@@ -208,12 +208,12 @@ def crossSectionPlot(surf_coils, surf, banana_curve, OUT_DIR_ITER):
     rs_vv = np.sqrt(cs_vv[:, 0]**2 + cs_vv[:, 1]**2); zs_vv = cs_vv[:, 2]
     rs_vv = np.append(rs_vv, rs_vv[0]); zs_vv = np.append(zs_vv, zs_vv[0])
     plt.plot(rs_vv, zs_vv, label='Vacuum Vessel')
-    phi_array = np.linspace(0, 1 / surf_coils.nfp, 5) # scaled from 0 to 1
+    phi_array = np.linspace(0, 2*np.pi / surf_coils.nfp * 4/5, 5)
     for phi_slice in phi_array:
         cs = surf.cross_section(phi_slice * 2 * np.pi)
         rs = np.sqrt(cs[:,0]**2 + cs[:,1]**2); rs = np.append(rs, rs[0])
         zs = cs[:,2]; zs = np.append(zs, zs[0])
-        plt.plot(rs, zs)
+        plt.plot(rs, zs, label=f'Φ={phi_slice/np.pi:0.2f}π')
     plt.xlabel('R [m]', fontsize=18, fontweight='bold')
     plt.ylabel('Z [m]', fontsize=18, fontweight='bold')
     plt.legend(loc='upper right', bbox_to_anchor=(1.3, 1), fontsize=16)
