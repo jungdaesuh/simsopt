@@ -249,7 +249,7 @@ filename = f"../equilibria/{plasma_surf_name}"
 OUT_DIR = f"./outputs-{plasma_surf_name}/"
 os.makedirs(OUT_DIR, exist_ok=True)
 
-# The proposed new HBT equilibrium
+# The proposed new HBT LCFS
 hbt = SurfaceRZFourier(nfp=5, stellsym=True)
 hbt.set_rc(0, 0, 0.9115)    # R0 of LCFS semi-circle center
 hbt.set_rc(1, 0, 0.1605)    # Minor radius (thick metal walls)
