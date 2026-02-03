@@ -20,7 +20,7 @@ from itertools import combinations
 
 def initSurface(R0, s):
     # Initialize the boundary magnetic surface and scale it to the target major radius
-    surf = SurfaceRZFourier.from_wout(filename, range="full torus", nphi=nphi, ntheta=ntheta, s=s)
+    surf = SurfaceRZFourier.from_wout(file_loc, range="full torus", nphi=nphi, ntheta=ntheta, s=s)
     # scale the surface down to the target appropriate major radius
     surf.set_dofs(surf.get_dofs()*R0/surf.major_radius())
     print('Major radius target: ', R0)
@@ -242,11 +242,11 @@ def fun(dofs):
 # PRE-INITIALIZATION
 # ---------------------------------------------------------------------------------------
 # File for the desired boundary magnetic surface:
-plasma_surf_name = 'wout_nfp22ginsburg_000_014417_iota15.nc'
-filename = f"../equilibria/{plasma_surf_name}"
+plasma_surf_filename = 'wout_nfp22ginsburg_000_014417_iota15.nc'
+file_loc = f"../equilibria/{plasma_surf_filename}"
 
 # Make Directory for output
-OUT_DIR = f"./outputs-{plasma_surf_name}/"
+OUT_DIR = f"./outputs-{plasma_surf_filename}/"
 os.makedirs(OUT_DIR, exist_ok=True)
 
 # The proposed new HBT LCFS
