@@ -259,7 +259,7 @@ nphi = 255
 ntheta = 64
 surf = None
 
-# The surface the coils can lie on from Jeff - R0 = 0.976 and a=0.22
+# The surface the coils can lie on from Jeff - R0 = 0.976 and a=0.215
 banana_surf_radius = 0.215
 banana_surf_nfp = 5
 surf_coils = SurfaceRZFourier(nfp=banana_surf_nfp, stellsym=True)
