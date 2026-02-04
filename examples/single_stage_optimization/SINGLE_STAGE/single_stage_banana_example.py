@@ -248,6 +248,21 @@ def crossSectionPlot(surf_coils, surf, banana_curve, filename):
 
 
 def fun(x):
+    """
+    Objective function for L-BFGS-B optimization.
+
+    Evaluates the total objective function and its gradient for a given set of
+    degrees of freedom (coil parameters). Attempts to solve for a valid Boozer
+    surface; if unsuccessful (solver failure or self-intersection), returns the
+    last accepted objective value with negated gradient to reject the step.
+
+    Args:
+        x: Current degrees of freedom (coil parameters)
+
+    Returns:
+        J: Objective function value
+        dJ: Gradient of objective function
+    """
     dx = np.linalg.norm(x - run_dict['x_prev'])
     run_dict['x_prev'] = x.copy()
     print(f"Step size: {dx:.2e}")
@@ -297,6 +312,17 @@ def fun(x):
     return J, dJ
 
 def callback(x):
+    """
+    Callback function executed after each successful optimization iteration.
+
+    Stores the accepted state (surface DOFs, iota, G), evaluates and prints
+    detailed diagnostics for all objective function components, and logs the
+    iteration summary to file. Used for monitoring optimization progress and
+    recording convergence history.
+
+    Args:
+        x: Current degrees of freedom (coil parameters) from accepted step
+    """
     # Update count for tracking
     run_dict['lscount'] = 0
 
@@ -576,4 +602,3 @@ print(f"Iota: {Iotas(boozer_surface).J()}")
 # Generate final diagnostic plots
 normPlot(boozer_surface.surface, bs, OUT_DIR_ITER + "/NormPlotOptimized")
 crossSectionPlot(surf_coils, boozer_surface.surface, banana_curve, OUT_DIR_ITER + "/CrossSectionOptimized")
-

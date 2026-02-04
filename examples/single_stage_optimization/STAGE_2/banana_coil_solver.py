@@ -1,5 +1,7 @@
 import os
 import numpy as np
+
+# SIMSOPT imports
 from scipy.optimize import minimize
 from simsopt.field import BiotSavart, Current, Coil, coils_via_symmetries
 from simsopt.field.coil import ScaledCurrent
@@ -29,7 +31,7 @@ def initSurface(R0, s):
     return surf
 
 def initializeCoils(surf):
-    # Initialize banana coil
+    # Initialize banana coils on the provided surface
     banana_curve = CurveCWSFourierCPP(np.linspace(0, 1, num_quadpoints), order=order, surf=surf_coils)
     banana_curve.set('phic(0)', phi_center)
     banana_curve.set('thetac(0)', theta_center)
@@ -310,23 +312,17 @@ new_banana_coils = init_coil_array[3]
 new_tf_coils = tf_coils
 new_surf_coils = surf_coils
 
-
 # MAIN OPTIMIZATION
 # ---------------------------------------------------------------------------------------
 # Number of iterations to perform:
 MAXITER = 300
 # boolean for determining whether coil self-intersects
 intersecting = False
-# Define the individual terms objective function:
-Jf = SquaredFlux(new_surf, new_bs)
-Jls = CurveLength(new_banana_curve)
 
 # Weight on the curve lengths in the objective function
 # We'll penalize the coil if it becomes longer than an target length of 1.75 m
 LENGTH_WEIGHT = 5e-4
 LENGTH_TARGET = 1.75
-
-print(f"Initial coil length: {Jls.J():.2f} [m]")
 
 # Threshold and weight for the coil-to-coil distance penalty
 CC_THRESHOLD = 0.05 # keep 5 cm between coils (arbitrary)
@@ -336,12 +332,16 @@ CC_WEIGHT = 100
 CURVATURE_WEIGHT = 1e-4
 CURVATURE_THRESHOLD = 40
 
-Jccdist = CurveCurveDistance(new_curves, CC_THRESHOLD)
+# Define the individual terms objective function:
+Jf = SquaredFlux(new_surf, new_bs) # penalty on B dot n
+Jls = CurveLength(new_banana_curve) # penalty on curve length
+Jccdist = CurveCurveDistance(new_curves, CC_THRESHOLD) #penalty on coil-to-coil distance
 
 # Changed p-norm of curvature penalty from 2 to 4 to prevent kinks/dents in the coils
 Jc = LpCurveCurvature(new_banana_curve, 4, CURVATURE_THRESHOLD)
+print(f"Initial coil length: {Jls.J():.2f} [m]")
 
-# Total objective function - 
+# TOTAL OBJECTIVE FUNCTION -
 # we'll penalize the coil length, coil-coil distance, and curvature while minimizing the normal field
 JF = Jf \
     + LENGTH_WEIGHT * QuadraticPenalty(Jls, LENGTH_TARGET, "max") \
@@ -351,9 +351,7 @@ JF = Jf \
 OUT_DIR_ITER = f"{OUT_DIR}R0={R0}-s={s}-LW={LENGTH_WEIGHT}-CCW={CC_WEIGHT}-CW={CURVATURE_WEIGHT}-SR={banana_surf_radius:0.3f}-Order={order}/"
 os.makedirs(OUT_DIR_ITER, exist_ok=True)
 
-if not crossSectionPlot(new_surf_coils, new_surf, new_banana_curve, OUT_DIR_ITER):
-    os.rmdir(OUT_DIR_ITER)
-
+# minimize gets called, optimizes based on degrees of freedom from objective function
 dofs = JF.x
 res = minimize(fun, dofs, jac=True, method='L-BFGS-B', options={'maxiter': MAXITER, 'maxcor': 300}, tol=1e-15)
 print(res.message)
@@ -371,6 +369,8 @@ pointData = {"B_N/B": np.sum(new_bs.B().reshape((nphi, ntheta, 3)) *
 new_surf.to_vtk(OUT_DIR_ITER + "surf_opt", extra_data=pointData)
 new_surf_coils.to_vtk(OUT_DIR_ITER + "VV")
 
+# Create toroidal cross section plot
+crossSectionPlot(new_surf_coils, new_surf, new_banana_curve, OUT_DIR_ITER)
 # Create field error plot
 fieldError = magneticFieldPlots(new_surf, new_bs, OUT_DIR_ITER)
 
