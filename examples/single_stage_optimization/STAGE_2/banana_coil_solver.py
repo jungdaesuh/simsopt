@@ -322,9 +322,9 @@ Jf = SquaredFlux(new_surf, new_bs)
 Jls = CurveLength(new_banana_curve)
 
 # Weight on the curve lengths in the objective function
-# We'll penalize the coil if it becomes much longer than it was initialized to
+# We'll penalize the coil if it becomes longer than an target length of 1.75 m
 LENGTH_WEIGHT = 5e-4
-LENGTH_TARGET = Jls.J() * 2
+LENGTH_TARGET = 1.75
 
 print(f"Initial coil length: {Jls.J():.2f} [m]")
 
@@ -337,7 +337,9 @@ CURVATURE_WEIGHT = 1e-4
 CURVATURE_THRESHOLD = 40
 
 Jccdist = CurveCurveDistance(new_curves, CC_THRESHOLD)
-Jc = LpCurveCurvature(new_banana_curve, 2, CURVATURE_THRESHOLD)
+
+# Changed p-norm of curvature penalty from 2 to 4 to prevent kinks/dents in the coils
+Jc = LpCurveCurvature(new_banana_curve, 4, CURVATURE_THRESHOLD)
 
 # Total objective function - 
 # we'll penalize the coil length, coil-coil distance, and curvature while minimizing the normal field
