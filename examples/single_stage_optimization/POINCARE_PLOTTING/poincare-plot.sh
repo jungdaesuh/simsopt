@@ -1,8 +1,8 @@
 #!/bin/bash
 #SBATCH --account=m4680
-#SBATCH --job-name=single_scan
-#SBATCH --output=single_scan_%j.out
-#SBATCH --error=single_scan_%j.err
+#SBATCH --job-name=poincare_surfaces
+#SBATCH --output=poincare_surfaces_%j.out
+#SBATCH --error=poincare_surfaces_%j.err
 #SBATCH --time=04:00:00
 #SBATCH --partition=compute
 #SBATCH --nodes=1
@@ -17,7 +17,7 @@ module load python/3.11
 conda activate simsopt
 
 # Go to working directory
-cd ~/simsopt/examples/single_stage_optimization/SINGLE_STAGE
+cd ~/simsopt/examples/single_stage_optimization/POINCARE_PLOTTING
 
 # Run the simulation
-python3 single_stage_example.py
+python3 poincare-surfaces.py
