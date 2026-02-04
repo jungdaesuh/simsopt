@@ -17,18 +17,30 @@ The optimization process consists of two sequential stages:
 │   └── wout_nfp22ginsburg_000_014417_iota15.nc
 ├── STAGE_2/                             # Stage 2 script and outputs
 │   ├── banana_coil_solver.py
+│   ├── banana-scan.sh
 │   └── outputs-[plasma_file]/           # Created by Stage 2
 │       └── R0=X-s=Y-..../
 │           ├── biot_savart_opt.json     # Required for Single Stage
 │           ├── curves_opt.vtu
 │           ├── surf_opt.vtu
 │           └── results.json
-├── single_stage_banana_example.py       # Single stage script
-└── outputs/                             # Created by Single Stage
-    └── mpol=X-ntor=Y/
-        ├── biot_savart_opt.json
-        ├── surf_opt.json
-        └── ...
+├── SINGLE_STAGE/                        # Single stage script and outputs
+│   ├── single_stage_banana_example.py
+│   ├── single-scan.sh
+│   └── outputs/                         # Created by Single Stage
+│       └── mpol=X-ntor=Y/
+│           ├── biot_savart_init.json    # Required for Poincaré
+│           ├── biot_savart_opt.json
+│           ├── surf_init.json           # Required for Poincaré
+│           ├── surf_opt.json
+│           ├── curves_opt.vtu
+│           ├── NormPlot*.png
+│           ├── CrossSection*.png
+│           ├── log.txt
+│           └── PoincarePlot.png         # Created by poincare_surfaces.py
+└── POINCARE_PLOTTING/                   # Poincaré plot generation (optional)
+    ├── poincare_surfaces.py
+    └── poincare-plot.sh
 ```
 
 ## Prerequisites
@@ -44,7 +56,7 @@ The optimization process consists of two sequential stages:
 
 Install dependencies:
 ```bash
-pip install simsopt numpy scipy matplotlib shapely numba bentley_ottmann==8.0.0
+pip install numpy scipy matplotlib shapely numba bentley_ottmann==8.0.0
 ```
 
 ## Workflow Instructions
@@ -72,7 +84,7 @@ wout_nfp22ginsburg_000_014417_iota15.nc
 **Run**:
 ```bash
 cd STAGE_2
-./banana-scan.sh
+sbatch banana-scan.sh
 ```
 
 **Outputs** (in `STAGE_2/outputs-[plasma_filename]/R0=X-s=Y-.../`):
@@ -111,7 +123,7 @@ Ensure this path matches your Stage 2 output directory.
 **Run**:
 ```bash
 cd SINGLE_STAGE
-./single-scan.sh
+sbatch single-scan.sh
 ```
 
 **Outputs** (in `outputs/mpol=X-ntor=Y/`):
@@ -122,6 +134,42 @@ cd SINGLE_STAGE
 - `NormPlotInitial.png`, `NormPlotOptimized.png` - Field error diagnostics
 - `CrossSectionInitial.png`, `CrossSectionOptimized.png` - Cross-section plots
 - `log.txt` - Detailed optimization log
+
+### Step 5 (Optional): Generate Poincaré Plots
+
+**Purpose**: Visualize field line topology and magnetic surface quality by generating Poincaré plots.
+
+**Location**: `POINCARE_PLOTTING/poincare_surfaces.py`
+
+**Key Parameters** (editable in script):
+- `nfieldlines`: Number of field lines to trace (default: 50)
+- `tmax_fl`: Maximum toroidal angle for integration (default: 7000)
+- `tol`: Tolerance for field line integration (default: 1e-7)
+- `interpolate`: Use interpolated field for faster calculation (default: True)
+- `nr`, `nphi`, `nz`: Grid resolution for interpolation (default: 20, 10, 10)
+- `degree`: Interpolation degree (default: 3)
+
+**Edit the output directory path** (around line 16):
+```python
+OUT_DIR = f'../SINGLE_STAGE/outputs/mpol=8-ntor=6'
+```
+
+Ensure this path matches your Single Stage output directory.
+
+**Run**:
+```bash
+cd POINCARE_PLOTTING
+sbatch poincare-plot.sh
+```
+
+**Outputs** (in the specified `OUT_DIR`):
+- `PoincarePlot.png` - Poincaré sections at multiple toroidal angles showing field line intersections
+
+**Interpretation**:
+- Well-nested, closed contours indicate good magnetic surfaces
+- Scattered or chaotic patterns suggest field line stochasticity
+- The black outline shows the plasma surface boundary
+- Field lines are traced from the plasma edge outward to check confinement
 
 ## Key Optimization Objectives
 
@@ -148,6 +196,7 @@ Output VTK files can be visualized using:
 PNG diagnostic plots are generated automatically:
 - Cross-section plots show coil and surface geometries
 - Normal field plots show magnetic field errors
+- Poincaré plots show field line topology and magnetic surface quality
 
 ## Troubleshooting
 
@@ -160,6 +209,12 @@ PNG diagnostic plots are generated automatically:
 - **File not found error**: Verify the path to `biot_savart_opt.json` from Stage 2
 - **Boozer surface rejected**: Surface is self-intersecting or solver failed; try different initial conditions
 - **Convergence issues**: Adjust `ftol` and `gtol` tolerances for your `mpol` value
+
+### Poincaré Plotting Issues
+- **File not found error**: Verify paths to `biot_savart_init.json` and `surf_init.json` from Single Stage
+- **Field line integration errors**: Reduce `tol` for higher accuracy or decrease `tmax_fl` if lines escape
+- **Memory issues with interpolation**: Set `interpolate=False` or reduce `nr`, `nphi`, `nz` grid resolution
+- **Chaotic field lines**: May indicate issues with magnetic configuration; check quasi-symmetry metrics
 
 ## Customization
 
@@ -180,6 +235,13 @@ ftol_by_mpol = {8: 1e-5, 9: 5e-6, 10: 1e-6, ...}
 gtol_by_mpol = {8: 1e-2, 9: 5e-3, 10: 1e-3, ...}
 ```
 
+### Customizing Poincaré Plots
+Adjust field line tracing parameters in `poincare_surfaces.py`:
+- Increase `nfieldlines` for denser coverage (impacts computation time)
+- Adjust `tmax_fl` to trace field lines for longer/shorter distances
+- Set `interpolate=False` for exact field evaluation (slower but more accurate)
+- Modify `rrange`, `phirange`, `zrange` to change interpolation grid resolution
+
 ## Output Interpretation
 
 ### log.txt (Single Stage)
@@ -198,3 +260,11 @@ Contains:
 - Field error metric
 - Self-intersection status
 - Iteration count
+
+### PoincarePlot.png (Poincaré Analysis)
+Visualizes magnetic field line topology:
+- **Well-nested closed contours**: Indicate good magnetic surfaces and confinement
+- **Scattered/chaotic patterns**: Suggest field line stochasticity and poor confinement
+- **Black outline**: Shows the plasma surface boundary
+- **Multiple panels**: Different toroidal angle cross-sections (typically 4 per field period)
+- Field lines are traced from the plasma edge outward to assess confinement quality 
