@@ -1,23 +1,34 @@
 #!/bin/bash
+#SBATCH --job-name=banana_solver
 #SBATCH --account=m4680
-#SBATCH --job-name=banana_scan
-#SBATCH --output=banana_scan_%j.out
-#SBATCH --error=banana_scan_%j.err
-#SBATCH --time=00:30:00
-#SBATCH --partition=compute
+#SBATCH --constraint=cpu
+#SBATCH --qos=debug
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=1
-#SBATCH --mail-type=ALL
+#SBATCH --cpus-per-task=16
+#SBATCH --time=00:30:00
+#SBATCH --output=banana_%j.out
 
 # Load Python module
 module load python/3.11
 
-# Activate virtual environment
+# Initialize conda for batch environment
+source $(conda info --base)/etc/profile.d/conda.sh
+
+# Activate environment
 conda activate simsopt
+
+# Set thread counts to match SLURM allocation
+export OMP_NUM_THREADS=$SLURM_CPUS_PER_TASK
+export MKL_NUM_THREADS=$SLURM_CPUS_PER_TASK
+export OPENBLAS_NUM_THREADS=$SLURM_CPUS_PER_TASK
+
+# Recommended thread placement for CPU nodes
+export OMP_PLACES=threads
+export OMP_PROC_BIND=spread
 
 # Go to working directory
 cd ~/simsopt/examples/single_stage_optimization/STAGE_2
 
 # Run the simulation
-python3 banana_coil_solver.py
+srun python banana_coil_solver.py

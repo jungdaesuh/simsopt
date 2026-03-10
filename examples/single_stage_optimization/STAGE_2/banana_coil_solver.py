@@ -175,7 +175,7 @@ def magneticFieldPlots(surf, bs, OUT_DIR_ITER):
     cbar = fig.colorbar(contour, ax=ax)
     cbar.ax.set_ylabel(r'$\mathbf{B}\cdot\mathbf{n}/|\mathbf{B}|$', fontsize=16, fontweight='bold')
     cbar.ax.tick_params(axis='y', which='major', labelsize=14)
-    ax.set_title(f'Surface-averaged \n |Bn|/|B| = {mean_abs_relBfinal_norm:.4e}', fontsize=18, fontweight='bold')
+    ax.set_title(f'Surface-averaged |Bn|/|B| = {mean_abs_relBfinal_norm:.4e}', fontsize=18, fontweight='bold')
     plt.savefig(OUT_DIR_ITER + "NormFieldPlot.png")
     plt.close()
 

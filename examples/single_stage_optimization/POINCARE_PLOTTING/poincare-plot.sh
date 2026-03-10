@@ -4,17 +4,27 @@
 #SBATCH --output=poincare_surfaces_%j.out
 #SBATCH --error=poincare_surfaces_%j.err
 #SBATCH --time=04:00:00
-#SBATCH --partition=compute
+#SBATCH --qos=regular
+#SBATCH --constraint=cpu
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=1
-#SBATCH --mail-type=ALL
+#SBATCH --mail-type=BEGIN,END,FAIL
+#SBATCH --mail-user=rb3736@columbia.edu
 
 # Load Python module
 module load python/3.11
 
-# Activate virtual environment
+# Initialize conda for batch environment
+source $(conda info --base)/etc/profile.d/conda.sh
+
+# Activate environment
 conda activate simsopt
+
+# Match thread counts to SLURM allocation
+export OMP_NUM_THREADS=$SLURM_CPUS_PER_TASK
+export MKL_NUM_THREADS=$SLURM_CPUS_PER_TASK
+export OPENBLAS_NUM_THREADS=$SLURM_CPUS_PER_TASK
 
 # Go to working directory
 cd ~/simsopt/examples/single_stage_optimization/POINCARE_PLOTTING
