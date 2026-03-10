@@ -393,7 +393,8 @@ results = {
     "iterations": res.nit,
     "FINAL_VOLUME": float(new_surf.volume()),
     "FIELD_ERROR": float(fieldError),
-    "SELF_INTERSECTING": intersecting
+    "SELF_INTERSECTING": intersecting,
+    "MAX_CURVATURE": np.max(new_banana_curve.kappa())
 }
 with open(os.path.join(OUT_DIR_ITER, "results.json"), "w") as outfile:
     json.dump(results, outfile, indent=2)

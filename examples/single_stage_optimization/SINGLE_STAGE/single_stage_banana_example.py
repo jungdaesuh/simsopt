@@ -212,6 +212,7 @@ def normPlot(surf, bs, filename):
     ax.set_title(f'Surface-averaged \n |Bn|/|B| = {mean_abs_relBfinal_norm:.4e}', fontsize=18, fontweight='bold')
     plt.savefig(f"{filename}.png")
     plt.close()
+    return mean_abs_relBfinal_norm
 
 def crossSectionPlot(surf_coils, surf, banana_curve, filename):
     # plots cross section of plasma at a few toroidal locations and relevant HBT cross sections
@@ -359,6 +360,7 @@ def callback(x):
 
     max_r = np.max(np.sqrt(banana_curve.gamma()[:,1]**2 + banana_curve.gamma()[:,2]**2))
     max_z = np.max(np.abs(banana_curve.gamma()[:,0]))
+    max_curvature = np.max(banana_curve.kappa())
     length = curvelength.J()
     curvecurve_min = JCurveCurve.shortest_distance()
     curvesurf_min = JCurveSurface.shortest_distance()
@@ -387,6 +389,7 @@ def callback(x):
     print(f"{'Intersecting':{width}} = {intersecting}", file=buffer)
     print(f"{'Max Curve R':{width}} = {max_r:.6e}", file=buffer)
     print(f"{'Max Curve Z':{width}} = {max_z:.6e}", file=buffer)
+    print(f"{'Max Curvature':{width}} = {max_curvature:.6e}", file=buffer)
     print(f"{'Curve Length':{width}} = {length:.6e}", file=buffer)
     print("="*70, file=buffer)
 
@@ -596,9 +599,36 @@ pointData = {"B_N/B": np.sum(bs.B().reshape((nphi, ntheta, 3)) *
 # Print final results
 boozer_surface.surface.to_vtk(OUT_DIR_ITER + f"/surf_opt", extra_data=pointData)
 boozer_surface.surface.save(OUT_DIR_ITER + f"/surf_opt.json")
-print(f"Volume: {boozer_surface.surface.volume()}")
-print(f"Iota: {Iotas(boozer_surface).J()}")
+
+final_volume = boozer_surface.surface.volume()
+final_iota = Iotas(boozer_surface).J()
+final_max_curvature = np.max(banana_curve.kappa())
+print(f"Volume: {final_volume}")
+print(f"Iota: {final_iota}")
+print(f"Max Curvature: {final_max_curvature}")
 
 # Generate final diagnostic plots
-normPlot(boozer_surface.surface, bs, OUT_DIR_ITER + "/NormPlotOptimized")
+fieldError = normPlot(boozer_surface.surface, bs, OUT_DIR_ITER + "/NormPlotOptimized")
 crossSectionPlot(surf_coils, boozer_surface.surface, banana_curve, OUT_DIR_ITER + "/CrossSectionOptimized")
+
+# Save the results of optimization to a separate file
+results = {
+    "CC_DIST": CC_DIST,
+    "CC_WEIGHT": CC_WEIGHT,
+    "CURVATURE_WEIGHT": CURVATURE_WEIGHT,
+    "LENGTH_WEIGHT": LENGTH_WEIGHT,
+    "MAJOR_RADIUS": R0,
+    "TOROIDAL_FLUX": s,
+    "banana_surf_radius": banana_surf_radius,
+    "order": order,
+    "max_iterations": MAXITER,
+    "iterations": res.nit,
+    "FINAL_VOLUME": float(final_volume),
+    "FINAL_IOTA": float(final_iota),
+    "FIELD_ERROR": float(fieldError),
+    "SELF_INTERSECTING": intersecting,
+    "MAX_CURVATURE": float(final_max_curvature)
+}
+with open(os.path.join(OUT_DIR_ITER, "results.json"), "w") as outfile:
+    json.dump(results, outfile, indent=2)
+

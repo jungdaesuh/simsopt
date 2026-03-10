@@ -1,14 +1,9 @@
 #!/bin/bash
-#SBATCH --account=m4680
-#SBATCH --job-name=single_scan
-#SBATCH --output=single_scan_%j.out
-#SBATCH --error=single_scan_%j.err
-#SBATCH --time=04:00:00
-#SBATCH --partition=compute
-#SBATCH --nodes=1
-#SBATCH --ntasks=1
-#SBATCH --cpus-per-task=1
-#SBATCH --mail-type=ALL
+#SBATCH -A m4680
+#SBATCH -C cpu
+#SBATCH -q regular
+#SBATCH -t 04:00:00
+#SBATCH -N 1
 
 # Load Python module
 module load python/3.11
@@ -20,4 +15,4 @@ conda activate simsopt
 cd ~/simsopt/examples/single_stage_optimization/SINGLE_STAGE
 
 # Run the simulation
-python3 single_stage_example.py
+python3 single_stage_banana_example.py
