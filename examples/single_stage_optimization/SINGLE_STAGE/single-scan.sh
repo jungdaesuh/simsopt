@@ -32,4 +32,4 @@ export OMP_PLACES=threads
 cd ~/simsopt/examples/single_stage_optimization/SINGLE_STAGE
 
 # Run the simulation
-python3 single_stage_banana_example.py
+srun python3 single_stage_banana_example.py
