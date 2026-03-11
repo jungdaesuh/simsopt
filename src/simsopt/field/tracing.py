@@ -28,6 +28,13 @@ __all__ = ['SurfaceClassifier', 'LevelsetStoppingCriterion',
            'particles_to_vtk', 'plot_poincare_data']
 
 
+def _normalize_parallel_speeds(parallel_speeds: RealArray, nparticles: int) -> np.ndarray:
+    speed_par = np.asarray(parallel_speeds).reshape(-1)
+    if speed_par.shape != (nparticles,):
+        raise ValueError(f"Expected {nparticles} parallel speeds, got shape {speed_par.shape}")
+    return speed_par
+
+
 def compute_gc_radius(m, vperp, q, absb):
     """
     Computes the gyro radius of a particle in a field with strenght ``absb```,
@@ -165,8 +172,7 @@ def trace_particles_boozer(field: BoozerMagneticField,
     """
 
     nparticles = stz_inits.shape[0]
-    assert stz_inits.shape[0] == len(parallel_speeds)
-    speed_par = parallel_speeds
+    speed_par = _normalize_parallel_speeds(parallel_speeds, nparticles)
     m = mass
     speed_total = sqrt(2*Ekin/m)  # Ekin = 0.5 * m * v^2 <=> v = sqrt(2*Ekin/m)
     mode = mode.lower()
@@ -272,8 +278,7 @@ def trace_particles(field: MagneticField,
     """
 
     nparticles = xyz_inits.shape[0]
-    assert xyz_inits.shape[0] == len(parallel_speeds)
-    speed_par = parallel_speeds
+    speed_par = _normalize_parallel_speeds(parallel_speeds, nparticles)
     mode = mode.lower()
     assert mode in ['gc', 'gc_vac', 'full']
     m = mass

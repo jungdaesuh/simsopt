@@ -51,33 +51,15 @@ class CurveFilament(FramedCurve):
         gammadash[:] = self.curve.gammadash() + self.dn * nd + self.db * bd
 
     def dgamma_by_dcoeff_vjp(self, v):
-        vg = self.framedcurve.rotated_frame_dcoeff_vjp(v, self.dn, self.db, 0)
-        vgd = self.framedcurve.rotated_frame_dcoeff_vjp(v, self.dn, self.db, 1)
-        vgdd = self.framedcurve.rotated_frame_dcoeff_vjp(v, self.dn, self.db, 2)
-        va = self.framedcurve.rotated_frame_dcoeff_vjp(v, self.dn, self.db, 3)
-        out = self.curve.dgamma_by_dcoeff_vjp(v + vg) \
-            + self.curve.dgammadash_by_dcoeff_vjp(vgd) \
-            + self.rotation.dalpha_by_dcoeff_vjp(self.curve.quadpoints, va)
-        if vgdd is not None:
-            out += self.curve.dgammadashdash_by_dcoeff_vjp(vgdd)
-        return out
+        zero = np.zeros_like(v)
+        return self.curve.dgamma_by_dcoeff_vjp(v) \
+            + self.framedcurve.rotated_frame_dcoeff_vjp(zero, self.dn * v, self.db * v)
 
 
     def dgammadash_by_dcoeff_vjp(self, v):
-        vg = self.framedcurve.rotated_frame_dash_dcoeff_vjp(v, self.dn, self.db, 0)
-        vgd = self.framedcurve.rotated_frame_dash_dcoeff_vjp(v, self.dn, self.db, 1)
-        vgdd = self.framedcurve.rotated_frame_dash_dcoeff_vjp(v, self.dn, self.db, 2)
-        vgddd = self.framedcurve.rotated_frame_dash_dcoeff_vjp(v, self.dn, self.db, 3)
-        va = self.framedcurve.rotated_frame_dash_dcoeff_vjp(v, self.dn, self.db, 4)
-        vad = self.framedcurve.rotated_frame_dash_dcoeff_vjp(v, self.dn, self.db, 5)
-        out = self.curve.dgamma_by_dcoeff_vjp(vg) \
-            + self.curve.dgammadash_by_dcoeff_vjp(v+vgd) \
-            + self.curve.dgammadashdash_by_dcoeff_vjp(vgdd) \
-            + self.rotation.dalpha_by_dcoeff_vjp(self.curve.quadpoints, va) \
-            + self.rotation.dalphadash_by_dcoeff_vjp(self.curve.quadpoints, vad)
-        if vgddd is not None:
-            out += self.curve.dgammadashdashdash_by_dcoeff_vjp(vgddd)
-        return out
+        zero = np.zeros_like(v)
+        return self.curve.dgammadash_by_dcoeff_vjp(v) \
+            + self.framedcurve.rotated_frame_dash_dcoeff_vjp(zero, self.dn * v, self.db * v)
 
 
 def create_multifilament_grid(curve, numfilaments_n, numfilaments_b, gapsize_n, gapsize_b,

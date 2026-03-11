@@ -63,6 +63,21 @@ def validate_phi_hits(phi_hits, bfield, nphis):
     return True
 
 
+class ParticleTracingInputValidationTesting(unittest.TestCase):
+
+    def test_tracing_rejects_mismatched_parallel_speeds(self):
+        initial_positions = np.zeros((2, 3))
+        parallel_speeds = np.zeros((3, 1))
+
+        for tracing_function in (trace_particles, trace_particles_boozer):
+            with self.subTest(tracing_function=tracing_function.__name__):
+                with self.assertRaises(ValueError) as exc:
+                    tracing_function(None, initial_positions, parallel_speeds)
+                message = str(exc.exception)
+                self.assertIn("Expected 2 parallel speeds", message)
+                self.assertIn("(3,)", message)
+
+
 class ParticleTracingTesting(unittest.TestCase):
 
     def __init__(self, *args, **kwargs):

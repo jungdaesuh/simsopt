@@ -372,12 +372,14 @@ class Testing(unittest.TestCase):
 
         # define the disk
         def f(t, r):
+            t = np.atleast_1d(t)
             x = r * np.cos(t).reshape((-1, 1))
             y = r * np.sin(t).reshape((-1, 1))
             pts = np.concatenate((x, y, np.zeros((x.shape[1], 1))), axis=1) @ rot.T
             bs.set_points(pts)
             B = bs.B()
-            return np.sum(B*new_n[None, :], axis=1)*r
+            values = np.sum(B*new_n[None, :], axis=1)*r
+            return float(values[0]) if values.size == 1 else values
 
         # int_r int_theta B int r dr dtheta
         from scipy import integrate
