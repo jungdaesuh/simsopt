@@ -49,22 +49,10 @@ class FramedCurve(sopp.Curve, Curve):
         _, ndash, _ = self.rotated_frame_dash()
         return self.frame_twist_jax(gammadash, t, n, ndash)
 
-        # T = n[:,0] * (ndash[:,1] * t[:,2] - ndash[:,2] * t[:,1]) \
-        # +   n[:,1] * (ndash[:,2] * t[:,0] - ndash[:,0] * t[:,2]) \
-        # +   n[:,2] * (ndash[:,0] * t[:,1] - ndash[:,1] * t[:,0])
-        # return np.cumsum(T)/(2*np.pi*np.cumsum(np.ones_like(T)))
-
     def dframe_twist_by_dcoeff_vjp(self, v):
         gammadash = self.curve.gammadash()
         t, n, _ = self.rotated_frame()
         _, ndash, _ = self.rotated_frame_dash()
-
-        # gamma = self.curve.gamma()
-        # d1gamma = self.curve.gammadash()
-        # d2gamma = self.curve.gammadashdash()
-        # d3gamma = self.curve.gammadashdashdash()
-        # alpha = self.rotation.alpha(self.curve.quadpoints)
-        # alphadash = self.rotation.alphadash(self.curve.quadpoints)
 
         grad0 = self.frame_twistgrad_vjp0(gammadash, t, n, ndash, v)
         grad1 = self.frame_twistgrad_vjp1(gammadash, t, n, ndash, v)
@@ -246,7 +234,6 @@ class FramedCurveFrenet(FramedCurve):
             + self.rotation.dalphadash_by_dcoeff_vjp(self.curve.quadpoints, grad5)
 
     def rotated_frame_dcoeff_vjp(self, v0, v1, v2):
-    # def rotated_frame_dcoeff_vjp(self, v, dn, db, arg=0):
         """
         VJP function for the derivatives of the frame 
         :math:`(\hat{\textbf{t}}, \hat{\textbf{n}}, \hat{\textbf{b}})`,
@@ -272,7 +259,6 @@ class FramedCurveFrenet(FramedCurve):
              + self.rotation.dalpha_by_dcoeff_vjp(self.curve.quadpoints, vjp3)
 
     def rotated_frame_dash_dcoeff_vjp(self, v0, v1, v2):
-    # def rotated_frame_dash_dcoeff_vjp(self, v, dn, db, arg=0):
         """
         VJP function for the derivatives of the frame parameter derivatives,
         :math:`(\hat{\textbf{t}}'(\phi), \hat{\textbf{n}}'(\phi), \hat{\textbf{b}}'(\phi))`,
@@ -303,42 +289,6 @@ class FramedCurveFrenet(FramedCurve):
             + self.curve.dgammadashdashdash_by_dcoeff_vjp(vjp3) \
             + self.rotation.dalpha_by_dcoeff_vjp(self.curve.quadpoints, vjp4) \
             + self.rotation.dalphadash_by_dcoeff_vjp(self.curve.quadpoints, vjp5)
-
-    # def frame_twist(self):
-    #     gamma     = self.curve.gamma()
-    #     d1gamma   = self.curve.gammadash()
-    #     d2gamma   = self.curve.gammadashdash()
-    #     d3gamma   = self.curve.gammadashdashdash()
-    #     alpha     = self.rotation.alpha(self.curve.quadpoints)
-    #     alphadash = self.rotation.alphadash(self.curve.quadpoints)
-    #     return self.twist_pure(gamma,d1gamma,d2gamma,d3gamma,alpha,alphadash)
-
-    # def dframe_twist_by_dcoeff_vjp(self, v):
-    #     gamma     = self.curve.gamma()
-    #     d1gamma   = self.curve.gammadash()
-    #     d2gamma   = self.curve.gammadashdash()
-    #     d3gamma   = self.curve.gammadashdashdash()
-    #     alpha     = self.rotation.alpha(self.curve.quadpoints)
-    #     alphadash = self.rotation.alphadash(self.curve.quadpoints)
-    #     grad0 = self.twistgrad0(gamma, d1gamma, d2gamma,
-    #                                   d3gamma, alpha, alphadash,v)
-    #     grad1 = self.twistgrad1(gamma, d1gamma, d2gamma,
-    #                                   d3gamma, alpha, alphadash,v)
-    #     grad2 = self.twistgrad2(gamma, d1gamma, d2gamma,
-    #                                   d3gamma, alpha, alphadash,v)
-    #     grad3 = self.twistgrad3(gamma, d1gamma, d2gamma,
-    #                                   d3gamma, alpha, alphadash,v)
-    #     grad4 = self.twistgrad4(gamma, d1gamma, d2gamma,
-    #                                   d3gamma, alpha, alphadash,v)
-    #     grad5 = self.twistgrad5(gamma, d1gamma, d2gamma,
-    #                                  d3gamma, alpha, alphadash,v)
-        
-    #     return self.curve.dgamma_by_dcoeff_vjp(grad0) \
-    #         + self.curve.dgammadash_by_dcoeff_vjp(grad1) \
-    #         + self.curve.dgammadashdash_by_dcoeff_vjp(grad2) \
-    #         + self.curve.dgammadashdashdash_by_dcoeff_vjp(grad3) \
-    #         + self.rotation.dalpha_by_dcoeff_vjp(self.curve.quadpoints, grad4) \
-    #         + self.rotation.dalphadash_by_dcoeff_vjp(self.curve.quadpoints, grad5)
 
 class FramedCurveCentroid(FramedCurve):
     """
@@ -407,92 +357,6 @@ class FramedCurveCentroid(FramedCurve):
         alpha = self.rotation.alpha(self.curve.quadpoints)
         alphadash = self.rotation.alphadash(self.curve.quadpoints)
         return self.torsion(gamma, d1gamma, d2gamma, alpha, alphadash)
-
-    def frame_binormal_curvature(self):
-        gamma = self.curve.gamma()
-        d1gamma = self.curve.gammadash()
-        d2gamma = self.curve.gammadashdash()
-        alpha = self.rotation.alpha(self.curve.quadpoints)
-        alphadash = self.rotation.alphadash(self.curve.quadpoints)
-        return self.binorm(gamma, d1gamma, d2gamma, alpha, alphadash)
-
-    def rotated_frame(self):
-        return rotated_centroid_frame(self.curve.gamma(), self.curve.gammadash(),
-                                      self.rotation.alpha(self.curve.quadpoints))
-
-    def rotated_frame_dash(self):
-        return rotated_centroid_frame_dash(
-            self.curve.gamma(), self.curve.gammadash(), self.curve.gammadashdash(),
-            self.rotation.alpha(self.curve.quadpoints), self.rotation.alphadash(self.curve.quadpoints)
-        )
-
-    def rotated_frame_dcoeff_vjp(self, v, dn, db, arg=0):
-        assert arg in [0, 1, 2, 3]
-        g = self.curve.gamma()
-        gd = self.curve.gammadash()
-        a = self.rotation.alpha(self.curve.quadpoints)
-        zero = np.zeros_like(v)
-        if arg == 0:
-            return rotated_centroid_frame_dcoeff_vjp0(
-                g, gd, a, (zero, dn*v, db*v))
-        if arg == 1:
-            return rotated_centroid_frame_dcoeff_vjp1(
-                g, gd, a, (zero, dn*v, db*v))
-        if arg == 2:
-            return None
-        if arg == 3:
-            return rotated_centroid_frame_dcoeff_vjp3(
-                g, gd, a, (zero, dn*v, db*v))
-
-    def rotated_frame_dash_dcoeff_vjp(self, v, dn, db, arg=0):
-        assert arg in [0, 1, 2, 3, 4, 5]
-        g = self.curve.gamma()
-        gd = self.curve.gammadash()
-        gdd = self.curve.gammadashdash()
-        a = self.rotation.alpha(self.curve.quadpoints)
-        ad = self.rotation.alphadash(self.curve.quadpoints)
-        zero = np.zeros_like(v)
-        if arg == 0:
-            return rotated_centroid_frame_dash_dcoeff_vjp0(
-                g, gd, gdd, a, ad, (zero, dn*v, db*v))
-        if arg == 1:
-            return rotated_centroid_frame_dash_dcoeff_vjp1(
-                g, gd, gdd, a, ad, (zero, dn*v, db*v))
-        if arg == 2:
-            return rotated_centroid_frame_dash_dcoeff_vjp2(
-                g, gd, gdd, a, ad, (zero, dn*v, db*v))
-        if arg == 3:
-            return None
-        if arg == 4:
-            return rotated_centroid_frame_dash_dcoeff_vjp4(
-                g, gd, gdd, a, ad, (zero, dn*v, db*v))
-        if arg == 5:
-            return rotated_centroid_frame_dash_dcoeff_vjp5(
-                g, gd, gdd, a, ad, (zero, dn*v, db*v))
-
-    def dframe_binormal_curvature_by_dcoeff_vjp(self, v):
-        gamma = self.curve.gamma()
-        d1gamma = self.curve.gammadash()
-        d2gamma = self.curve.gammadashdash()
-        alpha = self.rotation.alpha(self.curve.quadpoints)
-        alphadash = self.rotation.alphadash(self.curve.quadpoints)
-
-        grad0 = self.binormgrad_vjp0(gamma, d1gamma, d2gamma,
-                                     alpha, alphadash, v)
-        grad1 = self.binormgrad_vjp1(gamma, d1gamma, d2gamma,
-                                     alpha, alphadash, v)
-        grad2 = self.binormgrad_vjp2(gamma, d1gamma, d2gamma,
-                                     alpha, alphadash, v)
-        grad4 = self.binormgrad_vjp4(gamma, d1gamma, d2gamma,
-                                     alpha, alphadash, v)
-        grad5 = self.binormgrad_vjp5(gamma, d1gamma, d2gamma,
-                                     alpha, alphadash, v)
-
-        return self.curve.dgamma_by_dcoeff_vjp(grad0) \
-            + self.curve.dgammadash_by_dcoeff_vjp(grad1) \
-            + self.curve.dgammadashdash_by_dcoeff_vjp(grad2) \
-            + self.rotation.dalpha_by_dcoeff_vjp(self.curve.quadpoints, grad4) \
-            + self.rotation.dalphadash_by_dcoeff_vjp(self.curve.quadpoints, grad5)
 
     def dframe_torsion_by_dcoeff_vjp(self, v):
         """

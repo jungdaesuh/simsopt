@@ -5,6 +5,7 @@ from simsopt import load
 from simsopt.mhd import Vmec
 from simsopt.geo import curves_to_vtk
 from simsopt.objectives import SquaredFlux
+
 this_path = str(Path(__file__).parent.resolve())
 
 nphi = 128
