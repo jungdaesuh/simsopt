@@ -7,7 +7,15 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 set(Python_FIND_STRATEGY LOCATION)
 find_package(Python REQUIRED COMPONENTS Interpreter Development.Module NumPy)
-find_package(pybind11 CONFIG REQUIRED)
+
+option(SIMSOPT_USE_SYSTEM_PYBIND11 "Use a system-installed pybind11 instead of the vendored submodule." OFF)
+
+if(SIMSOPT_USE_SYSTEM_PYBIND11)
+    find_package(pybind11 CONFIG REQUIRED)
+else()
+    set(PYBIND11_FINDPYTHON ON)
+    add_subdirectory(thirdparty/pybind11 EXCLUDE_FROM_ALL)
+endif()
 
 message(status "Python executable is ${Python_EXECUTABLE}")
 message(status "Python Development Module found value is ${Python_Development.Module_FOUND}")
@@ -140,6 +148,7 @@ set_target_properties(${PROJECT_NAME}
     CXX_STANDARD_REQUIRED ON)
 
 target_include_directories(${PROJECT_NAME} PRIVATE "thirdparty/xtensor/include" "thirdparty/xtensor-python/include" "thirdparty/xsimd/include" "thirdparty/xtl/include" "thirdparty/eigen" ${Python_NumPy_INCLUDE_DIRS} "src/simsoptpp/")
+target_include_directories(${PROJECT_NAME} BEFORE PRIVATE "thirdparty/pybind11/include")
 target_link_libraries(${PROJECT_NAME} PRIVATE fmt::fmt-header-only)
 
 if(NOT Boost_FOUND)
