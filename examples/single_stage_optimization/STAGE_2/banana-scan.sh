@@ -31,4 +31,4 @@ export OMP_PROC_BIND=spread
 cd ~/simsopt/examples/single_stage_optimization/STAGE_2
 
 # Run the simulation
-srun python banana_coil_solver.py
+srun python banana_coil_solver.py "$@"

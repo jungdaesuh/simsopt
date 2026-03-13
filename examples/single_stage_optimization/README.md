@@ -74,17 +74,22 @@ wout_nfp22ginsburg_000_014417_iota15.nc
 
 **Location**: `STAGE_2/banana_coil_solver.py`
 
-**Key Parameters** (editable in script):
-- `R0`: Major radius target (default: 0.925 m)
-- `s`: Normalized toroidal flux surface (default: 0.24)
-- `banana_surf_radius`: Coil surface radius (default: 0.215 m)
-- `order`: Fourier modes for coils (default: 2)
-- `MAXITER`: Maximum optimization iterations (default: 300)
+**Key Parameters** (CLI flags or environment variables):
+- `--major-radius` / `MAJOR_RADIUS`: Major radius target
+- `--toroidal-flux` / `TOROIDAL_FLUX`: Normalized toroidal flux surface
+- `--banana-surf-radius` / `BANANA_SURF_RADIUS`: Coil surface radius
+- `--cc-threshold` / `CC_THRESHOLD`: Coil-coil spacing threshold
+- `--curvature-threshold` / `CURVATURE_THRESHOLD`: Curvature threshold
+- `--maxiter` / `MAXITER`: Maximum optimization iterations
 
 **Run**:
 ```bash
 cd STAGE_2
-sbatch banana-scan.sh
+python banana_coil_solver.py \
+  --plasma-surf-filename wout_nfp22ginsburg_000_014417_iota15.nc \
+  --major-radius 0.915 \
+  --toroidal-flux 0.24 \
+  --banana-surf-radius 0.22
 ```
 
 **Outputs** (in `STAGE_2/outputs-[plasma_filename]/R0=X-s=Y-.../`):
@@ -96,16 +101,15 @@ sbatch banana-scan.sh
 
 **Note the output directory path** - you'll need it for the next step.
 
-### Step 3: Configure Single Stage Script
+### Step 3: Select the Stage 2 Seed
 
-**Edit** `single_stage_banana_example.py`:
+You no longer need to hand-edit `single_stage_banana_example.py`.
 
-Update the path to the Stage 2 output directory (around line 42):
-```python
-bs = load(f'../STAGE_2/outputs-{plasma_surf_filename}/R0=0.925-s=0.24-LW=0.0005-CCW=100-CW=0.0001-SR=0.215-Order=2/biot_savart_opt.json')
-```
+The script can resolve the seed either from the local Stage 2 outputs or from the archive database:
 
-Ensure this path matches your Stage 2 output directory.
+- `--stage2-source database` uses `DATABASE/COIL_OPTIMIZATION/outputs/...`
+- `--stage2-source local` uses `STAGE_2/outputs-[plasma]/...`
+- `--stage2-bs-path /full/path/to/biot_savart_opt.json` overrides both
 
 ### Step 4: Run Single Stage - Quasi-Symmetry Optimization
 
@@ -113,17 +117,47 @@ Ensure this path matches your Stage 2 output directory.
 
 **Location**: `SINGLE_STAGE/single_stage_banana_example.py`
 
-**Key Parameters** (editable in script):
-- `mpol`: Poloidal Fourier modes (default: 8)
-- `ntor`: Toroidal Fourier modes (default: 6)
-- `vol_target`: Target volume (default: 0.10)
-- `iota_target`: Target rotational transform (default: 0.15)
-- `MAXITER`: Maximum iterations (default: 300)
+**Key Parameters** (CLI flags or environment variables):
+- `--mpol` / `MPOL`
+- `--ntor` / `NTOR`
+- `--vol-target` / `VOL_TARGET`
+- `--iota-target` / `IOTA_TARGET`
+- `--cc-dist` / `CC_DIST`
+- `--curvature-threshold` / `CURVATURE_THRESHOLD`
+- `--stage2-seed-major-radius` / `STAGE2_SEED_MAJOR_RADIUS`
+- `--stage2-seed-toroidal-flux` / `STAGE2_SEED_TOROIDAL_FLUX`
+- `--stage2-seed-banana-surf-radius` / `STAGE2_SEED_BANANA_SURF_RADIUS`
+- `--stage2-bs-path` / `STAGE2_BS_PATH`
+- `--maxiter` / `MAXITER`
 
 **Run**:
 ```bash
 cd SINGLE_STAGE
-sbatch single-scan.sh
+python single_stage_banana_example.py \
+  --stage2-source database \
+  --plasma-surf-filename wout_nfp22ginsburg_000_014417_iota15.nc \
+  --stage2-seed-major-radius 0.915 \
+  --stage2-seed-toroidal-flux 0.24 \
+  --stage2-seed-banana-surf-radius 0.22 \
+  --iota-target 0.17 \
+  --vol-target 0.10 \
+  --cc-dist 0.07 \
+  --mpol 15 \
+  --ntor 6 \
+  --output-root ./outputs/CC_convergence-CC7-iota17-vol10
+```
+
+For the hard-iota seed A/B test, change only the Stage 2 seed and plasma file:
+
+```bash
+python single_stage_banana_example.py \
+  --stage2-source database \
+  --plasma-surf-filename wout_nfp22ginsburg_000_002084_iota20.nc \
+  --stage2-seed-major-radius 0.975 \
+  --stage2-seed-toroidal-flux 0.24 \
+  --stage2-seed-banana-surf-radius 0.22 \
+  --iota-target 0.20 \
+  --vol-target 0.10
 ```
 
 **Outputs** (in `outputs/mpol=X-ntor=Y/`):

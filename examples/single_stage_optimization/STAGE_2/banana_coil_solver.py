@@ -1,3 +1,4 @@
+import argparse
 import os
 import numpy as np
 
@@ -19,6 +20,152 @@ import copy
 import shutil
 from numba import njit
 from itertools import combinations
+
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+EXAMPLE_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, ".."))
+SIMSOPT_ROOT = os.path.abspath(os.path.join(EXAMPLE_ROOT, "..", ".."))
+REPO_ROOT = os.path.abspath(os.path.join(SIMSOPT_ROOT, ".."))
+DATABASE_EQUILIBRIA_DIR = os.path.join(REPO_ROOT, "DATABASE", "EQUILIBRIA")
+DEFAULT_EQUILIBRIA_DIR = DATABASE_EQUILIBRIA_DIR if os.path.isdir(DATABASE_EQUILIBRIA_DIR) else os.path.join(EXAMPLE_ROOT, "equilibria")
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Run Stage 2 banana coil optimization against a fixed plasma surface.",
+    )
+    parser.add_argument(
+        "--plasma-surf-filename",
+        default=os.environ.get("PLASMA_SURF_FILENAME", "wout_nfp22ginsburg_000_014417_iota15.nc"),
+        help="VMEC wout filename under the equilibria directory.",
+    )
+    parser.add_argument(
+        "--equilibria-dir",
+        default=os.environ.get("EQUILIBRIA_DIR", DEFAULT_EQUILIBRIA_DIR),
+        help="Directory that contains the equilibrium wout files.",
+    )
+    parser.add_argument(
+        "--equilibrium-path",
+        default=os.environ.get("EQUILIBRIUM_PATH"),
+        help="Explicit path to the equilibrium file. Overrides --equilibria-dir.",
+    )
+    parser.add_argument(
+        "--output-root",
+        default=os.environ.get("STAGE2_OUTPUT_ROOT", SCRIPT_DIR),
+        help="Directory where outputs-[plasma] will be written.",
+    )
+    parser.add_argument("--nphi", type=int, default=int(os.environ.get("NPHI", "255")))
+    parser.add_argument("--ntheta", type=int, default=int(os.environ.get("NTHETA", "64")))
+    parser.add_argument(
+        "--init-only",
+        action="store_true",
+        help="Build and save the initialized configuration without running the optimizer.",
+    )
+    parser.add_argument(
+        "--banana-surf-radius",
+        type=float,
+        default=float(os.environ.get("BANANA_SURF_RADIUS", "0.22")),
+        help="Coil surface minor radius.",
+    )
+    parser.add_argument(
+        "--major-radius",
+        type=float,
+        default=float(os.environ.get("MAJOR_RADIUS", "0.915")),
+        help="Target major radius used to rescale the plasma surface.",
+    )
+    parser.add_argument(
+        "--toroidal-flux",
+        type=float,
+        default=float(os.environ.get("TOROIDAL_FLUX", "0.24")),
+        help="Flux-surface label s used when loading the VMEC surface.",
+    )
+    parser.add_argument(
+        "--order",
+        type=int,
+        default=int(os.environ.get("COIL_ORDER", "2")),
+        help="Fourier order for the banana coil.",
+    )
+    parser.add_argument(
+        "--maxiter",
+        type=int,
+        default=int(os.environ.get("MAXITER", "300")),
+        help="Maximum optimizer iterations.",
+    )
+    parser.add_argument(
+        "--length-weight",
+        type=float,
+        default=float(os.environ.get("LENGTH_WEIGHT", "0.0005")),
+        help="Curve-length penalty weight.",
+    )
+    parser.add_argument(
+        "--length-target",
+        type=float,
+        default=float(os.environ.get("LENGTH_TARGET", "1.75")),
+        help="Curve-length target in meters.",
+    )
+    parser.add_argument(
+        "--cc-threshold",
+        type=float,
+        default=float(os.environ.get("CC_THRESHOLD", "0.05")),
+        help="Coil-coil distance threshold in meters.",
+    )
+    parser.add_argument(
+        "--cc-weight",
+        type=float,
+        default=float(os.environ.get("CC_WEIGHT", "100")),
+        help="Coil-coil distance penalty weight.",
+    )
+    parser.add_argument(
+        "--curvature-weight",
+        type=float,
+        default=float(os.environ.get("CURVATURE_WEIGHT", "0.0001")),
+        help="Curvature penalty weight.",
+    )
+    parser.add_argument(
+        "--curvature-threshold",
+        type=float,
+        default=float(os.environ.get("CURVATURE_THRESHOLD", "40")),
+        help="Curvature threshold.",
+    )
+    parser.add_argument(
+        "--theta-center",
+        type=float,
+        default=float(os.environ.get("THETA_CENTER", "0.5")),
+        help="Initial banana-coil poloidal center in normalized angle coordinates.",
+    )
+    parser.add_argument(
+        "--phi-center",
+        type=float,
+        default=float(os.environ.get("PHI_CENTER", "0.06")),
+        help="Initial banana-coil toroidal center in normalized angle coordinates.",
+    )
+    parser.add_argument(
+        "--theta-width",
+        type=float,
+        default=float(os.environ.get("THETA_WIDTH", "0.1")),
+        help="Initial banana-coil poloidal width in normalized angle coordinates.",
+    )
+    parser.add_argument(
+        "--phi-width",
+        type=float,
+        default=float(os.environ.get("PHI_WIDTH", "0.03")),
+        help="Initial banana-coil toroidal width in normalized angle coordinates.",
+    )
+    return parser.parse_args()
+
+
+def build_equilibrium_path(args):
+    if args.equilibrium_path is not None:
+        return args.equilibrium_path
+
+    candidate_paths = [
+        os.path.join(args.equilibria_dir, args.plasma_surf_filename),
+        os.path.join(DATABASE_EQUILIBRIA_DIR, args.plasma_surf_filename),
+    ]
+    for candidate_path in candidate_paths:
+        if os.path.exists(candidate_path):
+            return candidate_path
+    return candidate_paths[0]
 
 def initSurface(R0, s):
     # Initialize the boundary magnetic surface and scale it to the target major radius
@@ -243,12 +390,14 @@ def fun(dofs):
 
 # PRE-INITIALIZATION
 # ---------------------------------------------------------------------------------------
+args = parse_args()
+
 # File for the desired boundary magnetic surface:
-plasma_surf_filename = 'wout_nfp22ginsburg_000_014417_iota15.nc'
-file_loc = f"../equilibria/{plasma_surf_filename}"
+plasma_surf_filename = args.plasma_surf_filename
+file_loc = build_equilibrium_path(args)
 
 # Make Directory for output
-OUT_DIR = f"./outputs-{plasma_surf_filename}/"
+OUT_DIR = os.path.join(args.output_root, f"outputs-{plasma_surf_filename}") + "/"
 os.makedirs(OUT_DIR, exist_ok=True)
 
 # The proposed new HBT LCFS
@@ -257,12 +406,12 @@ hbt.set_rc(0, 0, 0.9115)    # R0 of LCFS semi-circle center
 hbt.set_rc(1, 0, 0.1605)    # Minor radius (thick metal walls)
 hbt.set_zs(1, 0, 0.152)    # Z extent = ±0.152 m (flat top/bottom)
 
-nphi = 255
-ntheta = 64
+nphi = args.nphi
+ntheta = args.ntheta
 surf = None
 
-# The surface the coils can lie on from Jeff - R0 = 0.976 and a=0.215
-banana_surf_radius = 0.215
+# The surface the coils can lie on from Jeff - R0 = 0.976 and a~=0.22
+banana_surf_radius = args.banana_surf_radius
 banana_surf_nfp = 5
 surf_coils = SurfaceRZFourier(nfp=banana_surf_nfp, stellsym=True)
 surf_coils.set_rc(0, 0, 0.976)
@@ -292,16 +441,16 @@ tf_coils = [Coil(curve,current) for curve, current in zip(tf_curves,tf_currents)
 # INITIALIZATION FOR BANANA COILS
 # ---------------------------------------------------------------------------------------
 # Initialize at inboard midplane (theta_center = 0.5) and mirrored over plane of symmetry
-theta_center = 0.5
-phi_center = 0.06
-theta_width = 0.1
-phi_width = 0.03
+theta_center = args.theta_center
+phi_center = args.phi_center
+theta_width = args.theta_width
+phi_width = args.phi_width
 
 num_quadpoints = 128 # number of quadature points for coils
-order = 2 # number of Fourier modes for coils
+order = args.order # number of Fourier modes for coils
 
-R0 = 0.925 # major radius
-s = 0.24 # minor radius
+R0 = args.major_radius # major radius
+s = args.toroidal_flux # VMEC flux-surface label
 
 new_surf = initSurface(R0, s)
 init_coil_array = initializeCoils(new_surf)
@@ -315,22 +464,22 @@ new_surf_coils = surf_coils
 # MAIN OPTIMIZATION
 # ---------------------------------------------------------------------------------------
 # Number of iterations to perform:
-MAXITER = 300
+MAXITER = args.maxiter
 # boolean for determining whether coil self-intersects
 intersecting = False
 
 # Weight on the curve lengths in the objective function
 # We'll penalize the coil if it becomes longer than an target length of 1.75 m
-LENGTH_WEIGHT = 5e-4
-LENGTH_TARGET = 1.75
+LENGTH_WEIGHT = args.length_weight
+LENGTH_TARGET = args.length_target
 
 # Threshold and weight for the coil-to-coil distance penalty
-CC_THRESHOLD = 0.05 # keep 5 cm between coils (arbitrary)
-CC_WEIGHT = 100
+CC_THRESHOLD = args.cc_threshold
+CC_WEIGHT = args.cc_weight
 
 # Threshold and weight for the coil curvature penalty
-CURVATURE_WEIGHT = 1e-4
-CURVATURE_THRESHOLD = 40
+CURVATURE_WEIGHT = args.curvature_weight
+CURVATURE_THRESHOLD = args.curvature_threshold
 
 # Define the individual terms objective function:
 Jf = SquaredFlux(new_surf, new_bs) # penalty on B dot n
@@ -353,8 +502,13 @@ os.makedirs(OUT_DIR_ITER, exist_ok=True)
 
 # minimize gets called, optimizes based on degrees of freedom from objective function
 dofs = JF.x
-res = minimize(fun, dofs, jac=True, method='L-BFGS-B', options={'maxiter': MAXITER, 'maxcor': 300}, tol=1e-15)
-print(res.message)
+if args.init_only:
+    res_nit = 0
+    print("Skipping Stage 2 optimizer because --init-only was provided.")
+else:
+    res = minimize(fun, dofs, jac=True, method='L-BFGS-B', options={'maxiter': MAXITER, 'maxcor': 300}, tol=1e-15)
+    res_nit = res.nit
+    print(res.message)
 
 
 # POST-OPTIMIZATION PROCESSING AND OUTPUTS
@@ -381,16 +535,25 @@ print(f'Banana Coil Current / TF Current = {new_banana_coils[0].current.get_valu
 
 # Save the results of optimization to a separate file
 results = {
+    "PLASMA_SURF_FILENAME": plasma_surf_filename,
+    "PLASMA_SURF_PATH": file_loc,
     "CC_THRESHOLD": CC_THRESHOLD,
     "CC_WEIGHT": CC_WEIGHT,
     "CURVATURE_WEIGHT": CURVATURE_WEIGHT,
+    "CURVATURE_THRESHOLD": CURVATURE_THRESHOLD,
     "LENGTH_WEIGHT": LENGTH_WEIGHT,
+    "theta_center": theta_center,
+    "phi_center": phi_center,
+    "theta_width": theta_width,
+    "phi_width": phi_width,
+    "LENGTH_TARGET": LENGTH_TARGET,
     "MAJOR_RADIUS": R0,
     "TOROIDAL_FLUX": s,
     "banana_surf_radius": banana_surf_radius,
     "order": order,
+    "init_only": args.init_only,
     "max_iterations": MAXITER,
-    "iterations": res.nit,
+    "iterations": res_nit,
     "FINAL_VOLUME": float(new_surf.volume()),
     "FIELD_ERROR": float(fieldError),
     "SELF_INTERSECTING": intersecting,
