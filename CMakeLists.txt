@@ -8,15 +8,6 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 set(Python_FIND_STRATEGY LOCATION)
 find_package(Python REQUIRED COMPONENTS Interpreter Development.Module NumPy)
 
-option(SIMSOPT_USE_SYSTEM_PYBIND11 "Use a system-installed pybind11 instead of the vendored submodule." OFF)
-
-if(SIMSOPT_USE_SYSTEM_PYBIND11)
-    find_package(pybind11 CONFIG REQUIRED)
-else()
-    set(PYBIND11_FINDPYTHON ON)
-    add_subdirectory(thirdparty/pybind11 EXCLUDE_FROM_ALL)
-endif()
-
 message(status "Python executable is ${Python_EXECUTABLE}")
 message(status "Python Development Module found value is ${Python_Development.Module_FOUND}")
 message(status "Python header dirs are ${Python_INCLUDE_DIRS}")
@@ -37,6 +28,15 @@ if(GIT_FOUND AND EXISTS "${PROJECT_SOURCE_DIR}/.git")
             message(FATAL_ERROR "git submodule update --init failed with ${GIT_SUBMOD_RESULT}, please checkout submodules")
         endif()
     endif()
+endif()
+
+option(SIMSOPT_USE_SYSTEM_PYBIND11 "Use a system-installed pybind11 instead of the vendored submodule." OFF)
+
+if(SIMSOPT_USE_SYSTEM_PYBIND11)
+    find_package(pybind11 CONFIG REQUIRED)
+else()
+    set(PYBIND11_FINDPYTHON ON)
+    add_subdirectory(thirdparty/pybind11 EXCLUDE_FROM_ALL)
 endif()
 
 # For XSIMD usage
