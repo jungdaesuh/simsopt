@@ -376,6 +376,45 @@ class SegmentDistanceTests(unittest.TestCase):
                                    msg=f"Mismatch: algo={d_algo}, brute={d_brute}")
 
 
+    def test_replica_matches_deployed_source(self):
+        """Guard against the test replica diverging from the deployed @njit function."""
+        import inspect, re
+        source = STAGE2_MODULE_PATH.read_text()
+
+        def _extract_code_lines(text, func_name):
+            """Extract function body lines, stripping docstrings, comments, and blanks."""
+            lines = []
+            in_func = False
+            in_docstring = False
+            for line in text.splitlines():
+                stripped = line.strip()
+                if f"def {func_name}(" in stripped and not in_func:
+                    in_func = True
+                    continue
+                if in_func:
+                    if '"""' in stripped:
+                        if stripped.count('"""') >= 2:
+                            continue
+                        in_docstring = not in_docstring
+                        continue
+                    if in_docstring:
+                        continue
+                    if stripped and not line.startswith("    ") and not line.startswith("\t"):
+                        break
+                    code = re.sub(r'\s*#.*$', '', stripped)
+                    if code:
+                        lines.append(code)
+            return lines
+
+        replica = _extract_code_lines(inspect.getsource(_segment_segment_distance), "_segment_segment_distance")
+        deployed = _extract_code_lines(source, "segment_segment_distance")
+        self.assertEqual(
+            replica, deployed,
+            "Test replica of segment_segment_distance has diverged from deployed code. "
+            "Update the test replica to match banana_coil_solver.py."
+        )
+
+
 class CrossSectionNormalizationTests(unittest.TestCase):
     """Issue #8/#9: cross_section phi argument must be normalized to [0,1]."""
 

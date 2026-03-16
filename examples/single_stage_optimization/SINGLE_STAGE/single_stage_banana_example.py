@@ -681,6 +681,11 @@ def callback(x):
     run_dict['it'] += 1
 
 
+# Convergence tolerances for different mpol values (module-level for testability)
+ftol_by_mpol = {8: 1e-5, 9: 5e-6, 10: 1e-6, 11: 5e-7, 12: 1e-7, 13: 5e-8, 14: 1e-8, 15: 5e-9, 16: 1e-9, 17: 5e-10, 18: 1e-10}
+gtol_by_mpol = {8: 1e-2, 9: 5e-3, 10: 1e-3, 11: 5e-4, 12: 1e-4, 13: 5e-5, 14: 1e-5, 15: 5e-6, 16: 1e-6, 17: 5e-7, 18: 1e-7}
+
+
 if __name__ == "__main__":
     # ==============================================================================
     # CONFIGURATION PARAMETERS
@@ -705,10 +710,6 @@ if __name__ == "__main__":
     MAXITER = args.maxiter
     iota_target = args.iota_target
     num_tf_coils = args.num_tf_coils
-
-    # Convergence tolerances for different mpol values
-    ftol_by_mpol = {8: 1e-5, 9: 5e-6, 10: 1e-6, 11: 5e-7, 12: 1e-7, 13: 5e-8, 14: 1e-8, 15: 5e-9, 16: 1e-9, 17: 5e-10, 18: 1e-10}
-    gtol_by_mpol = {8: 1e-2, 9: 5e-3, 10: 1e-3, 11: 5e-4, 12: 1e-4, 13: 5e-5, 14: 1e-5, 15: 5e-6, 16: 1e-6, 17: 5e-7, 18: 1e-7}
 
     # Output directory setup
     OUT_DIR = args.output_root
