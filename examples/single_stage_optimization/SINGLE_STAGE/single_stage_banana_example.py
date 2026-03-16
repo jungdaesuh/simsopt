@@ -9,10 +9,19 @@ from scipy.optimize import minimize
 # SIMSOPT imports
 from simsopt._core.optimizable import Optimizable
 from simsopt.geo import SurfaceRZFourier, SurfaceXYZTensorFourier, BoozerSurface, curves_to_vtk, CurveLength, LpCurveCurvature
-from simsopt.geo.surfaceobjectives import Volume, BoozerResidual, Iotas, NonQuasiSymmetricRatio, SurfaceSurfaceDistance
+from simsopt.geo.surfaceobjectives import (
+    Volume,
+    BoozerResidual,
+    Iotas,
+    NonQuasiSymmetricRatio,
+    SurfaceSurfaceDistance,
+    boozer_surface_residual,
+    boozer_surface_residual_dB,
+)
 from simsopt.geo.curveobjectives import CurveCurveDistance, CurveSurfaceDistance
 from simsopt.field import BiotSavart, Coil, Current
 from simsopt.objectives import QuadraticPenalty, SquaredFlux
+from simsopt.objectives.utilities import forward_backward
 from simsopt._core.optimizable import load, save
 from simsopt.field.coil import ScaledCurrent
 import matplotlib.pyplot as plt
@@ -415,7 +424,7 @@ def initialize_boozer_surface(surf_prev, mpol, ntor, bs, vol_target, constraint_
         surf_exact = SurfaceXYZTensorFourier(
               mpol=mpol,ntor=ntor,nfp=5,stellsym=True,
               quadpoints_theta=np.linspace(0,1,2*mpol+1,endpoint=False),
-              quadpoints_phi=np.linspace(0,1./surf.nfp,2*mpol+1,endpoint=False),
+              quadpoints_phi=np.linspace(0,1./surf.nfp,2*ntor+1,endpoint=False),
               dofs=surf.dofs
               )
     
