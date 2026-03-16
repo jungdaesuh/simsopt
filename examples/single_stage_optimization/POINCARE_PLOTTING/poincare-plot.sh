@@ -19,7 +19,8 @@ module load python/3.11
 source $(conda info --base)/etc/profile.d/conda.sh
 
 # Activate environment
-conda activate simsopt
+CONDA_ENV="${CONDA_ENV:-simsopt}"
+conda activate "$CONDA_ENV"
 
 # Match thread counts to SLURM allocation
 export OMP_NUM_THREADS=$SLURM_CPUS_PER_TASK
@@ -27,7 +28,8 @@ export MKL_NUM_THREADS=$SLURM_CPUS_PER_TASK
 export OPENBLAS_NUM_THREADS=$SLURM_CPUS_PER_TASK
 
 # Go to working directory
-cd ~/simsopt/examples/single_stage_optimization/POINCARE_PLOTTING
+SIMSOPT_ROOT="${SIMSOPT_ROOT:-$HOME/simsopt}"
+cd "$SIMSOPT_ROOT/examples/single_stage_optimization/POINCARE_PLOTTING"
 
 # Run the simulation
 python3 poincare_surfaces.py

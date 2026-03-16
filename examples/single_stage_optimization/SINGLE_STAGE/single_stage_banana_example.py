@@ -468,7 +468,6 @@ def normPlot(surf, bs, filename):
     abs_relBfinal_norm_dA = np.abs(relBfinal_norm.reshape((-1, 1))) * surf_area
     mean_abs_relBfinal_norm = np.sum(abs_relBfinal_norm_dA) / np.sum(surf_area)
     max_rnorm = np.max(np.abs(relBfinal_norm))
-    relBfinal_norm = np.sum(bs.B().reshape((nphi, ntheta, 3)) * surf.unitnormal(), axis=2)[:, :, None] / np.sqrt(np.sum(bs.B().reshape((nphi, ntheta, 3))**2, axis=2))[:, :, None]
     fig, ax = plt.subplots()
     contour = ax.contourf(phi, theta, np.squeeze(relBfinal_norm).T, levels=50, cmap='seismic', vmin=-max_rnorm, vmax=max_rnorm)
     ax.set_xlabel(r'$\phi/2\pi$', fontsize=18, fontweight='bold')
@@ -481,12 +480,17 @@ def normPlot(surf, bs, filename):
     plt.close()
     return mean_abs_relBfinal_norm
 
-def crossSectionPlot(surf_coils, surf, banana_curve, filename):
+def crossSectionPlot(surf_coils, surf, banana_curve, filename, hbt, VV):
     # plots cross section of plasma at a few toroidal locations and relevant HBT cross sections
     plt.figure(figsize=(7,6))
+    # Plot banana coil R-Z projection
+    gamma = banana_curve.gamma()
+    coil_r = np.sqrt(gamma[:, 0]**2 + gamma[:, 1]**2)
+    coil_z = gamma[:, 2]
+    plt.plot(coil_r, coil_z, 'k--', linewidth=1.5, label='Banana Coil')
     cs2 = surf_coils.cross_section(0)
     rs2 = np.sqrt(cs2[:,0]**2 + cs2[:,1]**2); rs2 = np.append(rs2, rs2[0])
-    zs2 = cs2[:,2]; zs2 = np.append(zs2, zs2[0])    
+    zs2 = cs2[:,2]; zs2 = np.append(zs2, zs2[0])
     plt.plot(rs2, zs2, label='Banana Surface')
     cs3 = hbt.cross_section(0)
     rs3 = np.sqrt(cs3[:,0]**2 + cs3[:,1]**2); rs3 = np.append(rs3, rs3[0])
@@ -549,12 +553,13 @@ def fun(x):
     res = boozer_surface.run_code(run_dict['iota'], run_dict['G'])
 
     # Check success
+    success1 = False
+    success2 = False
     try:
         success1 = boozer_surface.res['success']
         success2 = not boozer_surface.surface.is_self_intersecting()
     except Exception as e:
         print("Surface check failed:", e)
-        success2 = False
     success = success1 and success2
 
     if success:
@@ -637,7 +642,9 @@ def callback(x):
     curvecurve_min = JCurveCurve.shortest_distance()
     curvesurf_min = JCurveSurface.shortest_distance()
 
-    BdotN = np.mean(np.abs(np.sum(bs.B().reshape((nphi, ntheta, 3)) * boozer_surface.surface.unitnormal(), axis=2)))
+    bs.set_points(boozer_surface.surface.gamma().reshape((-1, 3)))
+    unitn = boozer_surface.surface.unitnormal()
+    BdotN = np.mean(np.abs(np.sum(bs.B().reshape(unitn.shape) * unitn, axis=2)))
     run_dict['intersecting'] = boozer_surface.surface.is_self_intersecting()
 
     width = 35
@@ -780,15 +787,17 @@ if __name__ == "__main__":
     bs.save(OUT_DIR_ITER + f"/biot_savart_init.json")
 
     # Save initial surface with magnetic field normal component data
-    pointData = {"B_N/B": np.sum(bs.B().reshape((nphi, ntheta, 3)) *
-        boozer_surface.surface.unitnormal(), axis=2)[:, :, None] / np.sqrt(np.sum(bs.B().reshape((nphi, ntheta, 3))**2, axis=2))[:, :, None]}
+    bs.set_points(boozer_surface.surface.gamma().reshape((-1, 3)))
+    unitn = boozer_surface.surface.unitnormal()
+    pointData = {"B_N/B": np.sum(bs.B().reshape(unitn.shape) *
+        unitn, axis=2)[:, :, None] / np.sqrt(np.sum(bs.B().reshape(unitn.shape)**2, axis=2))[:, :, None]}
     boozer_surface.surface.to_vtk(OUT_DIR_ITER + f"/surf_init", extra_data=pointData)
     boozer_surface.surface.save(OUT_DIR_ITER + f"/surf_init.json")
     print(f"Volume: {boozer_surface.surface.volume()}")
 
     # Generate initial diagnostic plots
     initial_field_error = normPlot(boozer_surface.surface, bs, OUT_DIR_ITER + "/NormPlotInitial")
-    crossSectionPlot(surf_coils, boozer_surface.surface, banana_curve, OUT_DIR_ITER + "/CrossSectionInitial")
+    crossSectionPlot(surf_coils, boozer_surface.surface, banana_curve, OUT_DIR_ITER + "/CrossSectionInitial", hbt, VV)
     initial_volume = boozer_surface.surface.volume()
     initial_iota = Iotas(boozer_surface).J()
     initial_max_curvature = np.max(banana_curve.kappa())
@@ -887,8 +896,10 @@ if __name__ == "__main__":
         bs.save(OUT_DIR_ITER + "/biot_savart_opt.json")
 
         # Save optimized surface with magnetic field normal component data
-        pointData = {"B_N/B": np.sum(bs.B().reshape((nphi, ntheta, 3)) *
-            boozer_surface.surface.unitnormal(), axis=2)[:, :, None] / np.sqrt(np.sum(bs.B().reshape((nphi, ntheta, 3))**2, axis=2))[:, :, None]}
+        bs.set_points(boozer_surface.surface.gamma().reshape((-1, 3)))
+        unitn = boozer_surface.surface.unitnormal()
+        pointData = {"B_N/B": np.sum(bs.B().reshape(unitn.shape) *
+            unitn, axis=2)[:, :, None] / np.sqrt(np.sum(bs.B().reshape(unitn.shape)**2, axis=2))[:, :, None]}
 
         # Print final results
         boozer_surface.surface.to_vtk(OUT_DIR_ITER + f"/surf_opt", extra_data=pointData)
@@ -903,7 +914,7 @@ if __name__ == "__main__":
 
         # Generate final diagnostic plots
         fieldError = normPlot(boozer_surface.surface, bs, OUT_DIR_ITER + "/NormPlotOptimized")
-        crossSectionPlot(surf_coils, boozer_surface.surface, banana_curve, OUT_DIR_ITER + "/CrossSectionOptimized")
+        crossSectionPlot(surf_coils, boozer_surface.surface, banana_curve, OUT_DIR_ITER + "/CrossSectionOptimized", hbt, VV)
 
     # Save the results of optimization to a separate file
     results = {

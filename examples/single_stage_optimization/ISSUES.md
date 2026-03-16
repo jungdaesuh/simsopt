@@ -29,6 +29,19 @@ is interior because numerators scale with the small denominator. Validated again
 near-parallel pairs (0 failures). Two new regression tests added to
 `tests/geo/test_single_stage_example.py`: deterministic adversarial case (9x overestimate
 before fix) and 1000-pair near-parallel brute-force.
+**Batch 5:** [Issue 10](#10) (VTK label fix), [Issue 13](#13) (initSurface parameterized),
+[Issue 14](#14) (initializeCoils parameterized), [Issue 15](#15) (normPlot global reshape removed),
+[Issue 16](#16) (magneticFieldPlots global reshape removed), [Issue 17](#17) (endpoint quadrature),
+[Issue 21](#21) (set_points before reshape), [Issue 22](#22) (poincare OUT_DIR),
+[Issue 30](#30) (Stage 2 tol=1e-15 replaced with explicit --ftol/--gtol CLI flags), [Issue 32](#32) (leaked figure), [Issue 33](#33) (tick labels),
+[Issue 34](#34) (blank subplots), [Issue 36](#36) (crossSectionPlot/fun global deps parameterized)
+in `banana_coil_solver.py`, `single_stage_banana_example.py`, and `poincare_surfaces.py`.
+All reshape operations now derive dimensions from the surface instead of global `nphi`/`ntheta`.
+Validated via `py_compile` and reviewer agent (2 rounds).
+**Batch 6:** [Issue 24](#24) (`__name__` guards added to `banana_coil_solver.py` and `poincare_surfaces.py`),
+[Issue 35](#35) (shell scripts use configurable `SIMSOPT_ROOT` variable).
+Stage 2 output directory float formatting aligned with single-stage lookup pattern (`:g` format).
+Bonus fix: `success1` pre-initialized in single-stage `fun()` to prevent `UnboundLocalError`.
 Unless otherwise noted, the issue descriptions below still describe the pre-fix audit state.
 
 ---
@@ -65,33 +78,33 @@ Unless otherwise noted, the issue descriptions below still describe the pre-fix 
 | [7](#7)  | C | poincare sh | ~~33~~ | ~~Shell script references wrong Python filename~~ :white_check_mark: |
 | [8](#8)  | M | banana_coil | ~~360-362~~ | ~~Cross-section angle double-scaled~~ :white_check_mark: |
 | [9](#9)  | M | single_stage | ~~493-495~~ | ~~Cross-section angle double-scaled (duplicate)~~ :white_check_mark: |
-| [10](#10) | M | banana_coil | 524 | VTK export labeled "VV" is actually banana coil surface |
-| [11](#11) | M | banana_coil | 500 | Output dir omits run-defining parameters |
-| [12](#12) | M | single_stage | 755 | Output dir only encodes mpol/ntor |
-| [13](#13) | M | banana_coil | 170-178 | `initSurface` depends on globals `file_loc`, `nphi`, `ntheta` |
-| [14](#14) | M | banana_coil | 180-201 | `initializeCoils(surf)` ignores its argument for coil placement |
-| [15](#15) | M | single_stage | 464 | `normPlot` reshapes using global `nphi`/`ntheta` |
-| [16](#16) | M | banana_coil | 317 | `magneticFieldPlots` reshapes using global `nphi`/`ntheta` |
-| [17](#17) | M | banana_coil | 182 | Quadrature includes duplicate endpoint |
+| [10](#10) | M | banana_coil | ~~524~~ | ~~VTK export labeled "VV" is actually banana coil surface~~ :white_check_mark: |
+| [11](#11) | M | banana_coil | 500 | Output dir omits run-defining parameters (deferred — format aligned with `:g`) |
+| [12](#12) | M | single_stage | 755 | Output dir only encodes mpol/ntor (deferred — results.json captures all) |
+| [13](#13) | M | banana_coil | ~~170-178~~ | ~~`initSurface` depends on globals `file_loc`, `nphi`, `ntheta`~~ :white_check_mark: |
+| [14](#14) | M | banana_coil | ~~180-201~~ | ~~`initializeCoils(surf)` ignores its argument for coil placement~~ :white_check_mark: |
+| [15](#15) | M | single_stage | ~~464~~ | ~~`normPlot` reshapes using global `nphi`/`ntheta`~~ :white_check_mark: |
+| [16](#16) | M | banana_coil | ~~317~~ | ~~`magneticFieldPlots` reshapes using global `nphi`/`ntheta`~~ :white_check_mark: |
+| [17](#17) | M | banana_coil | ~~182~~ | ~~Quadrature includes duplicate endpoint~~ :white_check_mark: |
 | [18](#18) | -- | single_stage | 300-301 | ~~`BoozerResidualExact` hardcodes `constraint_weight=0`~~ (by design) |
 | [19](#19) | C | single_stage | ~~417-418~~ | ~~Exact Boozer quadpoints use `mpol` for phi -- throws for `mpol != ntor`~~ :white_check_mark: |
 | [20](#20) | -- | single_stage | 594-595 | ~~`callback` re-calls JF.J()/JF.dJ()~~ (cache-safe) |
-| [21](#21) | M | single_stage | 769-770 | `bs.B()` reshape assumes nphi*ntheta before `set_points` |
-| [22](#22) | M | poincare | 94 | Hardcoded relative `OUT_DIR` |
-| [23](#23) | M | cross-file | -- | Duplicated `crossSectionPlot`/`normPlot` with identical bugs |
-| [24](#24) | M | cross-file | -- | No `if __name__ == "__main__"` guard in any script |
+| [21](#21) | M | single_stage | ~~769-770~~ | ~~`bs.B()` reshape assumes nphi*ntheta before `set_points`~~ :white_check_mark: |
+| [22](#22) | M | poincare | ~~94~~ | ~~Hardcoded relative `OUT_DIR`~~ :white_check_mark: |
+| [23](#23) | M | cross-file | -- | Duplicated `crossSectionPlot`/`normPlot` (deferred — now fully parameterized) |
+| [24](#24) | M | cross-file | -- | ~~No `if __name__ == "__main__"` guard in any script~~ :white_check_mark: |
 | [25](#25) | L | banana_coil | ~~354~~ | ~~Dead `hbt_poly` variable~~ :white_check_mark: |
 | [26](#26) | L | single_stage | ~~487~~ | ~~Dead `hbt_poly` variable (duplicate)~~ :white_check_mark: |
 | [27](#27) | L | banana_coil | ~~13-22~~ | ~~Unused imports~~ :white_check_mark: |
 | [28](#28) | L | single_stage | ~~6, 16, 17~~ | ~~Unused imports (`Polygon`, `save`, `ScaledCurrent`)~~ :white_check_mark: |
 | [29](#29) | L | poincare | ~~4-5, 9~~ | ~~Unused imports (`SurfaceClassifier`, `LevelsetStoppingCriterion`, `Line2D`)~~ :white_check_mark: |
-| [30](#30) | L | banana_coil | 509 | `tol=1e-15` is exceptionally strict |
+| [30](#30) | L | banana_coil | ~~509~~ | ~~`tol=1e-15` is exceptionally strict~~ :white_check_mark: |
 | [31](#31) | L | single_stage | ~~852-853~~ | ~~`ftol`/`gtol` returns `None` for out-of-range `mpol` (crashes)~~ :white_check_mark: |
-| [32](#32) | L | poincare | 30-31 | Leaked matplotlib figure |
-| [33](#33) | L | poincare | 47 | Y-axis tick labels only hidden for column 1 (conditional) |
-| [34](#34) | L | poincare | 29 | Blank subplots for non-square phi count (conditional) |
-| [35](#35) | L | shell | various | Shell scripts hardcoded to `~/simsopt/` and `conda activate simsopt` |
-| [36](#36) | L | banana_coil | 377-388 | `fun()` closes over many globals |
+| [32](#32) | L | poincare | ~~30-31~~ | ~~Leaked matplotlib figure~~ :white_check_mark: |
+| [33](#33) | L | poincare | ~~47~~ | ~~Y-axis tick labels only hidden for column 1~~ :white_check_mark: |
+| [34](#34) | L | poincare | ~~29~~ | ~~Blank subplots for non-square phi count~~ :white_check_mark: |
+| [35](#35) | L | shell | ~~various~~ | ~~Shell scripts hardcoded to `~/simsopt/`~~ :white_check_mark: |
+| [36](#36) | L | banana_coil | ~~377-388~~ | ~~`fun()` closes over many globals~~ :white_check_mark: |
 | [37](#37) | -- | banana_coil | 81 | ~~Default `s=0.24` is an interior VMEC surface~~ (intentional) |
 
 ---
@@ -112,33 +125,33 @@ Checklist meaning:
 - [x] [Issue 7](#7) Shell script references wrong Python filename
 - [x] [Issue 8](#8) Cross-section angle double-scaled
 - [x] [Issue 9](#9) Cross-section angle double-scaled (duplicate)
-- [ ] [Issue 10](#10) VTK export labeled "VV" is actually banana coil surface
-- [ ] [Issue 11](#11) Output dir omits run-defining parameters
-- [ ] [Issue 12](#12) Output dir only encodes `mpol`/`ntor`
-- [ ] [Issue 13](#13) `initSurface` depends on globals
-- [ ] [Issue 14](#14) `initializeCoils(surf)` ignores its argument
-- [ ] [Issue 15](#15) `normPlot` reshapes using global `nphi`/`ntheta`
-- [ ] [Issue 16](#16) `magneticFieldPlots` reshapes using global `nphi`/`ntheta`
-- [ ] [Issue 17](#17) Quadrature includes duplicate endpoint
+- [x] [Issue 10](#10) VTK export labeled "VV" is actually banana coil surface
+- [ ] [Issue 11](#11) Output dir omits run-defining parameters (deferred — format aligned)
+- [ ] [Issue 12](#12) Output dir only encodes `mpol`/`ntor` (deferred — results.json captures all)
+- [x] [Issue 13](#13) `initSurface` depends on globals
+- [x] [Issue 14](#14) `initializeCoils(surf)` ignores its argument
+- [x] [Issue 15](#15) `normPlot` reshapes using global `nphi`/`ntheta`
+- [x] [Issue 16](#16) `magneticFieldPlots` reshapes using global `nphi`/`ntheta`
+- [x] [Issue 17](#17) Quadrature includes duplicate endpoint
 - [ ] [Issue 18](#18) `BoozerResidualExact` hardcodes `constraint_weight=0` (reviewed, by design)
 - [x] [Issue 19](#19) Exact Boozer quadpoints use `mpol` for phi
 - [ ] [Issue 20](#20) `callback` re-calls `JF.J()/JF.dJ()` (reviewed, cache-safe)
-- [ ] [Issue 21](#21) `bs.B()` reshape assumes `nphi*ntheta` before `set_points`
-- [ ] [Issue 22](#22) Hardcoded relative `OUT_DIR`
-- [ ] [Issue 23](#23) Duplicated `crossSectionPlot`/`normPlot`
-- [ ] [Issue 24](#24) No `if __name__ == "__main__"` guard in any script
+- [x] [Issue 21](#21) `bs.B()` reshape assumes `nphi*ntheta` before `set_points`
+- [x] [Issue 22](#22) Hardcoded relative `OUT_DIR`
+- [ ] [Issue 23](#23) Duplicated `crossSectionPlot`/`normPlot` (deferred — now parameterized)
+- [x] [Issue 24](#24) No `if __name__ == "__main__"` guard in any script
 - [x] [Issue 25](#25) Dead `hbt_poly` variable
 - [x] [Issue 26](#26) Dead `hbt_poly` variable (duplicate)
 - [x] [Issue 27](#27) Unused imports
 - [x] [Issue 28](#28) Unused imports (`Polygon`, `save`, `ScaledCurrent`)
 - [x] [Issue 29](#29) Unused imports (`SurfaceClassifier`, `LevelsetStoppingCriterion`, `Line2D`)
-- [ ] [Issue 30](#30) `tol=1e-15` is exceptionally strict
+- [x] [Issue 30](#30) `tol=1e-15` is exceptionally strict
 - [x] [Issue 31](#31) `ftol`/`gtol` returns `None` for out-of-range `mpol`
-- [ ] [Issue 32](#32) Leaked matplotlib figure
-- [ ] [Issue 33](#33) Y-axis tick labels only hidden for column 1
-- [ ] [Issue 34](#34) Blank subplots for non-square phi count
-- [ ] [Issue 35](#35) Shell scripts hardcoded to `~/simsopt/` and `conda activate simsopt`
-- [ ] [Issue 36](#36) `fun()` closes over many globals
+- [x] [Issue 32](#32) Leaked matplotlib figure
+- [x] [Issue 33](#33) Y-axis tick labels only hidden for column 1
+- [x] [Issue 34](#34) Blank subplots for non-square phi count
+- [x] [Issue 35](#35) Shell scripts hardcoded to `~/simsopt/`
+- [x] [Issue 36](#36) `fun()` closes over many globals (factory pattern; all 7 deps explicit)
 - [ ] [Issue 37](#37) Default `s=0.24` is an interior VMEC surface (reviewed, intentional)
 
 ---
@@ -847,15 +860,20 @@ The following imports are not used anywhere in the file:
 **File:** `banana_coil_solver.py`
 **Line:** 509
 
-**Validation status:** Latent / tuning. This is not a correctness bug, but it is an unnecessarily aggressive tolerance choice for L-BFGS-B.
+**Validation status:** Latent / tuning. This is not a correctness bug, but the original
+tolerance was implicit (via the blunt `tol=` parameter) and undocumented.
 
 ```python
+# Original:
 res = minimize(fun, dofs, jac=True, method='L-BFGS-B',
                options={'maxiter': MAXITER, 'maxcor': 300}, tol=1e-15)
+# Fixed — explicit ftol/gtol in options, configurable via --ftol/--gtol CLI flags:
+res = minimize(fun, dofs, jac=True, method='L-BFGS-B',
+               options={'maxiter': MAXITER, 'maxcor': 300, 'ftol': args.ftol, 'gtol': args.gtol})
 ```
 
-SciPy maps `tol` to both `ftol` and `gtol` for L-BFGS-B via `options.setdefault()`. Since the
-`options` dict does not contain `ftol` or `gtol`, both are set to `1e-15`. This results in:
+SciPy maps `tol` to both `ftol` and `gtol` for L-BFGS-B via `options.setdefault()`. The
+original `tol=1e-15` set both to `1e-15`:
 - `ftol=1e-15` → `factr ≈ 4.5` (relative function change within ~4.5 machine epsilons)
 - `gtol=1e-15` → projected gradient norm below 1e-15
 
@@ -863,6 +881,13 @@ These thresholds are exceptionally strict and likely impractical for this optimi
 though not unreachable in principle (projected-gradient termination can trigger at machine
 precision for well-converged problems). In practice, the optimizer will most likely terminate
 by hitting `maxiter`.
+
+**Fix (Stage 2 only):** Replaced the implicit `tol=1e-15` with explicit `--ftol`/`--gtol` CLI
+flags (defaults: `1e-15` each, preserving the original very-tight termination settings). The
+tolerances are now set directly in the `options` dict, bypassing the `setdefault` indirection.
+Users can loosen for faster convergence (e.g., `--ftol 1e-9 --gtol 1e-5` for scipy "moderate
+accuracy" defaults). Note: Single stage already had its own explicit `ftol_by_mpol`/`gtol_by_mpol`
+system (Issue #31).
 
 Additionally, `maxcor=300` stores 300 correction pairs (default is 10). With typical ~20-50
 DOFs this is fine memory-wise but far exceeds what is useful for the Hessian approximation.

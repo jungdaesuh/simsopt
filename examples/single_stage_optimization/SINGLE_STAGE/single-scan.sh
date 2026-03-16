@@ -16,7 +16,8 @@ module load python/3.11
 source $(conda info --base)/etc/profile.d/conda.sh
 
 # Activate virtual environment
-conda activate simsopt
+CONDA_ENV="${CONDA_ENV:-simsopt}"
+conda activate "$CONDA_ENV"
 
 # Thread settings (important for SIMSOPT performance)
 export OMP_NUM_THREADS=$SLURM_CPUS_PER_TASK
@@ -29,7 +30,8 @@ export OMP_PROC_BIND=spread
 export OMP_PLACES=threads
 
 # Go to working directory
-cd ~/simsopt/examples/single_stage_optimization/SINGLE_STAGE
+SIMSOPT_ROOT="${SIMSOPT_ROOT:-$HOME/simsopt}"
+cd "$SIMSOPT_ROOT/examples/single_stage_optimization/SINGLE_STAGE"
 
 # Run the simulation
 srun python3 single_stage_banana_example.py "$@"

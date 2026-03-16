@@ -1,3 +1,5 @@
+import os
+
 # SIMSOPT imports
 from simsopt._core.optimizable import load
 from simsopt.field import InterpolatedField
@@ -24,7 +26,6 @@ def plot_poincare_data(fieldlines_phi_hits, phis, filename, mark_lost=False, asp
     import matplotlib.pyplot as plt
     from math import ceil, sqrt
     nrowcol = ceil(sqrt(len(phis)))
-    plt.figure()
     fig, axs = plt.subplots(nrowcol, nrowcol, figsize=(8, 5))
     for ax in axs.ravel():
         ax.set_aspect(aspect)
@@ -40,7 +41,7 @@ def plot_poincare_data(fieldlines_phi_hits, phis, filename, mark_lost=False, asp
             axs[row, col].set_xlabel("$r$")
         if col == 0:
             axs[row, col].set_ylabel("$z$")
-        if col == 1:
+        if col > 0:
             axs[row, col].set_yticklabels([])
         if xlims is not None:
             axs[row, col].set_xlim(xlims)
@@ -73,75 +74,84 @@ def plot_poincare_data(fieldlines_phi_hits, phis, filename, mark_lost=False, asp
             z_interp = cross_section[:, 2]
             axs[row, col].plot(r_interp, z_interp, linewidth=1, c='r')
 
+    # Hide unused subplots for non-square phi counts
+    for idx in range(len(phis), nrowcol * nrowcol):
+        axs[idx // nrowcol, idx % nrowcol].set_visible(False)
+
     plt.tight_layout()
     plt.savefig(filename, dpi=dpi)
     plt.close()
 
 
-nfieldlines = 50 # Number of field lines for integration 
-tmax_fl = 7000 # Maximum toroidal angle for integration
-tol = 1e-7 # Tolerance for field line integration
-interpolate = True # If True, then the BiotSavart magnetic field is interpolated 
-                   # on a grid for the magnetic field evaluation
-nr = 20 # Number of radial points for interpolation
-nphi = 10 # Number of toroidal angle points for interpolation
-nz = 10 # Number of vertical points for interpolation
-degree = 3 # Degree for interpolation
 
-OUT_DIR = f'../SINGLE_STAGE/outputs/mpol=8-ntor=6'
-bs = load(OUT_DIR + f'/biot_savart_init.json')
+if __name__ == "__main__":
+    nfieldlines = 50 # Number of field lines for integration 
+    tmax_fl = 7000 # Maximum toroidal angle for integration
+    tol = 1e-7 # Tolerance for field line integration
+    interpolate = True # If True, then the BiotSavart magnetic field is interpolated 
+                       # on a grid for the magnetic field evaluation
+    nr = 20 # Number of radial points for interpolation
+    nphi = 10 # Number of toroidal angle points for interpolation
+    nz = 10 # Number of vertical points for interpolation
+    degree = 3 # Degree for interpolation
 
-surf = load(OUT_DIR + f'/surf_init.json')
-# Extend surface, since we want to look at field lines beyond it
-surf_extended = load(OUT_DIR + f'/surf_init.json')
-surf_extended.extend_via_normal(0.05)
+    SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+    EXAMPLE_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, ".."))
+    _default_out_dir = os.path.join(EXAMPLE_ROOT, "SINGLE_STAGE", "outputs", "mpol=8-ntor=6")
+    OUT_DIR = os.environ.get("POINCARE_OUT_DIR", _default_out_dir)
+    bs = load(OUT_DIR + f'/biot_savart_init.json')
 
-# Use extended surface to determine initial conditions
-gamma = surf_extended.gamma()
-R = np.sqrt(gamma[:,:,0]**2 + gamma[:,:,1]**2)
-Z = gamma[:,:,2]
+    surf = load(OUT_DIR + f'/surf_init.json')
+    # Extend surface, since we want to look at field lines beyond it
+    surf_extended = load(OUT_DIR + f'/surf_init.json')
+    surf_extended.extend_via_normal(0.05)
 
-nfp = 5
+    # Use extended surface to determine initial conditions
+    gamma = surf_extended.gamma()
+    R = np.sqrt(gamma[:,:,0]**2 + gamma[:,:,1]**2)
+    Z = gamma[:,:,2]
 
-Rmin = np.min(R)
-Rmax = np.max(R)
-Zmax = np.max(Z)
+    nfp = 5
 
-# Sets stopping criteria for the poincare calculation
-stop_crit = [MaxZStoppingCriterion(Zmax*1.05), MinZStoppingCriterion(-Zmax*1.05), MinRStoppingCriterion(Rmin*0.95), MaxRStoppingCriterion(Rmax*1.05)]
+    Rmin = np.min(R)
+    Rmax = np.max(R)
+    Zmax = np.max(Z)
+
+    # Sets stopping criteria for the poincare calculation
+    stop_crit = [MaxZStoppingCriterion(Zmax*1.05), MinZStoppingCriterion(-Zmax*1.05), MinRStoppingCriterion(Rmin*0.95), MaxRStoppingCriterion(Rmax*1.05)]
 
 
-def trace_fieldlines(bfield):
-    # Set up initial conditions for field line tracing 
-    R0 = np.linspace(Rmin, Rmax, nfieldlines)
-    Z0 = np.zeros((nfieldlines,))
-    phis = [(i/4)*(2*np.pi/nfp) for i in range(4)]
-    fieldlines_tys, fieldlines_phi_hits = compute_fieldlines(
-        bfield, R0, Z0, tmax=tmax_fl, tol=tol,
-        phis=phis, stopping_criteria=stop_crit)
-    # Main field line tracing
-    plot_poincare_data(fieldlines_phi_hits, phis, OUT_DIR + f'/PoincarePlot.png', dpi=600, surf=surf, mark_lost=False)
-    return fieldlines_phi_hits
+    def trace_fieldlines(bfield):
+        # Set up initial conditions for field line tracing 
+        R0 = np.linspace(Rmin, Rmax, nfieldlines)
+        Z0 = np.zeros((nfieldlines,))
+        phis = [(i/4)*(2*np.pi/nfp) for i in range(4)]
+        fieldlines_tys, fieldlines_phi_hits = compute_fieldlines(
+            bfield, R0, Z0, tmax=tmax_fl, tol=tol,
+            phis=phis, stopping_criteria=stop_crit)
+        # Main field line tracing
+        plot_poincare_data(fieldlines_phi_hits, phis, OUT_DIR + f'/PoincarePlot.png', dpi=600, surf=surf, mark_lost=False)
+        return fieldlines_phi_hits
 
-# Determine range for measuring field line data points
-rrange = (Rmin, Rmax, nr)
-phirange = (0, 2*np.pi/nfp, nphi)
-# exploit stellarator symmetry and only consider positive z values:
-zrange = (0, Zmax, nz)
+    # Determine range for measuring field line data points
+    rrange = (Rmin, Rmax, nr)
+    phirange = (0, 2*np.pi/nfp, nphi)
+    # exploit stellarator symmetry and only consider positive z values:
+    zrange = (0, Zmax, nz)
 
-if interpolate:
-    bsh = InterpolatedField(
-        bs, degree, rrange, phirange, zrange, True, nfp=nfp, stellsym=True
-    )
+    if interpolate:
+        bsh = InterpolatedField(
+            bs, degree, rrange, phirange, zrange, True, nfp=nfp, stellsym=True
+        )
 
-    bsh.set_points(surf.gamma().reshape((-1, 3)))
-    bs.set_points(surf.gamma().reshape((-1, 3)))
-    Bh = bsh.B()
-    B = bs.B()
-    print("Maximum field interpolation error: ", np.max(np.abs(B-Bh)))
-else:
-    bsh = bs
+        bsh.set_points(surf.gamma().reshape((-1, 3)))
+        bs.set_points(surf.gamma().reshape((-1, 3)))
+        Bh = bsh.B()
+        B = bs.B()
+        print("Maximum field interpolation error: ", np.max(np.abs(B-Bh)))
+    else:
+        bsh = bs
 
-hits = trace_fieldlines(bsh)
+    hits = trace_fieldlines(bsh)
 
 

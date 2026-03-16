@@ -81,6 +81,8 @@ wout_nfp22ginsburg_000_014417_iota15.nc
 - `--cc-threshold` / `CC_THRESHOLD`: Coil-coil spacing threshold
 - `--curvature-threshold` / `CURVATURE_THRESHOLD`: Curvature threshold
 - `--maxiter` / `MAXITER`: Maximum optimization iterations
+- `--ftol` / `FTOL`: L-BFGS-B function change tolerance (default: `1e-15`, effectively lets `maxiter` control termination)
+- `--gtol` / `GTOL`: L-BFGS-B projected gradient tolerance (default: `1e-15`)
 
 **Run**:
 ```bash
@@ -183,17 +185,17 @@ python single_stage_banana_example.py \
 - `nr`, `nphi`, `nz`: Grid resolution for interpolation (default: 20, 10, 10)
 - `degree`: Interpolation degree (default: 3)
 
-**Edit the output directory path** (around line 16):
-```python
-OUT_DIR = f'../SINGLE_STAGE/outputs/mpol=8-ntor=6'
+**Output directory**: By default, the script reads from
+`SINGLE_STAGE/outputs/mpol=8-ntor=6` (resolved relative to the script location).
+Override with the `POINCARE_OUT_DIR` environment variable:
+```bash
+export POINCARE_OUT_DIR=/path/to/single_stage/outputs/mpol=8-ntor=6
 ```
 
-Ensure this path matches your Single Stage output directory.
-
-**Run**:
+**Run** (the shell script defaults `SIMSOPT_ROOT` to `$HOME/simsopt`; override for non-default checkouts):
 ```bash
-cd POINCARE_PLOTTING
-sbatch poincare-plot.sh
+export SIMSOPT_ROOT=/path/to/simsopt   # only if repo is not at ~/simsopt
+sbatch POINCARE_PLOTTING/poincare-plot.sh
 ```
 
 **Outputs** (in the specified `OUT_DIR`):
@@ -238,6 +240,7 @@ PNG diagnostic plots are generated automatically:
 - **Self-intersecting coils**: Reduce `CURVATURE_WEIGHT` or adjust coil initialization
 - **Optimization not converging**: Increase `MAXITER` or adjust weight parameters
 - **High field errors**: Reduce `LENGTH_WEIGHT` or adjust coil surface radius
+- **Slow convergence**: Default `--ftol`/`--gtol` of `1e-15` lets `maxiter` control termination; loosen to `--ftol 1e-9 --gtol 1e-5` for faster runs
 
 ### Single Stage Issues
 - **File not found error**: Verify the path to `biot_savart_opt.json` from Stage 2
@@ -262,8 +265,15 @@ Edit weight parameters in the scripts:
 - Stage 2: `LENGTH_WEIGHT`, `CC_WEIGHT`, `CURVATURE_WEIGHT`
 - Single Stage: `RES_WEIGHT`, `IOTAS_WEIGHT`, `CC_WEIGHT`, `CS_WEIGHT`, etc.
 
-### Multi-Resolution Strategy
-Single stage includes automatic tolerance adjustment by `mpol`:
+### Convergence Tolerances
+
+**Stage 2** defaults to `ftol=1e-15` and `gtol=1e-15` (`factr ≈ 4.5`), which effectively
+lets `--maxiter` control termination. Override for faster convergence:
+```bash
+python banana_coil_solver.py --ftol 1e-9 --gtol 1e-5   # scipy "moderate accuracy"
+```
+
+**Single stage** includes automatic tolerance adjustment by `mpol`:
 ```python
 ftol_by_mpol = {8: 1e-5, 9: 5e-6, 10: 1e-6, ...}
 gtol_by_mpol = {8: 1e-2, 9: 5e-3, 10: 1e-3, ...}

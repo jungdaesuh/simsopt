@@ -85,6 +85,18 @@ def parse_args():
         help="Maximum optimizer iterations.",
     )
     parser.add_argument(
+        "--ftol",
+        type=float,
+        default=float(os.environ.get("FTOL", "1e-15")),
+        help="L-BFGS-B function change tolerance. Default 1e-15 (factr~4.5) effectively lets maxiter control termination.",
+    )
+    parser.add_argument(
+        "--gtol",
+        type=float,
+        default=float(os.environ.get("GTOL", "1e-15")),
+        help="L-BFGS-B projected gradient tolerance. Default 1e-15 effectively lets maxiter control termination.",
+    )
+    parser.add_argument(
         "--length-weight",
         type=float,
         default=float(os.environ.get("LENGTH_WEIGHT", "0.0005")),
@@ -160,7 +172,7 @@ def build_equilibrium_path(args):
             return candidate_path
     return candidate_paths[0]
 
-def initSurface(R0, s):
+def initSurface(R0, s, file_loc, nphi, ntheta):
     # Initialize the boundary magnetic surface and scale it to the target major radius
     surf = SurfaceRZFourier.from_wout(file_loc, range="full torus", nphi=nphi, ntheta=ntheta, s=s)
     # scale the surface down to the target appropriate major radius
@@ -170,26 +182,28 @@ def initSurface(R0, s):
     print('Minor radius: ', surf.minor_radius())
     return surf
 
-def initializeCoils(surf):
-    # Initialize banana coils on the provided surface
-    banana_curve = CurveCWSFourierCPP(np.linspace(0, 1, num_quadpoints), order=order, surf=surf_coils)
+def initializeCoils(surf, surf_coils, tf_coils, num_quadpoints, order,
+                    phi_center, theta_center, phi_width, theta_width, OUT_DIR):
+    # Initialize banana coils on the coil winding surface
+    banana_curve = CurveCWSFourierCPP(np.linspace(0, 1, num_quadpoints, endpoint=False), order=order, surf=surf_coils)
     banana_curve.set('phic(0)', phi_center)
     banana_curve.set('thetac(0)', theta_center)
     banana_curve.set('phic(1)', phi_width)
     banana_curve.set('thetas(1)', theta_width)
-    
+
     # Apply symmetries - if stellsym = False, only one per half field period (and two if true)
     banana_coils = coils_via_symmetries([banana_curve], [ScaledCurrent(Current(1), 1e4)], surf_coils.nfp, surf_coils.stellsym)
-    
+
     # Combined coil set to evaluate magnetic field
     coils = tf_coils + banana_coils
     bs = BiotSavart(coils)
     bs.set_points(surf.gamma().reshape((-1, 3)))
-    
+
     # Save initialization state
     curves = [c.curve for c in coils]
     curves_to_vtk(curves, OUT_DIR + "curves_init", close=True)
-    pointData = {"B_N": np.sum(bs.B().reshape((nphi, ntheta, 3)) * surf.unitnormal(), axis=2)[:, :, None]}
+    unitn = surf.unitnormal()
+    pointData = {"B_N": np.sum(bs.B().reshape(unitn.shape) * unitn, axis=2)[:, :, None]}
     surf.to_vtk(OUT_DIR + "surf_init", extra_data=pointData)
     return bs, curves, banana_curve, banana_coils
 
@@ -379,7 +393,6 @@ def magneticFieldPlots(surf, bs, OUT_DIR_ITER):
     abs_relBfinal_norm_dA = np.abs(relBfinal_norm.reshape((-1, 1))) * surf_area
     mean_abs_relBfinal_norm = np.sum(abs_relBfinal_norm_dA) / np.sum(surf_area)
     max_rnorm = np.max(np.abs(relBfinal_norm))
-    relBfinal_norm = np.sum(bs.B().reshape((nphi, ntheta, 3)) * surf.unitnormal(), axis=2)[:, :, None] / np.sqrt(np.sum(bs.B().reshape((nphi, ntheta, 3))**2, axis=2))[:, :, None]
     fig, ax = plt.subplots()
     contour = ax.contourf(phi, theta, np.squeeze(relBfinal_norm).T, levels=50, cmap='seismic', vmin=-max_rnorm, vmax=max_rnorm)
     ax.set_xlabel(r'$\phi/2\pi$', fontsize=18, fontweight='bold')
@@ -406,12 +419,17 @@ def magneticFieldPlots(surf, bs, OUT_DIR_ITER):
     plt.close()
     return mean_abs_relBfinal_norm
 
-def crossSectionPlot(surf_coils, surf, banana_curve, OUT_DIR_ITER):
+def crossSectionPlot(surf_coils, surf, banana_curve, OUT_DIR_ITER, hbt, VV):
     # plots cross section of plasma at a few toroidal locations and relevant HBT cross sections
     plt.figure(figsize=(7,6))
+    # Plot banana coil R-Z projection
+    gamma = banana_curve.gamma()
+    coil_r = np.sqrt(gamma[:, 0]**2 + gamma[:, 1]**2)
+    coil_z = gamma[:, 2]
+    plt.plot(coil_r, coil_z, 'k--', linewidth=1.5, label='Banana Coil')
     cs2 = surf_coils.cross_section(0)
     rs2 = np.sqrt(cs2[:,0]**2 + cs2[:,1]**2); rs2 = np.append(rs2, rs2[0])
-    zs2 = cs2[:,2]; zs2 = np.append(zs2, zs2[0])    
+    zs2 = cs2[:,2]; zs2 = np.append(zs2, zs2[0])
     plt.plot(rs2, zs2, label='Banana Surface')
     cs3 = hbt.cross_section(0)
     rs3 = np.sqrt(cs3[:,0]**2 + cs3[:,1]**2); rs3 = np.append(rs3, rs3[0])
@@ -438,190 +456,205 @@ def crossSectionPlot(surf_coils, surf, banana_curve, OUT_DIR_ITER):
     plt.close()
     return True
 
-def fun(dofs):
-    JF.x = dofs
-    J = JF.J()
-    grad = JF.dJ()
-    BdotN = np.mean(np.abs(np.sum(new_bs.B().reshape((nphi, ntheta, 3)) * new_surf.unitnormal(), axis=2)))
-    outstr = f"J={J:.1e}, Jf={Jf.J():.1e}, ⟨B·n⟩={BdotN:.1e}"
-    outstr += f", Len={Jls.J():.1f}m"
-    outstr += f", C-C-Sep={Jccdist.shortest_distance():.2f}m"
-    outstr += f", Curvature={Jc.J():.2f}"
-    outstr += f", ║∇J║={np.linalg.norm(grad):.1e}"
-    print(outstr)
-    return J, grad
+def make_fun(JF, new_bs, new_surf, Jf, Jls, Jccdist, Jc):
+    """Factory for the Stage 2 objective function.
+
+    Returns a closure compatible with scipy.optimize.minimize(jac=True)
+    that captures all required state explicitly rather than from module scope.
+    """
+    def fun(dofs):
+        JF.x = dofs
+        J = JF.J()
+        grad = JF.dJ()
+        unitn = new_surf.unitnormal()
+        BdotN = np.mean(np.abs(np.sum(new_bs.B().reshape(unitn.shape) * unitn, axis=2)))
+        outstr = f"J={J:.1e}, Jf={Jf.J():.1e}, ⟨B·n⟩={BdotN:.1e}"
+        outstr += f", Len={Jls.J():.1f}m"
+        outstr += f", C-C-Sep={Jccdist.shortest_distance():.2f}m"
+        outstr += f", Curvature={Jc.J():.2f}"
+        outstr += f", ║∇J║={np.linalg.norm(grad):.1e}"
+        print(outstr)
+        return J, grad
+    return fun
 
 
-# PRE-INITIALIZATION
-# ---------------------------------------------------------------------------------------
-args = parse_args()
 
-# File for the desired boundary magnetic surface:
-plasma_surf_filename = args.plasma_surf_filename
-file_loc = build_equilibrium_path(args)
+if __name__ == "__main__":
+    # PRE-INITIALIZATION
+    # ---------------------------------------------------------------------------------------
+    args = parse_args()
 
-# Make Directory for output
-OUT_DIR = os.path.join(args.output_root, f"outputs-{plasma_surf_filename}") + "/"
-os.makedirs(OUT_DIR, exist_ok=True)
+    # File for the desired boundary magnetic surface:
+    plasma_surf_filename = args.plasma_surf_filename
+    file_loc = build_equilibrium_path(args)
 
-# The proposed new HBT LCFS
-hbt = SurfaceRZFourier(nfp=5, stellsym=True)
-hbt.set_rc(0, 0, 0.9115)    # R0 of LCFS semi-circle center
-hbt.set_rc(1, 0, 0.1605)    # Minor radius (thick metal walls)
-hbt.set_zs(1, 0, 0.152)    # Z extent = ±0.152 m (flat top/bottom)
+    # Make Directory for output
+    OUT_DIR = os.path.join(args.output_root, f"outputs-{plasma_surf_filename}") + "/"
+    os.makedirs(OUT_DIR, exist_ok=True)
 
-nphi = args.nphi
-ntheta = args.ntheta
-surf = None
+    # The proposed new HBT LCFS
+    hbt = SurfaceRZFourier(nfp=5, stellsym=True)
+    hbt.set_rc(0, 0, 0.9115)    # R0 of LCFS semi-circle center
+    hbt.set_rc(1, 0, 0.1605)    # Minor radius (thick metal walls)
+    hbt.set_zs(1, 0, 0.152)    # Z extent = ±0.152 m (flat top/bottom)
 
-# The surface the coils can lie on from Jeff - R0 = 0.976 and a~=0.22
-banana_surf_radius = args.banana_surf_radius
-banana_surf_nfp = 5
-surf_coils = SurfaceRZFourier(nfp=banana_surf_nfp, stellsym=True)
-surf_coils.set_rc(0, 0, 0.976)
-surf_coils.set_rc(1, 0, banana_surf_radius)
-surf_coils.set_zs(1, 0, banana_surf_radius)
+    nphi = args.nphi
+    ntheta = args.ntheta
+    surf = None
 
-# The outer vacuum vessel of HBT, R0 = 0.976, a = 0.222
-# Solely for visualization purposes
-VV = SurfaceRZFourier(nfp=5, stellsym=True)
-VV.set_rc(0, 0, 0.976)
-VV.set_rc(1, 0, 0.222)
-VV.set_zs(1, 0, 0.222)
+    # The surface the coils can lie on from Jeff - R0 = 0.976 and a~=0.22
+    banana_surf_radius = args.banana_surf_radius
+    banana_surf_nfp = 5
+    surf_coils = SurfaceRZFourier(nfp=banana_surf_nfp, stellsym=True)
+    surf_coils.set_rc(0, 0, 0.976)
+    surf_coils.set_rc(1, 0, banana_surf_radius)
+    surf_coils.set_zs(1, 0, banana_surf_radius)
 
-# Create the TF coils in HBT - these will be fixed but create background toroidal field:
-tf_curves = create_equally_spaced_curves(20, 1, stellsym=False, R0=0.976, R1=0.4, order=1)
-tf_currents = [Current(1.0) * 1e5 for i in range(20)]   # At some point, update with actual HBT TF current
+    # The outer vacuum vessel of HBT, R0 = 0.976, a = 0.222
+    # Solely for visualization purposes
+    VV = SurfaceRZFourier(nfp=5, stellsym=True)
+    VV.set_rc(0, 0, 0.976)
+    VV.set_rc(1, 0, 0.222)
+    VV.set_zs(1, 0, 0.222)
 
-# All the TF degrees of freedom are fixed
-for tf_curve in tf_curves:
-    tf_curve.fix_all()
-for tf_current in tf_currents:
-    tf_current.fix_all()
+    # Create the TF coils in HBT - these will be fixed but create background toroidal field:
+    tf_curves = create_equally_spaced_curves(20, 1, stellsym=False, R0=0.976, R1=0.4, order=1)
+    tf_currents = [Current(1.0) * 1e5 for i in range(20)]   # At some point, update with actual HBT TF current
 
-tf_coils = [Coil(curve,current) for curve, current in zip(tf_curves,tf_currents)]
+    # All the TF degrees of freedom are fixed
+    for tf_curve in tf_curves:
+        tf_curve.fix_all()
+    for tf_current in tf_currents:
+        tf_current.fix_all()
 
-
-# INITIALIZATION FOR BANANA COILS
-# ---------------------------------------------------------------------------------------
-# Initialize at inboard midplane (theta_center = 0.5) and mirrored over plane of symmetry
-theta_center = args.theta_center
-phi_center = args.phi_center
-theta_width = args.theta_width
-phi_width = args.phi_width
-
-num_quadpoints = 128 # number of quadature points for coils
-order = args.order # number of Fourier modes for coils
-
-R0 = args.major_radius # major radius
-s = args.toroidal_flux # VMEC flux-surface label
-
-new_surf = initSurface(R0, s)
-init_coil_array = initializeCoils(new_surf)
-new_bs = init_coil_array[0]
-new_curves = init_coil_array[1]
-new_banana_curve = init_coil_array[2]
-new_banana_coils = init_coil_array[3]
-new_tf_coils = tf_coils
-new_surf_coils = surf_coils
-
-# MAIN OPTIMIZATION
-# ---------------------------------------------------------------------------------------
-# Number of iterations to perform:
-MAXITER = args.maxiter
-# boolean for determining whether coil self-intersects
-intersecting = False
-
-# Weight on the curve lengths in the objective function
-# We'll penalize the coil if it becomes longer than an target length of 1.75 m
-LENGTH_WEIGHT = args.length_weight
-LENGTH_TARGET = args.length_target
-
-# Threshold and weight for the coil-to-coil distance penalty
-CC_THRESHOLD = args.cc_threshold
-CC_WEIGHT = args.cc_weight
-
-# Threshold and weight for the coil curvature penalty
-CURVATURE_WEIGHT = args.curvature_weight
-CURVATURE_THRESHOLD = args.curvature_threshold
-
-# Define the individual terms objective function:
-Jf = SquaredFlux(new_surf, new_bs) # penalty on B dot n
-Jls = CurveLength(new_banana_curve) # penalty on curve length
-Jccdist = CurveCurveDistance(new_curves, CC_THRESHOLD) #penalty on coil-to-coil distance
-
-# Changed p-norm of curvature penalty from 2 to 4 to prevent kinks/dents in the coils
-Jc = LpCurveCurvature(new_banana_curve, 4, CURVATURE_THRESHOLD)
-print(f"Initial coil length: {Jls.J():.2f} [m]")
-
-# TOTAL OBJECTIVE FUNCTION -
-# we'll penalize the coil length, coil-coil distance, and curvature while minimizing the normal field
-JF = Jf \
-    + LENGTH_WEIGHT * QuadraticPenalty(Jls, LENGTH_TARGET, "max") \
-    + CC_WEIGHT * Jccdist \
-    + CURVATURE_WEIGHT * Jc
-
-OUT_DIR_ITER = f"{OUT_DIR}R0={R0}-s={s}-LW={LENGTH_WEIGHT}-CCW={CC_WEIGHT}-CW={CURVATURE_WEIGHT}-SR={banana_surf_radius:0.3f}-Order={order}/"
-os.makedirs(OUT_DIR_ITER, exist_ok=True)
-
-# minimize gets called, optimizes based on degrees of freedom from objective function
-dofs = JF.x
-if args.init_only:
-    res_nit = 0
-    print("Skipping Stage 2 optimizer because --init-only was provided.")
-else:
-    res = minimize(fun, dofs, jac=True, method='L-BFGS-B', options={'maxiter': MAXITER, 'maxcor': 300}, tol=1e-15)
-    res_nit = res.nit
-    print(res.message)
+    tf_coils = [Coil(curve,current) for curve, current in zip(tf_curves,tf_currents)]
 
 
-# POST-OPTIMIZATION PROCESSING AND OUTPUTS
-# ---------------------------------------------------------------------------------------
-if is_self_intersecting(new_banana_curve):
-    print("BANANA COIL IS SELF-INTERSECTING!")
-    intersecting = True
+    # INITIALIZATION FOR BANANA COILS
+    # ---------------------------------------------------------------------------------------
+    # Initialize at inboard midplane (theta_center = 0.5) and mirrored over plane of symmetry
+    theta_center = args.theta_center
+    phi_center = args.phi_center
+    theta_width = args.theta_width
+    phi_width = args.phi_width
 
-curves_to_vtk(new_curves, OUT_DIR_ITER + "curves_opt", close=True)
-pointData = {"B_N/B": np.sum(new_bs.B().reshape((nphi, ntheta, 3)) *
-    new_surf.unitnormal(), axis=2)[:, :, None] / np.sqrt(np.sum(new_bs.B().reshape((nphi, ntheta, 3))**2, axis=2))[:, :, None]}
-new_surf.to_vtk(OUT_DIR_ITER + "surf_opt", extra_data=pointData)
-new_surf_coils.to_vtk(OUT_DIR_ITER + "VV")
+    num_quadpoints = 128 # number of quadature points for coils
+    order = args.order # number of Fourier modes for coils
 
-# Create toroidal cross section plot
-crossSectionPlot(new_surf_coils, new_surf, new_banana_curve, OUT_DIR_ITER)
-# Create field error plot
-fieldError = magneticFieldPlots(new_surf, new_bs, OUT_DIR_ITER)
+    R0 = args.major_radius # major radius
+    s = args.toroidal_flux # VMEC flux-surface label
 
-# Save the optimized coil shapes and currents so they can be loaded into other scripts for analysis:
-new_bs.save(OUT_DIR_ITER + "biot_savart_opt.json");
-#new_surf.save(OUT_DIR_ITER + "surf_opt.json");
-print(f'Banana Coil Current / TF Current = {new_banana_coils[0].current.get_value() / new_tf_coils[0].current.get_value():.3f}\n')
+    new_surf = initSurface(R0, s, file_loc, nphi, ntheta)
+    init_coil_array = initializeCoils(new_surf, surf_coils, tf_coils, num_quadpoints, order,
+                                      phi_center, theta_center, phi_width, theta_width, OUT_DIR)
+    new_bs = init_coil_array[0]
+    new_curves = init_coil_array[1]
+    new_banana_curve = init_coil_array[2]
+    new_banana_coils = init_coil_array[3]
+    new_tf_coils = tf_coils
+    new_surf_coils = surf_coils
 
-# Save the results of optimization to a separate file
-results = {
-    "PLASMA_SURF_FILENAME": plasma_surf_filename,
-    "PLASMA_SURF_PATH": file_loc,
-    "CC_THRESHOLD": CC_THRESHOLD,
-    "CC_WEIGHT": CC_WEIGHT,
-    "CURVATURE_WEIGHT": CURVATURE_WEIGHT,
-    "CURVATURE_THRESHOLD": CURVATURE_THRESHOLD,
-    "LENGTH_WEIGHT": LENGTH_WEIGHT,
-    "theta_center": theta_center,
-    "phi_center": phi_center,
-    "theta_width": theta_width,
-    "phi_width": phi_width,
-    "LENGTH_TARGET": LENGTH_TARGET,
-    "MAJOR_RADIUS": R0,
-    "TOROIDAL_FLUX": s,
-    "banana_surf_radius": banana_surf_radius,
-    "order": order,
-    "init_only": args.init_only,
-    "max_iterations": MAXITER,
-    "iterations": res_nit,
-    "FINAL_VOLUME": float(new_surf.volume()),
-    "FIELD_ERROR": float(fieldError),
-    "SELF_INTERSECTING": intersecting,
-    "MAX_CURVATURE": np.max(new_banana_curve.kappa())
-}
-with open(os.path.join(OUT_DIR_ITER, "results.json"), "w") as outfile:
-    json.dump(results, outfile, indent=2)
+    # MAIN OPTIMIZATION
+    # ---------------------------------------------------------------------------------------
+    # Number of iterations to perform:
+    MAXITER = args.maxiter
+    # boolean for determining whether coil self-intersects
+    intersecting = False
+
+    # Weight on the curve lengths in the objective function
+    # We'll penalize the coil if it becomes longer than an target length of 1.75 m
+    LENGTH_WEIGHT = args.length_weight
+    LENGTH_TARGET = args.length_target
+
+    # Threshold and weight for the coil-to-coil distance penalty
+    CC_THRESHOLD = args.cc_threshold
+    CC_WEIGHT = args.cc_weight
+
+    # Threshold and weight for the coil curvature penalty
+    CURVATURE_WEIGHT = args.curvature_weight
+    CURVATURE_THRESHOLD = args.curvature_threshold
+
+    # Define the individual terms objective function:
+    Jf = SquaredFlux(new_surf, new_bs) # penalty on B dot n
+    Jls = CurveLength(new_banana_curve) # penalty on curve length
+    Jccdist = CurveCurveDistance(new_curves, CC_THRESHOLD) #penalty on coil-to-coil distance
+
+    # Changed p-norm of curvature penalty from 2 to 4 to prevent kinks/dents in the coils
+    Jc = LpCurveCurvature(new_banana_curve, 4, CURVATURE_THRESHOLD)
+    print(f"Initial coil length: {Jls.J():.2f} [m]")
+
+    # TOTAL OBJECTIVE FUNCTION -
+    # we'll penalize the coil length, coil-coil distance, and curvature while minimizing the normal field
+    JF = Jf \
+        + LENGTH_WEIGHT * QuadraticPenalty(Jls, LENGTH_TARGET, "max") \
+        + CC_WEIGHT * Jccdist \
+        + CURVATURE_WEIGHT * Jc
+
+    OUT_DIR_ITER = f"{OUT_DIR}R0={R0:g}-s={s:g}-LW={LENGTH_WEIGHT:g}-CCW={CC_WEIGHT:g}-CW={CURVATURE_WEIGHT:g}-SR={banana_surf_radius:0.3f}-Order={order}/"
+    os.makedirs(OUT_DIR_ITER, exist_ok=True)
+
+    # minimize gets called, optimizes based on degrees of freedom from objective function
+    dofs = JF.x
+    fun = make_fun(JF, new_bs, new_surf, Jf, Jls, Jccdist, Jc)
+    if args.init_only:
+        res_nit = 0
+        print("Skipping Stage 2 optimizer because --init-only was provided.")
+    else:
+        res = minimize(fun, dofs, jac=True, method='L-BFGS-B',
+                       options={'maxiter': MAXITER, 'maxcor': 300, 'ftol': args.ftol, 'gtol': args.gtol})
+        res_nit = res.nit
+        print(res.message)
+
+
+    # POST-OPTIMIZATION PROCESSING AND OUTPUTS
+    # ---------------------------------------------------------------------------------------
+    if is_self_intersecting(new_banana_curve):
+        print("BANANA COIL IS SELF-INTERSECTING!")
+        intersecting = True
+
+    curves_to_vtk(new_curves, OUT_DIR_ITER + "curves_opt", close=True)
+    new_bs.set_points(new_surf.gamma().reshape((-1, 3)))
+    unitn = new_surf.unitnormal()
+    pointData = {"B_N/B": np.sum(new_bs.B().reshape(unitn.shape) *
+        unitn, axis=2)[:, :, None] / np.sqrt(np.sum(new_bs.B().reshape(unitn.shape)**2, axis=2))[:, :, None]}
+    new_surf.to_vtk(OUT_DIR_ITER + "surf_opt", extra_data=pointData)
+    VV.to_vtk(OUT_DIR_ITER + "VV")
+
+    # Create toroidal cross section plot
+    crossSectionPlot(new_surf_coils, new_surf, new_banana_curve, OUT_DIR_ITER, hbt, VV)
+    # Create field error plot
+    fieldError = magneticFieldPlots(new_surf, new_bs, OUT_DIR_ITER)
+
+    # Save the optimized coil shapes and currents so they can be loaded into other scripts for analysis:
+    new_bs.save(OUT_DIR_ITER + "biot_savart_opt.json");
+    #new_surf.save(OUT_DIR_ITER + "surf_opt.json");
+    print(f'Banana Coil Current / TF Current = {new_banana_coils[0].current.get_value() / new_tf_coils[0].current.get_value():.3f}\n')
+
+    # Save the results of optimization to a separate file
+    results = {
+        "PLASMA_SURF_FILENAME": plasma_surf_filename,
+        "PLASMA_SURF_PATH": file_loc,
+        "CC_THRESHOLD": CC_THRESHOLD,
+        "CC_WEIGHT": CC_WEIGHT,
+        "CURVATURE_WEIGHT": CURVATURE_WEIGHT,
+        "CURVATURE_THRESHOLD": CURVATURE_THRESHOLD,
+        "LENGTH_WEIGHT": LENGTH_WEIGHT,
+        "theta_center": theta_center,
+        "phi_center": phi_center,
+        "theta_width": theta_width,
+        "phi_width": phi_width,
+        "LENGTH_TARGET": LENGTH_TARGET,
+        "MAJOR_RADIUS": R0,
+        "TOROIDAL_FLUX": s,
+        "banana_surf_radius": banana_surf_radius,
+        "order": order,
+        "init_only": args.init_only,
+        "max_iterations": MAXITER,
+        "iterations": res_nit,
+        "FINAL_VOLUME": float(new_surf.volume()),
+        "FIELD_ERROR": float(fieldError),
+        "SELF_INTERSECTING": intersecting,
+        "MAX_CURVATURE": float(np.max(new_banana_curve.kappa()))
+    }
+    with open(os.path.join(OUT_DIR_ITER, "results.json"), "w") as outfile:
+        json.dump(results, outfile, indent=2)
