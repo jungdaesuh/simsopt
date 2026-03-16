@@ -523,8 +523,9 @@ def fun(x):
 
     Evaluates the total objective function and its gradient for a given set of
     degrees of freedom (coil parameters). Attempts to solve for a valid Boozer
-    surface; if unsuccessful (solver failure or self-intersection), returns the
-    last accepted objective value with negated gradient to reject the step.
+    surface; if unsuccessful (solver failure or self-intersection), returns an
+    elevated objective value with the last accepted gradient to trigger line
+    search backtracking without corrupting the L-BFGS-B Hessian approximation.
 
     Args:
         x: Current degrees of freedom (coil parameters)
@@ -573,8 +574,12 @@ def fun(x):
         if not success2:
             print("Surface is self-intersecting")
 
-        J = run_dict['J']
-        dJ = -run_dict['dJ']
+        # Elevated J violates Armijo, so the line search backtracks.
+        # Returning dJ_old (not negated) avoids the old -dJ corruption path
+        # and produces y_k=0 if the step is ever accepted, safely skipping
+        # the BFGS Hessian update.
+        J = run_dict['J'] + max(abs(run_dict['J']), 1.0)
+        dJ = run_dict['dJ'].copy()
         boozer_surface.surface.x = run_dict['sdofs']
         boozer_surface.res['iota'] = run_dict['iota']
         boozer_surface.res['G'] = run_dict['G']

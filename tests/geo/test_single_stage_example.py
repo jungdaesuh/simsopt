@@ -150,6 +150,77 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertEqual(len(FakeSurfaceXYZTensorFourier.instances), 1)
         self.assertIs(boozer_surface.surface, FakeSurfaceXYZTensorFourier.instances[0])
 
+    def test_fun_fallback_returns_elevated_j_and_same_sign_gradient(self):
+        """Issue #2: failed Boozer must return elevated J + same-sign gradient,
+        not (J_old, -dJ_old)."""
+        module = self.load_module()
+
+        last_J = 42.0
+        last_dJ = np.array([1.0, -2.0, 3.0, -4.0, 5.0])
+
+        class _Surface:
+            x = np.ones(3)
+            def is_self_intersecting(self):
+                return False
+
+        class _BoozerSurface:
+            surface = _Surface()
+            res = {"success": False, "iota": TEST_IOTA, "G": TEST_G0}
+            def run_code(self, iota, G):
+                return self.res
+
+        class _JF:
+            x = np.zeros(5)
+
+        module.run_dict = {
+            "x_prev": np.zeros(5), "lscount": 0,
+            "sdofs": np.ones(3), "iota": TEST_IOTA, "G": TEST_G0,
+            "J": last_J, "dJ": last_dJ.copy(),
+        }
+        module.boozer_surface = _BoozerSurface()
+        module.JF = _JF()
+
+        J_out, dJ_out = module.fun(np.ones(5))
+
+        self.assertGreater(J_out, last_J)
+        np.testing.assert_array_equal(dJ_out, last_dJ)
+        self.assertIsNot(dJ_out, module.run_dict["dJ"])
+
+
+class BoozerFallbackLBFGSBTests(unittest.TestCase):
+    """Issue #2: elevated-J fallback must not flush L-BFGS-B Hessian memory."""
+
+    def test_elevated_j_stale_gradient_preserves_bfgs_memory(self):
+        from scipy.optimize import minimize
+
+        def rosenbrock(x):
+            f = sum(100 * (x[i+1] - x[i]**2)**2 + (1 - x[i])**2
+                    for i in range(len(x) - 1))
+            g = np.zeros_like(x)
+            for i in range(len(x) - 1):
+                g[i] += -400*x[i]*(x[i+1] - x[i]**2) - 2*(1 - x[i])
+                g[i+1] += 200*(x[i+1] - x[i]**2)
+            return f, g
+
+        rng = np.random.RandomState(42)
+        x0 = rng.randn(10) * 0.5
+        state = {"x_good": x0.copy(), "J": None, "dJ": None}
+
+        def fun_with_fallback(x):
+            f, g = rosenbrock(x)
+            if np.linalg.norm(x - state["x_good"]) > 0.5 and state["J"] is not None:
+                return state["J"] + max(abs(state["J"]), 1.0), state["dJ"].copy()
+            state["J"] = f
+            state["dJ"] = g.copy()
+            state["x_good"] = x.copy()
+            return f, g
+
+        res = minimize(fun_with_fallback, x0, jac=True, method="L-BFGS-B",
+                       options={"maxiter": 500, "maxcor": 10})
+
+        self.assertTrue(res.success, f"L-BFGS-B did not converge: {res.message}")
+        self.assertGreater(res.hess_inv.n_corrs, 0)
+
 
 if __name__ == "__main__":
     unittest.main()
