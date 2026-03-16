@@ -501,7 +501,7 @@ def crossSectionPlot(surf_coils, surf, banana_curve, filename):
     plt.plot(rs_vv, zs_vv, label='Vacuum Vessel')
     phi_array = np.linspace(0, 2*np.pi / surf_coils.nfp * 4/5, 5)
     for phi_slice in phi_array:
-        cs = surf.cross_section(phi_slice * 2 * np.pi)
+        cs = surf.cross_section(phi_slice / (2 * np.pi))
         rs = np.sqrt(cs[:,0]**2 + cs[:,1]**2); rs = np.append(rs, rs[0])
         zs = cs[:,2]; zs = np.append(zs, zs[0])
         plt.plot(rs, zs, label=f'Φ={phi_slice/np.pi:0.2f}π')
@@ -632,8 +632,9 @@ def callback(x):
     iota_str = f"{iota.J():.4f}"
     volume_str = f"{boozer_surface.surface.volume():.4f}"
 
-    max_r = np.max(np.sqrt(banana_curve.gamma()[:,0]**2 + banana_curve.gamma()[:,1]**2))
-    max_z = np.max(np.abs(banana_curve.gamma()[:,2]))
+    gamma = banana_curve.gamma()
+    max_r = np.max(np.sqrt(gamma[:,0]**2 + gamma[:,1]**2))
+    max_z = np.max(np.abs(gamma[:,2]))
     max_curvature = np.max(banana_curve.kappa())
     length = curvelength.J()
     curvecurve_min = JCurveCurve.shortest_distance()
@@ -864,8 +865,8 @@ if __name__ == "__main__":
     # RUN OPTIMIZATION
     # ==============================================================================
     # Get convergence tolerances for current mpol
-    ftol = ftol_by_mpol.get(mpol)
-    gtol = gtol_by_mpol.get(mpol)
+    ftol = ftol_by_mpol.get(mpol, 1e-5 if mpol < 8 else 1e-10)
+    gtol = gtol_by_mpol.get(mpol, 1e-2 if mpol < 8 else 1e-7)
 
     if args.init_only:
         res_nit = 0
@@ -934,7 +935,7 @@ if __name__ == "__main__":
         "FINAL_VOLUME": float(final_volume),
         "FINAL_IOTA": float(final_iota),
         "FIELD_ERROR": float(fieldError),
-        "SELF_INTERSECTING": run_dict.get('intersecting', False),
+        "SELF_INTERSECTING": run_dict['intersecting'],
         "MAX_CURVATURE": float(final_max_curvature),
         "INITIAL_VOLUME": float(initial_volume),
         "INITIAL_IOTA": float(initial_iota),

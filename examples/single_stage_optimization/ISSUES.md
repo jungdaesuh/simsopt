@@ -4,11 +4,15 @@ Comprehensive code review covering `banana_coil_solver.py`, `single_stage_banana
 `poincare_surfaces.py`, and associated shell scripts.
 Review date: 2026-03-14.
 
-Candidate local status update: on 2026-03-16, candidate-only fixes for [Issue 1](#1),
-[Issue 2](#2), and [Issue 19](#19) were applied and validated in the local working tree at
-`/Users/suhjungdae/code/columbia/simsopt/examples/single_stage_optimization/SINGLE_STAGE/single_stage_banana_example.py`.
-Issue 2 fix was validated via empirical testing (20D Rosenbrock against scipy L-BFGS-B) and a
-regression test in `tests/geo/test_single_stage_example.py`.
+Candidate local status update: on 2026-03-16, candidate-only fixes were applied and validated
+in the local working tree. **Batch 1:** [Issue 1](#1), [Issue 2](#2), [Issue 3](#3),
+[Issue 4](#4), [Issue 7](#7), and [Issue 19](#19) in
+`single_stage_banana_example.py` and `poincare-plot.sh`. Issue 2 fix validated via empirical
+testing (20D Rosenbrock against scipy L-BFGS-B) and a regression test in
+`tests/geo/test_single_stage_example.py`. **Batch 2:** [Issue 5](#5), [Issue 6](#6) (segment
+distance algorithm rewrite with Sunday/Lumelsky), [Issue 8](#8), [Issue 9](#9) (cross-section
+angle normalization), and [Issue 31](#31) (ftol/gtol None crash) in `banana_coil_solver.py` and
+`single_stage_banana_example.py`. Segment distance fix validated against 8 test cases.
 Unless otherwise noted, the issue descriptions below still describe the pre-fix audit state.
 
 ---
@@ -87,11 +91,11 @@ Checklist meaning:
 - [x] [Issue 2](#2) Negated gradient can corrupt L-BFGS-B Hessian
 - [x] [Issue 3](#3) Swapped Cartesian axes in cylindrical R/Z
 - [x] [Issue 4](#4) `intersecting` never updates
-- [ ] [Issue 5](#5) Segment distance missing re-projection after clamping
-- [ ] [Issue 6](#6) Parallel-segment case incomplete
+- [x] [Issue 5](#5) Segment distance missing re-projection after clamping
+- [x] [Issue 6](#6) Parallel-segment case incomplete
 - [x] [Issue 7](#7) Shell script references wrong Python filename
-- [ ] [Issue 8](#8) Cross-section angle double-scaled
-- [ ] [Issue 9](#9) Cross-section angle double-scaled (duplicate)
+- [x] [Issue 8](#8) Cross-section angle double-scaled
+- [x] [Issue 9](#9) Cross-section angle double-scaled (duplicate)
 - [ ] [Issue 10](#10) VTK export labeled "VV" is actually banana coil surface
 - [ ] [Issue 11](#11) Output dir omits run-defining parameters
 - [ ] [Issue 12](#12) Output dir only encodes `mpol`/`ntor`
@@ -113,7 +117,7 @@ Checklist meaning:
 - [ ] [Issue 28](#28) Unused imports (`Polygon`, `save`, `ScaledCurrent`)
 - [ ] [Issue 29](#29) Unused imports (`SurfaceClassifier`, `LevelsetStoppingCriterion`, `Line2D`)
 - [ ] [Issue 30](#30) `tol=1e-15` is exceptionally strict
-- [ ] [Issue 31](#31) `ftol`/`gtol` returns `None` for out-of-range `mpol`
+- [x] [Issue 31](#31) `ftol`/`gtol` returns `None` for out-of-range `mpol`
 - [ ] [Issue 32](#32) Leaked matplotlib figure
 - [ ] [Issue 33](#33) Y-axis tick labels only hidden for column 1
 - [ ] [Issue 34](#34) Blank subplots for non-square phi count
@@ -306,6 +310,14 @@ validation.
 **Fix:** Implement the full Sunday algorithm with re-projection after each clamp boundary, or
 use a reference implementation.
 
+**Candidate update (2026-03-16):** Fixed locally by rewriting `segment_segment_distance` with
+the full Sunday/Lumelsky algorithm. Changes: (1) degenerate segment handling (zero-length),
+(2) relative parallelism threshold (`PAR_EPS * a * c` instead of absolute `1e-14`),
+(3) near-parallel case checks all four endpoint-to-segment projections,
+(4) general case re-projects the other parameter after each clamp. Validated against 8 test
+cases including both ISSUES.md examples (skew: 1.342 correct vs 1.414 buggy; parallel overlap:
+1.0 correct vs 8.06 buggy).
+
 ---
 
 <a id="6"></a>
@@ -330,6 +342,8 @@ one (`SMALL_NUM * a * c`), making it scale-dependent. Since `denom = a*c*sin^2(t
 **short** non-parallel segments can be falsely flagged as parallel (small `a*c` makes `denom`
 tiny even at significant angles), while **long** near-parallel segments can slip through as
 non-parallel (large `a*c` keeps `denom` above the threshold even at tiny angles).
+
+**Candidate update (2026-03-16):** Fixed together with [Issue 5](#5) in the same rewrite.
 
 ---
 
@@ -379,6 +393,9 @@ Note: The Poincare script (`poincare_surfaces.py:67`) handles this correctly:
 cs = surf.cross_section(phi_slice / (2 * np.pi))
 ```
 
+**Candidate update (2026-03-16):** Fixed locally. Verified against SIMSOPT `Surface.cross_section`
+docstring (phi normalized to [0,1]) and the correct usage in `poincare_surfaces.py:67`.
+
 ---
 
 <a id="9"></a>
@@ -396,6 +413,8 @@ for phi_slice in phi_array:
 ```
 
 **Fix:** Same as Issue 8.
+
+**Candidate update (2026-03-16):** Fixed locally, same change as Issue 8.
 
 ---
 
@@ -850,6 +869,13 @@ guard, so passing `ftol=None` raises `TypeError` at runtime. This is a crash, no
 fallback.
 
 **Fix:** Add a default, e.g. `ftol_by_mpol.get(mpol, 1e-5)`.
+
+**Candidate update (2026-03-16):** Fixed locally with edge-aware defaults:
+`ftol_by_mpol.get(mpol, 1e-5 if mpol < 8 else 1e-10)` and
+`gtol_by_mpol.get(mpol, 1e-2 if mpol < 8 else 1e-7)`. For mpol < 8, uses mpol=8 tolerances
+(most relaxed); for mpol > 18, uses mpol=18 tolerances (most strict). Confirmed scipy
+`_lbfgsb_py.py` divides `ftol` at line 376 (`factr = ftol / np.finfo(float).eps`) — `None`
+causes `TypeError`.
 
 ---
 

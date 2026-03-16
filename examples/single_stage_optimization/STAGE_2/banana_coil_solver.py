@@ -216,36 +216,97 @@ def compute_curve_length(pts):
     return total_length
 
 @njit
+def _clamp01(x):
+    if x < 0.0:
+        return 0.0
+    if x > 1.0:
+        return 1.0
+    return x
+
+@njit
 def segment_segment_distance(P1, P2, Q1, Q2):
+    """
+    Minimum distance between segments P1P2 and Q1Q2.
+    Sunday/Lumelsky algorithm with correct re-projection after clamping
+    and relative parallelism threshold.
+    """
     u = P2 - P1
     v = Q2 - Q1
     w0 = P1 - Q1
 
-    a = np.dot(u, u)
+    a = np.dot(u, u)  # |u|^2
     b = np.dot(u, v)
-    c = np.dot(v, v)
+    c = np.dot(v, v)  # |v|^2
     d = np.dot(u, w0)
     e = np.dot(v, w0)
 
-    denom = a * c - b * b
-    SMALL_NUM = 1e-14
+    ZERO_LEN = 1e-30  # degenerate segment threshold
+    PAR_EPS = 1e-10   # relative parallelism: sin^2(theta) < PAR_EPS
 
-    if denom < SMALL_NUM:
-        s = 0.0
-        t = e / c if c > SMALL_NUM else 0.0
-    else:
-        s = (b * e - c * d) / denom
-        t = (a * e - b * d) / denom
+    # Degenerate: P is a point
+    if a < ZERO_LEN:
+        if c < ZERO_LEN:
+            return np.linalg.norm(w0)
+        return np.linalg.norm(w0 - _clamp01(e / c) * v)
 
-    # scalar-safe clipping
-    s = 0.0 if s < 0.0 else (1.0 if s > 1.0 else s)
-    t = 0.0 if t < 0.0 else (1.0 if t > 1.0 else t)
+    # Degenerate: Q is a point
+    if c < ZERO_LEN:
+        return np.linalg.norm(w0 + _clamp01(-d / a) * u)
 
+    denom = a * c - b * b  # >= 0 by Cauchy-Schwarz
 
-    closest_point_A = P1 + s * u
-    closest_point_B = Q1 + t * v
-    dist = np.linalg.norm(closest_point_A - closest_point_B)
-    return dist
+    if denom < PAR_EPS * a * c:
+        # Near-parallel: check all four endpoint-to-segment projections
+        best_sq = np.inf
+
+        # P1 -> segment Q
+        dp = w0 - _clamp01(e / c) * v
+        dsq = np.dot(dp, dp)
+        if dsq < best_sq:
+            best_sq = dsq
+
+        # P2 -> segment Q
+        dp = w0 + u - _clamp01((e + b) / c) * v
+        dsq = np.dot(dp, dp)
+        if dsq < best_sq:
+            best_sq = dsq
+
+        # Q1 -> segment P
+        dp = w0 + _clamp01(-d / a) * u
+        dsq = np.dot(dp, dp)
+        if dsq < best_sq:
+            best_sq = dsq
+
+        # Q2 -> segment P
+        dp = w0 + _clamp01((b - d) / a) * u - v
+        dsq = np.dot(dp, dp)
+        if dsq < best_sq:
+            best_sq = dsq
+
+        return np.sqrt(best_sq)
+
+    # General case: unclamped line-line closest-point parameters
+    sc = (b * e - c * d) / denom
+    tc = (a * e - b * d) / denom
+
+    # Clamp s and re-project t
+    if sc < 0.0:
+        sc = 0.0
+        tc = e / c
+    elif sc > 1.0:
+        sc = 1.0
+        tc = (e + b) / c
+
+    # Clamp t and re-project s
+    if tc < 0.0:
+        tc = 0.0
+        sc = _clamp01(-d / a)
+    elif tc > 1.0:
+        tc = 1.0
+        sc = _clamp01((b - d) / a)
+
+    dp = w0 + sc * u - tc * v
+    return np.sqrt(np.dot(dp, dp))
 
 @njit
 def check_all_pairs(segments, tol, neighbor_skip):
@@ -359,7 +420,7 @@ def crossSectionPlot(surf_coils, surf, banana_curve, OUT_DIR_ITER):
     plt.plot(rs_vv, zs_vv, label='Vacuum Vessel')
     phi_array = np.linspace(0, 2*np.pi / surf_coils.nfp * 4/5, 5)
     for phi_slice in phi_array:
-        cs = surf.cross_section(phi_slice * 2 * np.pi)
+        cs = surf.cross_section(phi_slice / (2 * np.pi))
         rs = np.sqrt(cs[:,0]**2 + cs[:,1]**2); rs = np.append(rs, rs[0])
         zs = cs[:,2]; zs = np.append(zs, zs[0])
         plt.plot(rs, zs, label=f'Φ={phi_slice/np.pi:0.2f}π')
