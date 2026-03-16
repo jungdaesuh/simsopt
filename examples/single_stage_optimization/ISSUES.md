@@ -82,7 +82,7 @@ Unless otherwise noted, the issue descriptions below still describe the pre-fix 
 | [9](#9)  | M | single_stage | ~~493-495~~ | ~~Cross-section angle double-scaled (duplicate)~~ :white_check_mark: |
 | [10](#10) | M | banana_coil | ~~524~~ | ~~VTK export labeled "VV" is actually banana coil surface~~ :white_check_mark: |
 | [11](#11) | M | banana_coil | ~~500~~ | ~~Output dir omits run-defining parameters~~ :white_check_mark: |
-| [12](#12) | M | single_stage | 755 | Output dir only encodes mpol/ntor (deferred — results.json captures all) |
+| [12](#12) | M | single_stage | ~~755~~ | ~~Output dir only encodes mpol/ntor~~ :white_check_mark: (results.json enriched) |
 | [13](#13) | M | banana_coil | ~~170-178~~ | ~~`initSurface` depends on globals `file_loc`, `nphi`, `ntheta`~~ :white_check_mark: |
 | [14](#14) | M | banana_coil | ~~180-201~~ | ~~`initializeCoils(surf)` ignores its argument for coil placement~~ :white_check_mark: |
 | [15](#15) | M | single_stage | ~~464~~ | ~~`normPlot` reshapes using global `nphi`/`ntheta`~~ :white_check_mark: |
@@ -108,6 +108,7 @@ Unless otherwise noted, the issue descriptions below still describe the pre-fix 
 | [35](#35) | L | shell | ~~various~~ | ~~Shell scripts hardcoded to `~/simsopt/` and `conda activate simsopt`~~ :white_check_mark: |
 | [36](#36) | L | banana_coil | ~~377-388~~ | ~~`fun()` closes over many globals~~ :white_check_mark: (factory pattern + banana coil R-Z plot) |
 | [37](#37) | -- | banana_coil | 81 | ~~Default `s=0.24` is an interior VMEC surface~~ (intentional) |
+| [38](#38) | M | cross-file | -- | No direct coil-to-vessel clearance constraint in either stage (discovered via #25/#26 audit) |
 
 ---
 
@@ -129,7 +130,7 @@ Checklist meaning:
 - [x] [Issue 9](#9) Cross-section angle double-scaled (duplicate)
 - [x] [Issue 10](#10) VTK export labeled "VV" is actually banana coil surface
 - [x] [Issue 11](#11) Output dir now includes CC_THRESHOLD and CURVATURE_THRESHOLD
-- [ ] [Issue 12](#12) Output dir only encodes `mpol`/`ntor` (won't-fix — results.json captures all)
+- [x] [Issue 12](#12) Output dir encodes mpol/ntor; results.json now captures all run identity fields
 - [x] [Issue 13](#13) `initSurface` depends on globals
 - [x] [Issue 14](#14) `initializeCoils(surf)` ignores its argument
 - [x] [Issue 15](#15) `normPlot` reshapes using global `nphi`/`ntheta`
@@ -155,6 +156,7 @@ Checklist meaning:
 - [x] [Issue 35](#35) Shell scripts hardcoded to `~/simsopt/` and `conda activate simsopt`
 - [x] [Issue 36](#36) `fun()` closes over many globals (factory pattern; banana coil R-Z projection implemented)
 - [x] [Issue 37](#37) Default `s=0.24` is an interior VMEC surface (closed, intentional)
+- [ ] [Issue 38](#38) No direct coil-to-vessel clearance constraint in either stage
 
 ---
 
@@ -795,6 +797,22 @@ hbt_poly = Polygon(zip(rs3, zs3))  # created but never used
 
 The `shapely.geometry.Polygon` import (line 18) exists solely for this dead variable.
 
+**Post-removal note:** This was likely the start of an unfinished containment/clearance check.
+The feature was never wired into behavior, and a 2D polygon test is the wrong approach — the
+proper tool is `CurveSurfaceDistance` (3D coil-to-surface minimum distance penalty).
+
+**Gap analysis (verified against code and literature):** Neither Stage 2 nor single-stage
+currently enforces a direct **coil-to-vessel** clearance constraint. The existing constraints
+are: coil-to-coil (`CurveCurveDistance`), coil-to-plasma (`CurveSurfaceDistance` in
+single-stage only), and plasma-to-vessel (`SurfaceSurfaceDistance` in single-stage only).
+The CWS parameterization provides an implicit 2mm coil-to-vessel gap (banana surface
+a=0.22 vs VV a=0.222), but this is a geometric coincidence of the default parameters, not
+an enforced engineering constraint. The Baillod 2025 CSX paper (Nucl. Fusion 65 026046)
+uses an explicit coil-to-wall term `wcw` with threshold `dcw=0.08m`. If a direct
+coil-to-vessel penalty is needed for the HBT workflow, it would require adding
+`CurveSurfaceDistance(new_curves, VV, CV_THRESHOLD)` to the objective — see
+`examples/2_Intermediate/stage_two_optimization.py` for the reference pattern.
+
 ---
 
 <a id="26"></a>
@@ -808,6 +826,7 @@ hbt_poly = Polygon(zip(rs3, zs3))  # created but never used
 ```
 
 The `shapely.geometry.Polygon` import (line 6) exists solely for this dead variable.
+See [Issue 25](#25) post-removal note for context on the likely original intent.
 
 ---
 
@@ -1028,6 +1047,43 @@ coil optimization more commonly targets the LCFS (`s=1.0`), this default appears
 the HBT-hybrid workflow, as the same value is used consistently in the default seed table
 (`DEFAULT_STAGE2_SEEDS_BY_PLASMA`) and across both Stage 2 and single-stage scripts. Not a bug,
 but the choice could benefit from a code comment explaining the rationale.
+
+---
+
+<a id="38"></a>
+### 38. [M] No direct coil-to-vessel clearance constraint in either stage
+
+**Files:** `banana_coil_solver.py`, `single_stage_banana_example.py`
+
+**Validation status:** Latent / design. Not a runtime failure, but a missing engineering
+constraint that could produce physically unbuildable coil configurations.
+
+**Discovery path:** Issues #25/#26 removed a dead `hbt_poly = Polygon(...)` variable from
+`crossSectionPlot`. Audit of whether this was an intended feature revealed it was likely the
+start of an unfinished 2D containment check. Investigating the proper 3D replacement
+(`CurveSurfaceDistance`) led to the discovery that neither stage enforces coil-to-vessel
+clearance — a real engineering constraint per Baillod 2025 (Nucl. Fusion 65 026046,
+`dcw = 0.08 m` for CSX).
+
+Neither Stage 2 nor single-stage enforces a direct coil-to-vessel minimum distance.
+The existing distance constraints are:
+
+| Constraint | Type | Stage 2 | Single-stage |
+|---|---|---|---|
+| `CurveCurveDistance` | coil-to-coil | Yes (0.05 m) | Yes (0.05 m) |
+| `CurveSurfaceDistance` | coil-to-plasma | No | Yes (0.02 m) |
+| `SurfaceSurfaceDistance` | plasma-to-vessel | No | Yes (0.04 m) |
+| **coil-to-vessel** | **missing** | **No** | **No** |
+
+The CWS parameterization provides an implicit 2 mm coil-to-vessel gap in the default
+geometry (`surf_coils` a=0.22 vs `VV` a=0.222), but this is a coincidence of the default
+parameters, not an enforced threshold. For comparison, the CSX project (Baillod 2025,
+Nucl. Fusion 65 026046) uses an explicit coil-to-wall penalty with threshold `dcw = 0.08 m`.
+
+**Potential fix:** Add `CurveSurfaceDistance(curves, VV, CV_THRESHOLD)` to the objective in
+one or both stages. The threshold value should be determined by the hardware team based on
+HBT port access, assembly clearance, and finite-build coil width requirements. See
+`examples/2_Intermediate/stage_two_optimization.py` for the reference implementation pattern.
 
 ---
 
