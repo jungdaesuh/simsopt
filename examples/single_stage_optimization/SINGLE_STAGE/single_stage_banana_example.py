@@ -413,7 +413,7 @@ def initialize_boozer_surface(surf_prev, mpol, ntor, bs, vol_target, constraint_
           )
     surf.least_squares_fit(surf_prev.gamma())
 
-    if constraint_weight:
+    if constraint_weight is not None:
         # Boozer least square approach
         print("Generating Boozer least squares surface...")
         vol = Volume(surf)

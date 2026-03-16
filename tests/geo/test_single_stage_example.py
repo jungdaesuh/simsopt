@@ -17,6 +17,11 @@ EXAMPLE_MODULE_PATH = (
     / "SINGLE_STAGE"
     / "single_stage_banana_example.py"
 )
+TEST_MPOL = 8
+TEST_NTOR = 6
+TEST_VOL_TARGET = 0.1
+TEST_IOTA = 0.15
+TEST_G0 = 1.0
 
 
 def load_single_stage_example_module():
@@ -93,41 +98,57 @@ class FakeBoozerSurface:
 
 
 class SingleStageExampleTests(unittest.TestCase):
+    def setUp(self):
+        FakeSurfaceXYZTensorFourier.instances = []
+
+    def load_module(self):
+        return load_single_stage_example_module()
+
+    def initialize_boozer_surface(self, module, surf_prev, *, constraint_weight):
+        with patch.object(module, "SurfaceXYZTensorFourier", FakeSurfaceXYZTensorFourier), patch.object(
+            module, "Volume", FakeVolume
+        ), patch.object(module, "BoozerSurface", FakeBoozerSurface):
+            return module.initialize_boozer_surface(
+                surf_prev,
+                mpol=TEST_MPOL,
+                ntor=TEST_NTOR,
+                bs=object(),
+                vol_target=TEST_VOL_TARGET,
+                constraint_weight=constraint_weight,
+                iota=TEST_IOTA,
+                G0=TEST_G0,
+            )
+
     def test_exact_boozer_helpers_are_imported(self):
-        module = load_single_stage_example_module()
+        module = self.load_module()
 
         self.assertIs(module.boozer_surface_residual, boozer_surface_residual)
         self.assertIs(module.boozer_surface_residual_dB, boozer_surface_residual_dB)
         self.assertIs(module.forward_backward, forward_backward)
 
     def test_initialize_boozer_surface_exact_uses_ntor_phi_quadrature(self):
-        module = load_single_stage_example_module()
+        module = self.load_module()
         surf_prev = FakeSurfPrev()
-        FakeSurfaceXYZTensorFourier.instances = []
-
-        with patch.object(module, "SurfaceXYZTensorFourier", FakeSurfaceXYZTensorFourier), patch.object(
-            module, "Volume", FakeVolume
-        ), patch.object(module, "BoozerSurface", FakeBoozerSurface):
-            boozer_surface = module.initialize_boozer_surface(
-                surf_prev,
-                mpol=8,
-                ntor=6,
-                bs=object(),
-                vol_target=0.1,
-                constraint_weight=None,
-                iota=0.15,
-                G0=1.0,
-            )
+        boozer_surface = self.initialize_boozer_surface(module, surf_prev, constraint_weight=None)
 
         self.assertIsInstance(boozer_surface, FakeBoozerSurface)
         self.assertEqual(len(FakeSurfaceXYZTensorFourier.instances), 2)
 
         exact_surface = FakeSurfaceXYZTensorFourier.instances[1]
-        expected_phi = np.linspace(0, 1 / surf_prev.nfp, 2 * 6 + 1, endpoint=False)
+        expected_phi = np.linspace(0, 1 / surf_prev.nfp, 2 * TEST_NTOR + 1, endpoint=False)
 
-        self.assertEqual(exact_surface.quadpoints_theta.size, 2 * 8 + 1)
-        self.assertEqual(exact_surface.quadpoints_phi.size, 2 * 6 + 1)
+        self.assertEqual(exact_surface.quadpoints_theta.size, 2 * TEST_MPOL + 1)
+        self.assertEqual(exact_surface.quadpoints_phi.size, 2 * TEST_NTOR + 1)
         np.testing.assert_allclose(exact_surface.quadpoints_phi, expected_phi)
+
+    def test_initialize_boozer_surface_zero_constraint_weight_keeps_least_squares_path(self):
+        module = self.load_module()
+        surf_prev = FakeSurfPrev()
+        boozer_surface = self.initialize_boozer_surface(module, surf_prev, constraint_weight=0.0)
+
+        self.assertIsInstance(boozer_surface, FakeBoozerSurface)
+        self.assertEqual(len(FakeSurfaceXYZTensorFourier.instances), 1)
+        self.assertIs(boozer_surface.surface, FakeSurfaceXYZTensorFourier.instances[0])
 
 
 if __name__ == "__main__":
