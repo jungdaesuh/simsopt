@@ -30,4 +30,4 @@ export OPENBLAS_NUM_THREADS=$SLURM_CPUS_PER_TASK
 cd ~/simsopt/examples/single_stage_optimization/POINCARE_PLOTTING
 
 # Run the simulation
-python3 poincare-surfaces.py
+python3 poincare_surfaces.py

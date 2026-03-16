@@ -632,15 +632,15 @@ def callback(x):
     iota_str = f"{iota.J():.4f}"
     volume_str = f"{boozer_surface.surface.volume():.4f}"
 
-    max_r = np.max(np.sqrt(banana_curve.gamma()[:,1]**2 + banana_curve.gamma()[:,2]**2))
-    max_z = np.max(np.abs(banana_curve.gamma()[:,0]))
+    max_r = np.max(np.sqrt(banana_curve.gamma()[:,0]**2 + banana_curve.gamma()[:,1]**2))
+    max_z = np.max(np.abs(banana_curve.gamma()[:,2]))
     max_curvature = np.max(banana_curve.kappa())
     length = curvelength.J()
     curvecurve_min = JCurveCurve.shortest_distance()
     curvesurf_min = JCurveSurface.shortest_distance()
 
     BdotN = np.mean(np.abs(np.sum(bs.B().reshape((nphi, ntheta, 3)) * boozer_surface.surface.unitnormal(), axis=2)))
-    intersecting = boozer_surface.surface.is_self_intersecting()
+    run_dict['intersecting'] = boozer_surface.surface.is_self_intersecting()
 
     width = 35
     buffer = io.StringIO()
@@ -660,7 +660,7 @@ def callback(x):
     print(f"{'Curvature Penalty':{width}} = {J_curvature:.6e} (dJ = {dJ_curvature:.6e})", file=buffer) 
     print(f"{'⟨|B·n|⟩':{width}} = {BdotN:.6e}", file=buffer)
 
-    print(f"{'Intersecting':{width}} = {intersecting}", file=buffer)
+    print(f"{'Intersecting':{width}} = {run_dict['intersecting']}", file=buffer)
     print(f"{'Max Curve R':{width}} = {max_r:.6e}", file=buffer)
     print(f"{'Max Curve Z':{width}} = {max_z:.6e}", file=buffer)
     print(f"{'Max Curvature':{width}} = {max_curvature:.6e}", file=buffer)
@@ -793,7 +793,6 @@ if __name__ == "__main__":
     initial_volume = boozer_surface.surface.volume()
     initial_iota = Iotas(boozer_surface).J()
     initial_max_curvature = np.max(banana_curve.kappa())
-    intersecting = False
 
     # ==============================================================================
     # DEFINE OBJECTIVE FUNCTION COMPONENTS
@@ -857,7 +856,8 @@ if __name__ == "__main__":
         'dJ': JF.dJ().copy(),
         'it': 1,
         'lscount': 0,
-        'x_prev': dofs.copy()
+        'x_prev': dofs.copy(),
+        'intersecting': False,
     }
 
     # ==============================================================================
@@ -934,7 +934,7 @@ if __name__ == "__main__":
         "FINAL_VOLUME": float(final_volume),
         "FINAL_IOTA": float(final_iota),
         "FIELD_ERROR": float(fieldError),
-        "SELF_INTERSECTING": intersecting,
+        "SELF_INTERSECTING": run_dict.get('intersecting', False),
         "MAX_CURVATURE": float(final_max_curvature),
         "INITIAL_VOLUME": float(initial_volume),
         "INITIAL_IOTA": float(initial_iota),

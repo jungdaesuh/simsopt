@@ -85,11 +85,11 @@ Checklist meaning:
 
 - [x] [Issue 1](#1) Missing imports crash `--boozer-stage final`
 - [x] [Issue 2](#2) Negated gradient can corrupt L-BFGS-B Hessian
-- [ ] [Issue 3](#3) Swapped Cartesian axes in cylindrical R/Z
-- [ ] [Issue 4](#4) `intersecting` never updates
+- [x] [Issue 3](#3) Swapped Cartesian axes in cylindrical R/Z
+- [x] [Issue 4](#4) `intersecting` never updates
 - [ ] [Issue 5](#5) Segment distance missing re-projection after clamping
 - [ ] [Issue 6](#6) Parallel-segment case incomplete
-- [ ] [Issue 7](#7) Shell script references wrong Python filename
+- [x] [Issue 7](#7) Shell script references wrong Python filename
 - [ ] [Issue 8](#8) Cross-section angle double-scaled
 - [ ] [Issue 9](#9) Cross-section angle double-scaled (duplicate)
 - [ ] [Issue 10](#10) VTK export labeled "VV" is actually banana coil surface
