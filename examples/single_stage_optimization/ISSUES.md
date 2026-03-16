@@ -21,6 +21,14 @@ assertions). `ftol_by_mpol`/`gtol_by_mpol` moved to module scope for testability
 [Issue 27](#27), [Issue 28](#28), [Issue 29](#29) (unused imports) in
 `banana_coil_solver.py`, `single_stage_banana_example.py`, and `poincare_surfaces.py`.
 Pure deletion of dead code and unused imports; validated via `py_compile` and reviewer agent.
+**Batch 4:** Near-parallel interior minimum fix for `segment_segment_distance` in
+`banana_coil_solver.py`. The near-parallel branch (denom < PAR_EPS * a * c) previously only
+checked 4 endpoint projections, missing interior minima where both parameters are in (0,1).
+Added an interior check using the general-case formula — well-conditioned when the true minimum
+is interior because numerators scale with the small denominator. Validated against 50K adversarial
+near-parallel pairs (0 failures). Two new regression tests added to
+`tests/geo/test_single_stage_example.py`: deterministic adversarial case (9x overestimate
+before fix) and 1000-pair near-parallel brute-force.
 Unless otherwise noted, the issue descriptions below still describe the pre-fix audit state.
 
 ---
@@ -48,15 +56,15 @@ Unless otherwise noted, the issue descriptions below still describe the pre-fix 
 
 | # | Sev | File | Lines | Short Title |
 |---|-----|------|-------|-------------|
-| [1](#1)  | C | single_stage | 346, 364, 379 | Missing imports crash `--boozer-stage final` |
-| [2](#2)  | C | single_stage | 567-568 | Negated gradient can corrupt L-BFGS-B Hessian |
-| [3](#3)  | C | single_stage | 621-622 | Swapped Cartesian axes in cylindrical R/Z |
-| [4](#4)  | C | single_stage | 629, 781, 922 | `intersecting` never updates (Python scope) |
-| [5](#5)  | C | banana_coil | 240-242 | Segment distance missing re-projection after clamping |
-| [6](#6)  | C | banana_coil | 233-235 | Parallel-segment case incomplete |
-| [7](#7)  | C | poincare sh | 33 | Shell script references wrong Python filename |
-| [8](#8)  | M | banana_coil | 360-362 | Cross-section angle double-scaled |
-| [9](#9)  | M | single_stage | 493-495 | Cross-section angle double-scaled (duplicate) |
+| [1](#1)  | C | single_stage | ~~346, 364, 379~~ | ~~Missing imports crash `--boozer-stage final`~~ :white_check_mark: |
+| [2](#2)  | C | single_stage | ~~567-568~~ | ~~Negated gradient can corrupt L-BFGS-B Hessian~~ :white_check_mark: |
+| [3](#3)  | C | single_stage | ~~621-622~~ | ~~Swapped Cartesian axes in cylindrical R/Z~~ :white_check_mark: |
+| [4](#4)  | C | single_stage | ~~629, 781, 922~~ | ~~`intersecting` never updates (Python scope)~~ :white_check_mark: |
+| [5](#5)  | C | banana_coil | ~~240-242~~ | ~~Segment distance missing re-projection after clamping~~ :white_check_mark: |
+| [6](#6)  | C | banana_coil | ~~233-235~~ | ~~Parallel-segment case incomplete~~ :white_check_mark: |
+| [7](#7)  | C | poincare sh | ~~33~~ | ~~Shell script references wrong Python filename~~ :white_check_mark: |
+| [8](#8)  | M | banana_coil | ~~360-362~~ | ~~Cross-section angle double-scaled~~ :white_check_mark: |
+| [9](#9)  | M | single_stage | ~~493-495~~ | ~~Cross-section angle double-scaled (duplicate)~~ :white_check_mark: |
 | [10](#10) | M | banana_coil | 524 | VTK export labeled "VV" is actually banana coil surface |
 | [11](#11) | M | banana_coil | 500 | Output dir omits run-defining parameters |
 | [12](#12) | M | single_stage | 755 | Output dir only encodes mpol/ntor |
@@ -66,7 +74,7 @@ Unless otherwise noted, the issue descriptions below still describe the pre-fix 
 | [16](#16) | M | banana_coil | 317 | `magneticFieldPlots` reshapes using global `nphi`/`ntheta` |
 | [17](#17) | M | banana_coil | 182 | Quadrature includes duplicate endpoint |
 | [18](#18) | -- | single_stage | 300-301 | ~~`BoozerResidualExact` hardcodes `constraint_weight=0`~~ (by design) |
-| [19](#19) | C | single_stage | 417-418 | Exact Boozer quadpoints use `mpol` for phi -- throws for `mpol != ntor` |
+| [19](#19) | C | single_stage | ~~417-418~~ | ~~Exact Boozer quadpoints use `mpol` for phi -- throws for `mpol != ntor`~~ :white_check_mark: |
 | [20](#20) | -- | single_stage | 594-595 | ~~`callback` re-calls JF.J()/JF.dJ()~~ (cache-safe) |
 | [21](#21) | M | single_stage | 769-770 | `bs.B()` reshape assumes nphi*ntheta before `set_points` |
 | [22](#22) | M | poincare | 94 | Hardcoded relative `OUT_DIR` |
@@ -78,7 +86,7 @@ Unless otherwise noted, the issue descriptions below still describe the pre-fix 
 | [28](#28) | L | single_stage | ~~6, 16, 17~~ | ~~Unused imports (`Polygon`, `save`, `ScaledCurrent`)~~ :white_check_mark: |
 | [29](#29) | L | poincare | ~~4-5, 9~~ | ~~Unused imports (`SurfaceClassifier`, `LevelsetStoppingCriterion`, `Line2D`)~~ :white_check_mark: |
 | [30](#30) | L | banana_coil | 509 | `tol=1e-15` is exceptionally strict |
-| [31](#31) | L | single_stage | 852-853 | `ftol`/`gtol` returns `None` for out-of-range `mpol` (crashes) |
+| [31](#31) | L | single_stage | ~~852-853~~ | ~~`ftol`/`gtol` returns `None` for out-of-range `mpol` (crashes)~~ :white_check_mark: |
 | [32](#32) | L | poincare | 30-31 | Leaked matplotlib figure |
 | [33](#33) | L | poincare | 47 | Y-axis tick labels only hidden for column 1 (conditional) |
 | [34](#34) | L | poincare | 29 | Blank subplots for non-square phi count (conditional) |
@@ -119,11 +127,11 @@ Checklist meaning:
 - [ ] [Issue 22](#22) Hardcoded relative `OUT_DIR`
 - [ ] [Issue 23](#23) Duplicated `crossSectionPlot`/`normPlot`
 - [ ] [Issue 24](#24) No `if __name__ == "__main__"` guard in any script
-- [ ] [Issue 25](#25) Dead `hbt_poly` variable
-- [ ] [Issue 26](#26) Dead `hbt_poly` variable (duplicate)
-- [ ] [Issue 27](#27) Unused imports
-- [ ] [Issue 28](#28) Unused imports (`Polygon`, `save`, `ScaledCurrent`)
-- [ ] [Issue 29](#29) Unused imports (`SurfaceClassifier`, `LevelsetStoppingCriterion`, `Line2D`)
+- [x] [Issue 25](#25) Dead `hbt_poly` variable
+- [x] [Issue 26](#26) Dead `hbt_poly` variable (duplicate)
+- [x] [Issue 27](#27) Unused imports
+- [x] [Issue 28](#28) Unused imports (`Polygon`, `save`, `ScaledCurrent`)
+- [x] [Issue 29](#29) Unused imports (`SurfaceClassifier`, `LevelsetStoppingCriterion`, `Line2D`)
 - [ ] [Issue 30](#30) `tol=1e-15` is exceptionally strict
 - [x] [Issue 31](#31) `ftol`/`gtol` returns `None` for out-of-range `mpol`
 - [ ] [Issue 32](#32) Leaked matplotlib figure

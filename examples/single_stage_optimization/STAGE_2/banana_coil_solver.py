@@ -276,6 +276,17 @@ def segment_segment_distance(P1, P2, Q1, Q2):
         if dsq < best_sq:
             best_sq = dsq
 
+        # Interior check: when the true minimum is interior, numerators
+        # scale with denom so the division is well-conditioned.
+        if denom > 0.0:
+            sc_int = (b * e - c * d) / denom
+            tc_int = (a * e - b * d) / denom
+            if 0.0 <= sc_int <= 1.0 and 0.0 <= tc_int <= 1.0:
+                dp = w0 + sc_int * u - tc_int * v
+                dsq = np.dot(dp, dp)
+                if dsq < best_sq:
+                    best_sq = dsq
+
         return np.sqrt(best_sq)
 
     # General case: unclamped line-line closest-point parameters

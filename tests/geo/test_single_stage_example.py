@@ -257,6 +257,30 @@ def _load_segment_distance_from_source():
 _segment_segment_distance = _load_segment_distance_from_source()
 
 
+def _brute_force_segment_distance(P1, P2, Q1, Q2):
+    """Reference distance via interior + 4 edge candidates on [0,1]^2."""
+    u, v, w0 = P2 - P1, Q2 - Q1, P1 - Q1
+    a, bv, c = np.dot(u, u), np.dot(u, v), np.dot(v, v)
+    d_val, e = np.dot(u, w0), np.dot(v, w0)
+    cands = []
+    denom = a * c - bv * bv
+    if denom > 1e-30:
+        sn = (bv * e - c * d_val) / denom
+        tn = (a * e - bv * d_val) / denom
+        if 0.0 <= sn <= 1.0 and 0.0 <= tn <= 1.0:
+            dp = w0 + sn * u - tn * v
+            cands.append(np.dot(dp, dp))
+    for sf in [0.0, 1.0]:
+        to = max(0.0, min(1.0, (e + sf * bv) / c)) if c > 1e-30 else 0.0
+        dp = w0 + sf * u - to * v
+        cands.append(np.dot(dp, dp))
+    for tf in [0.0, 1.0]:
+        so = max(0.0, min(1.0, (tf * bv - d_val) / a)) if a > 1e-30 else 0.0
+        dp = w0 + so * u - tf * v
+        cands.append(np.dot(dp, dp))
+    return np.sqrt(min(cands))
+
+
 class SegmentDistanceTests(unittest.TestCase):
     """Issue #5/#6: segment-segment distance with Sunday/Lumelsky re-projection."""
 
@@ -300,36 +324,54 @@ class SegmentDistanceTests(unittest.TestCase):
         d = self._d([1, 2, 3], [1, 2, 3], [4, 5, 6], [4, 5, 6])
         self.assertAlmostEqual(d, np.linalg.norm([3, 3, 3]), places=10)
 
+    def test_near_parallel_interior_minimum(self):
+        """Near-parallel segments where the true minimum is at an interior point.
+
+        P along x-axis, Q nearly parallel with tiny z-tilt and small y-offset.
+        Endpoint projections all return sqrt(d^2 + eps^2) but the true minimum
+        at (s=0.5, t=0.5) is just d (z components cancel at the midpoint).
+        """
+        eps = 9e-6
+        d_offset = 1e-6
+        d = self._d([-1, 0, 0], [1, 0, 0], [-1, d_offset, -eps], [1, d_offset, eps])
+        self.assertAlmostEqual(d, d_offset, places=10)
+
+    def test_near_parallel_brute_force(self):
+        """Stress-test the near-parallel branch with 1000 adversarial pairs."""
+        rng = np.random.RandomState(77777)
+        PAR_EPS = 1e-10
+        n_parallel = 0
+        for _ in range(1000):
+            base = rng.randn(3)
+            base /= np.linalg.norm(base)
+            P1 = rng.randn(3)
+            P2 = P1 + rng.uniform(0.5, 5.0) * base
+            angle = rng.uniform(1e-7, 1e-5)
+            perp = rng.randn(3)
+            perp -= np.dot(perp, base) * base
+            perp /= np.linalg.norm(perp)
+            q_dir = base + angle * perp
+            q_dir /= np.linalg.norm(q_dir)
+            Q1 = P1 + rng.randn(3) * rng.uniform(1e-7, 1e-4)
+            Q2 = Q1 + rng.uniform(0.5, 5.0) * q_dir
+            u, v, w0 = P2 - P1, Q2 - Q1, P1 - Q1
+            a, bv, c = np.dot(u, u), np.dot(u, v), np.dot(v, v)
+            denom = a * c - bv * bv
+            if denom < PAR_EPS * a * c:
+                n_parallel += 1
+            d_algo = _segment_segment_distance(P1, P2, Q1, Q2)
+            d_brute = _brute_force_segment_distance(P1, P2, Q1, Q2)
+            self.assertAlmostEqual(d_algo, d_brute, places=9,
+                                   msg=f"Near-parallel mismatch: algo={d_algo}, brute={d_brute}")
+        self.assertGreater(n_parallel, 900, "Not enough pairs hit the near-parallel branch")
+
     def test_random_brute_force(self):
         """Verify against exhaustive interior + edge search on 1000 random pairs."""
         rng = np.random.RandomState(12345)
         for _ in range(1000):
             P1, P2, Q1, Q2 = rng.randn(4, 3)
             d_algo = _segment_segment_distance(P1, P2, Q1, Q2)
-            u = P2 - P1
-            v = Q2 - Q1
-            w0 = P1 - Q1
-            a, bv, c = np.dot(u, u), np.dot(u, v), np.dot(v, v)
-            d_val, e = np.dot(u, w0), np.dot(v, w0)
-            cands = []
-            # Interior (unclamped line-line solution)
-            denom = a * c - bv * bv
-            if denom > 1e-30:
-                sn = (bv * e - c * d_val) / denom
-                tn = (a * e - bv * d_val) / denom
-                if 0.0 <= sn <= 1.0 and 0.0 <= tn <= 1.0:
-                    dp = w0 + sn * u - tn * v
-                    cands.append(np.dot(dp, dp))
-            # Four edge optima
-            for sf in [0.0, 1.0]:
-                to = max(0.0, min(1.0, (e + sf * bv) / c)) if c > 1e-30 else 0.0
-                dp = w0 + sf * u - to * v
-                cands.append(np.dot(dp, dp))
-            for tf in [0.0, 1.0]:
-                so = max(0.0, min(1.0, (tf * bv - d_val) / a)) if a > 1e-30 else 0.0
-                dp = w0 + so * u - tf * v
-                cands.append(np.dot(dp, dp))
-            d_brute = np.sqrt(min(cands))
+            d_brute = _brute_force_segment_distance(P1, P2, Q1, Q2)
             self.assertAlmostEqual(d_algo, d_brute, places=9,
                                    msg=f"Mismatch: algo={d_algo}, brute={d_brute}")
 
