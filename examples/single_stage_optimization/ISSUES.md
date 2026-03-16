@@ -39,9 +39,11 @@ in `banana_coil_solver.py`, `single_stage_banana_example.py`, and `poincare_surf
 All reshape operations now derive dimensions from the surface instead of global `nphi`/`ntheta`.
 Validated via `py_compile` and reviewer agent (2 rounds).
 **Batch 6:** [Issue 24](#24) (`__name__` guards added to `banana_coil_solver.py` and `poincare_surfaces.py`),
-[Issue 35](#35) (shell scripts use configurable `SIMSOPT_ROOT` variable).
+[Issue 35](#35) (shell scripts use configurable `SIMSOPT_ROOT` and `CONDA_ENV` variables).
 Stage 2 output directory float formatting aligned with single-stage lookup pattern (`:g` format).
-Bonus fix: `success1` pre-initialized in single-stage `fun()` to prevent `UnboundLocalError`.
+Bonus fixes: `success1` pre-initialized in single-stage `fun()` to prevent `UnboundLocalError`;
+`crossSectionPlot` now plots banana coil R-Z projection (implementing the original author's
+unfinished intent — parameter was passed but never used upstream).
 Unless otherwise noted, the issue descriptions below still describe the pre-fix audit state.
 
 ---
@@ -103,8 +105,8 @@ Unless otherwise noted, the issue descriptions below still describe the pre-fix 
 | [32](#32) | L | poincare | ~~30-31~~ | ~~Leaked matplotlib figure~~ :white_check_mark: |
 | [33](#33) | L | poincare | ~~47~~ | ~~Y-axis tick labels only hidden for column 1~~ :white_check_mark: |
 | [34](#34) | L | poincare | ~~29~~ | ~~Blank subplots for non-square phi count~~ :white_check_mark: |
-| [35](#35) | L | shell | ~~various~~ | ~~Shell scripts hardcoded to `~/simsopt/`~~ :white_check_mark: |
-| [36](#36) | L | banana_coil | ~~377-388~~ | ~~`fun()` closes over many globals~~ :white_check_mark: |
+| [35](#35) | L | shell | ~~various~~ | ~~Shell scripts hardcoded to `~/simsopt/` and `conda activate simsopt`~~ :white_check_mark: |
+| [36](#36) | L | banana_coil | ~~377-388~~ | ~~`fun()` closes over many globals~~ :white_check_mark: (factory pattern + banana coil R-Z plot) |
 | [37](#37) | -- | banana_coil | 81 | ~~Default `s=0.24` is an interior VMEC surface~~ (intentional) |
 
 ---
@@ -150,8 +152,8 @@ Checklist meaning:
 - [x] [Issue 32](#32) Leaked matplotlib figure
 - [x] [Issue 33](#33) Y-axis tick labels only hidden for column 1
 - [x] [Issue 34](#34) Blank subplots for non-square phi count
-- [x] [Issue 35](#35) Shell scripts hardcoded to `~/simsopt/`
-- [x] [Issue 36](#36) `fun()` closes over many globals (factory pattern; all 7 deps explicit)
+- [x] [Issue 35](#35) Shell scripts hardcoded to `~/simsopt/` and `conda activate simsopt`
+- [x] [Issue 36](#36) `fun()` closes over many globals (factory pattern; banana coil R-Z projection implemented)
 - [ ] [Issue 37](#37) Default `s=0.24` is an interior VMEC surface (reviewed, intentional)
 
 ---
