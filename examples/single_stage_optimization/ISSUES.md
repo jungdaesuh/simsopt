@@ -12,7 +12,11 @@ testing (20D Rosenbrock against scipy L-BFGS-B) and a regression test in
 `tests/geo/test_single_stage_example.py`. **Batch 2:** [Issue 5](#5), [Issue 6](#6) (segment
 distance algorithm rewrite with Sunday/Lumelsky), [Issue 8](#8), [Issue 9](#9) (cross-section
 angle normalization), and [Issue 31](#31) (ftol/gtol None crash) in `banana_coil_solver.py` and
-`single_stage_banana_example.py`. Segment distance fix validated against 8 test cases.
+`single_stage_banana_example.py`. Segment distance fix validated against 8 named test cases
+plus 1000-pair random brute-force. All Batch 2 fixes covered by committed regression tests in
+`tests/geo/test_single_stage_example.py` (segment distance tests extract the real deployed
+function via AST; cross-section and ftol/gtol tests use source-level and module-level
+assertions). `ftol_by_mpol`/`gtol_by_mpol` moved to module scope for testability.
 Unless otherwise noted, the issue descriptions below still describe the pre-fix audit state.
 
 ---
@@ -314,9 +318,10 @@ use a reference implementation.
 the full Sunday/Lumelsky algorithm. Changes: (1) degenerate segment handling (zero-length),
 (2) relative parallelism threshold (`PAR_EPS * a * c` instead of absolute `1e-14`),
 (3) near-parallel case checks all four endpoint-to-segment projections,
-(4) general case re-projects the other parameter after each clamp. Validated against 8 test
-cases including both ISSUES.md examples (skew: 1.342 correct vs 1.414 buggy; parallel overlap:
-1.0 correct vs 8.06 buggy).
+(4) general case re-projects the other parameter after each clamp. Committed regression tests
+in `tests/geo/test_single_stage_example.py` extract the real deployed function via AST and
+validate against 8 named cases + 1000-pair random brute-force (interior + edge exhaustive
+search).
 
 ---
 
