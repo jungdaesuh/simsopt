@@ -162,7 +162,7 @@ python single_stage_banana_example.py \
   --vol-target 0.10
 ```
 
-**Outputs** (in `outputs/mpol=X-ntor=Y/`):
+**Outputs** (in `outputs/mpol=X-ntor=Y-<hash>/`, where `<hash>` is a deterministic fingerprint of the run config):
 - `biot_savart_opt.json` - Final optimized magnetic field
 - `surf_opt.json` - Final optimized surface
 - `curves_opt.vtu` - Final coil configurations
@@ -185,11 +185,10 @@ python single_stage_banana_example.py \
 - `nr`, `nphi`, `nz`: Grid resolution for interpolation (default: 20, 10, 10)
 - `degree`: Interpolation degree (default: 3)
 
-**Output directory**: By default, the script reads from
-`SINGLE_STAGE/outputs/mpol=8-ntor=6` (resolved relative to the script location).
-Override with the `POINCARE_OUT_DIR` environment variable:
+**Output directory**: By default, the script auto-selects the most recent
+`SINGLE_STAGE/outputs/mpol=*` run directory. Override with `POINCARE_OUT_DIR`:
 ```bash
-export POINCARE_OUT_DIR=/path/to/single_stage/outputs/mpol=8-ntor=6
+export POINCARE_OUT_DIR=/path/to/single_stage/outputs/mpol=8-ntor=6-abcd1234
 ```
 
 **Run** (the shell script defaults `SIMSOPT_ROOT` to `$HOME/simsopt`; override for non-default checkouts):

@@ -354,7 +354,7 @@ class SegmentDistanceTests(unittest.TestCase):
             q_dir /= np.linalg.norm(q_dir)
             Q1 = P1 + rng.randn(3) * rng.uniform(1e-7, 1e-4)
             Q2 = Q1 + rng.uniform(0.5, 5.0) * q_dir
-            u, v, w0 = P2 - P1, Q2 - Q1, P1 - Q1
+            u, v, _ = P2 - P1, Q2 - Q1, P1 - Q1
             a, bv, c = np.dot(u, u), np.dot(u, v), np.dot(v, v)
             denom = a * c - bv * bv
             if denom < PAR_EPS * a * c:
@@ -379,15 +379,16 @@ class SegmentDistanceTests(unittest.TestCase):
 class CrossSectionNormalizationTests(unittest.TestCase):
     """Issue #8/#9: cross_section phi argument must be normalized to [0,1]."""
 
-    def test_single_stage_source_divides_by_2pi(self):
-        """Verify the deployed source uses phi_slice / (2 * np.pi), not * 2 * np.pi."""
-        source = EXAMPLE_MODULE_PATH.read_text()
-        self.assertIn("phi_slice / (2 * np.pi)", source)
-        self.assertNotIn("phi_slice * 2 * np.pi", source)
+    PLOTTING_UTILS_PATH = (
+        Path(__file__).resolve().parents[2]
+        / "examples"
+        / "single_stage_optimization"
+        / "plotting_utils.py"
+    )
 
-    def test_stage2_source_divides_by_2pi(self):
-        """Verify banana_coil_solver.py source uses the correct normalization."""
-        source = STAGE2_MODULE_PATH.read_text()
+    def test_plotting_utils_source_divides_by_2pi(self):
+        """Verify the shared plotting_utils uses phi_slice / (2 * np.pi), not * 2 * np.pi."""
+        source = self.PLOTTING_UTILS_PATH.read_text()
         self.assertIn("phi_slice / (2 * np.pi)", source)
         self.assertNotIn("phi_slice * 2 * np.pi", source)
 

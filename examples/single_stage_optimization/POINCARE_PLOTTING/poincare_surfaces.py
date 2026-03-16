@@ -1,3 +1,4 @@
+import glob
 import os
 
 # SIMSOPT imports
@@ -97,8 +98,15 @@ if __name__ == "__main__":
 
     SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
     EXAMPLE_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, ".."))
-    _default_out_dir = os.path.join(EXAMPLE_ROOT, "SINGLE_STAGE", "outputs", "mpol=8-ntor=6")
-    OUT_DIR = os.environ.get("POINCARE_OUT_DIR", _default_out_dir)
+    if os.environ.get("POINCARE_OUT_DIR"):
+        OUT_DIR = os.environ["POINCARE_OUT_DIR"]
+    else:
+        outputs_root = os.path.join(EXAMPLE_ROOT, "SINGLE_STAGE", "outputs")
+        candidates = sorted(glob.glob(os.path.join(outputs_root, "mpol=*")), key=os.path.getmtime, reverse=True)
+        if not candidates:
+            raise FileNotFoundError(f"No single-stage output found in {outputs_root}. Set POINCARE_OUT_DIR.")
+        OUT_DIR = candidates[0]
+        print(f"Auto-selected: {os.path.basename(OUT_DIR)}")
     bs = load(OUT_DIR + '/biot_savart_init.json')
 
     surf = load(OUT_DIR + '/surf_init.json')
