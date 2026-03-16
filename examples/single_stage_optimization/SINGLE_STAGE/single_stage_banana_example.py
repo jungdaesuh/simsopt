@@ -675,265 +675,266 @@ def callback(x):
     run_dict['it'] += 1
 
 
-# ==============================================================================
-# CONFIGURATION PARAMETERS
-# ==============================================================================
-args = apply_default_stage2_seed_args(parse_args())
-stage2_bs_path = build_stage2_bs_path(args)
-stage2_results_path, stage2_results = load_stage2_results(stage2_bs_path)
-R0 = float(stage2_results["MAJOR_RADIUS"])
-s = float(stage2_results["TOROIDAL_FLUX"])
-order = int(stage2_results.get("order", args.stage2_seed_order))
+if __name__ == "__main__":
+    # ==============================================================================
+    # CONFIGURATION PARAMETERS
+    # ==============================================================================
+    args = apply_default_stage2_seed_args(parse_args())
+    stage2_bs_path = build_stage2_bs_path(args)
+    stage2_results_path, stage2_results = load_stage2_results(stage2_bs_path)
+    R0 = float(stage2_results["MAJOR_RADIUS"])
+    s = float(stage2_results["TOROIDAL_FLUX"])
+    order = int(stage2_results.get("order", args.stage2_seed_order))
 
-banana_surf_radius = args.banana_surf_radius if args.banana_surf_radius is not None else float(stage2_results["banana_surf_radius"])
-banana_surf_nfp = 5
-nphi = args.nphi
-ntheta = args.ntheta
-mpol = args.mpol
-ntor = args.ntor
+    banana_surf_radius = args.banana_surf_radius if args.banana_surf_radius is not None else float(stage2_results["banana_surf_radius"])
+    banana_surf_nfp = 5
+    nphi = args.nphi
+    ntheta = args.ntheta
+    mpol = args.mpol
+    ntor = args.ntor
 
-# Optimization targets and weights
-vol_target = args.vol_target
-CONSTRAINT_WEIGHT = args.constraint_weight
-MAXITER = args.maxiter
-iota_target = args.iota_target
-num_tf_coils = args.num_tf_coils
+    # Optimization targets and weights
+    vol_target = args.vol_target
+    CONSTRAINT_WEIGHT = args.constraint_weight
+    MAXITER = args.maxiter
+    iota_target = args.iota_target
+    num_tf_coils = args.num_tf_coils
 
-# Convergence tolerances for different mpol values
-ftol_by_mpol = {8: 1e-5, 9: 5e-6, 10: 1e-6, 11: 5e-7, 12: 1e-7, 13: 5e-8, 14: 1e-8, 15: 5e-9, 16: 1e-9, 17: 5e-10, 18: 1e-10}
-gtol_by_mpol = {8: 1e-2, 9: 5e-3, 10: 1e-3, 11: 5e-4, 12: 1e-4, 13: 5e-5, 14: 1e-5, 15: 5e-6, 16: 1e-6, 17: 5e-7, 18: 1e-7}
+    # Convergence tolerances for different mpol values
+    ftol_by_mpol = {8: 1e-5, 9: 5e-6, 10: 1e-6, 11: 5e-7, 12: 1e-7, 13: 5e-8, 14: 1e-8, 15: 5e-9, 16: 1e-9, 17: 5e-10, 18: 1e-10}
+    gtol_by_mpol = {8: 1e-2, 9: 5e-3, 10: 1e-3, 11: 5e-4, 12: 1e-4, 13: 5e-5, 14: 1e-5, 15: 5e-6, 16: 1e-6, 17: 5e-7, 18: 1e-7}
 
-# Output directory setup
-OUT_DIR = args.output_root
-os.makedirs(OUT_DIR, exist_ok=True)
-boozer_type = {'initial': 'least_squares', 'final': 'exact'}  # example
-stage = args.boozer_stage
-
-# ==============================================================================
-# SURFACE GEOMETRY DEFINITIONS
-# ==============================================================================
-# The outer vacuum vessel of HBT, R0 = 0.976, a = 0.222
-# Solely for visualization purposes
-VV = SurfaceRZFourier(nfp=5, stellsym=True)
-VV.set_rc(0, 0, 0.976)
-VV.set_rc(1, 0, 0.222)
-VV.set_zs(1, 0, 0.222)
-
-# The proposed new HBT LCFS
-hbt = SurfaceRZFourier(nfp=5, stellsym=True)
-hbt.set_rc(0, 0, 0.9115)    # R0 of LCFS semi-circle center
-hbt.set_rc(1, 0, 0.1605)    # Minor radius (thick metal walls)
-hbt.set_zs(1, 0, 0.152)    # Z extent = ±0.152 m (flat top/bottom)
-
-# The surface the coils can lie on from Jeff - R0 = 0.976 and a=0.22
-surf_coils = SurfaceRZFourier(nfp=banana_surf_nfp, stellsym=True)
-surf_coils.set_rc(0, 0, 0.976)
-surf_coils.set_rc(1, 0, banana_surf_radius)
-surf_coils.set_zs(1, 0, banana_surf_radius)
-
-# ==============================================================================
-# LOAD EQUILIBRIUM AND COILS
-# ==============================================================================
-plasma_surf_filename = args.plasma_surf_filename
-file_loc = build_equilibrium_path(args)
-bs = load(stage2_bs_path)
-
-# Initialize the boundary magnetic surface and scale it to the target major radius
-surf = SurfaceRZFourier.from_wout(file_loc, range="half period", nphi=nphi, ntheta=ntheta, s=s)
-# scale the surface down to the target appropriate major radius
-surf.set_dofs(surf.get_dofs()*R0/surf.major_radius())
-
-# Extract coil information
-coils = bs.coils
-curves = [c.curve for c in coils]
-tf_coils = coils[:num_tf_coils]
-tf_curves = [c.curve for c in tf_coils]
-banana_coils = coils[num_tf_coils:]
-banana_curves = [c.curve for c in banana_coils]
-banana_curve = banana_curves[0]
-current_sum = sum(abs(c.current.get_value()) for c in tf_coils)
-
-# Calculate G0 parameter from TF coil currents
-G0 = 2. * np.pi * current_sum * (4 * np.pi * 10**(-7) / (2 * np.pi))
-
-# ==============================================================================
-# OPTIMIZATION SETUP
-# ==============================================================================
-print(f"\n===== Starting single stage optimization for mpol = {mpol} =====")
-
-OUT_DIR_ITER = OUT_DIR + f"/mpol={mpol}-ntor={ntor}"
-os.makedirs(OUT_DIR_ITER, exist_ok=True)
-
-# Initialize Boozer surface with target parameters
-boozer_surface = initialize_boozer_surface(surf, mpol, ntor, bs, vol_target, CONSTRAINT_WEIGHT, iota_target, G0)
-
-# ==============================================================================
-# SAVE INITIAL STATE
-# ==============================================================================
-# Save initial coil configurations
-curves_to_vtk(curves, OUT_DIR_ITER + f"/curves_init", close=True)
-bs.save(OUT_DIR_ITER + f"/biot_savart_init.json")
-
-# Save initial surface with magnetic field normal component data
-pointData = {"B_N/B": np.sum(bs.B().reshape((nphi, ntheta, 3)) *
-    boozer_surface.surface.unitnormal(), axis=2)[:, :, None] / np.sqrt(np.sum(bs.B().reshape((nphi, ntheta, 3))**2, axis=2))[:, :, None]}
-boozer_surface.surface.to_vtk(OUT_DIR_ITER + f"/surf_init", extra_data=pointData)
-boozer_surface.surface.save(OUT_DIR_ITER + f"/surf_init.json")
-print(f"Volume: {boozer_surface.surface.volume()}")
-
-# Generate initial diagnostic plots
-initial_field_error = normPlot(boozer_surface.surface, bs, OUT_DIR_ITER + "/NormPlotInitial")
-crossSectionPlot(surf_coils, boozer_surface.surface, banana_curve, OUT_DIR_ITER + "/CrossSectionInitial")
-initial_volume = boozer_surface.surface.volume()
-initial_iota = Iotas(boozer_surface).J()
-initial_max_curvature = np.max(banana_curve.kappa())
-intersecting = False
-
-# ==============================================================================
-# DEFINE OBJECTIVE FUNCTION COMPONENTS
-# ==============================================================================
-# Biot-Savart field calculation
-bs_obj = BiotSavart(coils)
-
-# Quasi-symmetry and Boozer coordinate residuals
-nonQSs = [NonQuasiSymmetricRatio(boozer_surface, bs_obj)]
-if boozer_type[stage]=='exact':
-    brs = [BoozerResidualExact(boozer_surface, bs_obj)]
-else:
-    brs = [BoozerResidual(boozer_surface, bs_obj)]
-
-# Objective function weights and parameters
-LENGTH_WEIGHT = 1
-RES_WEIGHT = 1e3
-IOTAS_WEIGHT = 1e2
-CC_WEIGHT = args.cc_weight
-CC_DIST = args.cc_dist
-CS_WEIGHT = 1
-CS_DIST = 0.02
-SURF_DIST_WEIGHT = 1e3
-SS_DIST = 0.04
-CURVATURE_WEIGHT = args.curvature_weight
-CURVATURE_THRESHOLD = args.curvature_threshold
-phi_list = np.linspace(0, 1 / boozer_surface.surface.nfp, 5)
-
-# Individual objective terms
-iota = Iotas(boozer_surface)
-curvelength = CurveLength(banana_curves[0])
-length_target = curvelength.J()
-
-Jiota = QuadraticPenalty(iota, iota_target)
-JnonQSRatio = sum(nonQSs)
-JBoozerResidual = sum(brs)
-JCurveLength = QuadraticPenalty(curvelength,length_target,'max')
-JCurveCurve = CurveCurveDistance(curves, CC_DIST)
-JCurveSurface = CurveSurfaceDistance(curves, boozer_surface.surface, CS_DIST)
-JSurfSurf = SurfaceSurfaceDistance(boozer_surface.surface, VV, SS_DIST)
-JCurvature = LpCurveCurvature(banana_curves[0], 2, CURVATURE_THRESHOLD)
-
-# Combined objective function
-JF = JnonQSRatio + RES_WEIGHT * JBoozerResidual + IOTAS_WEIGHT * Jiota \
-  + LENGTH_WEIGHT * JCurveLength + CC_WEIGHT * JCurveCurve \
-    + CS_WEIGHT * JCurveSurface + SURF_DIST_WEIGHT * JSurfSurf \
-    + CURVATURE_WEIGHT * JCurvature
-
-# Extract degrees of freedom
-dofs = JF.x
-
-# ==============================================================================
-# INITIALIZE OPTIMIZATION STATE
-# ==============================================================================
-# Initialize run_dict after JF and boozer_surface are ready
-run_dict = {
-    'sdofs': boozer_surface.surface.x.copy(),
-    'iota': boozer_surface.res['iota'],
-    'G': boozer_surface.res['G'],
-    'J': JF.J(),
-    'dJ': JF.dJ().copy(),
-    'it': 1,
-    'lscount': 0,
-    'x_prev': dofs.copy()
-}
-
-# ==============================================================================
-# RUN OPTIMIZATION
-# ==============================================================================
-# Get convergence tolerances for current mpol
-ftol = ftol_by_mpol.get(mpol)
-gtol = gtol_by_mpol.get(mpol)
-
-if args.init_only:
-    res_nit = 0
-    final_volume = initial_volume
-    final_iota = initial_iota
-    final_max_curvature = initial_max_curvature
-    fieldError = initial_field_error
-    print("Skipping single-stage optimizer because --init-only was provided.")
-else:
-    # Run L-BFGS-B optimization
-    res = minimize(fun, dofs, jac=True, method='L-BFGS-B', callback=callback, options={'maxiter': MAXITER, 'maxcor': 300, 'ftol': ftol, 'gtol': gtol})
-    res_nit = res.nit
-    print(res.message)
+    # Output directory setup
+    OUT_DIR = args.output_root
+    os.makedirs(OUT_DIR, exist_ok=True)
+    boozer_type = {'initial': 'least_squares', 'final': 'exact'}  # example
+    stage = args.boozer_stage
 
     # ==============================================================================
-    # SAVE OPTIMIZED STATE
+    # SURFACE GEOMETRY DEFINITIONS
     # ==============================================================================
-    # Save optimized coil configurations
-    curves_to_vtk(curves, OUT_DIR_ITER + "/curves_opt", close=True)
-    bs.save(OUT_DIR_ITER + "/biot_savart_opt.json")
+    # The outer vacuum vessel of HBT, R0 = 0.976, a = 0.222
+    # Solely for visualization purposes
+    VV = SurfaceRZFourier(nfp=5, stellsym=True)
+    VV.set_rc(0, 0, 0.976)
+    VV.set_rc(1, 0, 0.222)
+    VV.set_zs(1, 0, 0.222)
 
-    # Save optimized surface with magnetic field normal component data
+    # The proposed new HBT LCFS
+    hbt = SurfaceRZFourier(nfp=5, stellsym=True)
+    hbt.set_rc(0, 0, 0.9115)    # R0 of LCFS semi-circle center
+    hbt.set_rc(1, 0, 0.1605)    # Minor radius (thick metal walls)
+    hbt.set_zs(1, 0, 0.152)    # Z extent = ±0.152 m (flat top/bottom)
+
+    # The surface the coils can lie on from Jeff - R0 = 0.976 and a=0.22
+    surf_coils = SurfaceRZFourier(nfp=banana_surf_nfp, stellsym=True)
+    surf_coils.set_rc(0, 0, 0.976)
+    surf_coils.set_rc(1, 0, banana_surf_radius)
+    surf_coils.set_zs(1, 0, banana_surf_radius)
+
+    # ==============================================================================
+    # LOAD EQUILIBRIUM AND COILS
+    # ==============================================================================
+    plasma_surf_filename = args.plasma_surf_filename
+    file_loc = build_equilibrium_path(args)
+    bs = load(stage2_bs_path)
+
+    # Initialize the boundary magnetic surface and scale it to the target major radius
+    surf = SurfaceRZFourier.from_wout(file_loc, range="half period", nphi=nphi, ntheta=ntheta, s=s)
+    # scale the surface down to the target appropriate major radius
+    surf.set_dofs(surf.get_dofs()*R0/surf.major_radius())
+
+    # Extract coil information
+    coils = bs.coils
+    curves = [c.curve for c in coils]
+    tf_coils = coils[:num_tf_coils]
+    tf_curves = [c.curve for c in tf_coils]
+    banana_coils = coils[num_tf_coils:]
+    banana_curves = [c.curve for c in banana_coils]
+    banana_curve = banana_curves[0]
+    current_sum = sum(abs(c.current.get_value()) for c in tf_coils)
+
+    # Calculate G0 parameter from TF coil currents
+    G0 = 2. * np.pi * current_sum * (4 * np.pi * 10**(-7) / (2 * np.pi))
+
+    # ==============================================================================
+    # OPTIMIZATION SETUP
+    # ==============================================================================
+    print(f"\n===== Starting single stage optimization for mpol = {mpol} =====")
+
+    OUT_DIR_ITER = OUT_DIR + f"/mpol={mpol}-ntor={ntor}"
+    os.makedirs(OUT_DIR_ITER, exist_ok=True)
+
+    # Initialize Boozer surface with target parameters
+    boozer_surface = initialize_boozer_surface(surf, mpol, ntor, bs, vol_target, CONSTRAINT_WEIGHT, iota_target, G0)
+
+    # ==============================================================================
+    # SAVE INITIAL STATE
+    # ==============================================================================
+    # Save initial coil configurations
+    curves_to_vtk(curves, OUT_DIR_ITER + f"/curves_init", close=True)
+    bs.save(OUT_DIR_ITER + f"/biot_savart_init.json")
+
+    # Save initial surface with magnetic field normal component data
     pointData = {"B_N/B": np.sum(bs.B().reshape((nphi, ntheta, 3)) *
         boozer_surface.surface.unitnormal(), axis=2)[:, :, None] / np.sqrt(np.sum(bs.B().reshape((nphi, ntheta, 3))**2, axis=2))[:, :, None]}
+    boozer_surface.surface.to_vtk(OUT_DIR_ITER + f"/surf_init", extra_data=pointData)
+    boozer_surface.surface.save(OUT_DIR_ITER + f"/surf_init.json")
+    print(f"Volume: {boozer_surface.surface.volume()}")
 
-    # Print final results
-    boozer_surface.surface.to_vtk(OUT_DIR_ITER + f"/surf_opt", extra_data=pointData)
-    boozer_surface.surface.save(OUT_DIR_ITER + f"/surf_opt.json")
+    # Generate initial diagnostic plots
+    initial_field_error = normPlot(boozer_surface.surface, bs, OUT_DIR_ITER + "/NormPlotInitial")
+    crossSectionPlot(surf_coils, boozer_surface.surface, banana_curve, OUT_DIR_ITER + "/CrossSectionInitial")
+    initial_volume = boozer_surface.surface.volume()
+    initial_iota = Iotas(boozer_surface).J()
+    initial_max_curvature = np.max(banana_curve.kappa())
+    intersecting = False
 
-    final_volume = boozer_surface.surface.volume()
-    final_iota = Iotas(boozer_surface).J()
-    final_max_curvature = np.max(banana_curve.kappa())
-    print(f"Volume: {final_volume}")
-    print(f"Iota: {final_iota}")
-    print(f"Max Curvature: {final_max_curvature}")
+    # ==============================================================================
+    # DEFINE OBJECTIVE FUNCTION COMPONENTS
+    # ==============================================================================
+    # Biot-Savart field calculation
+    bs_obj = BiotSavart(coils)
 
-    # Generate final diagnostic plots
-    fieldError = normPlot(boozer_surface.surface, bs, OUT_DIR_ITER + "/NormPlotOptimized")
-    crossSectionPlot(surf_coils, boozer_surface.surface, banana_curve, OUT_DIR_ITER + "/CrossSectionOptimized")
+    # Quasi-symmetry and Boozer coordinate residuals
+    nonQSs = [NonQuasiSymmetricRatio(boozer_surface, bs_obj)]
+    if boozer_type[stage] == 'exact':
+        brs = [BoozerResidualExact(boozer_surface, bs_obj)]
+    else:
+        brs = [BoozerResidual(boozer_surface, bs_obj)]
 
-# Save the results of optimization to a separate file
-results = {
-    "PLASMA_SURF_FILENAME": plasma_surf_filename,
-    "PLASMA_SURF_PATH": file_loc,
-    "STAGE2_SOURCE": args.stage2_source,
-    "STAGE2_BS_PATH": stage2_bs_path,
-    "STAGE2_RESULTS_PATH": stage2_results_path,
-    "STAGE2_SEED_MAJOR_RADIUS": R0,
-    "STAGE2_SEED_TOROIDAL_FLUX": s,
-    "STAGE2_SEED_BANANA_SURF_RADIUS": float(stage2_results["banana_surf_radius"]),
-    "STAGE2_SEED_ORDER": order,
-    "CC_DIST": CC_DIST,
-    "CC_WEIGHT": CC_WEIGHT,
-    "CURVATURE_WEIGHT": CURVATURE_WEIGHT,
-    "CURVATURE_THRESHOLD": CURVATURE_THRESHOLD,
-    "LENGTH_WEIGHT": LENGTH_WEIGHT,
-    "MAJOR_RADIUS": R0,
-    "TOROIDAL_FLUX": s,
-    "banana_surf_radius": banana_surf_radius,
-    "order": order,
-    "init_only": args.init_only,
-    "max_iterations": MAXITER,
-    "iterations": res_nit,
-    "TARGET_VOLUME": float(vol_target),
-    "TARGET_IOTA": float(iota_target),
-    "FINAL_VOLUME": float(final_volume),
-    "FINAL_IOTA": float(final_iota),
-    "FIELD_ERROR": float(fieldError),
-    "SELF_INTERSECTING": intersecting,
-    "MAX_CURVATURE": float(final_max_curvature),
-    "INITIAL_VOLUME": float(initial_volume),
-    "INITIAL_IOTA": float(initial_iota),
-    "INITIAL_FIELD_ERROR": float(initial_field_error),
-    "INITIAL_MAX_CURVATURE": float(initial_max_curvature),
-}
-with open(os.path.join(OUT_DIR_ITER, "results.json"), "w") as outfile:
-    json.dump(results, outfile, indent=2)
+    # Objective function weights and parameters
+    LENGTH_WEIGHT = 1
+    RES_WEIGHT = 1e3
+    IOTAS_WEIGHT = 1e2
+    CC_WEIGHT = args.cc_weight
+    CC_DIST = args.cc_dist
+    CS_WEIGHT = 1
+    CS_DIST = 0.02
+    SURF_DIST_WEIGHT = 1e3
+    SS_DIST = 0.04
+    CURVATURE_WEIGHT = args.curvature_weight
+    CURVATURE_THRESHOLD = args.curvature_threshold
+    phi_list = np.linspace(0, 1 / boozer_surface.surface.nfp, 5)
+
+    # Individual objective terms
+    iota = Iotas(boozer_surface)
+    curvelength = CurveLength(banana_curves[0])
+    length_target = curvelength.J()
+
+    Jiota = QuadraticPenalty(iota, iota_target)
+    JnonQSRatio = sum(nonQSs)
+    JBoozerResidual = sum(brs)
+    JCurveLength = QuadraticPenalty(curvelength, length_target, 'max')
+    JCurveCurve = CurveCurveDistance(curves, CC_DIST)
+    JCurveSurface = CurveSurfaceDistance(curves, boozer_surface.surface, CS_DIST)
+    JSurfSurf = SurfaceSurfaceDistance(boozer_surface.surface, VV, SS_DIST)
+    JCurvature = LpCurveCurvature(banana_curves[0], 2, CURVATURE_THRESHOLD)
+
+    # Combined objective function
+    JF = JnonQSRatio + RES_WEIGHT * JBoozerResidual + IOTAS_WEIGHT * Jiota \
+      + LENGTH_WEIGHT * JCurveLength + CC_WEIGHT * JCurveCurve \
+        + CS_WEIGHT * JCurveSurface + SURF_DIST_WEIGHT * JSurfSurf \
+        + CURVATURE_WEIGHT * JCurvature
+
+    # Extract degrees of freedom
+    dofs = JF.x
+
+    # ==============================================================================
+    # INITIALIZE OPTIMIZATION STATE
+    # ==============================================================================
+    # Initialize run_dict after JF and boozer_surface are ready
+    run_dict = {
+        'sdofs': boozer_surface.surface.x.copy(),
+        'iota': boozer_surface.res['iota'],
+        'G': boozer_surface.res['G'],
+        'J': JF.J(),
+        'dJ': JF.dJ().copy(),
+        'it': 1,
+        'lscount': 0,
+        'x_prev': dofs.copy()
+    }
+
+    # ==============================================================================
+    # RUN OPTIMIZATION
+    # ==============================================================================
+    # Get convergence tolerances for current mpol
+    ftol = ftol_by_mpol.get(mpol)
+    gtol = gtol_by_mpol.get(mpol)
+
+    if args.init_only:
+        res_nit = 0
+        final_volume = initial_volume
+        final_iota = initial_iota
+        final_max_curvature = initial_max_curvature
+        fieldError = initial_field_error
+        print("Skipping single-stage optimizer because --init-only was provided.")
+    else:
+        # Run L-BFGS-B optimization
+        res = minimize(fun, dofs, jac=True, method='L-BFGS-B', callback=callback, options={'maxiter': MAXITER, 'maxcor': 300, 'ftol': ftol, 'gtol': gtol})
+        res_nit = res.nit
+        print(res.message)
+
+        # ==============================================================================
+        # SAVE OPTIMIZED STATE
+        # ==============================================================================
+        # Save optimized coil configurations
+        curves_to_vtk(curves, OUT_DIR_ITER + "/curves_opt", close=True)
+        bs.save(OUT_DIR_ITER + "/biot_savart_opt.json")
+
+        # Save optimized surface with magnetic field normal component data
+        pointData = {"B_N/B": np.sum(bs.B().reshape((nphi, ntheta, 3)) *
+            boozer_surface.surface.unitnormal(), axis=2)[:, :, None] / np.sqrt(np.sum(bs.B().reshape((nphi, ntheta, 3))**2, axis=2))[:, :, None]}
+
+        # Print final results
+        boozer_surface.surface.to_vtk(OUT_DIR_ITER + f"/surf_opt", extra_data=pointData)
+        boozer_surface.surface.save(OUT_DIR_ITER + f"/surf_opt.json")
+
+        final_volume = boozer_surface.surface.volume()
+        final_iota = Iotas(boozer_surface).J()
+        final_max_curvature = np.max(banana_curve.kappa())
+        print(f"Volume: {final_volume}")
+        print(f"Iota: {final_iota}")
+        print(f"Max Curvature: {final_max_curvature}")
+
+        # Generate final diagnostic plots
+        fieldError = normPlot(boozer_surface.surface, bs, OUT_DIR_ITER + "/NormPlotOptimized")
+        crossSectionPlot(surf_coils, boozer_surface.surface, banana_curve, OUT_DIR_ITER + "/CrossSectionOptimized")
+
+    # Save the results of optimization to a separate file
+    results = {
+        "PLASMA_SURF_FILENAME": plasma_surf_filename,
+        "PLASMA_SURF_PATH": file_loc,
+        "STAGE2_SOURCE": args.stage2_source,
+        "STAGE2_BS_PATH": stage2_bs_path,
+        "STAGE2_RESULTS_PATH": stage2_results_path,
+        "STAGE2_SEED_MAJOR_RADIUS": R0,
+        "STAGE2_SEED_TOROIDAL_FLUX": s,
+        "STAGE2_SEED_BANANA_SURF_RADIUS": float(stage2_results["banana_surf_radius"]),
+        "STAGE2_SEED_ORDER": order,
+        "CC_DIST": CC_DIST,
+        "CC_WEIGHT": CC_WEIGHT,
+        "CURVATURE_WEIGHT": CURVATURE_WEIGHT,
+        "CURVATURE_THRESHOLD": CURVATURE_THRESHOLD,
+        "LENGTH_WEIGHT": LENGTH_WEIGHT,
+        "MAJOR_RADIUS": R0,
+        "TOROIDAL_FLUX": s,
+        "banana_surf_radius": banana_surf_radius,
+        "order": order,
+        "init_only": args.init_only,
+        "max_iterations": MAXITER,
+        "iterations": res_nit,
+        "TARGET_VOLUME": float(vol_target),
+        "TARGET_IOTA": float(iota_target),
+        "FINAL_VOLUME": float(final_volume),
+        "FINAL_IOTA": float(final_iota),
+        "FIELD_ERROR": float(fieldError),
+        "SELF_INTERSECTING": intersecting,
+        "MAX_CURVATURE": float(final_max_curvature),
+        "INITIAL_VOLUME": float(initial_volume),
+        "INITIAL_IOTA": float(initial_iota),
+        "INITIAL_FIELD_ERROR": float(initial_field_error),
+        "INITIAL_MAX_CURVATURE": float(initial_max_curvature),
+    }
+    with open(os.path.join(OUT_DIR_ITER, "results.json"), "w") as outfile:
+        json.dump(results, outfile, indent=2)
