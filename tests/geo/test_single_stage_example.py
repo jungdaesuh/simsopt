@@ -231,72 +231,30 @@ STAGE2_MODULE_PATH = (
 )
 
 
-def _clamp01(x):
-    if x < 0.0:
-        return 0.0
-    if x > 1.0:
-        return 1.0
-    return x
+def _load_segment_distance_from_source():
+    """Extract the deployed segment_segment_distance from banana_coil_solver.py via AST.
 
-
-def _segment_segment_distance(P1, P2, Q1, Q2):
-    """Pure-Python replica of the Sunday/Lumelsky algorithm in banana_coil_solver.py.
-
-    Used for regression testing independent of numba availability.
-    Any change to the deployed algorithm must be mirrored here.
+    Parses the source file, extracts just the _clamp01 and segment_segment_distance
+    function definitions (stripping @njit decorators), and compiles them in an
+    isolated namespace. This executes the REAL deployed algorithm without requiring
+    numba or triggering module-level code (arg parsing, VMEC file loading, etc.).
     """
-    u = P2 - P1
-    v = Q2 - Q1
-    w0 = P1 - Q1
-    a = np.dot(u, u)
-    b = np.dot(u, v)
-    c = np.dot(v, v)
-    d = np.dot(u, w0)
-    e = np.dot(v, w0)
-    ZERO_LEN = 1e-30
-    PAR_EPS = 1e-10
-    if a < ZERO_LEN:
-        if c < ZERO_LEN:
-            return np.linalg.norm(w0)
-        return np.linalg.norm(w0 - _clamp01(e / c) * v)
-    if c < ZERO_LEN:
-        return np.linalg.norm(w0 + _clamp01(-d / a) * u)
-    denom = a * c - b * b
-    if denom < PAR_EPS * a * c:
-        best_sq = np.inf
-        dp = w0 - _clamp01(e / c) * v
-        dsq = np.dot(dp, dp)
-        if dsq < best_sq:
-            best_sq = dsq
-        dp = w0 + u - _clamp01((e + b) / c) * v
-        dsq = np.dot(dp, dp)
-        if dsq < best_sq:
-            best_sq = dsq
-        dp = w0 + _clamp01(-d / a) * u
-        dsq = np.dot(dp, dp)
-        if dsq < best_sq:
-            best_sq = dsq
-        dp = w0 + _clamp01((b - d) / a) * u - v
-        dsq = np.dot(dp, dp)
-        if dsq < best_sq:
-            best_sq = dsq
-        return np.sqrt(best_sq)
-    sc = (b * e - c * d) / denom
-    tc = (a * e - b * d) / denom
-    if sc < 0.0:
-        sc = 0.0
-        tc = e / c
-    elif sc > 1.0:
-        sc = 1.0
-        tc = (e + b) / c
-    if tc < 0.0:
-        tc = 0.0
-        sc = _clamp01(-d / a)
-    elif tc > 1.0:
-        tc = 1.0
-        sc = _clamp01((b - d) / a)
-    dp = w0 + sc * u - tc * v
-    return np.sqrt(np.dot(dp, dp))
+    import ast
+    source = STAGE2_MODULE_PATH.read_text()
+    tree = ast.parse(source)
+    func_nodes = []
+    for node in ast.iter_child_nodes(tree):
+        if isinstance(node, ast.FunctionDef) and node.name in ("_clamp01", "segment_segment_distance"):
+            node.decorator_list = []
+            func_nodes.append(node)
+    extracted = ast.Module(body=func_nodes, type_ignores=[])
+    ast.fix_missing_locations(extracted)
+    namespace = {"np": np}
+    exec(compile(extracted, str(STAGE2_MODULE_PATH), "exec"), namespace)
+    return namespace["segment_segment_distance"]
+
+
+_segment_segment_distance = _load_segment_distance_from_source()
 
 
 class SegmentDistanceTests(unittest.TestCase):
@@ -374,45 +332,6 @@ class SegmentDistanceTests(unittest.TestCase):
             d_brute = np.sqrt(min(cands))
             self.assertAlmostEqual(d_algo, d_brute, places=9,
                                    msg=f"Mismatch: algo={d_algo}, brute={d_brute}")
-
-
-    def test_replica_matches_deployed_source(self):
-        """Guard against the test replica diverging from the deployed @njit function."""
-        import inspect, re
-        source = STAGE2_MODULE_PATH.read_text()
-
-        def _extract_code_lines(text, func_name):
-            """Extract function body lines, stripping docstrings, comments, and blanks."""
-            lines = []
-            in_func = False
-            in_docstring = False
-            for line in text.splitlines():
-                stripped = line.strip()
-                if f"def {func_name}(" in stripped and not in_func:
-                    in_func = True
-                    continue
-                if in_func:
-                    if '"""' in stripped:
-                        if stripped.count('"""') >= 2:
-                            continue
-                        in_docstring = not in_docstring
-                        continue
-                    if in_docstring:
-                        continue
-                    if stripped and not line.startswith("    ") and not line.startswith("\t"):
-                        break
-                    code = re.sub(r'\s*#.*$', '', stripped)
-                    if code:
-                        lines.append(code)
-            return lines
-
-        replica = _extract_code_lines(inspect.getsource(_segment_segment_distance), "_segment_segment_distance")
-        deployed = _extract_code_lines(source, "segment_segment_distance")
-        self.assertEqual(
-            replica, deployed,
-            "Test replica of segment_segment_distance has diverged from deployed code. "
-            "Update the test replica to match banana_coil_solver.py."
-        )
 
 
 class CrossSectionNormalizationTests(unittest.TestCase):
