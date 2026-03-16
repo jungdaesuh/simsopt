@@ -10,13 +10,16 @@ from simsopt.geo import (SurfaceRZFourier, curves_to_vtk, create_equally_spaced_
                          CurveLength, CurveCurveDistance, LpCurveCurvature)
 from simsopt.objectives import SquaredFlux, QuadraticPenalty
 from simsopt.geo import CurveCWSFourierCPP
-import matplotlib.pyplot as plt
 import json
 from numba import njit
 
-
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 EXAMPLE_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, ".."))
+
+import sys
+sys.path.insert(0, EXAMPLE_ROOT)
+from plotting_utils import norm_field_plot, magnitude_field_plot, cross_section_plot
+
 SIMSOPT_ROOT = os.path.abspath(os.path.join(EXAMPLE_ROOT, "..", ".."))
 REPO_ROOT = os.path.abspath(os.path.join(SIMSOPT_ROOT, ".."))
 DATABASE_EQUILIBRIA_DIR = os.path.join(REPO_ROOT, "DATABASE", "EQUILIBRIA")
@@ -377,84 +380,11 @@ def is_self_intersecting(curve, npts=2000, tol_factor=0.1, neighbor_skip=3): # m
 
 
 def magneticFieldPlots(surf, bs, OUT_DIR_ITER):
-    # Plot the normal magnetic field on the plasma surface (want this to be much less than 1e-2, ideally around 2e-3 or so)
-    theta = surf.quadpoints_theta
-    phi = surf.quadpoints_phi
-    n = surf.normal()
-    absn = np.linalg.norm(n, axis=2)
-    unitn = n * (1./absn)[:,:,None]
-    sqrt_area = np.sqrt(absn.reshape((-1,1))/float(absn.size))
-    surf_area = sqrt_area**2
-    bs.set_points(surf.gamma().reshape((-1, 3)))
-    Bfinal = bs.B().reshape(n.shape)
-    Bfinal_norm = np.sum(Bfinal * unitn, axis=2)[:, :, None]
-    modBfinal = np.sqrt(np.sum(Bfinal**2, axis=2))[:, :, None]
-    relBfinal_norm = Bfinal_norm / modBfinal
-    abs_relBfinal_norm_dA = np.abs(relBfinal_norm.reshape((-1, 1))) * surf_area
-    mean_abs_relBfinal_norm = np.sum(abs_relBfinal_norm_dA) / np.sum(surf_area)
-    max_rnorm = np.max(np.abs(relBfinal_norm))
-    fig, ax = plt.subplots()
-    contour = ax.contourf(phi, theta, np.squeeze(relBfinal_norm).T, levels=50, cmap='seismic', vmin=-max_rnorm, vmax=max_rnorm)
-    ax.set_xlabel(r'$\phi/2\pi$', fontsize=18, fontweight='bold')
-    ax.set_ylabel(r'$\theta/2\pi$', fontsize=18, fontweight='bold')
-    cbar = fig.colorbar(contour, ax=ax)
-    cbar.ax.set_ylabel(r'$\mathbf{B}\cdot\mathbf{n}/|\mathbf{B}|$', fontsize=16, fontweight='bold')
-    cbar.ax.tick_params(axis='y', which='major', labelsize=14)
-    ax.set_title(f'Surface-averaged |Bn|/|B| = {mean_abs_relBfinal_norm:.4e}', fontsize=18, fontweight='bold')
-    plt.savefig(OUT_DIR_ITER + "NormFieldPlot.png")
-    plt.close()
-
-    # Plot magnitude of magnetic field on the plasma surface
-    abs_modBfinal_dA = np.abs(modBfinal.reshape((-1, 1))) * surf_area
-    mean_abs_modBfinal = np.sum(abs_modBfinal_dA) / np.sum(surf_area)
-    fig, ax = plt.subplots()
-    contour = ax.contour(phi, theta, np.squeeze(modBfinal).T, levels=25, cmap='viridis')
-    ax.set_xlabel(r'$\phi/2\pi$', fontsize=18, fontweight='bold')
-    ax.set_ylabel(r'$\theta/2\pi$', fontsize=18, fontweight='bold')
-    cbar = fig.colorbar(contour, ax=ax)
-    cbar.ax.set_ylabel(r'$|\mathbf{B}|$', fontsize=16, fontweight='bold')
-    cbar.ax.tick_params(axis='y', which='major', labelsize=14)
-    ax.set_title(f'Surface-averaged |B| = {mean_abs_modBfinal:.3f}', fontsize=18, fontweight='bold')
-    plt.savefig(OUT_DIR_ITER + "MagFieldPlot.png")
-    plt.close()
+    """Generate normal-field and magnitude-field diagnostic plots."""
+    mean_abs_relBfinal_norm, modBfinal, surf_area, phi, theta = norm_field_plot(
+        surf, bs, OUT_DIR_ITER + "NormFieldPlot")
+    magnitude_field_plot(modBfinal, surf_area, phi, theta, OUT_DIR_ITER + "MagFieldPlot")
     return mean_abs_relBfinal_norm
-
-def crossSectionPlot(surf_coils, surf, banana_curve, OUT_DIR_ITER, hbt, VV):
-    # plots cross section of plasma at a few toroidal locations and relevant HBT cross sections
-    plt.figure(figsize=(7,6))
-    # Plot banana coil R-Z projection
-    gamma = banana_curve.gamma()
-    coil_r = np.sqrt(gamma[:, 0]**2 + gamma[:, 1]**2)
-    coil_z = gamma[:, 2]
-    plt.plot(coil_r, coil_z, 'k--', linewidth=1.5, label='Banana Coil')
-    cs2 = surf_coils.cross_section(0)
-    rs2 = np.sqrt(cs2[:,0]**2 + cs2[:,1]**2); rs2 = np.append(rs2, rs2[0])
-    zs2 = cs2[:,2]; zs2 = np.append(zs2, zs2[0])
-    plt.plot(rs2, zs2, label='Banana Surface')
-    cs3 = hbt.cross_section(0)
-    rs3 = np.sqrt(cs3[:,0]**2 + cs3[:,1]**2); rs3 = np.append(rs3, rs3[0])
-    zs3 = cs3[:,2]; zs3 = np.append(zs3, zs3[0])
-    plt.plot(rs3, zs3, label='HBT LCFS')
-    cs_vv = VV.cross_section(0)
-    rs_vv = np.sqrt(cs_vv[:, 0]**2 + cs_vv[:, 1]**2); zs_vv = cs_vv[:, 2]
-    rs_vv = np.append(rs_vv, rs_vv[0]); zs_vv = np.append(zs_vv, zs_vv[0])
-    plt.plot(rs_vv, zs_vv, label='Vacuum Vessel')
-    phi_array = np.linspace(0, 2*np.pi / surf_coils.nfp * 4/5, 5)
-    for phi_slice in phi_array:
-        cs = surf.cross_section(phi_slice / (2 * np.pi))
-        rs = np.sqrt(cs[:,0]**2 + cs[:,1]**2); rs = np.append(rs, rs[0])
-        zs = cs[:,2]; zs = np.append(zs, zs[0])
-        plt.plot(rs, zs, label=f'Φ={phi_slice/np.pi:0.2f}π')
-    plt.xlabel('R [m]', fontsize=18, fontweight='bold')
-    plt.ylabel('Z [m]', fontsize=18, fontweight='bold')
-    plt.legend(loc='upper right', bbox_to_anchor=(1.3, 1), fontsize=16)
-    plt.tick_params(axis='both', which='major', labelsize=14)
-    plt.gca().set_aspect('equal', adjustable='box')
-    plt.minorticks_on()
-    plt.grid(True)
-    plt.savefig(OUT_DIR_ITER + "CrossSectionPlot.png")
-    plt.close()
-    return True
 
 def make_fun(JF, new_bs, new_surf, Jf, Jls, Jccdist, Jc):
     """Factory for the Stage 2 objective function.
@@ -590,7 +520,7 @@ if __name__ == "__main__":
         + CC_WEIGHT * Jccdist \
         + CURVATURE_WEIGHT * Jc
 
-    OUT_DIR_ITER = f"{OUT_DIR}R0={R0:g}-s={s:g}-LW={LENGTH_WEIGHT:g}-CCW={CC_WEIGHT:g}-CW={CURVATURE_WEIGHT:g}-SR={banana_surf_radius:0.3f}-Order={order}/"
+    OUT_DIR_ITER = f"{OUT_DIR}R0={R0:g}-s={s:g}-LW={LENGTH_WEIGHT:g}-CCW={CC_WEIGHT:g}-CCT={CC_THRESHOLD:g}-CW={CURVATURE_WEIGHT:g}-CT={CURVATURE_THRESHOLD:g}-SR={banana_surf_radius:0.3f}-Order={order}/"
     os.makedirs(OUT_DIR_ITER, exist_ok=True)
 
     # minimize gets called, optimizes based on degrees of freedom from objective function
@@ -621,7 +551,7 @@ if __name__ == "__main__":
     VV.to_vtk(OUT_DIR_ITER + "VV")
 
     # Create toroidal cross section plot
-    crossSectionPlot(new_surf_coils, new_surf, new_banana_curve, OUT_DIR_ITER, hbt, VV)
+    cross_section_plot(new_surf_coils, new_surf, new_banana_curve, OUT_DIR_ITER + "CrossSectionPlot", hbt, VV)
     # Create field error plot
     fieldError = magneticFieldPlots(new_surf, new_bs, OUT_DIR_ITER)
 

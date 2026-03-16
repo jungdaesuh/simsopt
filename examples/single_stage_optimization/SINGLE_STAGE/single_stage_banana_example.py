@@ -18,16 +18,18 @@ from simsopt.geo.surfaceobjectives import (
     boozer_surface_residual_dB,
 )
 from simsopt.geo.curveobjectives import CurveCurveDistance, CurveSurfaceDistance
-from simsopt.field import BiotSavart, Coil, Current
-from simsopt.objectives import QuadraticPenalty, SquaredFlux
+from simsopt.field import BiotSavart
+from simsopt.objectives import QuadraticPenalty
 from simsopt.objectives.utilities import forward_backward
 from simsopt._core.optimizable import load
-import matplotlib.pyplot as plt
 from simsopt._core.derivative import derivative_dec
-
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 EXAMPLE_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, ".."))
+
+import sys
+sys.path.insert(0, EXAMPLE_ROOT)
+from plotting_utils import norm_field_plot, cross_section_plot
 SIMSOPT_ROOT = os.path.abspath(os.path.join(EXAMPLE_ROOT, "..", ".."))
 REPO_ROOT = os.path.abspath(os.path.join(SIMSOPT_ROOT, ".."))
 DATABASE_EQUILIBRIA_DIR = os.path.join(REPO_ROOT, "DATABASE", "EQUILIBRIA")
@@ -41,7 +43,9 @@ DEFAULT_STAGE2_SEEDS_BY_PLASMA = {
         "toroidal_flux": 0.24,
         "length_weight": 0.0005,
         "cc_weight": 100.0,
+        "cc_threshold": 0.05,
         "curvature_weight": 0.0001,
+        "curvature_threshold": 40.0,
         "banana_surf_radius": 0.22,
         "order": 2,
     },
@@ -50,7 +54,9 @@ DEFAULT_STAGE2_SEEDS_BY_PLASMA = {
         "toroidal_flux": 0.24,
         "length_weight": 0.0005,
         "cc_weight": 100.0,
+        "cc_threshold": 0.05,
         "curvature_weight": 0.0001,
+        "curvature_threshold": 40.0,
         "banana_surf_radius": 0.22,
         "order": 2,
     },
@@ -61,13 +67,15 @@ def format_compact_float(value):
     return f"{value:g}"
 
 
-def format_local_stage2_seed_dir(major_radius, toroidal_flux, length_weight, cc_weight, curvature_weight, banana_surf_radius, order):
+def format_local_stage2_seed_dir(major_radius, toroidal_flux, length_weight, cc_weight, cc_threshold, curvature_weight, curvature_threshold, banana_surf_radius, order):
     return (
         f"R0={format_compact_float(major_radius)}"
         f"-s={format_compact_float(toroidal_flux)}"
         f"-LW={format_compact_float(length_weight)}"
         f"-CCW={format_compact_float(cc_weight)}"
+        f"-CCT={format_compact_float(cc_threshold)}"
         f"-CW={format_compact_float(curvature_weight)}"
+        f"-CT={format_compact_float(curvature_threshold)}"
         f"-SR={banana_surf_radius:0.3f}"
         f"-Order={order}"
     )
@@ -111,16 +119,42 @@ def build_stage2_bs_path(args):
         args.stage2_seed_toroidal_flux,
         args.stage2_seed_length_weight,
         args.stage2_seed_cc_weight,
+        args.stage2_seed_cc_threshold,
         args.stage2_seed_curvature_weight,
+        args.stage2_seed_curvature_threshold,
         args.stage2_seed_banana_surf_radius,
         args.stage2_seed_order,
     )
-    return os.path.join(
+    candidate = os.path.join(
         args.local_stage2_root,
         f"outputs-{args.plasma_surf_filename}",
         seed_dir,
         "biot_savart_opt.json",
     )
+    if os.path.exists(candidate):
+        return candidate
+
+    # Fallback: legacy directory format without CCT/CT segments
+    legacy_dir = (
+        f"R0={format_compact_float(args.stage2_seed_major_radius)}"
+        f"-s={format_compact_float(args.stage2_seed_toroidal_flux)}"
+        f"-LW={format_compact_float(args.stage2_seed_length_weight)}"
+        f"-CCW={format_compact_float(args.stage2_seed_cc_weight)}"
+        f"-CW={format_compact_float(args.stage2_seed_curvature_weight)}"
+        f"-SR={args.stage2_seed_banana_surf_radius:0.3f}"
+        f"-Order={args.stage2_seed_order}"
+    )
+    legacy = os.path.join(
+        args.local_stage2_root,
+        f"outputs-{args.plasma_surf_filename}",
+        legacy_dir,
+        "biot_savart_opt.json",
+    )
+    if os.path.exists(legacy):
+        print(f"Note: found legacy Stage 2 output at {legacy_dir}/ (missing CCT/CT segments)")
+        return legacy
+
+    return candidate
 
 
 def load_stage2_results(stage2_bs_path):
@@ -156,6 +190,10 @@ def apply_default_stage2_seed_args(args):
         args.stage2_seed_cc_weight = default_seed.get("cc_weight", 100.0)
     if args.stage2_seed_curvature_weight is None:
         args.stage2_seed_curvature_weight = default_seed.get("curvature_weight", 0.0001)
+    if args.stage2_seed_cc_threshold is None:
+        args.stage2_seed_cc_threshold = default_seed.get("cc_threshold", 0.05)
+    if args.stage2_seed_curvature_threshold is None:
+        args.stage2_seed_curvature_threshold = default_seed.get("curvature_threshold", 40.0)
     if args.stage2_seed_banana_surf_radius is None:
         args.stage2_seed_banana_surf_radius = default_seed.get("banana_surf_radius", 0.22)
     if args.stage2_seed_order is None:
@@ -262,6 +300,16 @@ def parse_args():
         "--stage2-seed-curvature-weight",
         type=float,
         default=float(os.environ["STAGE2_SEED_CURVATURE_WEIGHT"]) if "STAGE2_SEED_CURVATURE_WEIGHT" in os.environ else None,
+    )
+    parser.add_argument(
+        "--stage2-seed-cc-threshold",
+        type=float,
+        default=float(os.environ["STAGE2_SEED_CC_THRESHOLD"]) if "STAGE2_SEED_CC_THRESHOLD" in os.environ else None,
+    )
+    parser.add_argument(
+        "--stage2-seed-curvature-threshold",
+        type=float,
+        default=float(os.environ["STAGE2_SEED_CURVATURE_THRESHOLD"]) if "STAGE2_SEED_CURVATURE_THRESHOLD" in os.environ else None,
     )
     parser.add_argument(
         "--stage2-seed-banana-surf-radius",
@@ -452,70 +500,9 @@ def initialize_boozer_surface(surf_prev, mpol, ntor, bs, vol_target, constraint_
     return boozer_surface
 
 def normPlot(surf, bs, filename):
-    # Plot the normal magnetic field on the plasma surface
-    theta = surf.quadpoints_theta
-    phi = surf.quadpoints_phi
-    n = surf.normal()
-    absn = np.linalg.norm(n, axis=2)
-    unitn = n * (1./absn)[:,:,None]
-    sqrt_area = np.sqrt(absn.reshape((-1,1))/float(absn.size))
-    surf_area = sqrt_area**2
-    bs.set_points(surf.gamma().reshape((-1, 3)))
-    Bfinal = bs.B().reshape(n.shape)
-    Bfinal_norm = np.sum(Bfinal * unitn, axis=2)[:, :, None]
-    modBfinal = np.sqrt(np.sum(Bfinal**2, axis=2))[:, :, None]
-    relBfinal_norm = Bfinal_norm / modBfinal
-    abs_relBfinal_norm_dA = np.abs(relBfinal_norm.reshape((-1, 1))) * surf_area
-    mean_abs_relBfinal_norm = np.sum(abs_relBfinal_norm_dA) / np.sum(surf_area)
-    max_rnorm = np.max(np.abs(relBfinal_norm))
-    fig, ax = plt.subplots()
-    contour = ax.contourf(phi, theta, np.squeeze(relBfinal_norm).T, levels=50, cmap='seismic', vmin=-max_rnorm, vmax=max_rnorm)
-    ax.set_xlabel(r'$\phi/2\pi$', fontsize=18, fontweight='bold')
-    ax.set_ylabel(r'$\theta/2\pi$', fontsize=18, fontweight='bold')
-    cbar = fig.colorbar(contour, ax=ax)
-    cbar.ax.set_ylabel(r'$\mathbf{B}\cdot\mathbf{n}/|\mathbf{B}|$', fontsize=16, fontweight='bold')
-    cbar.ax.tick_params(axis='y', which='major', labelsize=14)
-    ax.set_title(f'Surface-averaged \n |Bn|/|B| = {mean_abs_relBfinal_norm:.4e}', fontsize=18, fontweight='bold')
-    plt.savefig(f"{filename}.png")
-    plt.close()
+    """Plot normal magnetic field — delegates to shared norm_field_plot."""
+    mean_abs_relBfinal_norm, _, _, _, _ = norm_field_plot(surf, bs, filename)
     return mean_abs_relBfinal_norm
-
-def crossSectionPlot(surf_coils, surf, banana_curve, filename, hbt, VV):
-    # plots cross section of plasma at a few toroidal locations and relevant HBT cross sections
-    plt.figure(figsize=(7,6))
-    # Plot banana coil R-Z projection
-    gamma = banana_curve.gamma()
-    coil_r = np.sqrt(gamma[:, 0]**2 + gamma[:, 1]**2)
-    coil_z = gamma[:, 2]
-    plt.plot(coil_r, coil_z, 'k--', linewidth=1.5, label='Banana Coil')
-    cs2 = surf_coils.cross_section(0)
-    rs2 = np.sqrt(cs2[:,0]**2 + cs2[:,1]**2); rs2 = np.append(rs2, rs2[0])
-    zs2 = cs2[:,2]; zs2 = np.append(zs2, zs2[0])
-    plt.plot(rs2, zs2, label='Banana Surface')
-    cs3 = hbt.cross_section(0)
-    rs3 = np.sqrt(cs3[:,0]**2 + cs3[:,1]**2); rs3 = np.append(rs3, rs3[0])
-    zs3 = cs3[:,2]; zs3 = np.append(zs3, zs3[0])
-    plt.plot(rs3, zs3, label='HBT LCFS')
-    cs_vv = VV.cross_section(0)
-    rs_vv = np.sqrt(cs_vv[:, 0]**2 + cs_vv[:, 1]**2); zs_vv = cs_vv[:, 2]
-    rs_vv = np.append(rs_vv, rs_vv[0]); zs_vv = np.append(zs_vv, zs_vv[0])
-    plt.plot(rs_vv, zs_vv, label='Vacuum Vessel')
-    phi_array = np.linspace(0, 2*np.pi / surf_coils.nfp * 4/5, 5)
-    for phi_slice in phi_array:
-        cs = surf.cross_section(phi_slice / (2 * np.pi))
-        rs = np.sqrt(cs[:,0]**2 + cs[:,1]**2); rs = np.append(rs, rs[0])
-        zs = cs[:,2]; zs = np.append(zs, zs[0])
-        plt.plot(rs, zs, label=f'Φ={phi_slice/np.pi:0.2f}π')
-    plt.xlabel('R [m]', fontsize=18, fontweight='bold')
-    plt.ylabel('Z [m]', fontsize=18, fontweight='bold')
-    plt.legend(loc='upper right', bbox_to_anchor=(1.3, 1), fontsize=16)
-    plt.tick_params(axis='both', which='major', labelsize=14)
-    plt.gca().set_aspect('equal', adjustable='box')
-    plt.minorticks_on()
-    plt.grid(True)
-    plt.savefig(f"{filename}.png")
-    plt.close()
-    return True
 
 
 def fun(x):
@@ -797,7 +784,7 @@ if __name__ == "__main__":
 
     # Generate initial diagnostic plots
     initial_field_error = normPlot(boozer_surface.surface, bs, OUT_DIR_ITER + "/NormPlotInitial")
-    crossSectionPlot(surf_coils, boozer_surface.surface, banana_curve, OUT_DIR_ITER + "/CrossSectionInitial", hbt, VV)
+    cross_section_plot(surf_coils, boozer_surface.surface, banana_curve, OUT_DIR_ITER + "/CrossSectionInitial", hbt, VV)
     initial_volume = boozer_surface.surface.volume()
     initial_iota = Iotas(boozer_surface).J()
     initial_max_curvature = np.max(banana_curve.kappa())
@@ -914,7 +901,7 @@ if __name__ == "__main__":
 
         # Generate final diagnostic plots
         fieldError = normPlot(boozer_surface.surface, bs, OUT_DIR_ITER + "/NormPlotOptimized")
-        crossSectionPlot(surf_coils, boozer_surface.surface, banana_curve, OUT_DIR_ITER + "/CrossSectionOptimized", hbt, VV)
+        cross_section_plot(surf_coils, boozer_surface.surface, banana_curve, OUT_DIR_ITER + "/CrossSectionOptimized", hbt, VV)
 
     # Save the results of optimization to a separate file
     results = {

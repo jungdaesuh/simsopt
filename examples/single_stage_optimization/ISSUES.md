@@ -81,7 +81,7 @@ Unless otherwise noted, the issue descriptions below still describe the pre-fix 
 | [8](#8)  | M | banana_coil | ~~360-362~~ | ~~Cross-section angle double-scaled~~ :white_check_mark: |
 | [9](#9)  | M | single_stage | ~~493-495~~ | ~~Cross-section angle double-scaled (duplicate)~~ :white_check_mark: |
 | [10](#10) | M | banana_coil | ~~524~~ | ~~VTK export labeled "VV" is actually banana coil surface~~ :white_check_mark: |
-| [11](#11) | M | banana_coil | 500 | Output dir omits run-defining parameters (deferred — format aligned with `:g`) |
+| [11](#11) | M | banana_coil | ~~500~~ | ~~Output dir omits run-defining parameters~~ :white_check_mark: |
 | [12](#12) | M | single_stage | 755 | Output dir only encodes mpol/ntor (deferred — results.json captures all) |
 | [13](#13) | M | banana_coil | ~~170-178~~ | ~~`initSurface` depends on globals `file_loc`, `nphi`, `ntheta`~~ :white_check_mark: |
 | [14](#14) | M | banana_coil | ~~180-201~~ | ~~`initializeCoils(surf)` ignores its argument for coil placement~~ :white_check_mark: |
@@ -93,7 +93,7 @@ Unless otherwise noted, the issue descriptions below still describe the pre-fix 
 | [20](#20) | -- | single_stage | 594-595 | ~~`callback` re-calls JF.J()/JF.dJ()~~ (cache-safe) |
 | [21](#21) | M | single_stage | ~~769-770~~ | ~~`bs.B()` reshape assumes nphi*ntheta before `set_points`~~ :white_check_mark: |
 | [22](#22) | M | poincare | ~~94~~ | ~~Hardcoded relative `OUT_DIR`~~ :white_check_mark: |
-| [23](#23) | M | cross-file | -- | Duplicated `crossSectionPlot`/`normPlot` (deferred — now fully parameterized) |
+| [23](#23) | M | cross-file | -- | ~~Duplicated `crossSectionPlot`/`normPlot`~~ :white_check_mark: (extracted to `plotting_utils.py`) |
 | [24](#24) | M | cross-file | -- | ~~No `if __name__ == "__main__"` guard in any script~~ :white_check_mark: |
 | [25](#25) | L | banana_coil | ~~354~~ | ~~Dead `hbt_poly` variable~~ :white_check_mark: |
 | [26](#26) | L | single_stage | ~~487~~ | ~~Dead `hbt_poly` variable (duplicate)~~ :white_check_mark: |
@@ -128,19 +128,19 @@ Checklist meaning:
 - [x] [Issue 8](#8) Cross-section angle double-scaled
 - [x] [Issue 9](#9) Cross-section angle double-scaled (duplicate)
 - [x] [Issue 10](#10) VTK export labeled "VV" is actually banana coil surface
-- [ ] [Issue 11](#11) Output dir omits run-defining parameters (deferred — format aligned)
-- [ ] [Issue 12](#12) Output dir only encodes `mpol`/`ntor` (deferred — results.json captures all)
+- [x] [Issue 11](#11) Output dir now includes CC_THRESHOLD and CURVATURE_THRESHOLD
+- [ ] [Issue 12](#12) Output dir only encodes `mpol`/`ntor` (won't-fix — results.json captures all)
 - [x] [Issue 13](#13) `initSurface` depends on globals
 - [x] [Issue 14](#14) `initializeCoils(surf)` ignores its argument
 - [x] [Issue 15](#15) `normPlot` reshapes using global `nphi`/`ntheta`
 - [x] [Issue 16](#16) `magneticFieldPlots` reshapes using global `nphi`/`ntheta`
 - [x] [Issue 17](#17) Quadrature includes duplicate endpoint
-- [ ] [Issue 18](#18) `BoozerResidualExact` hardcodes `constraint_weight=0` (reviewed, by design)
+- [x] [Issue 18](#18) `BoozerResidualExact` hardcodes `constraint_weight=0` (closed, by design)
 - [x] [Issue 19](#19) Exact Boozer quadpoints use `mpol` for phi
-- [ ] [Issue 20](#20) `callback` re-calls `JF.J()/JF.dJ()` (reviewed, cache-safe)
+- [x] [Issue 20](#20) `callback` re-calls `JF.J()/JF.dJ()` (closed, cache-safe)
 - [x] [Issue 21](#21) `bs.B()` reshape assumes `nphi*ntheta` before `set_points`
 - [x] [Issue 22](#22) Hardcoded relative `OUT_DIR`
-- [ ] [Issue 23](#23) Duplicated `crossSectionPlot`/`normPlot` (deferred — now parameterized)
+- [x] [Issue 23](#23) Duplicated plotting code extracted to `plotting_utils.py`
 - [x] [Issue 24](#24) No `if __name__ == "__main__"` guard in any script
 - [x] [Issue 25](#25) Dead `hbt_poly` variable
 - [x] [Issue 26](#26) Dead `hbt_poly` variable (duplicate)
@@ -154,7 +154,7 @@ Checklist meaning:
 - [x] [Issue 34](#34) Blank subplots for non-square phi count
 - [x] [Issue 35](#35) Shell scripts hardcoded to `~/simsopt/` and `conda activate simsopt`
 - [x] [Issue 36](#36) `fun()` closes over many globals (factory pattern; banana coil R-Z projection implemented)
-- [ ] [Issue 37](#37) Default `s=0.24` is an interior VMEC surface (reviewed, intentional)
+- [x] [Issue 37](#37) Default `s=0.24` is an interior VMEC surface (closed, intentional)
 
 ---
 
