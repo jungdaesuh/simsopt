@@ -222,5 +222,208 @@ class BoozerFallbackLBFGSBTests(unittest.TestCase):
         self.assertGreater(res.hess_inv.n_corrs, 0)
 
 
+STAGE2_MODULE_PATH = (
+    Path(__file__).resolve().parents[2]
+    / "examples"
+    / "single_stage_optimization"
+    / "STAGE_2"
+    / "banana_coil_solver.py"
+)
+
+
+def _clamp01(x):
+    if x < 0.0:
+        return 0.0
+    if x > 1.0:
+        return 1.0
+    return x
+
+
+def _segment_segment_distance(P1, P2, Q1, Q2):
+    """Pure-Python replica of the Sunday/Lumelsky algorithm in banana_coil_solver.py.
+
+    Used for regression testing independent of numba availability.
+    Any change to the deployed algorithm must be mirrored here.
+    """
+    u = P2 - P1
+    v = Q2 - Q1
+    w0 = P1 - Q1
+    a = np.dot(u, u)
+    b = np.dot(u, v)
+    c = np.dot(v, v)
+    d = np.dot(u, w0)
+    e = np.dot(v, w0)
+    ZERO_LEN = 1e-30
+    PAR_EPS = 1e-10
+    if a < ZERO_LEN:
+        if c < ZERO_LEN:
+            return np.linalg.norm(w0)
+        return np.linalg.norm(w0 - _clamp01(e / c) * v)
+    if c < ZERO_LEN:
+        return np.linalg.norm(w0 + _clamp01(-d / a) * u)
+    denom = a * c - b * b
+    if denom < PAR_EPS * a * c:
+        best_sq = np.inf
+        dp = w0 - _clamp01(e / c) * v
+        dsq = np.dot(dp, dp)
+        if dsq < best_sq:
+            best_sq = dsq
+        dp = w0 + u - _clamp01((e + b) / c) * v
+        dsq = np.dot(dp, dp)
+        if dsq < best_sq:
+            best_sq = dsq
+        dp = w0 + _clamp01(-d / a) * u
+        dsq = np.dot(dp, dp)
+        if dsq < best_sq:
+            best_sq = dsq
+        dp = w0 + _clamp01((b - d) / a) * u - v
+        dsq = np.dot(dp, dp)
+        if dsq < best_sq:
+            best_sq = dsq
+        return np.sqrt(best_sq)
+    sc = (b * e - c * d) / denom
+    tc = (a * e - b * d) / denom
+    if sc < 0.0:
+        sc = 0.0
+        tc = e / c
+    elif sc > 1.0:
+        sc = 1.0
+        tc = (e + b) / c
+    if tc < 0.0:
+        tc = 0.0
+        sc = _clamp01(-d / a)
+    elif tc > 1.0:
+        tc = 1.0
+        sc = _clamp01((b - d) / a)
+    dp = w0 + sc * u - tc * v
+    return np.sqrt(np.dot(dp, dp))
+
+
+class SegmentDistanceTests(unittest.TestCase):
+    """Issue #5/#6: segment-segment distance with Sunday/Lumelsky re-projection."""
+
+    def _d(self, p1, p2, q1, q2):
+        return _segment_segment_distance(
+            np.array(p1, dtype=float), np.array(p2, dtype=float),
+            np.array(q1, dtype=float), np.array(q2, dtype=float),
+        )
+
+    def test_skew_segments_reprojection(self):
+        """Issue #5: buggy=1.414, correct=sqrt(1.8) after re-projection."""
+        d = self._d([0, 0, 0], [2, 1, 0], [-1, 3, 0], [1, 2, 0])
+        self.assertAlmostEqual(d, np.sqrt(1.8), places=10)
+
+    def test_parallel_overlapping_segments(self):
+        """Issue #6: buggy=8.06, correct=1.0 for overlapping parallel segments."""
+        d = self._d([0, 0, 0], [10, 0, 0], [8, 1, 0], [20, 1, 0])
+        self.assertAlmostEqual(d, 1.0, places=10)
+
+    def test_collinear_gap(self):
+        d = self._d([0, 0, 0], [1, 0, 0], [3, 0, 0], [5, 0, 0])
+        self.assertAlmostEqual(d, 2.0, places=10)
+
+    def test_perpendicular_touching(self):
+        d = self._d([0, 0, 0], [1, 0, 0], [0.5, 0, 0], [0.5, 1, 0])
+        self.assertAlmostEqual(d, 0.0, places=10)
+
+    def test_point_to_segment(self):
+        d = self._d([0, 2, 0], [0, 2, 0], [0, 0, 0], [1, 0, 0])
+        self.assertAlmostEqual(d, 2.0, places=10)
+
+    def test_parallel_non_overlapping(self):
+        d = self._d([0, 0, 0], [3, 0, 0], [5, 1, 0], [8, 1, 0])
+        self.assertAlmostEqual(d, np.sqrt(5.0), places=10)
+
+    def test_t_shaped(self):
+        d = self._d([0, 0, 0], [2, 0, 0], [1, 0.5, 0], [1, 3, 0])
+        self.assertAlmostEqual(d, 0.5, places=10)
+
+    def test_both_degenerate(self):
+        d = self._d([1, 2, 3], [1, 2, 3], [4, 5, 6], [4, 5, 6])
+        self.assertAlmostEqual(d, np.linalg.norm([3, 3, 3]), places=10)
+
+    def test_random_brute_force(self):
+        """Verify against exhaustive interior + edge search on 1000 random pairs."""
+        rng = np.random.RandomState(12345)
+        for _ in range(1000):
+            P1, P2, Q1, Q2 = rng.randn(4, 3)
+            d_algo = _segment_segment_distance(P1, P2, Q1, Q2)
+            u = P2 - P1
+            v = Q2 - Q1
+            w0 = P1 - Q1
+            a, bv, c = np.dot(u, u), np.dot(u, v), np.dot(v, v)
+            d_val, e = np.dot(u, w0), np.dot(v, w0)
+            cands = []
+            # Interior (unclamped line-line solution)
+            denom = a * c - bv * bv
+            if denom > 1e-30:
+                sn = (bv * e - c * d_val) / denom
+                tn = (a * e - bv * d_val) / denom
+                if 0.0 <= sn <= 1.0 and 0.0 <= tn <= 1.0:
+                    dp = w0 + sn * u - tn * v
+                    cands.append(np.dot(dp, dp))
+            # Four edge optima
+            for sf in [0.0, 1.0]:
+                to = max(0.0, min(1.0, (e + sf * bv) / c)) if c > 1e-30 else 0.0
+                dp = w0 + sf * u - to * v
+                cands.append(np.dot(dp, dp))
+            for tf in [0.0, 1.0]:
+                so = max(0.0, min(1.0, (tf * bv - d_val) / a)) if a > 1e-30 else 0.0
+                dp = w0 + so * u - tf * v
+                cands.append(np.dot(dp, dp))
+            d_brute = np.sqrt(min(cands))
+            self.assertAlmostEqual(d_algo, d_brute, places=9,
+                                   msg=f"Mismatch: algo={d_algo}, brute={d_brute}")
+
+
+class CrossSectionNormalizationTests(unittest.TestCase):
+    """Issue #8/#9: cross_section phi argument must be normalized to [0,1]."""
+
+    def test_single_stage_source_divides_by_2pi(self):
+        """Verify the deployed source uses phi_slice / (2 * np.pi), not * 2 * np.pi."""
+        source = EXAMPLE_MODULE_PATH.read_text()
+        self.assertIn("phi_slice / (2 * np.pi)", source)
+        self.assertNotIn("phi_slice * 2 * np.pi", source)
+
+    def test_stage2_source_divides_by_2pi(self):
+        """Verify banana_coil_solver.py source uses the correct normalization."""
+        source = STAGE2_MODULE_PATH.read_text()
+        self.assertIn("phi_slice / (2 * np.pi)", source)
+        self.assertNotIn("phi_slice * 2 * np.pi", source)
+
+
+class FtolGtolDefaultTests(unittest.TestCase):
+    """Issue #31: ftol/gtol must not be None for any mpol value."""
+
+    def test_ftol_gtol_have_defaults_for_all_mpol(self):
+        module = load_single_stage_example_module()
+        ftol_by_mpol = module.ftol_by_mpol
+        gtol_by_mpol = module.gtol_by_mpol
+        for mpol in range(1, 30):
+            ftol = ftol_by_mpol.get(mpol, 1e-5 if mpol < 8 else 1e-10)
+            gtol = gtol_by_mpol.get(mpol, 1e-2 if mpol < 8 else 1e-7)
+            self.assertIsNotNone(ftol, f"ftol is None for mpol={mpol}")
+            self.assertIsNotNone(gtol, f"gtol is None for mpol={mpol}")
+            self.assertIsInstance(ftol, float, f"ftol not float for mpol={mpol}")
+            self.assertIsInstance(gtol, float, f"gtol not float for mpol={mpol}")
+            self.assertGreater(ftol, 0, f"ftol not positive for mpol={mpol}")
+            self.assertGreater(gtol, 0, f"gtol not positive for mpol={mpol}")
+
+    def test_defaults_match_dictionary_endpoints(self):
+        module = load_single_stage_example_module()
+        ftol_by_mpol = module.ftol_by_mpol
+        gtol_by_mpol = module.gtol_by_mpol
+        self.assertEqual(ftol_by_mpol.get(7, 1e-5 if 7 < 8 else 1e-10), 1e-5)
+        self.assertEqual(ftol_by_mpol.get(19, 1e-5 if 19 < 8 else 1e-10), 1e-10)
+        self.assertEqual(gtol_by_mpol.get(7, 1e-2 if 7 < 8 else 1e-7), 1e-2)
+        self.assertEqual(gtol_by_mpol.get(19, 1e-2 if 19 < 8 else 1e-7), 1e-7)
+
+    def test_source_uses_default_argument(self):
+        """The deployed .get() calls must include a default, not bare .get(mpol)."""
+        source = EXAMPLE_MODULE_PATH.read_text()
+        self.assertNotIn("ftol_by_mpol.get(mpol)", source)
+        self.assertNotIn("gtol_by_mpol.get(mpol)", source)
+
+
 if __name__ == "__main__":
     unittest.main()
