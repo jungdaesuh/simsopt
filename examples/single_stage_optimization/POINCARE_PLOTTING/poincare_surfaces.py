@@ -99,11 +99,11 @@ if __name__ == "__main__":
     EXAMPLE_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, ".."))
     _default_out_dir = os.path.join(EXAMPLE_ROOT, "SINGLE_STAGE", "outputs", "mpol=8-ntor=6")
     OUT_DIR = os.environ.get("POINCARE_OUT_DIR", _default_out_dir)
-    bs = load(OUT_DIR + f'/biot_savart_init.json')
+    bs = load(OUT_DIR + '/biot_savart_init.json')
 
-    surf = load(OUT_DIR + f'/surf_init.json')
+    surf = load(OUT_DIR + '/surf_init.json')
     # Extend surface, since we want to look at field lines beyond it
-    surf_extended = load(OUT_DIR + f'/surf_init.json')
+    surf_extended = load(OUT_DIR + '/surf_init.json')
     surf_extended.extend_via_normal(0.05)
 
     # Use extended surface to determine initial conditions
@@ -130,7 +130,7 @@ if __name__ == "__main__":
             bfield, R0, Z0, tmax=tmax_fl, tol=tol,
             phis=phis, stopping_criteria=stop_crit)
         # Main field line tracing
-        plot_poincare_data(fieldlines_phi_hits, phis, OUT_DIR + f'/PoincarePlot.png', dpi=600, surf=surf, mark_lost=False)
+        plot_poincare_data(fieldlines_phi_hits, phis, OUT_DIR + '/PoincarePlot.png', dpi=600, surf=surf, mark_lost=False)
         return fieldlines_phi_hits
 
     # Determine range for measuring field line data points

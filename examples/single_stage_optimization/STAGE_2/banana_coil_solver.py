@@ -556,7 +556,7 @@ if __name__ == "__main__":
     fieldError = magneticFieldPlots(new_surf, new_bs, OUT_DIR_ITER)
 
     # Save the optimized coil shapes and currents so they can be loaded into other scripts for analysis:
-    new_bs.save(OUT_DIR_ITER + "biot_savart_opt.json");
+    new_bs.save(OUT_DIR_ITER + "biot_savart_opt.json")
     #new_surf.save(OUT_DIR_ITER + "surf_opt.json");
     print(f'Banana Coil Current / TF Current = {new_banana_coils[0].current.get_value() / new_tf_coils[0].current.get_value():.3f}\n')
 

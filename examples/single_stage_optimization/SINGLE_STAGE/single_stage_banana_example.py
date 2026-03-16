@@ -1,4 +1,5 @@
 import argparse
+import hashlib
 import os
 import io
 import json
@@ -389,7 +390,7 @@ class BoozerResidualExact(Optimizable):
 
         self.surface.set_dofs(self.in_surface.get_dofs())
         self.biotsavart.set_points(self.surface.gamma().reshape((-1, 3)))
- 
+
         nphi = self.surface.quadpoints_phi.size
         ntheta = self.surface.quadpoints_theta.size
         num_points = 3 * nphi * ntheta
@@ -427,7 +428,6 @@ class BoozerResidualExact(Optimizable):
         """
         
         surface = self.surface
-        res = self.boozer_surface.res
         nphi = self.surface.quadpoints_phi.size
         ntheta = self.surface.quadpoints_theta.size
         num_points = 3 * nphi * ntheta
@@ -537,7 +537,7 @@ def fun(x):
     JF.x = x
 
     # Run boozer surface
-    res = boozer_surface.run_code(run_dict['iota'], run_dict['G'])
+    boozer_surface.run_code(run_dict['iota'], run_dict['G'])
 
     # Check success
     success1 = False
@@ -760,7 +760,13 @@ if __name__ == "__main__":
     # ==============================================================================
     print(f"\n===== Starting single stage optimization for mpol = {mpol} =====")
 
-    OUT_DIR_ITER = OUT_DIR + f"/mpol={mpol}-ntor={ntor}"
+    config_str = (
+        f"{stage2_bs_path}|{stage}|{CONSTRAINT_WEIGHT}|{vol_target}|{iota_target}"
+        f"|{args.cc_dist}|{args.cc_weight}|{args.curvature_weight}|{args.curvature_threshold}"
+        f"|{banana_surf_radius}|{nphi}|{ntheta}|{args.init_only}"
+    )
+    config_hash = hashlib.sha256(config_str.encode()).hexdigest()[:8]
+    OUT_DIR_ITER = OUT_DIR + f"/mpol={mpol}-ntor={ntor}-{config_hash}"
     os.makedirs(OUT_DIR_ITER, exist_ok=True)
 
     # Initialize Boozer surface with target parameters
@@ -770,16 +776,16 @@ if __name__ == "__main__":
     # SAVE INITIAL STATE
     # ==============================================================================
     # Save initial coil configurations
-    curves_to_vtk(curves, OUT_DIR_ITER + f"/curves_init", close=True)
-    bs.save(OUT_DIR_ITER + f"/biot_savart_init.json")
+    curves_to_vtk(curves, OUT_DIR_ITER + "/curves_init", close=True)
+    bs.save(OUT_DIR_ITER + "/biot_savart_init.json")
 
     # Save initial surface with magnetic field normal component data
     bs.set_points(boozer_surface.surface.gamma().reshape((-1, 3)))
     unitn = boozer_surface.surface.unitnormal()
     pointData = {"B_N/B": np.sum(bs.B().reshape(unitn.shape) *
         unitn, axis=2)[:, :, None] / np.sqrt(np.sum(bs.B().reshape(unitn.shape)**2, axis=2))[:, :, None]}
-    boozer_surface.surface.to_vtk(OUT_DIR_ITER + f"/surf_init", extra_data=pointData)
-    boozer_surface.surface.save(OUT_DIR_ITER + f"/surf_init.json")
+    boozer_surface.surface.to_vtk(OUT_DIR_ITER + "/surf_init", extra_data=pointData)
+    boozer_surface.surface.save(OUT_DIR_ITER + "/surf_init.json")
     print(f"Volume: {boozer_surface.surface.volume()}")
 
     # Generate initial diagnostic plots
@@ -889,8 +895,8 @@ if __name__ == "__main__":
             unitn, axis=2)[:, :, None] / np.sqrt(np.sum(bs.B().reshape(unitn.shape)**2, axis=2))[:, :, None]}
 
         # Print final results
-        boozer_surface.surface.to_vtk(OUT_DIR_ITER + f"/surf_opt", extra_data=pointData)
-        boozer_surface.surface.save(OUT_DIR_ITER + f"/surf_opt.json")
+        boozer_surface.surface.to_vtk(OUT_DIR_ITER + "/surf_opt", extra_data=pointData)
+        boozer_surface.surface.save(OUT_DIR_ITER + "/surf_opt.json")
 
         final_volume = boozer_surface.surface.volume()
         final_iota = Iotas(boozer_surface).J()
