@@ -10,16 +10,9 @@ from simsopt.geo import (SurfaceRZFourier, curves_to_vtk, create_equally_spaced_
                          CurveLength, CurveCurveDistance, LpCurveCurvature)
 from simsopt.objectives import SquaredFlux, QuadraticPenalty
 from simsopt.geo import CurveCWSFourierCPP
-from simsopt.field import InterpolatedField
-from simsopt.field import SurfaceClassifier, \
-    compute_fieldlines, LevelsetStoppingCriterion, plot_poincare_data
 import matplotlib.pyplot as plt
 import json
-from shapely.geometry import Polygon
-import copy
-import shutil
 from numba import njit
-from itertools import combinations
 
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -412,7 +405,6 @@ def crossSectionPlot(surf_coils, surf, banana_curve, OUT_DIR_ITER):
     cs3 = hbt.cross_section(0)
     rs3 = np.sqrt(cs3[:,0]**2 + cs3[:,1]**2); rs3 = np.append(rs3, rs3[0])
     zs3 = cs3[:,2]; zs3 = np.append(zs3, zs3[0])
-    hbt_poly = Polygon(zip(rs3, zs3))
     plt.plot(rs3, zs3, label='HBT LCFS')
     cs_vv = VV.cross_section(0)
     rs_vv = np.sqrt(cs_vv[:, 0]**2 + cs_vv[:, 1]**2); zs_vv = cs_vv[:, 2]

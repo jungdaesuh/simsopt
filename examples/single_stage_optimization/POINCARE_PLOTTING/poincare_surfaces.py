@@ -1,12 +1,9 @@
 # SIMSOPT imports
 from simsopt._core.optimizable import load
 from simsopt.field import InterpolatedField
-from simsopt.field import SurfaceClassifier, \
-    compute_fieldlines, LevelsetStoppingCriterion
+from simsopt.field import compute_fieldlines
 import numpy as np
 from simsopt.field import MaxZStoppingCriterion, MinZStoppingCriterion, MaxRStoppingCriterion, MinRStoppingCriterion
-from simsopt.geo import SurfaceRZFourier
-from matplotlib.lines import Line2D
 
 
 def plot_poincare_data(fieldlines_phi_hits, phis, filename, mark_lost=False, aspect='equal', dpi=600, xlims=None,

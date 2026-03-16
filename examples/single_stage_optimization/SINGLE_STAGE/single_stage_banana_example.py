@@ -3,7 +3,6 @@ import os
 import io
 import json
 import numpy as np
-from shapely.geometry import Polygon
 from scipy.optimize import minimize
 
 # SIMSOPT imports
@@ -22,8 +21,7 @@ from simsopt.geo.curveobjectives import CurveCurveDistance, CurveSurfaceDistance
 from simsopt.field import BiotSavart, Coil, Current
 from simsopt.objectives import QuadraticPenalty, SquaredFlux
 from simsopt.objectives.utilities import forward_backward
-from simsopt._core.optimizable import load, save
-from simsopt.field.coil import ScaledCurrent
+from simsopt._core.optimizable import load
 import matplotlib.pyplot as plt
 from simsopt._core.derivative import derivative_dec
 
@@ -493,7 +491,6 @@ def crossSectionPlot(surf_coils, surf, banana_curve, filename):
     cs3 = hbt.cross_section(0)
     rs3 = np.sqrt(cs3[:,0]**2 + cs3[:,1]**2); rs3 = np.append(rs3, rs3[0])
     zs3 = cs3[:,2]; zs3 = np.append(zs3, zs3[0])
-    hbt_poly = Polygon(zip(rs3, zs3))
     plt.plot(rs3, zs3, label='HBT LCFS')
     cs_vv = VV.cross_section(0)
     rs_vv = np.sqrt(cs_vv[:, 0]**2 + cs_vv[:, 1]**2); zs_vv = cs_vv[:, 2]

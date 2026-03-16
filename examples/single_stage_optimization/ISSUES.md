@@ -17,6 +17,10 @@ plus 1000-pair random brute-force. All Batch 2 fixes covered by committed regres
 `tests/geo/test_single_stage_example.py` (segment distance tests extract the real deployed
 function via AST; cross-section and ftol/gtol tests use source-level and module-level
 assertions). `ftol_by_mpol`/`gtol_by_mpol` moved to module scope for testability.
+**Batch 3:** [Issue 25](#25), [Issue 26](#26) (dead `hbt_poly` variables),
+[Issue 27](#27), [Issue 28](#28), [Issue 29](#29) (unused imports) in
+`banana_coil_solver.py`, `single_stage_banana_example.py`, and `poincare_surfaces.py`.
+Pure deletion of dead code and unused imports; validated via `py_compile` and reviewer agent.
 Unless otherwise noted, the issue descriptions below still describe the pre-fix audit state.
 
 ---
@@ -68,11 +72,11 @@ Unless otherwise noted, the issue descriptions below still describe the pre-fix 
 | [22](#22) | M | poincare | 94 | Hardcoded relative `OUT_DIR` |
 | [23](#23) | M | cross-file | -- | Duplicated `crossSectionPlot`/`normPlot` with identical bugs |
 | [24](#24) | M | cross-file | -- | No `if __name__ == "__main__"` guard in any script |
-| [25](#25) | L | banana_coil | 354 | Dead `hbt_poly` variable |
-| [26](#26) | L | single_stage | 487 | Dead `hbt_poly` variable (duplicate) |
-| [27](#27) | L | banana_coil | 13-22 | Unused imports |
-| [28](#28) | L | single_stage | 6, 16, 17 | Unused imports (`Polygon`, `save`, `ScaledCurrent`) |
-| [29](#29) | L | poincare | 4-5, 9 | Unused imports (`SurfaceClassifier`, `LevelsetStoppingCriterion`, `Line2D`) |
+| [25](#25) | L | banana_coil | ~~354~~ | ~~Dead `hbt_poly` variable~~ :white_check_mark: |
+| [26](#26) | L | single_stage | ~~487~~ | ~~Dead `hbt_poly` variable (duplicate)~~ :white_check_mark: |
+| [27](#27) | L | banana_coil | ~~13-22~~ | ~~Unused imports~~ :white_check_mark: |
+| [28](#28) | L | single_stage | ~~6, 16, 17~~ | ~~Unused imports (`Polygon`, `save`, `ScaledCurrent`)~~ :white_check_mark: |
+| [29](#29) | L | poincare | ~~4-5, 9~~ | ~~Unused imports (`SurfaceClassifier`, `LevelsetStoppingCriterion`, `Line2D`)~~ :white_check_mark: |
 | [30](#30) | L | banana_coil | 509 | `tol=1e-15` is exceptionally strict |
 | [31](#31) | L | single_stage | 852-853 | `ftol`/`gtol` returns `None` for out-of-range `mpol` (crashes) |
 | [32](#32) | L | poincare | 30-31 | Leaked matplotlib figure |
