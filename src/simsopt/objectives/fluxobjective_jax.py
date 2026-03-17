@@ -94,11 +94,10 @@ class SquaredFluxJAX(Optimizable):
         gammas, gammadashs, currents = self.field._extract_coil_data()
         _, (dg, dgd, dc) = self._jit_val_grad(gammas, gammadashs, currents)
 
+        dg_np = np.asarray(dg)
+        dgd_np = np.asarray(dgd)
+        dc_np = np.asarray(dc)
         return sum(
-            coil.vjp(
-                np.asarray(dg[i]),
-                np.asarray(dgd[i]),
-                np.asarray([float(dc[i])]),
-            )
+            coil.vjp(dg_np[i], dgd_np[i], np.asarray([dc_np[i]]))
             for i, coil in enumerate(self.field.coils)
         )

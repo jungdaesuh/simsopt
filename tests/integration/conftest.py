@@ -38,6 +38,15 @@ def _patch_meta_path_finder():
         "simsopt.objectives.integral_bdotn_jax": os.path.join(
             jax_src, "objectives", "integral_bdotn_jax.py"
         ),
+        "simsopt.geo.label_constraints_jax": os.path.join(
+            jax_src, "geo", "label_constraints_jax.py"
+        ),
+        "simsopt.geo.optimizer_jax": os.path.join(
+            jax_src, "geo", "optimizer_jax.py"
+        ),
+        "simsopt.geo.boozersurface_jax": os.path.join(
+            jax_src, "geo", "boozersurface_jax.py"
+        ),
     }
 
     for finder in sys.meta_path:

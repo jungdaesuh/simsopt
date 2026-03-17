@@ -1,10 +1,19 @@
 """
-Pure JAX Boozer residual scalar objective.
+Pure JAX Boozer residual functions.
 
-Replaces the C++ kernels ``sopp.boozer_residual``,
-``sopp.boozer_residual_ds``, and ``sopp.boozer_residual_ds2``
-with a single forward function whose gradient and Hessian are
-obtained automatically via ``jax.grad`` and ``jax.hessian``.
+This module provides two layers:
+
+**M1 primitives** — ``boozer_residual_scalar``, ``boozer_residual_grad``,
+``boozer_residual_hessian`` operate on pre-computed B/xphi/xtheta arrays
+and differentiate only through (iota, G).  Surface DOF derivatives are
+zero because field data is treated as constant.
+
+**M3 composed pipeline** — ``boozer_penalty_composed``,
+``boozer_penalty_grad_composed``, ``boozer_residual_jacobian_composed``,
+``boozer_residual_coil_vjp`` trace through the full
+DOFs → surface geometry → Biot-Savart → residual chain via JAX autodiff,
+replacing the C++ kernels ``sopp.boozer_residual_ds``,
+``sopp.boozer_residual_ds2``, and ``sopp.boozer_dresidual_dc``.
 
 The residual at each grid point is
 
@@ -31,6 +40,11 @@ __all__ = [
     "boozer_residual_scalar",
     "boozer_residual_grad",
     "boozer_residual_hessian",
+    "boozer_residual_vector",
+    "boozer_penalty_composed",
+    "boozer_penalty_grad_composed",
+    "boozer_residual_jacobian_composed",
+    "boozer_residual_coil_vjp",
 ]
 
 
@@ -65,8 +79,9 @@ def boozer_residual_scalar(G, iota, B, xphi, xtheta, weight_inv_modB=True):
 
 
 # ---------------------------------------------------------------------------
-# M1-only gradient / Hessian wrappers (will be replaced by composed
-# surface → BiotSavart → residual pipeline in M2)
+# M1 gradient / Hessian wrappers (iota/G only, surface DOFs are constants).
+# For the full composed pipeline through surface DOFs, use the M3 functions:
+# boozer_penalty_grad_composed() and boozer_residual_jacobian_composed().
 # ---------------------------------------------------------------------------
 
 
@@ -89,14 +104,12 @@ def _boozer_objective_from_packed(x, nsurfdofs, B, xphi, xtheta, weight_inv_modB
 def boozer_residual_grad(G, iota, B, xphi, xtheta, nsurfdofs, weight_inv_modB=True):
     """Gradient of the Boozer residual w.r.t. [surface_dofs, iota, G].
 
-    The gradient w.r.t. *surface_dofs* is zero here because B, xphi,
-    xtheta are provided as constants (not differentiated through the
-    surface evaluation).  The gradient w.r.t. *iota* and *G* is
-    non-trivial.
+    Surface DOF gradient entries are zero because B, xphi, xtheta are
+    treated as constants (not differentiated through surface evaluation).
+    Only iota and G entries are non-trivial.
 
-    For the full pipeline (M2+), the caller should compose surface
-    evaluation → BiotSavart → this function and differentiate the
-    composition.
+    For the full composed pipeline (DOFs → geometry → field → residual),
+    use :func:`boozer_penalty_grad_composed` instead.
 
     Returns:
         grad: (nsurfdofs + 2,) gradient vector.
@@ -113,6 +126,10 @@ def boozer_residual_grad(G, iota, B, xphi, xtheta, nsurfdofs, weight_inv_modB=Tr
 def boozer_residual_hessian(G, iota, B, xphi, xtheta, nsurfdofs, weight_inv_modB=True):
     """Hessian of the Boozer residual w.r.t. [surface_dofs, iota, G].
 
+    Surface DOF Hessian blocks are zero because B, xphi, xtheta are
+    treated as constants.  For the full composed pipeline, use
+    ``jax.hessian(boozer_penalty_composed)`` instead.
+
     Returns:
         H: (nsurfdofs + 2, nsurfdofs + 2) Hessian matrix.
     """
@@ -123,3 +140,331 @@ def boozer_residual_hessian(G, iota, B, xphi, xtheta, nsurfdofs, weight_inv_modB
         )
     )
     return hess_fn(x0)
+
+
+# ---------------------------------------------------------------------------
+# M3: Composed derivative path (DOFs → geometry → field → residual)
+# ---------------------------------------------------------------------------
+
+
+def boozer_residual_vector(G, iota, B, xphi, xtheta, weight_inv_modB=True):
+    """Boozer residual vector (not the scalar 0.5||r||²/N).
+
+    Returns the weighted residual at each grid point, flattened.
+
+    Args:
+        G, iota: Boozer parameters.
+        B:      (nphi, ntheta, 3) magnetic field on the surface.
+        xphi:   (nphi, ntheta, 3) toroidal tangent.
+        xtheta: (nphi, ntheta, 3) poloidal tangent.
+        weight_inv_modB: weight by 1/|B| if True.
+
+    Returns:
+        (nphi*ntheta*3,) flattened residual vector.
+    """
+    tang = xphi + iota * xtheta
+    B2 = jnp.sum(B * B, axis=-1)
+    residual = G * B - B2[..., None] * tang
+
+    if weight_inv_modB:
+        w = 1.0 / jnp.sqrt(B2)
+        residual = w[..., None] * residual
+
+    return residual.ravel()
+
+
+def _get_surface_fns():
+    """Lazily import surface geometry functions (avoids simsopt top-level)."""
+    from simsopt.geo.surface_fourier_jax import (
+        surface_gamma_from_dofs,
+        surface_gammadash1_from_dofs,
+        surface_gammadash2_from_dofs,
+    )
+
+    return (
+        surface_gamma_from_dofs,
+        surface_gammadash1_from_dofs,
+        surface_gammadash2_from_dofs,
+    )
+
+
+def _get_biot_savart():
+    """Lazily import Biot-Savart (avoids simsopt top-level)."""
+    from simsopt.field.biotsavart_jax import biot_savart_B
+
+    return biot_savart_B
+
+
+def _surface_geometry_from_dofs(
+    sdofs,
+    quadpoints_phi,
+    quadpoints_theta,
+    mpol,
+    ntor,
+    nfp,
+    stellsym,
+    scatter_indices,
+):
+    """Evaluate gamma, gammadash1, gammadash2 from surface DOFs.
+
+    Pure function suitable for JAX tracing.  Used by both the composed
+    M3 pipeline and the M4 solver (``boozersurface_jax.py``).
+    """
+    sgf, sg1f, sg2f = _get_surface_fns()
+    args = (
+        sdofs,
+        quadpoints_phi,
+        quadpoints_theta,
+        mpol,
+        ntor,
+        nfp,
+        stellsym,
+        scatter_indices,
+    )
+    return sgf(*args), sg1f(*args), sg2f(*args)
+
+
+def _unpack_decision_vector(x, coil_currents, optimize_G):
+    """Unpack decision vector into (sdofs, iota, G)."""
+    if optimize_G:
+        return x[:-2], x[-2], x[-1]
+    mu0 = 4.0 * jnp.pi * 1e-7
+    return x[:-1], x[-1], mu0 * jnp.sum(jnp.abs(coil_currents))
+
+
+def _composed_pipeline(
+    x,
+    *,
+    coil_gammas,
+    coil_gammadashs,
+    coil_currents,
+    quadpoints_phi,
+    quadpoints_theta,
+    mpol,
+    ntor,
+    nfp,
+    stellsym,
+    scatter_indices,
+    optimize_G,
+):
+    """Shared pipeline: unpack x → surface geometry → Biot-Savart field.
+
+    Returns (sdofs, iota, G, gamma, xphi, xtheta, B).
+    """
+    sdofs, iota, G = _unpack_decision_vector(x, coil_currents, optimize_G)
+
+    gamma, xphi, xtheta = _surface_geometry_from_dofs(
+        sdofs,
+        quadpoints_phi,
+        quadpoints_theta,
+        mpol,
+        ntor,
+        nfp,
+        stellsym,
+        scatter_indices,
+    )
+
+    bs_B = _get_biot_savart()
+    B = bs_B(gamma.reshape(-1, 3), coil_gammas, coil_gammadashs, coil_currents)
+    B = B.reshape(gamma.shape)
+
+    return sdofs, iota, G, gamma, xphi, xtheta, B
+
+
+def boozer_penalty_composed(
+    x,
+    *,
+    coil_gammas,
+    coil_gammadashs,
+    coil_currents,
+    quadpoints_phi,
+    quadpoints_theta,
+    mpol,
+    ntor,
+    nfp,
+    stellsym,
+    scatter_indices,
+    optimize_G,
+    weight_inv_modB=True,
+):
+    """Composed scalar penalty objective: DOFs → geometry → field → residual → scalar.
+
+    The decision vector is ``x = [surface_dofs, iota]`` (optimize_G=False)
+    or ``x = [surface_dofs, iota, G]`` (optimize_G=True).
+
+    Args:
+        x: (n,) flat decision vector.
+        coil_gammas: (ncoils, nquad, 3) coil positions.
+        coil_gammadashs: (ncoils, nquad, 3) coil tangents.
+        coil_currents: (ncoils,) coil currents.
+        quadpoints_phi, quadpoints_theta: quadrature grids.
+        mpol, ntor, nfp: surface resolution.
+        stellsym: stellarator symmetry flag.
+        scatter_indices: stellsym DOF scatter indices (or None).
+        optimize_G: whether G is in the decision vector.
+        weight_inv_modB: weight residual by 1/|B|.
+
+    Returns:
+        Scalar objective value.
+    """
+    _, iota, G, _, xphi, xtheta, B = _composed_pipeline(
+        x,
+        coil_gammas=coil_gammas,
+        coil_gammadashs=coil_gammadashs,
+        coil_currents=coil_currents,
+        quadpoints_phi=quadpoints_phi,
+        quadpoints_theta=quadpoints_theta,
+        mpol=mpol,
+        ntor=ntor,
+        nfp=nfp,
+        stellsym=stellsym,
+        scatter_indices=scatter_indices,
+        optimize_G=optimize_G,
+    )
+    return boozer_residual_scalar(G, iota, B, xphi, xtheta, weight_inv_modB)
+
+
+def boozer_penalty_grad_composed(x, **kwargs):
+    """VJP-based gradient of the composed penalty objective.
+
+    Uses reverse-mode autodiff through the full pipeline:
+    DOFs → surface geometry → Biot-Savart → residual → scalar.
+
+    Args:
+        x: (n,) flat decision vector.
+        **kwargs: forwarded to :func:`boozer_penalty_composed`.
+
+    Returns:
+        (val, grad): scalar objective value and (n,) gradient vector.
+    """
+    return jax.value_and_grad(boozer_penalty_composed)(x, **kwargs)
+
+
+def _boozer_residual_vector_composed(
+    x,
+    *,
+    coil_gammas,
+    coil_gammadashs,
+    coil_currents,
+    quadpoints_phi,
+    quadpoints_theta,
+    mpol,
+    ntor,
+    nfp,
+    stellsym,
+    scatter_indices,
+    optimize_G=True,
+    weight_inv_modB=False,
+):
+    """Composed residual vector: DOFs → geometry → field → residual vector.
+
+    The decision vector is ``x = [surface_dofs, iota, G]`` (optimize_G=True,
+    default for BoozerExact) or ``x = [surface_dofs, iota]``
+    (optimize_G=False).
+
+    Returns:
+        (nphi*ntheta*3,) flattened residual vector.
+    """
+    _, iota, G, _, xphi, xtheta, B = _composed_pipeline(
+        x,
+        coil_gammas=coil_gammas,
+        coil_gammadashs=coil_gammadashs,
+        coil_currents=coil_currents,
+        quadpoints_phi=quadpoints_phi,
+        quadpoints_theta=quadpoints_theta,
+        mpol=mpol,
+        ntor=ntor,
+        nfp=nfp,
+        stellsym=stellsym,
+        scatter_indices=scatter_indices,
+        optimize_G=optimize_G,
+    )
+    return boozer_residual_vector(G, iota, B, xphi, xtheta, weight_inv_modB)
+
+
+def boozer_residual_jacobian_composed(
+    x,
+    **kwargs,
+):
+    """Explicit Jacobian of the composed residual vector.
+
+    Uses ``jax.jacfwd`` to compute the full Jacobian matrix
+    ``J[i,k] = ∂r_i/∂x_k`` where ``r`` is the residual vector and
+    ``x = [surface_dofs, iota, G]`` (optimize_G=True) or
+    ``x = [surface_dofs, iota]`` (optimize_G=False).
+
+    This replaces the hand-coded C++ chain:
+    ``sopp.boozer_dresidual_dc`` + ``dgamma_by_dcoeff`` + ``dB_by_dX``.
+
+    Args:
+        x: (n,) flat decision vector.
+        **kwargs: forwarded to :func:`_boozer_residual_vector_composed`.
+
+    Returns:
+        (r, J): residual vector (n_res,) and Jacobian (n_res, n).
+    """
+    r = _boozer_residual_vector_composed(x, **kwargs)
+    J = jax.jacfwd(_boozer_residual_vector_composed)(x, **kwargs)
+    return r, J
+
+
+def boozer_residual_coil_vjp(
+    adjoint,
+    *,
+    gamma,
+    xphi,
+    xtheta,
+    coil_gammas,
+    coil_gammadashs,
+    coil_currents,
+    iota,
+    G,
+    weight_inv_modB=False,
+):
+    """VJP of Boozer residual w.r.t. coil parameters (outer path).
+
+    Given an adjoint vector (from the outer optimization), computes
+    sensitivities of ``adjoint^T @ r`` w.r.t. coil geometry and currents
+    via reverse-mode autodiff through Biot-Savart.
+
+    This replaces the CPU chain:
+    ``boozer_surface_residual_dB()`` → ``B_vjp()`` →
+    ``sopp.biot_savart_vjp_graph()``.
+
+    The surface geometry (gamma, xphi, xtheta) is held fixed — this
+    function computes how the residual changes when the magnetic field
+    changes due to coil parameter variations.
+
+    Args:
+        adjoint: (nphi*ntheta*3,) adjoint vector from outer solve.
+        gamma:   (nphi, ntheta, 3) fixed surface positions.
+        xphi:    (nphi, ntheta, 3) fixed toroidal tangent.
+        xtheta:  (nphi, ntheta, 3) fixed poloidal tangent.
+        coil_gammas: (ncoils, nquad, 3) coil positions.
+        coil_gammadashs: (ncoils, nquad, 3) coil tangents.
+        coil_currents: (ncoils,) coil currents.
+        iota: rotational transform (scalar).
+        G: Boozer G constant (scalar).
+        weight_inv_modB: weight residual by 1/|B|.
+
+    Returns:
+        (d_coil_gammas, d_coil_gammadashs, d_coil_currents):
+        cotangent arrays with same shapes as the coil inputs.
+    """
+    nphi, ntheta = gamma.shape[:2]
+    expected = nphi * ntheta * 3
+    if adjoint.shape != (expected,):
+        raise ValueError(
+            f"adjoint shape {adjoint.shape} != expected ({expected},) "
+            f"for nphi={nphi}, ntheta={ntheta}"
+        )
+    bs_B = _get_biot_savart()
+
+    def residual_of_coils(cg, cgd, ci):
+        points = gamma.reshape(-1, 3)
+        B = bs_B(points, cg, cgd, ci)
+        B = B.reshape(nphi, ntheta, 3)
+        return boozer_residual_vector(G, iota, B, xphi, xtheta, weight_inv_modB)
+
+    _, vjp_fn = jax.vjp(residual_of_coils, coil_gammas, coil_gammadashs, coil_currents)
+    return vjp_fn(adjoint)

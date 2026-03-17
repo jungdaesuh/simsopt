@@ -56,7 +56,9 @@ def integral_BdotN(Bcoil, target, normal, definition="quadratic flux"):
 
     elif definition == "local":
         B2 = jnp.sum(Bcoil * Bcoil, axis=-1)
-        return 0.5 * jnp.sum(BdotN * BdotN / B2 * norm_n) / (nphi * ntheta)
+        safe_B2 = jnp.where(B2 > 0.0, B2, 1.0)
+        inv_B2 = jnp.where(B2 > 0.0, 1.0 / safe_B2, 0.0)
+        return 0.5 * jnp.sum(BdotN * BdotN * inv_B2 * norm_n) / (nphi * ntheta)
 
     else:
         raise ValueError(f"Unknown definition: {definition!r}")

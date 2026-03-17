@@ -15,16 +15,19 @@ import pytest
 import numpy as np
 
 import jax
+
 jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp
 
 _SRC = Path(__file__).resolve().parents[2] / "src" / "simsopt"
+
 
 def _load(name, relpath):
     spec = importlib.util.spec_from_file_location(name, str(_SRC / relpath))
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
+
 
 _br = _load("boozer_residual_jax", "geo/boozer_residual_jax.py")
 boozer_residual_scalar = _br.boozer_residual_scalar
@@ -62,7 +65,9 @@ class TestBoozerResidualScalar:
         rtil = w[..., None] * residual
         J_ref = 0.5 * np.sum(rtil**2) / (3 * nphi * ntheta)
 
-        J_jax = float(boozer_residual_scalar(G, iota, B, xphi, xtheta, weight_inv_modB=True))
+        J_jax = float(
+            boozer_residual_scalar(G, iota, B, xphi, xtheta, weight_inv_modB=True)
+        )
 
         np.testing.assert_allclose(J_jax, J_ref, rtol=1e-14)
 
@@ -80,7 +85,9 @@ class TestBoozerResidualScalar:
         residual = G * B_np - B2[..., None] * tang
         J_ref = 0.5 * np.sum(residual**2) / (3 * nphi * ntheta)
 
-        J_jax = float(boozer_residual_scalar(G, iota, B, xphi, xtheta, weight_inv_modB=False))
+        J_jax = float(
+            boozer_residual_scalar(G, iota, B, xphi, xtheta, weight_inv_modB=False)
+        )
 
         np.testing.assert_allclose(J_jax, J_ref, rtol=1e-14)
 
@@ -101,10 +108,16 @@ class TestBoozerResidualScalar:
         alpha = G / tang_sq
         B = alpha * tang
 
-        J = float(boozer_residual_scalar(
-            G, iota, jnp.array(B), jnp.array(xphi), jnp.array(xtheta),
-            weight_inv_modB=False,
-        ))
+        J = float(
+            boozer_residual_scalar(
+                G,
+                iota,
+                jnp.array(B),
+                jnp.array(xphi),
+                jnp.array(xtheta),
+                weight_inv_modB=False,
+            )
+        )
         np.testing.assert_allclose(J, 0.0, atol=1e-20)
 
 
@@ -192,7 +205,9 @@ class TestBoozerResidualM1Limitations:
         grad = boozer_residual_grad(G, iota, B, xphi, xtheta, nsurfdofs)
         # First nsurfdofs entries should be exactly zero
         np.testing.assert_allclose(
-            np.array(grad[:nsurfdofs]), 0.0, atol=1e-30,
+            np.array(grad[:nsurfdofs]),
+            0.0,
+            atol=1e-30,
         )
         # iota and G entries should be nonzero
         assert float(jnp.abs(grad[-2])) > 1e-10

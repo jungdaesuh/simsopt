@@ -21,6 +21,7 @@ For stellarator symmetry the caller must zero out the forbidden entries
 """
 
 import numpy as np
+import jax
 import jax.numpy as jnp
 
 __all__ = [
@@ -35,8 +36,12 @@ __all__ = [
     "surface_gammadash2_from_dofs",
     "surface_normal_from_dofs",
     "surface_volume",
+    "surface_area",
     "stellsym_scatter_indices",
     "dofs_to_xyzc",
+    "dgamma_by_dcoeff",
+    "dgammadash1_by_dcoeff",
+    "dgammadash2_by_dcoeff",
 ]
 
 # ---------------------------------------------------------------------------
@@ -363,6 +368,11 @@ def surface_gamma_from_dofs(
 def _dofs_to_xyzc_any(dofs, mpol, ntor, stellsym, scatter_indices):
     """Internal helper: unpack DOFs to (xc, yc, zc) for both stellsym modes."""
     if stellsym:
+        if scatter_indices is None:
+            raise ValueError(
+                "scatter_indices required for stellsym=True. "
+                "Precompute with stellsym_scatter_indices(mpol, ntor)."
+            )
         return dofs_to_xyzc(dofs, scatter_indices, mpol, ntor)
     n_per_coord = (2 * mpol + 1) * (2 * ntor + 1)
     shape = (2 * mpol + 1, 2 * ntor + 1)
@@ -445,3 +455,69 @@ def surface_volume(gamma, normal):
     nphi, ntheta = gamma.shape[:2]
     integrand = jnp.sum(gamma * normal, axis=-1)  # (nphi, ntheta)
     return jnp.sum(integrand) / (3.0 * nphi * ntheta)
+
+
+def surface_area(normal):
+    """Compute the surface area of a toroidal surface.
+
+    ``A = ∫∫ |n| dφ dθ``
+    where ``n = gammadash1 × gammadash2`` is the unnormalized normal.
+
+    Args:
+        normal: (nphi, ntheta, 3) unnormalized normal vectors.
+
+    Returns:
+        Scalar area.
+    """
+    nphi, ntheta = normal.shape[:2]
+    norm_n = jnp.sqrt(jnp.sum(normal * normal, axis=-1))  # (nphi, ntheta)
+    return jnp.sum(norm_n) / (nphi * ntheta)
+
+
+# ---------------------------------------------------------------------------
+# Surface coefficient Jacobians (M3)
+# ---------------------------------------------------------------------------
+
+
+def _dcoeff_jacobian(fn):
+    """Build a surface coefficient Jacobian function from a ``_from_dofs`` evaluator."""
+
+    def wrapper(dofs, quadpoints_phi, quadpoints_theta, mpol, ntor, nfp,
+                stellsym, scatter_indices=None):
+        return jax.jacfwd(fn, argnums=0)(
+            dofs, quadpoints_phi, quadpoints_theta,
+            mpol, ntor, nfp, stellsym, scatter_indices,
+        )
+
+    return wrapper
+
+
+dgamma_by_dcoeff = _dcoeff_jacobian(surface_gamma_from_dofs)
+dgamma_by_dcoeff.__doc__ = """\
+Jacobian of gamma w.r.t. surface DOFs via forward-mode autodiff.
+
+Replaces ``sopp.SurfaceXYZTensorFourier.dgamma_by_dcoeff()``.
+
+Returns:
+    (nphi, ntheta, 3, ndofs) where ``result[i,j,l,k] = ∂γ_l(φ_i,θ_j)/∂dof_k``.
+"""
+
+dgammadash1_by_dcoeff = _dcoeff_jacobian(surface_gammadash1_from_dofs)
+dgammadash1_by_dcoeff.__doc__ = """\
+Jacobian of gammadash1 w.r.t. surface DOFs via forward-mode autodiff.
+
+Replaces ``sopp.SurfaceXYZTensorFourier.dgammadash1_by_dcoeff()``.
+
+Returns:
+    (nphi, ntheta, 3, ndofs) where ``result[i,j,l,k] = ∂(∂γ/∂φ)_l(φ_i,θ_j)/∂dof_k``.
+"""
+
+dgammadash2_by_dcoeff = _dcoeff_jacobian(surface_gammadash2_from_dofs)
+dgammadash2_by_dcoeff.__doc__ = """\
+Jacobian of gammadash2 w.r.t. surface DOFs via forward-mode autodiff.
+
+Replaces ``sopp.SurfaceXYZTensorFourier.dgammadash2_by_dcoeff()``.
+
+Returns:
+    (nphi, ntheta, 3, ndofs) where ``result[i,j,l,k] = ∂(∂γ/∂θ)_l(φ_i,θ_j)/∂dof_k``.
+"""

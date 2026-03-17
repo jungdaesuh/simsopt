@@ -59,9 +59,15 @@ class BiotSavartJAX(Optimizable):
             gammadashs: (ncoils, nquad, 3)
             currents:   (ncoils,)
         """
-        gammas = jnp.asarray(np.stack([c.curve.gamma() for c in self._coils]))
-        gammadashs = jnp.asarray(np.stack([c.curve.gammadash() for c in self._coils]))
-        currents = jnp.asarray(np.array([c.current.get_value() for c in self._coils]))
+        gammas = jnp.asarray(
+            np.stack([c.curve.gamma() for c in self._coils]), dtype=jnp.float64
+        )
+        gammadashs = jnp.asarray(
+            np.stack([c.curve.gammadash() for c in self._coils]), dtype=jnp.float64
+        )
+        currents = jnp.asarray(
+            np.array([c.current.get_value() for c in self._coils]), dtype=jnp.float64
+        )
         return gammas, gammadashs, currents
 
     # ------------------------------------------------------------------
@@ -125,11 +131,10 @@ class BiotSavartJAX(Optimizable):
         _, vjp_fn = jax.vjp(fwd, gammas, gammadashs, currents)
         dg, dgd, dc = vjp_fn(jnp.asarray(v))
 
+        dg_np = np.asarray(dg)
+        dgd_np = np.asarray(dgd)
+        dc_np = np.asarray(dc)
         return sum(
-            coil.vjp(
-                np.asarray(dg[i]),
-                np.asarray(dgd[i]),
-                np.asarray([float(dc[i])]),
-            )
+            coil.vjp(dg_np[i], dgd_np[i], np.asarray([dc_np[i]]))
             for i, coil in enumerate(self._coils)
         )
