@@ -35,7 +35,7 @@ ruff format <changed-files>
 # M1–M4 unit tests (no simsoptpp) — 84 pass, 5 skip
 conda run -n columbia-repro-b4815f18 python -m pytest tests/field/test_biotsavart_jax.py tests/geo/test_surface_fourier_jax.py tests/geo/test_boozer_residual_jax.py tests/objectives/test_integral_bdotn_jax.py tests/geo/test_boozer_derivatives_jax.py tests/geo/test_boozersurface_jax.py -v
 
-# M2+M5 integration tests (needs simsoptpp) — 19 pass
+# M2+M5 integration tests (needs simsoptpp) — 20 pass
 /Users/suhjungdae/code/hbt-compare/envs/candidate-fixed/bin/python -m pytest tests/integration/ -v
 ```
 
@@ -135,7 +135,7 @@ from simsopt.backend import get_backend, is_jax_backend, get_jax_platform
 - **Boozer grad/hessian**: M1 wrappers only differentiate through iota/G. Surface DOF derivatives require the composed pipeline (M3+).
 - **M3 composed derivatives**: `boozer_penalty_composed()`, `boozer_penalty_grad_composed()`, `boozer_residual_jacobian_composed()`, `boozer_residual_coil_vjp()` in `boozer_residual_jax.py` — pure Boozer pipeline without label constraints.
 - **M4 VJP calling convention**: The JAX VJP hooks stored in `res['vjp']` have signature `(lm, booz_surf, iota, G)`, NOT the CPU signature `(lm, booz_surf)`. This is because JAX VJPs construct the decision vector from explicit args rather than reading `booz_surf` internal state.
-- **M5 implicit differentiation**: `BoozerResidualJAX`, `IotasJAX`, `NonQuasiSymmetricRatioJAX` use the IFT adjoint formula: `dJ/d_coils = ∂J/∂coils − adj^T ∂g/∂coils` where `adj = PLU^{−T} ∂J/∂x_inner`. The PLU and VJP come from `BoozerSurfaceJAX.run_code()` result dict. FD-validated via two complementary tests: (1) fixed-surface FD validates the direct B→coil term (`rel_err < 1e-10`); (2) `IotasJAX.dJ()` re-solve FD validates the full adjoint pipeline (`rel_err < 1e-6`).
+- **M5 implicit differentiation**: `BoozerResidualJAX`, `IotasJAX`, `NonQuasiSymmetricRatioJAX` use the IFT adjoint formula: `dJ/d_coils = ∂J/∂coils − adj^T ∂g/∂coils` where `adj = PLU^{−T} ∂J/∂x_inner`. The PLU and VJP come from `BoozerSurfaceJAX.run_code()` result dict. **Validation status**: strong component-level evidence (fixed-surface FD for direct term, deterministic adjoint-solve consistency, VJP finite-derivative test, IotasJAX pure-adjoint pipeline). End-to-end re-solve FD for the full composed derivative when the adjoint term materially matters is deferred pending a stable representative fixture (current toy grids are inadequate — inner Boozer solve branch-switches under coil perturbation).
 - **M5 adapter pattern**: The JAX objective wrappers use CPU surface objects (`surface.gamma()`, `label.J()`) for value computation, and JAX autodiff through `_surface_geometry_from_dofs`/`biot_savart_B` for gradient computation. This is by design (M0 contract adapter pattern): CPU objects at the boundary, JAX on the gradient hot path.
 - **JIT closure strategy**: `SquaredFluxJAX` captures fixed surface arrays (gamma, normal, target) in JIT closures at construction time. Valid for Stage 2 (fixed surface). Do not call `field.set_points()` after constructing `SquaredFluxJAX`.
 - **Coil data round-trip**: `BiotSavartJAX._extract_coil_data()` reads coil geometry from C++ every call. Acceptable for M2 CPU-mode JIT benefit; GPU-native coil evaluation is a later milestone.

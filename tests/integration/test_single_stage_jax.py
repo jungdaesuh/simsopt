@@ -372,16 +372,16 @@ class TestCompositeObjective:
 
 
 class TestBoozerResidualGradientFD:
-    """BoozerResidualJAX.dJ() direct term matches fixed-surface FD."""
+    """End-to-end BoozerResidualJAX.dJ() vs fixed-surface FD.
 
-    def test_direct_term_fd(self, boozer_setup):
-        """Validate the ∂J/∂coils direct term via fixed-surface FD.
+    Calls the real composed method ``dJ_by_dcoils - adj_derivative``
+    and compares against FD at fixed surface.  At a converged Boozer
+    surface the adjoint term ≈ 0 (∂J_BR/∂x_inner ≈ 0), so the
+    composed gradient equals the direct term.  This validates the
+    full code path through ``BoozerResidualJAX.compute()``.
+    """
 
-        At a converged Boozer surface, the adjoint term ≈ 0 (since
-        ∂J_BR/∂x_inner ≈ 0), so the total gradient ≈ the direct term.
-        We validate the direct term by perturbing coils WITHOUT re-solving
-        the Boozer surface (fixed surface FD).
-        """
+    def test_end_to_end_dJ_vs_fd(self, boozer_setup):
         (coils, surf_cpu, surf_jax, bs_cpu, bs_jax, booz_cpu, booz_jax, vol_cpu) = (
             boozer_setup
         )
@@ -391,9 +391,8 @@ class TestBoozerResidualGradientFD:
 
         jr_jax = BoozerResidualJAX(booz_jax, bs_jax)
         jr_jax.J()
-        g = jr_jax.dJ()
+        g_composed = jr_jax.dJ()
 
-        # Fixed-surface FD: perturb coils, evaluate J at FIXED surface
         gamma_fixed = surf_jax.gamma().reshape(-1, 3)
         xphi = jnp.asarray(surf_jax.gammadash1())
         xtheta = jnp.asarray(surf_jax.gammadash2())
@@ -418,23 +417,21 @@ class TestBoozerResidualGradientFD:
             d = rng.randn(len(x0))
             d /= np.linalg.norm(d)
 
-            dd_analytic = float(np.dot(g, d))
+            dd_composed = float(np.dot(g_composed, d))
             dd_fd = (
                 J_at_fixed_surface(x0 + eps * d) - J_at_fixed_surface(x0 - eps * d)
             ) / (2 * eps)
 
-            rel_err = abs(dd_analytic - dd_fd) / (abs(dd_fd) + 1e-30)
+            abs_err = abs(dd_composed - dd_fd)
+            rel_err = abs_err / (abs(dd_fd) + 1e-30)
             print(
-                f"FD check {i}: analytic={dd_analytic:.6e} fd={dd_fd:.6e} "
-                f"rel={rel_err:.2e}"
+                f"E2E FD[{i}]: composed={dd_composed:.6e} fd={dd_fd:.6e} "
+                f"rel={rel_err:.2e} abs={abs_err:.2e}"
             )
-            abs_err = abs(dd_analytic - dd_fd)
             assert rel_err < 1e-3 or abs_err < 1e-8, (
-                f"FD check {i}: rel_err={rel_err:.2e} abs_err={abs_err:.2e} "
-                f"(analytic={dd_analytic:.6e}, fd={dd_fd:.6e})"
+                f"E2E FD[{i}]: rel={rel_err:.2e} abs={abs_err:.2e}"
             )
 
-        # Restore coil state
         bs_jax.x = x0
         bs_jax.set_points(gamma_fixed)
 
@@ -477,3 +474,73 @@ class TestCompositeGradientPipeline:
         assert np.isfinite(j0), "Composite J is not finite"
         assert np.all(np.isfinite(dj0)), "Composite dJ contains NaN/inf"
         assert grad_norm > 0, "Gradient is zero — pipeline may be broken"
+
+
+# -----------------------------------------------------------------------
+# Test 8: Script-level --backend jax constructs JAX objects
+# -----------------------------------------------------------------------
+
+
+class TestScriptBackendSelection:
+    """initialize_boozer_surface(..., backend='jax') uses BoozerSurfaceJAX."""
+
+    def test_jax_backend_constructs_boozer_surface_jax(self, boozer_setup):
+        (coils, surf_cpu, surf_jax, bs_cpu, bs_jax, booz_cpu, booz_jax, vol_cpu) = (
+            boozer_setup
+        )
+        assert type(booz_jax).__name__ == "BoozerSurfaceJAX"
+        assert type(booz_cpu).__name__ == "BoozerSurface"
+
+    def test_initialize_boozer_surface_jax_backend(self):
+        """Call the real initialize_boozer_surface with backend='jax'."""
+        import importlib.util
+        from unittest.mock import MagicMock, patch
+
+        spec = importlib.util.spec_from_file_location(
+            "single_stage",
+            "examples/single_stage_optimization/SINGLE_STAGE/"
+            "single_stage_banana_example.py",
+        )
+        mod = importlib.util.module_from_spec(spec)
+
+        fake_bs = MagicMock()
+        fake_bs.coils = []
+        fake_surf = MagicMock()
+        fake_surf.quadpoints_phi = np.linspace(0, 0.5, 5)
+        fake_surf.quadpoints_theta = np.linspace(0, 1, 5)
+        fake_surf.gamma.return_value = np.zeros((5, 5, 3))
+
+        recorder = MagicMock()
+        recorder.return_value = MagicMock(
+            run_code=MagicMock(return_value={"success": True, "G": 1.0, "iota": 0.3}),
+            surface=MagicMock(
+                is_self_intersecting=MagicMock(return_value=False),
+                volume=MagicMock(return_value=0.1),
+            ),
+        )
+
+        with patch.dict(
+            "sys.modules",
+            {"simsopt.geo.boozersurface_jax": MagicMock(BoozerSurfaceJAX=recorder)},
+        ):
+            spec.loader.exec_module(mod)
+
+            fake_vol = MagicMock()
+            fake_vol.return_value = MagicMock()
+            with patch.object(mod, "Volume", fake_vol), patch.object(
+                mod, "SurfaceXYZTensorFourier", MagicMock(return_value=fake_surf)
+            ):
+                mod.initialize_boozer_surface(
+                    fake_surf,
+                    mpol=2,
+                    ntor=2,
+                    bs=fake_bs,
+                    vol_target=0.1,
+                    constraint_weight=1.0,
+                    iota=0.3,
+                    G0=1.0,
+                    backend="jax",
+                )
+
+        assert recorder.called, "BoozerSurfaceJAX was not constructed"
+        print("initialize_boozer_surface(backend='jax') -> BoozerSurfaceJAX OK")
