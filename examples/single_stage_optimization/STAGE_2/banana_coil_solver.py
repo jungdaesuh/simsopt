@@ -159,6 +159,24 @@ def parse_args():
         default=float(os.environ.get("PHI_WIDTH", "0.03")),
         help="Initial banana-coil toroidal width in normalized angle coordinates.",
     )
+    parser.add_argument(
+        "--curvature-p-norm",
+        type=int,
+        default=int(os.environ.get("CURVATURE_P_NORM", "4")),
+        help="Lp norm exponent for curvature penalty (default 4).",
+    )
+    parser.add_argument(
+        "--num-quadpoints",
+        type=int,
+        default=int(os.environ.get("NUM_QUADPOINTS", "128")),
+        help="Number of quadrature points for coil discretization (default 128).",
+    )
+    parser.add_argument(
+        "--squared-flux-weight",
+        type=float,
+        default=float(os.environ.get("SQUARED_FLUX_WEIGHT", "1.0")),
+        help="Weight on the SquaredFlux term (default 1.0).",
+    )
     return parser.parse_args()
 
 
@@ -468,7 +486,7 @@ if __name__ == "__main__":
     theta_width = args.theta_width
     phi_width = args.phi_width
 
-    num_quadpoints = 128 # number of quadature points for coils
+    num_quadpoints = args.num_quadpoints # number of quadature points for coils
     order = args.order # number of Fourier modes for coils
 
     R0 = args.major_radius # major radius
@@ -509,13 +527,14 @@ if __name__ == "__main__":
     Jls = CurveLength(new_banana_curve) # penalty on curve length
     Jccdist = CurveCurveDistance(new_curves, CC_THRESHOLD) #penalty on coil-to-coil distance
 
-    # Changed p-norm of curvature penalty from 2 to 4 to prevent kinks/dents in the coils
-    Jc = LpCurveCurvature(new_banana_curve, 4, CURVATURE_THRESHOLD)
+    # Lp-norm curvature penalty (configurable via --curvature-p-norm)
+    Jc = LpCurveCurvature(new_banana_curve, args.curvature_p_norm, CURVATURE_THRESHOLD)
     print(f"Initial coil length: {Jls.J():.2f} [m]")
 
     # TOTAL OBJECTIVE FUNCTION -
     # we'll penalize the coil length, coil-coil distance, and curvature while minimizing the normal field
-    JF = Jf \
+    SQUARED_FLUX_WEIGHT = args.squared_flux_weight
+    JF = SQUARED_FLUX_WEIGHT * Jf \
         + LENGTH_WEIGHT * QuadraticPenalty(Jls, LENGTH_TARGET, "max") \
         + CC_WEIGHT * Jccdist \
         + CURVATURE_WEIGHT * Jc
