@@ -20,6 +20,7 @@ if _JAX_BACKEND not in _VALID_JAX_BACKENDS:
 import jax as _jax
 
 _jax.config.update("jax_platforms", _JAX_BACKEND)
+_jax.config.update("jax_enable_x64", True)
 del _os, _jax
 
 # Two ways of achieving the above-mentioned objective
