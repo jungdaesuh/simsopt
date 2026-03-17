@@ -15,6 +15,8 @@ __all__ = [
     "biot_savart_B",
     "biot_savart_dB_by_dX",
     "biot_savart_B_and_dB",
+    "biot_savart_A",
+    "biot_savart_dA_by_dX",
 ]
 
 # μ₀ / (4π) in SI units  [T·m/A]
@@ -126,3 +128,80 @@ def biot_savart_B_and_dB(points, gammas, gammadashs, currents):
 
     B, dB_dX = jax.vmap(_val_and_jac)(points)
     return B, dB_dX
+
+
+# ---------------------------------------------------------------------------
+# Vector potential  A(x) = (μ₀/4π) Σ_k I_k ∫ Γ'_k / |Γ_k − x| dφ
+# ---------------------------------------------------------------------------
+
+
+def _biot_savart_A_one_point(x, gammas, gammadashs, currents):
+    """Biot-Savart vector potential A at a single evaluation point.
+
+    Args:
+        x: (3,) evaluation point.
+        gammas: (ncoils, nquad, 3) coil curve positions.
+        gammadashs: (ncoils, nquad, 3) coil curve tangent vectors dγ/dφ.
+        currents: (ncoils,) coil currents [A].
+
+    Returns:
+        A: (3,) vector potential [T·m].
+    """
+    diff = gammas - x  # (ncoils, nquad, 3)
+    r2 = jnp.sum(diff * diff, axis=-1)  # (ncoils, nquad)
+    safe_r2 = jnp.where(r2 > 0, r2, 1.0)
+    r_inv = jnp.where(r2 > 0, safe_r2 ** (-0.5), 0.0)  # 1/|r|
+
+    # A integrand:  Γ'_k / |Γ_k − x|
+    integrand = gammadashs * r_inv[..., None]  # (ncoils, nquad, 3)
+    integral = jnp.mean(integrand, axis=1)  # (ncoils, 3)
+
+    A = _MU0_OVER_4PI * jnp.einsum("c,cj->j", currents, integral)
+    return A
+
+
+@jax.jit
+def biot_savart_A(points, gammas, gammadashs, currents):
+    """Compute the Biot-Savart vector potential at many evaluation points.
+
+    .. math::
+
+        \\mathbf A(\\mathbf x) = \\frac{\\mu_0}{4\\pi}
+        \\sum_k I_k \\int_0^1
+        \\frac{\\Gamma_k'}{\\|\\Gamma_k - \\mathbf x\\|}\\,d\\varphi
+
+    Args:
+        points: (npoints, 3) evaluation points.
+        gammas: (ncoils, nquad, 3) coil positions.
+        gammadashs: (ncoils, nquad, 3) coil tangent vectors.
+        currents: (ncoils,) coil currents [A].
+
+    Returns:
+        A: (npoints, 3) vector potential [T·m].
+    """
+    return jax.vmap(_biot_savart_A_one_point, in_axes=(0, None, None, None))(
+        points, gammas, gammadashs, currents
+    )
+
+
+@jax.jit
+def biot_savart_dA_by_dX(points, gammas, gammadashs, currents):
+    """Compute the spatial Jacobian dA/dX at many evaluation points.
+
+    Follows SIMSOPT convention: ``dA_dX[p, j, l] = ∂_j A_l(x_p)``.
+
+    Args:
+        points: (npoints, 3) evaluation points.
+        gammas: (ncoils, nquad, 3) coil positions.
+        gammadashs: (ncoils, nquad, 3) coil tangent vectors.
+        currents: (ncoils,) coil currents [A].
+
+    Returns:
+        dA_dX: (npoints, 3, 3) where ``dA_dX[p, j, l] = ∂_j A_l``.
+    """
+    jac_fn = jax.jacfwd(_biot_savart_A_one_point, argnums=0)
+    raw = jax.vmap(
+        lambda x: jac_fn(x, gammas, gammadashs, currents),
+        in_axes=0,
+    )(points)
+    return jnp.swapaxes(raw, -1, -2)

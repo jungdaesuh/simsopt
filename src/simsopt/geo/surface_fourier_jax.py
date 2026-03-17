@@ -20,6 +20,7 @@ For stellarator symmetry the caller must zero out the forbidden entries
 *before* calling these functions; no masking is applied here.
 """
 
+import numpy as np
 import jax.numpy as jnp
 
 __all__ = [
@@ -30,6 +31,12 @@ __all__ = [
     "surface_gammadash2",
     "surface_normal",
     "surface_gamma_from_dofs",
+    "surface_gammadash1_from_dofs",
+    "surface_gammadash2_from_dofs",
+    "surface_normal_from_dofs",
+    "surface_volume",
+    "stellsym_scatter_indices",
+    "dofs_to_xyzc",
 ]
 
 # ---------------------------------------------------------------------------
@@ -234,28 +241,207 @@ def surface_normal(quadpoints_phi, quadpoints_theta, xc, yc, zc, mpol, ntor, nfp
 # ---------------------------------------------------------------------------
 
 
-def surface_gamma_from_dofs(
-    dofs, quadpoints_phi, quadpoints_theta, mpol, ntor, nfp, stellsym
-):
-    """Evaluate gamma as a pure function of the flat dof vector.
+# ---------------------------------------------------------------------------
+# Stellsym DOF ↔ coefficient mapping
+# ---------------------------------------------------------------------------
 
-    This is the entry point for JAX autodiff w.r.t. surface degrees of
-    freedom: ``jax.jacfwd(surface_gamma_from_dofs)(dofs, ...)``.
 
-    The dof vector is packed as ``[x_dofs, y_dofs, z_dofs]`` where each
-    block is the flattened coefficient matrix (row-major) with stellsym
-    masking applied.  For the feasibility spike the caller must supply
-    the *full* coefficient matrices via :func:`surface_gamma`.
+def _is_stellsym_xy(m, n, mpol, ntor):
+    """True if (m, n) index is free for x̂/ŷ under stellsym.
 
-    .. warning::
-        **M1 limitation — no stellsym masking.**  This function unpacks
-        assuming every entry in the ``(2*mpol+1, 2*ntor+1)`` matrix is
-        free.  For stellsym surfaces, callers must use :func:`surface_gamma`
-        with pre-masked coefficient matrices instead.  Stellsym DOF packing
-        will be added in M2.
+    Allowed quadrants: cos-cos (rows 0..mpol, cols 0..ntor)
+    and sin-sin (rows mpol+1..2*mpol, cols ntor+1..2*ntor).
+    """
+    is_cos_theta = m <= mpol
+    is_sin_theta = m > mpol
+    is_cos_phi = n <= ntor
+    is_sin_phi = n > ntor
+    return (is_cos_theta and is_cos_phi) or (is_sin_theta and is_sin_phi)
+
+
+def _is_stellsym_z(m, n, mpol, ntor):
+    """True if (m, n) index is free for z under stellsym.
+
+    Allowed quadrants: cos-sin (rows 0..mpol, cols ntor+1..2*ntor)
+    and sin-cos (rows mpol+1..2*mpol, cols 0..ntor).
+    """
+    is_cos_theta = m <= mpol
+    is_sin_theta = m > mpol
+    is_cos_phi = n <= ntor
+    is_sin_phi = n > ntor
+    return (is_cos_theta and is_sin_phi) or (is_sin_theta and is_cos_phi)
+
+
+def stellsym_scatter_indices(mpol, ntor):
+    """Compute scatter indices for stellsym DOF unpacking.
+
+    The returned array maps DOF index ``i`` to position in the flattened
+    ``[xc, yc, zc]`` super-vector (each block of length
+    ``(2*mpol+1)*(2*ntor+1)``).
+
+    Returns:
+        indices: (ndofs,) int array.
     """
     n_per_coord = (2 * mpol + 1) * (2 * ntor + 1)
-    xc = dofs[:n_per_coord].reshape((2 * mpol + 1, 2 * ntor + 1))
-    yc = dofs[n_per_coord : 2 * n_per_coord].reshape((2 * mpol + 1, 2 * ntor + 1))
-    zc = dofs[2 * n_per_coord :].reshape((2 * mpol + 1, 2 * ntor + 1))
+    indices = []
+    for coord_offset, allowed_fn in [
+        (0, _is_stellsym_xy),
+        (n_per_coord, _is_stellsym_xy),
+        (2 * n_per_coord, _is_stellsym_z),
+    ]:
+        for m in range(2 * mpol + 1):
+            for n in range(2 * ntor + 1):
+                if allowed_fn(m, n, mpol, ntor):
+                    indices.append(coord_offset + m * (2 * ntor + 1) + n)
+    return np.array(indices, dtype=np.int32)
+
+
+def dofs_to_xyzc(sdofs, scatter_indices, mpol, ntor):
+    """Scatter surface DOFs into full ``(xc, yc, zc)`` coefficient matrices.
+
+    JAX-traceable: supports autodiff through the scatter operation.
+
+    Args:
+        sdofs: (ndofs,) free surface DOFs.
+        scatter_indices: (ndofs,) int array from :func:`stellsym_scatter_indices`.
+        mpol, ntor: surface resolution.
+
+    Returns:
+        xc, yc, zc: each (2*mpol+1, 2*ntor+1).
+    """
+    n_per_coord = (2 * mpol + 1) * (2 * ntor + 1)
+    flat = jnp.zeros(3 * n_per_coord).at[scatter_indices].set(sdofs)
+    shape = (2 * mpol + 1, 2 * ntor + 1)
+    xc = flat[:n_per_coord].reshape(shape)
+    yc = flat[n_per_coord : 2 * n_per_coord].reshape(shape)
+    zc = flat[2 * n_per_coord :].reshape(shape)
+    return xc, yc, zc
+
+
+def surface_gamma_from_dofs(
+    dofs,
+    quadpoints_phi,
+    quadpoints_theta,
+    mpol,
+    ntor,
+    nfp,
+    stellsym,
+    scatter_indices=None,
+):
+    """Evaluate gamma as a pure function of the flat DOF vector.
+
+    This is the entry point for JAX autodiff w.r.t. surface degrees of
+    freedom: ``jax.grad(f)(dofs, ...)`` where ``f`` composes this function
+    with downstream objectives.
+
+    Args:
+        dofs: flat DOF vector (free coefficients only if stellsym).
+        quadpoints_phi, quadpoints_theta: quadrature grids.
+        mpol, ntor, nfp: surface resolution and field periods.
+        stellsym: whether stellarator symmetry is active.
+        scatter_indices: precomputed from :func:`stellsym_scatter_indices`.
+            Required when ``stellsym=True``.
+
+    Returns:
+        gamma: (nphi, ntheta, 3) Cartesian positions.
+    """
+    if stellsym:
+        if scatter_indices is None:
+            raise ValueError(
+                "scatter_indices required for stellsym=True. "
+                "Precompute with stellsym_scatter_indices(mpol, ntor)."
+            )
+        xc, yc, zc = dofs_to_xyzc(dofs, scatter_indices, mpol, ntor)
+    else:
+        n_per_coord = (2 * mpol + 1) * (2 * ntor + 1)
+        xc = dofs[:n_per_coord].reshape((2 * mpol + 1, 2 * ntor + 1))
+        yc = dofs[n_per_coord : 2 * n_per_coord].reshape((2 * mpol + 1, 2 * ntor + 1))
+        zc = dofs[2 * n_per_coord :].reshape((2 * mpol + 1, 2 * ntor + 1))
     return surface_gamma(quadpoints_phi, quadpoints_theta, xc, yc, zc, mpol, ntor, nfp)
+
+
+def _dofs_to_xyzc_any(dofs, mpol, ntor, stellsym, scatter_indices):
+    """Internal helper: unpack DOFs to (xc, yc, zc) for both stellsym modes."""
+    if stellsym:
+        return dofs_to_xyzc(dofs, scatter_indices, mpol, ntor)
+    n_per_coord = (2 * mpol + 1) * (2 * ntor + 1)
+    shape = (2 * mpol + 1, 2 * ntor + 1)
+    xc = dofs[:n_per_coord].reshape(shape)
+    yc = dofs[n_per_coord : 2 * n_per_coord].reshape(shape)
+    zc = dofs[2 * n_per_coord :].reshape(shape)
+    return xc, yc, zc
+
+
+def surface_gammadash1_from_dofs(
+    dofs,
+    quadpoints_phi,
+    quadpoints_theta,
+    mpol,
+    ntor,
+    nfp,
+    stellsym,
+    scatter_indices=None,
+):
+    """Evaluate dγ/dφ as a pure function of DOFs (autodiff-compatible)."""
+    xc, yc, zc = _dofs_to_xyzc_any(dofs, mpol, ntor, stellsym, scatter_indices)
+    return surface_gammadash1(
+        quadpoints_phi, quadpoints_theta, xc, yc, zc, mpol, ntor, nfp
+    )
+
+
+def surface_gammadash2_from_dofs(
+    dofs,
+    quadpoints_phi,
+    quadpoints_theta,
+    mpol,
+    ntor,
+    nfp,
+    stellsym,
+    scatter_indices=None,
+):
+    """Evaluate dγ/dθ as a pure function of DOFs (autodiff-compatible)."""
+    xc, yc, zc = _dofs_to_xyzc_any(dofs, mpol, ntor, stellsym, scatter_indices)
+    return surface_gammadash2(
+        quadpoints_phi, quadpoints_theta, xc, yc, zc, mpol, ntor, nfp
+    )
+
+
+def surface_normal_from_dofs(
+    dofs,
+    quadpoints_phi,
+    quadpoints_theta,
+    mpol,
+    ntor,
+    nfp,
+    stellsym,
+    scatter_indices=None,
+):
+    """Evaluate unnormalized normal as a pure function of DOFs."""
+    xc, yc, zc = _dofs_to_xyzc_any(dofs, mpol, ntor, stellsym, scatter_indices)
+    return surface_normal(quadpoints_phi, quadpoints_theta, xc, yc, zc, mpol, ntor, nfp)
+
+
+# ---------------------------------------------------------------------------
+# Volume computation
+# ---------------------------------------------------------------------------
+
+
+def surface_volume(gamma, normal):
+    """Compute the volume enclosed by a toroidal surface.
+
+    Uses the divergence theorem:
+    ``V = (1/3) ∫∫ γ · n dφ dθ``
+    where ``n = gammadash1 × gammadash2`` is the unnormalized normal.
+
+    The ``nfp`` factor cancels with the quadrature step size.
+
+    Args:
+        gamma:  (nphi, ntheta, 3) surface positions.
+        normal: (nphi, ntheta, 3) unnormalized normal vectors.
+
+    Returns:
+        Scalar volume.
+    """
+    nphi, ntheta = gamma.shape[:2]
+    integrand = jnp.sum(gamma * normal, axis=-1)  # (nphi, ntheta)
+    return jnp.sum(integrand) / (3.0 * nphi * ntheta)

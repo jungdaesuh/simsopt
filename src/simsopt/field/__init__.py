@@ -12,8 +12,17 @@ from .wireframefield import *
 from .selffield import *
 from .magnetic_axis_helpers import *
 
+_jax_field_all = []
+try:
+    from .biotsavart_jax_backend import *
+
+    _jax_field_all = biotsavart_jax_backend.__all__
+except ImportError:
+    pass
+
 __all__ = (
     biotsavart.__all__
+    + _jax_field_all
     + boozermagneticfield.__all__
     + coil.__all__
     + coilset.__all__

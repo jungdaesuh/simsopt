@@ -55,8 +55,11 @@ def boozer_residual_scalar(G, iota, B, xphi, xtheta, weight_inv_modB=True):
     B2 = jnp.sum(B * B, axis=-1)  # (nphi, ntheta)
     residual = G * B - B2[..., None] * tang  # (nphi, ntheta, 3)
 
-    w = jnp.where(weight_inv_modB, jnp.sqrt(1.0 / B2), 1.0)  # (nphi, ntheta)
-    rtil = w[..., None] * residual  # (nphi, ntheta, 3)
+    if weight_inv_modB:
+        w = jnp.sqrt(1.0 / B2)  # (nphi, ntheta)
+        rtil = w[..., None] * residual  # (nphi, ntheta, 3)
+    else:
+        rtil = residual
 
     return 0.5 * jnp.sum(rtil * rtil) / num_res
 
