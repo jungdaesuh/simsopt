@@ -8,7 +8,14 @@ from scipy.optimize import minimize
 
 # SIMSOPT imports
 from simsopt._core.optimizable import Optimizable
-from simsopt.geo import SurfaceRZFourier, SurfaceXYZTensorFourier, BoozerSurface, curves_to_vtk, CurveLength, LpCurveCurvature
+from simsopt.geo import (
+    SurfaceRZFourier,
+    SurfaceXYZTensorFourier,
+    BoozerSurface,
+    curves_to_vtk,
+    CurveLength,
+    LpCurveCurvature,
+)
 from simsopt.geo.surfaceobjectives import (
     Volume,
     BoozerResidual,
@@ -29,14 +36,22 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 EXAMPLE_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, ".."))
 
 import sys
+
 sys.path.insert(0, EXAMPLE_ROOT)
 from plotting_utils import norm_field_plot, cross_section_plot
+
 SIMSOPT_ROOT = os.path.abspath(os.path.join(EXAMPLE_ROOT, "..", ".."))
 REPO_ROOT = os.path.abspath(os.path.join(SIMSOPT_ROOT, ".."))
 DATABASE_EQUILIBRIA_DIR = os.path.join(REPO_ROOT, "DATABASE", "EQUILIBRIA")
-DEFAULT_EQUILIBRIA_DIR = DATABASE_EQUILIBRIA_DIR if os.path.isdir(DATABASE_EQUILIBRIA_DIR) else os.path.join(EXAMPLE_ROOT, "equilibria")
+DEFAULT_EQUILIBRIA_DIR = (
+    DATABASE_EQUILIBRIA_DIR
+    if os.path.isdir(DATABASE_EQUILIBRIA_DIR)
+    else os.path.join(EXAMPLE_ROOT, "equilibria")
+)
 DEFAULT_LOCAL_STAGE2_ROOT = os.path.join(EXAMPLE_ROOT, "STAGE_2")
-DEFAULT_DATABASE_STAGE2_ROOT = os.path.join(REPO_ROOT, "DATABASE", "COIL_OPTIMIZATION", "outputs")
+DEFAULT_DATABASE_STAGE2_ROOT = os.path.join(
+    REPO_ROOT, "DATABASE", "COIL_OPTIMIZATION", "outputs"
+)
 DEFAULT_SINGLE_STAGE_OUTPUT_ROOT = os.path.join(SCRIPT_DIR, "outputs")
 DEFAULT_STAGE2_SEEDS_BY_PLASMA = {
     "wout_nfp22ginsburg_000_014417_iota15.nc": {
@@ -68,7 +83,17 @@ def format_compact_float(value):
     return f"{value:g}"
 
 
-def format_local_stage2_seed_dir(major_radius, toroidal_flux, length_weight, cc_weight, cc_threshold, curvature_weight, curvature_threshold, banana_surf_radius, order):
+def format_local_stage2_seed_dir(
+    major_radius,
+    toroidal_flux,
+    length_weight,
+    cc_weight,
+    cc_threshold,
+    curvature_weight,
+    curvature_threshold,
+    banana_surf_radius,
+    order,
+):
     return (
         f"R0={format_compact_float(major_radius)}"
         f"-s={format_compact_float(toroidal_flux)}"
@@ -82,7 +107,15 @@ def format_local_stage2_seed_dir(major_radius, toroidal_flux, length_weight, cc_
     )
 
 
-def format_database_stage2_seed_dir(major_radius, toroidal_flux, length_weight, cc_weight, curvature_weight, banana_surf_radius, order):
+def format_database_stage2_seed_dir(
+    major_radius,
+    toroidal_flux,
+    length_weight,
+    cc_weight,
+    curvature_weight,
+    banana_surf_radius,
+    order,
+):
     return (
         f"MR={format_compact_float(major_radius)}"
         f"-TF={format_compact_float(toroidal_flux)}"
@@ -152,7 +185,9 @@ def build_stage2_bs_path(args):
         "biot_savart_opt.json",
     )
     if os.path.exists(legacy):
-        print(f"Note: found legacy Stage 2 output at {legacy_dir}/ (missing CCT/CT segments)")
+        print(
+            f"Note: found legacy Stage 2 output at {legacy_dir}/ (missing CCT/CT segments)"
+        )
         return legacy
 
     return candidate
@@ -194,9 +229,13 @@ def apply_default_stage2_seed_args(args):
     if args.stage2_seed_cc_threshold is None:
         args.stage2_seed_cc_threshold = default_seed.get("cc_threshold", 0.05)
     if args.stage2_seed_curvature_threshold is None:
-        args.stage2_seed_curvature_threshold = default_seed.get("curvature_threshold", 40.0)
+        args.stage2_seed_curvature_threshold = default_seed.get(
+            "curvature_threshold", 40.0
+        )
     if args.stage2_seed_banana_surf_radius is None:
-        args.stage2_seed_banana_surf_radius = default_seed.get("banana_surf_radius", 0.22)
+        args.stage2_seed_banana_surf_radius = default_seed.get(
+            "banana_surf_radius", 0.22
+        )
     if args.stage2_seed_order is None:
         args.stage2_seed_order = default_seed.get("order", 2)
     return args
@@ -208,7 +247,9 @@ def parse_args():
     )
     parser.add_argument(
         "--plasma-surf-filename",
-        default=os.environ.get("PLASMA_SURF_FILENAME", "wout_nfp22ginsburg_000_014417_iota15.nc"),
+        default=os.environ.get(
+            "PLASMA_SURF_FILENAME", "wout_nfp22ginsburg_000_014417_iota15.nc"
+        ),
         help="VMEC wout filename under the equilibria directory.",
     )
     parser.add_argument(
@@ -223,17 +264,23 @@ def parse_args():
     )
     parser.add_argument(
         "--output-root",
-        default=os.environ.get("SINGLE_STAGE_OUTPUT_ROOT", DEFAULT_SINGLE_STAGE_OUTPUT_ROOT),
+        default=os.environ.get(
+            "SINGLE_STAGE_OUTPUT_ROOT", DEFAULT_SINGLE_STAGE_OUTPUT_ROOT
+        ),
         help="Directory where the single-stage output family will be written.",
     )
     parser.add_argument(
         "--banana-surf-radius",
         type=float,
-        default=float(os.environ["BANANA_SURF_RADIUS"]) if "BANANA_SURF_RADIUS" in os.environ else None,
+        default=float(os.environ["BANANA_SURF_RADIUS"])
+        if "BANANA_SURF_RADIUS" in os.environ
+        else None,
         help="Coil surface minor radius. Defaults to the Stage 2 seed radius when omitted.",
     )
     parser.add_argument("--nphi", type=int, default=int(os.environ.get("NPHI", "255")))
-    parser.add_argument("--ntheta", type=int, default=int(os.environ.get("NTHETA", "64")))
+    parser.add_argument(
+        "--ntheta", type=int, default=int(os.environ.get("NTHETA", "64"))
+    )
     parser.add_argument(
         "--init-only",
         action="store_true",
@@ -241,21 +288,47 @@ def parse_args():
     )
     parser.add_argument("--mpol", type=int, default=int(os.environ.get("MPOL", "8")))
     parser.add_argument("--ntor", type=int, default=int(os.environ.get("NTOR", "6")))
-    parser.add_argument("--vol-target", type=float, default=float(os.environ.get("VOL_TARGET", "0.10")))
-    parser.add_argument("--constraint-weight", type=float, default=float(os.environ.get("CONSTRAINT_WEIGHT", "1.0")))
-    parser.add_argument("--maxiter", type=int, default=int(os.environ.get("MAXITER", "300")))
-    parser.add_argument("--iota-target", type=float, default=float(os.environ.get("IOTA_TARGET", "0.15")))
-    parser.add_argument("--num-tf-coils", type=int, default=int(os.environ.get("NUM_TF_COILS", "20")))
+    parser.add_argument(
+        "--vol-target", type=float, default=float(os.environ.get("VOL_TARGET", "0.10"))
+    )
+    parser.add_argument(
+        "--constraint-weight",
+        type=float,
+        default=float(os.environ.get("CONSTRAINT_WEIGHT", "1.0")),
+    )
+    parser.add_argument(
+        "--maxiter", type=int, default=int(os.environ.get("MAXITER", "300"))
+    )
+    parser.add_argument(
+        "--iota-target",
+        type=float,
+        default=float(os.environ.get("IOTA_TARGET", "0.15")),
+    )
+    parser.add_argument(
+        "--num-tf-coils", type=int, default=int(os.environ.get("NUM_TF_COILS", "20"))
+    )
     parser.add_argument(
         "--boozer-stage",
         choices=["initial", "final"],
         default=os.environ.get("BOOZER_STAGE", "initial"),
         help="Use least-squares Boozer residual during initial stage or exact residual during final stage.",
     )
-    parser.add_argument("--cc-dist", type=float, default=float(os.environ.get("CC_DIST", "0.05")))
-    parser.add_argument("--curvature-threshold", type=float, default=float(os.environ.get("CURVATURE_THRESHOLD", "20")))
-    parser.add_argument("--cc-weight", type=float, default=float(os.environ.get("CC_WEIGHT", "100")))
-    parser.add_argument("--curvature-weight", type=float, default=float(os.environ.get("CURVATURE_WEIGHT", "0.1")))
+    parser.add_argument(
+        "--cc-dist", type=float, default=float(os.environ.get("CC_DIST", "0.05"))
+    )
+    parser.add_argument(
+        "--curvature-threshold",
+        type=float,
+        default=float(os.environ.get("CURVATURE_THRESHOLD", "20")),
+    )
+    parser.add_argument(
+        "--cc-weight", type=float, default=float(os.environ.get("CC_WEIGHT", "100"))
+    )
+    parser.add_argument(
+        "--curvature-weight",
+        type=float,
+        default=float(os.environ.get("CURVATURE_WEIGHT", "0.1")),
+    )
     parser.add_argument(
         "--stage2-source",
         choices=["database", "local"],
@@ -280,47 +353,71 @@ def parse_args():
     parser.add_argument(
         "--stage2-seed-major-radius",
         type=float,
-        default=float(os.environ["STAGE2_SEED_MAJOR_RADIUS"]) if "STAGE2_SEED_MAJOR_RADIUS" in os.environ else None,
+        default=float(os.environ["STAGE2_SEED_MAJOR_RADIUS"])
+        if "STAGE2_SEED_MAJOR_RADIUS" in os.environ
+        else None,
     )
     parser.add_argument(
         "--stage2-seed-toroidal-flux",
         type=float,
-        default=float(os.environ["STAGE2_SEED_TOROIDAL_FLUX"]) if "STAGE2_SEED_TOROIDAL_FLUX" in os.environ else None,
+        default=float(os.environ["STAGE2_SEED_TOROIDAL_FLUX"])
+        if "STAGE2_SEED_TOROIDAL_FLUX" in os.environ
+        else None,
     )
     parser.add_argument(
         "--stage2-seed-length-weight",
         type=float,
-        default=float(os.environ["STAGE2_SEED_LENGTH_WEIGHT"]) if "STAGE2_SEED_LENGTH_WEIGHT" in os.environ else None,
+        default=float(os.environ["STAGE2_SEED_LENGTH_WEIGHT"])
+        if "STAGE2_SEED_LENGTH_WEIGHT" in os.environ
+        else None,
     )
     parser.add_argument(
         "--stage2-seed-cc-weight",
         type=float,
-        default=float(os.environ["STAGE2_SEED_CC_WEIGHT"]) if "STAGE2_SEED_CC_WEIGHT" in os.environ else None,
+        default=float(os.environ["STAGE2_SEED_CC_WEIGHT"])
+        if "STAGE2_SEED_CC_WEIGHT" in os.environ
+        else None,
     )
     parser.add_argument(
         "--stage2-seed-curvature-weight",
         type=float,
-        default=float(os.environ["STAGE2_SEED_CURVATURE_WEIGHT"]) if "STAGE2_SEED_CURVATURE_WEIGHT" in os.environ else None,
+        default=float(os.environ["STAGE2_SEED_CURVATURE_WEIGHT"])
+        if "STAGE2_SEED_CURVATURE_WEIGHT" in os.environ
+        else None,
     )
     parser.add_argument(
         "--stage2-seed-cc-threshold",
         type=float,
-        default=float(os.environ["STAGE2_SEED_CC_THRESHOLD"]) if "STAGE2_SEED_CC_THRESHOLD" in os.environ else None,
+        default=float(os.environ["STAGE2_SEED_CC_THRESHOLD"])
+        if "STAGE2_SEED_CC_THRESHOLD" in os.environ
+        else None,
     )
     parser.add_argument(
         "--stage2-seed-curvature-threshold",
         type=float,
-        default=float(os.environ["STAGE2_SEED_CURVATURE_THRESHOLD"]) if "STAGE2_SEED_CURVATURE_THRESHOLD" in os.environ else None,
+        default=float(os.environ["STAGE2_SEED_CURVATURE_THRESHOLD"])
+        if "STAGE2_SEED_CURVATURE_THRESHOLD" in os.environ
+        else None,
     )
     parser.add_argument(
         "--stage2-seed-banana-surf-radius",
         type=float,
-        default=float(os.environ["STAGE2_SEED_BANANA_SURF_RADIUS"]) if "STAGE2_SEED_BANANA_SURF_RADIUS" in os.environ else None,
+        default=float(os.environ["STAGE2_SEED_BANANA_SURF_RADIUS"])
+        if "STAGE2_SEED_BANANA_SURF_RADIUS" in os.environ
+        else None,
     )
     parser.add_argument(
         "--stage2-seed-order",
         type=int,
-        default=int(os.environ["STAGE2_SEED_ORDER"]) if "STAGE2_SEED_ORDER" in os.environ else None,
+        default=int(os.environ["STAGE2_SEED_ORDER"])
+        if "STAGE2_SEED_ORDER" in os.environ
+        else None,
+    )
+    parser.add_argument(
+        "--backend",
+        choices=["cpu", "jax"],
+        default=os.environ.get("SIMSOPT_BACKEND", "cpu"),
+        help="Field/objective backend: cpu (simsoptpp) or jax (JAX autodiff).",
     )
     return parser.parse_args()
 
@@ -328,29 +425,36 @@ def parse_args():
 class BoozerResidualExact(Optimizable):
     r"""
     This term returns the Boozer residual penalty term
-    
+
     .. math::
        J = \int_0^{1/n_{\text{fp}}} \int_0^1 \| \mathbf r \|^2 ~d\theta ~d\varphi + w (\text{label.J()-boozer_surface.constraint_weight})^2.
-    
+
     where
-    
+
     .. math::
         \mathbf r = \frac{1}{\|\mathbf B\|}[G\mathbf B_\text{BS}(\mathbf x) - ||\mathbf B_\text{BS}(\mathbf x)||^2  (\mathbf x_\varphi + \iota  \mathbf x_\theta)]
-    
+
     """
 
     def __init__(self, boozer_surface, bs):
         Optimizable.__init__(self, depends_on=[boozer_surface])
         in_surface = boozer_surface.surface
         self.boozer_surface = boozer_surface
-        
+
         # same number of points as on the solved surface
         nphis = in_surface.quadpoints_phi.size
-        phis = np.linspace(0,1./in_surface.nfp,nphis*4,endpoint=False)
+        phis = np.linspace(0, 1.0 / in_surface.nfp, nphis * 4, endpoint=False)
         nthetas = in_surface.quadpoints_theta.size
-        thetas = np.linspace(0,1,nthetas*4,endpoint=False)
+        thetas = np.linspace(0, 1, nthetas * 4, endpoint=False)
 
-        s = SurfaceXYZTensorFourier(mpol=in_surface.mpol, ntor=in_surface.ntor, stellsym=in_surface.stellsym, nfp=in_surface.nfp, quadpoints_phi=phis, quadpoints_theta=thetas)
+        s = SurfaceXYZTensorFourier(
+            mpol=in_surface.mpol,
+            ntor=in_surface.ntor,
+            stellsym=in_surface.stellsym,
+            nfp=in_surface.nfp,
+            quadpoints_phi=phis,
+            quadpoints_theta=thetas,
+        )
         s.set_dofs(in_surface.get_dofs())
 
         print("warning: constraint weight set to 0")
@@ -364,11 +468,11 @@ class BoozerResidualExact(Optimizable):
         """
         Return the value of the penalty function.
         """
-        
+
         if self._J is None:
             self.compute()
         return self._J
-    
+
     @derivative_dec
     def dJ(self):
         """
@@ -386,7 +490,7 @@ class BoozerResidualExact(Optimizable):
     def compute(self):
         if self.boozer_surface.need_to_run_code:
             res = self.boozer_surface.res
-            res = self.boozer_surface.run_code(res['iota'], G=res['G'])
+            res = self.boozer_surface.run_code(res["iota"], G=res["G"])
 
         self.surface.set_dofs(self.in_surface.get_dofs())
         self.biotsavart.set_points(self.surface.gamma().reshape((-1, 3)))
@@ -397,15 +501,25 @@ class BoozerResidualExact(Optimizable):
 
         # compute J
         surface = self.surface
-        iota = self.boozer_surface.res['iota']
-        G = self.boozer_surface.res['G']
-        r, J = boozer_surface_residual(surface, iota, G, self.biotsavart, derivatives=1, weight_inv_modB=True)
-        rtil = np.concatenate((r/np.sqrt(num_points), [np.sqrt(self.constraint_weight)*(self.boozer_surface.label.J()-self.boozer_surface.targetlabel)]))
-        self._J = 0.5*np.sum(rtil**2)
-        
+        iota = self.boozer_surface.res["iota"]
+        G = self.boozer_surface.res["G"]
+        r, J = boozer_surface_residual(
+            surface, iota, G, self.biotsavart, derivatives=1, weight_inv_modB=True
+        )
+        rtil = np.concatenate(
+            (
+                r / np.sqrt(num_points),
+                [
+                    np.sqrt(self.constraint_weight)
+                    * (self.boozer_surface.label.J() - self.boozer_surface.targetlabel)
+                ],
+            )
+        )
+        self._J = 0.5 * np.sum(rtil**2)
+
         booz_surf = self.boozer_surface
-        P, L, U = booz_surf.res['PLU']
-        dconstraint_dcoils_vjp = booz_surf.res['vjp']
+        P, L, U = booz_surf.res["PLU"]
+        dconstraint_dcoils_vjp = booz_surf.res["vjp"]
 
         dJ_by_dB = self.dJ_by_dB()
         dJ_by_dcoils = self.biotsavart.B_vjp(dJ_by_dB)
@@ -413,69 +527,98 @@ class BoozerResidualExact(Optimizable):
         # dJ_diota, dJ_dG  to the end of dJ_ds are on the end
         dl = np.zeros((J.shape[1],))
         dlabel_dsurface = self.boozer_surface.label.dJ_by_dsurfacecoefficients()
-        dl[:dlabel_dsurface.size] = dlabel_dsurface
-        Jtil = np.concatenate((J/np.sqrt(num_points), np.sqrt(self.constraint_weight) * dl[None, :]), axis=0)
-        dJ_ds = Jtil.T@rtil
-        
+        dl[: dlabel_dsurface.size] = dlabel_dsurface
+        Jtil = np.concatenate(
+            (J / np.sqrt(num_points), np.sqrt(self.constraint_weight) * dl[None, :]),
+            axis=0,
+        )
+        dJ_ds = Jtil.T @ rtil
+
         adj = forward_backward(P, L, U, dJ_ds)
-        
+
         adj_times_dg_dcoil = dconstraint_dcoils_vjp(adj, booz_surf, iota, G)
         self._dJ = dJ_by_dcoils - adj_times_dg_dcoil
-        
+
     def dJ_by_dB(self):
         """
         Return the partial derivative of the objective with respect to the magnetic field
         """
-        
+
         surface = self.surface
         nphi = self.surface.quadpoints_phi.size
         ntheta = self.surface.quadpoints_theta.size
         num_points = 3 * nphi * ntheta
-        r, r_dB = boozer_surface_residual_dB(surface, self.boozer_surface.res['iota'], self.boozer_surface.res['G'], self.biotsavart, derivatives=0, weight_inv_modB=True)
+        r, r_dB = boozer_surface_residual_dB(
+            surface,
+            self.boozer_surface.res["iota"],
+            self.boozer_surface.res["G"],
+            self.biotsavart,
+            derivatives=0,
+            weight_inv_modB=True,
+        )
 
         r /= np.sqrt(num_points)
         r_dB /= np.sqrt(num_points)
-        
-        dJ_by_dB = r[:, None]*r_dB
+
+        dJ_by_dB = r[:, None] * r_dB
         dJ_by_dB = np.sum(dJ_by_dB.reshape((-1, 3, 3)), axis=1)
         return dJ_by_dB
 
-def initialize_boozer_surface(surf_prev, mpol, ntor, bs, vol_target, constraint_weight, iota, G0):
+
+def initialize_boozer_surface(
+    surf_prev, mpol, ntor, bs, vol_target, constraint_weight, iota, G0, backend="cpu"
+):
     """
     This initializes the boozer surface, using either the boozer "exact" algorithm, or the boozer "least squares" algorithm
-    
+
     surf_prev: Any instance of simsopt.geo.Surface. This is the initial guess for the boozer surface solver
     mpol: SurfaceXYZTensorFourier resolution (both toroidal and poloidal)
-    bs: simsopt.field.BiotSavart instance
+    bs: simsopt.field.BiotSavart or BiotSavartJAX instance
     vol_target: target volume to be enclosed by the boozer surface
     constraint_weight: Set to 1.0 to use Boozer least square, None to use Boozer exact
     iota: initial guess for iota value on the surface
     G0: Value of net current going through the torus hole
+    backend: "cpu" or "jax"
     """
     surf = SurfaceXYZTensorFourier(
-          mpol=mpol,ntor=ntor,nfp=5,stellsym=True,
-          quadpoints_theta=surf_prev.quadpoints_theta,
-          quadpoints_phi=surf_prev.quadpoints_phi
-          )
+        mpol=mpol,
+        ntor=ntor,
+        nfp=5,
+        stellsym=True,
+        quadpoints_theta=surf_prev.quadpoints_theta,
+        quadpoints_phi=surf_prev.quadpoints_phi,
+    )
     surf.least_squares_fit(surf_prev.gamma())
 
-    if constraint_weight is not None:
-        # Boozer least square approach
-        print("Generating Boozer least squares surface...")
-        vol = Volume(surf)
-        boozer_surface = BoozerSurface(bs, surf, vol, vol_target, constraint_weight, options={'verbose':True})
+    if backend == "jax":
+        from simsopt.geo.boozersurface_jax import BoozerSurfaceJAX
+
+        BoozerCls = BoozerSurfaceJAX
     else:
-        # Boozer exact approach
-        print("Generating Boozer exact surface...")
+        BoozerCls = BoozerSurface
+
+    solver_name = "JAX " if backend == "jax" else ""
+    if constraint_weight is not None:
+        print(f"Generating {solver_name}Boozer least squares surface...")
+        vol = Volume(surf)
+        boozer_surface = BoozerCls(
+            bs, surf, vol, vol_target, constraint_weight, options={"verbose": True}
+        )
+    else:
+        print(f"Generating {solver_name}Boozer exact surface...")
         surf_exact = SurfaceXYZTensorFourier(
-              mpol=mpol,ntor=ntor,nfp=5,stellsym=True,
-              quadpoints_theta=np.linspace(0,1,2*mpol+1,endpoint=False),
-              quadpoints_phi=np.linspace(0,1./surf.nfp,2*ntor+1,endpoint=False),
-              dofs=surf.dofs
-              )
-    
+            mpol=mpol,
+            ntor=ntor,
+            nfp=5,
+            stellsym=True,
+            quadpoints_theta=np.linspace(0, 1, 2 * mpol + 1, endpoint=False),
+            quadpoints_phi=np.linspace(0, 1.0 / surf.nfp, 2 * ntor + 1, endpoint=False),
+            dofs=surf.dofs,
+        )
         vol = Volume(surf_exact)
-        boozer_surface = BoozerSurface(bs, surf_exact, vol, vol_target, None, options={'verbose':True})
+        boozer_surface = BoozerCls(
+            bs, surf_exact, vol, vol_target, None, options={"verbose": True}
+        )
 
     # Run boozer surface algorithm
     res = boozer_surface.run_code(iota, G0)
@@ -483,8 +626,10 @@ def initialize_boozer_surface(surf_prev, mpol, ntor, bs, vol_target, constraint_
     print(f"iota from solve: {res['iota']}")
 
     # Check if boozer algo is successful
-    success1 = res['success'] # True if the boozer surface algo converged
-    success2 = not boozer_surface.surface.is_self_intersecting() # True if surface is not self intersecting
+    success1 = res["success"]  # True if the boozer surface algo converged
+    success2 = (
+        not boozer_surface.surface.is_self_intersecting()
+    )  # True if surface is not self intersecting
     success = success1 and success2
     if not success:
         print(
@@ -498,6 +643,7 @@ def initialize_boozer_surface(surf_prev, mpol, ntor, bs, vol_target, constraint_
         raise RuntimeError("Something went wrong with the Boozer solve...")
 
     return boozer_surface
+
 
 def normPlot(surf, bs, filename):
     """Plot normal magnetic field — delegates to shared norm_field_plot."""
@@ -522,28 +668,28 @@ def fun(x):
         J: Objective function value
         dJ: Gradient of objective function
     """
-    dx = np.linalg.norm(x - run_dict['x_prev'])
-    run_dict['x_prev'] = x.copy()
+    dx = np.linalg.norm(x - run_dict["x_prev"])
+    run_dict["x_prev"] = x.copy()
     print(f"Step size: {dx:.2e}")
 
-    run_dict['lscount']+=1
+    run_dict["lscount"] += 1
 
     # initialize to last accepted surface values
-    boozer_surface.surface.x = run_dict['sdofs']
-    boozer_surface.res['iota'] = run_dict['iota']
-    boozer_surface.res['G'] = run_dict['G']
+    boozer_surface.surface.x = run_dict["sdofs"]
+    boozer_surface.res["iota"] = run_dict["iota"]
+    boozer_surface.res["G"] = run_dict["G"]
 
     # Set new coil dofs
     JF.x = x
 
     # Run boozer surface
-    boozer_surface.run_code(run_dict['iota'], run_dict['G'])
+    boozer_surface.run_code(run_dict["iota"], run_dict["G"])
 
     # Check success
     success1 = False
     success2 = False
     try:
-        success1 = boozer_surface.res['success']
+        success1 = boozer_surface.res["success"]
         success2 = not boozer_surface.surface.is_self_intersecting()
     except Exception as e:
         print("Surface check failed:", e)
@@ -567,13 +713,14 @@ def fun(x):
         # Returning dJ_old (not negated) avoids the old -dJ corruption path
         # and produces y_k=0 if the step is ever accepted, safely skipping
         # the BFGS Hessian update.
-        J = run_dict['J'] + max(abs(run_dict['J']), 1.0)
-        dJ = run_dict['dJ'].copy()
-        boozer_surface.surface.x = run_dict['sdofs']
-        boozer_surface.res['iota'] = run_dict['iota']
-        boozer_surface.res['G'] = run_dict['G']
+        J = run_dict["J"] + max(abs(run_dict["J"]), 1.0)
+        dJ = run_dict["dJ"].copy()
+        boozer_surface.surface.x = run_dict["sdofs"]
+        boozer_surface.res["iota"] = run_dict["iota"]
+        boozer_surface.res["G"] = run_dict["G"]
 
     return J, dJ
+
 
 def callback(x):
     """
@@ -588,19 +735,19 @@ def callback(x):
         x: Current degrees of freedom (coil parameters) from accepted step
     """
     # Update count for tracking
-    run_dict['lscount'] = 0
+    run_dict["lscount"] = 0
 
     # Store last accepted state
-    run_dict['sdofs'] = boozer_surface.surface.x.copy()
-    run_dict['iota'] = boozer_surface.res['iota']
-    run_dict['G'] = boozer_surface.res['G']
-    run_dict['J'] = JF.J()
-    run_dict['dJ'] = JF.dJ().copy()
+    run_dict["sdofs"] = boozer_surface.surface.x.copy()
+    run_dict["iota"] = boozer_surface.res["iota"]
+    run_dict["G"] = boozer_surface.res["G"]
+    run_dict["J"] = JF.J()
+    run_dict["dJ"] = JF.dJ().copy()
 
     # Evaluate diagnostics
-    J = run_dict['J']
-    grad = run_dict['dJ']
-    
+    J = run_dict["J"]
+    grad = run_dict["dJ"]
+
     J_QS = JnonQSRatio.J()
     dJ_QS = np.linalg.norm(JnonQSRatio.dJ())
     J_Boozer = JBoozerResidual.J()
@@ -622,8 +769,8 @@ def callback(x):
     volume_str = f"{boozer_surface.surface.volume():.4f}"
 
     gamma = banana_curve.gamma()
-    max_r = np.max(np.sqrt(gamma[:,0]**2 + gamma[:,1]**2))
-    max_z = np.max(np.abs(gamma[:,2]))
+    max_r = np.max(np.sqrt(gamma[:, 0] ** 2 + gamma[:, 1] ** 2))
+    max_z = np.max(np.abs(gamma[:, 2]))
     max_curvature = np.max(banana_curve.kappa())
     length = curvelength.J()
     curvecurve_min = JCurveCurve.shortest_distance()
@@ -632,24 +779,42 @@ def callback(x):
     bs.set_points(boozer_surface.surface.gamma().reshape((-1, 3)))
     unitn = boozer_surface.surface.unitnormal()
     BdotN = np.mean(np.abs(np.sum(bs.B().reshape(unitn.shape) * unitn, axis=2)))
-    run_dict['intersecting'] = boozer_surface.surface.is_self_intersecting()
+    run_dict["intersecting"] = boozer_surface.surface.is_self_intersecting()
 
     width = 35
     buffer = io.StringIO()
-    print("="*70, file=buffer)
+    print("=" * 70, file=buffer)
     print(f"ITERATION {run_dict['it']}", file=buffer)
     print(f"{'Objective J':{width}} = {J:.6e}", file=buffer)
     print(f"{'||∇J||':{width}} = {np.linalg.norm(grad):.6e}", file=buffer)
     print(f"{'nonQS ratio':{width}} = {J_QS:.6e} (dJ = {dJ_QS:.6e})", file=buffer)
-    print(f"{'Boozer Residual':{width}} = {J_Boozer:.6e} (dJ = {dJ_Boozer:.6e})", file=buffer)
+    print(
+        f"{'Boozer Residual':{width}} = {J_Boozer:.6e} (dJ = {dJ_Boozer:.6e})",
+        file=buffer,
+    )
     print(f"{'ι Penalty':{width}} = {J_iota:.6e} (dJ = {dJ_iota:.6e})", file=buffer)
     print(f"{'Iotas (actual)':{width}} = {iota_str}", file=buffer)
     print(f"{'Volume':{width}} = {volume_str}", file=buffer)
-    print(f"{'Curve Length Penalty':{width}} = {J_len:.6e} (dJ = {dJ_len:.6e})", file=buffer)
-    print(f"{'Curve-Curve Penalty':{width}} = {J_cc:.6e} (min={curvecurve_min:.3e}) (dJ = {dJ_cc:.6e})", file=buffer)
-    print(f"{'Curve-Surface Penalty':{width}} = {J_cs:.6e} (min={curvesurf_min:.3e}) (dJ = {dJ_cs:.6e})", file=buffer)
-    print(f"{'Surf-Vessel Penalty':{width}} = {J_surf:.6e} (dJ = {dJ_surf:.6e})", file=buffer) 
-    print(f"{'Curvature Penalty':{width}} = {J_curvature:.6e} (dJ = {dJ_curvature:.6e})", file=buffer) 
+    print(
+        f"{'Curve Length Penalty':{width}} = {J_len:.6e} (dJ = {dJ_len:.6e})",
+        file=buffer,
+    )
+    print(
+        f"{'Curve-Curve Penalty':{width}} = {J_cc:.6e} (min={curvecurve_min:.3e}) (dJ = {dJ_cc:.6e})",
+        file=buffer,
+    )
+    print(
+        f"{'Curve-Surface Penalty':{width}} = {J_cs:.6e} (min={curvesurf_min:.3e}) (dJ = {dJ_cs:.6e})",
+        file=buffer,
+    )
+    print(
+        f"{'Surf-Vessel Penalty':{width}} = {J_surf:.6e} (dJ = {dJ_surf:.6e})",
+        file=buffer,
+    )
+    print(
+        f"{'Curvature Penalty':{width}} = {J_curvature:.6e} (dJ = {dJ_curvature:.6e})",
+        file=buffer,
+    )
     print(f"{'⟨|B·n|⟩':{width}} = {BdotN:.6e}", file=buffer)
 
     print(f"{'Intersecting':{width}} = {run_dict['intersecting']}", file=buffer)
@@ -657,7 +822,7 @@ def callback(x):
     print(f"{'Max Curve Z':{width}} = {max_z:.6e}", file=buffer)
     print(f"{'Max Curvature':{width}} = {max_curvature:.6e}", file=buffer)
     print(f"{'Curve Length':{width}} = {length:.6e}", file=buffer)
-    print("="*70, file=buffer)
+    print("=" * 70, file=buffer)
 
     output_str = buffer.getvalue()
     buffer.close()
@@ -669,12 +834,36 @@ def callback(x):
         f.write(output_str + "\n")
 
     # Advance iteration counter
-    run_dict['it'] += 1
+    run_dict["it"] += 1
 
 
 # Convergence tolerances for different mpol values (module-level for testability)
-ftol_by_mpol = {8: 1e-5, 9: 5e-6, 10: 1e-6, 11: 5e-7, 12: 1e-7, 13: 5e-8, 14: 1e-8, 15: 5e-9, 16: 1e-9, 17: 5e-10, 18: 1e-10}
-gtol_by_mpol = {8: 1e-2, 9: 5e-3, 10: 1e-3, 11: 5e-4, 12: 1e-4, 13: 5e-5, 14: 1e-5, 15: 5e-6, 16: 1e-6, 17: 5e-7, 18: 1e-7}
+ftol_by_mpol = {
+    8: 1e-5,
+    9: 5e-6,
+    10: 1e-6,
+    11: 5e-7,
+    12: 1e-7,
+    13: 5e-8,
+    14: 1e-8,
+    15: 5e-9,
+    16: 1e-9,
+    17: 5e-10,
+    18: 1e-10,
+}
+gtol_by_mpol = {
+    8: 1e-2,
+    9: 5e-3,
+    10: 1e-3,
+    11: 5e-4,
+    12: 1e-4,
+    13: 5e-5,
+    14: 1e-5,
+    15: 5e-6,
+    16: 1e-6,
+    17: 5e-7,
+    18: 1e-7,
+}
 
 
 if __name__ == "__main__":
@@ -688,7 +877,11 @@ if __name__ == "__main__":
     s = float(stage2_results["TOROIDAL_FLUX"])
     order = int(stage2_results.get("order", args.stage2_seed_order))
 
-    banana_surf_radius = args.banana_surf_radius if args.banana_surf_radius is not None else float(stage2_results["banana_surf_radius"])
+    banana_surf_radius = (
+        args.banana_surf_radius
+        if args.banana_surf_radius is not None
+        else float(stage2_results["banana_surf_radius"])
+    )
     banana_surf_nfp = 5
     nphi = args.nphi
     ntheta = args.ntheta
@@ -705,7 +898,7 @@ if __name__ == "__main__":
     # Output directory setup
     OUT_DIR = args.output_root
     os.makedirs(OUT_DIR, exist_ok=True)
-    boozer_type = {'initial': 'least_squares', 'final': 'exact'}  # example
+    boozer_type = {"initial": "least_squares", "final": "exact"}  # example
     stage = args.boozer_stage
 
     # ==============================================================================
@@ -720,9 +913,9 @@ if __name__ == "__main__":
 
     # The proposed new HBT LCFS
     hbt = SurfaceRZFourier(nfp=5, stellsym=True)
-    hbt.set_rc(0, 0, 0.9115)    # R0 of LCFS semi-circle center
-    hbt.set_rc(1, 0, 0.1605)    # Minor radius (thick metal walls)
-    hbt.set_zs(1, 0, 0.152)    # Z extent = ±0.152 m (flat top/bottom)
+    hbt.set_rc(0, 0, 0.9115)  # R0 of LCFS semi-circle center
+    hbt.set_rc(1, 0, 0.1605)  # Minor radius (thick metal walls)
+    hbt.set_zs(1, 0, 0.152)  # Z extent = ±0.152 m (flat top/bottom)
 
     # The surface the coils can lie on from Jeff - R0 = 0.976 and a=0.22
     surf_coils = SurfaceRZFourier(nfp=banana_surf_nfp, stellsym=True)
@@ -737,10 +930,20 @@ if __name__ == "__main__":
     file_loc = build_equilibrium_path(args)
     bs = load(stage2_bs_path)
 
+    # JAX backend: wrap the loaded BiotSavart coils in BiotSavartJAX.
+    # Keep a CPU reference for diagnostics (VTK output, norm plots).
+    bs_cpu_diag = bs if args.backend == "jax" else None
+    if args.backend == "jax":
+        from simsopt.field.biotsavart_jax_backend import BiotSavartJAX
+
+        bs = BiotSavartJAX(bs.coils)
+
     # Initialize the boundary magnetic surface and scale it to the target major radius
-    surf = SurfaceRZFourier.from_wout(file_loc, range="half period", nphi=nphi, ntheta=ntheta, s=s)
+    surf = SurfaceRZFourier.from_wout(
+        file_loc, range="half period", nphi=nphi, ntheta=ntheta, s=s
+    )
     # scale the surface down to the target appropriate major radius
-    surf.set_dofs(surf.get_dofs()*R0/surf.major_radius())
+    surf.set_dofs(surf.get_dofs() * R0 / surf.major_radius())
 
     # Extract coil information
     coils = bs.coils
@@ -753,7 +956,7 @@ if __name__ == "__main__":
     current_sum = sum(abs(c.current.get_value()) for c in tf_coils)
 
     # Calculate G0 parameter from TF coil currents
-    G0 = 2. * np.pi * current_sum * (4 * np.pi * 10**(-7) / (2 * np.pi))
+    G0 = 2.0 * np.pi * current_sum * (4 * np.pi * 10 ** (-7) / (2 * np.pi))
 
     # ==============================================================================
     # OPTIMIZATION SETUP
@@ -770,7 +973,17 @@ if __name__ == "__main__":
     os.makedirs(OUT_DIR_ITER, exist_ok=True)
 
     # Initialize Boozer surface with target parameters
-    boozer_surface = initialize_boozer_surface(surf, mpol, ntor, bs, vol_target, CONSTRAINT_WEIGHT, iota_target, G0)
+    boozer_surface = initialize_boozer_surface(
+        surf,
+        mpol,
+        ntor,
+        bs,
+        vol_target,
+        CONSTRAINT_WEIGHT,
+        iota_target,
+        G0,
+        backend=args.backend,
+    )
 
     # ==============================================================================
     # SAVE INITIAL STATE
@@ -782,15 +995,26 @@ if __name__ == "__main__":
     # Save initial surface with magnetic field normal component data
     bs.set_points(boozer_surface.surface.gamma().reshape((-1, 3)))
     unitn = boozer_surface.surface.unitnormal()
-    pointData = {"B_N/B": np.sum(bs.B().reshape(unitn.shape) *
-        unitn, axis=2)[:, :, None] / np.sqrt(np.sum(bs.B().reshape(unitn.shape)**2, axis=2))[:, :, None]}
+    pointData = {
+        "B_N/B": np.sum(bs.B().reshape(unitn.shape) * unitn, axis=2)[:, :, None]
+        / np.sqrt(np.sum(bs.B().reshape(unitn.shape) ** 2, axis=2))[:, :, None]
+    }
     boozer_surface.surface.to_vtk(OUT_DIR_ITER + "/surf_init", extra_data=pointData)
     boozer_surface.surface.save(OUT_DIR_ITER + "/surf_init.json")
     print(f"Volume: {boozer_surface.surface.volume()}")
 
     # Generate initial diagnostic plots
-    initial_field_error = normPlot(boozer_surface.surface, bs, OUT_DIR_ITER + "/NormPlotInitial")
-    cross_section_plot(surf_coils, boozer_surface.surface, banana_curve, OUT_DIR_ITER + "/CrossSectionInitial", hbt, VV)
+    initial_field_error = normPlot(
+        boozer_surface.surface, bs, OUT_DIR_ITER + "/NormPlotInitial"
+    )
+    cross_section_plot(
+        surf_coils,
+        boozer_surface.surface,
+        banana_curve,
+        OUT_DIR_ITER + "/CrossSectionInitial",
+        hbt,
+        VV,
+    )
     initial_volume = boozer_surface.surface.volume()
     initial_iota = Iotas(boozer_surface).J()
     initial_max_curvature = np.max(banana_curve.kappa())
@@ -799,14 +1023,29 @@ if __name__ == "__main__":
     # DEFINE OBJECTIVE FUNCTION COMPONENTS
     # ==============================================================================
     # Biot-Savart field calculation
-    bs_obj = BiotSavart(coils)
+    use_jax = args.backend == "jax"
+    if use_jax:
+        from simsopt.field.biotsavart_jax_backend import BiotSavartJAX
+        from simsopt.geo.surfaceobjectives_jax import (
+            BoozerResidualJAX,
+            IotasJAX,
+            NonQuasiSymmetricRatioJAX,
+        )
+
+        bs_obj = BiotSavartJAX(coils)
+    else:
+        bs_obj = BiotSavart(coils)
 
     # Quasi-symmetry and Boozer coordinate residuals
-    nonQSs = [NonQuasiSymmetricRatio(boozer_surface, bs_obj)]
-    if boozer_type[stage] == 'exact':
-        brs = [BoozerResidualExact(boozer_surface, bs_obj)]
+    if use_jax:
+        nonQSs = [NonQuasiSymmetricRatioJAX(boozer_surface, bs_obj)]
+        brs = [BoozerResidualJAX(boozer_surface, bs_obj)]
     else:
-        brs = [BoozerResidual(boozer_surface, bs_obj)]
+        nonQSs = [NonQuasiSymmetricRatio(boozer_surface, bs_obj)]
+        if boozer_type[stage] == "exact":
+            brs = [BoozerResidualExact(boozer_surface, bs_obj)]
+        else:
+            brs = [BoozerResidual(boozer_surface, bs_obj)]
 
     # Objective function weights and parameters
     LENGTH_WEIGHT = 1
@@ -823,24 +1062,30 @@ if __name__ == "__main__":
     phi_list = np.linspace(0, 1 / boozer_surface.surface.nfp, 5)
 
     # Individual objective terms
-    iota = Iotas(boozer_surface)
+    iota = IotasJAX(boozer_surface) if use_jax else Iotas(boozer_surface)
     curvelength = CurveLength(banana_curves[0])
     length_target = curvelength.J()
 
     Jiota = QuadraticPenalty(iota, iota_target)
     JnonQSRatio = sum(nonQSs)
     JBoozerResidual = sum(brs)
-    JCurveLength = QuadraticPenalty(curvelength, length_target, 'max')
+    JCurveLength = QuadraticPenalty(curvelength, length_target, "max")
     JCurveCurve = CurveCurveDistance(curves, CC_DIST)
     JCurveSurface = CurveSurfaceDistance(curves, boozer_surface.surface, CS_DIST)
     JSurfSurf = SurfaceSurfaceDistance(boozer_surface.surface, VV, SS_DIST)
     JCurvature = LpCurveCurvature(banana_curves[0], 2, CURVATURE_THRESHOLD)
 
     # Combined objective function
-    JF = JnonQSRatio + RES_WEIGHT * JBoozerResidual + IOTAS_WEIGHT * Jiota \
-      + LENGTH_WEIGHT * JCurveLength + CC_WEIGHT * JCurveCurve \
-        + CS_WEIGHT * JCurveSurface + SURF_DIST_WEIGHT * JSurfSurf \
+    JF = (
+        JnonQSRatio
+        + RES_WEIGHT * JBoozerResidual
+        + IOTAS_WEIGHT * Jiota
+        + LENGTH_WEIGHT * JCurveLength
+        + CC_WEIGHT * JCurveCurve
+        + CS_WEIGHT * JCurveSurface
+        + SURF_DIST_WEIGHT * JSurfSurf
         + CURVATURE_WEIGHT * JCurvature
+    )
 
     # Extract degrees of freedom
     dofs = JF.x
@@ -850,15 +1095,15 @@ if __name__ == "__main__":
     # ==============================================================================
     # Initialize run_dict after JF and boozer_surface are ready
     run_dict = {
-        'sdofs': boozer_surface.surface.x.copy(),
-        'iota': boozer_surface.res['iota'],
-        'G': boozer_surface.res['G'],
-        'J': JF.J(),
-        'dJ': JF.dJ().copy(),
-        'it': 1,
-        'lscount': 0,
-        'x_prev': dofs.copy(),
-        'intersecting': False,
+        "sdofs": boozer_surface.surface.x.copy(),
+        "iota": boozer_surface.res["iota"],
+        "G": boozer_surface.res["G"],
+        "J": JF.J(),
+        "dJ": JF.dJ().copy(),
+        "it": 1,
+        "lscount": 0,
+        "x_prev": dofs.copy(),
+        "intersecting": False,
     }
 
     # ==============================================================================
@@ -877,7 +1122,14 @@ if __name__ == "__main__":
         print("Skipping single-stage optimizer because --init-only was provided.")
     else:
         # Run L-BFGS-B optimization
-        res = minimize(fun, dofs, jac=True, method='L-BFGS-B', callback=callback, options={'maxiter': MAXITER, 'maxcor': 300, 'ftol': ftol, 'gtol': gtol})
+        res = minimize(
+            fun,
+            dofs,
+            jac=True,
+            method="L-BFGS-B",
+            callback=callback,
+            options={"maxiter": MAXITER, "maxcor": 300, "ftol": ftol, "gtol": gtol},
+        )
         res_nit = res.nit
         print(res.message)
 
@@ -891,8 +1143,10 @@ if __name__ == "__main__":
         # Save optimized surface with magnetic field normal component data
         bs.set_points(boozer_surface.surface.gamma().reshape((-1, 3)))
         unitn = boozer_surface.surface.unitnormal()
-        pointData = {"B_N/B": np.sum(bs.B().reshape(unitn.shape) *
-            unitn, axis=2)[:, :, None] / np.sqrt(np.sum(bs.B().reshape(unitn.shape)**2, axis=2))[:, :, None]}
+        pointData = {
+            "B_N/B": np.sum(bs.B().reshape(unitn.shape) * unitn, axis=2)[:, :, None]
+            / np.sqrt(np.sum(bs.B().reshape(unitn.shape) ** 2, axis=2))[:, :, None]
+        }
 
         # Print final results
         boozer_surface.surface.to_vtk(OUT_DIR_ITER + "/surf_opt", extra_data=pointData)
@@ -906,8 +1160,17 @@ if __name__ == "__main__":
         print(f"Max Curvature: {final_max_curvature}")
 
         # Generate final diagnostic plots
-        fieldError = normPlot(boozer_surface.surface, bs, OUT_DIR_ITER + "/NormPlotOptimized")
-        cross_section_plot(surf_coils, boozer_surface.surface, banana_curve, OUT_DIR_ITER + "/CrossSectionOptimized", hbt, VV)
+        fieldError = normPlot(
+            boozer_surface.surface, bs, OUT_DIR_ITER + "/NormPlotOptimized"
+        )
+        cross_section_plot(
+            surf_coils,
+            boozer_surface.surface,
+            banana_curve,
+            OUT_DIR_ITER + "/CrossSectionOptimized",
+            hbt,
+            VV,
+        )
 
     # Save the results of optimization to a separate file
     results = {
@@ -949,7 +1212,7 @@ if __name__ == "__main__":
         "FINAL_VOLUME": float(final_volume),
         "FINAL_IOTA": float(final_iota),
         "FIELD_ERROR": float(fieldError),
-        "SELF_INTERSECTING": run_dict['intersecting'],
+        "SELF_INTERSECTING": run_dict["intersecting"],
         "MAX_CURVATURE": float(final_max_curvature),
         "INITIAL_VOLUME": float(initial_volume),
         "INITIAL_IOTA": float(initial_iota),

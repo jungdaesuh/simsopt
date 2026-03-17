@@ -289,16 +289,38 @@ def stellsym_scatter_indices(mpol, ntor):
     """
     n_per_coord = (2 * mpol + 1) * (2 * ntor + 1)
     indices = []
+    # Stellsym convention: x uses cos-cos + sin-sin (even-even),
+    # y and z use cos-sin + sin-cos (odd-odd).  This matches
+    # CPU SurfaceXYZTensorFourier where y transforms like z
+    # under the stellarator symmetry (φ,θ) → (−φ,−θ).
     for coord_offset, allowed_fn in [
-        (0, _is_stellsym_xy),
-        (n_per_coord, _is_stellsym_xy),
-        (2 * n_per_coord, _is_stellsym_z),
+        (0, _is_stellsym_xy),  # x: cos-cos + sin-sin
+        (n_per_coord, _is_stellsym_z),  # y: cos-sin + sin-cos
+        (2 * n_per_coord, _is_stellsym_z),  # z: cos-sin + sin-cos
     ]:
         for m in range(2 * mpol + 1):
             for n in range(2 * ntor + 1):
                 if allowed_fn(m, n, mpol, ntor):
                     indices.append(coord_offset + m * (2 * ntor + 1) + n)
     return np.array(indices, dtype=np.int32)
+
+
+def _split_flat_to_xyzc(flat, mpol, ntor):
+    """Split a flat super-vector into (xc, yc, zc) coefficient matrices.
+
+    Args:
+        flat: (3 * n_per_coord,) flat array.
+        mpol, ntor: surface resolution.
+
+    Returns:
+        xc, yc, zc: each (2*mpol+1, 2*ntor+1).
+    """
+    n_per_coord = (2 * mpol + 1) * (2 * ntor + 1)
+    shape = (2 * mpol + 1, 2 * ntor + 1)
+    xc = flat[:n_per_coord].reshape(shape)
+    yc = flat[n_per_coord : 2 * n_per_coord].reshape(shape)
+    zc = flat[2 * n_per_coord :].reshape(shape)
+    return xc, yc, zc
 
 
 def dofs_to_xyzc(sdofs, scatter_indices, mpol, ntor):
@@ -316,11 +338,19 @@ def dofs_to_xyzc(sdofs, scatter_indices, mpol, ntor):
     """
     n_per_coord = (2 * mpol + 1) * (2 * ntor + 1)
     flat = jnp.zeros(3 * n_per_coord).at[scatter_indices].set(sdofs)
-    shape = (2 * mpol + 1, 2 * ntor + 1)
-    xc = flat[:n_per_coord].reshape(shape)
-    yc = flat[n_per_coord : 2 * n_per_coord].reshape(shape)
-    zc = flat[2 * n_per_coord :].reshape(shape)
-    return xc, yc, zc
+    return _split_flat_to_xyzc(flat, mpol, ntor)
+
+
+def _dofs_to_xyzc_any(dofs, mpol, ntor, stellsym, scatter_indices):
+    """Internal helper: unpack DOFs to (xc, yc, zc) for both stellsym modes."""
+    if stellsym:
+        if scatter_indices is None:
+            raise ValueError(
+                "scatter_indices required for stellsym=True. "
+                "Precompute with stellsym_scatter_indices(mpol, ntor)."
+            )
+        return dofs_to_xyzc(dofs, scatter_indices, mpol, ntor)
+    return _split_flat_to_xyzc(dofs, mpol, ntor)
 
 
 def surface_gamma_from_dofs(
@@ -350,36 +380,8 @@ def surface_gamma_from_dofs(
     Returns:
         gamma: (nphi, ntheta, 3) Cartesian positions.
     """
-    if stellsym:
-        if scatter_indices is None:
-            raise ValueError(
-                "scatter_indices required for stellsym=True. "
-                "Precompute with stellsym_scatter_indices(mpol, ntor)."
-            )
-        xc, yc, zc = dofs_to_xyzc(dofs, scatter_indices, mpol, ntor)
-    else:
-        n_per_coord = (2 * mpol + 1) * (2 * ntor + 1)
-        xc = dofs[:n_per_coord].reshape((2 * mpol + 1, 2 * ntor + 1))
-        yc = dofs[n_per_coord : 2 * n_per_coord].reshape((2 * mpol + 1, 2 * ntor + 1))
-        zc = dofs[2 * n_per_coord :].reshape((2 * mpol + 1, 2 * ntor + 1))
+    xc, yc, zc = _dofs_to_xyzc_any(dofs, mpol, ntor, stellsym, scatter_indices)
     return surface_gamma(quadpoints_phi, quadpoints_theta, xc, yc, zc, mpol, ntor, nfp)
-
-
-def _dofs_to_xyzc_any(dofs, mpol, ntor, stellsym, scatter_indices):
-    """Internal helper: unpack DOFs to (xc, yc, zc) for both stellsym modes."""
-    if stellsym:
-        if scatter_indices is None:
-            raise ValueError(
-                "scatter_indices required for stellsym=True. "
-                "Precompute with stellsym_scatter_indices(mpol, ntor)."
-            )
-        return dofs_to_xyzc(dofs, scatter_indices, mpol, ntor)
-    n_per_coord = (2 * mpol + 1) * (2 * ntor + 1)
-    shape = (2 * mpol + 1, 2 * ntor + 1)
-    xc = dofs[:n_per_coord].reshape(shape)
-    yc = dofs[n_per_coord : 2 * n_per_coord].reshape(shape)
-    zc = dofs[2 * n_per_coord :].reshape(shape)
-    return xc, yc, zc
 
 
 def surface_gammadash1_from_dofs(
@@ -482,11 +484,25 @@ def surface_area(normal):
 def _dcoeff_jacobian(fn):
     """Build a surface coefficient Jacobian function from a ``_from_dofs`` evaluator."""
 
-    def wrapper(dofs, quadpoints_phi, quadpoints_theta, mpol, ntor, nfp,
-                stellsym, scatter_indices=None):
+    def wrapper(
+        dofs,
+        quadpoints_phi,
+        quadpoints_theta,
+        mpol,
+        ntor,
+        nfp,
+        stellsym,
+        scatter_indices=None,
+    ):
         return jax.jacfwd(fn, argnums=0)(
-            dofs, quadpoints_phi, quadpoints_theta,
-            mpol, ntor, nfp, stellsym, scatter_indices,
+            dofs,
+            quadpoints_phi,
+            quadpoints_theta,
+            mpol,
+            ntor,
+            nfp,
+            stellsym,
+            scatter_indices,
         )
 
     return wrapper

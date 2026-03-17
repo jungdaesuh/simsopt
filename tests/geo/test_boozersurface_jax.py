@@ -191,11 +191,11 @@ class TestStellsymScatterIndices:
         n_full = (2 * mpol + 1) * (2 * ntor + 1)
         indices = stellsym_scatter_indices(mpol, ntor)
         assert len(indices) < 3 * n_full
-        # Expected: xy has (mpol+1)*(ntor+1) + mpol*ntor each
-        # z has (mpol+1)*ntor + mpol*(ntor+1)
-        n_xy = (mpol + 1) * (ntor + 1) + mpol * ntor
-        n_z = (mpol + 1) * ntor + mpol * (ntor + 1)
-        expected = 2 * n_xy + n_z
+        # x: cos-cos + sin-sin = (mpol+1)*(ntor+1) + mpol*ntor
+        # y,z: cos-sin + sin-cos = (mpol+1)*ntor + mpol*(ntor+1) each
+        n_x = (mpol + 1) * (ntor + 1) + mpol * ntor
+        n_yz = (mpol + 1) * ntor + mpol * (ntor + 1)
+        expected = n_x + 2 * n_yz
         assert len(indices) == expected
 
     def test_round_trip(self):
@@ -997,15 +997,8 @@ class _MockVolumeLabel:
         return 0.0
 
 
-def _make_mock_boozer_surface(nphi=8, ntheta=8, mpol=1, ntor=1, nfp=1):
-    """Build a BoozerSurfaceJAX from mock objects (no simsoptpp needed)."""
-    R0, r = 1.0, 0.1
-    xc, yc, zc = _make_simple_torus_coeffs(R0, r, mpol, ntor, nfp)
-    qphi = np.linspace(0, 1.0 / nfp, nphi, endpoint=False)
-    qtheta = np.linspace(0, 1.0, ntheta, endpoint=False)
-    sdofs = np.concatenate([xc.ravel(), yc.ravel(), zc.ravel()])
-
-    nquad = 64
+def _make_mock_coils(nquad=64):
+    """Create two mock coils at z=+/-0.3 for BoozerSurfaceJAX tests."""
     phi = np.linspace(0, 2 * np.pi, nquad, endpoint=False)
     R = 1.0
     coils = []
@@ -1022,8 +1015,18 @@ def _make_mock_boozer_surface(nphi=8, ntheta=8, mpol=1, ntor=1, nfp=1):
             axis=-1,
         )
         coils.append(_MockCoil(g, gd, cur))
+    return coils
 
-    bs = _MockBiotSavart(coils)
+
+def _make_mock_boozer_surface(nphi=8, ntheta=8, mpol=1, ntor=1, nfp=1):
+    """Build a BoozerSurfaceJAX from mock objects (no simsoptpp needed)."""
+    R0, r = 1.0, 0.1
+    xc, yc, zc = _make_simple_torus_coeffs(R0, r, mpol, ntor, nfp)
+    qphi = np.linspace(0, 1.0 / nfp, nphi, endpoint=False)
+    qtheta = np.linspace(0, 1.0, ntheta, endpoint=False)
+    sdofs = np.concatenate([xc.ravel(), yc.ravel(), zc.ravel()])
+
+    bs = _MockBiotSavart(_make_mock_coils())
     surf = _MockSurface(sdofs, mpol, ntor, nfp, False, qphi, qtheta)
     label = _MockVolumeLabel()
     target = 2.0 * np.pi**2 * R0 * r**2
@@ -1073,6 +1076,117 @@ class TestBoozerSurfaceJAXClass:
     def test_run_code_idempotent(self):
         """Second run_code() call returns None (not dirty)."""
         booz = _make_mock_boozer_surface()
+        booz.run_code(iota=0.3, G=0.05)
+        assert booz.run_code(iota=0.3, G=0.05) is None
+
+
+# ---------------------------------------------------------------------------
+# P2 #4b: BoozerSurfaceJAX exact-path tests
+# ---------------------------------------------------------------------------
+
+
+def _make_mock_boozer_surface_exact(mpol=1, ntor=1, nfp=1):
+    """Build a BoozerSurfaceJAX in exact (Newton) mode -- constraint_weight=None.
+
+    The exact Newton path requires a SQUARE system: n_eq == n_dof.
+    For non-stellsym: n_eq = 3*nphi*ntheta + 2, n_dof = 3*(2m+1)*(2n+1) + 2.
+    Square when nphi*ntheta = (2m+1)*(2n+1).  For mpol=ntor=1: 3x3 grid.
+    """
+    R0, r = 1.0, 0.1
+    nphi = 2 * mpol + 1
+    ntheta = 2 * ntor + 1
+
+    xc, yc, zc = _make_simple_torus_coeffs(R0, r, mpol, ntor, nfp)
+    qphi = np.linspace(0, 1.0 / nfp, nphi, endpoint=False)
+    qtheta = np.linspace(0, 1.0, ntheta, endpoint=False)
+    sdofs = np.concatenate([xc.ravel(), yc.ravel(), zc.ravel()])
+    assert sdofs.shape[0] == 3 * nphi * ntheta
+
+    bs = _MockBiotSavart(_make_mock_coils())
+    surf = _MockSurface(sdofs, mpol, ntor, nfp, False, qphi, qtheta)
+    label = _MockVolumeLabel()
+    target = 2.0 * np.pi**2 * R0 * r**2
+
+    return BoozerSurfaceJAX(bs, surf, label, target, constraint_weight=None)
+
+
+class TestBoozerSurfaceJAXExactPath:
+    """Test the exact (Newton) path of BoozerSurfaceJAX.
+
+    Validates:
+    - Exact-type instantiation and boozer_type.
+    - run_code() exact-path convergence.
+    - Result dict contract parity with CPU BoozerSurface.
+    - Mask is boolean (not integer indices).
+    - Residual is raw unmasked (full grid size).
+    """
+
+    def test_exact_instantiation(self):
+        """constraint_weight=None yields boozer_type='exact'."""
+        booz = _make_mock_boozer_surface_exact()
+        assert booz.boozer_type == "exact"
+        assert booz.constraint_weight is None
+
+    def test_run_code_exact_converges(self):
+        """run_code() exact path runs and returns a result dict."""
+        booz = _make_mock_boozer_surface_exact()
+        res = booz.run_code(iota=0.3, G=0.05)
+        assert res is not None
+        assert res["type"] == "exact"
+        assert booz.need_to_run_code is False
+
+    def test_exact_result_dict_keys(self):
+        """Exact-path result dict has all CPU-contract keys."""
+        booz = _make_mock_boozer_surface_exact()
+        res = booz.run_code(iota=0.3, G=0.05)
+        expected_keys = {
+            "residual",
+            "jacobian",
+            "iter",
+            "success",
+            "G",
+            "s",
+            "iota",
+            "PLU",
+            "mask",
+            "type",
+            "vjp",
+        }
+        assert expected_keys <= set(res.keys())
+
+    def test_exact_mask_is_boolean(self):
+        """CPU contract: mask is a boolean array, not integer indices."""
+        booz = _make_mock_boozer_surface_exact()
+        res = booz.run_code(iota=0.3, G=0.05)
+        mask = res["mask"]
+        assert mask.dtype == np.bool_, f"mask dtype should be bool, got {mask.dtype}"
+        nphi = len(booz.quadpoints_phi)
+        ntheta = len(booz.quadpoints_theta)
+        assert mask.shape == (3 * nphi * ntheta,)
+
+    def test_exact_residual_is_raw_unmasked(self):
+        """CPU contract: residual is the full unmasked Boozer residual."""
+        booz = _make_mock_boozer_surface_exact()
+        res = booz.run_code(iota=0.3, G=0.05)
+        nphi = len(booz.quadpoints_phi)
+        ntheta = len(booz.quadpoints_theta)
+        assert res["residual"].shape == (3 * nphi * ntheta,), (
+            f"residual shape should be {(3 * nphi * ntheta,)}, "
+            f"got {res['residual'].shape}"
+        )
+
+    def test_exact_mask_selects_from_residual(self):
+        """mask can index into residual (CPU pattern: r[mask])."""
+        booz = _make_mock_boozer_surface_exact()
+        res = booz.run_code(iota=0.3, G=0.05)
+        masked_r = res["residual"][res["mask"]]
+        assert masked_r.ndim == 1
+        assert len(masked_r) <= len(res["residual"])
+        assert len(masked_r) == int(res["mask"].sum())
+
+    def test_exact_idempotent(self):
+        """Second run_code() returns None when not dirty."""
+        booz = _make_mock_boozer_surface_exact()
         booz.run_code(iota=0.3, G=0.05)
         assert booz.run_code(iota=0.3, G=0.05) is None
 

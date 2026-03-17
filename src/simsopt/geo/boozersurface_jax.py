@@ -54,17 +54,34 @@ from simsopt.geo.optimizer_jax import jax_minimize, newton_polish, newton_exact
 __all__ = ["BoozerSurfaceJAX"]
 
 
-# ---------------------------------------------------------------------------
-# Pure JAX objective functions (no Python side effects, fully JIT-able)
-#
-# These extend M3's composed pipeline with label constraints and
-# z-coordinate penalty for the full Boozer inner solve.
-# ---------------------------------------------------------------------------
+def _compute_label(
+    label_type,
+    gamma,
+    xphi,
+    xtheta,
+    phi_idx,
+    points,
+    coil_gammas,
+    coil_gammadashs,
+    coil_currents,
+):
+    """Compute the label value (volume, area, or toroidal flux).
+
+    Shared by penalty objective, exact residual, and residual vector.
+    """
+    normal = jnp.cross(xphi, xtheta)
+    if label_type == "volume":
+        return volume_jax(gamma, normal)
+    if label_type == "area":
+        return area_jax(normal)
+    ntheta = gamma.shape[1]
+    A = biot_savart_A(points, coil_gammas, coil_gammadashs, coil_currents)
+    A = A.reshape(gamma.shape)
+    return toroidal_flux_jax(A[phi_idx], xtheta[phi_idx], ntheta)
 
 
 def _boozer_penalty_objective(
     x,
-    # --- static / closed-over data ---
     coil_gammas,
     coil_gammadashs,
     coil_currents,
@@ -92,14 +109,12 @@ def _boozer_penalty_objective(
     The decision vector is ``x = [surface_dofs, iota]`` (optimize_G=False)
     or ``x = [surface_dofs, iota, G]`` (optimize_G=True).
     """
-    # 1. Unpack decision vector
     if optimize_G:
         sdofs, iota, G = x[:-2], x[-2], x[-1]
     else:
         sdofs, iota = x[:-1], x[-1]
         G = compute_G_from_currents(coil_currents)
 
-    # 2. Surface geometry from DOFs (reuses M3's SSOT helper)
     gamma, xphi, xtheta = _surface_geometry_from_dofs(
         sdofs,
         quadpoints_phi,
@@ -112,26 +127,24 @@ def _boozer_penalty_objective(
     )
     nphi, ntheta = gamma.shape[:2]
 
-    # 3. Magnetic field on surface
     points = gamma.reshape(-1, 3)
     B = biot_savart_B(points, coil_gammas, coil_gammadashs, coil_currents)
     B = B.reshape(nphi, ntheta, 3)
 
-    # 4. Boozer residual scalar (M3 forward kernel)
     J_boozer = boozer_residual_scalar(G, iota, B, xphi, xtheta, weight_inv_modB)
 
-    # 5. Label constraint (M4 addition)
-    normal = jnp.cross(xphi, xtheta)
-    if label_type == "volume":
-        label_val = volume_jax(gamma, normal)
-    elif label_type == "area":
-        label_val = area_jax(normal)
-    else:  # "toroidal_flux"
-        A = biot_savart_A(points, coil_gammas, coil_gammadashs, coil_currents)
-        A = A.reshape(nphi, ntheta, 3)
-        label_val = toroidal_flux_jax(A[phi_idx], xtheta[phi_idx], ntheta)
+    label_val = _compute_label(
+        label_type,
+        gamma,
+        xphi,
+        xtheta,
+        phi_idx,
+        points,
+        coil_gammas,
+        coil_gammadashs,
+        coil_currents,
+    )
 
-    # 6. Penalty terms
     J_label = 0.5 * constraint_weight * (label_val - targetlabel) ** 2
     J_z = 0.5 * constraint_weight * gamma[0, 0, 2] ** 2
 
@@ -140,7 +153,6 @@ def _boozer_penalty_objective(
 
 def _boozer_exact_residual(
     x,
-    # --- static / closed-over data ---
     coil_gammas,
     coil_gammadashs,
     coil_currents,
@@ -168,7 +180,6 @@ def _boozer_exact_residual(
     """
     sdofs, iota, G = x[:-2], x[-2], x[-1]
 
-    # Surface geometry (M3 SSOT helper)
     gamma, xphi, xtheta = _surface_geometry_from_dofs(
         sdofs,
         quadpoints_phi,
@@ -181,28 +192,24 @@ def _boozer_exact_residual(
     )
     nphi, ntheta = gamma.shape[:2]
 
-    # Magnetic field
     points = gamma.reshape(-1, 3)
     B = biot_savart_B(points, coil_gammas, coil_gammadashs, coil_currents)
     B = B.reshape(nphi, ntheta, 3)
 
-    # Boozer residual vector (M3 kernel, reused)
     r_flat = boozer_residual_vector(G, iota, B, xphi, xtheta, weight_inv_modB)
-
-    # Select masked equations (M4: colocation grid filtering)
     r_masked = r_flat[mask_indices]
 
-    # Label constraint (M4 addition)
-    normal = jnp.cross(xphi, xtheta)
-    if label_type == "volume":
-        label_val = volume_jax(gamma, normal)
-    elif label_type == "area":
-        label_val = area_jax(normal)
-    else:
-        A = biot_savart_A(points, coil_gammas, coil_gammadashs, coil_currents)
-        A = A.reshape(nphi, ntheta, 3)
-        label_val = toroidal_flux_jax(A[phi_idx], xtheta[phi_idx], ntheta)
-
+    label_val = _compute_label(
+        label_type,
+        gamma,
+        xphi,
+        xtheta,
+        phi_idx,
+        points,
+        coil_gammas,
+        coil_gammadashs,
+        coil_currents,
+    )
     r_label = label_val - targetlabel
 
     if stellsym_surface:
@@ -210,11 +217,6 @@ def _boozer_exact_residual(
     else:
         r_z = gamma[0, 0, 2]
         return jnp.concatenate([r_masked, jnp.array([r_label, r_z])])
-
-
-# ---------------------------------------------------------------------------
-# JAX VJP wrappers for outer-path coil sensitivities
-# ---------------------------------------------------------------------------
 
 
 def _boozer_exact_coil_vjp(lm, booz_surf, iota, G):
@@ -235,7 +237,7 @@ def _boozer_exact_coil_vjp(lm, booz_surf, iota, G):
     Returns:
         (d_coil_gammas, d_coil_gammadashs, d_coil_currents) cotangent arrays.
     """
-    sdofs = jnp.asarray(booz_surf.surface.get_dofs())
+    sdofs = booz_surf._get_surface_dofs()
     x = jnp.concatenate([sdofs, jnp.array([iota, G])])
     mask_indices = booz_surf._compute_stellsym_mask_indices()
 
@@ -289,15 +291,13 @@ def _boozer_ls_coil_vjp(lm, booz_surf, iota, G, weight_inv_modB=True):
         (d_coil_gammas, d_coil_gammadashs, d_coil_currents) cotangent arrays.
     """
     optimize_G = G is not None
-    sdofs = jnp.asarray(booz_surf.surface.get_dofs())
+    sdofs = booz_surf._get_surface_dofs()
     if optimize_G:
         x = jnp.concatenate([sdofs, jnp.array([iota, G])])
     else:
         x = jnp.concatenate([sdofs, jnp.array([iota])])
 
     def grad_of_coils(cg, cgd, ci):
-        """Gradient of the penalty objective w.r.t. decision vector x,
-        as a function of coil params."""
         obj = lambda xx: _boozer_penalty_objective(
             xx,
             coil_gammas=cg,
@@ -326,11 +326,6 @@ def _boozer_ls_coil_vjp(lm, booz_surf, iota, G, weight_inv_modB=True):
         booz_surf.coil_currents,
     )
     return vjp_fn(lm)
-
-
-# ---------------------------------------------------------------------------
-# BoozerSurfaceJAX class (adapter around pure functions)
-# ---------------------------------------------------------------------------
 
 
 _DEFAULT_OPTIONS_LS = {
@@ -527,41 +522,30 @@ class BoozerSurfaceJAX(Optimizable):
             points, self.coil_gammas, self.coil_gammadashs, self.coil_currents
         ).reshape(nphi, ntheta, 3)
 
-        # Boozer residual vector (reuse M3 kernel)
         r_boozer_raw = boozer_residual_vector(
             G, iota, B, xphi, xtheta, self.options["weight_inv_modB"]
         )
         num_res = 3 * nphi * ntheta
         r_boozer = r_boozer_raw / jnp.sqrt(num_res)
 
-        # Label and z-constraint residuals
         cw = self.constraint_weight if self.constraint_weight is not None else 1.0
-        normal = jnp.cross(xphi, xtheta)
-        if self.label_type == "volume":
-            lab = float(volume_jax(gamma, normal))
-        elif self.label_type == "area":
-            lab = float(area_jax(normal))
-        else:
-            A = biot_savart_A(
-                points, self.coil_gammas, self.coil_gammadashs, self.coil_currents
-            ).reshape(nphi, ntheta, 3)
-            lab = float(
-                toroidal_flux_jax(A[self.phi_idx], xtheta[self.phi_idx], ntheta)
+        lab = float(
+            _compute_label(
+                self.label_type,
+                gamma,
+                xphi,
+                xtheta,
+                self.phi_idx,
+                points,
+                self.coil_gammas,
+                self.coil_gammadashs,
+                self.coil_currents,
             )
+        )
         rl = jnp.sqrt(cw) * (lab - self.targetlabel)
         rz = jnp.sqrt(cw) * gamma[0, 0, 2]
 
         return np.asarray(jnp.concatenate([r_boozer, jnp.array([rl, rz])]))
-
-    # ------------------------------------------------------------------
-    # LS (penalty) path
-    # ------------------------------------------------------------------
-
-    def _make_penalty_objective(self, optimize_G):
-        """Build penalty objective using default weight_inv_modB."""
-        return self._make_penalty_objective_with(
-            optimize_G, self.options["weight_inv_modB"]
-        )
 
     def minimize_boozer_penalty_constraints_LBFGS(
         self,
@@ -599,7 +583,7 @@ class BoozerSurfaceJAX(Optimizable):
         sdofs_final, iota_out, G_out = self._unpack_decision_vector(
             result.x, optimize_G
         )
-        s.set_dofs(np.asarray(sdofs_final))
+        self._set_surface_dofs(sdofs_final)
 
         resdict = {
             "fun": float(result.fun),
@@ -701,10 +685,6 @@ class BoozerSurfaceJAX(Optimizable):
             )
         return res
 
-    # ------------------------------------------------------------------
-    # Exact (Newton) path
-    # ------------------------------------------------------------------
-
     def _make_exact_residual(self, mask_indices):
         """Build the JIT-compiled exact residual function."""
         return partial(
@@ -735,11 +715,10 @@ class BoozerSurfaceJAX(Optimizable):
         """
         s = self.surface
         m = s.get_stellsym_mask()
-        mask = np.concatenate((m[..., None], m[..., None], m[..., None]), axis=2)
+        mask = np.repeat(m[..., None], 3, axis=2)
         if s.stellsym:
             mask[0, 0, 0] = False
-        mask = mask.flatten()
-        return jnp.asarray(np.where(mask)[0], dtype=jnp.int32)
+        return jnp.asarray(np.flatnonzero(mask), dtype=jnp.int32)
 
     def solve_residual_equation_exactly_newton(
         self,
@@ -767,7 +746,6 @@ class BoozerSurfaceJAX(Optimizable):
         if not self.need_to_run_code:
             return self.res
 
-        # Preflight: exact Newton requires SurfaceXYZTensorFourier
         s = self.surface
         try:
             from simsopt.geo.surfacexyztensorfourier import SurfaceXYZTensorFourier
@@ -806,8 +784,40 @@ class BoozerSurfaceJAX(Optimizable):
         J = result["jacobian"]
         P, L, U = jax.scipy.linalg.lu(J)
 
+        nphi = len(self.quadpoints_phi)
+        ntheta = len(self.quadpoints_theta)
+
+        # Reconstruct raw (unmasked) Boozer residual for CPU-contract parity.
+        gamma_final, xphi_final, xtheta_final = _surface_geometry_from_dofs(
+            sdofs_final,
+            self.quadpoints_phi,
+            self.quadpoints_theta,
+            self.mpol,
+            self.ntor,
+            self.nfp,
+            self.stellsym,
+            self.scatter_indices,
+        )
+        B_final = biot_savart_B(
+            gamma_final.reshape(-1, 3),
+            self.coil_gammas,
+            self.coil_gammadashs,
+            self.coil_currents,
+        ).reshape(nphi, ntheta, 3)
+        r_raw = boozer_residual_vector(
+            G_final,
+            iota_final,
+            B_final,
+            xphi_final,
+            xtheta_final,
+            self.options["weight_inv_modB"],
+        )
+
+        bool_mask = np.zeros(3 * nphi * ntheta, dtype=bool)
+        bool_mask[np.asarray(mask_indices)] = True
+
         res = {
-            "residual": np.asarray(result["residual"]),
+            "residual": np.asarray(r_raw),
             "jacobian": np.asarray(J),
             "iter": result["nit"],
             "success": result["success"],
@@ -815,7 +825,7 @@ class BoozerSurfaceJAX(Optimizable):
             "s": s,
             "iota": iota_final,
             "PLU": (np.asarray(P), np.asarray(L), np.asarray(U)),
-            "mask": np.asarray(mask_indices),
+            "mask": bool_mask,
             "type": "exact",
             "vjp": _boozer_exact_coil_vjp,
         }
@@ -831,10 +841,6 @@ class BoozerSurfaceJAX(Optimizable):
                 flush=True,
             )
         return res
-
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
 
     def run_code(self, iota, G=None):
         """Run the Boozer surface solver (LS or exact depending on config).

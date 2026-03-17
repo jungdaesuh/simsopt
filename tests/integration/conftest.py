@@ -20,6 +20,7 @@ def _patch_meta_path_finder():
     )
 
     new_modules = {
+        "simsopt.backend": os.path.join(jax_src, "backend.py"),
         "simsopt.field.biotsavart_jax": os.path.join(
             jax_src, "field", "biotsavart_jax.py"
         ),
