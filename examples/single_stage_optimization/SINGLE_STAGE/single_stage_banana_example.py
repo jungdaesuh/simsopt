@@ -330,6 +330,54 @@ def parse_args():
         default=float(os.environ.get("CURVATURE_WEIGHT", "0.1")),
     )
     parser.add_argument(
+        "--length-weight",
+        type=float,
+        default=float(os.environ.get("SS_LENGTH_WEIGHT", "1")),
+        help="Curve length penalty weight (default 1).",
+    )
+    parser.add_argument(
+        "--res-weight",
+        type=float,
+        default=float(os.environ.get("RES_WEIGHT", "1000")),
+        help="Boozer residual penalty weight (default 1000).",
+    )
+    parser.add_argument(
+        "--iotas-weight",
+        type=float,
+        default=float(os.environ.get("IOTAS_WEIGHT", "100")),
+        help="Iota target tracking weight (default 100).",
+    )
+    parser.add_argument(
+        "--cs-weight",
+        type=float,
+        default=float(os.environ.get("CS_WEIGHT", "1")),
+        help="Coil-surface distance penalty weight (default 1).",
+    )
+    parser.add_argument(
+        "--cs-dist",
+        type=float,
+        default=float(os.environ.get("CS_DIST", "0.02")),
+        help="Minimum coil-surface distance in meters (default 0.02).",
+    )
+    parser.add_argument(
+        "--surf-dist-weight",
+        type=float,
+        default=float(os.environ.get("SURF_DIST_WEIGHT", "1000")),
+        help="Surface-vessel distance penalty weight (default 1000).",
+    )
+    parser.add_argument(
+        "--ss-dist",
+        type=float,
+        default=float(os.environ.get("SS_DIST", "0.04")),
+        help="Minimum surface-vessel distance in meters (default 0.04).",
+    )
+    parser.add_argument(
+        "--maxcor",
+        type=int,
+        default=int(os.environ.get("MAXCOR", "300")),
+        help="L-BFGS-B memory (number of corrections, default 300).",
+    )
+    parser.add_argument(
         "--stage2-source",
         choices=["database", "local"],
         default=os.environ.get("STAGE2_SOURCE", "database"),
@@ -1049,17 +1097,17 @@ if __name__ == "__main__":
             brs = [BoozerResidual(boozer_surface, bs_obj)]
 
     # Objective function weights and parameters
-    LENGTH_WEIGHT = 1
-    RES_WEIGHT = 1e3
-    IOTAS_WEIGHT = 1e2
+    LENGTH_WEIGHT = args.length_weight
+    RES_WEIGHT = args.res_weight
+    IOTAS_WEIGHT = args.iotas_weight
     CC_WEIGHT = args.cc_weight
-    CC_DIST = args.cc_dist
-    CS_WEIGHT = 1
-    CS_DIST = 0.02
-    SURF_DIST_WEIGHT = 1e3
-    SS_DIST = 0.04
+    CC_DIST = max(args.cc_dist, 0.05)  # Hardware minimum: 5cm coil-coil spacing
+    CS_WEIGHT = args.cs_weight
+    CS_DIST = max(args.cs_dist, 0.02)  # Hardware minimum: 2cm coil-surface clearance
+    SURF_DIST_WEIGHT = args.surf_dist_weight
+    SS_DIST = max(args.ss_dist, 0.04)  # Hardware minimum: 4cm surface-vessel clearance
     CURVATURE_WEIGHT = args.curvature_weight
-    CURVATURE_THRESHOLD = args.curvature_threshold
+    CURVATURE_THRESHOLD = max(args.curvature_threshold, 20)  # Hardware minimum: 20
     phi_list = np.linspace(0, 1 / boozer_surface.surface.nfp, 5)
 
     # Individual objective terms

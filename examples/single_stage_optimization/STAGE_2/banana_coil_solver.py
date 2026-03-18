@@ -159,6 +159,24 @@ def parse_args():
         help="Initial banana-coil toroidal width in normalized angle coordinates.",
     )
     parser.add_argument(
+        "--num-quadpoints",
+        type=int,
+        default=int(os.environ.get("NUM_QUADPOINTS", "128")),
+        help="Number of quadrature points per coil (default 128).",
+    )
+    parser.add_argument(
+        "--curvature-p-norm",
+        type=int,
+        default=int(os.environ.get("CURVATURE_P_NORM", "4")),
+        help="Lp norm exponent for curvature penalty (default 4).",
+    )
+    parser.add_argument(
+        "--squared-flux-weight",
+        type=float,
+        default=float(os.environ.get("SQUARED_FLUX_WEIGHT", "1.0")),
+        help="Squared flux objective weight (default 1.0).",
+    )
+    parser.add_argument(
         "--backend",
         choices=["cpu", "jax"],
         default=os.environ.get("SIMSOPT_BACKEND")
@@ -541,7 +559,7 @@ if __name__ == "__main__":
     theta_width = args.theta_width
     phi_width = args.phi_width
 
-    num_quadpoints = 128  # number of quadature points for coils
+    num_quadpoints = args.num_quadpoints  # number of quadrature points for coils
     order = args.order  # number of Fourier modes for coils
 
     R0 = args.major_radius  # major radius
@@ -577,15 +595,15 @@ if __name__ == "__main__":
     # Weight on the curve lengths in the objective function
     # We'll penalize the coil if it becomes longer than an target length of 1.75 m
     LENGTH_WEIGHT = args.length_weight
-    LENGTH_TARGET = args.length_target
+    LENGTH_TARGET = max(args.length_target, 1.75)  # Hardware minimum: 1.75m
 
     # Threshold and weight for the coil-to-coil distance penalty
-    CC_THRESHOLD = args.cc_threshold
+    CC_THRESHOLD = max(args.cc_threshold, 0.05)  # Hardware minimum: 5cm coil-coil spacing
     CC_WEIGHT = args.cc_weight
 
     # Threshold and weight for the coil curvature penalty
     CURVATURE_WEIGHT = args.curvature_weight
-    CURVATURE_THRESHOLD = args.curvature_threshold
+    CURVATURE_THRESHOLD = max(args.curvature_threshold, 20)  # Hardware minimum: 20
 
     # Define the individual terms objective function:
     new_bs_jax = None
@@ -605,14 +623,15 @@ if __name__ == "__main__":
         new_curves, CC_THRESHOLD
     )  # penalty on coil-to-coil distance
 
-    # Changed p-norm of curvature penalty from 2 to 4 to prevent kinks/dents in the coils
-    Jc = LpCurveCurvature(new_banana_curve, 4, CURVATURE_THRESHOLD)
+    # Lp-norm curvature penalty (configurable via --curvature-p-norm)
+    Jc = LpCurveCurvature(new_banana_curve, args.curvature_p_norm, CURVATURE_THRESHOLD)
     print(f"Initial coil length: {Jls.J():.2f} [m]")
 
     # TOTAL OBJECTIVE FUNCTION -
     # we'll penalize the coil length, coil-coil distance, and curvature while minimizing the normal field
+    SQUARED_FLUX_WEIGHT = args.squared_flux_weight
     JF = (
-        Jf
+        SQUARED_FLUX_WEIGHT * Jf
         + LENGTH_WEIGHT * QuadraticPenalty(Jls, LENGTH_TARGET, "max")
         + CC_WEIGHT * Jccdist
         + CURVATURE_WEIGHT * Jc
