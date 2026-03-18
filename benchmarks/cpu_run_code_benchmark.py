@@ -149,7 +149,7 @@ def run_benchmarks(src_root):
         dofs = dofs.at[zc_idx + (mpol - 1) * (2 * ntor + 1) + ntor].set(0.1)
 
         iota_init = 0.3
-        G_init = float(lbl_mod.compute_G_from_currents(currents, nfp))
+        G_init = float(lbl_mod.compute_G_from_currents(currents))
 
         def run_ls():
             return opt_mod.jax_minimize(

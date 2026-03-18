@@ -156,7 +156,7 @@ def run_benchmarks(src_root):
         dofs = dofs.at[zc_idx + (mpol - 1) * (2 * ntor + 1) + ntor].set(0.1)  # r sin
 
         iota_init = 0.3
-        G_init = float(lbl_mod.compute_G_from_currents(currents, nfp))
+        G_init = float(lbl_mod.compute_G_from_currents(currents))
 
         constraint_weight = 1.0
         vol_target = float(lbl_mod.volume_jax(
