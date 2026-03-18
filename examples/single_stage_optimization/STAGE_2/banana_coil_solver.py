@@ -1,31 +1,15 @@
 import argparse
 import os
-import numpy as np
-
-# SIMSOPT imports
-from scipy.optimize import minimize
-from simsopt.field import BiotSavart, Current, Coil, coils_via_symmetries
-from simsopt.field.coil import ScaledCurrent
-from simsopt.geo import (
-    SurfaceRZFourier,
-    curves_to_vtk,
-    create_equally_spaced_curves,
-    CurveLength,
-    CurveCurveDistance,
-    LpCurveCurvature,
-)
-from simsopt.objectives import SquaredFlux, QuadraticPenalty
-from simsopt.geo import CurveCWSFourierCPP
+import sys
 import json
+
+import numpy as np
+from scipy.optimize import minimize
 from numba import njit
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 EXAMPLE_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, ".."))
-
-import sys
-
 sys.path.insert(0, EXAMPLE_ROOT)
-from plotting_utils import norm_field_plot, magnitude_field_plot, cross_section_plot
 
 SIMSOPT_ROOT = os.path.abspath(os.path.join(EXAMPLE_ROOT, "..", ".."))
 REPO_ROOT = os.path.abspath(os.path.join(SIMSOPT_ROOT, ".."))
@@ -479,6 +463,27 @@ if __name__ == "__main__":
     # ---------------------------------------------------------------------------------------
     args = parse_args()
 
+    # Deferred imports — simsopt modules require simsoptpp (C++ extension)
+    # for coil/surface setup.  Placing them after arg parsing lets --help work
+    # even when simsoptpp is not installed.
+    from simsopt.field import BiotSavart, Current, Coil, coils_via_symmetries
+    from simsopt.field.coil import ScaledCurrent
+    from simsopt.geo import (
+        SurfaceRZFourier,
+        curves_to_vtk,
+        create_equally_spaced_curves,
+        CurveLength,
+        CurveCurveDistance,
+        LpCurveCurvature,
+        CurveCWSFourierCPP,
+    )
+    from simsopt.objectives import SquaredFlux, QuadraticPenalty
+    from plotting_utils import (
+        norm_field_plot,
+        magnitude_field_plot,
+        cross_section_plot,
+    )
+
     # File for the desired boundary magnetic surface:
     plasma_surf_filename = args.plasma_surf_filename
     file_loc = build_equilibrium_path(args)
@@ -613,7 +618,7 @@ if __name__ == "__main__":
         + CURVATURE_WEIGHT * Jc
     )
 
-    OUT_DIR_ITER = f"{OUT_DIR}R0={R0:g}-s={s:g}-LW={LENGTH_WEIGHT:g}-CCW={CC_WEIGHT:g}-CCT={CC_THRESHOLD:g}-CW={CURVATURE_WEIGHT:g}-CT={CURVATURE_THRESHOLD:g}-SR={banana_surf_radius:0.3f}-Order={order}/"
+    OUT_DIR_ITER = f"{OUT_DIR}R0={R0:g}-s={s:g}-LW={LENGTH_WEIGHT:g}-CCW={CC_WEIGHT:g}-CCT={CC_THRESHOLD:g}-CW={CURVATURE_WEIGHT:g}-CT={CURVATURE_THRESHOLD:g}-SR={banana_surf_radius:0.3f}-Order={order}-backend={args.backend}/"
     os.makedirs(OUT_DIR_ITER, exist_ok=True)
 
     # minimize gets called, optimizes based on degrees of freedom from objective function
@@ -704,6 +709,7 @@ if __name__ == "__main__":
         "TOROIDAL_FLUX": s,
         "banana_surf_radius": banana_surf_radius,
         "order": order,
+        "backend": args.backend,
         "init_only": args.init_only,
         "max_iterations": MAXITER,
         "iterations": res_nit,

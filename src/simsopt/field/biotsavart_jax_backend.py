@@ -34,6 +34,11 @@ class BiotSavartJAX(Optimizable):
     chain runs through the coil list so that the outer framework
     correctly composes DOFs and derivatives.
 
+    When all coils use ``CurveXYZFourier`` (possibly wrapped in
+    ``RotatedCurve``), the JAX-native path is enabled: coil geometry
+    is evaluated from DOFs via a precomputed Fourier basis matrix
+    entirely inside the JIT boundary, eliminating CPU round-trips.
+
     Args:
         coils: list of :class:`simsopt.field.coil.Coil` objects.
     """
@@ -42,6 +47,98 @@ class BiotSavartJAX(Optimizable):
         self._coils = list(coils)
         self._points_jax = None
         Optimizable.__init__(self, x0=np.asarray([]), depends_on=self._coils)
+
+        # JAX-native path metadata (populated by _introspect_coils)
+        self._jax_native = False
+        self._unique_base_curves = []
+        self._unique_base_currents = []
+        self._coil_descs = []  # list of (curve_idx, current_idx, rotmat_jax, scale)
+        self._curve_order = 0
+        self._curve_dof_size = 0
+        self._curve_quadpoints_jax = None
+        self._introspect_coils()
+
+    def _introspect_coils(self):
+        """Walk coil tree to identify unique base curves/currents.
+
+        Enables the JAX-native path when all curves are
+        ``CurveXYZFourier`` (possibly wrapped in ``RotatedCurve``)
+        with uniform Fourier order and quadrature point count.
+        """
+        try:
+            from ..geo.curvexyzfourier import CurveXYZFourier
+            from ..geo.curve import RotatedCurve
+            from .coil import ScaledCurrent, Current
+        except ImportError:
+            return
+
+        base_curve_ids = {}  # id(obj) → index
+        base_current_ids = {}
+        base_curves = []
+        base_currents = []
+        descs = []
+
+        for coil in self._coils:
+            curve = coil.curve
+            rotmat = None
+
+            # Unwrap nested RotatedCurve layers (accumulate rotation).
+            # Outer wraps inner: gamma = base.gamma() @ R_inner @ R_outer,
+            # so we pre-multiply each inner rotation found while unwrapping.
+            while isinstance(curve, RotatedCurve):
+                rm = curve.rotmat
+                rotmat = rm if rotmat is None else rm @ rotmat
+                curve = curve.curve
+
+            if not isinstance(curve, CurveXYZFourier):
+                return  # unsupported curve type → stay on fallback path
+
+            cid = id(curve)
+            if cid not in base_curve_ids:
+                base_curve_ids[cid] = len(base_curves)
+                base_curves.append(curve)
+
+            # Unwrap ScaledCurrent chain
+            current = coil.current
+            scale = 1.0
+            while isinstance(current, ScaledCurrent):
+                scale *= current.scale
+                current = current.current_to_scale
+
+            # Must resolve to a single-DOF Current (not CurrentSum etc.)
+            if not isinstance(current, Current):
+                return
+
+            kid = id(current)
+            if kid not in base_current_ids:
+                base_current_ids[kid] = len(base_currents)
+                base_currents.append(current)
+
+            descs.append(
+                (
+                    base_curve_ids[cid],
+                    base_current_ids[kid],
+                    jnp.asarray(rotmat) if rotmat is not None else None,
+                    scale,
+                )
+            )
+
+        # All curves must share the same Fourier order and quadrature grid
+        orders = {c.order for c in base_curves}
+        if len(orders) != 1:
+            return
+        ref_qp = np.asarray(base_curves[0].quadpoints)
+        for c in base_curves[1:]:
+            if not np.array_equal(ref_qp, np.asarray(c.quadpoints)):
+                return
+
+        self._jax_native = True
+        self._unique_base_curves = base_curves
+        self._unique_base_currents = base_currents
+        self._coil_descs = descs
+        self._curve_order = orders.pop()
+        self._curve_dof_size = 3 * (2 * self._curve_order + 1)
+        self._curve_quadpoints_jax = jnp.asarray(np.asarray(base_curves[0].quadpoints))
 
     @property
     def coils(self):

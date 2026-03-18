@@ -26,5 +26,8 @@ from ._core import make_optimizable, load, save
 # VERSION info
 from ._version import version as __version__
 
-# Expose XSIMD depedency in simsoptpp
-from simsoptpp import using_xsimd as __built_with_xsimd__
+# Expose XSIMD dependency in simsoptpp (optional: absent in JAX-only envs)
+try:
+    from simsoptpp import using_xsimd as __built_with_xsimd__
+except (ImportError, AttributeError):
+    __built_with_xsimd__ = False
