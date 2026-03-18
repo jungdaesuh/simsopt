@@ -3,7 +3,7 @@ import os
 import numpy as np
 
 # SIMSOPT imports
-from scipy.optimize import minimize
+from scipy.optimize import minimize, basinhopping
 from simsopt.field import BiotSavart, Current, Coil, coils_via_symmetries
 from simsopt.field.coil import ScaledCurrent
 from simsopt.geo import (SurfaceRZFourier, curves_to_vtk, create_equally_spaced_curves, \
@@ -176,6 +176,26 @@ def parse_args():
         type=float,
         default=float(os.environ.get("SQUARED_FLUX_WEIGHT", "1.0")),
         help="Weight on the SquaredFlux term (default 1.0).",
+    )
+    parser.add_argument(
+        "--basin-hops",
+        type=int,
+        default=int(os.environ.get("BASIN_HOPS", "0")),
+        help="Number of basin-hopping restarts (0 = single L-BFGS-B run, default). "
+             "Each hop perturbs the coil DOFs and re-runs L-BFGS-B. "
+             "Total runs = basin_hops + 1. Keeps the best result.",
+    )
+    parser.add_argument(
+        "--basin-stepsize",
+        type=float,
+        default=float(os.environ.get("BASIN_STEPSIZE", "0.01")),
+        help="Perturbation scale for basin-hopping (fraction of DOF range, default 0.01).",
+    )
+    parser.add_argument(
+        "--basin-seed",
+        type=int,
+        default=int(os.environ.get("BASIN_SEED", "-1")),
+        help="RNG seed for basin-hopping (-1 = random, default). Set for reproducibility.",
     )
     return parser.parse_args()
 
@@ -512,22 +532,21 @@ if __name__ == "__main__":
     # Weight on the curve lengths in the objective function
     # We'll penalize the coil if it becomes longer than an target length of 1.75 m
     LENGTH_WEIGHT = args.length_weight
-    LENGTH_TARGET = max(args.length_target, 1.75)  # Hardware minimum: 1.75m
+    LENGTH_TARGET = max(args.length_target, 1.75)  # Baseline default floor
     if args.length_target < 1.75:
-        print(f"WARNING: --length-target {args.length_target} below hardware minimum, clamped to 1.75")
+        print(f"WARNING: --length-target {args.length_target} below baseline default, clamped to 1.75")
 
     # Threshold and weight for the coil-to-coil distance penalty
-    # Hardware minimum: 5cm coil-coil spacing
-    CC_THRESHOLD = max(args.cc_threshold, 0.05)
+    CC_THRESHOLD = max(args.cc_threshold, 0.05)  # Baseline default floor
     if args.cc_threshold < 0.05:
-        print(f"WARNING: --cc-threshold {args.cc_threshold} below hardware minimum, clamped to 0.05")
+        print(f"WARNING: --cc-threshold {args.cc_threshold} below baseline default, clamped to 0.05")
     CC_WEIGHT = args.cc_weight
 
     # Threshold and weight for the coil curvature penalty
     CURVATURE_WEIGHT = args.curvature_weight
-    CURVATURE_THRESHOLD = max(args.curvature_threshold, 40)  # Hardware minimum: 40 (Stage 2 baseline)
-    if args.curvature_threshold < 40:
-        print(f"WARNING: --curvature-threshold {args.curvature_threshold} below hardware minimum, clamped to 40")
+    CURVATURE_THRESHOLD = max(args.curvature_threshold, 20)  # Baseline default floor
+    if args.curvature_threshold < 20:
+        print(f"WARNING: --curvature-threshold {args.curvature_threshold} below minimum floor, clamped to 20")
 
     # Define the individual terms objective function:
     Jf = SquaredFlux(new_surf, new_bs) # penalty on B dot n
@@ -546,7 +565,15 @@ if __name__ == "__main__":
         + CC_WEIGHT * Jccdist \
         + CURVATURE_WEIGHT * Jc
 
-    OUT_DIR_ITER = f"{OUT_DIR}R0={R0:g}-s={s:g}-LW={LENGTH_WEIGHT:g}-CCW={CC_WEIGHT:g}-CCT={CC_THRESHOLD:g}-CW={CURVATURE_WEIGHT:g}-CT={CURVATURE_THRESHOLD:g}-SR={banana_surf_radius:0.3f}-Order={order}/"
+    rng_seed = None
+    basin_hop_count = None
+    basin_minimization_failures = None
+    if args.basin_hops > 0:
+        rng_seed = args.basin_seed if args.basin_seed >= 0 else int.from_bytes(os.urandom(4), 'big')
+        bh_suffix = f"-BH={args.basin_hops}-BS={args.basin_stepsize:g}-BSeed={rng_seed}"
+    else:
+        bh_suffix = ""
+    OUT_DIR_ITER = f"{OUT_DIR}R0={R0:g}-s={s:g}-LW={LENGTH_WEIGHT:g}-CCW={CC_WEIGHT:g}-CCT={CC_THRESHOLD:g}-CW={CURVATURE_WEIGHT:g}-CT={CURVATURE_THRESHOLD:g}-SR={banana_surf_radius:0.3f}-Order={order}{bh_suffix}/"
     os.makedirs(OUT_DIR_ITER, exist_ok=True)
 
     # minimize gets called, optimizes based on degrees of freedom from objective function
@@ -555,12 +582,40 @@ if __name__ == "__main__":
     if args.init_only:
         res_nit = 0
         print("Skipping Stage 2 optimizer because --init-only was provided.")
+    elif args.basin_hops > 0:
+        # Basin-hopping: perturb DOFs and re-run L-BFGS-B multiple times, keep best
+        minimizer_kwargs = {
+            'method': 'L-BFGS-B',
+            'jac': True,
+            'options': {'maxiter': MAXITER, 'maxcor': 300, 'ftol': args.ftol, 'gtol': args.gtol},
+        }
+        rng = np.random.RandomState(rng_seed)
+        print(f"Basin-hopping with {args.basin_hops} hops, stepsize={args.basin_stepsize}, seed={rng_seed}")
+        res = basinhopping(
+            fun, dofs,
+            minimizer_kwargs=minimizer_kwargs,
+            niter=args.basin_hops,
+            stepsize=args.basin_stepsize,
+            seed=rng,
+            disp=True,
+        )
+        basin_hop_count = res.nit if hasattr(res, 'nit') else None
+        basin_minimization_failures = res.minimization_failures if hasattr(res, 'minimization_failures') else None
+        if hasattr(res, 'lowest_optimization_result') and hasattr(res.lowest_optimization_result, 'nit'):
+            res_nit = res.lowest_optimization_result.nit
+        else:
+            res_nit = basin_hop_count
+        print(f"Basin-hopping complete. Best fun={res.fun:.6e}, hops={args.basin_hops}, seed={rng_seed}")
     else:
         res = minimize(fun, dofs, jac=True, method='L-BFGS-B',
                        options={'maxiter': MAXITER, 'maxcor': 300, 'ftol': args.ftol, 'gtol': args.gtol})
         res_nit = res.nit
         print(res.message)
 
+
+    # Ensure SIMSOPT state matches the best result (needed after basin-hopping)
+    if not args.init_only:
+        JF.x = res.x
 
     # POST-OPTIMIZATION PROCESSING AND OUTPUTS
     # ---------------------------------------------------------------------------------------
@@ -607,6 +662,11 @@ if __name__ == "__main__":
         "init_only": args.init_only,
         "max_iterations": MAXITER,
         "iterations": res_nit,
+        "basin_hops": args.basin_hops,
+        "basin_stepsize": args.basin_stepsize if args.basin_hops > 0 else None,
+        "basin_seed": rng_seed if args.basin_hops > 0 else None,
+        "basin_iterations": basin_hop_count,
+        "basin_minimization_failures": basin_minimization_failures,
         "FINAL_VOLUME": float(new_surf.volume()),
         "FIELD_ERROR": float(fieldError),
         "SELF_INTERSECTING": intersecting,

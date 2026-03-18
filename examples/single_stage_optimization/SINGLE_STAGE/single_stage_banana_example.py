@@ -4,7 +4,7 @@ import os
 import io
 import json
 import numpy as np
-from scipy.optimize import minimize
+from scipy.optimize import minimize, basinhopping
 
 # SIMSOPT imports
 from simsopt._core.optimizable import Optimizable
@@ -154,6 +154,26 @@ def build_stage2_bs_path(args):
     if os.path.exists(legacy):
         print(f"Note: found legacy Stage 2 output at {legacy_dir}/ (missing CCT/CT segments)")
         return legacy
+
+    # Fallback: basin-hopped directories have extra -BH=...-BS=...-BSeed=... suffix
+    # Glob for any directory starting with the base seed_dir name
+    from glob import glob as _glob
+    parent = os.path.join(
+        args.local_stage2_root,
+        f"outputs-{args.plasma_surf_filename}",
+    )
+    pattern = os.path.join(parent, seed_dir + "-BH=*", "biot_savart_opt.json")
+    matches = sorted(_glob(pattern))
+    if len(matches) == 1:
+        print(f"Note: found unique basin-hopped Stage 2 output at {os.path.dirname(matches[0])}")
+        return matches[0]
+    if len(matches) > 1:
+        match_dirs = "\n".join(f"  - {os.path.dirname(match)}" for match in matches)
+        raise FileNotFoundError(
+            "Multiple basin-hopped Stage 2 outputs match the requested seed specification. "
+            "Pass --stage2-bs-path explicitly to choose one.\n"
+            f"Matches:\n{match_dirs}"
+        )
 
     return candidate
 
@@ -337,6 +357,24 @@ def parse_args():
         "--stage2-seed-order",
         type=int,
         default=int(os.environ["STAGE2_SEED_ORDER"]) if "STAGE2_SEED_ORDER" in os.environ else None,
+    )
+    parser.add_argument(
+        "--basin-hops",
+        type=int,
+        default=int(os.environ.get("BASIN_HOPS", "0")),
+        help="Number of basin-hopping restarts (0 = single L-BFGS-B, default).",
+    )
+    parser.add_argument(
+        "--basin-stepsize",
+        type=float,
+        default=float(os.environ.get("BASIN_STEPSIZE", "0.01")),
+        help="Perturbation scale for basin-hopping (default 0.01).",
+    )
+    parser.add_argument(
+        "--basin-seed",
+        type=int,
+        default=int(os.environ.get("BASIN_SEED", "-1")),
+        help="RNG seed for basin-hopping (-1 = random). Set for reproducibility.",
     )
     return parser.parse_args()
 
@@ -776,10 +814,17 @@ if __name__ == "__main__":
     # ==============================================================================
     print(f"\n===== Starting single stage optimization for mpol = {mpol} =====")
 
+    # Resolve basin-hopping RNG seed early so it's available for config_hash
+    if args.basin_hops > 0:
+        rng_seed = args.basin_seed if args.basin_seed >= 0 else int.from_bytes(os.urandom(4), 'big')
+    else:
+        rng_seed = None
+
     config_str = (
         f"{stage2_bs_path}|{stage}|{CONSTRAINT_WEIGHT}|{vol_target}|{iota_target}"
         f"|{args.cc_dist}|{args.cc_weight}|{args.curvature_weight}|{args.curvature_threshold}"
         f"|{banana_surf_radius}|{nphi}|{ntheta}|{args.init_only}"
+        f"|{args.basin_hops}|{args.basin_stepsize}|{rng_seed}"
     )
     config_hash = hashlib.sha256(config_str.encode()).hexdigest()[:8]
     OUT_DIR_ITER = OUT_DIR + f"/mpol={mpol}-ntor={ntor}-{config_hash}"
@@ -825,26 +870,26 @@ if __name__ == "__main__":
         brs = [BoozerResidual(boozer_surface, bs_obj)]
 
     # Objective function weights and parameters (all configurable via CLI)
-    # Hardware minimums enforced via max() — weights are free, thresholds are clamped.
+    # Baseline default floors enforced via max() — weights are free, thresholds are clamped.
     LENGTH_WEIGHT = args.length_weight
     RES_WEIGHT = args.res_weight
     IOTAS_WEIGHT = args.iotas_weight
     CC_WEIGHT = args.cc_weight
-    CC_DIST = max(args.cc_dist, 0.05)            # Hardware minimum: 5cm coil-coil spacing
+    CC_DIST = max(args.cc_dist, 0.05)            # Baseline default floor
     if args.cc_dist < 0.05:
-        print(f"WARNING: --cc-dist {args.cc_dist} below hardware minimum, clamped to 0.05")
+        print(f"WARNING: --cc-dist {args.cc_dist} below baseline default, clamped to 0.05")
     CS_WEIGHT = args.cs_weight
-    CS_DIST = max(args.cs_dist, 0.02)            # Hardware minimum: 2cm coil-surface clearance
+    CS_DIST = max(args.cs_dist, 0.02)            # Baseline default floor
     if args.cs_dist < 0.02:
-        print(f"WARNING: --cs-dist {args.cs_dist} below hardware minimum, clamped to 0.02")
+        print(f"WARNING: --cs-dist {args.cs_dist} below baseline default, clamped to 0.02")
     SURF_DIST_WEIGHT = args.surf_dist_weight
-    SS_DIST = max(args.ss_dist, 0.04)            # Hardware minimum: 4cm surface-vessel clearance
+    SS_DIST = max(args.ss_dist, 0.04)            # Baseline default floor
     if args.ss_dist < 0.04:
-        print(f"WARNING: --ss-dist {args.ss_dist} below hardware minimum, clamped to 0.04")
+        print(f"WARNING: --ss-dist {args.ss_dist} below baseline default, clamped to 0.04")
     CURVATURE_WEIGHT = args.curvature_weight
-    CURVATURE_THRESHOLD = max(args.curvature_threshold, 20)  # Hardware minimum: 20
+    CURVATURE_THRESHOLD = max(args.curvature_threshold, 20)  # Baseline default floor
     if args.curvature_threshold < 20:
-        print(f"WARNING: --curvature-threshold {args.curvature_threshold} below hardware minimum, clamped to 20")
+        print(f"WARNING: --curvature-threshold {args.curvature_threshold} below baseline default, clamped to 20")
     phi_list = np.linspace(0, 1 / boozer_surface.surface.nfp, 5)
 
     # Individual objective terms
@@ -893,6 +938,8 @@ if __name__ == "__main__":
     ftol = ftol_by_mpol.get(mpol, 1e-5 if mpol < 8 else 1e-10)
     gtol = gtol_by_mpol.get(mpol, 1e-2 if mpol < 8 else 1e-7)
 
+    basin_hop_count = None
+    basin_minimization_failures = None
     if args.init_only:
         res_nit = 0
         final_volume = initial_volume
@@ -900,15 +947,47 @@ if __name__ == "__main__":
         final_max_curvature = initial_max_curvature
         fieldError = initial_field_error
         print("Skipping single-stage optimizer because --init-only was provided.")
+    elif args.basin_hops > 0:
+        # Basin-hopping: perturb DOFs and re-run L-BFGS-B multiple times, keep best
+        minimizer_kwargs = {
+            'method': 'L-BFGS-B',
+            'jac': True,
+            'callback': callback,
+            'options': {'maxiter': MAXITER, 'maxcor': args.maxcor, 'ftol': ftol, 'gtol': gtol},
+        }
+        rng = np.random.RandomState(rng_seed)
+        print(f"Basin-hopping with {args.basin_hops} hops, stepsize={args.basin_stepsize}, seed={rng_seed}")
+        res = basinhopping(
+            fun, dofs,
+            minimizer_kwargs=minimizer_kwargs,
+            niter=args.basin_hops,
+            stepsize=args.basin_stepsize,
+            seed=rng,
+            disp=True,
+        )
+        basin_hop_count = res.nit if hasattr(res, 'nit') else None
+        basin_minimization_failures = res.minimization_failures if hasattr(res, 'minimization_failures') else None
+        if hasattr(res, 'lowest_optimization_result') and hasattr(res.lowest_optimization_result, 'nit'):
+            res_nit = res.lowest_optimization_result.nit
+        else:
+            res_nit = basin_hop_count if basin_hop_count is not None else 0
+        print(f"Basin-hopping complete. Best fun={res.fun:.6e}, hops={args.basin_hops}, seed={rng_seed}")
     else:
         # Run L-BFGS-B optimization
         res = minimize(fun, dofs, jac=True, method='L-BFGS-B', callback=callback, options={'maxiter': MAXITER, 'maxcor': args.maxcor, 'ftol': ftol, 'gtol': gtol})
         res_nit = res.nit
         print(res.message)
 
-        # ==============================================================================
-        # SAVE OPTIMIZED STATE
-        # ==============================================================================
+    # ==============================================================================
+    # SAVE OPTIMIZED STATE
+    # ==============================================================================
+    if not args.init_only:
+        # Restore best DOFs (needed after basin-hopping)
+        JF.x = res.x
+
+        # Recheck self-intersection on final optimized state
+        run_dict['intersecting'] = boozer_surface.surface.is_self_intersecting()
+
         # Save optimized coil configurations
         curves_to_vtk(curves, OUT_DIR_ITER + "/curves_opt", close=True)
         bs.save(OUT_DIR_ITER + "/biot_savart_opt.json")
@@ -969,6 +1048,11 @@ if __name__ == "__main__":
         "init_only": args.init_only,
         "max_iterations": MAXITER,
         "iterations": res_nit,
+        "basin_hops": args.basin_hops,
+        "basin_stepsize": args.basin_stepsize if args.basin_hops > 0 else None,
+        "basin_seed": rng_seed if args.basin_hops > 0 else None,
+        "basin_iterations": basin_hop_count,
+        "basin_minimization_failures": basin_minimization_failures,
         "TARGET_VOLUME": float(vol_target),
         "TARGET_IOTA": float(iota_target),
         "FINAL_VOLUME": float(final_volume),
