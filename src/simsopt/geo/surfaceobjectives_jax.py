@@ -29,7 +29,7 @@ import jax.numpy as jnp
 from .._core.optimizable import Optimizable
 from .._core.derivative import derivative_dec
 from ..objectives.utilities import forward_backward
-from ..field.biotsavart_jax import biot_savart_B
+from ..field.biotsavart_jax import grouped_biot_savart_B
 from .boozer_residual_jax import (
     boozer_residual_vector,
     _surface_geometry_from_dofs,
@@ -45,28 +45,35 @@ __all__ = [
 ]
 
 
-def _coil_cotangents_to_derivative(coils, d_gammas, d_gammadashs, d_currents):
-    """Convert per-coil cotangent JAX arrays to a ``Derivative``.
+def _coil_cotangents_to_derivative(coils, d_coil_arrays, coil_indices):
+    """Convert grouped coil cotangent arrays to a ``Derivative``.
 
-    Same mapping as ``BiotSavartJAX.B_vjp()`` and
-    ``SquaredFluxJAX.dJ()`` — the chain rule from coil geometry
-    arrays to DOFs is handled by ``Coil.vjp()``.
+    Maps per-group cotangent tuples back to individual coil DOFs
+    via ``Coil.vjp()``, using ``coil_indices`` to recover the
+    original coil ordering.
 
     Args:
         coils: list of ``Coil`` objects.
-        d_gammas: (ncoils, nquad, 3) cotangent for coil gammas.
-        d_gammadashs: (ncoils, nquad, 3) cotangent for coil gammadashs.
-        d_currents: (ncoils,) cotangent for coil currents.
+        d_coil_arrays: list of ``(d_gammas, d_gammadashs, d_currents)``
+            cotangent tuples, one per quadrature group.
+        coil_indices: list of index lists, one per group, mapping
+            local position to global coil index.
 
     Returns:
         ``Derivative`` over all coil DOFs.
     """
-    dg = np.asarray(d_gammas)
-    dgd = np.asarray(d_gammadashs)
-    dc = np.asarray(d_currents)
-    return sum(
-        coil.vjp(dg[i], dgd[i], np.asarray([dc[i]])) for i, coil in enumerate(coils)
-    )
+    all_derivs = []
+    for (d_g, d_gd, d_c), indices in zip(d_coil_arrays, coil_indices):
+        dg = np.asarray(d_g)
+        dgd = np.asarray(d_gd)
+        dc = np.asarray(d_c)
+        for local_i, global_i in enumerate(indices):
+            all_derivs.append(
+                coils[global_i].vjp(
+                    dg[local_i], dgd[local_i], np.asarray([dc[local_i]])
+                )
+            )
+    return sum(all_derivs)
 
 
 def _ensure_solved(booz_surf):
@@ -83,9 +90,7 @@ def _ensure_solved(booz_surf):
 
 def _qs_ratio_pure(
     sdofs,
-    coil_gammas,
-    coil_gammadashs,
-    coil_currents,
+    coil_arrays,
     quadpoints_phi,
     quadpoints_theta,
     mpol,
@@ -98,6 +103,9 @@ def _qs_ratio_pure(
     """Pure JAX QS ratio: ``mean(dS * B_nonQS^2) / mean(dS * B_QS^2)``.
 
     Fully traceable by ``jax.grad`` / ``jax.vjp``.
+
+    Args:
+        coil_arrays: list of ``(gammas, gammadashs, currents)`` tuples.
     """
     gamma, xphi, xtheta = _surface_geometry_from_dofs(
         sdofs,
@@ -114,7 +122,7 @@ def _qs_ratio_pure(
 
     nphi, ntheta = gamma.shape[:2]
     points = gamma.reshape(-1, 3)
-    B = biot_savart_B(points, coil_gammas, coil_gammadashs, coil_currents)
+    B = grouped_biot_savart_B(points, coil_arrays)
     B = B.reshape(nphi, ntheta, 3)
     modB = jnp.sqrt(jnp.sum(B**2, axis=-1))
 
@@ -129,9 +137,7 @@ def _qs_ratio_pure(
 
 def _boozer_residual_J_of_x_inner(
     x_inner,
-    coil_gammas,
-    coil_gammadashs,
-    coil_currents,
+    coil_arrays,
     quadpoints_phi,
     quadpoints_theta,
     mpol,
@@ -150,12 +156,15 @@ def _boozer_residual_J_of_x_inner(
 
     Used to compute ``∂J_BR/∂x_inner`` via ``jax.grad`` for the
     adjoint system.
+
+    Args:
+        coil_arrays: list of ``(gammas, gammadashs, currents)`` tuples.
     """
     if optimize_G:
         sdofs, iota, G = x_inner[:-2], x_inner[-2], x_inner[-1]
     else:
         sdofs, iota = x_inner[:-1], x_inner[-1]
-        G = compute_G_from_currents(coil_currents)
+        G = compute_G_from_currents(jnp.concatenate([c for _, _, c in coil_arrays]))
 
     gamma, xphi, xtheta = _surface_geometry_from_dofs(
         sdofs,
@@ -171,9 +180,7 @@ def _boozer_residual_J_of_x_inner(
     num_points = 3 * nphi * ntheta
 
     points = gamma.reshape(-1, 3)
-    B = biot_savart_B(points, coil_gammas, coil_gammadashs, coil_currents).reshape(
-        nphi, ntheta, 3
-    )
+    B = grouped_biot_savart_B(points, coil_arrays).reshape(nphi, ntheta, 3)
 
     r_flat = boozer_residual_vector(G, iota, B, xphi, xtheta, weight_inv_modB)
     J_boozer = 0.5 * jnp.sum(r_flat**2) / num_points
@@ -185,9 +192,7 @@ def _boozer_residual_J_of_x_inner(
         xtheta,
         phi_idx,
         points,
-        coil_gammas,
-        coil_gammadashs,
-        coil_currents,
+        coil_arrays,
     )
     J_label = 0.5 * constraint_weight * (label_val - targetlabel) ** 2
     return J_boozer + J_label
@@ -298,9 +303,9 @@ class BoozerResidualJAX(Optimizable):
         dJ_ds = self._compute_dJ_ds(iota, G, weight_inv_modB, cw, nphi, ntheta)
         adj = forward_backward(P, L, U, dJ_ds)
 
-        adj_cotangents = vjp_fn(adj, booz_surf, iota, G)
+        d_coil_arrays, coil_indices = vjp_fn(adj, booz_surf, iota, G)
         adj_derivative = _coil_cotangents_to_derivative(
-            self.biotsavart.coils, *adj_cotangents
+            self.biotsavart.coils, d_coil_arrays, coil_indices
         )
 
         self._dJ = dJ_by_dcoils - adj_derivative
@@ -339,11 +344,10 @@ class BoozerResidualJAX(Optimizable):
         else:
             x_inner = jnp.concatenate([sdofs, jnp.array([iota])])
 
+        coil_arrays = booz_surf._coil_arrays
         dJ_ds_jax = jax.grad(_boozer_residual_J_of_x_inner)(
             x_inner,
-            coil_gammas=booz_surf.coil_gammas,
-            coil_gammadashs=booz_surf.coil_gammadashs,
-            coil_currents=booz_surf.coil_currents,
+            coil_arrays=coil_arrays,
             quadpoints_phi=booz_surf.quadpoints_phi,
             quadpoints_theta=booz_surf.quadpoints_theta,
             mpol=booz_surf.mpol,
@@ -412,9 +416,9 @@ class IotasJAX(Optimizable):
 
         adj = forward_backward(P, L, U, dJ_ds)
 
-        adj_cotangents = vjp_fn(adj, booz_surf, iota, G)
+        d_coil_arrays, coil_indices = vjp_fn(adj, booz_surf, iota, G)
         adj_derivative = _coil_cotangents_to_derivative(
-            self.biotsavart.coils, *adj_cotangents
+            self.biotsavart.coils, d_coil_arrays, coil_indices
         )
 
         self._dJ = -1.0 * adj_derivative
@@ -493,9 +497,8 @@ class NonQuasiSymmetricRatioJAX(Optimizable):
         vjp_fn = booz_surf.res["vjp"]
 
         sdofs = booz_surf._get_surface_dofs()
-        coil_gammas = booz_surf.coil_gammas
-        coil_gammadashs = booz_surf.coil_gammadashs
-        coil_currents = booz_surf.coil_currents
+        coil_arrays = booz_surf._coil_arrays
+        coil_indices = booz_surf._coil_index_lists
 
         qs_kwargs = dict(
             quadpoints_phi=self._aux_phi_jax,
@@ -508,31 +511,20 @@ class NonQuasiSymmetricRatioJAX(Optimizable):
             axis=self.axis,
         )
 
-        self._J = float(
-            _qs_ratio_pure(
-                sdofs, coil_gammas, coil_gammadashs, coil_currents, **qs_kwargs
-            )
-        )
+        self._J = float(_qs_ratio_pure(sdofs, coil_arrays, **qs_kwargs))
 
-        def J_of_coils(cg, cgd, ci):
-            return _qs_ratio_pure(sdofs, cg, cgd, ci, **qs_kwargs)
+        def J_of_coils(ca):
+            return _qs_ratio_pure(sdofs, ca, **qs_kwargs)
 
-        dJ_dcg, dJ_dcgd, dJ_dci = jax.grad(J_of_coils, argnums=(0, 1, 2))(
-            coil_gammas,
-            coil_gammadashs,
-            coil_currents,
-        )
+        d_coil_arrays_direct = jax.grad(J_of_coils)(coil_arrays)
         dJ_by_dcoils = _coil_cotangents_to_derivative(
             self.biotsavart.coils,
-            dJ_dcg,
-            dJ_dcgd,
-            dJ_dci,
+            d_coil_arrays_direct,
+            coil_indices,
         )
 
         def J_of_sdofs(s):
-            return _qs_ratio_pure(
-                s, coil_gammas, coil_gammadashs, coil_currents, **qs_kwargs
-            )
+            return _qs_ratio_pure(s, coil_arrays, **qs_kwargs)
 
         dJ_ds_surface = np.asarray(jax.grad(J_of_sdofs)(sdofs))
 
@@ -542,9 +534,9 @@ class NonQuasiSymmetricRatioJAX(Optimizable):
 
         adj = forward_backward(P, L, U, dJ_ds)
 
-        adj_cotangents = vjp_fn(adj, booz_surf, iota, G)
+        d_coil_arrays_adj, coil_indices_adj = vjp_fn(adj, booz_surf, iota, G)
         adj_derivative = _coil_cotangents_to_derivative(
-            self.biotsavart.coils, *adj_cotangents
+            self.biotsavart.coils, d_coil_arrays_adj, coil_indices_adj
         )
 
         self._dJ = dJ_by_dcoils - adj_derivative

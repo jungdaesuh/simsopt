@@ -14,17 +14,20 @@ import pytest
 import numpy as np
 
 import jax
+
 jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp
 
 # Load JAX module directly (avoids simsopt/__init__.py → simsoptpp dep)
 _SRC = Path(__file__).resolve().parents[2] / "src" / "simsopt"
 
+
 def _load(name, relpath):
     spec = importlib.util.spec_from_file_location(name, str(_SRC / relpath))
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
+
 
 _bs = _load("biotsavart_jax", "field/biotsavart_jax.py")
 biot_savart_B = _bs.biot_savart_B
@@ -43,14 +46,17 @@ def _make_circular_coil(R=1.0, nquad=128):
     # Actually the quadrature spacing is 1/nquad, so:
     # gammadash = dγ/dφ_01 = dγ/d(φ_rad) * d(φ_rad)/d(φ_01)
     #           = dγ/d(φ_rad) * 2π
-    gammadash = np.stack([
-        -R * np.sin(phi) * 2 * np.pi,
-         R * np.cos(phi) * 2 * np.pi,
-         np.zeros_like(phi),
-    ], axis=-1)
+    gammadash = np.stack(
+        [
+            -R * np.sin(phi) * 2 * np.pi,
+            R * np.cos(phi) * 2 * np.pi,
+            np.zeros_like(phi),
+        ],
+        axis=-1,
+    )
     return (
-        jnp.array(gamma[None, :, :]),      # (1, nquad, 3)
-        jnp.array(gammadash[None, :, :]),   # (1, nquad, 3)
+        jnp.array(gamma[None, :, :]),  # (1, nquad, 3)
+        jnp.array(gammadash[None, :, :]),  # (1, nquad, 3)
     )
 
 
@@ -84,7 +90,7 @@ class TestBiotSavartJaxAnalytical:
         points = jnp.array([[0.0, 0.0, h]])
         B = biot_savart_B(points, gammas, gammadashs, currents)
 
-        B_analytical = MU0 * I * R**2 / (2.0 * (R**2 + h**2)**1.5)
+        B_analytical = MU0 * I * R**2 / (2.0 * (R**2 + h**2) ** 1.5)
         np.testing.assert_allclose(float(B[0, 2]), B_analytical, rtol=1e-5)
 
     def test_div_B_zero(self):
@@ -95,11 +101,13 @@ class TestBiotSavartJaxAnalytical:
         currents = jnp.array([I])
 
         # Off-axis points
-        points = jnp.array([
-            [0.3, 0.0, 0.0],
-            [0.0, 0.3, 0.1],
-            [0.5, 0.5, 0.2],
-        ])
+        points = jnp.array(
+            [
+                [0.3, 0.0, 0.0],
+                [0.0, 0.3, 0.1],
+                [0.5, 0.5, 0.2],
+            ]
+        )
         dB = biot_savart_dB_by_dX(points, gammas, gammadashs, currents)
         div_B = jnp.trace(dB, axis1=1, axis2=2)  # (npoints,)
         np.testing.assert_allclose(np.array(div_B), 0.0, atol=1e-10)
@@ -111,10 +119,12 @@ class TestBiotSavartJaxAnalytical:
         gammas, gammadashs = _make_circular_coil(R=R, nquad=128)
         currents = jnp.array([I])
 
-        points = jnp.array([
-            [0.3, 0.1, 0.0],
-            [0.0, 0.5, 0.2],
-        ])
+        points = jnp.array(
+            [
+                [0.3, 0.1, 0.0],
+                [0.0, 0.5, 0.2],
+            ]
+        )
 
         B_ref = biot_savart_B(points, gammas, gammadashs, currents)
         dB_ref = biot_savart_dB_by_dX(points, gammas, gammadashs, currents)
@@ -171,7 +181,9 @@ class TestBiotSavartJaxCppParity:
 
     @pytest.fixture(autouse=True)
     def _require_simsoptpp(self):
-        pytest.importorskip("simsoptpp")
+        sopp = pytest.importorskip("simsoptpp")
+        if not hasattr(sopp, "BiotSavart"):
+            pytest.skip("simsoptpp compiled extensions not available")
         pytest.importorskip("simsopt")
 
     def test_B_parity_ncsx(self):

@@ -8,6 +8,7 @@ All functions accept and return JAX arrays and are fully traceable
 by ``jax.grad``, ``jax.jacfwd``, ``jax.jacrev``, and ``jax.hessian``.
 """
 
+import numpy as np
 import jax
 import jax.numpy as jnp
 
@@ -17,6 +18,9 @@ __all__ = [
     "biot_savart_B_and_dB",
     "biot_savart_A",
     "biot_savart_dA_by_dX",
+    "group_coil_data",
+    "grouped_biot_savart_B",
+    "grouped_biot_savart_A",
 ]
 
 # μ₀ / (4π) in SI units  [T·m/A]
@@ -205,3 +209,82 @@ def biot_savart_dA_by_dX(points, gammas, gammadashs, currents):
         in_axes=0,
     )(points)
     return jnp.swapaxes(raw, -1, -2)
+
+
+# ---------------------------------------------------------------------------
+# Grouped coil utilities for mixed-quadrature support
+# ---------------------------------------------------------------------------
+
+
+def group_coil_data(gammas_list, gammadashs_list, currents_list):
+    """Group per-coil geometry arrays by quadrature point count.
+
+    The CPU Biot-Savart kernel evaluates each coil individually with its
+    own ``num_quad_points``.  The JAX kernels need rectangular batches.
+    This function groups coils that share the same quadrature count so
+    they can be stacked into ``(n_coils_in_group, nquad, 3)`` arrays,
+    then each group is evaluated separately and the results summed.
+
+    Args:
+        gammas_list: list of ``(nquad_i, 3)`` NumPy arrays.
+        gammadashs_list: list of ``(nquad_i, 3)`` NumPy arrays.
+        currents_list: list of float scalars.
+
+    Returns:
+        list of ``(gammas, gammadashs, currents, indices)`` tuples.
+        ``indices`` maps each position in the group back to the original
+        coil index in the input lists.
+    """
+    by_nquad = {}
+    for i, g in enumerate(gammas_list):
+        by_nquad.setdefault(g.shape[0], []).append(i)
+
+    groups = []
+    for indices in by_nquad.values():
+        groups.append(
+            (
+                jnp.asarray(
+                    np.stack([gammas_list[i] for i in indices]), dtype=jnp.float64
+                ),
+                jnp.asarray(
+                    np.stack([gammadashs_list[i] for i in indices]), dtype=jnp.float64
+                ),
+                jnp.asarray(
+                    np.array([currents_list[i] for i in indices]), dtype=jnp.float64
+                ),
+                indices,
+            )
+        )
+    return groups
+
+
+def grouped_biot_savart_B(points, coil_arrays):
+    """Sum ``biot_savart_B`` over coil groups with different quadrature.
+
+    Args:
+        points: ``(npoints, 3)`` evaluation points.
+        coil_arrays: list of ``(gammas, gammadashs, currents)`` tuples,
+            one per quadrature-count group.  Typically the first three
+            elements of each tuple returned by :func:`group_coil_data`.
+
+    Returns:
+        ``(npoints, 3)`` total magnetic field.
+    """
+    g0, gd0, c0 = coil_arrays[0]
+    result = biot_savart_B(points, g0, gd0, c0)
+    for gammas, gammadashs, currents in coil_arrays[1:]:
+        result = result + biot_savart_B(points, gammas, gammadashs, currents)
+    return result
+
+
+def grouped_biot_savart_A(points, coil_arrays):
+    """Sum ``biot_savart_A`` over coil groups with different quadrature.
+
+    Same interface as :func:`grouped_biot_savart_B` but for the vector
+    potential.
+    """
+    g0, gd0, c0 = coil_arrays[0]
+    result = biot_savart_A(points, g0, gd0, c0)
+    for gammas, gammadashs, currents in coil_arrays[1:]:
+        result = result + biot_savart_A(points, gammas, gammadashs, currents)
+    return result

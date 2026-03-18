@@ -204,20 +204,21 @@ class SquaredFluxJAX(Optimizable):
     # ------------------------------------------------------------------
 
     def _init_fallback(self, field, nphi, ntheta, definition):
-        """Build JIT functions that take pre-computed geometry arrays."""
+        """Build JIT functions for the integral evaluation.
+
+        The Biot-Savart evaluation is delegated to ``field.B()`` which
+        handles mixed quadrature counts.  The JIT boundary covers only
+        the integral computation and its gradient w.r.t. B.
+        """
         normal_jax = self._normal_jax
         target_jax = self._target_jax
-        points_jax = field._points_jax
 
-        def _raw_forward(gammas, gammadashs, currents):
-            B = biot_savart_B(points_jax, gammas, gammadashs, currents)
+        def _integral_from_B(B):
             Bcoil = B.reshape((nphi, ntheta, 3))
             return integral_BdotN_jax(Bcoil, target_jax, normal_jax, definition)
 
-        self._jit_forward = jax.jit(_raw_forward)
-        self._jit_val_grad = jax.jit(
-            jax.value_and_grad(_raw_forward, argnums=(0, 1, 2))
-        )
+        self._jit_integral = jax.jit(_integral_from_B)
+        self._jit_integral_grad = jax.jit(jax.grad(_integral_from_B))
 
     # ------------------------------------------------------------------
     # DOF gathering (JAX-native path)
@@ -248,8 +249,8 @@ class SquaredFluxJAX(Optimizable):
         if self._use_jax_native:
             return float(self._jit_forward_dofs(self._gather_unique_full_dofs()))
 
-        gammas, gammadashs, currents = self.field._extract_coil_data()
-        return float(self._jit_forward(gammas, gammadashs, currents))
+        B = self.field.B()
+        return float(self._jit_integral(B))
 
     @derivative_dec
     def dJ(self):
@@ -276,14 +277,7 @@ class SquaredFluxJAX(Optimizable):
         return Derivative(deriv_data)
 
     def _dJ_fallback(self):
-        """Gradient via Coil.vjp() (CPU round-trip path)."""
-        gammas, gammadashs, currents = self.field._extract_coil_data()
-        _, (dg, dgd, dc) = self._jit_val_grad(gammas, gammadashs, currents)
-
-        dg_np = np.asarray(dg)
-        dgd_np = np.asarray(dgd)
-        dc_np = np.asarray(dc)
-        return sum(
-            coil.vjp(dg_np[i], dgd_np[i], np.asarray([dc_np[i]]))
-            for i, coil in enumerate(self.field.coils)
-        )
+        """Gradient via field.B_vjp() (handles mixed quadrature)."""
+        B = self.field.B()
+        dJ_dB = np.asarray(self._jit_integral_grad(B))
+        return self.field.B_vjp(dJ_dB)

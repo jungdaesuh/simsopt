@@ -287,14 +287,15 @@ class TestBoozerPenaltyGradComposed:
         self.thetas = jnp.linspace(0, 1.0, self.ntheta, endpoint=False)
         self.dofs = _make_torus_dofs(self.mpol, self.ntor, self.nfp)
         self.coil_gammas, self.coil_gammadashs, self.coil_currents = _make_coil_data()
+        self.coil_arrays = [
+            (self.coil_gammas, self.coil_gammadashs, self.coil_currents)
+        ]
         self.iota = 0.5
         self.G = 2.0
         # Decision vector: [sdofs, iota, G]
         self.x = jnp.concatenate([self.dofs, jnp.array([self.iota, self.G])])
         self.kwargs = dict(
-            coil_gammas=self.coil_gammas,
-            coil_gammadashs=self.coil_gammadashs,
-            coil_currents=self.coil_currents,
+            coil_arrays=self.coil_arrays,
             quadpoints_phi=self.phis,
             quadpoints_theta=self.thetas,
             mpol=self.mpol,
@@ -369,13 +370,14 @@ class TestBoozerResidualJacobianComposed:
         self.thetas = jnp.linspace(0, 1.0, self.ntheta, endpoint=False)
         self.dofs = _make_torus_dofs(self.mpol, self.ntor, self.nfp)
         self.coil_gammas, self.coil_gammadashs, self.coil_currents = _make_coil_data()
+        self.coil_arrays = [
+            (self.coil_gammas, self.coil_gammadashs, self.coil_currents)
+        ]
         self.iota = 0.5
         self.G = 2.0
         self.x = jnp.concatenate([self.dofs, jnp.array([self.iota, self.G])])
         self.kwargs = dict(
-            coil_gammas=self.coil_gammas,
-            coil_gammadashs=self.coil_gammadashs,
-            coil_currents=self.coil_currents,
+            coil_arrays=self.coil_arrays,
             quadpoints_phi=self.phis,
             quadpoints_theta=self.thetas,
             mpol=self.mpol,
@@ -433,13 +435,14 @@ class TestBoozerHessianComposed:
         self.thetas = jnp.linspace(0, 1.0, self.ntheta, endpoint=False)
         self.dofs = _make_torus_dofs(self.mpol, self.ntor, self.nfp)
         self.coil_gammas, self.coil_gammadashs, self.coil_currents = _make_coil_data()
+        self.coil_arrays = [
+            (self.coil_gammas, self.coil_gammadashs, self.coil_currents)
+        ]
         self.iota = 0.5
         self.G = 2.0
         self.x = jnp.concatenate([self.dofs, jnp.array([self.iota, self.G])])
         self.kwargs = dict(
-            coil_gammas=self.coil_gammas,
-            coil_gammadashs=self.coil_gammadashs,
-            coil_currents=self.coil_currents,
+            coil_arrays=self.coil_arrays,
             quadpoints_phi=self.phis,
             quadpoints_theta=self.thetas,
             mpol=self.mpol,
@@ -496,6 +499,9 @@ class TestBoozerResidualCoilVJP:
         self.thetas = jnp.linspace(0, 1.0, self.ntheta, endpoint=False)
         self.dofs = _make_torus_dofs(self.mpol, self.ntor, self.nfp)
         self.coil_gammas, self.coil_gammadashs, self.coil_currents = _make_coil_data()
+        self.coil_arrays = [
+            (self.coil_gammas, self.coil_gammadashs, self.coil_currents)
+        ]
         self.iota = 0.5
         self.G = 2.0
 
@@ -535,18 +541,18 @@ class TestBoozerResidualCoilVJP:
         rng = np.random.RandomState(99)
         adjoint = jnp.array(rng.randn(n_res))
 
-        dcg, dcgd, dci = boozer_residual_coil_vjp(
+        (d_coil_arrays,) = boozer_residual_coil_vjp(
             adjoint,
             gamma=self.gamma,
             xphi=self.xphi,
             xtheta=self.xtheta,
-            coil_gammas=self.coil_gammas,
-            coil_gammadashs=self.coil_gammadashs,
-            coil_currents=self.coil_currents,
+            coil_arrays=self.coil_arrays,
             iota=self.iota,
             G=self.G,
             weight_inv_modB=False,
         )
+        # Single group → unpack the first (only) group cotangent
+        dcg, dcgd, dci = d_coil_arrays[0]
 
         # FD on adjoint @ residual w.r.t. currents
         def f_currents(ci):
@@ -579,18 +585,18 @@ class TestBoozerResidualCoilVJP:
         n_res = 3 * self.nphi * self.ntheta
         adjoint = jnp.ones(n_res)
 
-        dcg, dcgd, dci = boozer_residual_coil_vjp(
+        (d_coil_arrays,) = boozer_residual_coil_vjp(
             adjoint,
             gamma=self.gamma,
             xphi=self.xphi,
             xtheta=self.xtheta,
-            coil_gammas=self.coil_gammas,
-            coil_gammadashs=self.coil_gammadashs,
-            coil_currents=self.coil_currents,
+            coil_arrays=self.coil_arrays,
             iota=self.iota,
             G=self.G,
             weight_inv_modB=False,
         )
+        # Single group → shapes match the input group
+        dcg, dcgd, dci = d_coil_arrays[0]
         assert dcg.shape == self.coil_gammas.shape
         assert dcgd.shape == self.coil_gammadashs.shape
         assert dci.shape == self.coil_currents.shape
@@ -613,13 +619,14 @@ class TestComposedWeightInvModB:
         self.thetas = jnp.linspace(0, 1.0, self.ntheta, endpoint=False)
         self.dofs = _make_torus_dofs(self.mpol, self.ntor, self.nfp)
         self.coil_gammas, self.coil_gammadashs, self.coil_currents = _make_coil_data()
+        self.coil_arrays = [
+            (self.coil_gammas, self.coil_gammadashs, self.coil_currents)
+        ]
         self.iota = 0.5
         self.G = 2.0
         self.x = jnp.concatenate([self.dofs, jnp.array([self.iota, self.G])])
         self.kwargs = dict(
-            coil_gammas=self.coil_gammas,
-            coil_gammadashs=self.coil_gammadashs,
-            coil_currents=self.coil_currents,
+            coil_arrays=self.coil_arrays,
             quadpoints_phi=self.phis,
             quadpoints_theta=self.thetas,
             mpol=self.mpol,
@@ -692,13 +699,14 @@ class TestComposedStellsym:
             self.nfp,
         )
         self.coil_gammas, self.coil_gammadashs, self.coil_currents = _make_coil_data()
+        self.coil_arrays = [
+            (self.coil_gammas, self.coil_gammadashs, self.coil_currents)
+        ]
         self.iota = 0.5
         self.G = 2.0
         self.x = jnp.concatenate([self.dofs, jnp.array([self.iota, self.G])])
         self.kwargs = dict(
-            coil_gammas=self.coil_gammas,
-            coil_gammadashs=self.coil_gammadashs,
-            coil_currents=self.coil_currents,
+            coil_arrays=self.coil_arrays,
             quadpoints_phi=self.phis,
             quadpoints_theta=self.thetas,
             mpol=self.mpol,

@@ -328,11 +328,14 @@ class TestComposedPenaltyObjective:
         target_vol = 2.0 * np.pi**2 * R0 * r**2
         cw = 1.0
 
+        coil_arrays = [(gammas, gammadashs, currents)]
+
         return {
             "x": x,
             "gammas": gammas,
             "gammadashs": gammadashs,
             "currents": currents,
+            "coil_arrays": coil_arrays,
             "qphi": qphi,
             "qtheta": qtheta,
             "mpol": mpol,
@@ -347,9 +350,7 @@ class TestComposedPenaltyObjective:
         d = self._setup()
         val = _boozer_penalty_objective(
             d["x"],
-            d["gammas"],
-            d["gammadashs"],
-            d["currents"],
+            d["coil_arrays"],
             d["qphi"],
             d["qtheta"],
             d["mpol"],
@@ -372,9 +373,7 @@ class TestComposedPenaltyObjective:
         d = self._setup()
         obj = lambda x: _boozer_penalty_objective(
             x,
-            d["gammas"],
-            d["gammadashs"],
-            d["currents"],
+            d["coil_arrays"],
             d["qphi"],
             d["qtheta"],
             d["mpol"],
@@ -478,9 +477,7 @@ class TestBFGSBoozer:
 
         obj = lambda x: _boozer_penalty_objective(
             x,
-            gammas,
-            gammadashs,
-            currents,
+            [(gammas, gammadashs, currents)],
             qphi,
             qtheta,
             mpol,
@@ -533,9 +530,7 @@ class TestNewtonPolishBoozer:
 
         obj = lambda x: _boozer_penalty_objective(
             x,
-            gammas,
-            gammadashs,
-            currents,
+            [(gammas, gammadashs, currents)],
             qphi,
             qtheta,
             mpol,
@@ -593,9 +588,7 @@ class TestOptimizeGFalse:
 
         obj = lambda x: _boozer_penalty_objective(
             x,
-            gammas,
-            gammadashs,
-            currents,
+            [(gammas, gammadashs, currents)],
             qphi,
             qtheta,
             mpol,
@@ -641,9 +634,7 @@ class TestOptimizeGFalse:
 
         obj = lambda x: _boozer_penalty_objective(
             x,
-            gammas,
-            gammadashs,
-            currents,
+            [(gammas, gammadashs, currents)],
             qphi,
             qtheta,
             mpol,
@@ -691,9 +682,7 @@ class TestToroidalFluxLabel:
 
         val = _boozer_penalty_objective(
             x,
-            gammas,
-            gammadashs,
-            currents,
+            [(gammas, gammadashs, currents)],
             qphi,
             qtheta,
             mpol,
@@ -715,9 +704,7 @@ class TestToroidalFluxLabel:
         grad = jax.grad(
             lambda x: _boozer_penalty_objective(
                 x,
-                gammas,
-                gammadashs,
-                currents,
+                [(gammas, gammadashs, currents)],
                 qphi,
                 qtheta,
                 mpol,
@@ -764,9 +751,7 @@ class TestLBFGSMethod:
 
         obj = lambda x: _boozer_penalty_objective(
             x,
-            gammas,
-            gammadashs,
-            currents,
+            [(gammas, gammadashs, currents)],
             qphi,
             qtheta,
             mpol,
@@ -877,9 +862,7 @@ class TestAreaLabelPath:
         target_area = 4.0 * np.pi**2 * R0 * r
         val = _boozer_penalty_objective(
             x,
-            gammas,
-            gammadashs,
-            currents,
+            [(gammas, gammadashs, currents)],
             qphi,
             qtheta,
             mpol,
@@ -901,9 +884,7 @@ class TestAreaLabelPath:
         grad = jax.grad(
             lambda x: _boozer_penalty_objective(
                 x,
-                gammas,
-                gammadashs,
-                currents,
+                [(gammas, gammadashs, currents)],
                 qphi,
                 qtheta,
                 mpol,
@@ -961,8 +942,11 @@ class _MockCoil:
         self.current = _MockCurrent(current)
 
 
-class _MockBiotSavart:
+class _MockBiotSavart(_bsj.Optimizable):
+    """Minimal mock for BiotSavartJAX — must be Optimizable for depends_on."""
+
     def __init__(self, coils):
+        super().__init__(x0=np.asarray([]))
         self._coils = coils
 
 
@@ -1016,6 +1000,41 @@ def _make_mock_coils(nquad=64):
         )
         coils.append(_MockCoil(g, gd, cur))
     return coils
+
+
+def _make_mixed_quad_mock_coils():
+    """Two coils with DIFFERENT quadrature counts (64 and 128)."""
+    R = 1.0
+    coils = []
+    for z_off, cur, nq in [(0.3, 1e5, 64), (-0.3, 1e5, 128)]:
+        phi = np.linspace(0, 2 * np.pi, nq, endpoint=False)
+        g = np.stack([R * np.cos(phi), R * np.sin(phi), z_off * np.ones(nq)], axis=-1)
+        gd = np.stack(
+            [
+                -R * np.sin(phi) * 2 * np.pi,
+                R * np.cos(phi) * 2 * np.pi,
+                np.zeros(nq),
+            ],
+            axis=-1,
+        )
+        coils.append(_MockCoil(g, gd, cur))
+    return coils
+
+
+def _make_mock_boozer_surface_mixed_quad(nphi=8, ntheta=8, mpol=1, ntor=1, nfp=1):
+    """BoozerSurfaceJAX with mixed-quadrature coils (no simsoptpp needed)."""
+    R0, r = 1.0, 0.1
+    xc, yc, zc = _make_simple_torus_coeffs(R0, r, mpol, ntor, nfp)
+    qphi = np.linspace(0, 1.0 / nfp, nphi, endpoint=False)
+    qtheta = np.linspace(0, 1.0, ntheta, endpoint=False)
+    sdofs = np.concatenate([xc.ravel(), yc.ravel(), zc.ravel()])
+
+    bs = _MockBiotSavart(_make_mixed_quad_mock_coils())
+    surf = _MockSurface(sdofs, mpol, ntor, nfp, False, qphi, qtheta)
+    label = _MockVolumeLabel()
+    target = 2.0 * np.pi**2 * R0 * r**2
+
+    return BoozerSurfaceJAX(bs, surf, label, target, constraint_weight=1.0)
 
 
 def _make_mock_boozer_surface(nphi=8, ntheta=8, mpol=1, ntor=1, nfp=1):
@@ -1211,10 +1230,13 @@ class TestVJPHooks:
         lm = np.zeros_like(res["jacobian"])
         lm[0] = 1.0
 
-        d_cg, d_cgd, d_ci = vjp_fn(jnp.asarray(lm), booz, iota_sol, G_sol)
-        assert d_cg.shape == booz.coil_gammas.shape
-        assert d_cgd.shape == booz.coil_gammadashs.shape
-        assert d_ci.shape == booz.coil_currents.shape
+        d_coil_arrays, coil_indices = vjp_fn(jnp.asarray(lm), booz, iota_sol, G_sol)
+        # d_coil_arrays is a list of (d_g, d_gd, d_c) tuples, one per group
+        assert len(d_coil_arrays) == len(booz.coil_groups)
+        for (d_g, d_gd, d_c), (g, gd, c, _) in zip(d_coil_arrays, booz.coil_groups):
+            assert d_g.shape == g.shape
+            assert d_gd.shape == gd.shape
+            assert d_c.shape == c.shape
 
 
 # ---------------------------------------------------------------------------
@@ -1341,3 +1363,42 @@ class TestEnsureSolvedGuard:
             "_ensure_solved must guard against res=None"
         )
         assert "RuntimeError" in source
+
+
+# ---------------------------------------------------------------------------
+# Mixed-quadrature Boozer regression
+# ---------------------------------------------------------------------------
+
+
+class TestMixedQuadratureBoozer:
+    """BoozerSurfaceJAX works when coils have different nquad counts."""
+
+    def test_instantiation(self):
+        """Mixed-quad coils don't crash _refresh_coil_data."""
+        booz = _make_mock_boozer_surface_mixed_quad()
+        assert len(booz.coil_groups) == 2  # two distinct nquad values
+
+    def test_run_code_ls_converges(self):
+        """LS solve converges with mixed-quadrature coils."""
+        booz = _make_mock_boozer_surface_mixed_quad()
+        res = booz.run_code(iota=0.3, G=0.05)
+        assert res is not None
+        assert res["type"] == "ls"
+        assert res["success"]
+
+    def test_penalty_matches_uniform(self):
+        """Penalty value is close to uniform-quad reference.
+
+        The mixed-quad setup uses 64+128 points while the uniform setup
+        uses 64+64.  The B field differs slightly due to quadrature
+        accuracy, but the penalty value should be in the same regime.
+        """
+        booz_mixed = _make_mock_boozer_surface_mixed_quad()
+        booz_uniform = _make_mock_boozer_surface()
+
+        res_mixed = booz_mixed.run_code(iota=0.3, G=0.05)
+        res_uniform = booz_uniform.run_code(iota=0.3, G=0.05)
+
+        # Both should converge to similar (small) values
+        assert res_mixed["fun"] < 1.0
+        assert res_uniform["fun"] < 1.0

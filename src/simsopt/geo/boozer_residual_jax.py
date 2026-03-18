@@ -188,11 +188,11 @@ def _get_surface_fns():
     )
 
 
-def _get_biot_savart():
-    """Lazily import Biot-Savart (avoids simsopt top-level)."""
-    from simsopt.field.biotsavart_jax import biot_savart_B
+def _get_grouped_biot_savart():
+    """Lazily import grouped Biot-Savart (avoids simsopt top-level)."""
+    from simsopt.field.biotsavart_jax import grouped_biot_savart_B
 
-    return biot_savart_B
+    return grouped_biot_savart_B
 
 
 def _surface_geometry_from_dofs(
@@ -224,20 +224,23 @@ def _surface_geometry_from_dofs(
     return sgf(*args), sg1f(*args), sg2f(*args)
 
 
-def _unpack_decision_vector(x, coil_currents, optimize_G):
-    """Unpack decision vector into (sdofs, iota, G)."""
+def _unpack_decision_vector(x, coil_arrays, optimize_G):
+    """Unpack decision vector into (sdofs, iota, G).
+
+    Args:
+        coil_arrays: list of ``(gammas, gammadashs, currents)`` tuples.
+    """
     if optimize_G:
         return x[:-2], x[-2], x[-1]
     mu0 = 4.0 * jnp.pi * 1e-7
-    return x[:-1], x[-1], mu0 * jnp.sum(jnp.abs(coil_currents))
+    all_currents = jnp.concatenate([c for _, _, c in coil_arrays])
+    return x[:-1], x[-1], mu0 * jnp.sum(jnp.abs(all_currents))
 
 
 def _composed_pipeline(
     x,
     *,
-    coil_gammas,
-    coil_gammadashs,
-    coil_currents,
+    coil_arrays,
     quadpoints_phi,
     quadpoints_theta,
     mpol,
@@ -249,9 +252,12 @@ def _composed_pipeline(
 ):
     """Shared pipeline: unpack x → surface geometry → Biot-Savart field.
 
+    Args:
+        coil_arrays: list of ``(gammas, gammadashs, currents)`` tuples.
+
     Returns (sdofs, iota, G, gamma, xphi, xtheta, B).
     """
-    sdofs, iota, G = _unpack_decision_vector(x, coil_currents, optimize_G)
+    sdofs, iota, G = _unpack_decision_vector(x, coil_arrays, optimize_G)
 
     gamma, xphi, xtheta = _surface_geometry_from_dofs(
         sdofs,
@@ -264,8 +270,8 @@ def _composed_pipeline(
         scatter_indices,
     )
 
-    bs_B = _get_biot_savart()
-    B = bs_B(gamma.reshape(-1, 3), coil_gammas, coil_gammadashs, coil_currents)
+    grouped_bs_B = _get_grouped_biot_savart()
+    B = grouped_bs_B(gamma.reshape(-1, 3), coil_arrays)
     B = B.reshape(gamma.shape)
 
     return sdofs, iota, G, gamma, xphi, xtheta, B
@@ -274,9 +280,7 @@ def _composed_pipeline(
 def boozer_penalty_composed(
     x,
     *,
-    coil_gammas,
-    coil_gammadashs,
-    coil_currents,
+    coil_arrays,
     quadpoints_phi,
     quadpoints_theta,
     mpol,
@@ -294,9 +298,7 @@ def boozer_penalty_composed(
 
     Args:
         x: (n,) flat decision vector.
-        coil_gammas: (ncoils, nquad, 3) coil positions.
-        coil_gammadashs: (ncoils, nquad, 3) coil tangents.
-        coil_currents: (ncoils,) coil currents.
+        coil_arrays: list of ``(gammas, gammadashs, currents)`` tuples.
         quadpoints_phi, quadpoints_theta: quadrature grids.
         mpol, ntor, nfp: surface resolution.
         stellsym: stellarator symmetry flag.
@@ -309,9 +311,7 @@ def boozer_penalty_composed(
     """
     _, iota, G, _, xphi, xtheta, B = _composed_pipeline(
         x,
-        coil_gammas=coil_gammas,
-        coil_gammadashs=coil_gammadashs,
-        coil_currents=coil_currents,
+        coil_arrays=coil_arrays,
         quadpoints_phi=quadpoints_phi,
         quadpoints_theta=quadpoints_theta,
         mpol=mpol,
@@ -343,9 +343,7 @@ def boozer_penalty_grad_composed(x, **kwargs):
 def _boozer_residual_vector_composed(
     x,
     *,
-    coil_gammas,
-    coil_gammadashs,
-    coil_currents,
+    coil_arrays,
     quadpoints_phi,
     quadpoints_theta,
     mpol,
@@ -362,14 +360,15 @@ def _boozer_residual_vector_composed(
     default for BoozerExact) or ``x = [surface_dofs, iota]``
     (optimize_G=False).
 
+    Args:
+        coil_arrays: list of ``(gammas, gammadashs, currents)`` tuples.
+
     Returns:
         (nphi*ntheta*3,) flattened residual vector.
     """
     _, iota, G, _, xphi, xtheta, B = _composed_pipeline(
         x,
-        coil_gammas=coil_gammas,
-        coil_gammadashs=coil_gammadashs,
-        coil_currents=coil_currents,
+        coil_arrays=coil_arrays,
         quadpoints_phi=quadpoints_phi,
         quadpoints_theta=quadpoints_theta,
         mpol=mpol,
@@ -414,9 +413,7 @@ def boozer_residual_coil_vjp(
     gamma,
     xphi,
     xtheta,
-    coil_gammas,
-    coil_gammadashs,
-    coil_currents,
+    coil_arrays,
     iota,
     G,
     weight_inv_modB=False,
@@ -440,16 +437,14 @@ def boozer_residual_coil_vjp(
         gamma:   (nphi, ntheta, 3) fixed surface positions.
         xphi:    (nphi, ntheta, 3) fixed toroidal tangent.
         xtheta:  (nphi, ntheta, 3) fixed poloidal tangent.
-        coil_gammas: (ncoils, nquad, 3) coil positions.
-        coil_gammadashs: (ncoils, nquad, 3) coil tangents.
-        coil_currents: (ncoils,) coil currents.
+        coil_arrays: list of ``(gammas, gammadashs, currents)`` tuples.
         iota: rotational transform (scalar).
         G: Boozer G constant (scalar).
         weight_inv_modB: weight residual by 1/|B|.
 
     Returns:
-        (d_coil_gammas, d_coil_gammadashs, d_coil_currents):
-        cotangent arrays with same shapes as the coil inputs.
+        ``(d_coil_arrays,)`` — 1-tuple of grouped cotangent list matching
+        the ``coil_arrays`` pytree structure.
     """
     nphi, ntheta = gamma.shape[:2]
     expected = nphi * ntheta * 3
@@ -458,13 +453,13 @@ def boozer_residual_coil_vjp(
             f"adjoint shape {adjoint.shape} != expected ({expected},) "
             f"for nphi={nphi}, ntheta={ntheta}"
         )
-    bs_B = _get_biot_savart()
+    grouped_bs_B = _get_grouped_biot_savart()
 
-    def residual_of_coils(cg, cgd, ci):
+    def residual_of_coils(ca):
         points = gamma.reshape(-1, 3)
-        B = bs_B(points, cg, cgd, ci)
+        B = grouped_bs_B(points, ca)
         B = B.reshape(nphi, ntheta, 3)
         return boozer_residual_vector(G, iota, B, xphi, xtheta, weight_inv_modB)
 
-    _, vjp_fn = jax.vjp(residual_of_coils, coil_gammas, coil_gammadashs, coil_currents)
+    _, vjp_fn = jax.vjp(residual_of_coils, coil_arrays)
     return vjp_fn(adjoint)

@@ -37,7 +37,11 @@ except (ImportError, ModuleNotFoundError):
 
 
 from simsopt.geo.surface_fourier_jax import stellsym_scatter_indices
-from simsopt.field.biotsavart_jax import biot_savart_B, biot_savart_A
+from simsopt.field.biotsavart_jax import (
+    group_coil_data,
+    grouped_biot_savart_B,
+    grouped_biot_savart_A,
+)
 from simsopt.geo.boozer_residual_jax import (
     boozer_residual_scalar,
     boozer_residual_vector,
@@ -61,9 +65,7 @@ def _compute_label(
     xtheta,
     phi_idx,
     points,
-    coil_gammas,
-    coil_gammadashs,
-    coil_currents,
+    coil_arrays,
 ):
     """Compute the label value (volume, area, or toroidal flux).
 
@@ -75,16 +77,14 @@ def _compute_label(
     if label_type == "area":
         return area_jax(normal)
     ntheta = gamma.shape[1]
-    A = biot_savart_A(points, coil_gammas, coil_gammadashs, coil_currents)
+    A = grouped_biot_savart_A(points, coil_arrays)
     A = A.reshape(gamma.shape)
     return toroidal_flux_jax(A[phi_idx], xtheta[phi_idx], ntheta)
 
 
 def _boozer_penalty_objective(
     x,
-    coil_gammas,
-    coil_gammadashs,
-    coil_currents,
+    coil_arrays,
     quadpoints_phi,
     quadpoints_theta,
     mpol,
@@ -113,7 +113,7 @@ def _boozer_penalty_objective(
         sdofs, iota, G = x[:-2], x[-2], x[-1]
     else:
         sdofs, iota = x[:-1], x[-1]
-        G = compute_G_from_currents(coil_currents)
+        G = compute_G_from_currents(jnp.concatenate([c for _, _, c in coil_arrays]))
 
     gamma, xphi, xtheta = _surface_geometry_from_dofs(
         sdofs,
@@ -128,7 +128,7 @@ def _boozer_penalty_objective(
     nphi, ntheta = gamma.shape[:2]
 
     points = gamma.reshape(-1, 3)
-    B = biot_savart_B(points, coil_gammas, coil_gammadashs, coil_currents)
+    B = grouped_biot_savart_B(points, coil_arrays)
     B = B.reshape(nphi, ntheta, 3)
 
     J_boozer = boozer_residual_scalar(G, iota, B, xphi, xtheta, weight_inv_modB)
@@ -140,9 +140,7 @@ def _boozer_penalty_objective(
         xtheta,
         phi_idx,
         points,
-        coil_gammas,
-        coil_gammadashs,
-        coil_currents,
+        coil_arrays,
     )
 
     J_label = 0.5 * constraint_weight * (label_val - targetlabel) ** 2
@@ -153,9 +151,7 @@ def _boozer_penalty_objective(
 
 def _boozer_exact_residual(
     x,
-    coil_gammas,
-    coil_gammadashs,
-    coil_currents,
+    coil_arrays,
     quadpoints_phi,
     quadpoints_theta,
     mpol,
@@ -193,7 +189,7 @@ def _boozer_exact_residual(
     nphi, ntheta = gamma.shape[:2]
 
     points = gamma.reshape(-1, 3)
-    B = biot_savart_B(points, coil_gammas, coil_gammadashs, coil_currents)
+    B = grouped_biot_savart_B(points, coil_arrays)
     B = B.reshape(nphi, ntheta, 3)
 
     r_flat = boozer_residual_vector(G, iota, B, xphi, xtheta, weight_inv_modB)
@@ -206,9 +202,7 @@ def _boozer_exact_residual(
         xtheta,
         phi_idx,
         points,
-        coil_gammas,
-        coil_gammadashs,
-        coil_currents,
+        coil_arrays,
     )
     r_label = label_val - targetlabel
 
@@ -235,18 +229,21 @@ def _boozer_exact_coil_vjp(lm, booz_surf, iota, G):
         G: Boozer G at the solution.
 
     Returns:
-        (d_coil_gammas, d_coil_gammadashs, d_coil_currents) cotangent arrays.
+        (d_coil_arrays,), coil_indices — grouped cotangents and index list.
+        ``d_coil_arrays`` is a list of ``(d_g, d_gd, d_c)`` tuples matching
+        the coil_arrays pytree structure.
     """
     sdofs = booz_surf._get_surface_dofs()
     x = jnp.concatenate([sdofs, jnp.array([iota, G])])
     mask_indices = booz_surf._compute_stellsym_mask_indices()
 
-    def residual_of_coils(cg, cgd, ci):
+    coil_arrays = booz_surf._coil_arrays
+    coil_indices = booz_surf._coil_index_lists
+
+    def residual_of_coils(ca):
         return _boozer_exact_residual(
             x,
-            coil_gammas=cg,
-            coil_gammadashs=cgd,
-            coil_currents=ci,
+            coil_arrays=ca,
             quadpoints_phi=booz_surf.quadpoints_phi,
             quadpoints_theta=booz_surf.quadpoints_theta,
             mpol=booz_surf.mpol,
@@ -262,13 +259,9 @@ def _boozer_exact_coil_vjp(lm, booz_surf, iota, G):
             weight_inv_modB=booz_surf.options["weight_inv_modB"],
         )
 
-    _, vjp_fn = jax.vjp(
-        residual_of_coils,
-        booz_surf.coil_gammas,
-        booz_surf.coil_gammadashs,
-        booz_surf.coil_currents,
-    )
-    return vjp_fn(lm)
+    _, vjp_fn = jax.vjp(residual_of_coils, coil_arrays)
+    (d_coil_arrays,) = vjp_fn(lm)
+    return d_coil_arrays, coil_indices
 
 
 def _boozer_ls_coil_vjp(lm, booz_surf, iota, G, weight_inv_modB=True):
@@ -288,7 +281,9 @@ def _boozer_ls_coil_vjp(lm, booz_surf, iota, G, weight_inv_modB=True):
         weight_inv_modB: residual weighting flag.
 
     Returns:
-        (d_coil_gammas, d_coil_gammadashs, d_coil_currents) cotangent arrays.
+        (d_coil_arrays,), coil_indices — grouped cotangents and index list.
+        ``d_coil_arrays`` is a list of ``(d_g, d_gd, d_c)`` tuples matching
+        the coil_arrays pytree structure.
     """
     optimize_G = G is not None
     sdofs = booz_surf._get_surface_dofs()
@@ -297,12 +292,13 @@ def _boozer_ls_coil_vjp(lm, booz_surf, iota, G, weight_inv_modB=True):
     else:
         x = jnp.concatenate([sdofs, jnp.array([iota])])
 
-    def grad_of_coils(cg, cgd, ci):
+    coil_arrays = booz_surf._coil_arrays
+    coil_indices = booz_surf._coil_index_lists
+
+    def grad_of_coils(ca):
         obj = lambda xx: _boozer_penalty_objective(
             xx,
-            coil_gammas=cg,
-            coil_gammadashs=cgd,
-            coil_currents=ci,
+            coil_arrays=ca,
             quadpoints_phi=booz_surf.quadpoints_phi,
             quadpoints_theta=booz_surf.quadpoints_theta,
             mpol=booz_surf.mpol,
@@ -319,13 +315,9 @@ def _boozer_ls_coil_vjp(lm, booz_surf, iota, G, weight_inv_modB=True):
         )
         return jax.grad(obj)(x)
 
-    _, vjp_fn = jax.vjp(
-        grad_of_coils,
-        booz_surf.coil_gammas,
-        booz_surf.coil_gammadashs,
-        booz_surf.coil_currents,
-    )
-    return vjp_fn(lm)
+    _, vjp_fn = jax.vjp(grad_of_coils, coil_arrays)
+    (d_coil_arrays,) = vjp_fn(lm)
+    return d_coil_arrays, coil_indices
 
 
 _DEFAULT_OPTIONS_LS = {
@@ -432,12 +424,27 @@ class BoozerSurfaceJAX(Optimizable):
         # Coil data (extracted once, updated via _refresh_coil_data)
         self._refresh_coil_data()
 
+    @property
+    def _coil_arrays(self):
+        """Coil geometry tuples ``(gammas, gammadashs, currents)`` without index lists."""
+        return [(g, gd, c) for g, gd, c, _ in self.coil_groups]
+
+    @property
+    def _coil_index_lists(self):
+        """Per-group coil index lists from ``coil_groups``."""
+        return [idx for _, _, _, idx in self.coil_groups]
+
     def recompute_bell(self, parent=None):
         """Mark solver as needing re-execution (dirty flag)."""
         self.need_to_run_code = True
 
     def _refresh_coil_data(self):
-        """Extract coil geometry and currents as JAX arrays."""
+        """Extract coil geometry and currents as JAX arrays.
+
+        Groups coils by quadrature point count so that coils with
+        different ``num_quad_points`` can coexist without crashing
+        on array stacking.
+        """
         coils = self.biotsavart._coils
         gammas = []
         gammadashs = []
@@ -446,8 +453,7 @@ class BoozerSurfaceJAX(Optimizable):
             gammas.append(c.curve.gamma())
             gammadashs.append(c.curve.gammadash())
             currents.append(c.current.get_value())
-        self.coil_gammas = jnp.asarray(np.array(gammas))
-        self.coil_gammadashs = jnp.asarray(np.array(gammadashs))
+        self.coil_groups = group_coil_data(gammas, gammadashs, currents)
         self.coil_currents = jnp.asarray(np.array(currents))
 
     def _get_surface_dofs(self):
@@ -477,9 +483,7 @@ class BoozerSurfaceJAX(Optimizable):
         """Build penalty objective with explicit overrides."""
         return partial(
             _boozer_penalty_objective,
-            coil_gammas=self.coil_gammas,
-            coil_gammadashs=self.coil_gammadashs,
-            coil_currents=self.coil_currents,
+            coil_arrays=self._coil_arrays,
             quadpoints_phi=self.quadpoints_phi,
             quadpoints_theta=self.quadpoints_theta,
             mpol=self.mpol,
@@ -518,9 +522,7 @@ class BoozerSurfaceJAX(Optimizable):
         )
         nphi, ntheta = int(gamma.shape[0]), int(gamma.shape[1])
         points = gamma.reshape(-1, 3)
-        B = biot_savart_B(
-            points, self.coil_gammas, self.coil_gammadashs, self.coil_currents
-        ).reshape(nphi, ntheta, 3)
+        B = grouped_biot_savart_B(points, self._coil_arrays).reshape(nphi, ntheta, 3)
 
         r_boozer_raw = boozer_residual_vector(
             G, iota, B, xphi, xtheta, self.options["weight_inv_modB"]
@@ -537,9 +539,7 @@ class BoozerSurfaceJAX(Optimizable):
                 xtheta,
                 self.phi_idx,
                 points,
-                self.coil_gammas,
-                self.coil_gammadashs,
-                self.coil_currents,
+                self._coil_arrays,
             )
         )
         rl = jnp.sqrt(cw) * (lab - self.targetlabel)
@@ -689,9 +689,7 @@ class BoozerSurfaceJAX(Optimizable):
         """Build the JIT-compiled exact residual function."""
         return partial(
             _boozer_exact_residual,
-            coil_gammas=self.coil_gammas,
-            coil_gammadashs=self.coil_gammadashs,
-            coil_currents=self.coil_currents,
+            coil_arrays=self._coil_arrays,
             quadpoints_phi=self.quadpoints_phi,
             quadpoints_theta=self.quadpoints_theta,
             mpol=self.mpol,
@@ -798,11 +796,9 @@ class BoozerSurfaceJAX(Optimizable):
             self.stellsym,
             self.scatter_indices,
         )
-        B_final = biot_savart_B(
+        B_final = grouped_biot_savart_B(
             gamma_final.reshape(-1, 3),
-            self.coil_gammas,
-            self.coil_gammadashs,
-            self.coil_currents,
+            self._coil_arrays,
         ).reshape(nphi, ntheta, 3)
         r_raw = boozer_residual_vector(
             G_final,

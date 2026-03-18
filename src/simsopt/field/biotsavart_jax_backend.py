@@ -19,6 +19,8 @@ from .biotsavart_jax import (
     biot_savart_B,
     biot_savart_dB_by_dX,
     biot_savart_B_and_dB,
+    group_coil_data,
+    grouped_biot_savart_B,
 )
 
 __all__ = ["BiotSavartJAX"]
@@ -148,24 +150,20 @@ class BiotSavartJAX(Optimizable):
         """Set evaluation points (converted to a JAX array once)."""
         self._points_jax = jnp.asarray(np.ascontiguousarray(points))
 
-    def _extract_coil_data(self):
-        """Read current coil geometry and currents as stacked JAX arrays.
+    def _extract_coil_data_grouped(self):
+        """Read coil geometry grouped by quadrature point count.
+
+        Delegates to :func:`group_coil_data` in ``biotsavart_jax.py``.
 
         Returns:
-            gammas:     (ncoils, nquad, 3)
-            gammadashs: (ncoils, nquad, 3)
-            currents:   (ncoils,)
+            list of ``(gammas, gammadashs, currents, coil_indices)``
+            tuples, one per distinct quadrature count.
         """
-        gammas = jnp.asarray(
-            np.stack([c.curve.gamma() for c in self._coils]), dtype=jnp.float64
+        return group_coil_data(
+            [c.curve.gamma() for c in self._coils],
+            [c.curve.gammadash() for c in self._coils],
+            [c.current.get_value() for c in self._coils],
         )
-        gammadashs = jnp.asarray(
-            np.stack([c.curve.gammadash() for c in self._coils]), dtype=jnp.float64
-        )
-        currents = jnp.asarray(
-            np.array([c.current.get_value() for c in self._coils]), dtype=jnp.float64
-        )
-        return gammas, gammadashs, currents
 
     # ------------------------------------------------------------------
     # Forward field evaluation
@@ -177,8 +175,8 @@ class BiotSavartJAX(Optimizable):
         Returns:
             (npoints, 3) JAX array.
         """
-        gammas, gammadashs, currents = self._extract_coil_data()
-        return biot_savart_B(self._points_jax, gammas, gammadashs, currents)
+        coil_arrays = [(g, gd, c) for g, gd, c, _ in self._extract_coil_data_grouped()]
+        return grouped_biot_savart_B(self._points_jax, coil_arrays)
 
     def dB_by_dX(self):
         """Spatial Jacobian dB/dX at the evaluation points.
@@ -186,8 +184,13 @@ class BiotSavartJAX(Optimizable):
         Returns:
             (npoints, 3, 3) JAX array where ``[p, j, l] = ∂_j B_l``.
         """
-        gammas, gammadashs, currents = self._extract_coil_data()
-        return biot_savart_dB_by_dX(self._points_jax, gammas, gammadashs, currents)
+        groups = self._extract_coil_data_grouped()
+        result = biot_savart_dB_by_dX(self._points_jax, *groups[0][:3])
+        for gammas, gammadashs, currents, _ in groups[1:]:
+            result = result + biot_savart_dB_by_dX(
+                self._points_jax, gammas, gammadashs, currents
+            )
+        return result
 
     def B_and_dB(self):
         """Combined B and dB/dX (single JIT compilation).
@@ -195,8 +198,15 @@ class BiotSavartJAX(Optimizable):
         Returns:
             (B, dB_dX) with shapes (npoints, 3) and (npoints, 3, 3).
         """
-        gammas, gammadashs, currents = self._extract_coil_data()
-        return biot_savart_B_and_dB(self._points_jax, gammas, gammadashs, currents)
+        groups = self._extract_coil_data_grouped()
+        B, dB = biot_savart_B_and_dB(self._points_jax, *groups[0][:3])
+        for gammas, gammadashs, currents, _ in groups[1:]:
+            Bi, dBi = biot_savart_B_and_dB(
+                self._points_jax, gammas, gammadashs, currents
+            )
+            B = B + Bi
+            dB = dB + dBi
+        return B, dB
 
     # ------------------------------------------------------------------
     # VJP (reverse-mode gradient w.r.t. coil DOFs)
@@ -219,19 +229,26 @@ class BiotSavartJAX(Optimizable):
         Returns:
             :class:`Derivative` (sum over all coils).
         """
-        gammas, gammadashs, currents = self._extract_coil_data()
+        groups = self._extract_coil_data_grouped()
         points = self._points_jax
+        v_jax = jnp.asarray(v)
 
-        def fwd(g, gd, c):
-            return biot_savart_B(points, g, gd, c)
+        all_derivs = []
+        for gammas, gammadashs, currents, indices in groups:
 
-        _, vjp_fn = jax.vjp(fwd, gammas, gammadashs, currents)
-        dg, dgd, dc = vjp_fn(jnp.asarray(v))
+            def fwd(g, gd, c):
+                return biot_savart_B(points, g, gd, c)
 
-        dg_np = np.asarray(dg)
-        dgd_np = np.asarray(dgd)
-        dc_np = np.asarray(dc)
-        return sum(
-            coil.vjp(dg_np[i], dgd_np[i], np.asarray([dc_np[i]]))
-            for i, coil in enumerate(self._coils)
-        )
+            _, vjp_fn = jax.vjp(fwd, gammas, gammadashs, currents)
+            dg, dgd, dc = vjp_fn(v_jax)
+
+            dg_np = np.asarray(dg)
+            dgd_np = np.asarray(dgd)
+            dc_np = np.asarray(dc)
+            for local_i, global_i in enumerate(indices):
+                all_derivs.append(
+                    self._coils[global_i].vjp(
+                        dg_np[local_i], dgd_np[local_i], np.asarray([dc_np[local_i]])
+                    )
+                )
+        return sum(all_derivs)
