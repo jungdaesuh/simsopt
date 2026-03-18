@@ -967,6 +967,7 @@ if __name__ == "__main__":
         f"{stage2_bs_path}|{stage}|{CONSTRAINT_WEIGHT}|{vol_target}|{iota_target}"
         f"|{args.cc_dist}|{args.cc_weight}|{args.curvature_weight}|{args.curvature_threshold}"
         f"|{banana_surf_radius}|{nphi}|{ntheta}|{args.init_only}|{args.backend}"
+        f"|{args.maxiter}|{args.num_tf_coils}|{file_loc}"
     )
     config_hash = hashlib.sha256(config_str.encode()).hexdigest()[:8]
     OUT_DIR_ITER = OUT_DIR + f"/mpol={mpol}-ntor={ntor}-{config_hash}"
