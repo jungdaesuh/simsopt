@@ -1244,3 +1244,100 @@ class TestNegativeCases:
             ValueError, match="Unsupported label type.*AspectRatioLabel"
         ):
             BoozerSurfaceJAX(bs, surf, AspectRatioLabel(), 1.0, constraint_weight=1.0)
+
+
+# ---------------------------------------------------------------------------
+# Issue-2 validation: nfp>1 volume and area correctness
+# ---------------------------------------------------------------------------
+
+
+class TestNfpVolumeArea:
+    """Verify volume/area are correct for nfp>1 (one-period quadrature)."""
+
+    @pytest.mark.parametrize("nfp", [1, 2, 3, 5])
+    def test_volume_nfp(self, nfp):
+        """Volume = 2π²Rr² regardless of nfp."""
+        R0, r = 1.0, 0.1
+        mpol, ntor = 1, 1
+        nphi, ntheta = 32, 32
+
+        xc, yc, zc = _make_simple_torus_coeffs(R0, r, mpol, ntor, nfp)
+        qphi = jnp.linspace(0, 1.0 / nfp, nphi, endpoint=False)
+        qtheta = jnp.linspace(0, 1.0, ntheta, endpoint=False)
+
+        gamma = surface_gamma(
+            qphi,
+            qtheta,
+            jnp.array(xc),
+            jnp.array(yc),
+            jnp.array(zc),
+            mpol,
+            ntor,
+            nfp,
+        )
+        normal = _sf.surface_normal(
+            qphi,
+            qtheta,
+            jnp.array(xc),
+            jnp.array(yc),
+            jnp.array(zc),
+            mpol,
+            ntor,
+            nfp,
+        )
+        vol = float(surface_volume(gamma, normal))
+        expected = 2.0 * np.pi**2 * R0 * r**2
+        np.testing.assert_allclose(vol, expected, rtol=1e-4)
+
+    @pytest.mark.parametrize("nfp", [1, 2, 3, 5])
+    def test_area_nfp(self, nfp):
+        """Area = 4π²Rr regardless of nfp."""
+        R0, r = 1.0, 0.1
+        mpol, ntor = 1, 1
+        nphi, ntheta = 32, 32
+
+        xc, yc, zc = _make_simple_torus_coeffs(R0, r, mpol, ntor, nfp)
+        qphi = jnp.linspace(0, 1.0 / nfp, nphi, endpoint=False)
+        qtheta = jnp.linspace(0, 1.0, ntheta, endpoint=False)
+
+        normal = _sf.surface_normal(
+            qphi,
+            qtheta,
+            jnp.array(xc),
+            jnp.array(yc),
+            jnp.array(zc),
+            mpol,
+            ntor,
+            nfp,
+        )
+        computed = float(surface_area(normal))
+        expected = 4.0 * np.pi**2 * R0 * r
+        np.testing.assert_allclose(computed, expected, rtol=1e-4)
+
+
+# ---------------------------------------------------------------------------
+# Issue-1 validation: _ensure_solved crash guard
+# ---------------------------------------------------------------------------
+
+
+class TestEnsureSolvedGuard:
+    """Verify _ensure_solved source has the None guard.
+
+    Full behavioral test is in tests/integration/test_single_stage_jax.py
+    (requires simsoptpp).
+    """
+
+    def test_source_has_none_guard(self):
+        """_ensure_solved must check res is None before indexing."""
+        src_path = (
+            Path(__file__).resolve().parents[2]
+            / "src"
+            / "simsopt"
+            / "geo"
+            / "surfaceobjectives_jax.py"
+        )
+        source = src_path.read_text()
+        assert "booz_surf.res is None" in source, (
+            "_ensure_solved must guard against res=None"
+        )
+        assert "RuntimeError" in source

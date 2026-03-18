@@ -547,3 +547,41 @@ class TestScriptBackendSelection:
 
         assert recorder.called, "BoozerSurfaceJAX was not constructed"
         print("initialize_boozer_surface(backend='jax') -> BoozerSurfaceJAX OK")
+
+
+class TestEnsureSolvedCrashGuard:
+    """Issue-1 regression: _ensure_solved must not crash with res=None."""
+
+    def test_J_before_run_code_gives_clear_error(self):
+        """BoozerResidualJAX.J() before run_code() raises RuntimeError."""
+        ncoils, nfp = 2, 2
+        base_curves = create_equally_spaced_curves(
+            ncoils,
+            nfp,
+            stellsym=True,
+            R0=1.0,
+            R1=0.5,
+            order=3,
+        )
+        base_currents = [Current(1e5) for _ in range(ncoils)]
+        for c in base_currents:
+            c.fix_all()
+        coils = coils_via_symmetries(base_curves, base_currents, nfp, stellsym=True)
+        bs_jax = BiotSavartJAX(coils)
+
+        s = SurfaceXYZTensorFourier(
+            mpol=2,
+            ntor=2,
+            stellsym=True,
+            nfp=nfp,
+            quadpoints_phi=np.linspace(0, 1.0 / nfp, 5, endpoint=False),
+            quadpoints_theta=np.linspace(0, 1.0, 5, endpoint=False),
+        )
+        vol = Volume(s)
+        booz = BoozerSurfaceJAX(bs_jax, s, vol, 0.1, constraint_weight=1.0)
+
+        assert booz.res is None
+        obj = BoozerResidualJAX(booz, bs_jax)
+
+        with pytest.raises(RuntimeError, match="has not been solved yet"):
+            obj.J()

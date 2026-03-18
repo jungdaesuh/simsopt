@@ -72,8 +72,13 @@ def _coil_cotangents_to_derivative(coils, d_gammas, d_gammadashs, d_currents):
 def _ensure_solved(booz_surf):
     """Re-run the Boozer inner solve if the surface is dirty."""
     if booz_surf.need_to_run_code:
-        res = booz_surf.res
-        booz_surf.run_code(res["iota"], G=res["G"])
+        if booz_surf.res is None:
+            raise RuntimeError(
+                "BoozerSurfaceJAX has not been solved yet. "
+                "Call boozer_surface.run_code(iota, G=G) before "
+                "accessing objective values."
+            )
+        booz_surf.run_code(booz_surf.res["iota"], G=booz_surf.res["G"])
 
 
 def _qs_ratio_pure(
