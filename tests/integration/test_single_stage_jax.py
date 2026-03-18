@@ -1,12 +1,15 @@
 """
-Single-stage JAX backend parity tests (Milestone 5).
+Single-stage JAX backend integration tests (Milestone 5).
 
 Validates:
-1. BoozerResidualJAX.J() matches BoozerResidual.J().
-2. IotasJAX.J() / dJ() match CPU Iotas.
-3. NonQuasiSymmetricRatioJAX.J() matches CPU.
-4. Composite objective value parity.
-5. Composite gradient pipeline is finite and non-zero.
+1. BoozerResidualJAX.J() is small at converged surface (both CPU and JAX).
+2. IotasJAX.J() is finite at independently converged solutions.
+3. NonQuasiSymmetricRatioJAX.J() is finite and non-negative.
+4. Adjoint-solve consistency (H^T adj = dJ_ds).
+5. VJP produces finite, non-zero derivative.
+6. Fixed-surface FD validates direct gradient term.
+7. Composite objective value and gradient are finite and non-zero.
+8. Backend selection constructs correct object types.
 
 Gradient tests use finite-difference validation against the JAX objective
 wrappers directly, because CPU and JAX use mathematically equivalent but
@@ -203,7 +206,7 @@ def boozer_setup():
 
 
 # -----------------------------------------------------------------------
-# Test 1: BoozerResidual value parity
+# Test 1: BoozerResidual value sanity
 # -----------------------------------------------------------------------
 
 
@@ -230,14 +233,14 @@ class TestBoozerResidualValue:
 
 
 # -----------------------------------------------------------------------
-# Test 2: Iotas value parity
+# Test 2: Iotas value sanity
 # -----------------------------------------------------------------------
 
 
 class TestIotasValue:
-    """IotasJAX.J() must match Iotas.J()."""
+    """IotasJAX.J() is finite at independently converged solutions."""
 
-    def test_j_parity(self, boozer_setup):
+    def test_j_finite(self, boozer_setup):
         (coils, surf_cpu, surf_jax, bs_cpu, bs_jax, booz_cpu, booz_jax, vol_cpu) = (
             boozer_setup
         )
@@ -314,14 +317,14 @@ class TestAdjointSolveConsistency:
 
 
 # -----------------------------------------------------------------------
-# Test 4: NonQuasiSymmetricRatio value parity
+# Test 4: NonQuasiSymmetricRatio value sanity
 # -----------------------------------------------------------------------
 
 
 class TestNonQSRatioValue:
-    """NonQuasiSymmetricRatioJAX.J() vs CPU (may differ due to eval path)."""
+    """NonQuasiSymmetricRatioJAX.J() is finite and non-negative at converged solutions."""
 
-    def test_j_parity(self, boozer_setup):
+    def test_j_finite_nonneg(self, boozer_setup):
         (coils, surf_cpu, surf_jax, bs_cpu, bs_jax, booz_cpu, booz_jax, vol_cpu) = (
             boozer_setup
         )
@@ -341,7 +344,7 @@ class TestNonQSRatioValue:
 
 
 # -----------------------------------------------------------------------
-# Test 5: Composite objective value parity
+# Test 5: Composite objective value sanity
 # -----------------------------------------------------------------------
 
 

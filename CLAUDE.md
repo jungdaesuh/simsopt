@@ -87,7 +87,7 @@ JAX modules live alongside C++ counterparts. They do NOT import simsoptpp.
 | Module | Purpose |
 |--------|---------|
 | `src/simsopt/geo/surfaceobjectives_jax.py` | `BoozerResidualJAX`, `IotasJAX`, `NonQuasiSymmetricRatioJAX` — Optimizable wrappers with IFT gradient |
-| `tests/integration/test_single_stage_jax.py` | Value parity, FD gradient validation, composite objective, short optimization |
+| `tests/integration/test_single_stage_jax.py` | Value sanity checks, adjoint consistency, FD gradient, composite pipeline, backend construction (10 tests) |
 
 ### M6 — Productionization
 

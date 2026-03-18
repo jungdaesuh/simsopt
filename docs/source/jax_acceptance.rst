@@ -88,8 +88,8 @@ Before switching a research workflow to the JAX backend, verify:
 
    [ ] All M1–M4 unit tests pass (jax_smoke CI green)
    [ ] Stage 2 parity tests pass (integration/test_stage2_jax.py)
-   [ ] Single-stage value parity tests pass
-   [ ] Single-stage gradient FD validation passes (currently xfail)
+   [ ] Single-stage value sanity tests pass (small/finite/non-negative)
+   [ ] Single-stage gradient FD validation passes (fixed-surface direct term)
    [ ] Short optimization run shows progress
    [ ] GPU memory fits within available VRAM
    [ ] Compile time acceptable for the workload
