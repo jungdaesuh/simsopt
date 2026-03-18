@@ -36,7 +36,6 @@ from .boozer_residual_jax import (
 )
 from .boozersurface_jax import _compute_label
 from .label_constraints_jax import compute_G_from_currents
-from .surfacexyztensorfourier import SurfaceXYZTensorFourier
 
 __all__ = [
     "BoozerResidualJAX",
@@ -222,6 +221,8 @@ class BoozerResidualJAX(Optimizable):
         self.in_surface = boozer_surface.surface
 
         # Auxiliary surface (same quadrature, independent DOF copy)
+        from .surfacexyztensorfourier import SurfaceXYZTensorFourier
+
         s = self.in_surface
         self.surface = SurfaceXYZTensorFourier(
             mpol=s.mpol,
@@ -453,6 +454,8 @@ class NonQuasiSymmetricRatioJAX(Optimizable):
         self.in_surface = boozer_surface.surface
 
         # Auxiliary surface with finer quadrature (matches CPU)
+        from .surfacexyztensorfourier import SurfaceXYZTensorFourier
+
         s = self.in_surface
         aux_phi = np.linspace(0, 1 / s.nfp, 2 * sDIM, endpoint=False)
         aux_theta = np.linspace(0, 1.0, 2 * sDIM, endpoint=False)

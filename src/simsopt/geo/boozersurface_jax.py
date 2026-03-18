@@ -36,24 +36,24 @@ except (ImportError, ModuleNotFoundError):
             pass
 
 
-from simsopt.geo.surface_fourier_jax import stellsym_scatter_indices
-from simsopt.field.biotsavart_jax import (
+from .surface_fourier_jax import stellsym_scatter_indices
+from ..field.biotsavart_jax import (
     group_coil_data,
     grouped_biot_savart_B,
     grouped_biot_savart_A,
 )
-from simsopt.geo.boozer_residual_jax import (
+from .boozer_residual_jax import (
     boozer_residual_scalar,
     boozer_residual_vector,
     _surface_geometry_from_dofs,
 )
-from simsopt.geo.label_constraints_jax import (
+from .label_constraints_jax import (
     area_jax,
     volume_jax,
     toroidal_flux_jax,
     compute_G_from_currents,
 )
-from simsopt.geo.optimizer_jax import jax_minimize, newton_polish, newton_exact
+from .optimizer_jax import jax_minimize, newton_polish, newton_exact
 
 __all__ = ["BoozerSurfaceJAX"]
 

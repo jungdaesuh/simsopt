@@ -11,8 +11,8 @@ derivatives — no hand-coded ``dJ``, ``d2J`` needed.
 
 import jax.numpy as jnp
 
-from simsopt.geo.surface_fourier_jax import surface_area as area_jax
-from simsopt.geo.surface_fourier_jax import surface_volume as volume_jax
+from .surface_fourier_jax import surface_area as area_jax
+from .surface_fourier_jax import surface_volume as volume_jax
 
 __all__ = [
     "volume_jax",
