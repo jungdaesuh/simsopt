@@ -1014,6 +1014,9 @@ if __name__ == "__main__":
     config_str = (
         f"{stage2_bs_path}|{stage}|{CONSTRAINT_WEIGHT}|{vol_target}|{iota_target}"
         f"|{args.cc_dist}|{args.cc_weight}|{args.curvature_weight}|{args.curvature_threshold}"
+        f"|{args.length_weight}|{args.res_weight}|{args.iotas_weight}"
+        f"|{args.cs_weight}|{args.cs_dist}|{args.surf_dist_weight}|{args.ss_dist}"
+        f"|{args.maxcor}"
         f"|{banana_surf_radius}|{nphi}|{ntheta}|{args.init_only}|{args.backend}"
         f"|{args.maxiter}|{args.num_tf_coils}|{file_loc}"
     )
@@ -1108,7 +1111,6 @@ if __name__ == "__main__":
     SS_DIST = max(args.ss_dist, 0.04)  # Hardware minimum: 4cm surface-vessel clearance
     CURVATURE_WEIGHT = args.curvature_weight
     CURVATURE_THRESHOLD = max(args.curvature_threshold, 20)  # Hardware minimum: 20
-    phi_list = np.linspace(0, 1 / boozer_surface.surface.nfp, 5)
 
     # Individual objective terms
     iota = IotasJAX(boozer_surface) if use_jax else Iotas(boozer_surface)
@@ -1177,7 +1179,7 @@ if __name__ == "__main__":
             jac=True,
             method="L-BFGS-B",
             callback=callback,
-            options={"maxiter": MAXITER, "maxcor": 300, "ftol": ftol, "gtol": gtol},
+            options={"maxiter": MAXITER, "maxcor": args.maxcor, "ftol": ftol, "gtol": gtol},
         )
         res_nit = res.nit
         print(res.message)
@@ -1256,6 +1258,11 @@ if __name__ == "__main__":
         "backend": args.backend,
         "init_only": args.init_only,
         "max_iterations": MAXITER,
+        "maxcor": args.maxcor,
+        "CS_WEIGHT": CS_WEIGHT,
+        "CS_DIST": CS_DIST,
+        "SURF_DIST_WEIGHT": SURF_DIST_WEIGHT,
+        "SS_DIST": SS_DIST,
         "iterations": res_nit,
         "TARGET_VOLUME": float(vol_target),
         "TARGET_IOTA": float(iota_target),

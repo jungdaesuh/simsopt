@@ -518,7 +518,6 @@ if __name__ == "__main__":
 
     nphi = args.nphi
     ntheta = args.ntheta
-    surf = None
 
     # The surface the coils can lie on from Jeff - R0 = 0.976 and a~=0.22
     banana_surf_radius = args.banana_surf_radius
@@ -637,7 +636,7 @@ if __name__ == "__main__":
         + CURVATURE_WEIGHT * Jc
     )
 
-    OUT_DIR_ITER = f"{OUT_DIR}R0={R0:g}-s={s:g}-LW={LENGTH_WEIGHT:g}-CCW={CC_WEIGHT:g}-CCT={CC_THRESHOLD:g}-CW={CURVATURE_WEIGHT:g}-CT={CURVATURE_THRESHOLD:g}-SR={banana_surf_radius:0.3f}-Order={order}-backend={args.backend}/"
+    OUT_DIR_ITER = f"{OUT_DIR}R0={R0:g}-s={s:g}-LW={LENGTH_WEIGHT:g}-CCW={CC_WEIGHT:g}-CCT={CC_THRESHOLD:g}-CW={CURVATURE_WEIGHT:g}-CT={CURVATURE_THRESHOLD:g}-SR={banana_surf_radius:0.3f}-Order={order}-NQ={num_quadpoints}-CP={args.curvature_p_norm}-SFW={SQUARED_FLUX_WEIGHT:g}-backend={args.backend}/"
     os.makedirs(OUT_DIR_ITER, exist_ok=True)
 
     # minimize gets called, optimizes based on degrees of freedom from objective function
@@ -728,6 +727,9 @@ if __name__ == "__main__":
         "TOROIDAL_FLUX": s,
         "banana_surf_radius": banana_surf_radius,
         "order": order,
+        "num_quadpoints": num_quadpoints,
+        "curvature_p_norm": args.curvature_p_norm,
+        "squared_flux_weight": SQUARED_FLUX_WEIGHT,
         "backend": args.backend,
         "init_only": args.init_only,
         "max_iterations": MAXITER,
