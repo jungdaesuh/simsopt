@@ -825,17 +825,26 @@ if __name__ == "__main__":
         brs = [BoozerResidual(boozer_surface, bs_obj)]
 
     # Objective function weights and parameters (all configurable via CLI)
+    # Hardware minimums enforced via max() — weights are free, thresholds are clamped.
     LENGTH_WEIGHT = args.length_weight
     RES_WEIGHT = args.res_weight
     IOTAS_WEIGHT = args.iotas_weight
     CC_WEIGHT = args.cc_weight
-    CC_DIST = args.cc_dist
+    CC_DIST = max(args.cc_dist, 0.05)            # Hardware minimum: 5cm coil-coil spacing
+    if args.cc_dist < 0.05:
+        print(f"WARNING: --cc-dist {args.cc_dist} below hardware minimum, clamped to 0.05")
     CS_WEIGHT = args.cs_weight
-    CS_DIST = args.cs_dist
+    CS_DIST = max(args.cs_dist, 0.02)            # Hardware minimum: 2cm coil-surface clearance
+    if args.cs_dist < 0.02:
+        print(f"WARNING: --cs-dist {args.cs_dist} below hardware minimum, clamped to 0.02")
     SURF_DIST_WEIGHT = args.surf_dist_weight
-    SS_DIST = args.ss_dist
+    SS_DIST = max(args.ss_dist, 0.04)            # Hardware minimum: 4cm surface-vessel clearance
+    if args.ss_dist < 0.04:
+        print(f"WARNING: --ss-dist {args.ss_dist} below hardware minimum, clamped to 0.04")
     CURVATURE_WEIGHT = args.curvature_weight
-    CURVATURE_THRESHOLD = args.curvature_threshold
+    CURVATURE_THRESHOLD = max(args.curvature_threshold, 20)  # Hardware minimum: 20
+    if args.curvature_threshold < 20:
+        print(f"WARNING: --curvature-threshold {args.curvature_threshold} below hardware minimum, clamped to 20")
     phi_list = np.linspace(0, 1 / boozer_surface.surface.nfp, 5)
 
     # Individual objective terms

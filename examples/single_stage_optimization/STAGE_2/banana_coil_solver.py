@@ -512,15 +512,22 @@ if __name__ == "__main__":
     # Weight on the curve lengths in the objective function
     # We'll penalize the coil if it becomes longer than an target length of 1.75 m
     LENGTH_WEIGHT = args.length_weight
-    LENGTH_TARGET = args.length_target
+    LENGTH_TARGET = max(args.length_target, 1.75)  # Hardware minimum: 1.75m
+    if args.length_target < 1.75:
+        print(f"WARNING: --length-target {args.length_target} below hardware minimum, clamped to 1.75")
 
     # Threshold and weight for the coil-to-coil distance penalty
-    CC_THRESHOLD = args.cc_threshold
+    # Hardware minimum: 5cm coil-coil spacing
+    CC_THRESHOLD = max(args.cc_threshold, 0.05)
+    if args.cc_threshold < 0.05:
+        print(f"WARNING: --cc-threshold {args.cc_threshold} below hardware minimum, clamped to 0.05")
     CC_WEIGHT = args.cc_weight
 
     # Threshold and weight for the coil curvature penalty
     CURVATURE_WEIGHT = args.curvature_weight
-    CURVATURE_THRESHOLD = args.curvature_threshold
+    CURVATURE_THRESHOLD = max(args.curvature_threshold, 40)  # Hardware minimum: 40 (Stage 2 baseline)
+    if args.curvature_threshold < 40:
+        print(f"WARNING: --curvature-threshold {args.curvature_threshold} below hardware minimum, clamped to 40")
 
     # Define the individual terms objective function:
     Jf = SquaredFlux(new_surf, new_bs) # penalty on B dot n
