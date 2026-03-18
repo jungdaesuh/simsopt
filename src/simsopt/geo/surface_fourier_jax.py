@@ -315,8 +315,8 @@ def _split_flat_to_xyzc(flat, mpol, ntor):
     Returns:
         xc, yc, zc: each (2*mpol+1, 2*ntor+1).
     """
-    n_per_coord = (2 * mpol + 1) * (2 * ntor + 1)
-    shape = (2 * mpol + 1, 2 * ntor + 1)
+    n_per_coord = int((2 * mpol + 1) * (2 * ntor + 1))
+    shape = (int(2 * mpol + 1), int(2 * ntor + 1))
     xc = flat[:n_per_coord].reshape(shape)
     yc = flat[n_per_coord : 2 * n_per_coord].reshape(shape)
     zc = flat[2 * n_per_coord :].reshape(shape)
@@ -336,7 +336,7 @@ def dofs_to_xyzc(sdofs, scatter_indices, mpol, ntor):
     Returns:
         xc, yc, zc: each (2*mpol+1, 2*ntor+1).
     """
-    n_per_coord = (2 * mpol + 1) * (2 * ntor + 1)
+    n_per_coord = int((2 * mpol + 1) * (2 * ntor + 1))
     flat = jnp.zeros(3 * n_per_coord).at[scatter_indices].set(sdofs)
     return _split_flat_to_xyzc(flat, mpol, ntor)
 
