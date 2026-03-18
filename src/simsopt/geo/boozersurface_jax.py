@@ -741,7 +741,7 @@ class BoozerSurfaceJAX(Optimizable):
 
         Returns:
             dict with 'residual', 'jacobian', 'iter', 'success', 'G',
-            's', 'iota', 'PLU', 'mask', 'type', 'vjp'.
+            's', 'iota', 'PLU', 'mask', 'type', 'vjp', 'weight_inv_modB'.
         """
         if not self.need_to_run_code:
             return self.res
