@@ -1,0 +1,150 @@
+name: JAX Smoke Tests
+
+on:
+  push:
+    branches: [jax-port]
+    paths:
+      - 'src/simsopt/**/*_jax*.py'
+      - 'src/simsopt/backend.py'
+      - 'tests/field/test_biotsavart_jax.py'
+      - 'tests/geo/test_surface_fourier_jax.py'
+      - 'tests/geo/test_boozer_residual_jax.py'
+      - 'tests/geo/test_boozer_derivatives_jax.py'
+      - 'tests/geo/test_boozersurface_jax.py'
+      - 'tests/objectives/test_integral_bdotn_jax.py'
+  pull_request:
+    branches: [jax-port, master]
+    paths:
+      - 'src/simsopt/**/*_jax*.py'
+      - 'src/simsopt/backend.py'
+
+jobs:
+  jax-unit-tests:
+    name: JAX unit tests (CPU, no simsoptpp)
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11"]
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install JAX-only dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install numpy scipy jax jaxlib pytest
+
+      - name: Run pure-JAX unit tests (M1–M4)
+        run: |
+          python -m pytest \
+            tests/field/test_biotsavart_jax.py \
+            tests/geo/test_surface_fourier_jax.py \
+            tests/geo/test_boozer_residual_jax.py \
+            tests/objectives/test_integral_bdotn_jax.py \
+            tests/geo/test_boozer_derivatives_jax.py \
+            tests/geo/test_boozersurface_jax.py \
+            -v --tb=short
+
+      - name: Verify backend module imports
+        run: |
+          python -c "
+          import importlib.util
+          spec = importlib.util.spec_from_file_location(
+              'simsopt.backend', 'src/simsopt/backend.py')
+          mod = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(mod)
+          assert mod.get_backend() == 'cpu'
+          assert not mod.is_jax_backend()
+          assert mod.get_jax_platform() == 'cpu'
+          print('backend module: OK')
+          "
+
+  jax-integration:
+    name: JAX integration tests (with simsoptpp)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential gfortran libopenmpi-dev \
+            libnetcdf-dev liblapack-dev libhdf5-dev libfftw3-dev \
+            libboost-all-dev libopenblas-dev
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install numpy cmake scikit-build ninja wheel setuptools \
+            scipy jax jaxlib pytest sympy f90nml pyevtk matplotlib \
+            ruamel.yaml monty Deprecated pybind11
+
+      - name: Install simsopt (with simsoptpp)
+        run: pip install -v -e .
+
+      - name: Run JAX integration tests (Stage 2 + single-stage)
+        run: |
+          python -m pytest \
+            tests/integration/test_stage2_jax.py \
+            tests/integration/test_single_stage_jax.py \
+            -v --tb=short
+
+  jax-lint:
+    name: Lint JAX modules
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install ruff
+        run: pip install ruff
+
+      - name: Ruff check JAX modules
+        run: |
+          ruff check \
+            src/simsopt/backend.py \
+            src/simsopt/field/biotsavart_jax.py \
+            src/simsopt/field/biotsavart_jax_backend.py \
+            src/simsopt/geo/surface_fourier_jax.py \
+            src/simsopt/geo/boozer_residual_jax.py \
+            src/simsopt/geo/boozersurface_jax.py \
+            src/simsopt/geo/surfaceobjectives_jax.py \
+            src/simsopt/geo/label_constraints_jax.py \
+            src/simsopt/geo/optimizer_jax.py \
+            src/simsopt/objectives/fluxobjective_jax.py \
+            src/simsopt/objectives/integral_bdotn_jax.py
+
+      - name: Ruff format check
+        run: |
+          ruff format --check \
+            src/simsopt/backend.py \
+            src/simsopt/field/biotsavart_jax.py \
+            src/simsopt/field/biotsavart_jax_backend.py \
+            src/simsopt/geo/surface_fourier_jax.py \
+            src/simsopt/geo/boozer_residual_jax.py \
+            src/simsopt/geo/boozersurface_jax.py \
+            src/simsopt/geo/surfaceobjectives_jax.py \
+            src/simsopt/geo/label_constraints_jax.py \
+            src/simsopt/geo/optimizer_jax.py \
+            src/simsopt/objectives/fluxobjective_jax.py \
+            src/simsopt/objectives/integral_bdotn_jax.py

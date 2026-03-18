@@ -7,21 +7,13 @@
 # JAX platform config — must run before any submodule imports JAX.
 # Placing it here (package root) guarantees it executes before simsopt.field,
 # simsopt.geo, or any other subpackage that does `import jax` at module level.
-import os as _os
-
-_VALID_JAX_BACKENDS = {"cpu", "cuda"}
-_JAX_BACKEND = _os.environ.get("SIMSOPT_JAX_BACKEND", "cpu")
-if _JAX_BACKEND not in _VALID_JAX_BACKENDS:
-    raise ValueError(
-        f"SIMSOPT_JAX_BACKEND={_JAX_BACKEND!r} is not valid. "
-        f"Accepted values: {sorted(_VALID_JAX_BACKENDS)}"
-    )
+from .backend import get_jax_platform as _get_jax_platform
 
 import jax as _jax
 
-_jax.config.update("jax_platforms", _JAX_BACKEND)
+_jax.config.update("jax_platforms", _get_jax_platform())
 _jax.config.update("jax_enable_x64", True)
-del _os, _jax
+del _get_jax_platform, _jax
 
 # Two ways of achieving the above-mentioned objective
 # Use "from xyz import XYZ" style

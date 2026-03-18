@@ -177,8 +177,10 @@ def parse_args():
     parser.add_argument(
         "--backend",
         choices=["cpu", "jax"],
-        default=os.environ.get("STAGE2_BACKEND", "cpu"),
-        help="Field backend: 'cpu' (simsoptpp) or 'jax' (JAX Biot-Savart).",
+        default=os.environ.get("SIMSOPT_BACKEND")
+        or os.environ.get("STAGE2_BACKEND", "cpu"),
+        help="Field backend: 'cpu' (simsoptpp) or 'jax' (JAX Biot-Savart). "
+        "Env: SIMSOPT_BACKEND (or legacy STAGE2_BACKEND).",
     )
     return parser.parse_args()
 

@@ -32,6 +32,20 @@ from .orientedcurve import *
 from .accessibility import *
 from .curvecwsfourier import *
 
+_jax_geo_all = []
+try:
+    from .boozersurface_jax import *
+
+    _jax_geo_all += boozersurface_jax.__all__
+except ImportError:
+    pass
+try:
+    from .surfaceobjectives_jax import *
+
+    _jax_geo_all += surfaceobjectives_jax.__all__
+except ImportError:
+    pass
+
 __all__ = (
     curve.__all__
     + curvehelical.__all__
@@ -52,6 +66,7 @@ __all__ = (
     + surfacexyzfourier.__all__
     + surfacexyztensorfourier.__all__
     + surfaceobjectives.__all__
+    + _jax_geo_all
     + permanent_magnet_grid.__all__
     + orientedcurve.__all__
     + strain_optimization.__all__
