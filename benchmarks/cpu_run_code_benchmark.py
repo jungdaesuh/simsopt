@@ -78,9 +78,12 @@ def run_benchmarks(src_root):
                          pkg_name="simsopt.geo.label_constraints_jax")
 
     configs = [
-        ("Small (4 coils, 15x15)",      4,  64, 15, 15, 2, 2, 1),
-        ("Medium (6 coils, 15x15)",     6, 128, 15, 15, 4, 4, 1),
-        ("HBT-like (12 coils, 15x15)", 12, 128, 15, 15, 4, 4, 1),
+        ("Small (4 coils, 15x15)",         4,  64,  15,  15, 2, 2, 1),
+        ("Medium (6 coils, 15x15)",        6, 128,  15,  15, 4, 4, 1),
+        ("HBT-like (12 coils, 15x15)",    12, 128,  15,  15, 4, 4, 1),
+        ("Prod-grid (12 coils, 64x64)",   12, 128,  64,  64, 4, 4, 1),
+        ("Columbia (12 coils, 128x64)",   12, 200, 128,  64, 8, 6, 1),
+        ("Full-HBT (22 coils, 128x64)",  22, 200, 128,  64, 8, 6, 1),
     ]
 
     for label, ncoils, nquad, nphi, ntheta, mpol, ntor, nfp in configs:
