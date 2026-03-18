@@ -23,7 +23,10 @@ All tests require ``simsoptpp`` for the CPU reference.
 import pytest
 import numpy as np
 
-sopp = pytest.importorskip("simsoptpp")
+sopp = pytest.importorskip(
+    "simsoptpp",
+    reason="Single-stage integration tests require simsoptpp (use candidate-fixed env)",
+)
 
 from simsopt.field import (  # noqa: E402
     BiotSavart,

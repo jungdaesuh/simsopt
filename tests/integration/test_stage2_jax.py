@@ -12,17 +12,22 @@ All tests require ``simsoptpp`` for the CPU reference.
 import pytest
 import numpy as np
 
-sopp = pytest.importorskip("simsoptpp")
+sopp = pytest.importorskip(
+    "simsoptpp",
+    reason="Stage 2 integration tests require simsoptpp (use candidate-fixed env)",
+)
 
 from scipy.optimize import minimize  # noqa: E402
 
 from simsopt.field import (  # noqa: E402
     BiotSavart,
     Current,
+    Coil,
     coils_via_symmetries,
 )
 from simsopt.geo import (  # noqa: E402
     SurfaceRZFourier,
+    CurveXYZFourier,
     create_equally_spaced_curves,
     CurveLength,
 )
@@ -389,3 +394,271 @@ class TestDOFMutation:
         jf.x = old_dofs
         j_restored = jf.J()
         np.testing.assert_allclose(j_restored, j_before, rtol=1e-12)
+
+
+# -----------------------------------------------------------------------
+# Test 7: Mixed-quadrature parity (TF + banana-like coils)
+# -----------------------------------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def mixed_quad_setup():
+    """Coils with mixed quadrature point counts.
+
+    Mimics the real Columbia workflow where TF coils use default
+    quadrature (15*order) and banana coils use explicit higher
+    quadrature (128 points).
+    """
+    nfp = 1
+    stellsym = False
+    R0 = 1.0
+    R1 = 0.5
+    order = 3
+
+    # Two TF coils with default 45 quadrature points (15 * order=3)
+    tf_curves = create_equally_spaced_curves(
+        2,
+        nfp,
+        stellsym=stellsym,
+        R0=R0,
+        R1=R1,
+        order=order,
+    )
+    tf_currents = [Current(1e5), Current(1e5)]
+    tf_coils = [Coil(c, cur) for c, cur in zip(tf_curves, tf_currents)]
+
+    # One "banana" coil with 128 quadrature points (same Fourier order)
+    banana = CurveXYZFourier(
+        np.linspace(0, 1, 128, endpoint=False),
+        order=order,
+    )
+    banana.x = tf_curves[0].x.copy()
+    banana_coil = Coil(banana, Current(1e5))
+
+    all_coils = tf_coils + [banana_coil]
+
+    nphi = 32
+    ntheta = 32
+    surf = SurfaceRZFourier(
+        nfp=nfp,
+        stellsym=stellsym,
+        mpol=1,
+        ntor=1,
+        quadpoints_phi=np.linspace(0, 1, nphi, endpoint=False),
+        quadpoints_theta=np.linspace(0, 1, ntheta, endpoint=False),
+    )
+    surf.set_rc(0, 0, R0)
+    surf.set_rc(1, 0, 0.2)
+    surf.set_zs(1, 0, 0.2)
+    surf.fix_all()
+
+    return all_coils, surf
+
+
+class TestMixedQuadratureParity:
+    """Parity when coils have different quadrature point counts."""
+
+    def test_b_parity(self, mixed_quad_setup):
+        """BiotSavartJAX.B() matches CPU with mixed quadrature."""
+        coils, surf = mixed_quad_setup
+        points = surf.gamma().reshape((-1, 3))
+
+        bs_cpu = BiotSavart(coils)
+        bs_cpu.set_points(points)
+        B_cpu = bs_cpu.B()
+
+        bs_jax = BiotSavartJAX(coils)
+        bs_jax.set_points(points)
+        B_jax = np.asarray(bs_jax.B())
+
+        np.testing.assert_allclose(
+            B_jax,
+            B_cpu,
+            rtol=1e-10,
+            atol=1e-15,
+            err_msg="BiotSavartJAX.B() mixed-quad parity failure",
+        )
+
+    @pytest.mark.parametrize(
+        "definition",
+        [
+            "quadratic flux",
+            "normalized",
+            "local",
+        ],
+    )
+    def test_j_parity(self, mixed_quad_setup, definition):
+        """SquaredFluxJAX.J() matches CPU with mixed quadrature."""
+        coils, surf = mixed_quad_setup
+
+        bs_cpu = BiotSavart(coils)
+        bs_cpu.set_points(surf.gamma().reshape((-1, 3)))
+        jf_cpu = SquaredFlux(surf, bs_cpu, definition=definition)
+        j_cpu = jf_cpu.J()
+
+        bs_jax = BiotSavartJAX(coils)
+        jf_jax = SquaredFluxJAX(surf, bs_jax, definition=definition)
+        j_jax = jf_jax.J()
+
+        rel_err = abs(j_jax - j_cpu) / (abs(j_cpu) + 1e-30)
+        assert rel_err < 1e-10, f"Relative error {rel_err:.2e} exceeds 1e-10"
+
+    def test_gradient_parity(self, mixed_quad_setup):
+        """SquaredFluxJAX.dJ() matches CPU with mixed quadrature."""
+        coils, surf = mixed_quad_setup
+
+        bs_cpu = BiotSavart(coils)
+        bs_cpu.set_points(surf.gamma().reshape((-1, 3)))
+        jf_cpu = SquaredFlux(surf, bs_cpu)
+        grad_cpu = jf_cpu.dJ()
+
+        bs_jax = BiotSavartJAX(coils)
+        jf_jax = SquaredFluxJAX(surf, bs_jax)
+        grad_jax = jf_jax.dJ()
+
+        np.testing.assert_allclose(
+            grad_jax,
+            grad_cpu,
+            rtol=1e-9,
+            atol=1e-15,
+            err_msg="Gradient mismatch with mixed quadrature",
+        )
+
+
+# -----------------------------------------------------------------------
+# Test 8: CurveCWSFourierCPP banana coil (real production curve type)
+# -----------------------------------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def banana_coil_setup():
+    """TF coils + a real CurveCWSFourierCPP banana coil with production-like DOFs.
+
+    This exercises the exact curve type and DOF pattern used in the Columbia
+    Stage 2 workflow (banana_coil_solver.py), not just a CurveXYZFourier
+    proxy with different nquad.  Non-zero DOFs (phic, thetac, thetas) ensure
+    the CWS gradient components are at meaningful magnitudes for parity
+    testing — with all-zero DOFs the curve degenerates to a plain circle
+    and all CWS DOF gradients fall to the noise floor (~1e-18).
+
+    The CurveCWSFourierCPP curve is defined on a *coil winding surface*
+    (r=0.5) that encloses the smaller *evaluation surface* (r=0.2),
+    keeping the coil well-separated from evaluation points.
+    """
+    from simsopt.geo import CurveCWSFourierCPP
+
+    nfp = 1
+    stellsym = False
+    R0 = 1.0
+
+    # Coil winding surface (large minor radius)
+    coil_surf = SurfaceRZFourier(
+        nfp=nfp,
+        stellsym=stellsym,
+        mpol=1,
+        ntor=1,
+        quadpoints_phi=np.linspace(0, 1, 32, endpoint=False),
+        quadpoints_theta=np.linspace(0, 1, 32, endpoint=False),
+    )
+    coil_surf.set_rc(0, 0, R0)
+    coil_surf.set_rc(1, 0, 0.5)
+    coil_surf.set_zs(1, 0, 0.5)
+
+    # Evaluation surface (smaller, inside coil winding surface)
+    eval_surf = SurfaceRZFourier(
+        nfp=nfp,
+        stellsym=stellsym,
+        mpol=1,
+        ntor=1,
+        quadpoints_phi=np.linspace(0, 1, 16, endpoint=False),
+        quadpoints_theta=np.linspace(0, 1, 16, endpoint=False),
+    )
+    eval_surf.set_rc(0, 0, R0)
+    eval_surf.set_rc(1, 0, 0.2)
+    eval_surf.set_zs(1, 0, 0.2)
+    eval_surf.fix_all()
+
+    # TF coils with 45 quadpoints (order=3)
+    tf_curves = create_equally_spaced_curves(
+        2,
+        nfp,
+        stellsym=stellsym,
+        R0=R0,
+        R1=0.5,
+        order=3,
+    )
+    tf_coils = [Coil(c, Current(1e5)) for c in tf_curves]
+
+    # CurveCWSFourierCPP banana coil with 128 quadpoints and production-like DOFs.
+    # Matches banana_coil_solver.py initialization pattern (H=0 default, localized curve).
+    banana = CurveCWSFourierCPP(
+        np.linspace(0, 1, 128, endpoint=False),
+        order=1,
+        surf=coil_surf,
+    )
+    banana.set("phic(0)", 0.06)
+    banana.set("thetac(0)", 0.5)
+    banana.set("phic(1)", 0.03)
+    banana.set("thetas(1)", 0.1)
+    banana_coil = Coil(banana, Current(1e5))
+
+    all_coils = tf_coils + [banana_coil]
+    return all_coils, eval_surf
+
+
+class TestCurveCWSFourierCPPParity:
+    """Parity with real CurveCWSFourierCPP banana coils."""
+
+    def test_b_parity(self, banana_coil_setup):
+        """BiotSavartJAX.B() matches CPU with CurveCWSFourierCPP coils."""
+        coils, surf = banana_coil_setup
+        points = surf.gamma().reshape((-1, 3))
+
+        bs_cpu = BiotSavart(coils)
+        bs_cpu.set_points(points)
+        B_cpu = bs_cpu.B()
+
+        bs_jax = BiotSavartJAX(coils)
+        bs_jax.set_points(points)
+        B_jax = np.asarray(bs_jax.B())
+
+        np.testing.assert_allclose(
+            B_jax,
+            B_cpu,
+            rtol=1e-10,
+            atol=1e-15,
+            err_msg="B parity failure with CurveCWSFourierCPP banana coil",
+        )
+
+    def test_j_parity(self, banana_coil_setup):
+        """SquaredFluxJAX.J() matches CPU with CurveCWSFourierCPP coils."""
+        coils, surf = banana_coil_setup
+
+        bs_cpu = BiotSavart(coils)
+        bs_cpu.set_points(surf.gamma().reshape((-1, 3)))
+        j_cpu = SquaredFlux(surf, bs_cpu).J()
+
+        bs_jax = BiotSavartJAX(coils)
+        j_jax = SquaredFluxJAX(surf, bs_jax).J()
+
+        rel_err = abs(j_jax - j_cpu) / (abs(j_cpu) + 1e-30)
+        assert rel_err < 1e-10, f"Relative error {rel_err:.2e} exceeds 1e-10"
+
+    def test_gradient_parity(self, banana_coil_setup):
+        """SquaredFluxJAX.dJ() matches CPU with CurveCWSFourierCPP coils."""
+        coils, surf = banana_coil_setup
+
+        bs_cpu = BiotSavart(coils)
+        bs_cpu.set_points(surf.gamma().reshape((-1, 3)))
+        grad_cpu = SquaredFlux(surf, bs_cpu).dJ()
+
+        bs_jax = BiotSavartJAX(coils)
+        grad_jax = SquaredFluxJAX(surf, bs_jax).dJ()
+
+        np.testing.assert_allclose(
+            grad_jax,
+            grad_cpu,
+            rtol=1e-9,
+            atol=1e-15,
+            err_msg="Gradient mismatch with CurveCWSFourierCPP banana coil",
+        )
