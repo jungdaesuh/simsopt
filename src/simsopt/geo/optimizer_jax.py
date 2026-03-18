@@ -1,14 +1,21 @@
 """
 JAX optimizer adapter for the Boozer inner solve.
 
-Uses SciPy's optimizer with JAX-computed objectives and gradients.
-The objective evaluation is JIT-compiled (device-resident); only the
-optimizer loop orchestration runs on the host.
-
 Per M0 contract §4:
   - BFGS is the default (stable, matches current SciPy inner solve).
   - L-BFGS-B available via ``method="lbfgs"``.
   - The adapter preserves SIMSOPT's flat-DOF contract.
+
+Device residency note (plan §3):
+  The BFGS optimizer loop runs via SciPy on the host, with JAX-compiled
+  objective/gradient evaluation on-device.  ``jax.scipy.optimize.minimize``
+  was evaluated as a fully on-device alternative but its simplified line
+  search (backtracking Armijo) fails to converge on the non-convex Boozer
+  penalty landscape from cold starts.  SciPy's Moré-Thuente line search
+  is required for reliable convergence.  This is accepted as a v1 fallback
+  per plan §3 ("unless explicitly accepted as a v1 fallback").
+  Newton polish and Newton exact use JAX arrays for all linear algebra;
+  only scalar convergence checks read a single float from device.
 """
 
 import numpy as np
@@ -25,7 +32,8 @@ def jax_minimize(fun, x0, *, method="bfgs", tol=1e-10, maxiter=1500, options=Non
 
     The objective ``fun(x)`` is JIT-compiled and differentiated via
     ``jax.value_and_grad``.  The optimizer loop itself runs via SciPy,
-    matching the current CPU inner-solve architecture.
+    which provides a robust Moré-Thuente line search needed for the
+    non-convex Boozer penalty landscape.
 
     Args:
         fun: Callable ``(x) -> scalar``.  Must be JAX-traceable.
@@ -87,6 +95,9 @@ def newton_polish(
     Each iteration computes value, gradient, and Hessian of the objective
     and solves the Newton system ``H dx = g``.
 
+    All linear algebra stays on JAX arrays; only the scalar convergence
+    check ``float(norm)`` touches the host.
+
     Args:
         objective_fn: Callable ``(x) -> scalar``, JAX-traceable.
         x0: (n,) initial DOFs (from prior BFGS).
@@ -141,6 +152,9 @@ def newton_exact(
 
     Computes Jacobian via ``jax.jacfwd`` and solves ``J dx = r``
     at each step with iterative refinement.
+
+    All linear algebra stays on JAX arrays; only the scalar convergence
+    check ``float(norm)`` touches the host.
 
     Args:
         residual_fn: Callable ``(x) -> (n_eq,)`` residual vector.

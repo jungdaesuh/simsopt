@@ -32,10 +32,10 @@ After every code change, run lint, format, and tests:
 ruff check <changed-files>
 ruff format <changed-files>
 
-# M1–M4 unit tests (no simsoptpp) — 84 pass, 5 skip
+# M1–M4 unit tests (no simsoptpp) — 93 pass, 5 skip
 conda run -n columbia-repro-b4815f18 python -m pytest tests/field/test_biotsavart_jax.py tests/geo/test_surface_fourier_jax.py tests/geo/test_boozer_residual_jax.py tests/objectives/test_integral_bdotn_jax.py tests/geo/test_boozer_derivatives_jax.py tests/geo/test_boozersurface_jax.py -v
 
-# M2+M5 integration tests (needs simsoptpp) — 20 pass
+# M2+M5 integration tests (needs simsoptpp) — 37 pass
 /Users/suhjungdae/code/hbt-compare/envs/candidate-fixed/bin/python -m pytest tests/integration/ -v
 ```
 
@@ -87,7 +87,7 @@ JAX modules live alongside C++ counterparts. They do NOT import simsoptpp.
 | Module | Purpose |
 |--------|---------|
 | `src/simsopt/geo/surfaceobjectives_jax.py` | `BoozerResidualJAX`, `IotasJAX`, `NonQuasiSymmetricRatioJAX` — Optimizable wrappers with IFT gradient |
-| `tests/integration/test_single_stage_jax.py` | Value sanity checks, adjoint consistency, FD gradient, composite pipeline, backend construction (10 tests) |
+| `tests/integration/test_single_stage_jax.py` | Value sanity, adjoint consistency, FD gradient, composite pipeline, backend construction, LS parity, short outer opt, exact path, ensure-solved guard (14 tests) |
 
 ### M6 — Productionization
 
@@ -139,6 +139,32 @@ from simsopt.backend import get_backend, is_jax_backend, get_jax_platform
 - **M5 adapter pattern**: The JAX objective wrappers use CPU surface objects (`surface.gamma()`, `label.J()`) for value computation, and JAX autodiff through `_surface_geometry_from_dofs`/`biot_savart_B` for gradient computation. This is by design (M0 contract adapter pattern): CPU objects at the boundary, JAX on the gradient hot path.
 - **JIT closure strategy**: `SquaredFluxJAX` captures fixed surface arrays (gamma, normal, target) in JIT closures at construction time. Valid for Stage 2 (fixed surface). Do not call `field.set_points()` after constructing `SquaredFluxJAX`.
 - **Coil data round-trip**: `BiotSavartJAX._extract_coil_data()` reads coil geometry from C++ every call. Acceptable for M2 CPU-mode JIT benefit; GPU-native coil evaluation is a later milestone.
+- **C++ ANGLE_RECOMPUTE brace pattern**: In `surfacerzfourier.cpp`, the VJP loops use `if(i % ANGLE_RECOMPUTE == 0)` to periodically recompute trig values. These blocks require explicit `{}` braces — bare `if` only guards the first statement, making costerm unconditional. Always add braces when touching these blocks.
+- **JAX scalar boundary conversions**: JAX integer/boolean scalars from `jnp` must be cast to `int()`/`bool()` before storing in result dicts consumed by SciPy or NumPy callers. Pattern: `"iter": int(result.nit), "success": bool(result.success)`.
+- **BFGS device residency (v1 accepted fallback)**: `jax.scipy.optimize.minimize` BFGS was evaluated but fails to converge on the non-convex Boozer penalty landscape from cold starts (backtracking Armijo line search). SciPy's Moré-Thuente line search is retained for v1.
+
+## Code Review History
+
+### Comprehensive jax-port code review (2026-03-18)
+
+Bugs fixed:
+- `_ensure_solved` crashed with `TypeError` when `booz_surf.res is None`. Fixed with None guard raising `RuntimeError`.
+- Missing `weight_inv_modB` in exact-path result dict (`boozersurface_jax.py`). Consumers defaulted to wrong value.
+- Unconditional `import jax` in `__init__.py` and `surfaceobjectives.py` broke CPU-only installs. Guarded with `try/except ImportError`.
+- Missing `}` closing `#pragma omp parallel` in `surfacerzfourier.cpp` `dgamma_by_dcoeff_vjp`.
+- `#pragma omp parallel for ordered` without ordered blocks in 3 C++ files. Removed `ordered` clause.
+- `mod_B_squared` data race in `integral_BdotN.cpp`. Moved declaration inside loop body.
+- Missing braces in ANGLE_RECOMPUTE if-blocks in 3 VJP functions (`surfacerzfourier.cpp`).
+- Docstring `r"""` → `"""` regression in `surfaceobjectives.py` (ruff format stripped raw prefix).
+- Added `int()`/`bool()` boundary conversions for JAX scalars in `boozersurface_jax.py`.
+
+Confirmed NOT bugs (false positives):
+- **nfp factor in volume/area**: correct — nfp cancels with quadrature step `1/(nfp*nphi)`.
+- **J_z omission from adjoint source**: correct — inner-solve regularizer, not part of `J_outer`.
+- **framedcurve.py API change** (4-arg → 3-arg): all callers already updated.
+- **BiotSavartJAX missing d2B_by_dXdX/A/compute**: backlog items, not needed by current consumers.
+- **SciPy host loop in optimizer**: accepted v1 fallback (JAX BFGS fails on non-convex cold starts).
+- **LS solve divergence CPU vs JAX**: did not reproduce — both converge to machine precision.
 
 ## Plan
 

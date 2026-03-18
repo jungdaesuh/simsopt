@@ -549,6 +549,279 @@ class TestScriptBackendSelection:
         print("initialize_boozer_surface(backend='jax') -> BoozerSurfaceJAX OK")
 
 
+# -----------------------------------------------------------------------
+# Test 9: Short outer optimization loop (plan §5 gate)
+# -----------------------------------------------------------------------
+
+
+# -----------------------------------------------------------------------
+# Test 9: Isolated run_code() LS parity (CPU vs JAX)
+# -----------------------------------------------------------------------
+
+
+class TestRunCodeLSParity:
+    """Isolated parity: CPU and JAX run_code() from the same initial guess.
+
+    Verifies that BoozerSurface and BoozerSurfaceJAX converge to the same
+    quality solution with identical solver options.  This is the primary
+    regression gate for the LS inner solve path (plan §2 workflow acceptance).
+    """
+
+    def test_ls_solve_parity(self):
+        """Both solvers converge; iota, label error, and residual match."""
+        ncoils, nfp = 2, 2
+        base_curves = create_equally_spaced_curves(
+            ncoils,
+            nfp,
+            stellsym=True,
+            R0=1.0,
+            R1=0.5,
+            order=3,
+        )
+        base_currents = [Current(1e5) for _ in range(ncoils)]
+        for c in base_currents:
+            c.fix_all()
+        coils = coils_via_symmetries(base_curves, base_currents, nfp, stellsym=True)
+
+        mpol, ntor = 2, 2
+        nphi, ntheta = 2 * ntor + 1, 2 * mpol + 1
+        surf_cpu = SurfaceXYZTensorFourier(
+            mpol=mpol,
+            ntor=ntor,
+            stellsym=True,
+            nfp=nfp,
+            quadpoints_phi=np.linspace(0, 1.0 / nfp, nphi, endpoint=False),
+            quadpoints_theta=np.linspace(0, 1.0, ntheta, endpoint=False),
+        )
+        surf_cpu.set_dofs(np.zeros_like(surf_cpu.get_dofs()))
+        from simsopt.geo import SurfaceRZFourier
+
+        s_rz = SurfaceRZFourier(
+            nfp=nfp,
+            stellsym=True,
+            mpol=1,
+            ntor=0,
+            quadpoints_phi=surf_cpu.quadpoints_phi,
+            quadpoints_theta=surf_cpu.quadpoints_theta,
+        )
+        s_rz.set_rc(0, 0, 1.0)
+        s_rz.set_rc(1, 0, 0.15)
+        s_rz.set_zs(1, 0, 0.15)
+        surf_cpu.least_squares_fit(s_rz.gamma())
+
+        surf_jax = SurfaceXYZTensorFourier(
+            mpol=mpol,
+            ntor=ntor,
+            stellsym=True,
+            nfp=nfp,
+            quadpoints_phi=surf_cpu.quadpoints_phi,
+            quadpoints_theta=surf_cpu.quadpoints_theta,
+        )
+        surf_jax.set_dofs(surf_cpu.get_dofs().copy())
+
+        bs_cpu = BiotSavart(coils)
+        bs_jax = BiotSavartJAX(coils)
+        vol_cpu = Volume(surf_cpu)
+        vol_jax = Volume(surf_jax)
+        vol_target = vol_cpu.J()
+
+        mu0 = 4 * np.pi * 1e-7
+        G0 = mu0 * sum(abs(c.current.get_value()) for c in coils)
+        iota0 = 0.3
+
+        opts = {
+            "verbose": False,
+            "bfgs_maxiter": 300,
+            "bfgs_tol": 1e-8,
+            "newton_maxiter": 20,
+            "newton_tol": 1e-9,
+        }
+        booz_cpu = BoozerSurface(
+            bs_cpu,
+            surf_cpu,
+            vol_cpu,
+            vol_target,
+            constraint_weight=1.0,
+            options=opts,
+        )
+        booz_jax = BoozerSurfaceJAX(
+            bs_jax,
+            surf_jax,
+            vol_jax,
+            vol_target,
+            constraint_weight=1.0,
+            options=opts,
+        )
+
+        res_cpu = booz_cpu.run_code(iota0, G0)
+        res_jax = booz_jax.run_code(iota0, G0)
+
+        assert res_cpu.get("success", False), "CPU solver did not converge"
+        assert res_jax.get("success", False), "JAX solver did not converge"
+
+        label_err_cpu = abs(vol_cpu.J() - vol_target)
+        label_err_jax = abs(vol_jax.J() - vol_target)
+        iota_diff = abs(res_cpu["iota"] - res_jax["iota"])
+
+        print(
+            f"CPU: iota={res_cpu['iota']:.6e} |label|={label_err_cpu:.6e}\n"
+            f"JAX: iota={res_jax['iota']:.6e} |label|={label_err_jax:.6e}\n"
+            f"|iota diff|={iota_diff:.6e}"
+        )
+
+        # Both should converge to near-zero iota and label error
+        assert abs(res_cpu["iota"]) < 1e-3, f"CPU iota too large: {res_cpu['iota']}"
+        assert abs(res_jax["iota"]) < 1e-3, f"JAX iota too large: {res_jax['iota']}"
+        assert label_err_cpu < 1e-3, f"CPU label error too large: {label_err_cpu}"
+        assert label_err_jax < 1e-3, f"JAX label error too large: {label_err_jax}"
+        # Iota should agree to within loose tolerance (different local minima OK)
+        assert iota_diff < 1e-3, f"Iota disagreement: {iota_diff:.6e}"
+
+
+# -----------------------------------------------------------------------
+# Test 10: Short outer optimization loop (plan §5 gate)
+# -----------------------------------------------------------------------
+
+
+class TestShortSingleStageOptRun:
+    """Run a short outer optimization and verify the objective decreases.
+
+    The plan (line 626) requires: "run a minimal optimization step sequence,
+    not just component calls."  This test builds a composite JAX objective
+    (BoozerResidual + iota penalty), takes a few L-BFGS-B steps on the
+    outer DOFs, and checks that the composite objective decreases.
+    """
+
+    def test_outer_opt_decreases_objective(self, boozer_setup):
+        (coils, surf_cpu, surf_jax, bs_cpu, bs_jax, booz_cpu, booz_jax, vol_cpu) = (
+            boozer_setup
+        )
+        from scipy.optimize import minimize as scipy_minimize
+
+        iota_target = booz_jax.res["iota"]
+        jr_jax = BoozerResidualJAX(booz_jax, bs_jax)
+        iotas_jax = IotasJAX(booz_jax)
+        JF_jax = jr_jax + QuadraticPenalty(iotas_jax, iota_target)
+
+        x0 = JF_jax.x.copy()
+        j0 = JF_jax.J()
+        assert np.isfinite(j0), "Initial objective not finite"
+
+        def fun(x):
+            JF_jax.x = x
+            return JF_jax.J(), JF_jax.dJ()
+
+        result = scipy_minimize(
+            fun,
+            x0,
+            jac=True,
+            method="L-BFGS-B",
+            options={"maxiter": 3, "maxcor": 10},
+        )
+        j_final = result.fun
+
+        print(
+            f"Short opt: J0={j0:.6e} -> J_final={j_final:.6e} "
+            f"nit={result.nit} success={result.success}"
+        )
+        assert np.isfinite(j_final), "Final objective not finite"
+        assert j_final <= j0 + 1e-12, (
+            f"Objective did not decrease: {j0:.6e} -> {j_final:.6e}"
+        )
+
+        JF_jax.x = x0
+
+
+# -----------------------------------------------------------------------
+# Test 10: Exact-path Boozer solve
+# -----------------------------------------------------------------------
+
+
+class TestExactPathSolve:
+    """Verify that the exact Newton path runs and converges.
+
+    The plan (line 695) requires: "the exact-path final-stage workflow
+    remains in scope, not just least-squares initialization."
+    """
+
+    def test_exact_path_converges(self):
+        """BoozerSurfaceJAX with boozer_type='exact' converges."""
+        ncoils, nfp = 2, 2
+        base_curves = create_equally_spaced_curves(
+            ncoils,
+            nfp,
+            stellsym=True,
+            R0=1.0,
+            R1=0.5,
+            order=3,
+        )
+        base_currents = [Current(1e5) for _ in range(ncoils)]
+        for c in base_currents:
+            c.fix_all()
+        coils = coils_via_symmetries(base_curves, base_currents, nfp, stellsym=True)
+        bs_jax = BiotSavartJAX(coils)
+
+        mpol, ntor = 2, 2
+        nphi, ntheta = 2 * ntor + 1, 2 * mpol + 1
+        surf = SurfaceXYZTensorFourier(
+            mpol=mpol,
+            ntor=ntor,
+            stellsym=True,
+            nfp=nfp,
+            quadpoints_phi=np.linspace(0, 1.0 / nfp, nphi, endpoint=False),
+            quadpoints_theta=np.linspace(0, 1.0, ntheta, endpoint=False),
+        )
+        from simsopt.geo import SurfaceRZFourier
+
+        s_rz = SurfaceRZFourier(
+            nfp=nfp,
+            stellsym=True,
+            mpol=1,
+            ntor=0,
+            quadpoints_phi=surf.quadpoints_phi,
+            quadpoints_theta=surf.quadpoints_theta,
+        )
+        s_rz.set_rc(0, 0, 1.0)
+        s_rz.set_rc(1, 0, 0.15)
+        s_rz.set_zs(1, 0, 0.15)
+        surf.least_squares_fit(s_rz.gamma())
+
+        vol = Volume(surf)
+        vol_target = vol.J()
+
+        mu0 = 4 * np.pi * 1e-7
+        G0 = mu0 * sum(abs(c.current.get_value()) for c in coils)
+        iota0 = 0.3
+
+        booz_exact = BoozerSurfaceJAX(
+            bs_jax,
+            surf,
+            vol,
+            vol_target,
+            constraint_weight=None,
+            options={
+                "verbose": False,
+                "bfgs_maxiter": 300,
+                "bfgs_tol": 1e-8,
+                "newton_maxiter": 40,
+                "newton_tol": 1e-8,
+            },
+        )
+        res = booz_exact.run_code(iota0, G0)
+
+        assert res is not None, "Exact solver returned None"
+        assert res["type"] == "exact", f"Expected 'exact', got {res['type']}"
+        assert "weight_inv_modB" in res, "Missing weight_inv_modB key"
+        residual_norm = np.linalg.norm(res["residual"], ord=np.inf)
+        print(
+            f"Exact path: success={res['success']} iter={res['iter']} "
+            f"||residual||_inf={residual_norm:.3e} iota={res['iota']:.6f}"
+        )
+        assert residual_norm < 1e-6, (
+            f"Exact solver residual too large: ||r||={residual_norm:.3e}"
+        )
+
+
 class TestEnsureSolvedCrashGuard:
     """Issue-1 regression: _ensure_solved must not crash with res=None."""
 

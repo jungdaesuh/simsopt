@@ -588,9 +588,9 @@ class BoozerSurfaceJAX(Optimizable):
         resdict = {
             "fun": float(result.fun),
             "gradient": np.asarray(result.jac),
-            "iter": result.nit,
+            "iter": int(result.nit),
             "info": result,
-            "success": result.success,
+            "success": bool(result.success),
             "G": G_out,
             "s": s,
             "iota": iota_out,
@@ -828,6 +828,7 @@ class BoozerSurfaceJAX(Optimizable):
             "mask": bool_mask,
             "type": "exact",
             "vjp": _boozer_exact_coil_vjp,
+            "weight_inv_modB": self.options["weight_inv_modB"],
         }
         self.res = res
         self.need_to_run_code = False
