@@ -18,7 +18,10 @@ on:
       - 'tests/geo/test_boozersurface_jax.py'
       - 'tests/objectives/test_integral_bdotn_jax.py'
       - 'tests/integration/test_jax_native_path.py'
+      - 'tests/integration/test_stage2_jax.py'
+      - 'tests/integration/test_single_stage_jax.py'
       - 'tests/test_jax_import_smoke.py'
+      - 'examples/single_stage_optimization/**'
   pull_request:
     branches: [jax-port, master]
     paths:
@@ -36,7 +39,10 @@ on:
       - 'tests/geo/test_boozersurface_jax.py'
       - 'tests/objectives/test_integral_bdotn_jax.py'
       - 'tests/integration/test_jax_native_path.py'
+      - 'tests/integration/test_stage2_jax.py'
+      - 'tests/integration/test_single_stage_jax.py'
       - 'tests/test_jax_import_smoke.py'
+      - 'examples/single_stage_optimization/**'
 
 jobs:
   jax-unit-tests:
