@@ -1,4 +1,6 @@
 import importlib.util
+import sys
+import types
 import unittest
 import uuid
 from pathlib import Path
@@ -6,7 +8,10 @@ from unittest.mock import patch
 
 import numpy as np
 
-from simsopt.geo.surfaceobjectives import boozer_surface_residual, boozer_surface_residual_dB
+from simsopt.geo.surfaceobjectives import (
+    boozer_surface_residual,
+    boozer_surface_residual_dB,
+)
 from simsopt.objectives.utilities import forward_backward
 
 
@@ -84,7 +89,9 @@ class FakeVolume:
 
 
 class FakeBoozerSurface:
-    def __init__(self, bs, surface, label, targetlabel, constraint_weight, options=None):
+    def __init__(
+        self, bs, surface, label, targetlabel, constraint_weight, options=None
+    ):
         self.bs = bs
         self.surface = surface
         self.label = label
@@ -105,9 +112,11 @@ class SingleStageExampleTests(unittest.TestCase):
         return load_single_stage_example_module()
 
     def initialize_boozer_surface(self, module, surf_prev, *, constraint_weight):
-        with patch.object(module, "SurfaceXYZTensorFourier", FakeSurfaceXYZTensorFourier), patch.object(
-            module, "Volume", FakeVolume
-        ), patch.object(module, "BoozerSurface", FakeBoozerSurface):
+        with patch.object(
+            module, "SurfaceXYZTensorFourier", FakeSurfaceXYZTensorFourier
+        ), patch.object(module, "Volume", FakeVolume), patch.object(
+            module, "BoozerSurface", FakeBoozerSurface
+        ):
             return module.initialize_boozer_surface(
                 surf_prev,
                 mpol=TEST_MPOL,
@@ -129,26 +138,186 @@ class SingleStageExampleTests(unittest.TestCase):
     def test_initialize_boozer_surface_exact_uses_ntor_phi_quadrature(self):
         module = self.load_module()
         surf_prev = FakeSurfPrev()
-        boozer_surface = self.initialize_boozer_surface(module, surf_prev, constraint_weight=None)
+        boozer_surface = self.initialize_boozer_surface(
+            module, surf_prev, constraint_weight=None
+        )
 
         self.assertIsInstance(boozer_surface, FakeBoozerSurface)
         self.assertEqual(len(FakeSurfaceXYZTensorFourier.instances), 2)
 
         exact_surface = FakeSurfaceXYZTensorFourier.instances[1]
-        expected_phi = np.linspace(0, 1 / surf_prev.nfp, 2 * TEST_NTOR + 1, endpoint=False)
+        expected_phi = np.linspace(
+            0, 1 / surf_prev.nfp, 2 * TEST_NTOR + 1, endpoint=False
+        )
 
         self.assertEqual(exact_surface.quadpoints_theta.size, 2 * TEST_MPOL + 1)
         self.assertEqual(exact_surface.quadpoints_phi.size, 2 * TEST_NTOR + 1)
         np.testing.assert_allclose(exact_surface.quadpoints_phi, expected_phi)
 
-    def test_initialize_boozer_surface_zero_constraint_weight_keeps_least_squares_path(self):
+    def test_initialize_boozer_surface_zero_constraint_weight_keeps_least_squares_path(
+        self,
+    ):
         module = self.load_module()
         surf_prev = FakeSurfPrev()
-        boozer_surface = self.initialize_boozer_surface(module, surf_prev, constraint_weight=0.0)
+        boozer_surface = self.initialize_boozer_surface(
+            module, surf_prev, constraint_weight=0.0
+        )
 
         self.assertIsInstance(boozer_surface, FakeBoozerSurface)
         self.assertEqual(len(FakeSurfaceXYZTensorFourier.instances), 1)
         self.assertIs(boozer_surface.surface, FakeSurfaceXYZTensorFourier.instances[0])
+
+    def test_initialize_boozer_surface_jax_backend_routes_to_jax_solver(self):
+        module = self.load_module()
+        surf_prev = FakeSurfPrev()
+
+        class FailingCPUBoozerSurface:
+            def __init__(self, *args, **kwargs):
+                raise AssertionError("CPU BoozerSurface should not be constructed")
+
+        class FakeBoozerSurfaceJAX:
+            instances = []
+
+            def __init__(
+                self,
+                bs,
+                surface,
+                label,
+                targetlabel,
+                constraint_weight,
+                options=None,
+            ):
+                self.bs = bs
+                self.surface = surface
+                self.label = label
+                self.targetlabel = targetlabel
+                self.constraint_weight = constraint_weight
+                self.options = options or {}
+                self.run_code_calls = []
+                self.res = {"success": True, "iota": TEST_IOTA, "G": TEST_G0}
+                FakeBoozerSurfaceJAX.instances.append(self)
+
+            def run_code(self, iota, G):
+                self.run_code_calls.append((iota, G))
+                return self.res
+
+        fake_jax_module = types.ModuleType("simsopt.geo.boozersurface_jax")
+        fake_jax_module.BoozerSurfaceJAX = FakeBoozerSurfaceJAX
+
+        with patch.object(
+            module, "SurfaceXYZTensorFourier", FakeSurfaceXYZTensorFourier
+        ), patch.object(module, "Volume", FakeVolume), patch.object(
+            module, "BoozerSurface", FailingCPUBoozerSurface
+        ), patch.dict(
+            sys.modules,
+            {"simsopt.geo.boozersurface_jax": fake_jax_module},
+        ):
+            boozer_surface = module.initialize_boozer_surface(
+                surf_prev,
+                mpol=TEST_MPOL,
+                ntor=TEST_NTOR,
+                bs=object(),
+                vol_target=TEST_VOL_TARGET,
+                constraint_weight=1.0,
+                iota=TEST_IOTA,
+                G0=TEST_G0,
+                backend="jax",
+            )
+
+        self.assertIsInstance(boozer_surface, FakeBoozerSurfaceJAX)
+        self.assertEqual(boozer_surface.run_code_calls, [(TEST_IOTA, TEST_G0)])
+        self.assertEqual(boozer_surface.constraint_weight, 1.0)
+        self.assertEqual(boozer_surface.options["verbose"], True)
+        self.assertEqual(boozer_surface.options["optimizer_backend"], "scipy")
+        self.assertIs(boozer_surface.surface, FakeSurfaceXYZTensorFourier.instances[0])
+
+    def test_diagnostic_field_prefers_cpu_reference_when_present(self):
+        module = self.load_module()
+        cpu_field = object()
+        jax_field = object()
+
+        self.assertIs(module.diagnostic_field(jax_field, cpu_field), cpu_field)
+        self.assertIs(module.diagnostic_field(jax_field, None), jax_field)
+
+    def test_build_iota_objective_uses_supplied_wrapper_class(self):
+        module = self.load_module()
+        calls = []
+
+        class FakeIotaWrapper:
+            def __init__(self, boozer_surface):
+                calls.append(boozer_surface)
+
+        marker = object()
+        wrapper = module.build_iota_objective(marker, FakeIotaWrapper)
+
+        self.assertIsInstance(wrapper, FakeIotaWrapper)
+        self.assertEqual(calls, [marker])
+
+    def test_select_boozer_residual_class_routes_exact_stage_to_exact_wrapper(self):
+        module = self.load_module()
+
+        self.assertIs(
+            module.select_boozer_residual_class(use_jax=True, boozer_kind="exact"),
+            module.BoozerResidualExact,
+        )
+        self.assertIs(
+            module.select_boozer_residual_class(use_jax=False, boozer_kind="exact"),
+            module.BoozerResidualExact,
+        )
+
+    def test_select_boozer_residual_class_routes_least_squares_by_backend(self):
+        module = self.load_module()
+
+        class FakeBoozerResidualJAX:
+            pass
+
+        with patch.object(
+            module,
+            "get_jax_surface_objective_classes",
+            return_value=(FakeBoozerResidualJAX, object(), object()),
+        ):
+            self.assertIs(
+                module.select_boozer_residual_class(
+                    use_jax=True, boozer_kind="least_squares"
+                ),
+                FakeBoozerResidualJAX,
+            )
+
+        self.assertIs(
+            module.select_boozer_residual_class(
+                use_jax=False, boozer_kind="least_squares"
+            ),
+            module.BoozerResidual,
+        )
+
+    def test_build_boozer_residual_objective_uses_supplied_wrapper_class(self):
+        module = self.load_module()
+        calls = []
+
+        class FakeResidualWrapper:
+            def __init__(self, boozer_surface, bs_obj):
+                calls.append((boozer_surface, bs_obj))
+
+        fake_boozer_surface = object()
+        fake_bs = object()
+        wrapper = module.build_boozer_residual_objective(
+            fake_boozer_surface,
+            fake_bs,
+            FakeResidualWrapper,
+        )
+
+        self.assertIsInstance(wrapper, FakeResidualWrapper)
+        self.assertEqual(calls, [(fake_boozer_surface, fake_bs)])
+
+    def test_cpu_boozer_surface_zero_weight_contract_uses_explicit_none_check(self):
+        source = (
+            Path(__file__).resolve().parents[2]
+            / "src"
+            / "simsopt"
+            / "geo"
+            / "boozersurface.py"
+        ).read_text()
+        self.assertIn("constraint_weight is not None", source)
 
     def test_fun_fallback_returns_elevated_j_and_same_sign_gradient(self):
         """Issue #2: failed Boozer must return elevated J + same-sign gradient,
@@ -160,22 +329,41 @@ class SingleStageExampleTests(unittest.TestCase):
 
         class _Surface:
             x = np.ones(3)
+
             def is_self_intersecting(self):
                 return False
 
         class _BoozerSurface:
             surface = _Surface()
-            res = {"success": False, "iota": TEST_IOTA, "G": TEST_G0}
+            res = {
+                "success": False,
+                "iota": TEST_IOTA,
+                "G": TEST_G0,
+                "PLU": None,
+                "vjp": None,
+            }
+
             def run_code(self, iota, G):
                 return self.res
 
         class _JF:
-            x = np.zeros(5)
+            def __init__(self):
+                self.x = np.zeros(5)
+
+            def J(self):
+                raise AssertionError("JF.J must not be called on failure path")
+
+            def dJ(self):
+                raise AssertionError("JF.dJ must not be called on failure path")
 
         module.run_dict = {
-            "x_prev": np.zeros(5), "lscount": 0,
-            "sdofs": np.ones(3), "iota": TEST_IOTA, "G": TEST_G0,
-            "J": last_J, "dJ": last_dJ.copy(),
+            "x_prev": np.zeros(5),
+            "lscount": 0,
+            "sdofs": np.ones(3),
+            "iota": TEST_IOTA,
+            "G": TEST_G0,
+            "J": last_J,
+            "dJ": last_dJ.copy(),
         }
         module.boozer_surface = _BoozerSurface()
         module.JF = _JF()
@@ -194,12 +382,14 @@ class BoozerFallbackLBFGSBTests(unittest.TestCase):
         from scipy.optimize import minimize
 
         def rosenbrock(x):
-            f = sum(100 * (x[i+1] - x[i]**2)**2 + (1 - x[i])**2
-                    for i in range(len(x) - 1))
+            f = sum(
+                100 * (x[i + 1] - x[i] ** 2) ** 2 + (1 - x[i]) ** 2
+                for i in range(len(x) - 1)
+            )
             g = np.zeros_like(x)
             for i in range(len(x) - 1):
-                g[i] += -400*x[i]*(x[i+1] - x[i]**2) - 2*(1 - x[i])
-                g[i+1] += 200*(x[i+1] - x[i]**2)
+                g[i] += -400 * x[i] * (x[i + 1] - x[i] ** 2) - 2 * (1 - x[i])
+                g[i + 1] += 200 * (x[i + 1] - x[i] ** 2)
             return f, g
 
         rng = np.random.RandomState(42)
@@ -215,8 +405,13 @@ class BoozerFallbackLBFGSBTests(unittest.TestCase):
             state["x_good"] = x.copy()
             return f, g
 
-        res = minimize(fun_with_fallback, x0, jac=True, method="L-BFGS-B",
-                       options={"maxiter": 500, "maxcor": 10})
+        res = minimize(
+            fun_with_fallback,
+            x0,
+            jac=True,
+            method="L-BFGS-B",
+            options={"maxiter": 500, "maxcor": 10},
+        )
 
         self.assertTrue(res.success, f"L-BFGS-B did not converge: {res.message}")
         self.assertGreater(res.hess_inv.n_corrs, 0)
@@ -240,11 +435,15 @@ def _load_segment_distance_from_source():
     numba or triggering module-level code (arg parsing, VMEC file loading, etc.).
     """
     import ast
+
     source = STAGE2_MODULE_PATH.read_text()
     tree = ast.parse(source)
     func_nodes = []
     for node in ast.iter_child_nodes(tree):
-        if isinstance(node, ast.FunctionDef) and node.name in ("_clamp01", "segment_segment_distance"):
+        if isinstance(node, ast.FunctionDef) and node.name in (
+            "_clamp01",
+            "segment_segment_distance",
+        ):
             node.decorator_list = []
             func_nodes.append(node)
     extracted = ast.Module(body=func_nodes, type_ignores=[])
@@ -286,8 +485,10 @@ class SegmentDistanceTests(unittest.TestCase):
 
     def _d(self, p1, p2, q1, q2):
         return _segment_segment_distance(
-            np.array(p1, dtype=float), np.array(p2, dtype=float),
-            np.array(q1, dtype=float), np.array(q2, dtype=float),
+            np.array(p1, dtype=float),
+            np.array(p2, dtype=float),
+            np.array(q1, dtype=float),
+            np.array(q2, dtype=float),
         )
 
     def test_skew_segments_reprojection(self):
@@ -361,9 +562,15 @@ class SegmentDistanceTests(unittest.TestCase):
                 n_parallel += 1
             d_algo = _segment_segment_distance(P1, P2, Q1, Q2)
             d_brute = _brute_force_segment_distance(P1, P2, Q1, Q2)
-            self.assertAlmostEqual(d_algo, d_brute, places=9,
-                                   msg=f"Near-parallel mismatch: algo={d_algo}, brute={d_brute}")
-        self.assertGreater(n_parallel, 900, "Not enough pairs hit the near-parallel branch")
+            self.assertAlmostEqual(
+                d_algo,
+                d_brute,
+                places=9,
+                msg=f"Near-parallel mismatch: algo={d_algo}, brute={d_brute}",
+            )
+        self.assertGreater(
+            n_parallel, 900, "Not enough pairs hit the near-parallel branch"
+        )
 
     def test_random_brute_force(self):
         """Verify against exhaustive interior + edge search on 1000 random pairs."""
@@ -372,8 +579,12 @@ class SegmentDistanceTests(unittest.TestCase):
             P1, P2, Q1, Q2 = rng.randn(4, 3)
             d_algo = _segment_segment_distance(P1, P2, Q1, Q2)
             d_brute = _brute_force_segment_distance(P1, P2, Q1, Q2)
-            self.assertAlmostEqual(d_algo, d_brute, places=9,
-                                   msg=f"Mismatch: algo={d_algo}, brute={d_brute}")
+            self.assertAlmostEqual(
+                d_algo,
+                d_brute,
+                places=9,
+                msg=f"Mismatch: algo={d_algo}, brute={d_brute}",
+            )
 
 
 class CrossSectionNormalizationTests(unittest.TestCase):

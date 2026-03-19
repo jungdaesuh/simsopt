@@ -82,11 +82,12 @@ try:
     _jax_geo_all += boozersurface_jax.__all__
 except (ImportError, AttributeError):
     pass
-try:
-    from .surfaceobjectives_jax import *
+if _has_simsoptpp:
+    try:
+        from .surfaceobjectives_jax import *
 
-    _jax_geo_all += surfaceobjectives_jax.__all__
-except (ImportError, AttributeError):
-    pass
+        _jax_geo_all += surfaceobjectives_jax.__all__
+    except (ImportError, AttributeError):
+        pass
 
 __all__ = _cpu_geo_all + _jax_geo_all

@@ -467,6 +467,12 @@ def parse_args():
         default=os.environ.get("SIMSOPT_BACKEND", "cpu"),
         help="Field/objective backend: cpu (simsoptpp) or jax (JAX autodiff).",
     )
+    parser.add_argument(
+        "--optimizer-backend",
+        choices=["scipy", "hybrid", "ondevice"],
+        default=os.environ.get("OPTIMIZER_BACKEND", "scipy"),
+        help="JAX Boozer optimizer backend. Recorded in the run fingerprint and passed through to the JAX surface solver.",
+    )
     return parser.parse_args()
 
 
@@ -614,7 +620,16 @@ class BoozerResidualExact(Optimizable):
 
 
 def initialize_boozer_surface(
-    surf_prev, mpol, ntor, bs, vol_target, constraint_weight, iota, G0, backend="cpu"
+    surf_prev,
+    mpol,
+    ntor,
+    bs,
+    vol_target,
+    constraint_weight,
+    iota,
+    G0,
+    backend="cpu",
+    optimizer_backend="scipy",
 ):
     """
     This initializes the boozer surface, using either the boozer "exact" algorithm, or the boozer "least squares" algorithm
@@ -627,6 +642,7 @@ def initialize_boozer_surface(
     iota: initial guess for iota value on the surface
     G0: Value of net current going through the torus hole
     backend: "cpu" or "jax"
+    optimizer_backend: JAX inner optimizer selector recorded in metadata
     """
     surf = SurfaceXYZTensorFourier(
         mpol=mpol,
@@ -649,8 +665,16 @@ def initialize_boozer_surface(
     if constraint_weight is not None:
         print(f"Generating {solver_name}Boozer least squares surface...")
         vol = Volume(surf)
+        options = {"verbose": True}
+        if backend == "jax":
+            options["optimizer_backend"] = optimizer_backend
         boozer_surface = BoozerCls(
-            bs, surf, vol, vol_target, constraint_weight, options={"verbose": True}
+            bs,
+            surf,
+            vol,
+            vol_target,
+            constraint_weight,
+            options=options,
         )
     else:
         print(f"Generating {solver_name}Boozer exact surface...")
@@ -665,7 +689,12 @@ def initialize_boozer_surface(
         )
         vol = Volume(surf_exact)
         boozer_surface = BoozerCls(
-            bs, surf_exact, vol, vol_target, None, options={"verbose": True}
+            bs,
+            surf_exact,
+            vol,
+            vol_target,
+            None,
+            options={"verbose": True},
         )
 
     # Run boozer surface algorithm
@@ -697,6 +726,42 @@ def normPlot(surf, bs, filename):
     """Plot normal magnetic field — delegates to shared norm_field_plot."""
     mean_abs_relBfinal_norm, _, _, _, _ = norm_field_plot(surf, bs, filename)
     return mean_abs_relBfinal_norm
+
+
+def diagnostic_field(bs, bs_cpu_diag):
+    """Use the CPU field object for artifact/diagnostic paths when available."""
+    return bs_cpu_diag if bs_cpu_diag is not None else bs
+
+
+def build_iota_objective(boozer_surface, iota_cls):
+    """Create the backend-matched iota diagnostic/objective wrapper."""
+    return iota_cls(boozer_surface)
+
+
+def get_jax_surface_objective_classes():
+    """Load the JAX single-stage objective wrappers on demand."""
+    from simsopt.geo.surfaceobjectives_jax import (
+        BoozerResidualJAX,
+        IotasJAX,
+        NonQuasiSymmetricRatioJAX,
+    )
+
+    return BoozerResidualJAX, IotasJAX, NonQuasiSymmetricRatioJAX
+
+
+def select_boozer_residual_class(use_jax, boozer_kind):
+    """Select the stage- and backend-matched Boozer residual wrapper."""
+    if boozer_kind == "exact":
+        return BoozerResidualExact
+    if use_jax:
+        boozer_residual_cls, _, _ = get_jax_surface_objective_classes()
+        return boozer_residual_cls
+    return BoozerResidual
+
+
+def build_boozer_residual_objective(boozer_surface, bs_obj, boozer_residual_cls):
+    """Create the stage- and backend-matched Boozer residual wrapper."""
+    return boozer_residual_cls(boozer_surface, bs_obj)
 
 
 def fun(x):
@@ -748,7 +813,7 @@ def fun(x):
         dJ = JF.dJ()
 
         print(f"Volume: {boozer_surface.surface.volume()}")
-        print(f"Iota: {Iotas(boozer_surface).J()}")
+        print(f"Iota: {build_iota_objective(boozer_surface, iota_cls).J()}")
 
     else:
         print("/!\\ /!\\ Boozer surface rejected /!\\ /!\\")
@@ -757,7 +822,7 @@ def fun(x):
         if not success2:
             print("Surface is self-intersecting")
 
-        # Elevated J violates Armijo, so the line search backtracks.
+        # Elevated J should force the outer line search to reject the step.
         # Returning dJ_old (not negated) avoids the old -dJ corruption path
         # and produces y_k=0 if the step is ever accepted, safely skipping
         # the BFGS Hessian update.
@@ -978,13 +1043,21 @@ if __name__ == "__main__":
     file_loc = build_equilibrium_path(args)
     bs = load(stage2_bs_path)
 
+    use_jax = args.backend == "jax"
+
     # JAX backend: wrap the loaded BiotSavart coils in BiotSavartJAX.
-    # Keep a CPU reference for diagnostics (VTK output, norm plots).
-    bs_cpu_diag = bs if args.backend == "jax" else None
-    if args.backend == "jax":
+    # Keep a CPU reference for diagnostics and artifact output.
+    bs_cpu_diag = bs if use_jax else None
+    if use_jax:
         from simsopt.field.biotsavart_jax_backend import BiotSavartJAX
 
+        _, IotasJAX, NonQuasiSymmetricRatioJAX = get_jax_surface_objective_classes()
         bs = BiotSavartJAX(bs.coils)
+        iota_cls = IotasJAX
+    else:
+        iota_cls = Iotas
+
+    bs_diag = diagnostic_field(bs, bs_cpu_diag)
 
     # Initialize the boundary magnetic surface and scale it to the target major radius
     surf = SurfaceRZFourier.from_wout(
@@ -1011,6 +1084,8 @@ if __name__ == "__main__":
     # ==============================================================================
     print(f"\n===== Starting single stage optimization for mpol = {mpol} =====")
 
+    optimizer_backend_record = args.optimizer_backend if args.backend == "jax" else None
+
     config_str = (
         f"{stage2_bs_path}|{stage}|{CONSTRAINT_WEIGHT}|{vol_target}|{iota_target}"
         f"|{args.cc_dist}|{args.cc_weight}|{args.curvature_weight}|{args.curvature_threshold}"
@@ -1018,6 +1093,7 @@ if __name__ == "__main__":
         f"|{args.cs_weight}|{args.cs_dist}|{args.surf_dist_weight}|{args.ss_dist}"
         f"|{args.maxcor}"
         f"|{banana_surf_radius}|{nphi}|{ntheta}|{args.init_only}|{args.backend}"
+        f"|{optimizer_backend_record}"
         f"|{args.maxiter}|{args.num_tf_coils}|{file_loc}"
     )
     config_hash = hashlib.sha256(config_str.encode()).hexdigest()[:8]
@@ -1035,6 +1111,7 @@ if __name__ == "__main__":
         iota_target,
         G0,
         backend=args.backend,
+        optimizer_backend=args.optimizer_backend,
     )
 
     # ==============================================================================
@@ -1042,14 +1119,14 @@ if __name__ == "__main__":
     # ==============================================================================
     # Save initial coil configurations
     curves_to_vtk(curves, OUT_DIR_ITER + "/curves_init", close=True)
-    bs.save(OUT_DIR_ITER + "/biot_savart_init.json")
+    bs_diag.save(OUT_DIR_ITER + "/biot_savart_init.json")
 
     # Save initial surface with magnetic field normal component data
-    bs.set_points(boozer_surface.surface.gamma().reshape((-1, 3)))
+    bs_diag.set_points(boozer_surface.surface.gamma().reshape((-1, 3)))
     unitn = boozer_surface.surface.unitnormal()
     pointData = {
-        "B_N/B": np.sum(bs.B().reshape(unitn.shape) * unitn, axis=2)[:, :, None]
-        / np.sqrt(np.sum(bs.B().reshape(unitn.shape) ** 2, axis=2))[:, :, None]
+        "B_N/B": np.sum(bs_diag.B().reshape(unitn.shape) * unitn, axis=2)[:, :, None]
+        / np.sqrt(np.sum(bs_diag.B().reshape(unitn.shape) ** 2, axis=2))[:, :, None]
     }
     boozer_surface.surface.to_vtk(OUT_DIR_ITER + "/surf_init", extra_data=pointData)
     boozer_surface.surface.save(OUT_DIR_ITER + "/surf_init.json")
@@ -1057,7 +1134,7 @@ if __name__ == "__main__":
 
     # Generate initial diagnostic plots
     initial_field_error = normPlot(
-        boozer_surface.surface, bs, OUT_DIR_ITER + "/NormPlotInitial"
+        boozer_surface.surface, bs_diag, OUT_DIR_ITER + "/NormPlotInitial"
     )
     cross_section_plot(
         surf_coils,
@@ -1068,36 +1145,29 @@ if __name__ == "__main__":
         VV,
     )
     initial_volume = boozer_surface.surface.volume()
-    initial_iota = Iotas(boozer_surface).J()
+    initial_iota = build_iota_objective(boozer_surface, iota_cls).J()
     initial_max_curvature = np.max(banana_curve.kappa())
 
     # ==============================================================================
     # DEFINE OBJECTIVE FUNCTION COMPONENTS
     # ==============================================================================
     # Biot-Savart field calculation
-    use_jax = args.backend == "jax"
     if use_jax:
-        from simsopt.field.biotsavart_jax_backend import BiotSavartJAX
-        from simsopt.geo.surfaceobjectives_jax import (
-            BoozerResidualJAX,
-            IotasJAX,
-            NonQuasiSymmetricRatioJAX,
-        )
-
         bs_obj = BiotSavartJAX(coils)
     else:
         bs_obj = BiotSavart(coils)
 
+    boozer_residual_cls = select_boozer_residual_class(
+        use_jax=use_jax,
+        boozer_kind=boozer_type[stage],
+    )
+
     # Quasi-symmetry and Boozer coordinate residuals
     if use_jax:
         nonQSs = [NonQuasiSymmetricRatioJAX(boozer_surface, bs_obj)]
-        brs = [BoozerResidualJAX(boozer_surface, bs_obj)]
     else:
         nonQSs = [NonQuasiSymmetricRatio(boozer_surface, bs_obj)]
-        if boozer_type[stage] == "exact":
-            brs = [BoozerResidualExact(boozer_surface, bs_obj)]
-        else:
-            brs = [BoozerResidual(boozer_surface, bs_obj)]
+    brs = [build_boozer_residual_objective(boozer_surface, bs_obj, boozer_residual_cls)]
 
     # Objective function weights and parameters
     LENGTH_WEIGHT = args.length_weight
@@ -1113,7 +1183,7 @@ if __name__ == "__main__":
     CURVATURE_THRESHOLD = max(args.curvature_threshold, 20)  # Hardware minimum: 20
 
     # Individual objective terms
-    iota = IotasJAX(boozer_surface) if use_jax else Iotas(boozer_surface)
+    iota = build_iota_objective(boozer_surface, iota_cls)
     curvelength = CurveLength(banana_curves[0])
     length_target = curvelength.J()
 
@@ -1179,7 +1249,12 @@ if __name__ == "__main__":
             jac=True,
             method="L-BFGS-B",
             callback=callback,
-            options={"maxiter": MAXITER, "maxcor": args.maxcor, "ftol": ftol, "gtol": gtol},
+            options={
+                "maxiter": MAXITER,
+                "maxcor": args.maxcor,
+                "ftol": ftol,
+                "gtol": gtol,
+            },
         )
         res_nit = res.nit
         print(res.message)
@@ -1189,14 +1264,16 @@ if __name__ == "__main__":
         # ==============================================================================
         # Save optimized coil configurations
         curves_to_vtk(curves, OUT_DIR_ITER + "/curves_opt", close=True)
-        bs.save(OUT_DIR_ITER + "/biot_savart_opt.json")
+        bs_diag.save(OUT_DIR_ITER + "/biot_savart_opt.json")
 
         # Save optimized surface with magnetic field normal component data
-        bs.set_points(boozer_surface.surface.gamma().reshape((-1, 3)))
+        bs_diag.set_points(boozer_surface.surface.gamma().reshape((-1, 3)))
         unitn = boozer_surface.surface.unitnormal()
         pointData = {
-            "B_N/B": np.sum(bs.B().reshape(unitn.shape) * unitn, axis=2)[:, :, None]
-            / np.sqrt(np.sum(bs.B().reshape(unitn.shape) ** 2, axis=2))[:, :, None]
+            "B_N/B": np.sum(bs_diag.B().reshape(unitn.shape) * unitn, axis=2)[
+                :, :, None
+            ]
+            / np.sqrt(np.sum(bs_diag.B().reshape(unitn.shape) ** 2, axis=2))[:, :, None]
         }
 
         # Print final results
@@ -1204,7 +1281,7 @@ if __name__ == "__main__":
         boozer_surface.surface.save(OUT_DIR_ITER + "/surf_opt.json")
 
         final_volume = boozer_surface.surface.volume()
-        final_iota = Iotas(boozer_surface).J()
+        final_iota = build_iota_objective(boozer_surface, iota_cls).J()
         final_max_curvature = np.max(banana_curve.kappa())
         print(f"Volume: {final_volume}")
         print(f"Iota: {final_iota}")
@@ -1212,7 +1289,7 @@ if __name__ == "__main__":
 
         # Generate final diagnostic plots
         fieldError = normPlot(
-            boozer_surface.surface, bs, OUT_DIR_ITER + "/NormPlotOptimized"
+            boozer_surface.surface, bs_diag, OUT_DIR_ITER + "/NormPlotOptimized"
         )
         cross_section_plot(
             surf_coils,
@@ -1256,13 +1333,10 @@ if __name__ == "__main__":
         "banana_surf_radius": banana_surf_radius,
         "order": order,
         "backend": args.backend,
+        "optimizer_backend": optimizer_backend_record,
         "init_only": args.init_only,
         "max_iterations": MAXITER,
         "maxcor": args.maxcor,
-        "CS_WEIGHT": CS_WEIGHT,
-        "CS_DIST": CS_DIST,
-        "SURF_DIST_WEIGHT": SURF_DIST_WEIGHT,
-        "SS_DIST": SS_DIST,
         "iterations": res_nit,
         "TARGET_VOLUME": float(vol_target),
         "TARGET_IOTA": float(iota_target),

@@ -14,6 +14,7 @@ Validates:
 import types
 import sys
 import importlib.util
+from contextlib import contextmanager
 from pathlib import Path
 
 import numpy as np
@@ -63,6 +64,9 @@ _lc = _load_and_register(
 )
 _opt = _load_and_register("simsopt.geo.optimizer_jax", "geo/optimizer_jax.py")
 _bsj = _load_and_register("simsopt.geo.boozersurface_jax", "geo/boozersurface_jax.py")
+_soj = _load_and_register(
+    "simsopt.geo.surfaceobjectives_jax", "geo/surfaceobjectives_jax.py"
+)
 
 # Convenient aliases
 surface_gamma = _sf.surface_gamma
@@ -93,6 +97,7 @@ _boozer_penalty_objective = _bsj._boozer_penalty_objective
 _boozer_exact_coil_vjp = _bsj._boozer_exact_coil_vjp
 _boozer_ls_coil_vjp = _bsj._boozer_ls_coil_vjp
 BoozerSurfaceJAX = _bsj.BoozerSurfaceJAX
+_ensure_solved_jax = _soj._ensure_solved
 
 
 # ---------------------------------------------------------------------------
@@ -420,6 +425,41 @@ class TestOptimizerAdapter:
         result = jax_minimize(rosenbrock, x0, method="bfgs", tol=1e-8, maxiter=500)
         np.testing.assert_allclose(result.x, jnp.array([1.0, 1.0]), atol=1e-4)
 
+    def test_scipy_lbfgs_preserves_supported_options(self, monkeypatch):
+        """SciPy L-BFGS-B must receive its valid tuning knobs."""
+        captured = {}
+
+        def fake_scipy_minimize(fun, x0, jac, method, options):
+            del fun, jac
+            captured["method"] = method
+            captured["options"] = dict(options)
+            return types.SimpleNamespace(
+                x=np.asarray(x0),
+                jac=np.asarray(x0),
+                fun=0.0,
+                nit=0,
+                nfev=1,
+                njev=1,
+                success=True,
+                status=0,
+            )
+
+        monkeypatch.setattr(_opt, "scipy_minimize", fake_scipy_minimize)
+        jax_minimize(
+            lambda x: jnp.sum(x**2),
+            jnp.array([1.0, -2.0]),
+            method="lbfgs",
+            tol=1e-8,
+            maxiter=7,
+            options={"maxcor": 33, "ftol": 1e-12, "maxfun": 55, "maxls": 66},
+        )
+
+        assert captured["method"] == "L-BFGS-B"
+        assert captured["options"]["maxcor"] == 33
+        assert captured["options"]["ftol"] == 1e-12
+        assert captured["options"]["maxfun"] == 55
+        assert captured["options"]["maxls"] == 66
+
     def test_newton_polish_quadratic(self):
         """Newton polish converges in 1 iteration for a quadratic."""
         A = jnp.array([[2.0, 0.5], [0.5, 3.0]])
@@ -447,6 +487,417 @@ class TestOptimizerAdapter:
         x_exact = jnp.linalg.solve(A, b)
         np.testing.assert_allclose(result["x"], x_exact, atol=1e-12)
         assert result["success"]
+
+    def test_hybrid_skips_continuation_after_scipy_success(self, monkeypatch):
+        """Hybrid mode must return the SciPy prefix directly on convergence."""
+        prefix = types.SimpleNamespace(
+            x=jnp.array([1.0, -1.0]),
+            fun=0.0,
+            jac=jnp.array([0.0, 0.0]),
+            nit=2,
+            nfev=3,
+            njev=3,
+            nhev=0,
+            success=True,
+            status=0,
+            hess_inv=np.eye(2),
+        )
+
+        monkeypatch.setattr(_opt, "_scipy_minimize", lambda *args, **kwargs: prefix)
+        monkeypatch.setattr(
+            _opt,
+            "_minimize_bfgs_private",
+            lambda *args, **kwargs: (_ for _ in ()).throw(
+                AssertionError(
+                    "continuation must not run after successful SciPy prefix"
+                )
+            ),
+        )
+
+        result = jax_minimize(
+            lambda x: jnp.sum(x**2),
+            jnp.array([1.0, -1.0]),
+            method="bfgs-hybrid",
+            maxiter=8,
+        )
+
+        assert result is prefix
+
+    def test_hybrid_skips_nonfinite_prefix_state(self, monkeypatch):
+        """Hybrid mode must not continue from a non-finite SciPy prefix."""
+        prefix = types.SimpleNamespace(
+            x=jnp.array([1.0, -1.0]),
+            fun=np.nan,
+            jac=jnp.array([0.0, 0.0]),
+            nit=2,
+            nfev=3,
+            njev=3,
+            nhev=0,
+            success=False,
+            status=1,
+            hess_inv=np.eye(2),
+            message="prefix failed",
+        )
+
+        monkeypatch.setattr(_opt, "_scipy_minimize", lambda *args, **kwargs: prefix)
+        monkeypatch.setattr(
+            _opt,
+            "_minimize_bfgs_private",
+            lambda *args, **kwargs: (_ for _ in ()).throw(
+                AssertionError("continuation must not run after non-finite prefix")
+            ),
+        )
+
+        result = jax_minimize(
+            lambda x: jnp.sum(x**2),
+            jnp.array([1.0, -1.0]),
+            method="bfgs-hybrid",
+            maxiter=8,
+        )
+
+        assert result is prefix
+        assert result.success is False
+        assert "non-finite state" in result.message
+
+    def test_hybrid_prefix_cap_and_total_iteration_count(self, monkeypatch):
+        """Hybrid mode must cap the SciPy prefix and report total nit."""
+        captured = {}
+        prefix = types.SimpleNamespace(
+            x=jnp.array([0.25, -0.5], dtype=jnp.float64),
+            fun=0.3125,
+            jac=jnp.array([0.5, -1.0], dtype=jnp.float64),
+            nit=3,
+            nfev=4,
+            njev=4,
+            nhev=0,
+            success=False,
+            status=1,
+            hess_inv=np.eye(2),
+        )
+
+        def fake_scipy_minimize(fun, x0, *, method, tol, maxiter, options):
+            del fun, x0, method, tol, options
+            captured["prefix_maxiter"] = maxiter
+            return prefix
+
+        def fake_minimize_bfgs_private(
+            fun,
+            x0,
+            *,
+            maxiter,
+            gtol,
+            line_search_maxiter,
+            initial_state,
+        ):
+            del fun, x0, gtol, line_search_maxiter
+            captured["remaining_maxiter"] = maxiter
+            captured["initial_k"] = int(initial_state.k)
+            return _opt._BFGSResults(
+                converged=jnp.array(True),
+                failed=jnp.array(False),
+                k=jnp.array(2),
+                nfev=jnp.array(7),
+                ngev=jnp.array(7),
+                nhev=jnp.array(0),
+                x_k=jnp.array([0.0, 0.0], dtype=jnp.float64),
+                f_k=jnp.array(0.0, dtype=jnp.float64),
+                g_k=jnp.array([0.0, 0.0], dtype=jnp.float64),
+                H_k=jnp.eye(2, dtype=jnp.float64),
+                old_old_fval=jnp.array(0.1, dtype=jnp.float64),
+                status=jnp.array(0),
+                line_search_status=jnp.array(0),
+            )
+
+        monkeypatch.setattr(_opt, "_scipy_minimize", fake_scipy_minimize)
+        monkeypatch.setattr(_opt, "_minimize_bfgs_private", fake_minimize_bfgs_private)
+
+        result = jax_minimize(
+            lambda x: jnp.sum(x**2),
+            jnp.array([1.0, -1.0], dtype=jnp.float64),
+            method="bfgs-hybrid",
+            maxiter=7,
+        )
+
+        assert captured["prefix_maxiter"] == 3
+        assert captured["remaining_maxiter"] == 4
+        assert captured["initial_k"] == 0
+        assert result.nit == 5
+
+    def test_hybrid_missing_hess_inv_falls_back_to_identity(self, monkeypatch):
+        """Hybrid continuation must recover when SciPy exposes no dense hess_inv."""
+        prefix = types.SimpleNamespace(
+            x=jnp.array([0.25, -0.5], dtype=jnp.float64),
+            fun=0.3125,
+            jac=jnp.array([0.5, -1.0], dtype=jnp.float64),
+            nit=1,
+            nfev=2,
+            njev=2,
+            nhev=0,
+            success=False,
+            status=1,
+            hess_inv=None,
+        )
+
+        def fake_minimize_bfgs_private(
+            fun,
+            x0,
+            *,
+            maxiter,
+            gtol,
+            line_search_maxiter,
+            initial_state,
+        ):
+            del fun, x0, maxiter, gtol, line_search_maxiter
+            np.testing.assert_allclose(
+                np.asarray(initial_state.H_k),
+                np.eye(2),
+            )
+            return _opt._BFGSResults(
+                converged=jnp.array(True),
+                failed=jnp.array(False),
+                k=jnp.array(1),
+                nfev=jnp.array(3),
+                ngev=jnp.array(3),
+                nhev=jnp.array(0),
+                x_k=jnp.array([0.0, 0.0], dtype=jnp.float64),
+                f_k=jnp.array(0.0, dtype=jnp.float64),
+                g_k=jnp.array([0.0, 0.0], dtype=jnp.float64),
+                H_k=jnp.eye(2, dtype=jnp.float64),
+                old_old_fval=jnp.array(0.1, dtype=jnp.float64),
+                status=jnp.array(0),
+                line_search_status=jnp.array(0),
+            )
+
+        monkeypatch.setattr(_opt, "_scipy_minimize", lambda *args, **kwargs: prefix)
+        monkeypatch.setattr(_opt, "_minimize_bfgs_private", fake_minimize_bfgs_private)
+
+        result = jax_minimize(
+            lambda x: jnp.sum(x**2),
+            jnp.array([1.0, -1.0], dtype=jnp.float64),
+            method="bfgs-hybrid",
+            maxiter=5,
+        )
+
+        assert result.success is True
+
+    def test_hybrid_degenerate_hess_inv_resets_to_identity(self, monkeypatch):
+        """Hybrid continuation must reject non-descent warm-start Hessians."""
+        prefix = types.SimpleNamespace(
+            x=jnp.array([0.25, -0.5], dtype=jnp.float64),
+            fun=0.3125,
+            jac=jnp.array([0.5, -1.0], dtype=jnp.float64),
+            nit=1,
+            nfev=2,
+            njev=2,
+            nhev=0,
+            success=False,
+            status=1,
+            hess_inv=-np.eye(2),
+        )
+
+        def fake_minimize_bfgs_private(
+            fun,
+            x0,
+            *,
+            maxiter,
+            gtol,
+            line_search_maxiter,
+            initial_state,
+        ):
+            del fun, x0, maxiter, gtol, line_search_maxiter
+            np.testing.assert_allclose(np.asarray(initial_state.H_k), np.eye(2))
+            return _opt._BFGSResults(
+                converged=jnp.array(True),
+                failed=jnp.array(False),
+                k=jnp.array(1),
+                nfev=jnp.array(3),
+                ngev=jnp.array(3),
+                nhev=jnp.array(0),
+                x_k=jnp.array([0.0, 0.0], dtype=jnp.float64),
+                f_k=jnp.array(0.0, dtype=jnp.float64),
+                g_k=jnp.array([0.0, 0.0], dtype=jnp.float64),
+                H_k=jnp.eye(2, dtype=jnp.float64),
+                old_old_fval=jnp.array(0.1, dtype=jnp.float64),
+                status=jnp.array(0),
+                line_search_status=jnp.array(0),
+            )
+
+        monkeypatch.setattr(_opt, "_scipy_minimize", lambda *args, **kwargs: prefix)
+        monkeypatch.setattr(_opt, "_minimize_bfgs_private", fake_minimize_bfgs_private)
+
+        result = jax_minimize(
+            lambda x: jnp.sum(x**2),
+            jnp.array([1.0, -1.0], dtype=jnp.float64),
+            method="bfgs-hybrid",
+            maxiter=5,
+        )
+
+        assert result.success is True
+
+    def test_line_search_zoom2_reversed_bracket_does_not_fail(self):
+        """The zoom2 branch must tolerate reversed brackets without spurious failure."""
+
+        def quad(x):
+            return 0.5 * jnp.dot(x, x)
+
+        result = _opt._line_search(
+            quad,
+            jnp.array([1.0], dtype=jnp.float64),
+            jnp.array([-1.95], dtype=jnp.float64),
+            old_fval=jnp.array(0.5, dtype=jnp.float64),
+            gfk=jnp.array([1.0], dtype=jnp.float64),
+            maxiter=20,
+        )
+
+        assert bool(result.failed) is False
+        assert int(result.status) == 0
+        assert float(result.f_k) < 1e-20
+
+    @pytest.mark.skipif(
+        jax.__version__ != "0.6.2",
+        reason="Private on-device optimizer behavior is pinned to the JAX 0.6.2 runtime.",
+    )
+    def test_bfgs_ondevice_rejects_nonvector_x0(self):
+        """bfgs-ondevice must reject non-flat decision vectors."""
+        with pytest.raises(ValueError, match="flat 1-D decision vector"):
+            jax_minimize(
+                lambda x: jnp.sum(x**2),
+                jnp.zeros((2, 2), dtype=jnp.float64),
+                method="bfgs-ondevice",
+                maxiter=3,
+            )
+
+    @pytest.mark.skipif(
+        jax.__version__ != "0.6.2",
+        reason="Private on-device optimizer behavior is pinned to the JAX 0.6.2 runtime.",
+    )
+    def test_bfgs_ondevice_respects_zero_iteration_budget(self):
+        """bfgs-ondevice must not take a step when maxiter=0."""
+
+        def quad(x):
+            return 0.5 * jnp.dot(x, x)
+
+        x0 = jnp.array([1.0, -2.0], dtype=jnp.float64)
+        result = jax_minimize(quad, x0, method="bfgs-ondevice", maxiter=0)
+
+        np.testing.assert_allclose(np.asarray(result.x), np.asarray(x0))
+        assert result.nit == 0
+        assert result.status == 1
+        assert result.success is False
+
+    @pytest.mark.skipif(
+        jax.__version__ != "0.6.2",
+        reason="Private on-device optimizer behavior is pinned to the JAX 0.6.2 runtime.",
+    )
+    def test_bfgs_ondevice_zero_gradient_converges_immediately(self):
+        """bfgs-ondevice must report success at a stationary initial point."""
+
+        def quad(x):
+            return 0.5 * jnp.dot(x, x)
+
+        x0 = jnp.zeros(2, dtype=jnp.float64)
+        result = jax_minimize(quad, x0, method="bfgs-ondevice", maxiter=5)
+
+        np.testing.assert_allclose(np.asarray(result.x), np.asarray(x0))
+        assert result.nit == 0
+        assert result.status == 0
+        assert result.success is True
+
+    @pytest.mark.skipif(
+        jax.__version__ != "0.6.2",
+        reason="Private on-device optimizer behavior is pinned to the JAX 0.6.2 runtime.",
+    )
+    def test_bfgs_ondevice_maxiter_one_edge_case(self):
+        """bfgs-ondevice maxiter=1 must permit exactly one capped step."""
+
+        def quad(x):
+            return 0.5 * jnp.dot(x, x)
+
+        x0 = jnp.array([1.0, -2.0], dtype=jnp.float64)
+        result = jax_minimize(quad, x0, method="bfgs-ondevice", maxiter=1)
+
+        assert float(result.fun) < float(quad(x0))
+        assert result.nit == 1
+        assert result.status == 1
+        assert result.success is False
+
+    @pytest.mark.skipif(
+        jax.__version__ != "0.6.2",
+        reason="Private on-device optimizer behavior is pinned to the JAX 0.6.2 runtime.",
+    )
+    def test_bfgs_ondevice_nan_objective_terminates(self):
+        """A NaN objective encountered mid-loop must fail without extra iterations."""
+
+        def nan_after_first_step(x):
+            return jax.lax.cond(
+                x[0] < 0.95,
+                lambda y: jnp.asarray(jnp.nan, dtype=y.dtype),
+                lambda y: 0.5 * jnp.dot(y, y),
+                x,
+            )
+
+        x0 = jnp.array([1.0], dtype=jnp.float64)
+        result = jax_minimize(
+            nan_after_first_step,
+            x0,
+            method="bfgs-ondevice",
+            maxiter=5,
+        )
+
+        assert result.success is False
+        assert result.nit == 1
+        assert np.isnan(float(result.fun))
+        assert "non-finite objective or gradient" in result.message
+
+    @pytest.mark.skipif(
+        jax.__version__ != "0.6.2",
+        reason="Private on-device optimizer behavior is pinned to the JAX 0.6.2 runtime.",
+    )
+    def test_bfgs_ondevice_inf_objective_preserves_last_finite_iterate(self):
+        """An infinite objective must abort from the last finite iterate."""
+
+        def inf_after_first_step(x):
+            return jax.lax.cond(
+                x[0] < 0.95,
+                lambda y: jnp.asarray(jnp.inf, dtype=y.dtype),
+                lambda y: 0.5 * jnp.dot(y, y),
+                x,
+            )
+
+        x0 = jnp.array([1.0], dtype=jnp.float64)
+        result = jax_minimize(
+            inf_after_first_step,
+            x0,
+            method="bfgs-ondevice",
+            maxiter=5,
+        )
+
+        assert result.success is False
+        assert result.nit == 1
+        assert float(result.fun) == pytest.approx(float(inf_after_first_step(x0)))
+        assert np.all(np.isfinite(np.asarray(result.x)))
+        assert np.all(np.isfinite(np.asarray(result.jac)))
+
+    @pytest.mark.skipif(
+        jax.__version__ != "0.6.2",
+        reason="Private on-device optimizer behavior is pinned to the JAX 0.6.2 runtime.",
+    )
+    def test_bfgs_ondevice_is_deterministic(self):
+        """Repeated on-device BFGS runs must return identical results."""
+
+        def quad(x):
+            return 0.5 * jnp.dot(x, x)
+
+        x0 = jnp.array([1.0, -2.0], dtype=jnp.float64)
+        first = jax_minimize(quad, x0, method="bfgs-ondevice", maxiter=5)
+        second = jax_minimize(quad, x0, method="bfgs-ondevice", maxiter=5)
+
+        np.testing.assert_allclose(np.asarray(first.x), np.asarray(second.x))
+        np.testing.assert_allclose(np.asarray(first.jac), np.asarray(second.jac))
+        assert float(first.fun) == pytest.approx(float(second.fun))
+        assert first.nit == second.nit
+        assert first.status == second.status
+        assert first.success == second.success
 
 
 class TestBFGSBoozer:
@@ -771,6 +1222,90 @@ class TestLBFGSMethod:
         result = jax_minimize(obj, x0, method="lbfgs", tol=1e-10, maxiter=200)
         assert float(result.fun) < val_init
 
+    @pytest.mark.skipif(
+        jax.__version__ != "0.6.2",
+        reason="lbfgs-ondevice budget behavior is pinned to the JAX 0.6.2 runtime.",
+    )
+    def test_lbfgs_ondevice_respects_zero_iteration_budget(self):
+        """lbfgs-ondevice must not take a step when maxiter=0."""
+
+        def quad(x):
+            return 0.5 * jnp.dot(x, x)
+
+        x0 = jnp.array([1.0, -2.0], dtype=jnp.float64)
+        result = jax_minimize(quad, x0, method="lbfgs-ondevice", maxiter=0)
+
+        np.testing.assert_allclose(np.asarray(result.x), np.asarray(x0))
+        assert result.nit == 0
+        assert result.status == 1
+        assert result.success is False
+
+    @pytest.mark.skipif(
+        jax.__version__ != "0.6.2",
+        reason="lbfgs-ondevice behavior is pinned to the JAX 0.6.2 runtime.",
+    )
+    def test_lbfgs_ondevice_reduces_objective_without_monkeypatch(self):
+        """lbfgs-ondevice must reduce the objective through the real adapter."""
+
+        def quad(x):
+            return 0.5 * jnp.dot(x, x)
+
+        x0 = jnp.array([1.0, -2.0], dtype=jnp.float64)
+        result = jax_minimize(quad, x0, method="lbfgs-ondevice", maxiter=5)
+
+        assert result.success is True
+        assert result.nit > 0
+        assert float(result.fun) < float(quad(x0))
+        assert np.linalg.norm(np.asarray(result.x)) < np.linalg.norm(np.asarray(x0))
+
+    @pytest.mark.skipif(
+        jax.__version__ != "0.6.2",
+        reason="lbfgs-ondevice behavior is pinned to the JAX 0.6.2 runtime.",
+    )
+    def test_lbfgs_ondevice_repeated_calls_are_stable(self):
+        """Repeated lbfgs-ondevice runs must not accumulate divergent state."""
+
+        def quad(x):
+            return 0.5 * jnp.dot(x, x)
+
+        x0 = jnp.array([1.0, -2.0], dtype=jnp.float64)
+        baseline = jax_minimize(quad, x0, method="lbfgs-ondevice", maxiter=5)
+
+        for _ in range(4):
+            current = jax_minimize(quad, x0, method="lbfgs-ondevice", maxiter=5)
+            np.testing.assert_allclose(np.asarray(current.x), np.asarray(baseline.x))
+            np.testing.assert_allclose(
+                np.asarray(current.jac),
+                np.asarray(baseline.jac),
+            )
+            assert float(current.fun) == pytest.approx(float(baseline.fun))
+            assert current.nit == baseline.nit
+            assert current.status == baseline.status
+            assert current.success == baseline.success
+
+    @pytest.mark.skipif(
+        jax.__version__ != "0.6.2",
+        reason="lbfgs-ondevice behavior is pinned to the JAX 0.6.2 runtime.",
+    )
+    def test_lbfgs_ondevice_ftol_zero_allows_tiny_objective_progress(self):
+        """ftol=0 must still allow progress when the objective is ~1e-15."""
+
+        def tiny_wave(x):
+            return 1e-15 * (jnp.sin(1e6 * x[0]) + 2.0)
+
+        x0 = jnp.array([1e-6], dtype=jnp.float64)
+        result = jax_minimize(
+            tiny_wave,
+            x0,
+            method="lbfgs-ondevice",
+            tol=1e-12,
+            maxiter=5,
+        )
+
+        assert result.success is True
+        assert result.nit > 0
+        assert float(result.fun) < float(tiny_wave(x0))
+
 
 class TestSurfaceArea:
     """Test the JAX area computation."""
@@ -974,6 +1509,24 @@ class _MockSurface:
         return np.ones((nphi, ntheta), dtype=bool)
 
 
+_fake_exact_surface_module = types.ModuleType("simsopt.geo.surfacexyztensorfourier")
+_fake_exact_surface_module.SurfaceXYZTensorFourier = _MockSurface
+
+
+@contextmanager
+def _patched_exact_surface_module():
+    module_name = "simsopt.geo.surfacexyztensorfourier"
+    original_module = sys.modules.get(module_name)
+    sys.modules[module_name] = _fake_exact_surface_module
+    try:
+        yield
+    finally:
+        if original_module is None:
+            sys.modules.pop(module_name, None)
+        else:
+            sys.modules[module_name] = original_module
+
+
 class _MockVolumeLabel:
     """Minimal mock for Volume label."""
 
@@ -1037,16 +1590,29 @@ def _make_mock_boozer_surface_mixed_quad(nphi=8, ntheta=8, mpol=1, ntor=1, nfp=1
     return BoozerSurfaceJAX(bs, surf, label, target, constraint_weight=1.0)
 
 
-def _make_mock_boozer_surface(nphi=8, ntheta=8, mpol=1, ntor=1, nfp=1):
+def _make_mock_boozer_surface(
+    nphi=8,
+    ntheta=8,
+    mpol=1,
+    ntor=1,
+    nfp=1,
+    *,
+    stellsym=False,
+):
     """Build a BoozerSurfaceJAX from mock objects (no simsoptpp needed)."""
     R0, r = 1.0, 0.1
     xc, yc, zc = _make_simple_torus_coeffs(R0, r, mpol, ntor, nfp)
     qphi = np.linspace(0, 1.0 / nfp, nphi, endpoint=False)
     qtheta = np.linspace(0, 1.0, ntheta, endpoint=False)
-    sdofs = np.concatenate([xc.ravel(), yc.ravel(), zc.ravel()])
+    full_sdofs = np.concatenate([xc.ravel(), yc.ravel(), zc.ravel()])
+    if stellsym:
+        scatter = np.asarray(stellsym_scatter_indices(mpol, ntor), dtype=np.int32)
+        sdofs = full_sdofs[scatter]
+    else:
+        sdofs = full_sdofs
 
     bs = _MockBiotSavart(_make_mock_coils())
-    surf = _MockSurface(sdofs, mpol, ntor, nfp, False, qphi, qtheta)
+    surf = _MockSurface(sdofs, mpol, ntor, nfp, stellsym, qphi, qtheta)
     label = _MockVolumeLabel()
     target = 2.0 * np.pi**2 * R0 * r**2
 
@@ -1062,6 +1628,52 @@ class TestBoozerSurfaceJAXClass:
         assert booz.boozer_type == "ls"
         assert booz.label_type == "volume"
         assert booz.need_to_run_code is True
+
+    def test_stale_bfgs_method_rejected(self):
+        """The removed bfgs_method option must fail fast."""
+        bs = _MockBiotSavart(_make_mock_coils())
+        surf = _MockSurface(
+            np.zeros(27),
+            1,
+            1,
+            1,
+            False,
+            np.linspace(0.0, 1.0, 3, endpoint=False),
+            np.linspace(0.0, 1.0, 3, endpoint=False),
+        )
+        label = _MockVolumeLabel()
+        with pytest.raises(ValueError, match="bfgs_method.*removed"):
+            BoozerSurfaceJAX(
+                bs,
+                surf,
+                label,
+                1.0,
+                constraint_weight=1.0,
+                options={"bfgs_method": "bfgs"},
+            )
+
+    def test_unknown_option_rejected(self):
+        """Unknown constructor options must fail fast instead of being ignored."""
+        bs = _MockBiotSavart(_make_mock_coils())
+        surf = _MockSurface(
+            np.zeros(27),
+            1,
+            1,
+            1,
+            False,
+            np.linspace(0.0, 1.0, 3, endpoint=False),
+            np.linspace(0.0, 1.0, 3, endpoint=False),
+        )
+        label = _MockVolumeLabel()
+        with pytest.raises(ValueError, match="Unknown BoozerSurfaceJAX option"):
+            BoozerSurfaceJAX(
+                bs,
+                surf,
+                label,
+                1.0,
+                constraint_weight=1.0,
+                options={"optimizer_backend_typo": "ondevice"},
+            )
 
     def test_recompute_bell(self):
         """recompute_bell sets the dirty flag."""
@@ -1089,14 +1701,157 @@ class TestBoozerSurfaceJAXClass:
         assert "hessian" in res
         assert "PLU" in res
         assert "vjp" in res
+        assert isinstance(res["PLU"], tuple)
+        assert len(res["PLU"]) == 3
+        assert all(piece is not None for piece in res["PLU"])
+        assert callable(res["vjp"])
         assert "iota" in res
         assert booz.need_to_run_code is False
+
+    def test_run_code_ls_converges_with_stellsym_surface(self):
+        """LS solve must also converge when the surface uses stellsym DOFs."""
+        booz = _make_mock_boozer_surface(stellsym=True)
+        res = booz.run_code(iota=0.3, G=0.05)
+
+        assert res is not None
+        assert res["type"] == "ls"
+        assert res["success"] is True
+        assert callable(res["vjp"])
 
     def test_run_code_idempotent(self):
         """Second run_code() call returns None (not dirty)."""
         booz = _make_mock_boozer_surface()
         booz.run_code(iota=0.3, G=0.05)
         assert booz.run_code(iota=0.3, G=0.05) is None
+
+    def test_run_code_invalid_newton_iterate_aborts_adjoint_state(self, monkeypatch):
+        """Finite iterates with invalid Newton derivatives must not build PLU/VJP."""
+        booz = _make_mock_boozer_surface()
+
+        def fake_newton_polish(_objective_fn, x0, *, maxiter, tol, stab):
+            del maxiter, tol, stab
+            return {
+                "x": x0,
+                "fun": jnp.asarray(jnp.nan),
+                "grad": jnp.full_like(x0, jnp.nan),
+                "hessian": jnp.full(
+                    (x0.shape[0], x0.shape[0]), jnp.nan, dtype=x0.dtype
+                ),
+                "nit": 0,
+                "success": False,
+            }
+
+        monkeypatch.setattr(_bsj, "newton_polish", fake_newton_polish)
+        res = booz.run_code(iota=0.3, G=0.05)
+
+        assert res is not None
+        assert res["success"] is False
+        assert res["PLU"] is None
+        assert res["vjp"] is None
+        assert booz.need_to_run_code is False
+        assert np.all(np.isfinite(booz.surface.get_dofs()))
+
+    def test_run_code_ondevice_limited_memory_routes_to_lbfgs(self, monkeypatch):
+        """limited_memory=True must route LS solves through lbfgs-ondevice."""
+        booz = _make_mock_boozer_surface()
+        booz.options["optimizer_backend"] = "ondevice"
+        booz.options["limited_memory"] = True
+
+        captured = {}
+
+        def fake_jax_minimize(fun, x0, *, method, tol, maxiter, options):
+            del fun, tol, maxiter, options
+            captured["method"] = method
+            return types.SimpleNamespace(
+                x=jnp.asarray(x0),
+                fun=0.0,
+                jac=jnp.zeros_like(x0),
+                nit=0,
+                nfev=1,
+                njev=1,
+                success=True,
+                status=0,
+            )
+
+        def fake_newton_polish(_objective_fn, x0, *, maxiter, tol, stab):
+            del maxiter, tol, stab
+            n = x0.shape[0]
+            return {
+                "x": x0,
+                "fun": jnp.asarray(0.0),
+                "grad": jnp.zeros_like(x0),
+                "hessian": jnp.eye(n, dtype=x0.dtype),
+                "nit": 0,
+                "success": True,
+            }
+
+        monkeypatch.setattr(_bsj, "jax_minimize", fake_jax_minimize)
+        monkeypatch.setattr(_bsj, "newton_polish", fake_newton_polish)
+
+        res = booz.run_code(iota=0.3, G=0.05)
+
+        assert captured["method"] == "lbfgs-ondevice"
+        assert res["success"] is True
+
+    @pytest.mark.skipif(
+        jax.__version__ != "0.6.2",
+        reason="On-device limited-memory solve is pinned to the JAX 0.6.2 runtime.",
+    )
+    def test_run_code_ondevice_limited_memory_converges_without_monkeypatch(self):
+        """limited_memory=True must run a full on-device L-BFGS solve."""
+        booz = _make_mock_boozer_surface()
+        booz.options["optimizer_backend"] = "ondevice"
+        booz.options["limited_memory"] = True
+
+        res = booz.run_code(iota=0.3, G=0.05)
+
+        assert res is not None
+        assert res["type"] == "ls"
+        assert res["success"] is True
+        assert np.isfinite(res["fun"])
+        assert res["PLU"] is not None
+        assert callable(res["vjp"])
+
+    def test_run_code_passes_newton_stab(self, monkeypatch):
+        """run_code() must forward newton_stab into the Newton polish call."""
+        booz = _make_mock_boozer_surface()
+        booz.options["newton_stab"] = 0.125
+
+        captured = {}
+
+        def fake_jax_minimize(fun, x0, *, method, tol, maxiter, options):
+            del fun, method, tol, maxiter, options
+            return types.SimpleNamespace(
+                x=jnp.asarray(x0),
+                fun=0.0,
+                jac=jnp.zeros_like(x0),
+                nit=0,
+                nfev=1,
+                njev=1,
+                success=True,
+                status=0,
+            )
+
+        def fake_newton_polish(_objective_fn, x0, *, maxiter, tol, stab):
+            del maxiter, tol
+            captured["stab"] = stab
+            n = x0.shape[0]
+            return {
+                "x": x0,
+                "fun": jnp.asarray(0.0),
+                "grad": jnp.zeros_like(x0),
+                "hessian": jnp.eye(n, dtype=x0.dtype),
+                "nit": 0,
+                "success": True,
+            }
+
+        monkeypatch.setattr(_bsj, "jax_minimize", fake_jax_minimize)
+        monkeypatch.setattr(_bsj, "newton_polish", fake_newton_polish)
+
+        res = booz.run_code(iota=0.3, G=0.05)
+
+        assert res["success"] is True
+        assert captured["stab"] == pytest.approx(0.125)
 
 
 # ---------------------------------------------------------------------------
@@ -1129,6 +1884,11 @@ def _make_mock_boozer_surface_exact(mpol=1, ntor=1, nfp=1):
     return BoozerSurfaceJAX(bs, surf, label, target, constraint_weight=None)
 
 
+def _run_mock_exact_boozer(booz, iota=0.3, G=0.05):
+    with _patched_exact_surface_module():
+        return booz.run_code(iota=iota, G=G)
+
+
 class TestBoozerSurfaceJAXExactPath:
     """Test the exact (Newton) path of BoozerSurfaceJAX.
 
@@ -1149,7 +1909,7 @@ class TestBoozerSurfaceJAXExactPath:
     def test_run_code_exact_converges(self):
         """run_code() exact path runs and returns a result dict."""
         booz = _make_mock_boozer_surface_exact()
-        res = booz.run_code(iota=0.3, G=0.05)
+        res = _run_mock_exact_boozer(booz)
         assert res is not None
         assert res["type"] == "exact"
         assert booz.need_to_run_code is False
@@ -1157,9 +1917,10 @@ class TestBoozerSurfaceJAXExactPath:
     def test_exact_result_dict_keys(self):
         """Exact-path result dict has all CPU-contract keys."""
         booz = _make_mock_boozer_surface_exact()
-        res = booz.run_code(iota=0.3, G=0.05)
+        res = _run_mock_exact_boozer(booz)
         expected_keys = {
             "residual",
+            "fun",
             "jacobian",
             "iter",
             "success",
@@ -1172,11 +1933,74 @@ class TestBoozerSurfaceJAXExactPath:
             "vjp",
         }
         assert expected_keys <= set(res.keys())
+        assert isinstance(res["PLU"], tuple)
+        assert len(res["PLU"]) == 3
+        assert all(piece is not None for piece in res["PLU"])
+        assert res["vjp"] is _boozer_exact_coil_vjp
+        assert callable(res["vjp"])
+
+    def test_exact_fun_tracks_exact_system_residual(self):
+        """Exact-path fun must reflect the actual Newton system residual."""
+        booz = _make_mock_boozer_surface_exact()
+        res = _run_mock_exact_boozer(booz)
+        mask_indices = booz._compute_stellsym_mask_indices()
+        res_fn = booz._make_exact_residual(mask_indices)
+        x_final = booz._pack_decision_vector(res["iota"], res["G"])
+        expected_fun = float(0.5 * jnp.mean(jnp.square(res_fn(x_final))))
+        assert res["fun"] == pytest.approx(expected_fun)
+
+    def test_exact_accepts_and_ignores_optimizer_backend_option(self):
+        """Exact solves accept optimizer_backend but ignore it."""
+        bs = _MockBiotSavart(_make_mock_coils())
+        surf = _MockSurface(
+            np.zeros(27),
+            1,
+            1,
+            1,
+            False,
+            np.linspace(0.0, 1.0, 3, endpoint=False),
+            np.linspace(0.0, 1.0, 3, endpoint=False),
+        )
+        label = _MockVolumeLabel()
+        booz = BoozerSurfaceJAX(
+            bs,
+            surf,
+            label,
+            1.0,
+            constraint_weight=None,
+            options={"optimizer_backend": "ondevice"},
+        )
+
+        assert booz.boozer_type == "exact"
+        assert "optimizer_backend" not in booz.options
+
+    def test_exact_rejects_invalid_optimizer_backend_value(self):
+        """Exact solves still validate optimizer_backend values."""
+        bs = _MockBiotSavart(_make_mock_coils())
+        surf = _MockSurface(
+            np.zeros(27),
+            1,
+            1,
+            1,
+            False,
+            np.linspace(0.0, 1.0, 3, endpoint=False),
+            np.linspace(0.0, 1.0, 3, endpoint=False),
+        )
+        label = _MockVolumeLabel()
+        with pytest.raises(ValueError, match="optimizer_backend must be one of"):
+            BoozerSurfaceJAX(
+                bs,
+                surf,
+                label,
+                1.0,
+                constraint_weight=None,
+                options={"optimizer_backend": "bogus"},
+            )
 
     def test_exact_mask_is_boolean(self):
         """CPU contract: mask is a boolean array, not integer indices."""
         booz = _make_mock_boozer_surface_exact()
-        res = booz.run_code(iota=0.3, G=0.05)
+        res = _run_mock_exact_boozer(booz)
         mask = res["mask"]
         assert mask.dtype == np.bool_, f"mask dtype should be bool, got {mask.dtype}"
         nphi = len(booz.quadpoints_phi)
@@ -1186,7 +2010,7 @@ class TestBoozerSurfaceJAXExactPath:
     def test_exact_residual_is_raw_unmasked(self):
         """CPU contract: residual is the full unmasked Boozer residual."""
         booz = _make_mock_boozer_surface_exact()
-        res = booz.run_code(iota=0.3, G=0.05)
+        res = _run_mock_exact_boozer(booz)
         nphi = len(booz.quadpoints_phi)
         ntheta = len(booz.quadpoints_theta)
         assert res["residual"].shape == (3 * nphi * ntheta,), (
@@ -1197,7 +2021,7 @@ class TestBoozerSurfaceJAXExactPath:
     def test_exact_mask_selects_from_residual(self):
         """mask can index into residual (CPU pattern: r[mask])."""
         booz = _make_mock_boozer_surface_exact()
-        res = booz.run_code(iota=0.3, G=0.05)
+        res = _run_mock_exact_boozer(booz)
         masked_r = res["residual"][res["mask"]]
         assert masked_r.ndim == 1
         assert len(masked_r) <= len(res["residual"])
@@ -1206,8 +2030,32 @@ class TestBoozerSurfaceJAXExactPath:
     def test_exact_idempotent(self):
         """Second run_code() returns None when not dirty."""
         booz = _make_mock_boozer_surface_exact()
-        booz.run_code(iota=0.3, G=0.05)
+        _run_mock_exact_boozer(booz)
         assert booz.run_code(iota=0.3, G=0.05) is None
+
+    def test_exact_invalid_newton_iterate_aborts_adjoint_state(self, monkeypatch):
+        """Exact-path failures must not expose PLU/VJP placeholders."""
+        booz = _make_mock_boozer_surface_exact()
+        dofs_before = booz.surface.get_dofs()
+
+        def fake_newton_exact(_residual_fn, x0, *, maxiter, tol):
+            del maxiter, tol
+            n = x0.shape[0]
+            return {
+                "x": jnp.full_like(x0, jnp.nan),
+                "jacobian": jnp.full((n, n), jnp.nan, dtype=x0.dtype),
+                "nit": 0,
+                "success": False,
+            }
+
+        monkeypatch.setattr(_bsj, "newton_exact", fake_newton_exact)
+        res = _run_mock_exact_boozer(booz)
+
+        assert res["success"] is False
+        assert res["PLU"] is None
+        assert res["vjp"] is None
+        assert res["mask"] is None
+        np.testing.assert_allclose(booz.surface.get_dofs(), dofs_before)
 
 
 # ---------------------------------------------------------------------------
@@ -1362,7 +2210,44 @@ class TestEnsureSolvedGuard:
         assert "booz_surf.res is None" in source, (
             "_ensure_solved must guard against res=None"
         )
+        assert 'not booz_surf.res.get("success", False)' in source
+        assert 'booz_surf.res.get("vjp") is None' in source
         assert "RuntimeError" in source
+
+    def test_dirty_resolve_preserves_nondefault_backend_contract(self, monkeypatch):
+        """Dirty on-device surfaces must re-solve from cached iota/G before use."""
+        booz = _make_mock_boozer_surface()
+        booz.options["optimizer_backend"] = "ondevice"
+        booz.res = {
+            "iota": 0.3,
+            "G": 0.05,
+            "success": True,
+            "PLU": (np.eye(1), np.eye(1), np.eye(1)),
+            "vjp": lambda *_args, **_kwargs: None,
+        }
+        booz.need_to_run_code = True
+
+        captured = {}
+
+        def fake_run_code(iota, G=None):
+            captured["iota"] = iota
+            captured["G"] = G
+            booz.res = {
+                "iota": iota,
+                "G": G,
+                "success": True,
+                "PLU": (np.eye(1), np.eye(1), np.eye(1)),
+                "vjp": lambda *_args, **_kwargs: None,
+            }
+            booz.need_to_run_code = False
+            return booz.res
+
+        monkeypatch.setattr(booz, "run_code", fake_run_code)
+
+        _ensure_solved_jax(booz)
+
+        assert captured == {"iota": 0.3, "G": 0.05}
+        assert booz.need_to_run_code is False
 
 
 # ---------------------------------------------------------------------------

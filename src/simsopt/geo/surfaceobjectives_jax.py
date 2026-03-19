@@ -85,6 +85,16 @@ def _ensure_solved(booz_surf):
                 "accessing objective values."
             )
         booz_surf.run_code(booz_surf.res["iota"], G=booz_surf.res["G"])
+    if (
+        booz_surf.res is None
+        or not booz_surf.res.get("success", False)
+        or booz_surf.res.get("PLU") is None
+        or booz_surf.res.get("vjp") is None
+    ):
+        raise RuntimeError(
+            "BoozerSurfaceJAX has not been solved yet or the last solve failed "
+            "to produce valid adjoint state."
+        )
 
 
 def _qs_ratio_pure(

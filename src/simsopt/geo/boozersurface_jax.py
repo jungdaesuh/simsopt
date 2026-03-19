@@ -324,7 +324,7 @@ _DEFAULT_OPTIONS_LS = {
     "verbose": True,
     "bfgs_tol": 1e-10,
     "bfgs_maxiter": 1500,
-    "bfgs_method": "bfgs",
+    "optimizer_backend": "scipy",
     "limited_memory": False,
     "newton_tol": 1e-11,
     "newton_maxiter": 40,
@@ -338,6 +338,41 @@ _DEFAULT_OPTIONS_EXACT = {
     "newton_maxiter": 40,
     "weight_inv_modB": False,
 }
+
+_VALID_OPTIMIZER_BACKENDS = frozenset({"scipy", "hybrid", "ondevice"})
+_ALLOWED_OPTIONS_LS = frozenset(_DEFAULT_OPTIONS_LS)
+_ALLOWED_OPTIONS_EXACT = frozenset(_DEFAULT_OPTIONS_EXACT) | {"optimizer_backend"}
+
+
+def _normalize_solver_options(raw_options, boozer_type):
+    """Validate and normalize constructor options for a Boozer solve mode."""
+    if "bfgs_method" in raw_options:
+        raise ValueError(
+            "BoozerSurfaceJAX option 'bfgs_method' was removed. "
+            "Use 'optimizer_backend' with one of: scipy, hybrid, ondevice."
+        )
+
+    allowed_option_keys = (
+        _ALLOWED_OPTIONS_LS if boozer_type == "ls" else _ALLOWED_OPTIONS_EXACT
+    )
+    unknown_option_keys = sorted(set(raw_options) - allowed_option_keys)
+    if unknown_option_keys:
+        unknown_keys = ", ".join(repr(key) for key in unknown_option_keys)
+        raise ValueError(f"Unknown BoozerSurfaceJAX option(s): {unknown_keys}.")
+
+    optimizer_backend = raw_options.get("optimizer_backend")
+    if (
+        optimizer_backend is not None
+        and optimizer_backend not in _VALID_OPTIMIZER_BACKENDS
+    ):
+        raise ValueError(
+            "optimizer_backend must be one of: scipy, hybrid, ondevice."
+        )
+
+    normalized_options = dict(raw_options)
+    if boozer_type == "exact":
+        normalized_options.pop("optimizer_backend", None)
+    return normalized_options
 
 
 class BoozerSurfaceJAX(Optimizable):
@@ -396,10 +431,19 @@ class BoozerSurfaceJAX(Optimizable):
                 "Supported: Volume, Area, ToroidalFlux."
             )
 
+        raw_options = _normalize_solver_options(
+            dict(options or {}),
+            self.boozer_type,
+        )
         defaults = (
             _DEFAULT_OPTIONS_LS if self.boozer_type == "ls" else _DEFAULT_OPTIONS_EXACT
         )
-        self.options = {**defaults, **(options or {})}
+        self.options = {**defaults, **raw_options}
+        if self.boozer_type == "ls":
+            if self.options["optimizer_backend"] not in _VALID_OPTIMIZER_BACKENDS:
+                raise ValueError(
+                    "optimizer_backend must be one of: scipy, hybrid, ondevice."
+                )
 
         # --- Extract static data from CPU objects (one-time) ---
         s = surface
@@ -577,8 +621,39 @@ class BoozerSurfaceJAX(Optimizable):
             optimize_G, weight_inv_modB, constraint_weight
         )
 
-        method = "lbfgs" if limited_memory else "bfgs"
-        result = jax_minimize(obj_fn, x0, method=method, tol=tol, maxiter=maxiter)
+        optimizer_backend = self.options["optimizer_backend"]
+        if optimizer_backend == "scipy":
+            method = "lbfgs" if limited_memory else "bfgs"
+        elif optimizer_backend == "hybrid":
+            if limited_memory:
+                raise ValueError(
+                    "optimizer_backend='hybrid' does not support limited_memory=True."
+                )
+            method = "bfgs-hybrid"
+        else:
+            method = "lbfgs-ondevice" if limited_memory else "bfgs-ondevice"
+
+        optimizer_options = {}
+        for key in (
+            "hybrid_scipy_maxiter",
+            "line_search_maxiter",
+            "maxcor",
+            "ftol",
+            "maxfun",
+            "maxgrad",
+            "maxls",
+        ):
+            if key in self.options:
+                optimizer_options[key] = self.options[key]
+
+        result = jax_minimize(
+            obj_fn,
+            x0,
+            method=method,
+            tol=tol,
+            maxiter=maxiter,
+            options=optimizer_options,
+        )
 
         sdofs_final, iota_out, G_out = self._unpack_decision_vector(
             result.x, optimize_G
@@ -645,8 +720,33 @@ class BoozerSurfaceJAX(Optimizable):
         sdofs_final, iota_out, G_out = self._unpack_decision_vector(
             result["x"], optimize_G
         )
-        self._set_surface_dofs(sdofs_final)
 
+        if (
+            not bool(result["success"])
+            or not np.all(np.isfinite(np.asarray(result["x"])))
+            or not np.all(np.isfinite(np.asarray(result["grad"])))
+            or not np.all(np.isfinite(np.asarray(result["hessian"])))
+        ):
+            res = {
+                "residual": None,
+                "jacobian": None,
+                "hessian": None,
+                "iter": result["nit"],
+                "success": False,
+                "G": G_out,
+                "s": s,
+                "iota": iota_out,
+                "PLU": None,
+                "vjp": None,
+                "type": "ls",
+                "weight_inv_modB": weight_inv_modB,
+                "fun": float(np.asarray(result["fun"])),
+            }
+            self.res = res
+            self.need_to_run_code = False
+            return res
+
+        self._set_surface_dofs(sdofs_final)
         H = result["hessian"]
         P, L, U = jax.scipy.linalg.lu(H)
 
@@ -738,7 +838,7 @@ class BoozerSurfaceJAX(Optimizable):
             verbose: print convergence info.
 
         Returns:
-            dict with 'residual', 'jacobian', 'iter', 'success', 'G',
+            dict with 'residual', 'fun', 'jacobian', 'iter', 'success', 'G',
             's', 'iota', 'PLU', 'mask', 'type', 'vjp', 'weight_inv_modB'.
         """
         if not self.need_to_run_code:
@@ -773,12 +873,37 @@ class BoozerSurfaceJAX(Optimizable):
         result = newton_exact(res_fn, x0, maxiter=maxiter, tol=tol)
 
         x_final = result["x"]
+        exact_residual = res_fn(x_final)
         sdofs_final = x_final[:-2]
         iota_final = float(x_final[-2])
         G_final = float(x_final[-1])
 
-        self._set_surface_dofs(sdofs_final)
+        if (
+            not bool(result["success"])
+            or not np.all(np.isfinite(np.asarray(x_final)))
+            or not np.all(np.isfinite(np.asarray(exact_residual)))
+            or not np.all(np.isfinite(np.asarray(result["jacobian"])))
+        ):
+            res = {
+                "residual": None,
+                "fun": float(0.5 * np.mean(np.square(np.asarray(exact_residual)))),
+                "jacobian": None,
+                "iter": result["nit"],
+                "success": False,
+                "G": G_final,
+                "s": s,
+                "iota": iota_final,
+                "PLU": None,
+                "mask": None,
+                "type": "exact",
+                "vjp": None,
+                "weight_inv_modB": self.options["weight_inv_modB"],
+            }
+            self.res = res
+            self.need_to_run_code = False
+            return res
 
+        self._set_surface_dofs(sdofs_final)
         J = result["jacobian"]
         P, L, U = jax.scipy.linalg.lu(J)
 
@@ -814,6 +939,7 @@ class BoozerSurfaceJAX(Optimizable):
 
         res = {
             "residual": np.asarray(r_raw),
+            "fun": float(0.5 * np.mean(np.square(np.asarray(exact_residual)))),
             "jacobian": np.asarray(J),
             "iter": result["nit"],
             "success": result["success"],
@@ -898,6 +1024,7 @@ class BoozerSurfaceJAX(Optimizable):
             verbose=self.options["verbose"],
             tol=self.options["newton_tol"],
             maxiter=self.options["newton_maxiter"],
+            stab=self.options["newton_stab"],
             weight_inv_modB=self.options["weight_inv_modB"],
         )
         return res

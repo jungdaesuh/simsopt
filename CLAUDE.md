@@ -141,7 +141,7 @@ from simsopt.backend import get_backend, is_jax_backend, get_jax_platform
 - **Mixed quadrature support**: `BiotSavartJAX._extract_coil_data_grouped()` groups coils by quadrature point count, evaluates each group via `biot_savart_B`, and sums. This allows TF coils (15-point) and banana coils (128-point) to coexist. The `SquaredFluxJAX` fallback path uses `field.B()` + `jax.grad(integral)` + `field.B_vjp()` chain, which also handles mixed quadrature correctly.
 - **C++ ANGLE_RECOMPUTE brace pattern**: In `surfacerzfourier.cpp`, the VJP loops use `if(i % ANGLE_RECOMPUTE == 0)` to periodically recompute trig values. These blocks require explicit `{}` braces — bare `if` only guards the first statement, making costerm unconditional. Always add braces when touching these blocks.
 - **JAX scalar boundary conversions**: JAX integer/boolean scalars from `jnp` must be cast to `int()`/`bool()` before storing in result dicts consumed by SciPy or NumPy callers. Pattern: `"iter": int(result.nit), "success": bool(result.success)`.
-- **BFGS device residency (v1 accepted fallback)**: `jax.scipy.optimize.minimize` BFGS was evaluated but fails to converge on the non-convex Boozer penalty landscape from cold starts (backtracking Armijo line search). SciPy's Moré-Thuente line search is retained for v1.
+- **BFGS device residency**: `BoozerSurfaceJAX` least-squares solves now support `optimizer_backend="ondevice"` and `optimizer_backend="hybrid"` via the private JAX 0.6.2 line-search implementation in `optimizer_jax.py`. `optimizer_backend="scipy"` remains the default least-squares path; exact Newton solves do not consume `optimizer_backend`.
 
 ## Code Review History
 
@@ -163,7 +163,7 @@ Confirmed NOT bugs (false positives):
 - **J_z omission from adjoint source**: correct — inner-solve regularizer, not part of `J_outer`.
 - **framedcurve.py API change** (4-arg → 3-arg): all callers already updated.
 - **BiotSavartJAX missing d2B_by_dXdX/A/compute**: backlog items, not needed by current consumers.
-- **SciPy host loop in optimizer**: accepted v1 fallback (JAX BFGS fails on non-convex cold starts).
+- **SciPy host loop in optimizer**: not a bug. It remains the default least-squares backend, but the on-device and hybrid backends are now supported and validated separately.
 - **LS solve divergence CPU vs JAX**: did not reproduce — both converge to machine precision.
 
 ## Plan

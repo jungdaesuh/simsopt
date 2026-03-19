@@ -22,6 +22,7 @@ All tests require ``simsoptpp`` for the CPU reference.
 
 import pytest
 import numpy as np
+import jax
 
 sopp = pytest.importorskip(
     "simsoptpp",
@@ -60,7 +61,7 @@ from simsopt.geo.surfaceobjectives_jax import (  # noqa: E402
 # -----------------------------------------------------------------------
 
 
-def _make_boozer_setup(constraint_weight=1.0):
+def _make_boozer_setup(constraint_weight=1.0, optimizer_backend="scipy"):
     """Create a Boozer surface configuration for testing."""
     ncoils = 2
     nfp = 2
@@ -151,6 +152,7 @@ def _make_boozer_setup(constraint_weight=1.0):
             "bfgs_tol": 1e-8,
             "newton_maxiter": 20,
             "newton_tol": 1e-9,
+            "optimizer_backend": optimizer_backend,
         },
     )
 
@@ -820,6 +822,42 @@ class TestExactPathSolve:
         )
 
 
+class TestOnDeviceBackendIntegration:
+    """Exercise the real on-device LS solve against simsoptpp-backed fixtures."""
+
+    @pytest.mark.skipif(
+        jax.__version__ != "0.6.2",
+        reason="On-device backend integration requires the pinned JAX 0.6.2 runtime.",
+    )
+    @pytest.mark.parametrize("optimizer_backend", ["ondevice", "hybrid"])
+    def test_ondevice_backend_run_code_converges(self, optimizer_backend):
+        (_, _, _, _, bs_jax, _, booz_jax, _, iota0, G0) = _make_boozer_setup(
+            constraint_weight=1.0,
+            optimizer_backend=optimizer_backend,
+        )
+
+        res = booz_jax.run_code(iota0, G0)
+
+        assert res is not None, f"{optimizer_backend} backend returned None"
+        assert res["type"] == "ls", f"Expected 'ls', got {res['type']}"
+        assert res["success"], f"{optimizer_backend} backend did not converge"
+        assert np.isfinite(res["fun"]), (
+            f"{optimizer_backend} backend returned non-finite fun"
+        )
+        assert res["PLU"] is not None, f"{optimizer_backend} backend did not build PLU"
+        assert callable(res["vjp"]), f"{optimizer_backend} backend did not expose VJP"
+
+        jr_jax = BoozerResidualJAX(booz_jax, bs_jax)
+        value = jr_jax.J()
+        grad = jr_jax.dJ()
+        assert np.isfinite(value), (
+            f"{optimizer_backend} backend produced non-finite M5 value"
+        )
+        assert np.all(np.isfinite(grad)), (
+            f"{optimizer_backend} backend produced non-finite M5 dJ"
+        )
+
+
 class TestEnsureSolvedCrashGuard:
     """Issue-1 regression: _ensure_solved must not crash with res=None."""
 
@@ -856,3 +894,91 @@ class TestEnsureSolvedCrashGuard:
 
         with pytest.raises(RuntimeError, match="has not been solved yet"):
             obj.J()
+
+    @pytest.mark.parametrize(
+        "wrapper_name",
+        ["BoozerResidualJAX", "IotasJAX", "NonQuasiSymmetricRatioJAX"],
+    )
+    def test_m5_wrappers_raise_before_touching_garbage(
+        self, boozer_setup, wrapper_name
+    ):
+        """All M5 wrappers must stop at _ensure_solved when res is unset.
+
+        This guards the negative path where a failed inner solve would leave
+        no PLU/VJP contract to consume.
+        """
+        (_, _, _, _, bs_jax, _, booz_jax, _) = boozer_setup
+        old_res = booz_jax.res
+        old_dirty = booz_jax.need_to_run_code
+        old_run_code = booz_jax.run_code
+        run_code_called = False
+
+        def forbidden_run_code(*args, **kwargs):
+            nonlocal run_code_called
+            run_code_called = True
+            raise AssertionError("run_code must not be called when res is None")
+
+        booz_jax.res = None
+        booz_jax.need_to_run_code = True
+        booz_jax.run_code = forbidden_run_code
+        try:
+            if wrapper_name == "BoozerResidualJAX":
+                obj = BoozerResidualJAX(booz_jax, bs_jax)
+            elif wrapper_name == "IotasJAX":
+                obj = IotasJAX(booz_jax)
+            else:
+                obj = NonQuasiSymmetricRatioJAX(booz_jax, bs_jax)
+
+            with pytest.raises(RuntimeError, match="has not been solved yet"):
+                obj.J()
+
+            assert not run_code_called
+        finally:
+            booz_jax.res = old_res
+            booz_jax.need_to_run_code = old_dirty
+            booz_jax.run_code = old_run_code
+
+    @pytest.mark.parametrize(
+        "wrapper_name",
+        ["BoozerResidualJAX", "IotasJAX", "NonQuasiSymmetricRatioJAX"],
+    )
+    def test_m5_wrappers_raise_on_failed_solve_state(self, boozer_setup, wrapper_name):
+        """Failed inner solves must be rejected even if adjoint placeholders exist."""
+        (_, _, _, _, bs_jax, _, booz_jax, _) = boozer_setup
+        old_res = booz_jax.res
+        old_dirty = booz_jax.need_to_run_code
+        old_run_code = booz_jax.run_code
+        run_code_called = False
+
+        def forbidden_run_code(*args, **kwargs):
+            nonlocal run_code_called
+            run_code_called = True
+            raise AssertionError("run_code must not be called for cached failed solve")
+
+        bad_res = dict(old_res)
+        bad_res["success"] = False
+        bad_res["PLU"] = tuple(np.eye(2) for _ in range(3))
+        bad_res["vjp"] = lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("vjp must not be touched for failed solves")
+        )
+        booz_jax.res = bad_res
+        booz_jax.need_to_run_code = False
+        booz_jax.run_code = forbidden_run_code
+        try:
+            if wrapper_name == "BoozerResidualJAX":
+                obj = BoozerResidualJAX(booz_jax, bs_jax)
+            elif wrapper_name == "IotasJAX":
+                obj = IotasJAX(booz_jax)
+            else:
+                obj = NonQuasiSymmetricRatioJAX(booz_jax, bs_jax)
+
+            with pytest.raises(
+                RuntimeError, match="failed to produce valid adjoint state"
+            ):
+                obj.J()
+
+            assert not run_code_called
+        finally:
+            booz_jax.res = old_res
+            booz_jax.need_to_run_code = old_dirty
+            booz_jax.run_code = old_run_code

@@ -70,7 +70,7 @@ def boozer_residual_scalar(G, iota, B, xphi, xtheta, weight_inv_modB=True):
     residual = G * B - B2[..., None] * tang  # (nphi, ntheta, 3)
 
     if weight_inv_modB:
-        w = jnp.sqrt(1.0 / B2)  # (nphi, ntheta)
+        w = 1.0 / jnp.sqrt(B2)  # (nphi, ntheta)
         rtil = w[..., None] * residual  # (nphi, ntheta, 3)
     else:
         rtil = residual
