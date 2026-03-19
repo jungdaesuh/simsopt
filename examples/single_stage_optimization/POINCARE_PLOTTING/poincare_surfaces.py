@@ -107,7 +107,7 @@ if __name__ == "__main__":
             raise FileNotFoundError(f"No single-stage output found in {outputs_root}. Set POINCARE_OUT_DIR.")
         OUT_DIR = candidates[0]
         print(f"Auto-selected: {os.path.basename(OUT_DIR)}")
-    # Load optimized field if available, otherwise fall back to init
+    # Load optimized field + surface if both available, otherwise fall back to init for both
     opt_bs_path = OUT_DIR + '/biot_savart_opt.json'
     init_bs_path = OUT_DIR + '/biot_savart_init.json'
     opt_surf_path = OUT_DIR + '/surf_opt.json'
