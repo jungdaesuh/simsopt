@@ -107,11 +107,27 @@ if __name__ == "__main__":
             raise FileNotFoundError(f"No single-stage output found in {outputs_root}. Set POINCARE_OUT_DIR.")
         OUT_DIR = candidates[0]
         print(f"Auto-selected: {os.path.basename(OUT_DIR)}")
-    bs = load(OUT_DIR + '/biot_savart_init.json')
+    # Load optimized field if available, otherwise fall back to init
+    opt_bs_path = OUT_DIR + '/biot_savart_opt.json'
+    init_bs_path = OUT_DIR + '/biot_savart_init.json'
+    opt_surf_path = OUT_DIR + '/surf_opt.json'
+    init_surf_path = OUT_DIR + '/surf_init.json'
 
-    surf = load(OUT_DIR + '/surf_init.json')
-    # Extend surface, since we want to look at field lines beyond it
-    surf_extended = load(OUT_DIR + '/surf_init.json')
+    if os.path.exists(opt_bs_path):
+        bs = load(opt_bs_path)
+        field_label = "opt"
+        print(f"Loaded OPTIMIZED field: {opt_bs_path}")
+    else:
+        bs = load(init_bs_path)
+        field_label = "init"
+        print(f"Loaded INITIAL field (no opt found): {init_bs_path}")
+
+    if os.path.exists(opt_surf_path):
+        surf = load(opt_surf_path)
+        surf_extended = load(opt_surf_path)
+    else:
+        surf = load(init_surf_path)
+        surf_extended = load(init_surf_path)
     surf_extended.extend_via_normal(0.05)
 
     # Use extended surface to determine initial conditions
@@ -138,7 +154,8 @@ if __name__ == "__main__":
             bfield, R0, Z0, tmax=tmax_fl, tol=tol,
             phis=phis, stopping_criteria=stop_crit)
         # Main field line tracing
-        plot_poincare_data(fieldlines_phi_hits, phis, OUT_DIR + '/PoincarePlot.png', dpi=600, surf=surf, mark_lost=False)
+        plot_poincare_data(fieldlines_phi_hits, phis, OUT_DIR + f'/PoincarePlot_{field_label}.png', dpi=600, surf=surf, mark_lost=False)
+        print(f"Saved: PoincarePlot_{field_label}.png")
         return fieldlines_phi_hits
 
     # Determine range for measuring field line data points
