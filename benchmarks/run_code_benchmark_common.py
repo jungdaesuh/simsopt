@@ -148,10 +148,18 @@ def _make_boozer_surface(config: BenchmarkConfig, optimizer_backend: str):
 
 
 def _sync_result(res: dict) -> None:
+    if res is None:
+        return
     for key in ("fun", "jacobian", "hessian", "residual"):
         value = res.get(key)
         if value is not None:
             jax.block_until_ready(jnp.asarray(value))
+    info = res.get("info")
+    if info is not None:
+        for attr in ("x", "jac"):
+            value = getattr(info, attr, None)
+            if value is not None:
+                jax.block_until_ready(jnp.asarray(value))
 
 
 def time_run_code(config: BenchmarkConfig, optimizer_backend: str):
@@ -162,6 +170,40 @@ def time_run_code(config: BenchmarkConfig, optimizer_backend: str):
     return time.perf_counter() - t0, res
 
 
+def time_run_code_stage_split(config: BenchmarkConfig, optimizer_backend: str):
+    booz, iota0, G0 = _make_boozer_surface(config, optimizer_backend)
+
+    t0 = time.perf_counter()
+    ls_res = booz.minimize_boozer_penalty_constraints_LBFGS(
+        constraint_weight=booz.constraint_weight,
+        iota=iota0,
+        G=G0,
+        tol=booz.options["bfgs_tol"],
+        maxiter=booz.options["bfgs_maxiter"],
+        verbose=booz.options["verbose"],
+        limited_memory=booz.options["limited_memory"],
+        weight_inv_modB=booz.options["weight_inv_modB"],
+    )
+    _sync_result(ls_res)
+    ls_time = time.perf_counter() - t0
+
+    booz.need_to_run_code = True
+    t1 = time.perf_counter()
+    res = booz.minimize_boozer_penalty_constraints_newton(
+        constraint_weight=booz.constraint_weight,
+        iota=ls_res["iota"],
+        G=ls_res["G"],
+        verbose=booz.options["verbose"],
+        tol=booz.options["newton_tol"],
+        maxiter=booz.options["newton_maxiter"],
+        stab=booz.options["newton_stab"],
+        weight_inv_modB=booz.options["weight_inv_modB"],
+    )
+    _sync_result(res)
+    newton_time = time.perf_counter() - t1
+    return ls_time, newton_time, res
+
+
 def benchmark_backend(
     config: BenchmarkConfig,
     optimizer_backend: str,
@@ -169,12 +211,13 @@ def benchmark_backend(
     repeats: int,
 ):
     compile_time, compile_res = time_run_code(config, optimizer_backend)
+    ls_time, newton_time, _ = time_run_code_stage_split(config, optimizer_backend)
     repeat_times = []
     repeat_res = compile_res
     for _ in range(repeats):
         elapsed, repeat_res = time_run_code(config, optimizer_backend)
         repeat_times.append(elapsed)
-    return compile_time, np.asarray(repeat_times), repeat_res
+    return compile_time, ls_time, newton_time, np.asarray(repeat_times), repeat_res
 
 
 def run_benchmarks(
@@ -196,7 +239,7 @@ def run_benchmarks(
 
         backend_summary: dict[str, float] = {}
         for optimizer_backend in backends:
-            compile_time, repeat_times, res = benchmark_backend(
+            compile_time, ls_time, newton_time, repeat_times, res = benchmark_backend(
                 config,
                 optimizer_backend,
                 repeats=repeats,
@@ -211,6 +254,10 @@ def run_benchmarks(
                 f"    repeat fresh solve: {np.median(repeat_times) * 1e3:.1f}ms median, "
                 f"{np.mean(repeat_times) * 1e3:.1f}ms mean ± "
                 f"{np.std(repeat_times) * 1e3:.1f}ms"
+            )
+            print(
+                f"    stage split sample: LS {ls_time * 1e3:.1f}ms, "
+                f"Newton {newton_time * 1e3:.1f}ms"
             )
             print(
                 f"    final fun:   {float(res['fun']):.6e}  "

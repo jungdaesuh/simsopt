@@ -26,33 +26,15 @@ import shutil
 import subprocess
 import sys
 import time
+from pathlib import Path
 
 import numpy as np
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
 
 def build_simsopt():
-    """Clone and build simsopt with simsoptpp C++ extension."""
-    repo_dir = "/tmp/simsopt-cpp"
-    if not os.path.exists(repo_dir):
-        print(
-            "Cloning simsopt fork (codex/hho-runner-parameterization — CPU-only branch)..."
-        )
-        subprocess.run(
-            [
-                "git",
-                "clone",
-                "--branch",
-                "codex/hho-runner-parameterization",
-                "--depth",
-                "1",
-                "--recurse-submodules",
-                "--shallow-submodules",
-                "https://github.com/jungdaesuh/simsopt.git",
-                repo_dir,
-            ],
-            check=True,
-        )
-
+    """Build the local simsopt checkout with the simsoptpp CPU extension."""
     # Install boost and eigen headers via apt (if available)
     print("Installing build dependencies...")
     subprocess.run(
@@ -72,8 +54,8 @@ def build_simsopt():
         capture_output=True,
     )
 
-    # Build and install simsopt
-    print("Building simsoptpp (this takes 2-3 minutes)...")
+    # Build and install the current local repo
+    print(f"Building local simsoptpp from {REPO_ROOT} ...")
     t0 = time.perf_counter()
 
     # uv pip for UV-managed environments
@@ -94,7 +76,7 @@ def build_simsopt():
 
     result = subprocess.run(
         cmd,
-        cwd=repo_dir,
+        cwd=REPO_ROOT,
         capture_output=True,
         text=True,
         timeout=600,
@@ -114,13 +96,13 @@ def build_simsopt():
         [sys.executable, "-c", "import simsoptpp; print('simsoptpp OK')"],
         check=True,
     )
-    return repo_dir
+    return REPO_ROOT
 
 
 def run_benchmarks():
     """Run Boozer solve through the CPU C++ path."""
-    # Add repo to path so simsopt is importable
-    sys.path.insert(0, "/tmp/simsopt-cpp/src")
+    # Add the local repo to path so simsopt is importable
+    sys.path.insert(0, str(REPO_ROOT / "src"))
 
     from simsopt.geo import SurfaceXYZTensorFourier, BoozerSurface, CurveXYZFourier
     from simsopt.geo.surfaceobjectives import Volume
@@ -189,15 +171,18 @@ def run_benchmarks():
                 "bfgs_tol": 1e-8,
                 "bfgs_maxiter": 50,
                 "limited_memory": False,
-                "newton_tol": 1e-12,
+                "newton_tol": 1e-9,
                 "newton_maxiter": 10,
             },
         )
+        mu0 = 4 * np.pi * 1e-7
+        G0 = mu0 * sum(abs(coil.current.get_value()) for coil in coils)
+        iota0 = 0.3
 
         # First call (cold)
         print("  Running...")
         t0 = time.perf_counter()
-        res = boozer.run_code(iota=0.3, G=None)
+        res = boozer.run_code(iota=iota0, G=G0)
         first_time = time.perf_counter() - t0
         if res:
             iota_val = res.get("iota")
@@ -209,12 +194,45 @@ def run_benchmarks():
                 f"fun={f'{fun_val:.6e}' if fun_val is not None else 'N/A'}"
             )
 
+        # Stage split on a fresh solve
+        boozer.need_to_run_code = True
+        t0 = time.perf_counter()
+        ls_res = boozer.minimize_boozer_penalty_constraints_LBFGS(
+            constraint_weight=boozer.constraint_weight,
+            iota=iota0,
+            G=G0,
+            tol=boozer.options["bfgs_tol"],
+            maxiter=boozer.options["bfgs_maxiter"],
+            verbose=boozer.options["verbose"],
+            limited_memory=boozer.options["limited_memory"],
+            weight_inv_modB=boozer.options["weight_inv_modB"],
+        )
+        ls_time = time.perf_counter() - t0
+
+        boozer.need_to_run_code = True
+        t0 = time.perf_counter()
+        boozer.minimize_boozer_penalty_constraints_newton(
+            constraint_weight=boozer.constraint_weight,
+            iota=ls_res["iota"],
+            G=ls_res["G"],
+            verbose=boozer.options["verbose"],
+            tol=boozer.options["newton_tol"],
+            maxiter=boozer.options["newton_maxiter"],
+            stab=0.0,
+            weight_inv_modB=boozer.options["weight_inv_modB"],
+        )
+        newton_time = time.perf_counter() - t0
+        print(
+            f"    stage split sample: LS {ls_time * 1e3:.1f}ms, "
+            f"Newton {newton_time * 1e3:.1f}ms"
+        )
+
         # Steady-state
         times = []
         for _ in range(5):
             boozer.need_to_run_code = True
             t0 = time.perf_counter()
-            res = boozer.run_code(iota=0.3, G=None)
+            res = boozer.run_code(iota=iota0, G=G0)
             times.append(time.perf_counter() - t0)
 
         times = np.array(times)
