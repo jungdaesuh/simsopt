@@ -113,21 +113,23 @@ if __name__ == "__main__":
     opt_surf_path = OUT_DIR + '/surf_opt.json'
     init_surf_path = OUT_DIR + '/surf_init.json'
 
-    if os.path.exists(opt_bs_path):
+    # Load field and surface from the same stage (both opt or both init)
+    has_opt = os.path.exists(opt_bs_path) and os.path.exists(opt_surf_path)
+    if has_opt:
         bs = load(opt_bs_path)
-        field_label = "opt"
-        print(f"Loaded OPTIMIZED field: {opt_bs_path}")
-    else:
-        bs = load(init_bs_path)
-        field_label = "init"
-        print(f"Loaded INITIAL field (no opt found): {init_bs_path}")
-
-    if os.path.exists(opt_surf_path):
         surf = load(opt_surf_path)
         surf_extended = load(opt_surf_path)
+        field_label = "opt"
+        print(f"Loaded OPTIMIZED field + surface")
     else:
+        bs = load(init_bs_path)
         surf = load(init_surf_path)
         surf_extended = load(init_surf_path)
+        field_label = "init"
+        if os.path.exists(opt_bs_path) != os.path.exists(opt_surf_path):
+            print(f"WARNING: mismatched opt files (bs={os.path.exists(opt_bs_path)}, surf={os.path.exists(opt_surf_path)}). Using init for both.")
+        else:
+            print(f"Loaded INITIAL field + surface (no opt found)")
     surf_extended.extend_via_normal(0.05)
 
     # Use extended surface to determine initial conditions
