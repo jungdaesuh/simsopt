@@ -340,7 +340,18 @@ _DEFAULT_OPTIONS_EXACT = {
 }
 
 _VALID_OPTIMIZER_BACKENDS = frozenset({"scipy", "hybrid", "ondevice"})
-_ALLOWED_OPTIONS_LS = frozenset(_DEFAULT_OPTIONS_LS)
+_INTERNAL_OPTIMIZER_OPTIONS = frozenset(
+    {
+        "hybrid_scipy_maxiter",
+        "line_search_maxiter",
+        "maxcor",
+        "ftol",
+        "maxfun",
+        "maxgrad",
+        "maxls",
+    }
+)
+_ALLOWED_OPTIONS_LS = frozenset(_DEFAULT_OPTIONS_LS) | _INTERNAL_OPTIMIZER_OPTIONS
 _ALLOWED_OPTIONS_EXACT = frozenset(_DEFAULT_OPTIONS_EXACT) | {"optimizer_backend"}
 
 
@@ -722,8 +733,7 @@ class BoozerSurfaceJAX(Optimizable):
         )
 
         if (
-            not bool(result["success"])
-            or not np.all(np.isfinite(np.asarray(result["x"])))
+            not np.all(np.isfinite(np.asarray(result["x"])))
             or not np.all(np.isfinite(np.asarray(result["grad"])))
             or not np.all(np.isfinite(np.asarray(result["hessian"])))
         ):

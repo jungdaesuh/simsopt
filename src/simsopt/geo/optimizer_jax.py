@@ -975,16 +975,6 @@ def jax_minimize(fun, x0, *, method="bfgs", tol=1e-10, maxiter=1500, options=Non
         return _private_lbfgs_result_to_optimize_result(state)
 
     total_maxiter = int(maxiter)
-    if total_maxiter <= 1:
-        state = _minimize_bfgs_private(
-            fun,
-            x0,
-            maxiter=total_maxiter,
-            gtol=tol,
-            line_search_maxiter=int(options.get("line_search_maxiter", 10)),
-        )
-        return _private_bfgs_result_to_optimize_result(state)
-
     prefix_cap = int(options.get("hybrid_scipy_maxiter", min(total_maxiter // 2, 100)))
     prefix_cap = max(0, min(prefix_cap, total_maxiter - 1))
     prefix_result = _scipy_minimize(

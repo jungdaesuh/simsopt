@@ -139,6 +139,8 @@ jobs:
       - name: Run JAX integration tests (Stage 2 + single-stage)
         run: |
           python -m pytest \
+            tests/geo/test_boozersurface.py \
+            tests/geo/test_surface_objectives.py \
             tests/integration/test_stage2_jax.py \
             tests/integration/test_single_stage_jax.py \
             tests/geo/test_single_stage_example.py \

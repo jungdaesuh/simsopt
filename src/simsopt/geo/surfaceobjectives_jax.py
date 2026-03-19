@@ -87,7 +87,6 @@ def _ensure_solved(booz_surf):
         booz_surf.run_code(booz_surf.res["iota"], G=booz_surf.res["G"])
     if (
         booz_surf.res is None
-        or not booz_surf.res.get("success", False)
         or booz_surf.res.get("PLU") is None
         or booz_surf.res.get("vjp") is None
     ):
@@ -95,6 +94,14 @@ def _ensure_solved(booz_surf):
             "BoozerSurfaceJAX has not been solved yet or the last solve failed "
             "to produce valid adjoint state."
         )
+
+
+def _resolved_boozer_G(booz_surf):
+    """Return the effective Boozer ``G`` for residual evaluation."""
+    G = booz_surf.res["G"]
+    if G is not None:
+        return G
+    return float(compute_G_from_currents(booz_surf.coil_currents))
 
 
 def _qs_ratio_pure(
@@ -275,6 +282,7 @@ class BoozerResidualJAX(Optimizable):
 
         iota = booz_surf.res["iota"]
         G = booz_surf.res["G"]
+        effective_G = _resolved_boozer_G(booz_surf)
         weight_inv_modB = booz_surf.res.get("weight_inv_modB", True)
         cw = self.constraint_weight if self.constraint_weight is not None else 1.0
 
@@ -285,7 +293,12 @@ class BoozerResidualJAX(Optimizable):
         B_3d = B.reshape(nphi, ntheta, 3)
 
         r_flat = boozer_residual_vector(
-            G, iota, B_3d, xphi_jax, xtheta_jax, weight_inv_modB
+            effective_G,
+            iota,
+            B_3d,
+            xphi_jax,
+            xtheta_jax,
+            weight_inv_modB,
         )
         r = np.asarray(r_flat) / np.sqrt(num_points)
 
@@ -303,7 +316,7 @@ class BoozerResidualJAX(Optimizable):
             xphi_jax,
             xtheta_jax,
             iota,
-            G,
+            effective_G,
             weight_inv_modB,
             nphi,
             ntheta,

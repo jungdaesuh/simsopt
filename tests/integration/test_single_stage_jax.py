@@ -830,13 +830,19 @@ class TestOnDeviceBackendIntegration:
         reason="On-device backend integration requires the pinned JAX 0.6.2 runtime.",
     )
     @pytest.mark.parametrize("optimizer_backend", ["ondevice", "hybrid"])
-    def test_ondevice_backend_run_code_converges(self, optimizer_backend):
+    @pytest.mark.parametrize("pass_explicit_G", [True, False])
+    def test_ondevice_backend_run_code_converges(
+        self, optimizer_backend, pass_explicit_G
+    ):
         (_, _, _, _, bs_jax, _, booz_jax, _, iota0, G0) = _make_boozer_setup(
             constraint_weight=1.0,
             optimizer_backend=optimizer_backend,
         )
+        import jax.numpy as jnp
+        from simsopt.geo.boozer_residual_jax import boozer_residual_vector
 
-        res = booz_jax.run_code(iota0, G0)
+        G_arg = G0 if pass_explicit_G else None
+        res = booz_jax.run_code(iota0, G_arg)
 
         assert res is not None, f"{optimizer_backend} backend returned None"
         assert res["type"] == "ls", f"Expected 'ls', got {res['type']}"
@@ -846,6 +852,10 @@ class TestOnDeviceBackendIntegration:
         )
         assert res["PLU"] is not None, f"{optimizer_backend} backend did not build PLU"
         assert callable(res["vjp"]), f"{optimizer_backend} backend did not expose VJP"
+        if pass_explicit_G:
+            assert res["G"] is not None
+        else:
+            assert res["G"] is None
 
         jr_jax = BoozerResidualJAX(booz_jax, bs_jax)
         value = jr_jax.J()
@@ -856,6 +866,43 @@ class TestOnDeviceBackendIntegration:
         assert np.all(np.isfinite(grad)), (
             f"{optimizer_backend} backend produced non-finite M5 dJ"
         )
+
+        gamma_fixed = booz_jax.surface.gamma().reshape(-1, 3)
+        xphi = jnp.asarray(booz_jax.surface.gammadash1())
+        xtheta = jnp.asarray(booz_jax.surface.gammadash2())
+        nphi = booz_jax.surface.quadpoints_phi.size
+        ntheta = booz_jax.surface.quadpoints_theta.size
+        num_pts = 3 * nphi * ntheta
+        effective_G = res["G"] if res["G"] is not None else G0
+        iota_sol = res["iota"]
+
+        def J_at_fixed_surface(coil_x):
+            bs_jax.x = coil_x
+            bs_jax.set_points(gamma_fixed)
+            B = bs_jax.B().reshape(nphi, ntheta, 3)
+            r = boozer_residual_vector(effective_G, iota_sol, B, xphi, xtheta, True)
+            return 0.5 * float(jnp.sum(r**2)) / num_pts
+
+        x0 = bs_jax.x.copy()
+        direction = np.linspace(1.0, 2.0, len(x0))
+        direction /= np.linalg.norm(direction)
+        eps = 1e-5
+        dd_composed = float(np.dot(grad, direction))
+        dd_fd = (
+            J_at_fixed_surface(x0 + eps * direction)
+            - J_at_fixed_surface(x0 - eps * direction)
+        ) / (2 * eps)
+        abs_err = abs(dd_composed - dd_fd)
+        rel_err = abs_err / (abs(dd_fd) + 1e-30)
+
+        assert rel_err < 1e-3 or abs_err < 1e-8, (
+            f"{optimizer_backend} pass_explicit_G={pass_explicit_G}: "
+            f"composed={dd_composed:.6e} fd={dd_fd:.6e} "
+            f"rel={rel_err:.2e} abs={abs_err:.2e}"
+        )
+
+        bs_jax.x = x0
+        bs_jax.set_points(gamma_fixed)
 
 
 class TestEnsureSolvedCrashGuard:

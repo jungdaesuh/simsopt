@@ -98,6 +98,7 @@ _boozer_exact_coil_vjp = _bsj._boozer_exact_coil_vjp
 _boozer_ls_coil_vjp = _bsj._boozer_ls_coil_vjp
 BoozerSurfaceJAX = _bsj.BoozerSurfaceJAX
 _ensure_solved_jax = _soj._ensure_solved
+_resolved_boozer_G_jax = _soj._resolved_boozer_G
 
 
 # ---------------------------------------------------------------------------
@@ -733,6 +734,110 @@ class TestOptimizerAdapter:
         )
 
         assert result.success is True
+
+    def test_hybrid_zero_budget_uses_scipy_prefix_only(self, monkeypatch):
+        """Hybrid maxiter=0 must still take the SciPy-prefix path."""
+        captured = {}
+        prefix = types.SimpleNamespace(
+            x=jnp.array([1.0, -1.0], dtype=jnp.float64),
+            fun=1.5,
+            jac=jnp.array([1.0, -2.0], dtype=jnp.float64),
+            nit=0,
+            nfev=1,
+            njev=1,
+            nhev=0,
+            success=False,
+            status=1,
+            hess_inv=np.eye(2),
+        )
+
+        def fake_scipy_minimize(fun, x0, *, method, tol, maxiter, options):
+            del fun, x0, method, tol, options
+            captured["prefix_maxiter"] = maxiter
+            return prefix
+
+        monkeypatch.setattr(_opt, "_scipy_minimize", fake_scipy_minimize)
+        monkeypatch.setattr(
+            _opt,
+            "_minimize_bfgs_private",
+            lambda *args, **kwargs: (_ for _ in ()).throw(
+                AssertionError("continuation must not run when total budget is zero")
+            ),
+        )
+
+        result = jax_minimize(
+            lambda x: jnp.sum(x**2),
+            jnp.array([1.0, -1.0], dtype=jnp.float64),
+            method="bfgs-hybrid",
+            maxiter=0,
+        )
+
+        assert captured["prefix_maxiter"] == 0
+        assert result is prefix
+
+    def test_hybrid_maxiter_one_still_uses_prefix_path(self, monkeypatch):
+        """Hybrid maxiter=1 must still enter via the SciPy-prefix seam."""
+        captured = {}
+        prefix = types.SimpleNamespace(
+            x=jnp.array([0.25, -0.5], dtype=jnp.float64),
+            fun=0.3125,
+            jac=jnp.array([0.5, -1.0], dtype=jnp.float64),
+            nit=0,
+            nfev=1,
+            njev=1,
+            nhev=0,
+            success=False,
+            status=1,
+            hess_inv=np.eye(2),
+        )
+
+        def fake_scipy_minimize(fun, x0, *, method, tol, maxiter, options):
+            del fun, x0, method, tol, options
+            captured["prefix_maxiter"] = maxiter
+            return prefix
+
+        def fake_minimize_bfgs_private(
+            fun,
+            x0,
+            *,
+            maxiter,
+            gtol,
+            line_search_maxiter,
+            initial_state,
+        ):
+            del fun, x0, gtol, line_search_maxiter
+            captured["continuation_maxiter"] = maxiter
+            captured["initial_k"] = int(initial_state.k)
+            return _opt._BFGSResults(
+                converged=jnp.array(False),
+                failed=jnp.array(False),
+                k=jnp.array(1),
+                nfev=jnp.array(2),
+                ngev=jnp.array(2),
+                nhev=jnp.array(0),
+                x_k=jnp.array([0.0, 0.0], dtype=jnp.float64),
+                f_k=jnp.array(0.0, dtype=jnp.float64),
+                g_k=jnp.array([0.0, 0.0], dtype=jnp.float64),
+                H_k=jnp.eye(2, dtype=jnp.float64),
+                old_old_fval=jnp.array(0.1, dtype=jnp.float64),
+                status=jnp.array(1),
+                line_search_status=jnp.array(0),
+            )
+
+        monkeypatch.setattr(_opt, "_scipy_minimize", fake_scipy_minimize)
+        monkeypatch.setattr(_opt, "_minimize_bfgs_private", fake_minimize_bfgs_private)
+
+        result = jax_minimize(
+            lambda x: jnp.sum(x**2),
+            jnp.array([1.0, -1.0], dtype=jnp.float64),
+            method="bfgs-hybrid",
+            maxiter=1,
+        )
+
+        assert captured["prefix_maxiter"] == 0
+        assert captured["continuation_maxiter"] == 1
+        assert captured["initial_k"] == 0
+        assert result.nit == 1
 
     def test_line_search_zoom2_reversed_bracket_does_not_fail(self):
         """The zoom2 branch must tolerate reversed brackets without spurious failure."""
@@ -1675,6 +1780,44 @@ class TestBoozerSurfaceJAXClass:
                 options={"optimizer_backend_typo": "ondevice"},
             )
 
+    def test_optimizer_tuning_options_are_accepted(self):
+        """Public constructor must accept the documented optimizer tuning knobs."""
+        bs = _MockBiotSavart(_make_mock_coils())
+        surf = _MockSurface(
+            np.zeros(27),
+            1,
+            1,
+            1,
+            False,
+            np.linspace(0.0, 1.0, 3, endpoint=False),
+            np.linspace(0.0, 1.0, 3, endpoint=False),
+        )
+        label = _MockVolumeLabel()
+        booz = BoozerSurfaceJAX(
+            bs,
+            surf,
+            label,
+            1.0,
+            constraint_weight=1.0,
+            options={
+                "hybrid_scipy_maxiter": 7,
+                "line_search_maxiter": 11,
+                "maxcor": 12,
+                "ftol": 1e-12,
+                "maxfun": 99,
+                "maxgrad": 101,
+                "maxls": 13,
+            },
+        )
+
+        assert booz.options["hybrid_scipy_maxiter"] == 7
+        assert booz.options["line_search_maxiter"] == 11
+        assert booz.options["maxcor"] == 12
+        assert booz.options["ftol"] == pytest.approx(1e-12)
+        assert booz.options["maxfun"] == 99
+        assert booz.options["maxgrad"] == 101
+        assert booz.options["maxls"] == 13
+
     def test_recompute_bell(self):
         """recompute_bell sets the dirty flag."""
         booz = _make_mock_boozer_surface()
@@ -1750,6 +1893,32 @@ class TestBoozerSurfaceJAXClass:
         assert res["vjp"] is None
         assert booz.need_to_run_code is False
         assert np.all(np.isfinite(booz.surface.get_dofs()))
+
+    def test_run_code_finite_unsuccessful_newton_keeps_adjoint_state(
+        self, monkeypatch
+    ):
+        """Finite maxiter-exhausted Newton exits must still keep PLU/VJP state."""
+        booz = _make_mock_boozer_surface()
+
+        def fake_newton_polish(_objective_fn, x0, *, maxiter, tol, stab):
+            del maxiter, tol, stab
+            n = x0.shape[0]
+            return {
+                "x": x0,
+                "fun": jnp.asarray(0.0),
+                "grad": jnp.zeros_like(x0),
+                "hessian": jnp.eye(n, dtype=x0.dtype),
+                "nit": 3,
+                "success": False,
+            }
+
+        monkeypatch.setattr(_bsj, "newton_polish", fake_newton_polish)
+        res = booz.run_code(iota=0.3, G=0.05)
+
+        assert res is not None
+        assert res["success"] is False
+        assert res["PLU"] is not None
+        assert callable(res["vjp"])
 
     def test_run_code_ondevice_limited_memory_routes_to_lbfgs(self, monkeypatch):
         """limited_memory=True must route LS solves through lbfgs-ondevice."""
@@ -2210,8 +2379,8 @@ class TestEnsureSolvedGuard:
         assert "booz_surf.res is None" in source, (
             "_ensure_solved must guard against res=None"
         )
-        assert 'not booz_surf.res.get("success", False)' in source
         assert 'booz_surf.res.get("vjp") is None' in source
+        assert 'booz_surf.res.get("PLU") is None' in source
         assert "RuntimeError" in source
 
     def test_dirty_resolve_preserves_nondefault_backend_contract(self, monkeypatch):
@@ -2248,6 +2417,30 @@ class TestEnsureSolvedGuard:
 
         assert captured == {"iota": 0.3, "G": 0.05}
         assert booz.need_to_run_code is False
+
+    def test_finite_unsuccessful_state_with_adjoint_contract_is_accepted(self):
+        """_ensure_solved must allow finite unsuccessful solves with PLU/VJP."""
+        booz = _make_mock_boozer_surface()
+        booz.need_to_run_code = False
+        booz.res = {
+            "iota": 0.3,
+            "G": 0.05,
+            "success": False,
+            "PLU": (np.eye(1), np.eye(1), np.eye(1)),
+            "vjp": lambda *_args, **_kwargs: None,
+        }
+
+        _ensure_solved_jax(booz)
+
+    def test_resolved_boozer_G_uses_fixed_currents_when_run_code_kept_G_none(self):
+        """Fixed-current LS paths must recover the effective G from coil currents."""
+        booz = _make_mock_boozer_surface()
+        booz.res = {"G": None}
+
+        resolved_G = _resolved_boozer_G_jax(booz)
+
+        expected_G = float(compute_G_from_currents(booz.coil_currents))
+        assert resolved_G == pytest.approx(expected_G)
 
 
 # ---------------------------------------------------------------------------
