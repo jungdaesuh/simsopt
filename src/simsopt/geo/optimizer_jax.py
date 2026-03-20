@@ -31,6 +31,7 @@ from jax._src import api
 from jax._src import dtypes
 from jax._src.numpy import linalg as jnp_linalg
 from jax._src.numpy.util import promote_dtypes_inexact
+from jax.scipy.sparse.linalg import gmres
 from scipy.optimize import OptimizeResult
 from scipy.optimize import minimize as scipy_minimize
 
@@ -279,6 +280,41 @@ def _scipy_result_is_continuable(result):
         and np.all(np.isfinite(np.asarray(result.x)))
         and np.all(np.isfinite(np.asarray(result.jac)))
     )
+
+
+def _hessian_vector_product_fn(objective_fn):
+    grad_fn = jax.grad(objective_fn)
+    return jax.jit(lambda x, v: jax.jvp(grad_fn, (x,), (v,))[1])
+
+
+def _materialize_dense_hessian(hvp_fn, x):
+    eye = jnp.eye(x.shape[0], dtype=x.dtype)
+    cols = lax.map(lambda basis: hvp_fn(x, basis), eye)
+    dense = jnp.swapaxes(cols, 0, 1)
+    return 0.5 * (dense + dense.T)
+
+
+def _gmres_solve_newton_system(hvp_fn, x, rhs, *, stab, tol):
+    n = int(rhs.shape[0])
+    restart = max(5, min(n, 50))
+    maxiter = max(10, min(4 * n, 200))
+
+    def matvec(v):
+        Hv = hvp_fn(x, v)
+        if stab != 0.0:
+            Hv = Hv + stab * v
+        return Hv
+
+    dx, _ = gmres(
+        matvec,
+        rhs,
+        tol=tol,
+        atol=0.0,
+        restart=restart,
+        maxiter=maxiter,
+    )
+    residual = rhs - matvec(dx)
+    return dx, residual, matvec
 
 
 def _cubicmin(a, fa, fpa, b, fb, c, fc):
@@ -1028,27 +1064,57 @@ def newton_polish(
     tol=1e-11,
     stab=0.0,
 ):
-    """Newton polish using JAX Hessian + ``jnp.linalg.solve``."""
+    """Newton polish using exact Hessian-vector products.
+
+    Iterations solve the Newton system with GMRES against the exact
+    Hessian linear operator, avoiding the peak memory cost of
+    ``jax.hessian(objective_fn)`` on large Boozer LS problems.
+
+    The dense Hessian is still materialized once at the final iterate so
+    callers retain the existing adjoint/PLU contract.
+    """
     val_and_grad_fn = jax.jit(jax.value_and_grad(objective_fn))
-    hessian_fn = jax.jit(jax.hessian(objective_fn))
+    hvp_fn = _hessian_vector_product_fn(objective_fn)
 
     x = x0
     val, grad = val_and_grad_fn(x)
     norm = jnp.linalg.norm(grad)
-    H = hessian_fn(x)
 
     nit = 0
     while nit < maxiter and float(norm) > tol:
-        if stab > 0:
-            H = H + stab * jnp.eye(H.shape[0])
-        dx = jnp.linalg.solve(H, grad)
+        linear_tol = min(1e-10, max(float(tol) * 0.1, 1e-14))
+        dx, linear_residual, _ = _gmres_solve_newton_system(
+            hvp_fn,
+            x,
+            grad,
+            stab=stab,
+            tol=linear_tol,
+        )
+        if not np.all(np.isfinite(np.asarray(dx))) or (
+            np.linalg.norm(np.asarray(linear_residual))
+            > max(1e-10, 1e-3 * float(norm))
+        ):
+            H_solve = _materialize_dense_hessian(hvp_fn, x)
+            if stab != 0.0:
+                H_solve = H_solve + stab * jnp.eye(H_solve.shape[0], dtype=H_solve.dtype)
+            dx = jnp.linalg.solve(H_solve, grad)
+            linear_residual = grad - H_solve @ dx
         if float(norm) < 1e-9:
-            dx = dx + jnp.linalg.solve(H, grad - H @ dx)
+            correction, _, _ = _gmres_solve_newton_system(
+                hvp_fn,
+                x,
+                linear_residual,
+                stab=stab,
+                tol=linear_tol,
+            )
+            if np.all(np.isfinite(np.asarray(correction))):
+                dx = dx + correction
         x = x - dx
         val, grad = val_and_grad_fn(x)
         norm = jnp.linalg.norm(grad)
-        H = hessian_fn(x)
         nit += 1
+
+    H = _materialize_dense_hessian(hvp_fn, x)
 
     return {
         "x": x,
