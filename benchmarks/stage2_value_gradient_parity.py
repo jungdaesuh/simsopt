@@ -206,11 +206,8 @@ def run_real_fixture(args: argparse.Namespace) -> dict:
             env=repo_pythonpath_env(platform="cpu"),
             cwd=REPO_ROOT,
             bootstrap_repo=True,
+            stream_output=True,
         )
-        if cpu_result.stdout:
-            print(cpu_result.stdout, end="")
-        if cpu_result.stderr:
-            print(cpu_result.stderr, end="", file=sys.stderr)
 
         jax_result = run_python_script(
             stage2_script,
@@ -218,11 +215,8 @@ def run_real_fixture(args: argparse.Namespace) -> dict:
             env=repo_pythonpath_env(platform=args.platform),
             cwd=REPO_ROOT,
             bootstrap_repo=True,
+            stream_output=True,
         )
-        if jax_result.stdout:
-            print(jax_result.stdout, end="")
-        if jax_result.stderr:
-            print(jax_result.stderr, end="", file=sys.stderr)
 
         cpu_payload = load_json(cpu_json)
         jax_payload = load_json(jax_json)

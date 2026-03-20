@@ -194,11 +194,8 @@ def _run_single_stage_case(
             env=repo_pythonpath_env(platform=platform if backend == "jax" else "cpu"),
             cwd=REPO_ROOT,
             bootstrap_repo=True,
+            stream_output=True,
         )
-        if result.stdout:
-            print(result.stdout, end="")
-        if result.stderr:
-            print(result.stderr, end="", file=sys.stderr)
 
         results_json = find_single_file(output_root, "results.json")
         surf_json = find_single_file(output_root, "surf_init.json")

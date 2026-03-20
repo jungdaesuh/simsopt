@@ -145,12 +145,9 @@ def _run_stage2_case(args: argparse.Namespace, backend: str, *, platform: str) -
             ),
             cwd=REPO_ROOT,
             bootstrap_repo=True,
+            stream_output=True,
         )
         elapsed_s = time.perf_counter() - start
-        if result.stdout:
-            print(result.stdout, end="")
-        if result.stderr:
-            print(result.stderr, end="", file=sys.stderr)
 
         results_json = find_single_file(output_root, "results.json")
         trajectory_payload = load_json(trajectory_json)

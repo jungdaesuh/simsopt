@@ -11,6 +11,7 @@ import resource
 import shlex
 import subprocess
 import sys
+import threading
 from typing import Any
 
 import numpy as np
@@ -232,6 +233,22 @@ def load_json(path: str | os.PathLike[str]) -> dict[str, Any]:
         return json.load(infile)
 
 
+def _stream_subprocess_pipe(
+    pipe,
+    sink,
+    chunks: list[str],
+) -> None:
+    """Mirror subprocess output to the parent stream while retaining it."""
+    while True:
+        chunk = pipe.read(4096)
+        if not chunk:
+            break
+        chunks.append(chunk)
+        sink.write(chunk)
+        sink.flush()
+    pipe.close()
+
+
 def run_python_script(
     script_path: str | os.PathLike[str],
     args: list[str],
@@ -239,6 +256,7 @@ def run_python_script(
     env: dict[str, str] | None = None,
     cwd: str | os.PathLike[str] | None = None,
     bootstrap_repo: bool = False,
+    stream_output: bool = False,
 ) -> subprocess.CompletedProcess[str]:
     """Run a Python helper script using the current interpreter."""
     if bootstrap_repo:
@@ -261,13 +279,48 @@ def run_python_script(
         ]
     else:
         command = [sys.executable, str(script_path), *args]
-    result = subprocess.run(
-        command,
-        cwd=str(cwd or REPO_ROOT),
-        env=env,
-        capture_output=True,
-        text=True,
-    )
+    child_env = dict(env) if env is not None else dict(os.environ)
+    child_env.setdefault("PYTHONUNBUFFERED", "1")
+    if not stream_output:
+        result = subprocess.run(
+            command,
+            cwd=str(cwd or REPO_ROOT),
+            env=child_env,
+            capture_output=True,
+            text=True,
+        )
+    else:
+        process = subprocess.Popen(
+            command,
+            cwd=str(cwd or REPO_ROOT),
+            env=child_env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        if process.stdout is None or process.stderr is None:
+            raise RuntimeError("Failed to capture subprocess stdout/stderr pipes.")
+        stdout_chunks: list[str] = []
+        stderr_chunks: list[str] = []
+        stdout_thread = threading.Thread(
+            target=_stream_subprocess_pipe,
+            args=(process.stdout, sys.stdout, stdout_chunks),
+        )
+        stderr_thread = threading.Thread(
+            target=_stream_subprocess_pipe,
+            args=(process.stderr, sys.stderr, stderr_chunks),
+        )
+        stdout_thread.start()
+        stderr_thread.start()
+        returncode = process.wait()
+        stdout_thread.join()
+        stderr_thread.join()
+        result = subprocess.CompletedProcess(
+            command,
+            returncode,
+            stdout="".join(stdout_chunks),
+            stderr="".join(stderr_chunks),
+        )
     if result.returncode != 0:
         formatted_command = " ".join(shlex.quote(part) for part in command)
         stdout = result.stdout.strip()

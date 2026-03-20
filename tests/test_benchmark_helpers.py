@@ -43,6 +43,7 @@ from benchmarks.stage2_e2e_comparison import (
 from benchmarks.validation_ladder_common import (
     max_pointwise_geometry_drift,
     repo_pythonpath_env,
+    run_python_script,
     short_run_geometry_rel_tolerance,
 )
 
@@ -184,6 +185,54 @@ def test_repo_pythonpath_env_auto_clears_inherited_platform_selectors(monkeypatc
     assert "SIMSOPT_JAX_PLATFORM" not in env
     assert "SIMSOPT_JAX_BACKEND" not in env
     assert env["PYTHONPATH"].endswith("/tmp/existing")
+
+
+def test_run_python_script_streams_and_captures_output(tmp_path, capsys):
+    script = tmp_path / "echo_child.py"
+    script.write_text(
+        "import sys\n"
+        "print('stdout-line', flush=True)\n"
+        "print('stderr-line', file=sys.stderr, flush=True)\n",
+        encoding="utf-8",
+    )
+
+    result = run_python_script(
+        script,
+        [],
+        cwd=tmp_path,
+        stream_output=True,
+    )
+
+    captured = capsys.readouterr()
+    assert "stdout-line" in captured.out
+    assert "stderr-line" in captured.err
+    assert "stdout-line" in result.stdout
+    assert "stderr-line" in result.stderr
+
+
+def test_run_python_script_stream_output_preserves_failure_details(tmp_path, capsys):
+    script = tmp_path / "fail_child.py"
+    script.write_text(
+        "import sys\n"
+        "print('before-fail', flush=True)\n"
+        "print('boom', file=sys.stderr, flush=True)\n"
+        "raise SystemExit(3)\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(RuntimeError, match="Subprocess failed with exit code 3") as excinfo:
+        run_python_script(
+            script,
+            [],
+            cwd=tmp_path,
+            stream_output=True,
+        )
+
+    captured = capsys.readouterr()
+    assert "before-fail" in captured.out
+    assert "boom" in captured.err
+    assert "stdout:\nbefore-fail" in str(excinfo.value)
+    assert "stderr:\nboom" in str(excinfo.value)
 
 
 def test_single_stage_init_parity_accepts_small_real_fixture_differences():
