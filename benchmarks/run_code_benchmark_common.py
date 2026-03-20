@@ -14,6 +14,7 @@ import jaxlib
 import jax.numpy as jnp
 
 from benchmarks.benchmark_config import BenchmarkConfig, DEFAULT_CONFIGS
+from benchmarks.benchmark_problem import build_synthetic_boozer_problem
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PUBLIC_EXPECTED_JAX_VERSION = os.environ.get(
@@ -115,83 +116,37 @@ def print_provenance(title: str, backends: tuple[str, ...]) -> None:
     _progress(f"backends:     {', '.join(backends)}")
 
 
-def _make_boozer_surface(config: BenchmarkConfig, optimizer_backend: str):
-    from simsopt.field import Current, coils_via_symmetries
+def _make_boozer_surface(
+    config: BenchmarkConfig,
+    optimizer_backend: str,
+    *,
+    option_overrides: dict | None = None,
+):
     from simsopt.field.biotsavart_jax_backend import BiotSavartJAX
-    from simsopt.geo import (
-        SurfaceRZFourier,
-        SurfaceXYZTensorFourier,
-        Volume,
-        create_equally_spaced_curves,
-    )
     from simsopt.geo.boozersurface_jax import BoozerSurfaceJAX
 
-    base_curves = create_equally_spaced_curves(
-        config.ncoils,
-        config.nfp,
-        stellsym=False,
-        R0=1.0,
-        R1=0.5,
-        order=3,
-    )
-    base_currents = [Current(1e5) for _ in range(config.ncoils)]
-    for current in base_currents:
-        current.fix_all()
-    coils = coils_via_symmetries(
-        base_curves,
-        base_currents,
-        config.nfp,
-        stellsym=False,
-    )
-
-    quadpoints_phi = np.linspace(0.0, 1.0 / config.nfp, config.nphi, endpoint=False)
-    quadpoints_theta = np.linspace(0.0, 1.0, config.ntheta, endpoint=False)
-
-    surface = SurfaceXYZTensorFourier(
-        mpol=config.mpol,
-        ntor=config.ntor,
-        stellsym=False,
-        nfp=config.nfp,
-        quadpoints_phi=quadpoints_phi,
-        quadpoints_theta=quadpoints_theta,
-    )
-    seed_surface = SurfaceRZFourier(
-        nfp=config.nfp,
-        stellsym=False,
-        mpol=1,
-        ntor=0,
-        quadpoints_phi=quadpoints_phi,
-        quadpoints_theta=quadpoints_theta,
-    )
-    seed_surface.set_rc(0, 0, 1.0)
-    seed_surface.set_rc(1, 0, 0.15)
-    seed_surface.set_zs(1, 0, 0.15)
-    surface.least_squares_fit(seed_surface.gamma())
-
-    bs_jax = BiotSavartJAX(coils)
-    vol_cpu = Volume(surface)
-    vol_target = vol_cpu.J()
-
-    mu0 = 4 * np.pi * 1e-7
-    G0 = mu0 * sum(abs(coil.current.get_value()) for coil in coils)
-    iota0 = 0.3
+    problem = build_synthetic_boozer_problem(config)
+    bs_jax = BiotSavartJAX(problem.coils)
+    options = {
+        "verbose": SOLVER_VERBOSE,
+        "bfgs_maxiter": 50,
+        "bfgs_tol": 1e-8,
+        "newton_maxiter": 10,
+        "newton_tol": 1e-9,
+        "optimizer_backend": optimizer_backend,
+    }
+    if option_overrides:
+        options.update(option_overrides)
 
     booz = BoozerSurfaceJAX(
         bs_jax,
-        surface,
-        vol_cpu,
-        vol_target,
+        problem.surface,
+        problem.volume,
+        problem.vol_target,
         constraint_weight=1.0,
-        options={
-            "verbose": SOLVER_VERBOSE,
-            "bfgs_maxiter": 50,
-            "bfgs_tol": 1e-8,
-            "newton_maxiter": 10,
-            "newton_tol": 1e-9,
-            "optimizer_backend": optimizer_backend,
-        },
+        options=options,
     )
-    return booz, iota0, G0
+    return booz, problem.iota0, problem.G0
 
 
 def _sync_result(res: dict) -> None:
@@ -222,9 +177,13 @@ def summarize_result_fun(res: dict) -> float:
     return 0.5 * float(np.mean(np.square(arr)))
 
 
-def time_run_code(config: BenchmarkConfig, optimizer_backend: str):
+def time_run_code(config: BenchmarkConfig, optimizer_backend: str, *, option_overrides=None):
     _progress(f"    [{optimizer_backend}] building run_code problem")
-    booz, iota0, G0 = _make_boozer_surface(config, optimizer_backend)
+    booz, iota0, G0 = _make_boozer_surface(
+        config,
+        optimizer_backend,
+        option_overrides=option_overrides,
+    )
     _progress(f"    [{optimizer_backend}] running full run_code()")
     t0 = time.perf_counter()
     res = booz.run_code(iota0, G0)
@@ -233,9 +192,18 @@ def time_run_code(config: BenchmarkConfig, optimizer_backend: str):
     return time.perf_counter() - t0, res
 
 
-def time_run_code_stage_split(config: BenchmarkConfig, optimizer_backend: str):
+def time_run_code_stage_split(
+    config: BenchmarkConfig,
+    optimizer_backend: str,
+    *,
+    option_overrides=None,
+):
     _progress(f"    [{optimizer_backend}] building stage-split problem")
-    booz, iota0, G0 = _make_boozer_surface(config, optimizer_backend)
+    booz, iota0, G0 = _make_boozer_surface(
+        config,
+        optimizer_backend,
+        option_overrides=option_overrides,
+    )
 
     _progress(f"    [{optimizer_backend}] running LS stage")
     t0 = time.perf_counter()
@@ -276,10 +244,19 @@ def benchmark_backend(
     optimizer_backend: str,
     *,
     repeats: int,
+    option_overrides: dict | None = None,
 ):
     _progress(f"  backend={optimizer_backend}")
-    compile_time, compile_res = time_run_code(config, optimizer_backend)
-    ls_time, newton_time, _ = time_run_code_stage_split(config, optimizer_backend)
+    compile_time, compile_res = time_run_code(
+        config,
+        optimizer_backend,
+        option_overrides=option_overrides,
+    )
+    ls_time, newton_time, _ = time_run_code_stage_split(
+        config,
+        optimizer_backend,
+        option_overrides=option_overrides,
+    )
     repeat_times = []
     repeat_res = compile_res
     for repeat_index in range(repeats):
@@ -287,7 +264,11 @@ def benchmark_backend(
             f"    [{optimizer_backend}] repeat fresh solve "
             f"{repeat_index + 1}/{repeats}"
         )
-        elapsed, repeat_res = time_run_code(config, optimizer_backend)
+        elapsed, repeat_res = time_run_code(
+            config,
+            optimizer_backend,
+            option_overrides=option_overrides,
+        )
         repeat_times.append(elapsed)
     _progress(f"    [{optimizer_backend}] repeats finished")
     return compile_time, ls_time, newton_time, np.asarray(repeat_times), repeat_res
@@ -299,6 +280,7 @@ def run_benchmarks(
     configs=DEFAULT_CONFIGS,
     backends=DEFAULT_PUBLIC_BACKENDS,
     repeats: int = 3,
+    option_overrides: dict | None = None,
 ) -> None:
     if repeats < 1:
         raise ValueError("repeats must be >= 1")
@@ -307,6 +289,10 @@ def run_benchmarks(
     _progress(f"\n{'=' * 70}")
     _progress(title)
     _progress(f"{'=' * 70}")
+    _progress(
+        "Diagnostic benchmark only: short solver budgets on a synthetic problem. "
+        "Use benchmarks/run_code_parity_probe.py for CPU/JAX correctness parity."
+    )
 
     for config in configs:
         _progress(f"\n{'=' * 70}")
@@ -323,6 +309,7 @@ def run_benchmarks(
                 config,
                 optimizer_backend,
                 repeats=repeats,
+                option_overrides=option_overrides,
             )
             backend_summary[optimizer_backend] = float(np.median(repeat_times))
             _progress(
@@ -342,6 +329,11 @@ def run_benchmarks(
                 f"    final fun:   {summarize_result_fun(res):.6e}  "
                 f"iota={float(res['iota']):.6f}"
             )
+            if not res["success"]:
+                _progress(
+                    "    warning: unconverged solve; treat timing as diagnostic only, "
+                    "not as a parity or replacement verdict"
+                )
 
         summaries[config.label] = backend_summary
         if "scipy" in backend_summary and "ondevice" in backend_summary:

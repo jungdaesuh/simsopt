@@ -17,6 +17,9 @@ This benchmark requires a full repo environment with ``simsoptpp`` available.
 On the public JAX ``0.9.2`` lane it defaults to ``optimizer_backend="scipy"``.
 ``ondevice`` and ``hybrid`` remain private-runtime backends that require the
 separate JAX ``0.6.2`` optimizer lane.
+
+This script is a diagnostic timing benchmark, not the CPU/GPU correctness gate.
+Use ``benchmarks/run_code_parity_probe.py`` for solver parity checks.
 """
 
 from __future__ import annotations
