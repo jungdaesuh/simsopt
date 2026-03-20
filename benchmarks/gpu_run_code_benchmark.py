@@ -1,9 +1,9 @@
 # /// script
-# requires-python = ">=3.10"
+# requires-python = ">=3.11"
 # dependencies = [
-#     "jax[cuda12]",
-#     "numpy",
-#     "scipy",
+#     "jax[cuda12]==0.9.2",
+#     "numpy>=2.0",
+#     "scipy>=1.13",
 # ]
 # ///
 """
@@ -13,8 +13,9 @@ Usage:
     PYTHONPATH=src hf jobs uv run benchmarks/gpu_run_code_benchmark.py --flavor a100-large --timeout 15m
 
 This benchmark requires a full repo environment with ``simsoptpp`` available.
-It compares the least-squares inner-solver backends on the same run_code path:
-``optimizer_backend=scipy``, ``ondevice``, and ``hybrid``.
+On the public JAX ``0.9.2`` lane it defaults to ``optimizer_backend="scipy"``.
+``ondevice`` and ``hybrid`` remain private-runtime backends that require the
+separate JAX ``0.6.2`` optimizer lane.
 """
 
 from __future__ import annotations
@@ -37,8 +38,9 @@ jax.config.update("jax_enable_x64", True)
 
 from benchmarks.benchmark_config import available_config_labels, resolve_configs
 from benchmarks.run_code_benchmark_common import (
-    DEFAULT_BACKENDS,
+    BENCHMARK_BACKEND_CHOICES,
     print_provenance,
+    resolve_benchmark_backends,
     run_benchmarks,
 )
 
@@ -54,7 +56,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--backend",
         action="append",
-        choices=DEFAULT_BACKENDS,
+        choices=BENCHMARK_BACKEND_CHOICES,
         help="Optimizer backend to benchmark. Repeat to run multiple backends.",
     )
     parser.add_argument(
@@ -68,11 +70,12 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    print_provenance("JAX run_code() GPU Benchmark")
+    backends = resolve_benchmark_backends(args.backend)
+    print_provenance("JAX run_code() GPU Benchmark", backends)
     run_benchmarks(
         title="JAX run_code() GPU Benchmark",
         configs=resolve_configs(args.config),
-        backends=tuple(args.backend) if args.backend else DEFAULT_BACKENDS,
+        backends=backends,
         repeats=args.repeats,
     )
     print(f"\n{'=' * 70}\nBENCHMARK COMPLETE\n{'=' * 70}")

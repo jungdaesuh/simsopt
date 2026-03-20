@@ -1,5 +1,6 @@
 #include "magneticfield_wireframe.h"
 #include "wireframe_field_impl.h"
+#include "xtensor_compat.h"
 #include <fmt/core.h>
 #include <fmt/format.h>
 #include <xtensor/xarray.hpp>
@@ -89,7 +90,7 @@ void WireframeField<T, Array, IntArray>::compute(int derivatives) {
             if(derivatives == 0){
                 wireframe_field_kernel<Array, 0>(pointsx, pointsy, pointsz, 
                     node0, node1, Bij, dummyjac, dummyhess);
-                Bi += seg_signs[j] * Bij;
+                simsoptpp::axpy_array(Bi, Bij, seg_signs[j]);
 
             } else {
     
@@ -98,8 +99,8 @@ void WireframeField<T, Array, IntArray>::compute(int derivatives) {
                                      fmt::format("dB_{}", i), {npoints, 3, 3});
                     wireframe_field_kernel<Array, 1>(pointsx, pointsy, pointsz, 
                         node0, node1, Bij, dBij, dummyhess);
-                    Bi += seg_signs[j] * Bij;
-                    dBi += seg_signs[j] * dBij;
+                    simsoptpp::axpy_array(Bi, Bij, seg_signs[j]);
+                    simsoptpp::axpy_array(dBi, dBij, seg_signs[j]);
 
                 } else {
     

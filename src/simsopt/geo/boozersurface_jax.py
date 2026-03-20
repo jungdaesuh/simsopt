@@ -952,7 +952,7 @@ class BoozerSurfaceJAX(Optimizable):
             "fun": float(0.5 * np.mean(np.square(np.asarray(exact_residual)))),
             "jacobian": np.asarray(J),
             "iter": result["nit"],
-            "success": result["success"],
+            "success": bool(result["success"]),
             "G": G_final,
             "s": s,
             "iota": iota_final,

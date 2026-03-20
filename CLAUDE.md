@@ -9,13 +9,24 @@ Branch: `jax-port`. Parent repo: `columbia/simsopt`.
 
 Two environments are relevant:
 
-**M1 pure-JAX tests** (no simsoptpp):
+**Public JAX lane** (`optimizer_backend="scipy"`, no private optimizer):
+```bash
+conda env create -f envs/columbia-jax-0.9.2.yml
+conda activate columbia-jax-0.9.2
+pip install -e ".[JAX]"
+```
+- JAX 0.9.2, jaxlib 0.9.2, NumPy 2.x, Python 3.11
+- use this lane for import smoke, pure-JAX unit tests, Stage 2 parity, and the
+  public CPU/GPU parity work
+
+**Private optimizer lane** (on-device / hybrid runtime still pinned):
 ```bash
 conda run -n columbia-repro-b4815f18 <command>
 ```
 - JAX 0.6.2 (CPU), numpy 1.26.4, Python 3.10
 - simsoptpp (C++ extension) is NOT installed in this env
-- For GPU: install `jaxlib[cuda12]` and set `JAX_PLATFORMS=cuda`
+- use this lane only for `optimizer_backend="ondevice"` /
+  `optimizer_backend="hybrid"` until the private optimizer is migrated
 
 **M2 integration tests** (needs simsoptpp for CPU parity):
 ```bash
@@ -32,8 +43,11 @@ After every code change, run lint, format, and tests:
 ruff check <changed-files>
 ruff format <changed-files>
 
-# M1–M4 unit tests (no simsoptpp) — 93 pass, 5 skip
-conda run -n columbia-repro-b4815f18 python -m pytest tests/field/test_biotsavart_jax.py tests/geo/test_surface_fourier_jax.py tests/geo/test_boozer_residual_jax.py tests/objectives/test_integral_bdotn_jax.py tests/geo/test_boozer_derivatives_jax.py tests/geo/test_boozersurface_jax.py -v
+# Public pure-JAX unit tests (no simsoptpp)
+conda run -n columbia-jax-0.9.2 python -m pytest tests/test_jax_import_smoke.py tests/field/test_biotsavart_jax.py tests/geo/test_surface_fourier_jax.py tests/geo/test_boozer_residual_jax.py tests/objectives/test_integral_bdotn_jax.py tests/geo/test_boozer_derivatives_jax.py tests/geo/test_boozersurface_jax.py tests/integration/test_jax_native_path.py -m "not private_optimizer_062" -v
+
+# Private optimizer tests (still pinned to JAX 0.6.2)
+conda run -n columbia-repro-b4815f18 python -m pytest tests/geo/test_boozersurface_jax.py tests/integration/test_single_stage_jax.py -m "private_optimizer_062" -v
 
 # M2+M5 integration tests (needs simsoptpp) — 37 pass
 /Users/suhjungdae/code/hbt-compare/envs/candidate-fixed/bin/python -m pytest tests/integration/ -v
@@ -141,7 +155,7 @@ from simsopt.backend import get_backend, is_jax_backend, get_jax_platform
 - **Mixed quadrature support**: `BiotSavartJAX._extract_coil_data_grouped()` groups coils by quadrature point count, evaluates each group via `biot_savart_B`, and sums. This allows TF coils (15-point) and banana coils (128-point) to coexist. The `SquaredFluxJAX` fallback path uses `field.B()` + `jax.grad(integral)` + `field.B_vjp()` chain, which also handles mixed quadrature correctly.
 - **C++ ANGLE_RECOMPUTE brace pattern**: In `surfacerzfourier.cpp`, the VJP loops use `if(i % ANGLE_RECOMPUTE == 0)` to periodically recompute trig values. These blocks require explicit `{}` braces — bare `if` only guards the first statement, making costerm unconditional. Always add braces when touching these blocks.
 - **JAX scalar boundary conversions**: JAX integer/boolean scalars from `jnp` must be cast to `int()`/`bool()` before storing in result dicts consumed by SciPy or NumPy callers. Pattern: `"iter": int(result.nit), "success": bool(result.success)`.
-- **BFGS device residency**: `BoozerSurfaceJAX` least-squares solves now support `optimizer_backend="ondevice"` and `optimizer_backend="hybrid"` via the private JAX 0.6.2 line-search implementation in `optimizer_jax.py`. `optimizer_backend="scipy"` remains the default least-squares path; exact Newton solves do not consume `optimizer_backend`.
+- **BFGS device residency**: `BoozerSurfaceJAX` least-squares solves expose three backends, but only `optimizer_backend="scipy"` is part of the public JAX 0.9.2 lane right now. `optimizer_backend="ondevice"` and `optimizer_backend="hybrid"` still depend on the private JAX 0.6.2 line-search implementation in `optimizer_jax.py`.
 
 ## Code Review History
 

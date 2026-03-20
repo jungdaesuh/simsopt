@@ -1,8 +1,8 @@
 # /// script
-# requires-python = ">=3.10"
+# requires-python = ">=3.11"
 # dependencies = [
-#     "numpy",
-#     "scipy",
+#     "numpy>=2.0",
+#     "scipy>=1.13",
 #     "cmake<3.30",
 #     "ninja",
 #     "scikit-build-core",
@@ -35,6 +35,16 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
 from benchmarks.benchmark_config import available_config_labels, resolve_configs
+
+
+def get_git_sha():
+    result = subprocess.run(
+        ["git", "-C", str(REPO_ROOT), "rev-parse", "HEAD"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return result.stdout.strip()
 
 
 def build_simsopt():
@@ -120,6 +130,7 @@ def run_benchmarks(*, configs, repeats):
     """Run Boozer solve through the CPU C++ path."""
     # Add the local repo to path so simsopt is importable
     sys.path.insert(0, str(REPO_ROOT / "src"))
+    print(f"Repo SHA: {get_git_sha()}")
 
     from simsopt.geo import SurfaceXYZTensorFourier, BoozerSurface, CurveXYZFourier
     from simsopt.geo.surfaceobjectives import Volume
@@ -220,7 +231,7 @@ def run_benchmarks(*, configs, repeats):
             maxiter=boozer.options["bfgs_maxiter"],
             verbose=boozer.options["verbose"],
             limited_memory=boozer.options["limited_memory"],
-            weight_inv_modB=boozer.options["weight_inv_modB"],
+            weight_inv_modB=boozer.options.get("weight_inv_modB", False),
         )
         ls_time = time.perf_counter() - t0
 
@@ -234,7 +245,7 @@ def run_benchmarks(*, configs, repeats):
             tol=boozer.options["newton_tol"],
             maxiter=boozer.options["newton_maxiter"],
             stab=0.0,
-            weight_inv_modB=boozer.options["weight_inv_modB"],
+            weight_inv_modB=boozer.options.get("weight_inv_modB", False),
         )
         newton_time = time.perf_counter() - t0
         print(

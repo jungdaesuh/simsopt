@@ -1,6 +1,6 @@
 # /// script
-# requires-python = ">=3.10"
-# dependencies = ["numpy"]
+# requires-python = ">=3.11"
+# dependencies = ["numpy>=2.0"]
 # ///
 import subprocess, shutil, sys
 checks = ["cmake", "g++", "make", "git", "apt"]

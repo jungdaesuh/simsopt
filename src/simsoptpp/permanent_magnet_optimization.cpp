@@ -2,6 +2,7 @@
 #include <Eigen/Dense>
 #include "simdhelpers.h"
 #include "vec3dsimd.h"
+#include "xtensor_compat.h"
 #include "xtensor/xsort.hpp"
 #include "xtensor/xview.hpp"
 #include <functional>
@@ -187,7 +188,7 @@ std::tuple<Array, Array, Array, Array> MwPGP_algorithm(Array& A_obj, Array& b_ob
     eigen_res = eigen_v*eigen_mat.transpose()*eigen_mat + 2 * eigen_v * (reg_l2 + 1.0 / (2.0 * nu));
 
     // subtract off A^T * b + m_proxy / nu for fully initialized g
-    g -= ATb_rs;
+    simsoptpp::subtract_array(g, ATb_rs);
 
     // initialize p as phi(m0, g)
 #pragma omp parallel for

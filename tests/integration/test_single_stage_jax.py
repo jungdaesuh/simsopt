@@ -822,6 +822,7 @@ class TestExactPathSolve:
         )
 
 
+@pytest.mark.private_optimizer_062
 class TestOnDeviceBackendIntegration:
     """Exercise the real on-device LS solve against simsoptpp-backed fixtures."""
 

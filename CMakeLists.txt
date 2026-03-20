@@ -129,7 +129,7 @@ pybind11_add_module(${PROJECT_NAME}
     src/simsoptpp/dipole_field.cpp src/simsoptpp/permanent_magnet_optimization.cpp
     src/simsoptpp/dommaschk.cpp src/simsoptpp/reiman.cpp src/simsoptpp/tracing.cpp
     src/simsoptpp/magneticfield_biotsavart.cpp src/simsoptpp/python_boozermagneticfield.cpp
-    src/simsoptpp/boozerradialinterpolant.cpp src/simsoptpp/curveplanarfourier.cpp
+    src/simsoptpp/boozerradialinterpolant.cpp
     src/simsoptpp/magneticfield_wireframe.cpp
     src/simsoptpp/wireframe_optimization.cpp
     )
@@ -138,6 +138,18 @@ set_target_properties(${PROJECT_NAME}
     PROPERTIES
     CXX_STANDARD 17
     CXX_STANDARD_REQUIRED ON)
+
+if(APPLE)
+    set(_simsoptpp_rpaths "/usr/lib")
+    if(DEFINED ENV{CONDA_PREFIX})
+        list(APPEND _simsoptpp_rpaths "$ENV{CONDA_PREFIX}/lib")
+    endif()
+    set_target_properties(${PROJECT_NAME}
+        PROPERTIES
+        BUILD_RPATH "${_simsoptpp_rpaths}"
+        INSTALL_RPATH "${_simsoptpp_rpaths}"
+        BUILD_WITH_INSTALL_RPATH ON)
+endif()
 
 target_include_directories(${PROJECT_NAME} PRIVATE "thirdparty/xtensor/include" "thirdparty/xtensor-python/include" "thirdparty/xsimd/include" "thirdparty/xtl/include" "thirdparty/eigen" ${Python_NumPy_INCLUDE_DIRS} "src/simsoptpp/")
 target_link_libraries(${PROJECT_NAME} PRIVATE fmt::fmt-header-only)

@@ -1,5 +1,6 @@
 #include "biot_savart_vjp_impl.h"
 #include "biot_savart_vjp_py.h"
+#include "xtensor_compat.h"
 
 void biot_savart_vjp(Array& points, vector<Array>& gammas, vector<Array>& dgamma_by_dphis, vector<double>& currents, Array& v, Array& vgrad, vector<Array>& dgamma_by_dcoeffs, vector<Array>& d2gamma_by_dphidcoeffs, vector<Array>& res_B, vector<Array>& res_dB){
     auto pointsx = AlignedPaddedVec(points.shape(0), 0);
@@ -57,9 +58,9 @@ void biot_savart_vjp(Array& points, vector<Array>& gammas, vector<Array>& dgamma
             }
         }
         double fak = (currents[i] * 1e-7/gammas[i].shape(0));
-        res_B[i] *= fak;
+        simsoptpp::scale_array(res_B[i], fak);
         if(compute_dB)
-            res_dB[i] *= fak;
+            simsoptpp::scale_array(res_dB[i], fak);
     }
 }
 
@@ -89,11 +90,11 @@ void biot_savart_vjp_graph(Array& points, vector<Array>& gammas, vector<Array>& 
                     dummy, dummy, dummy);
 
         double fak = (currents[i] * 1e-7/gammas[i].shape(0));
-        res_gamma[i] *= fak;
-        res_dgamma_by_dphi[i] *= fak;
+        simsoptpp::scale_array(res_gamma[i], fak);
+        simsoptpp::scale_array(res_dgamma_by_dphi[i], fak);
         if(compute_dB) {
-            res_grad_gamma[i] *= fak;
-            res_grad_dgamma_by_dphi[i] *= fak;
+            simsoptpp::scale_array(res_grad_gamma[i], fak);
+            simsoptpp::scale_array(res_grad_dgamma_by_dphi[i], fak);
         }
     }
 }
@@ -124,11 +125,11 @@ void biot_savart_vector_potential_vjp_graph(Array& points, vector<Array>& gammas
                     dummy, dummy, dummy);
 
         double fak = (currents[i] * 1e-7/gammas[i].shape(0));
-        res_gamma[i] *= fak;
-        res_dgamma_by_dphi[i] *= fak;
+        simsoptpp::scale_array(res_gamma[i], fak);
+        simsoptpp::scale_array(res_dgamma_by_dphi[i], fak);
         if(compute_dA) {
-            res_grad_gamma[i] *= fak;
-            res_grad_dgamma_by_dphi[i] *= fak;
+            simsoptpp::scale_array(res_grad_gamma[i], fak);
+            simsoptpp::scale_array(res_grad_dgamma_by_dphi[i], fak);
         }
     }
 }

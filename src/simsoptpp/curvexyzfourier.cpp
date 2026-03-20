@@ -1,9 +1,10 @@
 #include "curvexyzfourier.h"
+#include "xtensor_compat.h"
 
 template<class Array>
 void CurveXYZFourier<Array>::gamma_impl(Array& data, Array& quadpoints) {
     int numquadpoints = quadpoints.size();
-    data *= 0;
+    simsoptpp::fill_array(data, 0.0);
     for (int k = 0; k < numquadpoints; ++k) {
         for (int i = 0; i < 3; ++i) {
             data(k, i) += dofs[i][0];
@@ -17,7 +18,7 @@ void CurveXYZFourier<Array>::gamma_impl(Array& data, Array& quadpoints) {
 
 template<class Array>
 void CurveXYZFourier<Array>::gammadash_impl(Array& data) {
-    data *= 0;
+    simsoptpp::fill_array(data, 0.0);
     for (int k = 0; k < numquadpoints; ++k) {
         for (int i = 0; i < 3; ++i) {
             for (int j = 1; j < order+1; ++j) {
@@ -30,7 +31,7 @@ void CurveXYZFourier<Array>::gammadash_impl(Array& data) {
 
 template<class Array>
 void CurveXYZFourier<Array>::gammadashdash_impl(Array& data) {
-    data *= 0;
+    simsoptpp::fill_array(data, 0.0);
     for (int k = 0; k < numquadpoints; ++k) {
         for (int i = 0; i < 3; ++i) {
             for (int j = 1; j < order+1; ++j) {
@@ -43,7 +44,7 @@ void CurveXYZFourier<Array>::gammadashdash_impl(Array& data) {
 
 template<class Array>
 void CurveXYZFourier<Array>::gammadashdashdash_impl(Array& data) {
-    data *= 0;
+    simsoptpp::fill_array(data, 0.0);
     for (int k = 0; k < numquadpoints; ++k) {
         for (int i = 0; i < 3; ++i) {
             for (int j = 1; j < order+1; ++j) {

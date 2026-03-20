@@ -1,5 +1,6 @@
 #include "biot_savart_impl.h"
 #include "biot_savart_py.h"
+#include "xtensor_compat.h"
 
 void biot_savart(Array& points, vector<Array>& gammas, vector<Array>& dgamma_by_dphis, vector<Array>& B, vector<Array>& dB_by_dX, vector<Array>& d2B_by_dXdX) {
     auto pointsx = AlignedPaddedVec(points.shape(0), 0);
@@ -48,7 +49,7 @@ Array biot_savart_B(Array& points, vector<Array>& gammas, vector<Array>& dgamma_
     biot_savart(points, gammas, dgamma_by_dphis, Bs, dB_by_dXs, d2B_by_dXdXs);
     Array B = xt::zeros<double>({points.shape(0), points.shape(1)});
     for (int i = 0; i < num_coils; ++i) {
-        B += currents[i] * Bs[i];
+        simsoptpp::axpy_array(B, Bs[i], currents[i]);
     }
     return B;
 }

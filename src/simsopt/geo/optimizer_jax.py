@@ -135,7 +135,8 @@ def _require_private_optimizer_runtime(x0):
     if jax.__version__ != _EXPECTED_JAX_VERSION:
         raise RuntimeError(
             f"On-device optimizer is pinned to JAX {_EXPECTED_JAX_VERSION}; "
-            f"found {jax.__version__}."
+            f"found {jax.__version__}. Use optimizer_backend='scipy' on the "
+            "public JAX 0.9.2 lane until the private optimizer migration is complete."
         )
     if jnp.zeros(1).dtype != jnp.float64:
         raise RuntimeError(

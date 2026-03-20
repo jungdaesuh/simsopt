@@ -99,6 +99,7 @@ _boozer_ls_coil_vjp = _bsj._boozer_ls_coil_vjp
 BoozerSurfaceJAX = _bsj.BoozerSurfaceJAX
 _ensure_solved_jax = _soj._ensure_solved
 _resolved_boozer_G_jax = _soj._resolved_boozer_G
+PRIVATE_OPTIMIZER_062 = pytest.mark.private_optimizer_062
 
 
 # ---------------------------------------------------------------------------
@@ -489,6 +490,7 @@ class TestOptimizerAdapter:
         np.testing.assert_allclose(result["x"], x_exact, atol=1e-12)
         assert result["success"]
 
+    @PRIVATE_OPTIMIZER_062
     def test_hybrid_skips_continuation_after_scipy_success(self, monkeypatch):
         """Hybrid mode must return the SciPy prefix directly on convergence."""
         prefix = types.SimpleNamespace(
@@ -524,6 +526,7 @@ class TestOptimizerAdapter:
 
         assert result is prefix
 
+    @PRIVATE_OPTIMIZER_062
     def test_hybrid_skips_nonfinite_prefix_state(self, monkeypatch):
         """Hybrid mode must not continue from a non-finite SciPy prefix."""
         prefix = types.SimpleNamespace(
@@ -560,6 +563,7 @@ class TestOptimizerAdapter:
         assert result.success is False
         assert "non-finite state" in result.message
 
+    @PRIVATE_OPTIMIZER_062
     def test_hybrid_prefix_cap_and_total_iteration_count(self, monkeypatch):
         """Hybrid mode must cap the SciPy prefix and report total nit."""
         captured = {}
@@ -624,6 +628,7 @@ class TestOptimizerAdapter:
         assert captured["initial_k"] == 0
         assert result.nit == 5
 
+    @PRIVATE_OPTIMIZER_062
     def test_hybrid_missing_hess_inv_falls_back_to_identity(self, monkeypatch):
         """Hybrid continuation must recover when SciPy exposes no dense hess_inv."""
         prefix = types.SimpleNamespace(
@@ -681,6 +686,7 @@ class TestOptimizerAdapter:
 
         assert result.success is True
 
+    @PRIVATE_OPTIMIZER_062
     def test_hybrid_degenerate_hess_inv_resets_to_identity(self, monkeypatch):
         """Hybrid continuation must reject non-descent warm-start Hessians."""
         prefix = types.SimpleNamespace(
@@ -735,6 +741,7 @@ class TestOptimizerAdapter:
 
         assert result.success is True
 
+    @PRIVATE_OPTIMIZER_062
     def test_hybrid_zero_budget_uses_scipy_prefix_only(self, monkeypatch):
         """Hybrid maxiter=0 must still take the SciPy-prefix path."""
         captured = {}
@@ -775,6 +782,7 @@ class TestOptimizerAdapter:
         assert captured["prefix_maxiter"] == 0
         assert result is prefix
 
+    @PRIVATE_OPTIMIZER_062
     def test_hybrid_maxiter_one_still_uses_prefix_path(self, monkeypatch):
         """Hybrid maxiter=1 must still enter via the SciPy-prefix seam."""
         captured = {}
@@ -858,6 +866,7 @@ class TestOptimizerAdapter:
         assert int(result.status) == 0
         assert float(result.f_k) < 1e-20
 
+    @PRIVATE_OPTIMIZER_062
     @pytest.mark.skipif(
         jax.__version__ != "0.6.2",
         reason="Private on-device optimizer behavior is pinned to the JAX 0.6.2 runtime.",
@@ -872,6 +881,7 @@ class TestOptimizerAdapter:
                 maxiter=3,
             )
 
+    @PRIVATE_OPTIMIZER_062
     @pytest.mark.skipif(
         jax.__version__ != "0.6.2",
         reason="Private on-device optimizer behavior is pinned to the JAX 0.6.2 runtime.",
@@ -890,6 +900,7 @@ class TestOptimizerAdapter:
         assert result.status == 1
         assert result.success is False
 
+    @PRIVATE_OPTIMIZER_062
     @pytest.mark.skipif(
         jax.__version__ != "0.6.2",
         reason="Private on-device optimizer behavior is pinned to the JAX 0.6.2 runtime.",
@@ -908,6 +919,7 @@ class TestOptimizerAdapter:
         assert result.status == 0
         assert result.success is True
 
+    @PRIVATE_OPTIMIZER_062
     @pytest.mark.skipif(
         jax.__version__ != "0.6.2",
         reason="Private on-device optimizer behavior is pinned to the JAX 0.6.2 runtime.",
@@ -926,6 +938,7 @@ class TestOptimizerAdapter:
         assert result.status == 1
         assert result.success is False
 
+    @PRIVATE_OPTIMIZER_062
     @pytest.mark.skipif(
         jax.__version__ != "0.6.2",
         reason="Private on-device optimizer behavior is pinned to the JAX 0.6.2 runtime.",
@@ -954,6 +967,7 @@ class TestOptimizerAdapter:
         assert np.isnan(float(result.fun))
         assert "non-finite objective or gradient" in result.message
 
+    @PRIVATE_OPTIMIZER_062
     @pytest.mark.skipif(
         jax.__version__ != "0.6.2",
         reason="Private on-device optimizer behavior is pinned to the JAX 0.6.2 runtime.",
@@ -983,6 +997,7 @@ class TestOptimizerAdapter:
         assert np.all(np.isfinite(np.asarray(result.x)))
         assert np.all(np.isfinite(np.asarray(result.jac)))
 
+    @PRIVATE_OPTIMIZER_062
     @pytest.mark.skipif(
         jax.__version__ != "0.6.2",
         reason="Private on-device optimizer behavior is pinned to the JAX 0.6.2 runtime.",
@@ -1327,6 +1342,7 @@ class TestLBFGSMethod:
         result = jax_minimize(obj, x0, method="lbfgs", tol=1e-10, maxiter=200)
         assert float(result.fun) < val_init
 
+    @PRIVATE_OPTIMIZER_062
     @pytest.mark.skipif(
         jax.__version__ != "0.6.2",
         reason="lbfgs-ondevice budget behavior is pinned to the JAX 0.6.2 runtime.",
@@ -1345,6 +1361,7 @@ class TestLBFGSMethod:
         assert result.status == 1
         assert result.success is False
 
+    @PRIVATE_OPTIMIZER_062
     @pytest.mark.skipif(
         jax.__version__ != "0.6.2",
         reason="lbfgs-ondevice behavior is pinned to the JAX 0.6.2 runtime.",
@@ -1363,6 +1380,7 @@ class TestLBFGSMethod:
         assert float(result.fun) < float(quad(x0))
         assert np.linalg.norm(np.asarray(result.x)) < np.linalg.norm(np.asarray(x0))
 
+    @PRIVATE_OPTIMIZER_062
     @pytest.mark.skipif(
         jax.__version__ != "0.6.2",
         reason="lbfgs-ondevice behavior is pinned to the JAX 0.6.2 runtime.",
@@ -1388,6 +1406,7 @@ class TestLBFGSMethod:
             assert current.status == baseline.status
             assert current.success == baseline.success
 
+    @PRIVATE_OPTIMIZER_062
     @pytest.mark.skipif(
         jax.__version__ != "0.6.2",
         reason="lbfgs-ondevice behavior is pinned to the JAX 0.6.2 runtime.",
@@ -1920,6 +1939,7 @@ class TestBoozerSurfaceJAXClass:
         assert res["PLU"] is not None
         assert callable(res["vjp"])
 
+    @PRIVATE_OPTIMIZER_062
     def test_run_code_ondevice_limited_memory_routes_to_lbfgs(self, monkeypatch):
         """limited_memory=True must route LS solves through lbfgs-ondevice."""
         booz = _make_mock_boozer_surface()
@@ -1962,6 +1982,7 @@ class TestBoozerSurfaceJAXClass:
         assert captured["method"] == "lbfgs-ondevice"
         assert res["success"] is True
 
+    @PRIVATE_OPTIMIZER_062
     @pytest.mark.skipif(
         jax.__version__ != "0.6.2",
         reason="On-device limited-memory solve is pinned to the JAX 0.6.2 runtime.",
@@ -2058,6 +2079,32 @@ def _run_mock_exact_boozer(booz, iota=0.3, G=0.05):
         return booz.run_code(iota=iota, G=G)
 
 
+@contextmanager
+def _patched_exact_newton_result(*, success, step=0.1, nit=3):
+    original_newton_exact = _bsj.newton_exact
+
+    def fake_newton_exact(_residual_fn, x0, *, maxiter, tol):
+        del maxiter, tol
+        n = x0.shape[0]
+        return {
+            "x": x0 + step,
+            "jacobian": jnp.eye(n, dtype=x0.dtype),
+            "nit": nit,
+            "success": success,
+        }
+
+    _bsj.newton_exact = fake_newton_exact
+    try:
+        yield
+    finally:
+        _bsj.newton_exact = original_newton_exact
+
+
+def _run_mock_exact_boozer_success(booz, iota=0.3, G=0.05):
+    with _patched_exact_newton_result(success=True):
+        return _run_mock_exact_boozer(booz, iota=iota, G=G)
+
+
 class TestBoozerSurfaceJAXExactPath:
     """Test the exact (Newton) path of BoozerSurfaceJAX.
 
@@ -2078,7 +2125,7 @@ class TestBoozerSurfaceJAXExactPath:
     def test_run_code_exact_converges(self):
         """run_code() exact path runs and returns a result dict."""
         booz = _make_mock_boozer_surface_exact()
-        res = _run_mock_exact_boozer(booz)
+        res = _run_mock_exact_boozer_success(booz)
         assert res is not None
         assert res["type"] == "exact"
         assert booz.need_to_run_code is False
@@ -2086,7 +2133,7 @@ class TestBoozerSurfaceJAXExactPath:
     def test_exact_result_dict_keys(self):
         """Exact-path result dict has all CPU-contract keys."""
         booz = _make_mock_boozer_surface_exact()
-        res = _run_mock_exact_boozer(booz)
+        res = _run_mock_exact_boozer_success(booz)
         expected_keys = {
             "residual",
             "fun",
@@ -2111,7 +2158,7 @@ class TestBoozerSurfaceJAXExactPath:
     def test_exact_fun_tracks_exact_system_residual(self):
         """Exact-path fun must reflect the actual Newton system residual."""
         booz = _make_mock_boozer_surface_exact()
-        res = _run_mock_exact_boozer(booz)
+        res = _run_mock_exact_boozer_success(booz)
         mask_indices = booz._compute_stellsym_mask_indices()
         res_fn = booz._make_exact_residual(mask_indices)
         x_final = booz._pack_decision_vector(res["iota"], res["G"])
@@ -2169,7 +2216,7 @@ class TestBoozerSurfaceJAXExactPath:
     def test_exact_mask_is_boolean(self):
         """CPU contract: mask is a boolean array, not integer indices."""
         booz = _make_mock_boozer_surface_exact()
-        res = _run_mock_exact_boozer(booz)
+        res = _run_mock_exact_boozer_success(booz)
         mask = res["mask"]
         assert mask.dtype == np.bool_, f"mask dtype should be bool, got {mask.dtype}"
         nphi = len(booz.quadpoints_phi)
@@ -2179,7 +2226,7 @@ class TestBoozerSurfaceJAXExactPath:
     def test_exact_residual_is_raw_unmasked(self):
         """CPU contract: residual is the full unmasked Boozer residual."""
         booz = _make_mock_boozer_surface_exact()
-        res = _run_mock_exact_boozer(booz)
+        res = _run_mock_exact_boozer_success(booz)
         nphi = len(booz.quadpoints_phi)
         ntheta = len(booz.quadpoints_theta)
         assert res["residual"].shape == (3 * nphi * ntheta,), (
@@ -2190,7 +2237,7 @@ class TestBoozerSurfaceJAXExactPath:
     def test_exact_mask_selects_from_residual(self):
         """mask can index into residual (CPU pattern: r[mask])."""
         booz = _make_mock_boozer_surface_exact()
-        res = _run_mock_exact_boozer(booz)
+        res = _run_mock_exact_boozer_success(booz)
         masked_r = res["residual"][res["mask"]]
         assert masked_r.ndim == 1
         assert len(masked_r) <= len(res["residual"])
@@ -2199,26 +2246,30 @@ class TestBoozerSurfaceJAXExactPath:
     def test_exact_idempotent(self):
         """Second run_code() returns None when not dirty."""
         booz = _make_mock_boozer_surface_exact()
-        _run_mock_exact_boozer(booz)
+        _run_mock_exact_boozer_success(booz)
         assert booz.run_code(iota=0.3, G=0.05) is None
 
-    def test_exact_invalid_newton_iterate_aborts_adjoint_state(self, monkeypatch):
+    def test_exact_invalid_newton_iterate_aborts_adjoint_state(self):
         """Exact-path failures must not expose PLU/VJP placeholders."""
         booz = _make_mock_boozer_surface_exact()
         dofs_before = booz.surface.get_dofs()
 
-        def fake_newton_exact(_residual_fn, x0, *, maxiter, tol):
-            del maxiter, tol
-            n = x0.shape[0]
-            return {
-                "x": jnp.full_like(x0, jnp.nan),
-                "jacobian": jnp.full((n, n), jnp.nan, dtype=x0.dtype),
-                "nit": 0,
-                "success": False,
-            }
+        with _patched_exact_newton_result(success=False, step=jnp.nan, nit=0):
+            res = _run_mock_exact_boozer(booz)
 
-        monkeypatch.setattr(_bsj, "newton_exact", fake_newton_exact)
-        res = _run_mock_exact_boozer(booz)
+        assert res["success"] is False
+        assert res["PLU"] is None
+        assert res["vjp"] is None
+        assert res["mask"] is None
+        np.testing.assert_allclose(booz.surface.get_dofs(), dofs_before)
+
+    def test_exact_unsuccessful_finite_newton_exit_aborts_adjoint_state(self):
+        """Finite exact-Newton failures must not publish solved adjoint state."""
+        booz = _make_mock_boozer_surface_exact()
+        dofs_before = booz.surface.get_dofs()
+
+        with _patched_exact_newton_result(success=False):
+            res = _run_mock_exact_boozer(booz)
 
         assert res["success"] is False
         assert res["PLU"] is None

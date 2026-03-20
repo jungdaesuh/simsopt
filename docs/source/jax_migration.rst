@@ -7,6 +7,11 @@ JAX equivalents for callers migrating to the JAX code path.
 The JAX modules do **not** replace the CPU modules.  Both coexist.
 The CPU path remains the default and the correctness oracle.
 
+As of the public JAX ``0.9.2`` lane, the supported least-squares backend is
+``optimizer_backend="scipy"``.  The private ``hybrid`` and ``ondevice``
+backends remain on the separate JAX ``0.6.2`` runtime until the private
+optimizer migration is complete.
+
 Stage 2 (Field + Flux Objective)
 --------------------------------
 
