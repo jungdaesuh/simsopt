@@ -1,7 +1,11 @@
-from . import LHD_like as LHD_like
-from . import zoo as zoo
+import sys
 
 from .LHD_like import *
 from .zoo import *
 
-__all__ = (LHD_like.__all__ + zoo.__all__)
+
+def _module_all(name):
+    return list(sys.modules[f"{__name__}.{name}"].__all__)
+
+
+__all__ = _module_all("LHD_like") + _module_all("zoo")

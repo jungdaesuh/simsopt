@@ -1,10 +1,4 @@
-from . import vmec as vmec
-from . import virtual_casing as virtual_casing
-from . import vmec_diagnostics as vmec_diagnostics
-from . import profiles as profiles
-from . import bootstrap as bootstrap
-from . import boozer as boozer
-from . import spec as spec
+import sys
 
 # coding: utf-8
 # Copyright (c) HiddenSymmetries Development Team.
@@ -18,5 +12,17 @@ from .bootstrap import *
 from .boozer import *
 from .spec import *
 
-__all__ = (vmec.__all__ + virtual_casing.__all__ + vmec_diagnostics.__all__ +
-           profiles.__all__ + bootstrap.__all__ + boozer.__all__ + spec.__all__)
+
+def _module_all(name):
+    return list(sys.modules[f"{__name__}.{name}"].__all__)
+
+
+__all__ = (
+    _module_all("vmec")
+    + _module_all("virtual_casing")
+    + _module_all("vmec_diagnostics")
+    + _module_all("profiles")
+    + _module_all("bootstrap")
+    + _module_all("boozer")
+    + _module_all("spec")
+)

@@ -1,11 +1,18 @@
-from . import constrained as constrained
-from . import fluxobjective as fluxobjective
-from . import least_squares as least_squares
-from . import utilities as utilities
+import sys
 
 from .constrained import *
 from .fluxobjective import *
 from .least_squares import *
 from .utilities import *
 
-__all__ = (fluxobjective.__all__ + least_squares.__all__ + utilities.__all__ + constrained.__all__)
+
+def _module_all(name):
+    return list(sys.modules[f"{__name__}.{name}"].__all__)
+
+
+__all__ = (
+    _module_all("fluxobjective")
+    + _module_all("least_squares")
+    + _module_all("utilities")
+    + _module_all("constrained")
+)

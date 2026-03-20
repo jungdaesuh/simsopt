@@ -1,12 +1,18 @@
-from . import serial as serial
-from . import mpi as mpi
-from . import permanent_magnet_optimization as permanent_magnet_optimization
-from . import wireframe_optimization as wireframe_optimization
+import sys
 
 from .serial import *
 from .mpi import *
 from .permanent_magnet_optimization import *
 from .wireframe_optimization import *
 
-__all__ = (serial.__all__ + mpi.__all__ + permanent_magnet_optimization.__all__
-           + wireframe_optimization.__all__)
+
+def _module_all(name):
+    return list(sys.modules[f"{__name__}.{name}"].__all__)
+
+
+__all__ = (
+    _module_all("serial")
+    + _module_all("mpi")
+    + _module_all("permanent_magnet_optimization")
+    + _module_all("wireframe_optimization")
+)
