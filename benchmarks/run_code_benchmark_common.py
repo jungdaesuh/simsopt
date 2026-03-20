@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 import subprocess
 import time
@@ -17,6 +18,12 @@ from benchmarks.benchmark_config import BenchmarkConfig, DEFAULT_CONFIGS
 REPO_ROOT = Path(__file__).resolve().parents[1]
 EXPECTED_JAX_VERSION = "0.6.2"
 DEFAULT_BACKENDS = ("scipy", "ondevice", "hybrid")
+SOLVER_VERBOSE = os.environ.get("SIMSOPT_BENCHMARK_SOLVER_VERBOSE", "").lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
 
 
 def _progress(message: str) -> None:
@@ -119,7 +126,7 @@ def _make_boozer_surface(config: BenchmarkConfig, optimizer_backend: str):
         vol_target,
         constraint_weight=1.0,
         options={
-            "verbose": False,
+            "verbose": SOLVER_VERBOSE,
             "bfgs_maxiter": 50,
             "bfgs_tol": 1e-8,
             "newton_maxiter": 10,
