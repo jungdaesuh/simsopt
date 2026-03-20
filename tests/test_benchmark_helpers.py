@@ -9,6 +9,13 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from benchmarks.adjoint_fd_validation import (
+    ADJOINT_RESIDUAL_REL_TOL,
+    FIXED_SURFACE_FD_ABS_TOL,
+    FIXED_SURFACE_FD_REL_TOL,
+    RECOMPOSED_TOTAL_REL_TOL,
+    evaluate_adjoint_validation,
+)
 import benchmarks.single_stage_init_parity as single_stage_init_parity_module
 from benchmarks.benchmark_config import DEFAULT_CONFIGS, resolve_configs
 from benchmarks.benchmark_problem import (
@@ -19,6 +26,10 @@ from benchmarks.benchmark_problem import (
 from benchmarks.run_code_benchmark_common import summarize_result_fun
 from benchmarks.single_stage_init_parity import (
     DEFAULT_STAGE2_BS_PATH,
+    DEFAULT_SMOKE_MPOL,
+    DEFAULT_SMOKE_NPHI,
+    DEFAULT_SMOKE_NTHETA,
+    DEFAULT_SMOKE_NTOR,
     FIELD_ERROR_REL_TOL,
     IOTA_ABS_TOL,
     SURFACE_GEOMETRY_REL_TOL,
@@ -134,6 +145,21 @@ def test_single_stage_init_fixture_results_include_required_seed_metadata():
     assert results["TOROIDAL_FLUX"] > 0.0
     assert results["banana_surf_radius"] > 0.0
     assert results["order"] >= 1
+
+
+def test_single_stage_init_defaults_to_reduced_grid_smoke_fixture(monkeypatch):
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["single_stage_init_parity.py", "--output-json", "/tmp/out.json"],
+    )
+
+    args = single_stage_init_parity_module.parse_args()
+
+    assert args.nphi == DEFAULT_SMOKE_NPHI
+    assert args.ntheta == DEFAULT_SMOKE_NTHETA
+    assert args.mpol == DEFAULT_SMOKE_MPOL
+    assert args.ntor == DEFAULT_SMOKE_NTOR
 
 
 def test_repo_pythonpath_env_sets_all_platform_selectors(monkeypatch):
@@ -263,16 +289,16 @@ def test_single_stage_init_case_loads_surface_before_tempdir_cleanup(monkeypatch
 
     observed_paths: list[Path] = []
 
-    def fake_load_surface_gamma(surface_json_path: str) -> np.ndarray:
+    def fake_load_surface_artifacts(surface_json_path: str) -> tuple[np.ndarray, bool]:
         path = Path(surface_json_path)
         observed_paths.append(path)
         assert path.exists()
-        return np.zeros((2, 2, 3))
+        return np.zeros((2, 2, 3)), True
 
     monkeypatch.setattr(
         single_stage_init_parity_module,
-        "_load_surface_gamma",
-        fake_load_surface_gamma,
+        "_load_surface_artifacts",
+        fake_load_surface_artifacts,
     )
 
     payload = single_stage_init_parity_module._run_single_stage_case(
@@ -283,6 +309,7 @@ def test_single_stage_init_case_loads_surface_before_tempdir_cleanup(monkeypatch
 
     assert observed_paths
     np.testing.assert_allclose(payload["surface_gamma"], np.zeros((2, 2, 3)))
+    assert payload["results"]["SELF_INTERSECTING"] is True
 
 
 def test_stage2_e2e_comparison_keeps_field_error_as_hard_gate():
@@ -412,3 +439,77 @@ def test_stage2_e2e_payload_preserves_trajectory_and_timing_artifacts():
     assert payload["jax_trajectory"] == jax_case["trajectory"]
     assert payload["comparison"]["cpu_elapsed_s"] == pytest.approx(12.5)
     assert payload["comparison"]["jax_elapsed_s"] == pytest.approx(8.75)
+
+
+def test_evaluate_adjoint_validation_accepts_stable_metrics():
+    failures = evaluate_adjoint_validation(
+        {
+            "adjoint_residual_rel": ADJOINT_RESIDUAL_REL_TOL / 10.0,
+            "implicit_gradient_finite": True,
+            "implicit_gradient_norm": 1.0,
+            "total_gradient_finite": True,
+            "total_gradient_norm": 2.0,
+            "recomposed_total_rel": RECOMPOSED_TOTAL_REL_TOL / 10.0,
+            "fd_samples": [
+                {
+                    "sample_index": 0,
+                    "accepted": True,
+                    "rel_err": FIXED_SURFACE_FD_REL_TOL / 10.0,
+                    "abs_err": FIXED_SURFACE_FD_ABS_TOL / 10.0,
+                }
+            ],
+        }
+    )
+
+    assert failures == []
+
+
+def test_evaluate_adjoint_validation_reports_real_contract_failures():
+    failures = evaluate_adjoint_validation(
+        {
+            "adjoint_residual_rel": ADJOINT_RESIDUAL_REL_TOL * 10.0,
+            "implicit_gradient_finite": False,
+            "implicit_gradient_norm": 0.0,
+            "total_gradient_finite": False,
+            "total_gradient_norm": 0.0,
+            "recomposed_total_rel": RECOMPOSED_TOTAL_REL_TOL * 10.0,
+            "fd_samples": [
+                {
+                    "sample_index": 0,
+                    "accepted": False,
+                    "rel_err": FIXED_SURFACE_FD_REL_TOL * 10.0,
+                    "abs_err": FIXED_SURFACE_FD_ABS_TOL * 10.0,
+                }
+            ],
+        }
+    )
+
+    assert any("Adjoint solve residual too large" in failure for failure in failures)
+    assert any("Implicit correction produced NaN/inf" in failure for failure in failures)
+    assert any("Implicit correction produced zero gradient" in failure for failure in failures)
+    assert any("Total reduced gradient produced NaN/inf" in failure for failure in failures)
+    assert any("Total reduced gradient is zero" in failure for failure in failures)
+    assert any(
+        "Direct-minus-implicit recomposition drift too large" in failure
+        for failure in failures
+    )
+    assert any(
+        "Fixed-surface FD sample 0 exceeded tolerance" in failure
+        for failure in failures
+    )
+
+
+def test_evaluate_adjoint_validation_rejects_empty_fd_samples():
+    failures = evaluate_adjoint_validation(
+        {
+            "adjoint_residual_rel": ADJOINT_RESIDUAL_REL_TOL / 10.0,
+            "implicit_gradient_finite": True,
+            "implicit_gradient_norm": 1.0,
+            "total_gradient_finite": True,
+            "total_gradient_norm": 2.0,
+            "recomposed_total_rel": RECOMPOSED_TOTAL_REL_TOL / 10.0,
+            "fd_samples": [],
+        }
+    )
+
+    assert failures == ["No fixed-surface FD samples were evaluated."]

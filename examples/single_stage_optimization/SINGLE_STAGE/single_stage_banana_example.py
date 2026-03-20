@@ -1300,6 +1300,9 @@ if __name__ == "__main__":
             VV,
         )
 
+    final_self_intersecting = bool(boozer_surface.surface.is_self_intersecting())
+    run_dict["intersecting"] = final_self_intersecting
+
     # Save the results of optimization to a separate file
     results = {
         "PLASMA_SURF_FILENAME": plasma_surf_filename,
@@ -1343,7 +1346,7 @@ if __name__ == "__main__":
         "FINAL_VOLUME": float(final_volume),
         "FINAL_IOTA": float(final_iota),
         "FIELD_ERROR": float(fieldError),
-        "SELF_INTERSECTING": run_dict["intersecting"],
+        "SELF_INTERSECTING": final_self_intersecting,
         "MAX_CURVATURE": float(final_max_curvature),
         "INITIAL_VOLUME": float(initial_volume),
         "INITIAL_IOTA": float(initial_iota),

@@ -30,6 +30,18 @@ from benchmarks.validation_ladder_common import (
     run_python_script,
     write_json,
 )
+from benchmarks.single_stage_smoke_fixture import (
+    DEFAULT_EQUILIBRIA_DIR,
+    DEFAULT_IOTA_TARGET,
+    DEFAULT_OPTIMIZER_BACKEND,
+    DEFAULT_PLASMA_SURF_FILENAME,
+    DEFAULT_SMOKE_MPOL,
+    DEFAULT_SMOKE_NPHI,
+    DEFAULT_SMOKE_NTHETA,
+    DEFAULT_SMOKE_NTOR,
+    DEFAULT_STAGE2_BS_PATH,
+    DEFAULT_VOL_TARGET,
+)
 
 
 REQUESTED_PLATFORM = preparse_platform(sys.argv[1:])
@@ -41,11 +53,6 @@ import jaxlib
 jax.config.update("jax_enable_x64", True)
 
 
-DEFAULT_PLASMA_SURF_FILENAME = "wout_nfp22ginsburg_000_014417_iota15.nc"
-DEFAULT_STAGE2_SEED_DIR = (
-    REPO_ROOT / "benchmarks" / "fixtures" / "single_stage_seed_iota15"
-)
-DEFAULT_STAGE2_BS_PATH = DEFAULT_STAGE2_SEED_DIR / "biot_savart_opt.json"
 IOTA_ABS_TOL = 1e-3
 VOLUME_REL_TOL = 1e-6
 FIELD_ERROR_REL_TOL = 1e-4
@@ -74,7 +81,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--equilibria-dir",
-        default=str(REPO_ROOT / "examples" / "single_stage_optimization" / "equilibria"),
+        default=str(DEFAULT_EQUILIBRIA_DIR),
         help="Directory that contains VMEC equilibrium files.",
     )
     parser.add_argument(
@@ -87,26 +94,46 @@ def parse_args() -> argparse.Namespace:
         default=str(DEFAULT_STAGE2_BS_PATH),
         help="Path to the fixed Stage 2 seed biot_savart_opt.json fixture.",
     )
-    parser.add_argument("--nphi", type=int, default=255, help="Surface toroidal grid points.")
-    parser.add_argument("--ntheta", type=int, default=64, help="Surface poloidal grid points.")
-    parser.add_argument("--mpol", type=int, default=8, help="Surface poloidal mode count.")
-    parser.add_argument("--ntor", type=int, default=6, help="Surface toroidal mode count.")
+    parser.add_argument(
+        "--nphi",
+        type=int,
+        default=DEFAULT_SMOKE_NPHI,
+        help="Surface toroidal grid points.",
+    )
+    parser.add_argument(
+        "--ntheta",
+        type=int,
+        default=DEFAULT_SMOKE_NTHETA,
+        help="Surface poloidal grid points.",
+    )
+    parser.add_argument(
+        "--mpol",
+        type=int,
+        default=DEFAULT_SMOKE_MPOL,
+        help="Surface poloidal mode count.",
+    )
+    parser.add_argument(
+        "--ntor",
+        type=int,
+        default=DEFAULT_SMOKE_NTOR,
+        help="Surface toroidal mode count.",
+    )
     parser.add_argument(
         "--vol-target",
         type=float,
-        default=0.10,
+        default=DEFAULT_VOL_TARGET,
         help="Single-stage target volume.",
     )
     parser.add_argument(
         "--iota-target",
         type=float,
-        default=0.15,
+        default=DEFAULT_IOTA_TARGET,
         help="Single-stage target iota.",
     )
     parser.add_argument(
         "--optimizer-backend",
         choices=("scipy", "hybrid", "ondevice"),
-        default="scipy",
+        default=DEFAULT_OPTIMIZER_BACKEND,
         help="JAX Boozer optimizer backend for the init probe.",
     )
     return parser.parse_args()
@@ -175,17 +202,25 @@ def _run_single_stage_case(
 
         results_json = find_single_file(output_root, "results.json")
         surf_json = find_single_file(output_root, "surf_init.json")
+        results = dict(load_json(results_json))
+        surface_gamma, surface_self_intersecting = _load_surface_artifacts(
+            str(surf_json)
+        )
+        results["SELF_INTERSECTING"] = surface_self_intersecting
         return {
-            "results": load_json(results_json),
-            "surface_gamma": _load_surface_gamma(str(surf_json)),
+            "results": results,
+            "surface_gamma": surface_gamma,
         }
 
 
-def _load_surface_gamma(surface_json_path: str) -> np.ndarray:
+def _load_surface_artifacts(surface_json_path: str) -> tuple[np.ndarray, bool]:
     from simsopt._core.optimizable import load
 
     surface = load(surface_json_path)
-    return np.asarray(surface.gamma(), dtype=float)
+    return (
+        np.asarray(surface.gamma(), dtype=float),
+        bool(surface.is_self_intersecting()),
+    )
 
 
 def _display_path(path: Path) -> str:
