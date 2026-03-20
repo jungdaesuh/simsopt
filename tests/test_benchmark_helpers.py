@@ -1,4 +1,5 @@
 import argparse
+import json
 from pathlib import Path
 import sys
 import math
@@ -27,6 +28,7 @@ from benchmarks.single_stage_init_parity import (
 from benchmarks.stage2_e2e_comparison import evaluate_stage2_e2e_comparison
 from benchmarks.validation_ladder_common import (
     max_pointwise_geometry_drift,
+    repo_pythonpath_env,
     short_run_geometry_rel_tolerance,
 )
 
@@ -120,6 +122,39 @@ def test_short_run_geometry_rel_tolerance_relaxes_20_iter_smoke_runs():
 def test_single_stage_init_fixture_files_are_vendored():
     assert DEFAULT_STAGE2_BS_PATH.is_file()
     assert DEFAULT_STAGE2_BS_PATH.with_name("results.json").is_file()
+
+
+def test_single_stage_init_fixture_results_include_required_seed_metadata():
+    results = json.loads(DEFAULT_STAGE2_BS_PATH.with_name("results.json").read_text())
+
+    assert results["MAJOR_RADIUS"] > 0.0
+    assert results["TOROIDAL_FLUX"] > 0.0
+    assert results["banana_surf_radius"] > 0.0
+    assert results["order"] >= 1
+
+
+def test_repo_pythonpath_env_sets_all_platform_selectors(monkeypatch):
+    monkeypatch.delenv("PYTHONPATH", raising=False)
+
+    env = repo_pythonpath_env(platform="cpu")
+
+    assert env["JAX_PLATFORMS"] == "cpu"
+    assert env["SIMSOPT_JAX_PLATFORM"] == "cpu"
+    assert env["SIMSOPT_JAX_BACKEND"] == "cpu"
+
+
+def test_repo_pythonpath_env_auto_clears_inherited_platform_selectors(monkeypatch):
+    monkeypatch.setenv("JAX_PLATFORMS", "cuda")
+    monkeypatch.setenv("SIMSOPT_JAX_PLATFORM", "cuda")
+    monkeypatch.setenv("SIMSOPT_JAX_BACKEND", "cuda")
+    monkeypatch.setenv("PYTHONPATH", "/tmp/existing")
+
+    env = repo_pythonpath_env(platform="auto")
+
+    assert "JAX_PLATFORMS" not in env
+    assert "SIMSOPT_JAX_PLATFORM" not in env
+    assert "SIMSOPT_JAX_BACKEND" not in env
+    assert env["PYTHONPATH"].endswith("/tmp/existing")
 
 
 def test_single_stage_init_parity_accepts_small_real_fixture_differences():
