@@ -2,6 +2,7 @@ import argparse
 import os
 import sys
 import json
+import importlib.util
 
 import numpy as np
 from scipy.optimize import minimize
@@ -13,6 +14,38 @@ sys.path.insert(0, EXAMPLE_ROOT)
 
 SIMSOPT_ROOT = os.path.abspath(os.path.join(EXAMPLE_ROOT, "..", ".."))
 REPO_ROOT = os.path.abspath(os.path.join(SIMSOPT_ROOT, ".."))
+SRC_ROOT = os.path.join(SIMSOPT_ROOT, "src")
+sys.path.insert(0, SRC_ROOT)
+
+
+def bootstrap_local_simsopt():
+    """Force repo scripts to import the local simsopt source tree."""
+    package_root = os.path.join(SRC_ROOT, "simsopt")
+    sys.meta_path = [
+        finder
+        for finder in sys.meta_path
+        if not (
+            type(finder).__name__ == "ScikitBuildRedirectingFinder"
+            and type(finder).__module__ == "_simsopt_editable"
+        )
+    ]
+    for name in list(sys.modules):
+        if name == "simsopt" or name.startswith("simsopt."):
+            del sys.modules[name]
+    spec = importlib.util.spec_from_file_location(
+        "simsopt",
+        os.path.join(package_root, "__init__.py"),
+        submodule_search_locations=[package_root],
+    )
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"Failed to bootstrap local simsopt package from {package_root}")
+    module = importlib.util.module_from_spec(spec)
+    module.__path__ = [package_root]
+    sys.modules["simsopt"] = module
+    spec.loader.exec_module(module)
+
+
+bootstrap_local_simsopt()
 DATABASE_EQUILIBRIA_DIR = os.path.join(REPO_ROOT, "DATABASE", "EQUILIBRIA")
 DEFAULT_EQUILIBRIA_DIR = (
     DATABASE_EQUILIBRIA_DIR
@@ -46,6 +79,26 @@ def parse_args():
         "--output-root",
         default=os.environ.get("STAGE2_OUTPUT_ROOT", SCRIPT_DIR),
         help="Directory where outputs-[plasma] will be written.",
+    )
+    parser.add_argument(
+        "--export-objective-json",
+        default=os.environ.get("STAGE2_EXPORT_OBJECTIVE_JSON"),
+        help="Optional path to write the initialized squared-flux/composite objective snapshot as JSON.",
+    )
+    parser.add_argument(
+        "--trajectory-json",
+        default=os.environ.get("STAGE2_TRAJECTORY_JSON"),
+        help="Optional path to write per-evaluation objective diagnostics as JSON.",
+    )
+    parser.add_argument(
+        "--skip-postprocess",
+        action="store_true",
+        help="Skip heavy VTK/plot/save artifact generation while still writing results.json.",
+    )
+    parser.add_argument(
+        "--probe-only",
+        action="store_true",
+        help="Build the initialized Stage 2 objective snapshot, export JSON if requested, and exit before optimization/postprocess.",
     )
     parser.add_argument("--nphi", type=int, default=int(os.environ.get("NPHI", "255")))
     parser.add_argument(
@@ -444,7 +497,97 @@ def magneticFieldPlots(surf, bs, OUT_DIR_ITER):
     return mean_abs_relBfinal_norm
 
 
-def make_fun(JF, new_bs, new_surf, Jf, Jls, Jccdist, Jc, bs_jax=None):
+def compute_mean_abs_relbn(surf, bs):
+    """Return the area-weighted mean |B·n|/|B| without plotting artifacts."""
+    theta = surf.quadpoints_theta
+    phi = surf.quadpoints_phi
+    del theta, phi  # keep logic aligned with plotting utility inputs
+    n = surf.normal()
+    absn = np.linalg.norm(n, axis=2)
+    unitn = n * (1.0 / absn)[:, :, None]
+    sqrt_area = np.sqrt(absn.reshape((-1, 1)) / float(absn.size))
+    surf_area = sqrt_area**2
+    bs.set_points(surf.gamma().reshape((-1, 3)))
+    Bfinal = bs.B().reshape(n.shape)
+    Bfinal_norm = np.sum(Bfinal * unitn, axis=2)[:, :, None]
+    modBfinal = np.sqrt(np.sum(Bfinal**2, axis=2))[:, :, None]
+    relBfinal_norm = Bfinal_norm / modBfinal
+    abs_relBfinal_norm_dA = np.abs(relBfinal_norm.reshape((-1, 1))) * surf_area
+    return float(np.sum(abs_relBfinal_norm_dA) / np.sum(surf_area))
+
+
+def evaluate_stage2_objective(JF, new_bs, new_surf, Jf, Jls, Jccdist, Jc, bs_jax=None):
+    """Return composite objective diagnostics using the currently loaded DOFs."""
+    J = float(JF.J())
+    grad = np.asarray(JF.dJ(), dtype=float)
+    field_bs = bs_jax if bs_jax is not None else new_bs
+    snapshot = {
+        "J": J,
+        "Jf": float(Jf.J()),
+        "mean_abs_relBfinal_norm": compute_mean_abs_relbn(new_surf, field_bs),
+        "curve_length": float(Jls.J()),
+        "coil_coil_distance": float(Jccdist.shortest_distance()),
+        "curvature": float(Jc.J()),
+        "grad_norm": float(np.linalg.norm(grad)),
+    }
+    return snapshot, grad
+
+
+def build_stage2_probe_payload(
+    JF,
+    new_bs,
+    new_surf,
+    Jf,
+    Jls,
+    Jccdist,
+    Jc,
+    bs_jax=None,
+    *,
+    backend,
+    equilibrium_path,
+    nphi,
+    ntheta,
+):
+    """Serialize the initialized Stage 2 objective state for parity probes."""
+    composite_snapshot, composite_grad = evaluate_stage2_objective(
+        JF,
+        new_bs,
+        new_surf,
+        Jf,
+        Jls,
+        Jccdist,
+        Jc,
+        bs_jax=bs_jax,
+    )
+    flux_grad = np.asarray(Jf.dJ(), dtype=float)
+    return {
+        "backend": backend,
+        "equilibrium_path": equilibrium_path,
+        "nphi": int(nphi),
+        "ntheta": int(ntheta),
+        "dof_count": int(composite_grad.size),
+        "squared_flux": {
+            "J": float(Jf.J()),
+            "dJ": flux_grad.tolist(),
+            "grad_norm": float(np.linalg.norm(flux_grad)),
+        },
+        "composite": {
+            **composite_snapshot,
+            "dJ": composite_grad.tolist(),
+        },
+    }
+
+
+def write_json_file(path, payload):
+    """Write JSON payloads for probe/export workflows."""
+    output_dir = os.path.dirname(path)
+    if output_dir:
+        os.makedirs(output_dir, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as outfile:
+        json.dump(payload, outfile, indent=2)
+
+
+def make_fun(JF, new_bs, new_surf, Jf, Jls, Jccdist, Jc, bs_jax=None, trajectory_sink=None):
     """Factory for the Stage 2 objective function.
 
     Returns a closure compatible with scipy.optimize.minimize(jac=True)
@@ -454,24 +597,35 @@ def make_fun(JF, new_bs, new_surf, Jf, Jls, Jccdist, Jc, bs_jax=None):
     from the JAX field (avoids stale CPU cache and redundant CPU field
     evaluation inside the optimizer loop).
     """
+    eval_counter = {"count": 0}
 
     def fun(dofs):
         JF.x = dofs
-        J = JF.J()
-        grad = JF.dJ()
-        unitn = new_surf.unitnormal()
-        if bs_jax is not None:
-            B = np.asarray(bs_jax.B()).reshape(unitn.shape)
-        else:
-            B = new_bs.B().reshape(unitn.shape)
-        BdotN = np.mean(np.abs(np.sum(B * unitn, axis=2)))
-        outstr = f"J={J:.1e}, Jf={Jf.J():.1e}, ⟨B·n⟩={BdotN:.1e}"
-        outstr += f", Len={Jls.J():.1f}m"
-        outstr += f", C-C-Sep={Jccdist.shortest_distance():.2f}m"
-        outstr += f", Curvature={Jc.J():.2f}"
-        outstr += f", ║∇J║={np.linalg.norm(grad):.1e}"
+        snapshot, grad = evaluate_stage2_objective(
+            JF,
+            new_bs,
+            new_surf,
+            Jf,
+            Jls,
+            Jccdist,
+            Jc,
+            bs_jax=bs_jax,
+        )
+        eval_counter["count"] += 1
+        if trajectory_sink is not None:
+            trajectory_sink.append(
+                {
+                    "eval_index": eval_counter["count"],
+                    **snapshot,
+                }
+            )
+        outstr = f"J={snapshot['J']:.1e}, Jf={snapshot['Jf']:.1e}, ⟨B·n⟩={snapshot['mean_abs_relBfinal_norm']:.1e}"
+        outstr += f", Len={snapshot['curve_length']:.1f}m"
+        outstr += f", C-C-Sep={snapshot['coil_coil_distance']:.2f}m"
+        outstr += f", Curvature={snapshot['curvature']:.2f}"
+        outstr += f", ║∇J║={snapshot['grad_norm']:.1e}"
         print(outstr)
-        return J, grad
+        return snapshot["J"], grad
 
     return fun
 
@@ -641,6 +795,7 @@ if __name__ == "__main__":
 
     # minimize gets called, optimizes based on degrees of freedom from objective function
     dofs = JF.x
+    trajectory = [] if args.trajectory_json else None
     fun = make_fun(
         JF,
         new_bs,
@@ -650,7 +805,33 @@ if __name__ == "__main__":
         Jccdist,
         Jc,
         bs_jax=new_bs_jax,
+        trajectory_sink=trajectory,
     )
+    if args.export_objective_json:
+        probe_payload = build_stage2_probe_payload(
+            JF,
+            new_bs,
+            new_surf,
+            Jf,
+            Jls,
+            Jccdist,
+            Jc,
+            bs_jax=new_bs_jax,
+            backend=args.backend,
+            equilibrium_path=file_loc,
+            nphi=nphi,
+            ntheta=ntheta,
+        )
+        write_json_file(args.export_objective_json, probe_payload)
+        print(f"Wrote Stage 2 objective snapshot to {args.export_objective_json}")
+    if args.probe_only:
+        if args.trajectory_json:
+            write_json_file(
+                args.trajectory_json,
+                {"backend": args.backend, "evaluations": trajectory or []},
+            )
+        print("Probe-only mode requested; exiting before optimization and post-processing.")
+        sys.exit(0)
     if args.init_only:
         res_nit = 0
         print("Skipping Stage 2 optimizer because --init-only was provided.")
@@ -669,6 +850,12 @@ if __name__ == "__main__":
         )
         res_nit = res.nit
         print(res.message)
+    if args.trajectory_json:
+        write_json_file(
+            args.trajectory_json,
+            {"backend": args.backend, "evaluations": trajectory or []},
+        )
+        print(f"Wrote Stage 2 trajectory to {args.trajectory_json}")
 
     # POST-OPTIMIZATION PROCESSING AND OUTPUTS
     # Uses CPU new_bs intentionally: VTK, JSON save, and matplotlib all
@@ -679,7 +866,6 @@ if __name__ == "__main__":
         print("BANANA COIL IS SELF-INTERSECTING!")
         intersecting = True
 
-    curves_to_vtk(new_curves, OUT_DIR_ITER + "curves_opt", close=True)
     new_bs.set_points(new_surf.gamma().reshape((-1, 3)))
     unitn = new_surf.unitnormal()
     B_field = new_bs.B().reshape(unitn.shape)
@@ -687,29 +873,44 @@ if __name__ == "__main__":
         "B_N/B": np.sum(B_field * unitn, axis=2)[:, :, None]
         / np.sqrt(np.sum(B_field**2, axis=2))[:, :, None]
     }
-    new_surf.to_vtk(OUT_DIR_ITER + "surf_opt", extra_data=pointData)
-    VV.to_vtk(OUT_DIR_ITER + "VV")
+    fieldError = compute_mean_abs_relbn(new_surf, new_bs)
+    if args.skip_postprocess:
+        print("Skipping Stage 2 post-processing artifacts because --skip-postprocess was provided.")
+    else:
+        curves_to_vtk(new_curves, OUT_DIR_ITER + "curves_opt", close=True)
+        new_surf.to_vtk(OUT_DIR_ITER + "surf_opt", extra_data=pointData)
+        VV.to_vtk(OUT_DIR_ITER + "VV")
 
-    # Create toroidal cross section plot
-    cross_section_plot(
-        new_surf_coils,
-        new_surf,
-        new_banana_curve,
-        OUT_DIR_ITER + "CrossSectionPlot",
-        hbt,
-        VV,
-    )
-    # Create field error plot
-    fieldError = magneticFieldPlots(new_surf, new_bs, OUT_DIR_ITER)
+        # Create toroidal cross section plot
+        cross_section_plot(
+            new_surf_coils,
+            new_surf,
+            new_banana_curve,
+            OUT_DIR_ITER + "CrossSectionPlot",
+            hbt,
+            VV,
+        )
+        # Create field error plot
+        fieldError = magneticFieldPlots(new_surf, new_bs, OUT_DIR_ITER)
 
-    # Save the optimized coil shapes and currents so they can be loaded into other scripts for analysis:
-    new_bs.save(OUT_DIR_ITER + "biot_savart_opt.json")
+        # Save the optimized coil shapes and currents so they can be loaded into other scripts for analysis:
+        new_bs.save(OUT_DIR_ITER + "biot_savart_opt.json")
     # new_surf.save(OUT_DIR_ITER + "surf_opt.json");
     print(
         f"Banana Coil Current / TF Current = {new_banana_coils[0].current.get_value() / new_tf_coils[0].current.get_value():.3f}\n"
     )
 
     # Save the results of optimization to a separate file
+    final_snapshot, _ = evaluate_stage2_objective(
+        JF,
+        new_bs,
+        new_surf,
+        Jf,
+        Jls,
+        Jccdist,
+        Jc,
+        bs_jax=new_bs_jax,
+    )
     results = {
         "PLASMA_SURF_FILENAME": plasma_surf_filename,
         "PLASMA_SURF_PATH": file_loc,
@@ -734,10 +935,15 @@ if __name__ == "__main__":
         "init_only": args.init_only,
         "max_iterations": MAXITER,
         "iterations": res_nit,
+        "FINAL_OBJECTIVE": final_snapshot["J"],
+        "FINAL_SQUARED_FLUX": final_snapshot["Jf"],
+        "FINAL_CURVE_LENGTH": final_snapshot["curve_length"],
+        "FINAL_CC_DISTANCE": final_snapshot["coil_coil_distance"],
+        "FINAL_MEAN_ABS_RELBN": final_snapshot["mean_abs_relBfinal_norm"],
         "FINAL_VOLUME": float(new_surf.volume()),
         "FIELD_ERROR": float(fieldError),
         "SELF_INTERSECTING": intersecting,
         "MAX_CURVATURE": float(np.max(new_banana_curve.kappa())),
+        "FINAL_BANANA_GAMMA": np.asarray(new_banana_curve.gamma(), dtype=float).tolist(),
     }
-    with open(os.path.join(OUT_DIR_ITER, "results.json"), "w") as outfile:
-        json.dump(results, outfile, indent=2)
+    write_json_file(os.path.join(OUT_DIR_ITER, "results.json"), results)
