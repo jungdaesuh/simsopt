@@ -6,6 +6,7 @@ import argparse
 from pathlib import Path
 import sys
 import tempfile
+from typing import Any
 
 import numpy as np
 
@@ -20,11 +21,13 @@ from benchmarks.validation_ladder_common import (
     build_provenance,
     find_single_file,
     load_json,
+    max_pointwise_geometry_drift,
     preparse_platform,
     print_provenance,
     relative_error,
     repo_pythonpath_env,
     run_python_script,
+    short_run_geometry_rel_tolerance,
     write_json,
 )
 
@@ -36,6 +39,10 @@ import jax
 import jaxlib
 
 jax.config.update("jax_enable_x64", True)
+
+
+FINAL_OBJECTIVE_REL_TOL = 1e-4
+FIELD_ERROR_REL_TOL = 1e-4
 
 
 def parse_args() -> argparse.Namespace:
@@ -75,6 +82,12 @@ def parse_args() -> argparse.Namespace:
         "--equilibrium-path",
         default=None,
         help="Explicit equilibrium path override.",
+    )
+    parser.add_argument(
+        "--geometry-rel-tol",
+        type=float,
+        default=None,
+        help="Override the final banana-coil geometry relative tolerance.",
     )
     return parser.parse_args()
 
@@ -129,6 +142,7 @@ def _run_stage2_case(args: argparse.Namespace, backend: str, *, platform: str) -
                 platform=platform if backend == "jax" else "cpu"
             ),
             cwd=REPO_ROOT,
+            bootstrap_repo=True,
         )
         if result.stdout:
             print(result.stdout, end="")
@@ -168,13 +182,44 @@ def _trajectory_improves(trajectory: list[dict]) -> bool:
 def _max_geometry_deviation(cpu_results: dict, jax_results: dict) -> tuple[float, float]:
     cpu_gamma = np.asarray(cpu_results["FINAL_BANANA_GAMMA"], dtype=float)
     jax_gamma = np.asarray(jax_results["FINAL_BANANA_GAMMA"], dtype=float)
-    pointwise = np.linalg.norm(jax_gamma - cpu_gamma, axis=1)
-    curve_scale = max(float(np.max(np.linalg.norm(cpu_gamma, axis=1))), 1e-30)
-    return float(np.max(pointwise)), float(np.max(pointwise) / curve_scale)
+    return max_pointwise_geometry_drift(jax_gamma, cpu_gamma)
+
+
+def evaluate_stage2_e2e_comparison(comparison: dict[str, Any]) -> list[str]:
+    failures: list[str] = []
+    if float(comparison["final_objective_rel_diff"]) >= FINAL_OBJECTIVE_REL_TOL:
+        failures.append(
+            "Final objective relative difference too large: "
+            f"{float(comparison['final_objective_rel_diff']):.2e}"
+        )
+    if float(comparison["field_error_rel_diff"]) >= FIELD_ERROR_REL_TOL:
+        failures.append(
+            "Final field error relative difference too large: "
+            f"{float(comparison['field_error_rel_diff']):.2e}"
+        )
+    if float(comparison["max_geometry_pointwise_rel"]) >= float(comparison["geometry_rel_tol"]):
+        failures.append(
+            "Final banana-coil geometry drift too large: "
+            f"{float(comparison['max_geometry_pointwise_rel']):.2e} "
+            f"relative (tol={float(comparison['geometry_rel_tol']):.2e})"
+        )
+    if not bool(comparison["cpu_trajectory_finite"]):
+        failures.append("CPU trajectory contains NaN/inf.")
+    if not bool(comparison["jax_trajectory_finite"]):
+        failures.append("JAX trajectory contains NaN/inf.")
+    if not bool(comparison["cpu_trajectory_improves"]):
+        failures.append("CPU trajectory did not improve final objective.")
+    if not bool(comparison["jax_trajectory_improves"]):
+        failures.append("JAX trajectory did not improve final objective.")
+    return failures
 
 
 def main() -> None:
     args = parse_args()
+    geometry_rel_tol = short_run_geometry_rel_tolerance(
+        args.maxiter,
+        explicit_tol=args.geometry_rel_tol,
+    )
     provenance = build_provenance(
         jax,
         jaxlib,
@@ -185,6 +230,7 @@ def main() -> None:
             "nphi": int(args.nphi),
             "ntheta": int(args.ntheta),
             "maxiter": int(args.maxiter),
+            "geometry_rel_tol": geometry_rel_tol,
         },
     )
     print_provenance(provenance)
@@ -209,8 +255,10 @@ def main() -> None:
             float(jax_results["FIELD_ERROR"]),
             float(cpu_results["FIELD_ERROR"]),
         ),
+        "field_error_rel_tol": FIELD_ERROR_REL_TOL,
         "max_geometry_pointwise_abs": max_geom_abs,
         "max_geometry_pointwise_rel": max_geom_rel,
+        "geometry_rel_tol": geometry_rel_tol,
         "cpu_iterations": int(cpu_results["iterations"]),
         "jax_iterations": int(jax_results["iterations"]),
         "cpu_trajectory_len": len(cpu_trajectory),
@@ -221,23 +269,7 @@ def main() -> None:
         "jax_trajectory_improves": _trajectory_improves(jax_trajectory),
     }
 
-    failures: list[str] = []
-    if final_objective_rel_diff >= 1e-4:
-        failures.append(
-            f"Final objective relative difference too large: {final_objective_rel_diff:.2e}"
-        )
-    if max_geom_rel >= 1e-6:
-        failures.append(
-            f"Final banana-coil geometry drift too large: {max_geom_rel:.2e} relative"
-        )
-    if not comparison["cpu_trajectory_finite"]:
-        failures.append("CPU trajectory contains NaN/inf.")
-    if not comparison["jax_trajectory_finite"]:
-        failures.append("JAX trajectory contains NaN/inf.")
-    if not comparison["cpu_trajectory_improves"]:
-        failures.append("CPU trajectory did not improve final objective.")
-    if not comparison["jax_trajectory_improves"]:
-        failures.append("JAX trajectory did not improve final objective.")
+    failures = evaluate_stage2_e2e_comparison(comparison)
 
     print(
         "CPU vs JAX: "

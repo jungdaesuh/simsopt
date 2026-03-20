@@ -1,4 +1,4 @@
-"""Tier 3 production-grid Boozer parity probe."""
+"""Synthetic production-grid Boozer diagnostic probe."""
 
 from __future__ import annotations
 
@@ -51,7 +51,7 @@ SOLVER_OPTIONS = {
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Run a production-grid CPU vs JAX Boozer parity probe."
+        description="Run a synthetic production-grid CPU vs JAX Boozer diagnostic."
     )
     parser.add_argument(
         "--platform",

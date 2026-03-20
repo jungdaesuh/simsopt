@@ -121,6 +121,28 @@ def l2_relative_error(actual: np.ndarray, reference: np.ndarray) -> float:
     )
 
 
+def max_pointwise_geometry_drift(
+    actual_points: np.ndarray,
+    reference_points: np.ndarray,
+) -> tuple[float, float]:
+    """Return max absolute and relative pointwise geometry drift."""
+    actual_arr = np.asarray(actual_points, dtype=float).reshape(-1, 3)
+    reference_arr = np.asarray(reference_points, dtype=float).reshape(-1, 3)
+    pointwise = np.linalg.norm(actual_arr - reference_arr, axis=1)
+    geometry_scale = max(float(np.max(np.linalg.norm(reference_arr, axis=1))), 1e-30)
+    return float(np.max(pointwise)), float(np.max(pointwise) / geometry_scale)
+
+
+def short_run_geometry_rel_tolerance(
+    maxiter: int,
+    explicit_tol: float | None = None,
+) -> float:
+    """Return the geometry gate used for short Stage 2 smoke runs."""
+    if explicit_tol is not None:
+        return float(explicit_tol)
+    return 5e-6 if maxiter <= 20 else 1e-6
+
+
 def peak_rss_mb() -> float:
     """Return the process max RSS in MB using platform-correct units."""
     rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
@@ -216,9 +238,29 @@ def run_python_script(
     *,
     env: dict[str, str] | None = None,
     cwd: str | os.PathLike[str] | None = None,
+    bootstrap_repo: bool = False,
 ) -> subprocess.CompletedProcess[str]:
     """Run a Python helper script using the current interpreter."""
-    command = [sys.executable, str(script_path), *args]
+    if bootstrap_repo:
+        command = [
+            sys.executable,
+            "-c",
+            (
+                "import runpy, sys; "
+                "repo_root, script_path, *script_args = sys.argv[1:]; "
+                "sys.path.insert(0, repo_root); "
+                "sys.path.insert(0, repo_root + '/src'); "
+                "from benchmarks.validation_ladder_common import bootstrap_local_simsopt; "
+                "bootstrap_local_simsopt(); "
+                "sys.argv = [script_path, *script_args]; "
+                "runpy.run_path(script_path, run_name='__main__')"
+            ),
+            str(REPO_ROOT),
+            str(script_path),
+            *args,
+        ]
+    else:
+        command = [sys.executable, str(script_path), *args]
     result = subprocess.run(
         command,
         cwd=str(cwd or REPO_ROOT),

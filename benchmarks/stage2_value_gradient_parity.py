@@ -205,6 +205,7 @@ def run_real_fixture(args: argparse.Namespace) -> dict:
             ["--backend", "cpu", "--export-objective-json", cpu_json, *common_args],
             env=repo_pythonpath_env(platform="cpu"),
             cwd=REPO_ROOT,
+            bootstrap_repo=True,
         )
         if cpu_result.stdout:
             print(cpu_result.stdout, end="")
@@ -216,6 +217,7 @@ def run_real_fixture(args: argparse.Namespace) -> dict:
             ["--backend", "jax", "--export-objective-json", jax_json, *common_args],
             env=repo_pythonpath_env(platform=args.platform),
             cwd=REPO_ROOT,
+            bootstrap_repo=True,
         )
         if jax_result.stdout:
             print(jax_result.stdout, end="")

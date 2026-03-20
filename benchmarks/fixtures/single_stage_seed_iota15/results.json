@@ -1,0 +1,15 @@
+{
+  "CC_THRESHOLD": 0.05,
+  "CC_WEIGHT": 100,
+  "CURVATURE_WEIGHT": 0.0001,
+  "LENGTH_WEIGHT": 0.0005,
+  "MAJOR_RADIUS": 0.915,
+  "TOROIDAL_FLUX": 0.24,
+  "banana_surf_radius": 0.22,
+  "order": 2,
+  "max_iterations": 300,
+  "iterations": 300,
+  "FINAL_VOLUME": 0.09374293647252192,
+  "FIELD_ERROR": 0.009485710555577545,
+  "SELF_INTERSECTING": false
+}
