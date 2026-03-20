@@ -39,6 +39,11 @@ try:
 except:
     bentley_ottmann = None
 
+try:
+    from shapely.geometry import LineString
+except:
+    LineString = None
+
 
 class QuadpointsTests(unittest.TestCase):
     def test_theta(self):
@@ -546,6 +551,22 @@ class isSelfIntersecting(unittest.TestCase):
         assert s.is_self_intersecting(angle=0.123*np.pi/(2*np.pi))
         assert s.is_self_intersecting(angle=0.123*np.pi/(2*np.pi), thetas=200)
         assert s.is_self_intersecting(thetas=202)
+
+    @unittest.skipIf(LineString is None, "Shapely is required for the fallback self-intersection test")
+    def test_is_self_intersecting_shapely_fallback(self):
+        import simsopt.geo.surface as surface_module
+        from unittest.mock import patch
+
+        dofs = np.array([1., 0., 0., 0., 0., 0.1, 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0.1,
+                         0., 0., 0., 0., 0., 0., 0.1])
+
+        with patch.object(surface_module, "get_context", None), patch.object(surface_module, "contour_self_intersects", None):
+            s = get_surface('SurfaceRZFourier', True, full=True, nphi=200, ntheta=200, mpol=2, ntor=2)
+            s.x = dofs
+            assert s.is_self_intersecting()
+
+            s = get_surface('SurfaceRZFourier', True, full=True, nphi=200, ntheta=200, mpol=2, ntor=2)
+            assert not s.is_self_intersecting()
 
 
 class UtilTests(unittest.TestCase):

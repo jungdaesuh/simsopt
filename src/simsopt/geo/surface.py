@@ -18,6 +18,11 @@ try:
 except ImportError:
     contour_self_intersects = None
 
+try:
+    from shapely.geometry import LineString
+except ImportError:
+    LineString = None
+
 import simsoptpp as sopp
 from .._core.optimizable import Optimizable
 from .._core.dev import SimsoptRequires
@@ -435,8 +440,10 @@ class Surface(Optimizable):
         self.gamma_lin(cross_section, varphi_root, thetas)
         return cross_section
 
-    @SimsoptRequires(get_context is not None, "is_self_intersecting requires ground package")
-    @SimsoptRequires(contour_self_intersects is not None, "is_self_intersecting requires the bentley_ottmann package")
+    @SimsoptRequires(
+        (get_context is not None and contour_self_intersects is not None) or LineString is not None,
+        "is_self_intersecting requires ground+bentley_ottmann or shapely",
+    )
     def is_self_intersecting(self, angle=0., thetas=None):
         r"""
         This function computes a cross section of self at the input cylindrical angle.  Then,
@@ -462,10 +469,14 @@ class Surface(Optimizable):
         R = np.sqrt(cs[:, 0]**2 + cs[:, 1]**2)
         Z = cs[:, 2]
 
-        context = get_context()
-        Point, Contour = context.point_cls, context.contour_cls
-        contour = Contour([Point(R[i], Z[i]) for i in range(cs.shape[0])])
-        return contour_self_intersects(contour)
+        if get_context is not None and contour_self_intersects is not None:
+            context = get_context()
+            Point, Contour = context.point_cls, context.contour_cls
+            contour = Contour([Point(R[i], Z[i]) for i in range(cs.shape[0])])
+            return contour_self_intersects(contour)
+
+        contour = LineString([(R[i], Z[i]) for i in range(cs.shape[0])] + [(R[0], Z[0])])
+        return not contour.is_simple
 
     def aspect_ratio(self):
         r"""
