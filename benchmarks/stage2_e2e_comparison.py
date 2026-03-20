@@ -6,6 +6,7 @@ import argparse
 from pathlib import Path
 import sys
 import tempfile
+import time
 from typing import Any
 
 import numpy as np
@@ -135,6 +136,7 @@ def _run_stage2_case(args: argparse.Namespace, backend: str, *, platform: str) -
                 ]
             )
 
+        start = time.perf_counter()
         result = run_python_script(
             script_path,
             command,
@@ -144,6 +146,7 @@ def _run_stage2_case(args: argparse.Namespace, backend: str, *, platform: str) -
             cwd=REPO_ROOT,
             bootstrap_repo=True,
         )
+        elapsed_s = time.perf_counter() - start
         if result.stdout:
             print(result.stdout, end="")
         if result.stderr:
@@ -154,6 +157,7 @@ def _run_stage2_case(args: argparse.Namespace, backend: str, *, platform: str) -
         return {
             "results": load_json(results_json),
             "trajectory": trajectory_payload["evaluations"],
+            "elapsed_s": float(elapsed_s),
         }
 
 
@@ -214,6 +218,58 @@ def evaluate_stage2_e2e_comparison(comparison: dict[str, Any]) -> list[str]:
     return failures
 
 
+def build_stage2_e2e_payload(
+    provenance: dict[str, Any],
+    cpu_case: dict[str, Any],
+    jax_case: dict[str, Any],
+    *,
+    geometry_rel_tol: float,
+) -> dict[str, Any]:
+    cpu_results = cpu_case["results"]
+    jax_results = jax_case["results"]
+    cpu_trajectory = cpu_case["trajectory"]
+    jax_trajectory = jax_case["trajectory"]
+
+    max_geom_abs, max_geom_rel = _max_geometry_deviation(cpu_results, jax_results)
+    final_objective_rel_diff = relative_error(
+        float(jax_results["FINAL_OBJECTIVE"]),
+        float(cpu_results["FINAL_OBJECTIVE"]),
+    )
+
+    comparison = {
+        "final_objective_rel_diff": final_objective_rel_diff,
+        "field_error_rel_diff": relative_error(
+            float(jax_results["FIELD_ERROR"]),
+            float(cpu_results["FIELD_ERROR"]),
+        ),
+        "field_error_rel_tol": FIELD_ERROR_REL_TOL,
+        "max_geometry_pointwise_abs": max_geom_abs,
+        "max_geometry_pointwise_rel": max_geom_rel,
+        "geometry_rel_tol": geometry_rel_tol,
+        "cpu_iterations": int(cpu_results["iterations"]),
+        "jax_iterations": int(jax_results["iterations"]),
+        "cpu_elapsed_s": float(cpu_case["elapsed_s"]),
+        "jax_elapsed_s": float(jax_case["elapsed_s"]),
+        "cpu_trajectory_len": len(cpu_trajectory),
+        "jax_trajectory_len": len(jax_trajectory),
+        "cpu_trajectory_finite": _trajectory_is_finite(cpu_trajectory),
+        "jax_trajectory_finite": _trajectory_is_finite(jax_trajectory),
+        "cpu_trajectory_improves": _trajectory_improves(cpu_trajectory),
+        "jax_trajectory_improves": _trajectory_improves(jax_trajectory),
+    }
+    failures = evaluate_stage2_e2e_comparison(comparison)
+    return {
+        "provenance": provenance,
+        "cpu_results": cpu_results,
+        "jax_results": jax_results,
+        "cpu_trajectory": cpu_trajectory,
+        "jax_trajectory": jax_trajectory,
+        "comparison": comparison,
+        "failures": failures,
+        "passed": not failures,
+    }
+
+
 def main() -> None:
     args = parse_args()
     geometry_rel_tol = short_run_geometry_rel_tolerance(
@@ -238,38 +294,14 @@ def main() -> None:
     cpu_case = _run_stage2_case(args, "cpu", platform="auto")
     jax_case = _run_stage2_case(args, "jax", platform=args.platform)
 
-    cpu_results = cpu_case["results"]
-    jax_results = jax_case["results"]
-    cpu_trajectory = cpu_case["trajectory"]
-    jax_trajectory = jax_case["trajectory"]
-
-    max_geom_abs, max_geom_rel = _max_geometry_deviation(cpu_results, jax_results)
-    final_objective_rel_diff = relative_error(
-        float(jax_results["FINAL_OBJECTIVE"]),
-        float(cpu_results["FINAL_OBJECTIVE"]),
+    payload = build_stage2_e2e_payload(
+        provenance,
+        cpu_case,
+        jax_case,
+        geometry_rel_tol=geometry_rel_tol,
     )
-
-    comparison = {
-        "final_objective_rel_diff": final_objective_rel_diff,
-        "field_error_rel_diff": relative_error(
-            float(jax_results["FIELD_ERROR"]),
-            float(cpu_results["FIELD_ERROR"]),
-        ),
-        "field_error_rel_tol": FIELD_ERROR_REL_TOL,
-        "max_geometry_pointwise_abs": max_geom_abs,
-        "max_geometry_pointwise_rel": max_geom_rel,
-        "geometry_rel_tol": geometry_rel_tol,
-        "cpu_iterations": int(cpu_results["iterations"]),
-        "jax_iterations": int(jax_results["iterations"]),
-        "cpu_trajectory_len": len(cpu_trajectory),
-        "jax_trajectory_len": len(jax_trajectory),
-        "cpu_trajectory_finite": _trajectory_is_finite(cpu_trajectory),
-        "jax_trajectory_finite": _trajectory_is_finite(jax_trajectory),
-        "cpu_trajectory_improves": _trajectory_improves(cpu_trajectory),
-        "jax_trajectory_improves": _trajectory_improves(jax_trajectory),
-    }
-
-    failures = evaluate_stage2_e2e_comparison(comparison)
+    comparison = payload["comparison"]
+    failures = payload["failures"]
 
     print(
         "CPU vs JAX: "
@@ -278,14 +310,6 @@ def main() -> None:
         f"geometry rel_diff={comparison['max_geometry_pointwise_rel']:.2e}"
     )
 
-    payload = {
-        "provenance": provenance,
-        "cpu_results": cpu_results,
-        "jax_results": jax_results,
-        "comparison": comparison,
-        "failures": failures,
-        "passed": not failures,
-    }
     write_json(args.output_json, payload)
     if failures:
         print("STAGE 2 E2E COMPARISON FAILED")

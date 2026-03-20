@@ -25,7 +25,10 @@ from benchmarks.single_stage_init_parity import (
     VOLUME_REL_TOL,
     evaluate_single_stage_init_parity,
 )
-from benchmarks.stage2_e2e_comparison import evaluate_stage2_e2e_comparison
+from benchmarks.stage2_e2e_comparison import (
+    build_stage2_e2e_payload,
+    evaluate_stage2_e2e_comparison,
+)
 from benchmarks.validation_ladder_common import (
     max_pointwise_geometry_drift,
     repo_pythonpath_env,
@@ -334,3 +337,78 @@ def test_stage2_e2e_comparison_still_rejects_large_geometry_drift():
     )
 
     assert any("Final banana-coil geometry drift too large" in failure for failure in failures)
+
+
+def test_stage2_e2e_payload_preserves_trajectory_and_timing_artifacts():
+    provenance = {"title": "Stage 2 end-to-end comparison"}
+    cpu_case = {
+        "results": {
+            "FINAL_OBJECTIVE": 1.0,
+            "FIELD_ERROR": 0.01,
+            "FINAL_BANANA_GAMMA": [[[1.0, 0.0, 0.0]]],
+            "iterations": 3,
+        },
+        "trajectory": [
+            {
+                "J": 2.0,
+                "Jf": 0.2,
+                "mean_abs_relBfinal_norm": 0.2,
+                "curve_length": 1.0,
+                "coil_coil_distance": 1.0,
+                "curvature": 1.0,
+                "grad_norm": 1.0,
+            },
+            {
+                "J": 1.0,
+                "Jf": 0.1,
+                "mean_abs_relBfinal_norm": 0.1,
+                "curve_length": 1.0,
+                "coil_coil_distance": 1.0,
+                "curvature": 1.0,
+                "grad_norm": 0.5,
+            },
+        ],
+        "elapsed_s": 12.5,
+    }
+    jax_case = {
+        "results": {
+            "FINAL_OBJECTIVE": 1.0 + 1e-7,
+            "FIELD_ERROR": 0.01 + 1e-7,
+            "FINAL_BANANA_GAMMA": [[[1.0, 0.0, 0.0]]],
+            "iterations": 3,
+        },
+        "trajectory": [
+            {
+                "J": 2.0,
+                "Jf": 0.2,
+                "mean_abs_relBfinal_norm": 0.2,
+                "curve_length": 1.0,
+                "coil_coil_distance": 1.0,
+                "curvature": 1.0,
+                "grad_norm": 1.0,
+            },
+            {
+                "J": 1.0 + 1e-7,
+                "Jf": 0.1,
+                "mean_abs_relBfinal_norm": 0.1,
+                "curve_length": 1.0,
+                "coil_coil_distance": 1.0,
+                "curvature": 1.0,
+                "grad_norm": 0.5,
+            },
+        ],
+        "elapsed_s": 8.75,
+    }
+
+    payload = build_stage2_e2e_payload(
+        provenance,
+        cpu_case,
+        jax_case,
+        geometry_rel_tol=5e-6,
+    )
+
+    assert payload["passed"] is True
+    assert payload["cpu_trajectory"] == cpu_case["trajectory"]
+    assert payload["jax_trajectory"] == jax_case["trajectory"]
+    assert payload["comparison"]["cpu_elapsed_s"] == pytest.approx(12.5)
+    assert payload["comparison"]["jax_elapsed_s"] == pytest.approx(8.75)
