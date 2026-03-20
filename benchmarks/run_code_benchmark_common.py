@@ -19,6 +19,10 @@ EXPECTED_JAX_VERSION = "0.6.2"
 DEFAULT_BACKENDS = ("scipy", "ondevice", "hybrid")
 
 
+def _progress(message: str) -> None:
+    print(message, flush=True)
+
+
 def _get_git_sha() -> str:
     return subprocess.run(
         ["git", "-C", str(REPO_ROOT), "rev-parse", "HEAD"],
@@ -30,15 +34,15 @@ def _get_git_sha() -> str:
 
 def print_provenance(title: str) -> None:
     x64_enabled = jnp.zeros(1).dtype == jnp.float64
-    print(f"\n{'=' * 70}")
-    print(title)
-    print(f"{'=' * 70}")
-    print(f"repo sha:     {_get_git_sha()}")
-    print(f"jax:          {jax.__version__}")
-    print(f"jaxlib:       {jaxlib.__version__}")
-    print(f"backend:      {jax.default_backend()}")
-    print(f"devices:      {jax.devices()}")
-    print(f"x64 enabled:  {x64_enabled}")
+    _progress(f"\n{'=' * 70}")
+    _progress(title)
+    _progress(f"{'=' * 70}")
+    _progress(f"repo sha:     {_get_git_sha()}")
+    _progress(f"jax:          {jax.__version__}")
+    _progress(f"jaxlib:       {jaxlib.__version__}")
+    _progress(f"backend:      {jax.default_backend()}")
+    _progress(f"devices:      {jax.devices()}")
+    _progress(f"x64 enabled:  {x64_enabled}")
     if jax.__version__ != EXPECTED_JAX_VERSION:
         raise RuntimeError(
             f"Expected JAX {EXPECTED_JAX_VERSION} for this benchmark, found {jax.__version__}."
@@ -155,16 +159,21 @@ def summarize_result_fun(res: dict) -> float:
 
 
 def time_run_code(config: BenchmarkConfig, optimizer_backend: str):
+    _progress(f"    [{optimizer_backend}] building run_code problem")
     booz, iota0, G0 = _make_boozer_surface(config, optimizer_backend)
+    _progress(f"    [{optimizer_backend}] running full run_code()")
     t0 = time.perf_counter()
     res = booz.run_code(iota0, G0)
     _sync_result(res)
+    _progress(f"    [{optimizer_backend}] full run_code() finished")
     return time.perf_counter() - t0, res
 
 
 def time_run_code_stage_split(config: BenchmarkConfig, optimizer_backend: str):
+    _progress(f"    [{optimizer_backend}] building stage-split problem")
     booz, iota0, G0 = _make_boozer_surface(config, optimizer_backend)
 
+    _progress(f"    [{optimizer_backend}] running LS stage")
     t0 = time.perf_counter()
     ls_res = booz.minimize_boozer_penalty_constraints_LBFGS(
         constraint_weight=booz.constraint_weight,
@@ -180,6 +189,7 @@ def time_run_code_stage_split(config: BenchmarkConfig, optimizer_backend: str):
     ls_time = time.perf_counter() - t0
 
     booz.need_to_run_code = True
+    _progress(f"    [{optimizer_backend}] LS stage finished; running Newton stage")
     t1 = time.perf_counter()
     res = booz.minimize_boozer_penalty_constraints_newton(
         constraint_weight=booz.constraint_weight,
@@ -193,6 +203,7 @@ def time_run_code_stage_split(config: BenchmarkConfig, optimizer_backend: str):
     )
     _sync_result(res)
     newton_time = time.perf_counter() - t1
+    _progress(f"    [{optimizer_backend}] Newton stage finished")
     return ls_time, newton_time, res
 
 
@@ -202,13 +213,19 @@ def benchmark_backend(
     *,
     repeats: int,
 ):
+    _progress(f"  backend={optimizer_backend}")
     compile_time, compile_res = time_run_code(config, optimizer_backend)
     ls_time, newton_time, _ = time_run_code_stage_split(config, optimizer_backend)
     repeat_times = []
     repeat_res = compile_res
-    for _ in range(repeats):
+    for repeat_index in range(repeats):
+        _progress(
+            f"    [{optimizer_backend}] repeat fresh solve "
+            f"{repeat_index + 1}/{repeats}"
+        )
         elapsed, repeat_res = time_run_code(config, optimizer_backend)
         repeat_times.append(elapsed)
+    _progress(f"    [{optimizer_backend}] repeats finished")
     return compile_time, ls_time, newton_time, np.asarray(repeat_times), repeat_res
 
 
@@ -223,18 +240,18 @@ def run_benchmarks(
         raise ValueError("repeats must be >= 1")
     summaries: dict[str, dict[str, float]] = {}
 
-    print(f"\n{'=' * 70}")
-    print(title)
-    print(f"{'=' * 70}")
+    _progress(f"\n{'=' * 70}")
+    _progress(title)
+    _progress(f"{'=' * 70}")
 
     for config in configs:
-        print(f"\n{'=' * 70}")
-        print(f"run_code() benchmark: {config.label}")
-        print(
+        _progress(f"\n{'=' * 70}")
+        _progress(f"run_code() benchmark: {config.label}")
+        _progress(
             f"  grid: {config.nphi}x{config.ntheta}, surface: "
             f"mpol={config.mpol} ntor={config.ntor}, coils={config.ncoils}"
         )
-        print(f"{'=' * 70}")
+        _progress(f"{'=' * 70}")
 
         backend_summary: dict[str, float] = {}
         for optimizer_backend in backends:
@@ -244,21 +261,20 @@ def run_benchmarks(
                 repeats=repeats,
             )
             backend_summary[optimizer_backend] = float(np.median(repeat_times))
-            print(f"  backend={optimizer_backend}")
-            print(
+            _progress(
                 f"    first call:  {compile_time:.3f}s  "
                 f"success={res['success']}  iter={res['iter']}"
             )
-            print(
+            _progress(
                 f"    repeat fresh solve: {np.median(repeat_times) * 1e3:.1f}ms median, "
                 f"{np.mean(repeat_times) * 1e3:.1f}ms mean ± "
                 f"{np.std(repeat_times) * 1e3:.1f}ms"
             )
-            print(
+            _progress(
                 f"    stage split sample: LS {ls_time * 1e3:.1f}ms, "
                 f"Newton {newton_time * 1e3:.1f}ms"
             )
-            print(
+            _progress(
                 f"    final fun:   {summarize_result_fun(res):.6e}  "
                 f"iota={float(res['iota']):.6f}"
             )
@@ -266,10 +282,10 @@ def run_benchmarks(
         summaries[config.label] = backend_summary
         if "scipy" in backend_summary and "ondevice" in backend_summary:
             speedup = backend_summary["scipy"] / backend_summary["ondevice"]
-            print(f"  repeat fresh-solve speedup (ondevice/scipy): {speedup:.2f}x")
+            _progress(f"  repeat fresh-solve speedup (ondevice/scipy): {speedup:.2f}x")
         if "scipy" in backend_summary and "hybrid" in backend_summary:
             speedup = backend_summary["scipy"] / backend_summary["hybrid"]
-            print(f"  repeat fresh-solve speedup (hybrid/scipy):   {speedup:.2f}x")
+            _progress(f"  repeat fresh-solve speedup (hybrid/scipy):   {speedup:.2f}x")
 
     if "scipy" in backends and "ondevice" in backends:
         break_even = next(
@@ -280,15 +296,15 @@ def run_benchmarks(
             ),
             None,
         )
-        print(f"\n{'=' * 70}")
-        print("BREAK-EVEN SUMMARY")
-        print(f"{'=' * 70}")
+        _progress(f"\n{'=' * 70}")
+        _progress("BREAK-EVEN SUMMARY")
+        _progress(f"{'=' * 70}")
         if break_even is None:
-            print(
+            _progress(
                 "No tested configuration reached ondevice <= scipy repeat fresh-solve time."
             )
         else:
-            print(
+            _progress(
                 "First tested configuration with ondevice <= scipy "
                 f"repeat fresh-solve time: {break_even}"
             )
