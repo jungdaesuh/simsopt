@@ -1,11 +1,18 @@
-from . import derivative as derivative
-from . import descriptor as descriptor
-from . import optimizable as optimizable
-from . import util as util
+import sys
 
 from .derivative import *
 from .descriptor import *
 from .optimizable import *
 from .util import *
 
-__all__ = (derivative.__all__ + descriptor.__all__ + optimizable.__all__ + util.__all__)
+
+def _module_all(name):
+    return list(sys.modules[f"{__name__}.{name}"].__all__)
+
+
+__all__ = (
+    _module_all("derivative")
+    + _module_all("descriptor")
+    + _module_all("optimizable")
+    + _module_all("util")
+)
