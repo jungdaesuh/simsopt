@@ -1,3 +1,17 @@
+from . import biotsavart as biotsavart
+from . import boozermagneticfield as boozermagneticfield
+from . import coil as coil
+from . import coilset as coilset
+from . import magneticfield as magneticfield
+from . import magneticfieldclasses as magneticfieldclasses
+from . import mgrid as mgrid
+from . import normal_field as normal_field
+from . import tracing as tracing
+from . import coilobjective as coilobjective
+from . import wireframefield as wireframefield
+from . import selffield as selffield
+from . import magnetic_axis_helpers as magnetic_axis_helpers
+
 from .biotsavart import *
 from .boozermagneticfield import *
 from .coil import *

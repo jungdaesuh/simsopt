@@ -1,5 +1,35 @@
 import jax
 jax.config.update("jax_enable_x64", True)
+from . import config as config
+from . import curve as curve
+from . import curvehelical as curvehelical
+from . import curverzfourier as curverzfourier
+from . import curvexyzfourier as curvexyzfourier
+from . import curvexyzfouriersymmetries as curvexyzfouriersymmetries
+from . import curveperturbed as curveperturbed
+from . import curveobjectives as curveobjectives
+from . import curveplanarfourier as curveplanarfourier
+from . import framedcurve as framedcurve
+from . import finitebuild as finitebuild
+from . import plotting as plotting
+from . import boozersurface as boozersurface
+from . import qfmsurface as qfmsurface
+from . import surface as surface
+from . import surfacegarabedian as surfacegarabedian
+from . import surfacehenneberg as surfacehenneberg
+from . import surfaceobjectives as surfaceobjectives
+from . import surfacerzfourier as surfacerzfourier
+from . import surfacexyzfourier as surfacexyzfourier
+from . import surfacexyztensorfourier as surfacexyztensorfourier
+from . import strain_optimization as strain_optimization
+from . import hull as hull
+from . import wireframe_toroidal as wireframe_toroidal
+from . import ports as ports
+from . import permanent_magnet_grid as permanent_magnet_grid
+from . import orientedcurve as orientedcurve
+from . import accessibility as accessibility
+from . import curvecwsfourier as curvecwsfourier
+
 from .config import *
 
 from .curve import *

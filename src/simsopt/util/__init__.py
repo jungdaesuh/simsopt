@@ -1,5 +1,11 @@
 import os
 
+from . import mpi as mpi
+from . import logger as logger
+from . import famus_helpers as famus_helpers
+from . import polarization_project as polarization_project
+from . import permanent_magnet_helper_functions as permanent_magnet_helper_functions
+
 from .mpi import *
 from .logger import *
 from .famus_helpers import *
