@@ -14,17 +14,11 @@ SRC_ROOT = REPO_ROOT / "src"
 sys.path.insert(0, str(REPO_ROOT))
 sys.path.insert(0, str(SRC_ROOT))
 
-
-def _preparse_platform(argv: list[str]) -> str:
-    parser = argparse.ArgumentParser(add_help=False)
-    parser.add_argument("--platform", choices=("auto", "cpu", "cuda"), default="auto")
-    args, _ = parser.parse_known_args(argv)
-    return args.platform
+from benchmarks.validation_ladder_common import apply_requested_platform, preparse_platform
 
 
-REQUESTED_PLATFORM = _preparse_platform(sys.argv[1:])
-if REQUESTED_PLATFORM != "auto":
-    os.environ["JAX_PLATFORMS"] = REQUESTED_PLATFORM
+REQUESTED_PLATFORM = preparse_platform(sys.argv[1:])
+apply_requested_platform(REQUESTED_PLATFORM)
 
 import jax
 import jaxlib

@@ -125,7 +125,9 @@ def _run_stage2_case(args: argparse.Namespace, backend: str, *, platform: str) -
         result = run_python_script(
             script_path,
             command,
-            env=repo_pythonpath_env(platform=platform if backend == "jax" else "auto"),
+            env=repo_pythonpath_env(
+                platform=platform if backend == "jax" else "cpu"
+            ),
             cwd=REPO_ROOT,
         )
         if result.stdout:

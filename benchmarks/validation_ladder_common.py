@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import resource
+import shlex
 import subprocess
 import sys
 from typing import Any
@@ -17,6 +18,11 @@ import numpy as np
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SRC_ROOT = REPO_ROOT / "src"
+_JAX_PLATFORM_ENV_VARS = (
+    "JAX_PLATFORMS",
+    "SIMSOPT_JAX_PLATFORM",
+    "SIMSOPT_JAX_BACKEND",
+)
 
 
 def preparse_platform(argv: list[str]) -> str:
@@ -29,21 +35,30 @@ def preparse_platform(argv: list[str]) -> str:
 
 def apply_requested_platform(platform: str) -> None:
     """Pin JAX to a specific platform before importing the package."""
-    if platform != "auto":
-        os.environ["JAX_PLATFORMS"] = platform
+    _apply_platform_env(os.environ, platform)
 
 
 def repo_pythonpath_env(*, platform: str = "auto") -> dict[str, str]:
     """Return an environment that resolves in-repo imports for subprocess probes."""
     env = dict(os.environ)
-    if platform != "auto":
-        env["JAX_PLATFORMS"] = platform
+    _apply_platform_env(env, platform)
     pythonpath_entries = [str(REPO_ROOT), str(SRC_ROOT)]
     existing_pythonpath = env.get("PYTHONPATH")
     if existing_pythonpath:
         pythonpath_entries.append(existing_pythonpath)
     env["PYTHONPATH"] = os.pathsep.join(pythonpath_entries)
     return env
+
+
+def _apply_platform_env(env: dict[str, str], platform: str) -> None:
+    """Apply or clear all JAX platform selectors used by this repo."""
+    for key in _JAX_PLATFORM_ENV_VARS:
+        env.pop(key, None)
+    if platform == "auto":
+        return
+    env["JAX_PLATFORMS"] = platform
+    env["SIMSOPT_JAX_PLATFORM"] = platform
+    env["SIMSOPT_JAX_BACKEND"] = platform
 
 
 def bootstrap_local_simsopt() -> None:
@@ -204,14 +219,27 @@ def run_python_script(
 ) -> subprocess.CompletedProcess[str]:
     """Run a Python helper script using the current interpreter."""
     command = [sys.executable, str(script_path), *args]
-    return subprocess.run(
+    result = subprocess.run(
         command,
         cwd=str(cwd or REPO_ROOT),
         env=env,
-        check=True,
         capture_output=True,
         text=True,
     )
+    if result.returncode != 0:
+        formatted_command = " ".join(shlex.quote(part) for part in command)
+        stdout = result.stdout.strip()
+        stderr = result.stderr.strip()
+        details: list[str] = []
+        if stdout:
+            details.append(f"stdout:\n{stdout}")
+        if stderr:
+            details.append(f"stderr:\n{stderr}")
+        detail_block = "\n\n".join(details) if details else "no stdout/stderr captured"
+        raise RuntimeError(
+            f"Subprocess failed with exit code {result.returncode}: {formatted_command}\n\n{detail_block}"
+        )
+    return result
 
 
 def find_single_file(root: str | os.PathLike[str], pattern: str) -> Path:
