@@ -1064,6 +1064,10 @@ if __name__ == "__main__":
         "INITIAL_IOTA": float(initial_iota),
         "INITIAL_FIELD_ERROR": float(initial_field_error),
         "INITIAL_MAX_CURVATURE": float(initial_max_curvature),
+        "OBJECTIVE_J": float(JF.J()),
+        "NONQS_RATIO": float(JnonQSRatio.J()),
+        "BOOZER_RESIDUAL": float(JBoozerResidual.J()),
+        "CURVE_CURVE_MIN_DIST": float(JCurveCurve.shortest_distance()),
     }
     with open(os.path.join(OUT_DIR_ITER, "results.json"), "w") as outfile:
         json.dump(results, outfile, indent=2)

@@ -670,7 +670,9 @@ if __name__ == "__main__":
         "FINAL_VOLUME": float(new_surf.volume()),
         "FIELD_ERROR": float(fieldError),
         "SELF_INTERSECTING": intersecting,
-        "MAX_CURVATURE": float(np.max(new_banana_curve.kappa()))
+        "MAX_CURVATURE": float(np.max(new_banana_curve.kappa())),
+        "OBJECTIVE_J": float(JF.J()),
+        "CURVE_CURVE_MIN_DIST": float(Jccdist.shortest_distance()),
     }
     with open(os.path.join(OUT_DIR_ITER, "results.json"), "w") as outfile:
         json.dump(results, outfile, indent=2)
