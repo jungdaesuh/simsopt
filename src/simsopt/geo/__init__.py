@@ -1,3 +1,4 @@
+from . import config as config
 from .config import *
 
 # Check simsoptpp availability once; probe a compiled symbol to
@@ -11,6 +12,35 @@ except (ImportError, AttributeError):
 
 _cpu_geo_all = []
 if _has_simsoptpp:
+    from . import curve as curve
+    from . import curvehelical as curvehelical
+    from . import curverzfourier as curverzfourier
+    from . import curvexyzfourier as curvexyzfourier
+    from . import curvexyzfouriersymmetries as curvexyzfouriersymmetries
+    from . import curveperturbed as curveperturbed
+    from . import curveobjectives as curveobjectives
+    from . import curveplanarfourier as curveplanarfourier
+    from . import framedcurve as framedcurve
+    from . import finitebuild as finitebuild
+    from . import plotting as plotting
+    from . import boozersurface as boozersurface
+    from . import qfmsurface as qfmsurface
+    from . import surface as surface
+    from . import surfacegarabedian as surfacegarabedian
+    from . import surfacehenneberg as surfacehenneberg
+    from . import surfaceobjectives as surfaceobjectives
+    from . import surfacerzfourier as surfacerzfourier
+    from . import surfacexyzfourier as surfacexyzfourier
+    from . import surfacexyztensorfourier as surfacexyztensorfourier
+    from . import strain_optimization as strain_optimization
+    from . import hull as hull
+    from . import wireframe_toroidal as wireframe_toroidal
+    from . import ports as ports
+    from . import permanent_magnet_grid as permanent_magnet_grid
+    from . import orientedcurve as orientedcurve
+    from . import accessibility as accessibility
+    from . import curvecwsfourier as curvecwsfourier
+
     from .curve import *
     from .curvehelical import *
     from .curverzfourier import *
@@ -77,6 +107,7 @@ if _has_simsoptpp:
 # JAX modules (optional — requires jax)
 _jax_geo_all = []
 try:
+    from . import boozersurface_jax as boozersurface_jax
     from .boozersurface_jax import *
 
     _jax_geo_all += boozersurface_jax.__all__
@@ -84,6 +115,7 @@ except (ImportError, AttributeError):
     pass
 if _has_simsoptpp:
     try:
+        from . import surfaceobjectives_jax as surfaceobjectives_jax
         from .surfaceobjectives_jax import *
 
         _jax_geo_all += surfaceobjectives_jax.__all__

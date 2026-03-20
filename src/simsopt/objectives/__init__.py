@@ -1,3 +1,7 @@
+from . import constrained as constrained
+from . import least_squares as least_squares
+from . import utilities as utilities
+
 from .constrained import *
 from .least_squares import *
 from .utilities import *
@@ -13,6 +17,7 @@ except (ImportError, AttributeError):
 
 _cpu_flux_all = []
 if _has_simsoptpp:
+    from . import fluxobjective as fluxobjective
     from .fluxobjective import *
 
     _cpu_flux_all = fluxobjective.__all__
@@ -20,6 +25,7 @@ if _has_simsoptpp:
 # JAX modules (optional — requires jax)
 _jax_flux_all = []
 try:
+    from . import fluxobjective_jax as fluxobjective_jax
     from .fluxobjective_jax import *
 
     _jax_flux_all = fluxobjective_jax.__all__

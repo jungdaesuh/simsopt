@@ -16,6 +16,8 @@ import sys
 import textwrap
 from pathlib import Path
 
+import pytest
+
 # Resolve the src/ directory relative to the repo root so subprocesses
 # can import simsopt without a pip install.
 _SRC_DIR = str(Path(__file__).resolve().parents[1] / "src")
@@ -131,3 +133,25 @@ def test_m5_classes_require_simsoptpp():
                 assert not available, f"{name} should NOT be available without simsoptpp"
     """)
     assert rc == 0, f"M5 availability check failed:\n{err}"
+
+
+def test_import_cpu_package_entrypoints_with_simsoptpp():
+    """CPU package entrypoints must import cleanly when simsoptpp is available."""
+    try:
+        from simsoptpp import Curve as _  # noqa: F401
+    except (ImportError, AttributeError):
+        pytest.skip("compiled simsoptpp symbols are not available in this environment")
+
+    rc, err = _run_import_check("""
+        import simsopt.configs
+        import simsopt.field
+        import simsopt.geo
+        import simsopt.objectives
+        import simsopt.solve
+        import simsopt.util
+
+        assert hasattr(simsopt.field, "BiotSavart")
+        assert hasattr(simsopt.geo, "BoozerSurface")
+        assert hasattr(simsopt.objectives, "LeastSquaresProblem")
+    """)
+    assert rc == 0, f"CPU entrypoint import check failed:\n{err}"
