@@ -21,6 +21,7 @@ Usage:
     hf jobs uv run benchmarks/cpp_baseline_benchmark.py --flavor cpu-xl --timeout 30m
 """
 
+import argparse
 import os
 import shutil
 import subprocess
@@ -31,6 +32,9 @@ from pathlib import Path
 import numpy as np
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO_ROOT))
+
+from benchmarks.benchmark_config import available_config_labels, resolve_configs
 
 
 def build_simsopt():
@@ -99,7 +103,20 @@ def build_simsopt():
     return REPO_ROOT
 
 
-def run_benchmarks():
+def summarize_result_fun(res):
+    fun = res.get("fun")
+    if fun is not None:
+        return float(fun)
+    residual = res.get("residual")
+    if residual is None:
+        return float("nan")
+    arr = np.asarray(residual)
+    if arr.ndim == 0:
+        return float(arr)
+    return 0.5 * float(np.mean(np.square(arr)))
+
+
+def run_benchmarks(*, configs, repeats):
     """Run Boozer solve through the CPU C++ path."""
     # Add the local repo to path so simsopt is importable
     sys.path.insert(0, str(REPO_ROOT / "src"))
@@ -108,21 +125,19 @@ def run_benchmarks():
     from simsopt.geo.surfaceobjectives import Volume
     from simsopt.field import BiotSavart, Current, Coil
 
-    configs = [
-        # (label, ncoils, nquad, nphi, ntheta, mpol, ntor)
-        ("Small (4 coils, 15x15)", 4, 64, 15, 15, 2, 2),
-        ("HBT-like (12 coils, 15x15)", 12, 128, 15, 15, 4, 4),
-        ("Prod-grid (12 coils, 64x64)", 12, 128, 64, 64, 4, 4),
-        ("Columbia (12 coils, 128x64)", 12, 200, 128, 64, 8, 6),
-    ]
-
-    for label, ncoils, nquad, nphi, ntheta, mpol, ntor in configs:
+    for config in configs:
+        label = config.label
+        ncoils = config.ncoils
+        nphi = config.nphi
+        ntheta = config.ntheta
+        mpol = config.mpol
+        ntor = config.ntor
+        nfp = config.nfp
+        nquad = config.nquad
         print(f"\n{'=' * 70}")
         print(f"C++ run_code() benchmark: {label}")
         print(f"  Boozer grid: {nphi}x{ntheta}, surface: mpol={mpol} ntor={ntor}")
         print(f"{'=' * 70}")
-
-        nfp = 1
 
         # Create coils (circular, z=±0.3)
         coils = []
@@ -186,12 +201,12 @@ def run_benchmarks():
         first_time = time.perf_counter() - t0
         if res:
             iota_val = res.get("iota")
-            fun_val = res.get("fun")
+            fun_val = summarize_result_fun(res)
             print(
                 f"    first call:  {first_time:.3f}s  "
                 f"converged={res.get('success', 'N/A')}  "
                 f"iota={f'{iota_val:.6f}' if iota_val is not None else 'N/A'}  "
-                f"fun={f'{fun_val:.6e}' if fun_val is not None else 'N/A'}"
+                f"fun={fun_val:.6e}"
             )
 
         # Stage split on a fresh solve
@@ -229,7 +244,7 @@ def run_benchmarks():
 
         # Steady-state
         times = []
-        for _ in range(5):
+        for _ in range(repeats):
             boozer.need_to_run_code = True
             t0 = time.perf_counter()
             res = boozer.run_code(iota=iota0, G=G0)
@@ -256,11 +271,29 @@ def run_benchmarks():
     print(f"  OMP_NUM_THREADS: {os.environ.get('OMP_NUM_THREADS', 'not set')}")
 
 
+def parse_args():
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--config",
+        action="append",
+        choices=available_config_labels(),
+        help="Benchmark config label to run. Repeat to run multiple configs.",
+    )
+    parser.add_argument(
+        "--repeats",
+        type=int,
+        default=5,
+        help="Number of steady-state fresh-solve repeats per config.",
+    )
+    return parser.parse_args()
+
+
 def main():
+    args = parse_args()
     print("simsoptpp C++ Baseline Benchmark — Milestone 4")
     print(f"Python: {sys.version}")
     build_simsopt()
-    run_benchmarks()
+    run_benchmarks(configs=resolve_configs(args.config), repeats=args.repeats)
     print(f"\n{'=' * 70}\nBENCHMARK COMPLETE\n{'=' * 70}")
 
 

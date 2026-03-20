@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from pathlib import Path
 import subprocess
 import time
@@ -13,31 +12,11 @@ import jax
 import jaxlib
 import jax.numpy as jnp
 
+from benchmarks.benchmark_config import BenchmarkConfig, DEFAULT_CONFIGS
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 EXPECTED_JAX_VERSION = "0.6.2"
 DEFAULT_BACKENDS = ("scipy", "ondevice", "hybrid")
-
-
-@dataclass(frozen=True)
-class BenchmarkConfig:
-    label: str
-    ncoils: int
-    nphi: int
-    ntheta: int
-    mpol: int
-    ntor: int
-    nfp: int = 1
-
-
-DEFAULT_CONFIGS = (
-    BenchmarkConfig("Small (4 coils, 15x15)", 4, 15, 15, 2, 2),
-    BenchmarkConfig("Medium (6 coils, 15x15)", 6, 15, 15, 4, 4),
-    BenchmarkConfig("HBT-like (12 coils, 15x15)", 12, 15, 15, 4, 4),
-    BenchmarkConfig("Prod-grid (12 coils, 64x64)", 12, 64, 64, 4, 4),
-    BenchmarkConfig("Columbia (12 coils, 128x64)", 12, 128, 64, 8, 6),
-    BenchmarkConfig("Full-HBT (22 coils, 128x64)", 22, 128, 64, 8, 6),
-)
 
 
 def _get_git_sha() -> str:
@@ -162,6 +141,19 @@ def _sync_result(res: dict) -> None:
                 jax.block_until_ready(jnp.asarray(value))
 
 
+def summarize_result_fun(res: dict) -> float:
+    fun = res.get("fun")
+    if fun is not None:
+        return float(fun)
+    residual = res.get("residual")
+    if residual is None:
+        return float("nan")
+    arr = np.asarray(residual)
+    if arr.ndim == 0:
+        return float(arr)
+    return 0.5 * float(np.mean(np.square(arr)))
+
+
 def time_run_code(config: BenchmarkConfig, optimizer_backend: str):
     booz, iota0, G0 = _make_boozer_surface(config, optimizer_backend)
     t0 = time.perf_counter()
@@ -223,12 +215,19 @@ def benchmark_backend(
 def run_benchmarks(
     *,
     title: str,
+    configs=DEFAULT_CONFIGS,
     backends=DEFAULT_BACKENDS,
     repeats: int = 3,
 ) -> None:
+    if repeats < 1:
+        raise ValueError("repeats must be >= 1")
     summaries: dict[str, dict[str, float]] = {}
 
-    for config in DEFAULT_CONFIGS:
+    print(f"\n{'=' * 70}")
+    print(title)
+    print(f"{'=' * 70}")
+
+    for config in configs:
         print(f"\n{'=' * 70}")
         print(f"run_code() benchmark: {config.label}")
         print(
@@ -260,7 +259,7 @@ def run_benchmarks(
                 f"Newton {newton_time * 1e3:.1f}ms"
             )
             print(
-                f"    final fun:   {float(res['fun']):.6e}  "
+                f"    final fun:   {summarize_result_fun(res):.6e}  "
                 f"iota={float(res['iota']):.6f}"
             )
 
