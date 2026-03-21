@@ -348,21 +348,19 @@ class TestBiotSavartJAXParity:
         # Use B as the cotangent vector (arbitrary but non-zero)
         v = B_cpu.copy()
 
-        deriv_cpu = bs_cpu.B_vjp(v)
-        grad_cpu = deriv_cpu(coils[0])
-
         bs_jax = BiotSavartJAX(coils)
         bs_jax.set_points(points)
+        deriv_cpu = bs_cpu.B_vjp(v)
         deriv_jax = bs_jax.B_vjp(v)
-        grad_jax = deriv_jax(coils[0])
 
-        np.testing.assert_allclose(
-            grad_jax,
-            grad_cpu,
-            rtol=1e-8,
-            atol=1e-14,
-            err_msg="BiotSavartJAX.B_vjp() does not match CPU",
-        )
+        for coil in coils:
+            np.testing.assert_allclose(
+                deriv_jax(coil),
+                deriv_cpu(coil),
+                rtol=1e-8,
+                atol=1e-14,
+                err_msg="BiotSavartJAX.B_vjp() does not match CPU",
+            )
 
 
 # -----------------------------------------------------------------------

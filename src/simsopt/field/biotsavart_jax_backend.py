@@ -26,6 +26,22 @@ from .biotsavart_jax import (
 __all__ = ["BiotSavartJAX"]
 
 
+@jax.jit
+def _single_coil_b_vjp(points, v, gamma, gammadash, current):
+    """Reverse-mode pullback for one coil at a time.
+
+    Keeping the reverse pass at single-coil granularity avoids materializing
+    grouped multi-coil intermediates in device memory while still letting JAX
+    cache one compiled VJP per distinct quadrature shape.
+    """
+
+    def fwd(g, gd, c):
+        return biot_savart_B(points, g[None, ...], gd[None, ...], c[None])
+
+    _, pullback = jax.vjp(fwd, gamma, gammadash, current)
+    return pullback(v)
+
+
 class BiotSavartJAX(Optimizable):
     r"""JAX-backed Biot-Savart magnetic field evaluation.
 
@@ -229,25 +245,18 @@ class BiotSavartJAX(Optimizable):
         Returns:
             :class:`Derivative` (sum over all coils).
         """
-        groups = self._extract_coil_data_grouped()
+        all_derivs = []
         points = self._points_jax
         v_jax = jnp.asarray(v)
-
-        all_derivs = []
-        for gammas, gammadashs, currents, indices in groups:
-            for local_i, global_i in enumerate(indices):
-                gamma_i = gammas[local_i : local_i + 1]
-                gammadash_i = gammadashs[local_i : local_i + 1]
-                current_i = currents[local_i : local_i + 1]
-
-                def fwd(g, gd, c):
-                    return biot_savart_B(points, g, gd, c)
-
-                _, vjp_fn = jax.vjp(fwd, gamma_i, gammadash_i, current_i)
-                dg, dgd, dc = jax.device_get(vjp_fn(v_jax))
-                all_derivs.append(
-                    self._coils[global_i].vjp(
-                        dg[0], dgd[0], np.asarray([dc[0]])
-                    )
+        for coil in self._coils:
+            dg, dgd, dc = jax.device_get(
+                _single_coil_b_vjp(
+                    points,
+                    v_jax,
+                    jnp.asarray(coil.curve.gamma(), dtype=jnp.float64),
+                    jnp.asarray(coil.curve.gammadash(), dtype=jnp.float64),
+                    jnp.asarray(coil.current.get_value(), dtype=jnp.float64),
                 )
+            )
+            all_derivs.append(coil.vjp(dg, dgd, np.asarray([dc])))
         return sum(all_derivs)
