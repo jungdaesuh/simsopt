@@ -24,6 +24,7 @@ _JAX_PLATFORM_ENV_VARS = (
     "SIMSOPT_JAX_PLATFORM",
     "SIMSOPT_JAX_BACKEND",
 )
+_JAX_CUDA_MEMORY_ENV_VARS = ("XLA_PYTHON_CLIENT_PREALLOCATE",)
 
 
 def preparse_platform(argv: list[str]) -> str:
@@ -55,11 +56,15 @@ def _apply_platform_env(env: dict[str, str], platform: str) -> None:
     """Apply or clear all JAX platform selectors used by this repo."""
     for key in _JAX_PLATFORM_ENV_VARS:
         env.pop(key, None)
+    for key in _JAX_CUDA_MEMORY_ENV_VARS:
+        env.pop(key, None)
     if platform == "auto":
         return
     env["JAX_PLATFORMS"] = platform
     env["SIMSOPT_JAX_PLATFORM"] = platform
     env["SIMSOPT_JAX_BACKEND"] = platform
+    if platform == "cuda":
+        env["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
 
 
 def bootstrap_local_simsopt() -> None:
