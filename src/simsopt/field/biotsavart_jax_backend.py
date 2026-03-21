@@ -235,20 +235,19 @@ class BiotSavartJAX(Optimizable):
 
         all_derivs = []
         for gammas, gammadashs, currents, indices in groups:
-
-            def fwd(g, gd, c):
-                return biot_savart_B(points, g, gd, c)
-
-            _, vjp_fn = jax.vjp(fwd, gammas, gammadashs, currents)
-            dg, dgd, dc = vjp_fn(v_jax)
-
-            dg_np = np.asarray(dg)
-            dgd_np = np.asarray(dgd)
-            dc_np = np.asarray(dc)
             for local_i, global_i in enumerate(indices):
+                gamma_i = gammas[local_i : local_i + 1]
+                gammadash_i = gammadashs[local_i : local_i + 1]
+                current_i = currents[local_i : local_i + 1]
+
+                def fwd(g, gd, c):
+                    return biot_savart_B(points, g, gd, c)
+
+                _, vjp_fn = jax.vjp(fwd, gamma_i, gammadash_i, current_i)
+                dg, dgd, dc = jax.device_get(vjp_fn(v_jax))
                 all_derivs.append(
                     self._coils[global_i].vjp(
-                        dg_np[local_i], dgd_np[local_i], np.asarray([dc_np[local_i]])
+                        dg[0], dgd[0], np.asarray([dc[0]])
                     )
                 )
         return sum(all_derivs)
