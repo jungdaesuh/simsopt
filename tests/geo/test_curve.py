@@ -4,6 +4,7 @@ import json
 import os
 
 
+import jax.numpy as jnp
 import numpy as np
 
 from simsopt._core.json import GSONEncoder, GSONDecoder, SIMSON
@@ -741,6 +742,36 @@ class Testing(unittest.TestCase):
                 )
                 for values in outputs:
                     self.assertTrue(np.all(np.isfinite(values)))
+
+    def test_curvecwsfourier_surface_lin_inputs_materialize_jax_arrays(self):
+        from simsopt.geo.curvecwsfourier import CurveCWSFourierCPP
+
+        quadpoints = np.linspace(0, 1, 33, endpoint=False)
+        surf = SurfaceRZFourier(
+            nfp=5,
+            stellsym=True,
+            mpol=1,
+            ntor=0,
+            quadpoints_phi=np.arange(64) / 64,
+            quadpoints_theta=np.arange(64) / 64,
+        )
+        curve = CurveCWSFourierCPP(quadpoints, 3, surf, G=0, H=0)
+        curve.set('thetas(1)', .1)
+        curve.set('phic(1)', .05)
+
+        g2_jax = jnp.asarray(curve.gamma_2d())
+        phi, theta = curve._surface_lin_inputs_from_gamma2d(g2_jax)
+
+        self.assertIsInstance(phi, np.ndarray)
+        self.assertIsInstance(theta, np.ndarray)
+        self.assertEqual(phi.dtype, np.float64)
+        self.assertEqual(theta.dtype, np.float64)
+        self.assertTrue(phi.flags.c_contiguous)
+        self.assertTrue(theta.flags.c_contiguous)
+
+        out = np.zeros((curve.numquadpoints, 3))
+        curve.surf.gamma_lin(out, phi, theta)
+        self.assertTrue(np.all(np.isfinite(out)))
 
     @unittest.skipIf(pyevtk is None, "pyevtk not found")
     def test_curve_to_vtk(self):

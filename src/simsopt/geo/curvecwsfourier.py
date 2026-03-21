@@ -138,6 +138,15 @@ class CurveCWSFourierCPP( Curve, sopp.Curve ):
 
     def num_dofs(self):
         return 2*(self.order+1) + 2*self.order
+
+    @staticmethod
+    def _surface_lin_inputs(phi, theta):
+        phi_arr = np.ascontiguousarray(np.asarray(phi, dtype=np.float64))
+        theta_arr = np.ascontiguousarray(np.asarray(theta, dtype=np.float64))
+        return phi_arr, theta_arr
+
+    def _surface_lin_inputs_from_gamma2d(self, g2):
+        return self._surface_lin_inputs(g2[:, 0], g2[:, 1])
     
     def get_dofs(self):
         return np.concatenate(self.modes)
@@ -175,14 +184,16 @@ class CurveCWSFourierCPP( Curve, sopp.Curve ):
     
     def gamma(self):
         g2 = self.gamma_2d()
+        phi, theta = self._surface_lin_inputs_from_gamma2d(g2)
         out = np.zeros((self.numquadpoints,3))
-        self.surf.gamma_lin(out, g2[:,0], g2[:,1])
+        self.surf.gamma_lin(out, phi, theta)
         return out
     
     def gamma_impl(self, gamma, quadpoints):
         g2 = np.zeros((quadpoints.size,2))
         self.gamma_2d_impl(g2, quadpoints)
-        self.surf.gamma_lin(gamma, g2[:,0], g2[:,1])
+        phi, theta = self._surface_lin_inputs_from_gamma2d(g2)
+        self.surf.gamma_lin(gamma, phi, theta)
 
     def dgamma_2d_by_dcoeff(self):
         cdofs = self.get_dofs()
@@ -190,10 +201,11 @@ class CurveCWSFourierCPP( Curve, sopp.Curve ):
 
     def dgamma_by_dcoeff(self):
         g2 = self.gamma_2d()
+        phi, theta = self._surface_lin_inputs_from_gamma2d(g2)
         dsurf_dphi = np.zeros((self.numquadpoints,3)) # shape nqpts x 3
         dsurf_dtheta = np.zeros((self.numquadpoints,3)) # shape nqpts x 3
-        self.surf.gammadash1_lin(dsurf_dphi, g2[:,0], g2[:,1]) 
-        self.surf.gammadash2_lin(dsurf_dtheta, g2[:,0], g2[:,1])
+        self.surf.gammadash1_lin(dsurf_dphi, phi, theta)
+        self.surf.gammadash2_lin(dsurf_dtheta, phi, theta)
 
         dg2_by_dcoeff = self.dgamma_2d_by_dcoeff() # shape nqpts x 2 x ndofs
         dphi_by_dcoeff = dg2_by_dcoeff[:,0,:] # shape nqpts x ndofs
@@ -228,10 +240,11 @@ class CurveCWSFourierCPP( Curve, sopp.Curve ):
     
     def gammadash(self):
         g2 = self.gamma_2d()
+        phi, theta = self._surface_lin_inputs_from_gamma2d(g2)
         dsurf_dphi = np.zeros((self.numquadpoints,3)) # shape nqpts x 3
         dsurf_dtheta = np.zeros((self.numquadpoints,3)) # shape nqpts x 3
-        self.surf.gammadash1_lin(dsurf_dphi, g2[:,0], g2[:,1]) 
-        self.surf.gammadash2_lin(dsurf_dtheta, g2[:,0], g2[:,1])
+        self.surf.gammadash1_lin(dsurf_dphi, phi, theta)
+        self.surf.gammadash2_lin(dsurf_dtheta, phi, theta)
 
         g2dash = self.gammadash_2d()
         phidash = g2dash[:,0] # shape nqpts
@@ -245,16 +258,17 @@ class CurveCWSFourierCPP( Curve, sopp.Curve ):
 
     def dgammadash_by_dcoeff(self):# dgammadash by dcoeff
         g2 = self.gamma_2d()
+        phi, theta = self._surface_lin_inputs_from_gamma2d(g2)
         dsurf_dphi = np.zeros((self.numquadpoints,3)) 
         dsurf_dtheta = np.zeros((self.numquadpoints,3)) 
         dsurf_dphidphi = np.zeros((self.numquadpoints,3))
         dsurf_dphidtheta = np.zeros((self.numquadpoints,3)) 
         dsurf_dthetadtheta = np.zeros((self.numquadpoints,3)) 
-        self.surf.gammadash1_lin(dsurf_dphi, g2[:,0], g2[:,1]) 
-        self.surf.gammadash2_lin(dsurf_dtheta, g2[:,0], g2[:,1])
-        self.surf.gammadash1dash1_lin(dsurf_dphidphi, g2[:,0], g2[:,1]) 
-        self.surf.gammadash1dash2_lin(dsurf_dphidtheta, g2[:,0], g2[:,1])
-        self.surf.gammadash2dash2_lin(dsurf_dthetadtheta, g2[:,0], g2[:,1]) 
+        self.surf.gammadash1_lin(dsurf_dphi, phi, theta)
+        self.surf.gammadash2_lin(dsurf_dtheta, phi, theta)
+        self.surf.gammadash1dash1_lin(dsurf_dphidphi, phi, theta)
+        self.surf.gammadash1dash2_lin(dsurf_dphidtheta, phi, theta)
+        self.surf.gammadash2dash2_lin(dsurf_dthetadtheta, phi, theta)
 
         g2dash = self.gammadash_2d()
         phidash = g2dash[:,0]
@@ -299,16 +313,17 @@ class CurveCWSFourierCPP( Curve, sopp.Curve ):
     
     def gammadashdash(self):
         g2 = self.gamma_2d()
+        phi, theta = self._surface_lin_inputs_from_gamma2d(g2)
         dsurf_dphi = np.zeros((self.numquadpoints,3)) 
         dsurf_dtheta = np.zeros((self.numquadpoints,3)) 
         dsurf_dphidphi = np.zeros((self.numquadpoints,3))
         dsurf_dphidtheta = np.zeros((self.numquadpoints,3)) 
         dsurf_dthetadtheta = np.zeros((self.numquadpoints,3)) 
-        self.surf.gammadash1_lin(dsurf_dphi, g2[:,0], g2[:,1]) 
-        self.surf.gammadash2_lin(dsurf_dtheta, g2[:,0], g2[:,1])
-        self.surf.gammadash1dash1_lin(dsurf_dphidphi, g2[:,0], g2[:,1]) 
-        self.surf.gammadash1dash2_lin(dsurf_dphidtheta, g2[:,0], g2[:,1])
-        self.surf.gammadash2dash2_lin(dsurf_dthetadtheta, g2[:,0], g2[:,1]) 
+        self.surf.gammadash1_lin(dsurf_dphi, phi, theta)
+        self.surf.gammadash2_lin(dsurf_dtheta, phi, theta)
+        self.surf.gammadash1dash1_lin(dsurf_dphidphi, phi, theta)
+        self.surf.gammadash1dash2_lin(dsurf_dphidtheta, phi, theta)
+        self.surf.gammadash2dash2_lin(dsurf_dthetadtheta, phi, theta)
 
         g2dash = self.gammadash_2d()
         phidash = g2dash[:,0] # self.numquadpoints
@@ -331,30 +346,31 @@ class CurveCWSFourierCPP( Curve, sopp.Curve ):
     def dgammadashdash_by_dcoeff(self):
         # This is ugly, but I don't know how to make it better!
         g2 = self.gamma_2d()
+        phi, theta = self._surface_lin_inputs_from_gamma2d(g2)
 
         ## First order derivative
         dsurf_dphi = np.zeros((self.numquadpoints,3)) 
         dsurf_dtheta = np.zeros((self.numquadpoints,3)) 
-        self.surf.gammadash1_lin(dsurf_dphi, g2[:,0], g2[:,1]) 
-        self.surf.gammadash2_lin(dsurf_dtheta, g2[:,0], g2[:,1])
+        self.surf.gammadash1_lin(dsurf_dphi, phi, theta)
+        self.surf.gammadash2_lin(dsurf_dtheta, phi, theta)
 
         ## Second order derivative
         dsurf_dphidphi = np.zeros((self.numquadpoints,3))
         dsurf_dphidtheta = np.zeros((self.numquadpoints,3)) 
         dsurf_dthetadtheta = np.zeros((self.numquadpoints,3)) 
         dsurf_dphidphidphi = np.zeros((self.numquadpoints,3))
-        self.surf.gammadash1dash1_lin(dsurf_dphidphi, g2[:,0], g2[:,1]) 
-        self.surf.gammadash1dash2_lin(dsurf_dphidtheta, g2[:,0], g2[:,1])
-        self.surf.gammadash2dash2_lin(dsurf_dthetadtheta, g2[:,0], g2[:,1]) 
+        self.surf.gammadash1dash1_lin(dsurf_dphidphi, phi, theta)
+        self.surf.gammadash1dash2_lin(dsurf_dphidtheta, phi, theta)
+        self.surf.gammadash2dash2_lin(dsurf_dthetadtheta, phi, theta)
 
         ## Third order derivative
         dsurf_dphidphidtheta = np.zeros((self.numquadpoints,3)) 
         dsurf_dphidthetadtheta = np.zeros((self.numquadpoints,3)) 
         dsurf_dthetadthetadtheta = np.zeros((self.numquadpoints,3)) 
-        self.surf.gammadash1dash1dash1_lin(dsurf_dphidphidphi, g2[:,0], g2[:,1])
-        self.surf.gammadash1dash1dash2_lin(dsurf_dphidphidtheta, g2[:,0], g2[:,1]) 
-        self.surf.gammadash1dash2dash2_lin(dsurf_dphidthetadtheta, g2[:,0], g2[:,1])
-        self.surf.gammadash2dash2dash2_lin(dsurf_dthetadthetadtheta, g2[:,0], g2[:,1]) 
+        self.surf.gammadash1dash1dash1_lin(dsurf_dphidphidphi, phi, theta)
+        self.surf.gammadash1dash1dash2_lin(dsurf_dphidphidtheta, phi, theta)
+        self.surf.gammadash1dash2dash2_lin(dsurf_dphidthetadtheta, phi, theta)
+        self.surf.gammadash2dash2dash2_lin(dsurf_dthetadthetadtheta, phi, theta)
 
         cdofs = self.get_dofs()
         dg2_by_dcoef = self.dgamma_2d_by_dcoeff_jax(cdofs)
@@ -425,6 +441,7 @@ class CurveCWSFourierCPP( Curve, sopp.Curve ):
         return self.unit_normal_impl(g2[:,0], g2[:,1])
     
     def unit_normal_impl(self, phi, theta):
+        phi, theta = self._surface_lin_inputs(phi, theta)
         npts = phi.size
         dxdtheta = np.zeros((npts,3))
         dxdphi = np.zeros((npts,3))
@@ -438,10 +455,11 @@ class CurveCWSFourierCPP( Curve, sopp.Curve ):
 
     def dunit_normal_by_dcoeff(self):
         g2 = self.gamma_2d()
+        phi, theta = self._surface_lin_inputs_from_gamma2d(g2)
         dxdtheta = np.zeros((self.numquadpoints,3))
         dxdphi = np.zeros((self.numquadpoints,3))
-        self.surf.gammadash1_lin(dxdphi, g2[:,0], g2[:,1])
-        self.surf.gammadash2_lin(dxdtheta, g2[:,0], g2[:,1])
+        self.surf.gammadash1_lin(dxdphi, phi, theta)
+        self.surf.gammadash2_lin(dxdtheta, phi, theta)
 
         normal = np.cross(dxdphi, dxdtheta)
         normal_norm = np.linalg.norm( normal, axis=1 )
@@ -450,9 +468,9 @@ class CurveCWSFourierCPP( Curve, sopp.Curve ):
         dxdthetadtheta = np.zeros((self.numquadpoints,3))
         dxdphidtheta = np.zeros((self.numquadpoints,3))
         dxdphidphi = np.zeros((self.numquadpoints,3))
-        self.surf.gammadash1dash1_lin(dxdphidphi, g2[:,0], g2[:,1])
-        self.surf.gammadash1dash2_lin(dxdphidtheta, g2[:,0], g2[:,1])
-        self.surf.gammadash2dash2_lin(dxdthetadtheta, g2[:,0], g2[:,1])
+        self.surf.gammadash1dash1_lin(dxdphidphi, phi, theta)
+        self.surf.gammadash1dash2_lin(dxdphidtheta, phi, theta)
+        self.surf.gammadash2dash2_lin(dxdthetadtheta, phi, theta)
 
         p0 = np.cross(dxdphi, dxdphidtheta) + np.cross(dxdphidphi, dxdtheta)
         p1 = np.cross(dxdphi, dxdthetadtheta) + np.cross(dxdphidtheta, dxdtheta)
@@ -494,4 +512,3 @@ class CurveCWSFourierCPP( Curve, sopp.Curve ):
     def drfactor_by_dcoeff_vjp(self, v):
         return Derivative({self: vjp_contraction_1d(self.drfactor_by_dcoeff(), v)})
     
-
