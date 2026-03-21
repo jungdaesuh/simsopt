@@ -40,6 +40,11 @@ from benchmarks.stage2_e2e_comparison import (
     build_stage2_e2e_payload,
     evaluate_stage2_e2e_comparison,
 )
+from benchmarks.tier5_performance_characterization import (
+    safe_speedup,
+    summarize_pair_probe,
+    summarize_single_lane_probe,
+)
 from benchmarks.validation_ladder_common import (
     max_pointwise_geometry_drift,
     repo_pythonpath_env,
@@ -488,6 +493,46 @@ def test_stage2_e2e_payload_preserves_trajectory_and_timing_artifacts():
     assert payload["jax_trajectory"] == jax_case["trajectory"]
     assert payload["comparison"]["cpu_elapsed_s"] == pytest.approx(12.5)
     assert payload["comparison"]["jax_elapsed_s"] == pytest.approx(8.75)
+
+
+def test_safe_speedup_returns_ratio_for_positive_times():
+    assert safe_speedup(10.0, 2.0) == pytest.approx(5.0)
+
+
+def test_safe_speedup_rejects_missing_or_nonpositive_candidate():
+    assert safe_speedup(10.0, None) is None
+    assert safe_speedup(10.0, 0.0) is None
+
+
+def test_summarize_pair_probe_records_speedup():
+    summary = summarize_pair_probe(
+        name="tier2_stage2_e2e",
+        payload={"passed": True},
+        outer_elapsed_s=50.0,
+        cpu_elapsed_s=20.0,
+        lane_elapsed_s=5.0,
+        lane_label="jax-cuda",
+    )
+
+    assert summary["passed"] is True
+    assert summary["outer_elapsed_s"] == pytest.approx(50.0)
+    assert summary["speedup_vs_cpu"] == pytest.approx(4.0)
+
+
+def test_summarize_single_lane_probe_keeps_outer_elapsed():
+    summary = summarize_single_lane_probe(
+        name="tier4_adjoint_fd",
+        payload={"passed": True},
+        outer_elapsed_s=12.0,
+        lane_label="jax-cpu",
+    )
+
+    assert summary == {
+        "name": "tier4_adjoint_fd",
+        "passed": True,
+        "outer_elapsed_s": pytest.approx(12.0),
+        "lane_label": "jax-cpu",
+    }
 
 
 def test_evaluate_adjoint_validation_accepts_stable_metrics():

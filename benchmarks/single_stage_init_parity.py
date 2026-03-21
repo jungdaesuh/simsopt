@@ -6,6 +6,7 @@ import argparse
 from pathlib import Path
 import sys
 import tempfile
+import time
 from typing import Any
 
 import numpy as np
@@ -188,6 +189,7 @@ def _run_single_stage_case(
         else:
             command.extend(["--equilibria-dir", args.equilibria_dir])
 
+        start = time.perf_counter()
         result = run_python_script(
             script_path,
             command,
@@ -196,6 +198,7 @@ def _run_single_stage_case(
             bootstrap_repo=True,
             stream_output=True,
         )
+        elapsed_s = time.perf_counter() - start
 
         results_json = find_single_file(output_root, "results.json")
         surf_json = find_single_file(output_root, "surf_init.json")
@@ -207,6 +210,7 @@ def _run_single_stage_case(
         return {
             "results": results,
             "surface_gamma": surface_gamma,
+            "elapsed_s": float(elapsed_s),
         }
 
 
@@ -344,6 +348,10 @@ def main() -> None:
         "cpu_results": cpu_results,
         "jax_results": jax_results,
         "comparison": comparison,
+        "timings": {
+            "cpu_elapsed_s": float(cpu_case["elapsed_s"]),
+            "jax_elapsed_s": float(jax_case["elapsed_s"]),
+        },
         "failures": failures,
         "passed": not failures,
     }

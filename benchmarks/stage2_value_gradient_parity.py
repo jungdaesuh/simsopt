@@ -6,6 +6,7 @@ import argparse
 from pathlib import Path
 import sys
 import tempfile
+import time
 
 import numpy as np
 
@@ -142,21 +143,28 @@ def run_procedural_fixture(args: argparse.Namespace) -> dict:
     """Evaluate the procedural production-grid parity fixture."""
     flux_cpu, flux_jax = build_procedural_fixture(args.nphi, args.ntheta)
 
+    cpu_start = time.perf_counter()
     j_cpu = float(flux_cpu.J())
     grad_cpu = np.asarray(flux_cpu.dJ(), dtype=float)
+    cpu_elapsed_s = time.perf_counter() - cpu_start
+
+    jax_start = time.perf_counter()
     j_jax = float(flux_jax.J())
     grad_jax = np.asarray(flux_jax.dJ(), dtype=float)
+    jax_elapsed_s = time.perf_counter() - jax_start
 
     return {
         "cpu": {
             "J": j_cpu,
             "grad_norm": float(np.linalg.norm(grad_cpu)),
             "dof_count": int(grad_cpu.size),
+            "elapsed_s": float(cpu_elapsed_s),
         },
         "jax": {
             "J": j_jax,
             "grad_norm": float(np.linalg.norm(grad_jax)),
             "dof_count": int(grad_jax.size),
+            "elapsed_s": float(jax_elapsed_s),
         },
         "comparisons": {
             "j_rel_err": relative_error(j_jax, j_cpu),
@@ -200,6 +208,7 @@ def run_real_fixture(args: argparse.Namespace) -> dict:
         cpu_json = str(Path(temp_dir) / "cpu_snapshot.json")
         jax_json = str(Path(temp_dir) / "jax_snapshot.json")
 
+        cpu_start = time.perf_counter()
         cpu_result = run_python_script(
             stage2_script,
             ["--backend", "cpu", "--export-objective-json", cpu_json, *common_args],
@@ -208,7 +217,9 @@ def run_real_fixture(args: argparse.Namespace) -> dict:
             bootstrap_repo=True,
             stream_output=True,
         )
+        cpu_elapsed_s = time.perf_counter() - cpu_start
 
+        jax_start = time.perf_counter()
         jax_result = run_python_script(
             stage2_script,
             ["--backend", "jax", "--export-objective-json", jax_json, *common_args],
@@ -217,6 +228,7 @@ def run_real_fixture(args: argparse.Namespace) -> dict:
             bootstrap_repo=True,
             stream_output=True,
         )
+        jax_elapsed_s = time.perf_counter() - jax_start
 
         cpu_payload = load_json(cpu_json)
         jax_payload = load_json(jax_json)
@@ -232,12 +244,14 @@ def run_real_fixture(args: argparse.Namespace) -> dict:
             "grad_norm": float(cpu_flux["grad_norm"]),
             "dof_count": int(cpu_payload["dof_count"]),
             "equilibrium_path": cpu_payload["equilibrium_path"],
+            "elapsed_s": float(cpu_elapsed_s),
         },
         "jax": {
             "J": float(jax_flux["J"]),
             "grad_norm": float(jax_flux["grad_norm"]),
             "dof_count": int(jax_payload["dof_count"]),
             "equilibrium_path": jax_payload["equilibrium_path"],
+            "elapsed_s": float(jax_elapsed_s),
         },
         "comparisons": {
             "j_rel_err": relative_error(float(jax_flux["J"]), float(cpu_flux["J"])),
