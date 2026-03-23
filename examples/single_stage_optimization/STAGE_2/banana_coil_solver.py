@@ -563,8 +563,13 @@ def resolve_stage2_optimizer_method(field_backend, optimizer_backend):
     )
 
 
+def should_build_stage2_target_objective(field_backend, optimizer_backend):
+    """Return whether the target-lane scalar objective bundle is required."""
+    return field_backend == "jax" and optimizer_backend != "scipy"
+
+
 def run_stage2_optimizer(
-    fun,
+    value_and_grad_fun,
     dofs,
     *,
     field_backend,
@@ -573,34 +578,32 @@ def run_stage2_optimizer(
     ftol,
     gtol,
     maxcor=300,
+    scalar_fun=None,
 ):
     """Run the Stage 2 outer optimization through the shared optimizer substrate."""
     from simsopt.geo.optimizer_jax import jax_minimize
 
     method = resolve_stage2_optimizer_method(field_backend, optimizer_backend)
-    try:
-        return jax_minimize(
-            fun,
-            dofs,
-            method=method,
-            tol=gtol,
-            maxiter=maxiter,
-            options={
-                "maxcor": int(maxcor),
-                "ftol": float(ftol),
-            },
-            value_and_grad=True,
+    use_scalar_objective = should_build_stage2_target_objective(
+        field_backend,
+        optimizer_backend,
+    )
+    if use_scalar_objective and scalar_fun is None:
+        raise RuntimeError(
+            "Stage 2 target-lane optimization requires a scalar JAX objective."
         )
-    except RuntimeError as exc:
-        if optimizer_backend != "scipy" and "value-and-gradient objectives" in str(exc):
-            raise RuntimeError(
-                "Stage 2 target-lane optimizer_backend "
-                f"{optimizer_backend!r} is not available yet because the composite "
-                "objective is still exposed as a Python J()/dJ() pair. Finish the "
-                "JAX-native composite objective before enabling Stage 2 ondevice "
-                "optimization."
-            ) from exc
-        raise
+    return jax_minimize(
+        scalar_fun if use_scalar_objective else value_and_grad_fun,
+        dofs,
+        method=method,
+        tol=gtol,
+        maxiter=maxiter,
+        options={
+            "maxcor": int(maxcor),
+            "ftol": float(ftol),
+        },
+        value_and_grad=not use_scalar_objective,
+    )
 
 
 def build_stage2_probe_payload(
@@ -725,6 +728,9 @@ if __name__ == "__main__":
         CurveCWSFourierCPP,
     )
     from simsopt.objectives import SquaredFlux, QuadraticPenalty
+    from simsopt.objectives.stage2_target_objective_jax import (
+        build_stage2_target_objective,
+    )
     from plotting_utils import (
         norm_field_plot,
         magnitude_field_plot,
@@ -872,6 +878,26 @@ if __name__ == "__main__":
     # minimize gets called, optimizes based on degrees of freedom from objective function
     dofs = JF.x
     trajectory = [] if args.trajectory_json else None
+    target_objective_bundle = None
+    if should_build_stage2_target_objective(args.backend, args.optimizer_backend):
+        target_objective_bundle = build_stage2_target_objective(
+            surface=new_surf,
+            tf_coils=tf_coils,
+            banana_coils=new_banana_coils,
+            banana_curve=new_banana_curve,
+            squared_flux_weight=SQUARED_FLUX_WEIGHT,
+            length_weight=LENGTH_WEIGHT,
+            length_target=LENGTH_TARGET,
+            cc_weight=CC_WEIGHT,
+            cc_threshold=CC_THRESHOLD,
+            curvature_weight=CURVATURE_WEIGHT,
+            curvature_threshold=CURVATURE_THRESHOLD,
+            curvature_p_norm=args.curvature_p_norm,
+        )
+        if target_objective_bundle.expected_dof_count != dofs.size:
+            raise RuntimeError(
+                "Stage 2 target objective DOF layout does not match the composite objective."
+            )
     fun = make_fun(
         JF,
         new_bs,
@@ -923,7 +949,13 @@ if __name__ == "__main__":
             maxcor=300,
             ftol=args.ftol,
             gtol=args.gtol,
+            scalar_fun=(
+                None
+                if target_objective_bundle is None
+                else target_objective_bundle.objective
+            ),
         )
+        JF.x = np.asarray(res.x, dtype=float)
         res_nit = res.nit
         print(res.message)
     if args.trajectory_json:

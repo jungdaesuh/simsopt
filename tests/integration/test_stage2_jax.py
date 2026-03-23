@@ -10,12 +10,14 @@ All tests require ``simsoptpp`` for the CPU reference.
 """
 
 import json
+import importlib.util
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
 import types
 
+import jax
 import pytest
 import numpy as np
 
@@ -30,6 +32,7 @@ from simsopt.field import (  # noqa: E402
     Coil,
     coils_via_symmetries,
 )
+from simsopt.field.coil import ScaledCurrent  # noqa: E402
 from simsopt.geo import (  # noqa: E402
     SurfaceRZFourier,
     CurveCWSFourier,
@@ -45,9 +48,144 @@ from simsopt.objectives import SquaredFlux, QuadraticPenalty  # noqa: E402
 from simsopt.field.biotsavart_jax_backend import BiotSavartJAX
 from simsopt.geo.optimizer_jax import jax_minimize, resolve_optimizer_backend_method
 from simsopt.objectives.fluxobjective_jax import SquaredFluxJAX
+from simsopt.objectives.stage2_target_objective_jax import build_stage2_target_objective
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+STAGE2_SCRIPT = (
+    REPO_ROOT
+    / "examples"
+    / "single_stage_optimization"
+    / "STAGE_2"
+    / "banana_coil_solver.py"
+)
+
+
+def _load_stage2_script_module():
+    saved_meta_path = list(sys.meta_path)
+    saved_simsopt_modules = {
+        name: module
+        for name, module in sys.modules.items()
+        if name == "simsopt" or name.startswith("simsopt.")
+    }
+    spec = importlib.util.spec_from_file_location(
+        "stage2_banana_coil_solver",
+        STAGE2_SCRIPT,
+    )
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"Failed to load Stage 2 script module from {STAGE2_SCRIPT}")
+    module = importlib.util.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(module)
+        return module
+    finally:
+        sys.meta_path[:] = saved_meta_path
+        for name in list(sys.modules):
+            if name == "simsopt" or name.startswith("simsopt."):
+                del sys.modules[name]
+        sys.modules.update(saved_simsopt_modules)
+
+
+def _run_stage2_script(*args):
+    return subprocess.run(
+        [
+            sys.executable,
+            str(STAGE2_SCRIPT),
+            *args,
+        ],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+    )
+
+
+def _build_stage2_target_objective_contract_case():
+    eval_surf = SurfaceRZFourier(
+        nfp=5,
+        stellsym=True,
+        mpol=1,
+        ntor=0,
+        quadpoints_phi=np.arange(31) / 31,
+        quadpoints_theta=np.arange(16) / 16,
+    )
+    eval_surf.set_rc(0, 0, 0.915)
+    eval_surf.set_rc(1, 0, 0.15)
+    eval_surf.set_zs(1, 0, 0.15)
+    eval_surf.fix_all()
+
+    coil_surf = SurfaceRZFourier(
+        nfp=5,
+        stellsym=True,
+        mpol=1,
+        ntor=0,
+        quadpoints_phi=np.arange(64) / 64,
+        quadpoints_theta=np.arange(64) / 64,
+    )
+    coil_surf.set_rc(0, 0, 0.976)
+    coil_surf.set_rc(1, 0, 0.22)
+    coil_surf.set_zs(1, 0, 0.22)
+
+    tf_curves = create_equally_spaced_curves(
+        20,
+        1,
+        stellsym=False,
+        R0=0.976,
+        R1=0.4,
+        order=1,
+    )
+    tf_currents = [Current(1.0) * 1e5 for _ in range(20)]
+    for tf_curve in tf_curves:
+        tf_curve.fix_all()
+    for tf_current in tf_currents:
+        tf_current.fix_all()
+    tf_coils = [Coil(curve, current) for curve, current in zip(tf_curves, tf_currents)]
+
+    banana_curve = CurveCWSFourier(
+        np.linspace(0, 1, 128, endpoint=False),
+        order=2,
+        surf=coil_surf,
+    )
+    banana_curve.set("phic(0)", 0.06)
+    banana_curve.set("thetac(0)", 0.5)
+    banana_curve.set("phic(1)", 0.03)
+    banana_curve.set("thetas(1)", 0.1)
+    banana_current = Current(1.0)
+    banana_coils = coils_via_symmetries(
+        [banana_curve],
+        [ScaledCurrent(banana_current, 1e4)],
+        coil_surf.nfp,
+        coil_surf.stellsym,
+    )
+
+    all_coils = tf_coils + banana_coils
+    bs_jax = BiotSavartJAX(all_coils)
+    jf = SquaredFluxJAX(eval_surf, bs_jax)
+    jls = CurveLength(banana_curve)
+    jccdist = CurveCurveDistance([coil.curve for coil in all_coils], 0.05)
+    jc = LpCurveCurvature(banana_curve, 4, 40)
+    objective = (
+        jf
+        + 0.0005 * QuadraticPenalty(jls, 1.75, "max")
+        + 100.0 * jccdist
+        + 0.0001 * jc
+    )
+
+    target_bundle = build_stage2_target_objective(
+        surface=eval_surf,
+        tf_coils=tf_coils,
+        banana_coils=banana_coils,
+        banana_curve=banana_curve,
+        squared_flux_weight=1.0,
+        length_weight=0.0005,
+        length_target=1.75,
+        cc_weight=100.0,
+        cc_threshold=0.05,
+        curvature_weight=0.0001,
+        curvature_threshold=40.0,
+        curvature_p_norm=4,
+    )
+
+    return objective, target_bundle
 
 
 # -----------------------------------------------------------------------
@@ -853,6 +991,29 @@ class TestStage2OptimizerContract:
         ):
             resolve_optimizer_backend_method("hybrid", limited_memory=True)
 
+    @pytest.mark.parametrize(
+        ("field_backend", "optimizer_backend", "expected"),
+        [
+            ("cpu", "scipy", False),
+            ("jax", "scipy", False),
+            ("jax", "ondevice", True),
+        ],
+    )
+    def test_target_objective_bundle_is_built_only_for_target_lane(
+        self,
+        field_backend,
+        optimizer_backend,
+        expected,
+    ):
+        stage2_script = _load_stage2_script_module()
+        assert (
+            stage2_script.should_build_stage2_target_objective(
+                field_backend,
+                optimizer_backend,
+            )
+            is expected
+        )
+
     def test_run_stage2_optimizer_uses_shared_adapter(
         self,
         monkeypatch,
@@ -907,15 +1068,33 @@ class TestStage2OptimizerContract:
         assert captured["options"] == {"maxcor": 123, "ftol": 1e-15}
         assert result.message == "ok"
 
+    def test_target_scalar_objective_matches_stage2_composite_contract(self):
+        objective, target_bundle = _build_stage2_target_objective_contract_case()
+        dofs = np.asarray(objective.x, dtype=float)
+        value_ref = float(objective.J())
+        grad_ref = np.asarray(objective.dJ(), dtype=float)
+        value_target, grad_target = jax.value_and_grad(target_bundle.objective)(
+            np.asarray(dofs, dtype=np.float64)
+        )
+
+        assert target_bundle.expected_dof_count == dofs.size
+        np.testing.assert_allclose(
+            float(value_target),
+            value_ref,
+            rtol=1e-12,
+            atol=1e-18,
+        )
+        np.testing.assert_allclose(
+            np.asarray(grad_target, dtype=float),
+            grad_ref,
+            rtol=1e-9,
+            atol=1e-15,
+        )
+
     @pytest.mark.parametrize(
         ("backend", "optimizer_backend", "expected_error"),
         [
             ("cpu", "ondevice", "CPU/reference lane only supports optimizer_backend='scipy'"),
-            (
-                "jax",
-                "ondevice",
-                "Stage 2 target-lane optimizer_backend 'ondevice' is not available yet",
-            ),
         ],
     )
     def test_stage2_script_rejects_unsupported_optimizer_backend_pairs(
@@ -924,34 +1103,42 @@ class TestStage2OptimizerContract:
         optimizer_backend,
         expected_error,
     ):
-        stage2_script = (
-            REPO_ROOT
-            / "examples"
-            / "single_stage_optimization"
-            / "STAGE_2"
-            / "banana_coil_solver.py"
-        )
-        result = subprocess.run(
-            [
-                sys.executable,
-                str(stage2_script),
-                "--backend",
-                backend,
-                "--optimizer-backend",
-                optimizer_backend,
-                "--skip-postprocess",
-                "--nphi",
-                "31",
-                "--ntheta",
-                "16",
-                "--maxiter",
-                "0",
-            ],
-            cwd=REPO_ROOT,
-            capture_output=True,
-            text=True,
+        result = _run_stage2_script(
+            "--backend",
+            backend,
+            "--optimizer-backend",
+            optimizer_backend,
+            "--skip-postprocess",
+            "--nphi",
+            "31",
+            "--ntheta",
+            "16",
+            "--maxiter",
+            "0",
         )
 
         assert result.returncode != 0
         error_text = f"{result.stdout}\n{result.stderr}"
         assert expected_error in error_text
+
+    def test_stage2_script_target_backend_matches_runtime_contract(self):
+        result = _run_stage2_script(
+            "--backend",
+            "jax",
+            "--optimizer-backend",
+            "ondevice",
+            "--skip-postprocess",
+            "--nphi",
+            "31",
+            "--ntheta",
+            "16",
+            "--maxiter",
+            "0",
+        )
+
+        output = f"{result.stdout}\n{result.stderr}"
+        if jax.__version__ == "0.6.2":
+            assert result.returncode == 0, output
+        else:
+            assert result.returncode != 0
+            assert "On-device optimizer is pinned to JAX 0.6.2" in output
