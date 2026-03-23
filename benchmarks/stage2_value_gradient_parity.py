@@ -17,15 +17,20 @@ sys.path.insert(0, str(REPO_ROOT))
 sys.path.insert(0, str(SRC_ROOT))
 
 from benchmarks.validation_ladder_common import (
+    apply_compilation_cache_policy,
     apply_requested_platform,
     bootstrap_local_simsopt,
     build_provenance,
+    describe_compile_behavior,
     l2_relative_error,
     load_json,
+    optimizer_drift_tolerances,
     max_relative_error,
     preparse_platform,
     print_provenance,
+    require_x64_runtime,
     relative_error,
+    resolve_probe_lane,
     repo_pythonpath_env,
     run_python_script,
     write_json,
@@ -34,11 +39,19 @@ from benchmarks.validation_ladder_common import (
 
 REQUESTED_PLATFORM = preparse_platform(sys.argv[1:])
 apply_requested_platform(REQUESTED_PLATFORM)
+apply_compilation_cache_policy()
 
 import jax
 import jaxlib
 
 jax.config.update("jax_enable_x64", True)
+require_x64_runtime(jax, context="Stage 2 value/gradient parity")
+
+
+_TIER1_TOLERANCES = optimizer_drift_tolerances("tier1_stage2_value_gradient")
+OBJECTIVE_REL_TOL = _TIER1_TOLERANCES["objective_rel_tol"]
+GRADIENT_RTOL = _TIER1_TOLERANCES["gradient_rtol"]
+GRADIENT_ATOL = _TIER1_TOLERANCES["gradient_atol"]
 
 
 def parse_args() -> argparse.Namespace:
@@ -171,7 +184,14 @@ def run_procedural_fixture(args: argparse.Namespace) -> dict:
             "grad_l2_rel_err": l2_relative_error(grad_jax, grad_cpu),
             "grad_max_rel_err": max_relative_error(grad_jax, grad_cpu),
             "grad_max_abs_err": float(np.max(np.abs(grad_jax - grad_cpu))),
-            "grad_allclose": bool(np.allclose(grad_jax, grad_cpu, rtol=1e-9, atol=1e-12)),
+            "grad_allclose": bool(
+                np.allclose(
+                    grad_jax,
+                    grad_cpu,
+                    rtol=GRADIENT_RTOL,
+                    atol=GRADIENT_ATOL,
+                )
+            ),
         },
     }
 
@@ -258,7 +278,14 @@ def run_real_fixture(args: argparse.Namespace) -> dict:
             "grad_l2_rel_err": l2_relative_error(grad_jax, grad_cpu),
             "grad_max_rel_err": max_relative_error(grad_jax, grad_cpu),
             "grad_max_abs_err": float(np.max(np.abs(grad_jax - grad_cpu))),
-            "grad_allclose": bool(np.allclose(grad_jax, grad_cpu, rtol=1e-9, atol=1e-12)),
+            "grad_allclose": bool(
+                np.allclose(
+                    grad_jax,
+                    grad_cpu,
+                    rtol=GRADIENT_RTOL,
+                    atol=GRADIENT_ATOL,
+                )
+            ),
         },
     }
 
@@ -272,10 +299,15 @@ def main() -> None:
         jaxlib,
         title="Stage 2 value/gradient parity",
         extra={
+            "lane": resolve_probe_lane(),
             "fixture": args.fixture,
             "platform_request": args.platform,
             "nphi": int(args.nphi),
             "ntheta": int(args.ntheta),
+            "compile_behavior": describe_compile_behavior(
+                uses_subprocesses=args.fixture == "real"
+            ),
+            "optimizer_drift_tolerances": dict(_TIER1_TOLERANCES),
         },
     )
     print_provenance(provenance)
@@ -295,13 +327,14 @@ def main() -> None:
         failures.append("Squared-flux relative error is non-finite.")
     if not np.isfinite(results["comparisons"]["grad_l2_rel_err"]):
         failures.append("Squared-flux gradient L2 relative error is non-finite.")
-    if results["comparisons"]["j_rel_err"] >= 1e-10:
+    if results["comparisons"]["j_rel_err"] >= OBJECTIVE_REL_TOL:
         failures.append(
             f"Squared-flux value relative error too large: {results['comparisons']['j_rel_err']:.2e}"
         )
     if not results["comparisons"]["grad_allclose"]:
         failures.append(
-            "Squared-flux gradient parity failed np.allclose(rtol=1e-9, atol=1e-12)."
+            "Squared-flux gradient parity failed "
+            f"np.allclose(rtol={GRADIENT_RTOL:.0e}, atol={GRADIENT_ATOL:.0e})."
         )
 
     print(

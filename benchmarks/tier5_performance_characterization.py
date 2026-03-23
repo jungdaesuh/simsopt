@@ -28,11 +28,15 @@ from benchmarks.single_stage_smoke_fixture import (
     DEFAULT_VOL_TARGET,
 )
 from benchmarks.validation_ladder_common import (
+    apply_compilation_cache_policy,
     apply_requested_platform,
     build_provenance,
+    describe_compile_behavior,
     load_json,
     preparse_platform,
     print_provenance,
+    require_x64_runtime,
+    resolve_probe_lane,
     repo_pythonpath_env,
     run_python_script,
     write_json,
@@ -41,11 +45,13 @@ from benchmarks.validation_ladder_common import (
 
 REQUESTED_PLATFORM = preparse_platform(sys.argv[1:])
 apply_requested_platform(REQUESTED_PLATFORM)
+apply_compilation_cache_policy()
 
 import jax
 import jaxlib
 
 jax.config.update("jax_enable_x64", True)
+require_x64_runtime(jax, context="Tier 5 performance characterization")
 
 
 def parse_args() -> argparse.Namespace:
@@ -316,6 +322,7 @@ def main() -> None:
         jaxlib,
         title="Tier 5 trusted-fixture performance characterization",
         extra={
+            "lane": resolve_probe_lane(optimizer_backend=args.optimizer_backend),
             "fixture": "trusted-public-lane",
             "platform_request": args.platform,
             "plasma_surf_filename": args.plasma_surf_filename,
@@ -330,6 +337,7 @@ def main() -> None:
             "optimizer_backend": args.optimizer_backend,
             "fd_samples": int(args.samples),
             "fd_eps": float(args.eps),
+            "compile_behavior": describe_compile_behavior(uses_subprocesses=True),
         },
     )
     print_provenance(provenance)

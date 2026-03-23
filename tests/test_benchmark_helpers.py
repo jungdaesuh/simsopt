@@ -1,8 +1,10 @@
 import argparse
 import json
+import os
 from pathlib import Path
 import sys
 import math
+import types
 
 import numpy as np
 import pytest
@@ -46,8 +48,16 @@ from benchmarks.tier5_performance_characterization import (
     summarize_single_lane_probe,
 )
 from benchmarks.validation_ladder_common import (
+    _JAX_COMPILATION_CACHE_ENV_VAR,
+    _SIMSOPT_DISABLE_COMPILATION_CACHE_ENV_VAR,
+    apply_compilation_cache_policy,
+    build_provenance,
+    describe_compile_behavior,
     max_pointwise_geometry_drift,
+    optimizer_drift_tolerances,
     repo_pythonpath_env,
+    require_x64_runtime,
+    resolve_probe_lane,
     run_python_script,
     short_run_geometry_rel_tolerance,
 )
@@ -190,6 +200,131 @@ def test_repo_pythonpath_env_auto_clears_inherited_platform_selectors(monkeypatc
     assert "SIMSOPT_JAX_PLATFORM" not in env
     assert "SIMSOPT_JAX_BACKEND" not in env
     assert env["PYTHONPATH"].endswith("/tmp/existing")
+
+
+def test_apply_compilation_cache_policy_defaults_to_disabled(monkeypatch):
+    monkeypatch.delenv(_JAX_COMPILATION_CACHE_ENV_VAR, raising=False)
+    monkeypatch.delenv(_SIMSOPT_DISABLE_COMPILATION_CACHE_ENV_VAR, raising=False)
+
+    metadata = apply_compilation_cache_policy()
+
+    assert metadata == {
+        "compilation_cache_enabled": False,
+        "compilation_cache_dir": None,
+        "compilation_cache_policy": "disabled",
+    }
+    assert _JAX_COMPILATION_CACHE_ENV_VAR not in os.environ
+
+
+def test_apply_compilation_cache_policy_honors_explicit_cache_dir(monkeypatch, tmp_path):
+    monkeypatch.delenv(_SIMSOPT_DISABLE_COMPILATION_CACHE_ENV_VAR, raising=False)
+
+    metadata = apply_compilation_cache_policy(tmp_path / "jax-cache")
+
+    assert metadata["compilation_cache_enabled"] is True
+    assert metadata["compilation_cache_policy"] == "explicit"
+    assert metadata["compilation_cache_dir"] == str(tmp_path / "jax-cache")
+    assert Path(metadata["compilation_cache_dir"]).is_dir()
+
+
+def test_apply_compilation_cache_policy_honors_disable_flag(monkeypatch):
+    monkeypatch.setenv(_JAX_COMPILATION_CACHE_ENV_VAR, "/tmp/jax-cache")
+    monkeypatch.setenv(_SIMSOPT_DISABLE_COMPILATION_CACHE_ENV_VAR, "1")
+
+    metadata = apply_compilation_cache_policy()
+
+    assert metadata == {
+        "compilation_cache_enabled": False,
+        "compilation_cache_dir": None,
+        "compilation_cache_policy": "disabled",
+    }
+    assert _JAX_COMPILATION_CACHE_ENV_VAR not in os.environ
+
+
+def test_optimizer_drift_tolerances_tier2_geometry_gate_tracks_iteration_budget():
+    tol_20 = optimizer_drift_tolerances("tier2_stage2_e2e", maxiter=20)
+    tol_21 = optimizer_drift_tolerances("tier2_stage2_e2e", maxiter=21)
+
+    assert tol_20["geometry_rel_tol"] == pytest.approx(5e-6)
+    assert tol_21["geometry_rel_tol"] == pytest.approx(1e-6)
+    assert "geometry_rel_tol_20_iter" not in tol_20
+    assert "geometry_rel_tol_default" not in tol_20
+
+
+def test_describe_compile_behavior_tracks_cache_state(monkeypatch):
+    monkeypatch.delenv(_JAX_COMPILATION_CACHE_ENV_VAR, raising=False)
+    monkeypatch.delenv(_SIMSOPT_DISABLE_COMPILATION_CACHE_ENV_VAR, raising=False)
+    apply_compilation_cache_policy()
+    assert (
+        describe_compile_behavior(uses_subprocesses=True)
+        == "persistent compilation cache disabled; subprocess timings include first-call compilation"
+    )
+
+    monkeypatch.setenv(_JAX_COMPILATION_CACHE_ENV_VAR, "/tmp/jax-cache")
+    monkeypatch.delenv(_SIMSOPT_DISABLE_COMPILATION_CACHE_ENV_VAR, raising=False)
+    apply_compilation_cache_policy()
+    assert (
+        describe_compile_behavior(uses_subprocesses=False)
+        == "persistent compilation cache enabled; cached executables may reduce first-call compile cost"
+    )
+
+
+def test_resolve_probe_lane_tracks_private_optimizer_backends():
+    assert resolve_probe_lane() == "trusted-public-reference"
+    assert resolve_probe_lane(optimizer_backend="scipy") == "trusted-public-reference"
+    assert resolve_probe_lane(optimizer_backend="hybrid") == "private-optimizer"
+    assert resolve_probe_lane(optimizer_backend="ondevice") == "private-optimizer"
+
+
+def test_require_x64_runtime_rejects_float32_runtime():
+    fake_jax = types.SimpleNamespace(
+        numpy=types.SimpleNamespace(
+            zeros=lambda n: np.zeros(n, dtype=np.float32),
+            float64=np.float64,
+        )
+    )
+
+    with pytest.raises(RuntimeError, match="Tier 5 requires jax_enable_x64=True"):
+        require_x64_runtime(fake_jax, context="Tier 5")
+
+
+def test_build_provenance_includes_compilation_cache_metadata(monkeypatch):
+    monkeypatch.setenv(_JAX_COMPILATION_CACHE_ENV_VAR, "/tmp/probe-cache")
+    monkeypatch.delenv(_SIMSOPT_DISABLE_COMPILATION_CACHE_ENV_VAR, raising=False)
+    monkeypatch.setattr(
+        "benchmarks.validation_ladder_common.get_git_sha",
+        lambda: "abc123",
+    )
+    monkeypatch.setattr(
+        "benchmarks.validation_ladder_common.peak_rss_mb",
+        lambda: 12.5,
+    )
+    monkeypatch.setattr(
+        "benchmarks.validation_ladder_common.query_gpu_memory_mb",
+        lambda: None,
+    )
+    fake_jax = types.SimpleNamespace(
+        __version__="0.6.2",
+        default_backend=lambda: "cpu",
+        devices=lambda: ["cpu:0"],
+        numpy=types.SimpleNamespace(
+            zeros=lambda n: np.zeros(n, dtype=np.float64),
+            float64=np.float64,
+        ),
+    )
+    fake_jaxlib = types.SimpleNamespace(__version__="0.6.2")
+
+    provenance = build_provenance(
+        fake_jax,
+        fake_jaxlib,
+        title="Probe",
+        extra={"lane": "private-optimizer", "compile_behavior": "cold+warm"},
+    )
+
+    assert provenance["lane"] == "private-optimizer"
+    assert provenance["compile_behavior"] == "cold+warm"
+    assert provenance["compilation_cache_enabled"] is True
+    assert provenance["compilation_cache_dir"] == "/tmp/probe-cache"
 
 
 def test_run_python_script_streams_and_captures_output(tmp_path, capsys):

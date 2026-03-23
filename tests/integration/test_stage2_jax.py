@@ -9,6 +9,12 @@ Validates:
 All tests require ``simsoptpp`` for the CPU reference.
 """
 
+import json
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+
 import pytest
 import numpy as np
 
@@ -27,14 +33,21 @@ from simsopt.field import (  # noqa: E402
 )
 from simsopt.geo import (  # noqa: E402
     SurfaceRZFourier,
+    CurveCWSFourier,
+    CurveCWSFourierCPP,
     CurveXYZFourier,
     create_equally_spaced_curves,
+    CurveCurveDistance,
     CurveLength,
+    LpCurveCurvature,
 )
 from simsopt.objectives import SquaredFlux, QuadraticPenalty  # noqa: E402
 
 from simsopt.field.biotsavart_jax_backend import BiotSavartJAX
 from simsopt.objectives.fluxobjective_jax import SquaredFluxJAX
+
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 # -----------------------------------------------------------------------
@@ -660,3 +673,146 @@ class TestCurveCWSFourierCPPParity:
             atol=1e-15,
             err_msg="Gradient mismatch with CurveCWSFourierCPP banana coil",
         )
+
+
+class TestStage2BananaBoundary:
+    def test_stage2_curve_classes_match_on_stage2_surface(self):
+        quadpoints = np.linspace(0, 1, 128, endpoint=False)
+        surf = SurfaceRZFourier(
+            nfp=5,
+            stellsym=True,
+            mpol=1,
+            ntor=0,
+            quadpoints_phi=np.arange(64) / 64,
+            quadpoints_theta=np.arange(64) / 64,
+        )
+        surf.set_rc(0, 0, 0.976)
+        surf.set_rc(1, 0, 0.22)
+        surf.set_zs(1, 0, 0.22)
+
+        curve_jax = CurveCWSFourier(quadpoints, 2, surf)
+        curve_cpp = CurveCWSFourierCPP(quadpoints, 2, surf)
+        for curve in (curve_jax, curve_cpp):
+            curve.set("phic(0)", 0.06)
+            curve.set("thetac(0)", 0.5)
+            curve.set("phic(1)", 0.03)
+            curve.set("thetas(1)", 0.1)
+
+        np.testing.assert_allclose(curve_jax.gamma(), curve_cpp.gamma(), atol=1e-14)
+        np.testing.assert_allclose(
+            curve_jax.gammadash(),
+            curve_cpp.gammadash(),
+            atol=1e-13,
+        )
+        np.testing.assert_allclose(curve_jax.kappa(), curve_cpp.kappa(), atol=1e-12)
+
+    def test_stage2_composite_objective_matches_across_curve_classes(self):
+        eval_surf = SurfaceRZFourier(
+            nfp=5,
+            stellsym=True,
+            mpol=1,
+            ntor=0,
+            quadpoints_phi=np.arange(31) / 31,
+            quadpoints_theta=np.arange(16) / 16,
+        )
+        eval_surf.set_rc(0, 0, 0.915)
+        eval_surf.set_rc(1, 0, 0.15)
+        eval_surf.set_zs(1, 0, 0.15)
+        eval_surf.fix_all()
+
+        coil_surf = SurfaceRZFourier(
+            nfp=5,
+            stellsym=True,
+            mpol=1,
+            ntor=0,
+            quadpoints_phi=np.arange(64) / 64,
+            quadpoints_theta=np.arange(64) / 64,
+        )
+        coil_surf.set_rc(0, 0, 0.976)
+        coil_surf.set_rc(1, 0, 0.22)
+        coil_surf.set_zs(1, 0, 0.22)
+
+        tf_curves = create_equally_spaced_curves(
+            20,
+            1,
+            stellsym=False,
+            R0=0.976,
+            R1=0.4,
+            order=1,
+        )
+        tf_currents = [Current(1.0) * 1e5 for _ in range(20)]
+        for tf_curve in tf_curves:
+            tf_curve.fix_all()
+        for tf_current in tf_currents:
+            tf_current.fix_all()
+
+        def build_objective(curve_cls):
+            curve = curve_cls(np.linspace(0, 1, 128, endpoint=False), order=2, surf=coil_surf)
+            curve.set("phic(0)", 0.06)
+            curve.set("thetac(0)", 0.5)
+            curve.set("phic(1)", 0.03)
+            curve.set("thetas(1)", 0.1)
+            coils = [Coil(curve_obj, current) for curve_obj, current in zip(tf_curves, tf_currents)]
+            banana_coil = Coil(curve, Current(1.0) * 1e4)
+            all_coils = coils + [banana_coil]
+            bs_jax = BiotSavartJAX(all_coils)
+            jf = SquaredFluxJAX(eval_surf, bs_jax)
+            jls = CurveLength(curve)
+            jccdist = CurveCurveDistance([coil.curve for coil in all_coils], 0.05)
+            jc = LpCurveCurvature(curve, 4, 40)
+            objective = (
+                jf
+                + 0.0005 * QuadraticPenalty(jls, 1.75, "max")
+                + 100.0 * jccdist
+                + 0.0001 * jc
+            )
+            return float(objective.J()), np.asarray(objective.dJ(), dtype=float)
+
+        objective_cpp, grad_cpp = build_objective(CurveCWSFourierCPP)
+        objective_jax, grad_jax = build_objective(CurveCWSFourier)
+
+        np.testing.assert_allclose(objective_jax, objective_cpp, rtol=1e-12, atol=1e-18)
+        np.testing.assert_allclose(grad_jax, grad_cpp, rtol=1e-9, atol=1e-15)
+
+    @pytest.mark.parametrize(
+        ("backend", "expected_curve_class"),
+        [
+            ("cpu", "CurveCWSFourierCPP"),
+            ("jax", "CurveCWSFourier"),
+        ],
+    )
+    def test_stage2_probe_reports_backend_specific_banana_curve(
+        self, backend, expected_curve_class
+    ):
+        stage2_script = (
+            REPO_ROOT
+            / "examples"
+            / "single_stage_optimization"
+            / "STAGE_2"
+            / "banana_coil_solver.py"
+        )
+        with tempfile.TemporaryDirectory(prefix=f"stage2-boundary-{backend}-") as temp_dir:
+            export_json = Path(temp_dir) / f"{backend}_probe.json"
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(stage2_script),
+                    "--backend",
+                    backend,
+                    "--probe-only",
+                    "--nphi",
+                    "31",
+                    "--ntheta",
+                    "16",
+                    "--export-objective-json",
+                    str(export_json),
+                ],
+                cwd=REPO_ROOT,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            payload = json.loads(export_json.read_text(encoding="utf-8"))
+
+        assert result.returncode == 0
+        assert payload["banana_curve_class"] == expected_curve_class

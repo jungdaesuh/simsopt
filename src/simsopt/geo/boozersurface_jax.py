@@ -354,6 +354,7 @@ _OPTIMIZER_BACKEND_ROLE = {
     "hybrid": "transitional",
     "ondevice": "target",
 }
+_X64_REQUIRED_OPTIMIZER_BACKENDS = frozenset({"hybrid", "ondevice"})
 _INTERNAL_OPTIMIZER_OPTIONS = frozenset(
     {
         "hybrid_scipy_maxiter",
@@ -392,6 +393,23 @@ def _resolve_ls_optimizer_method(optimizer_backend, limited_memory):
             )
         return "bfgs-hybrid"
     return "lbfgs-ondevice" if limited_memory else "bfgs-ondevice"
+
+
+def _x64_enabled():
+    return bool(jnp.zeros(1).dtype == jnp.float64)
+
+
+def _require_target_backend_x64(optimizer_backend):
+    """Fail fast when a target-lane backend is requested without float64."""
+    if optimizer_backend not in _X64_REQUIRED_OPTIMIZER_BACKENDS:
+        return
+    if _x64_enabled():
+        return
+    role = _OPTIMIZER_BACKEND_ROLE[optimizer_backend]
+    raise RuntimeError(
+        f"optimizer_backend='{optimizer_backend}' ({role}) requires "
+        "jax_enable_x64=True before import/use."
+    )
 
 
 def _normalize_solver_options(raw_options, boozer_type):
@@ -675,6 +693,7 @@ class BoozerSurfaceJAX(Optimizable):
         )
 
         optimizer_backend = self.options["optimizer_backend"]
+        _require_target_backend_x64(optimizer_backend)
         method = _resolve_ls_optimizer_method(optimizer_backend, limited_memory)
 
         optimizer_options = {}

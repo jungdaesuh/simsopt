@@ -15,6 +15,10 @@ import jax.numpy as jnp
 
 from benchmarks.benchmark_config import BenchmarkConfig, DEFAULT_CONFIGS
 from benchmarks.benchmark_problem import build_synthetic_boozer_problem
+from benchmarks.validation_ladder_common import (
+    current_compilation_cache_metadata,
+    describe_compile_behavior,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PUBLIC_EXPECTED_JAX_VERSION = os.environ.get(
@@ -103,6 +107,7 @@ def resolve_benchmark_backends(requested_backends=None) -> tuple[str, ...]:
 def print_provenance(title: str, backends: tuple[str, ...]) -> None:
     x64_enabled = _x64_enabled()
     _validate_benchmark_runtime(backends)
+    compilation_cache = current_compilation_cache_metadata()
     _progress(f"\n{'=' * 70}")
     _progress(title)
     _progress(f"{'=' * 70}")
@@ -114,6 +119,10 @@ def print_provenance(title: str, backends: tuple[str, ...]) -> None:
     _progress(f"x64 enabled:  {x64_enabled}")
     _progress(f"lane:         {_resolve_runtime_lane(backends)}")
     _progress(f"backends:     {', '.join(backends)}")
+    _progress(f"compile:      {describe_compile_behavior(uses_subprocesses=False)}")
+    _progress(f"cache policy: {compilation_cache['compilation_cache_policy']}")
+    if compilation_cache["compilation_cache_dir"] is not None:
+        _progress(f"cache dir:    {compilation_cache['compilation_cache_dir']}")
 
 
 def _make_boozer_surface(

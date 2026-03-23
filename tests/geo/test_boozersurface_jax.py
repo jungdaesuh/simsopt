@@ -96,6 +96,7 @@ newton_exact = _opt.newton_exact
 _boozer_penalty_objective = _bsj._boozer_penalty_objective
 _boozer_exact_coil_vjp = _bsj._boozer_exact_coil_vjp
 _boozer_ls_coil_vjp = _bsj._boozer_ls_coil_vjp
+_require_target_backend_x64 = _bsj._require_target_backend_x64
 _resolve_ls_optimizer_method = _bsj._resolve_ls_optimizer_method
 BoozerSurfaceJAX = _bsj.BoozerSurfaceJAX
 _ensure_solved_jax = _soj._ensure_solved
@@ -1869,6 +1870,19 @@ class TestBoozerSurfaceJAXClass:
         with pytest.raises(ValueError, match="optimizer_backend must be one of"):
             _resolve_ls_optimizer_method("bogus", False)
 
+    @pytest.mark.parametrize("optimizer_backend", ["hybrid", "ondevice"])
+    def test_require_target_backend_x64_rejects_disabled_float64(
+        self, monkeypatch, optimizer_backend
+    ):
+        """Target-lane backends must fail fast when x64 is disabled."""
+        monkeypatch.setattr(_bsj, "_x64_enabled", lambda: False)
+
+        with pytest.raises(
+            RuntimeError,
+            match=rf"optimizer_backend='{optimizer_backend}'.*requires jax_enable_x64=True",
+        ):
+            _require_target_backend_x64(optimizer_backend)
+
     def test_recompute_bell(self):
         """recompute_bell sets the dirty flag."""
         booz = _make_mock_boozer_surface()
@@ -1973,6 +1987,21 @@ class TestBoozerSurfaceJAXClass:
         booz.options["optimizer_backend"] = "bogus"
 
         with pytest.raises(ValueError, match="optimizer_backend must be one of"):
+            booz.run_code(iota=0.3, G=0.05)
+
+    @pytest.mark.parametrize("optimizer_backend", ["hybrid", "ondevice"])
+    def test_run_code_rejects_target_backend_without_x64(
+        self, monkeypatch, optimizer_backend
+    ):
+        """run_code() must fail at the public seam before target-lane execution without x64."""
+        booz = _make_mock_boozer_surface()
+        booz.options["optimizer_backend"] = optimizer_backend
+        monkeypatch.setattr(_bsj, "_x64_enabled", lambda: False)
+
+        with pytest.raises(
+            RuntimeError,
+            match=rf"optimizer_backend='{optimizer_backend}'.*requires jax_enable_x64=True",
+        ):
             booz.run_code(iota=0.3, G=0.05)
 
     def test_run_code_ls_converges_with_stellsym_surface(self):

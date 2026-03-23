@@ -141,7 +141,7 @@ def _require_private_optimizer_runtime(x0):
             f"found {jax.__version__}. Use optimizer_backend='scipy' on the "
             "public JAX 0.9.2 lane until the private optimizer migration is complete."
         )
-    if jnp.zeros(1).dtype != jnp.float64:
+    if not _x64_enabled():
         raise RuntimeError(
             "On-device optimizer requires jax_enable_x64=True before import/use."
         )
@@ -152,6 +152,10 @@ def _require_private_optimizer_runtime(x0):
             f"On-device optimizer expects a flat 1-D decision vector, got {x0.shape}."
         )
     return x0
+
+
+def _x64_enabled():
+    return bool(jnp.zeros(1).dtype == jnp.float64)
 
 
 def _strip_internal_options(options, method):

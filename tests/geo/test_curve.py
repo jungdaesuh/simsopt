@@ -773,6 +773,40 @@ class Testing(unittest.TestCase):
         curve.surf.gamma_lin(out, phi, theta)
         self.assertTrue(np.all(np.isfinite(out)))
 
+    def test_curvecwsfourier_matches_cpp_on_stage2_surface(self):
+        from simsopt.geo import CurveCWSFourier
+        from simsopt.geo.curvecwsfourier import CurveCWSFourierCPP
+
+        quadpoints = np.linspace(0, 1, 128, endpoint=False)
+        surf = SurfaceRZFourier(
+            nfp=5,
+            stellsym=True,
+            mpol=1,
+            ntor=0,
+            quadpoints_phi=np.arange(64) / 64,
+            quadpoints_theta=np.arange(64) / 64,
+        )
+        surf.set_rc(0, 0, 0.976)
+        surf.set_rc(1, 0, 0.22)
+        surf.set_zs(1, 0, 0.22)
+
+        curve_jax = CurveCWSFourier(quadpoints, 2, surf, G=0, H=0)
+        curve_cpp = CurveCWSFourierCPP(quadpoints, 2, surf, G=0, H=0)
+        for curve in (curve_jax, curve_cpp):
+            curve.set("phic(0)", 0.06)
+            curve.set("thetac(0)", 0.5)
+            curve.set("phic(1)", 0.03)
+            curve.set("thetas(1)", 0.1)
+
+        np.testing.assert_allclose(curve_jax.get_dofs(), curve_cpp.get_dofs())
+        np.testing.assert_allclose(curve_jax.gamma(), curve_cpp.gamma(), atol=1e-14)
+        np.testing.assert_allclose(
+            curve_jax.gammadash(),
+            curve_cpp.gammadash(),
+            atol=1e-13,
+        )
+        np.testing.assert_allclose(curve_jax.kappa(), curve_cpp.kappa(), atol=1e-12)
+
     @unittest.skipIf(pyevtk is None, "pyevtk not found")
     def test_curve_to_vtk(self):
         curve0 = get_curve(self.curvetypes[0], False)

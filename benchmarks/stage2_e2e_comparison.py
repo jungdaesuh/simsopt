@@ -18,32 +18,39 @@ sys.path.insert(0, str(REPO_ROOT))
 sys.path.insert(0, str(SRC_ROOT))
 
 from benchmarks.validation_ladder_common import (
+    apply_compilation_cache_policy,
     apply_requested_platform,
     build_provenance,
+    describe_compile_behavior,
     find_single_file,
     load_json,
     max_pointwise_geometry_drift,
+    optimizer_drift_tolerances,
     preparse_platform,
     print_provenance,
+    require_x64_runtime,
     relative_error,
+    resolve_probe_lane,
     repo_pythonpath_env,
     run_python_script,
-    short_run_geometry_rel_tolerance,
     write_json,
 )
 
 
 REQUESTED_PLATFORM = preparse_platform(sys.argv[1:])
 apply_requested_platform(REQUESTED_PLATFORM)
+apply_compilation_cache_policy()
 
 import jax
 import jaxlib
 
 jax.config.update("jax_enable_x64", True)
+require_x64_runtime(jax, context="Stage 2 end-to-end comparison")
 
 
-FINAL_OBJECTIVE_REL_TOL = 1e-4
-FIELD_ERROR_REL_TOL = 1e-4
+_TIER2_BASE_TOLERANCES = optimizer_drift_tolerances("tier2_stage2_e2e")
+FINAL_OBJECTIVE_REL_TOL = _TIER2_BASE_TOLERANCES["final_objective_rel_tol"]
+FIELD_ERROR_REL_TOL = _TIER2_BASE_TOLERANCES["field_error_rel_tol"]
 
 
 def parse_args() -> argparse.Namespace:
@@ -269,21 +276,31 @@ def build_stage2_e2e_payload(
 
 def main() -> None:
     args = parse_args()
-    geometry_rel_tol = short_run_geometry_rel_tolerance(
-        args.maxiter,
-        explicit_tol=args.geometry_rel_tol,
+    geometry_rel_tol = (
+        float(args.geometry_rel_tol)
+        if args.geometry_rel_tol is not None
+        else optimizer_drift_tolerances(
+            "tier2_stage2_e2e",
+            maxiter=args.maxiter,
+        )["geometry_rel_tol"]
     )
     provenance = build_provenance(
         jax,
         jaxlib,
         title="Stage 2 end-to-end comparison",
         extra={
+            "lane": resolve_probe_lane(),
             "fixture": "real-stage2",
             "platform_request": args.platform,
             "nphi": int(args.nphi),
             "ntheta": int(args.ntheta),
             "maxiter": int(args.maxiter),
             "geometry_rel_tol": geometry_rel_tol,
+            "compile_behavior": describe_compile_behavior(uses_subprocesses=True),
+            "optimizer_drift_tolerances": optimizer_drift_tolerances(
+                "tier2_stage2_e2e",
+                maxiter=args.maxiter,
+            ),
         },
     )
     print_provenance(provenance)

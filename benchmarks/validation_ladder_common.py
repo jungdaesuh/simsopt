@@ -25,6 +25,36 @@ _JAX_PLATFORM_ENV_VARS = (
     "SIMSOPT_JAX_BACKEND",
 )
 _JAX_CUDA_MEMORY_ENV_VARS = ("XLA_PYTHON_CLIENT_PREALLOCATE",)
+_JAX_COMPILATION_CACHE_ENV_VAR = "JAX_COMPILATION_CACHE_DIR"
+_SIMSOPT_DISABLE_COMPILATION_CACHE_ENV_VAR = "SIMSOPT_DISABLE_JAX_COMPILATION_CACHE"
+_SIMSOPT_COMPILATION_CACHE_POLICY_ENV_VAR = "SIMSOPT_JAX_COMPILATION_CACHE_POLICY"
+_TRUTHY_ENV_VALUES = frozenset({"1", "true", "yes", "on"})
+
+OPTIMIZER_DRIFT_TOLERANCES = {
+    "tier1_stage2_value_gradient": {
+        "objective_rel_tol": 1e-10,
+        "gradient_rtol": 1e-9,
+        "gradient_atol": 1e-12,
+    },
+    "tier2_stage2_e2e": {
+        "final_objective_rel_tol": 1e-4,
+        "field_error_rel_tol": 1e-4,
+        "geometry_rel_tol_20_iter": 5e-6,
+        "geometry_rel_tol_default": 1e-6,
+    },
+    "tier3_single_stage_init": {
+        "final_iota_abs_tol": 1e-3,
+        "final_volume_rel_tol": 1e-6,
+        "field_error_rel_tol": 1e-4,
+        "surface_geometry_rel_tol": 1e-5,
+    },
+    "tier4_adjoint_fd": {
+        "adjoint_residual_rel_tol": 1e-10,
+        "recomposed_total_rel_tol": 1e-12,
+        "fixed_surface_fd_rel_tol": 1e-3,
+        "fixed_surface_fd_abs_tol": 1e-8,
+    },
+}
 
 
 def preparse_platform(argv: list[str]) -> str:
@@ -38,6 +68,30 @@ def preparse_platform(argv: list[str]) -> str:
 def apply_requested_platform(platform: str) -> None:
     """Pin JAX to a specific platform before importing the package."""
     _apply_platform_env(os.environ, platform)
+
+
+def apply_compilation_cache_policy(
+    cache_dir: str | os.PathLike[str] | None = None,
+) -> dict[str, Any]:
+    """Set a stable JAX compilation-cache policy before importing JAX."""
+    disable_raw = os.environ.get(_SIMSOPT_DISABLE_COMPILATION_CACHE_ENV_VAR, "")
+    if disable_raw.strip().lower() in _TRUTHY_ENV_VALUES:
+        os.environ.pop(_JAX_COMPILATION_CACHE_ENV_VAR, None)
+        os.environ[_SIMSOPT_COMPILATION_CACHE_POLICY_ENV_VAR] = "disabled"
+        return current_compilation_cache_metadata()
+
+    resolved_dir = cache_dir or os.environ.get(_JAX_COMPILATION_CACHE_ENV_VAR)
+    if resolved_dir is None:
+        os.environ.pop(_JAX_COMPILATION_CACHE_ENV_VAR, None)
+        os.environ[_SIMSOPT_COMPILATION_CACHE_POLICY_ENV_VAR] = "disabled"
+        return current_compilation_cache_metadata()
+    resolved_path = Path(resolved_dir).expanduser()
+    policy = "explicit"
+    resolved_path.mkdir(parents=True, exist_ok=True)
+    os.environ[_JAX_COMPILATION_CACHE_ENV_VAR] = str(resolved_path)
+    os.environ[_SIMSOPT_COMPILATION_CACHE_POLICY_ENV_VAR] = policy
+    metadata = current_compilation_cache_metadata()
+    return metadata
 
 
 def repo_pythonpath_env(*, platform: str = "auto") -> dict[str, str]:
@@ -65,6 +119,86 @@ def _apply_platform_env(env: dict[str, str], platform: str) -> None:
     env["SIMSOPT_JAX_BACKEND"] = platform
     if platform == "cuda":
         env["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
+
+
+def _x64_enabled(jax_module) -> bool:
+    """Return whether the active JAX runtime is operating in float64 mode."""
+    return bool(jax_module.numpy.zeros(1).dtype == jax_module.numpy.float64)
+
+
+def require_x64_runtime(jax_module, *, context: str) -> None:
+    """Raise when a target-lane runtime attempts to proceed without x64."""
+    if _x64_enabled(jax_module):
+        return
+    raise RuntimeError(f"{context} requires jax_enable_x64=True before import/use.")
+
+
+def current_compilation_cache_metadata() -> dict[str, Any]:
+    """Return the active compilation-cache policy as provenance metadata."""
+    disable_raw = os.environ.get(_SIMSOPT_DISABLE_COMPILATION_CACHE_ENV_VAR, "")
+    disabled = disable_raw.strip().lower() in _TRUTHY_ENV_VALUES
+    cache_dir = os.environ.get(_JAX_COMPILATION_CACHE_ENV_VAR)
+    policy = os.environ.get(_SIMSOPT_COMPILATION_CACHE_POLICY_ENV_VAR)
+    metadata = {
+        "compilation_cache_enabled": bool(cache_dir) and not disabled,
+        "compilation_cache_dir": None if disabled or cache_dir is None else cache_dir,
+        "compilation_cache_policy": "disabled" if disabled else "unset",
+    }
+    if policy:
+        metadata["compilation_cache_policy"] = policy
+    elif metadata["compilation_cache_enabled"]:
+        metadata["compilation_cache_policy"] = "env"
+    return metadata
+
+
+def describe_compile_behavior(
+    *,
+    uses_subprocesses: bool,
+) -> str:
+    """Describe whether the current process expects true cold-compile timing."""
+    metadata = current_compilation_cache_metadata()
+    if metadata["compilation_cache_enabled"]:
+        if uses_subprocesses:
+            return (
+                "persistent compilation cache enabled; subprocess launches may reuse "
+                "cached compilations"
+            )
+        return (
+            "persistent compilation cache enabled; cached executables may reduce "
+            "first-call compile cost"
+        )
+    if uses_subprocesses:
+        return (
+            "persistent compilation cache disabled; subprocess timings include "
+            "first-call compilation"
+        )
+    return "persistent compilation cache disabled; first-call compilation is included"
+
+
+def resolve_probe_lane(*, optimizer_backend: str | None = None) -> str:
+    """Map benchmark/probe options to the intended lane label."""
+    if optimizer_backend in {"hybrid", "ondevice"}:
+        return "private-optimizer"
+    return "trusted-public-reference"
+
+
+def optimizer_drift_tolerances(
+    rung: str,
+    *,
+    maxiter: int | None = None,
+) -> dict[str, float]:
+    """Return the documented optimizer-replacement tolerances for a ladder rung."""
+    if rung not in OPTIMIZER_DRIFT_TOLERANCES:
+        valid = ", ".join(sorted(OPTIMIZER_DRIFT_TOLERANCES))
+        raise ValueError(f"Unknown optimizer-drift rung {rung!r}. Expected one of: {valid}.")
+    tolerances = dict(OPTIMIZER_DRIFT_TOLERANCES[rung])
+    if rung == "tier2_stage2_e2e":
+        tolerances.pop("geometry_rel_tol_20_iter", None)
+        tolerances.pop("geometry_rel_tol_default", None)
+        tolerances["geometry_rel_tol"] = short_run_geometry_rel_tolerance(
+            21 if maxiter is None else int(maxiter)
+        )
+    return tolerances
 
 
 def bootstrap_local_simsopt() -> None:
@@ -183,6 +317,7 @@ def query_gpu_memory_mb() -> float | None:
 
 def build_provenance(jax_module, jaxlib_module, *, title: str, extra: dict[str, Any] | None = None) -> dict[str, Any]:
     """Collect shared provenance fields for ladder outputs."""
+    compilation_cache = current_compilation_cache_metadata()
     provenance = {
         "title": title,
         "repo_sha": get_git_sha(),
@@ -190,8 +325,9 @@ def build_provenance(jax_module, jaxlib_module, *, title: str, extra: dict[str, 
         "jaxlib": jaxlib_module.__version__,
         "backend": jax_module.default_backend(),
         "devices": [str(device) for device in jax_module.devices()],
-        "x64_enabled": bool(jax_module.numpy.zeros(1).dtype == jax_module.numpy.float64),
+        "x64_enabled": _x64_enabled(jax_module),
         "peak_rss_mb": peak_rss_mb(),
+        **compilation_cache,
     }
     gpu_memory_mb = query_gpu_memory_mb()
     if gpu_memory_mb is not None:
@@ -212,12 +348,19 @@ def print_provenance(provenance: dict[str, Any]) -> None:
     print(f"backend:      {provenance['backend']}")
     print(f"devices:      {provenance['devices']}")
     print(f"x64 enabled:  {provenance['x64_enabled']}")
+    if "lane" in provenance:
+        print(f"lane:         {provenance['lane']}")
     if "fixture" in provenance:
         print(f"fixture:      {provenance['fixture']}")
     if "config_label" in provenance:
         print(f"config:       {provenance['config_label']}")
     if "platform_request" in provenance:
         print(f"platform arg: {provenance['platform_request']}")
+    if "compile_behavior" in provenance:
+        print(f"compile:      {provenance['compile_behavior']}")
+    print(f"cache policy: {provenance['compilation_cache_policy']}")
+    if provenance.get("compilation_cache_dir"):
+        print(f"cache dir:    {provenance['compilation_cache_dir']}")
     if "peak_rss_mb" in provenance:
         print(f"peak RSS:     {provenance['peak_rss_mb']:.1f} MB")
     if "gpu_memory_mb" in provenance:

@@ -18,15 +18,20 @@ sys.path.insert(0, str(REPO_ROOT))
 sys.path.insert(0, str(SRC_ROOT))
 
 from benchmarks.validation_ladder_common import (
+    apply_compilation_cache_policy,
     apply_requested_platform,
     bootstrap_local_simsopt,
     build_provenance,
+    describe_compile_behavior,
     find_single_file,
     load_json,
     max_pointwise_geometry_drift,
+    optimizer_drift_tolerances,
     preparse_platform,
     print_provenance,
+    require_x64_runtime,
     relative_error,
+    resolve_probe_lane,
     repo_pythonpath_env,
     run_python_script,
     write_json,
@@ -47,17 +52,19 @@ from benchmarks.single_stage_smoke_fixture import (
 
 REQUESTED_PLATFORM = preparse_platform(sys.argv[1:])
 apply_requested_platform(REQUESTED_PLATFORM)
+apply_compilation_cache_policy()
 
 import jax
 import jaxlib
 
 jax.config.update("jax_enable_x64", True)
+require_x64_runtime(jax, context="Single-stage init parity")
 
-
-IOTA_ABS_TOL = 1e-3
-VOLUME_REL_TOL = 1e-6
-FIELD_ERROR_REL_TOL = 1e-4
-SURFACE_GEOMETRY_REL_TOL = 1e-5
+_TIER3_TOLERANCES = optimizer_drift_tolerances("tier3_single_stage_init")
+IOTA_ABS_TOL = _TIER3_TOLERANCES["final_iota_abs_tol"]
+VOLUME_REL_TOL = _TIER3_TOLERANCES["final_volume_rel_tol"]
+FIELD_ERROR_REL_TOL = _TIER3_TOLERANCES["field_error_rel_tol"]
+SURFACE_GEOMETRY_REL_TOL = _TIER3_TOLERANCES["surface_geometry_rel_tol"]
 
 
 def parse_args() -> argparse.Namespace:
@@ -302,6 +309,7 @@ def main() -> None:
         jaxlib,
         title="Single-stage init parity",
         extra={
+            "lane": resolve_probe_lane(optimizer_backend=args.optimizer_backend),
             "fixture": "real-single-stage-init",
             "platform_request": args.platform,
             "plasma_surf_filename": args.plasma_surf_filename,
@@ -315,6 +323,8 @@ def main() -> None:
             "volume_rel_tol": VOLUME_REL_TOL,
             "field_error_rel_tol": FIELD_ERROR_REL_TOL,
             "surface_geometry_rel_tol": SURFACE_GEOMETRY_REL_TOL,
+            "compile_behavior": describe_compile_behavior(uses_subprocesses=True),
+            "optimizer_drift_tolerances": dict(_TIER3_TOLERANCES),
         },
     )
     print_provenance(provenance)

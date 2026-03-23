@@ -16,11 +16,16 @@ sys.path.insert(0, str(REPO_ROOT))
 sys.path.insert(0, str(SRC_ROOT))
 
 from benchmarks.validation_ladder_common import (
+    apply_compilation_cache_policy,
     apply_requested_platform,
     bootstrap_local_simsopt,
     build_provenance,
+    describe_compile_behavior,
+    optimizer_drift_tolerances,
     preparse_platform,
     print_provenance,
+    require_x64_runtime,
+    resolve_probe_lane,
     write_json,
 )
 from benchmarks.single_stage_smoke_fixture import (
@@ -40,17 +45,19 @@ from benchmarks.single_stage_smoke_fixture import (
 
 REQUESTED_PLATFORM = preparse_platform(sys.argv[1:])
 apply_requested_platform(REQUESTED_PLATFORM)
+apply_compilation_cache_policy()
 
 import jax
 import jaxlib
 
 jax.config.update("jax_enable_x64", True)
+require_x64_runtime(jax, context="Adjoint FD validation")
 
-
-ADJOINT_RESIDUAL_REL_TOL = 1e-10
-RECOMPOSED_TOTAL_REL_TOL = 1e-12
-FIXED_SURFACE_FD_REL_TOL = 1e-3
-FIXED_SURFACE_FD_ABS_TOL = 1e-8
+_TIER4_TOLERANCES = optimizer_drift_tolerances("tier4_adjoint_fd")
+ADJOINT_RESIDUAL_REL_TOL = _TIER4_TOLERANCES["adjoint_residual_rel_tol"]
+RECOMPOSED_TOTAL_REL_TOL = _TIER4_TOLERANCES["recomposed_total_rel_tol"]
+FIXED_SURFACE_FD_REL_TOL = _TIER4_TOLERANCES["fixed_surface_fd_rel_tol"]
+FIXED_SURFACE_FD_ABS_TOL = _TIER4_TOLERANCES["fixed_surface_fd_abs_tol"]
 
 
 def _positive_int(value: str) -> int:
@@ -355,6 +362,7 @@ def main() -> None:
         jaxlib,
         title="Adjoint pipeline validation",
         extra={
+            "lane": resolve_probe_lane(optimizer_backend=args.optimizer_backend),
             "fixture": "real-single-stage-init",
             "platform_request": args.platform,
             "plasma_surf_filename": args.plasma_surf_filename,
@@ -366,6 +374,8 @@ def main() -> None:
             "ntor": int(args.ntor),
             "samples": int(args.samples),
             "eps": float(args.eps),
+            "compile_behavior": describe_compile_behavior(uses_subprocesses=False),
+            "optimizer_drift_tolerances": dict(_TIER4_TOLERANCES),
         },
     )
     print_provenance(provenance)

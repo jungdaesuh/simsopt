@@ -271,6 +271,7 @@ def initializeCoils(
     surf,
     surf_coils,
     tf_coils,
+    backend,
     num_quadpoints,
     order,
     phi_center,
@@ -280,7 +281,8 @@ def initializeCoils(
     OUT_DIR,
 ):
     # Initialize banana coils on the coil winding surface
-    banana_curve = CurveCWSFourierCPP(
+    curve_cls = CurveCWSFourier if backend == "jax" else CurveCWSFourierCPP
+    banana_curve = curve_cls(
         np.linspace(0, 1, num_quadpoints, endpoint=False), order=order, surf=surf_coils
     )
     banana_curve.set("phic(0)", phi_center)
@@ -312,10 +314,8 @@ def initializeCoils(
 
 # Helper: evaluate gamma for CurveCWSFourier
 def gamma_at_t(curve, t):
-    g2 = np.zeros((len(t), 2))
-    curve.gamma_2d_impl(g2, t)
     out = np.zeros((len(t), 3))
-    curve.surf.gamma_lin(out, g2[:, 0], g2[:, 1])
+    curve.gamma_impl(out, np.asarray(t, dtype=np.float64))
     return out
 
 
@@ -537,6 +537,7 @@ def build_stage2_probe_payload(
     JF,
     new_bs,
     new_surf,
+    banana_curve,
     Jf,
     Jls,
     Jccdist,
@@ -562,6 +563,7 @@ def build_stage2_probe_payload(
     flux_grad = np.asarray(Jf.dJ(), dtype=float)
     return {
         "backend": backend,
+        "banana_curve_class": type(banana_curve).__name__,
         "equilibrium_path": equilibrium_path,
         "nphi": int(nphi),
         "ntheta": int(ntheta),
@@ -647,6 +649,7 @@ if __name__ == "__main__":
         CurveLength,
         CurveCurveDistance,
         LpCurveCurvature,
+        CurveCWSFourier,
         CurveCWSFourierCPP,
     )
     from simsopt.objectives import SquaredFlux, QuadraticPenalty
@@ -723,6 +726,7 @@ if __name__ == "__main__":
         new_surf,
         surf_coils,
         tf_coils,
+        args.backend,
         num_quadpoints,
         order,
         phi_center,
@@ -812,6 +816,7 @@ if __name__ == "__main__":
             JF,
             new_bs,
             new_surf,
+            new_banana_curve,
             Jf,
             Jls,
             Jccdist,
@@ -932,6 +937,7 @@ if __name__ == "__main__":
         "curvature_p_norm": args.curvature_p_norm,
         "squared_flux_weight": SQUARED_FLUX_WEIGHT,
         "backend": args.backend,
+        "banana_curve_class": type(new_banana_curve).__name__,
         "init_only": args.init_only,
         "max_iterations": MAXITER,
         "iterations": res_nit,
