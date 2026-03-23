@@ -58,10 +58,14 @@ def _x64_enabled() -> bool:
     return jnp.zeros(1).dtype == jnp.float64
 
 
+def _requested_private_backends(backends: tuple[str, ...]) -> tuple[str, ...]:
+    return tuple(sorted(PRIVATE_ONLY_BACKENDS.intersection(backends)))
+
+
 def _resolve_runtime_lane(backends: tuple[str, ...]) -> str:
     if _current_jax_version() == PRIVATE_OPTIMIZER_JAX_VERSION:
         return "private-optimizer"
-    if PRIVATE_ONLY_BACKENDS.intersection(backends):
+    if _requested_private_backends(backends):
         return "private-optimizer"
     return "trusted-public-reference"
 
@@ -71,7 +75,7 @@ def _validate_benchmark_runtime(backends: tuple[str, ...]) -> None:
         raise RuntimeError("Expected JAX x64 mode to be enabled for this benchmark.")
 
     version = _current_jax_version()
-    private_backends = sorted(PRIVATE_ONLY_BACKENDS.intersection(backends))
+    private_backends = _requested_private_backends(backends)
     if version == PRIVATE_OPTIMIZER_JAX_VERSION:
         return
 
@@ -96,7 +100,7 @@ def _validate_benchmark_runtime(backends: tuple[str, ...]) -> None:
 def resolve_benchmark_backends(requested_backends=None) -> tuple[str, ...]:
     if requested_backends:
         backends = tuple(requested_backends)
-    elif jax.__version__ == PRIVATE_OPTIMIZER_JAX_VERSION:
+    elif _current_jax_version() == PRIVATE_OPTIMIZER_JAX_VERSION:
         backends = DEFAULT_PRIVATE_BACKENDS
     else:
         backends = DEFAULT_PUBLIC_BACKENDS
@@ -105,7 +109,6 @@ def resolve_benchmark_backends(requested_backends=None) -> tuple[str, ...]:
 
 
 def print_provenance(title: str, backends: tuple[str, ...]) -> None:
-    x64_enabled = _x64_enabled()
     _validate_benchmark_runtime(backends)
     compilation_cache = current_compilation_cache_metadata()
     _progress(f"\n{'=' * 70}")
@@ -116,7 +119,7 @@ def print_provenance(title: str, backends: tuple[str, ...]) -> None:
     _progress(f"jaxlib:       {jaxlib.__version__}")
     _progress(f"backend:      {jax.default_backend()}")
     _progress(f"devices:      {jax.devices()}")
-    _progress(f"x64 enabled:  {x64_enabled}")
+    _progress(f"x64 enabled:  {_x64_enabled()}")
     _progress(f"lane:         {_resolve_runtime_lane(backends)}")
     _progress(f"backends:     {', '.join(backends)}")
     _progress(f"compile:      {describe_compile_behavior(uses_subprocesses=False)}")
