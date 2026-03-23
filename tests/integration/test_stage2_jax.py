@@ -49,7 +49,6 @@ from simsopt.field.biotsavart_jax_backend import BiotSavartJAX
 from simsopt.geo.optimizer_jax import (
     PRIVATE_OPTIMIZER_JAX_VERSION,
     jax_minimize,
-    resolve_optimizer_backend_method,
 )
 from simsopt.objectives.fluxobjective_jax import SquaredFluxJAX
 from simsopt.objectives.stage2_target_objective_jax import build_stage2_target_objective
@@ -190,6 +189,26 @@ def _build_stage2_target_objective_contract_case():
     )
 
     return objective, target_bundle
+
+
+def _build_fake_bfgs_result(optimizer_jax, x0, value, grad):
+    x0_array = np.asarray(x0, dtype=np.float64)
+    grad_array = np.asarray(grad, dtype=np.float64)
+    return optimizer_jax._BFGSResults(
+        converged=False,
+        failed=False,
+        k=0,
+        nfev=1,
+        ngev=1,
+        nhev=0,
+        x_k=x0_array,
+        f_k=np.float64(value),
+        g_k=grad_array,
+        H_k=np.eye(len(x0_array), dtype=np.float64),
+        old_old_fval=np.float64(value),
+        status=0,
+        line_search_status=0,
+    )
 
 
 # -----------------------------------------------------------------------
@@ -972,7 +991,7 @@ class TestStage2OptimizerContract:
         [
             ("cpu", "scipy", "lbfgs"),
             ("jax", "scipy", "lbfgs"),
-            ("jax", "ondevice", "lbfgs-ondevice"),
+            ("jax", "ondevice", "bfgs-ondevice"),
         ],
     )
     def test_resolve_stage2_optimizer_method_contract(
@@ -981,19 +1000,19 @@ class TestStage2OptimizerContract:
         optimizer_backend,
         expected_method,
     ):
-        if field_backend != "jax" and optimizer_backend != "scipy":
-            pytest.skip("Shared optimizer backend mapping is only meaningful on the JAX lane.")
-        assert resolve_optimizer_backend_method(
+        stage2_script = _load_stage2_script_module()
+        assert stage2_script.resolve_stage2_optimizer_method(
+            field_backend,
             optimizer_backend,
-            limited_memory=True,
         ) == expected_method
 
     def test_resolve_stage2_optimizer_method_rejects_hybrid(self):
+        stage2_script = _load_stage2_script_module()
         with pytest.raises(
             ValueError,
-            match="optimizer_backend='hybrid'.*limited_memory=True",
+            match="optimizer_backend='hybrid'.*not supported for the Stage 2 outer loop",
         ):
-            resolve_optimizer_backend_method("hybrid", limited_memory=True)
+            stage2_script.resolve_stage2_optimizer_method("jax", "hybrid")
 
     @pytest.mark.parametrize(
         ("field_backend", "optimizer_backend", "expected"),
@@ -1024,7 +1043,9 @@ class TestStage2OptimizerContract:
     ):
         import simsopt.geo.optimizer_jax as optimizer_jax
 
-        captured = {}
+        stage2_script = _load_stage2_script_module()
+
+        scipy_captured = {}
 
         def fake_scipy_adapter(
             fun,
@@ -1035,10 +1056,10 @@ class TestStage2OptimizerContract:
             maxiter,
             options,
         ):
-            captured["method"] = method
-            captured["tol"] = tol
-            captured["maxiter"] = maxiter
-            captured["options"] = dict(options)
+            scipy_captured["method"] = method
+            scipy_captured["tol"] = tol
+            scipy_captured["maxiter"] = maxiter
+            scipy_captured["options"] = dict(options)
             value, grad = fun(np.asarray(x0, dtype=float))
             return types.SimpleNamespace(
                 x=np.asarray(x0, dtype=float),
@@ -1066,11 +1087,58 @@ class TestStage2OptimizerContract:
             value_and_grad=True,
         )
 
-        assert captured["method"] == "lbfgs"
-        assert captured["tol"] == pytest.approx(1e-12)
-        assert captured["maxiter"] == 25
-        assert captured["options"] == {"maxcor": 123, "ftol": 1e-15}
+        assert scipy_captured["method"] == "lbfgs"
+        assert scipy_captured["tol"] == pytest.approx(1e-12)
+        assert scipy_captured["maxiter"] == 25
+        assert scipy_captured["options"] == {"maxcor": 123, "ftol": 1e-15}
         assert result.message == "ok"
+
+        ondevice_captured = {}
+
+        def fake_bfgs_private(
+            fun,
+            x0,
+            *,
+            maxiter,
+            gtol,
+            line_search_maxiter,
+            initial_state=None,
+        ):
+            ondevice_captured["x0"] = np.asarray(x0, dtype=float)
+            ondevice_captured["maxiter"] = maxiter
+            ondevice_captured["gtol"] = gtol
+            ondevice_captured["line_search_maxiter"] = line_search_maxiter
+            ondevice_captured["initial_state"] = initial_state
+            value = float(fun(np.asarray(x0, dtype=float)))
+            grad = np.asarray(jax.grad(fun)(np.asarray(x0, dtype=np.float64)), dtype=float)
+            return _build_fake_bfgs_result(optimizer_jax, x0, value, grad)
+
+        monkeypatch.setattr(
+            optimizer_jax,
+            "_minimize_bfgs_private",
+            fake_bfgs_private,
+        )
+
+        target_result = stage2_script.run_stage2_optimizer(
+            lambda x: (float(np.dot(x, x)), np.asarray(2.0 * x, dtype=float)),
+            np.asarray([1.0, -2.0], dtype=float),
+            field_backend="jax",
+            optimizer_backend="ondevice",
+            maxiter=12,
+            ftol=1e-15,
+            gtol=1e-11,
+            scalar_fun=lambda x: jax.numpy.dot(x, x),
+        )
+
+        np.testing.assert_allclose(
+            ondevice_captured["x0"],
+            np.asarray([1.0, -2.0], dtype=float),
+        )
+        assert ondevice_captured["maxiter"] == 12
+        assert ondevice_captured["gtol"] == pytest.approx(1e-11)
+        assert ondevice_captured["line_search_maxiter"] == 10
+        assert ondevice_captured["initial_state"] is None
+        assert target_result.message == "Optimization terminated successfully."
 
     def test_target_scalar_objective_matches_stage2_composite_contract(self):
         objective, target_bundle = _build_stage2_target_objective_contract_case()
@@ -1149,3 +1217,31 @@ class TestStage2OptimizerContract:
                 f"On-device optimizer is validated on JAX "
                 f"{PRIVATE_OPTIMIZER_JAX_VERSION}" in output
             )
+
+    def test_stage2_script_target_backend_writes_nonempty_trajectory(self):
+        with tempfile.TemporaryDirectory(prefix="stage2-ondevice-trajectory-") as temp_dir:
+            trajectory_json = Path(temp_dir) / "trajectory.json"
+            result = _run_stage2_script(
+                "--backend",
+                "jax",
+                "--optimizer-backend",
+                "ondevice",
+                "--skip-postprocess",
+                "--nphi",
+                "31",
+                "--ntheta",
+                "16",
+                "--maxiter",
+                "0",
+                "--trajectory-json",
+                str(trajectory_json),
+            )
+
+            output = f"{result.stdout}\n{result.stderr}"
+            assert result.returncode == 0, output
+            payload = json.loads(trajectory_json.read_text(encoding="utf-8"))
+
+        evaluations = payload["evaluations"]
+        assert payload["backend"] == "jax"
+        assert len(evaluations) >= 2
+        assert evaluations[0]["J"] >= evaluations[-1]["J"]

@@ -245,8 +245,8 @@ def parse_args():
             "Stage 2 optimizer backend. "
             "'scipy' is the trusted reference lane; "
             "'ondevice' is the private full-GPU target lane. "
-            "'hybrid' is accepted for contract consistency but rejected for this "
-            "limited-memory Stage 2 path."
+            "'hybrid' is accepted for contract consistency but not currently "
+            "supported for the Stage 2 outer loop."
         ),
     )
     return parser.parse_args()
@@ -546,21 +546,29 @@ def evaluate_stage2_objective(JF, new_bs, new_surf, Jf, Jls, Jccdist, Jc, bs_jax
 
 
 def resolve_stage2_optimizer_method(field_backend, optimizer_backend):
-    """Resolve the shared optimizer substrate for the limited-memory Stage 2 path."""
+    """Resolve the shared optimizer substrate for the Stage 2 outer loop."""
     from simsopt.geo.optimizer_jax import (
         require_target_backend_x64,
-        resolve_optimizer_backend_method,
+        VALID_OPTIMIZER_BACKENDS,
     )
 
+    if optimizer_backend not in VALID_OPTIMIZER_BACKENDS:
+        raise ValueError(
+            "optimizer_backend must be one of: scipy, hybrid, ondevice."
+        )
     if field_backend != "jax" and optimizer_backend != "scipy":
         raise ValueError(
             "Stage 2 CPU/reference lane only supports optimizer_backend='scipy'."
         )
+    if optimizer_backend == "scipy":
+        return "lbfgs"
+    if optimizer_backend == "hybrid":
+        raise ValueError(
+            "optimizer_backend='hybrid' is transitional and not supported for "
+            "the Stage 2 outer loop."
+        )
     require_target_backend_x64(optimizer_backend)
-    return resolve_optimizer_backend_method(
-        optimizer_backend,
-        limited_memory=True,
-    )
+    return "bfgs-ondevice"
 
 
 def should_build_stage2_target_objective(field_backend, optimizer_backend):
@@ -664,6 +672,44 @@ def write_json_file(path, payload):
         json.dump(payload, outfile, indent=2)
 
 
+def append_stage2_trajectory_snapshot(trajectory_sink, snapshot, *, eval_index=None):
+    """Append a Stage 2 diagnostic snapshot when trajectory capture is enabled."""
+    if trajectory_sink is None:
+        return
+    trajectory_sink.append(
+        {
+            "eval_index": len(trajectory_sink) + 1 if eval_index is None else int(eval_index),
+            **snapshot,
+        }
+    )
+
+
+def capture_stage2_trajectory_snapshot(
+    trajectory_sink,
+    JF,
+    new_bs,
+    new_surf,
+    Jf,
+    Jls,
+    Jccdist,
+    Jc,
+    *,
+    bs_jax=None,
+):
+    """Evaluate and append a Stage 2 diagnostic snapshot when requested."""
+    snapshot, _ = evaluate_stage2_objective(
+        JF,
+        new_bs,
+        new_surf,
+        Jf,
+        Jls,
+        Jccdist,
+        Jc,
+        bs_jax=bs_jax,
+    )
+    append_stage2_trajectory_snapshot(trajectory_sink, snapshot)
+
+
 def make_fun(JF, new_bs, new_surf, Jf, Jls, Jccdist, Jc, bs_jax=None, trajectory_sink=None):
     """Factory for the Stage 2 objective function.
 
@@ -689,13 +735,11 @@ def make_fun(JF, new_bs, new_surf, Jf, Jls, Jccdist, Jc, bs_jax=None, trajectory
             bs_jax=bs_jax,
         )
         eval_counter["count"] += 1
-        if trajectory_sink is not None:
-            trajectory_sink.append(
-                {
-                    "eval_index": eval_counter["count"],
-                    **snapshot,
-                }
-            )
+        append_stage2_trajectory_snapshot(
+            trajectory_sink,
+            snapshot,
+            eval_index=eval_counter["count"],
+        )
         outstr = f"J={snapshot['J']:.1e}, Jf={snapshot['Jf']:.1e}, ⟨B·n⟩={snapshot['mean_abs_relBfinal_norm']:.1e}"
         outstr += f", Len={snapshot['curve_length']:.1f}m"
         outstr += f", C-C-Sep={snapshot['coil_coil_distance']:.2f}m"
@@ -940,6 +984,18 @@ if __name__ == "__main__":
         res_nit = 0
         print("Skipping Stage 2 optimizer because --init-only was provided.")
     else:
+        if target_objective_bundle is not None:
+            capture_stage2_trajectory_snapshot(
+                trajectory,
+                JF,
+                new_bs,
+                new_surf,
+                Jf,
+                Jls,
+                Jccdist,
+                Jc,
+                bs_jax=new_bs_jax,
+            )
         res = run_stage2_optimizer(
             fun,
             dofs,
@@ -957,6 +1013,18 @@ if __name__ == "__main__":
         )
         JF.x = np.asarray(res.x, dtype=float)
         res_nit = res.nit
+        if target_objective_bundle is not None:
+            capture_stage2_trajectory_snapshot(
+                trajectory,
+                JF,
+                new_bs,
+                new_surf,
+                Jf,
+                Jls,
+                Jccdist,
+                Jc,
+                bs_jax=new_bs_jax,
+            )
         print(res.message)
     if args.trajectory_json:
         write_json_file(

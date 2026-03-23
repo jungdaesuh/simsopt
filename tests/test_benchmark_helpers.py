@@ -520,19 +520,44 @@ def test_single_stage_init_case_loads_surface_before_tempdir_cleanup(monkeypatch
     assert payload["results"]["SELF_INTERSECTING"] is True
 
 
+def _stage2_e2e_comparison_case(**overrides):
+    comparison = {
+        "optimizer_backend": "scipy",
+        "final_objective_rel_diff": 1e-7,
+        "field_error_rel_diff": 1e-7,
+        "field_error_rel_tol": 1e-4,
+        "max_geometry_pointwise_rel": 2e-6,
+        "geometry_rel_tol": 5e-6,
+        "cpu_trajectory_finite": True,
+        "jax_trajectory_finite": True,
+        "cpu_trajectory_improves": True,
+        "jax_trajectory_improves": True,
+    }
+    comparison.update(overrides)
+    return comparison
+
+
+def _stage2_e2e_results_case(**overrides):
+    results = {
+        "FINAL_OBJECTIVE": 1.0,
+        "FIELD_ERROR": 0.01,
+        "FINAL_BANANA_GAMMA": [[[1.0, 0.0, 0.0]]],
+        "FINAL_CURVE_LENGTH": 1.0,
+        "FINAL_CC_DISTANCE": 0.2,
+        "LENGTH_TARGET": 1.75,
+        "CC_THRESHOLD": 0.05,
+        "CURVATURE_THRESHOLD": 40.0,
+        "MAX_CURVATURE": 39.5,
+        "SELF_INTERSECTING": False,
+        "iterations": 3,
+    }
+    results.update(overrides)
+    return results
+
+
 def test_stage2_e2e_comparison_keeps_field_error_as_hard_gate():
     failures = evaluate_stage2_e2e_comparison(
-        {
-            "final_objective_rel_diff": 1e-7,
-            "field_error_rel_diff": 2e-4,
-            "field_error_rel_tol": 1e-4,
-            "max_geometry_pointwise_rel": 2e-6,
-            "geometry_rel_tol": 5e-6,
-            "cpu_trajectory_finite": True,
-            "jax_trajectory_finite": True,
-            "cpu_trajectory_improves": True,
-            "jax_trajectory_improves": True,
-        }
+        _stage2_e2e_comparison_case(field_error_rel_diff=2e-4)
     )
 
     assert any("Final field error relative difference too large" in failure for failure in failures)
@@ -540,17 +565,7 @@ def test_stage2_e2e_comparison_keeps_field_error_as_hard_gate():
 
 def test_stage2_e2e_comparison_relaxes_short_run_geometry_gate():
     failures = evaluate_stage2_e2e_comparison(
-        {
-            "final_objective_rel_diff": 1e-7,
-            "field_error_rel_diff": 1e-7,
-            "field_error_rel_tol": 1e-4,
-            "max_geometry_pointwise_rel": 3e-6,
-            "geometry_rel_tol": 5e-6,
-            "cpu_trajectory_finite": True,
-            "jax_trajectory_finite": True,
-            "cpu_trajectory_improves": True,
-            "jax_trajectory_improves": True,
-        }
+        _stage2_e2e_comparison_case(max_geometry_pointwise_rel=3e-6)
     )
 
     assert failures == []
@@ -558,31 +573,50 @@ def test_stage2_e2e_comparison_relaxes_short_run_geometry_gate():
 
 def test_stage2_e2e_comparison_still_rejects_large_geometry_drift():
     failures = evaluate_stage2_e2e_comparison(
-        {
-            "final_objective_rel_diff": 1e-7,
-            "field_error_rel_diff": 1e-7,
-            "field_error_rel_tol": 1e-4,
-            "max_geometry_pointwise_rel": 6e-6,
-            "geometry_rel_tol": 5e-6,
-            "cpu_trajectory_finite": True,
-            "jax_trajectory_finite": True,
-            "cpu_trajectory_improves": True,
-            "jax_trajectory_improves": True,
-        }
+        _stage2_e2e_comparison_case(max_geometry_pointwise_rel=6e-6)
     )
 
     assert any("Final banana-coil geometry drift too large" in failure for failure in failures)
 
 
+def test_stage2_e2e_comparison_accepts_ondevice_solution_quality_without_geometry_parity():
+    failures = evaluate_stage2_e2e_comparison(
+        _stage2_e2e_comparison_case(
+            optimizer_backend="ondevice",
+            jax_objective_not_worse_than_cpu=True,
+            jax_field_error_not_worse_than_cpu=True,
+            jax_curve_length_within_target=True,
+            jax_cc_distance_within_threshold=True,
+            jax_curvature_not_worse_than_cpu=True,
+            jax_self_intersecting=False,
+        )
+    )
+
+    assert failures == []
+
+
+def test_stage2_e2e_comparison_rejects_ondevice_constraint_violation():
+    failures = evaluate_stage2_e2e_comparison(
+        _stage2_e2e_comparison_case(
+            optimizer_backend="ondevice",
+            jax_objective_not_worse_than_cpu=True,
+            jax_field_error_not_worse_than_cpu=True,
+            jax_curve_length_within_target=True,
+            jax_cc_distance_within_threshold=False,
+            jax_final_cc_distance=0.04,
+            cc_threshold=0.05,
+            jax_curvature_not_worse_than_cpu=True,
+            jax_self_intersecting=False,
+        )
+    )
+
+    assert any("configured threshold" in failure for failure in failures)
+
+
 def test_stage2_e2e_payload_preserves_trajectory_and_timing_artifacts():
     provenance = {"title": "Stage 2 end-to-end comparison"}
     cpu_case = {
-        "results": {
-            "FINAL_OBJECTIVE": 1.0,
-            "FIELD_ERROR": 0.01,
-            "FINAL_BANANA_GAMMA": [[[1.0, 0.0, 0.0]]],
-            "iterations": 3,
-        },
+        "results": _stage2_e2e_results_case(),
         "trajectory": [
             {
                 "J": 2.0,
@@ -606,12 +640,11 @@ def test_stage2_e2e_payload_preserves_trajectory_and_timing_artifacts():
         "elapsed_s": 12.5,
     }
     jax_case = {
-        "results": {
-            "FINAL_OBJECTIVE": 1.0 + 1e-7,
-            "FIELD_ERROR": 0.01 + 1e-7,
-            "FINAL_BANANA_GAMMA": [[[1.0, 0.0, 0.0]]],
-            "iterations": 3,
-        },
+        "results": _stage2_e2e_results_case(
+            FINAL_OBJECTIVE=1.0 + 1e-7,
+            FIELD_ERROR=0.01 + 1e-7,
+            optimizer_backend="scipy",
+        ),
         "trajectory": [
             {
                 "J": 2.0,
