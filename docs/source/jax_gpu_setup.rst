@@ -39,9 +39,10 @@ GPU install (CUDA 12)::
     # or manually:
     pip install "jax[cuda12]==0.9.2"
 
-The public JAX lane is Python ``3.11+`` with JAX / jaxlib ``0.9.2``.
-The private ``ondevice`` / ``hybrid`` optimizer lane remains pinned to
-JAX ``0.6.2`` until the private optimizer migration is complete.
+Both the public and private optimizer lanes are Python ``3.11+`` with JAX /
+jaxlib ``0.9.2``. The trusted reference backend remains
+``optimizer_backend="scipy"``; ``ondevice`` / ``hybrid`` still require the
+separate private-optimizer validation track.
 
 Verify the install::
 

@@ -21,13 +21,11 @@ from benchmarks.validation_ladder_common import (
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-PUBLIC_EXPECTED_JAX_VERSION = os.environ.get(
-    "SIMSOPT_PUBLIC_BENCHMARK_JAX_VERSION", "0.9.2"
+EXPECTED_BENCHMARK_JAX_VERSION = os.environ.get(
+    "SIMSOPT_BENCHMARK_JAX_VERSION", "0.9.2"
 )
-PRIVATE_OPTIMIZER_JAX_VERSION = "0.6.2"
 BENCHMARK_BACKEND_CHOICES = ("scipy", "ondevice", "hybrid")
 DEFAULT_PUBLIC_BACKENDS = ("scipy",)
-DEFAULT_PRIVATE_BACKENDS = BENCHMARK_BACKEND_CHOICES
 PRIVATE_ONLY_BACKENDS = frozenset({"ondevice", "hybrid"})
 SOLVER_VERBOSE = os.environ.get("SIMSOPT_BENCHMARK_SOLVER_VERBOSE", "").lower() in {
     "1",
@@ -63,8 +61,6 @@ def _requested_private_backends(backends: tuple[str, ...]) -> tuple[str, ...]:
 
 
 def _resolve_runtime_lane(backends: tuple[str, ...]) -> str:
-    if _current_jax_version() == PRIVATE_OPTIMIZER_JAX_VERSION:
-        return "private-optimizer"
     if _requested_private_backends(backends):
         return "private-optimizer"
     return "trusted-public-reference"
@@ -76,32 +72,20 @@ def _validate_benchmark_runtime(backends: tuple[str, ...]) -> None:
 
     version = _current_jax_version()
     private_backends = _requested_private_backends(backends)
-    if version == PRIVATE_OPTIMIZER_JAX_VERSION:
-        return
-
-    if private_backends:
-        requested = ", ".join(private_backends)
+    if version != EXPECTED_BENCHMARK_JAX_VERSION:
+        requested = ", ".join(private_backends or backends)
+        lane_label = f"benchmark backends {requested}" if requested else "benchmark runtime"
         raise RuntimeError(
-            f"Backends {requested} require the private JAX "
-            f"{PRIVATE_OPTIMIZER_JAX_VERSION} optimizer runtime; found "
-            f"{version}. Use backend='scipy' on the public JAX "
-            f"{PUBLIC_EXPECTED_JAX_VERSION} lane."
-        )
-
-    if version != PUBLIC_EXPECTED_JAX_VERSION:
-        raise RuntimeError(
-            f"Public scipy benchmark lane is configured for JAX "
-            f"{PUBLIC_EXPECTED_JAX_VERSION}; found {version}. "
-            "Set SIMSOPT_PUBLIC_BENCHMARK_JAX_VERSION only when intentionally "
-            "validating a different public runtime."
+            f"{lane_label} are configured for JAX "
+            f"{EXPECTED_BENCHMARK_JAX_VERSION}; found {version}. "
+            "Set SIMSOPT_BENCHMARK_JAX_VERSION only when intentionally "
+            "validating a different benchmark runtime."
         )
 
 
 def resolve_benchmark_backends(requested_backends=None) -> tuple[str, ...]:
     if requested_backends:
         backends = tuple(requested_backends)
-    elif _current_jax_version() == PRIVATE_OPTIMIZER_JAX_VERSION:
-        backends = DEFAULT_PRIVATE_BACKENDS
     else:
         backends = DEFAULT_PUBLIC_BACKENDS
     _validate_benchmark_runtime(backends)

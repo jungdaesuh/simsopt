@@ -132,5 +132,5 @@ source = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 markers = [
-    "private_optimizer_062: tests pinned to the private JAX 0.6.2 optimizer runtime",
+    "private_optimizer_runtime: tests validated on the private JAX optimizer runtime",
 ]

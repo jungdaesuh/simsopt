@@ -8,22 +8,29 @@ def _force_x64(monkeypatch):
     monkeypatch.setattr(benchmark_common, "_x64_enabled", lambda: True)
 
 
-def test_explicit_scipy_backend_allowed_on_private_optimizer_lane(monkeypatch):
+@pytest.fixture
+def _supported_runtime(monkeypatch):
     monkeypatch.setattr(
         benchmark_common,
         "_current_jax_version",
-        lambda: benchmark_common.PRIVATE_OPTIMIZER_JAX_VERSION,
+        lambda: benchmark_common.EXPECTED_BENCHMARK_JAX_VERSION,
     )
 
+
+def test_explicit_scipy_backend_allowed_on_supported_runtime(_supported_runtime):
     assert benchmark_common.resolve_benchmark_backends(["scipy"]) == ("scipy",)
 
 
-def test_private_backend_rejected_on_public_lane(monkeypatch):
+def test_explicit_private_backend_allowed_on_supported_runtime(_supported_runtime):
+    assert benchmark_common.resolve_benchmark_backends(["ondevice"]) == ("ondevice",)
+
+
+def test_private_backend_rejected_on_wrong_runtime(monkeypatch):
     monkeypatch.setattr(
         benchmark_common,
         "_current_jax_version",
-        lambda: benchmark_common.PUBLIC_EXPECTED_JAX_VERSION,
+        lambda: "0.9.1",
     )
 
-    with pytest.raises(RuntimeError, match="require the private JAX"):
+    with pytest.raises(RuntimeError, match="configured for JAX"):
         benchmark_common.resolve_benchmark_backends(["ondevice"])

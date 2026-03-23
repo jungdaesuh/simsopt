@@ -46,7 +46,11 @@ from simsopt.geo import (  # noqa: E402
 from simsopt.objectives import SquaredFlux, QuadraticPenalty  # noqa: E402
 
 from simsopt.field.biotsavart_jax_backend import BiotSavartJAX
-from simsopt.geo.optimizer_jax import jax_minimize, resolve_optimizer_backend_method
+from simsopt.geo.optimizer_jax import (
+    PRIVATE_OPTIMIZER_JAX_VERSION,
+    jax_minimize,
+    resolve_optimizer_backend_method,
+)
 from simsopt.objectives.fluxobjective_jax import SquaredFluxJAX
 from simsopt.objectives.stage2_target_objective_jax import build_stage2_target_objective
 
@@ -1137,8 +1141,11 @@ class TestStage2OptimizerContract:
         )
 
         output = f"{result.stdout}\n{result.stderr}"
-        if jax.__version__ == "0.6.2":
+        if jax.__version__ == PRIVATE_OPTIMIZER_JAX_VERSION:
             assert result.returncode == 0, output
         else:
             assert result.returncode != 0
-            assert "On-device optimizer is pinned to JAX 0.6.2" in output
+            assert (
+                f"On-device optimizer is validated on JAX "
+                f"{PRIVATE_OPTIMIZER_JAX_VERSION}" in output
+            )

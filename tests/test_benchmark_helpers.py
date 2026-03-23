@@ -281,7 +281,7 @@ def test_run_code_benchmark_runtime_lane_matches_ladder_vocabulary(monkeypatch):
     monkeypatch.setattr(
         run_code_benchmark_common,
         "_current_jax_version",
-        lambda: run_code_benchmark_common.PUBLIC_EXPECTED_JAX_VERSION,
+        lambda: run_code_benchmark_common.EXPECTED_BENCHMARK_JAX_VERSION,
     )
     assert (
         run_code_benchmark_common._resolve_runtime_lane(("scipy",))
@@ -321,7 +321,7 @@ def test_build_provenance_includes_compilation_cache_metadata(monkeypatch):
         lambda: None,
     )
     fake_jax = types.SimpleNamespace(
-        __version__="0.6.2",
+        __version__=run_code_benchmark_common.EXPECTED_BENCHMARK_JAX_VERSION,
         default_backend=lambda: "cpu",
         devices=lambda: ["cpu:0"],
         numpy=types.SimpleNamespace(
@@ -329,7 +329,9 @@ def test_build_provenance_includes_compilation_cache_metadata(monkeypatch):
             float64=np.float64,
         ),
     )
-    fake_jaxlib = types.SimpleNamespace(__version__="0.6.2")
+    fake_jaxlib = types.SimpleNamespace(
+        __version__=run_code_benchmark_common.EXPECTED_BENCHMARK_JAX_VERSION
+    )
 
     provenance = build_provenance(
         fake_jax,

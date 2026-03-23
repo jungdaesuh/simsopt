@@ -5,17 +5,17 @@ Reference/oracle methods:
   - ``method="bfgs"``: host-driven SciPy BFGS loop with JAX value/grad.
   - ``method="lbfgs"``: host-driven SciPy L-BFGS-B loop with JAX value/grad.
 
-Transitional private method (runtime-pinned to JAX 0.6.2):
+Transitional private method (validated on JAX 0.9.2):
   - ``method="bfgs-hybrid"``: SciPy BFGS prefix, then JAX on-device BFGS.
 
-Target private methods (runtime-pinned to JAX 0.6.2):
+Target private methods (validated on JAX 0.9.2):
   - ``method="bfgs-ondevice"``: JAX on-device BFGS.
   - ``method="lbfgs-ondevice"``: JAX on-device L-BFGS.
 
-The private methods intentionally mirror the JAX 0.6.2 optimizer internals so
+The private methods intentionally mirror the JAX 0.9.2 optimizer internals so
 the line-search and iteration semantics stay stable across this project. The
-reference source is the upstream ``jax-v0.6.2`` tag
-(``1ad05bb26105f23ee7728b36cca12901fe70e187`` in the local JAX checkout).
+reference source is the upstream ``jax-v0.9.2`` tag
+(``a659757d768587a81d095a9fab5f0c36f8beb218``).
 """
 
 from __future__ import annotations
@@ -38,6 +38,7 @@ from scipy.optimize import OptimizeResult
 from scipy.optimize import minimize as scipy_minimize
 
 __all__ = [
+    "PRIVATE_OPTIMIZER_JAX_VERSION",
     "VALID_OPTIMIZER_BACKENDS",
     "REFERENCE_OPTIMIZER_BACKENDS",
     "TARGET_X64_REQUIRED_OPTIMIZER_BACKENDS",
@@ -49,7 +50,7 @@ __all__ = [
 ]
 
 
-_EXPECTED_JAX_VERSION = "0.6.2"
+PRIVATE_OPTIMIZER_JAX_VERSION = "0.9.2"
 VALID_OPTIMIZER_BACKENDS = frozenset({"scipy", "hybrid", "ondevice"})
 OPTIMIZER_BACKEND_ROLE = {
     "scipy": "reference",
@@ -152,11 +153,12 @@ class _LBFGSResults(NamedTuple):
 
 
 def _require_private_optimizer_runtime(x0):
-    if jax.__version__ != _EXPECTED_JAX_VERSION:
+    if jax.__version__ != PRIVATE_OPTIMIZER_JAX_VERSION:
         raise RuntimeError(
-            f"On-device optimizer is pinned to JAX {_EXPECTED_JAX_VERSION}; "
-            f"found {jax.__version__}. Use optimizer_backend='scipy' on the "
-            "public JAX 0.9.2 lane until the private optimizer migration is complete."
+            f"On-device optimizer is validated on JAX "
+            f"{PRIVATE_OPTIMIZER_JAX_VERSION}; found {jax.__version__}. "
+            "Use envs/columbia-jax-0.9.2.yml for the supported runtime or "
+            "fall back to optimizer_backend='scipy'."
         )
     if not _x64_enabled():
         raise RuntimeError(
@@ -564,10 +566,10 @@ def _line_search(
         dphi_0 = jnp.real(_dot(gfk, pk))
 
     if old_old_fval is not None:
-        # JAX 0.6.2 line_search.py says old_old_fval is "unused" at line 283,
-        # but the actual start-value heuristic consumes it at lines 301-303.
+        # Upstream line_search.py says old_old_fval is "unused", but the
+        # actual start-value heuristic still consumes it.
         # The hybrid handoff must seed this value across the SciPy->JAX
-        # handoff seam to preserve the 0.6.2 starting-step heuristic; the
+        # handoff seam to preserve the upstream starting-step heuristic; the
         # positive clamp below is a later-iteration backstop for mid-loop
         # objective increase on the previous accepted step.
         candidate_start_value = 1.01 * 2 * (phi_0 - old_old_fval) / dphi_0
@@ -1111,7 +1113,7 @@ def jax_minimize(
         return _private_bfgs_result_to_optimize_result(state)
 
     if method == "lbfgs-ondevice":
-        # ftol=0 keeps the private JAX 0.6.2 loop in the "stop on actual
+        # ftol=0 keeps the private L-BFGS loop in the "stop on actual
         # objective increase" regime instead of treating ftol as disabled.
         state = _minimize_lbfgs_private(
             fun,

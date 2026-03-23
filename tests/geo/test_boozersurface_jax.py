@@ -92,6 +92,7 @@ surface_area = _sf.surface_area
 jax_minimize = _opt.jax_minimize
 newton_polish = _opt.newton_polish
 newton_exact = _opt.newton_exact
+PRIVATE_OPTIMIZER_JAX_VERSION = _opt.PRIVATE_OPTIMIZER_JAX_VERSION
 
 _boozer_penalty_objective = _bsj._boozer_penalty_objective
 _boozer_exact_coil_vjp = _bsj._boozer_exact_coil_vjp
@@ -101,7 +102,39 @@ _resolve_ls_optimizer_method = _bsj._resolve_ls_optimizer_method
 BoozerSurfaceJAX = _bsj.BoozerSurfaceJAX
 _ensure_solved_jax = _soj._ensure_solved
 _resolved_boozer_G_jax = _soj._resolved_boozer_G
-PRIVATE_OPTIMIZER_062 = pytest.mark.private_optimizer_062
+PRIVATE_OPTIMIZER_RUNTIME = pytest.mark.private_optimizer_runtime
+PRIVATE_RUNTIME_REASON = (
+    f"Private on-device optimizer behavior is validated on the JAX "
+    f"{PRIVATE_OPTIMIZER_JAX_VERSION} runtime."
+)
+PRIVATE_LBFGS_RUNTIME_REASON = (
+    f"lbfgs-ondevice behavior is validated on the JAX "
+    f"{PRIVATE_OPTIMIZER_JAX_VERSION} runtime."
+)
+PRIVATE_LBFGS_BUDGET_REASON = (
+    f"lbfgs-ondevice budget behavior is validated on the JAX "
+    f"{PRIVATE_OPTIMIZER_JAX_VERSION} runtime."
+)
+PRIVATE_LIMITED_MEMORY_REASON = (
+    f"On-device limited-memory solve is validated on the JAX "
+    f"{PRIVATE_OPTIMIZER_JAX_VERSION} runtime."
+)
+REQUIRES_PRIVATE_OPTIMIZER_RUNTIME = pytest.mark.skipif(
+    jax.__version__ != PRIVATE_OPTIMIZER_JAX_VERSION,
+    reason=PRIVATE_RUNTIME_REASON,
+)
+REQUIRES_PRIVATE_LBFGS_RUNTIME = pytest.mark.skipif(
+    jax.__version__ != PRIVATE_OPTIMIZER_JAX_VERSION,
+    reason=PRIVATE_LBFGS_RUNTIME_REASON,
+)
+REQUIRES_PRIVATE_LBFGS_BUDGET_RUNTIME = pytest.mark.skipif(
+    jax.__version__ != PRIVATE_OPTIMIZER_JAX_VERSION,
+    reason=PRIVATE_LBFGS_BUDGET_REASON,
+)
+REQUIRES_PRIVATE_LIMITED_MEMORY_RUNTIME = pytest.mark.skipif(
+    jax.__version__ != PRIVATE_OPTIMIZER_JAX_VERSION,
+    reason=PRIVATE_LIMITED_MEMORY_REASON,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -492,7 +525,7 @@ class TestOptimizerAdapter:
         np.testing.assert_allclose(result["x"], x_exact, atol=1e-12)
         assert result["success"]
 
-    @PRIVATE_OPTIMIZER_062
+    @PRIVATE_OPTIMIZER_RUNTIME
     def test_hybrid_skips_continuation_after_scipy_success(self, monkeypatch):
         """Hybrid mode must return the SciPy prefix directly on convergence."""
         prefix = types.SimpleNamespace(
@@ -528,7 +561,7 @@ class TestOptimizerAdapter:
 
         assert result is prefix
 
-    @PRIVATE_OPTIMIZER_062
+    @PRIVATE_OPTIMIZER_RUNTIME
     def test_hybrid_skips_nonfinite_prefix_state(self, monkeypatch):
         """Hybrid mode must not continue from a non-finite SciPy prefix."""
         prefix = types.SimpleNamespace(
@@ -565,7 +598,7 @@ class TestOptimizerAdapter:
         assert result.success is False
         assert "non-finite state" in result.message
 
-    @PRIVATE_OPTIMIZER_062
+    @PRIVATE_OPTIMIZER_RUNTIME
     def test_hybrid_prefix_cap_and_total_iteration_count(self, monkeypatch):
         """Hybrid mode must cap the SciPy prefix and report total nit."""
         captured = {}
@@ -630,7 +663,7 @@ class TestOptimizerAdapter:
         assert captured["initial_k"] == 0
         assert result.nit == 5
 
-    @PRIVATE_OPTIMIZER_062
+    @PRIVATE_OPTIMIZER_RUNTIME
     def test_hybrid_missing_hess_inv_falls_back_to_identity(self, monkeypatch):
         """Hybrid continuation must recover when SciPy exposes no dense hess_inv."""
         prefix = types.SimpleNamespace(
@@ -688,7 +721,7 @@ class TestOptimizerAdapter:
 
         assert result.success is True
 
-    @PRIVATE_OPTIMIZER_062
+    @PRIVATE_OPTIMIZER_RUNTIME
     def test_hybrid_degenerate_hess_inv_resets_to_identity(self, monkeypatch):
         """Hybrid continuation must reject non-descent warm-start Hessians."""
         prefix = types.SimpleNamespace(
@@ -743,7 +776,7 @@ class TestOptimizerAdapter:
 
         assert result.success is True
 
-    @PRIVATE_OPTIMIZER_062
+    @PRIVATE_OPTIMIZER_RUNTIME
     def test_hybrid_zero_budget_uses_scipy_prefix_only(self, monkeypatch):
         """Hybrid maxiter=0 must still take the SciPy-prefix path."""
         captured = {}
@@ -784,7 +817,7 @@ class TestOptimizerAdapter:
         assert captured["prefix_maxiter"] == 0
         assert result is prefix
 
-    @PRIVATE_OPTIMIZER_062
+    @PRIVATE_OPTIMIZER_RUNTIME
     def test_hybrid_maxiter_one_still_uses_prefix_path(self, monkeypatch):
         """Hybrid maxiter=1 must still enter via the SciPy-prefix seam."""
         captured = {}
@@ -868,11 +901,8 @@ class TestOptimizerAdapter:
         assert int(result.status) == 0
         assert float(result.f_k) < 1e-20
 
-    @PRIVATE_OPTIMIZER_062
-    @pytest.mark.skipif(
-        jax.__version__ != "0.6.2",
-        reason="Private on-device optimizer behavior is pinned to the JAX 0.6.2 runtime.",
-    )
+    @PRIVATE_OPTIMIZER_RUNTIME
+    @REQUIRES_PRIVATE_OPTIMIZER_RUNTIME
     def test_bfgs_ondevice_rejects_nonvector_x0(self):
         """bfgs-ondevice must reject non-flat decision vectors."""
         with pytest.raises(ValueError, match="flat 1-D decision vector"):
@@ -883,11 +913,8 @@ class TestOptimizerAdapter:
                 maxiter=3,
             )
 
-    @PRIVATE_OPTIMIZER_062
-    @pytest.mark.skipif(
-        jax.__version__ != "0.6.2",
-        reason="Private on-device optimizer behavior is pinned to the JAX 0.6.2 runtime.",
-    )
+    @PRIVATE_OPTIMIZER_RUNTIME
+    @REQUIRES_PRIVATE_OPTIMIZER_RUNTIME
     def test_bfgs_ondevice_respects_zero_iteration_budget(self):
         """bfgs-ondevice must not take a step when maxiter=0."""
 
@@ -902,11 +929,8 @@ class TestOptimizerAdapter:
         assert result.status == 1
         assert result.success is False
 
-    @PRIVATE_OPTIMIZER_062
-    @pytest.mark.skipif(
-        jax.__version__ != "0.6.2",
-        reason="Private on-device optimizer behavior is pinned to the JAX 0.6.2 runtime.",
-    )
+    @PRIVATE_OPTIMIZER_RUNTIME
+    @REQUIRES_PRIVATE_OPTIMIZER_RUNTIME
     def test_bfgs_ondevice_zero_gradient_converges_immediately(self):
         """bfgs-ondevice must report success at a stationary initial point."""
 
@@ -921,11 +945,8 @@ class TestOptimizerAdapter:
         assert result.status == 0
         assert result.success is True
 
-    @PRIVATE_OPTIMIZER_062
-    @pytest.mark.skipif(
-        jax.__version__ != "0.6.2",
-        reason="Private on-device optimizer behavior is pinned to the JAX 0.6.2 runtime.",
-    )
+    @PRIVATE_OPTIMIZER_RUNTIME
+    @REQUIRES_PRIVATE_OPTIMIZER_RUNTIME
     def test_bfgs_ondevice_maxiter_one_edge_case(self):
         """bfgs-ondevice maxiter=1 must permit exactly one capped step."""
 
@@ -940,11 +961,8 @@ class TestOptimizerAdapter:
         assert result.status == 1
         assert result.success is False
 
-    @PRIVATE_OPTIMIZER_062
-    @pytest.mark.skipif(
-        jax.__version__ != "0.6.2",
-        reason="Private on-device optimizer behavior is pinned to the JAX 0.6.2 runtime.",
-    )
+    @PRIVATE_OPTIMIZER_RUNTIME
+    @REQUIRES_PRIVATE_OPTIMIZER_RUNTIME
     def test_bfgs_ondevice_nan_objective_terminates(self):
         """A NaN objective encountered mid-loop must fail without extra iterations."""
 
@@ -969,11 +987,8 @@ class TestOptimizerAdapter:
         assert np.isnan(float(result.fun))
         assert "non-finite objective or gradient" in result.message
 
-    @PRIVATE_OPTIMIZER_062
-    @pytest.mark.skipif(
-        jax.__version__ != "0.6.2",
-        reason="Private on-device optimizer behavior is pinned to the JAX 0.6.2 runtime.",
-    )
+    @PRIVATE_OPTIMIZER_RUNTIME
+    @REQUIRES_PRIVATE_OPTIMIZER_RUNTIME
     def test_bfgs_ondevice_inf_objective_preserves_last_finite_iterate(self):
         """An infinite objective must abort from the last finite iterate."""
 
@@ -999,11 +1014,8 @@ class TestOptimizerAdapter:
         assert np.all(np.isfinite(np.asarray(result.x)))
         assert np.all(np.isfinite(np.asarray(result.jac)))
 
-    @PRIVATE_OPTIMIZER_062
-    @pytest.mark.skipif(
-        jax.__version__ != "0.6.2",
-        reason="Private on-device optimizer behavior is pinned to the JAX 0.6.2 runtime.",
-    )
+    @PRIVATE_OPTIMIZER_RUNTIME
+    @REQUIRES_PRIVATE_OPTIMIZER_RUNTIME
     def test_bfgs_ondevice_is_deterministic(self):
         """Repeated on-device BFGS runs must return identical results."""
 
@@ -1344,11 +1356,8 @@ class TestLBFGSMethod:
         result = jax_minimize(obj, x0, method="lbfgs", tol=1e-10, maxiter=200)
         assert float(result.fun) < val_init
 
-    @PRIVATE_OPTIMIZER_062
-    @pytest.mark.skipif(
-        jax.__version__ != "0.6.2",
-        reason="lbfgs-ondevice budget behavior is pinned to the JAX 0.6.2 runtime.",
-    )
+    @PRIVATE_OPTIMIZER_RUNTIME
+    @REQUIRES_PRIVATE_LBFGS_BUDGET_RUNTIME
     def test_lbfgs_ondevice_respects_zero_iteration_budget(self):
         """lbfgs-ondevice must not take a step when maxiter=0."""
 
@@ -1363,11 +1372,8 @@ class TestLBFGSMethod:
         assert result.status == 1
         assert result.success is False
 
-    @PRIVATE_OPTIMIZER_062
-    @pytest.mark.skipif(
-        jax.__version__ != "0.6.2",
-        reason="lbfgs-ondevice behavior is pinned to the JAX 0.6.2 runtime.",
-    )
+    @PRIVATE_OPTIMIZER_RUNTIME
+    @REQUIRES_PRIVATE_LBFGS_RUNTIME
     def test_lbfgs_ondevice_reduces_objective_without_monkeypatch(self):
         """lbfgs-ondevice must reduce the objective through the real adapter."""
 
@@ -1382,11 +1388,8 @@ class TestLBFGSMethod:
         assert float(result.fun) < float(quad(x0))
         assert np.linalg.norm(np.asarray(result.x)) < np.linalg.norm(np.asarray(x0))
 
-    @PRIVATE_OPTIMIZER_062
-    @pytest.mark.skipif(
-        jax.__version__ != "0.6.2",
-        reason="lbfgs-ondevice behavior is pinned to the JAX 0.6.2 runtime.",
-    )
+    @PRIVATE_OPTIMIZER_RUNTIME
+    @REQUIRES_PRIVATE_LBFGS_RUNTIME
     def test_lbfgs_ondevice_repeated_calls_are_stable(self):
         """Repeated lbfgs-ondevice runs must not accumulate divergent state."""
 
@@ -1408,11 +1411,8 @@ class TestLBFGSMethod:
             assert current.status == baseline.status
             assert current.success == baseline.success
 
-    @PRIVATE_OPTIMIZER_062
-    @pytest.mark.skipif(
-        jax.__version__ != "0.6.2",
-        reason="lbfgs-ondevice behavior is pinned to the JAX 0.6.2 runtime.",
-    )
+    @PRIVATE_OPTIMIZER_RUNTIME
+    @REQUIRES_PRIVATE_LBFGS_RUNTIME
     def test_lbfgs_ondevice_ftol_zero_allows_tiny_objective_progress(self):
         """ftol=0 must still allow progress when the objective is ~1e-15."""
 
@@ -2073,7 +2073,7 @@ class TestBoozerSurfaceJAXClass:
         assert res["PLU"] is not None
         assert callable(res["vjp"])
 
-    @PRIVATE_OPTIMIZER_062
+    @PRIVATE_OPTIMIZER_RUNTIME
     def test_run_code_ondevice_limited_memory_routes_to_lbfgs(self, monkeypatch):
         """limited_memory=True must route LS solves through lbfgs-ondevice."""
         booz = _make_mock_boozer_surface()
@@ -2116,11 +2116,8 @@ class TestBoozerSurfaceJAXClass:
         assert captured["method"] == "lbfgs-ondevice"
         assert res["success"] is True
 
-    @PRIVATE_OPTIMIZER_062
-    @pytest.mark.skipif(
-        jax.__version__ != "0.6.2",
-        reason="On-device limited-memory solve is pinned to the JAX 0.6.2 runtime.",
-    )
+    @PRIVATE_OPTIMIZER_RUNTIME
+    @REQUIRES_PRIVATE_LIMITED_MEMORY_RUNTIME
     def test_run_code_ondevice_limited_memory_converges_without_monkeypatch(self):
         """limited_memory=True must run a full on-device L-BFGS solve."""
         booz = _make_mock_boozer_surface()

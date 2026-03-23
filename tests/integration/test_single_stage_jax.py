@@ -49,6 +49,7 @@ from simsopt.objectives import QuadraticPenalty  # noqa: E402
 
 from simsopt.field.biotsavart_jax_backend import BiotSavartJAX  # noqa: E402
 from simsopt.geo.boozersurface_jax import BoozerSurfaceJAX  # noqa: E402
+from simsopt.geo.optimizer_jax import PRIVATE_OPTIMIZER_JAX_VERSION  # noqa: E402
 from simsopt.geo.surfaceobjectives_jax import (  # noqa: E402
     BoozerResidualJAX,
     IotasJAX,
@@ -822,13 +823,13 @@ class TestExactPathSolve:
         )
 
 
-@pytest.mark.private_optimizer_062
+@pytest.mark.private_optimizer_runtime
 class TestOnDeviceBackendIntegration:
     """Exercise the real on-device LS solve against simsoptpp-backed fixtures."""
 
     @pytest.mark.skipif(
-        jax.__version__ != "0.6.2",
-        reason="On-device backend integration requires the pinned JAX 0.6.2 runtime.",
+        jax.__version__ != PRIVATE_OPTIMIZER_JAX_VERSION,
+        reason=f"On-device backend integration requires the validated JAX {PRIVATE_OPTIMIZER_JAX_VERSION} runtime.",
     )
     @pytest.mark.parametrize("optimizer_backend", ["ondevice", "hybrid"])
     @pytest.mark.parametrize("pass_explicit_G", [True, False])

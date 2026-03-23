@@ -4,10 +4,10 @@ CPU vs JAX Acceptance Criteria
 This document defines when the JAX code path is ready for research use
 alongside the existing CPU (simsoptpp) implementation.
 
-The current public migration target is the JAX ``0.9.2`` ``scipy`` lane.
-Private ``hybrid`` / ``ondevice`` optimizer behavior remains a separate
-JAX ``0.6.2`` validation track and is not part of these public acceptance
-gates.
+The current migration target is the JAX ``0.9.2`` runtime. The trusted public
+acceptance gates remain centered on the ``scipy`` backend. Private
+``hybrid`` / ``ondevice`` optimizer behavior remains a separate validation
+track on the same runtime and is not part of these public acceptance gates.
 
 Parity Gates
 ------------

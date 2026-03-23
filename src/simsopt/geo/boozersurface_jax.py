@@ -2,7 +2,7 @@
 Lane-aware JAX Boozer surface solver.
 
 The public/reference lane still permits host-side SciPy minimization via
-``optimizer_backend="scipy"``. The private runtime-pinned lane adds two more
+``optimizer_backend="scipy"``. The private optimizer lane adds two more
 roles:
 
 - ``optimizer_backend="hybrid"``: transitional migration path
@@ -376,7 +376,7 @@ def _resolve_ls_optimizer_method(optimizer_backend, limited_memory):
     Contract:
 
     - ``scipy``: trusted reference/oracle backend
-    - ``hybrid``: transitional backend, BFGS-only in the pinned private lane
+    - ``hybrid``: transitional backend, BFGS-only in the private optimizer lane
     - ``ondevice``: target backend for full-GPU optimizer work
     """
     return resolve_optimizer_backend_method(
