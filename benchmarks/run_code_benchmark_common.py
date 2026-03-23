@@ -63,7 +63,7 @@ def _resolve_runtime_lane(backends: tuple[str, ...]) -> str:
         return "private-optimizer"
     if PRIVATE_ONLY_BACKENDS.intersection(backends):
         return "private-optimizer"
-    return "public-scipy"
+    return "trusted-public-reference"
 
 
 def _validate_benchmark_runtime(backends: tuple[str, ...]) -> None:

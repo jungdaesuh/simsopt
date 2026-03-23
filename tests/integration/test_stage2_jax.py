@@ -14,6 +14,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import types
 
 import pytest
 import numpy as np
@@ -22,8 +23,6 @@ sopp = pytest.importorskip(
     "simsoptpp",
     reason="Stage 2 integration tests require simsoptpp (use candidate-fixed env)",
 )
-
-from scipy.optimize import minimize  # noqa: E402
 
 from simsopt.field import (  # noqa: E402
     BiotSavart,
@@ -44,6 +43,7 @@ from simsopt.geo import (  # noqa: E402
 from simsopt.objectives import SquaredFlux, QuadraticPenalty  # noqa: E402
 
 from simsopt.field.biotsavart_jax_backend import BiotSavartJAX
+from simsopt.geo.optimizer_jax import jax_minimize, resolve_optimizer_backend_method
 from simsopt.objectives.fluxobjective_jax import SquaredFluxJAX
 
 
@@ -301,8 +301,14 @@ class TestShortOptimizationRun:
                 JF.x = x
                 return JF.J(), JF.dJ()
 
-            res = minimize(
-                fun, dofs, jac=True, method="L-BFGS-B", options={"maxiter": MAXITER}
+            res = jax_minimize(
+                fun,
+                dofs,
+                method="lbfgs",
+                tol=1e-10,
+                maxiter=MAXITER,
+                options={"ftol": 0.0},
+                value_and_grad=True,
             )
             return res.fun, res.nit
 
@@ -816,3 +822,136 @@ class TestStage2BananaBoundary:
 
         assert result.returncode == 0
         assert payload["banana_curve_class"] == expected_curve_class
+
+
+class TestStage2OptimizerContract:
+    @pytest.mark.parametrize(
+        ("field_backend", "optimizer_backend", "expected_method"),
+        [
+            ("cpu", "scipy", "lbfgs"),
+            ("jax", "scipy", "lbfgs"),
+            ("jax", "ondevice", "lbfgs-ondevice"),
+        ],
+    )
+    def test_resolve_stage2_optimizer_method_contract(
+        self,
+        field_backend,
+        optimizer_backend,
+        expected_method,
+    ):
+        if field_backend != "jax" and optimizer_backend != "scipy":
+            pytest.skip("Shared optimizer backend mapping is only meaningful on the JAX lane.")
+        assert resolve_optimizer_backend_method(
+            optimizer_backend,
+            limited_memory=True,
+        ) == expected_method
+
+    def test_resolve_stage2_optimizer_method_rejects_hybrid(self):
+        with pytest.raises(
+            ValueError,
+            match="optimizer_backend='hybrid'.*limited_memory=True",
+        ):
+            resolve_optimizer_backend_method("hybrid", limited_memory=True)
+
+    def test_run_stage2_optimizer_uses_shared_adapter(
+        self,
+        monkeypatch,
+    ):
+        import simsopt.geo.optimizer_jax as optimizer_jax
+
+        captured = {}
+
+        def fake_scipy_adapter(
+            fun,
+            x0,
+            *,
+            method,
+            tol,
+            maxiter,
+            options,
+        ):
+            captured["method"] = method
+            captured["tol"] = tol
+            captured["maxiter"] = maxiter
+            captured["options"] = dict(options)
+            value, grad = fun(np.asarray(x0, dtype=float))
+            return types.SimpleNamespace(
+                x=np.asarray(x0, dtype=float),
+                fun=float(value),
+                jac=np.asarray(grad, dtype=float),
+                nit=0,
+                message="ok",
+            )
+
+        monkeypatch.setattr(
+            optimizer_jax,
+            "_scipy_minimize_value_and_grad",
+            fake_scipy_adapter,
+        )
+        def toy_fun(x):
+            return float(np.dot(x, x)), np.asarray(2.0 * x, dtype=float)
+
+        result = optimizer_jax.jax_minimize(
+            toy_fun,
+            np.asarray([1.0, -2.0], dtype=float),
+            method="lbfgs",
+            tol=1e-12,
+            maxiter=25,
+            options={"maxcor": 123, "ftol": 1e-15},
+            value_and_grad=True,
+        )
+
+        assert captured["method"] == "lbfgs"
+        assert captured["tol"] == pytest.approx(1e-12)
+        assert captured["maxiter"] == 25
+        assert captured["options"] == {"maxcor": 123, "ftol": 1e-15}
+        assert result.message == "ok"
+
+    @pytest.mark.parametrize(
+        ("backend", "optimizer_backend", "expected_error"),
+        [
+            ("cpu", "ondevice", "CPU/reference lane only supports optimizer_backend='scipy'"),
+            (
+                "jax",
+                "ondevice",
+                "Stage 2 target-lane optimizer_backend 'ondevice' is not available yet",
+            ),
+        ],
+    )
+    def test_stage2_script_rejects_unsupported_optimizer_backend_pairs(
+        self,
+        backend,
+        optimizer_backend,
+        expected_error,
+    ):
+        stage2_script = (
+            REPO_ROOT
+            / "examples"
+            / "single_stage_optimization"
+            / "STAGE_2"
+            / "banana_coil_solver.py"
+        )
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(stage2_script),
+                "--backend",
+                backend,
+                "--optimizer-backend",
+                optimizer_backend,
+                "--skip-postprocess",
+                "--nphi",
+                "31",
+                "--ntheta",
+                "16",
+                "--maxiter",
+                "0",
+            ],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+        )
+
+        assert result.returncode != 0
+        error_text = f"{result.stdout}\n{result.stderr}"
+        assert expected_error in error_text

@@ -72,6 +72,12 @@ def parse_args() -> argparse.Namespace:
         help="Short but meaningful optimizer iteration budget.",
     )
     parser.add_argument(
+        "--optimizer-backend",
+        choices=("scipy", "hybrid", "ondevice"),
+        default="scipy",
+        help="Stage 2 optimizer backend for the JAX lane.",
+    )
+    parser.add_argument(
         "--output-json",
         required=True,
         help="Path to write structured comparison results.",
@@ -131,6 +137,8 @@ def _run_stage2_case(args: argparse.Namespace, backend: str, *, platform: str) -
             "--maxiter",
             str(args.maxiter),
         ]
+        if backend == "jax":
+            command.extend(["--optimizer-backend", args.optimizer_backend])
         if args.equilibrium_path:
             command.extend(["--equilibrium-path", args.equilibrium_path])
         else:
@@ -289,9 +297,10 @@ def main() -> None:
         jaxlib,
         title="Stage 2 end-to-end comparison",
         extra={
-            "lane": resolve_probe_lane(),
+            "lane": resolve_probe_lane(optimizer_backend=args.optimizer_backend),
             "fixture": "real-stage2",
             "platform_request": args.platform,
+            "optimizer_backend": args.optimizer_backend,
             "nphi": int(args.nphi),
             "ntheta": int(args.ntheta),
             "maxiter": int(args.maxiter),

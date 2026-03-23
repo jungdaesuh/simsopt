@@ -62,7 +62,14 @@ from .label_constraints_jax import (
     toroidal_flux_jax,
     compute_G_from_currents,
 )
-from .optimizer_jax import jax_minimize, newton_polish, newton_exact
+from .optimizer_jax import (
+    VALID_OPTIMIZER_BACKENDS,
+    jax_minimize,
+    newton_exact,
+    newton_polish,
+    require_target_backend_x64,
+    resolve_optimizer_backend_method,
+)
 
 __all__ = ["BoozerSurfaceJAX"]
 
@@ -348,13 +355,6 @@ _DEFAULT_OPTIONS_EXACT = {
     "weight_inv_modB": False,
 }
 
-_VALID_OPTIMIZER_BACKENDS = frozenset({"scipy", "hybrid", "ondevice"})
-_OPTIMIZER_BACKEND_ROLE = {
-    "scipy": "reference",
-    "hybrid": "transitional",
-    "ondevice": "target",
-}
-_X64_REQUIRED_OPTIMIZER_BACKENDS = frozenset({"hybrid", "ondevice"})
 _INTERNAL_OPTIMIZER_OPTIONS = frozenset(
     {
         "hybrid_scipy_maxiter",
@@ -379,20 +379,10 @@ def _resolve_ls_optimizer_method(optimizer_backend, limited_memory):
     - ``hybrid``: transitional backend, BFGS-only in the pinned private lane
     - ``ondevice``: target backend for full-GPU optimizer work
     """
-    if optimizer_backend not in _VALID_OPTIMIZER_BACKENDS:
-        raise ValueError(
-            "optimizer_backend must be one of: scipy, hybrid, ondevice."
-        )
-    if optimizer_backend == "scipy":
-        return "lbfgs" if limited_memory else "bfgs"
-    if optimizer_backend == "hybrid":
-        if limited_memory:
-            raise ValueError(
-                "optimizer_backend='hybrid' is transitional and does not support "
-                "limited_memory=True."
-            )
-        return "bfgs-hybrid"
-    return "lbfgs-ondevice" if limited_memory else "bfgs-ondevice"
+    return resolve_optimizer_backend_method(
+        optimizer_backend,
+        limited_memory=limited_memory,
+    )
 
 
 def _x64_enabled():
@@ -401,15 +391,7 @@ def _x64_enabled():
 
 def _require_target_backend_x64(optimizer_backend):
     """Fail fast when a target-lane backend is requested without float64."""
-    if optimizer_backend not in _X64_REQUIRED_OPTIMIZER_BACKENDS:
-        return
-    if _x64_enabled():
-        return
-    role = _OPTIMIZER_BACKEND_ROLE[optimizer_backend]
-    raise RuntimeError(
-        f"optimizer_backend='{optimizer_backend}' ({role}) requires "
-        "jax_enable_x64=True before import/use."
-    )
+    require_target_backend_x64(optimizer_backend)
 
 
 def _normalize_solver_options(raw_options, boozer_type):
@@ -431,7 +413,7 @@ def _normalize_solver_options(raw_options, boozer_type):
     optimizer_backend = raw_options.get("optimizer_backend")
     if (
         optimizer_backend is not None
-        and optimizer_backend not in _VALID_OPTIMIZER_BACKENDS
+        and optimizer_backend not in VALID_OPTIMIZER_BACKENDS
     ):
         raise ValueError(
             "optimizer_backend must be one of: scipy, hybrid, ondevice."
@@ -511,7 +493,7 @@ class BoozerSurfaceJAX(Optimizable):
         )
         self.options = {**defaults, **raw_options}
         if self.boozer_type == "ls":
-            if self.options["optimizer_backend"] not in _VALID_OPTIMIZER_BACKENDS:
+            if self.options["optimizer_backend"] not in VALID_OPTIMIZER_BACKENDS:
                 raise ValueError(
                     "optimizer_backend must be one of: scipy, hybrid, ondevice."
                 )

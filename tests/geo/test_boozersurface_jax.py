@@ -1875,7 +1875,7 @@ class TestBoozerSurfaceJAXClass:
         self, monkeypatch, optimizer_backend
     ):
         """Target-lane backends must fail fast when x64 is disabled."""
-        monkeypatch.setattr(_bsj, "_x64_enabled", lambda: False)
+        monkeypatch.setattr(_opt, "_x64_enabled", lambda: False)
 
         with pytest.raises(
             RuntimeError,
@@ -1996,7 +1996,7 @@ class TestBoozerSurfaceJAXClass:
         """run_code() must fail at the public seam before target-lane execution without x64."""
         booz = _make_mock_boozer_surface()
         booz.options["optimizer_backend"] = optimizer_backend
-        monkeypatch.setattr(_bsj, "_x64_enabled", lambda: False)
+        monkeypatch.setattr(_opt, "_x64_enabled", lambda: False)
 
         with pytest.raises(
             RuntimeError,

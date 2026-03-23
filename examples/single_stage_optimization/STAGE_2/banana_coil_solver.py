@@ -5,7 +5,6 @@ import json
 import importlib.util
 
 import numpy as np
-from scipy.optimize import minimize
 from numba import njit
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -236,6 +235,19 @@ def parse_args():
         or os.environ.get("STAGE2_BACKEND", "cpu"),
         help="Field backend: 'cpu' (simsoptpp) or 'jax' (JAX Biot-Savart). "
         "Env: SIMSOPT_BACKEND (or legacy STAGE2_BACKEND).",
+    )
+    parser.add_argument(
+        "--optimizer-backend",
+        choices=["scipy", "hybrid", "ondevice"],
+        default=os.environ.get("STAGE2_OPTIMIZER_BACKEND")
+        or os.environ.get("OPTIMIZER_BACKEND", "scipy"),
+        help=(
+            "Stage 2 optimizer backend. "
+            "'scipy' is the trusted reference lane; "
+            "'ondevice' is the private full-GPU target lane. "
+            "'hybrid' is accepted for contract consistency but rejected for this "
+            "limited-memory Stage 2 path."
+        ),
     )
     return parser.parse_args()
 
@@ -533,6 +545,64 @@ def evaluate_stage2_objective(JF, new_bs, new_surf, Jf, Jls, Jccdist, Jc, bs_jax
     return snapshot, grad
 
 
+def resolve_stage2_optimizer_method(field_backend, optimizer_backend):
+    """Resolve the shared optimizer substrate for the limited-memory Stage 2 path."""
+    from simsopt.geo.optimizer_jax import (
+        require_target_backend_x64,
+        resolve_optimizer_backend_method,
+    )
+
+    if field_backend != "jax" and optimizer_backend != "scipy":
+        raise ValueError(
+            "Stage 2 CPU/reference lane only supports optimizer_backend='scipy'."
+        )
+    require_target_backend_x64(optimizer_backend)
+    return resolve_optimizer_backend_method(
+        optimizer_backend,
+        limited_memory=True,
+    )
+
+
+def run_stage2_optimizer(
+    fun,
+    dofs,
+    *,
+    field_backend,
+    optimizer_backend,
+    maxiter,
+    ftol,
+    gtol,
+    maxcor=300,
+):
+    """Run the Stage 2 outer optimization through the shared optimizer substrate."""
+    from simsopt.geo.optimizer_jax import jax_minimize
+
+    method = resolve_stage2_optimizer_method(field_backend, optimizer_backend)
+    try:
+        return jax_minimize(
+            fun,
+            dofs,
+            method=method,
+            tol=gtol,
+            maxiter=maxiter,
+            options={
+                "maxcor": int(maxcor),
+                "ftol": float(ftol),
+            },
+            value_and_grad=True,
+        )
+    except RuntimeError as exc:
+        if optimizer_backend != "scipy" and "value-and-gradient objectives" in str(exc):
+            raise RuntimeError(
+                "Stage 2 target-lane optimizer_backend "
+                f"{optimizer_backend!r} is not available yet because the composite "
+                "objective is still exposed as a Python J()/dJ() pair. Finish the "
+                "JAX-native composite objective before enabling Stage 2 ondevice "
+                "optimization."
+            ) from exc
+        raise
+
+
 def build_stage2_probe_payload(
     JF,
     new_bs,
@@ -545,6 +615,7 @@ def build_stage2_probe_payload(
     bs_jax=None,
     *,
     backend,
+    optimizer_backend,
     equilibrium_path,
     nphi,
     ntheta,
@@ -563,6 +634,7 @@ def build_stage2_probe_payload(
     flux_grad = np.asarray(Jf.dJ(), dtype=float)
     return {
         "backend": backend,
+        "optimizer_backend": optimizer_backend,
         "banana_curve_class": type(banana_curve).__name__,
         "equilibrium_path": equilibrium_path,
         "nphi": int(nphi),
@@ -592,7 +664,7 @@ def write_json_file(path, payload):
 def make_fun(JF, new_bs, new_surf, Jf, Jls, Jccdist, Jc, bs_jax=None, trajectory_sink=None):
     """Factory for the Stage 2 objective function.
 
-    Returns a closure compatible with scipy.optimize.minimize(jac=True)
+    Returns a closure compatible with ``simsopt.geo.optimizer_jax.jax_minimize``
     that captures all required state explicitly rather than from module scope.
 
     When *bs_jax* is provided the logging ⟨B·n⟩ diagnostic is computed
@@ -823,6 +895,7 @@ if __name__ == "__main__":
             Jc,
             bs_jax=new_bs_jax,
             backend=args.backend,
+            optimizer_backend=args.optimizer_backend,
             equilibrium_path=file_loc,
             nphi=nphi,
             ntheta=ntheta,
@@ -841,17 +914,15 @@ if __name__ == "__main__":
         res_nit = 0
         print("Skipping Stage 2 optimizer because --init-only was provided.")
     else:
-        res = minimize(
+        res = run_stage2_optimizer(
             fun,
             dofs,
-            jac=True,
-            method="L-BFGS-B",
-            options={
-                "maxiter": MAXITER,
-                "maxcor": 300,
-                "ftol": args.ftol,
-                "gtol": args.gtol,
-            },
+            field_backend=args.backend,
+            optimizer_backend=args.optimizer_backend,
+            maxiter=MAXITER,
+            maxcor=300,
+            ftol=args.ftol,
+            gtol=args.gtol,
         )
         res_nit = res.nit
         print(res.message)
@@ -937,6 +1008,7 @@ if __name__ == "__main__":
         "curvature_p_norm": args.curvature_p_norm,
         "squared_flux_weight": SQUARED_FLUX_WEIGHT,
         "backend": args.backend,
+        "optimizer_backend": args.optimizer_backend,
         "banana_curve_class": type(new_banana_curve).__name__,
         "init_only": args.init_only,
         "max_iterations": MAXITER,

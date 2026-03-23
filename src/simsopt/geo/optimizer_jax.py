@@ -37,10 +37,26 @@ from jax.scipy.sparse.linalg import gmres
 from scipy.optimize import OptimizeResult
 from scipy.optimize import minimize as scipy_minimize
 
-__all__ = ["jax_minimize", "newton_polish", "newton_exact"]
+__all__ = [
+    "VALID_OPTIMIZER_BACKENDS",
+    "REFERENCE_OPTIMIZER_BACKENDS",
+    "TARGET_X64_REQUIRED_OPTIMIZER_BACKENDS",
+    "jax_minimize",
+    "newton_polish",
+    "newton_exact",
+    "require_target_backend_x64",
+    "resolve_optimizer_backend_method",
+]
 
 
 _EXPECTED_JAX_VERSION = "0.6.2"
+VALID_OPTIMIZER_BACKENDS = frozenset({"scipy", "hybrid", "ondevice"})
+OPTIMIZER_BACKEND_ROLE = {
+    "scipy": "reference",
+    "hybrid": "transitional",
+    "ondevice": "target",
+}
+TARGET_X64_REQUIRED_OPTIMIZER_BACKENDS = frozenset({"hybrid", "ondevice"})
 _SUPPORTED_METHODS = {
     "bfgs",
     "lbfgs",
@@ -48,6 +64,7 @@ _SUPPORTED_METHODS = {
     "bfgs-ondevice",
     "lbfgs-ondevice",
 }
+REFERENCE_OPTIMIZER_BACKENDS = frozenset({"scipy"})
 _REFERENCE_METHODS = frozenset({"bfgs", "lbfgs"})
 
 _dot = partial(jnp.dot, precision=lax.Precision.HIGHEST)
@@ -156,6 +173,37 @@ def _require_private_optimizer_runtime(x0):
 
 def _x64_enabled():
     return bool(jnp.zeros(1).dtype == jnp.float64)
+
+
+def resolve_optimizer_backend_method(optimizer_backend, *, limited_memory):
+    """Map the public backend contract to the concrete optimizer method."""
+    if optimizer_backend not in VALID_OPTIMIZER_BACKENDS:
+        raise ValueError(
+            "optimizer_backend must be one of: scipy, hybrid, ondevice."
+        )
+    if optimizer_backend == "scipy":
+        return "lbfgs" if limited_memory else "bfgs"
+    if optimizer_backend == "hybrid":
+        if limited_memory:
+            raise ValueError(
+                "optimizer_backend='hybrid' is transitional and does not support "
+                "limited_memory=True."
+            )
+        return "bfgs-hybrid"
+    return "lbfgs-ondevice" if limited_memory else "bfgs-ondevice"
+
+
+def require_target_backend_x64(optimizer_backend):
+    """Fail fast when a target-lane backend is requested without float64."""
+    if optimizer_backend not in TARGET_X64_REQUIRED_OPTIMIZER_BACKENDS:
+        return
+    if _x64_enabled():
+        return
+    role = OPTIMIZER_BACKEND_ROLE[optimizer_backend]
+    raise RuntimeError(
+        f"optimizer_backend='{optimizer_backend}' ({role}) requires "
+        "jax_enable_x64=True before import/use."
+    )
 
 
 def _strip_internal_options(options, method):
@@ -974,7 +1022,45 @@ def _scipy_minimize(fun, x0, *, method, tol, maxiter, options):
     )
 
 
-def jax_minimize(fun, x0, *, method="bfgs", tol=1e-10, maxiter=1500, options=None):
+def _scipy_minimize_value_and_grad(fun, x0, *, method, tol, maxiter, options):
+    def scipy_fun(x_np):
+        val, grad = fun(np.asarray(x_np))
+        return float(val), np.asarray(grad, dtype=float)
+
+    stripped_options = _strip_internal_options(options, method)
+    if method == "bfgs":
+        scipy_method = "BFGS"
+        scipy_opts = {"maxiter": maxiter, "gtol": tol, **stripped_options}
+    else:
+        scipy_method = "L-BFGS-B"
+        scipy_opts = {
+            "maxiter": maxiter,
+            "gtol": tol,
+            "maxcor": 200,
+            **stripped_options,
+        }
+
+    return _normalize_scipy_result(
+        scipy_minimize(
+            scipy_fun,
+            np.asarray(x0),
+            jac=True,
+            method=scipy_method,
+            options=scipy_opts,
+        )
+    )
+
+
+def jax_minimize(
+    fun,
+    x0,
+    *,
+    method="bfgs",
+    tol=1e-10,
+    maxiter=1500,
+    options=None,
+    value_and_grad=False,
+):
     """Optimizer adapter for Boozer LS minimization.
 
     Contract by method family:
@@ -985,6 +1071,10 @@ def jax_minimize(fun, x0, *, method="bfgs", tol=1e-10, maxiter=1500, options=Non
       transitional private path for staged migration away from SciPy.
     - ``bfgs-ondevice`` / ``lbfgs-ondevice``:
       private target path for the full-GPU optimizer lane.
+
+    If ``value_and_grad=True``, ``fun`` must return ``(value, grad)`` directly.
+    That explicit value/gradient contract is currently supported only on the
+    trusted SciPy reference methods.
     """
     if method not in _SUPPORTED_METHODS:
         raise ValueError(
@@ -993,13 +1083,21 @@ def jax_minimize(fun, x0, *, method="bfgs", tol=1e-10, maxiter=1500, options=Non
 
     options = dict(options or {})
     if method in _REFERENCE_METHODS:
-        return _scipy_minimize(
+        scipy_adapter = (
+            _scipy_minimize_value_and_grad if value_and_grad else _scipy_minimize
+        )
+        return scipy_adapter(
             fun,
             x0,
             method=method,
             tol=tol,
             maxiter=maxiter,
             options=options,
+        )
+    if value_and_grad:
+        raise RuntimeError(
+            "Explicit value-and-gradient objectives are only supported on the "
+            "trusted SciPy reference methods today."
         )
 
     if method == "bfgs-ondevice":

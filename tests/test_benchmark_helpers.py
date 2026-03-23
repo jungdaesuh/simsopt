@@ -25,6 +25,7 @@ from benchmarks.benchmark_problem import (
     build_synthetic_boozer_problem,
     clone_tensor_surface,
 )
+import benchmarks.run_code_benchmark_common as run_code_benchmark_common
 from benchmarks.run_code_benchmark_common import summarize_result_fun
 from benchmarks.single_stage_init_parity import (
     DEFAULT_STAGE2_BS_PATH,
@@ -274,6 +275,22 @@ def test_resolve_probe_lane_tracks_private_optimizer_backends():
     assert resolve_probe_lane(optimizer_backend="scipy") == "trusted-public-reference"
     assert resolve_probe_lane(optimizer_backend="hybrid") == "private-optimizer"
     assert resolve_probe_lane(optimizer_backend="ondevice") == "private-optimizer"
+
+
+def test_run_code_benchmark_runtime_lane_matches_ladder_vocabulary(monkeypatch):
+    monkeypatch.setattr(
+        run_code_benchmark_common,
+        "_current_jax_version",
+        lambda: run_code_benchmark_common.PUBLIC_EXPECTED_JAX_VERSION,
+    )
+    assert (
+        run_code_benchmark_common._resolve_runtime_lane(("scipy",))
+        == "trusted-public-reference"
+    )
+    assert (
+        run_code_benchmark_common._resolve_runtime_lane(("hybrid",))
+        == "private-optimizer"
+    )
 
 
 def test_require_x64_runtime_rejects_float32_runtime():
