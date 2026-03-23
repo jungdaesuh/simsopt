@@ -104,6 +104,33 @@ def _build_ondevice_stage2_metrics(
     }
 
 
+def _build_jax_stage2_timings(
+    jax_case: dict[str, Any],
+) -> tuple[float, dict[str, float]]:
+    jax_outer_elapsed_s = float(jax_case["elapsed_s"])
+    jax_primary_elapsed_s = jax_outer_elapsed_s
+    optimizer_timings = jax_case.get("optimizer_timings")
+    if optimizer_timings is not None and "warm_run_s" in optimizer_timings:
+        jax_primary_elapsed_s = max(
+            jax_outer_elapsed_s - float(optimizer_timings["warm_run_s"]),
+            0.0,
+        )
+    timings = {
+        "jax_outer_elapsed_s": jax_outer_elapsed_s,
+        "jax_primary_elapsed_s": jax_primary_elapsed_s,
+    }
+    if optimizer_timings is None:
+        return jax_primary_elapsed_s, timings
+    timings["jax_optimizer_cold_run_s"] = float(optimizer_timings["cold_run_s"])
+    if "warm_run_s" in optimizer_timings:
+        timings["jax_optimizer_warm_run_s"] = float(optimizer_timings["warm_run_s"])
+    if "compile_overhead_s" in optimizer_timings:
+        timings["jax_optimizer_compile_overhead_s"] = float(
+            optimizer_timings["compile_overhead_s"]
+        )
+    return jax_primary_elapsed_s, timings
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Run a short Stage 2 optimization on CPU vs JAX and compare outcomes."
@@ -190,6 +217,8 @@ def _run_stage2_case(args: argparse.Namespace, backend: str, *, platform: str) -
         ]
         if backend == "jax":
             command.extend(["--optimizer-backend", args.optimizer_backend])
+            if args.optimizer_backend == "ondevice":
+                command.append("--record-warm-timings")
         if args.equilibrium_path:
             command.extend(["--equilibrium-path", args.equilibrium_path])
         else:
@@ -216,11 +245,13 @@ def _run_stage2_case(args: argparse.Namespace, backend: str, *, platform: str) -
         elapsed_s = time.perf_counter() - start
 
         results_json = find_single_file(output_root, "results.json")
+        results_payload = load_json(results_json)
         trajectory_payload = load_json(trajectory_json)
         return {
-            "results": load_json(results_json),
+            "results": results_payload,
             "trajectory": trajectory_payload["evaluations"],
             "elapsed_s": float(elapsed_s),
+            "optimizer_timings": results_payload.get("OPTIMIZER_TIMINGS"),
         }
 
 
@@ -352,6 +383,7 @@ def build_stage2_e2e_payload(
     jax_results = jax_case["results"]
     cpu_trajectory = cpu_case["trajectory"]
     jax_trajectory = jax_case["trajectory"]
+    jax_primary_elapsed_s, jax_timings = _build_jax_stage2_timings(jax_case)
 
     max_geom_abs, max_geom_rel = _max_geometry_deviation(cpu_results, jax_results)
     ondevice_metrics = _build_ondevice_stage2_metrics(cpu_results, jax_results)
@@ -374,7 +406,7 @@ def build_stage2_e2e_payload(
         "cpu_iterations": int(cpu_results["iterations"]),
         "jax_iterations": int(jax_results["iterations"]),
         "cpu_elapsed_s": float(cpu_case["elapsed_s"]),
-        "jax_elapsed_s": float(jax_case["elapsed_s"]),
+        "jax_elapsed_s": jax_primary_elapsed_s,
         "cpu_trajectory_len": len(cpu_trajectory),
         "jax_trajectory_len": len(jax_trajectory),
         "cpu_trajectory_finite": _trajectory_is_finite(cpu_trajectory),
@@ -384,12 +416,17 @@ def build_stage2_e2e_payload(
         **ondevice_metrics,
     }
     failures = evaluate_stage2_e2e_comparison(comparison)
+    timings = {
+        "cpu_outer_elapsed_s": float(cpu_case["elapsed_s"]),
+        **jax_timings,
+    }
     return {
         "provenance": provenance,
         "cpu_results": cpu_results,
         "jax_results": jax_results,
         "cpu_trajectory": cpu_trajectory,
         "jax_trajectory": jax_trajectory,
+        "timings": timings,
         "comparison": comparison,
         "failures": failures,
         "passed": not failures,
@@ -446,6 +483,14 @@ def main() -> None:
         f"field error rel_diff={comparison['field_error_rel_diff']:.2e}, "
         f"geometry rel_diff={comparison['max_geometry_pointwise_rel']:.2e}"
     )
+    if "jax_optimizer_warm_run_s" in payload["timings"]:
+        print(
+            "JAX ondevice optimizer timings: "
+            f"cold={payload['timings']['jax_optimizer_cold_run_s']:.2f}s, "
+            f"warm={payload['timings']['jax_optimizer_warm_run_s']:.2f}s, "
+            "compile_overhead~="
+            f"{payload['timings']['jax_optimizer_compile_overhead_s']:.2f}s"
+        )
 
     write_json(args.output_json, payload)
     if failures:

@@ -62,6 +62,13 @@ STAGE2_SCRIPT = (
     / "STAGE_2"
     / "banana_coil_solver.py"
 )
+WARM_TIMING_REFERENCE_LANE_ERROR = (
+    "--record-warm-timings is only supported on the JAX Stage 2 ondevice lane."
+)
+WARM_TIMING_NO_OPTIMIZATION_ERROR = (
+    "--record-warm-timings requires an actual Stage 2 optimization run and "
+    "cannot be combined with --probe-only or --init-only."
+)
 
 
 def _load_stage2_script_module():
@@ -100,6 +107,12 @@ def _run_stage2_script(*args):
         capture_output=True,
         text=True,
     )
+
+
+def _assert_stage2_script_failure(result, expected_error):
+    output = f"{result.stdout}\n{result.stderr}"
+    assert result.returncode != 0
+    assert expected_error in output
 
 
 def _build_stage2_target_objective_contract_case():
@@ -1045,9 +1058,9 @@ class TestStage2OptimizerContract:
 
         stage2_script = _load_stage2_script_module()
 
-        scipy_captured = {}
+        cpu_scipy_captured = {}
 
-        def fake_scipy_adapter(
+        def fake_scipy_value_and_grad_adapter(
             fun,
             x0,
             *,
@@ -1056,10 +1069,10 @@ class TestStage2OptimizerContract:
             maxiter,
             options,
         ):
-            scipy_captured["method"] = method
-            scipy_captured["tol"] = tol
-            scipy_captured["maxiter"] = maxiter
-            scipy_captured["options"] = dict(options)
+            cpu_scipy_captured["method"] = method
+            cpu_scipy_captured["tol"] = tol
+            cpu_scipy_captured["maxiter"] = maxiter
+            cpu_scipy_captured["options"] = dict(options)
             value, grad = fun(np.asarray(x0, dtype=float))
             return types.SimpleNamespace(
                 x=np.asarray(x0, dtype=float),
@@ -1072,29 +1085,25 @@ class TestStage2OptimizerContract:
         monkeypatch.setattr(
             optimizer_jax,
             "_scipy_minimize_value_and_grad",
-            fake_scipy_adapter,
+            fake_scipy_value_and_grad_adapter,
         )
-        def toy_fun(x):
-            return float(np.dot(x, x)), np.asarray(2.0 * x, dtype=float)
-
-        result = optimizer_jax.jax_minimize(
-            toy_fun,
+        cpu_result = stage2_script.run_stage2_optimizer(
+            lambda x: (float(np.dot(x, x)), np.asarray(2.0 * x, dtype=float)),
             np.asarray([1.0, -2.0], dtype=float),
-            method="lbfgs",
-            tol=1e-12,
+            field_backend="cpu",
+            optimizer_backend="scipy",
             maxiter=25,
-            options={"maxcor": 123, "ftol": 1e-15},
-            value_and_grad=True,
+            ftol=1e-15,
+            gtol=1e-12,
         )
 
-        assert scipy_captured["method"] == "lbfgs"
-        assert scipy_captured["tol"] == pytest.approx(1e-12)
-        assert scipy_captured["maxiter"] == 25
-        assert scipy_captured["options"] == {"maxcor": 123, "ftol": 1e-15}
-        assert result.message == "ok"
+        assert cpu_scipy_captured["method"] == "lbfgs"
+        assert cpu_scipy_captured["tol"] == pytest.approx(1e-12)
+        assert cpu_scipy_captured["maxiter"] == 25
+        assert cpu_scipy_captured["options"] == {"maxcor": 300, "ftol": 1e-15}
+        assert cpu_result.message == "ok"
 
         ondevice_captured = {}
-
         def fake_bfgs_private(
             fun,
             x0,
@@ -1139,6 +1148,165 @@ class TestStage2OptimizerContract:
         assert ondevice_captured["line_search_maxiter"] == 10
         assert ondevice_captured["initial_state"] is None
         assert target_result.message == "Optimization terminated successfully."
+
+    def test_make_fun_caches_field_diagnostics_between_stride_refreshes(
+        self,
+        monkeypatch,
+    ):
+        stage2_script = _load_stage2_script_module()
+        calls = {"jf": 0, "relbn": 0}
+
+        class DummyJF:
+            def __init__(self):
+                self.x = np.zeros(2, dtype=float)
+
+            def J(self):
+                return float(np.dot(self.x, self.x))
+
+            def dJ(self):
+                return np.asarray(2.0 * self.x, dtype=float)
+
+        class DummyScalar:
+            def __init__(self, value):
+                self._value = float(value)
+
+            def J(self):
+                return self._value
+
+        class DummyDistance:
+            def shortest_distance(self):
+                return 0.5
+
+        class DummyFlux:
+            def J(self):
+                calls["jf"] += 1
+                return 0.125
+
+        def fake_relbn(_surf, _bs):
+            calls["relbn"] += 1
+            return 0.25
+
+        monkeypatch.setattr(stage2_script, "compute_mean_abs_relbn", fake_relbn)
+
+        trajectory = []
+        fun = stage2_script.make_fun(
+            DummyJF(),
+            object(),
+            object(),
+            DummyFlux(),
+            DummyScalar(1.25),
+            DummyDistance(),
+            DummyScalar(0.75),
+            trajectory_sink=trajectory,
+            field_diagnostic_stride=10,
+        )
+
+        first_value, _ = fun(np.asarray([1.0, -2.0], dtype=float))
+        second_value, _ = fun(np.asarray([0.5, -1.0], dtype=float))
+
+        assert first_value == pytest.approx(5.0)
+        assert second_value == pytest.approx(1.25)
+        assert calls["jf"] == 1
+        assert calls["relbn"] == 1
+        assert len(trajectory) == 2
+        assert trajectory[0]["Jf"] == pytest.approx(0.125)
+        assert trajectory[1]["Jf"] == pytest.approx(0.125)
+
+    def test_stage2_script_ondevice_warm_timing_is_recorded(self):
+        with tempfile.TemporaryDirectory(prefix="stage2-ondevice-timing-") as temp_dir:
+            output_root = Path(temp_dir) / "outputs"
+            result = _run_stage2_script(
+                "--backend",
+                "jax",
+                "--optimizer-backend",
+                "ondevice",
+                "--record-warm-timings",
+                "--skip-postprocess",
+                "--nphi",
+                "31",
+                "--ntheta",
+                "16",
+                "--maxiter",
+                "0",
+                "--output-root",
+                str(output_root),
+            )
+
+            output = f"{result.stdout}\n{result.stderr}"
+            assert result.returncode == 0, output
+            results_json = next(output_root.glob("**/results.json"))
+            payload = json.loads(results_json.read_text(encoding="utf-8"))
+
+        timings = payload["OPTIMIZER_TIMINGS"]
+        assert timings["cold_run_s"] >= 0.0
+        assert timings["warm_run_s"] >= 0.0
+        assert timings["compile_overhead_s"] >= 0.0
+
+    def test_stage2_script_rejects_warm_timing_on_reference_lane(self):
+        with tempfile.TemporaryDirectory(prefix="stage2-warm-timing-invalid-") as temp_dir:
+            output_root = Path(temp_dir) / "outputs"
+            result = _run_stage2_script(
+                "--backend",
+                "jax",
+                "--optimizer-backend",
+                "scipy",
+                "--record-warm-timings",
+                "--skip-postprocess",
+                "--nphi",
+                "31",
+                "--ntheta",
+                "16",
+                "--maxiter",
+                "0",
+                "--output-root",
+                str(output_root),
+            )
+
+        _assert_stage2_script_failure(result, WARM_TIMING_REFERENCE_LANE_ERROR)
+
+    def test_stage2_script_rejects_warm_timing_without_optimization(self):
+        with tempfile.TemporaryDirectory(prefix="stage2-warm-timing-init-only-") as temp_dir:
+            output_root = Path(temp_dir) / "outputs"
+            result = _run_stage2_script(
+                "--backend",
+                "jax",
+                "--optimizer-backend",
+                "ondevice",
+                "--record-warm-timings",
+                "--init-only",
+                "--skip-postprocess",
+                "--nphi",
+                "31",
+                "--ntheta",
+                "16",
+                "--maxiter",
+                "0",
+                "--output-root",
+                str(output_root),
+            )
+
+        _assert_stage2_script_failure(result, WARM_TIMING_NO_OPTIMIZATION_ERROR)
+
+    def test_stage2_script_rejects_warm_timing_in_probe_only_mode(self):
+        with tempfile.TemporaryDirectory(prefix="stage2-warm-timing-probe-only-") as temp_dir:
+            output_root = Path(temp_dir) / "outputs"
+            result = _run_stage2_script(
+                "--backend",
+                "jax",
+                "--optimizer-backend",
+                "ondevice",
+                "--record-warm-timings",
+                "--probe-only",
+                "--skip-postprocess",
+                "--nphi",
+                "31",
+                "--ntheta",
+                "16",
+                "--output-root",
+                str(output_root),
+            )
+
+        _assert_stage2_script_failure(result, WARM_TIMING_NO_OPTIMIZATION_ERROR)
 
     def test_target_scalar_objective_matches_stage2_composite_contract(self):
         objective, target_bundle = _build_stage2_target_objective_contract_case()

@@ -3,6 +3,7 @@ import os
 import sys
 import json
 import importlib.util
+import time
 
 import numpy as np
 from numba import njit
@@ -247,6 +248,25 @@ def parse_args():
             "'ondevice' is the private full-GPU target lane. "
             "'hybrid' is accepted for contract consistency but not currently "
             "supported for the Stage 2 outer loop."
+        ),
+    )
+    parser.add_argument(
+        "--record-warm-timings",
+        action="store_true",
+        help=(
+            "After the primary JAX ondevice Stage 2 optimization run, reset to "
+            "the same initial DOFs and rerun once in-process to capture a warm "
+            "timing."
+        ),
+    )
+    parser.add_argument(
+        "--field-diagnostic-stride",
+        type=int,
+        default=int(os.environ.get("FIELD_DIAGNOSTIC_STRIDE", "0")),
+        help=(
+            "Refresh the expensive squared-flux-only and mean-|B.n|/|B| "
+            "diagnostics every N optimizer evaluations on explicit value/grad "
+            "lanes. Use 0 to select the lane default."
         ),
     )
     return parser.parse_args()
@@ -528,21 +548,38 @@ def compute_mean_abs_relbn(surf, bs):
     return float(np.sum(abs_relBfinal_norm_dA) / np.sum(surf_area))
 
 
-def evaluate_stage2_objective(JF, new_bs, new_surf, Jf, Jls, Jccdist, Jc, bs_jax=None):
+def evaluate_stage2_objective(
+    JF,
+    new_bs,
+    new_surf,
+    Jf,
+    Jls,
+    Jccdist,
+    Jc,
+    bs_jax=None,
+    *,
+    field_diagnostics=None,
+    recompute_field_diagnostics=True,
+):
     """Return composite objective diagnostics using the currently loaded DOFs."""
     J = float(JF.J())
     grad = np.asarray(JF.dJ(), dtype=float)
-    field_bs = bs_jax if bs_jax is not None else new_bs
+    if recompute_field_diagnostics or field_diagnostics is None:
+        field_bs = bs_jax if bs_jax is not None else new_bs
+        field_diagnostics = {
+            "Jf": float(Jf.J()),
+            "mean_abs_relBfinal_norm": compute_mean_abs_relbn(new_surf, field_bs),
+        }
     snapshot = {
         "J": J,
-        "Jf": float(Jf.J()),
-        "mean_abs_relBfinal_norm": compute_mean_abs_relbn(new_surf, field_bs),
+        "Jf": float(field_diagnostics["Jf"]),
+        "mean_abs_relBfinal_norm": float(field_diagnostics["mean_abs_relBfinal_norm"]),
         "curve_length": float(Jls.J()),
         "coil_coil_distance": float(Jccdist.shortest_distance()),
         "curvature": float(Jc.J()),
         "grad_norm": float(np.linalg.norm(grad)),
     }
-    return snapshot, grad
+    return snapshot, grad, field_diagnostics
 
 
 def resolve_stage2_optimizer_method(field_backend, optimizer_backend):
@@ -572,13 +609,23 @@ def resolve_stage2_optimizer_method(field_backend, optimizer_backend):
 
 
 def should_build_stage2_target_objective(field_backend, optimizer_backend):
-    """Return whether the target-lane scalar objective bundle is required."""
-    return field_backend == "jax" and optimizer_backend != "scipy"
+    """Return whether the scalar JAX Stage 2 objective should drive optimization."""
+    return field_backend == "jax" and optimizer_backend == "ondevice"
+
+
+def resolve_stage2_field_diagnostic_stride(args):
+    """Return the effective field-diagnostic refresh stride for the active lane."""
+    requested_stride = int(args.field_diagnostic_stride)
+    if requested_stride > 0:
+        return requested_stride
+    if args.backend == "jax" and args.optimizer_backend == "scipy":
+        return 10
+    return 1
 
 
 def run_stage2_optimizer(
-    value_and_grad_fun,
-    dofs,
+    value_and_grad_fun=None,
+    dofs=None,
     *,
     field_backend,
     optimizer_backend,
@@ -600,6 +647,11 @@ def run_stage2_optimizer(
         raise RuntimeError(
             "Stage 2 target-lane optimization requires a scalar JAX objective."
         )
+    if (not use_scalar_objective) and value_and_grad_fun is None:
+        raise RuntimeError(
+            "Stage 2 reference-lane optimization requires an explicit "
+            "value-and-gradient objective."
+        )
     return jax_minimize(
         scalar_fun if use_scalar_objective else value_and_grad_fun,
         dofs,
@@ -612,6 +664,34 @@ def run_stage2_optimizer(
         },
         value_and_grad=not use_scalar_objective,
     )
+
+
+def run_stage2_optimizer_timed(
+    value_and_grad_fun=None,
+    dofs=None,
+    *,
+    field_backend,
+    optimizer_backend,
+    maxiter,
+    ftol,
+    gtol,
+    maxcor=300,
+    scalar_fun=None,
+):
+    """Run the Stage 2 optimizer and return both result and elapsed time."""
+    start = time.perf_counter()
+    result = run_stage2_optimizer(
+        value_and_grad_fun,
+        dofs,
+        field_backend=field_backend,
+        optimizer_backend=optimizer_backend,
+        maxiter=maxiter,
+        ftol=ftol,
+        gtol=gtol,
+        maxcor=maxcor,
+        scalar_fun=scalar_fun,
+    )
+    return result, float(time.perf_counter() - start)
 
 
 def build_stage2_probe_payload(
@@ -632,7 +712,7 @@ def build_stage2_probe_payload(
     ntheta,
 ):
     """Serialize the initialized Stage 2 objective state for parity probes."""
-    composite_snapshot, composite_grad = evaluate_stage2_objective(
+    composite_snapshot, composite_grad, _ = evaluate_stage2_objective(
         JF,
         new_bs,
         new_surf,
@@ -697,7 +777,7 @@ def capture_stage2_trajectory_snapshot(
     bs_jax=None,
 ):
     """Evaluate and append a Stage 2 diagnostic snapshot when requested."""
-    snapshot, _ = evaluate_stage2_objective(
+    snapshot, _, _ = evaluate_stage2_objective(
         JF,
         new_bs,
         new_surf,
@@ -708,9 +788,21 @@ def capture_stage2_trajectory_snapshot(
         bs_jax=bs_jax,
     )
     append_stage2_trajectory_snapshot(trajectory_sink, snapshot)
+    return snapshot
 
 
-def make_fun(JF, new_bs, new_surf, Jf, Jls, Jccdist, Jc, bs_jax=None, trajectory_sink=None):
+def make_fun(
+    JF,
+    new_bs,
+    new_surf,
+    Jf,
+    Jls,
+    Jccdist,
+    Jc,
+    bs_jax=None,
+    trajectory_sink=None,
+    field_diagnostic_stride=1,
+):
     """Factory for the Stage 2 objective function.
 
     Returns a closure compatible with ``simsopt.geo.optimizer_jax.jax_minimize``
@@ -721,10 +813,18 @@ def make_fun(JF, new_bs, new_surf, Jf, Jls, Jccdist, Jc, bs_jax=None, trajectory
     evaluation inside the optimizer loop).
     """
     eval_counter = {"count": 0}
+    field_diagnostic_cache = {"snapshot": None}
 
     def fun(dofs):
+        next_eval = eval_counter["count"] + 1
+        recompute_field_diagnostics = (
+            field_diagnostic_cache["snapshot"] is None
+            or field_diagnostic_stride <= 1
+            or next_eval == 1
+            or next_eval % field_diagnostic_stride == 0
+        )
         JF.x = dofs
-        snapshot, grad = evaluate_stage2_objective(
+        snapshot, grad, field_diagnostic_cache["snapshot"] = evaluate_stage2_objective(
             JF,
             new_bs,
             new_surf,
@@ -733,12 +833,14 @@ def make_fun(JF, new_bs, new_surf, Jf, Jls, Jccdist, Jc, bs_jax=None, trajectory
             Jccdist,
             Jc,
             bs_jax=bs_jax,
+            field_diagnostics=field_diagnostic_cache["snapshot"],
+            recompute_field_diagnostics=recompute_field_diagnostics,
         )
-        eval_counter["count"] += 1
+        eval_counter["count"] = next_eval
         append_stage2_trajectory_snapshot(
             trajectory_sink,
             snapshot,
-            eval_index=eval_counter["count"],
+            eval_index=next_eval,
         )
         outstr = f"J={snapshot['J']:.1e}, Jf={snapshot['Jf']:.1e}, ⟨B·n⟩={snapshot['mean_abs_relBfinal_norm']:.1e}"
         outstr += f", Len={snapshot['curve_length']:.1f}m"
@@ -922,8 +1024,14 @@ if __name__ == "__main__":
     # minimize gets called, optimizes based on degrees of freedom from objective function
     dofs = JF.x
     trajectory = [] if args.trajectory_json else None
+    final_snapshot = None
+    optimizer_timings = None
     target_objective_bundle = None
-    if should_build_stage2_target_objective(args.backend, args.optimizer_backend):
+    use_scalar_objective = should_build_stage2_target_objective(
+        args.backend,
+        args.optimizer_backend,
+    )
+    if use_scalar_objective:
         target_objective_bundle = build_stage2_target_objective(
             surface=new_surf,
             tf_coils=tf_coils,
@@ -942,17 +1050,30 @@ if __name__ == "__main__":
             raise RuntimeError(
                 "Stage 2 target objective DOF layout does not match the composite objective."
             )
-    fun = make_fun(
-        JF,
-        new_bs,
-        new_surf,
-        Jf,
-        Jls,
-        Jccdist,
-        Jc,
-        bs_jax=new_bs_jax,
-        trajectory_sink=trajectory,
-    )
+    if args.record_warm_timings and not use_scalar_objective:
+        raise ValueError(
+            "--record-warm-timings is only supported on the JAX Stage 2 ondevice lane."
+        )
+    if args.record_warm_timings and (args.probe_only or args.init_only):
+        raise ValueError(
+            "--record-warm-timings requires an actual Stage 2 optimization run and "
+            "cannot be combined with --probe-only or --init-only."
+        )
+    field_diagnostic_stride = resolve_stage2_field_diagnostic_stride(args)
+    fun = None
+    if not use_scalar_objective:
+        fun = make_fun(
+            JF,
+            new_bs,
+            new_surf,
+            Jf,
+            Jls,
+            Jccdist,
+            Jc,
+            bs_jax=new_bs_jax,
+            trajectory_sink=trajectory,
+            field_diagnostic_stride=field_diagnostic_stride,
+        )
     if args.export_objective_json:
         probe_payload = build_stage2_probe_payload(
             JF,
@@ -984,7 +1105,8 @@ if __name__ == "__main__":
         res_nit = 0
         print("Skipping Stage 2 optimizer because --init-only was provided.")
     else:
-        if target_objective_bundle is not None:
+        initial_dofs = np.asarray(dofs, dtype=float).copy()
+        if use_scalar_objective:
             capture_stage2_trajectory_snapshot(
                 trajectory,
                 JF,
@@ -996,7 +1118,7 @@ if __name__ == "__main__":
                 Jc,
                 bs_jax=new_bs_jax,
             )
-        res = run_stage2_optimizer(
+        res, cold_elapsed_s = run_stage2_optimizer_timed(
             fun,
             dofs,
             field_backend=args.backend,
@@ -1013,8 +1135,8 @@ if __name__ == "__main__":
         )
         JF.x = np.asarray(res.x, dtype=float)
         res_nit = res.nit
-        if target_objective_bundle is not None:
-            capture_stage2_trajectory_snapshot(
+        if use_scalar_objective:
+            final_snapshot = capture_stage2_trajectory_snapshot(
                 trajectory,
                 JF,
                 new_bs,
@@ -1025,6 +1147,28 @@ if __name__ == "__main__":
                 Jc,
                 bs_jax=new_bs_jax,
             )
+            optimizer_timings = {
+                "cold_run_s": float(cold_elapsed_s),
+            }
+            if args.record_warm_timings:
+                JF.x = initial_dofs
+                _, warm_elapsed_s = run_stage2_optimizer_timed(
+                    None,
+                    initial_dofs,
+                    field_backend=args.backend,
+                    optimizer_backend=args.optimizer_backend,
+                    maxiter=MAXITER,
+                    maxcor=300,
+                    ftol=args.ftol,
+                    gtol=args.gtol,
+                    scalar_fun=target_objective_bundle.objective,
+                )
+                optimizer_timings["warm_run_s"] = float(warm_elapsed_s)
+                optimizer_timings["compile_overhead_s"] = max(
+                    float(cold_elapsed_s) - float(warm_elapsed_s),
+                    0.0,
+                )
+                JF.x = np.asarray(res.x, dtype=float)
         print(res.message)
     if args.trajectory_json:
         write_json_file(
@@ -1077,16 +1221,17 @@ if __name__ == "__main__":
     )
 
     # Save the results of optimization to a separate file
-    final_snapshot, _ = evaluate_stage2_objective(
-        JF,
-        new_bs,
-        new_surf,
-        Jf,
-        Jls,
-        Jccdist,
-        Jc,
-        bs_jax=new_bs_jax,
-    )
+    if final_snapshot is None:
+        final_snapshot, _, _ = evaluate_stage2_objective(
+            JF,
+            new_bs,
+            new_surf,
+            Jf,
+            Jls,
+            Jccdist,
+            Jc,
+            bs_jax=new_bs_jax,
+        )
     results = {
         "PLASMA_SURF_FILENAME": plasma_surf_filename,
         "PLASMA_SURF_PATH": file_loc,
@@ -1109,6 +1254,7 @@ if __name__ == "__main__":
         "squared_flux_weight": SQUARED_FLUX_WEIGHT,
         "backend": args.backend,
         "optimizer_backend": args.optimizer_backend,
+        "field_diagnostic_stride": int(field_diagnostic_stride),
         "banana_curve_class": type(new_banana_curve).__name__,
         "init_only": args.init_only,
         "max_iterations": MAXITER,
@@ -1124,4 +1270,6 @@ if __name__ == "__main__":
         "MAX_CURVATURE": float(np.max(new_banana_curve.kappa())),
         "FINAL_BANANA_GAMMA": np.asarray(new_banana_curve.gamma(), dtype=float).tolist(),
     }
+    if optimizer_timings is not None:
+        results["OPTIMIZER_TIMINGS"] = optimizer_timings
     write_json_file(os.path.join(OUT_DIR_ITER, "results.json"), results)

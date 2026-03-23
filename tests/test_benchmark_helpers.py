@@ -643,8 +643,13 @@ def test_stage2_e2e_payload_preserves_trajectory_and_timing_artifacts():
         "results": _stage2_e2e_results_case(
             FINAL_OBJECTIVE=1.0 + 1e-7,
             FIELD_ERROR=0.01 + 1e-7,
-            optimizer_backend="scipy",
+            optimizer_backend="ondevice",
         ),
+        "optimizer_timings": {
+            "cold_run_s": 9.5,
+            "warm_run_s": 3.25,
+            "compile_overhead_s": 6.25,
+        },
         "trajectory": [
             {
                 "J": 2.0,
@@ -679,7 +684,13 @@ def test_stage2_e2e_payload_preserves_trajectory_and_timing_artifacts():
     assert payload["cpu_trajectory"] == cpu_case["trajectory"]
     assert payload["jax_trajectory"] == jax_case["trajectory"]
     assert payload["comparison"]["cpu_elapsed_s"] == pytest.approx(12.5)
-    assert payload["comparison"]["jax_elapsed_s"] == pytest.approx(8.75)
+    assert payload["comparison"]["jax_elapsed_s"] == pytest.approx(5.5)
+    assert payload["timings"]["cpu_outer_elapsed_s"] == pytest.approx(12.5)
+    assert payload["timings"]["jax_outer_elapsed_s"] == pytest.approx(8.75)
+    assert payload["timings"]["jax_primary_elapsed_s"] == pytest.approx(5.5)
+    assert payload["timings"]["jax_optimizer_cold_run_s"] == pytest.approx(9.5)
+    assert payload["timings"]["jax_optimizer_warm_run_s"] == pytest.approx(3.25)
+    assert payload["timings"]["jax_optimizer_compile_overhead_s"] == pytest.approx(6.25)
 
 
 def test_safe_speedup_returns_ratio_for_positive_times():
