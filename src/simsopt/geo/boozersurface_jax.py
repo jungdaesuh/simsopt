@@ -1,15 +1,24 @@
 """
-JAX-native Boozer surface solver.
+Lane-aware JAX Boozer surface solver.
 
-Replaces the CPU ``BoozerSurface.run_code()`` with a pure JAX inner solve
-that keeps all computation on-device between entry and exit.
+The public/reference lane still permits host-side SciPy minimization via
+``optimizer_backend="scipy"``. The private runtime-pinned lane adds two more
+roles:
+
+- ``optimizer_backend="hybrid"``: transitional migration path
+- ``optimizer_backend="ondevice"``: target full-GPU backend
+
+This module owns the LS/exact solver routing contract. Only the
+``ondevice`` backend is intended to represent the final full-GPU optimizer
+state.
 
 Architecture (per M0 contract §5-§6):
   - Adapter pattern: ``BoozerSurfaceJAX`` inherits ``Optimizable`` and
     mirrors the CPU ``BoozerSurface`` public API.
   - The outer ``Optimizable`` dependency graph and ``need_to_run_code``
     dirty-flag semantics are preserved.
-  - Host↔device transfers happen only at the ``run_code()`` boundary.
+  - The reference lane may still cross the host/device boundary inside the LS
+    optimizer loop; removing that is part of the on-device migration.
 
 Builds on M3's composed derivative path:
   - ``_surface_geometry_from_dofs()`` for surface DOFs → geometry (SSOT)
@@ -340,6 +349,11 @@ _DEFAULT_OPTIONS_EXACT = {
 }
 
 _VALID_OPTIMIZER_BACKENDS = frozenset({"scipy", "hybrid", "ondevice"})
+_OPTIMIZER_BACKEND_ROLE = {
+    "scipy": "reference",
+    "hybrid": "transitional",
+    "ondevice": "target",
+}
 _INTERNAL_OPTIMIZER_OPTIONS = frozenset(
     {
         "hybrid_scipy_maxiter",
@@ -353,6 +367,31 @@ _INTERNAL_OPTIMIZER_OPTIONS = frozenset(
 )
 _ALLOWED_OPTIONS_LS = frozenset(_DEFAULT_OPTIONS_LS) | _INTERNAL_OPTIMIZER_OPTIONS
 _ALLOWED_OPTIONS_EXACT = frozenset(_DEFAULT_OPTIONS_EXACT) | {"optimizer_backend"}
+
+
+def _resolve_ls_optimizer_method(optimizer_backend, limited_memory):
+    """Map the public LS backend contract to the concrete optimizer method.
+
+    Contract:
+
+    - ``scipy``: trusted reference/oracle backend
+    - ``hybrid``: transitional backend, BFGS-only in the pinned private lane
+    - ``ondevice``: target backend for full-GPU optimizer work
+    """
+    if optimizer_backend not in _VALID_OPTIMIZER_BACKENDS:
+        raise ValueError(
+            "optimizer_backend must be one of: scipy, hybrid, ondevice."
+        )
+    if optimizer_backend == "scipy":
+        return "lbfgs" if limited_memory else "bfgs"
+    if optimizer_backend == "hybrid":
+        if limited_memory:
+            raise ValueError(
+                "optimizer_backend='hybrid' is transitional and does not support "
+                "limited_memory=True."
+            )
+        return "bfgs-hybrid"
+    return "lbfgs-ondevice" if limited_memory else "bfgs-ondevice"
 
 
 def _normalize_solver_options(raw_options, boozer_type):
@@ -403,6 +442,9 @@ class BoozerSurfaceJAX(Optimizable):
         constraint_weight: penalty weight.  If ``None``, BoozerExact
             path is used; otherwise BoozerLS.
         options: dict of solver options (see ``_DEFAULT_OPTIONS_*``).
+            For LS solves, ``optimizer_backend="scipy"`` is the trusted
+            reference lane, ``"hybrid"`` is the transitional migration lane,
+            and ``"ondevice"`` is the full-GPU target backend.
     """
 
     def __init__(
@@ -633,16 +675,7 @@ class BoozerSurfaceJAX(Optimizable):
         )
 
         optimizer_backend = self.options["optimizer_backend"]
-        if optimizer_backend == "scipy":
-            method = "lbfgs" if limited_memory else "bfgs"
-        elif optimizer_backend == "hybrid":
-            if limited_memory:
-                raise ValueError(
-                    "optimizer_backend='hybrid' does not support limited_memory=True."
-                )
-            method = "bfgs-hybrid"
-        else:
-            method = "lbfgs-ondevice" if limited_memory else "bfgs-ondevice"
+        method = _resolve_ls_optimizer_method(optimizer_backend, limited_memory)
 
         optimizer_options = {}
         for key in (

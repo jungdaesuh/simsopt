@@ -1,12 +1,14 @@
 """
 JAX optimizer adapter for the Boozer inner solve.
 
-Public methods:
-  - ``method="bfgs"``: SciPy BFGS loop with JAX value/grad.
-  - ``method="lbfgs"``: SciPy L-BFGS-B loop with JAX value/grad.
+Reference/oracle methods:
+  - ``method="bfgs"``: host-driven SciPy BFGS loop with JAX value/grad.
+  - ``method="lbfgs"``: host-driven SciPy L-BFGS-B loop with JAX value/grad.
 
-Internal methods (runtime-pinned to JAX 0.6.2):
+Transitional private method (runtime-pinned to JAX 0.6.2):
   - ``method="bfgs-hybrid"``: SciPy BFGS prefix, then JAX on-device BFGS.
+
+Target private methods (runtime-pinned to JAX 0.6.2):
   - ``method="bfgs-ondevice"``: JAX on-device BFGS.
   - ``method="lbfgs-ondevice"``: JAX on-device L-BFGS.
 
@@ -46,6 +48,7 @@ _SUPPORTED_METHODS = {
     "bfgs-ondevice",
     "lbfgs-ondevice",
 }
+_REFERENCE_METHODS = frozenset({"bfgs", "lbfgs"})
 
 _dot = partial(jnp.dot, precision=lax.Precision.HIGHEST)
 _einsum = partial(jnp.einsum, precision=lax.Precision.HIGHEST)
@@ -968,14 +971,24 @@ def _scipy_minimize(fun, x0, *, method, tol, maxiter, options):
 
 
 def jax_minimize(fun, x0, *, method="bfgs", tol=1e-10, maxiter=1500, options=None):
-    """Optimizer adapter for Boozer LS minimization."""
+    """Optimizer adapter for Boozer LS minimization.
+
+    Contract by method family:
+
+    - ``bfgs`` / ``lbfgs``:
+      trusted reference/oracle path using host-side SciPy loops.
+    - ``bfgs-hybrid``:
+      transitional private path for staged migration away from SciPy.
+    - ``bfgs-ondevice`` / ``lbfgs-ondevice``:
+      private target path for the full-GPU optimizer lane.
+    """
     if method not in _SUPPORTED_METHODS:
         raise ValueError(
             f"Unknown method {method!r}. Supported: {sorted(_SUPPORTED_METHODS)}."
         )
 
     options = dict(options or {})
-    if method in {"bfgs", "lbfgs"}:
+    if method in _REFERENCE_METHODS:
         return _scipy_minimize(
             fun,
             x0,

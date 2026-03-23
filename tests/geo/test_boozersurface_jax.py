@@ -96,6 +96,7 @@ newton_exact = _opt.newton_exact
 _boozer_penalty_objective = _bsj._boozer_penalty_objective
 _boozer_exact_coil_vjp = _bsj._boozer_exact_coil_vjp
 _boozer_ls_coil_vjp = _bsj._boozer_ls_coil_vjp
+_resolve_ls_optimizer_method = _bsj._resolve_ls_optimizer_method
 BoozerSurfaceJAX = _bsj.BoozerSurfaceJAX
 _ensure_solved_jax = _soj._ensure_solved
 _resolved_boozer_G_jax = _soj._resolved_boozer_G
@@ -1837,6 +1838,37 @@ class TestBoozerSurfaceJAXClass:
         assert booz.options["maxgrad"] == 101
         assert booz.options["maxls"] == 13
 
+    @pytest.mark.parametrize(
+        ("optimizer_backend", "limited_memory", "expected_method"),
+        [
+            ("scipy", False, "bfgs"),
+            ("scipy", True, "lbfgs"),
+            ("hybrid", False, "bfgs-hybrid"),
+            ("ondevice", False, "bfgs-ondevice"),
+            ("ondevice", True, "lbfgs-ondevice"),
+        ],
+    )
+    def test_resolve_ls_optimizer_method_contract(
+        self, optimizer_backend, limited_memory, expected_method
+    ):
+        """LS backend contract must route to the expected optimizer method."""
+        assert (
+            _resolve_ls_optimizer_method(optimizer_backend, limited_memory)
+            == expected_method
+        )
+
+    def test_resolve_ls_optimizer_method_rejects_hybrid_limited_memory(self):
+        """Hybrid is transitional and must stay BFGS-only."""
+        with pytest.raises(
+            ValueError, match="optimizer_backend='hybrid'.*limited_memory=True"
+        ):
+            _resolve_ls_optimizer_method("hybrid", True)
+
+    def test_resolve_ls_optimizer_method_rejects_invalid_backend(self):
+        """Invalid backend names must fail instead of silently falling through."""
+        with pytest.raises(ValueError, match="optimizer_backend must be one of"):
+            _resolve_ls_optimizer_method("bogus", False)
+
     def test_recompute_bell(self):
         """recompute_bell sets the dirty flag."""
         booz = _make_mock_boozer_surface()
@@ -1863,12 +1895,85 @@ class TestBoozerSurfaceJAXClass:
         assert "hessian" in res
         assert "PLU" in res
         assert "vjp" in res
+
+    @pytest.mark.parametrize(
+        ("optimizer_backend", "limited_memory", "expected_method"),
+        [
+            ("scipy", False, "bfgs"),
+            ("scipy", True, "lbfgs"),
+            ("hybrid", False, "bfgs-hybrid"),
+            ("ondevice", False, "bfgs-ondevice"),
+            ("ondevice", True, "lbfgs-ondevice"),
+        ],
+    )
+    def test_run_code_routes_backend_contract_to_expected_method(
+        self, monkeypatch, optimizer_backend, limited_memory, expected_method
+    ):
+        """run_code() must honor the documented backend contract."""
+        booz = _make_mock_boozer_surface()
+        booz.options["optimizer_backend"] = optimizer_backend
+        booz.options["limited_memory"] = limited_memory
+
+        captured = {}
+
+        def fake_jax_minimize(fun, x0, *, method, tol, maxiter, options):
+            del fun, tol, maxiter, options
+            captured["method"] = method
+            return types.SimpleNamespace(
+                x=jnp.asarray(x0),
+                fun=0.0,
+                jac=jnp.zeros_like(x0),
+                nit=0,
+                nfev=1,
+                njev=1,
+                success=True,
+                status=0,
+            )
+
+        def fake_newton_polish(_objective_fn, x0, *, maxiter, tol, stab):
+            del maxiter, tol, stab
+            n = x0.shape[0]
+            return {
+                "x": x0,
+                "fun": jnp.asarray(0.0),
+                "grad": jnp.zeros_like(x0),
+                "hessian": jnp.eye(n, dtype=x0.dtype),
+                "nit": 0,
+                "success": True,
+            }
+
+        monkeypatch.setattr(_bsj, "jax_minimize", fake_jax_minimize)
+        monkeypatch.setattr(_bsj, "newton_polish", fake_newton_polish)
+
+        res = booz.run_code(iota=0.3, G=0.05)
+
+        assert captured["method"] == expected_method
+        assert res["success"] is True
         assert isinstance(res["PLU"], tuple)
         assert len(res["PLU"]) == 3
         assert all(piece is not None for piece in res["PLU"])
         assert callable(res["vjp"])
         assert "iota" in res
         assert booz.need_to_run_code is False
+
+    def test_run_code_rejects_hybrid_limited_memory_at_public_seam(self):
+        """run_code() must reject the unsupported hybrid + limited-memory pair."""
+        booz = _make_mock_boozer_surface()
+        booz.options["optimizer_backend"] = "hybrid"
+        booz.options["limited_memory"] = True
+
+        with pytest.raises(
+            ValueError, match="optimizer_backend='hybrid'.*limited_memory=True"
+        ):
+            booz.run_code(iota=0.3, G=0.05)
+
+    def test_run_code_rejects_invalid_backend_after_options_mutation(self):
+        """Mutable option dicts must not permit silent fallback to ondevice."""
+        booz = _make_mock_boozer_surface()
+        booz.options["optimizer_backend"] = "bogus"
+
+        with pytest.raises(ValueError, match="optimizer_backend must be one of"):
+            booz.run_code(iota=0.3, G=0.05)
 
     def test_run_code_ls_converges_with_stellsym_surface(self):
         """LS solve must also converge when the surface uses stellsym DOFs."""
