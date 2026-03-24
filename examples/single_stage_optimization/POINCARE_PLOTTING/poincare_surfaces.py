@@ -1,4 +1,5 @@
 import glob
+import json
 import os
 
 # SIMSOPT imports
@@ -6,7 +7,42 @@ from simsopt._core.optimizable import load
 from simsopt.field import InterpolatedField
 from simsopt.field import compute_fieldlines
 import numpy as np
-from simsopt.field import MaxZStoppingCriterion, MinZStoppingCriterion, MaxRStoppingCriterion, MinRStoppingCriterion
+from simsopt.field import (
+    LevelsetStoppingCriterion,
+    MaxZStoppingCriterion,
+    MinZStoppingCriterion,
+    MaxRStoppingCriterion,
+    MinRStoppingCriterion,
+)
+from simsopt.geo import SurfaceClassifier
+
+
+def _closed_rz(cross_section):
+    """Convert a Cartesian cross-section to closed (R, Z) arrays."""
+    r = np.sqrt(cross_section[:, 0] ** 2 + cross_section[:, 1] ** 2)
+    z = cross_section[:, 2]
+    return np.append(r, r[0]), np.append(z, z[0])
+
+
+def _midplane_seed_radii(surf, nfieldlines, inset_fraction=0.05, min_inset=0.01):
+    """Seed field lines slightly inside the phi=0 midplane cross-section."""
+    cross_section = surf.cross_section(phi=0.0, thetas=512)
+    r = np.sqrt(cross_section[:, 0] ** 2 + cross_section[:, 1] ** 2)
+    z = cross_section[:, 2]
+    midplane = np.argsort(np.abs(z))[:8]
+    r_mid = np.sort(r[midplane])
+    rin = r_mid[0]
+    rout = r_mid[-1]
+    span = rout - rin
+    inset = min(max(inset_fraction * span, min_inset), 0.45 * span)
+    return np.linspace(rin + inset, rout - inset, nfieldlines)
+
+
+def _padded_bounds(rmin, rmax, zmax, radial_padding_fraction=0.05, axial_padding_fraction=0.05):
+    """Add a modest interpolation buffer around the validation surface bounds."""
+    rpad = max(radial_padding_fraction * (rmax - rmin), 0.02)
+    zpad = max(axial_padding_fraction * zmax, 0.01)
+    return max(0.0, rmin - rpad), rmax + rpad, zmax + zpad
 
 
 def plot_poincare_data(fieldlines_phi_hits, phis, filename, mark_lost=False, aspect='equal', dpi=600, xlims=None,
@@ -64,15 +100,13 @@ def plot_poincare_data(fieldlines_phi_hits, phis, filename, mark_lost=False, asp
         # if passed a surface, plot the plasma surface outline
         if surf is not None:
             phi_new = phis[i] * 1 / (2 * np.pi)
-            cross_section = surf.cross_section(phi=phi_new)
-            r_interp = np.sqrt(cross_section[:, 0] ** 2 + cross_section[:, 1] ** 2)
-            z_interp = cross_section[:, 2]
+            cross_section = surf.cross_section(phi=phi_new, thetas=256)
+            r_interp, z_interp = _closed_rz(cross_section)
             axs[row, col].plot(r_interp, z_interp, linewidth=1, c='k')
         if surf1 is not None:
             phi_new = phis[i] * 1 / (2 * np.pi)
-            cross_section = surf1.cross_section(phi=phi_new)
-            r_interp = np.sqrt(cross_section[:, 0] ** 2 + cross_section[:, 1] ** 2)
-            z_interp = cross_section[:, 2]
+            cross_section = surf1.cross_section(phi=phi_new, thetas=256)
+            r_interp, z_interp = _closed_rz(cross_section)
             axs[row, col].plot(r_interp, z_interp, linewidth=1, c='r')
 
     # Hide unused subplots for non-square phi counts
@@ -84,6 +118,93 @@ def plot_poincare_data(fieldlines_phi_hits, phis, filename, mark_lost=False, asp
     plt.close()
 
 
+def _phi_hit_counts(fieldlines_phi_hits, phis):
+    """Summarize how many Poincare hits were recorded on each phi plane."""
+    return [
+        int(sum(np.sum(fieldline[:, 1] == i) for fieldline in fieldlines_phi_hits))
+        for i in range(len(phis))
+    ]
+
+
+def _stop_reason(stop_index, stop_labels):
+    if 0 <= stop_index < len(stop_labels):
+        return stop_labels[stop_index]
+    return f"stop_{stop_index}"
+
+
+def _toroidal_angle(x, y):
+    return float(np.mod(np.arctan2(y, x), 2 * np.pi))
+
+
+def _trace_metrics(fieldlines_tys, fieldlines_phi_hits, phis, stop_labels, mode):
+    nfieldlines = len(fieldlines_tys)
+    hit_counts = _phi_hit_counts(fieldlines_phi_hits, phis)
+    line_metrics = []
+    stop_reason_counts = {label: 0 for label in stop_labels}
+    survived = 0
+    earliest_exit = None
+
+    for seed_index, (history, hits) in enumerate(zip(fieldlines_tys, fieldlines_phi_hits)):
+        negative_hits = hits[hits[:, 1] < 0]
+        first_stop = negative_hits[0] if negative_hits.size else None
+        per_phi_counts = [int(np.sum(hits[:, 1] == i)) for i in range(len(phis))]
+        final_time = float(history[-1, 0]) if len(history) else None
+
+        if first_stop is None:
+            survived += 1
+            line_metrics.append(
+                {
+                    "seed_index": seed_index,
+                    "survived": True,
+                    "final_time": final_time,
+                    "phi_hit_counts": per_phi_counts,
+                    "stop_reason": None,
+                    "first_exit_time": None,
+                    "first_exit_angle": None,
+                }
+            )
+            continue
+
+        stop_index = int(-first_stop[1]) - 1
+        stop_reason = _stop_reason(stop_index, stop_labels)
+        stop_reason_counts.setdefault(stop_reason, 0)
+        stop_reason_counts[stop_reason] += 1
+
+        exit_time = float(first_stop[0])
+        exit_angle = _toroidal_angle(first_stop[2], first_stop[3])
+        line_metric = {
+            "seed_index": seed_index,
+            "survived": False,
+            "final_time": exit_time,
+            "phi_hit_counts": per_phi_counts,
+            "stop_reason": stop_reason,
+            "first_exit_time": exit_time,
+            "first_exit_angle": exit_angle,
+        }
+        line_metrics.append(line_metric)
+
+        if earliest_exit is None or exit_time < earliest_exit["first_exit_time"]:
+            earliest_exit = line_metric
+
+    survival_fraction = survived / nfieldlines if nfieldlines else 0.0
+    if mode == "validation":
+        validation_status = "validated" if survived == nfieldlines else "fails_validation"
+    else:
+        validation_status = "diagnostic_only"
+
+    return {
+        "mode": mode,
+        "nfieldlines": nfieldlines,
+        "survived_lines": survived,
+        "survival_fraction": survival_fraction,
+        "per_phi_hit_counts": hit_counts,
+        "stop_reason_counts": stop_reason_counts,
+        "first_exit": earliest_exit,
+        "validation_status": validation_status,
+        "line_metrics": line_metrics,
+    }
+
+
 
 if __name__ == "__main__":
     nfieldlines = 50 # Number of field lines for integration 
@@ -92,7 +213,7 @@ if __name__ == "__main__":
     interpolate = True # If True, then the BiotSavart magnetic field is interpolated 
                        # on a grid for the magnetic field evaluation
     nr = 20 # Number of radial points for interpolation
-    nphi = 10 # Number of toroidal angle points for interpolation
+    nphi = 40 # Number of toroidal angle points for interpolation
     nz = 10 # Number of vertical points for interpolation
     degree = 3 # Degree for interpolation
 
@@ -118,24 +239,22 @@ if __name__ == "__main__":
     if has_opt:
         bs = load(opt_bs_path)
         surf = load(opt_surf_path)
-        surf_extended = load(opt_surf_path)
         field_label = "opt"
         print(f"Loaded OPTIMIZED field + surface")
     else:
         bs = load(init_bs_path)
         surf = load(init_surf_path)
-        surf_extended = load(init_surf_path)
         field_label = "init"
         if os.path.exists(opt_bs_path) != os.path.exists(opt_surf_path):
             print(f"WARNING: mismatched opt files (bs={os.path.exists(opt_bs_path)}, surf={os.path.exists(opt_surf_path)}). Using init for both.")
         else:
             print(f"Loaded INITIAL field + surface (no opt found)")
-    surf_extended.extend_via_normal(0.05)
 
-    # Use extended surface to determine initial conditions
-    gamma = surf_extended.gamma()
-    R = np.sqrt(gamma[:,:,0]**2 + gamma[:,:,1]**2)
-    Z = gamma[:,:,2]
+    # Use the actual Boozer surface for validation launches so the plotted
+    # field-line family does not artificially extend beyond the black outline.
+    gamma = surf.gamma()
+    R = np.sqrt(gamma[:, :, 0]**2 + gamma[:, :, 1]**2)
+    Z = gamma[:, :, 2]
 
     nfp = 5
 
@@ -143,32 +262,123 @@ if __name__ == "__main__":
     Rmax = np.max(R)
     Zmax = np.max(Z)
 
-    # Sets stopping criteria for the poincare calculation
-    stop_crit = [MaxZStoppingCriterion(Zmax*1.05), MinZStoppingCriterion(-Zmax*1.05), MinRStoppingCriterion(Rmin*0.95), MaxRStoppingCriterion(Rmax*1.05)]
+    sc_fieldline = SurfaceClassifier(surf, h=0.03, p=2)
+
+    # Keep a loose outer box as a shared guardrail. The validation plot adds
+    # a surface-exit stop, while the diagnostic plot traces within this box
+    # only so edge behavior remains visible.
+    stop_crit_box = [
+        MaxZStoppingCriterion(Zmax * 1.05),
+        MinZStoppingCriterion(-Zmax * 1.05),
+        MinRStoppingCriterion(Rmin * 0.95),
+        MaxRStoppingCriterion(Rmax * 1.05),
+    ]
+    stop_crit_validation = [LevelsetStoppingCriterion(sc_fieldline.dist)] + stop_crit_box
+    stop_labels_validation = [
+        "surface_exit",
+        "max_z_guardrail",
+        "min_z_guardrail",
+        "min_r_guardrail",
+        "max_r_guardrail",
+    ]
+    stop_labels_diagnostic = [
+        "max_z_guardrail",
+        "min_z_guardrail",
+        "min_r_guardrail",
+        "max_r_guardrail",
+    ]
 
 
     def trace_fieldlines(bfield):
-        # Set up initial conditions for field line tracing 
-        R0 = np.linspace(Rmin, Rmax, nfieldlines)
+        # Seed from the midplane slightly inside the surface so any outward
+        # excursion is meaningful rather than an artifact of boundary seeding.
+        R0 = _midplane_seed_radii(surf, nfieldlines)
         Z0 = np.zeros((nfieldlines,))
         phis = [(i/4)*(2*np.pi/nfp) for i in range(4)]
-        fieldlines_tys, fieldlines_phi_hits = compute_fieldlines(
-            bfield, R0, Z0, tmax=tmax_fl, tol=tol,
-            phis=phis, stopping_criteria=stop_crit)
-        # Main field line tracing
-        plot_poincare_data(fieldlines_phi_hits, phis, OUT_DIR + f'/PoincarePlot_{field_label}.png', dpi=600, surf=surf, mark_lost=False)
-        print(f"Saved: PoincarePlot_{field_label}.png")
-        return fieldlines_phi_hits
 
-    # Determine range for measuring field line data points
-    rrange = (Rmin, Rmax, nr)
+        def trace_and_plot(stopping_criteria, stop_labels, suffix, label, mode):
+            fieldlines_tys, fieldlines_phi_hits = compute_fieldlines(
+                bfield,
+                R0,
+                Z0,
+                tmax=tmax_fl,
+                tol=tol,
+                phis=phis,
+                stopping_criteria=stopping_criteria,
+            )
+            metrics = _trace_metrics(
+                fieldlines_tys,
+                fieldlines_phi_hits,
+                phis,
+                stop_labels,
+                mode,
+            )
+            filename = OUT_DIR + f'/PoincarePlot_{field_label}{suffix}.png'
+            plot_poincare_data(
+                fieldlines_phi_hits,
+                phis,
+                filename,
+                dpi=600,
+                surf=surf,
+                mark_lost=False,
+            )
+            print(
+                f"Saved: {os.path.basename(filename)} "
+                f"({label}; phi hit counts={metrics['per_phi_hit_counts']}; "
+                f"status={metrics['validation_status']}; "
+                f"survival={metrics['survived_lines']}/{metrics['nfieldlines']})"
+            )
+            metrics["plot_filename"] = os.path.basename(filename)
+            return metrics
+
+        validation_metrics = trace_and_plot(
+            stop_crit_validation,
+            stop_labels_validation,
+            "",
+            "validation: stop on Boozer-surface exit",
+            "validation",
+        )
+        diagnostic_metrics = trace_and_plot(
+            stop_crit_box,
+            stop_labels_diagnostic,
+            "_diagnostic",
+            "diagnostic: box-bounded only",
+            "diagnostic",
+        )
+        metrics_path = os.path.join(OUT_DIR, f"PoincareMetrics_{field_label}.json")
+        artifact = {
+            "field_label": field_label,
+            "nfieldlines": nfieldlines,
+            "tmax": tmax_fl,
+            "tol": tol,
+            "phis": [float(phi) for phi in phis],
+            "validation": validation_metrics,
+            "diagnostic": diagnostic_metrics,
+            "validation_status": validation_metrics["validation_status"],
+        }
+        with open(metrics_path, "w", encoding="utf-8") as f:
+            json.dump(artifact, f, indent=2)
+        print(f"Saved: {os.path.basename(metrics_path)}")
+        return artifact
+
+    # Determine interpolation bounds independently from the validation surface
+    # so the field interpolant is not clipped at the exact Boozer outline.
+    interp_rmin, interp_rmax, interp_zmax = _padded_bounds(Rmin, Rmax, Zmax)
+    rrange = (interp_rmin, interp_rmax, nr)
     phirange = (0, 2*np.pi/nfp, nphi)
     # exploit stellarator symmetry and only consider positive z values:
-    zrange = (0, Zmax, nz)
+    zrange = (0, interp_zmax, nz)
 
     if interpolate:
         bsh = InterpolatedField(
-            bs, degree, rrange, phirange, zrange, True, nfp=nfp, stellsym=True
+            bs,
+            degree,
+            rrange,
+            phirange,
+            zrange,
+            True,
+            nfp=nfp,
+            stellsym=True,
         )
 
         bsh.set_points(surf.gamma().reshape((-1, 3)))
@@ -179,6 +389,4 @@ if __name__ == "__main__":
     else:
         bsh = bs
 
-    hits = trace_fieldlines(bsh)
-
-
+    trace_fieldlines(bsh)
