@@ -269,6 +269,14 @@ def parse_args():
             "lanes. Use 0 to select the lane default."
         ),
     )
+    parser.add_argument(
+        "--profile-step-json",
+        default=None,
+        help=(
+            "Write a one-step explicit Stage 2 objective breakdown JSON. "
+            "Supported on reference/value-and-gradient lanes only."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -548,6 +556,30 @@ def compute_mean_abs_relbn(surf, bs):
     return float(np.sum(abs_relBfinal_norm_dA) / np.sum(surf_area))
 
 
+def resolve_stage2_field_bs(new_bs, bs_jax):
+    return bs_jax if bs_jax is not None else new_bs
+
+
+def time_stage2_callback(callback):
+    start = time.perf_counter()
+    callback()
+    return float(time.perf_counter() - start)
+
+
+def compute_stage2_diagnostics(
+    new_bs,
+    new_surf,
+    Jf,
+    *,
+    bs_jax=None,
+):
+    field_bs = resolve_stage2_field_bs(new_bs, bs_jax)
+    return {
+        "Jf": float(Jf.J()),
+        "mean_abs_relBfinal_norm": compute_mean_abs_relbn(new_surf, field_bs),
+    }
+
+
 def evaluate_stage2_objective(
     JF,
     new_bs,
@@ -558,28 +590,96 @@ def evaluate_stage2_objective(
     Jc,
     bs_jax=None,
     *,
-    field_diagnostics=None,
-    recompute_field_diagnostics=True,
+    diagnostics=None,
+    recompute_diagnostics=True,
 ):
     """Return composite objective diagnostics using the currently loaded DOFs."""
     J = float(JF.J())
     grad = np.asarray(JF.dJ(), dtype=float)
-    if recompute_field_diagnostics or field_diagnostics is None:
-        field_bs = bs_jax if bs_jax is not None else new_bs
-        field_diagnostics = {
-            "Jf": float(Jf.J()),
-            "mean_abs_relBfinal_norm": compute_mean_abs_relbn(new_surf, field_bs),
-        }
+    if recompute_diagnostics or diagnostics is None:
+        diagnostics = compute_stage2_diagnostics(
+            new_bs,
+            new_surf,
+            Jf,
+            bs_jax=bs_jax,
+        )
     snapshot = {
         "J": J,
-        "Jf": float(field_diagnostics["Jf"]),
-        "mean_abs_relBfinal_norm": float(field_diagnostics["mean_abs_relBfinal_norm"]),
+        "Jf": float(diagnostics["Jf"]),
+        "mean_abs_relBfinal_norm": float(diagnostics["mean_abs_relBfinal_norm"]),
         "curve_length": float(Jls.J()),
         "coil_coil_distance": float(Jccdist.shortest_distance()),
         "curvature": float(Jc.J()),
         "grad_norm": float(np.linalg.norm(grad)),
     }
-    return snapshot, grad, field_diagnostics
+    return snapshot, grad, diagnostics
+
+
+def profile_stage2_explicit_step(
+    JF,
+    new_bs,
+    new_surf,
+    Jf,
+    Jls,
+    Jccdist,
+    Jc,
+    *,
+    bs_jax=None,
+):
+    """Return a one-step timing breakdown for the explicit Stage 2 objective."""
+    objective_path_timings = {
+        "JF_J_s": time_stage2_callback(JF.J),
+        "JF_dJ_s": time_stage2_callback(JF.dJ),
+    }
+
+    start = time.perf_counter()
+    snapshot, gradient, _ = evaluate_stage2_objective(
+        JF,
+        new_bs,
+        new_surf,
+        Jf,
+        Jls,
+        Jccdist,
+        Jc,
+        bs_jax=bs_jax,
+    )
+    observed_step_total_s = float(time.perf_counter() - start)
+
+    field_bs = resolve_stage2_field_bs(new_bs, bs_jax)
+    extra_diagnostic_callbacks = (
+        ("Jf_J_s", lambda: float(Jf.J())),
+        ("mean_abs_relBfinal_norm_s", lambda: compute_mean_abs_relbn(new_surf, field_bs)),
+        ("curve_length_s", lambda: float(Jls.J())),
+        ("coil_coil_distance_s", lambda: float(Jccdist.shortest_distance())),
+        ("curvature_s", lambda: float(Jc.J())),
+    )
+    extra_diagnostic_timings = {}
+    for name, callback in extra_diagnostic_callbacks:
+        extra_diagnostic_timings[name] = time_stage2_callback(callback)
+
+    extra_diagnostic_total_s = float(sum(extra_diagnostic_timings.values()))
+    dominant_extra_diagnostics = sorted(
+        (
+            {
+                "name": name,
+                "elapsed_s": elapsed_s,
+                "share": (elapsed_s / extra_diagnostic_total_s)
+                if extra_diagnostic_total_s > 0.0
+                else 0.0,
+            }
+            for name, elapsed_s in extra_diagnostic_timings.items()
+        ),
+        key=lambda item: item["elapsed_s"],
+        reverse=True,
+    )
+    return {
+        "objective_path_timings_s": objective_path_timings,
+        "observed_step_total_s": observed_step_total_s,
+        "extra_diagnostic_timings_s": extra_diagnostic_timings,
+        "extra_diagnostic_total_s": extra_diagnostic_total_s,
+        "dominant_extra_diagnostics": dominant_extra_diagnostics,
+        "snapshot": snapshot,
+    }
 
 
 def resolve_stage2_optimizer_method(field_backend, optimizer_backend):
@@ -813,18 +913,18 @@ def make_fun(
     evaluation inside the optimizer loop).
     """
     eval_counter = {"count": 0}
-    field_diagnostic_cache = {"snapshot": None}
+    diagnostic_cache = {"snapshot": None}
 
     def fun(dofs):
         next_eval = eval_counter["count"] + 1
-        recompute_field_diagnostics = (
-            field_diagnostic_cache["snapshot"] is None
+        recompute_diagnostics = (
+            diagnostic_cache["snapshot"] is None
             or field_diagnostic_stride <= 1
             or next_eval == 1
             or next_eval % field_diagnostic_stride == 0
         )
         JF.x = dofs
-        snapshot, grad, field_diagnostic_cache["snapshot"] = evaluate_stage2_objective(
+        snapshot, grad, diagnostic_cache["snapshot"] = evaluate_stage2_objective(
             JF,
             new_bs,
             new_surf,
@@ -833,8 +933,8 @@ def make_fun(
             Jccdist,
             Jc,
             bs_jax=bs_jax,
-            field_diagnostics=field_diagnostic_cache["snapshot"],
-            recompute_field_diagnostics=recompute_field_diagnostics,
+            diagnostics=diagnostic_cache["snapshot"],
+            recompute_diagnostics=recompute_diagnostics,
         )
         eval_counter["count"] = next_eval
         append_stage2_trajectory_snapshot(
@@ -1054,6 +1154,10 @@ if __name__ == "__main__":
         raise ValueError(
             "--record-warm-timings is only supported on the JAX Stage 2 ondevice lane."
         )
+    if args.profile_step_json is not None and use_scalar_objective:
+        raise ValueError(
+            "--profile-step-json is only supported on explicit Stage 2 reference lanes."
+        )
     if args.record_warm_timings and (args.probe_only or args.init_only):
         raise ValueError(
             "--record-warm-timings requires an actual Stage 2 optimization run and "
@@ -1093,6 +1197,19 @@ if __name__ == "__main__":
         )
         write_json_file(args.export_objective_json, probe_payload)
         print(f"Wrote Stage 2 objective snapshot to {args.export_objective_json}")
+    if args.profile_step_json is not None:
+        profile_payload = profile_stage2_explicit_step(
+            JF,
+            new_bs,
+            new_surf,
+            Jf,
+            Jls,
+            Jccdist,
+            Jc,
+            bs_jax=new_bs_jax,
+        )
+        write_json_file(args.profile_step_json, profile_payload)
+        print(f"Wrote Stage 2 step profile to {args.profile_step_json}")
     if args.probe_only:
         if args.trajectory_json:
             write_json_file(
@@ -1193,6 +1310,17 @@ if __name__ == "__main__":
         "B_N/B": np.sum(B_field * unitn, axis=2)[:, :, None]
         / np.sqrt(np.sum(B_field**2, axis=2))[:, :, None]
     }
+    if args.skip_postprocess and final_snapshot is None:
+        final_snapshot, _, _ = evaluate_stage2_objective(
+            JF,
+            new_bs,
+            new_surf,
+            Jf,
+            Jls,
+            Jccdist,
+            Jc,
+            bs_jax=new_bs_jax,
+        )
     fieldError = compute_mean_abs_relbn(new_surf, new_bs)
     if args.skip_postprocess:
         print("Skipping Stage 2 post-processing artifacts because --skip-postprocess was provided.")

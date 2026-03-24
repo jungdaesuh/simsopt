@@ -69,6 +69,17 @@ WARM_TIMING_NO_OPTIMIZATION_ERROR = (
     "--record-warm-timings requires an actual Stage 2 optimization run and "
     "cannot be combined with --probe-only or --init-only."
 )
+PROFILE_STEP_REFERENCE_LANE_ERROR = (
+    "--profile-step-json is only supported on explicit Stage 2 reference lanes."
+)
+REDUCED_STAGE2_ARGS = (
+    "--backend",
+    "jax",
+    "--nphi",
+    "31",
+    "--ntheta",
+    "16",
+)
 
 
 def _load_stage2_script_module():
@@ -113,6 +124,10 @@ def _assert_stage2_script_failure(result, expected_error):
     output = f"{result.stdout}\n{result.stderr}"
     assert result.returncode != 0
     assert expected_error in output
+
+
+def _load_stage2_results_json(output_root):
+    return json.loads(next(output_root.glob("**/results.json")).read_text(encoding="utf-8"))
 
 
 def _build_stage2_target_objective_contract_case():
@@ -1154,7 +1169,7 @@ class TestStage2OptimizerContract:
         monkeypatch,
     ):
         stage2_script = _load_stage2_script_module()
-        calls = {"jf": 0, "relbn": 0}
+        calls = {"jf": 0, "relbn": 0, "length": 0, "distance": 0, "curvature": 0}
 
         class DummyJF:
             def __init__(self):
@@ -1167,14 +1182,18 @@ class TestStage2OptimizerContract:
                 return np.asarray(2.0 * self.x, dtype=float)
 
         class DummyScalar:
-            def __init__(self, value):
+            def __init__(self, value, counter_key=None):
                 self._value = float(value)
+                self._counter_key = counter_key
 
             def J(self):
+                if self._counter_key is not None:
+                    calls[self._counter_key] += 1
                 return self._value
 
         class DummyDistance:
             def shortest_distance(self):
+                calls["distance"] += 1
                 return 0.5
 
         class DummyFlux:
@@ -1194,9 +1213,9 @@ class TestStage2OptimizerContract:
             object(),
             object(),
             DummyFlux(),
-            DummyScalar(1.25),
+            DummyScalar(1.25, "length"),
             DummyDistance(),
-            DummyScalar(0.75),
+            DummyScalar(0.75, "curvature"),
             trajectory_sink=trajectory,
             field_diagnostic_stride=10,
         )
@@ -1208,24 +1227,119 @@ class TestStage2OptimizerContract:
         assert second_value == pytest.approx(1.25)
         assert calls["jf"] == 1
         assert calls["relbn"] == 1
+        assert calls["length"] == 2
+        assert calls["distance"] == 2
+        assert calls["curvature"] == 2
         assert len(trajectory) == 2
         assert trajectory[0]["Jf"] == pytest.approx(0.125)
         assert trajectory[1]["Jf"] == pytest.approx(0.125)
+        assert trajectory[0]["curve_length"] == pytest.approx(1.25)
+        assert trajectory[1]["curve_length"] == pytest.approx(1.25)
+
+    def test_profile_stage2_explicit_step_reports_component_breakdown(self, monkeypatch):
+        stage2_script = _load_stage2_script_module()
+
+        class DummyJF:
+            def __init__(self):
+                self.x = np.zeros(2, dtype=float)
+
+            def J(self):
+                return 1.5
+
+            def dJ(self):
+                return np.asarray([2.0, -1.0], dtype=float)
+
+        class DummyScalar:
+            def __init__(self, value):
+                self._value = float(value)
+
+            def J(self):
+                return self._value
+
+        class DummyDistance:
+            def shortest_distance(self):
+                return 0.25
+
+        monkeypatch.setattr(stage2_script, "compute_mean_abs_relbn", lambda _surf, _bs: 0.5)
+
+        payload = stage2_script.profile_stage2_explicit_step(
+            DummyJF(),
+            object(),
+            object(),
+            DummyScalar(0.75),
+            DummyScalar(1.25),
+            DummyDistance(),
+            DummyScalar(0.5),
+        )
+
+        assert payload["observed_step_total_s"] >= 0.0
+        assert set(payload["objective_path_timings_s"]) == {"JF_J_s", "JF_dJ_s"}
+        assert set(payload["extra_diagnostic_timings_s"]) == {
+            "Jf_J_s",
+            "mean_abs_relBfinal_norm_s",
+            "curve_length_s",
+            "coil_coil_distance_s",
+            "curvature_s",
+        }
+        assert payload["extra_diagnostic_total_s"] >= 0.0
+        assert payload["dominant_extra_diagnostics"]
+        assert payload["snapshot"]["J"] == pytest.approx(1.5)
+        assert payload["snapshot"]["Jf"] == pytest.approx(0.75)
+        assert payload["snapshot"]["curve_length"] == pytest.approx(1.25)
+        assert payload["snapshot"]["coil_coil_distance"] == pytest.approx(0.25)
+        assert payload["snapshot"]["curvature"] == pytest.approx(0.5)
+        assert payload["snapshot"]["grad_norm"] == pytest.approx(np.sqrt(5.0))
+
+    def test_stage2_script_probe_only_writes_step_profile(self):
+        with tempfile.TemporaryDirectory(prefix="stage2-step-profile-") as temp_dir:
+            output_root = Path(temp_dir) / "outputs"
+            profile_json = Path(temp_dir) / "step_profile.json"
+            result = _run_stage2_script(
+                *REDUCED_STAGE2_ARGS,
+                "--optimizer-backend",
+                "scipy",
+                "--probe-only",
+                "--skip-postprocess",
+                "--profile-step-json",
+                str(profile_json),
+                "--output-root",
+                str(output_root),
+            )
+
+            output = f"{result.stdout}\n{result.stderr}"
+            assert result.returncode == 0, output
+            payload = json.loads(profile_json.read_text(encoding="utf-8"))
+
+        assert payload["observed_step_total_s"] >= 0.0
+        assert payload["dominant_extra_diagnostics"]
+        assert payload["dominant_extra_diagnostics"][0]["elapsed_s"] >= 0.0
+
+    def test_stage2_script_rejects_step_profile_on_target_lane(self):
+        with tempfile.TemporaryDirectory(prefix="stage2-step-profile-invalid-") as temp_dir:
+            output_root = Path(temp_dir) / "outputs"
+            profile_json = Path(temp_dir) / "step_profile.json"
+            result = _run_stage2_script(
+                *REDUCED_STAGE2_ARGS,
+                "--optimizer-backend",
+                "ondevice",
+                "--skip-postprocess",
+                "--profile-step-json",
+                str(profile_json),
+                "--output-root",
+                str(output_root),
+            )
+
+        _assert_stage2_script_failure(result, PROFILE_STEP_REFERENCE_LANE_ERROR)
 
     def test_stage2_script_ondevice_warm_timing_is_recorded(self):
         with tempfile.TemporaryDirectory(prefix="stage2-ondevice-timing-") as temp_dir:
             output_root = Path(temp_dir) / "outputs"
             result = _run_stage2_script(
-                "--backend",
-                "jax",
+                *REDUCED_STAGE2_ARGS,
                 "--optimizer-backend",
                 "ondevice",
                 "--record-warm-timings",
                 "--skip-postprocess",
-                "--nphi",
-                "31",
-                "--ntheta",
-                "16",
                 "--maxiter",
                 "0",
                 "--output-root",
@@ -1234,28 +1348,56 @@ class TestStage2OptimizerContract:
 
             output = f"{result.stdout}\n{result.stderr}"
             assert result.returncode == 0, output
-            results_json = next(output_root.glob("**/results.json"))
-            payload = json.loads(results_json.read_text(encoding="utf-8"))
+            payload = _load_stage2_results_json(output_root)
 
         timings = payload["OPTIMIZER_TIMINGS"]
         assert timings["cold_run_s"] >= 0.0
         assert timings["warm_run_s"] >= 0.0
         assert timings["compile_overhead_s"] >= 0.0
 
+    def test_stage2_script_skip_postprocess_preserves_field_error(self):
+        with tempfile.TemporaryDirectory(prefix="stage2-ondevice-skip-") as skip_dir, tempfile.TemporaryDirectory(
+            prefix="stage2-ondevice-noskip-"
+        ) as full_dir:
+            skip_output_root = Path(skip_dir) / "outputs"
+            full_output_root = Path(full_dir) / "outputs"
+            common_args = (
+                *REDUCED_STAGE2_ARGS,
+                "--optimizer-backend",
+                "ondevice",
+                "--maxiter",
+                "0",
+            )
+            skip_result = _run_stage2_script(
+                *common_args,
+                "--skip-postprocess",
+                "--output-root",
+                str(skip_output_root),
+            )
+            full_result = _run_stage2_script(
+                *common_args,
+                "--output-root",
+                str(full_output_root),
+            )
+
+            skip_output = f"{skip_result.stdout}\n{skip_result.stderr}"
+            full_output = f"{full_result.stdout}\n{full_result.stderr}"
+            assert skip_result.returncode == 0, skip_output
+            assert full_result.returncode == 0, full_output
+            skip_payload = _load_stage2_results_json(skip_output_root)
+            full_payload = _load_stage2_results_json(full_output_root)
+
+        assert skip_payload["FIELD_ERROR"] == pytest.approx(full_payload["FIELD_ERROR"])
+
     def test_stage2_script_rejects_warm_timing_on_reference_lane(self):
         with tempfile.TemporaryDirectory(prefix="stage2-warm-timing-invalid-") as temp_dir:
             output_root = Path(temp_dir) / "outputs"
             result = _run_stage2_script(
-                "--backend",
-                "jax",
+                *REDUCED_STAGE2_ARGS,
                 "--optimizer-backend",
                 "scipy",
                 "--record-warm-timings",
                 "--skip-postprocess",
-                "--nphi",
-                "31",
-                "--ntheta",
-                "16",
                 "--maxiter",
                 "0",
                 "--output-root",
@@ -1268,17 +1410,12 @@ class TestStage2OptimizerContract:
         with tempfile.TemporaryDirectory(prefix="stage2-warm-timing-init-only-") as temp_dir:
             output_root = Path(temp_dir) / "outputs"
             result = _run_stage2_script(
-                "--backend",
-                "jax",
+                *REDUCED_STAGE2_ARGS,
                 "--optimizer-backend",
                 "ondevice",
                 "--record-warm-timings",
                 "--init-only",
                 "--skip-postprocess",
-                "--nphi",
-                "31",
-                "--ntheta",
-                "16",
                 "--maxiter",
                 "0",
                 "--output-root",
@@ -1291,17 +1428,12 @@ class TestStage2OptimizerContract:
         with tempfile.TemporaryDirectory(prefix="stage2-warm-timing-probe-only-") as temp_dir:
             output_root = Path(temp_dir) / "outputs"
             result = _run_stage2_script(
-                "--backend",
-                "jax",
+                *REDUCED_STAGE2_ARGS,
                 "--optimizer-backend",
                 "ondevice",
                 "--record-warm-timings",
                 "--probe-only",
                 "--skip-postprocess",
-                "--nphi",
-                "31",
-                "--ntheta",
-                "16",
                 "--output-root",
                 str(output_root),
             )
