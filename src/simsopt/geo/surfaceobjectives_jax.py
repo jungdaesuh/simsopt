@@ -69,13 +69,36 @@ def _coil_cotangents_to_derivative(coils, d_coil_arrays, coil_indices):
     """
     total_derivative = Derivative({})
     for (d_g, d_gd, d_c), indices in zip(d_coil_arrays, coil_indices):
-        dg = np.asarray(d_g)
-        dgd = np.asarray(d_gd)
-        dc = np.asarray(d_c)
         for local_i, global_i in enumerate(indices):
             total_derivative += coils[global_i].vjp(
-                dg[local_i], dgd[local_i], np.asarray([dc[local_i]])
+                np.asarray(d_g[local_i]),
+                np.asarray(d_gd[local_i]),
+                np.asarray([d_c[local_i]]),
             )
+    return total_derivative
+
+
+def _iter_adjoint_coil_cotangents(vjp_fn, vjp_groups_fn, booz_surf, iota, G, adjoint):
+    """Yield grouped coil cotangents from either the streaming or full VJP path."""
+    if vjp_groups_fn is not None:
+        yield from vjp_groups_fn(adjoint, booz_surf, iota, G)
+        return
+
+    d_coil_arrays, coil_indices = vjp_fn(adjoint, booz_surf, iota, G)
+    yield from zip(d_coil_arrays, coil_indices)
+
+
+def _adjoint_coil_derivative(vjp_fn, vjp_groups_fn, booz_surf, iota, G, adjoint, coils):
+    """Project grouped adjoint cotangents to a coil ``Derivative`` promptly."""
+    total_derivative = Derivative({})
+    for d_coil_array, coil_group_indices in _iter_adjoint_coil_cotangents(
+        vjp_fn, vjp_groups_fn, booz_surf, iota, G, adjoint
+    ):
+        total_derivative += _coil_cotangents_to_derivative(
+            coils,
+            [d_coil_array],
+            [coil_group_indices],
+        )
     return total_derivative
 
 
@@ -313,6 +336,7 @@ class BoozerResidualJAX(Optimizable):
         self._J = 0.5 * np.sum(rtil**2)
 
         vjp_fn = booz_surf.res["vjp"]
+        vjp_groups_fn = booz_surf.res.get("vjp_groups")
 
         dJ_by_dB = self._compute_dJ_by_dB(
             B_3d,
@@ -330,9 +354,14 @@ class BoozerResidualJAX(Optimizable):
         dJ_ds = self._compute_dJ_ds(iota, G, weight_inv_modB, cw, nphi, ntheta)
         adj = _solve_boozer_adjoint(booz_surf, dJ_ds)
 
-        d_coil_arrays, coil_indices = vjp_fn(adj, booz_surf, iota, G)
-        adj_derivative = _coil_cotangents_to_derivative(
-            self.biotsavart.coils, d_coil_arrays, coil_indices
+        adj_derivative = _adjoint_coil_derivative(
+            vjp_fn,
+            vjp_groups_fn,
+            booz_surf,
+            iota,
+            G,
+            adj,
+            self.biotsavart.coils,
         )
 
         self._dJ = dJ_by_dcoils - adj_derivative
@@ -431,6 +460,7 @@ class IotasJAX(Optimizable):
         G = booz_surf.res["G"]
         self._J = iota
         vjp_fn = booz_surf.res["vjp"]
+        vjp_groups_fn = booz_surf.res.get("vjp_groups")
 
         # dJ/dx_inner for iota: unit vector at the iota position
         L = booz_surf.res["PLU"][1]
@@ -443,9 +473,14 @@ class IotasJAX(Optimizable):
 
         adj = _solve_boozer_adjoint(booz_surf, dJ_ds)
 
-        d_coil_arrays, coil_indices = vjp_fn(adj, booz_surf, iota, G)
-        adj_derivative = _coil_cotangents_to_derivative(
-            self.biotsavart.coils, d_coil_arrays, coil_indices
+        adj_derivative = _adjoint_coil_derivative(
+            vjp_fn,
+            vjp_groups_fn,
+            booz_surf,
+            iota,
+            G,
+            adj,
+            self.biotsavart.coils,
         )
 
         self._dJ = -1.0 * adj_derivative
@@ -523,6 +558,7 @@ class NonQuasiSymmetricRatioJAX(Optimizable):
         iota = booz_surf.res["iota"]
         G = booz_surf.res["G"]
         vjp_fn = booz_surf.res["vjp"]
+        vjp_groups_fn = booz_surf.res.get("vjp_groups")
 
         sdofs = booz_surf._get_surface_dofs()
         coil_arrays = booz_surf._coil_arrays
@@ -562,9 +598,14 @@ class NonQuasiSymmetricRatioJAX(Optimizable):
 
         adj = _solve_boozer_adjoint(booz_surf, dJ_ds)
 
-        d_coil_arrays_adj, coil_indices_adj = vjp_fn(adj, booz_surf, iota, G)
-        adj_derivative = _coil_cotangents_to_derivative(
-            self.biotsavart.coils, d_coil_arrays_adj, coil_indices_adj
+        adj_derivative = _adjoint_coil_derivative(
+            vjp_fn,
+            vjp_groups_fn,
+            booz_surf,
+            iota,
+            G,
+            adj,
+            self.biotsavart.coils,
         )
 
         self._dJ = dJ_by_dcoils - adj_derivative

@@ -18,6 +18,7 @@ from benchmarks.adjoint_fd_validation import (
     RECOMPOSED_TOTAL_REL_TOL,
     evaluate_adjoint_validation,
 )
+from benchmarks.adjoint_probe_common import compute_derivative_l2_metrics
 from benchmarks.grouped_adjoint_memory_probe import (
     evaluate_grouped_adjoint_memory_probe,
 )
@@ -719,17 +720,52 @@ def _grouped_adjoint_memory_metrics(*, snapshots, **overrides):
     return metrics
 
 
+def _grouped_adjoint_snapshot(label, rss_mb):
+    return {"label": label, "rss_mb": rss_mb, "gpu_memory_mb": None}
+
+
+def _complete_grouped_adjoint_snapshots():
+    return [
+        _grouped_adjoint_snapshot("start", 1.0),
+        _grouped_adjoint_snapshot("after_fixture", 2.0),
+        _grouped_adjoint_snapshot("after_objective", 3.0),
+        _grouped_adjoint_snapshot("after_adjoint_solve", 4.0),
+        _grouped_adjoint_snapshot("after_grouped_adjoint_vjp", 5.0),
+    ]
+
+
+def test_compute_derivative_l2_metrics_ignores_missing_dependency_keys():
+    class _DepOpt:
+        __slots__ = ("local_dofs_free_status",)
+        __hash__ = object.__hash__
+
+        def __init__(self, free_status):
+            self.local_dofs_free_status = np.asarray(free_status, dtype=bool)
+
+    dep_present = _DepOpt([True, False])
+    dep_missing = _DepOpt([True])
+    lineage = types.SimpleNamespace(
+        dofs_free_status=np.array([True], dtype=bool),
+        local_dof_size=1,
+        dofs=types.SimpleNamespace(dep_opts=lambda: [dep_present, dep_missing]),
+    )
+    derivative = types.SimpleNamespace(
+        data={dep_present: np.array([3.0, 4.0], dtype=float)}
+    )
+
+    norm, finite = compute_derivative_l2_metrics(
+        derivative,
+        types.SimpleNamespace(unique_dof_lineage=[lineage]),
+    )
+
+    assert finite is True
+    assert norm == pytest.approx(3.0)
+    assert dep_missing not in derivative.data
+
+
 def test_grouped_adjoint_memory_probe_requires_complete_finite_metrics():
     failures = evaluate_grouped_adjoint_memory_probe(
-        _grouped_adjoint_memory_metrics(
-            snapshots=[
-                {"label": "start", "rss_mb": 1.0, "gpu_memory_mb": None},
-                {"label": "after_fixture", "rss_mb": 2.0, "gpu_memory_mb": None},
-                {"label": "after_objective", "rss_mb": 3.0, "gpu_memory_mb": None},
-                {"label": "after_adjoint_solve", "rss_mb": 4.0, "gpu_memory_mb": None},
-                {"label": "after_grouped_adjoint_vjp", "rss_mb": 5.0, "gpu_memory_mb": None},
-            ]
-        )
+        _grouped_adjoint_memory_metrics(snapshots=_complete_grouped_adjoint_snapshots())
     )
 
     assert failures == []
@@ -741,7 +777,7 @@ def test_grouped_adjoint_memory_probe_rejects_missing_snapshots_or_nonfinite_gra
             adjoint_residual_rel=np.inf,
             implicit_gradient_finite=False,
             implicit_gradient_norm=0.0,
-            snapshots=[{"label": "start", "rss_mb": 1.0, "gpu_memory_mb": None}],
+            snapshots=[_grouped_adjoint_snapshot("start", 1.0)],
         )
     )
 

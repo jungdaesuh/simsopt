@@ -24,6 +24,10 @@ import pytest
 import numpy as np
 import jax
 import scipy.linalg
+from pathlib import Path
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 sopp = pytest.importorskip(
     "simsoptpp",
@@ -85,6 +89,59 @@ def _explicit_grouped_coil_derivative(coils, d_coil_arrays, coil_indices):
                 )
             )
     return sum(all_derivatives)
+
+
+def _assert_gradients_finite_nonzero(gradients, message_prefix):
+    for grad in gradients:
+        assert np.all(np.isfinite(grad)), f"{message_prefix} produced NaN/inf"
+        assert np.linalg.norm(grad) > 0, f"{message_prefix} produced zero gradient"
+
+
+def _assert_streaming_group_vjp_matches_full(
+    full_d_coil_arrays, full_coil_indices, streamed
+):
+    assert len(streamed) == len(full_d_coil_arrays)
+    assert [indices for _, indices in streamed] == full_coil_indices
+    for (streamed_arrays, _), full_arrays in zip(streamed, full_d_coil_arrays):
+        for streamed_arr, full_arr in zip(streamed_arrays, full_arrays):
+            np.testing.assert_allclose(
+                np.asarray(streamed_arr, dtype=float),
+                np.asarray(full_arr, dtype=float),
+                rtol=1e-12,
+                atol=1e-12,
+            )
+
+
+class _WholeGroupArrayConversionBomb:
+    """Array-like that allows per-slice conversion but rejects whole-array casts."""
+
+    def __init__(self, slices):
+        self._slices = list(slices)
+
+    def __array__(self, dtype=None, copy=None):
+        raise AssertionError("Whole grouped cotangent arrays should not be materialized")
+
+    def __getitem__(self, index):
+        return self._slices[index]
+
+
+class _RecordingVJPCoil:
+    """Minimal coil stub that records per-slice VJP calls."""
+
+    def __init__(self):
+        self.calls = []
+
+    def vjp(self, dg, dgd, dc):
+        self.calls.append(
+            (
+                np.asarray(dg, dtype=float),
+                np.asarray(dgd, dtype=float),
+                np.asarray(dc, dtype=float),
+            )
+        )
+        from simsopt._core.derivative import Derivative
+
+        return Derivative({})
 
 
 def _make_boozer_setup(constraint_weight=1.0, optimizer_backend="scipy"):
@@ -385,6 +442,42 @@ class TestAdjointSolveConsistency:
             atol=1e-12,
         )
 
+    def test_coil_cotangent_projection_avoids_whole_group_host_materialization(self):
+        """Projection should convert one coil slice at a time, not a whole group."""
+        from simsopt.geo.surfaceobjectives_jax import _coil_cotangents_to_derivative
+
+        coils = [_RecordingVJPCoil(), _RecordingVJPCoil()]
+        d_coil_arrays = [
+            (
+                _WholeGroupArrayConversionBomb(
+                    [
+                        np.array([1.0, 2.0, 3.0]),
+                        np.array([4.0, 5.0, 6.0]),
+                    ]
+                ),
+                _WholeGroupArrayConversionBomb(
+                    [
+                        np.array([7.0, 8.0, 9.0]),
+                        np.array([10.0, 11.0, 12.0]),
+                    ]
+                ),
+                _WholeGroupArrayConversionBomb([1.5, 2.5]),
+            )
+        ]
+
+        _coil_cotangents_to_derivative(coils, d_coil_arrays, [[0, 1]])
+
+        assert len(coils[0].calls) == 1
+        assert len(coils[1].calls) == 1
+        np.testing.assert_allclose(coils[0].calls[0][0], np.array([1.0, 2.0, 3.0]))
+        np.testing.assert_allclose(coils[1].calls[0][0], np.array([4.0, 5.0, 6.0]))
+        np.testing.assert_allclose(coils[0].calls[0][1], np.array([7.0, 8.0, 9.0]))
+        np.testing.assert_allclose(
+            coils[1].calls[0][1], np.array([10.0, 11.0, 12.0])
+        )
+        np.testing.assert_allclose(coils[0].calls[0][2], np.array([1.5]))
+        np.testing.assert_allclose(coils[1].calls[0][2], np.array([2.5]))
+
     def test_surface_objectives_jax_reject_host_forward_backward(
         self, boozer_setup, monkeypatch
     ):
@@ -406,9 +499,138 @@ class TestAdjointSolveConsistency:
             np.array(NonQuasiSymmetricRatioJAX(booz_jax, bs_jax, sDIM=6).dJ()),
         ]
 
-        for grad in gradients:
-            assert np.all(np.isfinite(grad)), "Implicit JAX path produced NaN/inf"
-            assert np.linalg.norm(grad) > 0, "Implicit JAX path produced zero gradient"
+        _assert_gradients_finite_nonzero(gradients, "Implicit JAX path")
+
+    def test_surface_objectives_jax_prefers_streaming_group_vjp(
+        self, boozer_setup, monkeypatch
+    ):
+        """Implicit wrappers should use group-at-a-time VJPs when available."""
+        (coils, surf_cpu, surf_jax, bs_cpu, bs_jax, booz_cpu, booz_jax, vol_cpu) = (
+            boozer_setup
+        )
+
+        def _bomb(*args, **kwargs):
+            raise AssertionError("Whole-pytree VJP should not run on the streaming path")
+
+        monkeypatch.setitem(booz_jax.res, "vjp", _bomb)
+
+        gradients = [
+            np.array(BoozerResidualJAX(booz_jax, bs_jax).dJ()),
+            np.array(IotasJAX(booz_jax).dJ()),
+            np.array(NonQuasiSymmetricRatioJAX(booz_jax, bs_jax, sDIM=6).dJ()),
+        ]
+
+        _assert_gradients_finite_nonzero(gradients, "Streaming group VJP")
+
+    def test_streaming_group_vjp_matches_full_vjp(self, boozer_setup):
+        """Group-at-a-time VJPs should match the legacy full-pytree VJP result."""
+        (coils, surf_cpu, surf_jax, bs_cpu, bs_jax, booz_cpu, booz_jax, vol_cpu) = (
+            boozer_setup
+        )
+        from simsopt.objectives.utilities import forward_backward_jax
+
+        P, L, U = booz_jax.res["PLU"]
+        dJ_ds = _iota_unit_rhs((P, L, U))
+        adj = forward_backward_jax(P, L, U, dJ_ds)
+
+        full_d_coil_arrays, full_coil_indices = booz_jax.res["vjp"](
+            adj, booz_jax, booz_jax.res["iota"], booz_jax.res["G"]
+        )
+        streamed = list(
+            booz_jax.res["vjp_groups"](
+                adj, booz_jax, booz_jax.res["iota"], booz_jax.res["G"]
+            )
+        )
+
+        _assert_streaming_group_vjp_matches_full(
+            full_d_coil_arrays, full_coil_indices, streamed
+        )
+
+    def test_exact_streaming_group_vjp_matches_full_vjp(self):
+        """Exact-solve group-at-a-time VJPs should match the legacy exact VJP."""
+        (
+            coils,
+            surf_cpu,
+            surf_jax,
+            bs_cpu,
+            bs_jax,
+            booz_cpu,
+            booz_jax,
+            vol_cpu,
+            iota0,
+            G0,
+        ) = _make_boozer_setup(constraint_weight=1.0, optimizer_backend="ondevice")
+
+        # Seed the exact Newton solve from the converged LS state on this fixture.
+        # The raw initial guess is not a stable exact-solve regression anchor here.
+        res_ls = booz_jax.run_code(iota0, G0)
+        assert res_ls is not None
+        assert res_ls.get("success", False), "LS JAX solve did not converge"
+        booz_jax.need_to_run_code = True
+
+        res_exact = booz_jax.solve_residual_equation_exactly_newton(
+            iota=res_ls["iota"], G=res_ls["G"]
+        )
+
+        assert res_exact is not None
+        assert res_exact.get("type") == "exact"
+        assert res_exact.get("success", False), "Exact JAX solve did not converge"
+        assert res_exact.get("vjp_groups") is not None
+
+        lm = np.ones(res_exact["PLU"][1].shape[0], dtype=float)
+        full_d_coil_arrays, full_coil_indices = res_exact["vjp"](
+            lm, booz_jax, res_exact["iota"], res_exact["G"]
+        )
+        streamed = list(
+            res_exact["vjp_groups"](
+                lm, booz_jax, res_exact["iota"], res_exact["G"]
+            )
+        )
+
+        _assert_streaming_group_vjp_matches_full(
+            full_d_coil_arrays, full_coil_indices, streamed
+        )
+
+    def test_compute_derivative_l2_metrics_does_not_mutate_derivative_map(
+        self, boozer_setup
+    ):
+        """Norm helper should not populate missing derivative entries on read."""
+        (coils, surf_cpu, surf_jax, bs_cpu, bs_jax, booz_cpu, booz_jax, vol_cpu) = (
+            boozer_setup
+        )
+        from benchmarks.adjoint_probe_common import compute_derivative_l2_metrics
+        from simsopt._core.derivative import Derivative
+
+        derivative = Derivative({})
+        original_keys = tuple(derivative.data.keys())
+
+        norm, finite = compute_derivative_l2_metrics(derivative, bs_jax)
+
+        assert norm == pytest.approx(0.0)
+        assert finite is True
+        assert tuple(derivative.data.keys()) == original_keys
+
+    def test_compute_derivative_l2_metrics_matches_full_gradient_norm(
+        self, boozer_setup
+    ):
+        """Norm helper should match the full Derivative gradient on a real fixture."""
+        (coils, surf_cpu, surf_jax, bs_cpu, bs_jax, booz_cpu, booz_jax, vol_cpu) = (
+            boozer_setup
+        )
+        from benchmarks.adjoint_probe_common import compute_derivative_l2_metrics
+
+        derivative_for_metrics = BoozerResidualJAX(booz_jax, bs_jax).dJ(partials=True)
+        derivative_for_full = BoozerResidualJAX(booz_jax, bs_jax).dJ(partials=True)
+
+        norm, finite = compute_derivative_l2_metrics(derivative_for_metrics, bs_jax)
+        full_gradient = np.asarray(derivative_for_full(bs_jax), dtype=float)
+
+        assert finite is True
+        assert norm == pytest.approx(
+            float(np.linalg.norm(full_gradient)),
+            rel=1e-12,
+            abs=1e-12,
+        )
 
 
 # -----------------------------------------------------------------------

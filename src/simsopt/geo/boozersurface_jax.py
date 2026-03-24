@@ -74,6 +74,22 @@ from .optimizer_jax import (
 __all__ = ["BoozerSurfaceJAX"]
 
 
+def _replace_group_coil_array(coil_arrays, group_index, group_array):
+    grouped_arrays = list(coil_arrays)
+    grouped_arrays[group_index] = group_array
+    return grouped_arrays
+
+
+def _yield_group_vjps(lm, group_runners, coil_arrays, coil_indices):
+    for group_runner, group_array, group_index_list in zip(
+        group_runners,
+        coil_arrays,
+        coil_indices,
+    ):
+        _, vjp_fn = jax.vjp(group_runner, group_array)
+        yield vjp_fn(lm)[0], group_index_list
+
+
 def _compute_label(
     label_type,
     gamma,
@@ -280,6 +296,68 @@ def _boozer_exact_coil_vjp(lm, booz_surf, iota, G):
     return d_coil_arrays, coil_indices
 
 
+def _boozer_exact_coil_vjp_groups(lm, booz_surf, iota, G):
+    """Yield exact-solve coil VJPs one grouped coil block at a time."""
+    yield from _build_exact_group_vjp_callback(booz_surf, iota, G)(
+        lm,
+        booz_surf,
+        iota,
+        G,
+    )
+
+
+def _build_exact_group_vjp_callback(booz_surf, iota, G):
+    """Build stable exact-solve group runners for repeated streaming VJPs."""
+    sdofs = booz_surf._get_surface_dofs()
+    x = jnp.concatenate([sdofs, jnp.array([iota, G])])
+    mask_indices = booz_surf._compute_stellsym_mask_indices()
+
+    coil_arrays = booz_surf._coil_arrays
+    coil_indices = booz_surf._coil_index_lists
+
+    group_runners = tuple(
+        _make_exact_group_runner(
+            x,
+            coil_arrays,
+            booz_surf,
+            mask_indices,
+            group_index,
+        )
+        for group_index in range(len(coil_arrays))
+    )
+
+    def vjp_groups(lm, _booz_surf, _iota, _G):
+        yield from _yield_group_vjps(lm, group_runners, coil_arrays, coil_indices)
+
+    return vjp_groups
+
+
+def _make_exact_group_runner(x, coil_arrays, booz_surf, mask_indices, group_index):
+    def residual_of_group(group_array):
+        return _boozer_exact_residual(
+            x,
+            coil_arrays=_replace_group_coil_array(
+                coil_arrays,
+                group_index,
+                group_array,
+            ),
+            quadpoints_phi=booz_surf.quadpoints_phi,
+            quadpoints_theta=booz_surf.quadpoints_theta,
+            mpol=booz_surf.mpol,
+            ntor=booz_surf.ntor,
+            nfp=booz_surf.nfp,
+            stellsym=booz_surf.stellsym,
+            scatter_indices=booz_surf.scatter_indices,
+            targetlabel=booz_surf.targetlabel,
+            label_type=booz_surf.label_type,
+            phi_idx=booz_surf.phi_idx,
+            mask_indices=mask_indices,
+            stellsym_surface=booz_surf.stellsym,
+            weight_inv_modB=booz_surf.options["weight_inv_modB"],
+        )
+    return residual_of_group
+
+
 def _boozer_ls_coil_vjp(lm, booz_surf, iota, G, weight_inv_modB=True):
     """JAX VJP for the LS penalty path.
 
@@ -334,6 +412,122 @@ def _boozer_ls_coil_vjp(lm, booz_surf, iota, G, weight_inv_modB=True):
     _, vjp_fn = jax.vjp(grad_of_coils, coil_arrays)
     (d_coil_arrays,) = vjp_fn(lm)
     return d_coil_arrays, coil_indices
+
+
+def _boozer_ls_coil_vjp_groups(lm, booz_surf, iota, G, weight_inv_modB=True):
+    """Yield LS-path coil VJPs one grouped coil block at a time."""
+    yield from _build_ls_group_vjp_callback(
+        booz_surf,
+        iota,
+        G,
+        weight_inv_modB=weight_inv_modB,
+    )(
+        lm,
+        booz_surf,
+        iota,
+        G,
+    )
+
+
+def _build_ls_group_vjp_callback(booz_surf, iota, G, weight_inv_modB=True):
+    """Build stable LS group runners for repeated streaming VJPs."""
+    optimize_G = G is not None
+    sdofs = booz_surf._get_surface_dofs()
+    if optimize_G:
+        x = jnp.concatenate([sdofs, jnp.array([iota, G])])
+    else:
+        x = jnp.concatenate([sdofs, jnp.array([iota])])
+
+    coil_arrays = booz_surf._coil_arrays
+    coil_indices = booz_surf._coil_index_lists
+
+    group_runners = tuple(
+        _make_ls_group_runner(
+            x,
+            coil_arrays,
+            booz_surf,
+            optimize_G,
+            weight_inv_modB,
+            group_index,
+        )
+        for group_index in range(len(coil_arrays))
+    )
+
+    def vjp_groups(lm, _booz_surf, _iota, _G):
+        yield from _yield_group_vjps(lm, group_runners, coil_arrays, coil_indices)
+
+    return vjp_groups
+
+
+def _make_ls_group_runner(
+    x,
+    coil_arrays,
+    booz_surf,
+    optimize_G,
+    weight_inv_modB,
+    group_index,
+):
+    def grad_of_group(group_array):
+        return _group_penalty_gradient(
+            x,
+            _replace_group_coil_array(
+                coil_arrays,
+                group_index,
+                group_array,
+            ),
+            booz_surf.quadpoints_phi,
+            booz_surf.quadpoints_theta,
+            booz_surf.mpol,
+            booz_surf.ntor,
+            booz_surf.nfp,
+            booz_surf.stellsym,
+            booz_surf.scatter_indices,
+            booz_surf.targetlabel,
+            booz_surf.constraint_weight,
+            booz_surf.label_type,
+            booz_surf.phi_idx,
+            optimize_G,
+            weight_inv_modB,
+        )
+
+    return grad_of_group
+
+
+def _group_penalty_gradient(
+    x,
+    coil_arrays,
+    quadpoints_phi,
+    quadpoints_theta,
+    mpol,
+    ntor,
+    nfp,
+    stellsym,
+    scatter_indices,
+    targetlabel,
+    constraint_weight,
+    label_type,
+    phi_idx,
+    optimize_G,
+    weight_inv_modB,
+):
+    obj = lambda xx: _boozer_penalty_objective(
+        xx,
+        coil_arrays=coil_arrays,
+        quadpoints_phi=quadpoints_phi,
+        quadpoints_theta=quadpoints_theta,
+        mpol=mpol,
+        ntor=ntor,
+        nfp=nfp,
+        stellsym=stellsym,
+        scatter_indices=scatter_indices,
+        targetlabel=targetlabel,
+        constraint_weight=constraint_weight,
+        label_type=label_type,
+        phi_idx=phi_idx,
+        optimize_G=optimize_G,
+        weight_inv_modB=weight_inv_modB,
+    )
+    return jax.grad(obj)(x)
 
 
 _DEFAULT_OPTIONS_LS = {
@@ -761,6 +955,7 @@ class BoozerSurfaceJAX(Optimizable):
                 "iota": iota_out,
                 "PLU": None,
                 "vjp": None,
+                "vjp_groups": None,
                 "type": "ls",
                 "weight_inv_modB": weight_inv_modB,
                 "fun": float(np.asarray(result["fun"])),
@@ -791,6 +986,12 @@ class BoozerSurfaceJAX(Optimizable):
             "iota": iota_out,
             "PLU": (np.asarray(P), np.asarray(L), np.asarray(U)),
             "vjp": partial(_boozer_ls_coil_vjp, weight_inv_modB=weight_inv_modB),
+            "vjp_groups": _build_ls_group_vjp_callback(
+                self,
+                iota_out,
+                G_out,
+                weight_inv_modB=weight_inv_modB,
+            ),
             "type": "ls",
             "weight_inv_modB": weight_inv_modB,
             "fun": float(result["fun"]),
@@ -920,6 +1121,7 @@ class BoozerSurfaceJAX(Optimizable):
                 "mask": None,
                 "type": "exact",
                 "vjp": None,
+                "vjp_groups": None,
                 "weight_inv_modB": self.options["weight_inv_modB"],
             }
             self.res = res
@@ -973,6 +1175,11 @@ class BoozerSurfaceJAX(Optimizable):
             "mask": bool_mask,
             "type": "exact",
             "vjp": _boozer_exact_coil_vjp,
+            "vjp_groups": _build_exact_group_vjp_callback(
+                self,
+                iota_final,
+                G_final,
+            ),
             "weight_inv_modB": self.options["weight_inv_modB"],
         }
         self.res = res

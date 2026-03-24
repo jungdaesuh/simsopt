@@ -28,6 +28,23 @@ def copy_numpy_dict(d):
     return res
 
 
+def _iter_local_free_derivative_blocks(derivative_data, optim, *, populate_missing):
+    for lineage_opt in optim.unique_dof_lineage:
+        if not np.any(lineage_opt.dofs_free_status):
+            continue
+        local_derivs = np.zeros(lineage_opt.local_dof_size)
+        for dep_opt in lineage_opt.dofs.dep_opts():
+            dep_deriv = (
+                derivative_data[dep_opt]
+                if populate_missing
+                else derivative_data.get(dep_opt)
+            )
+            if dep_deriv is None:
+                continue
+            local_derivs += dep_deriv[dep_opt.local_dofs_free_status]
+        yield local_derivs
+
+
 class Derivative:
 
     """
@@ -199,12 +216,13 @@ class Derivative:
             return Derivative({k: d for k, d in zip(keys, derivs)})
 
         else:
-            for k in optim.unique_dof_lineage:
-                if np.any(k.dofs_free_status):
-                    local_derivs = np.zeros(k.local_dof_size)
-                    for opt in k.dofs.dep_opts():
-                        local_derivs += self.data[opt][opt.local_dofs_free_status]
-                    derivs.append(local_derivs)
+            derivs.extend(
+                _iter_local_free_derivative_blocks(
+                    self.data,
+                    optim,
+                    populate_missing=True,
+                )
+            )
             return np.concatenate(derivs)
 
     # https://stackoverflow.com/questions/11624955/avoiding-python-sum-default-start-arg-behavior

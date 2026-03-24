@@ -18,8 +18,10 @@ sys.path.insert(0, str(REPO_ROOT))
 sys.path.insert(0, str(SRC_ROOT))
 
 from benchmarks.adjoint_probe_common import (
+    accumulate_grouped_adjoint_derivative,
     compute_adjoint_state,
-    compute_implicit_gradient_correction,
+    compute_derivative_l2_metrics,
+    iter_grouped_adjoint_cotangents,
 )
 from benchmarks.single_stage_smoke_fixture import (
     DEFAULT_EQUILIBRIA_DIR,
@@ -168,17 +170,17 @@ def _peak_snapshot_value(
 def _build_grouped_adjoint_metrics(
     adjoint: np.ndarray,
     adjoint_residual_rel: float,
-    implicit_gradient: np.ndarray,
+    implicit_gradient_norm: float,
+    implicit_gradient_finite: bool,
     snapshots: list[dict[str, float | str | None]],
 ) -> dict[str, Any]:
     adjoint_norm = float(np.linalg.norm(adjoint))
-    implicit_gradient_norm = float(np.linalg.norm(implicit_gradient))
     return {
         "adjoint_residual_rel": float(adjoint_residual_rel),
         "adjoint_finite": bool(np.all(np.isfinite(adjoint))),
         "adjoint_norm": adjoint_norm,
-        "implicit_gradient_finite": bool(np.all(np.isfinite(implicit_gradient))),
-        "implicit_gradient_norm": implicit_gradient_norm,
+        "implicit_gradient_finite": bool(implicit_gradient_finite),
+        "implicit_gradient_norm": float(implicit_gradient_norm),
         "snapshots": snapshots,
     }
 
@@ -186,8 +188,20 @@ def _build_grouped_adjoint_metrics(
 def evaluate_grouped_adjoint_memory_probe(metrics: dict[str, Any]) -> list[str]:
     failures: list[str] = []
     snapshots = list(metrics.get("snapshots", []))
-    if len(snapshots) < 5:
-        failures.append("Grouped-adjoint memory probe did not record all required snapshots.")
+    required_labels = {
+        "start",
+        "after_fixture",
+        "after_objective",
+        "after_adjoint_solve",
+        "after_grouped_adjoint_vjp",
+    }
+    labels = {str(snapshot.get("label")) for snapshot in snapshots}
+    missing_labels = sorted(required_labels - labels)
+    if missing_labels:
+        failures.append(
+            "Grouped-adjoint memory probe did not record all required snapshots: "
+            + ", ".join(missing_labels)
+        )
     if not bool(metrics.get("adjoint_finite", False)):
         failures.append("Grouped-adjoint memory probe produced a non-finite adjoint state.")
     if not bool(metrics.get("implicit_gradient_finite", False)):
@@ -253,13 +267,21 @@ def main() -> None:
     adjoint, adjoint_residual_rel = compute_adjoint_state(jr_jax)
     snapshots.append(record_memory_snapshot("after_adjoint_solve", started_at))
 
-    implicit_gradient = compute_implicit_gradient_correction(jr_jax, fixture["bs"], adjoint)
+    grouped_cotangents = iter_grouped_adjoint_cotangents(jr_jax, adjoint)
+    implicit_derivative = accumulate_grouped_adjoint_derivative(
+        fixture["bs"], grouped_cotangents
+    )
+
+    implicit_gradient_norm, implicit_gradient_finite = compute_derivative_l2_metrics(
+        implicit_derivative, fixture["bs"]
+    )
     snapshots.append(record_memory_snapshot("after_grouped_adjoint_vjp", started_at))
 
     metrics = _build_grouped_adjoint_metrics(
         adjoint,
         adjoint_residual_rel,
-        implicit_gradient,
+        implicit_gradient_norm,
+        implicit_gradient_finite,
         snapshots,
     )
     failures = evaluate_grouped_adjoint_memory_probe(metrics)
