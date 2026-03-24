@@ -51,6 +51,9 @@ conda run -n columbia-jax-0.9.2 python -m pytest tests/test_jax_import_smoke.py 
 # Private optimizer tests (same 0.9.2 runtime, simsoptpp-backed install)
 conda run -n columbia-jax-0.9.2 python -m pytest tests/geo/test_boozersurface_jax.py tests/integration/test_single_stage_jax.py -m "private_optimizer_runtime" -v
 
+# Benchmark/runtime helper regressions
+conda run -n columbia-jax-0.9.2 python -m pytest tests/test_run_code_benchmark_common.py tests/test_benchmark_helpers.py -v
+
 # M2+M5 integration tests (needs simsoptpp) — 37 pass
 /Users/suhjungdae/code/hbt-compare/envs/candidate-fixed/bin/python -m pytest tests/integration/ -v
 ```

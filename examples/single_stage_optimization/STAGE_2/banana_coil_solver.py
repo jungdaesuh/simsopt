@@ -1,8 +1,8 @@
 import argparse
+from dataclasses import dataclass
 import os
 import sys
 import json
-import importlib.util
 import time
 
 import jax
@@ -17,36 +17,13 @@ SIMSOPT_ROOT = os.path.abspath(os.path.join(EXAMPLE_ROOT, "..", ".."))
 REPO_ROOT = os.path.abspath(os.path.join(SIMSOPT_ROOT, ".."))
 SRC_ROOT = os.path.join(SIMSOPT_ROOT, "src")
 sys.path.insert(0, SRC_ROOT)
+sys.path.insert(0, SIMSOPT_ROOT)
+sys.path.insert(0, REPO_ROOT)
+
+from repo_bootstrap import bootstrap_local_simsopt
 
 
-def bootstrap_local_simsopt():
-    """Force repo scripts to import the local simsopt source tree."""
-    package_root = os.path.join(SRC_ROOT, "simsopt")
-    sys.meta_path = [
-        finder
-        for finder in sys.meta_path
-        if not (
-            type(finder).__name__ == "ScikitBuildRedirectingFinder"
-            and type(finder).__module__ == "_simsopt_editable"
-        )
-    ]
-    for name in list(sys.modules):
-        if name == "simsopt" or name.startswith("simsopt."):
-            del sys.modules[name]
-    spec = importlib.util.spec_from_file_location(
-        "simsopt",
-        os.path.join(package_root, "__init__.py"),
-        submodule_search_locations=[package_root],
-    )
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"Failed to bootstrap local simsopt package from {package_root}")
-    module = importlib.util.module_from_spec(spec)
-    module.__path__ = [package_root]
-    sys.modules["simsopt"] = module
-    spec.loader.exec_module(module)
-
-
-bootstrap_local_simsopt()
+bootstrap_local_simsopt(SRC_ROOT)
 DATABASE_EQUILIBRIA_DIR = os.path.join(REPO_ROOT, "DATABASE", "EQUILIBRIA")
 DEFAULT_EQUILIBRIA_DIR = (
     DATABASE_EQUILIBRIA_DIR
@@ -690,7 +667,19 @@ def compute_stage2_diagnostics(
     }
 
 
-def evaluate_stage2_objective(
+@dataclass(frozen=True)
+class Stage2ObjectiveContext:
+    JF: object
+    new_bs: object
+    new_surf: object
+    Jf: object
+    Jls: object
+    Jccdist: object
+    Jc: object
+    bs_jax: object | None = None
+
+
+def make_stage2_objective_context(
     JF,
     new_bs,
     new_surf,
@@ -698,7 +687,23 @@ def evaluate_stage2_objective(
     Jls,
     Jccdist,
     Jc,
+    *,
     bs_jax=None,
+):
+    return Stage2ObjectiveContext(
+        JF,
+        new_bs,
+        new_surf,
+        Jf,
+        Jls,
+        Jccdist,
+        Jc,
+        bs_jax,
+    )
+
+
+def evaluate_stage2_objective(
+    context,
     *,
     diagnostics=None,
     recompute_diagnostics=True,
@@ -707,73 +712,58 @@ def evaluate_stage2_objective(
     # Ask for the gradient first so the JAX squared-flux reference lane can
     # reuse its cached objective value. Swapping the order does not reduce the
     # non-JAX term work because those terms do not share a value cache.
-    grad = np.asarray(JF.dJ(), dtype=float)
-    J = float(JF.J())
+    grad = np.asarray(context.JF.dJ(), dtype=float)
+    J = float(context.JF.J())
     if recompute_diagnostics or diagnostics is None:
         diagnostics = compute_stage2_diagnostics(
-            new_bs,
-            new_surf,
-            Jf,
-            bs_jax=bs_jax,
+            context.new_bs,
+            context.new_surf,
+            context.Jf,
+            bs_jax=context.bs_jax,
         )
     snapshot = {
         "J": J,
         "Jf": float(diagnostics["Jf"]),
         "mean_abs_relBfinal_norm": float(diagnostics["mean_abs_relBfinal_norm"]),
-        "curve_length": float(Jls.J()),
-        "coil_coil_distance": float(Jccdist.shortest_distance()),
-        "curvature": float(Jc.J()),
+        "curve_length": float(context.Jls.J()),
+        "coil_coil_distance": float(context.Jccdist.shortest_distance()),
+        "curvature": float(context.Jc.J()),
         "grad_norm": float(np.linalg.norm(grad)),
     }
     return snapshot, grad, diagnostics
 
 
 def profile_stage2_explicit_step(
-    JF,
-    new_bs,
-    new_surf,
-    Jf,
+    context,
     length_penalty,
-    Jls,
-    Jccdist,
-    Jc,
-    *,
-    bs_jax=None,
 ):
     """Return a one-step timing breakdown for the explicit Stage 2 objective."""
     objective_path_timings = {
-        "JF_J_s": time_stage2_callback(JF.J),
-        "JF_dJ_s": time_stage2_callback(JF.dJ),
+        "JF_J_s": time_stage2_callback(context.JF.J),
+        "JF_dJ_s": time_stage2_callback(context.JF.dJ),
     }
 
     start = time.perf_counter()
     snapshot, gradient, _ = evaluate_stage2_objective(
-        JF,
-        new_bs,
-        new_surf,
-        Jf,
-        Jls,
-        Jccdist,
-        Jc,
-        bs_jax=bs_jax,
+        context,
     )
     observed_step_total_s = float(time.perf_counter() - start)
 
-    field_bs = resolve_stage2_field_bs(new_bs, bs_jax)
+    field_bs = resolve_stage2_field_bs(context.new_bs, context.bs_jax)
     extra_diagnostic_callbacks = {
-        "Jf_J_s": lambda: float(Jf.J()),
-        "mean_abs_relBfinal_norm_s": lambda: compute_mean_abs_relbn(new_surf, field_bs),
-        "curve_length_s": lambda: float(Jls.J()),
-        "coil_coil_distance_s": lambda: float(Jccdist.shortest_distance()),
-        "curvature_s": lambda: float(Jc.J()),
+        "Jf_J_s": lambda: float(context.Jf.J()),
+        "mean_abs_relBfinal_norm_s": lambda: compute_mean_abs_relbn(context.new_surf, field_bs),
+        "curve_length_s": lambda: float(context.Jls.J()),
+        "coil_coil_distance_s": lambda: float(context.Jccdist.shortest_distance()),
+        "curvature_s": lambda: float(context.Jc.J()),
     }
     extra_diagnostic_timings = profile_stage2_named_callbacks(extra_diagnostic_callbacks)
 
     term_callbacks = build_stage2_objective_term_callbacks(
-        Jf,
+        context.Jf,
         length_penalty,
-        Jccdist,
-        Jc,
+        context.Jccdist,
+        context.Jc,
     )
     objective_term_value_timings = profile_stage2_named_callbacks(
         {name: callbacks["J"] for name, callbacks in term_callbacks.items()}
@@ -798,7 +788,7 @@ def profile_stage2_explicit_step(
         squared_flux_field_b_vjp_component_timings,
         dominant_squared_flux_field_b_vjp_components,
         dominant_squared_flux_field_b_vjp_coils,
-    ) = profile_stage2_squared_flux_internal_components(Jf)
+    ) = profile_stage2_squared_flux_internal_components(context.Jf)
     return {
         "objective_path_timings_s": objective_path_timings,
         "observed_step_total_s": observed_step_total_s,
@@ -951,7 +941,7 @@ def build_stage2_probe_payload(
     ntheta,
 ):
     """Serialize the initialized Stage 2 objective state for parity probes."""
-    composite_snapshot, composite_grad, _ = evaluate_stage2_objective(
+    context = make_stage2_objective_context(
         JF,
         new_bs,
         new_surf,
@@ -960,6 +950,9 @@ def build_stage2_probe_payload(
         Jccdist,
         Jc,
         bs_jax=bs_jax,
+    )
+    composite_snapshot, composite_grad, _ = evaluate_stage2_objective(
+        context,
     )
     flux_grad = np.asarray(Jf.dJ(), dtype=float)
     return {
@@ -1016,7 +1009,7 @@ def capture_stage2_trajectory_snapshot(
     bs_jax=None,
 ):
     """Evaluate and append a Stage 2 diagnostic snapshot when requested."""
-    snapshot, _, _ = evaluate_stage2_objective(
+    context = make_stage2_objective_context(
         JF,
         new_bs,
         new_surf,
@@ -1025,6 +1018,9 @@ def capture_stage2_trajectory_snapshot(
         Jccdist,
         Jc,
         bs_jax=bs_jax,
+    )
+    snapshot, _, _ = evaluate_stage2_objective(
+        context,
     )
     append_stage2_trajectory_snapshot(trajectory_sink, snapshot)
     return snapshot
@@ -1053,6 +1049,16 @@ def make_fun(
     """
     eval_counter = {"count": 0}
     diagnostic_cache = {"snapshot": None}
+    context = make_stage2_objective_context(
+        JF,
+        new_bs,
+        new_surf,
+        Jf,
+        Jls,
+        Jccdist,
+        Jc,
+        bs_jax=bs_jax,
+    )
 
     def fun(dofs):
         next_eval = eval_counter["count"] + 1
@@ -1064,14 +1070,7 @@ def make_fun(
         )
         JF.x = dofs
         snapshot, grad, diagnostic_cache["snapshot"] = evaluate_stage2_objective(
-            JF,
-            new_bs,
-            new_surf,
-            Jf,
-            Jls,
-            Jccdist,
-            Jc,
-            bs_jax=bs_jax,
+            context,
             diagnostics=diagnostic_cache["snapshot"],
             recompute_diagnostics=recompute_diagnostics,
         )
@@ -1338,16 +1337,19 @@ if __name__ == "__main__":
         write_json_file(args.export_objective_json, probe_payload)
         print(f"Wrote Stage 2 objective snapshot to {args.export_objective_json}")
     if args.profile_step_json is not None:
-        profile_payload = profile_stage2_explicit_step(
+        profile_context = make_stage2_objective_context(
             JF,
             new_bs,
             new_surf,
             Jf,
-            Jls_penalty,
             Jls,
             Jccdist,
             Jc,
             bs_jax=new_bs_jax,
+        )
+        profile_payload = profile_stage2_explicit_step(
+            profile_context,
+            Jls_penalty,
         )
         write_json_file(args.profile_step_json, profile_payload)
         print(f"Wrote Stage 2 step profile to {args.profile_step_json}")
@@ -1452,7 +1454,7 @@ if __name__ == "__main__":
         / np.sqrt(np.sum(B_field**2, axis=2))[:, :, None]
     }
     if args.skip_postprocess and final_snapshot is None:
-        final_snapshot, _, _ = evaluate_stage2_objective(
+        final_context = make_stage2_objective_context(
             JF,
             new_bs,
             new_surf,
@@ -1461,6 +1463,9 @@ if __name__ == "__main__":
             Jccdist,
             Jc,
             bs_jax=new_bs_jax,
+        )
+        final_snapshot, _, _ = evaluate_stage2_objective(
+            final_context,
         )
     fieldError = compute_mean_abs_relbn(new_surf, new_bs)
     if args.skip_postprocess:
@@ -1491,7 +1496,7 @@ if __name__ == "__main__":
 
     # Save the results of optimization to a separate file
     if final_snapshot is None:
-        final_snapshot, _, _ = evaluate_stage2_objective(
+        final_context = make_stage2_objective_context(
             JF,
             new_bs,
             new_surf,
@@ -1500,6 +1505,9 @@ if __name__ == "__main__":
             Jccdist,
             Jc,
             bs_jax=new_bs_jax,
+        )
+        final_snapshot, _, _ = evaluate_stage2_objective(
+            final_context,
         )
     results = {
         "PLASMA_SURF_FILENAME": plasma_surf_filename,

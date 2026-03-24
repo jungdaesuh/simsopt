@@ -370,26 +370,6 @@ _ALLOWED_OPTIONS_LS = frozenset(_DEFAULT_OPTIONS_LS) | _INTERNAL_OPTIMIZER_OPTIO
 _ALLOWED_OPTIONS_EXACT = frozenset(_DEFAULT_OPTIONS_EXACT) | {"optimizer_backend"}
 
 
-def _resolve_ls_optimizer_method(optimizer_backend, limited_memory):
-    """Map the public LS backend contract to the concrete optimizer method.
-
-    Contract:
-
-    - ``scipy``: trusted reference/oracle backend
-    - ``hybrid``: transitional backend, BFGS-only in the private optimizer lane
-    - ``ondevice``: target backend for full-GPU optimizer work
-    """
-    return resolve_optimizer_backend_method(
-        optimizer_backend,
-        limited_memory=limited_memory,
-    )
-
-
-def _require_target_backend_x64(optimizer_backend):
-    """Fail fast when a target-lane backend is requested without float64."""
-    require_target_backend_x64(optimizer_backend)
-
-
 def _normalize_solver_options(raw_options, boozer_type):
     """Validate and normalize constructor options for a Boozer solve mode."""
     if "bfgs_method" in raw_options:
@@ -671,8 +651,11 @@ class BoozerSurfaceJAX(Optimizable):
         )
 
         optimizer_backend = self.options["optimizer_backend"]
-        _require_target_backend_x64(optimizer_backend)
-        method = _resolve_ls_optimizer_method(optimizer_backend, limited_memory)
+        require_target_backend_x64(optimizer_backend)
+        method = resolve_optimizer_backend_method(
+            optimizer_backend,
+            limited_memory=limited_memory,
+        )
 
         optimizer_options = {}
         for key in (

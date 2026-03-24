@@ -40,7 +40,6 @@ from scipy.optimize import minimize as scipy_minimize
 __all__ = [
     "PRIVATE_OPTIMIZER_JAX_VERSION",
     "VALID_OPTIMIZER_BACKENDS",
-    "REFERENCE_OPTIMIZER_BACKENDS",
     "TARGET_X64_REQUIRED_OPTIMIZER_BACKENDS",
     "jax_minimize",
     "newton_polish",
@@ -65,7 +64,6 @@ _SUPPORTED_METHODS = {
     "bfgs-ondevice",
     "lbfgs-ondevice",
 }
-REFERENCE_OPTIMIZER_BACKENDS = frozenset({"scipy"})
 _REFERENCE_METHODS = frozenset({"bfgs", "lbfgs"})
 
 _dot = partial(jnp.dot, precision=lax.Precision.HIGHEST)
@@ -1233,6 +1231,8 @@ def newton_polish(
         nit += 1
 
     H = _materialize_dense_hessian(hvp_fn, x)
+    if stab != 0.0:
+        H = H + stab * jnp.eye(H.shape[0], dtype=H.dtype)
 
     return {
         "x": x,

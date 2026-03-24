@@ -97,8 +97,8 @@ PRIVATE_OPTIMIZER_JAX_VERSION = _opt.PRIVATE_OPTIMIZER_JAX_VERSION
 _boozer_penalty_objective = _bsj._boozer_penalty_objective
 _boozer_exact_coil_vjp = _bsj._boozer_exact_coil_vjp
 _boozer_ls_coil_vjp = _bsj._boozer_ls_coil_vjp
-_require_target_backend_x64 = _bsj._require_target_backend_x64
-_resolve_ls_optimizer_method = _bsj._resolve_ls_optimizer_method
+require_target_backend_x64 = _bsj.require_target_backend_x64
+resolve_optimizer_backend_method = _bsj.resolve_optimizer_backend_method
 BoozerSurfaceJAX = _bsj.BoozerSurfaceJAX
 _ensure_solved_jax = _soj._ensure_solved
 _resolved_boozer_G_jax = _soj._resolved_boozer_G
@@ -1854,7 +1854,10 @@ class TestBoozerSurfaceJAXClass:
     ):
         """LS backend contract must route to the expected optimizer method."""
         assert (
-            _resolve_ls_optimizer_method(optimizer_backend, limited_memory)
+            resolve_optimizer_backend_method(
+                optimizer_backend,
+                limited_memory=limited_memory,
+            )
             == expected_method
         )
 
@@ -1863,12 +1866,12 @@ class TestBoozerSurfaceJAXClass:
         with pytest.raises(
             ValueError, match="optimizer_backend='hybrid'.*limited_memory=True"
         ):
-            _resolve_ls_optimizer_method("hybrid", True)
+            resolve_optimizer_backend_method("hybrid", limited_memory=True)
 
     def test_resolve_ls_optimizer_method_rejects_invalid_backend(self):
         """Invalid backend names must fail instead of silently falling through."""
         with pytest.raises(ValueError, match="optimizer_backend must be one of"):
-            _resolve_ls_optimizer_method("bogus", False)
+            resolve_optimizer_backend_method("bogus", limited_memory=False)
 
     @pytest.mark.parametrize("optimizer_backend", ["hybrid", "ondevice"])
     def test_require_target_backend_x64_rejects_disabled_float64(
@@ -1881,7 +1884,23 @@ class TestBoozerSurfaceJAXClass:
             RuntimeError,
             match=rf"optimizer_backend='{optimizer_backend}'.*requires jax_enable_x64=True",
         ):
-            _require_target_backend_x64(optimizer_backend)
+            require_target_backend_x64(optimizer_backend)
+
+    def test_newton_polish_returns_stabilized_hessian_when_requested(self):
+        """Returned Hessian must match the stabilized linear system."""
+        A = jnp.array([[2.0, 0.5], [0.5, 3.0]])
+        b = jnp.array([1.0, 2.0])
+        stab = 0.25
+
+        def obj(x):
+            return 0.5 * x @ A @ x - b @ x
+
+        result = newton_polish(obj, jnp.zeros(2), maxiter=5, tol=1e-14, stab=stab)
+        np.testing.assert_allclose(
+            result["hessian"],
+            np.asarray(A + stab * jnp.eye(2)),
+            atol=1e-12,
+        )
 
     def test_recompute_bell(self):
         """recompute_bell sets the dirty flag."""

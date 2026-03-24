@@ -1,5 +1,4 @@
-"""
-Optimizable adapter wrapping the pure JAX Biot-Savart functions.
+"""JAX-backed Biot-Savart adapter and coil-tree helpers.
 
 ``BiotSavartJAX`` participates in the ``Optimizable`` dependency graph
 through its coil list while computing the magnetic field via the pure
@@ -88,6 +87,26 @@ def _build_coil_profile_breakdown(per_coil_timings):
     ]
 
 
+def _unwrap_coil_curve_and_current(coil):
+    from ..geo.curve import RotatedCurve
+    from .coil import ScaledCurrent
+
+    curve = coil.curve
+    rotmat = None
+    while isinstance(curve, RotatedCurve):
+        next_rotmat = jnp.asarray(curve.rotmat)
+        rotmat = next_rotmat if rotmat is None else next_rotmat @ rotmat
+        curve = curve.curve
+
+    current = coil.current
+    scale = 1.0
+    while isinstance(current, ScaledCurrent):
+        scale *= float(current.scale)
+        current = current.current_to_scale
+
+    return curve, rotmat, current, scale
+
+
 class BiotSavartJAX(Optimizable):
     r"""JAX-backed Biot-Savart magnetic field evaluation.
 
@@ -131,8 +150,7 @@ class BiotSavartJAX(Optimizable):
         """
         try:
             from ..geo.curvexyzfourier import CurveXYZFourier
-            from ..geo.curve import RotatedCurve
-            from .coil import ScaledCurrent, Current
+            from .coil import Current
         except ImportError:
             return
 
@@ -143,16 +161,7 @@ class BiotSavartJAX(Optimizable):
         descs = []
 
         for coil in self._coils:
-            curve = coil.curve
-            rotmat = None
-
-            # Unwrap nested RotatedCurve layers (accumulate rotation).
-            # Outer wraps inner: gamma = base.gamma() @ R_inner @ R_outer,
-            # so we pre-multiply each inner rotation found while unwrapping.
-            while isinstance(curve, RotatedCurve):
-                rm = curve.rotmat
-                rotmat = rm if rotmat is None else rm @ rotmat
-                curve = curve.curve
+            curve, rotmat, current, scale = _unwrap_coil_curve_and_current(coil)
 
             if not isinstance(curve, CurveXYZFourier):
                 return  # unsupported curve type → stay on fallback path
@@ -161,13 +170,6 @@ class BiotSavartJAX(Optimizable):
             if cid not in base_curve_ids:
                 base_curve_ids[cid] = len(base_curves)
                 base_curves.append(curve)
-
-            # Unwrap ScaledCurrent chain
-            current = coil.current
-            scale = 1.0
-            while isinstance(current, ScaledCurrent):
-                scale *= current.scale
-                current = current.current_to_scale
 
             # Must resolve to a single-DOF Current (not CurrentSum etc.)
             if not isinstance(current, Current):

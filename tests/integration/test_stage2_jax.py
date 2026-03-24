@@ -285,6 +285,16 @@ def _build_stage2_target_objective_contract_case():
     return objective, target_bundle
 
 
+def _centered_fd_gradient(fun, x, *, eps):
+    x = np.asarray(x, dtype=float)
+    grad = np.zeros_like(x)
+    for i in range(x.size):
+        step = np.zeros_like(x)
+        step[i] = eps
+        grad[i] = (float(fun(x + step)) - float(fun(x - step))) / (2.0 * eps)
+    return grad
+
+
 def _build_fake_bfgs_result(optimizer_jax, x0, value, grad):
     x0_array = np.asarray(x0, dtype=np.float64)
     grad_array = np.asarray(grad, dtype=np.float64)
@@ -1438,7 +1448,7 @@ class TestStage2OptimizerContract:
             },
         )
 
-        snapshot, grad, diagnostics = stage2_script.evaluate_stage2_objective(
+        context = stage2_script.Stage2ObjectiveContext(
             DummyJF(),
             object(),
             object(),
@@ -1446,6 +1456,9 @@ class TestStage2OptimizerContract:
             DummyScalar(1.25),
             DummyDistance(),
             DummyScalar(0.5),
+        )
+        snapshot, grad, diagnostics = stage2_script.evaluate_stage2_objective(
+            context,
         )
 
         assert call_order[:2] == ["dJ", "J"]
@@ -1495,15 +1508,19 @@ class TestStage2OptimizerContract:
 
         monkeypatch.setattr(stage2_script, "compute_mean_abs_relbn", lambda _surf, _bs: 0.5)
 
-        payload = stage2_script.profile_stage2_explicit_step(
+        context = stage2_script.Stage2ObjectiveContext(
             DummyJF(),
             object(),
             object(),
             DummyScalar(0.75),
-            DummyScalar(0.2),
             DummyScalar(1.25),
             DummyDistance(),
             DummyScalar(0.5),
+            DummyScalar(0.2),
+        )
+        payload = stage2_script.profile_stage2_explicit_step(
+            context,
+            DummyScalar(0.2),
         )
 
         assert payload["observed_step_total_s"] >= 0.0
@@ -1604,15 +1621,19 @@ class TestStage2OptimizerContract:
 
         monkeypatch.setattr(stage2_script, "compute_mean_abs_relbn", lambda _surf, _bs: 0.5)
 
-        payload = stage2_script.profile_stage2_explicit_step(
+        context = stage2_script.Stage2ObjectiveContext(
             DummyCompositeObjective(),
             object(),
             object(),
             DummyFallbackSquaredFlux(),
-            DummyScalar(0.2),
             DummyScalar(1.25),
             DummyDistance(),
             DummyScalar(0.5),
+            DummyScalar(0.2),
+        )
+        payload = stage2_script.profile_stage2_explicit_step(
+            context,
+            DummyScalar(0.2),
         )
 
         assert set(payload["squared_flux_internal_timings_s"]) == EXPECTED_SQUARED_FLUX_INTERNAL_TIMING_KEYS
@@ -1803,6 +1824,19 @@ class TestStage2OptimizerContract:
             grad_ref,
             rtol=1e-9,
             atol=1e-15,
+        )
+
+    def test_target_scalar_objective_gradient_matches_centered_fd(self):
+        objective, target_bundle = _build_stage2_target_objective_contract_case()
+        dofs = np.asarray(objective.x, dtype=float)
+        grad_target = np.asarray(jax.grad(target_bundle.objective)(dofs), dtype=float)
+        grad_fd = _centered_fd_gradient(target_bundle.objective, dofs, eps=1e-7)
+
+        np.testing.assert_allclose(
+            grad_target,
+            grad_fd,
+            rtol=2e-5,
+            atol=5e-7,
         )
 
     @pytest.mark.parametrize(

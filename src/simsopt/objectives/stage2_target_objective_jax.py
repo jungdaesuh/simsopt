@@ -1,3 +1,5 @@
+"""Scalar JAX objective used by the Stage 2 ondevice target lane."""
+
 from __future__ import annotations
 
 from typing import Callable, NamedTuple
@@ -6,8 +8,8 @@ import numpy as np
 import jax.numpy as jnp
 
 from ..field.biotsavart_jax import biot_savart_B, group_coil_data, grouped_biot_savart_B
-from ..field.coil import ScaledCurrent
-from ..geo.curve import RotatedCurve, incremental_arclength_pure, kappa_pure
+from ..field.biotsavart_jax_backend import _unwrap_coil_curve_and_current
+from ..geo.curve import incremental_arclength_pure, kappa_pure
 from ..geo.curveobjectives import Lp_curvature_pure, cc_distance_pure, curve_length_pure
 from .integral_bdotn_jax import integral_BdotN
 
@@ -23,23 +25,6 @@ def _as_jax_float64_array(values, *, contiguous=False):
     if contiguous:
         values = np.ascontiguousarray(values)
     return jnp.asarray(values, dtype=jnp.float64)
-
-
-def _rotation_and_scale_from_coil(coil):
-    curve = coil.curve
-    rotmat = None
-    while isinstance(curve, RotatedCurve):
-        next_rotmat = _as_jax_float64_array(curve.rotmat)
-        rotmat = next_rotmat if rotmat is None else next_rotmat @ rotmat
-        curve = curve.curve
-
-    current = coil.current
-    scale = 1.0
-    while isinstance(current, ScaledCurrent):
-        scale *= float(current.scale)
-        current = current.current_to_scale
-
-    return curve, rotmat, scale
 
 
 def _fixed_curve_penalty(curves, minimum_distance):
@@ -156,10 +141,10 @@ def build_stage2_target_objective(
 
     banana_descriptors = []
     for coil in banana_coils:
-        _, rotmat, scale = _rotation_and_scale_from_coil(coil)
+        _, rotmat, _, scale = _unwrap_coil_curve_and_current(coil)
         banana_descriptors.append(
             (
-                rotmat,
+                None if rotmat is None else _as_jax_float64_array(rotmat),
                 _as_jax_float64_array(scale),
             )
         )
