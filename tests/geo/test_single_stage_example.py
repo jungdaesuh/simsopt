@@ -1,3 +1,4 @@
+from contextlib import contextmanager
 import importlib.util
 import sys
 import types
@@ -104,6 +105,11 @@ class FakeBoozerSurface:
         return self.res
 
 
+class FailingCPUBoozerSurface:
+    def __init__(self, *args, **kwargs):
+        raise AssertionError("CPU BoozerSurface should not be constructed")
+
+
 class SingleStageExampleTests(unittest.TestCase):
     def setUp(self):
         FakeSurfaceXYZTensorFourier.instances = []
@@ -127,6 +133,51 @@ class SingleStageExampleTests(unittest.TestCase):
                 iota=TEST_IOTA,
                 G0=TEST_G0,
             )
+
+    def build_fake_boozer_surface_jax_class(self, *, record_run_calls):
+        class FakeBoozerSurfaceJAX:
+            instances = []
+
+            def __init__(
+                self,
+                bs,
+                surface,
+                label,
+                targetlabel,
+                constraint_weight,
+                options=None,
+            ):
+                self.bs = bs
+                self.surface = surface
+                self.label = label
+                self.targetlabel = targetlabel
+                self.constraint_weight = constraint_weight
+                self.options = options or {}
+                self.res = {"success": True, "iota": TEST_IOTA, "G": TEST_G0}
+                if record_run_calls:
+                    self.run_code_calls = []
+                FakeBoozerSurfaceJAX.instances.append(self)
+
+            def run_code(self, iota, G):
+                if record_run_calls:
+                    self.run_code_calls.append((iota, G))
+                return self.res
+
+        return FakeBoozerSurfaceJAX
+
+    @contextmanager
+    def patch_initialize_boozer_surface_jax(self, module, fake_boozer_surface_jax):
+        fake_jax_module = types.ModuleType("simsopt.geo.boozersurface_jax")
+        fake_jax_module.BoozerSurfaceJAX = fake_boozer_surface_jax
+        with patch.object(
+            module, "SurfaceXYZTensorFourier", FakeSurfaceXYZTensorFourier
+        ), patch.object(module, "Volume", FakeVolume), patch.object(
+            module, "BoozerSurface", FailingCPUBoozerSurface
+        ), patch.dict(
+            sys.modules,
+            {"simsopt.geo.boozersurface_jax": fake_jax_module},
+        ):
+            yield
 
     def test_exact_boozer_helpers_are_imported(self):
         module = self.load_module()
@@ -170,47 +221,12 @@ class SingleStageExampleTests(unittest.TestCase):
     def test_initialize_boozer_surface_jax_backend_routes_to_jax_solver(self):
         module = self.load_module()
         surf_prev = FakeSurfPrev()
+        fake_boozer_surface_jax = self.build_fake_boozer_surface_jax_class(
+            record_run_calls=True
+        )
 
-        class FailingCPUBoozerSurface:
-            def __init__(self, *args, **kwargs):
-                raise AssertionError("CPU BoozerSurface should not be constructed")
-
-        class FakeBoozerSurfaceJAX:
-            instances = []
-
-            def __init__(
-                self,
-                bs,
-                surface,
-                label,
-                targetlabel,
-                constraint_weight,
-                options=None,
-            ):
-                self.bs = bs
-                self.surface = surface
-                self.label = label
-                self.targetlabel = targetlabel
-                self.constraint_weight = constraint_weight
-                self.options = options or {}
-                self.run_code_calls = []
-                self.res = {"success": True, "iota": TEST_IOTA, "G": TEST_G0}
-                FakeBoozerSurfaceJAX.instances.append(self)
-
-            def run_code(self, iota, G):
-                self.run_code_calls.append((iota, G))
-                return self.res
-
-        fake_jax_module = types.ModuleType("simsopt.geo.boozersurface_jax")
-        fake_jax_module.BoozerSurfaceJAX = FakeBoozerSurfaceJAX
-
-        with patch.object(
-            module, "SurfaceXYZTensorFourier", FakeSurfaceXYZTensorFourier
-        ), patch.object(module, "Volume", FakeVolume), patch.object(
-            module, "BoozerSurface", FailingCPUBoozerSurface
-        ), patch.dict(
-            sys.modules,
-            {"simsopt.geo.boozersurface_jax": fake_jax_module},
+        with self.patch_initialize_boozer_surface_jax(
+            module, fake_boozer_surface_jax
         ):
             boozer_surface = module.initialize_boozer_surface(
                 surf_prev,
@@ -224,12 +240,41 @@ class SingleStageExampleTests(unittest.TestCase):
                 backend="jax",
             )
 
-        self.assertIsInstance(boozer_surface, FakeBoozerSurfaceJAX)
+        self.assertIsInstance(boozer_surface, fake_boozer_surface_jax)
         self.assertEqual(boozer_surface.run_code_calls, [(TEST_IOTA, TEST_G0)])
         self.assertEqual(boozer_surface.constraint_weight, 1.0)
         self.assertEqual(boozer_surface.options["verbose"], True)
         self.assertEqual(boozer_surface.options["optimizer_backend"], "scipy")
         self.assertIs(boozer_surface.surface, FakeSurfaceXYZTensorFourier.instances[0])
+
+    def test_initialize_boozer_surface_threads_nondefault_optimizer_backend(self):
+        module = self.load_module()
+        surf_prev = FakeSurfPrev()
+        fake_boozer_surface_jax = self.build_fake_boozer_surface_jax_class(
+            record_run_calls=False
+        )
+
+        with self.patch_initialize_boozer_surface_jax(
+            module, fake_boozer_surface_jax
+        ):
+            module.initialize_boozer_surface(
+                surf_prev,
+                mpol=TEST_MPOL,
+                ntor=TEST_NTOR,
+                bs=object(),
+                vol_target=TEST_VOL_TARGET,
+                constraint_weight=1.0,
+                iota=TEST_IOTA,
+                G0=TEST_G0,
+                backend="jax",
+                optimizer_backend="ondevice",
+            )
+
+        self.assertEqual(len(fake_boozer_surface_jax.instances), 1)
+        self.assertEqual(
+            fake_boozer_surface_jax.instances[0].options["optimizer_backend"],
+            "ondevice",
+        )
 
     def test_diagnostic_field_prefers_cpu_reference_when_present(self):
         module = self.load_module()

@@ -14,7 +14,11 @@ SRC_ROOT = REPO_ROOT / "src"
 sys.path.insert(0, str(REPO_ROOT))
 sys.path.insert(0, str(SRC_ROOT))
 
-from benchmarks.validation_ladder_common import apply_requested_platform, preparse_platform
+from benchmarks.validation_ladder_common import (
+    apply_requested_platform,
+    preparse_platform,
+    resolve_probe_lane,
+)
 
 
 REQUESTED_PLATFORM = preparse_platform(sys.argv[1:])
@@ -49,7 +53,7 @@ def get_git_sha() -> str:
     ).stdout.strip()
 
 
-def print_provenance() -> None:
+def print_provenance(*, optimizer_backend: str) -> None:
     print(f"{'=' * 70}")
     print("run_code() parity probe")
     print(f"{'=' * 70}")
@@ -59,9 +63,11 @@ def print_provenance() -> None:
     print(f"backend:      {jax.default_backend()}")
     print(f"devices:      {jax.devices()}")
     print(f"x64 enabled:  {jax.numpy.zeros(1).dtype == jax.numpy.float64}")
+    print(f"lane:         {resolve_probe_lane(optimizer_backend=optimizer_backend)}")
+    print(f"optimizer:    {optimizer_backend}")
 
 
-def run_probe():
+def run_probe(*, optimizer_backend: str):
     from simsopt.field import BiotSavart
     from simsopt.field.biotsavart_jax_backend import BiotSavartJAX
     from simsopt.geo import BoozerSurface, BoozerSurfaceJAX, Volume
@@ -88,7 +94,7 @@ def run_probe():
         vol_jax,
         problem.vol_target,
         constraint_weight=1.0,
-        options={**SOLVER_OPTIONS, "optimizer_backend": "scipy"},
+        options={**SOLVER_OPTIONS, "optimizer_backend": optimizer_backend},
     )
 
     res_cpu = booz_cpu.run_code(problem.iota0, problem.G0)
@@ -142,13 +148,19 @@ def parse_args() -> argparse.Namespace:
         default="auto",
         help="JAX platform to request before importing JAX.",
     )
+    parser.add_argument(
+        "--optimizer-backend",
+        choices=("scipy", "hybrid", "ondevice"),
+        default="scipy",
+        help="BoozerSurfaceJAX LS optimizer backend to exercise on the JAX lane.",
+    )
     return parser.parse_args()
 
 
 def main() -> None:
-    parse_args()
-    print_provenance()
-    failures = run_probe()
+    args = parse_args()
+    print_provenance(optimizer_backend=args.optimizer_backend)
+    failures = run_probe(optimizer_backend=args.optimizer_backend)
     if failures:
         print("PARITY PROBE FAILED")
         for failure in failures:

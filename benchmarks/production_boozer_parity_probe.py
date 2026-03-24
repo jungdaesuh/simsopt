@@ -27,6 +27,7 @@ from benchmarks.validation_ladder_common import (
     print_provenance,
     query_gpu_memory_mb,
     relative_error,
+    resolve_probe_lane,
     write_json,
 )
 
@@ -69,6 +70,12 @@ def parse_args() -> argparse.Namespace:
         required=True,
         help="Path to write structured parity results.",
     )
+    parser.add_argument(
+        "--optimizer-backend",
+        choices=("scipy", "hybrid", "ondevice"),
+        default="scipy",
+        help="BoozerSurfaceJAX LS optimizer backend to exercise on the JAX lane.",
+    )
     return parser.parse_args()
 
 
@@ -97,7 +104,7 @@ def _build_cpu_solver(problem):
     return booz, vol
 
 
-def _build_jax_solver(problem):
+def _build_jax_solver(problem, *, optimizer_backend: str):
     from simsopt.field.biotsavart_jax_backend import BiotSavartJAX
     from simsopt.geo.boozersurface_jax import BoozerSurfaceJAX
     from simsopt.geo import Volume
@@ -111,9 +118,16 @@ def _build_jax_solver(problem):
         vol,
         problem.vol_target,
         constraint_weight=1.0,
-        options={**SOLVER_OPTIONS, "optimizer_backend": "scipy"},
+        options={**SOLVER_OPTIONS, "optimizer_backend": optimizer_backend},
     )
     return booz, vol
+
+
+def _build_jax_solver_factory(*, optimizer_backend: str):
+    def build(problem):
+        return _build_jax_solver(problem, optimizer_backend=optimizer_backend)
+
+    return build
 
 
 def _run_full_case(builder, problem, *, name: str) -> dict:
@@ -184,6 +198,8 @@ def main() -> None:
         extra={
             "config_label": args.config_label,
             "platform_request": args.platform,
+            "lane": resolve_probe_lane(optimizer_backend=args.optimizer_backend),
+            "optimizer_backend": args.optimizer_backend,
             "grid": f"{config.nphi}x{config.ntheta}",
             "surface_modes": f"mpol={config.mpol} ntor={config.ntor}",
         },
@@ -192,9 +208,12 @@ def main() -> None:
 
     cpu_first = _run_full_case(_build_cpu_solver, problem, name="CPU")
     cpu_stage_split = _run_stage_split(_build_cpu_solver, problem)
-    jax_first = _run_full_case(_build_jax_solver, problem, name="JAX")
-    jax_second = _run_full_case(_build_jax_solver, problem, name="JAX-repeat")
-    jax_stage_split = _run_stage_split(_build_jax_solver, problem)
+    jax_builder = _build_jax_solver_factory(
+        optimizer_backend=args.optimizer_backend
+    )
+    jax_first = _run_full_case(jax_builder, problem, name="JAX")
+    jax_second = _run_full_case(jax_builder, problem, name="JAX-repeat")
+    jax_stage_split = _run_stage_split(jax_builder, problem)
 
     comparison = {
         "iota_abs_diff": abs(cpu_first["iota"] - jax_first["iota"]),
@@ -242,6 +261,7 @@ def main() -> None:
         "jax_second": jax_second,
         "jax_stage_split": jax_stage_split,
         "comparison": comparison,
+        "optimizer_backend": args.optimizer_backend,
         "failures": failures,
         "passed": not failures,
     }

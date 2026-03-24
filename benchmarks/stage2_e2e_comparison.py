@@ -389,8 +389,12 @@ def build_stage2_e2e_payload(
         ondevice_metrics["cpu_final_objective"],
     )
 
+    cpu_elapsed_s = float(cpu_case["elapsed_s"])
+    cpu_iterations = int(cpu_results["iterations"])
+    jax_iterations = int(jax_results["iterations"])
+    jax_optimizer_backend = str(jax_results.get("optimizer_backend", "scipy"))
     comparison = {
-        "optimizer_backend": str(jax_results.get("optimizer_backend", "scipy")),
+        "optimizer_backend": jax_optimizer_backend,
         "final_objective_rel_diff": final_objective_rel_diff,
         "field_error_rel_diff": relative_error(
             ondevice_metrics["jax_field_error"],
@@ -400,9 +404,9 @@ def build_stage2_e2e_payload(
         "max_geometry_pointwise_abs": max_geom_abs,
         "max_geometry_pointwise_rel": max_geom_rel,
         "geometry_rel_tol": geometry_rel_tol,
-        "cpu_iterations": int(cpu_results["iterations"]),
-        "jax_iterations": int(jax_results["iterations"]),
-        "cpu_elapsed_s": float(cpu_case["elapsed_s"]),
+        "cpu_iterations": cpu_iterations,
+        "jax_iterations": jax_iterations,
+        "cpu_elapsed_s": cpu_elapsed_s,
         "jax_elapsed_s": jax_primary_elapsed_s,
         "cpu_trajectory_len": len(cpu_trajectory),
         "jax_trajectory_len": len(jax_trajectory),
@@ -414,11 +418,22 @@ def build_stage2_e2e_payload(
     }
     failures = evaluate_stage2_e2e_comparison(comparison)
     timings = {
-        "cpu_outer_elapsed_s": float(cpu_case["elapsed_s"]),
+        "cpu_outer_elapsed_s": cpu_elapsed_s,
         **jax_timings,
     }
+    status = "passed" if not failures else "failed"
+    cpu_summary = {"elapsed_s": cpu_elapsed_s, "iterations": cpu_iterations}
+    jax_summary = {
+        "elapsed_s": jax_primary_elapsed_s,
+        "iterations": jax_iterations,
+        "optimizer_backend": jax_optimizer_backend,
+    }
     return {
+        "status": status,
         "provenance": provenance,
+        "cpu": cpu_summary,
+        "jax": jax_summary,
+        "ondevice_metrics": ondevice_metrics,
         "cpu_results": cpu_results,
         "jax_results": jax_results,
         "cpu_trajectory": cpu_trajectory,

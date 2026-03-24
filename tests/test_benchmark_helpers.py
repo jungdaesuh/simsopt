@@ -681,6 +681,17 @@ def test_stage2_e2e_payload_preserves_trajectory_and_timing_artifacts():
     )
 
     assert payload["passed"] is True
+    assert payload["status"] == "passed"
+    assert payload["cpu"] == {
+        "elapsed_s": pytest.approx(12.5),
+        "iterations": 3,
+    }
+    assert payload["jax"] == {
+        "elapsed_s": pytest.approx(9.5),
+        "iterations": 3,
+        "optimizer_backend": "ondevice",
+    }
+    assert payload["ondevice_metrics"]["jax_final_objective"] == pytest.approx(1.0 + 1e-7)
     assert payload["cpu_trajectory"] == cpu_case["trajectory"]
     assert payload["jax_trajectory"] == jax_case["trajectory"]
     assert payload["comparison"]["cpu_elapsed_s"] == pytest.approx(12.5)

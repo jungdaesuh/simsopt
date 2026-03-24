@@ -2136,6 +2136,25 @@ class TestBoozerSurfaceJAXClass:
         assert res["success"] is True
 
     @PRIVATE_OPTIMIZER_RUNTIME
+    @REQUIRES_PRIVATE_OPTIMIZER_RUNTIME
+    def test_run_code_ondevice_does_not_enter_scipy_minimize(self, monkeypatch):
+        """The target LS path must not fall back through _scipy_minimize()."""
+        booz = _make_mock_boozer_surface()
+        booz.options["optimizer_backend"] = "ondevice"
+        booz.options["limited_memory"] = False
+
+        def forbidden_scipy_minimize(*_args, **_kwargs):
+            raise AssertionError("_scipy_minimize must not be called on the ondevice path")
+
+        monkeypatch.setattr(_opt, "_scipy_minimize", forbidden_scipy_minimize)
+
+        res = booz.run_code(iota=0.3, G=0.05)
+
+        assert res is not None
+        assert res["success"] is True
+        assert np.isfinite(res["fun"])
+
+    @PRIVATE_OPTIMIZER_RUNTIME
     @REQUIRES_PRIVATE_LIMITED_MEMORY_RUNTIME
     def test_run_code_ondevice_limited_memory_converges_without_monkeypatch(self):
         """limited_memory=True must run a full on-device L-BFGS solve."""
