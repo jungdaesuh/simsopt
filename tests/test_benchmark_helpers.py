@@ -177,6 +177,7 @@ def test_single_stage_init_defaults_to_reduced_grid_smoke_fixture(monkeypatch):
     assert args.ntheta == DEFAULT_SMOKE_NTHETA
     assert args.mpol == DEFAULT_SMOKE_MPOL
     assert args.ntor == DEFAULT_SMOKE_NTOR
+    assert args.optimizer_backend == single_stage_init_parity_module.TARGET_OPTIMIZER_BACKEND
 
 
 def test_repo_pythonpath_env_sets_all_platform_selectors(monkeypatch):
@@ -401,6 +402,7 @@ def test_single_stage_init_parity_accepts_small_real_fixture_differences():
         "FIELD_ERROR": 0.0030,
         "MAX_CURVATURE": 12.0,
         "SELF_INTERSECTING": False,
+        "SELF_INTERSECTION_CHECK_AVAILABLE": True,
     }
     jax_results = {
         "FINAL_IOTA": 0.1505,
@@ -408,6 +410,7 @@ def test_single_stage_init_parity_accepts_small_real_fixture_differences():
         "FIELD_ERROR": 0.0030002,
         "MAX_CURVATURE": 12.1,
         "SELF_INTERSECTING": False,
+        "SELF_INTERSECTION_CHECK_AVAILABLE": True,
     }
 
     comparison, failures = evaluate_single_stage_init_parity(
@@ -422,6 +425,8 @@ def test_single_stage_init_parity_accepts_small_real_fixture_differences():
     assert comparison["field_error_rel_diff"] < FIELD_ERROR_REL_TOL
     assert comparison["max_surface_pointwise_rel"] < SURFACE_GEOMETRY_REL_TOL
     assert failures == []
+    assert comparison["cpu_self_intersection_check_available"] is True
+    assert comparison["jax_self_intersection_check_available"] is True
 
 
 def test_single_stage_init_parity_reports_real_gate_failures():
@@ -431,6 +436,7 @@ def test_single_stage_init_parity_reports_real_gate_failures():
         "FIELD_ERROR": 0.003,
         "MAX_CURVATURE": 10.0,
         "SELF_INTERSECTING": False,
+        "SELF_INTERSECTION_CHECK_AVAILABLE": True,
     }
     jax_results = {
         "FINAL_IOTA": 0.17,
@@ -438,6 +444,7 @@ def test_single_stage_init_parity_reports_real_gate_failures():
         "FIELD_ERROR": 0.004,
         "MAX_CURVATURE": 10.0,
         "SELF_INTERSECTING": True,
+        "SELF_INTERSECTION_CHECK_AVAILABLE": True,
     }
 
     _, failures = evaluate_single_stage_init_parity(
@@ -452,6 +459,36 @@ def test_single_stage_init_parity_reports_real_gate_failures():
     assert any("Final field error relative difference too large" in failure for failure in failures)
     assert any("Initial Boozer surface geometry drift too large" in failure for failure in failures)
     assert any("self-intersecting" in failure for failure in failures)
+
+
+def test_single_stage_init_parity_tracks_self_intersection_check_availability():
+    cpu_results = {
+        "FINAL_IOTA": 0.15,
+        "FINAL_VOLUME": 0.10,
+        "FIELD_ERROR": 0.003,
+        "MAX_CURVATURE": 10.0,
+        "SELF_INTERSECTING": False,
+        "SELF_INTERSECTION_CHECK_AVAILABLE": False,
+    }
+    jax_results = {
+        "FINAL_IOTA": 0.15,
+        "FINAL_VOLUME": 0.10,
+        "FIELD_ERROR": 0.003,
+        "MAX_CURVATURE": 10.0,
+        "SELF_INTERSECTING": False,
+        "SELF_INTERSECTION_CHECK_AVAILABLE": True,
+    }
+
+    comparison, failures = evaluate_single_stage_init_parity(
+        cpu_results,
+        jax_results,
+        max_surface_geometry_abs=1e-6,
+        max_surface_geometry_rel=5e-6,
+    )
+
+    assert failures == []
+    assert comparison["cpu_self_intersection_check_available"] is False
+    assert comparison["jax_self_intersection_check_available"] is True
 
 
 def test_single_stage_init_case_loads_surface_before_tempdir_cleanup(monkeypatch, tmp_path):
@@ -497,16 +534,16 @@ def test_single_stage_init_case_loads_surface_before_tempdir_cleanup(monkeypatch
 
     observed_paths: list[Path] = []
 
-    def fake_load_surface_artifacts(surface_json_path: str) -> tuple[np.ndarray, bool]:
+    def fake_load_surface_gamma_artifact(surface_json_path: str) -> np.ndarray:
         path = Path(surface_json_path)
         observed_paths.append(path)
         assert path.exists()
-        return np.zeros((2, 2, 3)), True
+        return np.zeros((2, 2, 3))
 
     monkeypatch.setattr(
         single_stage_init_parity_module,
-        "_load_surface_artifacts",
-        fake_load_surface_artifacts,
+        "_load_surface_gamma_artifact",
+        fake_load_surface_gamma_artifact,
     )
 
     payload = single_stage_init_parity_module._run_single_stage_case(
@@ -517,7 +554,76 @@ def test_single_stage_init_case_loads_surface_before_tempdir_cleanup(monkeypatch
 
     assert observed_paths
     np.testing.assert_allclose(payload["surface_gamma"], np.zeros((2, 2, 3)))
-    assert payload["results"]["SELF_INTERSECTING"] is True
+    assert payload["results"]["SELF_INTERSECTING"] is False
+
+
+def test_single_stage_init_case_threads_optimizer_backend_to_jax_lane(
+    monkeypatch, tmp_path
+):
+    args = argparse.Namespace(
+        plasma_surf_filename="wout_nfp22ginsburg_000_014417_iota15.nc",
+        stage2_bs_path=str(DEFAULT_STAGE2_BS_PATH),
+        nphi=63,
+        ntheta=32,
+        mpol=4,
+        ntor=4,
+        vol_target=0.1,
+        iota_target=0.15,
+        optimizer_backend="ondevice",
+        equilibrium_path=None,
+        equilibria_dir=str(tmp_path / "equilibria"),
+    )
+
+    observed_commands: list[list[str]] = []
+    monkeypatch.setattr(
+        single_stage_init_parity_module,
+        "_single_stage_script_path",
+        lambda: tmp_path / "driver.py",
+    )
+
+    def fake_run_python_script(_script_path, command, **_kwargs):
+        observed_commands.append(list(command))
+        return argparse.Namespace(stdout="", stderr="")
+
+    monkeypatch.setattr(
+        single_stage_init_parity_module,
+        "run_python_script",
+        fake_run_python_script,
+    )
+
+    def fake_find_single_file(root: str | Path, pattern: str) -> Path:
+        path = Path(root) / pattern
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{}", encoding="utf-8")
+        return path
+
+    monkeypatch.setattr(single_stage_init_parity_module, "find_single_file", fake_find_single_file)
+    monkeypatch.setattr(
+        single_stage_init_parity_module,
+        "load_json",
+        lambda _path: {
+            "FINAL_IOTA": 0.15,
+            "FINAL_VOLUME": 0.1,
+            "FIELD_ERROR": 0.003,
+            "MAX_CURVATURE": 10.0,
+            "SELF_INTERSECTING": False,
+        },
+    )
+    monkeypatch.setattr(
+        single_stage_init_parity_module,
+        "_load_surface_gamma_artifact",
+        lambda _surface_json_path: np.zeros((2, 2, 3)),
+    )
+
+    single_stage_init_parity_module._run_single_stage_case(
+        args,
+        "jax",
+        platform="cpu",
+    )
+
+    assert observed_commands
+    optimizer_flag_index = observed_commands[0].index("--optimizer-backend")
+    assert observed_commands[0][optimizer_flag_index + 1] == "ondevice"
 
 
 def _stage2_e2e_comparison_case(**overrides):

@@ -178,6 +178,13 @@ class SingleStageExampleTests(unittest.TestCase):
         ):
             yield
 
+    @contextmanager
+    def patch_surface_self_intersection_backend_unavailable(self, module):
+        with patch.object(module.surface_module, "get_context", None), patch.object(
+            module.surface_module, "contour_self_intersects", None
+        ), patch.object(module.surface_module, "LineString", None):
+            yield
+
     def test_exact_boozer_helpers_are_imported(self):
         module = self.load_module()
 
@@ -274,6 +281,38 @@ class SingleStageExampleTests(unittest.TestCase):
             fake_boozer_surface_jax.instances[0].options["optimizer_backend"],
             "ondevice",
         )
+
+    def test_evaluate_surface_self_intersection_skips_when_backend_unavailable(self):
+        module = self.load_module()
+
+        class SentinelSurface:
+            def is_self_intersecting(self):
+                raise AssertionError("surface.is_self_intersecting should not be called")
+
+        with self.patch_surface_self_intersection_backend_unavailable(module):
+            self.assertEqual(
+                module.evaluate_surface_self_intersection(SentinelSurface()),
+                (False, False),
+            )
+
+    def test_initialize_boozer_surface_skips_optional_self_intersection_gate(self):
+        module = self.load_module()
+        surf_prev = FakeSurfPrev()
+
+        with self.patch_surface_self_intersection_backend_unavailable(
+            module
+        ), patch.object(
+            FakeSurfaceXYZTensorFourier,
+            "is_self_intersecting",
+            side_effect=AssertionError(
+                "surface.is_self_intersecting should not be called"
+            ),
+        ):
+            boozer_surface = self.initialize_boozer_surface(
+                module, surf_prev, constraint_weight=1.0
+            )
+
+        self.assertIsInstance(boozer_surface, FakeBoozerSurface)
 
     def test_diagnostic_field_prefers_cpu_reference_when_present(self):
         module = self.load_module()

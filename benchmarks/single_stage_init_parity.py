@@ -39,7 +39,6 @@ from benchmarks.validation_ladder_common import (
 from benchmarks.single_stage_smoke_fixture import (
     DEFAULT_EQUILIBRIA_DIR,
     DEFAULT_IOTA_TARGET,
-    DEFAULT_OPTIMIZER_BACKEND,
     DEFAULT_PLASMA_SURF_FILENAME,
     DEFAULT_SMOKE_MPOL,
     DEFAULT_SMOKE_NPHI,
@@ -65,6 +64,7 @@ IOTA_ABS_TOL = _TIER3_TOLERANCES["final_iota_abs_tol"]
 VOLUME_REL_TOL = _TIER3_TOLERANCES["final_volume_rel_tol"]
 FIELD_ERROR_REL_TOL = _TIER3_TOLERANCES["field_error_rel_tol"]
 SURFACE_GEOMETRY_REL_TOL = _TIER3_TOLERANCES["surface_geometry_rel_tol"]
+TARGET_OPTIMIZER_BACKEND = "ondevice"
 
 
 def parse_args() -> argparse.Namespace:
@@ -141,8 +141,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--optimizer-backend",
         choices=("scipy", "hybrid", "ondevice"),
-        default=DEFAULT_OPTIMIZER_BACKEND,
-        help="JAX Boozer optimizer backend for the init probe.",
+        default=TARGET_OPTIMIZER_BACKEND,
+        help=(
+            "JAX Boozer optimizer backend for the init probe. "
+            "Defaults to the target ondevice lane; pass scipy to compare "
+            "against the public reference lane explicitly."
+        ),
     )
     return parser.parse_args()
 
@@ -210,10 +214,7 @@ def _run_single_stage_case(
         results_json = find_single_file(output_root, "results.json")
         surf_json = find_single_file(output_root, "surf_init.json")
         results = dict(load_json(results_json))
-        surface_gamma, surface_self_intersecting = _load_surface_artifacts(
-            str(surf_json)
-        )
-        results["SELF_INTERSECTING"] = surface_self_intersecting
+        surface_gamma = _load_surface_gamma_artifact(str(surf_json))
         return {
             "results": results,
             "surface_gamma": surface_gamma,
@@ -221,14 +222,11 @@ def _run_single_stage_case(
         }
 
 
-def _load_surface_artifacts(surface_json_path: str) -> tuple[np.ndarray, bool]:
+def _load_surface_gamma_artifact(surface_json_path: str) -> np.ndarray:
     from simsopt._core.optimizable import load
 
     surface = load(surface_json_path)
-    return (
-        np.asarray(surface.gamma(), dtype=float),
-        bool(surface.is_self_intersecting()),
-    )
+    return np.asarray(surface.gamma(), dtype=float)
 
 
 def _display_path(path: Path) -> str:
@@ -265,6 +263,12 @@ def evaluate_single_stage_init_parity(
         "max_surface_pointwise_rel": max_surface_geometry_rel,
         "cpu_self_intersecting": bool(cpu_results["SELF_INTERSECTING"]),
         "jax_self_intersecting": bool(jax_results["SELF_INTERSECTING"]),
+        "cpu_self_intersection_check_available": bool(
+            cpu_results.get("SELF_INTERSECTION_CHECK_AVAILABLE", True)
+        ),
+        "jax_self_intersection_check_available": bool(
+            jax_results.get("SELF_INTERSECTION_CHECK_AVAILABLE", True)
+        ),
     }
 
     failures: list[str] = []
@@ -344,6 +348,24 @@ def main() -> None:
         max_surface_geometry_abs=max_geom_abs,
         max_surface_geometry_rel=max_geom_rel,
     )
+    warnings: list[str] = []
+    if not comparison["cpu_self_intersection_check_available"]:
+        warnings.append(
+            "CPU self-intersection parity check was skipped because the optional "
+            "surface self-intersection backend is unavailable."
+        )
+    if not comparison["jax_self_intersection_check_available"]:
+        warnings.append(
+            "JAX self-intersection parity check was skipped because the optional "
+            "surface self-intersection backend is unavailable."
+        )
+    if (
+        comparison["cpu_self_intersection_check_available"]
+        != comparison["jax_self_intersection_check_available"]
+    ):
+        warnings.append(
+            "CPU and JAX lanes did not have matching self-intersection check availability."
+        )
 
     print(
         "CPU vs JAX: "
@@ -352,6 +374,8 @@ def main() -> None:
         f"field error rel_diff={comparison['field_error_rel_diff']:.2e}, "
         f"surface rel_diff={comparison['max_surface_pointwise_rel']:.2e}"
     )
+    for warning in warnings:
+        print(f"NOTE: {warning}")
 
     payload = {
         "provenance": provenance,
@@ -362,6 +386,7 @@ def main() -> None:
             "cpu_elapsed_s": float(cpu_case["elapsed_s"]),
             "jax_elapsed_s": float(jax_case["elapsed_s"]),
         },
+        "warnings": warnings,
         "failures": failures,
         "passed": not failures,
     }

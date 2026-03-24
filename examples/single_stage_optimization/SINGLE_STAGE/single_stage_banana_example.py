@@ -16,6 +16,7 @@ from simsopt.geo import (
     CurveLength,
     LpCurveCurvature,
 )
+import simsopt.geo.surface as surface_module
 from simsopt.geo.surfaceobjectives import (
     Volume,
     BoozerResidual,
@@ -704,15 +705,22 @@ def initialize_boozer_surface(
 
     # Check if boozer algo is successful
     success1 = res["success"]  # True if the boozer surface algo converged
-    success2 = (
-        not boozer_surface.surface.is_self_intersecting()
-    )  # True if surface is not self intersecting
+    (
+        self_intersecting,
+        self_intersection_check_available,
+    ) = evaluate_surface_self_intersection(boozer_surface.surface)
+    success2 = not self_intersecting  # True if surface is not self intersecting
     success = success1 and success2
+    if not self_intersection_check_available:
+        print(
+            "Skipping surface self-intersection check because "
+            "ground+bentley_ottmann or shapely is unavailable."
+        )
     if not success:
         print(
             "Boozer initialization failed: "
             f"solve_success={success1}, "
-            f"self_intersecting={not success2}, "
+            f"self_intersecting={self_intersecting}, "
             f"volume={boozer_surface.surface.volume()}, "
             f"iota_guess={iota}, "
             f"iota_solved={res['iota']}"
@@ -736,6 +744,32 @@ def diagnostic_field(bs, bs_cpu_diag):
 def build_iota_objective(boozer_surface, iota_cls):
     """Create the backend-matched iota diagnostic/objective wrapper."""
     return iota_cls(boozer_surface)
+
+
+def surface_self_intersection_check_available():
+    """Return whether the optional surface self-intersection backend is present."""
+    has_ground = (
+        surface_module.get_context is not None
+        and surface_module.contour_self_intersects is not None
+    )
+    return has_ground or surface_module.LineString is not None
+
+
+def evaluate_surface_self_intersection(surface):
+    """Return (intersecting, check_available) for a SIMSOPT surface."""
+    check_available = surface_self_intersection_check_available()
+    if not check_available:
+        return False, False
+    return bool(surface.is_self_intersecting()), True
+
+
+def update_self_intersection_status(run_dict, surface):
+    """Refresh self-intersection status in the shared run-state dictionary."""
+    (
+        run_dict["intersecting"],
+        run_dict["self_intersection_check_available"],
+    ) = evaluate_surface_self_intersection(surface)
+    return run_dict["intersecting"]
 
 
 def get_jax_surface_objective_classes():
@@ -799,13 +833,8 @@ def fun(x):
     boozer_surface.run_code(run_dict["iota"], run_dict["G"])
 
     # Check success
-    success1 = False
-    success2 = False
-    try:
-        success1 = boozer_surface.res["success"]
-        success2 = not boozer_surface.surface.is_self_intersecting()
-    except Exception as e:
-        print("Surface check failed:", e)
+    success1 = bool(boozer_surface.res["success"])
+    success2 = not update_self_intersection_status(run_dict, boozer_surface.surface)
     success = success1 and success2
 
     if success:
@@ -892,7 +921,7 @@ def callback(x):
     bs.set_points(boozer_surface.surface.gamma().reshape((-1, 3)))
     unitn = boozer_surface.surface.unitnormal()
     BdotN = np.mean(np.abs(np.sum(bs.B().reshape(unitn.shape) * unitn, axis=2)))
-    run_dict["intersecting"] = boozer_surface.surface.is_self_intersecting()
+    update_self_intersection_status(run_dict, boozer_surface.surface)
 
     width = 35
     buffer = io.StringIO()
@@ -930,7 +959,13 @@ def callback(x):
     )
     print(f"{'⟨|B·n|⟩':{width}} = {BdotN:.6e}", file=buffer)
 
+    check_status = (
+        "available"
+        if run_dict["self_intersection_check_available"]
+        else "skipped (dependency unavailable)"
+    )
     print(f"{'Intersecting':{width}} = {run_dict['intersecting']}", file=buffer)
+    print(f"{'Self-intersection check':{width}} = {check_status}", file=buffer)
     print(f"{'Max Curve R':{width}} = {max_r:.6e}", file=buffer)
     print(f"{'Max Curve Z':{width}} = {max_z:.6e}", file=buffer)
     print(f"{'Max Curvature':{width}} = {max_curvature:.6e}", file=buffer)
@@ -1225,6 +1260,7 @@ if __name__ == "__main__":
         "lscount": 0,
         "x_prev": dofs.copy(),
         "intersecting": False,
+        "self_intersection_check_available": True,
     }
 
     # ==============================================================================
@@ -1300,8 +1336,12 @@ if __name__ == "__main__":
             VV,
         )
 
-    final_self_intersecting = bool(boozer_surface.surface.is_self_intersecting())
-    run_dict["intersecting"] = final_self_intersecting
+    final_self_intersecting = update_self_intersection_status(
+        run_dict, boozer_surface.surface
+    )
+    final_self_intersection_check_available = run_dict[
+        "self_intersection_check_available"
+    ]
 
     # Save the results of optimization to a separate file
     results = {
@@ -1347,6 +1387,7 @@ if __name__ == "__main__":
         "FINAL_IOTA": float(final_iota),
         "FIELD_ERROR": float(fieldError),
         "SELF_INTERSECTING": final_self_intersecting,
+        "SELF_INTERSECTION_CHECK_AVAILABLE": final_self_intersection_check_available,
         "MAX_CURVATURE": float(final_max_curvature),
         "INITIAL_VOLUME": float(initial_volume),
         "INITIAL_IOTA": float(initial_iota),

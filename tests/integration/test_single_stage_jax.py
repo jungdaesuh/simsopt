@@ -906,7 +906,6 @@ class TestOnDeviceBackendIntegration:
         bs_jax.x = x0
         bs_jax.set_points(gamma_fixed)
 
-
 class TestEnsureSolvedCrashGuard:
     """Issue-1 regression: _ensure_solved must not crash with res=None."""
 
