@@ -94,7 +94,7 @@ class DOFs(GSONable, Hashable):
         if x is None:
             x = np.array([])
         else:
-            x = np.asarray(x, dtype=np.double)
+            x = np.array(x, dtype=np.double, copy=True)
 
         if names is None:
             names = [f"x{i}" for i in range(len(x))]
@@ -346,7 +346,7 @@ class DOFs(GSONable, Hashable):
         # To prevent broadcasting of a single DOF
         if len(self._x) != len(x):
             raise DofLengthMismatchError(len(x), len(self._x))
-        self._x = np.asarray(x, dtype=np.double)
+        self._x = np.array(x, dtype=np.double, copy=True)
         self._flag_recompute_opt()
 
     @property

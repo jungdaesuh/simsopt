@@ -4,7 +4,6 @@ import os
 import io
 import json
 import numpy as np
-from scipy.optimize import minimize
 
 # SIMSOPT imports
 from simsopt._core.optimizable import Optimizable
@@ -472,7 +471,11 @@ def parse_args():
         "--optimizer-backend",
         choices=["scipy", "hybrid", "ondevice"],
         default=os.environ.get("OPTIMIZER_BACKEND", "scipy"),
-        help="JAX Boozer optimizer backend. Recorded in the run fingerprint and passed through to the JAX surface solver.",
+        help=(
+            "JAX Boozer optimizer backend. Recorded in the run fingerprint, "
+            "passed through to the JAX surface solver, and used to select the "
+            "target outer single-stage optimizer path."
+        ),
     )
     return parser.parse_args()
 
@@ -796,6 +799,50 @@ def select_boozer_residual_class(use_jax, boozer_kind):
 def build_boozer_residual_objective(boozer_surface, bs_obj, boozer_residual_cls):
     """Create the stage- and backend-matched Boozer residual wrapper."""
     return boozer_residual_cls(boozer_surface, bs_obj)
+
+
+def resolve_single_stage_outer_optimizer_method(field_backend, optimizer_backend):
+    """Return the shared optimizer adapter method for the outer single-stage loop."""
+    if field_backend == "jax" and optimizer_backend == "ondevice":
+        from simsopt.geo.optimizer_jax import require_target_backend_x64
+
+        require_target_backend_x64(optimizer_backend)
+        return "lbfgs-ondevice"
+    return "lbfgs"
+
+
+def run_single_stage_optimizer(
+    fun,
+    dofs,
+    *,
+    field_backend,
+    optimizer_backend,
+    maxiter,
+    ftol,
+    gtol,
+    maxcor,
+    callback,
+):
+    """Run the single-stage outer optimization through the shared adapter."""
+    from simsopt.geo.optimizer_jax import jax_minimize
+
+    method = resolve_single_stage_outer_optimizer_method(
+        field_backend,
+        optimizer_backend,
+    )
+    return jax_minimize(
+        fun,
+        dofs,
+        method=method,
+        tol=gtol,
+        maxiter=maxiter,
+        options={
+            "maxcor": int(maxcor),
+            "ftol": float(ftol),
+        },
+        value_and_grad=True,
+        callback=callback,
+    )
 
 
 def fun(x):
@@ -1278,19 +1325,16 @@ if __name__ == "__main__":
         fieldError = initial_field_error
         print("Skipping single-stage optimizer because --init-only was provided.")
     else:
-        # Run L-BFGS-B optimization
-        res = minimize(
+        res = run_single_stage_optimizer(
             fun,
             dofs,
-            jac=True,
-            method="L-BFGS-B",
             callback=callback,
-            options={
-                "maxiter": MAXITER,
-                "maxcor": args.maxcor,
-                "ftol": ftol,
-                "gtol": gtol,
-            },
+            field_backend=args.backend,
+            optimizer_backend=args.optimizer_backend,
+            maxiter=MAXITER,
+            ftol=ftol,
+            gtol=gtol,
+            maxcor=args.maxcor,
         )
         res_nit = res.nit
         print(res.message)
@@ -1377,6 +1421,12 @@ if __name__ == "__main__":
         "order": order,
         "backend": args.backend,
         "optimizer_backend": optimizer_backend_record,
+        "outer_optimizer_method": resolve_single_stage_outer_optimizer_method(
+            args.backend,
+            args.optimizer_backend,
+        )
+        if args.backend == "jax"
+        else "lbfgs",
         "init_only": args.init_only,
         "max_iterations": MAXITER,
         "maxcor": args.maxcor,

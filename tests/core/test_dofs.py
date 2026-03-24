@@ -163,6 +163,22 @@ class DOFsTests(unittest.TestCase):
         self.assertTrue(np.allclose(free_dofs.full_x, output))
         self.assertTrue(np.allclose(one_fixed_dofs.full_x, output))
 
+    def test_dofs_own_writable_storage_after_readonly_assignment(self):
+        readonly_x = np.array([1.0, 2.0, 3.0])
+        readonly_x.setflags(write=False)
+
+        dofs = DOFs(x=readonly_x)
+        self.assertTrue(dofs.full_x.flags.writeable)
+        dofs.free_x = np.array([4.0, 5.0, 6.0])
+        self.assertTrue(np.allclose(dofs.full_x, np.array([4.0, 5.0, 6.0])))
+
+        replacement = np.array([7.0, 8.0, 9.0])
+        replacement.setflags(write=False)
+        dofs.full_x = replacement
+        self.assertTrue(dofs.full_x.flags.writeable)
+        dofs.free_x = np.array([10.0, 11.0, 12.0])
+        self.assertTrue(np.allclose(dofs.full_x, np.array([10.0, 11.0, 12.0])))
+
     def test_lower_bounds(self):
         dofs = DOFs(x=np.array([1, 2, 3]),
                     names=np.array(['x', 'y', 'z']),

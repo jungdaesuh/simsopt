@@ -179,6 +179,23 @@ class SingleStageExampleTests(unittest.TestCase):
             yield
 
     @contextmanager
+    def patch_optimizer_jax_module(
+        self,
+        *,
+        require_target_backend_x64,
+        jax_minimize,
+        scipy_minimize_side_effect=None,
+    ):
+        fake_optimizer_module = types.ModuleType("simsopt.geo.optimizer_jax")
+        fake_optimizer_module.require_target_backend_x64 = require_target_backend_x64
+        fake_optimizer_module.jax_minimize = jax_minimize
+        scipy_patch = patch("scipy.optimize.minimize", side_effect=scipy_minimize_side_effect)
+        with scipy_patch, patch.dict(
+            sys.modules, {"simsopt.geo.optimizer_jax": fake_optimizer_module}
+        ):
+            yield
+
+    @contextmanager
     def patch_surface_self_intersection_backend_unavailable(self, module):
         with patch.object(module.surface_module, "get_context", None), patch.object(
             module.surface_module, "contour_self_intersects", None
@@ -281,6 +298,84 @@ class SingleStageExampleTests(unittest.TestCase):
             fake_boozer_surface_jax.instances[0].options["optimizer_backend"],
             "ondevice",
         )
+
+    def test_run_single_stage_optimizer_routes_target_lane_to_ondevice_adapter(self):
+        module = self.load_module()
+        captured = {}
+
+        def fake_require_target_backend_x64(optimizer_backend):
+            captured["x64_backend"] = optimizer_backend
+
+        def fake_jax_minimize(
+            fun, x0, *, method, tol, maxiter, options, value_and_grad, callback
+        ):
+            captured["method"] = method
+            captured["x0"] = np.asarray(x0)
+            captured["tol"] = tol
+            captured["maxiter"] = maxiter
+            captured["options"] = dict(options)
+            captured["value_and_grad"] = value_and_grad
+            captured["callback"] = callback
+            return types.SimpleNamespace(x=np.asarray(x0), nit=0, message="ok")
+
+        with self.patch_optimizer_jax_module(
+            require_target_backend_x64=fake_require_target_backend_x64,
+            jax_minimize=fake_jax_minimize,
+        ):
+            callback = object()
+            result = module.run_single_stage_optimizer(
+                lambda x: (1.0, np.asarray(x)),
+                np.array([1.0, -2.0]),
+                field_backend="jax",
+                optimizer_backend="ondevice",
+                maxiter=7,
+                ftol=1e-8,
+                gtol=1e-6,
+                maxcor=9,
+                callback=callback,
+            )
+
+        self.assertEqual(captured["x64_backend"], "ondevice")
+        self.assertEqual(captured["method"], "lbfgs-ondevice")
+        np.testing.assert_allclose(captured["x0"], np.array([1.0, -2.0]))
+        self.assertEqual(captured["tol"], 1e-6)
+        self.assertEqual(captured["maxiter"], 7)
+        self.assertEqual(captured["options"], {"maxcor": 9, "ftol": 1e-8})
+        self.assertTrue(captured["value_and_grad"])
+        self.assertIs(captured["callback"], callback)
+        self.assertEqual(result.message, "ok")
+
+    def test_run_single_stage_optimizer_ondevice_does_not_enter_scipy_minimize(self):
+        module = self.load_module()
+
+        def fake_require_target_backend_x64(_optimizer_backend):
+            return None
+
+        def fake_jax_minimize(
+            fun, x0, *, method, tol, maxiter, options, value_and_grad, callback
+        ):
+            del fun, x0, tol, maxiter, options, value_and_grad, callback
+            self.assertEqual(method, "lbfgs-ondevice")
+            return types.SimpleNamespace(x=np.zeros(2), nit=0, message="ok")
+
+        with self.patch_optimizer_jax_module(
+            require_target_backend_x64=fake_require_target_backend_x64,
+            jax_minimize=fake_jax_minimize,
+            scipy_minimize_side_effect=AssertionError,
+        ):
+            result = module.run_single_stage_optimizer(
+                lambda x: (1.0, np.asarray(x)),
+                np.array([0.0, 0.0]),
+                field_backend="jax",
+                optimizer_backend="ondevice",
+                maxiter=1,
+                ftol=0.0,
+                gtol=1e-6,
+                maxcor=5,
+                callback=lambda _x: None,
+            )
+
+        self.assertEqual(result.message, "ok")
 
     def test_evaluate_surface_self_intersection_skips_when_backend_unavailable(self):
         module = self.load_module()

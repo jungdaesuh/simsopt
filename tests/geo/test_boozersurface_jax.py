@@ -1390,6 +1390,31 @@ class TestLBFGSMethod:
 
     @PRIVATE_OPTIMIZER_RUNTIME
     @REQUIRES_PRIVATE_LBFGS_RUNTIME
+    def test_lbfgs_ondevice_accepts_explicit_value_and_grad(self):
+        """lbfgs-ondevice must support explicit value/grad objectives."""
+
+        def quad_value_and_grad(x):
+            x = np.asarray(x, dtype=float)
+            return 0.5 * float(np.dot(x, x)), x.copy()
+
+        callback_calls = []
+        x0 = jnp.array([1.0, -2.0], dtype=jnp.float64)
+        result = jax_minimize(
+            quad_value_and_grad,
+            x0,
+            method="lbfgs-ondevice",
+            maxiter=5,
+            value_and_grad=True,
+            callback=lambda x: callback_calls.append(np.asarray(x, dtype=float)),
+        )
+
+        assert result.success is True
+        assert result.nit > 0
+        assert float(result.fun) < quad_value_and_grad(np.asarray(x0))[0]
+        assert len(callback_calls) == result.nit
+
+    @PRIVATE_OPTIMIZER_RUNTIME
+    @REQUIRES_PRIVATE_LBFGS_RUNTIME
     def test_lbfgs_ondevice_repeated_calls_are_stable(self):
         """Repeated lbfgs-ondevice runs must not accumulate divergent state."""
 
