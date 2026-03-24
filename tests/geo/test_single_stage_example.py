@@ -154,12 +154,11 @@ class SingleStageExampleTests(unittest.TestCase):
                 self.constraint_weight = constraint_weight
                 self.options = options or {}
                 self.res = {"success": True, "iota": TEST_IOTA, "G": TEST_G0}
-                if record_run_calls:
-                    self.run_code_calls = []
+                self.run_code_calls = [] if record_run_calls else None
                 FakeBoozerSurfaceJAX.instances.append(self)
 
             def run_code(self, iota, G):
-                if record_run_calls:
+                if self.run_code_calls is not None:
                     self.run_code_calls.append((iota, G))
                 return self.res
 

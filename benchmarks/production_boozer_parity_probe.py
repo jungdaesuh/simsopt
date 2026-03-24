@@ -152,6 +152,7 @@ def _run_full_case(builder, problem, *, name: str) -> dict:
 
 def _run_stage_split(builder, problem) -> dict:
     solver, _ = builder(problem)
+    optimizer_backend = str(solver.options.get("optimizer_backend", "scipy"))
     ls_start = time.perf_counter()
     ls_result = solver.minimize_boozer_penalty_constraints_LBFGS(
         constraint_weight=solver.constraint_weight,
@@ -179,6 +180,7 @@ def _run_stage_split(builder, problem) -> dict:
     )
     newton_elapsed = time.perf_counter() - newton_start
     return {
+        "optimizer_backend": optimizer_backend,
         "ls_s": ls_elapsed,
         "newton_s": newton_elapsed,
         "success": bool(newton_result["success"]),
