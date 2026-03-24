@@ -566,6 +566,12 @@ def time_stage2_callback(callback):
     return float(time.perf_counter() - start)
 
 
+def time_stage2_callback_result(callback):
+    start = time.perf_counter()
+    result = callback()
+    return float(time.perf_counter() - start), result
+
+
 def profile_stage2_named_callbacks(callbacks):
     return {
         name: time_stage2_callback(callback)
@@ -616,6 +622,52 @@ def build_stage2_objective_term_callbacks(
     }
 
 
+def profile_stage2_squared_flux_internal_components(Jf):
+    if getattr(Jf, "_use_jax_native", True):
+        return {}, 0.0, [], {}, [], []
+
+    field_B_for_J_s, field_B_for_J = time_stage2_callback_result(Jf.field.B)
+    integral_only_s = time_stage2_callback(lambda: Jf._jit_integral(field_B_for_J))
+    field_B_for_dJ_s, field_B_for_dJ = time_stage2_callback_result(Jf.field.B)
+    integral_value_grad_s, (_, dJ_dB) = time_stage2_callback_result(
+        lambda: Jf._jit_integral_value_grad(field_B_for_dJ)
+    )
+    field_B_vjp_component_timings = {}
+    dominant_field_B_vjp_components = []
+    dominant_field_B_vjp_coils = []
+    if hasattr(Jf.field, "profile_B_vjp"):
+        field_B_vjp_profile = Jf.field.profile_B_vjp(np.asarray(dJ_dB))
+        field_B_vjp_s = float(field_B_vjp_profile["wall_time_s"])
+        field_B_vjp_component_timings = {
+            name: float(elapsed_s)
+            for name, elapsed_s in field_B_vjp_profile["component_timings_s"].items()
+        }
+        dominant_field_B_vjp_components = list(
+            field_B_vjp_profile["dominant_components"]
+        )
+        dominant_field_B_vjp_coils = list(field_B_vjp_profile["dominant_coils"])
+    else:
+        field_B_vjp_s, _ = time_stage2_callback_result(
+            lambda: Jf.field.B_vjp(np.asarray(dJ_dB))
+        )
+    timings = {
+        "field_B_for_J_s": field_B_for_J_s,
+        "integral_only_s": integral_only_s,
+        "field_B_for_dJ_s": field_B_for_dJ_s,
+        "integral_value_grad_s": integral_value_grad_s,
+        "field_B_vjp_s": field_B_vjp_s,
+    }
+    total_s, dominant = build_stage2_profile_breakdown(timings)
+    return (
+        timings,
+        total_s,
+        dominant,
+        field_B_vjp_component_timings,
+        dominant_field_B_vjp_components,
+        dominant_field_B_vjp_coils,
+    )
+
+
 def compute_stage2_diagnostics(
     new_bs,
     new_surf,
@@ -644,8 +696,8 @@ def evaluate_stage2_objective(
     recompute_diagnostics=True,
 ):
     """Return composite objective diagnostics using the currently loaded DOFs."""
-    J = float(JF.J())
     grad = np.asarray(JF.dJ(), dtype=float)
+    J = float(JF.J())
     if recompute_diagnostics or diagnostics is None:
         diagnostics = compute_stage2_diagnostics(
             new_bs,
@@ -728,6 +780,14 @@ def profile_stage2_explicit_step(
     objective_term_gradient_total_s, dominant_objective_gradient_terms = build_stage2_profile_breakdown(
         objective_term_gradient_timings
     )
+    (
+        squared_flux_internal_timings,
+        squared_flux_internal_total_s,
+        dominant_squared_flux_internal_components,
+        squared_flux_field_b_vjp_component_timings,
+        dominant_squared_flux_field_b_vjp_components,
+        dominant_squared_flux_field_b_vjp_coils,
+    ) = profile_stage2_squared_flux_internal_components(Jf)
     return {
         "objective_path_timings_s": objective_path_timings,
         "observed_step_total_s": observed_step_total_s,
@@ -740,6 +800,12 @@ def profile_stage2_explicit_step(
         "objective_term_gradient_timings_s": objective_term_gradient_timings,
         "objective_term_gradient_total_s": objective_term_gradient_total_s,
         "dominant_objective_gradient_terms": dominant_objective_gradient_terms,
+        "squared_flux_internal_timings_s": squared_flux_internal_timings,
+        "squared_flux_internal_total_s": squared_flux_internal_total_s,
+        "dominant_squared_flux_internal_components": dominant_squared_flux_internal_components,
+        "squared_flux_field_b_vjp_component_timings_s": squared_flux_field_b_vjp_component_timings,
+        "dominant_squared_flux_field_b_vjp_components": dominant_squared_flux_field_b_vjp_components,
+        "dominant_squared_flux_field_b_vjp_coils": dominant_squared_flux_field_b_vjp_coils,
         "snapshot": snapshot,
     }
 

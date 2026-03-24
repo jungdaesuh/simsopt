@@ -120,6 +120,8 @@ class SquaredFluxJAX(Optimizable):
         xyz = surface.gamma()
         field.set_points(xyz.reshape((-1, 3)))
 
+        self._clear_cached_results()
+
         # Choose path: JAX-native (end-to-end) or fallback (via Coil.vjp).
         self._use_jax_native = field._jax_native
         if self._use_jax_native:
@@ -218,7 +220,7 @@ class SquaredFluxJAX(Optimizable):
             return integral_BdotN_jax(Bcoil, target_jax, normal_jax, definition)
 
         self._jit_integral = jax.jit(_integral_from_B)
-        self._jit_integral_grad = jax.jit(jax.grad(_integral_from_B))
+        self._jit_integral_value_grad = jax.jit(jax.value_and_grad(_integral_from_B))
 
     # ------------------------------------------------------------------
     # DOF gathering (JAX-native path)
@@ -245,23 +247,51 @@ class SquaredFluxJAX(Optimizable):
     # Public API
     # ------------------------------------------------------------------
 
-    def J(self):
-        if self._use_jax_native:
-            return float(self._jit_forward_dofs(self._gather_unique_full_dofs()))
+    def _clear_cached_results(self):
+        self._cached_value = None
+        self._cached_partials = None
 
-        B = self.field.B()
-        return float(self._jit_integral(B))
+    def recompute_bell(self, parent=None):
+        self._clear_cached_results()
+
+    def J(self):
+        if self._use_jax_native and not self.new_x and self._cached_value is not None:
+            return self._cached_value
+
+        if self._use_jax_native:
+            self._cached_value = float(
+                self._jit_forward_dofs(self._gather_unique_full_dofs())
+            )
+            value = self._cached_value
+        else:
+            # Mixed-quadrature fallback can change through field.set_points(...)
+            # without marking the Optimizable DOFs dirty, so do not reuse cache.
+            value = float(self._jit_integral(self.field.B()))
+            self._clear_cached_results()
+
+        self._cached_partials = None
+        self.new_x = False
+        return value
 
     @derivative_dec
     def dJ(self):
-        if self._use_jax_native:
-            return self._dJ_jax_native()
-        return self._dJ_fallback()
+        if self._use_jax_native and not self.new_x and self._cached_partials is not None:
+            return self._cached_partials
 
-    def _dJ_jax_native(self):
-        """Gradient via end-to-end JAX value_and_grad."""
+        if self._use_jax_native:
+            self._cached_value, self._cached_partials = self._value_and_dJ_jax_native()
+            partials = self._cached_partials
+        else:
+            _value, partials = self._value_and_dJ_fallback()
+            self._clear_cached_results()
+
+        self.new_x = False
+        return partials
+
+    def _value_and_dJ_jax_native(self):
+        """Combined value and gradient via end-to-end JAX value_and_grad."""
         flat_dofs = self._gather_unique_full_dofs()
-        _, grad = self._jit_val_grad_dofs(flat_dofs)
+        value, grad = self._jit_val_grad_dofs(flat_dofs)
         grad_np = np.asarray(grad)
 
         # Map the flat gradient back to per-Optimizable Derivative entries.
@@ -274,10 +304,10 @@ class SquaredFluxJAX(Optimizable):
         for i, current in enumerate(self.field._unique_base_currents):
             deriv_data[current] = grad_np[current_start + i : current_start + i + 1]
 
-        return Derivative(deriv_data)
+        return float(value), Derivative(deriv_data)
 
-    def _dJ_fallback(self):
-        """Gradient via field.B_vjp() (handles mixed quadrature)."""
+    def _value_and_dJ_fallback(self):
+        """Combined value and gradient via field.B_vjp() (mixed quadrature)."""
         B = self.field.B()
-        dJ_dB = np.asarray(self._jit_integral_grad(B))
-        return self.field.B_vjp(dJ_dB)
+        value, dJ_dB = self._jit_integral_value_grad(B)
+        return float(value), self.field.B_vjp(np.asarray(dJ_dB))

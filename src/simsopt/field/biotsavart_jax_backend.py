@@ -10,6 +10,8 @@ This module does **not** inherit from ``sopp.BiotSavart`` or
 M0 rewrite contract (adapter pattern, §5).
 """
 
+import time
+
 import numpy as np
 import jax
 import jax.numpy as jnp
@@ -40,6 +42,50 @@ def _single_coil_b_vjp(points, v, gamma, gammadash, current):
 
     _, pullback = jax.vjp(fwd, gamma, gammadash, current)
     return pullback(v)
+
+
+def _time_call_result(callback):
+    start = time.perf_counter()
+    result = callback()
+    return float(time.perf_counter() - start), result
+
+
+def _build_profile_breakdown(timings):
+    total_s = float(sum(timings.values()))
+    if total_s <= 0.0:
+        return []
+    ranked = sorted(
+        timings.items(),
+        key=lambda item: item[1],
+        reverse=True,
+    )
+    return [
+        {
+            "name": name,
+            "elapsed_s": float(elapsed_s),
+            "share": float(elapsed_s / total_s),
+        }
+        for name, elapsed_s in ranked
+    ]
+
+
+def _build_coil_profile_breakdown(per_coil_timings):
+    total_s = float(sum(entry["total_s"] for entry in per_coil_timings))
+    if total_s <= 0.0:
+        return []
+    ranked = sorted(
+        per_coil_timings,
+        key=lambda entry: entry["total_s"],
+        reverse=True,
+    )
+    return [
+        {
+            "coil_index": int(entry["coil_index"]),
+            "elapsed_s": float(entry["total_s"]),
+            "share": float(entry["total_s"] / total_s),
+        }
+        for entry in ranked
+    ]
 
 
 class BiotSavartJAX(Optimizable):
@@ -228,6 +274,32 @@ class BiotSavartJAX(Optimizable):
     # VJP (reverse-mode gradient w.r.t. coil DOFs)
     # ------------------------------------------------------------------
 
+    def _coil_b_vjp_inputs(self, coil):
+        gamma_s, gamma = _time_call_result(
+            lambda: jnp.asarray(coil.curve.gamma(), dtype=jnp.float64)
+        )
+        gammadash_s, gammadash = _time_call_result(
+            lambda: jnp.asarray(coil.curve.gammadash(), dtype=jnp.float64)
+        )
+        current_s, current = _time_call_result(
+            lambda: jnp.asarray(coil.current.get_value(), dtype=jnp.float64)
+        )
+        timings = {
+            "curve_gamma_s": gamma_s,
+            "curve_gammadash_s": gammadash_s,
+            "current_value_s": current_s,
+        }
+        return gamma, gammadash, current, timings
+
+    def _coil_b_vjp_derivative(self, coil, points, v_jax):
+        gamma = jnp.asarray(coil.curve.gamma(), dtype=jnp.float64)
+        gammadash = jnp.asarray(coil.curve.gammadash(), dtype=jnp.float64)
+        current = jnp.asarray(coil.current.get_value(), dtype=jnp.float64)
+        dg, dgd, dc = jax.device_get(
+            _single_coil_b_vjp(points, v_jax, gamma, gammadash, current)
+        )
+        return coil.vjp(dg, dgd, np.asarray([dc]))
+
     def B_vjp(self, v):
         r"""Vector-Jacobian product of B w.r.t. coil DOFs.
 
@@ -249,14 +321,55 @@ class BiotSavartJAX(Optimizable):
         points = self._points_jax
         v_jax = jnp.asarray(v)
         for coil in self._coils:
-            dg, dgd, dc = jax.device_get(
-                _single_coil_b_vjp(
-                    points,
-                    v_jax,
-                    jnp.asarray(coil.curve.gamma(), dtype=jnp.float64),
-                    jnp.asarray(coil.curve.gammadash(), dtype=jnp.float64),
-                    jnp.asarray(coil.current.get_value(), dtype=jnp.float64),
+            all_derivs.append(self._coil_b_vjp_derivative(coil, points, v_jax))
+        return sum(all_derivs)
+
+    def profile_B_vjp(self, v):
+        """Return a timing breakdown for ``B_vjp`` at the current points."""
+        points = self._points_jax
+        v_jax = jnp.asarray(v)
+        component_totals = {
+            "curve_gamma_s": 0.0,
+            "curve_gammadash_s": 0.0,
+            "current_value_s": 0.0,
+            "single_coil_pullback_s": 0.0,
+            "coil_vjp_s": 0.0,
+        }
+        per_coil_timings = []
+        wall_start = time.perf_counter()
+        for coil_index, coil in enumerate(self._coils):
+            gamma, gammadash, current, coil_timings = self._coil_b_vjp_inputs(coil)
+            pullback_s, (dg, dgd, dc) = _time_call_result(
+                lambda: jax.device_get(
+                    _single_coil_b_vjp(points, v_jax, gamma, gammadash, current)
                 )
             )
-            all_derivs.append(coil.vjp(dg, dgd, np.asarray([dc])))
-        return sum(all_derivs)
+            coil_vjp_s, _ = _time_call_result(
+                lambda: coil.vjp(dg, dgd, np.asarray([dc]))
+            )
+            coil_timings["single_coil_pullback_s"] = pullback_s
+            coil_timings["coil_vjp_s"] = coil_vjp_s
+            for name, elapsed_s in coil_timings.items():
+                component_totals[name] += elapsed_s
+            coil_total_s = float(sum(coil_timings.values()))
+            per_coil_timings.append(
+                {
+                    "coil_index": int(coil_index),
+                    "component_timings_s": {
+                        name: float(elapsed_s)
+                        for name, elapsed_s in coil_timings.items()
+                    },
+                    "total_s": coil_total_s,
+                }
+            )
+        wall_time_s = float(time.perf_counter() - wall_start)
+        return {
+            "wall_time_s": wall_time_s,
+            "component_timings_s": {
+                name: float(elapsed_s)
+                for name, elapsed_s in component_totals.items()
+            },
+            "dominant_components": _build_profile_breakdown(component_totals),
+            "per_coil_timings_s": per_coil_timings,
+            "dominant_coils": _build_coil_profile_breakdown(per_coil_timings),
+        }

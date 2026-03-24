@@ -72,6 +72,20 @@ WARM_TIMING_NO_OPTIMIZATION_ERROR = (
 PROFILE_STEP_REFERENCE_LANE_ERROR = (
     "--profile-step-json is only supported on explicit Stage 2 reference lanes."
 )
+EXPECTED_SQUARED_FLUX_INTERNAL_TIMING_KEYS = {
+    "field_B_for_J_s",
+    "integral_only_s",
+    "field_B_for_dJ_s",
+    "integral_value_grad_s",
+    "field_B_vjp_s",
+}
+EXPECTED_B_VJP_COMPONENT_TIMING_KEYS = {
+    "curve_gamma_s",
+    "curve_gammadash_s",
+    "current_value_s",
+    "single_coil_pullback_s",
+    "coil_vjp_s",
+}
 REDUCED_STAGE2_ARGS = (
     "--backend",
     "jax",
@@ -128,6 +142,40 @@ def _assert_stage2_script_failure(result, expected_error):
 
 def _load_stage2_results_json(output_root):
     return json.loads(next(output_root.glob("**/results.json")).read_text(encoding="utf-8"))
+
+
+def _build_fake_b_vjp_profile():
+    return {
+        "wall_time_s": 0.125,
+        "component_timings_s": {
+            "curve_gamma_s": 0.01,
+            "curve_gammadash_s": 0.02,
+            "current_value_s": 0.03,
+            "single_coil_pullback_s": 0.04,
+            "coil_vjp_s": 0.05,
+        },
+        "dominant_components": [
+            {
+                "name": "coil_vjp_s",
+                "elapsed_s": 0.05,
+                "share": 0.3333333333333333,
+            }
+        ],
+        "per_coil_timings_s": [],
+        "dominant_coils": [
+            {
+                "coil_index": 0,
+                "elapsed_s": 0.125,
+                "share": 1.0,
+            }
+        ],
+    }
+
+
+def _assert_b_vjp_profile_payload(payload):
+    assert set(payload["squared_flux_field_b_vjp_component_timings_s"]) == EXPECTED_B_VJP_COMPONENT_TIMING_KEYS
+    assert payload["dominant_squared_flux_field_b_vjp_components"]
+    assert payload["dominant_squared_flux_field_b_vjp_coils"]
 
 
 def _build_stage2_target_objective_contract_case():
@@ -383,6 +431,68 @@ class TestGradientParity:
             err_msg=f"Gradient mismatch between JAX and CPU for {definition!r}",
         )
 
+    def test_j_only_uses_forward_path_until_gradient_is_requested(
+        self, coil_surf_setup, monkeypatch
+    ):
+        coils, surf, _, _ = coil_surf_setup
+        bs_jax = BiotSavartJAX(coils)
+        jf_jax = SquaredFluxJAX(surf, bs_jax)
+        assert jf_jax._use_jax_native
+
+        calls = {"forward": 0, "value_grad": 0}
+        original_forward = jf_jax._jit_forward_dofs
+        original_value_grad = jf_jax._jit_val_grad_dofs
+
+        def counted_forward(flat_dofs):
+            calls["forward"] += 1
+            return original_forward(flat_dofs)
+
+        def counted_value_grad(flat_dofs):
+            calls["value_grad"] += 1
+            return original_value_grad(flat_dofs)
+
+        monkeypatch.setattr(jf_jax, "_jit_forward_dofs", counted_forward)
+        monkeypatch.setattr(jf_jax, "_jit_val_grad_dofs", counted_value_grad)
+
+        first_value = jf_jax.J()
+        second_value = jf_jax.J()
+
+        assert first_value == pytest.approx(second_value)
+        assert calls == {"forward": 1, "value_grad": 0}
+
+        jf_jax.dJ()
+        assert calls == {"forward": 1, "value_grad": 1}
+
+    def test_gradient_then_value_reuses_cached_squared_flux_value(
+        self, coil_surf_setup, monkeypatch
+    ):
+        coils, surf, _, _ = coil_surf_setup
+        bs_jax = BiotSavartJAX(coils)
+        jf_jax = SquaredFluxJAX(surf, bs_jax)
+        assert jf_jax._use_jax_native
+
+        calls = {"forward": 0, "value_grad": 0}
+        original_forward = jf_jax._jit_forward_dofs
+        original_value_grad = jf_jax._jit_val_grad_dofs
+
+        def counted_forward(flat_dofs):
+            calls["forward"] += 1
+            return original_forward(flat_dofs)
+
+        def counted_value_grad(flat_dofs):
+            calls["value_grad"] += 1
+            return original_value_grad(flat_dofs)
+
+        monkeypatch.setattr(jf_jax, "_jit_forward_dofs", counted_forward)
+        monkeypatch.setattr(jf_jax, "_jit_val_grad_dofs", counted_value_grad)
+
+        grad = jf_jax.dJ()
+        value = jf_jax.J()
+
+        assert np.asarray(grad).shape[0] > 0
+        assert np.isfinite(value)
+        assert calls == {"forward": 0, "value_grad": 1}
+
 
 # -----------------------------------------------------------------------
 # Test 3: Composite objective gradient (SquaredFlux + curve penalties)
@@ -570,6 +680,28 @@ class TestBiotSavartJAXParity:
                 err_msg="BiotSavartJAX.B_vjp() does not match CPU",
             )
 
+    def test_profile_b_vjp_reports_component_breakdown(self, coil_surf_setup):
+        coils, surf, _, _ = coil_surf_setup
+        points = surf.gamma().reshape((-1, 3))
+
+        bs_jax = BiotSavartJAX(coils)
+        bs_jax.set_points(points)
+        profile = bs_jax.profile_B_vjp(np.asarray(bs_jax.B()))
+
+        assert profile["wall_time_s"] >= 0.0
+        assert set(profile["component_timings_s"]) == EXPECTED_B_VJP_COMPONENT_TIMING_KEYS
+        assert profile["dominant_components"]
+        assert profile["dominant_coils"]
+        assert len(profile["per_coil_timings_s"]) == len(coils)
+        component_total = sum(profile["component_timings_s"].values())
+        assert component_total == pytest.approx(
+            sum(entry["total_s"] for entry in profile["per_coil_timings_s"])
+        )
+        assert component_total >= 0.9 * profile["wall_time_s"]
+        for entry in profile["per_coil_timings_s"]:
+            assert set(entry["component_timings_s"]) == EXPECTED_B_VJP_COMPONENT_TIMING_KEYS
+            assert entry["total_s"] >= 0.0
+
 
 # -----------------------------------------------------------------------
 # Test 6: DOF mutation round-trip
@@ -729,6 +861,25 @@ class TestMixedQuadratureParity:
             atol=1e-15,
             err_msg="Gradient mismatch with mixed quadrature",
         )
+
+    def test_j_recomputes_after_field_points_change(self, mixed_quad_setup):
+        """Fallback J() must not reuse stale values after field.set_points(...)."""
+        coils, surf = mixed_quad_setup
+
+        bs_jax = BiotSavartJAX(coils)
+        jf_jax = SquaredFluxJAX(surf, bs_jax)
+        assert not jf_jax._use_jax_native
+
+        initial_value = jf_jax.J()
+        shifted_points = surf.gamma().reshape((-1, 3)) + np.array([0.05, 0.0, 0.0])
+        bs_jax.set_points(shifted_points)
+
+        updated_value = jf_jax.J()
+        jf_jax.recompute_bell()
+        recomputed_value = jf_jax.J()
+
+        assert recomputed_value != pytest.approx(initial_value)
+        assert updated_value == pytest.approx(recomputed_value)
 
 
 # -----------------------------------------------------------------------
@@ -1236,6 +1387,55 @@ class TestStage2OptimizerContract:
         assert trajectory[0]["curve_length"] == pytest.approx(1.25)
         assert trajectory[1]["curve_length"] == pytest.approx(1.25)
 
+    def test_evaluate_stage2_objective_requests_gradient_before_value(self, monkeypatch):
+        stage2_script = _load_stage2_script_module()
+        call_order = []
+
+        class DummyJF:
+            def J(self):
+                call_order.append("J")
+                return 1.5
+
+            def dJ(self):
+                call_order.append("dJ")
+                return np.asarray([2.0, -1.0], dtype=float)
+
+        class DummyScalar:
+            def __init__(self, value):
+                self._value = float(value)
+
+            def J(self):
+                return self._value
+
+        class DummyDistance:
+            def shortest_distance(self):
+                return 0.25
+
+        monkeypatch.setattr(
+            stage2_script,
+            "compute_stage2_diagnostics",
+            lambda *_args, **_kwargs: {
+                "Jf": 0.75,
+                "mean_abs_relBfinal_norm": 0.5,
+            },
+        )
+
+        snapshot, grad, diagnostics = stage2_script.evaluate_stage2_objective(
+            DummyJF(),
+            object(),
+            object(),
+            object(),
+            DummyScalar(1.25),
+            DummyDistance(),
+            DummyScalar(0.5),
+        )
+
+        assert call_order[:2] == ["dJ", "J"]
+        np.testing.assert_allclose(grad, np.asarray([2.0, -1.0], dtype=float))
+        assert snapshot["J"] == pytest.approx(1.5)
+        assert snapshot["Jf"] == pytest.approx(0.75)
+        assert diagnostics["mean_abs_relBfinal_norm"] == pytest.approx(0.5)
+
     def test_profile_stage2_explicit_step_reports_component_breakdown(self, monkeypatch):
         stage2_script = _load_stage2_script_module()
         expected_objective_term_names = {
@@ -1302,6 +1502,12 @@ class TestStage2OptimizerContract:
         assert payload["extra_diagnostic_total_s"] >= 0.0
         assert payload["objective_term_value_total_s"] >= 0.0
         assert payload["objective_term_gradient_total_s"] >= 0.0
+        assert payload["squared_flux_internal_timings_s"] == {}
+        assert payload["squared_flux_internal_total_s"] == pytest.approx(0.0)
+        assert payload["dominant_squared_flux_internal_components"] == []
+        assert payload["squared_flux_field_b_vjp_component_timings_s"] == {}
+        assert payload["dominant_squared_flux_field_b_vjp_components"] == []
+        assert payload["dominant_squared_flux_field_b_vjp_coils"] == []
         assert payload["dominant_extra_diagnostics"]
         assert payload["dominant_objective_value_terms"]
         assert payload["dominant_objective_gradient_terms"]
@@ -1311,6 +1517,91 @@ class TestStage2OptimizerContract:
         assert payload["snapshot"]["coil_coil_distance"] == pytest.approx(0.25)
         assert payload["snapshot"]["curvature"] == pytest.approx(0.5)
         assert payload["snapshot"]["grad_norm"] == pytest.approx(np.sqrt(5.0))
+
+    def test_profile_stage2_explicit_step_reports_squared_flux_fallback_components(
+        self,
+        monkeypatch,
+    ):
+        stage2_script = _load_stage2_script_module()
+
+        class DummyFallbackField:
+            def B(self):
+                return np.zeros((2, 3), dtype=float)
+
+            def B_vjp(self, dJ_dB):
+                raise AssertionError("profile_stage2_squared_flux_internal_components should use profile_B_vjp when available")
+
+            def profile_B_vjp(self, dJ_dB):
+                assert dJ_dB.shape == (2, 3)
+                return _build_fake_b_vjp_profile()
+
+        class DummyFallbackSquaredFlux:
+            def __init__(self):
+                self._use_jax_native = False
+                self.field = DummyFallbackField()
+
+            def J(self):
+                return 0.75
+
+            def dJ(self):
+                return np.asarray([0.75, -0.75], dtype=float)
+
+            def _jit_integral(self, B):
+                assert B.shape == (2, 3)
+                return 0.75
+
+            def _jit_integral_value_grad(self, B):
+                assert B.shape == (2, 3)
+                return 0.75, np.zeros_like(B)
+
+        class DummyCompositeObjective:
+            def __init__(self):
+                self.x = np.zeros(2, dtype=float)
+
+            def J(self):
+                return 1.5
+
+            def dJ(self):
+                return np.asarray([2.0, -1.0], dtype=float)
+
+        class DummyScalar:
+            def __init__(self, value):
+                self._value = float(value)
+
+            def J(self):
+                return self._value
+
+            def dJ(self):
+                return np.asarray([self._value, -self._value], dtype=float)
+
+        class DummyDistance:
+            def J(self):
+                return 0.125
+
+            def dJ(self):
+                return np.asarray([0.125, -0.125], dtype=float)
+
+            def shortest_distance(self):
+                return 0.25
+
+        monkeypatch.setattr(stage2_script, "compute_mean_abs_relbn", lambda _surf, _bs: 0.5)
+
+        payload = stage2_script.profile_stage2_explicit_step(
+            DummyCompositeObjective(),
+            object(),
+            object(),
+            DummyFallbackSquaredFlux(),
+            DummyScalar(0.2),
+            DummyScalar(1.25),
+            DummyDistance(),
+            DummyScalar(0.5),
+        )
+
+        assert set(payload["squared_flux_internal_timings_s"]) == EXPECTED_SQUARED_FLUX_INTERNAL_TIMING_KEYS
+        assert payload["squared_flux_internal_total_s"] >= 0.0
+        assert payload["dominant_squared_flux_internal_components"]
+        assert payload["dominant_squared_flux_internal_components"][0]["elapsed_s"] >= 0.0
+        _assert_b_vjp_profile_payload(payload)
 
     def test_stage2_script_probe_only_writes_step_profile(self):
         with tempfile.TemporaryDirectory(prefix="stage2-step-profile-") as temp_dir:
@@ -1337,6 +1628,9 @@ class TestStage2OptimizerContract:
         assert payload["dominant_extra_diagnostics"][0]["elapsed_s"] >= 0.0
         assert payload["dominant_objective_value_terms"]
         assert payload["dominant_objective_gradient_terms"]
+        assert set(payload["squared_flux_internal_timings_s"]) == EXPECTED_SQUARED_FLUX_INTERNAL_TIMING_KEYS
+        assert payload["dominant_squared_flux_internal_components"]
+        _assert_b_vjp_profile_payload(payload)
 
     def test_stage2_script_rejects_step_profile_on_target_lane(self):
         with tempfile.TemporaryDirectory(prefix="stage2-step-profile-invalid-") as temp_dir:
