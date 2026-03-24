@@ -566,6 +566,56 @@ def time_stage2_callback(callback):
     return float(time.perf_counter() - start)
 
 
+def profile_stage2_named_callbacks(callbacks):
+    return {
+        name: time_stage2_callback(callback)
+        for name, callback in callbacks.items()
+    }
+
+
+def build_stage2_profile_breakdown(timings):
+    total_s = float(sum(timings.values()))
+    dominant = sorted(
+        (
+            {
+                "name": name,
+                "elapsed_s": elapsed_s,
+                "share": (elapsed_s / total_s) if total_s > 0.0 else 0.0,
+            }
+            for name, elapsed_s in timings.items()
+        ),
+        key=lambda item: item["elapsed_s"],
+        reverse=True,
+    )
+    return total_s, dominant
+
+
+def build_stage2_objective_term_callbacks(
+    Jf,
+    length_penalty,
+    Jccdist,
+    Jc,
+):
+    return {
+        "squared_flux": {
+            "J": Jf.J,
+            "dJ": Jf.dJ,
+        },
+        "length_penalty": {
+            "J": length_penalty.J,
+            "dJ": length_penalty.dJ,
+        },
+        "coil_distance": {
+            "J": Jccdist.J,
+            "dJ": Jccdist.dJ,
+        },
+        "curvature": {
+            "J": Jc.J,
+            "dJ": Jc.dJ,
+        },
+    }
+
+
 def compute_stage2_diagnostics(
     new_bs,
     new_surf,
@@ -620,6 +670,7 @@ def profile_stage2_explicit_step(
     new_bs,
     new_surf,
     Jf,
+    length_penalty,
     Jls,
     Jccdist,
     Jc,
@@ -646,31 +697,36 @@ def profile_stage2_explicit_step(
     observed_step_total_s = float(time.perf_counter() - start)
 
     field_bs = resolve_stage2_field_bs(new_bs, bs_jax)
-    extra_diagnostic_callbacks = (
-        ("Jf_J_s", lambda: float(Jf.J())),
-        ("mean_abs_relBfinal_norm_s", lambda: compute_mean_abs_relbn(new_surf, field_bs)),
-        ("curve_length_s", lambda: float(Jls.J())),
-        ("coil_coil_distance_s", lambda: float(Jccdist.shortest_distance())),
-        ("curvature_s", lambda: float(Jc.J())),
-    )
-    extra_diagnostic_timings = {}
-    for name, callback in extra_diagnostic_callbacks:
-        extra_diagnostic_timings[name] = time_stage2_callback(callback)
+    extra_diagnostic_callbacks = {
+        "Jf_J_s": lambda: float(Jf.J()),
+        "mean_abs_relBfinal_norm_s": lambda: compute_mean_abs_relbn(new_surf, field_bs),
+        "curve_length_s": lambda: float(Jls.J()),
+        "coil_coil_distance_s": lambda: float(Jccdist.shortest_distance()),
+        "curvature_s": lambda: float(Jc.J()),
+    }
+    extra_diagnostic_timings = profile_stage2_named_callbacks(extra_diagnostic_callbacks)
 
-    extra_diagnostic_total_s = float(sum(extra_diagnostic_timings.values()))
-    dominant_extra_diagnostics = sorted(
-        (
-            {
-                "name": name,
-                "elapsed_s": elapsed_s,
-                "share": (elapsed_s / extra_diagnostic_total_s)
-                if extra_diagnostic_total_s > 0.0
-                else 0.0,
-            }
-            for name, elapsed_s in extra_diagnostic_timings.items()
-        ),
-        key=lambda item: item["elapsed_s"],
-        reverse=True,
+    term_callbacks = build_stage2_objective_term_callbacks(
+        Jf,
+        length_penalty,
+        Jccdist,
+        Jc,
+    )
+    objective_term_value_timings = profile_stage2_named_callbacks(
+        {name: callbacks["J"] for name, callbacks in term_callbacks.items()}
+    )
+    objective_term_gradient_timings = profile_stage2_named_callbacks(
+        {name: callbacks["dJ"] for name, callbacks in term_callbacks.items()}
+    )
+
+    extra_diagnostic_total_s, dominant_extra_diagnostics = build_stage2_profile_breakdown(
+        extra_diagnostic_timings
+    )
+    objective_term_value_total_s, dominant_objective_value_terms = build_stage2_profile_breakdown(
+        objective_term_value_timings
+    )
+    objective_term_gradient_total_s, dominant_objective_gradient_terms = build_stage2_profile_breakdown(
+        objective_term_gradient_timings
     )
     return {
         "objective_path_timings_s": objective_path_timings,
@@ -678,6 +734,12 @@ def profile_stage2_explicit_step(
         "extra_diagnostic_timings_s": extra_diagnostic_timings,
         "extra_diagnostic_total_s": extra_diagnostic_total_s,
         "dominant_extra_diagnostics": dominant_extra_diagnostics,
+        "objective_term_value_timings_s": objective_term_value_timings,
+        "objective_term_value_total_s": objective_term_value_total_s,
+        "dominant_objective_value_terms": dominant_objective_value_terms,
+        "objective_term_gradient_timings_s": objective_term_gradient_timings,
+        "objective_term_gradient_total_s": objective_term_gradient_total_s,
+        "dominant_objective_gradient_terms": dominant_objective_gradient_terms,
         "snapshot": snapshot,
     }
 
@@ -1107,13 +1169,14 @@ if __name__ == "__main__":
     # Lp-norm curvature penalty (configurable via --curvature-p-norm)
     Jc = LpCurveCurvature(new_banana_curve, args.curvature_p_norm, CURVATURE_THRESHOLD)
     print(f"Initial coil length: {Jls.J():.2f} [m]")
+    Jls_penalty = QuadraticPenalty(Jls, LENGTH_TARGET, "max")
 
     # TOTAL OBJECTIVE FUNCTION -
     # we'll penalize the coil length, coil-coil distance, and curvature while minimizing the normal field
     SQUARED_FLUX_WEIGHT = args.squared_flux_weight
     JF = (
         SQUARED_FLUX_WEIGHT * Jf
-        + LENGTH_WEIGHT * QuadraticPenalty(Jls, LENGTH_TARGET, "max")
+        + LENGTH_WEIGHT * Jls_penalty
         + CC_WEIGHT * Jccdist
         + CURVATURE_WEIGHT * Jc
     )
@@ -1203,6 +1266,7 @@ if __name__ == "__main__":
             new_bs,
             new_surf,
             Jf,
+            Jls_penalty,
             Jls,
             Jccdist,
             Jc,

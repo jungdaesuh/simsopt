@@ -1238,6 +1238,12 @@ class TestStage2OptimizerContract:
 
     def test_profile_stage2_explicit_step_reports_component_breakdown(self, monkeypatch):
         stage2_script = _load_stage2_script_module()
+        expected_objective_term_names = {
+            "squared_flux",
+            "length_penalty",
+            "coil_distance",
+            "curvature",
+        }
 
         class DummyJF:
             def __init__(self):
@@ -1256,7 +1262,16 @@ class TestStage2OptimizerContract:
             def J(self):
                 return self._value
 
+            def dJ(self):
+                return np.asarray([self._value, -self._value], dtype=float)
+
         class DummyDistance:
+            def J(self):
+                return 0.125
+
+            def dJ(self):
+                return np.asarray([0.125, -0.125], dtype=float)
+
             def shortest_distance(self):
                 return 0.25
 
@@ -1267,6 +1282,7 @@ class TestStage2OptimizerContract:
             object(),
             object(),
             DummyScalar(0.75),
+            DummyScalar(0.2),
             DummyScalar(1.25),
             DummyDistance(),
             DummyScalar(0.5),
@@ -1281,8 +1297,14 @@ class TestStage2OptimizerContract:
             "coil_coil_distance_s",
             "curvature_s",
         }
+        assert set(payload["objective_term_value_timings_s"]) == expected_objective_term_names
+        assert set(payload["objective_term_gradient_timings_s"]) == expected_objective_term_names
         assert payload["extra_diagnostic_total_s"] >= 0.0
+        assert payload["objective_term_value_total_s"] >= 0.0
+        assert payload["objective_term_gradient_total_s"] >= 0.0
         assert payload["dominant_extra_diagnostics"]
+        assert payload["dominant_objective_value_terms"]
+        assert payload["dominant_objective_gradient_terms"]
         assert payload["snapshot"]["J"] == pytest.approx(1.5)
         assert payload["snapshot"]["Jf"] == pytest.approx(0.75)
         assert payload["snapshot"]["curve_length"] == pytest.approx(1.25)
@@ -1313,6 +1335,8 @@ class TestStage2OptimizerContract:
         assert payload["observed_step_total_s"] >= 0.0
         assert payload["dominant_extra_diagnostics"]
         assert payload["dominant_extra_diagnostics"][0]["elapsed_s"] >= 0.0
+        assert payload["dominant_objective_value_terms"]
+        assert payload["dominant_objective_gradient_terms"]
 
     def test_stage2_script_rejects_step_profile_on_target_lane(self):
         with tempfile.TemporaryDirectory(prefix="stage2-step-profile-invalid-") as temp_dir:
