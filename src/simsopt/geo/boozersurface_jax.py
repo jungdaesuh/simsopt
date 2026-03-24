@@ -385,10 +385,6 @@ def _resolve_ls_optimizer_method(optimizer_backend, limited_memory):
     )
 
 
-def _x64_enabled():
-    return bool(jnp.zeros(1).dtype == jnp.float64)
-
-
 def _require_target_backend_x64(optimizer_backend):
     """Fail fast when a target-lane backend is requested without float64."""
     require_target_backend_x64(optimizer_backend)

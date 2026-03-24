@@ -110,11 +110,8 @@ def _build_jax_stage2_timings(
     jax_outer_elapsed_s = float(jax_case["elapsed_s"])
     jax_primary_elapsed_s = jax_outer_elapsed_s
     optimizer_timings = jax_case.get("optimizer_timings")
-    if optimizer_timings is not None and "warm_run_s" in optimizer_timings:
-        jax_primary_elapsed_s = max(
-            jax_outer_elapsed_s - float(optimizer_timings["warm_run_s"]),
-            0.0,
-        )
+    if optimizer_timings is not None and "cold_run_s" in optimizer_timings:
+        jax_primary_elapsed_s = float(optimizer_timings["cold_run_s"])
     timings = {
         "jax_outer_elapsed_s": jax_outer_elapsed_s,
         "jax_primary_elapsed_s": jax_primary_elapsed_s,

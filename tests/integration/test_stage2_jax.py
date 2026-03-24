@@ -140,6 +140,24 @@ def _assert_stage2_script_failure(result, expected_error):
     assert expected_error in output
 
 
+def _assert_target_backend_runtime_gate(result):
+    if jax.__version__ == PRIVATE_OPTIMIZER_JAX_VERSION:
+        return True
+    _assert_stage2_script_failure(
+        result,
+        f"On-device optimizer is validated on JAX {PRIVATE_OPTIMIZER_JAX_VERSION}",
+    )
+    return False
+
+
+def _assert_target_backend_success(result):
+    output = f"{result.stdout}\n{result.stderr}"
+    if not _assert_target_backend_runtime_gate(result):
+        return None
+    assert result.returncode == 0, output
+    return output
+
+
 def _load_stage2_results_json(output_root):
     return json.loads(next(output_root.glob("**/results.json")).read_text(encoding="utf-8"))
 
@@ -1647,6 +1665,8 @@ class TestStage2OptimizerContract:
                 str(output_root),
             )
 
+        if not _assert_target_backend_runtime_gate(result):
+            return
         _assert_stage2_script_failure(result, PROFILE_STEP_REFERENCE_LANE_ERROR)
 
     def test_stage2_script_ondevice_warm_timing_is_recorded(self):
@@ -1664,8 +1684,8 @@ class TestStage2OptimizerContract:
                 str(output_root),
             )
 
-            output = f"{result.stdout}\n{result.stderr}"
-            assert result.returncode == 0, output
+            if _assert_target_backend_success(result) is None:
+                return
             payload = _load_stage2_results_json(output_root)
 
         timings = payload["OPTIMIZER_TIMINGS"]
@@ -1698,10 +1718,10 @@ class TestStage2OptimizerContract:
                 str(full_output_root),
             )
 
-            skip_output = f"{skip_result.stdout}\n{skip_result.stderr}"
-            full_output = f"{full_result.stdout}\n{full_result.stderr}"
-            assert skip_result.returncode == 0, skip_output
-            assert full_result.returncode == 0, full_output
+            if _assert_target_backend_success(skip_result) is None:
+                return
+            if _assert_target_backend_success(full_result) is None:
+                return
             skip_payload = _load_stage2_results_json(skip_output_root)
             full_payload = _load_stage2_results_json(full_output_root)
 
@@ -1740,6 +1760,8 @@ class TestStage2OptimizerContract:
                 str(output_root),
             )
 
+        if not _assert_target_backend_runtime_gate(result):
+            return
         _assert_stage2_script_failure(result, WARM_TIMING_NO_OPTIMIZATION_ERROR)
 
     def test_stage2_script_rejects_warm_timing_in_probe_only_mode(self):
@@ -1756,6 +1778,8 @@ class TestStage2OptimizerContract:
                 str(output_root),
             )
 
+        if not _assert_target_backend_runtime_gate(result):
+            return
         _assert_stage2_script_failure(result, WARM_TIMING_NO_OPTIMIZATION_ERROR)
 
     def test_target_scalar_objective_matches_stage2_composite_contract(self):
@@ -1855,8 +1879,8 @@ class TestStage2OptimizerContract:
                 str(trajectory_json),
             )
 
-            output = f"{result.stdout}\n{result.stderr}"
-            assert result.returncode == 0, output
+            if _assert_target_backend_success(result) is None:
+                return
             payload = json.loads(trajectory_json.read_text(encoding="utf-8"))
 
         evaluations = payload["evaluations"]

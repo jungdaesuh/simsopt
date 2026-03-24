@@ -5,6 +5,7 @@ import json
 import importlib.util
 import time
 
+import jax
 import numpy as np
 from numba import njit
 
@@ -560,15 +561,22 @@ def resolve_stage2_field_bs(new_bs, bs_jax):
     return bs_jax if bs_jax is not None else new_bs
 
 
+def _block_until_ready_tree(value):
+    for leaf in jax.tree_util.tree_leaves(value):
+        if hasattr(leaf, "block_until_ready"):
+            leaf.block_until_ready()
+
+
 def time_stage2_callback(callback):
     start = time.perf_counter()
-    callback()
+    _block_until_ready_tree(callback())
     return float(time.perf_counter() - start)
 
 
 def time_stage2_callback_result(callback):
     start = time.perf_counter()
     result = callback()
+    _block_until_ready_tree(result)
     return float(time.perf_counter() - start), result
 
 
@@ -696,6 +704,9 @@ def evaluate_stage2_objective(
     recompute_diagnostics=True,
 ):
     """Return composite objective diagnostics using the currently loaded DOFs."""
+    # Ask for the gradient first so the JAX squared-flux reference lane can
+    # reuse its cached objective value. Swapping the order does not reduce the
+    # non-JAX term work because those terms do not share a value cache.
     grad = np.asarray(JF.dJ(), dtype=float)
     J = float(JF.J())
     if recompute_diagnostics or diagnostics is None:
