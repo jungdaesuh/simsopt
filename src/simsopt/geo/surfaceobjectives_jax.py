@@ -28,7 +28,7 @@ import jax.numpy as jnp
 
 from .._core.optimizable import Optimizable
 from .._core.derivative import derivative_dec
-from ..objectives.utilities import forward_backward
+from ..objectives.utilities import forward_backward_jax
 from ..field.biotsavart_jax import grouped_biot_savart_B
 from .boozer_residual_jax import (
     boozer_residual_vector,
@@ -42,6 +42,12 @@ __all__ = [
     "IotasJAX",
     "NonQuasiSymmetricRatioJAX",
 ]
+
+
+def _solve_boozer_adjoint(booz_surf, rhs):
+    """Solve the transposed PLU adjoint system for a BoozerSurfaceJAX result."""
+    P, L, U = booz_surf.res["PLU"]
+    return forward_backward_jax(P, L, U, rhs)
 
 
 def _coil_cotangents_to_derivative(coils, d_coil_arrays, coil_indices):
@@ -308,7 +314,6 @@ class BoozerResidualJAX(Optimizable):
         rtil = np.concatenate([r, [rl]])
         self._J = 0.5 * np.sum(rtil**2)
 
-        P, L, U = booz_surf.res["PLU"]
         vjp_fn = booz_surf.res["vjp"]
 
         dJ_by_dB = self._compute_dJ_by_dB(
@@ -325,7 +330,7 @@ class BoozerResidualJAX(Optimizable):
         dJ_by_dcoils = self.biotsavart.B_vjp(dJ_by_dB)
 
         dJ_ds = self._compute_dJ_ds(iota, G, weight_inv_modB, cw, nphi, ntheta)
-        adj = forward_backward(P, L, U, dJ_ds)
+        adj = _solve_boozer_adjoint(booz_surf, dJ_ds)
 
         d_coil_arrays, coil_indices = vjp_fn(adj, booz_surf, iota, G)
         adj_derivative = _coil_cotangents_to_derivative(
@@ -386,7 +391,7 @@ class BoozerResidualJAX(Optimizable):
             label_type=booz_surf.label_type,
             phi_idx=booz_surf.phi_idx,
         )
-        return np.asarray(dJ_ds_jax)
+        return dJ_ds_jax
 
 
 class IotasJAX(Optimizable):
@@ -427,18 +432,18 @@ class IotasJAX(Optimizable):
         iota = booz_surf.res["iota"]
         G = booz_surf.res["G"]
         self._J = iota
-        P, L, U = booz_surf.res["PLU"]
         vjp_fn = booz_surf.res["vjp"]
 
         # dJ/dx_inner for iota: unit vector at the iota position
+        L = booz_surf.res["PLU"][1]
         n = L.shape[0]
-        dJ_ds = np.zeros(n)
+        dJ_ds = jnp.zeros(n, dtype=jnp.asarray(L).dtype)
         if G is not None:
-            dJ_ds[-2] = 1.0  # [surface_dofs..., iota, G]
+            dJ_ds = dJ_ds.at[-2].set(1.0)  # [surface_dofs..., iota, G]
         else:
-            dJ_ds[-1] = 1.0  # [surface_dofs..., iota]
+            dJ_ds = dJ_ds.at[-1].set(1.0)  # [surface_dofs..., iota]
 
-        adj = forward_backward(P, L, U, dJ_ds)
+        adj = _solve_boozer_adjoint(booz_surf, dJ_ds)
 
         d_coil_arrays, coil_indices = vjp_fn(adj, booz_surf, iota, G)
         adj_derivative = _coil_cotangents_to_derivative(
@@ -519,7 +524,6 @@ class NonQuasiSymmetricRatioJAX(Optimizable):
 
         iota = booz_surf.res["iota"]
         G = booz_surf.res["G"]
-        P, L, U = booz_surf.res["PLU"]
         vjp_fn = booz_surf.res["vjp"]
 
         sdofs = booz_surf._get_surface_dofs()
@@ -552,13 +556,13 @@ class NonQuasiSymmetricRatioJAX(Optimizable):
         def J_of_sdofs(s):
             return _qs_ratio_pure(s, coil_arrays, **qs_kwargs)
 
-        dJ_ds_surface = np.asarray(jax.grad(J_of_sdofs)(sdofs))
+        dJ_ds_surface = jax.grad(J_of_sdofs)(sdofs)
 
-        n = L.shape[0]
-        dJ_ds = np.zeros(n)
-        dJ_ds[: dJ_ds_surface.size] = dJ_ds_surface
+        n = booz_surf.res["PLU"][1].shape[0]
+        dJ_ds = jnp.zeros(n, dtype=dJ_ds_surface.dtype)
+        dJ_ds = dJ_ds.at[: dJ_ds_surface.size].set(dJ_ds_surface)
 
-        adj = forward_backward(P, L, U, dJ_ds)
+        adj = _solve_boozer_adjoint(booz_surf, dJ_ds)
 
         d_coil_arrays_adj, coil_indices_adj = vjp_fn(adj, booz_surf, iota, G)
         adj_derivative = _coil_cotangents_to_derivative(

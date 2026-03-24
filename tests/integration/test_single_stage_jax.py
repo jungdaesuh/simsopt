@@ -23,6 +23,7 @@ All tests require ``simsoptpp`` for the CPU reference.
 import pytest
 import numpy as np
 import jax
+import scipy.linalg
 
 sopp = pytest.importorskip(
     "simsoptpp",
@@ -60,6 +61,14 @@ from simsopt.geo.surfaceobjectives_jax import (  # noqa: E402
 # -----------------------------------------------------------------------
 # Fixtures
 # -----------------------------------------------------------------------
+
+
+def _iota_unit_rhs(plu):
+    """Return the standard IotasJAX inner cotangent for the LS path."""
+    n = plu[1].shape[0]
+    rhs = np.zeros(n)
+    rhs[-2] = 1.0
+    return rhs
 
 
 def _make_boozer_setup(constraint_weight=1.0, optimizer_backend="scipy"):
@@ -275,21 +284,32 @@ class TestAdjointSolveConsistency:
     to happen on BOTH CPU and JAX solvers on this config).
     """
 
-    def test_adjoint_residual(self, boozer_setup):
-        """Check that forward_backward(PLU, dJ_ds) actually solves H^T adj = dJ_ds."""
+    def test_device_native_adjoint_solve_matches_host(self, boozer_setup):
+        """JAX PLU solve matches the legacy host triangular solve."""
         (coils, surf_cpu, surf_jax, bs_cpu, bs_jax, booz_cpu, booz_jax, vol_cpu) = (
             boozer_setup
         )
-        from simsopt.objectives.utilities import forward_backward
+        from simsopt.objectives.utilities import forward_backward, forward_backward_jax
 
         P, L, U = booz_jax.res["PLU"]
+        dJ_ds = _iota_unit_rhs((P, L, U))
 
-        # IotasJAX dJ_ds: unit vector at iota position
-        n = L.shape[0]
-        dJ_ds = np.zeros(n)
-        dJ_ds[-2] = 1.0
+        adj_host = forward_backward(P, L, U, dJ_ds)
+        adj_jax = np.asarray(forward_backward_jax(P, L, U, dJ_ds))
 
-        adj = forward_backward(P, L, U, dJ_ds)
+        np.testing.assert_allclose(adj_jax, adj_host, rtol=1e-12, atol=1e-12)
+
+    def test_adjoint_residual(self, boozer_setup):
+        """Check that forward_backward_jax(PLU, dJ_ds) solves H^T adj = dJ_ds."""
+        (coils, surf_cpu, surf_jax, bs_cpu, bs_jax, booz_cpu, booz_jax, vol_cpu) = (
+            boozer_setup
+        )
+        from simsopt.objectives.utilities import forward_backward_jax
+
+        P, L, U = booz_jax.res["PLU"]
+        dJ_ds = _iota_unit_rhs((P, L, U))
+
+        adj = np.asarray(forward_backward_jax(P, L, U, dJ_ds))
 
         # Verify: (P @ L @ U)^T @ adj should equal dJ_ds
         H = P @ L @ U
@@ -304,13 +324,11 @@ class TestAdjointSolveConsistency:
             boozer_setup
         )
         from simsopt.geo.surfaceobjectives_jax import _coil_cotangents_to_derivative
-        from simsopt.objectives.utilities import forward_backward
+        from simsopt.objectives.utilities import forward_backward_jax
 
         P, L, U = booz_jax.res["PLU"]
-        n = L.shape[0]
-        dJ_ds = np.zeros(n)
-        dJ_ds[-2] = 1.0
-        adj = forward_backward(P, L, U, dJ_ds)
+        dJ_ds = _iota_unit_rhs((P, L, U))
+        adj = forward_backward_jax(P, L, U, dJ_ds)
 
         vjp_fn = booz_jax.res["vjp"]
         adj_cot = vjp_fn(adj, booz_jax, booz_jax.res["iota"], booz_jax.res["G"])
@@ -320,6 +338,31 @@ class TestAdjointSolveConsistency:
         print(f"||VJP result|| = {np.linalg.norm(g):.6e}")
         assert np.all(np.isfinite(g)), "VJP produced NaN/inf"
         assert np.linalg.norm(g) > 0, "VJP produced zero gradient"
+
+    def test_surface_objectives_jax_reject_host_forward_backward(
+        self, boozer_setup, monkeypatch
+    ):
+        """Target JAX implicit wrappers must not fall back to SciPy triangular solves."""
+        (coils, surf_cpu, surf_jax, bs_cpu, bs_jax, booz_cpu, booz_jax, vol_cpu) = (
+            boozer_setup
+        )
+
+        def _bomb(*args, **kwargs):
+            raise AssertionError(
+                "SciPy triangular solves should not run on the JAX implicit path"
+            )
+
+        monkeypatch.setattr(scipy.linalg, "solve_triangular", _bomb)
+
+        gradients = [
+            np.array(BoozerResidualJAX(booz_jax, bs_jax).dJ()),
+            np.array(IotasJAX(booz_jax).dJ()),
+            np.array(NonQuasiSymmetricRatioJAX(booz_jax, bs_jax, sDIM=6).dJ()),
+        ]
+
+        for grad in gradients:
+            assert np.all(np.isfinite(grad)), "Implicit JAX path produced NaN/inf"
+            assert np.linalg.norm(grad) > 0, "Implicit JAX path produced zero gradient"
 
 
 # -----------------------------------------------------------------------

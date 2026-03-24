@@ -5,7 +5,14 @@ import scipy
 from .._core.optimizable import Optimizable
 from .._core.derivative import Derivative, derivative_dec
 
-__all__ = ['MPIOptimizable', 'MPIObjective', 'QuadraticPenalty', 'Weight', 'forward_backward']
+__all__ = [
+    'MPIOptimizable',
+    'MPIObjective',
+    'QuadraticPenalty',
+    'Weight',
+    'forward_backward',
+    'forward_backward_jax',
+]
 
 
 def forward_backward(P, L, U, rhs, iterative_refinement=False):
@@ -29,6 +36,34 @@ def forward_backward(P, L, U, rhs, iterative_refinement=False):
         yp = scipy.linalg.solve_triangular(U.T, rhs-(P@L@U).T@adj, lower=True)
         zp = scipy.linalg.solve_triangular(L.T, yp, lower=False)
         adj += P@zp
+
+    return adj
+
+
+def forward_backward_jax(P, L, U, rhs, iterative_refinement=False):
+    """
+    Solve ``(PLU)^T * adj = rhs`` using JAX triangular solves.
+
+    This preserves the existing PLU contract while keeping the adjoint
+    linear solve on the active JAX device for JAX-native implicit paths.
+    """
+    import jax
+    import jax.numpy as jnp
+
+    P_jax = jnp.asarray(P)
+    L_jax = jnp.asarray(L)
+    U_jax = jnp.asarray(U)
+    rhs_jax = jnp.asarray(rhs)
+
+    y = jax.scipy.linalg.solve_triangular(U_jax.T, rhs_jax, lower=True)
+    z = jax.scipy.linalg.solve_triangular(L_jax.T, y, lower=False)
+    adj = P_jax @ z
+
+    if iterative_refinement:
+        residual = rhs_jax - (P_jax @ L_jax @ U_jax).T @ adj
+        yp = jax.scipy.linalg.solve_triangular(U_jax.T, residual, lower=True)
+        zp = jax.scipy.linalg.solve_triangular(L_jax.T, yp, lower=False)
+        adj = adj + P_jax @ zp
 
     return adj
 
