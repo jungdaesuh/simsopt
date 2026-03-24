@@ -71,6 +71,22 @@ def _iota_unit_rhs(plu):
     return rhs
 
 
+def _explicit_grouped_coil_derivative(coils, d_coil_arrays, coil_indices):
+    """Reference grouped-coil projection using the original explicit summation."""
+    all_derivatives = []
+    for (d_g, d_gd, d_c), indices in zip(d_coil_arrays, coil_indices):
+        dg = np.asarray(d_g)
+        dgd = np.asarray(d_gd)
+        dc = np.asarray(d_c)
+        for local_i, global_i in enumerate(indices):
+            all_derivatives.append(
+                coils[global_i].vjp(
+                    dg[local_i], dgd[local_i], np.asarray([dc[local_i]])
+                )
+            )
+    return sum(all_derivatives)
+
+
 def _make_boozer_setup(constraint_weight=1.0, optimizer_backend="scipy"):
     """Create a Boozer surface configuration for testing."""
     ncoils = 2
@@ -338,6 +354,36 @@ class TestAdjointSolveConsistency:
         print(f"||VJP result|| = {np.linalg.norm(g):.6e}")
         assert np.all(np.isfinite(g)), "VJP produced NaN/inf"
         assert np.linalg.norm(g) > 0, "VJP produced zero gradient"
+
+    def test_coil_cotangent_projection_matches_explicit_sum(self, boozer_setup):
+        """Incremental grouped-coil accumulation matches the prior explicit summation."""
+        (coils, surf_cpu, surf_jax, bs_cpu, bs_jax, booz_cpu, booz_jax, vol_cpu) = (
+            boozer_setup
+        )
+        from simsopt.geo.surfaceobjectives_jax import _coil_cotangents_to_derivative
+        from simsopt.objectives.utilities import forward_backward_jax
+
+        P, L, U = booz_jax.res["PLU"]
+        dJ_ds = _iota_unit_rhs((P, L, U))
+        adj = forward_backward_jax(P, L, U, dJ_ds)
+
+        vjp_fn = booz_jax.res["vjp"]
+        d_coil_arrays, coil_indices = vjp_fn(
+            adj, booz_jax, booz_jax.res["iota"], booz_jax.res["G"]
+        )
+        projected = _coil_cotangents_to_derivative(
+            bs_jax.coils, d_coil_arrays, coil_indices
+        )
+        explicit = _explicit_grouped_coil_derivative(
+            bs_jax.coils, d_coil_arrays, coil_indices
+        )
+
+        np.testing.assert_allclose(
+            np.asarray(projected(bs_jax), dtype=float),
+            np.asarray(explicit(bs_jax), dtype=float),
+            rtol=1e-12,
+            atol=1e-12,
+        )
 
     def test_surface_objectives_jax_reject_host_forward_backward(
         self, boozer_setup, monkeypatch

@@ -26,8 +26,8 @@ import numpy as np
 import jax
 import jax.numpy as jnp
 
+from .._core.derivative import Derivative, derivative_dec
 from .._core.optimizable import Optimizable
-from .._core.derivative import derivative_dec
 from ..objectives.utilities import forward_backward_jax
 from ..field.biotsavart_jax import grouped_biot_savart_B
 from .boozer_residual_jax import (
@@ -67,18 +67,16 @@ def _coil_cotangents_to_derivative(coils, d_coil_arrays, coil_indices):
     Returns:
         ``Derivative`` over all coil DOFs.
     """
-    all_derivs = []
+    total_derivative = Derivative({})
     for (d_g, d_gd, d_c), indices in zip(d_coil_arrays, coil_indices):
         dg = np.asarray(d_g)
         dgd = np.asarray(d_gd)
         dc = np.asarray(d_c)
         for local_i, global_i in enumerate(indices):
-            all_derivs.append(
-                coils[global_i].vjp(
-                    dg[local_i], dgd[local_i], np.asarray([dc[local_i]])
-                )
+            total_derivative += coils[global_i].vjp(
+                dg[local_i], dgd[local_i], np.asarray([dc[local_i]])
             )
-    return sum(all_derivs)
+    return total_derivative
 
 
 def _ensure_solved(booz_surf):
