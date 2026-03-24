@@ -18,7 +18,14 @@ from benchmarks.adjoint_fd_validation import (
     RECOMPOSED_TOTAL_REL_TOL,
     evaluate_adjoint_validation,
 )
+from benchmarks.grouped_adjoint_memory_probe import (
+    evaluate_grouped_adjoint_memory_probe,
+)
 import benchmarks.single_stage_init_parity as single_stage_init_parity_module
+from benchmarks.single_stage_outer_loop_probe import (
+    TARGET_OUTER_OPTIMIZER_METHOD,
+    evaluate_single_stage_outer_loop_probe,
+)
 from benchmarks.benchmark_config import DEFAULT_CONFIGS, resolve_configs
 from benchmarks.benchmark_problem import (
     build_ls_parity_problem,
@@ -28,6 +35,7 @@ from benchmarks.benchmark_problem import (
 import benchmarks.run_code_benchmark_common as run_code_benchmark_common
 from benchmarks.run_code_benchmark_common import summarize_result_fun
 from benchmarks.single_stage_init_parity import (
+    DEFAULT_OUTER_MAXITER,
     DEFAULT_STAGE2_BS_PATH,
     DEFAULT_SMOKE_MPOL,
     DEFAULT_SMOKE_NPHI,
@@ -178,6 +186,7 @@ def test_single_stage_init_defaults_to_reduced_grid_smoke_fixture(monkeypatch):
     assert args.mpol == DEFAULT_SMOKE_MPOL
     assert args.ntor == DEFAULT_SMOKE_NTOR
     assert args.optimizer_backend == single_stage_init_parity_module.TARGET_OPTIMIZER_BACKEND
+    assert args.maxiter == DEFAULT_OUTER_MAXITER
 
 
 def test_repo_pythonpath_env_sets_all_platform_selectors(monkeypatch):
@@ -502,6 +511,7 @@ def test_single_stage_init_case_loads_surface_before_tempdir_cleanup(monkeypatch
         vol_target=0.1,
         iota_target=0.15,
         optimizer_backend="scipy",
+        maxiter=0,
         equilibrium_path=None,
         equilibria_dir=str(tmp_path / "equilibria"),
     )
@@ -570,6 +580,7 @@ def test_single_stage_init_case_threads_optimizer_backend_to_jax_lane(
         vol_target=0.1,
         iota_target=0.15,
         optimizer_backend="ondevice",
+        maxiter=1,
         equilibrium_path=None,
         equilibria_dir=str(tmp_path / "equilibria"),
     )
@@ -622,8 +633,120 @@ def test_single_stage_init_case_threads_optimizer_backend_to_jax_lane(
     )
 
     assert observed_commands
+    assert "--init-only" not in observed_commands[0]
+    maxiter_flag_index = observed_commands[0].index("--maxiter")
+    assert observed_commands[0][maxiter_flag_index + 1] == "1"
     optimizer_flag_index = observed_commands[0].index("--optimizer-backend")
     assert observed_commands[0][optimizer_flag_index + 1] == "ondevice"
+
+
+def _single_stage_probe_results(**overrides):
+    results = {
+        "FINAL_IOTA": 0.15,
+        "FINAL_VOLUME": 0.1,
+        "FIELD_ERROR": 0.003,
+        "MAX_CURVATURE": 10.0,
+        "SELF_INTERSECTING": False,
+        "SELF_INTERSECTION_CHECK_AVAILABLE": True,
+        "iterations": 1,
+        "outer_optimizer_method": "lbfgs",
+    }
+    results.update(overrides)
+    return results
+
+
+def test_single_stage_init_parity_requires_accepted_step_on_outer_loop_probe():
+    cpu_results = _single_stage_probe_results()
+    jax_results = _single_stage_probe_results(
+        iterations=0,
+        outer_optimizer_method="lbfgs-ondevice",
+    )
+
+    _, failures = evaluate_single_stage_init_parity(
+        cpu_results,
+        jax_results,
+        max_surface_geometry_abs=0.0,
+        max_surface_geometry_rel=0.0,
+        maxiter=1,
+    )
+
+    assert any("did not accept an optimizer step" in failure for failure in failures)
+
+
+def test_single_stage_outer_loop_probe_accepts_finite_target_lane_result():
+    summary, failures = evaluate_single_stage_outer_loop_probe(
+        _single_stage_probe_results(
+            FINAL_IOTA=0.01,
+            FIELD_ERROR=0.004,
+            MAX_CURVATURE=32.0,
+            SELF_INTERSECTION_CHECK_AVAILABLE=False,
+            outer_optimizer_method=TARGET_OUTER_OPTIMIZER_METHOD,
+        )
+    )
+
+    assert failures == []
+    assert summary["iterations"] == 1
+    assert summary["outer_optimizer_method"] == TARGET_OUTER_OPTIMIZER_METHOD
+    assert summary["self_intersection_check_available"] is False
+
+
+def test_single_stage_outer_loop_probe_rejects_missing_step_or_wrong_method():
+    _, failures = evaluate_single_stage_outer_loop_probe(
+        _single_stage_probe_results(
+            iterations=0,
+            SELF_INTERSECTING=True,
+            FINAL_IOTA=np.nan,
+            FIELD_ERROR=0.004,
+            MAX_CURVATURE=32.0,
+        )
+    )
+
+    assert any("did not accept an optimizer step" in failure for failure in failures)
+    assert any(TARGET_OUTER_OPTIMIZER_METHOD in failure for failure in failures)
+    assert any("self-intersecting surface" in failure for failure in failures)
+    assert any("non-finite FINAL_IOTA" in failure for failure in failures)
+
+
+def _grouped_adjoint_memory_metrics(*, snapshots, **overrides):
+    metrics = {
+        "adjoint_residual_rel": 1e-12,
+        "adjoint_finite": True,
+        "implicit_gradient_finite": True,
+        "implicit_gradient_norm": 1.0,
+        "snapshots": snapshots,
+    }
+    metrics.update(overrides)
+    return metrics
+
+
+def test_grouped_adjoint_memory_probe_requires_complete_finite_metrics():
+    failures = evaluate_grouped_adjoint_memory_probe(
+        _grouped_adjoint_memory_metrics(
+            snapshots=[
+                {"label": "start", "rss_mb": 1.0, "gpu_memory_mb": None},
+                {"label": "after_fixture", "rss_mb": 2.0, "gpu_memory_mb": None},
+                {"label": "after_objective", "rss_mb": 3.0, "gpu_memory_mb": None},
+                {"label": "after_adjoint_solve", "rss_mb": 4.0, "gpu_memory_mb": None},
+                {"label": "after_grouped_adjoint_vjp", "rss_mb": 5.0, "gpu_memory_mb": None},
+            ]
+        )
+    )
+
+    assert failures == []
+
+
+def test_grouped_adjoint_memory_probe_rejects_missing_snapshots_or_nonfinite_gradient():
+    failures = evaluate_grouped_adjoint_memory_probe(
+        _grouped_adjoint_memory_metrics(
+            adjoint_residual_rel=np.inf,
+            implicit_gradient_finite=False,
+            implicit_gradient_norm=0.0,
+            snapshots=[{"label": "start", "rss_mb": 1.0, "gpu_memory_mb": None}],
+        )
+    )
+
+    assert any("required snapshots" in failure for failure in failures)
+    assert any("non-finite implicit gradient" in failure for failure in failures)
 
 
 def _stage2_e2e_comparison_case(**overrides):

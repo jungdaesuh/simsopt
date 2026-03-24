@@ -65,6 +65,7 @@ VOLUME_REL_TOL = _TIER3_TOLERANCES["final_volume_rel_tol"]
 FIELD_ERROR_REL_TOL = _TIER3_TOLERANCES["field_error_rel_tol"]
 SURFACE_GEOMETRY_REL_TOL = _TIER3_TOLERANCES["surface_geometry_rel_tol"]
 TARGET_OPTIMIZER_BACKEND = "ondevice"
+DEFAULT_OUTER_MAXITER = 0
 
 
 def parse_args() -> argparse.Namespace:
@@ -148,6 +149,15 @@ def parse_args() -> argparse.Namespace:
             "against the public reference lane explicitly."
         ),
     )
+    parser.add_argument(
+        "--maxiter",
+        type=int,
+        default=DEFAULT_OUTER_MAXITER,
+        help=(
+            "Single-stage outer-loop iteration budget. "
+            "Use 0 to keep the historical init-only Tier 3 probe shape."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -173,7 +183,6 @@ def _run_single_stage_case(
         command = [
             "--backend",
             backend,
-            "--init-only",
             "--output-root",
             str(output_root),
             "--plasma-surf-filename",
@@ -193,6 +202,10 @@ def _run_single_stage_case(
             "--iota-target",
             str(args.iota_target),
         ]
+        if int(args.maxiter) <= 0:
+            command.append("--init-only")
+        else:
+            command.extend(["--maxiter", str(args.maxiter)])
         if backend == "jax":
             command.extend(["--optimizer-backend", args.optimizer_backend])
         if args.equilibrium_path:
@@ -242,6 +255,7 @@ def evaluate_single_stage_init_parity(
     *,
     max_surface_geometry_abs: float,
     max_surface_geometry_rel: float,
+    maxiter: int = DEFAULT_OUTER_MAXITER,
 ) -> tuple[dict[str, Any], list[str]]:
     comparison = {
         "final_iota_abs_diff": abs(
@@ -269,6 +283,14 @@ def evaluate_single_stage_init_parity(
         "jax_self_intersection_check_available": bool(
             jax_results.get("SELF_INTERSECTION_CHECK_AVAILABLE", True)
         ),
+        "cpu_iterations": int(cpu_results.get("iterations", 0)),
+        "jax_iterations": int(jax_results.get("iterations", 0)),
+        "cpu_outer_optimizer_method": str(
+            cpu_results.get("outer_optimizer_method", "lbfgs")
+        ),
+        "jax_outer_optimizer_method": str(
+            jax_results.get("outer_optimizer_method", "lbfgs")
+        ),
     }
 
     failures: list[str] = []
@@ -295,6 +317,19 @@ def evaluate_single_stage_init_parity(
         failures.append("CPU single-stage init produced a self-intersecting surface.")
     if comparison["jax_self_intersecting"]:
         failures.append("JAX single-stage init produced a self-intersecting surface.")
+    if maxiter > 0:
+        if comparison["cpu_iterations"] < 1:
+            failures.append(
+                "CPU single-stage outer-loop probe did not accept an optimizer step."
+            )
+        if comparison["jax_iterations"] < 1:
+            failures.append(
+                "JAX single-stage outer-loop probe did not accept an optimizer step."
+            )
+        if comparison["jax_outer_optimizer_method"] != "lbfgs-ondevice":
+            failures.append(
+                "JAX target-lane outer-loop probe did not use lbfgs-ondevice."
+            )
     return comparison, failures
 
 
@@ -319,6 +354,7 @@ def main() -> None:
             "plasma_surf_filename": args.plasma_surf_filename,
             "stage2_seed_path": _display_path(stage2_bs_path),
             "optimizer_backend": args.optimizer_backend,
+            "outer_maxiter": int(args.maxiter),
             "nphi": int(args.nphi),
             "ntheta": int(args.ntheta),
             "mpol": int(args.mpol),
@@ -347,6 +383,7 @@ def main() -> None:
         jax_results,
         max_surface_geometry_abs=max_geom_abs,
         max_surface_geometry_rel=max_geom_rel,
+        maxiter=int(args.maxiter),
     )
     warnings: list[str] = []
     if not comparison["cpu_self_intersection_check_available"]:
