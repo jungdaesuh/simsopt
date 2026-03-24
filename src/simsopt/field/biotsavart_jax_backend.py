@@ -9,6 +9,7 @@ This module does **not** inherit from ``sopp.BiotSavart`` or
 M0 rewrite contract (adapter pattern, §5).
 """
 
+from dataclasses import dataclass
 import time
 
 import numpy as np
@@ -19,6 +20,7 @@ from .._core.derivative import Derivative
 from .._core.optimizable import Optimizable
 from .biotsavart_jax import (
     biot_savart_B,
+    biot_savart_B_vjp,
     biot_savart_dB_by_dX,
     biot_savart_B_and_dB,
     group_coil_data,
@@ -104,6 +106,48 @@ def _build_coil_profile_entry(coil_index, coil_timings):
         },
         "total_s": float(sum(coil_timings.values())),
     }
+
+
+def _build_pullback_group_profile_entry(*, kind, coil_indices, elapsed_s, native_curve):
+    return {
+        "kind": kind,
+        "coil_indices": [int(coil_index) for coil_index in coil_indices],
+        "elapsed_s": float(elapsed_s),
+        "native_curve": bool(native_curve),
+    }
+
+
+def _build_pullback_group_profile_breakdown(entries):
+    total_s = float(sum(entry["elapsed_s"] for entry in entries))
+    if total_s <= 0.0:
+        return []
+    ranked = sorted(entries, key=lambda entry: entry["elapsed_s"], reverse=True)
+    return [
+        {
+            **entry,
+            "share": float(entry["elapsed_s"] / total_s),
+        }
+        for entry in ranked
+    ]
+
+
+def _host_pullback_group(pullback_outputs):
+    return jax.device_get(pullback_outputs)
+
+
+@dataclass(frozen=True)
+class _CoilVJPInfo:
+    coil_index: int
+    coil: object
+    curve: object
+    rotmat: object
+    current: object
+    scale: float
+    gamma: object
+    gammadash: object
+    current_value: object
+    native_curve: bool
+    timings: dict[str, float] | None = None
 
 
 def _supports_native_curve_geometry(curve):
@@ -291,6 +335,71 @@ class BiotSavartJAX(Optimizable):
     def _coil_has_free_dofs(self, coil):
         return coil.curve.dof_size > 0 or coil.current.dof_size > 0
 
+    def _build_coil_vjp_info(self, coil_index, coil, inputs, *, timings=None):
+        curve, rotmat, current, scale, gamma, gammadash, current_value = inputs
+        return _CoilVJPInfo(
+            coil_index=int(coil_index),
+            coil=coil,
+            curve=curve,
+            rotmat=rotmat,
+            current=current,
+            scale=scale,
+            gamma=gamma,
+            gammadash=gammadash,
+            current_value=current_value,
+            native_curve=_supports_native_curve_geometry(curve),
+            timings=timings,
+        )
+
+    def _collect_free_coil_vjp_infos(self, geometry_cache=None):
+        coil_infos = []
+        for coil_index, coil in enumerate(self._coils):
+            if not self._coil_has_free_dofs(coil):
+                continue
+            inputs = self._coil_geometry_inputs(coil, geometry_cache)
+            coil_infos.append(
+                self._build_coil_vjp_info(
+                    coil_index,
+                    coil,
+                    inputs,
+                )
+            )
+        return coil_infos
+
+    def _group_coil_vjp_infos(self, coil_infos):
+        grouped = {}
+        for info in coil_infos:
+            key = (int(info.gamma.shape[0]), bool(info.native_curve))
+            grouped.setdefault(key, []).append(info)
+        group_infos = []
+        for infos in grouped.values():
+            group_infos.append(
+                {
+                    "infos": infos,
+                    "gammas": jnp.stack([info.gamma for info in infos]),
+                    "gammadashs": jnp.stack([info.gammadash for info in infos]),
+                    "currents": jnp.stack([info.current_value for info in infos]),
+                    "native_curve": infos[0].native_curve,
+                }
+            )
+        return group_infos
+
+    def _collect_profiled_free_coil_vjp_infos(self, geometry_cache=None):
+        coil_infos = []
+        for coil_index, coil in enumerate(self._coils):
+            if not self._coil_has_free_dofs(coil):
+                continue
+            *inputs, timings = self._coil_b_vjp_inputs(coil, geometry_cache)
+            coil_infos.append(
+                self._build_coil_vjp_info(
+                    coil_index,
+                    coil,
+                    inputs,
+                    timings=timings,
+                )
+            )
+        return coil_infos
+
     def _extract_coil_data_grouped(self):
         """Read coil geometry grouped by quadrature point count.
 
@@ -380,7 +489,7 @@ class BiotSavartJAX(Optimizable):
     def _direct_curve_current_vjp(self, curve, rotmat, current, scale, dg, dgd, dc):
         """Map native JAX pullbacks back to curve, surface, and current DOFs."""
         if rotmat is not None:
-            rotmat_t = np.asarray(rotmat).T
+            rotmat_t = jnp.asarray(rotmat, dtype=jnp.float64).T
             dg = dg @ rotmat_t
             dgd = dgd @ rotmat_t
 
@@ -388,39 +497,25 @@ class BiotSavartJAX(Optimizable):
         if curve.dof_size > 0:
             curve_dofs = jnp.asarray(curve.get_dofs(), dtype=jnp.float64)
             deriv_data[curve] = (
-                np.asarray(curve.dgamma_by_dcoeff_vjp_jax(curve_dofs, dg))
-                + np.asarray(curve.dgammadash_by_dcoeff_vjp_jax(curve_dofs, dgd))
+                np.asarray(
+                    curve.dgamma_by_dcoeff_vjp_jax(curve_dofs, dg)
+                    + curve.dgammadash_by_dcoeff_vjp_jax(curve_dofs, dgd)
+                )
             )
         if curve.surf.dof_size > 0:
-            surf_dofs = curve.surf.get_dofs()
+            surf_dofs = jnp.asarray(curve.surf.get_dofs(), dtype=jnp.float64)
             deriv_data[curve.surf] = (
-                np.asarray(curve.dgamma_by_dsurf_vjp_jax(surf_dofs, dg))
-                + np.asarray(
-                    curve.dgammadash_by_dsurf_vjp_jax(surf_dofs, dgd)
+                np.asarray(
+                    curve.dgamma_by_dsurf_vjp_jax(surf_dofs, dg)
+                    + curve.dgammadash_by_dsurf_vjp_jax(surf_dofs, dgd)
                 )
             )
         if current.dof_size > 0:
-            deriv_data[current] = np.asarray([float(scale) * float(dc)], dtype=float)
-        return Derivative(deriv_data)
-
-    def _coil_b_vjp_derivative(self, coil, points, v_jax, geometry_cache=None):
-        curve, rotmat, current, scale, gamma, gammadash, current_value = (
-            self._coil_geometry_inputs(coil, geometry_cache)
-        )
-        dg, dgd, dc = jax.device_get(
-            _single_coil_b_vjp(points, v_jax, gamma, gammadash, current_value)
-        )
-        if _supports_native_curve_geometry(curve):
-            return self._direct_curve_current_vjp(
-                curve,
-                rotmat,
-                current,
-                scale,
-                dg,
-                dgd,
-                dc,
+            deriv_data[current] = np.asarray(
+                [float(scale) * float(np.asarray(dc))],
+                dtype=float,
             )
-        return coil.vjp(dg, dgd, np.asarray([dc]))
+        return Derivative(deriv_data)
 
     def B_vjp(self, v):
         r"""Vector-Jacobian product of B w.r.t. coil DOFs.
@@ -443,12 +538,40 @@ class BiotSavartJAX(Optimizable):
         points = self._points_jax
         v_jax = jnp.asarray(v)
         geometry_cache = {}
-        for coil in self._coils:
-            if not self._coil_has_free_dofs(coil):
-                continue
-            all_derivs.append(
-                self._coil_b_vjp_derivative(coil, points, v_jax, geometry_cache)
+        coil_infos = self._collect_free_coil_vjp_infos(geometry_cache)
+        for group in self._group_coil_vjp_infos(coil_infos):
+            dg_group, dgd_group, dc_group = biot_savart_B_vjp(
+                points,
+                v_jax,
+                group["gammas"],
+                group["gammadashs"],
+                group["currents"],
             )
+            if not group["native_curve"]:
+                dg_group, dgd_group, dc_group = _host_pullback_group(
+                    (dg_group, dgd_group, dc_group)
+                )
+            for group_index, info in enumerate(group["infos"]):
+                if group["native_curve"]:
+                    all_derivs.append(
+                        self._direct_curve_current_vjp(
+                            info.curve,
+                            info.rotmat,
+                            info.current,
+                            info.scale,
+                            dg_group[group_index],
+                            dgd_group[group_index],
+                            dc_group[group_index],
+                        )
+                    )
+                else:
+                    all_derivs.append(
+                        info.coil.vjp(
+                            dg_group[group_index],
+                            dgd_group[group_index],
+                            np.asarray([dc_group[group_index]]),
+                        )
+                    )
         if not all_derivs:
             return Derivative({})
         return sum(all_derivs)
@@ -465,43 +588,87 @@ class BiotSavartJAX(Optimizable):
             "single_coil_pullback_s": 0.0,
             "coil_vjp_s": 0.0,
         }
-        per_coil_timings = []
+        pullback_group_timings = []
+        per_coil_timings = [
+            _build_coil_profile_entry(
+                coil_index,
+                _zero_profile_component_timings(component_totals),
+            )
+            for coil_index, coil in enumerate(self._coils)
+            if not self._coil_has_free_dofs(coil)
+        ]
         wall_start = time.perf_counter()
-        for coil_index, coil in enumerate(self._coils):
-            if not self._coil_has_free_dofs(coil):
-                per_coil_timings.append(
-                    _build_coil_profile_entry(
-                        coil_index,
-                        _zero_profile_component_timings(component_totals),
+        prep_start = time.perf_counter()
+        coil_infos = self._collect_profiled_free_coil_vjp_infos(geometry_cache)
+        grouped_infos = self._group_coil_vjp_infos(coil_infos)
+        prep_s = float(time.perf_counter() - prep_start)
+        free_coil_indices = [info.coil_index for info in coil_infos]
+        component_totals["single_coil_pullback_s"] += prep_s
+        if prep_s > 0.0 and free_coil_indices:
+            pullback_group_timings.append(
+                _build_pullback_group_profile_entry(
+                    kind="prep",
+                    coil_indices=free_coil_indices,
+                    elapsed_s=prep_s,
+                    native_curve=False,
+                )
+            )
+        for group in grouped_infos:
+            pullback_s, (dg_group, dgd_group, dc_group) = _time_call_result(
+                lambda: biot_savart_B_vjp(
+                    points,
+                    v_jax,
+                    group["gammas"],
+                    group["gammadashs"],
+                    group["currents"],
+                )
+            )
+            transfer_s = 0.0
+            if not group["native_curve"]:
+                transfer_s, (dg_group, dgd_group, dc_group) = _time_call_result(
+                    lambda: _host_pullback_group((dg_group, dgd_group, dc_group))
+                )
+            total_pullback_s = pullback_s + transfer_s
+            component_totals["single_coil_pullback_s"] += total_pullback_s
+            pullback_group_timings.append(
+                _build_pullback_group_profile_entry(
+                    kind="group_pullback",
+                    coil_indices=[info.coil_index for info in group["infos"]],
+                    elapsed_s=total_pullback_s,
+                    native_curve=group["native_curve"],
+                )
+            )
+            for group_index, info in enumerate(group["infos"]):
+                coil_vjp_s, _ = _time_call_result(
+                    lambda: self._direct_curve_current_vjp(
+                        info.curve,
+                        info.rotmat,
+                        info.current,
+                        info.scale,
+                        dg_group[group_index],
+                        dgd_group[group_index],
+                        dc_group[group_index],
+                    )
+                    if group["native_curve"]
+                    else info.coil.vjp(
+                        dg_group[group_index],
+                        dgd_group[group_index],
+                        np.asarray([dc_group[group_index]]),
                     )
                 )
-                continue
-            curve, rotmat, current, scale, gamma, gammadash, current_value, coil_timings = (
-                self._coil_b_vjp_inputs(coil, geometry_cache)
-            )
-            pullback_s, (dg, dgd, dc) = _time_call_result(
-                lambda: jax.device_get(
-                    _single_coil_b_vjp(points, v_jax, gamma, gammadash, current_value)
+                component_totals["coil_vjp_s"] += coil_vjp_s
+                coil_timings = dict(info.timings)
+                coil_timings.update(
+                    {
+                        "single_coil_pullback_s": 0.0,
+                        "coil_vjp_s": coil_vjp_s,
+                    }
                 )
-            )
-            coil_vjp_s, _ = _time_call_result(
-                lambda: self._direct_curve_current_vjp(
-                    curve,
-                    rotmat,
-                    current,
-                    scale,
-                    dg,
-                    dgd,
-                    dc,
+                for name in ("curve_gamma_s", "curve_gammadash_s", "current_value_s"):
+                    component_totals[name] += coil_timings[name]
+                per_coil_timings.append(
+                    _build_coil_profile_entry(info.coil_index, coil_timings)
                 )
-                if _supports_native_curve_geometry(curve)
-                else coil.vjp(dg, dgd, np.asarray([dc]))
-            )
-            coil_timings["single_coil_pullback_s"] = pullback_s
-            coil_timings["coil_vjp_s"] = coil_vjp_s
-            for name, elapsed_s in coil_timings.items():
-                component_totals[name] += elapsed_s
-            per_coil_timings.append(_build_coil_profile_entry(coil_index, coil_timings))
         wall_time_s = float(time.perf_counter() - wall_start)
         return {
             "wall_time_s": wall_time_s,
@@ -512,4 +679,8 @@ class BiotSavartJAX(Optimizable):
             "dominant_components": _build_profile_breakdown(component_totals),
             "per_coil_timings_s": per_coil_timings,
             "dominant_coils": _build_coil_profile_breakdown(per_coil_timings),
+            "pullback_group_timings_s": pullback_group_timings,
+            "dominant_pullback_groups": _build_pullback_group_profile_breakdown(
+                pullback_group_timings
+            ),
         }

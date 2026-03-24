@@ -14,6 +14,7 @@ import jax.numpy as jnp
 
 __all__ = [
     "biot_savart_B",
+    "biot_savart_B_vjp",
     "biot_savart_dB_by_dX",
     "biot_savart_B_and_dB",
     "biot_savart_A",
@@ -82,6 +83,17 @@ def biot_savart_B(points, gammas, gammadashs, currents):
     return jax.vmap(_biot_savart_one_point, in_axes=(0, None, None, None))(
         points, gammas, gammadashs, currents
     )
+
+
+@jax.jit
+def biot_savart_B_vjp(points, v, gammas, gammadashs, currents):
+    """Vector-Jacobian product of ``biot_savart_B`` w.r.t. grouped coil inputs."""
+
+    def fwd(group_gammas, group_gammadashs, group_currents):
+        return biot_savart_B(points, group_gammas, group_gammadashs, group_currents)
+
+    _, pullback = jax.vjp(fwd, gammas, gammadashs, currents)
+    return pullback(v)
 
 
 @jax.jit

@@ -46,6 +46,7 @@ from simsopt.geo import (  # noqa: E402
 from simsopt.objectives import SquaredFlux, QuadraticPenalty  # noqa: E402
 
 from simsopt.field.biotsavart_jax_backend import BiotSavartJAX
+from simsopt.field import biotsavart_jax_backend as biotsavart_jax_backend_module
 from simsopt.geo.optimizer_jax import (
     PRIVATE_OPTIMIZER_JAX_VERSION,
     jax_minimize,
@@ -738,15 +739,21 @@ class TestBiotSavartJAXParity:
         assert set(profile["component_timings_s"]) == EXPECTED_B_VJP_COMPONENT_TIMING_KEYS
         assert profile["dominant_components"]
         assert profile["dominant_coils"]
+        assert profile["dominant_pullback_groups"]
         assert len(profile["per_coil_timings_s"]) == len(coils)
         component_total = sum(profile["component_timings_s"].values())
         assert component_total == pytest.approx(
             sum(entry["total_s"] for entry in profile["per_coil_timings_s"])
+            + sum(entry["elapsed_s"] for entry in profile["pullback_group_timings_s"])
         )
         assert component_total >= 0.9 * profile["wall_time_s"]
         for entry in profile["per_coil_timings_s"]:
             assert set(entry["component_timings_s"]) == EXPECTED_B_VJP_COMPONENT_TIMING_KEYS
             assert entry["total_s"] >= 0.0
+        for entry in profile["pullback_group_timings_s"]:
+            assert entry["kind"] in {"prep", "group_pullback"}
+            assert entry["elapsed_s"] >= 0.0
+            assert entry["coil_indices"]
 
 
 # -----------------------------------------------------------------------
@@ -1265,6 +1272,30 @@ class TestCurveCWSFourierNativeFieldPath:
         assert surface_grad.shape[0] == banana_coil.curve.surf.local_dof_size
         assert np.all(np.isfinite(surface_grad))
         assert np.linalg.norm(surface_grad) > 0.0
+
+    def test_b_vjp_keeps_native_pullback_on_device_for_curvecwsfourier(
+        self,
+        banana_coil_jax_setup,
+        monkeypatch,
+    ):
+        coils, surf, _banana_coil = banana_coil_jax_setup
+        points = surf.gamma().reshape((-1, 3))
+
+        bs_jax = BiotSavartJAX(coils)
+        bs_jax.set_points(points)
+
+        monkeypatch.setattr(
+            biotsavart_jax_backend_module,
+            "_host_pullback_group",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError(
+                    "Native CurveCWSFourier B_vjp path should not host-transfer the pullback"
+                )
+            ),
+        )
+
+        deriv = bs_jax.B_vjp(np.asarray(bs_jax.B()))
+        assert np.linalg.norm(deriv(coils[-1].curve)) > 0.0
 
 
 class TestStage2BananaBoundary:
