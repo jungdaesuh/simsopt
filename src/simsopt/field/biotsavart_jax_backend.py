@@ -15,6 +15,7 @@ import numpy as np
 import jax
 import jax.numpy as jnp
 
+from .._core.derivative import Derivative
 from .._core.optimizable import Optimizable
 from .biotsavart_jax import (
     biot_savart_B,
@@ -46,6 +47,9 @@ def _single_coil_b_vjp(points, v, gamma, gammadash, current):
 def _time_call_result(callback):
     start = time.perf_counter()
     result = callback()
+    for leaf in jax.tree_util.tree_leaves(result):
+        if hasattr(leaf, "block_until_ready"):
+            leaf.block_until_ready()
     return float(time.perf_counter() - start), result
 
 
@@ -85,6 +89,33 @@ def _build_coil_profile_breakdown(per_coil_timings):
         }
         for entry in ranked
     ]
+
+
+def _zero_profile_component_timings(component_totals):
+    return {name: 0.0 for name in component_totals}
+
+
+def _build_coil_profile_entry(coil_index, coil_timings):
+    return {
+        "coil_index": int(coil_index),
+        "component_timings_s": {
+            name: float(elapsed_s)
+            for name, elapsed_s in coil_timings.items()
+        },
+        "total_s": float(sum(coil_timings.values())),
+    }
+
+
+def _supports_native_curve_geometry(curve):
+    from ..geo.curve import CurveCWSFourier
+
+    return isinstance(curve, CurveCWSFourier)
+
+
+def _rotate_curve_geometry(gamma, gammadash, rotmat):
+    if rotmat is None:
+        return gamma, gammadash
+    return gamma @ rotmat, gammadash @ rotmat
 
 
 def _unwrap_coil_curve_and_current(coil):
@@ -129,6 +160,7 @@ class BiotSavartJAX(Optimizable):
     def __init__(self, coils):
         self._coils = list(coils)
         self._points_jax = None
+        self._points_version = 0
         Optimizable.__init__(self, x0=np.asarray([]), depends_on=self._coils)
 
         # JAX-native path metadata (populated by _introspect_coils)
@@ -213,6 +245,51 @@ class BiotSavartJAX(Optimizable):
     def set_points(self, points):
         """Set evaluation points (converted to a JAX array once)."""
         self._points_jax = jnp.asarray(np.ascontiguousarray(points))
+        self._points_version += 1
+
+    def _base_curve_geometry(self, curve, geometry_cache=None):
+        gamma, gammadash, _, _ = self._base_curve_geometry_with_timings(
+            curve,
+            geometry_cache,
+        )
+        return gamma, gammadash
+
+    def _base_curve_geometry_with_timings(self, curve, geometry_cache=None):
+        cache_key = id(curve)
+        if geometry_cache is not None and cache_key in geometry_cache:
+            base_gamma, base_gammadash = geometry_cache[cache_key]
+            return base_gamma, base_gammadash, 0.0, 0.0
+
+        if _supports_native_curve_geometry(curve):
+            curve_dofs = jnp.asarray(curve.get_dofs(), dtype=jnp.float64)
+            surf_dofs = jnp.asarray(curve.surf.get_dofs(), dtype=jnp.float64)
+            gamma_s, base_gamma = _time_call_result(
+                lambda: curve.gamma_jax(curve_dofs, surf_dofs)
+            )
+            gammadash_s, base_gammadash = _time_call_result(
+                lambda: curve.gammadash_jax(curve_dofs, surf_dofs)
+            )
+        else:
+            gamma_s, base_gamma = _time_call_result(
+                lambda: jnp.asarray(curve.gamma(), dtype=jnp.float64)
+            )
+            gammadash_s, base_gammadash = _time_call_result(
+                lambda: jnp.asarray(curve.gammadash(), dtype=jnp.float64)
+            )
+
+        if geometry_cache is not None:
+            geometry_cache[cache_key] = (base_gamma, base_gammadash)
+        return base_gamma, base_gammadash, gamma_s, gammadash_s
+
+    def _coil_geometry_inputs(self, coil, geometry_cache=None):
+        curve, rotmat, current, scale = _unwrap_coil_curve_and_current(coil)
+        gamma, gammadash = self._base_curve_geometry(curve, geometry_cache)
+        gamma, gammadash = _rotate_curve_geometry(gamma, gammadash, rotmat)
+        current_value = jnp.asarray(current.get_value() * scale, dtype=jnp.float64)
+        return curve, rotmat, current, scale, gamma, gammadash, current_value
+
+    def _coil_has_free_dofs(self, coil):
+        return coil.curve.dof_size > 0 or coil.current.dof_size > 0
 
     def _extract_coil_data_grouped(self):
         """Read coil geometry grouped by quadrature point count.
@@ -223,11 +300,19 @@ class BiotSavartJAX(Optimizable):
             list of ``(gammas, gammadashs, currents, coil_indices)``
             tuples, one per distinct quadrature count.
         """
-        return group_coil_data(
-            [c.curve.gamma() for c in self._coils],
-            [c.curve.gammadash() for c in self._coils],
-            [c.current.get_value() for c in self._coils],
-        )
+        geometry_cache = {}
+        gammas = []
+        gammadashs = []
+        currents = []
+        for coil in self._coils:
+            *_prefix, gamma, gammadash, current_value = self._coil_geometry_inputs(
+                coil,
+                geometry_cache,
+            )
+            gammas.append(gamma)
+            gammadashs.append(gammadash)
+            currents.append(float(current_value))
+        return group_coil_data(gammas, gammadashs, currents)
 
     # ------------------------------------------------------------------
     # Forward field evaluation
@@ -276,30 +361,65 @@ class BiotSavartJAX(Optimizable):
     # VJP (reverse-mode gradient w.r.t. coil DOFs)
     # ------------------------------------------------------------------
 
-    def _coil_b_vjp_inputs(self, coil):
-        gamma_s, gamma = _time_call_result(
-            lambda: jnp.asarray(coil.curve.gamma(), dtype=jnp.float64)
+    def _coil_b_vjp_inputs(self, coil, geometry_cache=None):
+        curve, rotmat, current, scale = _unwrap_coil_curve_and_current(coil)
+        base_gamma, base_gammadash, gamma_s, gammadash_s = (
+            self._base_curve_geometry_with_timings(curve, geometry_cache)
         )
-        gammadash_s, gammadash = _time_call_result(
-            lambda: jnp.asarray(coil.curve.gammadash(), dtype=jnp.float64)
-        )
-        current_s, current = _time_call_result(
-            lambda: jnp.asarray(coil.current.get_value(), dtype=jnp.float64)
+        gamma, gammadash = _rotate_curve_geometry(base_gamma, base_gammadash, rotmat)
+        current_s, current_value = _time_call_result(
+            lambda: jnp.asarray(current.get_value() * scale, dtype=jnp.float64)
         )
         timings = {
             "curve_gamma_s": gamma_s,
             "curve_gammadash_s": gammadash_s,
             "current_value_s": current_s,
         }
-        return gamma, gammadash, current, timings
+        return curve, rotmat, current, scale, gamma, gammadash, current_value, timings
 
-    def _coil_b_vjp_derivative(self, coil, points, v_jax):
-        gamma = jnp.asarray(coil.curve.gamma(), dtype=jnp.float64)
-        gammadash = jnp.asarray(coil.curve.gammadash(), dtype=jnp.float64)
-        current = jnp.asarray(coil.current.get_value(), dtype=jnp.float64)
-        dg, dgd, dc = jax.device_get(
-            _single_coil_b_vjp(points, v_jax, gamma, gammadash, current)
+    def _direct_curve_current_vjp(self, curve, rotmat, current, scale, dg, dgd, dc):
+        """Map native JAX pullbacks back to curve, surface, and current DOFs."""
+        if rotmat is not None:
+            rotmat_t = np.asarray(rotmat).T
+            dg = dg @ rotmat_t
+            dgd = dgd @ rotmat_t
+
+        deriv_data = {}
+        if curve.dof_size > 0:
+            curve_dofs = jnp.asarray(curve.get_dofs(), dtype=jnp.float64)
+            deriv_data[curve] = (
+                np.asarray(curve.dgamma_by_dcoeff_vjp_jax(curve_dofs, dg))
+                + np.asarray(curve.dgammadash_by_dcoeff_vjp_jax(curve_dofs, dgd))
+            )
+        if curve.surf.dof_size > 0:
+            surf_dofs = curve.surf.get_dofs()
+            deriv_data[curve.surf] = (
+                np.asarray(curve.dgamma_by_dsurf_vjp_jax(surf_dofs, dg))
+                + np.asarray(
+                    curve.dgammadash_by_dsurf_vjp_jax(surf_dofs, dgd)
+                )
+            )
+        if current.dof_size > 0:
+            deriv_data[current] = np.asarray([float(scale) * float(dc)], dtype=float)
+        return Derivative(deriv_data)
+
+    def _coil_b_vjp_derivative(self, coil, points, v_jax, geometry_cache=None):
+        curve, rotmat, current, scale, gamma, gammadash, current_value = (
+            self._coil_geometry_inputs(coil, geometry_cache)
         )
+        dg, dgd, dc = jax.device_get(
+            _single_coil_b_vjp(points, v_jax, gamma, gammadash, current_value)
+        )
+        if _supports_native_curve_geometry(curve):
+            return self._direct_curve_current_vjp(
+                curve,
+                rotmat,
+                current,
+                scale,
+                dg,
+                dgd,
+                dc,
+            )
         return coil.vjp(dg, dgd, np.asarray([dc]))
 
     def B_vjp(self, v):
@@ -322,14 +442,22 @@ class BiotSavartJAX(Optimizable):
         all_derivs = []
         points = self._points_jax
         v_jax = jnp.asarray(v)
+        geometry_cache = {}
         for coil in self._coils:
-            all_derivs.append(self._coil_b_vjp_derivative(coil, points, v_jax))
+            if not self._coil_has_free_dofs(coil):
+                continue
+            all_derivs.append(
+                self._coil_b_vjp_derivative(coil, points, v_jax, geometry_cache)
+            )
+        if not all_derivs:
+            return Derivative({})
         return sum(all_derivs)
 
     def profile_B_vjp(self, v):
         """Return a timing breakdown for ``B_vjp`` at the current points."""
         points = self._points_jax
         v_jax = jnp.asarray(v)
+        geometry_cache = {}
         component_totals = {
             "curve_gamma_s": 0.0,
             "curve_gammadash_s": 0.0,
@@ -340,30 +468,40 @@ class BiotSavartJAX(Optimizable):
         per_coil_timings = []
         wall_start = time.perf_counter()
         for coil_index, coil in enumerate(self._coils):
-            gamma, gammadash, current, coil_timings = self._coil_b_vjp_inputs(coil)
+            if not self._coil_has_free_dofs(coil):
+                per_coil_timings.append(
+                    _build_coil_profile_entry(
+                        coil_index,
+                        _zero_profile_component_timings(component_totals),
+                    )
+                )
+                continue
+            curve, rotmat, current, scale, gamma, gammadash, current_value, coil_timings = (
+                self._coil_b_vjp_inputs(coil, geometry_cache)
+            )
             pullback_s, (dg, dgd, dc) = _time_call_result(
                 lambda: jax.device_get(
-                    _single_coil_b_vjp(points, v_jax, gamma, gammadash, current)
+                    _single_coil_b_vjp(points, v_jax, gamma, gammadash, current_value)
                 )
             )
             coil_vjp_s, _ = _time_call_result(
-                lambda: coil.vjp(dg, dgd, np.asarray([dc]))
+                lambda: self._direct_curve_current_vjp(
+                    curve,
+                    rotmat,
+                    current,
+                    scale,
+                    dg,
+                    dgd,
+                    dc,
+                )
+                if _supports_native_curve_geometry(curve)
+                else coil.vjp(dg, dgd, np.asarray([dc]))
             )
             coil_timings["single_coil_pullback_s"] = pullback_s
             coil_timings["coil_vjp_s"] = coil_vjp_s
             for name, elapsed_s in coil_timings.items():
                 component_totals[name] += elapsed_s
-            coil_total_s = float(sum(coil_timings.values()))
-            per_coil_timings.append(
-                {
-                    "coil_index": int(coil_index),
-                    "component_timings_s": {
-                        name: float(elapsed_s)
-                        for name, elapsed_s in coil_timings.items()
-                    },
-                    "total_s": coil_total_s,
-                }
-            )
+            per_coil_timings.append(_build_coil_profile_entry(coil_index, coil_timings))
         wall_time_s = float(time.perf_counter() - wall_start)
         return {
             "wall_time_s": wall_time_s,

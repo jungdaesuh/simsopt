@@ -250,12 +250,19 @@ class SquaredFluxJAX(Optimizable):
     def _clear_cached_results(self):
         self._cached_value = None
         self._cached_partials = None
+        self._cached_points_version = None
 
     def recompute_bell(self, parent=None):
         self._clear_cached_results()
 
     def J(self):
-        if self._use_jax_native and not self.new_x and self._cached_value is not None:
+        current_points_version = getattr(self.field, "_points_version", None)
+        cache_valid = (
+            not self.new_x
+            and self._cached_value is not None
+            and self._cached_points_version == current_points_version
+        )
+        if cache_valid:
             return self._cached_value
 
         if self._use_jax_native:
@@ -264,27 +271,33 @@ class SquaredFluxJAX(Optimizable):
             )
             value = self._cached_value
         else:
-            # Mixed-quadrature fallback can change through field.set_points(...)
-            # without marking the Optimizable DOFs dirty, so do not reuse cache.
             value = float(self._jit_integral(self.field.B()))
-            self._clear_cached_results()
+            self._cached_value = value
 
         self._cached_partials = None
+        self._cached_points_version = current_points_version
         self.new_x = False
         return value
 
     @derivative_dec
     def dJ(self):
-        if self._use_jax_native and not self.new_x and self._cached_partials is not None:
+        current_points_version = getattr(self.field, "_points_version", None)
+        cache_valid = (
+            not self.new_x
+            and self._cached_partials is not None
+            and self._cached_points_version == current_points_version
+        )
+        if cache_valid:
             return self._cached_partials
 
         if self._use_jax_native:
             self._cached_value, self._cached_partials = self._value_and_dJ_jax_native()
             partials = self._cached_partials
         else:
-            _value, partials = self._value_and_dJ_fallback()
-            self._clear_cached_results()
+            self._cached_value, partials = self._value_and_dJ_fallback()
+            self._cached_partials = partials
 
+        self._cached_points_version = current_points_version
         self.new_x = False
         return partials
 

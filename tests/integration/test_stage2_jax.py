@@ -96,6 +96,16 @@ REDUCED_STAGE2_ARGS = (
 )
 
 
+def _stage2_context_kwargs():
+    return {
+        "squared_flux_weight": 1.0,
+        "length_weight": 1.0,
+        "length_target": 1.75,
+        "cc_weight": 1.0,
+        "curvature_weight": 1.0,
+    }
+
+
 def _load_stage2_script_module():
     saved_meta_path = list(sys.meta_path)
     saved_simsopt_modules = {
@@ -293,6 +303,14 @@ def _centered_fd_gradient(fun, x, *, eps):
         step[i] = eps
         grad[i] = (float(fun(x + step)) - float(fun(x - step))) / (2.0 * eps)
     return grad
+
+
+class _DummyDerivative:
+    def __init__(self, values):
+        self._values = np.asarray(values, dtype=float)
+
+    def __call__(self, _optim):
+        return self._values
 
 
 def _build_fake_bfgs_result(optimizer_jax, x0, value, grad):
@@ -909,6 +927,66 @@ class TestMixedQuadratureParity:
         assert recomputed_value != pytest.approx(initial_value)
         assert updated_value == pytest.approx(recomputed_value)
 
+    def test_gradient_then_value_reuses_cached_fallback_squared_flux_value(
+        self,
+        mixed_quad_setup,
+        monkeypatch,
+    ):
+        coils, surf = mixed_quad_setup
+
+        bs_jax = BiotSavartJAX(coils)
+        jf_jax = SquaredFluxJAX(surf, bs_jax)
+        assert not jf_jax._use_jax_native
+
+        calls = {"B": 0}
+        original_B = bs_jax.B
+
+        def counted_B():
+            calls["B"] += 1
+            return original_B()
+
+        monkeypatch.setattr(bs_jax, "B", counted_B)
+
+        grad = jf_jax.dJ()
+        value = jf_jax.J()
+
+        assert np.asarray(grad).shape[0] > 0
+        assert value >= 0.0
+        assert calls["B"] == 1
+
+    def test_value_then_gradient_recomputes_fallback_squared_flux_gradient(
+        self,
+        mixed_quad_setup,
+        monkeypatch,
+    ):
+        coils, surf = mixed_quad_setup
+
+        bs_jax = BiotSavartJAX(coils)
+        jf_jax = SquaredFluxJAX(surf, bs_jax)
+        assert not jf_jax._use_jax_native
+
+        calls = {"B": 0, "B_vjp": 0}
+        original_B = bs_jax.B
+        original_B_vjp = bs_jax.B_vjp
+
+        def counted_B():
+            calls["B"] += 1
+            return original_B()
+
+        def counted_B_vjp(v):
+            calls["B_vjp"] += 1
+            return original_B_vjp(v)
+
+        monkeypatch.setattr(bs_jax, "B", counted_B)
+        monkeypatch.setattr(bs_jax, "B_vjp", counted_B_vjp)
+
+        value = jf_jax.J()
+        grad = jf_jax.dJ()
+
+        assert value >= 0.0
+        assert np.asarray(grad).shape[0] > 0
+        assert calls == {"B": 2, "B_vjp": 1}
+
 
 # -----------------------------------------------------------------------
 # Test 8: CurveCWSFourierCPP banana coil (real production curve type)
@@ -991,6 +1069,64 @@ def banana_coil_setup():
     return all_coils, eval_surf
 
 
+@pytest.fixture
+def banana_coil_jax_setup():
+    nfp = 1
+    stellsym = False
+    R0 = 1.0
+
+    coil_surf = SurfaceRZFourier(
+        nfp=nfp,
+        stellsym=stellsym,
+        mpol=1,
+        ntor=1,
+        quadpoints_phi=np.linspace(0, 1, 32, endpoint=False),
+        quadpoints_theta=np.linspace(0, 1, 32, endpoint=False),
+    )
+    coil_surf.set_rc(0, 0, R0)
+    coil_surf.set_rc(1, 0, 0.5)
+    coil_surf.set_zs(1, 0, 0.5)
+
+    eval_surf = SurfaceRZFourier(
+        nfp=nfp,
+        stellsym=stellsym,
+        mpol=1,
+        ntor=1,
+        quadpoints_phi=np.linspace(0, 1, 16, endpoint=False),
+        quadpoints_theta=np.linspace(0, 1, 16, endpoint=False),
+    )
+    eval_surf.set_rc(0, 0, R0)
+    eval_surf.set_rc(1, 0, 0.2)
+    eval_surf.set_zs(1, 0, 0.2)
+    eval_surf.fix_all()
+
+    tf_curves = create_equally_spaced_curves(
+        2,
+        nfp,
+        stellsym=stellsym,
+        R0=R0,
+        R1=0.5,
+        order=3,
+    )
+    tf_coils = [Coil(c, Current(1e5)) for c in tf_curves]
+    for coil in tf_coils:
+        coil.curve.fix_all()
+        coil.current.fix_all()
+
+    banana = CurveCWSFourier(
+        np.linspace(0, 1, 128, endpoint=False),
+        order=1,
+        surf=coil_surf,
+    )
+    banana.set("phic(0)", 0.06)
+    banana.set("thetac(0)", 0.5)
+    banana.set("phic(1)", 0.03)
+    banana.set("thetas(1)", 0.1)
+    banana_coil = Coil(banana, Current(1e5))
+
+    return tf_coils + [banana_coil], eval_surf, banana_coil
+
+
 class TestCurveCWSFourierCPPParity:
     """Parity with real CurveCWSFourierCPP banana coils."""
 
@@ -1047,6 +1183,88 @@ class TestCurveCWSFourierCPPParity:
             atol=1e-15,
             err_msg="Gradient mismatch with CurveCWSFourierCPP banana coil",
         )
+
+
+class TestCurveCWSFourierNativeFieldPath:
+    def test_b_uses_native_curvecwsfourier_geometry(self, banana_coil_jax_setup, monkeypatch):
+        coils, surf, banana_coil = banana_coil_jax_setup
+        points = surf.gamma().reshape((-1, 3))
+
+        monkeypatch.setattr(
+            banana_coil.curve,
+            "gamma",
+            lambda: (_ for _ in ()).throw(
+                AssertionError("BiotSavartJAX.B() should use CurveCWSFourier.gamma_jax")
+            ),
+        )
+        monkeypatch.setattr(
+            banana_coil.curve,
+            "gammadash",
+            lambda: (_ for _ in ()).throw(
+                AssertionError("BiotSavartJAX.B() should use CurveCWSFourier.gammadash_jax")
+            ),
+        )
+
+        bs_jax = BiotSavartJAX(coils)
+        bs_jax.set_points(points)
+        B_jax = np.asarray(bs_jax.B())
+
+        assert B_jax.shape == points.shape
+
+    def test_b_vjp_bypasses_python_coil_vjp_for_free_curvecwsfourier(
+        self,
+        banana_coil_jax_setup,
+        monkeypatch,
+    ):
+        coils, surf, banana_coil = banana_coil_jax_setup
+        points = surf.gamma().reshape((-1, 3))
+
+        bs_cpu = BiotSavart(coils)
+        bs_cpu.set_points(points)
+        bs_jax = BiotSavartJAX(coils)
+        bs_jax.set_points(points)
+        v = np.asarray(bs_jax.B())
+        deriv_cpu = bs_cpu.B_vjp(v)
+
+        monkeypatch.setattr(
+            banana_coil,
+            "vjp",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("BiotSavartJAX.B_vjp() should bypass Coil.vjp() for CurveCWSFourier")
+            ),
+        )
+
+        deriv = bs_jax.B_vjp(v)
+
+        assert deriv(banana_coil.curve).shape[0] == banana_coil.curve.local_full_dof_size
+        np.testing.assert_allclose(
+            deriv(banana_coil.curve),
+            deriv_cpu(banana_coil.curve),
+            rtol=1e-9,
+            atol=1e-15,
+        )
+        np.testing.assert_allclose(
+            deriv(banana_coil.current),
+            deriv_cpu(banana_coil.current),
+            rtol=1e-9,
+            atol=1e-15,
+        )
+
+    def test_b_vjp_includes_curvecwsfourier_surface_derivative(
+        self,
+        banana_coil_jax_setup,
+    ):
+        coils, surf, banana_coil = banana_coil_jax_setup
+        points = surf.gamma().reshape((-1, 3))
+
+        bs_jax = BiotSavartJAX(coils)
+        bs_jax.set_points(points)
+        deriv = bs_jax.B_vjp(np.asarray(bs_jax.B()))
+
+        surface_grad = deriv(banana_coil.curve.surf)
+        assert surface_grad.shape[0] == banana_coil.curve.surf.local_dof_size
+        assert np.all(np.isfinite(surface_grad))
+        assert np.linalg.norm(surface_grad) > 0.0
 
 
 class TestStage2BananaBoundary:
@@ -1354,12 +1572,6 @@ class TestStage2OptimizerContract:
             def __init__(self):
                 self.x = np.zeros(2, dtype=float)
 
-            def J(self):
-                return float(np.dot(self.x, self.x))
-
-            def dJ(self):
-                return np.asarray(2.0 * self.x, dtype=float)
-
         class DummyScalar:
             def __init__(self, value, counter_key=None):
                 self._value = float(value)
@@ -1370,7 +1582,22 @@ class TestStage2OptimizerContract:
                     calls[self._counter_key] += 1
                 return self._value
 
+            def dJ(self, partials=False):
+                grad = np.asarray([self._value, -self._value], dtype=float)
+                if partials:
+                    return _DummyDerivative(grad)
+                return grad
+
         class DummyDistance:
+            def J(self):
+                return 0.25
+
+            def dJ(self, partials=False):
+                grad = np.asarray([0.25, -0.25], dtype=float)
+                if partials:
+                    return _DummyDerivative(grad)
+                return grad
+
             def shortest_distance(self):
                 calls["distance"] += 1
                 return 0.5
@@ -1379,6 +1606,12 @@ class TestStage2OptimizerContract:
             def J(self):
                 calls["jf"] += 1
                 return 0.125
+
+            def dJ(self, partials=False):
+                grad = np.asarray([0.5, -0.5], dtype=float)
+                if partials:
+                    return _DummyDerivative(grad)
+                return grad
 
         def fake_relbn(_surf, _bs):
             calls["relbn"] += 1
@@ -1395,6 +1628,11 @@ class TestStage2OptimizerContract:
             DummyScalar(1.25, "length"),
             DummyDistance(),
             DummyScalar(0.75, "curvature"),
+            1.0,
+            1.0,
+            1.75,
+            1.0,
+            1.0,
             trajectory_sink=trajectory,
             field_diagnostic_stride=10,
         )
@@ -1402,12 +1640,12 @@ class TestStage2OptimizerContract:
         first_value, _ = fun(np.asarray([1.0, -2.0], dtype=float))
         second_value, _ = fun(np.asarray([0.5, -1.0], dtype=float))
 
-        assert first_value == pytest.approx(5.0)
-        assert second_value == pytest.approx(1.25)
-        assert calls["jf"] == 1
+        assert first_value == pytest.approx(1.125)
+        assert second_value == pytest.approx(1.125)
+        assert calls["jf"] == 2
         assert calls["relbn"] == 1
         assert calls["length"] == 2
-        assert calls["distance"] == 2
+        assert calls["distance"] == 1
         assert calls["curvature"] == 2
         assert len(trajectory) == 2
         assert trajectory[0]["Jf"] == pytest.approx(0.125)
@@ -1415,18 +1653,24 @@ class TestStage2OptimizerContract:
         assert trajectory[0]["curve_length"] == pytest.approx(1.25)
         assert trajectory[1]["curve_length"] == pytest.approx(1.25)
 
-    def test_evaluate_stage2_objective_requests_gradient_before_value(self, monkeypatch):
+    def test_evaluate_stage2_objective_requests_squared_flux_gradient_before_value(
+        self,
+        monkeypatch,
+    ):
         stage2_script = _load_stage2_script_module()
         call_order = []
 
-        class DummyJF:
+        class DummyFlux:
             def J(self):
                 call_order.append("J")
-                return 1.5
+                return 0.75
 
-            def dJ(self):
+            def dJ(self, partials=False):
                 call_order.append("dJ")
-                return np.asarray([2.0, -1.0], dtype=float)
+                grad = np.asarray([2.0, -1.0], dtype=float)
+                if partials:
+                    return _DummyDerivative(grad)
+                return grad
 
         class DummyScalar:
             def __init__(self, value):
@@ -1435,34 +1679,49 @@ class TestStage2OptimizerContract:
             def J(self):
                 return self._value
 
+            def dJ(self, partials=False):
+                grad = np.asarray([self._value, -self._value], dtype=float)
+                if partials:
+                    return _DummyDerivative(grad)
+                return grad
+
         class DummyDistance:
+            def J(self):
+                return 0.125
+
+            def dJ(self, partials=False):
+                grad = np.asarray([0.125, -0.125], dtype=float)
+                if partials:
+                    return _DummyDerivative(grad)
+                return grad
+
             def shortest_distance(self):
                 return 0.25
 
         monkeypatch.setattr(
             stage2_script,
-            "compute_stage2_diagnostics",
+            "compute_stage2_field_diagnostics",
             lambda *_args, **_kwargs: {
-                "Jf": 0.75,
                 "mean_abs_relBfinal_norm": 0.5,
             },
         )
 
         context = stage2_script.Stage2ObjectiveContext(
-            DummyJF(),
             object(),
             object(),
             object(),
-            DummyScalar(1.25),
+            DummyFlux(),
+            DummyScalar(2.25),
             DummyDistance(),
             DummyScalar(0.5),
+            **_stage2_context_kwargs(),
         )
         snapshot, grad, diagnostics = stage2_script.evaluate_stage2_objective(
             context,
         )
 
         assert call_order[:2] == ["dJ", "J"]
-        np.testing.assert_allclose(grad, np.asarray([2.0, -1.0], dtype=float))
+        np.testing.assert_allclose(grad, np.asarray([3.75, -2.75], dtype=float))
         assert snapshot["J"] == pytest.approx(1.5)
         assert snapshot["Jf"] == pytest.approx(0.75)
         assert diagnostics["mean_abs_relBfinal_norm"] == pytest.approx(0.5)
@@ -1483,8 +1742,11 @@ class TestStage2OptimizerContract:
             def J(self):
                 return 1.5
 
-            def dJ(self):
-                return np.asarray([2.0, -1.0], dtype=float)
+            def dJ(self, partials=False):
+                grad = np.asarray([2.0, -1.0], dtype=float)
+                if partials:
+                    return _DummyDerivative(grad)
+                return grad
 
         class DummyScalar:
             def __init__(self, value):
@@ -1493,15 +1755,21 @@ class TestStage2OptimizerContract:
             def J(self):
                 return self._value
 
-            def dJ(self):
-                return np.asarray([self._value, -self._value], dtype=float)
+            def dJ(self, partials=False):
+                grad = np.asarray([self._value, -self._value], dtype=float)
+                if partials:
+                    return _DummyDerivative(grad)
+                return grad
 
         class DummyDistance:
             def J(self):
                 return 0.125
 
-            def dJ(self):
-                return np.asarray([0.125, -0.125], dtype=float)
+            def dJ(self, partials=False):
+                grad = np.asarray([0.125, -0.125], dtype=float)
+                if partials:
+                    return _DummyDerivative(grad)
+                return grad
 
             def shortest_distance(self):
                 return 0.25
@@ -1516,12 +1784,12 @@ class TestStage2OptimizerContract:
             DummyScalar(1.25),
             DummyDistance(),
             DummyScalar(0.5),
-            DummyScalar(0.2),
+            **{
+                **_stage2_context_kwargs(),
+                "length_target": 1.25,
+            },
         )
-        payload = stage2_script.profile_stage2_explicit_step(
-            context,
-            DummyScalar(0.2),
-        )
+        payload = stage2_script.profile_stage2_explicit_step(context)
 
         assert payload["observed_step_total_s"] >= 0.0
         assert set(payload["objective_path_timings_s"]) == {"JF_J_s", "JF_dJ_s"}
@@ -1546,12 +1814,12 @@ class TestStage2OptimizerContract:
         assert payload["dominant_extra_diagnostics"]
         assert payload["dominant_objective_value_terms"]
         assert payload["dominant_objective_gradient_terms"]
-        assert payload["snapshot"]["J"] == pytest.approx(1.5)
+        assert payload["snapshot"]["J"] == pytest.approx(1.375)
         assert payload["snapshot"]["Jf"] == pytest.approx(0.75)
         assert payload["snapshot"]["curve_length"] == pytest.approx(1.25)
         assert payload["snapshot"]["coil_coil_distance"] == pytest.approx(0.25)
         assert payload["snapshot"]["curvature"] == pytest.approx(0.5)
-        assert payload["snapshot"]["grad_norm"] == pytest.approx(np.sqrt(5.0))
+        assert payload["snapshot"]["grad_norm"] == pytest.approx(np.sqrt(2.0) * 1.375)
 
     def test_profile_stage2_explicit_step_reports_squared_flux_fallback_components(
         self,
@@ -1578,8 +1846,11 @@ class TestStage2OptimizerContract:
             def J(self):
                 return 0.75
 
-            def dJ(self):
-                return np.asarray([0.75, -0.75], dtype=float)
+            def dJ(self, partials=False):
+                grad = np.asarray([0.75, -0.75], dtype=float)
+                if partials:
+                    return _DummyDerivative(grad)
+                return grad
 
             def _jit_integral(self, B):
                 assert B.shape == (2, 3)
@@ -1596,8 +1867,11 @@ class TestStage2OptimizerContract:
             def J(self):
                 return 1.5
 
-            def dJ(self):
-                return np.asarray([2.0, -1.0], dtype=float)
+            def dJ(self, partials=False):
+                grad = np.asarray([2.0, -1.0], dtype=float)
+                if partials:
+                    return _DummyDerivative(grad)
+                return grad
 
         class DummyScalar:
             def __init__(self, value):
@@ -1606,15 +1880,21 @@ class TestStage2OptimizerContract:
             def J(self):
                 return self._value
 
-            def dJ(self):
-                return np.asarray([self._value, -self._value], dtype=float)
+            def dJ(self, partials=False):
+                grad = np.asarray([self._value, -self._value], dtype=float)
+                if partials:
+                    return _DummyDerivative(grad)
+                return grad
 
         class DummyDistance:
             def J(self):
                 return 0.125
 
-            def dJ(self):
-                return np.asarray([0.125, -0.125], dtype=float)
+            def dJ(self, partials=False):
+                grad = np.asarray([0.125, -0.125], dtype=float)
+                if partials:
+                    return _DummyDerivative(grad)
+                return grad
 
             def shortest_distance(self):
                 return 0.25
@@ -1629,12 +1909,12 @@ class TestStage2OptimizerContract:
             DummyScalar(1.25),
             DummyDistance(),
             DummyScalar(0.5),
-            DummyScalar(0.2),
+            **{
+                **_stage2_context_kwargs(),
+                "length_target": 1.25,
+            },
         )
-        payload = stage2_script.profile_stage2_explicit_step(
-            context,
-            DummyScalar(0.2),
-        )
+        payload = stage2_script.profile_stage2_explicit_step(context)
 
         assert set(payload["squared_flux_internal_timings_s"]) == EXPECTED_SQUARED_FLUX_INTERNAL_TIMING_KEYS
         assert payload["squared_flux_internal_total_s"] >= 0.0

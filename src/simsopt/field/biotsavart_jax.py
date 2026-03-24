@@ -243,11 +243,14 @@ def group_coil_data(gammas_list, gammadashs_list, currents_list):
     for indices in by_nquad.values():
         groups.append(
             (
-                jnp.asarray(
-                    np.stack([gammas_list[i] for i in indices]), dtype=jnp.float64
+                jnp.stack(
+                    [jnp.asarray(gammas_list[i], dtype=jnp.float64) for i in indices]
                 ),
-                jnp.asarray(
-                    np.stack([gammadashs_list[i] for i in indices]), dtype=jnp.float64
+                jnp.stack(
+                    [
+                        jnp.asarray(gammadashs_list[i], dtype=jnp.float64)
+                        for i in indices
+                    ]
                 ),
                 jnp.asarray(
                     np.array([currents_list[i] for i in indices]), dtype=jnp.float64

@@ -582,28 +582,55 @@ def build_stage2_profile_breakdown(timings):
 
 
 def build_stage2_objective_term_callbacks(
-    Jf,
-    length_penalty,
-    Jccdist,
-    Jc,
+    context,
 ):
     return {
         "squared_flux": {
-            "J": Jf.J,
-            "dJ": Jf.dJ,
+            "J": context.Jf.J,
+            "dJ": lambda: compute_stage2_term_gradient(context.Jf, context.JF),
         },
         "length_penalty": {
-            "J": length_penalty.J,
-            "dJ": length_penalty.dJ,
+            "J": lambda: compute_stage2_length_penalty_value(
+                context.Jls.J(),
+                context.length_target,
+            ),
+            "dJ": lambda: compute_stage2_length_penalty_gradient(
+                float(context.Jls.J()),
+                context.length_target,
+                context.Jls,
+                context.JF,
+            ),
         },
         "coil_distance": {
-            "J": Jccdist.J,
-            "dJ": Jccdist.dJ,
+            "J": context.Jccdist.J,
+            "dJ": lambda: compute_stage2_term_gradient(context.Jccdist, context.JF),
         },
         "curvature": {
-            "J": Jc.J,
-            "dJ": Jc.dJ,
+            "J": context.Jc.J,
+            "dJ": lambda: compute_stage2_term_gradient(context.Jc, context.JF),
         },
+    }
+
+
+def profile_stage2_objective_terms(context):
+    term_callbacks = build_stage2_objective_term_callbacks(context)
+    value_timings = profile_stage2_named_callbacks(
+        {name: callbacks["J"] for name, callbacks in term_callbacks.items()}
+    )
+    gradient_timings = profile_stage2_named_callbacks(
+        {name: callbacks["dJ"] for name, callbacks in term_callbacks.items()}
+    )
+    value_total_s, dominant_value_terms = build_stage2_profile_breakdown(value_timings)
+    gradient_total_s, dominant_gradient_terms = build_stage2_profile_breakdown(
+        gradient_timings
+    )
+    return {
+        "value_timings_s": value_timings,
+        "value_total_s": value_total_s,
+        "dominant_value_terms": dominant_value_terms,
+        "gradient_timings_s": gradient_timings,
+        "gradient_total_s": gradient_total_s,
+        "dominant_gradient_terms": dominant_gradient_terms,
     }
 
 
@@ -652,23 +679,12 @@ def profile_stage2_squared_flux_internal_components(Jf):
         dominant_field_B_vjp_coils,
     )
 
-
-def compute_stage2_diagnostics(
-    new_bs,
-    new_surf,
-    Jf,
-    *,
-    bs_jax=None,
-):
-    field_bs = resolve_stage2_field_bs(new_bs, bs_jax)
-    return {
-        "Jf": float(Jf.J()),
-        "mean_abs_relBfinal_norm": compute_mean_abs_relbn(new_surf, field_bs),
-    }
-
-
 @dataclass(frozen=True)
 class Stage2ObjectiveContext:
+    """Stage 2 objective state plus the composite root used for DOF projection."""
+
+    # `JF` is the composite/root Optimizable whose DOF layout defines the
+    # gradient space for all explicit Stage 2 term projections.
     JF: object
     new_bs: object
     new_surf: object
@@ -676,6 +692,11 @@ class Stage2ObjectiveContext:
     Jls: object
     Jccdist: object
     Jc: object
+    squared_flux_weight: float
+    length_weight: float
+    length_target: float
+    cc_weight: float
+    curvature_weight: float
     bs_jax: object | None = None
 
 
@@ -687,6 +708,11 @@ def make_stage2_objective_context(
     Jls,
     Jccdist,
     Jc,
+    squared_flux_weight,
+    length_weight,
+    length_target,
+    cc_weight,
+    curvature_weight,
     *,
     bs_jax=None,
 ):
@@ -698,8 +724,43 @@ def make_stage2_objective_context(
         Jls,
         Jccdist,
         Jc,
+        float(squared_flux_weight),
+        float(length_weight),
+        float(length_target),
+        float(cc_weight),
+        float(curvature_weight),
         bs_jax,
     )
+
+
+def compute_stage2_field_diagnostics(
+    new_bs,
+    new_surf,
+    *,
+    bs_jax=None,
+):
+    field_bs = resolve_stage2_field_bs(new_bs, bs_jax)
+    return {
+        "mean_abs_relBfinal_norm": compute_mean_abs_relbn(new_surf, field_bs),
+    }
+
+
+def compute_stage2_length_penalty_value(curve_length, length_target):
+    return 0.5 * max(float(curve_length) - float(length_target), 0.0) ** 2
+
+
+def compute_stage2_term_gradient(term, root_objective):
+    return np.asarray(term.dJ(partials=True)(root_objective), dtype=float)
+
+
+def compute_stage2_length_penalty_gradient(
+    curve_length,
+    length_target,
+    Jls,
+    root_objective,
+):
+    active_diff = max(curve_length - float(length_target), 0.0)
+    return active_diff * compute_stage2_term_gradient(Jls, root_objective)
 
 
 def evaluate_stage2_objective(
@@ -709,25 +770,51 @@ def evaluate_stage2_objective(
     recompute_diagnostics=True,
 ):
     """Return composite objective diagnostics using the currently loaded DOFs."""
-    # Ask for the gradient first so the JAX squared-flux reference lane can
-    # reuse its cached objective value. Swapping the order does not reduce the
-    # non-JAX term work because those terms do not share a value cache.
-    grad = np.asarray(context.JF.dJ(), dtype=float)
-    J = float(context.JF.J())
+    # Ask for the squared-flux gradient first so both native and fallback
+    # JAX lanes can reuse the cached value on the subsequent J() call.
+    squared_flux_grad = compute_stage2_term_gradient(context.Jf, context.JF)
+    squared_flux = float(context.Jf.J())
+    curve_length = float(context.Jls.J())
+    length_penalty = compute_stage2_length_penalty_value(
+        curve_length,
+        context.length_target,
+    )
+    length_grad = compute_stage2_length_penalty_gradient(
+        curve_length,
+        context.length_target,
+        context.Jls,
+        context.JF,
+    )
+    coil_distance_penalty = float(context.Jccdist.J())
+    coil_distance_grad = compute_stage2_term_gradient(context.Jccdist, context.JF)
+    curvature = float(context.Jc.J())
+    curvature_grad = compute_stage2_term_gradient(context.Jc, context.JF)
+    grad = (
+        context.squared_flux_weight * squared_flux_grad
+        + context.length_weight * length_grad
+        + context.cc_weight * coil_distance_grad
+        + context.curvature_weight * curvature_grad
+    )
+    J = (
+        context.squared_flux_weight * squared_flux
+        + context.length_weight * length_penalty
+        + context.cc_weight * coil_distance_penalty
+        + context.curvature_weight * curvature
+    )
     if recompute_diagnostics or diagnostics is None:
-        diagnostics = compute_stage2_diagnostics(
+        diagnostics = compute_stage2_field_diagnostics(
             context.new_bs,
             context.new_surf,
-            context.Jf,
             bs_jax=context.bs_jax,
         )
+        diagnostics["coil_coil_distance"] = float(context.Jccdist.shortest_distance())
     snapshot = {
         "J": J,
-        "Jf": float(diagnostics["Jf"]),
+        "Jf": squared_flux,
         "mean_abs_relBfinal_norm": float(diagnostics["mean_abs_relBfinal_norm"]),
-        "curve_length": float(context.Jls.J()),
-        "coil_coil_distance": float(context.Jccdist.shortest_distance()),
-        "curvature": float(context.Jc.J()),
+        "curve_length": curve_length,
+        "coil_coil_distance": float(diagnostics["coil_coil_distance"]),
+        "curvature": curvature,
         "grad_norm": float(np.linalg.norm(grad)),
     }
     return snapshot, grad, diagnostics
@@ -735,7 +822,6 @@ def evaluate_stage2_objective(
 
 def profile_stage2_explicit_step(
     context,
-    length_penalty,
 ):
     """Return a one-step timing breakdown for the explicit Stage 2 objective."""
     objective_path_timings = {
@@ -758,28 +844,10 @@ def profile_stage2_explicit_step(
         "curvature_s": lambda: float(context.Jc.J()),
     }
     extra_diagnostic_timings = profile_stage2_named_callbacks(extra_diagnostic_callbacks)
-
-    term_callbacks = build_stage2_objective_term_callbacks(
-        context.Jf,
-        length_penalty,
-        context.Jccdist,
-        context.Jc,
-    )
-    objective_term_value_timings = profile_stage2_named_callbacks(
-        {name: callbacks["J"] for name, callbacks in term_callbacks.items()}
-    )
-    objective_term_gradient_timings = profile_stage2_named_callbacks(
-        {name: callbacks["dJ"] for name, callbacks in term_callbacks.items()}
-    )
+    term_profile = profile_stage2_objective_terms(context)
 
     extra_diagnostic_total_s, dominant_extra_diagnostics = build_stage2_profile_breakdown(
         extra_diagnostic_timings
-    )
-    objective_term_value_total_s, dominant_objective_value_terms = build_stage2_profile_breakdown(
-        objective_term_value_timings
-    )
-    objective_term_gradient_total_s, dominant_objective_gradient_terms = build_stage2_profile_breakdown(
-        objective_term_gradient_timings
     )
     (
         squared_flux_internal_timings,
@@ -795,12 +863,12 @@ def profile_stage2_explicit_step(
         "extra_diagnostic_timings_s": extra_diagnostic_timings,
         "extra_diagnostic_total_s": extra_diagnostic_total_s,
         "dominant_extra_diagnostics": dominant_extra_diagnostics,
-        "objective_term_value_timings_s": objective_term_value_timings,
-        "objective_term_value_total_s": objective_term_value_total_s,
-        "dominant_objective_value_terms": dominant_objective_value_terms,
-        "objective_term_gradient_timings_s": objective_term_gradient_timings,
-        "objective_term_gradient_total_s": objective_term_gradient_total_s,
-        "dominant_objective_gradient_terms": dominant_objective_gradient_terms,
+        "objective_term_value_timings_s": term_profile["value_timings_s"],
+        "objective_term_value_total_s": term_profile["value_total_s"],
+        "dominant_objective_value_terms": term_profile["dominant_value_terms"],
+        "objective_term_gradient_timings_s": term_profile["gradient_timings_s"],
+        "objective_term_gradient_total_s": term_profile["gradient_total_s"],
+        "dominant_objective_gradient_terms": term_profile["dominant_gradient_terms"],
         "squared_flux_internal_timings_s": squared_flux_internal_timings,
         "squared_flux_internal_total_s": squared_flux_internal_total_s,
         "dominant_squared_flux_internal_components": dominant_squared_flux_internal_components,
@@ -939,6 +1007,11 @@ def build_stage2_probe_payload(
     equilibrium_path,
     nphi,
     ntheta,
+    squared_flux_weight,
+    length_weight,
+    length_target,
+    cc_weight,
+    curvature_weight,
 ):
     """Serialize the initialized Stage 2 objective state for parity probes."""
     context = make_stage2_objective_context(
@@ -949,6 +1022,11 @@ def build_stage2_probe_payload(
         Jls,
         Jccdist,
         Jc,
+        squared_flux_weight,
+        length_weight,
+        length_target,
+        cc_weight,
+        curvature_weight,
         bs_jax=bs_jax,
     )
     composite_snapshot, composite_grad, _ = evaluate_stage2_objective(
@@ -1005,6 +1083,11 @@ def capture_stage2_trajectory_snapshot(
     Jls,
     Jccdist,
     Jc,
+    squared_flux_weight,
+    length_weight,
+    length_target,
+    cc_weight,
+    curvature_weight,
     *,
     bs_jax=None,
 ):
@@ -1017,6 +1100,11 @@ def capture_stage2_trajectory_snapshot(
         Jls,
         Jccdist,
         Jc,
+        squared_flux_weight,
+        length_weight,
+        length_target,
+        cc_weight,
+        curvature_weight,
         bs_jax=bs_jax,
     )
     snapshot, _, _ = evaluate_stage2_objective(
@@ -1034,6 +1122,11 @@ def make_fun(
     Jls,
     Jccdist,
     Jc,
+    squared_flux_weight,
+    length_weight,
+    length_target,
+    cc_weight,
+    curvature_weight,
     bs_jax=None,
     trajectory_sink=None,
     field_diagnostic_stride=1,
@@ -1057,6 +1150,11 @@ def make_fun(
         Jls,
         Jccdist,
         Jc,
+        squared_flux_weight,
+        length_weight,
+        length_target,
+        cc_weight,
+        curvature_weight,
         bs_jax=bs_jax,
     )
 
@@ -1313,6 +1411,11 @@ if __name__ == "__main__":
             Jls,
             Jccdist,
             Jc,
+            SQUARED_FLUX_WEIGHT,
+            LENGTH_WEIGHT,
+            LENGTH_TARGET,
+            CC_WEIGHT,
+            CURVATURE_WEIGHT,
             bs_jax=new_bs_jax,
             trajectory_sink=trajectory,
             field_diagnostic_stride=field_diagnostic_stride,
@@ -1333,6 +1436,11 @@ if __name__ == "__main__":
             equilibrium_path=file_loc,
             nphi=nphi,
             ntheta=ntheta,
+            squared_flux_weight=SQUARED_FLUX_WEIGHT,
+            length_weight=LENGTH_WEIGHT,
+            length_target=LENGTH_TARGET,
+            cc_weight=CC_WEIGHT,
+            curvature_weight=CURVATURE_WEIGHT,
         )
         write_json_file(args.export_objective_json, probe_payload)
         print(f"Wrote Stage 2 objective snapshot to {args.export_objective_json}")
@@ -1345,12 +1453,14 @@ if __name__ == "__main__":
             Jls,
             Jccdist,
             Jc,
+            SQUARED_FLUX_WEIGHT,
+            LENGTH_WEIGHT,
+            LENGTH_TARGET,
+            CC_WEIGHT,
+            CURVATURE_WEIGHT,
             bs_jax=new_bs_jax,
         )
-        profile_payload = profile_stage2_explicit_step(
-            profile_context,
-            Jls_penalty,
-        )
+        profile_payload = profile_stage2_explicit_step(profile_context)
         write_json_file(args.profile_step_json, profile_payload)
         print(f"Wrote Stage 2 step profile to {args.profile_step_json}")
     if args.probe_only:
@@ -1376,6 +1486,11 @@ if __name__ == "__main__":
                 Jls,
                 Jccdist,
                 Jc,
+                SQUARED_FLUX_WEIGHT,
+                LENGTH_WEIGHT,
+                LENGTH_TARGET,
+                CC_WEIGHT,
+                CURVATURE_WEIGHT,
                 bs_jax=new_bs_jax,
             )
         res, cold_elapsed_s = run_stage2_optimizer_timed(
@@ -1405,6 +1520,11 @@ if __name__ == "__main__":
                 Jls,
                 Jccdist,
                 Jc,
+                SQUARED_FLUX_WEIGHT,
+                LENGTH_WEIGHT,
+                LENGTH_TARGET,
+                CC_WEIGHT,
+                CURVATURE_WEIGHT,
                 bs_jax=new_bs_jax,
             )
             optimizer_timings = {
@@ -1462,6 +1582,11 @@ if __name__ == "__main__":
             Jls,
             Jccdist,
             Jc,
+            SQUARED_FLUX_WEIGHT,
+            LENGTH_WEIGHT,
+            LENGTH_TARGET,
+            CC_WEIGHT,
+            CURVATURE_WEIGHT,
             bs_jax=new_bs_jax,
         )
         final_snapshot, _, _ = evaluate_stage2_objective(
@@ -1504,6 +1629,11 @@ if __name__ == "__main__":
             Jls,
             Jccdist,
             Jc,
+            SQUARED_FLUX_WEIGHT,
+            LENGTH_WEIGHT,
+            LENGTH_TARGET,
+            CC_WEIGHT,
+            CURVATURE_WEIGHT,
             bs_jax=new_bs_jax,
         )
         final_snapshot, _, _ = evaluate_stage2_objective(
