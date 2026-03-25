@@ -1538,16 +1538,19 @@ def newton_polish(
             stab=stab,
             tol=linear_tol,
         )
+        linear_residual_norm = float(np.linalg.norm(np.asarray(linear_residual)))
+        used_dense_fallback = False
         if not np.all(np.isfinite(np.asarray(dx))) or (
-            np.linalg.norm(np.asarray(linear_residual))
-            > max(1e-10, 1e-3 * float(norm))
+            linear_residual_norm > max(1e-10, 1e-3 * float(norm))
         ):
             H_solve = _materialize_dense_hessian(hvp_fn, x)
             if stab != 0.0:
                 H_solve = H_solve + stab * jnp.eye(H_solve.shape[0], dtype=H_solve.dtype)
             dx = jnp.linalg.solve(H_solve, grad)
             linear_residual = grad - H_solve @ dx
-        if float(norm) < 1e-9:
+            linear_residual_norm = float(np.linalg.norm(np.asarray(linear_residual)))
+            used_dense_fallback = True
+        if (not used_dense_fallback) and linear_residual_norm > linear_tol:
             correction, _, _ = _gmres_solve_newton_system(
                 hvp_fn,
                 x,

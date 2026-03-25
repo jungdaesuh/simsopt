@@ -553,6 +553,31 @@ class TestOptimizerAdapter:
         np.testing.assert_allclose(result["x"], x_exact, atol=1e-12)
         assert result["success"]
 
+    def test_newton_polish_refines_nontrivial_gmres_residual(self, monkeypatch):
+        """Iterative refinement should run when GMRES leaves a small residual."""
+
+        def obj(x):
+            return 0.5 * x[0] ** 2
+
+        calls = []
+
+        def fake_hvp_fn(_objective_fn):
+            return lambda _x, v: v
+
+        def fake_gmres(_hvp_fn, _x, rhs, *, stab, tol):
+            calls.append(np.asarray(rhs, dtype=float).copy())
+            if len(calls) == 1:
+                return jnp.array([0.75]), jnp.array([1e-6]), None
+            return jnp.array([0.25]), jnp.array([0.0]), None
+
+        monkeypatch.setattr(_opt, "_hessian_vector_product_fn", fake_hvp_fn)
+        monkeypatch.setattr(_opt, "_gmres_solve_newton_system", fake_gmres)
+
+        result = newton_polish(obj, jnp.array([1.0]), maxiter=1, tol=1e-12)
+
+        assert len(calls) == 2
+        np.testing.assert_allclose(result["x"], np.array([0.0]), atol=1e-12)
+
     def test_newton_exact_linear_system(self):
         """Newton exact solver finds root of a linear system in 1 step."""
         A = jnp.array([[3.0, 1.0], [1.0, 4.0]])

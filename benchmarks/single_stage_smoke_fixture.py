@@ -68,6 +68,7 @@ def build_real_single_stage_init_fixture(
     optimizer_backend: str = DEFAULT_OPTIMIZER_BACKEND,
     boozer_optimizer_backend: str | None = None,
     boozer_limited_memory: bool = False,
+    bs_dofs_override: np.ndarray | None = None,
     constraint_weight: float = DEFAULT_CONSTRAINT_WEIGHT,
     num_tf_coils: int = DEFAULT_NUM_TF_COILS,
     on_stage=None,
@@ -111,6 +112,8 @@ def build_real_single_stage_init_fixture(
         bs = BiotSavartJAX(bs_loaded.coils)
     else:
         bs = bs_loaded
+    if bs_dofs_override is not None:
+        bs.x = np.asarray(bs_dofs_override, dtype=float)
     _emit_stage(on_stage, "after_biotsavart_load", backend=backend)
 
     surf = SurfaceRZFourier.from_wout(

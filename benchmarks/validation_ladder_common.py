@@ -54,6 +54,8 @@ OPTIMIZER_DRIFT_TOLERANCES = {
         "recomposed_total_rel_tol": 1e-12,
         "fixed_surface_fd_rel_tol": 1e-3,
         "fixed_surface_fd_abs_tol": 1e-8,
+        "full_resolve_fd_rel_tol": 1e-2,
+        "full_resolve_fd_abs_tol": 1e-8,
     },
 }
 

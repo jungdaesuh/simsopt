@@ -23,6 +23,7 @@ All tests require ``simsoptpp`` for the CPU reference.
 import pytest
 import numpy as np
 import jax
+import jax.numpy as jnp
 import scipy.linalg
 from pathlib import Path
 import sys
@@ -55,6 +56,8 @@ from simsopt.objectives import QuadraticPenalty  # noqa: E402
 from simsopt.field.biotsavart_jax_backend import BiotSavartJAX  # noqa: E402
 from simsopt.geo.boozersurface_jax import (  # noqa: E402
     BoozerSurfaceJAX,
+    _boozer_ls_coil_vjp,
+    _boozer_ls_coil_vjp_groups,
     _ls_decision_vector,
     _make_ls_penalty_objective,
 )
@@ -167,7 +170,12 @@ class _RecordingVJPCoil:
         return Derivative({})
 
 
-def _make_boozer_setup(constraint_weight=1.0, optimizer_backend="scipy"):
+def _make_boozer_setup(
+    constraint_weight=1.0,
+    optimizer_backend="scipy",
+    *,
+    weight_inv_modB=True,
+):
     """Create a Boozer surface configuration for testing."""
     ncoils = 2
     nfp = 2
@@ -259,6 +267,7 @@ def _make_boozer_setup(constraint_weight=1.0, optimizer_backend="scipy"):
             "newton_maxiter": 20,
             "newton_tol": 1e-9,
             "optimizer_backend": optimizer_backend,
+            "weight_inv_modB": weight_inv_modB,
         },
     )
 
@@ -569,6 +578,75 @@ class TestAdjointSolveConsistency:
             full_d_coil_arrays, full_coil_indices, streamed
         )
 
+    def test_streaming_group_vjp_matches_full_vjp_fixed_G(self):
+        """Grouped LS VJPs should also match when ``optimize_G=False``."""
+        (
+            coils,
+            surf_cpu,
+            surf_jax,
+            bs_cpu,
+            bs_jax,
+            booz_cpu,
+            booz_jax,
+            vol_cpu,
+            iota0,
+            G0,
+        ) = _make_boozer_setup(constraint_weight=1.0, optimizer_backend="ondevice")
+        from simsopt.objectives.utilities import forward_backward_jax
+
+        res_ls = booz_jax.run_code(iota0, None)
+        assert res_ls is not None
+        assert res_ls.get("success", False), "Fixed-G LS JAX solve did not converge"
+
+        P, L, U = res_ls["PLU"]
+        dJ_ds = _iota_unit_rhs((P, L, U))
+        adj = forward_backward_jax(P, L, U, dJ_ds)
+
+        full_d_coil_arrays, full_coil_indices = res_ls["vjp"](
+            adj, booz_jax, res_ls["iota"], res_ls["G"]
+        )
+        streamed = list(
+            res_ls["vjp_groups"](adj, booz_jax, res_ls["iota"], res_ls["G"])
+        )
+
+        _assert_streaming_group_vjp_matches_full(
+            full_d_coil_arrays, full_coil_indices, streamed
+        )
+
+    def test_streaming_group_vjp_matches_full_vjp_without_inv_modB_weighting(
+        self, boozer_setup
+    ):
+        """Grouped LS VJPs should match when ``weight_inv_modB=False``."""
+        (coils, surf_cpu, surf_jax, bs_cpu, bs_jax, booz_cpu, booz_jax, vol_cpu) = (
+            boozer_setup
+        )
+        from simsopt.objectives.utilities import forward_backward_jax
+
+        P, L, U = booz_jax.res["PLU"]
+        dJ_ds = _iota_unit_rhs((P, L, U))
+        adj = forward_backward_jax(P, L, U, dJ_ds)
+
+        full_d_coil_arrays, full_coil_indices = _boozer_ls_coil_vjp(
+            adj,
+            booz_jax,
+            booz_jax.res["iota"],
+            booz_jax.res["G"],
+            weight_inv_modB=False,
+        )
+        streamed = list(
+            _boozer_ls_coil_vjp_groups(
+                adj,
+                booz_jax,
+                booz_jax.res["iota"],
+                booz_jax.res["G"],
+                weight_inv_modB=False,
+            )
+        )
+
+        _assert_streaming_group_vjp_matches_full(
+            full_d_coil_arrays, full_coil_indices, streamed
+        )
+
     def test_ls_coil_vjp_matches_reverse_over_reverse_reference(self, boozer_setup):
         """LS cotangent rewrite must match the previous reverse-over-reverse result."""
         (coils, surf_cpu, surf_jax, bs_cpu, bs_jax, booz_cpu, booz_jax, vol_cpu) = (
@@ -603,6 +681,66 @@ class TestAdjointSolveConsistency:
                     rtol=1e-12,
                     atol=1e-12,
                 )
+
+    def test_ls_coil_vjp_matches_directional_objective_fd(self, boozer_setup):
+        """LS cotangent should match FD on the scalar directional objective."""
+        (coils, surf_cpu, surf_jax, bs_cpu, bs_jax, booz_cpu, booz_jax, vol_cpu) = (
+            boozer_setup
+        )
+        from simsopt.objectives.utilities import forward_backward_jax
+
+        P, L, U = booz_jax.res["PLU"]
+        dJ_ds = _iota_unit_rhs((P, L, U))
+        adj = forward_backward_jax(P, L, U, dJ_ds)
+
+        full_d_coil_arrays, full_coil_indices = booz_jax.res["vjp"](
+            adj, booz_jax, booz_jax.res["iota"], booz_jax.res["G"]
+        )
+        derivative = _explicit_grouped_coil_derivative(
+            coils,
+            full_d_coil_arrays,
+            full_coil_indices,
+        )
+        full_gradient = np.asarray(derivative(bs_jax), dtype=float)
+
+        x, optimize_G = _ls_decision_vector(
+            booz_jax, booz_jax.res["iota"], booz_jax.res["G"]
+        )
+
+        def directional_objective_at(coil_x):
+            bs_jax.x = coil_x
+            booz_jax._refresh_coil_data()
+            objective = _make_ls_penalty_objective(
+                booz_jax,
+                booz_jax._coil_arrays,
+                optimize_G,
+                booz_jax.res.get("weight_inv_modB", True),
+            )
+            return float(jnp.vdot(adj, jax.grad(objective)(x)))
+
+        x0 = bs_jax.x.copy()
+        rng = np.random.RandomState(7)
+        eps = 1e-5
+
+        for i in range(3):
+            direction = rng.randn(len(x0))
+            direction /= np.linalg.norm(direction)
+
+            dd_vjp = float(np.dot(full_gradient, direction))
+            dd_fd = (
+                directional_objective_at(x0 + eps * direction)
+                - directional_objective_at(x0 - eps * direction)
+            ) / (2 * eps)
+
+            abs_err = abs(dd_vjp - dd_fd)
+            rel_err = abs_err / (abs(dd_fd) + 1e-30)
+            assert rel_err < 1e-3 or abs_err < 1e-8, (
+                f"LS cotangent FD[{i}]: vjp={dd_vjp:.6e} fd={dd_fd:.6e} "
+                f"rel={rel_err:.2e} abs={abs_err:.2e}"
+            )
+
+        bs_jax.x = x0
+        booz_jax._refresh_coil_data()
 
     def test_exact_streaming_group_vjp_matches_full_vjp(self):
         """Exact-solve group-at-a-time VJPs should match the legacy exact VJP."""

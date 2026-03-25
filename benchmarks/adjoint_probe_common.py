@@ -47,21 +47,6 @@ def compute_adjoint_state(jr_jax) -> tuple[np.ndarray, float]:
     return adj, rel
 
 
-def compute_grouped_adjoint_cotangents(jr_jax, adj: np.ndarray):
-    """Return grouped adjoint cotangents before projection back to coil DOFs."""
-    grouped_entries = list(iter_grouped_adjoint_cotangents(jr_jax, adj))
-    d_coil_arrays = [entry[0] for entry in grouped_entries]
-    coil_indices = [entry[1] for entry in grouped_entries]
-    return d_coil_arrays, coil_indices
-
-
-def project_grouped_adjoint_derivative(bs_jax, adj_cot):
-    """Project grouped adjoint cotangents to a coil ``Derivative``."""
-    from simsopt.geo.surfaceobjectives_jax import _coil_cotangents_to_derivative
-
-    return _coil_cotangents_to_derivative(bs_jax.coils, *adj_cot)
-
-
 def accumulate_grouped_adjoint_derivative(
     bs_jax,
     grouped_adj_cotangents,

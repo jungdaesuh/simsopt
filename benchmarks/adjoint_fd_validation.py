@@ -24,10 +24,12 @@ from benchmarks.validation_ladder_common import (
     optimizer_drift_tolerances,
     preparse_platform,
     print_provenance,
+    relative_error,
     require_x64_runtime,
     resolve_probe_lane,
     write_json,
 )
+from benchmarks.run_code_benchmark_common import summarize_result_fun
 from benchmarks.adjoint_probe_common import (
     compute_adjoint_state,
     compute_implicit_gradient_correction,
@@ -62,6 +64,11 @@ ADJOINT_RESIDUAL_REL_TOL = _TIER4_TOLERANCES["adjoint_residual_rel_tol"]
 RECOMPOSED_TOTAL_REL_TOL = _TIER4_TOLERANCES["recomposed_total_rel_tol"]
 FIXED_SURFACE_FD_REL_TOL = _TIER4_TOLERANCES["fixed_surface_fd_rel_tol"]
 FIXED_SURFACE_FD_ABS_TOL = _TIER4_TOLERANCES["fixed_surface_fd_abs_tol"]
+FULL_RESOLVE_FD_REL_TOL = _TIER4_TOLERANCES["full_resolve_fd_rel_tol"]
+FULL_RESOLVE_FD_ABS_TOL = _TIER4_TOLERANCES["full_resolve_fd_abs_tol"]
+_STABLE_IOTA_ABS_TOL = 5e-3
+_STABLE_G_REL_TOL = 5e-3
+_STABLE_FUN_REL_TOL = 0.25
 
 
 def _positive_int(value: str) -> int:
@@ -80,7 +87,10 @@ def _positive_float(value: str) -> float:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Validate the stable adjoint/VJP pipeline plus fixed-surface FD."
+        description=(
+            "Validate the stable adjoint/VJP pipeline, fixed-surface FD, "
+            "and full re-solve FD on the real reduced fixture."
+        )
     )
     parser.add_argument(
         "--platform",
@@ -159,7 +169,13 @@ def parse_args() -> argparse.Namespace:
         "--samples",
         type=_positive_int,
         default=3,
-        help="Random fixed-surface finite-difference samples to try.",
+        help="Random fixed-surface and full re-solve finite-difference samples to try.",
+    )
+    parser.add_argument(
+        "--min-stable-samples",
+        type=_positive_int,
+        default=2,
+        help="Minimum number of branch-stable full re-solve FD samples required.",
     )
     parser.add_argument(
         "--eps",
@@ -168,6 +184,8 @@ def parse_args() -> argparse.Namespace:
         help="Finite-difference perturbation magnitude.",
     )
     return parser.parse_args()
+
+
 def compute_direct_and_total_gradients(
     jr_jax,
     bs_jax,
@@ -272,6 +290,150 @@ def compute_fixed_surface_fd_samples(
     return direct_gradient, sample_records
 
 
+def _build_real_fixture_at(
+    args: argparse.Namespace,
+    *,
+    coil_dofs: np.ndarray | None = None,
+):
+    return build_real_single_stage_init_fixture(
+        backend="jax",
+        plasma_surf_filename=args.plasma_surf_filename,
+        equilibria_dir=args.equilibria_dir,
+        equilibrium_path=args.equilibrium_path,
+        stage2_bs_path=args.stage2_bs_path,
+        nphi=args.nphi,
+        ntheta=args.ntheta,
+        mpol=args.mpol,
+        ntor=args.ntor,
+        vol_target=args.vol_target,
+        iota_target=args.iota_target,
+        optimizer_backend=args.optimizer_backend,
+        bs_dofs_override=coil_dofs,
+    )
+
+
+def _is_stable_resolve(
+    base_state: dict[str, float | np.ndarray],
+    *,
+    iota_value: float,
+    g_value: float,
+    fun_value: float,
+) -> bool:
+    return (
+        abs(iota_value - float(base_state["iota"])) < _STABLE_IOTA_ABS_TOL
+        and relative_error(g_value, float(base_state["G"])) < _STABLE_G_REL_TOL
+        and relative_error(fun_value, float(base_state["fun"])) < _STABLE_FUN_REL_TOL
+    )
+
+
+def _resolve_total_objective_at(
+    args: argparse.Namespace,
+    base_state: dict[str, float | np.ndarray],
+    coil_dofs: np.ndarray,
+) -> dict[str, float | bool | str]:
+    from simsopt.geo.surfaceobjectives_jax import BoozerResidualJAX
+    from examples.single_stage_optimization.SINGLE_STAGE import (
+        single_stage_banana_example as single_stage_example,
+    )
+
+    fixture = _build_real_fixture_at(args, coil_dofs=coil_dofs)
+    bs_jax = fixture["bs"]
+    booz_jax = fixture["boozer_surface"]
+    result = booz_jax.res
+    if result is None or not result.get("success", False):
+        return {"stable": False, "reason": "solve_failed"}
+    is_self_intersecting, check_available = (
+        single_stage_example.evaluate_surface_self_intersection(booz_jax.surface)
+    )
+    if check_available and is_self_intersecting:
+        return {"stable": False, "reason": "self_intersecting"}
+
+    iota_value = float(result["iota"])
+    g_value = float(result["G"])
+    fun_value = float(summarize_result_fun(result))
+    stable = _is_stable_resolve(
+        base_state,
+        iota_value=iota_value,
+        g_value=g_value,
+        fun_value=fun_value,
+    )
+    if not stable:
+        return {
+            "stable": False,
+            "reason": "branch_switch",
+            "iota": iota_value,
+            "G": g_value,
+            "fun": fun_value,
+        }
+
+    objective_value = float(BoozerResidualJAX(booz_jax, bs_jax).J())
+    return {
+        "stable": True,
+        "reason": "ok",
+        "objective": objective_value,
+        "iota": iota_value,
+        "G": g_value,
+        "fun": fun_value,
+    }
+
+
+def compute_full_resolve_fd_samples(
+    args: argparse.Namespace,
+    total_gradient: np.ndarray,
+    base_state: dict[str, float | np.ndarray],
+    *,
+    samples: int,
+    eps: float,
+) -> tuple[int, list[dict[str, float | int | bool | str]]]:
+    x0 = np.asarray(base_state["coil_dofs"], dtype=float)
+    rng = np.random.RandomState(42)
+    stable_samples = 0
+    sample_records: list[dict[str, float | int | bool | str]] = []
+    for sample_index in range(samples):
+        direction = rng.randn(len(x0))
+        direction /= np.linalg.norm(direction)
+
+        plus = _resolve_total_objective_at(args, base_state, x0 + eps * direction)
+        minus = _resolve_total_objective_at(args, base_state, x0 - eps * direction)
+
+        if not bool(plus["stable"]) or not bool(minus["stable"]):
+            sample_records.append(
+                {
+                    "sample_index": sample_index,
+                    "stable": False,
+                    "accepted": False,
+                    "plus_reason": str(plus["reason"]),
+                    "minus_reason": str(minus["reason"]),
+                }
+            )
+            continue
+
+        stable_samples += 1
+        directional_grad = float(np.dot(total_gradient, direction))
+        directional_fd = (
+            float(plus["objective"]) - float(minus["objective"])
+        ) / (2.0 * eps)
+        abs_err = abs(directional_grad - directional_fd)
+        rel_err = abs_err / (abs(directional_fd) + 1e-30)
+        accepted = rel_err < FULL_RESOLVE_FD_REL_TOL or abs_err < FULL_RESOLVE_FD_ABS_TOL
+        sample_records.append(
+            {
+                "sample_index": sample_index,
+                "stable": True,
+                "accepted": accepted,
+                "total_directional": directional_grad,
+                "fd_directional": directional_fd,
+                "abs_err": abs_err,
+                "rel_err": rel_err,
+                "plus_iota": float(plus["iota"]),
+                "minus_iota": float(minus["iota"]),
+                "plus_fun": float(plus["fun"]),
+                "minus_fun": float(minus["fun"]),
+            }
+        )
+    return stable_samples, sample_records
+
+
 def evaluate_adjoint_validation(metrics: dict[str, Any]) -> list[str]:
     """Return ladder failures for the stable adjoint validation contract."""
     failures: list[str] = []
@@ -315,6 +477,33 @@ def evaluate_adjoint_validation(metrics: dict[str, Any]) -> list[str]:
             f"Fixed-surface FD sample {sample_index} exceeded tolerance: "
             f"rel_err={rel_err:.2e}, abs_err={abs_err:.2e}"
         )
+
+    full_resolve_fd_samples = metrics["full_resolve_fd_samples"]
+    if not full_resolve_fd_samples:
+        failures.append("No full re-solve FD samples were evaluated.")
+
+    stable_resolve_fd_samples = int(metrics["stable_resolve_fd_samples"])
+    min_stable_resolve_fd_samples = int(metrics["min_stable_resolve_fd_samples"])
+    if stable_resolve_fd_samples < min_stable_resolve_fd_samples:
+        failures.append(
+            "Only "
+            f"{stable_resolve_fd_samples} stable full re-solve FD samples were found; "
+            f"need at least {min_stable_resolve_fd_samples}."
+        )
+
+    for sample in full_resolve_fd_samples:
+        sample_record = dict(sample)
+        if not bool(sample_record.get("stable", True)):
+            continue
+        if bool(sample_record["accepted"]):
+            continue
+        sample_index = int(sample_record["sample_index"])
+        rel_err = float(sample_record["rel_err"])
+        abs_err = float(sample_record["abs_err"])
+        failures.append(
+            f"Full re-solve FD sample {sample_index} exceeded tolerance: "
+            f"rel_err={rel_err:.2e}, abs_err={abs_err:.2e}"
+        )
     return failures
 
 
@@ -344,20 +533,7 @@ def main() -> None:
     )
     print_provenance(provenance)
 
-    fixture = build_real_single_stage_init_fixture(
-        backend="jax",
-        plasma_surf_filename=args.plasma_surf_filename,
-        equilibria_dir=args.equilibria_dir,
-        equilibrium_path=args.equilibrium_path,
-        stage2_bs_path=args.stage2_bs_path,
-        nphi=args.nphi,
-        ntheta=args.ntheta,
-        mpol=args.mpol,
-        ntor=args.ntor,
-        vol_target=args.vol_target,
-        iota_target=args.iota_target,
-        optimizer_backend=args.optimizer_backend,
-    )
+    fixture = _build_real_fixture_at(args)
     bs_jax = fixture["bs"]
     booz_jax = fixture["boozer_surface"]
     base_result = booz_jax.res
@@ -381,6 +557,19 @@ def main() -> None:
         samples=args.samples,
         eps=args.eps,
     )
+    base_state = {
+        "coil_dofs": np.asarray(bs_jax.x, dtype=float).copy(),
+        "iota": float(booz_jax.res["iota"]),
+        "G": float(booz_jax.res["G"]),
+        "fun": float(summarize_result_fun(booz_jax.res)),
+    }
+    stable_resolve_fd_samples, full_resolve_fd_samples = compute_full_resolve_fd_samples(
+        args,
+        total_gradient,
+        base_state,
+        samples=args.samples,
+        eps=args.eps,
+    )
 
     print(f"adjoint residual: {adjoint_residual_rel:.2e}")
     print(f"implicit correction norm: {np.linalg.norm(implicit_gradient):.6e}")
@@ -389,6 +578,17 @@ def main() -> None:
     for sample in fd_samples:
         print(
             f"sample {sample['sample_index']}: direct={sample['direct_directional']:.6e} "
+            f"fd={sample['fd_directional']:.6e} rel_err={sample['rel_err']:.2e}"
+        )
+    for sample in full_resolve_fd_samples:
+        if not bool(sample.get("stable", True)):
+            print(
+                f"re-solve sample {sample['sample_index']}: rejected "
+                f"(plus={sample['plus_reason']}, minus={sample['minus_reason']})"
+            )
+            continue
+        print(
+            f"re-solve sample {sample['sample_index']}: total={sample['total_directional']:.6e} "
             f"fd={sample['fd_directional']:.6e} rel_err={sample['rel_err']:.2e}"
         )
 
@@ -400,6 +600,9 @@ def main() -> None:
         "total_gradient_norm": float(np.linalg.norm(total_gradient)),
         "recomposed_total_rel": recomposed_total_rel,
         "fd_samples": fd_samples,
+        "stable_resolve_fd_samples": stable_resolve_fd_samples,
+        "min_stable_resolve_fd_samples": int(args.min_stable_samples),
+        "full_resolve_fd_samples": full_resolve_fd_samples,
     }
     failures = evaluate_adjoint_validation(metrics)
 
@@ -426,6 +629,15 @@ def main() -> None:
             "rel_tol": FIXED_SURFACE_FD_REL_TOL,
             "abs_tol": FIXED_SURFACE_FD_ABS_TOL,
             "samples": fd_samples,
+        },
+        "full_resolve_fd": {
+            "validated_quantity": "total_gradient_after_full_resolve",
+            "gradient_norm": float(np.linalg.norm(total_gradient)),
+            "stable_samples": stable_resolve_fd_samples,
+            "min_stable_samples": int(args.min_stable_samples),
+            "rel_tol": FULL_RESOLVE_FD_REL_TOL,
+            "abs_tol": FULL_RESOLVE_FD_ABS_TOL,
+            "samples": full_resolve_fd_samples,
         },
         "failures": failures,
         "passed": not failures,

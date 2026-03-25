@@ -15,6 +15,8 @@ from benchmarks.adjoint_fd_validation import (
     ADJOINT_RESIDUAL_REL_TOL,
     FIXED_SURFACE_FD_ABS_TOL,
     FIXED_SURFACE_FD_REL_TOL,
+    FULL_RESOLVE_FD_ABS_TOL,
+    FULL_RESOLVE_FD_REL_TOL,
     RECOMPOSED_TOTAL_REL_TOL,
     evaluate_adjoint_validation,
 )
@@ -1143,39 +1145,54 @@ def test_summarize_single_lane_probe_keeps_outer_elapsed():
     }
 
 
+def _adjoint_validation_metrics(**overrides):
+    metrics = {
+        "adjoint_residual_rel": ADJOINT_RESIDUAL_REL_TOL / 10.0,
+        "implicit_gradient_finite": True,
+        "implicit_gradient_norm": 1.0,
+        "total_gradient_finite": True,
+        "total_gradient_norm": 2.0,
+        "recomposed_total_rel": RECOMPOSED_TOTAL_REL_TOL / 10.0,
+        "fd_samples": [
+            {
+                "sample_index": 0,
+                "accepted": True,
+                "rel_err": FIXED_SURFACE_FD_REL_TOL / 10.0,
+                "abs_err": FIXED_SURFACE_FD_ABS_TOL / 10.0,
+            }
+        ],
+        "stable_resolve_fd_samples": 1,
+        "min_stable_resolve_fd_samples": 1,
+        "full_resolve_fd_samples": [
+            {
+                "sample_index": 0,
+                "stable": True,
+                "accepted": True,
+                "rel_err": FULL_RESOLVE_FD_REL_TOL / 10.0,
+                "abs_err": FULL_RESOLVE_FD_ABS_TOL / 10.0,
+            }
+        ],
+    }
+    metrics.update(overrides)
+    return metrics
+
+
 def test_evaluate_adjoint_validation_accepts_stable_metrics():
-    failures = evaluate_adjoint_validation(
-        {
-            "adjoint_residual_rel": ADJOINT_RESIDUAL_REL_TOL / 10.0,
-            "implicit_gradient_finite": True,
-            "implicit_gradient_norm": 1.0,
-            "total_gradient_finite": True,
-            "total_gradient_norm": 2.0,
-            "recomposed_total_rel": RECOMPOSED_TOTAL_REL_TOL / 10.0,
-            "fd_samples": [
-                {
-                    "sample_index": 0,
-                    "accepted": True,
-                    "rel_err": FIXED_SURFACE_FD_REL_TOL / 10.0,
-                    "abs_err": FIXED_SURFACE_FD_ABS_TOL / 10.0,
-                }
-            ],
-        }
-    )
+    failures = evaluate_adjoint_validation(_adjoint_validation_metrics())
 
     assert failures == []
 
 
 def test_evaluate_adjoint_validation_reports_real_contract_failures():
     failures = evaluate_adjoint_validation(
-        {
-            "adjoint_residual_rel": ADJOINT_RESIDUAL_REL_TOL * 10.0,
-            "implicit_gradient_finite": False,
-            "implicit_gradient_norm": 0.0,
-            "total_gradient_finite": False,
-            "total_gradient_norm": 0.0,
-            "recomposed_total_rel": RECOMPOSED_TOTAL_REL_TOL * 10.0,
-            "fd_samples": [
+        _adjoint_validation_metrics(
+            adjoint_residual_rel=ADJOINT_RESIDUAL_REL_TOL * 10.0,
+            implicit_gradient_finite=False,
+            implicit_gradient_norm=0.0,
+            total_gradient_finite=False,
+            total_gradient_norm=0.0,
+            recomposed_total_rel=RECOMPOSED_TOTAL_REL_TOL * 10.0,
+            fd_samples=[
                 {
                     "sample_index": 0,
                     "accepted": False,
@@ -1183,7 +1200,25 @@ def test_evaluate_adjoint_validation_reports_real_contract_failures():
                     "abs_err": FIXED_SURFACE_FD_ABS_TOL * 10.0,
                 }
             ],
-        }
+            stable_resolve_fd_samples=1,
+            min_stable_resolve_fd_samples=2,
+            full_resolve_fd_samples=[
+                {
+                    "sample_index": 0,
+                    "stable": True,
+                    "accepted": False,
+                    "rel_err": FULL_RESOLVE_FD_REL_TOL * 10.0,
+                    "abs_err": FULL_RESOLVE_FD_ABS_TOL * 10.0,
+                },
+                {
+                    "sample_index": 1,
+                    "stable": False,
+                    "accepted": False,
+                    "plus_reason": "branch_switch",
+                    "minus_reason": "branch_switch",
+                },
+            ],
+        )
     )
 
     assert any("Adjoint solve residual too large" in failure for failure in failures)
@@ -1199,19 +1234,27 @@ def test_evaluate_adjoint_validation_reports_real_contract_failures():
         "Fixed-surface FD sample 0 exceeded tolerance" in failure
         for failure in failures
     )
+    assert any(
+        "Only 1 stable full re-solve FD samples were found; need at least 2."
+        in failure
+        for failure in failures
+    )
+    assert any(
+        "Full re-solve FD sample 0 exceeded tolerance" in failure
+        for failure in failures
+    )
 
 
 def test_evaluate_adjoint_validation_rejects_empty_fd_samples():
     failures = evaluate_adjoint_validation(
-        {
-            "adjoint_residual_rel": ADJOINT_RESIDUAL_REL_TOL / 10.0,
-            "implicit_gradient_finite": True,
-            "implicit_gradient_norm": 1.0,
-            "total_gradient_finite": True,
-            "total_gradient_norm": 2.0,
-            "recomposed_total_rel": RECOMPOSED_TOTAL_REL_TOL / 10.0,
-            "fd_samples": [],
-        }
+        _adjoint_validation_metrics(
+            fd_samples=[],
+            stable_resolve_fd_samples=0,
+            min_stable_resolve_fd_samples=2,
+            full_resolve_fd_samples=[],
+        )
     )
 
-    assert failures == ["No fixed-surface FD samples were evaluated."]
+    assert "No fixed-surface FD samples were evaluated." in failures
+    assert "No full re-solve FD samples were evaluated." in failures
+    assert "Only 0 stable full re-solve FD samples were found; need at least 2." in failures
