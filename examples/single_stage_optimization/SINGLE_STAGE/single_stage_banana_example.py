@@ -472,9 +472,17 @@ def parse_args():
         choices=["scipy", "hybrid", "ondevice"],
         default=os.environ.get("OPTIMIZER_BACKEND", "scipy"),
         help=(
-            "JAX Boozer optimizer backend. Recorded in the run fingerprint, "
-            "passed through to the JAX surface solver, and used to select the "
-            "target outer single-stage optimizer path."
+            "JAX outer single-stage optimizer backend. Recorded in the run "
+            "fingerprint and used to select the outer optimization path."
+        ),
+    )
+    parser.add_argument(
+        "--boozer-optimizer-backend",
+        choices=["scipy", "hybrid", "ondevice"],
+        default=None,
+        help=(
+            "Optional override for the inner JAX Boozer LS solve backend. "
+            "Defaults to --optimizer-backend when omitted."
         ),
     )
     return parser.parse_args()
@@ -634,6 +642,8 @@ def initialize_boozer_surface(
     G0,
     backend="cpu",
     optimizer_backend="scipy",
+    boozer_limited_memory=False,
+    on_stage=None,
 ):
     """
     This initializes the boozer surface, using either the boozer "exact" algorithm, or the boozer "least squares" algorithm
@@ -647,7 +657,19 @@ def initialize_boozer_surface(
     G0: Value of net current going through the torus hole
     backend: "cpu" or "jax"
     optimizer_backend: JAX inner optimizer selector recorded in metadata
+    boozer_limited_memory: force the JAX Boozer LS solve through ondevice
+        limited-memory routing without changing the default contract elsewhere
     """
+    def emit_stage(label, **extra):
+        if on_stage is not None:
+            on_stage(label, **extra)
+
+    def build_jax_stage_options(**extra):
+        options = dict(extra)
+        if backend == "jax" and on_stage is not None:
+            options["stage_callback"] = on_stage
+        return options
+
     surf = SurfaceXYZTensorFourier(
         mpol=mpol,
         ntor=ntor,
@@ -657,6 +679,7 @@ def initialize_boozer_surface(
         quadpoints_phi=surf_prev.quadpoints_phi,
     )
     surf.least_squares_fit(surf_prev.gamma())
+    emit_stage("after_boozer_surface_fit")
 
     if backend == "jax":
         from simsopt.geo.boozersurface_jax import BoozerSurfaceJAX
@@ -672,6 +695,8 @@ def initialize_boozer_surface(
         options = {"verbose": True}
         if backend == "jax":
             options["optimizer_backend"] = optimizer_backend
+            options["force_ondevice_limited_memory"] = boozer_limited_memory
+            options.update(build_jax_stage_options())
         boozer_surface = BoozerCls(
             bs,
             surf,
@@ -679,6 +704,11 @@ def initialize_boozer_surface(
             vol_target,
             constraint_weight,
             options=options,
+        )
+        emit_stage(
+            "after_boozer_setup",
+            boozer_type="ls",
+            backend=backend,
         )
     else:
         print(f"Generating {solver_name}Boozer exact surface...")
@@ -698,11 +728,21 @@ def initialize_boozer_surface(
             vol,
             vol_target,
             None,
-            options={"verbose": True},
+            options=build_jax_stage_options(verbose=True),
+        )
+        emit_stage(
+            "after_boozer_setup",
+            boozer_type="exact",
+            backend=backend,
         )
 
     # Run boozer surface algorithm
     res = boozer_surface.run_code(iota, G0)
+    emit_stage(
+        "after_boozer_solve",
+        solve_success=bool(res["success"]),
+        iterations=float(res["iter"]),
+    )
     print(f"G0 from solve: {res['G']}")
     print(f"iota from solve: {res['iota']}")
 
@@ -730,6 +770,12 @@ def initialize_boozer_surface(
         )
         raise RuntimeError("Something went wrong with the Boozer solve...")
 
+    emit_stage(
+        "after_boozer_postprocess",
+        self_intersection_check_available=(
+            "true" if self_intersection_check_available else "false"
+        ),
+    )
     return boozer_surface
 
 
@@ -799,6 +845,19 @@ def select_boozer_residual_class(use_jax, boozer_kind):
 def build_boozer_residual_objective(boozer_surface, bs_obj, boozer_residual_cls):
     """Create the stage- and backend-matched Boozer residual wrapper."""
     return boozer_residual_cls(boozer_surface, bs_obj)
+
+
+def resolve_boozer_optimizer_backend(
+    field_backend,
+    optimizer_backend,
+    boozer_optimizer_backend=None,
+):
+    """Resolve the inner Boozer LS backend without changing CPU behavior."""
+    if field_backend != "jax":
+        return None
+    if boozer_optimizer_backend is None:
+        return optimizer_backend
+    return boozer_optimizer_backend
 
 
 def resolve_single_stage_outer_optimizer_method(field_backend, optimizer_backend):
@@ -1167,17 +1226,46 @@ if __name__ == "__main__":
     print(f"\n===== Starting single stage optimization for mpol = {mpol} =====")
 
     optimizer_backend_record = args.optimizer_backend if args.backend == "jax" else None
-
-    config_str = (
-        f"{stage2_bs_path}|{stage}|{CONSTRAINT_WEIGHT}|{vol_target}|{iota_target}"
-        f"|{args.cc_dist}|{args.cc_weight}|{args.curvature_weight}|{args.curvature_threshold}"
-        f"|{args.length_weight}|{args.res_weight}|{args.iotas_weight}"
-        f"|{args.cs_weight}|{args.cs_dist}|{args.surf_dist_weight}|{args.ss_dist}"
-        f"|{args.maxcor}"
-        f"|{banana_surf_radius}|{nphi}|{ntheta}|{args.init_only}|{args.backend}"
-        f"|{optimizer_backend_record}"
-        f"|{args.maxiter}|{args.num_tf_coils}|{file_loc}"
+    boozer_optimizer_backend_record = resolve_boozer_optimizer_backend(
+        args.backend,
+        args.optimizer_backend,
+        args.boozer_optimizer_backend,
     )
+    boozer_optimizer_backend_hash_record = (
+        args.boozer_optimizer_backend if args.backend == "jax" else None
+    )
+
+    config_parts = [
+        str(stage2_bs_path),
+        str(stage),
+        str(CONSTRAINT_WEIGHT),
+        str(vol_target),
+        str(iota_target),
+        str(args.cc_dist),
+        str(args.cc_weight),
+        str(args.curvature_weight),
+        str(args.curvature_threshold),
+        str(args.length_weight),
+        str(args.res_weight),
+        str(args.iotas_weight),
+        str(args.cs_weight),
+        str(args.cs_dist),
+        str(args.surf_dist_weight),
+        str(args.ss_dist),
+        str(args.maxcor),
+        str(banana_surf_radius),
+        str(nphi),
+        str(ntheta),
+        str(args.init_only),
+        str(args.backend),
+        str(optimizer_backend_record),
+        str(args.maxiter),
+        str(args.num_tf_coils),
+        str(file_loc),
+    ]
+    if boozer_optimizer_backend_hash_record is not None:
+        config_parts.append(str(boozer_optimizer_backend_hash_record))
+    config_str = "|".join(config_parts)
     config_hash = hashlib.sha256(config_str.encode()).hexdigest()[:8]
     OUT_DIR_ITER = OUT_DIR + f"/mpol={mpol}-ntor={ntor}-{config_hash}"
     os.makedirs(OUT_DIR_ITER, exist_ok=True)
@@ -1193,7 +1281,7 @@ if __name__ == "__main__":
         iota_target,
         G0,
         backend=args.backend,
-        optimizer_backend=args.optimizer_backend,
+        optimizer_backend=boozer_optimizer_backend_record,
     )
 
     # ==============================================================================
@@ -1421,6 +1509,8 @@ if __name__ == "__main__":
         "order": order,
         "backend": args.backend,
         "optimizer_backend": optimizer_backend_record,
+        "boozer_optimizer_backend": boozer_optimizer_backend_record,
+        "boozer_optimizer_method": boozer_surface.res.get("optimizer_method"),
         "outer_optimizer_method": resolve_single_stage_outer_optimizer_method(
             args.backend,
             args.optimizer_backend,

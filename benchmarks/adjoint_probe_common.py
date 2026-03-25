@@ -62,19 +62,50 @@ def project_grouped_adjoint_derivative(bs_jax, adj_cot):
     return _coil_cotangents_to_derivative(bs_jax.coils, *adj_cot)
 
 
-def accumulate_grouped_adjoint_derivative(bs_jax, grouped_adj_cotangents):
+def accumulate_grouped_adjoint_derivative(
+    bs_jax,
+    grouped_adj_cotangents,
+    *,
+    on_stage=None,
+):
     """Project grouped adjoint cotangents incrementally to a coil ``Derivative``."""
     from simsopt._core.derivative import Derivative
     from simsopt.geo.surfaceobjectives_jax import _coil_cotangents_to_derivative
 
+    def emit(label: str, *, group_count: int) -> None:
+        if on_stage is not None:
+            on_stage(label, group_count=group_count)
+
     total_derivative = Derivative({})
-    for d_coil_array, coil_group_indices in grouped_adj_cotangents:
+    grouped_iter = iter(grouped_adj_cotangents)
+    emit("before_grouped_adjoint_vjp", group_count=0)
+    try:
+        current_entry = next(grouped_iter)
+    except StopIteration:
+        emit("after_grouped_adjoint_vjp_end", group_count=0)
+        emit("after_derivative_projection", group_count=0)
+        return total_derivative
+
+    group_count = 0
+    emit("after_grouped_adjoint_vjp_first_group", group_count=1)
+    while True:
+        try:
+            next_entry = next(grouped_iter)
+        except StopIteration:
+            emit("after_grouped_adjoint_vjp_end", group_count=group_count + 1)
+            next_entry = None
+
+        d_coil_array, coil_group_indices = current_entry
         total_derivative += _coil_cotangents_to_derivative(
             bs_jax.coils,
             [d_coil_array],
             [coil_group_indices],
         )
-    return total_derivative
+        group_count += 1
+        if next_entry is None:
+            emit("after_derivative_projection", group_count=group_count)
+            return total_derivative
+        current_entry = next_entry
 
 
 def compute_derivative_l2_metrics(derivative, optim) -> tuple[float, bool]:

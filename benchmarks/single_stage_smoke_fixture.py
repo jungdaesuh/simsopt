@@ -27,6 +27,15 @@ DEFAULT_CONSTRAINT_WEIGHT = 1.0
 DEFAULT_NUM_TF_COILS = 20
 
 
+def _emit_stage(
+    on_stage,
+    label: str,
+    **extra: float | str | None,
+) -> None:
+    if on_stage is not None:
+        on_stage(label, **extra)
+
+
 def resolve_equilibrium_path(
     *,
     plasma_surf_filename: str = DEFAULT_PLASMA_SURF_FILENAME,
@@ -57,8 +66,11 @@ def build_real_single_stage_init_fixture(
     vol_target: float = DEFAULT_VOL_TARGET,
     iota_target: float = DEFAULT_IOTA_TARGET,
     optimizer_backend: str = DEFAULT_OPTIMIZER_BACKEND,
+    boozer_optimizer_backend: str | None = None,
+    boozer_limited_memory: bool = False,
     constraint_weight: float = DEFAULT_CONSTRAINT_WEIGHT,
     num_tf_coils: int = DEFAULT_NUM_TF_COILS,
+    on_stage=None,
 ) -> dict[str, object]:
     """Build the real reduced-grid single-stage init fixture without diagnostics."""
     from simsopt._core.optimizable import load
@@ -68,10 +80,24 @@ def build_real_single_stage_init_fixture(
         single_stage_banana_example as single_stage_example,
     )
 
+    resolved_boozer_optimizer_backend = (
+        single_stage_example.resolve_boozer_optimizer_backend(
+            backend,
+            optimizer_backend,
+            boozer_optimizer_backend,
+        )
+    )
+
     stage2_bs_path = Path(stage2_bs_path)
     _, stage2_results = single_stage_example.load_stage2_results(str(stage2_bs_path))
     major_radius = float(stage2_results["MAJOR_RADIUS"])
     toroidal_flux = float(stage2_results["TOROIDAL_FLUX"])
+    _emit_stage(
+        on_stage,
+        "after_stage2_results_load",
+        major_radius=major_radius,
+        toroidal_flux=toroidal_flux,
+    )
     equilibrium_file = resolve_equilibrium_path(
         plasma_surf_filename=plasma_surf_filename,
         equilibria_dir=equilibria_dir,
@@ -85,6 +111,7 @@ def build_real_single_stage_init_fixture(
         bs = BiotSavartJAX(bs_loaded.coils)
     else:
         bs = bs_loaded
+    _emit_stage(on_stage, "after_biotsavart_load", backend=backend)
 
     surf = SurfaceRZFourier.from_wout(
         str(equilibrium_file),
@@ -94,6 +121,14 @@ def build_real_single_stage_init_fixture(
         s=toroidal_flux,
     )
     surf.set_dofs(surf.get_dofs() * major_radius / surf.major_radius())
+    _emit_stage(
+        on_stage,
+        "after_surface_seed_setup",
+        nphi=int(nphi),
+        ntheta=int(ntheta),
+        mpol=int(mpol),
+        ntor=int(ntor),
+    )
 
     tf_coils = bs.coils[:num_tf_coils]
     current_sum = sum(abs(coil.current.get_value()) for coil in tf_coils)
@@ -109,11 +144,14 @@ def build_real_single_stage_init_fixture(
         iota_target,
         g0,
         backend=backend,
-        optimizer_backend=optimizer_backend,
+        optimizer_backend=resolved_boozer_optimizer_backend,
+        boozer_limited_memory=boozer_limited_memory,
+        on_stage=on_stage,
     )
     return {
         "bs": bs,
         "boozer_surface": boozer_surface,
+        "boozer_optimizer_backend": resolved_boozer_optimizer_backend,
         "equilibrium_path": str(equilibrium_file),
         "stage2_bs_path": str(stage2_bs_path),
         "vol_target": float(vol_target),

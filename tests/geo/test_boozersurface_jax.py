@@ -210,6 +210,43 @@ def _make_two_coils(nquad=128):
     return gammas, gammadashs, currents
 
 
+def _successful_minimize_result(
+    x0,
+    *,
+    nit=0,
+    nfev=1,
+    njev=1,
+):
+    return types.SimpleNamespace(
+        x=jnp.asarray(x0),
+        fun=0.0,
+        jac=jnp.zeros_like(x0),
+        nit=nit,
+        nfev=nfev,
+        njev=njev,
+        success=True,
+        status=0,
+    )
+
+
+def _successful_newton_polish_result(x0):
+    n = x0.shape[0]
+    return {
+        "x": x0,
+        "fun": jnp.asarray(0.0),
+        "grad": jnp.zeros_like(x0),
+        "hessian": jnp.eye(n, dtype=x0.dtype),
+        "nit": 0,
+        "success": True,
+    }
+
+
+def _emit_sparse_progress(progress_callback):
+    progress_callback(1, 3.0, 2.0)
+    progress_callback(7, 2.0, 1.0)
+    progress_callback(25, 1.0, 0.5)
+
+
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
@@ -1974,8 +2011,17 @@ class TestBoozerSurfaceJAXClass:
 
         captured = {}
 
-        def fake_jax_minimize(fun, x0, *, method, tol, maxiter, options):
-            del fun, tol, maxiter, options
+        def fake_jax_minimize(
+            fun,
+            x0,
+            *,
+            method,
+            tol,
+            maxiter,
+            options,
+            progress_callback=None,
+        ):
+            del fun, tol, maxiter, options, progress_callback
             captured["method"] = method
             return types.SimpleNamespace(
                 x=jnp.asarray(x0),
@@ -1990,15 +2036,7 @@ class TestBoozerSurfaceJAXClass:
 
         def fake_newton_polish(_objective_fn, x0, *, maxiter, tol, stab):
             del maxiter, tol, stab
-            n = x0.shape[0]
-            return {
-                "x": x0,
-                "fun": jnp.asarray(0.0),
-                "grad": jnp.zeros_like(x0),
-                "hessian": jnp.eye(n, dtype=x0.dtype),
-                "nit": 0,
-                "success": True,
-            }
+            return _successful_newton_polish_result(x0)
 
         monkeypatch.setattr(_bsj, "jax_minimize", fake_jax_minimize)
         monkeypatch.setattr(_bsj, "newton_polish", fake_newton_polish)
@@ -2126,8 +2164,54 @@ class TestBoozerSurfaceJAXClass:
 
         captured = {}
 
-        def fake_jax_minimize(fun, x0, *, method, tol, maxiter, options):
-            del fun, tol, maxiter, options
+        def fake_jax_minimize(
+            fun,
+            x0,
+            *,
+            method,
+            tol,
+            maxiter,
+            options,
+            progress_callback=None,
+        ):
+            del fun, tol, maxiter, options, progress_callback
+            captured["method"] = method
+            return _successful_minimize_result(x0)
+
+        def fake_newton_polish(_objective_fn, x0, *, maxiter, tol, stab):
+            del maxiter, tol, stab
+            return _successful_newton_polish_result(x0)
+
+        monkeypatch.setattr(_bsj, "jax_minimize", fake_jax_minimize)
+        monkeypatch.setattr(_bsj, "newton_polish", fake_newton_polish)
+
+        res = booz.run_code(iota=0.3, G=0.05)
+
+        assert captured["method"] == "lbfgs-ondevice"
+        assert res["success"] is True
+        assert res["optimizer_method"] == "lbfgs-ondevice"
+
+    @PRIVATE_OPTIMIZER_RUNTIME
+    def test_run_code_ondevice_force_limited_memory_routes_to_lbfgs(self, monkeypatch):
+        """The explicit Boozer LS override must route ondevice solves through lbfgs."""
+        booz = _make_mock_boozer_surface()
+        booz.options["optimizer_backend"] = "ondevice"
+        booz.options["limited_memory"] = False
+        booz.options["force_ondevice_limited_memory"] = True
+
+        captured = {}
+
+        def fake_jax_minimize(
+            fun,
+            x0,
+            *,
+            method,
+            tol,
+            maxiter,
+            options,
+            progress_callback=None,
+        ):
+            del fun, tol, maxiter, options, progress_callback
             captured["method"] = method
             return types.SimpleNamespace(
                 x=jnp.asarray(x0),
@@ -2159,6 +2243,7 @@ class TestBoozerSurfaceJAXClass:
 
         assert captured["method"] == "lbfgs-ondevice"
         assert res["success"] is True
+        assert res["optimizer_method"] == "lbfgs-ondevice"
 
     @PRIVATE_OPTIMIZER_RUNTIME
     @REQUIRES_PRIVATE_OPTIMIZER_RUNTIME
@@ -2180,6 +2265,102 @@ class TestBoozerSurfaceJAXClass:
         assert np.isfinite(res["fun"])
 
     @PRIVATE_OPTIMIZER_RUNTIME
+    def test_run_code_ondevice_emits_sparse_progress_updates(self, monkeypatch):
+        """On-device BFGS progress should surface iteration/fun/grad snapshots sparsely."""
+        booz = _make_mock_boozer_surface()
+        booz.options["optimizer_backend"] = "ondevice"
+        booz.options["limited_memory"] = False
+
+        observed = []
+
+        def record_stage(label, **payload):
+            observed.append((label, payload))
+
+        booz.options["stage_callback"] = record_stage
+
+        def fake_jax_minimize(
+            fun,
+            x0,
+            *,
+            method,
+            tol,
+            maxiter,
+            options,
+            progress_callback=None,
+        ):
+            del fun, tol, maxiter, options
+            assert method == "bfgs-ondevice"
+            assert progress_callback is not None
+            _emit_sparse_progress(progress_callback)
+            return _successful_minimize_result(x0, nit=25, nfev=30, njev=30)
+
+        def fake_newton_polish(_objective_fn, x0, *, maxiter, tol, stab):
+            del maxiter, tol, stab
+            return _successful_newton_polish_result(x0)
+
+        monkeypatch.setattr(_bsj, "jax_minimize", fake_jax_minimize)
+        monkeypatch.setattr(_bsj, "newton_polish", fake_newton_polish)
+
+        res = booz.run_code(iota=0.3, G=0.05)
+
+        progress_events = [payload for label, payload in observed if label == "boozer_ls_progress"]
+        assert res is not None
+        assert res["success"] is True
+        assert res["optimizer_method"] == "bfgs-ondevice"
+        assert [int(payload["iteration"]) for payload in progress_events] == [1, 25]
+        assert all(payload["method"] == "bfgs-ondevice" for payload in progress_events)
+
+    @PRIVATE_OPTIMIZER_RUNTIME
+    def test_run_code_ondevice_limited_memory_emits_sparse_progress_updates(
+        self, monkeypatch
+    ):
+        """On-device L-BFGS progress should surface the same sparse stage updates."""
+        booz = _make_mock_boozer_surface()
+        booz.options["optimizer_backend"] = "ondevice"
+        booz.options["limited_memory"] = True
+
+        observed = []
+
+        def record_stage(label, **payload):
+            observed.append((label, payload))
+
+        booz.options["stage_callback"] = record_stage
+
+        def fake_jax_minimize(
+            fun,
+            x0,
+            *,
+            method,
+            tol,
+            maxiter,
+            options,
+            progress_callback=None,
+        ):
+            del fun, tol, maxiter, options
+            assert method == "lbfgs-ondevice"
+            assert progress_callback is not None
+            _emit_sparse_progress(progress_callback)
+            return _successful_minimize_result(x0, nit=25, nfev=30, njev=30)
+
+        def fake_newton_polish(_objective_fn, x0, *, maxiter, tol, stab):
+            del maxiter, tol, stab
+            return _successful_newton_polish_result(x0)
+
+        monkeypatch.setattr(_bsj, "jax_minimize", fake_jax_minimize)
+        monkeypatch.setattr(_bsj, "newton_polish", fake_newton_polish)
+
+        res = booz.run_code(iota=0.3, G=0.05)
+
+        progress_events = [
+            payload for label, payload in observed if label == "boozer_ls_progress"
+        ]
+        assert res is not None
+        assert res["success"] is True
+        assert res["optimizer_method"] == "lbfgs-ondevice"
+        assert [int(payload["iteration"]) for payload in progress_events] == [1, 25]
+        assert all(payload["method"] == "lbfgs-ondevice" for payload in progress_events)
+
+    @PRIVATE_OPTIMIZER_RUNTIME
     @REQUIRES_PRIVATE_LIMITED_MEMORY_RUNTIME
     def test_run_code_ondevice_limited_memory_converges_without_monkeypatch(self):
         """limited_memory=True must run a full on-device L-BFGS solve."""
@@ -2195,6 +2376,7 @@ class TestBoozerSurfaceJAXClass:
         assert np.isfinite(res["fun"])
         assert res["PLU"] is not None
         assert callable(res["vjp"])
+        assert res["optimizer_method"] == "lbfgs-ondevice"
 
     def test_run_code_passes_newton_stab(self, monkeypatch):
         """run_code() must forward newton_stab into the Newton polish call."""
@@ -2203,8 +2385,17 @@ class TestBoozerSurfaceJAXClass:
 
         captured = {}
 
-        def fake_jax_minimize(fun, x0, *, method, tol, maxiter, options):
-            del fun, method, tol, maxiter, options
+        def fake_jax_minimize(
+            fun,
+            x0,
+            *,
+            method,
+            tol,
+            maxiter,
+            options,
+            progress_callback=None,
+        ):
+            del fun, method, tol, maxiter, options, progress_callback
             return types.SimpleNamespace(
                 x=jnp.asarray(x0),
                 fun=0.0,
@@ -2383,6 +2574,35 @@ class TestBoozerSurfaceJAXExactPath:
 
         assert booz.boozer_type == "exact"
         assert "optimizer_backend" not in booz.options
+
+    def test_exact_accepts_stage_callback_option(self):
+        """Exact solves must accept stage_callback because init probes thread it in."""
+        bs = _MockBiotSavart(_make_mock_coils())
+        surf = _MockSurface(
+            np.zeros(27),
+            1,
+            1,
+            1,
+            False,
+            np.linspace(0.0, 1.0, 3, endpoint=False),
+            np.linspace(0.0, 1.0, 3, endpoint=False),
+        )
+        label = _MockVolumeLabel()
+
+        def stage_callback(_label, **_payload):
+            return None
+
+        booz = BoozerSurfaceJAX(
+            bs,
+            surf,
+            label,
+            1.0,
+            constraint_weight=None,
+            options={"stage_callback": stage_callback},
+        )
+
+        assert booz.boozer_type == "exact"
+        assert booz.options["stage_callback"] is stage_callback
 
     def test_exact_rejects_invalid_optimizer_backend_value(self):
         """Exact solves still validate optimizer_backend values."""

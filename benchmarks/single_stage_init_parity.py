@@ -150,6 +150,15 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--boozer-optimizer-backend",
+        choices=("scipy", "hybrid", "ondevice"),
+        default=None,
+        help=(
+            "Optional override for the inner JAX Boozer LS backend. "
+            "Defaults to --optimizer-backend to preserve the historical probe."
+        ),
+    )
+    parser.add_argument(
         "--maxiter",
         type=int,
         default=DEFAULT_OUTER_MAXITER,
@@ -208,6 +217,13 @@ def _run_single_stage_case(
             command.extend(["--maxiter", str(args.maxiter)])
         if backend == "jax":
             command.extend(["--optimizer-backend", args.optimizer_backend])
+            if args.boozer_optimizer_backend is not None:
+                command.extend(
+                    [
+                        "--boozer-optimizer-backend",
+                        args.boozer_optimizer_backend,
+                    ]
+                )
         if args.equilibrium_path:
             command.extend(["--equilibrium-path", args.equilibrium_path])
         else:
@@ -354,6 +370,7 @@ def main() -> None:
             "plasma_surf_filename": args.plasma_surf_filename,
             "stage2_seed_path": _display_path(stage2_bs_path),
             "optimizer_backend": args.optimizer_backend,
+            "boozer_optimizer_backend": args.boozer_optimizer_backend,
             "outer_maxiter": int(args.maxiter),
             "nphi": int(args.nphi),
             "ntheta": int(args.ntheta),

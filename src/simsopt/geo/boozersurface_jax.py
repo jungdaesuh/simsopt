@@ -536,6 +536,7 @@ _DEFAULT_OPTIONS_LS = {
     "bfgs_maxiter": 1500,
     "optimizer_backend": "scipy",
     "limited_memory": False,
+    "force_ondevice_limited_memory": False,
     "newton_tol": 1e-11,
     "newton_maxiter": 40,
     "newton_stab": 0.0,
@@ -558,10 +559,15 @@ _INTERNAL_OPTIMIZER_OPTIONS = frozenset(
         "maxfun",
         "maxgrad",
         "maxls",
+        "stage_callback",
+        "progress_callback",
     }
 )
 _ALLOWED_OPTIONS_LS = frozenset(_DEFAULT_OPTIONS_LS) | _INTERNAL_OPTIMIZER_OPTIONS
-_ALLOWED_OPTIONS_EXACT = frozenset(_DEFAULT_OPTIONS_EXACT) | {"optimizer_backend"}
+_ALLOWED_OPTIONS_EXACT = frozenset(_DEFAULT_OPTIONS_EXACT) | {
+    "optimizer_backend",
+    "stage_callback",
+}
 
 
 def _normalize_solver_options(raw_options, boozer_type):
@@ -723,6 +729,32 @@ class BoozerSurfaceJAX(Optimizable):
         self.coil_groups = group_coil_data(gammas, gammadashs, currents)
         self.coil_currents = jnp.asarray(np.array(currents))
 
+    def _emit_stage_callback(
+        self,
+        label: str,
+        **extra: float | str | None,
+    ) -> None:
+        callback = self.options.get("stage_callback")
+        if callback is not None:
+            callback(label, **extra)
+
+    def _make_solver_progress_callback(self, method: str):
+        stage_callback = self.options.get("stage_callback")
+        if stage_callback is None:
+            return None
+
+        def emit_progress(iteration: int, fun_value: float, grad_inf: float) -> None:
+            if iteration <= 5 or iteration % 25 == 0:
+                stage_callback(
+                    "boozer_ls_progress",
+                    iteration=float(iteration),
+                    objective=float(fun_value),
+                    grad_inf=float(grad_inf),
+                    method=method,
+                )
+
+        return emit_progress
+
     def _get_surface_dofs(self):
         """Get current surface DOFs as JAX array."""
         return jnp.asarray(self.surface.get_dofs(), dtype=jnp.float64)
@@ -846,9 +878,14 @@ class BoozerSurfaceJAX(Optimizable):
 
         optimizer_backend = self.options["optimizer_backend"]
         require_target_backend_x64(optimizer_backend)
+        effective_limited_memory = bool(limited_memory)
+        if optimizer_backend == "ondevice" and self.options[
+            "force_ondevice_limited_memory"
+        ]:
+            effective_limited_memory = True
         method = resolve_optimizer_backend_method(
             optimizer_backend,
-            limited_memory=limited_memory,
+            limited_memory=effective_limited_memory,
         )
 
         optimizer_options = {}
@@ -871,6 +908,7 @@ class BoozerSurfaceJAX(Optimizable):
             tol=tol,
             maxiter=maxiter,
             options=optimizer_options,
+            progress_callback=self._make_solver_progress_callback(method),
         )
 
         sdofs_final, iota_out, G_out = self._unpack_decision_vector(
@@ -887,6 +925,7 @@ class BoozerSurfaceJAX(Optimizable):
             "G": G_out,
             "s": s,
             "iota": iota_out,
+            "optimizer_method": method,
             "weight_inv_modB": weight_inv_modB,
             "type": "ls",
         }
@@ -895,7 +934,7 @@ class BoozerSurfaceJAX(Optimizable):
 
         if verbose:
             print(
-                f"{'L-BFGS-B' if limited_memory else 'BFGS'} solve - "
+                f"{'L-BFGS-B' if effective_limited_memory else 'BFGS'} solve - "
                 f"success={resdict['success']}  iter={resdict['iter']}, "
                 f"iota={iota_out:.16f}, ||grad||_inf="
                 f"{np.linalg.norm(resdict['gradient'], ord=np.inf):.3e}",
@@ -1233,7 +1272,7 @@ class BoozerSurfaceJAX(Optimizable):
 
         # BoozerLS: BFGS + Newton polish
         assert self.constraint_weight is not None
-        res = self.minimize_boozer_penalty_constraints_LBFGS(
+        ls_res = self.minimize_boozer_penalty_constraints_LBFGS(
             constraint_weight=self.constraint_weight,
             iota=iota,
             G=G,
@@ -1243,7 +1282,13 @@ class BoozerSurfaceJAX(Optimizable):
             limited_memory=self.options["limited_memory"],
             weight_inv_modB=self.options["weight_inv_modB"],
         )
-        iota_out, G_out = res["iota"], res["G"]
+        self._emit_stage_callback(
+            "after_boozer_lbfgs",
+            solve_success=("true" if bool(ls_res["success"]) else "false"),
+            iterations=float(ls_res["iter"]),
+            method=str(ls_res["optimizer_method"]),
+        )
+        iota_out, G_out = ls_res["iota"], ls_res["G"]
 
         # Polish with Newton
         self.need_to_run_code = True
@@ -1256,5 +1301,11 @@ class BoozerSurfaceJAX(Optimizable):
             maxiter=self.options["newton_maxiter"],
             stab=self.options["newton_stab"],
             weight_inv_modB=self.options["weight_inv_modB"],
+        )
+        res["optimizer_method"] = ls_res["optimizer_method"]
+        self._emit_stage_callback(
+            "after_boozer_newton",
+            solve_success=("true" if bool(res["success"]) else "false"),
+            iterations=float(res["iter"]),
         )
         return res

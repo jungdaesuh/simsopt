@@ -209,7 +209,12 @@ def require_target_backend_x64(optimizer_backend):
 def _strip_internal_options(options, method):
     if not options:
         return {}
-    internal = {"hybrid_scipy_maxiter", "line_search_maxiter", "callback"}
+    internal = {
+        "hybrid_scipy_maxiter",
+        "line_search_maxiter",
+        "callback",
+        "progress_callback",
+    }
     if method == "bfgs":
         internal |= {"maxcor", "ftol", "maxfun", "maxgrad", "maxls"}
     elif method == "lbfgs":
@@ -714,6 +719,8 @@ def _minimize_bfgs_private(
     gtol=1e-5,
     line_search_maxiter=10,
     initial_state=None,
+    callback=None,
+    progress_callback=None,
 ):
     x0 = _require_private_optimizer_runtime(x0)
     if maxiter is None:
@@ -789,10 +796,31 @@ def _minimize_bfgs_private(
         )
         H_kp1 = jnp.where(jnp.isfinite(rho_k), H_kp1, state.H_k)
         converged = jnp_linalg.norm(g_kp1, ord=norm) < gtol
+        next_k = state.k + 1
+
+        if callback is not None:
+            jax.debug.callback(
+                lambda x: callback(np.asarray(x, dtype=float)),
+                x_kp1,
+                ordered=True,
+            )
+        if progress_callback is not None:
+            grad_inf = jnp_linalg.norm(g_kp1, ord=jnp.inf)
+            jax.debug.callback(
+                lambda iteration, fun_value, grad_inf_value: progress_callback(
+                    int(iteration),
+                    float(fun_value),
+                    float(grad_inf_value),
+                ),
+                next_k,
+                f_kp1,
+                grad_inf,
+                ordered=True,
+            )
 
         return state._replace(
             converged=converged,
-            k=state.k + 1,
+            k=next_k,
             x_k=x_kp1,
             f_k=f_kp1,
             g_k=g_kp1,
@@ -861,6 +889,8 @@ def _minimize_lbfgs_private(
     maxfun=None,
     maxgrad=None,
     maxls=20,
+    callback=None,
+    progress_callback=None,
 ):
     x0 = _require_private_optimizer_runtime(x0)
     d = len(x0)
@@ -941,6 +971,25 @@ def _minimize_lbfgs_private(
         status = jnp.where(ls_results.failed, 5, status)
 
         converged = jnp_linalg.norm(g_kp1, ord=norm) < gtol
+        if callback is not None:
+            jax.debug.callback(
+                lambda x: callback(np.asarray(x, dtype=float)),
+                x_kp1,
+                ordered=True,
+            )
+        if progress_callback is not None:
+            grad_inf = jnp_linalg.norm(g_kp1, ord=jnp.inf)
+            jax.debug.callback(
+                lambda iteration, fun_value, grad_inf_value: progress_callback(
+                    int(iteration),
+                    float(fun_value),
+                    float(grad_inf_value),
+                ),
+                next_k,
+                f_kp1,
+                grad_inf,
+                ordered=True,
+            )
         return state._replace(
             converged=converged,
             failed=(status > 0) & (~converged),
@@ -1317,6 +1366,7 @@ def jax_minimize(
     options=None,
     value_and_grad=False,
     callback=None,
+    progress_callback=None,
 ):
     """Optimizer adapter for Boozer LS minimization.
 
@@ -1342,6 +1392,8 @@ def jax_minimize(
     options = dict(options or {})
     if callback is not None:
         options["callback"] = callback
+    if progress_callback is not None:
+        options["progress_callback"] = progress_callback
     if method in _REFERENCE_METHODS:
         scipy_adapter = (
             _scipy_minimize_value_and_grad if value_and_grad else _scipy_minimize
@@ -1380,6 +1432,8 @@ def jax_minimize(
             maxiter=maxiter,
             gtol=tol,
             line_search_maxiter=int(options.get("line_search_maxiter", 10)),
+            callback=options.get("callback"),
+            progress_callback=options.get("progress_callback"),
         )
         return _private_bfgs_result_to_optimize_result(state)
 
@@ -1396,6 +1450,8 @@ def jax_minimize(
             maxfun=options.get("maxfun"),
             maxgrad=options.get("maxgrad"),
             maxls=int(options.get("maxls", 20)),
+            callback=options.get("callback"),
+            progress_callback=options.get("progress_callback"),
         )
         return _private_lbfgs_result_to_optimize_result(state)
 
@@ -1436,6 +1492,8 @@ def jax_minimize(
         gtol=tol,
         line_search_maxiter=int(options.get("line_search_maxiter", 10)),
         initial_state=continuation_state,
+        callback=options.get("callback"),
+        progress_callback=options.get("progress_callback"),
     )
     result = _private_bfgs_result_to_optimize_result(
         final_state,

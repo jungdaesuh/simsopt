@@ -23,6 +23,10 @@ from benchmarks.adjoint_probe_common import (
     compute_derivative_l2_metrics,
     iter_grouped_adjoint_cotangents,
 )
+from benchmarks.single_stage_backend_routing import (
+    resolve_boozer_limited_memory,
+    resolve_boozer_optimizer_backend,
+)
 from benchmarks.single_stage_smoke_fixture import (
     DEFAULT_EQUILIBRIA_DIR,
     DEFAULT_IOTA_TARGET,
@@ -136,10 +140,26 @@ def parse_args() -> argparse.Namespace:
         "--optimizer-backend",
         choices=("scipy", "hybrid", "ondevice"),
         default="ondevice",
-        help="JAX Boozer optimizer backend for the grouped-adjoint probe.",
+        help="Outer optimizer lane marker for the grouped-adjoint probe provenance.",
+    )
+    parser.add_argument(
+        "--boozer-optimizer-backend",
+        choices=("scipy", "hybrid", "ondevice"),
+        default=None,
+        help=(
+            "Optional override for the inner JAX Boozer LS backend. "
+            "Defaults to --optimizer-backend when omitted."
+        ),
+    )
+    parser.add_argument(
+        "--boozer-limited-memory",
+        action="store_true",
+        help=(
+            "Request the limited-memory ondevice Boozer LS route. "
+            "This only takes effect when --boozer-optimizer-backend=ondevice."
+        ),
     )
     return parser.parse_args()
-
 
 def _rss_high_water_mark_mb() -> float:
     rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
@@ -148,13 +168,69 @@ def _rss_high_water_mark_mb() -> float:
     return float(rss) / 1024.0
 
 
-def record_memory_snapshot(label: str, started_at: float) -> dict[str, float | str | None]:
-    return {
+def record_memory_snapshot(
+    label: str,
+    started_at: float,
+    **extra: float | str | None,
+) -> dict[str, float | str | None]:
+    snapshot = {
         "label": label,
         "elapsed_s": float(time.perf_counter() - started_at),
         "rss_mb": _rss_high_water_mark_mb(),
         "gpu_memory_mb": query_gpu_memory_mb(),
     }
+    snapshot.update(extra)
+    return snapshot
+
+
+def print_memory_snapshot(snapshot: dict[str, float | str | None]) -> None:
+    gpu_memory = snapshot["gpu_memory_mb"]
+    group_count = snapshot.get("group_count")
+    iteration = snapshot.get("iteration")
+    objective = snapshot.get("objective")
+    grad_inf = snapshot.get("grad_inf")
+    method = snapshot.get("method")
+    group_suffix = (
+        f", groups={int(group_count)}"
+        if isinstance(group_count, (int, float))
+        else ""
+    )
+    progress_suffix = (
+        f", iter={int(iteration)}"
+        if isinstance(iteration, (int, float))
+        else ""
+    )
+    objective_suffix = (
+        f", fun={float(objective):.6e}"
+        if isinstance(objective, (int, float))
+        else ""
+    )
+    grad_suffix = (
+        f", ||grad||_inf={float(grad_inf):.3e}"
+        if isinstance(grad_inf, (int, float))
+        else ""
+    )
+    method_suffix = f", method={method}" if isinstance(method, str) else ""
+    gpu_suffix = (
+        f"{float(gpu_memory):.2f} MB" if gpu_memory is not None else "n/a"
+    )
+    print(
+        "[snapshot] "
+        f"{snapshot['label']}: "
+        f"elapsed={float(snapshot['elapsed_s']):.2f}s, "
+        f"rss={float(snapshot['rss_mb']):.2f} MB, "
+        f"gpu={gpu_suffix}"
+        f"{group_suffix}",
+        end="",
+        flush=False,
+    )
+    print(
+        f"{progress_suffix}"
+        f"{objective_suffix}"
+        f"{grad_suffix}"
+        f"{method_suffix}",
+        flush=True,
+    )
 
 
 def _peak_snapshot_value(
@@ -185,15 +261,103 @@ def _build_grouped_adjoint_metrics(
     }
 
 
+def _build_grouped_adjoint_payload(
+    *,
+    provenance: dict[str, Any],
+    fixture: dict[str, object],
+    base_result: dict[str, Any],
+    metrics: dict[str, Any],
+    failures: list[str],
+    snapshots: list[dict[str, float | str | None]],
+    boozer_limited_memory: bool,
+    boozer_limited_memory_requested: bool,
+) -> dict[str, Any]:
+    return {
+        "provenance": provenance,
+        "baseline": {
+            "solve_success": bool(base_result.get("success", False)),
+            "equilibrium_path": str(fixture["equilibrium_path"]),
+            "stage2_bs_path": str(fixture["stage2_bs_path"]),
+            "boozer_optimizer_backend": fixture["boozer_optimizer_backend"],
+            "optimizer_method": base_result.get("optimizer_method"),
+            "boozer_limited_memory": bool(boozer_limited_memory),
+            "boozer_limited_memory_requested": bool(
+                boozer_limited_memory_requested
+            ),
+        },
+        "grouped_adjoint": {
+            "adjoint_residual_rel": metrics["adjoint_residual_rel"],
+            "adjoint_norm": metrics["adjoint_norm"],
+            "adjoint_finite": metrics["adjoint_finite"],
+            "implicit_gradient_norm": metrics["implicit_gradient_norm"],
+            "implicit_gradient_finite": metrics["implicit_gradient_finite"],
+        },
+        "memory": {
+            "snapshots": snapshots,
+            "peak_rss_mb": _peak_snapshot_value(snapshots, "rss_mb"),
+            "peak_gpu_memory_mb": _peak_snapshot_value(snapshots, "gpu_memory_mb"),
+        },
+        "failures": failures,
+        "passed": not failures,
+    }
+
+
+def _build_probe_provenance(args: argparse.Namespace) -> dict[str, Any]:
+    resolved_boozer_optimizer_backend = resolve_boozer_optimizer_backend(
+        args.optimizer_backend,
+        args.boozer_optimizer_backend,
+    )
+    boozer_limited_memory_requested = bool(args.boozer_limited_memory)
+    boozer_limited_memory = resolve_boozer_limited_memory(
+        resolved_boozer_optimizer_backend,
+        boozer_limited_memory_requested,
+    )
+    return build_provenance(
+        jax,
+        jaxlib,
+        title="Grouped adjoint memory probe",
+        extra={
+            "lane": resolve_probe_lane(optimizer_backend=args.optimizer_backend),
+            "fixture": "real-single-stage-init",
+            "platform_request": args.platform,
+            "plasma_surf_filename": args.plasma_surf_filename,
+            "stage2_seed_path": str(Path(args.stage2_bs_path)),
+            "optimizer_backend": args.optimizer_backend,
+            "boozer_optimizer_backend": resolved_boozer_optimizer_backend,
+            "boozer_optimizer_backend_requested": args.boozer_optimizer_backend,
+            "boozer_limited_memory": boozer_limited_memory,
+            "boozer_limited_memory_requested": boozer_limited_memory_requested,
+            "nphi": int(args.nphi),
+            "ntheta": int(args.ntheta),
+            "mpol": int(args.mpol),
+            "ntor": int(args.ntor),
+            "compile_behavior": describe_compile_behavior(uses_subprocesses=False),
+        },
+    )
+
+
 def evaluate_grouped_adjoint_memory_probe(metrics: dict[str, Any]) -> list[str]:
     failures: list[str] = []
     snapshots = list(metrics.get("snapshots", []))
     required_labels = {
         "start",
+        "after_stage2_results_load",
+        "after_biotsavart_load",
+        "after_surface_seed_setup",
+        "after_boozer_surface_fit",
+        "after_boozer_setup",
+        "after_boozer_lbfgs",
+        "after_boozer_newton",
+        "after_boozer_solve",
+        "after_boozer_postprocess",
         "after_fixture",
         "after_objective",
         "after_adjoint_solve",
-        "after_grouped_adjoint_vjp",
+        "before_grouped_adjoint_vjp",
+        "after_grouped_adjoint_vjp_first_group",
+        "after_grouped_adjoint_vjp_end",
+        "after_derivative_projection",
+        "after_norm_metrics",
     }
     labels = {str(snapshot.get("label")) for snapshot in snapshots}
     missing_labels = sorted(required_labels - labels)
@@ -216,28 +380,27 @@ def evaluate_grouped_adjoint_memory_probe(metrics: dict[str, Any]) -> list[str]:
 def main() -> None:
     args = parse_args()
     bootstrap_local_simsopt()
-    provenance = build_provenance(
-        jax,
-        jaxlib,
-        title="Grouped adjoint memory probe",
-        extra={
-            "lane": resolve_probe_lane(optimizer_backend=args.optimizer_backend),
-            "fixture": "real-single-stage-init",
-            "platform_request": args.platform,
-            "plasma_surf_filename": args.plasma_surf_filename,
-            "stage2_seed_path": str(Path(args.stage2_bs_path)),
-            "optimizer_backend": args.optimizer_backend,
-            "nphi": int(args.nphi),
-            "ntheta": int(args.ntheta),
-            "mpol": int(args.mpol),
-            "ntor": int(args.ntor),
-            "compile_behavior": describe_compile_behavior(uses_subprocesses=False),
-        },
+    resolved_boozer_optimizer_backend = resolve_boozer_optimizer_backend(
+        args.optimizer_backend,
+        args.boozer_optimizer_backend,
     )
+    boozer_limited_memory_requested = bool(args.boozer_limited_memory)
+    boozer_limited_memory = resolve_boozer_limited_memory(
+        resolved_boozer_optimizer_backend,
+        boozer_limited_memory_requested,
+    )
+    provenance = _build_probe_provenance(args)
     print_provenance(provenance)
 
     started_at = time.perf_counter()
-    snapshots = [record_memory_snapshot("start", started_at)]
+    snapshots: list[dict[str, float | str | None]] = []
+
+    def capture_snapshot(label: str, **extra: float | str | None) -> None:
+        snapshot = record_memory_snapshot(label, started_at, **extra)
+        snapshots.append(snapshot)
+        print_memory_snapshot(snapshot)
+
+    capture_snapshot("start")
 
     fixture = build_real_single_stage_init_fixture(
         backend="jax",
@@ -252,8 +415,11 @@ def main() -> None:
         vol_target=args.vol_target,
         iota_target=args.iota_target,
         optimizer_backend=args.optimizer_backend,
+        boozer_optimizer_backend=args.boozer_optimizer_backend,
+        boozer_limited_memory=boozer_limited_memory,
+        on_stage=capture_snapshot,
     )
-    snapshots.append(record_memory_snapshot("after_fixture", started_at))
+    capture_snapshot("after_fixture")
 
     base_result = fixture["boozer_surface"].res
     if base_result is None or not base_result.get("success", False):
@@ -262,20 +428,22 @@ def main() -> None:
     from simsopt.geo.surfaceobjectives_jax import BoozerResidualJAX
 
     jr_jax = BoozerResidualJAX(fixture["boozer_surface"], fixture["bs"])
-    snapshots.append(record_memory_snapshot("after_objective", started_at))
+    capture_snapshot("after_objective")
 
     adjoint, adjoint_residual_rel = compute_adjoint_state(jr_jax)
-    snapshots.append(record_memory_snapshot("after_adjoint_solve", started_at))
+    capture_snapshot("after_adjoint_solve")
 
     grouped_cotangents = iter_grouped_adjoint_cotangents(jr_jax, adjoint)
     implicit_derivative = accumulate_grouped_adjoint_derivative(
-        fixture["bs"], grouped_cotangents
+        fixture["bs"],
+        grouped_cotangents,
+        on_stage=capture_snapshot,
     )
 
     implicit_gradient_norm, implicit_gradient_finite = compute_derivative_l2_metrics(
         implicit_derivative, fixture["bs"]
     )
-    snapshots.append(record_memory_snapshot("after_grouped_adjoint_vjp", started_at))
+    capture_snapshot("after_norm_metrics")
 
     metrics = _build_grouped_adjoint_metrics(
         adjoint,
@@ -286,28 +454,16 @@ def main() -> None:
     )
     failures = evaluate_grouped_adjoint_memory_probe(metrics)
 
-    payload = {
-        "provenance": provenance,
-        "baseline": {
-            "solve_success": bool(base_result.get("success", False)),
-            "equilibrium_path": str(fixture["equilibrium_path"]),
-            "stage2_bs_path": str(fixture["stage2_bs_path"]),
-        },
-        "grouped_adjoint": {
-            "adjoint_residual_rel": metrics["adjoint_residual_rel"],
-            "adjoint_norm": metrics["adjoint_norm"],
-            "adjoint_finite": metrics["adjoint_finite"],
-            "implicit_gradient_norm": metrics["implicit_gradient_norm"],
-            "implicit_gradient_finite": metrics["implicit_gradient_finite"],
-        },
-        "memory": {
-            "snapshots": snapshots,
-            "peak_rss_mb": _peak_snapshot_value(snapshots, "rss_mb"),
-            "peak_gpu_memory_mb": _peak_snapshot_value(snapshots, "gpu_memory_mb"),
-        },
-        "failures": failures,
-        "passed": not failures,
-    }
+    payload = _build_grouped_adjoint_payload(
+        provenance=provenance,
+        fixture=fixture,
+        base_result=base_result,
+        metrics=metrics,
+        failures=failures,
+        snapshots=snapshots,
+        boozer_limited_memory=boozer_limited_memory,
+        boozer_limited_memory_requested=boozer_limited_memory_requested,
+    )
     write_json(args.output_json, payload)
     if failures:
         print("GROUPED ADJOINT MEMORY PROBE FAILED")

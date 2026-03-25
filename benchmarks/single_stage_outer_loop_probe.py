@@ -16,6 +16,10 @@ sys.path.insert(0, str(REPO_ROOT))
 sys.path.insert(0, str(SRC_ROOT))
 
 from benchmarks.single_stage_init_parity import _run_single_stage_case
+from benchmarks.single_stage_backend_routing import (
+    resolve_boozer_optimizer_backend,
+    resolve_boozer_optimizer_method,
+)
 from benchmarks.single_stage_smoke_fixture import (
     DEFAULT_EQUILIBRIA_DIR,
     DEFAULT_IOTA_TARGET,
@@ -137,6 +141,15 @@ def parse_args() -> argparse.Namespace:
         help="JAX Boozer optimizer backend to prove on the target outer path.",
     )
     parser.add_argument(
+        "--boozer-optimizer-backend",
+        choices=("scipy", "hybrid", "ondevice"),
+        default=None,
+        help=(
+            "Optional override for the inner JAX Boozer LS backend. "
+            "Defaults to --optimizer-backend when omitted."
+        ),
+    )
+    parser.add_argument(
         "--maxiter",
         type=int,
         default=DEFAULT_OUTER_PROOF_MAXITER,
@@ -151,10 +164,16 @@ def _finite_result_keys(results: dict[str, Any]) -> dict[str, bool]:
         for key in _REQUIRED_RESULT_KEYS
     }
 
-
-def evaluate_single_stage_outer_loop_probe(results: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
+def evaluate_single_stage_outer_loop_probe(
+    results: dict[str, Any],
+    *,
+    expected_boozer_optimizer_backend: str | None = None,
+    expected_boozer_optimizer_method: str | None = None,
+) -> tuple[dict[str, Any], list[str]]:
     summary = {
         "iterations": int(results.get("iterations", 0)),
+        "boozer_optimizer_backend": results.get("boozer_optimizer_backend"),
+        "boozer_optimizer_method": results.get("boozer_optimizer_method"),
         "outer_optimizer_method": str(results.get("outer_optimizer_method", "")),
         "self_intersecting": bool(results.get("SELF_INTERSECTING", False)),
         "self_intersection_check_available": bool(
@@ -171,6 +190,22 @@ def evaluate_single_stage_outer_loop_probe(results: dict[str, Any]) -> tuple[dic
             "Single-stage outer-loop probe did not use the target "
             f"{TARGET_OUTER_OPTIMIZER_METHOD} method."
         )
+    if (
+        expected_boozer_optimizer_backend is not None
+        and summary["boozer_optimizer_backend"] != expected_boozer_optimizer_backend
+    ):
+        failures.append(
+            "Single-stage outer-loop probe did not use the requested inner "
+            f"Boozer backend {expected_boozer_optimizer_backend!r}."
+        )
+    if (
+        expected_boozer_optimizer_method is not None
+        and summary["boozer_optimizer_method"] != expected_boozer_optimizer_method
+    ):
+        failures.append(
+            "Single-stage outer-loop probe did not use the requested inner "
+            f"Boozer optimizer method {expected_boozer_optimizer_method!r}."
+        )
     if summary["self_intersecting"]:
         failures.append("Single-stage outer-loop probe produced a self-intersecting surface.")
     for key, is_finite in summary["finite_result_keys"].items():
@@ -182,6 +217,10 @@ def evaluate_single_stage_outer_loop_probe(results: dict[str, Any]) -> tuple[dic
 def main() -> None:
     args = parse_args()
     bootstrap_local_simsopt()
+    resolved_boozer_optimizer_backend = resolve_boozer_optimizer_backend(
+        args.optimizer_backend,
+        args.boozer_optimizer_backend,
+    )
     provenance = build_provenance(
         jax,
         jaxlib,
@@ -193,6 +232,8 @@ def main() -> None:
             "plasma_surf_filename": args.plasma_surf_filename,
             "stage2_seed_path": str(Path(args.stage2_bs_path)),
             "optimizer_backend": args.optimizer_backend,
+            "boozer_optimizer_backend": resolved_boozer_optimizer_backend,
+            "boozer_optimizer_backend_requested": args.boozer_optimizer_backend,
             "outer_maxiter": int(args.maxiter),
             "nphi": int(args.nphi),
             "ntheta": int(args.ntheta),
@@ -204,7 +245,13 @@ def main() -> None:
     print_provenance(provenance)
 
     case = _run_single_stage_case(args, "jax", platform=args.platform)
-    summary, failures = evaluate_single_stage_outer_loop_probe(case["results"])
+    summary, failures = evaluate_single_stage_outer_loop_probe(
+        case["results"],
+        expected_boozer_optimizer_backend=resolved_boozer_optimizer_backend,
+        expected_boozer_optimizer_method=resolve_boozer_optimizer_method(
+            resolved_boozer_optimizer_backend
+        ),
+    )
     payload = {
         "provenance": provenance,
         "results": case["results"],

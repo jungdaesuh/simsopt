@@ -1,5 +1,6 @@
 from contextlib import contextmanager
 import importlib.util
+import os
 import sys
 import types
 import unittest
@@ -153,7 +154,12 @@ class SingleStageExampleTests(unittest.TestCase):
                 self.targetlabel = targetlabel
                 self.constraint_weight = constraint_weight
                 self.options = options or {}
-                self.res = {"success": True, "iota": TEST_IOTA, "G": TEST_G0}
+                self.res = {
+                    "success": True,
+                    "iter": 1,
+                    "iota": TEST_IOTA,
+                    "G": TEST_G0,
+                }
                 self.run_code_calls = [] if record_run_calls else None
                 FakeBoozerSurfaceJAX.instances.append(self)
 
@@ -298,6 +304,38 @@ class SingleStageExampleTests(unittest.TestCase):
             fake_boozer_surface_jax.instances[0].options["optimizer_backend"],
             "ondevice",
         )
+
+    def test_resolve_boozer_optimizer_backend_defaults_and_overrides(self):
+        module = self.load_module()
+
+        self.assertIsNone(
+            module.resolve_boozer_optimizer_backend(
+                "cpu",
+                "ondevice",
+                "scipy",
+            )
+        )
+        self.assertEqual(
+            module.resolve_boozer_optimizer_backend("jax", "ondevice", None),
+            "ondevice",
+        )
+        self.assertEqual(
+            module.resolve_boozer_optimizer_backend("jax", "ondevice", "scipy"),
+            "scipy",
+        )
+
+    def test_parse_args_does_not_treat_optimizer_env_as_explicit_boozer_override(self):
+        module = self.load_module()
+
+        with patch.dict(os.environ, {"OPTIMIZER_BACKEND": "ondevice"}), patch.object(
+            sys,
+            "argv",
+            ["single_stage_banana_example.py"],
+        ):
+            args = module.parse_args()
+
+        self.assertEqual(args.optimizer_backend, "ondevice")
+        self.assertIsNone(args.boozer_optimizer_backend)
 
     def test_run_single_stage_optimizer_routes_target_lane_to_ondevice_adapter(self):
         module = self.load_module()

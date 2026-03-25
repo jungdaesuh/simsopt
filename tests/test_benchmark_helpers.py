@@ -19,7 +19,12 @@ from benchmarks.adjoint_fd_validation import (
     evaluate_adjoint_validation,
 )
 from benchmarks.adjoint_probe_common import compute_derivative_l2_metrics
+from benchmarks.single_stage_backend_routing import (
+    resolve_boozer_limited_memory,
+    resolve_boozer_optimizer_method,
+)
 from benchmarks.grouped_adjoint_memory_probe import (
+    _build_grouped_adjoint_payload,
     evaluate_grouped_adjoint_memory_probe,
 )
 import benchmarks.single_stage_init_parity as single_stage_init_parity_module
@@ -187,6 +192,7 @@ def test_single_stage_init_defaults_to_reduced_grid_smoke_fixture(monkeypatch):
     assert args.mpol == DEFAULT_SMOKE_MPOL
     assert args.ntor == DEFAULT_SMOKE_NTOR
     assert args.optimizer_backend == single_stage_init_parity_module.TARGET_OPTIMIZER_BACKEND
+    assert args.boozer_optimizer_backend is None
     assert args.maxiter == DEFAULT_OUTER_MAXITER
 
 
@@ -512,6 +518,7 @@ def test_single_stage_init_case_loads_surface_before_tempdir_cleanup(monkeypatch
         vol_target=0.1,
         iota_target=0.15,
         optimizer_backend="scipy",
+        boozer_optimizer_backend=None,
         maxiter=0,
         equilibrium_path=None,
         equilibria_dir=str(tmp_path / "equilibria"),
@@ -581,6 +588,7 @@ def test_single_stage_init_case_threads_optimizer_backend_to_jax_lane(
         vol_target=0.1,
         iota_target=0.15,
         optimizer_backend="ondevice",
+        boozer_optimizer_backend="scipy",
         maxiter=1,
         equilibrium_path=None,
         equilibria_dir=str(tmp_path / "equilibria"),
@@ -639,6 +647,10 @@ def test_single_stage_init_case_threads_optimizer_backend_to_jax_lane(
     assert observed_commands[0][maxiter_flag_index + 1] == "1"
     optimizer_flag_index = observed_commands[0].index("--optimizer-backend")
     assert observed_commands[0][optimizer_flag_index + 1] == "ondevice"
+    boozer_optimizer_flag_index = observed_commands[0].index(
+        "--boozer-optimizer-backend"
+    )
+    assert observed_commands[0][boozer_optimizer_flag_index + 1] == "scipy"
 
 
 def _single_stage_probe_results(**overrides):
@@ -650,6 +662,8 @@ def _single_stage_probe_results(**overrides):
         "SELF_INTERSECTING": False,
         "SELF_INTERSECTION_CHECK_AVAILABLE": True,
         "iterations": 1,
+        "boozer_optimizer_backend": "scipy",
+        "boozer_optimizer_method": "bfgs",
         "outer_optimizer_method": "lbfgs",
     }
     results.update(overrides)
@@ -682,11 +696,14 @@ def test_single_stage_outer_loop_probe_accepts_finite_target_lane_result():
             MAX_CURVATURE=32.0,
             SELF_INTERSECTION_CHECK_AVAILABLE=False,
             outer_optimizer_method=TARGET_OUTER_OPTIMIZER_METHOD,
-        )
+        ),
+        expected_boozer_optimizer_backend="scipy",
+        expected_boozer_optimizer_method="bfgs",
     )
 
     assert failures == []
     assert summary["iterations"] == 1
+    assert summary["boozer_optimizer_backend"] == "scipy"
     assert summary["outer_optimizer_method"] == TARGET_OUTER_OPTIMIZER_METHOD
     assert summary["self_intersection_check_available"] is False
 
@@ -695,14 +712,20 @@ def test_single_stage_outer_loop_probe_rejects_missing_step_or_wrong_method():
     _, failures = evaluate_single_stage_outer_loop_probe(
         _single_stage_probe_results(
             iterations=0,
+            boozer_optimizer_backend="ondevice",
+            boozer_optimizer_method="bfgs-ondevice",
             SELF_INTERSECTING=True,
             FINAL_IOTA=np.nan,
             FIELD_ERROR=0.004,
             MAX_CURVATURE=32.0,
-        )
+        ),
+        expected_boozer_optimizer_backend="scipy",
+        expected_boozer_optimizer_method="bfgs",
     )
 
     assert any("did not accept an optimizer step" in failure for failure in failures)
+    assert any("requested inner Boozer backend" in failure for failure in failures)
+    assert any("requested inner Boozer optimizer method" in failure for failure in failures)
     assert any(TARGET_OUTER_OPTIMIZER_METHOD in failure for failure in failures)
     assert any("self-intersecting surface" in failure for failure in failures)
     assert any("non-finite FINAL_IOTA" in failure for failure in failures)
@@ -711,6 +734,7 @@ def test_single_stage_outer_loop_probe_rejects_missing_step_or_wrong_method():
 def _grouped_adjoint_memory_metrics(*, snapshots, **overrides):
     metrics = {
         "adjoint_residual_rel": 1e-12,
+        "adjoint_norm": 1.0,
         "adjoint_finite": True,
         "implicit_gradient_finite": True,
         "implicit_gradient_norm": 1.0,
@@ -721,16 +745,34 @@ def _grouped_adjoint_memory_metrics(*, snapshots, **overrides):
 
 
 def _grouped_adjoint_snapshot(label, rss_mb):
-    return {"label": label, "rss_mb": rss_mb, "gpu_memory_mb": None}
+    return {
+        "label": label,
+        "elapsed_s": rss_mb * 0.5,
+        "rss_mb": rss_mb,
+        "gpu_memory_mb": None,
+    }
 
 
 def _complete_grouped_adjoint_snapshots():
     return [
         _grouped_adjoint_snapshot("start", 1.0),
-        _grouped_adjoint_snapshot("after_fixture", 2.0),
-        _grouped_adjoint_snapshot("after_objective", 3.0),
-        _grouped_adjoint_snapshot("after_adjoint_solve", 4.0),
-        _grouped_adjoint_snapshot("after_grouped_adjoint_vjp", 5.0),
+        _grouped_adjoint_snapshot("after_stage2_results_load", 1.25),
+        _grouped_adjoint_snapshot("after_biotsavart_load", 1.5),
+        _grouped_adjoint_snapshot("after_surface_seed_setup", 1.75),
+        _grouped_adjoint_snapshot("after_boozer_surface_fit", 2.0),
+        _grouped_adjoint_snapshot("after_boozer_setup", 2.25),
+        _grouped_adjoint_snapshot("after_boozer_lbfgs", 2.5),
+        _grouped_adjoint_snapshot("after_boozer_newton", 2.75),
+        _grouped_adjoint_snapshot("after_boozer_solve", 3.0),
+        _grouped_adjoint_snapshot("after_boozer_postprocess", 3.25),
+        _grouped_adjoint_snapshot("after_fixture", 3.5),
+        _grouped_adjoint_snapshot("after_objective", 4.5),
+        _grouped_adjoint_snapshot("after_adjoint_solve", 5.5),
+        _grouped_adjoint_snapshot("before_grouped_adjoint_vjp", 6.0),
+        _grouped_adjoint_snapshot("after_grouped_adjoint_vjp_first_group", 6.25),
+        _grouped_adjoint_snapshot("after_grouped_adjoint_vjp_end", 6.5),
+        _grouped_adjoint_snapshot("after_derivative_projection", 6.75),
+        _grouped_adjoint_snapshot("after_norm_metrics", 7.0),
     ]
 
 
@@ -783,6 +825,90 @@ def test_grouped_adjoint_memory_probe_rejects_missing_snapshots_or_nonfinite_gra
 
     assert any("required snapshots" in failure for failure in failures)
     assert any("non-finite implicit gradient" in failure for failure in failures)
+
+
+def test_grouped_adjoint_memory_payload_records_limited_memory_route():
+    snapshots = _complete_grouped_adjoint_snapshots()
+    metrics = _grouped_adjoint_memory_metrics(snapshots=snapshots)
+
+    payload = _build_grouped_adjoint_payload(
+        provenance={
+            "title": "Grouped adjoint memory probe",
+            "optimizer_backend": "ondevice",
+            "boozer_limited_memory_requested": True,
+            "boozer_optimizer_backend": "ondevice",
+            "boozer_limited_memory": True,
+        },
+        fixture={
+            "equilibrium_path": Path("/tmp/equilibrium.nc"),
+            "stage2_bs_path": Path("/tmp/biot_savart_opt.json"),
+            "boozer_optimizer_backend": "ondevice",
+        },
+        base_result={
+            "success": True,
+            "optimizer_method": "lbfgs-ondevice",
+        },
+        metrics=metrics,
+        failures=[],
+        snapshots=snapshots,
+        boozer_limited_memory=True,
+        boozer_limited_memory_requested=True,
+    )
+
+    assert payload["provenance"]["boozer_limited_memory"] is True
+    assert payload["provenance"]["boozer_optimizer_backend"] == "ondevice"
+    assert payload["baseline"]["boozer_optimizer_backend"] == "ondevice"
+    assert payload["baseline"]["optimizer_method"] == "lbfgs-ondevice"
+    assert payload["baseline"]["boozer_limited_memory"] is True
+    assert payload["baseline"]["boozer_limited_memory_requested"] is True
+
+
+def test_grouped_adjoint_memory_payload_records_requested_but_inactive_limited_memory():
+    snapshots = _complete_grouped_adjoint_snapshots()
+    metrics = _grouped_adjoint_memory_metrics(snapshots=snapshots)
+
+    payload = _build_grouped_adjoint_payload(
+        provenance={
+            "title": "Grouped adjoint memory probe",
+            "optimizer_backend": "ondevice",
+            "boozer_limited_memory_requested": True,
+            "boozer_optimizer_backend": "scipy",
+            "boozer_limited_memory": False,
+        },
+        fixture={
+            "equilibrium_path": Path("/tmp/equilibrium.nc"),
+            "stage2_bs_path": Path("/tmp/biot_savart_opt.json"),
+            "boozer_optimizer_backend": "scipy",
+        },
+        base_result={
+            "success": True,
+            "optimizer_method": "bfgs",
+        },
+        metrics=metrics,
+        failures=[],
+        snapshots=snapshots,
+        boozer_limited_memory=False,
+        boozer_limited_memory_requested=True,
+    )
+
+    assert payload["provenance"]["boozer_limited_memory"] is False
+    assert payload["provenance"]["boozer_limited_memory_requested"] is True
+    assert payload["baseline"]["boozer_optimizer_backend"] == "scipy"
+    assert payload["baseline"]["optimizer_method"] == "bfgs"
+    assert payload["baseline"]["boozer_limited_memory"] is False
+    assert payload["baseline"]["boozer_limited_memory_requested"] is True
+
+
+def test_grouped_adjoint_memory_resolves_effective_limited_memory_route():
+    assert resolve_boozer_limited_memory("ondevice", True) is True
+    assert resolve_boozer_limited_memory("scipy", True) is False
+    assert resolve_boozer_limited_memory("ondevice", False) is False
+
+
+def test_single_stage_outer_loop_probe_resolves_expected_boozer_method():
+    assert resolve_boozer_optimizer_method("scipy") == "bfgs"
+    assert resolve_boozer_optimizer_method("hybrid") == "bfgs-hybrid"
+    assert resolve_boozer_optimizer_method("ondevice") == "bfgs-ondevice"
 
 
 def _stage2_e2e_comparison_case(**overrides):
