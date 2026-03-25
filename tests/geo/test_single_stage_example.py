@@ -1,7 +1,9 @@
 import importlib.util
+import tempfile
 import unittest
 import uuid
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import numpy as np
@@ -97,6 +99,30 @@ class FakeBoozerSurface:
         return self.res
 
 
+class FakeAlgebraicObjective:
+    def __init__(self, value, gradient):
+        self._value = float(value)
+        self._gradient = np.asarray(gradient, dtype=float)
+
+    def J(self):
+        return self._value
+
+    def dJ(self):
+        return self._gradient.copy()
+
+    def __add__(self, other):
+        if other == 0:
+            return self
+        return FakeAlgebraicObjective(self._value + other._value, self._gradient + other._gradient)
+
+    __radd__ = __add__
+
+    def __mul__(self, scalar):
+        return FakeAlgebraicObjective(self._value * scalar, self._gradient * scalar)
+
+    __rmul__ = __mul__
+
+
 class SingleStageExampleTests(unittest.TestCase):
     def setUp(self):
         FakeSurfaceXYZTensorFourier.instances = []
@@ -162,6 +188,10 @@ class SingleStageExampleTests(unittest.TestCase):
             x = np.ones(3)
             def is_self_intersecting(self):
                 return False
+            def volume(self):
+                return 1.0
+            def gamma(self):
+                return np.zeros((1, 1, 3))
 
         class _BoozerSurface:
             surface = _Surface()
@@ -172,12 +202,18 @@ class SingleStageExampleTests(unittest.TestCase):
         class _JF:
             x = np.zeros(5)
 
+        surface_data = [{"boozer_surface": _BoozerSurface()}]
         module.run_dict = {
             "x_prev": np.zeros(5), "lscount": 0,
-            "sdofs": np.ones(3), "iota": TEST_IOTA, "G": TEST_G0,
+            "surface_state": {"sdofs": [np.ones(3)], "iota": [TEST_IOTA], "G": [TEST_G0]},
             "J": last_J, "dJ": last_dJ.copy(),
+            "accepted_iterations": 0,
+            "accepted_x": np.zeros(5),
         }
-        module.boozer_surface = _BoozerSurface()
+        module.surface_data = surface_data
+        module.VV = object()
+        module.SURFACE_GAP_THRESHOLD = 0.0
+        module.SS_DIST = 0.0
         module.JF = _JF()
 
         J_out, dJ_out = module.fun(np.ones(5))
@@ -185,6 +221,1090 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertGreater(J_out, last_J)
         np.testing.assert_array_equal(dJ_out, last_dJ)
         self.assertIsNot(dJ_out, module.run_dict["dJ"])
+
+    def test_evaluate_topology_gate_reports_early_surface_exit(self):
+        module = self.load_module()
+
+        class _Surface:
+            def cross_section(self, phi, thetas):
+                theta = np.asarray(thetas)
+                return np.column_stack(
+                    [
+                        1.0 + 0.1 * np.cos(2 * np.pi * theta),
+                        np.zeros_like(theta),
+                        0.1 * np.sin(2 * np.pi * theta),
+                    ]
+                )
+
+        class _Stop:
+            def __init__(self, *args, **kwargs):
+                pass
+
+        fake_hits = [
+            np.array([[0.8, -1.0, 1.0, 0.0, 0.0]]),
+            np.array([]),
+        ]
+
+        with patch.object(module, "SurfaceClassifier", return_value=SimpleNamespace(dist=lambda xyz: 1.0)), patch.object(
+            module, "LevelsetStoppingCriterion", _Stop
+        ), patch.object(module, "MaxZStoppingCriterion", _Stop), patch.object(
+            module, "MinZStoppingCriterion", _Stop
+        ), patch.object(module, "MinRStoppingCriterion", _Stop), patch.object(
+            module, "MaxRStoppingCriterion", _Stop
+        ), patch.object(module, "compute_fieldlines", return_value=([], fake_hits)):
+            status = module.evaluate_topology_gate(_Surface(), object(), 2, 2.0, 1e-7, 0.75)
+
+        self.assertTrue(status["enabled"])
+        self.assertFalse(status["success"])
+        self.assertEqual(status["survived_lines"], 1)
+        self.assertAlmostEqual(status["survival_fraction"], 0.5)
+        self.assertEqual(status["first_exit_reason"], "surface_exit")
+        self.assertAlmostEqual(status["first_exit_time"], 0.8)
+
+    def test_topology_gate_rejection_increment_scales_with_deficit(self):
+        module = self.load_module()
+
+        status = {
+            "enabled": True,
+            "survival_fraction": 0.5,
+            "survival_threshold": 0.75,
+        }
+
+        self.assertAlmostEqual(module.topology_gate_deficit(status), 0.25)
+        self.assertAlmostEqual(
+            module.topology_gate_rejection_increment(42.0, status, 4.0),
+            84.0,
+        )
+
+    def test_fun_rejects_candidate_on_topology_gate_failure(self):
+        module = self.load_module()
+
+        last_J = 42.0
+        last_dJ = np.array([1.0, -2.0, 3.0, -4.0, 5.0])
+
+        class _Surface:
+            x = np.ones(3)
+
+            def is_self_intersecting(self):
+                return False
+
+            def volume(self):
+                return 1.0
+
+            def gamma(self):
+                return np.zeros((1, 1, 3))
+
+        class _BoozerSurface:
+            surface = _Surface()
+            res = {"success": True, "iota": TEST_IOTA, "G": TEST_G0}
+
+            def run_code(self, iota, G):
+                return self.res
+
+        class _JF:
+            x = np.zeros(5)
+
+        surface_data = [{"boozer_surface": _BoozerSurface()}, {"boozer_surface": _BoozerSurface()}]
+        module.run_dict = {
+            "x_prev": np.zeros(5),
+            "lscount": 0,
+            "surface_state": {"sdofs": [np.ones(3), np.ones(3)], "iota": [TEST_IOTA, TEST_IOTA], "G": [TEST_G0, TEST_G0]},
+            "J": last_J,
+            "dJ": last_dJ.copy(),
+            "accepted_iterations": 0,
+            "accepted_x": np.zeros(5),
+        }
+        module.surface_data = surface_data
+        module.outer_surface_data = surface_data[-1]
+        module.surface_iota_terms = [SimpleNamespace(J=lambda: TEST_IOTA), SimpleNamespace(J=lambda: TEST_IOTA)]
+        module.VV = object()
+        module.SURFACE_GAP_THRESHOLD = 0.0
+        module.SS_DIST = 0.0
+        module.JF = _JF()
+        module.bs = object()
+        module.nonQSs = []
+        module.brs = []
+        module.Jiota = object()
+        module.IOTAS_WEIGHT = 1.0
+        module.JCurveLength = object()
+        module.LENGTH_WEIGHT = 1.0
+        module.JCurveCurve = object()
+        module.CC_WEIGHT = 1.0
+        module.JCurveSurface = object()
+        module.CS_WEIGHT = 1.0
+        module.JCurvature = object()
+        module.CURVATURE_WEIGHT = 1.0
+        module.JSurfSurf = None
+        module.SURF_DIST_WEIGHT = 0.0
+        module.RES_WEIGHT = 1.0
+        module.MULTISURFACE_RAMP_ITERATIONS = 0
+        module.INNER_SURFACE_INITIAL_WEIGHT = 1.0
+        module.TOPOLOGY_GATE_FIELDLINES = 4
+        module.TOPOLOGY_GATE_TMAX = 2.0
+        module.TOPOLOGY_GATE_TOL = 1e-7
+        module.TOPOLOGY_GATE_SURVIVAL_THRESHOLD = 0.25
+        module.TOPOLOGY_GATE_PENALTY_SCALE = 4.0
+
+        with patch.object(
+            module,
+            "solve_surface_stack_at_dofs",
+            return_value={
+                "success": True,
+                "solve_success": [True, True],
+                "self_intersections": [False, False],
+                "volumes_ordered": True,
+                "gap_ok": True,
+                "vessel_gap_ok": True,
+                "nesting_ok": True,
+                "adjacent_gaps": [0.01],
+                "outer_vessel_gap": 0.1,
+                "bad_nesting_phis": [],
+            },
+        ), patch.object(
+            module,
+            "evaluate_total_objective",
+            return_value={"total": 7.0, "grad": np.arange(5, dtype=float), "surface_weights": np.array([1.0, 1.0])},
+        ), patch.object(module, "restore_surface_states") as restore_mock, patch.object(
+            module,
+            "evaluate_topology_gate",
+            return_value={
+                "enabled": True,
+                "success": False,
+                "nfieldlines": 4,
+                "survived_lines": 0,
+                "survival_fraction": 0.0,
+                "survival_threshold": 0.25,
+                "tmax": 2.0,
+                "tol": 1e-7,
+                "stop_reason_counts": {"surface_exit": 4},
+                "first_exit_time": 0.4,
+                "first_exit_angle": 0.2,
+                "first_exit_reason": "surface_exit",
+            },
+        ):
+            J_out, dJ_out = module.fun(np.ones(5))
+
+        self.assertEqual(J_out, 126.0)
+        np.testing.assert_array_equal(dJ_out, last_dJ)
+        restore_mock.assert_called_once()
+
+    def test_build_surface_configs_two_surface_mode_derives_inner_target_volume(self):
+        module = self.load_module()
+
+        class _FakeRZSurface:
+            def __init__(self, label):
+                self.label = label
+                self._major_radius = 2.0
+                self._volume = 10.0 * label
+                self.nfp = 5
+                self._dofs = np.array([1.0])
+
+            def major_radius(self):
+                return self._major_radius
+
+            def get_dofs(self):
+                return self._dofs.copy()
+
+            def set_dofs(self, dofs):
+                dofs = np.asarray(dofs)
+                scale = dofs[0] / self._dofs[0]
+                self._dofs = dofs
+                self._major_radius *= scale
+                self._volume *= scale ** 3
+
+            def volume(self):
+                return self._volume
+
+        fake_factory = SimpleNamespace(
+            from_wout=lambda *_args, **kwargs: _FakeRZSurface(kwargs["s"]),
+        )
+
+        with patch.object(module, "SurfaceRZFourier", fake_factory):
+            configs = module.build_surface_configs(
+                "dummy.nc",
+                nphi=11,
+                ntheta=13,
+                seed_label=0.25,
+                major_radius=1.0,
+                outer_target_volume=0.10,
+                num_surfaces=2,
+                inner_surface_ratio=0.8,
+            )
+
+        self.assertEqual([config["name"] for config in configs], ["inner", "outer"])
+        self.assertAlmostEqual(configs[0]["seed_label"], 0.20)
+        self.assertAlmostEqual(configs[1]["seed_label"], 0.25)
+        self.assertAlmostEqual(configs[0]["target_volume"], 0.08)
+        self.assertAlmostEqual(configs[1]["target_volume"], 0.10)
+
+    def test_build_surface_configs_single_surface_mode_keeps_outer_only_contract(self):
+        module = self.load_module()
+
+        class _FakeRZSurface:
+            def __init__(self, label):
+                self.label = label
+                self._major_radius = 2.0
+                self._volume = 10.0 * label
+                self.nfp = 5
+                self._dofs = np.array([1.0])
+
+            def major_radius(self):
+                return self._major_radius
+
+            def get_dofs(self):
+                return self._dofs.copy()
+
+            def set_dofs(self, dofs):
+                dofs = np.asarray(dofs)
+                scale = dofs[0] / self._dofs[0]
+                self._dofs = dofs
+                self._major_radius *= scale
+                self._volume *= scale ** 3
+
+            def volume(self):
+                return self._volume
+
+        fake_factory = SimpleNamespace(
+            from_wout=lambda *_args, **kwargs: _FakeRZSurface(kwargs["s"]),
+        )
+
+        with patch.object(module, "SurfaceRZFourier", fake_factory):
+            configs = module.build_surface_configs(
+                "dummy.nc",
+                nphi=11,
+                ntheta=13,
+                seed_label=0.25,
+                major_radius=1.0,
+                outer_target_volume=0.10,
+                num_surfaces=1,
+                inner_surface_ratio=0.8,
+            )
+
+        self.assertEqual(len(configs), 1)
+        self.assertEqual(configs[0]["name"], "outer")
+        self.assertAlmostEqual(configs[0]["seed_label"], 0.25)
+        self.assertAlmostEqual(configs[0]["target_volume"], 0.10)
+
+    def test_average_surface_objectives_uses_mean_and_preserves_single_surface_scale(self):
+        module = self.load_module()
+
+        single = FakeAlgebraicObjective(2.0, [2.0, -1.0])
+        single_avg = module.average_surface_objectives([single])
+        self.assertAlmostEqual(single_avg.J(), 2.0)
+        np.testing.assert_allclose(single_avg.dJ(), [2.0, -1.0])
+
+        left = FakeAlgebraicObjective(2.0, [2.0, -1.0])
+        right = FakeAlgebraicObjective(6.0, [4.0, 3.0])
+        pair_avg = module.average_surface_objectives([left, right])
+        self.assertAlmostEqual(pair_avg.J(), 4.0)
+        np.testing.assert_allclose(pair_avg.dJ(), [3.0, 1.0])
+
+    def test_build_surface_search_weights_ramps_inner_surface_only(self):
+        module = self.load_module()
+
+        np.testing.assert_allclose(
+            module.build_surface_search_weights(
+                num_surfaces=1,
+                accepted_iterations=0,
+                ramp_iterations=5,
+                initial_inner_weight=0.0,
+            ),
+            [1.0],
+        )
+        np.testing.assert_allclose(
+            module.build_surface_search_weights(
+                num_surfaces=2,
+                accepted_iterations=0,
+                ramp_iterations=5,
+                initial_inner_weight=0.0,
+            ),
+            [0.0, 1.0],
+        )
+        np.testing.assert_allclose(
+            module.build_surface_search_weights(
+                num_surfaces=2,
+                accepted_iterations=2,
+                ramp_iterations=5,
+                initial_inner_weight=0.0,
+            ),
+            [0.4, 1.0],
+        )
+        np.testing.assert_allclose(
+            module.build_surface_search_weights(
+                num_surfaces=2,
+                accepted_iterations=5,
+                ramp_iterations=5,
+                initial_inner_weight=0.0,
+            ),
+            [1.0, 1.0],
+        )
+
+    def test_build_surface_search_gate_ramps_thresholds_and_nesting(self):
+        module = self.load_module()
+
+        single = module.build_surface_search_gate(
+            num_surfaces=1,
+            accepted_iterations=0,
+            ramp_iterations=5,
+            initial_inner_weight=0.0,
+            surface_gap_threshold=0.005,
+            vessel_gap_threshold=0.04,
+        )
+        self.assertEqual(single["surface_gap_threshold"], 0.005)
+        self.assertEqual(single["vessel_gap_threshold"], 0.04)
+        self.assertTrue(single["enforce_nesting"])
+        self.assertEqual(single["gate_scale"], 1.0)
+
+        start = module.build_surface_search_gate(
+            num_surfaces=2,
+            accepted_iterations=0,
+            ramp_iterations=5,
+            initial_inner_weight=0.0,
+            surface_gap_threshold=0.005,
+            vessel_gap_threshold=0.04,
+        )
+        self.assertEqual(start["surface_gap_threshold"], 0.0)
+        self.assertEqual(start["vessel_gap_threshold"], 0.0)
+        self.assertFalse(start["enforce_nesting"])
+        self.assertEqual(start["gate_scale"], 0.0)
+
+        mid = module.build_surface_search_gate(
+            num_surfaces=2,
+            accepted_iterations=2,
+            ramp_iterations=5,
+            initial_inner_weight=0.0,
+            surface_gap_threshold=0.005,
+            vessel_gap_threshold=0.04,
+        )
+        self.assertAlmostEqual(mid["surface_gap_threshold"], 0.002)
+        self.assertAlmostEqual(mid["vessel_gap_threshold"], 0.016)
+        self.assertFalse(mid["enforce_nesting"])
+        self.assertAlmostEqual(mid["gate_scale"], 0.4)
+
+        done = module.build_surface_search_gate(
+            num_surfaces=2,
+            accepted_iterations=5,
+            ramp_iterations=5,
+            initial_inner_weight=0.0,
+            surface_gap_threshold=0.005,
+            vessel_gap_threshold=0.04,
+        )
+        self.assertAlmostEqual(done["surface_gap_threshold"], 0.005)
+        self.assertAlmostEqual(done["vessel_gap_threshold"], 0.04)
+        self.assertTrue(done["enforce_nesting"])
+        self.assertAlmostEqual(done["gate_scale"], 1.0)
+
+    def test_build_scaled_outer_problem_scales_coordinates_gradients_and_callback(self):
+        module = self.load_module()
+        seen = {"fun": [], "callback": []}
+
+        def base_fun(x):
+            seen["fun"].append(np.asarray(x, dtype=float).copy())
+            return 7.5, np.array([3.0, -4.0])
+
+        def base_callback(x):
+            seen["callback"].append(np.asarray(x, dtype=float).copy())
+
+        scaled_fun, scaled_callback = module.build_scaled_outer_problem(
+            base_fun,
+            base_callback,
+            np.array([10.0, 20.0]),
+            0.1,
+        )
+
+        J, dJ = scaled_fun(np.array([1.0, -2.0]))
+        self.assertAlmostEqual(J, 7.5)
+        np.testing.assert_allclose(dJ, [0.3, -0.4])
+        np.testing.assert_allclose(seen["fun"][0], [10.1, 19.8])
+
+        scaled_callback(np.array([1.0, -2.0]))
+        np.testing.assert_allclose(seen["callback"][0], [10.1, 19.8])
+
+    def test_evaluate_total_objective_uses_surface_weights_for_qs_and_boozer_terms(self):
+        module = self.load_module()
+
+        nonqs = [
+            FakeAlgebraicObjective(2.0, [2.0, 0.0]),
+            FakeAlgebraicObjective(6.0, [4.0, 0.0]),
+        ]
+        brs = [
+            FakeAlgebraicObjective(10.0, [1.0, 1.0]),
+            FakeAlgebraicObjective(20.0, [3.0, 3.0]),
+        ]
+        zero = FakeAlgebraicObjective(0.0, [0.0, 0.0])
+
+        outer_only = module.evaluate_total_objective(
+            np.array([0.0, 1.0]),
+            nonqs,
+            brs,
+            RES_WEIGHT=2.0,
+            Jiota=zero,
+            IOTAS_WEIGHT=3.0,
+            JCurveLength=zero,
+            LENGTH_WEIGHT=4.0,
+            JCurveCurve=zero,
+            CC_WEIGHT=5.0,
+            JCurveSurface=zero,
+            CS_WEIGHT=6.0,
+            JCurvature=zero,
+            CURVATURE_WEIGHT=7.0,
+        )
+        self.assertAlmostEqual(outer_only["J_QS"], 6.0)
+        self.assertAlmostEqual(outer_only["J_Boozer"], 20.0)
+        np.testing.assert_allclose(outer_only["dJ_QS"], [4.0, 0.0])
+        np.testing.assert_allclose(outer_only["dJ_Boozer"], [3.0, 3.0])
+        self.assertAlmostEqual(outer_only["total"], 46.0)
+        np.testing.assert_allclose(outer_only["grad"], [10.0, 6.0])
+
+        ramped = module.evaluate_total_objective(
+            np.array([0.5, 1.0]),
+            nonqs,
+            brs,
+            RES_WEIGHT=2.0,
+            Jiota=zero,
+            IOTAS_WEIGHT=3.0,
+            JCurveLength=zero,
+            LENGTH_WEIGHT=4.0,
+            JCurveCurve=zero,
+            CC_WEIGHT=5.0,
+            JCurveSurface=zero,
+            CS_WEIGHT=6.0,
+            JCurvature=zero,
+            CURVATURE_WEIGHT=7.0,
+        )
+        self.assertAlmostEqual(ramped["J_QS"], (0.5 * 2.0 + 6.0) / 1.5)
+        self.assertAlmostEqual(ramped["J_Boozer"], (0.5 * 10.0 + 20.0) / 1.5)
+        np.testing.assert_allclose(ramped["dJ_QS"], [10.0 / 3.0, 0.0])
+        np.testing.assert_allclose(ramped["dJ_Boozer"], [7.0 / 3.0, 7.0 / 3.0])
+        self.assertAlmostEqual(ramped["total"], 38.0)
+        np.testing.assert_allclose(ramped["grad"], [8.0, 14.0 / 3.0])
+
+    def test_build_total_objective_skips_missing_surface_vessel_term_without_injecting_int(self):
+        module = self.load_module()
+
+        total = module.build_total_objective(
+            FakeAlgebraicObjective(1.0, [1.0, 0.0]),
+            2.0,
+            FakeAlgebraicObjective(3.0, [0.0, 2.0]),
+            4.0,
+            FakeAlgebraicObjective(5.0, [1.0, 1.0]),
+            6.0,
+            FakeAlgebraicObjective(7.0, [2.0, 0.0]),
+            8.0,
+            FakeAlgebraicObjective(9.0, [0.0, 3.0]),
+            10.0,
+            FakeAlgebraicObjective(11.0, [1.0, -1.0]),
+            12.0,
+            FakeAlgebraicObjective(13.0, [0.5, 0.5]),
+            SURF_DIST_WEIGHT=1000.0,
+            JSurfSurf=None,
+        )
+
+        self.assertAlmostEqual(total.J(), 1 + 2*3 + 4*5 + 6*7 + 8*9 + 10*11 + 12*13)
+        np.testing.assert_allclose(total.dJ(), [33.0, 28.0])
+
+    def test_evaluate_surface_stack_rejects_unordered_or_too_close_surfaces(self):
+        module = self.load_module()
+
+        class _FakeSurface:
+            def __init__(self, volume, points, self_intersecting=False):
+                self._volume = volume
+                self._points = np.asarray(points, dtype=float).reshape((-1, 1, 3))
+                self._self_intersecting = self_intersecting
+
+            def volume(self):
+                return self._volume
+
+            def gamma(self):
+                return self._points
+
+            def is_self_intersecting(self):
+                return self._self_intersecting
+
+        good_stack = [
+            {"boozer_surface": SimpleNamespace(surface=_FakeSurface(0.08, [[0.0, 0.0, 0.0]]), res={"success": True, "iota": 0.12})},
+            {"boozer_surface": SimpleNamespace(surface=_FakeSurface(0.10, [[0.4, 0.0, 0.0]]), res={"success": True, "iota": 0.15})},
+        ]
+        vessel = _FakeSurface(0.2, [[1.0, 0.0, 0.0]])
+        good_status = module.evaluate_surface_stack(good_stack, vessel_surface=vessel, surface_gap_threshold=0.1, vessel_gap_threshold=0.1)
+        self.assertTrue(good_status["success"])
+        self.assertEqual(good_status["adjacent_gaps"], [0.4])
+
+        bad_order = [
+            {"boozer_surface": SimpleNamespace(surface=_FakeSurface(0.11, [[0.0, 0.0, 0.0]]), res={"success": True, "iota": 0.12})},
+            {"boozer_surface": SimpleNamespace(surface=_FakeSurface(0.10, [[0.4, 0.0, 0.0]]), res={"success": True, "iota": 0.15})},
+        ]
+        order_status = module.evaluate_surface_stack(bad_order)
+        self.assertFalse(order_status["success"])
+        self.assertFalse(order_status["volumes_ordered"])
+
+        bad_gap = [
+            {"boozer_surface": SimpleNamespace(surface=_FakeSurface(0.08, [[0.0, 0.0, 0.0]]), res={"success": True, "iota": 0.12})},
+            {"boozer_surface": SimpleNamespace(surface=_FakeSurface(0.10, [[0.05, 0.0, 0.0]]), res={"success": True, "iota": 0.15})},
+        ]
+        gap_status = module.evaluate_surface_stack(bad_gap, surface_gap_threshold=0.1)
+        self.assertFalse(gap_status["success"])
+        self.assertFalse(gap_status["gap_ok"])
+
+    def test_evaluate_surface_stack_rejects_cross_section_nesting_failure(self):
+        module = self.load_module()
+
+        class _FakeSurface:
+            nfp = 5
+
+            def __init__(self, volume, cross_section):
+                self._volume = volume
+                self._cross_section = np.asarray(cross_section, dtype=float)
+
+            def volume(self):
+                return self._volume
+
+            def gamma(self):
+                return self._cross_section.reshape((-1, 1, 3))
+
+            def is_self_intersecting(self):
+                return False
+
+            def cross_section(self, phi, thetas=None, tol=1e-13):
+                return self._cross_section
+
+        inner_crossing = [
+            [0.9, 0.0, -0.2],
+            [1.4, 0.0, 0.0],
+            [0.9, 0.0, 0.2],
+            [0.6, 0.0, 0.0],
+        ]
+        outer_box = [
+            [0.7, 0.0, -0.3],
+            [1.3, 0.0, -0.3],
+            [1.3, 0.0, 0.3],
+            [0.7, 0.0, 0.3],
+        ]
+        surface_data = [
+            {"boozer_surface": SimpleNamespace(surface=_FakeSurface(0.08, inner_crossing), res={"success": True, "iota": 0.12})},
+            {"boozer_surface": SimpleNamespace(surface=_FakeSurface(0.10, outer_box), res={"success": True, "iota": 0.15})},
+        ]
+
+        status = module.evaluate_surface_stack(surface_data)
+        self.assertFalse(status["success"])
+        self.assertFalse(status["nesting_ok"])
+        self.assertTrue(status["bad_nesting_phis"])
+
+    def test_evaluate_surface_stack_can_skip_nesting_during_search_continuation(self):
+        module = self.load_module()
+
+        class _FakeSurface:
+            nfp = 5
+
+            def __init__(self, volume, point, cross_section):
+                self._volume = volume
+                self._point = np.asarray(point, dtype=float)
+                self._cross_section = np.asarray(cross_section, dtype=float)
+
+            def volume(self):
+                return self._volume
+
+            def gamma(self):
+                return self._point.reshape((1, 1, 3))
+
+            def is_self_intersecting(self):
+                return False
+
+            def cross_section(self, phi, thetas=None, tol=1e-13):
+                return self._cross_section
+
+        inner_crossing = [
+            [0.9, 0.0, -0.2],
+            [1.4, 0.0, 0.0],
+            [0.9, 0.0, 0.2],
+            [0.6, 0.0, 0.0],
+        ]
+        outer_box = [
+            [0.7, 0.0, -0.3],
+            [1.3, 0.0, -0.3],
+            [1.3, 0.0, 0.3],
+            [0.7, 0.0, 0.3],
+        ]
+        surface_data = [
+            {"boozer_surface": SimpleNamespace(surface=_FakeSurface(0.08, [0.0, 0.0, 0.0], inner_crossing), res={"success": True, "iota": 0.12})},
+            {"boozer_surface": SimpleNamespace(surface=_FakeSurface(0.10, [0.4, 0.0, 0.0], outer_box), res={"success": True, "iota": 0.15})},
+        ]
+
+        relaxed = module.evaluate_surface_stack(surface_data, enforce_nesting=False)
+        self.assertTrue(relaxed["success"])
+        self.assertTrue(relaxed["nesting_ok"])
+        self.assertEqual(relaxed["bad_nesting_phis"], [])
+
+        strict = module.evaluate_surface_stack(surface_data, enforce_nesting=True)
+        self.assertFalse(strict["success"])
+        self.assertFalse(strict["nesting_ok"])
+
+    def test_fun_multisurface_fallback_restores_all_surface_state(self):
+        module = self.load_module()
+        last_J = 42.0
+        last_dJ = np.array([1.0, -2.0, 3.0, -4.0, 5.0])
+
+        class _Surface:
+            nfp = 5
+
+            def __init__(self, volume, point):
+                self.x = np.array([volume])
+                self._volume = volume
+                self._point = np.asarray(point, dtype=float)
+
+            def volume(self):
+                return self._volume
+
+            def gamma(self):
+                return self._point.reshape((1, 1, 3))
+
+            def is_self_intersecting(self):
+                return False
+
+            def cross_section(self, phi, thetas=None, tol=1e-13):
+                return np.array([[1.0, 0.0, -0.1], [1.1, 0.0, 0.0], [1.0, 0.0, 0.1], [0.9, 0.0, 0.0]])
+
+        class _BoozerSurface:
+            def __init__(self, surface, success):
+                self.surface = surface
+                self.res = {"success": success, "iota": TEST_IOTA, "G": TEST_G0}
+
+            def run_code(self, iota, G):
+                self.res["iota"] = iota + 0.1
+                self.res["G"] = G + 0.2
+                return self.res
+
+        class _JF:
+            x = np.zeros(5)
+
+        inner = _BoozerSurface(_Surface(0.08, [0.0, 0.0, 0.0]), True)
+        outer = _BoozerSurface(_Surface(0.10, [0.4, 0.0, 0.0]), False)
+        module.surface_data = [
+            {"boozer_surface": inner},
+            {"boozer_surface": outer},
+        ]
+        module.run_dict = {
+            "x_prev": np.zeros(5),
+            "lscount": 0,
+            "surface_state": {
+                "sdofs": [np.array([0.08]), np.array([0.10])],
+                "iota": [0.12, 0.15],
+                "G": [1.0, 1.1],
+            },
+            "J": last_J,
+            "dJ": last_dJ.copy(),
+            "accepted_iterations": 0,
+            "accepted_x": np.zeros(5),
+        }
+        module.VV = SimpleNamespace(gamma=lambda: np.array([[[1.0, 0.0, 0.0]]]))
+        module.SURFACE_GAP_THRESHOLD = 0.0
+        module.SS_DIST = 0.0
+        module.JF = _JF()
+
+        J_out, dJ_out = module.fun(np.ones(5))
+
+        self.assertGreater(J_out, last_J)
+        np.testing.assert_array_equal(dJ_out, last_dJ)
+        np.testing.assert_array_equal(inner.surface.x, np.array([0.08]))
+        np.testing.assert_array_equal(outer.surface.x, np.array([0.10]))
+        self.assertEqual(inner.res["iota"], 0.12)
+        self.assertEqual(outer.res["iota"], 0.15)
+
+    def test_callback_multisurface_records_status_and_log(self):
+        module = self.load_module()
+
+        class _Surface:
+            nfp = 5
+
+            def __init__(self, volume, point, cross_section):
+                self.x = np.array([volume])
+                self._volume = volume
+                self._point = np.asarray(point, dtype=float)
+                self._cross_section = np.asarray(cross_section, dtype=float)
+
+            def volume(self):
+                return self._volume
+
+            def gamma(self):
+                return self._point.reshape((1, 1, 3))
+
+            def unitnormal(self):
+                return np.array([[[1.0, 0.0, 0.0]]])
+
+            def is_self_intersecting(self):
+                return False
+
+            def cross_section(self, phi, thetas=None, tol=1e-13):
+                return self._cross_section
+
+        class _ScalarObjective:
+            def __init__(self, value):
+                self._value = value
+
+            def J(self):
+                return self._value
+
+            def dJ(self):
+                return np.array([self._value, -self._value])
+
+            def __add__(self, other):
+                if other == 0:
+                    return self
+                return FakeAlgebraicObjective(self._value + other.J(), self.dJ() + other.dJ())
+
+            __radd__ = __add__
+
+            def __mul__(self, scalar):
+                return FakeAlgebraicObjective(self._value * scalar, self.dJ() * scalar)
+
+            __rmul__ = __mul__
+
+        class _DistanceObjective(_ScalarObjective):
+            def __init__(self, value, min_distance):
+                super().__init__(value)
+                self._min_distance = min_distance
+
+            def shortest_distance(self):
+                return self._min_distance
+
+        class _Curve:
+            def gamma(self):
+                return np.array([[1.0, 0.0, 0.0]])
+
+            def kappa(self):
+                return np.array([2.0, 3.0])
+
+        class _CurveLength:
+            def J(self):
+                return 4.2
+
+        class _BS:
+            def set_points(self, pts):
+                self._points = pts
+
+            def B(self):
+                return np.array([[1.0, 0.0, 0.0]])
+
+        inner_cs = [[0.85, 0.0, -0.1], [1.05, 0.0, -0.1], [1.05, 0.0, 0.1], [0.85, 0.0, 0.1]]
+        outer_cs = [[0.7, 0.0, -0.3], [1.3, 0.0, -0.3], [1.3, 0.0, 0.3], [0.7, 0.0, 0.3]]
+        inner = SimpleNamespace(surface=_Surface(0.08, [0.0, 0.0, 0.0], inner_cs), res={"success": True, "iota": 0.12, "G": 1.0})
+        outer = SimpleNamespace(surface=_Surface(0.10, [0.4, 0.0, 0.0], outer_cs), res={"success": True, "iota": 0.15, "G": 1.1})
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            module.surface_data = [
+                {"name": "inner", "seed_label": 0.16, "target_volume": 0.08, "boozer_surface": inner},
+                {"name": "outer", "seed_label": 0.20, "target_volume": 0.10, "boozer_surface": outer},
+            ]
+            module.outer_surface_data = module.surface_data[-1]
+            module.surface_iota_terms = [_ScalarObjective(0.12), _ScalarObjective(0.15)]
+            module.nonQSs = [_ScalarObjective(0.10), _ScalarObjective(0.12)]
+            module.brs = [_ScalarObjective(0.20), _ScalarObjective(0.24)]
+            module.VV = SimpleNamespace(gamma=lambda: np.array([[[1.0, 0.0, 0.0]]]))
+            module.SURFACE_GAP_THRESHOLD = 0.0
+            module.SS_DIST = 0.0
+            module.MULTISURFACE_RAMP_ITERATIONS = 5
+            module.INNER_SURFACE_INITIAL_WEIGHT = 0.0
+            module.JF = _ScalarObjective(1.23)
+            module.Jiota = _ScalarObjective(0.33)
+            module.JCurveLength = _ScalarObjective(0.44)
+            module.JCurveCurve = _DistanceObjective(0.55, 0.66)
+            module.JCurveSurface = _DistanceObjective(0.77, 0.88)
+            module.JSurfSurf = None
+            module.JCurvature = _ScalarObjective(0.99)
+            module.RES_WEIGHT = 1000.0
+            module.IOTAS_WEIGHT = 200.0
+            module.LENGTH_WEIGHT = 1.0
+            module.CC_WEIGHT = 100.0
+            module.CS_WEIGHT = 1.0
+            module.CURVATURE_WEIGHT = 0.1
+            module.SURF_DIST_WEIGHT = 1000.0
+            module.banana_curve = _Curve()
+            module.curvelength = _CurveLength()
+            module.bs = _BS()
+            module.OUT_DIR_ITER = tmpdir
+            module.run_dict = {
+                "surface_state": {
+                    "sdofs": [np.array([0.08]), np.array([0.10])],
+                    "iota": [0.12, 0.15],
+                    "G": [1.0, 1.1],
+                },
+                "J": 1.0,
+                "dJ": np.array([1.0, -1.0]),
+                "it": 1,
+                "accepted_iterations": 0,
+                "lscount": 0,
+                "x_prev": np.zeros(2),
+                "intersecting": False,
+                "topology_gate_status": {"enabled": False, "success": True, "nfieldlines": 0, "survived_lines": 0, "survival_fraction": 1.0, "survival_threshold": 0.25, "tmax": 2.0, "tol": 1e-7, "stop_reason_counts": {}, "first_exit_time": None, "first_exit_angle": None, "first_exit_reason": None},
+            }
+
+            module.callback(np.zeros(2))
+
+            self.assertEqual(module.run_dict["surface_status"]["adjacent_gaps"], [0.4])
+            self.assertEqual(module.run_dict["search_surface_status"]["adjacent_gaps"], [0.4])
+            self.assertTrue(module.run_dict["surface_status"]["nesting_ok"])
+            log_path = Path(tmpdir) / "log.txt"
+            self.assertTrue(log_path.exists())
+            log_text = log_path.read_text()
+            self.assertIn("Adjacent surface gaps", log_text)
+            self.assertIn("Surfaces nested", log_text)
+            self.assertIn("Surface gate scale", log_text)
+
+    def test_callback_tracks_relaxed_search_status_separately_from_full_status(self):
+        module = self.load_module()
+
+        class _Surface:
+            nfp = 5
+
+            def __init__(self, volume, point, cross_section):
+                self.x = np.array([volume])
+                self._volume = volume
+                self._point = np.asarray(point, dtype=float)
+                self._cross_section = np.asarray(cross_section, dtype=float)
+
+            def volume(self):
+                return self._volume
+
+            def gamma(self):
+                return self._point.reshape((1, 1, 3))
+
+            def unitnormal(self):
+                return np.array([[[1.0, 0.0, 0.0]]])
+
+            def is_self_intersecting(self):
+                return False
+
+            def cross_section(self, phi, thetas=None, tol=1e-13):
+                return self._cross_section
+
+        class _ScalarObjective:
+            def __init__(self, value):
+                self._value = value
+
+            def J(self):
+                return self._value
+
+            def dJ(self):
+                return np.array([self._value, -self._value])
+
+            def __add__(self, other):
+                if other == 0:
+                    return self
+                return FakeAlgebraicObjective(self._value + other.J(), self.dJ() + other.dJ())
+
+            __radd__ = __add__
+
+            def __mul__(self, scalar):
+                return FakeAlgebraicObjective(self._value * scalar, self.dJ() * scalar)
+
+            __rmul__ = __mul__
+
+        class _DistanceObjective(_ScalarObjective):
+            def __init__(self, value, min_distance):
+                super().__init__(value)
+                self._min_distance = min_distance
+
+            def shortest_distance(self):
+                return self._min_distance
+
+        class _Curve:
+            def gamma(self):
+                return np.array([[1.0, 0.0, 0.0]])
+
+            def kappa(self):
+                return np.array([2.0, 3.0])
+
+        class _CurveLength:
+            def J(self):
+                return 4.2
+
+        class _BS:
+            def set_points(self, pts):
+                self._points = pts
+
+            def B(self):
+                return np.array([[1.0, 0.0, 0.0]])
+
+        inner_crossing = [
+            [0.9, 0.0, -0.2],
+            [1.4, 0.0, 0.0],
+            [0.9, 0.0, 0.2],
+            [0.6, 0.0, 0.0],
+        ]
+        outer_box = [
+            [0.7, 0.0, -0.3],
+            [1.3, 0.0, -0.3],
+            [1.3, 0.0, 0.3],
+            [0.7, 0.0, 0.3],
+        ]
+        inner = SimpleNamespace(surface=_Surface(0.08, [0.0, 0.0, 0.0], inner_crossing), res={"success": True, "iota": 0.12, "G": 1.0})
+        outer = SimpleNamespace(surface=_Surface(0.10, [0.4, 0.0, 0.0], outer_box), res={"success": True, "iota": 0.15, "G": 1.1})
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            module.surface_data = [
+                {"name": "inner", "seed_label": 0.16, "target_volume": 0.08, "boozer_surface": inner},
+                {"name": "outer", "seed_label": 0.20, "target_volume": 0.10, "boozer_surface": outer},
+            ]
+            module.outer_surface_data = module.surface_data[-1]
+            module.surface_iota_terms = [_ScalarObjective(0.12), _ScalarObjective(0.15)]
+            module.nonQSs = [_ScalarObjective(0.10), _ScalarObjective(0.12)]
+            module.brs = [_ScalarObjective(0.20), _ScalarObjective(0.24)]
+            module.VV = SimpleNamespace(gamma=lambda: np.array([[[1.0, 0.0, 0.0]]]))
+            module.SURFACE_GAP_THRESHOLD = 0.005
+            module.SS_DIST = 0.0
+            module.MULTISURFACE_RAMP_ITERATIONS = 5
+            module.INNER_SURFACE_INITIAL_WEIGHT = 0.0
+            module.JF = _ScalarObjective(1.23)
+            module.Jiota = _ScalarObjective(0.33)
+            module.JCurveLength = _ScalarObjective(0.44)
+            module.JCurveCurve = _DistanceObjective(0.55, 0.66)
+            module.JCurveSurface = _DistanceObjective(0.77, 0.88)
+            module.JSurfSurf = None
+            module.JCurvature = _ScalarObjective(0.99)
+            module.RES_WEIGHT = 1000.0
+            module.IOTAS_WEIGHT = 200.0
+            module.LENGTH_WEIGHT = 1.0
+            module.CC_WEIGHT = 100.0
+            module.CS_WEIGHT = 1.0
+            module.CURVATURE_WEIGHT = 0.1
+            module.SURF_DIST_WEIGHT = 1000.0
+            module.banana_curve = _Curve()
+            module.curvelength = _CurveLength()
+            module.bs = _BS()
+            module.OUT_DIR_ITER = tmpdir
+            module.run_dict = {
+                "surface_state": {
+                    "sdofs": [np.array([0.08]), np.array([0.10])],
+                    "iota": [0.12, 0.15],
+                    "G": [1.0, 1.1],
+                },
+                "J": 1.0,
+                "dJ": np.array([1.0, -1.0]),
+                "it": 1,
+                "accepted_iterations": 0,
+                "lscount": 0,
+                "x_prev": np.zeros(2),
+                "intersecting": False,
+                "topology_gate_status": {"enabled": False, "success": True, "nfieldlines": 0, "survived_lines": 0, "survival_fraction": 1.0, "survival_threshold": 0.25, "tmax": 2.0, "tol": 1e-7, "stop_reason_counts": {}, "first_exit_time": None, "first_exit_angle": None, "first_exit_reason": None},
+            }
+
+            module.callback(np.zeros(2))
+
+            self.assertTrue(module.run_dict["search_surface_status"]["success"])
+            self.assertTrue(module.run_dict["search_surface_status"]["nesting_ok"])
+            self.assertFalse(module.run_dict["surface_status"]["success"])
+            self.assertFalse(module.run_dict["surface_status"]["nesting_ok"])
+
+    def test_finalize_surface_stack_reverts_to_last_accepted_state_when_final_endpoint_is_invalid(self):
+        module = self.load_module()
+
+        class _Objective:
+            def __init__(self):
+                self.x = np.array([0.0])
+
+            def J(self):
+                return float(self.x[0] + 10.0)
+
+            def dJ(self):
+                return np.array([self.x[0] + 1.0])
+
+        class _Surface:
+            nfp = 5
+
+            def __init__(self, accepted_x, accepted_volume, point):
+                self.x = np.array([accepted_x], dtype=float)
+                self._volume = accepted_volume
+                self._point = np.asarray(point, dtype=float)
+
+            def volume(self):
+                return self._volume
+
+            def gamma(self):
+                return self._point.reshape((1, 1, 3))
+
+            def is_self_intersecting(self):
+                return False
+
+            def cross_section(self, phi, thetas=None, tol=1e-13):
+                radius = self._point[0]
+                return np.array([
+                    [radius - 0.05, 0.0, -0.05],
+                    [radius + 0.05, 0.0, -0.05],
+                    [radius + 0.05, 0.0, 0.05],
+                    [radius - 0.05, 0.0, 0.05],
+                ])
+
+        class _BoozerSurface:
+            def __init__(self, surface, objective, valid_limit, success_iota):
+                self.surface = surface
+                self._objective = objective
+                self._valid_limit = valid_limit
+                self._success_iota = success_iota
+                self.res = {"success": True, "iota": success_iota, "G": 1.0}
+
+            def run_code(self, iota, G):
+                current = float(self._objective.x[0])
+                self.surface.x = np.array([current], dtype=float)
+                self.surface._volume = 0.08 if self._success_iota < 0.2 else 0.10
+                self.res["success"] = current <= self._valid_limit
+                self.res["iota"] = self._success_iota if self.res["success"] else -1.0
+                self.res["G"] = G
+                return self.res
+
+        objective = _Objective()
+        inner_surface = _Surface(1.0, 0.08, [0.2, 0.0, 0.0])
+        outer_surface = _Surface(1.0, 0.10, [0.6, 0.0, 0.0])
+        surface_data = [
+            {"boozer_surface": _BoozerSurface(inner_surface, objective, valid_limit=1.5, success_iota=0.12)},
+            {"boozer_surface": _BoozerSurface(outer_surface, objective, valid_limit=1.5, success_iota=0.15)},
+        ]
+        run_state = {
+            "surface_state": {
+                "sdofs": [np.array([1.0]), np.array([1.0])],
+                "iota": [0.12, 0.15],
+                "G": [1.0, 1.1],
+            },
+            "accepted_x": np.array([1.0]),
+            "J": 11.0,
+            "dJ": np.array([2.0]),
+            "intersecting": False,
+        }
+
+        status = module.finalize_surface_stack(np.array([2.0]), objective, surface_data, run_state)
+
+        self.assertFalse(status["success"])
+        np.testing.assert_allclose(objective.x, [1.0])
+        np.testing.assert_allclose(run_state["accepted_x"], [1.0])
+        np.testing.assert_allclose(surface_data[0]["boozer_surface"].surface.x, [1.0])
+        np.testing.assert_allclose(surface_data[1]["boozer_surface"].surface.x, [1.0])
+        self.assertEqual(run_state["surface_state"]["iota"], [0.12, 0.15])
+
+    def test_collect_surface_run_metadata_serializes_multisurface_fields(self):
+        module = self.load_module()
+        surface_data = [
+            {"name": "inner", "seed_label": 0.16, "target_volume": 0.08},
+            {"name": "outer", "seed_label": 0.20, "target_volume": 0.10},
+        ]
+        run_status = {
+            "self_intersections": [False, False],
+            "adjacent_gaps": [0.4],
+            "outer_vessel_gap": 0.6,
+            "nesting_ok": True,
+            "bad_nesting_phis": [],
+        }
+        payload = module.collect_surface_run_metadata(
+            surface_data,
+            run_status,
+            initial_surface_volumes=[0.08, 0.10],
+            initial_surface_iotas=[0.12, 0.15],
+            final_surface_volumes=[0.081, 0.101],
+            final_surface_iotas=[0.121, 0.151],
+        )
+
+        self.assertEqual(payload["SURFACE_NAMES"], ["inner", "outer"])
+        self.assertEqual(payload["ADJACENT_SURFACE_GAPS"], [0.4])
+        self.assertTrue(payload["SURFACES_NESTED"])
+        self.assertEqual(payload["FINAL_SURFACE_VOLUMES"], [0.081, 0.101])
 
 
 class BoozerFallbackLBFGSBTests(unittest.TestCase):

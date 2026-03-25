@@ -3,12 +3,23 @@ import hashlib
 import os
 import io
 import json
+from types import SimpleNamespace
 import numpy as np
+from matplotlib.path import Path as MplPath
 from scipy.optimize import minimize, basinhopping
+from scipy.spatial import cKDTree
 
 # SIMSOPT imports
 from simsopt._core.optimizable import Optimizable
-from simsopt.geo import SurfaceRZFourier, SurfaceXYZTensorFourier, BoozerSurface, curves_to_vtk, CurveLength, LpCurveCurvature
+from simsopt.geo import (
+    SurfaceClassifier,
+    SurfaceRZFourier,
+    SurfaceXYZTensorFourier,
+    BoozerSurface,
+    curves_to_vtk,
+    CurveLength,
+    LpCurveCurvature,
+)
 from simsopt.geo.surfaceobjectives import (
     Volume,
     BoozerResidual,
@@ -19,7 +30,15 @@ from simsopt.geo.surfaceobjectives import (
     boozer_surface_residual_dB,
 )
 from simsopt.geo.curveobjectives import CurveCurveDistance, CurveSurfaceDistance
-from simsopt.field import BiotSavart
+from simsopt.field import (
+    BiotSavart,
+    LevelsetStoppingCriterion,
+    MaxRStoppingCriterion,
+    MaxZStoppingCriterion,
+    MinRStoppingCriterion,
+    MinZStoppingCriterion,
+    compute_fieldlines,
+)
 from simsopt.objectives import QuadraticPenalty
 from simsopt.objectives.utilities import forward_backward
 from simsopt._core.optimizable import load
@@ -31,6 +50,7 @@ EXAMPLE_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, ".."))
 import sys
 sys.path.insert(0, EXAMPLE_ROOT)
 from plotting_utils import norm_field_plot, cross_section_plot
+from POINCARE_PLOTTING.poincare_surfaces import _midplane_seed_radii
 SIMSOPT_ROOT = os.path.abspath(os.path.join(EXAMPLE_ROOT, "..", ".."))
 REPO_ROOT = os.path.abspath(os.path.join(SIMSOPT_ROOT, ".."))
 DATABASE_EQUILIBRIA_DIR = os.path.join(REPO_ROOT, "DATABASE", "EQUILIBRIA")
@@ -264,6 +284,116 @@ def parse_args():
     parser.add_argument("--vol-target", type=float, default=float(os.environ.get("VOL_TARGET", "0.10")))
     parser.add_argument("--constraint-weight", type=float, default=float(os.environ.get("CONSTRAINT_WEIGHT", "1.0")))
     parser.add_argument("--maxiter", type=int, default=int(os.environ.get("MAXITER", "300")))
+    parser.add_argument(
+        "--num-surfaces",
+        type=int,
+        choices=[1, 2],
+        default=int(os.environ.get("NUM_SURFACES", "1")),
+        help="Number of nested Boozer surfaces to optimize together (v1 supports 1 or 2).",
+    )
+    parser.add_argument(
+        "--inner-surface-ratio",
+        type=float,
+        default=float(os.environ.get("INNER_SURFACE_RATIO", "0.8")),
+        help=(
+            "When --num-surfaces=2, use this factor times the Stage 2 toroidal-flux label "
+            "to build the inner equilibrium reference surface and derive its target volume."
+        ),
+    )
+    parser.add_argument(
+        "--surface-gap-threshold",
+        type=float,
+        default=float(os.environ.get("SURFACE_GAP_THRESHOLD", "0.0")),
+        help="Minimum allowed point-cloud gap between adjacent optimized Boozer surfaces in multi-surface mode.",
+    )
+    parser.add_argument(
+        "--multisurface-ramp-iterations",
+        type=int,
+        default=int(os.environ.get("MULTISURFACE_RAMP_ITERATIONS", "5")),
+        help=(
+            "Number of accepted outer iterations over which inner-surface search weight ramps "
+            "from --inner-surface-initial-weight to 1.0 in two-surface mode. Set to 0 to disable."
+        ),
+    )
+    parser.add_argument(
+        "--inner-surface-initial-weight",
+        type=float,
+        default=float(os.environ.get("INNER_SURFACE_INITIAL_WEIGHT", "0.0")),
+        help=(
+            "Initial search weight applied to inner-surface QS/Boozer terms in two-surface mode. "
+            "Must be between 0 and 1."
+        ),
+    )
+    parser.add_argument(
+        "--multisurface-initial-step-scale",
+        type=float,
+        default=float(os.environ.get("MULTISURFACE_INITIAL_STEP_SCALE", "1.0")),
+        help=(
+            "Physical step scale for an optional first outer-optimization phase in two-surface mode. "
+            "Values below 1.0 shrink early L-BFGS-B moves in a mathematically consistent scaled coordinate system."
+        ),
+    )
+    parser.add_argument(
+        "--multisurface-initial-step-maxiter",
+        type=int,
+        default=int(os.environ.get("MULTISURFACE_INITIAL_STEP_MAXITER", "0")),
+        help=(
+            "Maximum outer iterations to run in the scaled first phase of two-surface mode. "
+            "Set to 0 to disable the early-step continuation phase."
+        ),
+    )
+    parser.add_argument(
+        "--topology-gate-fieldlines",
+        type=int,
+        default=int(os.environ.get("TOPOLOGY_GATE_FIELDLINES", "4")),
+        help=(
+            "Number of cheap outer-surface field lines used for the search-time topology gate in "
+            "multi-surface mode. Set to 0 to disable."
+        ),
+    )
+    parser.add_argument(
+        "--topology-gate-tmax",
+        type=float,
+        default=float(os.environ.get("TOPOLOGY_GATE_TMAX", "2.0")),
+        help="Integration horizon for the search-time topology gate field-line traces.",
+    )
+    parser.add_argument(
+        "--topology-gate-tol",
+        type=float,
+        default=float(os.environ.get("TOPOLOGY_GATE_TOL", "1e-7")),
+        help="Integrator tolerance for the search-time topology gate field-line traces.",
+    )
+    parser.add_argument(
+        "--topology-gate-survival-threshold",
+        type=float,
+        default=float(os.environ.get("TOPOLOGY_GATE_SURVIVAL_THRESHOLD", "0.25")),
+        help=(
+            "Minimum survival fraction required by the cheap search-time topology gate in "
+            "multi-surface mode."
+        ),
+    )
+    parser.add_argument(
+        "--topology-gate-penalty-scale",
+        type=float,
+        default=float(os.environ.get("TOPOLOGY_GATE_PENALTY_SCALE", "4.0")),
+        help=(
+            "Scale factor for topology-deficit rejection severity. Applied only when a "
+            "candidate fails the search-time topology gate and the solver falls back to "
+            "the last accepted gradient."
+        ),
+    )
+    parser.add_argument(
+        "--ftol",
+        type=float,
+        default=float(os.environ["FTOL"]) if "FTOL" in os.environ else None,
+        help="Override the default mpol-based L-BFGS-B function tolerance.",
+    )
+    parser.add_argument(
+        "--gtol",
+        type=float,
+        default=float(os.environ["GTOL"]) if "GTOL" in os.environ else None,
+        help="Override the default mpol-based L-BFGS-B gradient tolerance.",
+    )
     parser.add_argument("--iota-target", type=float, default=float(os.environ.get("IOTA_TARGET", "0.15")))
     parser.add_argument("--num-tf-coils", type=int, default=int(os.environ.get("NUM_TF_COILS", "20")))
     parser.add_argument(
@@ -273,7 +403,7 @@ def parse_args():
         help="Use least-squares Boozer residual during initial stage or exact residual during final stage.",
     )
     parser.add_argument("--cc-dist", type=float, default=float(os.environ.get("CC_DIST", "0.05")))
-    parser.add_argument("--curvature-threshold", type=float, default=float(os.environ.get("CURVATURE_THRESHOLD", "20")))
+    parser.add_argument("--curvature-threshold", type=float, default=float(os.environ.get("CURVATURE_THRESHOLD", "40")))
     parser.add_argument("--cc-weight", type=float, default=float(os.environ.get("CC_WEIGHT", "100")))
     parser.add_argument("--curvature-weight", type=float, default=float(os.environ.get("CURVATURE_WEIGHT", "0.1")))
     parser.add_argument("--length-weight", type=float, default=float(os.environ.get("SS_LENGTH_WEIGHT", "1")),
@@ -393,11 +523,11 @@ class BoozerResidualExact(Optimizable):
     
     """
 
-    def __init__(self, boozer_surface, bs):
+    def __init__(self, boozer_surface, bs, constraint_weight=0.0):
         Optimizable.__init__(self, depends_on=[boozer_surface])
         in_surface = boozer_surface.surface
         self.boozer_surface = boozer_surface
-        
+
         # same number of points as on the solved surface
         nphis = in_surface.quadpoints_phi.size
         phis = np.linspace(0,1./in_surface.nfp,nphis*4,endpoint=False)
@@ -407,7 +537,8 @@ class BoozerResidualExact(Optimizable):
         s = SurfaceXYZTensorFourier(mpol=in_surface.mpol, ntor=in_surface.ntor, stellsym=in_surface.stellsym, nfp=in_surface.nfp, quadpoints_phi=phis, quadpoints_theta=thetas)
         s.set_dofs(in_surface.get_dofs())
 
-        print("warning: constraint weight set to 0")
+        import warnings
+        warnings.warn("BoozerResidualExact: constraint_weight forced to 0.0", stacklevel=2)
         self.constraint_weight = 0.0
         self.in_surface = in_surface
         self.surface = s
@@ -553,6 +684,571 @@ def initialize_boozer_surface(surf_prev, mpol, ntor, bs, vol_target, constraint_
 
     return boozer_surface
 
+
+def scale_surface_to_major_radius(surface, major_radius):
+    scale = major_radius / surface.major_radius()
+    surface.set_dofs(surface.get_dofs() * scale)
+    return surface
+
+
+def build_surface_configs(file_loc, nphi, ntheta, seed_label, major_radius, outer_target_volume, num_surfaces, inner_surface_ratio):
+    outer_reference = SurfaceRZFourier.from_wout(file_loc, range="half period", nphi=nphi, ntheta=ntheta, s=seed_label)
+    outer_reference = scale_surface_to_major_radius(outer_reference, major_radius)
+    configs = [{
+        "name": "outer",
+        "seed_label": seed_label,
+        "target_volume": outer_target_volume,
+        "initial_surface": outer_reference,
+    }]
+    if num_surfaces == 1:
+        return configs
+
+    if not (0.0 < inner_surface_ratio < 1.0):
+        raise ValueError("--inner-surface-ratio must be between 0 and 1 when --num-surfaces=2")
+
+    inner_label = seed_label * inner_surface_ratio
+    inner_reference = SurfaceRZFourier.from_wout(file_loc, range="half period", nphi=nphi, ntheta=ntheta, s=inner_label)
+    inner_reference = scale_surface_to_major_radius(inner_reference, major_radius)
+    inner_volume_ratio = inner_reference.volume() / outer_reference.volume()
+    inner_target_volume = outer_target_volume * inner_volume_ratio
+    if not (0.0 < inner_target_volume < outer_target_volume):
+        raise RuntimeError("Derived inner target volume is not strictly inside the outer target volume")
+
+    return [
+        {
+            "name": "inner",
+            "seed_label": inner_label,
+            "target_volume": inner_target_volume,
+            "initial_surface": inner_reference,
+        },
+        configs[0],
+    ]
+
+
+def surface_pointcloud_gap(surface_a, surface_b):
+    points_a = surface_a.gamma().reshape((-1, 3))
+    points_b = surface_b.gamma().reshape((-1, 3))
+    nearest, _ = cKDTree(points_b).query(points_a, k=1)
+    return float(np.min(nearest))
+
+
+def surface_cross_section_rz(surface, phi, theta_samples=128):
+    cross_section = surface.cross_section(phi, thetas=theta_samples)
+    rz = np.zeros((cross_section.shape[0], 2))
+    rz[:, 0] = np.sqrt(cross_section[:, 0] ** 2 + cross_section[:, 1] ** 2)
+    rz[:, 1] = cross_section[:, 2]
+    return rz
+
+
+def planar_segments_intersect(p1, p2, q1, q2, tol=1e-12):
+    def orientation(a, b, c):
+        return (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])
+
+    def on_segment(a, b, c):
+        return (
+            min(a[0], b[0]) - tol <= c[0] <= max(a[0], b[0]) + tol
+            and min(a[1], b[1]) - tol <= c[1] <= max(a[1], b[1]) + tol
+        )
+
+    o1 = orientation(p1, p2, q1)
+    o2 = orientation(p1, p2, q2)
+    o3 = orientation(q1, q2, p1)
+    o4 = orientation(q1, q2, p2)
+
+    if (o1 > tol and o2 < -tol or o1 < -tol and o2 > tol) and (o3 > tol and o4 < -tol or o3 < -tol and o4 > tol):
+        return True
+
+    if abs(o1) <= tol and on_segment(p1, p2, q1):
+        return True
+    if abs(o2) <= tol and on_segment(p1, p2, q2):
+        return True
+    if abs(o3) <= tol and on_segment(q1, q2, p1):
+        return True
+    if abs(o4) <= tol and on_segment(q1, q2, p2):
+        return True
+    return False
+
+
+def planar_polygons_intersect(poly_a, poly_b):
+    edges_a = list(zip(poly_a, np.roll(poly_a, -1, axis=0)))
+    edges_b = list(zip(poly_b, np.roll(poly_b, -1, axis=0)))
+    return any(planar_segments_intersect(a0, a1, b0, b1) for a0, a1 in edges_a for b0, b1 in edges_b)
+
+
+def cross_sections_are_nested(inner_surface, outer_surface, nphi_slices=9, theta_samples=128):
+    bad_phis = []
+    for phi in np.linspace(0.0, 1.0 / outer_surface.nfp, nphi_slices, endpoint=False):
+        inner_rz = surface_cross_section_rz(inner_surface, phi, theta_samples=theta_samples)
+        outer_rz = surface_cross_section_rz(outer_surface, phi, theta_samples=theta_samples)
+        outer_path = MplPath(np.vstack([outer_rz, outer_rz[0]]))
+        inner_inside_outer = bool(np.all(outer_path.contains_points(inner_rz, radius=1e-10)))
+        disjoint = not planar_polygons_intersect(inner_rz, outer_rz)
+        if not (inner_inside_outer and disjoint):
+            bad_phis.append(float(phi))
+    return len(bad_phis) == 0, bad_phis
+
+
+def evaluate_surface_stack(
+    surface_data,
+    vessel_surface=None,
+    surface_gap_threshold=0.0,
+    vessel_gap_threshold=0.0,
+    enforce_nesting=True,
+):
+    volumes = [entry["boozer_surface"].surface.volume() for entry in surface_data]
+    iotas = [entry["boozer_surface"].res["iota"] for entry in surface_data]
+    solve_success = [bool(entry["boozer_surface"].res["success"]) for entry in surface_data]
+    self_intersections = [bool(entry["boozer_surface"].surface.is_self_intersecting()) for entry in surface_data]
+    adjacent_gaps = []
+    for left, right in zip(surface_data[:-1], surface_data[1:]):
+        adjacent_gaps.append(surface_pointcloud_gap(left["boozer_surface"].surface, right["boozer_surface"].surface))
+    outer_vessel_gap = None
+    if vessel_surface is not None:
+        outer_vessel_gap = surface_pointcloud_gap(surface_data[-1]["boozer_surface"].surface, vessel_surface)
+
+    volumes_ordered = np.all(np.diff(volumes) > 0.0) if len(volumes) > 1 else True
+    gap_ok = all(gap > surface_gap_threshold for gap in adjacent_gaps)
+    vessel_gap_ok = outer_vessel_gap is None or outer_vessel_gap > vessel_gap_threshold
+    nesting_ok = True
+    bad_nesting_phis = []
+    if (
+        enforce_nesting
+        and len(surface_data) > 1
+        and all(hasattr(entry["boozer_surface"].surface, "cross_section") for entry in surface_data)
+    ):
+        nesting_ok, bad_nesting_phis = cross_sections_are_nested(
+            surface_data[0]["boozer_surface"].surface,
+            surface_data[-1]["boozer_surface"].surface,
+        )
+    success = all(solve_success) and not any(self_intersections) and volumes_ordered and gap_ok and vessel_gap_ok and nesting_ok
+    return {
+        "success": success,
+        "solve_success": solve_success,
+        "self_intersections": self_intersections,
+        "volumes": volumes,
+        "iotas": iotas,
+        "adjacent_gaps": adjacent_gaps,
+        "outer_vessel_gap": outer_vessel_gap,
+        "volumes_ordered": volumes_ordered,
+        "gap_ok": gap_ok,
+        "vessel_gap_ok": vessel_gap_ok,
+        "nesting_ok": nesting_ok,
+        "bad_nesting_phis": bad_nesting_phis,
+    }
+
+
+def snapshot_surface_states(surface_data):
+    return {
+        "sdofs": [entry["boozer_surface"].surface.x.copy() for entry in surface_data],
+        "iota": [entry["boozer_surface"].res["iota"] for entry in surface_data],
+        "G": [entry["boozer_surface"].res["G"] for entry in surface_data],
+    }
+
+
+def restore_surface_states(surface_data, state):
+    for entry, sdofs, iota, G in zip(surface_data, state["sdofs"], state["iota"], state["G"]):
+        entry["boozer_surface"].surface.x = sdofs.copy()
+        entry["boozer_surface"].res["iota"] = iota
+        entry["boozer_surface"].res["G"] = G
+
+
+def solve_surface_stack_at_dofs(
+    x,
+    objective,
+    surface_data,
+    state,
+    vessel_surface=None,
+    surface_gap_threshold=0.0,
+    vessel_gap_threshold=0.0,
+    enforce_nesting=True,
+):
+    restore_surface_states(surface_data, state)
+    objective.x = x
+    for entry, iota, G in zip(surface_data, state["iota"], state["G"]):
+        entry["boozer_surface"].run_code(iota, G)
+    return evaluate_surface_stack(
+        surface_data,
+        vessel_surface=vessel_surface,
+        surface_gap_threshold=surface_gap_threshold,
+        vessel_gap_threshold=vessel_gap_threshold,
+        enforce_nesting=enforce_nesting,
+    )
+
+
+def average_surface_objectives(objectives, weights=None):
+    if len(objectives) == 0:
+        raise ValueError("Need at least one surface objective to average")
+    if weights is None:
+        weights = np.ones(len(objectives))
+    if len(objectives) != len(weights):
+        raise ValueError("Number of objectives and weights must match")
+    total_weight = float(np.sum(weights))
+    if total_weight <= 0.0:
+        raise ValueError("Sum of weights must be positive")
+
+    weighted_sum = None
+    for weight, objective in zip(weights, objectives):
+        weighted_objective = weight * objective
+        weighted_sum = weighted_objective if weighted_sum is None else weighted_sum + weighted_objective
+    return (1.0 / total_weight) * weighted_sum
+
+
+def continuation_inner_surface_weight(num_surfaces, accepted_iterations, ramp_iterations, initial_weight):
+    if num_surfaces <= 1:
+        return 1.0
+    if not (0.0 <= initial_weight <= 1.0):
+        raise ValueError("inner-surface initial weight must be between 0 and 1")
+    if ramp_iterations <= 0:
+        return 1.0
+    progress = min(max(accepted_iterations, 0), ramp_iterations) / ramp_iterations
+    return initial_weight + (1.0 - initial_weight) * progress
+
+
+def build_surface_search_weights(num_surfaces, accepted_iterations, ramp_iterations, initial_inner_weight):
+    if num_surfaces <= 0:
+        raise ValueError("num_surfaces must be positive")
+    weights = np.ones(num_surfaces)
+    if num_surfaces > 1:
+        weights[:-1] = continuation_inner_surface_weight(
+            num_surfaces,
+            accepted_iterations,
+            ramp_iterations,
+            initial_inner_weight,
+        )
+    return weights
+
+
+def build_surface_search_gate(
+    num_surfaces,
+    accepted_iterations,
+    ramp_iterations,
+    initial_inner_weight,
+    surface_gap_threshold,
+    vessel_gap_threshold,
+):
+    if num_surfaces <= 1:
+        return {
+            "surface_gap_threshold": float(surface_gap_threshold),
+            "vessel_gap_threshold": float(vessel_gap_threshold),
+            "enforce_nesting": True,
+            "gate_scale": 1.0,
+        }
+
+    gate_scale = continuation_inner_surface_weight(
+        num_surfaces,
+        accepted_iterations,
+        ramp_iterations,
+        initial_inner_weight,
+    )
+    return {
+        "surface_gap_threshold": float(surface_gap_threshold) * gate_scale,
+        "vessel_gap_threshold": float(vessel_gap_threshold) * gate_scale,
+        "enforce_nesting": bool(gate_scale >= 1.0),
+        "gate_scale": float(gate_scale),
+    }
+
+
+def build_scaled_outer_problem(base_fun, base_callback, anchor_x, step_scale):
+    if not (0.0 < step_scale <= 1.0):
+        raise ValueError("step_scale must be in (0, 1]")
+
+    def scaled_fun(z):
+        x = anchor_x + step_scale * z
+        J, dJ = base_fun(x)
+        return J, step_scale * dJ
+
+    def scaled_callback(z):
+        base_callback(anchor_x + step_scale * z)
+
+    return scaled_fun, scaled_callback
+
+
+def _topology_stop_reason(stop_index, stop_labels):
+    if 0 <= stop_index < len(stop_labels):
+        return stop_labels[stop_index]
+    return f"stop_{stop_index}"
+
+
+def _topology_toroidal_angle(x, y):
+    return float(np.mod(np.arctan2(y, x), 2 * np.pi))
+
+
+def evaluate_topology_gate(surface, bfield, nfieldlines, tmax, tol, survival_threshold):
+    if nfieldlines <= 0:
+        return disabled_topology_gate_status(tmax, tol, survival_threshold)
+
+    cross_section = surface.cross_section(phi=0.0, thetas=512)
+    r = np.sqrt(cross_section[:, 0] ** 2 + cross_section[:, 1] ** 2)
+    z = cross_section[:, 2]
+    rmin = float(np.min(r))
+    rmax = float(np.max(r))
+    zmax = float(np.max(np.abs(z)))
+    classifier = SurfaceClassifier(surface, h=0.03, p=2)
+    stopping_criteria = [
+        LevelsetStoppingCriterion(classifier.dist),
+        MaxZStoppingCriterion(zmax * 1.05),
+        MinZStoppingCriterion(-zmax * 1.05),
+        MinRStoppingCriterion(rmin * 0.95),
+        MaxRStoppingCriterion(rmax * 1.05),
+    ]
+    stop_labels = [
+        "surface_exit",
+        "max_z_guardrail",
+        "min_z_guardrail",
+        "min_r_guardrail",
+        "max_r_guardrail",
+    ]
+    R0 = _midplane_seed_radii(surface, nfieldlines)
+    Z0 = np.zeros((nfieldlines,))
+    _, fieldlines_phi_hits = compute_fieldlines(
+        bfield,
+        R0,
+        Z0,
+        tmax=tmax,
+        tol=tol,
+        phis=[0.0],
+        stopping_criteria=stopping_criteria,
+    )
+
+    survived = 0
+    earliest_exit = None
+    stop_reason_counts = {label: 0 for label in stop_labels}
+    for hits in fieldlines_phi_hits:
+        hits = np.asarray(hits)
+        if hits.size == 0:
+            survived += 1
+            continue
+        if hits.ndim == 1:
+            hits = hits[None, :]
+        negative_hits = hits[hits[:, 1] < 0]
+        if negative_hits.size == 0:
+            survived += 1
+            continue
+        first_stop = negative_hits[0]
+        stop_index = int(-first_stop[1]) - 1
+        stop_reason = _topology_stop_reason(stop_index, stop_labels)
+        stop_reason_counts.setdefault(stop_reason, 0)
+        stop_reason_counts[stop_reason] += 1
+        exit_time = float(first_stop[0])
+        exit_angle = _topology_toroidal_angle(first_stop[2], first_stop[3])
+        if earliest_exit is None or exit_time < earliest_exit["first_exit_time"]:
+            earliest_exit = {
+                "first_exit_time": exit_time,
+                "first_exit_angle": exit_angle,
+                "stop_reason": stop_reason,
+            }
+
+    survival_fraction = survived / nfieldlines
+    return {
+        "enabled": True,
+        "success": bool(survival_fraction >= survival_threshold),
+        "nfieldlines": int(nfieldlines),
+        "survived_lines": int(survived),
+        "survival_fraction": float(survival_fraction),
+        "survival_threshold": float(survival_threshold),
+        "tmax": float(tmax),
+        "tol": float(tol),
+        "stop_reason_counts": stop_reason_counts,
+        "first_exit_time": None if earliest_exit is None else earliest_exit["first_exit_time"],
+        "first_exit_angle": None if earliest_exit is None else earliest_exit["first_exit_angle"],
+        "first_exit_reason": None if earliest_exit is None else earliest_exit["stop_reason"],
+    }
+
+
+def disabled_topology_gate_status(tmax, tol, survival_threshold):
+    return {
+        "enabled": False,
+        "success": True,
+        "nfieldlines": 0,
+        "survived_lines": 0,
+        "survival_fraction": 1.0,
+        "survival_threshold": float(survival_threshold),
+        "tmax": float(tmax),
+        "tol": float(tol),
+        "stop_reason_counts": {},
+        "first_exit_time": None,
+        "first_exit_angle": None,
+        "first_exit_reason": None,
+    }
+
+
+def topology_gate_deficit(status):
+    if not status["enabled"]:
+        return 0.0
+    return max(0.0, float(status["survival_threshold"]) - float(status["survival_fraction"]))
+
+
+def topology_gate_rejection_increment(last_objective, status, penalty_scale):
+    base_increment = max(abs(last_objective), 1.0)
+    deficit = topology_gate_deficit(status)
+    return base_increment * (1.0 + penalty_scale * deficit)
+
+
+def evaluate_search_topology_gate(num_surfaces, outer_surface, bfield):
+    if num_surfaces <= 1 or TOPOLOGY_GATE_FIELDLINES <= 0:
+        return disabled_topology_gate_status(
+            TOPOLOGY_GATE_TMAX,
+            TOPOLOGY_GATE_TOL,
+            TOPOLOGY_GATE_SURVIVAL_THRESHOLD,
+        )
+    return evaluate_topology_gate(
+        outer_surface,
+        bfield,
+        TOPOLOGY_GATE_FIELDLINES,
+        TOPOLOGY_GATE_TMAX,
+        TOPOLOGY_GATE_TOL,
+        TOPOLOGY_GATE_SURVIVAL_THRESHOLD,
+    )
+
+
+def evaluate_total_objective(
+    surface_weights,
+    nonQSs,
+    brs,
+    RES_WEIGHT,
+    Jiota,
+    IOTAS_WEIGHT,
+    JCurveLength,
+    LENGTH_WEIGHT,
+    JCurveCurve,
+    CC_WEIGHT,
+    JCurveSurface,
+    CS_WEIGHT,
+    JCurvature,
+    CURVATURE_WEIGHT,
+    JSurfSurf=None,
+    SURF_DIST_WEIGHT=0.0,
+):
+    J_QS_obj = average_surface_objectives(nonQSs, weights=surface_weights)
+    J_Boozer_obj = average_surface_objectives(brs, weights=surface_weights)
+    total_objective = build_total_objective(
+        J_QS_obj,
+        RES_WEIGHT,
+        J_Boozer_obj,
+        IOTAS_WEIGHT,
+        Jiota,
+        LENGTH_WEIGHT,
+        JCurveLength,
+        CC_WEIGHT,
+        JCurveCurve,
+        CS_WEIGHT,
+        JCurveSurface,
+        CURVATURE_WEIGHT,
+        JCurvature,
+        SURF_DIST_WEIGHT=SURF_DIST_WEIGHT,
+        JSurfSurf=JSurfSurf,
+    )
+    return {
+        "total": total_objective.J(),
+        "grad": total_objective.dJ(),
+        "J_QS": J_QS_obj.J(),
+        "dJ_QS": J_QS_obj.dJ(),
+        "J_Boozer": J_Boozer_obj.J(),
+        "dJ_Boozer": J_Boozer_obj.dJ(),
+        "J_iota": Jiota.J(),
+        "dJ_iota": Jiota.dJ(),
+        "J_len": JCurveLength.J(),
+        "dJ_len": JCurveLength.dJ(),
+        "J_cc": JCurveCurve.J(),
+        "dJ_cc": JCurveCurve.dJ(),
+        "J_cs": JCurveSurface.J(),
+        "dJ_cs": JCurveSurface.dJ(),
+        "J_surf": JSurfSurf.J() if JSurfSurf is not None else 0.0,
+        "dJ_surf": JSurfSurf.dJ() if JSurfSurf is not None else np.zeros_like(total_objective.dJ()),
+        "J_curvature": JCurvature.J(),
+        "dJ_curvature": JCurvature.dJ(),
+        "surface_weights": np.asarray(surface_weights, dtype=float).copy(),
+    }
+
+
+def build_total_objective(JnonQSRatio, RES_WEIGHT, JBoozerResidual, IOTAS_WEIGHT, Jiota, LENGTH_WEIGHT, JCurveLength, CC_WEIGHT, JCurveCurve, CS_WEIGHT, JCurveSurface, CURVATURE_WEIGHT, JCurvature, SURF_DIST_WEIGHT=0.0, JSurfSurf=None):
+    objective = (
+        JnonQSRatio
+        + RES_WEIGHT * JBoozerResidual
+        + IOTAS_WEIGHT * Jiota
+        + LENGTH_WEIGHT * JCurveLength
+        + CC_WEIGHT * JCurveCurve
+        + CS_WEIGHT * JCurveSurface
+        + CURVATURE_WEIGHT * JCurvature
+    )
+    if JSurfSurf is not None:
+        objective = objective + SURF_DIST_WEIGHT * JSurfSurf
+    return objective
+
+
+def finalize_surface_stack(x, objective, surface_data, run_state, vessel_surface=None, surface_gap_threshold=0.0, vessel_gap_threshold=0.0):
+    status = solve_surface_stack_at_dofs(
+        x,
+        objective,
+        surface_data,
+        run_state["surface_state"],
+        vessel_surface=vessel_surface,
+        surface_gap_threshold=surface_gap_threshold,
+        vessel_gap_threshold=vessel_gap_threshold,
+        enforce_nesting=True,
+    )
+    if status["success"]:
+        run_state["accepted_x"] = np.asarray(x).copy()
+        run_state["surface_state"] = snapshot_surface_states(surface_data)
+        run_state["surface_status"] = status
+        run_state["J"] = objective.J()
+        run_state["dJ"] = objective.dJ().copy()
+    else:
+        print("Final optimized state rejected; falling back to last accepted state.")
+        objective.x = run_state["accepted_x"].copy()
+        restore_surface_states(surface_data, run_state["surface_state"])
+        run_state["surface_status"] = evaluate_surface_stack(
+            surface_data,
+            vessel_surface=vessel_surface,
+            surface_gap_threshold=surface_gap_threshold,
+            vessel_gap_threshold=vessel_gap_threshold,
+        )
+    run_state["intersecting"] = any(run_state["surface_status"]["self_intersections"])
+    return run_state["surface_status"]
+
+
+def save_surface_artifacts(surface_data, biotsavart, out_dir, stem, also_write_outer_legacy):
+    outer_entry = surface_data[-1]
+    for entry in surface_data:
+        name = entry["name"]
+        path = os.path.join(out_dir, f"{stem}_{name}")
+        biotsavart.set_points(entry["boozer_surface"].surface.gamma().reshape((-1, 3)))
+        unitn = entry["boozer_surface"].surface.unitnormal()
+        point_data = {
+            "B_N/B": np.sum(biotsavart.B().reshape(unitn.shape) * unitn, axis=2)[:, :, None]
+            / np.sqrt(np.sum(biotsavart.B().reshape(unitn.shape) ** 2, axis=2))[:, :, None]
+        }
+        entry["boozer_surface"].surface.to_vtk(path, extra_data=point_data)
+        entry["boozer_surface"].surface.save(path + ".json")
+
+    if also_write_outer_legacy:
+        legacy_path = os.path.join(out_dir, stem)
+        biotsavart.set_points(outer_entry["boozer_surface"].surface.gamma().reshape((-1, 3)))
+        unitn = outer_entry["boozer_surface"].surface.unitnormal()
+        point_data = {
+            "B_N/B": np.sum(biotsavart.B().reshape(unitn.shape) * unitn, axis=2)[:, :, None]
+            / np.sqrt(np.sum(biotsavart.B().reshape(unitn.shape) ** 2, axis=2))[:, :, None]
+        }
+        outer_entry["boozer_surface"].surface.to_vtk(legacy_path, extra_data=point_data)
+        outer_entry["boozer_surface"].surface.save(legacy_path + ".json")
+
+
+def collect_surface_run_metadata(surface_data, run_status, initial_surface_volumes, initial_surface_iotas, final_surface_volumes, final_surface_iotas):
+    return {
+        "SURFACE_NAMES": [entry["name"] for entry in surface_data],
+        "SURFACE_SEED_LABELS": [float(entry["seed_label"]) for entry in surface_data],
+        "SURFACE_TARGET_VOLUMES": [float(entry["target_volume"]) for entry in surface_data],
+        "FINAL_SURFACE_VOLUMES": [float(value) for value in final_surface_volumes],
+        "FINAL_SURFACE_IOTAS": [float(value) for value in final_surface_iotas],
+        "SURFACE_SELF_INTERSECTING": [bool(value) for value in run_status["self_intersections"]],
+        "ADJACENT_SURFACE_GAPS": [float(value) for value in run_status["adjacent_gaps"]],
+        "OUTER_VESSEL_GAP": None if run_status["outer_vessel_gap"] is None else float(run_status["outer_vessel_gap"]),
+        "SURFACES_NESTED": bool(run_status["nesting_ok"]),
+        "BAD_NESTING_PHIS": [float(value) for value in run_status["bad_nesting_phis"]],
+        "INITIAL_SURFACE_VOLUMES": [float(value) for value in initial_surface_volumes],
+        "INITIAL_SURFACE_IOTAS": [float(value) for value in initial_surface_iotas],
+    }
+
 def normPlot(surf, bs, filename):
     """Plot normal magnetic field — delegates to shared norm_field_plot."""
     mean_abs_relBfinal_norm, _, _, _, _ = norm_field_plot(surf, bs, filename)
@@ -577,55 +1273,135 @@ def fun(x):
         dJ: Gradient of objective function
     """
     dx = np.linalg.norm(x - run_dict['x_prev'])
+    outer_entry = surface_data[-1]
     run_dict['x_prev'] = x.copy()
     print(f"Step size: {dx:.2e}")
 
     run_dict['lscount']+=1
+    search_gate = build_surface_search_gate(
+        len(surface_data),
+        run_dict['accepted_iterations'],
+        MULTISURFACE_RAMP_ITERATIONS,
+        INNER_SURFACE_INITIAL_WEIGHT,
+        SURFACE_GAP_THRESHOLD if len(surface_data) > 1 else 0.0,
+        SS_DIST if len(surface_data) > 1 else 0.0,
+    )
 
-    # initialize to last accepted surface values
-    boozer_surface.surface.x = run_dict['sdofs']
-    boozer_surface.res['iota'] = run_dict['iota']
-    boozer_surface.res['G'] = run_dict['G']
+    stack_status = solve_surface_stack_at_dofs(
+        x,
+        JF,
+        surface_data,
+        run_dict['surface_state'],
+        vessel_surface=VV if len(surface_data) > 1 else None,
+        surface_gap_threshold=search_gate['surface_gap_threshold'],
+        vessel_gap_threshold=search_gate['vessel_gap_threshold'],
+        enforce_nesting=search_gate['enforce_nesting'],
+    )
+    success = stack_status['success']
 
-    # Set new coil dofs
-    JF.x = x
-
-    # Run boozer surface
-    boozer_surface.run_code(run_dict['iota'], run_dict['G'])
-
-    # Check success
-    success1 = False
-    success2 = False
-    try:
-        success1 = boozer_surface.res['success']
-        success2 = not boozer_surface.surface.is_self_intersecting()
-    except Exception as e:
-        print("Surface check failed:", e)
-    success = success1 and success2
+    rejection_increment = None
 
     if success:
-        J = JF.J()
-        dJ = JF.dJ()
+        search_surface_weights = build_surface_search_weights(
+            len(surface_data),
+            run_dict['accepted_iterations'],
+            MULTISURFACE_RAMP_ITERATIONS,
+            INNER_SURFACE_INITIAL_WEIGHT,
+        )
+        objective_eval = evaluate_total_objective(
+            search_surface_weights,
+            nonQSs,
+            brs,
+            RES_WEIGHT,
+            Jiota,
+            IOTAS_WEIGHT,
+            JCurveLength,
+            LENGTH_WEIGHT,
+            JCurveCurve,
+            CC_WEIGHT,
+            JCurveSurface,
+            CS_WEIGHT,
+            JCurvature,
+            CURVATURE_WEIGHT,
+            JSurfSurf=JSurfSurf,
+            SURF_DIST_WEIGHT=SURF_DIST_WEIGHT,
+        )
+        J = objective_eval['total']
+        dJ = objective_eval['grad']
+        run_dict['last_successful_eval'] = objective_eval
+        run_dict['last_successful_eval_weights'] = np.asarray(search_surface_weights).copy()
+        topology_status = evaluate_search_topology_gate(
+            len(surface_data),
+            outer_entry['boozer_surface'].surface,
+            bs,
+        )
+        run_dict['topology_gate_status'] = topology_status
+        if topology_status['enabled'] and not topology_status['success']:
+            success = False
+            rejection_increment = topology_gate_rejection_increment(
+                run_dict['J'],
+                topology_status,
+                TOPOLOGY_GATE_PENALTY_SCALE,
+            )
+            print("/!\\ /!\\ Topology gate rejected candidate /!\\ /!\\")
+            print(
+                "Cheap field-line survival "
+                f"{topology_status['survived_lines']}/{topology_status['nfieldlines']} "
+                f"(fraction={topology_status['survival_fraction']:.3f}, "
+                f"threshold={topology_status['survival_threshold']:.3f})"
+            )
+            print(f"Topology rejection increment = {rejection_increment:.6e}")
+            if topology_status['first_exit_time'] is not None:
+                print(
+                    "First topology exit at "
+                    f"t={topology_status['first_exit_time']:.6e}, "
+                    f"phi={topology_status['first_exit_angle']:.6e}, "
+                    f"reason={topology_status['first_exit_reason']}"
+                )
 
-        print(f"Volume: {boozer_surface.surface.volume()}")
-        print(f"Iota: {Iotas(boozer_surface).J()}")
+        if success:
+            print(f"Volume: {outer_entry['boozer_surface'].surface.volume()}")
+            print(f"Iota: {surface_iota_terms[-1].J()}")
+            if len(surface_data) > 1:
+                print(f"Surface search weights: {objective_eval['surface_weights'].tolist()}")
+                print(f"Surface gate scale: {search_gate['gate_scale']:.6f}")
+                print(f"Adjacent surface gaps: {stack_status['adjacent_gaps']}")
+                print(f"Outer vessel gap: {stack_status['outer_vessel_gap']}")
 
-    else:
-        print("/!\\ /!\\ Boozer surface rejected /!\\ /!\\")
-        if not success1:
+    if not success:
+        if stack_status['success']:
+            print("/!\\ /!\\ Candidate rejected after surface solve /!\\ /!\\")
+        else:
+            run_dict['topology_gate_status'] = disabled_topology_gate_status(
+                TOPOLOGY_GATE_TMAX,
+                TOPOLOGY_GATE_TOL,
+                TOPOLOGY_GATE_SURVIVAL_THRESHOLD,
+            )
+            print("/!\\ /!\\ Boozer surface rejected /!\\ /!\\")
+        if not all(stack_status['solve_success']):
             print("Boozer solver failed")
-        if not success2:
+        if any(stack_status['self_intersections']):
             print("Surface is self-intersecting")
+        if len(surface_data) > 1:
+            if not stack_status['volumes_ordered']:
+                print("Surface volumes are not strictly ordered")
+            if not stack_status['gap_ok']:
+                print(f"Adjacent surfaces too close: {stack_status['adjacent_gaps']}")
+            if not stack_status['vessel_gap_ok']:
+                print(f"Outer surface too close to vessel: {stack_status['outer_vessel_gap']}")
+            if search_gate['enforce_nesting'] and not stack_status['nesting_ok']:
+                print(f"Surfaces are not nested on phi slices: {stack_status['bad_nesting_phis']}")
 
         # Elevated J violates Armijo, so the line search backtracks.
         # Returning dJ_old (not negated) avoids the old -dJ corruption path
         # and produces y_k=0 if the step is ever accepted, safely skipping
         # the BFGS Hessian update.
-        J = run_dict['J'] + max(abs(run_dict['J']), 1.0)
+        if rejection_increment is None:
+            rejection_increment = max(abs(run_dict['J']), 1.0)
+        J = run_dict['J'] + rejection_increment
         dJ = run_dict['dJ'].copy()
-        boozer_surface.surface.x = run_dict['sdofs']
-        boozer_surface.res['iota'] = run_dict['iota']
-        boozer_surface.res['G'] = run_dict['G']
+        JF.x = run_dict['accepted_x']
+        restore_surface_states(surface_data, run_dict['surface_state'])
 
     return J, dJ
 
@@ -643,37 +1419,93 @@ def callback(x):
     """
     # Update count for tracking
     run_dict['lscount'] = 0
+    outer_entry = surface_data[-1]
 
     # Store last accepted state
-    run_dict['sdofs'] = boozer_surface.surface.x.copy()
-    run_dict['iota'] = boozer_surface.res['iota']
-    run_dict['G'] = boozer_surface.res['G']
-    run_dict['J'] = JF.J()
-    run_dict['dJ'] = JF.dJ().copy()
+    search_surface_weights = build_surface_search_weights(
+        len(surface_data),
+        run_dict['accepted_iterations'],
+        MULTISURFACE_RAMP_ITERATIONS,
+        INNER_SURFACE_INITIAL_WEIGHT,
+    )
+    search_gate = build_surface_search_gate(
+        len(surface_data),
+        run_dict['accepted_iterations'],
+        MULTISURFACE_RAMP_ITERATIONS,
+        INNER_SURFACE_INITIAL_WEIGHT,
+        SURFACE_GAP_THRESHOLD if len(surface_data) > 1 else 0.0,
+        SS_DIST if len(surface_data) > 1 else 0.0,
+    )
+    if 'last_successful_eval' in run_dict and np.array_equal(run_dict.get('last_successful_eval_weights', None), search_surface_weights):
+        objective_eval = run_dict['last_successful_eval']
+    else:
+        objective_eval = evaluate_total_objective(
+            search_surface_weights,
+            nonQSs,
+            brs,
+            RES_WEIGHT,
+            Jiota,
+            IOTAS_WEIGHT,
+            JCurveLength,
+            LENGTH_WEIGHT,
+            JCurveCurve,
+            CC_WEIGHT,
+            JCurveSurface,
+            CS_WEIGHT,
+            JCurvature,
+            CURVATURE_WEIGHT,
+            JSurfSurf=JSurfSurf,
+            SURF_DIST_WEIGHT=SURF_DIST_WEIGHT,
+        )
+    run_dict['surface_state'] = snapshot_surface_states(surface_data)
+    run_dict['accepted_x'] = x.copy()
+    run_dict['J'] = objective_eval['total']
+    run_dict['dJ'] = objective_eval['grad'].copy()
+    run_dict['search_eval'] = objective_eval
+    topology_status = run_dict['topology_gate_status']
+    search_stack_status = evaluate_surface_stack(
+        surface_data,
+        vessel_surface=VV if len(surface_data) > 1 else None,
+        surface_gap_threshold=search_gate['surface_gap_threshold'],
+        vessel_gap_threshold=search_gate['vessel_gap_threshold'],
+        enforce_nesting=search_gate['enforce_nesting'],
+    )
+    full_stack_status = evaluate_surface_stack(
+        surface_data,
+        vessel_surface=VV if len(surface_data) > 1 else None,
+        surface_gap_threshold=SURFACE_GAP_THRESHOLD if len(surface_data) > 1 else 0.0,
+        vessel_gap_threshold=SS_DIST if len(surface_data) > 1 else 0.0,
+        enforce_nesting=True,
+    )
+    run_dict['search_surface_status'] = search_stack_status
+    run_dict['surface_status'] = full_stack_status
+    run_dict['topology_gate_status'] = topology_status
 
     # Evaluate diagnostics
     J = run_dict['J']
     grad = run_dict['dJ']
     
-    J_QS = JnonQSRatio.J()
-    dJ_QS = np.linalg.norm(JnonQSRatio.dJ())
-    J_Boozer = JBoozerResidual.J()
-    dJ_Boozer = np.linalg.norm(JBoozerResidual.dJ())
-    J_iota = Jiota.J()
-    dJ_iota = np.linalg.norm(Jiota.dJ())
+    J_QS = objective_eval['J_QS']
+    dJ_QS = np.linalg.norm(objective_eval['dJ_QS'])
+    J_Boozer = objective_eval['J_Boozer']
+    dJ_Boozer = np.linalg.norm(objective_eval['dJ_Boozer'])
+    J_iota = objective_eval['J_iota']
+    dJ_iota = np.linalg.norm(objective_eval['dJ_iota'])
     J_len = JCurveLength.J()
     dJ_len = np.linalg.norm(JCurveLength.dJ())
     J_cc = JCurveCurve.J()
     dJ_cc = np.linalg.norm(JCurveCurve.dJ())
     J_cs = JCurveSurface.J()
     dJ_cs = np.linalg.norm(JCurveSurface.dJ())
-    J_surf = JSurfSurf.J()
-    dJ_surf = np.linalg.norm(JSurfSurf.dJ())
-    J_curvature = JCurvature.J()
-    dJ_curvature = np.linalg.norm(JCurvature.dJ())
+    J_surf = objective_eval['J_surf']
+    dJ_surf = np.linalg.norm(objective_eval['dJ_surf'])
+    J_curvature = objective_eval['J_curvature']
+    dJ_curvature = np.linalg.norm(objective_eval['dJ_curvature'])
 
-    iota_str = f"{iota.J():.4f}"
-    volume_str = f"{boozer_surface.surface.volume():.4f}"
+    iota_values = [term.J() for term in surface_iota_terms]
+    volume_values = [entry['boozer_surface'].surface.volume() for entry in surface_data]
+    iota_str = ", ".join(f"{value:.4f}" for value in iota_values)
+    volume_str = ", ".join(f"{value:.4f}" for value in volume_values)
 
     gamma = banana_curve.gamma()
     max_r = np.max(np.sqrt(gamma[:,0]**2 + gamma[:,1]**2))
@@ -683,10 +1515,10 @@ def callback(x):
     curvecurve_min = JCurveCurve.shortest_distance()
     curvesurf_min = JCurveSurface.shortest_distance()
 
-    bs.set_points(boozer_surface.surface.gamma().reshape((-1, 3)))
-    unitn = boozer_surface.surface.unitnormal()
+    bs.set_points(outer_entry['boozer_surface'].surface.gamma().reshape((-1, 3)))
+    unitn = outer_entry['boozer_surface'].surface.unitnormal()
     BdotN = np.mean(np.abs(np.sum(bs.B().reshape(unitn.shape) * unitn, axis=2)))
-    run_dict['intersecting'] = boozer_surface.surface.is_self_intersecting()
+    run_dict['intersecting'] = any(full_stack_status['self_intersections'])
 
     width = 35
     buffer = io.StringIO()
@@ -705,6 +1537,28 @@ def callback(x):
     print(f"{'Surf-Vessel Penalty':{width}} = {J_surf:.6e} (dJ = {dJ_surf:.6e})", file=buffer) 
     print(f"{'Curvature Penalty':{width}} = {J_curvature:.6e} (dJ = {dJ_curvature:.6e})", file=buffer) 
     print(f"{'⟨|B·n|⟩':{width}} = {BdotN:.6e}", file=buffer)
+    if len(surface_data) > 1:
+        print(f"{'Surface search weights':{width}} = {objective_eval['surface_weights'].tolist()}", file=buffer)
+        print(f"{'Surface gate scale':{width}} = {search_gate['gate_scale']:.6f}", file=buffer)
+        print(f"{'Search gap threshold':{width}} = {search_gate['surface_gap_threshold']:.6e}", file=buffer)
+        print(f"{'Search vessel gap':{width}} = {search_gate['vessel_gap_threshold']:.6e}", file=buffer)
+        print(f"{'Search nesting enforced':{width}} = {search_gate['enforce_nesting']}", file=buffer)
+        if topology_status['enabled']:
+            print(
+                f"{'Topology survival':{width}} = "
+                f"{topology_status['survived_lines']}/{topology_status['nfieldlines']} "
+                f"(fraction={topology_status['survival_fraction']:.6f}, "
+                f"threshold={topology_status['survival_threshold']:.6f})",
+                file=buffer,
+            )
+            print(f"{'Topology stop counts':{width}} = {topology_status['stop_reason_counts']}", file=buffer)
+            print(f"{'Topology first exit time':{width}} = {topology_status['first_exit_time']}", file=buffer)
+            print(f"{'Topology first exit angle':{width}} = {topology_status['first_exit_angle']}", file=buffer)
+            print(f"{'Topology first exit reason':{width}} = {topology_status['first_exit_reason']}", file=buffer)
+        print(f"{'Adjacent surface gaps':{width}} = {full_stack_status['adjacent_gaps']}", file=buffer)
+        print(f"{'Outer vessel gap':{width}} = {full_stack_status['outer_vessel_gap']:.6e}", file=buffer)
+        print(f"{'Surfaces nested':{width}} = {full_stack_status['nesting_ok']}", file=buffer)
+        print(f"{'Bad nesting phis':{width}} = {full_stack_status['bad_nesting_phis']}", file=buffer)
 
     print(f"{'Intersecting':{width}} = {run_dict['intersecting']}", file=buffer)
     print(f"{'Max Curve R':{width}} = {max_r:.6e}", file=buffer)
@@ -723,12 +1577,19 @@ def callback(x):
         f.write(output_str + "\n")
 
     # Advance iteration counter
+    run_dict['accepted_iterations'] += 1
     run_dict['it'] += 1
 
 
 # Convergence tolerances for different mpol values (module-level for testability)
 ftol_by_mpol = {8: 1e-5, 9: 5e-6, 10: 1e-6, 11: 5e-7, 12: 1e-7, 13: 5e-8, 14: 1e-8, 15: 5e-9, 16: 1e-9, 17: 5e-10, 18: 1e-10}
 gtol_by_mpol = {8: 1e-2, 9: 5e-3, 10: 1e-3, 11: 5e-4, 12: 1e-4, 13: 5e-5, 14: 1e-5, 15: 5e-6, 16: 1e-6, 17: 5e-7, 18: 1e-7}
+MULTISURFACE_RAMP_ITERATIONS = 0
+INNER_SURFACE_INITIAL_WEIGHT = 1.0
+TOPOLOGY_GATE_FIELDLINES = 0
+TOPOLOGY_GATE_TMAX = 2.0
+TOPOLOGY_GATE_TOL = 1e-7
+TOPOLOGY_GATE_SURVIVAL_THRESHOLD = 0.0
 
 
 if __name__ == "__main__":
@@ -755,6 +1616,31 @@ if __name__ == "__main__":
     MAXITER = args.maxiter
     iota_target = args.iota_target
     num_tf_coils = args.num_tf_coils
+    if not (0.0 <= args.inner_surface_initial_weight <= 1.0):
+        raise ValueError("--inner-surface-initial-weight must be between 0 and 1")
+    if args.multisurface_ramp_iterations < 0:
+        raise ValueError("--multisurface-ramp-iterations must be non-negative")
+    if not (0.0 < args.multisurface_initial_step_scale <= 1.0):
+        raise ValueError("--multisurface-initial-step-scale must be in (0, 1]")
+    if args.multisurface_initial_step_maxiter < 0:
+        raise ValueError("--multisurface-initial-step-maxiter must be non-negative")
+    if args.topology_gate_fieldlines < 0:
+        raise ValueError("--topology-gate-fieldlines must be non-negative")
+    if args.topology_gate_tmax <= 0:
+        raise ValueError("--topology-gate-tmax must be positive")
+    if args.topology_gate_tol <= 0:
+        raise ValueError("--topology-gate-tol must be positive")
+    if not (0.0 <= args.topology_gate_survival_threshold <= 1.0):
+        raise ValueError("--topology-gate-survival-threshold must be between 0 and 1")
+    if args.topology_gate_penalty_scale < 0.0:
+        raise ValueError("--topology-gate-penalty-scale must be non-negative")
+    MULTISURFACE_RAMP_ITERATIONS = args.multisurface_ramp_iterations
+    INNER_SURFACE_INITIAL_WEIGHT = args.inner_surface_initial_weight
+    TOPOLOGY_GATE_FIELDLINES = args.topology_gate_fieldlines
+    TOPOLOGY_GATE_TMAX = args.topology_gate_tmax
+    TOPOLOGY_GATE_TOL = args.topology_gate_tol
+    TOPOLOGY_GATE_SURVIVAL_THRESHOLD = args.topology_gate_survival_threshold
+    TOPOLOGY_GATE_PENALTY_SCALE = args.topology_gate_penalty_scale
 
     # Output directory setup
     OUT_DIR = args.output_root
@@ -792,9 +1678,17 @@ if __name__ == "__main__":
     bs = load(stage2_bs_path)
 
     # Initialize the boundary magnetic surface and scale it to the target major radius
-    surf = SurfaceRZFourier.from_wout(file_loc, range="half period", nphi=nphi, ntheta=ntheta, s=s)
-    # scale the surface down to the target appropriate major radius
-    surf.set_dofs(surf.get_dofs()*R0/surf.major_radius())
+    surface_configs = build_surface_configs(
+        file_loc,
+        nphi,
+        ntheta,
+        s,
+        R0,
+        vol_target,
+        args.num_surfaces,
+        args.inner_surface_ratio,
+    )
+    surf = surface_configs[-1]["initial_surface"]
 
     # Extract coil information
     coils = bs.coils
@@ -825,13 +1719,36 @@ if __name__ == "__main__":
         f"|{args.cc_dist}|{args.cc_weight}|{args.curvature_weight}|{args.curvature_threshold}"
         f"|{banana_surf_radius}|{nphi}|{ntheta}|{args.init_only}"
         f"|{args.basin_hops}|{args.basin_stepsize}|{rng_seed}"
+        f"|{args.ftol}|{args.gtol}"
+        f"|{args.num_surfaces}|{args.inner_surface_ratio}|{args.surface_gap_threshold}"
+        f"|{MULTISURFACE_RAMP_ITERATIONS}|{INNER_SURFACE_INITIAL_WEIGHT}"
+        f"|{args.multisurface_initial_step_scale}|{args.multisurface_initial_step_maxiter}"
+        f"|{TOPOLOGY_GATE_FIELDLINES}|{TOPOLOGY_GATE_TMAX}|{TOPOLOGY_GATE_TOL}|{TOPOLOGY_GATE_SURVIVAL_THRESHOLD}"
     )
     config_hash = hashlib.sha256(config_str.encode()).hexdigest()[:8]
     OUT_DIR_ITER = OUT_DIR + f"/mpol={mpol}-ntor={ntor}-{config_hash}"
     os.makedirs(OUT_DIR_ITER, exist_ok=True)
 
-    # Initialize Boozer surface with target parameters
-    boozer_surface = initialize_boozer_surface(surf, mpol, ntor, bs, vol_target, CONSTRAINT_WEIGHT, iota_target, G0)
+    # Initialize Boozer surfaces with target parameters
+    surface_data = []
+    for config in surface_configs:
+        boozer_surface = initialize_boozer_surface(
+            config["initial_surface"],
+            mpol,
+            ntor,
+            bs,
+            config["target_volume"],
+            CONSTRAINT_WEIGHT,
+            iota_target,
+            G0,
+        )
+        surface_data.append({
+            "name": config["name"],
+            "seed_label": config["seed_label"],
+            "target_volume": config["target_volume"],
+            "boozer_surface": boozer_surface,
+        })
+    outer_surface_data = surface_data[-1]
 
     # ==============================================================================
     # SAVE INITIAL STATE
@@ -840,34 +1757,28 @@ if __name__ == "__main__":
     curves_to_vtk(curves, OUT_DIR_ITER + "/curves_init", close=True)
     bs.save(OUT_DIR_ITER + "/biot_savart_init.json")
 
-    # Save initial surface with magnetic field normal component data
-    bs.set_points(boozer_surface.surface.gamma().reshape((-1, 3)))
-    unitn = boozer_surface.surface.unitnormal()
-    pointData = {"B_N/B": np.sum(bs.B().reshape(unitn.shape) *
-        unitn, axis=2)[:, :, None] / np.sqrt(np.sum(bs.B().reshape(unitn.shape)**2, axis=2))[:, :, None]}
-    boozer_surface.surface.to_vtk(OUT_DIR_ITER + "/surf_init", extra_data=pointData)
-    boozer_surface.surface.save(OUT_DIR_ITER + "/surf_init.json")
-    print(f"Volume: {boozer_surface.surface.volume()}")
+    save_surface_artifacts(surface_data, bs, OUT_DIR_ITER, "surf_init", also_write_outer_legacy=True)
+    print(f"Volume: {outer_surface_data['boozer_surface'].surface.volume()}")
 
     # Generate initial diagnostic plots
-    initial_field_error = normPlot(boozer_surface.surface, bs, OUT_DIR_ITER + "/NormPlotInitial")
-    cross_section_plot(surf_coils, boozer_surface.surface, banana_curve, OUT_DIR_ITER + "/CrossSectionInitial", hbt, VV)
-    initial_volume = boozer_surface.surface.volume()
-    initial_iota = Iotas(boozer_surface).J()
+    initial_field_error = normPlot(outer_surface_data['boozer_surface'].surface, bs, OUT_DIR_ITER + "/NormPlotInitial")
+    cross_section_plot(surf_coils, outer_surface_data['boozer_surface'].surface, banana_curve, OUT_DIR_ITER + "/CrossSectionInitial", hbt, VV)
+    initial_volume = outer_surface_data['boozer_surface'].surface.volume()
+    initial_iota = Iotas(outer_surface_data['boozer_surface']).J()
     initial_max_curvature = np.max(banana_curve.kappa())
+    initial_surface_volumes = [entry["boozer_surface"].surface.volume() for entry in surface_data]
+    initial_surface_iotas = [Iotas(entry["boozer_surface"]).J() for entry in surface_data]
 
     # ==============================================================================
     # DEFINE OBJECTIVE FUNCTION COMPONENTS
     # ==============================================================================
-    # Biot-Savart field calculation
-    bs_obj = BiotSavart(coils)
-
     # Quasi-symmetry and Boozer coordinate residuals
-    nonQSs = [NonQuasiSymmetricRatio(boozer_surface, bs_obj)]
+    surface_iota_terms = [Iotas(entry["boozer_surface"]) for entry in surface_data]
+    nonQSs = [NonQuasiSymmetricRatio(entry["boozer_surface"], BiotSavart(coils)) for entry in surface_data]
     if boozer_type[stage] == 'exact':
-        brs = [BoozerResidualExact(boozer_surface, bs_obj)]
+        brs = [BoozerResidualExact(entry["boozer_surface"], BiotSavart(coils)) for entry in surface_data]
     else:
-        brs = [BoozerResidual(boozer_surface, bs_obj)]
+        brs = [BoozerResidual(entry["boozer_surface"], BiotSavart(coils)) for entry in surface_data]
 
     # Objective function weights and parameters (all configurable via CLI)
     # Baseline default floors enforced via max() — weights are free, thresholds are clamped.
@@ -887,30 +1798,43 @@ if __name__ == "__main__":
     if args.ss_dist < 0.04:
         print(f"WARNING: --ss-dist {args.ss_dist} below baseline default, clamped to 0.04")
     CURVATURE_WEIGHT = args.curvature_weight
-    CURVATURE_THRESHOLD = max(args.curvature_threshold, 20)  # Baseline default floor
+    CURVATURE_THRESHOLD = max(args.curvature_threshold, 20)  # Minimum floor; current HBT policy default is 40
     if args.curvature_threshold < 20:
-        print(f"WARNING: --curvature-threshold {args.curvature_threshold} below baseline default, clamped to 20")
-    phi_list = np.linspace(0, 1 / boozer_surface.surface.nfp, 5)
+        print(f"WARNING: --curvature-threshold {args.curvature_threshold} below minimum floor, clamped to 20")
+    SURFACE_GAP_THRESHOLD = max(args.surface_gap_threshold, 0.0)
+    if len(surface_data) > 1 and SURF_DIST_WEIGHT != 0:
+        print("WARNING: SURF_DIST_WEIGHT is diagnostic-only in multi-surface mode; outer-vessel spacing is enforced as a rejection gate.")
 
     # Individual objective terms
-    iota = Iotas(boozer_surface)
     curvelength = CurveLength(banana_curves[0])
     length_target = curvelength.J()
-
-    Jiota = QuadraticPenalty(iota, iota_target)
-    JnonQSRatio = sum(nonQSs)
-    JBoozerResidual = sum(brs)
+    Jiota = QuadraticPenalty(surface_iota_terms[-1], iota_target)
+    JnonQSRatio = average_surface_objectives(nonQSs)
+    JBoozerResidual = average_surface_objectives(brs)
     JCurveLength = QuadraticPenalty(curvelength, length_target, 'max')
     JCurveCurve = CurveCurveDistance(curves, CC_DIST)
-    JCurveSurface = CurveSurfaceDistance(curves, boozer_surface.surface, CS_DIST)
-    JSurfSurf = SurfaceSurfaceDistance(boozer_surface.surface, VV, SS_DIST)
+    JCurveSurface = CurveSurfaceDistance(curves, outer_surface_data['boozer_surface'].surface, CS_DIST)
+    JSurfSurf = SurfaceSurfaceDistance(outer_surface_data['boozer_surface'].surface, VV, SS_DIST) if len(surface_data) == 1 else None
     JCurvature = LpCurveCurvature(banana_curves[0], 2, CURVATURE_THRESHOLD)
 
     # Combined objective function
-    JF = JnonQSRatio + RES_WEIGHT * JBoozerResidual + IOTAS_WEIGHT * Jiota \
-      + LENGTH_WEIGHT * JCurveLength + CC_WEIGHT * JCurveCurve \
-        + CS_WEIGHT * JCurveSurface + SURF_DIST_WEIGHT * JSurfSurf \
-        + CURVATURE_WEIGHT * JCurvature
+    JF = build_total_objective(
+        JnonQSRatio,
+        RES_WEIGHT,
+        JBoozerResidual,
+        IOTAS_WEIGHT,
+        Jiota,
+        LENGTH_WEIGHT,
+        JCurveLength,
+        CC_WEIGHT,
+        JCurveCurve,
+        CS_WEIGHT,
+        JCurveSurface,
+        CURVATURE_WEIGHT,
+        JCurvature,
+        SURF_DIST_WEIGHT=SURF_DIST_WEIGHT,
+        JSurfSurf=JSurfSurf,
+    )
 
     # Extract degrees of freedom
     dofs = JF.x
@@ -919,33 +1843,92 @@ if __name__ == "__main__":
     # INITIALIZE OPTIMIZATION STATE
     # ==============================================================================
     # Initialize run_dict after JF and boozer_surface are ready
+    initial_search_surface_weights = build_surface_search_weights(
+        len(surface_data),
+        0,
+        MULTISURFACE_RAMP_ITERATIONS,
+        INNER_SURFACE_INITIAL_WEIGHT,
+    )
+    initial_search_eval = evaluate_total_objective(
+        initial_search_surface_weights,
+        nonQSs,
+        brs,
+        RES_WEIGHT,
+        Jiota,
+        IOTAS_WEIGHT,
+        JCurveLength,
+        LENGTH_WEIGHT,
+        JCurveCurve,
+        CC_WEIGHT,
+        JCurveSurface,
+        CS_WEIGHT,
+        JCurvature,
+        CURVATURE_WEIGHT,
+        JSurfSurf=JSurfSurf,
+        SURF_DIST_WEIGHT=SURF_DIST_WEIGHT,
+    )
+    initial_search_gate = build_surface_search_gate(
+        len(surface_data),
+        0,
+        MULTISURFACE_RAMP_ITERATIONS,
+        INNER_SURFACE_INITIAL_WEIGHT,
+        SURFACE_GAP_THRESHOLD if len(surface_data) > 1 else 0.0,
+        SS_DIST if len(surface_data) > 1 else 0.0,
+    )
     run_dict = {
-        'sdofs': boozer_surface.surface.x.copy(),
-        'iota': boozer_surface.res['iota'],
-        'G': boozer_surface.res['G'],
-        'J': JF.J(),
-        'dJ': JF.dJ().copy(),
+        'surface_state': snapshot_surface_states(surface_data),
+        'J': initial_search_eval['total'],
+        'dJ': initial_search_eval['grad'].copy(),
+        'search_eval': initial_search_eval,
         'it': 1,
+        'accepted_iterations': 0,
         'lscount': 0,
         'x_prev': dofs.copy(),
+        'accepted_x': dofs.copy(),
         'intersecting': False,
+        'surface_status': evaluate_surface_stack(
+            surface_data,
+            vessel_surface=VV if len(surface_data) > 1 else None,
+            surface_gap_threshold=SURFACE_GAP_THRESHOLD if len(surface_data) > 1 else 0.0,
+            vessel_gap_threshold=SS_DIST if len(surface_data) > 1 else 0.0,
+            enforce_nesting=True,
+        ),
+        'search_surface_status': evaluate_surface_stack(
+            surface_data,
+            vessel_surface=VV if len(surface_data) > 1 else None,
+            surface_gap_threshold=initial_search_gate['surface_gap_threshold'],
+            vessel_gap_threshold=initial_search_gate['vessel_gap_threshold'],
+            enforce_nesting=initial_search_gate['enforce_nesting'],
+        ),
+        'topology_gate_status': evaluate_search_topology_gate(
+            len(surface_data),
+            outer_surface_data['boozer_surface'].surface,
+            bs,
+        ),
     }
 
     # ==============================================================================
     # RUN OPTIMIZATION
     # ==============================================================================
     # Get convergence tolerances for current mpol
-    ftol = ftol_by_mpol.get(mpol, 1e-5 if mpol < 8 else 1e-10)
-    gtol = gtol_by_mpol.get(mpol, 1e-2 if mpol < 8 else 1e-7)
+    ftol = args.ftol if args.ftol is not None else ftol_by_mpol.get(mpol, 1e-5 if mpol < 8 else 1e-10)
+    gtol = args.gtol if args.gtol is not None else gtol_by_mpol.get(mpol, 1e-2 if mpol < 8 else 1e-7)
 
     basin_hop_count = None
     basin_minimization_failures = None
+    termination_message = None
+    optimizer_success = None
+    phase1_iterations = None
+    phase1_termination_message = None
+    phase1_success = None
     if args.init_only:
         res_nit = 0
         final_volume = initial_volume
         final_iota = initial_iota
         final_max_curvature = initial_max_curvature
         fieldError = initial_field_error
+        termination_message = "init_only"
+        optimizer_success = True
         print("Skipping single-stage optimizer because --init-only was provided.")
     elif args.basin_hops > 0:
         # Basin-hopping: perturb DOFs and re-run L-BFGS-B multiple times, keep best
@@ -971,47 +1954,160 @@ if __name__ == "__main__":
             res_nit = res.lowest_optimization_result.nit
         else:
             res_nit = basin_hop_count if basin_hop_count is not None else 0
+        if hasattr(res, 'lowest_optimization_result'):
+            termination_message = str(getattr(res.lowest_optimization_result, 'message', 'basinhopping_complete'))
+            optimizer_success = bool(getattr(res.lowest_optimization_result, 'success', True))
+        else:
+            termination_message = str(getattr(res, 'message', 'basinhopping_complete'))
+            optimizer_success = True
         print(f"Basin-hopping complete. Best fun={res.fun:.6e}, hops={args.basin_hops}, seed={rng_seed}")
     else:
-        # Run L-BFGS-B optimization
-        res = minimize(fun, dofs, jac=True, method='L-BFGS-B', callback=callback, options={'maxiter': MAXITER, 'maxcor': args.maxcor, 'ftol': ftol, 'gtol': gtol})
-        res_nit = res.nit
-        print(res.message)
+        phase1_maxiter = 0
+        if (
+            args.num_surfaces > 1
+            and args.multisurface_initial_step_maxiter > 0
+            and args.multisurface_initial_step_scale < 1.0
+        ):
+            phase1_maxiter = min(MAXITER, args.multisurface_initial_step_maxiter)
+            print(
+                "Running scaled multisurface continuation phase with "
+                f"step_scale={args.multisurface_initial_step_scale} and maxiter={phase1_maxiter}"
+            )
+            scaled_fun, scaled_callback = build_scaled_outer_problem(
+                fun,
+                callback,
+                dofs.copy(),
+                args.multisurface_initial_step_scale,
+            )
+            phase1_result = minimize(
+                scaled_fun,
+                np.zeros_like(dofs),
+                jac=True,
+                method='L-BFGS-B',
+                callback=scaled_callback,
+                options={'maxiter': phase1_maxiter, 'maxcor': args.maxcor, 'ftol': ftol, 'gtol': gtol},
+            )
+            phase1_iterations = phase1_result.nit
+            phase1_termination_message = str(phase1_result.message)
+            phase1_success = bool(phase1_result.success)
+            print(phase1_termination_message)
+            dofs = run_dict['accepted_x'].copy()
+            run_dict['x_prev'] = dofs.copy()
+
+        remaining_maxiter = max(MAXITER - (phase1_iterations or 0), 0)
+        if remaining_maxiter > 0:
+            res = minimize(
+                fun,
+                dofs,
+                jac=True,
+                method='L-BFGS-B',
+                callback=callback,
+                options={'maxiter': remaining_maxiter, 'maxcor': args.maxcor, 'ftol': ftol, 'gtol': gtol},
+            )
+            res_nit = (phase1_iterations or 0) + res.nit
+            termination_message = str(res.message)
+            optimizer_success = bool(res.success)
+            if phase1_termination_message is not None:
+                termination_message = f"phase1={phase1_termination_message}; phase2={termination_message}"
+            print(res.message)
+        else:
+            res = SimpleNamespace(
+                x=dofs.copy(),
+                nit=phase1_iterations or 0,
+                message=phase1_termination_message or "phase1_only",
+                success=bool(phase1_success),
+            )
+            res_nit = res.nit
+            termination_message = str(res.message)
+            optimizer_success = bool(res.success)
+            print(termination_message)
 
     # ==============================================================================
     # SAVE OPTIMIZED STATE
     # ==============================================================================
     if not args.init_only:
-        # Restore best DOFs (needed after basin-hopping)
-        JF.x = res.x
+        # Re-solve the surface stack at the reported optimizer endpoint so saved
+        # artifacts reflect the actual final coil DOFs rather than the last
+        # callback-accepted surface state.
+        finalize_surface_stack(
+            res.x,
+            JF,
+            surface_data,
+            run_dict,
+            vessel_surface=VV if len(surface_data) > 1 else None,
+            surface_gap_threshold=SURFACE_GAP_THRESHOLD if len(surface_data) > 1 else 0.0,
+            vessel_gap_threshold=SS_DIST if len(surface_data) > 1 else 0.0,
+        )
 
-        # Recheck self-intersection on final optimized state
-        run_dict['intersecting'] = boozer_surface.surface.is_self_intersecting()
+        full_objective_eval = evaluate_total_objective(
+            np.ones(len(surface_data)),
+            nonQSs,
+            brs,
+            RES_WEIGHT,
+            Jiota,
+            IOTAS_WEIGHT,
+            JCurveLength,
+            LENGTH_WEIGHT,
+            JCurveCurve,
+            CC_WEIGHT,
+            JCurveSurface,
+            CS_WEIGHT,
+            JCurvature,
+            CURVATURE_WEIGHT,
+            JSurfSurf=JSurfSurf,
+            SURF_DIST_WEIGHT=SURF_DIST_WEIGHT,
+        )
+        run_dict['J'] = full_objective_eval['total']
+        run_dict['dJ'] = full_objective_eval['grad'].copy()
+        run_dict['full_eval'] = full_objective_eval
 
         # Save optimized coil configurations
         curves_to_vtk(curves, OUT_DIR_ITER + "/curves_opt", close=True)
         bs.save(OUT_DIR_ITER + "/biot_savart_opt.json")
 
-        # Save optimized surface with magnetic field normal component data
-        bs.set_points(boozer_surface.surface.gamma().reshape((-1, 3)))
-        unitn = boozer_surface.surface.unitnormal()
-        pointData = {"B_N/B": np.sum(bs.B().reshape(unitn.shape) *
-            unitn, axis=2)[:, :, None] / np.sqrt(np.sum(bs.B().reshape(unitn.shape)**2, axis=2))[:, :, None]}
+        save_surface_artifacts(surface_data, bs, OUT_DIR_ITER, "surf_opt", also_write_outer_legacy=True)
 
-        # Print final results
-        boozer_surface.surface.to_vtk(OUT_DIR_ITER + "/surf_opt", extra_data=pointData)
-        boozer_surface.surface.save(OUT_DIR_ITER + "/surf_opt.json")
-
-        final_volume = boozer_surface.surface.volume()
-        final_iota = Iotas(boozer_surface).J()
+        final_volume = outer_surface_data['boozer_surface'].surface.volume()
+        final_iota = Iotas(outer_surface_data['boozer_surface']).J()
         final_max_curvature = np.max(banana_curve.kappa())
+        final_surface_volumes = [entry["boozer_surface"].surface.volume() for entry in surface_data]
+        final_surface_iotas = [Iotas(entry["boozer_surface"]).J() for entry in surface_data]
         print(f"Volume: {final_volume}")
         print(f"Iota: {final_iota}")
         print(f"Max Curvature: {final_max_curvature}")
 
         # Generate final diagnostic plots
-        fieldError = normPlot(boozer_surface.surface, bs, OUT_DIR_ITER + "/NormPlotOptimized")
-        cross_section_plot(surf_coils, boozer_surface.surface, banana_curve, OUT_DIR_ITER + "/CrossSectionOptimized", hbt, VV)
+        fieldError = normPlot(outer_surface_data['boozer_surface'].surface, bs, OUT_DIR_ITER + "/NormPlotOptimized")
+        cross_section_plot(surf_coils, outer_surface_data['boozer_surface'].surface, banana_curve, OUT_DIR_ITER + "/CrossSectionOptimized", hbt, VV)
+    else:
+        final_surface_volumes = initial_surface_volumes
+        final_surface_iotas = initial_surface_iotas
+        run_dict['full_eval'] = evaluate_total_objective(
+            np.ones(len(surface_data)),
+            nonQSs,
+            brs,
+            RES_WEIGHT,
+            Jiota,
+            IOTAS_WEIGHT,
+            JCurveLength,
+            LENGTH_WEIGHT,
+            JCurveCurve,
+            CC_WEIGHT,
+            JCurveSurface,
+            CS_WEIGHT,
+            JCurvature,
+            CURVATURE_WEIGHT,
+            JSurfSurf=JSurfSurf,
+            SURF_DIST_WEIGHT=SURF_DIST_WEIGHT,
+        )
+        run_dict['J'] = run_dict['full_eval']['total']
+        run_dict['dJ'] = run_dict['full_eval']['grad'].copy()
+
+    final_topology_status = evaluate_search_topology_gate(
+        len(surface_data),
+        outer_surface_data['boozer_surface'].surface,
+        bs,
+    )
 
     # Save the results of optimization to a separate file
     results = {
@@ -1028,6 +2124,18 @@ if __name__ == "__main__":
         "ntor": ntor,
         "nphi": nphi,
         "ntheta": ntheta,
+        "NUM_SURFACES": args.num_surfaces,
+        "INNER_SURFACE_RATIO": args.inner_surface_ratio,
+        "SURFACE_GAP_THRESHOLD": SURFACE_GAP_THRESHOLD,
+        "MULTISURFACE_RAMP_ITERATIONS": MULTISURFACE_RAMP_ITERATIONS,
+        "INNER_SURFACE_INITIAL_WEIGHT": INNER_SURFACE_INITIAL_WEIGHT,
+        "MULTISURFACE_INITIAL_STEP_SCALE": args.multisurface_initial_step_scale,
+        "MULTISURFACE_INITIAL_STEP_MAXITER": args.multisurface_initial_step_maxiter,
+        "TOPOLOGY_GATE_FIELDLINES": TOPOLOGY_GATE_FIELDLINES,
+        "TOPOLOGY_GATE_TMAX": TOPOLOGY_GATE_TMAX,
+        "TOPOLOGY_GATE_TOL": TOPOLOGY_GATE_TOL,
+        "TOPOLOGY_GATE_SURVIVAL_THRESHOLD": TOPOLOGY_GATE_SURVIVAL_THRESHOLD,
+        "TOPOLOGY_GATE_PENALTY_SCALE": TOPOLOGY_GATE_PENALTY_SCALE,
         "boozer_stage": stage,
         "CONSTRAINT_WEIGHT": CONSTRAINT_WEIGHT,
         "CC_DIST": CC_DIST,
@@ -1048,16 +2156,33 @@ if __name__ == "__main__":
         "init_only": args.init_only,
         "max_iterations": MAXITER,
         "iterations": res_nit,
+        "FTOL": ftol,
+        "GTOL": gtol,
+        "TERMINATION_MESSAGE": termination_message,
+        "OPTIMIZER_SUCCESS": optimizer_success,
         "basin_hops": args.basin_hops,
         "basin_stepsize": args.basin_stepsize if args.basin_hops > 0 else None,
         "basin_seed": rng_seed if args.basin_hops > 0 else None,
         "basin_iterations": basin_hop_count,
         "basin_minimization_failures": basin_minimization_failures,
+        "PHASE1_ITERATIONS": phase1_iterations,
+        "PHASE1_TERMINATION_MESSAGE": phase1_termination_message,
+        "PHASE1_SUCCESS": phase1_success,
+        "FINAL_TOPOLOGY_GATE_SUCCESS": bool(final_topology_status["success"]),
+        "FINAL_TOPOLOGY_SURVIVED_LINES": int(final_topology_status["survived_lines"]),
+        "FINAL_TOPOLOGY_SURVIVAL_FRACTION": float(final_topology_status["survival_fraction"]),
+        "FINAL_TOPOLOGY_FIRST_EXIT_TIME": final_topology_status["first_exit_time"],
+        "FINAL_TOPOLOGY_FIRST_EXIT_ANGLE": final_topology_status["first_exit_angle"],
+        "FINAL_TOPOLOGY_FIRST_EXIT_REASON": final_topology_status["first_exit_reason"],
+        "FINAL_TOPOLOGY_STOP_REASON_COUNTS": final_topology_status["stop_reason_counts"],
         "TARGET_VOLUME": float(vol_target),
         "TARGET_IOTA": float(iota_target),
         "FINAL_VOLUME": float(final_volume),
         "FINAL_IOTA": float(final_iota),
         "FIELD_ERROR": float(fieldError),
+        "OBJECTIVE_J": float(run_dict['J']),
+        "SEARCH_OBJECTIVE_J": float(run_dict['search_eval']['total']),
+        "FINAL_SEARCH_SURFACE_WEIGHTS": run_dict['search_eval']['surface_weights'].tolist(),
         "SELF_INTERSECTING": run_dict['intersecting'],
         "MAX_CURVATURE": float(final_max_curvature),
         "INITIAL_VOLUME": float(initial_volume),
@@ -1065,5 +2190,15 @@ if __name__ == "__main__":
         "INITIAL_FIELD_ERROR": float(initial_field_error),
         "INITIAL_MAX_CURVATURE": float(initial_max_curvature),
     }
+    results.update(
+        collect_surface_run_metadata(
+            surface_data,
+            run_dict['surface_status'],
+            initial_surface_volumes,
+            initial_surface_iotas,
+            final_surface_volumes,
+            final_surface_iotas,
+        )
+    )
     with open(os.path.join(OUT_DIR_ITER, "results.json"), "w") as outfile:
         json.dump(results, outfile, indent=2)

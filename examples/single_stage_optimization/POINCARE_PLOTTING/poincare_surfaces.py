@@ -99,12 +99,12 @@ def plot_poincare_data(fieldlines_phi_hits, phis, filename, mark_lost=False, asp
 
         # if passed a surface, plot the plasma surface outline
         if surf is not None:
-            phi_new = phis[i] * 1 / (2 * np.pi)
+            phi_new = phis[i] / (2 * np.pi)
             cross_section = surf.cross_section(phi=phi_new, thetas=256)
             r_interp, z_interp = _closed_rz(cross_section)
             axs[row, col].plot(r_interp, z_interp, linewidth=1, c='k')
         if surf1 is not None:
-            phi_new = phis[i] * 1 / (2 * np.pi)
+            phi_new = phis[i] / (2 * np.pi)
             cross_section = surf1.cross_section(phi=phi_new, thetas=256)
             r_interp, z_interp = _closed_rz(cross_section)
             axs[row, col].plot(r_interp, z_interp, linewidth=1, c='r')
@@ -212,9 +212,9 @@ if __name__ == "__main__":
     tol = 1e-7 # Tolerance for field line integration
     interpolate = True # If True, then the BiotSavart magnetic field is interpolated 
                        # on a grid for the magnetic field evaluation
-    nr = 20 # Number of radial points for interpolation
+    nr = 40 # Number of radial points for interpolation
     nphi = 40 # Number of toroidal angle points for interpolation
-    nz = 10 # Number of vertical points for interpolation
+    nz = 20 # Number of vertical points for interpolation
     degree = 3 # Degree for interpolation
 
     SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -256,7 +256,7 @@ if __name__ == "__main__":
     R = np.sqrt(gamma[:, :, 0]**2 + gamma[:, :, 1]**2)
     Z = gamma[:, :, 2]
 
-    nfp = 5
+    nfp = surf.nfp
 
     Rmin = np.min(R)
     Rmax = np.max(R)
