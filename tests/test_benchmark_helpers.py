@@ -762,6 +762,7 @@ def _complete_grouped_adjoint_snapshots():
         _grouped_adjoint_snapshot("after_boozer_surface_fit", 2.0),
         _grouped_adjoint_snapshot("after_boozer_setup", 2.25),
         _grouped_adjoint_snapshot("after_boozer_lbfgs", 2.5),
+        _grouped_adjoint_snapshot("before_boozer_newton", 2.625),
         _grouped_adjoint_snapshot("after_boozer_newton", 2.75),
         _grouped_adjoint_snapshot("after_boozer_solve", 3.0),
         _grouped_adjoint_snapshot("after_boozer_postprocess", 3.25),
@@ -907,8 +908,15 @@ def test_grouped_adjoint_memory_resolves_effective_limited_memory_route():
 
 def test_single_stage_outer_loop_probe_resolves_expected_boozer_method():
     assert resolve_boozer_optimizer_method("scipy") == "bfgs"
+    assert resolve_boozer_optimizer_method("scipy", limited_memory=True) == "lbfgs"
     assert resolve_boozer_optimizer_method("hybrid") == "bfgs-hybrid"
+    with pytest.raises(ValueError, match="does not support limited_memory=True"):
+        resolve_boozer_optimizer_method("hybrid", limited_memory=True)
     assert resolve_boozer_optimizer_method("ondevice") == "bfgs-ondevice"
+    assert (
+        resolve_boozer_optimizer_method("ondevice", limited_memory=True)
+        == "lbfgs-ondevice"
+    )
 
 
 def _stage2_e2e_comparison_case(**overrides):

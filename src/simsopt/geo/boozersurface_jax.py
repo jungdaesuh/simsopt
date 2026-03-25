@@ -379,38 +379,22 @@ def _boozer_ls_coil_vjp(lm, booz_surf, iota, G, weight_inv_modB=True):
         ``d_coil_arrays`` is a list of ``(d_g, d_gd, d_c)`` tuples matching
         the coil_arrays pytree structure.
     """
-    optimize_G = G is not None
-    sdofs = booz_surf._get_surface_dofs()
-    if optimize_G:
-        x = jnp.concatenate([sdofs, jnp.array([iota, G])])
-    else:
-        x = jnp.concatenate([sdofs, jnp.array([iota])])
+    x, optimize_G = _ls_decision_vector(booz_surf, iota, G)
 
     coil_arrays = booz_surf._coil_arrays
     coil_indices = booz_surf._coil_index_lists
 
-    def grad_of_coils(ca):
-        obj = lambda xx: _boozer_penalty_objective(
-            xx,
-            coil_arrays=ca,
-            quadpoints_phi=booz_surf.quadpoints_phi,
-            quadpoints_theta=booz_surf.quadpoints_theta,
-            mpol=booz_surf.mpol,
-            ntor=booz_surf.ntor,
-            nfp=booz_surf.nfp,
-            stellsym=booz_surf.stellsym,
-            scatter_indices=booz_surf.scatter_indices,
-            targetlabel=booz_surf.targetlabel,
-            constraint_weight=booz_surf.constraint_weight,
-            label_type=booz_surf.label_type,
-            phi_idx=booz_surf.phi_idx,
-            optimize_G=optimize_G,
-            weight_inv_modB=weight_inv_modB,
+    def directional_objective_of_coils(ca):
+        return _ls_penalty_directional_objective(
+            x,
+            lm,
+            ca,
+            booz_surf,
+            optimize_G,
+            weight_inv_modB,
         )
-        return jax.grad(obj)(x)
 
-    _, vjp_fn = jax.vjp(grad_of_coils, coil_arrays)
-    (d_coil_arrays,) = vjp_fn(lm)
+    d_coil_arrays = jax.grad(directional_objective_of_coils)(coil_arrays)
     return d_coil_arrays, coil_indices
 
 
@@ -431,12 +415,7 @@ def _boozer_ls_coil_vjp_groups(lm, booz_surf, iota, G, weight_inv_modB=True):
 
 def _build_ls_group_vjp_callback(booz_surf, iota, G, weight_inv_modB=True):
     """Build stable LS group runners for repeated streaming VJPs."""
-    optimize_G = G is not None
-    sdofs = booz_surf._get_surface_dofs()
-    if optimize_G:
-        x = jnp.concatenate([sdofs, jnp.array([iota, G])])
-    else:
-        x = jnp.concatenate([sdofs, jnp.array([iota])])
+    x, optimize_G = _ls_decision_vector(booz_surf, iota, G)
 
     coil_arrays = booz_surf._coil_arrays
     coil_indices = booz_surf._coil_index_lists
@@ -454,7 +433,15 @@ def _build_ls_group_vjp_callback(booz_surf, iota, G, weight_inv_modB=True):
     )
 
     def vjp_groups(lm, _booz_surf, _iota, _G):
-        yield from _yield_group_vjps(lm, group_runners, coil_arrays, coil_indices)
+        for group_runner, group_array, group_index_list in zip(
+            group_runners,
+            coil_arrays,
+            coil_indices,
+        ):
+            def directional_of_group(updated_group_array):
+                return group_runner(updated_group_array, lm)
+
+            yield jax.grad(directional_of_group)(group_array), group_index_list
 
     return vjp_groups
 
@@ -467,9 +454,10 @@ def _make_ls_group_runner(
     weight_inv_modB,
     group_index,
 ):
-    def grad_of_group(group_array):
-        return _group_penalty_gradient(
+    def directional_of_group(group_array, tangent):
+        return _group_penalty_directional_objective(
             x,
+            tangent,
             _replace_group_coil_array(
                 coil_arrays,
                 group_index,
@@ -490,11 +478,42 @@ def _make_ls_group_runner(
             weight_inv_modB,
         )
 
-    return grad_of_group
+    return directional_of_group
 
 
-def _group_penalty_gradient(
+def _ls_decision_vector(booz_surf, iota, G):
+    optimize_G = G is not None
+    sdofs = booz_surf._get_surface_dofs()
+    if optimize_G:
+        x = jnp.concatenate([sdofs, jnp.array([iota, G])])
+    else:
+        x = jnp.concatenate([sdofs, jnp.array([iota])])
+    return x, optimize_G
+
+
+def _ls_penalty_directional_objective(
     x,
+    tangent,
+    coil_arrays,
+    booz_surf,
+    optimize_G,
+    weight_inv_modB,
+):
+    return _directional_derivative(
+        _make_ls_penalty_objective(
+            booz_surf,
+            coil_arrays,
+            optimize_G,
+            weight_inv_modB,
+        ),
+        x,
+        tangent,
+    )
+
+
+def _group_penalty_directional_objective(
+    x,
+    tangent,
     coil_arrays,
     quadpoints_phi,
     quadpoints_theta,
@@ -510,7 +529,70 @@ def _group_penalty_gradient(
     optimize_G,
     weight_inv_modB,
 ):
-    obj = lambda xx: _boozer_penalty_objective(
+    return _directional_derivative(
+        _make_boozer_penalty_objective_closure(
+            coil_arrays=coil_arrays,
+            quadpoints_phi=quadpoints_phi,
+            quadpoints_theta=quadpoints_theta,
+            mpol=mpol,
+            ntor=ntor,
+            nfp=nfp,
+            stellsym=stellsym,
+            scatter_indices=scatter_indices,
+            targetlabel=targetlabel,
+            constraint_weight=constraint_weight,
+            label_type=label_type,
+            phi_idx=phi_idx,
+            optimize_G=optimize_G,
+            weight_inv_modB=weight_inv_modB,
+        ),
+        x,
+        tangent,
+    )
+
+
+def _make_ls_penalty_objective(
+    booz_surf,
+    coil_arrays,
+    optimize_G,
+    weight_inv_modB,
+):
+    return _make_boozer_penalty_objective_closure(
+        coil_arrays=coil_arrays,
+        quadpoints_phi=booz_surf.quadpoints_phi,
+        quadpoints_theta=booz_surf.quadpoints_theta,
+        mpol=booz_surf.mpol,
+        ntor=booz_surf.ntor,
+        nfp=booz_surf.nfp,
+        stellsym=booz_surf.stellsym,
+        scatter_indices=booz_surf.scatter_indices,
+        targetlabel=booz_surf.targetlabel,
+        constraint_weight=booz_surf.constraint_weight,
+        label_type=booz_surf.label_type,
+        phi_idx=booz_surf.phi_idx,
+        optimize_G=optimize_G,
+        weight_inv_modB=weight_inv_modB,
+    )
+
+
+def _make_boozer_penalty_objective_closure(
+    *,
+    coil_arrays,
+    quadpoints_phi,
+    quadpoints_theta,
+    mpol,
+    ntor,
+    nfp,
+    stellsym,
+    scatter_indices,
+    targetlabel,
+    constraint_weight,
+    label_type,
+    phi_idx,
+    optimize_G,
+    weight_inv_modB,
+):
+    return lambda xx: _boozer_penalty_objective(
         xx,
         coil_arrays=coil_arrays,
         quadpoints_phi=quadpoints_phi,
@@ -527,7 +609,11 @@ def _group_penalty_gradient(
         optimize_G=optimize_G,
         weight_inv_modB=weight_inv_modB,
     )
-    return jax.grad(obj)(x)
+
+
+def _directional_derivative(objective, x, tangent):
+    _, directional = jax.jvp(objective, (x,), (tangent,))
+    return directional
 
 
 _DEFAULT_OPTIONS_LS = {
@@ -755,6 +841,21 @@ class BoozerSurfaceJAX(Optimizable):
 
         return emit_progress
 
+    def _make_newton_progress_callback(self):
+        stage_callback = self.options.get("stage_callback")
+        if stage_callback is None:
+            return None
+
+        def emit_progress(iteration: int, fun_value: float, grad_norm: float) -> None:
+            stage_callback(
+                "boozer_newton_progress",
+                iteration=float(iteration),
+                objective=float(fun_value),
+                grad_norm=float(grad_norm),
+            )
+
+        return emit_progress
+
     def _get_surface_dofs(self):
         """Get current surface DOFs as JAX array."""
         return jnp.asarray(self.surface.get_dofs(), dtype=jnp.float64)
@@ -972,7 +1073,14 @@ class BoozerSurfaceJAX(Optimizable):
             optimize_G, weight_inv_modB, constraint_weight
         )
 
-        result = newton_polish(obj_fn, x0, maxiter=maxiter, tol=tol, stab=stab)
+        result = newton_polish(
+            obj_fn,
+            x0,
+            maxiter=maxiter,
+            tol=tol,
+            stab=stab,
+            progress_callback=self._make_newton_progress_callback(),
+        )
 
         sdofs_final, iota_out, G_out = self._unpack_decision_vector(
             result["x"], optimize_G
@@ -1292,6 +1400,11 @@ class BoozerSurfaceJAX(Optimizable):
 
         # Polish with Newton
         self.need_to_run_code = True
+        self._emit_stage_callback(
+            "before_boozer_newton",
+            method="newton-polish",
+            ls_method=str(ls_res["optimizer_method"]),
+        )
         res = self.minimize_boozer_penalty_constraints_newton(
             constraint_weight=self.constraint_weight,
             iota=iota_out,

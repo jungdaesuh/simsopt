@@ -53,7 +53,11 @@ from simsopt.geo.surfaceobjectives import (  # noqa: E402
 from simsopt.objectives import QuadraticPenalty  # noqa: E402
 
 from simsopt.field.biotsavart_jax_backend import BiotSavartJAX  # noqa: E402
-from simsopt.geo.boozersurface_jax import BoozerSurfaceJAX  # noqa: E402
+from simsopt.geo.boozersurface_jax import (  # noqa: E402
+    BoozerSurfaceJAX,
+    _ls_decision_vector,
+    _make_ls_penalty_objective,
+)
 from simsopt.geo.optimizer_jax import PRIVATE_OPTIMIZER_JAX_VERSION  # noqa: E402
 from simsopt.geo.surfaceobjectives_jax import (  # noqa: E402
     BoozerResidualJAX,
@@ -89,6 +93,25 @@ def _explicit_grouped_coil_derivative(coils, d_coil_arrays, coil_indices):
                 )
             )
     return sum(all_derivatives)
+
+
+def _reference_ls_coil_vjp_reverse_over_reverse(
+    booz_surf, lm, iota, G, *, weight_inv_modB=True
+):
+    """Reference the original LS cotangent path before the reverse-over-forward rewrite."""
+    x, optimize_G = _ls_decision_vector(booz_surf, iota, G)
+
+    def grad_of_coils(coil_arrays):
+        objective = _make_ls_penalty_objective(
+            booz_surf,
+            coil_arrays,
+            optimize_G,
+            weight_inv_modB,
+        )
+        return jax.grad(objective)(x)
+
+    _, vjp_fn = jax.vjp(grad_of_coils, booz_surf._coil_arrays)
+    return vjp_fn(lm)[0]
 
 
 def _assert_gradients_finite_nonzero(gradients, message_prefix):
@@ -545,6 +568,41 @@ class TestAdjointSolveConsistency:
         _assert_streaming_group_vjp_matches_full(
             full_d_coil_arrays, full_coil_indices, streamed
         )
+
+    def test_ls_coil_vjp_matches_reverse_over_reverse_reference(self, boozer_setup):
+        """LS cotangent rewrite must match the previous reverse-over-reverse result."""
+        (coils, surf_cpu, surf_jax, bs_cpu, bs_jax, booz_cpu, booz_jax, vol_cpu) = (
+            boozer_setup
+        )
+        from simsopt.objectives.utilities import forward_backward_jax
+
+        P, L, U = booz_jax.res["PLU"]
+        dJ_ds = _iota_unit_rhs((P, L, U))
+        adj = forward_backward_jax(P, L, U, dJ_ds)
+
+        rewritten_d_coil_arrays, rewritten_coil_indices = booz_jax.res["vjp"](
+            adj, booz_jax, booz_jax.res["iota"], booz_jax.res["G"]
+        )
+        reference_d_coil_arrays = _reference_ls_coil_vjp_reverse_over_reverse(
+            booz_jax,
+            adj,
+            booz_jax.res["iota"],
+            booz_jax.res["G"],
+            weight_inv_modB=booz_jax.res.get("weight_inv_modB", True),
+        )
+
+        assert rewritten_coil_indices == booz_jax._coil_index_lists
+        for rewritten_arrays, reference_arrays in zip(
+            rewritten_d_coil_arrays,
+            reference_d_coil_arrays,
+        ):
+            for rewritten_arr, reference_arr in zip(rewritten_arrays, reference_arrays):
+                np.testing.assert_allclose(
+                    np.asarray(rewritten_arr, dtype=float),
+                    np.asarray(reference_arr, dtype=float),
+                    rtol=1e-12,
+                    atol=1e-12,
+                )
 
     def test_exact_streaming_group_vjp_matches_full_vjp(self):
         """Exact-solve group-at-a-time VJPs should match the legacy exact VJP."""

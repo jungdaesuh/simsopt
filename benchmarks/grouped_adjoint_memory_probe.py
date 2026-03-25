@@ -347,6 +347,7 @@ def evaluate_grouped_adjoint_memory_probe(metrics: dict[str, Any]) -> list[str]:
         "after_boozer_surface_fit",
         "after_boozer_setup",
         "after_boozer_lbfgs",
+        "before_boozer_newton",
         "after_boozer_newton",
         "after_boozer_solve",
         "after_boozer_postprocess",

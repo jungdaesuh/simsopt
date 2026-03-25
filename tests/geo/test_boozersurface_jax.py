@@ -229,14 +229,14 @@ def _successful_minimize_result(
     )
 
 
-def _successful_newton_polish_result(x0):
+def _successful_newton_polish_result(x0, *, nit=0):
     n = x0.shape[0]
     return {
         "x": x0,
         "fun": jnp.asarray(0.0),
         "grad": jnp.zeros_like(x0),
         "hessian": jnp.eye(n, dtype=x0.dtype),
-        "nit": 0,
+        "nit": nit,
         "success": True,
     }
 
@@ -245,6 +245,11 @@ def _emit_sparse_progress(progress_callback):
     progress_callback(1, 3.0, 2.0)
     progress_callback(7, 2.0, 1.0)
     progress_callback(25, 1.0, 0.5)
+
+
+def _emit_newton_progress(progress_callback):
+    progress_callback(1, 0.25, 1.0e-2)
+    progress_callback(2, 0.05, 1.0e-4)
 
 
 # ---------------------------------------------------------------------------
@@ -2034,8 +2039,10 @@ class TestBoozerSurfaceJAXClass:
                 status=0,
             )
 
-        def fake_newton_polish(_objective_fn, x0, *, maxiter, tol, stab):
-            del maxiter, tol, stab
+        def fake_newton_polish(
+            _objective_fn, x0, *, maxiter, tol, stab, progress_callback=None
+        ):
+            del maxiter, tol, stab, progress_callback
             return _successful_newton_polish_result(x0)
 
         monkeypatch.setattr(_bsj, "jax_minimize", fake_jax_minimize)
@@ -2106,8 +2113,10 @@ class TestBoozerSurfaceJAXClass:
         """Finite iterates with invalid Newton derivatives must not build PLU/VJP."""
         booz = _make_mock_boozer_surface()
 
-        def fake_newton_polish(_objective_fn, x0, *, maxiter, tol, stab):
-            del maxiter, tol, stab
+        def fake_newton_polish(
+            _objective_fn, x0, *, maxiter, tol, stab, progress_callback=None
+        ):
+            del maxiter, tol, stab, progress_callback
             return {
                 "x": x0,
                 "fun": jnp.asarray(jnp.nan),
@@ -2135,8 +2144,10 @@ class TestBoozerSurfaceJAXClass:
         """Finite maxiter-exhausted Newton exits must still keep PLU/VJP state."""
         booz = _make_mock_boozer_surface()
 
-        def fake_newton_polish(_objective_fn, x0, *, maxiter, tol, stab):
-            del maxiter, tol, stab
+        def fake_newton_polish(
+            _objective_fn, x0, *, maxiter, tol, stab, progress_callback=None
+        ):
+            del maxiter, tol, stab, progress_callback
             n = x0.shape[0]
             return {
                 "x": x0,
@@ -2178,8 +2189,10 @@ class TestBoozerSurfaceJAXClass:
             captured["method"] = method
             return _successful_minimize_result(x0)
 
-        def fake_newton_polish(_objective_fn, x0, *, maxiter, tol, stab):
-            del maxiter, tol, stab
+        def fake_newton_polish(
+            _objective_fn, x0, *, maxiter, tol, stab, progress_callback=None
+        ):
+            del maxiter, tol, stab, progress_callback
             return _successful_newton_polish_result(x0)
 
         monkeypatch.setattr(_bsj, "jax_minimize", fake_jax_minimize)
@@ -2224,8 +2237,10 @@ class TestBoozerSurfaceJAXClass:
                 status=0,
             )
 
-        def fake_newton_polish(_objective_fn, x0, *, maxiter, tol, stab):
-            del maxiter, tol, stab
+        def fake_newton_polish(
+            _objective_fn, x0, *, maxiter, tol, stab, progress_callback=None
+        ):
+            del maxiter, tol, stab, progress_callback
             n = x0.shape[0]
             return {
                 "x": x0,
@@ -2294,8 +2309,10 @@ class TestBoozerSurfaceJAXClass:
             _emit_sparse_progress(progress_callback)
             return _successful_minimize_result(x0, nit=25, nfev=30, njev=30)
 
-        def fake_newton_polish(_objective_fn, x0, *, maxiter, tol, stab):
-            del maxiter, tol, stab
+        def fake_newton_polish(
+            _objective_fn, x0, *, maxiter, tol, stab, progress_callback=None
+        ):
+            del maxiter, tol, stab, progress_callback
             return _successful_newton_polish_result(x0)
 
         monkeypatch.setattr(_bsj, "jax_minimize", fake_jax_minimize)
@@ -2342,8 +2359,10 @@ class TestBoozerSurfaceJAXClass:
             _emit_sparse_progress(progress_callback)
             return _successful_minimize_result(x0, nit=25, nfev=30, njev=30)
 
-        def fake_newton_polish(_objective_fn, x0, *, maxiter, tol, stab):
-            del maxiter, tol, stab
+        def fake_newton_polish(
+            _objective_fn, x0, *, maxiter, tol, stab, progress_callback=None
+        ):
+            del maxiter, tol, stab, progress_callback
             return _successful_newton_polish_result(x0)
 
         monkeypatch.setattr(_bsj, "jax_minimize", fake_jax_minimize)
@@ -2359,6 +2378,59 @@ class TestBoozerSurfaceJAXClass:
         assert res["optimizer_method"] == "lbfgs-ondevice"
         assert [int(payload["iteration"]) for payload in progress_events] == [1, 25]
         assert all(payload["method"] == "lbfgs-ondevice" for payload in progress_events)
+
+    def test_run_code_emits_newton_progress_updates(self, monkeypatch):
+        """run_code() should surface Newton start/progress/completion through stage_callback."""
+        booz = _make_mock_boozer_surface()
+
+        observed = []
+
+        def record_stage(label, **payload):
+            observed.append((label, payload))
+
+        booz.options["stage_callback"] = record_stage
+
+        def fake_jax_minimize(
+            fun,
+            x0,
+            *,
+            method,
+            tol,
+            maxiter,
+            options,
+            progress_callback=None,
+        ):
+            del fun, method, tol, maxiter, options, progress_callback
+            return _successful_minimize_result(x0)
+
+        def fake_newton_polish(
+            _objective_fn, x0, *, maxiter, tol, stab, progress_callback=None
+        ):
+            del maxiter, tol, stab
+            assert progress_callback is not None
+            _emit_newton_progress(progress_callback)
+            return _successful_newton_polish_result(x0, nit=2)
+
+        monkeypatch.setattr(_bsj, "jax_minimize", fake_jax_minimize)
+        monkeypatch.setattr(_bsj, "newton_polish", fake_newton_polish)
+
+        res = booz.run_code(iota=0.3, G=0.05)
+
+        labels = [label for label, _payload in observed]
+        progress_events = [
+            payload for label, payload in observed if label == "boozer_newton_progress"
+        ]
+        before_newton_payload = next(
+            payload for label, payload in observed if label == "before_boozer_newton"
+        )
+        assert res is not None
+        assert res["success"] is True
+        assert "before_boozer_newton" in labels
+        assert "after_boozer_newton" in labels
+        assert before_newton_payload["method"] == "newton-polish"
+        assert before_newton_payload["ls_method"] == "bfgs"
+        assert [int(payload["iteration"]) for payload in progress_events] == [1, 2]
+        assert all("grad_norm" in payload for payload in progress_events)
 
     @PRIVATE_OPTIMIZER_RUNTIME
     @REQUIRES_PRIVATE_LIMITED_MEMORY_RUNTIME
@@ -2407,8 +2479,10 @@ class TestBoozerSurfaceJAXClass:
                 status=0,
             )
 
-        def fake_newton_polish(_objective_fn, x0, *, maxiter, tol, stab):
-            del maxiter, tol
+        def fake_newton_polish(
+            _objective_fn, x0, *, maxiter, tol, stab, progress_callback=None
+        ):
+            del maxiter, tol, progress_callback
             captured["stab"] = stab
             n = x0.shape[0]
             return {

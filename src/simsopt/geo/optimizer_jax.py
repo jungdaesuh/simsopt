@@ -1510,6 +1510,7 @@ def newton_polish(
     maxiter=40,
     tol=1e-11,
     stab=0.0,
+    progress_callback=None,
 ):
     """Newton polish using exact Hessian-vector products.
 
@@ -1560,6 +1561,8 @@ def newton_polish(
         val, grad = val_and_grad_fn(x)
         norm = jnp.linalg.norm(grad)
         nit += 1
+        if progress_callback is not None:
+            progress_callback(nit, float(val), float(norm))
 
     H = _materialize_dense_hessian(hvp_fn, x)
     if stab != 0.0:
