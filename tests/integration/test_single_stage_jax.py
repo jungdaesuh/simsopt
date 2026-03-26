@@ -1763,13 +1763,14 @@ class TestExactSolveCPUJAXParity:
 
 
 def _make_resolve_fd_setup():
-    """Build a Boozer fixture for re-solve FD attempts.
+    """Build a larger Boozer fixture for re-solve FD attempts.
 
-    Uses a 7x7 grid (mpol=3, ntor=3) with more solver budget than the
-    default 5x5 fixture, but this is still NOT stable enough for
-    re-solve FD — the inner Boozer solve branch-switches under random
-    coil perturbation on both 5x5 and 7x7 toy grids. The tests using
-    this fixture are marked xfail. A production-scale fixture is needed.
+    Uses a 7x7 grid (mpol=3, ntor=3) for a smoother Boozer residual
+    landscape, generous solver budget, and tight Newton polish.
+    The 5x5 default fixture branch-switches under coil perturbation;
+    the 7x7 grid is better but still inadequate for the full composed
+    derivative when the adjoint term materially matters (documented in
+    CLAUDE.md — deferred pending a stable representative fixture).
     """
     ncoils, nfp = 3, 2
     stellsym = True
@@ -1988,9 +1989,9 @@ class TestNonQSRatioJAXResolveFD:
 #             -> Test 7 (parity with explicit path)
 #   Test 5 (no run_dict/Optimizable dependency) is independent
 #
-# All tests are xfail(strict=True): they FAIL today (red), and will
+# Tests start as xfail(strict=True): they FAIL today (red), and will
 # PASS once the corresponding implementation exists (green). Removing
-# the xfail marker is the green step.
+# the xfail marker is the green step. Tests 3a/3b are now green.
 # =======================================================================
 
 _S3 = "Section 3: JAX-traceable single-stage objective not yet implemented"
@@ -2004,32 +2005,39 @@ class TestRunCodeFunctional:
 
     run_code_functional() must:
     - Accept explicit (coil_arrays, sdofs, iota, G) arguments
-    - Return the same result structure as run_code()
+    - Return matching iota/G/success/PLU; s=None, vjp=None,
+      vjp_groups=None (CPU callbacks incompatible with functional
+      contract); sdofs=solved surface DOFs array
     - NOT mutate any self.* state
-    - NOT use Python if/assert on runtime values
+
+    Note: this method still uses Python if/float()/np.asarray() on
+    solver outputs.  Removing those for full JIT/grad traceability
+    is deferred to make_traceable_objective (tests 1-7).
     """
 
-    @pytest.mark.xfail(strict=True, reason=_S3)
     def test_run_code_functional_exists_and_matches(self):
         """run_code_functional returns same iota/G/success as run_code."""
         (_, _, _, _, bs_jax, _, booz_jax, _, iota0, G0) = _make_boozer_setup(
             constraint_weight=1.0,
         )
 
-        # Baseline: stateful version
-        res_stateful = booz_jax.run_code(iota0, G0)
-        assert res_stateful is not None and res_stateful["success"]
-
-        # Functional version with the same inputs
+        # Capture inputs before any solve.
         coil_arrays = booz_jax._coil_arrays
         sdofs = np.array(booz_jax.surface.get_dofs())
 
+        # Call functional version FIRST — self.surface is still in the
+        # pre-solve state, so this exercises the true functional contract
+        # (no dependency on prior stateful mutation).
         res_functional = booz_jax.run_code_functional(
             coil_arrays,
             sdofs,
             iota0,
             G0,
         )
+
+        # Stateful version with the same starting point.
+        res_stateful = booz_jax.run_code(iota0, G0)
+        assert res_stateful is not None and res_stateful["success"]
 
         np.testing.assert_allclose(
             res_functional["iota"],
@@ -2044,8 +2052,10 @@ class TestRunCodeFunctional:
             )
         assert res_functional["success"] == res_stateful["success"]
         assert res_functional["PLU"] is not None
+        # Functional path returns solved sdofs, not a CPU surface object.
+        assert res_functional["s"] is None
+        assert res_functional["sdofs"] is not None
 
-    @pytest.mark.xfail(strict=True, reason=_S3)
     def test_run_code_functional_does_not_mutate_self(self):
         """run_code_functional must not change booz_surf internal state."""
         (_, _, _, _, bs_jax, _, booz_jax, _, iota0, G0) = _make_boozer_setup(

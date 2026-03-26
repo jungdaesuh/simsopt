@@ -864,9 +864,10 @@ class BoozerSurfaceJAX(Optimizable):
         """Write JAX DOFs back to CPU surface."""
         self.surface.set_dofs(np.asarray(dofs_jax))
 
-    def _pack_decision_vector(self, iota, G):
+    def _pack_decision_vector(self, iota, G, sdofs=None):
         """Pack [surface_dofs, iota] or [surface_dofs, iota, G]."""
-        sdofs = self._get_surface_dofs()
+        if sdofs is None:
+            sdofs = self._get_surface_dofs()
         if G is not None:
             return jnp.concatenate([sdofs, jnp.array([iota, G])])
         return jnp.concatenate([sdofs, jnp.array([iota])])
@@ -878,12 +879,13 @@ class BoozerSurfaceJAX(Optimizable):
         return x[:-1], float(x[-1]), None
 
     def _make_penalty_objective_with(
-        self, optimize_G, weight_inv_modB, constraint_weight=None
+        self, optimize_G, weight_inv_modB, constraint_weight=None,
+        coil_arrays=None,
     ):
         """Build penalty objective with explicit overrides."""
         return partial(
             _boozer_penalty_objective,
-            coil_arrays=self._coil_arrays,
+            coil_arrays=coil_arrays if coil_arrays is not None else self._coil_arrays,
             quadpoints_phi=self.quadpoints_phi,
             quadpoints_theta=self.quadpoints_theta,
             mpol=self.mpol,
@@ -901,7 +903,7 @@ class BoozerSurfaceJAX(Optimizable):
             weight_inv_modB=weight_inv_modB,
         )
 
-    def _compute_residual_vector(self, sdofs, iota, G):
+    def _compute_residual_vector(self, sdofs, iota, G, coil_arrays=None):
         """Compute unscalarized penalty residual vector at given state.
 
         Reuses M3's ``boozer_residual_vector`` for the Boozer part,
@@ -910,6 +912,8 @@ class BoozerSurfaceJAX(Optimizable):
         Returns a NumPy array matching CPU
         ``boozer_penalty_constraints(..., scalarize=False)``.
         """
+        if coil_arrays is None:
+            coil_arrays = self._coil_arrays
         gamma, xphi, xtheta = _surface_geometry_from_dofs(
             sdofs,
             self.quadpoints_phi,
@@ -922,7 +926,7 @@ class BoozerSurfaceJAX(Optimizable):
         )
         nphi, ntheta = int(gamma.shape[0]), int(gamma.shape[1])
         points = gamma.reshape(-1, 3)
-        B = grouped_biot_savart_B(points, self._coil_arrays).reshape(nphi, ntheta, 3)
+        B = grouped_biot_savart_B(points, coil_arrays).reshape(nphi, ntheta, 3)
 
         r_boozer_raw = boozer_residual_vector(
             G, iota, B, xphi, xtheta, self.options["weight_inv_modB"]
@@ -939,13 +943,46 @@ class BoozerSurfaceJAX(Optimizable):
                 xtheta,
                 self.phi_idx,
                 points,
-                self._coil_arrays,
+                coil_arrays,
             )
         )
         rl = jnp.sqrt(cw) * (lab - self.targetlabel)
         rz = jnp.sqrt(cw) * gamma[0, 0, 2]
 
         return np.asarray(jnp.concatenate([r_boozer, jnp.array([rl, rz])]))
+
+    def _resolve_optimizer_method(self, limited_memory=None):
+        """Resolve optimizer method string from options."""
+        optimizer_backend = self.options["optimizer_backend"]
+        require_target_backend_x64(optimizer_backend)
+        if limited_memory is None:
+            limited_memory = self.options["limited_memory"]
+        effective_limited_memory = bool(limited_memory)
+        if (
+            optimizer_backend == "ondevice"
+            and self.options["force_ondevice_limited_memory"]
+        ):
+            effective_limited_memory = True
+        return resolve_optimizer_backend_method(
+            optimizer_backend,
+            limited_memory=effective_limited_memory,
+        )
+
+    def _collect_optimizer_options(self):
+        """Gather optimizer-specific options from self.options."""
+        return {
+            k: self.options[k]
+            for k in (
+                "hybrid_scipy_maxiter",
+                "line_search_maxiter",
+                "maxcor",
+                "ftol",
+                "maxfun",
+                "maxgrad",
+                "maxls",
+            )
+            if k in self.options
+        }
 
     def minimize_boozer_penalty_constraints_LBFGS(
         self,
@@ -977,31 +1014,8 @@ class BoozerSurfaceJAX(Optimizable):
             optimize_G, weight_inv_modB, constraint_weight
         )
 
-        optimizer_backend = self.options["optimizer_backend"]
-        require_target_backend_x64(optimizer_backend)
-        effective_limited_memory = bool(limited_memory)
-        if (
-            optimizer_backend == "ondevice"
-            and self.options["force_ondevice_limited_memory"]
-        ):
-            effective_limited_memory = True
-        method = resolve_optimizer_backend_method(
-            optimizer_backend,
-            limited_memory=effective_limited_memory,
-        )
-
-        optimizer_options = {}
-        for key in (
-            "hybrid_scipy_maxiter",
-            "line_search_maxiter",
-            "maxcor",
-            "ftol",
-            "maxfun",
-            "maxgrad",
-            "maxls",
-        ):
-            if key in self.options:
-                optimizer_options[key] = self.options[key]
+        method = self._resolve_optimizer_method(limited_memory=limited_memory)
+        optimizer_options = self._collect_optimizer_options()
 
         result = jax_minimize(
             obj_fn,
@@ -1036,7 +1050,7 @@ class BoozerSurfaceJAX(Optimizable):
 
         if verbose:
             print(
-                f"{'L-BFGS-B' if effective_limited_memory else 'BFGS'} solve - "
+                f"{method} solve - "
                 f"success={resdict['success']}  iter={resdict['iter']}, "
                 f"iota={iota_out:.16f}, ||grad||_inf="
                 f"{np.linalg.norm(resdict['gradient'], ord=np.inf):.3e}",
@@ -1434,3 +1448,127 @@ class BoozerSurfaceJAX(Optimizable):
             iterations=float(res["iter"]),
         )
         return res
+
+    def run_code_functional(self, coil_arrays, sdofs, iota, G):
+        """Pure functional form of ``run_code()`` — no self mutation.
+
+        Accepts explicit arguments instead of reading from self state.
+        Does NOT set ``self.res``, ``self.need_to_run_code``, or
+        ``self.surface`` DOFs.
+
+        This is the pure-functional prerequisite for a JAX-traceable
+        outer objective.  It eliminates self-mutation so that a future
+        ``make_traceable_objective`` wrapper can close over this method
+        and differentiate through the solve.  **This method is not
+        itself JIT/grad-traceable** — it still uses ``float()`` casts,
+        ``np.asarray`` conversions, and Python ``if`` on solver outputs.
+        Making those trace-safe is deferred to the traceable-objective
+        implementation (Section 3 items 2-7).
+
+        Differences from the stateful ``run_code()`` result dict:
+
+        * ``sdofs`` — solved surface DOFs as a JAX array (new key).
+        * ``s`` — ``None``.  The functional path does not produce a
+          CPU surface object; use ``sdofs`` instead.
+        * ``vjp``, ``vjp_groups`` — ``None``.  The CPU VJP callbacks
+          read from ``self`` state at call/construction time and are
+          structurally incompatible with the functional contract.
+          Downstream traceable consumers should use JAX autodiff
+          through ``coil_arrays → objective`` instead.
+
+        Args:
+            coil_arrays: list of ``(gammas, gammadashs, currents)`` tuples.
+            sdofs: surface DOFs as a 1-D array.
+            iota: initial guess for rotational transform.
+            G: initial guess for G.
+
+        Returns:
+            dict with solver results.  See docstring for keys that
+            differ from the stateful ``run_code()`` path.
+        """
+        optimize_G = G is not None
+        weight_inv_modB = self.options["weight_inv_modB"]
+
+        # Pack from explicit sdofs (not self.surface)
+        sdofs_jax = jnp.asarray(sdofs, dtype=jnp.float64)
+        x0 = self._pack_decision_vector(iota, G, sdofs=sdofs_jax)
+        obj_fn = self._make_penalty_objective_with(
+            optimize_G, weight_inv_modB, coil_arrays=coil_arrays,
+        )
+        method = self._resolve_optimizer_method()
+        optimizer_options = self._collect_optimizer_options()
+
+        # LBFGS → Newton polish
+        ls_result = jax_minimize(
+            obj_fn, x0, method=method,
+            tol=self.options["bfgs_tol"],
+            maxiter=self.options["bfgs_maxiter"],
+            options=optimizer_options,
+        )
+        newton_result = newton_polish(
+            obj_fn, ls_result.x,
+            maxiter=self.options["newton_maxiter"],
+            tol=self.options["newton_tol"],
+            stab=self.options["newton_stab"],
+        )
+
+        sdofs_final, iota_out, G_out = self._unpack_decision_vector(
+            newton_result["x"], optimize_G
+        )
+
+        if (
+            not np.all(np.isfinite(np.asarray(newton_result["x"])))
+            or not np.all(np.isfinite(np.asarray(newton_result["grad"])))
+            or not np.all(np.isfinite(np.asarray(newton_result["hessian"])))
+        ):
+            return {
+                "residual": None,
+                "jacobian": None,
+                "hessian": None,
+                "iter": newton_result["nit"],
+                "success": False,
+                "G": G_out,
+                "s": None,
+                "sdofs": sdofs_final,
+                "iota": iota_out,
+                "PLU": None,
+                "vjp": None,
+                "vjp_groups": None,
+                "type": "ls",
+                "weight_inv_modB": weight_inv_modB,
+                "fun": float(np.asarray(newton_result["fun"])),
+                "optimizer_method": method,
+            }
+
+        H = newton_result["hessian"]
+        P, L, U = jax.scipy.linalg.lu(H)
+
+        G_for_res = (
+            G_out
+            if G_out is not None
+            else float(compute_G_from_currents(
+                jnp.concatenate([c for _, _, c in coil_arrays])
+            ))
+        )
+        residual_vec = self._compute_residual_vector(
+            sdofs_final, iota_out, G_for_res, coil_arrays=coil_arrays,
+        )
+
+        return {
+            "residual": residual_vec,
+            "jacobian": np.asarray(newton_result["grad"]),
+            "hessian": H,
+            "iter": newton_result["nit"],
+            "success": newton_result["success"],
+            "G": G_out,
+            "s": None,
+            "sdofs": sdofs_final,
+            "iota": iota_out,
+            "PLU": (np.asarray(P), np.asarray(L), np.asarray(U)),
+            "vjp": None,
+            "vjp_groups": None,
+            "type": "ls",
+            "weight_inv_modB": weight_inv_modB,
+            "fun": float(newton_result["fun"]),
+            "optimizer_method": method,
+        }
