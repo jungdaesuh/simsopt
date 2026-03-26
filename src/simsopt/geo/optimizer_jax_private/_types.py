@@ -30,15 +30,21 @@ class _ZoomState(NamedTuple):
     a_lo: float | jax.Array
     phi_lo: float | jax.Array
     dphi_lo: float | jax.Array
+    g_lo: jax.Array
     a_hi: float | jax.Array
     phi_hi: float | jax.Array
     dphi_hi: float | jax.Array
+    g_hi: jax.Array
     a_rec: float | jax.Array
     phi_rec: float | jax.Array
     a_star: float | jax.Array
     phi_star: float | jax.Array
     dphi_star: float | jax.Array
     g_star: jax.Array
+    best_a: float | jax.Array
+    best_phi: float | jax.Array
+    best_dphi: float | jax.Array
+    best_g: jax.Array
     nfev: int | jax.Array
     ngev: int | jax.Array
 
@@ -50,6 +56,11 @@ class _LineSearchState(NamedTuple):
     a_i1: float | jax.Array
     phi_i1: float | jax.Array
     dphi_i1: float | jax.Array
+    g_i1: jax.Array
+    best_a: float | jax.Array
+    best_phi: float | jax.Array
+    best_dphi: float | jax.Array
+    best_g: jax.Array
     nfev: int | jax.Array
     ngev: int | jax.Array
     a_star: float | jax.Array

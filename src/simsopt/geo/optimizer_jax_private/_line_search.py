@@ -52,15 +52,18 @@ def _zoom(
     restricted_func_and_grad,
     wolfe_one,
     wolfe_two,
+    phi_0,
     a_lo,
     phi_lo,
     dphi_lo,
+    g_lo,
     a_hi,
     phi_hi,
     dphi_hi,
-    g_0,
+    g_hi,
     pass_through,
 ):
+    lo_is_better = phi_lo <= phi_hi
     state = _ZoomState(
         done=False,
         failed=False,
@@ -68,15 +71,21 @@ def _zoom(
         a_lo=a_lo,
         phi_lo=phi_lo,
         dphi_lo=dphi_lo,
+        g_lo=g_lo,
         a_hi=a_hi,
         phi_hi=phi_hi,
         dphi_hi=dphi_hi,
+        g_hi=g_hi,
         a_rec=(a_lo + a_hi) / 2.0,
         phi_rec=(phi_lo + phi_hi) / 2.0,
         a_star=1.0,
         phi_star=phi_lo,
         dphi_star=dphi_lo,
-        g_star=g_0,
+        g_star=g_lo,
+        best_a=jnp.where(lo_is_better, a_lo, a_hi),
+        best_phi=jnp.where(lo_is_better, phi_lo, phi_hi),
+        best_dphi=jnp.where(lo_is_better, dphi_lo, dphi_hi),
+        best_g=jnp.where(lo_is_better, g_lo, g_hi),
         nfev=0,
         ngev=0,
     )
@@ -122,6 +131,13 @@ def _zoom(
         dphi_j = dphi_j.astype(state.dphi_lo.dtype)
         g_j = g_j.astype(state.g_star.dtype)
         state = state._replace(nfev=state.nfev + 1, ngev=state.ngev + 1)
+        improves_best = jnp.isfinite(phi_j) & (phi_j < state.best_phi)
+        state = state._replace(
+            best_a=jnp.where(improves_best, a_j, state.best_a),
+            best_phi=jnp.where(improves_best, phi_j, state.best_phi),
+            best_dphi=jnp.where(improves_best, dphi_j, state.best_dphi),
+            best_g=jnp.where(improves_best, g_j, state.best_g),
+        )
 
         hi_to_j = wolfe_one(a_j, phi_j) | (phi_j >= state.phi_lo)
         star_to_j = wolfe_two(dphi_j) & (~hi_to_j)
@@ -138,6 +154,7 @@ def _zoom(
                     a_hi=a_j,
                     phi_hi=phi_j,
                     dphi_hi=dphi_j,
+                    g_hi=g_j,
                     a_rec=state.a_hi,
                     phi_rec=state.phi_hi,
                 ),
@@ -159,6 +176,7 @@ def _zoom(
                     a_hi=state.a_lo,
                     phi_hi=state.phi_lo,
                     dphi_hi=state.dphi_lo,
+                    g_hi=state.g_lo,
                     a_rec=state.a_hi,
                     phi_rec=state.phi_hi,
                 ),
@@ -175,17 +193,38 @@ def _zoom(
             **_binary_replace(
                 lo_to_j,
                 state._asdict(),
-                dict(a_lo=a_j, phi_lo=phi_j, dphi_lo=dphi_j),
+                dict(a_lo=a_j, phi_lo=phi_j, dphi_lo=dphi_j, g_lo=g_j),
             )
         )
         state = state._replace(j=state.j + 1)
         state = state._replace(failed=state.failed | (state.j >= 30))
         return state
 
-    return lax.while_loop(
+    state = lax.while_loop(
         lambda state: (~state.done) & (~pass_through) & (~state.failed),
         body,
         state,
+    )
+    best_is_acceptable = (
+        jnp.isfinite(state.best_phi)
+        & (~wolfe_one(state.best_a, state.best_phi))
+        & (state.best_phi < phi_0)
+    )
+    return state._replace(
+        failed=jnp.where(state.failed & best_is_acceptable, False, state.failed),
+        done=jnp.where(state.failed & best_is_acceptable, True, state.done),
+        a_star=jnp.where(state.failed & best_is_acceptable, state.best_a, state.a_star),
+        phi_star=jnp.where(
+            state.failed & best_is_acceptable,
+            state.best_phi,
+            state.phi_star,
+        ),
+        dphi_star=jnp.where(
+            state.failed & best_is_acceptable,
+            state.best_dphi,
+            state.dphi_star,
+        ),
+        g_star=jnp.where(state.failed & best_is_acceptable, state.best_g, state.g_star),
     )
 
 
@@ -228,6 +267,11 @@ def _line_search(
         a_i1=0.0,
         phi_i1=phi_0,
         dphi_i1=dphi_0,
+        g_i1=gfk,
+        best_a=0.0,
+        best_phi=phi_0,
+        best_dphi=dphi_0,
+        best_g=gfk,
         nfev=1 if (old_fval is None or gfk is None) else 0,
         ngev=1 if (old_fval is None or gfk is None) else 0,
         a_star=0.0,
@@ -241,6 +285,15 @@ def _line_search(
 
         phi_i, dphi_i, g_i = restricted_func_and_grad(a_i)
         state = state._replace(nfev=state.nfev + 1, ngev=state.ngev + 1)
+        improves_best_i = (
+            jnp.isfinite(phi_i) & (~wolfe_one(a_i, phi_i)) & (phi_i < state.best_phi)
+        )
+        state = state._replace(
+            best_a=jnp.where(improves_best_i, a_i, state.best_a),
+            best_phi=jnp.where(improves_best_i, phi_i, state.best_phi),
+            best_dphi=jnp.where(improves_best_i, dphi_i, state.best_dphi),
+            best_g=jnp.where(improves_best_i, g_i, state.best_g),
+        )
 
         star_to_zoom1 = wolfe_one(a_i, phi_i) | (
             (phi_i >= state.phi_i1) & (state.i > 1)
@@ -252,34 +305,60 @@ def _line_search(
             restricted_func_and_grad,
             wolfe_one,
             wolfe_two,
+            phi_0,
             state.a_i1,
             state.phi_i1,
             state.dphi_i1,
+            state.g_i1,
             a_i,
             phi_i,
             dphi_i,
-            gfk,
+            g_i,
             ~star_to_zoom1,
         )
         state = state._replace(
             nfev=state.nfev + zoom1.nfev, ngev=state.ngev + zoom1.ngev
+        )
+        improves_best_zoom1 = (
+            jnp.isfinite(zoom1.best_phi)
+            & (~wolfe_one(zoom1.best_a, zoom1.best_phi))
+            & (zoom1.best_phi < state.best_phi)
+        )
+        state = state._replace(
+            best_a=jnp.where(improves_best_zoom1, zoom1.best_a, state.best_a),
+            best_phi=jnp.where(improves_best_zoom1, zoom1.best_phi, state.best_phi),
+            best_dphi=jnp.where(improves_best_zoom1, zoom1.best_dphi, state.best_dphi),
+            best_g=jnp.where(improves_best_zoom1, zoom1.best_g, state.best_g),
         )
 
         zoom2 = _zoom(
             restricted_func_and_grad,
             wolfe_one,
             wolfe_two,
+            phi_0,
             a_i,
             phi_i,
             dphi_i,
+            g_i,
             state.a_i1,
             state.phi_i1,
             state.dphi_i1,
-            gfk,
+            state.g_i1,
             ~star_to_zoom2,
         )
         state = state._replace(
             nfev=state.nfev + zoom2.nfev, ngev=state.ngev + zoom2.ngev
+        )
+        improves_best_zoom2 = (
+            jnp.isfinite(zoom2.best_phi)
+            & (~wolfe_one(zoom2.best_a, zoom2.best_phi))
+            & (zoom2.best_phi < state.best_phi)
+        )
+        state = state._replace(
+            best_a=jnp.where(improves_best_zoom2, zoom2.best_a, state.best_a),
+            best_phi=jnp.where(improves_best_zoom2, zoom2.best_phi, state.best_phi),
+            best_dphi=jnp.where(improves_best_zoom2, zoom2.best_dphi, state.best_dphi),
+            best_g=jnp.where(improves_best_zoom2, zoom2.best_g, state.best_g),
         )
 
         state = state._replace(
@@ -310,12 +389,47 @@ def _line_search(
                 keys=["a_star", "phi_star", "dphi_star", "g_star"],
             ),
         )
-        return state._replace(i=state.i + 1, a_i1=a_i, phi_i1=phi_i, dphi_i1=dphi_i)
+        return state._replace(
+            i=state.i + 1,
+            a_i1=a_i,
+            phi_i1=phi_i,
+            dphi_i1=dphi_i,
+            g_i1=g_i,
+        )
 
     state = lax.while_loop(
         lambda state: (~state.done) & (state.i <= maxiter) & (~state.failed),
         body,
         state,
+    )
+    best_is_acceptable = jnp.isfinite(state.best_phi) & (state.best_phi < phi_0)
+    state = state._replace(
+        failed=jnp.where(
+            (state.failed | (~state.done)) & best_is_acceptable, False, state.failed
+        ),
+        done=jnp.where(
+            (state.failed | (~state.done)) & best_is_acceptable, True, state.done
+        ),
+        a_star=jnp.where(
+            (state.failed | (~state.done)) & best_is_acceptable,
+            state.best_a,
+            state.a_star,
+        ),
+        phi_star=jnp.where(
+            (state.failed | (~state.done)) & best_is_acceptable,
+            state.best_phi,
+            state.phi_star,
+        ),
+        dphi_star=jnp.where(
+            (state.failed | (~state.done)) & best_is_acceptable,
+            state.best_dphi,
+            state.dphi_star,
+        ),
+        g_star=jnp.where(
+            (state.failed | (~state.done)) & best_is_acceptable,
+            state.best_g,
+            state.g_star,
+        ),
     )
 
     status = jnp.where(

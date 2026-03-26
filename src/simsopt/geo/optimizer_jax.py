@@ -39,6 +39,7 @@ __all__ = [
     "newton_polish",
     "newton_polish_traceable",
     "newton_exact",
+    "newton_exact_traceable",
     "require_target_backend_x64",
     "resolve_optimizer_backend_method",
 ]
@@ -375,7 +376,7 @@ def newton_polish_traceable(
     flow so higher-level traced objectives can invoke the Newton stage without
     crossing back into Python.
     """
-    val_and_grad_fn = jax.value_and_grad(objective_fn)
+    val_and_grad_fn = jax.jit(jax.value_and_grad(objective_fn))
     hvp_fn = _hessian_vector_product_fn(objective_fn)
 
     val0, grad0 = val_and_grad_fn(x0)
@@ -468,17 +469,19 @@ def newton_polish_traceable(
         },
     )
 
+    val_final, grad_final = val_and_grad_fn(state["x"])
+    norm_final = jnp.linalg.norm(grad_final)
     H = _materialize_dense_hessian(hvp_fn, state["x"])
     if stab != 0.0:
         H = H + stab * jnp.eye(H.shape[0], dtype=H.dtype)
 
     return {
         "x": state["x"],
-        "fun": state["val"],
-        "grad": state["grad"],
+        "fun": val_final,
+        "grad": grad_final,
         "hessian": H,
         "nit": state["nit"],
-        "success": state["norm"] <= tol,
+        "success": norm_final <= tol,
     }
 
 
@@ -514,6 +517,61 @@ def newton_exact(
         "jacobian": J,
         "nit": nit,
         "success": bool(float(norm) <= tol),
+    }
+
+
+def newton_exact_traceable(
+    residual_fn,
+    x0,
+    *,
+    maxiter=40,
+    tol=1e-13,
+):
+    """Trace-safe Newton solver for the exact Boozer residual system."""
+    jac_fn = jax.jacfwd(residual_fn)
+
+    r0 = residual_fn(x0)
+    J0 = jac_fn(x0)
+    norm0 = jnp.linalg.norm(r0)
+
+    def cond_fun(state):
+        return (state["nit"] < maxiter) & (state["norm"] > tol)
+
+    def body_fun(state):
+        dx = jnp.linalg.solve(state["jacobian"], state["residual"])
+        correction = jnp.linalg.solve(
+            state["jacobian"],
+            state["residual"] - state["jacobian"] @ dx,
+        )
+        x_next = state["x"] - (dx + correction)
+        residual_next = residual_fn(x_next)
+        jacobian_next = jac_fn(x_next)
+        return {
+            "x": x_next,
+            "residual": residual_next,
+            "jacobian": jacobian_next,
+            "norm": jnp.linalg.norm(residual_next),
+            "nit": state["nit"] + 1,
+        }
+
+    state = lax.while_loop(
+        cond_fun,
+        body_fun,
+        {
+            "x": x0,
+            "residual": r0,
+            "jacobian": J0,
+            "norm": norm0,
+            "nit": jnp.asarray(0, dtype=jnp.int32),
+        },
+    )
+
+    return {
+        "x": state["x"],
+        "residual": state["residual"],
+        "jacobian": state["jacobian"],
+        "nit": state["nit"],
+        "success": state["norm"] <= tol,
     }
 
 

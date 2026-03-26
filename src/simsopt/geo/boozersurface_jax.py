@@ -47,6 +47,7 @@ except (ImportError, ModuleNotFoundError):
 
 from .surface_fourier_jax import stellsym_scatter_indices
 from ..field.biotsavart_jax import (
+    group_coil_data,
     grouped_biot_savart_B,
     grouped_biot_savart_A,
 )
@@ -66,6 +67,7 @@ from .optimizer_jax import (
     VALID_OPTIMIZER_BACKENDS,
     jax_minimize,
     newton_exact,
+    newton_exact_traceable,
     newton_polish,
     newton_polish_traceable,
     require_target_backend_x64,
@@ -89,6 +91,34 @@ def _yield_group_vjps(lm, group_runners, coil_arrays, coil_indices):
     ):
         _, vjp_fn = jax.vjp(group_runner, group_array)
         yield vjp_fn(lm)[0], group_index_list
+
+
+def _extract_grouped_coil_data(biotsavart):
+    """Return grouped coil geometry/current arrays for a biotsavart-like object.
+
+    ``BiotSavartJAX`` provides a dedicated grouped extractor. Fallback callers,
+    including the lightweight Boozer test doubles, only expose a coil list and
+    the public per-coil geometry/current interface.
+    """
+    grouped_extractor = getattr(biotsavart, "_extract_coil_data_grouped", None)
+    if grouped_extractor is not None:
+        return grouped_extractor()
+
+    coils = getattr(biotsavart, "_coils", None)
+    if coils is None:
+        raise AttributeError(
+            "BoozerSurfaceJAX requires a biotsavart object that provides either "
+            "_extract_coil_data_grouped() or a _coils list."
+        )
+
+    gammas = []
+    gammadashs = []
+    currents = []
+    for coil in coils:
+        gammas.append(coil.curve.gamma())
+        gammadashs.append(coil.curve.gammadash())
+        currents.append(coil.current.get_value())
+    return group_coil_data(gammas, gammadashs, currents)
 
 
 def _compute_label(
@@ -830,10 +860,12 @@ class BoozerSurfaceJAX(Optimizable):
         different ``num_quad_points`` can coexist without crashing
         on array stacking.
         """
-        self.coil_groups = self.biotsavart._extract_coil_data_grouped()
-        self.coil_currents = jnp.asarray(
-            np.asarray([c.current.get_value() for c in self.biotsavart._coils])
-        )
+        self.coil_groups = _extract_grouped_coil_data(self.biotsavart)
+        coil_currents = [None] * len(self.biotsavart._coils)
+        for _, _, currents, indices in self.coil_groups:
+            for local_i, coil_i in enumerate(indices):
+                coil_currents[coil_i] = currents[local_i]
+        self.coil_currents = jnp.asarray(coil_currents, dtype=jnp.float64)
 
     def _emit_stage_callback(
         self,
@@ -934,26 +966,70 @@ class BoozerSurfaceJAX(Optimizable):
         )
 
     def run_code_traceable(self, coil_arrays, sdofs, iota, G):
-        """Trace-safe LS inner solve for the target on-device lane.
+        """Trace-safe pure-array inner solve for the Section 3 target path.
 
-        This helper is the pure-array counterpart to ``run_code()`` for Section 3:
-        it accepts explicit coil arrays and warm-start state, performs the inner
-        LS solve on the on-device optimizer lane, and returns only JAX values.
-        It never reads or writes ``self.res`` / ``self.surface`` / ``self.need_to_run_code``.
+        Accepts explicit coil arrays and warm-start state, returns only JAX
+        arrays / scalars, and never reads or writes ``self.res``,
+        ``self.surface``, or ``self.need_to_run_code``.
+
+        Supported modes:
+        - LS Boozer solve on the on-device optimizer lane.
+        - Exact Boozer Newton solve (backend-independent).
         """
-        if self.boozer_type != "ls":
-            raise RuntimeError(
-                "run_code_traceable() currently supports LS Boozer solves only."
+        weight_inv_modB = self.options["weight_inv_modB"]
+
+        if self.boozer_type == "exact":
+            G_exact = (
+                G
+                if G is not None
+                else compute_G_from_currents(
+                    jnp.concatenate([c for _, _, c in coil_arrays])
+                )
             )
+            x0 = jnp.concatenate(
+                [
+                    jnp.asarray(sdofs, dtype=jnp.float64),
+                    jnp.array([iota, G_exact], dtype=jnp.float64),
+                ]
+            )
+            mask_indices = self._compute_stellsym_mask_indices()
+            res_fn = self._make_exact_residual_with(
+                mask_indices, coil_arrays=coil_arrays
+            )
+            result = newton_exact_traceable(
+                res_fn,
+                x0,
+                maxiter=self.options["newton_maxiter"],
+                tol=self.options["newton_tol"],
+            )
+            P, L, U = jax.scipy.linalg.lu(result["jacobian"])
+            finite = (
+                jnp.all(jnp.isfinite(result["x"]))
+                & jnp.all(jnp.isfinite(result["residual"]))
+                & jnp.all(jnp.isfinite(result["jacobian"]))
+            )
+            return {
+                "x": result["x"],
+                "sdofs": result["x"][:-2],
+                "iota": result["x"][-2],
+                "G": result["x"][-1],
+                "fun": 0.5 * jnp.mean(jnp.square(result["residual"])),
+                "residual": result["residual"],
+                "jacobian": result["jacobian"],
+                "plu": (P, L, U),
+                "nit": result["nit"],
+                "success": result["success"] & finite,
+                "type": "exact",
+                "weight_inv_modB": weight_inv_modB,
+            }
 
         method = self._resolve_optimizer_method()
         if method not in {"bfgs-ondevice", "lbfgs-ondevice"}:
             raise RuntimeError(
-                "run_code_traceable() requires optimizer_backend='ondevice'."
+                "run_code_traceable() requires optimizer_backend='ondevice' for LS solves."
             )
 
         optimize_G = G is not None
-        weight_inv_modB = self.options["weight_inv_modB"]
         obj_fn = self._make_penalty_objective_with(
             optimize_G,
             weight_inv_modB,
@@ -997,6 +1073,9 @@ class BoozerSurfaceJAX(Optimizable):
             tol=self.options["newton_tol"],
             stab=self.options["newton_stab"],
         )
+        compiled_val_and_grad = jax.jit(jax.value_and_grad(obj_fn))
+        fun_out, grad_out = compiled_val_and_grad(newton_result["x"])
+        P, L, U = jax.scipy.linalg.lu(newton_result["hessian"])
         sdofs_out, iota_out, G_out = self._unpack_decision_vector_jax(
             newton_result["x"],
             optimize_G,
@@ -1004,7 +1083,7 @@ class BoozerSurfaceJAX(Optimizable):
         )
         finite = (
             jnp.all(jnp.isfinite(newton_result["x"]))
-            & jnp.all(jnp.isfinite(newton_result["grad"]))
+            & jnp.all(jnp.isfinite(grad_out))
             & jnp.all(jnp.isfinite(newton_result["hessian"]))
         )
         return {
@@ -1012,12 +1091,14 @@ class BoozerSurfaceJAX(Optimizable):
             "sdofs": sdofs_out,
             "iota": iota_out,
             "G": G_out,
-            "fun": newton_result["fun"],
-            "grad": newton_result["grad"],
+            "fun": fun_out,
+            "grad": grad_out,
             "hessian": newton_result["hessian"],
+            "plu": (P, L, U),
             "nit": newton_result["nit"],
             "success": newton_result["success"] & finite,
             "optimizer_method": method,
+            "type": "ls",
             "weight_inv_modB": weight_inv_modB,
         }
 
@@ -1319,11 +1400,11 @@ class BoozerSurfaceJAX(Optimizable):
             )
         return res
 
-    def _make_exact_residual(self, mask_indices):
-        """Build the JIT-compiled exact residual function."""
+    def _make_exact_residual_with(self, mask_indices, coil_arrays=None):
+        """Build the exact residual function with optional explicit coil arrays."""
         return partial(
             _boozer_exact_residual,
-            coil_arrays=self._coil_arrays,
+            coil_arrays=self._coil_arrays if coil_arrays is None else coil_arrays,
             quadpoints_phi=self.quadpoints_phi,
             quadpoints_theta=self.quadpoints_theta,
             mpol=self.mpol,
@@ -1338,6 +1419,10 @@ class BoozerSurfaceJAX(Optimizable):
             stellsym_surface=self.stellsym,
             weight_inv_modB=self.options["weight_inv_modB"],
         )
+
+    def _make_exact_residual(self, mask_indices):
+        """Build the JIT-compiled exact residual function."""
+        return self._make_exact_residual_with(mask_indices)
 
     def _compute_stellsym_mask_indices(self):
         """Compute the integer mask indices for the exact residual.

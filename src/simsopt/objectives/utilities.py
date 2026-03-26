@@ -12,6 +12,7 @@ __all__ = [
     'Weight',
     'forward_backward',
     'forward_backward_jax',
+    'plu_solve_jax',
 ]
 
 
@@ -66,6 +67,44 @@ def forward_backward_jax(P, L, U, rhs, iterative_refinement=False):
         adj = adj + P_jax @ zp
 
     return adj
+
+
+def plu_solve_jax(P, L, U, rhs, iterative_refinement=False):
+    """
+    Solve ``(PLU) * x = rhs`` using JAX triangular solves.
+
+    This complements ``forward_backward_jax()``, which solves the transposed
+    system.  The factorization contract matches the rest of simsopt: callers
+    provide ``P, L, U`` from ``jax.scipy.linalg.lu``.
+    """
+    import jax
+    import jax.numpy as jnp
+
+    P_jax = jnp.asarray(P)
+    L_jax = jnp.asarray(L)
+    U_jax = jnp.asarray(U)
+    rhs_jax = jnp.asarray(rhs)
+
+    y = jax.scipy.linalg.solve_triangular(
+        L_jax,
+        P_jax.T @ rhs_jax,
+        lower=True,
+        unit_diagonal=True,
+    )
+    x = jax.scipy.linalg.solve_triangular(U_jax, y, lower=False)
+
+    if iterative_refinement:
+        residual = rhs_jax - (P_jax @ L_jax @ U_jax) @ x
+        yp = jax.scipy.linalg.solve_triangular(
+            L_jax,
+            P_jax.T @ residual,
+            lower=True,
+            unit_diagonal=True,
+        )
+        xp = jax.scipy.linalg.solve_triangular(U_jax, yp, lower=False)
+        x = x + xp
+
+    return x
 
 
 def sum_across_comm(derivative, comm):

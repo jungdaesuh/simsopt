@@ -85,12 +85,8 @@ def _minimize_bfgs_private(
             gfk=state.g_k,
             maxiter=line_search_maxiter,
         )
-        state = state._replace(
-            nfev=state.nfev + line_search_results.nfev,
-            ngev=state.ngev + line_search_results.ngev,
-            failed=line_search_results.failed,
-            line_search_status=line_search_results.status,
-        )
+        next_nfev = state.nfev + line_search_results.nfev
+        next_ngev = state.ngev + line_search_results.ngev
         s_k = line_search_results.a_k * p_k
         x_kp1 = state.x_k + s_k
         f_kp1 = line_search_results.f_k
@@ -108,21 +104,49 @@ def _minimize_bfgs_private(
         converged = jnp_linalg.norm(g_kp1, ord=norm) < gtol
         next_k = state.k + 1
 
-        _emit_iteration_callbacks(
-            callback, progress_callback, x_kp1, next_k, f_kp1, g_kp1
-        )
+        def failed_step(_):
+            return state._replace(
+                converged=False,
+                failed=True,
+                nfev=next_nfev,
+                ngev=next_ngev,
+                line_search_status=line_search_results.status,
+            )
 
-        return state._replace(
-            converged=converged,
-            k=next_k,
-            x_k=x_kp1,
-            f_k=f_kp1,
-            g_k=g_kp1,
-            H_k=H_kp1,
-            old_old_fval=state.f_k,
+        def accepted_step(_):
+            _emit_iteration_callbacks(
+                callback, progress_callback, x_kp1, next_k, f_kp1, g_kp1
+            )
+            return state._replace(
+                converged=converged,
+                nfev=next_nfev,
+                ngev=next_ngev,
+                k=next_k,
+                x_k=x_kp1,
+                f_k=f_kp1,
+                g_k=g_kp1,
+                H_k=H_kp1,
+                old_old_fval=state.f_k,
+                line_search_status=line_search_results.status,
+            )
+
+        return lax.cond(
+            line_search_results.failed,
+            failed_step,
+            accepted_step,
+            operand=None,
         )
 
     state = lax.while_loop(cond_fun, body_fun, state)
+    f_final, g_final = api.value_and_grad(fun)(state.x_k)
+    converged_final = jnp_linalg.norm(g_final, ord=norm) < gtol
+    state = state._replace(
+        converged=converged_final,
+        nfev=state.nfev + 1,
+        ngev=state.ngev + 1,
+        f_k=jnp.asarray(f_final, dtype=state.f_k.dtype),
+        g_k=jnp.asarray(g_final, dtype=state.g_k.dtype),
+    )
     status = jnp.where(
         state.converged,
         0,

@@ -121,6 +121,8 @@ def _minimize_lbfgs_private(
             maxiter=maxls,
         )
 
+        next_nfev = state.nfev + ls_results.nfev
+        next_ngev = state.ngev + ls_results.ngev
         s_k = jnp.asarray(ls_results.a_k).astype(p_k.dtype) * p_k
         x_kp1 = state.x_k + s_k
         f_kp1 = ls_results.f_k
@@ -129,37 +131,70 @@ def _minimize_lbfgs_private(
         rho_k_inv = jnp.real(_dot(y_k, s_k))
         rho_k = jnp.reciprocal(rho_k_inv).astype(y_k.dtype)
         gamma = rho_k_inv / jnp.real(_dot(jnp.conj(y_k), y_k))
-
         next_k = state.k + 1
-        next_nfev = state.nfev + ls_results.nfev
-        next_ngev = state.ngev + ls_results.ngev
 
-        status = jnp.array(0)
-        status = jnp.where(state.f_k - f_kp1 < ftol, 4, status)
-        status = jnp.where(next_ngev >= maxgrad, 3, status)
-        status = jnp.where(next_nfev >= maxfun, 2, status)
-        status = jnp.where(next_k >= maxiter, 1, status)
-        status = jnp.where(ls_results.failed, 5, status)
+        def failed_step(_):
+            return state._replace(
+                converged=False,
+                failed=True,
+                nfev=next_nfev,
+                ngev=next_ngev,
+                status=jnp.array(5),
+                ls_status=ls_results.status,
+            )
 
-        converged = jnp_linalg.norm(g_kp1, ord=norm) < gtol
-        _emit_iteration_callbacks(
-            callback, progress_callback, x_kp1, next_k, f_kp1, g_kp1
-        )
-        return state._replace(
-            converged=converged,
-            failed=(status > 0) & (~converged),
-            k=next_k,
-            nfev=next_nfev,
-            ngev=next_ngev,
-            x_k=x_kp1.astype(state.x_k.dtype),
-            f_k=f_kp1.astype(state.f_k.dtype),
-            g_k=g_kp1.astype(state.g_k.dtype),
-            s_history=_update_history_vectors(state.s_history, s_k),
-            y_history=_update_history_vectors(state.y_history, y_k),
-            rho_history=_update_history_scalars(state.rho_history, rho_k),
-            gamma=gamma.astype(state.g_k.dtype),
-            status=jnp.where(converged, 0, status),
-            ls_status=ls_results.status,
-        )
+        def accepted_step(_):
+            status = jnp.array(0)
+            status = jnp.where(state.f_k - f_kp1 < ftol, 4, status)
+            status = jnp.where(next_ngev >= maxgrad, 3, status)
+            status = jnp.where(next_nfev >= maxfun, 2, status)
+            status = jnp.where(next_k >= maxiter, 1, status)
+            converged = jnp_linalg.norm(g_kp1, ord=norm) < gtol
+            _emit_iteration_callbacks(
+                callback, progress_callback, x_kp1, next_k, f_kp1, g_kp1
+            )
+            return state._replace(
+                converged=converged,
+                failed=(status > 0) & (~converged),
+                k=next_k,
+                nfev=next_nfev,
+                ngev=next_ngev,
+                x_k=x_kp1.astype(state.x_k.dtype),
+                f_k=f_kp1.astype(state.f_k.dtype),
+                g_k=g_kp1.astype(state.g_k.dtype),
+                s_history=_update_history_vectors(state.s_history, s_k),
+                y_history=_update_history_vectors(state.y_history, y_k),
+                rho_history=_update_history_scalars(state.rho_history, rho_k),
+                gamma=gamma.astype(state.g_k.dtype),
+                status=jnp.where(converged, 0, status),
+                ls_status=ls_results.status,
+            )
 
-    return lax.while_loop(cond_fun, body_fun, state_initial)
+        return lax.cond(ls_results.failed, failed_step, accepted_step, operand=None)
+
+    state = lax.while_loop(cond_fun, body_fun, state_initial)
+    f_final, g_final = api.value_and_grad(fun)(state.x_k)
+    converged_final = jnp_linalg.norm(g_final, ord=norm) < gtol
+    state = state._replace(
+        converged=converged_final,
+        nfev=state.nfev + 1,
+        ngev=state.ngev + 1,
+        f_k=jnp.asarray(f_final, dtype=state.f_k.dtype),
+        g_k=jnp.asarray(g_final, dtype=state.g_k.dtype),
+    )
+    status = jnp.where(
+        state.converged,
+        0,
+        jnp.where(
+            state.k >= maxiter,
+            1,
+            jnp.where(
+                state.nfev >= maxfun,
+                2,
+                jnp.where(
+                    state.ngev >= maxgrad, 3, jnp.where(state.failed, 5, state.status)
+                ),
+            ),
+        ),
+    )
+    return state._replace(status=status)

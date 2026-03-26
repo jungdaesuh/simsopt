@@ -28,13 +28,19 @@ import jax.numpy as jnp
 
 from .._core.derivative import Derivative, derivative_dec
 from .._core.optimizable import Optimizable
-from ..objectives.utilities import forward_backward_jax
+from ..objectives.utilities import forward_backward_jax, plu_solve_jax
 from ..field.biotsavart_jax import grouped_biot_savart_B
+from ..field.biotsavart_jax_backend import project_coil_cotangents_to_derivative
 from .boozer_residual_jax import (
     boozer_residual_vector,
     _surface_geometry_from_dofs,
 )
-from .boozersurface_jax import _compute_label, _make_boozer_penalty_objective_closure
+from .boozersurface_jax import (
+    _boozer_penalty_objective,
+    _boozer_exact_residual,
+    _compute_label,
+    _make_boozer_penalty_objective_closure,
+)
 from .label_constraints_jax import compute_G_from_currents
 
 __all__ = [
@@ -63,19 +69,11 @@ def _iter_adjoint_coil_cotangents(vjp_fn, vjp_groups_fn, booz_surf, iota, G, adj
 
 def _coil_cotangents_to_derivative(coils, d_coil_arrays, coil_indices):
     """Compatibility helper for slice-at-a-time coil VJP projection."""
-    all_derivatives = []
-    for (d_g, d_gd, d_c), indices in zip(d_coil_arrays, coil_indices):
-        for local_i, global_i in enumerate(indices):
-            all_derivatives.append(
-                coils[global_i].vjp(
-                    np.asarray(d_g[local_i]),
-                    np.asarray(d_gd[local_i]),
-                    np.asarray([d_c[local_i]]),
-                )
-            )
-    if not all_derivatives:
-        return Derivative({})
-    return sum(all_derivatives)
+    return project_coil_cotangents_to_derivative(
+        coils,
+        d_coil_arrays,
+        coil_indices,
+    )
 
 
 def _adjoint_coil_derivative(
@@ -84,8 +82,9 @@ def _adjoint_coil_derivative(
     """Project grouped adjoint cotangents to a coil ``Derivative``.
 
     Uses ``BiotSavartJAX.coil_cotangents_to_derivative()`` for
-    JAX-native coil DOF projection (no CPU ``Coil.vjp()`` per-coil
-    loop for native curves).
+    shared coil DOF projection. JAX-capable curves stay on the JAX
+    projection path; unsupported curves fall back to ``Coil.vjp()``
+    slice by slice.
     """
     total_derivative = Derivative({})
     for d_coil_array, coil_group_indices in _iter_adjoint_coil_cotangents(
@@ -297,9 +296,36 @@ class BoozerResidualJAX(Optimizable):
         booz_surf = self.boozer_surface
         _ensure_solved(booz_surf)
 
+        sdofs = booz_surf._get_surface_dofs()
+        iota = booz_surf.res["iota"]
+        G = booz_surf.res["G"]
+        weight_inv_modB = booz_surf.res.get("weight_inv_modB", True)
+        x_inner = booz_surf._pack_decision_vector(iota, G, sdofs=sdofs)
+        current_coil_dofs = jnp.asarray(self.biotsavart.x.copy(), dtype=jnp.float64)
+
+        def objective_of_coils(coil_dofs, x):
+            return _boozer_penalty_objective(
+                x,
+                coil_arrays=self.biotsavart.grouped_coil_arrays_from_dofs(coil_dofs),
+                quadpoints_phi=booz_surf.quadpoints_phi,
+                quadpoints_theta=booz_surf.quadpoints_theta,
+                mpol=booz_surf.mpol,
+                ntor=booz_surf.ntor,
+                nfp=booz_surf.nfp,
+                stellsym=booz_surf.stellsym,
+                scatter_indices=booz_surf.scatter_indices,
+                targetlabel=booz_surf.targetlabel,
+                constraint_weight=self.constraint_weight,
+                label_type=booz_surf.label_type,
+                phi_idx=booz_surf.phi_idx,
+                optimize_G=G is not None,
+                weight_inv_modB=weight_inv_modB,
+            )
+
+        self._J = float(jax.jit(objective_of_coils)(current_coil_dofs, x_inner))
+
         # Evaluate surface geometry and field entirely via JAX (no CPU
         # surface.gamma/gammadash/label.J round-trips).
-        sdofs = booz_surf._get_surface_dofs()
         gamma, xphi_jax, xtheta_jax = _surface_geometry_from_dofs(
             sdofs,
             booz_surf.quadpoints_phi,
@@ -318,37 +344,12 @@ class BoozerResidualJAX(Optimizable):
         # stays on device via the updated set_points().
         self.biotsavart.set_points(points)
 
-        iota = booz_surf.res["iota"]
-        G = booz_surf.res["G"]
         effective_G = _resolved_boozer_G(booz_surf)
-        weight_inv_modB = booz_surf.res.get("weight_inv_modB", True)
         cw = self.constraint_weight if self.constraint_weight is not None else 1.0
 
         B_3d = grouped_biot_savart_B(points, booz_surf._coil_arrays).reshape(
             nphi, ntheta, 3
         )
-
-        r_flat = boozer_residual_vector(
-            effective_G,
-            iota,
-            B_3d,
-            xphi_jax,
-            xtheta_jax,
-            weight_inv_modB,
-        )
-        J_boozer = 0.5 * jnp.sum(r_flat**2) / num_points
-
-        label_val = _compute_label(
-            booz_surf.label_type,
-            gamma,
-            xphi_jax,
-            xtheta_jax,
-            booz_surf.phi_idx,
-            points,
-            booz_surf._coil_arrays,
-        )
-        J_label = 0.5 * cw * (label_val - booz_surf.targetlabel) ** 2
-        self._J = float(J_boozer + J_label)
 
         vjp_fn = booz_surf.res["vjp"]
         vjp_groups_fn = booz_surf.res.get("vjp_groups")
@@ -646,10 +647,53 @@ _TRACEABLE_INNER_OBJECTIVE_KEYS = (
     "weight_inv_modB",
 )
 
+_TRACEABLE_TOTAL_OBJECTIVE_KEYS = (
+    "quadpoints_phi",
+    "quadpoints_theta",
+    "mpol",
+    "ntor",
+    "nfp",
+    "stellsym",
+    "scatter_indices",
+    "optimize_G",
+    "weight_inv_modB",
+    "constraint_weight",
+    "targetlabel",
+    "label_type",
+    "phi_idx",
+    "iota_target",
+)
+
+_TRACEABLE_EXACT_RESIDUAL_KEYS = (
+    "quadpoints_phi",
+    "quadpoints_theta",
+    "mpol",
+    "ntor",
+    "nfp",
+    "stellsym",
+    "scatter_indices",
+    "targetlabel",
+    "label_type",
+    "phi_idx",
+    "mask_indices",
+    "stellsym_surface",
+    "weight_inv_modB",
+)
+
 
 def _traceable_inner_objective_kwargs(objective_kwargs):
     """Select the LS inner-objective kwargs from the full traceable contract."""
     return {key: objective_kwargs[key] for key in _TRACEABLE_INNER_OBJECTIVE_KEYS}
+
+
+def _traceable_total_objective_kwargs(objective_kwargs):
+    """Select the scalar total-objective kwargs from the full traceable contract."""
+    return {key: objective_kwargs[key] for key in _TRACEABLE_TOTAL_OBJECTIVE_KEYS}
+
+
+def _traceable_exact_residual_kwargs(objective_kwargs):
+    """Select the exact-residual kwargs from the full traceable contract."""
+    return {key: objective_kwargs[key] for key in _TRACEABLE_EXACT_RESIDUAL_KEYS}
 
 
 def _traceable_total_objective(
@@ -712,46 +756,66 @@ def _traceable_forward_result(
     bs_jax,
     *,
     coil_dofs,
-    warmstart_x,
-    warmstart_sdofs,
-    warmstart_iota,
-    warmstart_G,
+    baseline_x,
+    baseline_value,
+    baseline_plu,
     optimize_G,
     baseline_coil_dofs,
     failure_value,
     failure_scale,
+    predictor_kind,
     objective_kwargs,
 ):
     """Run the pure traceable inner solve and return value plus solver data."""
-    coil_arrays = bs_jax.grouped_coil_arrays_from_dofs(coil_dofs)
-    solve_result = booz_jax.run_code_traceable(
-        coil_arrays,
-        warmstart_sdofs,
-        warmstart_iota,
-        warmstart_G,
-    )
-    solved_x = solve_result["x"]
-    solved_hessian = solve_result["hessian"]
-    solved_success = solve_result["success"]
-    delta = coil_dofs - baseline_coil_dofs
+    same_coils = jnp.all(coil_dofs == baseline_coil_dofs)
 
-    # Keep the static objective assembly out of the cond branch. Capturing
-    # Python metadata such as label_type inside the branch closure perturbs the
-    # scalar value even though the solved inner state is identical.
-    value_x = jnp.where(solved_success, solved_x, warmstart_x)
-    success_value = _traceable_total_objective(
-        value_x,
-        coil_arrays,
-        **objective_kwargs,
-    )
-    failure_penalty = failure_value + 0.5 * failure_scale * jnp.dot(delta, delta)
+    def baseline_case(_):
+        return {
+            "value": baseline_value,
+            "x": baseline_x,
+            "plu": baseline_plu,
+            "success": jnp.array(True, dtype=bool),
+        }
 
-    return {
-        "value": jnp.where(solved_success, success_value, failure_penalty),
-        "x": solved_x,
-        "hessian": solved_hessian,
-        "success": solved_success,
-    }
+    def general_case(_):
+        coil_arrays = bs_jax.grouped_coil_arrays_from_dofs(coil_dofs)
+        warmstart_x = _traceable_predict_warmstart_x(
+            booz_jax,
+            bs_jax,
+            coil_dofs=coil_dofs,
+            baseline_coil_dofs=baseline_coil_dofs,
+            baseline_x=baseline_x,
+            baseline_plu=baseline_plu,
+            predictor_kind=predictor_kind,
+            objective_kwargs=objective_kwargs,
+        )
+        warmstart_sdofs, warmstart_iota, warmstart_G = (
+            booz_jax._unpack_decision_vector_jax(
+                warmstart_x,
+                optimize_G,
+                coil_arrays,
+            )
+        )
+        solve_result = booz_jax.run_code_traceable(
+            coil_arrays,
+            warmstart_sdofs,
+            warmstart_iota,
+            warmstart_G,
+        )
+        delta = coil_dofs - baseline_coil_dofs
+        failure_penalty = failure_value + 0.5 * failure_scale * jnp.dot(delta, delta)
+        return {
+            "value": jnp.where(
+                solve_result["success"],
+                solve_result["fun"],
+                failure_penalty,
+            ),
+            "x": solve_result["x"],
+            "plu": solve_result["plu"],
+            "success": solve_result["success"],
+        }
+
+    return jax.lax.cond(same_coils, baseline_case, general_case, operand=None)
 
 
 def _traceable_total_gradient(
@@ -760,17 +824,18 @@ def _traceable_total_gradient(
     *,
     coil_dofs,
     solved_x,
-    solved_hessian,
+    solved_plu,
     objective_kwargs,
 ):
     """Implicit total derivative of the pure traceable objective."""
+    total_objective_kwargs = _traceable_total_objective_kwargs(objective_kwargs)
     inner_objective_kwargs = _traceable_inner_objective_kwargs(objective_kwargs)
 
     def total_of_coils(cd):
         return _traceable_total_objective(
             solved_x,
             bs_jax.grouped_coil_arrays_from_dofs(cd),
-            **objective_kwargs,
+            **total_objective_kwargs,
         )
 
     coil_arrays = bs_jax.grouped_coil_arrays_from_dofs(coil_dofs)
@@ -778,10 +843,10 @@ def _traceable_total_gradient(
         lambda x: _traceable_total_objective(
             x,
             coil_arrays,
-            **objective_kwargs,
+            **total_objective_kwargs,
         )
     )(solved_x)
-    adjoint = jnp.linalg.solve(solved_hessian.T, dJ_dx)
+    adjoint = forward_backward_jax(*solved_plu, dJ_dx, iterative_refinement=True)
 
     def directional_of_coils(cd):
         return _traceable_directional_inner_objective(
@@ -796,13 +861,62 @@ def _traceable_total_gradient(
     return direct_grad - implicit_grad
 
 
+def _traceable_predict_warmstart_x(
+    booz_jax,
+    bs_jax,
+    *,
+    coil_dofs,
+    baseline_coil_dofs,
+    baseline_x,
+    baseline_plu,
+    predictor_kind,
+    objective_kwargs,
+):
+    """Predict a coil-dependent warm start via a first-order implicit step."""
+    delta = coil_dofs - baseline_coil_dofs
+
+    if predictor_kind == "exact":
+        exact_residual_kwargs = _traceable_exact_residual_kwargs(objective_kwargs)
+
+        def baseline_residual_of_coils(cd):
+            return _boozer_exact_residual(
+                baseline_x,
+                bs_jax.grouped_coil_arrays_from_dofs(cd),
+                **exact_residual_kwargs,
+            )
+
+        forcing = jax.jvp(
+            baseline_residual_of_coils,
+            (baseline_coil_dofs,),
+            (delta,),
+        )[1]
+    else:
+        inner_objective_kwargs = _traceable_inner_objective_kwargs(objective_kwargs)
+
+        def baseline_stationarity_of_coils(cd):
+            inner_objective = _make_boozer_penalty_objective_closure(
+                coil_arrays=bs_jax.grouped_coil_arrays_from_dofs(cd),
+                **inner_objective_kwargs,
+            )
+            return jax.grad(inner_objective)(baseline_x)
+
+        forcing = jax.jvp(
+            baseline_stationarity_of_coils,
+            (baseline_coil_dofs,),
+            (delta,),
+        )[1]
+
+    dx = plu_solve_jax(*baseline_plu, -forcing, iterative_refinement=True)
+    return baseline_x + dx
+
+
 def make_traceable_objective(booz_jax, bs_jax, iota_target):
     """Build a pure function ``f(coil_dofs) -> scalar`` for single-stage optimization.
 
     The returned closure:
 
-    * **Forward**: re-solves the LS Boozer problem from a frozen warm-start
-      using the pure on-device inner solver path and returns the exact
+    * **Forward**: re-solves the inner Boozer problem from a coil-dependent
+      linearized warm-start predictor and returns the exact
       single-stage scalar objective
       ``BoozerResidualJAX + 0.5 * (iota - iota_target)^2``.
     * **No object mutation**: coil geometry is reconstructed directly from
@@ -825,7 +939,10 @@ def make_traceable_objective(booz_jax, bs_jax, iota_target):
     _ensure_solved(booz_jax)
 
     objective_method = booz_jax._resolve_optimizer_method()
-    if objective_method not in {"bfgs-ondevice", "lbfgs-ondevice"}:
+    if booz_jax.boozer_type == "ls" and objective_method not in {
+        "bfgs-ondevice",
+        "lbfgs-ondevice",
+    }:
         raise RuntimeError(
             "make_traceable_objective() requires optimizer_backend='ondevice'."
         )
@@ -838,6 +955,7 @@ def make_traceable_objective(booz_jax, bs_jax, iota_target):
 
     baseline_coil_dofs = jnp.asarray(bs_jax.x.copy(), dtype=jnp.float64)
     optimize_G = warmstart_G is not None
+    predictor_kind = booz_jax.boozer_type
     objective_kwargs = {
         "quadpoints_phi": booz_jax.quadpoints_phi,
         "quadpoints_theta": booz_jax.quadpoints_theta,
@@ -853,19 +971,38 @@ def make_traceable_objective(booz_jax, bs_jax, iota_target):
         "label_type": booz_jax.label_type,
         "phi_idx": booz_jax.phi_idx,
         "iota_target": jnp.asarray(iota_target, dtype=jnp.float64),
+        "mask_indices": booz_jax.res.get("mask"),
+        "stellsym_surface": booz_jax.stellsym,
     }
+    baseline_plu = booz_jax.res["PLU"]
 
     baseline_x = booz_jax._pack_decision_vector(
         float(warmstart_iota),
         None if warmstart_G is None else float(warmstart_G),
         sdofs=warmstart_sdofs,
     )
-    baseline_value = float(
-        _traceable_total_objective(
-            baseline_x,
-            bs_jax.grouped_coil_arrays_from_dofs(baseline_coil_dofs),
-            **objective_kwargs,
+
+    def baseline_objective_of_coils(coil_dofs, x):
+        return _boozer_penalty_objective(
+            x,
+            coil_arrays=bs_jax.grouped_coil_arrays_from_dofs(coil_dofs),
+            quadpoints_phi=booz_jax.quadpoints_phi,
+            quadpoints_theta=booz_jax.quadpoints_theta,
+            mpol=booz_jax.mpol,
+            ntor=booz_jax.ntor,
+            nfp=booz_jax.nfp,
+            stellsym=booz_jax.stellsym,
+            scatter_indices=booz_jax.scatter_indices,
+            targetlabel=booz_jax.targetlabel,
+            constraint_weight=booz_jax.constraint_weight,
+            label_type=booz_jax.label_type,
+            phi_idx=booz_jax.phi_idx,
+            optimize_G=optimize_G,
+            weight_inv_modB=booz_jax.options["weight_inv_modB"],
         )
+
+    baseline_value = float(
+        jax.jit(baseline_objective_of_coils)(baseline_coil_dofs, baseline_x)
     )
     failure_value = jnp.asarray(
         baseline_value + max(abs(baseline_value), 1.0),
@@ -878,44 +1015,51 @@ def make_traceable_objective(booz_jax, bs_jax, iota_target):
             booz_jax,
             bs_jax,
             coil_dofs=coil_dofs,
-            warmstart_x=baseline_x,
-            warmstart_sdofs=warmstart_sdofs,
-            warmstart_iota=warmstart_iota,
-            warmstart_G=warmstart_G,
+            baseline_x=baseline_x,
+            baseline_value=jnp.asarray(baseline_value, dtype=jnp.float64),
+            baseline_plu=baseline_plu,
             optimize_G=optimize_G,
             baseline_coil_dofs=baseline_coil_dofs,
             failure_value=failure_value,
             failure_scale=failure_scale,
+            predictor_kind=predictor_kind,
             objective_kwargs=objective_kwargs,
         )
+
+    compiled_forward_result_for = jax.jit(_forward_result_for)
+
+    def _total_gradient_for(coil_dofs, solved_x, solved_plu):
+        return _traceable_total_gradient(
+            booz_jax,
+            bs_jax,
+            coil_dofs=coil_dofs,
+            solved_x=solved_x,
+            solved_plu=solved_plu,
+            objective_kwargs=objective_kwargs,
+        )
+
+    compiled_total_gradient_for = jax.jit(_total_gradient_for)
 
     @jax.custom_vjp
     def f(coil_dofs):
         coil_dofs = jnp.asarray(coil_dofs, dtype=jnp.float64)
-        return _forward_result_for(coil_dofs)["value"]
+        return compiled_forward_result_for(coil_dofs)["value"]
 
     def f_fwd(coil_dofs):
         coil_dofs = jnp.asarray(coil_dofs, dtype=jnp.float64)
-        result = _forward_result_for(coil_dofs)
+        result = compiled_forward_result_for(coil_dofs)
         return result["value"], (
             coil_dofs,
             result["x"],
-            result["hessian"],
+            result["plu"],
             result["success"],
         )
 
     def f_bwd(saved_state, cotangent):
-        coil_dofs, solved_x, solved_hessian, success = saved_state
+        coil_dofs, solved_x, solved_plu, success = saved_state
 
         def _success(_):
-            return _traceable_total_gradient(
-                booz_jax,
-                bs_jax,
-                coil_dofs=coil_dofs,
-                solved_x=solved_x,
-                solved_hessian=solved_hessian,
-                objective_kwargs=objective_kwargs,
-            )
+            return compiled_total_gradient_for(coil_dofs, solved_x, solved_plu)
 
         def _failure(_):
             return failure_scale * (coil_dofs - baseline_coil_dofs)

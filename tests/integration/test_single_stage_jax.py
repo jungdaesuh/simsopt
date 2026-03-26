@@ -32,6 +32,9 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+from benchmarks.run_code_benchmark_common import summarize_result_fun
+from benchmarks.single_stage_smoke_fixture import build_real_single_stage_init_fixture
+
 sopp = pytest.importorskip(
     "simsoptpp",
     reason="Single-stage integration tests require simsoptpp (use candidate-fixed env)",
@@ -70,6 +73,11 @@ from simsopt.geo.surfaceobjectives_jax import (  # noqa: E402
     BoozerResidualJAX,
     IotasJAX,
     NonQuasiSymmetricRatioJAX,
+)
+from simsopt.geo.curve import Curve, RotatedCurve  # noqa: E402
+
+from examples.single_stage_optimization.SINGLE_STAGE import (  # noqa: E402
+    single_stage_banana_example as single_stage_example,
 )
 
 
@@ -163,6 +171,17 @@ class _FakeCurve:
     pass
 
 
+class _MinimalNonNativeCurve(Curve):
+    """Small ``Curve`` subclass usable as a rotated non-native fallback stub."""
+
+    def __init__(self):
+        self.quadpoints = np.array([0.0, 0.5])
+        super().__init__(x0=np.array([]))
+
+    def invalidate_cache(self):
+        pass
+
+
 class _FakeCurrent:
     """Stub current for _unwrap_coil_curve_and_current."""
 
@@ -193,6 +212,196 @@ class _RecordingVJPCoil:
         from simsopt._core.derivative import Derivative
 
         return Derivative({})
+
+
+class _RecordingRotatedNonNativeCoil(_RecordingVJPCoil):
+    """Fallback coil whose curve is wrapped in ``RotatedCurve``."""
+
+    def __init__(self, phi):
+        super().__init__()
+        self.curve = RotatedCurve(_MinimalNonNativeCurve(), phi=phi, flip=False)
+
+
+class _JaxProjectableCurve:
+    """Curve stub exposing JAX pullback methods without native geometry support."""
+
+    def __init__(self):
+        self.dof_size = 2
+
+    def get_dofs(self):
+        return np.array([0.0, 0.0])
+
+    def dgamma_by_dcoeff_vjp_jax(self, dofs, v):
+        return jnp.array([v[0], v[1]], dtype=jnp.float64)
+
+    def dgammadash_by_dcoeff_vjp_jax(self, dofs, v):
+        return jnp.array([10.0 * v[0], 10.0 * v[1]], dtype=jnp.float64)
+
+
+class _RecordingCurrent:
+    """Current stub that records whether the JAX projection path reached it."""
+
+    def __init__(self):
+        self.dof_size = 1
+        self.calls = []
+
+    def vjp(self, v_current):
+        self.calls.append(np.asarray(v_current, dtype=float))
+        from simsopt._core.derivative import Derivative
+
+        return Derivative({self: v_current})
+
+
+class _FallbackBombCoil:
+    """Coil stub whose ``vjp`` must never be called on the JAX projection path."""
+
+    def __init__(self):
+        self.curve = _JaxProjectableCurve()
+        self.current = _RecordingCurrent()
+
+    def vjp(self, dg, dgd, dc):
+        raise AssertionError("JAX-projectable coils should not fall back to coil.vjp()")
+
+
+_REAL_RESOLVE_FD_REL_TOL = 1e-2
+_REAL_RESOLVE_FD_ABS_TOL = 1e-8
+_REAL_RESOLVE_FD_EPS = 1e-4
+_REAL_RESOLVE_FD_MAX_ATTEMPTS = 4
+_STABLE_IOTA_ABS_TOL = 5e-3
+_STABLE_G_REL_TOL = 5e-3
+_STABLE_FUN_REL_TOL = 0.25
+
+
+def _relative_error(actual, reference):
+    return abs(actual - reference) / (abs(reference) + 1e-30)
+
+
+def _make_real_resolve_fd_setup():
+    """Build the stable reduced real single-stage fixture used by Tier 4."""
+    fixture = build_real_single_stage_init_fixture(
+        backend="jax",
+        optimizer_backend="ondevice",
+    )
+    bs_jax = fixture["bs"]
+    booz_jax = fixture["boozer_surface"]
+    result = booz_jax.res
+    assert result is not None and result.get("success", False), (
+        "Baseline reduced real-fixture solve did not converge"
+    )
+    return bs_jax, booz_jax, {
+        "coil_dofs": np.asarray(bs_jax.x, dtype=float).copy(),
+        "iota": float(result["iota"]),
+        "G": float(result["G"]),
+        "fun": float(summarize_result_fun(result)),
+    }
+
+
+def _is_stable_real_resolve(base_state, *, iota_value, G_value, fun_value):
+    return (
+        abs(iota_value - float(base_state["iota"])) < _STABLE_IOTA_ABS_TOL
+        and _relative_error(G_value, float(base_state["G"])) < _STABLE_G_REL_TOL
+        and _relative_error(fun_value, float(base_state["fun"])) < _STABLE_FUN_REL_TOL
+    )
+
+
+def _resolve_wrapper_value_on_real_fixture(base_state, coil_dofs, wrapper_factory):
+    fixture = build_real_single_stage_init_fixture(
+        backend="jax",
+        optimizer_backend="ondevice",
+        bs_dofs_override=np.asarray(coil_dofs, dtype=float),
+    )
+    bs_jax = fixture["bs"]
+    booz_jax = fixture["boozer_surface"]
+    result = booz_jax.res
+    if result is None or not result.get("success", False):
+        return {"stable": False, "reason": "solve_failed"}
+
+    is_self_intersecting, check_available = (
+        single_stage_example.evaluate_surface_self_intersection(booz_jax.surface)
+    )
+    if check_available and is_self_intersecting:
+        return {"stable": False, "reason": "self_intersecting"}
+
+    iota_value = float(result["iota"])
+    G_value = float(result["G"])
+    fun_value = float(summarize_result_fun(result))
+    if not _is_stable_real_resolve(
+        base_state,
+        iota_value=iota_value,
+        G_value=G_value,
+        fun_value=fun_value,
+    ):
+        return {
+            "stable": False,
+            "reason": "branch_switch",
+            "iota": iota_value,
+            "G": G_value,
+            "fun": fun_value,
+        }
+
+    return {
+        "stable": True,
+        "reason": "ok",
+        "value": float(wrapper_factory(booz_jax, bs_jax).J()),
+        "iota": iota_value,
+        "G": G_value,
+        "fun": fun_value,
+    }
+
+
+def _assert_wrapper_resolve_fd_matches_real_fixture(
+    *,
+    wrapper_label,
+    gradient_builder,
+    wrapper_factory,
+    rng_seed,
+):
+    bs_jax, booz_jax, base_state = _make_real_resolve_fd_setup()
+    gradient = np.asarray(gradient_builder(booz_jax, bs_jax), dtype=float)
+    x0 = np.asarray(base_state["coil_dofs"], dtype=float)
+    rng = np.random.RandomState(rng_seed)
+    instability_reasons = []
+
+    for sample_index in range(_REAL_RESOLVE_FD_MAX_ATTEMPTS):
+        direction = rng.randn(len(x0))
+        direction /= np.linalg.norm(direction)
+        directional_adjoint = float(np.dot(gradient, direction))
+
+        plus = _resolve_wrapper_value_on_real_fixture(
+            base_state,
+            x0 + _REAL_RESOLVE_FD_EPS * direction,
+            wrapper_factory,
+        )
+        minus = _resolve_wrapper_value_on_real_fixture(
+            base_state,
+            x0 - _REAL_RESOLVE_FD_EPS * direction,
+            wrapper_factory,
+        )
+        if not plus["stable"] or not minus["stable"]:
+            instability_reasons.append(
+                f"sample {sample_index}: plus={plus['reason']} minus={minus['reason']}"
+            )
+            continue
+
+        directional_fd = (plus["value"] - minus["value"]) / (2.0 * _REAL_RESOLVE_FD_EPS)
+        abs_err = abs(directional_adjoint - directional_fd)
+        rel_err = abs_err / (abs(directional_fd) + 1e-30)
+        print(
+            f"{wrapper_label} reduced-real FD[{sample_index}]: "
+            f"adjoint={directional_adjoint:.6e} fd={directional_fd:.6e} "
+            f"rel={rel_err:.2e} abs={abs_err:.2e}"
+        )
+        assert rel_err < _REAL_RESOLVE_FD_REL_TOL or abs_err < _REAL_RESOLVE_FD_ABS_TOL, (
+            f"{wrapper_label} reduced-real FD[{sample_index}] exceeded tolerance: "
+            f"rel={rel_err:.2e} abs={abs_err:.2e}"
+        )
+        return
+
+    pytest.fail(
+        f"{wrapper_label} did not find a branch-stable reduced real-fixture FD sample "
+        f"within {_REAL_RESOLVE_FD_MAX_ATTEMPTS} attempts: "
+        + "; ".join(instability_reasons)
+    )
 
 
 def _make_boozer_setup(
@@ -552,6 +761,142 @@ class TestAdjointSolveConsistency:
             atol=1e-12,
         )
         np.testing.assert_allclose(np.asarray(current_group), np.array([1.23]), atol=1e-12)
+
+    def test_biotsavart_projection_keeps_non_native_fallback_explicit(self):
+        """Non-native curves still fall back to per-coil ``vjp()`` by contract."""
+        bs_jax = object.__new__(BiotSavartJAX)
+        coils = [_RecordingVJPCoil(), _RecordingVJPCoil()]
+        bs_jax._coils = coils
+        d_coil_arrays = [
+            (
+                _WholeGroupArrayConversionBomb(
+                    [
+                        np.array([1.0, 2.0, 3.0]),
+                        np.array([4.0, 5.0, 6.0]),
+                    ]
+                ),
+                _WholeGroupArrayConversionBomb(
+                    [
+                        np.array([7.0, 8.0, 9.0]),
+                        np.array([10.0, 11.0, 12.0]),
+                    ]
+                ),
+                _WholeGroupArrayConversionBomb([1.5, 2.5]),
+            )
+        ]
+
+        bs_jax.coil_cotangents_to_derivative(d_coil_arrays, [[0, 1]])
+
+        assert len(coils[0].calls) == 1
+        assert len(coils[1].calls) == 1
+        np.testing.assert_allclose(coils[0].calls[0][2], np.array([1.5]))
+        np.testing.assert_allclose(coils[1].calls[0][2], np.array([2.5]))
+
+    def test_biotsavart_projection_preserves_rotated_fallback_cotangents(self):
+        """Fallback ``coil.vjp()`` must receive unrotated cotangents."""
+        bs_jax = object.__new__(BiotSavartJAX)
+        coils = [_RecordingRotatedNonNativeCoil(phi=np.pi / 2.0)]
+        bs_jax._coils = coils
+        d_gamma = np.array([1.0, 2.0, 3.0])
+        d_gammadash = np.array([4.0, 5.0, 6.0])
+
+        bs_jax.coil_cotangents_to_derivative(
+            [(jnp.asarray([d_gamma]), jnp.asarray([d_gammadash]), jnp.asarray([1.5]))],
+            [[0]],
+        )
+
+        assert len(coils[0].calls) == 1
+        np.testing.assert_allclose(coils[0].calls[0][0], d_gamma)
+        np.testing.assert_allclose(coils[0].calls[0][1], d_gammadash)
+        np.testing.assert_allclose(coils[0].calls[0][2], np.array([1.5]))
+
+    def test_biotsavart_projection_uses_jax_pullbacks_for_projectable_curves(self):
+        """JAX-capable curves should bypass ``coil.vjp()`` even if they are not native."""
+        bs_jax = object.__new__(BiotSavartJAX)
+        coils = [_FallbackBombCoil()]
+        bs_jax._coils = coils
+
+        derivative = bs_jax.coil_cotangents_to_derivative(
+            [(jnp.array([[1.0, 2.0, 3.0]]), jnp.array([[4.0, 5.0, 6.0]]), jnp.array([1.5]))],
+            [[0]],
+        )
+
+        np.testing.assert_allclose(
+            np.asarray(derivative.data[coils[0].curve], dtype=float),
+            np.array([41.0, 52.0]),
+            atol=1e-12,
+        )
+        np.testing.assert_allclose(
+            np.asarray(derivative.data[coils[0].current], dtype=float),
+            np.array([1.5]),
+            atol=1e-12,
+        )
+        assert len(coils[0].current.calls) == 1
+
+    def test_compat_helper_uses_shared_jax_projection_for_projectable_curves(self):
+        """The compatibility helper should share the same JAX projection path."""
+        from simsopt.geo.surfaceobjectives_jax import _coil_cotangents_to_derivative
+
+        coils = [_FallbackBombCoil()]
+        derivative = _coil_cotangents_to_derivative(
+            coils,
+            [(jnp.array([[1.0, 2.0, 3.0]]), jnp.array([[4.0, 5.0, 6.0]]), jnp.array([1.5]))],
+            [[0]],
+        )
+
+        np.testing.assert_allclose(
+            np.asarray(derivative.data[coils[0].curve], dtype=float),
+            np.array([41.0, 52.0]),
+            atol=1e-12,
+        )
+        np.testing.assert_allclose(
+            np.asarray(derivative.data[coils[0].current], dtype=float),
+            np.array([1.5]),
+            atol=1e-12,
+        )
+
+    def test_refresh_coil_data_reuses_grouped_currents_without_host_reads(
+        self, monkeypatch
+    ):
+        """Refreshing grouped coil data should not re-read coil currents on host."""
+        (
+            coils,
+            surf_cpu,
+            surf_jax,
+            bs_cpu,
+            bs_jax,
+            booz_cpu,
+            booz_jax,
+            vol_cpu,
+            _iota0,
+            _G0,
+        ) = _make_boozer_setup(
+            constraint_weight=1.0,
+            optimizer_backend="scipy",
+        )
+
+        for coil in bs_jax.coils:
+            monkeypatch.setattr(
+                coil.current,
+                "get_value",
+                lambda: (_ for _ in ()).throw(
+                    AssertionError(
+                        "_refresh_coil_data() should reuse grouped JAX current arrays"
+                    )
+                ),
+            )
+
+        booz_jax._refresh_coil_data()
+
+        expected = np.zeros(len(bs_jax.coils))
+        for _, _, currents, indices in booz_jax.coil_groups:
+            for local_i, global_i in enumerate(indices):
+                expected[global_i] = float(np.asarray(currents[local_i]))
+        np.testing.assert_allclose(
+            np.asarray(booz_jax.coil_currents, dtype=float),
+            expected,
+            atol=1e-12,
+        )
 
     def test_surface_objectives_jax_reject_host_forward_backward(
         self, boozer_setup, monkeypatch
@@ -1801,89 +2146,8 @@ class TestExactSolveCPUJAXParity:
 
 
 # -----------------------------------------------------------------------
-# Test 16: IotasJAX re-solve FD
+# Test 16: IotasJAX re-solve FD on the stable reduced real fixture
 # -----------------------------------------------------------------------
-
-
-def _make_resolve_fd_setup():
-    """Build a larger Boozer fixture for re-solve FD attempts.
-
-    Uses a 7x7 grid (mpol=3, ntor=3) for a smoother Boozer residual
-    landscape, generous solver budget, and tight Newton polish.
-    The 5x5 default fixture branch-switches under coil perturbation;
-    the 7x7 grid is better but still inadequate for the full composed
-    derivative when the adjoint term materially matters (documented in
-    CLAUDE.md — deferred pending a stable representative fixture).
-    """
-    ncoils, nfp = 3, 2
-    stellsym = True
-    base_curves = create_equally_spaced_curves(
-        ncoils,
-        nfp,
-        stellsym=stellsym,
-        R0=1.0,
-        R1=0.5,
-        order=3,
-    )
-    base_currents = [Current(1e5) for _ in range(ncoils)]
-    for c in base_currents:
-        c.fix_all()
-    coils = coils_via_symmetries(base_curves, base_currents, nfp, stellsym)
-
-    mpol, ntor = 3, 3
-    nphi = 2 * ntor + 1
-    ntheta = 2 * mpol + 1
-    surf = SurfaceXYZTensorFourier(
-        mpol=mpol,
-        ntor=ntor,
-        stellsym=stellsym,
-        nfp=nfp,
-        quadpoints_phi=np.linspace(0, 1.0 / nfp, nphi, endpoint=False),
-        quadpoints_theta=np.linspace(0, 1.0, ntheta, endpoint=False),
-    )
-
-    from simsopt.geo import SurfaceRZFourier
-
-    s_rz = SurfaceRZFourier(
-        nfp=nfp,
-        stellsym=stellsym,
-        mpol=1,
-        ntor=0,
-        quadpoints_phi=surf.quadpoints_phi,
-        quadpoints_theta=surf.quadpoints_theta,
-    )
-    s_rz.set_rc(0, 0, 1.0)
-    s_rz.set_rc(1, 0, 0.15)
-    s_rz.set_zs(1, 0, 0.15)
-    surf.least_squares_fit(s_rz.gamma())
-
-    bs_jax = BiotSavartJAX(coils)
-    vol = Volume(surf)
-    vol_target = vol.J()
-
-    mu0 = 4 * np.pi * 1e-7
-    G0 = mu0 * sum(abs(c.current.get_value()) for c in coils)
-    iota0 = 0.3
-
-    booz_jax = BoozerSurfaceJAX(
-        bs_jax,
-        surf,
-        vol,
-        vol_target,
-        constraint_weight=1.0,
-        options={
-            "verbose": False,
-            "bfgs_maxiter": 500,
-            "bfgs_tol": 1e-10,
-            "newton_maxiter": 20,
-            "newton_tol": 1e-10,
-        },
-    )
-    res0 = booz_jax.run_code(iota0, G0)
-    assert res0 is not None and res0.get("success", False), (
-        "Baseline resolve-FD solve did not converge"
-    )
-    return surf, bs_jax, booz_jax, res0
 
 
 class TestIotasJAXResolveFD:
@@ -1894,60 +2158,13 @@ class TestIotasJAXResolveFD:
     difference approximation of (iota(coils+eps) - iota(coils-eps)) / (2*eps).
     """
 
-    @pytest.mark.xfail(
-        reason=(
-            "Re-solve FD needs a stable fixture where the inner Boozer solve "
-            "does not branch-switch under coil perturbation. Current toy grids "
-            "(5x5 and 7x7) are inadequate — the solver lands in different local "
-            "minima for ±eps perturbations. Component-level adjoint tests in "
-            "TestAdjointSolveConsistency validate the gradient pipeline "
-            "independently. See CLAUDE.md M5 validation status."
-        ),
-        strict=False,
-    )
     def test_iotas_resolve_fd(self):
-        surf_jax, bs_jax, booz_jax, res0 = _make_resolve_fd_setup()
-
-        iotas_jax = IotasJAX(booz_jax)
-        dj0 = np.asarray(iotas_jax.dJ(), dtype=float)
-
-        x0 = bs_jax.x.copy()
-        sdofs0 = surf_jax.get_dofs().copy()
-        rng = np.random.RandomState(77)
-
-        eps = 1e-5
-        n_dirs = 2
-        for i in range(n_dirs):
-            direction = rng.randn(len(x0))
-            direction /= np.linalg.norm(direction)
-            dd_adjoint = float(np.dot(dj0, direction))
-
-            def _iota_at(step):
-                bs_jax.x = x0 + step * direction
-                booz_jax.need_to_run_code = True
-                res = booz_jax.run_code(
-                    res0["iota"],
-                    res0["G"],
-                    sdofs=sdofs0,
-                )
-                assert res is not None and res.get("PLU") is not None, (
-                    f"Re-solve at step={step:.2e} did not produce PLU"
-                )
-                return res["iota"]
-
-            iota_p = _iota_at(eps)
-            iota_m = _iota_at(-eps)
-            dd_fd = (iota_p - iota_m) / (2 * eps)
-
-            abs_err = abs(dd_adjoint - dd_fd)
-            rel_err = abs_err / (abs(dd_fd) + 1e-30)
-            print(
-                f"IotasJAX FD[{i}]: adjoint={dd_adjoint:.6e} fd={dd_fd:.6e} "
-                f"rel={rel_err:.2e} abs={abs_err:.2e}"
-            )
-            assert rel_err < 0.1 or abs_err < 1e-6, (
-                f"IotasJAX FD[{i}]: rel={rel_err:.2e} abs={abs_err:.2e}"
-            )
+        _assert_wrapper_resolve_fd_matches_real_fixture(
+            wrapper_label="IotasJAX",
+            gradient_builder=lambda booz_jax, bs_jax: IotasJAX(booz_jax).dJ(),
+            wrapper_factory=lambda booz_jax, bs_jax: IotasJAX(booz_jax),
+            rng_seed=77,
+        )
 
 
 # -----------------------------------------------------------------------
@@ -1961,57 +2178,17 @@ class TestNonQSRatioJAXResolveFD:
     Same pattern as TestIotasJAXResolveFD but for the QS ratio wrapper.
     """
 
-    @pytest.mark.xfail(
-        reason=(
-            "Re-solve FD needs a stable fixture — same branch-switching "
-            "limitation as TestIotasJAXResolveFD. See CLAUDE.md M5 status."
-        ),
-        strict=False,
-    )
     def test_nqsr_resolve_fd(self):
-        surf_jax, bs_jax, booz_jax, res0 = _make_resolve_fd_setup()
-
-        sDIM = 6
-        nqsr_jax = NonQuasiSymmetricRatioJAX(booz_jax, bs_jax, sDIM=sDIM)
-        dj0 = np.asarray(nqsr_jax.dJ(), dtype=float)
-
-        x0 = bs_jax.x.copy()
-        sdofs0 = surf_jax.get_dofs().copy()
-        rng = np.random.RandomState(88)
-
-        eps = 1e-5
-        n_dirs = 2
-        for i in range(n_dirs):
-            direction = rng.randn(len(x0))
-            direction /= np.linalg.norm(direction)
-            dd_adjoint = float(np.dot(dj0, direction))
-
-            def _nqsr_at(step):
-                bs_jax.x = x0 + step * direction
-                booz_jax.need_to_run_code = True
-                res = booz_jax.run_code(
-                    res0["iota"],
-                    res0["G"],
-                    sdofs=sdofs0,
-                )
-                assert res is not None and res.get("PLU") is not None, (
-                    f"Re-solve at step={step:.2e} did not produce PLU"
-                )
-                return nqsr_jax.J()
-
-            j_p = _nqsr_at(eps)
-            j_m = _nqsr_at(-eps)
-            dd_fd = (j_p - j_m) / (2 * eps)
-
-            abs_err = abs(dd_adjoint - dd_fd)
-            rel_err = abs_err / (abs(dd_fd) + 1e-30)
-            print(
-                f"NQSR FD[{i}]: adjoint={dd_adjoint:.6e} fd={dd_fd:.6e} "
-                f"rel={rel_err:.2e} abs={abs_err:.2e}"
-            )
-            assert rel_err < 0.1 or abs_err < 1e-6, (
-                f"NQSR FD[{i}]: rel={rel_err:.2e} abs={abs_err:.2e}"
-            )
+        _assert_wrapper_resolve_fd_matches_real_fixture(
+            wrapper_label="NonQuasiSymmetricRatioJAX",
+            gradient_builder=lambda booz_jax, bs_jax: NonQuasiSymmetricRatioJAX(
+                booz_jax, bs_jax, sDIM=6
+            ).dJ(),
+            wrapper_factory=lambda booz_jax, bs_jax: NonQuasiSymmetricRatioJAX(
+                booz_jax, bs_jax, sDIM=6
+            ),
+            rng_seed=88,
+        )
 
 
 # =======================================================================
