@@ -2,6 +2,7 @@ from contextlib import contextmanager
 import importlib.util
 import os
 import sys
+import tempfile
 import types
 import unittest
 import uuid
@@ -594,6 +595,56 @@ class SingleStageExampleTests(unittest.TestCase):
         np.testing.assert_array_equal(dJ_out, last_dJ)
         self.assertIsNot(dJ_out, run_dict["dJ"])
 
+    def test_fun_fallback_cpu_rolls_back_surface_state(self):
+        """CPU failure path must restore surface.x and res from run_dict."""
+        module = self.load_module()
+        CpuBoozerSurface = module.BoozerSurface
+
+        class _Surface:
+            def __init__(self):
+                self.x = np.array([9.0, 8.0, 7.0])
+
+            def is_self_intersecting(self):
+                return False
+
+        class _CpuMock(CpuBoozerSurface):
+            def __init__(self):
+                self.surface = _Surface()
+                self.res = {
+                    "success": False,
+                    "iota": -999.0,
+                    "G": -999.0,
+                }
+
+            def run_code(self, iota, G=None):
+                # Simulate a failed solve that leaves dirty state
+                self.surface.x = np.array([0.0, 0.0, 0.0])
+                self.res["iota"] = -999.0
+                self.res["G"] = -999.0
+                return self.res
+
+        sdofs_warm = np.array([1.0, 2.0, 3.0])
+        run_dict = {
+            "x_prev": np.zeros(5),
+            "lscount": 0,
+            "sdofs": sdofs_warm.copy(),
+            "iota": TEST_IOTA,
+            "G": TEST_G0,
+            "J": 42.0,
+            "dJ": np.array([1.0, -2.0, 3.0, -4.0, 5.0]),
+        }
+        booz = _CpuMock()
+        jf = types.SimpleNamespace(x=np.zeros(5))
+
+        J_out, _ = module.evaluate_candidate(np.ones(5), run_dict, booz, jf)
+
+        # Failure: elevated J
+        self.assertGreater(J_out, 42.0)
+        # Rollback: surface.x and res restored from run_dict
+        np.testing.assert_array_equal(booz.surface.x, sdofs_warm)
+        self.assertEqual(booz.res["iota"], TEST_IOTA)
+        self.assertEqual(booz.res["G"], TEST_G0)
+
     def test_evaluate_candidate_does_not_mutate_external_state(self):
         """evaluate_candidate must not directly mutate JF.x, surface.x, or res.
 
@@ -667,6 +718,189 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertEqual(call_iota, TEST_IOTA)
         self.assertEqual(call_G, TEST_G0)
         np.testing.assert_array_equal(call_sdofs, run_dict["sdofs"])
+
+    def test_accept_step_does_not_mutate_bs_points(self):
+        """accept_step must restore bs evaluation points after BdotN diagnostic."""
+        module = self.load_module()
+
+        INITIAL_PTS = np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
+        GAMMA_SHAPE = (3, 4, 3)
+
+        class _BS:
+            """Fake BiotSavart that tracks set_points calls."""
+
+            def __init__(self):
+                self._current_pts = INITIAL_PTS.copy()
+                self.set_points_calls = []
+
+            def get_points_cart_ref(self):
+                return self._current_pts
+
+            def set_points(self, pts):
+                self.set_points_calls.append(pts.copy())
+                self._current_pts = np.asarray(pts).copy()
+
+            def B(self):
+                n = self._current_pts.shape[0]
+                return np.ones((n, 3)) * 0.01
+
+        class _Surface:
+            def __init__(self):
+                self.x = np.zeros(5)
+
+            def gamma(self):
+                return np.ones(GAMMA_SHAPE)
+
+            def unitnormal(self):
+                n = np.zeros(GAMMA_SHAPE)
+                n[..., 2] = 1.0
+                return n
+
+            def volume(self):
+                return 1.0
+
+        class _BoozerSurface:
+            def __init__(self):
+                self.surface = _Surface()
+                self.res = {"success": True, "iter": 1, "iota": 0.15, "G": 1.0}
+
+        class _JF:
+            def J(self):
+                return 1.0
+
+            def dJ(self):
+                return np.zeros(5)
+
+        class _Objective:
+            def J(self):
+                return 0.5
+
+            def dJ(self):
+                return np.zeros(5)
+
+            def shortest_distance(self):
+                return 0.1
+
+        class _IotaObj:
+            def J(self):
+                return 0.15
+
+        class _Curve:
+            def gamma(self):
+                return np.zeros((10, 3))
+
+            def kappa(self):
+                return np.ones(10)
+
+        class _CurveLength:
+            def J(self):
+                return 6.0
+
+        bs = _BS()
+        booz = _BoozerSurface()
+
+        run_dict = {
+            "lscount": 5,
+            "sdofs": np.zeros(5),
+            "iota": 0.15,
+            "G": 1.0,
+            "J": 1.0,
+            "dJ": np.zeros(5),
+            "it": 1,
+            "intersecting": False,
+            "self_intersection_check_available": False,
+        }
+        objectives = {"cc": _Objective(), "cs": _Objective(), "boozer": _Objective()}
+        diagnostics_refs = {
+            "iota": _IotaObj(),
+            "banana_curve": _Curve(),
+            "curvelength": _CurveLength(),
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log_path = os.path.join(tmpdir, "test.log")
+            with patch.object(
+                module, "update_self_intersection_status", return_value=False
+            ), patch.object(module, "BiotSavart", _BS):
+                module.accept_step(
+                    run_dict, booz, _JF(), bs, objectives, diagnostics_refs, log_path
+                )
+
+        # bs must be restored to its original evaluation points
+        np.testing.assert_array_equal(bs._current_pts, INITIAL_PTS)
+        # set_points must have been called twice: once for gamma, once for restore
+        self.assertEqual(len(bs.set_points_calls), 2)
+        np.testing.assert_array_equal(bs.set_points_calls[1], INITIAL_PTS)
+
+    def test_evaluate_candidate_cpu_path_does_not_pass_sdofs(self):
+        """CPU BoozerSurface.run_code() does not accept sdofs=.
+
+        Regression test: evaluate_candidate must detect the CPU backend
+        via isinstance and use the old warm-start path (surface.x and
+        res mutation) instead of passing sdofs= to run_code.
+        """
+        module = self.load_module()
+        CpuBoozerSurface = module.BoozerSurface
+
+        class _Surface:
+            def __init__(self):
+                self.x = np.array([9.0, 8.0, 7.0])
+
+            def volume(self):
+                return 1.0
+
+            def is_self_intersecting(self):
+                return False
+
+        class _CpuMock(CpuBoozerSurface):
+            """Mock that passes isinstance check and rejects sdofs=."""
+
+            def __init__(self):
+                self.surface = _Surface()
+                self.res = {
+                    "success": True,
+                    "iter": 1,
+                    "iota": TEST_IOTA,
+                    "G": TEST_G0,
+                }
+                self.run_code_calls = []
+
+            def run_code(self, iota, G=None):
+                # CPU signature — no sdofs parameter
+                self.run_code_calls.append((iota, G))
+                return self.res
+
+        class _JF:
+            x = np.zeros(5)
+
+            def J(self):
+                return 3.14
+
+            def dJ(self):
+                return np.arange(5.0)
+
+        sdofs_warm = np.array([1.0, 2.0, 3.0])
+        run_dict = {
+            "x_prev": np.zeros(5),
+            "lscount": 0,
+            "sdofs": sdofs_warm.copy(),
+            "iota": TEST_IOTA,
+            "G": TEST_G0,
+            "J": 1.0,
+            "dJ": np.zeros(5),
+        }
+        booz = _CpuMock()
+        jf = _JF()
+
+        with patch.object(
+            module, "update_self_intersection_status", return_value=False
+        ):
+            module.evaluate_candidate(np.ones(5), run_dict, booz, jf)
+
+        # CPU path must call run_code(iota, G) without sdofs
+        self.assertEqual(len(booz.run_code_calls), 1)
+        self.assertEqual(booz.run_code_calls[0], (TEST_IOTA, TEST_G0))
+        # CPU path must warm-start surface.x from run_dict before run_code
+        np.testing.assert_array_equal(booz.surface.x, sdofs_warm)
 
     def test_snapshot_restore_round_trip(self):
         """Wave 1.4: snapshot → restore → snapshot produces identical arrays."""

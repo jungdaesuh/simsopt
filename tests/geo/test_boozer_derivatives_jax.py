@@ -615,6 +615,60 @@ class TestBoozerResidualCoilVJP:
         assert dcgd.shape == self.coil_gammadashs.shape
         assert dci.shape == self.coil_currents.shape
 
+    @pytest.mark.parametrize(
+        "grad_idx,seed",
+        [(0, 42), (1, 43)],
+        ids=["gammas", "gammadashs"],
+    )
+    def test_coil_vjp_geometry_fd(self, grad_idx, seed):
+        """VJP w.r.t. coil gammas/gammadashs matches directional central FD."""
+        nphi, ntheta = self.nphi, self.ntheta
+        n_res = 3 * nphi * ntheta
+        rng = np.random.RandomState(seed)
+        adjoint = jnp.array(rng.randn(n_res))
+
+        (d_coil_arrays,) = boozer_residual_coil_vjp(
+            adjoint,
+            gamma=self.gamma,
+            xphi=self.xphi,
+            xtheta=self.xtheta,
+            coil_arrays=self.coil_arrays,
+            iota=self.iota,
+            G=self.G,
+            weight_inv_modB=False,
+        )
+        dg = d_coil_arrays[0][grad_idx]
+        coil_inputs = [self.coil_gammas, self.coil_gammadashs, self.coil_currents]
+        target = coil_inputs[grad_idx]
+
+        h = jnp.array(1e-2 * rng.randn(*target.shape))
+        dJ_dh_vjp = float(jnp.sum(dg * h))
+
+        def f(x):
+            points = self.gamma.reshape(-1, 3)
+            args = list(coil_inputs)
+            args[grad_idx] = x
+            B = biot_savart_B(points, *args).reshape(nphi, ntheta, 3)
+            r = boozer_residual_vector(
+                self.G, self.iota, B, self.xphi, self.xtheta, weight_inv_modB=False
+            )
+            return jnp.dot(adjoint, r)
+
+        err = 1e9
+        for i in range(8, 18):
+            eps = 0.5**i
+            fd_est = (float(f(target + eps * h)) - float(f(target - eps * h))) / (
+                2 * eps
+            )
+            new_err = abs(fd_est - dJ_dh_vjp)
+            if new_err < 1e-12:
+                break
+            assert new_err < 0.35 * err, (
+                f"Central FD stalled: err={new_err:.2e}, "
+                f"prev={err:.2e}, ratio={new_err / err:.3f}"
+            )
+            err = new_err
+
 
 # ---------------------------------------------------------------------------
 # Test: weight_inv_modB=True (reviewer finding #1)

@@ -10,7 +10,10 @@ Tests:
 2. B = curl(A)
 3. dA/dX finite difference (forward Taylor test)
 4. dB/dX symmetric (vacuum) + divergence-free
-5. B VJP Taylor test (reverse-mode derivative correctness)
+5. B VJP Taylor test — gammas channel (reverse-mode derivative)
+6. B VJP Taylor test — gammadash channel
+7. B VJP Taylor test — currents channel
+8. Grouped Biot-Savart gradient FD (mixed quadrature self-consistency)
 
 No simsoptpp dependency — all tests use pure JAX functions.
 """
@@ -45,6 +48,7 @@ biot_savart_dB_by_dX = _bs.biot_savart_dB_by_dX
 biot_savart_A = _bs.biot_savart_A
 biot_savart_dA_by_dX = _bs.biot_savart_dA_by_dX
 biot_savart_B_vjp = _bs.biot_savart_B_vjp
+grouped_biot_savart_B = _bs.grouped_biot_savart_B
 
 
 # ---------------------------------------------------------------------------
@@ -213,13 +217,18 @@ class TestBiotSavartParitySuite:
         # Symmetric in vacuum: ∂_j B_l = ∂_l B_j
         np.testing.assert_allclose(dB_idx, dB_idx.T, atol=1e-12)
 
-    def test_B_vjp_taylor_test(self):
-        """VJP Taylor test: |J(γ+εh) − J(γ) − ε⟨dJ,h⟩| decays as O(ε).
+    @pytest.mark.parametrize(
+        "channel_idx,seed",
+        [(0, 1), (1, 2), (2, 3)],
+        ids=["gammas", "gammadashs", "currents"],
+    )
+    def test_B_vjp_taylor_test(self, channel_idx, seed):
+        """VJP Taylor test: |J(x+εh) − J(x) − ε⟨dJ,h⟩| decays as O(ε).
 
-        Matches ``test_dB_by_dcoilcoeff_reverse_taylortest``.
-        Uses J = Σ B² and perturbs coil positions (gammas).
+        Validates each channel of biot_savart_B_vjp (gammas, gammadashs,
+        currents) via forward FD convergence.
         """
-        np.random.seed(1)
+        np.random.seed(seed)
         gammas, gammadashs = _make_fourier_coil(200)
         currents = jnp.array([_CURRENT])
 
@@ -227,25 +236,138 @@ class TestBiotSavartParitySuite:
             _BASE_POINTS + 0.001 * (np.random.rand(*_BASE_POINTS.shape) - 0.5)
         )
 
-        B = biot_savart_B(points, gammas, gammadashs, currents)
+        inputs = [gammas, gammadashs, currents]
+        B = biot_savart_B(points, *inputs)
         J0 = float(jnp.sum(B**2))
 
-        # VJP: B_vjp(v) = dB^T v w.r.t. coil inputs
-        # For J = sum(B²): dJ = 2·B_vjp(B)
-        grad_gammas, _, _ = biot_savart_B_vjp(points, B, gammas, gammadashs, currents)
+        vjp_out = biot_savart_B_vjp(points, B, *inputs)
+        grad = vjp_out[channel_idx]
 
-        h = 1e-2 * jnp.array(np.random.rand(*gammas.shape))
-        dJ_dh = float(2 * jnp.sum(grad_gammas * h))
+        h = 1e-2 * jnp.array(np.random.rand(*inputs[channel_idx].shape))
+        dJ_dh = float(2 * jnp.sum(grad * h))
 
         err = 1e6
         for i in range(5, 10):
             eps = 0.5**i
-            B_eps = biot_savart_B(points, gammas + eps * h, gammadashs, currents)
+            perturbed = list(inputs)
+            perturbed[channel_idx] = inputs[channel_idx] + eps * h
+            B_eps = biot_savart_B(points, *perturbed)
             J_eps = float(jnp.sum(B_eps**2))
             deriv_est = (J_eps - J0) / eps
             new_err = abs(deriv_est - dJ_dh)
+            if new_err < 1e-14:
+                break
             assert new_err < 0.55 * err
             err = new_err
+
+
+# ---------------------------------------------------------------------------
+# Test: Grouped Biot-Savart gradient (mixed quadrature)
+# ---------------------------------------------------------------------------
+
+
+class TestGroupedBiotSavartGradient:
+    """Validate gradient through grouped_biot_savart_B for mixed quadrature.
+
+    Section 8d: verifies that mixed-quadrature grouping preserves
+    gradient accuracy on the JAX side (self-consistency test).
+    """
+
+    def test_mixed_quad_gradient_fd(self):
+        """Gradient of J=ΣB² through mixed-quad grouped B matches central FD.
+
+        Creates two coil groups (32-point and 64-point quadrature) and
+        verifies that jax.grad through grouped_biot_savart_B matches
+        central finite differences to O(ε²) convergence.
+        """
+        R_coil = 1.5
+        twopi = 2 * np.pi
+
+        # Group 1: 2 coils with 32 quadrature points
+        nq1 = 32
+        g1_np = np.zeros((2, nq1, 3))
+        gd1_np = np.zeros((2, nq1, 3))
+        for i in range(2):
+            phi_off = twopi * i / 3
+            t = np.linspace(0, twopi, nq1, endpoint=False)
+            g1_np[i, :, 0] = R_coil * np.cos(t + phi_off)
+            g1_np[i, :, 1] = R_coil * np.sin(t + phi_off)
+            gd1_np[i, :, 0] = -R_coil * twopi * np.sin(t + phi_off)
+            gd1_np[i, :, 1] = R_coil * twopi * np.cos(t + phi_off)
+        g1 = jnp.array(g1_np)
+        gd1 = jnp.array(gd1_np)
+        c1 = jnp.array([1e5, 1e5])
+
+        # Group 2: 1 coil with 64 quadrature points
+        nq2 = 64
+        phi_off = twopi * 2 / 3
+        t = np.linspace(0, twopi, nq2, endpoint=False)
+        g2_np = np.zeros((1, nq2, 3))
+        gd2_np = np.zeros((1, nq2, 3))
+        g2_np[0, :, 0] = R_coil * np.cos(t + phi_off)
+        g2_np[0, :, 1] = R_coil * np.sin(t + phi_off)
+        gd2_np[0, :, 0] = -R_coil * twopi * np.sin(t + phi_off)
+        gd2_np[0, :, 1] = R_coil * twopi * np.cos(t + phi_off)
+        g2 = jnp.array(g2_np)
+        gd2 = jnp.array(gd2_np)
+        c2 = jnp.array([1e5])
+
+        coil_arrays = [(g1, gd1, c1), (g2, gd2, c2)]
+
+        # Evaluation points inside the coil set
+        rng = np.random.RandomState(10)
+        pts_R = 0.8 + 0.2 * rng.rand(15)
+        pts_phi = twopi * rng.rand(15)
+        pts_z = 0.1 * (rng.rand(15) - 0.5)
+        points = jnp.array(
+            np.stack(
+                [pts_R * np.cos(pts_phi), pts_R * np.sin(pts_phi), pts_z],
+                axis=-1,
+            )
+        )
+
+        def J(ca):
+            B = grouped_biot_savart_B(points, ca)
+            return jnp.sum(B**2)
+
+        grad_ca = jax.grad(J)(coil_arrays)
+
+        def _check_fd(grad, h, perturb, label):
+            """Central FD convergence check for one gradient component."""
+            dJ_dh = float(jnp.sum(grad * h))
+            err = 1e9
+            for i in range(8, 18):
+                eps = 0.5**i
+                fd = (float(J(perturb(eps * h))) - float(J(perturb(-eps * h)))) / (
+                    2 * eps
+                )
+                new_err = abs(fd - dJ_dh)
+                if new_err < 1e-12:
+                    break
+                assert new_err < 0.35 * err, (
+                    f"{label}: err={new_err:.2e}, "
+                    f"prev={err:.2e}, ratio={new_err / err:.3f}"
+                )
+                err = new_err
+
+        _check_fd(
+            grad_ca[0][0],
+            jnp.array(1e-2 * rng.randn(*g1.shape)),
+            lambda d: [(g1 + d, gd1, c1), (g2, gd2, c2)],
+            "Group 1 gammas",
+        )
+        _check_fd(
+            grad_ca[1][0],
+            jnp.array(1e-2 * rng.randn(*g2.shape)),
+            lambda d: [(g1, gd1, c1), (g2 + d, gd2, c2)],
+            "Group 2 gammas",
+        )
+        _check_fd(
+            grad_ca[1][2],
+            jnp.array(rng.randn(*c2.shape)),
+            lambda d: [(g1, gd1, c1), (g2, gd2, c2 + d)],
+            "Group 2 currents",
+        )
 
 
 if __name__ == "__main__":

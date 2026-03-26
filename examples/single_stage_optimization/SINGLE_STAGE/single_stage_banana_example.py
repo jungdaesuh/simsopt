@@ -920,6 +920,13 @@ _DIAG_LABELS = {
 }
 
 
+def _restore_cpu_boozer_state(boozer_surface, run_dict):
+    """Restore CPU BoozerSurface warm-start state from run_dict snapshot."""
+    boozer_surface.surface.x = run_dict["sdofs"]
+    boozer_surface.res["iota"] = run_dict["iota"]
+    boozer_surface.res["G"] = run_dict["G"]
+
+
 def evaluate_candidate(x, run_dict, boozer_surface, JF):
     """Evaluate a candidate coil configuration.
 
@@ -930,16 +937,11 @@ def evaluate_candidate(x, run_dict, boozer_surface, JF):
     On failure: ``J = run_dict["J"] + penalty``, ``dJ = run_dict["dJ"]``
     (gradient-inconsistent by design — see plan documentation).
 
-    This function does not directly mutate external state.  The caller
-    (``SingleStageAdapter.__call__``) sets ``JF.x = x`` before calling
-    this function so that coil geometry and the Optimizable graph are
-    in the correct state.  The inner solve (``run_code``) receives
-    explicit ``sdofs`` so that ``boozer_surface.surface`` is not read
-    for the warm-start.
-
-    Remaining implicit dependency: ``JF.J()`` and ``JF.dJ()`` read
-    from the Optimizable graph, which requires ``JF.x`` to have been
-    set by the caller.
+    The caller (``SingleStageAdapter.__call__``) sets ``JF.x = x``
+    before calling this function.  This function mutates ``run_dict``
+    (tracking state) and, on the CPU path, mutates
+    ``boozer_surface.surface.x`` / ``boozer_surface.res`` for
+    warm-start and failure rollback.
 
     Args:
         x: Candidate coil DOFs from the optimizer.
@@ -956,7 +958,14 @@ def evaluate_candidate(x, run_dict, boozer_surface, JF):
 
     run_dict["lscount"] += 1
 
-    boozer_surface.run_code(run_dict["iota"], run_dict["G"], sdofs=run_dict["sdofs"])
+    is_cpu = isinstance(boozer_surface, BoozerSurface)
+    if is_cpu:
+        _restore_cpu_boozer_state(boozer_surface, run_dict)
+        boozer_surface.run_code(run_dict["iota"], run_dict["G"])
+    else:
+        boozer_surface.run_code(
+            run_dict["iota"], run_dict["G"], sdofs=run_dict["sdofs"]
+        )
     success_solve = bool(boozer_surface.res["success"])
     is_intersecting = update_self_intersection_status(run_dict, boozer_surface.surface)
     success = success_solve and not is_intersecting
@@ -980,6 +989,9 @@ def evaluate_candidate(x, run_dict, boozer_surface, JF):
         J = run_dict["J"] + max(abs(run_dict["J"]), 1.0)
         dJ = run_dict["dJ"].copy()
 
+        if is_cpu:
+            _restore_cpu_boozer_state(boozer_surface, run_dict)
+
     return J, dJ
 
 
@@ -990,6 +1002,10 @@ def accept_step(
 
     Called by the optimizer callback. Snapshots the current Optimizable
     state into ``run_dict`` and evaluates per-component diagnostics.
+
+    Does not persistently mutate any Optimizable object.  The
+    BiotSavart field's evaluation points are saved before the B·n
+    diagnostic and restored afterward.
 
     Args:
         run_dict: Mutable optimization state dict (updated in place).
@@ -1031,9 +1047,20 @@ def accept_step(
     curvecurve_min = JCurveCurve_obj.shortest_distance()
     curvesurf_min = JCurveSurface_obj.shortest_distance()
 
+    # Save bs evaluation points so we can restore after the diagnostic
+    _bs_pts_before = None
+    if isinstance(bs, BiotSavart):
+        _bs_pts_before = bs.get_points_cart_ref().copy()
+    elif hasattr(bs, "_points_jax") and bs._points_jax is not None:
+        _bs_pts_before = bs._points_jax  # JAX arrays are immutable; no copy needed
+
     bs.set_points(boozer_surface.surface.gamma().reshape((-1, 3)))
     unitn = boozer_surface.surface.unitnormal()
     BdotN = np.mean(np.abs(np.sum(bs.B().reshape(unitn.shape) * unitn, axis=2)))
+
+    # Restore bs state — no persistent mutation
+    if _bs_pts_before is not None:
+        bs.set_points(_bs_pts_before)
     update_self_intersection_status(run_dict, boozer_surface.surface)
 
     width = 35
@@ -1113,7 +1140,10 @@ class SingleStageAdapter:
         return evaluate_candidate(x, self.run_dict, self.boozer_surface, self.JF)
 
     def callback(self, x):
-        """Accepted-step callback — delegates to accept_step."""
+        """Accepted-step callback — delegates to accept_step.
+
+        No persistent Optimizable mutation.
+        """
         accept_step(
             self.run_dict,
             self.boozer_surface,

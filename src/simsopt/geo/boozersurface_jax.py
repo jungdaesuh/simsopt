@@ -1353,8 +1353,9 @@ class BoozerSurfaceJAX(Optimizable):
             G: initial guess for G (None → compute from coil currents,
                and coil currents must be fixed).
             sdofs: explicit surface DOFs for the initial guess. If None,
-                reads from ``self.surface``.  Passing explicit DOFs avoids
-                mutating ``self.surface`` before the solve.
+                reads from ``self.surface``.  When provided, syncs
+                ``self.surface`` to ``sdofs`` before the solve so that
+                failure paths leave the surface in a consistent state.
 
         Returns:
             dict with solver results, or None if solver was not dirty.
