@@ -1,5 +1,6 @@
 import argparse
 import hashlib
+import logging
 import os
 import io
 import json
@@ -904,65 +905,79 @@ def run_single_stage_optimizer(
     )
 
 
-def fun(x):
-    """
-    Objective function for L-BFGS-B optimization.
+logger = logging.getLogger(__name__)
 
-    Evaluates the total objective function and its gradient for a given set of
-    degrees of freedom (coil parameters). Attempts to solve for a valid Boozer
-    surface; if unsuccessful (solver failure or self-intersection), returns an
-    elevated objective value with the last accepted gradient to trigger line
-    search backtracking without corrupting the L-BFGS-B Hessian approximation.
+_DIAG_LABELS = {
+    "qs": "nonQS ratio",
+    "boozer": "Boozer Residual",
+    "iota_penalty": "ι Penalty",
+    "length": "Curve Length Penalty",
+    "cc": "Curve-Curve Penalty",
+    "cs": "Curve-Surface Penalty",
+    "surf": "Surf-Vessel Penalty",
+    "curvature": "Curvature Penalty",
+}
+
+
+
+def evaluate_candidate(x, run_dict, boozer_surface, JF):
+    """Evaluate a candidate coil configuration.
+
+    Resets the Optimizable graph to the last accepted state, sets coil
+    DOFs to ``x``, runs the inner Boozer solve, and returns ``(J, dJ)``.
+
+    On success: ``J = JF.J()``, ``dJ = JF.dJ()``.
+    On failure: ``J = run_dict["J"] + penalty``, ``dJ = run_dict["dJ"]``
+    (gradient-inconsistent by design — see plan documentation).
+
+    The Optimizable graph is mutated internally (required by simsopt).
+    State tracking uses ``run_dict`` directly so that module-level
+    consumers (tests, post-optimization code) see live values.
 
     Args:
-        x: Current degrees of freedom (coil parameters)
+        x: Candidate coil DOFs from the optimizer.
+        run_dict: Mutable optimization state dict (the single source of truth).
+        boozer_surface: The Boozer surface adapter.
+        JF: Composite objective (``Optimizable``).
 
     Returns:
-        J: Objective function value
-        dJ: Gradient of objective function
+        (J, dJ): Objective value and gradient.
     """
     dx = np.linalg.norm(x - run_dict["x_prev"])
     run_dict["x_prev"] = x.copy()
-    print(f"Step size: {dx:.2e}")
+    logger.info("Step size: %.2e", dx)
 
     run_dict["lscount"] += 1
 
-    # initialize to last accepted surface values
     boozer_surface.surface.x = run_dict["sdofs"]
     boozer_surface.res["iota"] = run_dict["iota"]
     boozer_surface.res["G"] = run_dict["G"]
-
-    # Set new coil dofs
     JF.x = x
-
-    # Run boozer surface
     boozer_surface.run_code(run_dict["iota"], run_dict["G"])
-
-    # Check success
-    success1 = bool(boozer_surface.res["success"])
-    success2 = not update_self_intersection_status(run_dict, boozer_surface.surface)
-    success = success1 and success2
+    success_solve = bool(boozer_surface.res["success"])
+    is_intersecting = update_self_intersection_status(run_dict, boozer_surface.surface)
+    success = success_solve and not is_intersecting
 
     if success:
         J = JF.J()
         dJ = JF.dJ()
-
-        print(f"Volume: {boozer_surface.surface.volume()}")
-        print(f"Iota: {build_iota_objective(boozer_surface, iota_cls).J()}")
-
+        logger.info("Volume: %s", boozer_surface.surface.volume())
+        logger.info("Iota: %s", boozer_surface.res["iota"])
     else:
-        print("/!\\ /!\\ Boozer surface rejected /!\\ /!\\")
-        if not success1:
-            print("Boozer solver failed")
-        if not success2:
-            print("Surface is self-intersecting")
+        if not success_solve:
+            logger.warning("Boozer solver failed")
+        if is_intersecting:
+            logger.warning("Surface is self-intersecting")
 
-        # Elevated J should force the outer line search to reject the step.
-        # Returning dJ_old (not negated) avoids the old -dJ corruption path
-        # and produces y_k=0 if the step is ever accepted, safely skipping
-        # the BFGS Hessian update.
+        # Elevated J triggers line-search backtracking.
+        # Returning dJ (not the derivative of J) is intentionally
+        # gradient-inconsistent: it produces y_k=0 if the step is ever
+        # accepted, safely skipping the L-BFGS Hessian update via the
+        # ys > 0 guard.
         J = run_dict["J"] + max(abs(run_dict["J"]), 1.0)
         dJ = run_dict["dJ"].copy()
+
+        # Roll back Optimizable state
         boozer_surface.surface.x = run_dict["sdofs"]
         boozer_surface.res["iota"] = run_dict["iota"]
         boozer_surface.res["G"] = run_dict["G"]
@@ -970,59 +985,51 @@ def fun(x):
     return J, dJ
 
 
-def callback(x):
-    """
-    Callback function executed after each successful optimization iteration.
+def accept_step(run_dict, boozer_surface, JF, bs, objectives, diagnostics_refs, log_path):
+    """Update state and log diagnostics on an accepted optimizer step.
 
-    Stores the accepted state (surface DOFs, iota, G), evaluates and prints
-    detailed diagnostics for all objective function components, and logs the
-    iteration summary to file. Used for monitoring optimization progress and
-    recording convergence history.
+    Called by the optimizer callback. Snapshots the current Optimizable
+    state into ``run_dict`` and evaluates per-component diagnostics.
 
     Args:
-        x: Current degrees of freedom (coil parameters) from accepted step
+        run_dict: Mutable optimization state dict (updated in place).
+        boozer_surface: The Boozer surface adapter.
+        JF: Composite objective (``Optimizable``).
+        bs: Biot-Savart field object.
+        objectives: Dict of named objective components for diagnostics.
+        diagnostics_refs: Dict of extra diagnostic objects (banana_curve, etc.).
+        log_path: Path to the iteration log file.
     """
-    # Update count for tracking
     run_dict["lscount"] = 0
-
-    # Store last accepted state
     run_dict["sdofs"] = boozer_surface.surface.x.copy()
     run_dict["iota"] = boozer_surface.res["iota"]
     run_dict["G"] = boozer_surface.res["G"]
     run_dict["J"] = JF.J()
     run_dict["dJ"] = JF.dJ().copy()
-
-    # Evaluate diagnostics
     J = run_dict["J"]
     grad = run_dict["dJ"]
 
-    J_QS = JnonQSRatio.J()
-    dJ_QS = np.linalg.norm(JnonQSRatio.dJ())
-    J_Boozer = JBoozerResidual.J()
-    dJ_Boozer = np.linalg.norm(JBoozerResidual.dJ())
-    J_iota = Jiota.J()
-    dJ_iota = np.linalg.norm(Jiota.dJ())
-    J_len = JCurveLength.J()
-    dJ_len = np.linalg.norm(JCurveLength.dJ())
-    J_cc = JCurveCurve.J()
-    dJ_cc = np.linalg.norm(JCurveCurve.dJ())
-    J_cs = JCurveSurface.J()
-    dJ_cs = np.linalg.norm(JCurveSurface.dJ())
-    J_surf = JSurfSurf.J()
-    dJ_surf = np.linalg.norm(JSurfSurf.dJ())
-    J_curvature = JCurvature.J()
-    dJ_curvature = np.linalg.norm(JCurvature.dJ())
+    # Per-component diagnostics
+    diag = {}
+    for name, obj in objectives.items():
+        diag[name] = (obj.J(), np.linalg.norm(obj.dJ()))
 
-    iota_str = f"{iota.J():.4f}"
+    iota_obj = diagnostics_refs["iota"]
+    banana_curve = diagnostics_refs["banana_curve"]
+    curvelength_obj = diagnostics_refs["curvelength"]
+    JCurveCurve_obj = objectives["cc"]
+    JCurveSurface_obj = objectives["cs"]
+
+    iota_str = f"{iota_obj.J():.4f}"
     volume_str = f"{boozer_surface.surface.volume():.4f}"
 
     gamma = banana_curve.gamma()
     max_r = np.max(np.sqrt(gamma[:, 0] ** 2 + gamma[:, 1] ** 2))
     max_z = np.max(np.abs(gamma[:, 2]))
     max_curvature = np.max(banana_curve.kappa())
-    length = curvelength.J()
-    curvecurve_min = JCurveCurve.shortest_distance()
-    curvesurf_min = JCurveSurface.shortest_distance()
+    length = curvelength_obj.J()
+    curvecurve_min = JCurveCurve_obj.shortest_distance()
+    curvesurf_min = JCurveSurface_obj.shortest_distance()
 
     bs.set_points(boozer_surface.surface.gamma().reshape((-1, 3)))
     unitn = boozer_surface.surface.unitnormal()
@@ -1035,36 +1042,17 @@ def callback(x):
     print(f"ITERATION {run_dict['it']}", file=buffer)
     print(f"{'Objective J':{width}} = {J:.6e}", file=buffer)
     print(f"{'||∇J||':{width}} = {np.linalg.norm(grad):.6e}", file=buffer)
-    print(f"{'nonQS ratio':{width}} = {J_QS:.6e} (dJ = {dJ_QS:.6e})", file=buffer)
-    print(
-        f"{'Boozer Residual':{width}} = {J_Boozer:.6e} (dJ = {dJ_Boozer:.6e})",
-        file=buffer,
-    )
-    print(f"{'ι Penalty':{width}} = {J_iota:.6e} (dJ = {dJ_iota:.6e})", file=buffer)
+    for name, (val, gnorm) in diag.items():
+        label = _DIAG_LABELS.get(name, name)
+        extra = ""
+        if name == "cc":
+            extra = f" (min={curvecurve_min:.3e})"
+        elif name == "cs":
+            extra = f" (min={curvesurf_min:.3e})"
+        print(f"{label:{width}} = {val:.6e}{extra} (dJ = {gnorm:.6e})", file=buffer)
     print(f"{'Iotas (actual)':{width}} = {iota_str}", file=buffer)
     print(f"{'Volume':{width}} = {volume_str}", file=buffer)
-    print(
-        f"{'Curve Length Penalty':{width}} = {J_len:.6e} (dJ = {dJ_len:.6e})",
-        file=buffer,
-    )
-    print(
-        f"{'Curve-Curve Penalty':{width}} = {J_cc:.6e} (min={curvecurve_min:.3e}) (dJ = {dJ_cc:.6e})",
-        file=buffer,
-    )
-    print(
-        f"{'Curve-Surface Penalty':{width}} = {J_cs:.6e} (min={curvesurf_min:.3e}) (dJ = {dJ_cs:.6e})",
-        file=buffer,
-    )
-    print(
-        f"{'Surf-Vessel Penalty':{width}} = {J_surf:.6e} (dJ = {dJ_surf:.6e})",
-        file=buffer,
-    )
-    print(
-        f"{'Curvature Penalty':{width}} = {J_curvature:.6e} (dJ = {dJ_curvature:.6e})",
-        file=buffer,
-    )
     print(f"{'⟨|B·n|⟩':{width}} = {BdotN:.6e}", file=buffer)
-
     check_status = (
         "available"
         if run_dict["self_intersection_check_available"]
@@ -1080,15 +1068,25 @@ def callback(x):
 
     output_str = buffer.getvalue()
     buffer.close()
+    logger.info("%s", output_str)
 
-    print(output_str)
-
-    filename = OUT_DIR_ITER + "/log.txt"
-    with open(filename, "a") as f:
+    with open(log_path, "a") as f:
         f.write(output_str + "\n")
 
-    # Advance iteration counter
     run_dict["it"] += 1
+
+
+def fun(x):
+    """Objective for L-BFGS-B — delegates to evaluate_candidate."""
+    return evaluate_candidate(x, run_dict, boozer_surface, JF)
+
+
+def callback(x):
+    """Accepted-step callback — delegates to accept_step."""
+    accept_step(
+        run_dict, boozer_surface, JF, bs,
+        _opt_objectives, _opt_diagnostics, _opt_log_path,
+    )
 
 
 # Convergence tolerances for different mpol values (module-level for testability)
@@ -1121,6 +1119,12 @@ gtol_by_mpol = {
 
 
 if __name__ == "__main__":
+    if not logging.root.handlers:
+        handler = logging.StreamHandler(sys.stdout)
+        handler.setFormatter(logging.Formatter("%(message)s"))
+        logging.root.addHandler(handler)
+        logging.root.setLevel(logging.INFO)
+
     # ==============================================================================
     # CONFIGURATION PARAMETERS
     # ==============================================================================
@@ -1384,7 +1388,7 @@ if __name__ == "__main__":
     # ==============================================================================
     # INITIALIZE OPTIMIZATION STATE
     # ==============================================================================
-    # Initialize run_dict after JF and boozer_surface are ready
+    global _opt_objectives, _opt_diagnostics, _opt_log_path  # noqa: PLW0603
     run_dict = {
         "sdofs": boozer_surface.surface.x.copy(),
         "iota": boozer_surface.res["iota"],
@@ -1397,6 +1401,22 @@ if __name__ == "__main__":
         "intersecting": False,
         "self_intersection_check_available": True,
     }
+    _opt_objectives = {
+        "qs": JnonQSRatio,
+        "boozer": JBoozerResidual,
+        "iota_penalty": Jiota,
+        "length": JCurveLength,
+        "cc": JCurveCurve,
+        "cs": JCurveSurface,
+        "surf": JSurfSurf,
+        "curvature": JCurvature,
+    }
+    _opt_diagnostics = {
+        "iota": iota,
+        "banana_curve": banana_curve,
+        "curvelength": curvelength,
+    }
+    _opt_log_path = OUT_DIR_ITER + "/log.txt"
 
     # ==============================================================================
     # RUN OPTIMIZATION
