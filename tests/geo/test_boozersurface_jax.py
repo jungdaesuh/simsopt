@@ -34,7 +34,11 @@ _SRC = Path(__file__).resolve().parents[2] / "src" / "simsopt"
 
 
 def _ensure_package(pkg, path):
-    if pkg not in sys.modules:
+    if pkg in sys.modules:
+        return
+    try:
+        __import__(pkg)
+    except ImportError:
         m = types.ModuleType(pkg)
         m.__path__ = [str(path)]
         sys.modules[pkg] = m
@@ -508,10 +512,11 @@ class TestOptimizerAdapter:
         """SciPy L-BFGS-B must receive its valid tuning knobs."""
         captured = {}
 
-        def fake_scipy_minimize(fun, x0, jac, method, options):
+        def fake_scipy_minimize(fun, x0, jac, method, options, callback=None):
             del fun, jac
             captured["method"] = method
             captured["options"] = dict(options)
+            captured["callback"] = callback
             return types.SimpleNamespace(
                 x=np.asarray(x0),
                 jac=np.asarray(x0),
@@ -538,6 +543,7 @@ class TestOptimizerAdapter:
         assert captured["options"]["ftol"] == 1e-12
         assert captured["options"]["maxfun"] == 55
         assert captured["options"]["maxls"] == 66
+        assert captured["callback"] is None  # no callback in this call
 
     def test_newton_polish_quadratic(self):
         """Newton polish converges in 1 iteration for a quadratic."""
@@ -2134,6 +2140,71 @@ class TestBoozerSurfaceJAXClass:
         booz.run_code(iota=0.3, G=0.05)
         assert booz.run_code(iota=0.3, G=0.05) is None
 
+    def test_run_code_sdofs_matches_implicit_path(self):
+        """run_code(sdofs=surface_dofs) must produce the same result as run_code()."""
+        booz_ref = _make_mock_boozer_surface()
+        sdofs_orig = booz_ref.surface.get_dofs().copy()
+        res_ref = booz_ref.run_code(iota=0.3, G=0.05)
+
+        booz_sdofs = _make_mock_boozer_surface()
+        res_sdofs = booz_sdofs.run_code(iota=0.3, G=0.05, sdofs=sdofs_orig)
+
+        assert res_sdofs["success"] == res_ref["success"]
+        np.testing.assert_allclose(res_sdofs["iota"], res_ref["iota"], atol=1e-14)
+        np.testing.assert_allclose(res_sdofs["fun"], res_ref["fun"], atol=1e-14)
+        np.testing.assert_allclose(
+            booz_sdofs.surface.get_dofs(), booz_ref.surface.get_dofs(), atol=1e-14
+        )
+
+    def test_run_code_sdofs_overrides_stale_surface(self):
+        """run_code(sdofs=...) must use explicit DOFs, not stale self.surface."""
+        booz = _make_mock_boozer_surface()
+        sdofs_good = booz.surface.get_dofs().copy()
+
+        # Solve once to get reference result
+        res_ref = booz.run_code(iota=0.3, G=0.05)
+        surface_after_ref = booz.surface.get_dofs().copy()
+
+        # Perturb surface to garbage, mark dirty, re-solve with explicit sdofs
+        booz.surface.set_dofs(sdofs_good * 0.0 + 999.0)
+        booz.need_to_run_code = True
+        res_sdofs = booz.run_code(iota=0.3, G=0.05, sdofs=sdofs_good)
+
+        # Must converge to the same solution as the reference
+        assert res_sdofs["success"] is True
+        np.testing.assert_allclose(res_sdofs["iota"], res_ref["iota"], atol=1e-12)
+        np.testing.assert_allclose(res_sdofs["fun"], res_ref["fun"], atol=1e-12)
+        # Surface must hold solved DOFs, not the garbage or the warm-start
+        np.testing.assert_allclose(
+            booz.surface.get_dofs(), surface_after_ref, atol=1e-12
+        )
+
+    def test_run_code_sdofs_syncs_surface_on_exact_failure(self):
+        """On exact-path failure, self.surface must hold warm-start sdofs.
+
+        The exact-path failure (NaN iterates) returns before calling
+        ``_set_surface_dofs``.  The pre-sync in ``run_code`` must leave
+        ``self.surface`` in the warm-start state, not whatever garbage
+        was there before.
+        """
+        booz = _make_mock_boozer_surface_exact()
+        sdofs_good = booz.surface.get_dofs().copy()
+
+        # Corrupt surface state
+        booz.surface.set_dofs(sdofs_good * 0.0 + 999.0)
+        booz.need_to_run_code = True
+
+        # Force exact Newton to fail → failure path skips _set_surface_dofs
+        with (
+            _patched_exact_surface_module(),
+            _patched_exact_newton_result(success=False, step=jnp.nan, nit=0),
+        ):
+            res = booz.run_code(iota=0.3, G=0.05, sdofs=sdofs_good)
+
+        assert res["success"] is False
+        # Surface must hold the warm-start DOFs, not the garbage
+        np.testing.assert_allclose(booz.surface.get_dofs(), sdofs_good, atol=1e-14)
+
     def test_run_code_invalid_newton_iterate_aborts_adjoint_state(self, monkeypatch):
         """Finite iterates with invalid Newton derivatives must not build PLU/VJP."""
         booz = _make_mock_boozer_surface()
@@ -2163,9 +2234,7 @@ class TestBoozerSurfaceJAXClass:
         assert booz.need_to_run_code is False
         assert np.all(np.isfinite(booz.surface.get_dofs()))
 
-    def test_run_code_finite_unsuccessful_newton_keeps_adjoint_state(
-        self, monkeypatch
-    ):
+    def test_run_code_finite_unsuccessful_newton_keeps_adjoint_state(self, monkeypatch):
         """Finite maxiter-exhausted Newton exits must still keep PLU/VJP state."""
         booz = _make_mock_boozer_surface()
 
@@ -2294,7 +2363,9 @@ class TestBoozerSurfaceJAXClass:
         booz.options["limited_memory"] = False
 
         def forbidden_scipy_minimize(*_args, **_kwargs):
-            raise AssertionError("_scipy_minimize must not be called on the ondevice path")
+            raise AssertionError(
+                "_scipy_minimize must not be called on the ondevice path"
+            )
 
         monkeypatch.setattr(_opt, "_scipy_minimize", forbidden_scipy_minimize)
 
@@ -2345,7 +2416,9 @@ class TestBoozerSurfaceJAXClass:
 
         res = booz.run_code(iota=0.3, G=0.05)
 
-        progress_events = [payload for label, payload in observed if label == "boozer_ls_progress"]
+        progress_events = [
+            payload for label, payload in observed if label == "boozer_ls_progress"
+        ]
         assert res is not None
         assert res["success"] is True
         assert res["optimizer_method"] == "bfgs-ondevice"
@@ -2982,8 +3055,8 @@ class TestEnsureSolvedGuard:
         assert captured == {"iota": 0.3, "G": 0.05}
         assert booz.need_to_run_code is False
 
-    def test_finite_unsuccessful_state_with_adjoint_contract_is_accepted(self):
-        """_ensure_solved must allow finite unsuccessful solves with PLU/VJP."""
+    def test_finite_unsuccessful_state_with_adjoint_contract_is_rejected(self):
+        """_ensure_solved must reject unsuccessful solves even with PLU/VJP."""
         booz = _make_mock_boozer_surface()
         booz.need_to_run_code = False
         booz.res = {
@@ -2994,7 +3067,8 @@ class TestEnsureSolvedGuard:
             "vjp": lambda *_args, **_kwargs: None,
         }
 
-        _ensure_solved_jax(booz)
+        with pytest.raises(RuntimeError, match="failed"):
+            _ensure_solved_jax(booz)
 
     def test_resolved_boozer_G_uses_fixed_currents_when_run_code_kept_G_none(self):
         """Fixed-current LS paths must recover the effective G from coil currents."""
