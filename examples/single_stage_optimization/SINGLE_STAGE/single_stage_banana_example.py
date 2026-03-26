@@ -51,7 +51,7 @@ EXAMPLE_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, ".."))
 import sys
 sys.path.insert(0, EXAMPLE_ROOT)
 from plotting_utils import norm_field_plot, cross_section_plot
-from POINCARE_PLOTTING.poincare_surfaces import _midplane_seed_radii
+from topology_scorer import midplane_seed_radii as _midplane_seed_radii, score_topology, stop_reason_label as _topology_stop_reason, toroidal_angle as _topology_toroidal_angle
 SIMSOPT_ROOT = os.path.abspath(os.path.join(EXAMPLE_ROOT, "..", ".."))
 REPO_ROOT = os.path.abspath(os.path.join(SIMSOPT_ROOT, ".."))
 DATABASE_EQUILIBRIA_DIR = os.path.join(REPO_ROOT, "DATABASE", "EQUILIBRIA")
@@ -494,6 +494,24 @@ def parse_args():
         type=int,
         default=int(os.environ.get("CHECKPOINT_EVERY", "0")),
         help="Save checkpoint artifacts every N accepted iterations (0 = disabled, default).",
+    )
+    parser.add_argument(
+        "--topology-scorer-every",
+        type=int,
+        default=int(os.environ.get("TOPOLOGY_SCORER_EVERY", "0")),
+        help="Run medium-fidelity topology scorer every N accepted iterations (0 = disabled, default).",
+    )
+    parser.add_argument(
+        "--topology-scorer-nfieldlines",
+        type=int,
+        default=int(os.environ.get("TOPOLOGY_SCORER_NFIELDLINES", "12")),
+        help="Number of field lines for callback topology scorer (default 12).",
+    )
+    parser.add_argument(
+        "--topology-scorer-tmax",
+        type=float,
+        default=float(os.environ.get("TOPOLOGY_SCORER_TMAX", "50.0")),
+        help="Integration horizon for callback topology scorer (default 50.0).",
     )
     parser.add_argument(
         "--basin-hops",
@@ -968,16 +986,6 @@ def build_scaled_outer_problem(base_fun, base_callback, anchor_x, step_scale):
         base_callback(anchor_x + step_scale * z)
 
     return scaled_fun, scaled_callback
-
-
-def _topology_stop_reason(stop_index, stop_labels):
-    if 0 <= stop_index < len(stop_labels):
-        return stop_labels[stop_index]
-    return f"stop_{stop_index}"
-
-
-def _topology_toroidal_angle(x, y):
-    return float(np.mod(np.arctan2(y, x), 2 * np.pi))
 
 
 def evaluate_topology_gate(surface, bfield, nfieldlines, tmax, tol, survival_threshold):
@@ -1595,6 +1603,46 @@ def callback(x):
         save_surface_artifacts(surface_data, bs, ckpt_dir, "surf", also_write_outer_legacy=False)
         print(f"  [checkpoint] Saved iteration {run_dict['accepted_iterations']} to {ckpt_dir}")
 
+    # Periodic topology scoring (medium-fidelity confinement evaluation)
+    if TOPOLOGY_SCORER_EVERY > 0 and run_dict['accepted_iterations'] % TOPOLOGY_SCORER_EVERY == 0:
+        outer_surf = outer_surface_data['boozer_surface'].surface
+        topo_result = score_topology(
+            outer_surf, bs,
+            nfieldlines=TOPOLOGY_SCORER_NFIELDLINES,
+            tmax=TOPOLOGY_SCORER_TMAX,
+        )
+        topo_entry = {
+            "accepted_iteration": run_dict['accepted_iterations'],
+            "J": float(J),
+            "survival_fraction": topo_result["survival_fraction"],
+            "survived_lines": topo_result["survived_lines"],
+            "nfieldlines": topo_result["nfieldlines"],
+            "tmax": topo_result["tmax"],
+            "mean_exit_time": topo_result["mean_exit_time"],
+            "confinement_score": topo_result["confinement_score"],
+            "stop_reason_counts": topo_result["stop_reason_counts"],
+        }
+        # Append to archive JSONL
+        archive_path = os.path.join(OUT_DIR_ITER, "topology_archive.jsonl")
+        with open(archive_path, "a") as af:
+            af.write(json.dumps(topo_entry) + "\n")
+
+        # Track best states
+        if 'best_topology' not in run_dict or topo_entry['confinement_score'] > run_dict['best_topology']['confinement_score']:
+            run_dict['best_topology'] = topo_entry
+            # Save checkpoint for best-topology state
+            best_dir = os.path.join(OUT_DIR_ITER, "best_topology")
+            os.makedirs(best_dir, exist_ok=True)
+            bs.save(os.path.join(best_dir, "biot_savart.json"))
+            save_surface_artifacts(surface_data, bs, best_dir, "surf", also_write_outer_legacy=False)
+
+        print(
+            f"  [topology] iter={run_dict['accepted_iterations']}: "
+            f"survival={topo_result['survived_lines']}/{topo_result['nfieldlines']}, "
+            f"confinement={topo_result['confinement_score']:.4f}, "
+            f"mean_exit={topo_result['mean_exit_time']}"
+        )
+
 
 # Convergence tolerances for different mpol values (module-level for testability)
 ftol_by_mpol = {8: 1e-5, 9: 5e-6, 10: 1e-6, 11: 5e-7, 12: 1e-7, 13: 5e-8, 14: 1e-8, 15: 5e-9, 16: 1e-9, 17: 5e-10, 18: 1e-10}
@@ -1606,6 +1654,9 @@ TOPOLOGY_GATE_TMAX = 2.0
 TOPOLOGY_GATE_TOL = 1e-7
 TOPOLOGY_GATE_SURVIVAL_THRESHOLD = 0.0
 CHECKPOINT_EVERY = 0
+TOPOLOGY_SCORER_EVERY = 0
+TOPOLOGY_SCORER_NFIELDLINES = 12
+TOPOLOGY_SCORER_TMAX = 50.0
 
 
 if __name__ == "__main__":
@@ -1631,6 +1682,9 @@ if __name__ == "__main__":
     CONSTRAINT_WEIGHT = args.constraint_weight
     MAXITER = args.maxiter
     CHECKPOINT_EVERY = args.checkpoint_every
+    TOPOLOGY_SCORER_EVERY = args.topology_scorer_every
+    TOPOLOGY_SCORER_NFIELDLINES = args.topology_scorer_nfieldlines
+    TOPOLOGY_SCORER_TMAX = args.topology_scorer_tmax
     iota_target = args.iota_target
     num_tf_coils = args.num_tf_coils
     if not (0.0 <= args.inner_surface_initial_weight <= 1.0):
@@ -2178,6 +2232,9 @@ if __name__ == "__main__":
         "TERMINATION_MESSAGE": termination_message,
         "OPTIMIZER_SUCCESS": optimizer_success,
         "CHECKPOINT_EVERY": CHECKPOINT_EVERY,
+        "TOPOLOGY_SCORER_EVERY": TOPOLOGY_SCORER_EVERY,
+        "TOPOLOGY_SCORER_NFIELDLINES": TOPOLOGY_SCORER_NFIELDLINES,
+        "TOPOLOGY_SCORER_TMAX": TOPOLOGY_SCORER_TMAX,
         "basin_hops": args.basin_hops,
         "basin_stepsize": args.basin_stepsize if args.basin_hops > 0 else None,
         "basin_seed": rng_seed if args.basin_hops > 0 else None,
