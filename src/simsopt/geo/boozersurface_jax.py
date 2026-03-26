@@ -624,7 +624,6 @@ _DEFAULT_OPTIONS_LS = {
     "bfgs_maxiter": 1500,
     "optimizer_backend": "scipy",
     "limited_memory": False,
-    "force_ondevice_limited_memory": False,
     "newton_tol": 1e-11,
     "newton_maxiter": 40,
     "newton_stab": 0.0,
@@ -638,20 +637,28 @@ _DEFAULT_OPTIONS_EXACT = {
     "weight_inv_modB": False,
 }
 
-_INTERNAL_OPTIMIZER_OPTIONS = frozenset(
+# Options only meaningful for private optimizer backends (hybrid, ondevice).
+_PRIVATE_OPTIMIZER_OPTIONS = frozenset(
     {
+        "force_ondevice_limited_memory",
         "hybrid_scipy_maxiter",
         "line_search_maxiter",
-        "maxcor",
-        "ftol",
-        "maxfun",
         "maxgrad",
-        "maxls",
-        "stage_callback",
-        "progress_callback",
     }
 )
-_ALLOWED_OPTIONS_LS = frozenset(_DEFAULT_OPTIONS_LS) | _INTERNAL_OPTIMIZER_OPTIONS
+
+# Options shared by the public SciPy L-BFGS lane and the private L-BFGS lanes.
+_LBFGS_TUNING_OPTIONS = frozenset({"maxcor", "ftol", "maxfun", "maxls"})
+
+# Callback options accepted by all backends.
+_CALLBACK_OPTIONS = frozenset({"stage_callback", "progress_callback"})
+
+_ALLOWED_OPTIONS_LS = (
+    frozenset(_DEFAULT_OPTIONS_LS)
+    | _PRIVATE_OPTIMIZER_OPTIONS
+    | _LBFGS_TUNING_OPTIONS
+    | _CALLBACK_OPTIONS
+)
 _ALLOWED_OPTIONS_EXACT = frozenset(_DEFAULT_OPTIONS_EXACT) | {
     "optimizer_backend",
     "stage_callback",
@@ -680,6 +687,24 @@ def _normalize_solver_options(raw_options, boozer_type):
         and optimizer_backend not in VALID_OPTIMIZER_BACKENDS
     ):
         raise ValueError("optimizer_backend must be one of: scipy, hybrid, ondevice.")
+
+    if boozer_type == "ls":
+        effective_backend = raw_options.get("optimizer_backend", "scipy")
+        private_keys = sorted(set(raw_options) & _PRIVATE_OPTIMIZER_OPTIONS)
+        if private_keys and effective_backend == "scipy":
+            keys_str = ", ".join(repr(k) for k in private_keys)
+            raise ValueError(
+                f"Private optimizer option(s) {keys_str} require "
+                "optimizer_backend='hybrid' or 'ondevice'."
+            )
+
+        lbfgs_keys = sorted(set(raw_options) & _LBFGS_TUNING_OPTIONS)
+        if lbfgs_keys and effective_backend == "hybrid":
+            keys_str = ", ".join(repr(k) for k in lbfgs_keys)
+            raise ValueError(
+                f"L-BFGS tuning option(s) {keys_str} are unsupported for "
+                "optimizer_backend='hybrid'."
+            )
 
     normalized_options = dict(raw_options)
     if boozer_type == "exact":
@@ -879,7 +904,10 @@ class BoozerSurfaceJAX(Optimizable):
         return x[:-1], float(x[-1]), None
 
     def _make_penalty_objective_with(
-        self, optimize_G, weight_inv_modB, constraint_weight=None,
+        self,
+        optimize_G,
+        weight_inv_modB,
+        constraint_weight=None,
         coil_arrays=None,
     ):
         """Build penalty objective with explicit overrides."""
@@ -958,9 +986,8 @@ class BoozerSurfaceJAX(Optimizable):
         if limited_memory is None:
             limited_memory = self.options["limited_memory"]
         effective_limited_memory = bool(limited_memory)
-        if (
-            optimizer_backend == "ondevice"
-            and self.options["force_ondevice_limited_memory"]
+        if optimizer_backend == "ondevice" and self.options.get(
+            "force_ondevice_limited_memory", False
         ):
             effective_limited_memory = True
         return resolve_optimizer_backend_method(
@@ -1493,20 +1520,25 @@ class BoozerSurfaceJAX(Optimizable):
         sdofs_jax = jnp.asarray(sdofs, dtype=jnp.float64)
         x0 = self._pack_decision_vector(iota, G, sdofs=sdofs_jax)
         obj_fn = self._make_penalty_objective_with(
-            optimize_G, weight_inv_modB, coil_arrays=coil_arrays,
+            optimize_G,
+            weight_inv_modB,
+            coil_arrays=coil_arrays,
         )
         method = self._resolve_optimizer_method()
         optimizer_options = self._collect_optimizer_options()
 
         # LBFGS → Newton polish
         ls_result = jax_minimize(
-            obj_fn, x0, method=method,
+            obj_fn,
+            x0,
+            method=method,
             tol=self.options["bfgs_tol"],
             maxiter=self.options["bfgs_maxiter"],
             options=optimizer_options,
         )
         newton_result = newton_polish(
-            obj_fn, ls_result.x,
+            obj_fn,
+            ls_result.x,
             maxiter=self.options["newton_maxiter"],
             tol=self.options["newton_tol"],
             stab=self.options["newton_stab"],
@@ -1546,12 +1578,15 @@ class BoozerSurfaceJAX(Optimizable):
         G_for_res = (
             G_out
             if G_out is not None
-            else float(compute_G_from_currents(
-                jnp.concatenate([c for _, _, c in coil_arrays])
-            ))
+            else float(
+                compute_G_from_currents(jnp.concatenate([c for _, _, c in coil_arrays]))
+            )
         )
         residual_vec = self._compute_residual_vector(
-            sdofs_final, iota_out, G_for_res, coil_arrays=coil_arrays,
+            sdofs_final,
+            iota_out,
+            G_for_res,
+            coil_arrays=coil_arrays,
         )
 
         return {
