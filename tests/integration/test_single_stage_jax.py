@@ -1028,7 +1028,7 @@ class TestScriptBackendSelection:
 
         recorder = MagicMock()
         recorder.return_value = MagicMock(
-            run_code=MagicMock(return_value={"success": True, "G": 1.0, "iota": 0.3}),
+            run_code=MagicMock(return_value={"success": True, "G": 1.0, "iota": 0.3, "iter": 10}),
             surface=MagicMock(
                 is_self_intersecting=MagicMock(return_value=False),
                 volume=MagicMock(return_value=0.1),
@@ -1309,8 +1309,6 @@ class TestExactPathSolve:
             constraint_weight=None,
             options={
                 "verbose": False,
-                "bfgs_maxiter": 300,
-                "bfgs_tol": 1e-8,
                 "newton_maxiter": 40,
                 "newton_tol": 1e-8,
             },

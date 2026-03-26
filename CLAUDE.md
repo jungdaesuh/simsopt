@@ -167,7 +167,7 @@ from simsopt.backend import get_backend, is_jax_backend, get_jax_platform
 ### Comprehensive jax-port code review (2026-03-18)
 
 Bugs fixed:
-- `_ensure_solved` crashed with `TypeError` when `booz_surf.res is None`. Fixed with None guard raising `RuntimeError`.
+- `_ensure_solved` crashed with `TypeError` when `booz_surf.res is None`. Fixed with None guard raising `RuntimeError`. Later hardened to also check `res["success"]` — a failed solve must not trust its PLU/VJP state.
 - Missing `weight_inv_modB` in exact-path result dict (`boozersurface_jax.py`). Consumers defaulted to wrong value.
 - Unconditional `import jax` in `__init__.py` and `surfaceobjectives.py` broke CPU-only installs. Guarded with `try/except ImportError`.
 - Missing `}` closing `#pragma omp parallel` in `surfacerzfourier.cpp` `dgamma_by_dcoeff_vjp`.

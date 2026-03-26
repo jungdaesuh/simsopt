@@ -114,6 +114,7 @@ def _ensure_solved(booz_surf):
         booz_surf.run_code(booz_surf.res["iota"], G=booz_surf.res["G"])
     if (
         booz_surf.res is None
+        or not booz_surf.res.get("success")
         or booz_surf.res.get("PLU") is None
         or booz_surf.res.get("vjp") is None
     ):
