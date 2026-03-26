@@ -1121,6 +1121,93 @@ class SingleStageAdapter:
         )
 
 
+def snapshot_to_pytree(JF, boozer_surface, bs, *, num_tf_coils):
+    """Extract pre-optimization state from the Optimizable graph.
+
+    Converts the mutable Optimizable graph into plain arrays and metadata.
+    The returned ``run_dict`` serves as the mutable accepted-state
+    container for :class:`SingleStageAdapter`, and ``static_config``
+    captures frozen geometry (TF coil ``gamma()``, currents) that does
+    not change during optimization.
+
+    Args:
+        JF: Composite objective (``Optimizable``).
+        boozer_surface: Boozer surface adapter.
+        bs: Biot-Savart field object with ``.coils``.
+        num_tf_coils: Number of TF coils (first ``num_tf_coils`` in
+            ``bs.coils`` are frozen; the rest are banana coils).
+
+    Returns:
+        (coil_dofs, run_dict, static_config):
+        - coil_dofs: Starting DOFs for the optimizer.
+        - run_dict: Mutable accepted-state dict for ``SingleStageAdapter``.
+        - static_config: Frozen arrays and metadata.
+
+    Raises:
+        RuntimeError: If Boozer surface has not been solved or solve failed.
+    """
+    if boozer_surface.res is None or not boozer_surface.res.get("success", False):
+        raise RuntimeError(
+            "snapshot_to_pytree requires a successful Boozer solve; "
+            "call initialize_boozer_surface() first."
+        )
+    coil_dofs = JF.x.copy()
+    coils = bs.coils
+    tf_coils = coils[:num_tf_coils]
+
+    run_dict = {
+        "sdofs": boozer_surface.surface.x.copy(),
+        "iota": boozer_surface.res["iota"],
+        "G": boozer_surface.res["G"],
+        "J": JF.J(),
+        "dJ": JF.dJ().copy(),
+        "it": 1,
+        "lscount": 0,
+        "x_prev": coil_dofs.copy(),
+        "intersecting": False,
+        "self_intersection_check_available": (
+            surface_self_intersection_check_available()
+        ),
+    }
+
+    static_config = {
+        "num_tf_coils": num_tf_coils,
+        "tf_gamma": [c.curve.gamma().copy() for c in tf_coils],
+        "tf_gammadash": [c.curve.gammadash().copy() for c in tf_coils],
+        "tf_currents": [float(c.current.get_value()) for c in tf_coils],
+    }
+
+    return coil_dofs, run_dict, static_config
+
+
+def restore_from_pytree(JF, boozer_surface, run_dict, coil_dofs=None):
+    """Write optimization state back into the Optimizable graph.
+
+    Restores coil DOFs, surface DOFs, and the warm-start scalars
+    (``iota``, ``G``) so post-optimization consumers see values
+    consistent with the last accepted step.
+
+    Note: ``res["success"]``, ``res["PLU"]``, and ``res["vjp"]`` are
+    NOT directly restored.  Setting ``surface.x`` or ``JF.x`` marks
+    the Boozer surface dirty (``need_to_run_code = True``), so the
+    next access through an ``IotasJAX`` / ``NonQuasiSymmetricRatioJAX``
+    wrapper will trigger ``_ensure_solved`` which re-runs the inner
+    solve and refreshes the full ``res`` dict automatically.
+
+    Args:
+        JF: Composite objective (``Optimizable``).
+        boozer_surface: Boozer surface adapter.
+        run_dict: Final accepted-state dict from the optimizer.
+        coil_dofs: Final coil DOFs from the optimizer result. If None,
+            the coil DOFs in the graph are left unchanged.
+    """
+    if coil_dofs is not None:
+        JF.x = coil_dofs
+    boozer_surface.surface.x = run_dict["sdofs"]
+    boozer_surface.res["iota"] = run_dict["iota"]
+    boozer_surface.res["G"] = run_dict["G"]
+
+
 # Convergence tolerances for different mpol values (module-level for testability)
 ftol_by_mpol = {
     8: 1e-5,
@@ -1414,24 +1501,12 @@ if __name__ == "__main__":
         + CURVATURE_WEIGHT * JCurvature
     )
 
-    # Extract degrees of freedom
-    dofs = JF.x
-
     # ==============================================================================
-    # INITIALIZE OPTIMIZATION STATE
+    # SNAPSHOT PRE-OPTIMIZATION STATE
     # ==============================================================================
-    run_dict = {
-        "sdofs": boozer_surface.surface.x.copy(),
-        "iota": boozer_surface.res["iota"],
-        "G": boozer_surface.res["G"],
-        "J": JF.J(),
-        "dJ": JF.dJ().copy(),
-        "it": 1,
-        "lscount": 0,
-        "x_prev": dofs.copy(),
-        "intersecting": False,
-        "self_intersection_check_available": True,
-    }
+    dofs, run_dict, static_config = snapshot_to_pytree(
+        JF, boozer_surface, bs, num_tf_coils=num_tf_coils
+    )
     adapter = SingleStageAdapter(
         run_dict=run_dict,
         boozer_surface=boozer_surface,
@@ -1483,6 +1558,12 @@ if __name__ == "__main__":
         )
         res_nit = res.nit
         print(res.message)
+
+        # Restore final accepted state to the Optimizable graph so
+        # post-optimization diagnostics and artifact writers see
+        # consistent values even if the last evaluate_candidate was a
+        # rejected trial.
+        restore_from_pytree(JF, boozer_surface, run_dict, coil_dofs=res.x)
 
         # ==============================================================================
         # SAVE OPTIMIZED STATE
@@ -1590,6 +1671,8 @@ if __name__ == "__main__":
         "INITIAL_IOTA": float(initial_iota),
         "INITIAL_FIELD_ERROR": float(initial_field_error),
         "INITIAL_MAX_CURVATURE": float(initial_max_curvature),
+        "num_tf_coils": static_config["num_tf_coils"],
+        "tf_currents": static_config["tf_currents"],
     }
     with open(os.path.join(OUT_DIR_ITER, "results.json"), "w") as outfile:
         json.dump(results, outfile, indent=2)

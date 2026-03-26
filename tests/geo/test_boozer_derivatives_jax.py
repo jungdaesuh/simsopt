@@ -32,10 +32,17 @@ def _load(name, relpath):
     return mod
 
 
-# Ensure stub package hierarchy exists so lazy imports resolve
+# boozer_residual_jax.py uses relative imports (from .surface_fourier_jax ...)
+# that need stub parent packages in sys.modules during importlib loading.
+# We create temporary stubs, load the modules, then clean up so the real
+# simsopt package can load normally in subsequent tests.
+_stubs_added = []
 for _pkg in ["simsopt", "simsopt.geo", "simsopt.field"]:
     if _pkg not in sys.modules:
-        sys.modules[_pkg] = types.ModuleType(_pkg)
+        _stub = types.ModuleType(_pkg)
+        _stub.__path__ = []
+        sys.modules[_pkg] = _stub
+        _stubs_added.append(_pkg)
 
 _sf = _load("surface_fourier_jax", "geo/surface_fourier_jax.py")
 sys.modules["simsopt.geo.surface_fourier_jax"] = _sf
@@ -44,6 +51,13 @@ _bs = _load("biotsavart_jax", "field/biotsavart_jax.py")
 sys.modules["simsopt.field.biotsavart_jax"] = _bs
 
 _br = _load("boozer_residual_jax", "geo/boozer_residual_jax.py")
+
+# Clean up: remove stubs and synthetic entries so the real simsopt
+# package (if installed) isn't shadowed for other test files.
+for _entry in ["simsopt.geo.surface_fourier_jax", "simsopt.field.biotsavart_jax"]:
+    sys.modules.pop(_entry, None)
+for _pkg in reversed(_stubs_added):
+    sys.modules.pop(_pkg, None)
 
 surface_gamma_from_dofs = _sf.surface_gamma_from_dofs
 surface_gammadash1_from_dofs = _sf.surface_gammadash1_from_dofs

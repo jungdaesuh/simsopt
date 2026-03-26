@@ -638,12 +638,263 @@ class SingleStageExampleTests(unittest.TestCase):
         res_before = booz.res.copy()
         jf_x_before = jf.x.copy()
 
-        with patch.object(module, "update_self_intersection_status", return_value=False):
+        with patch.object(
+            module, "update_self_intersection_status", return_value=False
+        ):
             module.evaluate_candidate(np.ones(5), run_dict, booz, jf)
 
         np.testing.assert_array_equal(jf.x, jf_x_before)
         np.testing.assert_array_equal(booz.surface.x, surface_x_before)
         self.assertEqual(booz.res, res_before)
+
+    def test_snapshot_restore_round_trip(self):
+        """Wave 1.4: snapshot → restore → snapshot produces identical arrays."""
+        module = self.load_module()
+
+        class _Surface:
+            def __init__(self):
+                self._x = np.array([10.0, 20.0, 30.0])
+
+            @property
+            def x(self):
+                return self._x
+
+            @x.setter
+            def x(self, val):
+                self._x = np.asarray(val)
+
+        class _BoozerSurface:
+            def __init__(self):
+                self.surface = _Surface()
+                self.res = {"success": True, "iter": 1, "iota": 0.15, "G": 1.0}
+
+        class _JF:
+            def __init__(self):
+                self._x = np.array([1.0, 2.0, 3.0, 4.0, 5.0])
+
+            @property
+            def x(self):
+                return self._x
+
+            @x.setter
+            def x(self, val):
+                self._x = np.asarray(val)
+
+            def J(self):
+                return 42.0
+
+            def dJ(self):
+                return np.array([0.1, 0.2, 0.3, 0.4, 0.5])
+
+        class _Curve:
+            def __init__(self, scale):
+                self._scale = scale
+
+            def gamma(self):
+                return np.ones((10, 3)) * self._scale
+
+            def gammadash(self):
+                return np.zeros((10, 3)) + self._scale * 0.1
+
+        class _Current:
+            def __init__(self, val):
+                self._val = val
+
+            def get_value(self):
+                return self._val
+
+        class _Coil:
+            def __init__(self, current_val, curve_scale):
+                self.curve = _Curve(curve_scale)
+                self.current = _Current(current_val)
+
+        class _BS:
+            def __init__(self):
+                self.coils = [
+                    _Coil(100.0, 1.0),
+                    _Coil(200.0, 2.0),
+                    _Coil(300.0, 3.0),
+                ]
+
+        jf = _JF()
+        booz = _BoozerSurface()
+        bs_obj = _BS()
+
+        with patch.object(
+            module, "surface_self_intersection_check_available", return_value=True
+        ):
+            dofs1, rd1, sc1 = module.snapshot_to_pytree(
+                jf, booz, bs_obj, num_tf_coils=2
+            )
+
+        # Verify snapshot extracted the expected state
+        np.testing.assert_array_equal(dofs1, [1, 2, 3, 4, 5])
+        np.testing.assert_array_equal(rd1["sdofs"], [10, 20, 30])
+        self.assertEqual(rd1["iota"], 0.15)
+        self.assertEqual(rd1["G"], 1.0)
+        self.assertEqual(rd1["J"], 42.0)
+        self.assertEqual(rd1["it"], 1)
+        self.assertEqual(rd1["lscount"], 0)
+        self.assertTrue(rd1["self_intersection_check_available"])
+
+        # Verify TF gamma frozen as static arrays
+        self.assertEqual(sc1["num_tf_coils"], 2)
+        self.assertEqual(len(sc1["tf_gamma"]), 2)
+        np.testing.assert_array_equal(sc1["tf_gamma"][0], np.ones((10, 3)))
+        np.testing.assert_array_equal(sc1["tf_gamma"][1], np.ones((10, 3)) * 2)
+        self.assertAlmostEqual(sc1["tf_currents"][0], 100.0)
+        self.assertAlmostEqual(sc1["tf_currents"][1], 200.0)
+
+        # Mutate the Optimizable graph to simulate post-optimization state
+        jf.x = np.array([99.0, 99.0, 99.0, 99.0, 99.0])
+        booz.surface.x = np.array([99.0, 99.0, 99.0])
+        booz.res["iota"] = 999.0
+        booz.res["G"] = 999.0
+
+        # Restore from the snapshot
+        module.restore_from_pytree(jf, booz, rd1, coil_dofs=dofs1)
+
+        # Verify restore wrote back correctly
+        np.testing.assert_array_equal(jf.x, [1, 2, 3, 4, 5])
+        np.testing.assert_array_equal(booz.surface.x, [10, 20, 30])
+        self.assertEqual(booz.res["iota"], 0.15)
+        self.assertEqual(booz.res["G"], 1.0)
+
+        # Re-snapshot and verify round-trip identity
+        with patch.object(
+            module, "surface_self_intersection_check_available", return_value=True
+        ):
+            dofs2, rd2, sc2 = module.snapshot_to_pytree(
+                jf, booz, bs_obj, num_tf_coils=2
+            )
+
+        np.testing.assert_array_equal(dofs1, dofs2)
+        np.testing.assert_array_equal(rd1["sdofs"], rd2["sdofs"])
+        self.assertEqual(rd1["iota"], rd2["iota"])
+        self.assertEqual(rd1["G"], rd2["G"])
+        self.assertEqual(rd1["J"], rd2["J"])
+        np.testing.assert_array_equal(rd1["dJ"], rd2["dJ"])
+        np.testing.assert_array_equal(rd1["x_prev"], rd2["x_prev"])
+        for key in [
+            "it",
+            "lscount",
+            "intersecting",
+            "self_intersection_check_available",
+        ]:
+            self.assertEqual(rd1[key], rd2[key], msg=f"mismatch on {key}")
+        for i in range(2):
+            np.testing.assert_array_equal(sc1["tf_gamma"][i], sc2["tf_gamma"][i])
+            np.testing.assert_array_equal(
+                sc1["tf_gammadash"][i], sc2["tf_gammadash"][i]
+            )
+            self.assertEqual(sc1["tf_currents"][i], sc2["tf_currents"][i])
+
+    def test_restore_without_coil_dofs_leaves_jf_unchanged(self):
+        """restore_from_pytree with coil_dofs=None must not touch JF.x."""
+        module = self.load_module()
+
+        class _Surface:
+            def __init__(self):
+                self._x = np.zeros(2)
+
+            @property
+            def x(self):
+                return self._x
+
+            @x.setter
+            def x(self, val):
+                self._x = np.asarray(val)
+
+        class _BoozerSurface:
+            def __init__(self):
+                self.surface = _Surface()
+                self.res = {"iota": 0.0, "G": 0.0}
+
+        class _JF:
+            def __init__(self):
+                self._x = np.array([7.0, 8.0])
+
+            @property
+            def x(self):
+                return self._x
+
+            @x.setter
+            def x(self, val):
+                self._x = np.asarray(val)
+
+        jf = _JF()
+        booz = _BoozerSurface()
+        run_dict = {"sdofs": np.array([1.0, 2.0]), "iota": 0.15, "G": 1.0}
+
+        module.restore_from_pytree(jf, booz, run_dict)
+
+        np.testing.assert_array_equal(jf.x, [7.0, 8.0])
+        np.testing.assert_array_equal(booz.surface.x, [1.0, 2.0])
+        self.assertEqual(booz.res["iota"], 0.15)
+        self.assertEqual(booz.res["G"], 1.0)
+
+    def test_snapshot_records_unavailable_self_intersection_backend(self):
+        """snapshot_to_pytree must propagate False when backend is absent."""
+        module = self.load_module()
+
+        class _Surface:
+            def __init__(self):
+                self._x = np.zeros(2)
+
+            @property
+            def x(self):
+                return self._x
+
+            @x.setter
+            def x(self, val):
+                self._x = np.asarray(val)
+
+        class _BoozerSurface:
+            def __init__(self):
+                self.surface = _Surface()
+                self.res = {"success": True, "iota": 0.15, "G": 1.0}
+
+        class _JF:
+            def __init__(self):
+                self._x = np.zeros(3)
+
+            @property
+            def x(self):
+                return self._x
+
+            @x.setter
+            def x(self, val):
+                self._x = np.asarray(val)
+
+            def J(self):
+                return 0.0
+
+            def dJ(self):
+                return np.zeros(3)
+
+        class _Coil:
+            def __init__(self):
+                self.curve = type(
+                    "C",
+                    (),
+                    {
+                        "gamma": lambda self: np.zeros((5, 3)),
+                        "gammadash": lambda self: np.zeros((5, 3)),
+                    },
+                )()
+                self.current = type("I", (), {"get_value": lambda self: 1.0})()
+
+        class _BS:
+            coils = [_Coil()]
+
+        with patch.object(
+            module, "surface_self_intersection_check_available", return_value=False
+        ):
+            _, rd, _ = module.snapshot_to_pytree(
+                _JF(), _BoozerSurface(), _BS(), num_tf_coils=1
+            )
+
+        self.assertFalse(rd["self_intersection_check_available"])
 
 
 class BoozerFallbackLBFGSBTests(unittest.TestCase):
