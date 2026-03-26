@@ -61,6 +61,9 @@ _sf = _load_and_register(
     "simsopt.geo.surface_fourier_jax", "geo/surface_fourier_jax.py"
 )
 _bs_jax = _load_and_register("simsopt.field.biotsavart_jax", "field/biotsavart_jax.py")
+_bs_backend = _load_and_register(
+    "simsopt.field.biotsavart_jax_backend", "field/biotsavart_jax_backend.py"
+)
 _obj_utils = _load_and_register(
     "simsopt.objectives.utilities", "objectives/utilities.py"
 )
@@ -212,6 +215,37 @@ def _successful_newton_polish_result(x0, *, nit=0):
         "nit": nit,
         "success": True,
     }
+
+
+def _patch_newton_polish_runner(monkeypatch, fake_newton_polish):
+    """Patch the centralized Newton-polish dispatch seam used by run_code()."""
+
+    def fake_runner(
+        self,
+        method,
+        obj_fn,
+        x0,
+        *,
+        maxiter,
+        tol,
+        stab,
+        progress_callback=None,
+    ):
+        del self, method
+        return fake_newton_polish(
+            obj_fn,
+            x0,
+            maxiter=maxiter,
+            tol=tol,
+            stab=stab,
+            progress_callback=progress_callback,
+        )
+
+    monkeypatch.setattr(
+        _bsj.BoozerSurfaceJAX,
+        "_run_newton_polish_for_method",
+        fake_runner,
+    )
 
 
 def _emit_newton_progress(progress_callback):
@@ -1516,7 +1550,7 @@ class TestBoozerSurfaceJAXClass:
             return _successful_newton_polish_result(x0)
 
         monkeypatch.setattr(_bsj, "jax_minimize", fake_jax_minimize)
-        monkeypatch.setattr(_bsj, "newton_polish", fake_newton_polish)
+        _patch_newton_polish_runner(monkeypatch, fake_newton_polish)
 
         res = booz.run_code(iota=0.3, G=0.05)
 
@@ -1671,7 +1705,7 @@ class TestBoozerSurfaceJAXClass:
                 "success": False,
             }
 
-        monkeypatch.setattr(_bsj, "newton_polish", nan_newton_polish)
+        _patch_newton_polish_runner(monkeypatch, nan_newton_polish)
         booz_ref.run_code(iota=0.3, G=0.05)
         lbfgs_surface = booz_ref.surface.get_dofs().copy()
 
@@ -1703,7 +1737,7 @@ class TestBoozerSurfaceJAXClass:
                 "success": False,
             }
 
-        monkeypatch.setattr(_bsj, "newton_polish", fake_newton_polish)
+        _patch_newton_polish_runner(monkeypatch, fake_newton_polish)
         res = booz.run_code(iota=0.3, G=0.05)
 
         assert res is not None
@@ -1731,7 +1765,7 @@ class TestBoozerSurfaceJAXClass:
                 "success": False,
             }
 
-        monkeypatch.setattr(_bsj, "newton_polish", fake_newton_polish)
+        _patch_newton_polish_runner(monkeypatch, fake_newton_polish)
         res = booz.run_code(iota=0.3, G=0.05)
 
         assert res is not None
@@ -1772,7 +1806,7 @@ class TestBoozerSurfaceJAXClass:
             return _successful_newton_polish_result(x0, nit=2)
 
         monkeypatch.setattr(_bsj, "jax_minimize", fake_jax_minimize)
-        monkeypatch.setattr(_bsj, "newton_polish", fake_newton_polish)
+        _patch_newton_polish_runner(monkeypatch, fake_newton_polish)
 
         res = booz.run_code(iota=0.3, G=0.05)
 
@@ -1837,7 +1871,7 @@ class TestBoozerSurfaceJAXClass:
             }
 
         monkeypatch.setattr(_bsj, "jax_minimize", fake_jax_minimize)
-        monkeypatch.setattr(_bsj, "newton_polish", fake_newton_polish)
+        _patch_newton_polish_runner(monkeypatch, fake_newton_polish)
 
         res = booz.run_code(iota=0.3, G=0.05)
 

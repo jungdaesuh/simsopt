@@ -130,10 +130,6 @@ def _build_pullback_group_profile_breakdown(entries):
     ]
 
 
-def _host_pullback_group(pullback_outputs):
-    return jax.device_get(pullback_outputs)
-
-
 @dataclass(frozen=True)
 class _CoilVJPInfo:
     coil_index: int
@@ -150,10 +146,180 @@ class _CoilVJPInfo:
 
 
 def _supports_native_curve_geometry(curve):
-    from ..geo.curve import CurveCWSFourier
     from ..geo.curvexyzfourier import CurveXYZFourier
 
-    return isinstance(curve, (CurveCWSFourier, CurveXYZFourier))
+    return isinstance(curve, CurveXYZFourier) or (
+        hasattr(curve, "gamma_jax") and hasattr(curve, "gammadash_jax")
+    )
+
+
+def _curve_surface_dofs(curve):
+    surf = getattr(curve, "surf", None)
+    if surf is None or surf.dof_size == 0:
+        return None
+    return jnp.asarray(surf.get_dofs(), dtype=jnp.float64)
+
+
+def _supports_jax_curve_pullback(curve):
+    from ..geo.curvexyzfourier import CurveXYZFourier
+
+    if isinstance(curve, CurveXYZFourier):
+        return True
+
+    if not (
+        hasattr(curve, "dgamma_by_dcoeff_vjp_jax")
+        and hasattr(curve, "dgammadash_by_dcoeff_vjp_jax")
+    ):
+        return False
+
+    if _curve_surface_dofs(curve) is None:
+        return True
+
+    return (
+        hasattr(curve, "dgamma_by_dsurf_vjp_jax")
+        and hasattr(curve, "dgammadash_by_dsurf_vjp_jax")
+    )
+
+
+def _merge_derivative_data(target, derivative_like):
+    items = (
+        derivative_like.data.items()
+        if isinstance(derivative_like, Derivative)
+        else derivative_like.items()
+    )
+    for opt, block in items:
+        if opt in target:
+            target[opt] = target[opt] + block
+        else:
+            target[opt] = block.copy() if hasattr(block, "copy") else block
+
+
+def _curve_coeff_pullback_data(curve, dg, dgd):
+    from ..geo.curvexyzfourier import CurveXYZFourier, jaxfouriercurve_pure
+
+    if curve.dof_size == 0:
+        return {}
+
+    if isinstance(curve, CurveXYZFourier):
+        curve_dofs = jnp.asarray(curve.get_dofs(), dtype=jnp.float64)
+        quadpoints = jnp.asarray(np.asarray(curve.quadpoints), dtype=jnp.float64)
+        ones = jnp.ones_like(quadpoints)
+
+        def gamma_of_dofs(dofs):
+            return jaxfouriercurve_pure(dofs, quadpoints, curve.order)
+
+        def gammadash_of_dofs(dofs):
+            return jax.jvp(
+                lambda qpts: jaxfouriercurve_pure(dofs, qpts, curve.order),
+                (quadpoints,),
+                (ones,),
+            )[1]
+
+        _, gamma_pullback = jax.vjp(gamma_of_dofs, curve_dofs)
+        _, gammadash_pullback = jax.vjp(gammadash_of_dofs, curve_dofs)
+        return {curve: gamma_pullback(dg)[0] + gammadash_pullback(dgd)[0]}
+
+    curve_dofs = jnp.asarray(curve.get_dofs(), dtype=jnp.float64)
+    return {
+        curve: curve.dgamma_by_dcoeff_vjp_jax(curve_dofs, dg)
+        + curve.dgammadash_by_dcoeff_vjp_jax(curve_dofs, dgd)
+    }
+
+
+def _curve_gamma_from_dofs(curve, curve_dofs):
+    from ..geo.curvexyzfourier import CurveXYZFourier, jaxfouriercurve_pure
+
+    if isinstance(curve, CurveXYZFourier):
+        quadpoints = jnp.asarray(np.asarray(curve.quadpoints), dtype=jnp.float64)
+        return jaxfouriercurve_pure(curve_dofs, quadpoints, curve.order)
+
+    surf_dofs = _curve_surface_dofs(curve)
+    if surf_dofs is not None:
+        return curve.gamma_jax(curve_dofs, surf_dofs)
+
+    return curve.gamma_jax(curve_dofs)
+
+
+def _curve_gammadash_from_dofs(curve, curve_dofs):
+    from ..geo.curvexyzfourier import CurveXYZFourier, jaxfouriercurve_pure
+
+    if isinstance(curve, CurveXYZFourier):
+        quadpoints = jnp.asarray(np.asarray(curve.quadpoints), dtype=jnp.float64)
+        ones = jnp.ones_like(quadpoints)
+        return jax.jvp(
+            lambda qpts: jaxfouriercurve_pure(curve_dofs, qpts, curve.order),
+            (quadpoints,),
+            (ones,),
+        )[1]
+
+    surf_dofs = _curve_surface_dofs(curve)
+    if surf_dofs is not None:
+        return curve.gammadash_jax(curve_dofs, surf_dofs)
+
+    return curve.gammadash_jax(curve_dofs)
+
+
+def _curve_surface_pullback_data(curve, dg, dgd):
+    surf_dofs = _curve_surface_dofs(curve)
+    if surf_dofs is None:
+        return {}
+    if not (
+        hasattr(curve, "dgamma_by_dsurf_vjp_jax")
+        and hasattr(curve, "dgammadash_by_dsurf_vjp_jax")
+    ):
+        return {}
+
+    return {
+        curve.surf: curve.dgamma_by_dsurf_vjp_jax(surf_dofs, dg)
+        + curve.dgammadash_by_dsurf_vjp_jax(surf_dofs, dgd)
+    }
+
+
+def _project_single_coil_cotangent_data(coil, dg, dgd, dc):
+    curve, rotmat, current, scale = _unwrap_coil_curve_and_current(coil)
+
+    if _supports_jax_curve_pullback(curve):
+        if rotmat is not None:
+            rotmat_t = jnp.asarray(rotmat, dtype=jnp.float64).T
+            dg = dg @ rotmat_t
+            dgd = dgd @ rotmat_t
+
+        deriv_data = {}
+        _merge_derivative_data(deriv_data, _curve_coeff_pullback_data(curve, dg, dgd))
+        _merge_derivative_data(deriv_data, _curve_surface_pullback_data(curve, dg, dgd))
+        if current.dof_size > 0:
+            current_cotangent = jnp.atleast_1d(
+                jnp.asarray(scale, dtype=jnp.float64) * jnp.asarray(dc, dtype=jnp.float64)
+            )
+            _merge_derivative_data(deriv_data, current.vjp(current_cotangent))
+        return deriv_data
+
+    # ``coil.vjp()`` already unwraps rotated curves and applies the inverse
+    # rotation internally, so pass the original cotangents through unchanged.
+    return dict(
+        coil.vjp(
+            np.asarray(dg),
+            np.asarray(dgd),
+            np.asarray([dc]),
+        ).data
+    )
+
+
+def project_coil_cotangents_to_derivative(coils, d_coil_arrays, coil_indices):
+    """Project grouped coil cotangents to a single public ``Derivative``."""
+    deriv_data = {}
+    for (d_g, d_gd, d_c), indices in zip(d_coil_arrays, coil_indices):
+        for local_i, global_i in enumerate(indices):
+            _merge_derivative_data(
+                deriv_data,
+                _project_single_coil_cotangent_data(
+                    coils[global_i],
+                    d_g[local_i],
+                    d_gd[local_i],
+                    d_c[local_i],
+                ),
+            )
+    return Derivative(deriv_data)
 
 
 def _rotate_curve_geometry(gamma, gammadash, rotmat):
@@ -282,6 +448,48 @@ class BiotSavartJAX(Optimizable):
         self._curve_dof_size = 3 * (2 * self._curve_order + 1)
         self._curve_quadpoints_jax = jnp.asarray(np.asarray(base_curves[0].quadpoints))
 
+    def _coil_arrays_in_order_from_dofs_generic_jax(self, coil_dofs):
+        """Rebuild per-coil arrays for any JAX-geometry-capable curve set."""
+        from .coil import Current
+
+        coil_dofs = self._normalize_explicit_coil_dofs(coil_dofs)
+
+        coil_gammas = []
+        coil_gammadashs = []
+        coil_currents = []
+        for coil in self._coils:
+            curve, rotmat, current, scale = _unwrap_coil_curve_and_current(coil)
+            if not _supports_native_curve_geometry(curve):
+                raise RuntimeError(
+                    "grouped_coil_arrays_from_dofs() requires JAX geometry support "
+                    f"for every base curve; unsupported type {type(curve).__name__}."
+                )
+            if not isinstance(current, Current):
+                raise RuntimeError(
+                    "grouped_coil_arrays_from_dofs() only supports scalar Current "
+                    "degrees of freedom on the JAX geometry lane."
+                )
+
+            curve_dofs = self._local_full_dofs_from_free_vector(curve, coil_dofs)
+            gamma = _curve_gamma_from_dofs(curve, curve_dofs)
+            gammadash = _curve_gammadash_from_dofs(curve, curve_dofs)
+            if rotmat is not None:
+                gamma = gamma @ rotmat
+                gammadash = gammadash @ rotmat
+
+            coil_gammas.append(gamma)
+            coil_gammadashs.append(gammadash)
+            coil_currents.append(
+                jnp.asarray(scale, dtype=jnp.float64)
+                * self._scalar_current_value_from_dofs(
+                    current,
+                    coil_dofs,
+                    "JAX geometry lane",
+                )
+            )
+
+        return coil_gammas, coil_gammadashs, coil_currents
+
     def _local_full_dofs_from_free_vector(self, opt, coil_dofs):
         """Rebuild one Optimizable's full local DOF vector from ``coil_dofs``.
 
@@ -298,6 +506,24 @@ class BiotSavartJAX(Optimizable):
         free_indices = np.flatnonzero(opt.local_dofs_free_status)
         return full_x.at[free_indices].set(coil_dofs[start:end])
 
+    def _normalize_explicit_coil_dofs(self, coil_dofs):
+        coil_dofs = jnp.asarray(coil_dofs, dtype=jnp.float64)
+        expected_dofs = self.dof_size
+        if coil_dofs.shape[0] != expected_dofs:
+            raise ValueError(
+                f"Expected {expected_dofs} coil DOFs, got {coil_dofs.shape[0]}."
+            )
+        return coil_dofs
+
+    def _scalar_current_value_from_dofs(self, current, coil_dofs, lane_label):
+        current_full_x = self._local_full_dofs_from_free_vector(current, coil_dofs)
+        if current_full_x.shape[0] != 1:
+            raise RuntimeError(
+                "grouped_coil_arrays_from_dofs() only supports scalar Current "
+                f"degrees of freedom on the {lane_label}."
+            )
+        return current_full_x[0]
+
     def _coil_arrays_in_order_from_dofs(self, coil_dofs):
         """Build per-coil ``(gamma, gammadash, current)`` arrays from DOFs.
 
@@ -305,23 +531,15 @@ class BiotSavartJAX(Optimizable):
         ``Optimizable`` graph: it reconstructs coil data from the explicit
         flat ``coil_dofs`` vector without assigning ``self.x``.
 
-        Today this helper is only defined on the JAX-native curve lane
-        (uniform ``CurveXYZFourier`` bases plus optional rotations/current
-        scalings), which is the intended full-GPU target path.
+        The fast path uses the JAX-native uniform-``CurveXYZFourier`` lane.
+        Other curves can still use this helper when they expose the
+        JAX geometry hooks needed to rebuild per-coil arrays from DOFs.
         """
         if not self._jax_native:
-            raise RuntimeError(
-                "_coil_arrays_in_order_from_dofs() requires the JAX-native "
-                "BiotSavartJAX coil lane."
-            )
+            return self._coil_arrays_in_order_from_dofs_generic_jax(coil_dofs)
         from ..geo.curvexyzfourier import jaxfouriercurve_pure
 
-        coil_dofs = jnp.asarray(coil_dofs, dtype=jnp.float64)
-        expected_dofs = self.dof_size
-        if coil_dofs.shape[0] != expected_dofs:
-            raise ValueError(
-                f"Expected {expected_dofs} coil DOFs, got {coil_dofs.shape[0]}."
-            )
+        coil_dofs = self._normalize_explicit_coil_dofs(coil_dofs)
 
         quadpoints = self._curve_quadpoints_jax
         ones = jnp.ones_like(quadpoints)
@@ -332,13 +550,13 @@ class BiotSavartJAX(Optimizable):
 
         current_values = []
         for current in self._unique_base_currents:
-            current_full_x = self._local_full_dofs_from_free_vector(current, coil_dofs)
-            if current_full_x.shape[0] != 1:
-                raise RuntimeError(
-                    "grouped_coil_arrays_from_dofs() only supports scalar Current "
-                    "degrees of freedom on the JAX-native lane."
+            current_values.append(
+                self._scalar_current_value_from_dofs(
+                    current,
+                    coil_dofs,
+                    "JAX-native lane",
                 )
-            current_values.append(current_full_x[0])
+            )
 
         base_gammas = []
         base_gammadashs = []
@@ -412,37 +630,13 @@ class BiotSavartJAX(Optimizable):
             return base_gamma, base_gammadash, 0.0, 0.0
 
         if _supports_native_curve_geometry(curve):
-            if hasattr(curve, "surf"):
-                curve_dofs = jnp.asarray(curve.get_dofs(), dtype=jnp.float64)
-                surf_dofs = jnp.asarray(curve.surf.get_dofs(), dtype=jnp.float64)
-                gamma_s, base_gamma = _time_call_result(
-                    lambda: curve.gamma_jax(curve_dofs, surf_dofs)
-                )
-                gammadash_s, base_gammadash = _time_call_result(
-                    lambda: curve.gammadash_jax(curve_dofs, surf_dofs)
-                )
-            else:
-                from ..geo.curvexyzfourier import jaxfouriercurve_pure
-
-                curve_dofs = jnp.asarray(curve.get_dofs(), dtype=jnp.float64)
-                quadpoints = jnp.asarray(
-                    np.asarray(curve.quadpoints), dtype=jnp.float64
-                )
-                ones = jnp.ones_like(quadpoints)
-                gamma_s, base_gamma = _time_call_result(
-                    lambda: jaxfouriercurve_pure(curve_dofs, quadpoints, curve.order)
-                )
-                gammadash_s, base_gammadash = _time_call_result(
-                    lambda: jax.jvp(
-                        lambda qpts: jaxfouriercurve_pure(
-                            curve_dofs,
-                            qpts,
-                            curve.order,
-                        ),
-                        (quadpoints,),
-                        (ones,),
-                    )[1]
-                )
+            curve_dofs = jnp.asarray(curve.get_dofs(), dtype=jnp.float64)
+            gamma_s, base_gamma = _time_call_result(
+                lambda: _curve_gamma_from_dofs(curve, curve_dofs)
+            )
+            gammadash_s, base_gammadash = _time_call_result(
+                lambda: _curve_gammadash_from_dofs(curve, curve_dofs)
+            )
         else:
             gamma_s, base_gamma = _time_call_result(
                 lambda: jnp.asarray(curve.gamma(), dtype=jnp.float64)
@@ -499,7 +693,7 @@ class BiotSavartJAX(Optimizable):
     def _group_coil_vjp_infos(self, coil_infos):
         grouped = {}
         for info in coil_infos:
-            key = (int(info.gamma.shape[0]), bool(info.native_curve))
+            key = int(info.gamma.shape[0])
             grouped.setdefault(key, []).append(info)
         group_infos = []
         for infos in grouped.values():
@@ -509,7 +703,7 @@ class BiotSavartJAX(Optimizable):
                     "gammas": jnp.stack([info.gamma for info in infos]),
                     "gammadashs": jnp.stack([info.gammadash for info in infos]),
                     "currents": jnp.stack([info.current_value for info in infos]),
-                    "native_curve": infos[0].native_curve,
+                    "native_curve": all(info.native_curve for info in infos),
                 }
             )
         return group_infos
@@ -622,57 +816,6 @@ class BiotSavartJAX(Optimizable):
         }
         return curve, rotmat, current, scale, gamma, gammadash, current_value, timings
 
-    def _direct_curve_current_vjp(self, curve, rotmat, current, scale, dg, dgd, dc):
-        """Map native JAX pullbacks back to curve, surface, and current DOFs."""
-        from ..geo.curvexyzfourier import CurveXYZFourier, jaxfouriercurve_pure
-
-        if rotmat is not None:
-            rotmat_t = jnp.asarray(rotmat, dtype=jnp.float64).T
-            dg = dg @ rotmat_t
-            dgd = dgd @ rotmat_t
-
-        deriv_data = {}
-        if curve.dof_size > 0:
-            curve_dofs = jnp.asarray(curve.get_dofs(), dtype=jnp.float64)
-            if isinstance(curve, CurveXYZFourier):
-                quadpoints = jnp.asarray(
-                    np.asarray(curve.quadpoints), dtype=jnp.float64
-                )
-                ones = jnp.ones_like(quadpoints)
-
-                def gamma_of_dofs(dofs):
-                    return jaxfouriercurve_pure(dofs, quadpoints, curve.order)
-
-                def gammadash_of_dofs(dofs):
-                    return jax.jvp(
-                        lambda qpts: jaxfouriercurve_pure(dofs, qpts, curve.order),
-                        (quadpoints,),
-                        (ones,),
-                    )[1]
-
-                _, gamma_pullback = jax.vjp(gamma_of_dofs, curve_dofs)
-                _, gammadash_pullback = jax.vjp(gammadash_of_dofs, curve_dofs)
-                deriv_data[curve] = np.asarray(
-                    gamma_pullback(dg)[0] + gammadash_pullback(dgd)[0]
-                )
-            else:
-                deriv_data[curve] = np.asarray(
-                    curve.dgamma_by_dcoeff_vjp_jax(curve_dofs, dg)
-                    + curve.dgammadash_by_dcoeff_vjp_jax(curve_dofs, dgd)
-                )
-        if hasattr(curve, "surf") and curve.surf.dof_size > 0:
-            surf_dofs = jnp.asarray(curve.surf.get_dofs(), dtype=jnp.float64)
-            deriv_data[curve.surf] = np.asarray(
-                curve.dgamma_by_dsurf_vjp_jax(surf_dofs, dg)
-                + curve.dgammadash_by_dsurf_vjp_jax(surf_dofs, dgd)
-            )
-        if current.dof_size > 0:
-            deriv_data[current] = np.asarray(
-                [float(scale) * float(np.asarray(dc))],
-                dtype=float,
-            )
-        return Derivative(deriv_data)
-
     def B_vjp(self, v):
         r"""Vector-Jacobian product of B w.r.t. coil DOFs.
 
@@ -681,8 +824,11 @@ class BiotSavartJAX(Optimizable):
         contribution to the scalar objective.
 
         Uses ``jax.vjp`` through the pure Biot-Savart kernel, then
-        maps the per-coil geometry/current gradients back to DOFs via
-        the existing ``Coil.vjp()`` machinery.
+        projects each coil's geometry/current cotangents back to coil
+        DOFs. Curves that expose JAX pullback methods stay on the JAX
+        path through the projection step; only legacy curves that do
+        not expose the JAX geometry/pullback interface fall back to
+        ``Coil.vjp()``.
 
         Args:
             v: (npoints, 3) cotangent, same shape as ``B()``.
@@ -690,7 +836,7 @@ class BiotSavartJAX(Optimizable):
         Returns:
             :class:`Derivative` (sum over all coils).
         """
-        all_derivs = []
+        deriv_data = {}
         points = self._points_jax
         v_jax = jnp.asarray(v)
         geometry_cache = {}
@@ -703,44 +849,26 @@ class BiotSavartJAX(Optimizable):
                 group["gammadashs"],
                 group["currents"],
             )
-            if not group["native_curve"]:
-                dg_group, dgd_group, dc_group = _host_pullback_group(
-                    (dg_group, dgd_group, dc_group)
-                )
             for group_index, info in enumerate(group["infos"]):
-                if group["native_curve"]:
-                    all_derivs.append(
-                        self._direct_curve_current_vjp(
-                            info.curve,
-                            info.rotmat,
-                            info.current,
-                            info.scale,
-                            dg_group[group_index],
-                            dgd_group[group_index],
-                            dc_group[group_index],
-                        )
-                    )
-                else:
-                    all_derivs.append(
-                        info.coil.vjp(
-                            dg_group[group_index],
-                            dgd_group[group_index],
-                            np.asarray([dc_group[group_index]]),
-                        )
-                    )
-        if not all_derivs:
-            return Derivative({})
-        return sum(all_derivs)
+                _merge_derivative_data(
+                    deriv_data,
+                    _project_single_coil_cotangent_data(
+                        info.coil,
+                        dg_group[group_index],
+                        dgd_group[group_index],
+                        dc_group[group_index],
+                    ),
+                )
+        return Derivative(deriv_data)
 
     def coil_cotangents_to_derivative(self, d_coil_arrays, coil_indices):
         """Project grouped coil cotangent arrays to a :class:`Derivative`.
 
         This is the JAX-native replacement for the standalone
-        ``_coil_cotangents_to_derivative()`` helper.  For coils backed
-        by ``CurveCWSFourier`` (the "native curve" path), cotangents
-        are projected to curve/surface/current DOFs entirely in JAX
-        via ``_direct_curve_current_vjp``.  Non-native curves fall back
-        to the CPU ``Coil.vjp()`` path.
+        ``_coil_cotangents_to_derivative()`` helper. Curves that
+        expose JAX pullback methods stay on the JAX path through the
+        projection step. Legacy curves that do not expose that
+        interface fall back to CPU ``Coil.vjp()`` slice by slice.
 
         Args:
             d_coil_arrays: list of ``(d_gammas, d_gammadashs, d_currents)``
@@ -751,34 +879,11 @@ class BiotSavartJAX(Optimizable):
         Returns:
             :class:`Derivative` over all coil DOFs.
         """
-        all_derivs = []
-        for (d_g, d_gd, d_c), indices in zip(d_coil_arrays, coil_indices):
-            for local_i, global_i in enumerate(indices):
-                coil = self._coils[global_i]
-                curve, rotmat, current, scale = _unwrap_coil_curve_and_current(coil)
-                if _supports_native_curve_geometry(curve):
-                    all_derivs.append(
-                        self._direct_curve_current_vjp(
-                            curve,
-                            rotmat,
-                            current,
-                            scale,
-                            d_g[local_i],
-                            d_gd[local_i],
-                            d_c[local_i],
-                        )
-                    )
-                else:
-                    all_derivs.append(
-                        coil.vjp(
-                            np.asarray(d_g[local_i]),
-                            np.asarray(d_gd[local_i]),
-                            np.asarray([d_c[local_i]]),
-                        )
-                    )
-        if not all_derivs:
-            return Derivative({})
-        return sum(all_derivs)
+        return project_coil_cotangents_to_derivative(
+            self._coils,
+            d_coil_arrays,
+            coil_indices,
+        )
 
     def profile_B_vjp(self, v):
         """Return a timing breakdown for ``B_vjp`` at the current points."""
@@ -827,37 +932,22 @@ class BiotSavartJAX(Optimizable):
                     group["currents"],
                 )
             )
-            transfer_s = 0.0
-            if not group["native_curve"]:
-                transfer_s, (dg_group, dgd_group, dc_group) = _time_call_result(
-                    lambda: _host_pullback_group((dg_group, dgd_group, dc_group))
-                )
-            total_pullback_s = pullback_s + transfer_s
-            component_totals["single_coil_pullback_s"] += total_pullback_s
+            component_totals["single_coil_pullback_s"] += pullback_s
             pullback_group_timings.append(
                 _build_pullback_group_profile_entry(
                     kind="group_pullback",
                     coil_indices=[info.coil_index for info in group["infos"]],
-                    elapsed_s=total_pullback_s,
+                    elapsed_s=pullback_s,
                     native_curve=group["native_curve"],
                 )
             )
             for group_index, info in enumerate(group["infos"]):
                 coil_vjp_s, _ = _time_call_result(
-                    lambda: self._direct_curve_current_vjp(
-                        info.curve,
-                        info.rotmat,
-                        info.current,
-                        info.scale,
+                    lambda: _project_single_coil_cotangent_data(
+                        info.coil,
                         dg_group[group_index],
                         dgd_group[group_index],
                         dc_group[group_index],
-                    )
-                    if group["native_curve"]
-                    else info.coil.vjp(
-                        dg_group[group_index],
-                        dgd_group[group_index],
-                        np.asarray([dc_group[group_index]]),
                     )
                 )
                 component_totals["coil_vjp_s"] += coil_vjp_s

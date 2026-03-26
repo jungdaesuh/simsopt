@@ -48,6 +48,7 @@ from simsopt.field import (  # noqa: E402
 )
 from simsopt.geo import (  # noqa: E402
     SurfaceXYZTensorFourier,
+    CurveHelical,
     CurveXYZFourier,
     create_equally_spaced_curves,
     Volume,
@@ -263,7 +264,41 @@ class _FallbackBombCoil:
         raise AssertionError("JAX-projectable coils should not fall back to coil.vjp()")
 
 
-_REAL_RESOLVE_FD_REL_TOL = 1e-2
+_GENERIC_JAXCURVE_DOFS = np.array([0.1, -0.03, 0.02, 0.04, -0.01])
+_GENERIC_JAXCURVE_POINTS = np.array([[1.2, 0.1, 0.2], [0.8, -0.3, 0.4]])
+
+
+def _build_helical_curve(nquadpoints):
+    curve = CurveHelical(nquadpoints, order=2)
+    curve.set_dofs(_GENERIC_JAXCURVE_DOFS.copy())
+    return curve
+
+
+def _build_rotated_helical_coil():
+    curve = _build_helical_curve(32)
+    current = Current(8.0e4)
+    coil = Coil(RotatedCurve(curve, phi=np.pi / 3.0, flip=False), current)
+    return curve, current, coil
+
+
+def _assert_curve_uses_jax_geometry(monkeypatch, curve, owner_name):
+    monkeypatch.setattr(
+        curve,
+        "gamma",
+        lambda: (_ for _ in ()).throw(
+            AssertionError(f"{owner_name} should use CurveHelical.gamma_jax")
+        ),
+    )
+    monkeypatch.setattr(
+        curve,
+        "gammadash",
+        lambda: (_ for _ in ()).throw(
+            AssertionError(f"{owner_name} should use CurveHelical.gammadash_jax")
+        ),
+    )
+
+
+_REAL_RESOLVE_FD_REL_TOL = 1e-3
 _REAL_RESOLVE_FD_ABS_TOL = 1e-8
 _REAL_RESOLVE_FD_EPS = 1e-4
 _REAL_RESOLVE_FD_MAX_ATTEMPTS = 4
@@ -579,10 +614,8 @@ class TestBoozerResidualValue:
         j_jax = jr_jax.J()
 
         print(f"BoozerResidual J: cpu={j_cpu:.12e} jax={j_jax:.12e}")
-        # Both should be small (converged Boozer surfaces).
-        # CPU typically reaches ~1e-6, JAX ~1e-2 on this small 5x5 grid
-        # (different local minima due to solver differences).
-        assert j_jax < 0.1, f"JAX BoozerResidual too large: {j_jax:.2e}"
+        # Both should be small on the shared reduced fixture.
+        assert j_jax < 1e-3, f"JAX BoozerResidual too large: {j_jax:.2e}"
         assert j_cpu < 1e-3, f"CPU BoozerResidual too large: {j_cpu:.2e}"
 
 
@@ -761,6 +794,92 @@ class TestAdjointSolveConsistency:
             atol=1e-12,
         )
         np.testing.assert_allclose(np.asarray(current_group), np.array([1.23]), atol=1e-12)
+
+    def test_grouped_coil_arrays_from_dofs_supports_generic_jaxcurve_geometry(
+        self,
+        monkeypatch,
+    ):
+        """Explicit coil-DOF reconstruction should work for JAX-capable non-XYZ curves."""
+        curve = _build_helical_curve(16)
+        current = Current(1.23)
+        bs_jax = BiotSavartJAX([Coil(curve, current)])
+        curve_dofs = jnp.asarray(curve.get_dofs(), dtype=jnp.float64)
+        expected_gamma = np.asarray(curve.gamma_jax(curve_dofs))
+        expected_gammadash = np.asarray(curve.gammadash_jax(curve_dofs))
+
+        _assert_curve_uses_jax_geometry(
+            monkeypatch,
+            curve,
+            "grouped_coil_arrays_from_dofs()",
+        )
+
+        gamma_group, gammadash_group, current_group = bs_jax.grouped_coil_arrays_from_dofs(
+            jnp.asarray(bs_jax.x)
+        )[0]
+
+        np.testing.assert_allclose(np.asarray(gamma_group[0]), expected_gamma, atol=1e-12)
+        np.testing.assert_allclose(
+            np.asarray(gammadash_group[0]),
+            expected_gammadash,
+            atol=1e-12,
+        )
+        np.testing.assert_allclose(np.asarray(current_group), np.array([1.23]), atol=1e-12)
+
+    def test_biotsavart_B_uses_generic_jaxcurve_geometry_without_cpu_calls(
+        self,
+        monkeypatch,
+    ):
+        """Forward field evaluation should stay on the JAX geometry lane for JaxCurve subclasses."""
+        curve, _current, coil = _build_rotated_helical_coil()
+
+        bs_cpu = BiotSavart([coil])
+        bs_cpu.set_points(_GENERIC_JAXCURVE_POINTS)
+        B_cpu = bs_cpu.B()
+
+        _assert_curve_uses_jax_geometry(monkeypatch, curve, "BiotSavartJAX.B()")
+
+        bs_jax = BiotSavartJAX([coil])
+        bs_jax.set_points(_GENERIC_JAXCURVE_POINTS)
+        B_jax = np.asarray(bs_jax.B())
+
+        np.testing.assert_allclose(B_jax, B_cpu, rtol=1e-10, atol=1e-15)
+
+    def test_biotsavart_B_vjp_bypasses_coil_vjp_for_generic_jaxcurve(self, monkeypatch):
+        """Reverse field pullback should stay off ``Coil.vjp()`` for real JAX-capable curves."""
+        curve, current, coil = _build_rotated_helical_coil()
+
+        bs_cpu = BiotSavart([coil])
+        bs_cpu.set_points(_GENERIC_JAXCURVE_POINTS)
+
+        bs_jax = BiotSavartJAX([coil])
+        bs_jax.set_points(_GENERIC_JAXCURVE_POINTS)
+        v = np.asarray(bs_jax.B())
+        deriv_cpu = bs_cpu.B_vjp(v)
+
+        monkeypatch.setattr(
+            coil,
+            "vjp",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError(
+                    "BiotSavartJAX.B_vjp() should bypass Coil.vjp() for CurveHelical"
+                )
+            ),
+        )
+
+        deriv = bs_jax.B_vjp(v)
+
+        np.testing.assert_allclose(
+            deriv(curve),
+            deriv_cpu(curve),
+            rtol=1e-9,
+            atol=1e-15,
+        )
+        np.testing.assert_allclose(
+            deriv(current),
+            deriv_cpu(current),
+            rtol=1e-9,
+            atol=1e-15,
+        )
 
     def test_biotsavart_projection_keeps_non_native_fallback_explicit(self):
         """Non-native curves still fall back to per-coil ``vjp()`` by contract."""
@@ -1572,8 +1691,7 @@ class TestRunCodeLSParity:
         assert abs(res_jax["iota"]) < 1e-3, f"JAX iota too large: {res_jax['iota']}"
         assert label_err_cpu < 1e-3, f"CPU label error too large: {label_err_cpu}"
         assert label_err_jax < 1e-3, f"JAX label error too large: {label_err_jax}"
-        # Iota should agree to within loose tolerance (different local minima OK)
-        assert iota_diff < 1e-3, f"Iota disagreement: {iota_diff:.6e}"
+        assert iota_diff < 1e-6, f"Iota disagreement: {iota_diff:.6e}"
 
 
 # -----------------------------------------------------------------------
@@ -1991,7 +2109,7 @@ class TestBVjpCPUParityPerComponent:
             f"||jax||={np.linalg.norm(grad_jax):.6e} "
             f"||diff||={np.linalg.norm(grad_cpu - grad_jax):.6e}"
         )
-        np.testing.assert_allclose(grad_jax, grad_cpu, rtol=1e-6, atol=1e-10)
+        np.testing.assert_allclose(grad_jax, grad_cpu, rtol=1e-9, atol=1e-12)
 
 
 # -----------------------------------------------------------------------

@@ -10,7 +10,7 @@ from .._core.derivative import Derivative
 from .surfacerzfourier import SurfaceRZFourier
 from.surfacexyzfourier import SurfaceXYZFourier
 from .surfacexyztensorfourier import SurfaceXYZTensorFourier
-from .curve import Curve
+from .curve import Curve, gamma_curve_on_surface
 
 
 from .jit import jit
@@ -166,6 +166,16 @@ class CurveCWSFourierCPP( Curve, sopp.Curve ):
         #self.quadpoints = quadpoints
         self.surf = surf
 
+        if isinstance(surf, SurfaceRZFourier):
+            self.surf_type = 'RZ_Fourier'
+        elif isinstance(surf, SurfaceXYZTensorFourier):
+            self.surf_type = 'XYZ_Tensor_Fourier'
+        else:
+            raise NotImplementedError(
+                'CurveCWSFourierCPP is only implemented for SurfaceRZFourier '
+                'and SurfaceXYZTensorFourier classes.'
+            )
+
         # Initialize C++ class and Curve class   
         sopp.Curve.__init__(self, quadpoints)
         Curve.__init__(self, x0=self.get_dofs(), depends_on=[], names=self._make_names(), external_dof_setter=CurveCWSFourierCPP.set_dofs_impl, **kwargs)      
@@ -175,6 +185,65 @@ class CurveCWSFourierCPP( Curve, sopp.Curve ):
         # useful functions
         points = np.asarray(self.quadpoints)
         ones = jnp.ones_like(points)
+        current_curve_dofs = lambda: self.get_dofs()
+        current_surface_dofs = lambda: self.surf.get_dofs()
+
+        def gamma_on_surface(curve_dofs, surface_dofs, qpts):
+            return gamma_curve_on_surface(
+                curve_dofs,
+                qpts,
+                self.order,
+                self.G,
+                self.H,
+                surface_dofs,
+                self.surf_type,
+                self.surf.mpol,
+                self.surf.ntor,
+                self.surf.nfp,
+                self.surf.stellsym,
+            )
+
+        def gammadash_on_surface(curve_dofs, surface_dofs, qpts):
+            return jvp(
+                lambda curve_qpts: gamma_on_surface(curve_dofs, surface_dofs, curve_qpts),
+                (qpts,),
+                (ones,),
+            )[1]
+
+        self.gamma_pure = jit(gamma_on_surface)
+        self.gamma_jax = jit(lambda cdofs, sdofs: self.gamma_pure(cdofs, sdofs, points))
+        self.gamma_impl_jax = jit(
+            lambda cdofs, sdofs, qpts: self.gamma_pure(cdofs, sdofs, qpts)
+        )
+        self.gammac_jax = jit(lambda cdofs: self.gamma_pure(cdofs, current_surface_dofs(), points))
+        self.gammas_jax = jit(lambda sdofs: self.gamma_pure(current_curve_dofs(), sdofs, points))
+        self.dgamma_by_dcoeff_jax = jit(jacfwd(self.gammac_jax))
+        self.dgamma_by_dcoeff_vjp_jax = jit(
+            lambda cdofs, v: vjp(self.gammac_jax, cdofs)[1](v)[0]
+        )
+        self.dgamma_by_dsurf_jax = jit(jacfwd(self.gammas_jax))
+        self.dgamma_by_dsurf_vjp_jax = jit(
+            lambda sdofs, v: vjp(self.gammas_jax, sdofs)[1](v)[0]
+        )
+
+        self.gammadash_pure = jit(gammadash_on_surface)
+        self.gammadash_jax = jit(
+            lambda cdofs, sdofs: self.gammadash_pure(cdofs, sdofs, points)
+        )
+        self.gammacdash_jax = jit(
+            lambda cdofs: self.gammadash_pure(cdofs, current_surface_dofs(), points)
+        )
+        self.gammasdash_jax = jit(
+            lambda sdofs: self.gammadash_pure(current_curve_dofs(), sdofs, points)
+        )
+        self.dgammadash_by_dcoeff_jax = jit(jacfwd(self.gammacdash_jax))
+        self.dgammadash_by_dcoeff_vjp_jax = jit(
+            lambda cdofs, v: vjp(self.gammacdash_jax, cdofs)[1](v)[0]
+        )
+        self.dgammadash_by_dsurf_jax = jit(jacfwd(self.gammasdash_jax))
+        self.dgammadash_by_dsurf_vjp_jax = jit(
+            lambda sdofs, v: vjp(self.gammasdash_jax, sdofs)[1](v)[0]
+        )
 
         ## gamma
         self.gamma_2d_pure = jit(lambda cdofs, qpts: gamma_2d(cdofs, qpts, self.order, self.G, self.H)) 

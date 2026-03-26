@@ -103,14 +103,57 @@ def _minimize_bfgs_private(
         H_kp1 = jnp.where(jnp.isfinite(rho_k), H_kp1, state.H_k)
         converged = jnp_linalg.norm(g_kp1, ord=norm) < gtol
         next_k = state.k + 1
+        dphi_0 = jnp.real(_dot(state.g_k, p_k))
+        dphi_kp1 = jnp.real(_dot(g_kp1, p_k))
+        strong_wolfe = (
+            jnp.isfinite(f_kp1)
+            & jnp.all(jnp.isfinite(g_kp1))
+            & (f_kp1 <= state.f_k + 1e-4 * line_search_results.a_k * dphi_0)
+            & (jnp.abs(dphi_kp1) <= -0.9 * dphi_0)
+        )
+        step_eps = jnp.sqrt(
+            jnp.asarray(jnp.finfo(state.x_k.dtype).eps, dtype=state.x_k.dtype)
+        )
+        step_tol = step_eps * jnp.maximum(
+            jnp.asarray(1.0, dtype=state.x_k.dtype),
+            jnp_linalg.norm(state.x_k),
+        )
+        stalled_step = (
+            (~converged)
+            & (jnp_linalg.norm(s_k) <= step_tol)
+        )
+        nonfinite_step = (~jnp.isfinite(f_kp1)) | (~jnp.all(jnp.isfinite(g_kp1)))
+        failure_line_search_status = jnp.where(
+            line_search_results.failed,
+            line_search_results.status,
+            jnp.where(
+                stalled_step | (~strong_wolfe),
+                jnp.asarray(0, dtype=line_search_results.status.dtype),
+                line_search_results.status,
+            ),
+        )
+
+        def nonfinite_step_result(_):
+            return state._replace(
+                converged=False,
+                failed=False,
+                k=next_k,
+                nfev=next_nfev,
+                ngev=next_ngev,
+                x_k=x_kp1,
+                f_k=f_kp1,
+                g_k=g_kp1,
+                line_search_status=line_search_results.status,
+            )
 
         def failed_step(_):
             return state._replace(
                 converged=False,
                 failed=True,
+                k=next_k,
                 nfev=next_nfev,
                 ngev=next_ngev,
-                line_search_status=line_search_results.status,
+                line_search_status=failure_line_search_status,
             )
 
         def accepted_step(_):
@@ -131,9 +174,14 @@ def _minimize_bfgs_private(
             )
 
         return lax.cond(
-            line_search_results.failed,
-            failed_step,
-            accepted_step,
+            nonfinite_step,
+            nonfinite_step_result,
+            lambda _: lax.cond(
+                line_search_results.failed | stalled_step | (~strong_wolfe),
+                failed_step,
+                accepted_step,
+                operand=None,
+            ),
             operand=None,
         )
 

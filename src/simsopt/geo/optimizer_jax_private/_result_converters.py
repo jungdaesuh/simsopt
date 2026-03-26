@@ -18,6 +18,7 @@ def _is_invalid_state(f, g):
 _BFGS_STATUS_MESSAGES = {
     0: "Optimization terminated successfully.",
     1: "Maximum number of iterations reached.",
+    2: "Insufficient progress.",
     3: "Line search zoom failed.",
     5: "Line search reached its iteration limit.",
     -1: "Optimization failed.",

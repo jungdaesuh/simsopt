@@ -1030,23 +1030,32 @@ def surfrz_gamma_lin(quadpoints_phi, quadpoints_theta, mpol, ntor, surf_dofs, nf
     r = jnp.zeros((npts,))
     z = jnp.zeros((npts,))
 
-    nmn = ntor+1 + mpol*(2*ntor+1)
-    counter = -1
-    for mm in range(mpol+1):
-        for nn in range(-ntor,ntor+1):
-            if mm==0 and nn<0:
-                continue
-            counter = counter+1
-            r = r + surf_dofs[counter] * jnp.cos(mm*th - nn*ph*nfp)
+    nmn_cos = ntor + 1 + mpol * (2 * ntor + 1)
+    nmn_sin = ntor + mpol * (2 * ntor + 1)
 
+    rc_offset = 0
+    rs_offset = nmn_cos
+    zc_offset = rs_offset + (0 if stellsym else nmn_sin)
+    zs_offset = zc_offset + (0 if stellsym else nmn_cos)
 
-    counter = -1
-    for mm in range(mpol+1):
-        for nn in range(-ntor,ntor+1):
-            if mm==0 and nn<=0:
+    cos_counter = -1
+    sin_counter = -1
+    for mm in range(mpol + 1):
+        for nn in range(-ntor, ntor + 1):
+            angle = mm * th - nn * ph * nfp
+            if not (mm == 0 and nn < 0):
+                cos_counter += 1
+                r = r + surf_dofs[rc_offset + cos_counter] * jnp.cos(angle)
+                if not stellsym:
+                    z = z + surf_dofs[zc_offset + cos_counter] * jnp.cos(angle)
+
+            if mm == 0 and nn <= 0:
                 continue
-            counter = counter+1
-            z = z + surf_dofs[nmn+ counter] * jnp.sin(mm*th - nn*ph*nfp)
+
+            sin_counter += 1
+            if not stellsym:
+                r = r + surf_dofs[rs_offset + sin_counter] * jnp.sin(angle)
+            z = z + surf_dofs[zs_offset + sin_counter] * jnp.sin(angle)
             
     gamma = jnp.zeros((quadpoints_phi.size, 3))
     gamma = gamma.at[:,0].set( r * jnp.cos( ph ) )

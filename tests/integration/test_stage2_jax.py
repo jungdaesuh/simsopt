@@ -722,7 +722,7 @@ class TestBiotSavartJAXParity:
             np.testing.assert_allclose(
                 deriv_jax(coil),
                 deriv_cpu(coil),
-                rtol=1e-8,
+                rtol=1e-9,
                 atol=1e-14,
                 err_msg="BiotSavartJAX.B_vjp() does not match CPU",
             )
@@ -1000,8 +1000,7 @@ class TestMixedQuadratureParity:
 # -----------------------------------------------------------------------
 
 
-@pytest.fixture(scope="module")
-def banana_coil_setup():
+def _build_banana_coil_cpp_setup():
     """TF coils + a real CurveCWSFourierCPP banana coil with production-like DOFs.
 
     This exercises the exact curve type and DOF pattern used in the Columbia
@@ -1073,7 +1072,25 @@ def banana_coil_setup():
     banana_coil = Coil(banana, Current(1e5))
 
     all_coils = tf_coils + [banana_coil]
-    return all_coils, eval_surf
+    return all_coils, eval_surf, banana_coil
+
+
+def _build_jax_field_on_surface(coils, surf):
+    points = surf.gamma().reshape((-1, 3))
+    bs_jax = BiotSavartJAX(coils)
+    bs_jax.set_points(points)
+    return points, bs_jax
+
+
+@pytest.fixture(scope="module")
+def banana_coil_setup():
+    coils, eval_surf, _banana_coil = _build_banana_coil_cpp_setup()
+    return coils, eval_surf
+
+
+@pytest.fixture(scope="module")
+def banana_coil_cpp_setup():
+    return _build_banana_coil_cpp_setup()
 
 
 @pytest.fixture
@@ -1190,6 +1207,87 @@ class TestCurveCWSFourierCPPParity:
             atol=1e-15,
             err_msg="Gradient mismatch with CurveCWSFourierCPP banana coil",
         )
+
+
+class TestCurveCWSFourierCPPJaxFieldPath:
+    def test_b_uses_jax_curvecwsfouriercpp_geometry(
+        self, banana_coil_cpp_setup, monkeypatch
+    ):
+        coils, surf, banana_coil = banana_coil_cpp_setup
+        points, bs_jax = _build_jax_field_on_surface(coils, surf)
+
+        monkeypatch.setattr(
+            banana_coil.curve,
+            "gamma",
+            lambda: (_ for _ in ()).throw(
+                AssertionError("BiotSavartJAX.B() should use CurveCWSFourierCPP.gamma_jax")
+            ),
+        )
+        monkeypatch.setattr(
+            banana_coil.curve,
+            "gammadash",
+            lambda: (_ for _ in ()).throw(
+                AssertionError(
+                    "BiotSavartJAX.B() should use CurveCWSFourierCPP.gammadash_jax"
+                )
+            ),
+        )
+
+        B_jax = np.asarray(bs_jax.B())
+
+        assert B_jax.shape == points.shape
+
+    def test_b_vjp_bypasses_python_coil_vjp_for_curvecwsfouriercpp(
+        self,
+        banana_coil_cpp_setup,
+        monkeypatch,
+    ):
+        coils, surf, banana_coil = banana_coil_cpp_setup
+        points, bs_jax = _build_jax_field_on_surface(coils, surf)
+
+        bs_cpu = BiotSavart(coils)
+        bs_cpu.set_points(points)
+        v = np.asarray(bs_jax.B())
+        deriv_cpu = bs_cpu.B_vjp(v)
+
+        monkeypatch.setattr(
+            banana_coil,
+            "vjp",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError(
+                    "BiotSavartJAX.B_vjp() should bypass Coil.vjp() for CurveCWSFourierCPP"
+                )
+            ),
+        )
+
+        deriv = bs_jax.B_vjp(v)
+
+        assert deriv(banana_coil.curve).shape[0] == banana_coil.curve.local_full_dof_size
+        np.testing.assert_allclose(
+            deriv(banana_coil.curve),
+            deriv_cpu(banana_coil.curve),
+            rtol=1e-9,
+            atol=1e-15,
+        )
+        np.testing.assert_allclose(
+            deriv(banana_coil.current),
+            deriv_cpu(banana_coil.current),
+            rtol=1e-9,
+            atol=1e-15,
+        )
+
+    def test_b_vjp_includes_curvecwsfouriercpp_surface_derivative(
+        self,
+        banana_coil_cpp_setup,
+    ):
+        coils, surf, banana_coil = banana_coil_cpp_setup
+        _points, bs_jax = _build_jax_field_on_surface(coils, surf)
+        deriv = bs_jax.B_vjp(np.asarray(bs_jax.B()))
+
+        surface_grad = deriv(banana_coil.curve.surf)
+        assert surface_grad.shape[0] == banana_coil.curve.surf.local_dof_size
+        assert np.all(np.isfinite(surface_grad))
+        assert np.linalg.norm(surface_grad) > 0.0
 
 
 class TestCurveCWSFourierNativeFieldPath:
