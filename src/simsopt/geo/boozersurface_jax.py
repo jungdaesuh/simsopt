@@ -47,7 +47,6 @@ except (ImportError, ModuleNotFoundError):
 
 from .surface_fourier_jax import stellsym_scatter_indices
 from ..field.biotsavart_jax import (
-    group_coil_data,
     grouped_biot_savart_B,
     grouped_biot_savart_A,
 )
@@ -62,11 +61,13 @@ from .label_constraints_jax import (
     toroidal_flux_jax,
     compute_G_from_currents,
 )
+from . import optimizer_jax as _optimizer_jax
 from .optimizer_jax import (
     VALID_OPTIMIZER_BACKENDS,
     jax_minimize,
     newton_exact,
     newton_polish,
+    newton_polish_traceable,
     require_target_backend_x64,
     resolve_optimizer_backend_method,
 )
@@ -829,16 +830,10 @@ class BoozerSurfaceJAX(Optimizable):
         different ``num_quad_points`` can coexist without crashing
         on array stacking.
         """
-        coils = self.biotsavart._coils
-        gammas = []
-        gammadashs = []
-        currents = []
-        for c in coils:
-            gammas.append(c.curve.gamma())
-            gammadashs.append(c.curve.gammadash())
-            currents.append(c.current.get_value())
-        self.coil_groups = group_coil_data(gammas, gammadashs, currents)
-        self.coil_currents = jnp.asarray(np.array(currents))
+        self.coil_groups = self.biotsavart._extract_coil_data_grouped()
+        self.coil_currents = jnp.asarray(
+            np.asarray([c.current.get_value() for c in self.biotsavart._coils])
+        )
 
     def _emit_stage_callback(
         self,
@@ -903,6 +898,13 @@ class BoozerSurfaceJAX(Optimizable):
             return x[:-2], float(x[-2]), float(x[-1])
         return x[:-1], float(x[-1]), None
 
+    def _unpack_decision_vector_jax(self, x, optimize_G, coil_arrays):
+        """JAX-array version of ``_unpack_decision_vector``."""
+        if optimize_G:
+            return x[:-2], x[-2], x[-1]
+        G = compute_G_from_currents(jnp.concatenate([c for _, _, c in coil_arrays]))
+        return x[:-1], x[-1], G
+
     def _make_penalty_objective_with(
         self,
         optimize_G,
@@ -931,13 +933,101 @@ class BoozerSurfaceJAX(Optimizable):
             weight_inv_modB=weight_inv_modB,
         )
 
+    def run_code_traceable(self, coil_arrays, sdofs, iota, G):
+        """Trace-safe LS inner solve for the target on-device lane.
+
+        This helper is the pure-array counterpart to ``run_code()`` for Section 3:
+        it accepts explicit coil arrays and warm-start state, performs the inner
+        LS solve on the on-device optimizer lane, and returns only JAX values.
+        It never reads or writes ``self.res`` / ``self.surface`` / ``self.need_to_run_code``.
+        """
+        if self.boozer_type != "ls":
+            raise RuntimeError(
+                "run_code_traceable() currently supports LS Boozer solves only."
+            )
+
+        method = self._resolve_optimizer_method()
+        if method not in {"bfgs-ondevice", "lbfgs-ondevice"}:
+            raise RuntimeError(
+                "run_code_traceable() requires optimizer_backend='ondevice'."
+            )
+
+        optimize_G = G is not None
+        weight_inv_modB = self.options["weight_inv_modB"]
+        obj_fn = self._make_penalty_objective_with(
+            optimize_G,
+            weight_inv_modB,
+            coil_arrays=coil_arrays,
+        )
+        x0 = self._pack_decision_vector(
+            iota, G, sdofs=jnp.asarray(sdofs, dtype=jnp.float64)
+        )
+        optimizer_options = self._collect_optimizer_options()
+
+        if method == "bfgs-ondevice":
+            ls_state = _optimizer_jax._minimize_bfgs_private(
+                obj_fn,
+                x0,
+                maxiter=self.options["bfgs_maxiter"],
+                gtol=self.options["bfgs_tol"],
+                line_search_maxiter=int(
+                    optimizer_options.get("line_search_maxiter", 10)
+                ),
+            )
+            x_ls = ls_state.x_k
+        else:
+            ls_state = _optimizer_jax._minimize_lbfgs_private(
+                obj_fn,
+                x0,
+                maxiter=self.options["bfgs_maxiter"],
+                gtol=self.options["bfgs_tol"],
+                maxcor=int(optimizer_options.get("maxcor", 200)),
+                ftol=float(optimizer_options.get("ftol", 0.0)),
+                maxfun=optimizer_options.get("maxfun"),
+                maxgrad=optimizer_options.get("maxgrad"),
+                maxls=int(optimizer_options.get("maxls", 20)),
+            )
+            x_ls = ls_state.x_k
+
+        newton_result = self._run_newton_polish_for_method(
+            method,
+            obj_fn,
+            x_ls,
+            maxiter=self.options["newton_maxiter"],
+            tol=self.options["newton_tol"],
+            stab=self.options["newton_stab"],
+        )
+        sdofs_out, iota_out, G_out = self._unpack_decision_vector_jax(
+            newton_result["x"],
+            optimize_G,
+            coil_arrays,
+        )
+        finite = (
+            jnp.all(jnp.isfinite(newton_result["x"]))
+            & jnp.all(jnp.isfinite(newton_result["grad"]))
+            & jnp.all(jnp.isfinite(newton_result["hessian"]))
+        )
+        return {
+            "x": newton_result["x"],
+            "sdofs": sdofs_out,
+            "iota": iota_out,
+            "G": G_out,
+            "fun": newton_result["fun"],
+            "grad": newton_result["grad"],
+            "hessian": newton_result["hessian"],
+            "nit": newton_result["nit"],
+            "success": newton_result["success"] & finite,
+            "optimizer_method": method,
+            "weight_inv_modB": weight_inv_modB,
+        }
+
     def _compute_residual_vector(self, sdofs, iota, G, coil_arrays=None):
         """Compute unscalarized penalty residual vector at given state.
 
         Reuses M3's ``boozer_residual_vector`` for the Boozer part,
         appends label and z-constraint residuals.
 
-        Returns a NumPy array matching CPU
+        Returns a JAX array matching CPU
         ``boozer_penalty_constraints(..., scalarize=False)``.
         """
         if coil_arrays is None:
@@ -977,7 +1067,7 @@ class BoozerSurfaceJAX(Optimizable):
         rl = jnp.sqrt(cw) * (lab - self.targetlabel)
         rz = jnp.sqrt(cw) * gamma[0, 0, 2]
 
-        return np.asarray(jnp.concatenate([r_boozer, jnp.array([rl, rz])]))
+        return jnp.concatenate([r_boozer, jnp.array([rl, rz])])
 
     def _resolve_optimizer_method(self, limited_memory=None):
         """Resolve optimizer method string from options."""
@@ -1010,6 +1100,36 @@ class BoozerSurfaceJAX(Optimizable):
             )
             if k in self.options
         }
+
+    def _run_newton_polish_for_method(
+        self,
+        method,
+        obj_fn,
+        x0,
+        *,
+        maxiter,
+        tol,
+        stab,
+        progress_callback=None,
+    ):
+        """Run the Newton polish implementation for a resolved optimizer method."""
+        if method in {"bfgs-ondevice", "lbfgs-ondevice"}:
+            return newton_polish_traceable(
+                obj_fn,
+                x0,
+                maxiter=maxiter,
+                tol=tol,
+                stab=stab,
+                progress_callback=progress_callback,
+            )
+        return newton_polish(
+            obj_fn,
+            x0,
+            maxiter=maxiter,
+            tol=tol,
+            stab=stab,
+            progress_callback=progress_callback,
+        )
 
     def minimize_boozer_penalty_constraints_LBFGS(
         self,
@@ -1061,7 +1181,7 @@ class BoozerSurfaceJAX(Optimizable):
 
         resdict = {
             "fun": float(result.fun),
-            "gradient": np.asarray(result.jac),
+            "gradient": result.jac,
             "iter": int(result.nit),
             "info": result,
             "success": bool(result.success),
@@ -1080,7 +1200,7 @@ class BoozerSurfaceJAX(Optimizable):
                 f"{method} solve - "
                 f"success={resdict['success']}  iter={resdict['iter']}, "
                 f"iota={iota_out:.16f}, ||grad||_inf="
-                f"{np.linalg.norm(resdict['gradient'], ord=np.inf):.3e}",
+                f"{float(jnp.max(jnp.abs(resdict['gradient']))):.3e}",
                 flush=True,
             )
         return resdict
@@ -1115,7 +1235,8 @@ class BoozerSurfaceJAX(Optimizable):
             optimize_G, weight_inv_modB, constraint_weight
         )
 
-        result = newton_polish(
+        result = self._run_newton_polish_for_method(
+            self._resolve_optimizer_method(),
             obj_fn,
             x0,
             maxiter=maxiter,
@@ -1166,14 +1287,14 @@ class BoozerSurfaceJAX(Optimizable):
 
         res = {
             "residual": residual_vec,
-            "jacobian": np.asarray(result["grad"]),
+            "jacobian": result["grad"],
             "hessian": H,
             "iter": result["nit"],
             "success": result["success"],
             "G": G_out,
             "s": s,
             "iota": iota_out,
-            "PLU": (np.asarray(P), np.asarray(L), np.asarray(U)),
+            "PLU": (P, L, U),
             "vjp": partial(_boozer_ls_coil_vjp, weight_inv_modB=weight_inv_modB),
             "vjp_groups": _build_ls_group_vjp_callback(
                 self,
@@ -1189,7 +1310,7 @@ class BoozerSurfaceJAX(Optimizable):
         self.need_to_run_code = False
 
         if verbose:
-            grad_norm = float(np.linalg.norm(res["jacobian"]))
+            grad_norm = float(jnp.linalg.norm(res["jacobian"]))
             print(
                 f"NEWTON solve - success={res['success']}  "
                 f"iter={res['iter']}, iota={iota_out:.16f}, "
@@ -1352,15 +1473,15 @@ class BoozerSurfaceJAX(Optimizable):
         bool_mask[np.asarray(mask_indices)] = True
 
         res = {
-            "residual": np.asarray(r_raw),
-            "fun": float(0.5 * np.mean(np.square(np.asarray(exact_residual)))),
-            "jacobian": np.asarray(J),
+            "residual": r_raw,
+            "fun": float(0.5 * jnp.mean(jnp.square(exact_residual))),
+            "jacobian": J,
             "iter": result["nit"],
             "success": bool(result["success"]),
             "G": G_final,
             "s": s,
             "iota": iota_final,
-            "PLU": (np.asarray(P), np.asarray(L), np.asarray(U)),
+            "PLU": (P, L, U),
             "mask": bool_mask,
             "type": "exact",
             "vjp": _boozer_exact_coil_vjp,
@@ -1375,7 +1496,7 @@ class BoozerSurfaceJAX(Optimizable):
         self.need_to_run_code = False
 
         if verbose:
-            res_norm = float(np.linalg.norm(res["residual"], ord=np.inf))
+            res_norm = float(jnp.max(jnp.abs(res["residual"])))
             print(
                 f"NEWTON solve - success={res['success']}  "
                 f"iter={res['iter']}, iota={iota_final:.16f}, "
@@ -1536,7 +1657,8 @@ class BoozerSurfaceJAX(Optimizable):
             maxiter=self.options["bfgs_maxiter"],
             options=optimizer_options,
         )
-        newton_result = newton_polish(
+        newton_result = self._run_newton_polish_for_method(
+            method,
             obj_fn,
             ls_result.x,
             maxiter=self.options["newton_maxiter"],
@@ -1591,7 +1713,7 @@ class BoozerSurfaceJAX(Optimizable):
 
         return {
             "residual": residual_vec,
-            "jacobian": np.asarray(newton_result["grad"]),
+            "jacobian": newton_result["grad"],
             "hessian": H,
             "iter": newton_result["nit"],
             "success": newton_result["success"],
@@ -1599,7 +1721,7 @@ class BoozerSurfaceJAX(Optimizable):
             "s": None,
             "sdofs": sdofs_final,
             "iota": iota_out,
-            "PLU": (np.asarray(P), np.asarray(L), np.asarray(U)),
+            "PLU": (P, L, U),
             "vjp": None,
             "vjp_groups": None,
             "type": "ls",

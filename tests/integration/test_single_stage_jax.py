@@ -20,6 +20,8 @@ unreliable at ill-conditioned solution points.
 All tests require ``simsoptpp`` for the CPU reference.
 """
 
+import gc
+
 import pytest
 import numpy as np
 import jax
@@ -37,11 +39,13 @@ sopp = pytest.importorskip(
 
 from simsopt.field import (  # noqa: E402
     BiotSavart,
+    Coil,
     Current,
     coils_via_symmetries,
 )
 from simsopt.geo import (  # noqa: E402
     SurfaceXYZTensorFourier,
+    CurveXYZFourier,
     create_equally_spaced_curves,
     Volume,
     BoozerSurface,
@@ -153,11 +157,30 @@ class _WholeGroupArrayConversionBomb:
         return self._slices[index]
 
 
+class _FakeCurve:
+    """Non-native curve stub for _unwrap_coil_curve_and_current."""
+
+    pass
+
+
+class _FakeCurrent:
+    """Stub current for _unwrap_coil_curve_and_current."""
+
+    pass
+
+
 class _RecordingVJPCoil:
-    """Minimal coil stub that records per-slice VJP calls."""
+    """Minimal coil stub that records per-slice VJP calls.
+
+    Includes ``curve`` and ``current`` attributes so
+    ``_unwrap_coil_curve_and_current`` can process this coil
+    (non-native curve path → falls through to ``coil.vjp()``).
+    """
 
     def __init__(self):
         self.calls = []
+        self.curve = _FakeCurve()
+        self.current = _FakeCurrent()
 
     def vjp(self, dg, dgd, dc):
         self.calls.append(
@@ -174,7 +197,7 @@ class _RecordingVJPCoil:
 
 def _make_boozer_setup(
     constraint_weight=1.0,
-    optimizer_backend="scipy",
+    optimizer_backend="ondevice",
     *,
     weight_inv_modB=True,
 ):
@@ -430,7 +453,6 @@ class TestAdjointSolveConsistency:
         (coils, surf_cpu, surf_jax, bs_cpu, bs_jax, booz_cpu, booz_jax, vol_cpu) = (
             boozer_setup
         )
-        from simsopt.geo.surfaceobjectives_jax import _coil_cotangents_to_derivative
         from simsopt.objectives.utilities import forward_backward_jax
 
         P, L, U = booz_jax.res["PLU"]
@@ -439,7 +461,7 @@ class TestAdjointSolveConsistency:
 
         vjp_fn = booz_jax.res["vjp"]
         adj_cot = vjp_fn(adj, booz_jax, booz_jax.res["iota"], booz_jax.res["G"])
-        adj_deriv = _coil_cotangents_to_derivative(bs_jax.coils, *adj_cot)
+        adj_deriv = bs_jax.coil_cotangents_to_derivative(*adj_cot)
         g = np.array(adj_deriv(bs_jax))
 
         print(f"||VJP result|| = {np.linalg.norm(g):.6e}")
@@ -451,7 +473,6 @@ class TestAdjointSolveConsistency:
         (coils, surf_cpu, surf_jax, bs_cpu, bs_jax, booz_cpu, booz_jax, vol_cpu) = (
             boozer_setup
         )
-        from simsopt.geo.surfaceobjectives_jax import _coil_cotangents_to_derivative
         from simsopt.objectives.utilities import forward_backward_jax
 
         P, L, U = booz_jax.res["PLU"]
@@ -462,8 +483,8 @@ class TestAdjointSolveConsistency:
         d_coil_arrays, coil_indices = vjp_fn(
             adj, booz_jax, booz_jax.res["iota"], booz_jax.res["G"]
         )
-        projected = _coil_cotangents_to_derivative(
-            bs_jax.coils, d_coil_arrays, coil_indices
+        projected = bs_jax.coil_cotangents_to_derivative(
+            d_coil_arrays, coil_indices
         )
         explicit = _explicit_grouped_coil_derivative(
             bs_jax.coils, d_coil_arrays, coil_indices
@@ -509,6 +530,28 @@ class TestAdjointSolveConsistency:
         np.testing.assert_allclose(coils[1].calls[0][1], np.array([10.0, 11.0, 12.0]))
         np.testing.assert_allclose(coils[0].calls[0][2], np.array([1.5]))
         np.testing.assert_allclose(coils[1].calls[0][2], np.array([2.5]))
+
+    def test_grouped_coil_arrays_from_dofs_respects_unique_dof_lineage_order(self):
+        """Native grouped reconstruction must decode free current DOFs by lineage slice."""
+        curve = CurveXYZFourier(16, 1)
+        curve.x = np.array([0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9])
+        current = Current(1.23)
+        bs_jax = BiotSavartJAX([Coil(curve, current)])
+
+        lineage_names = [type(opt).__name__ for opt in bs_jax.unique_dof_lineage]
+        assert lineage_names.index("Current") < lineage_names.index("CurveXYZFourier")
+
+        gamma_group, gammadash_group, current_group = bs_jax.grouped_coil_arrays_from_dofs(
+            jnp.asarray(bs_jax.x)
+        )[0]
+
+        np.testing.assert_allclose(np.asarray(gamma_group[0]), curve.gamma(), atol=1e-12)
+        np.testing.assert_allclose(
+            np.asarray(gammadash_group[0]),
+            curve.gammadash(),
+            atol=1e-12,
+        )
+        np.testing.assert_allclose(np.asarray(current_group), np.array([1.23]), atol=1e-12)
 
     def test_surface_objectives_jax_reject_host_forward_backward(
         self, boozer_setup, monkeypatch
@@ -1972,7 +2015,7 @@ class TestNonQSRatioJAXResolveFD:
 
 
 # =======================================================================
-# Section 3 Red Tests: JAX-Traceable Single-Stage Objective
+# Section 3: JAX-Traceable Single-Stage Objective
 # =======================================================================
 #
 # These tests define the contract for making the single-stage objective
@@ -1989,12 +2032,11 @@ class TestNonQSRatioJAXResolveFD:
 #             -> Test 7 (parity with explicit path)
 #   Test 5 (no run_dict/Optimizable dependency) is independent
 #
-# Tests start as xfail(strict=True): they FAIL today (red), and will
-# PASS once the corresponding implementation exists (green). Removing
-# the xfail marker is the green step. Tests 3a/3b are now green.
+# This slice is now green. Tests 1-7 validate the pure array-backed
+# custom_vjp traceable objective used by make_traceable_objective(),
+# while Tests 3a/3b continue to pin the lower-level functional
+# inner-solve contract.
 # =======================================================================
-
-_S3 = "Section 3: JAX-traceable single-stage objective not yet implemented"
 
 
 class TestRunCodeFunctional:
@@ -2011,8 +2053,10 @@ class TestRunCodeFunctional:
     - NOT mutate any self.* state
 
     Note: this method still uses Python if/float()/np.asarray() on
-    solver outputs.  Removing those for full JIT/grad traceability
-    is deferred to make_traceable_objective (tests 1-7).
+    solver outputs. Full JIT/grad traceability is achieved one layer
+    up via make_traceable_objective(), which rebuilds the single-stage
+    objective on pure arrays and differentiates it with custom-VJP
+    (tests 1-7).
     """
 
     def test_run_code_functional_exists_and_matches(self):
@@ -2135,7 +2179,6 @@ class TestTraceableObjective:
             err_msg="Traceable objective value differs from JF.J()",
         )
 
-    @pytest.mark.xfail(strict=True, reason=_S3)
     def test_pure_objective_is_jax_grad_differentiable(self, boozer_setup):
         """Test 2: jax.grad(f)(coil_dofs) is finite, nonzero, matches JF.dJ()."""
         (_, _, _, _, bs_jax, _, booz_jax, _) = boozer_setup
@@ -2162,14 +2205,16 @@ class TestTraceableObjective:
             err_msg="jax.grad gradient differs from IFT reference",
         )
 
-    @pytest.mark.xfail(strict=True, reason=_S3)
     def test_pure_objective_traces_to_jaxpr(self, boozer_setup):
-        """Test 4: jax.make_jaxpr succeeds — no Python if on traced values."""
+        """Test 4: jax.make_jaxpr succeeds without a callback bridge."""
         (_, _, _, _, bs_jax, _, booz_jax, _) = boozer_setup
         f, coil_dofs, _, _, _ = self._make_traceable(bs_jax, booz_jax)
 
         jaxpr = jax.make_jaxpr(f)(coil_dofs)
         assert jaxpr is not None, "make_jaxpr returned None"
+        assert "pure_callback" not in str(jaxpr), (
+            "Traceable objective still routes through jax.pure_callback"
+        )
 
     def test_traceable_objective_has_no_optimizable_dependency(self):
         """Test 5: Traced objective needs no run_dict, no JF.x mutation."""
@@ -2179,7 +2224,12 @@ class TestTraceableObjective:
         res = booz_jax.run_code(iota0, G0)
         assert res is not None and res["success"]
 
-        f, coil_dofs, _, _, _ = self._make_traceable(bs_jax, booz_jax)
+        f, coil_dofs, jr_jax, iotas_jax, _ = self._make_traceable(bs_jax, booz_jax)
+
+        jr_jax.J()
+        iotas_jax.J()
+        jr_cache_before = jr_jax._J
+        iotas_cache_before = iotas_jax._J
 
         # Evaluate at a DIFFERENT coil DOF vector without touching JF.x
         rng = np.random.RandomState(99)
@@ -2191,8 +2241,19 @@ class TestTraceableObjective:
         res_before = booz_jax.res
         need_to_run_before = booz_jax.need_to_run_code
 
-        j0 = float(f(coil_dofs))
-        j1 = float(f(x_perturbed))
+        original_run_code = booz_jax.run_code
+
+        def _reject_run_code(*args, **kwargs):
+            raise AssertionError(
+                "traceable objective should not call stateful run_code()"
+            )
+
+        booz_jax.run_code = _reject_run_code
+        try:
+            j0 = float(f(coil_dofs))
+            j1 = float(f(x_perturbed))
+        finally:
+            booz_jax.run_code = original_run_code
 
         # Must produce finite, distinct values
         assert np.isfinite(j0), "f(x0) not finite"
@@ -2212,8 +2273,24 @@ class TestTraceableObjective:
         assert booz_jax.need_to_run_code == need_to_run_before, (
             "f dirtied booz_jax.need_to_run_code"
         )
+        assert jr_jax._J is jr_cache_before, "f dirtied BoozerResidualJAX cache"
+        assert iotas_jax._J is iotas_cache_before, "f dirtied IotasJAX cache"
 
-    @pytest.mark.xfail(strict=True, reason=_S3)
+    def test_traceable_objective_does_not_accumulate_children(self, boozer_setup):
+        """Repeated calls must not grow booz_jax's descendant graph."""
+        (_, _, _, _, bs_jax, _, booz_jax, _) = boozer_setup
+        f, coil_dofs, _, _, _ = self._make_traceable(bs_jax, booz_jax)
+
+        child_count_before = len(booz_jax._children)
+
+        for _ in range(3):
+            float(f(coil_dofs))
+            gc.collect()
+
+        assert len(booz_jax._children) == child_count_before, (
+            "traceable objective leaked Optimizable children across evaluations"
+        )
+
     def test_traceable_routes_through_lax_while_loop(self, boozer_setup, monkeypatch):
         """Test 6: lbfgs-ondevice uses _minimize_lbfgs_private, not fallback."""
         (_, _, _, _, bs_jax, _, booz_jax, _) = boozer_setup
@@ -2236,11 +2313,11 @@ class TestTraceableObjective:
             f,
             x0,
             method="lbfgs-ondevice",
-            options={"maxiter": 2, "gtol": 1e-20},
+            maxiter=2,
+            tol=1e-20,
         )
         assert np.isfinite(float(result.fun)), "Optimizer produced non-finite J"
 
-    @pytest.mark.xfail(strict=True, reason=_S3)
     def test_traceable_matches_explicit_path(self, boozer_setup):
         """Test 7: Traceable and explicit paths produce same J after 3 iters."""
         (_, _, _, _, bs_jax, _, booz_jax, _) = boozer_setup
@@ -2264,7 +2341,8 @@ class TestTraceableObjective:
                 f,
                 x0,
                 method="lbfgs-ondevice",
-                options={"maxiter": 3, "gtol": 1e-20},
+                maxiter=3,
+                tol=1e-20,
             )
 
             _restore_state()
@@ -2281,7 +2359,8 @@ class TestTraceableObjective:
                 np.asarray(x0),
                 method="lbfgs-ondevice",
                 value_and_grad=True,
-                options={"maxiter": 3, "gtol": 1e-20},
+                maxiter=3,
+                tol=1e-20,
             )
 
             np.testing.assert_allclose(

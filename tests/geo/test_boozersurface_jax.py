@@ -55,11 +55,15 @@ def _load_and_register(module_fqn, relpath):
 _ensure_package("simsopt", _SRC)
 _ensure_package("simsopt.geo", _SRC / "geo")
 _ensure_package("simsopt.field", _SRC / "field")
+_ensure_package("simsopt.objectives", _SRC / "objectives")
 
 _sf = _load_and_register(
     "simsopt.geo.surface_fourier_jax", "geo/surface_fourier_jax.py"
 )
 _bs_jax = _load_and_register("simsopt.field.biotsavart_jax", "field/biotsavart_jax.py")
+_obj_utils = _load_and_register(
+    "simsopt.objectives.utilities", "objectives/utilities.py"
+)
 _br = _load_and_register(
     "simsopt.geo.boozer_residual_jax", "geo/boozer_residual_jax.py"
 )
