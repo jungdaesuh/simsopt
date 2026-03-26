@@ -100,7 +100,7 @@ class FakeBoozerSurface:
         self.targetlabel = targetlabel
         self.constraint_weight = constraint_weight
         self.options = options or {}
-        self.res = {"success": True, "iota": 0.15, "G": 1.0}
+        self.res = {"success": True, "iter": 1, "iota": 0.15, "G": 1.0}
 
     def run_code(self, iota, G):
         return self.res
@@ -195,7 +195,9 @@ class SingleStageExampleTests(unittest.TestCase):
         fake_optimizer_module = types.ModuleType("simsopt.geo.optimizer_jax")
         fake_optimizer_module.require_target_backend_x64 = require_target_backend_x64
         fake_optimizer_module.jax_minimize = jax_minimize
-        scipy_patch = patch("scipy.optimize.minimize", side_effect=scipy_minimize_side_effect)
+        scipy_patch = patch(
+            "scipy.optimize.minimize", side_effect=scipy_minimize_side_effect
+        )
         with scipy_patch, patch.dict(
             sys.modules, {"simsopt.geo.optimizer_jax": fake_optimizer_module}
         ):
@@ -254,9 +256,7 @@ class SingleStageExampleTests(unittest.TestCase):
             record_run_calls=True
         )
 
-        with self.patch_initialize_boozer_surface_jax(
-            module, fake_boozer_surface_jax
-        ):
+        with self.patch_initialize_boozer_surface_jax(module, fake_boozer_surface_jax):
             boozer_surface = module.initialize_boozer_surface(
                 surf_prev,
                 mpol=TEST_MPOL,
@@ -283,9 +283,7 @@ class SingleStageExampleTests(unittest.TestCase):
             record_run_calls=False
         )
 
-        with self.patch_initialize_boozer_surface_jax(
-            module, fake_boozer_surface_jax
-        ):
+        with self.patch_initialize_boozer_surface_jax(module, fake_boozer_surface_jax):
             module.initialize_boozer_surface(
                 surf_prev,
                 mpol=TEST_MPOL,
@@ -420,7 +418,9 @@ class SingleStageExampleTests(unittest.TestCase):
 
         class SentinelSurface:
             def is_self_intersecting(self):
-                raise AssertionError("surface.is_self_intersecting should not be called")
+                raise AssertionError(
+                    "surface.is_self_intersecting should not be called"
+                )
 
         with self.patch_surface_self_intersection_backend_unavailable(module):
             self.assertEqual(
@@ -572,7 +572,7 @@ class SingleStageExampleTests(unittest.TestCase):
             def dJ(self):
                 raise AssertionError("JF.dJ must not be called on failure path")
 
-        module.run_dict = {
+        run_dict = {
             "x_prev": np.zeros(5),
             "lscount": 0,
             "sdofs": np.ones(3),
@@ -581,14 +581,69 @@ class SingleStageExampleTests(unittest.TestCase):
             "J": last_J,
             "dJ": last_dJ.copy(),
         }
-        module.boozer_surface = _BoozerSurface()
-        module.JF = _JF()
+        booz = _BoozerSurface()
+        jf = _JF()
 
-        J_out, dJ_out = module.fun(np.ones(5))
+        J_out, dJ_out = module.evaluate_candidate(np.ones(5), run_dict, booz, jf)
 
         self.assertGreater(J_out, last_J)
         np.testing.assert_array_equal(dJ_out, last_dJ)
-        self.assertIsNot(dJ_out, module.run_dict["dJ"])
+        self.assertIsNot(dJ_out, run_dict["dJ"])
+
+    def test_evaluate_candidate_does_not_mutate_external_state(self):
+        module = self.load_module()
+
+        class _Surface:
+            def __init__(self):
+                self.x = np.array([9.0, 8.0, 7.0])
+
+            def volume(self):
+                return 1.0
+
+        class _BoozerSurface:
+            def __init__(self):
+                self.surface = _Surface()
+                self.res = {
+                    "success": True,
+                    "iter": 1,
+                    "iota": -3.0,
+                    "G": -4.0,
+                }
+
+            def run_code(self, iota, G):
+                return self.res
+
+        class _JF:
+            def __init__(self):
+                self.x = np.array([-5.0, -4.0, -3.0, -2.0, -1.0])
+
+            def J(self):
+                return 3.14
+
+            def dJ(self):
+                return np.arange(5.0)
+
+        run_dict = {
+            "x_prev": np.zeros(5),
+            "lscount": 0,
+            "sdofs": np.array([1.0, 2.0, 3.0]),
+            "iota": TEST_IOTA,
+            "G": TEST_G0,
+            "J": 1.0,
+            "dJ": np.zeros(5),
+        }
+        booz = _BoozerSurface()
+        jf = _JF()
+        surface_x_before = booz.surface.x.copy()
+        res_before = booz.res.copy()
+        jf_x_before = jf.x.copy()
+
+        with patch.object(module, "update_self_intersection_status", return_value=False):
+            module.evaluate_candidate(np.ones(5), run_dict, booz, jf)
+
+        np.testing.assert_array_equal(jf.x, jf_x_before)
+        np.testing.assert_array_equal(booz.surface.x, surface_x_before)
+        self.assertEqual(booz.res, res_before)
 
 
 class BoozerFallbackLBFGSBTests(unittest.TestCase):

@@ -661,6 +661,7 @@ def initialize_boozer_surface(
     boozer_limited_memory: force the JAX Boozer LS solve through ondevice
         limited-memory routing without changing the default contract elsewhere
     """
+
     def emit_stage(label, **extra):
         if on_stage is not None:
             on_stage(label, **extra)
@@ -919,7 +920,6 @@ _DIAG_LABELS = {
 }
 
 
-
 def evaluate_candidate(x, run_dict, boozer_surface, JF):
     """Evaluate a candidate coil configuration.
 
@@ -985,7 +985,9 @@ def evaluate_candidate(x, run_dict, boozer_surface, JF):
     return J, dJ
 
 
-def accept_step(run_dict, boozer_surface, JF, bs, objectives, diagnostics_refs, log_path):
+def accept_step(
+    run_dict, boozer_surface, JF, bs, objectives, diagnostics_refs, log_path
+):
     """Update state and log diagnostics on an accepted optimizer step.
 
     Called by the optimizer callback. Snapshots the current Optimizable
@@ -1076,17 +1078,47 @@ def accept_step(run_dict, boozer_surface, JF, bs, objectives, diagnostics_refs, 
     run_dict["it"] += 1
 
 
-def fun(x):
-    """Objective for L-BFGS-B — delegates to evaluate_candidate."""
-    return evaluate_candidate(x, run_dict, boozer_surface, JF)
+class SingleStageAdapter:
+    """Stateful adapter wrapping evaluate_candidate/accept_step for L-BFGS.
 
+    Carries all optimization state explicitly so the outer loop does not
+    depend on module-level globals.  Provides ``__call__`` for the objective
+    and ``callback`` for accepted-step updates.
+    """
 
-def callback(x):
-    """Accepted-step callback — delegates to accept_step."""
-    accept_step(
-        run_dict, boozer_surface, JF, bs,
-        _opt_objectives, _opt_diagnostics, _opt_log_path,
-    )
+    def __init__(
+        self,
+        run_dict,
+        boozer_surface,
+        JF,
+        bs,
+        objectives,
+        diagnostics,
+        log_path,
+    ):
+        self.run_dict = run_dict
+        self.boozer_surface = boozer_surface
+        self.JF = JF
+        self.bs = bs
+        self.objectives = objectives
+        self.diagnostics = diagnostics
+        self.log_path = log_path
+
+    def __call__(self, x):
+        """Objective for L-BFGS — delegates to evaluate_candidate."""
+        return evaluate_candidate(x, self.run_dict, self.boozer_surface, self.JF)
+
+    def callback(self, x):
+        """Accepted-step callback — delegates to accept_step."""
+        accept_step(
+            self.run_dict,
+            self.boozer_surface,
+            self.JF,
+            self.bs,
+            self.objectives,
+            self.diagnostics,
+            self.log_path,
+        )
 
 
 # Convergence tolerances for different mpol values (module-level for testability)
@@ -1388,7 +1420,6 @@ if __name__ == "__main__":
     # ==============================================================================
     # INITIALIZE OPTIMIZATION STATE
     # ==============================================================================
-    global _opt_objectives, _opt_diagnostics, _opt_log_path  # noqa: PLW0603
     run_dict = {
         "sdofs": boozer_surface.surface.x.copy(),
         "iota": boozer_surface.res["iota"],
@@ -1401,22 +1432,28 @@ if __name__ == "__main__":
         "intersecting": False,
         "self_intersection_check_available": True,
     }
-    _opt_objectives = {
-        "qs": JnonQSRatio,
-        "boozer": JBoozerResidual,
-        "iota_penalty": Jiota,
-        "length": JCurveLength,
-        "cc": JCurveCurve,
-        "cs": JCurveSurface,
-        "surf": JSurfSurf,
-        "curvature": JCurvature,
-    }
-    _opt_diagnostics = {
-        "iota": iota,
-        "banana_curve": banana_curve,
-        "curvelength": curvelength,
-    }
-    _opt_log_path = OUT_DIR_ITER + "/log.txt"
+    adapter = SingleStageAdapter(
+        run_dict=run_dict,
+        boozer_surface=boozer_surface,
+        JF=JF,
+        bs=bs,
+        objectives={
+            "qs": JnonQSRatio,
+            "boozer": JBoozerResidual,
+            "iota_penalty": Jiota,
+            "length": JCurveLength,
+            "cc": JCurveCurve,
+            "cs": JCurveSurface,
+            "surf": JSurfSurf,
+            "curvature": JCurvature,
+        },
+        diagnostics={
+            "iota": iota,
+            "banana_curve": banana_curve,
+            "curvelength": curvelength,
+        },
+        log_path=OUT_DIR_ITER + "/log.txt",
+    )
 
     # ==============================================================================
     # RUN OPTIMIZATION
@@ -1434,9 +1471,9 @@ if __name__ == "__main__":
         print("Skipping single-stage optimizer because --init-only was provided.")
     else:
         res = run_single_stage_optimizer(
-            fun,
+            adapter,
             dofs,
-            callback=callback,
+            callback=adapter.callback,
             field_backend=args.backend,
             optimizer_backend=args.optimizer_backend,
             maxiter=MAXITER,
