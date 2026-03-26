@@ -923,16 +923,23 @@ _DIAG_LABELS = {
 def evaluate_candidate(x, run_dict, boozer_surface, JF):
     """Evaluate a candidate coil configuration.
 
-    Resets the Optimizable graph to the last accepted state, sets coil
-    DOFs to ``x``, runs the inner Boozer solve, and returns ``(J, dJ)``.
+    Runs the inner Boozer solve with warm-start from ``run_dict`` and
+    returns ``(J, dJ)``.
 
     On success: ``J = JF.J()``, ``dJ = JF.dJ()``.
     On failure: ``J = run_dict["J"] + penalty``, ``dJ = run_dict["dJ"]``
     (gradient-inconsistent by design — see plan documentation).
 
-    The Optimizable graph is mutated internally (required by simsopt).
-    State tracking uses ``run_dict`` directly so that module-level
-    consumers (tests, post-optimization code) see live values.
+    This function does not directly mutate external state.  The caller
+    (``SingleStageAdapter.__call__``) sets ``JF.x = x`` before calling
+    this function so that coil geometry and the Optimizable graph are
+    in the correct state.  The inner solve (``run_code``) receives
+    explicit ``sdofs`` so that ``boozer_surface.surface`` is not read
+    for the warm-start.
+
+    Remaining implicit dependency: ``JF.J()`` and ``JF.dJ()`` read
+    from the Optimizable graph, which requires ``JF.x`` to have been
+    set by the caller.
 
     Args:
         x: Candidate coil DOFs from the optimizer.
@@ -949,11 +956,7 @@ def evaluate_candidate(x, run_dict, boozer_surface, JF):
 
     run_dict["lscount"] += 1
 
-    boozer_surface.surface.x = run_dict["sdofs"]
-    boozer_surface.res["iota"] = run_dict["iota"]
-    boozer_surface.res["G"] = run_dict["G"]
-    JF.x = x
-    boozer_surface.run_code(run_dict["iota"], run_dict["G"])
+    boozer_surface.run_code(run_dict["iota"], run_dict["G"], sdofs=run_dict["sdofs"])
     success_solve = bool(boozer_surface.res["success"])
     is_intersecting = update_self_intersection_status(run_dict, boozer_surface.surface)
     success = success_solve and not is_intersecting
@@ -976,11 +979,6 @@ def evaluate_candidate(x, run_dict, boozer_surface, JF):
         # ys > 0 guard.
         J = run_dict["J"] + max(abs(run_dict["J"]), 1.0)
         dJ = run_dict["dJ"].copy()
-
-        # Roll back Optimizable state
-        boozer_surface.surface.x = run_dict["sdofs"]
-        boozer_surface.res["iota"] = run_dict["iota"]
-        boozer_surface.res["G"] = run_dict["G"]
 
     return J, dJ
 
@@ -1105,7 +1103,13 @@ class SingleStageAdapter:
         self.log_path = log_path
 
     def __call__(self, x):
-        """Objective for L-BFGS — delegates to evaluate_candidate."""
+        """Objective for L-BFGS — delegates to evaluate_candidate.
+
+        Sets ``JF.x = x`` to update coil DOFs on the Optimizable graph
+        before delegating.  This is the only mutation site for the outer
+        loop — ``evaluate_candidate`` itself is mutation-free.
+        """
+        self.JF.x = x
         return evaluate_candidate(x, self.run_dict, self.boozer_surface, self.JF)
 
     def callback(self, x):

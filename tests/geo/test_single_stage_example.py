@@ -102,7 +102,7 @@ class FakeBoozerSurface:
         self.options = options or {}
         self.res = {"success": True, "iter": 1, "iota": 0.15, "G": 1.0}
 
-    def run_code(self, iota, G):
+    def run_code(self, iota, G, *, sdofs=None):
         return self.res
 
 
@@ -163,9 +163,9 @@ class SingleStageExampleTests(unittest.TestCase):
                 self.run_code_calls = [] if record_run_calls else None
                 FakeBoozerSurfaceJAX.instances.append(self)
 
-            def run_code(self, iota, G):
+            def run_code(self, iota, G, *, sdofs=None):
                 if self.run_code_calls is not None:
-                    self.run_code_calls.append((iota, G))
+                    self.run_code_calls.append((iota, G, sdofs))
                 return self.res
 
         return FakeBoozerSurfaceJAX
@@ -270,7 +270,11 @@ class SingleStageExampleTests(unittest.TestCase):
             )
 
         self.assertIsInstance(boozer_surface, fake_boozer_surface_jax)
-        self.assertEqual(boozer_surface.run_code_calls, [(TEST_IOTA, TEST_G0)])
+        self.assertEqual(len(boozer_surface.run_code_calls), 1)
+        call_iota, call_G, call_sdofs = boozer_surface.run_code_calls[0]
+        self.assertEqual(call_iota, TEST_IOTA)
+        self.assertEqual(call_G, TEST_G0)
+        self.assertIsNone(call_sdofs)
         self.assertEqual(boozer_surface.constraint_weight, 1.0)
         self.assertEqual(boozer_surface.options["verbose"], True)
         self.assertEqual(boozer_surface.options["optimizer_backend"], "scipy")
@@ -559,7 +563,7 @@ class SingleStageExampleTests(unittest.TestCase):
                 "vjp": None,
             }
 
-            def run_code(self, iota, G):
+            def run_code(self, iota, G, *, sdofs=None):
                 return self.res
 
         class _JF:
@@ -591,6 +595,13 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertIsNot(dJ_out, run_dict["dJ"])
 
     def test_evaluate_candidate_does_not_mutate_external_state(self):
+        """evaluate_candidate must not directly mutate JF.x, surface.x, or res.
+
+        This tests the direct-call contract: ``evaluate_candidate`` itself
+        performs no mutations.  ``JF.x = x`` happens in
+        ``SingleStageAdapter.__call__``, and the real ``run_code`` syncs
+        ``self.surface`` internally — neither is tested here.
+        """
         module = self.load_module()
 
         class _Surface:
@@ -609,8 +620,10 @@ class SingleStageExampleTests(unittest.TestCase):
                     "iota": -3.0,
                     "G": -4.0,
                 }
+                self.run_code_calls = []
 
-            def run_code(self, iota, G):
+            def run_code(self, iota, G, *, sdofs=None):
+                self.run_code_calls.append((iota, G, sdofs))
                 return self.res
 
         class _JF:
@@ -643,9 +656,17 @@ class SingleStageExampleTests(unittest.TestCase):
         ):
             module.evaluate_candidate(np.ones(5), run_dict, booz, jf)
 
+        # evaluate_candidate must not directly mutate these
         np.testing.assert_array_equal(jf.x, jf_x_before)
         np.testing.assert_array_equal(booz.surface.x, surface_x_before)
         self.assertEqual(booz.res, res_before)
+
+        # evaluate_candidate must forward sdofs from run_dict to run_code
+        self.assertEqual(len(booz.run_code_calls), 1)
+        call_iota, call_G, call_sdofs = booz.run_code_calls[0]
+        self.assertEqual(call_iota, TEST_IOTA)
+        self.assertEqual(call_G, TEST_G0)
+        np.testing.assert_array_equal(call_sdofs, run_dict["sdofs"])
 
     def test_snapshot_restore_round_trip(self):
         """Wave 1.4: snapshot → restore → snapshot produces identical arrays."""

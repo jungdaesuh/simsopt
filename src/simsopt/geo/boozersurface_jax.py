@@ -355,6 +355,7 @@ def _make_exact_group_runner(x, coil_arrays, booz_surf, mask_indices, group_inde
             stellsym_surface=booz_surf.stellsym,
             weight_inv_modB=booz_surf.options["weight_inv_modB"],
         )
+
     return residual_of_group
 
 
@@ -438,6 +439,7 @@ def _build_ls_group_vjp_callback(booz_surf, iota, G, weight_inv_modB=True):
             coil_arrays,
             coil_indices,
         ):
+
             def directional_of_group(updated_group_array):
                 return group_runner(updated_group_array, lm)
 
@@ -677,9 +679,7 @@ def _normalize_solver_options(raw_options, boozer_type):
         optimizer_backend is not None
         and optimizer_backend not in VALID_OPTIMIZER_BACKENDS
     ):
-        raise ValueError(
-            "optimizer_backend must be one of: scipy, hybrid, ondevice."
-        )
+        raise ValueError("optimizer_backend must be one of: scipy, hybrid, ondevice.")
 
     normalized_options = dict(raw_options)
     if boozer_type == "exact":
@@ -980,9 +980,10 @@ class BoozerSurfaceJAX(Optimizable):
         optimizer_backend = self.options["optimizer_backend"]
         require_target_backend_x64(optimizer_backend)
         effective_limited_memory = bool(limited_memory)
-        if optimizer_backend == "ondevice" and self.options[
-            "force_ondevice_limited_memory"
-        ]:
+        if (
+            optimizer_backend == "ondevice"
+            and self.options["force_ondevice_limited_memory"]
+        ):
             effective_limited_memory = True
         method = resolve_optimizer_backend_method(
             optimizer_backend,
@@ -1342,7 +1343,7 @@ class BoozerSurfaceJAX(Optimizable):
             )
         return res
 
-    def run_code(self, iota, G=None):
+    def run_code(self, iota, G=None, *, sdofs=None):
         """Run the Boozer surface solver (LS or exact depending on config).
 
         Mirrors ``BoozerSurface.run_code()`` API.
@@ -1351,12 +1352,22 @@ class BoozerSurfaceJAX(Optimizable):
             iota: initial guess for rotational transform.
             G: initial guess for G (None → compute from coil currents,
                and coil currents must be fixed).
+            sdofs: explicit surface DOFs for the initial guess. If None,
+                reads from ``self.surface``.  Passing explicit DOFs avoids
+                mutating ``self.surface`` before the solve.
 
         Returns:
             dict with solver results, or None if solver was not dirty.
         """
         if not self.need_to_run_code:
             return
+
+        # Sync surface DOFs when caller provides explicit warm-start.
+        # This ensures failure paths (which skip _set_surface_dofs) leave
+        # self.surface in a state consistent with the warm-start DOFs,
+        # matching the old pre-solve ``surface.x = sdofs`` behavior.
+        if sdofs is not None:
+            self._set_surface_dofs(sdofs)
 
         # When G=None the gradient treats currents as constants,
         # so coil currents must be fixed to avoid silent gradient errors.
