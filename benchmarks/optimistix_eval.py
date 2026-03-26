@@ -14,6 +14,7 @@ Usage:
 from __future__ import annotations
 
 import importlib.util
+import logging
 import sys
 import time
 import types
@@ -26,6 +27,8 @@ import numpy as np
 jax.config.update("jax_enable_x64", True)
 
 import optimistix as optx
+
+logger = logging.getLogger(__name__)
 
 # Deferred to _init_modules() to avoid sys.modules pollution on import.
 _SRC = Path(__file__).resolve().parents[1] / "src" / "simsopt"
@@ -210,71 +213,78 @@ def run_optimistix_bfgs(
     return result
 
 
-def _print_result(r):
-    print(f"  {r['solver']}")
-    print(f"    f         = {r['f']:.16e}")
-    print(f"    ||g||_inf = {r['g_inf']:.6e}")
-    print(f"    steps     = {r['nit']}")
+def _log_result(r):
+    logger.info("  %s", r["solver"])
+    logger.info("    f         = %.16e", r["f"])
+    logger.info("    ||g||_inf = %.6e", r["g_inf"])
+    logger.info("    steps     = %d", r["nit"])
     if "nfev" in r:
-        print(f"    nfev      = {r['nfev']}")
+        logger.info("    nfev      = %d", r["nfev"])
     if "num_accepted" in r:
-        print(f"    accepted  = {r['num_accepted']}")
-    print(f"    converged = {r['converged']}")
+        logger.info("    accepted  = %d", r["num_accepted"])
+    logger.info("    converged = %s", r["converged"])
     if "failed" in r:
-        print(f"    failed    = {r['failed']}  (status={r['status']})")
+        logger.info("    failed    = %s  (status=%d)", r["failed"], r["status"])
     if "result_code" in r:
-        print(f"    result    = {r['result_code']}")
+        logger.info("    result    = %s", r["result_code"])
     if "g_inf_meets_gtol" in r:
-        print(f"    g_inf < 1e-10 = {r['g_inf_meets_gtol']}")
-    print(f"    wall      = {r['wall_s']:.3f}s")
+        logger.info("    g_inf < 1e-10 = %s", r["g_inf_meets_gtol"])
+    logger.info("    wall      = %.3fs", r["wall_s"])
 
 
 def main():
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(message)s",
+        handlers=[logging.StreamHandler(sys.stdout)],
+    )
+
     _init_modules()
 
-    print("=" * 72)
-    print("Wave 2.2: Optimistix BFGS Evaluation for Inner Boozer Solve")
-    print("=" * 72)
-    print()
+    logger.info("=" * 72)
+    logger.info("Wave 2.2: Optimistix BFGS Evaluation for Inner Boozer Solve")
+    logger.info("=" * 72)
+    logger.info("")
 
-    print("Building fixture...")
+    logger.info("Building fixture...")
     fun, x0 = _build_fixture()
-    print(f"  Decision vector size: {x0.shape[0]}")
+    logger.info("  Decision vector size: %d", x0.shape[0])
 
     f0, g0 = jax.value_and_grad(fun)(x0)
-    print(f"  Initial objective:    {float(f0):.6e}")
-    print(f"  Initial ||g||_inf:    {float(jnp.linalg.norm(g0, ord=jnp.inf)):.6e}")
-    print()
+    logger.info("  Initial objective:    %.6e", float(f0))
+    logger.info("  Initial ||g||_inf:    %.6e", float(jnp.linalg.norm(g0, ord=jnp.inf)))
+    logger.info("")
 
-    print("--- Private BFGS (gtol=1e-10) ---")
+    logger.info("--- Private BFGS (gtol=1e-10) ---")
     ref = run_private_bfgs(fun, x0, gtol=1e-10)
-    _print_result(ref)
-    print()
+    _log_result(ref)
+    logger.info("")
 
-    print("--- Optimistix BFGS (rtol=1e-10, atol=1e-10) ---")
+    logger.info("--- Optimistix BFGS (rtol=1e-10, atol=1e-10) ---")
     r1 = run_optimistix_bfgs(fun, x0, rtol=1e-10, atol=1e-10)
-    _print_result(r1)
-    print()
+    _log_result(r1)
+    logger.info("")
 
-    print("--- Optimistix BFGS (rtol=1e-13, atol=1e-13) ---")
+    logger.info("--- Optimistix BFGS (rtol=1e-13, atol=1e-13) ---")
     r2 = run_optimistix_bfgs(fun, x0, rtol=1e-13, atol=1e-13)
-    _print_result(r2)
-    print()
+    _log_result(r2)
+    logger.info("")
 
-    print("--- Optimistix BFGS (rtol=1e-14, atol=1e-14) + g_norm post-check ---")
+    logger.info("--- Optimistix BFGS (rtol=1e-14, atol=1e-14) + g_norm post-check ---")
     r3 = run_optimistix_bfgs(fun, x0, rtol=1e-14, atol=1e-14, gtol_target=1e-10)
-    _print_result(r3)
-    print()
+    _log_result(r3)
+    logger.info("")
 
-    print("=" * 72)
-    print("COMPARISON SUMMARY")
-    print("=" * 72)
-    print()
-
-    print("  NOTE: Neither solver fully converges on this synthetic fixture.")
-    print(f"  Private BFGS: converged={ref['converged']}, failed={ref.get('failed')}")
-    print(f"  Optimistix:   converged={r2['converged']}")
-    print()
+    logger.info("=" * 72)
+    logger.info("COMPARISON SUMMARY")
+    logger.info("=" * 72)
+    logger.info("")
+    logger.info("  NOTE: Neither solver fully converges on this synthetic fixture.")
+    logger.info(
+        "  Private BFGS: converged=%s, failed=%s", ref["converged"], ref.get("failed")
+    )
+    logger.info("  Optimistix:   converged=%s", r2["converged"])
+    logger.info("")
 
     for label, r in [
         ("optx(1e-10)", r1),
@@ -282,81 +292,95 @@ def main():
         ("optx(1e-14)+check", r3),
     ]:
         f_diff = abs(r["f"] - ref["f"])
-        print(f"  {label} vs private_bfgs:")
-        print(f"    |f_diff|   = {f_diff:.6e}")
-        print(f"    g_inf ratio = {r['g_inf'] / max(ref['g_inf'], 1e-30):.2f}")
-        print()
+        logger.info("  %s vs private_bfgs:", label)
+        logger.info("    |f_diff|   = %.6e", f_diff)
+        logger.info("    g_inf ratio = %.2f", r["g_inf"] / max(ref["g_inf"], 1e-30))
+        logger.info("")
 
-    print("=" * 72)
-    print("TERMINATION + LINE SEARCH DIFFERENCES")
-    print("=" * 72)
-    print()
-    print("  Private BFGS:")
-    print("    Termination: ||g||_inf < gtol (gradient-norm)")
-    print("    Line search: Strong Wolfe (cubic/quad zoom)")
-    print()
-    print("  Optimistix BFGS:")
-    print(
+    logger.info("=" * 72)
+    logger.info("TERMINATION + LINE SEARCH DIFFERENCES")
+    logger.info("=" * 72)
+    logger.info("")
+    logger.info("  Private BFGS:")
+    logger.info("    Termination: ||g||_inf < gtol (gradient-norm)")
+    logger.info("    Line search: Strong Wolfe (cubic/quad zoom)")
+    logger.info("")
+    logger.info("  Optimistix BFGS:")
+    logger.info(
         "    Termination: Cauchy (|y_diff| < atol+rtol*|y| AND |f_diff| < atol+rtol*|f|)"
     )
-    print("    Line search: BacktrackingArmijo (halving, slope=0.1)")
-    print("    Note: Optimistix TODO in source to replace BacktrackingArmijo")
-    print()
+    logger.info("    Line search: BacktrackingArmijo (halving, slope=0.1)")
+    logger.info("    Note: Optimistix TODO in source to replace BacktrackingArmijo")
+    logger.info("")
 
     for label, r in [("optx(1e-10)", r1), ("optx(1e-13)", r2), ("optx(1e-14)", r3)]:
         status = "PASS" if r["g_inf"] < 1e-10 else "FAIL"
-        print(f"  {label}: ||g||_inf = {r['g_inf']:.3e}  [{status} vs gtol=1e-10]")
-    print()
+        logger.info(
+            "  %s: ||g||_inf = %.3e  [%s vs gtol=1e-10]", label, r["g_inf"], status
+        )
+    logger.info("")
 
-    print("=" * 72)
-    print("OBSERVATIONS")
-    print("=" * 72)
-    print()
-    print("  1. On this fixture, default optx.BFGS reaches a higher final gradient")
-    print("     norm (~4.2e-9) than the private BFGS (~4.5e-10) across all tested")
-    print("     tolerance settings (1e-10 through 1e-14).")
-    print()
-    print("  2. The private BFGS ultimately fails (line search status=3) rather")
-    print("     than converging. Both solvers struggle on this problem.")
-    print()
-    print("  3. The two solvers differ in termination criterion AND line search")
-    print("     strategy simultaneously. This benchmark does not isolate which")
-    print("     factor dominates. A controlled ablation (e.g., swapping only the")
-    print("     line search) would be needed to establish causation.")
-    print()
-    print("  4. Optimistix's BacktrackingArmijo lacks the curvature condition")
-    print("     that the Wolfe line search provides. The Optimistix source")
-    print("     includes a TODO to replace it. A future Optimistix release with")
-    print("     a Wolfe line search could change these results.")
-    print()
+    logger.info("=" * 72)
+    logger.info("OBSERVATIONS")
+    logger.info("=" * 72)
+    logger.info("")
+    logger.info(
+        "  1. On this fixture, default optx.BFGS reaches a higher final gradient"
+    )
+    logger.info(
+        "     norm (~4.2e-9) than the private BFGS (~4.5e-10) across all tested"
+    )
+    logger.info("     tolerance settings (1e-10 through 1e-14).")
+    logger.info("")
+    logger.info("  2. The private BFGS ultimately fails (line search status=3) rather")
+    logger.info("     than converging. Both solvers struggle on this problem.")
+    logger.info("")
+    logger.info("  3. The two solvers differ in termination criterion AND line search")
+    logger.info("     strategy simultaneously. This benchmark does not isolate which")
+    logger.info("     factor dominates. A controlled ablation (e.g., swapping only the")
+    logger.info("     line search) would be needed to establish causation.")
+    logger.info("")
+    logger.info("  4. Optimistix's BacktrackingArmijo lacks the curvature condition")
+    logger.info("     that the Wolfe line search provides. The Optimistix source")
+    logger.info("     includes a TODO to replace it. A future Optimistix release with")
+    logger.info("     a Wolfe line search could change these results.")
+    logger.info("")
 
-    print("=" * 72)
-    print("DECISION")
-    print("=" * 72)
-    print()
-    print("  Keep _minimize_bfgs_private for the inner Boozer solve.")
-    print()
-    print("  Rationale: under default settings on this fixture, the private")
-    print("  solver reaches ~10x lower gradient norm before exit. The private")
-    print("  solver is the known quantity with validated behavior on production")
-    print("  fixtures (Waves 2.1-2.4). Adopting Optimistix BFGS would trade a")
-    print("  tested implementation for one that underperforms on the available")
-    print("  benchmark without a clear corrective path today.")
-    print()
-    print("  Caveats:")
-    print("  - This is a single synthetic fixture, not a production config.")
-    print("  - Neither solver converges; comparison is between two failure modes.")
-    print("  - Re-evaluate if Optimistix ships a Wolfe line search.")
-    print()
+    logger.info("=" * 72)
+    logger.info("DECISION")
+    logger.info("=" * 72)
+    logger.info("")
+    logger.info("  Keep _minimize_bfgs_private for the inner Boozer solve.")
+    logger.info("")
+    logger.info("  Rationale: under default settings on this fixture, the private")
+    logger.info("  solver reaches ~10x lower gradient norm before exit. The private")
+    logger.info("  solver is the known quantity with validated behavior on production")
+    logger.info("  fixtures (Waves 2.1-2.4). Adopting Optimistix BFGS would trade a")
+    logger.info("  tested implementation for one that underperforms on the available")
+    logger.info("  benchmark without a clear corrective path today.")
+    logger.info("")
+    logger.info("  Caveats:")
+    logger.info("  - This is a single synthetic fixture, not a production config.")
+    logger.info(
+        "  - Neither solver converges; comparison is between two failure modes."
+    )
+    logger.info("  - Re-evaluate if Optimistix ships a Wolfe line search.")
+    logger.info("")
 
-    print("=" * 72)
-    print("USEFUL FROM OPTIMISTIX ECOSYSTEM (Phase 3)")
-    print("=" * 72)
-    print()
-    print("  1. ImplicitAdjoint for automatic IFT through solves (jax.custom_vjp)")
-    print("  2. Lineax for GMRES/iterative linear solves (newton_polish replacement)")
-    print("  Note: optimistix is a benchmark-only dep (pip install optimistix==0.1.0),")
-    print("  not in the [JAX] or [JAX_GPU] public extras.")
+    logger.info("=" * 72)
+    logger.info("USEFUL FROM OPTIMISTIX ECOSYSTEM (Phase 3)")
+    logger.info("=" * 72)
+    logger.info("")
+    logger.info(
+        "  1. ImplicitAdjoint for automatic IFT through solves (jax.custom_vjp)"
+    )
+    logger.info(
+        "  2. Lineax for GMRES/iterative linear solves (newton_polish replacement)"
+    )
+    logger.info(
+        "  Note: optimistix is a benchmark-only dep (pip install optimistix==0.1.0),"
+    )
+    logger.info("  not in the [JAX] or [JAX_GPU] public extras.")
 
 
 if __name__ == "__main__":
