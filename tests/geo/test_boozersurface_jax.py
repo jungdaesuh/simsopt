@@ -2195,15 +2195,55 @@ class TestBoozerSurfaceJAXClass:
         booz.need_to_run_code = True
 
         # Force exact Newton to fail → failure path skips _set_surface_dofs
-        with (
-            _patched_exact_surface_module(),
-            _patched_exact_newton_result(success=False, step=jnp.nan, nit=0),
-        ):
-            res = booz.run_code(iota=0.3, G=0.05, sdofs=sdofs_good)
+        with _patched_exact_surface_module():
+            with _patched_exact_newton_result(success=False, step=jnp.nan, nit=0):
+                res = booz.run_code(iota=0.3, G=0.05, sdofs=sdofs_good)
 
         assert res["success"] is False
         # Surface must hold the warm-start DOFs, not the garbage
         np.testing.assert_allclose(booz.surface.get_dofs(), sdofs_good, atol=1e-14)
+
+    def test_run_code_sdofs_syncs_surface_on_ls_newton_failure(self, monkeypatch):
+        """On LS Newton-polish failure with sdofs, surface holds LBFGS output.
+
+        In the LS path, LBFGS always calls ``_set_surface_dofs`` before
+        Newton runs, so the pre-sync is overwritten by LBFGS.  On Newton
+        NaN failure, surface retains the LBFGS result — NOT the warm-start
+        sdofs and NOT the pre-corruption garbage.
+        """
+        booz = _make_mock_boozer_surface()
+        sdofs_good = booz.surface.get_dofs().copy()
+
+        # Solve once to capture the LBFGS-only surface output
+        booz_ref = _make_mock_boozer_surface()
+
+        def nan_newton_polish(
+            _objective_fn, x0, *, maxiter, tol, stab, progress_callback=None
+        ):
+            del maxiter, tol, stab, progress_callback
+            return {
+                "x": x0,
+                "fun": jnp.asarray(jnp.nan),
+                "grad": jnp.full_like(x0, jnp.nan),
+                "hessian": jnp.full(
+                    (x0.shape[0], x0.shape[0]), jnp.nan, dtype=x0.dtype
+                ),
+                "nit": 0,
+                "success": False,
+            }
+
+        monkeypatch.setattr(_bsj, "newton_polish", nan_newton_polish)
+        booz_ref.run_code(iota=0.3, G=0.05)
+        lbfgs_surface = booz_ref.surface.get_dofs().copy()
+
+        # Corrupt surface, re-solve with explicit sdofs
+        booz.surface.set_dofs(sdofs_good * 0.0 + 999.0)
+        booz.need_to_run_code = True
+        res = booz.run_code(iota=0.3, G=0.05, sdofs=sdofs_good)
+
+        assert res["success"] is False
+        # Surface must hold LBFGS output (not garbage, not warm-start)
+        np.testing.assert_allclose(booz.surface.get_dofs(), lbfgs_surface, atol=1e-12)
 
     def test_run_code_invalid_newton_iterate_aborts_adjoint_state(self, monkeypatch):
         """Finite iterates with invalid Newton derivatives must not build PLU/VJP."""
