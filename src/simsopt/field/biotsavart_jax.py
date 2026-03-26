@@ -8,7 +8,6 @@ All functions accept and return JAX arrays and are fully traceable
 by ``jax.grad``, ``jax.jacfwd``, ``jax.jacrev``, and ``jax.hessian``.
 """
 
-import numpy as np
 import jax
 import jax.numpy as jnp
 
@@ -264,8 +263,8 @@ def group_coil_data(gammas_list, gammadashs_list, currents_list):
                         for i in indices
                     ]
                 ),
-                jnp.asarray(
-                    np.array([currents_list[i] for i in indices]), dtype=jnp.float64
+                jnp.stack(
+                    [jnp.asarray(currents_list[i], dtype=jnp.float64) for i in indices]
                 ),
                 indices,
             )

@@ -37,6 +37,7 @@ __all__ = [
     "TARGET_X64_REQUIRED_OPTIMIZER_BACKENDS",
     "jax_minimize",
     "newton_polish",
+    "newton_polish_traceable",
     "newton_exact",
     "require_target_backend_x64",
     "resolve_optimizer_backend_method",
@@ -356,6 +357,128 @@ def newton_polish(
         "hessian": H,
         "nit": nit,
         "success": bool(float(norm) <= tol),
+    }
+
+
+def newton_polish_traceable(
+    objective_fn,
+    x0,
+    *,
+    maxiter=40,
+    tol=1e-11,
+    stab=0.0,
+    progress_callback=None,
+):
+    """Trace-safe Newton polish for JAX-traceable objective paths.
+
+    This variant keeps all loop state and fallback decisions inside JAX control
+    flow so higher-level traced objectives can invoke the Newton stage without
+    crossing back into Python.
+    """
+    val_and_grad_fn = jax.value_and_grad(objective_fn)
+    hvp_fn = _hessian_vector_product_fn(objective_fn)
+
+    val0, grad0 = val_and_grad_fn(x0)
+    norm0 = jnp.linalg.norm(grad0)
+    linear_tol = jnp.minimum(1e-10, jnp.maximum(jnp.asarray(tol) * 0.1, 1e-14))
+
+    def cond_fun(state):
+        return (state["nit"] < maxiter) & (state["norm"] > tol)
+
+    def body_fun(state):
+        dx, linear_residual, _ = _gmres_solve_newton_system(
+            hvp_fn,
+            state["x"],
+            state["grad"],
+            stab=stab,
+            tol=linear_tol,
+        )
+        linear_residual_norm = jnp.linalg.norm(linear_residual)
+        dense_threshold = jnp.maximum(1e-10, 1e-3 * state["norm"])
+
+        def use_dense_fallback(_):
+            H_solve = _materialize_dense_hessian(hvp_fn, state["x"])
+            if stab != 0.0:
+                H_solve = H_solve + stab * jnp.eye(
+                    H_solve.shape[0], dtype=H_solve.dtype
+                )
+            dx_dense = jnp.linalg.solve(H_solve, state["grad"])
+            residual_dense = state["grad"] - H_solve @ dx_dense
+            return dx_dense, residual_dense, jnp.linalg.norm(residual_dense)
+
+        def keep_gmres_step(_):
+            return dx, linear_residual, linear_residual_norm
+
+        dx, linear_residual, linear_residual_norm = lax.cond(
+            (~jnp.all(jnp.isfinite(dx))) | (linear_residual_norm > dense_threshold),
+            use_dense_fallback,
+            keep_gmres_step,
+            operand=None,
+        )
+
+        def add_correction(current_dx):
+            correction, _, _ = _gmres_solve_newton_system(
+                hvp_fn,
+                state["x"],
+                linear_residual,
+                stab=stab,
+                tol=linear_tol,
+            )
+            return lax.cond(
+                jnp.all(jnp.isfinite(correction)),
+                lambda corr: current_dx + corr,
+                lambda _corr: current_dx,
+                correction,
+            )
+
+        dx = lax.cond(
+            linear_residual_norm > linear_tol,
+            add_correction,
+            lambda current_dx: current_dx,
+            dx,
+        )
+
+        x_next = state["x"] - dx
+        val_next, grad_next = val_and_grad_fn(x_next)
+        norm_next = jnp.linalg.norm(grad_next)
+        if progress_callback is not None:
+            jax.debug.callback(
+                progress_callback,
+                state["nit"] + 1,
+                val_next,
+                norm_next,
+            )
+        return {
+            "x": x_next,
+            "val": val_next,
+            "grad": grad_next,
+            "norm": norm_next,
+            "nit": state["nit"] + 1,
+        }
+
+    state = lax.while_loop(
+        cond_fun,
+        body_fun,
+        {
+            "x": x0,
+            "val": val0,
+            "grad": grad0,
+            "norm": norm0,
+            "nit": jnp.asarray(0, dtype=jnp.int32),
+        },
+    )
+
+    H = _materialize_dense_hessian(hvp_fn, state["x"])
+    if stab != 0.0:
+        H = H + stab * jnp.eye(H.shape[0], dtype=H.dtype)
+
+    return {
+        "x": state["x"],
+        "fun": state["val"],
+        "grad": state["grad"],
+        "hessian": H,
+        "nit": state["nit"],
+        "success": state["norm"] <= tol,
     }
 
 
