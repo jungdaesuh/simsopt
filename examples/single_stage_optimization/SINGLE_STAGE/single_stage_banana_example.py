@@ -697,7 +697,8 @@ def initialize_boozer_surface(
         options = {"verbose": True}
         if backend == "jax":
             options["optimizer_backend"] = optimizer_backend
-            options["force_ondevice_limited_memory"] = boozer_limited_memory
+            if optimizer_backend == "ondevice" and boozer_limited_memory:
+                options["force_ondevice_limited_memory"] = True
             options.update(build_jax_stage_options())
         boozer_surface = BoozerCls(
             bs,
