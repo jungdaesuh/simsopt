@@ -8,6 +8,7 @@ import numpy as np
 from matplotlib.path import Path as MplPath
 from scipy.optimize import minimize, basinhopping
 from scipy.spatial import cKDTree
+from scipy.spatial.distance import cdist
 
 # SIMSOPT imports
 from simsopt._core.optimizable import Optimizable
@@ -487,6 +488,12 @@ def parse_args():
         "--stage2-seed-order",
         type=int,
         default=int(os.environ["STAGE2_SEED_ORDER"]) if "STAGE2_SEED_ORDER" in os.environ else None,
+    )
+    parser.add_argument(
+        "--checkpoint-every",
+        type=int,
+        default=int(os.environ.get("CHECKPOINT_EVERY", "0")),
+        help="Save checkpoint artifacts every N accepted iterations (0 = disabled, default).",
     )
     parser.add_argument(
         "--basin-hops",
@@ -1580,6 +1587,14 @@ def callback(x):
     run_dict['accepted_iterations'] += 1
     run_dict['it'] += 1
 
+    # Periodic checkpoint saving
+    if CHECKPOINT_EVERY > 0 and run_dict['accepted_iterations'] % CHECKPOINT_EVERY == 0:
+        ckpt_dir = os.path.join(OUT_DIR_ITER, f"checkpoint_iter{run_dict['accepted_iterations']:04d}")
+        os.makedirs(ckpt_dir, exist_ok=True)
+        bs.save(os.path.join(ckpt_dir, "biot_savart.json"))
+        save_surface_artifacts(surface_data, bs, ckpt_dir, "surf", also_write_outer_legacy=False)
+        print(f"  [checkpoint] Saved iteration {run_dict['accepted_iterations']} to {ckpt_dir}")
+
 
 # Convergence tolerances for different mpol values (module-level for testability)
 ftol_by_mpol = {8: 1e-5, 9: 5e-6, 10: 1e-6, 11: 5e-7, 12: 1e-7, 13: 5e-8, 14: 1e-8, 15: 5e-9, 16: 1e-9, 17: 5e-10, 18: 1e-10}
@@ -1590,6 +1605,7 @@ TOPOLOGY_GATE_FIELDLINES = 0
 TOPOLOGY_GATE_TMAX = 2.0
 TOPOLOGY_GATE_TOL = 1e-7
 TOPOLOGY_GATE_SURVIVAL_THRESHOLD = 0.0
+CHECKPOINT_EVERY = 0
 
 
 if __name__ == "__main__":
@@ -1614,6 +1630,7 @@ if __name__ == "__main__":
     vol_target = args.vol_target
     CONSTRAINT_WEIGHT = args.constraint_weight
     MAXITER = args.maxiter
+    CHECKPOINT_EVERY = args.checkpoint_every
     iota_target = args.iota_target
     num_tf_coils = args.num_tf_coils
     if not (0.0 <= args.inner_surface_initial_weight <= 1.0):
@@ -2160,6 +2177,7 @@ if __name__ == "__main__":
         "GTOL": gtol,
         "TERMINATION_MESSAGE": termination_message,
         "OPTIMIZER_SUCCESS": optimizer_success,
+        "CHECKPOINT_EVERY": CHECKPOINT_EVERY,
         "basin_hops": args.basin_hops,
         "basin_stepsize": args.basin_stepsize if args.basin_hops > 0 else None,
         "basin_seed": rng_seed if args.basin_hops > 0 else None,
@@ -2185,6 +2203,15 @@ if __name__ == "__main__":
         "FINAL_SEARCH_SURFACE_WEIGHTS": run_dict['search_eval']['surface_weights'].tolist(),
         "SELF_INTERSECTING": run_dict['intersecting'],
         "MAX_CURVATURE": float(final_max_curvature),
+        "COIL_LENGTH": float(curvelength.J()),
+        "CURVE_CURVE_MIN_DIST": float(JCurveCurve.shortest_distance()),
+        "CURVE_SURFACE_MIN_DIST": float(JCurveSurface.shortest_distance()),
+        "SURFACE_VESSEL_MIN_DIST": float(np.min(cdist(
+            outer_surface_data['boozer_surface'].surface.gamma().reshape((-1, 3)),
+            VV.gamma().reshape((-1, 3)),
+        ))),
+        "NONQS_RATIO": float(JnonQSRatio.J()),
+        "BOOZER_RESIDUAL": float(JBoozerResidual.J()),
         "INITIAL_VOLUME": float(initial_volume),
         "INITIAL_IOTA": float(initial_iota),
         "INITIAL_FIELD_ERROR": float(initial_field_error),
