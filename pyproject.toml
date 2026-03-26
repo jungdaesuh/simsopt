@@ -78,13 +78,11 @@ JAX = [
     "jaxlib==0.9.2; python_version >= '3.11'",
     "numpy>=2.0; python_version >= '3.11'",
     "scipy>=1.13; python_version >= '3.11'",
-    "optimistix==0.1.0; python_version >= '3.11'",
 ]
 JAX_GPU = [
     "jax[cuda12]==0.9.2; python_version >= '3.11'",
     "numpy>=2.0; python_version >= '3.11'",
     "scipy>=1.13; python_version >= '3.11'",
-    "optimistix==0.1.0; python_version >= '3.11'",
 ]
 
 [project.urls]

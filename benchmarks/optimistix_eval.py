@@ -1,11 +1,11 @@
 """
-Wave 2.2 — Evaluate Optimistix BFGS as a replacement for _minimize_bfgs_private.
+Wave 2.2 — Evaluate default Optimistix BFGS against _minimize_bfgs_private.
 
-Compares:
-  1. Private BFGS (lax.while_loop, Wolfe line search, gradient-norm termination)
-  2. Optimistix BFGS (BacktrackingArmijo, Cauchy termination)
+Compares the two solvers on the same Boozer penalty objective from a synthetic
+mock fixture (8x8 quadrature, 2 coils, 29-DOF decision vector).
 
-on the same Boozer penalty objective from a mock fixture.
+Prerequisites:
+    pip install optimistix==0.1.0   # benchmark-only, not in [JAX] extras
 
 Usage:
     conda run -n columbia-jax-0.9.2 python benchmarks/optimistix_eval.py
@@ -148,18 +148,20 @@ def _build_fixture(nphi=8, ntheta=8, mpol=1, ntor=1, nfp=1):
 
 
 def run_private_bfgs(fun, x0, *, gtol=1e-10, maxiter=1500):
-    """Run the private BFGS solver and collect results."""
+    """Run the private BFGS solver. Timer includes solve + final g_inf."""
     t0 = time.perf_counter()
     state = _minimize_bfgs_private(fun, x0, gtol=gtol, maxiter=maxiter)
     state.x_k.block_until_ready()
+    g_final = np.asarray(state.g_k)
+    g_inf = float(np.linalg.norm(g_final, ord=np.inf))
     wall = time.perf_counter() - t0
 
-    g_final = np.asarray(state.g_k)
     return {
         "solver": "private_bfgs",
         "f": float(state.f_k),
-        "g_inf": float(np.linalg.norm(g_final, ord=np.inf)),
+        "g_inf": g_inf,
         "nit": int(state.k),
+        "nfev": int(state.nfev),
         "converged": bool(state.converged),
         "failed": bool(state.failed),
         "status": int(state.status),
@@ -171,7 +173,7 @@ def run_private_bfgs(fun, x0, *, gtol=1e-10, maxiter=1500):
 def run_optimistix_bfgs(
     fun, x0, *, rtol=1e-10, atol=1e-10, max_steps=1500, gtol_target=None
 ):
-    """Run Optimistix BFGS and collect results.
+    """Run Optimistix BFGS. Timer includes solve + post-solve g_inf evaluation.
 
     If gtol_target is set, adds a gradient-norm post-check to the result.
     """
@@ -184,21 +186,20 @@ def run_optimistix_bfgs(
     t0 = time.perf_counter()
     sol = optx.minimise(fn, solver, x0, max_steps=max_steps, throw=False)
     sol.value.block_until_ready()
-    wall = time.perf_counter() - t0
-
     f_final, g_final = jax.value_and_grad(fun)(sol.value)
     g_final = np.asarray(g_final)
     g_inf = float(np.linalg.norm(g_final, ord=np.inf))
+    wall = time.perf_counter() - t0
 
     label = f"optimistix_bfgs(rtol={rtol:.0e}, atol={atol:.0e})"
+    num_steps = int(sol.stats["num_steps"])
+    num_accepted = int(sol.stats.get("num_accepted_steps", num_steps))
     result = {
         "solver": label + (" + g_norm check" if gtol_target is not None else ""),
         "f": float(f_final),
         "g_inf": g_inf,
-        "nit": int(sol.stats["num_steps"]),
-        "num_accepted": int(
-            sol.stats.get("num_accepted_steps", sol.stats["num_steps"])
-        ),
+        "nit": num_steps,
+        "num_accepted": num_accepted,
         "converged": bool(sol.result == optx.RESULTS.successful),
         "result_code": str(sol.result),
         "wall_s": wall,
@@ -213,7 +214,9 @@ def _print_result(r):
     print(f"  {r['solver']}")
     print(f"    f         = {r['f']:.16e}")
     print(f"    ||g||_inf = {r['g_inf']:.6e}")
-    print(f"    iters     = {r['nit']}")
+    print(f"    steps     = {r['nit']}")
+    if "nfev" in r:
+        print(f"    nfev      = {r['nfev']}")
     if "num_accepted" in r:
         print(f"    accepted  = {r['num_accepted']}")
     print(f"    converged = {r['converged']}")
@@ -238,13 +241,12 @@ def main():
     fun, x0 = _build_fixture()
     print(f"  Decision vector size: {x0.shape[0]}")
 
-    # Single JIT warmup for all solver runs
     f0, g0 = jax.value_and_grad(fun)(x0)
     print(f"  Initial objective:    {float(f0):.6e}")
     print(f"  Initial ||g||_inf:    {float(jnp.linalg.norm(g0, ord=jnp.inf)):.6e}")
     print()
 
-    print("--- Reference: _minimize_bfgs_private (gtol=1e-10) ---")
+    print("--- Private BFGS (gtol=1e-10) ---")
     ref = run_private_bfgs(fun, x0, gtol=1e-10)
     _print_result(ref)
     print()
@@ -269,97 +271,92 @@ def main():
     print("=" * 72)
     print()
 
+    print("  NOTE: Neither solver fully converges on this synthetic fixture.")
+    print(f"  Private BFGS: converged={ref['converged']}, failed={ref.get('failed')}")
+    print(f"  Optimistix:   converged={r2['converged']}")
+    print()
+
     for label, r in [
         ("optx(1e-10)", r1),
         ("optx(1e-13)", r2),
         ("optx(1e-14)+check", r3),
     ]:
-        x_diff = np.linalg.norm(r["x"] - ref["x"])
         f_diff = abs(r["f"] - ref["f"])
-        print(f"  {label} vs reference:")
-        print(f"    ||x_optx - x_ref|| = {x_diff:.6e}")
-        print(f"    |f_optx - f_ref|   = {f_diff:.6e}")
-        print(f"    g_inf ratio        = {r['g_inf'] / max(ref['g_inf'], 1e-30):.2f}")
-        print(f"    iter ratio         = {r['nit'] / max(ref['nit'], 1):.1f}x")
+        print(f"  {label} vs private_bfgs:")
+        print(f"    |f_diff|   = {f_diff:.6e}")
+        print(f"    g_inf ratio = {r['g_inf'] / max(ref['g_inf'], 1e-30):.2f}")
         print()
 
     print("=" * 72)
-    print("TERMINATION CRITERION ANALYSIS")
+    print("TERMINATION + LINE SEARCH DIFFERENCES")
     print("=" * 72)
     print()
-    print("Private BFGS: gradient-norm termination (||g||_inf < gtol)")
-    print("Optimistix:   Cauchy termination (|y_diff| < atol + rtol*|y| AND")
-    print("              |f_diff| < atol + rtol*|f|)")
+    print("  Private BFGS:")
+    print("    Termination: ||g||_inf < gtol (gradient-norm)")
+    print("    Line search: Strong Wolfe (cubic/quad zoom)")
     print()
-    print("Key differences:")
-    print("  1. Cauchy checks iterate convergence, not optimality")
+    print("  Optimistix BFGS:")
     print(
-        "  2. Cauchy can terminate early if iterates plateau (even with large gradient)"
+        "    Termination: Cauchy (|y_diff| < atol+rtol*|y| AND |f_diff| < atol+rtol*|f|)"
     )
-    print("  3. Cauchy can over-iterate if f is small (rtol*|f| << atol)")
+    print("    Line search: BacktrackingArmijo (halving, slope=0.1)")
+    print("    Note: Optimistix TODO in source to replace BacktrackingArmijo")
     print()
 
     for label, r in [("optx(1e-10)", r1), ("optx(1e-13)", r2), ("optx(1e-14)", r3)]:
         status = "PASS" if r["g_inf"] < 1e-10 else "FAIL"
-        print(f"  {label}: ||g||_inf = {r['g_inf']:.3e}  [{status}]")
+        print(f"  {label}: ||g||_inf = {r['g_inf']:.3e}  [{status} vs gtol=1e-10]")
     print()
 
     print("=" * 72)
-    print("LINE SEARCH ANALYSIS")
+    print("OBSERVATIONS")
     print("=" * 72)
     print()
-    print("Private BFGS: Strong Wolfe (cubic/quadratic zoom, maxiter=10)")
-    print("  - Guarantees sufficient decrease + curvature condition")
-    print("  - Ensures y^T s > 0 for positive-definite Hessian update")
+    print("  1. On this fixture, default optx.BFGS reaches a higher final gradient")
+    print("     norm (~4.2e-9) than the private BFGS (~4.5e-10) across all tested")
+    print("     tolerance settings (1e-10 through 1e-14).")
     print()
-    print("Optimistix:   Backtracking Armijo (halving, slope=0.1)")
-    print("  - Only guarantees sufficient decrease (no curvature condition)")
-    print("  - Simpler, fewer f-evals per line search step")
-    print("  - Risk: may not guarantee positive-definite H update")
+    print("  2. The private BFGS ultimately fails (line search status=3) rather")
+    print("     than converging. Both solvers struggle on this problem.")
+    print()
+    print("  3. The two solvers differ in termination criterion AND line search")
+    print("     strategy simultaneously. This benchmark does not isolate which")
+    print("     factor dominates. A controlled ablation (e.g., swapping only the")
+    print("     line search) would be needed to establish causation.")
+    print()
+    print("  4. Optimistix's BacktrackingArmijo lacks the curvature condition")
+    print("     that the Wolfe line search provides. The Optimistix source")
+    print("     includes a TODO to replace it. A future Optimistix release with")
+    print("     a Wolfe line search could change these results.")
     print()
 
     print("=" * 72)
-    print("RECOMMENDATION")
+    print("DECISION")
     print("=" * 72)
     print()
-    print("  VERDICT: Optimistix BFGS is NOT a suitable replacement for")
-    print("  _minimize_bfgs_private on the inner Boozer solve.")
+    print("  Keep _minimize_bfgs_private for the inner Boozer solve.")
     print()
-    print("  Root cause: BacktrackingArmijo line search (Armijo-only, no")
-    print("  curvature condition) degrades the BFGS Hessian approximation")
-    print("  quality near the optimum. The solver plateaus at ~4.2e-9")
-    print("  gradient norm and makes zero further progress from 500 to 5000")
-    print("  iterations. The private BFGS with strong Wolfe line search")
-    print("  reaches 4.5e-10 (10x better) in only 333 iterations.")
+    print("  Rationale: under default settings on this fixture, the private")
+    print("  solver reaches ~10x lower gradient norm before exit. The private")
+    print("  solver is the known quantity with validated behavior on production")
+    print("  fixtures (Waves 2.1-2.4). Adopting Optimistix BFGS would trade a")
+    print("  tested implementation for one that underperforms on the available")
+    print("  benchmark without a clear corrective path today.")
     print()
-    print("  The issue is structural (line search quality), not just")
-    print("  termination criterion. Even a gradient-norm terminate()")
-    print("  override would not help — the solver simply cannot find")
-    print("  descent directions that reduce the gradient past 4.2e-9.")
-    print()
-    print("  Decision: Keep _minimize_bfgs_private for the inner solve (option c).")
+    print("  Caveats:")
+    print("  - This is a single synthetic fixture, not a production config.")
+    print("  - Neither solver converges; comparison is between two failure modes.")
+    print("  - Re-evaluate if Optimistix ships a Wolfe line search.")
     print()
 
     print("=" * 72)
-    print("WHAT IS USEFUL FROM OPTIMISTIX ECOSYSTEM")
+    print("USEFUL FROM OPTIMISTIX ECOSYSTEM (Phase 3)")
     print("=" * 72)
     print()
-    print("  While Optimistix BFGS is not suitable for the inner solver,")
-    print("  the ecosystem (Optimistix + Lineax) offers value for Phase 3:")
-    print()
-    print("  1. ImplicitAdjoint: optx.minimise(..., adjoint=ImplicitAdjoint())")
-    print("     provides automatic implicit differentiation through a solve.")
-    print("     Could replace the manual IFT path (PLU + forward_backward_jax)")
-    print("     even while keeping _minimize_bfgs_private as inner solver,")
-    print("     via jax.custom_vjp wrapping.")
-    print()
-    print("  2. Lineax: lineax.linear_solve(lineax.GMRES(), ...) could replace")
-    print("     the manual GMRES + HVP setup in newton_polish, with a cleaner")
-    print("     API and potential memory efficiency.")
-    print()
-    print("  3. The optimistix dependency in pyproject.toml [JAX] is worth")
-    print("     keeping for Phase 3 evaluation, even though the inner solver")
-    print("     stays private.")
+    print("  1. ImplicitAdjoint for automatic IFT through solves (jax.custom_vjp)")
+    print("  2. Lineax for GMRES/iterative linear solves (newton_polish replacement)")
+    print("  Note: optimistix is a benchmark-only dep (pip install optimistix==0.1.0),")
+    print("  not in the [JAX] or [JAX_GPU] public extras.")
 
 
 if __name__ == "__main__":
