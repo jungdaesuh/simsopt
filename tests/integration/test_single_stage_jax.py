@@ -61,7 +61,7 @@ from simsopt.geo.boozersurface_jax import (  # noqa: E402
     _ls_decision_vector,
     _make_ls_penalty_objective,
 )
-from simsopt.geo.optimizer_jax import PRIVATE_OPTIMIZER_JAX_VERSION  # noqa: E402
+from simsopt.geo.optimizer_jax import PRIVATE_OPTIMIZER_JAX_VERSION, jax_minimize  # noqa: E402
 from simsopt.geo.surfaceobjectives_jax import (  # noqa: E402
     BoozerResidualJAX,
     IotasJAX,
@@ -145,7 +145,9 @@ class _WholeGroupArrayConversionBomb:
         self._slices = list(slices)
 
     def __array__(self, dtype=None, copy=None):
-        raise AssertionError("Whole grouped cotangent arrays should not be materialized")
+        raise AssertionError(
+            "Whole grouped cotangent arrays should not be materialized"
+        )
 
     def __getitem__(self, index):
         return self._slices[index]
@@ -504,9 +506,7 @@ class TestAdjointSolveConsistency:
         np.testing.assert_allclose(coils[0].calls[0][0], np.array([1.0, 2.0, 3.0]))
         np.testing.assert_allclose(coils[1].calls[0][0], np.array([4.0, 5.0, 6.0]))
         np.testing.assert_allclose(coils[0].calls[0][1], np.array([7.0, 8.0, 9.0]))
-        np.testing.assert_allclose(
-            coils[1].calls[0][1], np.array([10.0, 11.0, 12.0])
-        )
+        np.testing.assert_allclose(coils[1].calls[0][1], np.array([10.0, 11.0, 12.0]))
         np.testing.assert_allclose(coils[0].calls[0][2], np.array([1.5]))
         np.testing.assert_allclose(coils[1].calls[0][2], np.array([2.5]))
 
@@ -542,7 +542,9 @@ class TestAdjointSolveConsistency:
         )
 
         def _bomb(*args, **kwargs):
-            raise AssertionError("Whole-pytree VJP should not run on the streaming path")
+            raise AssertionError(
+                "Whole-pytree VJP should not run on the streaming path"
+            )
 
         monkeypatch.setitem(booz_jax.res, "vjp", _bomb)
 
@@ -778,9 +780,7 @@ class TestAdjointSolveConsistency:
             lm, booz_jax, res_exact["iota"], res_exact["G"]
         )
         streamed = list(
-            res_exact["vjp_groups"](
-                lm, booz_jax, res_exact["iota"], res_exact["G"]
-            )
+            res_exact["vjp_groups"](lm, booz_jax, res_exact["iota"], res_exact["G"])
         )
 
         _assert_streaming_group_vjp_matches_full(
@@ -1028,7 +1028,9 @@ class TestScriptBackendSelection:
 
         recorder = MagicMock()
         recorder.return_value = MagicMock(
-            run_code=MagicMock(return_value={"success": True, "G": 1.0, "iota": 0.3, "iter": 10}),
+            run_code=MagicMock(
+                return_value={"success": True, "G": 1.0, "iota": 0.3, "iter": 10}
+            ),
             surface=MagicMock(
                 is_self_intersecting=MagicMock(return_value=False),
                 volume=MagicMock(return_value=0.1),
@@ -1432,6 +1434,7 @@ class TestOnDeviceBackendIntegration:
         bs_jax.x = x0
         bs_jax.set_points(gamma_fixed)
 
+
 class TestEnsureSolvedCrashGuard:
     """Issue-1 regression: _ensure_solved must not crash with res=None."""
 
@@ -1556,3 +1559,733 @@ class TestEnsureSolvedCrashGuard:
             booz_jax.res = old_res
             booz_jax.need_to_run_code = old_dirty
             booz_jax.run_code = old_run_code
+
+
+# -----------------------------------------------------------------------
+# Test 14: B_vjp CPU↔JAX parity
+# -----------------------------------------------------------------------
+
+
+class TestBVjpCPUParityPerComponent:
+    """BiotSavartJAX.B_vjp(v) matches BiotSavart.B_vjp(v) per-component.
+
+    Both paths compute the VJP of B w.r.t. coil DOFs at shared evaluation
+    points and with a shared cotangent vector.  The resulting Derivative
+    vectors should agree to tight tolerance.
+    """
+
+    def test_b_vjp_parity(self, boozer_setup):
+        (coils, surf_cpu, surf_jax, bs_cpu, bs_jax, booz_cpu, booz_jax, vol_cpu) = (
+            boozer_setup
+        )
+
+        gamma_flat = surf_jax.gamma().reshape(-1, 3)
+        old_points_cpu = bs_cpu.get_points_cart_ref().copy()
+        old_points_jax = bs_jax._points_jax
+        bs_cpu.set_points(gamma_flat)
+        bs_jax.set_points(gamma_flat)
+
+        rng = np.random.RandomState(99)
+        v = rng.randn(*gamma_flat.shape)
+
+        deriv_cpu = bs_cpu.B_vjp(v)
+        deriv_jax = bs_jax.B_vjp(v)
+
+        grad_cpu = np.asarray(deriv_cpu(bs_cpu), dtype=float)
+        grad_jax = np.asarray(deriv_jax(bs_jax), dtype=float)
+
+        # Restore eval points on module-scoped fixture
+        bs_cpu.set_points(old_points_cpu)
+        bs_jax._points_jax = old_points_jax
+
+        print(
+            f"B_vjp parity: ||cpu||={np.linalg.norm(grad_cpu):.6e} "
+            f"||jax||={np.linalg.norm(grad_jax):.6e} "
+            f"||diff||={np.linalg.norm(grad_cpu - grad_jax):.6e}"
+        )
+        np.testing.assert_allclose(grad_jax, grad_cpu, rtol=1e-6, atol=1e-10)
+
+
+# -----------------------------------------------------------------------
+# Test 15: Exact solve CPU↔JAX parity
+# -----------------------------------------------------------------------
+
+
+class TestExactSolveCPUJAXParity:
+    """Exact Newton solutions match between CPU and JAX solvers.
+
+    Both solvers start from the same LS-warmed initial guess (shared surface
+    DOFs, iota, G) and run exact Newton to convergence.  The solution iota,
+    G, and residual norm should agree.
+    """
+
+    def test_exact_solve_parity(self):
+        ncoils, nfp = 2, 2
+        stellsym = True
+        base_curves = create_equally_spaced_curves(
+            ncoils,
+            nfp,
+            stellsym=stellsym,
+            R0=1.0,
+            R1=0.5,
+            order=3,
+        )
+        base_currents = [Current(1e5) for _ in range(ncoils)]
+        for c in base_currents:
+            c.fix_all()
+        coils = coils_via_symmetries(base_curves, base_currents, nfp, stellsym)
+
+        mpol, ntor = 2, 2
+        nphi, ntheta = 2 * ntor + 1, 2 * mpol + 1
+        qp_phi = np.linspace(0, 1.0 / nfp, nphi, endpoint=False)
+        qp_theta = np.linspace(0, 1.0, ntheta, endpoint=False)
+
+        # Build initial surface from RZ fit
+        from simsopt.geo import SurfaceRZFourier
+
+        s_rz = SurfaceRZFourier(
+            nfp=nfp,
+            stellsym=stellsym,
+            mpol=1,
+            ntor=0,
+            quadpoints_phi=qp_phi,
+            quadpoints_theta=qp_theta,
+        )
+        s_rz.set_rc(0, 0, 1.0)
+        s_rz.set_rc(1, 0, 0.15)
+        s_rz.set_zs(1, 0, 0.15)
+
+        # CPU surface + LS warm-start
+        surf_cpu = SurfaceXYZTensorFourier(
+            mpol=mpol,
+            ntor=ntor,
+            stellsym=stellsym,
+            nfp=nfp,
+            quadpoints_phi=qp_phi,
+            quadpoints_theta=qp_theta,
+        )
+        surf_cpu.least_squares_fit(s_rz.gamma())
+        bs_cpu = BiotSavart(coils)
+        vol_cpu = Volume(surf_cpu)
+        vol_target = vol_cpu.J()
+
+        mu0 = 4 * np.pi * 1e-7
+        G0 = mu0 * sum(abs(c.current.get_value()) for c in coils)
+        iota0 = 0.3
+
+        booz_ls_cpu = BoozerSurface(
+            bs_cpu,
+            surf_cpu,
+            vol_cpu,
+            vol_target,
+            constraint_weight=1.0,
+            options={
+                "verbose": False,
+                "bfgs_maxiter": 300,
+                "bfgs_tol": 1e-10,
+                "newton_maxiter": 20,
+                "newton_tol": 1e-11,
+            },
+        )
+        ls_res_cpu = booz_ls_cpu.run_code(iota0, G0)
+        assert ls_res_cpu["success"], "CPU LS warm-start did not converge"
+        iota_warm = ls_res_cpu["iota"]
+        G_warm = ls_res_cpu["G"]
+
+        surf_jax = SurfaceXYZTensorFourier(
+            mpol=mpol,
+            ntor=ntor,
+            stellsym=stellsym,
+            nfp=nfp,
+            quadpoints_phi=qp_phi,
+            quadpoints_theta=qp_theta,
+        )
+        surf_jax.set_dofs(surf_cpu.get_dofs())
+        bs_jax = BiotSavartJAX(coils)
+        vol_jax = Volume(surf_jax)
+
+        # Exact solves from the warmed state
+        booz_cpu_exact = BoozerSurface(
+            bs_cpu,
+            surf_cpu,
+            vol_cpu,
+            vol_target,
+            options={"verbose": False},
+        )
+        booz_cpu_exact.need_to_run_code = True
+        res_cpu = booz_cpu_exact.solve_residual_equation_exactly_newton(
+            iota=iota_warm,
+            G=G_warm,
+            tol=1e-10,
+            maxiter=40,
+        )
+        assert res_cpu["success"], "CPU exact Newton did not converge"
+
+        booz_jax_exact = BoozerSurfaceJAX(
+            bs_jax,
+            surf_jax,
+            vol_jax,
+            vol_target,
+            constraint_weight=None,
+            options={
+                "verbose": False,
+                "newton_maxiter": 40,
+                "newton_tol": 1e-10,
+            },
+        )
+        res_jax = booz_jax_exact.run_code(iota_warm, G_warm)
+        assert res_jax is not None, "JAX exact solver returned None"
+        assert res_jax["success"], "JAX exact Newton did not converge"
+
+        iota_diff = abs(res_cpu["iota"] - res_jax["iota"])
+        G_diff = abs(res_cpu["G"] - res_jax["G"])
+        resid_cpu = np.linalg.norm(res_cpu["residual"], ord=np.inf)
+        resid_jax = np.linalg.norm(res_jax["residual"], ord=np.inf)
+
+        print(
+            f"Exact parity:\n"
+            f"  CPU: iota={res_cpu['iota']:.10e} G={res_cpu['G']:.10e} "
+            f"||r||_inf={resid_cpu:.3e}\n"
+            f"  JAX: iota={res_jax['iota']:.10e} G={res_jax['G']:.10e} "
+            f"||r||_inf={resid_jax:.3e}\n"
+            f"  |Δiota|={iota_diff:.3e} |ΔG|={G_diff:.3e}"
+        )
+
+        assert resid_cpu < 1e-6, f"CPU residual too large: {resid_cpu:.3e}"
+        assert resid_jax < 1e-6, f"JAX residual too large: {resid_jax:.3e}"
+        assert iota_diff < 1e-5, f"Iota disagreement: {iota_diff:.3e}"
+        assert G_diff < 1e-5, f"G disagreement: {G_diff:.3e}"
+
+
+# -----------------------------------------------------------------------
+# Test 16: IotasJAX re-solve FD
+# -----------------------------------------------------------------------
+
+
+def _make_resolve_fd_setup():
+    """Build a Boozer fixture for re-solve FD attempts.
+
+    Uses a 7x7 grid (mpol=3, ntor=3) with more solver budget than the
+    default 5x5 fixture, but this is still NOT stable enough for
+    re-solve FD — the inner Boozer solve branch-switches under random
+    coil perturbation on both 5x5 and 7x7 toy grids. The tests using
+    this fixture are marked xfail. A production-scale fixture is needed.
+    """
+    ncoils, nfp = 3, 2
+    stellsym = True
+    base_curves = create_equally_spaced_curves(
+        ncoils,
+        nfp,
+        stellsym=stellsym,
+        R0=1.0,
+        R1=0.5,
+        order=3,
+    )
+    base_currents = [Current(1e5) for _ in range(ncoils)]
+    for c in base_currents:
+        c.fix_all()
+    coils = coils_via_symmetries(base_curves, base_currents, nfp, stellsym)
+
+    mpol, ntor = 3, 3
+    nphi = 2 * ntor + 1
+    ntheta = 2 * mpol + 1
+    surf = SurfaceXYZTensorFourier(
+        mpol=mpol,
+        ntor=ntor,
+        stellsym=stellsym,
+        nfp=nfp,
+        quadpoints_phi=np.linspace(0, 1.0 / nfp, nphi, endpoint=False),
+        quadpoints_theta=np.linspace(0, 1.0, ntheta, endpoint=False),
+    )
+
+    from simsopt.geo import SurfaceRZFourier
+
+    s_rz = SurfaceRZFourier(
+        nfp=nfp,
+        stellsym=stellsym,
+        mpol=1,
+        ntor=0,
+        quadpoints_phi=surf.quadpoints_phi,
+        quadpoints_theta=surf.quadpoints_theta,
+    )
+    s_rz.set_rc(0, 0, 1.0)
+    s_rz.set_rc(1, 0, 0.15)
+    s_rz.set_zs(1, 0, 0.15)
+    surf.least_squares_fit(s_rz.gamma())
+
+    bs_jax = BiotSavartJAX(coils)
+    vol = Volume(surf)
+    vol_target = vol.J()
+
+    mu0 = 4 * np.pi * 1e-7
+    G0 = mu0 * sum(abs(c.current.get_value()) for c in coils)
+    iota0 = 0.3
+
+    booz_jax = BoozerSurfaceJAX(
+        bs_jax,
+        surf,
+        vol,
+        vol_target,
+        constraint_weight=1.0,
+        options={
+            "verbose": False,
+            "bfgs_maxiter": 500,
+            "bfgs_tol": 1e-10,
+            "newton_maxiter": 20,
+            "newton_tol": 1e-10,
+        },
+    )
+    res0 = booz_jax.run_code(iota0, G0)
+    assert res0 is not None and res0.get("success", False), (
+        "Baseline resolve-FD solve did not converge"
+    )
+    return surf, bs_jax, booz_jax, res0
+
+
+class TestIotasJAXResolveFD:
+    """IotasJAX.dJ() matches central FD through the full re-solve path.
+
+    Perturbs coil DOFs, re-runs the inner Boozer solve, and checks that the
+    directional derivative predicted by IotasJAX.dJ() matches the finite-
+    difference approximation of (iota(coils+eps) - iota(coils-eps)) / (2*eps).
+    """
+
+    @pytest.mark.xfail(
+        reason=(
+            "Re-solve FD needs a stable fixture where the inner Boozer solve "
+            "does not branch-switch under coil perturbation. Current toy grids "
+            "(5x5 and 7x7) are inadequate — the solver lands in different local "
+            "minima for ±eps perturbations. Component-level adjoint tests in "
+            "TestAdjointSolveConsistency validate the gradient pipeline "
+            "independently. See CLAUDE.md M5 validation status."
+        ),
+        strict=False,
+    )
+    def test_iotas_resolve_fd(self):
+        surf_jax, bs_jax, booz_jax, res0 = _make_resolve_fd_setup()
+
+        iotas_jax = IotasJAX(booz_jax)
+        dj0 = np.asarray(iotas_jax.dJ(), dtype=float)
+
+        x0 = bs_jax.x.copy()
+        sdofs0 = surf_jax.get_dofs().copy()
+        rng = np.random.RandomState(77)
+
+        eps = 1e-5
+        n_dirs = 2
+        for i in range(n_dirs):
+            direction = rng.randn(len(x0))
+            direction /= np.linalg.norm(direction)
+            dd_adjoint = float(np.dot(dj0, direction))
+
+            def _iota_at(step):
+                bs_jax.x = x0 + step * direction
+                booz_jax.need_to_run_code = True
+                res = booz_jax.run_code(
+                    res0["iota"],
+                    res0["G"],
+                    sdofs=sdofs0,
+                )
+                assert res is not None and res.get("PLU") is not None, (
+                    f"Re-solve at step={step:.2e} did not produce PLU"
+                )
+                return res["iota"]
+
+            iota_p = _iota_at(eps)
+            iota_m = _iota_at(-eps)
+            dd_fd = (iota_p - iota_m) / (2 * eps)
+
+            abs_err = abs(dd_adjoint - dd_fd)
+            rel_err = abs_err / (abs(dd_fd) + 1e-30)
+            print(
+                f"IotasJAX FD[{i}]: adjoint={dd_adjoint:.6e} fd={dd_fd:.6e} "
+                f"rel={rel_err:.2e} abs={abs_err:.2e}"
+            )
+            assert rel_err < 0.1 or abs_err < 1e-6, (
+                f"IotasJAX FD[{i}]: rel={rel_err:.2e} abs={abs_err:.2e}"
+            )
+
+
+# -----------------------------------------------------------------------
+# Test 17: NonQuasiSymmetricRatioJAX re-solve FD
+# -----------------------------------------------------------------------
+
+
+class TestNonQSRatioJAXResolveFD:
+    """NonQuasiSymmetricRatioJAX.dJ() matches central FD through re-solve.
+
+    Same pattern as TestIotasJAXResolveFD but for the QS ratio wrapper.
+    """
+
+    @pytest.mark.xfail(
+        reason=(
+            "Re-solve FD needs a stable fixture — same branch-switching "
+            "limitation as TestIotasJAXResolveFD. See CLAUDE.md M5 status."
+        ),
+        strict=False,
+    )
+    def test_nqsr_resolve_fd(self):
+        surf_jax, bs_jax, booz_jax, res0 = _make_resolve_fd_setup()
+
+        sDIM = 6
+        nqsr_jax = NonQuasiSymmetricRatioJAX(booz_jax, bs_jax, sDIM=sDIM)
+        dj0 = np.asarray(nqsr_jax.dJ(), dtype=float)
+
+        x0 = bs_jax.x.copy()
+        sdofs0 = surf_jax.get_dofs().copy()
+        rng = np.random.RandomState(88)
+
+        eps = 1e-5
+        n_dirs = 2
+        for i in range(n_dirs):
+            direction = rng.randn(len(x0))
+            direction /= np.linalg.norm(direction)
+            dd_adjoint = float(np.dot(dj0, direction))
+
+            def _nqsr_at(step):
+                bs_jax.x = x0 + step * direction
+                booz_jax.need_to_run_code = True
+                res = booz_jax.run_code(
+                    res0["iota"],
+                    res0["G"],
+                    sdofs=sdofs0,
+                )
+                assert res is not None and res.get("PLU") is not None, (
+                    f"Re-solve at step={step:.2e} did not produce PLU"
+                )
+                return nqsr_jax.J()
+
+            j_p = _nqsr_at(eps)
+            j_m = _nqsr_at(-eps)
+            dd_fd = (j_p - j_m) / (2 * eps)
+
+            abs_err = abs(dd_adjoint - dd_fd)
+            rel_err = abs_err / (abs(dd_fd) + 1e-30)
+            print(
+                f"NQSR FD[{i}]: adjoint={dd_adjoint:.6e} fd={dd_fd:.6e} "
+                f"rel={rel_err:.2e} abs={abs_err:.2e}"
+            )
+            assert rel_err < 0.1 or abs_err < 1e-6, (
+                f"NQSR FD[{i}]: rel={rel_err:.2e} abs={abs_err:.2e}"
+            )
+
+
+# =======================================================================
+# Section 3 Red Tests: JAX-Traceable Single-Stage Objective
+# =======================================================================
+#
+# These tests define the contract for making the single-stage objective
+# fully JAX-traceable so the outer optimizer routes through
+# _minimize_lbfgs_private (lax.while_loop) instead of the host-callback
+# fallback (_minimize_lbfgs_explicit_value_and_grad).
+#
+# Dependency order:
+#   Test 3 (run_code_functional)
+#     -> Test 1 (pure objective value)
+#       -> Test 2 (jax.grad differentiable)
+#         -> Test 4 (jaxpr traces without error)
+#           -> Test 6 (routes through lax.while_loop)
+#             -> Test 7 (parity with explicit path)
+#   Test 5 (no run_dict/Optimizable dependency) is independent
+#
+# All tests are xfail(strict=True): they FAIL today (red), and will
+# PASS once the corresponding implementation exists (green). Removing
+# the xfail marker is the green step.
+# =======================================================================
+
+_S3 = "Section 3: JAX-traceable single-stage objective not yet implemented"
+
+
+class TestRunCodeFunctional:
+    """Test 3: BoozerSurfaceJAX.run_code_functional() — pure functional inner solve.
+
+    The current run_code() mutates self state (need_to_run_code, surface DOFs
+    via _set_surface_dofs), uses Python assertions, and branches on dirty flags.
+
+    run_code_functional() must:
+    - Accept explicit (coil_arrays, sdofs, iota, G) arguments
+    - Return the same result structure as run_code()
+    - NOT mutate any self.* state
+    - NOT use Python if/assert on runtime values
+    """
+
+    @pytest.mark.xfail(strict=True, reason=_S3)
+    def test_run_code_functional_exists_and_matches(self):
+        """run_code_functional returns same iota/G/success as run_code."""
+        (_, _, _, _, bs_jax, _, booz_jax, _, iota0, G0) = _make_boozer_setup(
+            constraint_weight=1.0,
+        )
+
+        # Baseline: stateful version
+        res_stateful = booz_jax.run_code(iota0, G0)
+        assert res_stateful is not None and res_stateful["success"]
+
+        # Functional version with the same inputs
+        coil_arrays = booz_jax._coil_arrays
+        sdofs = np.array(booz_jax.surface.get_dofs())
+
+        res_functional = booz_jax.run_code_functional(
+            coil_arrays,
+            sdofs,
+            iota0,
+            G0,
+        )
+
+        np.testing.assert_allclose(
+            res_functional["iota"],
+            res_stateful["iota"],
+            rtol=1e-10,
+        )
+        if res_stateful["G"] is not None:
+            np.testing.assert_allclose(
+                res_functional["G"],
+                res_stateful["G"],
+                rtol=1e-10,
+            )
+        assert res_functional["success"] == res_stateful["success"]
+        assert res_functional["PLU"] is not None
+
+    @pytest.mark.xfail(strict=True, reason=_S3)
+    def test_run_code_functional_does_not_mutate_self(self):
+        """run_code_functional must not change booz_surf internal state."""
+        (_, _, _, _, bs_jax, _, booz_jax, _, iota0, G0) = _make_boozer_setup(
+            constraint_weight=1.0,
+        )
+
+        # Establish baseline state
+        res0 = booz_jax.run_code(iota0, G0)
+        assert res0 is not None
+
+        sdofs_before = np.array(booz_jax.surface.get_dofs())
+        need_to_run_before = booz_jax.need_to_run_code
+        res_ref = booz_jax.res
+
+        # Call functional version with perturbed surface DOFs
+        rng = np.random.RandomState(42)
+        sdofs_perturbed = sdofs_before + 0.001 * rng.randn(len(sdofs_before))
+
+        booz_jax.run_code_functional(
+            booz_jax._coil_arrays,
+            sdofs_perturbed,
+            iota0,
+            G0,
+        )
+
+        # Self state must be unchanged
+        np.testing.assert_array_equal(
+            np.array(booz_jax.surface.get_dofs()),
+            sdofs_before,
+        )
+        assert booz_jax.need_to_run_code == need_to_run_before
+        assert booz_jax.res is res_ref
+
+
+class TestTraceableObjective:
+    """Tests 1, 2, 4-7: Pure JAX-traceable composed single-stage objective.
+
+    The current evaluate_candidate() requires JF.x mutation, run_dict state,
+    Python if/assert branching, and CPU-side surface/label evaluations.
+
+    A traceable objective must be a pure function:
+        f(coil_dofs: jax.Array) -> jax.Array  (scalar)
+    that JAX can trace, differentiate via jax.grad, and compile via JIT.
+    """
+
+    @staticmethod
+    def _make_traceable(bs_jax, booz_jax):
+        """Build the traceable objective and coil DOFs from a solved setup.
+
+        Returns (f, coil_dofs, jr_jax, iotas_jax, iota_target).
+        """
+        jr_jax = BoozerResidualJAX(booz_jax, bs_jax)
+        iotas_jax = IotasJAX(booz_jax)
+        iota_target = booz_jax.res["iota"]
+
+        from simsopt.geo.surfaceobjectives_jax import make_traceable_objective
+
+        f = make_traceable_objective(
+            booz_jax,
+            bs_jax,
+            jr_jax,
+            iotas_jax,
+            iota_target,
+        )
+        coil_dofs = jnp.array(bs_jax.x.copy())
+        return f, coil_dofs, jr_jax, iotas_jax, iota_target
+
+    @pytest.mark.xfail(strict=True, reason=_S3)
+    def test_pure_objective_matches_optimizable_value(self, boozer_setup):
+        """Test 1: Pure JAX objective returns same value as JF.J()."""
+        (_, _, _, _, bs_jax, _, booz_jax, _) = boozer_setup
+        f, coil_dofs, jr_jax, iotas_jax, iota_target = self._make_traceable(
+            bs_jax,
+            booz_jax,
+        )
+
+        JF_jax = jr_jax + QuadraticPenalty(iotas_jax, iota_target)
+        j_reference = JF_jax.J()
+
+        np.testing.assert_allclose(
+            float(f(coil_dofs)),
+            j_reference,
+            rtol=1e-10,
+            err_msg="Traceable objective value differs from JF.J()",
+        )
+
+    @pytest.mark.xfail(strict=True, reason=_S3)
+    def test_pure_objective_is_jax_grad_differentiable(self, boozer_setup):
+        """Test 2: jax.grad(f)(coil_dofs) is finite, nonzero, matches JF.dJ()."""
+        (_, _, _, _, bs_jax, _, booz_jax, _) = boozer_setup
+        f, coil_dofs, jr_jax, iotas_jax, iota_target = self._make_traceable(
+            bs_jax,
+            booz_jax,
+        )
+
+        grad = jax.grad(f)(coil_dofs)
+
+        assert jnp.all(jnp.isfinite(grad)), "jax.grad produced NaN/inf"
+        assert jnp.linalg.norm(grad) > 0, "jax.grad produced zero gradient"
+
+        # Compare against existing IFT gradient
+        JF_jax = jr_jax + QuadraticPenalty(iotas_jax, iota_target)
+        JF_jax.J()
+        dj_reference = np.asarray(JF_jax.dJ(), dtype=float)
+
+        np.testing.assert_allclose(
+            np.asarray(grad),
+            dj_reference,
+            rtol=1e-6,
+            atol=1e-10,
+            err_msg="jax.grad gradient differs from IFT reference",
+        )
+
+    @pytest.mark.xfail(strict=True, reason=_S3)
+    def test_pure_objective_traces_to_jaxpr(self, boozer_setup):
+        """Test 4: jax.make_jaxpr succeeds — no Python if on traced values."""
+        (_, _, _, _, bs_jax, _, booz_jax, _) = boozer_setup
+        f, coil_dofs, _, _, _ = self._make_traceable(bs_jax, booz_jax)
+
+        jaxpr = jax.make_jaxpr(f)(coil_dofs)
+        assert jaxpr is not None, "make_jaxpr returned None"
+
+    @pytest.mark.xfail(strict=True, reason=_S3)
+    def test_traceable_objective_has_no_optimizable_dependency(self):
+        """Test 5: Traced objective needs no run_dict, no JF.x mutation."""
+        (_, _, _, _, bs_jax, _, booz_jax, _, iota0, G0) = _make_boozer_setup(
+            constraint_weight=1.0,
+        )
+        res = booz_jax.run_code(iota0, G0)
+        assert res is not None and res["success"]
+
+        f, coil_dofs, _, _, _ = self._make_traceable(bs_jax, booz_jax)
+
+        # Evaluate at a DIFFERENT coil DOF vector without touching JF.x
+        rng = np.random.RandomState(99)
+        x_perturbed = coil_dofs + 1e-6 * jnp.array(rng.randn(len(coil_dofs)))
+
+        # Snapshot state before calling f
+        x_bs_before = bs_jax.x.copy()
+        sdofs_before = np.array(booz_jax.surface.get_dofs())
+        res_before = booz_jax.res
+
+        j0 = float(f(coil_dofs))
+        j1 = float(f(x_perturbed))
+
+        # Must produce finite, distinct values
+        assert np.isfinite(j0), "f(x0) not finite"
+        assert np.isfinite(j1), "f(x_perturbed) not finite"
+        assert j0 != j1, "f should be sensitive to coil DOF perturbation"
+
+        # Must not mutate Optimizable state
+        np.testing.assert_array_equal(
+            bs_jax.x, x_bs_before, err_msg="f mutated bs_jax.x"
+        )
+        np.testing.assert_array_equal(
+            np.array(booz_jax.surface.get_dofs()),
+            sdofs_before,
+            err_msg="f mutated booz_jax.surface DOFs",
+        )
+        assert booz_jax.res is res_before, "f replaced booz_jax.res"
+
+    @pytest.mark.xfail(strict=True, reason=_S3)
+    def test_traceable_routes_through_lax_while_loop(self, boozer_setup, monkeypatch):
+        """Test 6: lbfgs-ondevice uses _minimize_lbfgs_private, not fallback."""
+        (_, _, _, _, bs_jax, _, booz_jax, _) = boozer_setup
+        f, x0, _, _, _ = self._make_traceable(bs_jax, booz_jax)
+
+        # Reject if the explicit host-loop fallback is called --
+        # jax_minimize resolves this name via module.__dict__ at call time,
+        # so monkeypatch.setattr on the module object is sufficient.
+        import simsopt.geo.optimizer_jax as opt_mod
+
+        def _reject(*args, **kwargs):
+            raise AssertionError(
+                "Traceable objective should route through "
+                "_minimize_lbfgs_private, not the explicit fallback"
+            )
+
+        monkeypatch.setattr(opt_mod, "_minimize_lbfgs_explicit_value_and_grad", _reject)
+
+        result = jax_minimize(
+            f,
+            x0,
+            method="lbfgs-ondevice",
+            options={"maxiter": 2, "gtol": 1e-20},
+        )
+        assert np.isfinite(float(result.fun)), "Optimizer produced non-finite J"
+
+    @pytest.mark.xfail(strict=True, reason=_S3)
+    def test_traceable_matches_explicit_path(self, boozer_setup):
+        """Test 7: Traceable and explicit paths produce same J after 3 iters."""
+        (_, _, _, _, bs_jax, _, booz_jax, _) = boozer_setup
+        f, x0, _, _, _ = self._make_traceable(bs_jax, booz_jax)
+
+        # Snapshot Optimizable state so Path B starts from identical state
+        # even if Path A's optimizer leaks side effects (defensive guard --
+        # f is supposed to be pure, but we verify rather than assume).
+        x0_bs = bs_jax.x.copy()
+        sdofs_snap = np.array(booz_jax.surface.get_dofs())
+        res_snap = booz_jax.res
+
+        def _restore_state():
+            bs_jax.x = x0_bs
+            booz_jax.surface.set_dofs(sdofs_snap)
+            booz_jax.res = res_snap
+
+        try:
+            # Path A: traceable through _minimize_lbfgs_private
+            result_a = jax_minimize(
+                f,
+                x0,
+                method="lbfgs-ondevice",
+                options={"maxiter": 3, "gtol": 1e-20},
+            )
+
+            _restore_state()
+
+            # Path B: explicit value_and_grad through host loop
+            def fun_vg(x):
+                x_jax = jnp.array(x) if not isinstance(x, jnp.ndarray) else x
+                val = float(f(x_jax))
+                g = np.asarray(jax.grad(f)(x_jax), dtype=float)
+                return val, g
+
+            result_b = jax_minimize(
+                fun_vg,
+                np.asarray(x0),
+                method="lbfgs-ondevice",
+                value_and_grad=True,
+                options={"maxiter": 3, "gtol": 1e-20},
+            )
+
+            np.testing.assert_allclose(
+                float(result_a.fun),
+                float(result_b.fun),
+                rtol=1e-10,
+                err_msg=(
+                    f"Traceable J={float(result_a.fun):.6e} vs "
+                    f"explicit J={float(result_b.fun):.6e}"
+                ),
+            )
+        finally:
+            _restore_state()

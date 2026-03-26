@@ -39,6 +39,10 @@ def _patch_meta_path_finder():
         "simsopt.objectives.integral_bdotn_jax": os.path.join(
             jax_src, "objectives", "integral_bdotn_jax.py"
         ),
+        # Override base-install utilities.py to pick up forward_backward_jax
+        "simsopt.objectives.utilities": os.path.join(
+            jax_src, "objectives", "utilities.py"
+        ),
         "simsopt.geo.label_constraints_jax": os.path.join(
             jax_src, "geo", "label_constraints_jax.py"
         ),
