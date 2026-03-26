@@ -1301,6 +1301,27 @@ class TestExactPathSolve:
         G0 = mu0 * sum(abs(c.current.get_value()) for c in coils)
         iota0 = 0.3
 
+        # Warm-start: run LS solve first so the exact Newton has a good initial guess.
+        booz_ls = BoozerSurfaceJAX(
+            bs_jax,
+            surf,
+            vol,
+            vol_target,
+            constraint_weight=1.0,
+            options={
+                "verbose": False,
+                "bfgs_maxiter": 300,
+                "bfgs_tol": 1e-10,
+                "newton_maxiter": 20,
+                "newton_tol": 1e-11,
+            },
+        )
+        ls_res = booz_ls.run_code(iota0, G0)
+        assert ls_res["success"], "LS warm-start solve did not converge"
+        iota_warm = ls_res["iota"]
+        G_warm = ls_res["G"]
+        # Surface DOFs are already updated in-place by the LS solve.
+
         booz_exact = BoozerSurfaceJAX(
             bs_jax,
             surf,
@@ -1313,7 +1334,7 @@ class TestExactPathSolve:
                 "newton_tol": 1e-8,
             },
         )
-        res = booz_exact.run_code(iota0, G0)
+        res = booz_exact.run_code(iota_warm, G_warm)
 
         assert res is not None, "Exact solver returned None"
         assert res["type"] == "exact", f"Expected 'exact', got {res['type']}"

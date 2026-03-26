@@ -191,7 +191,7 @@ class TestBiotSavartJaxCppParity:
         from simsopt.field import coils_via_symmetries, BiotSavart
 
         curves, currents_objs, ma = get_ncsx_data()
-        coils = coils_via_symmetries(curves, currents_objs, 3)
+        coils = coils_via_symmetries(curves, currents_objs, 3, stellsym=True)
         bs = BiotSavart(coils)
 
         npoints = 50
