@@ -107,6 +107,7 @@ lint.ignore = ["E226","E265","E266","E4","E501","E701","E702","E712","E722","E73
 extend-exclude = ["thirdparty"]
 [tool.ruff.lint.per-file-ignores]
 "__init__.py" = ["E402","F401"]
+"src/simsopt/geo/optimizer_jax.py" = ["F821"]  # __getattr__ lazy loading
 "src/simsopt/field/magneticfieldclasses.py" = ["E743"]
 "src/simsopt/mhd/bootstrap.py" = ["F841"]
 "src/simsopt/mhd/vmec_diagnostics.py" = ["F841"]

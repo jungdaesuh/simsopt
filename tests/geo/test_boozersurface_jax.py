@@ -701,8 +701,10 @@ class TestOptimizerAdapter:
             gtol,
             line_search_maxiter,
             initial_state,
+            callback=None,
+            progress_callback=None,
         ):
-            del fun, x0, gtol, line_search_maxiter
+            del fun, x0, gtol, line_search_maxiter, callback, progress_callback
             captured["remaining_maxiter"] = maxiter
             captured["initial_k"] = int(initial_state.k)
             return _opt._BFGSResults(
@@ -760,8 +762,10 @@ class TestOptimizerAdapter:
             gtol,
             line_search_maxiter,
             initial_state,
+            callback=None,
+            progress_callback=None,
         ):
-            del fun, x0, maxiter, gtol, line_search_maxiter
+            del fun, x0, maxiter, gtol, line_search_maxiter, callback, progress_callback
             np.testing.assert_allclose(
                 np.asarray(initial_state.H_k),
                 np.eye(2),
@@ -818,8 +822,10 @@ class TestOptimizerAdapter:
             gtol,
             line_search_maxiter,
             initial_state,
+            callback=None,
+            progress_callback=None,
         ):
-            del fun, x0, maxiter, gtol, line_search_maxiter
+            del fun, x0, maxiter, gtol, line_search_maxiter, callback, progress_callback
             np.testing.assert_allclose(np.asarray(initial_state.H_k), np.eye(2))
             return _opt._BFGSResults(
                 converged=jnp.array(True),
@@ -920,8 +926,10 @@ class TestOptimizerAdapter:
             gtol,
             line_search_maxiter,
             initial_state,
+            callback=None,
+            progress_callback=None,
         ):
-            del fun, x0, gtol, line_search_maxiter
+            del fun, x0, gtol, line_search_maxiter, callback, progress_callback
             captured["continuation_maxiter"] = maxiter
             captured["initial_k"] = int(initial_state.k)
             return _opt._BFGSResults(

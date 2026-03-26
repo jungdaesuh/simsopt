@@ -2113,17 +2113,10 @@ class TestTraceableObjective:
 
         from simsopt.geo.surfaceobjectives_jax import make_traceable_objective
 
-        f = make_traceable_objective(
-            booz_jax,
-            bs_jax,
-            jr_jax,
-            iotas_jax,
-            iota_target,
-        )
+        f = make_traceable_objective(booz_jax, bs_jax, iota_target)
         coil_dofs = jnp.array(bs_jax.x.copy())
         return f, coil_dofs, jr_jax, iotas_jax, iota_target
 
-    @pytest.mark.xfail(strict=True, reason=_S3)
     def test_pure_objective_matches_optimizable_value(self, boozer_setup):
         """Test 1: Pure JAX objective returns same value as JF.J()."""
         (_, _, _, _, bs_jax, _, booz_jax, _) = boozer_setup
@@ -2178,7 +2171,6 @@ class TestTraceableObjective:
         jaxpr = jax.make_jaxpr(f)(coil_dofs)
         assert jaxpr is not None, "make_jaxpr returned None"
 
-    @pytest.mark.xfail(strict=True, reason=_S3)
     def test_traceable_objective_has_no_optimizable_dependency(self):
         """Test 5: Traced objective needs no run_dict, no JF.x mutation."""
         (_, _, _, _, bs_jax, _, booz_jax, _, iota0, G0) = _make_boozer_setup(
@@ -2197,6 +2189,7 @@ class TestTraceableObjective:
         x_bs_before = bs_jax.x.copy()
         sdofs_before = np.array(booz_jax.surface.get_dofs())
         res_before = booz_jax.res
+        need_to_run_before = booz_jax.need_to_run_code
 
         j0 = float(f(coil_dofs))
         j1 = float(f(x_perturbed))
@@ -2216,6 +2209,9 @@ class TestTraceableObjective:
             err_msg="f mutated booz_jax.surface DOFs",
         )
         assert booz_jax.res is res_before, "f replaced booz_jax.res"
+        assert booz_jax.need_to_run_code == need_to_run_before, (
+            "f dirtied booz_jax.need_to_run_code"
+        )
 
     @pytest.mark.xfail(strict=True, reason=_S3)
     def test_traceable_routes_through_lax_while_loop(self, boozer_setup, monkeypatch):

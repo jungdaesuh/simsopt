@@ -41,6 +41,7 @@ __all__ = [
     "BoozerResidualJAX",
     "IotasJAX",
     "NonQuasiSymmetricRatioJAX",
+    "make_traceable_objective",
 ]
 
 
@@ -610,3 +611,93 @@ class NonQuasiSymmetricRatioJAX(Optimizable):
         )
 
         self._dJ = dJ_by_dcoils - adj_derivative
+
+
+def _coil_dofs_to_arrays(bs_jax, coil_dofs):
+    """Convert flat coil DOF vector to grouped coil arrays.
+
+    Uses snapshot-restore: temporarily sets DOFs on ``bs_jax``,
+    extracts coil geometry via ``_extract_coil_data_grouped()``,
+    then restores the original DOFs.  The Optimizable dependency
+    chain fires ``recompute_bell`` on both set and restore, but the
+    caller's visible state (``bs_jax.x``) is unchanged.
+    """
+    x_saved = bs_jax.x.copy()
+    try:
+        bs_jax.x = np.asarray(coil_dofs)
+        return [(g, gd, c) for g, gd, c, _ in bs_jax._extract_coil_data_grouped()]
+    finally:
+        bs_jax.x = x_saved
+
+
+def make_traceable_objective(booz_jax, bs_jax, iota_target):
+    """Build a pure function ``f(coil_dofs) -> scalar`` for single-stage optimization.
+
+    The returned closure:
+
+    * **Forward**: evaluates the Boozer-residual + label-constraint
+      penalty + iota quadratic penalty at the frozen solved-surface
+      geometry with the B field from the given coil DOFs.
+    * **No mutation**: coil DOFs and ``need_to_run_code`` are
+      snapshot/restored so the caller sees no state change on
+      ``bs_jax`` or ``booz_jax``.
+    * **Frozen surface**: the surface geometry and label are captured
+      from the CPU objects at construction time and reused in every
+      call.  This is exact when coil DOFs are unchanged and
+      first-order correct for small perturbations (the surface
+      adjustment is second-order in coil DOF change).
+    * **Not yet JIT/grad-traceable**: coil-array extraction uses the
+      CPU snapshot-restore pattern.  Making the closure fully
+      traceable (with inner re-solve via ``custom_vjp``) is deferred
+      to Section 3 items 2-7.
+
+    Args:
+        booz_jax: solved :class:`BoozerSurfaceJAX`.
+        bs_jax:   :class:`BiotSavartJAX` providing coil geometry.
+        iota_target: scalar target iota for the quadratic penalty.
+
+    Returns:
+        ``f(coil_dofs) -> float`` — composed single-stage objective.
+    """
+    _ensure_solved(booz_jax)
+
+    iota0 = float(booz_jax.res["iota"])
+    effective_G = _resolved_boozer_G(booz_jax)
+    weight_inv_modB = booz_jax.res.get("weight_inv_modB", True)
+    cw = booz_jax.constraint_weight if booz_jax.constraint_weight is not None else 1.0
+
+    # Freeze CPU surface geometry (matches BoozerResidualJAX.compute() path)
+    gamma0 = jnp.asarray(booz_jax.surface.gamma())
+    xphi0 = jnp.asarray(booz_jax.surface.gammadash1())
+    xtheta0 = jnp.asarray(booz_jax.surface.gammadash2())
+    nphi, ntheta = gamma0.shape[:2]
+    num_points = 3 * nphi * ntheta
+
+    label_val0 = float(booz_jax.label.J())
+    J_label0 = 0.5 * cw * (label_val0 - booz_jax.targetlabel) ** 2
+    j_iota0 = 0.5 * (iota0 - float(iota_target)) ** 2
+
+    def f(coil_dofs):
+        # Snapshot dirty flags — _coil_dofs_to_arrays triggers recompute_bell
+        # via bs_jax.x assignment, which propagates to booz_jax even though
+        # bs_jax.x values are restored.
+        need_to_run_saved = booz_jax.need_to_run_code
+        try:
+            coil_arrays = _coil_dofs_to_arrays(bs_jax, coil_dofs)
+            B = grouped_biot_savart_B(gamma0.reshape(-1, 3), coil_arrays).reshape(
+                nphi, ntheta, 3
+            )
+            r_flat = boozer_residual_vector(
+                effective_G,
+                iota0,
+                B,
+                xphi0,
+                xtheta0,
+                weight_inv_modB,
+            )
+            J_boozer = 0.5 * float(jnp.sum(r_flat**2)) / num_points
+            return J_boozer + J_label0 + j_iota0
+        finally:
+            booz_jax.need_to_run_code = need_to_run_saved
+
+    return f
