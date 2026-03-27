@@ -2404,6 +2404,31 @@ class TestStage2OptimizerContract:
             rtol=1e-9,
             atol=_TARGET_OBJECTIVE_GRAD_ATOL,
         )
+        assert target_bundle.raw_terms is not None
+        raw_terms = np.asarray(target_bundle.raw_terms(dofs), dtype=float)
+        raw_term_grads = np.asarray(
+            jax.jacrev(target_bundle.raw_terms)(dofs), dtype=float
+        )
+        weighted_value = sum(
+            term.weight * raw_terms[index]
+            for index, term in enumerate(target_bundle.terms)
+        )
+        weighted_grad = sum(
+            term.weight * raw_term_grads[index]
+            for index, term in enumerate(target_bundle.terms)
+        )
+        np.testing.assert_allclose(
+            float(weighted_value),
+            float(value_target),
+            rtol=1e-12,
+            atol=1e-18,
+        )
+        np.testing.assert_allclose(
+            np.asarray(weighted_grad, dtype=float),
+            np.asarray(grad_target, dtype=float),
+            rtol=1e-9,
+            atol=_TARGET_OBJECTIVE_GRAD_ATOL,
+        )
 
     def test_target_scalar_objective_gradient_matches_centered_fd(self):
         objective, target_bundle = _build_stage2_target_objective_contract_case()
@@ -2504,7 +2529,20 @@ class TestStage2OptimizerContract:
         fake_root = types.SimpleNamespace(x=dofs.copy())
         fake_flux = _FakeStage2SquaredFluxTerm(0.5, [0.75, -0.25])
         target_objective_bundle = types.SimpleNamespace(
-            objective=lambda x: jax.numpy.sum(jax.numpy.square(x + 1.0))
+            objective=lambda x: (
+                jax.numpy.sum(jax.numpy.square(x + 1.0)) + 0.5 * (x[0] + 2.0 * x[1])
+            ),
+            raw_terms=lambda x: jax.numpy.asarray(
+                (
+                    jax.numpy.sum(jax.numpy.square(x + 1.0)),
+                    x[0] + 2.0 * x[1],
+                ),
+                dtype=jax.numpy.float64,
+            ),
+            terms=(
+                types.SimpleNamespace(name="squared_flux", weight=1.0),
+                types.SimpleNamespace(name="curvature_barrier", weight=0.5),
+            ),
         )
 
         payload = stage2_script.build_stage2_probe_payload(
@@ -2535,6 +2573,13 @@ class TestStage2OptimizerContract:
         expected_value, expected_grad = jax.value_and_grad(
             target_objective_bundle.objective
         )(dofs.astype(np.float64))
+        expected_terms = np.asarray(
+            target_objective_bundle.raw_terms(dofs), dtype=float
+        )
+        expected_term_grads = np.asarray(
+            jax.jacrev(target_objective_bundle.raw_terms)(dofs.astype(np.float64)),
+            dtype=float,
+        )
 
         assert payload["composite"]["objective_source"] == expected_source
         assert payload["composite"]["mean_abs_relBfinal_norm"] == pytest.approx(
@@ -2548,6 +2593,26 @@ class TestStage2OptimizerContract:
                 rtol=0.0,
                 atol=0.0,
             )
+            assert payload["composite"]["terms"] == {
+                "squared_flux": {
+                    "weight": pytest.approx(1.0),
+                    "raw_J": pytest.approx(expected_terms[0]),
+                    "J": pytest.approx(expected_terms[0]),
+                    "dJ": pytest.approx(expected_term_grads[0].tolist()),
+                    "grad_norm": pytest.approx(
+                        float(np.linalg.norm(expected_term_grads[0]))
+                    ),
+                },
+                "curvature_barrier": {
+                    "weight": pytest.approx(0.5),
+                    "raw_J": pytest.approx(expected_terms[1]),
+                    "J": pytest.approx(0.5 * expected_terms[1]),
+                    "dJ": pytest.approx((0.5 * expected_term_grads[1]).tolist()),
+                    "grad_norm": pytest.approx(
+                        float(np.linalg.norm(0.5 * expected_term_grads[1]))
+                    ),
+                },
+            }
         else:
             assert payload["composite"]["J"] == pytest.approx(explicit_snapshot["J"])
             np.testing.assert_allclose(
@@ -2556,6 +2621,7 @@ class TestStage2OptimizerContract:
                 rtol=0.0,
                 atol=0.0,
             )
+            assert "terms" not in payload["composite"]
 
     @pytest.mark.parametrize(
         ("backend", "optimizer_backend", "expected_error"),

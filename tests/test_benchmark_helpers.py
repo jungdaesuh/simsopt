@@ -990,6 +990,21 @@ def _stage2_probe_payload_case(**overrides):
     return payload
 
 
+def _stage2_gradient_term_case(
+    *,
+    objective_rel_diff=1e-12,
+    gradient_allclose=True,
+    gradient_l2_rel_diff=1e-12,
+    gradient_max_abs_diff=1e-12,
+):
+    return {
+        "objective_rel_diff": objective_rel_diff,
+        "gradient_allclose": gradient_allclose,
+        "gradient_l2_rel_diff": gradient_l2_rel_diff,
+        "gradient_max_abs_diff": gradient_max_abs_diff,
+    }
+
+
 def _stage2_e2e_results_case(**overrides):
     results = {
         "FINAL_OBJECTIVE": 1.0,
@@ -1083,12 +1098,22 @@ def test_stage2_e2e_comparison_rejects_matched_state_gradient_mismatch():
                 "field_error_rel_diff": 1e-12,
                 "gradient_allclose": False,
                 "gradient_l2_rel_diff": 1e-3,
+                "worst_gradient_term": {
+                    "name": "curvature_barrier",
+                    **_stage2_gradient_term_case(
+                        gradient_allclose=False,
+                        gradient_l2_rel_diff=1e-3,
+                        gradient_max_abs_diff=2e-4,
+                    ),
+                },
             }
         )
     )
 
     assert any(
-        "Matched JAX-final gradient parity failed" in failure for failure in failures
+        "Matched JAX-final gradient parity failed" in failure
+        and "curvature_barrier" in failure
+        for failure in failures
     )
 
 
@@ -1122,12 +1147,22 @@ def test_stage2_e2e_comparison_rejects_ondevice_matched_state_gradient_mismatch(
                 "field_error_rel_diff": 1e-12,
                 "gradient_allclose": False,
                 "gradient_l2_rel_diff": 1e-3,
+                "worst_gradient_term": {
+                    "name": "curvature_barrier",
+                    **_stage2_gradient_term_case(
+                        gradient_allclose=False,
+                        gradient_l2_rel_diff=1e-3,
+                        gradient_max_abs_diff=2e-4,
+                    ),
+                },
             },
         )
     )
 
     assert any(
-        "Matched JAX-final gradient parity failed" in failure for failure in failures
+        "Matched JAX-final gradient parity failed" in failure
+        and "curvature_barrier" in failure
+        for failure in failures
     )
 
 

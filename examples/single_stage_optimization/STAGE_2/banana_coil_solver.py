@@ -776,25 +776,32 @@ def compute_stage2_term_gradient(term, root_objective):
     return np.asarray(term.dJ(partials=True)(root_objective), dtype=float)
 
 
-def compute_stage2_length_penalty_gradient(
-    curve_length,
-    length_target,
-    Jls,
-    root_objective,
-):
-    active_diff = max(curve_length - float(length_target), 0.0)
-    return active_diff * compute_stage2_term_gradient(Jls, root_objective)
+def _stage2_term_payload_entry(weight, raw_value, raw_grad):
+    raw_grad_array = np.asarray(raw_grad, dtype=float)
+    weighted_grad = float(weight) * raw_grad_array
+    return {
+        "weight": float(weight),
+        "raw_J": float(raw_value),
+        "J": float(weight) * float(raw_value),
+        "dJ": weighted_grad,
+        "grad_norm": float(np.linalg.norm(weighted_grad)),
+    }
 
 
-def evaluate_stage2_objective(
-    context,
-    *,
-    diagnostics=None,
-    recompute_diagnostics=True,
-):
-    """Return composite objective diagnostics using the currently loaded DOFs."""
-    # Ask for the squared-flux gradient first so both native and fallback
-    # JAX lanes can reuse the cached value on the subsequent J() call.
+def _serialize_stage2_term_payload(entries):
+    return {
+        name: {
+            "weight": float(entry["weight"]),
+            "raw_J": float(entry["raw_J"]),
+            "J": float(entry["J"]),
+            "dJ": np.asarray(entry["dJ"], dtype=float).tolist(),
+            "grad_norm": float(entry["grad_norm"]),
+        }
+        for name, entry in entries.items()
+    }
+
+
+def _build_stage2_explicit_term_payload(context):
     squared_flux_grad = compute_stage2_term_gradient(context.Jf, context.JF)
     squared_flux = float(context.Jf.J())
     curve_length = float(context.Jls.J())
@@ -813,18 +820,70 @@ def evaluate_stage2_objective(
     curvature_penalty = float(context.Jc.J())
     curvature = compute_stage2_max_curvature_value(context.Jc)
     curvature_grad = compute_stage2_term_gradient(context.Jc, context.JF)
-    grad = (
-        context.squared_flux_weight * squared_flux_grad
-        + context.length_weight * length_grad
-        + context.cc_weight * coil_distance_grad
-        + context.curvature_weight * curvature_grad
-    )
-    J = (
-        context.squared_flux_weight * squared_flux
-        + context.length_weight * length_penalty
-        + context.cc_weight * coil_distance_penalty
-        + context.curvature_weight * curvature_penalty
-    )
+    entries = {
+        "squared_flux": _stage2_term_payload_entry(
+            context.squared_flux_weight,
+            squared_flux,
+            squared_flux_grad,
+        ),
+        "length_penalty": _stage2_term_payload_entry(
+            context.length_weight,
+            length_penalty,
+            length_grad,
+        ),
+        "coil_distance_barrier": _stage2_term_payload_entry(
+            context.cc_weight,
+            coil_distance_penalty,
+            coil_distance_grad,
+        ),
+        "curvature_barrier": _stage2_term_payload_entry(
+            context.curvature_weight,
+            curvature_penalty,
+            curvature_grad,
+        ),
+    }
+    return entries, curve_length, curvature
+
+
+def _build_stage2_target_term_payload(target_objective_bundle, dofs):
+    raw_terms = getattr(target_objective_bundle, "raw_terms", None)
+    terms = getattr(target_objective_bundle, "terms", ())
+    if raw_terms is None or not terms:
+        return None
+    dofs64 = np.asarray(dofs, dtype=np.float64)
+    raw_values = np.asarray(raw_terms(dofs64), dtype=float)
+    raw_gradients = np.asarray(jax.jacrev(raw_terms)(dofs64), dtype=float)
+    entries = {}
+    for index, term in enumerate(terms):
+        entries[term.name] = _stage2_term_payload_entry(
+            term.weight,
+            raw_values[index],
+            raw_gradients[index],
+        )
+    return _serialize_stage2_term_payload(entries)
+
+
+def compute_stage2_length_penalty_gradient(
+    curve_length,
+    length_target,
+    Jls,
+    root_objective,
+):
+    active_diff = max(curve_length - float(length_target), 0.0)
+    return active_diff * compute_stage2_term_gradient(Jls, root_objective)
+
+
+def evaluate_stage2_objective(
+    context,
+    *,
+    diagnostics=None,
+    recompute_diagnostics=True,
+):
+    """Return composite objective diagnostics using the currently loaded DOFs."""
+    term_entries, curve_length, curvature = _build_stage2_explicit_term_payload(context)
+    grad = sum(np.asarray(entry["dJ"], dtype=float) for entry in term_entries.values())
+    J = sum(float(entry["J"]) for entry in term_entries.values())
+    squared_flux = float(term_entries["squared_flux"]["raw_J"])
     if recompute_diagnostics or diagnostics is None:
         diagnostics = compute_stage2_field_diagnostics(
             context.new_bs,
@@ -1041,6 +1100,7 @@ def _build_stage2_probe_composite_payload(
     objective_source = "explicit-composite"
     composite_value = float(explicit_snapshot["J"])
     composite_grad = np.asarray(explicit_grad, dtype=float)
+    composite_terms = None
     if target_objective_bundle is not None:
         composite_value, composite_grad = jax.value_and_grad(
             target_objective_bundle.objective
@@ -1048,6 +1108,10 @@ def _build_stage2_probe_composite_payload(
         composite_value = float(composite_value)
         composite_grad = np.asarray(composite_grad, dtype=float)
         objective_source = "target-objective"
+        composite_terms = _build_stage2_target_term_payload(
+            target_objective_bundle,
+            np.asarray(context.JF.x, dtype=np.float64),
+        )
     return (
         {
             **explicit_snapshot,
@@ -1056,6 +1120,7 @@ def _build_stage2_probe_composite_payload(
             "objective_source": objective_source,
         },
         composite_grad,
+        composite_terms,
     )
 
 
@@ -1100,9 +1165,11 @@ def build_stage2_probe_payload(
         curvature_weight,
         bs_jax=bs_jax,
     )
-    composite_snapshot, composite_grad = _build_stage2_probe_composite_payload(
-        context,
-        target_objective_bundle=target_objective_bundle,
+    composite_snapshot, composite_grad, composite_terms = (
+        _build_stage2_probe_composite_payload(
+            context,
+            target_objective_bundle=target_objective_bundle,
+        )
     )
     flux_grad = np.asarray(Jf.dJ(), dtype=float)
     return {
@@ -1121,6 +1188,7 @@ def build_stage2_probe_payload(
         "composite": {
             **composite_snapshot,
             "dJ": composite_grad.tolist(),
+            **({"terms": composite_terms} if composite_terms is not None else {}),
         },
     }
 

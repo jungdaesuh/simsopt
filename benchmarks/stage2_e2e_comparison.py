@@ -393,6 +393,48 @@ def _max_geometry_deviation(
     return max_pointwise_geometry_drift(jax_gamma, cpu_gamma)
 
 
+def _build_gradient_term_metrics(
+    cpu_terms: dict[str, Any],
+    jax_terms: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    metrics: dict[str, Any] = {}
+    worst_term: dict[str, Any] | None = None
+    for name in cpu_terms:
+        if name not in jax_terms:
+            continue
+        cpu_grad = np.asarray(cpu_terms[name]["dJ"], dtype=float)
+        jax_grad = np.asarray(jax_terms[name]["dJ"], dtype=float)
+        gradient_l2_rel_diff = float(
+            np.linalg.norm(jax_grad - cpu_grad) / (np.linalg.norm(cpu_grad) + 1e-30)
+        )
+        gradient_max_abs_diff = float(np.max(np.abs(jax_grad - cpu_grad)))
+        term_metric = {
+            "objective_rel_diff": relative_error(
+                float(jax_terms[name]["J"]),
+                float(cpu_terms[name]["J"]),
+            ),
+            "gradient_allclose": bool(
+                np.allclose(
+                    jax_grad,
+                    cpu_grad,
+                    rtol=MATCHED_GRADIENT_RTOL,
+                    atol=STAGE2_MATCHED_GRADIENT_ATOL,
+                )
+            ),
+            "gradient_l2_rel_diff": gradient_l2_rel_diff,
+            "gradient_max_abs_diff": gradient_max_abs_diff,
+        }
+        metrics[name] = term_metric
+        if worst_term is None or gradient_l2_rel_diff > float(
+            worst_term["gradient_l2_rel_diff"]
+        ):
+            worst_term = {
+                "name": name,
+                **term_metric,
+            }
+    return metrics, worst_term
+
+
 def _build_matched_state_metrics(
     cpu_probe: dict[str, Any],
     jax_probe: dict[str, Any],
@@ -409,6 +451,15 @@ def _build_matched_state_metrics(
             atol=STAGE2_MATCHED_GRADIENT_ATOL,
         )
     )
+    gradient_terms: dict[str, Any] = {}
+    worst_gradient_term = None
+    cpu_terms = cpu_composite.get("terms")
+    jax_terms = jax_composite.get("terms")
+    if isinstance(cpu_terms, dict) and isinstance(jax_terms, dict):
+        gradient_terms, worst_gradient_term = _build_gradient_term_metrics(
+            cpu_terms,
+            jax_terms,
+        )
     return {
         "objective_rel_diff": relative_error(
             float(jax_composite["J"]),
@@ -422,7 +473,25 @@ def _build_matched_state_metrics(
         "gradient_l2_rel_diff": float(
             np.linalg.norm(jax_grad - cpu_grad) / (np.linalg.norm(cpu_grad) + 1e-30)
         ),
+        "gradient_terms": gradient_terms,
+        "worst_gradient_term": worst_gradient_term,
     }
+
+
+def _matched_gradient_failure_message(
+    state: dict[str, Any],
+    *,
+    state_label: str,
+) -> str:
+    worst_term = state.get("worst_gradient_term")
+    if isinstance(worst_term, dict):
+        return (
+            f"Matched {state_label}-final gradient parity failed allclose gate "
+            f"(worst term: {str(worst_term['name'])}, "
+            f"rel_diff={float(worst_term['gradient_l2_rel_diff']):.2e}, "
+            f"max_abs_diff={float(worst_term['gradient_max_abs_diff']):.2e})."
+        )
+    return f"Matched {state_label}-final gradient parity failed allclose gate."
 
 
 def _append_geometry_gate_failure(
@@ -469,9 +538,19 @@ def _append_matched_state_failures(
             f"{float(jax_state['field_error_rel_diff']):.2e}"
         )
     if not bool(cpu_state["gradient_allclose"]):
-        failures.append("Matched CPU-final gradient parity failed allclose gate.")
+        failures.append(
+            _matched_gradient_failure_message(
+                cpu_state,
+                state_label="CPU",
+            )
+        )
     if not bool(jax_state["gradient_allclose"]):
-        failures.append("Matched JAX-final gradient parity failed allclose gate.")
+        failures.append(
+            _matched_gradient_failure_message(
+                jax_state,
+                state_label="JAX",
+            )
+        )
 
 
 def _append_stage2_ondevice_failures(
@@ -728,6 +807,15 @@ def main() -> None:
         f"field error rel_diff={comparison['field_error_rel_diff']:.2e}, "
         f"geometry rel_diff={comparison['max_geometry_pointwise_rel']:.2e}"
     )
+    matched_jax_worst_term = comparison["matched_jax_state"].get("worst_gradient_term")
+    if isinstance(matched_jax_worst_term, dict):
+        print(
+            "Matched JAX-final worst gradient term: "
+            f"{matched_jax_worst_term['name']} "
+            f"(rel_diff={float(matched_jax_worst_term['gradient_l2_rel_diff']):.2e}, "
+            "max_abs_diff="
+            f"{float(matched_jax_worst_term['gradient_max_abs_diff']):.2e})"
+        )
     if "jax_optimizer_warm_run_s" in payload["timings"]:
         print(
             "JAX ondevice optimizer timings: "

@@ -17,12 +17,25 @@ from ..geo.curveobjectives import (
 )
 from .integral_bdotn_jax import integral_BdotN
 
-__all__ = ["Stage2TargetObjectiveBundle", "build_stage2_target_objective"]
+__all__ = [
+    "Stage2TargetObjectiveBundle",
+    "Stage2TargetObjectiveTerm",
+    "build_stage2_target_objective",
+]
+
+Stage2ObjectiveFn = Callable[[jnp.ndarray], jnp.ndarray]
+
+
+class Stage2TargetObjectiveTerm(NamedTuple):
+    name: str
+    weight: float
 
 
 class Stage2TargetObjectiveBundle(NamedTuple):
-    objective: Callable[[jnp.ndarray], jnp.ndarray]
+    objective: Stage2ObjectiveFn
     expected_dof_count: int
+    terms: tuple[Stage2TargetObjectiveTerm, ...] = ()
+    raw_terms: Stage2ObjectiveFn | None = None
 
 
 def _as_jax_float64_array(values, *, contiguous=False):
@@ -154,7 +167,7 @@ def build_stage2_target_objective(
         )
     banana_descriptors = tuple(banana_descriptors)
 
-    def objective(dofs):
+    def _raw_terms(dofs):
         dofs = jnp.asarray(dofs, dtype=jnp.float64)
         current_dof = dofs[0]
         curve_dofs = dofs[1 : 1 + curve_dof_count]
@@ -163,11 +176,13 @@ def build_stage2_target_objective(
         base_gammadash = banana_curve.gammadash_jax(curve_dofs, surf_dofs)
         base_gammadashdash = banana_curve.gammadashdash_jax(curve_dofs, surf_dofs)
 
-        dynamic_gammas, dynamic_gammadashs, dynamic_current_array = _build_dynamic_curve_data(
-            base_gamma,
-            base_gammadash,
-            banana_descriptors,
-            current_dof,
+        dynamic_gammas, dynamic_gammadashs, dynamic_current_array = (
+            _build_dynamic_curve_data(
+                base_gamma,
+                base_gammadash,
+                banana_descriptors,
+                current_dof,
+            )
         )
         dynamic_pairs = tuple(zip(dynamic_gammas, dynamic_gammadashs))
         dynamic_field = biot_savart_B(
@@ -200,14 +215,32 @@ def build_stage2_target_objective(
             fixed_curve_penalty,
         )
 
-        return (
-            squared_flux_weight * flux
-            + length_weight * length_penalty
-            + cc_weight * coil_distance_penalty
-            + curvature_weight * curvature_penalty
+        return jnp.stack(
+            (
+                flux,
+                length_penalty,
+                coil_distance_penalty,
+                curvature_penalty,
+            )
         )
+
+    terms = (
+        Stage2TargetObjectiveTerm("squared_flux", float(squared_flux_weight)),
+        Stage2TargetObjectiveTerm("length_penalty", float(length_weight)),
+        Stage2TargetObjectiveTerm("coil_distance_barrier", float(cc_weight)),
+        Stage2TargetObjectiveTerm("curvature_barrier", float(curvature_weight)),
+    )
+
+    def objective(dofs):
+        raw_terms = _raw_terms(dofs)
+        total = jnp.asarray(0.0, dtype=jnp.float64)
+        for index, term in enumerate(terms):
+            total = total + term.weight * raw_terms[index]
+        return total
 
     return Stage2TargetObjectiveBundle(
         objective=objective,
         expected_dof_count=curve_dof_count + 1,
+        terms=terms,
+        raw_terms=_raw_terms,
     )
