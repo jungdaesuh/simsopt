@@ -297,7 +297,6 @@ def initializeCoils(
     surf,
     surf_coils,
     tf_coils,
-    backend,
     num_quadpoints,
     order,
     phi_center,
@@ -307,8 +306,11 @@ def initializeCoils(
     OUT_DIR,
 ):
     # Initialize banana coils on the coil winding surface
-    curve_cls = CurveCWSFourier if backend == "jax" else CurveCWSFourierCPP
-    banana_curve = curve_cls(
+    # Keep the production banana-coil class shared across CPU and JAX lanes.
+    # CurveCWSFourierCPP now exposes the JAX geometry/VJP surface needed by the
+    # target lane, and reusing it here avoids backend-specific curve-derivative
+    # drift in barrier-active Stage 2 states.
+    banana_curve = CurveCWSFourierCPP(
         np.linspace(0, 1, num_quadpoints, endpoint=False), order=order, surf=surf_coils
     )
     banana_curve.set("phic(0)", phi_center)
@@ -338,7 +340,7 @@ def initializeCoils(
     return bs, curves, banana_curve, banana_coils
 
 
-# Helper: evaluate gamma for CurveCWSFourier
+# Helper: evaluate gamma for the Stage 2 banana-curve winding-surface class.
 def gamma_at_t(curve, t):
     out = np.zeros((len(t), 3))
     curve.gamma_impl(out, np.asarray(t, dtype=np.float64))
@@ -483,10 +485,10 @@ def is_self_intersecting(
     curve, npts=2000, tol_factor=0.1, neighbor_skip=3
 ):  # maybe different skip works better
     """
-    3D self-intersection checker for CurveCWSFourier objects.
+    3D self-intersection checker for Stage 2 banana-curve objects.
 
     Parameters:
-        curve: CurveCWSFourier object
+        curve: winding-surface banana curve
         npts: number of discretization points (higher is better)
         tol_factor: tolerance as fraction of segment length (default 5%)
         neighbor_skip: number of neighboring segments to skip (default 3)
@@ -1328,7 +1330,6 @@ if __name__ == "__main__":
         new_surf,
         surf_coils,
         tf_coils,
-        args.backend,
         num_quadpoints,
         order,
         phi_center,

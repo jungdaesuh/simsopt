@@ -1518,16 +1518,8 @@ class TestStage2BananaBoundary:
         np.testing.assert_allclose(objective_jax, objective_cpp, rtol=1e-12, atol=1e-18)
         np.testing.assert_allclose(grad_jax, grad_cpp, rtol=1e-9, atol=1e-15)
 
-    @pytest.mark.parametrize(
-        ("backend", "expected_curve_class"),
-        [
-            ("cpu", "CurveCWSFourierCPP"),
-            ("jax", "CurveCWSFourier"),
-        ],
-    )
-    def test_stage2_probe_reports_backend_specific_banana_curve(
-        self, backend, expected_curve_class
-    ):
+    @pytest.mark.parametrize("backend", ["cpu", "jax"])
+    def test_stage2_probe_reports_shared_production_banana_curve(self, backend):
         stage2_script = (
             REPO_ROOT
             / "examples"
@@ -1559,7 +1551,7 @@ class TestStage2BananaBoundary:
             payload = json.loads(export_json.read_text(encoding="utf-8"))
 
         assert result.returncode == 0
-        assert payload["banana_curve_class"] == expected_curve_class
+        assert payload["banana_curve_class"] == "CurveCWSFourierCPP"
 
     def test_stage2_probe_override_dofs_evaluates_requested_state(self):
         with tempfile.TemporaryDirectory(prefix="stage2-override-dofs-") as temp_dir:
