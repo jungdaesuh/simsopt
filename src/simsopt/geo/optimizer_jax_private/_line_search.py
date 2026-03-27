@@ -1,23 +1,20 @@
 """Strong Wolfe line search for on-device BFGS / L-BFGS.
 
-Mirrors the JAX 0.9.2 ``jax._src.scipy.optimize.line_search`` internals so
+Mirrors the JAX 0.9.2 line-search semantics so
 the line-search semantics stay stable across this project.
 """
 
 from __future__ import annotations
 
 import jax.numpy as jnp
-from jax import lax
-from jax._src import api
-from jax._src import dtypes
-from jax._src.numpy.util import promote_dtypes_inexact
+from jax import lax, value_and_grad
 
-from ._common import _dot
+from ._common import _dot, _promote_dtypes_inexact
 from ._types import _LineSearchResults, _LineSearchState, _ZoomState
 
 
 def _cubicmin(a, fa, fpa, b, fb, c, fc):
-    dtype = dtypes.result_type(a, fa, fpa, b, fb, c, fc)
+    dtype = jnp.result_type(a, fa, fpa, b, fb, c, fc)
     C = fpa
     db = b - a
     dc = c - a
@@ -99,7 +96,7 @@ def _zoom(
         cchk = delta1 * dalpha
         qchk = delta2 * dalpha
 
-        threshold = jnp.where((dtypes.finfo(dalpha.dtype).bits < 64), 1e-5, 1e-10)
+        threshold = jnp.where((jnp.finfo(dalpha.dtype).bits < 64), 1e-5, 1e-10)
         state = state._replace(failed=state.failed | (dalpha <= threshold))
 
         a_j_cubic = _cubicmin(
@@ -231,11 +228,11 @@ def _zoom(
 def _line_search(
     f, xk, pk, old_fval=None, old_old_fval=None, gfk=None, c1=1e-4, c2=0.9, maxiter=20
 ):
-    xk, pk = promote_dtypes_inexact(xk, pk)
+    xk, pk = _promote_dtypes_inexact(xk, pk)
 
     def restricted_func_and_grad(t):
         t = jnp.array(t, dtype=pk.dtype)
-        phi, g = api.value_and_grad(f)(xk + t * pk)
+        phi, g = value_and_grad(f)(xk + t * pk)
         dphi = jnp.real(_dot(g, pk))
         return phi, dphi, g
 
@@ -439,7 +436,7 @@ def _line_search(
     )
     alpha_k = jnp.asarray(state.a_star)
     alpha_k = jnp.where(
-        (dtypes.finfo(alpha_k.dtype).bits != 64) & (jnp.abs(alpha_k) < 1e-8),
+        (jnp.finfo(alpha_k.dtype).bits != 64) & (jnp.abs(alpha_k) < 1e-8),
         jnp.sign(alpha_k) * 1e-8,
         alpha_k,
     )

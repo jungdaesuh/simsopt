@@ -374,6 +374,68 @@ class TestOptimizerAdapterPrivate:
         assert float(result.f_k) < 1e-20
 
     @PRIVATE_OPTIMIZER_RUNTIME
+    @REQUIRES_PRIVATE_OPTIMIZER_RUNTIME
+    def test_line_search_promotes_integer_inputs_to_inexact_dtype(self):
+        """The private line search must preserve the old inexact-promotion contract."""
+
+        def quad(x):
+            return 0.5 * jnp.dot(x, x)
+
+        result = _opt._line_search(
+            quad,
+            jnp.array([1], dtype=jnp.int32),
+            jnp.array([-1], dtype=jnp.int32),
+            maxiter=5,
+        )
+
+        assert jnp.issubdtype(result.a_k.dtype, jnp.inexact)
+        assert jnp.issubdtype(result.f_k.dtype, jnp.inexact)
+        assert jnp.issubdtype(result.g_k.dtype, jnp.inexact)
+
+    @PRIVATE_OPTIMIZER_RUNTIME
+    @REQUIRES_PRIVATE_OPTIMIZER_RUNTIME
+    def test_minimize_bfgs_private_solves_simple_quadratic(self):
+        """Direct private BFGS should keep its simple quadratic contract."""
+
+        def quad(x):
+            return 0.5 * jnp.dot(x, x)
+
+        state = _opt._minimize_bfgs_private(
+            quad,
+            jnp.array([1.0, -2.0], dtype=jnp.float64),
+            maxiter=10,
+            gtol=1e-8,
+        )
+
+        assert bool(state.converged) is True
+        assert bool(state.failed) is False
+        assert int(state.status) == 0
+        np.testing.assert_allclose(np.asarray(state.x_k), np.zeros(2), atol=1e-12)
+        np.testing.assert_allclose(np.asarray(state.g_k), np.zeros(2), atol=1e-12)
+
+    @PRIVATE_OPTIMIZER_RUNTIME
+    @REQUIRES_PRIVATE_LBFGS_RUNTIME
+    def test_minimize_lbfgs_private_solves_simple_quadratic(self):
+        """Direct private L-BFGS should keep its simple quadratic contract."""
+
+        def quad(x):
+            return 0.5 * jnp.dot(x, x)
+
+        state = _opt._minimize_lbfgs_private(
+            quad,
+            jnp.array([1.0, -2.0], dtype=jnp.float64),
+            maxiter=10,
+            gtol=1e-8,
+            maxcor=5,
+        )
+
+        assert bool(state.converged) is True
+        assert bool(state.failed) is False
+        assert int(state.status) == 0
+        np.testing.assert_allclose(np.asarray(state.x_k), np.zeros(2), atol=1e-12)
+        np.testing.assert_allclose(np.asarray(state.g_k), np.zeros(2), atol=1e-12)
+
+    @PRIVATE_OPTIMIZER_RUNTIME
     def test_hybrid_skips_continuation_after_scipy_success(self, monkeypatch):
         """Hybrid mode must return the SciPy prefix directly on convergence."""
         prefix = types.SimpleNamespace(

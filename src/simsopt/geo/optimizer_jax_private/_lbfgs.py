@@ -5,14 +5,12 @@ from __future__ import annotations
 import numpy as np
 
 import jax.numpy as jnp
-from jax import lax
-from jax._src import api
-from jax._src import dtypes
-from jax._src.numpy import linalg as jnp_linalg
+from jax import lax, value_and_grad
 
 from ._common import (
     _dot,
     _emit_iteration_callbacks,
+    _norm,
     _require_private_optimizer_runtime,
     _resolve_lbfgs_limits,
 )
@@ -73,12 +71,12 @@ def _minimize_lbfgs_private(
 ):
     x0 = _require_private_optimizer_runtime(x0)
     d = len(x0)
-    dtype = dtypes.dtype(x0)
+    dtype = x0.dtype
     maxiter, maxfun, maxgrad = _resolve_lbfgs_limits(d, maxiter, maxfun, maxgrad)
 
-    f_0, g_0 = api.value_and_grad(fun)(x0)
+    f_0, g_0 = value_and_grad(fun)(x0)
     state_initial = _LBFGSResults(
-        converged=jnp_linalg.norm(g_0, ord=norm) < gtol,
+        converged=_norm(g_0, ord=norm) < gtol,
         failed=jnp.array(False, dtype=bool),
         k=0,
         nfev=1,
@@ -149,7 +147,7 @@ def _minimize_lbfgs_private(
             status = jnp.where(next_ngev >= maxgrad, 3, status)
             status = jnp.where(next_nfev >= maxfun, 2, status)
             status = jnp.where(next_k >= maxiter, 1, status)
-            converged = jnp_linalg.norm(g_kp1, ord=norm) < gtol
+            converged = _norm(g_kp1, ord=norm) < gtol
             _emit_iteration_callbacks(
                 callback, progress_callback, x_kp1, next_k, f_kp1, g_kp1
             )
@@ -173,8 +171,8 @@ def _minimize_lbfgs_private(
         return lax.cond(ls_results.failed, failed_step, accepted_step, operand=None)
 
     state = lax.while_loop(cond_fun, body_fun, state_initial)
-    f_final, g_final = api.value_and_grad(fun)(state.x_k)
-    converged_final = jnp_linalg.norm(g_final, ord=norm) < gtol
+    f_final, g_final = value_and_grad(fun)(state.x_k)
+    converged_final = _norm(g_final, ord=norm) < gtol
     state = state._replace(
         converged=converged_final,
         nfev=state.nfev + 1,

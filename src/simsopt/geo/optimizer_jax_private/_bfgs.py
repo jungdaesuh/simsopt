@@ -5,14 +5,13 @@ from __future__ import annotations
 import numpy as np
 
 import jax.numpy as jnp
-from jax import lax
-from jax._src import api
-from jax._src.numpy import linalg as jnp_linalg
+from jax import lax, value_and_grad
 
 from ._common import (
     _dot,
     _einsum,
     _emit_iteration_callbacks,
+    _norm,
     _require_private_optimizer_runtime,
 )
 from ._line_search import _line_search
@@ -40,9 +39,9 @@ def _minimize_bfgs_private(
     d = x0.shape[0]
     if initial_state is None:
         initial_H = jnp.eye(d, dtype=x0.dtype)
-        f_0, g_0 = api.value_and_grad(fun)(x0)
+        f_0, g_0 = value_and_grad(fun)(x0)
         state = _BFGSResults(
-            converged=jnp_linalg.norm(g_0, ord=norm) < gtol,
+            converged=_norm(g_0, ord=norm) < gtol,
             failed=False,
             k=0,
             nfev=1,
@@ -52,7 +51,7 @@ def _minimize_bfgs_private(
             f_k=f_0,
             g_k=g_0,
             H_k=initial_H,
-            old_old_fval=f_0 + jnp_linalg.norm(g_0) / 2.0,
+            old_old_fval=f_0 + _norm(g_0) / 2.0,
             status=0,
             line_search_status=0,
         )
@@ -101,7 +100,7 @@ def _minimize_bfgs_private(
             + rho_k * s_k[:, np.newaxis] * s_k[np.newaxis, :]
         )
         H_kp1 = jnp.where(jnp.isfinite(rho_k), H_kp1, state.H_k)
-        converged = jnp_linalg.norm(g_kp1, ord=norm) < gtol
+        converged = _norm(g_kp1, ord=norm) < gtol
         next_k = state.k + 1
         dphi_0 = jnp.real(_dot(state.g_k, p_k))
         dphi_kp1 = jnp.real(_dot(g_kp1, p_k))
@@ -116,11 +115,11 @@ def _minimize_bfgs_private(
         )
         step_tol = step_eps * jnp.maximum(
             jnp.asarray(1.0, dtype=state.x_k.dtype),
-            jnp_linalg.norm(state.x_k),
+            _norm(state.x_k),
         )
         stalled_step = (
             (~converged)
-            & (jnp_linalg.norm(s_k) <= step_tol)
+            & (_norm(s_k) <= step_tol)
         )
         nonfinite_step = (~jnp.isfinite(f_kp1)) | (~jnp.all(jnp.isfinite(g_kp1)))
         failure_line_search_status = jnp.where(
@@ -186,8 +185,8 @@ def _minimize_bfgs_private(
         )
 
     state = lax.while_loop(cond_fun, body_fun, state)
-    f_final, g_final = api.value_and_grad(fun)(state.x_k)
-    converged_final = jnp_linalg.norm(g_final, ord=norm) < gtol
+    f_final, g_final = value_and_grad(fun)(state.x_k)
+    converged_final = _norm(g_final, ord=norm) < gtol
     state = state._replace(
         converged=converged_final,
         nfev=state.nfev + 1,
@@ -229,7 +228,7 @@ def _make_bfgs_continuation_state(result, *, gtol, norm):
         f_k=f_k,
         g_k=g_k,
         H_k=H_k,
-        old_old_fval=f_k + jnp_linalg.norm(g_k) / 2.0,
+        old_old_fval=f_k + _norm(g_k) / 2.0,
         status=0,
         line_search_status=0,
     )

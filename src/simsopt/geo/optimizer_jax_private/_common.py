@@ -19,6 +19,18 @@ _dot = partial(jnp.dot, precision=lax.Precision.HIGHEST)
 _einsum = partial(jnp.einsum, precision=lax.Precision.HIGHEST)
 
 
+def _norm(x, *, ord=None):
+    return jnp.linalg.norm(x, ord=ord)
+
+
+def _promote_dtypes_inexact(*args):
+    """Promote arguments to a shared inexact dtype using public JAX APIs."""
+    dtype = jnp.result_type(*args)
+    if not jnp.issubdtype(dtype, jnp.inexact):
+        dtype = jnp.promote_types(dtype, jnp.float32)
+    return tuple(jnp.asarray(arg, dtype=dtype) for arg in args)
+
+
 def _require_private_optimizer_runtime(x0):
     import jax
 
@@ -63,7 +75,6 @@ def _emit_iteration_callbacks(callback, progress_callback, x_kp1, next_k, f_kp1,
     Shared by the BFGS and L-BFGS on-device body functions.
     """
     import jax
-    from jax._src.numpy import linalg as jnp_linalg
     import numpy as np
 
     if callback is not None:
@@ -73,7 +84,7 @@ def _emit_iteration_callbacks(callback, progress_callback, x_kp1, next_k, f_kp1,
             ordered=True,
         )
     if progress_callback is not None:
-        grad_inf = jnp_linalg.norm(g_kp1, ord=jnp.inf)
+        grad_inf = _norm(g_kp1, ord=jnp.inf)
         jax.debug.callback(
             lambda iteration, fun_value, grad_inf_value: progress_callback(
                 int(iteration),

@@ -23,6 +23,7 @@ import pytest
 # can import simsopt without a pip install.
 _SRC_DIR = str(Path(__file__).resolve().parents[1] / "src")
 _OPTIMIZER_JAX_PATH = Path(_SRC_DIR) / "simsopt" / "geo" / "optimizer_jax.py"
+_OPTIMIZER_PRIVATE_DIR = Path(_SRC_DIR) / "simsopt" / "geo" / "optimizer_jax_private"
 
 
 def _run_import_check(code):
@@ -186,6 +187,30 @@ def test_optimizer_jax_public_module_has_no_jax_src_imports():
 
     assert forbidden_imports == [], (
         "optimizer_jax.py must not import jax._src in the public lane: "
+        f"{forbidden_imports}"
+    )
+
+
+def test_optimizer_jax_private_package_has_no_jax_src_imports():
+    """Private optimizer modules must also stay on public JAX APIs."""
+    forbidden_imports = {}
+    for path in sorted(_OPTIMIZER_PRIVATE_DIR.glob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        imports = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                imports.extend(
+                    alias.name for alias in node.names if alias.name.startswith("jax._src")
+                )
+            elif isinstance(node, ast.ImportFrom):
+                module = node.module or ""
+                if module.startswith("jax._src"):
+                    imports.append(module)
+        if imports:
+            forbidden_imports[str(path.relative_to(_OPTIMIZER_PRIVATE_DIR.parent))] = imports
+
+    assert forbidden_imports == {}, (
+        "optimizer_jax_private must not import jax._src: "
         f"{forbidden_imports}"
     )
 
