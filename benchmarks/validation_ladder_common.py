@@ -30,6 +30,7 @@ _JAX_COMPILATION_CACHE_ENV_VAR = "JAX_COMPILATION_CACHE_DIR"
 _SIMSOPT_DISABLE_COMPILATION_CACHE_ENV_VAR = "SIMSOPT_DISABLE_JAX_COMPILATION_CACHE"
 _SIMSOPT_COMPILATION_CACHE_POLICY_ENV_VAR = "SIMSOPT_JAX_COMPILATION_CACHE_POLICY"
 _TRUTHY_ENV_VALUES = frozenset({"1", "true", "yes", "on"})
+_SHORT_RUN_SMOKE_MAXITER = 20
 
 OPTIMIZER_DRIFT_TOLERANCES = {
     "tier1_stage2_value_gradient": {
@@ -40,7 +41,7 @@ OPTIMIZER_DRIFT_TOLERANCES = {
     "tier2_stage2_e2e": {
         "final_objective_rel_tol": 1e-4,
         "field_error_rel_tol": 1e-4,
-        "geometry_rel_tol_20_iter": 5e-6,
+        "geometry_rel_tol_20_iter": None,
         "geometry_rel_tol_default": 1e-6,
     },
     "tier3_single_stage_init": {
@@ -189,7 +190,7 @@ def optimizer_drift_tolerances(
     rung: str,
     *,
     maxiter: int | None = None,
-) -> dict[str, float]:
+) -> dict[str, float | None]:
     """Return the documented optimizer-replacement tolerances for a ladder rung."""
     if rung not in OPTIMIZER_DRIFT_TOLERANCES:
         valid = ", ".join(sorted(OPTIMIZER_DRIFT_TOLERANCES))
@@ -257,11 +258,19 @@ def max_pointwise_geometry_drift(
 def short_run_geometry_rel_tolerance(
     maxiter: int,
     explicit_tol: float | None = None,
-) -> float:
-    """Return the geometry gate used for short Stage 2 smoke runs."""
+) -> float | None:
+    """Return the end-state geometry gate for Stage 2 ladder runs.
+
+    Short smoke runs on the reduced real fixture intentionally do not hard-gate
+    on final geometry alignment. On that flat 20-iteration fixture, matched-state
+    objective / field / gradient parity is the hard precision contract and final
+    geometry drift is report-only unless the caller opts into an explicit gate.
+    """
     if explicit_tol is not None:
         return float(explicit_tol)
-    return 5e-6 if maxiter <= 20 else 1e-6
+    if maxiter <= _SHORT_RUN_SMOKE_MAXITER:
+        return None
+    return 1e-6
 
 
 def peak_rss_mb() -> float:

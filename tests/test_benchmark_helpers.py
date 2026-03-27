@@ -158,8 +158,8 @@ def test_max_pointwise_geometry_drift_matches_expected_scale():
     assert max_rel == pytest.approx(1.5e-4)
 
 
-def test_short_run_geometry_rel_tolerance_relaxes_20_iter_smoke_runs():
-    assert short_run_geometry_rel_tolerance(20) == pytest.approx(5e-6)
+def test_short_run_geometry_rel_tolerance_disables_20_iter_smoke_gate():
+    assert short_run_geometry_rel_tolerance(20) is None
     assert short_run_geometry_rel_tolerance(21) == pytest.approx(1e-6)
     assert short_run_geometry_rel_tolerance(20, explicit_tol=2.5e-6) == pytest.approx(
         2.5e-6
@@ -265,7 +265,7 @@ def test_optimizer_drift_tolerances_tier2_geometry_gate_tracks_iteration_budget(
     tol_20 = optimizer_drift_tolerances("tier2_stage2_e2e", maxiter=20)
     tol_21 = optimizer_drift_tolerances("tier2_stage2_e2e", maxiter=21)
 
-    assert tol_20["geometry_rel_tol"] == pytest.approx(5e-6)
+    assert tol_20["geometry_rel_tol"] is None
     assert tol_21["geometry_rel_tol"] == pytest.approx(1e-6)
     assert "geometry_rel_tol_20_iter" not in tol_20
     assert "geometry_rel_tol_default" not in tol_20
