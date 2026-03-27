@@ -213,6 +213,13 @@ def _supports_jax_curve_pullback(curve):
     )
 
 
+def _supports_cpu_curve_pullback(curve):
+    return hasattr(curve, "dgamma_by_dcoeff_vjp") and hasattr(
+        curve,
+        "dgammadash_by_dcoeff_vjp",
+    )
+
+
 def _merge_derivative_data(target, derivative_like):
     items = (
         derivative_like.data.items()
@@ -326,15 +333,27 @@ def _curve_surface_pullback_data(curve, dg, dgd):
     }
 
 
+def _curve_coeff_pullback_data_cpu(curve, dg, dgd):
+    deriv_data = {}
+    _merge_derivative_data(deriv_data, curve.dgamma_by_dcoeff_vjp(np.asarray(dg)))
+    _merge_derivative_data(
+        deriv_data,
+        curve.dgammadash_by_dcoeff_vjp(np.asarray(dgd)),
+    )
+    return deriv_data
+
+
 def _project_single_coil_cotangent_data(coil, dg, dgd, dc):
     curve, rotmat, current, scale = _unwrap_coil_curve_and_current(coil)
+    supports_jax_pullback = _supports_jax_curve_pullback(curve)
+    supports_cpu_pullback = _supports_cpu_curve_pullback(curve)
 
-    if _supports_jax_curve_pullback(curve):
-        if rotmat is not None:
-            rotmat_t = jnp.asarray(rotmat, dtype=jnp.float64).T
-            dg = dg @ rotmat_t
-            dgd = dgd @ rotmat_t
+    if rotmat is not None and (supports_jax_pullback or supports_cpu_pullback):
+        rotmat_t = jnp.asarray(rotmat, dtype=jnp.float64).T
+        dg = dg @ rotmat_t
+        dgd = dgd @ rotmat_t
 
+    if supports_jax_pullback:
         deriv_data = {}
         _merge_derivative_data(deriv_data, _curve_coeff_pullback_data(curve, dg, dgd))
         _merge_derivative_data(deriv_data, _curve_surface_pullback_data(curve, dg, dgd))
@@ -345,14 +364,18 @@ def _project_single_coil_cotangent_data(coil, dg, dgd, dc):
             _merge_derivative_data(deriv_data, current.vjp(current_cotangent))
         return deriv_data
 
-    # ``coil.vjp()`` already unwraps rotated curves and applies the inverse
-    # rotation internally, so pass the original cotangents through unchanged.
-    return dict(
-        coil.vjp(
-            np.asarray(dg),
-            np.asarray(dgd),
-            np.asarray([dc]),
-        ).data
+    if supports_cpu_pullback:
+        deriv_data = _curve_coeff_pullback_data_cpu(curve, dg, dgd)
+        if current.dof_size > 0:
+            current_cotangent = np.atleast_1d(
+                np.asarray(scale, dtype=float) * np.asarray(dc, dtype=float)
+            )
+            _merge_derivative_data(deriv_data, current.vjp(current_cotangent))
+        return deriv_data
+
+    raise TypeError(
+        "Curve does not expose a supported JAX or CPU pullback contract for "
+        "BiotSavartJAX coil cotangent projection."
     )
 
 
