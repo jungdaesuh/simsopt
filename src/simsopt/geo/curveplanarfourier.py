@@ -1,8 +1,73 @@
 import numpy as np
+import jax
+import jax.numpy as jnp
 import simsoptpp as sopp
-from .curve import Curve
+from .curve import Curve, _install_curve_jax_contract
 
 __all__ = ['CurvePlanarFourier']
+
+
+def _normalized_quaternion(quaternion):
+    norm_sq = jnp.sum(quaternion * quaternion)
+    inv_norm = jnp.where(norm_sq > 0.0, jax.lax.rsqrt(norm_sq), 1.0)
+    return quaternion * inv_norm
+
+
+def _quaternion_rotation_matrix(quaternion):
+    q0, q1, q2, q3 = quaternion
+    return jnp.array(
+        [
+            [
+                1.0 - 2.0 * (q2 * q2 + q3 * q3),
+                2.0 * (q1 * q2 - q3 * q0),
+                2.0 * (q1 * q3 + q2 * q0),
+            ],
+            [
+                2.0 * (q1 * q2 + q3 * q0),
+                1.0 - 2.0 * (q1 * q1 + q3 * q3),
+                2.0 * (q2 * q3 - q1 * q0),
+            ],
+            [
+                2.0 * (q1 * q3 - q2 * q0),
+                2.0 * (q2 * q3 + q1 * q0),
+                1.0 - 2.0 * (q1 * q1 + q2 * q2),
+            ],
+        ],
+        dtype=jnp.float64,
+    )
+
+
+def curveplanarfourier_pure(dofs, quadpoints, order):
+    rc_end = order + 1
+    rs_end = rc_end + order
+
+    rc = dofs[:rc_end]
+    rs = dofs[rc_end:rs_end]
+    quaternion = _normalized_quaternion(dofs[rs_end : rs_end + 4])
+    center = dofs[rs_end + 4 :]
+
+    phi = 2.0 * jnp.pi * quadpoints
+    cosphi = jnp.cos(phi)
+    sinphi = jnp.sin(phi)
+
+    radius = rc[0] * jnp.ones_like(phi)
+    if order > 0:
+        modes = jnp.arange(1, order + 1, dtype=jnp.float64)
+        phase = phi[:, None] * modes[None, :]
+        radius = radius + jnp.sum(
+            rc[1:][None, :] * jnp.cos(phase) + rs[None, :] * jnp.sin(phase),
+            axis=1,
+        )
+
+    base_curve = jnp.column_stack(
+        (
+            radius * cosphi,
+            radius * sinphi,
+            jnp.zeros_like(phi),
+        )
+    )
+    rotation = _quaternion_rotation_matrix(quaternion)
+    return base_curve @ rotation.T + center[None, :]
 
 
 class CurvePlanarFourier(sopp.CurvePlanarFourier, Curve):
@@ -65,6 +130,10 @@ class CurvePlanarFourier(sopp.CurvePlanarFourier, Curve):
             Curve.__init__(self, external_dof_setter=CurvePlanarFourier.set_dofs_impl,
                            dofs=dofs,
                            names=self._make_names(order))
+        _install_curve_jax_contract(
+            self,
+            lambda dofs, points: curveplanarfourier_pure(dofs, points, order),
+        )
 
     def get_dofs(self):
         """

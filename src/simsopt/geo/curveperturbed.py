@@ -1,13 +1,20 @@
 from dataclasses import dataclass
 
 import numpy as np
+from jax import vjp
+import jax.numpy as jnp
 from sympy import Symbol, lambdify, exp
 
 from .._core.json import GSONable
 from .._core.util import RealArray
 
 import simsoptpp as sopp
-from simsopt.geo.curve import Curve
+from .curve import (
+    Curve,
+    _curve_jax_eval_from_arg,
+    _curve_jax_arg_from_full_dofs,
+)
+from .jit import jit
 
 __all__ = ['GaussianSampler', 'PerturbationSample', 'CurvePerturbed']
 
@@ -174,6 +181,34 @@ class CurvePerturbed(sopp.Curve, Curve):
         sopp.Curve.__init__(self, curve.quadpoints)
         Curve.__init__(self, depends_on=[curve])
         self.sample = sample
+
+        if hasattr(curve, "gamma_jax") and hasattr(curve, "gammadash_jax"):
+            sample_gamma = jnp.asarray(self.sample[0], dtype=jnp.float64)
+            sample_gammadash = jnp.asarray(self.sample[1], dtype=jnp.float64)
+
+            self._jax_curve_dof_mode = "full"
+            self.gamma_jax = jit(
+                lambda dofs: _curve_jax_eval_from_arg(
+                    curve,
+                    "gamma_jax",
+                    _curve_jax_arg_from_full_dofs(self, curve, dofs),
+                )
+                + sample_gamma
+            )
+            self.dgamma_by_dcoeff_vjp_jax = jit(
+                lambda dofs, cotangent: vjp(self.gamma_jax, dofs)[1](cotangent)[0]
+            )
+            self.gammadash_jax = jit(
+                lambda dofs: _curve_jax_eval_from_arg(
+                    curve,
+                    "gammadash_jax",
+                    _curve_jax_arg_from_full_dofs(self, curve, dofs),
+                )
+                + sample_gammadash
+            )
+            self.dgammadash_by_dcoeff_vjp_jax = jit(
+                lambda dofs, cotangent: vjp(self.gammadash_jax, dofs)[1](cotangent)[0]
+            )
 
     def resample(self):
         self.sample.resample()

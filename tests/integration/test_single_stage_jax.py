@@ -47,9 +47,18 @@ from simsopt.field import (  # noqa: E402
     coils_via_symmetries,
 )
 from simsopt.geo import (  # noqa: E402
+    SurfaceRZFourier,
     SurfaceXYZTensorFourier,
+    CurveCWSFourierCPP,
     CurveHelical,
+    CurvePlanarFourier,
+    CurvePerturbed,
+    CurveRZFourier,
     CurveXYZFourier,
+    CurveFilament,
+    FramedCurveCentroid,
+    FrameRotation,
+    PerturbationSample,
     create_equally_spaced_curves,
     Volume,
     BoozerSurface,
@@ -295,6 +304,155 @@ def _assert_curve_uses_jax_geometry(monkeypatch, curve, owner_name):
         lambda: (_ for _ in ()).throw(
             AssertionError(f"{owner_name} should use CurveHelical.gammadash_jax")
         ),
+    )
+
+
+def _assert_curve_class_uses_jax_geometry(monkeypatch, curve, owner_name):
+    curve_type = type(curve)
+    monkeypatch.setattr(
+        curve_type,
+        "gamma",
+        lambda self: (_ for _ in ()).throw(
+            AssertionError(f"{owner_name} should use {curve_type.__name__}.gamma_jax")
+        ),
+    )
+    monkeypatch.setattr(
+        curve_type,
+        "gammadash",
+        lambda self: (_ for _ in ()).throw(
+            AssertionError(f"{owner_name} should use {curve_type.__name__}.gammadash_jax")
+        ),
+    )
+
+
+def _build_rz_curve(nquadpoints):
+    curve = CurveRZFourier(nquadpoints, order=2, nfp=3, stellsym=False)
+    curve.set_dofs(
+        np.array(
+            [1.2, 0.18, -0.07, 0.04, -0.03, 0.1, -0.05, 0.02, 0.08, -0.06]
+        )
+    )
+    return curve
+
+
+def _build_planar_curve(nquadpoints):
+    curve = CurvePlanarFourier(nquadpoints, order=2)
+    curve.set_dofs(
+        np.array(
+            [1.1, 0.14, -0.09, 0.05, -0.02, 1.0, 0.2, -0.1, 0.3, 0.15, -0.2, 0.05]
+        )
+    )
+    return curve
+
+
+def _build_perturbed_helical_curve(nquadpoints):
+    base_curve = _build_helical_curve(nquadpoints)
+    quadpoints = np.asarray(base_curve.quadpoints, dtype=float)
+    sample = PerturbationSample(
+        None,
+        sample=[
+            np.column_stack(
+                (
+                    1.0e-3 * np.sin(2.0 * np.pi * quadpoints),
+                    -8.0e-4 * np.cos(2.0 * np.pi * quadpoints),
+                    6.0e-4 * np.sin(4.0 * np.pi * quadpoints),
+                )
+            ),
+            np.column_stack(
+                (
+                    2.0e-3 * np.cos(2.0 * np.pi * quadpoints),
+                    1.6e-3 * np.sin(2.0 * np.pi * quadpoints),
+                    2.4e-3 * np.cos(4.0 * np.pi * quadpoints),
+                )
+            ),
+        ],
+    )
+    return CurvePerturbed(base_curve, sample)
+
+
+def _build_filament_curve(nquadpoints):
+    base_curve = _build_planar_curve(nquadpoints)
+    rotation = FrameRotation(base_curve.quadpoints, order=1)
+    rotation.x = np.array([0.07, -0.03, 0.02])
+    framed_curve = FramedCurveCentroid(base_curve, rotation)
+    return CurveFilament(framed_curve, dn=0.012, db=-0.009)
+
+
+def _build_surface_bound_cpp_curve(nquadpoints):
+    surf = SurfaceRZFourier(
+        nfp=1,
+        stellsym=False,
+        mpol=1,
+        ntor=1,
+        quadpoints_phi=np.linspace(0.0, 1.0, 16, endpoint=False),
+        quadpoints_theta=np.linspace(0.0, 1.0, 16, endpoint=False),
+    )
+    surf.set_rc(0, 0, 1.0)
+    surf.set_rc(1, 0, 0.18)
+    surf.set_zs(1, 0, 0.14)
+    surf.set_rc(0, 1, 0.03)
+    surf.set_zs(1, 1, -0.02)
+
+    curve = CurveCWSFourierCPP(
+        np.linspace(0.0, 1.0, nquadpoints, endpoint=False),
+        order=2,
+        surf=surf,
+    )
+    curve.set("phic(0)", 0.08)
+    curve.set("thetac(0)", 0.47)
+    curve.set("phic(1)", -0.03)
+    curve.set("phis(1)", 0.02)
+    curve.set("thetas(1)", 0.07)
+    return curve, surf
+
+
+def _build_filament_cws_curve(nquadpoints):
+    base_curve, surf = _build_surface_bound_cpp_curve(nquadpoints)
+    rotation = FrameRotation(base_curve.quadpoints, order=1)
+    rotation.x = np.array([0.04, 0.01, -0.02])
+    framed_curve = FramedCurveCentroid(base_curve, rotation)
+    return CurveFilament(framed_curve, dn=0.01, db=0.006), surf
+
+
+def _assert_grouped_coil_arrays_match_curve(curve, current_value):
+    bs_jax = BiotSavartJAX([Coil(curve, Current(current_value))])
+    gamma_group, gammadash_group, current_group = bs_jax.grouped_coil_arrays_from_dofs(
+        jnp.asarray(bs_jax.x)
+    )[0]
+
+    np.testing.assert_allclose(np.asarray(gamma_group[0]), curve.gamma(), atol=1e-12)
+    np.testing.assert_allclose(
+        np.asarray(gammadash_group[0]),
+        curve.gammadash(),
+        atol=1e-12,
+    )
+    np.testing.assert_allclose(np.asarray(current_group), np.array([current_value]), atol=1e-12)
+
+
+def _assert_biotsavart_vjp_bypasses_coil_vjp(curve, current, points, monkeypatch, message):
+    coil = Coil(curve, current)
+    bs_cpu = BiotSavart([coil])
+    bs_cpu.set_points(points)
+
+    bs_jax = BiotSavartJAX([coil])
+    bs_jax.set_points(points)
+    v = np.asarray(bs_jax.B())
+    deriv_cpu = bs_cpu.B_vjp(v)
+
+    monkeypatch.setattr(
+        coil,
+        "vjp",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError(message)),
+    )
+
+    deriv = bs_jax.B_vjp(v)
+
+    np.testing.assert_allclose(deriv(curve), deriv_cpu(curve), rtol=1e-9, atol=1e-15)
+    np.testing.assert_allclose(
+        deriv(current),
+        deriv_cpu(current),
+        rtol=1e-9,
+        atol=1e-15,
     )
 
 
@@ -879,6 +1037,63 @@ class TestAdjointSolveConsistency:
             deriv_cpu(current),
             rtol=1e-9,
             atol=1e-15,
+        )
+
+    def test_grouped_coil_arrays_from_dofs_supports_curverzfourier_geometry(self):
+        """Explicit reconstruction should work for legacy cylindrical Fourier curves."""
+        _assert_grouped_coil_arrays_match_curve(_build_rz_curve(24), 1.23)
+
+    def test_biotsavart_B_uses_curverzfourier_jax_geometry_without_cpu_calls(
+        self,
+        monkeypatch,
+    ):
+        """Forward field evaluation should stay on the JAX lane for CurveRZFourier."""
+        curve = _build_rz_curve(24)
+        current = Current(8.0e4)
+        coil = Coil(curve, current)
+
+        bs_cpu = BiotSavart([coil])
+        bs_cpu.set_points(_GENERIC_JAXCURVE_POINTS)
+        B_cpu = bs_cpu.B()
+
+        _assert_curve_class_uses_jax_geometry(monkeypatch, curve, "BiotSavartJAX.B()")
+
+        bs_jax = BiotSavartJAX([coil])
+        bs_jax.set_points(_GENERIC_JAXCURVE_POINTS)
+        B_jax = np.asarray(bs_jax.B())
+
+        np.testing.assert_allclose(B_jax, B_cpu, rtol=1e-10, atol=1e-15)
+
+    def test_grouped_coil_arrays_from_dofs_supports_curveplanarfourier_geometry(self):
+        """Explicit reconstruction should work for planar legacy Fourier curves."""
+        _assert_grouped_coil_arrays_match_curve(_build_planar_curve(24), 2.5)
+
+    def test_grouped_coil_arrays_from_dofs_supports_curveperturbed_fullgraph_geometry(self):
+        """Full-graph wrapper curves should reconstruct from explicit coil DOFs."""
+        _assert_grouped_coil_arrays_match_curve(_build_perturbed_helical_curve(24), 1.7)
+
+    def test_biotsavart_B_vjp_bypasses_coil_vjp_for_curvefilament(self, monkeypatch):
+        """Full-graph finite-build wrapper curves should stay off ``Coil.vjp()``."""
+        _assert_biotsavart_vjp_bypasses_coil_vjp(
+            _build_filament_curve(32),
+            Current(8.0e4),
+            _GENERIC_JAXCURVE_POINTS,
+            monkeypatch,
+            "BiotSavartJAX.B_vjp() should bypass Coil.vjp() for CurveFilament",
+        )
+
+    def test_biotsavart_B_vjp_preserves_surface_pullback_for_curvefilament_cws(
+        self,
+        monkeypatch,
+    ):
+        """CWS-backed finite-build curves should stay on the JAX wrapper pullback path."""
+        curve, _surf = _build_filament_cws_curve(32)
+        _assert_biotsavart_vjp_bypasses_coil_vjp(
+            curve,
+            Current(8.0e4),
+            _GENERIC_JAXCURVE_POINTS,
+            monkeypatch,
+            "BiotSavartJAX.B_vjp() should bypass Coil.vjp() for finite-build CWS curves",
         )
 
     def test_biotsavart_projection_keeps_non_native_fallback_explicit(self):

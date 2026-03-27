@@ -1,9 +1,44 @@
 import numpy as np
+import jax.numpy as jnp
 
 import simsoptpp as sopp
-from .curve import Curve
+from .curve import Curve, _install_curve_jax_contract
 
 __all__ = ['CurveRZFourier']
+
+
+def curverzfourier_pure(dofs, quadpoints, order, nfp, stellsym):
+    phi = 2.0 * jnp.pi * quadpoints
+    cosphi = jnp.cos(phi)
+    sinphi = jnp.sin(phi)
+
+    rc = dofs[: order + 1]
+    if stellsym:
+        rs = None
+        zc = None
+        zs = dofs[order + 1 :]
+    else:
+        rs = dofs[order + 1 : 2 * order + 1]
+        zc = dofs[2 * order + 1 : 3 * order + 2]
+        zs = dofs[3 * order + 2 :]
+
+    cos_modes = jnp.arange(order + 1, dtype=jnp.float64)
+    cos_phase = phi[:, None] * (nfp * cos_modes)[None, :]
+    radius = jnp.sum(rc[None, :] * jnp.cos(cos_phase), axis=1)
+
+    sin_modes = jnp.arange(1, order + 1, dtype=jnp.float64)
+    if order > 0:
+        sin_phase = phi[:, None] * (nfp * sin_modes)[None, :]
+        z = jnp.sum(zs[None, :] * jnp.sin(sin_phase), axis=1)
+        if not stellsym:
+            radius = radius + jnp.sum(rs[None, :] * jnp.sin(sin_phase), axis=1)
+    else:
+        z = jnp.zeros_like(phi)
+
+    if not stellsym:
+        z = z + jnp.sum(zc[None, :] * jnp.cos(cos_phase), axis=1)
+
+    return jnp.column_stack((radius * cosphi, radius * sinphi, z))
 
 
 class CurveRZFourier(sopp.CurveRZFourier, Curve):
@@ -40,6 +75,16 @@ class CurveRZFourier(sopp.CurveRZFourier, Curve):
         else:
             Curve.__init__(self, external_dof_setter=CurveRZFourier.set_dofs_impl,
                            dofs=dofs)
+        _install_curve_jax_contract(
+            self,
+            lambda dofs, points: curverzfourier_pure(
+                dofs,
+                points,
+                order,
+                nfp,
+                stellsym,
+            ),
+        )
 
     def _make_names(self, order, stellsym):
         r_names = [f'rc({i})' for i in range(0, order + 1)]

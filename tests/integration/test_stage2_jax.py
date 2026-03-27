@@ -1152,7 +1152,17 @@ def banana_coil_jax_setup():
 
 
 class TestCurveCWSFourierCPPParity:
-    """Parity with real CurveCWSFourierCPP banana coils."""
+    """Parity checks for the shared CurveCWSFourierCPP CPU/JAX contract."""
+
+    def test_direct_cpu_third_derivative_is_unsupported(self, banana_coil_cpp_setup):
+        """Raw CPU third-derivative parity is intentionally out of contract."""
+        _, _, banana_coil = banana_coil_cpp_setup
+
+        with pytest.raises(
+            RuntimeError,
+            match="gammadashdashdash_impl was not implemented",
+        ):
+            banana_coil.curve.gammadashdashdash()
 
     def test_b_parity(self, banana_coil_setup):
         """BiotSavartJAX.B() matches CPU with CurveCWSFourierCPP coils."""

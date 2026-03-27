@@ -153,6 +153,16 @@ def _supports_native_curve_geometry(curve):
     )
 
 
+def _curve_dof_mode(curve):
+    return getattr(curve, "_jax_curve_dof_mode", "local")
+
+
+def _curve_live_dofs(curve):
+    if _curve_dof_mode(curve) == "full":
+        return jnp.asarray(curve.full_x, dtype=jnp.float64)
+    return jnp.asarray(curve.get_dofs(), dtype=jnp.float64)
+
+
 def _curve_surface_dofs(curve):
     surf = getattr(curve, "surf", None)
     if surf is None or surf.dof_size == 0:
@@ -194,6 +204,16 @@ def _merge_derivative_data(target, derivative_like):
             target[opt] = block.copy() if hasattr(block, "copy") else block
 
 
+def _full_curve_cotangent_to_derivative(curve, full_cotangent):
+    full_cotangent = jnp.asarray(full_cotangent, dtype=jnp.float64)
+    deriv_data = {}
+    for opt, (start, end) in curve._full_dof_indices.items():
+        if opt.local_full_dof_size == 0:
+            continue
+        deriv_data[opt] = full_cotangent[start:end]
+    return deriv_data
+
+
 def _curve_coeff_pullback_data(curve, dg, dgd):
     from ..geo.curvexyzfourier import CurveXYZFourier, jaxfouriercurve_pure
 
@@ -219,11 +239,14 @@ def _curve_coeff_pullback_data(curve, dg, dgd):
         _, gammadash_pullback = jax.vjp(gammadash_of_dofs, curve_dofs)
         return {curve: gamma_pullback(dg)[0] + gammadash_pullback(dgd)[0]}
 
-    curve_dofs = jnp.asarray(curve.get_dofs(), dtype=jnp.float64)
-    return {
-        curve: curve.dgamma_by_dcoeff_vjp_jax(curve_dofs, dg)
-        + curve.dgammadash_by_dcoeff_vjp_jax(curve_dofs, dgd)
-    }
+    curve_dofs = _curve_live_dofs(curve)
+    coeff_cotangent = curve.dgamma_by_dcoeff_vjp_jax(
+        curve_dofs,
+        dg,
+    ) + curve.dgammadash_by_dcoeff_vjp_jax(curve_dofs, dgd)
+    if _curve_dof_mode(curve) == "full":
+        return _full_curve_cotangent_to_derivative(curve, coeff_cotangent)
+    return {curve: coeff_cotangent}
 
 
 def _curve_gamma_from_dofs(curve, curve_dofs):
@@ -232,6 +255,9 @@ def _curve_gamma_from_dofs(curve, curve_dofs):
     if isinstance(curve, CurveXYZFourier):
         quadpoints = jnp.asarray(np.asarray(curve.quadpoints), dtype=jnp.float64)
         return jaxfouriercurve_pure(curve_dofs, quadpoints, curve.order)
+
+    if _curve_dof_mode(curve) == "full":
+        return curve.gamma_jax(curve_dofs)
 
     surf_dofs = _curve_surface_dofs(curve)
     if surf_dofs is not None:
@@ -251,6 +277,9 @@ def _curve_gammadash_from_dofs(curve, curve_dofs):
             (quadpoints,),
             (ones,),
         )[1]
+
+    if _curve_dof_mode(curve) == "full":
+        return curve.gammadash_jax(curve_dofs)
 
     surf_dofs = _curve_surface_dofs(curve)
     if surf_dofs is not None:
@@ -470,7 +499,7 @@ class BiotSavartJAX(Optimizable):
                     "degrees of freedom on the JAX geometry lane."
                 )
 
-            curve_dofs = self._local_full_dofs_from_free_vector(curve, coil_dofs)
+            curve_dofs = self._curve_dofs_from_free_vector(curve, coil_dofs)
             gamma = _curve_gamma_from_dofs(curve, curve_dofs)
             gammadash = _curve_gammadash_from_dofs(curve, curve_dofs)
             if rotmat is not None:
@@ -505,6 +534,23 @@ class BiotSavartJAX(Optimizable):
         start, end = self.dof_indices[opt]
         free_indices = np.flatnonzero(opt.local_dofs_free_status)
         return full_x.at[free_indices].set(coil_dofs[start:end])
+
+    def _full_dofs_from_free_vector(self, opt, coil_dofs):
+        """Rebuild one Optimizable graph's full DOF vector from ``coil_dofs``."""
+        full_x = jnp.asarray(opt.full_x, dtype=jnp.float64)
+        for dep_opt, (start, end) in opt._full_dof_indices.items():
+            dep_full_x = jnp.asarray(dep_opt.local_full_x, dtype=jnp.float64)
+            if dep_opt.local_dof_size > 0:
+                dep_start, dep_end = self.dof_indices[dep_opt]
+                free_indices = np.flatnonzero(dep_opt.local_dofs_free_status)
+                dep_full_x = dep_full_x.at[free_indices].set(coil_dofs[dep_start:dep_end])
+            full_x = full_x.at[start:end].set(dep_full_x)
+        return full_x
+
+    def _curve_dofs_from_free_vector(self, curve, coil_dofs):
+        if _curve_dof_mode(curve) == "full":
+            return self._full_dofs_from_free_vector(curve, coil_dofs)
+        return self._local_full_dofs_from_free_vector(curve, coil_dofs)
 
     def _normalize_explicit_coil_dofs(self, coil_dofs):
         coil_dofs = jnp.asarray(coil_dofs, dtype=jnp.float64)
@@ -630,7 +676,7 @@ class BiotSavartJAX(Optimizable):
             return base_gamma, base_gammadash, 0.0, 0.0
 
         if _supports_native_curve_geometry(curve):
-            curve_dofs = jnp.asarray(curve.get_dofs(), dtype=jnp.float64)
+            curve_dofs = _curve_live_dofs(curve)
             gamma_s, base_gamma = _time_call_result(
                 lambda: _curve_gamma_from_dofs(curve, curve_dofs)
             )

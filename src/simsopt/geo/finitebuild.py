@@ -1,6 +1,24 @@
 import numpy as np
+from jax import vjp
+import jax.numpy as jnp
 
-from .framedcurve import FramedCurve, FrameRotation, ZeroRotation, FramedCurveCentroid, FramedCurveFrenet
+from .framedcurve import (
+    FramedCurve,
+    FrameRotation,
+    ZeroRotation,
+    FramedCurveCentroid,
+    FramedCurveFrenet,
+    rotated_centroid_frame,
+    rotated_centroid_frame_dash,
+    rotated_frenet_frame,
+    rotated_frenet_frame_dash,
+)
+from .curve import (
+    _curve_jax_eval_from_arg,
+    _curve_jax_arg_from_full_dofs,
+    _optimizable_local_full_dofs_from_full_dofs,
+)
+from .jit import jit
 
 """
 The functions and classes in this model are used to deal with multifilament
@@ -37,6 +55,17 @@ class CurveFilament(FramedCurve):
         self.framedcurve = framedcurve
         FramedCurve.__init__(self, self.curve, self.rotation)
 
+        if self._supports_jax_finitebuild_geometry():
+            self._jax_curve_dof_mode = "full"
+            self.gamma_jax = jit(self._gamma_jax_from_full_dofs)
+            self.dgamma_by_dcoeff_vjp_jax = jit(
+                lambda dofs, cotangent: vjp(self.gamma_jax, dofs)[1](cotangent)[0]
+            )
+            self.gammadash_jax = jit(self._gammadash_jax_from_full_dofs)
+            self.dgammadash_by_dcoeff_vjp_jax = jit(
+                lambda dofs, cotangent: vjp(self.gammadash_jax, dofs)[1](cotangent)[0]
+            )
+
     def recompute_bell(self, parent=None):
         self.invalidate_cache()
 
@@ -60,6 +89,115 @@ class CurveFilament(FramedCurve):
         zero = np.zeros_like(v)
         return self.curve.dgammadash_by_dcoeff_vjp(v) \
             + self.framedcurve.rotated_frame_dash_dcoeff_vjp(zero, self.dn * v, self.db * v)
+
+    def _rotation_jax_values(self, dofs):
+        points = jnp.asarray(np.asarray(self.curve.quadpoints), dtype=jnp.float64)
+        if isinstance(self.rotation, ZeroRotation) or self.rotation.local_full_dof_size == 0:
+            zeros = jnp.zeros_like(points)
+            return zeros, zeros
+
+        rotation_dofs = _optimizable_local_full_dofs_from_full_dofs(
+            self,
+            self.rotation,
+            dofs,
+        )
+        alpha = self.rotation.scale * self.rotation.jax_alpha(rotation_dofs, points)
+        alphadash = self.rotation.scale * self.rotation.jax_alphadash(
+            rotation_dofs,
+            points,
+        )
+        return alpha, alphadash
+
+    def _curve_jax_geometry(self, dofs, surf_dofs=None):
+        curve_dofs = _curve_jax_arg_from_full_dofs(self, self.curve, dofs)
+        gamma = _curve_jax_eval_from_arg(
+            self.curve,
+            "gamma_jax",
+            curve_dofs,
+            surf_dofs=surf_dofs,
+        )
+        gammadash = _curve_jax_eval_from_arg(
+            self.curve,
+            "gammadash_jax",
+            curve_dofs,
+            surf_dofs=surf_dofs,
+        )
+        return curve_dofs, gamma, gammadash
+
+    def _supports_jax_finitebuild_geometry(self):
+        if not (
+            hasattr(self.curve, "gamma_jax")
+            and hasattr(self.curve, "gammadash_jax")
+            and hasattr(self.curve, "gammadashdash_jax")
+        ):
+            return False
+        if isinstance(self.framedcurve, FramedCurveFrenet):
+            return hasattr(self.curve, "gammadashdashdash_jax")
+        return isinstance(self.framedcurve, FramedCurveCentroid)
+
+    def _gamma_jax_from_full_dofs(self, dofs):
+        curve_dofs, gamma, gammadash = self._curve_jax_geometry(dofs)
+        alpha, _alphadash = self._rotation_jax_values(dofs)
+
+        if isinstance(self.framedcurve, FramedCurveFrenet):
+            gammadashdash = _curve_jax_eval_from_arg(
+                self.curve,
+                "gammadashdash_jax",
+                curve_dofs,
+            )
+            _tangent, normal, binormal = rotated_frenet_frame(
+                gamma,
+                gammadash,
+                gammadashdash,
+                alpha,
+            )
+        else:
+            _tangent, normal, binormal = rotated_centroid_frame(
+                gamma,
+                gammadash,
+                alpha,
+            )
+
+        return gamma + self.dn * normal + self.db * binormal
+
+    def _gammadash_jax_from_full_dofs(self, dofs):
+        curve_dofs, gamma, gammadash = self._curve_jax_geometry(dofs)
+        alpha, alphadash = self._rotation_jax_values(dofs)
+
+        if isinstance(self.framedcurve, FramedCurveFrenet):
+            gammadashdash = _curve_jax_eval_from_arg(
+                self.curve,
+                "gammadashdash_jax",
+                curve_dofs,
+            )
+            gammadashdashdash = _curve_jax_eval_from_arg(
+                self.curve,
+                "gammadashdashdash_jax",
+                curve_dofs,
+            )
+            tangent_dash, normal_dash, binormal_dash = rotated_frenet_frame_dash(
+                gamma,
+                gammadash,
+                gammadashdash,
+                gammadashdashdash,
+                alpha,
+                alphadash,
+            )
+        else:
+            gammadashdash = _curve_jax_eval_from_arg(
+                self.curve,
+                "gammadashdash_jax",
+                curve_dofs,
+            )
+            tangent_dash, normal_dash, binormal_dash = rotated_centroid_frame_dash(
+                gamma,
+                gammadash,
+                gammadashdash,
+                alpha,
+                alphadash,
+            )
+
+        return gammadash + self.dn * normal_dash + self.db * binormal_dash
 
 
 def create_multifilament_grid(curve, numfilaments_n, numfilaments_b, gapsize_n, gapsize_b,

@@ -245,6 +245,73 @@ class CurveCWSFourierCPP( Curve, sopp.Curve ):
             lambda sdofs, v: vjp(self.gammasdash_jax, sdofs)[1](v)[0]
         )
 
+        self.gammadashdash_pure = jit(
+            lambda cdofs, sdofs, qpts: jvp(
+                lambda curve_qpts: self.gammadash_pure(cdofs, sdofs, curve_qpts),
+                (qpts,),
+                (ones,),
+            )[1]
+        )
+        self.gammadashdash_jax = jit(
+            lambda cdofs, sdofs: self.gammadashdash_pure(cdofs, sdofs, points)
+        )
+        self.gammacdashdash_jax = jit(
+            lambda cdofs: self.gammadashdash_pure(cdofs, current_surface_dofs(), points)
+        )
+        self.gammasdashdash_jax = jit(
+            lambda sdofs: self.gammadashdash_pure(current_curve_dofs(), sdofs, points)
+        )
+        self.dgammadashdash_by_dcoeff_jax = jit(jacfwd(self.gammacdashdash_jax))
+        self.dgammadashdash_by_dcoeff_vjp_jax = jit(
+            lambda cdofs, v: vjp(self.gammacdashdash_jax, cdofs)[1](v)[0]
+        )
+        self.dgammadashdash_by_dsurf_jax = jit(jacfwd(self.gammasdashdash_jax))
+        self.dgammadashdash_by_dsurf_vjp_jax = jit(
+            lambda sdofs, v: vjp(self.gammasdashdash_jax, sdofs)[1](v)[0]
+        )
+
+        # The CPU contract for CurveCWSFourierCPP stops at gammadashdash():
+        # this Python-defined curve uses the generic sopp.Curve hook, and that
+        # hook has no raw gammadashdashdash_impl for this class. Keep the JAX
+        # third derivative only as an internal support primitive for composed
+        # JAX paths such as finite-build wrappers and BiotSavartJAX pullbacks.
+        self.gammadashdashdash_pure = jit(
+            lambda cdofs, sdofs, qpts: jvp(
+                lambda curve_qpts: self.gammadashdash_pure(cdofs, sdofs, curve_qpts),
+                (qpts,),
+                (ones,),
+            )[1]
+        )
+        self.gammadashdashdash_jax = jit(
+            lambda cdofs, sdofs: self.gammadashdashdash_pure(cdofs, sdofs, points)
+        )
+        self.gammacdashdashdash_jax = jit(
+            lambda cdofs: self.gammadashdashdash_pure(
+                cdofs,
+                current_surface_dofs(),
+                points,
+            )
+        )
+        self.gammasdashdashdash_jax = jit(
+            lambda sdofs: self.gammadashdashdash_pure(
+                current_curve_dofs(),
+                sdofs,
+                points,
+            )
+        )
+        self.dgammadashdashdash_by_dcoeff_jax = jit(
+            jacfwd(self.gammacdashdashdash_jax)
+        )
+        self.dgammadashdashdash_by_dcoeff_vjp_jax = jit(
+            lambda cdofs, v: vjp(self.gammacdashdashdash_jax, cdofs)[1](v)[0]
+        )
+        self.dgammadashdashdash_by_dsurf_jax = jit(
+            jacfwd(self.gammasdashdashdash_jax)
+        )
+        self.dgammadashdashdash_by_dsurf_vjp_jax = jit(
+            lambda sdofs, v: vjp(self.gammasdashdashdash_jax, sdofs)[1](v)[0]
+        )
+
         ## gamma
         self.gamma_2d_pure = jit(lambda cdofs, qpts: gamma_2d(cdofs, qpts, self.order, self.G, self.H)) 
         self.gamma_2d_jax = jit(lambda cdofs: self.gamma_2d_pure(cdofs, self.quadpoints)) 
