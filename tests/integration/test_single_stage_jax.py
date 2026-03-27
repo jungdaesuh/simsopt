@@ -2396,7 +2396,14 @@ class TestBVjpCPUParityPerComponent:
             f"||jax||={np.linalg.norm(grad_jax):.6e} "
             f"||diff||={np.linalg.norm(grad_cpu - grad_jax):.6e}"
         )
-        np.testing.assert_allclose(grad_jax, grad_cpu, rtol=1e-9, atol=1e-12)
+        b_vjp_rel_tol = 1e-10
+        b_vjp_abs_tol = 1e-12
+        np.testing.assert_allclose(
+            grad_jax,
+            grad_cpu,
+            rtol=b_vjp_rel_tol,
+            atol=b_vjp_abs_tol,
+        )
 
 
 # -----------------------------------------------------------------------
