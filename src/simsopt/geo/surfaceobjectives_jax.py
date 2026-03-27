@@ -30,7 +30,10 @@ from .._core.derivative import Derivative, derivative_dec
 from .._core.optimizable import Optimizable
 from ..objectives.utilities import forward_backward_jax, plu_solve_jax
 from ..field.biotsavart_jax import grouped_biot_savart_B
-from ..field.biotsavart_jax_backend import project_coil_cotangents_to_derivative
+from ..field.biotsavart_jax_backend import (
+    _project_single_coil_cotangent_data,
+    project_coil_cotangents_to_derivative,
+)
 from .boozer_residual_jax import (
     boozer_residual_vector,
     _surface_geometry_from_dofs,
@@ -67,13 +70,37 @@ def _iter_adjoint_coil_cotangents(vjp_fn, vjp_groups_fn, booz_surf, iota, G, adj
     yield from zip(d_coil_arrays, coil_indices)
 
 
+def _project_single_coil_cotangent_compat(coil, d_gamma, d_gammadash, d_current):
+    """Project one coil cotangent, falling back to ``Coil.vjp()`` for legacy doubles."""
+    try:
+        return Derivative(
+            _project_single_coil_cotangent_data(
+                coil,
+                d_gamma,
+                d_gammadash,
+                d_current,
+            )
+        )
+    except TypeError:
+        return coil.vjp(
+            d_gamma,
+            d_gammadash,
+            np.asarray([d_current]),
+        )
+
+
 def _coil_cotangents_to_derivative(coils, d_coil_arrays, coil_indices):
     """Compatibility helper for slice-at-a-time coil VJP projection."""
-    return project_coil_cotangents_to_derivative(
-        coils,
-        d_coil_arrays,
-        coil_indices,
-    )
+    total_derivative = Derivative({})
+    for (d_g, d_gd, d_c), indices in zip(d_coil_arrays, coil_indices):
+        for local_i, global_i in enumerate(indices):
+            total_derivative += _project_single_coil_cotangent_compat(
+                coils[global_i],
+                d_g[local_i],
+                d_gd[local_i],
+                d_c[local_i],
+            )
+    return total_derivative
 
 
 def _adjoint_coil_derivative(

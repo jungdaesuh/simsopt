@@ -314,23 +314,28 @@ class _DummyDerivative:
         return self._values
 
 
-def _build_fake_bfgs_result(optimizer_jax, x0, value, grad):
+def _build_fake_lbfgs_result(x0, value, grad):
+    from simsopt.geo.optimizer_jax_private import _LBFGSResults
+
     x0_array = np.asarray(x0, dtype=np.float64)
     grad_array = np.asarray(grad, dtype=np.float64)
-    return optimizer_jax._BFGSResults(
+    d = len(x0_array)
+    maxcor = 3
+    return _LBFGSResults(
         converged=False,
         failed=False,
         k=0,
         nfev=1,
         ngev=1,
-        nhev=0,
         x_k=x0_array,
         f_k=np.float64(value),
         g_k=grad_array,
-        H_k=np.eye(len(x0_array), dtype=np.float64),
-        old_old_fval=np.float64(value),
+        s_history=np.zeros((maxcor, d), dtype=np.float64),
+        y_history=np.zeros((maxcor, d), dtype=np.float64),
+        rho_history=np.zeros((maxcor,), dtype=np.float64),
+        gamma=np.float64(1.0),
         status=0,
-        line_search_status=0,
+        ls_status=0,
     )
 
 
@@ -1386,21 +1391,18 @@ class TestCurveCWSFourierNativeFieldPath:
         banana_coil_jax_setup,
         monkeypatch,
     ):
+        def fail_if_called(*_args, **_kwargs):
+            raise AssertionError(
+                "Native CurveCWSFourier B_vjp path should not fall back to coil.vjp()"
+            )
+
         coils, surf, _banana_coil = banana_coil_jax_setup
         points = surf.gamma().reshape((-1, 3))
 
         bs_jax = BiotSavartJAX(coils)
         bs_jax.set_points(points)
 
-        monkeypatch.setattr(
-            biotsavart_jax_backend_module,
-            "_host_pullback_group",
-            lambda *_args, **_kwargs: (_ for _ in ()).throw(
-                AssertionError(
-                    "Native CurveCWSFourier B_vjp path should not host-transfer the pullback"
-                )
-            ),
-        )
+        monkeypatch.setattr(_banana_coil, "vjp", fail_if_called)
 
         deriv = bs_jax.B_vjp(np.asarray(bs_jax.B()))
         assert np.linalg.norm(deriv(coils[-1].curve)) > 0.0
@@ -1548,6 +1550,61 @@ class TestStage2BananaBoundary:
         assert result.returncode == 0
         assert payload["banana_curve_class"] == expected_curve_class
 
+    def test_stage2_probe_override_dofs_evaluates_requested_state(self):
+        with tempfile.TemporaryDirectory(prefix="stage2-override-dofs-") as temp_dir:
+            output_root = Path(temp_dir) / "outputs"
+            result = _run_stage2_script(
+                *REDUCED_STAGE2_ARGS,
+                "--optimizer-backend",
+                "scipy",
+                "--skip-postprocess",
+                "--maxiter",
+                "0",
+                "--output-root",
+                str(output_root),
+            )
+
+            output = f"{result.stdout}\n{result.stderr}"
+            assert result.returncode == 0, output
+            results_payload = _load_stage2_results_json(output_root)
+
+            export_json = Path(temp_dir) / "probe.json"
+            override_json = Path(temp_dir) / "override_dofs.json"
+            override_json.write_text(
+                json.dumps(results_payload["FINAL_DOFS"]),
+                encoding="utf-8",
+            )
+            probe_result = _run_stage2_script(
+                *REDUCED_STAGE2_ARGS,
+                "--optimizer-backend",
+                "scipy",
+                "--probe-only",
+                "--skip-postprocess",
+                "--override-dofs-json",
+                str(override_json),
+                "--export-objective-json",
+                str(export_json),
+                "--output-root",
+                str(output_root),
+            )
+
+            probe_output = f"{probe_result.stdout}\n{probe_result.stderr}"
+            assert probe_result.returncode == 0, probe_output
+            probe_payload = json.loads(export_json.read_text(encoding="utf-8"))
+
+        np.testing.assert_allclose(
+            probe_payload["composite"]["J"],
+            results_payload["FINAL_OBJECTIVE"],
+            rtol=1e-12,
+            atol=1e-18,
+        )
+        np.testing.assert_allclose(
+            probe_payload["composite"]["mean_abs_relBfinal_norm"],
+            results_payload["FINAL_MEAN_ABS_RELBN"],
+            rtol=1e-12,
+            atol=1e-18,
+        )
+
 
 class TestStage2OptimizerContract:
     @pytest.mark.parametrize(
@@ -1555,7 +1612,7 @@ class TestStage2OptimizerContract:
         [
             ("cpu", "scipy", "lbfgs"),
             ("jax", "scipy", "lbfgs"),
-            ("jax", "ondevice", "bfgs-ondevice"),
+            ("jax", "ondevice", "lbfgs-ondevice"),
         ],
     )
     def test_resolve_stage2_optimizer_method_contract(
@@ -1655,28 +1712,38 @@ class TestStage2OptimizerContract:
         assert cpu_result.message == "ok"
 
         ondevice_captured = {}
-        def fake_bfgs_private(
+        def fake_lbfgs_private(
             fun,
             x0,
             *,
             maxiter,
             gtol,
-            line_search_maxiter,
-            initial_state=None,
+            maxcor,
+            ftol,
+            maxfun=None,
+            maxgrad=None,
+            maxls,
+            callback=None,
+            progress_callback=None,
         ):
             ondevice_captured["x0"] = np.asarray(x0, dtype=float)
             ondevice_captured["maxiter"] = maxiter
             ondevice_captured["gtol"] = gtol
-            ondevice_captured["line_search_maxiter"] = line_search_maxiter
-            ondevice_captured["initial_state"] = initial_state
+            ondevice_captured["maxcor"] = maxcor
+            ondevice_captured["ftol"] = ftol
+            ondevice_captured["maxfun"] = maxfun
+            ondevice_captured["maxgrad"] = maxgrad
+            ondevice_captured["maxls"] = maxls
+            ondevice_captured["callback"] = callback
+            ondevice_captured["progress_callback"] = progress_callback
             value = float(fun(np.asarray(x0, dtype=float)))
             grad = np.asarray(jax.grad(fun)(np.asarray(x0, dtype=np.float64)), dtype=float)
-            return _build_fake_bfgs_result(optimizer_jax, x0, value, grad)
+            return _build_fake_lbfgs_result(x0, value, grad)
 
         monkeypatch.setattr(
             optimizer_jax,
-            "_minimize_bfgs_private",
-            fake_bfgs_private,
+            "_minimize_lbfgs_private",
+            fake_lbfgs_private,
         )
 
         target_result = stage2_script.run_stage2_optimizer(
@@ -1696,8 +1763,13 @@ class TestStage2OptimizerContract:
         )
         assert ondevice_captured["maxiter"] == 12
         assert ondevice_captured["gtol"] == pytest.approx(1e-11)
-        assert ondevice_captured["line_search_maxiter"] == 10
-        assert ondevice_captured["initial_state"] is None
+        assert ondevice_captured["maxcor"] == 300
+        assert ondevice_captured["ftol"] == pytest.approx(1e-15)
+        assert ondevice_captured["maxfun"] is None
+        assert ondevice_captured["maxgrad"] is None
+        assert ondevice_captured["maxls"] == 20
+        assert ondevice_captured["callback"] is None
+        assert ondevice_captured["progress_callback"] is None
         assert target_result.message == "Optimization terminated successfully."
 
     def test_make_fun_caches_field_diagnostics_between_stride_refreshes(
