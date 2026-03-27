@@ -1,0 +1,11 @@
+.git
+.github
+.pytest_cache
+.ruff_cache
+__pycache__
+build
+dist
+*.egg-info
+.mypy_cache
+.DS_Store
+examples/single_stage_optimization/STAGE_2/outputs-*/

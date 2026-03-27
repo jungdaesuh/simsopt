@@ -134,6 +134,42 @@ GPU Node Quick-Start
 
        SIMSOPT_JAX_PLATFORM=cuda python benchmarks/jax_feasibility_spike.py
 
+Hugging Face Jobs
+-----------------
+
+For repeatable A100 / H200 proof runs on Hugging Face Jobs, the repo now
+ships a dedicated launch path under ``benchmarks/hf_jobs``.
+
+1. **Build and publish the reusable runtime image once**::
+
+       docker build -f benchmarks/hf_jobs/production_gpu_proof.Dockerfile \
+         -t <registry>/simsopt-jax:cuda12-jax092 .
+       docker push <registry>/simsopt-jax:cuda12-jax092
+
+   The image bakes the heavy system and Python dependency stack, including
+   ``jax[cuda12]==0.9.2``. Runtime jobs still clone and build the exact target
+   repo SHA so the proof remains commit-accurate.
+
+2. **Launch the proof jobs**::
+
+       SIMSOPT_HF_GPU_IMAGE=<registry>/simsopt-jax:cuda12-jax092 \
+         python benchmarks/hf_jobs/launch_production_gpu_proof.py
+
+   By default this launches both ``a100-large`` and ``h200`` jobs, pins the
+   current ``fork`` remote SHA, and runs the authoritative Tier 2 / Tier 3
+   entrypoints:
+
+   - ``benchmarks/stage2_e2e_comparison.py``
+   - ``benchmarks/single_stage_init_parity.py``
+
+3. **Fallback mode**::
+
+       python benchmarks/hf_jobs/launch_production_gpu_proof.py \
+         --image python:3.11-bookworm --bootstrap-mode always
+
+   This keeps the old ad hoc bootstrap behavior for environments where the
+   reusable image has not been published yet.
+
 Troubleshooting
 ---------------
 
