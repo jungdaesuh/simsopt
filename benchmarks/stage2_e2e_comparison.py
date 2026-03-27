@@ -51,6 +51,11 @@ require_x64_runtime(jax, context="Stage 2 end-to-end comparison")
 _TIER2_BASE_TOLERANCES = optimizer_drift_tolerances("tier2_stage2_e2e")
 FINAL_OBJECTIVE_REL_TOL = _TIER2_BASE_TOLERANCES["final_objective_rel_tol"]
 FIELD_ERROR_REL_TOL = _TIER2_BASE_TOLERANCES["field_error_rel_tol"]
+_TIER1_BASE_TOLERANCES = optimizer_drift_tolerances("tier1_stage2_value_gradient")
+MATCHED_OBJECTIVE_REL_TOL = _TIER1_BASE_TOLERANCES["objective_rel_tol"]
+MATCHED_GRADIENT_RTOL = _TIER1_BASE_TOLERANCES["gradient_rtol"]
+MATCHED_GRADIENT_ATOL = _TIER1_BASE_TOLERANCES["gradient_atol"]
+MATCHED_FIELD_REL_TOL = 1e-10
 
 
 def _objective_not_worse(jax_value: float, cpu_value: float) -> bool:
@@ -252,6 +257,56 @@ def _run_stage2_case(args: argparse.Namespace, backend: str, *, platform: str) -
         }
 
 
+def _run_stage2_probe(
+    args: argparse.Namespace,
+    backend: str,
+    *,
+    platform: str,
+    dofs: list[float],
+) -> dict[str, Any]:
+    script_path = _stage2_script_path()
+    with tempfile.TemporaryDirectory(prefix=f"stage2-probe-{backend}-") as temp_dir:
+        export_json = Path(temp_dir) / f"{backend}_probe.json"
+        dofs_json = Path(temp_dir) / "override_dofs.json"
+        write_json(dofs_json, list(dofs))
+        command = [
+            "--backend",
+            backend,
+            "--probe-only",
+            "--skip-postprocess",
+            "--export-objective-json",
+            str(export_json),
+            "--override-dofs-json",
+            str(dofs_json),
+            "--nphi",
+            str(args.nphi),
+            "--ntheta",
+            str(args.ntheta),
+        ]
+        if backend == "jax":
+            command.extend(["--optimizer-backend", args.optimizer_backend])
+        if args.equilibrium_path:
+            command.extend(["--equilibrium-path", args.equilibrium_path])
+        else:
+            command.extend(
+                [
+                    "--plasma-surf-filename",
+                    args.plasma_surf_filename,
+                    "--equilibria-dir",
+                    args.equilibria_dir,
+                ]
+            )
+        run_python_script(
+            script_path,
+            command,
+            env=repo_pythonpath_env(platform=platform if backend == "jax" else "cpu"),
+            cwd=REPO_ROOT,
+            bootstrap_repo=True,
+            stream_output=True,
+        )
+        return load_json(export_json)
+
+
 def _trajectory_is_finite(trajectory: list[dict]) -> bool:
     for entry in trajectory:
         values = (
@@ -278,6 +333,87 @@ def _max_geometry_deviation(cpu_results: dict, jax_results: dict) -> tuple[float
     cpu_gamma = np.asarray(cpu_results["FINAL_BANANA_GAMMA"], dtype=float)
     jax_gamma = np.asarray(jax_results["FINAL_BANANA_GAMMA"], dtype=float)
     return max_pointwise_geometry_drift(jax_gamma, cpu_gamma)
+
+
+def _build_matched_state_metrics(
+    cpu_probe: dict[str, Any],
+    jax_probe: dict[str, Any],
+) -> dict[str, Any]:
+    cpu_composite = cpu_probe["composite"]
+    jax_composite = jax_probe["composite"]
+    cpu_grad = np.asarray(cpu_composite["dJ"], dtype=float)
+    jax_grad = np.asarray(jax_composite["dJ"], dtype=float)
+    gradient_allclose = bool(
+        np.allclose(
+            jax_grad,
+            cpu_grad,
+            rtol=MATCHED_GRADIENT_RTOL,
+            atol=MATCHED_GRADIENT_ATOL,
+        )
+    )
+    return {
+        "objective_rel_diff": relative_error(
+            float(jax_composite["J"]),
+            float(cpu_composite["J"]),
+        ),
+        "field_error_rel_diff": relative_error(
+            float(jax_composite["mean_abs_relBfinal_norm"]),
+            float(cpu_composite["mean_abs_relBfinal_norm"]),
+        ),
+        "gradient_allclose": gradient_allclose,
+        "gradient_l2_rel_diff": float(
+            np.linalg.norm(jax_grad - cpu_grad) / (np.linalg.norm(cpu_grad) + 1e-30)
+        ),
+    }
+
+
+def _append_geometry_gate_failure(
+    failures: list[str],
+    *,
+    geometry_rel_diff: float,
+    geometry_rel_tol: float | None,
+) -> None:
+    if geometry_rel_tol is None:
+        return
+    if float(geometry_rel_diff) < float(geometry_rel_tol):
+        return
+    failures.append(
+        "Final banana-coil geometry drift too large: "
+        f"{float(geometry_rel_diff):.2e} "
+        f"relative (tol={float(geometry_rel_tol):.2e})"
+    )
+
+
+def _append_matched_state_failures(
+    failures: list[str],
+    *,
+    cpu_state: dict[str, Any],
+    jax_state: dict[str, Any],
+) -> None:
+    if float(cpu_state["objective_rel_diff"]) >= MATCHED_OBJECTIVE_REL_TOL:
+        failures.append(
+            "Matched CPU-final objective parity too large: "
+            f"{float(cpu_state['objective_rel_diff']):.2e}"
+        )
+    if float(jax_state["objective_rel_diff"]) >= MATCHED_OBJECTIVE_REL_TOL:
+        failures.append(
+            "Matched JAX-final objective parity too large: "
+            f"{float(jax_state['objective_rel_diff']):.2e}"
+        )
+    if float(cpu_state["field_error_rel_diff"]) >= MATCHED_FIELD_REL_TOL:
+        failures.append(
+            "Matched CPU-final field diagnostic parity too large: "
+            f"{float(cpu_state['field_error_rel_diff']):.2e}"
+        )
+    if float(jax_state["field_error_rel_diff"]) >= MATCHED_FIELD_REL_TOL:
+        failures.append(
+            "Matched JAX-final field diagnostic parity too large: "
+            f"{float(jax_state['field_error_rel_diff']):.2e}"
+        )
+    if not bool(cpu_state["gradient_allclose"]):
+        failures.append("Matched CPU-final gradient parity failed allclose gate.")
+    if not bool(jax_state["gradient_allclose"]):
+        failures.append("Matched JAX-final gradient parity failed allclose gate.")
 
 
 def _append_stage2_ondevice_failures(
@@ -339,25 +475,20 @@ def _append_stage2_ondevice_failures(
 def evaluate_stage2_e2e_comparison(comparison: dict[str, Any]) -> list[str]:
     failures: list[str] = []
     optimizer_backend = comparison.get("optimizer_backend", "scipy")
+    cpu_state = comparison["matched_cpu_state"]
+    jax_state = comparison["matched_jax_state"]
+    _append_matched_state_failures(
+        failures,
+        cpu_state=cpu_state,
+        jax_state=jax_state,
+    )
     if optimizer_backend == "ondevice":
         _append_stage2_ondevice_failures(failures, comparison)
-    else:
-        if float(comparison["final_objective_rel_diff"]) >= FINAL_OBJECTIVE_REL_TOL:
-            failures.append(
-                "Final objective relative difference too large: "
-                f"{float(comparison['final_objective_rel_diff']):.2e}"
-            )
-        if float(comparison["field_error_rel_diff"]) >= FIELD_ERROR_REL_TOL:
-            failures.append(
-                "Final field error relative difference too large: "
-                f"{float(comparison['field_error_rel_diff']):.2e}"
-            )
-        if float(comparison["max_geometry_pointwise_rel"]) >= float(comparison["geometry_rel_tol"]):
-            failures.append(
-                "Final banana-coil geometry drift too large: "
-                f"{float(comparison['max_geometry_pointwise_rel']):.2e} "
-                f"relative (tol={float(comparison['geometry_rel_tol']):.2e})"
-            )
+    _append_geometry_gate_failure(
+        failures,
+        geometry_rel_diff=float(comparison["max_geometry_pointwise_rel"]),
+        geometry_rel_tol=comparison["geometry_rel_tol"],
+    )
     if not bool(comparison["cpu_trajectory_finite"]):
         failures.append("CPU trajectory contains NaN/inf.")
     if not bool(comparison["jax_trajectory_finite"]):
@@ -373,8 +504,10 @@ def build_stage2_e2e_payload(
     provenance: dict[str, Any],
     cpu_case: dict[str, Any],
     jax_case: dict[str, Any],
+    cpu_final_state_probes: dict[str, dict[str, Any]],
+    jax_final_state_probes: dict[str, dict[str, Any]],
     *,
-    geometry_rel_tol: float,
+    geometry_rel_tol: float | None,
 ) -> dict[str, Any]:
     cpu_results = cpu_case["results"]
     jax_results = jax_case["results"]
@@ -414,6 +547,14 @@ def build_stage2_e2e_payload(
         "jax_trajectory_finite": _trajectory_is_finite(jax_trajectory),
         "cpu_trajectory_improves": _trajectory_improves(cpu_trajectory),
         "jax_trajectory_improves": _trajectory_improves(jax_trajectory),
+        "matched_cpu_state": _build_matched_state_metrics(
+            cpu_final_state_probes["cpu"],
+            cpu_final_state_probes["jax"],
+        ),
+        "matched_jax_state": _build_matched_state_metrics(
+            jax_final_state_probes["cpu"],
+            jax_final_state_probes["jax"],
+        ),
         **ondevice_metrics,
     }
     failures = evaluate_stage2_e2e_comparison(comparison)
@@ -438,6 +579,10 @@ def build_stage2_e2e_payload(
         "jax_results": jax_results,
         "cpu_trajectory": cpu_trajectory,
         "jax_trajectory": jax_trajectory,
+        "matched_state_probes": {
+            "cpu_final_state": cpu_final_state_probes,
+            "jax_final_state": jax_final_state_probes,
+        },
         "timings": timings,
         "comparison": comparison,
         "failures": failures,
@@ -479,11 +624,33 @@ def main() -> None:
 
     cpu_case = _run_stage2_case(args, "cpu", platform="auto")
     jax_case = _run_stage2_case(args, "jax", platform=args.platform)
+    cpu_final_dofs = cpu_case["results"]["FINAL_DOFS"]
+    jax_final_dofs = jax_case["results"]["FINAL_DOFS"]
+    cpu_final_state_probes = {
+        "cpu": _run_stage2_probe(args, "cpu", platform="auto", dofs=cpu_final_dofs),
+        "jax": _run_stage2_probe(
+            args,
+            "jax",
+            platform=args.platform,
+            dofs=cpu_final_dofs,
+        ),
+    }
+    jax_final_state_probes = {
+        "cpu": _run_stage2_probe(args, "cpu", platform="auto", dofs=jax_final_dofs),
+        "jax": _run_stage2_probe(
+            args,
+            "jax",
+            platform=args.platform,
+            dofs=jax_final_dofs,
+        ),
+    }
 
     payload = build_stage2_e2e_payload(
         provenance,
         cpu_case,
         jax_case,
+        cpu_final_state_probes,
+        jax_final_state_probes,
         geometry_rel_tol=geometry_rel_tol,
     )
     comparison = payload["comparison"]

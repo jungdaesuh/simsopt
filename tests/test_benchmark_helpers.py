@@ -933,9 +933,33 @@ def _stage2_e2e_comparison_case(**overrides):
         "jax_trajectory_finite": True,
         "cpu_trajectory_improves": True,
         "jax_trajectory_improves": True,
+        "matched_cpu_state": {
+            "objective_rel_diff": 1e-12,
+            "field_error_rel_diff": 1e-12,
+            "gradient_allclose": True,
+            "gradient_l2_rel_diff": 1e-12,
+        },
+        "matched_jax_state": {
+            "objective_rel_diff": 1e-12,
+            "field_error_rel_diff": 1e-12,
+            "gradient_allclose": True,
+            "gradient_l2_rel_diff": 1e-12,
+        },
     }
     comparison.update(overrides)
     return comparison
+
+
+def _stage2_probe_payload_case(**overrides):
+    payload = {
+        "composite": {
+            "J": 1.0,
+            "mean_abs_relBfinal_norm": 0.01,
+            "dJ": [0.5, -0.25],
+        }
+    }
+    payload.update(overrides)
+    return payload
 
 
 def _stage2_e2e_results_case(**overrides):
@@ -956,58 +980,122 @@ def _stage2_e2e_results_case(**overrides):
     return results
 
 
+def _stage2_ondevice_quality_case(**overrides):
+    comparison = {
+        "optimizer_backend": "ondevice",
+        "jax_objective_not_worse_than_cpu": True,
+        "jax_field_error_not_worse_than_cpu": True,
+        "jax_curve_length_within_target": True,
+        "jax_cc_distance_within_threshold": True,
+        "jax_curvature_not_worse_than_cpu": True,
+        "jax_self_intersecting": False,
+    }
+    comparison.update(overrides)
+    return _stage2_e2e_comparison_case(**comparison)
+
+
 def test_stage2_e2e_comparison_keeps_field_error_as_hard_gate():
     failures = evaluate_stage2_e2e_comparison(
-        _stage2_e2e_comparison_case(field_error_rel_diff=2e-4)
+        _stage2_e2e_comparison_case(
+            matched_cpu_state={
+                "objective_rel_diff": 1e-12,
+                "field_error_rel_diff": 2e-4,
+                "gradient_allclose": True,
+                "gradient_l2_rel_diff": 1e-12,
+            }
+        )
     )
 
-    assert any("Final field error relative difference too large" in failure for failure in failures)
+    assert any("Matched CPU-final field diagnostic parity too large" in failure for failure in failures)
 
 
-def test_stage2_e2e_comparison_relaxes_short_run_geometry_gate():
-    failures = evaluate_stage2_e2e_comparison(
-        _stage2_e2e_comparison_case(max_geometry_pointwise_rel=3e-6)
-    )
-
-    assert failures == []
-
-
-def test_stage2_e2e_comparison_still_rejects_large_geometry_drift():
-    failures = evaluate_stage2_e2e_comparison(
-        _stage2_e2e_comparison_case(max_geometry_pointwise_rel=6e-6)
-    )
-
-    assert any("Final banana-coil geometry drift too large" in failure for failure in failures)
-
-
-def test_stage2_e2e_comparison_accepts_ondevice_solution_quality_without_geometry_parity():
+def test_stage2_e2e_comparison_disables_short_run_geometry_gate_when_matched_state_checks_pass():
     failures = evaluate_stage2_e2e_comparison(
         _stage2_e2e_comparison_case(
-            optimizer_backend="ondevice",
-            jax_objective_not_worse_than_cpu=True,
-            jax_field_error_not_worse_than_cpu=True,
-            jax_curve_length_within_target=True,
-            jax_cc_distance_within_threshold=True,
-            jax_curvature_not_worse_than_cpu=True,
-            jax_self_intersecting=False,
+            max_geometry_pointwise_rel=3e-6,
+            geometry_rel_tol=None,
         )
     )
 
     assert failures == []
 
 
-def test_stage2_e2e_comparison_rejects_ondevice_constraint_violation():
+def test_stage2_e2e_comparison_keeps_geometry_report_only_for_short_run_smoke():
     failures = evaluate_stage2_e2e_comparison(
         _stage2_e2e_comparison_case(
-            optimizer_backend="ondevice",
-            jax_objective_not_worse_than_cpu=True,
-            jax_field_error_not_worse_than_cpu=True,
-            jax_curve_length_within_target=True,
+            max_geometry_pointwise_rel=6e-6,
+            geometry_rel_tol=None,
+        )
+    )
+
+    assert failures == []
+
+
+def test_stage2_e2e_comparison_still_rejects_large_geometry_drift_once_gate_is_enabled():
+    failures = evaluate_stage2_e2e_comparison(
+        _stage2_e2e_comparison_case(
+            max_geometry_pointwise_rel=6e-6,
+            geometry_rel_tol=5e-6,
+        )
+    )
+
+    assert any("Final banana-coil geometry drift too large" in failure for failure in failures)
+
+
+def test_stage2_e2e_comparison_rejects_matched_state_gradient_mismatch():
+    failures = evaluate_stage2_e2e_comparison(
+        _stage2_e2e_comparison_case(
+            matched_jax_state={
+                "objective_rel_diff": 1e-12,
+                "field_error_rel_diff": 1e-12,
+                "gradient_allclose": False,
+                "gradient_l2_rel_diff": 1e-3,
+            }
+        )
+    )
+
+    assert any("Matched JAX-final gradient parity failed" in failure for failure in failures)
+
+
+def test_stage2_e2e_comparison_accepts_ondevice_solution_quality_without_geometry_parity():
+    failures = evaluate_stage2_e2e_comparison(_stage2_ondevice_quality_case(geometry_rel_tol=None))
+
+    assert failures == []
+
+
+def test_stage2_e2e_comparison_rejects_ondevice_matched_state_gradient_mismatch():
+    failures = evaluate_stage2_e2e_comparison(
+        _stage2_ondevice_quality_case(
+            geometry_rel_tol=None,
+            matched_jax_state={
+                "objective_rel_diff": 1e-12,
+                "field_error_rel_diff": 1e-12,
+                "gradient_allclose": False,
+                "gradient_l2_rel_diff": 1e-3,
+            },
+        )
+    )
+
+    assert any("Matched JAX-final gradient parity failed" in failure for failure in failures)
+
+
+def test_stage2_e2e_comparison_rejects_ondevice_geometry_drift_when_explicit_gate_enabled():
+    failures = evaluate_stage2_e2e_comparison(
+        _stage2_ondevice_quality_case(
+            max_geometry_pointwise_rel=6e-6,
+            geometry_rel_tol=5e-6,
+        )
+    )
+
+    assert any("Final banana-coil geometry drift too large" in failure for failure in failures)
+
+
+def test_stage2_e2e_comparison_rejects_ondevice_constraint_violation():
+    failures = evaluate_stage2_e2e_comparison(
+        _stage2_ondevice_quality_case(
             jax_cc_distance_within_threshold=False,
             jax_final_cc_distance=0.04,
             cc_threshold=0.05,
-            jax_curvature_not_worse_than_cpu=True,
-            jax_self_intersecting=False,
         )
     )
 
@@ -1078,6 +1166,14 @@ def test_stage2_e2e_payload_preserves_trajectory_and_timing_artifacts():
         provenance,
         cpu_case,
         jax_case,
+        {
+            "cpu": _stage2_probe_payload_case(),
+            "jax": _stage2_probe_payload_case(),
+        },
+        {
+            "cpu": _stage2_probe_payload_case(),
+            "jax": _stage2_probe_payload_case(),
+        },
         geometry_rel_tol=5e-6,
     )
 
@@ -1097,6 +1193,8 @@ def test_stage2_e2e_payload_preserves_trajectory_and_timing_artifacts():
     assert payload["jax_trajectory"] == jax_case["trajectory"]
     assert payload["comparison"]["cpu_elapsed_s"] == pytest.approx(12.5)
     assert payload["comparison"]["jax_elapsed_s"] == pytest.approx(9.5)
+    assert payload["comparison"]["matched_cpu_state"]["gradient_allclose"] is True
+    assert payload["comparison"]["matched_jax_state"]["gradient_allclose"] is True
     assert payload["timings"]["cpu_outer_elapsed_s"] == pytest.approx(12.5)
     assert payload["timings"]["jax_outer_elapsed_s"] == pytest.approx(12.75)
     assert payload["timings"]["jax_primary_elapsed_s"] == pytest.approx(9.5)
