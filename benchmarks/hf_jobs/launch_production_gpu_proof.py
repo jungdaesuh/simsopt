@@ -65,7 +65,7 @@ def _build_job_command(args: argparse.Namespace) -> str:
         f"cd {shlex.quote(repo_dir)}",
         f"git checkout {shlex.quote(args.repo_sha)}",
         "git submodule update --init --recursive",
-        "bash benchmarks/hf_jobs/bootstrap_runtime.sh",
+        ". benchmarks/hf_jobs/bootstrap_runtime.sh",
         "python -m pip install -v -e .",
         (
             "bash benchmarks/hf_jobs/run_production_gpu_proof.sh "
