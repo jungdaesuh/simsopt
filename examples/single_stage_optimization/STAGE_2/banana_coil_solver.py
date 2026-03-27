@@ -30,6 +30,9 @@ DEFAULT_EQUILIBRIA_DIR = (
     if os.path.isdir(DATABASE_EQUILIBRIA_DIR)
     else os.path.join(EXAMPLE_ROOT, "equilibria")
 )
+STAGE2_TARGET_OBJECTIVE_DOF_LAYOUT_ERROR = (
+    "Stage 2 target objective DOF layout does not match the composite objective."
+)
 
 
 def parse_args():
@@ -569,8 +572,7 @@ def time_stage2_callback_result(callback):
 
 def profile_stage2_named_callbacks(callbacks):
     return {
-        name: time_stage2_callback(callback)
-        for name, callback in callbacks.items()
+        name: time_stage2_callback(callback) for name, callback in callbacks.items()
     }
 
 
@@ -688,6 +690,7 @@ def profile_stage2_squared_flux_internal_components(Jf):
         dominant_field_B_vjp_components,
         dominant_field_B_vjp_coils,
     )
+
 
 @dataclass(frozen=True)
 class Stage2ObjectiveContext:
@@ -829,8 +832,8 @@ def evaluate_stage2_objective(
             bs_jax=context.bs_jax,
         )
         diagnostics["coil_coil_distance"] = float(context.Jccdist.shortest_distance())
-    distance_constraint_violated = (
-        float(diagnostics["coil_coil_distance"]) <= float(context.cc_threshold)
+    distance_constraint_violated = float(diagnostics["coil_coil_distance"]) <= float(
+        context.cc_threshold
     )
     snapshot = {
         "J": J,
@@ -863,16 +866,20 @@ def profile_stage2_explicit_step(
     field_bs = resolve_stage2_field_bs(context.new_bs, context.bs_jax)
     extra_diagnostic_callbacks = {
         "Jf_J_s": lambda: float(context.Jf.J()),
-        "mean_abs_relBfinal_norm_s": lambda: compute_mean_abs_relbn(context.new_surf, field_bs),
+        "mean_abs_relBfinal_norm_s": lambda: compute_mean_abs_relbn(
+            context.new_surf, field_bs
+        ),
         "curve_length_s": lambda: float(context.Jls.J()),
         "coil_coil_distance_s": lambda: float(context.Jccdist.shortest_distance()),
         "curvature_s": lambda: compute_stage2_max_curvature_value(context.Jc),
     }
-    extra_diagnostic_timings = profile_stage2_named_callbacks(extra_diagnostic_callbacks)
+    extra_diagnostic_timings = profile_stage2_named_callbacks(
+        extra_diagnostic_callbacks
+    )
     term_profile = profile_stage2_objective_terms(context)
 
-    extra_diagnostic_total_s, dominant_extra_diagnostics = build_stage2_profile_breakdown(
-        extra_diagnostic_timings
+    extra_diagnostic_total_s, dominant_extra_diagnostics = (
+        build_stage2_profile_breakdown(extra_diagnostic_timings)
     )
     (
         squared_flux_internal_timings,
@@ -912,9 +919,7 @@ def resolve_stage2_optimizer_method(field_backend, optimizer_backend):
     )
 
     if optimizer_backend not in VALID_OPTIMIZER_BACKENDS:
-        raise ValueError(
-            "optimizer_backend must be one of: scipy, hybrid, ondevice."
-        )
+        raise ValueError("optimizer_backend must be one of: scipy, hybrid, ondevice.")
     if field_backend != "jax" and optimizer_backend != "scipy":
         raise ValueError(
             "Stage 2 CPU/reference lane only supports optimizer_backend='scipy'."
@@ -933,6 +938,14 @@ def resolve_stage2_optimizer_method(field_backend, optimizer_backend):
 def should_build_stage2_target_objective(field_backend, optimizer_backend):
     """Return whether the scalar JAX Stage 2 objective should drive optimization."""
     return field_backend == "jax" and optimizer_backend == "ondevice"
+
+
+def validate_stage2_target_objective_dof_layout(
+    target_objective_bundle,
+    dofs,
+):
+    if target_objective_bundle.expected_dof_count != dofs.size:
+        raise RuntimeError(STAGE2_TARGET_OBJECTIVE_DOF_LAYOUT_ERROR)
 
 
 def resolve_stage2_field_diagnostic_stride(args):
@@ -1140,7 +1153,9 @@ def append_stage2_trajectory_snapshot(trajectory_sink, snapshot, *, eval_index=N
         return
     trajectory_sink.append(
         {
-            "eval_index": len(trajectory_sink) + 1 if eval_index is None else int(eval_index),
+            "eval_index": len(trajectory_sink) + 1
+            if eval_index is None
+            else int(eval_index),
             **snapshot,
         }
     )
@@ -1282,7 +1297,6 @@ if __name__ == "__main__":
         CurveLength,
         CurveCurveDistanceBarrier,
         LpCurveCurvatureBarrier,
-        CurveCWSFourier,
         CurveCWSFourierCPP,
     )
     from simsopt.objectives import SquaredFlux, QuadraticPenalty
@@ -1390,7 +1404,9 @@ if __name__ == "__main__":
     LENGTH_TARGET = max(args.length_target, 1.75)  # Hardware minimum: 1.75m
 
     # Threshold and weight for the coil-to-coil distance penalty
-    CC_THRESHOLD = max(args.cc_threshold, 0.05)  # Hardware minimum: 5cm coil-coil spacing
+    CC_THRESHOLD = max(
+        args.cc_threshold, 0.05
+    )  # Hardware minimum: 5cm coil-coil spacing
     CC_WEIGHT = args.cc_weight
 
     # Threshold and weight for the coil curvature penalty
@@ -1436,9 +1452,11 @@ if __name__ == "__main__":
     # minimize gets called, optimizes based on degrees of freedom from objective function
     dofs = JF.x
     if args.override_dofs_json is not None:
-        dofs = load_stage2_override_dofs(args.override_dofs_json, np.asarray(dofs).shape)
+        dofs = load_stage2_override_dofs(
+            args.override_dofs_json, np.asarray(dofs).shape
+        )
         JF.x = np.asarray(dofs, dtype=float)
-    trajectory = [] if args.trajectory_json else None
+    trajectory: list[dict[str, object]] | None = [] if args.trajectory_json else None
     final_snapshot = None
     optimizer_timings = None
     target_objective_bundle = None
@@ -1447,10 +1465,10 @@ if __name__ == "__main__":
         args.optimizer_backend,
     )
     needs_target_probe_payload = (
-        args.export_objective_json is not None
-        and args.optimizer_backend == "ondevice"
+        args.export_objective_json is not None and args.optimizer_backend == "ondevice"
     )
-    if use_scalar_objective or needs_target_probe_payload:
+    needs_target_objective_bundle = use_scalar_objective or needs_target_probe_payload
+    if needs_target_objective_bundle:
         target_objective_bundle = build_stage2_target_objective(
             surface=new_surf,
             tf_coils=tf_coils,
@@ -1465,10 +1483,10 @@ if __name__ == "__main__":
             curvature_threshold=CURVATURE_THRESHOLD,
             curvature_p_norm=args.curvature_p_norm,
         )
-        if use_scalar_objective and target_objective_bundle.expected_dof_count != dofs.size:
-            raise RuntimeError(
-                "Stage 2 target objective DOF layout does not match the composite objective."
-            )
+        validate_stage2_target_objective_dof_layout(
+            target_objective_bundle,
+            dofs,
+        )
     if args.record_warm_timings and not use_scalar_objective:
         raise ValueError(
             "--record-warm-timings is only supported on the JAX Stage 2 ondevice lane."
@@ -1559,7 +1577,9 @@ if __name__ == "__main__":
                 args.trajectory_json,
                 {"backend": args.backend, "evaluations": trajectory or []},
             )
-        print("Probe-only mode requested; exiting before optimization and post-processing.")
+        print(
+            "Probe-only mode requested; exiting before optimization and post-processing."
+        )
         sys.exit(0)
     if args.init_only:
         res_nit = 0
@@ -1602,6 +1622,7 @@ if __name__ == "__main__":
         JF.x = np.asarray(res.x, dtype=float)
         res_nit = res.nit
         if use_scalar_objective:
+            assert target_objective_bundle is not None
             final_snapshot = capture_stage2_trajectory_snapshot(
                 trajectory,
                 JF,
@@ -1687,7 +1708,9 @@ if __name__ == "__main__":
         )
     fieldError = compute_mean_abs_relbn(new_surf, new_bs)
     if args.skip_postprocess:
-        print("Skipping Stage 2 post-processing artifacts because --skip-postprocess was provided.")
+        print(
+            "Skipping Stage 2 post-processing artifacts because --skip-postprocess was provided."
+        )
     else:
         curves_to_vtk(new_curves, OUT_DIR_ITER + "curves_opt", close=True)
         new_surf.to_vtk(OUT_DIR_ITER + "surf_opt", extra_data=pointData)
@@ -1770,7 +1793,9 @@ if __name__ == "__main__":
         "FIELD_ERROR": float(fieldError),
         "SELF_INTERSECTING": intersecting,
         "MAX_CURVATURE": float(np.max(new_banana_curve.kappa())),
-        "FINAL_BANANA_GAMMA": np.asarray(new_banana_curve.gamma(), dtype=float).tolist(),
+        "FINAL_BANANA_GAMMA": np.asarray(
+            new_banana_curve.gamma(), dtype=float
+        ).tolist(),
     }
     if optimizer_timings is not None:
         results["OPTIMIZER_TIMINGS"] = optimizer_timings

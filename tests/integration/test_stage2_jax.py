@@ -2423,6 +2423,36 @@ class TestStage2OptimizerContract:
         )
 
     @pytest.mark.parametrize(
+        ("field_backend", "optimizer_backend", "export_objective_json"),
+        [
+            ("jax", "ondevice", None),
+            ("cpu", "ondevice", "dummy.json"),
+        ],
+    )
+    def test_stage2_target_objective_dof_layout_guard_covers_active_target_lanes(
+        self,
+        field_backend,
+        optimizer_backend,
+        export_objective_json,
+    ):
+        stage2_script = _load_stage2_script_module()
+        target_objective_bundle = types.SimpleNamespace(expected_dof_count=3)
+        dofs = np.zeros(2, dtype=float)
+
+        assert stage2_script.should_build_stage2_target_objective(
+            field_backend,
+            optimizer_backend,
+        ) or (export_objective_json is not None and optimizer_backend == "ondevice")
+        with pytest.raises(
+            RuntimeError,
+            match=stage2_script.STAGE2_TARGET_OBJECTIVE_DOF_LAYOUT_ERROR,
+        ):
+            stage2_script.validate_stage2_target_objective_dof_layout(
+                target_objective_bundle,
+                dofs,
+            )
+
+    @pytest.mark.parametrize(
         ("optimizer_backend", "expected_source"),
         [
             ("scipy", "explicit-composite"),
