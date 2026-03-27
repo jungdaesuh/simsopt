@@ -58,6 +58,24 @@ MATCHED_GRADIENT_ATOL = _TIER1_BASE_TOLERANCES["gradient_atol"]
 STAGE2_MATCHED_GRADIENT_ATOL = max(MATCHED_GRADIENT_ATOL, 5e-12)
 MATCHED_FIELD_REL_TOL = 1e-10
 
+_CPU_ONDEVICE_ENDPOINT_LANE = ("jax", "cpu", "cpu-ondevice")
+_CPU_REFERENCE_ENDPOINT_LANE = ("cpu", "auto", "cpu-reference")
+
+
+def _resolve_stage2_endpoint_cpu_lane(
+    optimizer_backend: str,
+) -> tuple[str, str, str]:
+    """Return the CPU-side endpoint lane for the requested Stage 2 comparison."""
+    if optimizer_backend == "ondevice":
+        return _CPU_ONDEVICE_ENDPOINT_LANE
+    return _CPU_REFERENCE_ENDPOINT_LANE
+
+
+def _cpu_endpoint_lane_label(cpu_lane_kind: str) -> str:
+    if cpu_lane_kind == _CPU_ONDEVICE_ENDPOINT_LANE[2]:
+        return "CPU ondevice lane"
+    return "CPU reference lane"
+
 
 def _objective_not_worse(jax_value: float, cpu_value: float) -> bool:
     return float(jax_value) <= float(cpu_value) * (1.0 + FINAL_OBJECTIVE_REL_TOL)
@@ -144,8 +162,12 @@ def parse_args() -> argparse.Namespace:
         default="auto",
         help="JAX platform to request before import/use.",
     )
-    parser.add_argument("--nphi", type=int, default=255, help="Surface toroidal grid points.")
-    parser.add_argument("--ntheta", type=int, default=64, help="Surface poloidal grid points.")
+    parser.add_argument(
+        "--nphi", type=int, default=255, help="Surface toroidal grid points."
+    )
+    parser.add_argument(
+        "--ntheta", type=int, default=64, help="Surface poloidal grid points."
+    )
     parser.add_argument(
         "--maxiter",
         type=int,
@@ -235,12 +257,10 @@ def _run_stage2_case(args: argparse.Namespace, backend: str, *, platform: str) -
             )
 
         start = time.perf_counter()
-        result = run_python_script(
+        run_python_script(
             script_path,
             command,
-            env=repo_pythonpath_env(
-                platform=platform if backend == "jax" else "cpu"
-            ),
+            env=repo_pythonpath_env(platform=platform if backend == "jax" else "cpu"),
             cwd=REPO_ROOT,
             bootstrap_repo=True,
             stream_output=True,
@@ -283,9 +303,9 @@ def _run_stage2_probe(
             str(args.nphi),
             "--ntheta",
             str(args.ntheta),
+            "--optimizer-backend",
+            args.optimizer_backend,
         ]
-        if backend == "jax":
-            command.extend(["--optimizer-backend", args.optimizer_backend])
         if args.equilibrium_path:
             command.extend(["--equilibrium-path", args.equilibrium_path])
         else:
@@ -306,6 +326,30 @@ def _run_stage2_probe(
             stream_output=True,
         )
         return load_json(export_json)
+
+
+def _run_stage2_matched_state_probes(
+    args: argparse.Namespace,
+    *,
+    cpu_backend: str,
+    cpu_platform: str,
+    jax_platform: str,
+    dofs: list[float],
+) -> dict[str, dict[str, Any]]:
+    return {
+        "cpu": _run_stage2_probe(
+            args,
+            cpu_backend,
+            platform=cpu_platform,
+            dofs=dofs,
+        ),
+        "jax": _run_stage2_probe(
+            args,
+            "jax",
+            platform=jax_platform,
+            dofs=dofs,
+        ),
+    }
 
 
 def _trajectory_is_finite(trajectory: list[dict]) -> bool:
@@ -341,7 +385,9 @@ def _trajectory_improves(trajectory: list[dict]) -> bool:
     return float(trajectory[-1]["J"]) <= float(trajectory[0]["J"])
 
 
-def _max_geometry_deviation(cpu_results: dict, jax_results: dict) -> tuple[float, float]:
+def _max_geometry_deviation(
+    cpu_results: dict, jax_results: dict
+) -> tuple[float, float]:
     cpu_gamma = np.asarray(cpu_results["FINAL_BANANA_GAMMA"], dtype=float)
     jax_gamma = np.asarray(jax_results["FINAL_BANANA_GAMMA"], dtype=float)
     return max_pointwise_geometry_drift(jax_gamma, cpu_gamma)
@@ -432,11 +478,12 @@ def _append_stage2_ondevice_failures(
     failures: list[str],
     comparison: dict[str, Any],
 ) -> None:
+    cpu_lane_label = str(comparison.get("cpu_lane_label", "CPU lane"))
     checks = [
         (
             not bool(comparison["jax_objective_not_worse_than_cpu"]),
             lambda: (
-                "Final objective is worse than the CPU reference beyond tolerance: "
+                f"Final objective is worse than the {cpu_lane_label} beyond tolerance: "
                 f"jax={float(comparison['jax_final_objective']):.6e}, "
                 f"cpu={float(comparison['cpu_final_objective']):.6e}"
             ),
@@ -444,7 +491,7 @@ def _append_stage2_ondevice_failures(
         (
             not bool(comparison["jax_field_error_not_worse_than_cpu"]),
             lambda: (
-                "Final field error is worse than the CPU reference beyond tolerance: "
+                f"Final field error is worse than the {cpu_lane_label} beyond tolerance: "
                 f"jax={float(comparison['jax_field_error']):.6e}, "
                 f"cpu={float(comparison['cpu_field_error']):.6e}"
             ),
@@ -468,7 +515,7 @@ def _append_stage2_ondevice_failures(
         (
             not bool(comparison["jax_curvature_not_worse_than_cpu"]),
             lambda: (
-                "Final banana-coil curvature is worse than the CPU reference envelope: "
+                f"Final banana-coil curvature is worse than the {cpu_lane_label} envelope: "
                 f"jax={float(comparison['jax_max_curvature']):.6e}, "
                 f"cpu={float(comparison['cpu_max_curvature']):.6e}, "
                 f"threshold={float(comparison['curvature_threshold']):.6e}"
@@ -519,6 +566,7 @@ def build_stage2_e2e_payload(
     cpu_final_state_probes: dict[str, dict[str, Any]],
     jax_final_state_probes: dict[str, dict[str, Any]],
     *,
+    cpu_lane_kind: str,
     geometry_rel_tol: float | None,
 ) -> dict[str, Any]:
     cpu_results = cpu_case["results"]
@@ -540,6 +588,8 @@ def build_stage2_e2e_payload(
     jax_optimizer_backend = str(jax_results.get("optimizer_backend", "scipy"))
     comparison = {
         "optimizer_backend": jax_optimizer_backend,
+        "cpu_lane_kind": cpu_lane_kind,
+        "cpu_lane_label": _cpu_endpoint_lane_label(cpu_lane_kind),
         "final_objective_rel_diff": final_objective_rel_diff,
         "field_error_rel_diff": relative_error(
             ondevice_metrics["jax_field_error"],
@@ -632,30 +682,33 @@ def main() -> None:
             ),
         },
     )
+    cpu_backend, cpu_platform, cpu_lane_kind = _resolve_stage2_endpoint_cpu_lane(
+        args.optimizer_backend
+    )
+    provenance["cpu_endpoint_lane"] = {
+        "backend": cpu_backend,
+        "platform": cpu_platform,
+        "kind": cpu_lane_kind,
+    }
     print_provenance(provenance)
-
-    cpu_case = _run_stage2_case(args, "cpu", platform="auto")
+    cpu_case = _run_stage2_case(args, cpu_backend, platform=cpu_platform)
     jax_case = _run_stage2_case(args, "jax", platform=args.platform)
     cpu_final_dofs = cpu_case["results"]["FINAL_DOFS"]
     jax_final_dofs = jax_case["results"]["FINAL_DOFS"]
-    cpu_final_state_probes = {
-        "cpu": _run_stage2_probe(args, "cpu", platform="auto", dofs=cpu_final_dofs),
-        "jax": _run_stage2_probe(
-            args,
-            "jax",
-            platform=args.platform,
-            dofs=cpu_final_dofs,
-        ),
-    }
-    jax_final_state_probes = {
-        "cpu": _run_stage2_probe(args, "cpu", platform="auto", dofs=jax_final_dofs),
-        "jax": _run_stage2_probe(
-            args,
-            "jax",
-            platform=args.platform,
-            dofs=jax_final_dofs,
-        ),
-    }
+    cpu_final_state_probes = _run_stage2_matched_state_probes(
+        args,
+        cpu_backend=cpu_backend,
+        cpu_platform=cpu_platform,
+        jax_platform=args.platform,
+        dofs=cpu_final_dofs,
+    )
+    jax_final_state_probes = _run_stage2_matched_state_probes(
+        args,
+        cpu_backend=cpu_backend,
+        cpu_platform=cpu_platform,
+        jax_platform=args.platform,
+        dofs=jax_final_dofs,
+    )
 
     payload = build_stage2_e2e_payload(
         provenance,
@@ -663,6 +716,7 @@ def main() -> None:
         jax_case,
         cpu_final_state_probes,
         jax_final_state_probes,
+        cpu_lane_kind=cpu_lane_kind,
         geometry_rel_tol=geometry_rel_tol,
     )
     comparison = payload["comparison"]

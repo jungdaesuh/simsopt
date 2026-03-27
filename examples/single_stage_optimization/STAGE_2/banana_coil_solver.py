@@ -1016,6 +1016,36 @@ def run_stage2_optimizer_timed(
     return result, float(time.perf_counter() - start)
 
 
+def _build_stage2_probe_composite_payload(
+    context,
+    *,
+    target_objective_bundle=None,
+):
+    """Return the probe composite snapshot/gradient using the active optimizer SSOT."""
+    explicit_snapshot, explicit_grad, _ = evaluate_stage2_objective(
+        context,
+    )
+    objective_source = "explicit-composite"
+    composite_value = float(explicit_snapshot["J"])
+    composite_grad = np.asarray(explicit_grad, dtype=float)
+    if target_objective_bundle is not None:
+        composite_value, composite_grad = jax.value_and_grad(
+            target_objective_bundle.objective
+        )(np.asarray(context.JF.x, dtype=np.float64))
+        composite_value = float(composite_value)
+        composite_grad = np.asarray(composite_grad, dtype=float)
+        objective_source = "target-objective"
+    return (
+        {
+            **explicit_snapshot,
+            "J": composite_value,
+            "grad_norm": float(np.linalg.norm(composite_grad)),
+            "objective_source": objective_source,
+        },
+        composite_grad,
+    )
+
+
 def build_stage2_probe_payload(
     JF,
     new_bs,
@@ -1038,6 +1068,7 @@ def build_stage2_probe_payload(
     cc_weight,
     cc_threshold,
     curvature_weight,
+    target_objective_bundle=None,
 ):
     """Serialize the initialized Stage 2 objective state for parity probes."""
     context = make_stage2_objective_context(
@@ -1056,8 +1087,9 @@ def build_stage2_probe_payload(
         curvature_weight,
         bs_jax=bs_jax,
     )
-    composite_snapshot, composite_grad, _ = evaluate_stage2_objective(
+    composite_snapshot, composite_grad = _build_stage2_probe_composite_payload(
         context,
+        target_objective_bundle=target_objective_bundle,
     )
     flux_grad = np.asarray(Jf.dJ(), dtype=float)
     return {
@@ -1414,7 +1446,11 @@ if __name__ == "__main__":
         args.backend,
         args.optimizer_backend,
     )
-    if use_scalar_objective:
+    needs_target_probe_payload = (
+        args.export_objective_json is not None
+        and args.optimizer_backend == "ondevice"
+    )
+    if use_scalar_objective or needs_target_probe_payload:
         target_objective_bundle = build_stage2_target_objective(
             surface=new_surf,
             tf_coils=tf_coils,
@@ -1429,7 +1465,7 @@ if __name__ == "__main__":
             curvature_threshold=CURVATURE_THRESHOLD,
             curvature_p_norm=args.curvature_p_norm,
         )
-        if target_objective_bundle.expected_dof_count != dofs.size:
+        if use_scalar_objective and target_objective_bundle.expected_dof_count != dofs.size:
             raise RuntimeError(
                 "Stage 2 target objective DOF layout does not match the composite objective."
             )
@@ -1489,6 +1525,11 @@ if __name__ == "__main__":
             cc_weight=CC_WEIGHT,
             cc_threshold=CC_THRESHOLD,
             curvature_weight=CURVATURE_WEIGHT,
+            target_objective_bundle=(
+                target_objective_bundle
+                if args.optimizer_backend == "ondevice"
+                else None
+            ),
         )
         write_json_file(args.export_objective_json, probe_payload)
         print(f"Wrote Stage 2 objective snapshot to {args.export_objective_json}")

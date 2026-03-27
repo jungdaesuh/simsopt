@@ -59,6 +59,7 @@ from benchmarks.stage2_e2e_comparison import (
     build_stage2_e2e_payload,
     evaluate_stage2_e2e_comparison,
 )
+import benchmarks.stage2_e2e_comparison as stage2_e2e_comparison_module
 from benchmarks.tier5_performance_characterization import (
     safe_speedup,
     summarize_pair_probe,
@@ -193,7 +194,10 @@ def test_single_stage_init_defaults_to_reduced_grid_smoke_fixture(monkeypatch):
     assert args.ntheta == DEFAULT_SMOKE_NTHETA
     assert args.mpol == DEFAULT_SMOKE_MPOL
     assert args.ntor == DEFAULT_SMOKE_NTOR
-    assert args.optimizer_backend == single_stage_init_parity_module.TARGET_OPTIMIZER_BACKEND
+    assert (
+        args.optimizer_backend
+        == single_stage_init_parity_module.TARGET_OPTIMIZER_BACKEND
+    )
     assert args.boozer_optimizer_backend is None
     assert args.maxiter == DEFAULT_OUTER_MAXITER
 
@@ -236,7 +240,9 @@ def test_apply_compilation_cache_policy_defaults_to_disabled(monkeypatch):
     assert _JAX_COMPILATION_CACHE_ENV_VAR not in os.environ
 
 
-def test_apply_compilation_cache_policy_honors_explicit_cache_dir(monkeypatch, tmp_path):
+def test_apply_compilation_cache_policy_honors_explicit_cache_dir(
+    monkeypatch, tmp_path
+):
     monkeypatch.delenv(_SIMSOPT_DISABLE_COMPILATION_CACHE_ENV_VAR, raising=False)
 
     metadata = apply_compilation_cache_policy(tmp_path / "jax-cache")
@@ -398,7 +404,9 @@ def test_run_python_script_stream_output_preserves_failure_details(tmp_path, cap
         encoding="utf-8",
     )
 
-    with pytest.raises(RuntimeError, match="Subprocess failed with exit code 3") as excinfo:
+    with pytest.raises(
+        RuntimeError, match="Subprocess failed with exit code 3"
+    ) as excinfo:
         run_python_script(
             script,
             [],
@@ -473,9 +481,17 @@ def test_single_stage_init_parity_reports_real_gate_failures():
     )
 
     assert any("Final iota disagreement too large" in failure for failure in failures)
-    assert any("Final volume relative difference too large" in failure for failure in failures)
-    assert any("Final field error relative difference too large" in failure for failure in failures)
-    assert any("Initial Boozer surface geometry drift too large" in failure for failure in failures)
+    assert any(
+        "Final volume relative difference too large" in failure for failure in failures
+    )
+    assert any(
+        "Final field error relative difference too large" in failure
+        for failure in failures
+    )
+    assert any(
+        "Initial Boozer surface geometry drift too large" in failure
+        for failure in failures
+    )
     assert any("self-intersecting" in failure for failure in failures)
 
 
@@ -509,7 +525,9 @@ def test_single_stage_init_parity_tracks_self_intersection_check_availability():
     assert comparison["jax_self_intersection_check_available"] is True
 
 
-def test_single_stage_init_case_loads_surface_before_tempdir_cleanup(monkeypatch, tmp_path):
+def test_single_stage_init_case_loads_surface_before_tempdir_cleanup(
+    monkeypatch, tmp_path
+):
     args = argparse.Namespace(
         plasma_surf_filename="wout_nfp22ginsburg_000_014417_iota15.nc",
         stage2_bs_path=str(DEFAULT_STAGE2_BS_PATH),
@@ -526,7 +544,11 @@ def test_single_stage_init_case_loads_surface_before_tempdir_cleanup(monkeypatch
         equilibria_dir=str(tmp_path / "equilibria"),
     )
 
-    monkeypatch.setattr(single_stage_init_parity_module, "_single_stage_script_path", lambda: tmp_path / "driver.py")
+    monkeypatch.setattr(
+        single_stage_init_parity_module,
+        "_single_stage_script_path",
+        lambda: tmp_path / "driver.py",
+    )
     monkeypatch.setattr(
         single_stage_init_parity_module,
         "run_python_script",
@@ -539,7 +561,9 @@ def test_single_stage_init_case_loads_surface_before_tempdir_cleanup(monkeypatch
         path.write_text("{}", encoding="utf-8")
         return path
 
-    monkeypatch.setattr(single_stage_init_parity_module, "find_single_file", fake_find_single_file)
+    monkeypatch.setattr(
+        single_stage_init_parity_module, "find_single_file", fake_find_single_file
+    )
     monkeypatch.setattr(
         single_stage_init_parity_module,
         "load_json",
@@ -619,7 +643,9 @@ def test_single_stage_init_case_threads_optimizer_backend_to_jax_lane(
         path.write_text("{}", encoding="utf-8")
         return path
 
-    monkeypatch.setattr(single_stage_init_parity_module, "find_single_file", fake_find_single_file)
+    monkeypatch.setattr(
+        single_stage_init_parity_module, "find_single_file", fake_find_single_file
+    )
     monkeypatch.setattr(
         single_stage_init_parity_module,
         "load_json",
@@ -727,7 +753,9 @@ def test_single_stage_outer_loop_probe_rejects_missing_step_or_wrong_method():
 
     assert any("did not accept an optimizer step" in failure for failure in failures)
     assert any("requested inner Boozer backend" in failure for failure in failures)
-    assert any("requested inner Boozer optimizer method" in failure for failure in failures)
+    assert any(
+        "requested inner Boozer optimizer method" in failure for failure in failures
+    )
     assert any(TARGET_OUTER_OPTIMIZER_METHOD in failure for failure in failures)
     assert any("self-intersecting surface" in failure for failure in failures)
     assert any("non-finite FINAL_IOTA" in failure for failure in failures)
@@ -1006,7 +1034,10 @@ def test_stage2_e2e_comparison_keeps_field_error_as_hard_gate():
         )
     )
 
-    assert any("Matched CPU-final field diagnostic parity too large" in failure for failure in failures)
+    assert any(
+        "Matched CPU-final field diagnostic parity too large" in failure
+        for failure in failures
+    )
 
 
 def test_stage2_e2e_comparison_disables_short_run_geometry_gate_when_matched_state_checks_pass():
@@ -1039,7 +1070,9 @@ def test_stage2_e2e_comparison_still_rejects_large_geometry_drift_once_gate_is_e
         )
     )
 
-    assert any("Final banana-coil geometry drift too large" in failure for failure in failures)
+    assert any(
+        "Final banana-coil geometry drift too large" in failure for failure in failures
+    )
 
 
 def test_stage2_e2e_comparison_rejects_matched_state_gradient_mismatch():
@@ -1054,13 +1087,30 @@ def test_stage2_e2e_comparison_rejects_matched_state_gradient_mismatch():
         )
     )
 
-    assert any("Matched JAX-final gradient parity failed" in failure for failure in failures)
+    assert any(
+        "Matched JAX-final gradient parity failed" in failure for failure in failures
+    )
 
 
 def test_stage2_e2e_comparison_accepts_ondevice_solution_quality_without_geometry_parity():
-    failures = evaluate_stage2_e2e_comparison(_stage2_ondevice_quality_case(geometry_rel_tol=None))
+    failures = evaluate_stage2_e2e_comparison(
+        _stage2_ondevice_quality_case(geometry_rel_tol=None)
+    )
 
     assert failures == []
+
+
+def test_stage2_e2e_comparison_labels_ondevice_failures_against_cpu_ondevice_lane():
+    failures = evaluate_stage2_e2e_comparison(
+        _stage2_ondevice_quality_case(
+            jax_objective_not_worse_than_cpu=False,
+            jax_final_objective=1.2,
+            cpu_final_objective=1.0,
+            cpu_lane_label="CPU ondevice lane",
+        )
+    )
+
+    assert any("CPU ondevice lane" in failure for failure in failures)
 
 
 def test_stage2_e2e_comparison_rejects_ondevice_matched_state_gradient_mismatch():
@@ -1076,7 +1126,9 @@ def test_stage2_e2e_comparison_rejects_ondevice_matched_state_gradient_mismatch(
         )
     )
 
-    assert any("Matched JAX-final gradient parity failed" in failure for failure in failures)
+    assert any(
+        "Matched JAX-final gradient parity failed" in failure for failure in failures
+    )
 
 
 def test_stage2_e2e_comparison_rejects_ondevice_geometry_drift_when_explicit_gate_enabled():
@@ -1087,7 +1139,9 @@ def test_stage2_e2e_comparison_rejects_ondevice_geometry_drift_when_explicit_gat
         )
     )
 
-    assert any("Final banana-coil geometry drift too large" in failure for failure in failures)
+    assert any(
+        "Final banana-coil geometry drift too large" in failure for failure in failures
+    )
 
 
 def test_stage2_e2e_comparison_rejects_ondevice_constraint_violation():
@@ -1100,6 +1154,110 @@ def test_stage2_e2e_comparison_rejects_ondevice_constraint_violation():
     )
 
     assert any("configured threshold" in failure for failure in failures)
+
+
+def test_stage2_e2e_probe_threads_optimizer_backend_to_both_probe_lanes(
+    monkeypatch,
+    tmp_path,
+):
+    args = argparse.Namespace(
+        optimizer_backend="ondevice",
+        nphi=31,
+        ntheta=16,
+        equilibrium_path=None,
+        plasma_surf_filename="wout_nfp22ginsburg_000_014417_iota15.nc",
+        equilibria_dir=str(tmp_path / "equilibria"),
+    )
+    observed_commands: list[list[str]] = []
+
+    monkeypatch.setattr(
+        stage2_e2e_comparison_module,
+        "_stage2_script_path",
+        lambda: tmp_path / "driver.py",
+    )
+    monkeypatch.setattr(
+        stage2_e2e_comparison_module,
+        "write_json",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        stage2_e2e_comparison_module,
+        "load_json",
+        lambda _path: {},
+    )
+
+    def fake_run_python_script(_script_path, command, **_kwargs):
+        observed_commands.append(list(command))
+        return argparse.Namespace(stdout="", stderr="")
+
+    monkeypatch.setattr(
+        stage2_e2e_comparison_module,
+        "run_python_script",
+        fake_run_python_script,
+    )
+
+    stage2_e2e_comparison_module._run_stage2_probe(
+        args,
+        "cpu",
+        platform="cpu",
+        dofs=[0.1, -0.2],
+    )
+    stage2_e2e_comparison_module._run_stage2_probe(
+        args,
+        "jax",
+        platform="cpu",
+        dofs=[0.1, -0.2],
+    )
+
+    assert len(observed_commands) == 2
+    for command in observed_commands:
+        optimizer_flag_index = command.index("--optimizer-backend")
+        assert command[optimizer_flag_index + 1] == "ondevice"
+
+
+def test_stage2_e2e_ondevice_endpoint_lane_uses_jax_cpu_reference():
+    assert stage2_e2e_comparison_module._resolve_stage2_endpoint_cpu_lane(
+        "ondevice"
+    ) == (
+        "jax",
+        "cpu",
+        "cpu-ondevice",
+    )
+    assert stage2_e2e_comparison_module._resolve_stage2_endpoint_cpu_lane("scipy") == (
+        "cpu",
+        "auto",
+        "cpu-reference",
+    )
+
+
+def test_stage2_e2e_matched_state_probes_follow_resolved_cpu_lane(monkeypatch):
+    args = argparse.Namespace()
+    observed_calls: list[tuple[str, str, tuple[float, ...]]] = []
+
+    def fake_run_stage2_probe(_args, backend, *, platform, dofs):
+        observed_calls.append((backend, platform, tuple(dofs)))
+        return {"backend": backend, "platform": platform}
+
+    monkeypatch.setattr(
+        stage2_e2e_comparison_module,
+        "_run_stage2_probe",
+        fake_run_stage2_probe,
+    )
+
+    probes = stage2_e2e_comparison_module._run_stage2_matched_state_probes(
+        args,
+        cpu_backend="jax",
+        cpu_platform="cpu",
+        jax_platform="cuda",
+        dofs=[0.1, -0.2],
+    )
+
+    assert probes["cpu"] == {"backend": "jax", "platform": "cpu"}
+    assert probes["jax"] == {"backend": "jax", "platform": "cuda"}
+    assert observed_calls == [
+        ("jax", "cpu", (0.1, -0.2)),
+        ("jax", "cuda", (0.1, -0.2)),
+    ]
 
 
 def test_stage2_e2e_payload_preserves_trajectory_and_timing_artifacts():
@@ -1174,6 +1332,7 @@ def test_stage2_e2e_payload_preserves_trajectory_and_timing_artifacts():
             "cpu": _stage2_probe_payload_case(),
             "jax": _stage2_probe_payload_case(),
         },
+        cpu_lane_kind="cpu-ondevice",
         geometry_rel_tol=5e-6,
     )
 
@@ -1188,11 +1347,15 @@ def test_stage2_e2e_payload_preserves_trajectory_and_timing_artifacts():
         "iterations": 3,
         "optimizer_backend": "ondevice",
     }
-    assert payload["ondevice_metrics"]["jax_final_objective"] == pytest.approx(1.0 + 1e-7)
+    assert payload["ondevice_metrics"]["jax_final_objective"] == pytest.approx(
+        1.0 + 1e-7
+    )
     assert payload["cpu_trajectory"] == cpu_case["trajectory"]
     assert payload["jax_trajectory"] == jax_case["trajectory"]
     assert payload["comparison"]["cpu_elapsed_s"] == pytest.approx(12.5)
     assert payload["comparison"]["jax_elapsed_s"] == pytest.approx(9.5)
+    assert payload["comparison"]["cpu_lane_kind"] == "cpu-ondevice"
+    assert payload["comparison"]["cpu_lane_label"] == "CPU ondevice lane"
     assert payload["comparison"]["matched_cpu_state"]["gradient_allclose"] is True
     assert payload["comparison"]["matched_jax_state"]["gradient_allclose"] is True
     assert payload["timings"]["cpu_outer_elapsed_s"] == pytest.approx(12.5)
@@ -1257,6 +1420,7 @@ def test_stage2_e2e_payload_allows_intentional_barrier_rejection_entries():
             "cpu": _stage2_probe_payload_case(),
             "jax": _stage2_probe_payload_case(),
         },
+        cpu_lane_kind="cpu-reference",
         geometry_rel_tol=5e-6,
     )
 
@@ -1381,9 +1545,15 @@ def test_evaluate_adjoint_validation_reports_real_contract_failures():
     )
 
     assert any("Adjoint solve residual too large" in failure for failure in failures)
-    assert any("Implicit correction produced NaN/inf" in failure for failure in failures)
-    assert any("Implicit correction produced zero gradient" in failure for failure in failures)
-    assert any("Total reduced gradient produced NaN/inf" in failure for failure in failures)
+    assert any(
+        "Implicit correction produced NaN/inf" in failure for failure in failures
+    )
+    assert any(
+        "Implicit correction produced zero gradient" in failure for failure in failures
+    )
+    assert any(
+        "Total reduced gradient produced NaN/inf" in failure for failure in failures
+    )
     assert any("Total reduced gradient is zero" in failure for failure in failures)
     assert any(
         "Direct-minus-implicit recomposition drift too large" in failure
@@ -1394,8 +1564,7 @@ def test_evaluate_adjoint_validation_reports_real_contract_failures():
         for failure in failures
     )
     assert any(
-        "Only 1 stable full re-solve FD samples were found; need at least 2."
-        in failure
+        "Only 1 stable full re-solve FD samples were found; need at least 2." in failure
         for failure in failures
     )
     assert any(
@@ -1416,4 +1585,7 @@ def test_evaluate_adjoint_validation_rejects_empty_fd_samples():
 
     assert "No fixed-surface FD samples were evaluated." in failures
     assert "No full re-solve FD samples were evaluated." in failures
-    assert "Only 0 stable full re-solve FD samples were found; need at least 2." in failures
+    assert (
+        "Only 0 stable full re-solve FD samples were found; need at least 2."
+        in failures
+    )

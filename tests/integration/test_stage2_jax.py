@@ -47,7 +47,6 @@ from simsopt.geo import (  # noqa: E402
 from simsopt.objectives import SquaredFlux, QuadraticPenalty  # noqa: E402
 
 from simsopt.field.biotsavart_jax_backend import BiotSavartJAX
-from simsopt.field import biotsavart_jax_backend as biotsavart_jax_backend_module
 from simsopt.geo.optimizer_jax import (
     PRIVATE_OPTIMIZER_JAX_VERSION,
     jax_minimize,
@@ -181,7 +180,22 @@ def _assert_target_backend_success(result):
 
 
 def _load_stage2_results_json(output_root):
-    return json.loads(next(output_root.glob("**/results.json")).read_text(encoding="utf-8"))
+    return json.loads(
+        next(output_root.glob("**/results.json")).read_text(encoding="utf-8")
+    )
+
+
+def _run_stage2_probe_and_load_payload(*args):
+    with tempfile.TemporaryDirectory(prefix="stage2-probe-") as temp_dir:
+        export_json = Path(temp_dir) / "probe.json"
+        result = _run_stage2_script(
+            *args,
+            "--probe-only",
+            "--export-objective-json",
+            str(export_json),
+        )
+        payload = json.loads(export_json.read_text(encoding="utf-8"))
+    return result, payload
 
 
 def _build_fake_b_vjp_profile():
@@ -213,7 +227,10 @@ def _build_fake_b_vjp_profile():
 
 
 def _assert_b_vjp_profile_payload(payload):
-    assert set(payload["squared_flux_field_b_vjp_component_timings_s"]) == EXPECTED_B_VJP_COMPONENT_TIMING_KEYS
+    assert (
+        set(payload["squared_flux_field_b_vjp_component_timings_s"])
+        == EXPECTED_B_VJP_COMPONENT_TIMING_KEYS
+    )
     assert payload["dominant_squared_flux_field_b_vjp_components"]
     assert payload["dominant_squared_flux_field_b_vjp_coils"]
 
@@ -283,10 +300,7 @@ def _build_stage2_target_objective_contract_case():
     jccdist = CurveCurveDistanceBarrier([coil.curve for coil in all_coils], 0.05)
     jc = LpCurveCurvatureBarrier(banana_curve, 40)
     objective = (
-        jf
-        + 0.0005 * QuadraticPenalty(jls, 1.75, "max")
-        + 100.0 * jccdist
-        + 0.0001 * jc
+        jf + 0.0005 * QuadraticPenalty(jls, 1.75, "max") + 100.0 * jccdist + 0.0001 * jc
     )
 
     target_bundle = build_stage2_target_objective(
@@ -315,6 +329,18 @@ def _centered_fd_gradient(fun, x, *, eps):
         step[i] = eps
         grad[i] = (float(fun(x + step)) - float(fun(x - step))) / (2.0 * eps)
     return grad
+
+
+class _FakeStage2SquaredFluxTerm:
+    def __init__(self, value, grad):
+        self._value = float(value)
+        self._grad = np.asarray(grad, dtype=float)
+
+    def J(self):
+        return self._value
+
+    def dJ(self):
+        return self._grad
 
 
 class _DummyDerivative:
@@ -752,7 +778,9 @@ class TestBiotSavartJAXParity:
         profile = bs_jax.profile_B_vjp(np.asarray(bs_jax.B()))
 
         assert profile["wall_time_s"] >= 0.0
-        assert set(profile["component_timings_s"]) == EXPECTED_B_VJP_COMPONENT_TIMING_KEYS
+        assert (
+            set(profile["component_timings_s"]) == EXPECTED_B_VJP_COMPONENT_TIMING_KEYS
+        )
         assert profile["dominant_components"]
         assert profile["dominant_coils"]
         assert profile["dominant_pullback_groups"]
@@ -764,7 +792,10 @@ class TestBiotSavartJAXParity:
         )
         assert component_total >= 0.9 * profile["wall_time_s"]
         for entry in profile["per_coil_timings_s"]:
-            assert set(entry["component_timings_s"]) == EXPECTED_B_VJP_COMPONENT_TIMING_KEYS
+            assert (
+                set(entry["component_timings_s"])
+                == EXPECTED_B_VJP_COMPONENT_TIMING_KEYS
+            )
             assert entry["total_s"] >= 0.0
         for entry in profile["pullback_group_timings_s"]:
             assert entry["kind"] in {"prep", "group_pullback"}
@@ -1246,7 +1277,9 @@ class TestCurveCWSFourierCPPJaxFieldPath:
             banana_coil.curve,
             "gamma",
             lambda: (_ for _ in ()).throw(
-                AssertionError("BiotSavartJAX.B() should use CurveCWSFourierCPP.gamma_jax")
+                AssertionError(
+                    "BiotSavartJAX.B() should use CurveCWSFourierCPP.gamma_jax"
+                )
             ),
         )
         monkeypatch.setattr(
@@ -1288,7 +1321,9 @@ class TestCurveCWSFourierCPPJaxFieldPath:
 
         deriv = bs_jax.B_vjp(v)
 
-        assert deriv(banana_coil.curve).shape[0] == banana_coil.curve.local_full_dof_size
+        assert (
+            deriv(banana_coil.curve).shape[0] == banana_coil.curve.local_full_dof_size
+        )
         np.testing.assert_allclose(
             deriv(banana_coil.curve),
             deriv_cpu(banana_coil.curve),
@@ -1317,7 +1352,9 @@ class TestCurveCWSFourierCPPJaxFieldPath:
 
 
 class TestCurveCWSFourierNativeFieldPath:
-    def test_b_uses_native_curvecwsfourier_geometry(self, banana_coil_jax_setup, monkeypatch):
+    def test_b_uses_native_curvecwsfourier_geometry(
+        self, banana_coil_jax_setup, monkeypatch
+    ):
         coils, surf, banana_coil = banana_coil_jax_setup
         points = surf.gamma().reshape((-1, 3))
 
@@ -1332,7 +1369,9 @@ class TestCurveCWSFourierNativeFieldPath:
             banana_coil.curve,
             "gammadash",
             lambda: (_ for _ in ()).throw(
-                AssertionError("BiotSavartJAX.B() should use CurveCWSFourier.gammadash_jax")
+                AssertionError(
+                    "BiotSavartJAX.B() should use CurveCWSFourier.gammadash_jax"
+                )
             ),
         )
 
@@ -1361,13 +1400,17 @@ class TestCurveCWSFourierNativeFieldPath:
             banana_coil,
             "vjp",
             lambda *_args, **_kwargs: (_ for _ in ()).throw(
-                AssertionError("BiotSavartJAX.B_vjp() should bypass Coil.vjp() for CurveCWSFourier")
+                AssertionError(
+                    "BiotSavartJAX.B_vjp() should bypass Coil.vjp() for CurveCWSFourier"
+                )
             ),
         )
 
         deriv = bs_jax.B_vjp(v)
 
-        assert deriv(banana_coil.curve).shape[0] == banana_coil.curve.local_full_dof_size
+        assert (
+            deriv(banana_coil.curve).shape[0] == banana_coil.curve.local_full_dof_size
+        )
         np.testing.assert_allclose(
             deriv(banana_coil.curve),
             deriv_cpu(banana_coil.curve),
@@ -1491,18 +1534,25 @@ class TestStage2BananaBoundary:
             tf_current.fix_all()
 
         def build_objective(curve_cls):
-            curve = curve_cls(np.linspace(0, 1, 128, endpoint=False), order=2, surf=coil_surf)
+            curve = curve_cls(
+                np.linspace(0, 1, 128, endpoint=False), order=2, surf=coil_surf
+            )
             curve.set("phic(0)", 0.06)
             curve.set("thetac(0)", 0.5)
             curve.set("phic(1)", 0.03)
             curve.set("thetas(1)", 0.1)
-            coils = [Coil(curve_obj, current) for curve_obj, current in zip(tf_curves, tf_currents)]
+            coils = [
+                Coil(curve_obj, current)
+                for curve_obj, current in zip(tf_curves, tf_currents)
+            ]
             banana_coil = Coil(curve, Current(1.0) * 1e4)
             all_coils = coils + [banana_coil]
             bs_jax = BiotSavartJAX(all_coils)
             jf = SquaredFluxJAX(eval_surf, bs_jax)
             jls = CurveLength(curve)
-            jccdist = CurveCurveDistanceBarrier([coil.curve for coil in all_coils], 0.05)
+            jccdist = CurveCurveDistanceBarrier(
+                [coil.curve for coil in all_coils], 0.05
+            )
             jc = LpCurveCurvatureBarrier(curve, 40)
             objective = (
                 jf
@@ -1520,38 +1570,35 @@ class TestStage2BananaBoundary:
 
     @pytest.mark.parametrize("backend", ["cpu", "jax"])
     def test_stage2_probe_reports_shared_production_banana_curve(self, backend):
-        stage2_script = (
-            REPO_ROOT
-            / "examples"
-            / "single_stage_optimization"
-            / "STAGE_2"
-            / "banana_coil_solver.py"
+        result, payload = _run_stage2_probe_and_load_payload(
+            "--backend",
+            backend,
+            "--nphi",
+            "31",
+            "--ntheta",
+            "16",
         )
-        with tempfile.TemporaryDirectory(prefix=f"stage2-boundary-{backend}-") as temp_dir:
-            export_json = Path(temp_dir) / f"{backend}_probe.json"
-            result = subprocess.run(
-                [
-                    sys.executable,
-                    str(stage2_script),
-                    "--backend",
-                    backend,
-                    "--probe-only",
-                    "--nphi",
-                    "31",
-                    "--ntheta",
-                    "16",
-                    "--export-objective-json",
-                    str(export_json),
-                ],
-                cwd=REPO_ROOT,
-                check=True,
-                capture_output=True,
-                text=True,
-            )
-            payload = json.loads(export_json.read_text(encoding="utf-8"))
 
         assert result.returncode == 0
         assert payload["banana_curve_class"] == "CurveCWSFourierCPP"
+
+    def test_stage2_probe_only_cpu_backend_ondevice_exports_target_objective_source(
+        self,
+    ):
+        result, payload = _run_stage2_probe_and_load_payload(
+            *REDUCED_STAGE2_ARGS,
+            "--backend",
+            "cpu",
+            "--optimizer-backend",
+            "ondevice",
+            "--skip-postprocess",
+        )
+
+        probe_output = f"{result.stdout}\n{result.stderr}"
+        assert result.returncode == 0, probe_output
+        assert payload["backend"] == "cpu"
+        assert payload["optimizer_backend"] == "ondevice"
+        assert payload["composite"]["objective_source"] == "target-objective"
 
     def test_stage2_probe_override_dofs_evaluates_requested_state(self):
         with tempfile.TemporaryDirectory(prefix="stage2-override-dofs-") as temp_dir:
@@ -1625,10 +1672,13 @@ class TestStage2OptimizerContract:
         expected_method,
     ):
         stage2_script = _load_stage2_script_module()
-        assert stage2_script.resolve_stage2_optimizer_method(
-            field_backend,
-            optimizer_backend,
-        ) == expected_method
+        assert (
+            stage2_script.resolve_stage2_optimizer_method(
+                field_backend,
+                optimizer_backend,
+            )
+            == expected_method
+        )
 
     def test_resolve_stage2_optimizer_method_rejects_hybrid(self):
         stage2_script = _load_stage2_script_module()
@@ -1715,6 +1765,7 @@ class TestStage2OptimizerContract:
         assert cpu_result.message == "ok"
 
         ondevice_captured = {}
+
         def fake_lbfgs_private(
             fun,
             x0,
@@ -1740,7 +1791,9 @@ class TestStage2OptimizerContract:
             ondevice_captured["callback"] = callback
             ondevice_captured["progress_callback"] = progress_callback
             value = float(fun(np.asarray(x0, dtype=float)))
-            grad = np.asarray(jax.grad(fun)(np.asarray(x0, dtype=np.float64)), dtype=float)
+            grad = np.asarray(
+                jax.grad(fun)(np.asarray(x0, dtype=np.float64)), dtype=float
+            )
             return _build_fake_lbfgs_result(x0, value, grad)
 
         monkeypatch.setattr(
@@ -1940,7 +1993,9 @@ class TestStage2OptimizerContract:
         assert snapshot["Jf"] == pytest.approx(0.75)
         assert diagnostics["mean_abs_relBfinal_norm"] == pytest.approx(0.5)
 
-    def test_profile_stage2_explicit_step_reports_component_breakdown(self, monkeypatch):
+    def test_profile_stage2_explicit_step_reports_component_breakdown(
+        self, monkeypatch
+    ):
         stage2_script = _load_stage2_script_module()
         expected_objective_term_names = {
             "squared_flux",
@@ -1988,7 +2043,9 @@ class TestStage2OptimizerContract:
             def shortest_distance(self):
                 return 0.25
 
-        monkeypatch.setattr(stage2_script, "compute_mean_abs_relbn", lambda _surf, _bs: 0.5)
+        monkeypatch.setattr(
+            stage2_script, "compute_mean_abs_relbn", lambda _surf, _bs: 0.5
+        )
 
         context = stage2_script.Stage2ObjectiveContext(
             DummyJF(),
@@ -2014,8 +2071,14 @@ class TestStage2OptimizerContract:
             "coil_coil_distance_s",
             "curvature_s",
         }
-        assert set(payload["objective_term_value_timings_s"]) == expected_objective_term_names
-        assert set(payload["objective_term_gradient_timings_s"]) == expected_objective_term_names
+        assert (
+            set(payload["objective_term_value_timings_s"])
+            == expected_objective_term_names
+        )
+        assert (
+            set(payload["objective_term_gradient_timings_s"])
+            == expected_objective_term_names
+        )
         assert payload["extra_diagnostic_total_s"] >= 0.0
         assert payload["objective_term_value_total_s"] >= 0.0
         assert payload["objective_term_gradient_total_s"] >= 0.0
@@ -2046,7 +2109,9 @@ class TestStage2OptimizerContract:
                 return np.zeros((2, 3), dtype=float)
 
             def B_vjp(self, dJ_dB):
-                raise AssertionError("profile_stage2_squared_flux_internal_components should use profile_B_vjp when available")
+                raise AssertionError(
+                    "profile_stage2_squared_flux_internal_components should use profile_B_vjp when available"
+                )
 
             def profile_B_vjp(self, dJ_dB):
                 assert dJ_dB.shape == (2, 3)
@@ -2113,7 +2178,9 @@ class TestStage2OptimizerContract:
             def shortest_distance(self):
                 return 0.25
 
-        monkeypatch.setattr(stage2_script, "compute_mean_abs_relbn", lambda _surf, _bs: 0.5)
+        monkeypatch.setattr(
+            stage2_script, "compute_mean_abs_relbn", lambda _surf, _bs: 0.5
+        )
 
         context = stage2_script.Stage2ObjectiveContext(
             DummyCompositeObjective(),
@@ -2130,10 +2197,15 @@ class TestStage2OptimizerContract:
         )
         payload = stage2_script.profile_stage2_explicit_step(context)
 
-        assert set(payload["squared_flux_internal_timings_s"]) == EXPECTED_SQUARED_FLUX_INTERNAL_TIMING_KEYS
+        assert (
+            set(payload["squared_flux_internal_timings_s"])
+            == EXPECTED_SQUARED_FLUX_INTERNAL_TIMING_KEYS
+        )
         assert payload["squared_flux_internal_total_s"] >= 0.0
         assert payload["dominant_squared_flux_internal_components"]
-        assert payload["dominant_squared_flux_internal_components"][0]["elapsed_s"] >= 0.0
+        assert (
+            payload["dominant_squared_flux_internal_components"][0]["elapsed_s"] >= 0.0
+        )
         _assert_b_vjp_profile_payload(payload)
 
     def test_stage2_script_probe_only_writes_step_profile(self):
@@ -2161,12 +2233,17 @@ class TestStage2OptimizerContract:
         assert payload["dominant_extra_diagnostics"][0]["elapsed_s"] >= 0.0
         assert payload["dominant_objective_value_terms"]
         assert payload["dominant_objective_gradient_terms"]
-        assert set(payload["squared_flux_internal_timings_s"]) == EXPECTED_SQUARED_FLUX_INTERNAL_TIMING_KEYS
+        assert (
+            set(payload["squared_flux_internal_timings_s"])
+            == EXPECTED_SQUARED_FLUX_INTERNAL_TIMING_KEYS
+        )
         assert payload["dominant_squared_flux_internal_components"]
         _assert_b_vjp_profile_payload(payload)
 
     def test_stage2_script_rejects_step_profile_on_target_lane(self):
-        with tempfile.TemporaryDirectory(prefix="stage2-step-profile-invalid-") as temp_dir:
+        with tempfile.TemporaryDirectory(
+            prefix="stage2-step-profile-invalid-"
+        ) as temp_dir:
             output_root = Path(temp_dir) / "outputs"
             profile_json = Path(temp_dir) / "step_profile.json"
             result = _run_stage2_script(
@@ -2209,7 +2286,9 @@ class TestStage2OptimizerContract:
         assert timings["compile_overhead_s"] >= 0.0
 
     def test_stage2_script_skip_postprocess_preserves_field_error(self):
-        with tempfile.TemporaryDirectory(prefix="stage2-ondevice-skip-") as skip_dir, tempfile.TemporaryDirectory(
+        with tempfile.TemporaryDirectory(
+            prefix="stage2-ondevice-skip-"
+        ) as skip_dir, tempfile.TemporaryDirectory(
             prefix="stage2-ondevice-noskip-"
         ) as full_dir:
             skip_output_root = Path(skip_dir) / "outputs"
@@ -2243,7 +2322,9 @@ class TestStage2OptimizerContract:
         assert skip_payload["FIELD_ERROR"] == pytest.approx(full_payload["FIELD_ERROR"])
 
     def test_stage2_script_rejects_warm_timing_on_reference_lane(self):
-        with tempfile.TemporaryDirectory(prefix="stage2-warm-timing-invalid-") as temp_dir:
+        with tempfile.TemporaryDirectory(
+            prefix="stage2-warm-timing-invalid-"
+        ) as temp_dir:
             output_root = Path(temp_dir) / "outputs"
             result = _run_stage2_script(
                 *REDUCED_STAGE2_ARGS,
@@ -2260,7 +2341,9 @@ class TestStage2OptimizerContract:
         _assert_stage2_script_failure(result, WARM_TIMING_REFERENCE_LANE_ERROR)
 
     def test_stage2_script_rejects_warm_timing_without_optimization(self):
-        with tempfile.TemporaryDirectory(prefix="stage2-warm-timing-init-only-") as temp_dir:
+        with tempfile.TemporaryDirectory(
+            prefix="stage2-warm-timing-init-only-"
+        ) as temp_dir:
             output_root = Path(temp_dir) / "outputs"
             result = _run_stage2_script(
                 *REDUCED_STAGE2_ARGS,
@@ -2280,7 +2363,9 @@ class TestStage2OptimizerContract:
         _assert_stage2_script_failure(result, WARM_TIMING_NO_OPTIMIZATION_ERROR)
 
     def test_stage2_script_rejects_warm_timing_in_probe_only_mode(self):
-        with tempfile.TemporaryDirectory(prefix="stage2-warm-timing-probe-only-") as temp_dir:
+        with tempfile.TemporaryDirectory(
+            prefix="stage2-warm-timing-probe-only-"
+        ) as temp_dir:
             output_root = Path(temp_dir) / "outputs"
             result = _run_stage2_script(
                 *REDUCED_STAGE2_ARGS,
@@ -2338,9 +2423,118 @@ class TestStage2OptimizerContract:
         )
 
     @pytest.mark.parametrize(
+        ("optimizer_backend", "expected_source"),
+        [
+            ("scipy", "explicit-composite"),
+            ("ondevice", "target-objective"),
+        ],
+    )
+    def test_stage2_probe_payload_uses_lane_ssot_objective_source(
+        self,
+        monkeypatch,
+        optimizer_backend,
+        expected_source,
+    ):
+        stage2_script = _load_stage2_script_module()
+        dofs = np.asarray([0.25, -0.5], dtype=float)
+        explicit_snapshot = {
+            "J": 11.0,
+            "Jf": 0.125,
+            "mean_abs_relBfinal_norm": 0.03125,
+            "curve_length": 1.8,
+            "coil_coil_distance": 0.12,
+            "curvature": 18.0,
+            "grad_norm": 9.0,
+            "distance_constraint_violated": False,
+        }
+        explicit_grad = np.asarray([3.0, -4.0], dtype=float)
+
+        def fake_evaluate_stage2_objective(
+            _context, *, diagnostics=None, recompute_diagnostics=True
+        ):
+            assert diagnostics is None
+            assert recompute_diagnostics is True
+            return (
+                dict(explicit_snapshot),
+                explicit_grad.copy(),
+                {
+                    "mean_abs_relBfinal_norm": explicit_snapshot[
+                        "mean_abs_relBfinal_norm"
+                    ],
+                    "coil_coil_distance": explicit_snapshot["coil_coil_distance"],
+                },
+            )
+
+        monkeypatch.setattr(
+            stage2_script,
+            "evaluate_stage2_objective",
+            fake_evaluate_stage2_objective,
+        )
+
+        fake_root = types.SimpleNamespace(x=dofs.copy())
+        fake_flux = _FakeStage2SquaredFluxTerm(0.5, [0.75, -0.25])
+        target_objective_bundle = types.SimpleNamespace(
+            objective=lambda x: jax.numpy.sum(jax.numpy.square(x + 1.0))
+        )
+
+        payload = stage2_script.build_stage2_probe_payload(
+            fake_root,
+            object(),
+            object(),
+            object(),
+            fake_flux,
+            object(),
+            object(),
+            object(),
+            backend="jax",
+            optimizer_backend=optimizer_backend,
+            equilibrium_path="dummy.nc",
+            nphi=31,
+            ntheta=16,
+            squared_flux_weight=1.0,
+            length_weight=0.1,
+            length_target=1.75,
+            cc_weight=10.0,
+            cc_threshold=0.05,
+            curvature_weight=1e-4,
+            target_objective_bundle=(
+                target_objective_bundle if optimizer_backend == "ondevice" else None
+            ),
+        )
+
+        expected_value, expected_grad = jax.value_and_grad(
+            target_objective_bundle.objective
+        )(dofs.astype(np.float64))
+
+        assert payload["composite"]["objective_source"] == expected_source
+        assert payload["composite"]["mean_abs_relBfinal_norm"] == pytest.approx(
+            explicit_snapshot["mean_abs_relBfinal_norm"]
+        )
+        if optimizer_backend == "ondevice":
+            assert payload["composite"]["J"] == pytest.approx(float(expected_value))
+            np.testing.assert_allclose(
+                np.asarray(payload["composite"]["dJ"], dtype=float),
+                np.asarray(expected_grad, dtype=float),
+                rtol=0.0,
+                atol=0.0,
+            )
+        else:
+            assert payload["composite"]["J"] == pytest.approx(explicit_snapshot["J"])
+            np.testing.assert_allclose(
+                np.asarray(payload["composite"]["dJ"], dtype=float),
+                explicit_grad,
+                rtol=0.0,
+                atol=0.0,
+            )
+
+    @pytest.mark.parametrize(
         ("backend", "optimizer_backend", "expected_error"),
         [
-            ("cpu", "ondevice", "CPU/reference lane only supports optimizer_backend='scipy'"),
+            (
+                "cpu",
+                "ondevice",
+                "CPU/reference lane only supports optimizer_backend='scipy'",
+            ),
         ],
     )
     def test_stage2_script_rejects_unsupported_optimizer_backend_pairs(
@@ -2393,7 +2587,9 @@ class TestStage2OptimizerContract:
             )
 
     def test_stage2_script_target_backend_writes_nonempty_trajectory(self):
-        with tempfile.TemporaryDirectory(prefix="stage2-ondevice-trajectory-") as temp_dir:
+        with tempfile.TemporaryDirectory(
+            prefix="stage2-ondevice-trajectory-"
+        ) as temp_dir:
             trajectory_json = Path(temp_dir) / "trajectory.json"
             result = _run_stage2_script(
                 "--backend",
