@@ -402,30 +402,18 @@ def _build_gradient_term_metrics(
     for name in cpu_terms:
         if name not in jax_terms:
             continue
-        cpu_grad = np.asarray(cpu_terms[name]["dJ"], dtype=float)
-        jax_grad = np.asarray(jax_terms[name]["dJ"], dtype=float)
-        gradient_l2_rel_diff = float(
-            np.linalg.norm(jax_grad - cpu_grad) / (np.linalg.norm(cpu_grad) + 1e-30)
-        )
-        gradient_max_abs_diff = float(np.max(np.abs(jax_grad - cpu_grad)))
         term_metric = {
             "objective_rel_diff": relative_error(
                 float(jax_terms[name]["J"]),
                 float(cpu_terms[name]["J"]),
             ),
-            "gradient_allclose": bool(
-                np.allclose(
-                    jax_grad,
-                    cpu_grad,
-                    rtol=MATCHED_GRADIENT_RTOL,
-                    atol=STAGE2_MATCHED_GRADIENT_ATOL,
-                )
+            **_build_gradient_parity_metrics(
+                np.asarray(cpu_terms[name]["dJ"], dtype=float),
+                np.asarray(jax_terms[name]["dJ"], dtype=float),
             ),
-            "gradient_l2_rel_diff": gradient_l2_rel_diff,
-            "gradient_max_abs_diff": gradient_max_abs_diff,
         }
         metrics[name] = term_metric
-        if worst_term is None or gradient_l2_rel_diff > float(
+        if worst_term is None or float(term_metric["gradient_l2_rel_diff"]) > float(
             worst_term["gradient_l2_rel_diff"]
         ):
             worst_term = {
@@ -435,21 +423,51 @@ def _build_gradient_term_metrics(
     return metrics, worst_term
 
 
-def _build_matched_state_metrics(
-    cpu_probe: dict[str, Any],
-    jax_probe: dict[str, Any],
+def _build_gradient_parity_metrics(
+    cpu_grad: np.ndarray,
+    jax_grad: np.ndarray,
 ) -> dict[str, Any]:
-    cpu_composite = cpu_probe["composite"]
-    jax_composite = jax_probe["composite"]
-    cpu_grad = np.asarray(cpu_composite["dJ"], dtype=float)
-    jax_grad = np.asarray(jax_composite["dJ"], dtype=float)
-    gradient_allclose = bool(
+    gradient_l2_rel_diff = float(
+        np.linalg.norm(jax_grad - cpu_grad) / (np.linalg.norm(cpu_grad) + 1e-30)
+    )
+    gradient_max_abs_diff = float(np.max(np.abs(jax_grad - cpu_grad)))
+    gradient_componentwise_allclose = bool(
         np.allclose(
             jax_grad,
             cpu_grad,
             rtol=MATCHED_GRADIENT_RTOL,
             atol=STAGE2_MATCHED_GRADIENT_ATOL,
         )
+    )
+    gradient_scaled_atol = max(
+        STAGE2_MATCHED_GRADIENT_ATOL,
+        MATCHED_GRADIENT_RTOL * max(1.0, float(np.max(np.abs(cpu_grad)))),
+    )
+    gradient_global_scale_match = bool(
+        gradient_l2_rel_diff <= MATCHED_GRADIENT_RTOL
+        and gradient_max_abs_diff <= gradient_scaled_atol
+    )
+    return {
+        "gradient_allclose": bool(
+            gradient_componentwise_allclose or gradient_global_scale_match
+        ),
+        "gradient_componentwise_allclose": gradient_componentwise_allclose,
+        "gradient_global_scale_match": gradient_global_scale_match,
+        "gradient_l2_rel_diff": gradient_l2_rel_diff,
+        "gradient_max_abs_diff": gradient_max_abs_diff,
+        "gradient_scaled_atol": float(gradient_scaled_atol),
+    }
+
+
+def _build_matched_state_metrics(
+    cpu_probe: dict[str, Any],
+    jax_probe: dict[str, Any],
+) -> dict[str, Any]:
+    cpu_composite = cpu_probe["composite"]
+    jax_composite = jax_probe["composite"]
+    gradient_metrics = _build_gradient_parity_metrics(
+        np.asarray(cpu_composite["dJ"], dtype=float),
+        np.asarray(jax_composite["dJ"], dtype=float),
     )
     gradient_terms: dict[str, Any] = {}
     worst_gradient_term = None
@@ -469,10 +487,7 @@ def _build_matched_state_metrics(
             float(jax_composite["mean_abs_relBfinal_norm"]),
             float(cpu_composite["mean_abs_relBfinal_norm"]),
         ),
-        "gradient_allclose": gradient_allclose,
-        "gradient_l2_rel_diff": float(
-            np.linalg.norm(jax_grad - cpu_grad) / (np.linalg.norm(cpu_grad) + 1e-30)
-        ),
+        **gradient_metrics,
         "gradient_terms": gradient_terms,
         "worst_gradient_term": worst_gradient_term,
     }
@@ -486,12 +501,13 @@ def _matched_gradient_failure_message(
     worst_term = state.get("worst_gradient_term")
     if isinstance(worst_term, dict):
         return (
-            f"Matched {state_label}-final gradient parity failed allclose gate "
+            f"Matched {state_label}-final gradient parity failed gate "
             f"(worst term: {str(worst_term['name'])}, "
             f"rel_diff={float(worst_term['gradient_l2_rel_diff']):.2e}, "
-            f"max_abs_diff={float(worst_term['gradient_max_abs_diff']):.2e})."
+            f"max_abs_diff={float(worst_term['gradient_max_abs_diff']):.2e}, "
+            f"scaled_atol={float(worst_term['gradient_scaled_atol']):.2e})."
         )
-    return f"Matched {state_label}-final gradient parity failed allclose gate."
+    return f"Matched {state_label}-final gradient parity failed gate."
 
 
 def _append_geometry_gate_failure(

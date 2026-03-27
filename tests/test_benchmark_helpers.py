@@ -994,14 +994,20 @@ def _stage2_gradient_term_case(
     *,
     objective_rel_diff=1e-12,
     gradient_allclose=True,
+    gradient_componentwise_allclose=True,
+    gradient_global_scale_match=True,
     gradient_l2_rel_diff=1e-12,
     gradient_max_abs_diff=1e-12,
+    gradient_scaled_atol=1e-12,
 ):
     return {
         "objective_rel_diff": objective_rel_diff,
         "gradient_allclose": gradient_allclose,
+        "gradient_componentwise_allclose": gradient_componentwise_allclose,
+        "gradient_global_scale_match": gradient_global_scale_match,
         "gradient_l2_rel_diff": gradient_l2_rel_diff,
         "gradient_max_abs_diff": gradient_max_abs_diff,
+        "gradient_scaled_atol": gradient_scaled_atol,
     }
 
 
@@ -1102,8 +1108,11 @@ def test_stage2_e2e_comparison_rejects_matched_state_gradient_mismatch():
                     "name": "curvature_barrier",
                     **_stage2_gradient_term_case(
                         gradient_allclose=False,
+                        gradient_componentwise_allclose=False,
+                        gradient_global_scale_match=False,
                         gradient_l2_rel_diff=1e-3,
                         gradient_max_abs_diff=2e-4,
+                        gradient_scaled_atol=5e-12,
                     ),
                 },
             }
@@ -1151,8 +1160,11 @@ def test_stage2_e2e_comparison_rejects_ondevice_matched_state_gradient_mismatch(
                     "name": "curvature_barrier",
                     **_stage2_gradient_term_case(
                         gradient_allclose=False,
+                        gradient_componentwise_allclose=False,
+                        gradient_global_scale_match=False,
                         gradient_l2_rel_diff=1e-3,
                         gradient_max_abs_diff=2e-4,
+                        gradient_scaled_atol=5e-12,
                     ),
                 },
             },
@@ -1189,6 +1201,35 @@ def test_stage2_e2e_comparison_rejects_ondevice_constraint_violation():
     )
 
     assert any("configured threshold" in failure for failure in failures)
+
+
+def test_stage2_gradient_parity_accepts_global_scale_match_near_barrier():
+    cpu_grad = np.asarray([0.0, 3.0e7, -4.0e7], dtype=float)
+    jax_grad = np.asarray([1.55e-5, 3.0e7, -4.0e7], dtype=float)
+
+    metrics = stage2_e2e_comparison_module._build_gradient_parity_metrics(
+        cpu_grad,
+        jax_grad,
+    )
+
+    assert metrics["gradient_componentwise_allclose"] is False
+    assert metrics["gradient_global_scale_match"] is True
+    assert metrics["gradient_allclose"] is True
+    assert metrics["gradient_l2_rel_diff"] < 1e-9
+
+
+def test_stage2_gradient_parity_rejects_material_global_mismatch():
+    cpu_grad = np.asarray([0.0, 3.0e7, -4.0e7], dtype=float)
+    jax_grad = np.asarray([0.0, 3.0e7 + 1.0, -4.0e7], dtype=float)
+
+    metrics = stage2_e2e_comparison_module._build_gradient_parity_metrics(
+        cpu_grad,
+        jax_grad,
+    )
+
+    assert metrics["gradient_global_scale_match"] is False
+    assert metrics["gradient_allclose"] is False
+    assert metrics["gradient_max_abs_diff"] == pytest.approx(1.0)
 
 
 def test_stage2_e2e_probe_threads_optimizer_backend_to_both_probe_lanes(
