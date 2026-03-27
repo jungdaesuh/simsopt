@@ -91,7 +91,7 @@ class CurveFilament(FramedCurve):
             + self.framedcurve.rotated_frame_dash_dcoeff_vjp(zero, self.dn * v, self.db * v)
 
     def _rotation_jax_values(self, dofs):
-        points = jnp.asarray(np.asarray(self.curve.quadpoints), dtype=jnp.float64)
+        points = jnp.asarray(self.curve.quadpoints, dtype=jnp.float64)
         if isinstance(self.rotation, ZeroRotation) or self.rotation.local_full_dof_size == 0:
             zeros = jnp.zeros_like(points)
             return zeros, zeros

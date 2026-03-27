@@ -49,10 +49,28 @@ def _single_coil_b_vjp(points, v, gamma, gammadash, current):
 def _time_call_result(callback):
     start = time.perf_counter()
     result = callback()
-    for leaf in jax.tree_util.tree_leaves(result):
+    _block_until_ready(result)
+    return float(time.perf_counter() - start), result
+
+
+def _block_until_ready(value):
+    if hasattr(value, "block_until_ready"):
+        value.block_until_ready()
+        return
+    if isinstance(value, Derivative):
+        _block_until_ready(value.data)
+        return
+    if isinstance(value, dict):
+        for dict_value in value.values():
+            _block_until_ready(dict_value)
+        return
+    if isinstance(value, (list, tuple)):
+        for item in value:
+            _block_until_ready(item)
+        return
+    for leaf in jax.tree_util.tree_leaves(value):
         if hasattr(leaf, "block_until_ready"):
             leaf.block_until_ready()
-    return float(time.perf_counter() - start), result
 
 
 def _build_profile_breakdown(timings):
@@ -163,6 +181,10 @@ def _curve_live_dofs(curve):
     return jnp.asarray(curve.get_dofs(), dtype=jnp.float64)
 
 
+def _curve_quadpoints_jax(curve):
+    return jnp.asarray(curve.quadpoints, dtype=jnp.float64)
+
+
 def _curve_surface_dofs(curve):
     surf = getattr(curve, "surf", None)
     if surf is None or surf.dof_size == 0:
@@ -222,7 +244,7 @@ def _curve_coeff_pullback_data(curve, dg, dgd):
 
     if isinstance(curve, CurveXYZFourier):
         curve_dofs = jnp.asarray(curve.get_dofs(), dtype=jnp.float64)
-        quadpoints = jnp.asarray(np.asarray(curve.quadpoints), dtype=jnp.float64)
+        quadpoints = _curve_quadpoints_jax(curve)
         ones = jnp.ones_like(quadpoints)
 
         def gamma_of_dofs(dofs):
@@ -253,7 +275,7 @@ def _curve_gamma_from_dofs(curve, curve_dofs):
     from ..geo.curvexyzfourier import CurveXYZFourier, jaxfouriercurve_pure
 
     if isinstance(curve, CurveXYZFourier):
-        quadpoints = jnp.asarray(np.asarray(curve.quadpoints), dtype=jnp.float64)
+        quadpoints = _curve_quadpoints_jax(curve)
         return jaxfouriercurve_pure(curve_dofs, quadpoints, curve.order)
 
     if _curve_dof_mode(curve) == "full":
@@ -270,7 +292,7 @@ def _curve_gammadash_from_dofs(curve, curve_dofs):
     from ..geo.curvexyzfourier import CurveXYZFourier, jaxfouriercurve_pure
 
     if isinstance(curve, CurveXYZFourier):
-        quadpoints = jnp.asarray(np.asarray(curve.quadpoints), dtype=jnp.float64)
+        quadpoints = _curve_quadpoints_jax(curve)
         ones = jnp.ones_like(quadpoints)
         return jax.jvp(
             lambda qpts: jaxfouriercurve_pure(curve_dofs, qpts, curve.order),
@@ -475,7 +497,7 @@ class BiotSavartJAX(Optimizable):
         self._coil_descs = descs
         self._curve_order = orders.pop()
         self._curve_dof_size = 3 * (2 * self._curve_order + 1)
-        self._curve_quadpoints_jax = jnp.asarray(np.asarray(base_curves[0].quadpoints))
+        self._curve_quadpoints_jax = _curve_quadpoints_jax(base_curves[0])
 
     def _coil_arrays_in_order_from_dofs_generic_jax(self, coil_dofs):
         """Rebuild per-coil arrays for any JAX-geometry-capable curve set."""
