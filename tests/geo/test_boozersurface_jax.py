@@ -581,6 +581,29 @@ class TestOptimizerAdapter:
         assert len(calls) == 2
         np.testing.assert_allclose(result["x"], np.array([0.0]), atol=1e-12)
 
+    def test_newton_polish_rejects_worsening_step(self, monkeypatch):
+        """A Newton step that increases the gradient norm should be rejected."""
+
+        def obj(x):
+            return 0.5 * x[0] ** 2
+
+        def fake_hvp_fn(_objective_fn):
+            return lambda _x, v: v
+
+        def fake_gmres(_hvp_fn, _x, _rhs, *, stab, tol):
+            del stab, tol
+            return jnp.array([10.0]), jnp.array([0.0]), None
+
+        monkeypatch.setattr(_opt, "_hessian_vector_product_fn", fake_hvp_fn)
+        monkeypatch.setattr(_opt, "_gmres_solve_newton_system", fake_gmres)
+
+        result = newton_polish(obj, jnp.array([1.0]), maxiter=5, tol=1e-12)
+
+        np.testing.assert_allclose(result["x"], np.array([1.0]), atol=1e-12)
+        np.testing.assert_allclose(result["grad"], np.array([1.0]), atol=1e-12)
+        assert result["nit"] == 0
+        assert not result["success"]
+
     def test_newton_exact_linear_system(self):
         """Newton exact solver finds root of a linear system in 1 step."""
         A = jnp.array([[3.0, 1.0], [1.0, 4.0]])

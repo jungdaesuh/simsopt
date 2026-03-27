@@ -13,12 +13,12 @@ Target private methods (validated on JAX 0.9.2):
   - ``method="lbfgs-ondevice"``: JAX on-device L-BFGS.
 
 The private methods live in ``optimizer_jax_private/`` and intentionally mirror
-the JAX 0.9.2 optimizer internals so the line-search and iteration semantics
-stay stable across this project.  The reference source is the upstream
+the JAX 0.9.2 optimizer semantics so the line-search and iteration behavior
+stay stable across this project. The reference source is the upstream
 ``jax-v0.9.2`` tag (``a659757d768587a81d095a9fab5f0c36f8beb218``).
 
-This module contains zero ``jax._src`` imports.  All ``jax._src``-dependent
-code is in the private package.
+This module contains zero ``jax._src`` imports. The private package now does as
+well; both paths use public JAX APIs.
 """
 
 from __future__ import annotations
@@ -70,7 +70,7 @@ def _x64_enabled():
 # ---------------------------------------------------------------------------
 # Private package — lazy, one-way (private imports only constants defined above).
 # The package is loaded on first access to a private symbol, so importing
-# optimizer_jax for SciPy / Newton paths never touches jax._src.
+# optimizer_jax for SciPy / Newton paths never touches private optimizer internals.
 # ---------------------------------------------------------------------------
 _private_pkg = None  # None = untried, False = absent, module = loaded
 
@@ -258,6 +258,16 @@ def _materialize_dense_hessian(hvp_fn, x):
     return 0.5 * (dense + dense.T)
 
 
+def _newton_candidate_status(current_norm, x_next, grad_next):
+    candidate_norm = jnp.linalg.norm(grad_next)
+    accepted = (
+        jnp.all(jnp.isfinite(x_next))
+        & jnp.all(jnp.isfinite(grad_next))
+        & (candidate_norm <= current_norm)
+    )
+    return accepted, candidate_norm
+
+
 def _gmres_solve_newton_system(hvp_fn, x, rhs, *, stab, tol):
     n = int(rhs.shape[0])
     restart = max(5, min(n, 50))
@@ -340,9 +350,17 @@ def newton_polish(
             )
             if np.all(np.isfinite(np.asarray(correction))):
                 dx = dx + correction
-        x = x - dx
-        val, grad = val_and_grad_fn(x)
-        norm = jnp.linalg.norm(grad)
+        candidate_x = x - dx
+        candidate_val, candidate_grad = val_and_grad_fn(candidate_x)
+        accepted, candidate_norm = _newton_candidate_status(
+            norm, candidate_x, candidate_grad
+        )
+        if not bool(accepted):
+            break
+        x = candidate_x
+        val = candidate_val
+        grad = candidate_grad
+        norm = candidate_norm
         nit += 1
         if progress_callback is not None:
             progress_callback(nit, float(val), float(norm))
@@ -384,7 +402,7 @@ def newton_polish_traceable(
     linear_tol = jnp.minimum(1e-10, jnp.maximum(jnp.asarray(tol) * 0.1, 1e-14))
 
     def cond_fun(state):
-        return (state["nit"] < maxiter) & (state["norm"] > tol)
+        return (state["nit"] < maxiter) & (state["norm"] > tol) & (~state["stalled"])
 
     def body_fun(state):
         dx, linear_residual, _ = _gmres_solve_newton_system(
@@ -441,20 +459,23 @@ def newton_polish_traceable(
 
         x_next = state["x"] - dx
         val_next, grad_next = val_and_grad_fn(x_next)
-        norm_next = jnp.linalg.norm(grad_next)
+        accepted, candidate_norm = _newton_candidate_status(
+            state["norm"], x_next, grad_next
+        )
         if progress_callback is not None:
             jax.debug.callback(
                 progress_callback,
                 state["nit"] + 1,
-                val_next,
-                norm_next,
+                lax.select(accepted, val_next, state["val"]),
+                lax.select(accepted, candidate_norm, state["norm"]),
             )
         return {
-            "x": x_next,
-            "val": val_next,
-            "grad": grad_next,
-            "norm": norm_next,
+            "x": lax.select(accepted, x_next, state["x"]),
+            "val": lax.select(accepted, val_next, state["val"]),
+            "grad": lax.select(accepted, grad_next, state["grad"]),
+            "norm": lax.select(accepted, candidate_norm, state["norm"]),
             "nit": state["nit"] + 1,
+            "stalled": ~accepted,
         }
 
     state = lax.while_loop(
@@ -466,6 +487,7 @@ def newton_polish_traceable(
             "grad": grad0,
             "norm": norm0,
             "nit": jnp.asarray(0, dtype=jnp.int32),
+            "stalled": jnp.asarray(False),
         },
     )
 

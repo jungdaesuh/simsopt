@@ -30,7 +30,9 @@ import scipy.linalg
 from pathlib import Path
 import sys
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+REPO_ROOT = Path(__file__).resolve().parents[2]
+
+sys.path.insert(0, str(REPO_ROOT))
 
 from benchmarks.run_code_benchmark_common import summarize_result_fun
 from benchmarks.single_stage_smoke_fixture import build_real_single_stage_init_fixture
@@ -1787,8 +1789,10 @@ class TestScriptBackendSelection:
 
         spec = importlib.util.spec_from_file_location(
             "single_stage",
-            "examples/single_stage_optimization/SINGLE_STAGE/"
-            "single_stage_banana_example.py",
+            REPO_ROOT / "examples"
+            / "single_stage_optimization"
+            / "SINGLE_STAGE"
+            / "single_stage_banana_example.py",
         )
         mod = importlib.util.module_from_spec(spec)
 

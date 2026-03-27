@@ -10,6 +10,7 @@ All tests require ``simsoptpp`` for the CPU reference.
 """
 
 import json
+import importlib
 import importlib.util
 from pathlib import Path
 import subprocess
@@ -130,6 +131,11 @@ def _load_stage2_script_module():
             if name == "simsopt" or name.startswith("simsopt."):
                 del sys.modules[name]
         sys.modules.update(saved_simsopt_modules)
+
+
+def _fresh_import(module_name):
+    sys.modules.pop(module_name, None)
+    return importlib.import_module(module_name)
 
 
 def _run_stage2_script(*args):
@@ -1662,7 +1668,7 @@ class TestStage2OptimizerContract:
         self,
         monkeypatch,
     ):
-        import simsopt.geo.optimizer_jax as optimizer_jax
+        optimizer_jax = _fresh_import("simsopt.geo.optimizer_jax")
 
         stage2_script = _load_stage2_script_module()
 
