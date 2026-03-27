@@ -96,6 +96,7 @@ REDUCED_STAGE2_ARGS = (
     "--ntheta",
     "16",
 )
+_SHORT_RUN_PARITY_RTOL = 1e-3
 
 
 def _stage2_context_kwargs():
@@ -675,10 +676,8 @@ class TestShortOptimizationRun:
         print(f"CPU: J={j_cpu:.8e}, nit={nit_cpu}")
         print(f"JAX: J={j_jax:.8e}, nit={nit_jax}")
 
-        # Final objectives should be in the same regime.
-        # Allow wider tolerance since optimizer trajectories may diverge slightly.
         rel_diff = abs(j_jax - j_cpu) / (abs(j_cpu) + 1e-30)
-        assert rel_diff < 0.01, (
+        assert rel_diff < _SHORT_RUN_PARITY_RTOL, (
             f"Short-run final objectives differ by {rel_diff:.2%}: "
             f"CPU={j_cpu:.6e}, JAX={j_jax:.6e}"
         )

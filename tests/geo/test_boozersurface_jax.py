@@ -186,6 +186,61 @@ def _make_two_coils(nquad=128):
     return gammas, gammadashs, currents
 
 
+_TORUS_GEOMETRY_RTOL = 1e-12
+_ROSENBROCK_SOLUTION_ATOL = 1e-8
+_STOKES_FLUX_RTOL = 1e-5
+_STOKES_FLUX_ATOL = 5e-7
+_STOKES_DISK_NR = 96
+_STOKES_DISK_NTHETA = 192
+
+
+def _simple_torus_geometry_values(*, R0, r, mpol, ntor, nfp, nphi, ntheta):
+    xc, yc, zc = _make_simple_torus_coeffs(R0, r, mpol, ntor, nfp)
+    qphi = jnp.linspace(0, 1.0 / nfp, nphi, endpoint=False)
+    qtheta = jnp.linspace(0, 1.0, ntheta, endpoint=False)
+    gamma = surface_gamma(
+        qphi,
+        qtheta,
+        jnp.array(xc),
+        jnp.array(yc),
+        jnp.array(zc),
+        mpol,
+        ntor,
+        nfp,
+    )
+    normal = surface_normal(
+        qphi,
+        qtheta,
+        jnp.array(xc),
+        jnp.array(yc),
+        jnp.array(zc),
+        mpol,
+        ntor,
+        nfp,
+    )
+    return {
+        "volume": float(surface_volume(gamma, normal)),
+        "area": float(surface_area(normal)),
+        "expected_volume": 2.0 * np.pi**2 * R0 * r**2,
+        "expected_area": 4.0 * np.pi**2 * R0 * r,
+    }
+
+
+def _disk_flux_through_circle_z0(*, radius, nr, ntheta, gammas, gammadashs, currents):
+    rs = (np.arange(nr) + 0.5) * (radius / nr)
+    thetas = (np.arange(ntheta) + 0.5) * (2.0 * np.pi / ntheta)
+    rr, tt = np.meshgrid(rs, thetas, indexing="ij")
+    points = np.stack(
+        [rr * np.cos(tt), rr * np.sin(tt), np.zeros_like(rr)],
+        axis=-1,
+    ).reshape(-1, 3)
+    B = np.asarray(
+        biot_savart_B(jnp.array(points), gammas, gammadashs, currents)
+    ).reshape(nr, ntheta, 3)
+    area_element = (radius / nr) * (2.0 * np.pi / ntheta) * rr
+    return float(np.sum(B[..., 2] * area_element))
+
+
 def _successful_minimize_result(
     x0,
     *,
@@ -320,24 +375,20 @@ class TestSurfaceVolume:
 
     def test_simple_torus_volume(self):
         """Volume of a simple torus: V = 2π² R r²."""
-        R0, r = 1.0, 0.1
-        mpol, ntor, nfp = 1, 1, 1
-        nphi, ntheta = 32, 32
-
-        xc, yc, zc = _make_simple_torus_coeffs(R0, r, mpol, ntor, nfp)
-        qphi = jnp.linspace(0, 1.0 / nfp, nphi, endpoint=False)
-        qtheta = jnp.linspace(0, 1.0, ntheta, endpoint=False)
-
-        gamma = surface_gamma(
-            qphi, qtheta, jnp.array(xc), jnp.array(yc), jnp.array(zc), mpol, ntor, nfp
+        geometry = _simple_torus_geometry_values(
+            R0=1.0,
+            r=0.1,
+            mpol=1,
+            ntor=1,
+            nfp=1,
+            nphi=32,
+            ntheta=32,
         )
-        normal = surface_normal(
-            qphi, qtheta, jnp.array(xc), jnp.array(yc), jnp.array(zc), mpol, ntor, nfp
+        np.testing.assert_allclose(
+            geometry["volume"],
+            geometry["expected_volume"],
+            rtol=_TORUS_GEOMETRY_RTOL,
         )
-
-        vol = float(surface_volume(gamma, normal))
-        expected = 2.0 * np.pi**2 * R0 * r**2
-        np.testing.assert_allclose(vol, expected, rtol=1e-4)
 
 
 class TestVectorPotentialA:
@@ -361,9 +412,20 @@ class TestVectorPotentialA:
         A = biot_savart_A(jnp.array(pts), gammas, gammadashs, currents)
         # Line integral: ∮ A · dl ≈ (2π/N) Σ A · tangent
         flux_A = float(jnp.sum(A * jnp.array(tangent))) * (2 * np.pi / npts)
-
-        # The line integral of A should be non-trivial
-        assert abs(flux_A) > 0
+        flux_B = _disk_flux_through_circle_z0(
+            radius=r_test,
+            nr=_STOKES_DISK_NR,
+            ntheta=_STOKES_DISK_NTHETA,
+            gammas=gammas,
+            gammadashs=gammadashs,
+            currents=currents,
+        )
+        np.testing.assert_allclose(
+            flux_A,
+            flux_B,
+            rtol=_STOKES_FLUX_RTOL,
+            atol=_STOKES_FLUX_ATOL,
+        )
 
     def test_A_divergence_free_proxy(self):
         """dA/dX trace should be approximately zero (Coulomb gauge)."""
@@ -503,7 +565,12 @@ class TestOptimizerAdapter:
 
         x0 = jnp.array([-1.0, 1.0])
         result = jax_minimize(rosenbrock, x0, method="bfgs", tol=1e-8, maxiter=500)
-        np.testing.assert_allclose(result.x, jnp.array([1.0, 1.0]), atol=1e-4)
+        assert result.success
+        np.testing.assert_allclose(
+            result.x,
+            jnp.array([1.0, 1.0]),
+            atol=_ROSENBROCK_SOLUTION_ATOL,
+        )
 
     def test_scipy_lbfgs_preserves_supported_options(self, monkeypatch):
         """SciPy L-BFGS-B must receive its valid tuning knobs."""
@@ -948,61 +1015,42 @@ class TestSurfaceArea:
 
     def test_simple_torus_area(self):
         """Area of a simple torus: A = 4pi^2 R r."""
-        R0, r = 1.0, 0.1
-        mpol, ntor, nfp = 1, 1, 1
-        nphi, ntheta = 32, 32
-
-        xc, yc, zc = _make_simple_torus_coeffs(R0, r, mpol, ntor, nfp)
-        qphi = jnp.linspace(0, 1.0 / nfp, nphi, endpoint=False)
-        qtheta = jnp.linspace(0, 1.0, ntheta, endpoint=False)
-
-        normal = _sf.surface_normal(
-            qphi,
-            qtheta,
-            jnp.array(xc),
-            jnp.array(yc),
-            jnp.array(zc),
-            mpol,
-            ntor,
-            nfp,
+        geometry = _simple_torus_geometry_values(
+            R0=1.0,
+            r=0.1,
+            mpol=1,
+            ntor=1,
+            nfp=1,
+            nphi=32,
+            ntheta=32,
         )
-        computed = float(surface_area(normal))
-        expected = 4.0 * np.pi**2 * R0 * r
-        np.testing.assert_allclose(computed, expected, rtol=1e-4)
+        np.testing.assert_allclose(
+            geometry["area"],
+            geometry["expected_area"],
+            rtol=_TORUS_GEOMETRY_RTOL,
+        )
 
     def test_area_differs_from_volume(self):
-        """area_jax and volume_jax return different values."""
-        R0, r = 1.0, 0.1
-        mpol, ntor, nfp = 1, 1, 1
-        nphi, ntheta = 16, 16
-
-        xc, yc, zc = _make_simple_torus_coeffs(R0, r, mpol, ntor, nfp)
-        qphi = jnp.linspace(0, 1.0 / nfp, nphi, endpoint=False)
-        qtheta = jnp.linspace(0, 1.0, ntheta, endpoint=False)
-
-        gamma = surface_gamma(
-            qphi,
-            qtheta,
-            jnp.array(xc),
-            jnp.array(yc),
-            jnp.array(zc),
-            mpol,
-            ntor,
-            nfp,
+        """Area and volume both match the analytical torus formulas."""
+        geometry = _simple_torus_geometry_values(
+            R0=1.0,
+            r=0.1,
+            mpol=1,
+            ntor=1,
+            nfp=1,
+            nphi=16,
+            ntheta=16,
         )
-        normal = _sf.surface_normal(
-            qphi,
-            qtheta,
-            jnp.array(xc),
-            jnp.array(yc),
-            jnp.array(zc),
-            mpol,
-            ntor,
-            nfp,
+        np.testing.assert_allclose(
+            geometry["volume"],
+            geometry["expected_volume"],
+            rtol=_TORUS_GEOMETRY_RTOL,
         )
-        vol = float(volume_jax(gamma, normal))
-        area = float(area_jax(normal))
-        assert vol != area
+        np.testing.assert_allclose(
+            geometry["area"],
+            geometry["expected_area"],
+            rtol=_TORUS_GEOMETRY_RTOL,
+        )
 
 
 class TestAreaLabelPath:
@@ -2234,62 +2282,38 @@ class TestNfpVolumeArea:
     @pytest.mark.parametrize("nfp", [1, 2, 3, 5])
     def test_volume_nfp(self, nfp):
         """Volume = 2π²Rr² regardless of nfp."""
-        R0, r = 1.0, 0.1
-        mpol, ntor = 1, 1
-        nphi, ntheta = 32, 32
-
-        xc, yc, zc = _make_simple_torus_coeffs(R0, r, mpol, ntor, nfp)
-        qphi = jnp.linspace(0, 1.0 / nfp, nphi, endpoint=False)
-        qtheta = jnp.linspace(0, 1.0, ntheta, endpoint=False)
-
-        gamma = surface_gamma(
-            qphi,
-            qtheta,
-            jnp.array(xc),
-            jnp.array(yc),
-            jnp.array(zc),
-            mpol,
-            ntor,
-            nfp,
+        geometry = _simple_torus_geometry_values(
+            R0=1.0,
+            r=0.1,
+            mpol=1,
+            ntor=1,
+            nfp=nfp,
+            nphi=32,
+            ntheta=32,
         )
-        normal = _sf.surface_normal(
-            qphi,
-            qtheta,
-            jnp.array(xc),
-            jnp.array(yc),
-            jnp.array(zc),
-            mpol,
-            ntor,
-            nfp,
+        np.testing.assert_allclose(
+            geometry["volume"],
+            geometry["expected_volume"],
+            rtol=_TORUS_GEOMETRY_RTOL,
         )
-        vol = float(surface_volume(gamma, normal))
-        expected = 2.0 * np.pi**2 * R0 * r**2
-        np.testing.assert_allclose(vol, expected, rtol=1e-4)
 
     @pytest.mark.parametrize("nfp", [1, 2, 3, 5])
     def test_area_nfp(self, nfp):
         """Area = 4π²Rr regardless of nfp."""
-        R0, r = 1.0, 0.1
-        mpol, ntor = 1, 1
-        nphi, ntheta = 32, 32
-
-        xc, yc, zc = _make_simple_torus_coeffs(R0, r, mpol, ntor, nfp)
-        qphi = jnp.linspace(0, 1.0 / nfp, nphi, endpoint=False)
-        qtheta = jnp.linspace(0, 1.0, ntheta, endpoint=False)
-
-        normal = _sf.surface_normal(
-            qphi,
-            qtheta,
-            jnp.array(xc),
-            jnp.array(yc),
-            jnp.array(zc),
-            mpol,
-            ntor,
-            nfp,
+        geometry = _simple_torus_geometry_values(
+            R0=1.0,
+            r=0.1,
+            mpol=1,
+            ntor=1,
+            nfp=nfp,
+            nphi=32,
+            ntheta=32,
         )
-        computed = float(surface_area(normal))
-        expected = 4.0 * np.pi**2 * R0 * r
-        np.testing.assert_allclose(computed, expected, rtol=1e-4)
+        np.testing.assert_allclose(
+            geometry["area"],
+            geometry["expected_area"],
+            rtol=_TORUS_GEOMETRY_RTOL,
+        )
 
 
 # ---------------------------------------------------------------------------
