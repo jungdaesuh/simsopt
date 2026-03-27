@@ -644,6 +644,9 @@ def initialize_boozer_surface(
     backend="cpu",
     optimizer_backend="scipy",
     boozer_limited_memory=False,
+    surface_dofs_override=None,
+    iota_override=None,
+    G_override=None,
     on_stage=None,
 ):
     """
@@ -660,6 +663,10 @@ def initialize_boozer_surface(
     optimizer_backend: JAX inner optimizer selector recorded in metadata
     boozer_limited_memory: force the JAX Boozer LS solve through ondevice
         limited-memory routing without changing the default contract elsewhere
+    surface_dofs_override: optional converged surface DOFs to reuse as the
+        initial Boozer state instead of the fitted Stage 2 seed surface
+    iota_override: optional solved iota warm start for the Boozer replay
+    G_override: optional solved G warm start for the Boozer replay
     """
 
     def emit_stage(label, **extra):
@@ -672,6 +679,16 @@ def initialize_boozer_surface(
             options["stage_callback"] = on_stage
         return options
 
+    def resolve_boozer_warm_start():
+        solve_iota = float(iota_override) if iota_override is not None else iota
+        solve_G = float(G_override) if G_override is not None else G0
+        solve_sdofs = (
+            None
+            if surface_dofs_override is None
+            else np.asarray(surface_dofs_override, dtype=float)
+        )
+        return solve_iota, solve_G, solve_sdofs
+
     surf = SurfaceXYZTensorFourier(
         mpol=mpol,
         ntor=ntor,
@@ -681,6 +698,8 @@ def initialize_boozer_surface(
         quadpoints_phi=surf_prev.quadpoints_phi,
     )
     surf.least_squares_fit(surf_prev.gamma())
+    if surface_dofs_override is not None:
+        surf.set_dofs(np.asarray(surface_dofs_override, dtype=float))
     emit_stage("after_boozer_surface_fit")
 
     if backend == "jax":
@@ -740,7 +759,8 @@ def initialize_boozer_surface(
         )
 
     # Run boozer surface algorithm
-    res = boozer_surface.run_code(iota, G0)
+    solve_iota, solve_G, solve_sdofs = resolve_boozer_warm_start()
+    res = boozer_surface.run_code(solve_iota, solve_G, sdofs=solve_sdofs)
     emit_stage(
         "after_boozer_solve",
         solve_success=bool(res["success"]),
@@ -768,7 +788,7 @@ def initialize_boozer_surface(
             f"solve_success={success1}, "
             f"self_intersecting={self_intersecting}, "
             f"volume={boozer_surface.surface.volume()}, "
-            f"iota_guess={iota}, "
+            f"iota_guess={solve_iota}, "
             f"iota_solved={res['iota']}"
         )
         raise RuntimeError("Something went wrong with the Boozer solve...")

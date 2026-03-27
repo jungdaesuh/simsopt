@@ -294,6 +294,9 @@ def _build_real_fixture_at(
     args: argparse.Namespace,
     *,
     coil_dofs: np.ndarray | None = None,
+    surface_dofs: np.ndarray | None = None,
+    iota: float | None = None,
+    G: float | None = None,
 ):
     return build_real_single_stage_init_fixture(
         backend="jax",
@@ -309,7 +312,20 @@ def _build_real_fixture_at(
         iota_target=args.iota_target,
         optimizer_backend=args.optimizer_backend,
         bs_dofs_override=coil_dofs,
+        boozer_surface_dofs_override=surface_dofs,
+        boozer_iota_override=iota,
+        boozer_G_override=G,
     )
+
+
+def _build_real_resolve_overrides(
+    base_state: dict[str, float | np.ndarray],
+) -> dict[str, float | np.ndarray]:
+    return {
+        "surface_dofs": np.asarray(base_state["surface_dofs"], dtype=float),
+        "iota": float(base_state["iota"]),
+        "G": float(base_state["G"]),
+    }
 
 
 def _is_stable_resolve(
@@ -336,7 +352,11 @@ def _resolve_total_objective_at(
         single_stage_banana_example as single_stage_example,
     )
 
-    fixture = _build_real_fixture_at(args, coil_dofs=coil_dofs)
+    fixture = _build_real_fixture_at(
+        args,
+        coil_dofs=coil_dofs,
+        **_build_real_resolve_overrides(base_state),
+    )
     bs_jax = fixture["bs"]
     booz_jax = fixture["boozer_surface"]
     result = booz_jax.res
@@ -559,6 +579,7 @@ def main() -> None:
     )
     base_state = {
         "coil_dofs": np.asarray(bs_jax.x, dtype=float).copy(),
+        "surface_dofs": np.asarray(booz_jax.surface.get_dofs(), dtype=float).copy(),
         "iota": float(booz_jax.res["iota"]),
         "G": float(booz_jax.res["G"]),
         "fun": float(summarize_result_fun(booz_jax.res)),

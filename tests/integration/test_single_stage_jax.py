@@ -471,7 +471,8 @@ def _assert_biotsavart_vjp_bypasses_coil_vjp(curve, current, points, monkeypatch
 _REAL_RESOLVE_FD_REL_TOL = 1e-3
 _REAL_RESOLVE_FD_ABS_TOL = 1e-8
 _REAL_RESOLVE_FD_EPS = 1e-4
-_REAL_RESOLVE_FD_MAX_ATTEMPTS = 4
+_REAL_RESOLVE_FD_MAX_ATTEMPTS = 6
+_REAL_RESOLVE_FD_MIN_STABLE_SAMPLES = 2
 _STABLE_IOTA_ABS_TOL = 5e-3
 _STABLE_G_REL_TOL = 5e-3
 _STABLE_FUN_REL_TOL = 0.25
@@ -495,6 +496,7 @@ def _make_real_resolve_fd_setup():
     )
     return bs_jax, booz_jax, {
         "coil_dofs": np.asarray(bs_jax.x, dtype=float).copy(),
+        "surface_dofs": np.asarray(booz_jax.surface.get_dofs(), dtype=float).copy(),
         "iota": float(result["iota"]),
         "G": float(result["G"]),
         "fun": float(summarize_result_fun(result)),
@@ -509,11 +511,22 @@ def _is_stable_real_resolve(base_state, *, iota_value, G_value, fun_value):
     )
 
 
+def _build_real_resolve_overrides(base_state):
+    return {
+        "boozer_surface_dofs_override": np.asarray(
+            base_state["surface_dofs"], dtype=float
+        ),
+        "boozer_iota_override": float(base_state["iota"]),
+        "boozer_G_override": float(base_state["G"]),
+    }
+
+
 def _resolve_wrapper_value_on_real_fixture(base_state, coil_dofs, wrapper_factory):
     fixture = build_real_single_stage_init_fixture(
         backend="jax",
         optimizer_backend="ondevice",
         bs_dofs_override=np.asarray(coil_dofs, dtype=float),
+        **_build_real_resolve_overrides(base_state),
     )
     bs_jax = fixture["bs"]
     booz_jax = fixture["boozer_surface"]
@@ -566,6 +579,7 @@ def _assert_wrapper_resolve_fd_matches_real_fixture(
     x0 = np.asarray(base_state["coil_dofs"], dtype=float)
     rng = np.random.RandomState(rng_seed)
     instability_reasons = []
+    stable_sample_count = 0
 
     for sample_index in range(_REAL_RESOLVE_FD_MAX_ATTEMPTS):
         direction = rng.randn(len(x0))
@@ -600,11 +614,14 @@ def _assert_wrapper_resolve_fd_matches_real_fixture(
             f"{wrapper_label} reduced-real FD[{sample_index}] exceeded tolerance: "
             f"rel={rel_err:.2e} abs={abs_err:.2e}"
         )
-        return
+        stable_sample_count += 1
+        if stable_sample_count >= _REAL_RESOLVE_FD_MIN_STABLE_SAMPLES:
+            return
 
     pytest.fail(
-        f"{wrapper_label} did not find a branch-stable reduced real-fixture FD sample "
-        f"within {_REAL_RESOLVE_FD_MAX_ATTEMPTS} attempts: "
+        f"{wrapper_label} only found {stable_sample_count} branch-stable reduced "
+        f"real-fixture FD samples within {_REAL_RESOLVE_FD_MAX_ATTEMPTS} attempts; "
+        f"need {_REAL_RESOLVE_FD_MIN_STABLE_SAMPLES}: "
         + "; ".join(instability_reasons)
     )
 
