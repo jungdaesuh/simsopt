@@ -2408,14 +2408,25 @@ class TestMixedQuadratureBoozer:
 
         The mixed-quad setup uses 64+128 points while the uniform setup
         uses 64+64.  The B field differs slightly due to quadrature
-        accuracy, but the penalty value should be in the same regime.
+        accuracy, but the solved penalty should stay close. The mock
+        problem is not unique in ``iota``/``G``, so compare the scalar
+        objective directly instead of the recovered parameters.
         """
         booz_mixed = _make_mock_boozer_surface_mixed_quad()
         booz_uniform = _make_mock_boozer_surface()
 
         res_mixed = booz_mixed.run_code(iota=0.3, G=0.05)
         res_uniform = booz_uniform.run_code(iota=0.3, G=0.05)
+        penalty_fun_rel_tol = 2e-3
+        penalty_fun_abs_tol = 2e-6
 
-        # Both should converge to similar (small) values
-        assert res_mixed["fun"] < 1.0
-        assert res_uniform["fun"] < 1.0
+        assert res_mixed["success"]
+        assert res_uniform["success"]
+
+        # Observed mixed-vs-uniform gap on this mock torus is ~1.4e-3 relative.
+        np.testing.assert_allclose(
+            res_mixed["fun"],
+            res_uniform["fun"],
+            rtol=penalty_fun_rel_tol,
+            atol=penalty_fun_abs_tol,
+        )
