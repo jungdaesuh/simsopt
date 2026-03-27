@@ -74,10 +74,17 @@ class TestBiotSavartJaxAnalytical:
         B = biot_savart_B(points, gammas, gammadashs, currents)
 
         B_analytical = MU0 * I / (2.0 * R)
-        np.testing.assert_allclose(float(B[0, 2]), B_analytical, rtol=1e-6)
+        analytical_rel_tol = 1e-12
+        symmetry_abs_tol = 1e-14
+
+        np.testing.assert_allclose(
+            float(B[0, 2]),
+            B_analytical,
+            rtol=analytical_rel_tol,
+        )
         # Bx and By should be zero by symmetry
-        np.testing.assert_allclose(float(B[0, 0]), 0.0, atol=1e-10)
-        np.testing.assert_allclose(float(B[0, 1]), 0.0, atol=1e-10)
+        np.testing.assert_allclose(float(B[0, 0]), 0.0, atol=symmetry_abs_tol)
+        np.testing.assert_allclose(float(B[0, 1]), 0.0, atol=symmetry_abs_tol)
 
     def test_on_axis_field_offset_z(self):
         """B_z at z=h on axis: B_z = μ₀IR²/(2(R²+h²)^{3/2})."""
@@ -91,7 +98,12 @@ class TestBiotSavartJaxAnalytical:
         B = biot_savart_B(points, gammas, gammadashs, currents)
 
         B_analytical = MU0 * I * R**2 / (2.0 * (R**2 + h**2) ** 1.5)
-        np.testing.assert_allclose(float(B[0, 2]), B_analytical, rtol=1e-5)
+        analytical_rel_tol = 1e-12
+        np.testing.assert_allclose(
+            float(B[0, 2]),
+            B_analytical,
+            rtol=analytical_rel_tol,
+        )
 
     def test_div_B_zero(self):
         """∇·B = Tr(dB/dX) should be zero (Maxwell)."""
@@ -110,7 +122,8 @@ class TestBiotSavartJaxAnalytical:
         )
         dB = biot_savart_dB_by_dX(points, gammas, gammadashs, currents)
         div_B = jnp.trace(dB, axis1=1, axis2=2)  # (npoints,)
-        np.testing.assert_allclose(np.array(div_B), 0.0, atol=1e-10)
+        divergence_abs_tol = 1e-14
+        np.testing.assert_allclose(np.array(div_B), 0.0, atol=divergence_abs_tol)
 
     def test_B_and_dB_consistency(self):
         """biot_savart_B_and_dB returns same values as separate calls."""
@@ -154,7 +167,14 @@ class TestBiotSavartJaxAnalytical:
             # Row j = all B components differentiated w.r.t. x_j
             dB_fd[j, :] = (np.array(Bp) - np.array(Bm)) / (2 * eps)
 
-        np.testing.assert_allclose(np.array(dB_jax), dB_fd, rtol=1e-5)
+        fd_rel_tol = 1e-8
+        fd_abs_tol = 5e-11
+        np.testing.assert_allclose(
+            np.array(dB_jax),
+            dB_fd,
+            rtol=fd_rel_tol,
+            atol=fd_abs_tol,
+        )
 
     def test_multiple_coils(self):
         """Superposition: field of two coils equals sum of individual fields."""
