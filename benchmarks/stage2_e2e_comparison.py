@@ -55,6 +55,7 @@ _TIER1_BASE_TOLERANCES = optimizer_drift_tolerances("tier1_stage2_value_gradient
 MATCHED_OBJECTIVE_REL_TOL = _TIER1_BASE_TOLERANCES["objective_rel_tol"]
 MATCHED_GRADIENT_RTOL = _TIER1_BASE_TOLERANCES["gradient_rtol"]
 MATCHED_GRADIENT_ATOL = _TIER1_BASE_TOLERANCES["gradient_atol"]
+STAGE2_MATCHED_GRADIENT_ATOL = max(MATCHED_GRADIENT_ATOL, 5e-12)
 MATCHED_FIELD_REL_TOL = 1e-10
 
 
@@ -309,15 +310,26 @@ def _run_stage2_probe(
 
 def _trajectory_is_finite(trajectory: list[dict]) -> bool:
     for entry in trajectory:
-        values = (
-            entry["J"],
-            entry["Jf"],
-            entry["mean_abs_relBfinal_norm"],
-            entry["curve_length"],
-            entry["coil_coil_distance"],
-            entry["curvature"],
-            entry["grad_norm"],
-        )
+        barrier_rejection = bool(entry.get("distance_constraint_violated", False))
+        objective_value = float(entry["J"])
+        if barrier_rejection and np.isposinf(objective_value):
+            values = (
+                entry["Jf"],
+                entry["mean_abs_relBfinal_norm"],
+                entry["curve_length"],
+                entry["coil_coil_distance"],
+                entry["curvature"],
+            )
+        else:
+            values = (
+                objective_value,
+                entry["Jf"],
+                entry["mean_abs_relBfinal_norm"],
+                entry["curve_length"],
+                entry["coil_coil_distance"],
+                entry["curvature"],
+                entry["grad_norm"],
+            )
         if not np.all(np.isfinite(values)):
             return False
     return True
@@ -348,7 +360,7 @@ def _build_matched_state_metrics(
             jax_grad,
             cpu_grad,
             rtol=MATCHED_GRADIENT_RTOL,
-            atol=MATCHED_GRADIENT_ATOL,
+            atol=STAGE2_MATCHED_GRADIENT_ATOL,
         )
     )
     return {

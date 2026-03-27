@@ -11,8 +11,8 @@ from .._core.derivative import derivative_dec, Derivative
 import simsoptpp as sopp
 from simsopt.geo.framedcurve import FramedCurveCentroid 
 
-__all__ = ['CurveLength', 'LpCurveCurvature', 'LpCurveTorsion',
-           'CurveCurveDistance', 'CurveSurfaceDistance', 'ArclengthVariation',
+__all__ = ['CurveLength', 'LpCurveCurvature', 'LpCurveCurvatureBarrier', 'LpCurveTorsion',
+           'CurveCurveDistance', 'CurveCurveDistanceBarrier', 'CurveSurfaceDistance', 'ArclengthVariation',
            'MeanSquaredCurvature', 'LinkingNumber', 'FramedCurveTwist',
            'MinCurveCurveDistance']
 
@@ -66,6 +66,21 @@ def Lp_curvature_pure(kappa, gammadash, p, desired_kappa):
     return (1./p)*jnp.mean(jnp.maximum(kappa-desired_kappa, 0)**p * arc_length)
 
 
+@jit
+def curvature_barrier_pure(kappa, gammadash, threshold):
+    """
+    A strict interior-point barrier for pointwise curvature constraints.
+    The value is finite only when every sampled curvature stays strictly below
+    ``threshold``.
+    """
+    arc_length = jnp.linalg.norm(gammadash, axis=1)
+    feasible = kappa < threshold
+    safe_ratio = jnp.where(feasible, kappa / threshold, 2.0)
+    barrier = -jnp.log1p(-safe_ratio)
+    barrier = jnp.where(feasible, barrier, jnp.inf)
+    return jnp.mean(barrier * arc_length)
+
+
 class LpCurveCurvature(Optimizable):
     r"""
     This class computes a penalty term based on the :math:`L_p` norm
@@ -97,6 +112,49 @@ class LpCurveCurvature(Optimizable):
         """
         This returns the derivative of the quantity with respect to the curve dofs.
         """
+        grad0 = self.thisgrad0(self.curve.kappa(), self.curve.gammadash())
+        grad1 = self.thisgrad1(self.curve.kappa(), self.curve.gammadash())
+        return self.curve.dkappa_by_dcoeff_vjp(grad0) + self.curve.dgammadash_by_dcoeff_vjp(grad1)
+
+    return_fn_map = {'J': J, 'dJ': dJ}
+
+
+class LpCurveCurvatureBarrier(Optimizable):
+    r"""
+    Strict interior-point barrier for enforcing a maximum curve curvature:
+
+    .. math::
+        J = \int_{\text{curve}}
+        -\log\left(1 - \frac{\kappa}{\kappa_0}\right) ~dl
+
+    The barrier is finite only when every sampled curvature stays strictly
+    below ``threshold`` and tends to ``+\infty`` as the threshold is
+    approached from below.
+    """
+
+    def __init__(self, curve, threshold):
+        self.curve = curve
+        self.threshold = threshold
+        super().__init__(depends_on=[curve])
+        self.J_jax = jit(
+            lambda kappa, gammadash: curvature_barrier_pure(
+                kappa,
+                gammadash,
+                threshold,
+            )
+        )
+        self.thisgrad0 = jit(
+            lambda kappa, gammadash: grad(self.J_jax, argnums=0)(kappa, gammadash)
+        )
+        self.thisgrad1 = jit(
+            lambda kappa, gammadash: grad(self.J_jax, argnums=1)(kappa, gammadash)
+        )
+
+    def J(self):
+        return self.J_jax(self.curve.kappa(), self.curve.gammadash())
+
+    @derivative_dec
+    def dJ(self):
         grad0 = self.thisgrad0(self.curve.kappa(), self.curve.gammadash())
         grad1 = self.thisgrad1(self.curve.kappa(), self.curve.gammadash())
         return self.curve.dkappa_by_dcoeff_vjp(grad0) + self.curve.dgammadash_by_dcoeff_vjp(grad1)
@@ -162,6 +220,128 @@ def cc_distance_pure(gamma1, l1, gamma2, l2, minimum_distance):
     dists = jnp.sqrt(jnp.sum((gamma1[:, None, :] - gamma2[None, :, :])**2, axis=2))
     alen = jnp.linalg.norm(l1, axis=1)[:, None] * jnp.linalg.norm(l2, axis=1)[None, :]
     return jnp.sum(alen * jnp.maximum(minimum_distance-dists, 0)**2)/(gamma1.shape[0]*gamma2.shape[0])
+
+
+def cc_distance_barrier_pure(gamma1, l1, gamma2, l2, minimum_distance):
+    """
+    A true interior-point barrier for the pointwise coil-coil separation
+    constraint. The value is finite only when every sampled point-pair distance
+    stays strictly above ``minimum_distance`` and diverges at the constraint
+    boundary.
+    """
+    dists = jnp.sqrt(jnp.sum((gamma1[:, None, :] - gamma2[None, :, :])**2, axis=2))
+    alen = jnp.linalg.norm(l1, axis=1)[:, None] * jnp.linalg.norm(l2, axis=1)[None, :]
+    feasible = dists > minimum_distance
+    safe_ratio = jnp.where(feasible, minimum_distance / dists, 0.5)
+    barrier = -jnp.log1p(-safe_ratio)
+    barrier = jnp.where(feasible, barrier, jnp.inf)
+    return jnp.sum(alen * barrier) / (gamma1.shape[0] * gamma2.shape[0])
+
+
+class CurveCurveDistanceBarrier(Optimizable):
+    r"""
+    ``CurveCurveDistanceBarrier`` is a strict interior-point barrier for
+    enforcing a minimum coil-coil separation:
+
+    .. math::
+        J = \sum_{i = 1}^{\text{num_coils}} \sum_{j = 1}^{i-1} b_{i,j}
+
+    where
+
+    .. math::
+        b_{i,j} = \int_{\text{curve}_i} \int_{\text{curve}_j}
+        -\log\left(1 - \frac{d_{\min}}{\| \mathbf{r}_i - \mathbf{r}_j \|_2}\right)
+        ~dl_j ~dl_i.
+
+    The barrier is finite only when every sampled point-pair distance exceeds
+    ``minimum_distance`` and tends to ``+\infty`` as the true sampled minimum
+    distance approaches the threshold from above.
+    """
+
+    def __init__(self, curves, minimum_distance, num_basecurves=None):
+        self.curves = curves
+        self.minimum_distance = minimum_distance
+        self.num_basecurves = num_basecurves or len(curves)
+
+        self.J_jax = jit(
+            lambda gamma1, l1, gamma2, l2: cc_distance_barrier_pure(
+                gamma1, l1, gamma2, l2, minimum_distance
+            )
+        )
+        self.thisgrad0 = jit(
+            lambda gamma1, l1, gamma2, l2: grad(self.J_jax, argnums=0)(
+                gamma1, l1, gamma2, l2
+            )
+        )
+        self.thisgrad1 = jit(
+            lambda gamma1, l1, gamma2, l2: grad(self.J_jax, argnums=1)(
+                gamma1, l1, gamma2, l2
+            )
+        )
+        self.thisgrad2 = jit(
+            lambda gamma1, l1, gamma2, l2: grad(self.J_jax, argnums=2)(
+                gamma1, l1, gamma2, l2
+            )
+        )
+        self.thisgrad3 = jit(
+            lambda gamma1, l1, gamma2, l2: grad(self.J_jax, argnums=3)(
+                gamma1, l1, gamma2, l2
+            )
+        )
+        super().__init__(depends_on=curves)
+
+    def _iter_curve_pair_indices(self):
+        for i in range(len(self.curves)):
+            for j in range(min(i, self.num_basecurves)):
+                yield i, j
+
+    def shortest_distance(self):
+        from scipy.spatial.distance import cdist
+
+        return min(
+            np.min(cdist(self.curves[i].gamma(), self.curves[j].gamma()))
+            for i, j in self._iter_curve_pair_indices()
+        )
+
+    def J(self):
+        """
+        This returns the value of the quantity.
+        """
+        res = 0
+        for i, j in self._iter_curve_pair_indices():
+            gamma1 = self.curves[i].gamma()
+            l1 = self.curves[i].gammadash()
+            gamma2 = self.curves[j].gamma()
+            l2 = self.curves[j].gammadash()
+            res += self.J_jax(gamma1, l1, gamma2, l2)
+        return res
+
+    @derivative_dec
+    def dJ(self):
+        """
+        This returns the derivative of the quantity with respect to the curve dofs.
+        """
+        dgamma_by_dcoeff_vjp_vecs = [np.zeros_like(c.gamma()) for c in self.curves]
+        dgammadash_by_dcoeff_vjp_vecs = [np.zeros_like(c.gammadash()) for c in self.curves]
+
+        for i, j in self._iter_curve_pair_indices():
+            gamma1 = self.curves[i].gamma()
+            l1 = self.curves[i].gammadash()
+            gamma2 = self.curves[j].gamma()
+            l2 = self.curves[j].gammadash()
+            dgamma_by_dcoeff_vjp_vecs[i] += self.thisgrad0(gamma1, l1, gamma2, l2)
+            dgammadash_by_dcoeff_vjp_vecs[i] += self.thisgrad1(gamma1, l1, gamma2, l2)
+            dgamma_by_dcoeff_vjp_vecs[j] += self.thisgrad2(gamma1, l1, gamma2, l2)
+            dgammadash_by_dcoeff_vjp_vecs[j] += self.thisgrad3(gamma1, l1, gamma2, l2)
+
+        res = [
+            self.curves[i].dgamma_by_dcoeff_vjp(dgamma_by_dcoeff_vjp_vecs[i])
+            + self.curves[i].dgammadash_by_dcoeff_vjp(dgammadash_by_dcoeff_vjp_vecs[i])
+            for i in range(len(self.curves))
+        ]
+        return sum(res)
+
+    return_fn_map = {'J': J, 'dJ': dJ}
 
 
 class CurveCurveDistance(Optimizable):

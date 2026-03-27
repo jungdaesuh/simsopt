@@ -10,7 +10,11 @@ import jax.numpy as jnp
 from ..field.biotsavart_jax import biot_savart_B, group_coil_data, grouped_biot_savart_B
 from ..field.biotsavart_jax_backend import _unwrap_coil_curve_and_current
 from ..geo.curve import incremental_arclength_pure, kappa_pure
-from ..geo.curveobjectives import Lp_curvature_pure, cc_distance_pure, curve_length_pure
+from ..geo.curveobjectives import (
+    curvature_barrier_pure,
+    cc_distance_barrier_pure,
+    curve_length_pure,
+)
 from .integral_bdotn_jax import integral_BdotN
 
 __all__ = ["Stage2TargetObjectiveBundle", "build_stage2_target_objective"]
@@ -31,7 +35,7 @@ def _fixed_curve_penalty(curves, minimum_distance):
     total = jnp.asarray(0.0, dtype=jnp.float64)
     for i, (gamma_i, gammadash_i) in enumerate(curves):
         for gamma_j, gammadash_j in curves[:i]:
-            total = total + cc_distance_pure(
+            total = total + cc_distance_barrier_pure(
                 gamma_i,
                 gammadash_i,
                 gamma_j,
@@ -72,7 +76,7 @@ def _dynamic_curve_distance_penalty(
     total = initial_penalty
     for gamma, gammadash in dynamic_pairs:
         for tf_gamma, tf_gammadash in tf_curve_data:
-            total = total + cc_distance_pure(
+            total = total + cc_distance_barrier_pure(
                 gamma,
                 gammadash,
                 tf_gamma,
@@ -81,7 +85,7 @@ def _dynamic_curve_distance_penalty(
             )
     for i, (gamma_i, gammadash_i) in enumerate(dynamic_pairs):
         for gamma_j, gammadash_j in dynamic_pairs[:i]:
-            total = total + cc_distance_pure(
+            total = total + cc_distance_barrier_pure(
                 gamma_i,
                 gammadash_i,
                 gamma_j,
@@ -183,10 +187,9 @@ def build_stage2_target_objective(
         curve_length = curve_length_pure(incremental_arclength)
         length_penalty = 0.5 * jnp.maximum(curve_length - length_target, 0.0) ** 2
 
-        curvature_penalty = Lp_curvature_pure(
+        curvature_penalty = curvature_barrier_pure(
             kappa_pure(base_gammadash, base_gammadashdash),
             base_gammadash,
-            curvature_p_norm,
             curvature_threshold,
         )
 

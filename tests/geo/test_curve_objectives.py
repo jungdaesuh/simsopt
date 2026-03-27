@@ -8,7 +8,7 @@ from simsopt.geo.curve import RotatedCurve, create_equally_spaced_curves
 from simsopt.geo.curvexyzfourier import CurveXYZFourier, JaxCurveXYZFourier
 from simsopt.geo.curverzfourier import CurveRZFourier
 from simsopt.geo.curveobjectives import CurveLength, LpCurveCurvature, \
-    LpCurveTorsion, CurveCurveDistance, ArclengthVariation, \
+    LpCurveCurvatureBarrier, LpCurveTorsion, CurveCurveDistance, CurveCurveDistanceBarrier, ArclengthVariation, \
     MeanSquaredCurvature, CurveSurfaceDistance, LinkingNumber
 from simsopt.geo.surfacerzfourier import SurfaceRZFourier
 from simsopt.field.coil import coils_via_symmetries
@@ -22,6 +22,7 @@ parameters['jit'] = False
 class Testing(unittest.TestCase):
 
     curvetypes = ["CurveXYZFourier", "JaxCurveXYZFourier", "CurveRZFourier"]
+    _BARRIER_TAYLOR_FLOOR = 5e-12
 
     def create_curve(self, curvetype, rotated):
         np.random.seed(1)
@@ -54,6 +55,25 @@ class Testing(unittest.TestCase):
         if rotated:
             coil = RotatedCurve(coil, 0.5, flip=False)
         return coil
+
+    def _assert_barrier_taylor_progress(self, err, err_new):
+        if err > 10.0 * self._BARRIER_TAYLOR_FLOOR:
+            assert err_new < 0.6 * err
+        else:
+            assert err_new <= max(1.05 * err, self._BARRIER_TAYLOR_FLOOR)
+
+    def _curve_collection_min_distance(self, curves):
+        min_distance = 1e10
+        for i in range(len(curves)):
+            for j in range(i):
+                pair_distance = np.min(
+                    np.linalg.norm(
+                        curves[i].gamma()[:, None, :] - curves[j].gamma()[None, :, :],
+                        axis=2,
+                    )
+                )
+                min_distance = min(min_distance, pair_distance)
+        return min_distance
 
     def subtest_curve_length_taylor_test(self, curve):
         J = CurveLength(curve)
@@ -111,6 +131,37 @@ class Testing(unittest.TestCase):
                 with self.subTest(curvetype=curvetype, rotated=rotated):
                     curve = self.create_curve(curvetype, rotated)
                     self.subtest_curve_curvature_taylor_test(curve)
+
+    def subtest_curve_curvature_barrier_taylor_test(self, curve):
+        max_kappa = float(np.max(curve.kappa()))
+        feasible_threshold = 2.0 * max_kappa
+        J = LpCurveCurvatureBarrier(curve, feasible_threshold)
+        assert np.isfinite(J.J())
+        Jviol = LpCurveCurvatureBarrier(curve, 0.5 * max_kappa)
+        assert np.isposinf(Jviol.J())
+
+        J0 = J.J()
+        curve_dofs = curve.x
+        h = 1e-2 * np.random.rand(len(curve_dofs)).reshape(curve_dofs.shape)
+        dJ = J.dJ()
+        deriv = np.sum(dJ * h)
+        assert np.abs(deriv) > 1e-10
+        err = 1e6
+        for i in range(5, 15):
+            eps = 0.5**i
+            curve.x = curve_dofs + eps * h
+            Jh = J.J()
+            deriv_est = (Jh - J0) / eps
+            err_new = np.linalg.norm(deriv_est - deriv)
+            self._assert_barrier_taylor_progress(err, err_new)
+            err = err_new
+
+    def test_curve_curvature_barrier_taylor_test(self):
+        for curvetype in self.curvetypes:
+            for rotated in [True, False]:
+                with self.subTest(curvetype=curvetype, rotated=rotated):
+                    curve = self.create_curve(curvetype, rotated)
+                    self.subtest_curve_curvature_barrier_taylor_test(curve)
 
     def subtest_curve_torsion_taylor_test(self, curve):
         J = LpCurveTorsion(curve, p=2)
@@ -180,6 +231,43 @@ class Testing(unittest.TestCase):
                 with self.subTest(curvetype=curvetype, rotated=rotated):
                     curve = self.create_curve(curvetype, rotated)
                     self.subtest_curve_minimum_distance_taylor_test(curve)
+
+    def subtest_curve_minimum_distance_barrier_taylor_test(self, curve):
+        ncurves = 3
+        curve_t = curve.curve.__class__.__name__ if isinstance(curve, RotatedCurve) else curve.__class__.__name__
+        curves = [curve] + [RotatedCurve(self.create_curve(curve_t, False), 0.1*i, True) for i in range(1, ncurves)]
+        mindist = self._curve_collection_min_distance(curves)
+        assert mindist > 1e-6
+
+        feasible_threshold = 0.5 * mindist
+        J = CurveCurveDistanceBarrier(curves, feasible_threshold)
+        assert np.isfinite(J.J())
+        Jviol = CurveCurveDistanceBarrier(curves, mindist + 1e-3)
+        assert np.isposinf(Jviol.J())
+
+        for k in range(ncurves):
+            curve_dofs = curves[k].x
+            h = 1e-4 * np.random.rand(len(curve_dofs)).reshape(curve_dofs.shape)
+            J0 = J.J()
+            dJ = J.dJ(partials=True)(curves[k].curve if isinstance(curves[k], RotatedCurve) else curves[k])
+            deriv = np.sum(dJ * h)
+            assert np.abs(deriv) > 1e-10
+            err = 1e6
+            for i in range(6, 15):
+                eps = 0.5**i
+                curves[k].x = curve_dofs + eps * h
+                Jh = J.J()
+                deriv_est = (Jh - J0) / eps
+                err_new = np.linalg.norm(deriv_est - deriv)
+                self._assert_barrier_taylor_progress(err, err_new)
+                err = err_new
+
+    def test_curve_minimum_distance_barrier_taylor_test(self):
+        for curvetype in self.curvetypes:
+            for rotated in [True, False]:
+                with self.subTest(curvetype=curvetype, rotated=rotated):
+                    curve = self.create_curve(curvetype, rotated)
+                    self.subtest_curve_minimum_distance_barrier_taylor_test(curve)
 
     def subtest_curve_arclengthvariation_taylor_test(self, curve, nintervals):
         if isinstance(curve, CurveXYZFourier):

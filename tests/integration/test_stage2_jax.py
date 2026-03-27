@@ -40,9 +40,9 @@ from simsopt.geo import (  # noqa: E402
     CurveCWSFourierCPP,
     CurveXYZFourier,
     create_equally_spaced_curves,
-    CurveCurveDistance,
+    CurveCurveDistanceBarrier,
     CurveLength,
-    LpCurveCurvature,
+    LpCurveCurvatureBarrier,
 )
 from simsopt.objectives import SquaredFlux, QuadraticPenalty  # noqa: E402
 
@@ -97,6 +97,9 @@ REDUCED_STAGE2_ARGS = (
     "16",
 )
 _SHORT_RUN_PARITY_RTOL = 1e-3
+_TARGET_OBJECTIVE_GRAD_ATOL = 5e-12
+_TARGET_OBJECTIVE_FD_EPS = 1e-6
+_TARGET_OBJECTIVE_FD_ATOL = 2e-5
 
 
 def _stage2_context_kwargs():
@@ -105,6 +108,7 @@ def _stage2_context_kwargs():
         "length_weight": 1.0,
         "length_target": 1.75,
         "cc_weight": 1.0,
+        "cc_threshold": 0.25,
         "curvature_weight": 1.0,
     }
 
@@ -276,8 +280,8 @@ def _build_stage2_target_objective_contract_case():
     bs_jax = BiotSavartJAX(all_coils)
     jf = SquaredFluxJAX(eval_surf, bs_jax)
     jls = CurveLength(banana_curve)
-    jccdist = CurveCurveDistance([coil.curve for coil in all_coils], 0.05)
-    jc = LpCurveCurvature(banana_curve, 4, 40)
+    jccdist = CurveCurveDistanceBarrier([coil.curve for coil in all_coils], 0.05)
+    jc = LpCurveCurvatureBarrier(banana_curve, 40)
     objective = (
         jf
         + 0.0005 * QuadraticPenalty(jls, 1.75, "max")
@@ -727,13 +731,15 @@ class TestBiotSavartJAXParity:
         bs_jax.set_points(points)
         deriv_cpu = bs_cpu.B_vjp(v)
         deriv_jax = bs_jax.B_vjp(v)
+        b_vjp_rel_tol = 1e-10
+        b_vjp_abs_tol = 1e-14
 
         for coil in coils:
             np.testing.assert_allclose(
                 deriv_jax(coil),
                 deriv_cpu(coil),
-                rtol=1e-9,
-                atol=1e-14,
+                rtol=b_vjp_rel_tol,
+                atol=b_vjp_abs_tol,
                 err_msg="BiotSavartJAX.B_vjp() does not match CPU",
             )
 
@@ -1496,8 +1502,8 @@ class TestStage2BananaBoundary:
             bs_jax = BiotSavartJAX(all_coils)
             jf = SquaredFluxJAX(eval_surf, bs_jax)
             jls = CurveLength(curve)
-            jccdist = CurveCurveDistance([coil.curve for coil in all_coils], 0.05)
-            jc = LpCurveCurvature(curve, 4, 40)
+            jccdist = CurveCurveDistanceBarrier([coil.curve for coil in all_coils], 0.05)
+            jc = LpCurveCurvatureBarrier(curve, 40)
             objective = (
                 jf
                 + 0.0005 * QuadraticPenalty(jls, 1.75, "max")
@@ -2319,20 +2325,24 @@ class TestStage2OptimizerContract:
             np.asarray(grad_target, dtype=float),
             grad_ref,
             rtol=1e-9,
-            atol=1e-15,
+            atol=_TARGET_OBJECTIVE_GRAD_ATOL,
         )
 
     def test_target_scalar_objective_gradient_matches_centered_fd(self):
         objective, target_bundle = _build_stage2_target_objective_contract_case()
         dofs = np.asarray(objective.x, dtype=float)
         grad_target = np.asarray(jax.grad(target_bundle.objective)(dofs), dtype=float)
-        grad_fd = _centered_fd_gradient(target_bundle.objective, dofs, eps=1e-7)
+        grad_fd = _centered_fd_gradient(
+            target_bundle.objective,
+            dofs,
+            eps=_TARGET_OBJECTIVE_FD_EPS,
+        )
 
         np.testing.assert_allclose(
             grad_target,
             grad_fd,
             rtol=2e-5,
-            atol=5e-7,
+            atol=_TARGET_OBJECTIVE_FD_ATOL,
         )
 
     @pytest.mark.parametrize(

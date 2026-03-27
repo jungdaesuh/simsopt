@@ -64,6 +64,14 @@ def parse_args():
         help="Optional path to write the initialized squared-flux/composite objective snapshot as JSON.",
     )
     parser.add_argument(
+        "--override-dofs-json",
+        default=os.environ.get("STAGE2_OVERRIDE_DOFS_JSON"),
+        help=(
+            "Optional JSON file containing an explicit DOF vector to load into the "
+            "Stage 2 composite objective before probe/init/optimization."
+        ),
+    )
+    parser.add_argument(
         "--trajectory-json",
         default=os.environ.get("STAGE2_TRAJECTORY_JSON"),
         help="Optional path to write per-evaluation objective diagnostics as JSON.",
@@ -696,6 +704,7 @@ class Stage2ObjectiveContext:
     length_weight: float
     length_target: float
     cc_weight: float
+    cc_threshold: float
     curvature_weight: float
     bs_jax: object | None = None
 
@@ -712,6 +721,7 @@ def make_stage2_objective_context(
     length_weight,
     length_target,
     cc_weight,
+    cc_threshold,
     curvature_weight,
     *,
     bs_jax=None,
@@ -728,6 +738,7 @@ def make_stage2_objective_context(
         float(length_weight),
         float(length_target),
         float(cc_weight),
+        float(cc_threshold),
         float(curvature_weight),
         bs_jax,
     )
@@ -747,6 +758,13 @@ def compute_stage2_field_diagnostics(
 
 def compute_stage2_length_penalty_value(curve_length, length_target):
     return 0.5 * max(float(curve_length) - float(length_target), 0.0) ** 2
+
+
+def compute_stage2_max_curvature_value(Jc):
+    banana_curve = getattr(Jc, "curve", None)
+    if banana_curve is not None:
+        return float(np.max(banana_curve.kappa()))
+    return float(Jc.J())
 
 
 def compute_stage2_term_gradient(term, root_objective):
@@ -787,7 +805,8 @@ def evaluate_stage2_objective(
     )
     coil_distance_penalty = float(context.Jccdist.J())
     coil_distance_grad = compute_stage2_term_gradient(context.Jccdist, context.JF)
-    curvature = float(context.Jc.J())
+    curvature_penalty = float(context.Jc.J())
+    curvature = compute_stage2_max_curvature_value(context.Jc)
     curvature_grad = compute_stage2_term_gradient(context.Jc, context.JF)
     grad = (
         context.squared_flux_weight * squared_flux_grad
@@ -799,7 +818,7 @@ def evaluate_stage2_objective(
         context.squared_flux_weight * squared_flux
         + context.length_weight * length_penalty
         + context.cc_weight * coil_distance_penalty
-        + context.curvature_weight * curvature
+        + context.curvature_weight * curvature_penalty
     )
     if recompute_diagnostics or diagnostics is None:
         diagnostics = compute_stage2_field_diagnostics(
@@ -808,6 +827,9 @@ def evaluate_stage2_objective(
             bs_jax=context.bs_jax,
         )
         diagnostics["coil_coil_distance"] = float(context.Jccdist.shortest_distance())
+    distance_constraint_violated = (
+        float(diagnostics["coil_coil_distance"]) <= float(context.cc_threshold)
+    )
     snapshot = {
         "J": J,
         "Jf": squared_flux,
@@ -816,6 +838,7 @@ def evaluate_stage2_objective(
         "coil_coil_distance": float(diagnostics["coil_coil_distance"]),
         "curvature": curvature,
         "grad_norm": float(np.linalg.norm(grad)),
+        "distance_constraint_violated": bool(distance_constraint_violated),
     }
     return snapshot, grad, diagnostics
 
@@ -841,7 +864,7 @@ def profile_stage2_explicit_step(
         "mean_abs_relBfinal_norm_s": lambda: compute_mean_abs_relbn(context.new_surf, field_bs),
         "curve_length_s": lambda: float(context.Jls.J()),
         "coil_coil_distance_s": lambda: float(context.Jccdist.shortest_distance()),
-        "curvature_s": lambda: float(context.Jc.J()),
+        "curvature_s": lambda: compute_stage2_max_curvature_value(context.Jc),
     }
     extra_diagnostic_timings = profile_stage2_named_callbacks(extra_diagnostic_callbacks)
     term_profile = profile_stage2_objective_terms(context)
@@ -902,7 +925,7 @@ def resolve_stage2_optimizer_method(field_backend, optimizer_backend):
             "the Stage 2 outer loop."
         )
     require_target_backend_x64(optimizer_backend)
-    return "bfgs-ondevice"
+    return "lbfgs-ondevice"
 
 
 def should_build_stage2_target_objective(field_backend, optimizer_backend):
@@ -1011,6 +1034,7 @@ def build_stage2_probe_payload(
     length_weight,
     length_target,
     cc_weight,
+    cc_threshold,
     curvature_weight,
 ):
     """Serialize the initialized Stage 2 objective state for parity probes."""
@@ -1026,6 +1050,7 @@ def build_stage2_probe_payload(
         length_weight,
         length_target,
         cc_weight,
+        cc_threshold,
         curvature_weight,
         bs_jax=bs_jax,
     )
@@ -1062,6 +1087,19 @@ def write_json_file(path, payload):
         json.dump(payload, outfile, indent=2)
 
 
+def load_stage2_override_dofs(path, expected_shape):
+    """Load a Stage 2 DOF override vector from JSON and validate its shape."""
+    with open(path, "r", encoding="utf-8") as infile:
+        payload = json.load(infile)
+    dofs = np.asarray(payload, dtype=float)
+    if dofs.shape != expected_shape:
+        raise ValueError(
+            "Override DOF vector shape mismatch: "
+            f"expected {expected_shape}, got {dofs.shape}."
+        )
+    return dofs
+
+
 def append_stage2_trajectory_snapshot(trajectory_sink, snapshot, *, eval_index=None):
     """Append a Stage 2 diagnostic snapshot when trajectory capture is enabled."""
     if trajectory_sink is None:
@@ -1087,6 +1125,7 @@ def capture_stage2_trajectory_snapshot(
     length_weight,
     length_target,
     cc_weight,
+    cc_threshold,
     curvature_weight,
     *,
     bs_jax=None,
@@ -1104,6 +1143,7 @@ def capture_stage2_trajectory_snapshot(
         length_weight,
         length_target,
         cc_weight,
+        cc_threshold,
         curvature_weight,
         bs_jax=bs_jax,
     )
@@ -1126,6 +1166,7 @@ def make_fun(
     length_weight,
     length_target,
     cc_weight,
+    cc_threshold,
     curvature_weight,
     bs_jax=None,
     trajectory_sink=None,
@@ -1154,6 +1195,7 @@ def make_fun(
         length_weight,
         length_target,
         cc_weight,
+        cc_threshold,
         curvature_weight,
         bs_jax=bs_jax,
     )
@@ -1204,8 +1246,8 @@ if __name__ == "__main__":
         curves_to_vtk,
         create_equally_spaced_curves,
         CurveLength,
-        CurveCurveDistance,
-        LpCurveCurvature,
+        CurveCurveDistanceBarrier,
+        LpCurveCurvatureBarrier,
         CurveCWSFourier,
         CurveCWSFourierCPP,
     )
@@ -1336,12 +1378,12 @@ if __name__ == "__main__":
         Jf = SquaredFlux(new_surf, new_bs)  # penalty on B dot n
         print("Stage 2 backend: CPU (simsoptpp)")
     Jls = CurveLength(new_banana_curve)  # penalty on curve length
-    Jccdist = CurveCurveDistance(
+    Jccdist = CurveCurveDistanceBarrier(
         new_curves, CC_THRESHOLD
-    )  # penalty on coil-to-coil distance
+    )  # hard barrier on coil-to-coil distance
 
     # Lp-norm curvature penalty (configurable via --curvature-p-norm)
-    Jc = LpCurveCurvature(new_banana_curve, args.curvature_p_norm, CURVATURE_THRESHOLD)
+    Jc = LpCurveCurvatureBarrier(new_banana_curve, CURVATURE_THRESHOLD)
     print(f"Initial coil length: {Jls.J():.2f} [m]")
     Jls_penalty = QuadraticPenalty(Jls, LENGTH_TARGET, "max")
 
@@ -1360,6 +1402,9 @@ if __name__ == "__main__":
 
     # minimize gets called, optimizes based on degrees of freedom from objective function
     dofs = JF.x
+    if args.override_dofs_json is not None:
+        dofs = load_stage2_override_dofs(args.override_dofs_json, np.asarray(dofs).shape)
+        JF.x = np.asarray(dofs, dtype=float)
     trajectory = [] if args.trajectory_json else None
     final_snapshot = None
     optimizer_timings = None
@@ -1415,6 +1460,7 @@ if __name__ == "__main__":
             LENGTH_WEIGHT,
             LENGTH_TARGET,
             CC_WEIGHT,
+            CC_THRESHOLD,
             CURVATURE_WEIGHT,
             bs_jax=new_bs_jax,
             trajectory_sink=trajectory,
@@ -1440,6 +1486,7 @@ if __name__ == "__main__":
             length_weight=LENGTH_WEIGHT,
             length_target=LENGTH_TARGET,
             cc_weight=CC_WEIGHT,
+            cc_threshold=CC_THRESHOLD,
             curvature_weight=CURVATURE_WEIGHT,
         )
         write_json_file(args.export_objective_json, probe_payload)
@@ -1457,6 +1504,7 @@ if __name__ == "__main__":
             LENGTH_WEIGHT,
             LENGTH_TARGET,
             CC_WEIGHT,
+            CC_THRESHOLD,
             CURVATURE_WEIGHT,
             bs_jax=new_bs_jax,
         )
@@ -1490,6 +1538,7 @@ if __name__ == "__main__":
                 LENGTH_WEIGHT,
                 LENGTH_TARGET,
                 CC_WEIGHT,
+                CC_THRESHOLD,
                 CURVATURE_WEIGHT,
                 bs_jax=new_bs_jax,
             )
@@ -1524,6 +1573,7 @@ if __name__ == "__main__":
                 LENGTH_WEIGHT,
                 LENGTH_TARGET,
                 CC_WEIGHT,
+                CC_THRESHOLD,
                 CURVATURE_WEIGHT,
                 bs_jax=new_bs_jax,
             )
@@ -1586,6 +1636,7 @@ if __name__ == "__main__":
             LENGTH_WEIGHT,
             LENGTH_TARGET,
             CC_WEIGHT,
+            CC_THRESHOLD,
             CURVATURE_WEIGHT,
             bs_jax=new_bs_jax,
         )
@@ -1633,6 +1684,7 @@ if __name__ == "__main__":
             LENGTH_WEIGHT,
             LENGTH_TARGET,
             CC_WEIGHT,
+            CC_THRESHOLD,
             CURVATURE_WEIGHT,
             bs_jax=new_bs_jax,
         )
@@ -1666,6 +1718,7 @@ if __name__ == "__main__":
         "init_only": args.init_only,
         "max_iterations": MAXITER,
         "iterations": res_nit,
+        "FINAL_DOFS": np.asarray(JF.x, dtype=float).tolist(),
         "FINAL_OBJECTIVE": final_snapshot["J"],
         "FINAL_SQUARED_FLUX": final_snapshot["Jf"],
         "FINAL_CURVE_LENGTH": final_snapshot["curve_length"],

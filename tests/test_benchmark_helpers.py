@@ -1203,6 +1203,67 @@ def test_stage2_e2e_payload_preserves_trajectory_and_timing_artifacts():
     assert payload["timings"]["jax_optimizer_compile_overhead_s"] == pytest.approx(6.25)
 
 
+def test_stage2_e2e_payload_allows_intentional_barrier_rejection_entries():
+    provenance = {"title": "Stage 2 end-to-end comparison"}
+    barrier_entry = {
+        "J": np.inf,
+        "Jf": 0.2,
+        "mean_abs_relBfinal_norm": 0.2,
+        "curve_length": 1.0,
+        "coil_coil_distance": 0.04,
+        "curvature": 1.0,
+        "grad_norm": np.nan,
+        "distance_constraint_violated": True,
+    }
+    converged_entry = {
+        "J": 1.0,
+        "Jf": 0.1,
+        "mean_abs_relBfinal_norm": 0.1,
+        "curve_length": 1.0,
+        "coil_coil_distance": 0.06,
+        "curvature": 1.0,
+        "grad_norm": 0.5,
+        "distance_constraint_violated": False,
+    }
+    cpu_case = {
+        "results": _stage2_e2e_results_case(),
+        "trajectory": [barrier_entry, converged_entry],
+        "elapsed_s": 12.5,
+    }
+    jax_case = {
+        "results": _stage2_e2e_results_case(
+            FINAL_OBJECTIVE=1.0 + 1e-7,
+            FIELD_ERROR=0.01 + 1e-7,
+            optimizer_backend="ondevice",
+        ),
+        "optimizer_timings": {
+            "cold_run_s": 9.5,
+            "warm_run_s": 3.25,
+            "compile_overhead_s": 6.25,
+        },
+        "trajectory": [converged_entry],
+        "elapsed_s": 12.75,
+    }
+
+    payload = build_stage2_e2e_payload(
+        provenance,
+        cpu_case,
+        jax_case,
+        {
+            "cpu": _stage2_probe_payload_case(),
+            "jax": _stage2_probe_payload_case(),
+        },
+        {
+            "cpu": _stage2_probe_payload_case(),
+            "jax": _stage2_probe_payload_case(),
+        },
+        geometry_rel_tol=5e-6,
+    )
+
+    assert payload["comparison"]["cpu_trajectory_finite"] is True
+    assert payload["comparison"]["jax_trajectory_finite"] is True
+
+
 def test_safe_speedup_returns_ratio_for_positive_times():
     assert safe_speedup(10.0, 2.0) == pytest.approx(5.0)
 
