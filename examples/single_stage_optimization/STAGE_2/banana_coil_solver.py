@@ -1180,6 +1180,9 @@ def build_stage2_probe_payload(
         "nphi": int(nphi),
         "ntheta": int(ntheta),
         "dof_count": int(composite_grad.size),
+        "curvature_threshold": float(context.Jc.threshold),
+        "curvature_margin": float(context.Jc.threshold)
+        - float(composite_snapshot["curvature"]),
         "squared_flux": {
             "J": float(Jf.J()),
             "dJ": flux_grad.tolist(),

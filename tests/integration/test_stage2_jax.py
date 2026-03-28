@@ -2528,6 +2528,7 @@ class TestStage2OptimizerContract:
 
         fake_root = types.SimpleNamespace(x=dofs.copy())
         fake_flux = _FakeStage2SquaredFluxTerm(0.5, [0.75, -0.25])
+        fake_curvature_term = types.SimpleNamespace(threshold=40.0)
         target_objective_bundle = types.SimpleNamespace(
             objective=lambda x: (
                 jax.numpy.sum(jax.numpy.square(x + 1.0)) + 0.5 * (x[0] + 2.0 * x[1])
@@ -2553,7 +2554,7 @@ class TestStage2OptimizerContract:
             fake_flux,
             object(),
             object(),
-            object(),
+            fake_curvature_term,
             backend="jax",
             optimizer_backend=optimizer_backend,
             equilibrium_path="dummy.nc",
@@ -2585,6 +2586,8 @@ class TestStage2OptimizerContract:
         assert payload["composite"]["mean_abs_relBfinal_norm"] == pytest.approx(
             explicit_snapshot["mean_abs_relBfinal_norm"]
         )
+        assert payload["curvature_threshold"] == pytest.approx(40.0)
+        assert payload["curvature_margin"] == pytest.approx(22.0)
         if optimizer_backend == "ondevice":
             assert payload["composite"]["J"] == pytest.approx(float(expected_value))
             np.testing.assert_allclose(

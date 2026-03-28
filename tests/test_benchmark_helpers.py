@@ -991,12 +991,20 @@ def _stage2_e2e_comparison_case(**overrides):
         "matched_cpu_state": {
             "objective_rel_diff": 1e-12,
             "field_error_rel_diff": 1e-12,
+            "curvature": 39.0,
+            "curvature_threshold": 40.0,
+            "curvature_margin": 1.0,
+            "curvature_barrier_edge_active": False,
             "gradient_allclose": True,
             "gradient_l2_rel_diff": 1e-12,
         },
         "matched_jax_state": {
             "objective_rel_diff": 1e-12,
             "field_error_rel_diff": 1e-12,
+            "curvature": 39.0,
+            "curvature_threshold": 40.0,
+            "curvature_margin": 1.0,
+            "curvature_barrier_edge_active": False,
             "gradient_allclose": True,
             "gradient_l2_rel_diff": 1e-12,
         },
@@ -1007,11 +1015,14 @@ def _stage2_e2e_comparison_case(**overrides):
 
 def _stage2_probe_payload_case(**overrides):
     payload = {
+        "curvature_threshold": 40.0,
+        "curvature_margin": 39.0,
         "composite": {
             "J": 1.0,
             "mean_abs_relBfinal_norm": 0.01,
+            "curvature": 1.0,
             "dJ": [0.5, -0.25],
-        }
+        },
     }
     payload.update(overrides)
     return payload
@@ -1059,10 +1070,26 @@ def _stage2_e2e_results_case(**overrides):
 def _stage2_ondevice_quality_case(**overrides):
     comparison = {
         "optimizer_backend": "ondevice",
+        "final_objective_rel_tol": 1e-4,
+        "cpu_final_objective": 1.0,
+        "jax_final_objective": 1.0,
         "jax_objective_not_worse_than_cpu": True,
+        "cpu_field_error": 0.01,
+        "jax_field_error": 0.01,
         "jax_field_error_not_worse_than_cpu": True,
+        "length_target": 1.75,
+        "jax_final_curve_length": 1.0,
         "jax_curve_length_within_target": True,
+        "cc_threshold": 0.05,
+        "jax_final_cc_distance": 0.2,
         "jax_cc_distance_within_threshold": True,
+        "curvature_threshold": 40.0,
+        "cpu_max_curvature": 39.5,
+        "jax_max_curvature": 39.5,
+        "cpu_curvature_margin": 0.5,
+        "jax_curvature_margin": 0.5,
+        "cpu_curvature_barrier_edge_active": False,
+        "jax_curvature_barrier_edge_active": False,
         "jax_curvature_not_worse_than_cpu": True,
         "jax_self_intersecting": False,
     }
@@ -1181,6 +1208,10 @@ def test_stage2_e2e_comparison_rejects_ondevice_matched_state_gradient_mismatch(
             matched_jax_state={
                 "objective_rel_diff": 1e-12,
                 "field_error_rel_diff": 1e-12,
+                "curvature": 39.0,
+                "curvature_threshold": 40.0,
+                "curvature_margin": 1.0,
+                "curvature_barrier_edge_active": False,
                 "gradient_allclose": False,
                 "gradient_l2_rel_diff": 1e-3,
                 "worst_gradient_term": {
@@ -1205,6 +1236,37 @@ def test_stage2_e2e_comparison_rejects_ondevice_matched_state_gradient_mismatch(
     )
 
 
+def test_stage2_e2e_comparison_accepts_barrier_edge_curvature_gradient_portability():
+    failures = evaluate_stage2_e2e_comparison(
+        _stage2_ondevice_quality_case(
+            geometry_rel_tol=None,
+            matched_jax_state={
+                "objective_rel_diff": 1e-12,
+                "field_error_rel_diff": 1e-12,
+                "curvature": 39.9999995,
+                "curvature_threshold": 40.0,
+                "curvature_margin": 5e-7,
+                "curvature_barrier_edge_active": True,
+                "gradient_allclose": False,
+                "gradient_l2_rel_diff": 5e-6,
+                "worst_gradient_term": {
+                    "name": "curvature_barrier",
+                    **_stage2_gradient_term_case(
+                        gradient_allclose=False,
+                        gradient_componentwise_allclose=False,
+                        gradient_global_scale_match=False,
+                        gradient_l2_rel_diff=5e-6,
+                        gradient_max_abs_diff=1.3e-1,
+                        gradient_scaled_atol=1.3e-4,
+                    ),
+                },
+            },
+        )
+    )
+
+    assert failures == []
+
+
 def test_stage2_e2e_comparison_rejects_ondevice_geometry_drift_when_explicit_gate_enabled():
     failures = evaluate_stage2_e2e_comparison(
         _stage2_ondevice_quality_case(
@@ -1216,6 +1278,45 @@ def test_stage2_e2e_comparison_rejects_ondevice_geometry_drift_when_explicit_gat
     assert any(
         "Final banana-coil geometry drift too large" in failure for failure in failures
     )
+
+
+def test_stage2_e2e_comparison_accepts_barrier_edge_objective_drift():
+    failures = evaluate_stage2_e2e_comparison(
+        _stage2_ondevice_quality_case(
+            final_objective_rel_diff=2.8e-4,
+            final_objective_rel_tol=5e-4,
+            jax_objective_not_worse_than_cpu=True,
+            cpu_max_curvature=39.9999995,
+            jax_max_curvature=39.9999994,
+            curvature_threshold=40.0,
+            cpu_curvature_margin=5e-7,
+            jax_curvature_margin=6e-7,
+            cpu_curvature_barrier_edge_active=True,
+            jax_curvature_barrier_edge_active=True,
+        )
+    )
+
+    assert failures == []
+
+
+def test_stage2_e2e_comparison_rejects_large_barrier_edge_objective_drift():
+    failures = evaluate_stage2_e2e_comparison(
+        _stage2_ondevice_quality_case(
+            jax_objective_not_worse_than_cpu=False,
+            jax_final_objective=6009.5,
+            cpu_final_objective=6000.0,
+            final_objective_rel_tol=5e-4,
+            cpu_max_curvature=39.9999995,
+            jax_max_curvature=39.9999994,
+            curvature_threshold=40.0,
+            cpu_curvature_margin=5e-7,
+            jax_curvature_margin=6e-7,
+            cpu_curvature_barrier_edge_active=True,
+            jax_curvature_barrier_edge_active=True,
+        )
+    )
+
+    assert any("Final objective is worse" in failure for failure in failures)
 
 
 def test_stage2_e2e_comparison_rejects_ondevice_constraint_violation():

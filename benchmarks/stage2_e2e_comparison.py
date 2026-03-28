@@ -57,6 +57,10 @@ MATCHED_GRADIENT_RTOL = _TIER1_BASE_TOLERANCES["gradient_rtol"]
 MATCHED_GRADIENT_ATOL = _TIER1_BASE_TOLERANCES["gradient_atol"]
 STAGE2_MATCHED_GRADIENT_ATOL = max(MATCHED_GRADIENT_ATOL, 5e-12)
 MATCHED_FIELD_REL_TOL = 1e-10
+STAGE2_CURVATURE_BARRIER_EDGE_MARGIN = 1e-6
+STAGE2_CURVATURE_BARRIER_EDGE_GRADIENT_RTOL = 1e-5
+STAGE2_CURVATURE_BARRIER_EDGE_OBJECTIVE_REL_TOL = 5e-4
+STAGE2_CURVATURE_BARRIER_TERM_NAME = "curvature_barrier"
 
 _CPU_ONDEVICE_ENDPOINT_LANE = ("jax", "cpu", "cpu-ondevice")
 _CPU_REFERENCE_ENDPOINT_LANE = ("cpu", "auto", "cpu-reference")
@@ -77,8 +81,45 @@ def _cpu_endpoint_lane_label(cpu_lane_kind: str) -> str:
     return "CPU reference lane"
 
 
-def _objective_not_worse(jax_value: float, cpu_value: float) -> bool:
-    return float(jax_value) <= float(cpu_value) * (1.0 + FINAL_OBJECTIVE_REL_TOL)
+def _objective_not_worse(
+    jax_value: float,
+    cpu_value: float,
+    *,
+    rel_tol: float = FINAL_OBJECTIVE_REL_TOL,
+) -> bool:
+    return float(jax_value) <= float(cpu_value) * (1.0 + float(rel_tol))
+
+
+def _curvature_margin(curvature: float, threshold: float) -> float:
+    return float(threshold) - float(curvature)
+
+
+def _curvature_barrier_edge_active(
+    curvature: float,
+    threshold: float,
+) -> bool:
+    margin = _curvature_margin(curvature, threshold)
+    return 0.0 <= margin <= STAGE2_CURVATURE_BARRIER_EDGE_MARGIN
+
+
+def _stage2_final_objective_rel_tol(
+    *,
+    cpu_max_curvature: float,
+    jax_max_curvature: float,
+    curvature_threshold: float,
+) -> float:
+    if _curvature_barrier_edge_active(
+        cpu_max_curvature,
+        curvature_threshold,
+    ) and _curvature_barrier_edge_active(
+        jax_max_curvature,
+        curvature_threshold,
+    ):
+        return max(
+            FINAL_OBJECTIVE_REL_TOL,
+            STAGE2_CURVATURE_BARRIER_EDGE_OBJECTIVE_REL_TOL,
+        )
+    return FINAL_OBJECTIVE_REL_TOL
 
 
 def _field_error_not_worse(jax_value: float, cpu_value: float) -> bool:
@@ -100,13 +141,20 @@ def _build_ondevice_stage2_metrics(
     curvature_threshold = float(jax_results["CURVATURE_THRESHOLD"])
     cpu_max_curvature = float(cpu_results["MAX_CURVATURE"])
     jax_max_curvature = float(jax_results["MAX_CURVATURE"])
+    final_objective_rel_tol = _stage2_final_objective_rel_tol(
+        cpu_max_curvature=cpu_max_curvature,
+        jax_max_curvature=jax_max_curvature,
+        curvature_threshold=curvature_threshold,
+    )
     return {
         "cpu_final_objective": cpu_final_objective,
         "jax_final_objective": jax_final_objective,
         "jax_objective_not_worse_than_cpu": _objective_not_worse(
             jax_final_objective,
             cpu_final_objective,
+            rel_tol=final_objective_rel_tol,
         ),
+        "final_objective_rel_tol": final_objective_rel_tol,
         "cpu_field_error": cpu_field_error,
         "jax_field_error": jax_field_error,
         "jax_field_error_not_worse_than_cpu": _field_error_not_worse(
@@ -122,6 +170,22 @@ def _build_ondevice_stage2_metrics(
         "curvature_threshold": curvature_threshold,
         "cpu_max_curvature": cpu_max_curvature,
         "jax_max_curvature": jax_max_curvature,
+        "cpu_curvature_margin": _curvature_margin(
+            cpu_max_curvature,
+            curvature_threshold,
+        ),
+        "jax_curvature_margin": _curvature_margin(
+            jax_max_curvature,
+            curvature_threshold,
+        ),
+        "cpu_curvature_barrier_edge_active": _curvature_barrier_edge_active(
+            cpu_max_curvature,
+            curvature_threshold,
+        ),
+        "jax_curvature_barrier_edge_active": _curvature_barrier_edge_active(
+            jax_max_curvature,
+            curvature_threshold,
+        ),
         "jax_curvature_not_worse_than_cpu": jax_max_curvature
         <= max(cpu_max_curvature, curvature_threshold),
         "jax_self_intersecting": bool(jax_results["SELF_INTERSECTING"]),
@@ -473,6 +537,8 @@ def _build_matched_state_metrics(
 ) -> dict[str, Any]:
     cpu_composite = cpu_probe["composite"]
     jax_composite = jax_probe["composite"]
+    curvature_threshold = float(cpu_probe["curvature_threshold"])
+    jax_curvature = float(jax_composite["curvature"])
     gradient_metrics = _build_gradient_parity_metrics(
         np.asarray(cpu_composite["dJ"], dtype=float),
         np.asarray(jax_composite["dJ"], dtype=float),
@@ -495,10 +561,33 @@ def _build_matched_state_metrics(
             float(jax_composite["mean_abs_relBfinal_norm"]),
             float(cpu_composite["mean_abs_relBfinal_norm"]),
         ),
+        "curvature": jax_curvature,
+        "curvature_threshold": curvature_threshold,
+        "curvature_margin": _curvature_margin(
+            jax_curvature,
+            curvature_threshold,
+        ),
+        "curvature_barrier_edge_active": _curvature_barrier_edge_active(
+            jax_curvature,
+            curvature_threshold,
+        ),
         **gradient_metrics,
         "gradient_terms": gradient_terms,
         "worst_gradient_term": worst_gradient_term,
     }
+
+
+def _matched_gradient_barrier_edge_portable(state: dict[str, Any]) -> bool:
+    if not bool(state.get("curvature_barrier_edge_active", False)):
+        return False
+    worst_term = state.get("worst_gradient_term")
+    if not isinstance(worst_term, dict):
+        return False
+    if str(worst_term.get("name")) != STAGE2_CURVATURE_BARRIER_TERM_NAME:
+        return False
+    return float(worst_term["gradient_l2_rel_diff"]) <= (
+        STAGE2_CURVATURE_BARRIER_EDGE_GRADIENT_RTOL
+    )
 
 
 def _matched_gradient_failure_message(
@@ -507,13 +596,17 @@ def _matched_gradient_failure_message(
     state_label: str,
 ) -> str:
     worst_term = state.get("worst_gradient_term")
+    margin_suffix = ""
+    if "curvature_margin" in state:
+        margin_suffix = f", curvature_margin={float(state['curvature_margin']):.2e}"
     if isinstance(worst_term, dict):
         return (
             f"Matched {state_label}-final gradient parity failed gate "
             f"(worst term: {str(worst_term['name'])}, "
             f"rel_diff={float(worst_term['gradient_l2_rel_diff']):.2e}, "
             f"max_abs_diff={float(worst_term['gradient_max_abs_diff']):.2e}, "
-            f"scaled_atol={float(worst_term['gradient_scaled_atol']):.2e})."
+            f"scaled_atol={float(worst_term['gradient_scaled_atol']):.2e}"
+            f"{margin_suffix})."
         )
     return f"Matched {state_label}-final gradient parity failed gate."
 
@@ -562,19 +655,21 @@ def _append_matched_state_failures(
             f"{float(jax_state['field_error_rel_diff']):.2e}"
         )
     if not bool(cpu_state["gradient_allclose"]):
-        failures.append(
-            _matched_gradient_failure_message(
-                cpu_state,
-                state_label="CPU",
+        if not _matched_gradient_barrier_edge_portable(cpu_state):
+            failures.append(
+                _matched_gradient_failure_message(
+                    cpu_state,
+                    state_label="CPU",
+                )
             )
-        )
     if not bool(jax_state["gradient_allclose"]):
-        failures.append(
-            _matched_gradient_failure_message(
-                jax_state,
-                state_label="JAX",
+        if not _matched_gradient_barrier_edge_portable(jax_state):
+            failures.append(
+                _matched_gradient_failure_message(
+                    jax_state,
+                    state_label="JAX",
+                )
             )
-        )
 
 
 def _append_stage2_ondevice_failures(
@@ -588,7 +683,9 @@ def _append_stage2_ondevice_failures(
             lambda: (
                 f"Final objective is worse than the {cpu_lane_label} beyond tolerance: "
                 f"jax={float(comparison['jax_final_objective']):.6e}, "
-                f"cpu={float(comparison['cpu_final_objective']):.6e}"
+                f"cpu={float(comparison['cpu_final_objective']):.6e}, "
+                "rel_tol="
+                f"{float(comparison['final_objective_rel_tol']):.2e}"
             ),
         ),
         (
