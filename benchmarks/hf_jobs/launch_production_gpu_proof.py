@@ -61,7 +61,12 @@ def _build_job_command(args: argparse.Namespace) -> str:
         "unset LD_LIBRARY_PATH",
         "rm -rf /tmp/hf-production-proof",
         'mkdir -p /tmp/hf-production-proof "$JAX_COMPILATION_CACHE_DIR"',
-        f"git clone --recursive {shlex.quote(args.repo_url)} {shlex.quote(repo_dir)}",
+        (
+            "git clone --recursive"
+            f" --branch {shlex.quote(args.repo_ref)}"
+            " --single-branch"
+            f" {shlex.quote(args.repo_url)} {shlex.quote(repo_dir)}"
+        ),
         f"cd {shlex.quote(repo_dir)}",
         f"git checkout {shlex.quote(args.repo_sha)}",
         "git submodule update --init --recursive",
@@ -113,6 +118,11 @@ def parse_args() -> argparse.Namespace:
         "--repo-sha",
         default=_git_output("rev-parse", "HEAD"),
         help="Exact git SHA to validate.",
+    )
+    parser.add_argument(
+        "--repo-ref",
+        default=_git_output("rev-parse", "--abbrev-ref", "HEAD"),
+        help="Branch or ref to clone before checking out the validation SHA.",
     )
     parser.add_argument(
         "--hardware",
