@@ -104,6 +104,7 @@ def _curvature_barrier_edge_active(
 
 def _stage2_final_objective_rel_tol(
     *,
+    base_rel_tol: float,
     cpu_max_curvature: float,
     jax_max_curvature: float,
     curvature_threshold: float,
@@ -115,11 +116,8 @@ def _stage2_final_objective_rel_tol(
         jax_max_curvature,
         curvature_threshold,
     ):
-        return max(
-            FINAL_OBJECTIVE_REL_TOL,
-            STAGE2_CURVATURE_BARRIER_EDGE_OBJECTIVE_REL_TOL,
-        )
-    return FINAL_OBJECTIVE_REL_TOL
+        return max(base_rel_tol, STAGE2_CURVATURE_BARRIER_EDGE_OBJECTIVE_REL_TOL)
+    return base_rel_tol
 
 
 def _field_error_not_worse(jax_value: float, cpu_value: float) -> bool:
@@ -129,6 +127,8 @@ def _field_error_not_worse(jax_value: float, cpu_value: float) -> bool:
 def _build_ondevice_stage2_metrics(
     cpu_results: dict[str, Any],
     jax_results: dict[str, Any],
+    *,
+    final_objective_rel_tol: float,
 ) -> dict[str, Any]:
     cpu_final_objective = float(cpu_results["FINAL_OBJECTIVE"])
     jax_final_objective = float(jax_results["FINAL_OBJECTIVE"])
@@ -142,6 +142,7 @@ def _build_ondevice_stage2_metrics(
     cpu_max_curvature = float(cpu_results["MAX_CURVATURE"])
     jax_max_curvature = float(jax_results["MAX_CURVATURE"])
     final_objective_rel_tol = _stage2_final_objective_rel_tol(
+        base_rel_tol=final_objective_rel_tol,
         cpu_max_curvature=cpu_max_curvature,
         jax_max_curvature=jax_max_curvature,
         curvature_threshold=curvature_threshold,
@@ -767,6 +768,7 @@ def build_stage2_e2e_payload(
     jax_final_state_probes: dict[str, dict[str, Any]],
     *,
     cpu_lane_kind: str,
+    final_objective_rel_tol: float,
     geometry_rel_tol: float | None,
 ) -> dict[str, Any]:
     cpu_results = cpu_case["results"]
@@ -776,7 +778,11 @@ def build_stage2_e2e_payload(
     jax_primary_elapsed_s, jax_timings = _build_jax_stage2_timings(jax_case)
 
     max_geom_abs, max_geom_rel = _max_geometry_deviation(cpu_results, jax_results)
-    ondevice_metrics = _build_ondevice_stage2_metrics(cpu_results, jax_results)
+    ondevice_metrics = _build_ondevice_stage2_metrics(
+        cpu_results,
+        jax_results,
+        final_objective_rel_tol=final_objective_rel_tol,
+    )
     final_objective_rel_diff = relative_error(
         ondevice_metrics["jax_final_objective"],
         ondevice_metrics["cpu_final_objective"],
@@ -862,6 +868,12 @@ def main() -> None:
             maxiter=args.maxiter,
         )["geometry_rel_tol"]
     )
+    final_objective_rel_tol = float(
+        optimizer_drift_tolerances(
+            "tier2_stage2_e2e",
+            maxiter=args.maxiter,
+        )["final_objective_rel_tol"]
+    )
     provenance = build_provenance(
         jax,
         jaxlib,
@@ -875,6 +887,7 @@ def main() -> None:
             "ntheta": int(args.ntheta),
             "maxiter": int(args.maxiter),
             "geometry_rel_tol": geometry_rel_tol,
+            "final_objective_rel_tol": final_objective_rel_tol,
             "compile_behavior": describe_compile_behavior(uses_subprocesses=True),
             "optimizer_drift_tolerances": optimizer_drift_tolerances(
                 "tier2_stage2_e2e",
@@ -917,6 +930,7 @@ def main() -> None:
         cpu_final_state_probes,
         jax_final_state_probes,
         cpu_lane_kind=cpu_lane_kind,
+        final_objective_rel_tol=final_objective_rel_tol,
         geometry_rel_tol=geometry_rel_tol,
     )
     comparison = payload["comparison"]

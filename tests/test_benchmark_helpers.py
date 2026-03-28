@@ -78,6 +78,7 @@ from benchmarks.validation_ladder_common import (
     require_x64_runtime,
     resolve_probe_lane,
     run_python_script,
+    short_run_stage2_final_objective_rel_tolerance,
     short_run_geometry_rel_tolerance,
 )
 
@@ -166,6 +167,11 @@ def test_short_run_geometry_rel_tolerance_disables_20_iter_smoke_gate():
     assert short_run_geometry_rel_tolerance(20, explicit_tol=2.5e-6) == pytest.approx(
         2.5e-6
     )
+
+
+def test_short_run_stage2_final_objective_rel_tolerance_tracks_smoke_budget():
+    assert short_run_stage2_final_objective_rel_tolerance(20) == pytest.approx(5e-4)
+    assert short_run_stage2_final_objective_rel_tolerance(21) == pytest.approx(1e-4)
 
 
 def test_single_stage_init_fixture_files_are_vendored():
@@ -296,8 +302,12 @@ def test_optimizer_drift_tolerances_tier2_geometry_gate_tracks_iteration_budget(
     tol_20 = optimizer_drift_tolerances("tier2_stage2_e2e", maxiter=20)
     tol_21 = optimizer_drift_tolerances("tier2_stage2_e2e", maxiter=21)
 
+    assert tol_20["final_objective_rel_tol"] == pytest.approx(5e-4)
+    assert tol_21["final_objective_rel_tol"] == pytest.approx(1e-4)
     assert tol_20["geometry_rel_tol"] is None
     assert tol_21["geometry_rel_tol"] == pytest.approx(1e-6)
+    assert "final_objective_rel_tol_20_iter" not in tol_20
+    assert "final_objective_rel_tol_default" not in tol_20
     assert "geometry_rel_tol_20_iter" not in tol_20
     assert "geometry_rel_tol_default" not in tol_20
 
@@ -1595,6 +1605,7 @@ def test_stage2_e2e_payload_preserves_trajectory_and_timing_artifacts():
             "jax": _stage2_probe_payload_case(),
         },
         cpu_lane_kind="cpu-ondevice",
+        final_objective_rel_tol=1e-4,
         geometry_rel_tol=5e-6,
     )
 
@@ -1683,6 +1694,7 @@ def test_stage2_e2e_payload_allows_intentional_barrier_rejection_entries():
             "jax": _stage2_probe_payload_case(),
         },
         cpu_lane_kind="cpu-reference",
+        final_objective_rel_tol=1e-4,
         geometry_rel_tol=5e-6,
     )
 
