@@ -187,7 +187,10 @@ def _run_single_stage_case(
     platform: str,
 ) -> dict[str, Any]:
     script_path = _single_stage_script_path()
-    with tempfile.TemporaryDirectory(prefix=f"single-stage-init-{backend}-") as temp_dir:
+    effective_platform = platform if backend == "jax" else "cpu"
+    with tempfile.TemporaryDirectory(
+        prefix=f"single-stage-init-{backend}-"
+    ) as temp_dir:
         output_root = Path(temp_dir) / "outputs"
         command = [
             "--backend",
@@ -230,10 +233,13 @@ def _run_single_stage_case(
             command.extend(["--equilibria-dir", args.equilibria_dir])
 
         start = time.perf_counter()
-        result = run_python_script(
+        run_python_script(
             script_path,
             command,
-            env=repo_pythonpath_env(platform=platform if backend == "jax" else "cpu"),
+            env=repo_pythonpath_env(
+                platform=effective_platform,
+                disable_compilation_cache=(effective_platform == "cpu"),
+            ),
             cwd=REPO_ROOT,
             bootstrap_repo=True,
             stream_output=True,
@@ -357,7 +363,9 @@ def main() -> None:
         raise RuntimeError(f"Stage 2 seed fixture does not exist: {stage2_bs_path}")
     stage2_results_path = stage2_bs_path.with_name("results.json")
     if not stage2_results_path.exists():
-        raise RuntimeError(f"Stage 2 seed results.json does not exist: {stage2_results_path}")
+        raise RuntimeError(
+            f"Stage 2 seed results.json does not exist: {stage2_results_path}"
+        )
 
     provenance = build_provenance(
         jax,

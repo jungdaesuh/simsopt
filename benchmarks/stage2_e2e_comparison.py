@@ -221,6 +221,7 @@ def _stage2_script_path() -> Path:
 
 def _run_stage2_case(args: argparse.Namespace, backend: str, *, platform: str) -> dict:
     script_path = _stage2_script_path()
+    effective_platform = platform if backend == "jax" else "cpu"
     with tempfile.TemporaryDirectory(prefix=f"stage2-e2e-{backend}-") as temp_dir:
         trajectory_json = str(Path(temp_dir) / f"{backend}_trajectory.json")
         output_root = str(Path(temp_dir) / "outputs")
@@ -260,7 +261,10 @@ def _run_stage2_case(args: argparse.Namespace, backend: str, *, platform: str) -
         run_python_script(
             script_path,
             command,
-            env=repo_pythonpath_env(platform=platform if backend == "jax" else "cpu"),
+            env=repo_pythonpath_env(
+                platform=effective_platform,
+                disable_compilation_cache=(effective_platform == "cpu"),
+            ),
             cwd=REPO_ROOT,
             bootstrap_repo=True,
             stream_output=True,
@@ -286,6 +290,7 @@ def _run_stage2_probe(
     dofs: list[float],
 ) -> dict[str, Any]:
     script_path = _stage2_script_path()
+    effective_platform = platform if backend == "jax" else "cpu"
     with tempfile.TemporaryDirectory(prefix=f"stage2-probe-{backend}-") as temp_dir:
         export_json = Path(temp_dir) / f"{backend}_probe.json"
         dofs_json = Path(temp_dir) / "override_dofs.json"
@@ -320,7 +325,10 @@ def _run_stage2_probe(
         run_python_script(
             script_path,
             command,
-            env=repo_pythonpath_env(platform=platform if backend == "jax" else "cpu"),
+            env=repo_pythonpath_env(
+                platform=effective_platform,
+                disable_compilation_cache=(effective_platform == "cpu"),
+            ),
             cwd=REPO_ROOT,
             bootstrap_repo=True,
             stream_output=True,

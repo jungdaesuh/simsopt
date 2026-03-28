@@ -98,10 +98,20 @@ def apply_compilation_cache_policy(
     return metadata
 
 
-def repo_pythonpath_env(*, platform: str = "auto") -> dict[str, str]:
+def repo_pythonpath_env(
+    *,
+    platform: str = "auto",
+    disable_compilation_cache: bool = False,
+) -> dict[str, str]:
     """Return an environment that resolves in-repo imports for subprocess probes."""
     env = dict(os.environ)
     _apply_platform_env(env, platform)
+    env.pop(_SIMSOPT_DISABLE_COMPILATION_CACHE_ENV_VAR, None)
+    env.pop(_SIMSOPT_COMPILATION_CACHE_POLICY_ENV_VAR, None)
+    if disable_compilation_cache:
+        env.pop(_JAX_COMPILATION_CACHE_ENV_VAR, None)
+        env[_SIMSOPT_DISABLE_COMPILATION_CACHE_ENV_VAR] = "1"
+        env[_SIMSOPT_COMPILATION_CACHE_POLICY_ENV_VAR] = "disabled"
     pythonpath_entries = [str(REPO_ROOT), str(SRC_ROOT)]
     existing_pythonpath = env.get("PYTHONPATH")
     if existing_pythonpath:
@@ -194,7 +204,9 @@ def optimizer_drift_tolerances(
     """Return the documented optimizer-replacement tolerances for a ladder rung."""
     if rung not in OPTIMIZER_DRIFT_TOLERANCES:
         valid = ", ".join(sorted(OPTIMIZER_DRIFT_TOLERANCES))
-        raise ValueError(f"Unknown optimizer-drift rung {rung!r}. Expected one of: {valid}.")
+        raise ValueError(
+            f"Unknown optimizer-drift rung {rung!r}. Expected one of: {valid}."
+        )
     tolerances = dict(OPTIMIZER_DRIFT_TOLERANCES[rung])
     if rung == "tier2_stage2_e2e":
         tolerances.pop("geometry_rel_tol_20_iter", None)
@@ -305,7 +317,9 @@ def query_gpu_memory_mb() -> float | None:
         return None
 
 
-def build_provenance(jax_module, jaxlib_module, *, title: str, extra: dict[str, Any] | None = None) -> dict[str, Any]:
+def build_provenance(
+    jax_module, jaxlib_module, *, title: str, extra: dict[str, Any] | None = None
+) -> dict[str, Any]:
     """Collect shared provenance fields for ladder outputs."""
     compilation_cache = current_compilation_cache_metadata()
     provenance = {
@@ -480,5 +494,7 @@ def find_single_file(root: str | os.PathLike[str], pattern: str) -> Path:
     matches = list(Path(root).rglob(pattern))
     if len(matches) != 1:
         match_display = ", ".join(str(match) for match in matches) or "<none>"
-        raise RuntimeError(f"Expected exactly one {pattern!r} under {root}, found {match_display}")
+        raise RuntimeError(
+            f"Expected exactly one {pattern!r} under {root}, found {match_display}"
+        )
     return matches[0]

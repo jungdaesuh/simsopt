@@ -67,6 +67,7 @@ from benchmarks.tier5_performance_characterization import (
 )
 from benchmarks.validation_ladder_common import (
     _JAX_COMPILATION_CACHE_ENV_VAR,
+    _SIMSOPT_COMPILATION_CACHE_POLICY_ENV_VAR,
     _SIMSOPT_DISABLE_COMPILATION_CACHE_ENV_VAR,
     apply_compilation_cache_policy,
     build_provenance,
@@ -224,6 +225,30 @@ def test_repo_pythonpath_env_auto_clears_inherited_platform_selectors(monkeypatc
     assert "SIMSOPT_JAX_PLATFORM" not in env
     assert "SIMSOPT_JAX_BACKEND" not in env
     assert env["PYTHONPATH"].endswith("/tmp/existing")
+
+
+def test_repo_pythonpath_env_can_disable_compilation_cache(monkeypatch):
+    monkeypatch.setenv(_JAX_COMPILATION_CACHE_ENV_VAR, "/tmp/jax-cache")
+
+    env = repo_pythonpath_env(platform="cpu", disable_compilation_cache=True)
+
+    assert _JAX_COMPILATION_CACHE_ENV_VAR not in env
+    assert env[_SIMSOPT_DISABLE_COMPILATION_CACHE_ENV_VAR] == "1"
+    assert env[_SIMSOPT_COMPILATION_CACHE_POLICY_ENV_VAR] == "disabled"
+
+
+def test_repo_pythonpath_env_clears_stale_disable_flags_when_cache_is_enabled(
+    monkeypatch,
+):
+    monkeypatch.setenv(_JAX_COMPILATION_CACHE_ENV_VAR, "/tmp/jax-cache")
+    monkeypatch.setenv(_SIMSOPT_DISABLE_COMPILATION_CACHE_ENV_VAR, "1")
+    monkeypatch.setenv(_SIMSOPT_COMPILATION_CACHE_POLICY_ENV_VAR, "disabled")
+
+    env = repo_pythonpath_env(platform="cuda")
+
+    assert env[_JAX_COMPILATION_CACHE_ENV_VAR] == "/tmp/jax-cache"
+    assert _SIMSOPT_DISABLE_COMPILATION_CACHE_ENV_VAR not in env
+    assert _SIMSOPT_COMPILATION_CACHE_POLICY_ENV_VAR not in env
 
 
 def test_apply_compilation_cache_policy_defaults_to_disabled(monkeypatch):
@@ -620,15 +645,15 @@ def test_single_stage_init_case_threads_optimizer_backend_to_jax_lane(
         equilibria_dir=str(tmp_path / "equilibria"),
     )
 
-    observed_commands: list[list[str]] = []
+    observed_invocations: list[tuple[list[str], dict[str, str]]] = []
     monkeypatch.setattr(
         single_stage_init_parity_module,
         "_single_stage_script_path",
         lambda: tmp_path / "driver.py",
     )
 
-    def fake_run_python_script(_script_path, command, **_kwargs):
-        observed_commands.append(list(command))
+    def fake_run_python_script(_script_path, command, **kwargs):
+        observed_invocations.append((list(command), dict(kwargs["env"])))
         return argparse.Namespace(stdout="", stderr="")
 
     monkeypatch.setattr(
@@ -669,16 +694,18 @@ def test_single_stage_init_case_threads_optimizer_backend_to_jax_lane(
         platform="cpu",
     )
 
-    assert observed_commands
-    assert "--init-only" not in observed_commands[0]
-    maxiter_flag_index = observed_commands[0].index("--maxiter")
-    assert observed_commands[0][maxiter_flag_index + 1] == "1"
-    optimizer_flag_index = observed_commands[0].index("--optimizer-backend")
-    assert observed_commands[0][optimizer_flag_index + 1] == "ondevice"
-    boozer_optimizer_flag_index = observed_commands[0].index(
-        "--boozer-optimizer-backend"
-    )
-    assert observed_commands[0][boozer_optimizer_flag_index + 1] == "scipy"
+    assert len(observed_invocations) == 1
+    command, env = observed_invocations[0]
+    assert "--init-only" not in command
+    maxiter_flag_index = command.index("--maxiter")
+    assert command[maxiter_flag_index + 1] == "1"
+    optimizer_flag_index = command.index("--optimizer-backend")
+    assert command[optimizer_flag_index + 1] == "ondevice"
+    boozer_optimizer_flag_index = command.index("--boozer-optimizer-backend")
+    assert command[boozer_optimizer_flag_index + 1] == "scipy"
+    assert _JAX_COMPILATION_CACHE_ENV_VAR not in env
+    assert env[_SIMSOPT_DISABLE_COMPILATION_CACHE_ENV_VAR] == "1"
+    assert env[_SIMSOPT_COMPILATION_CACHE_POLICY_ENV_VAR] == "disabled"
 
 
 def _single_stage_probe_results(**overrides):
@@ -1244,7 +1271,7 @@ def test_stage2_e2e_probe_threads_optimizer_backend_to_both_probe_lanes(
         plasma_surf_filename="wout_nfp22ginsburg_000_014417_iota15.nc",
         equilibria_dir=str(tmp_path / "equilibria"),
     )
-    observed_commands: list[list[str]] = []
+    observed_invocations: list[tuple[list[str], dict[str, str]]] = []
 
     monkeypatch.setattr(
         stage2_e2e_comparison_module,
@@ -1262,8 +1289,8 @@ def test_stage2_e2e_probe_threads_optimizer_backend_to_both_probe_lanes(
         lambda _path: {},
     )
 
-    def fake_run_python_script(_script_path, command, **_kwargs):
-        observed_commands.append(list(command))
+    def fake_run_python_script(_script_path, command, **kwargs):
+        observed_invocations.append((list(command), dict(kwargs["env"])))
         return argparse.Namespace(stdout="", stderr="")
 
     monkeypatch.setattr(
@@ -1285,10 +1312,13 @@ def test_stage2_e2e_probe_threads_optimizer_backend_to_both_probe_lanes(
         dofs=[0.1, -0.2],
     )
 
-    assert len(observed_commands) == 2
-    for command in observed_commands:
+    assert len(observed_invocations) == 2
+    for command, env in observed_invocations:
         optimizer_flag_index = command.index("--optimizer-backend")
         assert command[optimizer_flag_index + 1] == "ondevice"
+        assert _JAX_COMPILATION_CACHE_ENV_VAR not in env
+        assert env[_SIMSOPT_DISABLE_COMPILATION_CACHE_ENV_VAR] == "1"
+        assert env[_SIMSOPT_COMPILATION_CACHE_POLICY_ENV_VAR] == "disabled"
 
 
 def test_stage2_e2e_ondevice_endpoint_lane_uses_jax_cpu_reference():
@@ -1304,6 +1334,61 @@ def test_stage2_e2e_ondevice_endpoint_lane_uses_jax_cpu_reference():
         "auto",
         "cpu-reference",
     )
+
+
+def test_stage2_e2e_probe_keeps_compilation_cache_for_cuda_lane(
+    monkeypatch,
+    tmp_path,
+):
+    args = argparse.Namespace(
+        optimizer_backend="ondevice",
+        nphi=31,
+        ntheta=16,
+        equilibrium_path=None,
+        plasma_surf_filename="wout_nfp22ginsburg_000_014417_iota15.nc",
+        equilibria_dir=str(tmp_path / "equilibria"),
+    )
+    observed_envs: list[dict[str, str]] = []
+    monkeypatch.setenv(_JAX_COMPILATION_CACHE_ENV_VAR, "/tmp/jax-cache")
+
+    monkeypatch.setattr(
+        stage2_e2e_comparison_module,
+        "_stage2_script_path",
+        lambda: tmp_path / "driver.py",
+    )
+    monkeypatch.setattr(
+        stage2_e2e_comparison_module,
+        "write_json",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        stage2_e2e_comparison_module,
+        "load_json",
+        lambda _path: {},
+    )
+
+    def fake_run_python_script(_script_path, command, **kwargs):
+        observed_envs.append(dict(kwargs["env"]))
+        return argparse.Namespace(stdout="", stderr="")
+
+    monkeypatch.setattr(
+        stage2_e2e_comparison_module,
+        "run_python_script",
+        fake_run_python_script,
+    )
+
+    stage2_e2e_comparison_module._run_stage2_probe(
+        args,
+        "jax",
+        platform="cuda",
+        dofs=[0.1, -0.2],
+    )
+
+    assert len(observed_envs) == 1
+    env = observed_envs[0]
+    assert env[_JAX_COMPILATION_CACHE_ENV_VAR] == "/tmp/jax-cache"
+    assert _SIMSOPT_DISABLE_COMPILATION_CACHE_ENV_VAR not in env
+    assert _SIMSOPT_COMPILATION_CACHE_POLICY_ENV_VAR not in env
 
 
 def test_stage2_e2e_matched_state_probes_follow_resolved_cpu_lane(monkeypatch):
