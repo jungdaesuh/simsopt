@@ -156,11 +156,24 @@ ships a dedicated launch path under ``benchmarks/hf_jobs``.
          python benchmarks/hf_jobs/launch_production_gpu_proof.py
 
    By default this launches both ``a100-large`` and ``h200`` jobs, pins the
-   current ``fork`` remote SHA, and runs the authoritative Tier 2 / Tier 3
-   entrypoints:
+   current ``fork`` remote SHA, prints a local preflight summary, and runs the
+   authoritative Tier 2 / Tier 3 entrypoints:
 
    - ``benchmarks/stage2_e2e_comparison.py``
    - ``benchmarks/single_stage_init_parity.py``
+
+   The default ``maxiter=20`` Stage 2 path is now portability smoke only:
+   it runs the cold/warm Stage 2 probes without forcing an explicit end-state
+   geometry override. Single-stage cold/warm probes still run even if an earlier
+   rung fails, and the harness returns one aggregate exit code after collecting
+   all rung evidence.
+
+   To add a dedicated Stage 2 reproducibility rung with an explicit geometry
+   gate, pass both a longer Stage 2 budget and ``--geometry-rel-tol``::
+
+       SIMSOPT_HF_GPU_IMAGE=<registry>/simsopt-jax:cuda12-jax092 \
+         python benchmarks/hf_jobs/launch_production_gpu_proof.py \
+         --stage2-maxiter 60 --geometry-rel-tol 1e-6
 
 3. **Fallback mode**::
 

@@ -18,6 +18,7 @@ import numpy as np
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 from repo_bootstrap import bootstrap_local_simsopt as _bootstrap_local_simsopt
+from benchmarks import validation_ladder_contract as ladder_contract
 
 SRC_ROOT = REPO_ROOT / "src"
 _JAX_PLATFORM_ENV_VARS = (
@@ -30,36 +31,14 @@ _JAX_COMPILATION_CACHE_ENV_VAR = "JAX_COMPILATION_CACHE_DIR"
 _SIMSOPT_DISABLE_COMPILATION_CACHE_ENV_VAR = "SIMSOPT_DISABLE_JAX_COMPILATION_CACHE"
 _SIMSOPT_COMPILATION_CACHE_POLICY_ENV_VAR = "SIMSOPT_JAX_COMPILATION_CACHE_POLICY"
 _TRUTHY_ENV_VALUES = frozenset({"1", "true", "yes", "on"})
-_SHORT_RUN_SMOKE_MAXITER = 20
-
-OPTIMIZER_DRIFT_TOLERANCES = {
-    "tier1_stage2_value_gradient": {
-        "objective_rel_tol": 1e-10,
-        "gradient_rtol": 1e-9,
-        "gradient_atol": 1e-12,
-    },
-    "tier2_stage2_e2e": {
-        "final_objective_rel_tol_20_iter": 5e-4,
-        "final_objective_rel_tol_default": 1e-4,
-        "field_error_rel_tol": 1e-4,
-        "geometry_rel_tol_20_iter": None,
-        "geometry_rel_tol_default": 1e-6,
-    },
-    "tier3_single_stage_init": {
-        "final_iota_abs_tol": 1e-3,
-        "final_volume_rel_tol": 1e-6,
-        "field_error_rel_tol": 1e-4,
-        "surface_geometry_rel_tol": 1e-5,
-    },
-    "tier4_adjoint_fd": {
-        "adjoint_residual_rel_tol": 1e-10,
-        "recomposed_total_rel_tol": 1e-12,
-        "fixed_surface_fd_rel_tol": 1e-3,
-        "fixed_surface_fd_abs_tol": 1e-8,
-        "full_resolve_fd_rel_tol": 1e-2,
-        "full_resolve_fd_abs_tol": 1e-8,
-    },
-}
+OPTIMIZER_DRIFT_TOLERANCES = ladder_contract.OPTIMIZER_DRIFT_TOLERANCES
+_SHORT_RUN_SMOKE_MAXITER = ladder_contract.SHORT_RUN_SMOKE_MAXITER
+optimizer_drift_tolerances = ladder_contract.optimizer_drift_tolerances
+resolve_probe_lane = ladder_contract.resolve_probe_lane
+short_run_geometry_rel_tolerance = ladder_contract.short_run_geometry_rel_tolerance
+short_run_stage2_final_objective_rel_tolerance = (
+    ladder_contract.short_run_stage2_final_objective_rel_tolerance
+)
 
 
 def preparse_platform(argv: list[str]) -> str:
@@ -190,41 +169,6 @@ def describe_compile_behavior(
     return "persistent compilation cache disabled; first-call compilation is included"
 
 
-def resolve_probe_lane(*, optimizer_backend: str | None = None) -> str:
-    """Map benchmark/probe options to the intended lane label."""
-    if optimizer_backend in {"hybrid", "ondevice"}:
-        return "private-optimizer"
-    return "trusted-public-reference"
-
-
-def optimizer_drift_tolerances(
-    rung: str,
-    *,
-    maxiter: int | None = None,
-) -> dict[str, float | None]:
-    """Return the documented optimizer-replacement tolerances for a ladder rung."""
-    if rung not in OPTIMIZER_DRIFT_TOLERANCES:
-        valid = ", ".join(sorted(OPTIMIZER_DRIFT_TOLERANCES))
-        raise ValueError(
-            f"Unknown optimizer-drift rung {rung!r}. Expected one of: {valid}."
-        )
-    tolerances = dict(OPTIMIZER_DRIFT_TOLERANCES[rung])
-    if rung == "tier2_stage2_e2e":
-        tolerances.pop("final_objective_rel_tol_20_iter", None)
-        tolerances.pop("final_objective_rel_tol_default", None)
-        tolerances["final_objective_rel_tol"] = (
-            short_run_stage2_final_objective_rel_tolerance(
-                21 if maxiter is None else int(maxiter)
-            )
-        )
-        tolerances.pop("geometry_rel_tol_20_iter", None)
-        tolerances.pop("geometry_rel_tol_default", None)
-        tolerances["geometry_rel_tol"] = short_run_geometry_rel_tolerance(
-            21 if maxiter is None else int(maxiter)
-        )
-    return tolerances
-
-
 def bootstrap_local_simsopt() -> None:
     """Force imports to resolve against this repo's source tree."""
     _bootstrap_local_simsopt(SRC_ROOT)
@@ -273,38 +217,6 @@ def max_pointwise_geometry_drift(
     pointwise = np.linalg.norm(actual_arr - reference_arr, axis=1)
     geometry_scale = max(float(np.max(np.linalg.norm(reference_arr, axis=1))), 1e-30)
     return float(np.max(pointwise)), float(np.max(pointwise) / geometry_scale)
-
-
-def short_run_geometry_rel_tolerance(
-    maxiter: int,
-    explicit_tol: float | None = None,
-) -> float | None:
-    """Return the end-state geometry gate for Stage 2 ladder runs.
-
-    Short smoke runs on the reduced real fixture intentionally do not hard-gate
-    on final geometry alignment. On that flat 20-iteration fixture, matched-state
-    objective / field / gradient parity is the hard precision contract and final
-    geometry drift is report-only unless the caller opts into an explicit gate.
-    """
-    if explicit_tol is not None:
-        return float(explicit_tol)
-    if maxiter <= _SHORT_RUN_SMOKE_MAXITER:
-        return None
-    return 1e-6
-
-
-def short_run_stage2_final_objective_rel_tolerance(maxiter: int) -> float:
-    """Return the Stage 2 endpoint-objective gate for a given iteration budget.
-
-    The 20-iteration production-scale smoke rung uses the same objective and
-    optimizer on CPU and CUDA, but it does not require bitwise-equivalent short-run
-    line-search paths across devices. Keep the gate tight enough to catch material
-    regressions while allowing the observed CPU-vs-CUDA endpoint drift on the smoke
-    fixture.
-    """
-    if maxiter <= _SHORT_RUN_SMOKE_MAXITER:
-        return 5e-4
-    return 1e-4
 
 
 def peak_rss_mb() -> float:

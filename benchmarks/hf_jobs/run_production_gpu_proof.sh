@@ -2,6 +2,8 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+SHORT_RUN_SMOKE_MAXITER=20
+HEARTBEAT_INTERVAL_S="${HEARTBEAT_INTERVAL_S:-60}"
 
 RESULTS_DIR=""
 EQUILIBRIA_DIR=""
@@ -13,7 +15,7 @@ STAGE2_NPHI="255"
 STAGE2_NTHETA="64"
 STAGE2_MAXITER="20"
 STAGE2_OPTIMIZER_BACKEND="ondevice"
-GEOMETRY_REL_TOL="5e-6"
+GEOMETRY_REL_TOL=""
 SINGLE_STAGE_NPHI="255"
 SINGLE_STAGE_NTHETA="64"
 SINGLE_STAGE_MPOL="8"
@@ -53,11 +55,45 @@ if [[ -z "${RESULTS_DIR}" || -z "${EQUILIBRIA_DIR}" || -z "${STAGE2_BS_PATH}" ]]
   echo "Missing required arguments: --results-dir, --equilibria-dir, --stage2-bs-path" >&2
   exit 1
 fi
+if [[ -n "${GEOMETRY_REL_TOL}" && "${STAGE2_MAXITER}" -le "${SHORT_RUN_SMOKE_MAXITER}" ]]; then
+  echo \
+    "Explicit --geometry-rel-tol conflicts with the maxiter=${STAGE2_MAXITER} smoke contract; "\
+    "omit the override or use a longer Stage 2 reproducibility rung." >&2
+  exit 1
+fi
 
 export HF_HUB_DISABLE_TELEMETRY=1
 export JAX_COMPILATION_CACHE_DIR="${JAX_COMPILATION_CACHE_DIR:-/tmp/jax-compilation-cache}"
 mkdir -p "${RESULTS_DIR}" "${JAX_COMPILATION_CACHE_DIR}"
 unset LD_LIBRARY_PATH
+
+OVERALL_RC=0
+declare -a EXPECTED_PROBES=("stage2_cold" "stage2_warm" "single_stage_cold" "single_stage_warm")
+if [[ -n "${GEOMETRY_REL_TOL}" ]]; then
+  EXPECTED_PROBES=("stage2_cold" "stage2_warm" "stage2_warm_repro" "single_stage_cold" "single_stage_warm")
+fi
+
+emit_payload_summary() {
+  local name="$1"
+  local output_json="$2"
+  python - "${name}" "${output_json}" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+name = sys.argv[1]
+payload_path = Path(sys.argv[2])
+try:
+    payload = json.loads(payload_path.read_text(encoding="utf-8"))
+except json.JSONDecodeError as exc:
+    print(
+        f"[summary] {name} corrupt payload: {payload_path} "
+        f"({exc.__class__.__name__}: {exc})"
+    )
+    raise SystemExit(1)
+print({"passed": payload.get("passed"), "failures": payload.get("failures")})
+PY
+}
 
 run_probe() {
   local name="$1"
@@ -71,21 +107,28 @@ run_probe() {
   local pid=$!
   while kill -0 "${pid}" 2>/dev/null; do
     echo "[heartbeat] ${name} $(date -u +%FT%TZ)"
-    sleep 60
+    sleep "${HEARTBEAT_INTERVAL_S}"
   done
-  wait "${pid}"
-  local rc=$?
+  local rc=0
+  if wait "${pid}"; then
+    rc=0
+  else
+    rc=$?
+  fi
   local end_ts
   end_ts="$(date +%s)"
   echo "[result] ${name} rc=${rc} wall_s=$((end_ts-start_ts))"
-  cat "${output_json}"
-  python - "${output_json}" <<'PY'
-import json
-import sys
-
-payload = json.load(open(sys.argv[1], encoding="utf-8"))
-print({"passed": payload.get("passed"), "failures": payload.get("failures")})
-PY
+  if [[ -f "${output_json}" ]]; then
+    cat "${output_json}"
+    if ! emit_payload_summary "${name}" "${output_json}"; then
+      rc=1
+    fi
+  else
+    echo "[summary] ${name} missing payload: ${output_json}"
+    if [[ "${rc}" -eq 0 ]]; then
+      rc=1
+    fi
+  fi
   return "${rc}"
 }
 
@@ -97,7 +140,7 @@ run_probe stage2_cold "${RESULTS_DIR}/stage2_cold.json" \
     --ntheta "${STAGE2_NTHETA}" \
     --maxiter "${STAGE2_MAXITER}" \
     --optimizer-backend "${STAGE2_OPTIMIZER_BACKEND}" \
-    --output-json "${RESULTS_DIR}/stage2_cold.json"
+    --output-json "${RESULTS_DIR}/stage2_cold.json" || OVERALL_RC=1
 
 run_probe stage2_warm "${RESULTS_DIR}/stage2_warm.json" \
   python "${REPO_ROOT}/benchmarks/stage2_e2e_comparison.py" \
@@ -107,18 +150,20 @@ run_probe stage2_warm "${RESULTS_DIR}/stage2_warm.json" \
     --ntheta "${STAGE2_NTHETA}" \
     --maxiter "${STAGE2_MAXITER}" \
     --optimizer-backend "${STAGE2_OPTIMIZER_BACKEND}" \
-    --output-json "${RESULTS_DIR}/stage2_warm.json"
+    --output-json "${RESULTS_DIR}/stage2_warm.json" || OVERALL_RC=1
 
-run_probe stage2_warm_geometry_gate "${RESULTS_DIR}/stage2_warm_geometry_gate.json" \
-  python "${REPO_ROOT}/benchmarks/stage2_e2e_comparison.py" \
-    --platform "${STAGE2_PLATFORM}" \
-    --equilibria-dir "${EQUILIBRIA_DIR}" \
-    --nphi "${STAGE2_NPHI}" \
-    --ntheta "${STAGE2_NTHETA}" \
-    --maxiter "${STAGE2_MAXITER}" \
-    --optimizer-backend "${STAGE2_OPTIMIZER_BACKEND}" \
-    --geometry-rel-tol "${GEOMETRY_REL_TOL}" \
-    --output-json "${RESULTS_DIR}/stage2_warm_geometry_gate.json"
+if [[ -n "${GEOMETRY_REL_TOL}" ]]; then
+  run_probe stage2_warm_repro "${RESULTS_DIR}/stage2_warm_repro.json" \
+    python "${REPO_ROOT}/benchmarks/stage2_e2e_comparison.py" \
+      --platform "${STAGE2_PLATFORM}" \
+      --equilibria-dir "${EQUILIBRIA_DIR}" \
+      --nphi "${STAGE2_NPHI}" \
+      --ntheta "${STAGE2_NTHETA}" \
+      --maxiter "${STAGE2_MAXITER}" \
+      --optimizer-backend "${STAGE2_OPTIMIZER_BACKEND}" \
+      --geometry-rel-tol "${GEOMETRY_REL_TOL}" \
+      --output-json "${RESULTS_DIR}/stage2_warm_repro.json" || OVERALL_RC=1
+fi
 
 run_probe single_stage_cold "${RESULTS_DIR}/single_stage_cold.json" \
   python "${REPO_ROOT}/benchmarks/single_stage_init_parity.py" \
@@ -133,7 +178,7 @@ run_probe single_stage_cold "${RESULTS_DIR}/single_stage_cold.json" \
     --optimizer-backend "${SINGLE_STAGE_OPTIMIZER_BACKEND}" \
     --boozer-optimizer-backend "${SINGLE_STAGE_BOOZER_OPTIMIZER_BACKEND}" \
     --maxiter "${SINGLE_STAGE_MAXITER}" \
-    --output-json "${RESULTS_DIR}/single_stage_cold.json"
+    --output-json "${RESULTS_DIR}/single_stage_cold.json" || OVERALL_RC=1
 
 run_probe single_stage_warm "${RESULTS_DIR}/single_stage_warm.json" \
   python "${REPO_ROOT}/benchmarks/single_stage_init_parity.py" \
@@ -148,21 +193,46 @@ run_probe single_stage_warm "${RESULTS_DIR}/single_stage_warm.json" \
     --optimizer-backend "${SINGLE_STAGE_OPTIMIZER_BACKEND}" \
     --boozer-optimizer-backend "${SINGLE_STAGE_BOOZER_OPTIMIZER_BACKEND}" \
     --maxiter "${SINGLE_STAGE_MAXITER}" \
-    --output-json "${RESULTS_DIR}/single_stage_warm.json"
+    --output-json "${RESULTS_DIR}/single_stage_warm.json" || OVERALL_RC=1
 
-python - "${RESULTS_DIR}" <<'PY'
+python - "${RESULTS_DIR}" "${EXPECTED_PROBES[@]}" <<'PY'
 import json
 import sys
 from pathlib import Path
 
 results_dir = Path(sys.argv[1])
+expected = sys.argv[2:]
 summary = {}
-for path in sorted(results_dir.glob("*.json")):
-    payload = json.loads(path.read_text(encoding="utf-8"))
+for probe_name in expected:
+    path = results_dir / f"{probe_name}.json"
+    if path.exists():
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            summary[path.name] = {
+                "passed": False,
+                "elapsed_s": None,
+                "failures": [f"corrupt payload: {exc}"],
+                "missing_payload": False,
+                "corrupt_payload": True,
+            }
+            continue
+        summary[path.name] = {
+            "passed": payload.get("passed"),
+            "elapsed_s": payload.get("elapsed_s"),
+            "failures": payload.get("failures"),
+            "missing_payload": False,
+            "corrupt_payload": False,
+        }
+        continue
     summary[path.name] = {
-        "passed": payload.get("passed"),
-        "elapsed_s": payload.get("elapsed_s"),
-        "failures": payload.get("failures"),
+        "passed": False,
+        "elapsed_s": None,
+        "failures": ["missing payload"],
+        "missing_payload": True,
+        "corrupt_payload": False,
     }
 print(json.dumps(summary, indent=2))
 PY
+
+exit "${OVERALL_RC}"
