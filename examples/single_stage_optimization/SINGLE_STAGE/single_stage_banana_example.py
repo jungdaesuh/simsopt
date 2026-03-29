@@ -689,6 +689,11 @@ def initialize_boozer_surface(
         )
         return solve_iota, solve_G, solve_sdofs
 
+    def run_boozer_solve(boozer_surface, solve_iota, solve_G, solve_sdofs):
+        if backend == "jax":
+            return boozer_surface.run_code(solve_iota, solve_G, sdofs=solve_sdofs)
+        return boozer_surface.run_code(solve_iota, solve_G)
+
     surf = SurfaceXYZTensorFourier(
         mpol=mpol,
         ntor=ntor,
@@ -760,7 +765,7 @@ def initialize_boozer_surface(
 
     # Run boozer surface algorithm
     solve_iota, solve_G, solve_sdofs = resolve_boozer_warm_start()
-    res = boozer_surface.run_code(solve_iota, solve_G, sdofs=solve_sdofs)
+    res = run_boozer_solve(boozer_surface, solve_iota, solve_G, solve_sdofs)
     emit_stage(
         "after_boozer_solve",
         solve_success=bool(res["success"]),
@@ -824,7 +829,7 @@ def surface_self_intersection_check_available():
         surface_module.get_context is not None
         and surface_module.contour_self_intersects is not None
     )
-    return has_ground or surface_module.LineString is not None
+    return has_ground or getattr(surface_module, "LineString", None) is not None
 
 
 def evaluate_surface_self_intersection(surface):

@@ -19,7 +19,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from benchmarks.validation_ladder_contract import (  # noqa: E402
-    SHORT_RUN_SMOKE_MAXITER,
+    build_stage2_hf_plan,
     optimizer_drift_tolerances,
     resolve_probe_lane,
 )
@@ -113,9 +113,13 @@ def _resolve_default_repo_url() -> str:
 
 
 def _build_optional_stage2_geometry_flag(args: argparse.Namespace) -> str:
-    if args.geometry_rel_tol is None:
+    stage2_plan = build_stage2_hf_plan(args.stage2_maxiter, args.geometry_rel_tol)
+    if stage2_plan["geometry_rel_tol"] is None:
         return ""
-    return f"--geometry-rel-tol {shlex.quote(str(args.geometry_rel_tol))} "
+    return (
+        "--geometry-rel-tol "
+        f"{shlex.quote(str(stage2_plan['geometry_rel_tol']))} "
+    )
 
 
 def _resolve_repo_defaults(args: argparse.Namespace) -> argparse.Namespace:
@@ -261,23 +265,10 @@ def _build_preflight_report(args: argparse.Namespace) -> dict[str, object]:
         "tier2_stage2_e2e",
         maxiter=args.stage2_maxiter,
     )
-    effective_geometry_rel_tol = (
-        float(args.geometry_rel_tol)
-        if args.geometry_rel_tol is not None
-        else stage2_tolerances["geometry_rel_tol"]
-    )
-    if (
-        args.stage2_maxiter <= SHORT_RUN_SMOKE_MAXITER
-        and args.geometry_rel_tol is not None
-    ):
-        raise SystemExit(
-            "Explicit --geometry-rel-tol conflicts with the maxiter<=20 Stage 2 "
-            "smoke contract; omit the override or increase --stage2-maxiter for a "
-            "dedicated reproducibility rung."
-        )
-    stage2_rungs = ["stage2_cold", "stage2_warm"]
-    if args.geometry_rel_tol is not None:
-        stage2_rungs.append("stage2_warm_repro")
+    try:
+        stage2_plan = build_stage2_hf_plan(args.stage2_maxiter, args.geometry_rel_tol)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
     return {
         "repo_sha": resolved_sha,
         "repo_ref": args.repo_ref,
@@ -291,11 +282,12 @@ def _build_preflight_report(args: argparse.Namespace) -> dict[str, object]:
         "single_stage_lane": resolve_probe_lane(
             optimizer_backend=args.single_stage_optimizer_backend
         ),
-        "stage2_rungs": stage2_rungs,
+        "stage2_rungs": list(stage2_plan["stage2_rungs"]),
         "single_stage_rungs": ["single_stage_cold", "single_stage_warm"],
         "stage2_maxiter": int(args.stage2_maxiter),
-        "stage2_geometry_override": args.geometry_rel_tol,
-        "effective_geometry_rel_tol": effective_geometry_rel_tol,
+        "stage2_geometry_override": stage2_plan["geometry_rel_tol"],
+        "stage2_geometry_policy": stage2_plan["geometry_policy"],
+        "effective_geometry_rel_tol": stage2_plan["effective_geometry_rel_tol"],
         "effective_final_objective_rel_tol": stage2_tolerances[
             "final_objective_rel_tol"
         ],

@@ -1857,6 +1857,42 @@ class TestScriptBackendSelection:
         assert recorder.called, "BoozerSurfaceJAX was not constructed"
         print("initialize_boozer_surface(backend='jax') -> BoozerSurfaceJAX OK")
 
+    def test_real_fixture_cpu_warm_start_overrides_do_not_crash(self):
+        """Reduced real CPU fixture must accept warm-start overrides without sdofs=."""
+        from unittest.mock import patch
+
+        with patch.object(
+            single_stage_example,
+            "evaluate_surface_self_intersection",
+            return_value=(False, False),
+        ):
+            base_fixture = build_real_single_stage_init_fixture(
+                backend="cpu",
+                optimizer_backend="scipy",
+            )
+            base_boozer = base_fixture["boozer_surface"]
+            base_result = base_boozer.res
+
+            assert base_result is not None and base_result.get("success", False), (
+                "Baseline reduced real CPU fixture did not converge"
+            )
+
+            replay_fixture = build_real_single_stage_init_fixture(
+                backend="cpu",
+                optimizer_backend="scipy",
+                boozer_surface_dofs_override=np.asarray(
+                    base_boozer.surface.get_dofs(),
+                    dtype=float,
+                ),
+                boozer_iota_override=float(base_result["iota"]),
+                boozer_G_override=float(base_result["G"]),
+            )
+            replay_result = replay_fixture["boozer_surface"].res
+
+            assert replay_result is not None and replay_result.get("success", False), (
+                "Warm-started reduced real CPU fixture did not converge"
+            )
+
 
 # -----------------------------------------------------------------------
 # Test 9: Isolated run_code() LS parity (CPU vs JAX)

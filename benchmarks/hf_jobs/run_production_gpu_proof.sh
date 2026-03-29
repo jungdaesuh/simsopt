@@ -2,7 +2,6 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-SHORT_RUN_SMOKE_MAXITER=20
 HEARTBEAT_INTERVAL_S="${HEARTBEAT_INTERVAL_S:-60}"
 
 RESULTS_DIR=""
@@ -55,10 +54,32 @@ if [[ -z "${RESULTS_DIR}" || -z "${EQUILIBRIA_DIR}" || -z "${STAGE2_BS_PATH}" ]]
   echo "Missing required arguments: --results-dir, --equilibria-dir, --stage2-bs-path" >&2
   exit 1
 fi
-if [[ -n "${GEOMETRY_REL_TOL}" && "${STAGE2_MAXITER}" -le "${SHORT_RUN_SMOKE_MAXITER}" ]]; then
-  echo \
-    "Explicit --geometry-rel-tol conflicts with the maxiter=${STAGE2_MAXITER} smoke contract; "\
-    "omit the override or use a longer Stage 2 reproducibility rung." >&2
+
+GEOMETRY_REL_TOL_ARG="${GEOMETRY_REL_TOL}"
+if [[ -z "${GEOMETRY_REL_TOL_ARG}" ]]; then
+  GEOMETRY_REL_TOL_ARG="__NONE__"
+fi
+if ! mapfile -t STAGE2_RUNG_NAMES < <(
+  python - "${REPO_ROOT}" "${STAGE2_MAXITER}" "${GEOMETRY_REL_TOL_ARG}" <<'PY'
+from pathlib import Path
+import sys
+
+repo_root = Path(sys.argv[1])
+sys.path.insert(0, str(repo_root))
+
+from benchmarks.validation_ladder_contract import build_stage2_hf_plan
+
+maxiter = int(sys.argv[2])
+raw_geometry_rel_tol = sys.argv[3]
+geometry_rel_tol = None if raw_geometry_rel_tol == "__NONE__" else float(raw_geometry_rel_tol)
+try:
+    plan = build_stage2_hf_plan(maxiter, geometry_rel_tol)
+except ValueError as exc:
+    raise SystemExit(str(exc))
+for rung_name in plan["stage2_rungs"]:
+    print(rung_name)
+PY
+); then
   exit 1
 fi
 
@@ -68,10 +89,7 @@ mkdir -p "${RESULTS_DIR}" "${JAX_COMPILATION_CACHE_DIR}"
 unset LD_LIBRARY_PATH
 
 OVERALL_RC=0
-declare -a EXPECTED_PROBES=("stage2_cold" "stage2_warm" "single_stage_cold" "single_stage_warm")
-if [[ -n "${GEOMETRY_REL_TOL}" ]]; then
-  EXPECTED_PROBES=("stage2_cold" "stage2_warm" "stage2_warm_repro" "single_stage_cold" "single_stage_warm")
-fi
+declare -a EXPECTED_PROBES=("${STAGE2_RUNG_NAMES[@]}" "single_stage_cold" "single_stage_warm")
 
 emit_payload_summary() {
   local name="$1"
@@ -152,7 +170,7 @@ run_probe stage2_warm "${RESULTS_DIR}/stage2_warm.json" \
     --optimizer-backend "${STAGE2_OPTIMIZER_BACKEND}" \
     --output-json "${RESULTS_DIR}/stage2_warm.json" || OVERALL_RC=1
 
-if [[ -n "${GEOMETRY_REL_TOL}" ]]; then
+if [[ " ${STAGE2_RUNG_NAMES[*]} " == *" stage2_warm_repro "* ]]; then
   run_probe stage2_warm_repro "${RESULTS_DIR}/stage2_warm_repro.json" \
     python "${REPO_ROOT}/benchmarks/stage2_e2e_comparison.py" \
       --platform "${STAGE2_PLATFORM}" \

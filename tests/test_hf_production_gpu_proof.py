@@ -16,10 +16,12 @@ if str(TEST_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(TEST_REPO_ROOT))
 
 from benchmarks.hf_jobs import launch_production_gpu_proof as launcher
+from benchmarks.validation_ladder_contract import build_stage2_hf_plan
 
 
 REPO_ROOT = TEST_REPO_ROOT
 RUNNER_SCRIPT = REPO_ROOT / "benchmarks" / "hf_jobs" / "run_production_gpu_proof.sh"
+LADDER_CONTRACT = REPO_ROOT / "benchmarks" / "validation_ladder_contract.py"
 LAUNCHER_SCRIPT = (
     REPO_ROOT / "benchmarks" / "hf_jobs" / "launch_production_gpu_proof.py"
 )
@@ -42,6 +44,7 @@ def _build_fake_proof_repo(
     hf_jobs_dir.mkdir(parents=True)
     equilibria_dir.mkdir(parents=True)
     shutil.copy2(RUNNER_SCRIPT, hf_jobs_dir / "run_production_gpu_proof.sh")
+    shutil.copy2(LADDER_CONTRACT, benchmarks_dir / "validation_ladder_contract.py")
     call_log = repo_root / "call_log.jsonl"
     stage2_script = textwrap.dedent(
         f"""\
@@ -219,6 +222,48 @@ def test_run_production_gpu_proof_adds_optional_repro_rung(tmp_path):
     assert "--geometry-rel-tol" in repro_calls[0]["argv"]
 
 
+def test_build_stage2_hf_plan_keeps_smoke_jobs_geometry_report_only():
+    plan = build_stage2_hf_plan(20, None)
+
+    assert plan["stage2_rungs"] == ("stage2_cold", "stage2_warm")
+    assert plan["geometry_rel_tol"] is None
+    assert plan["effective_geometry_rel_tol"] is None
+    assert plan["geometry_policy"] == "report-only"
+    assert plan["supports_geometry_repro"] is False
+
+
+def test_build_stage2_hf_plan_requires_long_run_for_explicit_geometry_repro():
+    with pytest.raises(
+        ValueError,
+        match="Explicit --geometry-rel-tol conflicts with the maxiter=20 Stage 2 smoke contract",
+    ):
+        build_stage2_hf_plan(20, 1e-6)
+
+
+def test_build_stage2_hf_plan_adds_repro_rung_for_long_run_override():
+    plan = build_stage2_hf_plan(60, 1e-6)
+
+    assert plan["stage2_rungs"] == (
+        "stage2_cold",
+        "stage2_warm",
+        "stage2_warm_repro",
+    )
+    assert plan["geometry_rel_tol"] == pytest.approx(1e-6)
+    assert plan["effective_geometry_rel_tol"] == pytest.approx(1e-6)
+    assert plan["geometry_policy"] == "explicit-repro-gate"
+    assert plan["supports_geometry_repro"] is True
+
+
+def test_build_stage2_hf_plan_reports_default_long_run_geometry_gate():
+    plan = build_stage2_hf_plan(60, None)
+
+    assert plan["stage2_rungs"] == ("stage2_cold", "stage2_warm")
+    assert plan["geometry_rel_tol"] is None
+    assert plan["effective_geometry_rel_tol"] == pytest.approx(1e-6)
+    assert plan["geometry_policy"] == "default-long-run-gate"
+    assert plan["supports_geometry_repro"] is True
+
+
 def _launcher_env(tmp_path: Path) -> dict[str, str]:
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
@@ -356,6 +401,33 @@ def test_launch_production_gpu_proof_dry_run_omits_smoke_geometry_override(tmp_p
 
     assert completed.returncode == 0
     assert '"effective_geometry_rel_tol": null' in completed.stdout
+    assert '"stage2_geometry_policy": "report-only"' in completed.stdout
+    assert "--geometry-rel-tol" not in completed.stdout
+    assert "stage2_warm_repro" not in completed.stdout
+
+
+def test_launch_production_gpu_proof_reports_default_long_run_geometry_gate(tmp_path):
+    env = _launcher_env(tmp_path)
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(LAUNCHER_SCRIPT),
+            "--dry-run",
+            "--hardware",
+            "a100-large",
+            "--stage2-maxiter",
+            "60",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+        cwd=str(REPO_ROOT),
+    )
+
+    assert completed.returncode == 0
+    assert '"effective_geometry_rel_tol": 1e-06' in completed.stdout
+    assert '"stage2_geometry_policy": "default-long-run-gate"' in completed.stdout
     assert "--geometry-rel-tol" not in completed.stdout
     assert "stage2_warm_repro" not in completed.stdout
 
@@ -380,7 +452,7 @@ def test_launch_production_gpu_proof_rejects_smoke_geometry_override(tmp_path):
     )
 
     assert completed.returncode != 0
-    assert "maxiter<=20 Stage 2 smoke contract" in completed.stderr
+    assert "maxiter=20 Stage 2 smoke contract" in completed.stderr
 
 
 def test_launch_production_gpu_proof_rejects_remote_sha_not_on_repo_ref(tmp_path):
@@ -465,5 +537,6 @@ def test_launch_production_gpu_proof_allows_explicit_long_run_geometry_rung(tmp_
 
     assert completed.returncode == 0
     assert '"stage2_rungs": [' in completed.stdout
+    assert '"stage2_geometry_policy": "explicit-repro-gate"' in completed.stdout
     assert "stage2_warm_repro" in completed.stdout
     assert "--geometry-rel-tol 1e-06" in completed.stdout

@@ -79,6 +79,12 @@ class FakeSurfaceXYZTensorFourier:
     def least_squares_fit(self, gamma):
         self.fitted_gamma = gamma
 
+    def set_dofs(self, dofs):
+        self.dofs = np.asarray(dofs)
+
+    def get_dofs(self):
+        return np.asarray(self.dofs)
+
     def is_self_intersecting(self):
         return False
 
@@ -107,6 +113,21 @@ class FakeBoozerSurface:
         return self.res
 
 
+class RecordingCPUBoozerSurface(FakeBoozerSurface):
+    instances = []
+
+    def __init__(
+        self, bs, surface, label, targetlabel, constraint_weight, options=None
+    ):
+        super().__init__(bs, surface, label, targetlabel, constraint_weight, options)
+        self.run_code_calls = []
+        RecordingCPUBoozerSurface.instances.append(self)
+
+    def run_code(self, iota, G=None):
+        self.run_code_calls.append((iota, G))
+        return self.res
+
+
 class FailingCPUBoozerSurface:
     def __init__(self, *args, **kwargs):
         raise AssertionError("CPU BoozerSurface should not be constructed")
@@ -115,6 +136,7 @@ class FailingCPUBoozerSurface:
 class SingleStageExampleTests(unittest.TestCase):
     def setUp(self):
         FakeSurfaceXYZTensorFourier.instances = []
+        RecordingCPUBoozerSurface.instances = []
 
     def load_module(self):
         return load_single_stage_example_module()
@@ -208,7 +230,7 @@ class SingleStageExampleTests(unittest.TestCase):
     def patch_surface_self_intersection_backend_unavailable(self, module):
         with patch.object(module.surface_module, "get_context", None), patch.object(
             module.surface_module, "contour_self_intersects", None
-        ), patch.object(module.surface_module, "LineString", None):
+        ), patch.object(module.surface_module, "LineString", None, create=True):
             yield
 
     def test_exact_boozer_helpers_are_imported(self):
@@ -280,6 +302,38 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertEqual(boozer_surface.options["verbose"], True)
         self.assertEqual(boozer_surface.options["optimizer_backend"], "scipy")
         self.assertIs(boozer_surface.surface, FakeSurfaceXYZTensorFourier.instances[0])
+
+    def test_initialize_boozer_surface_cpu_warm_start_does_not_pass_sdofs(self):
+        module = self.load_module()
+        surf_prev = FakeSurfPrev()
+        surface_override = np.array([4.0, 5.0, 6.0])
+
+        with patch.object(
+            module, "SurfaceXYZTensorFourier", FakeSurfaceXYZTensorFourier
+        ), patch.object(module, "Volume", FakeVolume), patch.object(
+            module, "BoozerSurface", RecordingCPUBoozerSurface
+        ):
+            boozer_surface = module.initialize_boozer_surface(
+                surf_prev,
+                mpol=TEST_MPOL,
+                ntor=TEST_NTOR,
+                bs=object(),
+                vol_target=TEST_VOL_TARGET,
+                constraint_weight=1.0,
+                iota=TEST_IOTA,
+                G0=TEST_G0,
+                backend="cpu",
+                surface_dofs_override=surface_override,
+                iota_override=0.21,
+                G_override=1.7,
+            )
+
+        self.assertIsInstance(boozer_surface, RecordingCPUBoozerSurface)
+        self.assertEqual(len(boozer_surface.run_code_calls), 1)
+        self.assertEqual(boozer_surface.run_code_calls[0], (0.21, 1.7))
+        np.testing.assert_array_equal(
+            boozer_surface.surface.get_dofs(), surface_override
+        )
 
     def test_initialize_boozer_surface_threads_nondefault_optimizer_backend(self):
         module = self.load_module()

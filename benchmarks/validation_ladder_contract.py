@@ -4,6 +4,8 @@ from __future__ import annotations
 
 
 SHORT_RUN_SMOKE_MAXITER = 20
+_SMOKE_STAGE2_RUNG_NAMES = ("stage2_cold", "stage2_warm")
+_GEOMETRY_REPRO_STAGE2_RUNG_NAME = "stage2_warm_repro"
 
 OPTIMIZER_DRIFT_TOLERANCES = {
     "tier1_stage2_value_gradient": {
@@ -59,6 +61,66 @@ def short_run_stage2_final_objective_rel_tolerance(maxiter: int) -> float:
     if maxiter <= SHORT_RUN_SMOKE_MAXITER:
         return 5e-4
     return 1e-4
+
+
+def _smoke_geometry_override_error(maxiter: int) -> str:
+    return (
+        "Explicit --geometry-rel-tol conflicts with the maxiter="
+        f"{int(maxiter)} Stage 2 smoke contract; omit the override or use "
+        "a longer Stage 2 reproducibility rung."
+    )
+
+
+def stage2_geometry_repro_supported(maxiter: int) -> bool:
+    """Return whether the HF harness permits an explicit Stage 2 repro rung."""
+    return int(maxiter) > SHORT_RUN_SMOKE_MAXITER
+
+
+def validate_stage2_hf_plan(
+    maxiter: int,
+    geometry_rel_tol: float | None,
+) -> None:
+    """Validate the requested HF Stage 2 rung shape against the ladder contract."""
+    if geometry_rel_tol is None:
+        return
+    if stage2_geometry_repro_supported(maxiter):
+        return
+    raise ValueError(_smoke_geometry_override_error(maxiter))
+
+
+def build_stage2_hf_plan(
+    maxiter: int,
+    geometry_rel_tol: float | None,
+) -> dict[str, object]:
+    """Return the HF Stage 2 rung plan derived from the ladder contract SSOT."""
+    validate_stage2_hf_plan(maxiter, geometry_rel_tol)
+    default_geometry_rel_tol = short_run_geometry_rel_tolerance(int(maxiter))
+    explicit_geometry_repro = geometry_rel_tol is not None
+    stage2_rungs = list(_SMOKE_STAGE2_RUNG_NAMES)
+    if explicit_geometry_repro:
+        stage2_rungs.append(_GEOMETRY_REPRO_STAGE2_RUNG_NAME)
+    effective_geometry_rel_tol = (
+        float(geometry_rel_tol)
+        if explicit_geometry_repro
+        else default_geometry_rel_tol
+    )
+    if explicit_geometry_repro:
+        geometry_policy = "explicit-repro-gate"
+    elif effective_geometry_rel_tol is None:
+        geometry_policy = "report-only"
+    else:
+        geometry_policy = "default-long-run-gate"
+    return {
+        "stage2_rungs": tuple(stage2_rungs),
+        "explicit_geometry_repro": explicit_geometry_repro,
+        "geometry_rel_tol": (
+            None if geometry_rel_tol is None else float(geometry_rel_tol)
+        ),
+        "effective_geometry_rel_tol": effective_geometry_rel_tol,
+        "geometry_policy": geometry_policy,
+        "smoke_budget": int(maxiter) <= SHORT_RUN_SMOKE_MAXITER,
+        "supports_geometry_repro": stage2_geometry_repro_supported(maxiter),
+    }
 
 
 def optimizer_drift_tolerances(
