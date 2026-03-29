@@ -1,77 +1,23 @@
-"""Private optimizer runtime tests for BoozerSurfaceJAX (split from test_boozersurface_jax.py)."""
+"""Private optimizer runtime tests for BoozerSurfaceJAX."""
 
 import types
-import sys
-import importlib.util
-from pathlib import Path
 
+import jax
+import jax.numpy as jnp
 import numpy as np
 import pytest
 
-import jax
-
-jax.config.update("jax_enable_x64", True)
-import jax.numpy as jnp
-
-# ---------------------------------------------------------------------------
-# Module loading: register JAX modules in sys.modules so that
-# boozersurface_jax.py's package-level imports resolve correctly.
-# ---------------------------------------------------------------------------
-
-_SRC = Path(__file__).resolve().parents[2] / "src" / "simsopt"
-
-
-def _ensure_package(pkg, path):
-    if pkg in sys.modules:
-        return
-    try:
-        __import__(pkg)
-    except ImportError:
-        m = types.ModuleType(pkg)
-        m.__path__ = [str(path)]
-        sys.modules[pkg] = m
-
-
-def _load_and_register(module_fqn, relpath):
-    spec = importlib.util.spec_from_file_location(module_fqn, str(_SRC / relpath))
-    mod = importlib.util.module_from_spec(spec)
-    sys.modules[module_fqn] = mod
-    spec.loader.exec_module(mod)
-    return mod
-
-
-_ensure_package("simsopt", _SRC)
-_ensure_package("simsopt.geo", _SRC / "geo")
-_ensure_package("simsopt.field", _SRC / "field")
-_ensure_package("simsopt.objectives", _SRC / "objectives")
-
-_sf = _load_and_register(
-    "simsopt.geo.surface_fourier_jax", "geo/surface_fourier_jax.py"
+from .boozersurface_jax_test_helpers import (
+    PRIVATE_OPTIMIZER_JAX_VERSION,
+    _bsj,
+    _make_mock_boozer_surface,
+    _opt,
+    _patch_newton_polish_runner,
+    _soj,
+    _successful_minimize_result,
+    _successful_newton_polish_result,
+    jax_minimize,
 )
-_bs_jax = _load_and_register("simsopt.field.biotsavart_jax", "field/biotsavart_jax.py")
-_bs_backend = _load_and_register(
-    "simsopt.field.biotsavart_jax_backend", "field/biotsavart_jax_backend.py"
-)
-_obj_utils = _load_and_register(
-    "simsopt.objectives.utilities", "objectives/utilities.py"
-)
-_br = _load_and_register(
-    "simsopt.geo.boozer_residual_jax", "geo/boozer_residual_jax.py"
-)
-_lc = _load_and_register(
-    "simsopt.geo.label_constraints_jax", "geo/label_constraints_jax.py"
-)
-_opt = _load_and_register("simsopt.geo.optimizer_jax", "geo/optimizer_jax.py")
-_bsj = _load_and_register("simsopt.geo.boozersurface_jax", "geo/boozersurface_jax.py")
-_soj = _load_and_register(
-    "simsopt.geo.surfaceobjectives_jax", "geo/surfaceobjectives_jax.py"
-)
-
-# Convenient aliases (only what private tests need)
-stellsym_scatter_indices = _sf.stellsym_scatter_indices
-jax_minimize = _opt.jax_minimize
-PRIVATE_OPTIMIZER_JAX_VERSION = _opt.PRIVATE_OPTIMIZER_JAX_VERSION
-BoozerSurfaceJAX = _bsj.BoozerSurfaceJAX
 
 
 def test_solve_boozer_adjoint_enables_iterative_refinement(monkeypatch):
@@ -130,237 +76,10 @@ REQUIRES_PRIVATE_LIMITED_MEMORY_RUNTIME = pytest.mark.skipif(
 )
 
 
-# ---------------------------------------------------------------------------
-# Test data helpers
-# ---------------------------------------------------------------------------
-
-
-def _make_simple_torus_coeffs(R0=1.0, r=0.1, mpol=1, ntor=1, nfp=1):
-    """Create coefficient matrices for a simple circular-cross-section torus.
-
-    gamma(phi, theta) = [(R0 + r cos(theta)) cos(2*pi*phi),
-                         (R0 + r cos(theta)) sin(2*pi*phi),
-                         r sin(theta)]
-
-    In SurfaceXYZTensorFourier basis:
-      x_hat = R0 + r*cos(theta),  y_hat = 0,  z = r*sin(theta)
-    """
-    shape = (2 * mpol + 1, 2 * ntor + 1)
-    xc = np.zeros(shape)
-    yc = np.zeros(shape)
-    zc = np.zeros(shape)
-    # x_hat: constant term = R0, cos(theta) term = r
-    xc[0, 0] = R0  # cos(0*theta) * cos(0*phi)
-    xc[1, 0] = r  # cos(1*theta) * cos(0*phi)
-    # z: sin(theta) term = r
-    # sin(theta) is row mpol+1 = 2 in the basis
-    zc[mpol + 1, 0] = r  # sin(1*theta) * cos(0*phi)  → but this is sc quadrant
-    # Actually for the standard basis: row mpol+1..2*mpol are sin modes
-    # For mpol=1: row 2 = sin(theta)
-    # Col 0 = cos(0*phi) = 1
-    # z[2, 0] = r → z = r * sin(theta) * 1
-    return xc, yc, zc
-
-
-def _successful_minimize_result(
-    x0,
-    *,
-    nit=0,
-    nfev=1,
-    njev=1,
-):
-    return types.SimpleNamespace(
-        x=jnp.asarray(x0),
-        fun=0.0,
-        jac=jnp.zeros_like(x0),
-        nit=nit,
-        nfev=nfev,
-        njev=njev,
-        success=True,
-        status=0,
-    )
-
-
-def _successful_newton_polish_result(x0, *, nit=0):
-    n = x0.shape[0]
-    return {
-        "x": x0,
-        "fun": jnp.asarray(0.0),
-        "grad": jnp.zeros_like(x0),
-        "hessian": jnp.eye(n, dtype=x0.dtype),
-        "nit": nit,
-        "success": True,
-    }
-
-
-def _patch_newton_polish_runner(monkeypatch, fake_newton_polish):
-    """Patch the centralized Newton-polish dispatch seam used by run_code()."""
-
-    def fake_runner(
-        self,
-        method,
-        obj_fn,
-        x0,
-        *,
-        maxiter,
-        tol,
-        stab,
-        progress_callback=None,
-    ):
-        del self, method
-        return fake_newton_polish(
-            obj_fn,
-            x0,
-            maxiter=maxiter,
-            tol=tol,
-            stab=stab,
-            progress_callback=progress_callback,
-        )
-
-    monkeypatch.setattr(
-        _bsj.BoozerSurfaceJAX,
-        "_run_newton_polish_for_method",
-        fake_runner,
-    )
-
-
 def _emit_sparse_progress(progress_callback):
     progress_callback(1, 3.0, 2.0)
     progress_callback(7, 2.0, 1.0)
     progress_callback(25, 1.0, 0.5)
-
-
-# ---------------------------------------------------------------------------
-# Mock classes
-# ---------------------------------------------------------------------------
-
-
-class _MockCurrent:
-    """Minimal mock for coil current."""
-
-    def __init__(self, value):
-        self._value = value
-        self.dofs = self
-
-    def get_value(self):
-        return self._value
-
-    def all_fixed(self):
-        return True
-
-
-class _MockCurve:
-    """Minimal mock for coil curve."""
-
-    def __init__(self, gamma, gammadash):
-        self._gamma = gamma
-        self._gammadash = gammadash
-
-    def gamma(self):
-        return self._gamma
-
-    def gammadash(self):
-        return self._gammadash
-
-
-class _MockCoil:
-    def __init__(self, gamma, gammadash, current):
-        self.curve = _MockCurve(gamma, gammadash)
-        self.current = _MockCurrent(current)
-
-
-class _MockBiotSavart(_bsj.Optimizable):
-    """Minimal mock for BiotSavartJAX — must be Optimizable for depends_on."""
-
-    def __init__(self, coils):
-        super().__init__(x0=np.asarray([]))
-        self._coils = coils
-
-
-class _MockSurface:
-    """Minimal mock for SurfaceXYZTensorFourier."""
-
-    def __init__(self, dofs, mpol, ntor, nfp, stellsym, qphi, qtheta):
-        self._dofs = np.array(dofs, dtype=np.float64)
-        self.mpol = mpol
-        self.ntor = ntor
-        self.nfp = nfp
-        self.stellsym = stellsym
-        self.quadpoints_phi = qphi
-        self.quadpoints_theta = qtheta
-
-    def get_dofs(self):
-        return self._dofs.copy()
-
-    def set_dofs(self, d):
-        self._dofs = np.array(d, dtype=np.float64)
-
-    def get_stellsym_mask(self):
-        nphi = len(self.quadpoints_phi)
-        ntheta = len(self.quadpoints_theta)
-        return np.ones((nphi, ntheta), dtype=bool)
-
-
-class _MockVolumeLabel:
-    """Minimal mock for Volume label."""
-
-    def J(self):
-        return 0.0
-
-
-def _make_mock_coils(nquad=64):
-    """Create two mock coils at z=+/-0.3 for BoozerSurfaceJAX tests."""
-    phi = np.linspace(0, 2 * np.pi, nquad, endpoint=False)
-    R = 1.0
-    coils = []
-    for z_off, cur in [(0.3, 1e5), (-0.3, 1e5)]:
-        g = np.stack(
-            [R * np.cos(phi), R * np.sin(phi), z_off * np.ones(nquad)], axis=-1
-        )
-        gd = np.stack(
-            [
-                -R * np.sin(phi) * 2 * np.pi,
-                R * np.cos(phi) * 2 * np.pi,
-                np.zeros(nquad),
-            ],
-            axis=-1,
-        )
-        coils.append(_MockCoil(g, gd, cur))
-    return coils
-
-
-# ---------------------------------------------------------------------------
-# Factory function
-# ---------------------------------------------------------------------------
-
-
-def _make_mock_boozer_surface(
-    nphi=8,
-    ntheta=8,
-    mpol=1,
-    ntor=1,
-    nfp=1,
-    *,
-    stellsym=False,
-):
-    """Build a BoozerSurfaceJAX from mock objects (no simsoptpp needed)."""
-    R0, r = 1.0, 0.1
-    xc, yc, zc = _make_simple_torus_coeffs(R0, r, mpol, ntor, nfp)
-    qphi = np.linspace(0, 1.0 / nfp, nphi, endpoint=False)
-    qtheta = np.linspace(0, 1.0, ntheta, endpoint=False)
-    full_sdofs = np.concatenate([xc.ravel(), yc.ravel(), zc.ravel()])
-    if stellsym:
-        scatter = np.asarray(stellsym_scatter_indices(mpol, ntor), dtype=np.int32)
-        sdofs = full_sdofs[scatter]
-    else:
-        sdofs = full_sdofs
-
-    bs = _MockBiotSavart(_make_mock_coils())
-    surf = _MockSurface(sdofs, mpol, ntor, nfp, stellsym, qphi, qtheta)
-    label = _MockVolumeLabel()
-    target = 2.0 * np.pi**2 * R0 * r**2
-
-    return BoozerSurfaceJAX(bs, surf, label, target, constraint_weight=1.0)
 
 
 # ---------------------------------------------------------------------------
