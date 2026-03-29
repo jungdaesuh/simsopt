@@ -866,15 +866,21 @@ class CoilForcesTest(unittest.TestCase):
             self.assertTrue(len(dJ) > 0)
 
         # Per-coil vs combined: same J and dJ when all coils have same quadpoints.
-        # Use 40-quad coils so we can pass other targets + external in source_coils_coarse (no coarse/fine split).
-        curve_b1_40 = CurveXYZFourier(40, 1)
-        curve_b1_40.x = np.array([0, 0, 1, 0, 1, 0, 0, 0., 0.]) * 0.8
-        curve_b2_40 = CurveXYZFourier(40, 1)
-        curve_b2_40.x = np.array([0, 0, 1, 0, 1, 0, 0, 0., 0.]) * 1.5
-        coil_b1_40 = RegularizedCoil(curve_b1_40, Current(I), regularization_circ(0.05))
-        coil_b2_40 = RegularizedCoil(curve_b2_40, Current(I), regularization_circ(0.05))
-        target_same_quad = [coil_a1, coil_a2]  # both 40 quadpoints
-        source_external_40 = [coil_b1_40, coil_b2_40]  # both 40 quadpoints
+        # Use the toroidal equally-spaced family and scramble one orientation so the
+        # force and torque objectives have a real signal instead of cancelling to zero.
+        same_quad_current = 1.0e5
+        same_quad_curves = create_equally_spaced_curves(
+            4, 1, False, R0=1.0, R1=0.35, order=2, numquadpoints=40
+        )
+        # Perturb xs(2) on the first coil to break the symmetric cancellation.
+        same_quad_curves[0].set("xs(2)", same_quad_curves[0].get("xs(2)") + 0.10)
+        same_quad_coils = [
+            RegularizedCoil(curve, Current(same_quad_current), regularization_circ(0.05))
+            for curve in same_quad_curves
+        ]
+        coil_a1_40, coil_a2_40, coil_b1_40, coil_b2_40 = same_quad_coils
+        target_same_quad = [coil_a1_40, coil_a2_40]
+        source_external_40 = [coil_b1_40, coil_b2_40]
 
         for ForceClass, kwargs in [
             (LpCurveForce, {"p": p, "threshold": threshold}),
@@ -895,9 +901,7 @@ class CoilForcesTest(unittest.TestCase):
                 for c in target_same_quad
             )
             obj_cb = ForceClass(target_same_quad, source_external_40, **kwargs)
-            # Relax tolerance for dJ: per-coil vs combined can differ due to floating-point order of ops
-            # and VJP aggregation; use atol for small-magnitude components
-            np.testing.assert_allclose(dJ_cb, dJ_pc(obj_cb), rtol=1e-5, atol=2e-24,
+            np.testing.assert_allclose(dJ_cb, dJ_pc(obj_cb), rtol=1e-10, atol=1e-30,
                                        err_msg=f"{ForceClass.__name__}: sum(per-coil dJ) should equal combined dJ")
 
         # Coarse vs coarse+fine split: same J and dJ when all sources have same quadpoints
