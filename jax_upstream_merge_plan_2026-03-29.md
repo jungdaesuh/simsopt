@@ -30,9 +30,14 @@
   - `git checkout -b merge-upstream-2026-03-29 jax-port`
   - Why: preserve jax-port as-is until merge is validated
 
-- [ ] **Backup current test results**
-  - Run full test suite, save output as baseline
-  - Why: need before/after comparison to verify merge didn't break anything
+- [ ] **Record a minimal pre-merge baseline on current `jax-port`**
+  - Goal: capture a small, already-green reference set before changing the API surface. Do **not** add new parity tests on the old `vectorize` / Python penalty path before the merge.
+  - Run only the existing targeted slices that already pass:
+    - `conda run -n columbia-jax-0.9.2 python -m pytest /Users/suhjungdae/code/columbia/simsopt-jax/tests/integration/test_single_stage_jax.py -k "TestExactSolveCPUJAXParity" -v`
+    - `conda run -n columbia-jax-0.9.2 python -m pytest /Users/suhjungdae/code/columbia/simsopt-jax/tests/integration/test_stage2_jax.py -k "TestStage2BananaBoundary" -v`
+    - `conda run -n columbia-jax-0.9.2 python -m pytest /Users/suhjungdae/code/columbia/simsopt-jax/tests/test_benchmark_helpers.py -k "single_stage_init_parity or stage2_e2e_comparison" -v`
+  - Save the command lines and outputs as the before/after comparison anchor.
+  - Why: need a trusted pre-merge reference without spending time hardening soon-to-be-replaced pre-merge surfaces
 
 ---
 
@@ -202,11 +207,16 @@
   - `_get_residual_vector_and_jacobian()` — new internal method
   - These should be exercised by upstream's new tests which come in via the merge.
 
-- [ ] **Run full test suite**
-  - Public JAX tests (no simsoptpp): `conda run -n columbia-jax-0.9.2 python -m pytest /Users/suhjungdae/code/columbia/simsopt-jax/tests/ -m "not private_optimizer_runtime" -v`
-  - Private optimizer tests: `conda run -n columbia-jax-0.9.2 python -m pytest /Users/suhjungdae/code/columbia/simsopt-jax/tests/ -m "private_optimizer_runtime" -v`
-  - M2 integration: `/Users/suhjungdae/code/hbt-compare/envs/candidate-fixed/bin/python -m pytest /Users/suhjungdae/code/columbia/simsopt-jax/tests/integration/ -v`
-  - Benchmark regressions: `conda run -n columbia-jax-0.9.2 python -m pytest /Users/suhjungdae/code/columbia/simsopt-jax/tests/test_benchmark_helpers.py /Users/suhjungdae/code/columbia/simsopt-jax/tests/test_hf_production_gpu_proof.py -v`
+- [ ] **Run post-merge validation sweep**
+  - After conflict resolution and API cleanup, rerun the minimal pre-merge baseline first:
+    - `conda run -n columbia-jax-0.9.2 python -m pytest /Users/suhjungdae/code/columbia/simsopt-jax/tests/integration/test_single_stage_jax.py -k "TestExactSolveCPUJAXParity" -v`
+    - `conda run -n columbia-jax-0.9.2 python -m pytest /Users/suhjungdae/code/columbia/simsopt-jax/tests/integration/test_stage2_jax.py -k "TestStage2BananaBoundary" -v`
+    - `conda run -n columbia-jax-0.9.2 python -m pytest /Users/suhjungdae/code/columbia/simsopt-jax/tests/test_benchmark_helpers.py -k "single_stage_init_parity or stage2_e2e_comparison" -v`
+  - Then run the broader suites needed to validate the merged surface:
+    - Public JAX tests (no simsoptpp): `conda run -n columbia-jax-0.9.2 python -m pytest /Users/suhjungdae/code/columbia/simsopt-jax/tests/ -m "not private_optimizer_runtime" -v`
+    - Private optimizer tests: `conda run -n columbia-jax-0.9.2 python -m pytest /Users/suhjungdae/code/columbia/simsopt-jax/tests/ -m "private_optimizer_runtime" -v`
+    - M2 integration: `/Users/suhjungdae/code/hbt-compare/envs/candidate-fixed/bin/python -m pytest /Users/suhjungdae/code/columbia/simsopt-jax/tests/integration/ -v`
+    - Benchmark regressions: `conda run -n columbia-jax-0.9.2 python -m pytest /Users/suhjungdae/code/columbia/simsopt-jax/tests/test_benchmark_helpers.py /Users/suhjungdae/code/columbia/simsopt-jax/tests/test_hf_production_gpu_proof.py -v`
 
 - [ ] **Verify upstream's new tests pass**
   - `/Users/suhjungdae/code/columbia/simsopt-jax/tests/geo/test_boozersurface.py` — upstream added 5 new tests (manual ls, need_to_run_code, G=None exact, non-stellsym exact)
@@ -233,6 +243,6 @@
 | Import/config plumbing | 4 | 30 min | LOW — mechanical merge of import lists |
 | Tests | 3 | 30 min | LOW — both sides added non-overlapping tests |
 | Auto-merge verification | 6 | 30 min | LOW — spot-check only |
-| Post-merge validation | — | 1-2 hr | MED — full test suite + API compatibility |
+| Post-merge validation | — | 1-2 hr | MED — minimal baseline rerun, broader suites, and API compatibility |
 
 **Total estimated effort: 4-8 hours**

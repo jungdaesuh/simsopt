@@ -1,8 +1,24 @@
 # Single-Stage JAX GPU Parity Audit — Issue Checklist
 
 **Date**: 2026-03-29
-**Branch**: `jax-port` at `274fefbd`
+**Branch**: `jax-port` at `43c447de`
 **Scope**: All issues uncovered during code review and parity chain analysis
+
+---
+
+## Execution Order
+
+- [x] **Keep pre-merge validation minimal on current `jax-port`**
+  - Before merging upstream, use only the existing targeted slices that already pass as a baseline:
+    - `/Users/suhjungdae/code/columbia/simsopt-jax/tests/integration/test_single_stage_jax.py` `-k "TestExactSolveCPUJAXParity"`
+    - `/Users/suhjungdae/code/columbia/simsopt-jax/tests/integration/test_stage2_jax.py` `-k "TestStage2BananaBoundary"`
+    - `/Users/suhjungdae/code/columbia/simsopt-jax/tests/test_benchmark_helpers.py` `-k "single_stage_init_parity or stage2_e2e_comparison"`
+  - Reason: capture a before/after anchor without investing in pre-merge hardening on surfaces that upstream removes or reshapes.
+
+- [x] **Defer broader parity hardening until after the upstream merge**
+  - Sections 3 and 4 below are primarily a post-merge backlog.
+  - Do not add new tests on the old `vectorize` / non-vectorized Python penalty split before merging.
+  - Do not treat Columbia-only `cpp_notcpp` comparisons as pre-merge blocking work for the upstreamed surface; use them as reference context only.
 
 ---
 
