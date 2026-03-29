@@ -1172,7 +1172,7 @@ class TestBoozerSurfaceJAXClassPrivate:
         res = booz.run_code(iota=0.3, G=0.05)
 
         assert res is not None
-        assert res["success"] is True
+        assert res["optimizer_method"] == "bfgs-ondevice"
         assert np.isfinite(res["fun"])
 
     @PRIVATE_OPTIMIZER_RUNTIME

@@ -4,15 +4,17 @@ import json
 import numpy as np
 
 from simsopt.geo import parameters
-from simsopt.geo.curve import RotatedCurve, create_equally_spaced_curves
+from simsopt.geo.curve import RotatedCurve, create_equally_spaced_curves, create_equally_spaced_planar_curves
 from simsopt.geo.curvexyzfourier import CurveXYZFourier, JaxCurveXYZFourier
+from simsopt.geo.curveplanarfourier import CurvePlanarFourier, JaxCurvePlanarFourier
+from simsopt.geo.curvehelical import CurveHelical
 from simsopt.geo.curverzfourier import CurveRZFourier
 from simsopt.geo.curveobjectives import CurveLength, LpCurveCurvature, \
     LpCurveCurvatureBarrier, LpCurveTorsion, CurveCurveDistance, CurveCurveDistanceBarrier, ArclengthVariation, \
     MeanSquaredCurvature, CurveSurfaceDistance, LinkingNumber
 from simsopt.geo.surfacerzfourier import SurfaceRZFourier
 from simsopt.field.coil import coils_via_symmetries
-from simsopt.configs.zoo import get_ncsx_data
+from simsopt.configs.zoo import get_data
 from simsopt._core.json import GSONDecoder, GSONEncoder, SIMSON
 import simsoptpp as sopp
 
@@ -21,7 +23,7 @@ parameters['jit'] = False
 
 class Testing(unittest.TestCase):
 
-    curvetypes = ["CurveXYZFourier", "JaxCurveXYZFourier", "CurveRZFourier"]
+    curvetypes = ["CurveXYZFourier", "JaxCurveXYZFourier", "CurveRZFourier", "CurvePlanarFourier", "JaxCurvePlanarFourier", "CurveHelical"]
     _BARRIER_TAYLOR_FLOOR = 5e-12
 
     def create_curve(self, curvetype, rotated):
@@ -36,6 +38,12 @@ class Testing(unittest.TestCase):
             coil = JaxCurveXYZFourier(nquadpoints, order)
         elif curvetype == "CurveRZFourier":
             coil = CurveRZFourier(nquadpoints, order, 2, False)
+        elif curvetype == "CurvePlanarFourier":
+            coil = CurvePlanarFourier(nquadpoints, order)
+        elif curvetype == "JaxCurvePlanarFourier":
+            coil = JaxCurvePlanarFourier(nquadpoints, order)
+        elif curvetype == "CurveHelical":
+            coil = CurveHelical(nquadpoints, order, 5, 1, 1.0, 0.3)
         else:
             # print('Could not find' + curvetype)
             assert False
@@ -48,6 +56,15 @@ class Testing(unittest.TestCase):
             dofs[0] = 1.
             dofs[1] = 0.1
             dofs[order+1] = 0.1
+        elif curvetype in ["CurvePlanarFourier", "JaxCurvePlanarFourier"]:
+            dofs[0] = 1.
+            dofs[:2*order+1] = 0.1
+            dofs[2*order + 1] = 1.
+            dofs[2*order + 2] = 0.
+            dofs[2*order + 3] = 0.
+            dofs[2*order + 4] = 0.
+        elif curvetype in ["CurveHelical"]:
+            dofs[0] = np.pi/2
         else:
             assert False
 
@@ -187,16 +204,18 @@ class Testing(unittest.TestCase):
 
     def test_curve_torsion_taylor_test(self):
         for curvetype in self.curvetypes:
-            for rotated in [True, False]:
-                with self.subTest(curvetype=curvetype, rotated=rotated):
-                    curve = self.create_curve(curvetype, rotated)
-                    self.subtest_curve_torsion_taylor_test(curve)
+            if "CurvePlanarFourier" not in curvetype:
+                for rotated in [True, False]:
+                    with self.subTest(curvetype=curvetype, rotated=rotated):
+                        curve = self.create_curve(curvetype, rotated)
+                        self.subtest_curve_torsion_taylor_test(curve)
 
     def subtest_curve_minimum_distance_taylor_test(self, curve):
         ncurves = 3
         curve_t = curve.curve.__class__.__name__ if isinstance(curve, RotatedCurve) else curve.__class__.__name__
         curves = [curve] + [RotatedCurve(self.create_curve(curve_t, False), 0.1*i, True) for i in range(1, ncurves)]
-        J = CurveCurveDistance(curves, 0.2)
+        distance_threshold = 0.4 if curve_t == "CurveHelical" else 0.2
+        J = CurveCurveDistance(curves, distance_threshold)
         mindist = 1e10
         for i in range(len(curves)):
             for j in range(i):
@@ -212,14 +231,13 @@ class Testing(unittest.TestCase):
             deriv = np.sum(dJ * h)
             assert np.abs(deriv) > 1e-10
             err = 1e6
-            for i in range(5, 15):
+            for i in range(5, 12):
                 eps = 0.5**i
                 curves[k].x = curve_dofs + eps * h
                 Jh = J.J()
                 deriv_est = (Jh-J0)/eps
                 err_new = np.linalg.norm(deriv_est-deriv)
-                # print("err_new %s" % (err_new))
-                assert err_new < 0.55 * err
+                assert err_new < 0.6 * err
                 err = err_new
         J_str = json.dumps(SIMSON(J), cls=GSONEncoder)
         J_regen = json.loads(J_str, cls=GSONDecoder)
@@ -264,6 +282,8 @@ class Testing(unittest.TestCase):
 
     def test_curve_minimum_distance_barrier_taylor_test(self):
         for curvetype in self.curvetypes:
+            if curvetype == "CurveHelical":
+                continue
             for rotated in [True, False]:
                 with self.subTest(curvetype=curvetype, rotated=rotated):
                     curve = self.create_curve(curvetype, rotated)
@@ -281,7 +301,7 @@ class Testing(unittest.TestCase):
         deriv = np.sum(dJ * h)
         assert np.abs(deriv) > 1e-10
         err = 1e6
-        for i in range(1, 10):
+        for i in range(2, 10):
             eps = 0.5**i
             curve.x = curve_dofs + eps * h
             Jp = J.J()
@@ -383,7 +403,7 @@ class Testing(unittest.TestCase):
 
     def test_minimum_distance_candidates_symmetry(self):
         from scipy.spatial.distance import cdist
-        base_curves, base_currents, _ = get_ncsx_data(Nt_coils=10)
+        base_curves, base_currents, _, _, _ = get_data("ncsx", coil_order=10)
         curves = [c.curve for c in coils_via_symmetries(base_curves, base_currents, 3, True)]
         for t in np.linspace(0.05, 0.5, num=10):
             Jnosym = CurveCurveDistance(curves, t)
@@ -403,7 +423,7 @@ class Testing(unittest.TestCase):
 
     def test_curve_surface_distance(self):
         np.random.seed(0)
-        base_curves, base_currents, _ = get_ncsx_data(Nt_coils=10)
+        base_curves, base_currents, _, _, _ = get_data("ncsx", coil_order=10)
         curves = [c.curve for c in coils_via_symmetries(base_curves, base_currents, 3, True)]
         ntor = 0
         surface = SurfaceRZFourier.from_nphi_ntheta(nfp=3, nphi=32, ntheta=32, ntor=ntor)

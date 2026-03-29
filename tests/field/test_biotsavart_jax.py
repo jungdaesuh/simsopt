@@ -207,11 +207,11 @@ class TestBiotSavartJaxCppParity:
         pytest.importorskip("simsopt")
 
     def test_B_parity_ncsx(self):
-        from simsopt.configs import get_ncsx_data
+        from simsopt.configs import get_data
         from simsopt.field import coils_via_symmetries, BiotSavart
 
-        curves, currents_objs, ma = get_ncsx_data()
-        coils = coils_via_symmetries(curves, currents_objs, 3, stellsym=True)
+        curves, currents_objs, _, nfp, _ = get_data("ncsx")
+        coils = coils_via_symmetries(curves, currents_objs, nfp, stellsym=True)
         bs = BiotSavart(coils)
 
         npoints = 50

@@ -1,7 +1,6 @@
 import sys
-
-from .LHD_like import *
 from .zoo import *
+from .LHD_like import *
 
 
 def _module_all(name):

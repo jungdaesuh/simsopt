@@ -606,7 +606,6 @@ class BoozerSurface(Optimizable):
         constraint_weight=1.0,
         iota=0.0,
         G=None,
-        vectorize=True,
         limited_memory=True,
         weight_inv_modB=True,
         verbose=False,
@@ -627,7 +626,6 @@ class BoozerSurface(Optimizable):
             constraint_weight (float, Optional): The weight of the label constraint used when solving Boozer least squares.
             iota (float, Optional): The initial guess for the value of the rotational transform on the surface. Defaults to 0.
             G (float, Optional): The initial guess for the value of G on the surface. Defaults to None.
-            vectorize (bool, Optional): If True, use the vectorized version of the residual function. Defaults to True.
             limited_memory (bool, Optional): If True, use the limited memory version of L-BFGS. Defaults to True.
             weight_inv_modB (bool, Optional): If True, weight the residual by modB so that it does not scale with coil currents. Defaults to True.
             verbose (bool, Optional): If True, print the optimization progress. Defaults to False.
@@ -658,14 +656,8 @@ class BoozerSurface(Optimizable):
         else:
             x = np.concatenate((s.get_dofs(), [iota, G]))
 
-        fun_name = (
-            self.boozer_penalty_constraints_vectorized
-            if vectorize
-            else self.boozer_penalty_constraints
-        )
-
         def fun(x):
-            return fun_name(
+            return self.boozer_penalty_constraints_vectorized(
                 x,
                 derivatives=1,
                 constraint_weight=constraint_weight,
@@ -721,7 +713,6 @@ class BoozerSurface(Optimizable):
         iota=0.0,
         G=None,
         stab=0.0,
-        vectorize=True,
         weight_inv_modB=True,
         verbose=False,
     ):
@@ -736,7 +727,6 @@ class BoozerSurface(Optimizable):
             iota (float, Optional): The initial guess for the value of the rotational transform on the surface. Defaults to 0.
             G (float, Optional): The initial guess for the value of G on the surface. Defaults to None.
             stab (float, Optional): The stabilization parameter for the Newton method. Defaults to 0.
-            vectorize (bool, Optional): If True, use the vectorized version of the residual function. Defaults to True.
             weight_inv_modB (bool, Optional): If True, weight the residual by modB so that it does not scale with coil currents. Defaults to True.
             verbose (bool, Optional): If True, print the optimization progress. Defaults to False.
 
@@ -765,12 +755,7 @@ class BoozerSurface(Optimizable):
             x = np.concatenate((s.get_dofs(), [iota, G]))
         i = 0
 
-        fun_name = (
-            self.boozer_penalty_constraints_vectorized
-            if vectorize
-            else self.boozer_penalty_constraints
-        )
-        val, dval, d2val = fun_name(
+        val, dval, d2val = self.boozer_penalty_constraints_vectorized(
             x,
             derivatives=2,
             constraint_weight=constraint_weight,
@@ -785,7 +770,7 @@ class BoozerSurface(Optimizable):
             if norm < 1e-9:
                 dx += np.linalg.solve(d2val, dval - d2val @ dx)
             x = x - dx
-            val, dval, d2val = fun_name(
+            val, dval, d2val = self.boozer_penalty_constraints_vectorized(
                 x,
                 derivatives=2,
                 constraint_weight=constraint_weight,
@@ -848,6 +833,7 @@ class BoozerSurface(Optimizable):
         iota=0.0,
         G=None,
         method="lm",
+        weight_inv_modB=True,
     ):
         """
         This function does the same as :mod:`minimize_boozer_penalty_constraints_LBFGS`, but instead of LBFGS it
@@ -862,6 +848,7 @@ class BoozerSurface(Optimizable):
             iota (float, Optional): The initial guess for the value of the rotational transform on the surface. Defaults to 0.
             G (float, Optional): The initial guess for the value of G on the surface. Defaults to None.
             method (str, Optional): The method to use for the optimization. Defaults to 'lm'.
+            weight_inv_modB (bool, Optional): If True, weight the residual by modB so that it does not scale with coil currents. Defaults to True.
 
         Returns:
             res (dict): A dictionary containing the results of the optimization. The dictionary contains the following keys in addition
@@ -888,24 +875,16 @@ class BoozerSurface(Optimizable):
         if method == "manual":
             i = 0
             lam = 1.0
-            r, J = self.boozer_penalty_constraints(
-                x,
-                derivatives=1,
-                constraint_weight=constraint_weight,
-                scalarize=False,
-                optimize_G=G is not None,
+            r, J = self._get_residual_vector_and_jacobian(
+                x, constraint_weight, G is not None, weight_inv_modB
             )
             b = J.T @ r
             JTJ = J.T @ J
             while i < maxiter and norm > tol:
                 dx = np.linalg.solve(JTJ + lam * np.diag(np.diag(JTJ)), b)
                 x -= dx
-                r, J = self.boozer_penalty_constraints(
-                    x,
-                    derivatives=1,
-                    constraint_weight=constraint_weight,
-                    scalarize=False,
-                    optimize_G=G is not None,
+                r, J = self._get_residual_vector_and_jacobian(
+                    x, constraint_weight, G is not None, weight_inv_modB
                 )
                 b = J.T @ r
                 JTJ = J.T @ J
@@ -931,21 +910,13 @@ class BoozerSurface(Optimizable):
             return resdict
 
         def fun(x):
-            return self.boozer_penalty_constraints(
-                x,
-                derivatives=0,
-                constraint_weight=constraint_weight,
-                scalarize=False,
-                optimize_G=G is not None,
-            )
+            return self._get_residual_vector_and_jacobian(
+                x, constraint_weight, G is not None, weight_inv_modB
+            )[0]
 
         def jac(x):
-            return self.boozer_penalty_constraints(
-                x,
-                derivatives=1,
-                constraint_weight=constraint_weight,
-                scalarize=False,
-                optimize_G=G is not None,
+            return self._get_residual_vector_and_jacobian(
+                x, constraint_weight, G is not None, weight_inv_modB
             )[1]
 
         res = least_squares(
@@ -981,6 +952,18 @@ class BoozerSurface(Optimizable):
         self.res = resdict
         self.need_to_run_code = False
         return resdict
+
+    def _get_residual_vector_and_jacobian(
+        self, x, constraint_weight, optimize_G, weight_inv_modB
+    ):
+        return self.boozer_penalty_constraints(
+            x,
+            derivatives=1,
+            constraint_weight=constraint_weight,
+            scalarize=False,
+            optimize_G=optimize_G,
+            weight_inv_modB=weight_inv_modB,
+        )
 
     def minimize_boozer_exact_constraints_newton(
         self, tol=1e-12, maxiter=10, iota=0.0, G=None, lm=[0.0, 0.0]

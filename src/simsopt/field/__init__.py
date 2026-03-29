@@ -29,6 +29,7 @@ if _has_simsoptpp:
     from .wireframefield import *
     from .selffield import *
     from .magnetic_axis_helpers import *
+    from .force import *
 
     _cpu_field_all = (
         _module_all("biotsavart")
@@ -44,6 +45,7 @@ if _has_simsoptpp:
         + _module_all("wireframefield")
         + _module_all("selffield")
         + _module_all("magnetic_axis_helpers")
+        + _module_all("force")
     )
 
 # JAX modules (optional — requires jax)

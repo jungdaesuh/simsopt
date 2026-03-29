@@ -2,9 +2,9 @@ import numpy as np
 import jax
 import jax.numpy as jnp
 import simsoptpp as sopp
-from .curve import Curve, _install_curve_jax_contract
+from .curve import Curve, JaxCurve, _install_curve_jax_contract
 
-__all__ = ['CurvePlanarFourier']
+__all__ = ['CurvePlanarFourier', 'JaxCurvePlanarFourier']
 
 
 def _normalized_quaternion(quaternion):
@@ -68,6 +68,10 @@ def curveplanarfourier_pure(dofs, quadpoints, order):
     )
     rotation = _quaternion_rotation_matrix(quaternion)
     return base_curve @ rotation.T + center[None, :]
+
+
+def jaxplanarcurve_pure(dofs, quadpoints, order):
+    return curveplanarfourier_pure(dofs, quadpoints, order)
 
 
 class CurvePlanarFourier(sopp.CurvePlanarFourier, Curve):
@@ -162,6 +166,56 @@ class CurvePlanarFourier(sopp.CurvePlanarFourier, Curve):
         x_cos_names = [f'rc({i})' for i in range(1, order + 1)]
         x_sin_names = [f'rs({i})' for i in range(1, order + 1)]
 
+        x_names += x_cos_names + x_sin_names
+        y_names = ['q0', 'qi', 'qj', 'qk']
+        z_names = ['X', 'Y', 'Z']
+        return x_names + y_names + z_names
+
+
+class JaxCurvePlanarFourier(JaxCurve):
+    r"""
+    A Python+Jax implementation of the CurvePlanarFourier class.
+    """
+
+    def __init__(self, quadpoints, order, dofs=None):
+        if isinstance(quadpoints, int):
+            quadpoints = np.linspace(0, 1, quadpoints, endpoint=False)
+
+        def pure(local_dofs, points):
+            return jaxplanarcurve_pure(local_dofs, points, order)
+
+        self.order = order
+        self.dof_list = np.zeros(2 * order + 1 + 4 + 3)
+        if dofs is None:
+            super().__init__(
+                quadpoints,
+                pure,
+                x0=self.dof_list,
+                names=self._make_names(order),
+                external_dof_setter=JaxCurvePlanarFourier.set_dofs_impl,
+            )
+        else:
+            super().__init__(
+                quadpoints,
+                pure,
+                dofs=dofs,
+                names=self._make_names(order),
+                external_dof_setter=JaxCurvePlanarFourier.set_dofs_impl,
+            )
+
+    def num_dofs(self):
+        return 2 * self.order + 1 + 4 + 3
+
+    def get_dofs(self):
+        return np.array(self.dof_list)
+
+    def set_dofs_impl(self, dofs):
+        self.dof_list = np.array(dofs)
+
+    def _make_names(self, order):
+        x_names = ['rc(0)']
+        x_cos_names = [f'rc({i})' for i in range(1, order + 1)]
+        x_sin_names = [f'rs({i})' for i in range(1, order + 1)]
         x_names += x_cos_names + x_sin_names
         y_names = ['q0', 'qi', 'qj', 'qk']
         z_names = ['X', 'Y', 'Z']

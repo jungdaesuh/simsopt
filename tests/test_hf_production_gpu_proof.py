@@ -319,6 +319,18 @@ def _build_remote_validation_repo(tmp_path: Path) -> tuple[str, str, str]:
     return str(remote_repo), main_sha, feature_sha
 
 
+def _default_remote_launcher_args(tmp_path: Path) -> list[str]:
+    repo_url, main_sha, _ = _build_remote_validation_repo(tmp_path)
+    return [
+        "--repo-url",
+        repo_url,
+        "--repo-ref",
+        "main",
+        "--repo-sha",
+        main_sha,
+    ]
+
+
 def test_launch_production_gpu_proof_help_works_without_site_packages():
     completed = subprocess.run(
         [
@@ -384,6 +396,7 @@ def test_resolve_default_repo_url_rejects_ambiguous_nonstandard_remotes(monkeypa
 
 def test_launch_production_gpu_proof_dry_run_omits_smoke_geometry_override(tmp_path):
     env = _launcher_env(tmp_path)
+    remote_args = _default_remote_launcher_args(tmp_path)
     completed = subprocess.run(
         [
             sys.executable,
@@ -391,6 +404,7 @@ def test_launch_production_gpu_proof_dry_run_omits_smoke_geometry_override(tmp_p
             "--dry-run",
             "--hardware",
             "a100-large",
+            *remote_args,
         ],
         check=False,
         capture_output=True,
@@ -408,6 +422,7 @@ def test_launch_production_gpu_proof_dry_run_omits_smoke_geometry_override(tmp_p
 
 def test_launch_production_gpu_proof_reports_default_long_run_geometry_gate(tmp_path):
     env = _launcher_env(tmp_path)
+    remote_args = _default_remote_launcher_args(tmp_path)
     completed = subprocess.run(
         [
             sys.executable,
@@ -417,6 +432,7 @@ def test_launch_production_gpu_proof_reports_default_long_run_geometry_gate(tmp_
             "a100-large",
             "--stage2-maxiter",
             "60",
+            *remote_args,
         ],
         check=False,
         capture_output=True,
@@ -434,6 +450,7 @@ def test_launch_production_gpu_proof_reports_default_long_run_geometry_gate(tmp_
 
 def test_launch_production_gpu_proof_rejects_smoke_geometry_override(tmp_path):
     env = _launcher_env(tmp_path)
+    remote_args = _default_remote_launcher_args(tmp_path)
     completed = subprocess.run(
         [
             sys.executable,
@@ -443,6 +460,7 @@ def test_launch_production_gpu_proof_rejects_smoke_geometry_override(tmp_path):
             "20",
             "--geometry-rel-tol",
             "1e-6",
+            *remote_args,
         ],
         check=False,
         capture_output=True,
@@ -516,6 +534,7 @@ def test_launch_production_gpu_proof_accepts_matching_remote_repo_ref_and_sha(tm
 
 def test_launch_production_gpu_proof_allows_explicit_long_run_geometry_rung(tmp_path):
     env = _launcher_env(tmp_path)
+    remote_args = _default_remote_launcher_args(tmp_path)
     completed = subprocess.run(
         [
             sys.executable,
@@ -527,6 +546,7 @@ def test_launch_production_gpu_proof_allows_explicit_long_run_geometry_rung(tmp_
             "60",
             "--geometry-rel-tol",
             "1e-6",
+            *remote_args,
         ],
         check=False,
         capture_output=True,

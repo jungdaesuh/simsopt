@@ -14,7 +14,22 @@ from .jit import jit
 from .._core.derivative import derivative_dec
 from .plotting import fix_matplotlib_3d
 
-__all__ = ['Curve', 'JaxCurve', 'RotatedCurve', 'curves_to_vtk', 'create_equally_spaced_curves', 'create_equally_spaced_oriented_curves', 'CurveCWSFourier', 'create_equally_spaced_planar_curves']
+__all__ = ['Curve', 'JaxCurve', 'RotatedCurve', 'curves_to_vtk', 'create_equally_spaced_curves', 'create_equally_spaced_oriented_curves', 'CurveCWSFourier', 'create_equally_spaced_planar_curves', 'create_planar_curves_between_two_toroidal_surfaces']
+
+
+@jit
+def centroid_pure(gamma, gammadash):
+    r"""
+    This pure function is used in a Python+Jax implementation of formula for centroid.
+
+    .. math::
+        \mathbf{c} = \frac{1}{L} \int_0^L \mathbf{\gamma}(l) dl
+
+    where :math:`\gamma` is the position vector on the curve.
+    """
+    arclength = jnp.linalg.norm(gammadash, axis=-1)
+    centroid = jnp.sum(gamma * arclength[:, None], axis=0) / jnp.sum(arclength)
+    return centroid
 
 @jit
 def incremental_arclength_pure(d1gamma):
@@ -55,6 +70,28 @@ def torsion_pure(d1gamma, d2gamma, d3gamma):
 torsionvjp0 = jit(lambda d1gamma, d2gamma, d3gamma, v: vjp(lambda d1g: torsion_pure(d1g, d2gamma, d3gamma), d1gamma)[1](v)[0])
 torsionvjp1 = jit(lambda d1gamma, d2gamma, d3gamma, v: vjp(lambda d2g: torsion_pure(d1gamma, d2g, d3gamma), d2gamma)[1](v)[0])
 torsionvjp2 = jit(lambda d1gamma, d2gamma, d3gamma, v: vjp(lambda d3g: torsion_pure(d1gamma, d2gamma, d3g), d3gamma)[1](v)[0])
+
+
+@jit
+def frenet_frame_pure(gammadash, gammadashdash, incremental_arclength):
+    r"""
+    This function returns the Frenet frame, :math:`(\mathbf{t}, \mathbf{n}, \mathbf{b})`,
+    associated to the curve.
+    """
+    def norm(a):
+        return jnp.linalg.norm(a, axis=1)
+
+    def inner(a, b):
+        return jnp.sum(a * b, axis=1)
+
+    tangent = (1.0 / incremental_arclength[:, None]) * gammadash
+    tdash = (1.0 / incremental_arclength[:, None]) ** 2 * (
+        incremental_arclength[:, None] * gammadashdash
+        - (inner(gammadash, gammadashdash) / incremental_arclength)[:, None] * gammadash
+    )
+    normal = (1.0 / norm(tdash))[:, None] * tdash
+    binormal = jnp.cross(tangent, normal, axis=1)
+    return tangent, normal, binormal
 
 
 def _quadpoint_jvp(geometry_fn):
@@ -376,22 +413,9 @@ class Curve(Optimizable):
         This function returns the Frenet frame, :math:`(\mathbf{t}, \mathbf{n}, \mathbf{b})`,
         associated to the curve.
         """
-
-        gammadash = self.gammadash()
-        gammadashdash = self.gammadashdash()
-        l = self.incremental_arclength()
-        def norm(a): return np.linalg.norm(a, axis=1)
-        def inner(a, b): return np.sum(a*b, axis=1)
-        N = len(self.quadpoints)
-        t, n, b = (np.zeros((N, 3)), np.zeros((N, 3)), np.zeros((N, 3)))
-        t[:, :] = (1./l[:, None]) * gammadash
-
-        tdash = (1./l[:, None])**2 * (l[:, None] * gammadashdash
-                                      - (inner(gammadash, gammadashdash)/l)[:, None] * gammadash
-                                      )
-        n[:, :] = (1./norm(tdash))[:, None] * tdash
-        b[:, :] = np.cross(t, n, axis=1)
-        return t, n, b
+        return frenet_frame_pure(
+            self.gammadash(), self.gammadashdash(), self.incremental_arclength()
+        )
 
     def kappadash(self):
         r"""
@@ -509,6 +533,12 @@ class Curve(Optimizable):
                     - 5 * d1_dot_d2 * norm_d1_x_d2 * d1_dot_d1coeff/normdgamma**7
             )
         return dkappadash_by_dcoeff
+
+    def centroid(self):
+        r"""
+        Compute the centroid of the curve.
+        """
+        return centroid_pure(self.gamma(), self.gammadash())
 
 
 class JaxCurve(sopp.Curve, Curve):
@@ -957,7 +987,115 @@ def curves_to_vtk(curves, filename, close=False, extra_data=None):
     polyLinesToVTK(str(filename), x, y, z, pointsPerLine=ppl, pointData=pointData)
 
 
-def create_equally_spaced_curves(ncurves, nfp, stellsym, R0=1.0, R1=0.5, order=6, numquadpoints=None):
+def _setup_uniform_grid_in_bounding_box(s_outer, Nx, Ny, Nz, Nmin_factor=2.01):
+    """
+    Generate a uniform 3D grid of candidate planar coil centers.
+    """
+    import warnings
+
+    if Nmin_factor <= 2.0:
+        warnings.warn('Nmin_factor should be greater than 2.0 to avoid coil overlap.')
+
+    nfp = s_outer.nfp
+    xyz_outer = s_outer.gamma().reshape(-1, 3)
+    x_outer = xyz_outer[:, 0]
+    y_outer = xyz_outer[:, 1]
+    z_outer = xyz_outer[:, 2]
+    x_max = np.max(x_outer)
+    x_min = np.min(x_outer)
+    y_max = np.max(y_outer)
+    y_min = 0
+    z_max = np.max(z_outer)
+    z_min = np.min(z_outer)
+    z_max = min(z_max, abs(z_min))
+
+    if nfp != 1:
+        x_min = 0.0
+
+    dx = (x_max - x_min) / (Nx - 1)
+    dy = y_max / (Ny - 1)
+    X = np.linspace(dx / 2.0 + x_min, x_max - dx / 2.0, Nx, endpoint=True)
+    Y = np.linspace(dy / 2.0 + y_min, y_max - dy / 2.0, Ny, endpoint=True)
+    Z = np.linspace(-z_max, z_max, Nz, endpoint=True)
+
+    dx = X[1] - X[0]
+    dy = Y[1] - Y[0]
+    dz = Z[1] - Z[0]
+    R = min(dx, min(dy, dz)) / Nmin_factor
+
+    X, Y, Z = np.meshgrid(X, Y, Z, indexing='ij')
+    xyz_uniform = np.transpose(np.array([X, Y, Z]), [1, 2, 3, 0]).reshape(Nx * Ny * Nz, 3)
+
+    phi0 = np.pi / nfp if s_outer.stellsym else 2 * np.pi / nfp
+    nt = 100
+    t = np.linspace(0, 2 * np.pi, nt)
+    circle_xy = np.zeros((nt, Nx * Ny * Nz, 2))
+    circle_xy[:, :, 0] = R * np.outer(np.cos(t), np.ones(Nx * Ny * Nz)) + np.outer(np.ones(nt), xyz_uniform[:, 0])
+    circle_xy[:, :, 1] = R * np.outer(np.sin(t), np.ones(Nx * Ny * Nz)) + np.outer(np.ones(nt), xyz_uniform[:, 1])
+
+    phi = np.arctan2(circle_xy[:, :, 1], circle_xy[:, :, 0])
+    remove_inds = np.logical_or(phi >= phi0, phi <= 0)
+    xyz_uniform = xyz_uniform[~np.any(remove_inds, axis=0), :]
+    return xyz_uniform, R
+
+
+def create_planar_curves_between_two_toroidal_surfaces(
+    s, s_inner, s_outer, Nx=10, Ny=10, Nz=10, order=1,
+    use_jax_curve=False, numquadpoints=None, Nmin_factor=2.01,
+):
+    """
+    Create planar curves initialized on a filtered Cartesian grid between two toroidal surfaces.
+    """
+    from simsopt.geo import CurvePlanarFourier, JaxCurvePlanarFourier
+    from simsopt.field import apply_symmetries_to_curves
+
+    nfp = s.nfp
+    stellsym = s.stellsym
+    normal_inner = s_inner.unitnormal().reshape(-1, 3)
+    xyz_inner = s_inner.gamma().reshape(-1, 3)
+    normal_outer = s_outer.unitnormal().reshape(-1, 3)
+    xyz_outer = s_outer.gamma().reshape(-1, 3)
+
+    xyz_uniform, R = _setup_uniform_grid_in_bounding_box(
+        s_outer, Nx, Ny, Nz, Nmin_factor=Nmin_factor
+    )
+    contig = np.ascontiguousarray
+    grid_xyz = sopp.define_a_uniform_cartesian_grid_between_two_toroidal_surfaces(
+        contig(normal_inner),
+        contig(normal_outer),
+        contig(xyz_uniform),
+        contig(xyz_inner),
+        contig(xyz_outer),
+    )
+    inds = np.ravel(np.logical_not(np.all(grid_xyz == 0.0, axis=-1)))
+    grid_xyz = np.array(grid_xyz[inds, :], dtype=float)
+    ncoils = grid_xyz.shape[0]
+    nquad = (order + 1) * 40 if numquadpoints is None else numquadpoints
+
+    curve_cls = JaxCurvePlanarFourier if use_jax_curve else CurvePlanarFourier
+    curves = [curve_cls(nquad, order) for _ in range(ncoils)]
+    for ic in range(ncoils):
+        alpha2 = (np.random.rand(1) * np.pi - np.pi / 2.0)[0]
+        delta2 = (np.random.rand(1) * np.pi)[0]
+        calpha2 = np.cos(alpha2)
+        salpha2 = np.sin(alpha2)
+        cdelta2 = np.cos(delta2)
+        sdelta2 = np.sin(delta2)
+        dofs = np.zeros(2 * order + 8)
+        dofs[0] = R
+        dofs[2 * order + 1] = calpha2 * cdelta2
+        dofs[2 * order + 2] = salpha2 * cdelta2
+        dofs[2 * order + 3] = calpha2 * sdelta2
+        dofs[2 * order + 4] = -salpha2 * sdelta2
+        dofs[2 * order + 5:2 * order + 8] = grid_xyz[ic, :]
+        curves[ic].set_dofs(dofs)
+        curves[ic].x = curves[ic].x
+
+    all_curves = apply_symmetries_to_curves(curves, nfp, stellsym)
+    return curves, all_curves
+
+
+def create_equally_spaced_curves(ncurves, nfp, stellsym, R0=1.0, R1=0.5, order=6, numquadpoints=None, use_jax_curve=False):
     """
     Create ``ncurves`` curves of type
     :obj:`~simsopt.geo.curvexyzfourier.CurveXYZFourier` of order
@@ -977,9 +1115,10 @@ def create_equally_spaced_curves(ncurves, nfp, stellsym, R0=1.0, R1=0.5, order=6
     if numquadpoints is None:
         numquadpoints = 15 * order
     curves = []
-    from simsopt.geo.curvexyzfourier import CurveXYZFourier
+    from simsopt.geo.curvexyzfourier import CurveXYZFourier, JaxCurveXYZFourier
+    curvefunc = JaxCurveXYZFourier if use_jax_curve else CurveXYZFourier
     for i in range(ncurves):
-        curve = CurveXYZFourier(numquadpoints, order)
+        curve = curvefunc(numquadpoints, order)
         angle = (i+0.5)*(2*np.pi)/((1+int(stellsym))*nfp*ncurves)
         curve.set("xc(0)", cos(angle)*R0)
         curve.set("xc(1)", cos(angle)*R1)
@@ -1015,7 +1154,7 @@ def create_equally_spaced_oriented_curves( ncurves, nfp, R0, R1, Z0, order, numq
 
     return curves
 
-def create_equally_spaced_planar_curves(ncurves, nfp, stellsym, R0=1.0, R1=0.5, order=6, numquadpoints=None):
+def create_equally_spaced_planar_curves(ncurves, nfp, stellsym, R0=1.0, R1=0.5, order=6, numquadpoints=None, use_jax_curve=False):
     """
     Create ``ncurves`` curves of type
     :obj:`~simsopt.geo.curveplanarfourier.CurvePlanarFourier` of order
@@ -1027,10 +1166,11 @@ def create_equally_spaced_planar_curves(ncurves, nfp, stellsym, R0=1.0, R1=0.5, 
     if numquadpoints is None:
         numquadpoints = 15 * order
     curves = []
-    from simsopt.geo.curveplanarfourier import CurvePlanarFourier
+    from simsopt.geo.curveplanarfourier import CurvePlanarFourier, JaxCurvePlanarFourier
+    curvefunc = JaxCurvePlanarFourier if use_jax_curve else CurvePlanarFourier
     for k in range(ncurves):
         angle = (k+0.5)*(2*np.pi) / ((1+int(stellsym))*nfp*ncurves)
-        curve = CurvePlanarFourier(numquadpoints, order)
+        curve = curvefunc(numquadpoints, order)
 
         rcCoeffs = np.zeros(order+1)
         rcCoeffs[0] = R1
