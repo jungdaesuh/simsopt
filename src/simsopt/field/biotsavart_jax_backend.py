@@ -841,7 +841,7 @@ class BiotSavartJAX(Optimizable):
             )
             gammas.append(gamma)
             gammadashs.append(gammadash)
-            currents.append(float(current_value))
+            currents.append(current_value)
         return group_coil_data(gammas, gammadashs, currents)
 
     # ------------------------------------------------------------------

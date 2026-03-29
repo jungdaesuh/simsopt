@@ -75,6 +75,7 @@ from benchmarks.validation_ladder_common import (
     max_pointwise_geometry_drift,
     optimizer_drift_tolerances,
     repo_pythonpath_env,
+    require_requested_platform_runtime,
     require_x64_runtime,
     resolve_probe_lane,
     run_python_script,
@@ -404,6 +405,43 @@ def test_build_provenance_includes_compilation_cache_metadata(monkeypatch):
     assert provenance["compile_behavior"] == "cold+warm"
     assert provenance["compilation_cache_enabled"] is True
     assert provenance["compilation_cache_dir"] == "/tmp/probe-cache"
+
+
+def _fake_jax_runtime(*, backend: str, devices: list[str]) -> types.SimpleNamespace:
+    return types.SimpleNamespace(
+        default_backend=lambda: backend,
+        devices=lambda: devices,
+    )
+
+
+def test_require_requested_platform_runtime_accepts_cuda_backend_alias():
+    fake_jax = _fake_jax_runtime(
+        backend="gpu",
+        devices=["CudaDevice(id=0)"],
+    )
+
+    require_requested_platform_runtime(
+        fake_jax,
+        requested_platform="cuda",
+        context="Tier 3",
+    )
+
+
+def test_require_requested_platform_runtime_rejects_cpu_fallback_for_cuda():
+    fake_jax = _fake_jax_runtime(
+        backend="cpu",
+        devices=["CpuDevice(id=0)"],
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="requested JAX platform 'cuda' but initialized backend 'cpu'",
+    ):
+        require_requested_platform_runtime(
+            fake_jax,
+            requested_platform="cuda",
+            context="Tier 3",
+        )
 
 
 def test_run_python_script_streams_and_captures_output(tmp_path, capsys):

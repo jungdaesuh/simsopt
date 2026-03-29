@@ -57,7 +57,7 @@ __all__ = [
 def _solve_boozer_adjoint(booz_surf, rhs):
     """Solve the transposed PLU adjoint system for a BoozerSurfaceJAX result."""
     P, L, U = booz_surf.res["PLU"]
-    return forward_backward_jax(P, L, U, rhs)
+    return forward_backward_jax(P, L, U, rhs, iterative_refinement=True)
 
 
 def _iter_adjoint_coil_cotangents(vjp_fn, vjp_groups_fn, booz_surf, iota, G, adjoint):

@@ -73,6 +73,25 @@ jax_minimize = _opt.jax_minimize
 PRIVATE_OPTIMIZER_JAX_VERSION = _opt.PRIVATE_OPTIMIZER_JAX_VERSION
 BoozerSurfaceJAX = _bsj.BoozerSurfaceJAX
 
+
+def test_solve_boozer_adjoint_enables_iterative_refinement(monkeypatch):
+    recorded = {}
+
+    def fake_forward_backward_jax(P, L, U, rhs, *, iterative_refinement=False):
+        recorded["args"] = (P, L, U, rhs)
+        recorded["iterative_refinement"] = iterative_refinement
+        return "adjoint"
+
+    monkeypatch.setattr(_soj, "forward_backward_jax", fake_forward_backward_jax)
+    booz_surf = types.SimpleNamespace(res={"PLU": ("P", "L", "U")})
+
+    result = _soj._solve_boozer_adjoint(booz_surf, "rhs")
+
+    assert result == "adjoint"
+    assert recorded["args"] == ("P", "L", "U", "rhs")
+    assert recorded["iterative_refinement"] is True
+
+
 # ---------------------------------------------------------------------------
 # Marker constants
 # ---------------------------------------------------------------------------

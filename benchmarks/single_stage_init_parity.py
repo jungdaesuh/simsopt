@@ -29,6 +29,7 @@ from benchmarks.validation_ladder_common import (
     optimizer_drift_tolerances,
     preparse_platform,
     print_provenance,
+    require_requested_platform_runtime,
     require_x64_runtime,
     relative_error,
     resolve_probe_lane,
@@ -56,8 +57,15 @@ apply_compilation_cache_policy()
 import jax
 import jaxlib
 
+_RUNTIME_CONTEXT = "Single-stage init parity"
+
 jax.config.update("jax_enable_x64", True)
-require_x64_runtime(jax, context="Single-stage init parity")
+require_x64_runtime(jax, context=_RUNTIME_CONTEXT)
+require_requested_platform_runtime(
+    jax,
+    requested_platform=REQUESTED_PLATFORM,
+    context=_RUNTIME_CONTEXT,
+)
 
 _TIER3_TOLERANCES = optimizer_drift_tolerances("tier3_single_stage_init")
 IOTA_ABS_TOL = _TIER3_TOLERANCES["final_iota_abs_tol"]

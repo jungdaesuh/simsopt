@@ -31,6 +31,10 @@ _JAX_COMPILATION_CACHE_ENV_VAR = "JAX_COMPILATION_CACHE_DIR"
 _SIMSOPT_DISABLE_COMPILATION_CACHE_ENV_VAR = "SIMSOPT_DISABLE_JAX_COMPILATION_CACHE"
 _SIMSOPT_COMPILATION_CACHE_POLICY_ENV_VAR = "SIMSOPT_JAX_COMPILATION_CACHE_POLICY"
 _TRUTHY_ENV_VALUES = frozenset({"1", "true", "yes", "on"})
+_REQUESTED_PLATFORM_RUNTIME_BACKENDS = {
+    "cpu": frozenset({"cpu"}),
+    "cuda": frozenset({"cuda", "gpu"}),
+}
 OPTIMIZER_DRIFT_TOLERANCES = ladder_contract.OPTIMIZER_DRIFT_TOLERANCES
 _SHORT_RUN_SMOKE_MAXITER = ladder_contract.SHORT_RUN_SMOKE_MAXITER
 optimizer_drift_tolerances = ladder_contract.optimizer_drift_tolerances
@@ -125,6 +129,26 @@ def require_x64_runtime(jax_module, *, context: str) -> None:
     if _x64_enabled(jax_module):
         return
     raise RuntimeError(f"{context} requires jax_enable_x64=True before import/use.")
+
+
+def require_requested_platform_runtime(
+    jax_module,
+    *,
+    requested_platform: str,
+    context: str,
+) -> None:
+    """Raise when the active JAX backend does not honor an explicit platform request."""
+    if requested_platform == "auto":
+        return
+    actual_backend = str(jax_module.default_backend()).lower()
+    expected_backends = _REQUESTED_PLATFORM_RUNTIME_BACKENDS[requested_platform]
+    if actual_backend in expected_backends:
+        return
+    devices = [str(device) for device in jax_module.devices()]
+    raise RuntimeError(
+        f"{context} requested JAX platform '{requested_platform}' but initialized "
+        f"backend '{actual_backend}' on devices {devices}."
+    )
 
 
 def current_compilation_cache_metadata() -> dict[str, Any]:

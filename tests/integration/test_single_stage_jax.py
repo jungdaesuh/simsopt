@@ -177,6 +177,19 @@ class _WholeGroupArrayConversionBomb:
         return self._slices[index]
 
 
+class _ArrayScalarNoFloat:
+    """Scalar-like wrapper that can be array-converted but must not hit float()."""
+
+    def __init__(self, value):
+        self._value = value
+
+    def __array__(self, dtype=None, copy=None):
+        return np.asarray(self._value, dtype=dtype)
+
+    def __float__(self):
+        raise AssertionError("Fallback coil current extraction should not call float()")
+
+
 class _FakeCurve:
     """Non-native curve stub for _unwrap_coil_curve_and_current."""
 
@@ -1235,7 +1248,26 @@ class TestAdjointSolveConsistency:
             np.array([1.5]),
             atol=1e-12,
         )
-        assert len(coils[0].current.calls) == 1
+
+    def test_biotsavart_grouped_extraction_keeps_array_like_cpu_currents(self):
+        """Legacy fallback extraction should preserve array-like current scalars."""
+        bs_jax = object.__new__(BiotSavartJAX)
+        bs_jax._coils = [object()]
+        bs_jax._jax_native = False
+        bs_jax._coil_geometry_inputs = lambda coil, geometry_cache: (
+            None,
+            None,
+            np.array([[1.0, 0.0, 0.0]]),
+            np.array([[0.0, 1.0, 0.0]]),
+            _ArrayScalarNoFloat(1.5),
+        )
+
+        groups = bs_jax._extract_coil_data_grouped()
+
+        assert len(groups) == 1
+        _, _, currents, indices = groups[0]
+        np.testing.assert_allclose(np.asarray(currents, dtype=float), np.array([1.5]))
+        assert indices == [0]
 
     def test_compat_helper_uses_shared_jax_projection_for_projectable_curves(self):
         """The compatibility helper should share the same JAX projection path."""
