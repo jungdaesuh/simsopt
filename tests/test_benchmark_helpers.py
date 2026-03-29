@@ -84,6 +84,14 @@ from benchmarks.validation_ladder_common import (
 )
 
 
+def _single_stage_cuda_runtime_available() -> bool:
+    try:
+        devices = single_stage_init_parity_module.jax.devices("gpu")
+    except RuntimeError:
+        return False
+    return bool(devices)
+
+
 def test_resolve_configs_defaults_to_all_configs():
     assert resolve_configs(None) == DEFAULT_CONFIGS
 
@@ -208,6 +216,36 @@ def test_single_stage_init_defaults_to_reduced_grid_smoke_fixture(monkeypatch):
     )
     assert args.boozer_optimizer_backend is None
     assert args.maxiter == DEFAULT_OUTER_MAXITER
+
+
+@pytest.mark.skipif(
+    not _single_stage_cuda_runtime_available(),
+    reason="requires a real CUDA JAX runtime",
+)
+def test_single_stage_init_parity_passes_on_real_cuda_runtime(tmp_path):
+    output_json = tmp_path / "single-stage-init-cuda.json"
+
+    run_python_script(
+        Path(single_stage_init_parity_module.__file__),
+        [
+            "--platform",
+            "cuda",
+            "--optimizer-backend",
+            "scipy",
+            "--output-json",
+            str(output_json),
+        ],
+        cwd=single_stage_init_parity_module.REPO_ROOT,
+        env=repo_pythonpath_env(platform="cuda"),
+        bootstrap_repo=True,
+        stream_output=True,
+    )
+
+    payload = json.loads(output_json.read_text(encoding="utf-8"))
+
+    assert payload["passed"] is True
+    assert payload["provenance"]["platform_request"] == "cuda"
+    assert str(payload["provenance"]["backend"]).lower() in {"gpu", "cuda"}
 
 
 def test_repo_pythonpath_env_sets_all_platform_selectors(monkeypatch):

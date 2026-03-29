@@ -29,6 +29,7 @@ import jax.numpy as jnp
 import scipy.linalg
 from pathlib import Path
 import sys
+from typing import NamedTuple
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -2479,6 +2480,140 @@ class TestBVjpCPUParityPerComponent:
 # -----------------------------------------------------------------------
 
 
+class _ExactSolveParityPair(NamedTuple):
+    bs_cpu: BiotSavart
+    bs_jax: BiotSavartJAX
+    booz_cpu_exact: BoozerSurface
+    booz_jax_exact: BoozerSurfaceJAX
+    res_cpu: dict
+    res_jax: dict
+
+
+def _solve_exact_cpu_jax_parity_pair() -> _ExactSolveParityPair:
+    ncoils, nfp = 2, 2
+    stellsym = True
+    base_curves = create_equally_spaced_curves(
+        ncoils,
+        nfp,
+        stellsym=stellsym,
+        R0=1.0,
+        R1=0.5,
+        order=3,
+    )
+    base_currents = [Current(1e5) for _ in range(ncoils)]
+    for current in base_currents:
+        current.fix_all()
+    coils = coils_via_symmetries(base_curves, base_currents, nfp, stellsym)
+
+    mpol, ntor = 2, 2
+    nphi, ntheta = 2 * ntor + 1, 2 * mpol + 1
+    qp_phi = np.linspace(0, 1.0 / nfp, nphi, endpoint=False)
+    qp_theta = np.linspace(0, 1.0, ntheta, endpoint=False)
+
+    from simsopt.geo import SurfaceRZFourier
+
+    s_rz = SurfaceRZFourier(
+        nfp=nfp,
+        stellsym=stellsym,
+        mpol=1,
+        ntor=0,
+        quadpoints_phi=qp_phi,
+        quadpoints_theta=qp_theta,
+    )
+    s_rz.set_rc(0, 0, 1.0)
+    s_rz.set_rc(1, 0, 0.15)
+    s_rz.set_zs(1, 0, 0.15)
+
+    surf_cpu = SurfaceXYZTensorFourier(
+        mpol=mpol,
+        ntor=ntor,
+        stellsym=stellsym,
+        nfp=nfp,
+        quadpoints_phi=qp_phi,
+        quadpoints_theta=qp_theta,
+    )
+    surf_cpu.least_squares_fit(s_rz.gamma())
+    bs_cpu = BiotSavart(coils)
+    vol_cpu = Volume(surf_cpu)
+    vol_target = vol_cpu.J()
+
+    mu0 = 4 * np.pi * 1e-7
+    G0 = mu0 * sum(abs(c.current.get_value()) for c in coils)
+    iota0 = 0.3
+
+    booz_ls_cpu = BoozerSurface(
+        bs_cpu,
+        surf_cpu,
+        vol_cpu,
+        vol_target,
+        constraint_weight=1.0,
+        options={
+            "verbose": False,
+            "bfgs_maxiter": 300,
+            "bfgs_tol": 1e-10,
+            "newton_maxiter": 20,
+            "newton_tol": 1e-11,
+        },
+    )
+    ls_res_cpu = booz_ls_cpu.run_code(iota0, G0)
+    assert ls_res_cpu["success"], "CPU LS warm-start did not converge"
+    iota_warm = ls_res_cpu["iota"]
+    G_warm = ls_res_cpu["G"]
+
+    surf_jax = SurfaceXYZTensorFourier(
+        mpol=mpol,
+        ntor=ntor,
+        stellsym=stellsym,
+        nfp=nfp,
+        quadpoints_phi=qp_phi,
+        quadpoints_theta=qp_theta,
+    )
+    surf_jax.set_dofs(surf_cpu.get_dofs())
+    bs_jax = BiotSavartJAX(coils)
+    vol_jax = Volume(surf_jax)
+
+    booz_cpu_exact = BoozerSurface(
+        bs_cpu,
+        surf_cpu,
+        vol_cpu,
+        vol_target,
+        options={"verbose": False},
+    )
+    booz_cpu_exact.need_to_run_code = True
+    res_cpu = booz_cpu_exact.solve_residual_equation_exactly_newton(
+        iota=iota_warm,
+        G=G_warm,
+        tol=1e-10,
+        maxiter=40,
+    )
+    assert res_cpu["success"], "CPU exact Newton did not converge"
+
+    booz_jax_exact = BoozerSurfaceJAX(
+        bs_jax,
+        surf_jax,
+        vol_jax,
+        vol_target,
+        constraint_weight=None,
+        options={
+            "verbose": False,
+            "newton_maxiter": 40,
+            "newton_tol": 1e-10,
+        },
+    )
+    res_jax = booz_jax_exact.run_code(iota_warm, G_warm)
+    assert res_jax is not None, "JAX exact solver returned None"
+    assert res_jax["success"], "JAX exact Newton did not converge"
+
+    return _ExactSolveParityPair(
+        bs_cpu=bs_cpu,
+        bs_jax=bs_jax,
+        booz_cpu_exact=booz_cpu_exact,
+        booz_jax_exact=booz_jax_exact,
+        res_cpu=res_cpu,
+        res_jax=res_jax,
+    )
+
+
 class TestExactSolveCPUJAXParity:
     """Exact Newton solutions match between CPU and JAX solvers.
 
@@ -2488,122 +2623,11 @@ class TestExactSolveCPUJAXParity:
     """
 
     def test_exact_solve_parity(self):
-        ncoils, nfp = 2, 2
-        stellsym = True
-        base_curves = create_equally_spaced_curves(
-            ncoils,
-            nfp,
-            stellsym=stellsym,
-            R0=1.0,
-            R1=0.5,
-            order=3,
-        )
-        base_currents = [Current(1e5) for _ in range(ncoils)]
-        for c in base_currents:
-            c.fix_all()
-        coils = coils_via_symmetries(base_curves, base_currents, nfp, stellsym)
-
-        mpol, ntor = 2, 2
-        nphi, ntheta = 2 * ntor + 1, 2 * mpol + 1
-        qp_phi = np.linspace(0, 1.0 / nfp, nphi, endpoint=False)
-        qp_theta = np.linspace(0, 1.0, ntheta, endpoint=False)
-
-        # Build initial surface from RZ fit
-        from simsopt.geo import SurfaceRZFourier
-
-        s_rz = SurfaceRZFourier(
-            nfp=nfp,
-            stellsym=stellsym,
-            mpol=1,
-            ntor=0,
-            quadpoints_phi=qp_phi,
-            quadpoints_theta=qp_theta,
-        )
-        s_rz.set_rc(0, 0, 1.0)
-        s_rz.set_rc(1, 0, 0.15)
-        s_rz.set_zs(1, 0, 0.15)
-
-        # CPU surface + LS warm-start
-        surf_cpu = SurfaceXYZTensorFourier(
-            mpol=mpol,
-            ntor=ntor,
-            stellsym=stellsym,
-            nfp=nfp,
-            quadpoints_phi=qp_phi,
-            quadpoints_theta=qp_theta,
-        )
-        surf_cpu.least_squares_fit(s_rz.gamma())
-        bs_cpu = BiotSavart(coils)
-        vol_cpu = Volume(surf_cpu)
-        vol_target = vol_cpu.J()
-
-        mu0 = 4 * np.pi * 1e-7
-        G0 = mu0 * sum(abs(c.current.get_value()) for c in coils)
-        iota0 = 0.3
-
-        booz_ls_cpu = BoozerSurface(
-            bs_cpu,
-            surf_cpu,
-            vol_cpu,
-            vol_target,
-            constraint_weight=1.0,
-            options={
-                "verbose": False,
-                "bfgs_maxiter": 300,
-                "bfgs_tol": 1e-10,
-                "newton_maxiter": 20,
-                "newton_tol": 1e-11,
-            },
-        )
-        ls_res_cpu = booz_ls_cpu.run_code(iota0, G0)
-        assert ls_res_cpu["success"], "CPU LS warm-start did not converge"
-        iota_warm = ls_res_cpu["iota"]
-        G_warm = ls_res_cpu["G"]
-
-        surf_jax = SurfaceXYZTensorFourier(
-            mpol=mpol,
-            ntor=ntor,
-            stellsym=stellsym,
-            nfp=nfp,
-            quadpoints_phi=qp_phi,
-            quadpoints_theta=qp_theta,
-        )
-        surf_jax.set_dofs(surf_cpu.get_dofs())
-        bs_jax = BiotSavartJAX(coils)
-        vol_jax = Volume(surf_jax)
-
-        # Exact solves from the warmed state
-        booz_cpu_exact = BoozerSurface(
-            bs_cpu,
-            surf_cpu,
-            vol_cpu,
-            vol_target,
-            options={"verbose": False},
-        )
-        booz_cpu_exact.need_to_run_code = True
-        res_cpu = booz_cpu_exact.solve_residual_equation_exactly_newton(
-            iota=iota_warm,
-            G=G_warm,
-            tol=1e-10,
-            maxiter=40,
-        )
-        assert res_cpu["success"], "CPU exact Newton did not converge"
-
-        booz_jax_exact = BoozerSurfaceJAX(
-            bs_jax,
-            surf_jax,
-            vol_jax,
-            vol_target,
-            constraint_weight=None,
-            options={
-                "verbose": False,
-                "newton_maxiter": 40,
-                "newton_tol": 1e-10,
-            },
-        )
-        res_jax = booz_jax_exact.run_code(iota_warm, G_warm)
-        assert res_jax is not None, "JAX exact solver returned None"
-        assert res_jax["success"], "JAX exact Newton did not converge"
+        exact_pair = _solve_exact_cpu_jax_parity_pair()
+        res_cpu = exact_pair.res_cpu
+        res_jax = exact_pair.res_jax
+        exact_residual_tol = 1e-6
+        exact_solution_abs_tol = 1e-5
 
         iota_diff = abs(res_cpu["iota"] - res_jax["iota"])
         G_diff = abs(res_cpu["G"] - res_jax["G"])
@@ -2619,10 +2643,37 @@ class TestExactSolveCPUJAXParity:
             f"  |Δiota|={iota_diff:.3e} |ΔG|={G_diff:.3e}"
         )
 
-        assert resid_cpu < 1e-6, f"CPU residual too large: {resid_cpu:.3e}"
-        assert resid_jax < 1e-6, f"JAX residual too large: {resid_jax:.3e}"
-        assert iota_diff < 1e-5, f"Iota disagreement: {iota_diff:.3e}"
-        assert G_diff < 1e-5, f"G disagreement: {G_diff:.3e}"
+        assert resid_cpu < exact_residual_tol, f"CPU residual too large: {resid_cpu:.3e}"
+        assert resid_jax < exact_residual_tol, f"JAX residual too large: {resid_jax:.3e}"
+        assert iota_diff < exact_solution_abs_tol, f"Iota disagreement: {iota_diff:.3e}"
+        assert G_diff < exact_solution_abs_tol, f"G disagreement: {G_diff:.3e}"
+
+    def test_value_wrappers_match_on_shared_exact_state(self):
+        exact_pair = _solve_exact_cpu_jax_parity_pair()
+        iota_abs_tol = 1e-5
+        nqs_rel_tol = 1e-4
+        nqs_abs_tol = 1e-10
+
+        iota_cpu = Iotas(exact_pair.booz_cpu_exact).J()
+        iota_jax = IotasJAX(exact_pair.booz_jax_exact).J()
+        nqs_cpu = NonQuasiSymmetricRatio(
+            exact_pair.booz_cpu_exact,
+            exact_pair.bs_cpu,
+            sDIM=6,
+        ).J()
+        nqs_jax = NonQuasiSymmetricRatioJAX(
+            exact_pair.booz_jax_exact,
+            exact_pair.bs_jax,
+            sDIM=6,
+        ).J()
+
+        np.testing.assert_allclose(iota_jax, iota_cpu, rtol=0.0, atol=iota_abs_tol)
+        np.testing.assert_allclose(
+            nqs_jax,
+            nqs_cpu,
+            rtol=nqs_rel_tol,
+            atol=nqs_abs_tol,
+        )
 
 
 # -----------------------------------------------------------------------
