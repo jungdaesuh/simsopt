@@ -19,11 +19,10 @@ post-merge state. The main conflict set was resolved, the known post-merge
 regressions were fixed, and the focused validation slices established during
 the merge session are green.
 
-The main remaining blocker is no longer merge resolution. It is validation
-closure under the correct runtime environment. In particular, the old
-`candidate-fixed` integration environment is stale for the current private
-optimizer contract because it provides JAX `0.9.1` while the merged branch
-expects JAX `0.9.2`.
+The main remaining blocker is no longer merge resolution or the integration
+runtime. The correct post-merge integration environment is now established as
+`columbia-jax-0.9.2`, and the full integration suite passes there. The only
+remaining validation gap is the broader public non-private sweep.
 
 ## Merge Conflict Set
 
@@ -138,13 +137,9 @@ The following post-merge validation work passed during the merge session:
 
 The merge should not yet be considered fully validated.
 
-Two gaps remain:
+One gap remains:
 
-1. The integration lane under the old `candidate-fixed` runtime is red after
-   corrected source routing because that environment carries JAX `0.9.1` while
-   `src/simsopt/geo/optimizer_jax_private/_common.py` requires JAX `0.9.2`.
-
-2. The full public non-private post-merge sweep was not run to completion
+1. The full public non-private post-merge sweep was not run to completion
    locally.
 
 ### Current tree state
@@ -154,20 +149,16 @@ facts:
 
 - No real `<<<<<<<` / `>>>>>>>` merge markers remain under `src/`, `tests/`,
   `docs/`, or `examples/`.
-- The staged merge payload currently contains 127 changed files with 36,824
-  insertions and 2,597 deletions.
-- The staged payload currently includes 8 added files:
-  - `src/simsopt/configs/STAR_Lite-A.json`
-  - `src/simsopt/util/coil_optimization_helper_functions.py`
-  - `tests/configs/test_quasr_integration.py`
-  - `tests/configs/test_zoo.py`
-  - `tests/configs/test_zoo_mock_quasr.py`
-  - `tests/test_files/input.basic_non_stellsym`
-  - `tests/test_files/serial0000952.json`
-  - `tests/util/test_coil_optimization_helper_functions.py`
-- The merge is still uncommitted and `MERGE_HEAD` is absent, but the worktree is
-  mixed rather than purely staged: it also contains unstaged and untracked
-  files outside the staged merge payload.
+- The upstream merge itself is committed in local history, along with follow-up
+  test and documentation commits.
+- The old `candidate-fixed` environment is now known to be stale for this
+  branch because it carries JAX `0.9.1`, while the private optimizer contract
+  requires `0.9.2`.
+- The current uncommitted tracked changes are follow-up test adjustments in:
+  - `tests/integration/test_single_stage_jax.py`
+  - `tests/integration/test_stage2_jax.py`
+- The worktree also still contains untracked generated artifacts outside the
+  merge payload.
 
 ## Architecture Findings
 
@@ -219,11 +210,10 @@ Desired shape:
 
 Before this merge should be treated as fully closed:
 
-1. Create or update a runtime environment for the current merged branch that
-   satisfies the private optimizer JAX contract.
-2. Re-run the integration lane in that environment.
-3. Finish the full public post-merge sweep.
-4. Commit the merge payload after validation closure.
+1. Finish the full public non-private post-merge sweep.
+2. Commit or otherwise disposition the follow-up validation edits in:
+   - `tests/integration/test_single_stage_jax.py`
+   - `tests/integration/test_stage2_jax.py`
 
 After that, the next engineering cleanup should be the duplicate-geometry
 reduction around `CurveCWSFourierCPP`, `curve.py`, and `BiotSavartJAX`.
@@ -232,8 +222,9 @@ reduction around `CurveCWSFourierCPP`, `curve.py`, and `BiotSavartJAX`.
 
 The upstream merge succeeded.
 
-The remaining work is no longer merge mechanics. The remaining work is:
+The remaining work is no longer merge mechanics or integration-runtime
+alignment. The remaining work is:
 
-- runtime-environment alignment,
-- final validation closure,
+- final public-lane validation closure,
+- committing the latest follow-up validation fixes,
 - and follow-on reduction of now-unnecessary local duplication.

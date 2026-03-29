@@ -3071,10 +3071,15 @@ class TestTraceableObjective:
                 tol=1e-20,
             )
 
+            # The compared objective values are nominally zero at this point in
+            # the short run, so a tiny absolute floor is more meaningful than a
+            # pure relative check.
+            traceable_objective_abs_tol = 1e-32
             np.testing.assert_allclose(
                 float(result_a.fun),
                 float(result_b.fun),
                 rtol=1e-10,
+                atol=traceable_objective_abs_tol,
                 err_msg=(
                     f"Traceable J={float(result_a.fun):.6e} vs "
                     f"explicit J={float(result_b.fun):.6e}"

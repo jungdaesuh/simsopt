@@ -1865,6 +1865,14 @@ class TestStage2OptimizerContract:
                     return _DummyDerivative(grad)
                 return grad
 
+        class DummyCurvature(DummyScalar):
+            def __init__(self, value, counter_key=None):
+                super().__init__(value, counter_key)
+                self.curve = self
+
+            def kappa(self):
+                return np.asarray([self._value], dtype=float)
+
         class DummyDistance:
             def J(self):
                 return 0.25
@@ -1904,10 +1912,11 @@ class TestStage2OptimizerContract:
             DummyFlux(),
             DummyScalar(1.25, "length"),
             DummyDistance(),
-            DummyScalar(0.75, "curvature"),
+            DummyCurvature(0.75, "curvature"),
             1.0,
             1.0,
             1.75,
+            1.0,
             1.0,
             1.0,
             trajectory_sink=trajectory,
