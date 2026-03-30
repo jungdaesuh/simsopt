@@ -1,6 +1,7 @@
 import numpy as np
 import unittest
 
+from _jit_test_state import make_module_jit_hooks
 from monty.tempfile import ScratchDir
 
 from simsopt.geo.curverzfourier import CurveRZFourier
@@ -10,7 +11,7 @@ from simsopt.geo.curveobjectives import CurveLength
 from simsopt.objectives.least_squares import LeastSquaresProblem
 from simsopt.solve.serial import least_squares_serial_solve
 
-parameters['jit'] = False
+setUpModule, tearDownModule = make_module_jit_hooks(parameters, value=False)
 
 # MJL 2025-01-24: Eventually we should get this test working,
 # but for some reason the objective is giving NaNs in

@@ -1,11 +1,13 @@
 import unittest
 
 import numpy as np
+from _jit_test_state import make_module_jit_hooks
 from simsopt.geo import parameters
 from simsopt.geo.surfacerzfourier import SurfaceRZFourier
 from simsopt.geo.surfacexyzfourier import SurfaceXYZFourier
 from simsopt.geo.surfacexyztensorfourier import SurfaceXYZTensorFourier
-parameters['jit'] = False
+
+setUpModule, tearDownModule = make_module_jit_hooks(parameters, value=False)
 
 
 def taylor_test(f, df, x, epsilons=None, direction=None, order=2):

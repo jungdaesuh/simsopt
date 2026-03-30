@@ -3,6 +3,7 @@ import json
 
 import numpy as np
 
+from _jit_test_state import make_module_jit_hooks
 from simsopt.geo import parameters
 from simsopt.geo.curve import RotatedCurve, create_equally_spaced_curves, create_equally_spaced_planar_curves
 from simsopt.geo.curvexyzfourier import CurveXYZFourier, JaxCurveXYZFourier
@@ -18,7 +19,7 @@ from simsopt.configs.zoo import get_data
 from simsopt._core.json import GSONDecoder, GSONEncoder, SIMSON
 import simsoptpp as sopp
 
-parameters['jit'] = False
+setUpModule, tearDownModule = make_module_jit_hooks(parameters, value=False)
 
 
 class Testing(unittest.TestCase):

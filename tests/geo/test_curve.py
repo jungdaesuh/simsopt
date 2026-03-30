@@ -9,6 +9,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
 
+from _jit_test_state import make_module_jit_hooks
 from simsopt._core.json import GSONEncoder, GSONDecoder, SIMSON
 from simsopt.geo.curvexyzfourier import CurveXYZFourier, JaxCurveXYZFourier
 from simsopt.geo.curverzfourier import CurveRZFourier
@@ -34,7 +35,7 @@ except ImportError:
 logger = logging.getLogger(__name__)
 #logging.basicConfig(level=logging.INFO)
 
-parameters['jit'] = False
+setUpModule, tearDownModule = make_module_jit_hooks(parameters, value=False)
 
 
 def taylor_test(f, df, x, epsilons=None, direction=None):

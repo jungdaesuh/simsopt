@@ -3,6 +3,7 @@ import json
 
 import numpy as np
 
+from _jit_test_state import make_module_jit_hooks
 from simsopt.geo import SurfaceXYZTensorFourier
 from simsopt.geo.curvexyzfourier import CurveXYZFourier
 from simsopt.geo.curveobjectives import CurveLength, LpCurveTorsion
@@ -10,7 +11,9 @@ from simsopt.objectives.utilities import MPIObjective, QuadraticPenalty, MPIOpti
 from simsopt.geo import parameters
 from simsopt._core.json import GSONDecoder, GSONEncoder, SIMSON
 from simsopt._core.util import parallel_loop_bounds
-parameters['jit'] = False
+
+setUpModule, tearDownModule = make_module_jit_hooks(parameters, value=False)
+
 try:
     from mpi4py import MPI
 except:
