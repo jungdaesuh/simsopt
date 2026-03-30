@@ -890,16 +890,15 @@ def evaluate_stage2_objective(
             context.new_surf,
             bs_jax=context.bs_jax,
         )
-        diagnostics["coil_coil_distance"] = float(context.Jccdist.shortest_distance())
-    distance_constraint_violated = float(diagnostics["coil_coil_distance"]) <= float(
-        context.cc_threshold
-    )
+    coil_coil_distance = float(context.Jccdist.shortest_distance())
+    diagnostics["coil_coil_distance"] = coil_coil_distance
+    distance_constraint_violated = coil_coil_distance <= float(context.cc_threshold)
     snapshot = {
         "J": J,
         "Jf": squared_flux,
         "mean_abs_relBfinal_norm": float(diagnostics["mean_abs_relBfinal_norm"]),
         "curve_length": curve_length,
-        "coil_coil_distance": float(diagnostics["coil_coil_distance"]),
+        "coil_coil_distance": coil_coil_distance,
         "curvature": curvature,
         "grad_norm": float(np.linalg.norm(grad)),
         "distance_constraint_violated": bool(distance_constraint_violated),

@@ -1874,6 +1874,10 @@ class TestStage2OptimizerContract:
                 return np.asarray([self._value], dtype=float)
 
         class DummyDistance:
+            def __init__(self, distances):
+                self._distances = [float(value) for value in distances]
+                self._index = 0
+
             def J(self):
                 return 0.25
 
@@ -1885,7 +1889,9 @@ class TestStage2OptimizerContract:
 
             def shortest_distance(self):
                 calls["distance"] += 1
-                return 0.5
+                value = self._distances[min(self._index, len(self._distances) - 1)]
+                self._index += 1
+                return value
 
         class DummyFlux:
             def J(self):
@@ -1904,6 +1910,7 @@ class TestStage2OptimizerContract:
 
         monkeypatch.setattr(stage2_script, "compute_mean_abs_relbn", fake_relbn)
 
+        expected_distances = (0.5, 0.1)
         trajectory = []
         fun = stage2_script.make_fun(
             DummyJF(),
@@ -1911,13 +1918,13 @@ class TestStage2OptimizerContract:
             object(),
             DummyFlux(),
             DummyScalar(1.25, "length"),
-            DummyDistance(),
+            DummyDistance(expected_distances),
             DummyCurvature(0.75, "curvature"),
             1.0,
             1.0,
             1.75,
             1.0,
-            1.0,
+            0.2,
             1.0,
             trajectory_sink=trajectory,
             field_diagnostic_stride=10,
@@ -1931,13 +1938,19 @@ class TestStage2OptimizerContract:
         assert calls["jf"] == 2
         assert calls["relbn"] == 1
         assert calls["length"] == 2
-        assert calls["distance"] == 1
+        assert calls["distance"] == 2
         assert calls["curvature"] == 2
         assert len(trajectory) == 2
         assert trajectory[0]["Jf"] == pytest.approx(0.125)
         assert trajectory[1]["Jf"] == pytest.approx(0.125)
         assert trajectory[0]["curve_length"] == pytest.approx(1.25)
         assert trajectory[1]["curve_length"] == pytest.approx(1.25)
+        assert trajectory[0]["mean_abs_relBfinal_norm"] == pytest.approx(0.25)
+        assert trajectory[1]["mean_abs_relBfinal_norm"] == pytest.approx(0.25)
+        assert trajectory[0]["coil_coil_distance"] == pytest.approx(expected_distances[0])
+        assert trajectory[1]["coil_coil_distance"] == pytest.approx(expected_distances[1])
+        assert trajectory[0]["distance_constraint_violated"] is False
+        assert trajectory[1]["distance_constraint_violated"] is True
 
     def test_evaluate_stage2_objective_requests_squared_flux_gradient_before_value(
         self,
