@@ -8,6 +8,8 @@ Validates against:
 """
 
 import importlib.util
+from contextlib import contextmanager
+import os
 from pathlib import Path
 
 import pytest
@@ -27,6 +29,27 @@ def _load(name, relpath):
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
+
+
+@contextmanager
+def _backend_mode(mode: str):
+    previous_mode = os.environ.get("SIMSOPT_BACKEND_MODE")
+    os.environ["SIMSOPT_BACKEND_MODE"] = mode
+    try:
+        yield
+    finally:
+        if previous_mode is None:
+            del os.environ["SIMSOPT_BACKEND_MODE"]
+        else:
+            os.environ["SIMSOPT_BACKEND_MODE"] = previous_mode
+
+
+def _load_with_backend_mode(mode: str):
+    return _load(f"biotsavart_jax_{mode}", "field/biotsavart_jax.py")
+
+
+def _load_chunked_biotsavart():
+    return _load_with_backend_mode("jax_cpu_parity")
 
 
 _bs = _load("biotsavart_jax", "field/biotsavart_jax.py")
@@ -58,6 +81,18 @@ def _make_circular_coil(R=1.0, nquad=128):
         jnp.array(gamma[None, :, :]),  # (1, nquad, 3)
         jnp.array(gammadash[None, :, :]),  # (1, nquad, 3)
     )
+
+
+def _make_shifted_circular_coils(ncoils: int, *, R: float = 1.0, nquad: int = 128):
+    gamma, gammadash = _make_circular_coil(R=R, nquad=nquad)
+    z_offsets = jnp.linspace(-0.4, 0.4, ncoils, dtype=jnp.float64)
+    gamma_stack = jnp.concatenate(
+        [gamma + jnp.array([[[0.0, 0.0, offset]]]) for offset in z_offsets],
+        axis=0,
+    )
+    gammadash_stack = jnp.concatenate([gammadash] * ncoils, axis=0)
+    currents = jnp.linspace(5e4, 5e4 + 1e3 * (ncoils - 1), ncoils, dtype=jnp.float64)
+    return gamma_stack, gammadash_stack, currents
 
 
 class TestBiotSavartJaxAnalytical:
@@ -234,6 +269,94 @@ class TestBiotSavartJaxCppParity:
         )
 
         np.testing.assert_allclose(np.array(B_jax), B_ref, rtol=1e-10)
+
+
+class TestBiotSavartJaxChunkedParity:
+    """Directly compare chunked low-level kernels against dense references."""
+
+    def test_chunked_B_and_dB_match_dense_reference(self):
+        with _backend_mode("jax_cpu_parity"):
+            chunked_bs = _load_chunked_biotsavart()
+            assert chunked_bs._coil_chunk_size() > 0
+
+            gammas, gammadashs, currents = _make_shifted_circular_coils(20, nquad=96)
+            points = jnp.array(
+                [
+                    [0.2, 0.1, -0.3],
+                    [0.1, -0.4, 0.0],
+                    [-0.3, 0.2, 0.35],
+                ],
+                dtype=jnp.float64,
+            )
+
+            dense_B = jax.vmap(
+                lambda x: chunked_bs._biot_savart_one_point_dense(
+                    x,
+                    gammas,
+                    gammadashs,
+                    currents,
+                )
+            )(points)
+            dense_dB = jax.vmap(
+                lambda x: jnp.swapaxes(
+                    jax.jacfwd(chunked_bs._biot_savart_one_point_dense, argnums=0)(
+                        x,
+                        gammas,
+                        gammadashs,
+                        currents,
+                    ),
+                    -1,
+                    -2,
+                )
+            )(points)
+
+            B = chunked_bs.biot_savart_B(points, gammas, gammadashs, currents)
+            dB = chunked_bs.biot_savart_dB_by_dX(points, gammas, gammadashs, currents)
+            B_combo, dB_combo = chunked_bs.biot_savart_B_and_dB(
+                points,
+                gammas,
+                gammadashs,
+                currents,
+            )
+
+            np.testing.assert_allclose(np.asarray(B), np.asarray(dense_B), atol=1e-14)
+            np.testing.assert_allclose(np.asarray(dB), np.asarray(dense_dB), atol=1e-14)
+            np.testing.assert_allclose(
+                np.asarray(B_combo),
+                np.asarray(dense_B),
+                atol=1e-14,
+            )
+            np.testing.assert_allclose(
+                np.asarray(dB_combo),
+                np.asarray(dense_dB),
+                atol=1e-14,
+            )
+
+    def test_chunked_A_matches_dense_reference(self):
+        with _backend_mode("jax_cpu_parity"):
+            chunked_bs = _load_chunked_biotsavart()
+            assert chunked_bs._coil_chunk_size() > 0
+
+            gammas, gammadashs, currents = _make_shifted_circular_coils(20, nquad=96)
+            points = jnp.array(
+                [
+                    [0.15, 0.05, -0.25],
+                    [-0.05, -0.25, 0.1],
+                ],
+                dtype=jnp.float64,
+            )
+
+            dense_A = jax.vmap(
+                lambda x: chunked_bs._biot_savart_A_one_point_dense(
+                    x,
+                    gammas,
+                    gammadashs,
+                    currents,
+                )
+            )(points)
+            A = chunked_bs.biot_savart_A(points, gammas, gammadashs, currents)
+
+            np.testing.assert_allclose(np.asarray(A), np.asarray(dense_A), atol=1e-14)
 
 
 if __name__ == "__main__":
