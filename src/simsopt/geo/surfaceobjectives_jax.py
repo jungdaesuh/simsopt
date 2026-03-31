@@ -137,8 +137,10 @@ def _ensure_solved(booz_surf):
     if (
         booz_surf.res is None
         or not booz_surf.res.get("success")
-        or booz_surf.res.get("PLU") is None
-        or booz_surf.res.get("vjp") is None
+        or "PLU" not in booz_surf.res
+        or booz_surf.res["PLU"] is None
+        or "vjp" not in booz_surf.res
+        or booz_surf.res["vjp"] is None
     ):
         raise RuntimeError(
             "BoozerSurfaceJAX has not been solved yet or the last solve failed "

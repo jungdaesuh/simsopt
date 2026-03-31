@@ -17,8 +17,8 @@ def build_fourier_basis(quadpoints_jax, order):
     """Precompute the CurveXYZFourier basis matrix and its derivative."""
     k = 2 * order + 1
     npts = quadpoints_jax.shape[0]
-    basis = jnp.zeros((npts, k))
-    dbasis = jnp.zeros((npts, k))
+    basis = jnp.zeros((npts, k), dtype=jnp.float64)
+    dbasis = jnp.zeros((npts, k), dtype=jnp.float64)
 
     basis = basis.at[:, 0].set(1.0)
     for j in range(1, order + 1):

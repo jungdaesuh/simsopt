@@ -28,7 +28,16 @@ _PLATFORM_ENV = "SIMSOPT_JAX_PLATFORM"
 _PLATFORM_LEGACY_ENV = "SIMSOPT_JAX_BACKEND"
 _MODE_ENV = "SIMSOPT_BACKEND_MODE"
 _STRICT_ENV = "SIMSOPT_BACKEND_STRICT"
+_DEBUG_NANS_ENV = "SIMSOPT_JAX_DEBUG_NANS"
+_TRANSFER_GUARD_ENV = "SIMSOPT_JAX_TRANSFER_GUARD"
+_COMPILATION_CACHE_DIR_ENV = "SIMSOPT_JAX_COMPILATION_CACHE_DIR"
 _JAX_PLATFORMS_ENV = "JAX_PLATFORMS"
+_VALID_TRANSFER_GUARDS = ("allow", "log", "disallow")
+_GUARDRAIL_ENV_VARS = (
+    _DEBUG_NANS_ENV,
+    _TRANSFER_GUARD_ENV,
+    _COMPILATION_CACHE_DIR_ENV,
+)
 _EXPLICIT_SELECTOR_ENV_VARS = (
     _MODE_ENV,
     _BACKEND_ENV,
@@ -39,6 +48,9 @@ _EXPLICIT_SELECTOR_ENV_VARS = (
 _SYNCED_RUNTIME_ENV_VALUES = (
     (_MODE_ENV, "mode"),
     (_STRICT_ENV, "strict"),
+    (_DEBUG_NANS_ENV, "debug_nans"),
+    (_TRANSFER_GUARD_ENV, "transfer_guard"),
+    (_COMPILATION_CACHE_DIR_ENV, "compilation_cache_dir"),
     (_BACKEND_ENV, "backend"),
     (_BACKEND_LEGACY_ENV, "backend"),
     (_PLATFORM_ENV, "jax_platform"),
@@ -102,6 +114,9 @@ class BackendConfig:
     backend: str
     jax_platform: str
     strict: bool = False
+    debug_nans: bool = False
+    transfer_guard: str | None = None
+    compilation_cache_dir: str | None = None
 
 
 @dataclass(frozen=True)
@@ -116,6 +131,9 @@ class BackendPolicy:
     tolerance_tier: str
     compilation_cache_policy: str
     provenance_label: str
+    debug_nans: bool
+    transfer_guard: str | None
+    compilation_cache_dir: str | None
 
 
 def _env_bool(name: str) -> bool:
@@ -147,13 +165,84 @@ def _validate_mode(mode: str) -> str:
     return mode
 
 
-def _config_from_mode(mode: str, *, strict: bool) -> BackendConfig:
-    backend, jax_platform = _MODE_TO_RUNTIME[_validate_mode(mode)]
+def _validate_transfer_guard(value: str | None, *, source: str) -> str | None:
+    if value in (None, ""):
+        return None
+    if value not in _VALID_TRANSFER_GUARDS:
+        raise ValueError(
+            f"{source}={value!r} is not valid. Accepted: {_VALID_TRANSFER_GUARDS}"
+        )
+    return value
+
+
+def _default_compilation_cache_dir(mode: str) -> str | None:
+    del mode
+    return None
+
+
+def _optional_env_value(name: str) -> str | None:
+    raw_value = os.environ.get(name)
+    if raw_value in (None, ""):
+        return None
+    return raw_value
+
+
+def _resolve_debug_nans(debug_nans: bool | None) -> bool:
+    if debug_nans is None:
+        return (
+            _env_bool(_DEBUG_NANS_ENV)
+            if _optional_env_value(_DEBUG_NANS_ENV)
+            else False
+        )
+    return bool(debug_nans)
+
+
+def _resolve_transfer_guard(transfer_guard: str | None) -> str | None:
+    env_value = _optional_env_value(_TRANSFER_GUARD_ENV)
+    if transfer_guard is None and env_value is not None:
+        return _validate_transfer_guard(
+            env_value,
+            source=_TRANSFER_GUARD_ENV,
+        )
+    return _validate_transfer_guard(
+        transfer_guard,
+        source="transfer_guard",
+    )
+
+
+def _resolve_compilation_cache_dir(
+    mode: str,
+    compilation_cache_dir: str | None,
+) -> str | None:
+    if compilation_cache_dir is not None:
+        return compilation_cache_dir or None
+    env_value = _optional_env_value(_COMPILATION_CACHE_DIR_ENV)
+    if env_value is not None:
+        return env_value
+    return _default_compilation_cache_dir(mode)
+
+
+def _config_from_mode(
+    mode: str,
+    *,
+    strict: bool,
+    debug_nans: bool | None = None,
+    transfer_guard: str | None = None,
+    compilation_cache_dir: str | None = None,
+) -> BackendConfig:
+    mode = _validate_mode(mode)
+    backend, jax_platform = _MODE_TO_RUNTIME[mode]
     return BackendConfig(
         mode=mode,
         backend=backend,
         jax_platform=jax_platform,
         strict=bool(strict),
+        debug_nans=_resolve_debug_nans(debug_nans),
+        transfer_guard=_resolve_transfer_guard(transfer_guard),
+        compilation_cache_dir=_resolve_compilation_cache_dir(
+            mode,
+            compilation_cache_dir,
+        ),
     )
 
 
@@ -180,12 +269,17 @@ def _policy_from_config(config: BackendConfig) -> BackendPolicy:
         tolerance_tier=str(defaults["tolerance_tier"]),
         compilation_cache_policy=str(defaults["compilation_cache_policy"]),
         provenance_label=str(defaults["provenance_label"]),
+        debug_nans=config.debug_nans,
+        transfer_guard=config.transfer_guard,
+        compilation_cache_dir=config.compilation_cache_dir,
     )
 
 
 def _runtime_env_value(attribute_name: str, value: object) -> str:
-    if attribute_name == "strict":
+    if attribute_name in {"strict", "debug_nans"}:
         return "1" if bool(value) else "0"
+    if value is None:
+        return ""
     return str(value)
 
 
@@ -308,6 +402,21 @@ def get_provenance_label(mode: str | None = None) -> str:
     return get_backend_policy(mode).provenance_label
 
 
+def get_debug_nans(mode: str | None = None) -> bool:
+    """Return the debug-NaN runtime guardrail state for the resolved mode."""
+    return get_backend_policy(mode).debug_nans
+
+
+def get_transfer_guard(mode: str | None = None) -> str | None:
+    """Return the active JAX transfer-guard policy for the resolved mode."""
+    return get_backend_policy(mode).transfer_guard
+
+
+def get_compilation_cache_dir(mode: str | None = None) -> str | None:
+    """Return the active JAX compilation-cache directory for the resolved mode."""
+    return get_backend_policy(mode).compilation_cache_dir
+
+
 def raise_if_strict_jax_fallback(*, component: str, detail: str) -> None:
     """Reject CPU or mixed fallback behavior when strict JAX mode is active."""
     config = get_backend_config()
@@ -333,16 +442,24 @@ def apply_jax_runtime_config() -> None:
     config = get_backend_config()
     if config.backend != "jax":
         return
+
     import jax
 
     jax.config.update("jax_platforms", config.jax_platform)
     jax.config.update("jax_enable_x64", requires_x64(config.mode))
+    jax.config.update("jax_debug_nans", config.debug_nans)
+    jax.config.update("jax_transfer_guard", config.transfer_guard)
+    if config.compilation_cache_dir is not None:
+        jax.config.update("jax_compilation_cache_dir", config.compilation_cache_dir)
 
 
 def set_backend(
     mode: str,
     *,
     strict: bool = False,
+    debug_nans: bool | None = None,
+    transfer_guard: str | None = None,
+    compilation_cache_dir: str | None = None,
     configure_runtime: bool = True,
 ) -> BackendConfig:
     """Set the active backend mode for the current process.
@@ -350,7 +467,13 @@ def set_backend(
     This keeps the legacy env vars in sync so existing scripts and subprocess
     helpers continue to work unchanged.
     """
-    config = _config_from_mode(mode, strict=bool(strict))
+    config = _config_from_mode(
+        mode,
+        strict=bool(strict),
+        debug_nans=debug_nans,
+        transfer_guard=transfer_guard,
+        compilation_cache_dir=compilation_cache_dir,
+    )
     for env_name, attribute_name in _SYNCED_RUNTIME_ENV_VALUES:
         os.environ[env_name] = _runtime_env_value(
             attribute_name, getattr(config, attribute_name)

@@ -127,6 +127,35 @@ def test_programmatic_backend_selection_configures_jax_runtime():
     assert rc == 0, f"programmatic backend config failed:\n{err}"
 
 
+def test_native_cpu_backend_selection_does_not_require_jax_runtime():
+    """native_cpu config must not force a JAX import when only CPU mode is selected."""
+    rc, err = _run_import_check("""
+        import importlib.abc
+        import sys
+
+        class _BlockJax(importlib.abc.MetaPathFinder):
+            def find_spec(self, fullname, path=None, target=None):
+                del path, target
+                if fullname == "jax" or fullname.startswith("jax."):
+                    raise ImportError("blocked jax import for native_cpu smoke")
+                return None
+
+        sys.meta_path.insert(0, _BlockJax())
+
+        import simsopt.config as simsopt_config
+
+        cfg = simsopt_config.set_backend(
+            "native_cpu",
+            debug_nans=True,
+            transfer_guard="log",
+            compilation_cache_dir="/tmp/ignored-native-cache",
+        )
+        assert cfg.mode == "native_cpu"
+        assert cfg.backend == "cpu"
+    """)
+    assert rc == 0, f"native_cpu config unexpectedly required jax:\n{err}"
+
+
 def test_native_cpu_policy_matches_import_time_x64_contract():
     """The default/native policy should match the package's import-time x64 state."""
     rc, err = _run_import_check("""

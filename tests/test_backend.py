@@ -4,6 +4,19 @@ import importlib
 
 import pytest
 
+_BACKEND_ENV_VARS = (
+    "SIMSOPT_BACKEND_MODE",
+    "SIMSOPT_BACKEND_STRICT",
+    "SIMSOPT_JAX_DEBUG_NANS",
+    "SIMSOPT_JAX_TRANSFER_GUARD",
+    "SIMSOPT_JAX_COMPILATION_CACHE_DIR",
+    "SIMSOPT_BACKEND",
+    "STAGE2_BACKEND",
+    "SIMSOPT_JAX_PLATFORM",
+    "SIMSOPT_JAX_BACKEND",
+    "JAX_PLATFORMS",
+)
+
 
 def _fresh_backend():
     import simsopt.backend as backend
@@ -12,15 +25,7 @@ def _fresh_backend():
 
 
 def _clear_backend_env(monkeypatch) -> None:
-    for name in (
-        "SIMSOPT_BACKEND_MODE",
-        "SIMSOPT_BACKEND_STRICT",
-        "SIMSOPT_BACKEND",
-        "STAGE2_BACKEND",
-        "SIMSOPT_JAX_PLATFORM",
-        "SIMSOPT_JAX_BACKEND",
-        "JAX_PLATFORMS",
-    ):
+    for name in _BACKEND_ENV_VARS:
         monkeypatch.delenv(name, raising=False)
 
 
@@ -214,6 +219,27 @@ def test_jax_mode_requests_eager_jax_import(monkeypatch):
     backend = _fresh_backend()
 
     assert backend.should_eagerly_configure_jax() is True
+
+
+def test_native_cpu_guardrail_env_does_not_trigger_eager_jax_import(monkeypatch):
+    _clear_backend_env(monkeypatch)
+    monkeypatch.setenv("SIMSOPT_BACKEND_MODE", "native_cpu")
+    monkeypatch.setenv("SIMSOPT_JAX_DEBUG_NANS", "1")
+    backend = _fresh_backend()
+
+    assert backend.should_eagerly_configure_jax() is False
+
+
+def test_jax_modes_do_not_enable_compilation_cache_without_opt_in(monkeypatch):
+    _clear_backend_env(monkeypatch)
+    backend = _fresh_backend()
+
+    config = backend.set_backend("jax_cpu_parity", configure_runtime=False)
+    policy = backend.get_backend_policy("jax_cpu_parity")
+
+    assert config.compilation_cache_dir is None
+    assert backend.get_compilation_cache_dir() is None
+    assert policy.compilation_cache_dir is None
 
 
 def test_strict_fallback_helper_ignores_native_cpu(monkeypatch):
