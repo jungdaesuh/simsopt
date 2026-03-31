@@ -19,6 +19,7 @@ import tempfile
 import types
 
 import jax
+import jax.numpy as jnp
 import pytest
 import numpy as np
 
@@ -48,6 +49,10 @@ from simsopt.objectives import SquaredFlux, QuadraticPenalty  # noqa: E402
 
 from simsopt.field.biotsavart_jax_backend import BiotSavartJAX
 import simsopt.field.biotsavart_jax_backend as biotsavart_jax_backend_module
+from simsopt.jax_core import (
+    grouped_biot_savart_B_from_inputs,
+    grouped_biot_savart_B_from_spec,
+)
 from simsopt.geo.optimizer_jax import (
     PRIVATE_OPTIMIZER_JAX_VERSION,
     jax_minimize,
@@ -921,6 +926,52 @@ class TestMixedQuadratureParity:
             rtol=1e-10,
             atol=1e-15,
             err_msg="BiotSavartJAX.B() mixed-quad parity failure",
+        )
+
+    def test_chunked_grouped_paths_match_cpu_on_large_point_cloud(
+        self, mixed_quad_setup
+    ):
+        """Spec and array-compat grouped paths agree with CPU on multi-chunk inputs."""
+        coils, surf = mixed_quad_setup
+        base_points = surf.gamma().reshape((-1, 3))
+        point_offsets = np.asarray(
+            [
+                [0.0, 0.0, 0.0],
+                [0.01, -0.015, 0.005],
+                [-0.02, 0.01, -0.01],
+            ]
+        )
+        points = np.concatenate(
+            [base_points + offset for offset in point_offsets], axis=0
+        )
+        assert points.shape[0] > 2 * 256
+
+        bs_cpu = BiotSavart(coils)
+        bs_cpu.set_points(points)
+        B_cpu = bs_cpu.B()
+
+        bs_jax = BiotSavartJAX(coils)
+        coil_arrays = bs_jax.grouped_coil_arrays_from_dofs(jnp.asarray(bs_jax.x))
+        coil_spec = bs_jax.coil_set_spec()
+
+        B_from_inputs = np.asarray(
+            grouped_biot_savart_B_from_inputs(points, coil_arrays)
+        )
+        B_from_spec = np.asarray(grouped_biot_savart_B_from_spec(points, coil_spec))
+
+        np.testing.assert_allclose(
+            B_from_inputs,
+            B_from_spec,
+            rtol=1e-12,
+            atol=1e-15,
+            err_msg="Chunked grouped compatibility path diverged from spec path",
+        )
+        np.testing.assert_allclose(
+            B_from_spec,
+            B_cpu,
+            rtol=1e-10,
+            atol=1e-15,
+            err_msg="Chunked grouped path lost CPU parity on large point cloud",
         )
 
     @pytest.mark.parametrize(

@@ -28,12 +28,12 @@ import jax.numpy as jnp
 
 from .._core.derivative import Derivative, derivative_dec
 from .._core.optimizable import Optimizable
-from ..objectives.utilities import forward_backward_jax, plu_solve_jax
-from ..field.biotsavart_jax import grouped_biot_savart_B
-from ..field.biotsavart_jax_backend import (
-    _project_single_coil_cotangent_data,
-    project_coil_cotangents_to_derivative,
+from ..jax_core.field import (
+    grouped_biot_savart_B_from_inputs,
+    grouped_coil_currents_from_inputs,
 )
+from ..objectives.utilities import forward_backward_jax, plu_solve_jax
+from ..field.biotsavart_jax_backend import _project_single_coil_cotangent_data
 from .boozer_residual_jax import (
     boozer_residual_vector,
     _surface_geometry_from_dofs,
@@ -188,7 +188,7 @@ def _qs_ratio_pure(
 
     nphi, ntheta = gamma.shape[:2]
     points = gamma.reshape(-1, 3)
-    B = grouped_biot_savart_B(points, coil_arrays)
+    B = grouped_biot_savart_B_from_inputs(points, coil_arrays)
     B = B.reshape(nphi, ntheta, 3)
     modB = jnp.sqrt(jnp.sum(B**2, axis=-1))
 
@@ -230,7 +230,7 @@ def _boozer_residual_J_of_x_inner(
         sdofs, iota, G = x_inner[:-2], x_inner[-2], x_inner[-1]
     else:
         sdofs, iota = x_inner[:-1], x_inner[-1]
-        G = compute_G_from_currents(jnp.concatenate([c for _, _, c in coil_arrays]))
+        G = compute_G_from_currents(grouped_coil_currents_from_inputs(coil_arrays))
 
     gamma, xphi, xtheta = _surface_geometry_from_dofs(
         sdofs,
@@ -246,7 +246,11 @@ def _boozer_residual_J_of_x_inner(
     num_points = 3 * nphi * ntheta
 
     points = gamma.reshape(-1, 3)
-    B = grouped_biot_savart_B(points, coil_arrays).reshape(nphi, ntheta, 3)
+    B = grouped_biot_savart_B_from_inputs(points, coil_arrays).reshape(
+        nphi,
+        ntheta,
+        3,
+    )
 
     r_flat = boozer_residual_vector(G, iota, B, xphi, xtheta, weight_inv_modB)
     J_boozer = 0.5 * jnp.sum(r_flat**2) / num_points
@@ -374,9 +378,10 @@ class BoozerResidualJAX(Optimizable):
         effective_G = _resolved_boozer_G(booz_surf)
         cw = self.constraint_weight if self.constraint_weight is not None else 1.0
 
-        B_3d = grouped_biot_savart_B(points, booz_surf._coil_arrays).reshape(
-            nphi, ntheta, 3
-        )
+        B_3d = grouped_biot_savart_B_from_inputs(
+            points,
+            booz_surf._coil_arrays,
+        ).reshape(nphi, ntheta, 3)
 
         vjp_fn = booz_surf.res["vjp"]
         vjp_groups_fn = booz_surf.res.get("vjp_groups")

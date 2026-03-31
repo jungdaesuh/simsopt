@@ -50,8 +50,11 @@ except (ImportError, ModuleNotFoundError):
 
 from .surface_fourier_jax import stellsym_scatter_indices
 from ..jax_core.field import (
+    grouped_biot_savart_A_from_inputs,
     grouped_biot_savart_A_from_spec,
+    grouped_biot_savart_B_from_inputs,
     grouped_biot_savart_B_from_spec,
+    grouped_coil_currents_from_inputs,
     grouped_coil_currents_from_spec,
     grouped_coil_index_lists_from_spec,
     grouped_coil_set_spec_from_grouped_data,
@@ -59,7 +62,6 @@ from ..jax_core.field import (
     grouped_field_data_from_spec,
     grouped_field_inputs_from_spec,
 )
-from ..field.biotsavart_jax import grouped_biot_savart_A, grouped_biot_savart_B
 from .boozer_residual_jax import (
     boozer_residual_scalar,
     boozer_residual_vector,
@@ -157,7 +159,7 @@ def _coil_currents_are_fixed(biotsavart):
 def _grouped_coil_currents(*, coil_arrays=None, coil_set_spec=None):
     if coil_set_spec is not None:
         return grouped_coil_currents_from_spec(coil_set_spec)
-    return jnp.concatenate([currents for _, _, currents in coil_arrays])
+    return grouped_coil_currents_from_inputs(coil_arrays)
 
 
 def _resolved_coil_set_spec(default_spec, *, coil_arrays=None, coil_set_spec=None):
@@ -169,13 +171,13 @@ def _resolved_coil_set_spec(default_spec, *, coil_arrays=None, coil_set_spec=Non
 def _grouped_biot_savart_B_points(points, *, coil_arrays=None, coil_set_spec=None):
     if coil_set_spec is not None:
         return grouped_biot_savart_B_from_spec(points, coil_set_spec)
-    return grouped_biot_savart_B(points, coil_arrays)
+    return grouped_biot_savart_B_from_inputs(points, coil_arrays)
 
 
 def _grouped_biot_savart_A_points(points, *, coil_arrays=None, coil_set_spec=None):
     if coil_set_spec is not None:
         return grouped_biot_savart_A_from_spec(points, coil_set_spec)
-    return grouped_biot_savart_A(points, coil_arrays)
+    return grouped_biot_savart_A_from_inputs(points, coil_arrays)
 
 
 def _compute_label(

@@ -139,6 +139,27 @@ def grouped_coil_set_spec_from_grouped_data(groups: object) -> GroupedCoilSetSpe
     return make_grouped_coil_set_spec(groups)
 
 
+def grouped_coil_set_spec_from_inputs(coil_arrays: object) -> GroupedCoilSetSpec:
+    groups = []
+    coil_offset = 0
+    for gammas, gammadashs, currents in coil_arrays:
+        group_size = int(currents.shape[0])
+        groups.append(
+            (
+                gammas,
+                gammadashs,
+                currents,
+                tuple(range(coil_offset, coil_offset + group_size)),
+            )
+        )
+        coil_offset += group_size
+    return make_grouped_coil_set_spec(groups)
+
+
+def _coil_set_spec_from_inputs(coil_arrays: object) -> GroupedCoilSetSpec:
+    return grouped_coil_set_spec_from_inputs(coil_arrays)
+
+
 def grouped_field_inputs_from_spec(
     coil_spec: GroupedCoilSetSpec,
 ) -> tuple[tuple[object, object, object], ...]:
@@ -177,12 +198,30 @@ def grouped_coil_currents_from_spec(
     return currents
 
 
+def grouped_coil_currents_from_inputs(coil_arrays: object):
+    return grouped_coil_currents_from_spec(_coil_set_spec_from_inputs(coil_arrays))
+
+
 def grouped_biot_savart_B_from_spec(points: object, coil_spec: GroupedCoilSetSpec):
     return _accumulate_grouped_field(points, coil_spec, biot_savart_B)
 
 
+def grouped_biot_savart_B_from_inputs(points: object, coil_arrays: object):
+    return grouped_biot_savart_B_from_spec(
+        points,
+        _coil_set_spec_from_inputs(coil_arrays),
+    )
+
+
 def grouped_biot_savart_A_from_spec(points: object, coil_spec: GroupedCoilSetSpec):
     return _accumulate_grouped_field(points, coil_spec, biot_savart_A)
+
+
+def grouped_biot_savart_A_from_inputs(points: object, coil_arrays: object):
+    return grouped_biot_savart_A_from_spec(
+        points,
+        _coil_set_spec_from_inputs(coil_arrays),
+    )
 
 
 def grouped_biot_savart_dB_by_dX_from_spec(
