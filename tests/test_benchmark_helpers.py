@@ -1,4 +1,5 @@
 import argparse
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -84,6 +85,22 @@ from benchmarks.validation_ladder_common import (
 )
 
 
+def _load_benchmark_module(name: str, relpath: str):
+    module_path = Path(__file__).resolve().parents[1] / relpath
+    spec = importlib.util.spec_from_file_location(name, str(module_path))
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+biot_savart_kernel_scaling = _load_benchmark_module(
+    "biot_savart_kernel_scaling",
+    "benchmarks/biot_savart_kernel_scaling.py",
+)
+
+
 def _single_stage_cuda_runtime_available() -> bool:
     try:
         devices = single_stage_init_parity_module.jax.devices("gpu")
@@ -122,6 +139,55 @@ def test_summarize_result_fun_falls_back_to_residual_norm():
 
 def test_summarize_result_fun_returns_nan_without_fun_or_residual():
     assert math.isnan(summarize_result_fun({}))
+
+
+def test_biot_savart_kernel_scaling_payload_includes_tuning(monkeypatch):
+    monkeypatch.setattr(
+        biot_savart_kernel_scaling,
+        "_make_fixture",
+        lambda case, seed: (
+            np.zeros((case.npoints, 3)),
+            np.zeros((case.ncoils, case.nquad, 3)),
+            np.zeros((case.ncoils, case.nquad, 3)),
+            np.ones((case.ncoils,)),
+        ),
+    )
+    monkeypatch.setattr(
+        biot_savart_kernel_scaling,
+        "_measure_kernel",
+        lambda fn, *args, warmup, repeat: {
+            "compile_s": 0.1,
+            "median_ms": 0.2,
+            "mean_ms": 0.3,
+            "shape": list(np.shape(fn(*args))),
+        },
+    )
+    monkeypatch.setattr(
+        biot_savart_kernel_scaling,
+        "build_provenance",
+        lambda jax_module, jaxlib_module, *, title, extra=None: {
+            "title": title,
+            "repo_sha": "deadbeef",
+            **(extra or {}),
+        },
+    )
+
+    payload = biot_savart_kernel_scaling.build_biotsavart_kernel_scaling_payload(
+        title="kernel scaling",
+        mode="jax_gpu_fast",
+        warmup=0,
+        repeat=1,
+        seed=0,
+        cases=(biot_savart_kernel_scaling.KernelScalingCase("mini", 2, 4, 3),),
+    )
+
+    assert payload["provenance"]["backend_mode"] == "jax_gpu_fast"
+    assert payload["provenance"]["chunk_policy"] == "performance_tuned"
+    assert payload["provenance"]["coil_chunk_size"] == 64
+    assert payload["provenance"]["quadrature_block_size"] == 64
+    assert payload["cases"][0]["label"] == "mini"
+    assert payload["cases"][0]["B"]["shape"] == [3, 3]
+    assert payload["cases"][0]["dA_by_dX"]["shape"] == [3, 3, 3]
 
 
 def test_build_synthetic_boozer_problem_uses_requested_grid():

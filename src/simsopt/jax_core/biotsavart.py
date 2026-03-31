@@ -9,11 +9,12 @@ by ``jax.grad``, ``jax.jacfwd``, ``jax.jacrev``, and ``jax.hessian``.
 """
 
 from functools import partial
-import os
 
 import jax
 from jax import lax
 import jax.numpy as jnp
+
+from ..backend import get_coil_chunk_size, get_quadrature_block_size
 
 __all__ = [
     "biot_savart_B",
@@ -28,18 +29,14 @@ __all__ = [
 ]
 
 _MU0_OVER_4PI = 1e-7
-_MODE_ENV = "SIMSOPT_BACKEND_MODE"
-_COIL_CHUNK_SIZE_BY_MODE = {
-    "native_cpu": 0,
-    "jax_cpu_parity": 16,
-    "jax_gpu_parity": 16,
-    "jax_gpu_fast": 64,
-}
 
 
 def _coil_chunk_size() -> int:
-    mode = os.environ.get(_MODE_ENV, "native_cpu")
-    return int(_COIL_CHUNK_SIZE_BY_MODE.get(mode, 0))
+    return get_coil_chunk_size()
+
+
+def _quadrature_block_size() -> int:
+    return get_quadrature_block_size()
 
 
 def _slice_coil_chunk(array, start: int, chunk_size: int):
@@ -48,6 +45,14 @@ def _slice_coil_chunk(array, start: int, chunk_size: int):
         array,
         (start,) + (0,) * len(trailing_shape),
         (chunk_size,) + trailing_shape,
+    )
+
+
+def _slice_quadrature_block(array, start: int, block_size: int):
+    return lax.dynamic_slice(
+        array,
+        (0, start, 0),
+        (array.shape[0], block_size, array.shape[2]),
     )
 
 
@@ -87,14 +92,64 @@ def _coil_chunk_reduce(
     return lax.fori_loop(0, chunk_count, body, zero)
 
 
-def _biot_savart_one_point_dense(x, gammas, gammadashs, currents):
+def _quadrature_block_integral(
+    x,
+    gammas,
+    gammadashs,
+    *,
+    block_size: int,
+    integrand,
+):
+    quadrature_count = int(gammas.shape[1])
+    if block_size <= 0 or quadrature_count <= block_size:
+        return jnp.mean(integrand(x, gammas, gammadashs), axis=1)
+
+    block_count = (quadrature_count + block_size - 1) // block_size
+    padded_quadrature_count = block_count * block_size
+    pad_width = ((0, 0), (0, padded_quadrature_count - quadrature_count), (0, 0))
+    padded_gammas = jnp.pad(gammas, pad_width)
+    padded_gammadashs = jnp.pad(gammadashs, pad_width)
+    zero = jnp.zeros((gammas.shape[0], 3), dtype=jnp.float64)
+
+    def body(block_index: int, acc):
+        start = block_index * block_size
+        block_gammas = _slice_quadrature_block(padded_gammas, start, block_size)
+        block_gammadashs = _slice_quadrature_block(
+            padded_gammadashs,
+            start,
+            block_size,
+        )
+        block_integrand = integrand(x, block_gammas, block_gammadashs)
+        return acc + jnp.sum(block_integrand, axis=1)
+
+    integral_sum = lax.fori_loop(0, block_count, body, zero)
+    return integral_sum / quadrature_count
+
+
+def _biot_savart_B_integrand(x, gammas, gammadashs):
     diff = gammas - x
     r2 = jnp.sum(diff * diff, axis=-1)
     safe_r2 = jnp.where(r2 > 0, r2, 1.0)
     r_inv3 = jnp.where(r2 > 0, safe_r2 ** (-1.5), 0.0)
     cross = jnp.cross(diff, gammadashs)
-    integrand = cross * r_inv3[..., None]
-    integral = jnp.mean(integrand, axis=1)
+    return cross * r_inv3[..., None]
+
+
+def _biot_savart_one_point_dense(
+    x,
+    gammas,
+    gammadashs,
+    currents,
+    *,
+    quadrature_block_size: int = 0,
+):
+    integral = _quadrature_block_integral(
+        x,
+        gammas,
+        gammadashs,
+        block_size=quadrature_block_size,
+        integrand=_biot_savart_B_integrand,
+    )
     return _MU0_OVER_4PI * jnp.einsum("c,cj->j", currents, integral)
 
 
@@ -106,6 +161,7 @@ def _chunked_one_point(
     currents,
     *,
     chunk_size: int,
+    quadrature_block_size: int,
 ):
     return _coil_chunk_reduce(
         gammas,
@@ -120,11 +176,20 @@ def _chunked_one_point(
             chunk_gammas,
             chunk_gammadashs,
             chunk_currents,
+            quadrature_block_size=quadrature_block_size,
         ),
     )
 
 
-def _biot_savart_one_point(x, gammas, gammadashs, currents, *, chunk_size: int):
+def _biot_savart_one_point(
+    x,
+    gammas,
+    gammadashs,
+    currents,
+    *,
+    chunk_size: int,
+    quadrature_block_size: int,
+):
     return _chunked_one_point(
         _biot_savart_one_point_dense,
         x,
@@ -132,11 +197,19 @@ def _biot_savart_one_point(x, gammas, gammadashs, currents, *, chunk_size: int):
         gammadashs,
         currents,
         chunk_size=chunk_size,
+        quadrature_block_size=quadrature_block_size,
     )
 
 
 def _pointwise_kernel(
-    points, point_kernel, gammas, gammadashs, currents, *, chunk_size: int
+    points,
+    point_kernel,
+    gammas,
+    gammadashs,
+    currents,
+    *,
+    chunk_size: int,
+    quadrature_block_size: int,
 ):
     return jax.vmap(
         lambda x: point_kernel(
@@ -145,6 +218,7 @@ def _pointwise_kernel(
             gammadashs,
             currents,
             chunk_size=chunk_size,
+            quadrature_block_size=quadrature_block_size,
         ),
         in_axes=0,
     )(points)
@@ -158,6 +232,7 @@ def _pointwise_jacobian(
     currents,
     *,
     chunk_size: int,
+    quadrature_block_size: int,
 ):
     jac_fn = jax.jacfwd(point_kernel, argnums=0)
     raw = jax.vmap(
@@ -167,14 +242,23 @@ def _pointwise_jacobian(
             gammadashs,
             currents,
             chunk_size=chunk_size,
+            quadrature_block_size=quadrature_block_size,
         ),
         in_axes=0,
     )(points)
     return jnp.swapaxes(raw, -1, -2)
 
 
-@partial(jax.jit, static_argnames=("chunk_size",))
-def _biot_savart_B_impl(points, gammas, gammadashs, currents, *, chunk_size: int):
+@partial(jax.jit, static_argnames=("chunk_size", "quadrature_block_size"))
+def _biot_savart_B_impl(
+    points,
+    gammas,
+    gammadashs,
+    currents,
+    *,
+    chunk_size: int,
+    quadrature_block_size: int,
+):
     return _pointwise_kernel(
         points,
         _biot_savart_one_point,
@@ -182,6 +266,7 @@ def _biot_savart_B_impl(points, gammas, gammadashs, currents, *, chunk_size: int
         gammadashs,
         currents,
         chunk_size=chunk_size,
+        quadrature_block_size=quadrature_block_size,
     )
 
 
@@ -192,6 +277,7 @@ def biot_savart_B(points, gammas, gammadashs, currents):
         gammadashs,
         currents,
         chunk_size=_coil_chunk_size(),
+        quadrature_block_size=_quadrature_block_size(),
     )
 
 
@@ -204,7 +290,7 @@ def biot_savart_B_vjp(points, v, gammas, gammadashs, currents):
     return pullback(v)
 
 
-@partial(jax.jit, static_argnames=("chunk_size",))
+@partial(jax.jit, static_argnames=("chunk_size", "quadrature_block_size"))
 def _biot_savart_dB_by_dX_impl(
     points,
     gammas,
@@ -212,6 +298,7 @@ def _biot_savart_dB_by_dX_impl(
     currents,
     *,
     chunk_size: int,
+    quadrature_block_size: int,
 ):
     return _pointwise_jacobian(
         points,
@@ -220,6 +307,7 @@ def _biot_savart_dB_by_dX_impl(
         gammadashs,
         currents,
         chunk_size=chunk_size,
+        quadrature_block_size=quadrature_block_size,
     )
 
 
@@ -230,10 +318,11 @@ def biot_savart_dB_by_dX(points, gammas, gammadashs, currents):
         gammadashs,
         currents,
         chunk_size=_coil_chunk_size(),
+        quadrature_block_size=_quadrature_block_size(),
     )
 
 
-@partial(jax.jit, static_argnames=("chunk_size",))
+@partial(jax.jit, static_argnames=("chunk_size", "quadrature_block_size"))
 def _biot_savart_B_and_dB_impl(
     points,
     gammas,
@@ -241,6 +330,7 @@ def _biot_savart_B_and_dB_impl(
     currents,
     *,
     chunk_size: int,
+    quadrature_block_size: int,
 ):
     def _val_and_jac(x):
         f = lambda xx: _biot_savart_one_point(
@@ -249,6 +339,7 @@ def _biot_savart_B_and_dB_impl(
             gammadashs,
             currents,
             chunk_size=chunk_size,
+            quadrature_block_size=quadrature_block_size,
         )
         primals, tangents_fn = jax.linearize(f, x)
         return primals, jax.vmap(tangents_fn)(jnp.eye(3))
@@ -263,21 +354,46 @@ def biot_savart_B_and_dB(points, gammas, gammadashs, currents):
         gammadashs,
         currents,
         chunk_size=_coil_chunk_size(),
+        quadrature_block_size=_quadrature_block_size(),
     )
     return B, dB_dX
 
 
-def _biot_savart_A_one_point_dense(x, gammas, gammadashs, currents):
+def _biot_savart_A_integrand(x, gammas, gammadashs):
     diff = gammas - x
     r2 = jnp.sum(diff * diff, axis=-1)
     safe_r2 = jnp.where(r2 > 0, r2, 1.0)
     r_inv = jnp.where(r2 > 0, safe_r2 ** (-0.5), 0.0)
-    integrand = gammadashs * r_inv[..., None]
-    integral = jnp.mean(integrand, axis=1)
+    return gammadashs * r_inv[..., None]
+
+
+def _biot_savart_A_one_point_dense(
+    x,
+    gammas,
+    gammadashs,
+    currents,
+    *,
+    quadrature_block_size: int = 0,
+):
+    integral = _quadrature_block_integral(
+        x,
+        gammas,
+        gammadashs,
+        block_size=quadrature_block_size,
+        integrand=_biot_savart_A_integrand,
+    )
     return _MU0_OVER_4PI * jnp.einsum("c,cj->j", currents, integral)
 
 
-def _biot_savart_A_one_point(x, gammas, gammadashs, currents, *, chunk_size: int):
+def _biot_savart_A_one_point(
+    x,
+    gammas,
+    gammadashs,
+    currents,
+    *,
+    chunk_size: int,
+    quadrature_block_size: int,
+):
     return _chunked_one_point(
         _biot_savart_A_one_point_dense,
         x,
@@ -285,11 +401,20 @@ def _biot_savart_A_one_point(x, gammas, gammadashs, currents, *, chunk_size: int
         gammadashs,
         currents,
         chunk_size=chunk_size,
+        quadrature_block_size=quadrature_block_size,
     )
 
 
-@partial(jax.jit, static_argnames=("chunk_size",))
-def _biot_savart_A_impl(points, gammas, gammadashs, currents, *, chunk_size: int):
+@partial(jax.jit, static_argnames=("chunk_size", "quadrature_block_size"))
+def _biot_savart_A_impl(
+    points,
+    gammas,
+    gammadashs,
+    currents,
+    *,
+    chunk_size: int,
+    quadrature_block_size: int,
+):
     return _pointwise_kernel(
         points,
         _biot_savart_A_one_point,
@@ -297,6 +422,7 @@ def _biot_savart_A_impl(points, gammas, gammadashs, currents, *, chunk_size: int
         gammadashs,
         currents,
         chunk_size=chunk_size,
+        quadrature_block_size=quadrature_block_size,
     )
 
 
@@ -307,10 +433,11 @@ def biot_savart_A(points, gammas, gammadashs, currents):
         gammadashs,
         currents,
         chunk_size=_coil_chunk_size(),
+        quadrature_block_size=_quadrature_block_size(),
     )
 
 
-@partial(jax.jit, static_argnames=("chunk_size",))
+@partial(jax.jit, static_argnames=("chunk_size", "quadrature_block_size"))
 def _biot_savart_dA_by_dX_impl(
     points,
     gammas,
@@ -318,6 +445,7 @@ def _biot_savart_dA_by_dX_impl(
     currents,
     *,
     chunk_size: int,
+    quadrature_block_size: int,
 ):
     return _pointwise_jacobian(
         points,
@@ -326,6 +454,7 @@ def _biot_savart_dA_by_dX_impl(
         gammadashs,
         currents,
         chunk_size=chunk_size,
+        quadrature_block_size=quadrature_block_size,
     )
 
 
@@ -336,6 +465,7 @@ def biot_savart_dA_by_dX(points, gammas, gammadashs, currents):
         gammadashs,
         currents,
         chunk_size=_coil_chunk_size(),
+        quadrature_block_size=_quadrature_block_size(),
     )
 
 

@@ -31,6 +31,8 @@ _STRICT_ENV = "SIMSOPT_BACKEND_STRICT"
 _DEBUG_NANS_ENV = "SIMSOPT_JAX_DEBUG_NANS"
 _TRANSFER_GUARD_ENV = "SIMSOPT_JAX_TRANSFER_GUARD"
 _COMPILATION_CACHE_DIR_ENV = "SIMSOPT_JAX_COMPILATION_CACHE_DIR"
+_COIL_CHUNK_SIZE_ENV = "SIMSOPT_JAX_COIL_CHUNK_SIZE"
+_QUADRATURE_BLOCK_SIZE_ENV = "SIMSOPT_JAX_QUADRATURE_BLOCK_SIZE"
 _JAX_PLATFORMS_ENV = "JAX_PLATFORMS"
 _VALID_TRANSFER_GUARDS = ("allow", "log", "disallow")
 _GUARDRAIL_ENV_VARS = (
@@ -107,6 +109,17 @@ _MODE_POLICY_DEFAULTS = {
     },
 }
 
+_FIELD_KERNEL_DEFAULTS = {
+    "native_cpu": {"coil_chunk_size": 0, "quadrature_block_size": 0},
+    "jax_cpu_parity": {"coil_chunk_size": 16, "quadrature_block_size": 0},
+    "jax_gpu_parity": {"coil_chunk_size": 16, "quadrature_block_size": 0},
+    "jax_gpu_fast": {"coil_chunk_size": 64, "quadrature_block_size": 64},
+}
+_FIELD_KERNEL_ENV_BY_KEY = {
+    "coil_chunk_size": _COIL_CHUNK_SIZE_ENV,
+    "quadrature_block_size": _QUADRATURE_BLOCK_SIZE_ENV,
+}
+
 
 @dataclass(frozen=True)
 class BackendConfig:
@@ -134,6 +147,14 @@ class BackendPolicy:
     debug_nans: bool
     transfer_guard: str | None
     compilation_cache_dir: str | None
+
+
+@dataclass(frozen=True)
+class FieldKernelTuning:
+    mode: str
+    chunk_policy: str
+    coil_chunk_size: int
+    quadrature_block_size: int
 
 
 def _env_bool(name: str) -> bool:
@@ -185,6 +206,24 @@ def _optional_env_value(name: str) -> str | None:
     if raw_value in (None, ""):
         return None
     return raw_value
+
+
+def _optional_positive_int_env(name: str) -> int | None:
+    raw_value = _optional_env_value(name)
+    if raw_value is None:
+        return None
+    value = int(raw_value)
+    if value < 0:
+        raise ValueError(f"{name}={raw_value!r} must be >= 0")
+    return value
+
+
+def _field_kernel_value(mode: str, key: str) -> int:
+    env_name = _FIELD_KERNEL_ENV_BY_KEY[key]
+    value = _optional_positive_int_env(env_name)
+    if value is not None:
+        return value
+    return _FIELD_KERNEL_DEFAULTS[mode][key]
 
 
 def _resolve_debug_nans(debug_nans: bool | None) -> bool:
@@ -400,6 +439,31 @@ def get_compilation_cache_policy(mode: str | None = None) -> str:
 def get_provenance_label(mode: str | None = None) -> str:
     """Return the provenance label that should tag outputs from the mode."""
     return get_backend_policy(mode).provenance_label
+
+
+def get_field_kernel_tuning(mode: str | None = None) -> FieldKernelTuning:
+    """Return the low-level field-kernel tuning contract for the resolved mode."""
+    resolved_mode = _resolve_mode(mode)
+    policy = get_backend_policy(resolved_mode)
+    return FieldKernelTuning(
+        mode=resolved_mode,
+        chunk_policy=policy.chunk_policy,
+        coil_chunk_size=_field_kernel_value(resolved_mode, "coil_chunk_size"),
+        quadrature_block_size=_field_kernel_value(
+            resolved_mode,
+            "quadrature_block_size",
+        ),
+    )
+
+
+def get_coil_chunk_size(mode: str | None = None) -> int:
+    """Return the low-level Biot-Savart coil-axis chunk size."""
+    return get_field_kernel_tuning(mode).coil_chunk_size
+
+
+def get_quadrature_block_size(mode: str | None = None) -> int:
+    """Return the low-level Biot-Savart quadrature-block size."""
+    return get_field_kernel_tuning(mode).quadrature_block_size
 
 
 def get_debug_nans(mode: str | None = None) -> bool:

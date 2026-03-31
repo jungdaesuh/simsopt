@@ -10,6 +10,8 @@ _BACKEND_ENV_VARS = (
     "SIMSOPT_JAX_DEBUG_NANS",
     "SIMSOPT_JAX_TRANSFER_GUARD",
     "SIMSOPT_JAX_COMPILATION_CACHE_DIR",
+    "SIMSOPT_JAX_COIL_CHUNK_SIZE",
+    "SIMSOPT_JAX_QUADRATURE_BLOCK_SIZE",
     "SIMSOPT_BACKEND",
     "STAGE2_BACKEND",
     "SIMSOPT_JAX_PLATFORM",
@@ -186,6 +188,32 @@ def test_fast_mode_policy_helpers(monkeypatch):
         provenance_label="jax_gpu_fast",
     )
     assert backend.is_parity_mode() is False
+
+
+def test_field_kernel_tuning_defaults_follow_mode(monkeypatch):
+    _clear_backend_env(monkeypatch)
+    backend = _fresh_backend()
+
+    tuning = backend.get_field_kernel_tuning("jax_gpu_fast")
+
+    assert tuning.mode == "jax_gpu_fast"
+    assert tuning.chunk_policy == "performance_tuned"
+    assert tuning.coil_chunk_size == 64
+    assert tuning.quadrature_block_size == 64
+    assert backend.get_coil_chunk_size("jax_cpu_parity") == 16
+    assert backend.get_quadrature_block_size("jax_cpu_parity") == 0
+
+
+def test_field_kernel_tuning_allows_explicit_env_overrides(monkeypatch):
+    _clear_backend_env(monkeypatch)
+    monkeypatch.setenv("SIMSOPT_JAX_COIL_CHUNK_SIZE", "23")
+    monkeypatch.setenv("SIMSOPT_JAX_QUADRATURE_BLOCK_SIZE", "11")
+    backend = _fresh_backend()
+
+    tuning = backend.get_field_kernel_tuning("jax_gpu_fast")
+
+    assert tuning.coil_chunk_size == 23
+    assert tuning.quadrature_block_size == 11
 
 
 def test_explicit_current_mode_policy_preserves_strict_state(monkeypatch):

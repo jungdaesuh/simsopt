@@ -52,12 +52,46 @@ def _load_chunked_biotsavart():
     return _load_with_backend_mode("jax_cpu_parity")
 
 
+@contextmanager
+def _kernel_tuning_env(
+    mode: str,
+    *,
+    coil_chunk_size: int | None = None,
+    quadrature_block_size: int | None = None,
+):
+    previous = {name: os.environ.get(name) for name in _KERNEL_TUNING_ENV_VARS}
+    os.environ["SIMSOPT_BACKEND_MODE"] = mode
+    if coil_chunk_size is None:
+        os.environ.pop("SIMSOPT_JAX_COIL_CHUNK_SIZE", None)
+    else:
+        os.environ["SIMSOPT_JAX_COIL_CHUNK_SIZE"] = str(coil_chunk_size)
+    if quadrature_block_size is None:
+        os.environ.pop("SIMSOPT_JAX_QUADRATURE_BLOCK_SIZE", None)
+    else:
+        os.environ["SIMSOPT_JAX_QUADRATURE_BLOCK_SIZE"] = str(quadrature_block_size)
+    try:
+        yield
+    finally:
+        for name, value in previous.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+
+
 _bs = _load("biotsavart_jax", "field/biotsavart_jax.py")
 biot_savart_B = _bs.biot_savart_B
 biot_savart_dB_by_dX = _bs.biot_savart_dB_by_dX
 biot_savart_B_and_dB = _bs.biot_savart_B_and_dB
+biot_savart_A = _bs.biot_savart_A
+biot_savart_dA_by_dX = _bs.biot_savart_dA_by_dX
 
 MU0 = 4.0 * np.pi * 1e-7
+_KERNEL_TUNING_ENV_VARS = (
+    "SIMSOPT_BACKEND_MODE",
+    "SIMSOPT_JAX_COIL_CHUNK_SIZE",
+    "SIMSOPT_JAX_QUADRATURE_BLOCK_SIZE",
+)
 
 
 def _make_circular_coil(R=1.0, nquad=128):
@@ -93,6 +127,72 @@ def _make_shifted_circular_coils(ncoils: int, *, R: float = 1.0, nquad: int = 12
     gammadash_stack = jnp.concatenate([gammadash] * ncoils, axis=0)
     currents = jnp.linspace(5e4, 5e4 + 1e3 * (ncoils - 1), ncoils, dtype=jnp.float64)
     return gamma_stack, gammadash_stack, currents
+
+
+def _make_random_fixture(
+    *,
+    seed: int,
+    ncoils: int = 33,
+    nquad: int = 130,
+    npoints: int = 17,
+):
+    rng = np.random.default_rng(seed)
+    points = rng.normal(size=(npoints, 3))
+    points[:, 0] -= 2.0
+    gammas = rng.normal(size=(ncoils, nquad, 3))
+    gammas[:, :, 0] += 1.5
+    gammadashs = rng.normal(size=(ncoils, nquad, 3))
+    currents = rng.normal(loc=1.0e5, scale=2.0e4, size=(ncoils,))
+    return (
+        jnp.asarray(points, dtype=jnp.float64),
+        jnp.asarray(gammas, dtype=jnp.float64),
+        jnp.asarray(gammadashs, dtype=jnp.float64),
+        jnp.asarray(currents, dtype=jnp.float64),
+    )
+
+
+def _dense_reference_fields(module, points, gammas, gammadashs, currents):
+    dense_B = jax.vmap(
+        lambda x: module._biot_savart_one_point_dense(
+            x,
+            gammas,
+            gammadashs,
+            currents,
+        )
+    )(points)
+    dense_A = jax.vmap(
+        lambda x: module._biot_savart_A_one_point_dense(
+            x,
+            gammas,
+            gammadashs,
+            currents,
+        )
+    )(points)
+    dense_dB = jax.vmap(
+        lambda x: jnp.swapaxes(
+            jax.jacfwd(module._biot_savart_one_point_dense, argnums=0)(
+                x,
+                gammas,
+                gammadashs,
+                currents,
+            ),
+            -1,
+            -2,
+        )
+    )(points)
+    dense_dA = jax.vmap(
+        lambda x: jnp.swapaxes(
+            jax.jacfwd(module._biot_savart_A_one_point_dense, argnums=0)(
+                x,
+                gammas,
+                gammadashs,
+                currents,
+            ),
+            -1,
+            -2,
+        )
+    )(points)
+    return dense_B, dense_A, dense_dB, dense_dA
 
 
 class TestBiotSavartJaxAnalytical:
@@ -357,6 +457,43 @@ class TestBiotSavartJaxChunkedParity:
             A = chunked_bs.biot_savart_A(points, gammas, gammadashs, currents)
 
             np.testing.assert_allclose(np.asarray(A), np.asarray(dense_A), atol=1e-14)
+
+    @pytest.mark.parametrize(
+        ("mode", "rtol", "atol"),
+        [
+            ("jax_cpu_parity", 1e-12, 1e-14),
+            ("jax_gpu_fast", 1e-11, 1e-13),
+        ],
+    )
+    def test_randomized_B_A_dB_dA_match_dense_reference(self, mode, rtol, atol):
+        with _kernel_tuning_env(mode):
+            tuned_bs = _load_with_backend_mode(mode)
+            points, gammas, gammadashs, currents = _make_random_fixture(seed=7)
+            dense_B, dense_A, dense_dB, dense_dA = _dense_reference_fields(
+                tuned_bs,
+                points,
+                gammas,
+                gammadashs,
+                currents,
+            )
+
+            B = tuned_bs.biot_savart_B(points, gammas, gammadashs, currents)
+            A = tuned_bs.biot_savart_A(points, gammas, gammadashs, currents)
+            dB = tuned_bs.biot_savart_dB_by_dX(points, gammas, gammadashs, currents)
+            dA = tuned_bs.biot_savart_dA_by_dX(points, gammas, gammadashs, currents)
+
+            np.testing.assert_allclose(
+                np.asarray(B), np.asarray(dense_B), rtol=rtol, atol=atol
+            )
+            np.testing.assert_allclose(
+                np.asarray(A), np.asarray(dense_A), rtol=rtol, atol=atol
+            )
+            np.testing.assert_allclose(
+                np.asarray(dB), np.asarray(dense_dB), rtol=rtol, atol=atol
+            )
+            np.testing.assert_allclose(
+                np.asarray(dA), np.asarray(dense_dA), rtol=rtol, atol=atol
+            )
 
 
 if __name__ == "__main__":
