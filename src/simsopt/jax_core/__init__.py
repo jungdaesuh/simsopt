@@ -36,12 +36,19 @@ from .objectives_flux import (
 )
 from .surface_rzfourier import (
     surface_rz_fourier_area_from_spec,
+    surface_rz_fourier_area_from_dofs,
     surface_rz_fourier_gamma_from_spec,
+    surface_rz_fourier_gamma_from_dofs,
     surface_rz_fourier_gammadash1_from_spec,
+    surface_rz_fourier_gammadash1_from_dofs,
     surface_rz_fourier_gammadash2_from_spec,
+    surface_rz_fourier_gammadash2_from_dofs,
     surface_rz_fourier_normal_from_spec,
+    surface_rz_fourier_normal_from_dofs,
+    surface_rz_fourier_spec_from_dofs,
     surface_rz_fourier_unitnormal_from_spec,
     surface_rz_fourier_volume_from_spec,
+    surface_rz_fourier_volume_from_dofs,
 )
 from .specs import (
     CoilSpec,
@@ -113,10 +120,17 @@ __all__ = [
     "make_surface_rzfourier_spec",
     "grouped_coil_set_spec_from_lists",
     "surface_rz_fourier_area_from_spec",
+    "surface_rz_fourier_area_from_dofs",
     "surface_rz_fourier_gamma_from_spec",
+    "surface_rz_fourier_gamma_from_dofs",
     "surface_rz_fourier_gammadash1_from_spec",
+    "surface_rz_fourier_gammadash1_from_dofs",
     "surface_rz_fourier_gammadash2_from_spec",
+    "surface_rz_fourier_gammadash2_from_dofs",
     "surface_rz_fourier_normal_from_spec",
+    "surface_rz_fourier_normal_from_dofs",
+    "surface_rz_fourier_spec_from_dofs",
     "surface_rz_fourier_unitnormal_from_spec",
     "surface_rz_fourier_volume_from_spec",
+    "surface_rz_fourier_volume_from_dofs",
 ]

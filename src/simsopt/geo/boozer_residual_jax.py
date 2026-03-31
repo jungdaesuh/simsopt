@@ -36,6 +36,13 @@ where ``N = 3 · nphi · ntheta`` (matching the C++ normalization).
 import jax
 import jax.numpy as jnp
 
+from ..jax_core.surface_rzfourier import (
+    surface_rz_fourier_gamma_from_spec,
+    surface_rz_fourier_gammadash1_from_spec,
+    surface_rz_fourier_gammadash2_from_spec,
+    surface_rz_fourier_spec_from_dofs,
+)
+
 __all__ = [
     "boozer_residual_scalar",
     "boozer_residual_grad",
@@ -174,7 +181,7 @@ def boozer_residual_vector(G, iota, B, xphi, xtheta, weight_inv_modB=True):
 
 
 def _get_surface_fns():
-    """Lazily import surface geometry functions (avoids simsopt top-level)."""
+    """Lazily import generic surface geometry helpers."""
     from simsopt.geo.surface_fourier_jax import (
         surface_gamma_from_dofs,
         surface_gammadash1_from_dofs,
@@ -204,12 +211,30 @@ def _surface_geometry_from_dofs(
     nfp,
     stellsym,
     scatter_indices,
+    surface_kind="generic",
 ):
     """Evaluate gamma, gammadash1, gammadash2 from surface DOFs.
 
     Pure function suitable for JAX tracing.  Used by both the composed
     M3 pipeline and the M4 solver (``boozersurface_jax.py``).
     """
+    if surface_kind == "rzfourier":
+        del scatter_indices
+        surface_spec = surface_rz_fourier_spec_from_dofs(
+            sdofs,
+            quadpoints_phi=quadpoints_phi,
+            quadpoints_theta=quadpoints_theta,
+            mpol=mpol,
+            ntor=ntor,
+            nfp=nfp,
+            stellsym=stellsym,
+        )
+        return (
+            surface_rz_fourier_gamma_from_spec(surface_spec),
+            surface_rz_fourier_gammadash1_from_spec(surface_spec),
+            surface_rz_fourier_gammadash2_from_spec(surface_spec),
+        )
+
     sgf, sg1f, sg2f = _get_surface_fns()
     args = (
         sdofs,

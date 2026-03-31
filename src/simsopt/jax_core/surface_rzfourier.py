@@ -5,6 +5,7 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 
+from .specs import make_surface_rzfourier_spec
 from .specs import SurfaceRZFourierSpec
 
 
@@ -46,6 +47,140 @@ def _radius_height_from_modes(
 
 def _phi_frame(phi: jax.Array) -> tuple[jax.Array, jax.Array]:
     return jnp.cos(phi)[:, None], jnp.sin(phi)[:, None]
+
+
+def _block_mode_indices(
+    *,
+    mpol: int,
+    ntor: int,
+    include_zero_mode: bool,
+) -> tuple[jax.Array, jax.Array]:
+    m_idx: list[int] = []
+    n_idx: list[int] = []
+
+    start_n = 0 if include_zero_mode else 1
+    for n in range(start_n, ntor + 1):
+        m_idx.append(0)
+        n_idx.append(n + ntor)
+
+    for m in range(1, mpol + 1):
+        for n in range(-ntor, ntor + 1):
+            m_idx.append(m)
+            n_idx.append(n + ntor)
+
+    return (
+        jnp.asarray(m_idx, dtype=jnp.int32),
+        jnp.asarray(n_idx, dtype=jnp.int32),
+    )
+
+
+def _coefficients_from_dofs(
+    dofs: jax.Array,
+    *,
+    mpol: int,
+    ntor: int,
+    stellsym: bool,
+) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
+    coeff_shape = (mpol + 1, 2 * ntor + 1)
+    include_m, include_n = _block_mode_indices(
+        mpol=mpol,
+        ntor=ntor,
+        include_zero_mode=True,
+    )
+    exclude_m, exclude_n = _block_mode_indices(
+        mpol=mpol,
+        ntor=ntor,
+        include_zero_mode=False,
+    )
+
+    rc_count = int(include_m.shape[0])
+    tail_count = int(exclude_m.shape[0])
+    dofs = jnp.asarray(dofs, dtype=jnp.float64)
+
+    rc = (
+        jnp.zeros(coeff_shape, dtype=jnp.float64)
+        .at[include_m, include_n]
+        .set(dofs[:rc_count])
+    )
+    if stellsym:
+        zs = (
+            jnp.zeros(coeff_shape, dtype=jnp.float64)
+            .at[exclude_m, exclude_n]
+            .set(dofs[rc_count : rc_count + tail_count])
+        )
+        zero = jnp.zeros(coeff_shape, dtype=jnp.float64)
+        return rc, zero, zero, zs
+
+    rs_start = rc_count
+    zc_start = rs_start + tail_count
+    zs_start = zc_start + rc_count
+
+    rs = (
+        jnp.zeros(coeff_shape, dtype=jnp.float64)
+        .at[exclude_m, exclude_n]
+        .set(dofs[rs_start : rs_start + tail_count])
+    )
+    zc = (
+        jnp.zeros(coeff_shape, dtype=jnp.float64)
+        .at[include_m, include_n]
+        .set(dofs[zc_start : zc_start + rc_count])
+    )
+    zs = (
+        jnp.zeros(coeff_shape, dtype=jnp.float64)
+        .at[exclude_m, exclude_n]
+        .set(dofs[zs_start : zs_start + tail_count])
+    )
+    return rc, rs, zc, zs
+
+
+def surface_rz_fourier_spec_from_dofs(
+    dofs: jax.Array,
+    *,
+    quadpoints_phi: jax.Array,
+    quadpoints_theta: jax.Array,
+    mpol: int,
+    ntor: int,
+    nfp: int,
+    stellsym: bool,
+) -> SurfaceRZFourierSpec:
+    rc, rs, zc, zs = _coefficients_from_dofs(
+        dofs,
+        mpol=mpol,
+        ntor=ntor,
+        stellsym=stellsym,
+    )
+    return make_surface_rzfourier_spec(
+        rc=rc,
+        rs=rs,
+        zc=zc,
+        zs=zs,
+        quadpoints_phi=quadpoints_phi,
+        quadpoints_theta=quadpoints_theta,
+        nfp=nfp,
+        stellsym=stellsym,
+    )
+
+
+def _spec_from_dofs(
+    spec: SurfaceRZFourierSpec, dofs: jax.Array
+) -> SurfaceRZFourierSpec:
+    return surface_rz_fourier_spec_from_dofs(
+        dofs,
+        quadpoints_phi=spec.quadpoints_phi,
+        quadpoints_theta=spec.quadpoints_theta,
+        mpol=spec.mpol,
+        ntor=spec.ntor,
+        nfp=spec.nfp,
+        stellsym=spec.stellsym,
+    )
+
+
+def _evaluate_from_dofs(
+    evaluator,
+    spec: SurfaceRZFourierSpec,
+    dofs: jax.Array,
+):
+    return evaluator(_spec_from_dofs(spec, dofs))
 
 
 def surface_rz_fourier_gamma_from_spec(spec: SurfaceRZFourierSpec):
@@ -124,3 +259,31 @@ def surface_rz_fourier_volume_from_spec(spec: SurfaceRZFourierSpec):
     normal = surface_rz_fourier_normal_from_spec(spec)
     nphi, ntheta = gamma.shape[:2]
     return jnp.sum(jnp.sum(gamma * normal, axis=-1)) / (3.0 * nphi * ntheta)
+
+
+def surface_rz_fourier_gamma_from_dofs(spec: SurfaceRZFourierSpec, dofs: jax.Array):
+    return _evaluate_from_dofs(surface_rz_fourier_gamma_from_spec, spec, dofs)
+
+
+def surface_rz_fourier_gammadash1_from_dofs(
+    spec: SurfaceRZFourierSpec, dofs: jax.Array
+):
+    return _evaluate_from_dofs(surface_rz_fourier_gammadash1_from_spec, spec, dofs)
+
+
+def surface_rz_fourier_gammadash2_from_dofs(
+    spec: SurfaceRZFourierSpec, dofs: jax.Array
+):
+    return _evaluate_from_dofs(surface_rz_fourier_gammadash2_from_spec, spec, dofs)
+
+
+def surface_rz_fourier_normal_from_dofs(spec: SurfaceRZFourierSpec, dofs: jax.Array):
+    return _evaluate_from_dofs(surface_rz_fourier_normal_from_spec, spec, dofs)
+
+
+def surface_rz_fourier_area_from_dofs(spec: SurfaceRZFourierSpec, dofs: jax.Array):
+    return _evaluate_from_dofs(surface_rz_fourier_area_from_spec, spec, dofs)
+
+
+def surface_rz_fourier_volume_from_dofs(spec: SurfaceRZFourierSpec, dofs: jax.Array):
+    return _evaluate_from_dofs(surface_rz_fourier_volume_from_spec, spec, dofs)

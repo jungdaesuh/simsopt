@@ -221,6 +221,7 @@ def _boozer_penalty_objective(
     nfp,
     stellsym,
     scatter_indices,
+    surface_kind,
     targetlabel,
     constraint_weight,
     label_type,
@@ -255,6 +256,7 @@ def _boozer_penalty_objective(
         nfp,
         stellsym,
         scatter_indices,
+        surface_kind=surface_kind,
     )
     nphi, ntheta = gamma.shape[:2]
 
@@ -297,6 +299,7 @@ def _boozer_exact_residual(
     nfp,
     stellsym,
     scatter_indices,
+    surface_kind,
     targetlabel,
     label_type,
     phi_idx,
@@ -323,6 +326,7 @@ def _boozer_exact_residual(
         nfp,
         stellsym,
         scatter_indices,
+        surface_kind=surface_kind,
     )
     nphi, ntheta = gamma.shape[:2]
 
@@ -394,6 +398,7 @@ def _boozer_exact_coil_vjp(lm, booz_surf, iota, G):
             nfp=booz_surf.nfp,
             stellsym=booz_surf.stellsym,
             scatter_indices=booz_surf.scatter_indices,
+            surface_kind=booz_surf._surface_geometry_kind,
             targetlabel=booz_surf.targetlabel,
             label_type=booz_surf.label_type,
             phi_idx=booz_surf.phi_idx,
@@ -459,6 +464,7 @@ def _make_exact_group_runner(x, coil_arrays, booz_surf, mask_indices, group_inde
             nfp=booz_surf.nfp,
             stellsym=booz_surf.stellsym,
             scatter_indices=booz_surf.scatter_indices,
+            surface_kind=booz_surf._surface_geometry_kind,
             targetlabel=booz_surf.targetlabel,
             label_type=booz_surf.label_type,
             phi_idx=booz_surf.phi_idx,
@@ -583,6 +589,7 @@ def _make_ls_group_runner(
             booz_surf.nfp,
             booz_surf.stellsym,
             booz_surf.scatter_indices,
+            booz_surf._surface_geometry_kind,
             booz_surf.targetlabel,
             booz_surf.constraint_weight,
             booz_surf.label_type,
@@ -635,6 +642,7 @@ def _group_penalty_directional_objective(
     nfp,
     stellsym,
     scatter_indices,
+    surface_kind,
     targetlabel,
     constraint_weight,
     label_type,
@@ -652,6 +660,7 @@ def _group_penalty_directional_objective(
             nfp=nfp,
             stellsym=stellsym,
             scatter_indices=scatter_indices,
+            surface_kind=surface_kind,
             targetlabel=targetlabel,
             constraint_weight=constraint_weight,
             label_type=label_type,
@@ -679,6 +688,7 @@ def _make_ls_penalty_objective(
         nfp=booz_surf.nfp,
         stellsym=booz_surf.stellsym,
         scatter_indices=booz_surf.scatter_indices,
+        surface_kind=booz_surf._surface_geometry_kind,
         targetlabel=booz_surf.targetlabel,
         constraint_weight=booz_surf.constraint_weight,
         label_type=booz_surf.label_type,
@@ -698,6 +708,7 @@ def _make_boozer_penalty_objective_closure(
     nfp,
     stellsym,
     scatter_indices,
+    surface_kind,
     targetlabel,
     constraint_weight,
     label_type,
@@ -715,6 +726,7 @@ def _make_boozer_penalty_objective_closure(
         nfp=nfp,
         stellsym=stellsym,
         scatter_indices=scatter_indices,
+        surface_kind=surface_kind,
         targetlabel=targetlabel,
         constraint_weight=constraint_weight,
         label_type=label_type,
@@ -905,6 +917,9 @@ class BoozerSurfaceJAX(Optimizable):
         self.stellsym = s.stellsym
         self.quadpoints_phi = jnp.asarray(s.quadpoints_phi, dtype=jnp.float64)
         self.quadpoints_theta = jnp.asarray(s.quadpoints_theta, dtype=jnp.float64)
+        self._surface_geometry_kind = (
+            "rzfourier" if type(s).__name__ == "SurfaceRZFourier" else "generic"
+        )
 
         # Stellsym DOF scatter indices
         if self.stellsym:
@@ -1060,6 +1075,7 @@ class BoozerSurfaceJAX(Optimizable):
             nfp=self.nfp,
             stellsym=self.stellsym,
             scatter_indices=self.scatter_indices,
+            surface_kind=self._surface_geometry_kind,
             targetlabel=self.targetlabel,
             constraint_weight=constraint_weight
             if constraint_weight is not None
@@ -1237,6 +1253,7 @@ class BoozerSurfaceJAX(Optimizable):
             self.nfp,
             self.stellsym,
             self.scatter_indices,
+            surface_kind=self._surface_geometry_kind,
         )
         nphi, ntheta = int(gamma.shape[0]), int(gamma.shape[1])
         points = gamma.reshape(-1, 3)
@@ -1550,6 +1567,7 @@ class BoozerSurfaceJAX(Optimizable):
             nfp=self.nfp,
             stellsym=self.stellsym,
             scatter_indices=self.scatter_indices,
+            surface_kind=self._surface_geometry_kind,
             targetlabel=self.targetlabel,
             label_type=self.label_type,
             phi_idx=self.phi_idx,
@@ -1678,6 +1696,7 @@ class BoozerSurfaceJAX(Optimizable):
             self.nfp,
             self.stellsym,
             self.scatter_indices,
+            surface_kind=self._surface_geometry_kind,
         )
         B_final = grouped_biot_savart_B_from_spec(
             gamma_final.reshape(-1, 3),

@@ -44,23 +44,35 @@ def _require_jax(feature_name):
 def _surface_rzfourier_jax_tools():
     from ..jax_core import (
         make_surface_rzfourier_spec,
+        surface_rz_fourier_area_from_dofs,
         surface_rz_fourier_area_from_spec,
+        surface_rz_fourier_gamma_from_dofs,
         surface_rz_fourier_gamma_from_spec,
+        surface_rz_fourier_gammadash1_from_dofs,
         surface_rz_fourier_gammadash1_from_spec,
+        surface_rz_fourier_gammadash2_from_dofs,
         surface_rz_fourier_gammadash2_from_spec,
+        surface_rz_fourier_normal_from_dofs,
         surface_rz_fourier_normal_from_spec,
         surface_rz_fourier_unitnormal_from_spec,
+        surface_rz_fourier_volume_from_dofs,
         surface_rz_fourier_volume_from_spec,
     )
 
     return {
         "make_spec": make_surface_rzfourier_spec,
+        "gamma_from_dofs": surface_rz_fourier_gamma_from_dofs,
         "gamma": surface_rz_fourier_gamma_from_spec,
+        "gammadash1_from_dofs": surface_rz_fourier_gammadash1_from_dofs,
         "gammadash1": surface_rz_fourier_gammadash1_from_spec,
+        "gammadash2_from_dofs": surface_rz_fourier_gammadash2_from_dofs,
         "gammadash2": surface_rz_fourier_gammadash2_from_spec,
+        "normal_from_dofs": surface_rz_fourier_normal_from_dofs,
         "normal": surface_rz_fourier_normal_from_spec,
         "unitnormal": surface_rz_fourier_unitnormal_from_spec,
+        "area_from_dofs": surface_rz_fourier_area_from_dofs,
         "area": surface_rz_fourier_area_from_spec,
+        "volume_from_dofs": surface_rz_fourier_volume_from_dofs,
         "volume": surface_rz_fourier_volume_from_spec,
     }
 
@@ -169,6 +181,22 @@ class SurfaceRZFourier(sopp.SurfaceRZFourier, Surface):
     def _evaluate_surface_jax(self, tool_name, feature_name):
         return _surface_rzfourier_jax_tool(tool_name, feature_name)(self.surface_spec())
 
+    def _evaluate_surface_jax_from_dofs(self, tool_name, dofs, feature_name):
+        dofs_jax = jnp.asarray(dofs, dtype=jnp.float64)
+        return _surface_rzfourier_jax_tool(tool_name, feature_name)(
+            self.surface_spec(),
+            dofs_jax,
+        )
+
+    def _surface_dofs_jax(self, dofs):
+        return jnp.asarray(self.get_dofs() if dofs is None else dofs, dtype=jnp.float64)
+
+    def _surface_scalar_grad_jax(self, tool_name, dofs, feature_name):
+        dofs_jax = self._surface_dofs_jax(dofs)
+        return jax.grad(
+            lambda x: self._evaluate_surface_jax_from_dofs(tool_name, x, feature_name)
+        )(dofs_jax)
+
     def surface_spec(self):
         """Build an immutable JAX geometry spec from the current surface state."""
         return _surface_rzfourier_jax_tool(
@@ -179,25 +207,49 @@ class SurfaceRZFourier(sopp.SurfaceRZFourier, Surface):
         """Build an immutable JAX geometry spec from the current surface state."""
         return self.surface_spec()
 
-    def gamma_jax(self):
+    def gamma_jax(self, dofs=None):
         """Pure JAX gamma evaluation for the current surface state."""
-        return self._evaluate_surface_jax("gamma", "SurfaceRZFourier.gamma_jax")
+        if dofs is None:
+            return self._evaluate_surface_jax("gamma", "SurfaceRZFourier.gamma_jax")
+        return self._evaluate_surface_jax_from_dofs(
+            "gamma_from_dofs",
+            dofs,
+            "SurfaceRZFourier.gamma_jax",
+        )
 
-    def gammadash1_jax(self):
+    def gammadash1_jax(self, dofs=None):
         """Pure JAX toroidal tangent evaluation for the current surface state."""
-        return self._evaluate_surface_jax(
-            "gammadash1", "SurfaceRZFourier.gammadash1_jax"
+        if dofs is None:
+            return self._evaluate_surface_jax(
+                "gammadash1", "SurfaceRZFourier.gammadash1_jax"
+            )
+        return self._evaluate_surface_jax_from_dofs(
+            "gammadash1_from_dofs",
+            dofs,
+            "SurfaceRZFourier.gammadash1_jax",
         )
 
-    def gammadash2_jax(self):
+    def gammadash2_jax(self, dofs=None):
         """Pure JAX poloidal tangent evaluation for the current surface state."""
-        return self._evaluate_surface_jax(
-            "gammadash2", "SurfaceRZFourier.gammadash2_jax"
+        if dofs is None:
+            return self._evaluate_surface_jax(
+                "gammadash2", "SurfaceRZFourier.gammadash2_jax"
+            )
+        return self._evaluate_surface_jax_from_dofs(
+            "gammadash2_from_dofs",
+            dofs,
+            "SurfaceRZFourier.gammadash2_jax",
         )
 
-    def normal_jax(self):
+    def normal_jax(self, dofs=None):
         """Pure JAX unnormalized normal evaluation for the current surface state."""
-        return self._evaluate_surface_jax("normal", "SurfaceRZFourier.normal_jax")
+        if dofs is None:
+            return self._evaluate_surface_jax("normal", "SurfaceRZFourier.normal_jax")
+        return self._evaluate_surface_jax_from_dofs(
+            "normal_from_dofs",
+            dofs,
+            "SurfaceRZFourier.normal_jax",
+        )
 
     def unitnormal_jax(self):
         """Pure JAX unit-normal evaluation for the current surface state."""
@@ -205,13 +257,41 @@ class SurfaceRZFourier(sopp.SurfaceRZFourier, Surface):
             "unitnormal", "SurfaceRZFourier.unitnormal_jax"
         )
 
-    def area_jax(self):
+    def area_jax(self, dofs=None):
         """Pure JAX area evaluation for the current surface state."""
-        return self._evaluate_surface_jax("area", "SurfaceRZFourier.area_jax")
+        if dofs is None:
+            return self._evaluate_surface_jax("area", "SurfaceRZFourier.area_jax")
+        return self._evaluate_surface_jax_from_dofs(
+            "area_from_dofs",
+            dofs,
+            "SurfaceRZFourier.area_jax",
+        )
 
-    def volume_jax(self):
+    def volume_jax(self, dofs=None):
         """Pure JAX volume evaluation for the current surface state."""
-        return self._evaluate_surface_jax("volume", "SurfaceRZFourier.volume_jax")
+        if dofs is None:
+            return self._evaluate_surface_jax("volume", "SurfaceRZFourier.volume_jax")
+        return self._evaluate_surface_jax_from_dofs(
+            "volume_from_dofs",
+            dofs,
+            "SurfaceRZFourier.volume_jax",
+        )
+
+    def darea_by_dcoeff_jax(self, dofs=None):
+        """Pure JAX area gradient with respect to surface DOFs."""
+        return self._surface_scalar_grad_jax(
+            "area_from_dofs",
+            dofs,
+            "SurfaceRZFourier.darea_by_dcoeff_jax",
+        )
+
+    def dvolume_by_dcoeff_jax(self, dofs=None):
+        """Pure JAX volume gradient with respect to surface DOFs."""
+        return self._surface_scalar_grad_jax(
+            "volume_from_dofs",
+            dofs,
+            "SurfaceRZFourier.dvolume_by_dcoeff_jax",
+        )
 
     def _make_names(self):
         """
