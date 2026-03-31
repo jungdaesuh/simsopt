@@ -36,6 +36,32 @@ def _assert_synced_runtime_env(
     assert backend.os.environ["JAX_PLATFORMS"] == platform
 
 
+def _assert_backend_policy(
+    policy,
+    *,
+    mode: str,
+    backend_name: str,
+    platform: str,
+    strict: bool,
+    parity_mode: bool,
+    requires_x64: bool,
+    chunk_policy: str,
+    tolerance_tier: str,
+    compilation_cache_policy: str,
+    provenance_label: str,
+) -> None:
+    assert policy.mode == mode
+    assert policy.backend == backend_name
+    assert policy.jax_platform == platform
+    assert policy.strict is strict
+    assert policy.parity_mode is parity_mode
+    assert policy.requires_x64 is requires_x64
+    assert policy.chunk_policy == chunk_policy
+    assert policy.tolerance_tier == tolerance_tier
+    assert policy.compilation_cache_policy == compilation_cache_policy
+    assert policy.provenance_label == provenance_label
+
+
 def test_backend_defaults_to_native_cpu(monkeypatch):
     _clear_backend_env(monkeypatch)
     backend = _fresh_backend()
@@ -89,6 +115,58 @@ def test_set_backend_updates_mode_and_legacy_envs(monkeypatch):
         platform="cuda",
         strict=True,
     )
+
+
+def test_backend_mode_policy_helpers(monkeypatch):
+    _clear_backend_env(monkeypatch)
+    monkeypatch.setenv("SIMSOPT_BACKEND_MODE", "jax_gpu_parity")
+    monkeypatch.setenv("SIMSOPT_BACKEND_STRICT", "1")
+    backend = _fresh_backend()
+
+    policy = backend.get_backend_policy()
+
+    _assert_backend_policy(
+        policy,
+        mode="jax_gpu_parity",
+        backend_name="jax",
+        platform="cuda",
+        strict=True,
+        parity_mode=True,
+        requires_x64=True,
+        chunk_policy="stable_default",
+        tolerance_tier="parity",
+        compilation_cache_policy="optional_persistent",
+        provenance_label="jax_gpu_parity",
+    )
+    assert backend.is_parity_mode() is True
+    assert backend.requires_x64() is True
+    assert backend.get_chunk_policy() == "stable_default"
+    assert backend.get_tolerance_tier() == "parity"
+    assert backend.get_compilation_cache_policy() == "optional_persistent"
+    assert backend.get_provenance_label() == "jax_gpu_parity"
+
+
+def test_fast_mode_policy_helpers(monkeypatch):
+    _clear_backend_env(monkeypatch)
+    monkeypatch.setenv("SIMSOPT_BACKEND_MODE", "jax_gpu_fast")
+    backend = _fresh_backend()
+
+    policy = backend.get_backend_policy()
+
+    _assert_backend_policy(
+        policy,
+        mode="jax_gpu_fast",
+        backend_name="jax",
+        platform="cuda",
+        strict=False,
+        parity_mode=False,
+        requires_x64=True,
+        chunk_policy="performance_tuned",
+        tolerance_tier="fast",
+        compilation_cache_policy="optional_persistent",
+        provenance_label="jax_gpu_fast",
+    )
+    assert backend.is_parity_mode() is False
 
 
 def test_native_cpu_mode_is_not_eager_jax_import(monkeypatch):

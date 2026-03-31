@@ -60,6 +60,41 @@ _MODE_TO_RUNTIME = {
     "jax_gpu_fast": ("jax", "cuda"),
 }
 
+_MODE_POLICY_DEFAULTS = {
+    "native_cpu": {
+        "parity_mode": False,
+        "requires_x64": False,
+        "chunk_policy": "host_reference",
+        "tolerance_tier": "cpu_reference",
+        "compilation_cache_policy": "not_applicable",
+        "provenance_label": "native_cpu",
+    },
+    "jax_cpu_parity": {
+        "parity_mode": True,
+        "requires_x64": True,
+        "chunk_policy": "stable_default",
+        "tolerance_tier": "parity",
+        "compilation_cache_policy": "optional_persistent",
+        "provenance_label": "jax_cpu_parity",
+    },
+    "jax_gpu_parity": {
+        "parity_mode": True,
+        "requires_x64": True,
+        "chunk_policy": "stable_default",
+        "tolerance_tier": "parity",
+        "compilation_cache_policy": "optional_persistent",
+        "provenance_label": "jax_gpu_parity",
+    },
+    "jax_gpu_fast": {
+        "parity_mode": False,
+        "requires_x64": True,
+        "chunk_policy": "performance_tuned",
+        "tolerance_tier": "fast",
+        "compilation_cache_policy": "optional_persistent",
+        "provenance_label": "jax_gpu_fast",
+    },
+}
+
 
 @dataclass(frozen=True)
 class BackendConfig:
@@ -67,6 +102,20 @@ class BackendConfig:
     backend: str
     jax_platform: str
     strict: bool = False
+
+
+@dataclass(frozen=True)
+class BackendPolicy:
+    mode: str
+    backend: str
+    jax_platform: str
+    strict: bool
+    parity_mode: bool
+    requires_x64: bool
+    chunk_policy: str
+    tolerance_tier: str
+    compilation_cache_policy: str
+    provenance_label: str
 
 
 def _env_bool(name: str) -> bool:
@@ -106,6 +155,48 @@ def _config_from_mode(mode: str, *, strict: bool) -> BackendConfig:
         jax_platform=jax_platform,
         strict=bool(strict),
     )
+
+
+def _resolve_mode(mode: str | None = None) -> str:
+    if mode is None:
+        return get_backend_mode()
+    return _validate_mode(mode)
+
+
+def _get_mode_policy_defaults(mode: str) -> dict[str, object]:
+    return _MODE_POLICY_DEFAULTS[_validate_mode(mode)]
+
+
+def _policy_from_config(config: BackendConfig) -> BackendPolicy:
+    defaults = _get_mode_policy_defaults(config.mode)
+    return BackendPolicy(
+        mode=config.mode,
+        backend=config.backend,
+        jax_platform=config.jax_platform,
+        strict=config.strict,
+        parity_mode=bool(defaults["parity_mode"]),
+        requires_x64=bool(defaults["requires_x64"]),
+        chunk_policy=str(defaults["chunk_policy"]),
+        tolerance_tier=str(defaults["tolerance_tier"]),
+        compilation_cache_policy=str(defaults["compilation_cache_policy"]),
+        provenance_label=str(defaults["provenance_label"]),
+    )
+
+
+def _runtime_env_value(attribute_name: str, value: object) -> str:
+    if attribute_name == "strict":
+        return "1" if bool(value) else "0"
+    return str(value)
+
+
+def get_backend_policy(mode: str | None = None) -> BackendPolicy:
+    """Return the numerical-policy contract for a backend mode."""
+    config = (
+        get_backend_config()
+        if mode is None
+        else _config_from_mode(_resolve_mode(mode), strict=False)
+    )
+    return _policy_from_config(config)
 
 
 def _resolve_legacy_value(
@@ -182,6 +273,36 @@ def is_backend_strict() -> bool:
     return get_backend_config().strict
 
 
+def is_parity_mode(mode: str | None = None) -> bool:
+    """``True`` when the resolved mode is a parity lane."""
+    return get_backend_policy(mode).parity_mode
+
+
+def requires_x64(mode: str | None = None) -> bool:
+    """``True`` when the resolved mode requires float64 JAX execution."""
+    return get_backend_policy(mode).requires_x64
+
+
+def get_chunk_policy(mode: str | None = None) -> str:
+    """Return the default chunking policy label for the resolved mode."""
+    return get_backend_policy(mode).chunk_policy
+
+
+def get_tolerance_tier(mode: str | None = None) -> str:
+    """Return the tolerance policy label for the resolved mode."""
+    return get_backend_policy(mode).tolerance_tier
+
+
+def get_compilation_cache_policy(mode: str | None = None) -> str:
+    """Return the compilation-cache policy label for the resolved mode."""
+    return get_backend_policy(mode).compilation_cache_policy
+
+
+def get_provenance_label(mode: str | None = None) -> str:
+    """Return the provenance label that should tag outputs from the mode."""
+    return get_backend_policy(mode).provenance_label
+
+
 def raise_if_strict_jax_fallback(*, component: str, detail: str) -> None:
     """Reject CPU or mixed fallback behavior when strict JAX mode is active."""
     config = get_backend_config()
@@ -210,7 +331,7 @@ def apply_jax_runtime_config() -> None:
     import jax
 
     jax.config.update("jax_platforms", config.jax_platform)
-    jax.config.update("jax_enable_x64", True)
+    jax.config.update("jax_enable_x64", requires_x64(config.mode))
 
 
 def set_backend(
@@ -226,11 +347,9 @@ def set_backend(
     """
     config = _config_from_mode(mode, strict=bool(strict))
     for env_name, attribute_name in _SYNCED_RUNTIME_ENV_VALUES:
-        value = getattr(config, attribute_name)
-        if attribute_name == "strict":
-            os.environ[env_name] = "1" if value else "0"
-        else:
-            os.environ[env_name] = value
+        os.environ[env_name] = _runtime_env_value(
+            attribute_name, getattr(config, attribute_name)
+        )
     if configure_runtime:
         apply_jax_runtime_config()
     return config

@@ -346,7 +346,9 @@ def _assert_curve_class_uses_jax_geometry(monkeypatch, curve, owner_name):
         curve_type,
         "gammadash",
         lambda self: (_ for _ in ()).throw(
-            AssertionError(f"{owner_name} should use {curve_type.__name__}.gammadash_jax")
+            AssertionError(
+                f"{owner_name} should use {curve_type.__name__}.gammadash_jax"
+            )
         ),
     )
 
@@ -354,9 +356,7 @@ def _assert_curve_class_uses_jax_geometry(monkeypatch, curve, owner_name):
 def _build_rz_curve(nquadpoints):
     curve = CurveRZFourier(nquadpoints, order=2, nfp=3, stellsym=False)
     curve.set_dofs(
-        np.array(
-            [1.2, 0.18, -0.07, 0.04, -0.03, 0.1, -0.05, 0.02, 0.08, -0.06]
-        )
+        np.array([1.2, 0.18, -0.07, 0.04, -0.03, 0.1, -0.05, 0.02, 0.08, -0.06])
     )
     return curve
 
@@ -364,9 +364,7 @@ def _build_rz_curve(nquadpoints):
 def _build_planar_curve(nquadpoints):
     curve = CurvePlanarFourier(nquadpoints, order=2)
     curve.set_dofs(
-        np.array(
-            [1.1, 0.14, -0.09, 0.05, -0.02, 1.0, 0.2, -0.1, 0.3, 0.15, -0.2, 0.05]
-        )
+        np.array([1.1, 0.14, -0.09, 0.05, -0.02, 1.0, 0.2, -0.1, 0.3, 0.15, -0.2, 0.05])
     )
     return curve
 
@@ -452,10 +450,14 @@ def _assert_grouped_coil_arrays_match_curve(curve, current_value):
         curve.gammadash(),
         atol=1e-12,
     )
-    np.testing.assert_allclose(np.asarray(current_group), np.array([current_value]), atol=1e-12)
+    np.testing.assert_allclose(
+        np.asarray(current_group), np.array([current_value]), atol=1e-12
+    )
 
 
-def _assert_biotsavart_vjp_bypasses_coil_vjp(curve, current, points, monkeypatch, message):
+def _assert_biotsavart_vjp_bypasses_coil_vjp(
+    curve, current, points, monkeypatch, message
+):
     coil = Coil(curve, current)
     bs_cpu = BiotSavart([coil])
     bs_cpu.set_points(points)
@@ -508,13 +510,17 @@ def _make_real_resolve_fd_setup():
     assert result is not None and result.get("success", False), (
         "Baseline reduced real-fixture solve did not converge"
     )
-    return bs_jax, booz_jax, {
-        "coil_dofs": np.asarray(bs_jax.x, dtype=float).copy(),
-        "surface_dofs": np.asarray(booz_jax.surface.get_dofs(), dtype=float).copy(),
-        "iota": float(result["iota"]),
-        "G": float(result["G"]),
-        "fun": float(summarize_result_fun(result)),
-    }
+    return (
+        bs_jax,
+        booz_jax,
+        {
+            "coil_dofs": np.asarray(bs_jax.x, dtype=float).copy(),
+            "surface_dofs": np.asarray(booz_jax.surface.get_dofs(), dtype=float).copy(),
+            "iota": float(result["iota"]),
+            "G": float(result["G"]),
+            "fun": float(summarize_result_fun(result)),
+        },
+    )
 
 
 def _is_stable_real_resolve(base_state, *, iota_value, G_value, fun_value):
@@ -624,7 +630,9 @@ def _assert_wrapper_resolve_fd_matches_real_fixture(
             f"adjoint={directional_adjoint:.6e} fd={directional_fd:.6e} "
             f"rel={rel_err:.2e} abs={abs_err:.2e}"
         )
-        assert rel_err < _REAL_RESOLVE_FD_REL_TOL or abs_err < _REAL_RESOLVE_FD_ABS_TOL, (
+        assert (
+            rel_err < _REAL_RESOLVE_FD_REL_TOL or abs_err < _REAL_RESOLVE_FD_ABS_TOL
+        ), (
             f"{wrapper_label} reduced-real FD[{sample_index}] exceeded tolerance: "
             f"rel={rel_err:.2e} abs={abs_err:.2e}"
         )
@@ -635,8 +643,7 @@ def _assert_wrapper_resolve_fd_matches_real_fixture(
     pytest.fail(
         f"{wrapper_label} only found {stable_sample_count} branch-stable reduced "
         f"real-fixture FD samples within {_REAL_RESOLVE_FD_MAX_ATTEMPTS} attempts; "
-        f"need {_REAL_RESOLVE_FD_MIN_STABLE_SAMPLES}: "
-        + "; ".join(instability_reasons)
+        f"need {_REAL_RESOLVE_FD_MIN_STABLE_SAMPLES}: " + "; ".join(instability_reasons)
     )
 
 
@@ -926,9 +933,7 @@ class TestAdjointSolveConsistency:
         d_coil_arrays, coil_indices = vjp_fn(
             adj, booz_jax, booz_jax.res["iota"], booz_jax.res["G"]
         )
-        projected = bs_jax.coil_cotangents_to_derivative(
-            d_coil_arrays, coil_indices
-        )
+        projected = bs_jax.coil_cotangents_to_derivative(d_coil_arrays, coil_indices)
         explicit = _explicit_grouped_coil_derivative(
             bs_jax.coils, d_coil_arrays, coil_indices
         )
@@ -984,17 +989,21 @@ class TestAdjointSolveConsistency:
         lineage_names = [type(opt).__name__ for opt in bs_jax.unique_dof_lineage]
         assert lineage_names.index("Current") < lineage_names.index("CurveXYZFourier")
 
-        gamma_group, gammadash_group, current_group = bs_jax.grouped_coil_arrays_from_dofs(
-            jnp.asarray(bs_jax.x)
-        )[0]
+        gamma_group, gammadash_group, current_group = (
+            bs_jax.grouped_coil_arrays_from_dofs(jnp.asarray(bs_jax.x))[0]
+        )
 
-        np.testing.assert_allclose(np.asarray(gamma_group[0]), curve.gamma(), atol=1e-12)
+        np.testing.assert_allclose(
+            np.asarray(gamma_group[0]), curve.gamma(), atol=1e-12
+        )
         np.testing.assert_allclose(
             np.asarray(gammadash_group[0]),
             curve.gammadash(),
             atol=1e-12,
         )
-        np.testing.assert_allclose(np.asarray(current_group), np.array([1.23]), atol=1e-12)
+        np.testing.assert_allclose(
+            np.asarray(current_group), np.array([1.23]), atol=1e-12
+        )
 
     def test_grouped_coil_arrays_from_dofs_supports_generic_jaxcurve_geometry(
         self,
@@ -1014,17 +1023,21 @@ class TestAdjointSolveConsistency:
             "grouped_coil_arrays_from_dofs()",
         )
 
-        gamma_group, gammadash_group, current_group = bs_jax.grouped_coil_arrays_from_dofs(
-            jnp.asarray(bs_jax.x)
-        )[0]
+        gamma_group, gammadash_group, current_group = (
+            bs_jax.grouped_coil_arrays_from_dofs(jnp.asarray(bs_jax.x))[0]
+        )
 
-        np.testing.assert_allclose(np.asarray(gamma_group[0]), expected_gamma, atol=1e-12)
+        np.testing.assert_allclose(
+            np.asarray(gamma_group[0]), expected_gamma, atol=1e-12
+        )
         np.testing.assert_allclose(
             np.asarray(gammadash_group[0]),
             expected_gammadash,
             atol=1e-12,
         )
-        np.testing.assert_allclose(np.asarray(current_group), np.array([1.23]), atol=1e-12)
+        np.testing.assert_allclose(
+            np.asarray(current_group), np.array([1.23]), atol=1e-12
+        )
 
     def test_biotsavart_B_uses_generic_jaxcurve_geometry_without_cpu_calls(
         self,
@@ -1111,7 +1124,9 @@ class TestAdjointSolveConsistency:
         """Explicit reconstruction should work for planar legacy Fourier curves."""
         _assert_grouped_coil_arrays_match_curve(_build_planar_curve(24), 2.5)
 
-    def test_grouped_coil_arrays_from_dofs_supports_curveperturbed_fullgraph_geometry(self):
+    def test_grouped_coil_arrays_from_dofs_supports_curveperturbed_fullgraph_geometry(
+        self,
+    ):
         """Full-graph wrapper curves should reconstruct from explicit coil DOFs."""
         _assert_grouped_coil_arrays_match_curve(_build_perturbed_helical_curve(24), 1.7)
 
@@ -1222,7 +1237,13 @@ class TestAdjointSolveConsistency:
 
         with pytest.raises(TypeError, match="supported JAX or CPU pullback contract"):
             bs_jax.coil_cotangents_to_derivative(
-                [(jnp.array([[1.0, 2.0, 3.0]]), jnp.array([[4.0, 5.0, 6.0]]), jnp.array([1.5]))],
+                [
+                    (
+                        jnp.array([[1.0, 2.0, 3.0]]),
+                        jnp.array([[4.0, 5.0, 6.0]]),
+                        jnp.array([1.5]),
+                    )
+                ],
                 [[0]],
             )
 
@@ -1235,7 +1256,13 @@ class TestAdjointSolveConsistency:
         bs_jax._coils = coils
 
         derivative = bs_jax.coil_cotangents_to_derivative(
-            [(jnp.array([[1.0, 2.0, 3.0]]), jnp.array([[4.0, 5.0, 6.0]]), jnp.array([1.5]))],
+            [
+                (
+                    jnp.array([[1.0, 2.0, 3.0]]),
+                    jnp.array([[4.0, 5.0, 6.0]]),
+                    jnp.array([1.5]),
+                )
+            ],
             [[0]],
         )
 
@@ -1277,7 +1304,13 @@ class TestAdjointSolveConsistency:
         coils = [_FallbackBombCoil()]
         derivative = _coil_cotangents_to_derivative(
             coils,
-            [(jnp.array([[1.0, 2.0, 3.0]]), jnp.array([[4.0, 5.0, 6.0]]), jnp.array([1.5]))],
+            [
+                (
+                    jnp.array([[1.0, 2.0, 3.0]]),
+                    jnp.array([[4.0, 5.0, 6.0]]),
+                    jnp.array([1.5]),
+                )
+            ],
             [[0]],
         )
 
@@ -1839,7 +1872,8 @@ class TestScriptBackendSelection:
 
         spec = importlib.util.spec_from_file_location(
             "single_stage",
-            REPO_ROOT / "examples"
+            REPO_ROOT
+            / "examples"
             / "single_stage_optimization"
             / "SINGLE_STAGE"
             / "single_stage_banana_example.py",
@@ -2643,8 +2677,12 @@ class TestExactSolveCPUJAXParity:
             f"  |Δiota|={iota_diff:.3e} |ΔG|={G_diff:.3e}"
         )
 
-        assert resid_cpu < exact_residual_tol, f"CPU residual too large: {resid_cpu:.3e}"
-        assert resid_jax < exact_residual_tol, f"JAX residual too large: {resid_jax:.3e}"
+        assert resid_cpu < exact_residual_tol, (
+            f"CPU residual too large: {resid_cpu:.3e}"
+        )
+        assert resid_jax < exact_residual_tol, (
+            f"JAX residual too large: {resid_jax:.3e}"
+        )
         assert iota_diff < exact_solution_abs_tol, f"Iota disagreement: {iota_diff:.3e}"
         assert G_diff < exact_solution_abs_tol, f"G disagreement: {G_diff:.3e}"
 
@@ -2723,13 +2761,13 @@ class TestNonQSRatioJAXResolveFD:
 
 
 # =======================================================================
-# Section 3: JAX-Traceable Single-Stage Objective
+# Section 3: Traceable Single-Stage Objective Path
 # =======================================================================
 #
-# These tests define the contract for making the single-stage objective
-# fully JAX-traceable so the outer optimizer routes through
+# These tests define the contract for the traceable target-objective path
+# inside the single-stage workflow so the outer optimizer can route through
 # _minimize_lbfgs_private (lax.while_loop) instead of the host-callback
-# fallback (_minimize_lbfgs_explicit_value_and_grad).
+# fallback (_minimize_lbfgs_explicit_value_and_grad) on the supported path.
 #
 # Dependency order:
 #   Test 3 (run_code_functional)
@@ -2740,10 +2778,10 @@ class TestNonQSRatioJAXResolveFD:
 #             -> Test 7 (parity with explicit path)
 #   Test 5 (no run_dict/Optimizable dependency) is independent
 #
-# This slice is now green. Tests 1-7 validate the pure array-backed
-# custom_vjp traceable objective used by make_traceable_objective(),
-# while Tests 3a/3b continue to pin the lower-level functional
-# inner-solve contract.
+# This slice is green for the current traceable-objective path. Tests 1-7
+# validate the pure array-backed custom_vjp objective built by
+# make_traceable_objective(), while Tests 3a/3b continue to pin the lower-level
+# functional transition seam exposed by run_code_functional().
 # =======================================================================
 
 
@@ -2843,12 +2881,12 @@ class TestRunCodeFunctional:
 
 
 class TestTraceableObjective:
-    """Tests 1, 2, 4-7: Pure JAX-traceable composed single-stage objective.
+    """Tests 1, 2, 4-7: Traceable composed single-stage target objective.
 
     The current evaluate_candidate() requires JF.x mutation, run_dict state,
     Python if/assert branching, and CPU-side surface/label evaluations.
 
-    A traceable objective must be a pure function:
+    The traceable target objective must be a pure function:
         f(coil_dofs: jax.Array) -> jax.Array  (scalar)
     that JAX can trace, differentiate via jax.grad, and compile via JIT.
     """

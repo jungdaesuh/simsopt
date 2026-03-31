@@ -637,7 +637,7 @@ def jax_minimize(
     - ``bfgs-hybrid``:
       transitional private path for staged migration away from SciPy.
     - ``bfgs-ondevice`` / ``lbfgs-ondevice``:
-      private target path for the full-GPU optimizer lane.
+      private target path for the eventual full-GPU optimizer lane.
 
     If ``value_and_grad=True``, ``fun`` must return ``(value, grad)`` directly.
     That explicit value/gradient contract is supported on the trusted SciPy

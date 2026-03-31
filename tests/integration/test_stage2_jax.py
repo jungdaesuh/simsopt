@@ -2174,6 +2174,80 @@ class TestStage2OptimizerContract:
         assert np.isposinf(snapshot["J"])
         assert np.isnan(snapshot["grad_norm"])
 
+    def test_evaluate_stage2_objective_recomputes_distance_state_without_diagnostics(
+        self,
+        monkeypatch,
+    ):
+        stage2_script = _load_stage2_script_module()
+        stale_diagnostics = {
+            "mean_abs_relBfinal_norm": 0.125,
+            "coil_coil_distance": 999.0,
+        }
+
+        class DummyFlux:
+            def J(self):
+                return 0.5
+
+            def dJ(self, partials=False):
+                grad = np.asarray([0.5, -0.25], dtype=float)
+                if partials:
+                    return _DummyDerivative(grad)
+                return grad
+
+        class DummyScalar:
+            def __init__(self, value):
+                self._value = float(value)
+
+            def J(self):
+                return self._value
+
+            def dJ(self, partials=False):
+                grad = np.asarray([self._value, -self._value], dtype=float)
+                if partials:
+                    return _DummyDerivative(grad)
+                return grad
+
+        class DummyDistance:
+            def __init__(self):
+                self.calls = 0
+
+            def J(self):
+                return 0.0
+
+            def dJ(self, partials=False):
+                grad = np.asarray([0.0, 0.0], dtype=float)
+                if partials:
+                    return _DummyDerivative(grad)
+                return grad
+
+            def shortest_distance(self):
+                self.calls += 1
+                return 0.2
+
+        distance = DummyDistance()
+        context = stage2_script.Stage2ObjectiveContext(
+            object(),
+            object(),
+            object(),
+            DummyFlux(),
+            DummyScalar(1.0),
+            distance,
+            DummyScalar(0.5),
+            **_stage2_context_kwargs(),
+        )
+
+        snapshot, _grad, diagnostics = stage2_script.evaluate_stage2_objective(
+            context,
+            diagnostics=stale_diagnostics.copy(),
+            recompute_diagnostics=False,
+        )
+
+        assert distance.calls == 1
+        assert diagnostics["mean_abs_relBfinal_norm"] == pytest.approx(0.125)
+        assert diagnostics["coil_coil_distance"] == pytest.approx(0.2)
+        assert snapshot["coil_coil_distance"] == pytest.approx(0.2)
+        assert snapshot["distance_constraint_violated"] is True
+
     def test_profile_stage2_explicit_step_reports_component_breakdown(
         self, monkeypatch
     ):

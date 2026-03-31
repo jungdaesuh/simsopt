@@ -6,11 +6,12 @@ The public/reference lane still permits host-side SciPy minimization via
 roles:
 
 - ``optimizer_backend="hybrid"``: transitional migration path
-- ``optimizer_backend="ondevice"``: target full-GPU backend
+- ``optimizer_backend="ondevice"``: target on-device backend for the eventual
+  full-GPU workflow
 
 This module owns the LS/exact solver routing contract. Only the
-``ondevice`` backend is intended to represent the final full-GPU optimizer
-state.
+``ondevice`` backend is intended to represent the eventual target optimizer
+lane, not a claim that the full workflow is already production-complete.
 
 Architecture (per M0 contract §5-§6):
   - Adapter pattern: ``BoozerSurfaceJAX`` inherits ``Optimizable`` and
@@ -764,7 +765,8 @@ class BoozerSurfaceJAX(Optimizable):
         options: dict of solver options (see ``_DEFAULT_OPTIONS_*``).
             For LS solves, ``optimizer_backend="scipy"`` is the trusted
             reference lane, ``"hybrid"`` is the transitional migration lane,
-            and ``"ondevice"`` is the full-GPU target backend.
+            and ``"ondevice"`` is the target on-device lane for the eventual
+            full-GPU workflow.
     """
 
     def __init__(

@@ -87,11 +87,18 @@ def test_programmatic_backend_selection_configures_jax_runtime():
         import simsopt.backend as backend
 
         cfg = simsopt_config.set_backend("jax_cpu_parity", strict=True)
+        policy = simsopt_config.get_backend_policy()
 
         assert cfg.mode == "jax_cpu_parity"
         assert cfg.backend == "jax"
         assert cfg.jax_platform == "cpu"
         assert cfg.strict is True
+        assert policy.mode == "jax_cpu_parity"
+        assert policy.parity_mode is True
+        assert policy.chunk_policy == "stable_default"
+        assert policy.tolerance_tier == "parity"
+        assert policy.compilation_cache_policy == "optional_persistent"
+        assert policy.provenance_label == "jax_cpu_parity"
         assert backend.get_backend_mode() == "jax_cpu_parity"
         assert backend.is_backend_strict() is True
 

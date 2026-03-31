@@ -121,17 +121,64 @@ Legacy-compatible example::
 Programmatic access::
 
     from simsopt import config as simsopt_config
-    from simsopt.backend import get_backend, get_backend_mode, is_jax_backend
+    from simsopt.backend import (
+        get_backend,
+        get_backend_mode,
+        get_backend_policy,
+        is_jax_backend,
+    )
 
     simsopt_config.set_backend("jax_gpu_parity", strict=True)
+    policy = get_backend_policy()
 
     assert get_backend_mode() == "jax_gpu_parity"
+    assert policy.chunk_policy == "stable_default"
+    assert policy.tolerance_tier == "parity"
     if is_jax_backend():
         from simsopt.field import BiotSavartJAX
         ...
 
 Call ``set_backend(...)`` before importing JAX-heavy simsopt subpackages so the
 requested runtime mode is visible to those imports.
+
+Mode-owned policy
+-----------------
+
+The mode contract now owns the baseline numerical-policy labels that should
+appear in provenance and validation output.
+
+.. list-table::
+   :header-rows: 1
+
+   * - Mode
+     - X64
+     - Chunk policy
+     - Tolerance tier
+     - Compilation cache policy
+   * - ``native_cpu``
+     - n/a
+     - ``host_reference``
+     - ``cpu_reference``
+     - ``not_applicable``
+   * - ``jax_cpu_parity``
+     - required
+     - ``stable_default``
+     - ``parity``
+     - ``optional_persistent``
+   * - ``jax_gpu_parity``
+     - required
+     - ``stable_default``
+     - ``parity``
+     - ``optional_persistent``
+   * - ``jax_gpu_fast``
+     - currently still required
+     - ``performance_tuned``
+     - ``fast``
+     - ``optional_persistent``
+
+These labels do not mean every kernel already implements the final chunked
+parity/fast architecture. They define the runtime contract and provenance
+surface while the remaining kernel work is still in progress.
 
 GPU Node Quick-Start
 --------------------
@@ -169,6 +216,10 @@ Hugging Face Jobs
 
 For repeatable A100 / H200 proof runs on Hugging Face Jobs, the repo now
 ships a dedicated launch path under ``benchmarks/hf_jobs``.
+
+This is still proof infrastructure, not evidence that full-GPU productization
+is complete. Routine GPU CI and warm production-scale workflow proof remain
+separate ship gates.
 
 1. **Build and publish the reusable runtime image once**::
 

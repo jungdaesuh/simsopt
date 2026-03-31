@@ -873,6 +873,39 @@ def compute_stage2_length_penalty_gradient(
     return active_diff * compute_stage2_term_gradient(Jls, root_objective)
 
 
+@dataclass(frozen=True)
+class Stage2DistanceConstraintState:
+    coil_coil_distance: float
+    coil_distance_barrier: float
+    cc_threshold: float
+    violated: bool
+
+
+def compute_stage2_distance_constraint_state(
+    context,
+    *,
+    term_entries,
+):
+    """Return the Stage 2 coil-distance state for the current objective eval.
+
+    This state is recomputed on every trajectory/objective snapshot, regardless
+    of whether field diagnostics were reused or skipped by stride policy. The
+    hard minimum-distance gate must never depend on diagnostic caching.
+    """
+    coil_coil_distance = float(context.Jccdist.shortest_distance())
+    coil_distance_barrier = float(term_entries["coil_distance_barrier"]["raw_J"])
+    cc_threshold = float(context.cc_threshold)
+    violated = coil_coil_distance <= cc_threshold or not np.isfinite(
+        coil_distance_barrier
+    )
+    return Stage2DistanceConstraintState(
+        coil_coil_distance=coil_coil_distance,
+        coil_distance_barrier=coil_distance_barrier,
+        cc_threshold=cc_threshold,
+        violated=bool(violated),
+    )
+
+
 def evaluate_stage2_objective(
     context,
     *,
@@ -890,22 +923,20 @@ def evaluate_stage2_objective(
             context.new_surf,
             bs_jax=context.bs_jax,
         )
-    coil_coil_distance = float(context.Jccdist.shortest_distance())
-    coil_distance_barrier = float(term_entries["coil_distance_barrier"]["raw_J"])
-    cc_threshold = float(context.cc_threshold)
-    diagnostics["coil_coil_distance"] = coil_coil_distance
-    distance_constraint_violated = (
-        coil_coil_distance <= cc_threshold or not np.isfinite(coil_distance_barrier)
+    distance_state = compute_stage2_distance_constraint_state(
+        context,
+        term_entries=term_entries,
     )
+    diagnostics["coil_coil_distance"] = distance_state.coil_coil_distance
     snapshot = {
         "J": J,
         "Jf": squared_flux,
         "mean_abs_relBfinal_norm": float(diagnostics["mean_abs_relBfinal_norm"]),
         "curve_length": curve_length,
-        "coil_coil_distance": coil_coil_distance,
+        "coil_coil_distance": distance_state.coil_coil_distance,
         "curvature": curvature,
         "grad_norm": float(np.linalg.norm(grad)),
-        "distance_constraint_violated": bool(distance_constraint_violated),
+        "distance_constraint_violated": distance_state.violated,
     }
     return snapshot, grad, diagnostics
 
