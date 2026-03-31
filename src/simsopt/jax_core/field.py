@@ -7,15 +7,15 @@ from jax import lax
 import jax.numpy as jnp
 
 from ..backend import get_chunk_policy
-from .curve_geometry import curve_gamma_from_spec, curve_gammadash_from_spec
-from .specs import CoilSpec, GroupedCoilSetSpec, make_grouped_coil_set_spec
-from ..field.biotsavart_jax import (
+from .biotsavart import (
     biot_savart_A,
     biot_savart_B,
     biot_savart_B_and_dB,
     biot_savart_dB_by_dX,
     group_coil_data,
 )
+from .curve_geometry import curve_gamma_from_spec, curve_gammadash_from_spec
+from .specs import CoilSpec, GroupedCoilSetSpec, make_grouped_coil_set_spec
 
 _POINT_CHUNK_SIZE_BY_POLICY = {
     "host_reference": 0,

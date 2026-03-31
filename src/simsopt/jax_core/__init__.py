@@ -1,6 +1,17 @@
 """Pure JAX kernel-layer specs and helpers."""
 
 from .curve_geometry import curve_gamma_from_spec, curve_gammadash_from_spec
+from .biotsavart import (
+    biot_savart_A,
+    biot_savart_B,
+    biot_savart_B_and_dB,
+    biot_savart_B_vjp,
+    biot_savart_dA_by_dX,
+    biot_savart_dB_by_dX,
+    group_coil_data,
+    grouped_biot_savart_A,
+    grouped_biot_savart_B,
+)
 from .field import (
     grouped_biot_savart_A_from_inputs,
     grouped_biot_savart_A_from_spec,
@@ -66,6 +77,15 @@ __all__ = [
     "build_fourier_basis",
     "curve_gamma_from_spec",
     "curve_gammadash_from_spec",
+    "biot_savart_A",
+    "biot_savart_B",
+    "biot_savart_B_and_dB",
+    "biot_savart_B_vjp",
+    "biot_savart_dA_by_dX",
+    "biot_savart_dB_by_dX",
+    "group_coil_data",
+    "grouped_biot_savart_A",
+    "grouped_biot_savart_B",
     "fixed_surface_flux_integral",
     "fixed_surface_flux_integral_from_B",
     "grouped_coil_set_spec_from_coil_specs",

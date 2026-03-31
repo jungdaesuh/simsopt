@@ -29,11 +29,11 @@ from ..jax_core.field import (
     grouped_coil_set_spec_from_lists,
 )
 from ..jax_core.specs import make_field_eval_spec
-from .coil import _unwrap_coil_curve_and_current_objects
-from .biotsavart_jax import (
+from ..jax_core.biotsavart import (
     biot_savart_B,
     biot_savart_B_vjp,
 )
+from .coil import _unwrap_coil_curve_and_current_objects
 
 __all__ = ["BiotSavartJAX"]
 

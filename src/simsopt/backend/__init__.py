@@ -1,13 +1,6 @@
-"""Public backend facade with implementation housed under ``backend/``."""
+"""Public backend runtime surface for the simsopt JAX lane."""
 
-import os
-from pathlib import Path
-
-_BACKEND_PACKAGE_DIR = Path(__file__).with_suffix("")
-
-__path__ = [str(_BACKEND_PACKAGE_DIR)]
-
-from simsopt.backend.runtime import (  # noqa: E402
+from .runtime import (
     VALID_BACKEND_MODES,
     BackendConfig,
     BackendPolicy,
@@ -33,7 +26,7 @@ from simsopt.backend.runtime import (  # noqa: E402
     should_eagerly_configure_jax,
 )
 
-__all__ = (
+__all__ = [
     "VALID_BACKEND_MODES",
     "BackendConfig",
     "BackendPolicy",
@@ -57,6 +50,4 @@ __all__ = (
     "requires_x64",
     "set_backend",
     "should_eagerly_configure_jax",
-    # Keep ``os`` available on the facade for existing tests/helpers.
-    "os",
-)
+]

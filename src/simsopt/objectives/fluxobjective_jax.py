@@ -26,7 +26,7 @@ import jax.numpy as jnp
 from ..backend import raise_if_strict_jax_fallback
 from .._core.optimizable import Optimizable
 from .._core.derivative import derivative_dec, Derivative
-from ..field.biotsavart_jax import biot_savart_B
+from ..jax_core.biotsavart import biot_savart_B
 from ..jax_core.objectives_flux import (
     build_fourier_basis,
     fixed_surface_geometry_from_surface,

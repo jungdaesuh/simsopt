@@ -7,7 +7,7 @@ from typing import Callable, NamedTuple
 import numpy as np
 import jax.numpy as jnp
 
-from ..field.biotsavart_jax import biot_savart_B
+from ..jax_core.biotsavart import biot_savart_B
 from ..field.biotsavart_jax_backend import _unwrap_coil_curve_and_current
 from ..geo.curve import incremental_arclength_pure, kappa_pure
 from ..jax_core.field import (
