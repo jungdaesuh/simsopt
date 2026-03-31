@@ -28,6 +28,9 @@ _OPTIMIZER_PRIVATE_DIR = Path(_SRC_DIR) / "simsopt" / "geo" / "optimizer_jax_pri
 _BACKEND_SELECTOR_ENV_VARS = (
     "SIMSOPT_BACKEND_MODE",
     "SIMSOPT_BACKEND_STRICT",
+    "SIMSOPT_JAX_DEBUG_NANS",
+    "SIMSOPT_JAX_TRANSFER_GUARD",
+    "SIMSOPT_JAX_COMPILATION_CACHE_DIR",
     "SIMSOPT_BACKEND",
     "STAGE2_BACKEND",
     "SIMSOPT_JAX_PLATFORM",
@@ -86,25 +89,40 @@ def test_programmatic_backend_selection_configures_jax_runtime():
         import simsopt.config as simsopt_config
         import simsopt.backend as backend
 
-        cfg = simsopt_config.set_backend("jax_cpu_parity", strict=True)
+        cfg = simsopt_config.set_backend(
+            "jax_cpu_parity",
+            strict=True,
+            debug_nans=True,
+            transfer_guard="log",
+            compilation_cache_dir="/tmp/simsopt-jax-cache",
+        )
         policy = simsopt_config.get_backend_policy()
 
         assert cfg.mode == "jax_cpu_parity"
         assert cfg.backend == "jax"
         assert cfg.jax_platform == "cpu"
         assert cfg.strict is True
+        assert cfg.debug_nans is True
+        assert cfg.transfer_guard == "log"
+        assert cfg.compilation_cache_dir == "/tmp/simsopt-jax-cache"
         assert policy.mode == "jax_cpu_parity"
         assert policy.parity_mode is True
         assert policy.chunk_policy == "stable_default"
         assert policy.tolerance_tier == "parity"
         assert policy.compilation_cache_policy == "optional_persistent"
         assert policy.provenance_label == "jax_cpu_parity"
+        assert policy.debug_nans is True
+        assert policy.transfer_guard == "log"
+        assert policy.compilation_cache_dir == "/tmp/simsopt-jax-cache"
         assert backend.get_backend_mode() == "jax_cpu_parity"
         assert backend.is_backend_strict() is True
 
         import jax
 
         assert jax.numpy.zeros(1).dtype == jax.numpy.float64
+        assert jax.config.jax_debug_nans is True
+        assert jax.config.jax_transfer_guard == "log"
+        assert jax.config.jax_compilation_cache_dir == "/tmp/simsopt-jax-cache"
     """)
     assert rc == 0, f"programmatic backend config failed:\n{err}"
 
@@ -132,6 +150,88 @@ def test_import_biotsavart_jax():
         assert BiotSavartJAX is not None
     """)
     assert rc == 0, f"import BiotSavartJAX failed:\n{err}"
+
+
+def test_import_jax_core_specs():
+    """The pure JAX kernel-layer package imports through the real package tree."""
+    rc, err = _run_import_check("""
+        from simsopt.jax_core import (
+            CoilGroupSpec,
+            GroupedCoilSetSpec,
+            FixedSurfaceFluxSpec,
+            SurfaceRZFourierSpec,
+        )
+
+        assert CoilGroupSpec is not None
+        assert GroupedCoilSetSpec is not None
+        assert FixedSurfaceFluxSpec is not None
+        assert SurfaceRZFourierSpec is not None
+    """)
+    assert rc == 0, f"import simsopt.jax_core failed:\n{err}"
+
+
+def test_jax_core_specs_are_pytrees():
+    """Immutable JAX specs must flatten and survive JIT as real pytrees."""
+    rc, err = _run_import_check("""
+        import jax
+        import jax.numpy as jnp
+
+        from simsopt.jax_core import (
+            FixedSurfaceFluxSpec,
+            GroupedCoilSetSpec,
+            SurfaceRZFourierSpec,
+            fixed_surface_flux_integral_from_B,
+            grouped_biot_savart_B_from_spec,
+            make_fixed_surface_flux_spec,
+            make_grouped_coil_set_spec,
+            make_surface_rzfourier_spec,
+            surface_rz_fourier_gamma_from_spec,
+        )
+
+        coil_spec = make_grouped_coil_set_spec([
+            (
+                jnp.zeros((1, 2, 3)),
+                jnp.ones((1, 2, 3)),
+                jnp.asarray([1.0]),
+                [0],
+            )
+        ])
+        flux_spec = make_fixed_surface_flux_spec(
+            points=jnp.zeros((4, 3)),
+            normal=jnp.ones((2, 2, 3)),
+            target=jnp.zeros((2, 2)),
+            definition="quadratic flux",
+        )
+        surface_spec = make_surface_rzfourier_spec(
+            rc=jnp.asarray([[1.0]]),
+            zs=jnp.asarray([[0.0]]),
+            quadpoints_phi=jnp.asarray([0.0, 0.5]),
+            quadpoints_theta=jnp.asarray([0.0, 0.5]),
+            nfp=1,
+            stellsym=True,
+        )
+
+        assert isinstance(coil_spec, GroupedCoilSetSpec)
+        assert isinstance(flux_spec, FixedSurfaceFluxSpec)
+        assert isinstance(surface_spec, SurfaceRZFourierSpec)
+
+        coil_leaves, _ = jax.tree_util.tree_flatten(coil_spec)
+        flux_leaves, _ = jax.tree_util.tree_flatten(flux_spec)
+        surface_leaves, _ = jax.tree_util.tree_flatten(surface_spec)
+
+        assert len(coil_leaves) == 3
+        assert len(flux_leaves) == 3
+        assert len(surface_leaves) == 6
+
+        B = jax.jit(grouped_biot_savart_B_from_spec)(jnp.zeros((4, 3)), coil_spec)
+        value = jax.jit(fixed_surface_flux_integral_from_B)(B, flux_spec)
+        gamma = jax.jit(surface_rz_fourier_gamma_from_spec)(surface_spec)
+
+        assert B.shape == (4, 3)
+        assert gamma.shape == (2, 2, 3)
+        assert jnp.isfinite(value)
+    """)
+    assert rc == 0, f"jax_core pytree contract failed:\n{err}"
 
 
 def test_import_squaredflux_jax():

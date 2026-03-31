@@ -27,49 +27,14 @@ from ..backend import raise_if_strict_jax_fallback
 from .._core.optimizable import Optimizable
 from .._core.derivative import derivative_dec, Derivative
 from ..field.biotsavart_jax import biot_savart_B
-from .integral_bdotn_jax import integral_BdotN as integral_BdotN_jax
+from ..jax_core.objectives_flux import (
+    build_fourier_basis,
+    fixed_surface_geometry_from_surface,
+    fixed_surface_flux_integral_from_B,
+)
+from ..jax_core.specs import make_fixed_surface_flux_spec
 
 __all__ = ["SquaredFluxJAX"]
-
-
-# -----------------------------------------------------------------------
-# Fourier basis precomputation
-# -----------------------------------------------------------------------
-
-
-def _build_fourier_basis(quadpoints_jax, order):
-    """Precompute the CurveXYZFourier basis matrix and its derivative.
-
-    The DOF layout per coordinate is ``[c₀, s₁, c₁, s₂, c₂, …]``
-    where ``cⱼ`` multiplies ``cos(2πjθ)`` and ``sⱼ`` multiplies
-    ``sin(2πjθ)``.
-
-    Args:
-        quadpoints_jax: (npts,) quadrature angles in [0, 1).
-        order: Fourier truncation order.
-
-    Returns:
-        basis:  (npts, 2*order+1) — ``gamma  = basis  @ coeffs.T``
-        dbasis: (npts, 2*order+1) — ``gammadash = dbasis @ coeffs.T``
-    """
-    k = 2 * order + 1
-    npts = quadpoints_jax.shape[0]
-    basis = jnp.zeros((npts, k))
-    dbasis = jnp.zeros((npts, k))
-
-    basis = basis.at[:, 0].set(1.0)
-    # dbasis[:, 0] stays zero (constant term has zero derivative)
-
-    for j in range(1, order + 1):
-        arg = 2.0 * jnp.pi * j * quadpoints_jax
-        s = jnp.sin(arg)
-        c = jnp.cos(arg)
-        basis = basis.at[:, 2 * j - 1].set(s)
-        basis = basis.at[:, 2 * j].set(c)
-        dbasis = dbasis.at[:, 2 * j - 1].set(2.0 * jnp.pi * j * c)
-        dbasis = dbasis.at[:, 2 * j].set(-2.0 * jnp.pi * j * s)
-
-    return basis, dbasis
 
 
 # -----------------------------------------------------------------------
@@ -108,8 +73,9 @@ class SquaredFluxJAX(Optimizable):
         self.field = field
         self.definition = definition
 
+        gamma_jax, self._normal_jax = fixed_surface_geometry_from_surface(surface)
+
         # Freeze surface geometry on JAX arrays (fixed for Stage 2).
-        self._normal_jax = jnp.asarray(surface.normal())
         nphi, ntheta = self._normal_jax.shape[:2]
 
         if target is not None:
@@ -118,8 +84,13 @@ class SquaredFluxJAX(Optimizable):
             self._target_jax = jnp.zeros((nphi, ntheta), dtype=jnp.float64)
 
         # Set evaluation points on the field adapter.
-        xyz = surface.gamma()
-        field.set_points(xyz.reshape((-1, 3)))
+        field.set_points(gamma_jax.reshape((-1, 3)))
+        self._flux_spec = make_fixed_surface_flux_spec(
+            points=field._points_jax,
+            normal=self._normal_jax,
+            target=self._target_jax,
+            definition=definition,
+        )
 
         self._clear_cached_results()
 
@@ -142,8 +113,9 @@ class SquaredFluxJAX(Optimizable):
 
     def _init_jax_native(self, field, nphi, ntheta, definition):
         """Build end-to-end JIT functions from flat DOFs to scalar J."""
+        del nphi, ntheta, definition
         order = field._curve_order
-        basis, dbasis = _build_fourier_basis(
+        basis, dbasis = build_fourier_basis(
             field._curve_quadpoints_jax,
             order,
         )
@@ -162,8 +134,7 @@ class SquaredFluxJAX(Optimizable):
 
         # Closure-captured constants
         points_jax = field._points_jax
-        normal_jax = self._normal_jax
-        target_jax = self._target_jax
+        flux_spec = self._flux_spec
 
         def forward(flat_dofs):
             # Per-base-curve DOF slices
@@ -200,8 +171,7 @@ class SquaredFluxJAX(Optimizable):
                 jnp.stack(gammadashs),
                 jnp.array(currents),
             )
-            Bcoil = B.reshape((nphi, ntheta, 3))
-            return integral_BdotN_jax(Bcoil, target_jax, normal_jax, definition)
+            return fixed_surface_flux_integral_from_B(B, flux_spec)
 
         self._jit_forward_dofs = jax.jit(forward)
         self._jit_val_grad_dofs = jax.jit(jax.value_and_grad(forward))
@@ -217,12 +187,11 @@ class SquaredFluxJAX(Optimizable):
         handles mixed quadrature counts.  The JIT boundary covers only
         the integral computation and its gradient w.r.t. B.
         """
-        normal_jax = self._normal_jax
-        target_jax = self._target_jax
+        del field, nphi, ntheta, definition
+        flux_spec = self._flux_spec
 
         def _integral_from_B(B):
-            Bcoil = B.reshape((nphi, ntheta, 3))
-            return integral_BdotN_jax(Bcoil, target_jax, normal_jax, definition)
+            return fixed_surface_flux_integral_from_B(B, flux_spec)
 
         self._jit_integral = jax.jit(_integral_from_B)
         self._jit_integral_value_grad = jax.jit(jax.value_and_grad(_integral_from_B))

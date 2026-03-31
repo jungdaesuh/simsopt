@@ -12,7 +12,7 @@ from matplotlib.gridspec import GridSpec
 
 import simsoptpp as sopp
 from .surface import Surface
-from .._core.optimizable import DOFs, Optimizable
+from .._core.optimizable import Optimizable
 from .._core.util import nested_lists_to_array
 from .._core.dev import SimsoptRequires
 
@@ -39,6 +39,35 @@ def _require_jax(feature_name):
         raise ImportError(
             f"JAX is required for {feature_name}. Install simsopt[JAX] or simsopt[JAX_GPU]."
         )
+
+
+def _surface_rzfourier_jax_tools():
+    from ..jax_core import (
+        make_surface_rzfourier_spec,
+        surface_rz_fourier_area_from_spec,
+        surface_rz_fourier_gamma_from_spec,
+        surface_rz_fourier_gammadash1_from_spec,
+        surface_rz_fourier_gammadash2_from_spec,
+        surface_rz_fourier_normal_from_spec,
+        surface_rz_fourier_unitnormal_from_spec,
+        surface_rz_fourier_volume_from_spec,
+    )
+
+    return {
+        "make_spec": make_surface_rzfourier_spec,
+        "gamma": surface_rz_fourier_gamma_from_spec,
+        "gammadash1": surface_rz_fourier_gammadash1_from_spec,
+        "gammadash2": surface_rz_fourier_gammadash2_from_spec,
+        "normal": surface_rz_fourier_normal_from_spec,
+        "unitnormal": surface_rz_fourier_unitnormal_from_spec,
+        "area": surface_rz_fourier_area_from_spec,
+        "volume": surface_rz_fourier_volume_from_spec,
+    }
+
+
+def _surface_rzfourier_jax_tool(tool_name, feature_name):
+    _require_jax(feature_name)
+    return _surface_rzfourier_jax_tools()[tool_name]
 
 
 class SurfaceRZFourier(sopp.SurfaceRZFourier, Surface):
@@ -90,7 +119,6 @@ class SurfaceRZFourier(sopp.SurfaceRZFourier, Surface):
         quadpoints_theta=None,
         dofs=None,
     ):
-
         if quadpoints_theta is None:
             quadpoints_theta = Surface.get_theta_quadpoints()
         if quadpoints_phi is None:
@@ -125,6 +153,61 @@ class SurfaceRZFourier(sopp.SurfaceRZFourier, Surface):
 
     def set_dofs(self, dofs):
         self.local_full_x = dofs
+
+    def _surface_spec_kwargs(self):
+        return {
+            "rc": self.rc,
+            "zs": self.zs,
+            "rs": getattr(self, "rs", None),
+            "zc": getattr(self, "zc", None),
+            "quadpoints_phi": self.quadpoints_phi,
+            "quadpoints_theta": self.quadpoints_theta,
+            "nfp": self.nfp,
+            "stellsym": self.stellsym,
+        }
+
+    def _evaluate_surface_jax(self, tool_name, feature_name):
+        return _surface_rzfourier_jax_tool(tool_name, feature_name)(self.surface_spec())
+
+    def surface_spec(self):
+        """Build an immutable JAX geometry spec from the current surface state."""
+        return _surface_rzfourier_jax_tool(
+            "make_spec", "SurfaceRZFourier.surface_spec"
+        )(**self._surface_spec_kwargs())
+
+    def gamma_jax(self):
+        """Pure JAX gamma evaluation for the current surface state."""
+        return self._evaluate_surface_jax("gamma", "SurfaceRZFourier.gamma_jax")
+
+    def gammadash1_jax(self):
+        """Pure JAX toroidal tangent evaluation for the current surface state."""
+        return self._evaluate_surface_jax(
+            "gammadash1", "SurfaceRZFourier.gammadash1_jax"
+        )
+
+    def gammadash2_jax(self):
+        """Pure JAX poloidal tangent evaluation for the current surface state."""
+        return self._evaluate_surface_jax(
+            "gammadash2", "SurfaceRZFourier.gammadash2_jax"
+        )
+
+    def normal_jax(self):
+        """Pure JAX unnormalized normal evaluation for the current surface state."""
+        return self._evaluate_surface_jax("normal", "SurfaceRZFourier.normal_jax")
+
+    def unitnormal_jax(self):
+        """Pure JAX unit-normal evaluation for the current surface state."""
+        return self._evaluate_surface_jax(
+            "unitnormal", "SurfaceRZFourier.unitnormal_jax"
+        )
+
+    def area_jax(self):
+        """Pure JAX area evaluation for the current surface state."""
+        return self._evaluate_surface_jax("area", "SurfaceRZFourier.area_jax")
+
+    def volume_jax(self):
+        """Pure JAX volume evaluation for the current surface state."""
+        return self._evaluate_surface_jax("volume", "SurfaceRZFourier.volume_jax")
 
     def _make_names(self):
         """
@@ -1326,7 +1409,9 @@ class SurfaceRZFourier(sopp.SurfaceRZFourier, Surface):
             x_scale_full,
         )
         start_time = time.time()
-        mnmax_steps = np.arange(1, max_mn_lambda + 1) if Fourier_continuation else [max_mn_lambda]
+        mnmax_steps = (
+            np.arange(1, max_mn_lambda + 1) if Fourier_continuation else [max_mn_lambda]
+        )
 
         previous_m_for_lambda = None
         previous_n_for_lambda = None
@@ -1372,7 +1457,9 @@ class SurfaceRZFourier(sopp.SurfaceRZFourier, Surface):
                     lambda x: compute_RZ_errors(x, m_for_lambda, n_for_lambda, x_scale),
                     -jnp.ones(n_constraints),
                     jnp.ones(n_constraints),
-                    jac=lambda x: jac_constraints(x, m_for_lambda, n_for_lambda, x_scale),
+                    jac=lambda x: jac_constraints(
+                        x, m_for_lambda, n_for_lambda, x_scale
+                    ),
                 )
 
                 options = {"maxiter": maxiter}
@@ -1397,7 +1484,9 @@ class SurfaceRZFourier(sopp.SurfaceRZFourier, Surface):
                 )
             else:
                 grad_objective = jax.jit(jax.grad(scalar_objective))
-                objective_to_use = scalar_objective_with_printing if verbose else scalar_objective
+                objective_to_use = (
+                    scalar_objective_with_printing if verbose else scalar_objective
+                )
                 res = minimize(
                     objective_to_use,
                     lambda_dofs,
@@ -1680,7 +1769,9 @@ def plot_spectral_condensation(surf1, surf2, data, show=True):
 
     n_theta_points_for_plot = 20
     decimate = 6
-    quadpoints_theta_for_plotting = np.linspace(0, 1, n_theta_points_for_plot * decimate + 1)
+    quadpoints_theta_for_plotting = np.linspace(
+        0, 1, n_theta_points_for_plot * decimate + 1
+    )
     quadpoints_phi_for_plotting = np.linspace(0, 1 / nfp, 8, endpoint=False)
     surf_theta1_for_plotting = SurfaceRZFourier(
         mpol=surf1.mpol,
@@ -1707,39 +1798,50 @@ def plot_spectral_condensation(surf1, surf2, data, show=True):
         color = cmap(float(j_phi) / n_phi)
         plt.plot(
             data["theta1_2d"][j_phi, :],
-            (data["theta_optimized"] - data["theta1_1d"]).reshape((n_phi, n_theta))[j_phi, :],
-            '.-',
+            (data["theta_optimized"] - data["theta1_1d"]).reshape((n_phi, n_theta))[
+                j_phi, :
+            ],
+            ".-",
             color=color,
         )
-    plt.xlabel('theta1')
-    plt.ylabel('lambda')
+    plt.xlabel("theta1")
+    plt.ylabel("lambda")
 
     plt.subplot(1, 2, 2)
     plt.semilogy(
         np.sqrt(data["m"] ** 2 + data["n"] ** 2),
         np.abs(data["lambda_mn"] * data["x_scale"]),
-        '.g',
+        ".g",
     )
-    plt.xlabel('sqrt(m^2 + n^2)')
-    plt.ylabel('Mode amplitudes of lambda')
+    plt.xlabel("sqrt(m^2 + n^2)")
+    plt.ylabel("Mode amplitudes of lambda")
     plt.ylim(1e-16, 2e1)
     plt.tight_layout()
 
     fig2 = plt.figure(figsize=figsize)
     gs = GridSpec(2, 3, figure=fig2, width_ratios=[1, 1, 2])
     axes_small = [
-        fig2.add_subplot(gs[0, 0], aspect='equal'),
-        fig2.add_subplot(gs[0, 1], aspect='equal'),
-        fig2.add_subplot(gs[1, 0], aspect='equal'),
-        fig2.add_subplot(gs[1, 1], aspect='equal'),
+        fig2.add_subplot(gs[0, 0], aspect="equal"),
+        fig2.add_subplot(gs[0, 1], aspect="equal"),
+        fig2.add_subplot(gs[1, 0], aspect="equal"),
+        fig2.add_subplot(gs[1, 1], aspect="equal"),
     ]
     colors = ["b", "r"]
 
-    for j_surf, surf_to_plot in enumerate([surf_theta1_for_plotting, surf_theta2_for_plotting]):
+    for j_surf, surf_to_plot in enumerate(
+        [surf_theta1_for_plotting, surf_theta2_for_plotting]
+    ):
         short_name = f"theta{j_surf + 1}"
-        for j_rz, (data_to_plot, data_name) in enumerate([(surf_to_plot.rc, 'Rmnc'), (surf_to_plot.zs, 'Zmns')]):
+        for j_rz, (data_to_plot, data_name) in enumerate(
+            [(surf_to_plot.rc, "Rmnc"), (surf_to_plot.zs, "Zmns")]
+        ):
             ax = axes_small[j_surf + j_rz * 2]
-            extent = (-surf_to_plot.ntor - 0.5, surf_to_plot.ntor + 0.5, surf_to_plot.mpol + 0.5, -0.5)
+            extent = (
+                -surf_to_plot.ntor - 0.5,
+                surf_to_plot.ntor + 0.5,
+                surf_to_plot.mpol + 0.5,
+                -0.5,
+            )
             im = ax.imshow(
                 np.abs(data_to_plot / minor_radius),
                 extent=extent,
@@ -1747,45 +1849,55 @@ def plot_spectral_condensation(surf1, surf2, data, show=True):
             )
             fig2.colorbar(im, ax=ax)
             ax.set_title(data_name + " / minor_radius, " + short_name)
-            ax.set_xlabel('n / nfp')
-            ax.set_ylabel('m')
+            ax.set_xlabel("n / nfp")
+            ax.set_ylabel("m")
 
     ax_big = fig2.add_subplot(gs[:, -1])
     ax_big.semilogy(
-        np.sqrt(surf_theta1_for_plotting.m ** 2 + surf_theta1_for_plotting.n ** 2),
+        np.sqrt(surf_theta1_for_plotting.m**2 + surf_theta1_for_plotting.n**2),
         np.abs(surf_theta1_for_plotting.x / minor_radius),
-        '+',
+        "+",
         color=colors[0],
-        label='theta1',
+        label="theta1",
     )
     ax_big.semilogy(
-        np.sqrt(surf_theta2_for_plotting.m ** 2 + surf_theta2_for_plotting.n ** 2),
+        np.sqrt(surf_theta2_for_plotting.m**2 + surf_theta2_for_plotting.n**2),
         np.abs(surf_theta2_for_plotting.x / minor_radius),
-        'x',
+        "x",
         color=colors[1],
-        label='theta2',
+        label="theta2",
     )
     ax_big.legend(loc=0)
-    ax_big.set_xlabel('sqrt(m^2 + n^2)')
-    ax_big.set_ylabel('(rc or zs) / minor radius')
+    ax_big.set_xlabel("sqrt(m^2 + n^2)")
+    ax_big.set_ylabel("(rc or zs) / minor radius")
     ax_big.set_ylim(1e-16, 2e1)
     plt.suptitle(title_str, fontsize=12)
     plt.tight_layout()
 
-    fig3, axes = plt.subplots(2, 4, figsize=figsize, subplot_kw={'aspect': 'equal'})
+    fig3, axes = plt.subplots(2, 4, figsize=figsize, subplot_kw={"aspect": "equal"})
     axes = axes.flatten()
     for j_phi in range(8):
-        for j_surf, surf_to_plot in enumerate([surf_theta1_for_plotting, surf_theta2_for_plotting]):
-            linespec = '-' if j_surf == 0 else ':'
-            marker = '+' if j_surf == 0 else 'x'
-            theta0_marker = 's' if j_surf == 0 else 'o'
+        for j_surf, surf_to_plot in enumerate(
+            [surf_theta1_for_plotting, surf_theta2_for_plotting]
+        ):
+            linespec = "-" if j_surf == 0 else ":"
+            marker = "+" if j_surf == 0 else "x"
+            theta0_marker = "s" if j_surf == 0 else "o"
             gamma = surf_to_plot.gamma()
             R = np.sqrt(gamma[:, :, 0] ** 2 + gamma[:, :, 1] ** 2)
             Z = gamma[:, :, 2]
             axes[j_phi].plot(R[j_phi, :], Z[j_phi, :], linespec, color=colors[j_surf])
-            axes[j_phi].plot(R[j_phi, 0], Z[j_phi, 0], theta0_marker, color=colors[j_surf])
-            axes[j_phi].plot(R[j_phi, ::decimate], Z[j_phi, ::decimate], marker, color=colors[j_surf], label=f"theta{j_surf + 1}")
-        axes[j_phi].set_title(f"phi = {j_phi/(8*nfp):.3f} * 2pi")
+            axes[j_phi].plot(
+                R[j_phi, 0], Z[j_phi, 0], theta0_marker, color=colors[j_surf]
+            )
+            axes[j_phi].plot(
+                R[j_phi, ::decimate],
+                Z[j_phi, ::decimate],
+                marker,
+                color=colors[j_surf],
+                label=f"theta{j_surf + 1}",
+            )
+        axes[j_phi].set_title(f"phi = {j_phi / (8 * nfp):.3f} * 2pi")
         axes[j_phi].set_xlabel("R")
         axes[j_phi].set_ylabel("Z")
     axes[0].legend(loc=0)

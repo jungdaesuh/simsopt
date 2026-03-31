@@ -10,6 +10,7 @@ import jax.numpy as jnp
 from ..field.biotsavart_jax import biot_savart_B, group_coil_data, grouped_biot_savart_B
 from ..field.biotsavart_jax_backend import _unwrap_coil_curve_and_current
 from ..geo.curve import incremental_arclength_pure, kappa_pure
+from ..jax_core.objectives_flux import fixed_surface_geometry_from_surface
 from ..geo.curveobjectives import (
     curvature_barrier_pure,
     cc_distance_barrier_pure,
@@ -128,8 +129,8 @@ def build_stage2_target_objective(
     The returned callable consumes the Stage 2 free-vector in the same order as
     the existing composite objective contract: ``[banana_current, curve_dofs...]``.
     """
-    points = _as_jax_float64_array(surface.gamma().reshape((-1, 3)), contiguous=True)
-    normal = _as_jax_float64_array(surface.normal(), contiguous=True)
+    gamma, normal = fixed_surface_geometry_from_surface(surface)
+    points = gamma.reshape((-1, 3))
     target = jnp.zeros(normal.shape[:2], dtype=jnp.float64)
     surf_dofs = _as_jax_float64_array(np.asarray(banana_curve.surf.get_dofs()))
     curve_dof_count = int(banana_curve.num_dofs())
