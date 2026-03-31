@@ -175,6 +175,10 @@ class SurfaceRZFourier(sopp.SurfaceRZFourier, Surface):
             "make_spec", "SurfaceRZFourier.surface_spec"
         )(**self._surface_spec_kwargs())
 
+    def to_spec(self):
+        """Build an immutable JAX geometry spec from the current surface state."""
+        return self.surface_spec()
+
     def gamma_jax(self):
         """Pure JAX gamma evaluation for the current surface state."""
         return self._evaluate_surface_jax("gamma", "SurfaceRZFourier.gamma_jax")

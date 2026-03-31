@@ -9,6 +9,89 @@ import jax.numpy as jnp
 
 
 @dataclass(frozen=True)
+class CurveXYZFourierSpec:
+    """Immutable payload for pure JAX CurveXYZFourier geometry."""
+
+    dofs: jax.Array
+    quadpoints: jax.Array
+    order: int
+
+
+jax.tree_util.register_dataclass(
+    CurveXYZFourierSpec,
+    data_fields=["dofs", "quadpoints"],
+    meta_fields=["order"],
+)
+
+
+@dataclass(frozen=True)
+class CurveRZFourierSpec:
+    """Immutable payload for pure JAX CurveRZFourier geometry."""
+
+    dofs: jax.Array
+    quadpoints: jax.Array
+    order: int
+    nfp: int
+    stellsym: bool
+
+
+jax.tree_util.register_dataclass(
+    CurveRZFourierSpec,
+    data_fields=["dofs", "quadpoints"],
+    meta_fields=["order", "nfp", "stellsym"],
+)
+
+
+CurveSpec = CurveXYZFourierSpec | CurveRZFourierSpec
+
+
+@dataclass(frozen=True)
+class CurrentValueSpec:
+    """Immutable scalar-current payload."""
+
+    value: jax.Array
+
+
+jax.tree_util.register_dataclass(
+    CurrentValueSpec,
+    data_fields=["value"],
+    meta_fields=[],
+)
+
+
+@dataclass(frozen=True)
+class CoilSpec:
+    """Immutable coil payload composed from curve/current specs and wrappers."""
+
+    curve: CurveSpec
+    current: CurrentValueSpec
+    rotmat: jax.Array
+    scale: float
+    has_rotation: bool
+
+
+jax.tree_util.register_dataclass(
+    CoilSpec,
+    data_fields=["curve", "current", "rotmat"],
+    meta_fields=["scale", "has_rotation"],
+)
+
+
+@dataclass(frozen=True)
+class FieldEvalSpec:
+    """Immutable field-evaluation point cloud."""
+
+    points: jax.Array
+
+
+jax.tree_util.register_dataclass(
+    FieldEvalSpec,
+    data_fields=["points"],
+    meta_fields=[],
+)
+
+
+@dataclass(frozen=True)
 class CoilGroupSpec:
     """One rectangular coil batch with a shared quadrature count."""
 
@@ -117,6 +200,66 @@ def make_coil_group_spec(
         currents=jnp.asarray(currents, dtype=jnp.float64),
         coil_indices=tuple(int(index) for index in coil_indices),
     )
+
+
+def make_curve_xyzfourier_spec(
+    *,
+    dofs: object,
+    quadpoints: object,
+    order: int,
+) -> CurveXYZFourierSpec:
+    return CurveXYZFourierSpec(
+        dofs=jnp.asarray(dofs, dtype=jnp.float64),
+        quadpoints=jnp.asarray(quadpoints, dtype=jnp.float64),
+        order=int(order),
+    )
+
+
+def make_curve_rzfourier_spec(
+    *,
+    dofs: object,
+    quadpoints: object,
+    order: int,
+    nfp: int,
+    stellsym: bool,
+) -> CurveRZFourierSpec:
+    return CurveRZFourierSpec(
+        dofs=jnp.asarray(dofs, dtype=jnp.float64),
+        quadpoints=jnp.asarray(quadpoints, dtype=jnp.float64),
+        order=int(order),
+        nfp=int(nfp),
+        stellsym=bool(stellsym),
+    )
+
+
+def make_current_value_spec(value: object) -> CurrentValueSpec:
+    return CurrentValueSpec(value=jnp.asarray([value], dtype=jnp.float64))
+
+
+def make_coil_spec(
+    *,
+    curve: CurveSpec,
+    current: CurrentValueSpec,
+    rotmat: object | None = None,
+    scale: float = 1.0,
+) -> CoilSpec:
+    has_rotation = rotmat is not None
+    rotmat_jax = (
+        jnp.eye(3, dtype=jnp.float64)
+        if rotmat is None
+        else jnp.asarray(rotmat, dtype=jnp.float64)
+    )
+    return CoilSpec(
+        curve=curve,
+        current=current,
+        rotmat=rotmat_jax,
+        scale=float(scale),
+        has_rotation=has_rotation,
+    )
+
+
+def make_field_eval_spec(points: object) -> FieldEvalSpec:
+    return FieldEvalSpec(points=jnp.asarray(points, dtype=jnp.float64))
 
 
 def make_grouped_coil_set_spec(groups: object) -> GroupedCoilSetSpec:

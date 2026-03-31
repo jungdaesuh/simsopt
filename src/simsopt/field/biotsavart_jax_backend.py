@@ -23,10 +23,13 @@ from ..jax_core.field import (
     grouped_biot_savart_B_and_dB_from_spec,
     grouped_biot_savart_B_from_spec,
     grouped_biot_savart_dB_by_dX_from_spec,
+    grouped_coil_set_spec_from_coil_specs,
     grouped_field_data_from_spec,
     grouped_field_inputs_from_spec,
     grouped_coil_set_spec_from_lists,
 )
+from ..jax_core.specs import make_field_eval_spec
+from .coil import _unwrap_coil_curve_and_current_objects
 from .biotsavart_jax import (
     biot_savart_B,
     biot_savart_B_vjp,
@@ -418,23 +421,16 @@ def _rotate_curve_geometry(gamma, gammadash, rotmat):
 
 
 def _unwrap_coil_curve_and_current(coil):
-    from ..geo.curve import RotatedCurve
-    from .coil import ScaledCurrent
-
-    curve = coil.curve
-    rotmat = None
-    while isinstance(curve, RotatedCurve):
-        next_rotmat = jnp.asarray(curve.rotmat)
-        rotmat = next_rotmat if rotmat is None else next_rotmat @ rotmat
-        curve = curve.curve
-
-    current = coil.current
-    scale = 1.0
-    while isinstance(current, ScaledCurrent):
-        scale *= float(current.scale)
-        current = current.current_to_scale
-
-    return curve, rotmat, current, scale
+    curve, rotmat, current, scale = _unwrap_coil_curve_and_current_objects(
+        coil.curve,
+        coil.current,
+    )
+    return (
+        curve,
+        (None if rotmat is None else jnp.asarray(rotmat, dtype=jnp.float64)),
+        current,
+        scale,
+    )
 
 
 class BiotSavartJAX(Optimizable):
@@ -728,6 +724,15 @@ class BiotSavartJAX(Optimizable):
             self._points_jax = jnp.asarray(np.ascontiguousarray(points))
         self._points_version += 1
 
+    def set_points_from_spec(self, field_eval_spec):
+        """Set evaluation points from an immutable field-evaluation spec."""
+        self._points_jax = jnp.asarray(field_eval_spec.points, dtype=jnp.float64)
+        self._points_version += 1
+
+    def field_eval_spec(self):
+        """Build the immutable field-evaluation spec for the current points."""
+        return make_field_eval_spec(self._points_jax)
+
     def _base_curve_geometry(self, curve, geometry_cache=None):
         gamma, gammadash, _, _ = self._base_curve_geometry_with_timings(
             curve,
@@ -858,6 +863,11 @@ class BiotSavartJAX(Optimizable):
         if self._jax_native:
             return self.coil_set_spec_from_dofs(jnp.asarray(self.x, dtype=jnp.float64))
 
+        try:
+            return grouped_coil_set_spec_from_coil_specs(self.coil_specs())
+        except NotImplementedError:
+            pass
+
         geometry_cache = {}
         gammas = []
         gammadashs = []
@@ -871,6 +881,10 @@ class BiotSavartJAX(Optimizable):
             gammadashs.append(gammadash)
             currents.append(current_value)
         return grouped_coil_set_spec_from_lists(gammas, gammadashs, currents)
+
+    def coil_specs(self):
+        """Build immutable per-coil specs from the live coil graph."""
+        return tuple(coil.to_spec() for coil in self._coils)
 
     # ------------------------------------------------------------------
     # Forward field evaluation

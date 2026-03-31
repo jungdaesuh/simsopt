@@ -185,13 +185,23 @@ def test_import_jax_core_specs():
     """The pure JAX kernel-layer package imports through the real package tree."""
     rc, err = _run_import_check("""
         from simsopt.jax_core import (
+            CoilSpec,
             CoilGroupSpec,
+            CurrentValueSpec,
+            CurveRZFourierSpec,
+            CurveXYZFourierSpec,
+            FieldEvalSpec,
             GroupedCoilSetSpec,
             FixedSurfaceFluxSpec,
             SurfaceRZFourierSpec,
         )
 
+        assert CoilSpec is not None
         assert CoilGroupSpec is not None
+        assert CurrentValueSpec is not None
+        assert CurveRZFourierSpec is not None
+        assert CurveXYZFourierSpec is not None
+        assert FieldEvalSpec is not None
         assert GroupedCoilSetSpec is not None
         assert FixedSurfaceFluxSpec is not None
         assert SurfaceRZFourierSpec is not None
@@ -206,16 +216,29 @@ def test_jax_core_specs_are_pytrees():
         import jax.numpy as jnp
 
         from simsopt.jax_core import (
+            CoilSpec,
+            CurrentValueSpec,
+            CurveRZFourierSpec,
+            CurveXYZFourierSpec,
+            FieldEvalSpec,
             FixedSurfaceFluxSpec,
             GroupedCoilSetSpec,
             SurfaceRZFourierSpec,
+            curve_gamma_from_spec,
+            curve_gammadash_from_spec,
             fixed_surface_flux_integral_from_B,
             grouped_biot_savart_B_from_spec,
             grouped_coil_currents_from_spec,
             grouped_coil_index_lists_from_spec,
+            grouped_coil_set_spec_from_coil_specs,
             grouped_field_data_from_spec,
             grouped_field_inputs_from_spec,
+            make_coil_spec,
             make_fixed_surface_flux_spec,
+            make_current_value_spec,
+            make_curve_rzfourier_spec,
+            make_curve_xyzfourier_spec,
+            make_field_eval_spec,
             make_grouped_coil_set_spec,
             make_surface_rzfourier_spec,
             surface_rz_fourier_gamma_from_spec,
@@ -235,6 +258,24 @@ def test_jax_core_specs_are_pytrees():
             target=jnp.zeros((2, 2)),
             definition="quadratic flux",
         )
+        curve_xyz_spec = make_curve_xyzfourier_spec(
+            dofs=jnp.asarray([1.0, 0.0, 0.0]),
+            quadpoints=jnp.asarray([0.0, 0.5]),
+            order=0,
+        )
+        curve_rz_spec = make_curve_rzfourier_spec(
+            dofs=jnp.asarray([1.0, 0.0]),
+            quadpoints=jnp.asarray([0.0, 0.5]),
+            order=0,
+            nfp=1,
+            stellsym=True,
+        )
+        current_spec = make_current_value_spec(2.0)
+        field_eval_spec = make_field_eval_spec(jnp.zeros((4, 3)))
+        coil_value_spec = make_coil_spec(
+            curve=curve_xyz_spec,
+            current=current_spec,
+        )
         surface_spec = make_surface_rzfourier_spec(
             rc=jnp.asarray([[1.0]]),
             zs=jnp.asarray([[0.0]]),
@@ -244,14 +285,29 @@ def test_jax_core_specs_are_pytrees():
             stellsym=True,
         )
 
+        assert isinstance(coil_value_spec, CoilSpec)
+        assert isinstance(current_spec, CurrentValueSpec)
+        assert isinstance(curve_rz_spec, CurveRZFourierSpec)
+        assert isinstance(curve_xyz_spec, CurveXYZFourierSpec)
+        assert isinstance(field_eval_spec, FieldEvalSpec)
         assert isinstance(coil_spec, GroupedCoilSetSpec)
         assert isinstance(flux_spec, FixedSurfaceFluxSpec)
         assert isinstance(surface_spec, SurfaceRZFourierSpec)
 
+        curve_xyz_leaves, _ = jax.tree_util.tree_flatten(curve_xyz_spec)
+        curve_rz_leaves, _ = jax.tree_util.tree_flatten(curve_rz_spec)
+        current_leaves, _ = jax.tree_util.tree_flatten(current_spec)
+        field_eval_leaves, _ = jax.tree_util.tree_flatten(field_eval_spec)
+        coil_value_leaves, _ = jax.tree_util.tree_flatten(coil_value_spec)
         coil_leaves, _ = jax.tree_util.tree_flatten(coil_spec)
         flux_leaves, _ = jax.tree_util.tree_flatten(flux_spec)
         surface_leaves, _ = jax.tree_util.tree_flatten(surface_spec)
 
+        assert len(curve_xyz_leaves) == 2
+        assert len(curve_rz_leaves) == 2
+        assert len(current_leaves) == 1
+        assert len(field_eval_leaves) == 1
+        assert len(coil_value_leaves) == 4
         assert len(coil_leaves) == 3
         assert len(flux_leaves) == 3
         assert len(surface_leaves) == 6
@@ -259,12 +315,19 @@ def test_jax_core_specs_are_pytrees():
         assert len(grouped_field_data_from_spec(coil_spec)) == 1
         assert grouped_coil_index_lists_from_spec(coil_spec) == ([0],)
         assert grouped_coil_currents_from_spec(coil_spec).shape == (1,)
+        assert grouped_coil_set_spec_from_coil_specs((coil_value_spec,)).groups[0].coil_indices == (0,)
 
+        curve_xyz_gamma = jax.jit(curve_gamma_from_spec)(curve_xyz_spec)
+        curve_xyz_gammadash = jax.jit(curve_gammadash_from_spec)(curve_xyz_spec)
+        curve_rz_gamma = jax.jit(curve_gamma_from_spec)(curve_rz_spec)
         B = jax.jit(grouped_biot_savart_B_from_spec)(jnp.zeros((4, 3)), coil_spec)
         value = jax.jit(fixed_surface_flux_integral_from_B)(B, flux_spec)
         gamma = jax.jit(surface_rz_fourier_gamma_from_spec)(surface_spec)
 
         assert B.shape == (4, 3)
+        assert curve_xyz_gamma.shape == (2, 3)
+        assert curve_xyz_gammadash.shape == (2, 3)
+        assert curve_rz_gamma.shape == (2, 3)
         assert gamma.shape == (2, 2, 3)
         assert jnp.isfinite(value)
     """)

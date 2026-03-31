@@ -6,7 +6,11 @@ Update as of 2026-04-01:
 * strict fallback mode now exists
 * a first `jax_core/` subtree now exists
 * first-wave immutable specs now exist for grouped coils, fixed-surface flux,
-  and `SurfaceRZFourier`
+  `SurfaceRZFourier`, `CurveXYZFourier`, `CurveRZFourier`, current values,
+  coils, and field-evaluation point sets
+* hot-path legacy objects now expose `to_spec()` where the adapter seam is
+  stable (`CurveXYZFourier`, `CurveRZFourier`, `SurfaceRZFourier`,
+  `CurrentBase`, `Coil`)
 * a narrow fixed-surface `SurfaceRZFourier` JAX hot path now exists
 * grouped forward-field compatibility paths now route through `jax_core`
 * the grouped forward field path now has a first chunked point-axis reduction
@@ -484,6 +488,12 @@ According to a document from March 31, 2026, here is the module-by-module implem
 
 3. **Broaden the pure JAX layer from the current first slice.**
    You already have it in spirit via `make_traceable_objective()` and `run_code_functional()`, and now also through the new `jax_core` subtree and first-wave specs. The next step is to widen that architecture instead of letting pure and mutable styles keep mixing.  
+
+   The hot-path spec layer is now broader than a toy first slice: concrete
+   curve/current/coil/field-eval specs and `to_spec()` adapters already exist
+   for the main Fourier/coil objects. The remaining work is to extend that
+   coverage to the rest of the legacy object families and thread it through
+   more objective paths.
 
 4. **Finish mode-owned numerical policy.**
    Backend modes are now real, but chunking, tolerance, provenance, and guardrail expectations still need to be fully centralized under them. 

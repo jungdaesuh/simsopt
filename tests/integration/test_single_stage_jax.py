@@ -74,7 +74,12 @@ from simsopt.geo.surfaceobjectives import (  # noqa: E402
 from simsopt.objectives import QuadraticPenalty  # noqa: E402
 
 from simsopt.field.biotsavart_jax_backend import BiotSavartJAX  # noqa: E402
-from simsopt.jax_core import GroupedCoilSetSpec  # noqa: E402
+from simsopt.jax_core import (  # noqa: E402
+    CoilSpec,
+    FieldEvalSpec,
+    GroupedCoilSetSpec,
+    grouped_coil_set_spec_from_coil_specs,
+)
 from simsopt.geo.boozersurface_jax import (  # noqa: E402
     BoozerSurfaceJAX,
     _boozer_ls_coil_vjp,
@@ -1031,6 +1036,64 @@ class TestAdjointSolveConsistency:
             np.asarray(group.currents),
             np.array([1.23]),
             atol=1e-12,
+        )
+
+    def test_legacy_objects_expose_curve_current_coil_specs(self):
+        """Legacy hot-path objects should expose immutable JAX specs."""
+        curve = CurveXYZFourier(16, 1)
+        curve.x = np.array([0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9])
+        rotated_curve = RotatedCurve(curve, np.pi / 3.0, False)
+        current = Current(1.23)
+        scaled_current = 2.0 * current
+        coil = Coil(rotated_curve, scaled_current)
+
+        curve_spec = curve.to_spec()
+        current_spec = current.to_spec()
+        coil_spec = coil.to_spec()
+        grouped_spec = grouped_coil_set_spec_from_coil_specs((coil_spec,))
+
+        assert isinstance(current_spec.value, jax.Array)
+        assert isinstance(coil_spec, CoilSpec)
+        assert grouped_spec.groups[0].coil_indices == (0,)
+        np.testing.assert_allclose(
+            np.asarray(grouped_spec.groups[0].gammas[0]),
+            rotated_curve.gamma(),
+            atol=1e-12,
+        )
+        np.testing.assert_allclose(
+            np.asarray(grouped_spec.groups[0].gammadashs[0]),
+            rotated_curve.gammadash(),
+            atol=1e-12,
+        )
+        np.testing.assert_allclose(
+            np.asarray(grouped_spec.groups[0].currents),
+            np.array([2.46]),
+            atol=1e-12,
+        )
+        assert curve_spec.order == curve.order
+
+    def test_field_eval_spec_round_trip_uses_immutable_points(self):
+        """BiotSavartJAX should round-trip evaluation points through FieldEvalSpec."""
+        curve = CurveXYZFourier(16, 1)
+        current = Current(1.23)
+        bs_jax = BiotSavartJAX([Coil(curve, current)])
+        points = np.array(
+            [
+                [0.1, 0.0, 0.0],
+                [0.2, 0.1, -0.1],
+            ]
+        )
+
+        bs_jax.set_points(points)
+        field_eval_spec = bs_jax.field_eval_spec()
+
+        assert isinstance(field_eval_spec, FieldEvalSpec)
+        np.testing.assert_allclose(np.asarray(field_eval_spec.points), points)
+
+        updated_points = jnp.asarray(points + 0.05, dtype=jnp.float64)
+        bs_jax.set_points_from_spec(FieldEvalSpec(points=updated_points))
+        np.testing.assert_allclose(
+            np.asarray(bs_jax.field_eval_spec().points), updated_points
         )
 
     def test_grouped_coil_arrays_from_dofs_supports_generic_jaxcurve_geometry(
