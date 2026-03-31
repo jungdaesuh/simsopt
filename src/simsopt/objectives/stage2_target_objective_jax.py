@@ -7,9 +7,13 @@ from typing import Callable, NamedTuple
 import numpy as np
 import jax.numpy as jnp
 
-from ..field.biotsavart_jax import biot_savart_B, group_coil_data, grouped_biot_savart_B
+from ..field.biotsavart_jax import biot_savart_B
 from ..field.biotsavart_jax_backend import _unwrap_coil_curve_and_current
 from ..geo.curve import incremental_arclength_pure, kappa_pure
+from ..jax_core.field import (
+    grouped_biot_savart_B_from_spec,
+    grouped_coil_set_spec_from_lists,
+)
 from ..jax_core.objectives_flux import fixed_surface_geometry_from_surface
 from ..geo.curveobjectives import (
     curvature_barrier_pure,
@@ -135,16 +139,13 @@ def build_stage2_target_objective(
     surf_dofs = _as_jax_float64_array(np.asarray(banana_curve.surf.get_dofs()))
     curve_dof_count = int(banana_curve.num_dofs())
 
-    tf_groups = tuple(
-        (gammas, gammadashs, currents)
-        for gammas, gammadashs, currents, _ in group_coil_data(
+    if tf_coils:
+        tf_coil_spec = grouped_coil_set_spec_from_lists(
             [coil.curve.gamma() for coil in tf_coils],
             [coil.curve.gammadash() for coil in tf_coils],
             [coil.current.get_value() for coil in tf_coils],
         )
-    )
-    if tf_groups:
-        fixed_field = grouped_biot_savart_B(points, tf_groups)
+        fixed_field = grouped_biot_savart_B_from_spec(points, tf_coil_spec)
     else:
         fixed_field = jnp.zeros((points.shape[0], 3), dtype=jnp.float64)
 

@@ -74,6 +74,7 @@ from simsopt.geo.surfaceobjectives import (  # noqa: E402
 from simsopt.objectives import QuadraticPenalty  # noqa: E402
 
 from simsopt.field.biotsavart_jax_backend import BiotSavartJAX  # noqa: E402
+from simsopt.jax_core import GroupedCoilSetSpec  # noqa: E402
 from simsopt.geo.boozersurface_jax import (  # noqa: E402
     BoozerSurfaceJAX,
     _boozer_ls_coil_vjp,
@@ -1003,6 +1004,33 @@ class TestAdjointSolveConsistency:
         )
         np.testing.assert_allclose(
             np.asarray(current_group), np.array([1.23]), atol=1e-12
+        )
+
+    def test_coil_set_spec_from_dofs_reuses_grouped_coil_ssot(self):
+        """Explicit reconstruction should expose the immutable grouped-coil spec."""
+        curve = CurveXYZFourier(16, 1)
+        curve.x = np.array([0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9])
+        current = Current(1.23)
+        bs_jax = BiotSavartJAX([Coil(curve, current)])
+
+        coil_set_spec = bs_jax.coil_set_spec_from_dofs(jnp.asarray(bs_jax.x))
+
+        assert isinstance(coil_set_spec, GroupedCoilSetSpec)
+        assert len(coil_set_spec.groups) == 1
+        group = coil_set_spec.groups[0]
+        assert group.coil_indices == (0,)
+        np.testing.assert_allclose(
+            np.asarray(group.gammas[0]), curve.gamma(), atol=1e-12
+        )
+        np.testing.assert_allclose(
+            np.asarray(group.gammadashs[0]),
+            curve.gammadash(),
+            atol=1e-12,
+        )
+        np.testing.assert_allclose(
+            np.asarray(group.currents),
+            np.array([1.23]),
+            atol=1e-12,
         )
 
     def test_grouped_coil_arrays_from_dofs_supports_generic_jaxcurve_geometry(

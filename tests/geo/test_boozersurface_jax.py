@@ -19,6 +19,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
+from simsopt.jax_core import GroupedCoilSetSpec, grouped_coil_set_spec_from_lists
 
 from .boozersurface_jax_test_helpers import (
     BoozerSurfaceJAX,
@@ -569,6 +570,23 @@ def _make_mock_boozer_surface_mixed_quad(nphi=8, ntheta=8, mpol=1, ntor=1, nfp=1
     return BoozerSurfaceJAX(bs, surf, label, target, constraint_weight=1.0)
 
 
+def _make_spec_only_biotsavart(coils):
+    class _SpecOnlyBiotSavart(_MockBiotSavart):
+        def __init__(self, grouped_coils):
+            super().__init__(grouped_coils)
+            self._coil_spec = grouped_coil_set_spec_from_lists(
+                [coil.curve.gamma() for coil in grouped_coils],
+                [coil.curve.gammadash() for coil in grouped_coils],
+                [coil.current.get_value() for coil in grouped_coils],
+            )
+            del self._coils
+
+        def coil_set_spec(self):
+            return self._coil_spec
+
+    return _SpecOnlyBiotSavart(coils)
+
+
 class TestBoozerSurfaceJAXClass:
     """Test the adapter class instantiation and run_code orchestration."""
 
@@ -578,6 +596,62 @@ class TestBoozerSurfaceJAXClass:
         assert booz.boozer_type == "ls"
         assert booz.label_type == "volume"
         assert booz.need_to_run_code is True
+
+    def test_instantiation_accepts_spec_only_biotsavart(self):
+        """The grouped-coil spec path must not require a legacy ``_coils`` list."""
+
+        coils = _make_mixed_quad_mock_coils()
+        bs = _make_spec_only_biotsavart(coils)
+        surf = _MockSurface(
+            np.zeros(27),
+            1,
+            1,
+            1,
+            False,
+            np.linspace(0.0, 1.0, 3, endpoint=False),
+            np.linspace(0.0, 1.0, 3, endpoint=False),
+        )
+        label = _MockVolumeLabel()
+        booz = BoozerSurfaceJAX(
+            bs,
+            surf,
+            label,
+            1.0,
+            constraint_weight=1.0,
+        )
+
+        assert isinstance(booz.coil_set_spec, GroupedCoilSetSpec)
+        np.testing.assert_allclose(
+            np.asarray(booz.coil_currents),
+            np.asarray([coil.current.get_value() for coil in coils]),
+        )
+
+    def test_spec_only_biotsavart_supports_G_none_ls_path(self):
+        """Spec-driven grouped-field state should work without a legacy ``_coils`` list."""
+        coils = _make_mixed_quad_mock_coils()
+        bs = _make_spec_only_biotsavart(coils)
+        surf = _MockSurface(
+            np.zeros(27),
+            1,
+            1,
+            1,
+            False,
+            np.linspace(0.0, 1.0, 3, endpoint=False),
+            np.linspace(0.0, 1.0, 3, endpoint=False),
+        )
+        label = _MockVolumeLabel()
+        booz = BoozerSurfaceJAX(
+            bs,
+            surf,
+            label,
+            1.0,
+            constraint_weight=1.0,
+        )
+
+        result = booz.run_code(iota=0.2, G=None)
+
+        assert result is not None
+        assert result["type"] == "ls"
 
     def test_stale_bfgs_method_rejected(self):
         """The removed bfgs_method option must fail fast."""
@@ -1702,6 +1776,8 @@ class TestMixedQuadratureBoozer:
         """Mixed-quad coils don't crash _refresh_coil_data."""
         booz = _make_mock_boozer_surface_mixed_quad()
         assert len(booz.coil_groups) == 2  # two distinct nquad values
+        assert isinstance(booz.coil_set_spec, GroupedCoilSetSpec)
+        assert len(booz.coil_set_spec.groups) == 2
 
     def test_run_code_ls_converges(self):
         """LS solve converges with mixed-quadrature coils."""

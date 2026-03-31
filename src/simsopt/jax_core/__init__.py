@@ -5,6 +5,11 @@ from .field import (
     grouped_biot_savart_B_and_dB_from_spec,
     grouped_biot_savart_B_from_spec,
     grouped_biot_savart_dB_by_dX_from_spec,
+    grouped_coil_currents_from_spec,
+    grouped_coil_index_lists_from_spec,
+    grouped_coil_set_spec_from_grouped_data,
+    grouped_field_data_from_spec,
+    grouped_field_inputs_from_spec,
     grouped_coil_set_spec_from_lists,
 )
 from .objectives_flux import (
@@ -44,6 +49,11 @@ __all__ = [
     "grouped_biot_savart_B_and_dB_from_spec",
     "grouped_biot_savart_B_from_spec",
     "grouped_biot_savart_dB_by_dX_from_spec",
+    "grouped_coil_currents_from_spec",
+    "grouped_coil_index_lists_from_spec",
+    "grouped_coil_set_spec_from_grouped_data",
+    "grouped_field_data_from_spec",
+    "grouped_field_inputs_from_spec",
     "make_coil_group_spec",
     "make_fixed_surface_flux_spec",
     "make_grouped_coil_set_spec",

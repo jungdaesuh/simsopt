@@ -49,11 +49,17 @@ except (ImportError, ModuleNotFoundError):
 
 
 from .surface_fourier_jax import stellsym_scatter_indices
-from ..field.biotsavart_jax import (
-    group_coil_data,
-    grouped_biot_savart_B,
-    grouped_biot_savart_A,
+from ..jax_core.field import (
+    grouped_biot_savart_A_from_spec,
+    grouped_biot_savart_B_from_spec,
+    grouped_coil_currents_from_spec,
+    grouped_coil_index_lists_from_spec,
+    grouped_coil_set_spec_from_grouped_data,
+    grouped_coil_set_spec_from_lists,
+    grouped_field_data_from_spec,
+    grouped_field_inputs_from_spec,
 )
+from ..field.biotsavart_jax import grouped_biot_savart_A, grouped_biot_savart_B
 from .boozer_residual_jax import (
     boozer_residual_scalar,
     boozer_residual_vector,
@@ -96,22 +102,26 @@ def _yield_group_vjps(lm, group_runners, coil_arrays, coil_indices):
         yield vjp_fn(lm)[0], group_index_list
 
 
-def _extract_grouped_coil_data(biotsavart):
-    """Return grouped coil geometry/current arrays for a biotsavart-like object.
+def _extract_grouped_coil_set_spec(biotsavart):
+    """Return the immutable grouped-coil spec for a biotsavart-like object.
 
     ``BiotSavartJAX`` provides a dedicated grouped extractor. Fallback callers,
     including the lightweight Boozer test doubles, only expose a coil list and
     the public per-coil geometry/current interface.
     """
+    coil_set_spec = getattr(biotsavart, "coil_set_spec", None)
+    if coil_set_spec is not None:
+        return coil_set_spec()
+
     grouped_extractor = getattr(biotsavart, "_extract_coil_data_grouped", None)
     if grouped_extractor is not None:
-        return grouped_extractor()
+        return grouped_coil_set_spec_from_grouped_data(grouped_extractor())
 
     coils = getattr(biotsavart, "_coils", None)
     if coils is None:
         raise AttributeError(
             "BoozerSurfaceJAX requires a biotsavart object that provides either "
-            "_extract_coil_data_grouped() or a _coils list."
+            "coil_set_spec(), _extract_coil_data_grouped(), or a _coils list."
         )
 
     gammas = []
@@ -121,7 +131,51 @@ def _extract_grouped_coil_data(biotsavart):
         gammas.append(coil.curve.gamma())
         gammadashs.append(coil.curve.gammadash())
         currents.append(coil.current.get_value())
-    return group_coil_data(gammas, gammadashs, currents)
+    return grouped_coil_set_spec_from_lists(gammas, gammadashs, currents)
+
+
+def _coil_count_from_spec_or_coils(biotsavart, coil_set_spec):
+    coils = getattr(biotsavart, "_coils", None)
+    if coils is not None:
+        return len(coils)
+    return (
+        max(
+            (max(indices) for indices in coil_set_spec.coil_index_lists()),
+            default=-1,
+        )
+        + 1
+    )
+
+
+def _coil_currents_are_fixed(biotsavart):
+    coils = getattr(biotsavart, "_coils", None)
+    if coils is None:
+        return True
+    return all(coil.current.dofs.all_fixed() for coil in coils)
+
+
+def _grouped_coil_currents(*, coil_arrays=None, coil_set_spec=None):
+    if coil_set_spec is not None:
+        return grouped_coil_currents_from_spec(coil_set_spec)
+    return jnp.concatenate([currents for _, _, currents in coil_arrays])
+
+
+def _resolved_coil_set_spec(default_spec, *, coil_arrays=None, coil_set_spec=None):
+    if coil_arrays is not None or coil_set_spec is not None:
+        return coil_set_spec
+    return default_spec
+
+
+def _grouped_biot_savart_B_points(points, *, coil_arrays=None, coil_set_spec=None):
+    if coil_set_spec is not None:
+        return grouped_biot_savart_B_from_spec(points, coil_set_spec)
+    return grouped_biot_savart_B(points, coil_arrays)
+
+
+def _grouped_biot_savart_A_points(points, *, coil_arrays=None, coil_set_spec=None):
+    if coil_set_spec is not None:
+        return grouped_biot_savart_A_from_spec(points, coil_set_spec)
+    return grouped_biot_savart_A(points, coil_arrays)
 
 
 def _compute_label(
@@ -131,7 +185,8 @@ def _compute_label(
     xtheta,
     phi_idx,
     points,
-    coil_arrays,
+    coil_arrays=None,
+    coil_set_spec=None,
 ):
     """Compute the label value (volume, area, or toroidal flux).
 
@@ -143,14 +198,20 @@ def _compute_label(
     if label_type == "area":
         return area_jax(normal)
     ntheta = gamma.shape[1]
-    A = grouped_biot_savart_A(points, coil_arrays)
+    A = _grouped_biot_savart_A_points(
+        points,
+        coil_arrays=coil_arrays,
+        coil_set_spec=coil_set_spec,
+    )
     A = A.reshape(gamma.shape)
     return toroidal_flux_jax(A[phi_idx], xtheta[phi_idx], ntheta)
 
 
 def _boozer_penalty_objective(
     x,
-    coil_arrays,
+    *,
+    coil_arrays=None,
+    coil_set_spec=None,
     quadpoints_phi,
     quadpoints_theta,
     mpol,
@@ -179,7 +240,9 @@ def _boozer_penalty_objective(
         sdofs, iota, G = x[:-2], x[-2], x[-1]
     else:
         sdofs, iota = x[:-1], x[-1]
-        G = compute_G_from_currents(jnp.concatenate([c for _, _, c in coil_arrays]))
+        G = compute_G_from_currents(
+            _grouped_coil_currents(coil_arrays=coil_arrays, coil_set_spec=coil_set_spec)
+        )
 
     gamma, xphi, xtheta = _surface_geometry_from_dofs(
         sdofs,
@@ -194,7 +257,11 @@ def _boozer_penalty_objective(
     nphi, ntheta = gamma.shape[:2]
 
     points = gamma.reshape(-1, 3)
-    B = grouped_biot_savart_B(points, coil_arrays)
+    B = _grouped_biot_savart_B_points(
+        points,
+        coil_arrays=coil_arrays,
+        coil_set_spec=coil_set_spec,
+    )
     B = B.reshape(nphi, ntheta, 3)
 
     J_boozer = boozer_residual_scalar(G, iota, B, xphi, xtheta, weight_inv_modB)
@@ -206,7 +273,8 @@ def _boozer_penalty_objective(
         xtheta,
         phi_idx,
         points,
-        coil_arrays,
+        coil_arrays=coil_arrays,
+        coil_set_spec=coil_set_spec,
     )
 
     J_label = 0.5 * constraint_weight * (label_val - targetlabel) ** 2
@@ -217,7 +285,9 @@ def _boozer_penalty_objective(
 
 def _boozer_exact_residual(
     x,
-    coil_arrays,
+    *,
+    coil_arrays=None,
+    coil_set_spec=None,
     quadpoints_phi,
     quadpoints_theta,
     mpol,
@@ -255,7 +325,11 @@ def _boozer_exact_residual(
     nphi, ntheta = gamma.shape[:2]
 
     points = gamma.reshape(-1, 3)
-    B = grouped_biot_savart_B(points, coil_arrays)
+    B = _grouped_biot_savart_B_points(
+        points,
+        coil_arrays=coil_arrays,
+        coil_set_spec=coil_set_spec,
+    )
     B = B.reshape(nphi, ntheta, 3)
 
     r_flat = boozer_residual_vector(G, iota, B, xphi, xtheta, weight_inv_modB)
@@ -268,7 +342,8 @@ def _boozer_exact_residual(
         xtheta,
         phi_idx,
         points,
-        coil_arrays,
+        coil_arrays=coil_arrays,
+        coil_set_spec=coil_set_spec,
     )
     r_label = label_val - targetlabel
 
@@ -846,12 +921,12 @@ class BoozerSurfaceJAX(Optimizable):
     @property
     def _coil_arrays(self):
         """Coil geometry tuples ``(gammas, gammadashs, currents)`` without index lists."""
-        return [(g, gd, c) for g, gd, c, _ in self.coil_groups]
+        return list(grouped_field_inputs_from_spec(self.coil_set_spec))
 
     @property
     def _coil_index_lists(self):
         """Per-group coil index lists from ``coil_groups``."""
-        return [idx for _, _, _, idx in self.coil_groups]
+        return list(grouped_coil_index_lists_from_spec(self.coil_set_spec))
 
     def recompute_bell(self, parent=None):
         """Mark solver as needing re-execution (dirty flag)."""
@@ -864,12 +939,15 @@ class BoozerSurfaceJAX(Optimizable):
         different ``num_quad_points`` can coexist without crashing
         on array stacking.
         """
-        self.coil_groups = _extract_grouped_coil_data(self.biotsavart)
-        coil_currents = [None] * len(self.biotsavart._coils)
-        for _, _, currents, indices in self.coil_groups:
-            for local_i, coil_i in enumerate(indices):
-                coil_currents[coil_i] = currents[local_i]
-        self.coil_currents = jnp.asarray(coil_currents, dtype=jnp.float64)
+        self.coil_set_spec = _extract_grouped_coil_set_spec(self.biotsavart)
+        self.coil_groups = list(grouped_field_data_from_spec(self.coil_set_spec))
+        self.coil_currents = grouped_coil_currents_from_spec(
+            self.coil_set_spec,
+            coil_count=_coil_count_from_spec_or_coils(
+                self.biotsavart,
+                self.coil_set_spec,
+            ),
+        )
 
     def _emit_stage_callback(
         self,
@@ -934,11 +1012,26 @@ class BoozerSurfaceJAX(Optimizable):
             return x[:-2], float(x[-2]), float(x[-1])
         return x[:-1], float(x[-1]), None
 
-    def _unpack_decision_vector_jax(self, x, optimize_G, coil_arrays):
+    def _unpack_decision_vector_jax(
+        self,
+        x,
+        optimize_G,
+        coil_set_spec=None,
+        coil_arrays=None,
+    ):
         """JAX-array version of ``_unpack_decision_vector``."""
         if optimize_G:
             return x[:-2], x[-2], x[-1]
-        G = compute_G_from_currents(jnp.concatenate([c for _, _, c in coil_arrays]))
+        G = compute_G_from_currents(
+            _grouped_coil_currents(
+                coil_arrays=coil_arrays,
+                coil_set_spec=_resolved_coil_set_spec(
+                    self.coil_set_spec,
+                    coil_arrays=coil_arrays,
+                    coil_set_spec=coil_set_spec,
+                ),
+            )
+        )
         return x[:-1], x[-1], G
 
     def _make_penalty_objective_with(
@@ -946,12 +1039,18 @@ class BoozerSurfaceJAX(Optimizable):
         optimize_G,
         weight_inv_modB,
         constraint_weight=None,
+        coil_set_spec=None,
         coil_arrays=None,
     ):
         """Build penalty objective with explicit overrides."""
         return partial(
             _boozer_penalty_objective,
-            coil_arrays=coil_arrays if coil_arrays is not None else self._coil_arrays,
+            coil_arrays=coil_arrays,
+            coil_set_spec=_resolved_coil_set_spec(
+                self.coil_set_spec,
+                coil_arrays=coil_arrays,
+                coil_set_spec=coil_set_spec,
+            ),
             quadpoints_phi=self.quadpoints_phi,
             quadpoints_theta=self.quadpoints_theta,
             mpol=self.mpol,
@@ -1083,7 +1182,7 @@ class BoozerSurfaceJAX(Optimizable):
         sdofs_out, iota_out, G_out = self._unpack_decision_vector_jax(
             newton_result["x"],
             optimize_G,
-            coil_arrays,
+            coil_arrays=coil_arrays,
         )
         finite = (
             jnp.all(jnp.isfinite(newton_result["x"]))
@@ -1106,7 +1205,14 @@ class BoozerSurfaceJAX(Optimizable):
             "weight_inv_modB": weight_inv_modB,
         }
 
-    def _compute_residual_vector(self, sdofs, iota, G, coil_arrays=None):
+    def _compute_residual_vector(
+        self,
+        sdofs,
+        iota,
+        G,
+        coil_set_spec=None,
+        coil_arrays=None,
+    ):
         """Compute unscalarized penalty residual vector at given state.
 
         Reuses M3's ``boozer_residual_vector`` for the Boozer part,
@@ -1115,8 +1221,11 @@ class BoozerSurfaceJAX(Optimizable):
         Returns a JAX array matching CPU
         ``boozer_penalty_constraints(..., scalarize=False)``.
         """
-        if coil_arrays is None:
-            coil_arrays = self._coil_arrays
+        coil_set_spec = _resolved_coil_set_spec(
+            self.coil_set_spec,
+            coil_arrays=coil_arrays,
+            coil_set_spec=coil_set_spec,
+        )
         gamma, xphi, xtheta = _surface_geometry_from_dofs(
             sdofs,
             self.quadpoints_phi,
@@ -1129,7 +1238,11 @@ class BoozerSurfaceJAX(Optimizable):
         )
         nphi, ntheta = int(gamma.shape[0]), int(gamma.shape[1])
         points = gamma.reshape(-1, 3)
-        B = grouped_biot_savart_B(points, coil_arrays).reshape(nphi, ntheta, 3)
+        B = _grouped_biot_savart_B_points(
+            points,
+            coil_arrays=coil_arrays,
+            coil_set_spec=coil_set_spec,
+        ).reshape(nphi, ntheta, 3)
 
         r_boozer_raw = boozer_residual_vector(
             G, iota, B, xphi, xtheta, self.options["weight_inv_modB"]
@@ -1146,7 +1259,8 @@ class BoozerSurfaceJAX(Optimizable):
                 xtheta,
                 self.phi_idx,
                 points,
-                coil_arrays,
+                coil_arrays=coil_arrays,
+                coil_set_spec=coil_set_spec,
             )
         )
         rl = jnp.sqrt(cw) * (lab - self.targetlabel)
@@ -1412,11 +1526,21 @@ class BoozerSurfaceJAX(Optimizable):
             )
         return res
 
-    def _make_exact_residual_with(self, mask_indices, coil_arrays=None):
-        """Build the exact residual function with optional explicit coil arrays."""
+    def _make_exact_residual_with(
+        self,
+        mask_indices,
+        coil_arrays=None,
+        coil_set_spec=None,
+    ):
+        """Build the exact residual function with explicit grouped-field inputs."""
         return partial(
             _boozer_exact_residual,
-            coil_arrays=self._coil_arrays if coil_arrays is None else coil_arrays,
+            coil_arrays=coil_arrays,
+            coil_set_spec=_resolved_coil_set_spec(
+                self.coil_set_spec,
+                coil_arrays=coil_arrays,
+                coil_set_spec=coil_set_spec,
+            ),
             quadpoints_phi=self.quadpoints_phi,
             quadpoints_theta=self.quadpoints_theta,
             mpol=self.mpol,
@@ -1553,9 +1677,9 @@ class BoozerSurfaceJAX(Optimizable):
             self.stellsym,
             self.scatter_indices,
         )
-        B_final = grouped_biot_savart_B(
+        B_final = grouped_biot_savart_B_from_spec(
             gamma_final.reshape(-1, 3),
-            self._coil_arrays,
+            self.coil_set_spec,
         ).reshape(nphi, ntheta, 3)
         r_raw = boozer_residual_vector(
             G_final,
@@ -1632,7 +1756,7 @@ class BoozerSurfaceJAX(Optimizable):
         # When G=None the gradient treats currents as constants,
         # so coil currents must be fixed to avoid silent gradient errors.
         if G is None:
-            assert all(c.current.dofs.all_fixed() for c in self.biotsavart._coils), (
+            assert _coil_currents_are_fixed(self.biotsavart), (
                 "Coil currents must be fixed when G=None"
             )
 

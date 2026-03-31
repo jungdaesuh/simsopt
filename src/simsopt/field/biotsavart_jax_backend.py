@@ -19,13 +19,17 @@ import jax.numpy as jnp
 from ..backend import raise_if_strict_jax_fallback
 from .._core.derivative import Derivative
 from .._core.optimizable import Optimizable
+from ..jax_core.field import (
+    grouped_biot_savart_B_and_dB_from_spec,
+    grouped_biot_savart_B_from_spec,
+    grouped_biot_savart_dB_by_dX_from_spec,
+    grouped_field_data_from_spec,
+    grouped_field_inputs_from_spec,
+    grouped_coil_set_spec_from_lists,
+)
 from .biotsavart_jax import (
     biot_savart_B,
     biot_savart_B_vjp,
-    biot_savart_dB_by_dX,
-    biot_savart_B_and_dB,
-    group_coil_data,
-    grouped_biot_savart_B,
 )
 
 __all__ = ["BiotSavartJAX"]
@@ -699,10 +703,14 @@ class BiotSavartJAX(Optimizable):
 
     def grouped_coil_arrays_from_dofs(self, coil_dofs):
         """Build grouped coil arrays from an explicit flat DOF vector."""
+        return list(
+            grouped_field_inputs_from_spec(self.coil_set_spec_from_dofs(coil_dofs))
+        )
+
+    def coil_set_spec_from_dofs(self, coil_dofs):
+        """Build an immutable grouped coil spec from an explicit flat DOF vector."""
         gammas, gammadashs, currents = self._coil_arrays_in_order_from_dofs(coil_dofs)
-        return [
-            (g, gd, c) for g, gd, c, _ in group_coil_data(gammas, gammadashs, currents)
-        ]
+        return grouped_coil_set_spec_from_lists(gammas, gammadashs, currents)
 
     @property
     def coils(self):
@@ -837,17 +845,18 @@ class BiotSavartJAX(Optimizable):
     def _extract_coil_data_grouped(self):
         """Read coil geometry grouped by quadrature point count.
 
-        Delegates to :func:`group_coil_data` in ``biotsavart_jax.py``.
+        Compatibility wrapper over the immutable grouped-coil spec.
 
         Returns:
             list of ``(gammas, gammadashs, currents, coil_indices)``
             tuples, one per distinct quadrature count.
         """
+        return list(grouped_field_data_from_spec(self.coil_set_spec()))
+
+    def coil_set_spec(self):
+        """Build the immutable grouped coil spec from the live coil graph."""
         if self._jax_native:
-            gammas, gammadashs, currents = self._coil_arrays_in_order_from_dofs(
-                jnp.asarray(self.x, dtype=jnp.float64)
-            )
-            return group_coil_data(gammas, gammadashs, currents)
+            return self.coil_set_spec_from_dofs(jnp.asarray(self.x, dtype=jnp.float64))
 
         geometry_cache = {}
         gammas = []
@@ -861,7 +870,7 @@ class BiotSavartJAX(Optimizable):
             gammas.append(gamma)
             gammadashs.append(gammadash)
             currents.append(current_value)
-        return group_coil_data(gammas, gammadashs, currents)
+        return grouped_coil_set_spec_from_lists(gammas, gammadashs, currents)
 
     # ------------------------------------------------------------------
     # Forward field evaluation
@@ -873,8 +882,7 @@ class BiotSavartJAX(Optimizable):
         Returns:
             (npoints, 3) JAX array.
         """
-        coil_arrays = [(g, gd, c) for g, gd, c, _ in self._extract_coil_data_grouped()]
-        return grouped_biot_savart_B(self._points_jax, coil_arrays)
+        return grouped_biot_savart_B_from_spec(self._points_jax, self.coil_set_spec())
 
     def dB_by_dX(self):
         """Spatial Jacobian dB/dX at the evaluation points.
@@ -882,13 +890,10 @@ class BiotSavartJAX(Optimizable):
         Returns:
             (npoints, 3, 3) JAX array where ``[p, j, l] = ∂_j B_l``.
         """
-        groups = self._extract_coil_data_grouped()
-        result = biot_savart_dB_by_dX(self._points_jax, *groups[0][:3])
-        for gammas, gammadashs, currents, _ in groups[1:]:
-            result = result + biot_savart_dB_by_dX(
-                self._points_jax, gammas, gammadashs, currents
-            )
-        return result
+        return grouped_biot_savart_dB_by_dX_from_spec(
+            self._points_jax,
+            self.coil_set_spec(),
+        )
 
     def B_and_dB(self):
         """Combined B and dB/dX (single JIT compilation).
@@ -896,15 +901,10 @@ class BiotSavartJAX(Optimizable):
         Returns:
             (B, dB_dX) with shapes (npoints, 3) and (npoints, 3, 3).
         """
-        groups = self._extract_coil_data_grouped()
-        B, dB = biot_savart_B_and_dB(self._points_jax, *groups[0][:3])
-        for gammas, gammadashs, currents, _ in groups[1:]:
-            Bi, dBi = biot_savart_B_and_dB(
-                self._points_jax, gammas, gammadashs, currents
-            )
-            B = B + Bi
-            dB = dB + dBi
-        return B, dB
+        return grouped_biot_savart_B_and_dB_from_spec(
+            self._points_jax,
+            self.coil_set_spec(),
+        )
 
     # ------------------------------------------------------------------
     # VJP (reverse-mode gradient w.r.t. coil DOFs)

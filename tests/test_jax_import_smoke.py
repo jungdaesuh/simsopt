@@ -182,6 +182,10 @@ def test_jax_core_specs_are_pytrees():
             SurfaceRZFourierSpec,
             fixed_surface_flux_integral_from_B,
             grouped_biot_savart_B_from_spec,
+            grouped_coil_currents_from_spec,
+            grouped_coil_index_lists_from_spec,
+            grouped_field_data_from_spec,
+            grouped_field_inputs_from_spec,
             make_fixed_surface_flux_spec,
             make_grouped_coil_set_spec,
             make_surface_rzfourier_spec,
@@ -222,6 +226,10 @@ def test_jax_core_specs_are_pytrees():
         assert len(coil_leaves) == 3
         assert len(flux_leaves) == 3
         assert len(surface_leaves) == 6
+        assert len(grouped_field_inputs_from_spec(coil_spec)) == 1
+        assert len(grouped_field_data_from_spec(coil_spec)) == 1
+        assert grouped_coil_index_lists_from_spec(coil_spec) == ([0],)
+        assert grouped_coil_currents_from_spec(coil_spec).shape == (1,)
 
         B = jax.jit(grouped_biot_savart_B_from_spec)(jnp.zeros((4, 3)), coil_spec)
         value = jax.jit(fixed_surface_flux_integral_from_B)(B, flux_spec)
