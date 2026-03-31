@@ -1128,6 +1128,11 @@ class TestStrictFieldFallbacks:
         bs_jax._jax_native = False
         bs_jax.set_points(surf.gamma().reshape((-1, 3)))
         monkeypatch.setattr(
+            bs_jax,
+            "coil_specs",
+            lambda: (_ for _ in ()).throw(NotImplementedError),
+        )
+        monkeypatch.setattr(
             biotsavart_jax_backend_module,
             "_supports_native_curve_geometry",
             lambda curve: False,

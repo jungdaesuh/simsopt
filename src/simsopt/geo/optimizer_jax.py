@@ -31,6 +31,8 @@ from jax import lax
 from jax.scipy.sparse.linalg import gmres
 from scipy.optimize import minimize as scipy_minimize
 
+from ..backend import raise_if_strict_jax_fallback
+
 __all__ = [
     "PRIVATE_OPTIMIZER_JAX_VERSION",
     "VALID_OPTIMIZER_BACKENDS",
@@ -61,6 +63,18 @@ _SUPPORTED_METHODS = {
     "lbfgs-ondevice",
 }
 _REFERENCE_METHODS = frozenset({"bfgs", "lbfgs"})
+_STRICT_REFERENCE_OPTIMIZER_DETAIL = "the host-side SciPy reference optimizer lane"
+_STRICT_EXPLICIT_VALUE_GRAD_DETAIL = (
+    "the explicit host-loop value-and-gradient optimizer fallback"
+)
+_STRICT_HYBRID_OPTIMIZER_DETAIL = "the transitional SciPy-prefix hybrid optimizer lane"
+
+
+def _raise_if_strict_optimizer_fallback(*, method: str, detail: str) -> None:
+    raise_if_strict_jax_fallback(
+        component="optimizer_jax.jax_minimize",
+        detail=f"{detail} for method={method!r}",
+    )
 
 
 def _x64_enabled():
@@ -655,6 +669,10 @@ def jax_minimize(
     if progress_callback is not None:
         options["progress_callback"] = progress_callback
     if method in _REFERENCE_METHODS:
+        _raise_if_strict_optimizer_fallback(
+            method=method,
+            detail=_STRICT_REFERENCE_OPTIMIZER_DETAIL,
+        )
         scipy_adapter = (
             _scipy_minimize_value_and_grad if value_and_grad else _scipy_minimize
         )
@@ -676,6 +694,10 @@ def jax_minimize(
                 "Explicit value-and-gradient objectives are only supported on the "
                 "trusted SciPy reference methods and lbfgs-ondevice today."
             )
+        _raise_if_strict_optimizer_fallback(
+            method=method,
+            detail=_STRICT_EXPLICIT_VALUE_GRAD_DETAIL,
+        )
         return _minimize_lbfgs_explicit_value_and_grad(
             fun,
             x0,
@@ -718,6 +740,10 @@ def jax_minimize(
         return _private_lbfgs_result_to_optimize_result(state)
 
     # --- bfgs-hybrid: SciPy prefix → on-device continuation ---
+    _raise_if_strict_optimizer_fallback(
+        method=method,
+        detail=_STRICT_HYBRID_OPTIMIZER_DETAIL,
+    )
     total_maxiter = int(maxiter)
     prefix_cap = int(options.get("hybrid_scipy_maxiter", min(total_maxiter // 2, 100)))
     prefix_cap = max(0, min(prefix_cap, total_maxiter - 1))

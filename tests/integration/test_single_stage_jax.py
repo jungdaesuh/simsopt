@@ -113,6 +113,11 @@ def _iota_unit_rhs(plu):
     return rhs
 
 
+def _enable_strict_jax_backend(monkeypatch, mode="jax_gpu_parity"):
+    monkeypatch.setenv("SIMSOPT_BACKEND_MODE", mode)
+    monkeypatch.setenv("SIMSOPT_BACKEND_STRICT", "1")
+
+
 def _explicit_grouped_coil_derivative(coils, d_coil_arrays, coil_indices):
     """Reference grouped-coil projection using the original explicit summation."""
     all_derivatives = []
@@ -1415,6 +1420,31 @@ class TestAdjointSolveConsistency:
             np.array([1.5]),
             atol=1e-12,
         )
+
+    def test_compat_helper_rejects_coil_vjp_fallback_in_strict_mode(self, monkeypatch):
+        """Strict JAX mode must reject the legacy Coil.vjp() projection fallback."""
+        from simsopt.geo.surfaceobjectives_jax import _coil_cotangents_to_derivative
+
+        _enable_strict_jax_backend(monkeypatch)
+        coils = [_RecordingVJPCoil()]
+
+        with pytest.raises(
+            RuntimeError,
+            match="surfaceobjectives_jax.*Coil\\.vjp\\(\\).*strict=True",
+        ):
+            _coil_cotangents_to_derivative(
+                coils,
+                [
+                    (
+                        jnp.array([[1.0, 2.0, 3.0]]),
+                        jnp.array([[4.0, 5.0, 6.0]]),
+                        jnp.array([1.5]),
+                    )
+                ],
+                [[0]],
+            )
+
+        assert coils[0].calls == []
 
     def test_refresh_coil_data_reuses_grouped_currents_without_host_reads(
         self, monkeypatch

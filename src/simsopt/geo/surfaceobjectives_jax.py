@@ -26,6 +26,7 @@ import numpy as np
 import jax
 import jax.numpy as jnp
 
+from ..backend import raise_if_strict_jax_fallback
 from .._core.derivative import Derivative, derivative_dec
 from .._core.optimizable import Optimizable
 from ..jax_core.field import (
@@ -82,11 +83,22 @@ def _project_single_coil_cotangent_compat(coil, d_gamma, d_gammadash, d_current)
             )
         )
     except TypeError:
+        _raise_if_strict_projection_fallback(coil)
         return coil.vjp(
             d_gamma,
             d_gammadash,
             np.asarray([d_current]),
         )
+
+
+def _raise_if_strict_projection_fallback(coil) -> None:
+    raise_if_strict_jax_fallback(
+        component="surfaceobjectives_jax",
+        detail=(
+            "the legacy Coil.vjp() cotangent-projection fallback for "
+            f"coil type {type(coil).__name__}"
+        ),
+    )
 
 
 def _coil_cotangents_to_derivative(coils, d_coil_arrays, coil_indices):

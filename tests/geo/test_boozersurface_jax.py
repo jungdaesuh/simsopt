@@ -89,6 +89,24 @@ def _enable_strict_jax_backend(monkeypatch, mode="jax_gpu_parity"):
     monkeypatch.setenv("SIMSOPT_BACKEND_STRICT", "1")
 
 
+def _assert_strict_jax_minimize_rejection(
+    monkeypatch,
+    *,
+    method,
+    match,
+    fun,
+    value_and_grad=False,
+):
+    _enable_strict_jax_backend(monkeypatch)
+    with pytest.raises(RuntimeError, match=match):
+        jax_minimize(
+            fun,
+            jnp.array([1.0]),
+            method=method,
+            value_and_grad=value_and_grad,
+        )
+
+
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
@@ -1009,6 +1027,38 @@ class TestBoozerSurfaceJAXClass:
             match=rf"optimizer_backend='{optimizer_backend}'.*strict=True",
         ):
             booz.run_code(iota=0.3, G=0.05)
+
+    @pytest.mark.parametrize("method", ["bfgs", "lbfgs", "bfgs-hybrid"])
+    def test_jax_minimize_rejects_fallback_methods_in_strict_mode(
+        self,
+        monkeypatch,
+        method,
+    ):
+        """Strict JAX mode must reject direct optimizer fallback lanes too."""
+        _assert_strict_jax_minimize_rejection(
+            monkeypatch,
+            method=method,
+            match=rf"optimizer_jax\.jax_minimize.*method='{method}'.*strict=True",
+            fun=lambda x: jnp.sum(x**2),
+        )
+
+    def test_jax_minimize_rejects_explicit_value_grad_fallback_in_strict_mode(
+        self,
+        monkeypatch,
+    ):
+        """Strict JAX mode must reject the host-loop explicit value/grad path."""
+
+        def _explicit_value_grad(x):
+            x = jnp.asarray(x, dtype=jnp.float64)
+            return jnp.sum(x**2), 2.0 * x
+
+        _assert_strict_jax_minimize_rejection(
+            monkeypatch,
+            method="lbfgs-ondevice",
+            match="explicit host-loop value-and-gradient optimizer fallback.*strict=True",
+            fun=_explicit_value_grad,
+            value_and_grad=True,
+        )
 
     @pytest.mark.parametrize("optimizer_backend", ["hybrid", "ondevice"])
     def test_run_code_rejects_target_backend_without_x64(
