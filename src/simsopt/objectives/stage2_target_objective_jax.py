@@ -7,20 +7,21 @@ from typing import Callable, NamedTuple
 import numpy as np
 import jax.numpy as jnp
 
-from ..jax_core.biotsavart import biot_savart_B
 from ..field.biotsavart_jax_backend import _unwrap_coil_curve_and_current
 from ..geo.curve import incremental_arclength_pure, kappa_pure
 from ..jax_core.field import (
     grouped_biot_savart_B_from_spec,
     grouped_coil_set_spec_from_lists,
 )
-from ..jax_core.objectives_flux import fixed_surface_geometry_from_surface
+from ..jax_core.objectives_flux import (
+    fixed_surface_flux_integral_from_B,
+    fixed_surface_flux_specs_from_surface,
+)
 from ..geo.curveobjectives import (
     curvature_barrier_pure,
     cc_distance_barrier_pure,
     curve_length_pure,
 )
-from .integral_bdotn_jax import integral_BdotN
 
 __all__ = [
     "Stage2TargetObjectiveBundle",
@@ -127,15 +128,18 @@ def build_stage2_target_objective(
     curvature_weight,
     curvature_threshold,
     curvature_p_norm,
+    squared_flux_definition="quadratic flux",
 ):
     """Build a scalar JAX objective for the target Stage 2 lane.
 
     The returned callable consumes the Stage 2 free-vector in the same order as
     the existing composite objective contract: ``[banana_current, curve_dofs...]``.
     """
-    gamma, normal = fixed_surface_geometry_from_surface(surface)
-    points = gamma.reshape((-1, 3))
-    target = jnp.zeros(normal.shape[:2], dtype=jnp.float64)
+    field_eval_spec, flux_spec = fixed_surface_flux_specs_from_surface(
+        surface,
+        definition=squared_flux_definition,
+    )
+    points = field_eval_spec.points
     surf_dofs = _as_jax_float64_array(np.asarray(banana_curve.surf.get_dofs()))
     curve_dof_count = int(banana_curve.num_dofs())
 
@@ -187,17 +191,15 @@ def build_stage2_target_objective(
             )
         )
         dynamic_pairs = tuple(zip(dynamic_gammas, dynamic_gammadashs))
-        dynamic_field = biot_savart_B(
-            points,
-            jnp.stack(dynamic_gammas),
-            jnp.stack(dynamic_gammadashs),
+        dynamic_coil_spec = grouped_coil_set_spec_from_lists(
+            dynamic_gammas,
+            dynamic_gammadashs,
             dynamic_current_array,
         )
-        flux = integral_BdotN(
-            (fixed_field + dynamic_field).reshape(normal.shape),
-            target,
-            normal,
-            definition="quadratic flux",
+        dynamic_field = grouped_biot_savart_B_from_spec(points, dynamic_coil_spec)
+        flux = fixed_surface_flux_integral_from_B(
+            fixed_field + dynamic_field,
+            flux_spec,
         )
 
         incremental_arclength = incremental_arclength_pure(base_gammadash)

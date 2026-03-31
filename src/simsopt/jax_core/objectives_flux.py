@@ -5,12 +5,24 @@ from __future__ import annotations
 import jax.numpy as jnp
 
 from .field import grouped_biot_savart_B_from_spec
-from .specs import FixedSurfaceFluxSpec
+from .specs import (
+    FieldEvalSpec,
+    FixedSurfaceFluxSpec,
+    make_field_eval_spec,
+    make_fixed_surface_flux_spec,
+)
 from .surface_rzfourier import (
     surface_rz_fourier_gamma_from_spec,
     surface_rz_fourier_normal_from_spec,
 )
 from ..objectives.integral_bdotn_jax import integral_BdotN as integral_BdotN_jax
+
+
+def _fixed_surface_target_array(normal, target):
+    nphi, ntheta = normal.shape[:2]
+    if target is None:
+        return jnp.zeros((nphi, ntheta), dtype=jnp.float64)
+    return jnp.asarray(target, dtype=jnp.float64)
 
 
 def build_fourier_basis(quadpoints_jax, order):
@@ -59,3 +71,21 @@ def fixed_surface_geometry_from_surface(surface):
         normal = surface_rz_fourier_normal_from_spec(surface_spec)
         return gamma, normal
     return jnp.asarray(surface.gamma()), jnp.asarray(surface.normal())
+
+
+def fixed_surface_flux_specs_from_surface(
+    surface,
+    *,
+    target=None,
+    definition: str,
+) -> tuple[FieldEvalSpec, FixedSurfaceFluxSpec]:
+    gamma, normal = fixed_surface_geometry_from_surface(surface)
+    target_jax = _fixed_surface_target_array(normal, target)
+    field_eval_spec = make_field_eval_spec(gamma.reshape((-1, 3)))
+    flux_spec = make_fixed_surface_flux_spec(
+        points=field_eval_spec.points,
+        normal=normal,
+        target=target_jax,
+        definition=definition,
+    )
+    return field_eval_spec, flux_spec

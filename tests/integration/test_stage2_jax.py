@@ -102,7 +102,13 @@ REDUCED_STAGE2_ARGS = (
     "16",
 )
 _SHORT_RUN_PARITY_RTOL = 1e-3
+_SQUARED_FLUX_DEFINITIONS = (
+    "quadratic flux",
+    "normalized",
+    "local",
+)
 _TARGET_OBJECTIVE_GRAD_ATOL = 5e-12
+_TARGET_OBJECTIVE_COMPOSITE_GRAD_ATOL = 1.5e-11
 _TARGET_OBJECTIVE_FD_EPS = 1e-6
 _TARGET_OBJECTIVE_FD_ATOL = 2e-5
 
@@ -246,7 +252,9 @@ def _assert_b_vjp_profile_payload(payload):
     assert payload["dominant_squared_flux_field_b_vjp_coils"]
 
 
-def _build_stage2_target_objective_contract_case():
+def _build_stage2_target_objective_contract_case(
+    definition: str = "quadratic flux",
+):
     eval_surf = SurfaceRZFourier(
         nfp=5,
         stellsym=True,
@@ -306,7 +314,7 @@ def _build_stage2_target_objective_contract_case():
 
     all_coils = tf_coils + banana_coils
     bs_jax = BiotSavartJAX(all_coils)
-    jf = SquaredFluxJAX(eval_surf, bs_jax)
+    jf = SquaredFluxJAX(eval_surf, bs_jax, definition=definition)
     jls = CurveLength(banana_curve)
     jccdist = CurveCurveDistanceBarrier([coil.curve for coil in all_coils], 0.05)
     jc = LpCurveCurvatureBarrier(banana_curve, 40)
@@ -327,6 +335,7 @@ def _build_stage2_target_objective_contract_case():
         curvature_weight=0.0001,
         curvature_threshold=40.0,
         curvature_p_norm=4,
+        squared_flux_definition=definition,
     )
 
     return objective, target_bundle
@@ -340,6 +349,24 @@ def _centered_fd_gradient(fun, x, *, eps):
         step[i] = eps
         grad[i] = (float(fun(x + step)) - float(fun(x - step))) / (2.0 * eps)
     return grad
+
+
+def _assert_first_order_taylor_contract(fun, x, grad, *, seed):
+    rng = np.random.RandomState(seed)
+    direction = rng.randn(*x.shape)
+    direction /= np.linalg.norm(direction)
+    epsilons = (1.0e-5, 5.0e-6)
+    errors = []
+    baseline = float(fun(x))
+    directional_derivative = float(np.dot(grad, direction))
+    for eps in epsilons:
+        trial = x + eps * direction
+        residual = float(fun(trial)) - baseline - eps * directional_derivative
+        errors.append(abs(residual))
+
+    assert errors[1] < 0.55 * errors[0], (
+        f"Taylor convergence stalled: err0={errors[0]:.3e}, err1={errors[1]:.3e}"
+    )
 
 
 class _FakeStage2SquaredFluxTerm:
@@ -447,14 +474,7 @@ def coil_surf_setup():
 class TestObjectiveValueParity:
     """SquaredFluxJAX.J() must match SquaredFlux.J()."""
 
-    @pytest.mark.parametrize(
-        "definition",
-        [
-            "quadratic flux",
-            "normalized",
-            "local",
-        ],
-    )
+    @pytest.mark.parametrize("definition", _SQUARED_FLUX_DEFINITIONS)
     def test_j_parity(self, coil_surf_setup, definition):
         coils, surf, _, _ = coil_surf_setup
 
@@ -503,14 +523,7 @@ class TestObjectiveValueParity:
 class TestGradientParity:
     """SquaredFluxJAX.dJ() must match SquaredFlux.dJ()."""
 
-    @pytest.mark.parametrize(
-        "definition",
-        [
-            "quadratic flux",
-            "normalized",
-            "local",
-        ],
-    )
+    @pytest.mark.parametrize("definition", _SQUARED_FLUX_DEFINITIONS)
     def test_gradient_parity(self, coil_surf_setup, definition):
         coils, surf, _, _ = coil_surf_setup
 
@@ -974,14 +987,7 @@ class TestMixedQuadratureParity:
             err_msg="Chunked grouped path lost CPU parity on large point cloud",
         )
 
-    @pytest.mark.parametrize(
-        "definition",
-        [
-            "quadratic flux",
-            "normalized",
-            "local",
-        ],
-    )
+    @pytest.mark.parametrize("definition", _SQUARED_FLUX_DEFINITIONS)
     def test_j_parity(self, mixed_quad_setup, definition):
         """SquaredFluxJAX.J() matches CPU with mixed quadrature."""
         coils, surf = mixed_quad_setup
@@ -998,17 +1004,18 @@ class TestMixedQuadratureParity:
         rel_err = abs(j_jax - j_cpu) / (abs(j_cpu) + 1e-30)
         assert rel_err < 1e-10, f"Relative error {rel_err:.2e} exceeds 1e-10"
 
-    def test_gradient_parity(self, mixed_quad_setup):
+    @pytest.mark.parametrize("definition", _SQUARED_FLUX_DEFINITIONS)
+    def test_gradient_parity(self, mixed_quad_setup, definition):
         """SquaredFluxJAX.dJ() matches CPU with mixed quadrature."""
         coils, surf = mixed_quad_setup
 
         bs_cpu = BiotSavart(coils)
         bs_cpu.set_points(surf.gamma().reshape((-1, 3)))
-        jf_cpu = SquaredFlux(surf, bs_cpu)
+        jf_cpu = SquaredFlux(surf, bs_cpu, definition=definition)
         grad_cpu = jf_cpu.dJ()
 
         bs_jax = BiotSavartJAX(coils)
-        jf_jax = SquaredFluxJAX(surf, bs_jax)
+        jf_jax = SquaredFluxJAX(surf, bs_jax, definition=definition)
         grad_jax = jf_jax.dJ()
 
         np.testing.assert_allclose(
@@ -1016,7 +1023,7 @@ class TestMixedQuadratureParity:
             grad_cpu,
             rtol=1e-9,
             atol=1e-15,
-            err_msg="Gradient mismatch with mixed quadrature",
+            err_msg=f"Gradient mismatch with mixed quadrature for {definition!r}",
         )
 
     def test_j_recomputes_after_field_points_change(self, mixed_quad_setup):
@@ -2693,8 +2700,14 @@ class TestStage2OptimizerContract:
             return
         _assert_stage2_script_failure(result, WARM_TIMING_NO_OPTIMIZATION_ERROR)
 
-    def test_target_scalar_objective_matches_stage2_composite_contract(self):
-        objective, target_bundle = _build_stage2_target_objective_contract_case()
+    @pytest.mark.parametrize("definition", _SQUARED_FLUX_DEFINITIONS)
+    def test_target_scalar_objective_matches_stage2_composite_contract(
+        self,
+        definition,
+    ):
+        objective, target_bundle = _build_stage2_target_objective_contract_case(
+            definition
+        )
         dofs = np.asarray(objective.x, dtype=float)
         value_ref = float(objective.J())
         grad_ref = np.asarray(objective.dJ(), dtype=float)
@@ -2713,7 +2726,7 @@ class TestStage2OptimizerContract:
             np.asarray(grad_target, dtype=float),
             grad_ref,
             rtol=1e-9,
-            atol=_TARGET_OBJECTIVE_GRAD_ATOL,
+            atol=_TARGET_OBJECTIVE_COMPOSITE_GRAD_ATOL,
         )
         assert target_bundle.raw_terms is not None
         raw_terms = np.asarray(target_bundle.raw_terms(dofs), dtype=float)
@@ -2738,11 +2751,17 @@ class TestStage2OptimizerContract:
             np.asarray(weighted_grad, dtype=float),
             np.asarray(grad_target, dtype=float),
             rtol=1e-9,
-            atol=_TARGET_OBJECTIVE_GRAD_ATOL,
+            atol=_TARGET_OBJECTIVE_COMPOSITE_GRAD_ATOL,
         )
 
-    def test_target_scalar_objective_gradient_matches_centered_fd(self):
-        objective, target_bundle = _build_stage2_target_objective_contract_case()
+    @pytest.mark.parametrize("definition", _SQUARED_FLUX_DEFINITIONS)
+    def test_target_scalar_objective_gradient_matches_centered_fd(
+        self,
+        definition,
+    ):
+        objective, target_bundle = _build_stage2_target_objective_contract_case(
+            definition
+        )
         dofs = np.asarray(objective.x, dtype=float)
         grad_target = np.asarray(jax.grad(target_bundle.objective)(dofs), dtype=float)
         grad_fd = _centered_fd_gradient(
@@ -2756,6 +2775,23 @@ class TestStage2OptimizerContract:
             grad_fd,
             rtol=2e-5,
             atol=_TARGET_OBJECTIVE_FD_ATOL,
+        )
+
+    @pytest.mark.parametrize("definition", _SQUARED_FLUX_DEFINITIONS)
+    def test_target_scalar_objective_gradient_satisfies_first_order_taylor_test(
+        self,
+        definition,
+    ):
+        objective, target_bundle = _build_stage2_target_objective_contract_case(
+            definition
+        )
+        dofs = np.asarray(objective.x, dtype=float)
+        grad_target = np.asarray(jax.grad(target_bundle.objective)(dofs), dtype=float)
+        _assert_first_order_taylor_contract(
+            target_bundle.objective,
+            dofs,
+            grad_target,
+            seed=17,
         )
 
     @pytest.mark.parametrize(

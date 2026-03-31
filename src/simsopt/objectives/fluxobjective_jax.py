@@ -29,10 +29,9 @@ from .._core.derivative import derivative_dec, Derivative
 from ..jax_core.biotsavart import biot_savart_B
 from ..jax_core.objectives_flux import (
     build_fourier_basis,
-    fixed_surface_geometry_from_surface,
+    fixed_surface_flux_specs_from_surface,
     fixed_surface_flux_integral_from_B,
 )
-from ..jax_core.specs import make_fixed_surface_flux_spec
 
 __all__ = ["SquaredFluxJAX"]
 
@@ -73,37 +72,30 @@ class SquaredFluxJAX(Optimizable):
         self.field = field
         self.definition = definition
 
-        gamma_jax, self._normal_jax = fixed_surface_geometry_from_surface(surface)
-
-        # Freeze surface geometry on JAX arrays (fixed for Stage 2).
-        nphi, ntheta = self._normal_jax.shape[:2]
-
-        if target is not None:
-            self._target_jax = jnp.asarray(np.ascontiguousarray(target))
-        else:
-            self._target_jax = jnp.zeros((nphi, ntheta), dtype=jnp.float64)
-
-        # Set evaluation points on the field adapter.
-        field.set_points(gamma_jax.reshape((-1, 3)))
-        self._flux_spec = make_fixed_surface_flux_spec(
-            points=field._points_jax,
-            normal=self._normal_jax,
-            target=self._target_jax,
+        target_array = None if target is None else np.ascontiguousarray(target)
+        field_eval_spec, self._flux_spec = fixed_surface_flux_specs_from_surface(
+            surface,
+            target=target_array,
             definition=definition,
         )
+        self._normal_jax = self._flux_spec.normal
+        self._target_jax = self._flux_spec.target
+
+        # Set evaluation points on the field adapter from the immutable spec.
+        field.set_points_from_spec(field_eval_spec)
 
         self._clear_cached_results()
 
         # Choose path: JAX-native (end-to-end) or fallback (via Coil.vjp).
         self._use_jax_native = field._jax_native
         if self._use_jax_native:
-            self._init_jax_native(field, nphi, ntheta, definition)
+            self._init_jax_native(field, definition)
         else:
             raise_if_strict_jax_fallback(
                 component="SquaredFluxJAX",
                 detail="the CPU fallback objective path for non-JAX-native coils",
             )
-            self._init_fallback(field, nphi, ntheta, definition)
+            self._init_fallback(field, definition)
 
         Optimizable.__init__(self, x0=np.asarray([]), depends_on=[field])
 
@@ -111,9 +103,9 @@ class SquaredFluxJAX(Optimizable):
     # JAX-native path: DOFs → Fourier basis → B → J (single JIT program)
     # ------------------------------------------------------------------
 
-    def _init_jax_native(self, field, nphi, ntheta, definition):
+    def _init_jax_native(self, field, definition):
         """Build end-to-end JIT functions from flat DOFs to scalar J."""
-        del nphi, ntheta, definition
+        del definition
         order = field._curve_order
         basis, dbasis = build_fourier_basis(
             field._curve_quadpoints_jax,
@@ -180,14 +172,14 @@ class SquaredFluxJAX(Optimizable):
     # Fallback path: geometry via C++ gamma(), gradient via Coil.vjp()
     # ------------------------------------------------------------------
 
-    def _init_fallback(self, field, nphi, ntheta, definition):
+    def _init_fallback(self, field, definition):
         """Build JIT functions for the integral evaluation.
 
         The Biot-Savart evaluation is delegated to ``field.B()`` which
         handles mixed quadrature counts.  The JIT boundary covers only
         the integral computation and its gradient w.r.t. B.
         """
-        del field, nphi, ntheta, definition
+        del field, definition
         flux_spec = self._flux_spec
 
         def _integral_from_B(B):

@@ -31,6 +31,7 @@ from .field import (
 )
 from .objectives_flux import (
     build_fourier_basis,
+    fixed_surface_flux_specs_from_surface,
     fixed_surface_flux_integral,
     fixed_surface_flux_integral_from_B,
 )
@@ -93,6 +94,7 @@ __all__ = [
     "group_coil_data",
     "grouped_biot_savart_A",
     "grouped_biot_savart_B",
+    "fixed_surface_flux_specs_from_surface",
     "fixed_surface_flux_integral",
     "fixed_surface_flux_integral_from_B",
     "grouped_coil_set_spec_from_coil_specs",
