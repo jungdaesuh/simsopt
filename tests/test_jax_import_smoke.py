@@ -22,19 +22,32 @@ import pytest
 # Resolve the src/ directory relative to the repo root so subprocesses
 # can import simsopt without a pip install.
 _SRC_DIR = str(Path(__file__).resolve().parents[1] / "src")
+_REPO_ROOT = str(Path(__file__).resolve().parents[1])
 _OPTIMIZER_JAX_PATH = Path(_SRC_DIR) / "simsopt" / "geo" / "optimizer_jax.py"
 _OPTIMIZER_PRIVATE_DIR = Path(_SRC_DIR) / "simsopt" / "geo" / "optimizer_jax_private"
+_BACKEND_SELECTOR_ENV_VARS = (
+    "SIMSOPT_BACKEND_MODE",
+    "SIMSOPT_BACKEND_STRICT",
+    "SIMSOPT_BACKEND",
+    "STAGE2_BACKEND",
+    "SIMSOPT_JAX_PLATFORM",
+    "SIMSOPT_JAX_BACKEND",
+    "JAX_PLATFORMS",
+)
 
 
 def _run_import_check(code):
     """Run *code* in a clean subprocess and return (returncode, stderr)."""
     env = os.environ.copy()
+    for name in _BACKEND_SELECTOR_ENV_VARS:
+        env.pop(name, None)
     env["PYTHONPATH"] = _SRC_DIR + os.pathsep + env.get("PYTHONPATH", "")
     result = subprocess.run(
         [sys.executable, "-c", textwrap.dedent(code)],
         capture_output=True,
         text=True,
         timeout=30,
+        cwd=_REPO_ROOT,
         env=env,
     )
     return result.returncode, result.stderr.strip()
@@ -65,6 +78,28 @@ def test_import_package_root():
         assert hasattr(simsopt, "__version__")
     """)
     assert rc == 0, f"import simsopt failed:\n{err}"
+
+
+def test_programmatic_backend_selection_configures_jax_runtime():
+    """The public config API should support the new mode-based backend contract."""
+    rc, err = _run_import_check("""
+        import simsopt.config as simsopt_config
+        import simsopt.backend as backend
+
+        cfg = simsopt_config.set_backend("jax_cpu_parity", strict=True)
+
+        assert cfg.mode == "jax_cpu_parity"
+        assert cfg.backend == "jax"
+        assert cfg.jax_platform == "cpu"
+        assert cfg.strict is True
+        assert backend.get_backend_mode() == "jax_cpu_parity"
+        assert backend.is_backend_strict() is True
+
+        import jax
+
+        assert jax.numpy.zeros(1).dtype == jax.numpy.float64
+    """)
+    assert rc == 0, f"programmatic backend config failed:\n{err}"
 
 
 def test_import_biotsavart_jax():
@@ -123,8 +158,8 @@ def test_optimizer_jax_public_reference_methods_work_without_private_package():
         + """
         import sys
 
-        import jax.numpy as jnp
         from simsopt.geo import optimizer_jax
+        import jax.numpy as jnp
 
         def quad(x):
             return 0.5 * jnp.dot(x, x)
@@ -147,8 +182,8 @@ def test_optimizer_jax_private_methods_require_private_package_when_blocked():
     rc, err = _run_import_check(
         _block_private_optimizer_imports()
         + """
-        import jax.numpy as jnp
         from simsopt.geo import optimizer_jax
+        import jax.numpy as jnp
 
         def quad(x):
             return 0.5 * jnp.dot(x, x)
@@ -200,18 +235,21 @@ def test_optimizer_jax_private_package_has_no_jax_src_imports():
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
                 imports.extend(
-                    alias.name for alias in node.names if alias.name.startswith("jax._src")
+                    alias.name
+                    for alias in node.names
+                    if alias.name.startswith("jax._src")
                 )
             elif isinstance(node, ast.ImportFrom):
                 module = node.module or ""
                 if module.startswith("jax._src"):
                     imports.append(module)
         if imports:
-            forbidden_imports[str(path.relative_to(_OPTIMIZER_PRIVATE_DIR.parent))] = imports
+            forbidden_imports[str(path.relative_to(_OPTIMIZER_PRIVATE_DIR.parent))] = (
+                imports
+            )
 
     assert forbidden_imports == {}, (
-        "optimizer_jax_private must not import jax._src: "
-        f"{forbidden_imports}"
+        f"optimizer_jax_private must not import jax._src: {forbidden_imports}"
     )
 
 

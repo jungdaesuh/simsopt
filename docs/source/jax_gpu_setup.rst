@@ -52,9 +52,27 @@ Verify the install::
 Environment Variables
 ---------------------
 
-Two orthogonal settings control the JAX lane:
+The preferred runtime selector is the explicit backend mode:
 
-**Code-path backend** (which implementation to use):
+.. list-table::
+   :header-rows: 1
+
+   * - Variable
+     - Values
+     - Default
+     - Purpose
+   * - ``SIMSOPT_BACKEND_MODE``
+     - ``native_cpu``, ``jax_cpu_parity``, ``jax_gpu_parity``, ``jax_gpu_fast``
+     - ``native_cpu``
+     - Select the runtime contract directly
+   * - ``SIMSOPT_BACKEND_STRICT``
+     - truthy / falsy env values
+     - falsy
+     - Record strict fallback policy for callsites that honor strict-mode guards
+
+The older env pair remains supported for compatibility.
+
+**Code-path backend**:
 
 .. list-table::
    :header-rows: 1
@@ -72,7 +90,7 @@ Two orthogonal settings control the JAX lane:
      - ``cpu``
      - Legacy alias for ``SIMSOPT_BACKEND``
 
-**JAX device platform** (which hardware JAX targets):
+**JAX device platform**:
 
 .. list-table::
    :header-rows: 1
@@ -90,18 +108,30 @@ Two orthogonal settings control the JAX lane:
      - ``cpu``
      - Legacy alias for ``SIMSOPT_JAX_PLATFORM``
 
-Example: run Stage 2 on GPU::
+Example: run Stage 2 on the GPU parity lane::
+
+    SIMSOPT_BACKEND_MODE=jax_gpu_parity \
+        python banana_coil_solver.py
+
+Legacy-compatible example::
 
     SIMSOPT_BACKEND=jax SIMSOPT_JAX_PLATFORM=cuda \
         python banana_coil_solver.py
 
 Programmatic access::
 
-    from simsopt.backend import get_backend, is_jax_backend, get_jax_platform
+    from simsopt import config as simsopt_config
+    from simsopt.backend import get_backend, get_backend_mode, is_jax_backend
 
+    simsopt_config.set_backend("jax_gpu_parity", strict=True)
+
+    assert get_backend_mode() == "jax_gpu_parity"
     if is_jax_backend():
         from simsopt.field import BiotSavartJAX
         ...
+
+Call ``set_backend(...)`` before importing JAX-heavy simsopt subpackages so the
+requested runtime mode is visible to those imports.
 
 GPU Node Quick-Start
 --------------------

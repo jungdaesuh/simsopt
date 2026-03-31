@@ -4,16 +4,22 @@
 # Follow the same logic in the sub-packages.
 # ===================END ATTENTION=============================================
 
-# JAX platform config — must run before any submodule imports JAX.
-# Placing it here (package root) guarantees it executes before simsopt.field,
-# simsopt.geo, or any other subpackage that does `import jax` at module level.
+# JAX runtime config.
+#
+# We keep the global x64 toggle at package import time so existing scientific
+# code paths and optimizer smoke tests continue to see the expected float64
+# runtime. Platform pinning still routes through the backend selector.
 try:
-    from .backend import get_jax_platform as _get_jax_platform
+    from .backend import (
+        apply_jax_runtime_config as _apply_jax_runtime_config,
+        should_eagerly_configure_jax as _should_eagerly_configure_jax,
+    )
     import jax as _jax
 
-    _jax.config.update("jax_platforms", _get_jax_platform())
     _jax.config.update("jax_enable_x64", True)
-    del _get_jax_platform, _jax
+    if _should_eagerly_configure_jax():
+        _apply_jax_runtime_config()
+    del _apply_jax_runtime_config, _should_eagerly_configure_jax, _jax
 except ImportError:
     pass
 
