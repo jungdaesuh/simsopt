@@ -63,7 +63,7 @@ _MODE_TO_RUNTIME = {
 _MODE_POLICY_DEFAULTS = {
     "native_cpu": {
         "parity_mode": False,
-        "requires_x64": False,
+        "requires_x64": True,
         "chunk_policy": "host_reference",
         "tolerance_tier": "cpu_reference",
         "compilation_cache_policy": "not_applicable",
@@ -191,11 +191,16 @@ def _runtime_env_value(attribute_name: str, value: object) -> str:
 
 def get_backend_policy(mode: str | None = None) -> BackendPolicy:
     """Return the numerical-policy contract for a backend mode."""
-    config = (
-        get_backend_config()
-        if mode is None
-        else _config_from_mode(_resolve_mode(mode), strict=False)
-    )
+    if mode is None:
+        config = get_backend_config()
+    else:
+        resolved_mode = _resolve_mode(mode)
+        current_config = get_backend_config()
+        config = (
+            current_config
+            if current_config.mode == resolved_mode
+            else _config_from_mode(resolved_mode, strict=False)
+        )
     return _policy_from_config(config)
 
 

@@ -67,6 +67,7 @@ def test_backend_defaults_to_native_cpu(monkeypatch):
     backend = _fresh_backend()
 
     config = backend.get_backend_config()
+    policy = backend.get_backend_policy()
 
     assert config.mode == "native_cpu"
     assert config.backend == "cpu"
@@ -74,6 +75,19 @@ def test_backend_defaults_to_native_cpu(monkeypatch):
     assert config.strict is False
     assert backend.is_jax_backend() is False
     assert backend.is_backend_strict() is False
+    _assert_backend_policy(
+        policy,
+        mode="native_cpu",
+        backend_name="cpu",
+        platform="cpu",
+        strict=False,
+        parity_mode=False,
+        requires_x64=True,
+        chunk_policy="host_reference",
+        tolerance_tier="cpu_reference",
+        compilation_cache_policy="not_applicable",
+        provenance_label="native_cpu",
+    )
 
 
 def test_backend_resolves_legacy_env_pair(monkeypatch):
@@ -167,6 +181,23 @@ def test_fast_mode_policy_helpers(monkeypatch):
         provenance_label="jax_gpu_fast",
     )
     assert backend.is_parity_mode() is False
+
+
+def test_explicit_current_mode_policy_preserves_strict_state(monkeypatch):
+    _clear_backend_env(monkeypatch)
+    backend = _fresh_backend()
+
+    backend.set_backend(
+        "jax_gpu_parity",
+        strict=True,
+        configure_runtime=False,
+    )
+
+    implicit_policy = backend.get_backend_policy()
+    explicit_policy = backend.get_backend_policy("jax_gpu_parity")
+
+    assert implicit_policy.strict is True
+    assert explicit_policy.strict is True
 
 
 def test_native_cpu_mode_is_not_eager_jax_import(monkeypatch):

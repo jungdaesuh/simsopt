@@ -109,6 +109,22 @@ def test_programmatic_backend_selection_configures_jax_runtime():
     assert rc == 0, f"programmatic backend config failed:\n{err}"
 
 
+def test_native_cpu_policy_matches_import_time_x64_contract():
+    """The default/native policy should match the package's import-time x64 state."""
+    rc, err = _run_import_check("""
+        import simsopt.config as simsopt_config
+        import jax
+
+        policy = simsopt_config.get_backend_policy()
+
+        assert policy.mode == "native_cpu"
+        assert policy.requires_x64 is True
+        assert jax.config.jax_enable_x64 is True
+        assert jax.numpy.zeros(1).dtype == jax.numpy.float64
+    """)
+    assert rc == 0, f"native_cpu x64 policy mismatch:\n{err}"
+
+
 def test_import_biotsavart_jax():
     """BiotSavartJAX is importable through the real package entrypoint."""
     rc, err = _run_import_check("""

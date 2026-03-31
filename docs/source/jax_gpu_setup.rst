@@ -156,7 +156,7 @@ appear in provenance and validation output.
      - Tolerance tier
      - Compilation cache policy
    * - ``native_cpu``
-     - n/a
+     - required by the current import-time scientific runtime contract
      - ``host_reference``
      - ``cpu_reference``
      - ``not_applicable``
