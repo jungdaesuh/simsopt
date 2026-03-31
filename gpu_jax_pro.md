@@ -8,6 +8,9 @@ Update as of 2026-04-01:
 * first-wave immutable specs now exist for grouped coils, fixed-surface flux,
   and `SurfaceRZFourier`
 * a narrow fixed-surface `SurfaceRZFourier` JAX hot path now exists
+* grouped forward-field compatibility paths now route through `jax_core`
+* the grouped forward field path now has a first chunked point-axis reduction
+  implementation in `jax_core.field`
 
 Read this document as architecture rationale and module-level guidance for the
 remaining work, not as a claim that Phase 0 and Phase 1 are still entirely
@@ -468,17 +471,21 @@ According to a document from March 31, 2026, here is the module-by-module implem
 
 ## Top priorities
 
-1. **Rework `biotsavart_jax.py` around chunked reductions.**
-   The current kernel is correct and already useful, but it still computes each point by broadcasting against the full `(ncoils, nquad, 3)` arrays and then `vmap`s over points. That is the biggest likely GPU memory bottleneck. 
+1. **Add a minimal automated GPU CI lane.**
+   The highest-value next product step is now a small always-on GPU lane that
+   exercises the chunked grouped-field path, one Stage 2 mixed-quadrature
+   parity probe, and one Boozer grouped-spec smoke.
 
-2. **Broaden the pure JAX layer from the current first slice.**
+2. **Rework `biotsavart_jax.py` around deeper chunked reductions.**
+   The current kernel is correct and already useful, but the first chunked
+   grouped forward path is now landed in `jax_core.field`. The next kernel
+   rewrite is deeper chunking inside the lower-level Biot-Savart path itself.
+
+3. **Broaden the pure JAX layer from the current first slice.**
    You already have it in spirit via `make_traceable_objective()` and `run_code_functional()`, and now also through the new `jax_core` subtree and first-wave specs. The next step is to widen that architecture instead of letting pure and mutable styles keep mixing.  
 
-3. **Finish mode-owned numerical policy.**
+4. **Finish mode-owned numerical policy.**
    Backend modes are now real, but chunking, tolerance, provenance, and guardrail expectations still need to be fully centralized under them. 
-
-4. **Add a real GPU CI lane.**
-   The smoke workflow is valuable, but the visible jobs are CPU-only.  
 
 5. **Tighten packaging/version contracts.**
    Workflows and env files pin JAX 0.9.2, but package metadata still claims support for much older JAX/JAXLIB.  
@@ -1067,22 +1074,24 @@ That mismatch is too wide.
 
 # The best next implementation sequence
 
-1. **Biot–Savart kernel rewrite**
+1. **Minimal GPU CI lane**
 
-   * add chunked `scan` / static `fori_loop` implementation
+   * grouped Biot-Savart parity on the chunked grouped path
+   * one Stage 2 mixed-quadrature parity probe
+   * one Boozer grouped-spec smoke
+
+2. **Biot–Savart kernel rewrite**
+
+   * push chunking deeper into `biotsavart_jax.py`
    * preserve current parity tests as the oracle  ([JAX Documentation][2])
 
-2. **Adapter and spec cleanup**
+3. **Adapter and spec cleanup**
 
    * narrow `BiotSavartJAX` and `BoozerSurfaceJAX` to façade roles
 
-3. **Traceable path promotion**
+4. **Traceable path promotion**
 
    * treat `make_traceable_objective()` as the real on-device path 
-
-4. **GPU CI lane**
-
-   * add minimal automated GPU tests
 
 5. **Packaging/version cleanup**
 
