@@ -35,6 +35,8 @@ import jax
 import jax.numpy as jnp
 import jax.scipy.linalg
 
+from ..backend import raise_if_strict_jax_fallback
+
 try:
     from simsopt._core.optimizable import Optimizable
 except (ImportError, ModuleNotFoundError):
@@ -1154,6 +1156,14 @@ class BoozerSurfaceJAX(Optimizable):
         """Resolve optimizer method string from options."""
         optimizer_backend = self.options["optimizer_backend"]
         require_target_backend_x64(optimizer_backend)
+        if optimizer_backend != "ondevice":
+            raise_if_strict_jax_fallback(
+                component="BoozerSurfaceJAX",
+                detail=(
+                    f"optimizer_backend={optimizer_backend!r} on the LS "
+                    "reference/transitional solver lane"
+                ),
+            )
         if limited_memory is None:
             limited_memory = self.options["limited_memory"]
         effective_limited_memory = bool(limited_memory)

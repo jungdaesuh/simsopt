@@ -182,6 +182,18 @@ def is_backend_strict() -> bool:
     return get_backend_config().strict
 
 
+def raise_if_strict_jax_fallback(*, component: str, detail: str) -> None:
+    """Reject CPU or mixed fallback behavior when strict JAX mode is active."""
+    config = get_backend_config()
+    if config.backend != "jax" or not config.strict:
+        return
+    raise RuntimeError(
+        f"{component} cannot use {detail} while simsopt backend mode "
+        f"{config.mode!r} has strict=True. Select a JAX-native path or "
+        "disable strict mode."
+    )
+
+
 def should_eagerly_configure_jax() -> bool:
     """Return whether package import should eagerly configure the JAX runtime."""
     explicit_selector_present = any(

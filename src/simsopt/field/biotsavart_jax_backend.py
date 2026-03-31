@@ -16,6 +16,7 @@ import numpy as np
 import jax
 import jax.numpy as jnp
 
+from ..backend import raise_if_strict_jax_fallback
 from .._core.derivative import Derivative
 from .._core.optimizable import Optimizable
 from .biotsavart_jax import (
@@ -125,6 +126,13 @@ def _build_coil_profile_entry(coil_index, coil_timings):
     }
 
 
+def _raise_if_strict_biot_savart_fallback(detail: str) -> None:
+    raise_if_strict_jax_fallback(
+        component="BiotSavartJAX",
+        detail=detail,
+    )
+
+
 def _build_pullback_group_profile_entry(*, kind, coil_indices, elapsed_s, native_curve):
     return {
         "kind": kind,
@@ -207,9 +215,8 @@ def _supports_jax_curve_pullback(curve):
     if _curve_surface_dofs(curve) is None:
         return True
 
-    return (
-        hasattr(curve, "dgamma_by_dsurf_vjp_jax")
-        and hasattr(curve, "dgammadash_by_dsurf_vjp_jax")
+    return hasattr(curve, "dgamma_by_dsurf_vjp_jax") and hasattr(
+        curve, "dgammadash_by_dsurf_vjp_jax"
     )
 
 
@@ -359,12 +366,16 @@ def _project_single_coil_cotangent_data(coil, dg, dgd, dc):
         _merge_derivative_data(deriv_data, _curve_surface_pullback_data(curve, dg, dgd))
         if current.dof_size > 0:
             current_cotangent = jnp.atleast_1d(
-                jnp.asarray(scale, dtype=jnp.float64) * jnp.asarray(dc, dtype=jnp.float64)
+                jnp.asarray(scale, dtype=jnp.float64)
+                * jnp.asarray(dc, dtype=jnp.float64)
             )
             _merge_derivative_data(deriv_data, current.vjp(current_cotangent))
         return deriv_data
 
     if supports_cpu_pullback:
+        _raise_if_strict_biot_savart_fallback(
+            (f"the CPU coil-pullback fallback for curve type {type(curve).__name__}"),
+        )
         deriv_data = _curve_coeff_pullback_data_cpu(curve, dg, dgd)
         if current.dof_size > 0:
             current_cotangent = np.atleast_1d(
@@ -588,7 +599,9 @@ class BiotSavartJAX(Optimizable):
             if dep_opt.local_dof_size > 0:
                 dep_start, dep_end = self.dof_indices[dep_opt]
                 free_indices = np.flatnonzero(dep_opt.local_dofs_free_status)
-                dep_full_x = dep_full_x.at[free_indices].set(coil_dofs[dep_start:dep_end])
+                dep_full_x = dep_full_x.at[free_indices].set(
+                    coil_dofs[dep_start:dep_end]
+                )
             full_x = full_x.at[start:end].set(dep_full_x)
         return full_x
 
@@ -729,6 +742,12 @@ class BiotSavartJAX(Optimizable):
                 lambda: _curve_gammadash_from_dofs(curve, curve_dofs)
             )
         else:
+            _raise_if_strict_biot_savart_fallback(
+                (
+                    f"the CPU curve-geometry fallback for curve type "
+                    f"{type(curve).__name__}"
+                ),
+            )
             gamma_s, base_gamma = _time_call_result(
                 lambda: jnp.asarray(curve.gamma(), dtype=jnp.float64)
             )

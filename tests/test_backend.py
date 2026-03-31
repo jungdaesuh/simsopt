@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import importlib
 
+import pytest
+
 
 def _fresh_backend():
     import simsopt.backend as backend
@@ -103,3 +105,28 @@ def test_jax_mode_requests_eager_jax_import(monkeypatch):
     backend = _fresh_backend()
 
     assert backend.should_eagerly_configure_jax() is True
+
+
+def test_strict_fallback_helper_ignores_native_cpu(monkeypatch):
+    _clear_backend_env(monkeypatch)
+    monkeypatch.setenv("SIMSOPT_BACKEND_MODE", "native_cpu")
+    monkeypatch.setenv("SIMSOPT_BACKEND_STRICT", "1")
+    backend = _fresh_backend()
+
+    backend.raise_if_strict_jax_fallback(
+        component="test-component",
+        detail="a fallback path",
+    )
+
+
+def test_strict_fallback_helper_rejects_jax_mode(monkeypatch):
+    _clear_backend_env(monkeypatch)
+    monkeypatch.setenv("SIMSOPT_BACKEND_MODE", "jax_gpu_parity")
+    monkeypatch.setenv("SIMSOPT_BACKEND_STRICT", "1")
+    backend = _fresh_backend()
+
+    with pytest.raises(RuntimeError, match="strict=True"):
+        backend.raise_if_strict_jax_fallback(
+            component="test-component",
+            detail="a fallback path",
+        )

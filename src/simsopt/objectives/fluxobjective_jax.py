@@ -23,6 +23,7 @@ import numpy as np
 import jax
 import jax.numpy as jnp
 
+from ..backend import raise_if_strict_jax_fallback
 from .._core.optimizable import Optimizable
 from .._core.derivative import derivative_dec, Derivative
 from ..field.biotsavart_jax import biot_savart_B
@@ -127,6 +128,10 @@ class SquaredFluxJAX(Optimizable):
         if self._use_jax_native:
             self._init_jax_native(field, nphi, ntheta, definition)
         else:
+            raise_if_strict_jax_fallback(
+                component="SquaredFluxJAX",
+                detail="the CPU fallback objective path for non-JAX-native coils",
+            )
             self._init_fallback(field, nphi, ntheta, definition)
 
         Optimizable.__init__(self, x0=np.asarray([]), depends_on=[field])

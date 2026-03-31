@@ -47,6 +47,7 @@ from simsopt.geo import (  # noqa: E402
 from simsopt.objectives import SquaredFlux, QuadraticPenalty  # noqa: E402
 
 from simsopt.field.biotsavart_jax_backend import BiotSavartJAX
+import simsopt.field.biotsavart_jax_backend as biotsavart_jax_backend_module
 from simsopt.geo.optimizer_jax import (
     PRIVATE_OPTIMIZER_JAX_VERSION,
     jax_minimize,
@@ -99,6 +100,11 @@ _SHORT_RUN_PARITY_RTOL = 1e-3
 _TARGET_OBJECTIVE_GRAD_ATOL = 5e-12
 _TARGET_OBJECTIVE_FD_EPS = 1e-6
 _TARGET_OBJECTIVE_FD_ATOL = 2e-5
+
+
+def _enable_strict_jax_backend(monkeypatch, mode="jax_cpu_parity"):
+    monkeypatch.setenv("SIMSOPT_BACKEND_MODE", mode)
+    monkeypatch.setenv("SIMSOPT_BACKEND_STRICT", "1")
 
 
 def _stage2_context_kwargs():
@@ -1040,6 +1046,75 @@ class TestMixedQuadratureParity:
         assert value >= 0.0
         assert np.asarray(grad).shape[0] > 0
         assert calls == {"B": 2, "B_vjp": 1}
+
+    def test_strict_mode_rejects_squared_flux_fallback(
+        self,
+        mixed_quad_setup,
+        monkeypatch,
+    ):
+        coils, surf = mixed_quad_setup
+        _enable_strict_jax_backend(monkeypatch)
+
+        bs_jax = BiotSavartJAX(coils)
+
+        with pytest.raises(
+            RuntimeError,
+            match="SquaredFluxJAX.*strict=True",
+        ):
+            SquaredFluxJAX(surf, bs_jax)
+
+
+class TestStrictFieldFallbacks:
+    def test_strict_mode_rejects_biot_savart_cpu_geometry_fallback(
+        self,
+        coil_surf_setup,
+        monkeypatch,
+    ):
+        coils, surf, _, _ = coil_surf_setup
+        _enable_strict_jax_backend(monkeypatch)
+
+        bs_jax = BiotSavartJAX(coils)
+        bs_jax._jax_native = False
+        bs_jax.set_points(surf.gamma().reshape((-1, 3)))
+        monkeypatch.setattr(
+            biotsavart_jax_backend_module,
+            "_supports_native_curve_geometry",
+            lambda curve: False,
+        )
+
+        with pytest.raises(
+            RuntimeError,
+            match="BiotSavartJAX.*curve-geometry fallback",
+        ):
+            bs_jax.B()
+
+    def test_strict_mode_rejects_biot_savart_cpu_pullback_fallback(
+        self,
+        coil_surf_setup,
+        monkeypatch,
+    ):
+        coils, surf, _, _ = coil_surf_setup
+        _enable_strict_jax_backend(monkeypatch)
+
+        bs_jax = BiotSavartJAX(coils)
+        bs_jax.set_points(surf.gamma().reshape((-1, 3)))
+        field_value = bs_jax.B()
+        monkeypatch.setattr(
+            biotsavart_jax_backend_module,
+            "_supports_jax_curve_pullback",
+            lambda curve: False,
+        )
+        monkeypatch.setattr(
+            biotsavart_jax_backend_module,
+            "_supports_cpu_curve_pullback",
+            lambda curve: True,
+        )
+
+        with pytest.raises(
+            RuntimeError,
+            match="BiotSavartJAX.*coil-pullback fallback",
+        ):
+            bs_jax.B_vjp(jax.numpy.ones_like(field_value))
 
 
 # -----------------------------------------------------------------------

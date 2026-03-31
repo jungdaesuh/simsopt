@@ -62,6 +62,7 @@ _STOKES_FLUX_ATOL = 5e-7
 _STOKES_DISK_NR = 96
 _STOKES_DISK_NTHETA = 192
 
+
 def _disk_flux_through_circle_z0(*, radius, nr, ntheta, gammas, gammadashs, currents):
     rs = (np.arange(nr) + 0.5) * (radius / nr)
     thetas = (np.arange(ntheta) + 0.5) * (2.0 * np.pi / ntheta)
@@ -80,6 +81,11 @@ def _disk_flux_through_circle_z0(*, radius, nr, ntheta, gammas, gammadashs, curr
 def _emit_newton_progress(progress_callback):
     progress_callback(1, 0.25, 1.0e-2)
     progress_callback(2, 0.05, 1.0e-4)
+
+
+def _enable_strict_jax_backend(monkeypatch, mode="jax_gpu_parity"):
+    monkeypatch.setenv("SIMSOPT_BACKEND_MODE", mode)
+    monkeypatch.setenv("SIMSOPT_BACKEND_STRICT", "1")
 
 
 # ---------------------------------------------------------------------------
@@ -398,7 +404,6 @@ class TestOptimizerAdapter:
         assert result["success"]
 
 
-
 class TestBFGSBoozer:
     """Test BFGS convergence on the Boozer penalty objective."""
 
@@ -510,6 +515,7 @@ class TestSurfaceArea:
             rtol=_TORUS_GEOMETRY_RTOL,
         )
 
+
 class TestAreaLabelPath:
     """Test the Area label constraint through the penalty objective."""
 
@@ -545,6 +551,7 @@ def _patched_exact_surface_module():
             sys.modules.pop(module_name, None)
         else:
             sys.modules[module_name] = original_module
+
 
 def _make_mock_boozer_surface_mixed_quad(nphi=8, ntheta=8, mpol=1, ntor=1, nfp=1):
     """BoozerSurfaceJAX with mixed-quadrature coils (no simsoptpp needed)."""
@@ -910,6 +917,23 @@ class TestBoozerSurfaceJAXClass:
         booz.options["optimizer_backend"] = "bogus"
 
         with pytest.raises(ValueError, match="optimizer_backend must be one of"):
+            booz.run_code(iota=0.3, G=0.05)
+
+    @pytest.mark.parametrize("optimizer_backend", ["scipy", "hybrid"])
+    def test_run_code_rejects_non_ondevice_ls_lane_in_strict_mode(
+        self,
+        monkeypatch,
+        optimizer_backend,
+    ):
+        """Strict JAX mode must reject LS reference/transitional optimizer lanes."""
+        _enable_strict_jax_backend(monkeypatch)
+        booz = _make_mock_boozer_surface()
+        booz.options["optimizer_backend"] = optimizer_backend
+
+        with pytest.raises(
+            RuntimeError,
+            match=rf"optimizer_backend='{optimizer_backend}'.*strict=True",
+        ):
             booz.run_code(iota=0.3, G=0.05)
 
     @pytest.mark.parametrize("optimizer_backend", ["hybrid", "ondevice"])
@@ -1583,7 +1607,9 @@ class TestNfpVolumeArea:
 class TestEnsureSolvedGuard:
     """Verify runtime guard behavior around cached Boozer solve state."""
 
-    def test_dirty_unsolved_surface_without_cached_result_is_rejected(self, monkeypatch):
+    def test_dirty_unsolved_surface_without_cached_result_is_rejected(
+        self, monkeypatch
+    ):
         """Dirty surfaces without cached iota/G must fail before attempting re-solve."""
         booz = _make_mock_boozer_surface()
         booz.need_to_run_code = True
