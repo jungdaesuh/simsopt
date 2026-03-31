@@ -1947,8 +1947,12 @@ class TestStage2OptimizerContract:
         assert trajectory[1]["curve_length"] == pytest.approx(1.25)
         assert trajectory[0]["mean_abs_relBfinal_norm"] == pytest.approx(0.25)
         assert trajectory[1]["mean_abs_relBfinal_norm"] == pytest.approx(0.25)
-        assert trajectory[0]["coil_coil_distance"] == pytest.approx(expected_distances[0])
-        assert trajectory[1]["coil_coil_distance"] == pytest.approx(expected_distances[1])
+        assert trajectory[0]["coil_coil_distance"] == pytest.approx(
+            expected_distances[0]
+        )
+        assert trajectory[1]["coil_coil_distance"] == pytest.approx(
+            expected_distances[1]
+        )
         assert trajectory[0]["distance_constraint_violated"] is False
         assert trajectory[1]["distance_constraint_violated"] is True
 
@@ -2024,6 +2028,76 @@ class TestStage2OptimizerContract:
         assert snapshot["J"] == pytest.approx(1.5)
         assert snapshot["Jf"] == pytest.approx(0.75)
         assert diagnostics["mean_abs_relBfinal_norm"] == pytest.approx(0.5)
+
+    def test_evaluate_stage2_objective_marks_distance_violation_when_barrier_is_active(
+        self,
+        monkeypatch,
+    ):
+        stage2_script = _load_stage2_script_module()
+        reported_distance = 0.25
+
+        class DummyFlux:
+            def J(self):
+                return 0.5
+
+            def dJ(self, partials=False):
+                grad = np.asarray([0.5, -0.25], dtype=float)
+                if partials:
+                    return _DummyDerivative(grad)
+                return grad
+
+        class DummyScalar:
+            def __init__(self, value):
+                self._value = float(value)
+
+            def J(self):
+                return self._value
+
+            def dJ(self, partials=False):
+                grad = np.asarray([self._value, -self._value], dtype=float)
+                if partials:
+                    return _DummyDerivative(grad)
+                return grad
+
+        class DummyDistance:
+            def J(self):
+                return np.inf
+
+            def dJ(self, partials=False):
+                grad = np.asarray([np.nan, np.nan], dtype=float)
+                if partials:
+                    return _DummyDerivative(grad)
+                return grad
+
+            def shortest_distance(self):
+                return reported_distance
+
+        monkeypatch.setattr(
+            stage2_script,
+            "compute_stage2_field_diagnostics",
+            lambda *_args, **_kwargs: {
+                "mean_abs_relBfinal_norm": 0.125,
+            },
+        )
+
+        context = stage2_script.Stage2ObjectiveContext(
+            object(),
+            object(),
+            object(),
+            DummyFlux(),
+            DummyScalar(1.0),
+            DummyDistance(),
+            DummyScalar(0.5),
+            **_stage2_context_kwargs(),
+        )
+
+        snapshot, _grad, diagnostics = stage2_script.evaluate_stage2_objective(context)
+
+        assert diagnostics["coil_coil_distance"] == pytest.approx(reported_distance)
+        assert snapshot["coil_coil_distance"] == pytest.approx(reported_distance)
+        assert snapshot["distance_constraint_violated"] is True
+        assert np.isposinf(snapshot["J"])
+        assert np.isnan(snapshot["grad_norm"])
 
     def test_profile_stage2_explicit_step_reports_component_breakdown(
         self, monkeypatch

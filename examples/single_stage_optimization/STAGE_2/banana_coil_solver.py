@@ -891,8 +891,12 @@ def evaluate_stage2_objective(
             bs_jax=context.bs_jax,
         )
     coil_coil_distance = float(context.Jccdist.shortest_distance())
+    coil_distance_barrier = float(term_entries["coil_distance_barrier"]["raw_J"])
+    cc_threshold = float(context.cc_threshold)
     diagnostics["coil_coil_distance"] = coil_coil_distance
-    distance_constraint_violated = coil_coil_distance <= float(context.cc_threshold)
+    distance_constraint_violated = (
+        coil_coil_distance <= cc_threshold or not np.isfinite(coil_distance_barrier)
+    )
     snapshot = {
         "J": J,
         "Jf": squared_flux,
