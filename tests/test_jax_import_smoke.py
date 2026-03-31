@@ -242,6 +242,106 @@ def test_jax_core_specs_are_pytrees():
     assert rc == 0, f"jax_core pytree contract failed:\n{err}"
 
 
+def test_jax_core_grouped_field_chunking_matches_dense_sum():
+    """Chunked grouped-field evaluation must preserve dense grouped parity."""
+    rc, err = _run_import_check("""
+        import jax
+        import jax.numpy as jnp
+
+        from simsopt import config as simsopt_config
+        from simsopt.field.biotsavart_jax import (
+            biot_savart_B,
+            biot_savart_B_and_dB,
+            biot_savart_dB_by_dX,
+        )
+        from simsopt.jax_core import (
+            grouped_biot_savart_B_and_dB_from_spec,
+            grouped_biot_savart_B_from_spec,
+            grouped_biot_savart_dB_by_dX_from_spec,
+            grouped_field_inputs_from_spec,
+            make_grouped_coil_set_spec,
+        )
+
+        def _sum_group_kernel(groups, kernel):
+            return sum(
+                kernel(points, gammas, gammadashs, currents)
+                for gammas, gammadashs, currents in groups
+            )
+
+        def _sum_group_combo(groups):
+            combo = [
+                biot_savart_B_and_dB(points, gammas, gammadashs, currents)
+                for gammas, gammadashs, currents in groups
+            ]
+            return sum(Bi for Bi, _ in combo), sum(dBi for _, dBi in combo)
+
+        simsopt_config.set_backend("jax_cpu_parity")
+
+        points = jnp.stack(
+            [
+                jnp.linspace(-0.2, 0.2, 300),
+                jnp.linspace(0.3, 0.7, 300),
+                jnp.linspace(-0.1, 0.1, 300),
+            ],
+            axis=1,
+        )
+        coil_spec = make_grouped_coil_set_spec(
+            [
+                (
+                    jnp.asarray(
+                        [
+                            [[1.0, 0.0, 0.0], [1.1, 0.2, 0.1]],
+                            [[-1.0, 0.1, 0.2], [-1.1, 0.3, 0.4]],
+                        ]
+                    ),
+                    jnp.asarray(
+                        [
+                            [[0.0, 1.0, 0.0], [0.0, 0.8, 0.1]],
+                            [[0.0, -1.0, 0.0], [0.0, -0.8, -0.1]],
+                        ]
+                    ),
+                    jnp.asarray([1.2, -0.7]),
+                    [0, 1],
+                ),
+                (
+                    jnp.asarray(
+                        [
+                            [[0.6, -0.4, 0.3], [0.7, -0.2, 0.4], [0.8, -0.1, 0.5]],
+                        ]
+                    ),
+                    jnp.asarray(
+                        [
+                            [[0.2, 0.1, 0.0], [0.2, 0.1, 0.0], [0.2, 0.1, 0.0]],
+                        ]
+                    ),
+                    jnp.asarray([0.9]),
+                    [2],
+                ),
+            ]
+        )
+
+        groups = grouped_field_inputs_from_spec(coil_spec)
+        B_ref = _sum_group_kernel(groups, biot_savart_B)
+        dB_ref = _sum_group_kernel(groups, biot_savart_dB_by_dX)
+
+        B = jax.jit(grouped_biot_savart_B_from_spec)(points, coil_spec)
+        dB = jax.jit(grouped_biot_savart_dB_by_dX_from_spec)(points, coil_spec)
+        B_combo, dB_combo = jax.jit(grouped_biot_savart_B_and_dB_from_spec)(points, coil_spec)
+
+        B_combo_ref, dB_combo_ref = _sum_group_combo(groups)
+
+        assert B.shape == (300, 3)
+        assert dB.shape == (300, 3, 3)
+        assert B_combo.shape == (300, 3)
+        assert dB_combo.shape == (300, 3, 3)
+        assert jnp.allclose(B, B_ref, rtol=1e-12, atol=1e-14)
+        assert jnp.allclose(dB, dB_ref, rtol=1e-12, atol=1e-14)
+        assert jnp.allclose(B_combo, B_combo_ref, rtol=1e-12, atol=1e-14)
+        assert jnp.allclose(dB_combo, dB_combo_ref, rtol=1e-12, atol=1e-14)
+    """)
+    assert rc == 0, f"jax_core grouped chunking contract failed:\n{err}"
+
+
 def test_import_squaredflux_jax():
     """SquaredFluxJAX is importable through the real package entrypoint."""
     rc, err = _run_import_check("""
