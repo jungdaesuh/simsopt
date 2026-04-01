@@ -509,6 +509,9 @@ According to a document from March 31, 2026, here is the module-by-module implem
      checks
    * the traceable single-stage path keeps the explicit `surface_kind`
      contract instead of relying on hidden geometry fallbacks
+   * the stateful single-stage wrappers now require streaming grouped adjoint
+     callbacks (`res["vjp_groups"]`) instead of silently carrying the legacy
+     full-pytree adjoint fallback
 
 4. **Finish mode-owned numerical policy.**
    Backend modes are now real, and chunk tuning is materially more centralized
