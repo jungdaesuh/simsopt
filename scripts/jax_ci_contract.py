@@ -6,6 +6,7 @@ import argparse
 import os
 from pathlib import Path
 import sys
+import tempfile
 from typing import Any
 
 import numpy as np
@@ -21,10 +22,13 @@ from benchmarks.validation_ladder_common import (  # noqa: E402
     apply_requested_platform,
     build_provenance,
     describe_compile_behavior,
+    load_json,
     preparse_platform,
     print_provenance,
     relative_error,
+    repo_pythonpath_env,
     require_x64_runtime,
+    run_python_script,
     write_json,
 )
 from benchmarks.validation_ladder_contract import (  # noqa: E402
@@ -61,6 +65,56 @@ def _sum_on_backend(values: np.ndarray, *, backend: str) -> float:
     return float(sum_fn(jnp.asarray(values, dtype=jnp.float64)))
 
 
+def _backend_sum_probe_payload(sample_size: int) -> dict[str, Any]:
+    values = _ordered_reduction_values(sample_size)
+    backend = str(jax.default_backend())
+    return {
+        "backend": backend,
+        "sample_size": int(sample_size),
+        "sum": _sum_on_backend(values, backend=backend),
+    }
+
+
+def _cpu_reduction_sum_via_subprocess(sample_size: int) -> float:
+    with tempfile.TemporaryDirectory(prefix="jax-ci-contract-") as tmpdir:
+        output_json = Path(tmpdir) / "cpu-reduction.json"
+        run_python_script(
+            Path(__file__),
+            [
+                "--platform",
+                "cpu",
+                "--output-json",
+                str(output_json),
+                "--emit-backend-sum-only",
+                "--sample-size",
+                str(int(sample_size)),
+            ],
+            cwd=REPO_ROOT,
+            env=repo_pythonpath_env(platform="cpu"),
+        )
+        payload = load_json(output_json)
+    backend = str(payload["backend"]).lower()
+    if backend != "cpu":
+        raise RuntimeError(
+            "CPU reduction-order oracle initialized the wrong backend: "
+            f"expected 'cpu', got {backend!r}."
+        )
+    return float(payload["sum"])
+
+
+def _cpu_sum_for_target_backend(sample_size: int, *, target_backend: str) -> float:
+    if target_backend == "cpu":
+        values = _ordered_reduction_values(sample_size)
+        return _sum_on_backend(values, backend=target_backend)
+    return _cpu_reduction_sum_via_subprocess(sample_size)
+
+
+def _write_output_payload(path: str | os.PathLike[str], payload: dict[str, Any]) -> None:
+    output_json = Path(path)
+    output_json.parent.mkdir(parents=True, exist_ok=True)
+    write_json(output_json, payload)
+
+
 def _lane_label(requested_platform: str) -> str:
     return os.environ.get(
         "SIMSOPT_BACKEND_MODE",
@@ -75,8 +129,8 @@ def probe_reduction_order(
     max_ulp: int,
 ) -> dict[str, Any]:
     values = _ordered_reduction_values(sample_size)
-    cpu_sum = _sum_on_backend(values, backend="cpu")
     backend_sum = _sum_on_backend(values, backend=target_backend)
+    cpu_sum = _cpu_sum_for_target_backend(sample_size, target_backend=target_backend)
     rel_err = relative_error(backend_sum, cpu_sum)
     ulp_distance = _as_positive_ulp_distance(backend_sum, cpu_sum)
     return {
@@ -175,7 +229,7 @@ def build_ci_contract_payload(*, requested_platform: str) -> dict[str, Any]:
         "lane": _lane_label(requested_platform),
         "fixture": "gpu-ci-contract",
         "platform_request": requested_platform,
-        "compile_behavior": describe_compile_behavior(uses_subprocesses=False),
+        "compile_behavior": describe_compile_behavior(uses_subprocesses=True),
         "reduction_order_max_ulp": max_ulp,
         "reduction_order_sample_size": sample_size,
         "reduction_order_rel_tol": current_rel_tol,
@@ -274,11 +328,31 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Optional path to write a markdown report.",
     )
+    parser.add_argument(
+        "--emit-backend-sum-only",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--sample-size",
+        type=int,
+        default=None,
+        help=argparse.SUPPRESS,
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
+    if args.emit_backend_sum_only:
+        if args.sample_size is None:
+            raise ValueError("--sample-size is required with --emit-backend-sum-only")
+        _write_output_payload(
+            args.output_json,
+            _backend_sum_probe_payload(args.sample_size),
+        )
+        return
+
     payload = build_ci_contract_payload(requested_platform=args.platform)
     print_provenance(payload["provenance"])
     reduction_order = payload["reduction_order"]
@@ -301,9 +375,7 @@ def main() -> None:
         f"ratcheted_rel_tol={tolerance['ratcheted_rel_tol']:.3e}"
     )
 
-    output_json = Path(args.output_json)
-    output_json.parent.mkdir(parents=True, exist_ok=True)
-    write_json(output_json, payload)
+    _write_output_payload(args.output_json, payload)
     if args.output_md is not None:
         output_md = Path(args.output_md)
         output_md.parent.mkdir(parents=True, exist_ok=True)

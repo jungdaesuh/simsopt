@@ -262,11 +262,20 @@ def test_jax_ci_contract_ratchet_rel_tol_tightens_without_loosening():
     )
 
 
+def _mock_gpu_reduction_sum() -> np.float64:
+    return np.nextafter(1.0, 2.0)
+
+
 def test_jax_ci_contract_reduction_order_probe_tracks_ulp_distance(monkeypatch):
     monkeypatch.setattr(
         jax_ci_contract,
+        "_cpu_reduction_sum_via_subprocess",
+        lambda sample_size: 1.0,
+    )
+    monkeypatch.setattr(
+        jax_ci_contract,
         "_sum_on_backend",
-        lambda values, *, backend: 1.0 if backend == "cpu" else np.nextafter(1.0, 2.0),
+        lambda values, *, backend: _mock_gpu_reduction_sum(),
     )
 
     result = jax_ci_contract.probe_reduction_order(
@@ -276,12 +285,41 @@ def test_jax_ci_contract_reduction_order_probe_tracks_ulp_distance(monkeypatch):
     )
 
     assert result["cpu_sum"] == pytest.approx(1.0)
-    assert result["backend_sum"] == pytest.approx(np.nextafter(1.0, 2.0))
+    assert result["backend_sum"] == pytest.approx(_mock_gpu_reduction_sum())
     assert result["ulp_distance"] == 1
     assert result["rel_err"] == pytest.approx(
-        abs(np.nextafter(1.0, 2.0) - 1.0) / 1.0
+        abs(_mock_gpu_reduction_sum() - 1.0) / 1.0
     )
     assert result["passed"] is True
+
+
+def test_jax_ci_contract_reduction_order_probe_uses_cpu_subprocess_oracle(monkeypatch):
+    seen_sample_sizes: list[int] = []
+
+    monkeypatch.setattr(
+        jax_ci_contract,
+        "_cpu_reduction_sum_via_subprocess",
+        lambda sample_size: seen_sample_sizes.append(sample_size) or 1.0,
+    )
+    monkeypatch.setattr(
+        jax_ci_contract,
+        "_sum_on_backend",
+        lambda values, *, backend: (
+            _mock_gpu_reduction_sum()
+            if backend == "gpu"
+            else pytest.fail("probe_reduction_order should not request cpu in-process")
+        ),
+    )
+
+    result = jax_ci_contract.probe_reduction_order(
+        2048,
+        target_backend="gpu",
+        max_ulp=10,
+    )
+
+    assert seen_sample_sizes == [2048]
+    assert result["cpu_sum"] == pytest.approx(1.0)
+    assert result["backend_sum"] == pytest.approx(_mock_gpu_reduction_sum())
 
 
 def test_jax_ci_contract_same_device_probe_requires_bitwise_identity(monkeypatch):
