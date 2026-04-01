@@ -365,6 +365,13 @@ def _boozer_exact_residual(
     stellsym_surface,
     weight_inv_modB,
 ):
+    """Route to the stellsym-specialized exact residual implementation.
+
+    ``stellsym_surface`` changes the residual length because the axis
+    constraint is only present on the non-stellsym branch. Callers must bind
+    that flag at closure-construction time so each compiled trace sees one
+    fixed output shape.
+    """
     residual_fn = _select_exact_residual_fn(stellsym_surface)
     return residual_fn(
         x,
@@ -387,6 +394,12 @@ def _boozer_exact_residual(
 
 
 def _select_exact_residual_fn(stellsym_surface):
+    """Select the exact-residual implementation for a fixed surface symmetry.
+
+    The selected callable becomes part of the surrounding compiled closure, so
+    ``stellsym_surface`` is a compile-time specialization choice rather than a
+    dynamic traced branch.
+    """
     if stellsym_surface:
         return _boozer_exact_residual_stellsym
     return _boozer_exact_residual_nonstellsym

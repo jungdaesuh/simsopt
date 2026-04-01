@@ -134,6 +134,13 @@ def _coil_chunk_reduce(
     zero,
     reduce_chunk,
 ):
+    """Reduce coil chunks assuming a concrete leading coil dimension.
+
+    This helper is only safe on call paths where ``currents.shape[0]`` is known
+    at trace time. The surrounding kernel builders satisfy that contract by
+    specializing each JIT closure to a fixed grouped-coil layout before calling
+    into this reducer.
+    """
     coil_count = currents.shape[0]
     if coil_count == 0:
         return zero

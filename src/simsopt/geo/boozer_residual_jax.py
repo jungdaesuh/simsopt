@@ -55,6 +55,12 @@ __all__ = [
 ]
 
 
+def _safe_inverse_modB(B2):
+    """Return ``1 / |B|`` with a zero-field guard suitable for traced code."""
+    safe_B2 = jnp.where(B2 > 0.0, B2, 1.0)
+    return jnp.where(B2 > 0.0, 1.0 / jnp.sqrt(safe_B2), 0.0)
+
+
 def boozer_residual_scalar(G, iota, B, xphi, xtheta, weight_inv_modB=True):
     """Boozer residual scalar objective (forward pass).
 
@@ -77,7 +83,7 @@ def boozer_residual_scalar(G, iota, B, xphi, xtheta, weight_inv_modB=True):
     residual = G * B - B2[..., None] * tang  # (nphi, ntheta, 3)
 
     if weight_inv_modB:
-        w = 1.0 / jnp.sqrt(B2)  # (nphi, ntheta)
+        w = _safe_inverse_modB(B2)  # (nphi, ntheta)
         rtil = w[..., None] * residual  # (nphi, ntheta, 3)
     else:
         rtil = residual
@@ -174,7 +180,7 @@ def boozer_residual_vector(G, iota, B, xphi, xtheta, weight_inv_modB=True):
     residual = G * B - B2[..., None] * tang
 
     if weight_inv_modB:
-        w = 1.0 / jnp.sqrt(B2)
+        w = _safe_inverse_modB(B2)
         residual = w[..., None] * residual
 
     return residual.ravel()

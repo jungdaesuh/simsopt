@@ -20,6 +20,7 @@ from simsopt.geo.boozer_residual_jax import (
     boozer_residual_scalar,
     boozer_residual_grad,
     boozer_residual_hessian,
+    boozer_residual_vector,
 )
 
 
@@ -107,6 +108,35 @@ class TestBoozerResidualScalar:
             )
         )
         np.testing.assert_allclose(J, 0.0, atol=1e-20)
+
+    def test_weighted_zero_field_is_finite(self):
+        """Zero-field points must not introduce NaN/Inf in the weighted path."""
+        nphi, ntheta = 4, 5
+        B = jnp.zeros((nphi, ntheta, 3))
+        xphi = jnp.ones((nphi, ntheta, 3))
+        xtheta = 2.0 * jnp.ones((nphi, ntheta, 3))
+
+        scalar_value = boozer_residual_scalar(
+            1.5,
+            0.25,
+            B,
+            xphi,
+            xtheta,
+            weight_inv_modB=True,
+        )
+        residual_vector = boozer_residual_vector(
+            1.5,
+            0.25,
+            B,
+            xphi,
+            xtheta,
+            weight_inv_modB=True,
+        )
+
+        assert jnp.isfinite(scalar_value)
+        assert jnp.all(jnp.isfinite(residual_vector))
+        np.testing.assert_allclose(float(scalar_value), 0.0, atol=0.0)
+        np.testing.assert_allclose(np.asarray(residual_vector), 0.0, atol=0.0)
 
 
 class TestBoozerResidualGradient:

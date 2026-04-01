@@ -683,6 +683,8 @@ def _make_spec_only_biotsavart(coils):
 
 def _make_grouped_extractor_only_biotsavart(coils):
     class _GroupedExtractorOnlyBiotSavart(_MockBiotSavart):
+        coil_set_spec = None
+
         def __init__(self, grouped_coils):
             super().__init__(grouped_coils)
             self._coil_spec = grouped_coil_set_spec_from_lists(
