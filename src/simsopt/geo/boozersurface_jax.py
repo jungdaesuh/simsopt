@@ -39,6 +39,7 @@ import jax.scipy.linalg
 
 from ..backend import raise_if_strict_jax_fallback, warn_if_jax_fallback
 from ..backend.runtime import register_backend_cache_clear
+from ..jax_core.specs import make_coil_spec
 
 try:
     from simsopt._core.optimizable import Optimizable
@@ -59,6 +60,7 @@ from ..jax_core.field import (
     grouped_coil_currents_from_inputs,
     grouped_coil_currents_from_spec,
     grouped_coil_index_lists_from_spec,
+    grouped_coil_set_spec_from_coil_specs,
     grouped_coil_set_spec_from_grouped_data,
     grouped_coil_set_spec_from_lists,
     grouped_coil_set_spec_from_source,
@@ -117,8 +119,8 @@ def _warn_hidden_grouped_coil_spec_fallback(detail: str) -> None:
     _WARNED_HIDDEN_GROUPED_FALLBACK_DETAILS.add(detail)
     warnings.warn(
         "BoozerSurfaceJAX is using a hidden grouped-coil compatibility fallback "
-        f"via {detail}. This path reads mutable live coil data and should be "
-        "treated as a legacy adapter seam.",
+        f"via {detail}. This path snapshots compatibility data from the live "
+        "coil graph and should be treated as a legacy adapter seam.",
         RuntimeWarning,
         stacklevel=3,
     )
@@ -144,8 +146,7 @@ def _extract_grouped_coil_set_spec(biotsavart):
     """Return the immutable grouped-coil spec for a biotsavart-like object.
 
     ``BiotSavartJAX`` provides a dedicated grouped extractor. Fallback callers,
-    including the lightweight Boozer test doubles, only expose a coil list and
-    the public per-coil geometry/current interface.
+    including compatibility shims, may only expose a hidden ``_coils`` list.
     """
     coil_set_spec = getattr(biotsavart, "coil_set_spec", None)
     if coil_set_spec is not None:
@@ -166,16 +167,33 @@ def _extract_grouped_coil_set_spec(biotsavart):
             "coil_set_spec(), _extract_coil_data_grouped(), or a _coils list."
         )
 
-    gammas = []
-    gammadashs = []
-    currents = []
     _raise_if_strict_hidden_grouped_coil_spec_fallback(_COILS_LIST_FALLBACK_DETAIL)
     _warn_hidden_grouped_coil_spec_fallback(_COILS_LIST_FALLBACK_DETAIL)
-    for coil in coils:
-        gammas.append(coil.curve.gamma())
-        gammadashs.append(coil.curve.gammadash())
-        currents.append(coil.current.get_value())
-    return grouped_coil_set_spec_from_lists(gammas, gammadashs, currents)
+    return grouped_coil_set_spec_from_coil_specs(
+        tuple(_coil_spec_from_hidden_fallback_coil(coil) for coil in coils)
+    )
+
+
+def _coil_spec_from_hidden_fallback_coil(coil):
+    coil_to_spec = getattr(coil, "to_spec", None)
+    if coil_to_spec is not None:
+        return coil_to_spec()
+
+    curve = getattr(coil, "curve", None)
+    current = getattr(coil, "current", None)
+    curve_to_spec = getattr(curve, "to_spec", None) if curve is not None else None
+    current_to_spec = getattr(current, "to_spec", None) if current is not None else None
+    if curve_to_spec is None or current_to_spec is None:
+        raise AttributeError(
+            "BoozerSurfaceJAX hidden _coils compatibility fallback requires "
+            "coils that expose immutable spec builders via coil.to_spec() "
+            "or curve.to_spec()/current.to_spec()."
+        )
+
+    return make_coil_spec(
+        curve=curve_to_spec(),
+        current=current_to_spec(),
+    )
 
 
 def _coil_count_from_spec_or_coils(biotsavart, coil_set_spec):
