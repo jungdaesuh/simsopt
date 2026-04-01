@@ -6,11 +6,12 @@ Update as of 2026-04-01:
 * strict fallback mode now exists
 * a first `jax_core/` subtree now exists
 * first-wave immutable specs now exist for grouped coils, fixed-surface flux,
-  `SurfaceRZFourier`, `CurveXYZFourier`, `CurveRZFourier`, current values,
-  coils, and field-evaluation point sets
+  `SurfaceRZFourier`, `CurveXYZFourier`, `CurveRZFourier`,
+  `CurvePlanarFourier`, `CurveHelical`, current values, coils, and
+  field-evaluation point sets
 * hot-path legacy objects now expose `to_spec()` where the adapter seam is
-  stable (`CurveXYZFourier`, `CurveRZFourier`, `SurfaceRZFourier`,
-  `CurrentBase`, `Coil`)
+  stable (`CurveXYZFourier`, `CurveRZFourier`, `CurvePlanarFourier`,
+  `CurveHelical`, `SurfaceRZFourier`, `CurrentBase`, `Coil`)
 * a narrow fixed-surface `SurfaceRZFourier` JAX hot path now exists
 * grouped forward-field compatibility paths now route through `jax_core`
 * the grouped forward field path now has a first chunked point-axis reduction
@@ -24,6 +25,10 @@ Update as of 2026-04-01:
   `NonQuasiSymmetricRatioJAX` and `BoozerResidualJAX` now route their direct
   objective-side field setup through immutable coil specs reconstructed from
   explicit DOFs
+* the next immutable-spec broadening slice is also landed:
+  `CurvePlanarFourier` and `CurveHelical` now round-trip through immutable
+  curve specs, and `BiotSavartJAX` prefers that spec path over grouped-array
+  fallback for those families
 
 Read this document as architecture rationale and module-level guidance for the
 remaining work, not as a claim that Phase 0 and Phase 1 are still entirely
