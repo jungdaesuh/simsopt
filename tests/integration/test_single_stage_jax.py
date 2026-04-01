@@ -440,7 +440,7 @@ def _build_filament_curve(nquadpoints):
     return CurveFilament(framed_curve, dn=0.012, db=-0.009)
 
 
-def _build_surface_bound_cpp_curve(nquadpoints):
+def _build_surface_bound_curve(curve_cls, nquadpoints):
     surf = SurfaceRZFourier(
         nfp=1,
         stellsym=False,
@@ -455,7 +455,7 @@ def _build_surface_bound_cpp_curve(nquadpoints):
     surf.set_rc(0, 1, 0.03)
     surf.set_zs(1, 1, -0.02)
 
-    curve = CurveCWSFourierCPP(
+    curve = curve_cls(
         np.linspace(0.0, 1.0, nquadpoints, endpoint=False),
         order=2,
         surf=surf,
@@ -466,6 +466,14 @@ def _build_surface_bound_cpp_curve(nquadpoints):
     curve.set("phis(1)", 0.02)
     curve.set("thetas(1)", 0.07)
     return curve, surf
+
+
+def _build_surface_bound_cpp_curve(nquadpoints):
+    return _build_surface_bound_curve(CurveCWSFourierCPP, nquadpoints)
+
+
+def _build_surface_bound_jax_curve(nquadpoints):
+    return _build_surface_bound_curve(CurveCWSFourier, nquadpoints)
 
 
 def _build_filament_cws_curve(nquadpoints):
