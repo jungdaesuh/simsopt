@@ -600,6 +600,13 @@ According to a document from March 31, 2026, here is the module-by-module implem
    * the traceable single-stage scalar objective now also keeps its iota-target
      penalty on the same pure immutable-spec forward path instead of dropping
      back to the inner Boozer objective value
+   * active non-strict JAX mode now warns once per component/detail when code
+     crosses known old-path seams instead of silently mixing legacy CPU paths
+     into JAX execution; strict mode still rejects those same seams
+   * the current warning-covered seams include `BiotSavartJAX` CPU
+     geometry/pullback fallbacks, hidden immutable-spec compatibility fallbacks
+     in `coil_set_spec_from_dofs()` / `coil_set_spec()`, and the
+     `SquaredFluxJAX` CPU fallback objective path
 
 4. **Finish mode-owned numerical policy.**
    Backend modes are now real, and chunk tuning is materially more centralized
