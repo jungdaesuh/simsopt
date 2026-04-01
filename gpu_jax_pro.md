@@ -495,6 +495,11 @@ According to a document from March 31, 2026, here is the module-by-module implem
    coverage to the rest of the legacy object families and thread it through
    the remaining non-hot-path objective families.
 
+   `BiotSavartJAX` is also thinner than the earlier draft state: explicit DOF
+   reconstruction now prefers immutable per-coil specs, and grouped array
+   rebuilding is reduced to a compatibility fallback for legacy curve families
+   that still lack immutable-spec support.
+
    The current objective cleanup slice is now materially better than the
    earlier draft state:
    * `SquaredFluxJAX` and the Stage 2 scalar target bundle share immutable
@@ -506,7 +511,9 @@ According to a document from March 31, 2026, here is the module-by-module implem
      contract instead of relying on hidden geometry fallbacks
 
 4. **Finish mode-owned numerical policy.**
-   Backend modes are now real, but chunking, tolerance, provenance, and guardrail expectations still need to be fully centralized under them. 
+   Backend modes are now real, and chunk tuning is materially more centralized
+   than before, but tolerance, provenance, and the last numerical policy seams
+   still need to be fully unified under them.
 
 5. **Tighten packaging/version contracts.**
    Workflows and env files pin JAX 0.9.2, but package metadata still claims support for much older JAX/JAXLIB.  
