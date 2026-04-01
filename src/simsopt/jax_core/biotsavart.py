@@ -8,6 +8,7 @@ All functions accept and return JAX arrays and are fully traceable
 by ``jax.grad``, ``jax.jacfwd``, ``jax.jacrev``, and ``jax.hessian``.
 """
 
+from enum import Enum
 from functools import lru_cache
 
 import jax
@@ -24,9 +25,11 @@ __all__ = [
     "biot_savart_B",
     "biot_savart_B_vjp",
     "biot_savart_dB_by_dX",
+    "biot_savart_d2B_by_dXdX",
     "biot_savart_B_and_dB",
     "biot_savart_A",
     "biot_savart_dA_by_dX",
+    "biot_savart_d2A_by_dXdX",
     "group_coil_data",
     "grouped_biot_savart_B",
     "grouped_biot_savart_A",
@@ -287,16 +290,21 @@ def _biot_savart_A_integrand(x, gammas, gammadashs):
 # ── Dense one-point kernels ──────────────────────────────────────────
 
 
-_INTEGRAND_B = "B"
-_INTEGRAND_A = "A"
+class _Integrand(Enum):
+    B = "B"
+    A = "A"
 
-_DIFF_VALUE = "value"
-_DIFF_JACOBIAN = "jacobian"
-_DIFF_VALUE_AND_JACOBIAN = "value_and_jacobian"
+
+class _DiffMode(Enum):
+    VALUE = "value"
+    JACOBIAN = "jacobian"
+    HESSIAN = "hessian"
+    VALUE_AND_JACOBIAN = "value_and_jacobian"
+
 
 _INTEGRANDS = {
-    _INTEGRAND_B: _biot_savart_B_integrand,
-    _INTEGRAND_A: _biot_savart_A_integrand,
+    _Integrand.B: _biot_savart_B_integrand,
+    _Integrand.A: _biot_savart_A_integrand,
 }
 
 
@@ -351,9 +359,9 @@ def _make_kernel(integrand_key, diff_mode, coil_cs, quad_bs, point_cs):
             ),
         )
 
-    if diff_mode == _DIFF_VALUE:
+    if diff_mode is _DiffMode.VALUE:
         per_point = one_point
-    elif diff_mode == _DIFF_JACOBIAN:
+    elif diff_mode is _DiffMode.JACOBIAN:
 
         def per_point(x, gammas, gammadashs, currents):
             return jnp.swapaxes(
@@ -362,7 +370,23 @@ def _make_kernel(integrand_key, diff_mode, coil_cs, quad_bs, point_cs):
                 -2,
             )
 
-    elif diff_mode == _DIFF_VALUE_AND_JACOBIAN:
+    elif diff_mode is _DiffMode.HESSIAN:
+
+        def per_point(x, gammas, gammadashs, currents):
+            # Transpose (1,2,0): raw jacfwd² yields [component, d1, d2],
+            # upstream convention is [d1, d2, component].
+            # jacfwd² (not jacrev∘jacfwd) preserves exact current-linearity.
+            return jnp.transpose(
+                jax.jacfwd(jax.jacfwd(one_point, argnums=0), argnums=0)(
+                    x,
+                    gammas,
+                    gammadashs,
+                    currents,
+                ),
+                (1, 2, 0),
+            )
+
+    elif diff_mode is _DiffMode.VALUE_AND_JACOBIAN:
 
         def per_point(x, gammas, gammadashs, currents):
             f = lambda xx: one_point(xx, gammas, gammadashs, currents)
@@ -406,27 +430,43 @@ register_backend_cache_clear(invalidate_kernel_cache)
 
 
 def biot_savart_B(points, gammas, gammadashs, currents):
-    return _get_kernel(_INTEGRAND_B, _DIFF_VALUE)(points, gammas, gammadashs, currents)
+    return _get_kernel(_Integrand.B, _DiffMode.VALUE)(
+        points, gammas, gammadashs, currents
+    )
 
 
 def biot_savart_dB_by_dX(points, gammas, gammadashs, currents):
-    return _get_kernel(_INTEGRAND_B, _DIFF_JACOBIAN)(
+    return _get_kernel(_Integrand.B, _DiffMode.JACOBIAN)(
+        points, gammas, gammadashs, currents
+    )
+
+
+def biot_savart_d2B_by_dXdX(points, gammas, gammadashs, currents):
+    return _get_kernel(_Integrand.B, _DiffMode.HESSIAN)(
         points, gammas, gammadashs, currents
     )
 
 
 def biot_savart_B_and_dB(points, gammas, gammadashs, currents):
-    return _get_kernel(_INTEGRAND_B, _DIFF_VALUE_AND_JACOBIAN)(
+    return _get_kernel(_Integrand.B, _DiffMode.VALUE_AND_JACOBIAN)(
         points, gammas, gammadashs, currents
     )
 
 
 def biot_savart_A(points, gammas, gammadashs, currents):
-    return _get_kernel(_INTEGRAND_A, _DIFF_VALUE)(points, gammas, gammadashs, currents)
+    return _get_kernel(_Integrand.A, _DiffMode.VALUE)(
+        points, gammas, gammadashs, currents
+    )
 
 
 def biot_savart_dA_by_dX(points, gammas, gammadashs, currents):
-    return _get_kernel(_INTEGRAND_A, _DIFF_JACOBIAN)(
+    return _get_kernel(_Integrand.A, _DiffMode.JACOBIAN)(
+        points, gammas, gammadashs, currents
+    )
+
+
+def biot_savart_d2A_by_dXdX(points, gammas, gammadashs, currents):
+    return _get_kernel(_Integrand.A, _DiffMode.HESSIAN)(
         points, gammas, gammadashs, currents
     )
 

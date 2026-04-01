@@ -55,6 +55,8 @@ biot_savart_A = _bs.biot_savart_A
 biot_savart_dA_by_dX = _bs.biot_savart_dA_by_dX
 biot_savart_B_vjp = _bs.biot_savart_B_vjp
 grouped_biot_savart_B = _bs.grouped_biot_savart_B
+biot_savart_d2B_by_dXdX = _bs.biot_savart_d2B_by_dXdX
+biot_savart_d2A_by_dXdX = _bs.biot_savart_d2A_by_dXdX
 
 
 # ---------------------------------------------------------------------------
@@ -95,6 +97,7 @@ def _make_fourier_coil(nquad=200):
 # Points matching upstream (near coil at y≈0.9, outside the wire).
 _BASE_POINTS = np.asarray(17 * [[-1.41513202e-03, 8.99999382e-01, -3.14473221e-04]])
 _CURRENT = 1e4
+_CURRENT_LINEARITY_TOL = 1e-15
 
 
 # ---------------------------------------------------------------------------
@@ -132,6 +135,64 @@ def _assert_point_perturbation_taylor_convergence(
                 break  # machine precision reached
             assert new_err < 0.55 * err
             err = new_err
+
+
+def _assert_second_derivative_taylor_convergence(
+    derivative_fn,
+    second_derivative_fn,
+    points,
+    gammas,
+    gammadashs,
+    currents,
+    idx,
+):
+    second_derivative = second_derivative_fn(points, gammas, gammadashs, currents)[idx]
+
+    for d1 in range(3):
+        for d2 in range(3):
+            target = second_derivative[d1, d2]
+            direction = jnp.zeros((1, 3), dtype=jnp.float64).at[0, d2].set(1.0)
+            err = 1e6
+            for i in range(5, 10):
+                eps = 0.5**i
+                derivative_plus = derivative_fn(
+                    points + eps * direction,
+                    gammas,
+                    gammadashs,
+                    currents,
+                )[idx, d1]
+                derivative_minus = derivative_fn(
+                    points - eps * direction,
+                    gammas,
+                    gammadashs,
+                    currents,
+                )[idx, d1]
+                second_derivative_est = (derivative_plus - derivative_minus) / (2 * eps)
+                new_err = float(jnp.linalg.norm(target - second_derivative_est))
+                if new_err < 1e-13:
+                    break
+                assert new_err < 0.30 * err
+                err = new_err
+
+
+def _assert_current_linearity(quantity_fn, points, gammas, gammadashs, current):
+    currents_full = jnp.array([current])
+    currents_zero = jnp.array([0.0])
+    currents_unit = jnp.array([1.0])
+
+    quantity_full = quantity_fn(points, gammas, gammadashs, currents_full)
+    quantity_zero = quantity_fn(points, gammas, gammadashs, currents_zero)
+    quantity_unit = quantity_fn(points, gammas, gammadashs, currents_unit)
+
+    assert (
+        float(jnp.linalg.norm(quantity_full - current * quantity_unit))
+        < _CURRENT_LINEARITY_TOL
+    )
+
+    quantity_approx = (quantity_full - quantity_zero) / current
+    assert (
+        float(jnp.linalg.norm(quantity_approx - quantity_unit)) < _CURRENT_LINEARITY_TOL
+    )
 
 
 class TestBiotSavartParitySuite:
@@ -267,6 +328,51 @@ class TestBiotSavartParitySuite:
         # Symmetric in vacuum: ∂_j B_l = ∂_l B_j
         np.testing.assert_allclose(dB_idx, dB_idx.T, atol=1e-12)
 
+    @pytest.mark.parametrize("idx", [0, 16])
+    def test_d2B_dXdX_symmetric(self, idx):
+        """d2B/dXdX is symmetric in its derivative axes.
+
+        Matches ``test_d2B_by_dXdX_is_symmetric`` from the upstream suite.
+        """
+        np.random.seed(42)
+        gammas, gammadashs = _make_fourier_coil(200)
+        currents = jnp.array([_CURRENT])
+        points = jnp.array(
+            _BASE_POINTS + 0.001 * (np.random.rand(*_BASE_POINTS.shape) - 0.5)
+        )
+
+        d2B = biot_savart_d2B_by_dXdX(points, gammas, gammadashs, currents)[idx]
+        for component in range(3):
+            np.testing.assert_allclose(
+                np.array(d2B[:, :, component]),
+                np.array(d2B[:, :, component].T),
+                atol=1e-14,
+            )
+
+    @pytest.mark.parametrize("idx", [0, 16])
+    @pytest.mark.parametrize(
+        "derivative_fn,second_derivative_fn",
+        [
+            (biot_savart_dB_by_dX, biot_savart_d2B_by_dXdX),
+            (biot_savart_dA_by_dX, biot_savart_d2A_by_dXdX),
+        ],
+        ids=["d2B_dXdX", "d2A_dXdX"],
+    )
+    def test_d2_dXdX_taylor_test(self, derivative_fn, second_derivative_fn, idx):
+        """Second spatial derivative matches central FD of first derivative."""
+        gammas, gammadashs = _make_fourier_coil(200)
+        currents = jnp.array([_CURRENT])
+        points = jnp.array(_BASE_POINTS)
+        _assert_second_derivative_taylor_convergence(
+            derivative_fn,
+            second_derivative_fn,
+            points,
+            gammas,
+            gammadashs,
+            currents,
+            idx,
+        )
+
     @pytest.mark.parametrize(
         "channel_idx,seed",
         [(0, 1), (1, 2), (2, 3)],
@@ -356,51 +462,15 @@ class TestBiotSavartParitySuite:
         points = jnp.array(_BASE_POINTS)
         I = _CURRENT
 
-        currents_full = jnp.array([I])
-        currents_zero = jnp.array([0.0])
-        currents_unit = jnp.array([1.0])
-
-        # --- B linearity ---
-        B_full = biot_savart_B(points, gammas, gammadashs, currents_full)
-        B_zero = biot_savart_B(points, gammas, gammadashs, currents_zero)
-        B_unit = biot_savart_B(points, gammas, gammadashs, currents_unit)
-
-        # B(I) = I * B(1)  (exact identity)
-        assert float(jnp.linalg.norm(B_full - I * B_unit)) < 1e-15
-
-        # (B(I) - B(0)) / I = B(1)
-        dB_approx = (B_full - B_zero) / I
-        assert float(jnp.linalg.norm(dB_approx - B_unit)) < 1e-15
-
-        # --- dB/dX linearity ---
-        dB_full = biot_savart_dB_by_dX(points, gammas, gammadashs, currents_full)
-        dB_zero = biot_savart_dB_by_dX(points, gammas, gammadashs, currents_zero)
-        dB_unit = biot_savart_dB_by_dX(points, gammas, gammadashs, currents_unit)
-
-        # dB/dX(I) = I * dB/dX(1)  (exact identity)
-        assert float(jnp.linalg.norm(dB_full - I * dB_unit)) < 1e-15
-
-        # (dB/dX(I) - dB/dX(0)) / I = dB/dX(1)
-        ddB_approx = (dB_full - dB_zero) / I
-        assert float(jnp.linalg.norm(ddB_approx - dB_unit)) < 1e-15
-
-        # --- A linearity ---
-        A_full = biot_savart_A(points, gammas, gammadashs, currents_full)
-        A_zero = biot_savart_A(points, gammas, gammadashs, currents_zero)
-        A_unit = biot_savart_A(points, gammas, gammadashs, currents_unit)
-
-        assert float(jnp.linalg.norm(A_full - I * A_unit)) < 1e-15
-        dA_approx = (A_full - A_zero) / I
-        assert float(jnp.linalg.norm(dA_approx - A_unit)) < 1e-15
-
-        # --- dA/dX linearity ---
-        dA_full = biot_savart_dA_by_dX(points, gammas, gammadashs, currents_full)
-        dA_zero = biot_savart_dA_by_dX(points, gammas, gammadashs, currents_zero)
-        dA_unit = biot_savart_dA_by_dX(points, gammas, gammadashs, currents_unit)
-
-        assert float(jnp.linalg.norm(dA_full - I * dA_unit)) < 1e-15
-        ddA_approx = (dA_full - dA_zero) / I
-        assert float(jnp.linalg.norm(ddA_approx - dA_unit)) < 1e-15
+        for quantity_fn in (
+            biot_savart_B,
+            biot_savart_dB_by_dX,
+            biot_savart_A,
+            biot_savart_dA_by_dX,
+            biot_savart_d2B_by_dXdX,
+            biot_savart_d2A_by_dXdX,
+        ):
+            _assert_current_linearity(quantity_fn, points, gammas, gammadashs, I)
 
 
 # ---------------------------------------------------------------------------
