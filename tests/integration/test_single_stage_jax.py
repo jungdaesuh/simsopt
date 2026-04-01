@@ -109,6 +109,7 @@ from simsopt.geo.boozersurface_jax import (  # noqa: E402
     _boozer_ls_coil_vjp_groups,
     _ls_decision_vector,
     _make_ls_penalty_objective,
+    _select_exact_residual_fn,
 )
 from simsopt.geo.optimizer_jax import PRIVATE_OPTIMIZER_JAX_VERSION, jax_minimize  # noqa: E402
 from simsopt.geo.surfaceobjectives_jax import (  # noqa: E402
@@ -220,6 +221,81 @@ def _reference_ls_coil_vjp_reverse_over_reverse(
 
     _, vjp_fn = jax.vjp(grad_of_coils, booz_surf._coil_arrays)
     return vjp_fn(lm)[0]
+
+
+def _make_fixed_state_exact_directional_objective(
+    booz_surf,
+    biotsavart,
+    lm,
+    iota,
+    G,
+):
+    """Build ``coil_dofs -> <lm, r_exact(x*, coil_dofs)>`` at a frozen exact state."""
+    exact_state = jnp.concatenate([booz_surf._get_surface_dofs(), jnp.array([iota, G])])
+    residual_fn = _select_exact_residual_fn(booz_surf.stellsym)
+    lm_jax = jnp.asarray(lm)
+    residual_kwargs = {
+        "quadpoints_phi": booz_surf.quadpoints_phi,
+        "quadpoints_theta": booz_surf.quadpoints_theta,
+        "mpol": booz_surf.mpol,
+        "ntor": booz_surf.ntor,
+        "nfp": booz_surf.nfp,
+        "stellsym": booz_surf.stellsym,
+        "scatter_indices": booz_surf.scatter_indices,
+        "surface_kind": booz_surf._surface_geometry_kind,
+        "targetlabel": booz_surf.targetlabel,
+        "label_type": booz_surf.label_type,
+        "phi_idx": booz_surf.phi_idx,
+        "mask_indices": booz_surf._compute_stellsym_mask_indices(),
+        "weight_inv_modB": booz_surf.options["weight_inv_modB"],
+    }
+
+    def directional_objective(coil_dofs):
+        return jnp.vdot(
+            lm_jax,
+            residual_fn(
+                exact_state,
+                coil_set_spec=biotsavart.coil_set_spec_from_dofs(coil_dofs),
+                **residual_kwargs,
+            ),
+        )
+
+    return directional_objective
+
+
+def _assert_directional_derivative_matches_fd(
+    full_gradient,
+    directional_objective_at,
+    x0,
+    *,
+    rng_seed,
+    eps,
+    num_directions,
+    rel_tol,
+    abs_tol,
+    label,
+):
+    rng = np.random.RandomState(rng_seed)
+
+    for i in range(num_directions):
+        direction = rng.randn(len(x0))
+        direction /= np.linalg.norm(direction)
+
+        dd_vjp = float(np.dot(full_gradient, direction))
+        dd_fd = float(
+            (
+                directional_objective_at(x0 + eps * direction)
+                - directional_objective_at(x0 - eps * direction)
+            )
+            / (2.0 * eps)
+        )
+
+        abs_err = abs(dd_vjp - dd_fd)
+        rel_err = abs_err / (abs(dd_fd) + 1e-30)
+        assert rel_err < rel_tol or abs_err < abs_tol, (
+            f"{label}[{i}]: vjp={dd_vjp:.6e} fd={dd_fd:.6e} "
+            f"rel={rel_err:.2e} abs={abs_err:.2e}"
+        )
 
 
 def _assert_gradients_finite_nonzero(gradients, message_prefix):
@@ -3780,6 +3856,46 @@ class TestExactSolveCPUJAXParity:
             nqs_cpu,
             rtol=nqs_rel_tol,
             atol=nqs_abs_tol,
+        )
+
+    def test_exact_coil_vjp_matches_fixed_state_directional_fd(self):
+        exact_pair = _solve_exact_cpu_jax_parity_pair()
+        booz_jax = exact_pair.booz_jax_exact
+        bs_jax = exact_pair.bs_jax
+        res_exact = exact_pair.res_jax
+        iota = res_exact["iota"]
+        G = res_exact["G"]
+        fd_rel_tol = 1e-4
+        fd_abs_tol = 1e-8
+
+        lm = np.ones(res_exact["PLU"][1].shape[0], dtype=float)
+        d_coil_arrays, coil_indices = res_exact["vjp"](
+            lm,
+            booz_jax,
+            iota,
+            G,
+        )
+        derivative = bs_jax.coil_cotangents_to_derivative(d_coil_arrays, coil_indices)
+        full_gradient = np.asarray(derivative(bs_jax), dtype=float)
+
+        directional_objective_at = _make_fixed_state_exact_directional_objective(
+            booz_jax,
+            bs_jax,
+            lm,
+            iota,
+            G,
+        )
+
+        _assert_directional_derivative_matches_fd(
+            full_gradient,
+            directional_objective_at,
+            np.asarray(bs_jax.x.copy(), dtype=float),
+            rng_seed=3,
+            eps=1e-5,
+            num_directions=3,
+            rel_tol=fd_rel_tol,
+            abs_tol=fd_abs_tol,
+            label="Exact cotangent FD",
         )
 
     def test_boozer_residual_wrapper_rejects_exact_surface(self):
