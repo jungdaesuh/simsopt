@@ -2821,9 +2821,7 @@ class TestStage2OptimizerContract:
         baseline_grad = np.asarray(jax.grad(target_bundle.objective)(dofs), dtype=float)
 
         def _fail(*_args, **_kwargs):
-            raise AssertionError(
-                "target objective should not touch the live banana curve"
-            )
+            assert False, "target objective should not touch the live banana curve"
 
         banana_curve = context["banana_curve"]
         monkeypatch.setattr(banana_curve, "gamma_jax", _fail)

@@ -88,6 +88,12 @@ def _tree_trim(prefix_tree, size: int):
     return jax.tree_util.tree_map(lambda leaf: leaf[:size], prefix_tree)
 
 
+def _tree_concatenate(left, right):
+    return jax.tree_util.tree_map(
+        lambda x, y: jnp.concatenate((x, y), axis=0), left, right
+    )
+
+
 def _tree_zeros_like_prefix(reference_tree, prefix_size: int):
     return jax.tree_util.tree_map(
         lambda leaf: jnp.zeros(
@@ -175,6 +181,12 @@ def _point_chunk_reduce(points: object, chunk_kernel):
         return chunk_kernel(points)
 
     chunk_count = (point_count + chunk_size - 1) // chunk_size
+    if chunk_count == 2:
+        return _tree_concatenate(
+            chunk_kernel(points[:chunk_size]),
+            chunk_kernel(points[chunk_size:]),
+        )
+
     padded_point_count = chunk_count * chunk_size
     padded_points = jnp.pad(
         points,

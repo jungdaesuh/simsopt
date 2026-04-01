@@ -192,6 +192,7 @@ class CurveCWSFourierRZSpec:
     dofs: jax.Array
     quadpoints: jax.Array
     surface: SurfaceRZFourierSpec
+    surface_dofs: jax.Array
     order: int
     G: float
     H: float
@@ -199,7 +200,7 @@ class CurveCWSFourierRZSpec:
 
 jax.tree_util.register_dataclass(
     CurveCWSFourierRZSpec,
-    data_fields=["dofs", "quadpoints", "surface"],
+    data_fields=["dofs", "quadpoints", "surface", "surface_dofs"],
     meta_fields=["order", "G", "H"],
 )
 
@@ -209,18 +210,41 @@ class CoilSymmetrySpec:
     """Immutable rotation/scale payload for symmetric coil replicas."""
 
     rotmat: jax.Array
-    scale: float
+    scale: jax.Array
     has_rotation: bool
 
 
 jax.tree_util.register_dataclass(
     CoilSymmetrySpec,
-    data_fields=["rotmat"],
-    meta_fields=["scale", "has_rotation"],
+    data_fields=["rotmat", "scale"],
+    meta_fields=["has_rotation"],
 )
 
 
 CurveSpec = CurveXYZFourierSpec | CurveRZFourierSpec | CurveCWSFourierRZSpec
+
+
+def _surface_rzfourier_include_mode_indices(
+    *,
+    mpol: int,
+    ntor: int,
+) -> tuple[jax.Array, jax.Array]:
+    m_idx: list[int] = []
+    n_idx: list[int] = []
+
+    for n in range(ntor + 1):
+        m_idx.append(0)
+        n_idx.append(n + ntor)
+
+    for m in range(1, mpol + 1):
+        for n in range(-ntor, ntor + 1):
+            m_idx.append(m)
+            n_idx.append(n + ntor)
+
+    return (
+        jnp.asarray(m_idx, dtype=jnp.int32),
+        jnp.asarray(n_idx, dtype=jnp.int32),
+    )
 
 
 def make_coil_group_spec(
@@ -276,10 +300,21 @@ def make_curve_cwsfourier_rz_spec(
     G: float = 0.0,
     H: float = 0.0,
 ) -> CurveCWSFourierRZSpec:
+    include_m, include_n = _surface_rzfourier_include_mode_indices(
+        mpol=surface.mpol,
+        ntor=surface.ntor,
+    )
+    surface_dofs = jnp.concatenate(
+        [
+            surface.rc[include_m, include_n],
+            surface.zs[include_m, include_n],
+        ]
+    )
     return CurveCWSFourierRZSpec(
         dofs=jnp.asarray(dofs, dtype=jnp.float64),
         quadpoints=jnp.asarray(quadpoints, dtype=jnp.float64),
         surface=surface,
+        surface_dofs=surface_dofs,
         order=int(order),
         G=float(G),
         H=float(H),
@@ -325,7 +360,7 @@ def make_coil_symmetry_spec(
     )
     return CoilSymmetrySpec(
         rotmat=rotmat_jax,
-        scale=float(scale),
+        scale=jnp.asarray(scale, dtype=jnp.float64),
         has_rotation=has_rotation,
     )
 

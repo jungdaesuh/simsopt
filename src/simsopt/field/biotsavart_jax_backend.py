@@ -19,6 +19,12 @@ import jax.numpy as jnp
 from ..backend import raise_if_strict_jax_fallback
 from .._core.derivative import Derivative
 from .._core.optimizable import Optimizable
+from ..jax_core import (
+    curve_spec_from_curve,
+    curve_spec_with_dofs,
+    make_coil_spec,
+    make_current_value_spec,
+)
 from ..jax_core.field import (
     grouped_biot_savart_B_and_dB_from_spec,
     grouped_biot_savart_B_from_spec,
@@ -619,6 +625,49 @@ class BiotSavartJAX(Optimizable):
             )
         return coil_dofs
 
+    def _coil_spec_from_dofs(self, coil, coil_dofs):
+        curve, rotmat, current, scale = _unwrap_coil_curve_and_current(coil)
+        curve_dofs = self._curve_dofs_from_free_vector(curve, coil_dofs)
+        try:
+            curve_spec = curve_spec_with_dofs(
+                curve_spec_from_curve(curve),
+                curve_dofs,
+            )
+        except NotImplementedError as exc:
+            raise NotImplementedError(
+                "coil_specs_from_dofs() requires immutable JAX curve specs for "
+                f"every base curve; unsupported type {type(curve).__name__}."
+            ) from exc
+
+        current_value = self._scalar_current_value_from_dofs(
+            current,
+            coil_dofs,
+            "immutable-spec lane",
+        )
+        return make_coil_spec(
+            curve=curve_spec,
+            current=make_current_value_spec(current_value),
+            rotmat=rotmat,
+            scale=scale,
+        )
+
+    def coil_specs_from_dofs(self, coil_dofs):
+        """Build immutable per-coil specs from an explicit flat DOF vector."""
+        coil_dofs = self._normalize_explicit_coil_dofs(coil_dofs)
+        return tuple(self._coil_spec_from_dofs(coil, coil_dofs) for coil in self._coils)
+
+    def _coil_set_spec_from_dofs_prefer_specs(self, coil_dofs):
+        coil_dofs = self._normalize_explicit_coil_dofs(coil_dofs)
+        try:
+            return grouped_coil_set_spec_from_coil_specs(
+                self.coil_specs_from_dofs(coil_dofs)
+            )
+        except NotImplementedError:
+            gammas, gammadashs, currents = self._coil_arrays_in_order_from_dofs(
+                coil_dofs
+            )
+            return grouped_coil_set_spec_from_lists(gammas, gammadashs, currents)
+
     def _scalar_current_value_from_dofs(self, current, coil_dofs, lane_label):
         current_full_x = self._local_full_dofs_from_free_vector(current, coil_dofs)
         if current_full_x.shape[0] != 1:
@@ -705,8 +754,7 @@ class BiotSavartJAX(Optimizable):
 
     def coil_set_spec_from_dofs(self, coil_dofs):
         """Build an immutable grouped coil spec from an explicit flat DOF vector."""
-        gammas, gammadashs, currents = self._coil_arrays_in_order_from_dofs(coil_dofs)
-        return grouped_coil_set_spec_from_lists(gammas, gammadashs, currents)
+        return self._coil_set_spec_from_dofs_prefer_specs(coil_dofs)
 
     @property
     def coils(self):
@@ -860,8 +908,12 @@ class BiotSavartJAX(Optimizable):
 
     def coil_set_spec(self):
         """Build the immutable grouped coil spec from the live coil graph."""
-        if self._jax_native:
-            return self.coil_set_spec_from_dofs(jnp.asarray(self.x, dtype=jnp.float64))
+        try:
+            return self._coil_set_spec_from_dofs_prefer_specs(
+                jnp.asarray(self.x, dtype=jnp.float64)
+            )
+        except NotImplementedError:
+            pass
 
         try:
             return grouped_coil_set_spec_from_coil_specs(self.coil_specs())

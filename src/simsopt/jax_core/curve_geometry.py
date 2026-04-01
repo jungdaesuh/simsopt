@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import jax
 import jax.numpy as jnp
 
@@ -15,7 +17,6 @@ from .specs import (
     CurveXYZFourierSpec,
     make_curve_cwsfourier_rz_spec,
 )
-from .surface_rzfourier import surface_rz_fourier_dofs_from_spec
 
 
 def curve_spec_from_curve(curve):
@@ -37,7 +38,8 @@ def curve_spec_from_curve(curve):
 
     if getattr(curve, "surf_type", None) != "RZ_Fourier":
         raise NotImplementedError(
-            f"Curve type {type(curve).__name__} only supports immutable specs on RZ_Fourier surfaces."
+            "CWS spec generation requires surf_type='RZ_Fourier', "
+            f"got {getattr(curve, 'surf_type', None)!r}."
         )
 
     return make_curve_cwsfourier_rz_spec(
@@ -67,14 +69,13 @@ def _curve_gamma_kernel(spec: CurveSpec, dofs=None):
             spec.stellsym,
         )
     if isinstance(spec, CurveCWSFourierRZSpec):
-        surface_dofs = surface_rz_fourier_dofs_from_spec(spec.surface)
         return lambda quadpoints: gamma_curve_on_surface(
             curve_dofs,
             quadpoints,
             spec.order,
             spec.G,
             spec.H,
-            surface_dofs,
+            spec.surface_dofs,
             "RZ_Fourier",
             spec.surface.mpol,
             spec.surface.ntor,
@@ -91,6 +92,10 @@ def _curve_quadpoints(spec: CurveSpec):
 
 def curve_gamma_from_spec(spec: CurveSpec):
     return curve_gamma_from_dofs(spec, spec.dofs)
+
+
+def curve_spec_with_dofs(spec: CurveSpec, dofs):
+    return replace(spec, dofs=jnp.asarray(dofs, dtype=jnp.float64))
 
 
 def curve_gamma_from_dofs(spec: CurveSpec, dofs):

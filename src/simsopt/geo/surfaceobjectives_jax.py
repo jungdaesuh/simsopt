@@ -30,8 +30,8 @@ from ..backend import raise_if_strict_jax_fallback
 from .._core.derivative import Derivative, derivative_dec
 from .._core.optimizable import Optimizable
 from ..jax_core.field import (
-    grouped_biot_savart_B_from_inputs,
     grouped_biot_savart_B_from_spec,
+    grouped_coil_set_spec_from_inputs,
     grouped_coil_currents_from_spec,
 )
 from ..objectives.utilities import forward_backward_jax, plu_solve_jax
@@ -171,7 +171,7 @@ def _resolved_boozer_G(booz_surf):
 
 def _qs_ratio_pure(
     sdofs,
-    coil_arrays,
+    coil_set_spec,
     quadpoints_phi,
     quadpoints_theta,
     mpol,
@@ -184,10 +184,8 @@ def _qs_ratio_pure(
     """Pure JAX QS ratio: ``mean(dS * B_nonQS^2) / mean(dS * B_QS^2)``.
 
     Fully traceable by ``jax.grad`` / ``jax.vjp``.
-
-    Args:
-        coil_arrays: list of ``(gammas, gammadashs, currents)`` tuples.
     """
+
     gamma, xphi, xtheta = _surface_geometry_from_dofs(
         sdofs,
         quadpoints_phi,
@@ -203,7 +201,7 @@ def _qs_ratio_pure(
 
     nphi, ntheta = gamma.shape[:2]
     points = gamma.reshape(-1, 3)
-    B = grouped_biot_savart_B_from_inputs(points, coil_arrays)
+    B = grouped_biot_savart_B_from_spec(points, coil_set_spec)
     B = B.reshape(nphi, ntheta, 3)
     modB = jnp.sqrt(jnp.sum(B**2, axis=-1))
 
@@ -629,6 +627,7 @@ class NonQuasiSymmetricRatioJAX(Optimizable):
         sdofs = booz_surf._get_surface_dofs()
         coil_arrays = booz_surf._coil_arrays
         coil_indices = booz_surf._coil_index_lists
+        coil_set_spec = grouped_coil_set_spec_from_inputs(coil_arrays)
 
         qs_kwargs = dict(
             quadpoints_phi=self._aux_phi_jax,
@@ -641,10 +640,14 @@ class NonQuasiSymmetricRatioJAX(Optimizable):
             axis=self.axis,
         )
 
-        self._J = float(_qs_ratio_pure(sdofs, coil_arrays, **qs_kwargs))
+        self._J = float(_qs_ratio_pure(sdofs, coil_set_spec, **qs_kwargs))
 
         def J_of_coils(ca):
-            return _qs_ratio_pure(sdofs, ca, **qs_kwargs)
+            return _qs_ratio_pure(
+                sdofs,
+                grouped_coil_set_spec_from_inputs(ca),
+                **qs_kwargs,
+            )
 
         d_coil_arrays_direct = jax.grad(J_of_coils)(coil_arrays)
         dJ_by_dcoils = self.biotsavart.coil_cotangents_to_derivative(
@@ -653,7 +656,7 @@ class NonQuasiSymmetricRatioJAX(Optimizable):
         )
 
         def J_of_sdofs(s):
-            return _qs_ratio_pure(s, coil_arrays, **qs_kwargs)
+            return _qs_ratio_pure(s, coil_set_spec, **qs_kwargs)
 
         dJ_ds_surface = jax.grad(J_of_sdofs)(sdofs)
 

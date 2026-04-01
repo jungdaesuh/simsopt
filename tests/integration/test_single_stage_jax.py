@@ -1045,6 +1045,36 @@ class TestAdjointSolveConsistency:
             atol=1e-12,
         )
 
+    def test_coil_set_spec_from_dofs_prefers_immutable_coil_specs_when_available(
+        self,
+        monkeypatch,
+    ):
+        """Spec-capable curves should not rebuild grouped arrays on the adapter path."""
+        curve = CurveXYZFourier(16, 1)
+        curve.x = np.array([0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9])
+        current = Current(1.23)
+        bs_jax = BiotSavartJAX([Coil(curve, current)])
+
+        monkeypatch.setattr(
+            bs_jax,
+            "_coil_arrays_in_order_from_dofs",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError(
+                    "coil_set_spec_from_dofs() should use immutable per-coil specs "
+                    "before the grouped-array compatibility path"
+                )
+            ),
+        )
+
+        coil_set_spec = bs_jax.coil_set_spec_from_dofs(jnp.asarray(bs_jax.x))
+
+        assert isinstance(coil_set_spec, GroupedCoilSetSpec)
+        np.testing.assert_allclose(
+            np.asarray(coil_set_spec.groups[0].gammas[0]),
+            curve.gamma(),
+            atol=1e-12,
+        )
+
     def test_legacy_objects_expose_curve_current_coil_specs(self):
         """Legacy hot-path objects should expose immutable JAX specs."""
         curve = CurveXYZFourier(16, 1)

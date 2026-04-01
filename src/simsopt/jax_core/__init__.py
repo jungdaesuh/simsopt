@@ -8,6 +8,7 @@ from .curve_geometry import (
     curve_gammadashdash_from_dofs,
     curve_gammadashdash_from_spec,
     curve_spec_from_curve,
+    curve_spec_with_dofs,
 )
 from .biotsavart import (
     biot_savart_A,
@@ -108,6 +109,7 @@ __all__ = [
     "curve_gammadashdash_from_dofs",
     "curve_gammadashdash_from_spec",
     "curve_spec_from_curve",
+    "curve_spec_with_dofs",
     "biot_savart_A",
     "biot_savart_B",
     "biot_savart_B_and_dB",

@@ -330,8 +330,8 @@ def test_jax_core_specs_are_pytrees():
 
         assert len(curve_xyz_leaves) == 2
         assert len(curve_rz_leaves) == 2
-        assert len(curve_cws_leaves) == 8
-        assert len(coil_symmetry_leaves) == 1
+        assert len(curve_cws_leaves) == 9
+        assert len(coil_symmetry_leaves) == 2
         assert len(current_leaves) == 1
         assert len(field_eval_leaves) == 1
         assert len(coil_value_leaves) == 4
