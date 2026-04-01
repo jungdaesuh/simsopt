@@ -323,11 +323,10 @@ def test_jax_core_specs_are_pytrees():
         )
         coil_symmetry_spec = make_coil_symmetry_spec(scale=2.5)
 
-        def assert_surface_dofs_match(curve_spec, surface_spec_value):
-            np.testing.assert_allclose(
-                np.asarray(curve_spec.surface_dofs),
-                np.asarray(surface_rz_fourier_dofs_from_spec(surface_spec_value)),
-            )
+        def assert_surface_dofs_derivable(curve_spec, expected_ndofs):
+            derived = curve_spec.surface_dofs()
+            assert derived.shape == (expected_ndofs,)
+            assert np.all(np.isfinite(np.asarray(derived)))
 
         assert isinstance(coil_value_spec, CoilSpec)
         assert isinstance(coil_symmetry_spec, CoilSymmetrySpec)
@@ -353,7 +352,7 @@ def test_jax_core_specs_are_pytrees():
 
         assert len(curve_xyz_leaves) == 2
         assert len(curve_rz_leaves) == 2
-        assert len(curve_cws_leaves) == 9
+        assert len(curve_cws_leaves) == 8
         assert len(coil_symmetry_leaves) == 2
         assert len(current_leaves) == 1
         assert len(field_eval_leaves) == 1
@@ -366,14 +365,8 @@ def test_jax_core_specs_are_pytrees():
         assert grouped_coil_index_lists_from_spec(coil_spec) == ([0],)
         assert grouped_coil_currents_from_spec(coil_spec).shape == (1,)
         assert grouped_coil_set_spec_from_coil_specs((coil_value_spec,)).groups[0].coil_indices == (0,)
-        assert_surface_dofs_match(curve_cws_spec, surface_spec)
-        assert_surface_dofs_match(
-            curve_cws_nonstellsym_spec,
-            surface_spec_nonstellsym,
-        )
-        assert surface_rz_fourier_dofs_from_spec(surface_spec).shape == (
-            curve_cws_spec.surface_dofs.shape[0],
-        )
+        assert_surface_dofs_derivable(curve_cws_spec, 3)  # stellsym: 2 rc + 1 zs
+        assert_surface_dofs_derivable(curve_cws_nonstellsym_spec, 6)  # 2rc+1rs+2zc+1zs
 
         curve_xyz_gamma = jax.jit(curve_gamma_from_spec)(curve_xyz_spec)
         curve_xyz_gammadash = jax.jit(curve_gammadash_from_spec)(curve_xyz_spec)

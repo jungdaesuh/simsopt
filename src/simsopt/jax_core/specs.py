@@ -192,15 +192,19 @@ class CurveCWSFourierRZSpec:
     dofs: jax.Array
     quadpoints: jax.Array
     surface: SurfaceRZFourierSpec
-    surface_dofs: jax.Array
     order: int
     G: float
     H: float
 
+    def surface_dofs(self) -> jax.Array:
+        from .surface_rzfourier import surface_rz_fourier_dofs_from_spec
+
+        return surface_rz_fourier_dofs_from_spec(self.surface)
+
 
 jax.tree_util.register_dataclass(
     CurveCWSFourierRZSpec,
-    data_fields=["dofs", "quadpoints", "surface", "surface_dofs"],
+    data_fields=["dofs", "quadpoints", "surface"],
     meta_fields=["order", "G", "H"],
 )
 
@@ -210,24 +214,18 @@ class CoilSymmetrySpec:
     """Immutable rotation/scale payload for symmetric coil replicas."""
 
     rotmat: jax.Array
-    scale: jax.Array
+    scale: float
     has_rotation: bool
 
 
 jax.tree_util.register_dataclass(
     CoilSymmetrySpec,
-    data_fields=["rotmat", "scale"],
-    meta_fields=["has_rotation"],
+    data_fields=["rotmat"],
+    meta_fields=["scale", "has_rotation"],
 )
 
 
 CurveSpec = CurveXYZFourierSpec | CurveRZFourierSpec | CurveCWSFourierRZSpec
-
-
-def _curve_cws_surface_dofs(surface: SurfaceRZFourierSpec) -> jax.Array:
-    from .surface_rzfourier import surface_rz_fourier_dofs_from_spec
-
-    return surface_rz_fourier_dofs_from_spec(surface)
 
 
 def make_coil_group_spec(
@@ -287,7 +285,6 @@ def make_curve_cwsfourier_rz_spec(
         dofs=jnp.asarray(dofs, dtype=jnp.float64),
         quadpoints=jnp.asarray(quadpoints, dtype=jnp.float64),
         surface=surface,
-        surface_dofs=_curve_cws_surface_dofs(surface),
         order=int(order),
         G=float(G),
         H=float(H),
@@ -298,6 +295,12 @@ def make_current_value_spec(value: object) -> CurrentValueSpec:
     return CurrentValueSpec(value=jnp.asarray([value], dtype=jnp.float64))
 
 
+def _normalize_rotmat(rotmat: object | None) -> tuple[jax.Array, bool]:
+    if rotmat is None:
+        return jnp.eye(3, dtype=jnp.float64), False
+    return jnp.asarray(rotmat, dtype=jnp.float64), True
+
+
 def make_coil_spec(
     *,
     curve: CurveSpec,
@@ -305,12 +308,7 @@ def make_coil_spec(
     rotmat: object | None = None,
     scale: float = 1.0,
 ) -> CoilSpec:
-    has_rotation = rotmat is not None
-    rotmat_jax = (
-        jnp.eye(3, dtype=jnp.float64)
-        if rotmat is None
-        else jnp.asarray(rotmat, dtype=jnp.float64)
-    )
+    rotmat_jax, has_rotation = _normalize_rotmat(rotmat)
     return CoilSpec(
         curve=curve,
         current=current,
@@ -325,15 +323,10 @@ def make_coil_symmetry_spec(
     rotmat: object | None = None,
     scale: float = 1.0,
 ) -> CoilSymmetrySpec:
-    has_rotation = rotmat is not None
-    rotmat_jax = (
-        jnp.eye(3, dtype=jnp.float64)
-        if rotmat is None
-        else jnp.asarray(rotmat, dtype=jnp.float64)
-    )
+    rotmat_jax, has_rotation = _normalize_rotmat(rotmat)
     return CoilSymmetrySpec(
         rotmat=rotmat_jax,
-        scale=jnp.asarray(scale, dtype=jnp.float64),
+        scale=float(scale),
         has_rotation=has_rotation,
     )
 

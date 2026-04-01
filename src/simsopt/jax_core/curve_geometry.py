@@ -18,6 +18,8 @@ from .specs import (
     make_curve_cwsfourier_rz_spec,
 )
 
+_SURF_TYPE_RZ_FOURIER = "RZ_Fourier"
+
 
 def curve_spec_from_curve(curve):
     to_spec = getattr(curve, "to_spec", None)
@@ -36,7 +38,7 @@ def curve_spec_from_curve(curve):
             f"Surface type {type(surface).__name__} does not expose surface_spec()."
         )
 
-    if getattr(curve, "surf_type", None) != "RZ_Fourier":
+    if getattr(curve, "surf_type", None) != _SURF_TYPE_RZ_FOURIER:
         raise NotImplementedError(
             "CWS spec generation requires surf_type='RZ_Fourier', "
             f"got {getattr(curve, 'surf_type', None)!r}."
@@ -69,14 +71,15 @@ def _curve_gamma_kernel(spec: CurveSpec, dofs=None):
             spec.stellsym,
         )
     if isinstance(spec, CurveCWSFourierRZSpec):
+        surface_dofs = spec.surface_dofs()
         return lambda quadpoints: gamma_curve_on_surface(
             curve_dofs,
             quadpoints,
             spec.order,
             spec.G,
             spec.H,
-            spec.surface_dofs,
-            "RZ_Fourier",
+            surface_dofs,
+            _SURF_TYPE_RZ_FOURIER,
             spec.surface.mpol,
             spec.surface.ntor,
             spec.surface.nfp,
