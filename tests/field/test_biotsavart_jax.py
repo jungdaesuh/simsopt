@@ -174,6 +174,26 @@ def _dense_reference_fields(module, points, gammas, gammadashs, currents):
     return dense_B, dense_A, dense_dB, dense_dA
 
 
+def _ncsx_biotsavart_parity_fixture():
+    from simsopt.configs import get_data
+    from simsopt.field import BiotSavart, coils_via_symmetries
+
+    curves, currents_objs, _, nfp, _ = get_data("ncsx")
+    coils = coils_via_symmetries(curves, currents_objs, nfp, stellsym=True)
+    bs = BiotSavart(coils)
+
+    npoints = 50
+    np.random.seed(42)
+    points_np = np.random.randn(npoints, 3) * 0.3
+    points_np[:, 0] += 1.0  # shift near torus
+
+    bs.set_points(points_np)
+    gammas_np = np.array([coil.curve.gamma() for coil in coils])
+    gds_np = np.array([coil.curve.gammadash() for coil in coils])
+    currents_np = np.array([coil.current.get_value() for coil in coils])
+    return bs, points_np, gammas_np, gds_np, currents_np
+
+
 class TestBiotSavartJaxAnalytical:
     """Test against the known on-axis field of a circular current loop."""
 
@@ -321,24 +341,10 @@ class TestBiotSavartJaxCppParity:
         pytest.importorskip("simsopt")
 
     def test_B_parity_ncsx(self):
-        from simsopt.configs import get_data
-        from simsopt.field import coils_via_symmetries, BiotSavart
-
-        curves, currents_objs, _, nfp, _ = get_data("ncsx")
-        coils = coils_via_symmetries(curves, currents_objs, nfp, stellsym=True)
-        bs = BiotSavart(coils)
-
-        npoints = 50
-        np.random.seed(42)
-        points_np = np.random.randn(npoints, 3) * 0.3
-        points_np[:, 0] += 1.0  # shift near torus
-
-        bs.set_points(points_np)
+        bs, points_np, gammas_np, gds_np, currents_np = (
+            _ncsx_biotsavart_parity_fixture()
+        )
         B_ref = bs.B()
-
-        gammas_np = np.array([c.curve.gamma() for c in coils])
-        gds_np = np.array([c.curve.gammadash() for c in coils])
-        currents_np = np.array([c.current.get_value() for c in coils])
 
         B_jax = biot_savart_B(
             jnp.array(points_np),
@@ -348,6 +354,21 @@ class TestBiotSavartJaxCppParity:
         )
 
         np.testing.assert_allclose(np.array(B_jax), B_ref, rtol=1e-10)
+
+    def test_dB_by_dX_parity_ncsx(self):
+        bs, points_np, gammas_np, gds_np, currents_np = (
+            _ncsx_biotsavart_parity_fixture()
+        )
+        dB_ref = bs.dB_by_dX()
+
+        dB_jax = biot_savart_dB_by_dX(
+            jnp.array(points_np),
+            jnp.array(gammas_np),
+            jnp.array(gds_np),
+            jnp.array(currents_np),
+        )
+
+        np.testing.assert_allclose(np.array(dB_jax), dB_ref, rtol=1e-10, atol=1e-13)
 
 
 class TestBiotSavartJaxChunkedParity:
