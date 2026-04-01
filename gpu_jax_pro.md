@@ -233,6 +233,9 @@ Do not promise universal bitwise equality. JAX explicitly says exact numerics ar
 2. **Device parity:** JAX CPU vs JAX GPU in x64 parity mode.
 3. **Physics parity:** invariants and final objective quality, especially for greedy/discrete solvers.
 
+Treat these as separate reporting buckets in CI, benchmarks, and proof runs.
+Do not collapse them into one generic "parity" label.
+
 Build CI around the tests you already have:
 
 * JAX vs non-JAX curve families
@@ -258,6 +261,8 @@ Status in the current Columbia JAX tree:
 * a dedicated CPU `jax_debug_nans` guardrail lane exists in `jax_smoke.yml`
 * subprocess smoke coverage now checks a practical transfer-guard rejection case
   at a jitted NumPy-to-JAX boundary
+* a user-facing backend guide now exists at
+  `docs/using_jax_backend.md`
 
 ## 6) How the JAX backend surpasses native Simsopt
 
