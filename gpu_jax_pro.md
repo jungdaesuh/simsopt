@@ -165,9 +165,30 @@ Port the smooth / mostly-smooth solvers before the greedy ones:
 * RCLS-like continuous subproblems
 * PM matrix assembly (`A`, `A^T b`, normal-field contractions) as batched JAX contractions
 
+For this repo, that should be split into two explicit subplans rather than one
+generic “later PM/wireframe” placeholder:
+
+* **PM continuous-subproblem plan**
+  * freeze `PermanentMagnetGrid` geometry, fixed plasma surface data, and
+    target `Bn` as immutable adapter inputs
+  * first port the continuous PM matrix/objective path in
+    `src/simsopt/solve/permanent_magnet_optimization.py`
+  * keep `GPMO` and other discrete sparsification logic explicitly out of
+    scope until the continuous parity gate is green
+* **Wireframe continuous-subproblem plan**
+  * freeze `ToroidalWireframe` geometry, segment metadata, and fixed-surface
+    field-eval inputs as immutable payloads
+  * first port the continuous `rcls` matrix/objective path in
+    `src/simsopt/solve/wireframe_optimization.py` and
+    `src/simsopt/field/wireframefield.py`
+  * keep `gsco` current-addition and loop-validity logic explicitly out of
+    scope until the continuous wireframe lane is green
+
 Keep the outer optimizer API compatible. In the first pass, it is acceptable for the façade to keep a CPU optimizer call if the objective/gradient stay fully on JAX CPU/GPU; then move the full loop on-device once the kernels are stable. This is lower-risk than rewriting every solver at once.   
 
-**Done when:** stage-two coil optimization and continuous PM/wireframe subproblems run end-to-end through the JAX backend.
+**Done when:** stage-two coil optimization plus one continuous PM solve slice
+and one continuous wireframe `rcls` slice run end-to-end through the JAX
+backend.
 
 ### Phase 6: greedy/discrete solvers later, with determinism rules
 
@@ -527,6 +548,10 @@ According to a document from March 31, 2026, here is the module-by-module implem
      explicit `ContinuousOptimizerContract`; the supported
      `scipy` / transitional `hybrid` / target `ondevice` split is defined in
      one place instead of being re-decided per entrypoint
+   * the current Stage 2 route helpers are internally consistent:
+     `_resolve_stage2_optimizer_contract(...)` returns the full contract and
+     only `resolve_stage2_optimizer_method(...)` strips that down to the
+     method string
    * unsupported single-stage outer `hybrid` routing is now rejected
      explicitly instead of silently degrading to plain `lbfgs`
    * the next broader non-hot-path objective slice is now landed:
