@@ -131,10 +131,16 @@ def _current_coil_dofs_and_spec(biotsavart):
     return current_coil_dofs, biotsavart.coil_set_spec_from_dofs(current_coil_dofs)
 
 
-def _value_and_direct_coil_derivative(biotsavart, objective_of_coils, coil_dofs):
-    """Evaluate a coil-DOF objective and map its direct gradient to Derivative."""
-    objective_value, coil_dofs_gradient = jax.value_and_grad(objective_of_coils)(
-        coil_dofs
+def _value_and_direct_coil_derivative(
+    biotsavart,
+    objective_value_and_grad,
+    coil_dofs,
+    *objective_args,
+):
+    """Evaluate a cached coil-DOF objective/gradient pair and map its gradient."""
+    objective_value, coil_dofs_gradient = objective_value_and_grad(
+        coil_dofs,
+        *objective_args,
     )
     direct_derivative = _coil_dofs_gradient_to_derivative(
         biotsavart,
@@ -334,7 +340,10 @@ class BoozerResidualJAX(Optimizable):
         )
         self.surface.set_dofs(s.get_dofs())
 
-        self.constraint_weight = boozer_surface.constraint_weight
+        self.constraint_weight = float(boozer_surface.constraint_weight)
+        self._direct_objective_value_and_grad = jax.value_and_grad(
+            self._direct_objective_of_coils
+        )
         self.recompute_bell()
 
     def recompute_bell(self, parent=None):
@@ -352,6 +361,32 @@ class BoozerResidualJAX(Optimizable):
             self.compute()
         return self._dJ
 
+    def _direct_objective_of_coils(
+        self,
+        coil_dofs,
+        x_inner,
+        optimize_G,
+        weight_inv_modB,
+    ):
+        """Pure direct BoozerResidual objective evaluated from explicit coil DOFs."""
+        return _boozer_residual_J_of_x_inner(
+            x_inner,
+            coil_set_spec=self.biotsavart.coil_set_spec_from_dofs(coil_dofs),
+            **self._residual_objective_kwargs(
+                optimize_G=optimize_G,
+                weight_inv_modB=weight_inv_modB,
+            ),
+        )
+
+    def _inner_objective_state(self, iota, G, *, sdofs=None):
+        """Return the packed inner decision vector and optimize-G flag."""
+        surface_dofs = self.boozer_surface._get_surface_dofs() if sdofs is None else sdofs
+        optimize_G = G is not None
+        return (
+            self.boozer_surface._pack_decision_vector(iota, G, sdofs=surface_dofs),
+            optimize_G,
+        )
+
     def compute(self):
         booz_surf = self.boozer_surface
         _ensure_solved(booz_surf)
@@ -360,24 +395,16 @@ class BoozerResidualJAX(Optimizable):
         iota = booz_surf.res["iota"]
         G = booz_surf.res["G"]
         weight_inv_modB = booz_surf.res.get("weight_inv_modB", True)
-        x_inner = booz_surf._pack_decision_vector(iota, G, sdofs=sdofs)
+        x_inner, optimize_G = self._inner_objective_state(iota, G, sdofs=sdofs)
         current_coil_dofs, coil_set_spec = _current_coil_dofs_and_spec(self.biotsavart)
-        objective_kwargs = self._residual_objective_kwargs(
-            optimize_G=G is not None,
-            weight_inv_modB=weight_inv_modB,
-        )
-
-        def objective_of_coils(coil_dofs):
-            return _boozer_residual_J_of_x_inner(
-                x_inner,
-                coil_set_spec=self.biotsavart.coil_set_spec_from_dofs(coil_dofs),
-                **objective_kwargs,
-            )
 
         self._J, dJ_by_dcoils = _value_and_direct_coil_derivative(
             self.biotsavart,
-            objective_of_coils,
+            self._direct_objective_value_and_grad,
             current_coil_dofs,
+            x_inner,
+            optimize_G,
+            weight_inv_modB,
         )
         vjp_groups_fn = booz_surf.res.get("vjp_groups")
 
@@ -397,14 +424,7 @@ class BoozerResidualJAX(Optimizable):
 
     def _compute_dJ_ds(self, coil_set_spec, iota, G, weight_inv_modB):
         """Compute ∂J_BR/∂[surface_dofs, iota, G] via JAX autodiff."""
-        booz_surf = self.boozer_surface
-        sdofs = booz_surf._get_surface_dofs()
-        optimize_G = G is not None
-
-        if optimize_G:
-            x_inner = jnp.concatenate([sdofs, jnp.array([iota, G])])
-        else:
-            x_inner = jnp.concatenate([sdofs, jnp.array([iota])])
+        x_inner, optimize_G = self._inner_objective_state(iota, G)
 
         dJ_ds_jax = jax.grad(_boozer_residual_J_of_x_inner)(
             x_inner,
@@ -418,9 +438,6 @@ class BoozerResidualJAX(Optimizable):
 
     def _residual_objective_kwargs(self, *, optimize_G, weight_inv_modB):
         booz_surf = self.boozer_surface
-        constraint_weight = (
-            self.constraint_weight if self.constraint_weight is not None else 1.0
-        )
         return dict(
             quadpoints_phi=booz_surf.quadpoints_phi,
             quadpoints_theta=booz_surf.quadpoints_theta,
@@ -433,7 +450,7 @@ class BoozerResidualJAX(Optimizable):
             optimize_G=optimize_G,
             weight_inv_modB=weight_inv_modB,
             targetlabel=booz_surf.targetlabel,
-            constraint_weight=constraint_weight,
+            constraint_weight=self.constraint_weight,
             label_type=booz_surf.label_type,
             phi_idx=booz_surf.phi_idx,
         )

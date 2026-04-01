@@ -228,6 +228,14 @@ def _assert_gradients_finite_nonzero(gradients, message_prefix):
         assert np.linalg.norm(grad) > 0, f"{message_prefix} produced zero gradient"
 
 
+def _jax_single_stage_wrapper_gradients(booz_jax, bs_jax):
+    return [
+        np.array(BoozerResidualJAX(booz_jax, bs_jax).dJ()),
+        np.array(IotasJAX(booz_jax).dJ()),
+        np.array(NonQuasiSymmetricRatioJAX(booz_jax, bs_jax, sDIM=6).dJ()),
+    ]
+
+
 def _assert_streaming_group_vjp_matches_full(
     full_d_coil_arrays, full_coil_indices, streamed
 ):
@@ -1101,10 +1109,14 @@ class TestBoozerResidualValue:
         coil_set_spec = bs_jax.coil_set_spec_from_dofs(coil_dofs)
 
         def fake_value_and_direct_coil_derivative(
-            biotsavart, objective_of_coils, coil_dofs
+            biotsavart,
+            objective_value_and_grad,
+            coil_dofs,
+            *objective_args,
         ):
             del biotsavart
-            value = float(objective_of_coils(coil_dofs))
+            value, _ = objective_value_and_grad(coil_dofs, *objective_args)
+            value = float(value)
             captured["value"] = value
             return value, Derivative({})
 
@@ -1164,6 +1176,46 @@ class TestBoozerResidualValue:
 
         np.testing.assert_allclose(value, expected, rtol=1e-12, atol=1e-12)
         assert captured["value"] == value
+
+    def test_direct_objective_value_and_grad_is_cached_per_instance(
+        self,
+        boozer_setup,
+        monkeypatch,
+    ):
+        """BoozerResidualJAX should not rebuild its direct objective transform."""
+        import simsopt.geo.surfaceobjectives_jax as soj
+
+        (_, _, _, _, bs_jax, _, booz_jax, _) = boozer_setup
+        original_value_and_grad = soj.jax.value_and_grad
+        build_count = 0
+
+        def counting_value_and_grad(*args, **kwargs):
+            nonlocal build_count
+            build_count += 1
+            return original_value_and_grad(*args, **kwargs)
+
+        monkeypatch.setattr(soj.jax, "value_and_grad", counting_value_and_grad)
+
+        jr_jax = BoozerResidualJAX(booz_jax, bs_jax)
+        cached_transform = jr_jax._direct_objective_value_and_grad
+
+        assert build_count == 1
+        jr_jax.J()
+        jr_jax.recompute_bell()
+        jr_jax.J()
+        assert build_count == 1
+        assert jr_jax._direct_objective_value_and_grad is cached_transform
+
+    def test_constraint_weight_is_concrete_float_for_ls_surface(self, boozer_setup):
+        """LS-only BoozerResidualJAX should store a concrete penalty weight."""
+        (_, _, _, _, bs_jax, _, booz_jax, _) = boozer_setup
+
+        jr_jax = BoozerResidualJAX(booz_jax, bs_jax)
+
+        assert isinstance(jr_jax.constraint_weight, float)
+        assert jr_jax.constraint_weight == pytest.approx(
+            float(booz_jax.constraint_weight)
+        )
 
 
 # -----------------------------------------------------------------------
@@ -2221,11 +2273,7 @@ class TestAdjointSolveConsistency:
 
         monkeypatch.setattr(scipy.linalg, "solve_triangular", _bomb)
 
-        gradients = [
-            np.array(BoozerResidualJAX(booz_jax, bs_jax).dJ()),
-            np.array(IotasJAX(booz_jax).dJ()),
-            np.array(NonQuasiSymmetricRatioJAX(booz_jax, bs_jax, sDIM=6).dJ()),
-        ]
+        gradients = _jax_single_stage_wrapper_gradients(booz_jax, bs_jax)
 
         _assert_gradients_finite_nonzero(gradients, "Implicit JAX path")
 
@@ -2244,11 +2292,7 @@ class TestAdjointSolveConsistency:
 
         monkeypatch.setitem(booz_jax.res, "vjp", _bomb)
 
-        gradients = [
-            np.array(BoozerResidualJAX(booz_jax, bs_jax).dJ()),
-            np.array(IotasJAX(booz_jax).dJ()),
-            np.array(NonQuasiSymmetricRatioJAX(booz_jax, bs_jax, sDIM=6).dJ()),
-        ]
+        gradients = _jax_single_stage_wrapper_gradients(booz_jax, bs_jax)
 
         _assert_gradients_finite_nonzero(gradients, "Streaming group VJP")
 
@@ -3052,6 +3096,63 @@ class TestRunCodeLSParity:
         assert iota_diff < 1e-6, f"Iota disagreement: {iota_diff:.6e}"
 
 
+class TestRealFixtureScipyM5Parity:
+    """Reduced real single-stage fixture covers the public scipy-backed M5 lane."""
+
+    def test_real_fixture_scipy_parity_and_wrapper_gradients(self):
+        """CPU and JAX reduced-real scipy fixtures agree, and JAX wrappers stay healthy."""
+        cpu_fixture = build_real_single_stage_init_fixture(
+            backend="cpu",
+            optimizer_backend="scipy",
+        )
+        jax_fixture = build_real_single_stage_init_fixture(
+            backend="jax",
+            optimizer_backend="scipy",
+        )
+
+        booz_cpu = cpu_fixture["boozer_surface"]
+        bs_cpu = cpu_fixture["bs"]
+        booz_jax = jax_fixture["boozer_surface"]
+        bs_jax = jax_fixture["bs"]
+
+        assert cpu_fixture["boozer_optimizer_backend"] is None
+        assert jax_fixture["boozer_optimizer_backend"] == "scipy"
+        assert booz_cpu.res is not None and booz_cpu.res.get("success", False)
+        assert booz_jax.res is not None and booz_jax.res.get("success", False)
+        assert booz_jax.res["type"] == "ls"
+
+        iota_cpu = Iotas(booz_cpu).J()
+        iota_jax = IotasJAX(booz_jax).J()
+        residual_cpu = BoozerResidual(booz_cpu, bs_cpu).J()
+        residual_jax = BoozerResidualJAX(booz_jax, bs_jax).J()
+        nqs_cpu = NonQuasiSymmetricRatio(booz_cpu, bs_cpu, sDIM=6).J()
+        nqs_jax = NonQuasiSymmetricRatioJAX(booz_jax, bs_jax, sDIM=6).J()
+
+        np.testing.assert_allclose(
+            booz_jax.res["iota"],
+            booz_cpu.res["iota"],
+            rtol=0.0,
+            atol=1e-12,
+        )
+        np.testing.assert_allclose(
+            booz_jax.res["G"],
+            booz_cpu.res["G"],
+            rtol=0.0,
+            atol=1e-12,
+        )
+        np.testing.assert_allclose(iota_jax, iota_cpu, rtol=0.0, atol=1e-12)
+        np.testing.assert_allclose(
+            residual_jax,
+            residual_cpu,
+            rtol=1e-12,
+            atol=1e-12,
+        )
+        np.testing.assert_allclose(nqs_jax, nqs_cpu, rtol=1e-12, atol=1e-12)
+
+        gradients = _jax_single_stage_wrapper_gradients(booz_jax, bs_jax)
+        _assert_gradients_finite_nonzero(gradients, "Real-fixture scipy M5 path")
+
+
 # -----------------------------------------------------------------------
 # Test 10: Short outer optimization loop (plan §5 gate)
 # -----------------------------------------------------------------------
@@ -3793,24 +3894,13 @@ class TestBoozerResidualAdjointFD:
             iota, G, sdofs=booz_surf._get_surface_dofs()
         )
         current_coil_dofs, coil_set_spec = _current_coil_dofs_and_spec(jr.biotsavart)
-        objective_kwargs = jr._residual_objective_kwargs(
-            optimize_G=G is not None,
-            weight_inv_modB=weight_inv_modB,
-        )
-
-        from simsopt.geo.surfaceobjectives_jax import _boozer_residual_J_of_x_inner
-
-        def objective_of_coils(coil_dofs):
-            return _boozer_residual_J_of_x_inner(
-                x_inner,
-                coil_set_spec=jr.biotsavart.coil_set_spec_from_dofs(coil_dofs),
-                **objective_kwargs,
-            )
-
         _, direct_deriv = _value_and_direct_coil_derivative(
             jr.biotsavart,
-            objective_of_coils,
+            jr._direct_objective_value_and_grad,
             current_coil_dofs,
+            x_inner,
+            G is not None,
+            weight_inv_modB,
         )
         dJ_ds = jr._compute_dJ_ds(coil_set_spec, iota, G, weight_inv_modB)
         adj = _solve_boozer_adjoint(booz_surf, dJ_ds)

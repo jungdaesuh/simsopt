@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TypeAlias
 
 import jax
 import jax.numpy as jnp
@@ -370,7 +371,7 @@ jax.tree_util.register_dataclass(
 )
 
 
-CurveSpec = (
+CurveSpec: TypeAlias = (
     CurveXYZFourierSpec
     | CurveRZFourierSpec
     | CurvePlanarFourierSpec
