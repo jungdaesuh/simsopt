@@ -3,6 +3,8 @@
 import importlib.util
 import sys
 import types
+import warnings
+from dataclasses import dataclass
 from pathlib import Path
 
 import jax
@@ -91,8 +93,208 @@ _boozer_ls_coil_vjp = _bsj._boozer_ls_coil_vjp
 require_target_backend_x64 = _bsj.require_target_backend_x64
 resolve_optimizer_backend_method = _bsj.resolve_optimizer_backend_method
 BoozerSurfaceJAX = _bsj.BoozerSurfaceJAX
+BiotSavartJAX = _bs_backend.BiotSavartJAX
 
 _ensure_solved_jax = _soj._ensure_solved
+
+
+UPSTREAM_BOOZER_SURFACE_TYPES = (
+    "SurfaceXYZFourier",
+    "SurfaceXYZTensorFourier",
+)
+UPSTREAM_BOOZER_STELLSYM = (True, False)
+UPSTREAM_BOOZER_OPTIMIZE_G = (True, False)
+
+_UPSTREAM_BOOZER_CONSTRAINT_WEIGHT = 11.1232
+_UPSTREAM_BOOZER_TF_TARGET = 0.1
+_UPSTREAM_BOOZER_IOTA0 = -0.3
+_UPSTREAM_EXACT_IOTA0 = -0.44856192
+_UPSTREAM_EXACT_TF_TARGET = 0.41431152
+_LEGACY_COILS_LIST_FALLBACK_WARNING = (
+    "BoozerSurfaceJAX is using a hidden grouped-coil compatibility fallback "
+    "via _coils list extraction in _refresh_coil_data(). This path snapshots "
+    "compatibility data from the live coil graph and should be treated as a "
+    "legacy adapter seam."
+)
+
+
+@dataclass(frozen=True)
+class UpstreamBoozerPenaltyCase:
+    surfacetype: str
+    stellsym: bool
+    optimize_G: bool
+    cpu_boozer: object
+    jax_boozer: BoozerSurfaceJAX
+    x: np.ndarray
+    constraint_weight: float
+
+
+@dataclass(frozen=True)
+class UpstreamExactSurfaceCase:
+    surfacetype: str
+    jax_boozer: BoozerSurfaceJAX
+    initial_iota: float
+    initial_G: float
+
+
+def _upstream_initial_G(current_values, nfp):
+    current_sum = nfp * sum(abs(current) for current in current_values)
+    return 2.0 * np.pi * current_sum * (4.0 * np.pi * 1e-7 / (2.0 * np.pi))
+
+
+def _current_values(currents):
+    return [current.get_value() for current in currents]
+
+
+def _build_upstream_penalty_decision_vector(
+    surface_dofs, current_values, nfp, *, optimize_G
+):
+    x = np.concatenate([surface_dofs, [_UPSTREAM_BOOZER_IOTA0]])
+    if not optimize_G:
+        return x
+    return np.concatenate([x, [_upstream_initial_G(current_values, nfp)]])
+
+
+def _construct_boozer_surface_jax_preserving_warning_state(*args, **kwargs):
+    warned_details = set(_bsj._WARNED_HIDDEN_GROUPED_FALLBACK_DETAILS)
+    try:
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore",
+                message=_LEGACY_COILS_LIST_FALLBACK_WARNING,
+                category=RuntimeWarning,
+            )
+            return BoozerSurfaceJAX(*args, **kwargs)
+    finally:
+        _bsj._WARNED_HIDDEN_GROUPED_FALLBACK_DETAILS.clear()
+        _bsj._WARNED_HIDDEN_GROUPED_FALLBACK_DETAILS.update(warned_details)
+
+
+def _make_toroidal_flux_label(surface, coils):
+    from simsopt.field import BiotSavart
+    from simsopt.geo import ToroidalFlux
+
+    return ToroidalFlux(surface, BiotSavart(coils), nphi=51, ntheta=51)
+
+
+def _build_upstream_jax_boozer(surface, bs, label, target, *, constraint_weight=None):
+    return _construct_boozer_surface_jax_preserving_warning_state(
+        BiotSavartJAX(bs.coils),
+        surface,
+        label,
+        target,
+        constraint_weight=constraint_weight,
+    )
+
+
+def _build_upstream_boozer_pair(bs, surface, label, target, *, constraint_weight=None):
+    from simsopt.geo import BoozerSurface
+
+    return (
+        BoozerSurface(bs, surface, label, target),
+        _build_upstream_jax_boozer(
+            surface,
+            bs,
+            label,
+            target,
+            constraint_weight=constraint_weight,
+        ),
+    )
+
+
+def _build_upstream_ncsx_surface_context(surfacetype, stellsym):
+    from simsopt.configs.zoo import get_data
+
+    from .surface_test_helpers import get_surface
+
+    _, base_currents, magnetic_axis, nfp, bs = get_data("ncsx")
+    surface = get_surface(surfacetype, stellsym)
+    surface.fit_to_curve(magnetic_axis, 0.1)
+    return {
+        "base_currents": base_currents,
+        "nfp": nfp,
+        "bs": bs,
+        "surface": surface,
+        "label": _make_toroidal_flux_label(surface, bs.coils),
+    }
+
+
+def _build_upstream_exact_surface_case(surfacetype):
+    from simsopt.configs.zoo import get_data
+
+    from .surface_test_helpers import get_exact_surface
+
+    _, base_currents, _, nfp, bs = get_data("ncsx")
+    current_values = _current_values(base_currents)
+    surface = get_exact_surface(surface_type=surfacetype)
+    label = _make_toroidal_flux_label(surface, bs.coils)
+    _, jax_boozer = _build_upstream_boozer_pair(
+        bs,
+        surface,
+        label,
+        _UPSTREAM_EXACT_TF_TARGET,
+    )
+    return UpstreamExactSurfaceCase(
+        surfacetype=surfacetype,
+        jax_boozer=jax_boozer,
+        initial_iota=_UPSTREAM_EXACT_IOTA0,
+        initial_G=_upstream_initial_G(current_values, nfp),
+    )
+
+
+def _build_upstream_boozer_penalty_case(surfacetype, stellsym, optimize_G):
+    case_data = _build_upstream_ncsx_surface_context(surfacetype, stellsym)
+    base_currents = case_data["base_currents"]
+    current_values = _current_values(base_currents)
+    bs = case_data["bs"]
+    surface = case_data["surface"]
+    label = case_data["label"]
+
+    cpu_boozer, jax_boozer = _build_upstream_boozer_pair(
+        bs,
+        surface,
+        label,
+        _UPSTREAM_BOOZER_TF_TARGET,
+        constraint_weight=_UPSTREAM_BOOZER_CONSTRAINT_WEIGHT,
+    )
+
+    x = _build_upstream_penalty_decision_vector(
+        surface.get_dofs(),
+        current_values,
+        case_data["nfp"],
+        optimize_G=optimize_G,
+    )
+
+    return UpstreamBoozerPenaltyCase(
+        surfacetype=surfacetype,
+        stellsym=stellsym,
+        optimize_G=optimize_G,
+        cpu_boozer=cpu_boozer,
+        jax_boozer=jax_boozer,
+        x=x,
+        constraint_weight=_UPSTREAM_BOOZER_CONSTRAINT_WEIGHT,
+    )
+
+
+def _evaluate_upstream_boozer_penalty_case(case):
+    cpu_value, cpu_gradient = case.cpu_boozer.boozer_penalty_constraints_vectorized(
+        case.x,
+        derivatives=1,
+        constraint_weight=case.constraint_weight,
+        optimize_G=case.optimize_G,
+    )
+    jax_objective = case.jax_boozer._make_penalty_objective_with(
+        case.optimize_G,
+        case.jax_boozer.options["weight_inv_modB"],
+        case.constraint_weight,
+    )
+    jax_value, jax_gradient = jax.value_and_grad(jax_objective)(jnp.asarray(case.x))
+    return {
+        "cpu_value": float(cpu_value),
+        "cpu_gradient": np.asarray(cpu_gradient),
+        "jax_value": float(jax_value),
+        "jax_gradient": np.asarray(jax_gradient),
+    }
 
 
 def _make_simple_torus_coeffs(R0=1.0, r=0.1, mpol=1, ntor=1, nfp=1):
@@ -195,6 +397,7 @@ def _build_penalty_problem(
     nfp=1,
     R0=1.0,
     r=0.1,
+    stellsym=False,
     label_type="volume",
     targetlabel=None,
     constraint_weight=1.0,
@@ -205,13 +408,20 @@ def _build_penalty_problem(
     xc, yc, zc = _make_simple_torus_coeffs(R0, r, mpol, ntor, nfp)
     qphi = jnp.linspace(0, 1.0 / nfp, nphi, endpoint=False)
     qtheta = jnp.linspace(0, 1.0, ntheta, endpoint=False)
-    sdofs = jnp.concatenate(
+    full_sdofs = jnp.concatenate(
         [
             jnp.array(xc).ravel(),
             jnp.array(yc).ravel(),
             jnp.array(zc).ravel(),
         ]
     )
+
+    if stellsym:
+        scatter = jnp.asarray(stellsym_scatter_indices(mpol, ntor), dtype=jnp.int32)
+        sdofs = full_sdofs[scatter]
+    else:
+        scatter = None
+        sdofs = full_sdofs
 
     gammas, gammadashs, currents = _make_two_coils()
     G = float(compute_G_from_currents(currents))
@@ -242,8 +452,8 @@ def _build_penalty_problem(
             mpol=mpol,
             ntor=ntor,
             nfp=nfp,
-            stellsym=False,
-            scatter_indices=None,
+            stellsym=stellsym,
+            scatter_indices=scatter,
             surface_kind="generic",
             targetlabel=targetlabel,
             constraint_weight=constraint_weight,
@@ -378,6 +588,14 @@ class _MockBiotSavart(_bsj.Optimizable):
     def __init__(self, coils):
         super().__init__(x0=np.asarray([]))
         self._coils = coils
+        self._coil_spec = _bsj.grouped_coil_set_spec_from_lists(
+            [coil.curve.gamma() for coil in coils],
+            [coil.curve.gammadash() for coil in coils],
+            [coil.current.get_value() for coil in coils],
+        )
+
+    def coil_set_spec(self):
+        return self._coil_spec
 
 
 class _MockSurface:

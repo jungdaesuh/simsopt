@@ -22,11 +22,14 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 from conftest import enable_non_strict_jax_backend, enable_strict_jax_backend
+from simsopt.field.coil import Coil, Current
 from simsopt.jax_core import (
     GroupedCoilSetSpec,
     grouped_coil_set_spec_from_lists,
     grouped_field_data_from_spec,
+    make_current_value_spec,
 )
+from simsopt.geo.curvexyzfourier import CurveXYZFourier
 
 from .boozersurface_jax_test_helpers import (
     BoozerSurfaceJAX,
@@ -35,11 +38,11 @@ from .boozersurface_jax_test_helpers import (
     _MockSurface,
     _MockVolumeLabel,
     _boozer_exact_coil_vjp,
-    _boozer_penalty_objective,
     _bsj,
     _build_penalty_problem,
     _ensure_solved_jax,
     _build_upstream_boozer_penalty_case,
+    _evaluate_upstream_boozer_penalty_case,
     _build_upstream_exact_surface_case,
     _make_circular_coil,
     _make_mixed_quad_mock_coils,
@@ -111,6 +114,8 @@ _STRICT_COILS_LIST_FALLBACK_PATTERN = (
     r"BoozerSurfaceJAX.*hidden grouped-coil spec compatibility "
     r"fallback.*_coils list extraction.*strict=True"
 )
+_LEGACY_FALLBACK_WARNING_PATTERN = "legacy adapter seam"
+_LEGACY_CURVE_X = np.array([1.0, 0.2, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
 
 
 @contextmanager
@@ -150,6 +155,58 @@ def _enable_non_strict_backend_with_clean_warning_cache(monkeypatch, request):
 
     _enable_non_strict_jax_backend(monkeypatch, request)
     invalidate_backend_cache()
+
+
+def _make_legacy_coils_list_biotsavart(coils):
+    class _LegacyCoilsListBiotSavart(_bsj.Optimizable):
+        def __init__(self, legacy_coils):
+            super().__init__(x0=np.asarray([]))
+            self._coils = legacy_coils
+
+    return _LegacyCoilsListBiotSavart(coils)
+
+
+def _make_legacy_spec_capable_coils():
+    curve = CurveXYZFourier(16, 1)
+    curve.x = _LEGACY_CURVE_X.copy()
+    return [Coil(curve, Current(1.23))]
+
+
+def _make_curve_current_spec_only_legacy_coils():
+    live_curve = CurveXYZFourier(16, 1)
+    live_curve.x = _LEGACY_CURVE_X.copy()
+    curve_spec = live_curve.to_spec()
+    current_spec = make_current_value_spec(1.23)
+
+    class _CurveSpecOnly:
+        def to_spec(self):
+            return curve_spec
+
+        def gamma(self):
+            raise AssertionError("gamma() should not be read")
+
+        def gammadash(self):
+            raise AssertionError("gammadash() should not be read")
+
+    class _CurrentSpecOnly:
+        def to_spec(self):
+            return current_spec
+
+        def get_value(self):
+            raise AssertionError("get_value() should not be read")
+
+    class _CurveCurrentSpecOnlyCoil:
+        def __init__(self, legacy_curve, legacy_current):
+            self.curve = legacy_curve
+            self.current = legacy_current
+
+    return [_CurveCurrentSpecOnlyCoil(_CurveSpecOnly(), _CurrentSpecOnly())]
+
+
+def _extract_legacy_coils_fallback_spec(bs, monkeypatch, request):
+    _enable_non_strict_backend_with_clean_warning_cache(monkeypatch, request)
+    with pytest.warns(RuntimeWarning, match=_LEGACY_FALLBACK_WARNING_PATTERN):
+        return _bsj._extract_grouped_coil_set_spec(bs)
 
 
 # ---------------------------------------------------------------------------
@@ -706,11 +763,19 @@ class TestBoozerSurfaceJAXClass:
     def test_strict_mode_rejects_hidden_coils_list_fallback(self, monkeypatch):
         """Strict JAX mode must reject raw ``_coils`` compatibility extraction."""
         with _strict_backend_mode(monkeypatch):
+            bs = _make_legacy_coils_list_biotsavart(_make_legacy_spec_capable_coils())
+            surf, label = _make_basic_mock_surface_and_label()
             with pytest.raises(
                 RuntimeError,
                 match=_STRICT_COILS_LIST_FALLBACK_PATTERN,
             ):
-                _make_mock_boozer_surface()
+                BoozerSurfaceJAX(
+                    bs,
+                    surf,
+                    label,
+                    1.0,
+                    constraint_weight=1.0,
+                )
 
     def test_spec_only_biotsavart_supports_G_none_ls_path(self):
         """Spec-driven grouped-field state should work without a legacy ``_coils`` list."""
@@ -1806,11 +1871,17 @@ class TestNegativeCases:
     def test_extract_grouped_coil_set_spec_warns_on_legacy_coils_fallback(
         self, monkeypatch, request
     ):
-        bs = _MockBiotSavart(_make_mock_coils())
-        _enable_non_strict_backend_with_clean_warning_cache(monkeypatch, request)
+        bs = _make_legacy_coils_list_biotsavart(_make_legacy_spec_capable_coils())
+        spec = _extract_legacy_coils_fallback_spec(bs, monkeypatch, request)
 
-        with pytest.warns(RuntimeWarning, match="legacy adapter seam"):
-            spec = _bsj._extract_grouped_coil_set_spec(bs)
+        assert isinstance(spec, GroupedCoilSetSpec)
+
+    def test_extract_grouped_coil_set_spec_hidden_coils_uses_spec_builders(
+        self, monkeypatch, request
+    ):
+        coils = _make_curve_current_spec_only_legacy_coils()
+        bs = _make_legacy_coils_list_biotsavart(coils)
+        spec = _extract_legacy_coils_fallback_spec(bs, monkeypatch, request)
 
         assert isinstance(spec, GroupedCoilSetSpec)
 
@@ -1821,10 +1892,10 @@ class TestNegativeCases:
     ):
         from simsopt.backend import invalidate_backend_cache
 
-        bs = _MockBiotSavart(_make_mock_coils())
+        bs = _make_legacy_coils_list_biotsavart(_make_legacy_spec_capable_coils())
         _enable_non_strict_backend_with_clean_warning_cache(monkeypatch, request)
 
-        with pytest.warns(RuntimeWarning, match="legacy adapter seam"):
+        with pytest.warns(RuntimeWarning, match=_LEGACY_FALLBACK_WARNING_PATTERN):
             _bsj._extract_grouped_coil_set_spec(bs)
 
         # Second call is suppressed (same cache key)
@@ -1837,7 +1908,7 @@ class TestNegativeCases:
         invalidate_backend_cache()
         _enable_non_strict_backend_with_clean_warning_cache(monkeypatch, request)
 
-        with pytest.warns(RuntimeWarning, match="legacy adapter seam"):
+        with pytest.warns(RuntimeWarning, match=_LEGACY_FALLBACK_WARNING_PATTERN):
             _bsj._extract_grouped_coil_set_spec(bs)
 
     def test_unsupported_label_raises(self):
@@ -2108,6 +2179,10 @@ class TestBoozerExactConstraintsJacobianTaylor:
 
 _STELLSYM_LIST = [True, False]
 _OPTIMIZE_G_LIST = [True, False]
+_UPSTREAM_PENALTY_VALUE_PARITY_RTOL = 1e-5
+_UPSTREAM_PENALTY_VALUE_PARITY_ATOL = 5e-6
+_UPSTREAM_PENALTY_GRADIENT_MAX_ABS_TOL = 1e-2
+_UPSTREAM_PENALTY_GRADIENT_REL_NORM_TOL = 2e-3
 
 
 def _assert_gradient_taylor_convergence(obj, x, *, label="", ratio_bound=0.55):
@@ -2123,12 +2198,46 @@ def _assert_gradient_taylor_convergence(obj, x, *, label="", ratio_bound=0.55):
     for eps in epsilons:
         f1 = float(obj(x + eps * h))
         Jfd = (f1 - f0) / float(eps)
-        err = abs(Jfd - Jex) / abs(Jex)
+        err = abs(Jfd - Jex) / max(abs(Jex), 1e-30)
         assert err < err_old * ratio_bound, (
             f"{label}FD ratio {err / err_old:.3f} >= {ratio_bound} "
             f"at eps={float(eps):.2e}"
         )
         err_old = err
+
+
+def _assert_upstream_penalty_parity(parity):
+    """Assert the calibrated CPU/JAX tensor penalty parity contract.
+
+    We intentionally keep the gradient gate as:
+    1. a hard per-component max-abs cap, and
+    2. a global relative-norm cap.
+
+    A plain ``assert_allclose(rtol, atol)`` would weaken the hard max-abs
+    bound on larger-magnitude components via ``atol + rtol * |reference|``.
+    """
+
+    np.testing.assert_allclose(
+        parity["jax_value"],
+        parity["cpu_value"],
+        rtol=_UPSTREAM_PENALTY_VALUE_PARITY_RTOL,
+        atol=_UPSTREAM_PENALTY_VALUE_PARITY_ATOL,
+        err_msg="CPU/JAX penalty value mismatch",
+    )
+    gradient_diff = np.abs(parity["jax_gradient"] - parity["cpu_gradient"])
+    gradient_max_abs = float(np.max(gradient_diff))
+    assert gradient_max_abs < _UPSTREAM_PENALTY_GRADIENT_MAX_ABS_TOL, (
+        "CPU/JAX gradient max-abs "
+        f"{gradient_max_abs:.3e} >= {_UPSTREAM_PENALTY_GRADIENT_MAX_ABS_TOL:.0e}"
+    )
+    cpu_gradient_norm = float(np.linalg.norm(parity["cpu_gradient"]))
+    gradient_rel_norm = float(
+        np.linalg.norm(gradient_diff) / max(cpu_gradient_norm, 1e-30)
+    )
+    assert gradient_rel_norm < _UPSTREAM_PENALTY_GRADIENT_REL_NORM_TOL, (
+        "CPU/JAX gradient rel-norm "
+        f"{gradient_rel_norm:.3e} >= {_UPSTREAM_PENALTY_GRADIENT_REL_NORM_TOL:.0e}"
+    )
 
 
 class TestParametrizedPenaltyGradientTaylor:
@@ -2168,24 +2277,22 @@ class TestParametrizedBFGSConvergence:
 
 
 # ---------------------------------------------------------------------------
-# P19 + P21: Upstream surface factory parity (pure-function level)
+# P19 + P21: Upstream surface factory parity (coil_arrays dispatch path)
 # ---------------------------------------------------------------------------
-
-try:
-    import simsoptpp as _simsoptpp  # noqa: F401
-
-    _has_simsoptpp = True
-except ImportError:
-    _has_simsoptpp = False
-
-_skip_no_simsoptpp = pytest.mark.skipif(
-    not _has_simsoptpp,
-    reason="P19/P21 upstream-factory tests require simsoptpp",
-)
 
 
 def _extract_jax_penalty_inputs(surface, bs, *, optimize_G):
-    """Extract JAX-compatible arrays from CPU surface and BiotSavart objects."""
+    """Extract raw JAX arrays from CPU objects for the coil_arrays path.
+
+    This bypasses the BoozerSurfaceJAX adapter and GroupedCoilSetSpec,
+    exercising the ``coil_arrays``-based dispatch inside
+    ``_boozer_penalty_objective`` (grouped_*_from_inputs functions).
+    """
+    from .boozersurface_jax_test_helpers import (
+        _UPSTREAM_BOOZER_IOTA0,
+        _upstream_initial_G,
+    )
+
     mpol, ntor, nfp = surface.mpol, surface.ntor, surface.nfp
     qphi = jnp.asarray(surface.quadpoints_phi, dtype=jnp.float64)
     qtheta = jnp.asarray(surface.quadpoints_theta, dtype=jnp.float64)
@@ -2197,21 +2304,17 @@ def _extract_jax_penalty_inputs(surface, bs, *, optimize_G):
         scatter = None
 
     gammas_list, dashs_list, currs_list = [], [], []
-    abs_current_sum = 0.0
     for coil in bs.coils:
         gammas_list.append(coil.curve.gamma())
         dashs_list.append(coil.curve.gammadash())
-        curr = coil.current.get_value()
-        currs_list.append(curr)
-        abs_current_sum += abs(curr)
+        currs_list.append(coil.current.get_value())
     gammas = jnp.asarray(np.stack(gammas_list))
     gammadashs = jnp.asarray(np.stack(dashs_list))
     currents = jnp.asarray(np.array(currs_list))
     coil_arrays = [(gammas, gammadashs, currents)]
 
-    current_sum = nfp * abs_current_sum
-    G = 2.0 * np.pi * current_sum * (4 * np.pi * 1e-7 / (2 * np.pi))
-    iota = -0.3
+    G = _upstream_initial_G(currs_list, nfp)
+    iota = _UPSTREAM_BOOZER_IOTA0
 
     if optimize_G:
         x = jnp.concatenate([sdofs, jnp.array([iota, G])])
@@ -2232,14 +2335,23 @@ def _extract_jax_penalty_inputs(surface, bs, *, optimize_G):
     }
 
 
-@_skip_no_simsoptpp
 class TestUpstreamSurfaceFactoryParity:
-    """Validate JAX penalty objective using upstream ``get_surface()`` factory."""
+    """Validate the coil_arrays dispatch path of ``_boozer_penalty_objective``.
+
+    Unlike ``TestUpstreamFactoryBoozerMatrix`` (which tests via the adapter's
+    ``coil_set_spec`` path), this class passes raw ``coil_arrays`` tuples
+    directly, exercising the ``grouped_*_from_inputs`` dispatch branch.
+    """
 
     @staticmethod
     def _make_problem(stellsym, optimize_G):
         from simsopt.configs import get_data
 
+        from .boozersurface_jax_test_helpers import (
+            _UPSTREAM_BOOZER_CONSTRAINT_WEIGHT,
+            _UPSTREAM_BOOZER_TF_TARGET,
+            _boozer_penalty_objective,
+        )
         from .surface_test_helpers import get_surface
 
         base_curves, base_currents, ma, nfp, bs = get_data("ncsx")
@@ -2247,7 +2359,6 @@ class TestUpstreamSurfaceFactoryParity:
         s.fit_to_curve(ma, 0.1)
 
         inputs = _extract_jax_penalty_inputs(s, bs, optimize_G=optimize_G)
-        targetlabel = 0.1
 
         def objective(xx):
             return _boozer_penalty_objective(
@@ -2261,8 +2372,8 @@ class TestUpstreamSurfaceFactoryParity:
                 stellsym=inputs["stellsym"],
                 scatter_indices=inputs["scatter_indices"],
                 surface_kind="generic",
-                targetlabel=targetlabel,
-                constraint_weight=11.1232,
+                targetlabel=_UPSTREAM_BOOZER_TF_TARGET,
+                constraint_weight=_UPSTREAM_BOOZER_CONSTRAINT_WEIGHT,
                 label_type="volume",
                 phi_idx=0,
                 optimize_G=optimize_G,
@@ -2283,7 +2394,7 @@ class TestUpstreamSurfaceFactoryParity:
     @pytest.mark.parametrize("stellsym", _STELLSYM_LIST)
     @pytest.mark.parametrize("optimize_G", _OPTIMIZE_G_LIST)
     def test_gradient_taylor_convergence(self, stellsym, optimize_G):
-        """Multi-epsilon Taylor test with NCSX coils and factory surface."""
+        """Multi-epsilon Taylor test via the coil_arrays dispatch path."""
         obj, x = self._make_problem(stellsym, optimize_G)
         _assert_gradient_taylor_convergence(
             obj,
@@ -2293,34 +2404,12 @@ class TestUpstreamSurfaceFactoryParity:
 
 
 # ---------------------------------------------------------------------------
-# P18 / P19 / P21: upstream factory matrix coverage
+# P18 / P19 / P21: upstream factory matrix coverage (coil_set_spec path)
 # ---------------------------------------------------------------------------
 
 
 class TestUpstreamFactoryBoozerMatrix:
     """Factory-driven JAX sweep over the upstream Boozer surface matrix."""
-
-    @staticmethod
-    def _run_penalty_gradient_taylor_series(objective, x, epsilons, ratio_bound=0.55):
-        np.random.seed(1)
-        f0 = float(objective(x))
-        grad0 = np.asarray(jax.grad(objective)(x))
-        direction = np.random.uniform(size=x.shape) - 0.5
-        directional_exact = float(grad0 @ direction)
-
-        err_old = 1e9
-        for eps in epsilons:
-            f1 = float(objective(x + eps * direction))
-            directional_fd = (f1 - f0) / eps
-            err = abs(directional_fd - directional_exact) / max(
-                abs(directional_exact),
-                1e-30,
-            )
-            assert err < err_old * ratio_bound, (
-                f"Taylor convergence stalled: err={err:.3e}, "
-                f"prev={err_old:.3e}, ratio={err / err_old:.3f}"
-            )
-            err_old = err
 
     @pytest.mark.parametrize("surfacetype", UPSTREAM_BOOZER_SURFACE_TYPES)
     @pytest.mark.parametrize("stellsym", UPSTREAM_BOOZER_STELLSYM)
@@ -2343,8 +2432,23 @@ class TestUpstreamFactoryBoozerMatrix:
             case.constraint_weight,
         )
         x = jnp.asarray(case.x, dtype=jnp.float64)
-        epsilons = np.power(2.0, -np.arange(7, 20))
-        self._run_penalty_gradient_taylor_series(objective, x, epsilons)
+        _assert_gradient_taylor_convergence(objective, x)
+
+    @pytest.mark.parametrize("stellsym", UPSTREAM_BOOZER_STELLSYM)
+    @pytest.mark.parametrize("optimize_G", UPSTREAM_BOOZER_OPTIMIZE_G)
+    def test_penalty_value_and_gradient_cpu_parity_tensor_matrix(
+        self,
+        stellsym,
+        optimize_G,
+    ):
+        """Tensor-surface factory cases must preserve the direct CPU/JAX parity contract."""
+        case = _build_upstream_boozer_penalty_case(
+            "SurfaceXYZTensorFourier",
+            stellsym,
+            optimize_G,
+        )
+        parity = _evaluate_upstream_boozer_penalty_case(case)
+        _assert_upstream_penalty_parity(parity)
 
     @pytest.mark.parametrize("surfacetype", UPSTREAM_BOOZER_SURFACE_TYPES)
     @pytest.mark.parametrize("stellsym", UPSTREAM_BOOZER_STELLSYM)
