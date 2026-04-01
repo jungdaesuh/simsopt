@@ -1,6 +1,5 @@
 import numpy as np
-import jax.numpy as jnp
-from .curve import JaxCurve
+from .curve import JaxCurve, jnp
 
 __all__ = ["CurveHelical"]
 
@@ -100,7 +99,9 @@ class CurveHelical(JaxCurve):
         self.R0 = R0
         self.r = r
         self.coefficients = np.zeros(self.num_dofs())
-        dof_names = [f"A_{i}" for i in range(order + 1)] + [f"B_{i}" for i in range(1, order + 1)]
+        dof_names = [f"A_{i}" for i in range(order + 1)] + [
+            f"B_{i}" for i in range(1, order + 1)
+        ]
 
         if "dofs" not in kwargs:
             if "x0" not in kwargs:
@@ -118,3 +119,17 @@ class CurveHelical(JaxCurve):
 
     def set_dofs_impl(self, dofs):
         self.coefficients[:] = dofs
+
+    def to_spec(self):
+        """Build an immutable JAX geometry spec from the current curve state."""
+        from ..jax_core import make_curve_helical_spec
+
+        return make_curve_helical_spec(
+            dofs=self.get_dofs(),
+            quadpoints=self.quadpoints,
+            order=self.order,
+            m=self.m,
+            ell=self.ell,
+            R0=self.R0,
+            r=self.r,
+        )

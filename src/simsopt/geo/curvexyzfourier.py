@@ -1,10 +1,9 @@
 from itertools import chain
 
 import numpy as np
-import jax.numpy as jnp
 from scipy.fft import rfft
 
-from .curve import Curve, JaxCurve
+from .curve import Curve, JaxCurve, jnp
 import simsoptpp as sopp
 
 

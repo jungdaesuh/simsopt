@@ -1,15 +1,13 @@
 import numpy as np
-import jax
-import jax.numpy as jnp
 import simsoptpp as sopp
-from .curve import Curve, JaxCurve, _install_curve_jax_contract
+from .curve import Curve, JaxCurve, _install_curve_jax_contract, jnp
 
-__all__ = ['CurvePlanarFourier', 'JaxCurvePlanarFourier']
+__all__ = ["CurvePlanarFourier", "JaxCurvePlanarFourier"]
 
 
 def _normalized_quaternion(quaternion):
     norm_sq = jnp.sum(quaternion * quaternion)
-    inv_norm = jnp.where(norm_sq > 0.0, jax.lax.rsqrt(norm_sq), 1.0)
+    inv_norm = jnp.where(norm_sq > 0.0, 1.0 / jnp.sqrt(norm_sq), 1.0)
     return quaternion * inv_norm
 
 
@@ -78,7 +76,7 @@ class CurvePlanarFourier(sopp.CurvePlanarFourier, Curve):
     r"""
     ``CurvePlanarFourier`` is a curve that is restricted to lie in a plane. The
     shape of the curve within the plane is represented by a Fourier series in
-    polar coordinates centered at the center of curve. 
+    polar coordinates centered at the center of curve.
     The resulting planar curve is then rotated in three
     dimensions using a quaternion, and finally a translation is applied by the center point
     (X, Y, Z). The Fourier series in polar coordinates is
@@ -104,9 +102,9 @@ class CurvePlanarFourier(sopp.CurvePlanarFourier, Curve):
     A quaternion is used for rotation rather than other methods for rotation to
     prevent gimbal locking during optimization. The quaternion is normalized
     before being applied to prevent scaling of the curve. The dofs themselves are not normalized. This
-    results in a redundancy in the optimization, where several different sets of 
-    dofs may correspond to the same normalized quaternion. Normalizing the dofs 
-    directly would create a dependence between the quaternion dofs, which may cause 
+    results in a redundancy in the optimization, where several different sets of
+    dofs may correspond to the same normalized quaternion. Normalizing the dofs
+    directly would create a dependence between the quaternion dofs, which may cause
     issues during optimization.
 
     The dofs are stored in the order
@@ -122,18 +120,24 @@ class CurvePlanarFourier(sopp.CurvePlanarFourier, Curve):
 
     def __init__(self, quadpoints, order, dofs=None):
         if isinstance(quadpoints, int):
-            quadpoints = list(np.linspace(0, 1., quadpoints, endpoint=False))
+            quadpoints = list(np.linspace(0, 1.0, quadpoints, endpoint=False))
         elif isinstance(quadpoints, np.ndarray):
             quadpoints = list(quadpoints)
         sopp.CurvePlanarFourier.__init__(self, quadpoints, order)
         if dofs is None:
-            Curve.__init__(self, external_dof_setter=CurvePlanarFourier.set_dofs_impl,
-                           names=self._make_names(order),
-                           x0=self.get_dofs())
+            Curve.__init__(
+                self,
+                external_dof_setter=CurvePlanarFourier.set_dofs_impl,
+                names=self._make_names(order),
+                x0=self.get_dofs(),
+            )
         else:
-            Curve.__init__(self, external_dof_setter=CurvePlanarFourier.set_dofs_impl,
-                           dofs=dofs,
-                           names=self._make_names(order))
+            Curve.__init__(
+                self,
+                external_dof_setter=CurvePlanarFourier.set_dofs_impl,
+                dofs=dofs,
+                names=self._make_names(order),
+            )
         _install_curve_jax_contract(
             self,
             lambda dofs, points: curveplanarfourier_pure(dofs, points, order),
@@ -152,6 +156,16 @@ class CurvePlanarFourier(sopp.CurvePlanarFourier, Curve):
         self.local_x = dofs
         sopp.CurvePlanarFourier.set_dofs(self, dofs)
 
+    def to_spec(self):
+        """Build an immutable JAX geometry spec from the current curve state."""
+        from ..jax_core import make_curve_planarfourier_spec
+
+        return make_curve_planarfourier_spec(
+            dofs=self.get_dofs(),
+            quadpoints=self.quadpoints,
+            order=self.order,
+        )
+
     def _make_names(self, order):
         """
         This function returns the names of the dofs associated to this object.
@@ -162,13 +176,13 @@ class CurvePlanarFourier(sopp.CurvePlanarFourier, Curve):
         Returns:
             List of dof names.
         """
-        x_names = ['rc(0)']
-        x_cos_names = [f'rc({i})' for i in range(1, order + 1)]
-        x_sin_names = [f'rs({i})' for i in range(1, order + 1)]
+        x_names = ["rc(0)"]
+        x_cos_names = [f"rc({i})" for i in range(1, order + 1)]
+        x_sin_names = [f"rs({i})" for i in range(1, order + 1)]
 
         x_names += x_cos_names + x_sin_names
-        y_names = ['q0', 'qi', 'qj', 'qk']
-        z_names = ['X', 'Y', 'Z']
+        y_names = ["q0", "qi", "qj", "qk"]
+        z_names = ["X", "Y", "Z"]
         return x_names + y_names + z_names
 
 
@@ -213,10 +227,10 @@ class JaxCurvePlanarFourier(JaxCurve):
         self.dof_list = np.array(dofs)
 
     def _make_names(self, order):
-        x_names = ['rc(0)']
-        x_cos_names = [f'rc({i})' for i in range(1, order + 1)]
-        x_sin_names = [f'rs({i})' for i in range(1, order + 1)]
+        x_names = ["rc(0)"]
+        x_cos_names = [f"rc({i})" for i in range(1, order + 1)]
+        x_sin_names = [f"rs({i})" for i in range(1, order + 1)]
         x_names += x_cos_names + x_sin_names
-        y_names = ['q0', 'qi', 'qj', 'qk']
-        z_names = ['X', 'Y', 'Z']
+        y_names = ["q0", "qi", "qj", "qk"]
+        z_names = ["X", "Y", "Z"]
         return x_names + y_names + z_names

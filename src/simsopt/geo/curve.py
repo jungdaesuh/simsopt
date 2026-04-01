@@ -1,8 +1,21 @@
 from math import sin, cos
 
 import numpy as np
-from jax import vjp, jacfwd, jvp, hessian, grad
-import jax.numpy as jnp
+
+try:
+    from jax import grad as _jax_grad
+    from jax import hessian as _jax_hessian
+    from jax import jacfwd as _jax_jacfwd
+    from jax import jvp as _jax_jvp
+    from jax import vjp as _jax_vjp
+    import jax.numpy as jnp
+except ImportError:
+    _jax_grad = None
+    _jax_hessian = None
+    _jax_jacfwd = None
+    _jax_jvp = None
+    _jax_vjp = None
+    jnp = np
 
 import simsoptpp as sopp
 from .._core.optimizable import Optimizable
@@ -11,10 +24,46 @@ from .surfacerzfourier import SurfaceRZFourier
 from .surfacexyztensorfourier import SurfaceXYZTensorFourier
 
 from .jit import jit
-from .._core.derivative import derivative_dec
 from .plotting import fix_matplotlib_3d
 
-__all__ = ['Curve', 'JaxCurve', 'RotatedCurve', 'curves_to_vtk', 'create_equally_spaced_curves', 'create_equally_spaced_oriented_curves', 'CurveCWSFourier', 'create_equally_spaced_planar_curves', 'create_planar_curves_between_two_toroidal_surfaces']
+__all__ = [
+    "Curve",
+    "JaxCurve",
+    "RotatedCurve",
+    "curves_to_vtk",
+    "create_equally_spaced_curves",
+    "create_equally_spaced_oriented_curves",
+    "create_equally_spaced_planar_curves",
+    "create_planar_curves_between_two_toroidal_surfaces",
+]
+
+
+_HAS_JAX = _jax_vjp is not None
+
+
+def _require_jax(feature_name):
+    if not _HAS_JAX:
+        raise ImportError(
+            f"JAX is required for {feature_name}. Install simsopt[JAX] or simsopt[JAX_GPU]."
+        )
+
+
+def _missing_jax_callable(feature_name):
+    def _missing(*args, **kwargs):
+        del args, kwargs
+        _require_jax(feature_name)
+
+    return _missing
+
+
+vjp = _jax_vjp or _missing_jax_callable("curve reverse-mode derivatives")
+jacfwd = _jax_jacfwd or _missing_jax_callable("curve forward-mode derivatives")
+jvp = _jax_jvp or _missing_jax_callable("curve JVP geometry helpers")
+hessian = _jax_hessian or _missing_jax_callable("curve Hessian helpers")
+grad = _jax_grad or _missing_jax_callable("curve gradient helpers")
+
+if _HAS_JAX:
+    __all__.append("CurveCWSFourier")
 
 
 @jit
@@ -31,6 +80,7 @@ def centroid_pure(gamma, gammadash):
     centroid = jnp.sum(gamma * arclength[:, None], axis=0) / jnp.sum(arclength)
     return centroid
 
+
 @jit
 def incremental_arclength_pure(d1gamma):
     """
@@ -40,7 +90,11 @@ def incremental_arclength_pure(d1gamma):
     return jnp.linalg.norm(d1gamma, axis=1)
 
 
-incremental_arclength_vjp = jit(lambda d1gamma, v: vjp(lambda d1g: incremental_arclength_pure(d1g), d1gamma)[1](v)[0])
+incremental_arclength_vjp = jit(
+    lambda d1gamma, v: vjp(lambda d1g: incremental_arclength_pure(d1g), d1gamma)[1](v)[
+        0
+    ]
+)
 
 
 @jit
@@ -49,13 +103,28 @@ def kappa_pure(d1gamma, d2gamma):
     This function is used in a Python+Jax implementation of formula for curvature.
     """
 
-    return jnp.linalg.norm(jnp.cross(d1gamma, d2gamma), axis=1)/jnp.linalg.norm(d1gamma, axis=1)**3
+    return (
+        jnp.linalg.norm(jnp.cross(d1gamma, d2gamma), axis=1)
+        / jnp.linalg.norm(d1gamma, axis=1) ** 3
+    )
 
 
-kappavjp0 = jit(lambda d1gamma, d2gamma, v: vjp(lambda d1g: kappa_pure(d1g, d2gamma), d1gamma)[1](v)[0])
-kappavjp1 = jit(lambda d1gamma, d2gamma, v: vjp(lambda d2g: kappa_pure(d1gamma, d2g), d2gamma)[1](v)[0])
-kappagrad0 = jit(lambda d1gamma, d2gamma: jacfwd(lambda d1g: kappa_pure(d1g, d2gamma))(d1gamma))
-kappagrad1 = jit(lambda d1gamma, d2gamma: jacfwd(lambda d2g: kappa_pure(d1gamma, d2g))(d2gamma))
+kappavjp0 = jit(
+    lambda d1gamma, d2gamma, v: vjp(lambda d1g: kappa_pure(d1g, d2gamma), d1gamma)[1](
+        v
+    )[0]
+)
+kappavjp1 = jit(
+    lambda d1gamma, d2gamma, v: vjp(lambda d2g: kappa_pure(d1gamma, d2g), d2gamma)[1](
+        v
+    )[0]
+)
+kappagrad0 = jit(
+    lambda d1gamma, d2gamma: jacfwd(lambda d1g: kappa_pure(d1g, d2gamma))(d1gamma)
+)
+kappagrad1 = jit(
+    lambda d1gamma, d2gamma: jacfwd(lambda d2g: kappa_pure(d1gamma, d2g))(d2gamma)
+)
 
 
 @jit
@@ -64,12 +133,26 @@ def torsion_pure(d1gamma, d2gamma, d3gamma):
     This function is used in a Python+Jax implementation of formula for torsion.
     """
 
-    return jnp.sum(jnp.cross(d1gamma, d2gamma, axis=1) * d3gamma, axis=1) / jnp.sum(jnp.cross(d1gamma, d2gamma, axis=1)**2, axis=1)
+    return jnp.sum(jnp.cross(d1gamma, d2gamma, axis=1) * d3gamma, axis=1) / jnp.sum(
+        jnp.cross(d1gamma, d2gamma, axis=1) ** 2, axis=1
+    )
 
 
-torsionvjp0 = jit(lambda d1gamma, d2gamma, d3gamma, v: vjp(lambda d1g: torsion_pure(d1g, d2gamma, d3gamma), d1gamma)[1](v)[0])
-torsionvjp1 = jit(lambda d1gamma, d2gamma, d3gamma, v: vjp(lambda d2g: torsion_pure(d1gamma, d2g, d3gamma), d2gamma)[1](v)[0])
-torsionvjp2 = jit(lambda d1gamma, d2gamma, d3gamma, v: vjp(lambda d3g: torsion_pure(d1gamma, d2gamma, d3g), d3gamma)[1](v)[0])
+torsionvjp0 = jit(
+    lambda d1gamma, d2gamma, d3gamma, v: vjp(
+        lambda d1g: torsion_pure(d1g, d2gamma, d3gamma), d1gamma
+    )[1](v)[0]
+)
+torsionvjp1 = jit(
+    lambda d1gamma, d2gamma, d3gamma, v: vjp(
+        lambda d2g: torsion_pure(d1gamma, d2g, d3gamma), d2gamma
+    )[1](v)[0]
+)
+torsionvjp2 = jit(
+    lambda d1gamma, d2gamma, d3gamma, v: vjp(
+        lambda d3g: torsion_pure(d1gamma, d2gamma, d3g), d3gamma
+    )[1](v)[0]
+)
 
 
 @jit
@@ -78,6 +161,7 @@ def frenet_frame_pure(gammadash, gammadashdash, incremental_arclength):
     This function returns the Frenet frame, :math:`(\mathbf{t}, \mathbf{n}, \mathbf{b})`,
     associated to the curve.
     """
+
     def norm(a):
         return jnp.linalg.norm(a, axis=1)
 
@@ -108,6 +192,9 @@ def _curve_uses_full_dofs(curve):
 
 def _install_curve_jax_contract(curve, gamma_pure, *, dof_mode="local"):
     """Attach the standard JAX geometry/VJP contract to a curve instance."""
+    if not _HAS_JAX:
+        return
+
     points = np.asarray(curve.quadpoints)
 
     curve._jax_curve_dof_mode = dof_mode
@@ -138,9 +225,7 @@ def _install_curve_jax_contract(curve, gamma_pure, *, dof_mode="local"):
     curve.dgammadashdash_by_dcoeff_vjp_jax = jit(
         lambda dofs, v: vjp(curve.gammadashdash_jax, dofs)[1](v)[0]
     )
-    curve.dgammadashdashdash_by_dcoeff_jax = jit(
-        jacfwd(curve.gammadashdashdash_jax)
-    )
+    curve.dgammadashdashdash_by_dcoeff_jax = jit(jacfwd(curve.gammadashdashdash_jax))
     curve.dgammadashdashdash_by_dcoeff_vjp_jax = jit(
         lambda dofs, v: vjp(curve.gammadashdashdash_jax, dofs)[1](v)[0]
     )
@@ -212,7 +297,16 @@ class Curve(Optimizable):
         """
         self.invalidate_cache()
 
-    def plot(self, engine="matplotlib", ax=None, show=True, plot_derivative=False, close=False, axis_equal=True, **kwargs):
+    def plot(
+        self,
+        engine="matplotlib",
+        ax=None,
+        show=True,
+        plot_derivative=False,
+        close=False,
+        axis_equal=True,
+        **kwargs,
+    ):
         """
         Plot the curve in 3D using ``matplotlib.pyplot``, ``mayavi``, or ``plotly``.
 
@@ -254,10 +348,19 @@ class Curve(Optimizable):
 
             if ax is None or ax.name != "3d":
                 fig = plt.figure()
-                ax = fig.add_subplot(projection='3d')
+                ax = fig.add_subplot(projection="3d")
             ax.plot(x, y, z, **kwargs)
             if plot_derivative:
-                ax.quiver(x, y, z, 0.1 * xt, 0.1 * yt, 0.1 * zt, arrow_length_ratio=0.1, color="r")
+                ax.quiver(
+                    x,
+                    y,
+                    z,
+                    0.1 * xt,
+                    0.1 * yt,
+                    0.1 * zt,
+                    arrow_length_ratio=0.1,
+                    color="r",
+                )
             if axis_equal:
                 fix_matplotlib_3d(ax)
             if show:
@@ -269,7 +372,7 @@ class Curve(Optimizable):
 
             mlab.plot3d(x, y, z, **kwargs)
             if plot_derivative:
-                mlab.quiver3d(x, y, z, 0.1*xt, 0.1*yt, 0.1*zt)
+                mlab.quiver3d(x, y, z, 0.1 * xt, 0.1 * yt, 0.1 * zt)
             if show:
                 mlab.show()
 
@@ -284,19 +387,16 @@ class Curve(Optimizable):
             kwargs.setdefault("line", go.scatter3d.Line(color=color, width=4))
             if ax is None:
                 ax = go.Figure()
-            ax.add_trace(
-                go.Scatter3d(
-                    x=x, y=y, z=z, mode="lines", **kwargs
-                )
-            )
+            ax.add_trace(go.Scatter3d(x=x, y=y, z=z, mode="lines", **kwargs))
             ax.update_layout(scene_aspectmode="data")
             if show:
                 ax.show()
         else:
-            raise ValueError("Invalid engine option! Please use one of {matplotlib, mayavi, plotly}.")
+            raise ValueError(
+                "Invalid engine option! Please use one of {matplotlib, mayavi, plotly}."
+            )
         return ax
 
-    
     def dgamma_by_dcoeff_vjp(self, v):
         return Derivative({self: self.dgamma_by_dcoeff_vjp_impl(v)})
 
@@ -316,19 +416,19 @@ class Curve(Optimizable):
         .. math::
             v^T \frac{\partial \|\Gamma'\|}{\partial \mathbf{c}}
 
-        where :math:`\|\Gamma'\|` is the incremental arclength, :math:`\Gamma'` is the tangent 
+        where :math:`\|\Gamma'\|` is the incremental arclength, :math:`\Gamma'` is the tangent
         to the curve and :math:`\mathbf{c}` are the curve dofs.
         """
 
         return self.dgammadash_by_dcoeff_vjp(
-            incremental_arclength_vjp(self.gammadash(), v))
+            incremental_arclength_vjp(self.gammadash(), v)
+        )
 
     def kappa_impl(self, kappa):
         r"""
         This function implements the curvature, :math:`\kappa(\varphi)`.
         """
-        kappa[:] = np.asarray(kappa_pure(
-            self.gammadash(), self.gammadashdash()))
+        kappa[:] = np.asarray(kappa_pure(self.gammadash(), self.gammadashdash()))
 
     def dkappa_by_dcoeff_impl(self, dkappa_by_dcoeff):
         r"""
@@ -345,20 +445,39 @@ class Curve(Optimizable):
         dgamma_by_dphidcoeff = self.dgammadash_by_dcoeff()
         dgamma_by_dphidphidcoeff = self.dgammadashdash_by_dcoeff()
 
-        def norm(a): return np.linalg.norm(a, axis=1)
+        def norm(a):
+            return np.linalg.norm(a, axis=1)
+
         numerator = np.cross(dgamma_by_dphi, dgamma_by_dphidphi)
         denominator = self.incremental_arclength()
-        dkappa_by_dcoeff[:, :] = (1 / (denominator**3*norm(numerator)))[:, None] * np.sum(numerator[:, :, None] * (
-            np.cross(dgamma_by_dphidcoeff[:, :, :], dgamma_by_dphidphi[:, :, None], axis=1) +
-            np.cross(dgamma_by_dphi[:, :, None], dgamma_by_dphidphidcoeff[:, :, :], axis=1)), axis=1) \
-            - (norm(numerator) * 3 / denominator**5)[:, None] * np.sum(dgamma_by_dphi[:, :, None] * dgamma_by_dphidcoeff[:, :, :], axis=1)
+        dkappa_by_dcoeff[:, :] = (1 / (denominator**3 * norm(numerator)))[
+            :, None
+        ] * np.sum(
+            numerator[:, :, None]
+            * (
+                np.cross(
+                    dgamma_by_dphidcoeff[:, :, :],
+                    dgamma_by_dphidphi[:, :, None],
+                    axis=1,
+                )
+                + np.cross(
+                    dgamma_by_dphi[:, :, None],
+                    dgamma_by_dphidphidcoeff[:, :, :],
+                    axis=1,
+                )
+            ),
+            axis=1,
+        ) - (norm(numerator) * 3 / denominator**5)[:, None] * np.sum(
+            dgamma_by_dphi[:, :, None] * dgamma_by_dphidcoeff[:, :, :], axis=1
+        )
 
     def torsion_impl(self, torsion):
         r"""
         This function returns the torsion, :math:`\tau`, of a curve.
         """
-        torsion[:] = torsion_pure(self.gammadash(), self.gammadashdash(),
-                                  self.gammadashdashdash())
+        torsion[:] = torsion_pure(
+            self.gammadash(), self.gammadashdash(), self.gammadashdashdash()
+        )
 
     def dtorsion_by_dcoeff_impl(self, dtorsion_by_dcoeff):
         r"""
@@ -376,37 +495,75 @@ class Curve(Optimizable):
         d2gammadcoeff = self.dgammadashdash_by_dcoeff()
         d3gammadcoeff = self.dgammadashdashdash_by_dcoeff()
         dtorsion_by_dcoeff[:, :] = (
-            np.sum(np.cross(d1gamma, d2gamma, axis=1)[:, :, None] * d3gammadcoeff, axis=1)
-            + np.sum((np.cross(d1gammadcoeff, d2gamma[:, :, None], axis=1) + np.cross(d1gamma[:, :, None], d2gammadcoeff, axis=1)) * d3gamma[:, :, None], axis=1)
-        )/np.sum(np.cross(d1gamma, d2gamma, axis=1)**2, axis=1)[:, None]
-        dtorsion_by_dcoeff[:, :] -= np.sum(np.cross(d1gamma, d2gamma, axis=1) * d3gamma, axis=1)[:, None] * np.sum(2 * np.cross(d1gamma, d2gamma, axis=1)[:, :, None] * (np.cross(d1gammadcoeff, d2gamma[:, :, None], axis=1) + np.cross(d1gamma[:, :, None], d2gammadcoeff, axis=1)), axis=1)/np.sum(np.cross(d1gamma, d2gamma, axis=1)**2, axis=1)[:, None]**2
+            np.sum(
+                np.cross(d1gamma, d2gamma, axis=1)[:, :, None] * d3gammadcoeff, axis=1
+            )
+            + np.sum(
+                (
+                    np.cross(d1gammadcoeff, d2gamma[:, :, None], axis=1)
+                    + np.cross(d1gamma[:, :, None], d2gammadcoeff, axis=1)
+                )
+                * d3gamma[:, :, None],
+                axis=1,
+            )
+        ) / np.sum(np.cross(d1gamma, d2gamma, axis=1) ** 2, axis=1)[:, None]
+        dtorsion_by_dcoeff[:, :] -= (
+            np.sum(np.cross(d1gamma, d2gamma, axis=1) * d3gamma, axis=1)[:, None]
+            * np.sum(
+                2
+                * np.cross(d1gamma, d2gamma, axis=1)[:, :, None]
+                * (
+                    np.cross(d1gammadcoeff, d2gamma[:, :, None], axis=1)
+                    + np.cross(d1gamma[:, :, None], d2gammadcoeff, axis=1)
+                ),
+                axis=1,
+            )
+            / np.sum(np.cross(d1gamma, d2gamma, axis=1) ** 2, axis=1)[:, None] ** 2
+        )
 
     def dkappa_by_dcoeff_vjp(self, v):
         r"""
         This function returns the vector Jacobian product
 
         .. math::
-            v^T \frac{\partial \kappa}{\partial \mathbf{c}} 
+            v^T \frac{\partial \kappa}{\partial \mathbf{c}}
 
         where :math:`\mathbf c` are the curve dofs and :math:`\kappa` is the curvature.
         """
 
-        return self.dgammadash_by_dcoeff_vjp(kappavjp0(self.gammadash(), self.gammadashdash(), v)) \
-            + self.dgammadashdash_by_dcoeff_vjp(kappavjp1(self.gammadash(), self.gammadashdash(), v))
+        return self.dgammadash_by_dcoeff_vjp(
+            kappavjp0(self.gammadash(), self.gammadashdash(), v)
+        ) + self.dgammadashdash_by_dcoeff_vjp(
+            kappavjp1(self.gammadash(), self.gammadashdash(), v)
+        )
 
     def dtorsion_by_dcoeff_vjp(self, v):
         r"""
         This function returns the vector Jacobian product
 
         .. math::
-            v^T  \frac{\partial \tau}{\partial \mathbf{c}} 
+            v^T  \frac{\partial \tau}{\partial \mathbf{c}}
 
         where :math:`\mathbf c` are the curve dofs, and :math:`\tau` is the torsion.
         """
 
-        return self.dgammadash_by_dcoeff_vjp(torsionvjp0(self.gammadash(), self.gammadashdash(), self.gammadashdashdash(), v)) \
-            + self.dgammadashdash_by_dcoeff_vjp(torsionvjp1(self.gammadash(), self.gammadashdash(), self.gammadashdashdash(), v)) \
-            + self.dgammadashdashdash_by_dcoeff_vjp(torsionvjp2(self.gammadash(), self.gammadashdash(), self.gammadashdashdash(), v))
+        return (
+            self.dgammadash_by_dcoeff_vjp(
+                torsionvjp0(
+                    self.gammadash(), self.gammadashdash(), self.gammadashdashdash(), v
+                )
+            )
+            + self.dgammadashdash_by_dcoeff_vjp(
+                torsionvjp1(
+                    self.gammadash(), self.gammadashdash(), self.gammadashdashdash(), v
+                )
+            )
+            + self.dgammadashdashdash_by_dcoeff_vjp(
+                torsionvjp2(
+                    self.gammadash(), self.gammadashdash(), self.gammadashdashdash(), v
+                )
+            )
+        )
 
     def frenet_frame(self):
         r"""
@@ -421,20 +578,33 @@ class Curve(Optimizable):
         r"""
         This function returns :math:`\kappa'(\phi)`, where :math:`\kappa` is the curvature.
         """
-        dkappa_by_dphi = np.zeros((len(self.quadpoints), ))
+        dkappa_by_dphi = np.zeros((len(self.quadpoints),))
         dgamma = self.gammadash()
         d2gamma = self.gammadashdash()
         d3gamma = self.gammadashdashdash()
-        def norm(a): return np.linalg.norm(a, axis=1)
-        def inner(a, b): return np.sum(a*b, axis=1)
-        def cross(a, b): return np.cross(a, b, axis=1)
-        dkappa_by_dphi[:] = inner(cross(dgamma, d2gamma), cross(dgamma, d3gamma))/(norm(cross(dgamma, d2gamma)) * norm(dgamma)**3) \
-            - 3 * inner(dgamma, d2gamma) * norm(cross(dgamma, d2gamma))/norm(dgamma)**5
+
+        def norm(a):
+            return np.linalg.norm(a, axis=1)
+
+        def inner(a, b):
+            return np.sum(a * b, axis=1)
+
+        def cross(a, b):
+            return np.cross(a, b, axis=1)
+
+        dkappa_by_dphi[:] = (
+            inner(cross(dgamma, d2gamma), cross(dgamma, d3gamma))
+            / (norm(cross(dgamma, d2gamma)) * norm(dgamma) ** 3)
+            - 3
+            * inner(dgamma, d2gamma)
+            * norm(cross(dgamma, d2gamma))
+            / norm(dgamma) ** 5
+        )
         return dkappa_by_dphi
 
     def dfrenet_frame_by_dcoeff(self):
         r"""
-        This function returns the derivative of the curve's Frenet frame, 
+        This function returns the derivative of the curve's Frenet frame,
 
         .. math::
             \left(\frac{\partial \mathbf{t}}{\partial \mathbf{c}}, \frac{\partial \mathbf{n}}{\partial \mathbf{c}}, \frac{\partial \mathbf{b}}{\partial \mathbf{c}}\right),
@@ -449,38 +619,73 @@ class Curve(Optimizable):
         l = self.incremental_arclength()
         dl_by_dcoeff = self.dincremental_arclength_by_dcoeff()
 
-        def norm(a): return np.linalg.norm(a, axis=1)
-        def inner(a, b): return np.sum(a*b, axis=1)
+        def norm(a):
+            return np.linalg.norm(a, axis=1)
+
+        def inner(a, b):
+            return np.sum(a * b, axis=1)
 
         N = len(self.quadpoints)
-        dt_by_dcoeff, dn_by_dcoeff, db_by_dcoeff = (np.zeros((N, 3, self.num_dofs())), np.zeros((N, 3, self.num_dofs())), np.zeros((N, 3, self.num_dofs())))
+        dt_by_dcoeff, dn_by_dcoeff, db_by_dcoeff = (
+            np.zeros((N, 3, self.num_dofs())),
+            np.zeros((N, 3, self.num_dofs())),
+            np.zeros((N, 3, self.num_dofs())),
+        )
         t, n, b = self.frenet_frame()
 
-        dt_by_dcoeff[:, :, :] = -(dl_by_dcoeff[:, None, :]/l[:, None, None]**2) * dgamma_by_dphi[:, :, None] \
+        dt_by_dcoeff[:, :, :] = (
+            -(dl_by_dcoeff[:, None, :] / l[:, None, None] ** 2)
+            * dgamma_by_dphi[:, :, None]
             + d2gamma_by_dphidcoeff / l[:, None, None]
+        )
 
-        tdash = (1./l[:, None])**2 * (
+        tdash = (1.0 / l[:, None]) ** 2 * (
             l[:, None] * d2gamma_by_dphidphi
-            - (inner(dgamma_by_dphi, d2gamma_by_dphidphi)/l)[:, None] * dgamma_by_dphi
+            - (inner(dgamma_by_dphi, d2gamma_by_dphidphi) / l)[:, None] * dgamma_by_dphi
         )
 
-        dtdash_by_dcoeff = (-2 * dl_by_dcoeff[:, None, :] / l[:, None, None]**3) * (l[:, None] * d2gamma_by_dphidphi - (inner(dgamma_by_dphi, d2gamma_by_dphidphi)/l)[:, None] * dgamma_by_dphi)[:, :, None] \
-            + (1./l[:, None, None])**2 * (
-                dl_by_dcoeff[:, None, :] * d2gamma_by_dphidphi[:, :, None] + l[:, None, None] * d3gamma_by_dphidphidcoeff
-                - (inner(d2gamma_by_dphidcoeff, d2gamma_by_dphidphi[:, :, None])[:, None, :]/l[:, None, None]) * dgamma_by_dphi[:, :, None]
-                - (inner(dgamma_by_dphi[:, :, None], d3gamma_by_dphidphidcoeff)[:, None, :]/l[:, None, None]) * dgamma_by_dphi[:, :, None]
-                + (inner(dgamma_by_dphi, d2gamma_by_dphidphi)[:, None, None] * dl_by_dcoeff[:, None, :]/l[:, None, None]**2) * dgamma_by_dphi[:, :, None]
-                - (inner(dgamma_by_dphi, d2gamma_by_dphidphi)/l)[:, None, None] * d2gamma_by_dphidcoeff
+        dtdash_by_dcoeff = (-2 * dl_by_dcoeff[:, None, :] / l[:, None, None] ** 3) * (
+            l[:, None] * d2gamma_by_dphidphi
+            - (inner(dgamma_by_dphi, d2gamma_by_dphidphi) / l)[:, None] * dgamma_by_dphi
+        )[:, :, None] + (1.0 / l[:, None, None]) ** 2 * (
+            dl_by_dcoeff[:, None, :] * d2gamma_by_dphidphi[:, :, None]
+            + l[:, None, None] * d3gamma_by_dphidphidcoeff
+            - (
+                inner(d2gamma_by_dphidcoeff, d2gamma_by_dphidphi[:, :, None])[
+                    :, None, :
+                ]
+                / l[:, None, None]
+            )
+            * dgamma_by_dphi[:, :, None]
+            - (
+                inner(dgamma_by_dphi[:, :, None], d3gamma_by_dphidphidcoeff)[:, None, :]
+                / l[:, None, None]
+            )
+            * dgamma_by_dphi[:, :, None]
+            + (
+                inner(dgamma_by_dphi, d2gamma_by_dphidphi)[:, None, None]
+                * dl_by_dcoeff[:, None, :]
+                / l[:, None, None] ** 2
+            )
+            * dgamma_by_dphi[:, :, None]
+            - (inner(dgamma_by_dphi, d2gamma_by_dphidphi) / l)[:, None, None]
+            * d2gamma_by_dphidcoeff
         )
-        dn_by_dcoeff[:, :, :] = (1./norm(tdash))[:, None, None] * dtdash_by_dcoeff \
-            - (inner(tdash[:, :, None], dtdash_by_dcoeff)[:, None, :]/inner(tdash, tdash)[:, None, None]**1.5) * tdash[:, :, None]
+        dn_by_dcoeff[:, :, :] = (1.0 / norm(tdash))[
+            :, None, None
+        ] * dtdash_by_dcoeff - (
+            inner(tdash[:, :, None], dtdash_by_dcoeff)[:, None, :]
+            / inner(tdash, tdash)[:, None, None] ** 1.5
+        ) * tdash[:, :, None]
 
-        db_by_dcoeff[:, :, :] = np.cross(dt_by_dcoeff, n[:, :, None], axis=1) + np.cross(t[:, :, None], dn_by_dcoeff, axis=1)
+        db_by_dcoeff[:, :, :] = np.cross(
+            dt_by_dcoeff, n[:, :, None], axis=1
+        ) + np.cross(t[:, :, None], dn_by_dcoeff, axis=1)
         return dt_by_dcoeff, dn_by_dcoeff, db_by_dcoeff
 
     def dkappadash_by_dcoeff(self):
         r"""
-        This function returns 
+        This function returns
 
         .. math::
             \frac{\partial \kappa'(\phi)}{\partial \mathbf{c}}.
@@ -493,9 +698,15 @@ class Curve(Optimizable):
         d2gamma = self.gammadashdash()
         d3gamma = self.gammadashdashdash()
 
-        def norm(a): return np.linalg.norm(a, axis=1)
-        def inner(a, b): return np.sum(a*b, axis=1)
-        def cross(a, b): return np.cross(a, b, axis=1)
+        def norm(a):
+            return np.linalg.norm(a, axis=1)
+
+        def inner(a, b):
+            return np.sum(a * b, axis=1)
+
+        def cross(a, b):
+            return np.cross(a, b, axis=1)
+
         d1_dot_d2 = inner(dgamma, d2gamma)
         d1_x_d2 = cross(dgamma, d2gamma)
         d1_x_d3 = cross(dgamma, d3gamma)
@@ -518,19 +729,25 @@ class Curve(Optimizable):
             d1_x_d3coeff = cross(dgamma, d3gamma_dcoeff)
 
             dkappadash_by_dcoeff[:, i] = (
-                +inner(d1coeff_x_d2 + d1_x_d2coeff, d1_x_d3)
-                + inner(d1_x_d2, d1coeff_x_d3 + d1_x_d3coeff)
-            )/(norm_d1_x_d2 * normdgamma**3) \
-                - inner(d1_x_d2, d1_x_d3) * (
-                    (
-                        inner(d1coeff_x_d2 + d1_x_d2coeff, d1_x_d2)/(norm_d1_x_d2**3 * normdgamma**3)
-                        + 3 * inner(dgamma, dgamma_dcoeff)/(norm_d1_x_d2 * normdgamma**5)
-                    )
-            ) \
-                - 3 * (
-                    + (d1coeff_dot_d2 + d1_dot_d2coeff) * norm_d1_x_d2/normdgamma**5
-                    + d1_dot_d2 * inner(d1coeff_x_d2 + d1_x_d2coeff, d1_x_d2)/(norm_d1_x_d2 * normdgamma**5)
-                    - 5 * d1_dot_d2 * norm_d1_x_d2 * d1_dot_d1coeff/normdgamma**7
+                (
+                    +inner(d1coeff_x_d2 + d1_x_d2coeff, d1_x_d3)
+                    + inner(d1_x_d2, d1coeff_x_d3 + d1_x_d3coeff)
+                )
+                / (norm_d1_x_d2 * normdgamma**3)
+                - inner(d1_x_d2, d1_x_d3)
+                * (
+                    inner(d1coeff_x_d2 + d1_x_d2coeff, d1_x_d2)
+                    / (norm_d1_x_d2**3 * normdgamma**3)
+                    + 3 * inner(dgamma, dgamma_dcoeff) / (norm_d1_x_d2 * normdgamma**5)
+                )
+                - 3
+                * (
+                    +(d1coeff_dot_d2 + d1_dot_d2coeff) * norm_d1_x_d2 / normdgamma**5
+                    + d1_dot_d2
+                    * inner(d1coeff_x_d2 + d1_x_d2coeff, d1_x_d2)
+                    / (norm_d1_x_d2 * normdgamma**5)
+                    - 5 * d1_dot_d2 * norm_d1_x_d2 * d1_dot_d1coeff / normdgamma**7
+                )
             )
         return dkappadash_by_dcoeff
 
@@ -543,6 +760,8 @@ class Curve(Optimizable):
 
 class JaxCurve(sopp.Curve, Curve):
     def __init__(self, quadpoints, gamma_pure, **kwargs):
+        _require_jax(type(self).__name__)
+
         if isinstance(quadpoints, np.ndarray):
             quadpoints = list(quadpoints)
         sopp.Curve.__init__(self, quadpoints)
@@ -557,26 +776,56 @@ class JaxCurve(sopp.Curve, Curve):
         self.gamma_jax = jit(lambda dofs: self.gamma_pure(dofs, points))
         self.gamma_impl_jax = jit(lambda dofs, p: self.gamma_pure(dofs, p))
         self.dgamma_by_dcoeff_jax = jit(jacfwd(self.gamma_jax))
-        self.dgamma_by_dcoeff_vjp_jax = jit(lambda x, v: vjp(self.gamma_jax, x)[1](v)[0])
+        self.dgamma_by_dcoeff_vjp_jax = jit(
+            lambda x, v: vjp(self.gamma_jax, x)[1](v)[0]
+        )
 
-        self.gammadash_pure = lambda x, q: jvp(lambda p: self.gamma_pure(x, p), (q,), (ones,))[1]
+        self.gammadash_pure = lambda x, q: jvp(
+            lambda p: self.gamma_pure(x, p), (q,), (ones,)
+        )[1]
         self.gammadash_jax = jit(lambda x: self.gammadash_pure(x, points))
         self.dgammadash_by_dcoeff_jax = jit(jacfwd(self.gammadash_jax))
-        self.dgammadash_by_dcoeff_vjp_jax = jit(lambda x, v: vjp(self.gammadash_jax, x)[1](v)[0])
+        self.dgammadash_by_dcoeff_vjp_jax = jit(
+            lambda x, v: vjp(self.gammadash_jax, x)[1](v)[0]
+        )
 
-        self.gammadashdash_pure = lambda x, q: jvp(lambda p: self.gammadash_pure(x, p), (q,), (ones,))[1]
+        self.gammadashdash_pure = lambda x, q: jvp(
+            lambda p: self.gammadash_pure(x, p), (q,), (ones,)
+        )[1]
         self.gammadashdash_jax = jit(lambda x: self.gammadashdash_pure(x, points))
         self.dgammadashdash_by_dcoeff_jax = jit(jacfwd(self.gammadashdash_jax))
-        self.dgammadashdash_by_dcoeff_vjp_jax = jit(lambda x, v: vjp(self.gammadashdash_jax, x)[1](v)[0])
+        self.dgammadashdash_by_dcoeff_vjp_jax = jit(
+            lambda x, v: vjp(self.gammadashdash_jax, x)[1](v)[0]
+        )
 
-        self.gammadashdashdash_pure = lambda x, q: jvp(lambda p: self.gammadashdash_pure(x, p), (q,), (ones,))[1]
-        self.gammadashdashdash_jax = jit(lambda x: self.gammadashdashdash_pure(x, points))
+        self.gammadashdashdash_pure = lambda x, q: jvp(
+            lambda p: self.gammadashdash_pure(x, p), (q,), (ones,)
+        )[1]
+        self.gammadashdashdash_jax = jit(
+            lambda x: self.gammadashdashdash_pure(x, points)
+        )
         self.dgammadashdashdash_by_dcoeff_jax = jit(jacfwd(self.gammadashdashdash_jax))
-        self.dgammadashdashdash_by_dcoeff_vjp_jax = jit(lambda x, v: vjp(self.gammadashdashdash_jax, x)[1](v)[0])
+        self.dgammadashdashdash_by_dcoeff_vjp_jax = jit(
+            lambda x, v: vjp(self.gammadashdashdash_jax, x)[1](v)[0]
+        )
 
-        self.dkappa_by_dcoeff_vjp_jax = jit(lambda x, v: vjp(lambda d: kappa_pure(self.gammadash_jax(d), self.gammadashdash_jax(d)), x)[1](v)[0])
+        self.dkappa_by_dcoeff_vjp_jax = jit(
+            lambda x, v: vjp(
+                lambda d: kappa_pure(self.gammadash_jax(d), self.gammadashdash_jax(d)),
+                x,
+            )[1](v)[0]
+        )
 
-        self.dtorsion_by_dcoeff_vjp_jax = jit(lambda x, v: vjp(lambda d: torsion_pure(self.gammadash_jax(d), self.gammadashdash_jax(d), self.gammadashdashdash_jax(d)), x)[1](v)[0])
+        self.dtorsion_by_dcoeff_vjp_jax = jit(
+            lambda x, v: vjp(
+                lambda d: torsion_pure(
+                    self.gammadash_jax(d),
+                    self.gammadashdash_jax(d),
+                    self.gammadashdashdash_jax(d),
+                ),
+                x,
+            )[1](v)[0]
+        )
 
     def set_dofs(self, dofs):
         self.local_x = dofs
@@ -591,7 +840,7 @@ class JaxCurve(sopp.Curve, Curve):
 
     def dgamma_by_dcoeff_impl(self, dgamma_by_dcoeff):
         r"""
-        This function returns 
+        This function returns
 
         .. math::
             \frac{\partial \Gamma}{\partial \mathbf c}
@@ -606,7 +855,7 @@ class JaxCurve(sopp.Curve, Curve):
         This function returns the vector Jacobian product
 
         .. math::
-            v^T  \frac{\partial \Gamma}{\partial \mathbf c} 
+            v^T  \frac{\partial \Gamma}{\partial \mathbf c}
 
         where :math:`\mathbf{c}` are the curve dofs, and :math:`\Gamma` are the x, y, z coordinates
         of the curve.
@@ -624,7 +873,7 @@ class JaxCurve(sopp.Curve, Curve):
 
     def dgammadash_by_dcoeff_impl(self, dgammadash_by_dcoeff):
         r"""
-        This function returns 
+        This function returns
 
         .. math::
             \frac{\partial \Gamma'}{\partial \mathbf c}
@@ -637,7 +886,7 @@ class JaxCurve(sopp.Curve, Curve):
 
     def dgammadash_by_dcoeff_vjp_impl(self, v):
         r"""
-        This function returns 
+        This function returns
 
         .. math::
             \mathbf v^T \frac{\partial \Gamma'}{\partial \mathbf c}
@@ -658,7 +907,7 @@ class JaxCurve(sopp.Curve, Curve):
 
     def dgammadashdash_by_dcoeff_impl(self, dgammadashdash_by_dcoeff):
         r"""
-        This function returns 
+        This function returns
 
         .. math::
             \frac{\partial \Gamma''}{\partial \mathbf c}
@@ -667,14 +916,16 @@ class JaxCurve(sopp.Curve, Curve):
         of the curve.
         """
 
-        dgammadashdash_by_dcoeff[:, :, :] = self.dgammadashdash_by_dcoeff_jax(self.get_dofs())
+        dgammadashdash_by_dcoeff[:, :, :] = self.dgammadashdash_by_dcoeff_jax(
+            self.get_dofs()
+        )
 
     def dgammadashdash_by_dcoeff_vjp_impl(self, v):
         r"""
         This function returns the vector Jacobian product
 
         .. math::
-            v^T  \frac{\partial \Gamma''}{\partial \mathbf c} 
+            v^T  \frac{\partial \Gamma''}{\partial \mathbf c}
 
         where :math:`\mathbf{c}` are the curve dofs, and :math:`\Gamma` are the x, y, z coordinates
         of the curve.
@@ -693,7 +944,7 @@ class JaxCurve(sopp.Curve, Curve):
 
     def dgammadashdashdash_by_dcoeff_impl(self, dgammadashdashdash_by_dcoeff):
         r"""
-        This function returns 
+        This function returns
 
         .. math::
             \frac{\partial \Gamma'''}{\partial \mathbf c}
@@ -702,14 +953,16 @@ class JaxCurve(sopp.Curve, Curve):
         of the curve.
         """
 
-        dgammadashdashdash_by_dcoeff[:, :, :] = self.dgammadashdashdash_by_dcoeff_jax(self.get_dofs())
+        dgammadashdashdash_by_dcoeff[:, :, :] = self.dgammadashdashdash_by_dcoeff_jax(
+            self.get_dofs()
+        )
 
     def dgammadashdashdash_by_dcoeff_vjp_impl(self, v):
         r"""
         This function returns the vector Jacobian product
 
         .. math::
-            v^T  \frac{\partial \Gamma'''}{\partial \mathbf c} 
+            v^T  \frac{\partial \Gamma'''}{\partial \mathbf c}
 
         where :math:`\mathbf{c}` are the curve dofs, and :math:`\Gamma` are the x, y, z coordinates
         of the curve.
@@ -735,7 +988,7 @@ class JaxCurve(sopp.Curve, Curve):
         This function returns the vector Jacobian product
 
         .. math::
-            v^T \frac{\partial \tau}{\partial \mathbf{c}} 
+            v^T \frac{\partial \tau}{\partial \mathbf{c}}
 
         where :math:`\mathbf{c}` are the curve dofs, and :math:`\tau` is the torsion.
 
@@ -757,14 +1010,10 @@ class RotatedCurve(sopp.Curve, Curve):
         Curve.__init__(self, depends_on=[curve])
         self._phi = phi
         self.rotmat = np.asarray(
-            [[cos(phi), -sin(phi), 0],
-             [sin(phi), cos(phi), 0],
-             [0, 0, 1]]).T
+            [[cos(phi), -sin(phi), 0], [sin(phi), cos(phi), 0], [0, 0, 1]]
+        ).T
         if flip:
-            self.rotmat = self.rotmat @ np.asarray(
-                [[1, 0, 0],
-                 [0, -1, 0],
-                 [0, 0, -1]])
+            self.rotmat = self.rotmat @ np.asarray([[1, 0, 0], [0, -1, 0], [0, 0, -1]])
         self.rotmatT = self.rotmat.T.copy()
 
     def change_curve(self, new_curve):
@@ -800,8 +1049,10 @@ class RotatedCurve(sopp.Curve, Curve):
 
         """
 
-        if len(quadpoints) == len(self.curve.quadpoints) \
-                and np.sum((quadpoints-self.curve.quadpoints)**2) < 1e-15:
+        if (
+            len(quadpoints) == len(self.curve.quadpoints)
+            and np.sum((quadpoints - self.curve.quadpoints) ** 2) < 1e-15
+        ):
             gamma[:] = self.curve.gamma() @ self.rotmat
         else:
             self.curve.gamma_impl(gamma, quadpoints)
@@ -850,7 +1101,7 @@ class RotatedCurve(sopp.Curve, Curve):
 
     def dgammadash_by_dcoeff_impl(self, dgammadash_by_dcoeff):
         r"""
-        This function returns 
+        This function returns
 
         .. math::
             \frac{\partial \Gamma'}{\partial \mathbf c}
@@ -863,7 +1114,7 @@ class RotatedCurve(sopp.Curve, Curve):
 
     def dgammadashdash_by_dcoeff_impl(self, dgammadashdash_by_dcoeff):
         r"""
-        This function returns 
+        This function returns
 
         .. math::
             \frac{\partial \Gamma''}{\partial \mathbf c}
@@ -873,11 +1124,13 @@ class RotatedCurve(sopp.Curve, Curve):
 
         """
 
-        dgammadashdash_by_dcoeff[:] = self.rotmatT @ self.curve.dgammadashdash_by_dcoeff()
+        dgammadashdash_by_dcoeff[:] = (
+            self.rotmatT @ self.curve.dgammadashdash_by_dcoeff()
+        )
 
     def dgammadashdashdash_by_dcoeff_impl(self, dgammadashdashdash_by_dcoeff):
         r"""
-        This function returns 
+        This function returns
 
         .. math::
             \frac{\partial \Gamma'''}{\partial \mathbf c}
@@ -887,14 +1140,16 @@ class RotatedCurve(sopp.Curve, Curve):
 
         """
 
-        dgammadashdashdash_by_dcoeff[:] = self.rotmatT @ self.curve.dgammadashdashdash_by_dcoeff()
+        dgammadashdashdash_by_dcoeff[:] = (
+            self.rotmatT @ self.curve.dgammadashdashdash_by_dcoeff()
+        )
 
     def dgamma_by_dcoeff_vjp(self, v):
         r"""
         This function returns the vector Jacobian product
 
         .. math::
-            v^T \frac{\partial \Gamma}{\partial \mathbf c} 
+            v^T \frac{\partial \Gamma}{\partial \mathbf c}
 
         where :math:`\mathbf{c}` are the curve dofs, and :math:`\Gamma` are the x, y, z
         coordinates of the curve.
@@ -908,7 +1163,7 @@ class RotatedCurve(sopp.Curve, Curve):
         This function returns the vector Jacobian product
 
         .. math::
-            v^T \frac{\partial \Gamma'}{\partial \mathbf c} 
+            v^T \frac{\partial \Gamma'}{\partial \mathbf c}
 
         where :math:`\mathbf{c}` are the curve dofs, and :math:`\Gamma` are the x, y, z
         coordinates of the curve.
@@ -922,7 +1177,7 @@ class RotatedCurve(sopp.Curve, Curve):
         This function returns the vector Jacobian product
 
         .. math::
-            v^T \frac{\partial \Gamma''}{\partial \mathbf c} 
+            v^T \frac{\partial \Gamma''}{\partial \mathbf c}
 
         where :math:`\mathbf{c}` are the curve dofs, and :math:`\Gamma` are the x, y, z
         coordinates of the curve.
@@ -937,7 +1192,7 @@ class RotatedCurve(sopp.Curve, Curve):
         This function returns the vector Jacobian product
 
         .. math::
-            v^T \frac{\partial \Gamma'''}{\partial \mathbf c} 
+            v^T \frac{\partial \Gamma'''}{\partial \mathbf c}
 
         where :math:`\mathbf{c}` are the curve dofs, and :math:`\Gamma` are the x, y, z
         coordinates of the curve.
@@ -972,14 +1227,14 @@ def curves_to_vtk(curves, filename, close=False, extra_data=None):
         x = np.concatenate([wrap(c.gamma()[:, 0]) for c in curves])
         y = np.concatenate([wrap(c.gamma()[:, 1]) for c in curves])
         z = np.concatenate([wrap(c.gamma()[:, 2]) for c in curves])
-        ppl = np.asarray([c.gamma().shape[0]+1 for c in curves])
+        ppl = np.asarray([c.gamma().shape[0] + 1 for c in curves])
     else:
         x = np.concatenate([c.gamma()[:, 0] for c in curves])
         y = np.concatenate([c.gamma()[:, 1] for c in curves])
         z = np.concatenate([c.gamma()[:, 2] for c in curves])
         ppl = np.asarray([c.gamma().shape[0] for c in curves])
-    data = np.concatenate([i*np.ones((ppl[i], )) for i in range(len(curves))])
-    pointData = {'idx': data}
+    data = np.concatenate([i * np.ones((ppl[i],)) for i in range(len(curves))])
+    pointData = {"idx": data}
 
     if extra_data is not None:
         pointData = {**pointData, **extra_data}
@@ -994,7 +1249,7 @@ def _setup_uniform_grid_in_bounding_box(s_outer, Nx, Ny, Nz, Nmin_factor=2.01):
     import warnings
 
     if Nmin_factor <= 2.0:
-        warnings.warn('Nmin_factor should be greater than 2.0 to avoid coil overlap.')
+        warnings.warn("Nmin_factor should be greater than 2.0 to avoid coil overlap.")
 
     nfp = s_outer.nfp
     xyz_outer = s_outer.gamma().reshape(-1, 3)
@@ -1023,15 +1278,21 @@ def _setup_uniform_grid_in_bounding_box(s_outer, Nx, Ny, Nz, Nmin_factor=2.01):
     dz = Z[1] - Z[0]
     R = min(dx, min(dy, dz)) / Nmin_factor
 
-    X, Y, Z = np.meshgrid(X, Y, Z, indexing='ij')
-    xyz_uniform = np.transpose(np.array([X, Y, Z]), [1, 2, 3, 0]).reshape(Nx * Ny * Nz, 3)
+    X, Y, Z = np.meshgrid(X, Y, Z, indexing="ij")
+    xyz_uniform = np.transpose(np.array([X, Y, Z]), [1, 2, 3, 0]).reshape(
+        Nx * Ny * Nz, 3
+    )
 
     phi0 = np.pi / nfp if s_outer.stellsym else 2 * np.pi / nfp
     nt = 100
     t = np.linspace(0, 2 * np.pi, nt)
     circle_xy = np.zeros((nt, Nx * Ny * Nz, 2))
-    circle_xy[:, :, 0] = R * np.outer(np.cos(t), np.ones(Nx * Ny * Nz)) + np.outer(np.ones(nt), xyz_uniform[:, 0])
-    circle_xy[:, :, 1] = R * np.outer(np.sin(t), np.ones(Nx * Ny * Nz)) + np.outer(np.ones(nt), xyz_uniform[:, 1])
+    circle_xy[:, :, 0] = R * np.outer(np.cos(t), np.ones(Nx * Ny * Nz)) + np.outer(
+        np.ones(nt), xyz_uniform[:, 0]
+    )
+    circle_xy[:, :, 1] = R * np.outer(np.sin(t), np.ones(Nx * Ny * Nz)) + np.outer(
+        np.ones(nt), xyz_uniform[:, 1]
+    )
 
     phi = np.arctan2(circle_xy[:, :, 1], circle_xy[:, :, 0])
     remove_inds = np.logical_or(phi >= phi0, phi <= 0)
@@ -1040,8 +1301,16 @@ def _setup_uniform_grid_in_bounding_box(s_outer, Nx, Ny, Nz, Nmin_factor=2.01):
 
 
 def create_planar_curves_between_two_toroidal_surfaces(
-    s, s_inner, s_outer, Nx=10, Ny=10, Nz=10, order=1,
-    use_jax_curve=False, numquadpoints=None, Nmin_factor=2.01,
+    s,
+    s_inner,
+    s_outer,
+    Nx=10,
+    Ny=10,
+    Nz=10,
+    order=1,
+    use_jax_curve=False,
+    numquadpoints=None,
+    Nmin_factor=2.01,
 ):
     """
     Create planar curves initialized on a filtered Cartesian grid between two toroidal surfaces.
@@ -1087,7 +1356,7 @@ def create_planar_curves_between_two_toroidal_surfaces(
         dofs[2 * order + 2] = salpha2 * cdelta2
         dofs[2 * order + 3] = calpha2 * sdelta2
         dofs[2 * order + 4] = -salpha2 * sdelta2
-        dofs[2 * order + 5:2 * order + 8] = grid_xyz[ic, :]
+        dofs[2 * order + 5 : 2 * order + 8] = grid_xyz[ic, :]
         curves[ic].set_dofs(dofs)
         curves[ic].x = curves[ic].x
 
@@ -1095,7 +1364,16 @@ def create_planar_curves_between_two_toroidal_surfaces(
     return curves, all_curves
 
 
-def create_equally_spaced_curves(ncurves, nfp, stellsym, R0=1.0, R1=0.5, order=6, numquadpoints=None, use_jax_curve=False):
+def create_equally_spaced_curves(
+    ncurves,
+    nfp,
+    stellsym,
+    R0=1.0,
+    R1=0.5,
+    order=6,
+    numquadpoints=None,
+    use_jax_curve=False,
+):
     """
     Create ``ncurves`` curves of type
     :obj:`~simsopt.geo.curvexyzfourier.CurveXYZFourier` of order
@@ -1116,14 +1394,15 @@ def create_equally_spaced_curves(ncurves, nfp, stellsym, R0=1.0, R1=0.5, order=6
         numquadpoints = 15 * order
     curves = []
     from simsopt.geo.curvexyzfourier import CurveXYZFourier, JaxCurveXYZFourier
+
     curvefunc = JaxCurveXYZFourier if use_jax_curve else CurveXYZFourier
     for i in range(ncurves):
         curve = curvefunc(numquadpoints, order)
-        angle = (i+0.5)*(2*np.pi)/((1+int(stellsym))*nfp*ncurves)
-        curve.set("xc(0)", cos(angle)*R0)
-        curve.set("xc(1)", cos(angle)*R1)
-        curve.set("yc(0)", sin(angle)*R0)
-        curve.set("yc(1)", sin(angle)*R1)
+        angle = (i + 0.5) * (2 * np.pi) / ((1 + int(stellsym)) * nfp * ncurves)
+        curve.set("xc(0)", cos(angle) * R0)
+        curve.set("xc(1)", cos(angle) * R1)
+        curve.set("yc(0)", sin(angle) * R0)
+        curve.set("yc(1)", sin(angle) * R1)
         # The the next line, the minus sign is for consistency with
         # Vmec.external_current(), so the coils create a toroidal field of the
         # proper sign and free-boundary equilibrium works following stage-2 optimization.
@@ -1132,29 +1411,42 @@ def create_equally_spaced_curves(ncurves, nfp, stellsym, R0=1.0, R1=0.5, order=6
         curves.append(curve)
     return curves
 
-def create_equally_spaced_oriented_curves( ncurves, nfp, R0, R1, Z0, order, numquadpoints=None ):
+
+def create_equally_spaced_oriented_curves(
+    ncurves, nfp, R0, R1, Z0, order, numquadpoints=None
+):
     if numquadpoints is None:
         numquadpoints = 15 * order
 
     curves = []
     from .orientedcurve import OrientedCurveXYZFourier
 
-    phi = np.linspace(0,np.pi/nfp,ncurves,endpoint=False)
-    dphi = np.pi/nfp * 1/ncurves
-    phi = phi + dphi/2
+    phi = np.linspace(0, np.pi / nfp, ncurves, endpoint=False)
+    dphi = np.pi / nfp * 1 / ncurves
+    phi = phi + dphi / 2
     for ii in range(ncurves):
-        c = OrientedCurveXYZFourier( numquadpoints, order )
-        c.set('xc(1)',R1)
-        c.set('zs(1)',R1)
-        c.set('x0', R0*np.cos(phi[ii]) )
-        c.set('y0', R0*np.sin(phi[ii]) )
-        c.set('z0', Z0)
-        c.set('yaw', np.pi/2 - phi[ii])
-        curves.append( c )
+        c = OrientedCurveXYZFourier(numquadpoints, order)
+        c.set("xc(1)", R1)
+        c.set("zs(1)", R1)
+        c.set("x0", R0 * np.cos(phi[ii]))
+        c.set("y0", R0 * np.sin(phi[ii]))
+        c.set("z0", Z0)
+        c.set("yaw", np.pi / 2 - phi[ii])
+        curves.append(c)
 
     return curves
 
-def create_equally_spaced_planar_curves(ncurves, nfp, stellsym, R0=1.0, R1=0.5, order=6, numquadpoints=None, use_jax_curve=False):
+
+def create_equally_spaced_planar_curves(
+    ncurves,
+    nfp,
+    stellsym,
+    R0=1.0,
+    R1=0.5,
+    order=6,
+    numquadpoints=None,
+    use_jax_curve=False,
+):
     """
     Create ``ncurves`` curves of type
     :obj:`~simsopt.geo.curveplanarfourier.CurvePlanarFourier` of order
@@ -1167,12 +1459,13 @@ def create_equally_spaced_planar_curves(ncurves, nfp, stellsym, R0=1.0, R1=0.5, 
         numquadpoints = 15 * order
     curves = []
     from simsopt.geo.curveplanarfourier import CurvePlanarFourier, JaxCurvePlanarFourier
+
     curvefunc = JaxCurvePlanarFourier if use_jax_curve else CurvePlanarFourier
     for k in range(ncurves):
-        angle = (k+0.5)*(2*np.pi) / ((1+int(stellsym))*nfp*ncurves)
+        angle = (k + 0.5) * (2 * np.pi) / ((1 + int(stellsym)) * nfp * ncurves)
         curve = curvefunc(numquadpoints, order)
 
-        rcCoeffs = np.zeros(order+1)
+        rcCoeffs = np.zeros(order + 1)
         rcCoeffs[0] = R1
         rsCoeffs = np.zeros(order)
         center = [R0 * cos(angle), R0 * sin(angle), 0]
@@ -1198,9 +1491,9 @@ def create_equally_spaced_planar_curves(ncurves, nfp, stellsym, R0=1.0, R1=0.5, 
     return curves
 
 
-def gamma_2d(modes, qpts, order, G:int=0, H:int=0):
+def gamma_2d(modes, qpts, order, G: int = 0, H: int = 0):
     """Given some dofs, return curve position in 2D cartesian coordinate
-    
+
     Args:
      - modes: Input dofs. Array of size 2*(2*order+1)
      - qpts: quadrature points. Array of floats from 0 to 1, of size N.
@@ -1211,23 +1504,23 @@ def gamma_2d(modes, qpts, order, G:int=0, H:int=0):
      - theta: Array of size N x 1.
     """
     # Unpack dofs
-    phic = modes[:order+1]
-    phis = modes[order+1:2*order+1]
-    thetac   = modes[2*order+1:3*order+2]
-    thetas   = modes[3*order+2:]
+    phic = modes[: order + 1]
+    phis = modes[order + 1 : 2 * order + 1]
+    thetac = modes[2 * order + 1 : 3 * order + 2]
+    thetas = modes[3 * order + 2 :]
 
     # Construct theta and phi arrays
     theta = jnp.zeros((qpts.size,))
     phi = jnp.zeros((qpts.size,))
 
-    ll = qpts*2.0*jnp.pi
-    for ii in range(order+1):
-        theta = theta + thetac[ii] * jnp.cos(ii*ll)
-        phi   = phi   + phic[ii]   * jnp.cos(ii*ll)
+    ll = qpts * 2.0 * jnp.pi
+    for ii in range(order + 1):
+        theta = theta + thetac[ii] * jnp.cos(ii * ll)
+        phi = phi + phic[ii] * jnp.cos(ii * ll)
 
     for ii in range(order):
-        theta = theta + thetas[ii] * jnp.sin((ii+1)*ll)
-        phi   = phi   + phis[ii]   * jnp.sin((ii+1)*ll)
+        theta = theta + thetas[ii] * jnp.sin((ii + 1) * ll)
+        phi = phi + phis[ii] * jnp.sin((ii + 1) * ll)
 
     # Add secular terms
     theta = theta + G * qpts
@@ -1236,11 +1529,13 @@ def gamma_2d(modes, qpts, order, G:int=0, H:int=0):
     return phi, theta
 
 
-def gamma_curve_on_surface(curve_dofs, qpts, order, G, H, surf_dofs, surf_type, mpol, ntor, nfp, stellsym=True):
+def gamma_curve_on_surface(
+    curve_dofs, qpts, order, G, H, surf_dofs, surf_type, mpol, ntor, nfp, stellsym=True
+):
     """Returns position in 3D space of a curve lying on a surface
 
     Args:
-     - gamma2d: Curve position in 2D space. 
+     - gamma2d: Curve position in 2D space.
      - surf_dofs: Surface dofs. The surface is assumed to be a surfaceRZFourier object.
      - qpts: Quadrature points. Array of floats of size N, values should be between 0 and 1.
      - mpol: Max poloidal mode number of surface
@@ -1251,20 +1546,25 @@ def gamma_curve_on_surface(curve_dofs, qpts, order, G, H, surf_dofs, surf_type, 
      - gamma: Position in 3D space. Array of size N x 3.
     """
     phi, theta = gamma_2d(curve_dofs, qpts, order, G, H)
-    
-    if surf_type=='RZ_Fourier':
+
+    if surf_type == "RZ_Fourier":
         gamma = surfrz_gamma_lin(phi, theta, mpol, ntor, surf_dofs, nfp, stellsym)
-    elif surf_type=='XYZ_Tensor_Fourier':
-        gamma = surfxyztensor_gamma_lin(phi, theta, mpol, ntor, surf_dofs, nfp, stellsym)
+    elif surf_type == "XYZ_Tensor_Fourier":
+        gamma = surfxyztensor_gamma_lin(
+            phi, theta, mpol, ntor, surf_dofs, nfp, stellsym
+        )
     elif surf_type is None:
         return phi, theta
 
     return gamma
 
-def surfrz_gamma_lin(quadpoints_phi, quadpoints_theta, mpol, ntor, surf_dofs, nfp, stellsym):
+
+def surfrz_gamma_lin(
+    quadpoints_phi, quadpoints_theta, mpol, ntor, surf_dofs, nfp, stellsym
+):
     npts = quadpoints_phi.size
     th = quadpoints_theta * 2.0 * jnp.pi
-    ph = quadpoints_phi   * 2.0 * jnp.pi
+    ph = quadpoints_phi * 2.0 * jnp.pi
 
     # Construct curve on surface
     r = jnp.zeros((npts,))
@@ -1296,77 +1596,82 @@ def surfrz_gamma_lin(quadpoints_phi, quadpoints_theta, mpol, ntor, surf_dofs, nf
             if not stellsym:
                 r = r + surf_dofs[rs_offset + sin_counter] * jnp.sin(angle)
             z = z + surf_dofs[zs_offset + sin_counter] * jnp.sin(angle)
-            
+
     gamma = jnp.zeros((quadpoints_phi.size, 3))
-    gamma = gamma.at[:,0].set( r * jnp.cos( ph ) )
-    gamma = gamma.at[:,1].set( r * jnp.sin( ph ) )
-    gamma = gamma.at[:,2].set( z                 )
+    gamma = gamma.at[:, 0].set(r * jnp.cos(ph))
+    gamma = gamma.at[:, 1].set(r * jnp.sin(ph))
+    gamma = gamma.at[:, 2].set(z)
 
     return gamma
+
 
 def skip(ii, m, n, stellsym, mpol, ntor):
     if not stellsym:
         pass
-    if ii==0:
-        return (n<=ntor and m>mpol) or (n>ntor and m<=mpol)
-    if ii==1:
-        return (n<=ntor and m<=mpol) or (n>ntor and m>mpol)
-    if ii==2:
-        return (n<=ntor and m<=mpol) or (n>ntor and m>mpol)
+    if ii == 0:
+        return (n <= ntor and m > mpol) or (n > ntor and m <= mpol)
+    if ii == 1:
+        return (n <= ntor and m <= mpol) or (n > ntor and m > mpol)
+    if ii == 2:
+        return (n <= ntor and m <= mpol) or (n > ntor and m > mpol)
+
 
 def read_dofs(dofs, mpol, ntor, stellsym):
-    xcs = jnp.zeros((2*mpol+1, 2*ntor+1))
-    ycs = jnp.zeros((2*mpol+1, 2*ntor+1))
-    zcs = jnp.zeros((2*mpol+1, 2*ntor+1))
+    xcs = jnp.zeros((2 * mpol + 1, 2 * ntor + 1))
+    ycs = jnp.zeros((2 * mpol + 1, 2 * ntor + 1))
+    zcs = jnp.zeros((2 * mpol + 1, 2 * ntor + 1))
 
     counter = 0
-    for m in range(2*mpol+1):
-        for n in range(2*ntor+1):
+    for m in range(2 * mpol + 1):
+        for n in range(2 * ntor + 1):
             if skip(0, m, n, stellsym, mpol, ntor):
                 continue
-            xcs = xcs.at[m,n].set(dofs[counter])
+            xcs = xcs.at[m, n].set(dofs[counter])
             counter += 1
-    for m in range(2*mpol+1):
-        for n in range(2*ntor+1):
+    for m in range(2 * mpol + 1):
+        for n in range(2 * ntor + 1):
             if skip(1, m, n, stellsym, mpol, ntor):
                 continue
-            ycs = ycs.at[m,n].set(dofs[counter])
+            ycs = ycs.at[m, n].set(dofs[counter])
             counter += 1
-    for m in range(2*mpol+1):
-        for n in range(2*ntor+1):
+    for m in range(2 * mpol + 1):
+        for n in range(2 * ntor + 1):
             if skip(2, m, n, stellsym, mpol, ntor):
                 continue
-            zcs = zcs.at[m,n].set(dofs[counter])
+            zcs = zcs.at[m, n].set(dofs[counter])
             counter += 1
 
     return xcs, ycs, zcs
 
+
 def get_coeff(ii, m, n, stellsym, mpol, ntor, xcs, ycs, zcs):
     if skip(ii, m, n, stellsym, mpol, ntor):
         return 0
-    if ii==0:
+    if ii == 0:
         return xcs[m, n]
-    if ii==1:
+    if ii == 1:
         return ycs[m, n]
-    if ii==2:
+    if ii == 2:
         return zcs[m, n]
 
+
 def basis_fun(n, phi, m, theta, mpol, ntor, nfp):
-    if n<=ntor:
-        a = jnp.cos(nfp*n*phi)
+    if n <= ntor:
+        a = jnp.cos(nfp * n * phi)
     else:
-        a = jnp.sin(nfp*(n-ntor)*phi)
-    if m<=mpol:
-        b = jnp.cos(m*theta)
+        a = jnp.sin(nfp * (n - ntor) * phi)
+    if m <= mpol:
+        b = jnp.cos(m * theta)
     else:
-        b = jnp.sin((m-mpol)*theta)
-        
+        b = jnp.sin((m - mpol) * theta)
+
     return a * b
-    
+
+
 def surfxyztensor_gamma_lin(qpts_phi, qpts_theta, mpol, ntor, dofs, nfp, stellsym):
     numqpts = qpts_phi.size
-    if numqpts!=qpts_theta.size:
-        raise ValueError('quadpoint_theta and phi should have the same size')
+    if numqpts != qpts_theta.size:
+        raise ValueError("quadpoint_theta and phi should have the same size")
 
     xcs, ycs, zcs = read_dofs(dofs, mpol, ntor, stellsym)
 
@@ -1376,23 +1681,30 @@ def surfxyztensor_gamma_lin(qpts_phi, qpts_theta, mpol, ntor, dofs, nfp, stellsy
     xhat = jnp.zeros((numqpts,))
     yhat = jnp.zeros((numqpts,))
     z = jnp.zeros((numqpts,))
-    for m in range(2*mpol+1):
-        for n in range(2*ntor+1):
-            xhat += get_coeff(0, m, n, stellsym, mpol, ntor, xcs, ycs, zcs) * basis_fun(n, phi, m, theta, mpol, ntor, nfp)
-            yhat += get_coeff(1, m, n, stellsym, mpol, ntor, xcs, ycs, zcs) * basis_fun(n, phi, m, theta, mpol, ntor, nfp)
-            z    += get_coeff(2, m, n, stellsym, mpol, ntor, xcs, ycs, zcs) * basis_fun(n, phi, m, theta, mpol, ntor, nfp)
+    for m in range(2 * mpol + 1):
+        for n in range(2 * ntor + 1):
+            xhat += get_coeff(0, m, n, stellsym, mpol, ntor, xcs, ycs, zcs) * basis_fun(
+                n, phi, m, theta, mpol, ntor, nfp
+            )
+            yhat += get_coeff(1, m, n, stellsym, mpol, ntor, xcs, ycs, zcs) * basis_fun(
+                n, phi, m, theta, mpol, ntor, nfp
+            )
+            z += get_coeff(2, m, n, stellsym, mpol, ntor, xcs, ycs, zcs) * basis_fun(
+                n, phi, m, theta, mpol, ntor, nfp
+            )
 
-    data = data.at[:, 0].set( xhat * jnp.cos(phi) - yhat * jnp.sin(phi) )
-    data = data.at[:, 1].set( xhat * jnp.sin(phi) + yhat * jnp.cos(phi) )
-    data = data.at[:, 2].set( z )
+    data = data.at[:, 0].set(xhat * jnp.cos(phi) - yhat * jnp.sin(phi))
+    data = data.at[:, 1].set(xhat * jnp.sin(phi) + yhat * jnp.cos(phi))
+    data = data.at[:, 2].set(z)
 
     return data
+
 
 def normal(curve_dofs, qpts, order, G, H, surf_dofs, surf_type, mpol, ntor, nfp):
     """Returns the unitary vector normal to the surface on a curve that lies on the surface
 
     Args:
-     - gamma2d: Curve position in 2D space. 
+     - gamma2d: Curve position in 2D space.
      - surf_dofs: Surface dofs. The surface is assumed to be a surfaceRZFourier object.
      - qpts: Quadrature points. Array of floats of size N, values should be between 0 and 1.
      - mpol: Max poloidal mode number of surface
@@ -1402,8 +1714,8 @@ def normal(curve_dofs, qpts, order, G, H, surf_dofs, surf_type, mpol, ntor, nfp)
     Returns:
      - n: Nx3 array; unitary normal vector.
     """
-    if not surf_type=='RZ_Fourier':
-        raise NotImplementedError('Normal only implemented for SurfaceRZFourier')
+    if not surf_type == "RZ_Fourier":
+        raise NotImplementedError("Normal only implemented for SurfaceRZFourier")
     phi, theta = gamma_2d(curve_dofs, qpts, order, G, H)
 
     # Construct normal on surface
@@ -1413,46 +1725,60 @@ def normal(curve_dofs, qpts, order, G, H, surf_dofs, surf_type, mpol, ntor, nfp)
     dzdt = jnp.zeros((qpts.size,))
     dzdp = jnp.zeros((qpts.size,))
 
-    nmn = ntor+1 + mpol*(2*ntor+1)
+    nmn = ntor + 1 + mpol * (2 * ntor + 1)
     rc = surf_dofs[:nmn]
     zs = surf_dofs[nmn:]
 
     th = theta * 2.0 * jnp.pi
-    ph = phi   * 2.0 * jnp.pi * nfp
+    ph = phi * 2.0 * jnp.pi * nfp
 
     counter = -1
-    for mm in range(mpol+1):
-        for nn in range(-ntor,ntor+1):
-            if mm==0 and nn<0:
+    for mm in range(mpol + 1):
+        for nn in range(-ntor, ntor + 1):
+            if mm == 0 and nn < 0:
                 continue
-            counter = counter+1 
-            r = r + rc[counter] * jnp.cos(mm*th - nn*ph)
-            drdt = drdt - mm * rc[counter] * jnp.sin(mm*th - nn*ph)
-            drdp = drdp + nn * nfp * rc[counter] * jnp.sin(mm*th - nn*ph)
+            counter = counter + 1
+            r = r + rc[counter] * jnp.cos(mm * th - nn * ph)
+            drdt = drdt - mm * rc[counter] * jnp.sin(mm * th - nn * ph)
+            drdp = drdp + nn * nfp * rc[counter] * jnp.sin(mm * th - nn * ph)
 
     counter = -1
-    for mm in range(mpol+1):
-        for nn in range(-ntor,ntor+1):
-            if mm==0 and nn<=0:
+    for mm in range(mpol + 1):
+        for nn in range(-ntor, ntor + 1):
+            if mm == 0 and nn <= 0:
                 continue
-            counter = counter+1 
-            dzdt = dzdt + mm * zs[counter] * jnp.cos(mm*th - nn*ph)
-            dzdp = dzdp - nn * nfp * zs[counter] * jnp.cos(mm*th - nn*ph)
+            counter = counter + 1
+            dzdt = dzdt + mm * zs[counter] * jnp.cos(mm * th - nn * ph)
+            dzdp = dzdp - nn * nfp * zs[counter] * jnp.cos(mm * th - nn * ph)
 
     n = jnp.zeros((qpts.size, 3))
-    nnorm = jnp.sqrt(r**2 * (drdt**2 + dzdt**2) + (drdp*dzdt-drdt*dzdp)**2)
+    nnorm = jnp.sqrt(r**2 * (drdt**2 + dzdt**2) + (drdp * dzdt - drdt * dzdp) ** 2)
 
-    n = n.at[:,0].set(  r*dzdt / nnorm )
-    n = n.at[:,1].set( -(drdp*dzdt-drdt*dzdp) / nnorm )
-    n = n.at[:,2].set( -r*drdt / nnorm )
+    n = n.at[:, 0].set(r * dzdt / nnorm)
+    n = n.at[:, 1].set(-(drdp * dzdt - drdt * dzdp) / nnorm)
+    n = n.at[:, 2].set(-r * drdt / nnorm)
 
     return n
 
-def nfactor(curve_dofs, qpts, order, G, H, sdofs, surf_type, mpol, ntor, nfp, stellsym, direction='z'):
+
+def nfactor(
+    curve_dofs,
+    qpts,
+    order,
+    G,
+    H,
+    sdofs,
+    surf_type,
+    mpol,
+    ntor,
+    nfp,
+    stellsym,
+    direction="z",
+):
     """Compute the scalar product between the unitary vector normal to the surface and some direction.
-    
+
     Args:
-     - gamma2d: Curve position in 2D space. 
+     - gamma2d: Curve position in 2D space.
      - surf_dofs: Surface dofs. The surface is assumed to be a surfaceRZFourier object.
      - qpts: Quadrature points. Array of floats of size N, values should be between 0 and 1.
      - mpol: Max poloidal mode number of surface
@@ -1463,169 +1789,368 @@ def nfactor(curve_dofs, qpts, order, G, H, sdofs, surf_type, mpol, ntor, nfp, st
     Returns:
      - Scalar product between the unitary normal vector and the access direction.
     """
-    if direction=='z':
+    if direction == "z":
         # return normal(curve_dofs, qpts, order, G, H, mpol, ntor, sdofs, nfp, stellsym, dgamma_dtheta, dgamma_dphi, surf_type)[:,2]
-        return normal(curve_dofs, qpts, order, G, H, sdofs, surf_type, mpol, ntor, nfp)[:,2]
-    elif direction=='r':
+        return normal(curve_dofs, qpts, order, G, H, sdofs, surf_type, mpol, ntor, nfp)[
+            :, 2
+        ]
+    elif direction == "r":
         # return normal(curve_dofs, qpts, order, G, H, mpol, ntor, sdofs, nfp, stellsym, dgamma_dtheta, dgamma_dphi, surf_type)[:,0]
-        return -normal(curve_dofs, qpts, order, G, H, sdofs, surf_type, mpol, ntor, nfp)[:,0]
+        return -normal(
+            curve_dofs, qpts, order, G, H, sdofs, surf_type, mpol, ntor, nfp
+        )[:, 0]
 
-class CurveCWSFourier( Curve, sopp.Curve ):
+
+class CurveCWSFourier(Curve, sopp.Curve):
     """Curve that lies on a surface
 
     This class describes a closed curve constrained to remain on a given surface. Derivatives are provided using JAX, and their implementation is heavily inspired from the class JaxCurve.
 
     Args:
      - curve2d: Instance of Curve2D
-     - surf: Instance of SurfaceRZFourier    
+     - surf: Instance of SurfaceRZFourier
     """
-    def __init__(self, quadpoints, order, surf,  G=0, H=0, **kwargs):   
+
+    def __init__(self, quadpoints, order, surf, G=0, H=0, **kwargs):
         if isinstance(quadpoints, int):
             quadpoints = jnp.linspace(0, 1, quadpoints, endpoint=False)
-        
+
         # Curve order. Number of Fourier harmonics for phi and theta
         self.order = order
         self.G = G
         self.H = H
-        
-        # Modes are order as phic, phis, thetac, thetas
-        self.modes = [np.zeros((order+1,)), np.zeros((order,)), np.zeros((order+1,)), np.zeros((order,))]
 
-        #self.quadpoints = quadpoints
+        # Modes are order as phic, phis, thetac, thetas
+        self.modes = [
+            np.zeros((order + 1,)),
+            np.zeros((order,)),
+            np.zeros((order + 1,)),
+            np.zeros((order,)),
+        ]
+
+        # self.quadpoints = quadpoints
         self.surf = surf
 
         if isinstance(surf, SurfaceRZFourier):
-            self.surf_type='RZ_Fourier'
+            self.surf_type = "RZ_Fourier"
         elif isinstance(surf, SurfaceXYZTensorFourier):
-            self.surf_type='XYZ_Tensor_Fourier'
+            self.surf_type = "XYZ_Tensor_Fourier"
         else:
-            raise NotImplementedError('CurveCWSFourier is only implemented for SurfaceRZFourier and SurfaceXYZTensorFourier classes.')
-        
-        # We are not doing the same search for x0       
+            raise NotImplementedError(
+                "CurveCWSFourier is only implemented for SurfaceRZFourier and SurfaceXYZTensorFourier classes."
+            )
+
+        # We are not doing the same search for x0
         sopp.Curve.__init__(self, quadpoints)
 
-        Curve.__init__(self, x0=self.get_dofs(), depends_on=[], names=self._make_names(), external_dof_setter=CurveCWSFourier.set_dofs_impl, **kwargs)
+        Curve.__init__(
+            self,
+            x0=self.get_dofs(),
+            depends_on=[],
+            names=self._make_names(),
+            external_dof_setter=CurveCWSFourier.set_dofs_impl,
+            **kwargs,
+        )
 
-        
-        self.gamma_2d_pure =  jit(lambda cdofs, sdofs, pts: gamma_curve_on_surface(cdofs, pts, self.order, self.G, self.H, sdofs, self.surf_type, self.surf.mpol, self.surf.ntor, self.surf.nfp, self.surf.gamma_lin))
-        self.gamma_pure = jit(lambda dofs, surf_dofs, points: gamma_curve_on_surface(dofs, points, self.order, self.G, self.H, surf_dofs, self.surf_type, self.surf.mpol, self.surf.ntor, self.surf.nfp, self.surf.gamma_lin))
+        self.gamma_2d_pure = jit(
+            lambda cdofs, sdofs, pts: gamma_curve_on_surface(
+                cdofs,
+                pts,
+                self.order,
+                self.G,
+                self.H,
+                sdofs,
+                self.surf_type,
+                self.surf.mpol,
+                self.surf.ntor,
+                self.surf.nfp,
+                self.surf.gamma_lin,
+            )
+        )
+        self.gamma_pure = jit(
+            lambda dofs, surf_dofs, points: gamma_curve_on_surface(
+                dofs,
+                points,
+                self.order,
+                self.G,
+                self.H,
+                surf_dofs,
+                self.surf_type,
+                self.surf.mpol,
+                self.surf.ntor,
+                self.surf.nfp,
+                self.surf.gamma_lin,
+            )
+        )
 
         # GAMMA
         points = np.asarray(self.quadpoints)
         ones = jnp.ones_like(points)
-        self.gamma_jax = jit(lambda cdofs, sdofs: self.gamma_pure(cdofs, sdofs, self.quadpoints))
-        self.gamma_impl_jax = jit(lambda cdofs, sdofs, p: self.gamma_pure(cdofs, sdofs, p))
-        self.gammac_jax = jit(lambda dofs: self.gamma_pure(dofs,  self.surf.get_dofs(), self.quadpoints))
-        self.gammac_impl_jax = jit(lambda dofs, p: self.gamma_pure(dofs, self.surf.get_dofs(), p))
-        self.gammas_jax = jit(lambda sdofs: self.gamma_pure(self.get_dofs(),  sdofs, self.quadpoints))
-        self.gammas_impl_jax = jit(lambda sdofs, p: self.gamma_pure(self.get_dofs(), sdofs, p))
+        self.gamma_jax = jit(
+            lambda cdofs, sdofs: self.gamma_pure(cdofs, sdofs, self.quadpoints)
+        )
+        self.gamma_impl_jax = jit(
+            lambda cdofs, sdofs, p: self.gamma_pure(cdofs, sdofs, p)
+        )
+        self.gammac_jax = jit(
+            lambda dofs: self.gamma_pure(dofs, self.surf.get_dofs(), self.quadpoints)
+        )
+        self.gammac_impl_jax = jit(
+            lambda dofs, p: self.gamma_pure(dofs, self.surf.get_dofs(), p)
+        )
+        self.gammas_jax = jit(
+            lambda sdofs: self.gamma_pure(self.get_dofs(), sdofs, self.quadpoints)
+        )
+        self.gammas_impl_jax = jit(
+            lambda sdofs, p: self.gamma_pure(self.get_dofs(), sdofs, p)
+        )
 
         self.dgamma_by_dcoeff_jax = jit(jacfwd(self.gammac_jax))
-        self.dgamma_by_dcoeff_vjp_jax = jit(lambda cdofs, v: vjp(self.gammac_jax, cdofs)[1](v)[0]) # derivative w.r.t to curve2d dofs
+        self.dgamma_by_dcoeff_vjp_jax = jit(
+            lambda cdofs, v: vjp(self.gammac_jax, cdofs)[1](v)[0]
+        )  # derivative w.r.t to curve2d dofs
         self.dgamma_by_dsurf_jax = jit(jacfwd(self.gammas_jax))
-        self.dgamma_by_dsurf_vjp_jax = jit(lambda sdofs, v: vjp(self.gammas_jax, sdofs)[1](v)[0]) # derivative w.r.t to surface dofs
+        self.dgamma_by_dsurf_vjp_jax = jit(
+            lambda sdofs, v: vjp(self.gammas_jax, sdofs)[1](v)[0]
+        )  # derivative w.r.t to surface dofs
 
-        self.gammadash_pure = jit(lambda cdofs, sdofs, q: jvp(lambda p: self.gamma_pure(cdofs, sdofs, p), (q,), (ones,))[1])
-        self.gammadash_jax = jit(lambda cdofs, sdofs: self.gammadash_pure(cdofs, sdofs, points))
-        self.gammacdash_jax = jit(lambda cdofs: self.gammadash_pure(cdofs, self.surf.get_dofs(), points))
-        self.gammasdash_jax = jit(lambda sdofs: self.gammadash_pure(self.get_dofs(), sdofs, points))
+        self.gammadash_pure = jit(
+            lambda cdofs, sdofs, q: jvp(
+                lambda p: self.gamma_pure(cdofs, sdofs, p), (q,), (ones,)
+            )[1]
+        )
+        self.gammadash_jax = jit(
+            lambda cdofs, sdofs: self.gammadash_pure(cdofs, sdofs, points)
+        )
+        self.gammacdash_jax = jit(
+            lambda cdofs: self.gammadash_pure(cdofs, self.surf.get_dofs(), points)
+        )
+        self.gammasdash_jax = jit(
+            lambda sdofs: self.gammadash_pure(self.get_dofs(), sdofs, points)
+        )
         self.dgammadash_by_dcoeff_jax = jit(jacfwd(self.gammacdash_jax))
-        self.dgammadash_by_dcoeff_vjp_jax = jit(lambda cdofs, v: vjp(self.gammacdash_jax, cdofs)[1](v)[0])
+        self.dgammadash_by_dcoeff_vjp_jax = jit(
+            lambda cdofs, v: vjp(self.gammacdash_jax, cdofs)[1](v)[0]
+        )
         self.dgammadash_by_dsurf_jax = jit(jacfwd(self.gammasdash_jax))
-        self.dgammadash_by_dsurf_vjp_jax = jit(lambda sdofs, v: vjp(self.gammasdash_jax, sdofs)[1](v)[0])
+        self.dgammadash_by_dsurf_vjp_jax = jit(
+            lambda sdofs, v: vjp(self.gammasdash_jax, sdofs)[1](v)[0]
+        )
 
-        self.gammadashdash_pure = jit(lambda cdofs, sdofs, q: jvp(lambda p: self.gammadash_pure(cdofs, sdofs, p), (q,), (ones,))[1])
-        self.gammadashdash_jax = jit(lambda cdofs, sdofs: self.gammadashdash_pure(cdofs, sdofs, points))
-        self.gammacdashdash_jax = jit(lambda cdofs: self.gammadashdash_pure(cdofs, self.surf.get_dofs(), points))
-        self.gammasdashdash_jax = jit(lambda sdofs: self.gammadashdash_pure(self.get_dofs(), sdofs, points))
+        self.gammadashdash_pure = jit(
+            lambda cdofs, sdofs, q: jvp(
+                lambda p: self.gammadash_pure(cdofs, sdofs, p), (q,), (ones,)
+            )[1]
+        )
+        self.gammadashdash_jax = jit(
+            lambda cdofs, sdofs: self.gammadashdash_pure(cdofs, sdofs, points)
+        )
+        self.gammacdashdash_jax = jit(
+            lambda cdofs: self.gammadashdash_pure(cdofs, self.surf.get_dofs(), points)
+        )
+        self.gammasdashdash_jax = jit(
+            lambda sdofs: self.gammadashdash_pure(self.get_dofs(), sdofs, points)
+        )
         self.dgammadashdash_by_dcoeff_jax = jit(jacfwd(self.gammacdashdash_jax))
-        self.dgammadashdash_by_dcoeff_vjp_jax = jit(lambda cdofs, v: vjp(self.gammacdashdash_jax, cdofs)[1](v)[0])
+        self.dgammadashdash_by_dcoeff_vjp_jax = jit(
+            lambda cdofs, v: vjp(self.gammacdashdash_jax, cdofs)[1](v)[0]
+        )
         self.dgammadashdash_by_dsurf_jax = jit(jacfwd(self.gammasdashdash_jax))
-        self.dgammadashdash_by_dsurf_vjp_jax = jit(lambda sdofs, v: vjp(self.gammasdashdash_jax, sdofs)[1](v)[0])
+        self.dgammadashdash_by_dsurf_vjp_jax = jit(
+            lambda sdofs, v: vjp(self.gammasdashdash_jax, sdofs)[1](v)[0]
+        )
 
-        self.gammadashdashdash_pure = jit(lambda cdofs, sdofs, q: jvp(lambda p: self.gammadashdash_pure(cdofs, sdofs, p), (q,), (ones,))[1])
-        self.gammadashdashdash_jax = jit(lambda cdofs, sdofs: self.gammadashdashdash_pure(cdofs, sdofs, points))
-        self.gammacdashdashdash_jax = jit(lambda cdofs: self.gammadashdashdash_pure(cdofs, self.surf.get_dofs(), points))
-        self.gammasdashdashdash_jax = jit(lambda sdofs: self.gammadashdashdash_pure(self.get_dofs(), sdofs, points))
+        self.gammadashdashdash_pure = jit(
+            lambda cdofs, sdofs, q: jvp(
+                lambda p: self.gammadashdash_pure(cdofs, sdofs, p), (q,), (ones,)
+            )[1]
+        )
+        self.gammadashdashdash_jax = jit(
+            lambda cdofs, sdofs: self.gammadashdashdash_pure(cdofs, sdofs, points)
+        )
+        self.gammacdashdashdash_jax = jit(
+            lambda cdofs: self.gammadashdashdash_pure(
+                cdofs, self.surf.get_dofs(), points
+            )
+        )
+        self.gammasdashdashdash_jax = jit(
+            lambda sdofs: self.gammadashdashdash_pure(self.get_dofs(), sdofs, points)
+        )
         self.dgammadashdashdash_by_dcoeff_jax = jit(jacfwd(self.gammacdashdashdash_jax))
-        self.dgammadashdashdash_by_dcoeff_vjp_jax = jit(lambda x, v: vjp(self.gammacdashdashdash_jax, x)[1](v)[0])
+        self.dgammadashdashdash_by_dcoeff_vjp_jax = jit(
+            lambda x, v: vjp(self.gammacdashdashdash_jax, x)[1](v)[0]
+        )
         self.dgammadashdashdash_by_dsurf_jax = jit(jacfwd(self.gammasdashdashdash_jax))
-        self.dgammadashdashdash_by_dsurf_vjp_jax = jit(lambda x, v: vjp(self.gammasdashdashdash_jax, x)[1](v)[0])
+        self.dgammadashdashdash_by_dsurf_vjp_jax = jit(
+            lambda x, v: vjp(self.gammasdashdashdash_jax, x)[1](v)[0]
+        )
 
-        self.dkappa_by_dcoeff_vjp_jax = jit(lambda cdofs, sdofs, v: vjp(lambda x: kappa_pure(self.gammadash_jax(x, sdofs), self.gammadashdash_jax(x, sdofs)), cdofs)[1](v)[0])
-        self.dkappa_by_dsurf_vjp_jax = jit(lambda cdofs, sdofs, v: vjp(lambda x: kappa_pure(self.gammadash_jax(cdofs, x), self.gammadashdash_jax(cdofs, x)), sdofs)[1](v)[0])
+        self.dkappa_by_dcoeff_vjp_jax = jit(
+            lambda cdofs, sdofs, v: vjp(
+                lambda x: kappa_pure(
+                    self.gammadash_jax(x, sdofs), self.gammadashdash_jax(x, sdofs)
+                ),
+                cdofs,
+            )[1](v)[0]
+        )
+        self.dkappa_by_dsurf_vjp_jax = jit(
+            lambda cdofs, sdofs, v: vjp(
+                lambda x: kappa_pure(
+                    self.gammadash_jax(cdofs, x), self.gammadashdash_jax(cdofs, x)
+                ),
+                sdofs,
+            )[1](v)[0]
+        )
 
-        self.dtorsion_by_dcoeff_vjp_jax = jit(lambda cdofs, sdofs, v: vjp(lambda x: torsion_pure(self.gammadash_jax(x, sdofs), self.gammadashdash_jax(x, sdofs), self.gammadashdashdash_jax(x, sdofs)), cdofs)[1](v)[0])
-        self.dtorsion_by_dsurf_vjp_jax = jit(lambda cdofs, sdofs, v: vjp(lambda x: torsion_pure(self.gammadash_jax(cdofs, x), self.gammadashdash_jax(cdofs, x), self.gammadashdashdash_jax(cdofs, x)), sdofs)[1](v)[0])
-
+        self.dtorsion_by_dcoeff_vjp_jax = jit(
+            lambda cdofs, sdofs, v: vjp(
+                lambda x: torsion_pure(
+                    self.gammadash_jax(x, sdofs),
+                    self.gammadashdash_jax(x, sdofs),
+                    self.gammadashdashdash_jax(x, sdofs),
+                ),
+                cdofs,
+            )[1](v)[0]
+        )
+        self.dtorsion_by_dsurf_vjp_jax = jit(
+            lambda cdofs, sdofs, v: vjp(
+                lambda x: torsion_pure(
+                    self.gammadash_jax(cdofs, x),
+                    self.gammadashdash_jax(cdofs, x),
+                    self.gammadashdashdash_jax(cdofs, x),
+                ),
+                sdofs,
+            )[1](v)[0]
+        )
 
         # NORMAL
-        if self.surf_type=='RZ_Fourier':
-            fun = lambda qphi, qtheta: surfrz_gamma_lin(qphi, qtheta, self.surf.mpol, self.surf.ntor, self.surf.get_dofs(), self.surf.nfp, self.surf.stellsym)
-        elif self.surf_type=='XYZ_Tensor_Fourier':
-            fun = lambda qphi, qtheta: surfxyztensor_gamma_lin(qphi, qtheta, self.surf.mpol, self.surf.ntor, self.surf.get_dofs(), self.surf.nfp, self.surf.stellsym)
+        if self.surf_type == "RZ_Fourier":
+            fun = lambda qphi, qtheta: surfrz_gamma_lin(
+                qphi,
+                qtheta,
+                self.surf.mpol,
+                self.surf.ntor,
+                self.surf.get_dofs(),
+                self.surf.nfp,
+                self.surf.stellsym,
+            )
+        elif self.surf_type == "XYZ_Tensor_Fourier":
+            fun = lambda qphi, qtheta: surfxyztensor_gamma_lin(
+                qphi,
+                qtheta,
+                self.surf.mpol,
+                self.surf.ntor,
+                self.surf.get_dofs(),
+                self.surf.nfp,
+                self.surf.stellsym,
+            )
 
-        #quadpoints_phi, quadpoints_theta, mpol, ntor, surf_dofs, nfp, stellsym
-        self.dgammalin_by_dtheta = jit(lambda quadpoints_phi, quadpoints_theta: jacfwd(fun, argnums=1)(quadpoints_phi, quadpoints_theta))
-        self.dgammalin_by_dphi = jit(lambda quadpoints_phi, quadpoints_theta: jacfwd(fun, argnums=0)(quadpoints_phi, quadpoints_theta))
+        # quadpoints_phi, quadpoints_theta, mpol, ntor, surf_dofs, nfp, stellsym
+        self.dgammalin_by_dtheta = jit(
+            lambda quadpoints_phi, quadpoints_theta: jacfwd(fun, argnums=1)(
+                quadpoints_phi, quadpoints_theta
+            )
+        )
+        self.dgammalin_by_dphi = jit(
+            lambda quadpoints_phi, quadpoints_theta: jacfwd(fun, argnums=0)(
+                quadpoints_phi, quadpoints_theta
+            )
+        )
 
         # curve_dofs, qpts, order, G, H, sdofs, surf_type, mpol, ntor, nfp, stellsym, dgamma_dtheta, dgamma_dphi, direction
-        self.snz = jit(lambda cdofs, sdofs: nfactor(cdofs, quadpoints, order, G, H, sdofs, self.surf_type, self.surf.mpol, self.surf.ntor, self.surf.nfp, self.surf.stellsym, direction='z'))
-        self.snr = jit(lambda cdofs, sdofs: nfactor(cdofs, quadpoints, order, G, H, sdofs, self.surf_type, self.surf.mpol, self.surf.ntor, self.surf.nfp, self.surf.stellsym, direction='r'))
+        self.snz = jit(
+            lambda cdofs, sdofs: nfactor(
+                cdofs,
+                quadpoints,
+                order,
+                G,
+                H,
+                sdofs,
+                self.surf_type,
+                self.surf.mpol,
+                self.surf.ntor,
+                self.surf.nfp,
+                self.surf.stellsym,
+                direction="z",
+            )
+        )
+        self.snr = jit(
+            lambda cdofs, sdofs: nfactor(
+                cdofs,
+                quadpoints,
+                order,
+                G,
+                H,
+                sdofs,
+                self.surf_type,
+                self.surf.mpol,
+                self.surf.ntor,
+                self.surf.nfp,
+                self.surf.stellsym,
+                direction="r",
+            )
+        )
 
         self.dsnz_by_dcoeff_jax = lambda cdofs, sdofs: jacfwd(self.snz)(cdofs, sdofs)
         self.dsnr_by_dcoeff_jax = lambda cdofs, sdofs: jacfwd(self.snr)(cdofs, sdofs)
         self.snr_hessian_jax = lambda cdofs, sdofs: hessian(self.snr)(cdofs, sdofs)
         self.snz_hessian_jax = lambda cdofs, sdofs: hessian(self.snz)(cdofs, sdofs)
-        self.dsnz_by_dcoeff_vjp_jax = jit(lambda cdofs, sdofs, v: vjp(lambda x: self.snz(x, sdofs), cdofs)[1](v)[0])
-        self.dsnr_by_dcoeff_vjp_jax = jit(lambda cdofs, sdofs, v: vjp(lambda x: self.snr(x, sdofs), cdofs)[1](v)[0])
+        self.dsnz_by_dcoeff_vjp_jax = jit(
+            lambda cdofs, sdofs, v: vjp(lambda x: self.snz(x, sdofs), cdofs)[1](v)[0]
+        )
+        self.dsnr_by_dcoeff_vjp_jax = jit(
+            lambda cdofs, sdofs, v: vjp(lambda x: self.snr(x, sdofs), cdofs)[1](v)[0]
+        )
 
     def set_dofs(self, dofs):
         self.local_x = dofs
         sopp.Curve.set_dofs(self, dofs)
 
     def num_dofs(self):
-        return 2*(self.order+1) + 2*self.order
-    
+        return 2 * (self.order + 1) + 2 * self.order
+
     def get_dofs(self):
         return np.concatenate(self.modes)
 
     def set_dofs_impl(self, dofs):
-        self.modes[0] = dofs[0:self.order+1]
-        self.modes[1] = dofs[self.order+1:2*self.order+1]
-        self.modes[2] = dofs[2*self.order+1:3*self.order+2]
-        self.modes[3] = dofs[3*self.order+2:4*self.order+2]
+        self.modes[0] = dofs[0 : self.order + 1]
+        self.modes[1] = dofs[self.order + 1 : 2 * self.order + 1]
+        self.modes[2] = dofs[2 * self.order + 1 : 3 * self.order + 2]
+        self.modes[3] = dofs[3 * self.order + 2 : 4 * self.order + 2]
 
     def _make_names(self):
         dofs_name = []
-        for mode in ['phic', 'phis', 'thetac', 'thetas']:
-            for ii in range(self.order+1):
-                if mode=='phis' and ii==0:
+        for mode in ["phic", "phis", "thetac", "thetas"]:
+            for ii in range(self.order + 1):
+                if mode == "phis" and ii == 0:
                     continue
 
-                if mode=='thetas' and ii==0:
+                if mode == "thetas" and ii == 0:
                     continue
 
-                dofs_name.append(f'{mode}({ii})')
+                dofs_name.append(f"{mode}({ii})")
 
         return dofs_name
-
 
     # GAMMA
     # =====
     def gamma_2d(self):
-        return self.gamma_2d_pure(self.get_dofs(), self.surf.get_dofs(), self.quadpoints)
-    
+        return self.gamma_2d_pure(
+            self.get_dofs(), self.surf.get_dofs(), self.quadpoints
+        )
+
     def gamma_hessian(self):
         cdofs = self.get_dofs()
         return hessian(self.gammac_jax)(cdofs)
+
     def gammadash_hessian(self):
         cdofs = self.get_dofs()
         return hessian(self.gammacdash_jax)(cdofs)
+
     def gammadashdash_hessian(self):
         cdofs = self.get_dofs()
         return hessian(self.gammacdashdash_jax)(cdofs)
-    
+
     def gamma_impl(self, gamma, quadpoints):
         r"""
         This function returns the x,y,z coordinates of the curve :math:`\Gamma`.
@@ -1634,17 +2159,15 @@ class CurveCWSFourier( Curve, sopp.Curve ):
         gamma[:, :] = self.gamma_impl_jax(self.get_dofs(), sdofs, quadpoints)
 
     def dgamma_by_dcoeff_vjp(self, v):
-        return Derivative({
-            self: self.dgamma_by_dcoeff_vjp_impl(v)
-            })
-        #return Derivative({
+        return Derivative({self: self.dgamma_by_dcoeff_vjp_impl(v)})
+        # return Derivative({
         #    self: self.dgamma_by_dcoeff_vjp_impl(v),
         #    self.surf: self.dgamma_by_dsurf_vjp_impl(v)
         #    })
-    
+
     def dgamma_by_dcoeff_impl(self, v):
         r"""
-        This function returns 
+        This function returns
 
         .. math::
             \frac{\partial \Gamma}{\partial \mathbf c}
@@ -1656,7 +2179,7 @@ class CurveCWSFourier( Curve, sopp.Curve ):
 
     def dgamma_by_dsurf_impl(self, v):
         r"""
-        This function returns 
+        This function returns
 
         .. math::
             \frac{\partial \Gamma}{\partial \mathbf c}
@@ -1671,20 +2194,20 @@ class CurveCWSFourier( Curve, sopp.Curve ):
         This function returns the vector Jacobian product
 
         .. math::
-            v^T  \frac{\partial \Gamma}{\partial \mathbf c} 
+            v^T  \frac{\partial \Gamma}{\partial \mathbf c}
 
         where :math:`\mathbf{c}` are the curve dofs, and :math:`\Gamma` are the x, y, z coordinates
         of the curve.
         """
 
         return self.dgamma_by_dcoeff_vjp_jax(self.get_dofs(), v)
-    
+
     def dgamma_by_dsurf_vjp_impl(self, v):
         r"""
         This function returns the vector Jacobian product
 
         .. math::
-            v^T  \frac{\partial \Gamma}{\partial \mathbf c} 
+            v^T  \frac{\partial \Gamma}{\partial \mathbf c}
 
         where :math:`\mathbf{c}` are the surface dofs, and :math:`\Gamma` are the x, y, z coordinates of the curve.
         """
@@ -1694,13 +2217,12 @@ class CurveCWSFourier( Curve, sopp.Curve ):
     # GAMMA DASH
     # ==========
     def dgammadash_by_dcoeff_vjp(self, v):
-        return Derivative({
-            self: self.dgammadash_by_dcoeff_vjp_impl(v)
-            })
+        return Derivative({self: self.dgammadash_by_dcoeff_vjp_impl(v)})
         # return Derivative({
         #     self: self.dgammadash_by_dcoeff_vjp_impl(v),
         #     self.surf: self.dgammadash_by_dsurf_vjp_impl(v)
         #     })
+
     def gammadash_impl(self, v):
         r"""
         This function returns :math:`\Gamma'(\varphi)`, where :math:`\Gamma` are the x, y, z coordinates
@@ -1711,7 +2233,7 @@ class CurveCWSFourier( Curve, sopp.Curve ):
 
     def dgammadash_by_dcoeff_impl(self, v):
         r"""
-        This function returns 
+        This function returns
 
         .. math::
             \frac{\partial \Gamma'}{\partial \mathbf c}
@@ -1724,7 +2246,7 @@ class CurveCWSFourier( Curve, sopp.Curve ):
 
     def dgammadash_by_dsurf_impl(self, v):
         r"""
-        This function returns 
+        This function returns
 
         .. math::
             \frac{\partial \Gamma'}{\partial \mathbf c}
@@ -1737,7 +2259,7 @@ class CurveCWSFourier( Curve, sopp.Curve ):
 
     def dgammadash_by_dcoeff_vjp_impl(self, v):
         r"""
-        This function returns 
+        This function returns
 
         .. math::
             \mathbf v^T \frac{\partial \Gamma'}{\partial \mathbf c}
@@ -1750,7 +2272,7 @@ class CurveCWSFourier( Curve, sopp.Curve ):
 
     def dgammadash_by_dsurf_vjp_impl(self, v):
         r"""
-        This function returns 
+        This function returns
 
         .. math::
             \mathbf v^T \frac{\partial \Gamma'}{\partial \mathbf c}
@@ -1764,14 +2286,12 @@ class CurveCWSFourier( Curve, sopp.Curve ):
     # GAMMA DASH DASH
     # ===============
     def dgammadashdash_by_dcoeff_vjp(self, v):
-        return Derivative({
-            self: self.dgammadashdash_by_dcoeff_vjp_impl(v)
-            })
+        return Derivative({self: self.dgammadashdash_by_dcoeff_vjp_impl(v)})
         # return Derivative({
         #     self: self.dgammadashdash_by_dcoeff_vjp_impl(v),
         #     self.surf: self.dgammadashdash_by_dsurf_vjp_impl(v)
         #     })
-    
+
     def gammadashdash_impl(self, v):
         r"""
         This function returns :math:`\Gamma''(\varphi)`, and :math:`\Gamma` are the x, y, z coordinates
@@ -1782,7 +2302,7 @@ class CurveCWSFourier( Curve, sopp.Curve ):
 
     def dgammadashdash_by_dcoeff_impl(self, v):
         r"""
-        This function returns 
+        This function returns
 
         .. math::
             \frac{\partial \Gamma''}{\partial \mathbf c}
@@ -1795,7 +2315,7 @@ class CurveCWSFourier( Curve, sopp.Curve ):
 
     def dgammadashdash_by_dsurf_impl(self, v):
         r"""
-        This function returns 
+        This function returns
 
         .. math::
             \frac{\partial \Gamma''}{\partial \mathbf c}
@@ -1810,7 +2330,7 @@ class CurveCWSFourier( Curve, sopp.Curve ):
         This function returns the vector Jacobian product
 
         .. math::
-            v^T  \frac{\partial \Gamma''}{\partial \mathbf c} 
+            v^T  \frac{\partial \Gamma''}{\partial \mathbf c}
 
         where :math:`\mathbf{c}` are the curve dofs, and :math:`\Gamma` are the x, y, z coordinates
         of the curve.
@@ -1818,13 +2338,13 @@ class CurveCWSFourier( Curve, sopp.Curve ):
         """
 
         return self.dgammadashdash_by_dcoeff_vjp_jax(self.get_dofs(), v)
-    
+
     def dgammadashdash_by_dsurf_vjp_impl(self, v):
         r"""
         This function returns the vector Jacobian product
 
         .. math::
-            v^T  \frac{\partial \Gamma''}{\partial \mathbf c} 
+            v^T  \frac{\partial \Gamma''}{\partial \mathbf c}
 
         where :math:`\mathbf{c}` are the surface dofs, and :math:`\Gamma` are the x, y, z coordinates
         of the curve.
@@ -1836,14 +2356,12 @@ class CurveCWSFourier( Curve, sopp.Curve ):
     # GAMMA DASH DASH DASH
     # ====================
     def dgammadashdashdash_by_dcoeff_vjp(self, v):
-        return Derivative({
-            self: self.dgammadashdashdash_by_dcoeff_vjp_impl(v)
-            })
+        return Derivative({self: self.dgammadashdashdash_by_dcoeff_vjp_impl(v)})
         # return Derivative({
         #     self: self.dgammadashdashdash_by_dcoeff_vjp_impl(v),
         #     self.surf: self.dgammadashdashdash_by_dsurf_vjp_jax_impl(v)
         #     })
-    
+
     def gammadashdashdash_impl(self, v):
         r"""
         This function returns :math:`\Gamma'''(\varphi)`, and :math:`\Gamma` are the x, y, z coordinates
@@ -1854,7 +2372,7 @@ class CurveCWSFourier( Curve, sopp.Curve ):
 
     def dgammadashdashdash_by_dcoeff_impl(self, v):
         r"""
-        This function returns 
+        This function returns
 
         .. math::
             \frac{\partial \Gamma'''}{\partial \mathbf c}
@@ -1867,7 +2385,7 @@ class CurveCWSFourier( Curve, sopp.Curve ):
 
     def dgammadashdashdash_by_dsurf_impl(self, v):
         r"""
-        This function returns 
+        This function returns
 
         .. math::
             \frac{\partial \Gamma'''}{\partial \mathbf c}
@@ -1883,7 +2401,7 @@ class CurveCWSFourier( Curve, sopp.Curve ):
         This function returns the vector Jacobian product
 
         .. math::
-            v^T  \frac{\partial \Gamma'''}{\partial \mathbf c} 
+            v^T  \frac{\partial \Gamma'''}{\partial \mathbf c}
 
         where :math:`\mathbf{c}` are the curve dofs, and :math:`\Gamma` are the x, y, z coordinates
         of the curve.
@@ -1891,13 +2409,13 @@ class CurveCWSFourier( Curve, sopp.Curve ):
         """
 
         return self.dgammadashdashdash_by_dcoeff_vjp_jax(self.get_dofs(), v)
-    
+
     def dgammadashdashdash_by_dsurf_vjp_impl(self, v):
         r"""
         This function returns the vector Jacobian product
 
         .. math::
-            v^T  \frac{\partial \Gamma'''}{\partial \mathbf c} 
+            v^T  \frac{\partial \Gamma'''}{\partial \mathbf c}
 
         where :math:`\mathbf{c}` are the surface dofs, and :math:`\Gamma` are the x, y, z coordinates
         of the curve.
@@ -1905,7 +2423,6 @@ class CurveCWSFourier( Curve, sopp.Curve ):
         """
 
         return self.dgammadashdashdash_by_dsurf_vjp_jax(self.surf.get_dofs(), v)
-
 
     # KAPPA
     # =====
@@ -1919,10 +2436,16 @@ class CurveCWSFourier( Curve, sopp.Curve ):
         where :math:`\mathbf{c}` are the curve dofs and :math:`\kappa` is the curvature.
 
         """
-        return Derivative({
-            self: self.dkappa_by_dcoeff_vjp_jax(self.get_dofs(), self.surf.get_dofs(), v),
-            self.surf: self.dkappa_by_dsurf_vjp_jax(self.get_dofs(), self.surf.get_dofs(), v)
-            })
+        return Derivative(
+            {
+                self: self.dkappa_by_dcoeff_vjp_jax(
+                    self.get_dofs(), self.surf.get_dofs(), v
+                ),
+                self.surf: self.dkappa_by_dsurf_vjp_jax(
+                    self.get_dofs(), self.surf.get_dofs(), v
+                ),
+            }
+        )
         # return Derivative({
         #     self: self.dkappa_by_dcoeff_vjp_jax(self.get_dofs(), v),
         #     self.surf: self.dkappa_by_dsurf_vjp_jax(self.surf.get_dofs(), v)
@@ -1935,27 +2458,24 @@ class CurveCWSFourier( Curve, sopp.Curve ):
         This function returns the vector Jacobian product
 
         .. math::
-            v^T \frac{\partial \tau}{\partial \mathbf{c}} 
+            v^T \frac{\partial \tau}{\partial \mathbf{c}}
 
         where :math:`\mathbf{c}` are the curve dofs, and :math:`\tau` is the torsion.
 
         """
 
-        return Derivative({
-            self: self.dtorsion_by_dcoeff_vjp_jax(self.get_dofs(), v)
-            })
+        return Derivative({self: self.dtorsion_by_dcoeff_vjp_jax(self.get_dofs(), v)})
         # return Derivative({
         #     self: self.dtorsion_by_dcoeff_vjp_jax(self.get_dofs(), v),
         #     self.surf: self.dtorsion_by_dsurf_vjp_jax(self.surf.get_dofs(), v)
         #     })
-
 
     # NORMAL COMPONENTS
     def zfactor(self):
         cdofs = self.get_dofs()
         sdofs = self.surf.get_dofs()
         return self.snz(cdofs, sdofs)
-    
+
     def dzfactor_by_dcoeff(self):
         cdofs = self.get_dofs()
         sdofs = self.surf.get_dofs()
@@ -1965,12 +2485,12 @@ class CurveCWSFourier( Curve, sopp.Curve ):
         cdofs = self.get_dofs()
         sdofs = self.surf.get_dofs()
         return Derivative({self: self.dsnz_by_dcoeff_vjp_jax(cdofs, sdofs, v)})
-    
+
     def zfactor_hessian(self):
         cdofs = self.get_dofs()
         sdofs = self.surf.get_dofs()
         return self.snz_hessian_jax(cdofs, sdofs)
-    
+
     def rfactor(self):
         cdofs = self.get_dofs()
         sdofs = self.surf.get_dofs()
@@ -1980,7 +2500,7 @@ class CurveCWSFourier( Curve, sopp.Curve ):
         cdofs = self.get_dofs()
         sdofs = self.surf.get_dofs()
         return self.dsnr_by_dcoeff_jax(cdofs, sdofs)
-        
+
     def drfactor_by_dcoeff_vjp(self, v):
         cdofs = self.get_dofs()
         sdofs = self.surf.get_dofs()

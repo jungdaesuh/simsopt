@@ -1,8 +1,7 @@
 import numpy as np
-import jax.numpy as jnp
 
 import simsoptpp as sopp
-from .curve import Curve, _install_curve_jax_contract
+from .curve import Curve, _install_curve_jax_contract, jnp
 
 __all__ = ["CurveRZFourier"]
 

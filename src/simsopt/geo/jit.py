@@ -1,9 +1,11 @@
-from jax import jit as jaxjit
+try:
+    from jax import jit as jaxjit
+except ImportError:
+    jaxjit = None
 from .config import parameters
 
 
 def jit(fun, **kwargs):
-    if parameters["jit"]:
+    if parameters["jit"] and jaxjit is not None:
         return jaxjit(fun, **kwargs)
-    else:
-        return fun
+    return fun

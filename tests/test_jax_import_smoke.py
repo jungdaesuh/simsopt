@@ -79,6 +79,19 @@ def _block_private_optimizer_imports():
     """
 
 
+def _strip_simsopt_editable_finders():
+    return """
+        import sys
+
+        sys.meta_path = [
+            finder
+            for finder in sys.meta_path
+            if type(finder).__module__ != "_simsopt_editable"
+            and not type(finder).__module__.startswith("__editable__")
+        ]
+    """
+
+
 def test_import_package_root():
     """simsopt package imports without simsoptpp."""
     rc, err = _run_import_check("""
@@ -269,6 +282,8 @@ def test_import_jax_core_specs():
             CoilGroupSpec,
             CoilSymmetrySpec,
             CurveCWSFourierRZSpec,
+            CurveHelicalSpec,
+            CurvePlanarFourierSpec,
             CurrentValueSpec,
             CurveRZFourierSpec,
             CurveXYZFourierSpec,
@@ -282,6 +297,8 @@ def test_import_jax_core_specs():
         assert CoilGroupSpec is not None
         assert CoilSymmetrySpec is not None
         assert CurveCWSFourierRZSpec is not None
+        assert CurveHelicalSpec is not None
+        assert CurvePlanarFourierSpec is not None
         assert CurrentValueSpec is not None
         assert CurveRZFourierSpec is not None
         assert CurveXYZFourierSpec is not None
@@ -304,6 +321,8 @@ def test_jax_core_specs_are_pytrees():
             CoilSpec,
             CoilSymmetrySpec,
             CurveCWSFourierRZSpec,
+            CurveHelicalSpec,
+            CurvePlanarFourierSpec,
             CurrentValueSpec,
             CurveRZFourierSpec,
             CurveXYZFourierSpec,
@@ -327,6 +346,8 @@ def test_jax_core_specs_are_pytrees():
             make_fixed_surface_flux_spec,
             make_current_value_spec,
             make_curve_cwsfourier_rz_spec,
+            make_curve_helical_spec,
+            make_curve_planarfourier_spec,
             make_curve_rzfourier_spec,
             make_curve_xyzfourier_spec,
             make_field_eval_spec,
@@ -361,6 +382,20 @@ def test_jax_core_specs_are_pytrees():
             order=0,
             nfp=1,
             stellsym=True,
+        )
+        curve_planar_spec = make_curve_planarfourier_spec(
+            dofs=jnp.asarray([1.1, 0.2, -0.1, 0.05, -0.03, 1.0, 0.0, 0.0, 0.0, 0.2, -0.1, 0.05]),
+            quadpoints=jnp.asarray([0.0, 0.5]),
+            order=2,
+        )
+        curve_helical_spec = make_curve_helical_spec(
+            dofs=jnp.asarray([0.1, -0.03, 0.02, 0.04, -0.01]),
+            quadpoints=jnp.asarray([0.0, 0.5]),
+            order=2,
+            m=5,
+            ell=2,
+            R0=1.0,
+            r=0.3,
         )
         current_spec = make_current_value_spec(2.0)
         field_eval_spec = make_field_eval_spec(jnp.zeros((4, 3)))
@@ -408,6 +443,8 @@ def test_jax_core_specs_are_pytrees():
         assert isinstance(coil_value_spec, CoilSpec)
         assert isinstance(coil_symmetry_spec, CoilSymmetrySpec)
         assert isinstance(curve_cws_spec, CurveCWSFourierRZSpec)
+        assert isinstance(curve_helical_spec, CurveHelicalSpec)
+        assert isinstance(curve_planar_spec, CurvePlanarFourierSpec)
         assert isinstance(current_spec, CurrentValueSpec)
         assert isinstance(curve_rz_spec, CurveRZFourierSpec)
         assert isinstance(curve_xyz_spec, CurveXYZFourierSpec)
@@ -418,6 +455,8 @@ def test_jax_core_specs_are_pytrees():
 
         curve_xyz_leaves, _ = jax.tree_util.tree_flatten(curve_xyz_spec)
         curve_rz_leaves, _ = jax.tree_util.tree_flatten(curve_rz_spec)
+        curve_planar_leaves, _ = jax.tree_util.tree_flatten(curve_planar_spec)
+        curve_helical_leaves, _ = jax.tree_util.tree_flatten(curve_helical_spec)
         curve_cws_leaves, _ = jax.tree_util.tree_flatten(curve_cws_spec)
         coil_symmetry_leaves, _ = jax.tree_util.tree_flatten(coil_symmetry_spec)
         current_leaves, _ = jax.tree_util.tree_flatten(current_spec)
@@ -429,6 +468,8 @@ def test_jax_core_specs_are_pytrees():
 
         assert len(curve_xyz_leaves) == 2
         assert len(curve_rz_leaves) == 2
+        assert len(curve_planar_leaves) == 2
+        assert len(curve_helical_leaves) == 2
         assert len(curve_cws_leaves) == 8
         assert len(coil_symmetry_leaves) == 1
         assert len(current_leaves) == 1
@@ -792,3 +833,37 @@ def test_import_cpu_package_entrypoints_with_simsoptpp():
         assert hasattr(simsopt.objectives, "LeastSquaresProblem")
     """)
     assert rc == 0, f"CPU entrypoint import check failed:\n{err}"
+
+
+def test_import_cpu_geo_core_entrypoints_without_jax():
+    """Core CPU geo entrypoints should import when simsoptpp is present but JAX is absent."""
+    try:
+        from simsoptpp import Curve as _  # noqa: F401
+    except (ImportError, AttributeError):
+        pytest.skip("compiled simsoptpp symbols are not available in this environment")
+
+    rc, err = _run_import_check(f"""
+        import importlib.abc
+
+        {_strip_simsopt_editable_finders()}
+
+        class _BlockJax(importlib.abc.MetaPathFinder):
+            def find_spec(self, fullname, path=None, target=None):
+                del path, target
+                if fullname == "jax" or fullname.startswith("jax."):
+                    raise ImportError("blocked jax import for geo CPU smoke")
+                return None
+
+        sys.meta_path.insert(0, _BlockJax())
+
+        import simsopt.geo
+
+        assert hasattr(simsopt.geo, "Curve")
+        assert hasattr(simsopt.geo, "CurveRZFourier")
+        assert hasattr(simsopt.geo, "CurveXYZFourier")
+        assert hasattr(simsopt.geo, "CurvePlanarFourier")
+        assert hasattr(simsopt.geo, "CurvePerturbed")
+        assert hasattr(simsopt.geo, "BoozerSurface")
+        assert not hasattr(simsopt.geo, "CurveCWSFourier")
+    """)
+    assert rc == 0, f"CPU geo import unexpectedly required jax:\n{err}"
