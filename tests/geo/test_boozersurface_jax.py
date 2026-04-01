@@ -1478,6 +1478,37 @@ class TestBoozerSurfaceJAXExactPath:
         expected_fun = float(0.5 * jnp.mean(jnp.square(res_fn(x_final))))
         assert res["fun"] == pytest.approx(expected_fun)
 
+    def test_run_code_traceable_accepts_grouped_coil_spec_source(self, monkeypatch):
+        """Traceable exact solves must accept ``GroupedCoilSetSpec`` directly."""
+        booz = _make_mock_boozer_surface_exact()
+        coil_set_spec = booz.coil_set_spec
+        sdofs = jnp.asarray(booz.surface.get_dofs(), dtype=jnp.float64)
+        iota = jnp.asarray(0.3, dtype=jnp.float64)
+        G = jnp.asarray(0.05, dtype=jnp.float64)
+        captured = {}
+
+        def fake_newton_exact_traceable(residual_fn, x0, *, maxiter, tol):
+            del maxiter, tol
+            residual = residual_fn(x0)
+            captured["residual"] = residual
+            n = x0.shape[0]
+            return {
+                "x": x0,
+                "residual": residual,
+                "jacobian": jnp.eye(n, dtype=x0.dtype),
+                "nit": 0,
+                "success": True,
+            }
+
+        monkeypatch.setattr(_bsj, "newton_exact_traceable", fake_newton_exact_traceable)
+
+        result = booz.run_code_traceable(coil_set_spec, sdofs, iota, G)
+
+        assert result["type"] == "exact"
+        assert bool(result["success"])
+        assert "residual" in captured
+        assert jnp.all(jnp.isfinite(captured["residual"]))
+
     def test_exact_accepts_and_ignores_optimizer_backend_option(self):
         """Exact solves accept optimizer_backend but ignore it."""
         bs = _MockBiotSavart(_make_mock_coils())

@@ -31,7 +31,8 @@ from .._core.derivative import Derivative, derivative_dec
 from .._core.optimizable import Optimizable
 from ..jax_core.field import (
     grouped_biot_savart_B_from_inputs,
-    grouped_coil_currents_from_inputs,
+    grouped_biot_savart_B_from_spec,
+    grouped_coil_currents_from_spec,
 )
 from ..objectives.utilities import forward_backward_jax, plu_solve_jax
 from ..field.biotsavart_jax_backend import _project_single_coil_cotangent_data
@@ -217,7 +218,7 @@ def _qs_ratio_pure(
 
 def _boozer_residual_J_of_x_inner(
     x_inner,
-    coil_arrays,
+    coil_set_spec,
     quadpoints_phi,
     quadpoints_theta,
     mpol,
@@ -239,13 +240,13 @@ def _boozer_residual_J_of_x_inner(
     adjoint system.
 
     Args:
-        coil_arrays: list of ``(gammas, gammadashs, currents)`` tuples.
+        coil_set_spec: immutable grouped-coil geometry/current payload.
     """
     if optimize_G:
         sdofs, iota, G = x_inner[:-2], x_inner[-2], x_inner[-1]
     else:
         sdofs, iota = x_inner[:-1], x_inner[-1]
-        G = compute_G_from_currents(grouped_coil_currents_from_inputs(coil_arrays))
+        G = compute_G_from_currents(grouped_coil_currents_from_spec(coil_set_spec))
 
     gamma, xphi, xtheta = _surface_geometry_from_dofs(
         sdofs,
@@ -262,7 +263,7 @@ def _boozer_residual_J_of_x_inner(
     num_points = 3 * nphi * ntheta
 
     points = gamma.reshape(-1, 3)
-    B = grouped_biot_savart_B_from_inputs(points, coil_arrays).reshape(
+    B = grouped_biot_savart_B_from_spec(points, coil_set_spec).reshape(
         nphi,
         ntheta,
         3,
@@ -278,7 +279,7 @@ def _boozer_residual_J_of_x_inner(
         xtheta,
         phi_idx,
         points,
-        coil_arrays,
+        coil_set_spec=coil_set_spec,
     )
     J_label = 0.5 * constraint_weight * (label_val - targetlabel) ** 2
     return J_boozer + J_label
@@ -353,7 +354,7 @@ class BoozerResidualJAX(Optimizable):
         def objective_of_coils(coil_dofs, x):
             return _boozer_penalty_objective(
                 x,
-                coil_arrays=self.biotsavart.grouped_coil_arrays_from_dofs(coil_dofs),
+                coil_set_spec=self.biotsavart.coil_set_spec_from_dofs(coil_dofs),
                 quadpoints_phi=booz_surf.quadpoints_phi,
                 quadpoints_theta=booz_surf.quadpoints_theta,
                 mpol=booz_surf.mpol,
@@ -395,9 +396,9 @@ class BoozerResidualJAX(Optimizable):
         effective_G = _resolved_boozer_G(booz_surf)
         cw = self.constraint_weight if self.constraint_weight is not None else 1.0
 
-        B_3d = grouped_biot_savart_B_from_inputs(
+        B_3d = grouped_biot_savart_B_from_spec(
             points,
-            booz_surf._coil_arrays,
+            booz_surf.coil_set_spec,
         ).reshape(nphi, ntheta, 3)
 
         vjp_fn = booz_surf.res["vjp"]
@@ -465,10 +466,9 @@ class BoozerResidualJAX(Optimizable):
         else:
             x_inner = jnp.concatenate([sdofs, jnp.array([iota])])
 
-        coil_arrays = booz_surf._coil_arrays
         dJ_ds_jax = jax.grad(_boozer_residual_J_of_x_inner)(
             x_inner,
-            coil_arrays=coil_arrays,
+            coil_set_spec=booz_surf.coil_set_spec,
             quadpoints_phi=booz_surf.quadpoints_phi,
             quadpoints_theta=booz_surf.quadpoints_theta,
             mpol=booz_surf.mpol,
@@ -751,7 +751,7 @@ def _traceable_exact_residual_kwargs(objective_kwargs):
 
 def _traceable_total_objective(
     x_inner,
-    coil_arrays,
+    coil_set_spec,
     *,
     quadpoints_phi,
     quadpoints_theta,
@@ -772,7 +772,7 @@ def _traceable_total_objective(
     """Pure single-stage objective evaluated at an explicit inner state."""
     J_boozer = _boozer_residual_J_of_x_inner(
         x_inner,
-        coil_arrays=coil_arrays,
+        coil_set_spec=coil_set_spec,
         quadpoints_phi=quadpoints_phi,
         quadpoints_theta=quadpoints_theta,
         mpol=mpol,
@@ -795,12 +795,12 @@ def _traceable_total_objective(
 def _traceable_directional_inner_objective(
     x_inner,
     tangent,
-    coil_arrays,
+    coil_set_spec,
     **objective_kwargs,
 ):
     """Directional derivative of the LS inner objective at an explicit state."""
     inner_objective = _make_boozer_penalty_objective_closure(
-        coil_arrays=coil_arrays,
+        coil_set_spec=coil_set_spec,
         **objective_kwargs,
     )
     return jax.jvp(inner_objective, (x_inner,), (tangent,))[1]
@@ -833,7 +833,7 @@ def _traceable_forward_result(
         }
 
     def general_case(_):
-        coil_arrays = bs_jax.grouped_coil_arrays_from_dofs(coil_dofs)
+        coil_set_spec = bs_jax.coil_set_spec_from_dofs(coil_dofs)
         warmstart_x = _traceable_predict_warmstart_x(
             booz_jax,
             bs_jax,
@@ -848,11 +848,11 @@ def _traceable_forward_result(
             booz_jax._unpack_decision_vector_jax(
                 warmstart_x,
                 optimize_G,
-                coil_arrays,
+                coil_set_spec=coil_set_spec,
             )
         )
         solve_result = booz_jax.run_code_traceable(
-            coil_arrays,
+            coil_set_spec,
             warmstart_sdofs,
             warmstart_iota,
             warmstart_G,
@@ -889,15 +889,15 @@ def _traceable_total_gradient(
     def total_of_coils(cd):
         return _traceable_total_objective(
             solved_x,
-            bs_jax.grouped_coil_arrays_from_dofs(cd),
+            bs_jax.coil_set_spec_from_dofs(cd),
             **total_objective_kwargs,
         )
 
-    coil_arrays = bs_jax.grouped_coil_arrays_from_dofs(coil_dofs)
+    coil_set_spec = bs_jax.coil_set_spec_from_dofs(coil_dofs)
     dJ_dx = jax.grad(
         lambda x: _traceable_total_objective(
             x,
-            coil_arrays,
+            coil_set_spec,
             **total_objective_kwargs,
         )
     )(solved_x)
@@ -907,7 +907,7 @@ def _traceable_total_gradient(
         return _traceable_directional_inner_objective(
             solved_x,
             adjoint,
-            bs_jax.grouped_coil_arrays_from_dofs(cd),
+            bs_jax.coil_set_spec_from_dofs(cd),
             **inner_objective_kwargs,
         )
 
@@ -936,7 +936,7 @@ def _traceable_predict_warmstart_x(
         def baseline_residual_of_coils(cd):
             return _boozer_exact_residual(
                 baseline_x,
-                bs_jax.grouped_coil_arrays_from_dofs(cd),
+                coil_set_spec=bs_jax.coil_set_spec_from_dofs(cd),
                 **exact_residual_kwargs,
             )
 
@@ -950,7 +950,7 @@ def _traceable_predict_warmstart_x(
 
         def baseline_stationarity_of_coils(cd):
             inner_objective = _make_boozer_penalty_objective_closure(
-                coil_arrays=bs_jax.grouped_coil_arrays_from_dofs(cd),
+                coil_set_spec=bs_jax.coil_set_spec_from_dofs(cd),
                 **inner_objective_kwargs,
             )
             return jax.grad(inner_objective)(baseline_x)
@@ -1041,7 +1041,7 @@ def make_traceable_objective(booz_jax, bs_jax, iota_target):
     def baseline_objective_of_coils(coil_dofs, x):
         return _boozer_penalty_objective(
             x,
-            coil_arrays=bs_jax.grouped_coil_arrays_from_dofs(coil_dofs),
+            coil_set_spec=bs_jax.coil_set_spec_from_dofs(coil_dofs),
             quadpoints_phi=booz_jax.quadpoints_phi,
             quadpoints_theta=booz_jax.quadpoints_theta,
             mpol=booz_jax.mpol,

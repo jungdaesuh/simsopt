@@ -493,7 +493,17 @@ According to a document from March 31, 2026, here is the module-by-module implem
    curve/current/coil/field-eval specs and `to_spec()` adapters already exist
    for the main Fourier/coil objects. The remaining work is to extend that
    coverage to the rest of the legacy object families and thread it through
-   more objective paths.
+   the remaining non-hot-path objective families.
+
+   The current objective cleanup slice is now materially better than the
+   earlier draft state:
+   * `SquaredFluxJAX` and the Stage 2 scalar target bundle share immutable
+     fixed-surface setup through `FieldEvalSpec` + `FixedSurfaceFluxSpec`
+   * the Stage 2 target lane now covers all three `SquaredFlux` definitions
+   * target-objective gradients now have centered-FD plus first-order Taylor
+     checks
+   * the traceable single-stage path keeps the explicit `surface_kind`
+     contract instead of relying on hidden geometry fallbacks
 
 4. **Finish mode-owned numerical policy.**
    Backend modes are now real, but chunking, tolerance, provenance, and guardrail expectations still need to be fully centralized under them. 
@@ -1100,11 +1110,16 @@ That mismatch is too wide.
 
    * narrow `BiotSavartJAX` and `BoozerSurfaceJAX` to façade roles
 
-4. **Traceable path promotion**
+4. **SurfaceRZFourier broadening beyond the current hot path**
+
+   * extend coverage beyond the landed Stage 2 / single-stage derivative
+     contracts
+
+5. **Traceable path promotion**
 
    * treat `make_traceable_objective()` as the real on-device path 
 
-5. **Packaging/version cleanup**
+6. **Packaging/version cleanup**
 
    * align envs, workflows, and package metadata
 

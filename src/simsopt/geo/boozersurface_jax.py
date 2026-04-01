@@ -59,6 +59,7 @@ from ..jax_core.field import (
     grouped_coil_index_lists_from_spec,
     grouped_coil_set_spec_from_grouped_data,
     grouped_coil_set_spec_from_lists,
+    grouped_coil_set_spec_from_source,
     grouped_field_data_from_spec,
     grouped_field_inputs_from_spec,
 )
@@ -700,7 +701,8 @@ def _make_ls_penalty_objective(
 
 def _make_boozer_penalty_objective_closure(
     *,
-    coil_arrays,
+    coil_arrays=None,
+    coil_set_spec=None,
     quadpoints_phi,
     quadpoints_theta,
     mpol,
@@ -719,6 +721,7 @@ def _make_boozer_penalty_objective_closure(
     return lambda xx: _boozer_penalty_objective(
         xx,
         coil_arrays=coil_arrays,
+        coil_set_spec=coil_set_spec,
         quadpoints_phi=quadpoints_phi,
         quadpoints_theta=quadpoints_theta,
         mpol=mpol,
@@ -1086,25 +1089,27 @@ class BoozerSurfaceJAX(Optimizable):
             weight_inv_modB=weight_inv_modB,
         )
 
-    def run_code_traceable(self, coil_arrays, sdofs, iota, G):
+    def run_code_traceable(self, coil_source, sdofs, iota, G):
         """Trace-safe pure-array inner solve for the Section 3 target path.
 
-        Accepts explicit coil arrays and warm-start state, returns only JAX
-        arrays / scalars, and never reads or writes ``self.res``,
-        ``self.surface``, or ``self.need_to_run_code``.
+        Accepts a preferred immutable ``GroupedCoilSetSpec`` or the legacy
+        grouped-array payload plus warm-start state, returns only JAX arrays /
+        scalars, and never reads or writes ``self.res``, ``self.surface``, or
+        ``self.need_to_run_code``.
 
         Supported modes:
         - LS Boozer solve on the on-device optimizer lane.
         - Exact Boozer Newton solve (backend-independent).
         """
         weight_inv_modB = self.options["weight_inv_modB"]
+        coil_set_spec = grouped_coil_set_spec_from_source(coil_source)
 
         if self.boozer_type == "exact":
             G_exact = (
                 G
                 if G is not None
                 else compute_G_from_currents(
-                    jnp.concatenate([c for _, _, c in coil_arrays])
+                    grouped_coil_currents_from_spec(coil_set_spec)
                 )
             )
             x0 = jnp.concatenate(
@@ -1115,7 +1120,8 @@ class BoozerSurfaceJAX(Optimizable):
             )
             mask_indices = self._compute_stellsym_mask_indices()
             res_fn = self._make_exact_residual_with(
-                mask_indices, coil_arrays=coil_arrays
+                mask_indices,
+                coil_set_spec=coil_set_spec,
             )
             result = newton_exact_traceable(
                 res_fn,
@@ -1154,7 +1160,7 @@ class BoozerSurfaceJAX(Optimizable):
         obj_fn = self._make_penalty_objective_with(
             optimize_G,
             weight_inv_modB,
-            coil_arrays=coil_arrays,
+            coil_set_spec=coil_set_spec,
         )
         x0 = self._pack_decision_vector(
             iota, G, sdofs=jnp.asarray(sdofs, dtype=jnp.float64)
@@ -1200,7 +1206,7 @@ class BoozerSurfaceJAX(Optimizable):
         sdofs_out, iota_out, G_out = self._unpack_decision_vector_jax(
             newton_result["x"],
             optimize_G,
-            coil_arrays=coil_arrays,
+            coil_set_spec=coil_set_spec,
         )
         finite = (
             jnp.all(jnp.isfinite(newton_result["x"]))
