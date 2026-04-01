@@ -772,6 +772,10 @@ def compute_stage2_max_curvature_value(Jc):
     return float(Jc.J())
 
 
+def stage2_curvature_within_threshold(curvature: float, threshold: float) -> bool:
+    return float(curvature) <= float(threshold)
+
+
 def compute_stage2_term_gradient(term, root_objective):
     return np.asarray(term.dJ(partials=True)(root_objective), dtype=float)
 
@@ -1195,6 +1199,8 @@ def build_stage2_probe_payload(
         )
     )
     flux_grad = np.asarray(Jf.dJ(), dtype=float)
+    curvature_threshold = float(context.Jc.threshold)
+    curvature = float(composite_snapshot["curvature"])
     return {
         "backend": backend,
         "optimizer_backend": optimizer_backend,
@@ -1203,9 +1209,12 @@ def build_stage2_probe_payload(
         "nphi": int(nphi),
         "ntheta": int(ntheta),
         "dof_count": int(composite_grad.size),
-        "curvature_threshold": float(context.Jc.threshold),
-        "curvature_margin": float(context.Jc.threshold)
-        - float(composite_snapshot["curvature"]),
+        "curvature_threshold": curvature_threshold,
+        "curvature_within_threshold": stage2_curvature_within_threshold(
+            curvature,
+            curvature_threshold,
+        ),
+        "curvature_margin": curvature_threshold - curvature,
         "squared_flux": {
             "J": float(Jf.J()),
             "dJ": flux_grad.tolist(),

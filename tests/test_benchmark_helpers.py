@@ -99,6 +99,10 @@ biot_savart_kernel_scaling = _load_benchmark_module(
     "biot_savart_kernel_scaling",
     "benchmarks/biot_savart_kernel_scaling.py",
 )
+jax_ci_contract = _load_benchmark_module(
+    "jax_ci_contract",
+    "scripts/jax_ci_contract.py",
+)
 
 
 def _single_stage_cuda_runtime_available() -> bool:
@@ -247,6 +251,113 @@ def test_short_run_geometry_rel_tolerance_disables_20_iter_smoke_gate():
 def test_short_run_stage2_final_objective_rel_tolerance_tracks_smoke_budget():
     assert short_run_stage2_final_objective_rel_tolerance(20) == pytest.approx(5e-4)
     assert short_run_stage2_final_objective_rel_tolerance(21) == pytest.approx(1e-4)
+
+
+def test_jax_ci_contract_ratchet_rel_tol_tightens_without_loosening():
+    assert jax_ci_contract.ratchet_rel_tol(1e-12, 1e-14, factor=10.0) == pytest.approx(
+        1e-13
+    )
+    assert jax_ci_contract.ratchet_rel_tol(1e-12, 1e-10, factor=10.0) == pytest.approx(
+        1e-12
+    )
+
+
+def test_jax_ci_contract_reduction_order_probe_tracks_ulp_distance(monkeypatch):
+    monkeypatch.setattr(
+        jax_ci_contract,
+        "_sum_on_backend",
+        lambda values, *, backend: 1.0 if backend == "cpu" else np.nextafter(1.0, 2.0),
+    )
+
+    result = jax_ci_contract.probe_reduction_order(
+        1000,
+        target_backend="gpu",
+        max_ulp=10,
+    )
+
+    assert result["cpu_sum"] == pytest.approx(1.0)
+    assert result["backend_sum"] == pytest.approx(np.nextafter(1.0, 2.0))
+    assert result["ulp_distance"] == 1
+    assert result["rel_err"] == pytest.approx(
+        abs(np.nextafter(1.0, 2.0) - 1.0) / 1.0
+    )
+    assert result["passed"] is True
+
+
+def test_jax_ci_contract_same_device_probe_requires_bitwise_identity(monkeypatch):
+    monkeypatch.setattr(
+        jax_ci_contract,
+        "_reproducibility_output",
+        lambda *, backend, seed, sample_size: np.array([1.0, 2.0, 3.0]),
+    )
+
+    result = jax_ci_contract.probe_same_device_bitwise_reproducibility(
+        backend="gpu",
+        seed=1729,
+        sample_size=1000,
+    )
+
+    assert result["bitwise_equal"] is True
+    assert result["rel_err"] == pytest.approx(0.0)
+    assert result["passed"] is True
+
+
+def test_jax_ci_contract_payload_tracks_ratchet_and_pass_state(monkeypatch):
+    monkeypatch.setattr(
+        jax_ci_contract,
+        "ci_reproducibility_contract",
+        lambda: {
+            "gpu_reduction_order_max_ulp": 10,
+            "gpu_reduction_order_rel_tol": 1e-12,
+            "gpu_reduction_order_sample_size": 1000,
+            "gpu_reproducibility_seed": 1729,
+            "gpu_reproducibility_sample_size": 1000,
+            "tolerance_ratchet_factor": 10.0,
+        },
+    )
+    monkeypatch.setattr(
+        jax_ci_contract,
+        "build_provenance",
+        lambda jax_module, jaxlib_module, *, title, extra=None: {
+            "title": title,
+            "repo_sha": "deadbeef",
+            "backend": "gpu",
+            "devices": ["gpu:0"],
+            **(extra or {}),
+        },
+    )
+    monkeypatch.setattr(
+        jax_ci_contract,
+        "probe_reduction_order",
+        lambda sample_size, *, target_backend, max_ulp: {
+            "sample_size": sample_size,
+            "cpu_sum": 1.0,
+            "backend_sum": np.nextafter(1.0, 2.0),
+            "rel_err": 1e-14,
+            "ulp_distance": 1,
+            "passed": True,
+        },
+    )
+    monkeypatch.setattr(
+        jax_ci_contract,
+        "probe_same_device_bitwise_reproducibility",
+        lambda *, backend, seed, sample_size: {
+            "seed": seed,
+            "sample_size": sample_size,
+            "first": [1.0, 2.0, 3.0],
+            "second": [1.0, 2.0, 3.0],
+            "bitwise_equal": True,
+            "rel_err": 0.0,
+            "passed": True,
+        },
+    )
+
+    payload = jax_ci_contract.build_ci_contract_payload(requested_platform="cuda")
+
+    assert payload["passed"] is True
+    assert payload["reduction_order"]["ulp_distance"] == 1
+    assert payload["tolerance_drift"]["ratcheted_rel_tol"] == pytest.approx(1e-13)
+    assert payload["same_device_bitwise_reproducibility"]["bitwise_equal"] is True
 
 
 def test_single_stage_init_fixture_files_are_vendored():
@@ -1443,6 +1554,22 @@ def test_stage2_e2e_comparison_accepts_barrier_edge_objective_drift():
             curvature_threshold=40.0,
             cpu_curvature_margin=5e-7,
             jax_curvature_margin=6e-7,
+            cpu_curvature_barrier_edge_active=True,
+            jax_curvature_barrier_edge_active=True,
+        )
+    )
+
+    assert failures == []
+
+
+def test_stage2_e2e_comparison_accepts_curvature_exactly_at_threshold():
+    failures = evaluate_stage2_e2e_comparison(
+        _stage2_ondevice_quality_case(
+            cpu_max_curvature=40.0,
+            jax_max_curvature=40.0,
+            curvature_threshold=40.0,
+            cpu_curvature_margin=0.0,
+            jax_curvature_margin=0.0,
             cpu_curvature_barrier_edge_active=True,
             jax_curvature_barrier_edge_active=True,
         )

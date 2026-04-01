@@ -50,6 +50,10 @@ __all__ = ['Optimizable', 'make_optimizable', 'load', 'save',
            'OptimizableSum', 'ScaledOptimizable']
 
 
+def _optimizable_ancestor_sort_key(opt: "Optimizable") -> tuple[str, int]:
+    return (opt.__class__.__name__, opt._id.id)
+
+
 class DOFs(GSONable, Hashable):
     """
     Defines the (D)egrees (O)f (F)reedom(s) associated with optimization
@@ -916,7 +920,14 @@ class Optimizable(ABC_Callable, Hashable, GSONable, metaclass=OptimizableMeta):
         for parent in self.parents:
             ancestors += parent.ancestors
         ancestors += self.parents
-        return sorted(dict.fromkeys(ancestors), key=lambda a: a.name)
+        # ``name`` embeds a numeric instance suffix as a string, so plain
+        # lexicographic sorting misorders double-digit siblings
+        # (``Current10`` < ``Current9``).  Preserve the historical class-grouped
+        # ordering, but compare the immutable numeric ids numerically.
+        return sorted(
+            dict.fromkeys(ancestors),
+            key=_optimizable_ancestor_sort_key,
+        )
 
     @property
     def unique_dof_lineage(self):

@@ -69,9 +69,14 @@ def Lp_curvature_pure(kappa, gammadash, p, desired_kappa):
 @jit
 def curvature_barrier_pure(kappa, gammadash, threshold):
     """
-    A strict interior-point barrier for pointwise curvature constraints.
-    The value is finite only when every sampled curvature stays strictly below
-    ``threshold``.
+    A strict interior-point barrier used to optimize against the engineering
+    curvature limit.
+
+    The production/reporting contract may treat the configured limit as
+    inclusive (``kappa <= threshold``), but the barrier itself stays strict so
+    its value and gradient remain the expected log-barrier surrogate inside the
+    feasible region. The value is therefore finite only when every sampled
+    curvature stays strictly below ``threshold``.
     """
     arc_length = jnp.linalg.norm(gammadash, axis=1)
     feasible = kappa < threshold

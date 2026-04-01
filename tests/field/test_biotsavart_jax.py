@@ -388,6 +388,21 @@ class TestBiotSavartJaxCppParity:
 class TestBiotSavartJaxChunkedParity:
     """Directly compare chunked low-level kernels against dense references."""
 
+    def test_backend_cache_invalidation_clears_kernel_cache(self):
+        with _kernel_tuning_env("jax_cpu_parity"):
+            from simsopt.jax_core import biotsavart as core_bs
+
+            core_bs.invalidate_kernel_cache()
+            gammas, gammadashs, currents = _make_shifted_circular_coils(4, nquad=16)
+            points = jnp.array([[0.2, -0.1, 0.05]], dtype=jnp.float64)
+
+            core_bs.biot_savart_B(points, gammas, gammadashs, currents)
+            assert core_bs._make_kernel.cache_info().currsize > 0
+
+            invalidate_backend_cache()
+
+            assert core_bs._make_kernel.cache_info().currsize == 0
+
     def test_two_chunk_coil_and_quadrature_paths_match_dense_reference(
         self, monkeypatch
     ):

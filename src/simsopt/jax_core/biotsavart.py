@@ -18,6 +18,7 @@ from ..backend import (
     get_field_kernel_tuning,
     get_point_chunk_size,
 )
+from ..backend.runtime import register_backend_cache_clear
 
 __all__ = [
     "biot_savart_B",
@@ -396,6 +397,9 @@ def invalidate_kernel_cache() -> None:
     to ensure the next ``biot_savart_*`` call rebuilds with the new config.
     """
     _make_kernel.cache_clear()
+
+
+register_backend_cache_clear(invalidate_kernel_cache)
 
 
 # ── Public API ────────────────────────────────────────────────────────

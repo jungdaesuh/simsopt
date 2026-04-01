@@ -94,6 +94,10 @@ def _curvature_margin(curvature: float, threshold: float) -> float:
     return float(threshold) - float(curvature)
 
 
+def _curvature_within_threshold(curvature: float, threshold: float) -> bool:
+    return float(curvature) <= float(threshold)
+
+
 def _curvature_barrier_edge_active(
     curvature: float,
     threshold: float,
@@ -187,8 +191,10 @@ def _build_ondevice_stage2_metrics(
             jax_max_curvature,
             curvature_threshold,
         ),
-        "jax_curvature_not_worse_than_cpu": jax_max_curvature
-        <= max(cpu_max_curvature, curvature_threshold),
+        "jax_curvature_not_worse_than_cpu": _curvature_within_threshold(
+            jax_max_curvature,
+            max(cpu_max_curvature, curvature_threshold),
+        ),
         "jax_self_intersecting": bool(jax_results["SELF_INTERSECTING"]),
     }
 

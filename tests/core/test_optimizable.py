@@ -58,6 +58,10 @@ class Adder(Optimizable):
     #                d.get("dof_fixed", None))
 
 
+class OrderingProbe(Adder):
+    pass
+
+
 class OptClassWithParents(Optimizable):
     def __init__(self, val, depends_on=None):
         if depends_on is None:
@@ -239,12 +243,19 @@ class OptimizableTestsWithDirectParentFnCalls(unittest.TestCase):
         self.assertAlmostEqual(self.opt.f(), 28.0/15)
         np.allclose(self.opt(), 28.0/15)
 
-        # Change parent objects and see if the DOFs are propagated
-        opt1 = self.opt.opt1
-        opt1.set('x1', 5)
-        opt2 = self.opt.opt2
-        opt2.set('x1', 4)
-        np.allclose(self.opt(), 34.0/24)
+
+class OptimizableAncestorOrderingTests(unittest.TestCase):
+    def test_ancestors_keep_numeric_instance_order_past_single_digits(self):
+        probes = [OrderingProbe(n=1, x0=[float(i)]) for i in range(10)]
+        parent_a = probes[8]
+        parent_b = probes[9]
+
+        child = OptClassWithParents(0.0, depends_on=[parent_a, parent_b])
+
+        self.assertEqual(
+            [opt._id.id for opt in child.ancestors],
+            [parent_a._id.id, parent_b._id.id],
+        )
 
 
 class OptClassWithDirectRegisterParentFn(Optimizable):

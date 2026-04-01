@@ -12,7 +12,9 @@ All tests require ``simsoptpp`` for the CPU reference.
 import json
 import importlib
 import importlib.util
+from contextlib import contextmanager
 from functools import partial
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -65,7 +67,10 @@ from simsopt.geo.optimizer_jax import (
     jax_minimize,
 )
 from simsopt.objectives.fluxobjective_jax import SquaredFluxJAX
-from simsopt.objectives.stage2_target_objective_jax import build_stage2_target_objective
+from simsopt.objectives.stage2_target_objective_jax import (
+    Stage2PenaltyConfig,
+    build_stage2_target_objective,
+)
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -120,6 +125,20 @@ _TARGET_OBJECTIVE_GRAD_ATOL = 5e-12
 _TARGET_OBJECTIVE_COMPOSITE_GRAD_ATOL = 1.5e-11
 _TARGET_OBJECTIVE_FD_EPS = 1e-6
 _TARGET_OBJECTIVE_FD_ATOL = 2e-5
+_BACKEND_RUNTIME_ENV_VARS = (
+    "SIMSOPT_BACKEND_MODE",
+    "SIMSOPT_BACKEND_STRICT",
+    "SIMSOPT_JAX_DEBUG_NANS",
+    "SIMSOPT_JAX_TRANSFER_GUARD",
+    "SIMSOPT_JAX_COMPILATION_CACHE_DIR",
+    "SIMSOPT_JAX_COIL_CHUNK_SIZE",
+    "SIMSOPT_JAX_QUADRATURE_BLOCK_SIZE",
+    "SIMSOPT_BACKEND",
+    "STAGE2_BACKEND",
+    "SIMSOPT_JAX_PLATFORM",
+    "SIMSOPT_JAX_BACKEND",
+    "JAX_PLATFORMS",
+)
 
 
 _enable_strict_jax_backend = partial(enable_strict_jax_backend, mode="jax_cpu_parity")
@@ -250,6 +269,29 @@ def _run_stage2_probe_and_load_payload(*args):
     return result, payload
 
 
+@contextmanager
+def _isolated_backend_runtime(mode: str):
+    from simsopt.backend import invalidate_backend_cache, set_backend
+    from simsopt.jax_core import invalidate_kernel_cache
+
+    previous_env = {name: os.environ.get(name) for name in _BACKEND_RUNTIME_ENV_VARS}
+    try:
+        if mode == "native_cpu":
+            set_backend(mode, strict=False, configure_runtime=False)
+        else:
+            set_backend(mode, strict=False)
+        invalidate_kernel_cache()
+        yield
+    finally:
+        for name, value in previous_env.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+        invalidate_backend_cache()
+        invalidate_kernel_cache()
+
+
 def _build_fake_b_vjp_profile():
     return {
         "wall_time_s": 0.125,
@@ -363,15 +405,17 @@ def _build_stage2_target_objective_contract_case(
         tf_coils=tf_coils,
         banana_coils=banana_coils,
         banana_curve=banana_curve,
-        squared_flux_weight=1.0,
-        length_weight=0.0005,
-        length_target=1.75,
-        cc_weight=100.0,
-        cc_threshold=0.05,
-        curvature_weight=0.0001,
-        curvature_threshold=40.0,
-        curvature_p_norm=4,
-        squared_flux_definition=definition,
+        penalty_config=Stage2PenaltyConfig(
+            squared_flux_weight=1.0,
+            length_weight=0.0005,
+            length_target=1.75,
+            cc_weight=100.0,
+            cc_threshold=0.05,
+            curvature_weight=0.0001,
+            curvature_threshold=40.0,
+            curvature_p_norm=4,
+            squared_flux_definition=definition,
+        ),
     )
 
     if return_context:
@@ -777,6 +821,264 @@ class TestShortOptimizationRun:
             f"Short-run final objectives differ by {rel_diff:.2%}: "
             f"CPU={j_cpu:.6e}, JAX={j_jax:.6e}"
         )
+
+
+# -----------------------------------------------------------------------
+# Test 4b: Optimizer trajectory parity (P28)
+# -----------------------------------------------------------------------
+
+# P28/P29/P30 tolerances.
+#
+# Calibration rationale (see jax_port_code_review_2026-04-01.md §6):
+#
+# - JAX does NOT guarantee bitwise reproducibility across JIT states
+#   (jax/docs/api_compatibility.md: "exact numerics are not necessarily
+#   stable ... within or without jax.jit").
+# - XLA reduction order is unspecified; floating-point non-associativity
+#   means accumulated sums can differ by O(eps_mach * condition_number).
+# - JAX's own optimizer tests use rtol=2e-4 for converged solutions and
+#   explicitly note "cannot compare step for step with scipy BFGS."
+# - Upstream SIMSOPT uses np.allclose (rtol=1e-5) for algorithm parity
+#   and 1e-3 to 1e-4 for physics quantities at convergence.
+#
+# P28 (identical start): trajectories match to ~1e-13, set gate at 1e-6.
+# P29 (physics at convergence): upstream range 1e-3 to 1e-4, set 1e-3.
+# P30 (perturbed start): gradient differences compound through L-BFGS-B
+#   Hessian approximation over 50 steps.  Upstream does not test basin
+#   stability.  Gate set at 1e-2 (10x achieved ~3e-3), matching upstream
+#   cross-stage tolerance range (test_qfm.py: 1e-3).
+_TRAJECTORY_MAXITER = 50
+_TRAJECTORY_OBJ_PARITY_RTOL = 1e-6
+_TRAJECTORY_DOF_L2_RTOL = 1e-6
+_PHYSICS_PARITY_RTOL = 1e-3
+_BASIN_OBJ_PARITY_RTOL = 1e-2
+_BASIN_DOF_L2_RTOL = 1e-2
+_BASIN_PERTURBATION_FRACTION = 5e-3
+_LENGTH_WEIGHT = 1e-3
+_LENGTH_TARGET = 5.0
+
+
+def _stage2_relative_l2_error(lhs, rhs) -> float:
+    lhs_array = np.asarray(lhs, dtype=float)
+    rhs_array = np.asarray(rhs, dtype=float)
+    return float(
+        np.linalg.norm(lhs_array - rhs_array) / np.linalg.norm(lhs_array)
+    )
+
+
+def _stage2_basin_perturbation(dofs, rng) -> np.ndarray:
+    dof_array = np.asarray(dofs, dtype=float)
+    dof_scale = np.maximum(np.abs(dof_array), 1.0)
+    return _BASIN_PERTURBATION_FRACTION * dof_scale * rng.randn(*dof_array.shape)
+
+
+def _stage2_max_bdotn_over_b(all_coils, surface) -> float:
+    bs_eval = BiotSavart(all_coils)
+    bs_eval.set_points(surface.gamma().reshape((-1, 3)))
+    b_surface = np.asarray(bs_eval.B())
+    normal = surface.unitnormal().reshape((-1, 3))
+    bdotn = np.sum(b_surface * normal, axis=1)
+    bmag = np.linalg.norm(b_surface, axis=1)
+    return float(np.max(np.abs(bdotn) / bmag))
+
+
+def _stage2_coil_lengths(curves) -> list[float]:
+    return [float(CurveLength(curve).J()) for curve in curves]
+
+
+def _build_and_run_stage2(
+    use_jax, maxiter=_TRAJECTORY_MAXITER, dof_perturbation=None
+):
+    """Build a Stage 2 composite problem, run L-BFGS-B, return full results.
+
+    Shared helper for P28/P29/P30.  Creates all objects from scratch — no
+    shared state with other tests. Pins the backend mode per lane so earlier
+    suite activity cannot bleed a different runtime contract into this helper.
+    """
+    from scipy.optimize import minimize as scipy_minimize
+
+    with _isolated_backend_runtime("jax_cpu_parity" if use_jax else "native_cpu"):
+        nfp, stellsym = 1, False
+        curves = create_equally_spaced_curves(
+            2,
+            nfp,
+            stellsym=stellsym,
+            R0=1.0,
+            R1=0.5,
+            order=3,
+        )
+        currents_list = [Current(1e5) for _ in range(2)]
+        all_coils = coils_via_symmetries(curves, currents_list, nfp, stellsym)
+
+        s = SurfaceRZFourier(
+            nfp=nfp,
+            stellsym=stellsym,
+            mpol=1,
+            ntor=1,
+            quadpoints_phi=np.linspace(0, 1, 32, endpoint=False),
+            quadpoints_theta=np.linspace(0, 1, 32, endpoint=False),
+        )
+        s.set_rc(0, 0, 1.0)
+        s.set_rc(1, 0, 0.2)
+        s.set_zs(1, 0, 0.2)
+        s.fix_all()
+
+        if use_jax:
+            bs = BiotSavartJAX(all_coils)
+            Jf = SquaredFluxJAX(s, bs)
+        else:
+            bs_obj = BiotSavart(all_coils)
+            bs_obj.set_points(s.gamma().reshape((-1, 3)))
+            Jf = SquaredFlux(s, bs_obj)
+
+        Jls = CurveLength(curves[0])
+        JF = Jf + _LENGTH_WEIGHT * QuadraticPenalty(Jls, _LENGTH_TARGET, "max")
+
+        dofs = JF.x.copy()
+        if dof_perturbation is not None:
+            dofs = dofs + dof_perturbation
+
+        iteration_objs = []
+
+        def callback(x):
+            JF.x = x
+            iteration_objs.append(float(JF.J()))
+
+        def fun(x):
+            JF.x = x
+            return JF.J(), JF.dJ()
+
+        res = scipy_minimize(
+            fun,
+            dofs,
+            jac=True,
+            method="L-BFGS-B",
+            options={"maxiter": maxiter, "ftol": 0.0},
+            callback=callback,
+        )
+
+        JF.x = res.x
+        return {
+            "trajectory": np.array(iteration_objs),
+            "initial_dofs": np.array(dofs).copy(),
+            "final_dofs": np.array(res.x).copy(),
+            "final_obj": float(res.fun),
+            "nit": int(res.nit),
+            # Measure final physics with a fresh CPU BiotSavart instance so
+            # backend-specific caches cannot affect the parity check.
+            "max_BdotN_over_B": _stage2_max_bdotn_over_b(all_coils, s),
+            "coil_lengths": _stage2_coil_lengths(curves),
+        }
+
+
+class TestOptimizerTrajectoryParity:
+    """P28/P29/P30: optimizer trajectory, physics, and basin stability."""
+
+    @pytest.fixture(scope="class")
+    def trajectory_results(self):
+        """Run CPU and JAX optimizations once, share across P28/P29."""
+        return _build_and_run_stage2(False), _build_and_run_stage2(True)
+
+    def test_lbfgs_trajectory_parity(self, trajectory_results):
+        """P28: 50 L-BFGS-B steps — trajectory and final DOFs must match."""
+        cpu, jax_r = trajectory_results
+
+        min_len = min(len(cpu["trajectory"]), len(jax_r["trajectory"]))
+        assert min_len >= 5, (
+            f"Too few iterations: CPU={len(cpu['trajectory'])}, "
+            f"JAX={len(jax_r['trajectory'])}"
+        )
+
+        traj_cpu = cpu["trajectory"][:min_len]
+        traj_jax = jax_r["trajectory"][:min_len]
+        traj_rel_err = np.max(
+            np.abs(traj_cpu - traj_jax) / np.maximum(np.abs(traj_cpu), 1e-30)
+        )
+        print(f"Trajectory: {min_len} iters, max rel err = {traj_rel_err:.2e}")
+        assert traj_rel_err < _TRAJECTORY_OBJ_PARITY_RTOL, (
+            f"Trajectory diverged: max rel err = {traj_rel_err:.2e} "
+            f"(threshold {_TRAJECTORY_OBJ_PARITY_RTOL:.0e})"
+        )
+
+        obj_rel_err = relative_error(jax_r["final_obj"], cpu["final_obj"])
+        print(
+            f"Final objective: CPU={cpu['final_obj']:.8e}, "
+            f"JAX={jax_r['final_obj']:.8e}, rel_err={obj_rel_err:.2e}"
+        )
+        assert obj_rel_err < _TRAJECTORY_OBJ_PARITY_RTOL
+
+        dof_l2 = _stage2_relative_l2_error(cpu["final_dofs"], jax_r["final_dofs"])
+        print(f"Final DOFs L2 relative error = {dof_l2:.2e}")
+        assert dof_l2 < _TRAJECTORY_DOF_L2_RTOL, (
+            f"Final DOFs diverged: L2 rel = {dof_l2:.2e}"
+        )
+
+    def test_physics_quantities_at_convergence(self, trajectory_results):
+        """P29: max|B.n|/|B| and coil lengths agree to 3+ digits."""
+        cpu, jax_r = trajectory_results
+
+        bn_rel = relative_error(jax_r["max_BdotN_over_B"], cpu["max_BdotN_over_B"])
+        print(
+            f"|B.n|/|B|: CPU={cpu['max_BdotN_over_B']:.6e}, "
+            f"JAX={jax_r['max_BdotN_over_B']:.6e}, rel_err={bn_rel:.2e}"
+        )
+        assert bn_rel < _PHYSICS_PARITY_RTOL, (
+            f"|B.n|/|B| diverged: rel_err={bn_rel:.2e}"
+        )
+
+        assert len(cpu["coil_lengths"]) == len(jax_r["coil_lengths"]), (
+            "Coil-count mismatch at convergence: "
+            f"CPU={len(cpu['coil_lengths'])}, JAX={len(jax_r['coil_lengths'])}"
+        )
+        for i, (lc, lj) in enumerate(zip(cpu["coil_lengths"], jax_r["coil_lengths"])):
+            rel = relative_error(lj, lc)
+            print(f"Coil {i} length: CPU={lc:.6f}, JAX={lj:.6f}, rel={rel:.2e}")
+            assert rel < _PHYSICS_PARITY_RTOL, (
+                f"Coil {i} length diverged: rel={rel:.2e}"
+            )
+
+    def test_basin_stability(self):
+        """P30: Perturbed initial coils converge to same local minimum."""
+        rng = np.random.RandomState(42)
+
+        # Get DOF count from a throwaway build
+        probe = _build_and_run_stage2(use_jax=False, maxiter=0)
+        perturbation = _stage2_basin_perturbation(probe["final_dofs"], rng)
+
+        cpu = _build_and_run_stage2(False, dof_perturbation=perturbation)
+        jax_r = _build_and_run_stage2(True, dof_perturbation=perturbation)
+        np.testing.assert_allclose(cpu["initial_dofs"], jax_r["initial_dofs"])
+
+        obj_rel = relative_error(jax_r["final_obj"], cpu["final_obj"])
+        print(
+            f"Basin stability: CPU={cpu['final_obj']:.8e}, "
+            f"JAX={jax_r['final_obj']:.8e}, rel_err={obj_rel:.2e}"
+        )
+        assert obj_rel < _BASIN_OBJ_PARITY_RTOL, (
+            f"Perturbed runs diverged: rel_err={obj_rel:.2e}"
+        )
+
+        dof_l2 = _stage2_relative_l2_error(cpu["final_dofs"], jax_r["final_dofs"])
+        print(f"Basin stability DOFs L2 relative error = {dof_l2:.2e}")
+        assert dof_l2 < _BASIN_DOF_L2_RTOL, (
+            f"Perturbed final DOFs diverged: L2 rel={dof_l2:.2e}"
+        )
+
+    def test_stage2_helper_restores_backend_runtime_contract(self, monkeypatch):
+        from simsopt.backend import get_backend_config, invalidate_backend_cache
+
+        monkeypatch.setenv("SIMSOPT_BACKEND_MODE", "jax_gpu_parity")
+        monkeypatch.setenv("SIMSOPT_BACKEND_STRICT", "1")
+        invalidate_backend_cache()
+
+        try:
+            _build_and_run_stage2(True, maxiter=0)
+
+            restored = get_backend_config()
+            assert restored.mode == "jax_gpu_parity"
+            assert restored.strict is True
+        finally:
+            invalidate_backend_cache()
 
 
 # -----------------------------------------------------------------------
@@ -3082,10 +3384,13 @@ class TestStage2OptimizerContract:
         target_objective_bundle = types.SimpleNamespace(expected_dof_count=3)
         dofs = np.zeros(2, dtype=float)
 
-        assert stage2_script.should_build_stage2_target_objective(
-            field_backend,
-            optimizer_backend,
-        ) or (export_objective_json is not None and optimizer_backend == "ondevice")
+        if field_backend == "jax":
+            assert stage2_script.should_build_stage2_target_objective(
+                field_backend,
+                optimizer_backend,
+            )
+        else:
+            assert export_objective_json is not None
         with pytest.raises(
             RuntimeError,
             match=stage2_script.STAGE2_TARGET_OBJECTIVE_DOF_LAYOUT_ERROR,
@@ -3205,6 +3510,7 @@ class TestStage2OptimizerContract:
             explicit_snapshot["mean_abs_relBfinal_norm"]
         )
         assert payload["curvature_threshold"] == pytest.approx(40.0)
+        assert payload["curvature_within_threshold"] is True
         assert payload["curvature_margin"] == pytest.approx(22.0)
         if optimizer_backend == "ondevice":
             assert payload["composite"]["J"] == pytest.approx(float(expected_value))
