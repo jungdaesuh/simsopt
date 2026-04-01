@@ -1555,14 +1555,20 @@ if __name__ == "__main__":
     final_snapshot = None
     optimizer_timings = None
     target_objective_bundle = None
-    outer_contract = resolve_stage2_optimizer_contract(
-        args.backend,
-        args.optimizer_backend,
-    )
-    use_scalar_objective = outer_contract.use_scalar_objective
     needs_target_probe_payload = (
         args.export_objective_json is not None and args.optimizer_backend == "ondevice"
     )
+    probe_only_target_payload = (
+        args.probe_only and needs_target_probe_payload and args.backend != "jax"
+    )
+    outer_contract = None
+    use_scalar_objective = False
+    if not probe_only_target_payload:
+        outer_contract = resolve_stage2_optimizer_contract(
+            args.backend,
+            args.optimizer_backend,
+        )
+        use_scalar_objective = outer_contract.use_scalar_objective
     needs_target_objective_bundle = use_scalar_objective or needs_target_probe_payload
     if needs_target_objective_bundle:
         target_objective_bundle = build_stage2_target_objective(
