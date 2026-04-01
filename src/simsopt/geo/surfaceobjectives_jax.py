@@ -634,6 +634,12 @@ def _traceable_iota_from_x_inner(x_inner, optimize_G):
     return x_inner[-2] if optimize_G else x_inner[-1]
 
 
+def _traceable_iota_target_penalty(x_inner, *, optimize_G, iota_target):
+    """Quadratic iota-target penalty at an explicit inner state."""
+    iota = _traceable_iota_from_x_inner(x_inner, optimize_G)
+    return 0.5 * (iota - iota_target) ** 2
+
+
 _TRACEABLE_INNER_OBJECTIVE_KEYS = (
     "quadpoints_phi",
     "quadpoints_theta",
@@ -741,8 +747,20 @@ def _traceable_total_objective(
         label_type=label_type,
         phi_idx=phi_idx,
     )
-    iota = _traceable_iota_from_x_inner(x_inner, optimize_G)
-    return J_boozer + 0.5 * (iota - iota_target) ** 2
+    return J_boozer + _traceable_iota_target_penalty(
+        x_inner,
+        optimize_G=optimize_G,
+        iota_target=iota_target,
+    )
+
+
+def _evaluate_traceable_total_objective(x_inner, coil_set_spec, objective_kwargs):
+    """Evaluate the full traceable scalar objective from packed kwargs."""
+    return _traceable_total_objective(
+        x_inner,
+        coil_set_spec,
+        **_traceable_total_objective_kwargs(objective_kwargs),
+    )
 
 
 def _traceable_directional_inner_objective(
@@ -815,7 +833,11 @@ def _traceable_forward_result(
         return {
             "value": jnp.where(
                 solve_result["success"],
-                solve_result["fun"],
+                _evaluate_traceable_total_objective(
+                    solve_result["x"],
+                    coil_set_spec,
+                    objective_kwargs,
+                ),
                 failure_penalty,
             ),
             "x": solve_result["x"],
@@ -836,22 +858,21 @@ def _traceable_total_gradient(
     objective_kwargs,
 ):
     """Implicit total derivative of the pure traceable objective."""
-    total_objective_kwargs = _traceable_total_objective_kwargs(objective_kwargs)
     inner_objective_kwargs = _traceable_inner_objective_kwargs(objective_kwargs)
 
     def total_of_coils(cd):
-        return _traceable_total_objective(
+        return _evaluate_traceable_total_objective(
             solved_x,
             bs_jax.coil_set_spec_from_dofs(cd),
-            **total_objective_kwargs,
+            objective_kwargs,
         )
 
     coil_set_spec = bs_jax.coil_set_spec_from_dofs(coil_dofs)
     dJ_dx = jax.grad(
-        lambda x: _traceable_total_objective(
+        lambda x: _evaluate_traceable_total_objective(
             x,
             coil_set_spec,
-            **total_objective_kwargs,
+            objective_kwargs,
         )
     )(solved_x)
     adjoint = forward_backward_jax(*solved_plu, dJ_dx, iterative_refinement=True)
@@ -991,28 +1012,17 @@ def make_traceable_objective(booz_jax, bs_jax, iota_target):
         sdofs=warmstart_sdofs,
     )
 
-    def baseline_objective_of_coils(coil_dofs, x):
-        return _boozer_penalty_objective(
-            x,
-            coil_set_spec=bs_jax.coil_set_spec_from_dofs(coil_dofs),
-            quadpoints_phi=booz_jax.quadpoints_phi,
-            quadpoints_theta=booz_jax.quadpoints_theta,
-            mpol=booz_jax.mpol,
-            ntor=booz_jax.ntor,
-            nfp=booz_jax.nfp,
-            stellsym=booz_jax.stellsym,
-            scatter_indices=booz_jax.scatter_indices,
-            surface_kind=booz_jax._surface_geometry_kind,
-            targetlabel=booz_jax.targetlabel,
-            constraint_weight=booz_jax.constraint_weight,
-            label_type=booz_jax.label_type,
-            phi_idx=booz_jax.phi_idx,
-            optimize_G=optimize_G,
-            weight_inv_modB=booz_jax.options["weight_inv_modB"],
-        )
-
     baseline_value = float(
-        jax.jit(baseline_objective_of_coils)(baseline_coil_dofs, baseline_x)
+        jax.jit(
+            lambda x, coil_set_spec: _evaluate_traceable_total_objective(
+                x,
+                coil_set_spec,
+                objective_kwargs,
+            )
+        )(
+            baseline_x,
+            bs_jax.coil_set_spec_from_dofs(baseline_coil_dofs),
+        )
     )
     failure_value = jnp.asarray(
         baseline_value + max(abs(baseline_value), 1.0),

@@ -106,6 +106,7 @@ from examples.single_stage_optimization.SINGLE_STAGE import (  # noqa: E402
 _HIDDEN_SPEC_FALLBACK_PATTERN = (
     "BiotSavartJAX.*hidden immutable-spec compatibility fallback.*"
 )
+_TRACEABLE_OBJECTIVE_ABS_TOL = 1e-32
 
 
 # -----------------------------------------------------------------------
@@ -3294,14 +3295,14 @@ class TestTraceableObjective:
     """
 
     @staticmethod
-    def _make_traceable(bs_jax, booz_jax):
+    def _make_traceable(bs_jax, booz_jax, *, iota_target_shift=0.0):
         """Build the traceable objective and coil DOFs from a solved setup.
 
         Returns (f, coil_dofs, jr_jax, iotas_jax, iota_target).
         """
         jr_jax = BoozerResidualJAX(booz_jax, bs_jax)
         iotas_jax = IotasJAX(booz_jax)
-        iota_target = booz_jax.res["iota"]
+        iota_target = booz_jax.res["iota"] + iota_target_shift
 
         from simsopt.geo.surfaceobjectives_jax import make_traceable_objective
 
@@ -3324,7 +3325,31 @@ class TestTraceableObjective:
             float(f(coil_dofs)),
             j_reference,
             rtol=1e-10,
+            atol=_TRACEABLE_OBJECTIVE_ABS_TOL,
             err_msg="Traceable objective value differs from JF.J()",
+        )
+
+    def test_pure_objective_matches_optimizable_value_with_offset_iota_target(
+        self,
+        boozer_setup,
+    ):
+        """Test 1b: nonzero iota penalty is included in the pure forward path."""
+        (_, _, _, _, bs_jax, _, booz_jax, _) = boozer_setup
+        f, coil_dofs, jr_jax, iotas_jax, iota_target = self._make_traceable(
+            bs_jax,
+            booz_jax,
+            iota_target_shift=1.0e-3,
+        )
+
+        JF_jax = jr_jax + QuadraticPenalty(iotas_jax, iota_target)
+        j_reference = JF_jax.J()
+
+        np.testing.assert_allclose(
+            float(f(coil_dofs)),
+            j_reference,
+            rtol=1e-10,
+            atol=_TRACEABLE_OBJECTIVE_ABS_TOL,
+            err_msg="Traceable objective dropped the offset iota penalty",
         )
 
     def test_pure_objective_is_jax_grad_differentiable(self, boozer_setup):
@@ -3554,12 +3579,11 @@ class TestTraceableObjective:
             # The compared objective values are nominally zero at this point in
             # the short run, so a tiny absolute floor is more meaningful than a
             # pure relative check.
-            traceable_objective_abs_tol = 1e-32
             np.testing.assert_allclose(
                 float(result_a.fun),
                 float(result_b.fun),
                 rtol=1e-10,
-                atol=traceable_objective_abs_tol,
+                atol=_TRACEABLE_OBJECTIVE_ABS_TOL,
                 err_msg=(
                     f"Traceable J={float(result_a.fun):.6e} vs "
                     f"explicit J={float(result_b.fun):.6e}"
