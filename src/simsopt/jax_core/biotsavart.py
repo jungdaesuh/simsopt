@@ -8,7 +8,7 @@ All functions accept and return JAX arrays and are fully traceable
 by ``jax.grad``, ``jax.jacfwd``, ``jax.jacrev``, and ``jax.hessian``.
 """
 
-from functools import partial
+from functools import lru_cache
 
 import jax
 from jax import lax
@@ -30,21 +30,26 @@ __all__ = [
     "group_coil_data",
     "grouped_biot_savart_B",
     "grouped_biot_savart_A",
+    "invalidate_kernel_cache",
 ]
 
 _MU0_OVER_4PI = 1e-7
 
 
-def _coil_chunk_size() -> int:
-    return get_coil_chunk_size()
+# ── Config reader (monkeypatchable by tests) ──────────────────────────
 
 
-def _quadrature_block_size() -> int:
-    return get_quadrature_block_size()
+def _read_tuning_config() -> tuple:
+    """Return ``(coil_chunk_size, quadrature_block_size, point_chunk_size)``.
+
+    Single indirection point for all tuning knobs consumed by the kernel
+    factory.  Tests override this one function (+ ``invalidate_kernel_cache``)
+    instead of patching three separate stubs.
+    """
+    return get_coil_chunk_size(), get_quadrature_block_size(), get_point_chunk_size()
 
 
-def _point_chunk_size() -> int:
-    return get_point_chunk_size()
+# ── Array slicing primitives ──────────────────────────────────────────
 
 
 def _slice_coil_chunk(array, start: int, chunk_size: int):
@@ -70,6 +75,9 @@ def _slice_point_chunk(points: object, start: int, chunk_size: int):
         (start, 0),
         (chunk_size, points.shape[1]),
     )
+
+
+# ── Tree utilities ────────────────────────────────────────────────────
 
 
 def _tree_dynamic_update(prefix_tree, chunk_tree, start_index: int):
@@ -102,6 +110,9 @@ def _tree_zeros_like_prefix(reference_tree, prefix_size: int):
         ),
         reference_tree,
     )
+
+
+# ── Tiling primitives ────────────────────────────────────────────────
 
 
 def _coil_chunk_reduce(
@@ -174,9 +185,14 @@ def _quadrature_block_integral(
     return integral_sum / quadrature_count
 
 
-def _point_chunk_reduce(points: object, chunk_kernel):
+def _point_chunk_reduce(points, chunk_kernel, chunk_size):
+    """Evaluate *chunk_kernel* over *points* with optional point-axis tiling.
+
+    Three-arg signature: ``chunk_size`` is passed explicitly by the kernel
+    factory (not read from module state) so that the value is part of the
+    ``lru_cache`` key and triggers recompilation when it changes.
+    """
     point_count = int(points.shape[0])
-    chunk_size = _point_chunk_size()
     if point_count == 0 or chunk_size <= 0 or point_count <= chunk_size:
         return chunk_kernel(points)
 
@@ -210,6 +226,9 @@ def _point_chunk_reduce(points: object, chunk_kernel):
     return _tree_trim(padded_result, point_count)
 
 
+# ── Physics integrands ────────────────────────────────────────────────
+
+
 def _biot_savart_B_integrand(x, gammas, gammadashs):
     diff = gammas - x
     r2 = jnp.sum(diff * diff, axis=-1)
@@ -217,240 +236,6 @@ def _biot_savart_B_integrand(x, gammas, gammadashs):
     r_inv3 = jnp.where(r2 > 0, safe_r2 ** (-1.5), 0.0)
     cross = jnp.cross(diff, gammadashs)
     return cross * r_inv3[..., None]
-
-
-def _biot_savart_one_point_dense(
-    x,
-    gammas,
-    gammadashs,
-    currents,
-    *,
-    quadrature_block_size: int = 0,
-):
-    integral = _quadrature_block_integral(
-        x,
-        gammas,
-        gammadashs,
-        block_size=quadrature_block_size,
-        integrand=_biot_savart_B_integrand,
-    )
-    return _MU0_OVER_4PI * jnp.einsum("c,cj->j", currents, integral)
-
-
-def _chunked_one_point(
-    dense_kernel,
-    x,
-    gammas,
-    gammadashs,
-    currents,
-    *,
-    chunk_size: int,
-    quadrature_block_size: int,
-):
-    return _coil_chunk_reduce(
-        gammas,
-        gammadashs,
-        currents,
-        chunk_size=chunk_size,
-        zero=jnp.zeros((3,), dtype=jnp.float64),
-        reduce_chunk=lambda chunk_gammas,
-        chunk_gammadashs,
-        chunk_currents: dense_kernel(
-            x,
-            chunk_gammas,
-            chunk_gammadashs,
-            chunk_currents,
-            quadrature_block_size=quadrature_block_size,
-        ),
-    )
-
-
-def _biot_savart_one_point(
-    x,
-    gammas,
-    gammadashs,
-    currents,
-    *,
-    chunk_size: int,
-    quadrature_block_size: int,
-):
-    return _chunked_one_point(
-        _biot_savart_one_point_dense,
-        x,
-        gammas,
-        gammadashs,
-        currents,
-        chunk_size=chunk_size,
-        quadrature_block_size=quadrature_block_size,
-    )
-
-
-def _pointwise_kernel(
-    points,
-    point_kernel,
-    gammas,
-    gammadashs,
-    currents,
-    *,
-    chunk_size: int,
-    quadrature_block_size: int,
-):
-    def chunk_kernel(chunk_points):
-        return jax.vmap(
-            lambda x: point_kernel(
-                x,
-                gammas,
-                gammadashs,
-                currents,
-                chunk_size=chunk_size,
-                quadrature_block_size=quadrature_block_size,
-            ),
-            in_axes=0,
-        )(chunk_points)
-
-    return _point_chunk_reduce(points, chunk_kernel)
-
-
-def _pointwise_jacobian(
-    points,
-    point_kernel,
-    gammas,
-    gammadashs,
-    currents,
-    *,
-    chunk_size: int,
-    quadrature_block_size: int,
-):
-    jac_fn = jax.jacfwd(point_kernel, argnums=0)
-
-    def chunk_kernel(chunk_points):
-        raw = jax.vmap(
-            lambda x: jac_fn(
-                x,
-                gammas,
-                gammadashs,
-                currents,
-                chunk_size=chunk_size,
-                quadrature_block_size=quadrature_block_size,
-            ),
-            in_axes=0,
-        )(chunk_points)
-        return jnp.swapaxes(raw, -1, -2)
-
-    return _point_chunk_reduce(points, chunk_kernel)
-
-
-@partial(jax.jit, static_argnames=("chunk_size", "quadrature_block_size"))
-def _biot_savart_B_impl(
-    points,
-    gammas,
-    gammadashs,
-    currents,
-    *,
-    chunk_size: int,
-    quadrature_block_size: int,
-):
-    return _pointwise_kernel(
-        points,
-        _biot_savart_one_point,
-        gammas,
-        gammadashs,
-        currents,
-        chunk_size=chunk_size,
-        quadrature_block_size=quadrature_block_size,
-    )
-
-
-def biot_savart_B(points, gammas, gammadashs, currents):
-    return _biot_savart_B_impl(
-        points,
-        gammas,
-        gammadashs,
-        currents,
-        chunk_size=_coil_chunk_size(),
-        quadrature_block_size=_quadrature_block_size(),
-    )
-
-
-@jax.jit
-def biot_savart_B_vjp(points, v, gammas, gammadashs, currents):
-    def fwd(group_gammas, group_gammadashs, group_currents):
-        return biot_savart_B(points, group_gammas, group_gammadashs, group_currents)
-
-    _, pullback = jax.vjp(fwd, gammas, gammadashs, currents)
-    return pullback(v)
-
-
-@partial(jax.jit, static_argnames=("chunk_size", "quadrature_block_size"))
-def _biot_savart_dB_by_dX_impl(
-    points,
-    gammas,
-    gammadashs,
-    currents,
-    *,
-    chunk_size: int,
-    quadrature_block_size: int,
-):
-    return _pointwise_jacobian(
-        points,
-        _biot_savart_one_point,
-        gammas,
-        gammadashs,
-        currents,
-        chunk_size=chunk_size,
-        quadrature_block_size=quadrature_block_size,
-    )
-
-
-def biot_savart_dB_by_dX(points, gammas, gammadashs, currents):
-    return _biot_savart_dB_by_dX_impl(
-        points,
-        gammas,
-        gammadashs,
-        currents,
-        chunk_size=_coil_chunk_size(),
-        quadrature_block_size=_quadrature_block_size(),
-    )
-
-
-@partial(jax.jit, static_argnames=("chunk_size", "quadrature_block_size"))
-def _biot_savart_B_and_dB_impl(
-    points,
-    gammas,
-    gammadashs,
-    currents,
-    *,
-    chunk_size: int,
-    quadrature_block_size: int,
-):
-    def _val_and_jac(x):
-        f = lambda xx: _biot_savart_one_point(
-            xx,
-            gammas,
-            gammadashs,
-            currents,
-            chunk_size=chunk_size,
-            quadrature_block_size=quadrature_block_size,
-        )
-        primals, tangents_fn = jax.linearize(f, x)
-        return primals, jax.vmap(tangents_fn)(jnp.eye(3))
-
-    return _point_chunk_reduce(
-        points,
-        lambda chunk_points: jax.vmap(_val_and_jac)(chunk_points),
-    )
-
-
-def biot_savart_B_and_dB(points, gammas, gammadashs, currents):
-    B, dB_dX = _biot_savart_B_and_dB_impl(
-        points,
-        gammas,
-        gammadashs,
-        currents,
-        chunk_size=_coil_chunk_size(),
-        quadrature_block_size=_quadrature_block_size(),
-    )
-    return B, dB_dX
 
 
 def _biot_savart_A_integrand(x, gammas, gammadashs):
@@ -461,106 +246,154 @@ def _biot_savart_A_integrand(x, gammas, gammadashs):
     return gammadashs * r_inv[..., None]
 
 
-def _biot_savart_A_one_point_dense(
-    x,
-    gammas,
-    gammadashs,
-    currents,
-    *,
-    quadrature_block_size: int = 0,
+# ── Dense one-point kernels ──────────────────────────────────────────
+
+
+_INTEGRANDS = {"B": _biot_savart_B_integrand, "A": _biot_savart_A_integrand}
+
+
+def _one_point_dense(
+    x, gammas, gammadashs, currents, *, integrand, quadrature_block_size=0
 ):
     integral = _quadrature_block_integral(
         x,
         gammas,
         gammadashs,
         block_size=quadrature_block_size,
-        integrand=_biot_savart_A_integrand,
+        integrand=integrand,
     )
     return _MU0_OVER_4PI * jnp.einsum("c,cj->j", currents, integral)
 
 
-def _biot_savart_A_one_point(
-    x,
-    gammas,
-    gammadashs,
-    currents,
-    *,
-    chunk_size: int,
-    quadrature_block_size: int,
-):
-    return _chunked_one_point(
-        _biot_savart_A_one_point_dense,
-        x,
-        gammas,
-        gammadashs,
-        currents,
-        chunk_size=chunk_size,
-        quadrature_block_size=quadrature_block_size,
-    )
+# ── Kernel factory ────────────────────────────────────────────────────
 
 
-@partial(jax.jit, static_argnames=("chunk_size", "quadrature_block_size"))
-def _biot_savart_A_impl(
-    points,
-    gammas,
-    gammadashs,
-    currents,
-    *,
-    chunk_size: int,
-    quadrature_block_size: int,
-):
-    return _pointwise_kernel(
-        points,
-        _biot_savart_A_one_point,
-        gammas,
-        gammadashs,
-        currents,
-        chunk_size=chunk_size,
-        quadrature_block_size=quadrature_block_size,
-    )
+@lru_cache(maxsize=16)
+def _make_kernel(integrand_key, diff_mode, coil_cs, quad_bs, point_cs):
+    """Build and JIT-compile a Biot-Savart kernel for the given tuning config.
+
+    All tiling parameters are captured in closures — callers never thread them.
+    ``lru_cache`` ensures the same config returns the same compiled function.
+
+    Cache keyed on ``(integrand_key, diff_mode, coil_cs, quad_bs, point_cs)``.
+    A config change that produces different int values naturally creates a new
+    cache entry.  Call ``_make_kernel.cache_clear()`` if you need to force
+    recompilation (e.g. after hot-patching an integrand function in tests).
+    """
+    integrand = _INTEGRANDS.get(integrand_key)
+    if integrand is None:
+        raise ValueError(
+            f"Unknown integrand_key: {integrand_key!r}. Expected one of {set(_INTEGRANDS)}"
+        )
+
+    def one_point(x, gammas, gammadashs, currents):
+        return _coil_chunk_reduce(
+            gammas,
+            gammadashs,
+            currents,
+            chunk_size=coil_cs,
+            zero=jnp.zeros((3,), dtype=jnp.float64),
+            reduce_chunk=lambda cg, cgd, cc: _one_point_dense(
+                x,
+                cg,
+                cgd,
+                cc,
+                integrand=integrand,
+                quadrature_block_size=quad_bs,
+            ),
+        )
+
+    if diff_mode == "value":
+        per_point = one_point
+    elif diff_mode == "jacobian":
+
+        def per_point(x, gammas, gammadashs, currents):
+            return jnp.swapaxes(
+                jax.jacfwd(one_point, argnums=0)(x, gammas, gammadashs, currents),
+                -1,
+                -2,
+            )
+
+    elif diff_mode == "value_and_jacobian":
+
+        def per_point(x, gammas, gammadashs, currents):
+            f = lambda xx: one_point(xx, gammas, gammadashs, currents)
+            primals, tangents_fn = jax.linearize(f, x)
+            return primals, jax.vmap(tangents_fn)(jnp.eye(3))
+
+    else:
+        raise ValueError(f"Unknown diff_mode: {diff_mode!r}")
+
+    @jax.jit
+    def kernel(points, gammas, gammadashs, currents):
+        def chunk_fn(chunk_points):
+            return jax.vmap(
+                lambda x: per_point(x, gammas, gammadashs, currents),
+            )(chunk_points)
+
+        return _point_chunk_reduce(points, chunk_fn, point_cs)
+
+    return kernel
+
+
+def _get_kernel(integrand_key, diff_mode):
+    """Read tuning config and return the cached JIT-compiled kernel."""
+    coil_cs, quad_bs, point_cs = _read_tuning_config()
+    return _make_kernel(integrand_key, diff_mode, coil_cs, quad_bs, point_cs)
+
+
+def invalidate_kernel_cache() -> None:
+    """Drop all cached JIT-compiled Biot-Savart kernels.
+
+    Call after overriding ``_read_tuning_config`` (e.g. via ``monkeypatch``)
+    to ensure the next ``biot_savart_*`` call rebuilds with the new config.
+    """
+    _make_kernel.cache_clear()
+
+
+# ── Public API ────────────────────────────────────────────────────────
+
+
+def biot_savart_B(points, gammas, gammadashs, currents):
+    return _get_kernel("B", "value")(points, gammas, gammadashs, currents)
+
+
+def biot_savart_dB_by_dX(points, gammas, gammadashs, currents):
+    return _get_kernel("B", "jacobian")(points, gammas, gammadashs, currents)
+
+
+def biot_savart_B_and_dB(points, gammas, gammadashs, currents):
+    return _get_kernel("B", "value_and_jacobian")(points, gammas, gammadashs, currents)
 
 
 def biot_savart_A(points, gammas, gammadashs, currents):
-    return _biot_savart_A_impl(
-        points,
-        gammas,
-        gammadashs,
-        currents,
-        chunk_size=_coil_chunk_size(),
-        quadrature_block_size=_quadrature_block_size(),
-    )
-
-
-@partial(jax.jit, static_argnames=("chunk_size", "quadrature_block_size"))
-def _biot_savart_dA_by_dX_impl(
-    points,
-    gammas,
-    gammadashs,
-    currents,
-    *,
-    chunk_size: int,
-    quadrature_block_size: int,
-):
-    return _pointwise_jacobian(
-        points,
-        _biot_savart_A_one_point,
-        gammas,
-        gammadashs,
-        currents,
-        chunk_size=chunk_size,
-        quadrature_block_size=quadrature_block_size,
-    )
+    return _get_kernel("A", "value")(points, gammas, gammadashs, currents)
 
 
 def biot_savart_dA_by_dX(points, gammas, gammadashs, currents):
-    return _biot_savart_dA_by_dX_impl(
-        points,
-        gammas,
-        gammadashs,
-        currents,
-        chunk_size=_coil_chunk_size(),
-        quadrature_block_size=_quadrature_block_size(),
-    )
+    return _get_kernel("A", "jacobian")(points, gammas, gammadashs, currents)
+
+
+@jax.jit
+def biot_savart_B_vjp(points, v, gammas, gammadashs, currents):
+    """VJP of ``biot_savart_B`` w.r.t. coil data.
+
+    Uses bare ``@jax.jit`` (not the kernel factory) because the VJP
+    structure differs from a plain field eval.  The inner
+    ``biot_savart_B`` call goes through ``_get_kernel`` at trace time,
+    so tuning config IS respected on first compilation.  However, a
+    mid-process config change will not invalidate the outer JIT cache —
+    acceptable because the backend mode is set once at startup.
+    """
+
+    def fwd(group_gammas, group_gammadashs, group_currents):
+        return biot_savart_B(points, group_gammas, group_gammadashs, group_currents)
+
+    _, pullback = jax.vjp(fwd, gammas, gammadashs, currents)
+    return pullback(v)
+
+
+# ── Grouped coil utilities ───────────────────────────────────────────
 
 
 def group_coil_data(gammas_list, gammadashs_list, currents_list):
@@ -590,17 +423,17 @@ def group_coil_data(gammas_list, gammadashs_list, currents_list):
     return groups
 
 
-def grouped_biot_savart_B(points, coil_arrays):
+def _grouped_field(field_fn, points, coil_arrays):
     g0, gd0, c0 = coil_arrays[0]
-    result = biot_savart_B(points, g0, gd0, c0)
+    result = field_fn(points, g0, gd0, c0)
     for gammas, gammadashs, currents in coil_arrays[1:]:
-        result = result + biot_savart_B(points, gammas, gammadashs, currents)
+        result = result + field_fn(points, gammas, gammadashs, currents)
     return result
+
+
+def grouped_biot_savart_B(points, coil_arrays):
+    return _grouped_field(biot_savart_B, points, coil_arrays)
 
 
 def grouped_biot_savart_A(points, coil_arrays):
-    g0, gd0, c0 = coil_arrays[0]
-    result = biot_savart_A(points, g0, gd0, c0)
-    for gammas, gammadashs, currents in coil_arrays[1:]:
-        result = result + biot_savart_A(points, gammas, gammadashs, currents)
-    return result
+    return _grouped_field(biot_savart_A, points, coil_arrays)

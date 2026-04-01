@@ -26,6 +26,8 @@ from repo_bootstrap import bootstrap_local_simsopt
 
 bootstrap_local_simsopt(Path(__file__).resolve().parents[2] / "src")
 
+from simsopt.backend import invalidate_backend_cache
+
 # Load JAX module directly (avoids simsopt/__init__.py → simsoptpp dep)
 _SRC = Path(__file__).resolve().parents[2] / "src" / "simsopt"
 
@@ -62,6 +64,7 @@ def _kernel_tuning_env(
         os.environ.pop("SIMSOPT_JAX_QUADRATURE_BLOCK_SIZE", None)
     else:
         os.environ["SIMSOPT_JAX_QUADRATURE_BLOCK_SIZE"] = str(quadrature_block_size)
+    invalidate_backend_cache()
     try:
         yield
     finally:
@@ -70,6 +73,7 @@ def _kernel_tuning_env(
                 os.environ.pop(name, None)
             else:
                 os.environ[name] = value
+        invalidate_backend_cache()
 
 
 _bs = _load("biotsavart_jax", "field/biotsavart_jax.py")
@@ -145,46 +149,28 @@ def _make_random_fixture(
 
 
 def _dense_reference_fields(module, points, gammas, gammadashs, currents):
-    dense_B = jax.vmap(
-        lambda x: module._biot_savart_one_point_dense(
+    def _dense_B(x):
+        return module._one_point_dense(
             x,
             gammas,
             gammadashs,
             currents,
+            integrand=module._biot_savart_B_integrand,
         )
-    )(points)
-    dense_A = jax.vmap(
-        lambda x: module._biot_savart_A_one_point_dense(
+
+    def _dense_A(x):
+        return module._one_point_dense(
             x,
             gammas,
             gammadashs,
             currents,
+            integrand=module._biot_savart_A_integrand,
         )
-    )(points)
-    dense_dB = jax.vmap(
-        lambda x: jnp.swapaxes(
-            jax.jacfwd(module._biot_savart_one_point_dense, argnums=0)(
-                x,
-                gammas,
-                gammadashs,
-                currents,
-            ),
-            -1,
-            -2,
-        )
-    )(points)
-    dense_dA = jax.vmap(
-        lambda x: jnp.swapaxes(
-            jax.jacfwd(module._biot_savart_A_one_point_dense, argnums=0)(
-                x,
-                gammas,
-                gammadashs,
-                currents,
-            ),
-            -1,
-            -2,
-        )
-    )(points)
+
+    dense_B = jax.vmap(_dense_B)(points)
+    dense_A = jax.vmap(_dense_A)(points)
+    dense_dB = jax.vmap(lambda x: jnp.swapaxes(jax.jacfwd(_dense_B)(x), -1, -2))(points)
+    dense_dA = jax.vmap(lambda x: jnp.swapaxes(jax.jacfwd(_dense_A)(x), -1, -2))(points)
     return dense_B, dense_A, dense_dB, dense_dA
 
 
@@ -370,7 +356,9 @@ class TestBiotSavartJaxChunkedParity:
     def test_chunked_B_and_dB_match_dense_reference(self):
         with _kernel_tuning_env("jax_cpu_parity"):
             chunked_bs = _load_chunked_biotsavart()
-            assert chunked_bs._coil_chunk_size() > 0
+            from simsopt.backend import get_coil_chunk_size
+
+            assert get_coil_chunk_size("jax_cpu_parity") > 0
 
             gammas, gammadashs, currents = _make_shifted_circular_coils(20, nquad=96)
             points = jnp.array(
@@ -382,25 +370,18 @@ class TestBiotSavartJaxChunkedParity:
                 dtype=jnp.float64,
             )
 
-            dense_B = jax.vmap(
-                lambda x: chunked_bs._biot_savart_one_point_dense(
+            def _dense_B(x):
+                return chunked_bs._one_point_dense(
                     x,
                     gammas,
                     gammadashs,
                     currents,
+                    integrand=chunked_bs._biot_savart_B_integrand,
                 )
-            )(points)
+
+            dense_B = jax.vmap(_dense_B)(points)
             dense_dB = jax.vmap(
-                lambda x: jnp.swapaxes(
-                    jax.jacfwd(chunked_bs._biot_savart_one_point_dense, argnums=0)(
-                        x,
-                        gammas,
-                        gammadashs,
-                        currents,
-                    ),
-                    -1,
-                    -2,
-                )
+                lambda x: jnp.swapaxes(jax.jacfwd(_dense_B)(x), -1, -2)
             )(points)
 
             B = chunked_bs.biot_savart_B(points, gammas, gammadashs, currents)
@@ -428,7 +409,9 @@ class TestBiotSavartJaxChunkedParity:
     def test_chunked_A_matches_dense_reference(self):
         with _kernel_tuning_env("jax_cpu_parity"):
             chunked_bs = _load_chunked_biotsavart()
-            assert chunked_bs._coil_chunk_size() > 0
+            from simsopt.backend import get_coil_chunk_size
+
+            assert get_coil_chunk_size("jax_cpu_parity") > 0
 
             gammas, gammadashs, currents = _make_shifted_circular_coils(20, nquad=96)
             points = jnp.array(
@@ -440,11 +423,12 @@ class TestBiotSavartJaxChunkedParity:
             )
 
             dense_A = jax.vmap(
-                lambda x: chunked_bs._biot_savart_A_one_point_dense(
+                lambda x: chunked_bs._one_point_dense(
                     x,
                     gammas,
                     gammadashs,
                     currents,
+                    integrand=chunked_bs._biot_savart_A_integrand,
                 )
             )(points)
             A = chunked_bs.biot_savart_A(points, gammas, gammadashs, currents)
@@ -456,9 +440,8 @@ class TestBiotSavartJaxChunkedParity:
             chunked_bs = _load_chunked_biotsavart()
             from simsopt.jax_core import biotsavart as core_bs
 
-            monkeypatch.setattr(core_bs, "_point_chunk_size", lambda: 2)
-            monkeypatch.setattr(core_bs, "_coil_chunk_size", lambda: 0)
-            monkeypatch.setattr(core_bs, "_quadrature_block_size", lambda: 0)
+            monkeypatch.setattr(core_bs, "_read_tuning_config", lambda: (0, 0, 2))
+            core_bs.invalidate_kernel_cache()
 
             gammas, gammadashs, currents = _make_shifted_circular_coils(6, nquad=32)
             points = jnp.array(
@@ -491,7 +474,7 @@ class TestBiotSavartJaxChunkedParity:
                 currents,
             )
 
-            assert core_bs._point_chunk_size() == 2
+            assert core_bs._read_tuning_config() == (0, 0, 2)
             np.testing.assert_allclose(np.asarray(B), np.asarray(dense_B), atol=1e-14)
             np.testing.assert_allclose(np.asarray(A), np.asarray(dense_A), atol=1e-14)
             np.testing.assert_allclose(np.asarray(dB), np.asarray(dense_dB), atol=1e-14)

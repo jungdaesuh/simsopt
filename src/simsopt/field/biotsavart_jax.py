@@ -17,9 +17,10 @@ def _ensure_src_root_on_path() -> None:
 _ensure_src_root_on_path()
 
 from simsopt.jax_core.biotsavart import (  # noqa: E402
-    _coil_chunk_size,
-    _biot_savart_A_one_point_dense,
-    _biot_savart_one_point_dense,
+    _biot_savart_A_integrand,
+    _biot_savart_B_integrand,
+    _one_point_dense,
+    _read_tuning_config,
     biot_savart_A,
     biot_savart_B,
     biot_savart_B_and_dB,
@@ -29,12 +30,14 @@ from simsopt.jax_core.biotsavart import (  # noqa: E402
     group_coil_data,
     grouped_biot_savart_A,
     grouped_biot_savart_B,
+    invalidate_kernel_cache,
 )
 
 __all__ = (
-    "_biot_savart_A_one_point_dense",
-    "_biot_savart_one_point_dense",
-    "_coil_chunk_size",
+    "_biot_savart_A_integrand",
+    "_biot_savart_B_integrand",
+    "_one_point_dense",
+    "_read_tuning_config",
     "biot_savart_A",
     "biot_savart_B",
     "biot_savart_B_and_dB",
@@ -44,4 +47,5 @@ __all__ = (
     "group_coil_data",
     "grouped_biot_savart_A",
     "grouped_biot_savart_B",
+    "invalidate_kernel_cache",
 )
