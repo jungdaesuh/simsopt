@@ -860,6 +860,13 @@ def get_jax_surface_objective_classes():
     return BoozerResidualJAX, IotasJAX, NonQuasiSymmetricRatioJAX
 
 
+def get_traceable_single_stage_objective_builder():
+    """Load the pure single-stage JAX target objective on demand."""
+    from simsopt.geo.surfaceobjectives_jax import make_traceable_objective
+
+    return make_traceable_objective
+
+
 def select_boozer_residual_class(use_jax, boozer_kind):
     """Select the stage- and backend-matched Boozer residual wrapper."""
     if boozer_kind == "exact":
@@ -888,14 +895,29 @@ def resolve_boozer_optimizer_backend(
     return boozer_optimizer_backend
 
 
+def _resolve_single_stage_contract(field_backend, optimizer_backend):
+    """Resolve the optimizer contract for the single-stage outer loop."""
+    from simsopt.geo.optimizer_jax import resolve_continuous_optimizer_contract
+
+    return resolve_continuous_optimizer_contract(
+        field_backend,
+        optimizer_backend,
+        limited_memory=True,
+        allow_hybrid=False,
+        component_label="the single-stage outer loop",
+    )
+
+
 def resolve_single_stage_outer_optimizer_method(field_backend, optimizer_backend):
     """Return the shared optimizer adapter method for the outer single-stage loop."""
-    if field_backend == "jax" and optimizer_backend == "ondevice":
-        from simsopt.geo.optimizer_jax import require_target_backend_x64
+    return _resolve_single_stage_contract(field_backend, optimizer_backend).method
 
-        require_target_backend_x64(optimizer_backend)
-        return "lbfgs-ondevice"
-    return "lbfgs"
+
+def use_single_stage_target_scalar_objective(field_backend, optimizer_backend):
+    """Return whether the outer loop should use the scalar traceable objective."""
+    return _resolve_single_stage_contract(
+        field_backend, optimizer_backend
+    ).use_scalar_objective
 
 
 def run_single_stage_optimizer(
@@ -909,25 +931,32 @@ def run_single_stage_optimizer(
     gtol,
     maxcor,
     callback,
+    scalar_fun=None,
 ):
     """Run the single-stage outer optimization through the shared adapter."""
     from simsopt.geo.optimizer_jax import jax_minimize
 
-    method = resolve_single_stage_outer_optimizer_method(
-        field_backend,
-        optimizer_backend,
-    )
+    contract = _resolve_single_stage_contract(field_backend, optimizer_backend)
+    if contract.use_scalar_objective and scalar_fun is None:
+        raise RuntimeError(
+            "Single-stage target-lane optimization requires a scalar JAX objective."
+        )
+    if (not contract.use_scalar_objective) and fun is None:
+        raise RuntimeError(
+            "Single-stage reference-lane optimization requires an explicit "
+            "value-and-gradient objective."
+        )
     return jax_minimize(
-        fun,
+        scalar_fun if contract.use_scalar_objective else fun,
         dofs,
-        method=method,
+        method=contract.method,
         tol=gtol,
         maxiter=maxiter,
         options={
             "maxcor": int(maxcor),
             "ftol": float(ftol),
         },
-        value_and_grad=True,
+        value_and_grad=not contract.use_scalar_objective,
         callback=callback,
     )
 
@@ -953,8 +982,21 @@ def _restore_cpu_boozer_state(boozer_surface, run_dict):
     boozer_surface.res["G"] = run_dict["G"]
 
 
-def evaluate_candidate(x, run_dict, boozer_surface, JF):
-    """Evaluate a candidate coil configuration.
+def _update_line_search_state(x, run_dict):
+    """Track step size and increment line-search counter."""
+    dx = np.linalg.norm(x - run_dict["x_prev"])
+    run_dict["x_prev"] = x.copy()
+    logger.info("Step size: %.2e", dx)
+    run_dict["lscount"] += 1
+
+
+def _evaluate_candidate_impl(
+    x,
+    run_dict,
+    boozer_surface,
+    JF,
+):
+    """Evaluate a candidate coil configuration against the mutable objective graph.
 
     Runs the inner Boozer solve with warm-start from ``run_dict`` and
     returns ``(J, dJ)``.
@@ -978,12 +1020,6 @@ def evaluate_candidate(x, run_dict, boozer_surface, JF):
     Returns:
         (J, dJ): Objective value and gradient.
     """
-    dx = np.linalg.norm(x - run_dict["x_prev"])
-    run_dict["x_prev"] = x.copy()
-    logger.info("Step size: %.2e", dx)
-
-    run_dict["lscount"] += 1
-
     is_cpu = isinstance(boozer_surface, BoozerSurface)
     if is_cpu:
         _restore_cpu_boozer_state(boozer_surface, run_dict)
@@ -1019,6 +1055,16 @@ def evaluate_candidate(x, run_dict, boozer_surface, JF):
             _restore_cpu_boozer_state(boozer_surface, run_dict)
 
     return J, dJ
+
+
+def evaluate_candidate(x, run_dict, boozer_surface, JF):
+    """Evaluate a candidate coil configuration.
+
+    This is the line-search/objective entry used by the explicit outer
+    optimizer contract.  Tracks line-search state before evaluating.
+    """
+    _update_line_search_state(x, run_dict)
+    return _evaluate_candidate_impl(x, run_dict, boozer_surface, JF)
 
 
 def accept_step(
@@ -1146,6 +1192,7 @@ class SingleStageAdapter:
         objectives,
         diagnostics,
         log_path,
+        reevaluate_before_accept=False,
     ):
         self.run_dict = run_dict
         self.boozer_surface = boozer_surface
@@ -1154,6 +1201,19 @@ class SingleStageAdapter:
         self.objectives = objectives
         self.diagnostics = diagnostics
         self.log_path = log_path
+        self.reevaluate_before_accept = bool(reevaluate_before_accept)
+
+    def _reevaluate_accepted_step(self, x):
+        """Refresh accepted-step state on the mutable graph for diagnostics.
+
+        The ondevice optimizer evaluates through JAX autodiff without
+        updating the Optimizable graph.  This re-evaluation at the
+        accepted point refreshes the mutable state that diagnostics
+        and ``accept_step`` depend on.
+        """
+        self.JF.x = x
+        _evaluate_candidate_impl(x, self.run_dict, self.boozer_surface, self.JF)
+        self.run_dict["x_prev"] = np.array(x, copy=True)
 
     def __call__(self, x):
         """Objective for L-BFGS — delegates to evaluate_candidate.
@@ -1170,6 +1230,8 @@ class SingleStageAdapter:
 
         No persistent Optimizable mutation.
         """
+        if self.reevaluate_before_accept:
+            self._reevaluate_accepted_step(x)
         accept_step(
             self.run_dict,
             self.boozer_surface,
@@ -1567,6 +1629,10 @@ if __name__ == "__main__":
     dofs, run_dict, static_config = snapshot_to_pytree(
         JF, boozer_surface, bs, num_tf_coils=num_tf_coils
     )
+    use_target_lane = use_single_stage_target_scalar_objective(
+        args.backend,
+        args.optimizer_backend,
+    )
     adapter = SingleStageAdapter(
         run_dict=run_dict,
         boozer_surface=boozer_surface,
@@ -1588,6 +1654,7 @@ if __name__ == "__main__":
             "curvelength": curvelength,
         },
         log_path=OUT_DIR_ITER + "/log.txt",
+        reevaluate_before_accept=use_target_lane,
     )
 
     # ==============================================================================
@@ -1605,6 +1672,13 @@ if __name__ == "__main__":
         fieldError = initial_field_error
         print("Skipping single-stage optimizer because --init-only was provided.")
     else:
+        target_scalar_objective = None
+        if use_target_lane:
+            target_scalar_objective = get_traceable_single_stage_objective_builder()(
+                boozer_surface,
+                bs,
+                iota_target,
+            )
         res = run_single_stage_optimizer(
             adapter,
             dofs,
@@ -1615,6 +1689,7 @@ if __name__ == "__main__":
             ftol=ftol,
             gtol=gtol,
             maxcor=args.maxcor,
+            scalar_fun=target_scalar_objective,
         )
         res_nit = res.nit
         print(res.message)

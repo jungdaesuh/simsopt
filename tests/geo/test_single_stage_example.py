@@ -30,6 +30,13 @@ TEST_NTOR = 6
 TEST_VOL_TARGET = 0.1
 TEST_IOTA = 0.15
 TEST_G0 = 1.0
+_SINGLE_STAGE_HYBRID_UNSUPPORTED = (
+    "optimizer_backend='hybrid' is transitional and not supported for "
+    "the single-stage outer loop"
+)
+_SINGLE_STAGE_CPU_ONLY_SCIPY = (
+    "single-stage outer loop CPU/reference lane only supports optimizer_backend='scipy'"
+)
 
 
 def load_single_stage_example_module():
@@ -213,11 +220,51 @@ class SingleStageExampleTests(unittest.TestCase):
         *,
         require_target_backend_x64,
         jax_minimize,
+        resolve_continuous_optimizer_contract=None,
         scipy_minimize_side_effect=None,
     ):
+        if resolve_continuous_optimizer_contract is None:
+
+            def resolve_continuous_optimizer_contract(
+                field_backend,
+                optimizer_backend,
+                *,
+                limited_memory,
+                allow_hybrid,
+                component_label,
+            ):
+                del component_label
+                if field_backend != "jax" and optimizer_backend != "scipy":
+                    raise ValueError(f"the {_SINGLE_STAGE_CPU_ONLY_SCIPY}.")
+                if optimizer_backend == "hybrid":
+                    if not allow_hybrid:
+                        raise ValueError(_SINGLE_STAGE_HYBRID_UNSUPPORTED)
+                    require_target_backend_x64(optimizer_backend)
+                    return types.SimpleNamespace(
+                        method="bfgs-hybrid",
+                        use_scalar_objective=False,
+                    )
+                if optimizer_backend == "ondevice":
+                    require_target_backend_x64(optimizer_backend)
+                    return types.SimpleNamespace(
+                        method="lbfgs-ondevice",
+                        use_scalar_objective=(field_backend == "jax"),
+                    )
+                if optimizer_backend == "scipy":
+                    return types.SimpleNamespace(
+                        method="lbfgs" if limited_memory else "bfgs",
+                        use_scalar_objective=False,
+                    )
+                raise ValueError(
+                    "optimizer_backend must be one of: scipy, hybrid, ondevice."
+                )
+
         fake_optimizer_module = types.ModuleType("simsopt.geo.optimizer_jax")
-        fake_optimizer_module.require_target_backend_x64 = require_target_backend_x64
         fake_optimizer_module.jax_minimize = jax_minimize
+        fake_optimizer_module.require_target_backend_x64 = require_target_backend_x64
+        fake_optimizer_module.resolve_continuous_optimizer_contract = (
+            resolve_continuous_optimizer_contract
+        )
         scipy_patch = patch(
             "scipy.optimize.minimize", side_effect=scipy_minimize_side_effect
         )
@@ -397,6 +444,7 @@ class SingleStageExampleTests(unittest.TestCase):
     def test_run_single_stage_optimizer_routes_target_lane_to_ondevice_adapter(self):
         module = self.load_module()
         captured = {}
+        scalar_fun = object()
 
         def fake_require_target_backend_x64(optimizer_backend):
             captured["x64_backend"] = optimizer_backend
@@ -404,6 +452,7 @@ class SingleStageExampleTests(unittest.TestCase):
         def fake_jax_minimize(
             fun, x0, *, method, tol, maxiter, options, value_and_grad, callback
         ):
+            captured["fun"] = fun
             captured["method"] = method
             captured["x0"] = np.asarray(x0)
             captured["tol"] = tol
@@ -428,20 +477,42 @@ class SingleStageExampleTests(unittest.TestCase):
                 gtol=1e-6,
                 maxcor=9,
                 callback=callback,
+                scalar_fun=scalar_fun,
             )
 
         self.assertEqual(captured["x64_backend"], "ondevice")
+        self.assertIs(captured["fun"], scalar_fun)
         self.assertEqual(captured["method"], "lbfgs-ondevice")
         np.testing.assert_allclose(captured["x0"], np.array([1.0, -2.0]))
         self.assertEqual(captured["tol"], 1e-6)
         self.assertEqual(captured["maxiter"], 7)
         self.assertEqual(captured["options"], {"maxcor": 9, "ftol": 1e-8})
-        self.assertTrue(captured["value_and_grad"])
+        self.assertFalse(captured["value_and_grad"])
         self.assertIs(captured["callback"], callback)
         self.assertEqual(result.message, "ok")
 
+    def test_run_single_stage_optimizer_target_lane_requires_scalar_objective(self):
+        module = self.load_module()
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "Single-stage target-lane optimization requires a scalar JAX objective",
+        ):
+            module.run_single_stage_optimizer(
+                lambda x: (1.0, np.asarray(x)),
+                np.array([1.0, -2.0]),
+                field_backend="jax",
+                optimizer_backend="ondevice",
+                maxiter=7,
+                ftol=1e-8,
+                gtol=1e-6,
+                maxcor=9,
+                callback=None,
+            )
+
     def test_run_single_stage_optimizer_ondevice_does_not_enter_scipy_minimize(self):
         module = self.load_module()
+        scalar_fun = object()
 
         def fake_require_target_backend_x64(_optimizer_backend):
             return None
@@ -449,8 +520,10 @@ class SingleStageExampleTests(unittest.TestCase):
         def fake_jax_minimize(
             fun, x0, *, method, tol, maxiter, options, value_and_grad, callback
         ):
-            del fun, x0, tol, maxiter, options, value_and_grad, callback
+            self.assertIs(fun, scalar_fun)
+            del x0, tol, maxiter, options, callback
             self.assertEqual(method, "lbfgs-ondevice")
+            self.assertFalse(value_and_grad)
             return types.SimpleNamespace(x=np.zeros(2), nit=0, message="ok")
 
         with self.patch_optimizer_jax_module(
@@ -468,9 +541,132 @@ class SingleStageExampleTests(unittest.TestCase):
                 gtol=1e-6,
                 maxcor=5,
                 callback=lambda _x: None,
+                scalar_fun=scalar_fun,
             )
 
         self.assertEqual(result.message, "ok")
+
+    def test_run_single_stage_optimizer_rejects_hybrid_outer_lane(self):
+        module = self.load_module()
+
+        def fake_require_target_backend_x64(optimizer_backend):
+            raise AssertionError(
+                f"x64 check should not run for unsupported hybrid lane: {optimizer_backend}"
+            )
+
+        def fake_jax_minimize(
+            fun, x0, *, method, tol, maxiter, options, value_and_grad, callback
+        ):
+            raise AssertionError(
+                "Unsupported single-stage hybrid lane must fail before jax_minimize."
+            )
+
+        with self.patch_optimizer_jax_module(
+            require_target_backend_x64=fake_require_target_backend_x64,
+            jax_minimize=fake_jax_minimize,
+        ):
+            with self.assertRaisesRegex(
+                ValueError,
+                "optimizer_backend='hybrid' is transitional and not supported "
+                "for the single-stage outer loop",
+            ):
+                module.run_single_stage_optimizer(
+                    lambda x: (1.0, np.asarray(x)),
+                    np.array([1.0, -2.0]),
+                    field_backend="jax",
+                    optimizer_backend="hybrid",
+                    maxiter=7,
+                    ftol=1e-8,
+                    gtol=1e-6,
+                    maxcor=9,
+                    callback=object(),
+                )
+
+    def test_resolve_single_stage_outer_optimizer_method_rejects_cpu_ondevice(self):
+        module = self.load_module()
+
+        with self.assertRaisesRegex(
+            ValueError,
+            _SINGLE_STAGE_CPU_ONLY_SCIPY,
+        ):
+            module.resolve_single_stage_outer_optimizer_method("cpu", "ondevice")
+
+    def test_resolve_single_stage_outer_optimizer_method_rejects_hybrid(self):
+        module = self.load_module()
+
+        with self.assertRaisesRegex(
+            ValueError,
+            _SINGLE_STAGE_HYBRID_UNSUPPORTED,
+        ):
+            module.resolve_single_stage_outer_optimizer_method("jax", "hybrid")
+
+    def test_single_stage_adapter_callback_reevaluates_before_accept_in_target_lane(
+        self,
+    ):
+        module = self.load_module()
+
+        class _JF:
+            def __init__(self):
+                self._x = None
+
+            @property
+            def x(self):
+                return self._x
+
+            @x.setter
+            def x(self, value):
+                self._x = np.asarray(value)
+
+        jf = _JF()
+        run_dict = {"x_prev": np.zeros(2), "lscount": 3}
+        captured = {}
+
+        def fake_eval(x, state, booz, objective):
+            captured["eval"] = {
+                "x": np.asarray(x),
+                "state": state,
+                "booz": booz,
+                "objective": objective,
+            }
+            return 1.0, np.zeros(2)
+
+        def fake_accept_step(
+            state, booz, objective, bs, objectives, diagnostics, log_path
+        ):
+            captured["accept"] = {
+                "state": state,
+                "booz": booz,
+                "objective": objective,
+                "bs": bs,
+                "objectives": objectives,
+                "diagnostics": diagnostics,
+                "log_path": log_path,
+            }
+
+        adapter = module.SingleStageAdapter(
+            run_dict=run_dict,
+            boozer_surface="booz",
+            JF=jf,
+            bs="bs",
+            objectives={"qs": "obj"},
+            diagnostics={"iota": "diag"},
+            log_path="/tmp/log.txt",
+            reevaluate_before_accept=True,
+        )
+
+        with patch.object(
+            module,
+            "_evaluate_candidate_impl",
+            side_effect=fake_eval,
+        ), patch.object(module, "accept_step", side_effect=fake_accept_step):
+            adapter.callback(np.array([2.0, -1.0]))
+
+        np.testing.assert_allclose(jf.x, np.array([2.0, -1.0]))
+        np.testing.assert_allclose(run_dict["x_prev"], np.array([2.0, -1.0]))
+        # Line-search counter must not increment during reevaluation.
+        self.assertEqual(run_dict["lscount"], 3)
+        self.assertIs(captured["accept"]["state"], run_dict)
+        self.assertEqual(captured["accept"]["log_path"], "/tmp/log.txt")
 
     def test_evaluate_surface_self_intersection_skips_when_backend_unavailable(self):
         module = self.load_module()

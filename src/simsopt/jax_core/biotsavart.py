@@ -15,9 +15,8 @@ from jax import lax
 import jax.numpy as jnp
 
 from ..backend import (
-    get_coil_chunk_size,
+    get_field_kernel_tuning,
     get_point_chunk_size,
-    get_quadrature_block_size,
 )
 
 __all__ = [
@@ -45,8 +44,11 @@ def _read_tuning_config() -> tuple:
     Single indirection point for all tuning knobs consumed by the kernel
     factory.  Tests override this one function (+ ``invalidate_kernel_cache``)
     instead of patching three separate stubs.
+
+    Resolves the backend config once to avoid repeated mode/policy lookups.
     """
-    return get_coil_chunk_size(), get_quadrature_block_size(), get_point_chunk_size()
+    fkt = get_field_kernel_tuning()
+    return fkt.coil_chunk_size, fkt.quadrature_block_size, get_point_chunk_size()
 
 
 # ── Array slicing primitives ──────────────────────────────────────────
@@ -268,7 +270,7 @@ def _one_point_dense(
 # ── Kernel factory ────────────────────────────────────────────────────
 
 
-@lru_cache(maxsize=16)
+@lru_cache(maxsize=32)
 def _make_kernel(integrand_key, diff_mode, coil_cs, quad_bs, point_cs):
     """Build and JIT-compile a Biot-Savart kernel for the given tuning config.
 
