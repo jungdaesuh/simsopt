@@ -182,6 +182,20 @@ def test_surface_rzfourier_spec_is_jittable():
     assert normal.shape == (4, 5, 3)
 
 
+def test_surface_rzfourier_unitnormal_degenerate_surface_stays_finite():
+    spec = make_surface_rzfourier_spec(
+        rc=np.zeros((2, 1), dtype=np.float64),
+        zs=np.zeros((2, 1), dtype=np.float64),
+        quadpoints_phi=np.linspace(0.0, 0.5, 4, endpoint=False),
+        quadpoints_theta=np.linspace(0.0, 1.0, 5, endpoint=False),
+        nfp=2,
+        stellsym=True,
+    )
+    unitnormal = np.asarray(surface_rz_fourier_unitnormal_from_spec(spec))
+    assert np.all(np.isfinite(unitnormal))
+    np.testing.assert_array_equal(unitnormal, np.zeros_like(unitnormal))
+
+
 def test_surface_rzfourier_geometry_from_dofs_matches_boozer_hot_path():
     surface = _make_surface(stellsym=False)
     dofs = jnp.asarray(surface.get_dofs(), dtype=jnp.float64)

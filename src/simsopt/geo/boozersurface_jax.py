@@ -88,6 +88,18 @@ from .optimizer_jax import (
 
 __all__ = ["BoozerSurfaceJAX"]
 
+_GROUPED_EXTRACTOR_FALLBACK_DETAIL = (
+    "_extract_coil_data_grouped() in _refresh_coil_data()"
+)
+_COILS_LIST_FALLBACK_DETAIL = "_coils list extraction in _refresh_coil_data()"
+
+
+def _raise_if_strict_hidden_grouped_coil_spec_fallback(detail: str) -> None:
+    raise_if_strict_jax_fallback(
+        component="BoozerSurfaceJAX",
+        detail=f"the hidden grouped-coil spec compatibility fallback via {detail}",
+    )
+
 
 def _replace_group_coil_array(coil_arrays, group_index, group_array):
     grouped_arrays = list(coil_arrays)
@@ -118,6 +130,9 @@ def _extract_grouped_coil_set_spec(biotsavart):
 
     grouped_extractor = getattr(biotsavart, "_extract_coil_data_grouped", None)
     if grouped_extractor is not None:
+        _raise_if_strict_hidden_grouped_coil_spec_fallback(
+            _GROUPED_EXTRACTOR_FALLBACK_DETAIL
+        )
         return grouped_coil_set_spec_from_grouped_data(grouped_extractor())
 
     coils = getattr(biotsavart, "_coils", None)
@@ -130,6 +145,7 @@ def _extract_grouped_coil_set_spec(biotsavart):
     gammas = []
     gammadashs = []
     currents = []
+    _raise_if_strict_hidden_grouped_coil_spec_fallback(_COILS_LIST_FALLBACK_DETAIL)
     for coil in coils:
         gammas.append(coil.curve.gamma())
         gammadashs.append(coil.curve.gammadash())
@@ -164,9 +180,7 @@ def _grouped_coil_currents(*, coil_arrays=None, coil_set_spec=None):
 
 
 def _resolved_coil_set_spec(default_spec, *, coil_arrays=None, coil_set_spec=None):
-    if coil_arrays is not None or coil_set_spec is not None:
-        return coil_set_spec
-    return default_spec
+    return default_spec if coil_set_spec is None else coil_set_spec
 
 
 def _grouped_biot_savart_B_points(points, *, coil_arrays=None, coil_set_spec=None):

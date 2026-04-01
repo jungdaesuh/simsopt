@@ -967,14 +967,12 @@ def make_traceable_objective(booz_jax, bs_jax, iota_target):
     """
     _ensure_solved(booz_jax)
 
-    objective_method = booz_jax._resolve_optimizer_method()
-    if booz_jax.boozer_type == "ls" and objective_method not in {
-        "bfgs-ondevice",
-        "lbfgs-ondevice",
-    }:
-        raise RuntimeError(
-            "make_traceable_objective() requires optimizer_backend='ondevice'."
-        )
+    if booz_jax.boozer_type == "ls":
+        objective_method = booz_jax._resolve_optimizer_method()
+        if objective_method not in {"bfgs-ondevice", "lbfgs-ondevice"}:
+            raise RuntimeError(
+                "make_traceable_objective() requires optimizer_backend='ondevice'."
+            )
 
     warmstart_sdofs = jnp.asarray(booz_jax.surface.get_dofs(), dtype=jnp.float64)
     warmstart_iota = jnp.asarray(booz_jax.res["iota"], dtype=jnp.float64)
@@ -985,6 +983,7 @@ def make_traceable_objective(booz_jax, bs_jax, iota_target):
     baseline_coil_dofs = jnp.asarray(bs_jax.x.copy(), dtype=jnp.float64)
     optimize_G = warmstart_G is not None
     predictor_kind = booz_jax.boozer_type
+    mask_indices = booz_jax._compute_stellsym_mask_indices()
     objective_kwargs = {
         "quadpoints_phi": booz_jax.quadpoints_phi,
         "quadpoints_theta": booz_jax.quadpoints_theta,
@@ -1001,7 +1000,7 @@ def make_traceable_objective(booz_jax, bs_jax, iota_target):
         "label_type": booz_jax.label_type,
         "phi_idx": booz_jax.phi_idx,
         "iota_target": jnp.asarray(iota_target, dtype=jnp.float64),
-        "mask_indices": booz_jax.res.get("mask"),
+        "mask_indices": mask_indices,
         "stellsym_surface": booz_jax.stellsym,
     }
     baseline_plu = booz_jax.res["PLU"]

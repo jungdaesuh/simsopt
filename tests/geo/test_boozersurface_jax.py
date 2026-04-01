@@ -20,7 +20,11 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 from conftest import enable_strict_jax_backend
-from simsopt.jax_core import GroupedCoilSetSpec, grouped_coil_set_spec_from_lists
+from simsopt.jax_core import (
+    GroupedCoilSetSpec,
+    grouped_coil_set_spec_from_lists,
+    grouped_field_data_from_spec,
+)
 
 from .boozersurface_jax_test_helpers import (
     BoozerSurfaceJAX,
@@ -88,6 +92,27 @@ def _emit_newton_progress(progress_callback):
 from functools import partial
 
 _enable_strict_jax_backend = partial(enable_strict_jax_backend, mode="jax_gpu_parity")
+_STRICT_GROUPED_EXTRACTOR_FALLBACK_PATTERN = (
+    r"BoozerSurfaceJAX.*hidden grouped-coil spec compatibility "
+    r"fallback.*_extract_coil_data_grouped\(\).*strict=True"
+)
+_STRICT_COILS_LIST_FALLBACK_PATTERN = (
+    r"BoozerSurfaceJAX.*hidden grouped-coil spec compatibility "
+    r"fallback.*_coils list extraction.*strict=True"
+)
+
+
+@contextmanager
+def _strict_backend_mode(monkeypatch, mode="jax_gpu_parity"):
+    from simsopt.backend import invalidate_backend_cache
+
+    monkeypatch.setenv("SIMSOPT_BACKEND_MODE", mode)
+    monkeypatch.setenv("SIMSOPT_BACKEND_STRICT", "1")
+    invalidate_backend_cache()
+    try:
+        yield
+    finally:
+        invalidate_backend_cache()
 
 
 def _assert_strict_jax_minimize_rejection(
@@ -606,6 +631,36 @@ def _make_spec_only_biotsavart(coils):
     return _SpecOnlyBiotSavart(coils)
 
 
+def _make_grouped_extractor_only_biotsavart(coils):
+    class _GroupedExtractorOnlyBiotSavart(_MockBiotSavart):
+        def __init__(self, grouped_coils):
+            super().__init__(grouped_coils)
+            self._coil_spec = grouped_coil_set_spec_from_lists(
+                [coil.curve.gamma() for coil in grouped_coils],
+                [coil.curve.gammadash() for coil in grouped_coils],
+                [coil.current.get_value() for coil in grouped_coils],
+            )
+            del self._coils
+
+        def _extract_coil_data_grouped(self):
+            return grouped_field_data_from_spec(self._coil_spec)
+
+    return _GroupedExtractorOnlyBiotSavart(coils)
+
+
+def _make_basic_mock_surface_and_label():
+    surface = _MockSurface(
+        np.zeros(27),
+        1,
+        1,
+        1,
+        False,
+        np.linspace(0.0, 1.0, 3, endpoint=False),
+        np.linspace(0.0, 1.0, 3, endpoint=False),
+    )
+    return surface, _MockVolumeLabel()
+
+
 class TestBoozerSurfaceJAXClass:
     """Test the adapter class instantiation and run_code orchestration."""
 
@@ -621,16 +676,7 @@ class TestBoozerSurfaceJAXClass:
 
         coils = _make_mixed_quad_mock_coils()
         bs = _make_spec_only_biotsavart(coils)
-        surf = _MockSurface(
-            np.zeros(27),
-            1,
-            1,
-            1,
-            False,
-            np.linspace(0.0, 1.0, 3, endpoint=False),
-            np.linspace(0.0, 1.0, 3, endpoint=False),
-        )
-        label = _MockVolumeLabel()
+        surf, label = _make_basic_mock_surface_and_label()
         booz = BoozerSurfaceJAX(
             bs,
             surf,
@@ -644,6 +690,34 @@ class TestBoozerSurfaceJAXClass:
             np.asarray(booz.coil_currents),
             np.asarray([coil.current.get_value() for coil in coils]),
         )
+
+    def test_strict_mode_rejects_hidden_grouped_extractor_fallback(self, monkeypatch):
+        """Strict JAX mode must reject grouped extractor compatibility fallback."""
+        with _strict_backend_mode(monkeypatch):
+            coils = _make_mixed_quad_mock_coils()
+            bs = _make_grouped_extractor_only_biotsavart(coils)
+            surf, label = _make_basic_mock_surface_and_label()
+
+            with pytest.raises(
+                RuntimeError,
+                match=_STRICT_GROUPED_EXTRACTOR_FALLBACK_PATTERN,
+            ):
+                BoozerSurfaceJAX(
+                    bs,
+                    surf,
+                    label,
+                    1.0,
+                    constraint_weight=1.0,
+                )
+
+    def test_strict_mode_rejects_hidden_coils_list_fallback(self, monkeypatch):
+        """Strict JAX mode must reject raw ``_coils`` compatibility extraction."""
+        with _strict_backend_mode(monkeypatch):
+            with pytest.raises(
+                RuntimeError,
+                match=_STRICT_COILS_LIST_FALLBACK_PATTERN,
+            ):
+                _make_mock_boozer_surface()
 
     def test_spec_only_biotsavart_supports_G_none_ls_path(self):
         """Spec-driven grouped-field state should work without a legacy ``_coils`` list."""
@@ -1469,6 +1543,15 @@ class TestBoozerSurfaceJAXExactPath:
         assert res["vjp"] is _boozer_exact_coil_vjp
         assert callable(res["vjp"])
 
+    def test_resolved_coil_set_spec_falls_back_to_default_for_coil_arrays(self):
+        """coil_arrays-only overrides must not erase the default grouped spec."""
+        booz = _make_mock_boozer_surface_exact()
+        resolved = _bsj._resolved_coil_set_spec(
+            booz.coil_set_spec,
+            coil_arrays=booz._coil_arrays,
+        )
+        assert resolved is booz.coil_set_spec
+
     def test_exact_fun_tracks_exact_system_residual(self):
         """Exact-path fun must reflect the actual Newton system residual."""
         booz = _make_mock_boozer_surface_exact()
@@ -1478,6 +1561,16 @@ class TestBoozerSurfaceJAXExactPath:
         x_final = booz._pack_decision_vector(res["iota"], res["G"])
         expected_fun = float(0.5 * jnp.mean(jnp.square(res_fn(x_final))))
         assert res["fun"] == pytest.approx(expected_fun)
+
+    def test_exact_residual_jits_with_integer_mask_indices(self):
+        """The exact residual closure must trace with integer mask indices."""
+        booz = _make_mock_boozer_surface_exact()
+        mask_indices = booz._compute_stellsym_mask_indices()
+        res_fn = jax.jit(booz._make_exact_residual(mask_indices))
+        x = booz._pack_decision_vector(0.3, 0.05)
+        residual = res_fn(x)
+        assert residual.shape == (mask_indices.shape[0] + 2,)
+        assert jnp.all(jnp.isfinite(residual))
 
     def test_run_code_traceable_accepts_grouped_coil_spec_source(self, monkeypatch):
         """Traceable exact solves must accept ``GroupedCoilSetSpec`` directly."""
