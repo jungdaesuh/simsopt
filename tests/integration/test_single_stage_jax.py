@@ -82,6 +82,8 @@ from simsopt.jax_core import (  # noqa: E402
     CurveCWSFourierRZSpec,
     FieldEvalSpec,
     GroupedCoilSetSpec,
+    curve_pullback_from_spec,
+    curve_spec_from_curve,
     grouped_coil_set_spec_from_coil_specs,
 )
 from simsopt.geo.boozersurface_jax import (  # noqa: E402
@@ -517,6 +519,73 @@ def _assert_biotsavart_vjp_bypasses_coil_vjp(
         deriv_cpu(current),
         rtol=1e-9,
         atol=1e-15,
+    )
+
+
+def _assert_curve_spec_pullback_matches_curve_methods(
+    curve,
+    *,
+    expect_surface: bool = False,
+):
+    spec = curve_spec_from_curve(curve)
+    gamma = jnp.asarray(curve.gamma(), dtype=jnp.float64)
+    gammadash = jnp.asarray(curve.gammadash(), dtype=jnp.float64)
+    dg = jnp.reshape(
+        jnp.linspace(0.1, 1.0, gamma.size, dtype=jnp.float64),
+        gamma.shape,
+    )
+    dgd = jnp.reshape(
+        jnp.linspace(-0.7, 0.2, gammadash.size, dtype=jnp.float64),
+        gammadash.shape,
+    )
+
+    coeff_cotangent, surface_cotangent = curve_pullback_from_spec(spec, dg, dgd)
+    curve_dofs = jnp.asarray(curve.get_dofs(), dtype=jnp.float64)
+    if hasattr(curve, "dgamma_by_dcoeff_vjp_jax") and hasattr(
+        curve,
+        "dgammadash_by_dcoeff_vjp_jax",
+    ):
+        coeff_expected = curve.dgamma_by_dcoeff_vjp_jax(
+            curve_dofs,
+            dg,
+        ) + curve.dgammadash_by_dcoeff_vjp_jax(curve_dofs, dgd)
+    else:
+        from simsopt.geo.curvexyzfourier import jaxfouriercurve_pure
+
+        quadpoints = jnp.asarray(curve.quadpoints, dtype=jnp.float64)
+        tangents = jnp.ones_like(quadpoints)
+
+        def outputs(dofs):
+            def gamma_kernel(qp):
+                return jaxfouriercurve_pure(dofs, qp, curve.order)
+
+            return jax.jvp(gamma_kernel, (quadpoints,), (tangents,))
+
+        _, pullback = jax.vjp(outputs, curve_dofs)
+        (coeff_expected,) = pullback((dg, dgd))
+
+    np.testing.assert_allclose(
+        np.asarray(coeff_cotangent),
+        np.asarray(coeff_expected),
+        rtol=1e-10,
+        atol=1e-12,
+    )
+
+    if not expect_surface:
+        assert surface_cotangent is None
+        return
+
+    surface_dofs = jnp.asarray(curve.surf.get_dofs(), dtype=jnp.float64)
+    surface_expected = curve.dgamma_by_dsurf_vjp_jax(
+        surface_dofs,
+        dg,
+    ) + curve.dgammadash_by_dsurf_vjp_jax(surface_dofs, dgd)
+    assert surface_cotangent is not None
+    np.testing.assert_allclose(
+        np.asarray(surface_cotangent),
+        np.asarray(surface_expected),
+        rtol=1e-10,
+        atol=1e-12,
     )
 
 
@@ -1285,6 +1354,21 @@ class TestAdjointSolveConsistency:
         bs_jax.set_points_from_spec(FieldEvalSpec(points=updated_points))
         np.testing.assert_allclose(
             np.asarray(bs_jax.field_eval_spec().points), updated_points
+        )
+
+    def test_curvexyzfourier_spec_pullback_matches_curve_methods(self):
+        curve = CurveXYZFourier(16, 1)
+        curve.set_dofs(np.array([1.0, 0.2, -0.1, 0.1, -0.05, 0.03, 0.8, -0.2, 0.15]))
+        _assert_curve_spec_pullback_matches_curve_methods(curve)
+
+    def test_curverzfourier_spec_pullback_matches_curve_methods(self):
+        _assert_curve_spec_pullback_matches_curve_methods(_build_rz_curve(24))
+
+    def test_curvecwsfouriercpp_spec_pullback_matches_curve_and_surface_methods(self):
+        curve, _surf = _build_surface_bound_cpp_curve(32)
+        _assert_curve_spec_pullback_matches_curve_methods(
+            curve,
+            expect_surface=True,
         )
 
     def test_grouped_coil_arrays_from_dofs_supports_generic_jaxcurve_geometry(

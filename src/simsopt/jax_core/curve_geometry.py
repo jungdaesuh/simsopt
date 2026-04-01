@@ -120,3 +120,56 @@ def curve_geometry_from_dofs(spec: CurveSpec, dofs):
     gammadash_kernel = lambda qp: jax.jvp(gamma_kernel, (qp,), (tangents,))[1]
     _, gammadashdash = jax.jvp(gammadash_kernel, (quadpoints,), (tangents,))
     return gamma, gammadash, gammadashdash
+
+
+def _curve_cws_gamma_and_dash_from_parts(
+    spec: CurveCWSFourierRZSpec,
+    curve_dofs,
+    surface_dofs,
+):
+    quadpoints, tangents = _curve_quadpoints(spec)
+
+    def gamma_kernel(qp):
+        return gamma_curve_on_surface(
+            curve_dofs,
+            qp,
+            spec.order,
+            spec.G,
+            spec.H,
+            surface_dofs,
+            _SURF_TYPE_RZ_FOURIER,
+            spec.surface.mpol,
+            spec.surface.ntor,
+            spec.surface.nfp,
+            spec.surface.stellsym,
+        )
+
+    return jax.jvp(gamma_kernel, (quadpoints,), (tangents,))
+
+
+def curve_pullback_from_spec(spec: CurveSpec, dg, dgd):
+    return curve_pullback_from_dofs(spec, spec.dofs, dg, dgd)
+
+
+def curve_pullback_from_dofs(spec: CurveSpec, dofs, dg, dgd):
+    """Return coefficient and optional surface cotangents for one curve spec."""
+    curve_dofs = jnp.asarray(dofs, dtype=jnp.float64)
+    dg_jax = jnp.asarray(dg, dtype=jnp.float64)
+    dgd_jax = jnp.asarray(dgd, dtype=jnp.float64)
+
+    if isinstance(spec, CurveCWSFourierRZSpec):
+        surface_dofs = spec.surface_dofs()
+
+        def outputs(curve_x, surface_x):
+            return _curve_cws_gamma_and_dash_from_parts(spec, curve_x, surface_x)
+
+        _, pullback = jax.vjp(outputs, curve_dofs, surface_dofs)
+        coeff_cotangent, surface_cotangent = pullback((dg_jax, dgd_jax))
+        return coeff_cotangent, surface_cotangent
+
+    def outputs(curve_x):
+        return curve_gamma_and_dash_from_dofs(spec, curve_x)
+
+    _, pullback = jax.vjp(outputs, curve_dofs)
+    (coeff_cotangent,) = pullback((dg_jax, dgd_jax))
+    return coeff_cotangent, None

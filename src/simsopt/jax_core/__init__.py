@@ -5,6 +5,8 @@ from .curve_geometry import (
     curve_gamma_and_dash_from_spec,
     curve_geometry_from_dofs,
     curve_geometry_from_spec,
+    curve_pullback_from_dofs,
+    curve_pullback_from_spec,
     curve_spec_from_curve,
     curve_spec_with_dofs,
 )
@@ -106,6 +108,8 @@ __all__ = [
     "curve_gamma_and_dash_from_spec",
     "curve_geometry_from_dofs",
     "curve_geometry_from_spec",
+    "curve_pullback_from_dofs",
+    "curve_pullback_from_spec",
     "curve_spec_from_curve",
     "curve_spec_with_dofs",
     "biot_savart_A",

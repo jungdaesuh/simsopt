@@ -1502,6 +1502,55 @@ class TestCurveCWSFourierCPPJaxFieldPath:
         assert np.all(np.isfinite(surface_grad))
         assert np.linalg.norm(surface_grad) > 0.0
 
+    def test_b_vjp_uses_spec_pullback_for_curvecwsfouriercpp(
+        self,
+        banana_coil_cpp_setup,
+        monkeypatch,
+    ):
+        coils, surf, banana_coil = banana_coil_cpp_setup
+        points, bs_jax = _build_jax_field_on_surface(coils, surf)
+
+        bs_cpu = BiotSavart(coils)
+        bs_cpu.set_points(points)
+        v = np.asarray(bs_jax.B())
+        deriv_cpu = bs_cpu.B_vjp(v)
+
+        def fail_if_called(*_args, **_kwargs):
+            raise AssertionError(
+                "BiotSavartJAX.B_vjp() should use the immutable-spec pullback for "
+                "CurveCWSFourierCPP"
+            )
+
+        monkeypatch.setattr(
+            banana_coil.curve, "dgamma_by_dcoeff_vjp_jax", fail_if_called
+        )
+        monkeypatch.setattr(
+            banana_coil.curve,
+            "dgammadash_by_dcoeff_vjp_jax",
+            fail_if_called,
+        )
+        monkeypatch.setattr(
+            banana_coil.curve, "dgamma_by_dsurf_vjp_jax", fail_if_called
+        )
+        monkeypatch.setattr(
+            banana_coil.curve,
+            "dgammadash_by_dsurf_vjp_jax",
+            fail_if_called,
+        )
+
+        deriv = bs_jax.B_vjp(v)
+
+        np.testing.assert_allclose(
+            deriv(banana_coil.curve),
+            deriv_cpu(banana_coil.curve),
+            rtol=1e-9,
+            atol=1e-15,
+        )
+        surface_grad = deriv(banana_coil.curve.surf)
+        assert surface_grad.shape[0] == banana_coil.curve.surf.local_dof_size
+        assert np.all(np.isfinite(surface_grad))
+        assert np.linalg.norm(surface_grad) > 0.0
+
 
 class TestCurveCWSFourierNativeFieldPath:
     def test_b_uses_native_curvecwsfourier_geometry(

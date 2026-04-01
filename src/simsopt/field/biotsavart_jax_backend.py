@@ -20,6 +20,8 @@ from ..backend import raise_if_strict_jax_fallback
 from .._core.derivative import Derivative
 from .._core.optimizable import Optimizable
 from ..jax_core import (
+    curve_gamma_and_dash_from_dofs as curve_gamma_and_dash_from_spec_dofs,
+    curve_pullback_from_dofs,
     curve_spec_from_curve,
     curve_spec_with_dofs,
     make_coil_spec,
@@ -273,30 +275,43 @@ def _full_curve_cotangent_to_derivative(curve, full_cotangent):
     return deriv_data
 
 
-def _curve_coeff_pullback_data(curve, dg, dgd):
-    from ..geo.curvexyzfourier import CurveXYZFourier, jaxfouriercurve_pure
+def _curve_pullback_data_from_spec(curve, dg, dgd):
+    if _curve_dof_mode(curve) == "full":
+        raise NotImplementedError(
+            "Full-graph curves do not yet expose immutable-spec pullbacks."
+        )
+    coeff_cotangent, surface_cotangent = curve_pullback_from_dofs(
+        curve_spec_from_curve(curve),
+        _curve_live_dofs(curve),
+        dg,
+        dgd,
+    )
+    deriv_data = {curve: coeff_cotangent}
+    if surface_cotangent is not None:
+        deriv_data[curve.surf] = surface_cotangent
+    return deriv_data
 
+
+def _merge_curve_pullback_data(deriv_data, curve, dg, dgd):
+    try:
+        _merge_derivative_data(
+            deriv_data,
+            _curve_pullback_data_from_spec(curve, dg, dgd),
+        )
+    except NotImplementedError:
+        _merge_derivative_data(
+            deriv_data,
+            _curve_coeff_pullback_data_from_methods(curve, dg, dgd),
+        )
+        _merge_derivative_data(
+            deriv_data,
+            _curve_surface_pullback_data(curve, dg, dgd),
+        )
+
+
+def _curve_coeff_pullback_data_from_methods(curve, dg, dgd):
     if curve.dof_size == 0:
         return {}
-
-    if isinstance(curve, CurveXYZFourier):
-        curve_dofs = jnp.asarray(curve.get_dofs(), dtype=jnp.float64)
-        quadpoints = _curve_quadpoints_jax(curve)
-        ones = jnp.ones_like(quadpoints)
-
-        def gamma_of_dofs(dofs):
-            return jaxfouriercurve_pure(dofs, quadpoints, curve.order)
-
-        def gammadash_of_dofs(dofs):
-            return jax.jvp(
-                lambda qpts: jaxfouriercurve_pure(dofs, qpts, curve.order),
-                (quadpoints,),
-                (ones,),
-            )[1]
-
-        _, gamma_pullback = jax.vjp(gamma_of_dofs, curve_dofs)
-        _, gammadash_pullback = jax.vjp(gammadash_of_dofs, curve_dofs)
-        return {curve: gamma_pullback(dg)[0] + gammadash_pullback(dgd)[0]}
 
     curve_dofs = _curve_live_dofs(curve)
     coeff_cotangent = curve.dgamma_by_dcoeff_vjp_jax(
@@ -309,24 +324,26 @@ def _curve_coeff_pullback_data(curve, dg, dgd):
 
 
 def _curve_gamma_and_dash_from_dofs(curve, curve_dofs):
-    from ..geo.curvexyzfourier import CurveXYZFourier, jaxfouriercurve_pure
-
-    if isinstance(curve, CurveXYZFourier):
-        quadpoints = _curve_quadpoints_jax(curve)
-        ones = jnp.ones_like(quadpoints)
-        gamma_fn = lambda qpts: jaxfouriercurve_pure(curve_dofs, qpts, curve.order)
-        return jax.jvp(gamma_fn, (quadpoints,), (ones,))
-
+    # Full-DOF-mode curves (FiniteBuild, CurvePerturbed) have no spec.
     if _curve_dof_mode(curve) == "full":
         return curve.gamma_jax(curve_dofs), curve.gammadash_jax(curve_dofs)
 
+    # Spec-capable curves (XYZ, RZ, CWS Fourier) → canonical spec path.
+    try:
+        return curve_gamma_and_dash_from_spec_dofs(
+            curve_spec_from_curve(curve),
+            curve_dofs,
+        )
+    except NotImplementedError:
+        pass
+
+    # Method-based fallback for non-spec curves with gamma_jax.
     surf_dofs = _curve_surface_dofs(curve)
     if surf_dofs is not None:
         return (
             curve.gamma_jax(curve_dofs, surf_dofs),
             curve.gammadash_jax(curve_dofs, surf_dofs),
         )
-
     return curve.gamma_jax(curve_dofs), curve.gammadash_jax(curve_dofs)
 
 
@@ -368,8 +385,7 @@ def _project_single_coil_cotangent_data(coil, dg, dgd, dc):
 
     if supports_jax_pullback:
         deriv_data = {}
-        _merge_derivative_data(deriv_data, _curve_coeff_pullback_data(curve, dg, dgd))
-        _merge_derivative_data(deriv_data, _curve_surface_pullback_data(curve, dg, dgd))
+        _merge_curve_pullback_data(deriv_data, curve, dg, dgd)
         if current.dof_size > 0:
             current_cotangent = jnp.atleast_1d(
                 jnp.asarray(scale, dtype=jnp.float64)
@@ -978,8 +994,8 @@ class BiotSavartJAX(Optimizable):
 
     def _coil_b_vjp_inputs(self, coil, geometry_cache=None):
         curve, rotmat, current, scale = _unwrap_coil_curve_and_current(coil)
-        base_gamma, base_gammadash, geometry_s = (
-            self._base_curve_geometry_with_timings(curve, geometry_cache)
+        base_gamma, base_gammadash, geometry_s = self._base_curve_geometry_with_timings(
+            curve, geometry_cache
         )
         gamma, gammadash = _rotate_curve_geometry(base_gamma, base_gammadash, rotmat)
         current_s, current_value = _time_call_result(
