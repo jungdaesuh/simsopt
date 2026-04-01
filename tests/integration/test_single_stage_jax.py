@@ -1914,6 +1914,43 @@ class TestNonQSRatioValue:
         assert np.isfinite(j_jax) and j_jax >= 0, f"JAX NonQSRatio invalid: {j_jax}"
         assert np.isfinite(j_cpu) and j_cpu >= 0, f"CPU NonQSRatio invalid: {j_cpu}"
 
+    def test_uses_spec_reconstruction_not_grouped_arrays(
+        self,
+        boozer_setup,
+        monkeypatch,
+    ):
+        """NonQSRatioJAX must rebuild coil data through immutable specs."""
+        (_, _, _, _, bs_jax, _, booz_jax, _) = boozer_setup
+
+        original_coil_set_spec_from_dofs = bs_jax.coil_set_spec_from_dofs
+        calls = {"count": 0}
+
+        def _counting_coil_set_spec_from_dofs(coil_dofs):
+            calls["count"] += 1
+            return original_coil_set_spec_from_dofs(coil_dofs)
+
+        def _reject_grouped_arrays(*_args, **_kwargs):
+            raise AssertionError(
+                "NonQSRatioJAX should not call grouped_coil_arrays_from_dofs()"
+            )
+
+        monkeypatch.setattr(
+            bs_jax,
+            "coil_set_spec_from_dofs",
+            _counting_coil_set_spec_from_dofs,
+        )
+        monkeypatch.setattr(
+            bs_jax,
+            "grouped_coil_arrays_from_dofs",
+            _reject_grouped_arrays,
+        )
+
+        nqs_jax = NonQuasiSymmetricRatioJAX(booz_jax, bs_jax, sDIM=6)
+        gradient = np.array(nqs_jax.dJ())
+
+        assert np.all(np.isfinite(gradient))
+        assert calls["count"] > 0
+
 
 # -----------------------------------------------------------------------
 # Test 5: Composite objective value sanity

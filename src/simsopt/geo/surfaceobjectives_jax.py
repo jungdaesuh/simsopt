@@ -31,7 +31,6 @@ from .._core.derivative import Derivative, derivative_dec
 from .._core.optimizable import Optimizable
 from ..jax_core.field import (
     grouped_biot_savart_B_from_spec,
-    grouped_coil_set_spec_from_inputs,
     grouped_coil_currents_from_spec,
 )
 from ..objectives.utilities import forward_backward_jax, plu_solve_jax
@@ -135,6 +134,39 @@ def _adjoint_coil_derivative(
             [coil_group_indices],
         )
     return total_derivative
+
+
+def _coil_dofs_gradient_to_derivative(biotsavart, coil_dofs_gradient):
+    """Convert a flat free-DOF gradient into the public ``Derivative`` contract."""
+    coil_dofs_gradient = np.asarray(coil_dofs_gradient, dtype=float)
+    deriv_data = {}
+    start = 0
+    for lineage_opt in biotsavart.unique_dof_lineage:
+        width = lineage_opt.local_dof_size
+        if width == 0:
+            continue
+
+        block = np.zeros(lineage_opt.local_full_dof_size)
+        stop = start + width
+        block[lineage_opt.local_dofs_free_status] = coil_dofs_gradient[start:stop]
+        start = stop
+
+        for dep_opt in lineage_opt.dofs.dep_opts():
+            if dep_opt in deriv_data:
+                deriv_data[dep_opt] = deriv_data[dep_opt] + block
+            else:
+                deriv_data[dep_opt] = block.copy()
+
+    return Derivative(deriv_data)
+
+
+def _qs_ratio_from_coil_dofs(sdofs, coil_dofs, biotsavart, **qs_kwargs):
+    """Evaluate the QS-ratio objective from explicit coil DOFs via immutable specs."""
+    return _qs_ratio_pure(
+        sdofs,
+        biotsavart.coil_set_spec_from_dofs(coil_dofs),
+        **qs_kwargs,
+    )
 
 
 def _ensure_solved(booz_surf):
@@ -625,13 +657,8 @@ class NonQuasiSymmetricRatioJAX(Optimizable):
         vjp_groups_fn = booz_surf.res.get("vjp_groups")
 
         sdofs = booz_surf._get_surface_dofs()
-        coil_arrays = booz_surf._coil_arrays
-        coil_indices = booz_surf._coil_index_lists
-
-        def _coil_set_spec(coil_array_groups):
-            return grouped_coil_set_spec_from_inputs(coil_array_groups)
-
-        coil_set_spec = _coil_set_spec(coil_arrays)
+        current_coil_dofs = jnp.asarray(self.biotsavart.x.copy(), dtype=jnp.float64)
+        coil_set_spec = self.biotsavart.coil_set_spec_from_dofs(current_coil_dofs)
 
         qs_kwargs = dict(
             quadpoints_phi=self._aux_phi_jax,
@@ -644,19 +671,26 @@ class NonQuasiSymmetricRatioJAX(Optimizable):
             axis=self.axis,
         )
 
-        self._J = float(_qs_ratio_pure(sdofs, coil_set_spec, **qs_kwargs))
-
-        def J_of_coils(ca):
-            return _qs_ratio_pure(
+        self._J = float(
+            _qs_ratio_from_coil_dofs(
                 sdofs,
-                _coil_set_spec(ca),
+                current_coil_dofs,
+                self.biotsavart,
+                **qs_kwargs,
+            )
+        )
+
+        def J_of_coils(coil_dofs):
+            return _qs_ratio_from_coil_dofs(
+                sdofs,
+                coil_dofs,
+                self.biotsavart,
                 **qs_kwargs,
             )
 
-        d_coil_arrays_direct = jax.grad(J_of_coils)(coil_arrays)
-        dJ_by_dcoils = self.biotsavart.coil_cotangents_to_derivative(
-            d_coil_arrays_direct,
-            coil_indices,
+        dJ_by_dcoils = _coil_dofs_gradient_to_derivative(
+            self.biotsavart,
+            jax.grad(J_of_coils)(current_coil_dofs),
         )
 
         def J_of_sdofs(s):
