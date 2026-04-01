@@ -627,7 +627,11 @@ class NonQuasiSymmetricRatioJAX(Optimizable):
         sdofs = booz_surf._get_surface_dofs()
         coil_arrays = booz_surf._coil_arrays
         coil_indices = booz_surf._coil_index_lists
-        coil_set_spec = grouped_coil_set_spec_from_inputs(coil_arrays)
+
+        def _coil_set_spec(coil_array_groups):
+            return grouped_coil_set_spec_from_inputs(coil_array_groups)
+
+        coil_set_spec = _coil_set_spec(coil_arrays)
 
         qs_kwargs = dict(
             quadpoints_phi=self._aux_phi_jax,
@@ -645,7 +649,7 @@ class NonQuasiSymmetricRatioJAX(Optimizable):
         def J_of_coils(ca):
             return _qs_ratio_pure(
                 sdofs,
-                grouped_coil_set_spec_from_inputs(ca),
+                _coil_set_spec(ca),
                 **qs_kwargs,
             )
 
