@@ -282,30 +282,40 @@ def test_import_jax_core_specs():
             CoilGroupSpec,
             CoilSymmetrySpec,
             CurveCWSFourierRZSpec,
+            CurveFilamentSpec,
             CurveHelicalSpec,
             CurvePlanarFourierSpec,
+            CurvePerturbedSpec,
             CurrentValueSpec,
             CurveRZFourierSpec,
             CurveXYZFourierSpec,
             FieldEvalSpec,
+            FrameRotationSpec,
             GroupedCoilSetSpec,
             FixedSurfaceFluxSpec,
+            OptimizableDofMapSpec,
             SurfaceRZFourierSpec,
+            ZeroRotationSpec,
         )
 
         assert CoilSpec is not None
         assert CoilGroupSpec is not None
         assert CoilSymmetrySpec is not None
         assert CurveCWSFourierRZSpec is not None
+        assert CurveFilamentSpec is not None
         assert CurveHelicalSpec is not None
         assert CurvePlanarFourierSpec is not None
+        assert CurvePerturbedSpec is not None
         assert CurrentValueSpec is not None
         assert CurveRZFourierSpec is not None
         assert CurveXYZFourierSpec is not None
         assert FieldEvalSpec is not None
+        assert FrameRotationSpec is not None
         assert GroupedCoilSetSpec is not None
         assert FixedSurfaceFluxSpec is not None
+        assert OptimizableDofMapSpec is not None
         assert SurfaceRZFourierSpec is not None
+        assert ZeroRotationSpec is not None
     """)
     assert rc == 0, f"import simsopt.jax_core failed:\n{err}"
 
@@ -321,15 +331,20 @@ def test_jax_core_specs_are_pytrees():
             CoilSpec,
             CoilSymmetrySpec,
             CurveCWSFourierRZSpec,
+            CurveFilamentSpec,
             CurveHelicalSpec,
             CurvePlanarFourierSpec,
+            CurvePerturbedSpec,
             CurrentValueSpec,
             CurveRZFourierSpec,
             CurveXYZFourierSpec,
             FieldEvalSpec,
+            FrameRotationSpec,
             FixedSurfaceFluxSpec,
             GroupedCoilSetSpec,
+            OptimizableDofMapSpec,
             SurfaceRZFourierSpec,
+            ZeroRotationSpec,
             curve_gamma_and_dash_from_dofs,
             curve_gamma_and_dash_from_spec,
             curve_geometry_from_dofs,
@@ -348,13 +363,18 @@ def test_jax_core_specs_are_pytrees():
             make_fixed_surface_flux_spec,
             make_current_value_spec,
             make_curve_cwsfourier_rz_spec,
+            make_curve_filament_spec,
             make_curve_helical_spec,
             make_curve_planarfourier_spec,
+            make_curve_perturbed_spec,
             make_curve_rzfourier_spec,
             make_curve_xyzfourier_spec,
             make_field_eval_spec,
+            make_frame_rotation_spec,
             make_grouped_coil_set_spec,
+            make_optimizable_dof_map_spec,
             make_surface_rzfourier_spec,
+            make_zero_rotation_spec,
             surface_rz_fourier_dofs_from_spec,
             surface_rz_fourier_gamma_from_spec,
         )
@@ -398,6 +418,54 @@ def test_jax_core_specs_are_pytrees():
             ell=2,
             R0=1.0,
             r=0.3,
+        )
+        identity_curve_map = make_optimizable_dof_map_spec(
+            template_full_dofs=jnp.asarray([0.1, -0.03, 0.02, 0.04, -0.01]),
+            owner_segments=((0, 5, 0, 5),),
+            input_mode="local",
+            input_start=0,
+            input_end=5,
+        )
+        curve_perturbed_spec = make_curve_perturbed_spec(
+            dofs=jnp.asarray([0.1, -0.03, 0.02, 0.04, -0.01]),
+            quadpoints=jnp.asarray([0.0, 0.5]),
+            base_curve=curve_helical_spec,
+            base_curve_map=identity_curve_map,
+            sample_gamma=jnp.asarray([[1.0e-3, 0.0, 0.0], [0.0, -2.0e-3, 0.0]]),
+            sample_gammadash=jnp.asarray([[0.0, 3.0e-3, 0.0], [-4.0e-3, 0.0, 0.0]]),
+        )
+        frame_rotation_spec = make_frame_rotation_spec(
+            dofs=jnp.asarray([0.07, -0.03, 0.02]),
+            quadpoints=jnp.asarray([0.0, 0.5]),
+            order=1,
+            scale=1.0,
+        )
+        zero_rotation_spec = make_zero_rotation_spec(quadpoints=jnp.asarray([0.0, 0.5]))
+        filament_owner_dofs = jnp.asarray([0.1, -0.03, 0.02, 0.04, -0.01, 0.07, -0.03, 0.02])
+        filament_curve_map = make_optimizable_dof_map_spec(
+            template_full_dofs=jnp.asarray([0.1, -0.03, 0.02, 0.04, -0.01]),
+            owner_segments=((0, 5, 0, 5),),
+            input_mode="local",
+            input_start=0,
+            input_end=5,
+        )
+        filament_rotation_map = make_optimizable_dof_map_spec(
+            template_full_dofs=jnp.asarray([0.07, -0.03, 0.02]),
+            owner_segments=((5, 8, 0, 3),),
+            input_mode="local",
+            input_start=0,
+            input_end=3,
+        )
+        curve_filament_spec = make_curve_filament_spec(
+            dofs=filament_owner_dofs,
+            quadpoints=jnp.asarray([0.0, 0.5]),
+            base_curve=curve_helical_spec,
+            base_curve_map=filament_curve_map,
+            rotation=frame_rotation_spec,
+            rotation_map=filament_rotation_map,
+            frame_kind="centroid",
+            dn=0.01,
+            db=-0.02,
         )
         current_spec = make_current_value_spec(2.0)
         field_eval_spec = make_field_eval_spec(jnp.zeros((4, 3)))
@@ -445,41 +513,56 @@ def test_jax_core_specs_are_pytrees():
         assert isinstance(coil_value_spec, CoilSpec)
         assert isinstance(coil_symmetry_spec, CoilSymmetrySpec)
         assert isinstance(curve_cws_spec, CurveCWSFourierRZSpec)
+        assert isinstance(curve_filament_spec, CurveFilamentSpec)
         assert isinstance(curve_helical_spec, CurveHelicalSpec)
         assert isinstance(curve_planar_spec, CurvePlanarFourierSpec)
+        assert isinstance(curve_perturbed_spec, CurvePerturbedSpec)
         assert isinstance(current_spec, CurrentValueSpec)
         assert isinstance(curve_rz_spec, CurveRZFourierSpec)
         assert isinstance(curve_xyz_spec, CurveXYZFourierSpec)
         assert isinstance(field_eval_spec, FieldEvalSpec)
+        assert isinstance(frame_rotation_spec, FrameRotationSpec)
         assert isinstance(coil_spec, GroupedCoilSetSpec)
         assert isinstance(flux_spec, FixedSurfaceFluxSpec)
+        assert isinstance(identity_curve_map, OptimizableDofMapSpec)
         assert isinstance(surface_spec, SurfaceRZFourierSpec)
+        assert isinstance(zero_rotation_spec, ZeroRotationSpec)
 
         curve_xyz_leaves, _ = jax.tree_util.tree_flatten(curve_xyz_spec)
         curve_rz_leaves, _ = jax.tree_util.tree_flatten(curve_rz_spec)
         curve_planar_leaves, _ = jax.tree_util.tree_flatten(curve_planar_spec)
         curve_helical_leaves, _ = jax.tree_util.tree_flatten(curve_helical_spec)
         curve_cws_leaves, _ = jax.tree_util.tree_flatten(curve_cws_spec)
+        curve_perturbed_leaves, _ = jax.tree_util.tree_flatten(curve_perturbed_spec)
+        curve_filament_leaves, _ = jax.tree_util.tree_flatten(curve_filament_spec)
         coil_symmetry_leaves, _ = jax.tree_util.tree_flatten(coil_symmetry_spec)
         current_leaves, _ = jax.tree_util.tree_flatten(current_spec)
         field_eval_leaves, _ = jax.tree_util.tree_flatten(field_eval_spec)
         coil_value_leaves, _ = jax.tree_util.tree_flatten(coil_value_spec)
         coil_leaves, _ = jax.tree_util.tree_flatten(coil_spec)
         flux_leaves, _ = jax.tree_util.tree_flatten(flux_spec)
+        frame_rotation_leaves, _ = jax.tree_util.tree_flatten(frame_rotation_spec)
+        dof_map_leaves, _ = jax.tree_util.tree_flatten(identity_curve_map)
         surface_leaves, _ = jax.tree_util.tree_flatten(surface_spec)
+        zero_rotation_leaves, _ = jax.tree_util.tree_flatten(zero_rotation_spec)
 
         assert len(curve_xyz_leaves) == 2
         assert len(curve_rz_leaves) == 2
         assert len(curve_planar_leaves) == 2
         assert len(curve_helical_leaves) == 2
         assert len(curve_cws_leaves) == 8
+        assert len(curve_perturbed_leaves) == 7
+        assert len(curve_filament_leaves) == 8
         assert len(coil_symmetry_leaves) == 1
         assert len(current_leaves) == 1
         assert len(field_eval_leaves) == 1
+        assert len(frame_rotation_leaves) == 2
         assert len(coil_value_leaves) == 4
         assert len(coil_leaves) == 3
+        assert len(dof_map_leaves) == 1
         assert len(flux_leaves) == 3
         assert len(surface_leaves) == 6
+        assert len(zero_rotation_leaves) == 1
         assert len(grouped_field_inputs_from_spec(coil_spec)) == 1
         assert len(grouped_field_data_from_spec(coil_spec)) == 1
         assert grouped_coil_index_lists_from_spec(coil_spec) == ([0],)
@@ -493,6 +576,8 @@ def test_jax_core_specs_are_pytrees():
         curve_xyz_gamma, curve_xyz_gammadash = jax.jit(curve_gamma_and_dash_from_spec)(curve_xyz_spec)
         curve_rz_gamma, _ = jax.jit(curve_gamma_and_dash_from_spec)(curve_rz_spec)
         curve_cws_gamma, curve_cws_gammadash = jax.jit(curve_gamma_and_dash_from_spec)(curve_cws_spec)
+        curve_perturbed_gamma, curve_perturbed_gammadash = jax.jit(curve_gamma_and_dash_from_spec)(curve_perturbed_spec)
+        curve_filament_gamma, curve_filament_gammadash = jax.jit(curve_gamma_and_dash_from_spec)(curve_filament_spec)
         curve_cws_gamma_from_dofs, curve_cws_gammadash_from_dofs = jax.jit(curve_gamma_and_dash_from_dofs)(
             curve_cws_spec,
             curve_cws_spec.dofs,
@@ -514,6 +599,10 @@ def test_jax_core_specs_are_pytrees():
         assert curve_cws_gamma_from_dofs.shape == (2, 3)
         assert curve_cws_gammadash.shape == (2, 3)
         assert curve_cws_gammadash_from_dofs.shape == (2, 3)
+        assert curve_perturbed_gamma.shape == (2, 3)
+        assert curve_perturbed_gammadash.shape == (2, 3)
+        assert curve_filament_gamma.shape == (2, 3)
+        assert curve_filament_gammadash.shape == (2, 3)
         assert curve_cws_gammadashdash.shape == (2, 3)
         assert curve_cws_gammadashdash_from_dofs.shape == (2, 3)
         assert gamma.shape == (2, 2, 3)

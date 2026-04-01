@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import os
+import warnings
 
 _VALID_BACKENDS = ("cpu", "jax")
 _VALID_PLATFORMS = ("cpu", "cuda")
@@ -340,6 +341,7 @@ def _runtime_env_value(attribute_name: str, value: object) -> str:
 
 
 _cached_backend_policy: BackendPolicy | None = None
+_warned_jax_fallbacks: set[tuple[str, str, str]] = set()
 
 
 def get_backend_policy(mode: str | None = None) -> BackendPolicy:
@@ -545,6 +547,7 @@ def invalidate_backend_cache() -> None:
     _cached_backend_config = None
     _cached_backend_policy = None
     _cached_field_kernel_tuning = None
+    _warned_jax_fallbacks.clear()
 
 
 def raise_if_strict_jax_fallback(*, component: str, detail: str) -> None:
@@ -556,6 +559,25 @@ def raise_if_strict_jax_fallback(*, component: str, detail: str) -> None:
         f"{component} cannot use {detail} while simsopt backend mode "
         f"{config.mode!r} has strict=True. Select a JAX-native path or "
         "disable strict mode."
+    )
+
+
+def warn_if_jax_fallback(*, component: str, detail: str) -> None:
+    """Warn once when non-strict JAX mode uses a legacy fallback path."""
+    config = get_backend_config()
+    if config.backend != "jax" or config.strict:
+        return
+
+    cache_key = (config.mode, component, detail)
+    if cache_key in _warned_jax_fallbacks:
+        return
+    _warned_jax_fallbacks.add(cache_key)
+    warnings.warn(
+        f"{component} is using {detail} while simsopt backend mode "
+        f"{config.mode!r} is active. This path should be treated as a legacy "
+        "adapter seam; enable strict mode to reject it.",
+        RuntimeWarning,
+        stacklevel=2,
     )
 
 
@@ -609,6 +631,7 @@ def set_backend(
     _cached_backend_config = config
     _cached_backend_policy = None
     _cached_field_kernel_tuning = None
+    _warned_jax_fallbacks.clear()
     for env_name, attribute_name in _SYNCED_RUNTIME_ENV_VALUES:
         os.environ[env_name] = _runtime_env_value(
             attribute_name, getattr(config, attribute_name)

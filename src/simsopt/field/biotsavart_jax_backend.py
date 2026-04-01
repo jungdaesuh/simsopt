@@ -16,7 +16,7 @@ import numpy as np
 import jax
 import jax.numpy as jnp
 
-from ..backend import raise_if_strict_jax_fallback
+from ..backend import raise_if_strict_jax_fallback, warn_if_jax_fallback
 from .._core.derivative import Derivative
 from .._core.optimizable import Optimizable
 from ..jax_core import (
@@ -148,14 +148,37 @@ def _raise_if_strict_biot_savart_fallback(detail: str) -> None:
     )
 
 
+def _warn_biot_savart_fallback(detail: str) -> None:
+    warn_if_jax_fallback(
+        component="BiotSavartJAX",
+        detail=detail,
+    )
+
+
+def _handle_biot_savart_fallback(detail: str) -> None:
+    _raise_if_strict_biot_savart_fallback(detail)
+    _warn_biot_savart_fallback(detail)
+
+
 def _raise_if_strict_hidden_spec_fallback(detail: str) -> None:
     _raise_if_strict_biot_savart_fallback(
         f"the hidden immutable-spec compatibility fallback via {detail}"
     )
 
 
-def _raise_if_strict_grouped_spec_compat_fallback(api_name: str, detail: str) -> None:
-    _raise_if_strict_hidden_spec_fallback(f"{detail} in {api_name}()")
+def _warn_hidden_spec_fallback(detail: str) -> None:
+    _warn_biot_savart_fallback(
+        f"the hidden immutable-spec compatibility fallback via {detail}"
+    )
+
+
+def _handle_hidden_spec_fallback(detail: str) -> None:
+    _raise_if_strict_hidden_spec_fallback(detail)
+    _warn_hidden_spec_fallback(detail)
+
+
+def _handle_grouped_spec_compat_fallback(api_name: str, detail: str) -> None:
+    _handle_hidden_spec_fallback(f"{detail} in {api_name}()")
 
 
 def _build_pullback_group_profile_entry(*, kind, coil_indices, elapsed_s, native_curve):
@@ -276,16 +299,15 @@ def _full_curve_cotangent_to_derivative(curve, full_cotangent):
 
 
 def _curve_pullback_data_from_spec(curve, dg, dgd):
-    if _curve_dof_mode(curve) == "full":
-        raise NotImplementedError(
-            "Full-graph curves do not yet expose immutable-spec pullbacks."
-        )
+    spec = curve_spec_from_curve(curve)
     coeff_cotangent, surface_cotangent = curve_pullback_from_dofs(
-        curve_spec_from_curve(curve),
+        spec,
         _curve_live_dofs(curve),
         dg,
         dgd,
     )
+    if _curve_dof_mode(curve) == "full":
+        return _full_curve_cotangent_to_derivative(curve, coeff_cotangent)
     deriv_data = {curve: coeff_cotangent}
     if surface_cotangent is not None:
         deriv_data[curve.surf] = surface_cotangent
@@ -324,11 +346,7 @@ def _curve_coeff_pullback_data_from_methods(curve, dg, dgd):
 
 
 def _curve_gamma_and_dash_from_dofs(curve, curve_dofs):
-    # Full-DOF-mode curves (FiniteBuild, CurvePerturbed) have no spec.
-    if _curve_dof_mode(curve) == "full":
-        return curve.gamma_jax(curve_dofs), curve.gammadash_jax(curve_dofs)
-
-    # Spec-capable curves (XYZ, RZ, CWS Fourier) → canonical spec path.
+    # Spec-capable curves, including full-graph wrappers, use the canonical spec path.
     try:
         return curve_gamma_and_dash_from_spec_dofs(
             curve_spec_from_curve(curve),
@@ -395,8 +413,8 @@ def _project_single_coil_cotangent_data(coil, dg, dgd, dc):
         return deriv_data
 
     if supports_cpu_pullback:
-        _raise_if_strict_biot_savart_fallback(
-            (f"the CPU coil-pullback fallback for curve type {type(curve).__name__}"),
+        _handle_biot_savart_fallback(
+            f"the CPU coil-pullback fallback for curve type {type(curve).__name__}"
         )
         deriv_data = _curve_coeff_pullback_data_cpu(curve, dg, dgd)
         if current.dof_size > 0:
@@ -671,7 +689,7 @@ class BiotSavartJAX(Optimizable):
                 self.coil_specs_from_dofs(coil_dofs)
             )
         except NotImplementedError:
-            _raise_if_strict_grouped_spec_compat_fallback(
+            _handle_grouped_spec_compat_fallback(
                 "coil_set_spec_from_dofs",
                 "grouped-array reconstruction",
             )
@@ -813,11 +831,8 @@ class BiotSavartJAX(Optimizable):
                 lambda: _curve_gamma_and_dash_from_dofs(curve, curve_dofs)
             )
         else:
-            _raise_if_strict_biot_savart_fallback(
-                (
-                    f"the CPU curve-geometry fallback for curve type "
-                    f"{type(curve).__name__}"
-                ),
+            _handle_biot_savart_fallback(
+                f"the CPU curve-geometry fallback for curve type {type(curve).__name__}"
             )
             geometry_s, (base_gamma, base_gammadash) = _time_call_result(
                 lambda: (
@@ -944,7 +959,7 @@ class BiotSavartJAX(Optimizable):
                 jnp.asarray(self.x, dtype=jnp.float64)
             )
         except NotImplementedError:
-            _raise_if_strict_grouped_spec_compat_fallback(
+            _handle_grouped_spec_compat_fallback(
                 "coil_set_spec",
                 "explicit-DOF grouped-array reconstruction",
             )
@@ -952,7 +967,7 @@ class BiotSavartJAX(Optimizable):
         try:
             return grouped_coil_set_spec_from_coil_specs(self.coil_specs())
         except NotImplementedError:
-            _raise_if_strict_grouped_spec_compat_fallback(
+            _handle_grouped_spec_compat_fallback(
                 "coil_set_spec",
                 "live-graph geometry extraction",
             )

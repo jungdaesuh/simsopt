@@ -30,6 +30,7 @@ from .runtime import (
     requires_x64,
     set_backend,
     should_eagerly_configure_jax,
+    warn_if_jax_fallback,
 )
 
 __all__ = [
@@ -62,4 +63,5 @@ __all__ = [
     "requires_x64",
     "set_backend",
     "should_eagerly_configure_jax",
+    "warn_if_jax_fallback",
 ]

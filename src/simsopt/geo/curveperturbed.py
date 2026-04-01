@@ -11,6 +11,7 @@ from .curve import (
     Curve,
     _curve_jax_eval_from_arg,
     _curve_jax_arg_from_full_dofs,
+    _optimizable_dof_map_spec,
     jnp,
     vjp,
 )
@@ -249,3 +250,19 @@ class CurvePerturbed(sopp.Curve, Curve):
 
     def dgammadashdashdash_by_dcoeff_vjp(self, v):
         return self.curve.dgammadashdashdash_by_dcoeff_vjp(v)
+
+    def to_spec(self):
+        """Build an immutable JAX geometry spec from the current wrapper state."""
+        from ..jax_core import (
+            curve_spec_from_curve,
+            make_curve_perturbed_spec,
+        )
+
+        return make_curve_perturbed_spec(
+            dofs=self.full_x,
+            quadpoints=self.quadpoints,
+            base_curve=curve_spec_from_curve(self.curve),
+            base_curve_map=_optimizable_dof_map_spec(self, self.curve),
+            sample_gamma=self.sample[0],
+            sample_gammadash=self.sample[1],
+        )

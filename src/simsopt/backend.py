@@ -37,6 +37,7 @@ from simsopt.backend.runtime import (  # noqa: E402
     requires_x64,
     set_backend,
     should_eagerly_configure_jax,
+    warn_if_jax_fallback,
 )
 
 __all__ = (
@@ -69,6 +70,7 @@ __all__ = (
     "requires_x64",
     "set_backend",
     "should_eagerly_configure_jax",
+    "warn_if_jax_fallback",
     # Keep ``os`` available on the facade for existing tests/helpers.
     "os",
 )

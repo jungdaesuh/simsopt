@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib
 import os
+import warnings
 
 import pytest
 
@@ -78,6 +79,13 @@ def _assert_transfer_guard_resolution(backend, *, mode: str, expected: str | Non
 
     assert config.transfer_guard == expected
     assert policy.transfer_guard == expected
+
+
+def _capture_fallback_warnings(callback):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        callback()
+    return caught
 
 
 def test_backend_defaults_to_native_cpu(monkeypatch):
@@ -327,3 +335,55 @@ def test_strict_fallback_helper_rejects_jax_mode(monkeypatch):
             component="test-component",
             detail="a fallback path",
         )
+
+
+def test_warn_fallback_helper_ignores_native_cpu(monkeypatch):
+    _clear_backend_env(monkeypatch)
+    backend = _fresh_backend()
+
+    caught = _capture_fallback_warnings(
+        lambda: backend.warn_if_jax_fallback(
+            component="test-component",
+            detail="a fallback path",
+        )
+    )
+
+    assert caught == []
+
+
+def test_warn_fallback_helper_emits_once_in_non_strict_jax_mode(monkeypatch):
+    _clear_backend_env(monkeypatch)
+    backend = _fresh_backend()
+    backend.set_backend("jax_gpu_parity", configure_runtime=False)
+
+    caught = _capture_fallback_warnings(
+        lambda: (
+            backend.warn_if_jax_fallback(
+                component="test-component",
+                detail="a fallback path",
+            ),
+            backend.warn_if_jax_fallback(
+                component="test-component",
+                detail="a fallback path",
+            ),
+        )
+    )
+
+    assert len(caught) == 1
+    assert issubclass(caught[0].category, RuntimeWarning)
+    assert "legacy adapter seam" in str(caught[0].message)
+
+
+def test_warn_fallback_helper_ignores_strict_jax_mode(monkeypatch):
+    _clear_backend_env(monkeypatch)
+    backend = _fresh_backend()
+    backend.set_backend("jax_gpu_parity", strict=True, configure_runtime=False)
+
+    caught = _capture_fallback_warnings(
+        lambda: backend.warn_if_jax_fallback(
+            component="test-component",
+            detail="a fallback path",
+        )
+    )
+
+    assert caught == []
