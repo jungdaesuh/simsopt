@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from typing import cast
 
 import jax
 import jax.numpy as jnp
@@ -32,6 +33,7 @@ from .specs import (
     OptimizableDofMapSpec,
     RotationSpec,
     ZeroRotationSpec,
+    curve_spec_kind,
     make_curve_cwsfourier_rz_spec,
 )
 
@@ -73,13 +75,16 @@ def curve_spec_from_curve(curve):
 
 def _curve_gamma_kernel(spec: CurveSpec, dofs=None):
     curve_dofs = spec.dofs if dofs is None else jnp.asarray(dofs, dtype=jnp.float64)
-    if isinstance(spec, CurveXYZFourierSpec):
+    spec_kind = curve_spec_kind(spec)
+    if spec_kind == "xyz_fourier":
+        spec = cast(CurveXYZFourierSpec, spec)
         return lambda quadpoints: jaxfouriercurve_pure(
             curve_dofs,
             quadpoints,
             spec.order,
         )
-    if isinstance(spec, CurveRZFourierSpec):
+    if spec_kind == "rz_fourier":
+        spec = cast(CurveRZFourierSpec, spec)
         return lambda quadpoints: curverzfourier_pure(
             curve_dofs,
             quadpoints,
@@ -87,13 +92,15 @@ def _curve_gamma_kernel(spec: CurveSpec, dofs=None):
             spec.nfp,
             spec.stellsym,
         )
-    if isinstance(spec, CurvePlanarFourierSpec):
+    if spec_kind == "planar_fourier":
+        spec = cast(CurvePlanarFourierSpec, spec)
         return lambda quadpoints: curveplanarfourier_pure(
             curve_dofs,
             quadpoints,
             spec.order,
         )
-    if isinstance(spec, CurveHelicalSpec):
+    if spec_kind == "helical":
+        spec = cast(CurveHelicalSpec, spec)
         return lambda quadpoints: curve_helical_pure(
             curve_dofs,
             quadpoints,
@@ -103,7 +110,8 @@ def _curve_gamma_kernel(spec: CurveSpec, dofs=None):
             spec.R0,
             spec.r,
         )
-    if isinstance(spec, CurveCWSFourierRZSpec):
+    if spec_kind == "cws_fourier_rz":
+        spec = cast(CurveCWSFourierRZSpec, spec)
         surface_dofs = spec.surface_dofs()
         return lambda quadpoints: gamma_curve_on_surface(
             curve_dofs,
@@ -118,7 +126,10 @@ def _curve_gamma_kernel(spec: CurveSpec, dofs=None):
             spec.surface.nfp,
             spec.surface.stellsym,
         )
-    raise TypeError(f"Unsupported curve spec type: {type(spec).__name__}")
+    raise TypeError(
+        "curve_gamma_kernel only supports direct curve specs, "
+        f"got {type(spec).__name__}."
+    )
 
 
 def _curve_quadpoints(spec: CurveSpec):
@@ -223,13 +234,16 @@ def _curve_perturbed_geometry_from_dofs(spec: CurvePerturbedSpec, dofs):
 
 def _curve_spec_with_quadpoints(spec: CurveSpec, quadpoints):
     quadpoints_jax = jnp.asarray(quadpoints, dtype=jnp.float64)
-    if isinstance(spec, CurvePerturbedSpec):
+    spec_kind = curve_spec_kind(spec)
+    if spec_kind == "perturbed":
+        spec = cast(CurvePerturbedSpec, spec)
         return replace(
             spec,
             quadpoints=quadpoints_jax,
             base_curve=_curve_spec_with_quadpoints(spec.base_curve, quadpoints_jax),
         )
-    if isinstance(spec, CurveFilamentSpec):
+    if spec_kind == "filament":
+        spec = cast(CurveFilamentSpec, spec)
         return replace(
             spec,
             quadpoints=quadpoints_jax,
@@ -335,9 +349,12 @@ def curve_gamma_and_dash_from_spec(spec: CurveSpec):
 
 def curve_gamma_and_dash_from_dofs(spec: CurveSpec, dofs):
     """Return (gamma, gammadash) from a single kernel build and JVP call."""
-    if isinstance(spec, CurvePerturbedSpec):
+    spec_kind = curve_spec_kind(spec)
+    if spec_kind == "perturbed":
+        spec = cast(CurvePerturbedSpec, spec)
         return _curve_perturbed_gamma_and_dash_from_dofs(spec, dofs)
-    if isinstance(spec, CurveFilamentSpec):
+    if spec_kind == "filament":
+        spec = cast(CurveFilamentSpec, spec)
         return _curve_filament_gamma_and_dash_from_dofs(spec, dofs)
     gamma_kernel = _curve_gamma_kernel(spec, dofs)
     quadpoints, tangents = _curve_quadpoints(spec)
@@ -350,9 +367,12 @@ def curve_geometry_from_spec(spec: CurveSpec):
 
 def curve_geometry_from_dofs(spec: CurveSpec, dofs):
     """Return (gamma, gammadash, gammadashdash) from a single kernel build."""
-    if isinstance(spec, CurvePerturbedSpec):
+    spec_kind = curve_spec_kind(spec)
+    if spec_kind == "perturbed":
+        spec = cast(CurvePerturbedSpec, spec)
         return _curve_perturbed_geometry_from_dofs(spec, dofs)
-    if isinstance(spec, CurveFilamentSpec):
+    if spec_kind == "filament":
+        spec = cast(CurveFilamentSpec, spec)
         return _curve_filament_geometry_from_dofs(spec, dofs)
     gamma_kernel = _curve_gamma_kernel(spec, dofs)
     quadpoints, tangents = _curve_quadpoints(spec)
@@ -397,7 +417,8 @@ def curve_pullback_from_dofs(spec: CurveSpec, dofs, dg, dgd):
     dg_jax = jnp.asarray(dg, dtype=jnp.float64)
     dgd_jax = jnp.asarray(dgd, dtype=jnp.float64)
 
-    if isinstance(spec, CurveCWSFourierRZSpec):
+    if curve_spec_kind(spec) == "cws_fourier_rz":
+        spec = cast(CurveCWSFourierRZSpec, spec)
         surface_dofs = spec.surface_dofs()
 
         def outputs(curve_x, surface_x):

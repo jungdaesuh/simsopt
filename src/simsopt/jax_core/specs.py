@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TypeAlias
+from typing import Literal, TypeAlias
 
 import jax
 import jax.numpy as jnp
@@ -380,6 +380,35 @@ CurveSpec: TypeAlias = (
     | CurvePerturbedSpec
     | CurveFilamentSpec
 )
+
+CurveSpecKind: TypeAlias = Literal[
+    "xyz_fourier",
+    "rz_fourier",
+    "planar_fourier",
+    "helical",
+    "cws_fourier_rz",
+    "perturbed",
+    "filament",
+]
+
+
+def curve_spec_kind(spec: CurveSpec) -> CurveSpecKind:
+    """Return the closed discriminant for a curve spec variant."""
+    if isinstance(spec, CurveXYZFourierSpec):
+        return "xyz_fourier"
+    if isinstance(spec, CurveRZFourierSpec):
+        return "rz_fourier"
+    if isinstance(spec, CurvePlanarFourierSpec):
+        return "planar_fourier"
+    if isinstance(spec, CurveHelicalSpec):
+        return "helical"
+    if isinstance(spec, CurveCWSFourierRZSpec):
+        return "cws_fourier_rz"
+    if isinstance(spec, CurvePerturbedSpec):
+        return "perturbed"
+    if isinstance(spec, CurveFilamentSpec):
+        return "filament"
+    raise TypeError(f"Unsupported curve spec type: {type(spec).__name__}")
 
 
 def _as_float64_array(value: object) -> jax.Array:

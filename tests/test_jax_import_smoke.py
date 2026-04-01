@@ -310,6 +310,8 @@ def test_import_jax_core_specs():
             CurveFilamentSpec,
             CurveHelicalSpec,
             CurvePlanarFourierSpec,
+            CurveSpec,
+            CurveSpecKind,
             CurvePerturbedSpec,
             CurrentValueSpec,
             CurveRZFourierSpec,
@@ -321,6 +323,7 @@ def test_import_jax_core_specs():
             OptimizableDofMapSpec,
             SurfaceRZFourierSpec,
             ZeroRotationSpec,
+            curve_spec_kind,
         )
 
         assert CoilSpec is not None
@@ -330,6 +333,8 @@ def test_import_jax_core_specs():
         assert CurveFilamentSpec is not None
         assert CurveHelicalSpec is not None
         assert CurvePlanarFourierSpec is not None
+        assert CurveSpec is not None
+        assert CurveSpecKind is not None
         assert CurvePerturbedSpec is not None
         assert CurrentValueSpec is not None
         assert CurveRZFourierSpec is not None
@@ -341,6 +346,7 @@ def test_import_jax_core_specs():
         assert OptimizableDofMapSpec is not None
         assert SurfaceRZFourierSpec is not None
         assert ZeroRotationSpec is not None
+        assert curve_spec_kind is not None
     """)
     assert rc == 0, f"import simsopt.jax_core failed:\n{err}"
 
