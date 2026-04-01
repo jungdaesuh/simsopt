@@ -510,11 +510,12 @@ According to a document from March 31, 2026, here is the module-by-module implem
    exercises the chunked grouped-field path, one Stage 2 mixed-quadrature
    parity probe, and one Boozer grouped-spec smoke.
 
-2. **Broaden the low-level `biotsavart_jax.py` chunked rewrite.**
-   The current kernel is correct and already useful, and the first low-level
-   coil-axis chunking slice is now landed. The next kernel work is to broaden
-   chunking where remaining quadrature/block materialization still matters
-   most, backed by memory-scaling benchmarks.
+2. **Keep the low-level `biotsavart_jax.py` chunked rewrite narrow and proven.**
+   The current kernel is correct and already useful, and the low-level
+   chunking slice now covers the first coil-axis reduction plus exact two-chunk
+   coil/quadrature hot spots. The next kernel work is only to broaden chunking
+   where profiling still shows remaining quadrature/block materialization
+   pressure, with the existing memory-scaling benchmarks as the gate.
 
 3. **Broaden the pure JAX layer from the current first slice.**
    You already have it in spirit via `make_traceable_objective()` and `run_code_functional()`, and now also through the new `jax_core` subtree and first-wave specs. The next step is to widen that architecture instead of letting pure and mutable styles keep mixing.  
@@ -1166,7 +1167,9 @@ That mismatch is too wide.
 
 2. **Biot–Savart kernel rewrite**
 
-   * push chunking deeper into `biotsavart_jax.py`
+   * preserve the landed low-level chunking rewrite in `biotsavart_jax.py`
+   * only broaden beyond the landed two-chunk hot spots if profiling still
+     justifies it
    * preserve current parity tests as the oracle  ([JAX Documentation][2])
 
 3. **Adapter and spec cleanup**
