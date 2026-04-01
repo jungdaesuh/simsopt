@@ -87,6 +87,15 @@ jobs:
         continue-on-error: true
         run: python -m pytest tests/geo/test_surface_fourier_jax.py -v --tb=short
 
+      - name: GPU reproducibility contract
+        id: ci_contract
+        continue-on-error: true
+        run: |
+          python scripts/jax_ci_contract.py \
+            --platform cuda \
+            --output-json benchmark_artifacts/jax_ci_contract.json \
+            --output-md benchmark_artifacts/jax_ci_contract.md
+
       # ------------------------------------------------------------------
       # Summary gate — fail the job if any test step failed
       # ------------------------------------------------------------------
@@ -102,14 +111,30 @@ jobs:
           echo "| Biot-Savart unit | ${{ steps.bs_unit.outcome }} |" >> "$GITHUB_STEP_SUMMARY"
           echo "| Boozer residual | ${{ steps.boozer.outcome }} |" >> "$GITHUB_STEP_SUMMARY"
           echo "| Surface Fourier | ${{ steps.surface.outcome }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| GPU reproducibility contract | ${{ steps.ci_contract.outcome }} |" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
+
+          if [ -f benchmark_artifacts/jax_ci_contract.md ]; then
+            cat benchmark_artifacts/jax_ci_contract.md >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+          fi
 
           # Fail the workflow if any test step did not succeed
           if [ "${{ steps.smoke.outcome }}" != "success" ] || \
              [ "${{ steps.bs_parity.outcome }}" != "success" ] || \
              [ "${{ steps.bs_unit.outcome }}" != "success" ] || \
              [ "${{ steps.boozer.outcome }}" != "success" ] || \
-             [ "${{ steps.surface.outcome }}" != "success" ]; then
+             [ "${{ steps.surface.outcome }}" != "success" ] || \
+             [ "${{ steps.ci_contract.outcome }}" != "success" ]; then
             echo "One or more GPU parity tests failed."
             exit 1
           fi
+
+      - name: Publish GPU contract artifact
+        if: always() && steps.ci_contract.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: jax-gpu-repro-contract
+          path: |
+            benchmark_artifacts/jax_ci_contract.json
+            benchmark_artifacts/jax_ci_contract.md

@@ -36,6 +36,15 @@ OPTIMIZER_DRIFT_TOLERANCES = {
     },
 }
 
+CI_REPRODUCIBILITY_CONTRACT = {
+    "gpu_reduction_order_max_ulp": 10,
+    "gpu_reduction_order_rel_tol": 1e-12,
+    "gpu_reduction_order_sample_size": 1000,
+    "gpu_reproducibility_seed": 1729,
+    "gpu_reproducibility_sample_size": 1000,
+    "tolerance_ratchet_factor": 10.0,
+}
+
 
 def resolve_probe_lane(*, optimizer_backend: str | None = None) -> str:
     """Map benchmark/probe options to the intended lane label."""
@@ -61,6 +70,21 @@ def short_run_stage2_final_objective_rel_tolerance(maxiter: int) -> float:
     if maxiter <= SHORT_RUN_SMOKE_MAXITER:
         return 5e-4
     return 1e-4
+
+
+def ci_reproducibility_contract() -> dict[str, float | int]:
+    """Return the JAX CI reproducibility contract for GPU parity lanes."""
+    return dict(CI_REPRODUCIBILITY_CONTRACT)
+
+
+def ratchet_rel_tol(
+    current_rel_tol: float,
+    achieved_rel_err: float,
+    *,
+    factor: float,
+) -> float:
+    """Tighten a relative tolerance gate to the requested ratchet factor."""
+    return min(float(current_rel_tol), float(factor) * float(achieved_rel_err))
 
 
 def _smoke_geometry_override_error(maxiter: int) -> str:
