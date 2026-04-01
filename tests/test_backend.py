@@ -72,6 +72,14 @@ def _assert_backend_policy(
     assert policy.provenance_label == provenance_label
 
 
+def _assert_transfer_guard_resolution(backend, *, mode: str, expected: str | None):
+    config = backend.set_backend(mode, configure_runtime=False)
+    policy = backend.get_backend_policy(mode)
+
+    assert config.transfer_guard == expected
+    assert policy.transfer_guard == expected
+
+
 def test_backend_defaults_to_native_cpu(monkeypatch):
     _clear_backend_env(monkeypatch)
     backend = _fresh_backend()
@@ -168,6 +176,7 @@ def test_backend_mode_policy_helpers(monkeypatch):
     assert backend.get_tolerance_tier() == "parity"
     assert backend.get_compilation_cache_policy() == "optional_persistent"
     assert backend.get_provenance_label() == "jax_gpu_parity"
+    assert backend.get_transfer_guard() == "log"
 
 
 def test_fast_mode_policy_helpers(monkeypatch):
@@ -191,6 +200,19 @@ def test_fast_mode_policy_helpers(monkeypatch):
         provenance_label="jax_gpu_fast",
     )
     assert backend.is_parity_mode() is False
+    _assert_transfer_guard_resolution(
+        backend,
+        mode="jax_gpu_fast",
+        expected=None,
+    )
+
+
+@pytest.mark.parametrize("mode", ["jax_cpu_parity", "jax_gpu_parity"])
+def test_parity_modes_default_transfer_guard_to_log(monkeypatch, mode):
+    _clear_backend_env(monkeypatch)
+    backend = _fresh_backend()
+
+    _assert_transfer_guard_resolution(backend, mode=mode, expected="log")
 
 
 def test_point_chunk_size_defaults_follow_mode(monkeypatch):

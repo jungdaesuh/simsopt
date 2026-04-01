@@ -124,6 +124,12 @@ _FIELD_KERNEL_ENV_BY_KEY = {
     "coil_chunk_size": _COIL_CHUNK_SIZE_ENV,
     "quadrature_block_size": _QUADRATURE_BLOCK_SIZE_ENV,
 }
+_DEFAULT_TRANSFER_GUARD_BY_MODE = {
+    "native_cpu": None,
+    "jax_cpu_parity": "log",
+    "jax_gpu_parity": "log",
+    "jax_gpu_fast": None,
+}
 
 
 @dataclass(frozen=True)
@@ -241,13 +247,19 @@ def _resolve_debug_nans(debug_nans: bool | None) -> bool:
     return bool(debug_nans)
 
 
-def _resolve_transfer_guard(transfer_guard: str | None) -> str | None:
+def _default_transfer_guard(mode: str) -> str | None:
+    return _DEFAULT_TRANSFER_GUARD_BY_MODE[_validate_mode(mode)]
+
+
+def _resolve_transfer_guard(mode: str, transfer_guard: str | None) -> str | None:
     env_value = _optional_env_value(_TRANSFER_GUARD_ENV)
     if transfer_guard is None and env_value is not None:
         return _validate_transfer_guard(
             env_value,
             source=_TRANSFER_GUARD_ENV,
         )
+    if transfer_guard is None:
+        return _default_transfer_guard(mode)
     return _validate_transfer_guard(
         transfer_guard,
         source="transfer_guard",
@@ -282,7 +294,7 @@ def _config_from_mode(
         jax_platform=jax_platform,
         strict=bool(strict),
         debug_nans=_resolve_debug_nans(debug_nans),
-        transfer_guard=_resolve_transfer_guard(transfer_guard),
+        transfer_guard=_resolve_transfer_guard(mode, transfer_guard),
         compilation_cache_dir=_resolve_compilation_cache_dir(
             mode,
             compilation_cache_dir,

@@ -123,6 +123,47 @@ jobs:
           print('backend module: OK')
           "
 
+  jax-public-guardrails:
+    name: JAX guardrail lane (0.9.2, CPU, debug_nans)
+    runs-on: ubuntu-latest
+    env:
+      PYTHONPATH: src
+      SIMSOPT_BACKEND_MODE: jax_cpu_parity
+      SIMSOPT_JAX_DEBUG_NANS: "1"
+      SIMSOPT_JAX_TRANSFER_GUARD: "log"
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install JAX public-lane dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install "numpy>=2.0" "scipy>=1.13" \
+            "jax==0.9.2" "jaxlib==0.9.2" pytest monty setuptools-scm
+
+      - name: Generate version file (setuptools-scm)
+        run: python -c "from setuptools_scm import get_version; get_version(write_to='src/simsopt/_version.py')"
+
+      - name: Run guardrail import smoke tests
+        run: |
+          python -m pytest tests/test_jax_import_smoke.py \
+            -k "parity_mode_defaults_transfer_guard_and_keeps_x64_enabled or env_selected_guardrails_eagerly_configure_jax_runtime or transfer_guard_disallow_rejects_implicit_host_to_device_jit_inputs" \
+            -v --tb=short
+
+      - name: Run debug-nans pure-JAX smoke slice
+        run: |
+          python -m pytest \
+            tests/field/test_biotsavart_jax.py -k "chunked_B_and_dB_match_dense_reference or chunked_A_matches_dense_reference" \
+            tests/test_backend.py -k "parity_modes_default_transfer_guard_to_log or backend_mode_policy_helpers or fast_mode_policy_helpers" \
+            -v --tb=short
+
   jax-public-integration:
     name: JAX public lane (0.9.2, with simsoptpp)
     runs-on: ubuntu-latest

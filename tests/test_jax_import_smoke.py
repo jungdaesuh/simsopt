@@ -56,6 +56,11 @@ def _run_import_check(code):
     return result.returncode, result.stderr.strip()
 
 
+def _assert_import_check_passes(code, *, failure_message):
+    rc, err = _run_import_check(code)
+    assert rc == 0, f"{failure_message}:\n{err}"
+
+
 def _block_private_optimizer_imports():
     return """
         import importlib.abc
@@ -126,6 +131,80 @@ def test_programmatic_backend_selection_configures_jax_runtime():
         assert jax.config.jax_compilation_cache_dir == "/tmp/simsopt-jax-cache"
     """)
     assert rc == 0, f"programmatic backend config failed:\n{err}"
+
+
+def test_parity_mode_defaults_transfer_guard_and_keeps_x64_enabled():
+    """Parity modes should own x64 and transfer-guard defaults without extra flags."""
+    _assert_import_check_passes(
+        """
+        import simsopt.config as simsopt_config
+        import jax
+
+        cfg = simsopt_config.set_backend("jax_cpu_parity")
+        policy = simsopt_config.get_backend_policy()
+
+        assert cfg.transfer_guard == "log"
+        assert policy.transfer_guard == "log"
+        assert policy.requires_x64 is True
+        assert jax.config.jax_enable_x64 is True
+        assert jax.config.jax_transfer_guard == "log"
+        assert jax.numpy.zeros(1).dtype == jax.numpy.float64
+    """,
+        failure_message="parity mode guardrail contract failed",
+    )
+
+
+def test_env_selected_guardrails_eagerly_configure_jax_runtime():
+    """Import-time eager config should honor parity x64/debug-nans/transfer-guard envs."""
+    _assert_import_check_passes(
+        """
+        import os
+
+        os.environ["SIMSOPT_BACKEND_MODE"] = "jax_cpu_parity"
+        os.environ["SIMSOPT_JAX_DEBUG_NANS"] = "1"
+        os.environ["SIMSOPT_JAX_TRANSFER_GUARD"] = "log"
+
+        import simsopt
+        import simsopt.config as simsopt_config
+        import jax
+
+        policy = simsopt_config.get_backend_policy()
+
+        assert policy.mode == "jax_cpu_parity"
+        assert policy.requires_x64 is True
+        assert policy.debug_nans is True
+        assert policy.transfer_guard == "log"
+        assert jax.config.jax_enable_x64 is True
+        assert jax.config.jax_debug_nans is True
+        assert jax.config.jax_transfer_guard == "log"
+        assert jax.numpy.zeros(1).dtype == jax.numpy.float64
+    """,
+        failure_message="eager guardrail config failed",
+    )
+
+
+def test_transfer_guard_disallow_rejects_implicit_host_to_device_jit_inputs():
+    """Disallow mode should catch implicit NumPy->JAX transfers at a JIT boundary."""
+    _assert_import_check_passes(
+        """
+        import numpy as np
+        import simsopt.config as simsopt_config
+        import jax
+        import jax.numpy as jnp
+
+        simsopt_config.set_backend("jax_cpu_parity", transfer_guard="disallow")
+        fn = jax.jit(lambda x: x + 1.0)
+
+        try:
+            fn(np.ones((2,), dtype=np.float64))
+        except Exception as exc:
+            message = str(exc)
+            assert "host-to-device" in message
+        else:
+            raise AssertionError("expected transfer guard to reject implicit host input")
+    """,
+        failure_message="transfer-guard disallow smoke failed",
+    )
 
 
 def test_native_cpu_backend_selection_does_not_require_jax_runtime():
