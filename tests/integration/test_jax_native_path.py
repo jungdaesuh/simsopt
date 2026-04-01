@@ -59,6 +59,15 @@ def _build_fourier_basis(quadpoints_jax, order):
     return basis, dbasis
 
 
+def _central_difference_gradient(objective, flat_dofs, eps):
+    grad_fd = np.zeros(len(flat_dofs))
+    for i in range(len(flat_dofs)):
+        fd_p = flat_dofs.at[i].add(eps)
+        fd_m = flat_dofs.at[i].add(-eps)
+        grad_fd[i] = (float(objective(fd_p)) - float(objective(fd_m))) / (2 * eps)
+    return grad_fd
+
+
 # -----------------------------------------------------------------------
 # Helpers
 # -----------------------------------------------------------------------
@@ -245,17 +254,13 @@ class TestGradientFiniteDifference:
             Bcoil = B.reshape((nphi, ntheta, 3))
             return integral_BdotN(Bcoil, target, normal, "quadratic flux")
 
-        J, grad = jax.value_and_grad(objective)(flat_dofs)
+        _, grad = jax.value_and_grad(objective)(flat_dofs)
 
         # Finite differences
-        eps = 1e-6
-        grad_fd = np.zeros(len(flat_dofs))
-        for i in range(len(flat_dofs)):
-            fd_p = flat_dofs.at[i].add(eps)
-            fd_m = flat_dofs.at[i].add(-eps)
-            grad_fd[i] = (float(objective(fd_p)) - float(objective(fd_m))) / (2 * eps)
+        eps = 3e-7
+        grad_fd = _central_difference_gradient(objective, flat_dofs, eps)
 
-        np.testing.assert_allclose(np.array(grad), grad_fd, rtol=1e-4, atol=1e-10)
+        np.testing.assert_allclose(np.array(grad), grad_fd, rtol=1e-5, atol=1e-10)
 
     def test_gradient_with_rotation(self):
         """Gradient through rotation matrix is correct."""
@@ -303,13 +308,9 @@ class TestGradientFiniteDifference:
         _, grad = jax.value_and_grad(objective)(flat_dofs)
 
         eps = 1e-5
-        grad_fd = np.zeros(len(flat_dofs))
-        for i in range(len(flat_dofs)):
-            fd_p = flat_dofs.at[i].add(eps)
-            fd_m = flat_dofs.at[i].add(-eps)
-            grad_fd[i] = (float(objective(fd_p)) - float(objective(fd_m))) / (2 * eps)
+        grad_fd = _central_difference_gradient(objective, flat_dofs, eps)
 
-        np.testing.assert_allclose(np.array(grad), grad_fd, rtol=1e-4, atol=1e-10)
+        np.testing.assert_allclose(np.array(grad), grad_fd, rtol=1e-6, atol=1e-10)
 
     def test_shared_dofs_accumulate(self):
         """Two coils sharing DOFs: gradient correctly sums contributions."""
@@ -365,14 +366,10 @@ class TestGradientFiniteDifference:
 
         _, grad = jax.value_and_grad(objective)(flat_dofs)
 
-        eps = 1e-5
-        grad_fd = np.zeros(len(flat_dofs))
-        for i in range(len(flat_dofs)):
-            fd_p = flat_dofs.at[i].add(eps)
-            fd_m = flat_dofs.at[i].add(-eps)
-            grad_fd[i] = (float(objective(fd_p)) - float(objective(fd_m))) / (2 * eps)
+        eps = 3e-7
+        grad_fd = _central_difference_gradient(objective, flat_dofs, eps)
 
-        np.testing.assert_allclose(np.array(grad), grad_fd, rtol=1e-4, atol=1e-10)
+        np.testing.assert_allclose(np.array(grad), grad_fd, rtol=2e-6, atol=1e-10)
 
 
 if __name__ == "__main__":
