@@ -85,7 +85,6 @@ resolve_optimizer_backend_method = _bsj.resolve_optimizer_backend_method
 BoozerSurfaceJAX = _bsj.BoozerSurfaceJAX
 
 _ensure_solved_jax = _soj._ensure_solved
-_resolved_boozer_G_jax = _soj._resolved_boozer_G
 
 
 def _make_simple_torus_coeffs(R0=1.0, r=0.1, mpol=1, ntor=1, nfp=1):

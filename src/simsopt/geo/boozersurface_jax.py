@@ -30,6 +30,7 @@ Builds on M3's composed derivative path:
 """
 
 from functools import partial
+import warnings
 
 import numpy as np
 import jax
@@ -92,12 +93,26 @@ _GROUPED_EXTRACTOR_FALLBACK_DETAIL = (
     "_extract_coil_data_grouped() in _refresh_coil_data()"
 )
 _COILS_LIST_FALLBACK_DETAIL = "_coils list extraction in _refresh_coil_data()"
+_WARNED_HIDDEN_GROUPED_FALLBACK_DETAILS: set[str] = set()
 
 
 def _raise_if_strict_hidden_grouped_coil_spec_fallback(detail: str) -> None:
     raise_if_strict_jax_fallback(
         component="BoozerSurfaceJAX",
         detail=f"the hidden grouped-coil spec compatibility fallback via {detail}",
+    )
+
+
+def _warn_hidden_grouped_coil_spec_fallback(detail: str) -> None:
+    if detail in _WARNED_HIDDEN_GROUPED_FALLBACK_DETAILS:
+        return
+    _WARNED_HIDDEN_GROUPED_FALLBACK_DETAILS.add(detail)
+    warnings.warn(
+        "BoozerSurfaceJAX is using a hidden grouped-coil compatibility fallback "
+        f"via {detail}. This path reads mutable live coil data and should be "
+        "treated as a legacy adapter seam.",
+        RuntimeWarning,
+        stacklevel=3,
     )
 
 
@@ -133,6 +148,7 @@ def _extract_grouped_coil_set_spec(biotsavart):
         _raise_if_strict_hidden_grouped_coil_spec_fallback(
             _GROUPED_EXTRACTOR_FALLBACK_DETAIL
         )
+        _warn_hidden_grouped_coil_spec_fallback(_GROUPED_EXTRACTOR_FALLBACK_DETAIL)
         return grouped_coil_set_spec_from_grouped_data(grouped_extractor())
 
     coils = getattr(biotsavart, "_coils", None)
@@ -146,6 +162,7 @@ def _extract_grouped_coil_set_spec(biotsavart):
     gammadashs = []
     currents = []
     _raise_if_strict_hidden_grouped_coil_spec_fallback(_COILS_LIST_FALLBACK_DETAIL)
+    _warn_hidden_grouped_coil_spec_fallback(_COILS_LIST_FALLBACK_DETAIL)
     for coil in coils:
         gammas.append(coil.curve.gamma())
         gammadashs.append(coil.curve.gammadash())
@@ -322,6 +339,53 @@ def _boozer_exact_residual(
     stellsym_surface,
     weight_inv_modB,
 ):
+    residual_fn = _select_exact_residual_fn(stellsym_surface)
+    return residual_fn(
+        x,
+        coil_arrays=coil_arrays,
+        coil_set_spec=coil_set_spec,
+        quadpoints_phi=quadpoints_phi,
+        quadpoints_theta=quadpoints_theta,
+        mpol=mpol,
+        ntor=ntor,
+        nfp=nfp,
+        stellsym=stellsym,
+        scatter_indices=scatter_indices,
+        surface_kind=surface_kind,
+        targetlabel=targetlabel,
+        label_type=label_type,
+        phi_idx=phi_idx,
+        mask_indices=mask_indices,
+        weight_inv_modB=weight_inv_modB,
+    )
+
+
+def _select_exact_residual_fn(stellsym_surface):
+    if stellsym_surface:
+        return _boozer_exact_residual_stellsym
+    return _boozer_exact_residual_nonstellsym
+
+
+def _boozer_exact_residual_impl(
+    x,
+    *,
+    coil_arrays=None,
+    coil_set_spec=None,
+    quadpoints_phi,
+    quadpoints_theta,
+    mpol,
+    ntor,
+    nfp,
+    stellsym,
+    scatter_indices,
+    surface_kind,
+    targetlabel,
+    label_type,
+    phi_idx,
+    mask_indices,
+    weight_inv_modB,
+    include_axis_constraint,
+):
     """Residual vector for the BoozerExact Newton system.
 
     Extends M3's ``boozer_residual_vector`` with masking and constraint
@@ -368,11 +432,91 @@ def _boozer_exact_residual(
     )
     r_label = label_val - targetlabel
 
-    if stellsym_surface:
-        return jnp.concatenate([r_masked, jnp.array([r_label])])
+    if include_axis_constraint:
+        residual_tail = jnp.array([r_label, gamma[0, 0, 2]])
     else:
-        r_z = gamma[0, 0, 2]
-        return jnp.concatenate([r_masked, jnp.array([r_label, r_z])])
+        residual_tail = jnp.array([r_label])
+    return jnp.concatenate([r_masked, residual_tail])
+
+
+def _boozer_exact_residual_stellsym(
+    x,
+    *,
+    coil_arrays=None,
+    coil_set_spec=None,
+    quadpoints_phi,
+    quadpoints_theta,
+    mpol,
+    ntor,
+    nfp,
+    stellsym,
+    scatter_indices,
+    surface_kind,
+    targetlabel,
+    label_type,
+    phi_idx,
+    mask_indices,
+    weight_inv_modB,
+):
+    return _boozer_exact_residual_impl(
+        x,
+        coil_arrays=coil_arrays,
+        coil_set_spec=coil_set_spec,
+        quadpoints_phi=quadpoints_phi,
+        quadpoints_theta=quadpoints_theta,
+        mpol=mpol,
+        ntor=ntor,
+        nfp=nfp,
+        stellsym=stellsym,
+        scatter_indices=scatter_indices,
+        surface_kind=surface_kind,
+        targetlabel=targetlabel,
+        label_type=label_type,
+        phi_idx=phi_idx,
+        mask_indices=mask_indices,
+        weight_inv_modB=weight_inv_modB,
+        include_axis_constraint=False,
+    )
+
+
+def _boozer_exact_residual_nonstellsym(
+    x,
+    *,
+    coil_arrays=None,
+    coil_set_spec=None,
+    quadpoints_phi,
+    quadpoints_theta,
+    mpol,
+    ntor,
+    nfp,
+    stellsym,
+    scatter_indices,
+    surface_kind,
+    targetlabel,
+    label_type,
+    phi_idx,
+    mask_indices,
+    weight_inv_modB,
+):
+    return _boozer_exact_residual_impl(
+        x,
+        coil_arrays=coil_arrays,
+        coil_set_spec=coil_set_spec,
+        quadpoints_phi=quadpoints_phi,
+        quadpoints_theta=quadpoints_theta,
+        mpol=mpol,
+        ntor=ntor,
+        nfp=nfp,
+        stellsym=stellsym,
+        scatter_indices=scatter_indices,
+        surface_kind=surface_kind,
+        targetlabel=targetlabel,
+        label_type=label_type,
+        phi_idx=phi_idx,
+        mask_indices=mask_indices,
+        weight_inv_modB=weight_inv_modB,
+        include_axis_constraint=True,
+    )
 
 
 def _boozer_exact_coil_vjp(lm, booz_surf, iota, G):
@@ -402,8 +546,10 @@ def _boozer_exact_coil_vjp(lm, booz_surf, iota, G):
     coil_arrays = booz_surf._coil_arrays
     coil_indices = booz_surf._coil_index_lists
 
+    residual_fn = _select_exact_residual_fn(booz_surf.stellsym)
+
     def residual_of_coils(ca):
-        return _boozer_exact_residual(
+        return residual_fn(
             x,
             coil_arrays=ca,
             quadpoints_phi=booz_surf.quadpoints_phi,
@@ -418,7 +564,6 @@ def _boozer_exact_coil_vjp(lm, booz_surf, iota, G):
             label_type=booz_surf.label_type,
             phi_idx=booz_surf.phi_idx,
             mask_indices=mask_indices,
-            stellsym_surface=booz_surf.stellsym,
             weight_inv_modB=booz_surf.options["weight_inv_modB"],
         )
 
@@ -464,8 +609,10 @@ def _build_exact_group_vjp_callback(booz_surf, iota, G):
 
 
 def _make_exact_group_runner(x, coil_arrays, booz_surf, mask_indices, group_index):
+    residual_fn = _select_exact_residual_fn(booz_surf.stellsym)
+
     def residual_of_group(group_array):
-        return _boozer_exact_residual(
+        return residual_fn(
             x,
             coil_arrays=_replace_group_coil_array(
                 coil_arrays,
@@ -484,7 +631,6 @@ def _make_exact_group_runner(x, coil_arrays, booz_surf, mask_indices, group_inde
             label_type=booz_surf.label_type,
             phi_idx=booz_surf.phi_idx,
             mask_indices=mask_indices,
-            stellsym_surface=booz_surf.stellsym,
             weight_inv_modB=booz_surf.options["weight_inv_modB"],
         )
 
@@ -1572,8 +1718,9 @@ class BoozerSurfaceJAX(Optimizable):
         coil_set_spec=None,
     ):
         """Build the exact residual function with explicit grouped-field inputs."""
+        residual_fn = _select_exact_residual_fn(self.stellsym)
         return partial(
-            _boozer_exact_residual,
+            residual_fn,
             coil_arrays=coil_arrays,
             coil_set_spec=_resolved_coil_set_spec(
                 self.coil_set_spec,
@@ -1592,7 +1739,6 @@ class BoozerSurfaceJAX(Optimizable):
             label_type=self.label_type,
             phi_idx=self.phi_idx,
             mask_indices=mask_indices,
-            stellsym_surface=self.stellsym,
             weight_inv_modB=self.options["weight_inv_modB"],
         )
 

@@ -732,8 +732,8 @@ class BiotSavartJAX(Optimizable):
             )
             base_gammadashs.append(
                 jax.jvp(
-                    lambda qpts: jaxfouriercurve_pure(
-                        curve_x,
+                    lambda qpts, cx=curve_x: jaxfouriercurve_pure(
+                        cx,
                         qpts,
                         self._curve_order,
                     ),

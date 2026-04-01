@@ -80,8 +80,11 @@ from simsopt.field.biotsavart_jax_backend import BiotSavartJAX  # noqa: E402
 from simsopt.jax_core import (  # noqa: E402
     CoilSpec,
     CurveCWSFourierRZSpec,
+    CurveHelicalSpec,
+    CurvePlanarFourierSpec,
     FieldEvalSpec,
     GroupedCoilSetSpec,
+    curve_gamma_and_dash_from_spec,
     curve_pullback_from_spec,
     curve_spec_from_curve,
     grouped_coil_set_spec_from_coil_specs,
@@ -124,9 +127,8 @@ def _iota_unit_rhs(plu):
     return rhs
 
 
-from functools import partial
-
-_enable_strict_jax_backend = partial(enable_strict_jax_backend, mode="jax_gpu_parity")
+def _enable_strict_jax_backend(monkeypatch, mode="jax_gpu_parity"):
+    enable_strict_jax_backend(monkeypatch, mode=mode)
 
 
 def _assert_hidden_spec_fallback_rejected(
@@ -499,6 +501,36 @@ def _assert_grouped_coil_arrays_match_curve(curve, current_value):
     np.testing.assert_allclose(
         np.asarray(current_group), np.array([current_value]), atol=1e-12
     )
+
+
+def _assert_curve_exposes_immutable_spec(curve, spec_type):
+    curve_spec = curve.to_spec()
+
+    assert isinstance(curve_spec, spec_type)
+    np.testing.assert_allclose(
+        np.asarray(curve_gamma_and_dash_from_spec(curve_spec)[0]),
+        curve.gamma(),
+        atol=1e-12,
+    )
+
+
+def _assert_coil_set_spec_prefers_immutable_curve_specs(
+    monkeypatch,
+    curve,
+    current_value,
+    message,
+):
+    coil = Coil(curve, Current(current_value))
+    bs_jax = BiotSavartJAX([coil])
+
+    monkeypatch.setattr(
+        bs_jax,
+        "_coil_set_spec_from_dofs_via_grouped_arrays",
+        lambda _coil_dofs: (_ for _ in ()).throw(AssertionError(message)),
+    )
+
+    coil_set_spec = bs_jax.coil_set_spec_from_dofs(jnp.asarray(bs_jax.x))
+    assert isinstance(coil_set_spec, GroupedCoilSetSpec)
 
 
 def _assert_biotsavart_vjp_bypasses_coil_vjp(
@@ -1230,33 +1262,29 @@ class TestAdjointSolveConsistency:
             atol=1e-12,
         )
 
-    def test_strict_mode_rejects_hidden_grouped_array_fallback_in_coil_set_spec_from_dofs(
+    def test_strict_mode_allows_native_spec_reconstruction_in_coil_set_spec_from_dofs(
         self,
         monkeypatch,
     ):
-        """Strict JAX mode should reject silent grouped-array compat in spec APIs."""
+        """Strict JAX mode should allow native immutable-spec reconstruction."""
         curve = _build_helical_curve(16)
         current = Current(1.23)
         bs_jax = BiotSavartJAX([Coil(curve, current)])
-        _assert_hidden_spec_fallback_rejected(
-            monkeypatch,
-            lambda: bs_jax.coil_set_spec_from_dofs(jnp.asarray(bs_jax.x)),
-            api_name="coil_set_spec_from_dofs",
-        )
+        _enable_strict_jax_backend(monkeypatch)
+        grouped_spec = bs_jax.coil_set_spec_from_dofs(jnp.asarray(bs_jax.x))
+        assert isinstance(grouped_spec, GroupedCoilSetSpec)
 
-    def test_strict_mode_rejects_hidden_compat_fallback_in_coil_set_spec(
+    def test_strict_mode_allows_native_spec_reconstruction_in_coil_set_spec(
         self,
         monkeypatch,
     ):
-        """Strict JAX mode should reject the first hidden compat seam in ``coil_set_spec()``."""
+        """Strict JAX mode should allow the live native grouped-coil spec path."""
         curve = _build_helical_curve(16)
         current = Current(1.23)
         bs_jax = BiotSavartJAX([Coil(curve, current)])
-        _assert_hidden_spec_fallback_rejected(
-            monkeypatch,
-            bs_jax.coil_set_spec,
-            api_name="coil_set_spec_from_dofs",
-        )
+        _enable_strict_jax_backend(monkeypatch)
+        grouped_spec = bs_jax.coil_set_spec()
+        assert isinstance(grouped_spec, GroupedCoilSetSpec)
 
     def test_legacy_objects_expose_curve_current_coil_specs(self):
         """Legacy hot-path objects should expose immutable JAX specs."""
@@ -1372,11 +1400,33 @@ class TestAdjointSolveConsistency:
     def test_curverzfourier_spec_pullback_matches_curve_methods(self):
         _assert_curve_spec_pullback_matches_curve_methods(_build_rz_curve(24))
 
+    def test_curvehelical_spec_pullback_matches_curve_methods(self):
+        _assert_curve_spec_pullback_matches_curve_methods(_build_helical_curve(24))
+
+    def test_curveplanarfourier_spec_pullback_matches_curve_methods(self):
+        _assert_curve_spec_pullback_matches_curve_methods(_build_planar_curve(24))
+
     def test_curvecwsfouriercpp_spec_pullback_matches_curve_and_surface_methods(self):
         curve, _surf = _build_surface_bound_cpp_curve(32)
         _assert_curve_spec_pullback_matches_curve_methods(
             curve,
             expect_surface=True,
+        )
+
+    def test_curvecwsfourier_spec_pullback_matches_curve_and_surface_methods(self):
+        curve, _surf = _build_surface_bound_jax_curve(32)
+        _assert_curve_spec_pullback_matches_curve_methods(
+            curve,
+            expect_surface=True,
+        )
+
+    def test_curvehelical_exposes_immutable_spec(self):
+        _assert_curve_exposes_immutable_spec(_build_helical_curve(24), CurveHelicalSpec)
+
+    def test_curveplanarfourier_exposes_immutable_spec(self):
+        _assert_curve_exposes_immutable_spec(
+            _build_planar_curve(24),
+            CurvePlanarFourierSpec,
         )
 
     def test_grouped_coil_arrays_from_dofs_supports_generic_jaxcurve_geometry(
@@ -1497,6 +1547,27 @@ class TestAdjointSolveConsistency:
     def test_grouped_coil_arrays_from_dofs_supports_curveplanarfourier_geometry(self):
         """Explicit reconstruction should work for planar legacy Fourier curves."""
         _assert_grouped_coil_arrays_match_curve(_build_planar_curve(24), 2.5)
+
+    def test_coil_set_spec_from_dofs_prefers_immutable_curvehelical_specs(
+        self, monkeypatch
+    ):
+        _assert_coil_set_spec_prefers_immutable_curve_specs(
+            monkeypatch,
+            _build_helical_curve(24),
+            1.23,
+            "CurveHelical should use immutable specs before grouped-array fallback",
+        )
+
+    def test_coil_set_spec_from_dofs_prefers_immutable_curveplanarfourier_specs(
+        self,
+        monkeypatch,
+    ):
+        _assert_coil_set_spec_prefers_immutable_curve_specs(
+            monkeypatch,
+            _build_planar_curve(24),
+            2.5,
+            "CurvePlanarFourier should use immutable specs before grouped-array fallback",
+        )
 
     def test_grouped_coil_arrays_from_dofs_supports_curveperturbed_fullgraph_geometry(
         self,
@@ -3207,6 +3278,12 @@ class TestExactSolveCPUJAXParity:
             rtol=nqs_rel_tol,
             atol=nqs_abs_tol,
         )
+
+    def test_boozer_residual_wrapper_rejects_exact_surface(self):
+        exact_pair = _solve_exact_cpu_jax_parity_pair()
+
+        with pytest.raises(ValueError, match="least-squares BoozerSurfaceJAX"):
+            BoozerResidualJAX(exact_pair.booz_jax_exact, exact_pair.bs_jax)
 
 
 # -----------------------------------------------------------------------

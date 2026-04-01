@@ -117,6 +117,10 @@ def _tree_zeros_like_prefix(reference_tree, prefix_size: int):
 # ── Tiling primitives ────────────────────────────────────────────────
 
 
+def _two_chunk_sum(first_chunk, second_chunk, reduce_chunk):
+    return reduce_chunk(*first_chunk) + reduce_chunk(*second_chunk)
+
+
 def _coil_chunk_reduce(
     gammas,
     gammadashs,
@@ -126,13 +130,28 @@ def _coil_chunk_reduce(
     zero,
     reduce_chunk,
 ):
-    coil_count = int(currents.shape[0])
+    coil_count = currents.shape[0]
     if coil_count == 0:
         return zero
     if chunk_size <= 0 or coil_count <= chunk_size:
         return reduce_chunk(gammas, gammadashs, currents)
 
     chunk_count = (coil_count + chunk_size - 1) // chunk_size
+    if chunk_count == 2:
+        return _two_chunk_sum(
+            (
+                gammas[:chunk_size],
+                gammadashs[:chunk_size],
+                currents[:chunk_size],
+            ),
+            (
+                gammas[chunk_size:],
+                gammadashs[chunk_size:],
+                currents[chunk_size:],
+            ),
+            reduce_chunk,
+        )
+
     padded_coil_count = chunk_count * chunk_size
     pad_width = ((0, padded_coil_count - coil_count), (0, 0), (0, 0))
     padded_gammas = jnp.pad(gammas, pad_width)
@@ -161,11 +180,27 @@ def _quadrature_block_integral(
     block_size: int,
     integrand,
 ):
-    quadrature_count = int(gammas.shape[1])
+    quadrature_count = gammas.shape[1]
     if block_size <= 0 or quadrature_count <= block_size:
         return jnp.mean(integrand(x, gammas, gammadashs), axis=1)
 
     block_count = (quadrature_count + block_size - 1) // block_size
+    if block_count == 2:
+        return (
+            _two_chunk_sum(
+                (
+                    gammas[:, :block_size, :],
+                    gammadashs[:, :block_size, :],
+                ),
+                (
+                    gammas[:, block_size:, :],
+                    gammadashs[:, block_size:, :],
+                ),
+                lambda gg, ggd: jnp.sum(integrand(x, gg, ggd), axis=1),
+            )
+            / quadrature_count
+        )
+
     padded_quadrature_count = block_count * block_size
     pad_width = ((0, 0), (0, padded_quadrature_count - quadrature_count), (0, 0))
     padded_gammas = jnp.pad(gammas, pad_width)
@@ -194,7 +229,7 @@ def _point_chunk_reduce(points, chunk_kernel, chunk_size):
     factory (not read from module state) so that the value is part of the
     ``lru_cache`` key and triggers recompilation when it changes.
     """
-    point_count = int(points.shape[0])
+    point_count = points.shape[0]
     if point_count == 0 or chunk_size <= 0 or point_count <= chunk_size:
         return chunk_kernel(points)
 
@@ -348,15 +383,9 @@ def _make_kernel(integrand_key, diff_mode, coil_cs, quad_bs, point_cs):
     return kernel
 
 
-_cached_tuning: tuple | None = None
-
-
 def _get_kernel(integrand_key, diff_mode):
     """Read tuning config and return the cached JIT-compiled kernel."""
-    global _cached_tuning
-    if _cached_tuning is None:
-        _cached_tuning = _read_tuning_config()
-    coil_cs, quad_bs, point_cs = _cached_tuning
+    coil_cs, quad_bs, point_cs = _read_tuning_config()
     return _make_kernel(integrand_key, diff_mode, coil_cs, quad_bs, point_cs)
 
 
@@ -366,8 +395,6 @@ def invalidate_kernel_cache() -> None:
     Call after overriding ``_read_tuning_config`` (e.g. via ``monkeypatch``)
     to ensure the next ``biot_savart_*`` call rebuilds with the new config.
     """
-    global _cached_tuning
-    _cached_tuning = None
     _make_kernel.cache_clear()
 
 

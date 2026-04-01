@@ -339,8 +339,10 @@ def test_jax_core_specs_are_pytrees():
             grouped_coil_currents_from_spec,
             grouped_coil_index_lists_from_spec,
             grouped_coil_set_spec_from_coil_specs,
+            grouped_coil_set_spec_from_source,
             grouped_field_data_from_spec,
             grouped_field_inputs_from_spec,
+            invalidate_kernel_cache,
             make_coil_spec,
             make_coil_symmetry_spec,
             make_fixed_surface_flux_spec,
@@ -483,6 +485,8 @@ def test_jax_core_specs_are_pytrees():
         assert grouped_coil_index_lists_from_spec(coil_spec) == ([0],)
         assert grouped_coil_currents_from_spec(coil_spec).shape == (1,)
         assert grouped_coil_set_spec_from_coil_specs((coil_value_spec,)).groups[0].coil_indices == (0,)
+        assert grouped_coil_set_spec_from_source(coil_spec) is coil_spec
+        assert callable(invalidate_kernel_cache)
         assert_surface_dofs_derivable(curve_cws_spec, 3)  # stellsym: 2 rc + 1 zs
         assert_surface_dofs_derivable(curve_cws_nonstellsym_spec, 6)  # 2rc+1rs+2zc+1zs
 

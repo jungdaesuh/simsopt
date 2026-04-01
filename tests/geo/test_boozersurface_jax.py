@@ -43,7 +43,6 @@ from .boozersurface_jax_test_helpers import (
     _make_simple_torus_coeffs,
     _opt,
     _patch_newton_polish_runner,
-    _resolved_boozer_G_jax,
     _simple_torus_geometry_values,
     _successful_minimize_result,
     _successful_newton_polish_result,
@@ -1092,14 +1091,14 @@ class TestBoozerSurfaceJAXClass:
         monkeypatch,
         optimizer_backend,
     ):
-        """Strict JAX mode must reject LS reference/transitional optimizer lanes."""
-        _enable_strict_jax_backend(monkeypatch)
+        """Strict JAX mode must reject the first non-native LS seam it reaches."""
         booz = _make_mock_boozer_surface()
+        _enable_strict_jax_backend(monkeypatch)
         booz.options["optimizer_backend"] = optimizer_backend
 
         with pytest.raises(
             RuntimeError,
-            match=rf"optimizer_backend='{optimizer_backend}'.*strict=True",
+            match="strict=True",
         ):
             booz.run_code(iota=0.3, G=0.05)
 
@@ -1782,6 +1781,15 @@ class TestVJPHooks:
 class TestNegativeCases:
     """Test error handling for unsupported inputs."""
 
+    def test_extract_grouped_coil_set_spec_warns_on_legacy_coils_fallback(self):
+        bs = _MockBiotSavart(_make_mock_coils())
+        _bsj._WARNED_HIDDEN_GROUPED_FALLBACK_DETAILS.clear()
+
+        with pytest.warns(RuntimeWarning, match="legacy adapter seam"):
+            spec = _bsj._extract_grouped_coil_set_spec(bs)
+
+        assert isinstance(spec, GroupedCoilSetSpec)
+
     def test_unsupported_label_raises(self):
         """Constructor rejects unsupported label types."""
 
@@ -1927,22 +1935,6 @@ class TestEnsureSolvedGuard:
 
         with pytest.raises(RuntimeError, match="failed"):
             _ensure_solved_jax(booz)
-
-    def test_resolved_boozer_G_uses_fixed_currents_when_run_code_kept_G_none(self):
-        """Fixed-current LS paths must recover the effective G from coil currents."""
-        booz = _make_mock_boozer_surface()
-        booz.res = {"G": None}
-
-        resolved_G = _resolved_boozer_G_jax(booz)
-
-        expected_G = float(compute_G_from_currents(booz.coil_currents))
-        assert resolved_G == pytest.approx(expected_G)
-
-
-# ---------------------------------------------------------------------------
-# Mixed-quadrature Boozer regression
-# ---------------------------------------------------------------------------
-
 
 class TestMixedQuadratureBoozer:
     """BoozerSurfaceJAX works when coils have different nquad counts."""

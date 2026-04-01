@@ -134,9 +134,9 @@ def _current_coil_dofs_and_spec(biotsavart):
 
 def _value_and_direct_coil_derivative(biotsavart, objective_of_coils, coil_dofs):
     """Evaluate a coil-DOF objective and map its direct gradient to Derivative."""
-    objective_value, coil_dofs_gradient = jax.jit(
-        jax.value_and_grad(objective_of_coils)
-    )(coil_dofs)
+    objective_value, coil_dofs_gradient = jax.value_and_grad(objective_of_coils)(
+        coil_dofs
+    )
     direct_derivative = _coil_dofs_gradient_to_derivative(
         biotsavart,
         coil_dofs_gradient,
@@ -175,14 +175,6 @@ def _ensure_solved(booz_surf):
             "BoozerSurfaceJAX has not been solved yet or the last solve failed "
             "to produce valid adjoint state."
         )
-
-
-def _resolved_boozer_G(booz_surf):
-    """Return the effective Boozer ``G`` for residual evaluation."""
-    G = booz_surf.res["G"]
-    if G is not None:
-        return G
-    return float(compute_G_from_currents(booz_surf.coil_currents))
 
 
 def _qs_ratio_pure(
@@ -318,6 +310,11 @@ class BoozerResidualJAX(Optimizable):
 
     def __init__(self, boozer_surface, biotsavart):
         Optimizable.__init__(self, depends_on=[boozer_surface])
+        if boozer_surface.boozer_type != "ls":
+            raise ValueError(
+                "BoozerResidualJAX requires a least-squares BoozerSurfaceJAX "
+                "(constraint_weight must be set)."
+            )
         self.boozer_surface = boozer_surface
         self.biotsavart = biotsavart
         self.in_surface = boozer_surface.surface

@@ -22,7 +22,7 @@ from .specs import (
 
 
 def _empty_grouped_field_result(points: object, kernel):
-    point_count = int(points.shape[0])
+    point_count = points.shape[0]
     zeros = jnp.zeros
     if kernel in {biot_savart_B, biot_savart_A}:
         return zeros((point_count, 3), dtype=jnp.float64)
@@ -90,7 +90,7 @@ def grouped_coil_set_spec_from_inputs(coil_arrays: object) -> GroupedCoilSetSpec
     groups = []
     coil_offset = 0
     for gammas, gammadashs, currents in coil_arrays:
-        group_size = int(currents.shape[0])
+        group_size = currents.shape[0]
         groups.append(
             (
                 gammas,

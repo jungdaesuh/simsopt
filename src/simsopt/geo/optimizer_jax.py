@@ -325,6 +325,15 @@ def _materialize_dense_hessian(hvp_fn, x):
     return 0.5 * (dense + dense.T)
 
 
+def _stabilize_dense_hessian(H, stab):
+    stab_value = jnp.asarray(stab, dtype=H.dtype)
+    return H + stab_value * jnp.eye(H.shape[0], dtype=H.dtype)
+
+
+def _noop_progress_callback(_iteration, _fun_value, _grad_norm):
+    return None
+
+
 def _newton_candidate_status(current_norm, x_next, grad_next):
     candidate_norm = jnp.linalg.norm(grad_next)
     accepted = (
@@ -336,15 +345,13 @@ def _newton_candidate_status(current_norm, x_next, grad_next):
 
 
 def _gmres_solve_newton_system(hvp_fn, x, rhs, *, stab, tol):
-    n = int(rhs.shape[0])
+    n = rhs.shape[0]
     restart = max(5, min(n, 50))
     maxiter = max(10, min(4 * n, 200))
+    stab_value = jnp.asarray(stab, dtype=rhs.dtype)
 
     def matvec(v):
-        Hv = hvp_fn(x, v)
-        if stab != 0.0:
-            Hv = Hv + stab * v
-        return Hv
+        return hvp_fn(x, v) + stab_value * v
 
     dx, _ = gmres(
         matvec,
@@ -398,11 +405,10 @@ def newton_polish(
         if not np.all(np.isfinite(np.asarray(dx))) or (
             linear_residual_norm > max(1e-10, 1e-3 * float(norm))
         ):
-            H_solve = _materialize_dense_hessian(hvp_fn, x)
-            if stab != 0.0:
-                H_solve = H_solve + stab * jnp.eye(
-                    H_solve.shape[0], dtype=H_solve.dtype
-                )
+            H_solve = _stabilize_dense_hessian(
+                _materialize_dense_hessian(hvp_fn, x),
+                stab,
+            )
             dx = jnp.linalg.solve(H_solve, grad)
             linear_residual = grad - H_solve @ dx
             linear_residual_norm = float(np.linalg.norm(np.asarray(linear_residual)))
@@ -432,9 +438,7 @@ def newton_polish(
         if progress_callback is not None:
             progress_callback(nit, float(val), float(norm))
 
-    H = _materialize_dense_hessian(hvp_fn, x)
-    if stab != 0.0:
-        H = H + stab * jnp.eye(H.shape[0], dtype=H.dtype)
+    H = _stabilize_dense_hessian(_materialize_dense_hessian(hvp_fn, x), stab)
 
     return {
         "x": x,
@@ -461,8 +465,11 @@ def newton_polish_traceable(
     flow so higher-level traced objectives can invoke the Newton stage without
     crossing back into Python.
     """
-    val_and_grad_fn = jax.jit(jax.value_and_grad(objective_fn))
+    val_and_grad_fn = jax.value_and_grad(objective_fn)
     hvp_fn = _hessian_vector_product_fn(objective_fn)
+    progress_callback_fn = (
+        progress_callback if progress_callback is not None else _noop_progress_callback
+    )
 
     val0, grad0 = val_and_grad_fn(x0)
     norm0 = jnp.linalg.norm(grad0)
@@ -483,11 +490,10 @@ def newton_polish_traceable(
         dense_threshold = jnp.maximum(1e-10, 1e-3 * state["norm"])
 
         def use_dense_fallback(_):
-            H_solve = _materialize_dense_hessian(hvp_fn, state["x"])
-            if stab != 0.0:
-                H_solve = H_solve + stab * jnp.eye(
-                    H_solve.shape[0], dtype=H_solve.dtype
-                )
+            H_solve = _stabilize_dense_hessian(
+                _materialize_dense_hessian(hvp_fn, state["x"]),
+                stab,
+            )
             dx_dense = jnp.linalg.solve(H_solve, state["grad"])
             residual_dense = state["grad"] - H_solve @ dx_dense
             return dx_dense, residual_dense, jnp.linalg.norm(residual_dense)
@@ -529,13 +535,12 @@ def newton_polish_traceable(
         accepted, candidate_norm = _newton_candidate_status(
             state["norm"], x_next, grad_next
         )
-        if progress_callback is not None:
-            jax.debug.callback(
-                progress_callback,
-                state["nit"] + 1,
-                lax.select(accepted, val_next, state["val"]),
-                lax.select(accepted, candidate_norm, state["norm"]),
-            )
+        jax.debug.callback(
+            progress_callback_fn,
+            state["nit"] + 1,
+            lax.select(accepted, val_next, state["val"]),
+            lax.select(accepted, candidate_norm, state["norm"]),
+        )
         return {
             "x": lax.select(accepted, x_next, state["x"]),
             "val": lax.select(accepted, val_next, state["val"]),
@@ -560,9 +565,10 @@ def newton_polish_traceable(
 
     val_final, grad_final = val_and_grad_fn(state["x"])
     norm_final = jnp.linalg.norm(grad_final)
-    H = _materialize_dense_hessian(hvp_fn, state["x"])
-    if stab != 0.0:
-        H = H + stab * jnp.eye(H.shape[0], dtype=H.dtype)
+    H = _stabilize_dense_hessian(
+        _materialize_dense_hessian(hvp_fn, state["x"]),
+        stab,
+    )
 
     return {
         "x": state["x"],
