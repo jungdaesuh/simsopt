@@ -15,6 +15,12 @@ Update as of 2026-04-01:
 * grouped forward-field compatibility paths now route through `jax_core`
 * the grouped forward field path now has a first chunked point-axis reduction
   implementation in `jax_core.field`
+* `BiotSavartJAX` spec adapters now reject hidden grouped-array/live-graph
+  compatibility fallback in strict mode instead of silently taking those paths
+* a first broader non-hot-path objective-family migration is landed:
+  `NonQuasiSymmetricRatioJAX` and `BoozerResidualJAX` now route their direct
+  objective-side field setup through immutable coil specs reconstructed from
+  explicit DOFs
 
 Read this document as architecture rationale and module-level guidance for the
 remaining work, not as a claim that Phase 0 and Phase 1 are still entirely
@@ -498,7 +504,9 @@ According to a document from March 31, 2026, here is the module-by-module implem
    `BiotSavartJAX` is also thinner than the earlier draft state: explicit DOF
    reconstruction now prefers immutable per-coil specs, and grouped array
    rebuilding is reduced to a compatibility fallback for legacy curve families
-   that still lack immutable-spec support.
+   that still lack immutable-spec support. In strict mode, the hidden
+   grouped-array/live-graph spec fallback is now rejected explicitly instead
+   of being taken silently.
 
    The current objective cleanup slice is now materially better than the
    earlier draft state:
@@ -512,6 +520,18 @@ According to a document from March 31, 2026, here is the module-by-module implem
    * the stateful single-stage wrappers now require streaming grouped adjoint
      callbacks (`res["vjp_groups"]`) instead of silently carrying the legacy
      full-pytree adjoint fallback
+   * the single-stage `ondevice` outer lane now consumes the scalar
+     traceable objective directly instead of the older explicit
+     `(value, grad)` adapter contract
+   * Stage 2 and single-stage outer continuous solver routing now share one
+     explicit `ContinuousOptimizerContract`; the supported
+     `scipy` / transitional `hybrid` / target `ondevice` split is defined in
+     one place instead of being re-decided per entrypoint
+   * unsupported single-stage outer `hybrid` routing is now rejected
+     explicitly instead of silently degrading to plain `lbfgs`
+   * the next broader non-hot-path objective slice is now landed:
+     `NonQuasiSymmetricRatioJAX` and `BoozerResidualJAX` route their direct
+     coil/objective terms through immutable coil-spec reconstruction
 
 4. **Finish mode-owned numerical policy.**
    Backend modes are now real, and chunk tuning is materially more centralized
