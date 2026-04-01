@@ -1563,15 +1563,12 @@ class TestStrictFieldFallbacks:
         bs_jax = BiotSavartJAX(coils)
         bs_jax._jax_native = False
         bs_jax.set_points(expected_points)
+        # Bypass coil_set_spec()'s spec-compatibility fallback warnings so this
+        # test isolates the live-geometry CPU fallback path.
         monkeypatch.setattr(
             bs_jax,
-            "_coil_set_spec_from_dofs_prefer_specs",
-            lambda _coil_dofs: (_ for _ in ()).throw(NotImplementedError),
-        )
-        monkeypatch.setattr(
-            bs_jax,
-            "coil_specs",
-            lambda: (_ for _ in ()).throw(NotImplementedError),
+            "coil_set_spec",
+            bs_jax._coil_set_spec_from_live_geometry,
         )
         monkeypatch.setattr(
             biotsavart_jax_backend_module,
