@@ -310,6 +310,40 @@ class TestBiotSavartParitySuite:
             assert new_err < 0.55 * err
             err = new_err
 
+    def test_A_quadrature_convergence(self):
+        """A converges monotonically under quadrature refinement.
+
+        Mirrors ``test_quadrature_convergence`` for the vector potential.
+        """
+        points = jnp.array(_BASE_POINTS)
+        currents = jnp.array([_CURRENT])
+
+        g_ref, gd_ref = _make_fourier_coil(1000)
+        A_ref = biot_savart_A(points, g_ref, gd_ref, currents)
+        dA_ref = biot_savart_dA_by_dX(points, g_ref, gd_ref, currents)
+
+        prev_A_err = float("inf")
+        prev_dA_err = float("inf")
+        for nq in [4, 8, 16, 32]:
+            g, gd = _make_fourier_coil(nq)
+            A = biot_savart_A(points, g, gd, currents)
+            dA = biot_savart_dA_by_dX(points, g, gd, currents)
+
+            A_err = float(jnp.linalg.norm(A - A_ref))
+            dA_err = float(jnp.linalg.norm(dA - dA_ref))
+
+            if prev_A_err > 1e-14:
+                assert A_err < 0.5 * prev_A_err, (
+                    f"A not converging at nq={nq}: {A_err:.2e} vs {prev_A_err:.2e}"
+                )
+            if prev_dA_err > 1e-14:
+                assert dA_err < 0.5 * prev_dA_err, (
+                    f"dA not converging at nq={nq}: {dA_err:.2e} vs {prev_dA_err:.2e}"
+                )
+
+            prev_A_err = A_err
+            prev_dA_err = dA_err
+
     def test_B_and_dB_linearity_in_current(self):
         """B and dB/dX are exactly linear in coil current.
 
@@ -349,6 +383,24 @@ class TestBiotSavartParitySuite:
         # (dB/dX(I) - dB/dX(0)) / I = dB/dX(1)
         ddB_approx = (dB_full - dB_zero) / I
         assert float(jnp.linalg.norm(ddB_approx - dB_unit)) < 1e-15
+
+        # --- A linearity ---
+        A_full = biot_savart_A(points, gammas, gammadashs, currents_full)
+        A_zero = biot_savart_A(points, gammas, gammadashs, currents_zero)
+        A_unit = biot_savart_A(points, gammas, gammadashs, currents_unit)
+
+        assert float(jnp.linalg.norm(A_full - I * A_unit)) < 1e-15
+        dA_approx = (A_full - A_zero) / I
+        assert float(jnp.linalg.norm(dA_approx - A_unit)) < 1e-15
+
+        # --- dA/dX linearity ---
+        dA_full = biot_savart_dA_by_dX(points, gammas, gammadashs, currents_full)
+        dA_zero = biot_savart_dA_by_dX(points, gammas, gammadashs, currents_zero)
+        dA_unit = biot_savart_dA_by_dX(points, gammas, gammadashs, currents_unit)
+
+        assert float(jnp.linalg.norm(dA_full - I * dA_unit)) < 1e-15
+        ddA_approx = (dA_full - dA_zero) / I
+        assert float(jnp.linalg.norm(ddA_approx - dA_unit)) < 1e-15
 
 
 # ---------------------------------------------------------------------------
