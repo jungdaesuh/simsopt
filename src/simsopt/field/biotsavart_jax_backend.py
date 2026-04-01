@@ -914,7 +914,28 @@ class BiotSavartJAX(Optimizable):
             list of ``(gammas, gammadashs, currents, coil_indices)``
             tuples, one per distinct quadrature count.
         """
+        if not hasattr(self, "_unique_dof_opts"):
+            return list(
+                grouped_field_data_from_spec(self._coil_set_spec_from_live_geometry())
+            )
+
         return list(grouped_field_data_from_spec(self.coil_set_spec()))
+
+    def _coil_set_spec_from_live_geometry(self):
+        """Build a grouped coil spec directly from the live coil graph."""
+        geometry_cache = {}
+        gammas = []
+        gammadashs = []
+        currents = []
+        for coil in self._coils:
+            *_prefix, gamma, gammadash, current_value = self._coil_geometry_inputs(
+                coil,
+                geometry_cache,
+            )
+            gammas.append(gamma)
+            gammadashs.append(gammadash)
+            currents.append(current_value)
+        return grouped_coil_set_spec_from_lists(gammas, gammadashs, currents)
 
     def coil_set_spec(self):
         """Build the immutable grouped coil spec from the live coil graph."""
@@ -936,19 +957,7 @@ class BiotSavartJAX(Optimizable):
                 "live-graph geometry extraction",
             )
 
-        geometry_cache = {}
-        gammas = []
-        gammadashs = []
-        currents = []
-        for coil in self._coils:
-            *_prefix, gamma, gammadash, current_value = self._coil_geometry_inputs(
-                coil,
-                geometry_cache,
-            )
-            gammas.append(gamma)
-            gammadashs.append(gammadash)
-            currents.append(current_value)
-        return grouped_coil_set_spec_from_lists(gammas, gammadashs, currents)
+        return self._coil_set_spec_from_live_geometry()
 
     def coil_specs(self):
         """Build immutable per-coil specs from the live coil graph."""

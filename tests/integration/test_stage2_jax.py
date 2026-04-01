@@ -211,6 +211,8 @@ def _run_stage2_probe_and_load_payload(*args):
             "--export-objective-json",
             str(export_json),
         )
+        output = f"{result.stdout}\n{result.stderr}"
+        assert result.returncode == 0, output
         payload = json.loads(export_json.read_text(encoding="utf-8"))
     return result, payload
 
@@ -1137,17 +1139,18 @@ class TestMixedQuadratureParity:
 
 
 class TestStrictFieldFallbacks:
-    def test_strict_mode_rejects_biot_savart_cpu_geometry_fallback(
+    def test_strict_mode_uses_spec_native_forward_path_before_cpu_geometry_fallback(
         self,
         coil_surf_setup,
         monkeypatch,
     ):
         coils, surf, _, _ = coil_surf_setup
+        expected_points = surf.gamma().reshape((-1, 3))
         _enable_strict_jax_backend(monkeypatch)
 
         bs_jax = BiotSavartJAX(coils)
         bs_jax._jax_native = False
-        bs_jax.set_points(surf.gamma().reshape((-1, 3)))
+        bs_jax.set_points(expected_points)
         monkeypatch.setattr(
             bs_jax,
             "coil_specs",
@@ -1159,11 +1162,8 @@ class TestStrictFieldFallbacks:
             lambda curve: False,
         )
 
-        with pytest.raises(
-            RuntimeError,
-            match="BiotSavartJAX.*curve-geometry fallback",
-        ):
-            bs_jax.B()
+        field_value = bs_jax.B()
+        assert np.asarray(field_value).shape == np.asarray(expected_points).shape
 
     def test_strict_mode_rejects_biot_savart_cpu_pullback_fallback(
         self,
@@ -1579,8 +1579,12 @@ class TestCurveCWSFourierNativeFieldPath:
         bs_jax = BiotSavartJAX(coils)
         bs_jax.set_points(points)
         B_jax = np.asarray(bs_jax.B())
+        bs_cpu = BiotSavart(coils)
+        bs_cpu.set_points(points)
+        B_cpu = bs_cpu.B()
 
         assert B_jax.shape == points.shape
+        np.testing.assert_allclose(B_jax, B_cpu, rtol=1e-10, atol=1e-15)
 
     def test_b_vjp_bypasses_python_coil_vjp_for_free_curvecwsfourier(
         self,
