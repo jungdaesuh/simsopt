@@ -16,9 +16,7 @@ Tests:
 No simsoptpp dependency — all tests use pure JAX functions.
 """
 
-import importlib.util
 import sys
-import types
 from pathlib import Path
 
 import pytest
@@ -30,57 +28,38 @@ jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp
 
 # ---------------------------------------------------------------------------
-# Load JAX modules directly (avoids simsopt/__init__.py → simsoptpp dep).
-# label_constraints_jax.py uses relative imports, so we temporarily inject
-# stub packages into sys.modules, load everything, then clean up.
+# Add the src root to sys.path so simsopt subpackages (jax_core, backend)
+# resolve naturally without fragile importlib stubs.  The simsopt top-level
+# __init__.py guards its simsoptpp import behind try/except, so this is
+# safe in a pure-JAX environment.
 # ---------------------------------------------------------------------------
 _SRC = Path(__file__).resolve().parents[2] / "src" / "simsopt"
+_src_root = str(_SRC.parent)  # .../src
+if _src_root not in sys.path:
+    sys.path.insert(0, _src_root)
 
-
-def _load(name, relpath, package=None):
-    spec = importlib.util.spec_from_file_location(name, str(_SRC / relpath))
-    mod = importlib.util.module_from_spec(spec)
-    if package is not None:
-        mod.__package__ = package
-    spec.loader.exec_module(mod)
-    return mod
-
-
-# label_constraints_jax.py has top-level relative imports that need stub
-# parent packages in sys.modules and __package__ set on the module.
-_stubs_added = []
-for _pkg in ["simsopt", "simsopt.geo", "simsopt.field"]:
-    if _pkg not in sys.modules:
-        _stub = types.ModuleType(_pkg)
-        _stub.__path__ = []
-        sys.modules[_pkg] = _stub
-        _stubs_added.append(_pkg)
-
-_sf = _load("surface_fourier_jax", "geo/surface_fourier_jax.py")
-sys.modules["simsopt.geo.surface_fourier_jax"] = _sf
-
-_bs = _load("biotsavart_jax", "field/biotsavart_jax.py")
-sys.modules["simsopt.field.biotsavart_jax"] = _bs
-
-_lc = _load(
-    "label_constraints_jax", "geo/label_constraints_jax.py", package="simsopt.geo"
+from simsopt.geo.surface_fourier_jax import (  # noqa: E402
+    stellsym_scatter_indices as _stellsym_scatter_indices,
+    surface_area as _surface_area,
+    surface_gamma_from_dofs as _surface_gamma_from_dofs,
+    surface_gammadash2_from_dofs as _surface_gammadash2_from_dofs,
+    surface_normal_from_dofs as _surface_normal_from_dofs,
+    surface_volume as _surface_volume,
+)
+from simsopt.field.biotsavart_jax import biot_savart_A as _biot_savart_A  # noqa: E402
+from simsopt.geo.label_constraints_jax import (  # noqa: E402
+    toroidal_flux_jax as _toroidal_flux_jax,
 )
 
-# Clean up stubs so the real simsopt package isn't shadowed for other tests.
-for _entry in ["simsopt.geo.surface_fourier_jax", "simsopt.field.biotsavart_jax"]:
-    sys.modules.pop(_entry, None)
-for _pkg in reversed(_stubs_added):
-    sys.modules.pop(_pkg, None)
+surface_gamma_from_dofs = _surface_gamma_from_dofs
+surface_gammadash2_from_dofs = _surface_gammadash2_from_dofs
+surface_normal_from_dofs = _surface_normal_from_dofs
+surface_volume = _surface_volume
+surface_area = _surface_area
+stellsym_scatter_indices = _stellsym_scatter_indices
 
-surface_gamma_from_dofs = _sf.surface_gamma_from_dofs
-surface_gammadash2_from_dofs = _sf.surface_gammadash2_from_dofs
-surface_normal_from_dofs = _sf.surface_normal_from_dofs
-surface_volume = _sf.surface_volume
-surface_area = _sf.surface_area
-stellsym_scatter_indices = _sf.stellsym_scatter_indices
-
-biot_savart_A = _bs.biot_savart_A
-toroidal_flux_jax = _lc.toroidal_flux_jax
+biot_savart_A = _biot_savart_A
+toroidal_flux_jax = _toroidal_flux_jax
 
 
 def _make_tf_coils(n_coils=16, R_center=1.0, r_coil=0.3, nquad=64, I=1e5):
@@ -297,6 +276,93 @@ class TestLabelConstraintsParity:
 
         grad_fn = jax.grad(f)
         _taylor_test_central(f, grad_fn, dofs)
+
+    # -------------------------------------------------------------------
+    # P7: ToroidalFlux Hessian Taylor test (2nd derivative w.r.t. surface DOFs)
+    # -------------------------------------------------------------------
+
+    @pytest.mark.parametrize("stellsym", [False, True])
+    def test_toroidal_flux_hessian_taylor(self, stellsym):
+        """d²Φ_tor/d(surface DOFs)² matches one-sided FD of gradient.
+
+        Matches upstream ``test_toroidal_flux_second_derivative`` pattern
+        (taylor_test2).
+        """
+        dofs_np, scatter_idx = _make_torus_dofs(
+            R=1.0, r=0.1, mpol=_MPOL, ntor=_NTOR, nfp=_NFP, stellsym=stellsym
+        )
+        dofs = jnp.array(dofs_np)
+
+        def f(d):
+            gamma = surface_gamma_from_dofs(
+                d, _QP_PHI, _QP_THETA, _MPOL, _NTOR, _NFP, stellsym, scatter_idx
+            )
+            gd2 = surface_gammadash2_from_dofs(
+                d, _QP_PHI, _QP_THETA, _MPOL, _NTOR, _NFP, stellsym, scatter_idx
+            )
+            pts = gamma[0]
+            A = biot_savart_A(pts, _TF_GAMMAS, _TF_GDS, _TF_CURRENTS)
+            return toroidal_flux_jax(A, gd2[0], _NTHETA)
+
+        grad_fn = jax.grad(f)
+        hessian_fn = jax.hessian(f)
+
+        rng = np.random.RandomState(1)
+        d1 = jnp.array(rng.rand(*dofs.shape) - 0.5)
+        d2 = jnp.array(rng.rand(*dofs.shape) - 0.5)
+
+        H = hessian_fn(dofs)
+        d2f_exact = float(d2 @ H @ d1)
+        df0 = grad_fn(dofs)
+        df0_d1 = float(df0 @ d1)
+
+        epsilons = np.power(2.0, -np.arange(7, 20, dtype=float))
+        err_old = 1e9
+        for eps in epsilons:
+            df_perturbed_d1 = float(grad_fn(dofs + eps * d2) @ d1)
+            d2f_fd = (df_perturbed_d1 - df0_d1) / eps
+            err = abs(d2f_fd - d2f_exact)
+            assert err < 0.6 * err_old, (
+                f"Hessian Taylor stalled: err={err:.2e}, "
+                f"prev={err_old:.2e}, ratio={err / err_old:.3f}"
+            )
+            err_old = err
+
+    # -------------------------------------------------------------------
+    # P8: ToroidalFlux derivative w.r.t. coil DOFs Taylor test
+    # -------------------------------------------------------------------
+
+    def test_toroidal_flux_coil_dof_gradient_taylor(self):
+        """dΦ_tor/d(coil gammas) matches central FD.
+
+        Matches upstream ``test_toroidal_flux_partial_derivatives_wrt_coils``.
+        Surface geometry is fixed; coil positions are the free DOFs.
+        """
+        dofs_np, scatter_idx = _make_torus_dofs(
+            R=1.0, r=0.1, mpol=_MPOL, ntor=_NTOR, nfp=_NFP, stellsym=False
+        )
+        dofs = jnp.array(dofs_np)
+
+        # Fix surface geometry
+        gamma = surface_gamma_from_dofs(
+            dofs, _QP_PHI, _QP_THETA, _MPOL, _NTOR, _NFP, False, None
+        )
+        gd2 = surface_gammadash2_from_dofs(
+            dofs, _QP_PHI, _QP_THETA, _MPOL, _NTOR, _NFP, False, None
+        )
+        pts_fixed = gamma[0]  # phi slice 0
+        gd2_fixed = gd2[0]
+
+        # Flatten coil gammas as DOF vector
+        coil_dofs = _TF_GAMMAS.ravel()
+
+        def f(coil_gammas_flat):
+            gammas = coil_gammas_flat.reshape(_TF_GAMMAS.shape)
+            A = biot_savart_A(pts_fixed, gammas, _TF_GDS, _TF_CURRENTS)
+            return toroidal_flux_jax(A, gd2_fixed, _NTHETA)
+
+        grad_fn = jax.grad(f)
+        _taylor_test_central(f, grad_fn, coil_dofs)
 
 
 if __name__ == "__main__":
