@@ -2,8 +2,8 @@
 Stage 2 JAX backend parity tests.
 
 Validates:
-1. SquaredFluxJAX.J() matches SquaredFlux.J() within 1e-10 relative error.
-2. SquaredFluxJAX.dJ() gradient matches CPU within 1e-9 relative error.
+1. SquaredFluxJAX.J() matches SquaredFlux.J() within 1e-12 relative error.
+2. SquaredFluxJAX.dJ() gradient matches CPU within 1e-11 relative error.
 3. Short L-BFGS-B run produces comparable field error and objective.
 
 All tests require ``simsoptpp`` for the CPU reference.
@@ -12,6 +12,7 @@ All tests require ``simsoptpp`` for the CPU reference.
 import json
 import importlib
 import importlib.util
+from functools import partial
 from pathlib import Path
 import subprocess
 import sys
@@ -21,7 +22,11 @@ import types
 import jax
 import jax.numpy as jnp
 import pytest
-from conftest import enable_strict_jax_backend
+from conftest import (
+    enable_non_strict_jax_backend,
+    enable_strict_jax_backend,
+    relative_error,
+)
 import numpy as np
 
 sopp = pytest.importorskip(
@@ -50,6 +55,7 @@ from simsopt.objectives import SquaredFlux, QuadraticPenalty  # noqa: E402
 
 from simsopt.field.biotsavart_jax_backend import BiotSavartJAX
 import simsopt.field.biotsavart_jax_backend as biotsavart_jax_backend_module
+from simsopt.field.biotsavart_jax import grouped_biot_savart_A
 from simsopt.jax_core import (
     grouped_biot_savart_B_from_inputs,
     grouped_biot_savart_B_from_spec,
@@ -102,6 +108,9 @@ REDUCED_STAGE2_ARGS = (
     "16",
 )
 _SHORT_RUN_PARITY_RTOL = 1e-3
+_STAGE2_VALUE_PARITY_RTOL = 1e-12
+_STAGE2_GRADIENT_PARITY_RTOL = 1e-11
+_STAGE2_GRADIENT_PARITY_ATOL = 1e-15
 _SQUARED_FLUX_DEFINITIONS = (
     "quadratic flux",
     "normalized",
@@ -113,9 +122,33 @@ _TARGET_OBJECTIVE_FD_EPS = 1e-6
 _TARGET_OBJECTIVE_FD_ATOL = 2e-5
 
 
-from functools import partial
-
 _enable_strict_jax_backend = partial(enable_strict_jax_backend, mode="jax_cpu_parity")
+_enable_non_strict_jax_backend = partial(
+    enable_non_strict_jax_backend,
+    mode="jax_cpu_parity",
+)
+
+
+def _assert_stage2_value_parity(actual, reference, *, definition=None):
+    rel_err = relative_error(actual, reference)
+    if definition is not None:
+        print(
+            f"[{definition}] J_cpu={reference:.12e}  J_jax={actual:.12e}  "
+            f"rel_err={rel_err:.2e}"
+        )
+    assert rel_err < _STAGE2_VALUE_PARITY_RTOL, (
+        f"Relative error {rel_err:.2e} exceeds {_STAGE2_VALUE_PARITY_RTOL:.0e}"
+    )
+
+
+def _assert_stage2_gradient_parity(actual, reference, *, err_msg):
+    np.testing.assert_allclose(
+        actual,
+        reference,
+        rtol=_STAGE2_GRADIENT_PARITY_RTOL,
+        atol=_STAGE2_GRADIENT_PARITY_ATOL,
+        err_msg=err_msg,
+    )
 
 
 def _stage2_context_kwargs():
@@ -505,11 +538,7 @@ class TestObjectiveValueParity:
         jf_jax = SquaredFluxJAX(surf, bs_jax, definition=definition)
         j_jax = jf_jax.J()
 
-        rel_err = abs(j_jax - j_cpu) / (abs(j_cpu) + 1e-30)
-        print(
-            f"[{definition}] J_cpu={j_cpu:.12e}  J_jax={j_jax:.12e}  rel_err={rel_err:.2e}"
-        )
-        assert rel_err < 1e-10, f"Relative error {rel_err:.2e} exceeds 1e-10"
+        _assert_stage2_value_parity(j_jax, j_cpu, definition=definition)
 
     def test_j_with_target(self, coil_surf_setup):
         """Parity with a non-zero target field."""
@@ -527,8 +556,7 @@ class TestObjectiveValueParity:
         jf_jax = SquaredFluxJAX(surf, bs_jax, target=target)
         j_jax = jf_jax.J()
 
-        rel_err = abs(j_jax - j_cpu) / (abs(j_cpu) + 1e-30)
-        assert rel_err < 1e-10
+        _assert_stage2_value_parity(j_jax, j_cpu)
 
 
 # -----------------------------------------------------------------------
@@ -552,11 +580,9 @@ class TestGradientParity:
         jf_jax = SquaredFluxJAX(surf, bs_jax, definition=definition)
         grad_jax = jf_jax.dJ()
 
-        np.testing.assert_allclose(
+        _assert_stage2_gradient_parity(
             grad_jax,
             grad_cpu,
-            rtol=1e-9,
-            atol=1e-15,
             err_msg=f"Gradient mismatch between JAX and CPU for {definition!r}",
         )
 
@@ -658,7 +684,7 @@ class TestCompositeGradient:
         j_jax = JF_jax.J()
         grad_jax = JF_jax.dJ()
 
-        rel_err_j = abs(j_jax - j_cpu) / (abs(j_cpu) + 1e-30)
+        rel_err_j = relative_error(j_jax, j_cpu)
         assert rel_err_j < 1e-10
 
         np.testing.assert_allclose(
@@ -746,7 +772,7 @@ class TestShortOptimizationRun:
         print(f"CPU: J={j_cpu:.8e}, nit={nit_cpu}")
         print(f"JAX: J={j_jax:.8e}, nit={nit_jax}")
 
-        rel_diff = abs(j_jax - j_cpu) / (abs(j_cpu) + 1e-30)
+        rel_diff = relative_error(j_jax, j_cpu)
         assert rel_diff < _SHORT_RUN_PARITY_RTOL, (
             f"Short-run final objectives differ by {rel_diff:.2%}: "
             f"CPU={j_cpu:.6e}, JAX={j_jax:.6e}"
@@ -841,6 +867,72 @@ class TestBiotSavartJAXParity:
             assert entry["kind"] in {"prep", "group_pullback"}
             assert entry["elapsed_s"] >= 0.0
             assert entry["coil_indices"]
+
+    def test_dB_by_dX_parity(self, coil_surf_setup):
+        """dB/dX spatial Jacobian must match CPU at the same evaluation points.
+
+        Validates the forward Jacobian tensor convention:
+        ``dB_by_dX[p, j, l] = ∂_j B_l(x_p)`` (axis 1 = derivative direction,
+        axis 2 = B component).
+
+        Requires simsoptpp for the CPU reference.
+        """
+        coils, surf, _, _ = coil_surf_setup
+        points = surf.gamma().reshape((-1, 3))
+
+        bs_cpu = BiotSavart(coils)
+        bs_cpu.set_points(points)
+        dB_cpu = bs_cpu.dB_by_dX()
+
+        bs_jax = BiotSavartJAX(coils)
+        bs_jax.set_points(points)
+        dB_jax = np.asarray(bs_jax.dB_by_dX())
+
+        assert dB_jax.shape == dB_cpu.shape, (
+            f"Shape mismatch: JAX {dB_jax.shape} vs CPU {dB_cpu.shape}"
+        )
+
+        np.testing.assert_allclose(
+            dB_jax,
+            dB_cpu,
+            rtol=1e-10,
+            atol=1e-15,
+            err_msg="BiotSavartJAX.dB_by_dX() does not match CPU",
+        )
+
+    def test_A_parity(self, coil_surf_setup):
+        """Vector potential A must match CPU at the same evaluation points.
+
+        BiotSavartJAX does not expose an A() method, so this test uses the
+        pure function ``grouped_biot_savart_A`` with coil data extracted from
+        the adapter.
+
+        Requires simsoptpp for the CPU reference.
+        """
+        coils, surf, _, _ = coil_surf_setup
+        points = surf.gamma().reshape((-1, 3))
+
+        bs_cpu = BiotSavart(coils)
+        bs_cpu.set_points(points)
+        A_cpu = bs_cpu.A()
+
+        bs_jax = BiotSavartJAX(coils)
+        bs_jax.set_points(points)
+        groups = bs_jax._extract_coil_data_grouped()
+        coil_arrays = [(g, gd, c) for g, gd, c, _ in groups]
+        A_jax = np.asarray(grouped_biot_savart_A(bs_jax._points_jax, coil_arrays))
+
+        assert A_jax.shape == A_cpu.shape, (
+            f"Shape mismatch: JAX {A_jax.shape} vs CPU {A_cpu.shape}"
+        )
+
+        np.testing.assert_allclose(
+            A_jax,
+            A_cpu,
+            rtol=1e-10,
+            atol=1e-15,
+            err_msg="biot_savart_A (via grouped_biot_savart_A) does not match CPU",
+        )
 
 
 # -----------------------------------------------------------------------
@@ -1017,8 +1109,7 @@ class TestMixedQuadratureParity:
         jf_jax = SquaredFluxJAX(surf, bs_jax, definition=definition)
         j_jax = jf_jax.J()
 
-        rel_err = abs(j_jax - j_cpu) / (abs(j_cpu) + 1e-30)
-        assert rel_err < 1e-10, f"Relative error {rel_err:.2e} exceeds 1e-10"
+        _assert_stage2_value_parity(j_jax, j_cpu)
 
     @pytest.mark.parametrize("definition", _SQUARED_FLUX_DEFINITIONS)
     def test_gradient_parity(self, mixed_quad_setup, definition):
@@ -1034,11 +1125,9 @@ class TestMixedQuadratureParity:
         jf_jax = SquaredFluxJAX(surf, bs_jax, definition=definition)
         grad_jax = jf_jax.dJ()
 
-        np.testing.assert_allclose(
+        _assert_stage2_gradient_parity(
             grad_jax,
             grad_cpu,
-            rtol=1e-9,
-            atol=1e-15,
             err_msg=f"Gradient mismatch with mixed quadrature for {definition!r}",
         )
 
@@ -1125,9 +1214,10 @@ class TestMixedQuadratureParity:
         self,
         mixed_quad_setup,
         monkeypatch,
+        request,
     ):
         coils, surf = mixed_quad_setup
-        _enable_strict_jax_backend(monkeypatch)
+        _enable_strict_jax_backend(monkeypatch, request)
 
         bs_jax = BiotSavartJAX(coils)
 
@@ -1137,16 +1227,73 @@ class TestMixedQuadratureParity:
         ):
             SquaredFluxJAX(surf, bs_jax)
 
+    def test_non_strict_squared_flux_fallback_warns(
+        self,
+        mixed_quad_setup,
+        monkeypatch,
+        request,
+    ):
+        coils, surf = mixed_quad_setup
+        _enable_non_strict_jax_backend(monkeypatch, request)
+
+        bs_jax = BiotSavartJAX(coils)
+
+        with pytest.warns(
+            RuntimeWarning,
+            match="SquaredFluxJAX.*CPU fallback objective path.*legacy adapter seam",
+        ):
+            jf_jax = SquaredFluxJAX(surf, bs_jax)
+
+        assert not jf_jax._use_jax_native
+
 
 class TestStrictFieldFallbacks:
+    def test_non_strict_mode_warns_on_biot_savart_cpu_geometry_fallback(
+        self,
+        coil_surf_setup,
+        monkeypatch,
+        request,
+    ):
+        coils, surf, _, _ = coil_surf_setup
+        expected_points = surf.gamma().reshape((-1, 3))
+        _enable_non_strict_jax_backend(monkeypatch, request)
+
+        bs_jax = BiotSavartJAX(coils)
+        bs_jax._jax_native = False
+        bs_jax.set_points(expected_points)
+        monkeypatch.setattr(
+            bs_jax,
+            "_coil_set_spec_from_dofs_prefer_specs",
+            lambda _coil_dofs: (_ for _ in ()).throw(NotImplementedError),
+        )
+        monkeypatch.setattr(
+            bs_jax,
+            "coil_specs",
+            lambda: (_ for _ in ()).throw(NotImplementedError),
+        )
+        monkeypatch.setattr(
+            biotsavart_jax_backend_module,
+            "_supports_native_curve_geometry",
+            lambda curve: False,
+        )
+
+        with pytest.warns(
+            RuntimeWarning,
+            match="BiotSavartJAX.*CPU curve-geometry fallback.*legacy adapter seam",
+        ):
+            field_value = bs_jax.B()
+
+        assert np.asarray(field_value).shape == np.asarray(expected_points).shape
+
     def test_strict_mode_uses_spec_native_forward_path_before_cpu_geometry_fallback(
         self,
         coil_surf_setup,
         monkeypatch,
+        request,
     ):
         coils, surf, _, _ = coil_surf_setup
         expected_points = surf.gamma().reshape((-1, 3))
-        _enable_strict_jax_backend(monkeypatch)
+        _enable_strict_jax_backend(monkeypatch, request)
 
         bs_jax = BiotSavartJAX(coils)
         bs_jax._jax_native = False
@@ -1169,9 +1316,10 @@ class TestStrictFieldFallbacks:
         self,
         coil_surf_setup,
         monkeypatch,
+        request,
     ):
         coils, surf, _, _ = coil_surf_setup
-        _enable_strict_jax_backend(monkeypatch)
+        _enable_strict_jax_backend(monkeypatch, request)
 
         bs_jax = BiotSavartJAX(coils)
         bs_jax.set_points(surf.gamma().reshape((-1, 3)))
@@ -1192,6 +1340,37 @@ class TestStrictFieldFallbacks:
             match="BiotSavartJAX.*coil-pullback fallback",
         ):
             bs_jax.B_vjp(jax.numpy.ones_like(field_value))
+
+    def test_non_strict_mode_warns_on_biot_savart_cpu_pullback_fallback(
+        self,
+        coil_surf_setup,
+        monkeypatch,
+        request,
+    ):
+        coils, surf, _, _ = coil_surf_setup
+        _enable_non_strict_jax_backend(monkeypatch, request)
+
+        bs_jax = BiotSavartJAX(coils)
+        bs_jax.set_points(surf.gamma().reshape((-1, 3)))
+        field_value = bs_jax.B()
+        monkeypatch.setattr(
+            biotsavart_jax_backend_module,
+            "_supports_jax_curve_pullback",
+            lambda curve: False,
+        )
+        monkeypatch.setattr(
+            biotsavart_jax_backend_module,
+            "_supports_cpu_curve_pullback",
+            lambda curve: True,
+        )
+
+        with pytest.warns(
+            RuntimeWarning,
+            match="BiotSavartJAX.*CPU coil-pullback fallback.*legacy adapter seam",
+        ):
+            derivative = bs_jax.B_vjp(jax.numpy.ones_like(field_value))
+
+        assert np.asarray(derivative(bs_jax._coils[0].curve)).shape[0] > 0
 
 
 # -----------------------------------------------------------------------
@@ -1395,8 +1574,7 @@ class TestCurveCWSFourierCPPParity:
         bs_jax = BiotSavartJAX(coils)
         j_jax = SquaredFluxJAX(surf, bs_jax).J()
 
-        rel_err = abs(j_jax - j_cpu) / (abs(j_cpu) + 1e-30)
-        assert rel_err < 1e-10, f"Relative error {rel_err:.2e} exceeds 1e-10"
+        _assert_stage2_value_parity(j_jax, j_cpu)
 
     def test_gradient_parity(self, banana_coil_setup):
         """SquaredFluxJAX.dJ() matches CPU with CurveCWSFourierCPP coils."""
@@ -1409,11 +1587,9 @@ class TestCurveCWSFourierCPPParity:
         bs_jax = BiotSavartJAX(coils)
         grad_jax = SquaredFluxJAX(surf, bs_jax).dJ()
 
-        np.testing.assert_allclose(
+        _assert_stage2_gradient_parity(
             grad_jax,
             grad_cpu,
-            rtol=1e-9,
-            atol=1e-15,
             err_msg="Gradient mismatch with CurveCWSFourierCPP banana coil",
         )
 

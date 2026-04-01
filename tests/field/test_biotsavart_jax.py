@@ -174,6 +174,20 @@ def _dense_reference_fields(module, points, gammas, gammadashs, currents):
     return dense_B, dense_A, dense_dB, dense_dA
 
 
+def _evaluate_field_family(module, points, gammas, gammadashs, currents):
+    B = module.biot_savart_B(points, gammas, gammadashs, currents)
+    A = module.biot_savart_A(points, gammas, gammadashs, currents)
+    dB = module.biot_savart_dB_by_dX(points, gammas, gammadashs, currents)
+    dA = module.biot_savart_dA_by_dX(points, gammas, gammadashs, currents)
+    B_combo, dB_combo = module.biot_savart_B_and_dB(
+        points,
+        gammas,
+        gammadashs,
+        currents,
+    )
+    return B, A, dB, dA, B_combo, dB_combo
+
+
 def _ncsx_biotsavart_parity_fixture():
     from simsopt.configs import get_data
     from simsopt.field import BiotSavart, coils_via_symmetries
@@ -373,6 +387,58 @@ class TestBiotSavartJaxCppParity:
 
 class TestBiotSavartJaxChunkedParity:
     """Directly compare chunked low-level kernels against dense references."""
+
+    def test_two_chunk_coil_and_quadrature_paths_match_dense_reference(
+        self, monkeypatch
+    ):
+        with _kernel_tuning_env("jax_cpu_parity"):
+            chunked_bs = _load_chunked_biotsavart()
+            from simsopt.jax_core import biotsavart as core_bs
+
+            monkeypatch.setattr(core_bs, "_read_tuning_config", lambda: (3, 5, 0))
+            core_bs.invalidate_kernel_cache()
+
+            gammas, gammadashs, currents = _make_shifted_circular_coils(6, nquad=9)
+            points = jnp.array(
+                [
+                    [0.2, 0.1, -0.3],
+                    [0.1, -0.4, 0.0],
+                    [-0.3, 0.2, 0.35],
+                ],
+                dtype=jnp.float64,
+            )
+
+            dense_B, dense_A, dense_dB, dense_dA = _dense_reference_fields(
+                chunked_bs,
+                points,
+                gammas,
+                gammadashs,
+                currents,
+            )
+
+            B, A, dB, dA, B_combo, dB_combo = _evaluate_field_family(
+                chunked_bs,
+                points,
+                gammas,
+                gammadashs,
+                currents,
+            )
+
+            assert core_bs._read_tuning_config() == (3, 5, 0)
+            np.testing.assert_allclose(np.asarray(B), np.asarray(dense_B), atol=1e-14)
+            np.testing.assert_allclose(np.asarray(A), np.asarray(dense_A), atol=1e-14)
+            np.testing.assert_allclose(np.asarray(dB), np.asarray(dense_dB), atol=1e-14)
+            np.testing.assert_allclose(np.asarray(dA), np.asarray(dense_dA), atol=1e-14)
+            np.testing.assert_allclose(
+                np.asarray(B_combo),
+                np.asarray(dense_B),
+                atol=1e-14,
+            )
+            np.testing.assert_allclose(
+                np.asarray(dB_combo),
+                np.asarray(dense_dB),
+                atol=1e-14,
+            )
 
     def test_chunked_B_and_dB_match_dense_reference(self):
         with _kernel_tuning_env("jax_cpu_parity"):

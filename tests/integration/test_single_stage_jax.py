@@ -22,9 +22,14 @@ All tests require ``simsoptpp`` for the CPU reference.
 
 import gc
 import re
+from functools import partial
 
 import pytest
-from conftest import enable_strict_jax_backend
+from conftest import (
+    enable_non_strict_jax_backend,
+    enable_strict_jax_backend,
+    relative_error,
+)
 import numpy as np
 import jax
 import jax.numpy as jnp
@@ -132,26 +137,22 @@ def _iota_unit_rhs(plu):
     return rhs
 
 
-def _enable_strict_jax_backend(monkeypatch, mode="jax_gpu_parity"):
-    enable_strict_jax_backend(monkeypatch, mode=mode)
-
-
-def _enable_non_strict_jax_backend(monkeypatch, mode="jax_gpu_parity"):
-    from simsopt.backend import invalidate_backend_cache
-
-    monkeypatch.setenv("SIMSOPT_BACKEND_MODE", mode)
-    monkeypatch.delenv("SIMSOPT_BACKEND_STRICT", raising=False)
-    invalidate_backend_cache()
+_enable_strict_jax_backend = partial(enable_strict_jax_backend, mode="jax_gpu_parity")
+_enable_non_strict_jax_backend = partial(
+    enable_non_strict_jax_backend,
+    mode="jax_gpu_parity",
+)
 
 
 def _assert_hidden_spec_fallback_rejected(
     monkeypatch,
+    request,
     callback,
     *,
     api_name,
     mode="jax_gpu_parity",
 ):
-    _enable_strict_jax_backend(monkeypatch, mode)
+    _enable_strict_jax_backend(monkeypatch, request, mode=mode)
     with pytest.raises(
         RuntimeError,
         match=_HIDDEN_SPEC_FALLBACK_PATTERN
@@ -162,12 +163,13 @@ def _assert_hidden_spec_fallback_rejected(
 
 def _assert_hidden_spec_fallback_warns(
     monkeypatch,
+    request,
     callback,
     *,
     api_name,
     mode="jax_gpu_parity",
 ):
-    _enable_non_strict_jax_backend(monkeypatch, mode)
+    _enable_non_strict_jax_backend(monkeypatch, request, mode=mode)
     with pytest.warns(
         RuntimeWarning,
         match=(
@@ -674,10 +676,6 @@ _STABLE_G_REL_TOL = 1e-4
 _STABLE_FUN_REL_TOL = 1e-2
 
 
-def _relative_error(actual, reference):
-    return abs(actual - reference) / (abs(reference) + 1e-30)
-
-
 def _make_real_resolve_fd_setup():
     """Build the stable reduced real single-stage fixture used by Tier 4."""
     fixture = build_real_single_stage_init_fixture(
@@ -706,8 +704,8 @@ def _make_real_resolve_fd_setup():
 def _is_stable_real_resolve(base_state, *, iota_value, G_value, fun_value):
     return (
         abs(iota_value - float(base_state["iota"])) < _STABLE_IOTA_ABS_TOL
-        and _relative_error(G_value, float(base_state["G"])) < _STABLE_G_REL_TOL
-        and _relative_error(fun_value, float(base_state["fun"])) < _STABLE_FUN_REL_TOL
+        and relative_error(G_value, float(base_state["G"])) < _STABLE_G_REL_TOL
+        and relative_error(fun_value, float(base_state["fun"])) < _STABLE_FUN_REL_TOL
     )
 
 
@@ -1390,30 +1388,33 @@ class TestAdjointSolveConsistency:
     def test_strict_mode_allows_native_spec_reconstruction_in_coil_set_spec_from_dofs(
         self,
         monkeypatch,
+        request,
     ):
         """Strict JAX mode should allow native immutable-spec reconstruction."""
         curve = _build_helical_curve(16)
         current = Current(1.23)
         bs_jax = BiotSavartJAX([Coil(curve, current)])
-        _enable_strict_jax_backend(monkeypatch)
+        _enable_strict_jax_backend(monkeypatch, request)
         grouped_spec = bs_jax.coil_set_spec_from_dofs(jnp.asarray(bs_jax.x))
         assert isinstance(grouped_spec, GroupedCoilSetSpec)
 
     def test_strict_mode_allows_native_spec_reconstruction_in_coil_set_spec(
         self,
         monkeypatch,
+        request,
     ):
         """Strict JAX mode should allow the live native grouped-coil spec path."""
         curve = _build_helical_curve(16)
         current = Current(1.23)
         bs_jax = BiotSavartJAX([Coil(curve, current)])
-        _enable_strict_jax_backend(monkeypatch)
+        _enable_strict_jax_backend(monkeypatch, request)
         grouped_spec = bs_jax.coil_set_spec()
         assert isinstance(grouped_spec, GroupedCoilSetSpec)
 
     def test_non_strict_mode_warns_on_grouped_spec_fallback_in_coil_set_spec_from_dofs(
         self,
         monkeypatch,
+        request,
     ):
         curve = CurveXYZFourier(16, 1)
         curve.x = np.array([0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9])
@@ -1426,6 +1427,7 @@ class TestAdjointSolveConsistency:
         )
         _assert_hidden_spec_fallback_warns(
             monkeypatch,
+            request,
             lambda: bs_jax.coil_set_spec_from_dofs(jnp.asarray(bs_jax.x)),
             api_name="coil_set_spec_from_dofs",
         )
@@ -1433,6 +1435,7 @@ class TestAdjointSolveConsistency:
     def test_non_strict_mode_warns_on_live_graph_spec_fallback_in_coil_set_spec(
         self,
         monkeypatch,
+        request,
     ):
         curve = CurveXYZFourier(16, 1)
         curve.x = np.array([0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9])
@@ -1450,6 +1453,7 @@ class TestAdjointSolveConsistency:
         )
         _assert_hidden_spec_fallback_warns(
             monkeypatch,
+            request,
             bs_jax.coil_set_spec,
             api_name="coil_set_spec",
         )
@@ -3998,3 +4002,326 @@ class TestTraceableObjective:
             )
         finally:
             _restore_state()
+
+
+# -----------------------------------------------------------------------
+# Test P15: Boozer residual direct CPU parity
+# -----------------------------------------------------------------------
+
+
+class TestBoozerResidualCPUParity:
+    """Direct comparison of JAX boozer_residual_scalar against the C++
+    sopp.boozer_residual at the same (surface, iota, G) state.
+
+    This test requires simsoptpp for the CPU reference.  Previously the JAX
+    Boozer residual was only validated via FD convergence; this class
+    establishes direct numerical parity with the C++ kernel.
+    """
+
+    @staticmethod
+    def _build_shared_state(seed=42):
+        """Build a shared (surface, coils, iota, G) state for parity evaluation.
+
+        Returns arrays that both CPU and JAX kernels can consume, ensuring
+        the comparison is at exactly the same numerical state.
+        """
+        np.random.seed(seed)
+
+        ncoils, nfp = 2, 2
+        stellsym = True
+        base_curves = create_equally_spaced_curves(
+            ncoils, nfp, stellsym=stellsym, R0=1.0, R1=0.5, order=3
+        )
+        base_currents = [Current(1e5) for _ in range(ncoils)]
+        for c in base_currents:
+            c.fix_all()
+        coils = coils_via_symmetries(base_curves, base_currents, nfp, stellsym)
+
+        mpol, ntor = 2, 2
+        nphi = 2 * ntor + 1
+        ntheta = 2 * mpol + 1
+        surf = SurfaceXYZTensorFourier(
+            mpol=mpol,
+            ntor=ntor,
+            stellsym=stellsym,
+            nfp=nfp,
+            quadpoints_phi=np.linspace(0, 1.0 / nfp, nphi, endpoint=False),
+            quadpoints_theta=np.linspace(0, 1.0, ntheta, endpoint=False),
+        )
+        surf.set_dofs(np.zeros_like(surf.get_dofs()))
+
+        # Fit to a simple RZ surface so the geometry is non-trivial
+        s_rz = SurfaceRZFourier(
+            nfp=nfp,
+            stellsym=stellsym,
+            mpol=1,
+            ntor=0,
+            quadpoints_phi=surf.quadpoints_phi,
+            quadpoints_theta=surf.quadpoints_theta,
+        )
+        s_rz.set_rc(0, 0, 1.0)
+        s_rz.set_rc(1, 0, 0.15)
+        s_rz.set_zs(1, 0, 0.15)
+        surf.least_squares_fit(s_rz.gamma())
+
+        # Add a small random perturbation so the residual is non-trivial
+        dofs = surf.get_dofs()
+        dofs += np.random.randn(len(dofs)) * 1e-4
+        surf.set_dofs(dofs)
+
+        mu0 = 4 * np.pi * 1e-7
+        G = mu0 * sum(abs(c.current.get_value()) for c in coils)
+        iota = 0.3
+
+        # Evaluate surface geometry and B-field via CPU objects
+        gamma = surf.gamma()
+        xphi = surf.gammadash1()
+        xtheta = surf.gammadash2()
+
+        bs_cpu = BiotSavart(coils)
+        xsemiflat = gamma.reshape(-1, 3)
+        bs_cpu.set_points(xsemiflat)
+        B = bs_cpu.B().reshape(gamma.shape)
+
+        return gamma, xphi, xtheta, B, iota, G, surf, coils, bs_cpu
+
+    def test_raw_boozer_residual_scalar_parity(self):
+        """JAX boozer_residual_scalar matches sopp.boozer_residual / num_res.
+
+        Compares the core Boozer residual scalar (without label or z
+        constraints) at a shared surface state with a small random
+        perturbation so the residual value is non-trivial.
+        """
+        from simsopt.geo.boozer_residual_jax import boozer_residual_scalar
+
+        gamma, xphi, xtheta, B, iota, G, surf, coils, bs_cpu = self._build_shared_state(
+            seed=42
+        )
+        nphi, ntheta, _ = B.shape
+        num_res = 3 * nphi * ntheta
+
+        # CPU: sopp.boozer_residual returns the raw half-sum-of-squares
+        val_cpu = sopp.boozer_residual(G, iota, xphi, xtheta, B, True)
+        val_cpu_normalized = val_cpu / num_res
+
+        # JAX: boozer_residual_scalar includes the / num_res normalization
+        val_jax = float(
+            boozer_residual_scalar(
+                G,
+                iota,
+                jnp.array(B),
+                jnp.array(xphi),
+                jnp.array(xtheta),
+                weight_inv_modB=True,
+            )
+        )
+
+        print(
+            f"Boozer residual scalar parity (weight_inv_modB=True):\n"
+            f"  CPU: {val_cpu_normalized:.15e}\n"
+            f"  JAX: {val_jax:.15e}\n"
+            f"  |diff|: {abs(val_cpu_normalized - val_jax):.3e}"
+        )
+
+        assert val_cpu_normalized > 1e-10, (
+            f"CPU residual unexpectedly tiny ({val_cpu_normalized:.3e}); "
+            "perturbation may not have taken effect"
+        )
+        np.testing.assert_allclose(
+            val_jax,
+            val_cpu_normalized,
+            rtol=1e-10,
+            err_msg="JAX boozer_residual_scalar does not match C++ sopp.boozer_residual",
+        )
+
+    def test_raw_boozer_residual_scalar_parity_no_weight(self):
+        """Same as above but with weight_inv_modB=False."""
+        from simsopt.geo.boozer_residual_jax import boozer_residual_scalar
+
+        gamma, xphi, xtheta, B, iota, G, surf, coils, bs_cpu = self._build_shared_state(
+            seed=43
+        )
+        nphi, ntheta, _ = B.shape
+        num_res = 3 * nphi * ntheta
+
+        val_cpu = sopp.boozer_residual(G, iota, xphi, xtheta, B, False)
+        val_cpu_normalized = val_cpu / num_res
+
+        val_jax = float(
+            boozer_residual_scalar(
+                G,
+                iota,
+                jnp.array(B),
+                jnp.array(xphi),
+                jnp.array(xtheta),
+                weight_inv_modB=False,
+            )
+        )
+
+        print(
+            f"Boozer residual scalar parity (weight_inv_modB=False):\n"
+            f"  CPU: {val_cpu_normalized:.15e}\n"
+            f"  JAX: {val_jax:.15e}\n"
+            f"  |diff|: {abs(val_cpu_normalized - val_jax):.3e}"
+        )
+
+        assert val_cpu_normalized > 1e-10, (
+            f"CPU residual unexpectedly tiny ({val_cpu_normalized:.3e})"
+        )
+        np.testing.assert_allclose(
+            val_jax,
+            val_cpu_normalized,
+            rtol=1e-10,
+            err_msg=(
+                "JAX boozer_residual_scalar (no weight) does not match "
+                "C++ sopp.boozer_residual"
+            ),
+        )
+
+    def test_boozer_residual_vector_parity(self):
+        """JAX boozer_residual_vector matches the component-wise C++ residual.
+
+        The C++ sopp.boozer_residual_ds with derivatives=0 only returns the
+        scalar, so we verify vector parity indirectly: the JAX vector's
+        squared norm (0.5 ||r||^2 / num_res) must equal the scalar from both
+        sides.
+        """
+        from simsopt.geo.boozer_residual_jax import (
+            boozer_residual_scalar,
+            boozer_residual_vector,
+        )
+
+        gamma, xphi, xtheta, B, iota, G, surf, coils, bs_cpu = self._build_shared_state(
+            seed=44
+        )
+        nphi, ntheta, _ = B.shape
+        num_res = 3 * nphi * ntheta
+
+        B_jax = jnp.array(B)
+        xphi_jax = jnp.array(xphi)
+        xtheta_jax = jnp.array(xtheta)
+
+        r_vec = boozer_residual_vector(
+            G, iota, B_jax, xphi_jax, xtheta_jax, weight_inv_modB=True
+        )
+        scalar_from_vec = float(0.5 * jnp.sum(r_vec**2) / num_res)
+
+        scalar_direct = float(
+            boozer_residual_scalar(
+                G, iota, B_jax, xphi_jax, xtheta_jax, weight_inv_modB=True
+            )
+        )
+
+        val_cpu = sopp.boozer_residual(G, iota, xphi, xtheta, B, True) / num_res
+
+        print(
+            f"Vector consistency:\n"
+            f"  0.5||r||^2/N from vector: {scalar_from_vec:.15e}\n"
+            f"  boozer_residual_scalar:    {scalar_direct:.15e}\n"
+            f"  sopp.boozer_residual/N:    {val_cpu:.15e}"
+        )
+
+        np.testing.assert_allclose(
+            scalar_from_vec,
+            scalar_direct,
+            rtol=1e-12,
+            err_msg="JAX vector norm disagrees with JAX scalar",
+        )
+        np.testing.assert_allclose(
+            scalar_from_vec,
+            val_cpu,
+            rtol=1e-10,
+            err_msg="JAX vector norm disagrees with C++ scalar",
+        )
+
+    def test_full_penalty_objective_parity(self):
+        """Full penalty objective (Boozer + label + z) matches CPU vs JAX.
+
+        Uses the same (surface, iota, G) state and compares the CPU
+        boozer_penalty_constraints_vectorized output against the JAX
+        _boozer_penalty_objective at the initial guess (no solving).
+        """
+        _gamma, _xphi, _xtheta, _B, iota0, _G, surf_cpu, coils_list, bs_cpu = (
+            self._build_shared_state(seed=45)
+        )
+
+        # Duplicate surface for JAX side
+        surf_jax = SurfaceXYZTensorFourier(
+            mpol=surf_cpu.mpol,
+            ntor=surf_cpu.ntor,
+            stellsym=surf_cpu.stellsym,
+            nfp=surf_cpu.nfp,
+            quadpoints_phi=surf_cpu.quadpoints_phi,
+            quadpoints_theta=surf_cpu.quadpoints_theta,
+        )
+        surf_jax.set_dofs(surf_cpu.get_dofs().copy())
+
+        bs_jax = BiotSavartJAX(coils_list)
+
+        vol_cpu = Volume(surf_cpu)
+        vol_jax = Volume(surf_jax)
+        vol_target = vol_cpu.J()
+
+        constraint_weight = 1.0
+
+        # CPU: evaluate full penalty via BoozerSurface
+        booz_cpu = BoozerSurface(
+            bs_cpu,
+            surf_cpu,
+            vol_cpu,
+            vol_target,
+            constraint_weight=constraint_weight,
+            options={"verbose": False},
+        )
+        x_cpu = np.concatenate((surf_cpu.get_dofs(), [iota0]))
+        val_cpu = booz_cpu.boozer_penalty_constraints_vectorized(
+            x_cpu,
+            derivatives=0,
+            constraint_weight=constraint_weight,
+            optimize_G=False,
+            weight_inv_modB=True,
+        )
+
+        # JAX: evaluate full penalty via _boozer_penalty_objective
+        booz_jax = BoozerSurfaceJAX(
+            bs_jax,
+            surf_jax,
+            vol_jax,
+            vol_target,
+            constraint_weight=constraint_weight,
+            options={
+                "verbose": False,
+                "weight_inv_modB": True,
+            },
+        )
+        coil_arrays = booz_jax._extract_coil_data_grouped()
+        obj_fn = _make_ls_penalty_objective(
+            booz_jax,
+            coil_arrays,
+            optimize_G=False,
+            weight_inv_modB=True,
+        )
+        x_jax = jnp.concatenate(
+            [
+                jnp.array(surf_jax.get_dofs()),
+                jnp.array([iota0]),
+            ]
+        )
+        val_jax = float(obj_fn(x_jax))
+
+        print(
+            f"Full penalty objective parity:\n"
+            f"  CPU: {val_cpu:.15e}\n"
+            f"  JAX: {val_jax:.15e}\n"
+            f"  |diff|: {abs(val_cpu - val_jax):.3e}"
+        )
+
+        np.testing.assert_allclose(
+            val_jax,
+            val_cpu,
+            rtol=1e-10,
+            err_msg=(
+                "Full JAX penalty objective does not match CPU "
+                "boozer_penalty_constraints_vectorized"
+            ),
+        )
