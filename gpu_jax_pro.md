@@ -12,7 +12,8 @@ Update as of 2026-04-01:
 * hot-path legacy objects now expose `to_spec()` where the adapter seam is
   stable (`CurveXYZFourier`, `CurveRZFourier`, `CurvePlanarFourier`,
   `CurveHelical`, `SurfaceRZFourier`, `CurrentBase`, `Coil`)
-* a narrow fixed-surface `SurfaceRZFourier` JAX hot path now exists
+* the `SurfaceRZFourier` JAX path now covers the broader geometry/derivative
+  contract beyond the original fixed-surface hot path
 * grouped forward-field compatibility paths now route through `jax_core`
 * the grouped forward field path now has a first chunked point-axis reduction
   implementation in `jax_core.field`
@@ -1195,10 +1196,10 @@ That mismatch is too wide.
 
    * narrow `BiotSavartJAX` and `BoozerSurfaceJAX` to façade roles
 
-4. **SurfaceRZFourier broadening beyond the current hot path**
+4. **SurfaceRZFourier consumer migration**
 
-   * extend coverage beyond the landed Stage 2 / single-stage derivative
-     contracts
+   * keep downstream callers on the landed JAX geometry/derivative contract
+   * only broaden new consumers where parity coverage exists
 
 5. **Traceable path promotion**
 
