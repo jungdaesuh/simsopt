@@ -251,6 +251,14 @@ Add these runtime safeguards:
 * profiling and device-memory profiling as part of benchmark runs
 * buffer donation on large solver-state arrays once kernels stabilize ([JAX Documentation][8])
 
+Status in the current Columbia JAX tree:
+
+* parity modes now keep x64 as a hard runtime requirement
+* parity modes default transfer guard to `log`
+* a dedicated CPU `jax_debug_nans` guardrail lane exists in `jax_smoke.yml`
+* subprocess smoke coverage now checks a practical transfer-guard rejection case
+  at a jitted NumPy-to-JAX boundary
+
 ## 6) How the JAX backend surpasses native Simsopt
 
 It will beat the native path only if you exploit what JAX does better than “Python calling C++”:
@@ -476,7 +484,8 @@ I did not see `checkify` wired into the main path here. I would add:
 * transfer guard in test/probe runs,
 * persistent compilation cache for parity/proof environments.
 
-That will improve reliability faster than another round of benchmark scripts.
+The `jax_debug_nans` lane and transfer-guard/x64 guardrails are now in place; the
+remaining runtime-safeguard gap here is mostly `checkify`.
 
 ## My summary judgment
 
