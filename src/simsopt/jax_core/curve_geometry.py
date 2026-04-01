@@ -138,3 +138,28 @@ def curve_gammadashdash_from_dofs(spec: CurveSpec, dofs):
         (quadpoints,),
         (quadpoint_tangents,),
     )[1]
+
+
+def curve_gamma_and_dash_from_spec(spec: CurveSpec):
+    return curve_gamma_and_dash_from_dofs(spec, spec.dofs)
+
+
+def curve_gamma_and_dash_from_dofs(spec: CurveSpec, dofs):
+    """Return (gamma, gammadash) from a single kernel build and JVP call."""
+    gamma_kernel = _curve_gamma_kernel(spec, dofs)
+    quadpoints, tangents = _curve_quadpoints(spec)
+    return jax.jvp(gamma_kernel, (quadpoints,), (tangents,))
+
+
+def curve_geometry_from_spec(spec: CurveSpec):
+    return curve_geometry_from_dofs(spec, spec.dofs)
+
+
+def curve_geometry_from_dofs(spec: CurveSpec, dofs):
+    """Return (gamma, gammadash, gammadashdash) from a single kernel build."""
+    gamma_kernel = _curve_gamma_kernel(spec, dofs)
+    quadpoints, tangents = _curve_quadpoints(spec)
+    gamma, gammadash = jax.jvp(gamma_kernel, (quadpoints,), (tangents,))
+    gammadash_kernel = lambda qp: jax.jvp(gamma_kernel, (qp,), (tangents,))[1]
+    _, gammadashdash = jax.jvp(gammadash_kernel, (quadpoints,), (tangents,))
+    return gamma, gammadash, gammadashdash

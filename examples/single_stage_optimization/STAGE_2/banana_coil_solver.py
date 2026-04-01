@@ -1006,31 +1006,27 @@ def profile_stage2_explicit_step(
 
 def resolve_stage2_optimizer_method(field_backend, optimizer_backend):
     """Resolve the shared optimizer substrate for the Stage 2 outer loop."""
-    from simsopt.geo.optimizer_jax import (
-        require_target_backend_x64,
-        VALID_OPTIMIZER_BACKENDS,
-    )
+    return _resolve_stage2_optimizer_contract(field_backend, optimizer_backend).method
 
-    if optimizer_backend not in VALID_OPTIMIZER_BACKENDS:
-        raise ValueError("optimizer_backend must be one of: scipy, hybrid, ondevice.")
-    if field_backend != "jax" and optimizer_backend != "scipy":
-        raise ValueError(
-            "Stage 2 CPU/reference lane only supports optimizer_backend='scipy'."
-        )
-    if optimizer_backend == "scipy":
-        return "lbfgs"
-    if optimizer_backend == "hybrid":
-        raise ValueError(
-            "optimizer_backend='hybrid' is transitional and not supported for "
-            "the Stage 2 outer loop."
-        )
-    require_target_backend_x64(optimizer_backend)
-    return "lbfgs-ondevice"
+
+def _resolve_stage2_optimizer_contract(field_backend, optimizer_backend):
+    """Resolve the optimizer contract for the Stage 2 outer loop."""
+    from simsopt.geo.optimizer_jax import resolve_continuous_optimizer_contract
+
+    return resolve_continuous_optimizer_contract(
+        field_backend,
+        optimizer_backend,
+        limited_memory=True,
+        allow_hybrid=False,
+        component_label="the Stage 2 outer loop",
+    )
 
 
 def should_build_stage2_target_objective(field_backend, optimizer_backend):
     """Return whether the scalar JAX Stage 2 objective should drive optimization."""
-    return field_backend == "jax" and optimizer_backend == "ondevice"
+    return _resolve_stage2_optimizer_contract(
+        field_backend, optimizer_backend
+    ).use_scalar_objective
 
 
 def validate_stage2_target_objective_dof_layout(
@@ -1066,31 +1062,27 @@ def run_stage2_optimizer(
     """Run the Stage 2 outer optimization through the shared optimizer substrate."""
     from simsopt.geo.optimizer_jax import jax_minimize
 
-    method = resolve_stage2_optimizer_method(field_backend, optimizer_backend)
-    use_scalar_objective = should_build_stage2_target_objective(
-        field_backend,
-        optimizer_backend,
-    )
-    if use_scalar_objective and scalar_fun is None:
+    contract = _resolve_stage2_optimizer_contract(field_backend, optimizer_backend)
+    if contract.use_scalar_objective and scalar_fun is None:
         raise RuntimeError(
             "Stage 2 target-lane optimization requires a scalar JAX objective."
         )
-    if (not use_scalar_objective) and value_and_grad_fun is None:
+    if (not contract.use_scalar_objective) and value_and_grad_fun is None:
         raise RuntimeError(
             "Stage 2 reference-lane optimization requires an explicit "
             "value-and-gradient objective."
         )
     return jax_minimize(
-        scalar_fun if use_scalar_objective else value_and_grad_fun,
+        scalar_fun if contract.use_scalar_objective else value_and_grad_fun,
         dofs,
-        method=method,
+        method=contract.method,
         tol=gtol,
         maxiter=maxiter,
         options={
             "maxcor": int(maxcor),
             "ftol": float(ftol),
         },
-        value_and_grad=not use_scalar_objective,
+        value_and_grad=not contract.use_scalar_objective,
     )
 
 
@@ -1406,6 +1398,7 @@ if __name__ == "__main__":
     )
     from simsopt.objectives import SquaredFlux, QuadraticPenalty
     from simsopt.objectives.stage2_target_objective_jax import (
+        Stage2PenaltyConfig,
         build_stage2_target_objective,
     )
     from plotting_utils import (
@@ -1579,14 +1572,16 @@ if __name__ == "__main__":
             tf_coils=tf_coils,
             banana_coils=new_banana_coils,
             banana_curve=new_banana_curve,
-            squared_flux_weight=SQUARED_FLUX_WEIGHT,
-            length_weight=LENGTH_WEIGHT,
-            length_target=LENGTH_TARGET,
-            cc_weight=CC_WEIGHT,
-            cc_threshold=CC_THRESHOLD,
-            curvature_weight=CURVATURE_WEIGHT,
-            curvature_threshold=CURVATURE_THRESHOLD,
-            curvature_p_norm=args.curvature_p_norm,
+            penalty_config=Stage2PenaltyConfig(
+                squared_flux_weight=SQUARED_FLUX_WEIGHT,
+                length_weight=LENGTH_WEIGHT,
+                length_target=LENGTH_TARGET,
+                cc_weight=CC_WEIGHT,
+                cc_threshold=CC_THRESHOLD,
+                curvature_weight=CURVATURE_WEIGHT,
+                curvature_threshold=CURVATURE_THRESHOLD,
+                curvature_p_norm=args.curvature_p_norm,
+            ),
         )
         validate_stage2_target_objective_dof_layout(
             target_objective_bundle,

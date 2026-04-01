@@ -12,8 +12,13 @@ from .biotsavart import (
     biot_savart_dB_by_dX,
     group_coil_data,
 )
-from .curve_geometry import curve_gamma_from_spec, curve_gammadash_from_spec
-from .specs import CoilSpec, GroupedCoilSetSpec, apply_coil_symmetry, make_grouped_coil_set_spec
+from .curve_geometry import curve_gamma_and_dash_from_spec
+from .specs import (
+    CoilSpec,
+    GroupedCoilSetSpec,
+    apply_coil_symmetry,
+    make_grouped_coil_set_spec,
+)
 
 
 def _empty_grouped_field_result(points: object, kernel):
@@ -68,10 +73,12 @@ def grouped_coil_set_spec_from_coil_specs(
     gammadashs = []
     currents = []
     for coil_spec in coil_specs:
-        gamma = curve_gamma_from_spec(coil_spec.curve)
-        gammadash = curve_gammadash_from_spec(coil_spec.curve)
+        gamma, gammadash = curve_gamma_and_dash_from_spec(coil_spec.curve)
         gamma, gammadash, current = apply_coil_symmetry(
-            gamma, gammadash, coil_spec.current.value[0], coil_spec.symmetry,
+            gamma,
+            gammadash,
+            coil_spec.current.value[0],
+            coil_spec.symmetry,
         )
         gammas.append(gamma)
         gammadashs.append(gammadash)

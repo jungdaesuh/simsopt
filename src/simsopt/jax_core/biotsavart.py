@@ -251,7 +251,17 @@ def _biot_savart_A_integrand(x, gammas, gammadashs):
 # ── Dense one-point kernels ──────────────────────────────────────────
 
 
-_INTEGRANDS = {"B": _biot_savart_B_integrand, "A": _biot_savart_A_integrand}
+_INTEGRAND_B = "B"
+_INTEGRAND_A = "A"
+
+_DIFF_VALUE = "value"
+_DIFF_JACOBIAN = "jacobian"
+_DIFF_VALUE_AND_JACOBIAN = "value_and_jacobian"
+
+_INTEGRANDS = {
+    _INTEGRAND_B: _biot_savart_B_integrand,
+    _INTEGRAND_A: _biot_savart_A_integrand,
+}
 
 
 def _one_point_dense(
@@ -270,7 +280,7 @@ def _one_point_dense(
 # ── Kernel factory ────────────────────────────────────────────────────
 
 
-@lru_cache(maxsize=32)
+@lru_cache(maxsize=16)
 def _make_kernel(integrand_key, diff_mode, coil_cs, quad_bs, point_cs):
     """Build and JIT-compile a Biot-Savart kernel for the given tuning config.
 
@@ -305,9 +315,9 @@ def _make_kernel(integrand_key, diff_mode, coil_cs, quad_bs, point_cs):
             ),
         )
 
-    if diff_mode == "value":
+    if diff_mode == _DIFF_VALUE:
         per_point = one_point
-    elif diff_mode == "jacobian":
+    elif diff_mode == _DIFF_JACOBIAN:
 
         def per_point(x, gammas, gammadashs, currents):
             return jnp.swapaxes(
@@ -316,7 +326,7 @@ def _make_kernel(integrand_key, diff_mode, coil_cs, quad_bs, point_cs):
                 -2,
             )
 
-    elif diff_mode == "value_and_jacobian":
+    elif diff_mode == _DIFF_VALUE_AND_JACOBIAN:
 
         def per_point(x, gammas, gammadashs, currents):
             f = lambda xx: one_point(xx, gammas, gammadashs, currents)
@@ -338,18 +348,26 @@ def _make_kernel(integrand_key, diff_mode, coil_cs, quad_bs, point_cs):
     return kernel
 
 
+_cached_tuning: tuple | None = None
+
+
 def _get_kernel(integrand_key, diff_mode):
     """Read tuning config and return the cached JIT-compiled kernel."""
-    coil_cs, quad_bs, point_cs = _read_tuning_config()
+    global _cached_tuning
+    if _cached_tuning is None:
+        _cached_tuning = _read_tuning_config()
+    coil_cs, quad_bs, point_cs = _cached_tuning
     return _make_kernel(integrand_key, diff_mode, coil_cs, quad_bs, point_cs)
 
 
 def invalidate_kernel_cache() -> None:
-    """Drop all cached JIT-compiled Biot-Savart kernels.
+    """Drop all cached JIT-compiled Biot-Savart kernels and tuning config.
 
     Call after overriding ``_read_tuning_config`` (e.g. via ``monkeypatch``)
     to ensure the next ``biot_savart_*`` call rebuilds with the new config.
     """
+    global _cached_tuning
+    _cached_tuning = None
     _make_kernel.cache_clear()
 
 
@@ -357,23 +375,29 @@ def invalidate_kernel_cache() -> None:
 
 
 def biot_savart_B(points, gammas, gammadashs, currents):
-    return _get_kernel("B", "value")(points, gammas, gammadashs, currents)
+    return _get_kernel(_INTEGRAND_B, _DIFF_VALUE)(points, gammas, gammadashs, currents)
 
 
 def biot_savart_dB_by_dX(points, gammas, gammadashs, currents):
-    return _get_kernel("B", "jacobian")(points, gammas, gammadashs, currents)
+    return _get_kernel(_INTEGRAND_B, _DIFF_JACOBIAN)(
+        points, gammas, gammadashs, currents
+    )
 
 
 def biot_savart_B_and_dB(points, gammas, gammadashs, currents):
-    return _get_kernel("B", "value_and_jacobian")(points, gammas, gammadashs, currents)
+    return _get_kernel(_INTEGRAND_B, _DIFF_VALUE_AND_JACOBIAN)(
+        points, gammas, gammadashs, currents
+    )
 
 
 def biot_savart_A(points, gammas, gammadashs, currents):
-    return _get_kernel("A", "value")(points, gammas, gammadashs, currents)
+    return _get_kernel(_INTEGRAND_A, _DIFF_VALUE)(points, gammas, gammadashs, currents)
 
 
 def biot_savart_dA_by_dX(points, gammas, gammadashs, currents):
-    return _get_kernel("A", "jacobian")(points, gammas, gammadashs, currents)
+    return _get_kernel(_INTEGRAND_A, _DIFF_JACOBIAN)(
+        points, gammas, gammadashs, currents
+    )
 
 
 @jax.jit

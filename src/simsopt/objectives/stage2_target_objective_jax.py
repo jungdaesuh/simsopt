@@ -15,9 +15,7 @@ from ..jax_core.field import (
 )
 from ..jax_core import (
     apply_coil_symmetry,
-    curve_gamma_from_dofs,
-    curve_gammadash_from_dofs,
-    curve_gammadashdash_from_dofs,
+    curve_geometry_from_dofs,
     curve_spec_from_curve,
     make_coil_symmetry_spec,
 )
@@ -32,6 +30,7 @@ from ..geo.curveobjectives import (
 )
 
 __all__ = [
+    "Stage2PenaltyConfig",
     "Stage2TargetObjectiveBundle",
     "Stage2TargetObjectiveTerm",
     "build_stage2_target_objective",
@@ -43,6 +42,18 @@ Stage2ObjectiveFn = Callable[[jnp.ndarray], jnp.ndarray]
 class Stage2TargetObjectiveTerm(NamedTuple):
     name: str
     weight: float
+
+
+class Stage2PenaltyConfig(NamedTuple):
+    squared_flux_weight: float
+    length_weight: float
+    length_target: float
+    cc_weight: float
+    cc_threshold: float
+    curvature_weight: float
+    curvature_threshold: float
+    curvature_p_norm: float
+    squared_flux_definition: str = "quadratic flux"
 
 
 class Stage2TargetObjectiveBundle(NamedTuple):
@@ -85,7 +96,10 @@ def _build_dynamic_curve_data(
     dynamic_currents = []
     for symmetry_spec in banana_symmetry_specs:
         gamma, gammadash, current = apply_coil_symmetry(
-            base_gamma, base_gammadash, current_dof, symmetry_spec,
+            base_gamma,
+            base_gammadash,
+            current_dof,
+            symmetry_spec,
         )
         dynamic_gammas.append(gamma)
         dynamic_gammadashs.append(gammadash)
@@ -131,24 +145,24 @@ def build_stage2_target_objective(
     tf_coils,
     banana_coils,
     banana_curve,
-    squared_flux_weight,
-    length_weight,
-    length_target,
-    cc_weight,
-    cc_threshold,
-    curvature_weight,
-    curvature_threshold,
-    curvature_p_norm,
-    squared_flux_definition="quadratic flux",
+    penalty_config: Stage2PenaltyConfig,
 ):
     """Build a scalar JAX objective for the target Stage 2 lane.
 
     The returned callable consumes the Stage 2 free-vector in the same order as
     the existing composite objective contract: ``[banana_current, curve_dofs...]``.
     """
+    squared_flux_weight = penalty_config.squared_flux_weight
+    length_weight = penalty_config.length_weight
+    length_target = penalty_config.length_target
+    cc_weight = penalty_config.cc_weight
+    cc_threshold = penalty_config.cc_threshold
+    curvature_weight = penalty_config.curvature_weight
+    curvature_threshold = penalty_config.curvature_threshold
+
     field_eval_spec, flux_spec = fixed_surface_flux_specs_from_surface(
         surface,
-        definition=squared_flux_definition,
+        definition=penalty_config.squared_flux_definition,
     )
     del field_eval_spec
     points = flux_spec.points
@@ -182,9 +196,7 @@ def build_stage2_target_objective(
         current_dof = dofs[0]
         curve_dofs = dofs[1 : 1 + curve_dof_count]
 
-        base_gamma = curve_gamma_from_dofs(banana_curve_spec, curve_dofs)
-        base_gammadash = curve_gammadash_from_dofs(banana_curve_spec, curve_dofs)
-        base_gammadashdash = curve_gammadashdash_from_dofs(
+        base_gamma, base_gammadash, base_gammadashdash = curve_geometry_from_dofs(
             banana_curve_spec,
             curve_dofs,
         )

@@ -1,12 +1,16 @@
 """Pure JAX kernel-layer specs and helpers."""
 
 from .curve_geometry import (
+    curve_gamma_and_dash_from_dofs,
+    curve_gamma_and_dash_from_spec,
     curve_gamma_from_dofs,
     curve_gamma_from_spec,
     curve_gammadash_from_dofs,
     curve_gammadash_from_spec,
     curve_gammadashdash_from_dofs,
     curve_gammadashdash_from_spec,
+    curve_geometry_from_dofs,
+    curve_geometry_from_spec,
     curve_spec_from_curve,
     curve_spec_with_dofs,
 )
@@ -104,12 +108,16 @@ __all__ = [
     "GroupedCoilSetSpec",
     "SurfaceRZFourierSpec",
     "build_fourier_basis",
+    "curve_gamma_and_dash_from_dofs",
+    "curve_gamma_and_dash_from_spec",
     "curve_gamma_from_dofs",
     "curve_gamma_from_spec",
     "curve_gammadash_from_dofs",
     "curve_gammadash_from_spec",
     "curve_gammadashdash_from_dofs",
     "curve_gammadashdash_from_spec",
+    "curve_geometry_from_dofs",
+    "curve_geometry_from_spec",
     "curve_spec_from_curve",
     "curve_spec_with_dofs",
     "biot_savart_A",

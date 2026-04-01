@@ -23,6 +23,8 @@ well; both paths use public JAX APIs.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import numpy as np
 
 import jax
@@ -34,6 +36,7 @@ from scipy.optimize import minimize as scipy_minimize
 from ..backend import raise_if_strict_jax_fallback
 
 __all__ = [
+    "ContinuousOptimizerContract",
     "PRIVATE_OPTIMIZER_JAX_VERSION",
     "VALID_OPTIMIZER_BACKENDS",
     "TARGET_X64_REQUIRED_OPTIMIZER_BACKENDS",
@@ -43,7 +46,9 @@ __all__ = [
     "newton_exact",
     "newton_exact_traceable",
     "require_target_backend_x64",
+    "resolve_continuous_optimizer_contract",
     "resolve_optimizer_backend_method",
+    "resolve_outer_loop_optimizer_contract",
 ]
 
 
@@ -68,6 +73,12 @@ _STRICT_EXPLICIT_VALUE_GRAD_DETAIL = (
     "the explicit host-loop value-and-gradient optimizer fallback"
 )
 _STRICT_HYBRID_OPTIMIZER_DETAIL = "the transitional SciPy-prefix hybrid optimizer lane"
+
+
+@dataclass(frozen=True)
+class ContinuousOptimizerContract:
+    method: str
+    use_scalar_objective: bool
 
 
 def _raise_if_strict_optimizer_fallback(*, method: str, detail: str) -> None:
@@ -158,6 +169,63 @@ def require_target_backend_x64(optimizer_backend):
     )
 
 
+def resolve_continuous_optimizer_contract(
+    field_backend,
+    optimizer_backend,
+    *,
+    limited_memory,
+    allow_hybrid,
+    component_label,
+):
+    """Resolve the shared continuous-optimizer route for outer solve lanes."""
+    if optimizer_backend not in VALID_OPTIMIZER_BACKENDS:
+        raise ValueError("optimizer_backend must be one of: scipy, hybrid, ondevice.")
+    if field_backend != "jax" and optimizer_backend != "scipy":
+        raise ValueError(
+            f"{component_label} CPU/reference lane only supports "
+            "optimizer_backend='scipy'."
+        )
+    if optimizer_backend == "hybrid":
+        if not allow_hybrid:
+            raise ValueError(
+                "optimizer_backend='hybrid' is transitional and not supported for "
+                f"{component_label}."
+            )
+        limited_memory = False
+    if (
+        field_backend == "jax"
+        and optimizer_backend in TARGET_X64_REQUIRED_OPTIMIZER_BACKENDS
+    ):
+        require_target_backend_x64(optimizer_backend)
+    return ContinuousOptimizerContract(
+        method=resolve_optimizer_backend_method(
+            optimizer_backend,
+            limited_memory=limited_memory,
+        ),
+        use_scalar_objective=field_backend == "jax" and optimizer_backend == "ondevice",
+    )
+
+
+def resolve_outer_loop_optimizer_contract(
+    field_backend,
+    optimizer_backend,
+    *,
+    component_label,
+):
+    """Resolve the optimizer contract for an outer optimization loop.
+
+    Shared by both Stage 2 and single-stage outer loops, which use
+    ``limited_memory=True`` and ``allow_hybrid=False``.
+    """
+    return resolve_continuous_optimizer_contract(
+        field_backend,
+        optimizer_backend,
+        limited_memory=True,
+        allow_hybrid=False,
+        component_label=component_label,
+    )
+
+
 # ---------------------------------------------------------------------------
 # SciPy adapter helpers
 # ---------------------------------------------------------------------------
@@ -192,14 +260,7 @@ def _normalize_scipy_result(result):
     return result
 
 
-def _scipy_minimize(fun, x0, *, method, tol, maxiter, options):
-    val_and_grad_fn = jax.jit(jax.value_and_grad(fun))
-
-    def scipy_fun(x_np):
-        x_jax = jnp.asarray(x_np)
-        val, grad = val_and_grad_fn(x_jax)
-        return float(val), np.asarray(grad)
-
+def _scipy_dispatch(scipy_fun, x0, *, method, tol, maxiter, options):
     stripped_options = _strip_internal_options(options, method)
     if method == "bfgs":
         scipy_method = "BFGS"
@@ -212,7 +273,6 @@ def _scipy_minimize(fun, x0, *, method, tol, maxiter, options):
             "maxcor": 200,
             **stripped_options,
         }
-
     return _normalize_scipy_result(
         scipy_minimize(
             scipy_fun,
@@ -225,33 +285,26 @@ def _scipy_minimize(fun, x0, *, method, tol, maxiter, options):
     )
 
 
+def _scipy_minimize(fun, x0, *, method, tol, maxiter, options):
+    val_and_grad_fn = jax.jit(jax.value_and_grad(fun))
+
+    def scipy_fun(x_np):
+        x_jax = jnp.asarray(x_np)
+        val, grad = val_and_grad_fn(x_jax)
+        return float(val), np.asarray(grad)
+
+    return _scipy_dispatch(
+        scipy_fun, x0, method=method, tol=tol, maxiter=maxiter, options=options
+    )
+
+
 def _scipy_minimize_value_and_grad(fun, x0, *, method, tol, maxiter, options):
     def scipy_fun(x_np):
         val, grad = fun(np.asarray(x_np))
         return float(val), np.asarray(grad, dtype=float)
 
-    stripped_options = _strip_internal_options(options, method)
-    if method == "bfgs":
-        scipy_method = "BFGS"
-        scipy_opts = {"maxiter": maxiter, "gtol": tol, **stripped_options}
-    else:
-        scipy_method = "L-BFGS-B"
-        scipy_opts = {
-            "maxiter": maxiter,
-            "gtol": tol,
-            "maxcor": 200,
-            **stripped_options,
-        }
-
-    return _normalize_scipy_result(
-        scipy_minimize(
-            scipy_fun,
-            np.asarray(x0),
-            jac=True,
-            method=scipy_method,
-            options=scipy_opts,
-            callback=options.get("callback"),
-        )
+    return _scipy_dispatch(
+        scipy_fun, x0, method=method, tol=tol, maxiter=maxiter, options=options
     )
 
 
