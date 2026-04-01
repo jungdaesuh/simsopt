@@ -263,6 +263,54 @@ def _optimizable_local_full_dofs_from_full_dofs(owner, opt, owner_dofs):
     return owner_dofs[start:end]
 
 
+def _optimizable_dof_map_components(owner, opt):
+    """Return immutable mapping metadata from an owner's full DOFs into ``opt``."""
+    template_full_dofs = jnp.asarray(opt.full_x, dtype=jnp.float64)
+    owner_segments = tuple(
+        (
+            int(owner._full_dof_indices[dep_opt][0]),
+            int(owner._full_dof_indices[dep_opt][1]),
+            int(sub_start),
+            int(sub_end),
+        )
+        for dep_opt, (sub_start, sub_end) in opt._full_dof_indices.items()
+    )
+    if _curve_uses_full_dofs(opt):
+        input_mode = "full"
+        input_start = 0
+        input_end = int(template_full_dofs.shape[0])
+    else:
+        input_mode = "local"
+        input_start, input_end = opt._full_dof_indices[opt]
+    return (
+        template_full_dofs,
+        owner_segments,
+        input_mode,
+        int(input_start),
+        int(input_end),
+    )
+
+
+def _optimizable_dof_map_spec(owner, opt):
+    """Build the immutable owner-to-optimizable DOF map spec for ``opt``."""
+    from ..jax_core import make_optimizable_dof_map_spec
+
+    (
+        template_full_dofs,
+        owner_segments,
+        input_mode,
+        input_start,
+        input_end,
+    ) = _optimizable_dof_map_components(owner, opt)
+    return make_optimizable_dof_map_spec(
+        template_full_dofs=template_full_dofs,
+        owner_segments=owner_segments,
+        input_mode=input_mode,
+        input_start=input_start,
+        input_end=input_end,
+    )
+
+
 def _curve_jax_eval_from_arg(curve, method_name, curve_dofs, surf_dofs=None):
     """Evaluate a curve JAX method for either local-DOF or surface-coupled curves."""
     curve_dofs = jnp.asarray(curve_dofs, dtype=jnp.float64)
@@ -1864,7 +1912,7 @@ class CurveCWSFourier(Curve, sopp.Curve):
                 self.surf.mpol,
                 self.surf.ntor,
                 self.surf.nfp,
-                self.surf.gamma_lin,
+                self.surf.stellsym,
             )
         )
         self.gamma_pure = jit(
@@ -1879,7 +1927,7 @@ class CurveCWSFourier(Curve, sopp.Curve):
                 self.surf.mpol,
                 self.surf.ntor,
                 self.surf.nfp,
-                self.surf.gamma_lin,
+                self.surf.stellsym,
             )
         )
 
@@ -2158,12 +2206,14 @@ class CurveCWSFourier(Curve, sopp.Curve):
         sdofs = self.surf.get_dofs()
         gamma[:, :] = self.gamma_impl_jax(self.get_dofs(), sdofs, quadpoints)
 
+    def _curve_and_surface_derivative(self, curve_term, surface_term):
+        return Derivative({self: curve_term, self.surf: surface_term})
+
     def dgamma_by_dcoeff_vjp(self, v):
-        return Derivative({self: self.dgamma_by_dcoeff_vjp_impl(v)})
-        # return Derivative({
-        #    self: self.dgamma_by_dcoeff_vjp_impl(v),
-        #    self.surf: self.dgamma_by_dsurf_vjp_impl(v)
-        #    })
+        return self._curve_and_surface_derivative(
+            self.dgamma_by_dcoeff_vjp_impl(v),
+            self.dgamma_by_dsurf_vjp_impl(v),
+        )
 
     def dgamma_by_dcoeff_impl(self, v):
         r"""
@@ -2217,11 +2267,10 @@ class CurveCWSFourier(Curve, sopp.Curve):
     # GAMMA DASH
     # ==========
     def dgammadash_by_dcoeff_vjp(self, v):
-        return Derivative({self: self.dgammadash_by_dcoeff_vjp_impl(v)})
-        # return Derivative({
-        #     self: self.dgammadash_by_dcoeff_vjp_impl(v),
-        #     self.surf: self.dgammadash_by_dsurf_vjp_impl(v)
-        #     })
+        return self._curve_and_surface_derivative(
+            self.dgammadash_by_dcoeff_vjp_impl(v),
+            self.dgammadash_by_dsurf_vjp_impl(v),
+        )
 
     def gammadash_impl(self, v):
         r"""
@@ -2286,11 +2335,10 @@ class CurveCWSFourier(Curve, sopp.Curve):
     # GAMMA DASH DASH
     # ===============
     def dgammadashdash_by_dcoeff_vjp(self, v):
-        return Derivative({self: self.dgammadashdash_by_dcoeff_vjp_impl(v)})
-        # return Derivative({
-        #     self: self.dgammadashdash_by_dcoeff_vjp_impl(v),
-        #     self.surf: self.dgammadashdash_by_dsurf_vjp_impl(v)
-        #     })
+        return self._curve_and_surface_derivative(
+            self.dgammadashdash_by_dcoeff_vjp_impl(v),
+            self.dgammadashdash_by_dsurf_vjp_impl(v),
+        )
 
     def gammadashdash_impl(self, v):
         r"""
@@ -2356,11 +2404,10 @@ class CurveCWSFourier(Curve, sopp.Curve):
     # GAMMA DASH DASH DASH
     # ====================
     def dgammadashdashdash_by_dcoeff_vjp(self, v):
-        return Derivative({self: self.dgammadashdashdash_by_dcoeff_vjp_impl(v)})
-        # return Derivative({
-        #     self: self.dgammadashdashdash_by_dcoeff_vjp_impl(v),
-        #     self.surf: self.dgammadashdashdash_by_dsurf_vjp_jax_impl(v)
-        #     })
+        return self._curve_and_surface_derivative(
+            self.dgammadashdashdash_by_dcoeff_vjp_impl(v),
+            self.dgammadashdashdash_by_dsurf_vjp_impl(v),
+        )
 
     def gammadashdashdash_impl(self, v):
         r"""
@@ -2436,15 +2483,9 @@ class CurveCWSFourier(Curve, sopp.Curve):
         where :math:`\mathbf{c}` are the curve dofs and :math:`\kappa` is the curvature.
 
         """
-        return Derivative(
-            {
-                self: self.dkappa_by_dcoeff_vjp_jax(
-                    self.get_dofs(), self.surf.get_dofs(), v
-                ),
-                self.surf: self.dkappa_by_dsurf_vjp_jax(
-                    self.get_dofs(), self.surf.get_dofs(), v
-                ),
-            }
+        return self._curve_and_surface_derivative(
+            self.dkappa_by_dcoeff_vjp_jax(self.get_dofs(), self.surf.get_dofs(), v),
+            self.dkappa_by_dsurf_vjp_jax(self.get_dofs(), self.surf.get_dofs(), v),
         )
         # return Derivative({
         #     self: self.dkappa_by_dcoeff_vjp_jax(self.get_dofs(), v),
@@ -2464,11 +2505,10 @@ class CurveCWSFourier(Curve, sopp.Curve):
 
         """
 
-        return Derivative({self: self.dtorsion_by_dcoeff_vjp_jax(self.get_dofs(), v)})
-        # return Derivative({
-        #     self: self.dtorsion_by_dcoeff_vjp_jax(self.get_dofs(), v),
-        #     self.surf: self.dtorsion_by_dsurf_vjp_jax(self.surf.get_dofs(), v)
-        #     })
+        return self._curve_and_surface_derivative(
+            self.dtorsion_by_dcoeff_vjp_jax(self.get_dofs(), self.surf.get_dofs(), v),
+            self.dtorsion_by_dsurf_vjp_jax(self.get_dofs(), self.surf.get_dofs(), v),
+        )
 
     # NORMAL COMPONENTS
     def zfactor(self):

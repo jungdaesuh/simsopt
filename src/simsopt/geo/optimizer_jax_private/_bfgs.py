@@ -117,10 +117,7 @@ def _minimize_bfgs_private(
             jnp.asarray(1.0, dtype=state.x_k.dtype),
             _norm(state.x_k),
         )
-        stalled_step = (
-            (~converged)
-            & (_norm(s_k) <= step_tol)
-        )
+        stalled_step = (~converged) & (_norm(s_k) <= step_tol)
         nonfinite_step = (~jnp.isfinite(f_kp1)) | (~jnp.all(jnp.isfinite(g_kp1)))
         failure_line_search_status = jnp.where(
             line_search_results.failed,
@@ -135,14 +132,11 @@ def _minimize_bfgs_private(
         def nonfinite_step_result(_):
             return state._replace(
                 converged=False,
-                failed=False,
+                failed=True,
                 k=next_k,
                 nfev=next_nfev,
                 ngev=next_ngev,
-                x_k=x_kp1,
-                f_k=f_kp1,
-                g_k=g_kp1,
-                line_search_status=line_search_results.status,
+                line_search_status=failure_line_search_status,
             )
 
         def failed_step(_):

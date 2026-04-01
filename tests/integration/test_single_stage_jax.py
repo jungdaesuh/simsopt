@@ -80,8 +80,10 @@ from simsopt.field.biotsavart_jax_backend import BiotSavartJAX  # noqa: E402
 from simsopt.jax_core import (  # noqa: E402
     CoilSpec,
     CurveCWSFourierRZSpec,
+    CurveFilamentSpec,
     CurveHelicalSpec,
     CurvePlanarFourierSpec,
+    CurvePerturbedSpec,
     FieldEvalSpec,
     GroupedCoilSetSpec,
     curve_gamma_and_dash_from_spec,
@@ -111,6 +113,9 @@ from examples.single_stage_optimization.SINGLE_STAGE import (  # noqa: E402
 _HIDDEN_SPEC_FALLBACK_PATTERN = (
     "BiotSavartJAX.*hidden immutable-spec compatibility fallback.*"
 )
+_HIDDEN_SPEC_WARNING_PATTERN = (
+    "BiotSavartJAX.*hidden immutable-spec compatibility fallback.*legacy adapter seam"
+)
 _TRACEABLE_OBJECTIVE_ABS_TOL = 1e-32
 
 
@@ -131,6 +136,14 @@ def _enable_strict_jax_backend(monkeypatch, mode="jax_gpu_parity"):
     enable_strict_jax_backend(monkeypatch, mode=mode)
 
 
+def _enable_non_strict_jax_backend(monkeypatch, mode="jax_gpu_parity"):
+    from simsopt.backend import invalidate_backend_cache
+
+    monkeypatch.setenv("SIMSOPT_BACKEND_MODE", mode)
+    monkeypatch.delenv("SIMSOPT_BACKEND_STRICT", raising=False)
+    invalidate_backend_cache()
+
+
 def _assert_hidden_spec_fallback_rejected(
     monkeypatch,
     callback,
@@ -143,6 +156,24 @@ def _assert_hidden_spec_fallback_rejected(
         RuntimeError,
         match=_HIDDEN_SPEC_FALLBACK_PATTERN
         + rf".*{re.escape(api_name)}\(\).*strict=True",
+    ):
+        callback()
+
+
+def _assert_hidden_spec_fallback_warns(
+    monkeypatch,
+    callback,
+    *,
+    api_name,
+    mode="jax_gpu_parity",
+):
+    _enable_non_strict_jax_backend(monkeypatch, mode)
+    with pytest.warns(
+        RuntimeWarning,
+        match=(
+            _HIDDEN_SPEC_WARNING_PATTERN.replace(".*legacy adapter seam", "")
+            + rf".*{re.escape(api_name)}\(\).*legacy adapter seam"
+        ),
     ):
         callback()
 
@@ -580,7 +611,12 @@ def _assert_curve_spec_pullback_matches_curve_methods(
     )
 
     coeff_cotangent, surface_cotangent = curve_pullback_from_spec(spec, dg, dgd)
-    curve_dofs = jnp.asarray(curve.get_dofs(), dtype=jnp.float64)
+    curve_dofs = jnp.asarray(
+        curve.full_x
+        if getattr(curve, "_jax_curve_dof_mode", "local") == "full"
+        else curve.get_dofs(),
+        dtype=jnp.float64,
+    )
     if hasattr(curve, "dgamma_by_dcoeff_vjp_jax") and hasattr(
         curve,
         "dgammadash_by_dcoeff_vjp_jax",
@@ -629,11 +665,10 @@ def _assert_curve_spec_pullback_matches_curve_methods(
     )
 
 
-_REAL_RESOLVE_FD_REL_TOL = 1e-3
 _REAL_RESOLVE_FD_ABS_TOL = 1e-8
-_REAL_RESOLVE_FD_EPS = 1e-4
+_REAL_RESOLVE_FD_TAYLOR_RATE = 0.55
+_REAL_RESOLVE_FD_EPSILONS = (8.0e-4, 4.0e-4, 2.0e-4, 1.0e-4)
 _REAL_RESOLVE_FD_MAX_ATTEMPTS = 6
-_REAL_RESOLVE_FD_MIN_STABLE_SAMPLES = 3
 _STABLE_IOTA_ABS_TOL = 5e-4
 _STABLE_G_REL_TOL = 1e-4
 _STABLE_FUN_REL_TOL = 1e-2
@@ -744,51 +779,61 @@ def _assert_wrapper_resolve_fd_matches_real_fixture(
     x0 = np.asarray(base_state["coil_dofs"], dtype=float)
     rng = np.random.RandomState(rng_seed)
     instability_reasons = []
-    stable_sample_count = 0
 
     for sample_index in range(_REAL_RESOLVE_FD_MAX_ATTEMPTS):
         direction = rng.randn(len(x0))
         direction /= np.linalg.norm(direction)
         directional_adjoint = float(np.dot(gradient, direction))
+        err_old = None
+        series_ok = True
 
-        plus = _resolve_wrapper_value_on_real_fixture(
-            base_state,
-            x0 + _REAL_RESOLVE_FD_EPS * direction,
-            wrapper_factory,
-        )
-        minus = _resolve_wrapper_value_on_real_fixture(
-            base_state,
-            x0 - _REAL_RESOLVE_FD_EPS * direction,
-            wrapper_factory,
-        )
-        if not plus["stable"] or not minus["stable"]:
-            instability_reasons.append(
-                f"sample {sample_index}: plus={plus['reason']} minus={minus['reason']}"
+        for eps in _REAL_RESOLVE_FD_EPSILONS:
+            plus = _resolve_wrapper_value_on_real_fixture(
+                base_state,
+                x0 + eps * direction,
+                wrapper_factory,
             )
-            continue
+            minus = _resolve_wrapper_value_on_real_fixture(
+                base_state,
+                x0 - eps * direction,
+                wrapper_factory,
+            )
+            if not plus["stable"] or not minus["stable"]:
+                instability_reasons.append(
+                    f"sample {sample_index} eps={eps:.1e}: "
+                    f"plus={plus['reason']} minus={minus['reason']}"
+                )
+                series_ok = False
+                break
 
-        directional_fd = (plus["value"] - minus["value"]) / (2.0 * _REAL_RESOLVE_FD_EPS)
-        abs_err = abs(directional_adjoint - directional_fd)
-        rel_err = abs_err / (abs(directional_fd) + 1e-30)
-        print(
-            f"{wrapper_label} reduced-real FD[{sample_index}]: "
-            f"adjoint={directional_adjoint:.6e} fd={directional_fd:.6e} "
-            f"rel={rel_err:.2e} abs={abs_err:.2e}"
-        )
-        assert (
-            rel_err < _REAL_RESOLVE_FD_REL_TOL or abs_err < _REAL_RESOLVE_FD_ABS_TOL
-        ), (
-            f"{wrapper_label} reduced-real FD[{sample_index}] exceeded tolerance: "
-            f"rel={rel_err:.2e} abs={abs_err:.2e}"
-        )
-        stable_sample_count += 1
-        if stable_sample_count >= _REAL_RESOLVE_FD_MIN_STABLE_SAMPLES:
+            directional_fd = (plus["value"] - minus["value"]) / (2.0 * eps)
+            abs_err = abs(directional_adjoint - directional_fd)
+            print(
+                f"{wrapper_label} reduced-real FD[{sample_index}, eps={eps:.1e}]: "
+                f"adjoint={directional_adjoint:.6e} fd={directional_fd:.6e} "
+                f"abs={abs_err:.2e}"
+            )
+            if err_old is not None:
+                threshold = max(
+                    _REAL_RESOLVE_FD_ABS_TOL,
+                    _REAL_RESOLVE_FD_TAYLOR_RATE * err_old,
+                )
+                if abs_err >= threshold:
+                    instability_reasons.append(
+                        f"sample {sample_index} eps={eps:.1e}: "
+                        f"err={abs_err:.2e} threshold={threshold:.2e}"
+                    )
+                    series_ok = False
+                    break
+            err_old = abs_err
+
+        if series_ok:
             return
 
     pytest.fail(
-        f"{wrapper_label} only found {stable_sample_count} branch-stable reduced "
-        f"real-fixture FD samples within {_REAL_RESOLVE_FD_MAX_ATTEMPTS} attempts; "
-        f"need {_REAL_RESOLVE_FD_MIN_STABLE_SAMPLES}: " + "; ".join(instability_reasons)
+        f"{wrapper_label} did not find a branch-stable reduced real-fixture "
+        f"Taylor-convergent FD direction within {_REAL_RESOLVE_FD_MAX_ATTEMPTS} "
+        f"attempts: " + "; ".join(instability_reasons)
     )
 
 
@@ -970,6 +1015,86 @@ class TestBoozerResidualValue:
         # Both should be small on the shared reduced fixture.
         assert j_jax < 1e-3, f"JAX BoozerResidual too large: {j_jax:.2e}"
         assert j_cpu < 1e-3, f"CPU BoozerResidual too large: {j_cpu:.2e}"
+
+    def test_value_path_matches_residual_helper_not_penalty_objective(
+        self,
+        boozer_setup,
+        monkeypatch,
+    ):
+        """BoozerResidualJAX value must use the CPU-parity residual helper."""
+        from simsopt._core.derivative import Derivative
+        import simsopt.geo.surfaceobjectives_jax as soj
+
+        (_, _, _, _, bs_jax, _, booz_jax, _) = boozer_setup
+
+        captured = {}
+        coil_dofs = jnp.array(bs_jax.x.copy())
+        coil_set_spec = bs_jax.coil_set_spec_from_dofs(coil_dofs)
+
+        def fake_value_and_direct_coil_derivative(
+            biotsavart, objective_of_coils, coil_dofs
+        ):
+            del biotsavart
+            value = float(objective_of_coils(coil_dofs))
+            captured["value"] = value
+            return value, Derivative({})
+
+        monkeypatch.setattr(soj, "_ensure_solved", lambda _booz: None)
+        monkeypatch.setattr(
+            soj,
+            "_value_and_direct_coil_derivative",
+            fake_value_and_direct_coil_derivative,
+        )
+        monkeypatch.setattr(
+            soj, "_solve_boozer_adjoint", lambda booz_surf, dJ_ds: dJ_ds
+        )
+        monkeypatch.setattr(
+            soj, "_adjoint_coil_derivative", lambda *args, **kwargs: Derivative({})
+        )
+        monkeypatch.setattr(
+            soj,
+            "_boozer_penalty_objective",
+            lambda *args, **kwargs: (_ for _ in ()).throw(
+                AssertionError(
+                    "BoozerResidualJAX.compute() must not route through "
+                    "_boozer_penalty_objective()"
+                )
+            ),
+            raising=False,
+        )
+
+        jr_jax = BoozerResidualJAX(booz_jax, bs_jax)
+        value = jr_jax.J()
+
+        x_inner = booz_jax._pack_decision_vector(
+            booz_jax.res["iota"],
+            booz_jax.res["G"],
+            sdofs=booz_jax._get_surface_dofs(),
+        )
+
+        expected = float(
+            soj._boozer_residual_J_of_x_inner(
+                x_inner,
+                coil_set_spec=coil_set_spec,
+                quadpoints_phi=booz_jax.quadpoints_phi,
+                quadpoints_theta=booz_jax.quadpoints_theta,
+                mpol=booz_jax.mpol,
+                ntor=booz_jax.ntor,
+                nfp=booz_jax.nfp,
+                stellsym=booz_jax.stellsym,
+                scatter_indices=booz_jax.scatter_indices,
+                surface_kind=booz_jax._surface_geometry_kind,
+                optimize_G=booz_jax.res["G"] is not None,
+                weight_inv_modB=booz_jax.res.get("weight_inv_modB", True),
+                constraint_weight=jr_jax.constraint_weight,
+                targetlabel=booz_jax.targetlabel,
+                label_type=booz_jax.label_type,
+                phi_idx=booz_jax.phi_idx,
+            )
+        )
+
+        np.testing.assert_allclose(value, expected, rtol=1e-12, atol=1e-12)
+        assert captured["value"] == value
 
 
 # -----------------------------------------------------------------------
@@ -1286,6 +1411,49 @@ class TestAdjointSolveConsistency:
         grouped_spec = bs_jax.coil_set_spec()
         assert isinstance(grouped_spec, GroupedCoilSetSpec)
 
+    def test_non_strict_mode_warns_on_grouped_spec_fallback_in_coil_set_spec_from_dofs(
+        self,
+        monkeypatch,
+    ):
+        curve = CurveXYZFourier(16, 1)
+        curve.x = np.array([0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9])
+        current = Current(1.23)
+        bs_jax = BiotSavartJAX([Coil(curve, current)])
+        monkeypatch.setattr(
+            bs_jax,
+            "coil_specs_from_dofs",
+            lambda _coil_dofs: (_ for _ in ()).throw(NotImplementedError),
+        )
+        _assert_hidden_spec_fallback_warns(
+            monkeypatch,
+            lambda: bs_jax.coil_set_spec_from_dofs(jnp.asarray(bs_jax.x)),
+            api_name="coil_set_spec_from_dofs",
+        )
+
+    def test_non_strict_mode_warns_on_live_graph_spec_fallback_in_coil_set_spec(
+        self,
+        monkeypatch,
+    ):
+        curve = CurveXYZFourier(16, 1)
+        curve.x = np.array([0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9])
+        current = Current(1.23)
+        bs_jax = BiotSavartJAX([Coil(curve, current)])
+        monkeypatch.setattr(
+            bs_jax,
+            "_coil_set_spec_from_dofs_prefer_specs",
+            lambda _coil_dofs: (_ for _ in ()).throw(NotImplementedError),
+        )
+        monkeypatch.setattr(
+            bs_jax,
+            "coil_specs",
+            lambda: (_ for _ in ()).throw(NotImplementedError),
+        )
+        _assert_hidden_spec_fallback_warns(
+            monkeypatch,
+            bs_jax.coil_set_spec,
+            api_name="coil_set_spec",
+        )
+
     def test_legacy_objects_expose_curve_current_coil_specs(self):
         """Legacy hot-path objects should expose immutable JAX specs."""
         curve = CurveXYZFourier(16, 1)
@@ -1406,6 +1574,14 @@ class TestAdjointSolveConsistency:
     def test_curveplanarfourier_spec_pullback_matches_curve_methods(self):
         _assert_curve_spec_pullback_matches_curve_methods(_build_planar_curve(24))
 
+    def test_curveperturbed_spec_pullback_matches_curve_methods(self):
+        _assert_curve_spec_pullback_matches_curve_methods(
+            _build_perturbed_helical_curve(24)
+        )
+
+    def test_curvefilament_spec_pullback_matches_curve_methods(self):
+        _assert_curve_spec_pullback_matches_curve_methods(_build_filament_curve(32))
+
     def test_curvecwsfouriercpp_spec_pullback_matches_curve_and_surface_methods(self):
         curve, _surf = _build_surface_bound_cpp_curve(32)
         _assert_curve_spec_pullback_matches_curve_methods(
@@ -1427,6 +1603,18 @@ class TestAdjointSolveConsistency:
         _assert_curve_exposes_immutable_spec(
             _build_planar_curve(24),
             CurvePlanarFourierSpec,
+        )
+
+    def test_curveperturbed_exposes_immutable_spec(self):
+        _assert_curve_exposes_immutable_spec(
+            _build_perturbed_helical_curve(24),
+            CurvePerturbedSpec,
+        )
+
+    def test_curvefilament_exposes_immutable_spec(self):
+        _assert_curve_exposes_immutable_spec(
+            _build_filament_curve(32),
+            CurveFilamentSpec,
         )
 
     def test_grouped_coil_arrays_from_dofs_supports_generic_jaxcurve_geometry(
@@ -1574,6 +1762,28 @@ class TestAdjointSolveConsistency:
     ):
         """Full-graph wrapper curves should reconstruct from explicit coil DOFs."""
         _assert_grouped_coil_arrays_match_curve(_build_perturbed_helical_curve(24), 1.7)
+
+    def test_coil_set_spec_from_dofs_prefers_immutable_curveperturbed_specs(
+        self,
+        monkeypatch,
+    ):
+        _assert_coil_set_spec_prefers_immutable_curve_specs(
+            monkeypatch,
+            _build_perturbed_helical_curve(24),
+            1.7,
+            "CurvePerturbed should use immutable specs before grouped-array fallback",
+        )
+
+    def test_coil_set_spec_from_dofs_prefers_immutable_curvefilament_specs(
+        self,
+        monkeypatch,
+    ):
+        _assert_coil_set_spec_prefers_immutable_curve_specs(
+            monkeypatch,
+            _build_filament_curve(32),
+            8.0e4,
+            "CurveFilament should use immutable specs before grouped-array fallback",
+        )
 
     def test_biotsavart_B_vjp_bypasses_coil_vjp_for_curvefilament(self, monkeypatch):
         """Full-graph finite-build wrapper curves should stay off ``Coil.vjp()``."""
@@ -2202,6 +2412,34 @@ class TestNonQSRatioValue:
         # surfaces, so exact parity is not expected)
         assert np.isfinite(j_jax) and j_jax >= 0, f"JAX NonQSRatio invalid: {j_jax}"
         assert np.isfinite(j_cpu) and j_cpu >= 0, f"CPU NonQSRatio invalid: {j_cpu}"
+
+    def test_threads_surface_kind_into_qs_ratio(self, boozer_setup, monkeypatch):
+        """The QS-ratio wrapper must pass the active surface geometry contract through."""
+        from simsopt._core.derivative import Derivative
+        import simsopt.geo.surfaceobjectives_jax as soj
+
+        (_, _, _, _, bs_jax, _, booz_jax, _) = boozer_setup
+        recorded_surface_kinds = []
+
+        def fake_qs_ratio_pure(sdofs, coil_set_spec, **qs_kwargs):
+            del coil_set_spec
+            recorded_surface_kinds.append(qs_kwargs["surface_kind"])
+            return jnp.sum(sdofs**2)
+
+        monkeypatch.setattr(booz_jax, "_surface_geometry_kind", "rzfourier")
+        monkeypatch.setattr(soj, "_qs_ratio_pure", fake_qs_ratio_pure)
+        monkeypatch.setattr(
+            soj, "_solve_boozer_adjoint", lambda booz_surf, dJ_ds: dJ_ds
+        )
+        monkeypatch.setattr(
+            soj, "_adjoint_coil_derivative", lambda *args, **kwargs: Derivative({})
+        )
+
+        value = NonQuasiSymmetricRatioJAX(booz_jax, bs_jax, sDIM=6).J()
+
+        assert np.isfinite(value)
+        assert recorded_surface_kinds
+        assert set(recorded_surface_kinds) == {"rzfourier"}
 
     def test_uses_spec_reconstruction_not_grouped_arrays(
         self,

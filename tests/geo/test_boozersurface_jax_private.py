@@ -152,6 +152,49 @@ class TestOptimizerAdapterPrivate:
         np.testing.assert_allclose(np.asarray(state.g_k), np.zeros(2), atol=1e-12)
 
     @PRIVATE_OPTIMIZER_RUNTIME
+    def test_minimize_bfgs_private_preserves_last_finite_iterate_on_nonfinite_step(
+        self,
+        monkeypatch,
+    ):
+        """A non-finite line-search proposal must keep the last finite iterate."""
+        from simsopt.geo.optimizer_jax_private import _LineSearchResults
+        from simsopt.geo.optimizer_jax_private import _bfgs as _bfgs_module
+
+        x0 = jnp.array([1.0, -2.0], dtype=jnp.float64)
+
+        def quad(x):
+            return 0.5 * jnp.dot(x, x)
+
+        def fake_line_search(*_args, **_kwargs):
+            return _LineSearchResults(
+                failed=jnp.array(False),
+                nit=jnp.array(1),
+                nfev=jnp.array(1),
+                ngev=jnp.array(1),
+                k=jnp.array(1),
+                a_k=jnp.array(1.0, dtype=jnp.float64),
+                f_k=jnp.array(np.nan, dtype=jnp.float64),
+                g_k=jnp.array([np.nan, np.nan], dtype=jnp.float64),
+                status=jnp.array(7),
+            )
+
+        monkeypatch.setattr(_bfgs_module, "_line_search", fake_line_search)
+
+        state = _bfgs_module._minimize_bfgs_private(
+            quad,
+            x0,
+            maxiter=5,
+            gtol=1e-8,
+        )
+
+        assert bool(state.converged) is False
+        assert bool(state.failed) is True
+        assert int(state.status) == 2
+        np.testing.assert_allclose(np.asarray(state.x_k), np.asarray(x0))
+        np.testing.assert_allclose(np.asarray(state.f_k), np.asarray(quad(x0)))
+        np.testing.assert_allclose(np.asarray(state.g_k), np.asarray(x0))
+
+    @PRIVATE_OPTIMIZER_RUNTIME
     @REQUIRES_PRIVATE_LBFGS_RUNTIME
     def test_minimize_lbfgs_private_solves_simple_quadratic(self):
         """Direct private L-BFGS should keep its simple quadratic contract."""

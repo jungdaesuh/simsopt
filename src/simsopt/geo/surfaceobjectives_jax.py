@@ -38,7 +38,6 @@ from .boozer_residual_jax import (
     _surface_geometry_from_dofs,
 )
 from .boozersurface_jax import (
-    _boozer_penalty_objective,
     _boozer_exact_residual,
     _compute_label,
     _make_boozer_penalty_objective_closure,
@@ -187,6 +186,7 @@ def _qs_ratio_pure(
     nfp,
     stellsym,
     scatter_indices,
+    surface_kind,
     axis,
 ):
     """Pure JAX QS ratio: ``mean(dS * B_nonQS^2) / mean(dS * B_QS^2)``.
@@ -203,6 +203,7 @@ def _qs_ratio_pure(
         nfp,
         stellsym,
         scatter_indices,
+        surface_kind=surface_kind,
     )
     normal = jnp.cross(xphi, xtheta)
     dS = jnp.sqrt(jnp.sum(normal**2, axis=-1))
@@ -361,25 +362,16 @@ class BoozerResidualJAX(Optimizable):
         weight_inv_modB = booz_surf.res.get("weight_inv_modB", True)
         x_inner = booz_surf._pack_decision_vector(iota, G, sdofs=sdofs)
         current_coil_dofs, coil_set_spec = _current_coil_dofs_and_spec(self.biotsavart)
+        objective_kwargs = self._residual_objective_kwargs(
+            optimize_G=G is not None,
+            weight_inv_modB=weight_inv_modB,
+        )
 
         def objective_of_coils(coil_dofs):
-            return _boozer_penalty_objective(
+            return _boozer_residual_J_of_x_inner(
                 x_inner,
                 coil_set_spec=self.biotsavart.coil_set_spec_from_dofs(coil_dofs),
-                quadpoints_phi=booz_surf.quadpoints_phi,
-                quadpoints_theta=booz_surf.quadpoints_theta,
-                mpol=booz_surf.mpol,
-                ntor=booz_surf.ntor,
-                nfp=booz_surf.nfp,
-                stellsym=booz_surf.stellsym,
-                scatter_indices=booz_surf.scatter_indices,
-                surface_kind=booz_surf._surface_geometry_kind,
-                targetlabel=booz_surf.targetlabel,
-                constraint_weight=self.constraint_weight,
-                label_type=booz_surf.label_type,
-                phi_idx=booz_surf.phi_idx,
-                optimize_G=G is not None,
-                weight_inv_modB=weight_inv_modB,
+                **objective_kwargs,
             )
 
         self._J, dJ_by_dcoils = _value_and_direct_coil_derivative(
@@ -408,9 +400,6 @@ class BoozerResidualJAX(Optimizable):
         booz_surf = self.boozer_surface
         sdofs = booz_surf._get_surface_dofs()
         optimize_G = G is not None
-        constraint_weight = (
-            self.constraint_weight if self.constraint_weight is not None else 1.0
-        )
 
         if optimize_G:
             x_inner = jnp.concatenate([sdofs, jnp.array([iota, G])])
@@ -420,6 +409,19 @@ class BoozerResidualJAX(Optimizable):
         dJ_ds_jax = jax.grad(_boozer_residual_J_of_x_inner)(
             x_inner,
             coil_set_spec=coil_set_spec,
+            **self._residual_objective_kwargs(
+                optimize_G=optimize_G,
+                weight_inv_modB=weight_inv_modB,
+            ),
+        )
+        return dJ_ds_jax
+
+    def _residual_objective_kwargs(self, *, optimize_G, weight_inv_modB):
+        booz_surf = self.boozer_surface
+        constraint_weight = (
+            self.constraint_weight if self.constraint_weight is not None else 1.0
+        )
+        return dict(
             quadpoints_phi=booz_surf.quadpoints_phi,
             quadpoints_theta=booz_surf.quadpoints_theta,
             mpol=booz_surf.mpol,
@@ -430,12 +432,11 @@ class BoozerResidualJAX(Optimizable):
             surface_kind=booz_surf._surface_geometry_kind,
             optimize_G=optimize_G,
             weight_inv_modB=weight_inv_modB,
-            constraint_weight=constraint_weight,
             targetlabel=booz_surf.targetlabel,
+            constraint_weight=constraint_weight,
             label_type=booz_surf.label_type,
             phi_idx=booz_surf.phi_idx,
         )
-        return dJ_ds_jax
 
 
 class IotasJAX(Optimizable):
@@ -585,6 +586,7 @@ class NonQuasiSymmetricRatioJAX(Optimizable):
             nfp=booz_surf.nfp,
             stellsym=booz_surf.stellsym,
             scatter_indices=booz_surf.scatter_indices,
+            surface_kind=booz_surf._surface_geometry_kind,
             axis=self.axis,
         )
 

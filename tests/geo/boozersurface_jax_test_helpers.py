@@ -38,14 +38,22 @@ _ensure_package("simsopt.geo", _SRC / "geo")
 _ensure_package("simsopt.field", _SRC / "field")
 _ensure_package("simsopt.objectives", _SRC / "objectives")
 
-_sf = _load_and_register("simsopt.geo.surface_fourier_jax", "geo/surface_fourier_jax.py")
+_sf = _load_and_register(
+    "simsopt.geo.surface_fourier_jax", "geo/surface_fourier_jax.py"
+)
 _bs_jax = _load_and_register("simsopt.field.biotsavart_jax", "field/biotsavart_jax.py")
 _bs_backend = _load_and_register(
     "simsopt.field.biotsavart_jax_backend", "field/biotsavart_jax_backend.py"
 )
-_obj_utils = _load_and_register("simsopt.objectives.utilities", "objectives/utilities.py")
-_br = _load_and_register("simsopt.geo.boozer_residual_jax", "geo/boozer_residual_jax.py")
-_lc = _load_and_register("simsopt.geo.label_constraints_jax", "geo/label_constraints_jax.py")
+_obj_utils = _load_and_register(
+    "simsopt.objectives.utilities", "objectives/utilities.py"
+)
+_br = _load_and_register(
+    "simsopt.geo.boozer_residual_jax", "geo/boozer_residual_jax.py"
+)
+_lc = _load_and_register(
+    "simsopt.geo.label_constraints_jax", "geo/label_constraints_jax.py"
+)
 _opt = _load_and_register("simsopt.geo.optimizer_jax", "geo/optimizer_jax.py")
 _bsj = _load_and_register("simsopt.geo.boozersurface_jax", "geo/boozersurface_jax.py")
 _soj = _load_and_register(
@@ -219,27 +227,30 @@ def _build_penalty_problem(
         elif label_type == "area":
             targetlabel = 4.0 * np.pi**2 * R0 * r
         else:
-            raise ValueError("targetlabel must be provided for non-analytic label types.")
+            raise ValueError(
+                "targetlabel must be provided for non-analytic label types."
+            )
 
     coil_arrays = [(gammas, gammadashs, currents)]
 
     def objective(xx):
         return _boozer_penalty_objective(
             xx,
-            coil_arrays,
-            qphi,
-            qtheta,
-            mpol,
-            ntor,
-            nfp,
-            False,
-            None,
-            targetlabel,
-            constraint_weight,
-            label_type,
-            0,
-            optimize_G,
-            weight_inv_modB,
+            coil_arrays=coil_arrays,
+            quadpoints_phi=qphi,
+            quadpoints_theta=qtheta,
+            mpol=mpol,
+            ntor=ntor,
+            nfp=nfp,
+            stellsym=False,
+            scatter_indices=None,
+            surface_kind="generic",
+            targetlabel=targetlabel,
+            constraint_weight=constraint_weight,
+            label_type=label_type,
+            phi_idx=0,
+            optimize_G=optimize_G,
+            weight_inv_modB=weight_inv_modB,
         )
 
     return {
