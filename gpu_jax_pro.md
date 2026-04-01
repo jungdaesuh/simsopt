@@ -7,11 +7,12 @@ Update as of 2026-04-01:
 * a first `jax_core/` subtree now exists
 * first-wave immutable specs now exist for grouped coils, fixed-surface flux,
   `SurfaceRZFourier`, `CurveXYZFourier`, `CurveRZFourier`,
-  `CurvePlanarFourier`, `CurveHelical`, current values, coils, and
-  field-evaluation point sets
+  `CurvePlanarFourier`, `CurveHelical`, `CurvePerturbed`,
+  `CurveFilament`, current values, coils, and field-evaluation point sets
 * hot-path legacy objects now expose `to_spec()` where the adapter seam is
   stable (`CurveXYZFourier`, `CurveRZFourier`, `CurvePlanarFourier`,
-  `CurveHelical`, `SurfaceRZFourier`, `CurrentBase`, `Coil`)
+  `CurveHelical`, `CurvePerturbed`, `CurveFilament`, `SurfaceRZFourier`,
+  `CurrentBase`, `Coil`)
 * the `SurfaceRZFourier` JAX path now covers the broader geometry/derivative
   contract beyond the original fixed-surface hot path
 * grouped forward-field compatibility paths now route through `jax_core`
@@ -27,9 +28,10 @@ Update as of 2026-04-01:
   objective-side field setup through immutable coil specs reconstructed from
   explicit DOFs
 * the next immutable-spec broadening slice is also landed:
-  `CurvePlanarFourier` and `CurveHelical` now round-trip through immutable
-  curve specs, and `BiotSavartJAX` prefers that spec path over grouped-array
-  fallback for those families
+  `CurvePlanarFourier`, `CurveHelical`, `CurvePerturbed`, and
+  `CurveFilament` now round-trip through immutable curve specs, and
+  `BiotSavartJAX` prefers that spec path over grouped-array fallback for those
+  families
 * `docs/using_jax_backend.md` now includes copy-paste Stage 2 and single-stage
   examples plus honest performance guidance for compile time, warm timing,
   parity lanes, fast lanes, and memory tradeoffs
@@ -553,9 +555,10 @@ According to a document from March 31, 2026, here is the module-by-module implem
 
    The hot-path spec layer is now broader than a toy first slice: concrete
    curve/current/coil/field-eval specs and `to_spec()` adapters already exist
-   for the main Fourier/coil objects. The remaining work is to extend that
-   coverage to the rest of the legacy object families and thread it through
-   the remaining non-hot-path objective families.
+   for the main Fourier/coil objects plus the current full-graph wrapper
+   families. The remaining work is to extend that coverage through any
+   residual legacy wrapper families and thread it through the remaining
+   non-hot-path objective families.
 
    `BiotSavartJAX` is also thinner than the earlier draft state: explicit DOF
    reconstruction now prefers immutable per-coil specs, and grouped array
