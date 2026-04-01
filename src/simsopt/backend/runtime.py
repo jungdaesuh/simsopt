@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import os
+from typing import Callable
 import warnings
 
 _VALID_BACKENDS = ("cpu", "jax")
@@ -75,6 +76,14 @@ _MODE_TO_RUNTIME = {
     "jax_gpu_fast": ("jax", "cuda"),
 }
 
+_NO_CI_REPRODUCIBILITY_DEFAULTS = {
+    "gpu_reduction_order_max_ulp": None,
+    "gpu_reduction_order_rel_tol": None,
+    "gpu_reproducibility_seed": None,
+    "gpu_reproducibility_sample_size": None,
+    "tolerance_ratchet_factor": None,
+}
+
 _MODE_POLICY_DEFAULTS = {
     "native_cpu": {
         "parity_mode": False,
@@ -83,6 +92,7 @@ _MODE_POLICY_DEFAULTS = {
         "tolerance_tier": "cpu_reference",
         "compilation_cache_policy": "not_applicable",
         "provenance_label": "native_cpu",
+        **_NO_CI_REPRODUCIBILITY_DEFAULTS,
     },
     "jax_cpu_parity": {
         "parity_mode": True,
@@ -91,6 +101,7 @@ _MODE_POLICY_DEFAULTS = {
         "tolerance_tier": "parity",
         "compilation_cache_policy": "optional_persistent",
         "provenance_label": "jax_cpu_parity",
+        **_NO_CI_REPRODUCIBILITY_DEFAULTS,
     },
     "jax_gpu_parity": {
         "parity_mode": True,
@@ -99,6 +110,11 @@ _MODE_POLICY_DEFAULTS = {
         "tolerance_tier": "parity",
         "compilation_cache_policy": "optional_persistent",
         "provenance_label": "jax_gpu_parity",
+        "gpu_reduction_order_max_ulp": 10,
+        "gpu_reduction_order_rel_tol": 1e-12,
+        "gpu_reproducibility_seed": 1729,
+        "gpu_reproducibility_sample_size": 1000,
+        "tolerance_ratchet_factor": 10.0,
     },
     "jax_gpu_fast": {
         "parity_mode": False,
@@ -107,6 +123,7 @@ _MODE_POLICY_DEFAULTS = {
         "tolerance_tier": "fast",
         "compilation_cache_policy": "optional_persistent",
         "provenance_label": "jax_gpu_fast",
+        **_NO_CI_REPRODUCIBILITY_DEFAULTS,
     },
 }
 
@@ -131,6 +148,7 @@ _DEFAULT_TRANSFER_GUARD_BY_MODE = {
     "jax_gpu_parity": "log",
     "jax_gpu_fast": None,
 }
+_backend_cache_clear_callbacks: list[Callable[[], None]] = []
 
 
 @dataclass(frozen=True)
@@ -156,6 +174,11 @@ class BackendPolicy:
     tolerance_tier: str
     compilation_cache_policy: str
     provenance_label: str
+    gpu_reduction_order_max_ulp: int | None
+    gpu_reduction_order_rel_tol: float | None
+    gpu_reproducibility_seed: int | None
+    gpu_reproducibility_sample_size: int | None
+    tolerance_ratchet_factor: float | None
     debug_nans: bool
     transfer_guard: str | None
     compilation_cache_dir: str | None
@@ -326,6 +349,11 @@ def _policy_from_config(config: BackendConfig) -> BackendPolicy:
         tolerance_tier=str(defaults["tolerance_tier"]),
         compilation_cache_policy=str(defaults["compilation_cache_policy"]),
         provenance_label=str(defaults["provenance_label"]),
+        gpu_reduction_order_max_ulp=defaults["gpu_reduction_order_max_ulp"],
+        gpu_reduction_order_rel_tol=defaults["gpu_reduction_order_rel_tol"],
+        gpu_reproducibility_seed=defaults["gpu_reproducibility_seed"],
+        gpu_reproducibility_sample_size=defaults["gpu_reproducibility_sample_size"],
+        tolerance_ratchet_factor=defaults["tolerance_ratchet_factor"],
         debug_nans=config.debug_nans,
         transfer_guard=config.transfer_guard,
         compilation_cache_dir=config.compilation_cache_dir,
@@ -535,6 +563,25 @@ def get_compilation_cache_dir(mode: str | None = None) -> str | None:
     return get_backend_policy(mode).compilation_cache_dir
 
 
+def register_backend_cache_clear(callback: Callable[[], None]) -> None:
+    """Register a callback that should run whenever backend caches are cleared."""
+    if callback not in _backend_cache_clear_callbacks:
+        _backend_cache_clear_callbacks.append(callback)
+
+
+def _run_backend_cache_clear_callbacks() -> None:
+    for callback in _backend_cache_clear_callbacks:
+        callback()
+
+
+def _reset_backend_runtime_caches() -> None:
+    global _cached_backend_policy, _cached_field_kernel_tuning
+    _cached_backend_policy = None
+    _cached_field_kernel_tuning = None
+    _run_backend_cache_clear_callbacks()
+    _warned_jax_fallbacks.clear()
+
+
 def invalidate_backend_cache() -> None:
     """Clear the cached backend configuration and derived caches.
 
@@ -543,11 +590,9 @@ def invalidate_backend_cache() -> None:
     re-reads the environment.  Test fixtures should call this when they
     manipulate env vars via ``monkeypatch`` or context managers.
     """
-    global _cached_backend_config, _cached_backend_policy, _cached_field_kernel_tuning
+    global _cached_backend_config
     _cached_backend_config = None
-    _cached_backend_policy = None
-    _cached_field_kernel_tuning = None
-    _warned_jax_fallbacks.clear()
+    _reset_backend_runtime_caches()
 
 
 def raise_if_strict_jax_fallback(*, component: str, detail: str) -> None:
@@ -600,7 +645,8 @@ def apply_jax_runtime_config() -> None:
     jax.config.update("jax_platforms", config.jax_platform)
     jax.config.update("jax_enable_x64", requires_x64(config.mode))
     jax.config.update("jax_debug_nans", config.debug_nans)
-    jax.config.update("jax_transfer_guard", config.transfer_guard)
+    if config.transfer_guard is not None:
+        jax.config.update("jax_transfer_guard", config.transfer_guard)
     if config.compilation_cache_dir is not None:
         jax.config.update("jax_compilation_cache_dir", config.compilation_cache_dir)
 
@@ -620,7 +666,7 @@ def set_backend(
     helpers continue to work unchanged.  Also updates the config cache so
     subsequent ``get_backend_config()`` calls are free.
     """
-    global _cached_backend_config, _cached_backend_policy, _cached_field_kernel_tuning
+    global _cached_backend_config
     config = _config_from_mode(
         mode,
         strict=bool(strict),
@@ -629,9 +675,7 @@ def set_backend(
         compilation_cache_dir=compilation_cache_dir,
     )
     _cached_backend_config = config
-    _cached_backend_policy = None
-    _cached_field_kernel_tuning = None
-    _warned_jax_fallbacks.clear()
+    _reset_backend_runtime_caches()
     for env_name, attribute_name in _SYNCED_RUNTIME_ENV_VALUES:
         os.environ[env_name] = _runtime_env_value(
             attribute_name, getattr(config, attribute_name)

@@ -91,10 +91,17 @@ from simsopt.jax_core import (  # noqa: E402
     CurvePerturbedSpec,
     FieldEvalSpec,
     GroupedCoilSetSpec,
+    curve_gamma_and_dash_from_dofs,
     curve_gamma_and_dash_from_spec,
+    curve_geometry_from_dofs,
     curve_pullback_from_spec,
     curve_spec_from_curve,
     grouped_coil_set_spec_from_coil_specs,
+    make_optimizable_dof_map_spec,
+)
+from simsopt.jax_core.curve_geometry import (  # noqa: E402
+    _mapped_full_dofs,
+    _mapped_input_dofs,
 )
 from simsopt.geo.boozersurface_jax import (  # noqa: E402
     BoozerSurfaceJAX,
@@ -462,6 +469,20 @@ def _build_perturbed_helical_curve(nquadpoints):
                     2.4e-3 * np.cos(4.0 * np.pi * quadpoints),
                 )
             ),
+            np.column_stack(
+                (
+                    -3.2e-3 * np.sin(2.0 * np.pi * quadpoints),
+                    2.1e-3 * np.cos(2.0 * np.pi * quadpoints),
+                    -1.7e-3 * np.sin(4.0 * np.pi * quadpoints),
+                )
+            ),
+            np.column_stack(
+                (
+                    -2.8e-3 * np.cos(2.0 * np.pi * quadpoints),
+                    -1.3e-3 * np.sin(2.0 * np.pi * quadpoints),
+                    3.6e-3 * np.cos(4.0 * np.pi * quadpoints),
+                )
+            ),
         ],
     )
     return CurvePerturbed(base_curve, sample)
@@ -665,6 +686,56 @@ def _assert_curve_spec_pullback_matches_curve_methods(
         rtol=1e-10,
         atol=1e-12,
     )
+
+
+def _central_difference_gradient(fun, x0, eps):
+    grad = np.zeros(x0.shape[0], dtype=float)
+    for index in range(x0.shape[0]):
+        x_plus = x0.at[index].add(eps)
+        x_minus = x0.at[index].add(-eps)
+        grad[index] = (float(fun(x_plus)) - float(fun(x_minus))) / (2.0 * eps)
+    return grad
+
+
+def _assert_curve_spec_geometry_matches_live_curve(curve):
+    spec = curve.to_spec()
+    gamma, gammadash, gammadashdash = curve_geometry_from_dofs(spec, spec.dofs)
+
+    np.testing.assert_allclose(np.asarray(gamma), curve.gamma(), atol=1e-12)
+    np.testing.assert_allclose(np.asarray(gammadash), curve.gammadash(), atol=1e-12)
+    try:
+        reference_gammadashdash = curve.gammadashdash()
+    except RuntimeError:
+        assert gammadashdash.shape == gamma.shape
+        assert np.all(np.isfinite(np.asarray(gammadashdash)))
+        return
+    np.testing.assert_allclose(
+        np.asarray(gammadashdash),
+        reference_gammadashdash,
+        atol=1e-12,
+    )
+
+
+def _assert_curve_spec_gamma_and_dash_gradient_matches_fd(curve, *, eps=1.0e-7):
+    spec = curve.to_spec()
+    dofs0 = jnp.asarray(spec.dofs, dtype=jnp.float64)
+    gamma0, gammadash0 = curve_gamma_and_dash_from_dofs(spec, dofs0)
+    gamma_weights = jnp.reshape(
+        jnp.linspace(0.1, 1.1, gamma0.size, dtype=jnp.float64),
+        gamma0.shape,
+    )
+    gammadash_weights = jnp.reshape(
+        jnp.linspace(-0.9, 0.3, gammadash0.size, dtype=jnp.float64),
+        gammadash0.shape,
+    )
+
+    def objective(dofs):
+        gamma, gammadash = curve_gamma_and_dash_from_dofs(spec, dofs)
+        return jnp.sum(gamma * gamma_weights) + jnp.sum(gammadash * gammadash_weights)
+
+    grad = np.asarray(jax.grad(objective)(dofs0))
+    grad_fd = _central_difference_gradient(objective, dofs0, eps)
+    np.testing.assert_allclose(grad, grad_fd, rtol=1e-6, atol=1e-9)
 
 
 _REAL_RESOLVE_FD_ABS_TOL = 1e-8
@@ -1564,6 +1635,23 @@ class TestAdjointSolveConsistency:
             np.asarray(bs_jax.field_eval_spec().points), updated_points
         )
 
+    def test_set_points_promotes_float32_inputs_to_float64(self):
+        curve = CurveXYZFourier(16, 1)
+        current = Current(1.23)
+        bs_jax = BiotSavartJAX([Coil(curve, current)])
+        points = np.asarray(
+            [
+                [0.1, 0.0, 0.0],
+                [0.2, 0.1, -0.1],
+            ],
+            dtype=np.float32,
+        )
+
+        bs_jax.set_points(points)
+
+        assert bs_jax._points_jax.dtype == jnp.float64
+        np.testing.assert_allclose(np.asarray(bs_jax._points_jax), points, atol=0.0)
+
     def test_curvexyzfourier_spec_pullback_matches_curve_methods(self):
         curve = CurveXYZFourier(16, 1)
         curve.set_dofs(np.array([1.0, 0.2, -0.1, 0.1, -0.05, 0.03, 0.8, -0.2, 0.15]))
@@ -1615,10 +1703,82 @@ class TestAdjointSolveConsistency:
             CurvePerturbedSpec,
         )
 
+    def test_curveperturbed_to_spec_preserves_sample_derivatives(self):
+        curve = _build_perturbed_helical_curve(24)
+        spec = curve.to_spec()
+
+        np.testing.assert_allclose(np.asarray(spec.sample_gamma), curve.sample[0])
+        np.testing.assert_allclose(np.asarray(spec.sample_gammadash), curve.sample[1])
+        np.testing.assert_allclose(
+            np.asarray(spec.sample_gammadashdash),
+            curve.sample[2],
+        )
+        np.testing.assert_allclose(
+            np.asarray(spec.sample_gammadashdashdash),
+            curve.sample[3],
+        )
+
     def test_curvefilament_exposes_immutable_spec(self):
         _assert_curve_exposes_immutable_spec(
             _build_filament_curve(32),
             CurveFilamentSpec,
+        )
+
+    def test_curvefilament_to_spec_preserves_frame_and_offsets(self):
+        curve = _build_filament_curve(32)
+        spec = curve.to_spec()
+
+        assert spec.frame_kind == "centroid"
+        assert spec.dn == pytest.approx(curve.dn)
+        assert spec.db == pytest.approx(curve.db)
+        np.testing.assert_allclose(
+            np.asarray(spec.rotation.dofs),
+            curve.rotation.full_x,
+            atol=1e-12,
+        )
+
+    @pytest.mark.parametrize(
+        ("curve_builder", "nquad"),
+        (
+            (_build_perturbed_helical_curve, 24),
+            (_build_filament_curve, 32),
+        ),
+        ids=("curveperturbed", "curvefilament"),
+    )
+    def test_curve_geometry_from_dofs_matches_live_curve(self, curve_builder, nquad):
+        _assert_curve_spec_geometry_matches_live_curve(curve_builder(nquad))
+
+    @pytest.mark.parametrize(
+        ("curve_builder", "nquad"),
+        (
+            (_build_perturbed_helical_curve, 24),
+            (_build_filament_curve, 32),
+        ),
+        ids=("curveperturbed", "curvefilament"),
+    )
+    def test_curve_gamma_and_dash_gradient_matches_fd(self, curve_builder, nquad):
+        _assert_curve_spec_gamma_and_dash_gradient_matches_fd(curve_builder(nquad))
+
+    def test_optimizable_dof_map_scatter_matches_expected_segments(self):
+        map_spec = make_optimizable_dof_map_spec(
+            template_full_dofs=jnp.asarray([10.0, 20.0, 30.0, 40.0, 50.0, 60.0]),
+            owner_segments=((0, 2, 1, 3), (2, 4, 4, 6)),
+            input_mode="local",
+            input_start=1,
+            input_end=5,
+        )
+        owner_dofs = jnp.asarray([1.0, 2.0, 3.0, 4.0])
+
+        mapped_full = _mapped_full_dofs(map_spec, owner_dofs)
+        mapped_input = _mapped_input_dofs(map_spec, owner_dofs)
+
+        np.testing.assert_allclose(
+            np.asarray(mapped_full),
+            np.asarray([10.0, 1.0, 2.0, 40.0, 3.0, 4.0]),
+        )
+        np.testing.assert_allclose(
+            np.asarray(mapped_input),
+            np.asarray([1.0, 2.0, 40.0, 3.0]),
         )
 
     def test_grouped_coil_arrays_from_dofs_supports_generic_jaxcurve_geometry(
@@ -3572,6 +3732,114 @@ class TestNonQSRatioJAXResolveFD:
             ),
             rng_seed=88,
         )
+
+
+# -----------------------------------------------------------------------
+# Test 18: BoozerResidualJAX end-to-end adjoint FD (P27)
+# -----------------------------------------------------------------------
+
+
+class TestBoozerResidualAdjointFD:
+    """BoozerResidualJAX.dJ() matches central FD through the full re-solve path.
+
+    Unlike TestBoozerResidualGradientFD (which validates at fixed surface
+    where adjoint ≈ 0), this test perturbs coil DOFs AND re-solves the
+    inner Boozer system, so the FD naturally captures the adjoint
+    contribution from surface movement.
+
+    The gradient is the full IFT composed gradient:
+        dJ/d_coils = dJ_direct - adj^T dg/d_coils
+
+    This validates that the adjoint solve and VJP projection are correct
+    end-to-end, not just at fixed surface.
+    """
+
+    def test_boozer_residual_resolve_fd(self):
+        _assert_wrapper_resolve_fd_matches_real_fixture(
+            wrapper_label="BoozerResidualJAX",
+            gradient_builder=lambda booz_jax, bs_jax: BoozerResidualJAX(
+                booz_jax, bs_jax
+            ).dJ(),
+            wrapper_factory=lambda booz_jax, bs_jax: BoozerResidualJAX(
+                booz_jax, bs_jax
+            ),
+            rng_seed=99,
+        )
+
+    def test_adjoint_fraction_diagnostic(self):
+        """Measure the adjoint fraction of the total BoozerResidualJAX gradient.
+
+        This is a diagnostic that reports the adjoint fraction; it does NOT
+        fail if the fraction is below 10%.  The re-solve FD above validates
+        correctness regardless of the fraction.
+        """
+        from simsopt.geo.surfaceobjectives_jax import (
+            _adjoint_coil_derivative,
+            _current_coil_dofs_and_spec,
+            _solve_boozer_adjoint,
+            _value_and_direct_coil_derivative,
+        )
+
+        bs_jax, booz_jax, base_state = _make_real_resolve_fd_setup()
+        jr = BoozerResidualJAX(booz_jax, bs_jax)
+        jr.J()
+
+        # Recompute with exposed intermediate terms
+        booz_surf = jr.boozer_surface
+        iota = booz_surf.res["iota"]
+        G = booz_surf.res["G"]
+        weight_inv_modB = booz_surf.res.get("weight_inv_modB", True)
+        x_inner = booz_surf._pack_decision_vector(
+            iota, G, sdofs=booz_surf._get_surface_dofs()
+        )
+        current_coil_dofs, coil_set_spec = _current_coil_dofs_and_spec(jr.biotsavart)
+        objective_kwargs = jr._residual_objective_kwargs(
+            optimize_G=G is not None,
+            weight_inv_modB=weight_inv_modB,
+        )
+
+        from simsopt.geo.surfaceobjectives_jax import _boozer_residual_J_of_x_inner
+
+        def objective_of_coils(coil_dofs):
+            return _boozer_residual_J_of_x_inner(
+                x_inner,
+                coil_set_spec=jr.biotsavart.coil_set_spec_from_dofs(coil_dofs),
+                **objective_kwargs,
+            )
+
+        _, direct_deriv = _value_and_direct_coil_derivative(
+            jr.biotsavart,
+            objective_of_coils,
+            current_coil_dofs,
+        )
+        dJ_ds = jr._compute_dJ_ds(coil_set_spec, iota, G, weight_inv_modB)
+        adj = _solve_boozer_adjoint(booz_surf, dJ_ds)
+
+        vjp_groups_fn = booz_surf.res.get("vjp_groups")
+        adj_deriv = _adjoint_coil_derivative(
+            vjp_groups_fn,
+            booz_surf,
+            iota,
+            G,
+            adj,
+            jr.biotsavart,
+        )
+
+        direct_norm = np.linalg.norm(np.asarray(direct_deriv(jr.biotsavart)))
+        adj_norm = np.linalg.norm(np.asarray(adj_deriv(jr.biotsavart)))
+        total_norm = np.linalg.norm(np.asarray(jr.dJ()))
+        adjoint_fraction = adj_norm / (direct_norm + 1e-30)
+
+        print(
+            f"Adjoint fraction diagnostic:\n"
+            f"  ||direct||  = {direct_norm:.6e}\n"
+            f"  ||adjoint|| = {adj_norm:.6e}\n"
+            f"  ||total||   = {total_norm:.6e}\n"
+            f"  adjoint/direct = {adjoint_fraction:.4f}"
+        )
+        # Diagnostic only — the re-solve FD validates correctness regardless.
+        # The fraction depends on how well-converged the inner solve is.
+        assert total_norm > 0, "Total gradient is exactly zero"
 
 
 # =======================================================================

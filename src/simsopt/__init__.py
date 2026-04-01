@@ -10,16 +10,26 @@
 # code paths and optimizer smoke tests continue to see the expected float64
 # runtime. Platform pinning still routes through the backend selector.
 try:
+    import os as _os
+    import sys as _sys
+
     from .backend import (
         apply_jax_runtime_config as _apply_jax_runtime_config,
         should_eagerly_configure_jax as _should_eagerly_configure_jax,
     )
-    import jax as _jax
 
-    _jax.config.update("jax_enable_x64", True)
+    if "jax" in _sys.modules:
+        import jax as _jax
+
+        _jax.config.update("jax_enable_x64", True)
+        del _jax
+    else:
+        _os.environ.setdefault("JAX_ENABLE_X64", "True")
+
     if _should_eagerly_configure_jax():
         _apply_jax_runtime_config()
-    del _apply_jax_runtime_config, _should_eagerly_configure_jax, _jax
+
+    del _apply_jax_runtime_config, _should_eagerly_configure_jax, _os, _sys
 except ImportError:
     pass
 

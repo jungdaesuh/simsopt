@@ -1690,6 +1690,7 @@ if __name__ == "__main__":
         print("Skipping Stage 2 optimizer because --init-only was provided.")
     else:
         initial_dofs = np.asarray(dofs, dtype=float).copy()
+        assert outer_contract is not None
         if use_scalar_objective:
             capture_stage2_trajectory_snapshot(
                 trajectory,

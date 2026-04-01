@@ -36,6 +36,7 @@ _BACKEND_SELECTOR_ENV_VARS = (
     "SIMSOPT_JAX_PLATFORM",
     "SIMSOPT_JAX_BACKEND",
     "JAX_PLATFORMS",
+    "JAX_ENABLE_X64",
 )
 
 
@@ -99,6 +100,30 @@ def test_import_package_root():
         assert hasattr(simsopt, "__version__")
     """)
     assert rc == 0, f"import simsopt failed:\n{err}"
+
+
+def test_import_package_root_native_cpu_does_not_require_jax_runtime():
+    """Importing package root without JAX selectors must not force a JAX import."""
+    rc, err = _run_import_check("""
+        import importlib.abc
+        import os
+        import sys
+
+        class _BlockJax(importlib.abc.MetaPathFinder):
+            def find_spec(self, fullname, path=None, target=None):
+                del path, target
+                if fullname == "jax" or fullname.startswith("jax."):
+                    raise ImportError("blocked jax import for package-root smoke")
+                return None
+
+        sys.meta_path.insert(0, _BlockJax())
+
+        import simsopt
+
+        assert hasattr(simsopt, "__version__")
+        assert os.environ["JAX_ENABLE_X64"] == "True"
+    """)
+    assert rc == 0, f"package root import unexpectedly required jax:\n{err}"
 
 
 def test_programmatic_backend_selection_configures_jax_runtime():
@@ -433,6 +458,8 @@ def test_jax_core_specs_are_pytrees():
             base_curve_map=identity_curve_map,
             sample_gamma=jnp.asarray([[1.0e-3, 0.0, 0.0], [0.0, -2.0e-3, 0.0]]),
             sample_gammadash=jnp.asarray([[0.0, 3.0e-3, 0.0], [-4.0e-3, 0.0, 0.0]]),
+            sample_gammadashdash=jnp.asarray([[0.0, 0.0, 5.0e-3], [0.0, -6.0e-3, 0.0]]),
+            sample_gammadashdashdash=jnp.asarray([[7.0e-3, 0.0, 0.0], [0.0, 0.0, -8.0e-3]]),
         )
         frame_rotation_spec = make_frame_rotation_spec(
             dofs=jnp.asarray([0.07, -0.03, 0.02]),
@@ -546,12 +573,21 @@ def test_jax_core_specs_are_pytrees():
         surface_leaves, _ = jax.tree_util.tree_flatten(surface_spec)
         zero_rotation_leaves, _ = jax.tree_util.tree_flatten(zero_rotation_spec)
 
+        def assert_round_trip(spec):
+            leaves, treedef = jax.tree_util.tree_flatten(spec)
+            rebuilt = jax.tree_util.tree_unflatten(treedef, leaves)
+            rebuilt_leaves, rebuilt_treedef = jax.tree_util.tree_flatten(rebuilt)
+            assert rebuilt_treedef == treedef
+            assert len(rebuilt_leaves) == len(leaves)
+            for expected, actual in zip(leaves, rebuilt_leaves):
+                np.testing.assert_allclose(np.asarray(actual), np.asarray(expected))
+
         assert len(curve_xyz_leaves) == 2
         assert len(curve_rz_leaves) == 2
         assert len(curve_planar_leaves) == 2
         assert len(curve_helical_leaves) == 2
         assert len(curve_cws_leaves) == 8
-        assert len(curve_perturbed_leaves) == 7
+        assert len(curve_perturbed_leaves) == 9
         assert len(curve_filament_leaves) == 8
         assert len(coil_symmetry_leaves) == 1
         assert len(current_leaves) == 1
@@ -572,6 +608,9 @@ def test_jax_core_specs_are_pytrees():
         assert callable(invalidate_kernel_cache)
         assert_surface_dofs_derivable(curve_cws_spec, 3)  # stellsym: 2 rc + 1 zs
         assert_surface_dofs_derivable(curve_cws_nonstellsym_spec, 6)  # 2rc+1rs+2zc+1zs
+        assert_round_trip(curve_perturbed_spec)
+        assert_round_trip(curve_filament_spec)
+        assert_round_trip(coil_spec)
 
         curve_xyz_gamma, curve_xyz_gammadash = jax.jit(curve_gamma_and_dash_from_spec)(curve_xyz_spec)
         curve_rz_gamma, _ = jax.jit(curve_gamma_and_dash_from_spec)(curve_rz_spec)

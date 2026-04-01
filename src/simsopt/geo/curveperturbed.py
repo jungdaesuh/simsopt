@@ -258,11 +258,26 @@ class CurvePerturbed(sopp.Curve, Curve):
             make_curve_perturbed_spec,
         )
 
+        sample_gamma = self.sample[0]
+        sample_gammadash = self.sample[1]
+        sample_gammadashdash = (
+            self.sample[2]
+            if len(self.sample._sample) > 2
+            else np.zeros_like(sample_gamma)
+        )
+        sample_gammadashdashdash = (
+            self.sample[3]
+            if len(self.sample._sample) > 3
+            else np.zeros_like(sample_gamma)
+        )
+
         return make_curve_perturbed_spec(
             dofs=self.full_x,
             quadpoints=self.quadpoints,
             base_curve=curve_spec_from_curve(self.curve),
             base_curve_map=_optimizable_dof_map_spec(self, self.curve),
-            sample_gamma=self.sample[0],
-            sample_gammadash=self.sample[1],
+            sample_gamma=sample_gamma,
+            sample_gammadash=sample_gammadash,
+            sample_gammadashdash=sample_gammadashdash,
+            sample_gammadashdashdash=sample_gammadashdashdash,
         )

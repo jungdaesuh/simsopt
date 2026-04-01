@@ -164,6 +164,12 @@ def _rotation_alpha_and_dash_from_dofs(
 
 def _curve_geometry_with_third_derivative_from_dofs(spec: CurveSpec, dofs):
     """Return (gamma, gammadash, gammadashdash, gammadashdashdash) in one pass."""
+    if isinstance(spec, CurvePerturbedSpec):
+        base_geometry = _curve_geometry_with_third_derivative_from_dofs(
+            spec.base_curve,
+            _curve_perturbed_base_dofs(spec, dofs),
+        )
+        return _add_curve_perturbation(spec, *base_geometry)
     gamma_kernel = _curve_gamma_kernel(spec, dofs)
     quadpoints, tangents = _curve_quadpoints(spec)
     gamma, gammadash = jax.jvp(gamma_kernel, (quadpoints,), (tangents,))
@@ -182,10 +188,93 @@ def _curve_geometry_with_third_derivative_from_dofs(spec: CurveSpec, dofs):
     return gamma, gammadash, gammadashdash, gammadashdashdash
 
 
+def _curve_perturbed_base_dofs(spec: CurvePerturbedSpec, dofs):
+    return _mapped_input_dofs(spec.base_curve_map, dofs)
+
+
+def _add_curve_perturbation(spec: CurvePerturbedSpec, *geometry_terms):
+    sample_terms = (
+        spec.sample_gamma,
+        spec.sample_gammadash,
+        spec.sample_gammadashdash,
+        spec.sample_gammadashdashdash,
+    )
+    return tuple(
+        geometry_term + sample_term
+        for geometry_term, sample_term in zip(geometry_terms, sample_terms)
+    )
+
+
 def _curve_perturbed_gamma_and_dash_from_dofs(spec: CurvePerturbedSpec, dofs):
-    base_dofs = _mapped_input_dofs(spec.base_curve_map, dofs)
-    gamma, gammadash = curve_gamma_and_dash_from_dofs(spec.base_curve, base_dofs)
-    return gamma + spec.sample_gamma, gammadash + spec.sample_gammadash
+    base_geometry = curve_gamma_and_dash_from_dofs(
+        spec.base_curve,
+        _curve_perturbed_base_dofs(spec, dofs),
+    )
+    return _add_curve_perturbation(spec, *base_geometry)
+
+
+def _curve_perturbed_geometry_from_dofs(spec: CurvePerturbedSpec, dofs):
+    base_geometry = curve_geometry_from_dofs(
+        spec.base_curve,
+        _curve_perturbed_base_dofs(spec, dofs),
+    )
+    return _add_curve_perturbation(spec, *base_geometry)
+
+
+def _curve_spec_with_quadpoints(spec: CurveSpec, quadpoints):
+    quadpoints_jax = jnp.asarray(quadpoints, dtype=jnp.float64)
+    if isinstance(spec, CurvePerturbedSpec):
+        return replace(
+            spec,
+            quadpoints=quadpoints_jax,
+            base_curve=_curve_spec_with_quadpoints(spec.base_curve, quadpoints_jax),
+        )
+    if isinstance(spec, CurveFilamentSpec):
+        return replace(
+            spec,
+            quadpoints=quadpoints_jax,
+            base_curve=_curve_spec_with_quadpoints(spec.base_curve, quadpoints_jax),
+            rotation=replace(spec.rotation, quadpoints=quadpoints_jax),
+        )
+    return replace(spec, quadpoints=quadpoints_jax)
+
+
+def _curve_filament_geometry_from_dofs(spec: CurveFilamentSpec, dofs):
+    def gamma_kernel(qp):
+        quad_spec = _curve_spec_with_quadpoints(spec, qp)
+        base_dofs = _mapped_input_dofs(quad_spec.base_curve_map, dofs)
+        alpha, _alphadash = _rotation_alpha_and_dash_from_dofs(
+            quad_spec.rotation,
+            quad_spec.rotation_map,
+            dofs,
+        )
+        gamma, gammadash = curve_gamma_and_dash_from_dofs(
+            quad_spec.base_curve, base_dofs
+        )
+        if quad_spec.frame_kind == "frenet":
+            _gamma, _gammadash, gammadashdash = curve_geometry_from_dofs(
+                quad_spec.base_curve,
+                base_dofs,
+            )
+            _tangent, normal, binormal = rotated_frenet_frame(
+                gamma,
+                gammadash,
+                gammadashdash,
+                alpha,
+            )
+        else:
+            _tangent, normal, binormal = rotated_centroid_frame(
+                gamma,
+                gammadash,
+                alpha,
+            )
+        return gamma + quad_spec.dn * normal + quad_spec.db * binormal
+
+    quadpoints, tangents = _curve_quadpoints(spec)
+    gamma, gammadash = jax.jvp(gamma_kernel, (quadpoints,), (tangents,))
+    gammadash_kernel = lambda qp: jax.jvp(gamma_kernel, (qp,), (tangents,))[1]
+    _, gammadashdash = jax.jvp(gammadash_kernel, (quadpoints,), (tangents,))
+    return gamma, gammadash, gammadashdash
 
 
 def _curve_filament_gamma_and_dash_from_dofs(spec: CurveFilamentSpec, dofs):
@@ -261,6 +350,10 @@ def curve_geometry_from_spec(spec: CurveSpec):
 
 def curve_geometry_from_dofs(spec: CurveSpec, dofs):
     """Return (gamma, gammadash, gammadashdash) from a single kernel build."""
+    if isinstance(spec, CurvePerturbedSpec):
+        return _curve_perturbed_geometry_from_dofs(spec, dofs)
+    if isinstance(spec, CurveFilamentSpec):
+        return _curve_filament_geometry_from_dofs(spec, dofs)
     gamma_kernel = _curve_gamma_kernel(spec, dofs)
     quadpoints, tangents = _curve_quadpoints(spec)
     gamma, gammadash = jax.jvp(gamma_kernel, (quadpoints,), (tangents,))

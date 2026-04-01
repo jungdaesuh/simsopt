@@ -321,6 +321,8 @@ class CurvePerturbedSpec:
     base_curve_map: OptimizableDofMapSpec
     sample_gamma: jax.Array
     sample_gammadash: jax.Array
+    sample_gammadashdash: jax.Array
+    sample_gammadashdashdash: jax.Array
 
 
 jax.tree_util.register_dataclass(
@@ -332,6 +334,8 @@ jax.tree_util.register_dataclass(
         "base_curve_map",
         "sample_gamma",
         "sample_gammadash",
+        "sample_gammadashdash",
+        "sample_gammadashdashdash",
     ],
     meta_fields=[],
 )
@@ -530,6 +534,8 @@ def make_curve_perturbed_spec(
     base_curve_map: OptimizableDofMapSpec,
     sample_gamma: object,
     sample_gammadash: object,
+    sample_gammadashdash: object,
+    sample_gammadashdashdash: object,
 ) -> CurvePerturbedSpec:
     return CurvePerturbedSpec(
         dofs=_as_float64_array(dofs),
@@ -538,6 +544,8 @@ def make_curve_perturbed_spec(
         base_curve_map=base_curve_map,
         sample_gamma=_as_float64_array(sample_gamma),
         sample_gammadash=_as_float64_array(sample_gammadash),
+        sample_gammadashdash=_as_float64_array(sample_gammadashdash),
+        sample_gammadashdashdash=_as_float64_array(sample_gammadashdashdash),
     )
 
 

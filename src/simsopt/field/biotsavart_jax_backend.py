@@ -38,28 +38,11 @@ from ..jax_core.field import (
 )
 from ..jax_core.specs import make_field_eval_spec
 from ..jax_core.biotsavart import (
-    biot_savart_B,
     biot_savart_B_vjp,
 )
 from .coil import _unwrap_coil_curve_and_current_objects
 
 __all__ = ["BiotSavartJAX"]
-
-
-@jax.jit
-def _single_coil_b_vjp(points, v, gamma, gammadash, current):
-    """Reverse-mode pullback for one coil at a time.
-
-    Keeping the reverse pass at single-coil granularity avoids materializing
-    grouped multi-coil intermediates in device memory while still letting JAX
-    cache one compiled VJP per distinct quadrature shape.
-    """
-
-    def fwd(g, gd, c):
-        return biot_savart_B(points, g[None, ...], gd[None, ...], c[None])
-
-    _, pullback = jax.vjp(fwd, gamma, gammadash, current)
-    return pullback(v)
 
 
 def _time_call_result(callback):
@@ -797,10 +780,10 @@ class BiotSavartJAX(Optimizable):
         Accepts both NumPy and JAX arrays.  JAX arrays stay on device
         without a host round-trip.
         """
-        if isinstance(points, jax.Array):
-            self._points_jax = points
-        else:
-            self._points_jax = jnp.asarray(np.ascontiguousarray(points))
+        points_array = (
+            points if isinstance(points, jax.Array) else np.ascontiguousarray(points)
+        )
+        self._points_jax = jnp.asarray(points_array, dtype=jnp.float64)
         self._points_version += 1
 
     def set_points_from_spec(self, field_eval_spec):

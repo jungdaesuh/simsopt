@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import importlib
 import os
+from pathlib import Path
+import sys
+import types
 import warnings
 
 import pytest
@@ -23,9 +26,22 @@ _BACKEND_ENV_VARS = (
 
 
 def _fresh_backend():
-    import simsopt.backend as backend
-
-    mod = importlib.reload(backend)
+    package_root = Path(__file__).resolve().parents[1] / "src" / "simsopt"
+    sys.modules.pop("simsopt.backend.runtime", None)
+    sys.modules.pop("simsopt.backend", None)
+    sys.modules.pop("simsopt", None)
+    package = types.ModuleType("simsopt")
+    package.__path__ = [str(package_root)]
+    sys.modules["simsopt"] = package
+    spec = importlib.util.spec_from_file_location(
+        "simsopt.backend",
+        package_root / "backend.py",
+    )
+    assert spec is not None
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["simsopt.backend"] = mod
+    assert spec.loader is not None
+    spec.loader.exec_module(mod)
     mod.invalidate_backend_cache()
     return mod
 
@@ -129,6 +145,19 @@ def test_backend_resolves_legacy_env_pair(monkeypatch):
     assert config.jax_platform == "cuda"
 
 
+def test_backend_resolves_stage2_backend_env_alias(monkeypatch):
+    _clear_backend_env(monkeypatch)
+    monkeypatch.setenv("STAGE2_BACKEND", "jax")
+    monkeypatch.setenv("SIMSOPT_JAX_BACKEND", "cuda")
+    backend = _fresh_backend()
+
+    config = backend.get_backend_config()
+
+    assert config.mode == "jax_gpu_parity"
+    assert config.backend == "jax"
+    assert config.jax_platform == "cuda"
+
+
 def test_set_backend_updates_mode_and_legacy_envs(monkeypatch):
     _clear_backend_env(monkeypatch)
     backend = _fresh_backend()
@@ -213,6 +242,20 @@ def test_fast_mode_policy_helpers(monkeypatch):
         mode="jax_gpu_fast",
         expected=None,
     )
+
+
+def test_gpu_parity_mode_exposes_ci_contract_defaults(monkeypatch):
+    _clear_backend_env(monkeypatch)
+    monkeypatch.setenv("SIMSOPT_BACKEND_MODE", "jax_gpu_parity")
+    backend = _fresh_backend()
+
+    policy = backend.get_backend_policy()
+
+    assert policy.gpu_reduction_order_max_ulp == 10
+    assert policy.gpu_reduction_order_rel_tol == pytest.approx(1e-12)
+    assert policy.gpu_reproducibility_seed == 1729
+    assert policy.gpu_reproducibility_sample_size == 1000
+    assert policy.tolerance_ratchet_factor == pytest.approx(10.0)
 
 
 @pytest.mark.parametrize("mode", ["jax_cpu_parity", "jax_gpu_parity"])
@@ -310,6 +353,26 @@ def test_jax_modes_do_not_enable_compilation_cache_without_opt_in(monkeypatch):
     assert config.compilation_cache_dir is None
     assert backend.get_compilation_cache_dir() is None
     assert policy.compilation_cache_dir is None
+
+
+def test_apply_jax_runtime_config_skips_none_transfer_guard(monkeypatch):
+    _clear_backend_env(monkeypatch)
+    backend = _fresh_backend()
+    calls: list[tuple[str, object]] = []
+    fake_jax = types.SimpleNamespace(
+        config=types.SimpleNamespace(
+            update=lambda name, value: calls.append((name, value))
+        )
+    )
+    monkeypatch.setitem(sys.modules, "jax", fake_jax)
+
+    backend.set_backend("jax_gpu_fast", configure_runtime=False)
+    backend.apply_jax_runtime_config()
+
+    assert ("jax_platforms", "cuda") in calls
+    assert ("jax_enable_x64", True) in calls
+    assert ("jax_debug_nans", False) in calls
+    assert ("jax_transfer_guard", None) not in calls
 
 
 def test_strict_fallback_helper_ignores_native_cpu(monkeypatch):

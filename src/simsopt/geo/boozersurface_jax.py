@@ -37,7 +37,8 @@ import jax
 import jax.numpy as jnp
 import jax.scipy.linalg
 
-from ..backend import raise_if_strict_jax_fallback
+from ..backend import raise_if_strict_jax_fallback, warn_if_jax_fallback
+from ..backend.runtime import register_backend_cache_clear
 
 try:
     from simsopt._core.optimizable import Optimizable
@@ -94,6 +95,13 @@ _GROUPED_EXTRACTOR_FALLBACK_DETAIL = (
 )
 _COILS_LIST_FALLBACK_DETAIL = "_coils list extraction in _refresh_coil_data()"
 _WARNED_HIDDEN_GROUPED_FALLBACK_DETAILS: set[str] = set()
+
+
+def _clear_hidden_grouped_fallback_warning_cache() -> None:
+    _WARNED_HIDDEN_GROUPED_FALLBACK_DETAILS.clear()
+
+
+register_backend_cache_clear(_clear_hidden_grouped_fallback_warning_cache)
 
 
 def _raise_if_strict_hidden_grouped_coil_spec_fallback(detail: str) -> None:
@@ -1080,9 +1088,13 @@ class BoozerSurfaceJAX(Optimizable):
         self.stellsym = s.stellsym
         self.quadpoints_phi = jnp.asarray(s.quadpoints_phi, dtype=jnp.float64)
         self.quadpoints_theta = jnp.asarray(s.quadpoints_theta, dtype=jnp.float64)
-        self._surface_geometry_kind = (
-            "rzfourier" if type(s).__name__ == "SurfaceRZFourier" else "generic"
-        )
+        surface_type_name = type(s).__name__
+        if surface_type_name == "SurfaceRZFourier":
+            self._surface_geometry_kind = "rzfourier"
+        elif surface_type_name == "SurfaceXYZFourier":
+            self._surface_geometry_kind = "xyzfourier"
+        else:
+            self._surface_geometry_kind = "generic"
 
         # Stellsym DOF scatter indices
         if self.stellsym:
@@ -1459,6 +1471,13 @@ class BoozerSurfaceJAX(Optimizable):
         require_target_backend_x64(optimizer_backend)
         if optimizer_backend != "ondevice":
             raise_if_strict_jax_fallback(
+                component="BoozerSurfaceJAX",
+                detail=(
+                    f"optimizer_backend={optimizer_backend!r} on the LS "
+                    "reference/transitional solver lane"
+                ),
+            )
+            warn_if_jax_fallback(
                 component="BoozerSurfaceJAX",
                 detail=(
                     f"optimizer_backend={optimizer_backend!r} on the LS "
