@@ -2052,6 +2052,45 @@ class TestCompositeObjective:
         assert np.isfinite(j), "Composite J is not finite"
         assert np.all(np.isfinite(g)), "Composite dJ contains NaN/inf"
 
+    def test_boozer_residual_uses_spec_reconstruction_not_live_field_path(
+        self,
+        boozer_setup,
+        monkeypatch,
+    ):
+        """BoozerResidualJAX should rebuild coil data through immutable specs."""
+        (_, _, _, _, bs_jax, _, booz_jax, _) = boozer_setup
+
+        original_coil_set_spec_from_dofs = bs_jax.coil_set_spec_from_dofs
+        calls = {"count": 0}
+
+        def _counting_coil_set_spec_from_dofs(coil_dofs):
+            calls["count"] += 1
+            return original_coil_set_spec_from_dofs(coil_dofs)
+
+        def _reject_set_points(*_args, **_kwargs):
+            raise AssertionError(
+                "BoozerResidualJAX should not call set_points() on the spec path"
+            )
+
+        def _reject_B_vjp(*_args, **_kwargs):
+            raise AssertionError(
+                "BoozerResidualJAX should not call B_vjp() on the spec path"
+            )
+
+        monkeypatch.setattr(
+            bs_jax,
+            "coil_set_spec_from_dofs",
+            _counting_coil_set_spec_from_dofs,
+        )
+        monkeypatch.setattr(bs_jax, "set_points", _reject_set_points)
+        monkeypatch.setattr(bs_jax, "B_vjp", _reject_B_vjp)
+
+        jr_jax = BoozerResidualJAX(booz_jax, bs_jax)
+        gradient = np.array(jr_jax.dJ())
+
+        assert np.all(np.isfinite(gradient))
+        assert calls["count"] > 0
+
 
 # -----------------------------------------------------------------------
 # Test 6: JAX gradient finite-difference validation

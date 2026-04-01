@@ -126,6 +126,24 @@ def _coil_dofs_gradient_to_derivative(biotsavart, coil_dofs_gradient):
     return Derivative(deriv_data)
 
 
+def _current_coil_dofs_and_spec(biotsavart):
+    """Return the current free coil DOFs and their immutable grouped spec."""
+    current_coil_dofs = jnp.asarray(biotsavart.x.copy(), dtype=jnp.float64)
+    return current_coil_dofs, biotsavart.coil_set_spec_from_dofs(current_coil_dofs)
+
+
+def _value_and_direct_coil_derivative(biotsavart, objective_of_coils, coil_dofs):
+    """Evaluate a coil-DOF objective and map its direct gradient to Derivative."""
+    objective_value, coil_dofs_gradient = jax.jit(
+        jax.value_and_grad(objective_of_coils)
+    )(coil_dofs)
+    direct_derivative = _coil_dofs_gradient_to_derivative(
+        biotsavart,
+        coil_dofs_gradient,
+    )
+    return float(objective_value), direct_derivative
+
+
 def _qs_ratio_from_coil_dofs(sdofs, coil_dofs, biotsavart, **qs_kwargs):
     """Evaluate the QS-ratio objective from explicit coil DOFs via immutable specs."""
     return _qs_ratio_pure(
@@ -345,11 +363,11 @@ class BoozerResidualJAX(Optimizable):
         G = booz_surf.res["G"]
         weight_inv_modB = booz_surf.res.get("weight_inv_modB", True)
         x_inner = booz_surf._pack_decision_vector(iota, G, sdofs=sdofs)
-        current_coil_dofs = jnp.asarray(self.biotsavart.x.copy(), dtype=jnp.float64)
+        current_coil_dofs, coil_set_spec = _current_coil_dofs_and_spec(self.biotsavart)
 
-        def objective_of_coils(coil_dofs, x):
+        def objective_of_coils(coil_dofs):
             return _boozer_penalty_objective(
-                x,
+                x_inner,
                 coil_set_spec=self.biotsavart.coil_set_spec_from_dofs(coil_dofs),
                 quadpoints_phi=booz_surf.quadpoints_phi,
                 quadpoints_theta=booz_surf.quadpoints_theta,
@@ -367,52 +385,14 @@ class BoozerResidualJAX(Optimizable):
                 weight_inv_modB=weight_inv_modB,
             )
 
-        self._J = float(jax.jit(objective_of_coils)(current_coil_dofs, x_inner))
-
-        # Evaluate surface geometry and field entirely via JAX (no CPU
-        # surface.gamma/gammadash/label.J round-trips).
-        gamma, xphi_jax, xtheta_jax = _surface_geometry_from_dofs(
-            sdofs,
-            booz_surf.quadpoints_phi,
-            booz_surf.quadpoints_theta,
-            booz_surf.mpol,
-            booz_surf.ntor,
-            booz_surf.nfp,
-            booz_surf.stellsym,
-            booz_surf.scatter_indices,
+        self._J, dJ_by_dcoils = _value_and_direct_coil_derivative(
+            self.biotsavart,
+            objective_of_coils,
+            current_coil_dofs,
         )
-        nphi, ntheta = gamma.shape[0], gamma.shape[1]
-        num_points = 3 * nphi * ntheta
-        points = gamma.reshape(-1, 3)
-
-        # Set points on biotsavart (needed for B_vjp later) — JAX array
-        # stays on device via the updated set_points().
-        self.biotsavart.set_points(points)
-
-        effective_G = _resolved_boozer_G(booz_surf)
-        cw = self.constraint_weight if self.constraint_weight is not None else 1.0
-
-        B_3d = grouped_biot_savart_B_from_spec(
-            points,
-            booz_surf.coil_set_spec,
-        ).reshape(nphi, ntheta, 3)
-
         vjp_groups_fn = booz_surf.res.get("vjp_groups")
 
-        dJ_by_dB = self._compute_dJ_by_dB(
-            B_3d,
-            xphi_jax,
-            xtheta_jax,
-            iota,
-            effective_G,
-            weight_inv_modB,
-            nphi,
-            ntheta,
-            num_points,
-        )
-        dJ_by_dcoils = self.biotsavart.B_vjp(dJ_by_dB)
-
-        dJ_ds = self._compute_dJ_ds(iota, G, weight_inv_modB, cw, nphi, ntheta)
+        dJ_ds = self._compute_dJ_ds(coil_set_spec, iota, G, weight_inv_modB)
         adj = _solve_boozer_adjoint(booz_surf, dJ_ds)
 
         adj_derivative = _adjoint_coil_derivative(
@@ -426,34 +406,14 @@ class BoozerResidualJAX(Optimizable):
 
         self._dJ = dJ_by_dcoils - adj_derivative
 
-    def _compute_dJ_by_dB(
-        self,
-        B_3d,
-        xphi,
-        xtheta,
-        iota,
-        G,
-        weight_inv_modB,
-        nphi,
-        ntheta,
-        num_points,
-    ):
-        """Compute ∂J_boozer/∂B via JAX autodiff."""
-
-        def J_of_B_flat(B_flat):
-            Bv = B_flat.reshape(nphi, ntheta, 3)
-            rv = boozer_residual_vector(G, iota, Bv, xphi, xtheta, weight_inv_modB)
-            return 0.5 * jnp.sum(rv**2) / num_points
-
-        B_flat = B_3d.reshape(-1)
-        dJ_dB = jax.grad(J_of_B_flat)(B_flat)
-        return dJ_dB.reshape(-1, 3)
-
-    def _compute_dJ_ds(self, iota, G, weight_inv_modB, cw, nphi, ntheta):
+    def _compute_dJ_ds(self, coil_set_spec, iota, G, weight_inv_modB):
         """Compute ∂J_BR/∂[surface_dofs, iota, G] via JAX autodiff."""
         booz_surf = self.boozer_surface
         sdofs = booz_surf._get_surface_dofs()
         optimize_G = G is not None
+        constraint_weight = (
+            self.constraint_weight if self.constraint_weight is not None else 1.0
+        )
 
         if optimize_G:
             x_inner = jnp.concatenate([sdofs, jnp.array([iota, G])])
@@ -462,7 +422,7 @@ class BoozerResidualJAX(Optimizable):
 
         dJ_ds_jax = jax.grad(_boozer_residual_J_of_x_inner)(
             x_inner,
-            coil_set_spec=booz_surf.coil_set_spec,
+            coil_set_spec=coil_set_spec,
             quadpoints_phi=booz_surf.quadpoints_phi,
             quadpoints_theta=booz_surf.quadpoints_theta,
             mpol=booz_surf.mpol,
@@ -473,7 +433,7 @@ class BoozerResidualJAX(Optimizable):
             surface_kind=booz_surf._surface_geometry_kind,
             optimize_G=optimize_G,
             weight_inv_modB=weight_inv_modB,
-            constraint_weight=cw,
+            constraint_weight=constraint_weight,
             targetlabel=booz_surf.targetlabel,
             label_type=booz_surf.label_type,
             phi_idx=booz_surf.phi_idx,
@@ -618,8 +578,7 @@ class NonQuasiSymmetricRatioJAX(Optimizable):
         vjp_groups_fn = booz_surf.res.get("vjp_groups")
 
         sdofs = booz_surf._get_surface_dofs()
-        current_coil_dofs = jnp.asarray(self.biotsavart.x.copy(), dtype=jnp.float64)
-        coil_set_spec = self.biotsavart.coil_set_spec_from_dofs(current_coil_dofs)
+        current_coil_dofs, coil_set_spec = _current_coil_dofs_and_spec(self.biotsavart)
 
         qs_kwargs = dict(
             quadpoints_phi=self._aux_phi_jax,
