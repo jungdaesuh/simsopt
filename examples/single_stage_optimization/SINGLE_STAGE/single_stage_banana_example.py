@@ -895,37 +895,32 @@ def resolve_boozer_optimizer_backend(
     return boozer_optimizer_backend
 
 
-def _resolve_single_stage_contract(field_backend, optimizer_backend):
-    """Resolve the optimizer contract for the single-stage outer loop."""
-    from simsopt.geo.optimizer_jax import resolve_continuous_optimizer_contract
+_SINGLE_STAGE_COMPONENT_LABEL = "the single-stage outer loop"
 
-    return resolve_continuous_optimizer_contract(
+
+def resolve_single_stage_optimizer_contract(field_backend, optimizer_backend):
+    """Resolve the optimizer contract for the single-stage outer loop."""
+    from simsopt.geo.optimizer_jax import resolve_outer_loop_optimizer_contract
+
+    return resolve_outer_loop_optimizer_contract(
         field_backend,
         optimizer_backend,
-        limited_memory=True,
-        allow_hybrid=False,
-        component_label="the single-stage outer loop",
+        component_label=_SINGLE_STAGE_COMPONENT_LABEL,
     )
 
 
 def resolve_single_stage_outer_optimizer_method(field_backend, optimizer_backend):
     """Return the shared optimizer adapter method for the outer single-stage loop."""
-    return _resolve_single_stage_contract(field_backend, optimizer_backend).method
-
-
-def use_single_stage_target_scalar_objective(field_backend, optimizer_backend):
-    """Return whether the outer loop should use the scalar traceable objective."""
-    return _resolve_single_stage_contract(
+    return resolve_single_stage_optimizer_contract(
         field_backend, optimizer_backend
-    ).use_scalar_objective
+    ).method
 
 
 def run_single_stage_optimizer(
     fun,
     dofs,
     *,
-    field_backend,
-    optimizer_backend,
+    contract,
     maxiter,
     ftol,
     gtol,
@@ -936,7 +931,6 @@ def run_single_stage_optimizer(
     """Run the single-stage outer optimization through the shared adapter."""
     from simsopt.geo.optimizer_jax import jax_minimize
 
-    contract = _resolve_single_stage_contract(field_backend, optimizer_backend)
     if contract.use_scalar_objective and scalar_fun is None:
         raise RuntimeError(
             "Single-stage target-lane optimization requires a scalar JAX objective."
@@ -1629,10 +1623,11 @@ if __name__ == "__main__":
     dofs, run_dict, static_config = snapshot_to_pytree(
         JF, boozer_surface, bs, num_tf_coils=num_tf_coils
     )
-    use_target_lane = use_single_stage_target_scalar_objective(
+    outer_contract = resolve_single_stage_optimizer_contract(
         args.backend,
         args.optimizer_backend,
     )
+    use_target_lane = outer_contract.use_scalar_objective
     adapter = SingleStageAdapter(
         run_dict=run_dict,
         boozer_surface=boozer_surface,
@@ -1683,8 +1678,7 @@ if __name__ == "__main__":
             adapter,
             dofs,
             callback=adapter.callback,
-            field_backend=args.backend,
-            optimizer_backend=args.optimizer_backend,
+            contract=outer_contract,
             maxiter=MAXITER,
             ftol=ftol,
             gtol=gtol,
@@ -1784,12 +1778,7 @@ if __name__ == "__main__":
         "optimizer_backend": optimizer_backend_record,
         "boozer_optimizer_backend": boozer_optimizer_backend_record,
         "boozer_optimizer_method": boozer_surface.res.get("optimizer_method"),
-        "outer_optimizer_method": resolve_single_stage_outer_optimizer_method(
-            args.backend,
-            args.optimizer_backend,
-        )
-        if args.backend == "jax"
-        else "lbfgs",
+        "outer_optimizer_method": outer_contract.method,
         "init_only": args.init_only,
         "max_iterations": MAXITER,
         "maxcor": args.maxcor,

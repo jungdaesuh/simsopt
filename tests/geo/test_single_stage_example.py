@@ -259,11 +259,25 @@ class SingleStageExampleTests(unittest.TestCase):
                     "optimizer_backend must be one of: scipy, hybrid, ondevice."
                 )
 
+        def resolve_outer_loop_optimizer_contract(
+            field_backend, optimizer_backend, *, component_label
+        ):
+            return resolve_continuous_optimizer_contract(
+                field_backend,
+                optimizer_backend,
+                limited_memory=True,
+                allow_hybrid=False,
+                component_label=component_label,
+            )
+
         fake_optimizer_module = types.ModuleType("simsopt.geo.optimizer_jax")
         fake_optimizer_module.jax_minimize = jax_minimize
         fake_optimizer_module.require_target_backend_x64 = require_target_backend_x64
         fake_optimizer_module.resolve_continuous_optimizer_contract = (
             resolve_continuous_optimizer_contract
+        )
+        fake_optimizer_module.resolve_outer_loop_optimizer_contract = (
+            resolve_outer_loop_optimizer_contract
         )
         scipy_patch = patch(
             "scipy.optimize.minimize", side_effect=scipy_minimize_side_effect
@@ -467,11 +481,11 @@ class SingleStageExampleTests(unittest.TestCase):
             jax_minimize=fake_jax_minimize,
         ):
             callback = object()
+            contract = module.resolve_single_stage_optimizer_contract("jax", "ondevice")
             result = module.run_single_stage_optimizer(
                 lambda x: (1.0, np.asarray(x)),
                 np.array([1.0, -2.0]),
-                field_backend="jax",
-                optimizer_backend="ondevice",
+                contract=contract,
                 maxiter=7,
                 ftol=1e-8,
                 gtol=1e-6,
@@ -493,6 +507,9 @@ class SingleStageExampleTests(unittest.TestCase):
 
     def test_run_single_stage_optimizer_target_lane_requires_scalar_objective(self):
         module = self.load_module()
+        target_contract = types.SimpleNamespace(
+            method="lbfgs-ondevice", use_scalar_objective=True
+        )
 
         with self.assertRaisesRegex(
             RuntimeError,
@@ -501,8 +518,7 @@ class SingleStageExampleTests(unittest.TestCase):
             module.run_single_stage_optimizer(
                 lambda x: (1.0, np.asarray(x)),
                 np.array([1.0, -2.0]),
-                field_backend="jax",
-                optimizer_backend="ondevice",
+                contract=target_contract,
                 maxiter=7,
                 ftol=1e-8,
                 gtol=1e-6,
@@ -531,11 +547,11 @@ class SingleStageExampleTests(unittest.TestCase):
             jax_minimize=fake_jax_minimize,
             scipy_minimize_side_effect=AssertionError,
         ):
+            contract = module.resolve_single_stage_optimizer_contract("jax", "ondevice")
             result = module.run_single_stage_optimizer(
                 lambda x: (1.0, np.asarray(x)),
                 np.array([0.0, 0.0]),
-                field_backend="jax",
-                optimizer_backend="ondevice",
+                contract=contract,
                 maxiter=1,
                 ftol=0.0,
                 gtol=1e-6,
@@ -570,17 +586,7 @@ class SingleStageExampleTests(unittest.TestCase):
                 "optimizer_backend='hybrid' is transitional and not supported "
                 "for the single-stage outer loop",
             ):
-                module.run_single_stage_optimizer(
-                    lambda x: (1.0, np.asarray(x)),
-                    np.array([1.0, -2.0]),
-                    field_backend="jax",
-                    optimizer_backend="hybrid",
-                    maxiter=7,
-                    ftol=1e-8,
-                    gtol=1e-6,
-                    maxcor=9,
-                    callback=object(),
-                )
+                module.resolve_single_stage_optimizer_contract("jax", "hybrid")
 
     def test_resolve_single_stage_outer_optimizer_method_rejects_cpu_ondevice(self):
         module = self.load_module()
