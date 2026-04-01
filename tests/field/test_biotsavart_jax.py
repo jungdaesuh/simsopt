@@ -37,19 +37,6 @@ def _load(name, relpath):
     return mod
 
 
-@contextmanager
-def _backend_mode(mode: str):
-    previous_mode = os.environ.get("SIMSOPT_BACKEND_MODE")
-    os.environ["SIMSOPT_BACKEND_MODE"] = mode
-    try:
-        yield
-    finally:
-        if previous_mode is None:
-            del os.environ["SIMSOPT_BACKEND_MODE"]
-        else:
-            os.environ["SIMSOPT_BACKEND_MODE"] = previous_mode
-
-
 def _load_with_backend_mode(mode: str):
     return _load(f"biotsavart_jax_{mode}", "field/biotsavart_jax.py")
 
@@ -381,7 +368,7 @@ class TestBiotSavartJaxChunkedParity:
     """Directly compare chunked low-level kernels against dense references."""
 
     def test_chunked_B_and_dB_match_dense_reference(self):
-        with _backend_mode("jax_cpu_parity"):
+        with _kernel_tuning_env("jax_cpu_parity"):
             chunked_bs = _load_chunked_biotsavart()
             assert chunked_bs._coil_chunk_size() > 0
 
@@ -439,7 +426,7 @@ class TestBiotSavartJaxChunkedParity:
             )
 
     def test_chunked_A_matches_dense_reference(self):
-        with _backend_mode("jax_cpu_parity"):
+        with _kernel_tuning_env("jax_cpu_parity"):
             chunked_bs = _load_chunked_biotsavart()
             assert chunked_bs._coil_chunk_size() > 0
 
@@ -465,7 +452,7 @@ class TestBiotSavartJaxChunkedParity:
             np.testing.assert_allclose(np.asarray(A), np.asarray(dense_A), atol=1e-14)
 
     def test_point_chunked_B_A_dB_dA_match_dense_reference(self, monkeypatch):
-        with _backend_mode("jax_cpu_parity"):
+        with _kernel_tuning_env("jax_cpu_parity"):
             chunked_bs = _load_chunked_biotsavart()
             from simsopt.jax_core import biotsavart as core_bs
 

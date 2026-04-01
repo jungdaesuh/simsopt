@@ -102,10 +102,6 @@ def grouped_coil_set_spec_from_source(coil_source: object) -> GroupedCoilSetSpec
     return grouped_coil_set_spec_from_inputs(coil_source)
 
 
-def _coil_set_spec_from_inputs(coil_arrays: object) -> GroupedCoilSetSpec:
-    return grouped_coil_set_spec_from_inputs(coil_arrays)
-
-
 def grouped_field_inputs_from_spec(
     coil_spec: GroupedCoilSetSpec,
 ) -> tuple[tuple[object, object, object], ...]:
@@ -145,7 +141,9 @@ def grouped_coil_currents_from_spec(
 
 
 def grouped_coil_currents_from_inputs(coil_arrays: object):
-    return grouped_coil_currents_from_spec(_coil_set_spec_from_inputs(coil_arrays))
+    return grouped_coil_currents_from_spec(
+        grouped_coil_set_spec_from_inputs(coil_arrays)
+    )
 
 
 def grouped_biot_savart_B_from_spec(points: object, coil_spec: GroupedCoilSetSpec):
@@ -155,7 +153,7 @@ def grouped_biot_savart_B_from_spec(points: object, coil_spec: GroupedCoilSetSpe
 def grouped_biot_savart_B_from_inputs(points: object, coil_arrays: object):
     return grouped_biot_savart_B_from_spec(
         points,
-        _coil_set_spec_from_inputs(coil_arrays),
+        grouped_coil_set_spec_from_inputs(coil_arrays),
     )
 
 
@@ -166,7 +164,7 @@ def grouped_biot_savart_A_from_spec(points: object, coil_spec: GroupedCoilSetSpe
 def grouped_biot_savart_A_from_inputs(points: object, coil_arrays: object):
     return grouped_biot_savart_A_from_spec(
         points,
-        _coil_set_spec_from_inputs(coil_arrays),
+        grouped_coil_set_spec_from_inputs(coil_arrays),
     )
 
 

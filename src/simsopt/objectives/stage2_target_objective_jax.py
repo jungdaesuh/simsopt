@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from typing import Callable, NamedTuple
 
-import numpy as np
 import jax.numpy as jnp
 
 from ..field.biotsavart_jax_backend import _unwrap_coil_curve_and_current
@@ -50,12 +49,6 @@ class Stage2TargetObjectiveBundle(NamedTuple):
     expected_dof_count: int
     terms: tuple[Stage2TargetObjectiveTerm, ...] = ()
     raw_terms: Stage2ObjectiveFn | None = None
-
-
-def _as_jax_float64_array(values, *, contiguous=False):
-    if contiguous:
-        values = np.ascontiguousarray(values)
-    return jnp.asarray(values, dtype=jnp.float64)
 
 
 def _fixed_curve_penalty(curves, minimum_distance):
@@ -106,7 +99,7 @@ def _build_dynamic_curve_data(
     return (
         tuple(dynamic_gammas),
         tuple(dynamic_gammadashs),
-        _as_jax_float64_array(dynamic_currents),
+        jnp.asarray(dynamic_currents, dtype=jnp.float64),
     )
 
 
