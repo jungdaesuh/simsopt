@@ -24,7 +24,9 @@ _BACKEND_ENV_VARS = (
 def _fresh_backend():
     import simsopt.backend as backend
 
-    return importlib.reload(backend)
+    mod = importlib.reload(backend)
+    mod.invalidate_backend_cache()
+    return mod
 
 
 def _clear_backend_env(monkeypatch) -> None:

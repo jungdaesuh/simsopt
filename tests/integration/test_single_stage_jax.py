@@ -24,6 +24,7 @@ import gc
 import re
 
 import pytest
+from conftest import enable_strict_jax_backend
 import numpy as np
 import jax
 import jax.numpy as jnp
@@ -120,9 +121,9 @@ def _iota_unit_rhs(plu):
     return rhs
 
 
-def _enable_strict_jax_backend(monkeypatch, mode="jax_gpu_parity"):
-    monkeypatch.setenv("SIMSOPT_BACKEND_MODE", mode)
-    monkeypatch.setenv("SIMSOPT_BACKEND_STRICT", "1")
+from functools import partial
+
+_enable_strict_jax_backend = partial(enable_strict_jax_backend, mode="jax_gpu_parity")
 
 
 def _assert_hidden_spec_fallback_rejected(

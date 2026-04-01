@@ -327,18 +327,25 @@ def _runtime_env_value(attribute_name: str, value: object) -> str:
     return str(value)
 
 
+_cached_backend_policy: BackendPolicy | None = None
+
+
 def get_backend_policy(mode: str | None = None) -> BackendPolicy:
     """Return the numerical-policy contract for a backend mode."""
+    global _cached_backend_policy
     if mode is None:
-        config = get_backend_config()
-    else:
-        resolved_mode = _resolve_mode(mode)
-        current_config = get_backend_config()
-        config = (
-            current_config
-            if current_config.mode == resolved_mode
-            else _config_from_mode(resolved_mode, strict=False)
-        )
+        if _cached_backend_policy is not None:
+            return _cached_backend_policy
+        policy = _policy_from_config(get_backend_config())
+        _cached_backend_policy = policy
+        return policy
+    resolved_mode = _resolve_mode(mode)
+    current_config = get_backend_config()
+    config = (
+        current_config
+        if current_config.mode == resolved_mode
+        else _config_from_mode(resolved_mode, strict=False)
+    )
     return _policy_from_config(config)
 
 
@@ -365,30 +372,43 @@ def _mode_from_legacy_env(backend: str, platform: str) -> str:
     return "jax_gpu_parity"
 
 
+_cached_backend_config: BackendConfig | None = None
+
+
 def get_backend_config() -> BackendConfig:
-    """Return the resolved backend configuration."""
+    """Return the resolved backend configuration.
+
+    The result is cached after first resolution. Call
+    ``invalidate_backend_cache()`` or ``set_backend()`` to clear.
+    """
+    global _cached_backend_config
+    if _cached_backend_config is not None:
+        return _cached_backend_config
+
     strict = _env_bool(_STRICT_ENV)
     mode = os.environ.get(_MODE_ENV)
     if mode is not None:
-        return _config_from_mode(mode, strict=strict)
+        config = _config_from_mode(mode, strict=strict)
+    else:
+        backend = _resolve_legacy_value(
+            _BACKEND_ENV,
+            _BACKEND_LEGACY_ENV,
+            "cpu",
+            validator=_validate_backend,
+        )
+        platform = _resolve_legacy_value(
+            _PLATFORM_ENV,
+            _PLATFORM_LEGACY_ENV,
+            "cpu",
+            validator=_validate_platform,
+        )
+        config = _config_from_mode(
+            _mode_from_legacy_env(backend, platform),
+            strict=strict,
+        )
 
-    backend = _resolve_legacy_value(
-        _BACKEND_ENV,
-        _BACKEND_LEGACY_ENV,
-        "cpu",
-        validator=_validate_backend,
-    )
-    platform = _resolve_legacy_value(
-        _PLATFORM_ENV,
-        _PLATFORM_LEGACY_ENV,
-        "cpu",
-        validator=_validate_platform,
-    )
-
-    return _config_from_mode(
-        _mode_from_legacy_env(backend, platform),
-        strict=strict,
-    )
+    _cached_backend_config = config
+    return config
 
 
 def get_backend_mode() -> str:
@@ -446,11 +466,17 @@ def get_provenance_label(mode: str | None = None) -> str:
     return get_backend_policy(mode).provenance_label
 
 
+_cached_field_kernel_tuning: FieldKernelTuning | None = None
+
+
 def get_field_kernel_tuning(mode: str | None = None) -> FieldKernelTuning:
     """Return the low-level field-kernel tuning contract for the resolved mode."""
+    global _cached_field_kernel_tuning
+    if mode is None and _cached_field_kernel_tuning is not None:
+        return _cached_field_kernel_tuning
     resolved_mode = _resolve_mode(mode)
     policy = get_backend_policy(resolved_mode)
-    return FieldKernelTuning(
+    tuning = FieldKernelTuning(
         mode=resolved_mode,
         chunk_policy=policy.chunk_policy,
         coil_chunk_size=_field_kernel_value(resolved_mode, "coil_chunk_size"),
@@ -459,6 +485,9 @@ def get_field_kernel_tuning(mode: str | None = None) -> FieldKernelTuning:
             "quadrature_block_size",
         ),
     )
+    if mode is None:
+        _cached_field_kernel_tuning = tuning
+    return tuning
 
 
 def get_coil_chunk_size(mode: str | None = None) -> int:
@@ -490,6 +519,20 @@ def get_transfer_guard(mode: str | None = None) -> str | None:
 def get_compilation_cache_dir(mode: str | None = None) -> str | None:
     """Return the active JAX compilation-cache directory for the resolved mode."""
     return get_backend_policy(mode).compilation_cache_dir
+
+
+def invalidate_backend_cache() -> None:
+    """Clear the cached backend configuration and derived caches.
+
+    Call this after mutating ``SIMSOPT_*`` environment variables directly
+    (outside of ``set_backend()``) so the next ``get_backend_config()`` call
+    re-reads the environment.  Test fixtures should call this when they
+    manipulate env vars via ``monkeypatch`` or context managers.
+    """
+    global _cached_backend_config, _cached_backend_policy, _cached_field_kernel_tuning
+    _cached_backend_config = None
+    _cached_backend_policy = None
+    _cached_field_kernel_tuning = None
 
 
 def raise_if_strict_jax_fallback(*, component: str, detail: str) -> None:
@@ -540,8 +583,10 @@ def set_backend(
     """Set the active backend mode for the current process.
 
     This keeps the legacy env vars in sync so existing scripts and subprocess
-    helpers continue to work unchanged.
+    helpers continue to work unchanged.  Also updates the config cache so
+    subsequent ``get_backend_config()`` calls are free.
     """
+    global _cached_backend_config, _cached_backend_policy, _cached_field_kernel_tuning
     config = _config_from_mode(
         mode,
         strict=bool(strict),
@@ -549,6 +594,9 @@ def set_backend(
         transfer_guard=transfer_guard,
         compilation_cache_dir=compilation_cache_dir,
     )
+    _cached_backend_config = config
+    _cached_backend_policy = None
+    _cached_field_kernel_tuning = None
     for env_name, attribute_name in _SYNCED_RUNTIME_ENV_VALUES:
         os.environ[env_name] = _runtime_env_value(
             attribute_name, getattr(config, attribute_name)

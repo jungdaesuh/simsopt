@@ -19,6 +19,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
+from conftest import enable_strict_jax_backend
 from simsopt.jax_core import GroupedCoilSetSpec, grouped_coil_set_spec_from_lists
 
 from .boozersurface_jax_test_helpers import (
@@ -84,9 +85,9 @@ def _emit_newton_progress(progress_callback):
     progress_callback(2, 0.05, 1.0e-4)
 
 
-def _enable_strict_jax_backend(monkeypatch, mode="jax_gpu_parity"):
-    monkeypatch.setenv("SIMSOPT_BACKEND_MODE", mode)
-    monkeypatch.setenv("SIMSOPT_BACKEND_STRICT", "1")
+from functools import partial
+
+_enable_strict_jax_backend = partial(enable_strict_jax_backend, mode="jax_gpu_parity")
 
 
 def _assert_strict_jax_minimize_rejection(

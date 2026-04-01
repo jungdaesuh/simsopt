@@ -21,6 +21,7 @@ import types
 import jax
 import jax.numpy as jnp
 import pytest
+from conftest import enable_strict_jax_backend
 import numpy as np
 
 sopp = pytest.importorskip(
@@ -113,9 +114,9 @@ _TARGET_OBJECTIVE_FD_EPS = 1e-6
 _TARGET_OBJECTIVE_FD_ATOL = 2e-5
 
 
-def _enable_strict_jax_backend(monkeypatch, mode="jax_cpu_parity"):
-    monkeypatch.setenv("SIMSOPT_BACKEND_MODE", mode)
-    monkeypatch.setenv("SIMSOPT_BACKEND_STRICT", "1")
+from functools import partial
+
+_enable_strict_jax_backend = partial(enable_strict_jax_backend, mode="jax_cpu_parity")
 
 
 def _stage2_context_kwargs():
