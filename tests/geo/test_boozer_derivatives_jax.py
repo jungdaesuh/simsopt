@@ -457,6 +457,40 @@ class TestBoozerHessianComposed:
 
         np.testing.assert_allclose(H, H_fd, rtol=1e-3, atol=1e-10)
 
+    def test_hessian_taylor_convergence(self):
+        """Multi-epsilon Taylor convergence for composed Hessian.
+
+        Mirrors the upstream ``subtest_boozer_penalty_constraints_hessian``
+        pattern: for two random directions h1, h2 the bilinear form
+        h2 @ H @ h1 must converge to the FD estimate with error contracting
+        by at least 0.55x per epsilon halving.
+        """
+        np.random.seed(1)
+
+        # Analytical Hessian applied as bilinear form
+        _, grad0 = boozer_penalty_grad_composed(self.x, **self.kwargs)
+        H = jax.hessian(boozer_penalty_composed)(self.x, **self.kwargs)
+
+        h1 = np.random.uniform(size=self.x.shape) - 0.5
+        h2 = np.random.uniform(size=self.x.shape) - 0.5
+        d2f = float(jnp.array(h2) @ jnp.array(H) @ jnp.array(h1))
+
+        grad0_h2 = float(jnp.dot(jnp.array(grad0), jnp.array(h2)))
+
+        err_old = 1e9
+        epsilons = np.power(2.0, -np.arange(10, 20))
+        for eps in epsilons:
+            x_pert = self.x + eps * jnp.array(h1)
+            _, grad_pert = boozer_penalty_grad_composed(x_pert, **self.kwargs)
+            grad_pert_h2 = float(jnp.dot(jnp.array(grad_pert), jnp.array(h2)))
+            d2f_fd = (grad_pert_h2 - grad0_h2) / eps
+            err = abs(d2f_fd - d2f) / abs(d2f)
+            assert err < err_old * 0.55, (
+                f"Taylor convergence stalled: err={err:.2e}, "
+                f"err_old={err_old:.2e}, ratio={err / err_old:.4f}"
+            )
+            err_old = err
+
 
 # ---------------------------------------------------------------------------
 # Test: Outer coil VJP

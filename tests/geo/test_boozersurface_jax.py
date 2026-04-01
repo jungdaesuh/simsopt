@@ -14,6 +14,7 @@ Validates:
 import sys
 import types
 from contextlib import contextmanager
+from functools import partial
 
 import jax
 import jax.numpy as jnp
@@ -60,7 +61,7 @@ from .boozersurface_jax_test_helpers import (
 )
 
 
-_TORUS_GEOMETRY_RTOL = 1e-12
+_TORUS_GEOMETRY_RTOL = 1e-13
 _ROSENBROCK_SOLUTION_ATOL = 1e-8
 _STOKES_FLUX_RTOL = 1e-5
 _STOKES_FLUX_ATOL = 5e-7
@@ -88,9 +89,9 @@ def _emit_newton_progress(progress_callback):
     progress_callback(2, 0.05, 1.0e-4)
 
 
-from functools import partial
-
 _enable_strict_jax_backend = partial(enable_strict_jax_backend, mode="jax_gpu_parity")
+
+
 _STRICT_GROUPED_EXTRACTOR_FALLBACK_PATTERN = (
     r"BoozerSurfaceJAX.*hidden grouped-coil spec compatibility "
     r"fallback.*_extract_coil_data_grouped\(\).*strict=True"
@@ -116,13 +117,14 @@ def _strict_backend_mode(monkeypatch, mode="jax_gpu_parity"):
 
 def _assert_strict_jax_minimize_rejection(
     monkeypatch,
+    request,
     *,
     method,
     match,
     fun,
     value_and_grad=False,
 ):
-    _enable_strict_jax_backend(monkeypatch)
+    _enable_strict_jax_backend(monkeypatch, request)
     with pytest.raises(RuntimeError, match=match):
         jax_minimize(
             fun,
@@ -1089,11 +1091,12 @@ class TestBoozerSurfaceJAXClass:
     def test_run_code_rejects_non_ondevice_ls_lane_in_strict_mode(
         self,
         monkeypatch,
+        request,
         optimizer_backend,
     ):
         """Strict JAX mode must reject the first non-native LS seam it reaches."""
         booz = _make_mock_boozer_surface()
-        _enable_strict_jax_backend(monkeypatch)
+        _enable_strict_jax_backend(monkeypatch, request)
         booz.options["optimizer_backend"] = optimizer_backend
 
         with pytest.raises(
@@ -1106,11 +1109,13 @@ class TestBoozerSurfaceJAXClass:
     def test_jax_minimize_rejects_fallback_methods_in_strict_mode(
         self,
         monkeypatch,
+        request,
         method,
     ):
         """Strict JAX mode must reject direct optimizer fallback lanes too."""
         _assert_strict_jax_minimize_rejection(
             monkeypatch,
+            request,
             method=method,
             match=rf"optimizer_jax\.jax_minimize.*method='{method}'.*strict=True",
             fun=lambda x: jnp.sum(x**2),
@@ -1119,6 +1124,7 @@ class TestBoozerSurfaceJAXClass:
     def test_jax_minimize_rejects_explicit_value_grad_fallback_in_strict_mode(
         self,
         monkeypatch,
+        request,
     ):
         """Strict JAX mode must reject the host-loop explicit value/grad path."""
 
@@ -1128,6 +1134,7 @@ class TestBoozerSurfaceJAXClass:
 
         _assert_strict_jax_minimize_rejection(
             monkeypatch,
+            request,
             method="lbfgs-ondevice",
             match="explicit host-loop value-and-gradient optimizer fallback.*strict=True",
             fun=_explicit_value_grad,
@@ -1436,7 +1443,7 @@ class TestBoozerSurfaceJAXClass:
 # ---------------------------------------------------------------------------
 
 
-def _make_mock_boozer_surface_exact(mpol=1, ntor=1, nfp=1):
+def _make_mock_boozer_surface_exact(mpol=1, ntor=1, nfp=1, stellsym=False):
     """Build a BoozerSurfaceJAX in exact (Newton) mode -- constraint_weight=None.
 
     The exact Newton path requires a SQUARE system: n_eq == n_dof.
@@ -1450,11 +1457,17 @@ def _make_mock_boozer_surface_exact(mpol=1, ntor=1, nfp=1):
     xc, yc, zc = _make_simple_torus_coeffs(R0, r, mpol, ntor, nfp)
     qphi = np.linspace(0, 1.0 / nfp, nphi, endpoint=False)
     qtheta = np.linspace(0, 1.0, ntheta, endpoint=False)
-    sdofs = np.concatenate([xc.ravel(), yc.ravel(), zc.ravel()])
-    assert sdofs.shape[0] == 3 * nphi * ntheta
+    full_sdofs = np.concatenate([xc.ravel(), yc.ravel(), zc.ravel()])
+    assert full_sdofs.shape[0] == 3 * nphi * ntheta
+
+    if stellsym:
+        scatter = np.asarray(stellsym_scatter_indices(mpol, ntor), dtype=np.int32)
+        sdofs = full_sdofs[scatter]
+    else:
+        sdofs = full_sdofs
 
     bs = _MockBiotSavart(_make_mock_coils())
-    surf = _MockSurface(sdofs, mpol, ntor, nfp, False, qphi, qtheta)
+    surf = _MockSurface(sdofs, mpol, ntor, nfp, stellsym, qphi, qtheta)
     label = _MockVolumeLabel()
     target = 2.0 * np.pi**2 * R0 * r**2
 
@@ -1936,6 +1949,7 @@ class TestEnsureSolvedGuard:
         with pytest.raises(RuntimeError, match="failed"):
             _ensure_solved_jax(booz)
 
+
 class TestMixedQuadratureBoozer:
     """BoozerSurfaceJAX works when coils have different nquad counts."""
 
@@ -1981,3 +1995,71 @@ class TestMixedQuadratureBoozer:
             rtol=penalty_fun_rel_tol,
             atol=penalty_fun_abs_tol,
         )
+
+
+# ---------------------------------------------------------------------------
+# P3: Boozer exact-constraints Jacobian Taylor test
+# ---------------------------------------------------------------------------
+
+
+class TestBoozerExactConstraintsJacobianTaylor:
+    """Taylor convergence test for the exact Boozer constraints Jacobian.
+
+    Verifies that the Jacobian of ``_boozer_exact_residual`` (computed
+    via ``jax.jacfwd``) is consistent with finite-difference
+    directional derivatives.  For each epsilon the FD error must
+    shrink by at least a factor of 0.55, confirming first-order
+    convergence.
+
+    Mirrors ``TestBoozerSurface.subtest_boozer_constrained_jacobian``
+    from the upstream CPU test suite.
+    """
+
+    @staticmethod
+    def _run_taylor_series(res_fn, x, epsilons, ratio_bound=0.55):
+        """Run the multi-epsilon FD convergence loop.
+
+        Returns the final error so callers can assert it shrank
+        monotonically.
+        """
+        np.random.seed(1)
+        r0 = res_fn(x)
+        J = jax.jacfwd(res_fn)(x)
+        h = jnp.array(np.random.uniform(size=x.shape) - 0.5)
+        dr_exact = J @ h
+
+        err_old = 1e9
+        for eps in epsilons:
+            r1 = res_fn(x + eps * h)
+            dr_fd = (r1 - r0) / eps
+            err = float(jnp.linalg.norm(dr_fd - dr_exact))
+            assert err < err_old * ratio_bound, (
+                f"FD error did not shrink: err={err:.3e}, "
+                f"prev={err_old:.3e}, ratio={err / err_old:.3f}"
+            )
+            err_old = err
+        return err_old
+
+    def test_exact_jacobian_taylor_nonstellsym(self):
+        """Taylor test for non-stellsym exact residual Jacobian."""
+        booz = _make_mock_boozer_surface_exact()
+        mask_indices = booz._compute_stellsym_mask_indices()
+        res_fn = booz._make_exact_residual(mask_indices)
+
+        iota, G = 0.3, 0.05
+        x = booz._pack_decision_vector(iota, G)
+
+        epsilons = jnp.pow(2.0, -jnp.arange(7, 20, dtype=jnp.float64))
+        self._run_taylor_series(res_fn, x, epsilons)
+
+    def test_exact_jacobian_taylor_stellsym(self):
+        """Taylor test for stellsym exact residual Jacobian."""
+        booz = _make_mock_boozer_surface_exact(stellsym=True)
+        mask_indices = booz._compute_stellsym_mask_indices()
+        res_fn = booz._make_exact_residual(mask_indices)
+
+        iota, G = 0.3, 0.05
+        x = booz._pack_decision_vector(iota, G)
+
+        epsilons = jnp.pow(2.0, -jnp.arange(7, 20, dtype=jnp.float64))
+        self._run_taylor_series(res_fn, x, epsilons)

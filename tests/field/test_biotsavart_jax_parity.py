@@ -102,6 +102,38 @@ _CURRENT = 1e4
 # ---------------------------------------------------------------------------
 
 
+def _assert_point_perturbation_taylor_convergence(
+    field_fn,
+    derivative_fn,
+    points,
+    gammas,
+    gammadashs,
+    currents,
+    idx,
+):
+    field_0 = field_fn(points, gammas, gammadashs, currents)[idx]
+    derivative = derivative_fn(points, gammas, gammadashs, currents)[idx]
+
+    for direction in [
+        jnp.array([1.0, 0.0, 0.0]),
+        jnp.array([0.0, 1.0, 0.0]),
+        jnp.array([0.0, 0.0, 1.0]),
+    ]:
+        directional_derivative = derivative.T @ direction
+        err = 1e6
+        for i in range(5, 10):
+            eps = 0.5**i
+            field_eps = field_fn(
+                points + eps * direction, gammas, gammadashs, currents
+            )[idx]
+            derivative_est = (field_eps - field_0) / eps
+            new_err = float(jnp.linalg.norm(directional_derivative - derivative_est))
+            if new_err < 1e-14:
+                break  # machine precision reached
+            assert new_err < 0.55 * err
+            err = new_err
+
+
 class TestBiotSavartParitySuite:
     """Parity tests matching upstream tests/field/test_biotsavart.py."""
 
@@ -179,27 +211,39 @@ class TestBiotSavartParitySuite:
         points = jnp.array(
             _BASE_POINTS + 0.001 * (np.random.rand(*_BASE_POINTS.shape) - 0.5)
         )
-        A0 = biot_savart_A(points, gammas, gammadashs, currents)[idx]
-        dA = biot_savart_dA_by_dX(points, gammas, gammadashs, currents)[idx]
+        _assert_point_perturbation_taylor_convergence(
+            biot_savart_A,
+            biot_savart_dA_by_dX,
+            points,
+            gammas,
+            gammadashs,
+            currents,
+            idx,
+        )
 
-        for direction in [
-            jnp.array([1.0, 0.0, 0.0]),
-            jnp.array([0.0, 1.0, 0.0]),
-            jnp.array([0.0, 0.0, 1.0]),
-        ]:
-            deriv = dA.T @ direction
-            err = 1e6
-            for i in range(5, 10):
-                eps = 0.5**i
-                A_eps = biot_savart_A(
-                    points + eps * direction, gammas, gammadashs, currents
-                )[idx]
-                deriv_est = (A_eps - A0) / eps
-                new_err = float(jnp.linalg.norm(deriv - deriv_est))
-                if new_err < 1e-14:
-                    break  # machine precision reached
-                assert new_err < 0.55 * err
-                err = new_err
+    @pytest.mark.parametrize("idx", [0, 16])
+    def test_dB_dX_taylor_test(self, idx):
+        """dB/dX matches forward finite differences under point perturbations.
+
+        Matches ``test_biotsavart_dBdX_taylortest`` from the upstream suite.
+        This is the multi-epsilon convergence gate requested by review item P1.
+        """
+        np.random.seed(42)
+        gammas, gammadashs = _make_fourier_coil(200)
+        currents = jnp.array([_CURRENT])
+
+        points = jnp.array(
+            _BASE_POINTS + 0.001 * (np.random.rand(*_BASE_POINTS.shape) - 0.5)
+        )
+        _assert_point_perturbation_taylor_convergence(
+            biot_savart_B,
+            biot_savart_dB_by_dX,
+            points,
+            gammas,
+            gammadashs,
+            currents,
+            idx,
+        )
 
     @pytest.mark.parametrize("idx", [0, 16])
     def test_dB_dX_symmetric_and_divergence_free(self, idx):
@@ -265,6 +309,46 @@ class TestBiotSavartParitySuite:
                 break
             assert new_err < 0.55 * err
             err = new_err
+
+    def test_B_and_dB_linearity_in_current(self):
+        """B and dB/dX are exactly linear in coil current.
+
+        Matches ``test_biotsavart_coil_current_taylortest``.  Because the
+        Biot-Savart field is strictly linear in I, a single large FD step
+        recovers the derivative to machine precision — no convergence
+        series needed.
+        """
+        gammas, gammadashs = _make_fourier_coil(200)
+        points = jnp.array(_BASE_POINTS)
+        I = _CURRENT
+
+        currents_full = jnp.array([I])
+        currents_zero = jnp.array([0.0])
+        currents_unit = jnp.array([1.0])
+
+        # --- B linearity ---
+        B_full = biot_savart_B(points, gammas, gammadashs, currents_full)
+        B_zero = biot_savart_B(points, gammas, gammadashs, currents_zero)
+        B_unit = biot_savart_B(points, gammas, gammadashs, currents_unit)
+
+        # B(I) = I * B(1)  (exact identity)
+        assert float(jnp.linalg.norm(B_full - I * B_unit)) < 1e-15
+
+        # (B(I) - B(0)) / I = B(1)
+        dB_approx = (B_full - B_zero) / I
+        assert float(jnp.linalg.norm(dB_approx - B_unit)) < 1e-15
+
+        # --- dB/dX linearity ---
+        dB_full = biot_savart_dB_by_dX(points, gammas, gammadashs, currents_full)
+        dB_zero = biot_savart_dB_by_dX(points, gammas, gammadashs, currents_zero)
+        dB_unit = biot_savart_dB_by_dX(points, gammas, gammadashs, currents_unit)
+
+        # dB/dX(I) = I * dB/dX(1)  (exact identity)
+        assert float(jnp.linalg.norm(dB_full - I * dB_unit)) < 1e-15
+
+        # (dB/dX(I) - dB/dX(0)) / I = dB/dX(1)
+        ddB_approx = (dB_full - dB_zero) / I
+        assert float(jnp.linalg.norm(ddB_approx - dB_unit)) < 1e-15
 
 
 # ---------------------------------------------------------------------------
@@ -373,6 +457,208 @@ class TestGroupedBiotSavartGradient:
             jnp.array(rng.randn(*c2.shape)),
             lambda d: [(g1, gd1, c1), (g2, gd2, c2 + d)],
             "Group 2 currents",
+        )
+
+
+# ---------------------------------------------------------------------------
+# Test: Curve type parametrization (P20)
+# ---------------------------------------------------------------------------
+
+from simsopt.jax_core import (
+    make_curve_xyzfourier_spec,
+    make_curve_rzfourier_spec,
+    make_curve_helical_spec,
+    make_curve_planarfourier_spec,
+    curve_gamma_and_dash_from_spec,
+)
+
+
+def _make_spec_xyzfourier(quadpoints, order, rand_scale, rng):
+    """Create a CurveXYZFourierSpec matching upstream get_curve DOF layout."""
+    ndofs = 3 * (2 * order + 1)
+    dofs = np.zeros(ndofs)
+    # Upstream convention: dofs[1]=1 (xs1), dofs[2*order+3]=1 (yc1),
+    # dofs[4*order+3]=1 (zc1)
+    dofs[1] = 1.0
+    dofs[2 * order + 3] = 1.0
+    dofs[4 * order + 3] = 1.0
+    dofs = dofs + rand_scale * rng.rand(ndofs)
+    return make_curve_xyzfourier_spec(
+        dofs=dofs,
+        quadpoints=quadpoints,
+        order=order,
+    )
+
+
+def _make_spec_rzfourier(quadpoints, order, rand_scale, rng):
+    """Create a CurveRZFourierSpec (stellsym=True, nfp=2) matching upstream."""
+    nfp = 2
+    stellsym = True
+    # stellsym=True: ndofs = (order+1) + order
+    ndofs = (order + 1) + order
+    dofs = np.zeros(ndofs)
+    # Upstream: dofs[0]=1 (rc0), dofs[1]=0.1 (rc1), dofs[order+1]=0.1 (zs1)
+    dofs[0] = 1.0
+    dofs[1] = 0.1
+    dofs[order + 1] = 0.1
+    dofs = dofs + rand_scale * rng.rand(ndofs)
+    # RZFourier quadpoints are in [0, 1/nfp) by convention
+    qp_rz = quadpoints / nfp
+    return make_curve_rzfourier_spec(
+        dofs=dofs,
+        quadpoints=qp_rz,
+        order=order,
+        nfp=nfp,
+        stellsym=stellsym,
+    )
+
+
+def _make_spec_helical(quadpoints, order, rand_scale, rng):
+    """Create a CurveHelicalSpec matching upstream get_curve parameters."""
+    m, ell, R0, r = 5, 2, 1.0, 0.3
+    ndofs = 1 + 2 * order
+    dofs = np.zeros(ndofs)
+    # Upstream: dofs[0] = pi/2
+    dofs[0] = np.pi / 2
+    dofs = dofs + rand_scale * rng.rand(ndofs)
+    return make_curve_helical_spec(
+        dofs=dofs,
+        quadpoints=quadpoints,
+        order=order,
+        m=m,
+        ell=ell,
+        R0=R0,
+        r=r,
+    )
+
+
+def _make_spec_planarfourier(quadpoints, order, rand_scale, rng):
+    """Create a CurvePlanarFourierSpec matching upstream get_curve DOF layout."""
+    # DOF layout: [rc0..rc_order, rs1..rs_order, q0, qi, qj, qk, X, Y, Z]
+    ndofs = (order + 1) + order + 4 + 3
+    dofs = np.zeros(ndofs)
+    # Upstream: dofs[0]=1 (rc0), dofs[1]=0.1 (rc1), dofs[order+1]=0.1 (rs1)
+    dofs[0] = 1.0
+    dofs[1] = 0.1
+    dofs[order + 1] = 0.1
+    # Set quaternion q0=1 for a valid identity rotation before perturbation
+    q_start = (order + 1) + order
+    dofs[q_start] = 1.0
+    dofs = dofs + rand_scale * rng.rand(ndofs)
+    return make_curve_planarfourier_spec(
+        dofs=dofs,
+        quadpoints=quadpoints,
+        order=order,
+    )
+
+
+_CURVE_SPEC_FACTORIES = {
+    "CurveXYZFourier": _make_spec_xyzfourier,
+    "CurveRZFourier": _make_spec_rzfourier,
+    "CurveHelical": _make_spec_helical,
+    "CurvePlanarFourier": _make_spec_planarfourier,
+}
+
+
+def _make_curve_type_fixture(curvetype, nquad=100):
+    """Build a single-coil field fixture for the given curve type."""
+    np.random.seed(2)
+    quadpoints = np.linspace(0, 1, nquad, endpoint=False)
+    spec = _CURVE_SPEC_FACTORIES[curvetype](
+        quadpoints, order=4, rand_scale=0.01, rng=np.random
+    )
+    gamma, gammadash = curve_gamma_and_dash_from_spec(spec)
+    gammas = gamma[None, :, :]
+    gammadashs = gammadash[None, :, :]
+    centroid = jnp.mean(gamma, axis=0)
+    points = (centroid + jnp.array([0.0, 0.0, 0.05]))[None, :]
+    return spec, gamma, gammadash, gammas, gammadashs, points
+
+
+class TestCurveTypeParametrization:
+    """Validate that biot_savart_B produces consistent, non-trivial results
+    across all four core curve type parametrizations via the JAX spec system.
+
+    Review item P20: parametrized curve-type coverage for JAX Biot-Savart.
+    """
+
+    @pytest.mark.parametrize("curvetype", list(_CURVE_SPEC_FACTORIES))
+    def test_gamma_nontrivial(self, curvetype):
+        """Gamma and gammadash from each spec type are non-degenerate."""
+        _, gamma, gammadash, _, _, _ = _make_curve_type_fixture(curvetype)
+        gamma_np = np.asarray(gamma)
+        gammadash_np = np.asarray(gammadash)
+
+        assert gamma_np.shape == (100, 3)
+        gamma_extent = gamma_np.max(axis=0) - gamma_np.min(axis=0)
+        assert np.max(gamma_extent) > 0.01, (
+            f"{curvetype}: curve gamma has negligible spatial extent"
+        )
+        gammadash_norms = np.linalg.norm(gammadash_np, axis=1)
+        assert np.min(gammadash_norms) > 1e-10, (
+            f"{curvetype}: gammadash has near-zero entries"
+        )
+
+    @pytest.mark.parametrize("curvetype", list(_CURVE_SPEC_FACTORIES))
+    def test_B_field_nontrivial(self, curvetype):
+        """B field from each curve type is non-zero and has physical magnitude."""
+        _, _, _, gammas, gammadashs, points = _make_curve_type_fixture(curvetype)
+        B = biot_savart_B(points, gammas, gammadashs, jnp.array([1e4]))
+        B_norm = float(jnp.linalg.norm(B))
+        assert B_norm > 1e-10, (
+            f"{curvetype}: B field norm {B_norm:.2e} is negligibly small"
+        )
+
+    @pytest.mark.parametrize("curvetype", list(_CURVE_SPEC_FACTORIES))
+    def test_dB_dX_divergence_free(self, curvetype):
+        """Divergence of B is zero for each curve type (Maxwell constraint)."""
+        _, gamma, _, gammas, gammadashs, _ = _make_curve_type_fixture(curvetype)
+        centroid = jnp.mean(gamma, axis=0)
+        rng = np.random.RandomState(42)
+        offsets = 0.05 * (rng.rand(5, 3) - 0.5)
+        points = jnp.array(np.asarray(centroid)[None, :] + offsets)
+
+        dB = biot_savart_dB_by_dX(points, gammas, gammadashs, jnp.array([1e4]))
+        dB_np = np.asarray(dB)
+        for i in range(dB_np.shape[0]):
+            div_B = dB_np[i, 0, 0] + dB_np[i, 1, 1] + dB_np[i, 2, 2]
+            assert abs(div_B) < 1e-12, (
+                f"{curvetype} point {i}: div(B) = {div_B:.2e} is not zero"
+            )
+
+    @pytest.mark.parametrize("curvetype", list(_CURVE_SPEC_FACTORIES))
+    def test_B_linearity_in_current(self, curvetype):
+        """B scales linearly with current for each curve type."""
+        _, _, _, gammas, gammadashs, points = _make_curve_type_fixture(curvetype)
+        I = 1e4
+        B_full = biot_savart_B(points, gammas, gammadashs, jnp.array([I]))
+        B_unit = biot_savart_B(points, gammas, gammadashs, jnp.array([1.0]))
+        err = float(jnp.linalg.norm(B_full - I * B_unit))
+        assert err < 1e-15, f"{curvetype}: B linearity error {err:.2e}"
+
+    @pytest.mark.parametrize("curvetype", list(_CURVE_SPEC_FACTORIES))
+    def test_B_cross_type_consistency(self, curvetype):
+        """B field changes non-trivially when curve DOFs are perturbed."""
+        spec, _, _, gammas, gammadashs, points = _make_curve_type_fixture(curvetype)
+        currents = jnp.array([1e4])
+        B_orig = biot_savart_B(points, gammas, gammadashs, currents)
+
+        np.random.seed(99)
+        perturbed_dofs = jnp.asarray(spec.dofs) + 0.05 * jnp.array(
+            np.random.rand(len(spec.dofs))
+        )
+        from simsopt.jax_core import curve_spec_with_dofs
+
+        perturbed_spec = curve_spec_with_dofs(spec, perturbed_dofs)
+        gamma_p, gammadash_p = curve_gamma_and_dash_from_spec(perturbed_spec)
+        centroid_p = jnp.mean(gamma_p, axis=0)
+        points_p = (centroid_p + jnp.array([0.0, 0.0, 0.05]))[None, :]
+        B_pert = biot_savart_B(
+            points_p, gamma_p[None, :, :], gammadash_p[None, :, :], currents
+        )
+        diff = float(jnp.linalg.norm(B_pert - B_orig))
+        assert diff > 1e-10, (
+            f"{curvetype}: B unchanged after DOF perturbation (diff={diff:.2e})"
         )
 
 
