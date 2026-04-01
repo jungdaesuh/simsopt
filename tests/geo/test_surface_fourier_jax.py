@@ -33,6 +33,9 @@ surface_gamma = _sf.surface_gamma
 surface_gammadash1 = _sf.surface_gammadash1
 surface_gammadash2 = _sf.surface_gammadash2
 surface_normal = _sf.surface_normal
+surface_xyzfourier_gamma_from_dofs = _sf.surface_xyzfourier_gamma_from_dofs
+surface_xyzfourier_gammadash1_from_dofs = _sf.surface_xyzfourier_gammadash1_from_dofs
+surface_xyzfourier_gammadash2_from_dofs = _sf.surface_xyzfourier_gammadash2_from_dofs
 
 
 def _make_simple_torus_coeffs(R=1.0, r=0.1, mpol=1, ntor=0, nfp=1):
@@ -221,6 +224,61 @@ class TestSurfaceFourierJaxCppParity:
         )
 
         np.testing.assert_allclose(np.array(gamma_jax), gamma_cpp, atol=1e-13)
+
+
+class TestSurfaceXYZFourierJaxCppParity:
+    """Compare the pure-JAX SurfaceXYZFourier path against the CPU object."""
+
+    @pytest.fixture(autouse=True)
+    def _require_simsoptpp(self):
+        pytest.importorskip("simsoptpp")
+        pytest.importorskip("simsopt")
+
+    @pytest.mark.parametrize("stellsym", [True, False])
+    def test_geometry_and_tangents_match_cpp(self, stellsym):
+        from simsopt.geo import SurfaceXYZFourier
+
+        rng = np.random.default_rng(0 if stellsym else 1)
+        surface = SurfaceXYZFourier(
+            mpol=2,
+            ntor=2,
+            nfp=3,
+            stellsym=stellsym,
+            quadpoints_phi=np.linspace(0, 1.0 / 3.0, 7, endpoint=False),
+            quadpoints_theta=np.linspace(0, 1.0, 6, endpoint=False),
+        )
+        dofs = surface.get_dofs().copy()
+        dofs[:] = rng.normal(size=dofs.shape)
+        surface.set_dofs(dofs)
+
+        args = (
+            jnp.asarray(dofs),
+            jnp.asarray(surface.quadpoints_phi),
+            jnp.asarray(surface.quadpoints_theta),
+            surface.mpol,
+            surface.ntor,
+            surface.nfp,
+            surface.stellsym,
+        )
+
+        np.testing.assert_allclose(
+            np.asarray(surface_xyzfourier_gamma_from_dofs(*args)),
+            surface.gamma(),
+            rtol=1e-12,
+            atol=1e-12,
+        )
+        np.testing.assert_allclose(
+            np.asarray(surface_xyzfourier_gammadash1_from_dofs(*args)),
+            surface.gammadash1(),
+            rtol=1e-12,
+            atol=1e-12,
+        )
+        np.testing.assert_allclose(
+            np.asarray(surface_xyzfourier_gammadash2_from_dofs(*args)),
+            surface.gammadash2(),
+            rtol=1e-12,
+            atol=1e-12,
+        )
 
 
 if __name__ == "__main__":

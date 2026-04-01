@@ -35,6 +35,9 @@ __all__ = [
     "surface_gammadash1_from_dofs",
     "surface_gammadash2_from_dofs",
     "surface_normal_from_dofs",
+    "surface_xyzfourier_gamma_from_dofs",
+    "surface_xyzfourier_gammadash1_from_dofs",
+    "surface_xyzfourier_gammadash2_from_dofs",
     "surface_volume",
     "surface_area",
     "stellsym_scatter_indices",
@@ -351,6 +354,211 @@ def _dofs_to_xyzc_any(dofs, mpol, ntor, stellsym, scatter_indices):
             )
         return dofs_to_xyzc(dofs, scatter_indices, mpol, ntor)
     return _split_flat_to_xyzc(dofs, mpol, ntor)
+
+
+def _scatter_surface_xyzfourier_dofs(dofs, mpol, ntor, stellsym):
+    """Unpack ``SurfaceXYZFourier`` DOFs into six coefficient matrices."""
+    shape = (mpol + 1, 2 * ntor + 1)
+    n_per = shape[0] * shape[1]
+    cos_count = n_per - ntor
+    sin_count = n_per - (ntor + 1)
+
+    def _scatter_segment(source, start, count, fill_start):
+        flat = jnp.zeros(n_per, dtype=source.dtype)
+        return flat.at[fill_start : fill_start + count].set(
+            source[start : start + count]
+        )
+
+    if stellsym:
+        xc = _scatter_segment(dofs, 0, cos_count, ntor).reshape(shape)
+        ys = _scatter_segment(dofs, cos_count, sin_count, ntor + 1).reshape(shape)
+        zs = _scatter_segment(
+            dofs,
+            cos_count + sin_count,
+            sin_count,
+            ntor + 1,
+        ).reshape(shape)
+        zeros = jnp.zeros(shape, dtype=dofs.dtype)
+        return xc, zeros, zeros, ys, zeros, zs
+
+    offset = 0
+    xc = _scatter_segment(dofs, offset, cos_count, ntor).reshape(shape)
+    offset += cos_count
+    xs = _scatter_segment(dofs, offset, sin_count, ntor + 1).reshape(shape)
+    offset += sin_count
+    yc = _scatter_segment(dofs, offset, cos_count, ntor).reshape(shape)
+    offset += cos_count
+    ys = _scatter_segment(dofs, offset, sin_count, ntor + 1).reshape(shape)
+    offset += sin_count
+    zc = _scatter_segment(dofs, offset, cos_count, ntor).reshape(shape)
+    offset += cos_count
+    zs = _scatter_segment(dofs, offset, sin_count, ntor + 1).reshape(shape)
+    return xc, xs, yc, ys, zc, zs
+
+
+def _surface_xyzfourier_basis(quadpoints_phi, quadpoints_theta, mpol, ntor, nfp):
+    """Return ``SurfaceXYZFourier`` phase terms and mode indices."""
+    theta = 2.0 * jnp.pi * quadpoints_theta
+    phi = 2.0 * jnp.pi * quadpoints_phi
+    m = jnp.arange(0, mpol + 1, dtype=theta.dtype)
+    n = jnp.arange(-ntor, ntor + 1, dtype=phi.dtype) * nfp
+
+    angle = (
+        theta[None, :, None, None] * m[None, None, :, None]
+        - phi[:, None, None, None] * n[None, None, None, :]
+    )
+    return jnp.cos(angle), jnp.sin(angle), m, n
+
+
+def _surface_xyzfourier_hat(cos_coeffs, sin_coeffs, cos_angle, sin_angle):
+    coeff_term = cos_coeffs[None, None, :, :] * cos_angle
+    coeff_term += sin_coeffs[None, None, :, :] * sin_angle
+    return jnp.sum(coeff_term, axis=(2, 3))
+
+
+def _surface_xyzfourier_derivative_hat(
+    cos_coeffs,
+    sin_coeffs,
+    mode_factor,
+    cos_angle,
+    sin_angle,
+):
+    return _surface_xyzfourier_hat(
+        cos_coeffs,
+        sin_coeffs,
+        -mode_factor * sin_angle,
+        mode_factor * cos_angle,
+    )
+
+
+def _surface_xyzfourier_rotate(phi_angle, xhat, yhat):
+    cphi = jnp.cos(phi_angle)[:, None]
+    sphi = jnp.sin(phi_angle)[:, None]
+    return xhat * cphi - yhat * sphi, xhat * sphi + yhat * cphi
+
+
+def surface_xyzfourier_gamma_from_dofs(
+    dofs,
+    quadpoints_phi,
+    quadpoints_theta,
+    mpol,
+    ntor,
+    nfp,
+    stellsym,
+):
+    """Evaluate ``SurfaceXYZFourier.gamma()`` as a pure JAX function."""
+    xc, xs, yc, ys, zc, zs = _scatter_surface_xyzfourier_dofs(
+        dofs,
+        mpol,
+        ntor,
+        stellsym,
+    )
+    cos_angle, sin_angle, _m, _n = _surface_xyzfourier_basis(
+        quadpoints_phi,
+        quadpoints_theta,
+        mpol,
+        ntor,
+        nfp,
+    )
+
+    xhat = _surface_xyzfourier_hat(xc, xs, cos_angle, sin_angle)
+    yhat = _surface_xyzfourier_hat(yc, ys, cos_angle, sin_angle)
+    z = _surface_xyzfourier_hat(zc, zs, cos_angle, sin_angle)
+
+    phi_angle = 2.0 * jnp.pi * quadpoints_phi
+    x, y = _surface_xyzfourier_rotate(phi_angle, xhat, yhat)
+    return jnp.stack([x, y, z], axis=-1)
+
+
+def surface_xyzfourier_gammadash1_from_dofs(
+    dofs,
+    quadpoints_phi,
+    quadpoints_theta,
+    mpol,
+    ntor,
+    nfp,
+    stellsym,
+):
+    """Evaluate ``SurfaceXYZFourier.gammadash1()`` as a pure JAX function."""
+    xc, xs, yc, ys, zc, zs = _scatter_surface_xyzfourier_dofs(
+        dofs,
+        mpol,
+        ntor,
+        stellsym,
+    )
+    cos_angle, sin_angle, _m, n = _surface_xyzfourier_basis(
+        quadpoints_phi,
+        quadpoints_theta,
+        mpol,
+        ntor,
+        nfp,
+    )
+    two_pi = 2.0 * jnp.pi
+    n_factor = two_pi * n[None, None, None, :]
+
+    xhat = _surface_xyzfourier_hat(xc, xs, cos_angle, sin_angle)
+    yhat = _surface_xyzfourier_hat(yc, ys, cos_angle, sin_angle)
+    dxhat_dphi = _surface_xyzfourier_derivative_hat(
+        xc, xs, -n_factor, cos_angle, sin_angle
+    )
+    dyhat_dphi = _surface_xyzfourier_derivative_hat(
+        yc, ys, -n_factor, cos_angle, sin_angle
+    )
+    dz_dphi = _surface_xyzfourier_derivative_hat(
+        zc, zs, -n_factor, cos_angle, sin_angle
+    )
+
+    phi_angle = 2.0 * jnp.pi * quadpoints_phi
+    cphi = jnp.cos(phi_angle)[:, None]
+    sphi = jnp.sin(phi_angle)[:, None]
+
+    dx = dxhat_dphi * cphi - xhat * (two_pi * sphi)
+    dx -= dyhat_dphi * sphi + yhat * (two_pi * cphi)
+    dy = dxhat_dphi * sphi + xhat * (two_pi * cphi)
+    dy += dyhat_dphi * cphi - yhat * (two_pi * sphi)
+
+    return jnp.stack([dx, dy, dz_dphi], axis=-1)
+
+
+def surface_xyzfourier_gammadash2_from_dofs(
+    dofs,
+    quadpoints_phi,
+    quadpoints_theta,
+    mpol,
+    ntor,
+    nfp,
+    stellsym,
+):
+    """Evaluate ``SurfaceXYZFourier.gammadash2()`` as a pure JAX function."""
+    xc, xs, yc, ys, zc, zs = _scatter_surface_xyzfourier_dofs(
+        dofs,
+        mpol,
+        ntor,
+        stellsym,
+    )
+    cos_angle, sin_angle, m, _n = _surface_xyzfourier_basis(
+        quadpoints_phi,
+        quadpoints_theta,
+        mpol,
+        ntor,
+        nfp,
+    )
+    two_pi = 2.0 * jnp.pi
+    m_factor = two_pi * m[None, None, :, None]
+
+    dxhat_dtheta = _surface_xyzfourier_derivative_hat(
+        xc, xs, m_factor, cos_angle, sin_angle
+    )
+    dyhat_dtheta = _surface_xyzfourier_derivative_hat(
+        yc, ys, m_factor, cos_angle, sin_angle
+    )
+    dz_dtheta = _surface_xyzfourier_derivative_hat(
+        zc, zs, m_factor, cos_angle, sin_angle
+    )
+
+    phi_angle = 2.0 * jnp.pi * quadpoints_phi
+    dx, dy = _surface_xyzfourier_rotate(phi_angle, dxhat_dtheta, dyhat_dtheta)
+    return jnp.stack([dx, dy, dz_dtheta], axis=-1)
 
 
 def surface_gamma_from_dofs(

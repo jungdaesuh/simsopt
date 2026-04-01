@@ -195,6 +195,21 @@ def _get_surface_fns():
     )
 
 
+def _get_surface_xyzfourier_fns():
+    """Lazily import ``SurfaceXYZFourier`` geometry helpers."""
+    from simsopt.geo.surface_fourier_jax import (
+        surface_xyzfourier_gamma_from_dofs,
+        surface_xyzfourier_gammadash1_from_dofs,
+        surface_xyzfourier_gammadash2_from_dofs,
+    )
+
+    return (
+        surface_xyzfourier_gamma_from_dofs,
+        surface_xyzfourier_gammadash1_from_dofs,
+        surface_xyzfourier_gammadash2_from_dofs,
+    )
+
+
 def _get_grouped_biot_savart():
     """Lazily import grouped Biot-Savart (avoids simsopt top-level)."""
     from simsopt.field.biotsavart_jax import grouped_biot_savart_B
@@ -234,6 +249,19 @@ def _surface_geometry_from_dofs(
             surface_rz_fourier_gammadash1_from_spec(surface_spec),
             surface_rz_fourier_gammadash2_from_spec(surface_spec),
         )
+
+    if surface_kind == "xyzfourier":
+        sgf, sg1f, sg2f = _get_surface_xyzfourier_fns()
+        args = (
+            sdofs,
+            quadpoints_phi,
+            quadpoints_theta,
+            mpol,
+            ntor,
+            nfp,
+            stellsym,
+        )
+        return sgf(*args), sg1f(*args), sg2f(*args)
 
     sgf, sg1f, sg2f = _get_surface_fns()
     args = (
