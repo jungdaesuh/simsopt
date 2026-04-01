@@ -26,7 +26,6 @@ import numpy as np
 import jax
 import jax.numpy as jnp
 
-from ..backend import raise_if_strict_jax_fallback
 from .._core.derivative import Derivative, derivative_dec
 from .._core.optimizable import Optimizable
 from ..jax_core.field import (
@@ -34,7 +33,6 @@ from ..jax_core.field import (
     grouped_coil_currents_from_spec,
 )
 from ..objectives.utilities import forward_backward_jax, plu_solve_jax
-from ..field.biotsavart_jax_backend import _project_single_coil_cotangent_data
 from .boozer_residual_jax import (
     boozer_residual_vector,
     _surface_geometry_from_dofs,
@@ -54,6 +52,15 @@ __all__ = [
     "make_traceable_objective",
 ]
 
+_MISSING_STREAMING_GROUP_VJP_ERROR = (
+    "BoozerSurfaceJAX objective wrappers require res['vjp_groups']; "
+    "the legacy full-pytree adjoint fallback is no longer supported."
+)
+_LEGACY_PROJECTION_HELPER_ERROR = (
+    "surfaceobjectives_jax._coil_cotangents_to_derivative() is no longer "
+    "supported; use BiotSavartJAX.coil_cotangents_to_derivative()."
+)
+
 
 def _solve_boozer_adjoint(booz_surf, rhs):
     """Solve the transposed PLU adjoint system for a BoozerSurfaceJAX result."""
@@ -61,63 +68,20 @@ def _solve_boozer_adjoint(booz_surf, rhs):
     return forward_backward_jax(P, L, U, rhs, iterative_refinement=True)
 
 
-def _iter_adjoint_coil_cotangents(vjp_fn, vjp_groups_fn, booz_surf, iota, G, adjoint):
-    """Yield grouped coil cotangents from either the streaming or full VJP path."""
-    if vjp_groups_fn is not None:
-        yield from vjp_groups_fn(adjoint, booz_surf, iota, G)
-        return
-
-    d_coil_arrays, coil_indices = vjp_fn(adjoint, booz_surf, iota, G)
-    yield from zip(d_coil_arrays, coil_indices)
-
-
-def _project_single_coil_cotangent_compat(coil, d_gamma, d_gammadash, d_current):
-    """Project one coil cotangent, falling back to ``Coil.vjp()`` for legacy doubles."""
-    try:
-        return Derivative(
-            _project_single_coil_cotangent_data(
-                coil,
-                d_gamma,
-                d_gammadash,
-                d_current,
-            )
-        )
-    except TypeError:
-        _raise_if_strict_projection_fallback(coil)
-        return coil.vjp(
-            d_gamma,
-            d_gammadash,
-            np.asarray([d_current]),
-        )
-
-
-def _raise_if_strict_projection_fallback(coil) -> None:
-    raise_if_strict_jax_fallback(
-        component="surfaceobjectives_jax",
-        detail=(
-            "the legacy Coil.vjp() cotangent-projection fallback for "
-            f"coil type {type(coil).__name__}"
-        ),
-    )
+def _iter_adjoint_coil_cotangents(vjp_groups_fn, booz_surf, iota, G, adjoint):
+    """Yield grouped coil cotangents from the streaming adjoint callback."""
+    if vjp_groups_fn is None:
+        raise RuntimeError(_MISSING_STREAMING_GROUP_VJP_ERROR)
+    yield from vjp_groups_fn(adjoint, booz_surf, iota, G)
 
 
 def _coil_cotangents_to_derivative(coils, d_coil_arrays, coil_indices):
-    """Compatibility helper for slice-at-a-time coil VJP projection."""
-    total_derivative = Derivative({})
-    for (d_g, d_gd, d_c), indices in zip(d_coil_arrays, coil_indices):
-        for local_i, global_i in enumerate(indices):
-            total_derivative += _project_single_coil_cotangent_compat(
-                coils[global_i],
-                d_g[local_i],
-                d_gd[local_i],
-                d_c[local_i],
-            )
-    return total_derivative
+    """Deprecated compatibility helper kept only as an explicit hard-fail seam."""
+    del coils, d_coil_arrays, coil_indices
+    raise RuntimeError(_LEGACY_PROJECTION_HELPER_ERROR)
 
 
-def _adjoint_coil_derivative(
-    vjp_fn, vjp_groups_fn, booz_surf, iota, G, adjoint, biotsavart
-):
+def _adjoint_coil_derivative(vjp_groups_fn, booz_surf, iota, G, adjoint, biotsavart):
     """Project grouped adjoint cotangents to a coil ``Derivative``.
 
     Uses ``BiotSavartJAX.coil_cotangents_to_derivative()`` for
@@ -127,7 +91,7 @@ def _adjoint_coil_derivative(
     """
     total_derivative = Derivative({})
     for d_coil_array, coil_group_indices in _iter_adjoint_coil_cotangents(
-        vjp_fn, vjp_groups_fn, booz_surf, iota, G, adjoint
+        vjp_groups_fn, booz_surf, iota, G, adjoint
     ):
         total_derivative += biotsavart.coil_cotangents_to_derivative(
             [d_coil_array],
@@ -431,7 +395,6 @@ class BoozerResidualJAX(Optimizable):
             booz_surf.coil_set_spec,
         ).reshape(nphi, ntheta, 3)
 
-        vjp_fn = booz_surf.res["vjp"]
         vjp_groups_fn = booz_surf.res.get("vjp_groups")
 
         dJ_by_dB = self._compute_dJ_by_dB(
@@ -451,7 +414,6 @@ class BoozerResidualJAX(Optimizable):
         adj = _solve_boozer_adjoint(booz_surf, dJ_ds)
 
         adj_derivative = _adjoint_coil_derivative(
-            vjp_fn,
             vjp_groups_fn,
             booz_surf,
             iota,
@@ -555,7 +517,6 @@ class IotasJAX(Optimizable):
         iota = booz_surf.res["iota"]
         G = booz_surf.res["G"]
         self._J = iota
-        vjp_fn = booz_surf.res["vjp"]
         vjp_groups_fn = booz_surf.res.get("vjp_groups")
 
         # dJ/dx_inner for iota: unit vector at the iota position
@@ -570,7 +531,6 @@ class IotasJAX(Optimizable):
         adj = _solve_boozer_adjoint(booz_surf, dJ_ds)
 
         adj_derivative = _adjoint_coil_derivative(
-            vjp_fn,
             vjp_groups_fn,
             booz_surf,
             iota,
@@ -653,7 +613,6 @@ class NonQuasiSymmetricRatioJAX(Optimizable):
 
         iota = booz_surf.res["iota"]
         G = booz_surf.res["G"]
-        vjp_fn = booz_surf.res["vjp"]
         vjp_groups_fn = booz_surf.res.get("vjp_groups")
 
         sdofs = booz_surf._get_surface_dofs()
@@ -705,7 +664,6 @@ class NonQuasiSymmetricRatioJAX(Optimizable):
         adj = _solve_boozer_adjoint(booz_surf, dJ_ds)
 
         adj_derivative = _adjoint_coil_derivative(
-            vjp_fn,
             vjp_groups_fn,
             booz_surf,
             iota,

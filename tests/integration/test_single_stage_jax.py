@@ -960,9 +960,9 @@ class TestAdjointSolveConsistency:
 
     def test_coil_cotangent_projection_avoids_whole_group_host_materialization(self):
         """Projection should convert one coil slice at a time, not a whole group."""
-        from simsopt.geo.surfaceobjectives_jax import _coil_cotangents_to_derivative
-
-        coils = [_RecordingVJPCoil(), _RecordingVJPCoil()]
+        coils = [_FallbackBombCoil(), _FallbackBombCoil()]
+        bs_jax = object.__new__(BiotSavartJAX)
+        bs_jax._coils = coils
         d_coil_arrays = [
             (
                 _WholeGroupArrayConversionBomb(
@@ -981,16 +981,22 @@ class TestAdjointSolveConsistency:
             )
         ]
 
-        _coil_cotangents_to_derivative(coils, d_coil_arrays, [[0, 1]])
+        derivative = bs_jax.coil_cotangents_to_derivative(d_coil_arrays, [[0, 1]])
 
-        assert len(coils[0].calls) == 1
-        assert len(coils[1].calls) == 1
-        np.testing.assert_allclose(coils[0].calls[0][0], np.array([1.0, 2.0, 3.0]))
-        np.testing.assert_allclose(coils[1].calls[0][0], np.array([4.0, 5.0, 6.0]))
-        np.testing.assert_allclose(coils[0].calls[0][1], np.array([7.0, 8.0, 9.0]))
-        np.testing.assert_allclose(coils[1].calls[0][1], np.array([10.0, 11.0, 12.0]))
-        np.testing.assert_allclose(coils[0].calls[0][2], np.array([1.5]))
-        np.testing.assert_allclose(coils[1].calls[0][2], np.array([2.5]))
+        np.testing.assert_allclose(
+            np.asarray(derivative.data[coils[0].curve], dtype=float),
+            np.array([71.0, 82.0]),
+            atol=1e-12,
+        )
+        np.testing.assert_allclose(
+            np.asarray(derivative.data[coils[1].curve], dtype=float),
+            np.array([104.0, 115.0]),
+            atol=1e-12,
+        )
+        assert len(coils[0].current.calls) == 1
+        assert len(coils[1].current.calls) == 1
+        np.testing.assert_allclose(coils[0].current.calls[0], np.array([1.5]))
+        np.testing.assert_allclose(coils[1].current.calls[0], np.array([2.5]))
 
     def test_grouped_coil_arrays_from_dofs_respects_unique_dof_lineage_order(self):
         """Native grouped reconstruction must decode free current DOFs by lineage slice."""
@@ -1473,13 +1479,12 @@ class TestAdjointSolveConsistency:
         np.testing.assert_allclose(np.asarray(currents, dtype=float), np.array([1.5]))
         assert indices == [0]
 
-    def test_compat_helper_uses_shared_jax_projection_for_projectable_curves(self):
-        """The compatibility helper should share the same JAX projection path."""
-        from simsopt.geo.surfaceobjectives_jax import _coil_cotangents_to_derivative
-
+    def test_coil_cotangent_projection_uses_jax_path_for_projectable_curves(self):
+        """BiotSavartJAX should project directly through the shared JAX path."""
         coils = [_FallbackBombCoil()]
-        derivative = _coil_cotangents_to_derivative(
-            coils,
+        bs_jax = object.__new__(BiotSavartJAX)
+        bs_jax._coils = coils
+        derivative = bs_jax.coil_cotangents_to_derivative(
             [
                 (
                     jnp.array([[1.0, 2.0, 3.0]]),
@@ -1501,19 +1506,16 @@ class TestAdjointSolveConsistency:
             atol=1e-12,
         )
 
-    def test_compat_helper_rejects_coil_vjp_fallback_in_strict_mode(self, monkeypatch):
-        """Strict JAX mode must reject the legacy Coil.vjp() projection fallback."""
+    def test_legacy_surfaceobjectives_projection_helper_is_unsupported(self):
+        """The old surfaceobjectives compatibility helper should hard-fail now."""
         from simsopt.geo.surfaceobjectives_jax import _coil_cotangents_to_derivative
-
-        _enable_strict_jax_backend(monkeypatch)
-        coils = [_RecordingVJPCoil()]
 
         with pytest.raises(
             RuntimeError,
-            match="surfaceobjectives_jax.*Coil\\.vjp\\(\\).*strict=True",
+            match="BiotSavartJAX\\.coil_cotangents_to_derivative",
         ):
             _coil_cotangents_to_derivative(
-                coils,
+                [_RecordingVJPCoil()],
                 [
                     (
                         jnp.array([[1.0, 2.0, 3.0]]),
@@ -1523,8 +1525,6 @@ class TestAdjointSolveConsistency:
                 ],
                 [[0]],
             )
-
-        assert coils[0].calls == []
 
     def test_refresh_coil_data_reuses_grouped_currents_without_host_reads(
         self, monkeypatch
@@ -1707,6 +1707,32 @@ class TestAdjointSolveConsistency:
         _assert_streaming_group_vjp_matches_full(
             full_d_coil_arrays, full_coil_indices, streamed
         )
+
+    @pytest.mark.parametrize(
+        "objective_factory",
+        (
+            lambda booz_jax, bs_jax: BoozerResidualJAX(booz_jax, bs_jax),
+            lambda booz_jax, bs_jax: IotasJAX(booz_jax),
+            lambda booz_jax, bs_jax: NonQuasiSymmetricRatioJAX(
+                booz_jax,
+                bs_jax,
+                sDIM=6,
+            ),
+        ),
+    )
+    def test_surface_objective_wrappers_reject_missing_streaming_group_vjp(
+        self,
+        boozer_setup,
+        objective_factory,
+    ):
+        """Objective wrappers should hard-fail if the legacy full VJP seam reappears."""
+        (coils, surf_cpu, surf_jax, bs_cpu, bs_jax, booz_cpu, booz_jax, vol_cpu) = (
+            boozer_setup
+        )
+        booz_jax.res["vjp_groups"] = None
+
+        with pytest.raises(RuntimeError, match="legacy full-pytree adjoint fallback"):
+            objective_factory(booz_jax, bs_jax).dJ()
 
     def test_ls_coil_vjp_matches_reverse_over_reverse_reference(self, boozer_setup):
         """LS cotangent rewrite must match the previous reverse-over-reverse result."""
