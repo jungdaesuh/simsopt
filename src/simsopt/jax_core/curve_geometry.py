@@ -93,51 +93,8 @@ def _curve_quadpoints(spec: CurveSpec):
     return quadpoints, jnp.ones_like(quadpoints)
 
 
-def curve_gamma_from_spec(spec: CurveSpec):
-    return curve_gamma_from_dofs(spec, spec.dofs)
-
-
 def curve_spec_with_dofs(spec: CurveSpec, dofs):
     return replace(spec, dofs=jnp.asarray(dofs, dtype=jnp.float64))
-
-
-def curve_gamma_from_dofs(spec: CurveSpec, dofs):
-    gamma_kernel = _curve_gamma_kernel(spec, dofs)
-    quadpoints, _ = _curve_quadpoints(spec)
-    return gamma_kernel(quadpoints)
-
-
-def curve_gammadash_from_spec(spec: CurveSpec):
-    return curve_gammadash_from_dofs(spec, spec.dofs)
-
-
-def curve_gammadash_from_dofs(spec: CurveSpec, dofs):
-    gamma_kernel = _curve_gamma_kernel(spec, dofs)
-    quadpoints, quadpoint_tangents = _curve_quadpoints(spec)
-    return jax.jvp(
-        gamma_kernel,
-        (quadpoints,),
-        (quadpoint_tangents,),
-    )[1]
-
-
-def curve_gammadashdash_from_spec(spec: CurveSpec):
-    return curve_gammadashdash_from_dofs(spec, spec.dofs)
-
-
-def curve_gammadashdash_from_dofs(spec: CurveSpec, dofs):
-    gamma_kernel = _curve_gamma_kernel(spec, dofs)
-    quadpoints, quadpoint_tangents = _curve_quadpoints(spec)
-    gammadash_kernel = lambda quadpoints_value: jax.jvp(
-        gamma_kernel,
-        (quadpoints_value,),
-        (quadpoint_tangents,),
-    )[1]
-    return jax.jvp(
-        gammadash_kernel,
-        (quadpoints,),
-        (quadpoint_tangents,),
-    )[1]
 
 
 def curve_gamma_and_dash_from_spec(spec: CurveSpec):

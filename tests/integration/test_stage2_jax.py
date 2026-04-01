@@ -88,8 +88,7 @@ EXPECTED_SQUARED_FLUX_INTERNAL_TIMING_KEYS = {
     "field_B_vjp_s",
 }
 EXPECTED_B_VJP_COMPONENT_TIMING_KEYS = {
-    "curve_gamma_s",
-    "curve_gammadash_s",
+    "curve_geometry_s",
     "current_value_s",
     "single_coil_pullback_s",
     "coil_vjp_s",
@@ -220,8 +219,7 @@ def _build_fake_b_vjp_profile():
     return {
         "wall_time_s": 0.125,
         "component_timings_s": {
-            "curve_gamma_s": 0.01,
-            "curve_gammadash_s": 0.02,
+            "curve_geometry_s": 0.01,
             "current_value_s": 0.03,
             "single_coil_pullback_s": 0.04,
             "coil_vjp_s": 0.05,
@@ -1912,11 +1910,11 @@ class TestStage2OptimizerContract:
             "_scipy_minimize_value_and_grad",
             fake_scipy_value_and_grad_adapter,
         )
+        cpu_contract = stage2_script.resolve_stage2_optimizer_contract("cpu", "scipy")
         cpu_result = stage2_script.run_stage2_optimizer(
             lambda x: (float(np.dot(x, x)), np.asarray(2.0 * x, dtype=float)),
             np.asarray([1.0, -2.0], dtype=float),
-            field_backend="cpu",
-            optimizer_backend="scipy",
+            contract=cpu_contract,
             maxiter=25,
             ftol=1e-15,
             gtol=1e-12,
@@ -1966,11 +1964,13 @@ class TestStage2OptimizerContract:
             fake_lbfgs_private,
         )
 
+        target_contract = stage2_script.resolve_stage2_optimizer_contract(
+            "jax", "ondevice"
+        )
         target_result = stage2_script.run_stage2_optimizer(
             lambda x: (float(np.dot(x, x)), np.asarray(2.0 * x, dtype=float)),
             np.asarray([1.0, -2.0], dtype=float),
-            field_backend="jax",
-            optimizer_backend="ondevice",
+            contract=target_contract,
             maxiter=12,
             ftol=1e-15,
             gtol=1e-11,

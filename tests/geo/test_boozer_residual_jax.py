@@ -8,9 +8,6 @@ Validates:
 4. C++ parity (when simsoptpp is available).
 """
 
-import importlib.util
-from pathlib import Path
-
 import pytest
 import numpy as np
 
@@ -19,20 +16,11 @@ import jax
 jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp
 
-_SRC = Path(__file__).resolve().parents[2] / "src" / "simsopt"
-
-
-def _load(name, relpath):
-    spec = importlib.util.spec_from_file_location(name, str(_SRC / relpath))
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
-
-
-_br = _load("boozer_residual_jax", "geo/boozer_residual_jax.py")
-boozer_residual_scalar = _br.boozer_residual_scalar
-boozer_residual_grad = _br.boozer_residual_grad
-boozer_residual_hessian = _br.boozer_residual_hessian
+from simsopt.geo.boozer_residual_jax import (
+    boozer_residual_scalar,
+    boozer_residual_grad,
+    boozer_residual_hessian,
+)
 
 
 def _make_synthetic_data(nphi=10, ntheta=12, seed=42):

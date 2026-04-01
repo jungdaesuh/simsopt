@@ -232,12 +232,10 @@ def test_jax_core_specs_are_pytrees():
             FixedSurfaceFluxSpec,
             GroupedCoilSetSpec,
             SurfaceRZFourierSpec,
-            curve_gamma_from_dofs,
-            curve_gamma_from_spec,
-            curve_gammadash_from_dofs,
-            curve_gammadash_from_spec,
-            curve_gammadashdash_from_dofs,
-            curve_gammadashdash_from_spec,
+            curve_gamma_and_dash_from_dofs,
+            curve_gamma_and_dash_from_spec,
+            curve_geometry_from_dofs,
+            curve_geometry_from_spec,
             fixed_surface_flux_integral_from_B,
             grouped_biot_savart_B_from_spec,
             grouped_coil_currents_from_spec,
@@ -368,21 +366,15 @@ def test_jax_core_specs_are_pytrees():
         assert_surface_dofs_derivable(curve_cws_spec, 3)  # stellsym: 2 rc + 1 zs
         assert_surface_dofs_derivable(curve_cws_nonstellsym_spec, 6)  # 2rc+1rs+2zc+1zs
 
-        curve_xyz_gamma = jax.jit(curve_gamma_from_spec)(curve_xyz_spec)
-        curve_xyz_gammadash = jax.jit(curve_gammadash_from_spec)(curve_xyz_spec)
-        curve_rz_gamma = jax.jit(curve_gamma_from_spec)(curve_rz_spec)
-        curve_cws_gamma = jax.jit(curve_gamma_from_spec)(curve_cws_spec)
-        curve_cws_gamma_from_dofs = jax.jit(curve_gamma_from_dofs)(
+        curve_xyz_gamma, curve_xyz_gammadash = jax.jit(curve_gamma_and_dash_from_spec)(curve_xyz_spec)
+        curve_rz_gamma, _ = jax.jit(curve_gamma_and_dash_from_spec)(curve_rz_spec)
+        curve_cws_gamma, curve_cws_gammadash = jax.jit(curve_gamma_and_dash_from_spec)(curve_cws_spec)
+        curve_cws_gamma_from_dofs, curve_cws_gammadash_from_dofs = jax.jit(curve_gamma_and_dash_from_dofs)(
             curve_cws_spec,
             curve_cws_spec.dofs,
         )
-        curve_cws_gammadash = jax.jit(curve_gammadash_from_spec)(curve_cws_spec)
-        curve_cws_gammadash_from_dofs = jax.jit(curve_gammadash_from_dofs)(
-            curve_cws_spec,
-            curve_cws_spec.dofs,
-        )
-        curve_cws_gammadashdash = jax.jit(curve_gammadashdash_from_spec)(curve_cws_spec)
-        curve_cws_gammadashdash_from_dofs = jax.jit(curve_gammadashdash_from_dofs)(
+        _, _, curve_cws_gammadashdash = jax.jit(curve_geometry_from_spec)(curve_cws_spec)
+        _, _, curve_cws_gammadashdash_from_dofs = jax.jit(curve_geometry_from_dofs)(
             curve_cws_spec,
             curve_cws_spec.dofs,
         )

@@ -549,9 +549,11 @@ According to a document from March 31, 2026, here is the module-by-module implem
      `scipy` / transitional `hybrid` / target `ondevice` split is defined in
      one place instead of being re-decided per entrypoint
    * the current Stage 2 route helpers are internally consistent:
-     `_resolve_stage2_optimizer_contract(...)` returns the full contract and
+     `resolve_stage2_optimizer_contract(...)` returns the full contract and
      only `resolve_stage2_optimizer_method(...)` strips that down to the
-     method string
+     method string; both Stage 2 and single-stage now share
+     `resolve_outer_loop_optimizer_contract()` in `optimizer_jax.py` which
+     bakes in the common `limited_memory=True, allow_hybrid=False` policy
    * unsupported single-stage outer `hybrid` routing is now rejected
      explicitly instead of silently degrading to plain `lbfgs`
    * the next broader non-hot-path objective slice is now landed:

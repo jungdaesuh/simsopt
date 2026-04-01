@@ -259,16 +259,13 @@ class SingleStageExampleTests(unittest.TestCase):
                     "optimizer_backend must be one of: scipy, hybrid, ondevice."
                 )
 
-        def resolve_outer_loop_optimizer_contract(
-            field_backend, optimizer_backend, *, component_label
-        ):
-            return resolve_continuous_optimizer_contract(
-                field_backend,
-                optimizer_backend,
-                limited_memory=True,
-                allow_hybrid=False,
-                component_label=component_label,
-            )
+        from functools import partial
+
+        resolve_outer_loop_optimizer_contract = partial(
+            resolve_continuous_optimizer_contract,
+            limited_memory=True,
+            allow_hybrid=False,
+        )
 
         fake_optimizer_module = types.ModuleType("simsopt.geo.optimizer_jax")
         fake_optimizer_module.jax_minimize = jax_minimize

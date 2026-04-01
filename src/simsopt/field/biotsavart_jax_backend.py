@@ -308,43 +308,26 @@ def _curve_coeff_pullback_data(curve, dg, dgd):
     return {curve: coeff_cotangent}
 
 
-def _curve_gamma_from_dofs(curve, curve_dofs):
-    from ..geo.curvexyzfourier import CurveXYZFourier, jaxfouriercurve_pure
-
-    if isinstance(curve, CurveXYZFourier):
-        quadpoints = _curve_quadpoints_jax(curve)
-        return jaxfouriercurve_pure(curve_dofs, quadpoints, curve.order)
-
-    if _curve_dof_mode(curve) == "full":
-        return curve.gamma_jax(curve_dofs)
-
-    surf_dofs = _curve_surface_dofs(curve)
-    if surf_dofs is not None:
-        return curve.gamma_jax(curve_dofs, surf_dofs)
-
-    return curve.gamma_jax(curve_dofs)
-
-
-def _curve_gammadash_from_dofs(curve, curve_dofs):
+def _curve_gamma_and_dash_from_dofs(curve, curve_dofs):
     from ..geo.curvexyzfourier import CurveXYZFourier, jaxfouriercurve_pure
 
     if isinstance(curve, CurveXYZFourier):
         quadpoints = _curve_quadpoints_jax(curve)
         ones = jnp.ones_like(quadpoints)
-        return jax.jvp(
-            lambda qpts: jaxfouriercurve_pure(curve_dofs, qpts, curve.order),
-            (quadpoints,),
-            (ones,),
-        )[1]
+        gamma_fn = lambda qpts: jaxfouriercurve_pure(curve_dofs, qpts, curve.order)
+        return jax.jvp(gamma_fn, (quadpoints,), (ones,))
 
     if _curve_dof_mode(curve) == "full":
-        return curve.gammadash_jax(curve_dofs)
+        return curve.gamma_jax(curve_dofs), curve.gammadash_jax(curve_dofs)
 
     surf_dofs = _curve_surface_dofs(curve)
     if surf_dofs is not None:
-        return curve.gammadash_jax(curve_dofs, surf_dofs)
+        return (
+            curve.gamma_jax(curve_dofs, surf_dofs),
+            curve.gammadash_jax(curve_dofs, surf_dofs),
+        )
 
-    return curve.gammadash_jax(curve_dofs)
+    return curve.gamma_jax(curve_dofs), curve.gammadash_jax(curve_dofs)
 
 
 def _curve_surface_pullback_data(curve, dg, dgd):
@@ -572,8 +555,7 @@ class BiotSavartJAX(Optimizable):
                 )
 
             curve_dofs = self._curve_dofs_from_free_vector(curve, coil_dofs)
-            gamma = _curve_gamma_from_dofs(curve, curve_dofs)
-            gammadash = _curve_gammadash_from_dofs(curve, curve_dofs)
+            gamma, gammadash = _curve_gamma_and_dash_from_dofs(curve, curve_dofs)
             if rotmat is not None:
                 gamma = gamma @ rotmat
                 gammadash = gammadash @ rotmat
@@ -797,7 +779,7 @@ class BiotSavartJAX(Optimizable):
         return make_field_eval_spec(self._points_jax)
 
     def _base_curve_geometry(self, curve, geometry_cache=None):
-        gamma, gammadash, _, _ = self._base_curve_geometry_with_timings(
+        gamma, gammadash, _ = self._base_curve_geometry_with_timings(
             curve,
             geometry_cache,
         )
@@ -807,15 +789,12 @@ class BiotSavartJAX(Optimizable):
         cache_key = id(curve)
         if geometry_cache is not None and cache_key in geometry_cache:
             base_gamma, base_gammadash = geometry_cache[cache_key]
-            return base_gamma, base_gammadash, 0.0, 0.0
+            return base_gamma, base_gammadash, 0.0
 
         if _supports_native_curve_geometry(curve):
             curve_dofs = _curve_live_dofs(curve)
-            gamma_s, base_gamma = _time_call_result(
-                lambda: _curve_gamma_from_dofs(curve, curve_dofs)
-            )
-            gammadash_s, base_gammadash = _time_call_result(
-                lambda: _curve_gammadash_from_dofs(curve, curve_dofs)
+            geometry_s, (base_gamma, base_gammadash) = _time_call_result(
+                lambda: _curve_gamma_and_dash_from_dofs(curve, curve_dofs)
             )
         else:
             _raise_if_strict_biot_savart_fallback(
@@ -824,16 +803,16 @@ class BiotSavartJAX(Optimizable):
                     f"{type(curve).__name__}"
                 ),
             )
-            gamma_s, base_gamma = _time_call_result(
-                lambda: jnp.asarray(curve.gamma(), dtype=jnp.float64)
-            )
-            gammadash_s, base_gammadash = _time_call_result(
-                lambda: jnp.asarray(curve.gammadash(), dtype=jnp.float64)
+            geometry_s, (base_gamma, base_gammadash) = _time_call_result(
+                lambda: (
+                    jnp.asarray(curve.gamma(), dtype=jnp.float64),
+                    jnp.asarray(curve.gammadash(), dtype=jnp.float64),
+                )
             )
 
         if geometry_cache is not None:
             geometry_cache[cache_key] = (base_gamma, base_gammadash)
-        return base_gamma, base_gammadash, gamma_s, gammadash_s
+        return base_gamma, base_gammadash, geometry_s
 
     def _coil_geometry_inputs(self, coil, geometry_cache=None):
         curve, rotmat, current, scale = _unwrap_coil_curve_and_current(coil)
@@ -999,7 +978,7 @@ class BiotSavartJAX(Optimizable):
 
     def _coil_b_vjp_inputs(self, coil, geometry_cache=None):
         curve, rotmat, current, scale = _unwrap_coil_curve_and_current(coil)
-        base_gamma, base_gammadash, gamma_s, gammadash_s = (
+        base_gamma, base_gammadash, geometry_s = (
             self._base_curve_geometry_with_timings(curve, geometry_cache)
         )
         gamma, gammadash = _rotate_curve_geometry(base_gamma, base_gammadash, rotmat)
@@ -1007,8 +986,7 @@ class BiotSavartJAX(Optimizable):
             lambda: jnp.asarray(current.get_value() * scale, dtype=jnp.float64)
         )
         timings = {
-            "curve_gamma_s": gamma_s,
-            "curve_gammadash_s": gammadash_s,
+            "curve_geometry_s": geometry_s,
             "current_value_s": current_s,
         }
         return curve, rotmat, current, scale, gamma, gammadash, current_value, timings
@@ -1088,8 +1066,7 @@ class BiotSavartJAX(Optimizable):
         v_jax = jnp.asarray(v)
         geometry_cache = {}
         component_totals = {
-            "curve_gamma_s": 0.0,
-            "curve_gammadash_s": 0.0,
+            "curve_geometry_s": 0.0,
             "current_value_s": 0.0,
             "single_coil_pullback_s": 0.0,
             "coil_vjp_s": 0.0,
@@ -1155,7 +1132,7 @@ class BiotSavartJAX(Optimizable):
                         "coil_vjp_s": coil_vjp_s,
                     }
                 )
-                for name in ("curve_gamma_s", "curve_gammadash_s", "current_value_s"):
+                for name in ("curve_geometry_s", "current_value_s"):
                     component_totals[name] += coil_timings[name]
                 per_coil_timings.append(
                     _build_coil_profile_entry(info.coil_index, coil_timings)

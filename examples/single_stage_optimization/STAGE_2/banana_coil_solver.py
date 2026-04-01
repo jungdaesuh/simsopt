@@ -1004,27 +1004,28 @@ def profile_stage2_explicit_step(
     }
 
 
-def resolve_stage2_optimizer_method(field_backend, optimizer_backend):
-    """Resolve the shared optimizer substrate for the Stage 2 outer loop."""
-    return _resolve_stage2_optimizer_contract(field_backend, optimizer_backend).method
+_STAGE2_COMPONENT_LABEL = "the Stage 2 outer loop"
 
 
-def _resolve_stage2_optimizer_contract(field_backend, optimizer_backend):
+def resolve_stage2_optimizer_contract(field_backend, optimizer_backend):
     """Resolve the optimizer contract for the Stage 2 outer loop."""
-    from simsopt.geo.optimizer_jax import resolve_continuous_optimizer_contract
+    from simsopt.geo.optimizer_jax import resolve_outer_loop_optimizer_contract
 
-    return resolve_continuous_optimizer_contract(
+    return resolve_outer_loop_optimizer_contract(
         field_backend,
         optimizer_backend,
-        limited_memory=True,
-        allow_hybrid=False,
-        component_label="the Stage 2 outer loop",
+        component_label=_STAGE2_COMPONENT_LABEL,
     )
+
+
+def resolve_stage2_optimizer_method(field_backend, optimizer_backend):
+    """Resolve the shared optimizer substrate for the Stage 2 outer loop."""
+    return resolve_stage2_optimizer_contract(field_backend, optimizer_backend).method
 
 
 def should_build_stage2_target_objective(field_backend, optimizer_backend):
     """Return whether the scalar JAX Stage 2 objective should drive optimization."""
-    return _resolve_stage2_optimizer_contract(
+    return resolve_stage2_optimizer_contract(
         field_backend, optimizer_backend
     ).use_scalar_objective
 
@@ -1051,8 +1052,7 @@ def run_stage2_optimizer(
     value_and_grad_fun=None,
     dofs=None,
     *,
-    field_backend,
-    optimizer_backend,
+    contract,
     maxiter,
     ftol,
     gtol,
@@ -1062,7 +1062,6 @@ def run_stage2_optimizer(
     """Run the Stage 2 outer optimization through the shared optimizer substrate."""
     from simsopt.geo.optimizer_jax import jax_minimize
 
-    contract = _resolve_stage2_optimizer_contract(field_backend, optimizer_backend)
     if contract.use_scalar_objective and scalar_fun is None:
         raise RuntimeError(
             "Stage 2 target-lane optimization requires a scalar JAX objective."
@@ -1090,8 +1089,7 @@ def run_stage2_optimizer_timed(
     value_and_grad_fun=None,
     dofs=None,
     *,
-    field_backend,
-    optimizer_backend,
+    contract,
     maxiter,
     ftol,
     gtol,
@@ -1103,8 +1101,7 @@ def run_stage2_optimizer_timed(
     result = run_stage2_optimizer(
         value_and_grad_fun,
         dofs,
-        field_backend=field_backend,
-        optimizer_backend=optimizer_backend,
+        contract=contract,
         maxiter=maxiter,
         ftol=ftol,
         gtol=gtol,
@@ -1558,10 +1555,11 @@ if __name__ == "__main__":
     final_snapshot = None
     optimizer_timings = None
     target_objective_bundle = None
-    use_scalar_objective = should_build_stage2_target_objective(
+    outer_contract = resolve_stage2_optimizer_contract(
         args.backend,
         args.optimizer_backend,
     )
+    use_scalar_objective = outer_contract.use_scalar_objective
     needs_target_probe_payload = (
         args.export_objective_json is not None and args.optimizer_backend == "ondevice"
     )
@@ -1707,8 +1705,7 @@ if __name__ == "__main__":
         res, cold_elapsed_s = run_stage2_optimizer_timed(
             fun,
             dofs,
-            field_backend=args.backend,
-            optimizer_backend=args.optimizer_backend,
+            contract=outer_contract,
             maxiter=MAXITER,
             maxcor=300,
             ftol=args.ftol,
@@ -1748,8 +1745,7 @@ if __name__ == "__main__":
                 _, warm_elapsed_s = run_stage2_optimizer_timed(
                     None,
                     initial_dofs,
-                    field_backend=args.backend,
-                    optimizer_backend=args.optimizer_backend,
+                    contract=outer_contract,
                     maxiter=MAXITER,
                     maxcor=300,
                     ftol=args.ftol,
