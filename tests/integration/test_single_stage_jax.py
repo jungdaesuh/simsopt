@@ -4294,7 +4294,7 @@ class TestBoozerResidualCPUParity:
                 "weight_inv_modB": True,
             },
         )
-        coil_arrays = booz_jax._extract_coil_data_grouped()
+        coil_arrays = booz_jax._coil_arrays
         obj_fn = _make_ls_penalty_objective(
             booz_jax,
             coil_arrays,
