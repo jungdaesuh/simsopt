@@ -958,6 +958,55 @@ class TestAdjointSolveConsistency:
             atol=1e-12,
         )
 
+    def test_coil_dofs_gradient_to_derivative_preserves_shared_dof_round_trip(self):
+        """Shared DOF lineages must not amplify gradients when converted to Derivative."""
+        from simsopt.geo.surfaceobjectives_jax import _coil_dofs_gradient_to_derivative
+
+        class _SharedDepOpt:
+            def __init__(self):
+                self.local_full_dof_size = 3
+                self.local_dofs_free_status = np.array([True, True, False])
+
+        class _SharedDofs:
+            def __init__(self, dep_opts):
+                self._dep_opts = dep_opts
+
+            def dep_opts(self):
+                return self._dep_opts
+
+        dep_opt_a = _SharedDepOpt()
+        dep_opt_b = _SharedDepOpt()
+        lineage = type("_SharedLineage", (), {})()
+        lineage.local_dof_size = 2
+        lineage.local_full_dof_size = 3
+        lineage.dofs_free_status = np.array([True, True, False])
+        lineage.local_dofs_free_status = np.array([True, True, False])
+        lineage.dofs = _SharedDofs((dep_opt_a, dep_opt_b))
+
+        bs_jax = object.__new__(BiotSavartJAX)
+        bs_jax._unique_dof_opts = [lineage]
+
+        derivative = _coil_dofs_gradient_to_derivative(bs_jax, np.array([2.0, -3.0]))
+
+        np.testing.assert_allclose(
+            np.asarray(derivative(bs_jax), dtype=float),
+            np.array([2.0, -3.0]),
+            rtol=1e-12,
+            atol=1e-12,
+        )
+        np.testing.assert_allclose(
+            np.asarray(derivative.data[dep_opt_a], dtype=float),
+            np.array([1.0, -1.5, 0.0]),
+            rtol=1e-12,
+            atol=1e-12,
+        )
+        np.testing.assert_allclose(
+            np.asarray(derivative.data[dep_opt_b], dtype=float),
+            np.array([1.0, -1.5, 0.0]),
+            rtol=1e-12,
+            atol=1e-12,
+        )
+
     def test_coil_cotangent_projection_avoids_whole_group_host_materialization(self):
         """Projection should convert one coil slice at a time, not a whole group."""
         coils = [_FallbackBombCoil(), _FallbackBombCoil()]

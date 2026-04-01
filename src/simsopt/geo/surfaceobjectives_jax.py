@@ -115,11 +115,13 @@ def _coil_dofs_gradient_to_derivative(biotsavart, coil_dofs_gradient):
         block[lineage_opt.local_dofs_free_status] = coil_dofs_gradient[start:stop]
         start = stop
 
-        for dep_opt in lineage_opt.dofs.dep_opts():
+        dep_opts = tuple(lineage_opt.dofs.dep_opts())
+        block_share = block / len(dep_opts)
+        for dep_opt in dep_opts:
             if dep_opt in deriv_data:
-                deriv_data[dep_opt] = deriv_data[dep_opt] + block
+                deriv_data[dep_opt] = deriv_data[dep_opt] + block_share
             else:
-                deriv_data[dep_opt] = block.copy()
+                deriv_data[dep_opt] = block_share.copy()
 
     return Derivative(deriv_data)
 
@@ -630,14 +632,7 @@ class NonQuasiSymmetricRatioJAX(Optimizable):
             axis=self.axis,
         )
 
-        self._J = float(
-            _qs_ratio_from_coil_dofs(
-                sdofs,
-                current_coil_dofs,
-                self.biotsavart,
-                **qs_kwargs,
-            )
-        )
+        self._J = float(_qs_ratio_pure(sdofs, coil_set_spec, **qs_kwargs))
 
         def J_of_coils(coil_dofs):
             return _qs_ratio_from_coil_dofs(
