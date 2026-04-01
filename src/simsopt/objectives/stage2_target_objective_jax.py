@@ -14,6 +14,7 @@ from ..jax_core.field import (
     grouped_coil_set_spec_from_lists,
 )
 from ..jax_core import (
+    apply_coil_symmetry,
     curve_gamma_from_dofs,
     curve_gammadash_from_dofs,
     curve_gammadashdash_from_dofs,
@@ -83,19 +84,12 @@ def _build_dynamic_curve_data(
     dynamic_gammadashs = []
     dynamic_currents = []
     for symmetry_spec in banana_symmetry_specs:
-        gamma = (
-            base_gamma
-            if not symmetry_spec.has_rotation
-            else base_gamma @ symmetry_spec.rotmat
-        )
-        gammadash = (
-            base_gammadash
-            if not symmetry_spec.has_rotation
-            else base_gammadash @ symmetry_spec.rotmat
+        gamma, gammadash, current = apply_coil_symmetry(
+            base_gamma, base_gammadash, current_dof, symmetry_spec,
         )
         dynamic_gammas.append(gamma)
         dynamic_gammadashs.append(gammadash)
-        dynamic_currents.append(symmetry_spec.scale * current_dof)
+        dynamic_currents.append(current)
     return (
         tuple(dynamic_gammas),
         tuple(dynamic_gammadashs),
