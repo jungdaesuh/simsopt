@@ -20,10 +20,11 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from repo_bootstrap import bootstrap_local_simsopt
-
-bootstrap_local_simsopt(Path(__file__).resolve().parents[2] / "src")
+# Add the src root so pure-JAX simsopt modules resolve from this repo
+# without reloading the entire simsopt package during test collection.
+_REPO_SRC_ROOT = str(Path(__file__).resolve().parents[2] / "src")
+if _REPO_SRC_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_SRC_ROOT)
 
 from simsopt.field.biotsavart_jax import biot_savart_A
 from simsopt.geo.label_constraints_jax import toroidal_flux_jax

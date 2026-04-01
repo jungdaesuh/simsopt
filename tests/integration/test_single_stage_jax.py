@@ -129,7 +129,9 @@ _HIDDEN_SPEC_FALLBACK_PATTERN = (
 _HIDDEN_SPEC_WARNING_PATTERN = (
     "BiotSavartJAX.*hidden immutable-spec compatibility fallback.*legacy adapter seam"
 )
-_TRACEABLE_OBJECTIVE_ABS_TOL = 1e-32
+# Solved-state objective parity can land in the ~1e-24 range, where tiny
+# evaluation-order differences need a small absolute floor to stay meaningful.
+_TRACEABLE_OBJECTIVE_ABS_TOL = 1e-28
 
 
 # -----------------------------------------------------------------------
