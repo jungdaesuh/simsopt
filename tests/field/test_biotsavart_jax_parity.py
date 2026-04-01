@@ -20,6 +20,7 @@ No simsoptpp dependency — all tests use pure JAX functions.
 
 import importlib.util
 from pathlib import Path
+import sys
 
 import pytest
 import numpy as np
@@ -28,6 +29,11 @@ import jax
 
 jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from repo_bootstrap import bootstrap_local_simsopt
+
+bootstrap_local_simsopt(Path(__file__).resolve().parents[2] / "src")
 
 # ---------------------------------------------------------------------------
 # Load JAX module directly (avoids simsopt/__init__.py → simsoptpp dep)

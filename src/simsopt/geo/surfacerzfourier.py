@@ -55,6 +55,9 @@ def _surface_rzfourier_jax_tools():
         surface_rz_fourier_normal_from_dofs,
         surface_rz_fourier_normal_from_spec,
         surface_rz_fourier_unitnormal_from_spec,
+        surface_rz_fourier_unitnormal_from_dofs,
+        surface_rz_fourier_dnormal_from_dofs,
+        surface_rz_fourier_dunitnormal_from_dofs,
         surface_rz_fourier_volume_from_dofs,
         surface_rz_fourier_volume_from_spec,
     )
@@ -70,6 +73,9 @@ def _surface_rzfourier_jax_tools():
         "normal_from_dofs": surface_rz_fourier_normal_from_dofs,
         "normal": surface_rz_fourier_normal_from_spec,
         "unitnormal": surface_rz_fourier_unitnormal_from_spec,
+        "unitnormal_from_dofs": surface_rz_fourier_unitnormal_from_dofs,
+        "dnormal_from_dofs": surface_rz_fourier_dnormal_from_dofs,
+        "dunitnormal_from_dofs": surface_rz_fourier_dunitnormal_from_dofs,
         "area_from_dofs": surface_rz_fourier_area_from_dofs,
         "area": surface_rz_fourier_area_from_spec,
         "volume_from_dofs": surface_rz_fourier_volume_from_dofs,
@@ -251,10 +257,16 @@ class SurfaceRZFourier(sopp.SurfaceRZFourier, Surface):
             "SurfaceRZFourier.normal_jax",
         )
 
-    def unitnormal_jax(self):
+    def unitnormal_jax(self, dofs=None):
         """Pure JAX unit-normal evaluation for the current surface state."""
-        return self._evaluate_surface_jax(
-            "unitnormal", "SurfaceRZFourier.unitnormal_jax"
+        if dofs is None:
+            return self._evaluate_surface_jax(
+                "unitnormal", "SurfaceRZFourier.unitnormal_jax"
+            )
+        return self._evaluate_surface_jax_from_dofs(
+            "unitnormal_from_dofs",
+            dofs,
+            "SurfaceRZFourier.unitnormal_jax",
         )
 
     def area_jax(self, dofs=None):
@@ -292,6 +304,22 @@ class SurfaceRZFourier(sopp.SurfaceRZFourier, Surface):
             dofs,
             "SurfaceRZFourier.dvolume_by_dcoeff_jax",
         )
+
+    def dnormal_by_dcoeff_jax(self, dofs=None):
+        """Pure JAX normal Jacobian with respect to surface DOFs."""
+        dofs_jax = self._surface_dofs_jax(dofs)
+        return _surface_rzfourier_jax_tool(
+            "dnormal_from_dofs",
+            "SurfaceRZFourier.dnormal_by_dcoeff_jax",
+        )(self.surface_spec(), dofs_jax)
+
+    def dunitnormal_by_dcoeff_jax(self, dofs=None):
+        """Pure JAX unit-normal Jacobian with respect to surface DOFs."""
+        dofs_jax = self._surface_dofs_jax(dofs)
+        return _surface_rzfourier_jax_tool(
+            "dunitnormal_from_dofs",
+            "SurfaceRZFourier.dunitnormal_by_dcoeff_jax",
+        )(self.surface_spec(), dofs_jax)
 
     def _make_names(self):
         """

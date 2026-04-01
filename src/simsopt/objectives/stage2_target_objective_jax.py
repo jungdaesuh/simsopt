@@ -11,7 +11,15 @@ from ..field.biotsavart_jax_backend import _unwrap_coil_curve_and_current
 from ..geo.curve import incremental_arclength_pure, kappa_pure
 from ..jax_core.field import (
     grouped_biot_savart_B_from_spec,
+    grouped_coil_set_spec_from_coil_specs,
     grouped_coil_set_spec_from_lists,
+)
+from ..jax_core import (
+    curve_gamma_from_dofs,
+    curve_gammadash_from_dofs,
+    curve_gammadashdash_from_dofs,
+    curve_spec_from_curve,
+    make_coil_symmetry_spec,
 )
 from ..jax_core.objectives_flux import (
     fixed_surface_flux_integral_from_B,
@@ -64,21 +72,37 @@ def _fixed_curve_penalty(curves, minimum_distance):
     return total
 
 
+def _curve_pairs_from_grouped_coil_set_spec(coil_set_spec):
+    return tuple(
+        (group.gammas[index], group.gammadashs[index])
+        for group in coil_set_spec.groups
+        for index in range(group.gammas.shape[0])
+    )
+
+
 def _build_dynamic_curve_data(
     base_gamma,
     base_gammadash,
-    banana_descriptors,
+    banana_symmetry_specs,
     current_dof,
 ):
     dynamic_gammas = []
     dynamic_gammadashs = []
     dynamic_currents = []
-    for rotmat, scale in banana_descriptors:
-        gamma = base_gamma if rotmat is None else base_gamma @ rotmat
-        gammadash = base_gammadash if rotmat is None else base_gammadash @ rotmat
+    for symmetry_spec in banana_symmetry_specs:
+        gamma = (
+            base_gamma
+            if not symmetry_spec.has_rotation
+            else base_gamma @ symmetry_spec.rotmat
+        )
+        gammadash = (
+            base_gammadash
+            if not symmetry_spec.has_rotation
+            else base_gammadash @ symmetry_spec.rotmat
+        )
         dynamic_gammas.append(gamma)
         dynamic_gammadashs.append(gammadash)
-        dynamic_currents.append(scale * current_dof)
+        dynamic_currents.append(symmetry_spec.scale * current_dof)
     return (
         tuple(dynamic_gammas),
         tuple(dynamic_gammadashs),
@@ -139,54 +163,50 @@ def build_stage2_target_objective(
         surface,
         definition=squared_flux_definition,
     )
-    points = field_eval_spec.points
-    surf_dofs = _as_jax_float64_array(np.asarray(banana_curve.surf.get_dofs()))
-    curve_dof_count = int(banana_curve.num_dofs())
+    del field_eval_spec
+    points = flux_spec.points
+    banana_curve_spec = curve_spec_from_curve(banana_curve)
+    curve_dof_count = int(banana_curve_spec.dofs.shape[0])
 
     if tf_coils:
-        tf_coil_spec = grouped_coil_set_spec_from_lists(
-            [coil.curve.gamma() for coil in tf_coils],
-            [coil.curve.gammadash() for coil in tf_coils],
-            [coil.current.get_value() for coil in tf_coils],
+        tf_coil_spec = grouped_coil_set_spec_from_coil_specs(
+            tuple(coil.to_spec() for coil in tf_coils)
         )
         fixed_field = grouped_biot_savart_B_from_spec(points, tf_coil_spec)
+        tf_curve_data = _curve_pairs_from_grouped_coil_set_spec(tf_coil_spec)
+        fixed_curve_penalty = _fixed_curve_penalty(tf_curve_data, cc_threshold)
     else:
         fixed_field = jnp.zeros((points.shape[0], 3), dtype=jnp.float64)
+        tf_curve_data = ()
+        fixed_curve_penalty = jnp.asarray(0.0, dtype=jnp.float64)
 
-    tf_curve_data = tuple(
-        (
-            _as_jax_float64_array(coil.curve.gamma(), contiguous=True),
-            _as_jax_float64_array(coil.curve.gammadash(), contiguous=True),
+    banana_symmetry_specs = tuple(
+        make_coil_symmetry_spec(
+            rotmat=rotmat,
+            scale=scale,
         )
-        for coil in tf_coils
+        for _, rotmat, _, scale in (
+            _unwrap_coil_curve_and_current(coil) for coil in banana_coils
+        )
     )
-    fixed_curve_penalty = _fixed_curve_penalty(tf_curve_data, cc_threshold)
-
-    banana_descriptors = []
-    for coil in banana_coils:
-        _, rotmat, _, scale = _unwrap_coil_curve_and_current(coil)
-        banana_descriptors.append(
-            (
-                None if rotmat is None else _as_jax_float64_array(rotmat),
-                _as_jax_float64_array(scale),
-            )
-        )
-    banana_descriptors = tuple(banana_descriptors)
 
     def _raw_terms(dofs):
         dofs = jnp.asarray(dofs, dtype=jnp.float64)
         current_dof = dofs[0]
         curve_dofs = dofs[1 : 1 + curve_dof_count]
 
-        base_gamma = banana_curve.gamma_jax(curve_dofs, surf_dofs)
-        base_gammadash = banana_curve.gammadash_jax(curve_dofs, surf_dofs)
-        base_gammadashdash = banana_curve.gammadashdash_jax(curve_dofs, surf_dofs)
+        base_gamma = curve_gamma_from_dofs(banana_curve_spec, curve_dofs)
+        base_gammadash = curve_gammadash_from_dofs(banana_curve_spec, curve_dofs)
+        base_gammadashdash = curve_gammadashdash_from_dofs(
+            banana_curve_spec,
+            curve_dofs,
+        )
 
         dynamic_gammas, dynamic_gammadashs, dynamic_current_array = (
             _build_dynamic_curve_data(
                 base_gamma,
                 base_gammadash,
-                banana_descriptors,
+                banana_symmetry_specs,
                 current_dof,
             )
         )

@@ -14,7 +14,11 @@ import jax
 from jax import lax
 import jax.numpy as jnp
 
-from ..backend import get_coil_chunk_size, get_quadrature_block_size
+from ..backend import (
+    get_coil_chunk_size,
+    get_point_chunk_size,
+    get_quadrature_block_size,
+)
 
 __all__ = [
     "biot_savart_B",
@@ -39,6 +43,10 @@ def _quadrature_block_size() -> int:
     return get_quadrature_block_size()
 
 
+def _point_chunk_size() -> int:
+    return get_point_chunk_size()
+
+
 def _slice_coil_chunk(array, start: int, chunk_size: int):
     trailing_shape = tuple(array.shape[1:])
     return lax.dynamic_slice(
@@ -53,6 +61,44 @@ def _slice_quadrature_block(array, start: int, block_size: int):
         array,
         (0, start, 0),
         (array.shape[0], block_size, array.shape[2]),
+    )
+
+
+def _slice_point_chunk(points: object, start: int, chunk_size: int):
+    return lax.dynamic_slice(
+        points,
+        (start, 0),
+        (chunk_size, points.shape[1]),
+    )
+
+
+def _tree_add(left, right):
+    return jax.tree_util.tree_map(lambda x, y: x + y, left, right)
+
+
+def _tree_dynamic_update(prefix_tree, chunk_tree, start_index: int):
+    return jax.tree_util.tree_map(
+        lambda acc, update: lax.dynamic_update_slice(
+            acc,
+            update,
+            (start_index,) + (0,) * (acc.ndim - 1),
+        ),
+        prefix_tree,
+        chunk_tree,
+    )
+
+
+def _tree_trim(prefix_tree, size: int):
+    return jax.tree_util.tree_map(lambda leaf: leaf[:size], prefix_tree)
+
+
+def _tree_zeros_like_prefix(reference_tree, prefix_size: int):
+    return jax.tree_util.tree_map(
+        lambda leaf: jnp.zeros(
+            (prefix_size,) + tuple(leaf.shape[1:]),
+            dtype=leaf.dtype,
+        ),
+        reference_tree,
     )
 
 
@@ -124,6 +170,36 @@ def _quadrature_block_integral(
 
     integral_sum = lax.fori_loop(0, block_count, body, zero)
     return integral_sum / quadrature_count
+
+
+def _point_chunk_reduce(points: object, chunk_kernel):
+    point_count = int(points.shape[0])
+    chunk_size = _point_chunk_size()
+    if point_count == 0 or chunk_size <= 0 or point_count <= chunk_size:
+        return chunk_kernel(points)
+
+    chunk_count = (point_count + chunk_size - 1) // chunk_size
+    padded_point_count = chunk_count * chunk_size
+    padded_points = jnp.pad(
+        points,
+        ((0, padded_point_count - point_count), (0, 0)),
+    )
+    first_chunk_points = _slice_point_chunk(padded_points, 0, chunk_size)
+    first_result = chunk_kernel(first_chunk_points)
+    padded_result = _tree_dynamic_update(
+        _tree_zeros_like_prefix(first_result, padded_point_count),
+        first_result,
+        0,
+    )
+
+    def body(chunk_index: int, acc):
+        start = chunk_index * chunk_size
+        chunk_points = _slice_point_chunk(padded_points, start, chunk_size)
+        chunk_result = chunk_kernel(chunk_points)
+        return _tree_dynamic_update(acc, chunk_result, start)
+
+    padded_result = lax.fori_loop(1, chunk_count, body, padded_result)
+    return _tree_trim(padded_result, point_count)
 
 
 def _biot_savart_B_integrand(x, gammas, gammadashs):
@@ -211,17 +287,20 @@ def _pointwise_kernel(
     chunk_size: int,
     quadrature_block_size: int,
 ):
-    return jax.vmap(
-        lambda x: point_kernel(
-            x,
-            gammas,
-            gammadashs,
-            currents,
-            chunk_size=chunk_size,
-            quadrature_block_size=quadrature_block_size,
-        ),
-        in_axes=0,
-    )(points)
+    def chunk_kernel(chunk_points):
+        return jax.vmap(
+            lambda x: point_kernel(
+                x,
+                gammas,
+                gammadashs,
+                currents,
+                chunk_size=chunk_size,
+                quadrature_block_size=quadrature_block_size,
+            ),
+            in_axes=0,
+        )(chunk_points)
+
+    return _point_chunk_reduce(points, chunk_kernel)
 
 
 def _pointwise_jacobian(
@@ -235,18 +314,22 @@ def _pointwise_jacobian(
     quadrature_block_size: int,
 ):
     jac_fn = jax.jacfwd(point_kernel, argnums=0)
-    raw = jax.vmap(
-        lambda x: jac_fn(
-            x,
-            gammas,
-            gammadashs,
-            currents,
-            chunk_size=chunk_size,
-            quadrature_block_size=quadrature_block_size,
-        ),
-        in_axes=0,
-    )(points)
-    return jnp.swapaxes(raw, -1, -2)
+
+    def chunk_kernel(chunk_points):
+        raw = jax.vmap(
+            lambda x: jac_fn(
+                x,
+                gammas,
+                gammadashs,
+                currents,
+                chunk_size=chunk_size,
+                quadrature_block_size=quadrature_block_size,
+            ),
+            in_axes=0,
+        )(chunk_points)
+        return jnp.swapaxes(raw, -1, -2)
+
+    return _point_chunk_reduce(points, chunk_kernel)
 
 
 @partial(jax.jit, static_argnames=("chunk_size", "quadrature_block_size"))
@@ -344,7 +427,10 @@ def _biot_savart_B_and_dB_impl(
         primals, tangents_fn = jax.linearize(f, x)
         return primals, jax.vmap(tangents_fn)(jnp.eye(3))
 
-    return jax.vmap(_val_and_jac)(points)
+    return _point_chunk_reduce(
+        points,
+        lambda chunk_points: jax.vmap(_val_and_jac)(chunk_points),
+    )
 
 
 def biot_savart_B_and_dB(points, gammas, gammadashs, currents):

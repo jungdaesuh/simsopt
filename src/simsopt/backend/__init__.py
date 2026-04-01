@@ -1,4 +1,4 @@
-"""Public backend runtime surface for the simsopt JAX lane."""
+"""Public backend home for runtime and mode-owned numerical policy helpers."""
 
 from .runtime import (
     VALID_BACKEND_MODES,
@@ -17,6 +17,7 @@ from .runtime import (
     get_debug_nans,
     get_field_kernel_tuning,
     get_jax_platform,
+    get_point_chunk_size,
     get_provenance_label,
     get_quadrature_block_size,
     get_tolerance_tier,
@@ -47,6 +48,7 @@ __all__ = [
     "get_debug_nans",
     "get_field_kernel_tuning",
     "get_jax_platform",
+    "get_point_chunk_size",
     "get_provenance_label",
     "get_quadrature_block_size",
     "get_tolerance_tier",

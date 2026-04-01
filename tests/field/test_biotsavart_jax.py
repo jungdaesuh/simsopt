@@ -11,6 +11,7 @@ import importlib.util
 from contextlib import contextmanager
 import os
 from pathlib import Path
+import sys
 
 import pytest
 import numpy as np
@@ -19,6 +20,11 @@ import jax
 
 jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from repo_bootstrap import bootstrap_local_simsopt
+
+bootstrap_local_simsopt(Path(__file__).resolve().parents[2] / "src")
 
 # Load JAX module directly (avoids simsopt/__init__.py → simsoptpp dep)
 _SRC = Path(__file__).resolve().parents[2] / "src" / "simsopt"
@@ -457,6 +463,62 @@ class TestBiotSavartJaxChunkedParity:
             A = chunked_bs.biot_savart_A(points, gammas, gammadashs, currents)
 
             np.testing.assert_allclose(np.asarray(A), np.asarray(dense_A), atol=1e-14)
+
+    def test_point_chunked_B_A_dB_dA_match_dense_reference(self, monkeypatch):
+        with _backend_mode("jax_cpu_parity"):
+            chunked_bs = _load_chunked_biotsavart()
+            from simsopt.jax_core import biotsavart as core_bs
+
+            monkeypatch.setattr(core_bs, "_point_chunk_size", lambda: 2)
+            monkeypatch.setattr(core_bs, "_coil_chunk_size", lambda: 0)
+            monkeypatch.setattr(core_bs, "_quadrature_block_size", lambda: 0)
+
+            gammas, gammadashs, currents = _make_shifted_circular_coils(6, nquad=32)
+            points = jnp.array(
+                [
+                    [0.2, 0.1, -0.3],
+                    [0.1, -0.4, 0.0],
+                    [-0.3, 0.2, 0.35],
+                    [0.05, 0.25, -0.15],
+                    [-0.2, -0.1, 0.1],
+                ],
+                dtype=jnp.float64,
+            )
+
+            dense_B, dense_A, dense_dB, dense_dA = _dense_reference_fields(
+                chunked_bs,
+                points,
+                gammas,
+                gammadashs,
+                currents,
+            )
+
+            B = chunked_bs.biot_savart_B(points, gammas, gammadashs, currents)
+            A = chunked_bs.biot_savart_A(points, gammas, gammadashs, currents)
+            dB = chunked_bs.biot_savart_dB_by_dX(points, gammas, gammadashs, currents)
+            dA = chunked_bs.biot_savart_dA_by_dX(points, gammas, gammadashs, currents)
+            B_combo, dB_combo = chunked_bs.biot_savart_B_and_dB(
+                points,
+                gammas,
+                gammadashs,
+                currents,
+            )
+
+            assert core_bs._point_chunk_size() == 2
+            np.testing.assert_allclose(np.asarray(B), np.asarray(dense_B), atol=1e-14)
+            np.testing.assert_allclose(np.asarray(A), np.asarray(dense_A), atol=1e-14)
+            np.testing.assert_allclose(np.asarray(dB), np.asarray(dense_dB), atol=1e-14)
+            np.testing.assert_allclose(np.asarray(dA), np.asarray(dense_dA), atol=1e-14)
+            np.testing.assert_allclose(
+                np.asarray(B_combo),
+                np.asarray(dense_B),
+                atol=1e-14,
+            )
+            np.testing.assert_allclose(
+                np.asarray(dB_combo),
+                np.asarray(dense_dB),
+                atol=1e-14,
+            )
 
     @pytest.mark.parametrize(
         ("mode", "rtol", "atol"),

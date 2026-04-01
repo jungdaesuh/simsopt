@@ -116,6 +116,7 @@ def test_programmatic_backend_selection_configures_jax_runtime():
         assert policy.compilation_cache_dir == "/tmp/simsopt-jax-cache"
         assert backend.get_backend_mode() == "jax_cpu_parity"
         assert backend.is_backend_strict() is True
+        assert backend.get_point_chunk_size("jax_cpu_parity") == 256
 
         import jax
 
@@ -187,6 +188,8 @@ def test_import_jax_core_specs():
         from simsopt.jax_core import (
             CoilSpec,
             CoilGroupSpec,
+            CoilSymmetrySpec,
+            CurveCWSFourierRZSpec,
             CurrentValueSpec,
             CurveRZFourierSpec,
             CurveXYZFourierSpec,
@@ -198,6 +201,8 @@ def test_import_jax_core_specs():
 
         assert CoilSpec is not None
         assert CoilGroupSpec is not None
+        assert CoilSymmetrySpec is not None
+        assert CurveCWSFourierRZSpec is not None
         assert CurrentValueSpec is not None
         assert CurveRZFourierSpec is not None
         assert CurveXYZFourierSpec is not None
@@ -217,6 +222,8 @@ def test_jax_core_specs_are_pytrees():
 
         from simsopt.jax_core import (
             CoilSpec,
+            CoilSymmetrySpec,
+            CurveCWSFourierRZSpec,
             CurrentValueSpec,
             CurveRZFourierSpec,
             CurveXYZFourierSpec,
@@ -224,8 +231,12 @@ def test_jax_core_specs_are_pytrees():
             FixedSurfaceFluxSpec,
             GroupedCoilSetSpec,
             SurfaceRZFourierSpec,
+            curve_gamma_from_dofs,
             curve_gamma_from_spec,
+            curve_gammadash_from_dofs,
             curve_gammadash_from_spec,
+            curve_gammadashdash_from_dofs,
+            curve_gammadashdash_from_spec,
             fixed_surface_flux_integral_from_B,
             grouped_biot_savart_B_from_spec,
             grouped_coil_currents_from_spec,
@@ -234,13 +245,16 @@ def test_jax_core_specs_are_pytrees():
             grouped_field_data_from_spec,
             grouped_field_inputs_from_spec,
             make_coil_spec,
+            make_coil_symmetry_spec,
             make_fixed_surface_flux_spec,
             make_current_value_spec,
+            make_curve_cwsfourier_rz_spec,
             make_curve_rzfourier_spec,
             make_curve_xyzfourier_spec,
             make_field_eval_spec,
             make_grouped_coil_set_spec,
             make_surface_rzfourier_spec,
+            surface_rz_fourier_dofs_from_spec,
             surface_rz_fourier_gamma_from_spec,
         )
 
@@ -284,8 +298,17 @@ def test_jax_core_specs_are_pytrees():
             nfp=1,
             stellsym=True,
         )
+        curve_cws_spec = make_curve_cwsfourier_rz_spec(
+            dofs=jnp.asarray([0.1, 0.0, 0.2, 0.0, 0.0, 0.0]),
+            quadpoints=jnp.asarray([0.0, 0.5]),
+            surface=surface_spec,
+            order=1,
+        )
+        coil_symmetry_spec = make_coil_symmetry_spec(scale=2.5)
 
         assert isinstance(coil_value_spec, CoilSpec)
+        assert isinstance(coil_symmetry_spec, CoilSymmetrySpec)
+        assert isinstance(curve_cws_spec, CurveCWSFourierRZSpec)
         assert isinstance(current_spec, CurrentValueSpec)
         assert isinstance(curve_rz_spec, CurveRZFourierSpec)
         assert isinstance(curve_xyz_spec, CurveXYZFourierSpec)
@@ -296,6 +319,8 @@ def test_jax_core_specs_are_pytrees():
 
         curve_xyz_leaves, _ = jax.tree_util.tree_flatten(curve_xyz_spec)
         curve_rz_leaves, _ = jax.tree_util.tree_flatten(curve_rz_spec)
+        curve_cws_leaves, _ = jax.tree_util.tree_flatten(curve_cws_spec)
+        coil_symmetry_leaves, _ = jax.tree_util.tree_flatten(coil_symmetry_spec)
         current_leaves, _ = jax.tree_util.tree_flatten(current_spec)
         field_eval_leaves, _ = jax.tree_util.tree_flatten(field_eval_spec)
         coil_value_leaves, _ = jax.tree_util.tree_flatten(coil_value_spec)
@@ -305,6 +330,8 @@ def test_jax_core_specs_are_pytrees():
 
         assert len(curve_xyz_leaves) == 2
         assert len(curve_rz_leaves) == 2
+        assert len(curve_cws_leaves) == 8
+        assert len(coil_symmetry_leaves) == 1
         assert len(current_leaves) == 1
         assert len(field_eval_leaves) == 1
         assert len(coil_value_leaves) == 4
@@ -316,10 +343,26 @@ def test_jax_core_specs_are_pytrees():
         assert grouped_coil_index_lists_from_spec(coil_spec) == ([0],)
         assert grouped_coil_currents_from_spec(coil_spec).shape == (1,)
         assert grouped_coil_set_spec_from_coil_specs((coil_value_spec,)).groups[0].coil_indices == (0,)
+        assert surface_rz_fourier_dofs_from_spec(surface_spec).shape == (1,)
 
         curve_xyz_gamma = jax.jit(curve_gamma_from_spec)(curve_xyz_spec)
         curve_xyz_gammadash = jax.jit(curve_gammadash_from_spec)(curve_xyz_spec)
         curve_rz_gamma = jax.jit(curve_gamma_from_spec)(curve_rz_spec)
+        curve_cws_gamma = jax.jit(curve_gamma_from_spec)(curve_cws_spec)
+        curve_cws_gamma_from_dofs = jax.jit(curve_gamma_from_dofs)(
+            curve_cws_spec,
+            curve_cws_spec.dofs,
+        )
+        curve_cws_gammadash = jax.jit(curve_gammadash_from_spec)(curve_cws_spec)
+        curve_cws_gammadash_from_dofs = jax.jit(curve_gammadash_from_dofs)(
+            curve_cws_spec,
+            curve_cws_spec.dofs,
+        )
+        curve_cws_gammadashdash = jax.jit(curve_gammadashdash_from_spec)(curve_cws_spec)
+        curve_cws_gammadashdash_from_dofs = jax.jit(curve_gammadashdash_from_dofs)(
+            curve_cws_spec,
+            curve_cws_spec.dofs,
+        )
         B = jax.jit(grouped_biot_savart_B_from_spec)(jnp.zeros((4, 3)), coil_spec)
         value = jax.jit(fixed_surface_flux_integral_from_B)(B, flux_spec)
         gamma = jax.jit(surface_rz_fourier_gamma_from_spec)(surface_spec)
@@ -328,6 +371,12 @@ def test_jax_core_specs_are_pytrees():
         assert curve_xyz_gamma.shape == (2, 3)
         assert curve_xyz_gammadash.shape == (2, 3)
         assert curve_rz_gamma.shape == (2, 3)
+        assert curve_cws_gamma.shape == (2, 3)
+        assert curve_cws_gamma_from_dofs.shape == (2, 3)
+        assert curve_cws_gammadash.shape == (2, 3)
+        assert curve_cws_gammadash_from_dofs.shape == (2, 3)
+        assert curve_cws_gammadashdash.shape == (2, 3)
+        assert curve_cws_gammadashdash_from_dofs.shape == (2, 3)
         assert gamma.shape == (2, 2, 3)
         assert jnp.isfinite(value)
     """)

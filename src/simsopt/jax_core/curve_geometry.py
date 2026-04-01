@@ -5,25 +5,81 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 
+from ..geo.curve import gamma_curve_on_surface
 from ..geo.curverzfourier import curverzfourier_pure
 from ..geo.curvexyzfourier import jaxfouriercurve_pure
-from .specs import CurveRZFourierSpec, CurveSpec, CurveXYZFourierSpec
+from .specs import (
+    CurveCWSFourierRZSpec,
+    CurveRZFourierSpec,
+    CurveSpec,
+    CurveXYZFourierSpec,
+    make_curve_cwsfourier_rz_spec,
+)
+from .surface_rzfourier import surface_rz_fourier_dofs_from_spec
 
 
-def _curve_gamma_kernel(spec: CurveSpec):
+def curve_spec_from_curve(curve):
+    to_spec = getattr(curve, "to_spec", None)
+    if callable(to_spec):
+        return to_spec()
+
+    surface = getattr(curve, "surf", None)
+    if surface is None:
+        raise NotImplementedError(
+            f"Curve type {type(curve).__name__} does not expose an immutable JAX spec."
+        )
+
+    surface_spec_fn = getattr(surface, "surface_spec", None)
+    if not callable(surface_spec_fn):
+        raise NotImplementedError(
+            f"Surface type {type(surface).__name__} does not expose surface_spec()."
+        )
+
+    if getattr(curve, "surf_type", None) != "RZ_Fourier":
+        raise NotImplementedError(
+            f"Curve type {type(curve).__name__} only supports immutable specs on RZ_Fourier surfaces."
+        )
+
+    return make_curve_cwsfourier_rz_spec(
+        dofs=curve.get_dofs(),
+        quadpoints=curve.quadpoints,
+        surface=surface_spec_fn(),
+        order=curve.order,
+        G=getattr(curve, "G", 0.0),
+        H=getattr(curve, "H", 0.0),
+    )
+
+
+def _curve_gamma_kernel(spec: CurveSpec, dofs=None):
+    curve_dofs = spec.dofs if dofs is None else jnp.asarray(dofs, dtype=jnp.float64)
     if isinstance(spec, CurveXYZFourierSpec):
         return lambda quadpoints: jaxfouriercurve_pure(
-            spec.dofs,
+            curve_dofs,
             quadpoints,
             spec.order,
         )
     if isinstance(spec, CurveRZFourierSpec):
         return lambda quadpoints: curverzfourier_pure(
-            spec.dofs,
+            curve_dofs,
             quadpoints,
             spec.order,
             spec.nfp,
             spec.stellsym,
+        )
+    if isinstance(spec, CurveCWSFourierRZSpec):
+        surface_dofs = surface_rz_fourier_dofs_from_spec(spec.surface)
+        return lambda quadpoints: gamma_curve_on_surface(
+            curve_dofs,
+            quadpoints,
+            spec.order,
+            spec.G,
+            spec.H,
+            surface_dofs,
+            "RZ_Fourier",
+            spec.surface.mpol,
+            spec.surface.ntor,
+            spec.surface.nfp,
+            spec.surface.stellsym,
         )
     raise TypeError(f"Unsupported curve spec type: {type(spec).__name__}")
 
@@ -34,16 +90,43 @@ def _curve_quadpoints(spec: CurveSpec):
 
 
 def curve_gamma_from_spec(spec: CurveSpec):
-    gamma_kernel = _curve_gamma_kernel(spec)
+    return curve_gamma_from_dofs(spec, spec.dofs)
+
+
+def curve_gamma_from_dofs(spec: CurveSpec, dofs):
+    gamma_kernel = _curve_gamma_kernel(spec, dofs)
     quadpoints, _ = _curve_quadpoints(spec)
     return gamma_kernel(quadpoints)
 
 
 def curve_gammadash_from_spec(spec: CurveSpec):
-    gamma_kernel = _curve_gamma_kernel(spec)
+    return curve_gammadash_from_dofs(spec, spec.dofs)
+
+
+def curve_gammadash_from_dofs(spec: CurveSpec, dofs):
+    gamma_kernel = _curve_gamma_kernel(spec, dofs)
     quadpoints, quadpoint_tangents = _curve_quadpoints(spec)
     return jax.jvp(
         gamma_kernel,
+        (quadpoints,),
+        (quadpoint_tangents,),
+    )[1]
+
+
+def curve_gammadashdash_from_spec(spec: CurveSpec):
+    return curve_gammadashdash_from_dofs(spec, spec.dofs)
+
+
+def curve_gammadashdash_from_dofs(spec: CurveSpec, dofs):
+    gamma_kernel = _curve_gamma_kernel(spec, dofs)
+    quadpoints, quadpoint_tangents = _curve_quadpoints(spec)
+    gammadash_kernel = lambda quadpoints_value: jax.jvp(
+        gamma_kernel,
+        (quadpoints_value,),
+        (quadpoint_tangents,),
+    )[1]
+    return jax.jvp(
+        gammadash_kernel,
         (quadpoints,),
         (quadpoint_tangents,),
     )[1]

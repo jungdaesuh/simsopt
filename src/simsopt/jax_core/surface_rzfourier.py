@@ -133,6 +133,27 @@ def _coefficients_from_dofs(
     return rc, rs, zc, zs
 
 
+def surface_rz_fourier_dofs_from_spec(spec: SurfaceRZFourierSpec) -> jax.Array:
+    include_m, include_n = _block_mode_indices(
+        mpol=spec.mpol,
+        ntor=spec.ntor,
+        include_zero_mode=True,
+    )
+    exclude_m, exclude_n = _block_mode_indices(
+        mpol=spec.mpol,
+        ntor=spec.ntor,
+        include_zero_mode=False,
+    )
+    rc = spec.rc[include_m, include_n]
+    if spec.stellsym:
+        zs = spec.zs[exclude_m, exclude_n]
+        return jnp.concatenate((rc, zs))
+    rs = spec.rs[exclude_m, exclude_n]
+    zc = spec.zc[include_m, include_n]
+    zs = spec.zs[exclude_m, exclude_n]
+    return jnp.concatenate((rc, rs, zc, zs))
+
+
 def surface_rz_fourier_spec_from_dofs(
     dofs: jax.Array,
     *,
@@ -181,6 +202,15 @@ def _evaluate_from_dofs(
     dofs: jax.Array,
 ):
     return evaluator(_spec_from_dofs(spec, dofs))
+
+
+def _evaluate_jacobian_from_dofs(
+    evaluator,
+    spec: SurfaceRZFourierSpec,
+    dofs: jax.Array,
+):
+    dofs_jax = jnp.asarray(dofs, dtype=jnp.float64)
+    return jax.jacfwd(lambda x: evaluator(_spec_from_dofs(spec, x)))(dofs_jax)
 
 
 def surface_rz_fourier_gamma_from_spec(spec: SurfaceRZFourierSpec):
@@ -248,6 +278,12 @@ def surface_rz_fourier_unitnormal_from_spec(spec: SurfaceRZFourierSpec):
     return normal / norm
 
 
+def surface_rz_fourier_unitnormal_from_dofs(
+    spec: SurfaceRZFourierSpec, dofs: jax.Array
+):
+    return _evaluate_from_dofs(surface_rz_fourier_unitnormal_from_spec, spec, dofs)
+
+
 def surface_rz_fourier_area_from_spec(spec: SurfaceRZFourierSpec):
     normal = surface_rz_fourier_normal_from_spec(spec)
     nphi, ntheta = normal.shape[:2]
@@ -259,6 +295,20 @@ def surface_rz_fourier_volume_from_spec(spec: SurfaceRZFourierSpec):
     normal = surface_rz_fourier_normal_from_spec(spec)
     nphi, ntheta = gamma.shape[:2]
     return jnp.sum(jnp.sum(gamma * normal, axis=-1)) / (3.0 * nphi * ntheta)
+
+
+def surface_rz_fourier_dnormal_from_dofs(spec: SurfaceRZFourierSpec, dofs: jax.Array):
+    return _evaluate_jacobian_from_dofs(surface_rz_fourier_normal_from_spec, spec, dofs)
+
+
+def surface_rz_fourier_dunitnormal_from_dofs(
+    spec: SurfaceRZFourierSpec, dofs: jax.Array
+):
+    return _evaluate_jacobian_from_dofs(
+        surface_rz_fourier_unitnormal_from_spec,
+        spec,
+        dofs,
+    )
 
 
 def surface_rz_fourier_gamma_from_dofs(spec: SurfaceRZFourierSpec, dofs: jax.Array):

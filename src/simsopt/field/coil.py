@@ -98,16 +98,10 @@ class Coil(sopp.Coil, Optimizable):
             self.curve,
             self.current,
         )
-
-        if not hasattr(curve, "to_spec"):
-            raise NotImplementedError(
-                f"Curve type {type(curve).__name__} does not expose to_spec()."
-            )
-
-        from ..jax_core import make_coil_spec
+        from ..jax_core import curve_spec_from_curve, make_coil_spec
 
         return make_coil_spec(
-            curve=curve.to_spec(),
+            curve=curve_spec_from_curve(curve),
             current=current.to_spec(),
             rotmat=rotmat,
             scale=scale,

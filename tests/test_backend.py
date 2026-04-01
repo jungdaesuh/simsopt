@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+import os
 
 import pytest
 
@@ -34,13 +35,13 @@ def _clear_backend_env(monkeypatch) -> None:
 def _assert_synced_runtime_env(
     backend, *, mode: str, backend_name: str, platform: str, strict: bool
 ) -> None:
-    assert backend.os.environ["SIMSOPT_BACKEND_MODE"] == mode
-    assert backend.os.environ["SIMSOPT_BACKEND_STRICT"] == ("1" if strict else "0")
-    assert backend.os.environ["SIMSOPT_BACKEND"] == backend_name
-    assert backend.os.environ["STAGE2_BACKEND"] == backend_name
-    assert backend.os.environ["SIMSOPT_JAX_PLATFORM"] == platform
-    assert backend.os.environ["SIMSOPT_JAX_BACKEND"] == platform
-    assert backend.os.environ["JAX_PLATFORMS"] == platform
+    assert os.environ["SIMSOPT_BACKEND_MODE"] == mode
+    assert os.environ["SIMSOPT_BACKEND_STRICT"] == ("1" if strict else "0")
+    assert os.environ["SIMSOPT_BACKEND"] == backend_name
+    assert os.environ["STAGE2_BACKEND"] == backend_name
+    assert os.environ["SIMSOPT_JAX_PLATFORM"] == platform
+    assert os.environ["SIMSOPT_JAX_BACKEND"] == platform
+    assert os.environ["JAX_PLATFORMS"] == platform
 
 
 def _assert_backend_policy(
@@ -188,6 +189,15 @@ def test_fast_mode_policy_helpers(monkeypatch):
         provenance_label="jax_gpu_fast",
     )
     assert backend.is_parity_mode() is False
+
+
+def test_point_chunk_size_defaults_follow_mode(monkeypatch):
+    _clear_backend_env(monkeypatch)
+    backend = _fresh_backend()
+
+    assert backend.get_point_chunk_size("native_cpu") == 0
+    assert backend.get_point_chunk_size("jax_cpu_parity") == 256
+    assert backend.get_point_chunk_size("jax_gpu_fast") == 1024
 
 
 def test_field_kernel_tuning_defaults_follow_mode(monkeypatch):

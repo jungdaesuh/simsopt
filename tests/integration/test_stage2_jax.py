@@ -254,6 +254,8 @@ def _assert_b_vjp_profile_payload(payload):
 
 def _build_stage2_target_objective_contract_case(
     definition: str = "quadratic flux",
+    *,
+    return_context: bool = False,
 ):
     eval_surf = SurfaceRZFourier(
         nfp=5,
@@ -338,6 +340,19 @@ def _build_stage2_target_objective_contract_case(
         squared_flux_definition=definition,
     )
 
+    if return_context:
+        return (
+            objective,
+            target_bundle,
+            {
+                "eval_surf": eval_surf,
+                "coil_surf": coil_surf,
+                "tf_coils": tf_coils,
+                "banana_coils": banana_coils,
+                "banana_curve": banana_curve,
+                "banana_current": banana_current,
+            },
+        )
     return objective, target_bundle
 
 
@@ -2793,6 +2808,34 @@ class TestStage2OptimizerContract:
             grad_target,
             seed=17,
         )
+
+    def test_target_scalar_objective_bundle_no_longer_depends_on_live_banana_curve(
+        self,
+        monkeypatch,
+    ):
+        objective, target_bundle, context = (
+            _build_stage2_target_objective_contract_case(return_context=True)
+        )
+        dofs = np.asarray(objective.x, dtype=np.float64)
+        baseline_value = float(target_bundle.objective(dofs))
+        baseline_grad = np.asarray(jax.grad(target_bundle.objective)(dofs), dtype=float)
+
+        def _fail(*_args, **_kwargs):
+            raise AssertionError(
+                "target objective should not touch the live banana curve"
+            )
+
+        banana_curve = context["banana_curve"]
+        monkeypatch.setattr(banana_curve, "gamma_jax", _fail)
+        monkeypatch.setattr(banana_curve, "gammadash_jax", _fail)
+        monkeypatch.setattr(banana_curve, "gammadashdash_jax", _fail)
+        monkeypatch.setattr(banana_curve.surf, "get_dofs", _fail)
+
+        value = float(target_bundle.objective(dofs))
+        grad = np.asarray(jax.grad(target_bundle.objective)(dofs), dtype=float)
+
+        np.testing.assert_allclose(value, baseline_value, rtol=1e-12, atol=1e-18)
+        np.testing.assert_allclose(grad, baseline_grad, rtol=1e-12, atol=1e-18)
 
     @pytest.mark.parametrize(
         ("field_backend", "optimizer_backend", "export_objective_json"),

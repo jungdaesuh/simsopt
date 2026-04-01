@@ -115,6 +115,11 @@ _FIELD_KERNEL_DEFAULTS = {
     "jax_gpu_parity": {"coil_chunk_size": 16, "quadrature_block_size": 0},
     "jax_gpu_fast": {"coil_chunk_size": 64, "quadrature_block_size": 64},
 }
+_POINT_CHUNK_SIZE_BY_POLICY = {
+    "host_reference": 0,
+    "stable_default": 256,
+    "performance_tuned": 1024,
+}
 _FIELD_KERNEL_ENV_BY_KEY = {
     "coil_chunk_size": _COIL_CHUNK_SIZE_ENV,
     "quadrature_block_size": _QUADRATURE_BLOCK_SIZE_ENV,
@@ -464,6 +469,12 @@ def get_coil_chunk_size(mode: str | None = None) -> int:
 def get_quadrature_block_size(mode: str | None = None) -> int:
     """Return the low-level Biot-Savart quadrature-block size."""
     return get_field_kernel_tuning(mode).quadrature_block_size
+
+
+def get_point_chunk_size(mode: str | None = None) -> int:
+    """Return the grouped-field point chunk size for the resolved mode."""
+    chunk_policy = get_chunk_policy(mode)
+    return _POINT_CHUNK_SIZE_BY_POLICY.get(chunk_policy, 0)
 
 
 def get_debug_nans(mode: str | None = None) -> bool:

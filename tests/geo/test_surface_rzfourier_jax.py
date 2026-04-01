@@ -17,7 +17,11 @@ from simsopt.jax_core import (
     surface_rz_fourier_gammadash2_from_spec,
     surface_rz_fourier_normal_from_dofs,
     surface_rz_fourier_normal_from_spec,
+    surface_rz_fourier_dnormal_from_dofs,
     surface_rz_fourier_spec_from_dofs,
+    surface_rz_fourier_unitnormal_from_dofs,
+    surface_rz_fourier_unitnormal_from_spec,
+    surface_rz_fourier_dunitnormal_from_dofs,
     surface_rz_fourier_volume_from_dofs,
     surface_rz_fourier_volume_from_spec,
 )
@@ -62,15 +66,22 @@ def _assert_surface_parity(surface: SurfaceRZFourier) -> None:
     gd1_jax = np.asarray(surface_rz_fourier_gammadash1_from_spec(spec))
     gd2_jax = np.asarray(surface_rz_fourier_gammadash2_from_spec(spec))
     normal_jax = np.asarray(surface_rz_fourier_normal_from_spec(spec))
+    unitnormal_jax = np.asarray(surface_rz_fourier_unitnormal_from_spec(spec))
     gamma_from_dofs = np.asarray(surface_rz_fourier_gamma_from_dofs(spec, dofs))
     gd1_from_dofs = np.asarray(surface_rz_fourier_gammadash1_from_dofs(spec, dofs))
     gd2_from_dofs = np.asarray(surface_rz_fourier_gammadash2_from_dofs(spec, dofs))
     normal_from_dofs = np.asarray(surface_rz_fourier_normal_from_dofs(spec, dofs))
+    unitnormal_from_dofs = np.asarray(
+        surface_rz_fourier_unitnormal_from_dofs(spec, dofs)
+    )
 
     np.testing.assert_allclose(gamma_jax, surface.gamma(), rtol=1e-12, atol=1e-12)
     np.testing.assert_allclose(gd1_jax, surface.gammadash1(), rtol=1e-12, atol=1e-12)
     np.testing.assert_allclose(gd2_jax, surface.gammadash2(), rtol=1e-12, atol=1e-12)
     np.testing.assert_allclose(normal_jax, surface.normal(), rtol=1e-12, atol=1e-12)
+    np.testing.assert_allclose(
+        unitnormal_jax, surface.unitnormal(), rtol=1e-12, atol=1e-12
+    )
     np.testing.assert_allclose(gamma_from_dofs, surface.gamma(), rtol=1e-12, atol=1e-12)
     np.testing.assert_allclose(
         gd1_from_dofs, surface.gammadash1(), rtol=1e-12, atol=1e-12
@@ -80,6 +91,9 @@ def _assert_surface_parity(surface: SurfaceRZFourier) -> None:
     )
     np.testing.assert_allclose(
         normal_from_dofs, surface.normal(), rtol=1e-12, atol=1e-12
+    )
+    np.testing.assert_allclose(
+        unitnormal_from_dofs, surface.unitnormal(), rtol=1e-12, atol=1e-12
     )
 
     np.testing.assert_allclose(
@@ -103,6 +117,18 @@ def _assert_surface_parity(surface: SurfaceRZFourier) -> None:
     np.testing.assert_allclose(
         np.asarray(surface.normal_jax(dofs)),
         surface.normal(),
+        rtol=1e-12,
+        atol=1e-12,
+    )
+    np.testing.assert_allclose(
+        np.asarray(surface.unitnormal_jax()),
+        surface.unitnormal(),
+        rtol=1e-12,
+        atol=1e-12,
+    )
+    np.testing.assert_allclose(
+        np.asarray(surface.unitnormal_jax(dofs)),
+        surface.unitnormal(),
         rtol=1e-12,
         atol=1e-12,
     )
@@ -179,6 +205,49 @@ def test_surface_rzfourier_geometry_from_dofs_matches_boozer_hot_path():
     np.testing.assert_allclose(
         np.asarray(xtheta), surface.gammadash2(), rtol=1e-12, atol=1e-12
     )
+
+
+def _assert_surface_jacobian_parity(surface: SurfaceRZFourier) -> None:
+    dofs = jnp.asarray(surface.get_dofs(), dtype=jnp.float64)
+    spec = surface.surface_spec()
+
+    normal_jacobian = np.asarray(surface_rz_fourier_dnormal_from_dofs(spec, dofs))
+    unitnormal_jacobian = np.asarray(
+        surface_rz_fourier_dunitnormal_from_dofs(spec, dofs)
+    )
+
+    np.testing.assert_allclose(
+        normal_jacobian,
+        np.asarray(surface.dnormal_by_dcoeff()),
+        rtol=1e-9,
+        atol=1e-9,
+    )
+    np.testing.assert_allclose(
+        normal_jacobian,
+        np.asarray(surface.dnormal_by_dcoeff_jax(dofs)),
+        rtol=1e-12,
+        atol=1e-12,
+    )
+    np.testing.assert_allclose(
+        unitnormal_jacobian,
+        np.asarray(surface.dunitnormal_by_dcoeff()),
+        rtol=1e-9,
+        atol=1e-9,
+    )
+    np.testing.assert_allclose(
+        unitnormal_jacobian,
+        np.asarray(surface.dunitnormal_by_dcoeff_jax(dofs)),
+        rtol=1e-12,
+        atol=1e-12,
+    )
+
+
+def test_surface_rzfourier_jax_jacobian_parity_stellsym():
+    _assert_surface_jacobian_parity(_make_surface(stellsym=True))
+
+
+def test_surface_rzfourier_jax_jacobian_parity_non_stellsym():
+    _assert_surface_jacobian_parity(_make_surface(stellsym=False))
 
 
 def _assert_area_volume_gradient_parity(surface: SurfaceRZFourier) -> None:

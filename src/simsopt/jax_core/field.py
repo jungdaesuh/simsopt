@@ -3,10 +3,8 @@
 from __future__ import annotations
 
 import jax
-from jax import lax
 import jax.numpy as jnp
 
-from ..backend import get_chunk_policy
 from .biotsavart import (
     biot_savart_A,
     biot_savart_B,
@@ -16,16 +14,6 @@ from .biotsavart import (
 )
 from .curve_geometry import curve_gamma_from_spec, curve_gammadash_from_spec
 from .specs import CoilSpec, GroupedCoilSetSpec, make_grouped_coil_set_spec
-
-_POINT_CHUNK_SIZE_BY_POLICY = {
-    "host_reference": 0,
-    "stable_default": 256,
-    "performance_tuned": 1024,
-}
-
-
-def _point_chunk_size() -> int:
-    return int(_POINT_CHUNK_SIZE_BY_POLICY.get(get_chunk_policy(), 0))
 
 
 def _empty_grouped_field_result(points: object, kernel):
@@ -47,82 +35,15 @@ def _tree_add(left, right):
     return jax.tree_util.tree_map(lambda x, y: x + y, left, right)
 
 
-def _tree_dynamic_update(prefix_tree, chunk_tree, start_index: int):
-    return jax.tree_util.tree_map(
-        lambda acc, update: lax.dynamic_update_slice(
-            acc,
-            update,
-            (start_index,) + (0,) * (acc.ndim - 1),
-        ),
-        prefix_tree,
-        chunk_tree,
-    )
-
-
-def _tree_trim(prefix_tree, size: int):
-    return jax.tree_util.tree_map(lambda leaf: leaf[:size], prefix_tree)
-
-
-def _tree_zeros_like_prefix(reference_tree, prefix_size: int):
-    return jax.tree_util.tree_map(
-        lambda leaf: jnp.zeros(
-            (prefix_size,) + tuple(leaf.shape[1:]),
-            dtype=leaf.dtype,
-        ),
-        reference_tree,
-    )
-
-
-def _slice_point_chunk(points: object, start: int, chunk_size: int):
-    return lax.dynamic_slice(
-        points,
-        (start, 0),
-        (chunk_size, points.shape[1]),
-    )
-
-
-def _kernel_on_point_chunks(points: object, kernel, gammas, gammadashs, currents):
-    point_count = int(points.shape[0])
-    chunk_size = _point_chunk_size()
-    if point_count == 0 or chunk_size <= 0 or point_count <= chunk_size:
-        return kernel(points, gammas, gammadashs, currents)
-
-    chunk_count = (point_count + chunk_size - 1) // chunk_size
-    padded_point_count = chunk_count * chunk_size
-    padded_points = jnp.pad(
-        points,
-        ((0, padded_point_count - point_count), (0, 0)),
-    )
-    first_chunk_points = _slice_point_chunk(padded_points, 0, chunk_size)
-    first_result = kernel(first_chunk_points, gammas, gammadashs, currents)
-    padded_result = _tree_dynamic_update(
-        _tree_zeros_like_prefix(first_result, padded_point_count),
-        first_result,
-        0,
-    )
-
-    def body(chunk_index: int, acc):
-        start = chunk_index * chunk_size
-        chunk_points = _slice_point_chunk(padded_points, start, chunk_size)
-        chunk_result = kernel(chunk_points, gammas, gammadashs, currents)
-        return _tree_dynamic_update(acc, chunk_result, start)
-
-    padded_result = lax.fori_loop(1, chunk_count, body, padded_result)
-    return _tree_trim(padded_result, point_count)
-
-
 def _accumulate_grouped_field(points: object, coil_spec: GroupedCoilSetSpec, kernel):
     coil_arrays = grouped_field_inputs_from_spec(coil_spec)
     if not coil_arrays:
         return _empty_grouped_field_result(points, kernel)
 
     gammas, gammadashs, currents = coil_arrays[0]
-    result = _kernel_on_point_chunks(points, kernel, gammas, gammadashs, currents)
+    result = kernel(points, gammas, gammadashs, currents)
     for gammas, gammadashs, currents in coil_arrays[1:]:
-        result = _tree_add(
-            result,
-            _kernel_on_point_chunks(points, kernel, gammas, gammadashs, currents),
-        )
+        result = _tree_add(result, kernel(points, gammas, gammadashs, currents))
     return result
 
 
@@ -173,6 +94,12 @@ def grouped_coil_set_spec_from_inputs(coil_arrays: object) -> GroupedCoilSetSpec
         )
         coil_offset += group_size
     return make_grouped_coil_set_spec(groups)
+
+
+def grouped_coil_set_spec_from_source(coil_source: object) -> GroupedCoilSetSpec:
+    if isinstance(coil_source, GroupedCoilSetSpec):
+        return coil_source
+    return grouped_coil_set_spec_from_inputs(coil_source)
 
 
 def _coil_set_spec_from_inputs(coil_arrays: object) -> GroupedCoilSetSpec:

@@ -52,6 +52,7 @@ from simsopt.field import (  # noqa: E402
 from simsopt.geo import (  # noqa: E402
     SurfaceRZFourier,
     SurfaceXYZTensorFourier,
+    CurveCWSFourier,
     CurveCWSFourierCPP,
     CurveHelical,
     CurvePlanarFourier,
@@ -76,6 +77,7 @@ from simsopt.objectives import QuadraticPenalty  # noqa: E402
 from simsopt.field.biotsavart_jax_backend import BiotSavartJAX  # noqa: E402
 from simsopt.jax_core import (  # noqa: E402
     CoilSpec,
+    CurveCWSFourierRZSpec,
     FieldEvalSpec,
     GroupedCoilSetSpec,
     grouped_coil_set_spec_from_coil_specs,
@@ -1076,6 +1078,54 @@ class TestAdjointSolveConsistency:
             atol=1e-12,
         )
         assert curve_spec.order == curve.order
+
+    @pytest.mark.parametrize("curve_cls", (CurveCWSFourierCPP, CurveCWSFourier))
+    def test_curve_on_surface_coils_expose_immutable_specs(self, curve_cls):
+        """Curve-on-surface coils should round-trip through immutable curve specs."""
+        coil_surf = SurfaceRZFourier(
+            nfp=2,
+            stellsym=True,
+            mpol=1,
+            ntor=0,
+            quadpoints_phi=np.arange(32) / 32,
+            quadpoints_theta=np.arange(32) / 32,
+        )
+        coil_surf.set_rc(0, 0, 0.95)
+        coil_surf.set_rc(1, 0, 0.2)
+        coil_surf.set_zs(1, 0, 0.2)
+
+        curve = curve_cls(
+            np.linspace(0.0, 1.0, 64, endpoint=False),
+            order=2,
+            surf=coil_surf,
+        )
+        curve.set("phic(0)", 0.07)
+        curve.set("thetac(0)", 0.35)
+        curve.set("phic(1)", 0.02)
+        curve.set("thetas(1)", -0.08)
+        current = 1.5 * Current(2.0)
+        coil = Coil(curve, current)
+
+        coil_spec = coil.to_spec()
+        grouped_spec = grouped_coil_set_spec_from_coil_specs((coil_spec,))
+
+        assert isinstance(coil_spec, CoilSpec)
+        assert isinstance(coil_spec.curve, CurveCWSFourierRZSpec)
+        np.testing.assert_allclose(
+            np.asarray(grouped_spec.groups[0].gammas[0]),
+            curve.gamma(),
+            atol=1e-12,
+        )
+        np.testing.assert_allclose(
+            np.asarray(grouped_spec.groups[0].gammadashs[0]),
+            curve.gammadash(),
+            atol=1e-12,
+        )
+        np.testing.assert_allclose(
+            np.asarray(grouped_spec.groups[0].currents),
+            np.array([3.0]),
+            atol=1e-12,
+        )
 
     def test_field_eval_spec_round_trip_uses_immutable_points(self):
         """BiotSavartJAX should round-trip evaluation points through FieldEvalSpec."""
@@ -3142,6 +3192,46 @@ class TestTraceableObjective:
         )
         assert jr_jax._J is jr_cache_before, "f dirtied BoozerResidualJAX cache"
         assert iotas_jax._J is iotas_cache_before, "f dirtied IotasJAX cache"
+
+    def test_traceable_objective_uses_spec_reconstruction_not_grouped_arrays(
+        self,
+        monkeypatch,
+    ):
+        """Traceable forward routing must use immutable grouped-coil specs."""
+        (_, _, _, _, bs_jax, _, booz_jax, _, iota0, G0) = _make_boozer_setup(
+            constraint_weight=1.0,
+        )
+        res = booz_jax.run_code(iota0, G0)
+        assert res is not None and res["success"]
+
+        original_coil_set_spec_from_dofs = bs_jax.coil_set_spec_from_dofs
+        calls = {"count": 0}
+
+        def _counting_coil_set_spec_from_dofs(coil_dofs):
+            calls["count"] += 1
+            return original_coil_set_spec_from_dofs(coil_dofs)
+
+        def _reject_grouped_arrays(*_args, **_kwargs):
+            raise AssertionError(
+                "traceable forward path should not call grouped_coil_arrays_from_dofs()"
+            )
+
+        monkeypatch.setattr(
+            bs_jax,
+            "coil_set_spec_from_dofs",
+            _counting_coil_set_spec_from_dofs,
+        )
+        monkeypatch.setattr(
+            bs_jax,
+            "grouped_coil_arrays_from_dofs",
+            _reject_grouped_arrays,
+        )
+
+        f, coil_dofs, _, _, _ = self._make_traceable(bs_jax, booz_jax)
+        value = float(f(coil_dofs))
+
+        assert np.isfinite(value)
+        assert calls["count"] > 0
 
     def test_traceable_objective_does_not_accumulate_children(self, boozer_setup):
         """Repeated calls must not grow booz_jax's descendant graph."""

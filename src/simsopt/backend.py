@@ -1,4 +1,4 @@
-"""Public backend facade with implementation housed under ``backend/``."""
+"""Stable public backend facade that forwards to the backend package home."""
 
 import os
 from pathlib import Path
@@ -24,6 +24,7 @@ from simsopt.backend.runtime import (  # noqa: E402
     get_debug_nans,
     get_field_kernel_tuning,
     get_jax_platform,
+    get_point_chunk_size,
     get_provenance_label,
     get_quadrature_block_size,
     get_tolerance_tier,
@@ -54,6 +55,7 @@ __all__ = (
     "get_debug_nans",
     "get_field_kernel_tuning",
     "get_jax_platform",
+    "get_point_chunk_size",
     "get_provenance_label",
     "get_quadrature_block_size",
     "get_tolerance_tier",
