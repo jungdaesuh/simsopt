@@ -219,6 +219,7 @@ def test_jax_core_specs_are_pytrees():
     rc, err = _run_import_check("""
         import jax
         import jax.numpy as jnp
+        import numpy as np
 
         from simsopt.jax_core import (
             CoilSpec,
@@ -291,8 +292,8 @@ def test_jax_core_specs_are_pytrees():
             current=current_spec,
         )
         surface_spec = make_surface_rzfourier_spec(
-            rc=jnp.asarray([[1.0]]),
-            zs=jnp.asarray([[0.0]]),
+            rc=jnp.asarray([[1.0], [0.25]]),
+            zs=jnp.asarray([[0.0], [0.2]]),
             quadpoints_phi=jnp.asarray([0.0, 0.5]),
             quadpoints_theta=jnp.asarray([0.0, 0.5]),
             nfp=1,
@@ -304,7 +305,29 @@ def test_jax_core_specs_are_pytrees():
             surface=surface_spec,
             order=1,
         )
+        surface_spec_nonstellsym = make_surface_rzfourier_spec(
+            rc=jnp.asarray([[1.0], [0.25]]),
+            zs=jnp.asarray([[0.0], [0.2]]),
+            rs=jnp.asarray([[0.0], [0.15]]),
+            zc=jnp.asarray([[0.05], [0.0]]),
+            quadpoints_phi=jnp.asarray([0.0, 0.5]),
+            quadpoints_theta=jnp.asarray([0.0, 0.5]),
+            nfp=1,
+            stellsym=False,
+        )
+        curve_cws_nonstellsym_spec = make_curve_cwsfourier_rz_spec(
+            dofs=jnp.asarray([0.1, 0.0, 0.2, 0.0, 0.0, 0.0]),
+            quadpoints=jnp.asarray([0.0, 0.5]),
+            surface=surface_spec_nonstellsym,
+            order=1,
+        )
         coil_symmetry_spec = make_coil_symmetry_spec(scale=2.5)
+
+        def assert_surface_dofs_match(curve_spec, surface_spec_value):
+            np.testing.assert_allclose(
+                np.asarray(curve_spec.surface_dofs),
+                np.asarray(surface_rz_fourier_dofs_from_spec(surface_spec_value)),
+            )
 
         assert isinstance(coil_value_spec, CoilSpec)
         assert isinstance(coil_symmetry_spec, CoilSymmetrySpec)
@@ -343,7 +366,14 @@ def test_jax_core_specs_are_pytrees():
         assert grouped_coil_index_lists_from_spec(coil_spec) == ([0],)
         assert grouped_coil_currents_from_spec(coil_spec).shape == (1,)
         assert grouped_coil_set_spec_from_coil_specs((coil_value_spec,)).groups[0].coil_indices == (0,)
-        assert surface_rz_fourier_dofs_from_spec(surface_spec).shape == (1,)
+        assert_surface_dofs_match(curve_cws_spec, surface_spec)
+        assert_surface_dofs_match(
+            curve_cws_nonstellsym_spec,
+            surface_spec_nonstellsym,
+        )
+        assert surface_rz_fourier_dofs_from_spec(surface_spec).shape == (
+            curve_cws_spec.surface_dofs.shape[0],
+        )
 
         curve_xyz_gamma = jax.jit(curve_gamma_from_spec)(curve_xyz_spec)
         curve_xyz_gammadash = jax.jit(curve_gammadash_from_spec)(curve_xyz_spec)

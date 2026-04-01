@@ -224,27 +224,10 @@ jax.tree_util.register_dataclass(
 CurveSpec = CurveXYZFourierSpec | CurveRZFourierSpec | CurveCWSFourierRZSpec
 
 
-def _surface_rzfourier_include_mode_indices(
-    *,
-    mpol: int,
-    ntor: int,
-) -> tuple[jax.Array, jax.Array]:
-    m_idx: list[int] = []
-    n_idx: list[int] = []
+def _curve_cws_surface_dofs(surface: SurfaceRZFourierSpec) -> jax.Array:
+    from .surface_rzfourier import surface_rz_fourier_dofs_from_spec
 
-    for n in range(ntor + 1):
-        m_idx.append(0)
-        n_idx.append(n + ntor)
-
-    for m in range(1, mpol + 1):
-        for n in range(-ntor, ntor + 1):
-            m_idx.append(m)
-            n_idx.append(n + ntor)
-
-    return (
-        jnp.asarray(m_idx, dtype=jnp.int32),
-        jnp.asarray(n_idx, dtype=jnp.int32),
-    )
+    return surface_rz_fourier_dofs_from_spec(surface)
 
 
 def make_coil_group_spec(
@@ -300,21 +283,11 @@ def make_curve_cwsfourier_rz_spec(
     G: float = 0.0,
     H: float = 0.0,
 ) -> CurveCWSFourierRZSpec:
-    include_m, include_n = _surface_rzfourier_include_mode_indices(
-        mpol=surface.mpol,
-        ntor=surface.ntor,
-    )
-    surface_dofs = jnp.concatenate(
-        [
-            surface.rc[include_m, include_n],
-            surface.zs[include_m, include_n],
-        ]
-    )
     return CurveCWSFourierRZSpec(
         dofs=jnp.asarray(dofs, dtype=jnp.float64),
         quadpoints=jnp.asarray(quadpoints, dtype=jnp.float64),
         surface=surface,
-        surface_dofs=surface_dofs,
+        surface_dofs=_curve_cws_surface_dofs(surface),
         order=int(order),
         G=float(G),
         H=float(H),
