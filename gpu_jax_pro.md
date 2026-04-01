@@ -30,6 +30,17 @@ Update as of 2026-04-01:
   `CurvePlanarFourier` and `CurveHelical` now round-trip through immutable
   curve specs, and `BiotSavartJAX` prefers that spec path over grouped-array
   fallback for those families
+* `docs/using_jax_backend.md` now includes copy-paste Stage 2 and single-stage
+  examples plus honest performance guidance for compile time, warm timing,
+  parity lanes, fast lanes, and memory tradeoffs
+* benchmark productization is now more concrete:
+  * a stable-hardware weekly manifest exists under `benchmarks/manifests/`
+  * a standardized markdown report template exists under
+    `benchmarks/reports/`
+  * a renderer exists for JSON -> markdown benchmark reports
+  * scheduled benchmark reporting now exists as a workflow contract for the
+    stable-hardware lane
+* `native_cpu` remains the default rollout lane; JAX stays opt-in
 
 Read this document as architecture rationale and module-level guidance for the
 remaining work, not as a claim that Phase 0 and Phase 1 are still entirely
@@ -1085,6 +1096,12 @@ You are already testing:
 
 * Promote a small subset of these probes into automated CI, not just manual or external benchmarking.
 * Keep the rest as heavier nightly or benchmark runs.
+* Standardize recurring benchmark reporting around:
+  * a checked-in manifest describing stable hardware, command contract, and
+    artifact paths
+  * one shared markdown report template
+  * one lightweight renderer from JSON payload to markdown report
+  * a scheduled stable-hardware workflow instead of ad hoc local runs
 
 ### Done when
 

@@ -34,6 +34,12 @@ Current public modes:
 - `jax_gpu_parity`
 - `jax_gpu_fast`
 
+Default rollout lane:
+
+- `native_cpu` remains the default indefinitely.
+- Treat JAX lanes as opt-in validation and acceleration lanes until the
+  production-scale benchmark and ship-proof gates are closed.
+
 ## Mode guide
 
 ### `native_cpu`
@@ -151,6 +157,89 @@ The currently strongest JAX-backed lanes are:
 
 The current CPU reference lane remains the oracle for broad workflow trust.
 
+## Copy-paste workflow examples
+
+All commands below assume:
+
+```bash
+cd /Users/suhjungdae/code/columbia/simsopt-jax
+```
+
+### Stage 2 on the default CPU reference lane
+
+```bash
+SIMSOPT_BACKEND_MODE=native_cpu \
+python examples/single_stage_optimization/STAGE_2/banana_coil_solver.py \
+  --backend cpu \
+  --optimizer-backend scipy \
+  --plasma-surf-filename wout_nfp22ginsburg_000_014417_iota15.nc \
+  --probe-only \
+  --skip-postprocess
+```
+
+Use this first when you want:
+
+- the default rollout lane
+- the broadest trusted oracle behavior
+- a cheap contract check before any JAX run
+
+### Stage 2 on the JAX CPU parity lane
+
+```bash
+SIMSOPT_BACKEND_MODE=jax_cpu_parity \
+python examples/single_stage_optimization/STAGE_2/banana_coil_solver.py \
+  --backend jax \
+  --optimizer-backend scipy \
+  --plasma-surf-filename wout_nfp22ginsburg_000_014417_iota15.nc \
+  --probe-only \
+  --skip-postprocess
+```
+
+Use this to validate Stage 2 algorithmic parity before moving to GPU.
+
+### Single-stage on the default CPU reference lane
+
+```bash
+SIMSOPT_BACKEND_MODE=native_cpu \
+python examples/single_stage_optimization/SINGLE_STAGE/single_stage_banana_example.py \
+  --backend cpu \
+  --optimizer-backend scipy \
+  --stage2-source local \
+  --stage2-bs-path examples/single_stage_optimization/STAGE_2/outputs-wout_nfp22ginsburg_000_014417_iota15.nc/biot_savart_opt.json \
+  --init-only
+```
+
+This is the safest single-stage initialization proof lane.
+
+### Single-stage on the JAX parity / target lanes
+
+```bash
+SIMSOPT_BACKEND_MODE=jax_cpu_parity \
+python examples/single_stage_optimization/SINGLE_STAGE/single_stage_banana_example.py \
+  --backend jax \
+  --optimizer-backend scipy \
+  --boozer-optimizer-backend scipy \
+  --stage2-source local \
+  --stage2-bs-path examples/single_stage_optimization/STAGE_2/outputs-wout_nfp22ginsburg_000_014417_iota15.nc/biot_savart_opt.json \
+  --init-only
+```
+
+After that is green, the target-lane outer optimizer path is:
+
+```bash
+SIMSOPT_BACKEND_MODE=jax_gpu_parity \
+python examples/single_stage_optimization/SINGLE_STAGE/single_stage_banana_example.py \
+  --backend jax \
+  --optimizer-backend ondevice \
+  --boozer-optimizer-backend ondevice \
+  --stage2-source local \
+  --stage2-bs-path examples/single_stage_optimization/STAGE_2/outputs-wout_nfp22ginsburg_000_014417_iota15.nc/biot_savart_opt.json \
+  --init-only
+```
+
+Do not treat the last command as the first proof lane. Keep `native_cpu` and
+`jax_cpu_parity` ahead of it.
+
 ## Recommended usage pattern
 
 ### 1. Validate on CPU parity first
@@ -215,6 +304,44 @@ print(policy.chunk_policy)
 print(policy.tolerance_tier)
 print(policy.provenance_label)
 ```
+
+## Benchmark and reporting contract
+
+The benchmark/productization SSOT now includes:
+
+- manifest:
+  - [`/Users/suhjungdae/code/columbia/simsopt-jax/benchmarks/manifests/stable_hardware_weekly_tier5.json`](/Users/suhjungdae/code/columbia/simsopt-jax/benchmarks/manifests/stable_hardware_weekly_tier5.json)
+- standardized markdown report template:
+  - [`/Users/suhjungdae/code/columbia/simsopt-jax/benchmarks/reports/STANDARD_REPORT_TEMPLATE.md`](/Users/suhjungdae/code/columbia/simsopt-jax/benchmarks/reports/STANDARD_REPORT_TEMPLATE.md)
+- report renderer:
+  - [`/Users/suhjungdae/code/columbia/simsopt-jax/benchmarks/render_benchmark_report.py`](/Users/suhjungdae/code/columbia/simsopt-jax/benchmarks/render_benchmark_report.py)
+- scheduled reporting workflow:
+  - [`/Users/suhjungdae/code/columbia/simsopt-jax/.github/workflows/jax_benchmark_reporting.yml`](/Users/suhjungdae/code/columbia/simsopt-jax/.github/workflows/jax_benchmark_reporting.yml)
+
+The scheduled benchmark workflow assumes a dedicated self-hosted runner for the
+stable benchmark lane. If that runner is not provisioned, use
+`workflow_dispatch` manually after preparing the benchmark environment.
+
+## Performance expectations
+
+Keep the timing claims narrow and honest:
+
+- cold compile time:
+  - first JAX calls can be dominated by compilation and cache setup
+  - do not compare cold JAX against warm CPU and call that steady-state speed
+- warm time:
+  - use repeated or in-process reruns to measure steady-state timing
+  - prefer the Tier 5 trusted-fixture report for workflow-level timing claims
+- parity mode:
+  - `jax_cpu_parity` and `jax_gpu_parity` favor x64 stability and explicit
+    reporting over maximum throughput
+- fast mode:
+  - `jax_gpu_fast` is the throughput-oriented lane after parity is green
+  - it is not the default oracle and should not replace `native_cpu`
+- memory:
+  - grouped-field and lower-level chunking reduce pressure, but memory claims
+    must still be tied to the exact fixture, hardware, and compilation state
+  - track both host RSS and GPU memory in benchmark artifacts when available
 
 ## Current caveats
 

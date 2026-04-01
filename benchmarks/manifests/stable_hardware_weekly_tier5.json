@@ -1,0 +1,42 @@
+{
+  "benchmark_id": "jax-stable-hardware-weekly-tier5",
+  "title": "Weekly JAX Tier 5 stable-hardware report",
+  "default_rollout_lane": "native_cpu",
+  "hardware_contract": {
+    "runner_labels": [
+      "self-hosted",
+      "stable-benchmarks"
+    ],
+    "platform": "cuda",
+    "expectation": "Use one dedicated stable-hardware runner or a homogeneous pinned pool.",
+    "notes": [
+      "Do not compare results across heterogeneous GPU generations in one report.",
+      "Treat missing or reprovisioned benchmark runners as a scheduling blocker, not a performance regression."
+    ]
+  },
+  "schedule": {
+    "cadence": "weekly",
+    "workflow": ".github/workflows/jax_benchmark_reporting.yml"
+  },
+  "commands": [
+    {
+      "name": "tier5_performance_characterization",
+      "script": "benchmarks/tier5_performance_characterization.py",
+      "args": [
+        "--platform",
+        "cuda",
+        "--optimizer-backend",
+        "scipy",
+        "--maxiter",
+        "20",
+        "--output-json",
+        "benchmark_artifacts/tier5_performance_characterization.json"
+      ]
+    }
+  ],
+  "report": {
+    "template": "benchmarks/reports/STANDARD_REPORT_TEMPLATE.md",
+    "renderer": "benchmarks/render_benchmark_report.py",
+    "output_markdown": "benchmark_artifacts/stable_hardware_weekly_report.md"
+  }
+}
