@@ -559,6 +559,9 @@ According to a document from March 31, 2026, here is the module-by-module implem
    * the next broader non-hot-path objective slice is now landed:
      `NonQuasiSymmetricRatioJAX` and `BoozerResidualJAX` route their direct
      coil/objective terms through immutable coil-spec reconstruction
+   * the traceable single-stage scalar objective now also keeps its iota-target
+     penalty on the same pure immutable-spec forward path instead of dropping
+     back to the inner Boozer objective value
 
 4. **Finish mode-owned numerical policy.**
    Backend modes are now real, and chunk tuning is materially more centralized
