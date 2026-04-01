@@ -57,20 +57,34 @@ jax.tree_util.register_dataclass(
 
 
 @dataclass(frozen=True)
-class CoilSpec:
-    """Immutable coil payload composed from curve/current specs and wrappers."""
+class CoilSymmetrySpec:
+    """Immutable rotation/scale payload for symmetric coil replicas."""
 
-    curve: CurveSpec
-    current: CurrentValueSpec
     rotmat: jax.Array
     scale: float
     has_rotation: bool
 
 
 jax.tree_util.register_dataclass(
-    CoilSpec,
-    data_fields=["curve", "current", "rotmat"],
+    CoilSymmetrySpec,
+    data_fields=["rotmat"],
     meta_fields=["scale", "has_rotation"],
+)
+
+
+@dataclass(frozen=True)
+class CoilSpec:
+    """Immutable coil payload: curve identity, current, and spatial placement."""
+
+    curve: CurveSpec
+    current: CurrentValueSpec
+    symmetry: CoilSymmetrySpec
+
+
+jax.tree_util.register_dataclass(
+    CoilSpec,
+    data_fields=["curve", "current", "symmetry"],
+    meta_fields=[],
 )
 
 
@@ -209,22 +223,6 @@ jax.tree_util.register_dataclass(
 )
 
 
-@dataclass(frozen=True)
-class CoilSymmetrySpec:
-    """Immutable rotation/scale payload for symmetric coil replicas."""
-
-    rotmat: jax.Array
-    scale: float
-    has_rotation: bool
-
-
-jax.tree_util.register_dataclass(
-    CoilSymmetrySpec,
-    data_fields=["rotmat"],
-    meta_fields=["scale", "has_rotation"],
-)
-
-
 CurveSpec = CurveXYZFourierSpec | CurveRZFourierSpec | CurveCWSFourierRZSpec
 
 
@@ -308,13 +306,10 @@ def make_coil_spec(
     rotmat: object | None = None,
     scale: float = 1.0,
 ) -> CoilSpec:
-    rotmat_jax, has_rotation = _normalize_rotmat(rotmat)
     return CoilSpec(
         curve=curve,
         current=current,
-        rotmat=rotmat_jax,
-        scale=float(scale),
-        has_rotation=has_rotation,
+        symmetry=make_coil_symmetry_spec(rotmat=rotmat, scale=scale),
     )
 
 
@@ -329,6 +324,19 @@ def make_coil_symmetry_spec(
         scale=float(scale),
         has_rotation=has_rotation,
     )
+
+
+def apply_coil_symmetry(
+    gamma: jax.Array,
+    gammadash: jax.Array,
+    current: jax.Array,
+    symmetry: CoilSymmetrySpec,
+) -> tuple[jax.Array, jax.Array, jax.Array]:
+    """Apply rotation/scale transform to curve geometry and current."""
+    if symmetry.has_rotation:
+        gamma = gamma @ symmetry.rotmat
+        gammadash = gammadash @ symmetry.rotmat
+    return gamma, gammadash, current * symmetry.scale
 
 
 def make_field_eval_spec(points: object) -> FieldEvalSpec:
