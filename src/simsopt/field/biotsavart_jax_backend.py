@@ -146,6 +146,16 @@ def _raise_if_strict_biot_savart_fallback(detail: str) -> None:
     )
 
 
+def _raise_if_strict_hidden_spec_fallback(detail: str) -> None:
+    _raise_if_strict_biot_savart_fallback(
+        f"the hidden immutable-spec compatibility fallback via {detail}"
+    )
+
+
+def _raise_if_strict_grouped_spec_compat_fallback(api_name: str, detail: str) -> None:
+    _raise_if_strict_hidden_spec_fallback(f"{detail} in {api_name}()")
+
+
 def _build_pullback_group_profile_entry(*, kind, coil_indices, elapsed_s, native_curve):
     return {
         "kind": kind,
@@ -663,10 +673,15 @@ class BiotSavartJAX(Optimizable):
                 self.coil_specs_from_dofs(coil_dofs)
             )
         except NotImplementedError:
-            gammas, gammadashs, currents = self._coil_arrays_in_order_from_dofs(
-                coil_dofs
+            _raise_if_strict_grouped_spec_compat_fallback(
+                "coil_set_spec_from_dofs",
+                "grouped-array reconstruction",
             )
-            return grouped_coil_set_spec_from_lists(gammas, gammadashs, currents)
+            return self._coil_set_spec_from_dofs_via_grouped_arrays(coil_dofs)
+
+    def _coil_set_spec_from_dofs_via_grouped_arrays(self, coil_dofs):
+        gammas, gammadashs, currents = self._coil_arrays_in_order_from_dofs(coil_dofs)
+        return grouped_coil_set_spec_from_lists(gammas, gammadashs, currents)
 
     def _scalar_current_value_from_dofs(self, current, coil_dofs, lane_label):
         current_full_x = self._local_full_dofs_from_free_vector(current, coil_dofs)
@@ -913,12 +928,18 @@ class BiotSavartJAX(Optimizable):
                 jnp.asarray(self.x, dtype=jnp.float64)
             )
         except NotImplementedError:
-            pass
+            _raise_if_strict_grouped_spec_compat_fallback(
+                "coil_set_spec",
+                "explicit-DOF grouped-array reconstruction",
+            )
 
         try:
             return grouped_coil_set_spec_from_coil_specs(self.coil_specs())
         except NotImplementedError:
-            pass
+            _raise_if_strict_grouped_spec_compat_fallback(
+                "coil_set_spec",
+                "live-graph geometry extraction",
+            )
 
         geometry_cache = {}
         gammas = []

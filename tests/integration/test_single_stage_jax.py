@@ -21,6 +21,7 @@ All tests require ``simsoptpp`` for the CPU reference.
 """
 
 import gc
+import re
 
 import pytest
 import numpy as np
@@ -101,6 +102,10 @@ from examples.single_stage_optimization.SINGLE_STAGE import (  # noqa: E402
     single_stage_banana_example as single_stage_example,
 )
 
+_HIDDEN_SPEC_FALLBACK_PATTERN = (
+    "BiotSavartJAX.*hidden immutable-spec compatibility fallback.*"
+)
+
 
 # -----------------------------------------------------------------------
 # Fixtures
@@ -118,6 +123,22 @@ def _iota_unit_rhs(plu):
 def _enable_strict_jax_backend(monkeypatch, mode="jax_gpu_parity"):
     monkeypatch.setenv("SIMSOPT_BACKEND_MODE", mode)
     monkeypatch.setenv("SIMSOPT_BACKEND_STRICT", "1")
+
+
+def _assert_hidden_spec_fallback_rejected(
+    monkeypatch,
+    callback,
+    *,
+    api_name,
+    mode="jax_gpu_parity",
+):
+    _enable_strict_jax_backend(monkeypatch, mode)
+    with pytest.raises(
+        RuntimeError,
+        match=_HIDDEN_SPEC_FALLBACK_PATTERN
+        + rf".*{re.escape(api_name)}\(\).*strict=True",
+    ):
+        callback()
 
 
 def _explicit_grouped_coil_derivative(coils, d_coil_arrays, coil_indices):
@@ -1128,6 +1149,34 @@ class TestAdjointSolveConsistency:
             np.asarray(coil_set_spec.groups[0].gammas[0]),
             curve.gamma(),
             atol=1e-12,
+        )
+
+    def test_strict_mode_rejects_hidden_grouped_array_fallback_in_coil_set_spec_from_dofs(
+        self,
+        monkeypatch,
+    ):
+        """Strict JAX mode should reject silent grouped-array compat in spec APIs."""
+        curve = _build_helical_curve(16)
+        current = Current(1.23)
+        bs_jax = BiotSavartJAX([Coil(curve, current)])
+        _assert_hidden_spec_fallback_rejected(
+            monkeypatch,
+            lambda: bs_jax.coil_set_spec_from_dofs(jnp.asarray(bs_jax.x)),
+            api_name="coil_set_spec_from_dofs",
+        )
+
+    def test_strict_mode_rejects_hidden_compat_fallback_in_coil_set_spec(
+        self,
+        monkeypatch,
+    ):
+        """Strict JAX mode should reject the first hidden compat seam in ``coil_set_spec()``."""
+        curve = _build_helical_curve(16)
+        current = Current(1.23)
+        bs_jax = BiotSavartJAX([Coil(curve, current)])
+        _assert_hidden_spec_fallback_rejected(
+            monkeypatch,
+            bs_jax.coil_set_spec,
+            api_name="coil_set_spec_from_dofs",
         )
 
     def test_legacy_objects_expose_curve_current_coil_specs(self):
