@@ -72,10 +72,6 @@ def _slice_point_chunk(points: object, start: int, chunk_size: int):
     )
 
 
-def _tree_add(left, right):
-    return jax.tree_util.tree_map(lambda x, y: x + y, left, right)
-
-
 def _tree_dynamic_update(prefix_tree, chunk_tree, start_index: int):
     return jax.tree_util.tree_map(
         lambda acc, update: lax.dynamic_update_slice(
