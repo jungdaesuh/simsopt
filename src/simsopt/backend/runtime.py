@@ -148,7 +148,10 @@ _DEFAULT_TRANSFER_GUARD_BY_MODE = {
     "jax_gpu_parity": "log",
     "jax_gpu_fast": None,
 }
-_backend_cache_clear_callbacks: list[Callable[[], None]] = []
+_BackendCacheClearCallbackKey = tuple[str, str]
+_backend_cache_clear_callbacks: dict[
+    _BackendCacheClearCallbackKey, Callable[[], None]
+] = {}
 
 
 @dataclass(frozen=True)
@@ -563,14 +566,21 @@ def get_compilation_cache_dir(mode: str | None = None) -> str | None:
     return get_backend_policy(mode).compilation_cache_dir
 
 
+def _backend_cache_clear_callback_key(
+    callback: Callable[[], None],
+) -> _BackendCacheClearCallbackKey:
+    return (callback.__module__, callback.__qualname__)
+
+
 def register_backend_cache_clear(callback: Callable[[], None]) -> None:
     """Register a callback that should run whenever backend caches are cleared."""
-    if callback not in _backend_cache_clear_callbacks:
-        _backend_cache_clear_callbacks.append(callback)
+    _backend_cache_clear_callbacks[_backend_cache_clear_callback_key(callback)] = (
+        callback
+    )
 
 
 def _run_backend_cache_clear_callbacks() -> None:
-    for callback in _backend_cache_clear_callbacks:
+    for callback in _backend_cache_clear_callbacks.values():
         callback()
 
 

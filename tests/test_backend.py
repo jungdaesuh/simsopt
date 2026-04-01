@@ -258,6 +258,33 @@ def test_gpu_parity_mode_exposes_ci_contract_defaults(monkeypatch):
     assert policy.tolerance_ratchet_factor == pytest.approx(10.0)
 
 
+def test_backend_cache_clear_callbacks_replace_reloaded_registrations(monkeypatch):
+    _clear_backend_env(monkeypatch)
+    backend = _fresh_backend()
+    runtime = sys.modules["simsopt.backend.runtime"]
+    calls: list[str] = []
+
+    def callback_first():
+        calls.append("first")
+
+    def callback_second():
+        calls.append("second")
+
+    callback_first.__module__ = "simsopt.geo.boozersurface_jax"
+    callback_first.__qualname__ = "_clear_hidden_grouped_fallback_warning_cache"
+    callback_second.__module__ = "simsopt.geo.boozersurface_jax"
+    callback_second.__qualname__ = "_clear_hidden_grouped_fallback_warning_cache"
+
+    runtime.register_backend_cache_clear(callback_first)
+    runtime.register_backend_cache_clear(callback_second)
+
+    assert len(runtime._backend_cache_clear_callbacks) == 1
+
+    backend.invalidate_backend_cache()
+
+    assert calls == ["second"]
+
+
 @pytest.mark.parametrize("mode", ["jax_cpu_parity", "jax_gpu_parity"])
 def test_parity_modes_default_transfer_guard_to_log(monkeypatch, mode):
     _clear_backend_env(monkeypatch)
