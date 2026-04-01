@@ -43,6 +43,91 @@ jax.tree_util.register_dataclass(
 
 
 @dataclass(frozen=True)
+class CurvePlanarFourierSpec:
+    """Immutable payload for pure JAX CurvePlanarFourier geometry."""
+
+    dofs: jax.Array
+    quadpoints: jax.Array
+    order: int
+
+
+jax.tree_util.register_dataclass(
+    CurvePlanarFourierSpec,
+    data_fields=["dofs", "quadpoints"],
+    meta_fields=["order"],
+)
+
+
+@dataclass(frozen=True)
+class CurveHelicalSpec:
+    """Immutable payload for pure JAX CurveHelical geometry."""
+
+    dofs: jax.Array
+    quadpoints: jax.Array
+    order: int
+    m: int
+    ell: int
+    R0: float
+    r: float
+
+
+jax.tree_util.register_dataclass(
+    CurveHelicalSpec,
+    data_fields=["dofs", "quadpoints"],
+    meta_fields=["order", "m", "ell", "R0", "r"],
+)
+
+
+@dataclass(frozen=True)
+class OptimizableDofMapSpec:
+    """Immutable mapping from an owner's full DOF vector into one nested Optimizable."""
+
+    template_full_dofs: jax.Array
+    owner_segments: tuple[tuple[int, int, int, int], ...]
+    input_mode: str
+    input_start: int
+    input_end: int
+
+
+jax.tree_util.register_dataclass(
+    OptimizableDofMapSpec,
+    data_fields=["template_full_dofs"],
+    meta_fields=["owner_segments", "input_mode", "input_start", "input_end"],
+)
+
+
+@dataclass(frozen=True)
+class FrameRotationSpec:
+    """Immutable payload for pure JAX FrameRotation evaluation."""
+
+    dofs: jax.Array
+    quadpoints: jax.Array
+    order: int
+    scale: float
+
+
+jax.tree_util.register_dataclass(
+    FrameRotationSpec,
+    data_fields=["dofs", "quadpoints"],
+    meta_fields=["order", "scale"],
+)
+
+
+@dataclass(frozen=True)
+class ZeroRotationSpec:
+    """Immutable zero-rotation payload."""
+
+    quadpoints: jax.Array
+
+
+jax.tree_util.register_dataclass(
+    ZeroRotationSpec,
+    data_fields=["quadpoints"],
+    meta_fields=[],
+)
+
+
+@dataclass(frozen=True)
 class CurrentValueSpec:
     """Immutable scalar-current payload."""
 
@@ -223,7 +308,77 @@ jax.tree_util.register_dataclass(
 )
 
 
-CurveSpec = CurveXYZFourierSpec | CurveRZFourierSpec | CurveCWSFourierRZSpec
+RotationSpec = FrameRotationSpec | ZeroRotationSpec
+
+
+@dataclass(frozen=True)
+class CurvePerturbedSpec:
+    """Immutable wrapper payload for a perturbed base curve."""
+
+    dofs: jax.Array
+    quadpoints: jax.Array
+    base_curve: CurveSpec
+    base_curve_map: OptimizableDofMapSpec
+    sample_gamma: jax.Array
+    sample_gammadash: jax.Array
+
+
+jax.tree_util.register_dataclass(
+    CurvePerturbedSpec,
+    data_fields=[
+        "dofs",
+        "quadpoints",
+        "base_curve",
+        "base_curve_map",
+        "sample_gamma",
+        "sample_gammadash",
+    ],
+    meta_fields=[],
+)
+
+
+@dataclass(frozen=True)
+class CurveFilamentSpec:
+    """Immutable wrapper payload for a finite-build filament curve."""
+
+    dofs: jax.Array
+    quadpoints: jax.Array
+    base_curve: CurveSpec
+    base_curve_map: OptimizableDofMapSpec
+    rotation: RotationSpec
+    rotation_map: OptimizableDofMapSpec
+    frame_kind: str
+    dn: float
+    db: float
+
+
+jax.tree_util.register_dataclass(
+    CurveFilamentSpec,
+    data_fields=[
+        "dofs",
+        "quadpoints",
+        "base_curve",
+        "base_curve_map",
+        "rotation",
+        "rotation_map",
+    ],
+    meta_fields=["frame_kind", "dn", "db"],
+)
+
+
+CurveSpec = (
+    CurveXYZFourierSpec
+    | CurveRZFourierSpec
+    | CurvePlanarFourierSpec
+    | CurveHelicalSpec
+    | CurveCWSFourierRZSpec
+    | CurvePerturbedSpec
+    | CurveFilamentSpec
+)
+
+
+def _as_float64_array(value: object) -> jax.Array:
+    return jnp.asarray(value, dtype=jnp.float64)
 
 
 def make_coil_group_spec(
@@ -233,9 +388,9 @@ def make_coil_group_spec(
     coil_indices: object,
 ) -> CoilGroupSpec:
     return CoilGroupSpec(
-        gammas=jnp.asarray(gammas, dtype=jnp.float64),
-        gammadashs=jnp.asarray(gammadashs, dtype=jnp.float64),
-        currents=jnp.asarray(currents, dtype=jnp.float64),
+        gammas=_as_float64_array(gammas),
+        gammadashs=_as_float64_array(gammadashs),
+        currents=_as_float64_array(currents),
         coil_indices=tuple(int(index) for index in coil_indices),
     )
 
@@ -247,8 +402,8 @@ def make_curve_xyzfourier_spec(
     order: int,
 ) -> CurveXYZFourierSpec:
     return CurveXYZFourierSpec(
-        dofs=jnp.asarray(dofs, dtype=jnp.float64),
-        quadpoints=jnp.asarray(quadpoints, dtype=jnp.float64),
+        dofs=_as_float64_array(dofs),
+        quadpoints=_as_float64_array(quadpoints),
         order=int(order),
     )
 
@@ -262,12 +417,90 @@ def make_curve_rzfourier_spec(
     stellsym: bool,
 ) -> CurveRZFourierSpec:
     return CurveRZFourierSpec(
-        dofs=jnp.asarray(dofs, dtype=jnp.float64),
-        quadpoints=jnp.asarray(quadpoints, dtype=jnp.float64),
+        dofs=_as_float64_array(dofs),
+        quadpoints=_as_float64_array(quadpoints),
         order=int(order),
         nfp=int(nfp),
         stellsym=bool(stellsym),
     )
+
+
+def make_curve_planarfourier_spec(
+    *,
+    dofs: object,
+    quadpoints: object,
+    order: int,
+) -> CurvePlanarFourierSpec:
+    return CurvePlanarFourierSpec(
+        dofs=_as_float64_array(dofs),
+        quadpoints=_as_float64_array(quadpoints),
+        order=int(order),
+    )
+
+
+def make_curve_helical_spec(
+    *,
+    dofs: object,
+    quadpoints: object,
+    order: int,
+    m: int,
+    ell: int,
+    R0: float,
+    r: float,
+) -> CurveHelicalSpec:
+    return CurveHelicalSpec(
+        dofs=_as_float64_array(dofs),
+        quadpoints=_as_float64_array(quadpoints),
+        order=int(order),
+        m=int(m),
+        ell=int(ell),
+        R0=float(R0),
+        r=float(r),
+    )
+
+
+def make_optimizable_dof_map_spec(
+    *,
+    template_full_dofs: object,
+    owner_segments: object,
+    input_mode: str,
+    input_start: int,
+    input_end: int,
+) -> OptimizableDofMapSpec:
+    return OptimizableDofMapSpec(
+        template_full_dofs=_as_float64_array(template_full_dofs),
+        owner_segments=tuple(
+            (
+                int(owner_start),
+                int(owner_end),
+                int(target_start),
+                int(target_end),
+            )
+            for owner_start, owner_end, target_start, target_end in owner_segments
+        ),
+        input_mode=str(input_mode),
+        input_start=int(input_start),
+        input_end=int(input_end),
+    )
+
+
+def make_frame_rotation_spec(
+    *,
+    dofs: object,
+    quadpoints: object,
+    order: int,
+    scale: float,
+) -> FrameRotationSpec:
+    return FrameRotationSpec(
+        dofs=_as_float64_array(dofs),
+        quadpoints=_as_float64_array(quadpoints),
+        order=int(order),
+        scale=float(scale),
+    )
+
+
+def make_zero_rotation_spec(*, quadpoints: object) -> ZeroRotationSpec:
+    return ZeroRotationSpec(quadpoints=_as_float64_array(quadpoints))
 
 
 def make_curve_cwsfourier_rz_spec(
@@ -280,8 +513,8 @@ def make_curve_cwsfourier_rz_spec(
     H: float = 0.0,
 ) -> CurveCWSFourierRZSpec:
     return CurveCWSFourierRZSpec(
-        dofs=jnp.asarray(dofs, dtype=jnp.float64),
-        quadpoints=jnp.asarray(quadpoints, dtype=jnp.float64),
+        dofs=_as_float64_array(dofs),
+        quadpoints=_as_float64_array(quadpoints),
         surface=surface,
         order=int(order),
         G=float(G),
@@ -289,14 +522,58 @@ def make_curve_cwsfourier_rz_spec(
     )
 
 
+def make_curve_perturbed_spec(
+    *,
+    dofs: object,
+    quadpoints: object,
+    base_curve: CurveSpec,
+    base_curve_map: OptimizableDofMapSpec,
+    sample_gamma: object,
+    sample_gammadash: object,
+) -> CurvePerturbedSpec:
+    return CurvePerturbedSpec(
+        dofs=_as_float64_array(dofs),
+        quadpoints=_as_float64_array(quadpoints),
+        base_curve=base_curve,
+        base_curve_map=base_curve_map,
+        sample_gamma=_as_float64_array(sample_gamma),
+        sample_gammadash=_as_float64_array(sample_gammadash),
+    )
+
+
+def make_curve_filament_spec(
+    *,
+    dofs: object,
+    quadpoints: object,
+    base_curve: CurveSpec,
+    base_curve_map: OptimizableDofMapSpec,
+    rotation: RotationSpec,
+    rotation_map: OptimizableDofMapSpec,
+    frame_kind: str,
+    dn: float,
+    db: float,
+) -> CurveFilamentSpec:
+    return CurveFilamentSpec(
+        dofs=_as_float64_array(dofs),
+        quadpoints=_as_float64_array(quadpoints),
+        base_curve=base_curve,
+        base_curve_map=base_curve_map,
+        rotation=rotation,
+        rotation_map=rotation_map,
+        frame_kind=str(frame_kind),
+        dn=float(dn),
+        db=float(db),
+    )
+
+
 def make_current_value_spec(value: object) -> CurrentValueSpec:
-    return CurrentValueSpec(value=jnp.asarray([value], dtype=jnp.float64))
+    return CurrentValueSpec(value=_as_float64_array([value]))
 
 
 def _normalize_rotmat(rotmat: object | None) -> tuple[jax.Array, bool]:
     if rotmat is None:
         return jnp.eye(3, dtype=jnp.float64), False
-    return jnp.asarray(rotmat, dtype=jnp.float64), True
+    return _as_float64_array(rotmat), True
 
 
 def make_coil_spec(
@@ -340,7 +617,7 @@ def apply_coil_symmetry(
 
 
 def make_field_eval_spec(points: object) -> FieldEvalSpec:
-    return FieldEvalSpec(points=jnp.asarray(points, dtype=jnp.float64))
+    return FieldEvalSpec(points=_as_float64_array(points))
 
 
 def make_grouped_coil_set_spec(groups: object) -> GroupedCoilSetSpec:
@@ -368,11 +645,11 @@ def make_fixed_surface_flux_spec(
     target: object,
     definition: str,
 ) -> FixedSurfaceFluxSpec:
-    normal_jax = jnp.asarray(normal, dtype=jnp.float64)
+    normal_jax = _as_float64_array(normal)
     return FixedSurfaceFluxSpec(
-        points=jnp.asarray(points, dtype=jnp.float64),
+        points=_as_float64_array(points),
         normal=normal_jax,
-        target=jnp.asarray(target, dtype=jnp.float64),
+        target=_as_float64_array(target),
         definition=definition,
         nphi=int(normal_jax.shape[0]),
         ntheta=int(normal_jax.shape[1]),
@@ -390,18 +667,18 @@ def make_surface_rzfourier_spec(
     rs: object | None = None,
     zc: object | None = None,
 ) -> SurfaceRZFourierSpec:
-    rc_jax = jnp.asarray(rc, dtype=jnp.float64)
-    zs_jax = jnp.asarray(zs, dtype=jnp.float64)
+    rc_jax = _as_float64_array(rc)
+    zs_jax = _as_float64_array(zs)
     zero_like_rc = jnp.zeros_like(rc_jax)
-    rs_jax = zero_like_rc if rs is None else jnp.asarray(rs, dtype=jnp.float64)
-    zc_jax = zero_like_rc if zc is None else jnp.asarray(zc, dtype=jnp.float64)
+    rs_jax = zero_like_rc if rs is None else _as_float64_array(rs)
+    zc_jax = zero_like_rc if zc is None else _as_float64_array(zc)
     return SurfaceRZFourierSpec(
         rc=rc_jax,
         zs=zs_jax,
         rs=rs_jax,
         zc=zc_jax,
-        quadpoints_phi=jnp.asarray(quadpoints_phi, dtype=jnp.float64),
-        quadpoints_theta=jnp.asarray(quadpoints_theta, dtype=jnp.float64),
+        quadpoints_phi=_as_float64_array(quadpoints_phi),
+        quadpoints_theta=_as_float64_array(quadpoints_theta),
         nfp=int(nfp),
         stellsym=bool(stellsym),
         mpol=int(rc_jax.shape[0] - 1),

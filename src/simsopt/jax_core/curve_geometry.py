@@ -8,13 +8,30 @@ import jax
 import jax.numpy as jnp
 
 from ..geo.curve import gamma_curve_on_surface
+from ..geo.framedcurve import (
+    jaxrotation_pure,
+    jaxrotationdash_pure,
+    rotated_centroid_frame,
+    rotated_centroid_frame_dash,
+    rotated_frenet_frame,
+    rotated_frenet_frame_dash,
+)
+from ..geo.curvehelical import curve_helical_pure
+from ..geo.curveplanarfourier import curveplanarfourier_pure
 from ..geo.curverzfourier import curverzfourier_pure
 from ..geo.curvexyzfourier import jaxfouriercurve_pure
 from .specs import (
     CurveCWSFourierRZSpec,
+    CurveFilamentSpec,
+    CurveHelicalSpec,
+    CurvePlanarFourierSpec,
+    CurvePerturbedSpec,
     CurveRZFourierSpec,
     CurveSpec,
     CurveXYZFourierSpec,
+    OptimizableDofMapSpec,
+    RotationSpec,
+    ZeroRotationSpec,
     make_curve_cwsfourier_rz_spec,
 )
 
@@ -70,6 +87,22 @@ def _curve_gamma_kernel(spec: CurveSpec, dofs=None):
             spec.nfp,
             spec.stellsym,
         )
+    if isinstance(spec, CurvePlanarFourierSpec):
+        return lambda quadpoints: curveplanarfourier_pure(
+            curve_dofs,
+            quadpoints,
+            spec.order,
+        )
+    if isinstance(spec, CurveHelicalSpec):
+        return lambda quadpoints: curve_helical_pure(
+            curve_dofs,
+            quadpoints,
+            spec.order,
+            spec.m,
+            spec.ell,
+            spec.R0,
+            spec.r,
+        )
     if isinstance(spec, CurveCWSFourierRZSpec):
         surface_dofs = spec.surface_dofs()
         return lambda quadpoints: gamma_curve_on_surface(
@@ -93,6 +126,116 @@ def _curve_quadpoints(spec: CurveSpec):
     return quadpoints, jnp.ones_like(quadpoints)
 
 
+def _mapped_full_dofs(map_spec: OptimizableDofMapSpec, owner_dofs):
+    mapped = jnp.asarray(map_spec.template_full_dofs, dtype=jnp.float64)
+    owner_dofs = jnp.asarray(owner_dofs, dtype=jnp.float64)
+    for owner_start, owner_end, target_start, target_end in map_spec.owner_segments:
+        mapped = mapped.at[target_start:target_end].set(
+            owner_dofs[owner_start:owner_end]
+        )
+    return mapped
+
+
+def _mapped_input_dofs(map_spec: OptimizableDofMapSpec, owner_dofs):
+    mapped_full = _mapped_full_dofs(map_spec, owner_dofs)
+    if map_spec.input_mode == "full":
+        return mapped_full
+    return mapped_full[map_spec.input_start : map_spec.input_end]
+
+
+def _rotation_alpha_and_dash_from_dofs(
+    rotation_spec: RotationSpec,
+    rotation_map: OptimizableDofMapSpec,
+    owner_dofs,
+):
+    quadpoints = jnp.asarray(rotation_spec.quadpoints, dtype=jnp.float64)
+    if isinstance(rotation_spec, ZeroRotationSpec):
+        zeros = jnp.zeros_like(quadpoints)
+        return zeros, zeros
+
+    rotation_dofs = _mapped_input_dofs(rotation_map, owner_dofs)
+    return (
+        rotation_spec.scale
+        * jaxrotation_pure(rotation_dofs, quadpoints, rotation_spec.order),
+        rotation_spec.scale
+        * jaxrotationdash_pure(rotation_dofs, quadpoints, rotation_spec.order),
+    )
+
+
+def _curve_geometry_with_third_derivative_from_dofs(spec: CurveSpec, dofs):
+    """Return (gamma, gammadash, gammadashdash, gammadashdashdash) in one pass."""
+    gamma_kernel = _curve_gamma_kernel(spec, dofs)
+    quadpoints, tangents = _curve_quadpoints(spec)
+    gamma, gammadash = jax.jvp(gamma_kernel, (quadpoints,), (tangents,))
+    gammadash_kernel = lambda qp: jax.jvp(gamma_kernel, (qp,), (tangents,))[1]
+    _, gammadashdash = jax.jvp(gammadash_kernel, (quadpoints,), (tangents,))
+    gammadashdash_kernel = lambda qp: jax.jvp(
+        gammadash_kernel,
+        (qp,),
+        (tangents,),
+    )[1]
+    _, gammadashdashdash = jax.jvp(
+        gammadashdash_kernel,
+        (quadpoints,),
+        (tangents,),
+    )
+    return gamma, gammadash, gammadashdash, gammadashdashdash
+
+
+def _curve_perturbed_gamma_and_dash_from_dofs(spec: CurvePerturbedSpec, dofs):
+    base_dofs = _mapped_input_dofs(spec.base_curve_map, dofs)
+    gamma, gammadash = curve_gamma_and_dash_from_dofs(spec.base_curve, base_dofs)
+    return gamma + spec.sample_gamma, gammadash + spec.sample_gammadash
+
+
+def _curve_filament_gamma_and_dash_from_dofs(spec: CurveFilamentSpec, dofs):
+    base_dofs = _mapped_input_dofs(spec.base_curve_map, dofs)
+    alpha, alphadash = _rotation_alpha_and_dash_from_dofs(
+        spec.rotation,
+        spec.rotation_map,
+        dofs,
+    )
+
+    if spec.frame_kind == "frenet":
+        gamma, gammadash, gammadashdash, gammadashdashdash = (
+            _curve_geometry_with_third_derivative_from_dofs(spec.base_curve, base_dofs)
+        )
+        _tangent, normal, binormal = rotated_frenet_frame(
+            gamma,
+            gammadash,
+            gammadashdash,
+            alpha,
+        )
+        tangent_dash, normal_dash, binormal_dash = rotated_frenet_frame_dash(
+            gamma,
+            gammadash,
+            gammadashdash,
+            gammadashdashdash,
+            alpha,
+            alphadash,
+        )
+    else:
+        gamma, gammadash, gammadashdash = curve_geometry_from_dofs(
+            spec.base_curve, base_dofs
+        )
+        _tangent, normal, binormal = rotated_centroid_frame(
+            gamma,
+            gammadash,
+            alpha,
+        )
+        _tangent_dash, normal_dash, binormal_dash = rotated_centroid_frame_dash(
+            gamma,
+            gammadash,
+            gammadashdash,
+            alpha,
+            alphadash,
+        )
+    return (
+        gamma + spec.dn * normal + spec.db * binormal,
+        gammadash + spec.dn * normal_dash + spec.db * binormal_dash,
+    )
+
+
 def curve_spec_with_dofs(spec: CurveSpec, dofs):
     return replace(spec, dofs=jnp.asarray(dofs, dtype=jnp.float64))
 
@@ -103,6 +246,10 @@ def curve_gamma_and_dash_from_spec(spec: CurveSpec):
 
 def curve_gamma_and_dash_from_dofs(spec: CurveSpec, dofs):
     """Return (gamma, gammadash) from a single kernel build and JVP call."""
+    if isinstance(spec, CurvePerturbedSpec):
+        return _curve_perturbed_gamma_and_dash_from_dofs(spec, dofs)
+    if isinstance(spec, CurveFilamentSpec):
+        return _curve_filament_gamma_and_dash_from_dofs(spec, dofs)
     gamma_kernel = _curve_gamma_kernel(spec, dofs)
     quadpoints, tangents = _curve_quadpoints(spec)
     return jax.jvp(gamma_kernel, (quadpoints,), (tangents,))

@@ -23,7 +23,7 @@ import numpy as np
 import jax
 import jax.numpy as jnp
 
-from ..backend import raise_if_strict_jax_fallback
+from ..backend import raise_if_strict_jax_fallback, warn_if_jax_fallback
 from .._core.optimizable import Optimizable
 from .._core.derivative import derivative_dec, Derivative
 from ..jax_core.biotsavart import biot_savart_B
@@ -34,6 +34,16 @@ from ..jax_core.objectives_flux import (
 )
 
 __all__ = ["SquaredFluxJAX"]
+
+
+# -----------------------------------------------------------------------
+# Fallback guardrails
+# -----------------------------------------------------------------------
+
+
+def _handle_squared_flux_fallback(detail: str) -> None:
+    raise_if_strict_jax_fallback(component="SquaredFluxJAX", detail=detail)
+    warn_if_jax_fallback(component="SquaredFluxJAX", detail=detail)
 
 
 # -----------------------------------------------------------------------
@@ -91,9 +101,8 @@ class SquaredFluxJAX(Optimizable):
         if self._use_jax_native:
             self._init_jax_native(field, definition)
         else:
-            raise_if_strict_jax_fallback(
-                component="SquaredFluxJAX",
-                detail="the CPU fallback objective path for non-JAX-native coils",
+            _handle_squared_flux_fallback(
+                "the CPU fallback objective path for non-JAX-native coils"
             )
             self._init_fallback(field, definition)
 
