@@ -74,6 +74,8 @@ FIELD_ERROR_REL_TOL = _TIER3_TOLERANCES["field_error_rel_tol"]
 SURFACE_GEOMETRY_REL_TOL = _TIER3_TOLERANCES["surface_geometry_rel_tol"]
 TARGET_OPTIMIZER_BACKEND = "ondevice"
 DEFAULT_OUTER_MAXITER = 0
+_TARGET_LANE_FINAL_ONLY_SYNC = "final-only"
+_TARGET_LANE_PER_ACCEPT_SYNC = "per-accept"
 
 
 def parse_args() -> argparse.Namespace:
@@ -188,6 +190,19 @@ def _single_stage_script_path() -> Path:
     )
 
 
+def _resolve_target_lane_sync_policy(
+    backend: str,
+    args: argparse.Namespace,
+) -> str:
+    if backend != "jax":
+        return _TARGET_LANE_PER_ACCEPT_SYNC
+    if args.optimizer_backend != TARGET_OPTIMIZER_BACKEND:
+        return _TARGET_LANE_PER_ACCEPT_SYNC
+    if int(args.maxiter) <= 0:
+        return _TARGET_LANE_PER_ACCEPT_SYNC
+    return _TARGET_LANE_FINAL_ONLY_SYNC
+
+
 def _run_single_stage_case(
     args: argparse.Namespace,
     backend: str,
@@ -235,6 +250,12 @@ def _run_single_stage_case(
                         args.boozer_optimizer_backend,
                     ]
                 )
+        command.extend(
+            [
+                "--target-lane-accepted-step-sync",
+                _resolve_target_lane_sync_policy(backend, args),
+            ]
+        )
         if args.equilibrium_path:
             command.extend(["--equilibrium-path", args.equilibrium_path])
         else:

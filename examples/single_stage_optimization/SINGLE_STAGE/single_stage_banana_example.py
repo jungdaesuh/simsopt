@@ -54,6 +54,10 @@ DEFAULT_DATABASE_STAGE2_ROOT = os.path.join(
     REPO_ROOT, "DATABASE", "COIL_OPTIMIZATION", "outputs"
 )
 DEFAULT_SINGLE_STAGE_OUTPUT_ROOT = os.path.join(SCRIPT_DIR, "outputs")
+CURVATURE_THRESHOLD_FLOOR = 20.0
+CURVATURE_THRESHOLD_CEILING = 40.0
+TARGET_LANE_ACCEPTED_STEP_SYNC_CHOICES = ("per-accept", "final-only")
+TARGET_LANE_ACCEPTED_STEP_SYNC_DEFAULT = "per-accept"
 DEFAULT_STAGE2_SEEDS_BY_PLASMA = {
     "wout_nfp22ginsburg_000_014417_iota15.nc": {
         "major_radius": 0.915,
@@ -82,6 +86,46 @@ DEFAULT_STAGE2_SEEDS_BY_PLASMA = {
 
 def format_compact_float(value):
     return f"{value:g}"
+
+
+def resolve_curvature_threshold(value: float) -> float:
+    """Apply the shared HBT curvature-threshold policy for single-stage runs."""
+    return min(
+        max(float(value), CURVATURE_THRESHOLD_FLOOR),
+        CURVATURE_THRESHOLD_CEILING,
+    )
+
+
+def uses_per_accept_target_lane_sync(sync_policy: str) -> bool:
+    """Return whether the target lane should sync/log every accepted step."""
+    return sync_policy == "per-accept"
+
+
+def resolve_target_lane_accepted_step_callback(
+    adapter,
+    *,
+    use_target_lane: bool,
+    sync_policy: str,
+):
+    """Return the accepted-step callback contract for the outer optimizer."""
+    if not use_target_lane:
+        return adapter.callback
+    if uses_per_accept_target_lane_sync(sync_policy):
+        return adapter.callback
+    return None
+
+
+def resolve_target_lane_accepted_step_sync_record(
+    *,
+    backend: str,
+    optimizer_backend: str | None,
+    maxiter: int,
+    sync_policy: str,
+):
+    """Return the sync policy only when it can affect the target lane."""
+    if backend == "jax" and optimizer_backend == "ondevice" and int(maxiter) > 0:
+        return sync_policy
+    return None
 
 
 def format_local_stage2_seed_dir(
@@ -233,6 +277,9 @@ def apply_default_stage2_seed_args(args):
         args.stage2_seed_curvature_threshold = default_seed.get(
             "curvature_threshold", 40.0
         )
+    args.stage2_seed_curvature_threshold = resolve_curvature_threshold(
+        args.stage2_seed_curvature_threshold
+    )
     if args.stage2_seed_banana_surf_radius is None:
         args.stage2_seed_banana_surf_radius = default_seed.get(
             "banana_surf_radius", 0.22
@@ -320,7 +367,7 @@ def parse_args():
     parser.add_argument(
         "--curvature-threshold",
         type=float,
-        default=float(os.environ.get("CURVATURE_THRESHOLD", "20")),
+        default=float(os.environ.get("CURVATURE_THRESHOLD", "40")),
     )
     parser.add_argument(
         "--cc-weight", type=float, default=float(os.environ.get("CC_WEIGHT", "100"))
@@ -484,6 +531,18 @@ def parse_args():
         help=(
             "Optional override for the inner JAX Boozer LS solve backend. "
             "Defaults to --optimizer-backend when omitted."
+        ),
+    )
+    parser.add_argument(
+        "--target-lane-accepted-step-sync",
+        choices=TARGET_LANE_ACCEPTED_STEP_SYNC_CHOICES,
+        default=os.environ.get(
+            "TARGET_LANE_ACCEPTED_STEP_SYNC",
+            TARGET_LANE_ACCEPTED_STEP_SYNC_DEFAULT,
+        ),
+        help=(
+            "How the target ondevice outer lane refreshes mutable state for "
+            "accepted-step diagnostics."
         ),
     )
     return parser.parse_args()
@@ -1209,6 +1268,20 @@ class SingleStageAdapter:
         _evaluate_candidate_impl(x, self.run_dict, self.boozer_surface, self.JF)
         self.run_dict["x_prev"] = np.array(x, copy=True)
 
+    def sync_accepted_step(self, x):
+        """Refresh mutable state if needed, then snapshot one accepted step."""
+        if self.reevaluate_before_accept:
+            self._reevaluate_accepted_step(x)
+        accept_step(
+            self.run_dict,
+            self.boozer_surface,
+            self.JF,
+            self.bs,
+            self.objectives,
+            self.diagnostics,
+            self.log_path,
+        )
+
     def __call__(self, x):
         """Objective for L-BFGS — delegates to evaluate_candidate.
 
@@ -1224,17 +1297,7 @@ class SingleStageAdapter:
 
         No persistent Optimizable mutation.
         """
-        if self.reevaluate_before_accept:
-            self._reevaluate_accepted_step(x)
-        accept_step(
-            self.run_dict,
-            self.boozer_surface,
-            self.JF,
-            self.bs,
-            self.objectives,
-            self.diagnostics,
-            self.log_path,
-        )
+        self.sync_accepted_step(x)
 
 
 def snapshot_to_pytree(JF, boozer_surface, bs, *, num_tf_coils):
@@ -1364,6 +1427,7 @@ if __name__ == "__main__":
     # CONFIGURATION PARAMETERS
     # ==============================================================================
     args = apply_default_stage2_seed_args(parse_args())
+    args.curvature_threshold = resolve_curvature_threshold(args.curvature_threshold)
     stage2_bs_path = build_stage2_bs_path(args)
     stage2_results_path, stage2_results = load_stage2_results(stage2_bs_path)
     R0 = float(stage2_results["MAJOR_RADIUS"])
@@ -1473,6 +1537,12 @@ if __name__ == "__main__":
     boozer_optimizer_backend_hash_record = (
         args.boozer_optimizer_backend if args.backend == "jax" else None
     )
+    target_lane_sync_record = resolve_target_lane_accepted_step_sync_record(
+        backend=args.backend,
+        optimizer_backend=optimizer_backend_record,
+        maxiter=args.maxiter,
+        sync_policy=args.target_lane_accepted_step_sync,
+    )
 
     config_parts = [
         str(stage2_bs_path),
@@ -1498,6 +1568,7 @@ if __name__ == "__main__":
         str(args.init_only),
         str(args.backend),
         str(optimizer_backend_record),
+        str(target_lane_sync_record),
         str(args.maxiter),
         str(args.num_tf_coils),
         str(file_loc),
@@ -1589,7 +1660,7 @@ if __name__ == "__main__":
     SURF_DIST_WEIGHT = args.surf_dist_weight
     SS_DIST = max(args.ss_dist, 0.04)  # Hardware minimum: 4cm surface-vessel clearance
     CURVATURE_WEIGHT = args.curvature_weight
-    CURVATURE_THRESHOLD = max(args.curvature_threshold, 20)  # Hardware minimum: 20
+    CURVATURE_THRESHOLD = args.curvature_threshold
 
     # Individual objective terms
     iota = build_iota_objective(boozer_surface, iota_cls)
@@ -1674,10 +1745,15 @@ if __name__ == "__main__":
                 bs,
                 iota_target,
             )
+        accepted_step_callback = resolve_target_lane_accepted_step_callback(
+            adapter,
+            use_target_lane=use_target_lane,
+            sync_policy=args.target_lane_accepted_step_sync,
+        )
         res = run_single_stage_optimizer(
             adapter,
             dofs,
-            callback=adapter.callback,
+            callback=accepted_step_callback,
             contract=outer_contract,
             maxiter=MAXITER,
             ftol=ftol,
@@ -1687,6 +1763,8 @@ if __name__ == "__main__":
         )
         res_nit = res.nit
         print(res.message)
+        if use_target_lane and accepted_step_callback is None and res.nit > 0:
+            adapter.sync_accepted_step(res.x)
 
         # Restore final accepted state to the Optimizable graph so
         # post-optimization diagnostics and artifact writers see
@@ -1779,6 +1857,7 @@ if __name__ == "__main__":
         "boozer_optimizer_backend": boozer_optimizer_backend_record,
         "boozer_optimizer_method": boozer_surface.res.get("optimizer_method"),
         "outer_optimizer_method": outer_contract.method,
+        "target_lane_accepted_step_sync": target_lane_sync_record,
         "init_only": args.init_only,
         "max_iterations": MAXITER,
         "maxcor": args.maxcor,

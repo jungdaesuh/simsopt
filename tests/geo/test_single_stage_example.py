@@ -452,6 +452,55 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertEqual(args.optimizer_backend, "ondevice")
         self.assertIsNone(args.boozer_optimizer_backend)
 
+    def test_parse_args_defaults_target_lane_sync_to_per_accept(self):
+        module = self.load_module()
+
+        with patch.object(
+            sys,
+            "argv",
+            ["single_stage_banana_example.py"],
+        ):
+            args = module.parse_args()
+
+        self.assertEqual(args.target_lane_accepted_step_sync, "per-accept")
+
+    def test_resolve_target_lane_accepted_step_sync_record_only_when_effective(self):
+        module = self.load_module()
+
+        self.assertIsNone(
+            module.resolve_target_lane_accepted_step_sync_record(
+                backend="cpu",
+                optimizer_backend=None,
+                maxiter=10,
+                sync_policy="final-only",
+            )
+        )
+        self.assertIsNone(
+            module.resolve_target_lane_accepted_step_sync_record(
+                backend="jax",
+                optimizer_backend="scipy",
+                maxiter=10,
+                sync_policy="final-only",
+            )
+        )
+        self.assertIsNone(
+            module.resolve_target_lane_accepted_step_sync_record(
+                backend="jax",
+                optimizer_backend="ondevice",
+                maxiter=0,
+                sync_policy="final-only",
+            )
+        )
+        self.assertEqual(
+            module.resolve_target_lane_accepted_step_sync_record(
+                backend="jax",
+                optimizer_backend="ondevice",
+                maxiter=3,
+                sync_policy="final-only",
+            ),
+            "final-only",
+        )
+
     def test_run_single_stage_optimizer_routes_target_lane_to_ondevice_adapter(self):
         module = self.load_module()
         captured = {}
@@ -668,6 +717,73 @@ class SingleStageExampleTests(unittest.TestCase):
         np.testing.assert_allclose(run_dict["x_prev"], np.array([2.0, -1.0]))
         # Line-search counter must not increment during reevaluation.
         self.assertEqual(run_dict["lscount"], 3)
+        self.assertIs(captured["accept"]["state"], run_dict)
+        self.assertEqual(captured["accept"]["log_path"], "/tmp/log.txt")
+
+    def test_single_stage_adapter_sync_accepted_step_refreshes_target_lane_state(
+        self,
+    ):
+        module = self.load_module()
+
+        class _JF:
+            def __init__(self):
+                self._x = None
+
+            @property
+            def x(self):
+                return self._x
+
+            @x.setter
+            def x(self, value):
+                self._x = np.asarray(value)
+
+        jf = _JF()
+        run_dict = {"x_prev": np.zeros(2), "lscount": 5}
+        captured = {}
+
+        def fake_eval(x, state, booz, objective):
+            captured["eval"] = {
+                "x": np.asarray(x),
+                "state": state,
+                "booz": booz,
+                "objective": objective,
+            }
+            return 1.0, np.zeros(2)
+
+        def fake_accept_step(
+            state, booz, objective, bs, objectives, diagnostics, log_path
+        ):
+            captured["accept"] = {
+                "state": state,
+                "booz": booz,
+                "objective": objective,
+                "bs": bs,
+                "objectives": objectives,
+                "diagnostics": diagnostics,
+                "log_path": log_path,
+            }
+
+        adapter = module.SingleStageAdapter(
+            run_dict=run_dict,
+            boozer_surface="booz",
+            JF=jf,
+            bs="bs",
+            objectives={"qs": "obj"},
+            diagnostics={"iota": "diag"},
+            log_path="/tmp/log.txt",
+            reevaluate_before_accept=True,
+        )
+
+        with patch.object(
+            module,
+            "_evaluate_candidate_impl",
+            side_effect=fake_eval,
+        ), patch.object(module, "accept_step", side_effect=fake_accept_step):
+            adapter.sync_accepted_step(np.array([3.0, -4.0]))
+
+        np.testing.assert_allclose(jf.x, np.array([3.0, -4.0]))
+        np.testing.assert_allclose(run_dict["x_prev"], np.array([3.0, -4.0]))
+        self.assertEqual(run_dict["lscount"], 5)
         self.assertIs(captured["accept"]["state"], run_dict)
         self.assertEqual(captured["accept"]["log_path"], "/tmp/log.txt")
 

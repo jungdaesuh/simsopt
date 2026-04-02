@@ -70,6 +70,7 @@ from benchmarks.validation_ladder_common import (
     _JAX_COMPILATION_CACHE_ENV_VAR,
     _SIMSOPT_COMPILATION_CACHE_POLICY_ENV_VAR,
     _SIMSOPT_DISABLE_COMPILATION_CACHE_ENV_VAR,
+    _TARGET_LANE_ACCEPTED_STEP_SYNC_ENV_VAR,
     apply_compilation_cache_policy,
     build_provenance,
     describe_compile_behavior,
@@ -485,6 +486,14 @@ def test_repo_pythonpath_env_auto_clears_inherited_platform_selectors(monkeypatc
     assert "SIMSOPT_JAX_PLATFORM" not in env
     assert "SIMSOPT_JAX_BACKEND" not in env
     assert env["PYTHONPATH"].endswith("/tmp/existing")
+
+
+def test_repo_pythonpath_env_clears_inherited_target_lane_sync(monkeypatch):
+    monkeypatch.setenv(_TARGET_LANE_ACCEPTED_STEP_SYNC_ENV_VAR, "final-only")
+
+    env = repo_pythonpath_env(platform="cpu")
+
+    assert _TARGET_LANE_ACCEPTED_STEP_SYNC_ENV_VAR not in env
 
 
 def test_repo_pythonpath_env_can_disable_compilation_cache(monkeypatch):
@@ -1004,9 +1013,87 @@ def test_single_stage_init_case_threads_optimizer_backend_to_jax_lane(
     assert command[optimizer_flag_index + 1] == "ondevice"
     boozer_optimizer_flag_index = command.index("--boozer-optimizer-backend")
     assert command[boozer_optimizer_flag_index + 1] == "scipy"
+    target_lane_sync_flag_index = command.index("--target-lane-accepted-step-sync")
+    assert command[target_lane_sync_flag_index + 1] == "final-only"
     assert _JAX_COMPILATION_CACHE_ENV_VAR not in env
     assert env[_SIMSOPT_DISABLE_COMPILATION_CACHE_ENV_VAR] == "1"
     assert env[_SIMSOPT_COMPILATION_CACHE_POLICY_ENV_VAR] == "disabled"
+
+
+def test_single_stage_init_case_pins_default_target_lane_sync_for_cpu_lane(
+    monkeypatch, tmp_path
+):
+    args = argparse.Namespace(
+        plasma_surf_filename="wout_nfp22ginsburg_000_014417_iota15.nc",
+        stage2_bs_path=str(DEFAULT_STAGE2_BS_PATH),
+        nphi=63,
+        ntheta=32,
+        mpol=4,
+        ntor=4,
+        vol_target=0.1,
+        iota_target=0.15,
+        optimizer_backend="scipy",
+        boozer_optimizer_backend=None,
+        maxiter=1,
+        equilibrium_path=None,
+        equilibria_dir=str(tmp_path / "equilibria"),
+    )
+
+    observed_invocations: list[tuple[list[str], dict[str, str]]] = []
+    monkeypatch.setattr(
+        single_stage_init_parity_module,
+        "_single_stage_script_path",
+        lambda: tmp_path / "driver.py",
+    )
+    monkeypatch.setenv(_TARGET_LANE_ACCEPTED_STEP_SYNC_ENV_VAR, "final-only")
+
+    def fake_run_python_script(_script_path, command, **kwargs):
+        observed_invocations.append((list(command), dict(kwargs["env"])))
+        return argparse.Namespace(stdout="", stderr="")
+
+    monkeypatch.setattr(
+        single_stage_init_parity_module,
+        "run_python_script",
+        fake_run_python_script,
+    )
+
+    def fake_find_single_file(root: str | Path, pattern: str) -> Path:
+        path = Path(root) / pattern
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{}", encoding="utf-8")
+        return path
+
+    monkeypatch.setattr(
+        single_stage_init_parity_module, "find_single_file", fake_find_single_file
+    )
+    monkeypatch.setattr(
+        single_stage_init_parity_module,
+        "load_json",
+        lambda _path: {
+            "FINAL_IOTA": 0.15,
+            "FINAL_VOLUME": 0.1,
+            "FIELD_ERROR": 0.003,
+            "MAX_CURVATURE": 10.0,
+            "SELF_INTERSECTING": False,
+        },
+    )
+    monkeypatch.setattr(
+        single_stage_init_parity_module,
+        "_load_surface_gamma_artifact",
+        lambda _surface_json_path: np.zeros((2, 2, 3)),
+    )
+
+    single_stage_init_parity_module._run_single_stage_case(
+        args,
+        "cpu",
+        platform="cpu",
+    )
+
+    assert len(observed_invocations) == 1
+    command, env = observed_invocations[0]
+    target_lane_sync_flag_index = command.index("--target-lane-accepted-step-sync")
+    assert command[target_lane_sync_flag_index + 1] == "per-accept"
+    assert _TARGET_LANE_ACCEPTED_STEP_SYNC_ENV_VAR not in env
 
 
 def _single_stage_probe_results(**overrides):
@@ -1295,7 +1382,7 @@ def _stage2_e2e_comparison_case(**overrides):
             "curvature": 39.0,
             "curvature_threshold": 40.0,
             "curvature_margin": 1.0,
-            "curvature_barrier_edge_active": False,
+            "curvature_threshold_edge_active": False,
             "gradient_allclose": True,
             "gradient_l2_rel_diff": 1e-12,
         },
@@ -1305,7 +1392,7 @@ def _stage2_e2e_comparison_case(**overrides):
             "curvature": 39.0,
             "curvature_threshold": 40.0,
             "curvature_margin": 1.0,
-            "curvature_barrier_edge_active": False,
+            "curvature_threshold_edge_active": False,
             "gradient_allclose": True,
             "gradient_l2_rel_diff": 1e-12,
         },
@@ -1389,8 +1476,8 @@ def _stage2_ondevice_quality_case(**overrides):
         "jax_max_curvature": 39.5,
         "cpu_curvature_margin": 0.5,
         "jax_curvature_margin": 0.5,
-        "cpu_curvature_barrier_edge_active": False,
-        "jax_curvature_barrier_edge_active": False,
+        "cpu_curvature_threshold_edge_active": False,
+        "jax_curvature_threshold_edge_active": False,
         "jax_curvature_not_worse_than_cpu": True,
         "jax_self_intersecting": False,
     }
@@ -1460,7 +1547,7 @@ def test_stage2_e2e_comparison_rejects_matched_state_gradient_mismatch():
                 "gradient_allclose": False,
                 "gradient_l2_rel_diff": 1e-3,
                 "worst_gradient_term": {
-                    "name": "curvature_barrier",
+                    "name": "curvature_penalty",
                     **_stage2_gradient_term_case(
                         gradient_allclose=False,
                         gradient_componentwise_allclose=False,
@@ -1476,7 +1563,7 @@ def test_stage2_e2e_comparison_rejects_matched_state_gradient_mismatch():
 
     assert any(
         "Matched JAX-final gradient parity failed" in failure
-        and "curvature_barrier" in failure
+        and "curvature_penalty" in failure
         for failure in failures
     )
 
@@ -1512,11 +1599,11 @@ def test_stage2_e2e_comparison_rejects_ondevice_matched_state_gradient_mismatch(
                 "curvature": 39.0,
                 "curvature_threshold": 40.0,
                 "curvature_margin": 1.0,
-                "curvature_barrier_edge_active": False,
+                "curvature_threshold_edge_active": False,
                 "gradient_allclose": False,
                 "gradient_l2_rel_diff": 1e-3,
                 "worst_gradient_term": {
-                    "name": "curvature_barrier",
+                    "name": "curvature_penalty",
                     **_stage2_gradient_term_case(
                         gradient_allclose=False,
                         gradient_componentwise_allclose=False,
@@ -1532,12 +1619,12 @@ def test_stage2_e2e_comparison_rejects_ondevice_matched_state_gradient_mismatch(
 
     assert any(
         "Matched JAX-final gradient parity failed" in failure
-        and "curvature_barrier" in failure
+        and "curvature_penalty" in failure
         for failure in failures
     )
 
 
-def test_stage2_e2e_comparison_accepts_barrier_edge_curvature_gradient_portability():
+def test_stage2_e2e_comparison_accepts_threshold_edge_curvature_gradient_portability():
     failures = evaluate_stage2_e2e_comparison(
         _stage2_ondevice_quality_case(
             geometry_rel_tol=None,
@@ -1547,11 +1634,11 @@ def test_stage2_e2e_comparison_accepts_barrier_edge_curvature_gradient_portabili
                 "curvature": 39.9999995,
                 "curvature_threshold": 40.0,
                 "curvature_margin": 5e-7,
-                "curvature_barrier_edge_active": True,
+                "curvature_threshold_edge_active": True,
                 "gradient_allclose": False,
                 "gradient_l2_rel_diff": 5e-6,
                 "worst_gradient_term": {
-                    "name": "curvature_barrier",
+                    "name": "curvature_penalty",
                     **_stage2_gradient_term_case(
                         gradient_allclose=False,
                         gradient_componentwise_allclose=False,
@@ -1581,7 +1668,7 @@ def test_stage2_e2e_comparison_rejects_ondevice_geometry_drift_when_explicit_gat
     )
 
 
-def test_stage2_e2e_comparison_accepts_barrier_edge_objective_drift():
+def test_stage2_e2e_comparison_accepts_threshold_edge_objective_drift():
     failures = evaluate_stage2_e2e_comparison(
         _stage2_ondevice_quality_case(
             final_objective_rel_diff=2.8e-4,
@@ -1592,8 +1679,8 @@ def test_stage2_e2e_comparison_accepts_barrier_edge_objective_drift():
             curvature_threshold=40.0,
             cpu_curvature_margin=5e-7,
             jax_curvature_margin=6e-7,
-            cpu_curvature_barrier_edge_active=True,
-            jax_curvature_barrier_edge_active=True,
+            cpu_curvature_threshold_edge_active=True,
+            jax_curvature_threshold_edge_active=True,
         )
     )
 
@@ -1608,15 +1695,15 @@ def test_stage2_e2e_comparison_accepts_curvature_exactly_at_threshold():
             curvature_threshold=40.0,
             cpu_curvature_margin=0.0,
             jax_curvature_margin=0.0,
-            cpu_curvature_barrier_edge_active=True,
-            jax_curvature_barrier_edge_active=True,
+            cpu_curvature_threshold_edge_active=True,
+            jax_curvature_threshold_edge_active=True,
         )
     )
 
     assert failures == []
 
 
-def test_stage2_e2e_comparison_rejects_large_barrier_edge_objective_drift():
+def test_stage2_e2e_comparison_rejects_large_threshold_edge_objective_drift():
     failures = evaluate_stage2_e2e_comparison(
         _stage2_ondevice_quality_case(
             jax_objective_not_worse_than_cpu=False,
@@ -1628,8 +1715,8 @@ def test_stage2_e2e_comparison_rejects_large_barrier_edge_objective_drift():
             curvature_threshold=40.0,
             cpu_curvature_margin=5e-7,
             jax_curvature_margin=6e-7,
-            cpu_curvature_barrier_edge_active=True,
-            jax_curvature_barrier_edge_active=True,
+            cpu_curvature_threshold_edge_active=True,
+            jax_curvature_threshold_edge_active=True,
         )
     )
 
@@ -1648,7 +1735,7 @@ def test_stage2_e2e_comparison_rejects_ondevice_constraint_violation():
     assert any("configured threshold" in failure for failure in failures)
 
 
-def test_stage2_gradient_parity_accepts_global_scale_match_near_barrier():
+def test_stage2_gradient_parity_accepts_global_scale_match_near_threshold():
     cpu_grad = np.asarray([0.0, 3.0e7, -4.0e7], dtype=float)
     jax_grad = np.asarray([1.55e-5, 3.0e7, -4.0e7], dtype=float)
 
@@ -1946,16 +2033,16 @@ def test_stage2_e2e_payload_preserves_trajectory_and_timing_artifacts():
     assert payload["timings"]["jax_optimizer_compile_overhead_s"] == pytest.approx(6.25)
 
 
-def test_stage2_e2e_payload_allows_intentional_barrier_rejection_entries():
+def test_stage2_e2e_payload_allows_intentional_threshold_violation_entries():
     provenance = {"title": "Stage 2 end-to-end comparison"}
-    barrier_entry = {
-        "J": np.inf,
+    threshold_violation_entry = {
+        "J": 5.0,
         "Jf": 0.2,
         "mean_abs_relBfinal_norm": 0.2,
         "curve_length": 1.0,
         "coil_coil_distance": 0.04,
         "curvature": 1.0,
-        "grad_norm": np.nan,
+        "grad_norm": 0.75,
         "distance_constraint_violated": True,
     }
     converged_entry = {
@@ -1970,7 +2057,7 @@ def test_stage2_e2e_payload_allows_intentional_barrier_rejection_entries():
     }
     cpu_case = {
         "results": _stage2_e2e_results_case(),
-        "trajectory": [barrier_entry, converged_entry],
+        "trajectory": [threshold_violation_entry, converged_entry],
         "elapsed_s": 12.5,
     }
     jax_case = {
