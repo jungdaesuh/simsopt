@@ -148,6 +148,17 @@ class SingleStageExampleTests(unittest.TestCase):
     def load_module(self):
         return load_single_stage_example_module()
 
+    def resolve_benchmark_target_lane_sync(
+        self,
+        module,
+        *,
+        sync_policy="per-accept",
+    ):
+        return module.resolve_effective_target_lane_accepted_step_sync(
+            sync_policy,
+            benchmark_mode=True,
+        )
+
     def initialize_boozer_surface(self, module, surf_prev, *, constraint_weight):
         with patch.object(
             module, "SurfaceXYZTensorFourier", FakeSurfaceXYZTensorFourier
@@ -463,6 +474,27 @@ class SingleStageExampleTests(unittest.TestCase):
             args = module.parse_args()
 
         self.assertEqual(args.target_lane_accepted_step_sync, "per-accept")
+        self.assertFalse(args.profile_target_lane)
+
+    def test_resolve_effective_target_lane_sync_forces_final_only_in_benchmark_mode(
+        self,
+    ):
+        module = self.load_module()
+
+        self.assertEqual(
+            module.resolve_effective_target_lane_accepted_step_sync(
+                "per-accept",
+                benchmark_mode=True,
+            ),
+            "final-only",
+        )
+        self.assertEqual(
+            module.resolve_effective_target_lane_accepted_step_sync(
+                "final-only",
+                benchmark_mode=False,
+            ),
+            "final-only",
+        )
 
     def test_resolve_target_lane_accepted_step_sync_record_only_when_effective(self):
         module = self.load_module()
@@ -500,11 +532,34 @@ class SingleStageExampleTests(unittest.TestCase):
             ),
             "final-only",
         )
+        self.assertEqual(
+            module.resolve_target_lane_accepted_step_sync_record(
+                backend="jax",
+                optimizer_backend="ondevice",
+                maxiter=3,
+                sync_policy=self.resolve_benchmark_target_lane_sync(module),
+            ),
+            "final-only",
+        )
+
+    def test_resolve_target_lane_accepted_step_callback_skips_per_accept_in_benchmark_mode(
+        self,
+    ):
+        module = self.load_module()
+        adapter = types.SimpleNamespace(callback=object())
+
+        callback = module.resolve_target_lane_accepted_step_callback(
+            adapter,
+            use_target_lane=True,
+            sync_policy=self.resolve_benchmark_target_lane_sync(module),
+        )
+
+        self.assertIsNone(callback)
 
     def test_run_single_stage_optimizer_routes_target_lane_to_ondevice_adapter(self):
         module = self.load_module()
         captured = {}
-        scalar_fun = object()
+        target_fun = object()
 
         def fake_require_target_backend_x64(optimizer_backend):
             captured["x64_backend"] = optimizer_backend
@@ -529,7 +584,7 @@ class SingleStageExampleTests(unittest.TestCase):
             callback = object()
             contract = module.resolve_single_stage_optimizer_contract("jax", "ondevice")
             result = module.run_single_stage_optimizer(
-                lambda x: (1.0, np.asarray(x)),
+                target_fun,
                 np.array([1.0, -2.0]),
                 contract=contract,
                 maxiter=7,
@@ -537,21 +592,21 @@ class SingleStageExampleTests(unittest.TestCase):
                 gtol=1e-6,
                 maxcor=9,
                 callback=callback,
-                scalar_fun=scalar_fun,
+                scalar_fun=object(),
             )
 
         self.assertEqual(captured["x64_backend"], "ondevice")
-        self.assertIs(captured["fun"], scalar_fun)
+        self.assertIs(captured["fun"], target_fun)
         self.assertEqual(captured["method"], "lbfgs-ondevice")
         np.testing.assert_allclose(captured["x0"], np.array([1.0, -2.0]))
         self.assertEqual(captured["tol"], 1e-6)
         self.assertEqual(captured["maxiter"], 7)
         self.assertEqual(captured["options"], {"maxcor": 9, "ftol": 1e-8})
-        self.assertFalse(captured["value_and_grad"])
+        self.assertTrue(captured["value_and_grad"])
         self.assertIs(captured["callback"], callback)
         self.assertEqual(result.message, "ok")
 
-    def test_run_single_stage_optimizer_target_lane_requires_scalar_objective(self):
+    def test_run_single_stage_optimizer_requires_objective_contract(self):
         module = self.load_module()
         target_contract = types.SimpleNamespace(
             method="lbfgs-ondevice", use_scalar_objective=True
@@ -559,10 +614,11 @@ class SingleStageExampleTests(unittest.TestCase):
 
         with self.assertRaisesRegex(
             RuntimeError,
-            "Single-stage target-lane optimization requires a scalar JAX objective",
+            "Single-stage optimization requires an explicit value-and-gradient "
+            "objective, or a scalar JAX objective on the scalar target lane",
         ):
             module.run_single_stage_optimizer(
-                lambda x: (1.0, np.asarray(x)),
+                None,
                 np.array([1.0, -2.0]),
                 contract=target_contract,
                 maxiter=7,
@@ -574,7 +630,7 @@ class SingleStageExampleTests(unittest.TestCase):
 
     def test_run_single_stage_optimizer_ondevice_does_not_enter_scipy_minimize(self):
         module = self.load_module()
-        scalar_fun = object()
+        target_fun = object()
 
         def fake_require_target_backend_x64(_optimizer_backend):
             return None
@@ -582,10 +638,10 @@ class SingleStageExampleTests(unittest.TestCase):
         def fake_jax_minimize(
             fun, x0, *, method, tol, maxiter, options, value_and_grad, callback
         ):
-            self.assertIs(fun, scalar_fun)
+            self.assertIs(fun, target_fun)
             del x0, tol, maxiter, options, callback
             self.assertEqual(method, "lbfgs-ondevice")
-            self.assertFalse(value_and_grad)
+            self.assertTrue(value_and_grad)
             return types.SimpleNamespace(x=np.zeros(2), nit=0, message="ok")
 
         with self.patch_optimizer_jax_module(
@@ -595,7 +651,7 @@ class SingleStageExampleTests(unittest.TestCase):
         ):
             contract = module.resolve_single_stage_optimizer_contract("jax", "ondevice")
             result = module.run_single_stage_optimizer(
-                lambda x: (1.0, np.asarray(x)),
+                target_fun,
                 np.array([0.0, 0.0]),
                 contract=contract,
                 maxiter=1,
@@ -603,7 +659,7 @@ class SingleStageExampleTests(unittest.TestCase):
                 gtol=1e-6,
                 maxcor=5,
                 callback=lambda _x: None,
-                scalar_fun=scalar_fun,
+                scalar_fun=object(),
             )
 
         self.assertEqual(result.message, "ok")
@@ -834,6 +890,64 @@ class SingleStageExampleTests(unittest.TestCase):
         np.testing.assert_allclose(captured["setter"][0], np.array([7.0, -8.0]))
         np.testing.assert_allclose(captured["eval_x"], np.array([7.0, -8.0]))
         np.testing.assert_allclose(jf.x, np.array([1.0, 2.0]))
+
+    def test_single_stage_adapter_sync_accepted_step_uses_benchmark_snapshot_path(
+        self,
+    ):
+        module = self.load_module()
+
+        class _JF:
+            def __init__(self):
+                self._x = None
+
+            @property
+            def x(self):
+                return self._x
+
+            @x.setter
+            def x(self, value):
+                self._x = np.asarray(value)
+
+        jf = _JF()
+        run_dict = {"x_prev": np.zeros(2), "lscount": 4}
+        captured = {}
+
+        def fake_snapshot(state, booz, objective):
+            captured["snapshot"] = {
+                "state": state,
+                "booz": booz,
+                "objective": objective,
+            }
+            return 1.0, np.zeros(2)
+
+        adapter = module.SingleStageAdapter(
+            run_dict=run_dict,
+            boozer_surface="booz",
+            JF=jf,
+            bs="bs",
+            objectives={"qs": "obj"},
+            diagnostics={"iota": "diag"},
+            log_path="/tmp/log.txt",
+            benchmark_mode=True,
+        )
+
+        with patch.object(
+            module,
+            "snapshot_accepted_step_state",
+            side_effect=fake_snapshot,
+        ), patch.object(
+            module,
+            "accept_step",
+            side_effect=AssertionError(
+                "benchmark sync path should not call accept_step"
+            ),
+        ):
+            adapter.sync_accepted_step(np.array([9.0, -10.0]))
+
+        self.assertIsNone(jf.x)
+        np.testing.assert_allclose(run_dict["x_prev"], np.zeros(2))
+        self.assertIs(captured["snapshot"]["state"], run_dict)
+        self.assertEqual(run_dict["lscount"], 4)
 
     def test_evaluate_surface_self_intersection_skips_when_backend_unavailable(self):
         module = self.load_module()

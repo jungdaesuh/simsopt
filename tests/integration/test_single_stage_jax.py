@@ -139,6 +139,18 @@ _TRACEABLE_OBJECTIVE_ABS_TOL = 1e-28
 # -----------------------------------------------------------------------
 
 
+def test_single_stage_curvature_threshold_policy_caps_at_40():
+    assert single_stage_example.resolve_curvature_threshold(10.0) == pytest.approx(
+        20.0
+    )
+    assert single_stage_example.resolve_curvature_threshold(30.0) == pytest.approx(
+        30.0
+    )
+    assert single_stage_example.resolve_curvature_threshold(80.0) == pytest.approx(
+        40.0
+    )
+
+
 def _iota_unit_rhs(plu):
     """Return the standard IotasJAX inner cotangent for the LS path."""
     n = plu[1].shape[0]
@@ -4182,6 +4194,13 @@ class TestTraceableObjective:
     """
 
     @staticmethod
+    def _traceable_target_inputs(bs_jax, booz_jax, *, iota_target_shift=0.0):
+        """Return the shared target-lane inputs used by traceable objective helpers."""
+        iota_target = booz_jax.res["iota"] + iota_target_shift
+        coil_dofs = jnp.array(bs_jax.x.copy())
+        return iota_target, coil_dofs
+
+    @staticmethod
     def _make_traceable(bs_jax, booz_jax, *, iota_target_shift=0.0):
         """Build the traceable objective and coil DOFs from a solved setup.
 
@@ -4189,13 +4208,61 @@ class TestTraceableObjective:
         """
         jr_jax = BoozerResidualJAX(booz_jax, bs_jax)
         iotas_jax = IotasJAX(booz_jax)
-        iota_target = booz_jax.res["iota"] + iota_target_shift
+        iota_target, coil_dofs = TestTraceableObjective._traceable_target_inputs(
+            bs_jax,
+            booz_jax,
+            iota_target_shift=iota_target_shift,
+        )
 
         from simsopt.geo.surfaceobjectives_jax import make_traceable_objective
 
         f = make_traceable_objective(booz_jax, bs_jax, iota_target)
-        coil_dofs = jnp.array(bs_jax.x.copy())
         return f, coil_dofs, jr_jax, iotas_jax, iota_target
+
+    @staticmethod
+    def _make_traceable_value_and_grad(bs_jax, booz_jax, *, iota_target_shift=0.0):
+        """Build the fused traceable value-and-gradient objective and coil DOFs."""
+        jr_jax = BoozerResidualJAX(booz_jax, bs_jax)
+        iotas_jax = IotasJAX(booz_jax)
+        runtime_bundle, coil_dofs = TestTraceableObjective._make_traceable_runtime_bundle(
+            bs_jax,
+            booz_jax,
+            iota_target_shift=iota_target_shift,
+        )
+        iota_target = booz_jax.res["iota"] + iota_target_shift
+        fun_vg = runtime_bundle["value_and_grad"]
+        return fun_vg, coil_dofs, jr_jax, iotas_jax, iota_target
+
+    @staticmethod
+    def _make_traceable_profile_suite(bs_jax, booz_jax, *, iota_target_shift=0.0):
+        """Build the profiled traceable target-lane closure suite and coil DOFs."""
+        runtime_bundle, coil_dofs = TestTraceableObjective._make_traceable_runtime_bundle(
+            bs_jax,
+            booz_jax,
+            iota_target_shift=iota_target_shift,
+        )
+        profile_suite = runtime_bundle["profile_suite"]
+        return profile_suite, coil_dofs
+
+    @staticmethod
+    def _make_traceable_runtime_bundle(bs_jax, booz_jax, *, iota_target_shift=0.0):
+        """Build the shared traceable runtime bundle and coil DOFs."""
+        iota_target, coil_dofs = TestTraceableObjective._traceable_target_inputs(
+            bs_jax,
+            booz_jax,
+            iota_target_shift=iota_target_shift,
+        )
+
+        from simsopt.geo.surfaceobjectives_jax import (
+            make_traceable_objective_runtime_bundle,
+        )
+
+        runtime_bundle = make_traceable_objective_runtime_bundle(
+            booz_jax,
+            bs_jax,
+            iota_target,
+        )
+        return runtime_bundle, coil_dofs
 
     def test_pure_objective_matches_optimizable_value(self, boozer_setup):
         """Test 1: Pure JAX objective returns same value as JF.J()."""
@@ -4263,6 +4330,52 @@ class TestTraceableObjective:
             rtol=1e-6,
             atol=1e-10,
             err_msg="jax.grad gradient differs from IFT reference",
+        )
+
+    def test_traceable_value_and_grad_builder_matches_scalar_builder(self, boozer_setup):
+        """The fused target-lane builder must match the scalar traceable contract."""
+        (_, _, _, _, bs_jax, _, booz_jax, _) = boozer_setup
+        f, coil_dofs, _, _, _ = self._make_traceable(bs_jax, booz_jax)
+        fun_vg, _, _, _, _ = self._make_traceable_value_and_grad(bs_jax, booz_jax)
+
+        value_scalar = f(coil_dofs)
+        grad_scalar = jax.grad(f)(coil_dofs)
+        value_vg, grad_vg = fun_vg(coil_dofs)
+
+        np.testing.assert_allclose(
+            np.asarray(value_vg),
+            np.asarray(value_scalar),
+            rtol=1e-10,
+            atol=_TRACEABLE_OBJECTIVE_ABS_TOL,
+        )
+        np.testing.assert_allclose(
+            np.asarray(grad_vg),
+            np.asarray(grad_scalar),
+            rtol=1e-10,
+            atol=1e-10,
+        )
+
+    def test_traceable_profile_suite_warmstart_predict_executes(self, boozer_setup):
+        """The profiling suite must execute warmstart prediction without NameError."""
+        (_, _, _, _, bs_jax, _, booz_jax, _) = boozer_setup
+        profile_suite, coil_dofs = self._make_traceable_profile_suite(bs_jax, booz_jax)
+
+        warmstart_x = profile_suite["warmstart_predict"](coil_dofs)
+
+        assert warmstart_x.shape[0] > 0
+        assert jnp.all(jnp.isfinite(warmstart_x))
+
+    def test_traceable_runtime_bundle_profiles_exact_optimizer_callable(
+        self,
+        boozer_setup,
+    ):
+        """The profile suite should expose the exact fused callable used by the optimizer."""
+        (_, _, _, _, bs_jax, _, booz_jax, _) = boozer_setup
+        runtime_bundle, _ = self._make_traceable_runtime_bundle(bs_jax, booz_jax)
+
+        assert (
+            runtime_bundle["profile_suite"]["value_and_grad_pipeline"]
+            is runtime_bundle["value_and_grad"]
         )
 
     def test_pure_objective_traces_to_jaxpr(self, boozer_setup):
@@ -4391,8 +4504,8 @@ class TestTraceableObjective:
             "traceable objective leaked Optimizable children across evaluations"
         )
 
-    def test_traceable_routes_through_lax_while_loop(self, boozer_setup, monkeypatch):
-        """Test 6: lbfgs-ondevice uses _minimize_lbfgs_private, not fallback."""
+    def test_traceable_scalar_routes_through_lax_while_loop(self, boozer_setup, monkeypatch):
+        """Test 6: scalar lbfgs-ondevice stays on the private ondevice path."""
         (_, _, _, _, bs_jax, _, booz_jax, _) = boozer_setup
         f, x0, _, _, _ = self._make_traceable(bs_jax, booz_jax)
 
@@ -4418,10 +4531,40 @@ class TestTraceableObjective:
         )
         assert np.isfinite(float(result.fun)), "Optimizer produced non-finite J"
 
+    def test_traceable_value_and_grad_routes_through_ondevice_private_path(
+        self,
+        boozer_setup,
+        monkeypatch,
+    ):
+        """Test 6b: explicit value/grad lbfgs-ondevice avoids the host fallback."""
+        (_, _, _, _, bs_jax, _, booz_jax, _) = boozer_setup
+        fun_vg, x0, _, _, _ = self._make_traceable_value_and_grad(bs_jax, booz_jax)
+
+        import simsopt.geo.optimizer_jax as opt_mod
+
+        def _reject(*args, **kwargs):
+            raise AssertionError(
+                "Traceable value/grad objective should route through "
+                "_minimize_lbfgs_private_value_and_grad, not the host fallback"
+            )
+
+        monkeypatch.setattr(opt_mod, "_minimize_lbfgs_explicit_value_and_grad", _reject)
+
+        result = jax_minimize(
+            fun_vg,
+            x0,
+            method="lbfgs-ondevice",
+            value_and_grad=True,
+            maxiter=2,
+            tol=1e-20,
+        )
+        assert np.isfinite(float(result.fun)), "Optimizer produced non-finite J"
+
     def test_traceable_matches_explicit_path(self, boozer_setup):
         """Test 7: Traceable and explicit paths produce same J after 3 iters."""
         (_, _, _, _, bs_jax, _, booz_jax, _) = boozer_setup
         f, x0, _, _, _ = self._make_traceable(bs_jax, booz_jax)
+        fun_vg, _, _, _, _ = self._make_traceable_value_and_grad(bs_jax, booz_jax)
 
         # Snapshot Optimizable state so Path B starts from identical state
         # even if Path A's optimizer leaks side effects (defensive guard --
@@ -4447,16 +4590,9 @@ class TestTraceableObjective:
 
             _restore_state()
 
-            # Path B: explicit value_and_grad through host loop
-            def fun_vg(x):
-                x_jax = jnp.array(x) if not isinstance(x, jnp.ndarray) else x
-                val = float(f(x_jax))
-                g = np.asarray(jax.grad(f)(x_jax), dtype=float)
-                return val, g
-
             result_b = jax_minimize(
                 fun_vg,
-                np.asarray(x0),
+                x0,
                 method="lbfgs-ondevice",
                 value_and_grad=True,
                 maxiter=3,

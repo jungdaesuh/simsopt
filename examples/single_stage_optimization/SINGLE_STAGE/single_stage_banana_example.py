@@ -4,6 +4,7 @@ import logging
 import os
 import io
 import json
+import time
 import numpy as np
 
 # SIMSOPT imports
@@ -39,7 +40,7 @@ EXAMPLE_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, ".."))
 import sys
 
 sys.path.insert(0, EXAMPLE_ROOT)
-from plotting_utils import norm_field_plot, cross_section_plot
+from plotting_utils import cross_section_plot, norm_field_plot, norm_field_summary
 
 SIMSOPT_ROOT = os.path.abspath(os.path.join(EXAMPLE_ROOT, "..", ".."))
 REPO_ROOT = os.path.abspath(os.path.join(SIMSOPT_ROOT, ".."))
@@ -58,6 +59,17 @@ CURVATURE_THRESHOLD_FLOOR = 20.0
 CURVATURE_THRESHOLD_CEILING = 40.0
 TARGET_LANE_ACCEPTED_STEP_SYNC_CHOICES = ("per-accept", "final-only")
 TARGET_LANE_ACCEPTED_STEP_SYNC_DEFAULT = "per-accept"
+_TIMED_STAGE_LABELS = frozenset(
+    {
+        "after_boozer_surface_fit",
+        "after_boozer_setup",
+        "after_boozer_solve",
+        "after_boozer_lbfgs",
+        "before_boozer_newton",
+        "after_boozer_newton",
+        "after_boozer_postprocess",
+    }
+)
 DEFAULT_STAGE2_SEEDS_BY_PLASMA = {
     "wout_nfp22ginsburg_000_014417_iota15.nc": {
         "major_radius": 0.915,
@@ -88,6 +100,42 @@ def format_compact_float(value):
     return f"{value:g}"
 
 
+def _perf_counter_s():
+    return float(time.perf_counter())
+
+
+def _elapsed_s(start_s, end_s):
+    return float(end_s - start_s)
+
+
+def _record_timing(timings, key, start_s, end_s):
+    timings[key] = _elapsed_s(start_s, end_s)
+    return timings[key]
+
+
+def _record_prefixed_stage_timings(timings, stage_marks, *, prefix, solve_start_s):
+    if "after_boozer_lbfgs" in stage_marks:
+        timings[f"{prefix}_lbfgs_s"] = _elapsed_s(
+            solve_start_s, stage_marks["after_boozer_lbfgs"]
+        )
+    if (
+        "before_boozer_newton" in stage_marks
+        and "after_boozer_newton" in stage_marks
+    ):
+        timings[f"{prefix}_newton_s"] = _elapsed_s(
+            stage_marks["before_boozer_newton"],
+            stage_marks["after_boozer_newton"],
+        )
+    if (
+        "after_boozer_solve" in stage_marks
+        and "after_boozer_postprocess" in stage_marks
+    ):
+        timings[f"{prefix}_postprocess_s"] = _elapsed_s(
+            stage_marks["after_boozer_solve"],
+            stage_marks["after_boozer_postprocess"],
+        )
+
+
 def resolve_curvature_threshold(value: float) -> float:
     """Apply the shared HBT curvature-threshold policy for single-stage runs."""
     return min(
@@ -99,6 +147,15 @@ def resolve_curvature_threshold(value: float) -> float:
 def uses_per_accept_target_lane_sync(sync_policy: str) -> bool:
     """Return whether the target lane should sync/log every accepted step."""
     return sync_policy == "per-accept"
+
+
+def resolve_effective_target_lane_accepted_step_sync(
+    sync_policy: str, *, benchmark_mode: bool
+) -> str:
+    """Return the effective target-lane sync policy for this run."""
+    if benchmark_mode:
+        return "final-only"
+    return sync_policy
 
 
 def resolve_target_lane_accepted_step_callback(
@@ -126,6 +183,11 @@ def resolve_target_lane_accepted_step_sync_record(
     if backend == "jax" and optimizer_backend == "ondevice" and int(maxiter) > 0:
         return sync_policy
     return None
+
+
+def should_write_single_stage_artifacts(benchmark_mode: bool) -> bool:
+    """Return whether the run should emit heavy plotting/VTK artifacts."""
+    return not benchmark_mode
 
 
 def format_local_stage2_seed_dir(
@@ -545,6 +607,22 @@ def parse_args():
             "accepted-step diagnostics."
         ),
     )
+    parser.add_argument(
+        "--benchmark-mode",
+        action="store_true",
+        help=(
+            "Skip heavy plotting/VTK artifacts and use the cheap target-lane "
+            "final sync path so benchmark/probe runs measure solver time more directly."
+        ),
+    )
+    parser.add_argument(
+        "--profile-target-lane",
+        action="store_true",
+        help=(
+            "Record first-vs-warm timing breakdowns for the traceable target-lane "
+            "objective closures used by the outer optimizer."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -707,6 +785,7 @@ def initialize_boozer_surface(
     iota_override=None,
     G_override=None,
     on_stage=None,
+    timings_out=None,
 ):
     """
     This initializes the boozer surface, using either the boozer "exact" algorithm, or the boozer "least squares" algorithm
@@ -728,7 +807,12 @@ def initialize_boozer_surface(
     G_override: optional solved G warm start for the Boozer replay
     """
 
+    timings = {} if timings_out is None else timings_out
+    stage_marks = {}
+
     def emit_stage(label, **extra):
+        if label in _TIMED_STAGE_LABELS:
+            stage_marks[label] = _perf_counter_s()
         if on_stage is not None:
             on_stage(label, **extra)
 
@@ -753,6 +837,8 @@ def initialize_boozer_surface(
             return boozer_surface.run_code(solve_iota, solve_G, sdofs=solve_sdofs)
         return boozer_surface.run_code(solve_iota, solve_G)
 
+    total_start_s = _perf_counter_s()
+    fit_start_s = total_start_s
     surf = SurfaceXYZTensorFourier(
         mpol=mpol,
         ntor=ntor,
@@ -762,6 +848,8 @@ def initialize_boozer_surface(
         quadpoints_phi=surf_prev.quadpoints_phi,
     )
     surf.least_squares_fit(surf_prev.gamma())
+    fit_end_s = _perf_counter_s()
+    _record_timing(timings, "boozer_surface_fit_s", fit_start_s, fit_end_s)
     if surface_dofs_override is not None:
         surf.set_dofs(np.asarray(surface_dofs_override, dtype=float))
     emit_stage("after_boozer_surface_fit")
@@ -774,6 +862,7 @@ def initialize_boozer_surface(
         BoozerCls = BoozerSurface
 
     solver_name = "JAX " if backend == "jax" else ""
+    setup_start_s = _perf_counter_s()
     if constraint_weight is not None:
         print(f"Generating {solver_name}Boozer least squares surface...")
         vol = Volume(surf)
@@ -821,10 +910,15 @@ def initialize_boozer_surface(
             boozer_type="exact",
             backend=backend,
         )
+    setup_end_s = _perf_counter_s()
+    _record_timing(timings, "boozer_setup_s", setup_start_s, setup_end_s)
 
     # Run boozer surface algorithm
     solve_iota, solve_G, solve_sdofs = resolve_boozer_warm_start()
+    solve_start_s = _perf_counter_s()
     res = run_boozer_solve(boozer_surface, solve_iota, solve_G, solve_sdofs)
+    solve_end_s = _perf_counter_s()
+    _record_timing(timings, "boozer_solve_s", solve_start_s, solve_end_s)
     emit_stage(
         "after_boozer_solve",
         solve_success=bool(res["success"]),
@@ -835,6 +929,7 @@ def initialize_boozer_surface(
 
     # Check if boozer algo is successful
     success1 = res["success"]  # True if the boozer surface algo converged
+    postprocess_start_s = _perf_counter_s()
     (
         self_intersecting,
         self_intersection_check_available,
@@ -862,6 +957,20 @@ def initialize_boozer_surface(
         self_intersection_check_available=(
             "true" if self_intersection_check_available else "false"
         ),
+    )
+    postprocess_end_s = _perf_counter_s()
+    _record_timing(
+        timings,
+        "boozer_postprocess_total_s",
+        postprocess_start_s,
+        postprocess_end_s,
+    )
+    _record_timing(timings, "boozer_total_s", total_start_s, postprocess_end_s)
+    _record_prefixed_stage_timings(
+        timings,
+        stage_marks,
+        prefix="boozer",
+        solve_start_s=solve_start_s,
     )
     return boozer_surface
 
@@ -926,6 +1035,13 @@ def get_traceable_single_stage_objective_builder():
     return make_traceable_objective
 
 
+def get_traceable_single_stage_runtime_bundle_builder():
+    """Load the shared single-stage JAX target-lane runtime bundle on demand."""
+    from simsopt.geo.surfaceobjectives_jax import make_traceable_objective_runtime_bundle
+
+    return make_traceable_objective_runtime_bundle
+
+
 def select_boozer_residual_class(use_jax, boozer_kind):
     """Select the stage- and backend-matched Boozer residual wrapper."""
     if boozer_kind == "exact":
@@ -980,6 +1096,91 @@ def _single_stage_optimizer_dofs_array(x):
     return np.asarray(x, dtype=float)
 
 
+def _block_tree_until_ready(tree):
+    """Synchronize a pytree of possible JAX arrays before returning timing data."""
+    import jax
+
+    for leaf in jax.tree_util.tree_leaves(tree):
+        block_until_ready = getattr(leaf, "block_until_ready", None)
+        if block_until_ready is not None:
+            block_until_ready()
+    return tree
+
+
+def _profile_tree_call(fn, *args):
+    """Measure dispatch and ready time for one profiled callable invocation."""
+    start_s = _perf_counter_s()
+    out = fn(*args)
+    dispatch_end_s = _perf_counter_s()
+    _block_tree_until_ready(out)
+    end_s = _perf_counter_s()
+    return out, {
+        "dispatch_s": _elapsed_s(start_s, dispatch_end_s),
+        "ready_s": _elapsed_s(dispatch_end_s, end_s),
+        "total_s": _elapsed_s(start_s, end_s),
+    }
+
+
+def _profile_tree_callable_pair(fn, *args):
+    """Return first-call vs warm-call timings for one profiled callable."""
+    first_out, first = _profile_tree_call(fn, *args)
+    warm_out, warm = _profile_tree_call(fn, *args)
+    return warm_out, {
+        "first": first,
+        "warm": warm,
+        "compile_overhead_s": max(first["total_s"] - warm["total_s"], 0.0),
+    }
+
+
+def profile_traceable_target_lane_objective(profile_suite, coil_dofs):
+    """Profile the traceable target-lane closures at one representative DOF point."""
+    profiled = {}
+    forward_result, profiled["forward_result"] = _profile_tree_callable_pair(
+        profile_suite["forward_result"],
+        coil_dofs,
+    )
+    _, profiled["forward_value"] = _profile_tree_callable_pair(
+        profile_suite["forward_value"],
+        coil_dofs,
+    )
+    _, profiled["warmstart_predict"] = _profile_tree_callable_pair(
+        profile_suite["warmstart_predict"],
+        coil_dofs,
+    )
+    solve_result, profiled["inner_solve"] = _profile_tree_callable_pair(
+        profile_suite["inner_solve"],
+        coil_dofs,
+    )
+    solved_x = forward_result["x"]
+    solved_plu = forward_result["plu"]
+    _, profiled["surface_geometry"] = _profile_tree_callable_pair(
+        profile_suite["surface_geometry"],
+        solved_x,
+    )
+    _, profiled["field_eval"] = _profile_tree_callable_pair(
+        profile_suite["field_eval"],
+        coil_dofs,
+        solved_x,
+    )
+    _, profiled["solved_total_objective"] = _profile_tree_callable_pair(
+        profile_suite["solved_total_objective"],
+        coil_dofs,
+        solved_x,
+    )
+    _, profiled["solved_total_gradient"] = _profile_tree_callable_pair(
+        profile_suite["solved_total_gradient"],
+        coil_dofs,
+        solved_x,
+        solved_plu,
+    )
+    _, profiled["value_and_grad_pipeline"] = _profile_tree_callable_pair(
+        profile_suite["value_and_grad_pipeline"],
+        coil_dofs,
+    )
+    profiled["solve_success"] = bool(np.asarray(solve_result["success"]).item())
+    return profiled
+
+
 def resolve_single_stage_outer_optimizer_initial_dofs(
     JF,
     bs,
@@ -1024,17 +1225,18 @@ def run_single_stage_optimizer(
     """Run the single-stage outer optimization through the shared adapter."""
     from simsopt.geo.optimizer_jax import jax_minimize
 
-    if contract.use_scalar_objective and scalar_fun is None:
+    optimizer_fun = fun
+    value_and_grad = True
+    if contract.use_scalar_objective and optimizer_fun is None:
+        optimizer_fun = scalar_fun
+        value_and_grad = False
+    if optimizer_fun is None:
         raise RuntimeError(
-            "Single-stage target-lane optimization requires a scalar JAX objective."
-        )
-    if (not contract.use_scalar_objective) and fun is None:
-        raise RuntimeError(
-            "Single-stage reference-lane optimization requires an explicit "
-            "value-and-gradient objective."
+            "Single-stage optimization requires an explicit value-and-gradient "
+            "objective, or a scalar JAX objective on the scalar target lane."
         )
     return jax_minimize(
-        scalar_fun if contract.use_scalar_objective else fun,
+        optimizer_fun,
         dofs,
         method=contract.method,
         tol=gtol,
@@ -1043,7 +1245,7 @@ def run_single_stage_optimizer(
             "maxcor": int(maxcor),
             "ftol": float(ftol),
         },
-        value_and_grad=not contract.use_scalar_objective,
+        value_and_grad=value_and_grad,
         callback=callback,
     )
 
@@ -1154,6 +1356,17 @@ def evaluate_candidate(x, run_dict, boozer_surface, JF):
     return _evaluate_candidate_impl(x, run_dict, boozer_surface, JF)
 
 
+def snapshot_accepted_step_state(run_dict, boozer_surface, JF):
+    """Persist the accepted-step solver/objective state into run_dict."""
+    run_dict["lscount"] = 0
+    run_dict["sdofs"] = boozer_surface.surface.x.copy()
+    run_dict["iota"] = boozer_surface.res["iota"]
+    run_dict["G"] = boozer_surface.res["G"]
+    run_dict["J"] = JF.J()
+    run_dict["dJ"] = JF.dJ().copy()
+    return run_dict["J"], run_dict["dJ"]
+
+
 def accept_step(
     run_dict, boozer_surface, JF, bs, objectives, diagnostics_refs, log_path
 ):
@@ -1175,14 +1388,7 @@ def accept_step(
         diagnostics_refs: Dict of extra diagnostic objects (banana_curve, etc.).
         log_path: Path to the iteration log file.
     """
-    run_dict["lscount"] = 0
-    run_dict["sdofs"] = boozer_surface.surface.x.copy()
-    run_dict["iota"] = boozer_surface.res["iota"]
-    run_dict["G"] = boozer_surface.res["G"]
-    run_dict["J"] = JF.J()
-    run_dict["dJ"] = JF.dJ().copy()
-    J = run_dict["J"]
-    grad = run_dict["dJ"]
+    J, grad = snapshot_accepted_step_state(run_dict, boozer_surface, JF)
 
     # Per-component diagnostics
     diag = {}
@@ -1281,6 +1487,7 @@ class SingleStageAdapter:
         log_path,
         reevaluate_before_accept=False,
         apply_coil_dofs=None,
+        benchmark_mode=False,
     ):
         self.run_dict = run_dict
         self.boozer_surface = boozer_surface
@@ -1290,6 +1497,7 @@ class SingleStageAdapter:
         self.diagnostics = diagnostics
         self.log_path = log_path
         self.reevaluate_before_accept = bool(reevaluate_before_accept)
+        self.benchmark_mode = bool(benchmark_mode)
         self.apply_coil_dofs = (
             apply_coil_dofs
             if apply_coil_dofs is not None
@@ -1312,6 +1520,13 @@ class SingleStageAdapter:
         """Refresh mutable state if needed, then snapshot one accepted step."""
         if self.reevaluate_before_accept:
             self._reevaluate_accepted_step(x)
+        if self.benchmark_mode:
+            snapshot_accepted_step_state(
+                self.run_dict,
+                self.boozer_surface,
+                self.JF,
+            )
+            return
         accept_step(
             self.run_dict,
             self.boozer_surface,
@@ -1467,6 +1682,8 @@ gtol_by_mpol = {
 
 
 if __name__ == "__main__":
+    run_wall_start_s = _perf_counter_s()
+
     if not logging.root.handlers:
         handler = logging.StreamHandler(sys.stdout)
         handler.setFormatter(logging.Formatter("%(message)s"))
@@ -1538,6 +1755,7 @@ if __name__ == "__main__":
     bs = load(stage2_bs_path)
 
     use_jax = args.backend == "jax"
+    write_artifacts = should_write_single_stage_artifacts(args.benchmark_mode)
 
     # JAX backend: wrap the loaded BiotSavart coils in BiotSavartJAX.
     # Keep a CPU reference for diagnostics and artifact output.
@@ -1587,11 +1805,17 @@ if __name__ == "__main__":
     boozer_optimizer_backend_hash_record = (
         args.boozer_optimizer_backend if args.backend == "jax" else None
     )
+    effective_target_lane_sync_policy = (
+        resolve_effective_target_lane_accepted_step_sync(
+            args.target_lane_accepted_step_sync,
+            benchmark_mode=args.benchmark_mode,
+        )
+    )
     target_lane_sync_record = resolve_target_lane_accepted_step_sync_record(
         backend=args.backend,
         optimizer_backend=optimizer_backend_record,
         maxiter=args.maxiter,
-        sync_policy=args.target_lane_accepted_step_sync,
+        sync_policy=effective_target_lane_sync_policy,
     )
 
     config_parts = [
@@ -1616,6 +1840,8 @@ if __name__ == "__main__":
         str(nphi),
         str(ntheta),
         str(args.init_only),
+        str(args.benchmark_mode),
+        str(args.profile_target_lane),
         str(args.backend),
         str(optimizer_backend_record),
         str(target_lane_sync_record),
@@ -1631,6 +1857,7 @@ if __name__ == "__main__":
     os.makedirs(OUT_DIR_ITER, exist_ok=True)
 
     # Initialize Boozer surface with target parameters
+    timings = {}
     boozer_surface = initialize_boozer_surface(
         surf,
         mpol,
@@ -1642,45 +1869,61 @@ if __name__ == "__main__":
         G0,
         backend=args.backend,
         optimizer_backend=boozer_optimizer_backend_record,
+        timings_out=timings,
     )
 
     # ==============================================================================
     # SAVE INITIAL STATE
     # ==============================================================================
-    # Save initial coil configurations
-    curves_to_vtk(curves, OUT_DIR_ITER + "/curves_init", close=True)
-    bs_diag.save(OUT_DIR_ITER + "/biot_savart_init.json")
+    initial_artifacts_start_s = _perf_counter_s()
+    if write_artifacts:
+        # Save initial coil configurations
+        curves_to_vtk(curves, OUT_DIR_ITER + "/curves_init", close=True)
+        bs_diag.save(OUT_DIR_ITER + "/biot_savart_init.json")
 
-    # Save initial surface with magnetic field normal component data
-    bs_diag.set_points(boozer_surface.surface.gamma().reshape((-1, 3)))
-    unitn = boozer_surface.surface.unitnormal()
-    pointData = {
-        "B_N/B": np.sum(bs_diag.B().reshape(unitn.shape) * unitn, axis=2)[:, :, None]
-        / np.sqrt(np.sum(bs_diag.B().reshape(unitn.shape) ** 2, axis=2))[:, :, None]
-    }
-    boozer_surface.surface.to_vtk(OUT_DIR_ITER + "/surf_init", extra_data=pointData)
-    boozer_surface.surface.save(OUT_DIR_ITER + "/surf_init.json")
+        # Save initial surface with magnetic field normal component data
+        bs_diag.set_points(boozer_surface.surface.gamma().reshape((-1, 3)))
+        unitn = boozer_surface.surface.unitnormal()
+        pointData = {
+            "B_N/B": np.sum(bs_diag.B().reshape(unitn.shape) * unitn, axis=2)[:, :, None]
+            / np.sqrt(np.sum(bs_diag.B().reshape(unitn.shape) ** 2, axis=2))[:, :, None]
+        }
+        boozer_surface.surface.to_vtk(OUT_DIR_ITER + "/surf_init", extra_data=pointData)
+        boozer_surface.surface.save(OUT_DIR_ITER + "/surf_init.json")
     print(f"Volume: {boozer_surface.surface.volume()}")
 
     # Generate initial diagnostic plots
-    initial_field_error = normPlot(
-        boozer_surface.surface, bs_diag, OUT_DIR_ITER + "/NormPlotInitial"
-    )
-    cross_section_plot(
-        surf_coils,
-        boozer_surface.surface,
-        banana_curve,
-        OUT_DIR_ITER + "/CrossSectionInitial",
-        hbt,
-        VV,
-    )
+    if write_artifacts:
+        initial_field_error = normPlot(
+            boozer_surface.surface, bs_diag, OUT_DIR_ITER + "/NormPlotInitial"
+        )
+        cross_section_plot(
+            surf_coils,
+            boozer_surface.surface,
+            banana_curve,
+            OUT_DIR_ITER + "/CrossSectionInitial",
+            hbt,
+            VV,
+        )
+    else:
+        initial_field_error, _, _, _, _, _ = norm_field_summary(
+            boozer_surface.surface,
+            bs_diag,
+        )
     initial_volume = boozer_surface.surface.volume()
     initial_iota = build_iota_objective(boozer_surface, iota_cls).J()
     initial_max_curvature = np.max(banana_curve.kappa())
+    _record_timing(
+        timings,
+        "initial_artifacts_s",
+        initial_artifacts_start_s,
+        _perf_counter_s(),
+    )
 
     # ==============================================================================
     # DEFINE OBJECTIVE FUNCTION COMPONENTS
     # ==============================================================================
+    objective_setup_start_s = _perf_counter_s()
     # Biot-Savart field calculation
     if use_jax:
         bs_obj = BiotSavartJAX(coils)
@@ -1737,6 +1980,12 @@ if __name__ == "__main__":
         + SURF_DIST_WEIGHT * JSurfSurf
         + CURVATURE_WEIGHT * JCurvature
     )
+    _record_timing(
+        timings,
+        "objective_setup_s",
+        objective_setup_start_s,
+        _perf_counter_s(),
+    )
 
     # ==============================================================================
     # SNAPSHOT PRE-OPTIMIZATION STATE
@@ -1760,6 +2009,7 @@ if __name__ == "__main__":
         use_target_lane=use_target_lane,
     )
     run_dict["x_prev"] = np.array(dofs, copy=True)
+    target_lane_profile = None
     adapter = SingleStageAdapter(
         run_dict=run_dict,
         boozer_surface=boozer_surface,
@@ -1783,6 +2033,7 @@ if __name__ == "__main__":
         log_path=OUT_DIR_ITER + "/log.txt",
         reevaluate_before_accept=use_target_lane,
         apply_coil_dofs=dof_setter,
+        benchmark_mode=args.benchmark_mode,
     )
 
     # ==============================================================================
@@ -1800,20 +2051,27 @@ if __name__ == "__main__":
         fieldError = initial_field_error
         print("Skipping single-stage optimizer because --init-only was provided.")
     else:
-        target_scalar_objective = None
+        outer_optimizer_start_s = _perf_counter_s()
+        target_value_and_grad_objective = None
         if use_target_lane:
-            target_scalar_objective = get_traceable_single_stage_objective_builder()(
+            target_lane_runtime_bundle = get_traceable_single_stage_runtime_bundle_builder()(
                 boozer_surface,
                 bs,
                 iota_target,
             )
+            target_value_and_grad_objective = target_lane_runtime_bundle["value_and_grad"]
+            if args.profile_target_lane:
+                target_lane_profile = profile_traceable_target_lane_objective(
+                    target_lane_runtime_bundle["profile_suite"],
+                    np.asarray(dofs, dtype=float),
+                )
         accepted_step_callback = resolve_target_lane_accepted_step_callback(
             adapter,
             use_target_lane=use_target_lane,
-            sync_policy=args.target_lane_accepted_step_sync,
+            sync_policy=effective_target_lane_sync_policy,
         )
         res = run_single_stage_optimizer(
-            adapter,
+            target_value_and_grad_objective if use_target_lane else adapter,
             dofs,
             callback=accepted_step_callback,
             contract=outer_contract,
@@ -1821,12 +2079,26 @@ if __name__ == "__main__":
             ftol=ftol,
             gtol=gtol,
             maxcor=args.maxcor,
-            scalar_fun=target_scalar_objective,
+            scalar_fun=None,
+        )
+        outer_optimizer_end_s = _perf_counter_s()
+        _record_timing(
+            timings,
+            "outer_optimizer_s",
+            outer_optimizer_start_s,
+            outer_optimizer_end_s,
         )
         res_nit = res.nit
         print(res.message)
         if use_target_lane and accepted_step_callback is None and res.nit > 0:
+            target_lane_sync_start_s = _perf_counter_s()
             adapter.sync_accepted_step(res.x)
+            _record_timing(
+                timings,
+                "target_lane_final_sync_s",
+                target_lane_sync_start_s,
+                _perf_counter_s(),
+            )
 
         # Restore final accepted state to the Optimizable graph so
         # post-optimization diagnostics and artifact writers see
@@ -1843,23 +2115,30 @@ if __name__ == "__main__":
         # ==============================================================================
         # SAVE OPTIMIZED STATE
         # ==============================================================================
-        # Save optimized coil configurations
-        curves_to_vtk(curves, OUT_DIR_ITER + "/curves_opt", close=True)
-        bs_diag.save(OUT_DIR_ITER + "/biot_savart_opt.json")
+        final_artifacts_start_s = _perf_counter_s()
+        if write_artifacts:
+            # Save optimized coil configurations
+            curves_to_vtk(curves, OUT_DIR_ITER + "/curves_opt", close=True)
+            bs_diag.save(OUT_DIR_ITER + "/biot_savart_opt.json")
 
-        # Save optimized surface with magnetic field normal component data
-        bs_diag.set_points(boozer_surface.surface.gamma().reshape((-1, 3)))
-        unitn = boozer_surface.surface.unitnormal()
-        pointData = {
-            "B_N/B": np.sum(bs_diag.B().reshape(unitn.shape) * unitn, axis=2)[
-                :, :, None
-            ]
-            / np.sqrt(np.sum(bs_diag.B().reshape(unitn.shape) ** 2, axis=2))[:, :, None]
-        }
+            # Save optimized surface with magnetic field normal component data
+            bs_diag.set_points(boozer_surface.surface.gamma().reshape((-1, 3)))
+            unitn = boozer_surface.surface.unitnormal()
+            pointData = {
+                "B_N/B": np.sum(bs_diag.B().reshape(unitn.shape) * unitn, axis=2)[
+                    :, :, None
+                ]
+                / np.sqrt(
+                    np.sum(bs_diag.B().reshape(unitn.shape) ** 2, axis=2)
+                )[:, :, None]
+            }
 
-        # Print final results
-        boozer_surface.surface.to_vtk(OUT_DIR_ITER + "/surf_opt", extra_data=pointData)
-        boozer_surface.surface.save(OUT_DIR_ITER + "/surf_opt.json")
+            # Print final results
+            boozer_surface.surface.to_vtk(
+                OUT_DIR_ITER + "/surf_opt",
+                extra_data=pointData,
+            )
+            boozer_surface.surface.save(OUT_DIR_ITER + "/surf_opt.json")
 
         final_volume = boozer_surface.surface.volume()
         final_iota = build_iota_objective(boozer_surface, iota_cls).J()
@@ -1869,16 +2148,30 @@ if __name__ == "__main__":
         print(f"Max Curvature: {final_max_curvature}")
 
         # Generate final diagnostic plots
-        fieldError = normPlot(
-            boozer_surface.surface, bs_diag, OUT_DIR_ITER + "/NormPlotOptimized"
-        )
-        cross_section_plot(
-            surf_coils,
-            boozer_surface.surface,
-            banana_curve,
-            OUT_DIR_ITER + "/CrossSectionOptimized",
-            hbt,
-            VV,
+        if write_artifacts:
+            fieldError = normPlot(
+                boozer_surface.surface,
+                bs_diag,
+                OUT_DIR_ITER + "/NormPlotOptimized",
+            )
+            cross_section_plot(
+                surf_coils,
+                boozer_surface.surface,
+                banana_curve,
+                OUT_DIR_ITER + "/CrossSectionOptimized",
+                hbt,
+                VV,
+            )
+        else:
+            fieldError, _, _, _, _, _ = norm_field_summary(
+                boozer_surface.surface,
+                bs_diag,
+            )
+        _record_timing(
+            timings,
+            "final_artifacts_s",
+            final_artifacts_start_s,
+            _perf_counter_s(),
         )
 
     final_self_intersecting = update_self_intersection_status(
@@ -1926,6 +2219,8 @@ if __name__ == "__main__":
         "boozer_optimizer_method": boozer_surface.res.get("optimizer_method"),
         "outer_optimizer_method": outer_contract.method,
         "target_lane_accepted_step_sync": target_lane_sync_record,
+        "benchmark_mode": bool(args.benchmark_mode),
+        "profile_target_lane": bool(args.profile_target_lane),
         "init_only": args.init_only,
         "max_iterations": MAXITER,
         "maxcor": args.maxcor,
@@ -1945,5 +2240,9 @@ if __name__ == "__main__":
         "num_tf_coils": static_config["num_tf_coils"],
         "tf_currents": static_config["tf_currents"],
     }
+    timings["script_total_s"] = _elapsed_s(run_wall_start_s, _perf_counter_s())
+    results["TIMINGS"] = timings
+    if target_lane_profile is not None:
+        results["TARGET_LANE_PROFILE"] = target_lane_profile
     with open(os.path.join(OUT_DIR_ITER, "results.json"), "w") as outfile:
         json.dump(results, outfile, indent=2)
