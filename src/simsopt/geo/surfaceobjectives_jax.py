@@ -61,6 +61,90 @@ _LEGACY_PROJECTION_HELPER_ERROR = (
 )
 
 
+def _compute_stellsym_mask_indices_for_grid(
+    *,
+    mpol,
+    ntor,
+    nfp,
+    stellsym,
+    quadpoints_phi,
+    quadpoints_theta,
+):
+    """Return exact-residual mask indices for a specific surface quadrature."""
+    from .surfacexyztensorfourier import SurfaceXYZTensorFourier
+
+    surface = SurfaceXYZTensorFourier(
+        mpol=mpol,
+        ntor=ntor,
+        nfp=nfp,
+        stellsym=stellsym,
+        quadpoints_phi=np.asarray(quadpoints_phi, dtype=float),
+        quadpoints_theta=np.asarray(quadpoints_theta, dtype=float),
+    )
+    mask = np.repeat(surface.get_stellsym_mask()[..., None], 3, axis=2)
+    if surface.stellsym:
+        mask[0, 0, 0] = False
+    return jnp.asarray(np.flatnonzero(mask), dtype=jnp.int32)
+
+
+def _canonicalize_traceable_exact_quadrature(booz_jax):
+    """Return exact-compatible quadrature for the traceable scalar objective.
+
+    Real single-stage fixtures often initialize Boozer least-squares surfaces
+    on the VMEC half-period integration grid. That grid uses half-cell-shifted
+    phi points for spectral quadrature, so it is valid for the solve but does
+    not match the unshifted quadrature families accepted by
+    ``SurfaceXYZTensorFourier.get_stellsym_mask()``. The traceable objective is
+    evaluated from surface DOFs, so it can safely canonicalize to an exact
+    quadrature family when the input surface uses a shifted integration grid.
+    """
+    quadpoints_phi = np.asarray(booz_jax.quadpoints_phi, dtype=float)
+    quadpoints_theta = np.asarray(booz_jax.quadpoints_theta, dtype=float)
+
+    def _mask_indices_for(phi_grid, theta_grid):
+        return _compute_stellsym_mask_indices_for_grid(
+            mpol=booz_jax.mpol,
+            ntor=booz_jax.ntor,
+            nfp=booz_jax.nfp,
+            stellsym=booz_jax.stellsym,
+            quadpoints_phi=phi_grid,
+            quadpoints_theta=theta_grid,
+        )
+
+    try:
+        mask_indices = _mask_indices_for(quadpoints_phi, quadpoints_theta)
+    except Exception:
+        phi_max = float(np.max(quadpoints_phi)) if quadpoints_phi.size else 0.0
+        half_period_upper = 0.5 / float(booz_jax.nfp)
+        if phi_max <= half_period_upper + 1e-12:
+            quadpoints_phi = np.linspace(
+                0.0,
+                half_period_upper,
+                int(booz_jax.ntor) + 1,
+                endpoint=False,
+            )
+        else:
+            quadpoints_phi = np.linspace(
+                0.0,
+                1.0 / float(booz_jax.nfp),
+                2 * int(booz_jax.ntor) + 1,
+                endpoint=False,
+            )
+        quadpoints_theta = np.linspace(
+            0.0,
+            1.0,
+            2 * int(booz_jax.mpol) + 1,
+            endpoint=False,
+        )
+        mask_indices = _mask_indices_for(quadpoints_phi, quadpoints_theta)
+
+    return (
+        jnp.asarray(quadpoints_phi, dtype=jnp.float64),
+        jnp.asarray(quadpoints_theta, dtype=jnp.float64),
+        mask_indices,
+    )
+
+
 def _solve_boozer_adjoint(booz_surf, rhs):
     """Solve the transposed PLU adjoint system for a BoozerSurfaceJAX result."""
     P, L, U = booz_surf.res["PLU"]
@@ -999,10 +1083,12 @@ def make_traceable_objective(booz_jax, bs_jax, iota_target):
     baseline_coil_dofs = jnp.asarray(bs_jax.x.copy(), dtype=jnp.float64)
     optimize_G = warmstart_G is not None
     predictor_kind = booz_jax.boozer_type
-    mask_indices = booz_jax._compute_stellsym_mask_indices()
+    quadpoints_phi, quadpoints_theta, mask_indices = (
+        _canonicalize_traceable_exact_quadrature(booz_jax)
+    )
     objective_kwargs = {
-        "quadpoints_phi": booz_jax.quadpoints_phi,
-        "quadpoints_theta": booz_jax.quadpoints_theta,
+        "quadpoints_phi": quadpoints_phi,
+        "quadpoints_theta": quadpoints_theta,
         "mpol": booz_jax.mpol,
         "ntor": booz_jax.ntor,
         "nfp": booz_jax.nfp,

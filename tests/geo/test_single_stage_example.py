@@ -787,6 +787,54 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertIs(captured["accept"]["state"], run_dict)
         self.assertEqual(captured["accept"]["log_path"], "/tmp/log.txt")
 
+    def test_single_stage_adapter_uses_custom_target_lane_dof_setter(self):
+        module = self.load_module()
+
+        class _JF:
+            def __init__(self):
+                self._x = np.array([1.0, 2.0])
+
+            @property
+            def x(self):
+                return self._x
+
+            @x.setter
+            def x(self, value):
+                self._x = np.asarray(value)
+
+        jf = _JF()
+        run_dict = {"x_prev": np.zeros(2), "lscount": 0}
+        captured = {"setter": []}
+
+        def fake_setter(value):
+            captured["setter"].append(np.asarray(value))
+
+        def fake_eval(x, state, booz, objective):
+            captured["eval_x"] = np.asarray(x)
+            return 1.0, np.zeros(2)
+
+        adapter = module.SingleStageAdapter(
+            run_dict=run_dict,
+            boozer_surface="booz",
+            JF=jf,
+            bs="bs",
+            objectives={"qs": "obj"},
+            diagnostics={"iota": "diag"},
+            log_path="/tmp/log.txt",
+            reevaluate_before_accept=True,
+            apply_coil_dofs=fake_setter,
+        )
+
+        with patch.object(module, "_evaluate_candidate_impl", side_effect=fake_eval), patch.object(
+            module, "accept_step", return_value=None
+        ):
+            adapter.sync_accepted_step(np.array([7.0, -8.0]))
+
+        assert len(captured["setter"]) == 1
+        np.testing.assert_allclose(captured["setter"][0], np.array([7.0, -8.0]))
+        np.testing.assert_allclose(captured["eval_x"], np.array([7.0, -8.0]))
+        np.testing.assert_allclose(jf.x, np.array([1.0, 2.0]))
+
     def test_evaluate_surface_self_intersection_skips_when_backend_unavailable(self):
         module = self.load_module()
 
@@ -1412,6 +1460,80 @@ class SingleStageExampleTests(unittest.TestCase):
                 sc1["tf_gammadash"][i], sc2["tf_gammadash"][i]
             )
             self.assertEqual(sc1["tf_currents"][i], sc2["tf_currents"][i])
+
+    def test_resolve_single_stage_outer_optimizer_initial_dofs_uses_target_lane_bs_space(
+        self,
+    ):
+        module = self.load_module()
+
+        class _JF:
+            x = np.array([1.0, 2.0, 3.0])
+
+        class _BS:
+            x = np.array([9.0, 8.0])
+
+        np.testing.assert_allclose(
+            module.resolve_single_stage_outer_optimizer_initial_dofs(
+                _JF(),
+                _BS(),
+                use_target_lane=False,
+            ),
+            np.array([1.0, 2.0, 3.0]),
+        )
+        np.testing.assert_allclose(
+            module.resolve_single_stage_outer_optimizer_initial_dofs(
+                _JF(),
+                _BS(),
+                use_target_lane=True,
+            ),
+            np.array([9.0, 8.0]),
+        )
+
+    def test_restore_from_pytree_uses_custom_coil_dof_setter_when_provided(self):
+        module = self.load_module()
+
+        class _JF:
+            def __init__(self):
+                self._x = np.array([1.0, 2.0])
+
+            @property
+            def x(self):
+                return self._x
+
+            @x.setter
+            def x(self, value):
+                self._x = np.asarray(value)
+
+        class _Surface:
+            def __init__(self):
+                self.x = np.array([10.0, 20.0])
+
+        class _Booz:
+            def __init__(self):
+                self.surface = _Surface()
+                self.res = {"iota": 0.1, "G": 2.0}
+
+        jf = _JF()
+        booz = _Booz()
+        run_dict = {"sdofs": np.array([3.0, 4.0]), "iota": 0.2, "G": 5.0}
+        captured = {}
+
+        def fake_setter(value):
+            captured["x"] = np.asarray(value)
+
+        module.restore_from_pytree(
+            jf,
+            booz,
+            run_dict,
+            coil_dofs=np.array([6.0, 7.0]),
+            apply_coil_dofs=fake_setter,
+        )
+
+        np.testing.assert_allclose(captured["x"], np.array([6.0, 7.0]))
+        np.testing.assert_allclose(jf.x, np.array([1.0, 2.0]))
+        np.testing.assert_allclose(booz.surface.x, np.array([3.0, 4.0]))
+        self.assertEqual(booz.res["iota"], 0.2)
+        self.assertEqual(booz.res["G"], 5.0)
 
     def test_restore_without_coil_dofs_leaves_jf_unchanged(self):
         """restore_from_pytree with coil_dofs=None must not touch JF.x."""

@@ -9,6 +9,8 @@ import types
 
 import numpy as np
 import pytest
+from simsopt.geo.surface import Surface
+from simsopt.geo.surfaceobjectives_jax import _canonicalize_traceable_exact_quadrature
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -1362,6 +1364,52 @@ def test_single_stage_outer_loop_probe_resolves_expected_boozer_method():
         resolve_boozer_optimizer_method("ondevice", limited_memory=True)
         == "lbfgs-ondevice"
     )
+
+
+def test_canonicalize_traceable_exact_quadrature_rewrites_shifted_half_period_grid():
+    booz = types.SimpleNamespace(
+        mpol=2,
+        ntor=2,
+        nfp=5,
+        stellsym=True,
+        quadpoints_phi=Surface.get_phi_quadpoints(nphi=31, range="half period", nfp=5),
+        quadpoints_theta=Surface.get_theta_quadpoints(ntheta=16),
+    )
+
+    quadpoints_phi, quadpoints_theta, mask_indices = (
+        _canonicalize_traceable_exact_quadrature(booz)
+    )
+
+    np.testing.assert_allclose(
+        np.asarray(quadpoints_phi),
+        np.linspace(0.0, 1.0 / (2.0 * booz.nfp), booz.ntor + 1, endpoint=False),
+    )
+    np.testing.assert_allclose(
+        np.asarray(quadpoints_theta),
+        np.linspace(0.0, 1.0, 2 * booz.mpol + 1, endpoint=False),
+    )
+    assert mask_indices.ndim == 1
+    assert mask_indices.size > 0
+
+
+def test_canonicalize_traceable_exact_quadrature_preserves_exact_half_period_grid():
+    booz = types.SimpleNamespace(
+        mpol=2,
+        ntor=2,
+        nfp=5,
+        stellsym=True,
+        quadpoints_phi=np.linspace(0.0, 1.0 / (2.0 * 5.0), 3, endpoint=False),
+        quadpoints_theta=np.linspace(0.0, 1.0, 5, endpoint=False),
+    )
+
+    quadpoints_phi, quadpoints_theta, mask_indices = (
+        _canonicalize_traceable_exact_quadrature(booz)
+    )
+
+    np.testing.assert_allclose(np.asarray(quadpoints_phi), booz.quadpoints_phi)
+    np.testing.assert_allclose(np.asarray(quadpoints_theta), booz.quadpoints_theta)
+    assert mask_indices.ndim == 1
+    assert mask_indices.size > 0
 
 
 def _stage2_e2e_comparison_case(**overrides):

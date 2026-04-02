@@ -975,6 +975,40 @@ def resolve_single_stage_outer_optimizer_method(field_backend, optimizer_backend
     ).method
 
 
+def _single_stage_optimizer_dofs_array(x):
+    """Normalize outer-loop DOFs to the float array contract used in this file."""
+    return np.asarray(x, dtype=float)
+
+
+def resolve_single_stage_outer_optimizer_initial_dofs(
+    JF,
+    bs,
+    *,
+    use_target_lane,
+):
+    """Return the optimizer-space DOFs for the selected outer-loop contract."""
+    if use_target_lane:
+        return _single_stage_optimizer_dofs_array(bs.x.copy())
+    return _single_stage_optimizer_dofs_array(JF.x.copy())
+
+
+def resolve_single_stage_outer_dof_setter(
+    JF,
+    bs,
+    *,
+    use_target_lane,
+):
+    """Return the graph update hook for the selected outer-loop contract."""
+    target = bs if use_target_lane else JF
+
+    def _set_dofs(x):
+        target.x = _single_stage_optimizer_dofs_array(x)
+
+    if use_target_lane:
+        return _set_dofs
+    return _set_dofs
+
+
 def run_single_stage_optimizer(
     fun,
     dofs,
@@ -1246,6 +1280,7 @@ class SingleStageAdapter:
         diagnostics,
         log_path,
         reevaluate_before_accept=False,
+        apply_coil_dofs=None,
     ):
         self.run_dict = run_dict
         self.boozer_surface = boozer_surface
@@ -1255,6 +1290,11 @@ class SingleStageAdapter:
         self.diagnostics = diagnostics
         self.log_path = log_path
         self.reevaluate_before_accept = bool(reevaluate_before_accept)
+        self.apply_coil_dofs = (
+            apply_coil_dofs
+            if apply_coil_dofs is not None
+            else (lambda x: setattr(self.JF, "x", _single_stage_optimizer_dofs_array(x)))
+        )
 
     def _reevaluate_accepted_step(self, x):
         """Refresh accepted-step state on the mutable graph for diagnostics.
@@ -1264,7 +1304,7 @@ class SingleStageAdapter:
         accepted point refreshes the mutable state that diagnostics
         and ``accept_step`` depend on.
         """
-        self.JF.x = x
+        self.apply_coil_dofs(x)
         _evaluate_candidate_impl(x, self.run_dict, self.boozer_surface, self.JF)
         self.run_dict["x_prev"] = np.array(x, copy=True)
 
@@ -1289,7 +1329,7 @@ class SingleStageAdapter:
         before delegating.  This is the only mutation site for the outer
         loop — ``evaluate_candidate`` itself is mutation-free.
         """
-        self.JF.x = x
+        self.apply_coil_dofs(x)
         return evaluate_candidate(x, self.run_dict, self.boozer_surface, self.JF)
 
     def callback(self, x):
@@ -1359,7 +1399,14 @@ def snapshot_to_pytree(JF, boozer_surface, bs, *, num_tf_coils):
     return coil_dofs, run_dict, static_config
 
 
-def restore_from_pytree(JF, boozer_surface, run_dict, coil_dofs=None):
+def restore_from_pytree(
+    JF,
+    boozer_surface,
+    run_dict,
+    coil_dofs=None,
+    *,
+    apply_coil_dofs=None,
+):
     """Write optimization state back into the Optimizable graph.
 
     Restores coil DOFs, surface DOFs, and the warm-start scalars
@@ -1381,7 +1428,10 @@ def restore_from_pytree(JF, boozer_surface, run_dict, coil_dofs=None):
             the coil DOFs in the graph are left unchanged.
     """
     if coil_dofs is not None:
-        JF.x = coil_dofs
+        if apply_coil_dofs is None:
+            JF.x = coil_dofs
+        else:
+            apply_coil_dofs(coil_dofs)
     boozer_surface.surface.x = run_dict["sdofs"]
     boozer_surface.res["iota"] = run_dict["iota"]
     boozer_surface.res["G"] = run_dict["G"]
@@ -1699,6 +1749,17 @@ if __name__ == "__main__":
         args.optimizer_backend,
     )
     use_target_lane = outer_contract.use_scalar_objective
+    dof_setter = resolve_single_stage_outer_dof_setter(
+        JF,
+        bs,
+        use_target_lane=use_target_lane,
+    )
+    dofs = resolve_single_stage_outer_optimizer_initial_dofs(
+        JF,
+        bs,
+        use_target_lane=use_target_lane,
+    )
+    run_dict["x_prev"] = np.array(dofs, copy=True)
     adapter = SingleStageAdapter(
         run_dict=run_dict,
         boozer_surface=boozer_surface,
@@ -1721,6 +1782,7 @@ if __name__ == "__main__":
         },
         log_path=OUT_DIR_ITER + "/log.txt",
         reevaluate_before_accept=use_target_lane,
+        apply_coil_dofs=dof_setter,
     )
 
     # ==============================================================================
@@ -1770,7 +1832,13 @@ if __name__ == "__main__":
         # post-optimization diagnostics and artifact writers see
         # consistent values even if the last evaluate_candidate was a
         # rejected trial.
-        restore_from_pytree(JF, boozer_surface, run_dict, coil_dofs=res.x)
+        restore_from_pytree(
+            JF,
+            boozer_surface,
+            run_dict,
+            coil_dofs=res.x,
+            apply_coil_dofs=dof_setter,
+        )
 
         # ==============================================================================
         # SAVE OPTIMIZED STATE
