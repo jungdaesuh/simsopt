@@ -823,6 +823,38 @@ class TestBoozerSurfaceJAXClassPrivate:
     """Private BoozerSurfaceJAX class tests split from TestBoozerSurfaceJAXClass."""
 
     @PRIVATE_OPTIMIZER_RUNTIME
+    @REQUIRES_PRIVATE_OPTIMIZER_RUNTIME
+    def test_newton_polish_traceable_skips_debug_callback_without_progress(
+        self, monkeypatch
+    ):
+        """Traceable Newton polish must not materialize host callbacks when unused."""
+        observed = {"called": False}
+
+        def forbidden_debug_callback(*_args, **_kwargs):
+            observed["called"] = True
+            raise AssertionError("jax.debug.callback must not run without progress_callback")
+
+        monkeypatch.setattr(_opt.jax.debug, "callback", forbidden_debug_callback)
+
+        x0 = jnp.asarray([1.0, -2.0], dtype=jnp.float64)
+        result = _opt.newton_polish_traceable(
+            lambda x: 0.5 * jnp.dot(x, x),
+            x0,
+            maxiter=1,
+            tol=1e-12,
+            stab=0.0,
+            progress_callback=None,
+        )
+
+        assert observed["called"] is False
+        np.testing.assert_allclose(
+            np.asarray(result["x"]),
+            np.zeros_like(np.asarray(x0)),
+            atol=1e-12,
+        )
+        assert bool(result["success"]) is True
+
+    @PRIVATE_OPTIMIZER_RUNTIME
     def test_run_code_ondevice_limited_memory_routes_to_lbfgs(self, monkeypatch):
         """limited_memory=True must route LS solves through lbfgs-ondevice."""
         booz = _make_mock_boozer_surface()

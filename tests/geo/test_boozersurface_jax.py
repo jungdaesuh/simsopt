@@ -1461,6 +1461,66 @@ class TestBoozerSurfaceJAXClass:
         assert [int(payload["iteration"]) for payload in progress_events] == [1, 2]
         assert all("grad_norm" in payload for payload in progress_events)
 
+    def test_run_code_ondevice_skips_newton_progress_callback(self, monkeypatch):
+        """The ondevice Newton polish lane must stay callback-free inside the traced loop."""
+        booz = _make_mock_boozer_surface()
+        booz.options["optimizer_backend"] = "ondevice"
+
+        observed = []
+        captured = {}
+
+        def record_stage(label, **payload):
+            observed.append((label, payload))
+
+        booz.options["stage_callback"] = record_stage
+
+        def fake_jax_minimize(
+            fun,
+            x0,
+            *,
+            method,
+            tol,
+            maxiter,
+            options,
+            progress_callback=None,
+        ):
+            del fun, tol, maxiter, options
+            assert method == "bfgs-ondevice"
+            assert progress_callback is not None
+            return _successful_minimize_result(x0)
+
+        def fake_newton_polish_traceable(
+            _objective_fn, x0, *, maxiter, tol, stab, progress_callback=None
+        ):
+            del maxiter, tol, stab
+            captured["progress_callback"] = progress_callback
+            return _successful_newton_polish_result(x0, nit=2)
+
+        monkeypatch.setattr(_bsj, "jax_minimize", fake_jax_minimize)
+        monkeypatch.setattr(
+            _bsj,
+            "newton_polish_traceable",
+            fake_newton_polish_traceable,
+        )
+
+        res = booz.run_code(iota=0.3, G=0.05)
+
+        labels = [label for label, _payload in observed]
+        progress_events = [
+            payload for label, payload in observed if label == "boozer_newton_progress"
+        ]
+        before_newton_payload = next(
+            payload for label, payload in observed if label == "before_boozer_newton"
+        )
+        assert res is not None
+        assert res["success"] is True
+        assert captured["progress_callback"] is None
+        assert "before_boozer_newton" in labels
+        assert "after_boozer_newton" in labels
+        assert before_newton_payload["method"] == "newton-polish"
+        assert before_newton_payload["ls_method"] == "bfgs-ondevice"
+        assert progress_events == []
+
     def test_run_code_passes_newton_stab(self, monkeypatch):
         """run_code() must forward newton_stab into the Newton polish call."""
         booz = _make_mock_boozer_surface()

@@ -977,6 +977,7 @@ _LBFGS_TUNING_OPTIONS = frozenset({"maxcor", "ftol", "maxfun", "maxls"})
 
 # Callback options accepted by all backends.
 _CALLBACK_OPTIONS = frozenset({"stage_callback", "progress_callback"})
+_ONDEVICE_OPTIMIZER_METHODS = frozenset({"bfgs-ondevice", "lbfgs-ondevice"})
 
 _ALLOWED_OPTIONS_LS = (
     frozenset(_DEFAULT_OPTIONS_LS)
@@ -1212,6 +1213,11 @@ class BoozerSurfaceJAX(Optimizable):
             )
 
         return emit_progress
+
+    def _resolve_newton_progress_callback(self, method: str):
+        if method in _ONDEVICE_OPTIMIZER_METHODS:
+            return None
+        return self._make_newton_progress_callback()
 
     def _get_surface_dofs(self):
         """Get current surface DOFs as JAX array."""
@@ -1555,7 +1561,7 @@ class BoozerSurfaceJAX(Optimizable):
         progress_callback=None,
     ):
         """Run the Newton polish implementation for a resolved optimizer method."""
-        if method in {"bfgs-ondevice", "lbfgs-ondevice"}:
+        if method in _ONDEVICE_OPTIMIZER_METHODS:
             return newton_polish_traceable(
                 obj_fn,
                 x0,
@@ -1677,14 +1683,15 @@ class BoozerSurfaceJAX(Optimizable):
             optimize_G, weight_inv_modB, constraint_weight
         )
 
+        method = self._resolve_optimizer_method()
         result = self._run_newton_polish_for_method(
-            self._resolve_optimizer_method(),
+            method,
             obj_fn,
             x0,
             maxiter=maxiter,
             tol=tol,
             stab=stab,
-            progress_callback=self._make_newton_progress_callback(),
+            progress_callback=self._resolve_newton_progress_callback(method),
         )
 
         sdofs_final, iota_out, G_out = self._unpack_decision_vector(
