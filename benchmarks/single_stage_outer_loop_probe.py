@@ -167,9 +167,8 @@ def parse_args() -> argparse.Namespace:
         "--experimental-target-lane-value-and-grad",
         action="store_true",
         help=(
-            "Request the experimental explicit (value, grad) target-lane objective. "
-            "This uses the fused runtime-bundle callable instead of autodiffing the "
-            "scalar target-lane objective inside the outer optimizer."
+            "Legacy compatibility flag. The single-stage JAX ondevice target lane "
+            "now uses the fused runtime-bundle (value, grad) contract by default."
         ),
     )
     return parser.parse_args()

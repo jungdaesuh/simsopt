@@ -1246,6 +1246,67 @@ def test_single_stage_init_case_threads_experimental_target_lane_flag(
     assert "--experimental-target-lane-value-and-grad" in observed_command
 
 
+def test_single_stage_init_case_preserves_target_lane_value_and_grad_result(
+    monkeypatch, tmp_path
+):
+    args = argparse.Namespace(
+        plasma_surf_filename="wout_nfp22ginsburg_000_014417_iota15.nc",
+        stage2_bs_path=str(DEFAULT_STAGE2_BS_PATH),
+        nphi=63,
+        ntheta=32,
+        mpol=4,
+        ntor=4,
+        vol_target=0.1,
+        iota_target=0.15,
+        optimizer_backend="ondevice",
+        boozer_optimizer_backend=None,
+        maxiter=1,
+        equilibrium_path=None,
+        equilibria_dir=str(tmp_path / "equilibria"),
+    )
+
+    monkeypatch.setattr(
+        single_stage_init_parity_module,
+        "_single_stage_script_path",
+        lambda: tmp_path / "driver.py",
+    )
+    monkeypatch.setattr(
+        single_stage_init_parity_module,
+        "run_python_script",
+        lambda *_args, **_kwargs: argparse.Namespace(stdout="", stderr=""),
+    )
+    monkeypatch.setattr(
+        single_stage_init_parity_module,
+        "find_single_file",
+        lambda root, pattern: Path(root) / pattern,
+    )
+    monkeypatch.setattr(
+        single_stage_init_parity_module,
+        "load_json",
+        lambda _path: {
+            "FINAL_IOTA": 0.15,
+            "FINAL_VOLUME": 0.1,
+            "FIELD_ERROR": 0.003,
+            "MAX_CURVATURE": 10.0,
+            "SELF_INTERSECTING": False,
+            "target_lane_value_and_grad": True,
+        },
+    )
+    monkeypatch.setattr(
+        single_stage_init_parity_module,
+        "_load_surface_gamma_artifact",
+        lambda _path: np.zeros((2, 2, 3)),
+    )
+
+    payload = single_stage_init_parity_module._run_single_stage_case(
+        args,
+        "jax",
+        platform="cpu",
+    )
+
+    assert payload["results"]["target_lane_value_and_grad"] is True
+
+
 def test_single_stage_init_case_pins_default_target_lane_sync_for_cpu_lane(
     monkeypatch, tmp_path
 ):

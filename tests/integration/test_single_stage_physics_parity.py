@@ -184,7 +184,7 @@ def _make_summary(
     curve_surface_distance: float,
 ) -> SingleStagePhysicsSummary:
     return SingleStagePhysicsSummary(
-        solver_success=bool(solver_success),
+        solver_success=None if solver_success is None else bool(solver_success),
         iterations=int(iterations),
         self_intersecting=bool(self_intersecting),
         final_iota=float(final_iota),

@@ -193,8 +193,37 @@ def use_experimental_target_lane_value_and_grad(
     optimizer_backend: str | None,
     enabled: bool,
 ) -> bool:
-    """Return whether the experimental explicit target lane is supported here."""
+    """Return whether the legacy experimental flag is applicable here."""
     return bool(enabled and backend == "jax" and optimizer_backend == "ondevice")
+
+
+def use_target_lane_value_and_grad(
+    *,
+    backend: str,
+    optimizer_backend: str | None,
+) -> bool:
+    """Return whether the fused target-lane value/grad contract is active."""
+    return bool(backend == "jax" and optimizer_backend == "ondevice")
+
+
+def resolve_target_lane_value_and_grad_modes(
+    *,
+    backend: str,
+    optimizer_backend: str | None,
+    experimental_enabled: bool,
+) -> tuple[bool, bool]:
+    """Return (requested_legacy_flag, effective_target_lane_value_and_grad)."""
+    return (
+        use_experimental_target_lane_value_and_grad(
+            backend=backend,
+            optimizer_backend=optimizer_backend,
+            enabled=experimental_enabled,
+        ),
+        use_target_lane_value_and_grad(
+            backend=backend,
+            optimizer_backend=optimizer_backend,
+        ),
+    )
 
 
 def format_local_stage2_seed_dir(
@@ -634,9 +663,8 @@ def parse_args():
         "--experimental-target-lane-value-and-grad",
         action="store_true",
         help=(
-            "Use the experimental explicit (value, grad) target-lane objective in the "
-            "single-stage outer optimizer. This routes through the fused runtime-bundle "
-            "callable instead of rebuilding gradients around the scalar contract."
+            "Legacy compatibility flag. The single-stage JAX ondevice target lane "
+            "now uses the fused runtime-bundle (value, grad) contract by default."
         ),
     )
     return parser.parse_args()
@@ -1065,20 +1093,16 @@ def build_target_lane_outer_objectives(
     bs,
     iota_target,
     *,
-    use_experimental_value_and_grad: bool,
+    use_value_and_grad: bool,
     profile_target_lane: bool,
 ):
     """Build the target-lane objective(s) needed by the selected outer-loop mode."""
-    target_scalar_objective = get_traceable_single_stage_objective_builder()(
-        boozer_surface,
-        bs,
-        iota_target,
-    )
+    target_scalar_objective = None
     target_value_and_grad_objective = None
     target_lane_profile = None
     runtime_bundle = None
 
-    needs_runtime_bundle = use_experimental_value_and_grad or profile_target_lane
+    needs_runtime_bundle = use_value_and_grad or profile_target_lane
     if needs_runtime_bundle:
         runtime_bundle = get_traceable_single_stage_runtime_bundle_builder()(
             boozer_surface,
@@ -1087,8 +1111,14 @@ def build_target_lane_outer_objectives(
             include_profile_suite=profile_target_lane,
         )
 
-    if use_experimental_value_and_grad:
+    if use_value_and_grad:
         target_value_and_grad_objective = runtime_bundle["value_and_grad"]
+    else:
+        target_scalar_objective = get_traceable_single_stage_objective_builder()(
+            boozer_surface,
+            bs,
+            iota_target,
+        )
 
     if profile_target_lane:
         target_lane_profile = profile_traceable_target_lane_objective(
@@ -1282,26 +1312,26 @@ def run_single_stage_optimizer(
     maxcor,
     callback,
     scalar_fun=None,
-    use_experimental_value_and_grad=False,
 ):
     """Run the single-stage outer optimization through the shared adapter."""
     from simsopt.geo.optimizer_jax import jax_minimize
 
-    if contract.use_scalar_objective and not use_experimental_value_and_grad:
+    if fun is not None:
+        optimizer_fun = fun
+        value_and_grad = True
+    elif contract.use_scalar_objective:
         if scalar_fun is None:
             raise RuntimeError(
-                "Single-stage target-lane optimization requires a scalar JAX objective."
+                "Single-stage target-lane optimization requires either the fused "
+                "value-and-gradient objective or a scalar JAX objective."
             )
         optimizer_fun = scalar_fun
         value_and_grad = False
-    elif fun is None:
+    else:
         raise RuntimeError(
             "Single-stage optimization requires an explicit value-and-gradient "
             "objective for the selected lane."
         )
-    else:
-        optimizer_fun = fun
-        value_and_grad = True
     return jax_minimize(
         optimizer_fun,
         dofs,
@@ -1880,10 +1910,13 @@ if __name__ == "__main__":
             benchmark_mode=args.benchmark_mode,
         )
     )
-    use_experimental_target_lane_vg = use_experimental_target_lane_value_and_grad(
+    (
+        requested_experimental_target_lane_vg,
+        use_target_lane_vg,
+    ) = resolve_target_lane_value_and_grad_modes(
         backend=args.backend,
         optimizer_backend=optimizer_backend_record,
-        enabled=args.experimental_target_lane_value_and_grad,
+        experimental_enabled=args.experimental_target_lane_value_and_grad,
     )
     target_lane_sync_record = resolve_target_lane_accepted_step_sync_record(
         backend=args.backend,
@@ -1919,7 +1952,7 @@ if __name__ == "__main__":
         str(args.backend),
         str(optimizer_backend_record),
         str(target_lane_sync_record),
-        str(use_experimental_target_lane_vg),
+        str(use_target_lane_vg),
         str(args.maxiter),
         str(args.num_tf_coils),
         str(file_loc),
@@ -2140,7 +2173,7 @@ if __name__ == "__main__":
                 boozer_surface,
                 bs,
                 iota_target,
-                use_experimental_value_and_grad=use_experimental_target_lane_vg,
+                use_value_and_grad=use_target_lane_vg,
                 profile_target_lane=args.profile_target_lane,
             )
         accepted_step_callback = resolve_target_lane_accepted_step_callback(
@@ -2158,7 +2191,6 @@ if __name__ == "__main__":
             gtol=gtol,
             maxcor=args.maxcor,
             scalar_fun=target_scalar_objective,
-            use_experimental_value_and_grad=use_experimental_target_lane_vg,
         )
         outer_optimizer_end_s = _perf_counter_s()
         _record_timing(
@@ -2298,7 +2330,8 @@ if __name__ == "__main__":
         "boozer_optimizer_method": boozer_surface.res.get("optimizer_method"),
         "outer_optimizer_method": outer_contract.method,
         "target_lane_accepted_step_sync": target_lane_sync_record,
-        "experimental_target_lane_value_and_grad": use_experimental_target_lane_vg,
+        "experimental_target_lane_value_and_grad": requested_experimental_target_lane_vg,
+        "target_lane_value_and_grad": use_target_lane_vg,
         "benchmark_mode": bool(args.benchmark_mode),
         "profile_target_lane": bool(args.profile_target_lane),
         "init_only": args.init_only,

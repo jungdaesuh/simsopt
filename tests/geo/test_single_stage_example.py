@@ -509,16 +509,17 @@ class SingleStageExampleTests(unittest.TestCase):
             )
         )
 
-    def test_build_target_lane_outer_objectives_uses_runtime_bundle_for_experimental_lane(
+    def test_build_target_lane_outer_objectives_uses_runtime_bundle_for_target_lane(
         self,
     ):
         module = self.load_module()
-        scalar_marker = object()
         value_and_grad_marker = object()
         runtime_calls = []
 
         def _scalar_builder(*args):
-            return scalar_marker
+            raise AssertionError(
+                "default target-lane build should not recreate the scalar closure"
+            )
 
         def _runtime_builder(*args, include_profile_suite=False):
             runtime_calls.append(include_profile_suite)
@@ -538,12 +539,12 @@ class SingleStageExampleTests(unittest.TestCase):
                     object(),
                     object(),
                     object(),
-                    use_experimental_value_and_grad=True,
+                    use_value_and_grad=True,
                     profile_target_lane=False,
                 )
             )
 
-        self.assertIs(scalar_fun, scalar_marker)
+        self.assertIsNone(scalar_fun)
         self.assertIs(value_and_grad_fun, value_and_grad_marker)
         self.assertIsNone(target_lane_profile)
         self.assertEqual(runtime_calls, [False])
@@ -628,9 +629,10 @@ class SingleStageExampleTests(unittest.TestCase):
 
         self.assertIsNone(callback)
 
-    def test_run_single_stage_optimizer_routes_target_lane_to_ondevice_adapter(self):
+    def test_run_single_stage_optimizer_prefers_fused_target_lane_contract(self):
         module = self.load_module()
         captured = {}
+        explicit_fun = object()
         scalar_fun = object()
 
         def fake_require_target_backend_x64(optimizer_backend):
@@ -656,7 +658,7 @@ class SingleStageExampleTests(unittest.TestCase):
             callback = object()
             contract = module.resolve_single_stage_optimizer_contract("jax", "ondevice")
             result = module.run_single_stage_optimizer(
-                lambda x: (1.0, np.asarray(x)),
+                explicit_fun,
                 np.array([1.0, -2.0]),
                 contract=contract,
                 maxiter=7,
@@ -668,17 +670,17 @@ class SingleStageExampleTests(unittest.TestCase):
             )
 
         self.assertEqual(captured["x64_backend"], "ondevice")
-        self.assertIs(captured["fun"], scalar_fun)
+        self.assertIs(captured["fun"], explicit_fun)
         self.assertEqual(captured["method"], "lbfgs-ondevice")
         np.testing.assert_allclose(captured["x0"], np.array([1.0, -2.0]))
         self.assertEqual(captured["tol"], 1e-6)
         self.assertEqual(captured["maxiter"], 7)
         self.assertEqual(captured["options"], {"maxcor": 9, "ftol": 1e-8})
-        self.assertFalse(captured["value_and_grad"])
+        self.assertTrue(captured["value_and_grad"])
         self.assertIs(captured["callback"], callback)
         self.assertEqual(result.message, "ok")
 
-    def test_run_single_stage_optimizer_target_lane_requires_scalar_objective(self):
+    def test_run_single_stage_optimizer_target_lane_requires_objective_contract(self):
         module = self.load_module()
         target_contract = types.SimpleNamespace(
             method="lbfgs-ondevice", use_scalar_objective=True
@@ -687,15 +689,16 @@ class SingleStageExampleTests(unittest.TestCase):
         with self.patch_optimizer_jax_module(
             require_target_backend_x64=lambda _optimizer_backend: None,
             jax_minimize=lambda *args, **kwargs: (_ for _ in ()).throw(
-                AssertionError("jax_minimize should not run without a scalar objective")
+                AssertionError("jax_minimize should not run without an objective")
             ),
         ):
             with self.assertRaisesRegex(
                 RuntimeError,
-                "Single-stage target-lane optimization requires a scalar JAX objective",
+                "Single-stage target-lane optimization requires either the fused "
+                "value-and-gradient objective or a scalar JAX objective",
             ):
                 module.run_single_stage_optimizer(
-                    lambda x: (1.0, np.asarray(x)),
+                    None,
                     np.array([1.0, -2.0]),
                     contract=target_contract,
                     maxiter=7,
@@ -707,7 +710,7 @@ class SingleStageExampleTests(unittest.TestCase):
 
     def test_run_single_stage_optimizer_ondevice_does_not_enter_scipy_minimize(self):
         module = self.load_module()
-        scalar_fun = object()
+        explicit_fun = object()
 
         def fake_require_target_backend_x64(_optimizer_backend):
             return None
@@ -715,10 +718,10 @@ class SingleStageExampleTests(unittest.TestCase):
         def fake_jax_minimize(
             fun, x0, *, method, tol, maxiter, options, value_and_grad, callback
         ):
-            self.assertIs(fun, scalar_fun)
+            self.assertIs(fun, explicit_fun)
             del x0, tol, maxiter, options, callback
             self.assertEqual(method, "lbfgs-ondevice")
-            self.assertFalse(value_and_grad)
+            self.assertTrue(value_and_grad)
             return types.SimpleNamespace(x=np.zeros(2), nit=0, message="ok")
 
         with self.patch_optimizer_jax_module(
@@ -728,7 +731,7 @@ class SingleStageExampleTests(unittest.TestCase):
         ):
             contract = module.resolve_single_stage_optimizer_contract("jax", "ondevice")
             result = module.run_single_stage_optimizer(
-                lambda x: (1.0, np.asarray(x)),
+                explicit_fun,
                 np.array([0.0, 0.0]),
                 contract=contract,
                 maxiter=1,
@@ -736,7 +739,7 @@ class SingleStageExampleTests(unittest.TestCase):
                 gtol=1e-6,
                 maxcor=5,
                 callback=lambda _x: None,
-                scalar_fun=scalar_fun,
+                scalar_fun=None,
             )
 
         self.assertEqual(result.message, "ok")
@@ -771,7 +774,6 @@ class SingleStageExampleTests(unittest.TestCase):
                 maxcor=5,
                 callback=None,
                 scalar_fun=None,
-                use_experimental_value_and_grad=True,
             )
 
         self.assertIs(captured["fun"], explicit_fun)
