@@ -168,8 +168,8 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help=(
             "Request the experimental explicit (value, grad) target-lane objective. "
-            "CUDA runs keep the trusted scalar target lane until explicit-path "
-            "parity is proven."
+            "This uses the fused runtime-bundle callable instead of autodiffing the "
+            "scalar target-lane objective inside the outer optimizer."
         ),
     )
     return parser.parse_args()

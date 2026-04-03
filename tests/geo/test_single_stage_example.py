@@ -501,28 +501,52 @@ class SingleStageExampleTests(unittest.TestCase):
                 enabled=False,
             )
         )
-        with patch.dict(
-            sys.modules,
-            {"jax": types.SimpleNamespace(default_backend=lambda: "cpu")},
+        self.assertTrue(
+            module.use_experimental_target_lane_value_and_grad(
+                backend="jax",
+                optimizer_backend="ondevice",
+                enabled=True,
+            )
+        )
+
+    def test_build_target_lane_outer_objectives_uses_runtime_bundle_for_experimental_lane(
+        self,
+    ):
+        module = self.load_module()
+        scalar_marker = object()
+        value_and_grad_marker = object()
+        runtime_calls = []
+
+        def _scalar_builder(*args):
+            return scalar_marker
+
+        def _runtime_builder(*args, include_profile_suite=False):
+            runtime_calls.append(include_profile_suite)
+            return {"value_and_grad": value_and_grad_marker}
+
+        with patch.object(
+            module,
+            "get_traceable_single_stage_objective_builder",
+            return_value=_scalar_builder,
+        ), patch.object(
+            module,
+            "get_traceable_single_stage_runtime_bundle_builder",
+            return_value=_runtime_builder,
         ):
-            self.assertTrue(
-                module.use_experimental_target_lane_value_and_grad(
-                    backend="jax",
-                    optimizer_backend="ondevice",
-                    enabled=True,
+            scalar_fun, value_and_grad_fun, target_lane_profile = (
+                module.build_target_lane_outer_objectives(
+                    object(),
+                    object(),
+                    object(),
+                    use_experimental_value_and_grad=True,
+                    profile_target_lane=False,
                 )
             )
-        with patch.dict(
-            sys.modules,
-            {"jax": types.SimpleNamespace(default_backend=lambda: "gpu")},
-        ):
-            self.assertFalse(
-                module.use_experimental_target_lane_value_and_grad(
-                    backend="jax",
-                    optimizer_backend="ondevice",
-                    enabled=True,
-                )
-            )
+
+        self.assertIs(scalar_fun, scalar_marker)
+        self.assertIs(value_and_grad_fun, value_and_grad_marker)
+        self.assertIsNone(target_lane_profile)
+        self.assertEqual(runtime_calls, [False])
 
     def test_resolve_effective_target_lane_sync_forces_final_only_in_benchmark_mode(
         self,

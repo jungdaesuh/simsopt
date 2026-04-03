@@ -194,11 +194,7 @@ def use_experimental_target_lane_value_and_grad(
     enabled: bool,
 ) -> bool:
     """Return whether the experimental explicit target lane is supported here."""
-    if not (enabled and backend == "jax" and optimizer_backend == "ondevice"):
-        return False
-    import jax
-
-    return str(jax.default_backend()).lower() == "cpu"
+    return bool(enabled and backend == "jax" and optimizer_backend == "ondevice")
 
 
 def format_local_stage2_seed_dir(
@@ -639,8 +635,8 @@ def parse_args():
         action="store_true",
         help=(
             "Use the experimental explicit (value, grad) target-lane objective in the "
-            "single-stage outer optimizer when running on CPU. CUDA runs keep the "
-            "trusted scalar target lane until explicit-path parity is proven."
+            "single-stage outer optimizer. This routes through the fused runtime-bundle "
+            "callable instead of rebuilding gradients around the scalar contract."
         ),
     )
     return parser.parse_args()
@@ -1073,20 +1069,17 @@ def build_target_lane_outer_objectives(
     profile_target_lane: bool,
 ):
     """Build the target-lane objective(s) needed by the selected outer-loop mode."""
-    import jax
-
-    target_scalar_objective = None
-    target_value_and_grad_objective = None
-    target_lane_profile = None
-    runtime_bundle = None
-
     target_scalar_objective = get_traceable_single_stage_objective_builder()(
         boozer_surface,
         bs,
         iota_target,
     )
+    target_value_and_grad_objective = None
+    target_lane_profile = None
+    runtime_bundle = None
 
-    if profile_target_lane:
+    needs_runtime_bundle = use_experimental_value_and_grad or profile_target_lane
+    if needs_runtime_bundle:
         runtime_bundle = get_traceable_single_stage_runtime_bundle_builder()(
             boozer_surface,
             bs,
@@ -1095,7 +1088,7 @@ def build_target_lane_outer_objectives(
         )
 
     if use_experimental_value_and_grad:
-        target_value_and_grad_objective = jax.value_and_grad(target_scalar_objective)
+        target_value_and_grad_objective = runtime_bundle["value_and_grad"]
 
     if profile_target_lane:
         target_lane_profile = profile_traceable_target_lane_objective(
