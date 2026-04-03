@@ -53,26 +53,9 @@ python3 -m venv "${VENV_DIR}"
 export PATH="${VENV_DIR}/bin:${PATH}"
 export VIRTUAL_ENV="${VENV_DIR}"
 
+# All Python dependency versions are defined in pyproject.toml (SSOT).
+# This only installs build prerequisites then delegates to the extras.
 python -m pip install --upgrade pip setuptools wheel
-python -m pip install \
-  "numpy>=2.0" \
-  cmake \
-  scikit-build-core \
-  ninja \
-  "setuptools-scm>=8.0" \
-  "scipy>=1.13" \
-  pytest \
-  sympy \
-  f90nml \
-  pyevtk \
-  matplotlib \
-  shapely \
-  numba \
-  "ground==9.0.0" \
-  "bentley_ottmann==8.0.0" \
-  ruamel.yaml \
-  monty \
-  Deprecated \
-  "pybind11<3"
-python -m pip install "jax[cuda12]==0.9.2"
+python -m pip install cmake ninja "pybind11<3" scikit-build-core "setuptools-scm>=8.0"
+python -m pip install -e ".[deploy_gpu]"
 bootstrap_finish 0
