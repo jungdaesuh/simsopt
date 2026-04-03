@@ -28,19 +28,13 @@ def compute_adjoint_state(jr_jax) -> tuple[np.ndarray, float]:
     """Return the objective-consistent adjoint vector and its residual."""
     booz_jax = jr_jax.boozer_surface
     p_mat, l_mat, u_mat = booz_jax.res["PLU"]
-    surface = jr_jax.surface
-    nphi = surface.quadpoints_phi.size
-    ntheta = surface.quadpoints_theta.size
-    constraint_weight = (
-        jr_jax.constraint_weight if jr_jax.constraint_weight is not None else 1.0
-    )
+    coil_dofs = jr_jax.biotsavart.x.copy()
+    coil_set_spec = jr_jax.biotsavart.coil_set_spec_from_dofs(coil_dofs)
     dJ_ds = jr_jax._compute_dJ_ds(
+        coil_set_spec,
         booz_jax.res["iota"],
         booz_jax.res["G"],
         booz_jax.res.get("weight_inv_modB", True),
-        constraint_weight,
-        nphi,
-        ntheta,
     )
     adj = forward_backward_jax(p_mat, l_mat, u_mat, dJ_ds, iterative_refinement=True)
     hessian = p_mat @ l_mat @ u_mat
@@ -57,7 +51,6 @@ def accumulate_grouped_adjoint_derivative(
 ):
     """Project grouped adjoint cotangents incrementally to a coil ``Derivative``."""
     from simsopt._core.derivative import Derivative
-    from simsopt.geo.surfaceobjectives_jax import _coil_cotangents_to_derivative
 
     def emit(label: str, *, group_count: int) -> None:
         if on_stage is not None:
@@ -83,8 +76,7 @@ def accumulate_grouped_adjoint_derivative(
             next_entry = None
 
         d_coil_array, coil_group_indices = current_entry
-        total_derivative += _coil_cotangents_to_derivative(
-            bs_jax.coils,
+        total_derivative += bs_jax.coil_cotangents_to_derivative(
             [d_coil_array],
             [coil_group_indices],
         )

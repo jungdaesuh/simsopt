@@ -192,34 +192,28 @@ def compute_direct_and_total_gradients(
     implicit_correction: np.ndarray,
 ) -> tuple[np.ndarray, np.ndarray, float]:
     """Return the fixed-surface direct term and the full reduced gradient."""
-    from simsopt.geo.surfaceobjectives_jax import _resolved_boozer_G
+    from simsopt.geo.surfaceobjectives_jax import _value_and_direct_coil_derivative
 
     booz_jax = jr_jax.boozer_surface
     total_gradient = np.asarray(jr_jax.dJ(), dtype=float)
-
-    surface = jr_jax.surface
-    nphi = surface.quadpoints_phi.size
-    ntheta = surface.quadpoints_theta.size
-    num_points = 3 * nphi * ntheta
     iota = booz_jax.res["iota"]
     g_value = booz_jax.res["G"]
-    effective_g = _resolved_boozer_G(booz_jax)
     weight_inv_modB = booz_jax.res.get("weight_inv_modB", True)
-    xphi = surface.gammadash1()
-    xtheta = surface.gammadash2()
-    b_field = bs_jax.B().reshape(nphi, ntheta, 3)
-    dJ_dB = jr_jax._compute_dJ_by_dB(
-        b_field,
-        xphi,
-        xtheta,
+    surface_dofs = booz_jax._get_surface_dofs()
+    x_inner, optimize_G = jr_jax._inner_objective_state(
         iota,
-        effective_g,
-        weight_inv_modB,
-        nphi,
-        ntheta,
-        num_points,
+        g_value,
+        sdofs=surface_dofs,
     )
-    direct_derivative = bs_jax.B_vjp(dJ_dB)
+    coil_dofs = np.asarray(bs_jax.x.copy(), dtype=float)
+    _, direct_derivative = _value_and_direct_coil_derivative(
+        bs_jax,
+        jr_jax._direct_objective_value_and_grad,
+        coil_dofs,
+        x_inner,
+        optimize_G,
+        weight_inv_modB,
+    )
     direct_gradient = np.asarray(direct_derivative(bs_jax), dtype=float)
     recomposed_total = direct_gradient - implicit_correction
     recomposed_rel = float(

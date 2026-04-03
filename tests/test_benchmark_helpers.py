@@ -21,6 +21,7 @@ from benchmarks.adjoint_fd_validation import (
     FULL_RESOLVE_FD_ABS_TOL,
     FULL_RESOLVE_FD_REL_TOL,
     RECOMPOSED_TOTAL_REL_TOL,
+    compute_direct_and_total_gradients,
     evaluate_adjoint_validation,
 )
 import benchmarks.adjoint_probe_common as adjoint_probe_common
@@ -1593,14 +1594,29 @@ def test_compute_adjoint_state_uses_device_native_forward_backward(monkeypatch):
     l_mat = np.eye(2)
     u_mat = np.eye(2)
     rhs = np.array([1.0, -2.0])
+    expected_spec = object()
+
+    def fake_compute_dJ_ds(coil_set_spec, iota, G, weight_inv_modB):
+        recorded["compute_dJ_ds_args"] = (coil_set_spec, iota, G, weight_inv_modB)
+        return rhs
+
     jr_jax = types.SimpleNamespace(
-        boozer_surface=types.SimpleNamespace(res={"PLU": (p_mat, l_mat, u_mat)}),
-        surface=types.SimpleNamespace(
-            quadpoints_phi=np.linspace(0.0, 1.0, 2, endpoint=False),
-            quadpoints_theta=np.linspace(0.0, 1.0, 3, endpoint=False),
+        boozer_surface=types.SimpleNamespace(
+            res={
+                "PLU": (p_mat, l_mat, u_mat),
+                "iota": 0.1,
+                "G": 0.2,
+                "weight_inv_modB": False,
+            }
         ),
-        constraint_weight=None,
-        _compute_dJ_ds=lambda *_args: rhs,
+        biotsavart=types.SimpleNamespace(
+            x=np.array([3.0, 4.0]),
+            coil_set_spec_from_dofs=lambda coil_dofs: (
+                recorded.setdefault("coil_dofs", coil_dofs.copy()),
+                expected_spec,
+            )[1],
+        ),
+        _compute_dJ_ds=fake_compute_dJ_ds,
     )
 
     adjoint, residual_rel = adjoint_probe_common.compute_adjoint_state(jr_jax)
@@ -1609,6 +1625,126 @@ def test_compute_adjoint_state_uses_device_native_forward_backward(monkeypatch):
     assert residual_rel == pytest.approx(0.0)
     assert recorded["args"] == (p_mat, l_mat, u_mat, rhs)
     assert recorded["iterative_refinement"] is True
+    np.testing.assert_allclose(recorded["coil_dofs"], np.array([3.0, 4.0]))
+    assert recorded["compute_dJ_ds_args"] == (expected_spec, 0.1, 0.2, False)
+
+
+def test_accumulate_grouped_adjoint_derivative_uses_biotsavart_projection_api(
+    monkeypatch,
+):
+    recorded = {}
+
+    class FakeDerivative:
+        def __init__(self, blocks):
+            self.blocks = tuple(blocks)
+
+        def __iadd__(self, other):
+            self.blocks = self.blocks + other.blocks
+            return self
+
+    def fake_projection(d_coil_arrays, coil_indices):
+        recorded.setdefault("projection_args", []).append((d_coil_arrays, coil_indices))
+        blocks = ((tuple(map(tuple, d_coil_arrays)), tuple(map(tuple, coil_indices))),)
+        return FakeDerivative(blocks)
+
+    bs_jax = types.SimpleNamespace(coil_cotangents_to_derivative=fake_projection)
+    grouped = [
+        (np.array([[1.0, 2.0, 3.0]]), [0, 2]),
+        (np.array([[4.0, 5.0, 6.0]]), [1]),
+    ]
+
+    from simsopt._core import derivative as derivative_module
+
+    monkeypatch.setattr(derivative_module, "Derivative", FakeDerivative)
+    derivative = adjoint_probe_common.accumulate_grouped_adjoint_derivative(
+        bs_jax,
+        iter(grouped),
+    )
+
+    assert len(recorded["projection_args"]) == 2
+    np.testing.assert_allclose(recorded["projection_args"][0][0][0], grouped[0][0])
+    assert recorded["projection_args"][0][1] == [[0, 2]]
+    np.testing.assert_allclose(recorded["projection_args"][1][0][0], grouped[1][0])
+    assert recorded["projection_args"][1][1] == [[1]]
+    assert len(derivative.blocks) == 2
+
+
+def test_compute_direct_and_total_gradients_uses_live_boozer_g(monkeypatch):
+    direct_gradient = np.array([7.0, 11.0])
+    total_gradient = np.array([5.0, 9.0])
+    implicit_correction = np.array([2.0, 2.0])
+    recorded = {}
+
+    class FakeDerivative:
+        def __call__(self, _optim):
+            return direct_gradient
+
+    def fake_value_and_direct_coil_derivative(
+        biotsavart,
+        objective_value_and_grad,
+        coil_dofs,
+        x_inner,
+        optimize_G,
+        weight_inv_modB,
+    ):
+        recorded["value_and_direct_args"] = (
+            biotsavart,
+            objective_value_and_grad,
+            coil_dofs.copy(),
+            x_inner.copy(),
+            optimize_G,
+            weight_inv_modB,
+        )
+        return 0.0, FakeDerivative()
+
+    booz_jax = types.SimpleNamespace(
+        res={"iota": 0.1, "G": 0.2, "weight_inv_modB": False},
+        _get_surface_dofs=lambda: np.array([0.3, 0.4]),
+    )
+
+    def fake_inner_objective_state(iota, G, sdofs=None):
+        recorded["inner_state_args"] = (iota, G, sdofs.copy())
+        return np.array([1.0, 2.0, 3.0]), True
+
+    jr_jax = types.SimpleNamespace(
+        boozer_surface=booz_jax,
+        dJ=lambda: total_gradient,
+        _inner_objective_state=fake_inner_objective_state,
+        _direct_objective_value_and_grad=object(),
+    )
+    bs_jax = types.SimpleNamespace(x=np.array([9.0, 8.0]))
+
+    monkeypatch.setattr(
+        "simsopt.geo.surfaceobjectives_jax._value_and_direct_coil_derivative",
+        fake_value_and_direct_coil_derivative,
+    )
+    direct, total, recomposed_rel = compute_direct_and_total_gradients(
+        jr_jax,
+        bs_jax,
+        implicit_correction,
+    )
+
+    np.testing.assert_allclose(direct, direct_gradient)
+    np.testing.assert_allclose(total, total_gradient)
+    iota, G, sdofs = recorded["inner_state_args"]
+    assert iota == 0.1
+    assert G == 0.2
+    np.testing.assert_allclose(sdofs, np.array([0.3, 0.4]))
+    (
+        called_bs_jax,
+        objective_value_and_grad,
+        coil_dofs,
+        x_inner,
+        optimize_G,
+        weight_inv_modB,
+    ) = recorded["value_and_direct_args"]
+    assert called_bs_jax is bs_jax
+    assert objective_value_and_grad is jr_jax._direct_objective_value_and_grad
+    np.testing.assert_allclose(coil_dofs, np.array([9.0, 8.0]))
+    np.testing.assert_allclose(x_inner, np.array([1.0, 2.0, 3.0]))
+    assert optimize_G is True
+    assert weight_inv_modB is False
+    assert recomposed_rel == pytest.approx(0.0)
 
 
 def test_grouped_adjoint_memory_probe_requires_complete_finite_metrics():
