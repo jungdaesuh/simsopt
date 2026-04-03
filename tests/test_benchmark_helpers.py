@@ -910,6 +910,10 @@ def test_single_stage_init_case_loads_surface_before_tempdir_cleanup(
             "FIELD_ERROR": 0.003,
             "MAX_CURVATURE": 10.0,
             "SELF_INTERSECTING": False,
+            "TIMINGS": {
+                "boozer_total_s": np.float64(3.5),
+                "outer_optimizer_s": np.float64(1.25),
+            },
         },
     )
 
@@ -936,6 +940,10 @@ def test_single_stage_init_case_loads_surface_before_tempdir_cleanup(
     assert observed_paths
     np.testing.assert_allclose(payload["surface_gamma"], np.zeros((2, 2, 3)))
     assert payload["results"]["SELF_INTERSECTING"] is False
+    assert payload["phase_timings"] == {
+        "boozer_total_s": pytest.approx(3.5),
+        "outer_optimizer_s": pytest.approx(1.25),
+    }
 
 
 def test_single_stage_init_case_threads_optimizer_backend_to_jax_lane(
@@ -992,6 +1000,7 @@ def test_single_stage_init_case_threads_optimizer_backend_to_jax_lane(
             "FIELD_ERROR": 0.003,
             "MAX_CURVATURE": 10.0,
             "SELF_INTERSECTING": False,
+            "TIMINGS": {"boozer_total_s": 2.0},
         },
     )
     monkeypatch.setattr(
@@ -1020,6 +1029,221 @@ def test_single_stage_init_case_threads_optimizer_backend_to_jax_lane(
     assert _JAX_COMPILATION_CACHE_ENV_VAR not in env
     assert env[_SIMSOPT_DISABLE_COMPILATION_CACHE_ENV_VAR] == "1"
     assert env[_SIMSOPT_COMPILATION_CACHE_POLICY_ENV_VAR] == "disabled"
+
+
+def test_prefix_phase_timings_adds_lane_prefix():
+    assert single_stage_init_parity_module._prefix_phase_timings(
+        "jax",
+        {"boozer_total_s": 2.5, "outer_optimizer_s": 1.0},
+    ) == {
+        "jax_boozer_total_s": pytest.approx(2.5),
+        "jax_outer_optimizer_s": pytest.approx(1.0),
+    }
+
+
+def test_single_stage_init_case_benchmark_mode_skips_surface_gamma_artifact(
+    monkeypatch, tmp_path
+):
+    args = argparse.Namespace(
+        plasma_surf_filename="wout_nfp22ginsburg_000_014417_iota15.nc",
+        stage2_bs_path=str(DEFAULT_STAGE2_BS_PATH),
+        nphi=63,
+        ntheta=32,
+        mpol=4,
+        ntor=4,
+        vol_target=0.1,
+        iota_target=0.15,
+        optimizer_backend="ondevice",
+        boozer_optimizer_backend=None,
+        maxiter=1,
+        equilibrium_path=None,
+        equilibria_dir=str(tmp_path / "equilibria"),
+    )
+
+    observed_command: list[str] = []
+    monkeypatch.setattr(
+        single_stage_init_parity_module,
+        "_single_stage_script_path",
+        lambda: tmp_path / "driver.py",
+    )
+
+    def fake_run_python_script(_script_path, command, **kwargs):
+        observed_command[:] = list(command)
+        return argparse.Namespace(stdout="", stderr="")
+
+    monkeypatch.setattr(
+        single_stage_init_parity_module,
+        "run_python_script",
+        fake_run_python_script,
+    )
+
+    def fake_find_single_file(root: str | Path, pattern: str) -> Path:
+        if pattern == "surf_init.json":
+            raise AssertionError("benchmark_mode should not require surf_init.json")
+        path = Path(root) / pattern
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{}", encoding="utf-8")
+        return path
+
+    monkeypatch.setattr(
+        single_stage_init_parity_module,
+        "find_single_file",
+        fake_find_single_file,
+    )
+    monkeypatch.setattr(
+        single_stage_init_parity_module,
+        "load_json",
+        lambda _path: {
+            "FINAL_IOTA": 0.15,
+            "FINAL_VOLUME": 0.1,
+            "FIELD_ERROR": 0.003,
+            "MAX_CURVATURE": 10.0,
+            "SELF_INTERSECTING": False,
+        },
+    )
+
+    payload = single_stage_init_parity_module._run_single_stage_case(
+        args,
+        "jax",
+        platform="cpu",
+        benchmark_mode=True,
+        load_surface_gamma=False,
+    )
+
+    assert "--benchmark-mode" in observed_command
+    assert payload["surface_gamma"] is None
+
+
+def test_single_stage_init_case_threads_profile_target_lane_flag(monkeypatch, tmp_path):
+    args = argparse.Namespace(
+        plasma_surf_filename="wout_nfp22ginsburg_000_014417_iota15.nc",
+        stage2_bs_path=str(DEFAULT_STAGE2_BS_PATH),
+        nphi=63,
+        ntheta=32,
+        mpol=4,
+        ntor=4,
+        vol_target=0.1,
+        iota_target=0.15,
+        optimizer_backend="ondevice",
+        boozer_optimizer_backend=None,
+        maxiter=1,
+        equilibrium_path=None,
+        equilibria_dir=str(tmp_path / "equilibria"),
+    )
+
+    observed_command: list[str] = []
+    monkeypatch.setattr(
+        single_stage_init_parity_module,
+        "_single_stage_script_path",
+        lambda: tmp_path / "driver.py",
+    )
+
+    def fake_run_python_script(_script_path, command, **kwargs):
+        observed_command[:] = list(command)
+        return argparse.Namespace(stdout="", stderr="")
+
+    monkeypatch.setattr(
+        single_stage_init_parity_module,
+        "run_python_script",
+        fake_run_python_script,
+    )
+    monkeypatch.setattr(
+        single_stage_init_parity_module,
+        "find_single_file",
+        lambda root, pattern: Path(root) / pattern,
+    )
+    monkeypatch.setattr(
+        single_stage_init_parity_module,
+        "load_json",
+        lambda _path: {
+            "FINAL_IOTA": 0.15,
+            "FINAL_VOLUME": 0.1,
+            "FIELD_ERROR": 0.003,
+            "MAX_CURVATURE": 10.0,
+            "SELF_INTERSECTING": False,
+        },
+    )
+    monkeypatch.setattr(
+        single_stage_init_parity_module,
+        "_load_surface_gamma_artifact",
+        lambda _path: np.zeros((2, 2, 3)),
+    )
+
+    single_stage_init_parity_module._run_single_stage_case(
+        args,
+        "jax",
+        platform="cpu",
+        profile_target_lane=True,
+    )
+
+    assert "--profile-target-lane" in observed_command
+
+
+def test_single_stage_init_case_threads_experimental_target_lane_flag(
+    monkeypatch, tmp_path
+):
+    args = argparse.Namespace(
+        plasma_surf_filename="wout_nfp22ginsburg_000_014417_iota15.nc",
+        stage2_bs_path=str(DEFAULT_STAGE2_BS_PATH),
+        nphi=63,
+        ntheta=32,
+        mpol=4,
+        ntor=4,
+        vol_target=0.1,
+        iota_target=0.15,
+        optimizer_backend="ondevice",
+        boozer_optimizer_backend=None,
+        maxiter=1,
+        equilibrium_path=None,
+        equilibria_dir=str(tmp_path / "equilibria"),
+    )
+
+    observed_command: list[str] = []
+    monkeypatch.setattr(
+        single_stage_init_parity_module,
+        "_single_stage_script_path",
+        lambda: tmp_path / "driver.py",
+    )
+
+    def fake_run_python_script(_script_path, command, **kwargs):
+        observed_command[:] = list(command)
+        return argparse.Namespace(stdout="", stderr="")
+
+    monkeypatch.setattr(
+        single_stage_init_parity_module,
+        "run_python_script",
+        fake_run_python_script,
+    )
+    monkeypatch.setattr(
+        single_stage_init_parity_module,
+        "find_single_file",
+        lambda root, pattern: Path(root) / pattern,
+    )
+    monkeypatch.setattr(
+        single_stage_init_parity_module,
+        "load_json",
+        lambda _path: {
+            "FINAL_IOTA": 0.15,
+            "FINAL_VOLUME": 0.1,
+            "FIELD_ERROR": 0.003,
+            "MAX_CURVATURE": 10.0,
+            "SELF_INTERSECTING": False,
+        },
+    )
+    monkeypatch.setattr(
+        single_stage_init_parity_module,
+        "_load_surface_gamma_artifact",
+        lambda _path: np.zeros((2, 2, 3)),
+    )
+
+    single_stage_init_parity_module._run_single_stage_case(
+        args,
+        "jax",
+        platform="cpu",
+        experimental_target_lane_value_and_grad=True,
+    )
+
+    assert "--experimental-target-lane-value-and-grad" in observed_command
 
 
 def test_single_stage_init_case_pins_default_target_lane_sync_for_cpu_lane(

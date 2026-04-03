@@ -475,6 +475,54 @@ class SingleStageExampleTests(unittest.TestCase):
 
         self.assertEqual(args.target_lane_accepted_step_sync, "per-accept")
         self.assertFalse(args.profile_target_lane)
+        self.assertFalse(args.experimental_target_lane_value_and_grad)
+
+    def test_use_experimental_target_lane_value_and_grad_only_on_jax_ondevice(self):
+        module = self.load_module()
+
+        self.assertFalse(
+            module.use_experimental_target_lane_value_and_grad(
+                backend="cpu",
+                optimizer_backend=None,
+                enabled=True,
+            )
+        )
+        self.assertFalse(
+            module.use_experimental_target_lane_value_and_grad(
+                backend="jax",
+                optimizer_backend="scipy",
+                enabled=True,
+            )
+        )
+        self.assertFalse(
+            module.use_experimental_target_lane_value_and_grad(
+                backend="jax",
+                optimizer_backend="ondevice",
+                enabled=False,
+            )
+        )
+        with patch.dict(
+            sys.modules,
+            {"jax": types.SimpleNamespace(default_backend=lambda: "cpu")},
+        ):
+            self.assertTrue(
+                module.use_experimental_target_lane_value_and_grad(
+                    backend="jax",
+                    optimizer_backend="ondevice",
+                    enabled=True,
+                )
+            )
+        with patch.dict(
+            sys.modules,
+            {"jax": types.SimpleNamespace(default_backend=lambda: "gpu")},
+        ):
+            self.assertFalse(
+                module.use_experimental_target_lane_value_and_grad(
+                    backend="jax",
+                    optimizer_backend="ondevice",
+                    enabled=True,
+                )
+            )
 
     def test_resolve_effective_target_lane_sync_forces_final_only_in_benchmark_mode(
         self,
@@ -667,6 +715,43 @@ class SingleStageExampleTests(unittest.TestCase):
                 scalar_fun=scalar_fun,
             )
 
+        self.assertEqual(result.message, "ok")
+
+    def test_run_single_stage_optimizer_allows_explicit_experimental_target_lane(self):
+        module = self.load_module()
+        captured = {}
+        explicit_fun = object()
+
+        def fake_require_target_backend_x64(_optimizer_backend):
+            return None
+
+        def fake_jax_minimize(
+            fun, x0, *, method, tol, maxiter, options, value_and_grad, callback
+        ):
+            captured["fun"] = fun
+            captured["value_and_grad"] = value_and_grad
+            return types.SimpleNamespace(x=np.asarray(x0), nit=0, message="ok")
+
+        with self.patch_optimizer_jax_module(
+            require_target_backend_x64=fake_require_target_backend_x64,
+            jax_minimize=fake_jax_minimize,
+        ):
+            contract = module.resolve_single_stage_optimizer_contract("jax", "ondevice")
+            result = module.run_single_stage_optimizer(
+                explicit_fun,
+                np.array([0.0, 0.0]),
+                contract=contract,
+                maxiter=1,
+                ftol=0.0,
+                gtol=1e-6,
+                maxcor=5,
+                callback=None,
+                scalar_fun=None,
+                use_experimental_value_and_grad=True,
+            )
+
+        self.assertIs(captured["fun"], explicit_fun)
+        self.assertTrue(captured["value_and_grad"])
         self.assertEqual(result.message, "ok")
 
     def test_run_single_stage_optimizer_rejects_hybrid_outer_lane(self):
@@ -886,9 +971,9 @@ class SingleStageExampleTests(unittest.TestCase):
             apply_coil_dofs=fake_setter,
         )
 
-        with patch.object(module, "_evaluate_candidate_impl", side_effect=fake_eval), patch.object(
-            module, "accept_step", return_value=None
-        ):
+        with patch.object(
+            module, "_evaluate_candidate_impl", side_effect=fake_eval
+        ), patch.object(module, "accept_step", return_value=None):
             adapter.sync_accepted_step(np.array([7.0, -8.0]))
 
         assert len(captured["setter"]) == 1

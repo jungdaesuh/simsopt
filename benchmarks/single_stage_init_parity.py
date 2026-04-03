@@ -218,6 +218,21 @@ def _prefix_phase_timings(prefix: str, timings: dict[str, float]) -> dict[str, f
     return {f"{prefix}_{key}": float(value) for key, value in timings.items()}
 
 
+def _append_optional_single_stage_flags(
+    command: list[str],
+    *,
+    benchmark_mode: bool,
+    profile_target_lane: bool,
+    experimental_target_lane_value_and_grad: bool,
+) -> None:
+    if benchmark_mode:
+        command.append("--benchmark-mode")
+    if profile_target_lane:
+        command.append("--profile-target-lane")
+    if experimental_target_lane_value_and_grad:
+        command.append("--experimental-target-lane-value-and-grad")
+
+
 def _run_single_stage_case(
     args: argparse.Namespace,
     backend: str,
@@ -226,6 +241,7 @@ def _run_single_stage_case(
     benchmark_mode: bool = False,
     load_surface_gamma: bool = True,
     profile_target_lane: bool = False,
+    experimental_target_lane_value_and_grad: bool = False,
 ) -> dict[str, Any]:
     script_path = _single_stage_script_path()
     effective_platform = platform if backend == "jax" else "cpu"
@@ -268,10 +284,14 @@ def _run_single_stage_case(
                         args.boozer_optimizer_backend,
                     ]
                 )
-        if benchmark_mode:
-            command.append("--benchmark-mode")
-        if profile_target_lane:
-            command.append("--profile-target-lane")
+        _append_optional_single_stage_flags(
+            command,
+            benchmark_mode=benchmark_mode,
+            profile_target_lane=profile_target_lane,
+            experimental_target_lane_value_and_grad=(
+                experimental_target_lane_value_and_grad
+            ),
+        )
         command.extend(
             [
                 "--target-lane-accepted-step-sync",

@@ -163,6 +163,15 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Record target-lane objective profiling breakdowns in the probe payload.",
     )
+    parser.add_argument(
+        "--experimental-target-lane-value-and-grad",
+        action="store_true",
+        help=(
+            "Request the experimental explicit (value, grad) target-lane objective. "
+            "CUDA runs keep the trusted scalar target lane until explicit-path "
+            "parity is proven."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -171,6 +180,7 @@ def _finite_result_keys(results: dict[str, Any]) -> dict[str, bool]:
         key: bool(np.isfinite(float(results.get(key, np.nan))))
         for key in _REQUIRED_RESULT_KEYS
     }
+
 
 def evaluate_single_stage_outer_loop_probe(
     results: dict[str, Any],
@@ -192,7 +202,9 @@ def evaluate_single_stage_outer_loop_probe(
 
     failures: list[str] = []
     if summary["iterations"] < 1:
-        failures.append("Single-stage outer-loop probe did not accept an optimizer step.")
+        failures.append(
+            "Single-stage outer-loop probe did not accept an optimizer step."
+        )
     if summary["outer_optimizer_method"] != TARGET_OUTER_OPTIMIZER_METHOD:
         failures.append(
             "Single-stage outer-loop probe did not use the target "
@@ -215,10 +227,14 @@ def evaluate_single_stage_outer_loop_probe(
             f"Boozer optimizer method {expected_boozer_optimizer_method!r}."
         )
     if summary["self_intersecting"]:
-        failures.append("Single-stage outer-loop probe produced a self-intersecting surface.")
+        failures.append(
+            "Single-stage outer-loop probe produced a self-intersecting surface."
+        )
     for key, is_finite in summary["finite_result_keys"].items():
         if not is_finite:
-            failures.append(f"Single-stage outer-loop probe produced a non-finite {key}.")
+            failures.append(
+                f"Single-stage outer-loop probe produced a non-finite {key}."
+            )
     return summary, failures
 
 
@@ -259,6 +275,9 @@ def main() -> None:
         benchmark_mode=True,
         load_surface_gamma=False,
         profile_target_lane=args.profile_target_lane,
+        experimental_target_lane_value_and_grad=(
+            args.experimental_target_lane_value_and_grad
+        ),
     )
     summary, failures = evaluate_single_stage_outer_loop_probe(
         case["results"],

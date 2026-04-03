@@ -118,10 +118,7 @@ def _record_prefixed_stage_timings(timings, stage_marks, *, prefix, solve_start_
         timings[f"{prefix}_lbfgs_s"] = _elapsed_s(
             solve_start_s, stage_marks["after_boozer_lbfgs"]
         )
-    if (
-        "before_boozer_newton" in stage_marks
-        and "after_boozer_newton" in stage_marks
-    ):
+    if "before_boozer_newton" in stage_marks and "after_boozer_newton" in stage_marks:
         timings[f"{prefix}_newton_s"] = _elapsed_s(
             stage_marks["before_boozer_newton"],
             stage_marks["after_boozer_newton"],
@@ -188,6 +185,20 @@ def resolve_target_lane_accepted_step_sync_record(
 def should_write_single_stage_artifacts(benchmark_mode: bool) -> bool:
     """Return whether the run should emit heavy plotting/VTK artifacts."""
     return not benchmark_mode
+
+
+def use_experimental_target_lane_value_and_grad(
+    *,
+    backend: str,
+    optimizer_backend: str | None,
+    enabled: bool,
+) -> bool:
+    """Return whether the experimental explicit target lane is supported here."""
+    if not (enabled and backend == "jax" and optimizer_backend == "ondevice"):
+        return False
+    import jax
+
+    return str(jax.default_backend()).lower() == "cpu"
 
 
 def format_local_stage2_seed_dir(
@@ -623,6 +634,15 @@ def parse_args():
             "objective closure suite used to study the outer optimization path."
         ),
     )
+    parser.add_argument(
+        "--experimental-target-lane-value-and-grad",
+        action="store_true",
+        help=(
+            "Use the experimental explicit (value, grad) target-lane objective in the "
+            "single-stage outer optimizer when running on CPU. CUDA runs keep the "
+            "trusted scalar target lane until explicit-path parity is proven."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -1037,9 +1057,57 @@ def get_traceable_single_stage_objective_builder():
 
 def get_traceable_single_stage_runtime_bundle_builder():
     """Load the shared single-stage JAX target-lane runtime bundle on demand."""
-    from simsopt.geo.surfaceobjectives_jax import make_traceable_objective_runtime_bundle
+    from simsopt.geo.surfaceobjectives_jax import (
+        make_traceable_objective_runtime_bundle,
+    )
 
     return make_traceable_objective_runtime_bundle
+
+
+def build_target_lane_outer_objectives(
+    boozer_surface,
+    bs,
+    iota_target,
+    *,
+    use_experimental_value_and_grad: bool,
+    profile_target_lane: bool,
+):
+    """Build the target-lane objective(s) needed by the selected outer-loop mode."""
+    import jax
+
+    target_scalar_objective = None
+    target_value_and_grad_objective = None
+    target_lane_profile = None
+    runtime_bundle = None
+
+    target_scalar_objective = get_traceable_single_stage_objective_builder()(
+        boozer_surface,
+        bs,
+        iota_target,
+    )
+
+    if profile_target_lane:
+        runtime_bundle = get_traceable_single_stage_runtime_bundle_builder()(
+            boozer_surface,
+            bs,
+            iota_target,
+            include_profile_suite=profile_target_lane,
+        )
+
+    if use_experimental_value_and_grad:
+        target_value_and_grad_objective = jax.value_and_grad(target_scalar_objective)
+
+    if profile_target_lane:
+        target_lane_profile = profile_traceable_target_lane_objective(
+            runtime_bundle["profile_suite"],
+            np.asarray(bs.x.copy(), dtype=float),
+        )
+
+    return (
+        target_scalar_objective,
+        target_value_and_grad_objective,
+        target_lane_profile,
+    )
 
 
 def select_boozer_residual_class(use_jax, boozer_kind):
@@ -1221,11 +1289,12 @@ def run_single_stage_optimizer(
     maxcor,
     callback,
     scalar_fun=None,
+    use_experimental_value_and_grad=False,
 ):
     """Run the single-stage outer optimization through the shared adapter."""
     from simsopt.geo.optimizer_jax import jax_minimize
 
-    if contract.use_scalar_objective:
+    if contract.use_scalar_objective and not use_experimental_value_and_grad:
         if scalar_fun is None:
             raise RuntimeError(
                 "Single-stage target-lane optimization requires a scalar JAX objective."
@@ -1234,8 +1303,8 @@ def run_single_stage_optimizer(
         value_and_grad = False
     elif fun is None:
         raise RuntimeError(
-            "Single-stage reference-lane optimization requires an explicit "
-            "value-and-gradient objective."
+            "Single-stage optimization requires an explicit value-and-gradient "
+            "objective for the selected lane."
         )
     else:
         optimizer_fun = fun
@@ -1506,7 +1575,9 @@ class SingleStageAdapter:
         self.apply_coil_dofs = (
             apply_coil_dofs
             if apply_coil_dofs is not None
-            else (lambda x: setattr(self.JF, "x", _single_stage_optimizer_dofs_array(x)))
+            else (
+                lambda x: setattr(self.JF, "x", _single_stage_optimizer_dofs_array(x))
+            )
         )
 
     def _reevaluate_accepted_step(self, x):
@@ -1816,6 +1887,11 @@ if __name__ == "__main__":
             benchmark_mode=args.benchmark_mode,
         )
     )
+    use_experimental_target_lane_vg = use_experimental_target_lane_value_and_grad(
+        backend=args.backend,
+        optimizer_backend=optimizer_backend_record,
+        enabled=args.experimental_target_lane_value_and_grad,
+    )
     target_lane_sync_record = resolve_target_lane_accepted_step_sync_record(
         backend=args.backend,
         optimizer_backend=optimizer_backend_record,
@@ -1850,6 +1926,7 @@ if __name__ == "__main__":
         str(args.backend),
         str(optimizer_backend_record),
         str(target_lane_sync_record),
+        str(use_experimental_target_lane_vg),
         str(args.maxiter),
         str(args.num_tf_coils),
         str(file_loc),
@@ -1890,7 +1967,9 @@ if __name__ == "__main__":
         bs_diag.set_points(boozer_surface.surface.gamma().reshape((-1, 3)))
         unitn = boozer_surface.surface.unitnormal()
         pointData = {
-            "B_N/B": np.sum(bs_diag.B().reshape(unitn.shape) * unitn, axis=2)[:, :, None]
+            "B_N/B": np.sum(bs_diag.B().reshape(unitn.shape) * unitn, axis=2)[
+                :, :, None
+            ]
             / np.sqrt(np.sum(bs_diag.B().reshape(unitn.shape) ** 2, axis=2))[:, :, None]
         }
         boozer_surface.surface.to_vtk(OUT_DIR_ITER + "/surf_init", extra_data=pointData)
@@ -2058,32 +2137,26 @@ if __name__ == "__main__":
     else:
         outer_optimizer_start_s = _perf_counter_s()
         target_scalar_objective = None
+        target_value_and_grad_objective = None
         if use_target_lane:
-            target_scalar_objective = get_traceable_single_stage_objective_builder()(
+            (
+                target_scalar_objective,
+                target_value_and_grad_objective,
+                target_lane_profile,
+            ) = build_target_lane_outer_objectives(
                 boozer_surface,
                 bs,
                 iota_target,
+                use_experimental_value_and_grad=use_experimental_target_lane_vg,
+                profile_target_lane=args.profile_target_lane,
             )
-            if args.profile_target_lane:
-                target_lane_runtime_bundle = (
-                    get_traceable_single_stage_runtime_bundle_builder()(
-                        boozer_surface,
-                        bs,
-                        iota_target,
-                        include_profile_suite=True,
-                    )
-                )
-                target_lane_profile = profile_traceable_target_lane_objective(
-                    target_lane_runtime_bundle["profile_suite"],
-                    np.asarray(dofs, dtype=float),
-                )
         accepted_step_callback = resolve_target_lane_accepted_step_callback(
             adapter,
             use_target_lane=use_target_lane,
             sync_policy=effective_target_lane_sync_policy,
         )
         res = run_single_stage_optimizer(
-            adapter,
+            target_value_and_grad_objective if use_target_lane else adapter,
             dofs,
             callback=accepted_step_callback,
             contract=outer_contract,
@@ -2092,6 +2165,7 @@ if __name__ == "__main__":
             gtol=gtol,
             maxcor=args.maxcor,
             scalar_fun=target_scalar_objective,
+            use_experimental_value_and_grad=use_experimental_target_lane_vg,
         )
         outer_optimizer_end_s = _perf_counter_s()
         _record_timing(
@@ -2140,9 +2214,9 @@ if __name__ == "__main__":
                 "B_N/B": np.sum(bs_diag.B().reshape(unitn.shape) * unitn, axis=2)[
                     :, :, None
                 ]
-                / np.sqrt(
-                    np.sum(bs_diag.B().reshape(unitn.shape) ** 2, axis=2)
-                )[:, :, None]
+                / np.sqrt(np.sum(bs_diag.B().reshape(unitn.shape) ** 2, axis=2))[
+                    :, :, None
+                ]
             }
 
             # Print final results
@@ -2231,6 +2305,7 @@ if __name__ == "__main__":
         "boozer_optimizer_method": boozer_surface.res.get("optimizer_method"),
         "outer_optimizer_method": outer_contract.method,
         "target_lane_accepted_step_sync": target_lane_sync_record,
+        "experimental_target_lane_value_and_grad": use_experimental_target_lane_vg,
         "benchmark_mode": bool(args.benchmark_mode),
         "profile_target_lane": bool(args.profile_target_lane),
         "init_only": args.init_only,
