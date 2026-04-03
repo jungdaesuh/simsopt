@@ -20,7 +20,10 @@ from ..geo.framedcurve import (
 from ..geo.curvehelical import curve_helical_pure
 from ..geo.curveplanarfourier import curveplanarfourier_pure
 from ..geo.curverzfourier import curverzfourier_pure
-from ..geo.curvexyzfourier import jaxfouriercurve_pure
+from ..geo.curvexyzfourier import (
+    jaxfouriercurve_geometry_pure,
+    jaxfouriercurve_pure,
+)
 from .specs import (
     CurveCWSFourierRZSpec,
     CurveFilamentSpec,
@@ -137,6 +140,42 @@ def _curve_quadpoints(spec: CurveSpec):
     return quadpoints, jnp.ones_like(quadpoints)
 
 
+def _curve_geometry_terms_from_kernel(gamma_kernel, quadpoints, tangents, *, order):
+    gamma, gammadash = jax.jvp(gamma_kernel, (quadpoints,), (tangents,))
+    if order == 1:
+        return gamma, gammadash
+
+    gammadash_kernel = lambda qp: jax.jvp(gamma_kernel, (qp,), (tangents,))[1]
+    _, gammadashdash = jax.jvp(gammadash_kernel, (quadpoints,), (tangents,))
+    if order == 2:
+        return gamma, gammadash, gammadashdash
+
+    gammadashdash_kernel = lambda qp: jax.jvp(
+        gammadash_kernel,
+        (qp,),
+        (tangents,),
+    )[1]
+    _, gammadashdashdash = jax.jvp(
+        gammadashdash_kernel,
+        (quadpoints,),
+        (tangents,),
+    )
+    return gamma, gammadash, gammadashdash, gammadashdashdash
+
+
+def _direct_curve_geometry_terms(spec: CurveSpec, dofs, *, order):
+    if curve_spec_kind(spec) != "xyz_fourier":
+        return None
+    spec = cast(CurveXYZFourierSpec, spec)
+    curve_dofs = spec.dofs if dofs is None else dofs
+    geometry = jaxfouriercurve_geometry_pure(
+        curve_dofs,
+        spec.quadpoints,
+        spec.order,
+    )
+    return geometry[: order + 1]
+
+
 def _mapped_full_dofs(map_spec: OptimizableDofMapSpec, owner_dofs):
     mapped = jnp.asarray(map_spec.template_full_dofs, dtype=jnp.float64)
     owner_dofs = jnp.asarray(owner_dofs, dtype=jnp.float64)
@@ -181,22 +220,17 @@ def _curve_geometry_with_third_derivative_from_dofs(spec: CurveSpec, dofs):
             _curve_perturbed_base_dofs(spec, dofs),
         )
         return _add_curve_perturbation(spec, *base_geometry)
-    gamma_kernel = _curve_gamma_kernel(spec, dofs)
     quadpoints, tangents = _curve_quadpoints(spec)
-    gamma, gammadash = jax.jvp(gamma_kernel, (quadpoints,), (tangents,))
-    gammadash_kernel = lambda qp: jax.jvp(gamma_kernel, (qp,), (tangents,))[1]
-    _, gammadashdash = jax.jvp(gammadash_kernel, (quadpoints,), (tangents,))
-    gammadashdash_kernel = lambda qp: jax.jvp(
-        gammadash_kernel,
-        (qp,),
-        (tangents,),
-    )[1]
-    _, gammadashdashdash = jax.jvp(
-        gammadashdash_kernel,
-        (quadpoints,),
-        (tangents,),
+    direct_geometry = _direct_curve_geometry_terms(spec, dofs, order=3)
+    if direct_geometry is not None:
+        return direct_geometry
+    gamma_kernel = _curve_gamma_kernel(spec, dofs)
+    return _curve_geometry_terms_from_kernel(
+        gamma_kernel,
+        quadpoints,
+        tangents,
+        order=3,
     )
-    return gamma, gammadash, gammadashdash, gammadashdashdash
 
 
 def _curve_perturbed_base_dofs(spec: CurvePerturbedSpec, dofs):
@@ -356,9 +390,17 @@ def curve_gamma_and_dash_from_dofs(spec: CurveSpec, dofs):
     if spec_kind == "filament":
         spec = cast(CurveFilamentSpec, spec)
         return _curve_filament_gamma_and_dash_from_dofs(spec, dofs)
-    gamma_kernel = _curve_gamma_kernel(spec, dofs)
     quadpoints, tangents = _curve_quadpoints(spec)
-    return jax.jvp(gamma_kernel, (quadpoints,), (tangents,))
+    direct_geometry = _direct_curve_geometry_terms(spec, dofs, order=1)
+    if direct_geometry is not None:
+        return direct_geometry
+    gamma_kernel = _curve_gamma_kernel(spec, dofs)
+    return _curve_geometry_terms_from_kernel(
+        gamma_kernel,
+        quadpoints,
+        tangents,
+        order=1,
+    )
 
 
 def curve_geometry_from_spec(spec: CurveSpec):
@@ -374,12 +416,17 @@ def curve_geometry_from_dofs(spec: CurveSpec, dofs):
     if spec_kind == "filament":
         spec = cast(CurveFilamentSpec, spec)
         return _curve_filament_geometry_from_dofs(spec, dofs)
-    gamma_kernel = _curve_gamma_kernel(spec, dofs)
     quadpoints, tangents = _curve_quadpoints(spec)
-    gamma, gammadash = jax.jvp(gamma_kernel, (quadpoints,), (tangents,))
-    gammadash_kernel = lambda qp: jax.jvp(gamma_kernel, (qp,), (tangents,))[1]
-    _, gammadashdash = jax.jvp(gammadash_kernel, (quadpoints,), (tangents,))
-    return gamma, gammadash, gammadashdash
+    direct_geometry = _direct_curve_geometry_terms(spec, dofs, order=2)
+    if direct_geometry is not None:
+        return direct_geometry
+    gamma_kernel = _curve_gamma_kernel(spec, dofs)
+    return _curve_geometry_terms_from_kernel(
+        gamma_kernel,
+        quadpoints,
+        tangents,
+        order=2,
+    )
 
 
 def _curve_cws_gamma_and_dash_from_parts(

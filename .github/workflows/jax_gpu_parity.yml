@@ -19,6 +19,8 @@ jobs:
     env:
       PYTHONPATH: src
       SIMSOPT_BACKEND_MODE: jax_gpu_parity
+      SIMSOPT_BACKEND_STRICT: "1"
+      SIMSOPT_JAX_TRANSFER_GUARD: disallow
       JAX_PLATFORMS: cuda
 
     steps:

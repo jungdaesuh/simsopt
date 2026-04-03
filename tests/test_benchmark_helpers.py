@@ -636,6 +636,9 @@ def test_require_x64_runtime_rejects_float32_runtime():
 def test_build_provenance_includes_compilation_cache_metadata(monkeypatch):
     monkeypatch.setenv(_JAX_COMPILATION_CACHE_ENV_VAR, "/tmp/probe-cache")
     monkeypatch.delenv(_SIMSOPT_DISABLE_COMPILATION_CACHE_ENV_VAR, raising=False)
+    monkeypatch.setenv("SIMSOPT_BACKEND_MODE", "jax_gpu_fast")
+    monkeypatch.setenv("SIMSOPT_BACKEND_STRICT", "1")
+    monkeypatch.setenv("SIMSOPT_JAX_TRANSFER_GUARD", "disallow")
     monkeypatch.setattr(
         "benchmarks.validation_ladder_common.get_git_sha",
         lambda: "abc123",
@@ -670,6 +673,9 @@ def test_build_provenance_includes_compilation_cache_metadata(monkeypatch):
 
     assert provenance["lane"] == "private-optimizer"
     assert provenance["compile_behavior"] == "cold+warm"
+    assert provenance["backend_mode"] == "jax_gpu_fast"
+    assert provenance["backend_strict"] is True
+    assert provenance["transfer_guard"] == "disallow"
     assert provenance["compilation_cache_enabled"] is True
     assert provenance["compilation_cache_dir"] == "/tmp/probe-cache"
 
@@ -1880,14 +1886,33 @@ def test_weekly_tier5_manifest_targets_ondevice_benchmark_mode():
     optimizer_backend_idx = args.index("--optimizer-backend")
     assert args[optimizer_backend_idx + 1] == "ondevice"
     assert "--benchmark-mode" in args
+    assert manifest["runtime_contract"]["backend_mode"] == "jax_gpu_fast"
+    assert manifest["runtime_contract"]["strict_backend"] is True
+    assert manifest["runtime_contract"]["transfer_guard"] == "disallow"
 
 
 def test_weekly_tier5_workflow_sets_cache_and_ondevice_contract():
     workflow_text = _weekly_tier5_workflow_path().read_text(encoding="utf-8")
 
     assert "JAX_COMPILATION_CACHE_DIR" in workflow_text
+    assert "SIMSOPT_BACKEND_MODE: jax_gpu_fast" in workflow_text
+    assert 'SIMSOPT_BACKEND_STRICT: "1"' in workflow_text
+    assert "SIMSOPT_JAX_TRANSFER_GUARD: disallow" in workflow_text
     assert "--optimizer-backend ondevice" in workflow_text
     assert "--benchmark-mode" in workflow_text
+
+
+def test_gpu_parity_workflow_enforces_strict_transfer_guard_contract():
+    workflow_text = (
+        Path(__file__).resolve().parents[1]
+        / ".github"
+        / "workflows"
+        / "jax_gpu_parity.yml"
+    ).read_text(encoding="utf-8")
+
+    assert "SIMSOPT_BACKEND_MODE: jax_gpu_parity" in workflow_text
+    assert 'SIMSOPT_BACKEND_STRICT: "1"' in workflow_text
+    assert "SIMSOPT_JAX_TRANSFER_GUARD: disallow" in workflow_text
 
 
 def test_single_stage_outer_loop_probe_resolves_expected_boozer_method():

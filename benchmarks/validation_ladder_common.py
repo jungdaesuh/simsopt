@@ -30,6 +30,9 @@ _JAX_CUDA_MEMORY_ENV_VARS = ("XLA_PYTHON_CLIENT_PREALLOCATE",)
 _JAX_COMPILATION_CACHE_ENV_VAR = "JAX_COMPILATION_CACHE_DIR"
 _SIMSOPT_DISABLE_COMPILATION_CACHE_ENV_VAR = "SIMSOPT_DISABLE_JAX_COMPILATION_CACHE"
 _SIMSOPT_COMPILATION_CACHE_POLICY_ENV_VAR = "SIMSOPT_JAX_COMPILATION_CACHE_POLICY"
+_SIMSOPT_BACKEND_MODE_ENV_VAR = "SIMSOPT_BACKEND_MODE"
+_SIMSOPT_BACKEND_STRICT_ENV_VAR = "SIMSOPT_BACKEND_STRICT"
+_SIMSOPT_TRANSFER_GUARD_ENV_VAR = "SIMSOPT_JAX_TRANSFER_GUARD"
 _TARGET_LANE_ACCEPTED_STEP_SYNC_ENV_VAR = "TARGET_LANE_ACCEPTED_STEP_SYNC"
 _TRUTHY_ENV_VALUES = frozenset({"1", "true", "yes", "on"})
 _REQUESTED_PLATFORM_RUNTIME_BACKENDS = {
@@ -171,6 +174,16 @@ def current_compilation_cache_metadata() -> dict[str, Any]:
     return metadata
 
 
+def current_backend_guardrail_metadata() -> dict[str, Any]:
+    """Return the active backend-mode contract from the environment."""
+    strict_raw = os.environ.get(_SIMSOPT_BACKEND_STRICT_ENV_VAR, "")
+    return {
+        "backend_mode": os.environ.get(_SIMSOPT_BACKEND_MODE_ENV_VAR),
+        "backend_strict": strict_raw.strip().lower() in _TRUTHY_ENV_VALUES,
+        "transfer_guard": os.environ.get(_SIMSOPT_TRANSFER_GUARD_ENV_VAR),
+    }
+
+
 def describe_compile_behavior(
     *,
     uses_subprocesses: bool,
@@ -282,6 +295,7 @@ def build_provenance(
 ) -> dict[str, Any]:
     """Collect shared provenance fields for ladder outputs."""
     compilation_cache = current_compilation_cache_metadata()
+    backend_guardrails = current_backend_guardrail_metadata()
     provenance = {
         "title": title,
         "repo_sha": get_git_sha(),
@@ -291,6 +305,7 @@ def build_provenance(
         "devices": [str(device) for device in jax_module.devices()],
         "x64_enabled": _x64_enabled(jax_module),
         "peak_rss_mb": peak_rss_mb(),
+        **backend_guardrails,
         **compilation_cache,
     }
     gpu_memory_mb = query_gpu_memory_mb()
@@ -322,6 +337,11 @@ def print_provenance(provenance: dict[str, Any]) -> None:
         print(f"platform arg: {provenance['platform_request']}")
     if "compile_behavior" in provenance:
         print(f"compile:      {provenance['compile_behavior']}")
+    if provenance.get("backend_mode") is not None:
+        print(f"mode:         {provenance['backend_mode']}")
+    print(f"strict:       {provenance['backend_strict']}")
+    if provenance.get("transfer_guard") is not None:
+        print(f"guard:        {provenance['transfer_guard']}")
     print(f"cache policy: {provenance['compilation_cache_policy']}")
     if provenance.get("compilation_cache_dir"):
         print(f"cache dir:    {provenance['compilation_cache_dir']}")

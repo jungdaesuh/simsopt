@@ -547,6 +547,32 @@ def _build_planar_curve(nquadpoints):
     return curve
 
 
+def _build_xyz_curve(nquadpoints):
+    curve = CurveXYZFourier(nquadpoints, 2)
+    curve.set_dofs(
+        np.array(
+            [
+                1.0,
+                0.2,
+                -0.1,
+                0.1,
+                -0.05,
+                0.03,
+                0.8,
+                -0.2,
+                0.15,
+                0.02,
+                -0.01,
+                0.04,
+                -0.03,
+                0.02,
+                -0.05,
+            ]
+        )
+    )
+    return curve
+
+
 def _build_perturbed_helical_curve(nquadpoints):
     base_curve = _build_helical_curve(nquadpoints)
     quadpoints = np.asarray(base_curve.quadpoints, dtype=float)
@@ -1882,10 +1908,11 @@ class TestAdjointSolveConsistency:
     @pytest.mark.parametrize(
         ("curve_builder", "nquad"),
         (
+            (_build_xyz_curve, 32),
             (_build_perturbed_helical_curve, 24),
             (_build_filament_curve, 32),
         ),
-        ids=("curveperturbed", "curvefilament"),
+        ids=("curvexyzfourier", "curveperturbed", "curvefilament"),
     )
     def test_curve_geometry_from_dofs_matches_live_curve(self, curve_builder, nquad):
         _assert_curve_spec_geometry_matches_live_curve(curve_builder(nquad))
@@ -1893,10 +1920,11 @@ class TestAdjointSolveConsistency:
     @pytest.mark.parametrize(
         ("curve_builder", "nquad"),
         (
+            (_build_xyz_curve, 32),
             (_build_perturbed_helical_curve, 24),
             (_build_filament_curve, 32),
         ),
-        ids=("curveperturbed", "curvefilament"),
+        ids=("curvexyzfourier", "curveperturbed", "curvefilament"),
     )
     def test_curve_gamma_and_dash_gradient_matches_fd(self, curve_builder, nquad):
         _assert_curve_spec_gamma_and_dash_gradient_matches_fd(curve_builder(nquad))

@@ -7,7 +7,12 @@ from .curve import Curve, JaxCurve, jnp
 import simsoptpp as sopp
 
 
-__all__ = ["CurveXYZFourier", "JaxCurveXYZFourier"]
+__all__ = [
+    "CurveXYZFourier",
+    "JaxCurveXYZFourier",
+    "jaxfouriercurve_pure",
+    "jaxfouriercurve_geometry_pure",
+]
 
 
 class CurveXYZFourier(sopp.CurveXYZFourier, Curve):
@@ -252,6 +257,47 @@ def jaxfouriercurve_pure(dofs, quadpoints, order):
         axis=0,
     )
     return jnp.stack((gamma_x, gamma_y, gamma_z), axis=-1)
+
+
+def _fourier_component_geometry_pure(coeffs, sin_phase, cos_phase, mode_scale):
+    sin_coeffs = coeffs[1::2]
+    cos_coeffs = coeffs[2::2]
+    phase_terms = sin_coeffs[:, None] * sin_phase + cos_coeffs[:, None] * cos_phase
+    dash_terms = sin_coeffs[:, None] * cos_phase - cos_coeffs[:, None] * sin_phase
+    mode_scale_sq = mode_scale * mode_scale
+    mode_scale_cu = mode_scale_sq * mode_scale
+    gamma = coeffs[0] + jnp.sum(phase_terms, axis=0)
+    gammadash = jnp.sum(mode_scale * dash_terms, axis=0)
+    gammadashdash = -jnp.sum(mode_scale_sq * phase_terms, axis=0)
+    gammadashdashdash = -jnp.sum(mode_scale_cu * dash_terms, axis=0)
+    return gamma, gammadash, gammadashdash, gammadashdashdash
+
+
+def jaxfouriercurve_geometry_pure(dofs, quadpoints, order):
+    """Return XYZ Fourier geometry and its first three quadpoint derivatives."""
+    quadpoints = jnp.asarray(quadpoints, dtype=jnp.float64)
+    k = jnp.shape(dofs)[0] // 3
+    coeffs = (dofs[:k], dofs[k : (2 * k)], dofs[(2 * k) :])
+    points = 2.0 * np.pi * quadpoints
+    mode_numbers = jnp.arange(1, order + 1, dtype=jnp.float64)
+    phase = mode_numbers[:, None] * points[None, :]
+    sin_phase = jnp.sin(phase)
+    cos_phase = jnp.cos(phase)
+    mode_scale = (2.0 * np.pi) * mode_numbers[:, None]
+
+    component_geometry = tuple(
+        _fourier_component_geometry_pure(
+            component_coeffs,
+            sin_phase,
+            cos_phase,
+            mode_scale,
+        )
+        for component_coeffs in coeffs
+    )
+
+    return tuple(
+        jnp.stack(components, axis=-1) for components in zip(*component_geometry)
+    )
 
 
 class JaxCurveXYZFourier(JaxCurve):

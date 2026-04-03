@@ -18,6 +18,12 @@
     "cadence": "weekly",
     "workflow": ".github/workflows/jax_benchmark_reporting.yml"
   },
+  "runtime_contract": {
+    "backend_mode": "jax_gpu_fast",
+    "strict_backend": true,
+    "transfer_guard": "disallow",
+    "compilation_cache": "required_persistent"
+  },
   "commands": [
     {
       "name": "tier5_performance_characterization",
