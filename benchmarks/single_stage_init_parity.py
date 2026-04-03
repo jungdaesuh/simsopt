@@ -177,6 +177,15 @@ def parse_args() -> argparse.Namespace:
             "Use 0 to keep the historical init-only Tier 3 probe shape."
         ),
     )
+    parser.add_argument(
+        "--benchmark-mode",
+        action="store_true",
+        help=(
+            "Request benchmark-mode target-lane execution. "
+            "This skips heavy single-stage artifacts and therefore skips the "
+            "surface-geometry drift check in this parity wrapper."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -345,6 +354,20 @@ def _display_path(path: Path) -> str:
         return str(path)
 
 
+def _resolve_surface_geometry_drift(
+    cpu_case: dict[str, Any],
+    jax_case: dict[str, Any],
+    *,
+    benchmark_mode: bool,
+) -> tuple[float, float]:
+    if benchmark_mode:
+        return 0.0, 0.0
+    return max_pointwise_geometry_drift(
+        jax_case["surface_gamma"],
+        cpu_case["surface_gamma"],
+    )
+
+
 def evaluate_single_stage_init_parity(
     cpu_results: dict[str, Any],
     jax_results: dict[str, Any],
@@ -431,6 +454,7 @@ def evaluate_single_stage_init_parity(
 
 def main() -> None:
     args = parse_args()
+    benchmark_mode = bool(args.benchmark_mode)
     bootstrap_local_simsopt()
     stage2_bs_path = Path(args.stage2_bs_path)
     if not stage2_bs_path.exists():
@@ -454,6 +478,7 @@ def main() -> None:
             "optimizer_backend": args.optimizer_backend,
             "boozer_optimizer_backend": args.boozer_optimizer_backend,
             "outer_maxiter": int(args.maxiter),
+            "benchmark_mode": benchmark_mode,
             "nphi": int(args.nphi),
             "ntheta": int(args.ntheta),
             "mpol": int(args.mpol),
@@ -468,14 +493,27 @@ def main() -> None:
     )
     print_provenance(provenance)
 
-    cpu_case = _run_single_stage_case(args, "cpu", platform="cpu")
-    jax_case = _run_single_stage_case(args, "jax", platform=args.platform)
+    cpu_case = _run_single_stage_case(
+        args,
+        "cpu",
+        platform="cpu",
+        benchmark_mode=benchmark_mode,
+        load_surface_gamma=not benchmark_mode,
+    )
+    jax_case = _run_single_stage_case(
+        args,
+        "jax",
+        platform=args.platform,
+        benchmark_mode=benchmark_mode,
+        load_surface_gamma=not benchmark_mode,
+    )
 
     cpu_results = cpu_case["results"]
     jax_results = jax_case["results"]
-    max_geom_abs, max_geom_rel = max_pointwise_geometry_drift(
-        jax_case["surface_gamma"],
-        cpu_case["surface_gamma"],
+    max_geom_abs, max_geom_rel = _resolve_surface_geometry_drift(
+        cpu_case,
+        jax_case,
+        benchmark_mode=benchmark_mode,
     )
     comparison, failures = evaluate_single_stage_init_parity(
         cpu_results,
@@ -501,6 +539,11 @@ def main() -> None:
     ):
         warnings.append(
             "CPU and JAX lanes did not have matching self-intersection check availability."
+        )
+    if benchmark_mode:
+        warnings.append(
+            "Surface geometry drift comparison was skipped because --benchmark-mode "
+            "suppresses the surf_init.json artifact."
         )
 
     print(

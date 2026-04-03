@@ -161,6 +161,14 @@ def parse_args() -> argparse.Namespace:
         default=1e-4,
         help="Finite-difference perturbation magnitude for Tier 4 timing.",
     )
+    parser.add_argument(
+        "--benchmark-mode",
+        action="store_true",
+        help=(
+            "Enable benchmark-mode on the Tier 3 single-stage rung so timing "
+            "skips heavy target-lane artifacts."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -210,6 +218,18 @@ def _trusted_single_stage_args(args: argparse.Namespace) -> list[str]:
         "--optimizer-backend",
         args.optimizer_backend,
     ]
+
+
+def _single_stage_init_probe_args(args: argparse.Namespace) -> list[str]:
+    command = [
+        "--platform",
+        args.platform,
+        *_common_equilibrium_args(args),
+        *_trusted_single_stage_args(args),
+    ]
+    if bool(args.benchmark_mode):
+        command.append("--benchmark-mode")
+    return command
 
 
 def safe_speedup(reference_s: float | None, candidate_s: float | None) -> float | None:
@@ -317,6 +337,7 @@ def _run_tier4_pair(args: argparse.Namespace) -> dict[str, Any]:
 
 def main() -> None:
     args = parse_args()
+    benchmark_mode = bool(args.benchmark_mode)
     provenance = build_provenance(
         jax,
         jaxlib,
@@ -335,6 +356,7 @@ def main() -> None:
             "ntor": int(args.ntor),
             "stage2_maxiter": int(args.maxiter),
             "optimizer_backend": args.optimizer_backend,
+            "benchmark_mode": benchmark_mode,
             "fd_samples": int(args.samples),
             "fd_eps": float(args.eps),
             "compile_behavior": describe_compile_behavior(uses_subprocesses=True),
@@ -376,12 +398,7 @@ def main() -> None:
     )
     tier3_payload, tier3_outer = _timed_probe(
         _single_stage_init_script(),
-        [
-            "--platform",
-            args.platform,
-            *_common_equilibrium_args(args),
-            *_trusted_single_stage_args(args),
-        ],
+        _single_stage_init_probe_args(args),
         platform=args.platform,
     )
     tier4_pair = _run_tier4_pair(args)
@@ -436,11 +453,7 @@ def main() -> None:
     print("--------------")
     for item in summary:
         speedup = item.get("speedup_vs_cpu")
-        speedup_str = (
-            f"{speedup:.2f}x"
-            if isinstance(speedup, float)
-            else "n/a"
-        )
+        speedup_str = f"{speedup:.2f}x" if isinstance(speedup, float) else "n/a"
         print(
             f"{item['name']}: passed={item['passed']}  "
             f"outer={item['outer_elapsed_s']:.2f}s  "

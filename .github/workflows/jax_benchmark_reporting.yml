@@ -19,11 +19,15 @@ jobs:
         run: conda run --no-capture-output -n columbia-jax-0.9.2 python -V
 
       - name: Run Tier 5 performance characterization
+        env:
+          JAX_COMPILATION_CACHE_DIR: ${{ github.workspace }}/benchmark_artifacts/jax-compilation-cache
         run: |
+          mkdir -p benchmark_artifacts "$JAX_COMPILATION_CACHE_DIR"
           conda run --no-capture-output -n columbia-jax-0.9.2 \
             python benchmarks/tier5_performance_characterization.py \
             --platform cuda \
-            --optimizer-backend scipy \
+            --optimizer-backend ondevice \
+            --benchmark-mode \
             --maxiter 20 \
             --output-json benchmark_artifacts/tier5_performance_characterization.json
 

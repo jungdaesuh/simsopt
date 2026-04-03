@@ -1751,6 +1751,63 @@ class TestBoozerSurfaceJAXExactPath:
         assert "residual" in captured
         assert jnp.all(jnp.isfinite(captured["residual"]))
 
+    def test_run_code_traceable_ls_reuses_newton_fun_and_grad(self, monkeypatch):
+        """LS traceable path must reuse Newton outputs instead of re-differentiating."""
+        booz = _make_mock_boozer_surface()
+        booz.options["optimizer_backend"] = "ondevice"
+        booz.options["limited_memory"] = True
+        coil_set_spec = booz.coil_set_spec
+        sdofs = jnp.asarray(booz.surface.get_dofs(), dtype=jnp.float64)
+        iota = jnp.asarray(0.3, dtype=jnp.float64)
+        G = jnp.asarray(0.05, dtype=jnp.float64)
+        expected_fun = jnp.asarray(3.5, dtype=jnp.float64)
+        expected_grad = jnp.arange(
+            sdofs.size + 2,
+            dtype=jnp.float64,
+        )
+
+        def fake_minimize(_fun, x0, **_kwargs):
+            return types.SimpleNamespace(x_k=x0)
+
+        def fake_newton_polish(
+            obj_fn,
+            x0,
+            *,
+            maxiter,
+            tol,
+            stab,
+            progress_callback=None,
+        ):
+            del obj_fn, maxiter, tol, stab, progress_callback
+            return {
+                "x": x0,
+                "fun": expected_fun,
+                "grad": expected_grad,
+                "hessian": jnp.eye(x0.shape[0], dtype=x0.dtype),
+                "nit": 2,
+                "success": True,
+            }
+
+        monkeypatch.setattr(_opt, "_minimize_lbfgs_private", fake_minimize)
+        monkeypatch.setattr(
+            _bsj.jax,
+            "value_and_grad",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("run_code_traceable() should reuse Newton fun/grad")
+            ),
+        )
+        _patch_newton_polish_runner(monkeypatch, fake_newton_polish)
+
+        result = booz.run_code_traceable(coil_set_spec, sdofs, iota, G)
+
+        assert result["type"] == "ls"
+        assert bool(result["success"])
+        np.testing.assert_allclose(np.asarray(result["fun"]), np.asarray(expected_fun))
+        np.testing.assert_allclose(
+            np.asarray(result["grad"]),
+            np.asarray(expected_grad),
+        )
+
     def test_exact_accepts_and_ignores_optimizer_backend_option(self):
         """Exact solves accept optimizer_backend but ignore it."""
         bs = _MockBiotSavart(_make_mock_coils())

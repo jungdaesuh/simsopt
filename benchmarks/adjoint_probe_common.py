@@ -4,6 +4,14 @@ from __future__ import annotations
 
 import numpy as np
 
+from simsopt.objectives.utilities import forward_backward_jax
+
+
+_STREAMING_GROUP_VJP_REQUIRED = (
+    "Grouped adjoint probes require res['vjp_groups']; "
+    "legacy full-pytree adjoint fallback is not allowed."
+)
+
 
 def iter_grouped_adjoint_cotangents(jr_jax, adj: np.ndarray):
     """Yield grouped adjoint cotangents one coil block at a time."""
@@ -11,19 +19,13 @@ def iter_grouped_adjoint_cotangents(jr_jax, adj: np.ndarray):
     iota = booz_jax.res["iota"]
     G = booz_jax.res["G"]
     vjp_groups_fn = booz_jax.res.get("vjp_groups")
-    if vjp_groups_fn is not None:
-        yield from vjp_groups_fn(adj, booz_jax, iota, G)
-        return
-
-    d_coil_arrays, coil_indices = booz_jax.res["vjp"](adj, booz_jax, iota, G)
-    for d_coil_array, coil_group_indices in zip(d_coil_arrays, coil_indices):
-        yield d_coil_array, coil_group_indices
+    if vjp_groups_fn is None:
+        raise RuntimeError(_STREAMING_GROUP_VJP_REQUIRED)
+    yield from vjp_groups_fn(adj, booz_jax, iota, G)
 
 
 def compute_adjoint_state(jr_jax) -> tuple[np.ndarray, float]:
     """Return the objective-consistent adjoint vector and its residual."""
-    from simsopt.objectives.utilities import forward_backward
-
     booz_jax = jr_jax.boozer_surface
     p_mat, l_mat, u_mat = booz_jax.res["PLU"]
     surface = jr_jax.surface
@@ -40,7 +42,7 @@ def compute_adjoint_state(jr_jax) -> tuple[np.ndarray, float]:
         nphi,
         ntheta,
     )
-    adj = forward_backward(p_mat, l_mat, u_mat, dJ_ds)
+    adj = forward_backward_jax(p_mat, l_mat, u_mat, dJ_ds, iterative_refinement=True)
     hessian = p_mat @ l_mat @ u_mat
     residual = hessian.T @ adj - dJ_ds
     rel = float(np.linalg.norm(residual) / (np.linalg.norm(dJ_ds) + 1e-30))

@@ -62,7 +62,6 @@ from ..jax_core.field import (
     grouped_coil_index_lists_from_spec,
     grouped_coil_set_spec_from_coil_specs,
     grouped_coil_set_spec_from_grouped_data,
-    grouped_coil_set_spec_from_lists,
     grouped_coil_set_spec_from_source,
     grouped_field_data_from_spec,
     grouped_field_inputs_from_spec,
@@ -1409,8 +1408,6 @@ class BoozerSurfaceJAX(Optimizable):
             tol=self.options["newton_tol"],
             stab=self.options["newton_stab"],
         )
-        compiled_val_and_grad = jax.jit(jax.value_and_grad(obj_fn))
-        fun_out, grad_out = compiled_val_and_grad(newton_result["x"])
         P, L, U = jax.scipy.linalg.lu(newton_result["hessian"])
         sdofs_out, iota_out, G_out = self._unpack_decision_vector_jax(
             newton_result["x"],
@@ -1419,7 +1416,7 @@ class BoozerSurfaceJAX(Optimizable):
         )
         finite = (
             jnp.all(jnp.isfinite(newton_result["x"]))
-            & jnp.all(jnp.isfinite(grad_out))
+            & jnp.all(jnp.isfinite(newton_result["grad"]))
             & jnp.all(jnp.isfinite(newton_result["hessian"]))
         )
         return {
@@ -1427,8 +1424,8 @@ class BoozerSurfaceJAX(Optimizable):
             "sdofs": sdofs_out,
             "iota": iota_out,
             "G": G_out,
-            "fun": fun_out,
-            "grad": grad_out,
+            "fun": newton_result["fun"],
+            "grad": newton_result["grad"],
             "hessian": newton_result["hessian"],
             "plu": (P, L, U),
             "nit": newton_result["nit"],

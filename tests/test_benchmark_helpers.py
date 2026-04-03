@@ -23,6 +23,7 @@ from benchmarks.adjoint_fd_validation import (
     RECOMPOSED_TOTAL_REL_TOL,
     evaluate_adjoint_validation,
 )
+import benchmarks.adjoint_probe_common as adjoint_probe_common
 from benchmarks.adjoint_probe_common import compute_derivative_l2_metrics
 from benchmarks.single_stage_backend_routing import (
     resolve_boozer_limited_memory,
@@ -44,6 +45,7 @@ from benchmarks.benchmark_problem import (
     clone_tensor_surface,
 )
 import benchmarks.run_code_benchmark_common as run_code_benchmark_common
+import benchmarks.tier5_performance_characterization as tier5_performance_characterization
 from benchmarks.run_code_benchmark_common import summarize_result_fun
 from benchmarks.single_stage_init_parity import (
     DEFAULT_OUTER_MAXITER,
@@ -1509,6 +1511,24 @@ def _complete_grouped_adjoint_snapshots():
     ]
 
 
+def _weekly_tier5_manifest_path() -> Path:
+    return (
+        Path(__file__).resolve().parents[1]
+        / "benchmarks"
+        / "manifests"
+        / "stable_hardware_weekly_tier5.json"
+    )
+
+
+def _weekly_tier5_workflow_path() -> Path:
+    return (
+        Path(__file__).resolve().parents[1]
+        / ".github"
+        / "workflows"
+        / "jax_benchmark_reporting.yml"
+    )
+
+
 def test_compute_derivative_l2_metrics_ignores_missing_dependency_keys():
     class _DepOpt:
         __slots__ = ("local_dofs_free_status",)
@@ -1536,6 +1556,59 @@ def test_compute_derivative_l2_metrics_ignores_missing_dependency_keys():
     assert finite is True
     assert norm == pytest.approx(3.0)
     assert dep_missing not in derivative.data
+
+
+def test_grouped_adjoint_helpers_require_streaming_vjp_groups():
+    jr_jax = types.SimpleNamespace(
+        boozer_surface=types.SimpleNamespace(
+            res={
+                "iota": 0.1,
+                "G": 0.2,
+                "vjp_groups": None,
+                "vjp": lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                    AssertionError("legacy full VJP fallback should stay disabled")
+                ),
+            }
+        )
+    )
+
+    with pytest.raises(RuntimeError, match="legacy full-pytree adjoint fallback"):
+        list(adjoint_probe_common.iter_grouped_adjoint_cotangents(jr_jax, np.ones(2)))
+
+
+def test_compute_adjoint_state_uses_device_native_forward_backward(monkeypatch):
+    recorded = {}
+
+    def fake_forward_backward_jax(P, L, U, rhs, iterative_refinement=False):
+        recorded["args"] = (P, L, U, rhs)
+        recorded["iterative_refinement"] = iterative_refinement
+        return rhs
+
+    monkeypatch.setattr(
+        adjoint_probe_common,
+        "forward_backward_jax",
+        fake_forward_backward_jax,
+    )
+    p_mat = np.eye(2)
+    l_mat = np.eye(2)
+    u_mat = np.eye(2)
+    rhs = np.array([1.0, -2.0])
+    jr_jax = types.SimpleNamespace(
+        boozer_surface=types.SimpleNamespace(res={"PLU": (p_mat, l_mat, u_mat)}),
+        surface=types.SimpleNamespace(
+            quadpoints_phi=np.linspace(0.0, 1.0, 2, endpoint=False),
+            quadpoints_theta=np.linspace(0.0, 1.0, 3, endpoint=False),
+        ),
+        constraint_weight=None,
+        _compute_dJ_ds=lambda *_args: rhs,
+    )
+
+    adjoint, residual_rel = adjoint_probe_common.compute_adjoint_state(jr_jax)
+
+    np.testing.assert_allclose(np.asarray(adjoint), rhs)
+    assert residual_rel == pytest.approx(0.0)
+    assert recorded["args"] == (p_mat, l_mat, u_mat, rhs)
+    assert recorded["iterative_refinement"] is True
 
 
 def test_grouped_adjoint_memory_probe_requires_complete_finite_metrics():
@@ -1636,6 +1709,49 @@ def test_grouped_adjoint_memory_resolves_effective_limited_memory_route():
     assert resolve_boozer_limited_memory("ondevice", True) is True
     assert resolve_boozer_limited_memory("scipy", True) is False
     assert resolve_boozer_limited_memory("ondevice", False) is False
+
+
+def test_tier5_single_stage_probe_args_thread_benchmark_mode():
+    args = argparse.Namespace(
+        platform="cuda",
+        equilibrium_path=None,
+        plasma_surf_filename="fixture.nc",
+        equilibria_dir="/tmp/equilibria",
+        stage2_bs_path="/tmp/biot_savart_opt.json",
+        single_stage_nphi=63,
+        single_stage_ntheta=32,
+        mpol=4,
+        ntor=4,
+        vol_target=0.1,
+        iota_target=0.15,
+        optimizer_backend="ondevice",
+        benchmark_mode=True,
+    )
+
+    command = tier5_performance_characterization._single_stage_init_probe_args(args)
+
+    assert "--optimizer-backend" in command
+    optimizer_backend_idx = command.index("--optimizer-backend")
+    assert command[optimizer_backend_idx + 1] == "ondevice"
+    assert "--benchmark-mode" in command
+
+
+def test_weekly_tier5_manifest_targets_ondevice_benchmark_mode():
+    manifest = json.loads(_weekly_tier5_manifest_path().read_text(encoding="utf-8"))
+    args = manifest["commands"][0]["args"]
+
+    assert "--optimizer-backend" in args
+    optimizer_backend_idx = args.index("--optimizer-backend")
+    assert args[optimizer_backend_idx + 1] == "ondevice"
+    assert "--benchmark-mode" in args
+
+
+def test_weekly_tier5_workflow_sets_cache_and_ondevice_contract():
+    workflow_text = _weekly_tier5_workflow_path().read_text(encoding="utf-8")
+
+    assert "JAX_COMPILATION_CACHE_DIR" in workflow_text
+    assert "--optimizer-backend ondevice" in workflow_text
+    assert "--benchmark-mode" in workflow_text
 
 
 def test_single_stage_outer_loop_probe_resolves_expected_boozer_method():

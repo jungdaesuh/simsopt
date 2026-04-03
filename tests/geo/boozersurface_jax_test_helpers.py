@@ -588,7 +588,7 @@ class _MockBiotSavart(_bsj.Optimizable):
     def __init__(self, coils):
         super().__init__(x0=np.asarray([]))
         self._coils = coils
-        self._coil_spec = _bsj.grouped_coil_set_spec_from_lists(
+        self._coil_spec = _bs_backend.grouped_coil_set_spec_from_lists(
             [coil.curve.gamma() for coil in coils],
             [coil.curve.gammadash() for coil in coils],
             [coil.current.get_value() for coil in coils],
