@@ -86,6 +86,38 @@ STOP_LABELS_DIAGNOSTIC = [
 ]
 
 
+def _full_torus_surface(surface):
+    """Create a full-torus copy of a surface for SurfaceClassifier.
+
+    SurfaceClassifier builds a 3D grid over [0, 2pi] in phi, but
+    surface.gamma() may only cover one half-period for stellarator-symmetric
+    surfaces.  Evaluating signed_distance_from_surface at phi values outside
+    the gamma coverage returns wrong distances, causing LevelsetStoppingCriterion
+    to falsely trigger.  This helper creates a full-torus surface that covers
+    all phi values.
+    """
+    from simsopt.geo import SurfaceXYZTensorFourier
+    if not isinstance(surface, SurfaceXYZTensorFourier):
+        return surface  # only XYZTensorFourier needs the fix
+    nphi_input = len(surface.quadpoints_phi)
+    ntheta_input = len(surface.quadpoints_theta)
+    if nphi_input < 2:
+        return surface
+    phi_spacing = float(surface.quadpoints_phi[1] - surface.quadpoints_phi[0])
+    phi_extent = phi_spacing * nphi_input
+    if phi_extent <= 0.0:
+        return surface
+    phi_density = nphi_input / phi_extent
+    full_torus_nphi = max(nphi_input, int(round(phi_density)))
+    surf_full = SurfaceXYZTensorFourier(
+        nfp=surface.nfp, stellsym=surface.stellsym,
+        mpol=surface.mpol, ntor=surface.ntor,
+        quadpoints_phi=np.linspace(0, 1, full_torus_nphi, endpoint=False),
+        quadpoints_theta=np.linspace(0, 1, ntheta_input, endpoint=False))
+    surf_full.x = surface.x
+    return surf_full
+
+
 def build_stopping_criteria(surface, include_surface_exit=True, box_padding=0.05):
     """Build stopping criteria from a Boozer surface.
 
@@ -107,7 +139,8 @@ def build_stopping_criteria(surface, include_surface_exit=True, box_padding=0.05
     ]
 
     if include_surface_exit:
-        classifier = SurfaceClassifier(surface, h=0.03, p=2)
+        surf_for_classifier = _full_torus_surface(surface)
+        classifier = SurfaceClassifier(surf_for_classifier, h=0.03, p=2)
         criteria = [LevelsetStoppingCriterion(classifier.dist)] + box_criteria
         return criteria, STOP_LABELS_VALIDATION
     else:
