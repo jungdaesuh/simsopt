@@ -2058,6 +2058,7 @@ if __name__ == "__main__":
                 boozer_surface,
                 bs,
                 iota_target,
+                include_profile_suite=args.profile_target_lane,
             )
             target_value_and_grad_objective = target_lane_runtime_bundle["value_and_grad"]
             if args.profile_target_lane:

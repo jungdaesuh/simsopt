@@ -1384,13 +1384,21 @@ def _make_traceable_objective_profile_suite_from_compiled_bundle(
     }
 
 
-def make_traceable_objective_runtime_bundle(booz_jax, bs_jax, iota_target):
+def make_traceable_objective_runtime_bundle(
+    booz_jax,
+    bs_jax,
+    iota_target,
+    *,
+    include_profile_suite=False,
+):
     """Build the shared runtime bundle for the target single-stage objective path."""
     compiled_bundle = _build_traceable_objective_compiled_bundle(
         booz_jax,
         bs_jax,
         iota_target,
     )
+    if not include_profile_suite:
+        return {"value_and_grad": compiled_bundle["compiled_value_and_grad_for"]}
     return {
         "value_and_grad": compiled_bundle["compiled_value_and_grad_for"],
         "profile_suite": _make_traceable_objective_profile_suite_from_compiled_bundle(
@@ -1407,4 +1415,5 @@ def make_traceable_objective_profile_suite(booz_jax, bs_jax, iota_target):
         booz_jax,
         bs_jax,
         iota_target,
+        include_profile_suite=True,
     )["profile_suite"]

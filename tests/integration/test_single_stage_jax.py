@@ -4245,7 +4245,13 @@ class TestTraceableObjective:
         return profile_suite, coil_dofs
 
     @staticmethod
-    def _make_traceable_runtime_bundle(bs_jax, booz_jax, *, iota_target_shift=0.0):
+    def _make_traceable_runtime_bundle(
+        bs_jax,
+        booz_jax,
+        *,
+        iota_target_shift=0.0,
+        include_profile_suite=True,
+    ):
         """Build the shared traceable runtime bundle and coil DOFs."""
         iota_target, coil_dofs = TestTraceableObjective._traceable_target_inputs(
             bs_jax,
@@ -4261,6 +4267,7 @@ class TestTraceableObjective:
             booz_jax,
             bs_jax,
             iota_target,
+            include_profile_suite=include_profile_suite,
         )
         return runtime_bundle, coil_dofs
 
@@ -4377,6 +4384,18 @@ class TestTraceableObjective:
             runtime_bundle["profile_suite"]["value_and_grad_pipeline"]
             is runtime_bundle["value_and_grad"]
         )
+
+    def test_traceable_runtime_bundle_skips_profile_suite_by_default(self, boozer_setup):
+        """The default runtime bundle should avoid building profiling siblings."""
+        (_, _, _, _, bs_jax, _, booz_jax, _) = boozer_setup
+        runtime_bundle, _ = self._make_traceable_runtime_bundle(
+            bs_jax,
+            booz_jax,
+            include_profile_suite=False,
+        )
+
+        assert "value_and_grad" in runtime_bundle
+        assert "profile_suite" not in runtime_bundle
 
     def test_pure_objective_traces_to_jaxpr(self, boozer_setup):
         """Test 4: jax.make_jaxpr succeeds without a callback bridge."""
