@@ -9,14 +9,29 @@ from .specs import make_surface_rzfourier_spec
 from .specs import SurfaceRZFourierSpec
 
 
+def _device_one(reference: jax.Array) -> jax.Array:
+    return jnp.exp(jnp.sum(reference - reference))
+
+
+def _two_pi(reference: jax.Array) -> jax.Array:
+    pi = jnp.arccos(-_device_one(reference))
+    return pi + pi
+
+
+def _float_scalar(value: int, reference: jax.Array) -> jax.Array:
+    return jnp.sum(jnp.broadcast_to(_device_one(reference), (value,)))
+
+
 def _mode_angles(spec: SurfaceRZFourierSpec) -> tuple[jax.Array, jax.Array, jax.Array]:
-    theta = 2.0 * jnp.pi * spec.quadpoints_theta
-    phi = 2.0 * jnp.pi * spec.quadpoints_phi
+    two_pi = _two_pi(spec.quadpoints_theta)
+    theta = two_pi * spec.quadpoints_theta
+    phi = two_pi * spec.quadpoints_phi
     m = jnp.arange(spec.mpol + 1, dtype=jnp.float64)
     n = jnp.arange(-spec.ntor, spec.ntor + 1, dtype=jnp.float64)
+    nfp = _float_scalar(spec.nfp, n)
     angles = (
         m[None, None, :, None] * theta[None, :, None, None]
-        - spec.nfp * n[None, None, None, :] * phi[:, None, None, None]
+        - nfp * n[None, None, None, :] * phi[:, None, None, None]
     )
     return phi, jnp.cos(angles), jnp.sin(angles)
 
@@ -223,7 +238,9 @@ def surface_rz_fourier_gamma_from_spec(spec: SurfaceRZFourierSpec):
 def surface_rz_fourier_gammadash1_from_spec(spec: SurfaceRZFourierSpec):
     phi, cos_terms, sin_terms = _mode_angles(spec)
     n = jnp.arange(-spec.ntor, spec.ntor + 1, dtype=jnp.float64)
-    scale = 2.0 * jnp.pi * spec.nfp * n[None, None, None, :]
+    two_pi = _two_pi(n)
+    nfp = _float_scalar(spec.nfp, n)
+    scale = two_pi * nfp * n[None, None, None, :]
     d_r = jnp.sum(
         spec.rc[None, None, :, :] * sin_terms * scale
         - spec.rs[None, None, :, :] * cos_terms * scale,
@@ -236,7 +253,6 @@ def surface_rz_fourier_gammadash1_from_spec(spec: SurfaceRZFourierSpec):
     )
     r, _ = _radius_height_from_modes(spec, cos_terms, sin_terms)
     cos_phi, sin_phi = _phi_frame(phi)
-    two_pi = 2.0 * jnp.pi
     return jnp.stack(
         [
             d_r * cos_phi - r * (two_pi * sin_phi),
@@ -250,7 +266,7 @@ def surface_rz_fourier_gammadash1_from_spec(spec: SurfaceRZFourierSpec):
 def surface_rz_fourier_gammadash2_from_spec(spec: SurfaceRZFourierSpec):
     phi, cos_terms, sin_terms = _mode_angles(spec)
     m = jnp.arange(spec.mpol + 1, dtype=jnp.float64)
-    scale = 2.0 * jnp.pi * m[None, None, :, None]
+    scale = _two_pi(m) * m[None, None, :, None]
     d_r = jnp.sum(
         -spec.rc[None, None, :, :] * sin_terms * scale
         + spec.rs[None, None, :, :] * cos_terms * scale,

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import jax
 import jax.numpy as jnp
 
 from .field import grouped_biot_savart_B_from_spec
@@ -18,31 +19,41 @@ from .surface_rzfourier import (
 from ..objectives.integral_bdotn_jax import integral_BdotN as integral_BdotN_jax
 
 
+def _device_one(reference):
+    return jnp.exp(jnp.sum(reference - reference))
+
+
+def _two_pi(reference):
+    pi = jnp.arccos(-_device_one(reference))
+    return pi + pi
+
+
+def _float_scalar(value: int, reference):
+    return jnp.sum(jnp.broadcast_to(_device_one(reference), (value,)))
+
+
 def _fixed_surface_target_array(normal, target):
-    nphi, ntheta = normal.shape[:2]
     if target is None:
-        return jnp.zeros((nphi, ntheta), dtype=jnp.float64)
-    return jnp.asarray(target, dtype=jnp.float64)
+        zero_target = jnp.sum(normal, axis=-1)
+        return zero_target - zero_target
+    return jax.device_put(target).astype(jnp.float64)
 
 
 def build_fourier_basis(quadpoints_jax, order):
     """Precompute the CurveXYZFourier basis matrix and its derivative."""
-    k = 2 * order + 1
-    npts = quadpoints_jax.shape[0]
-    basis = jnp.zeros((npts, k), dtype=jnp.float64)
-    dbasis = jnp.zeros((npts, k), dtype=jnp.float64)
-
-    basis = basis.at[:, 0].set(1.0)
+    zeros = quadpoints_jax - quadpoints_jax
+    basis_columns = [jnp.exp(zeros)]
+    dbasis_columns = [zeros]
+    two_pi = _two_pi(quadpoints_jax)
     for j in range(1, order + 1):
-        arg = 2.0 * jnp.pi * j * quadpoints_jax
+        mode = _float_scalar(j, quadpoints_jax)
+        arg = two_pi * mode * quadpoints_jax
         s = jnp.sin(arg)
         c = jnp.cos(arg)
-        basis = basis.at[:, 2 * j - 1].set(s)
-        basis = basis.at[:, 2 * j].set(c)
-        dbasis = dbasis.at[:, 2 * j - 1].set(2.0 * jnp.pi * j * c)
-        dbasis = dbasis.at[:, 2 * j].set(-2.0 * jnp.pi * j * s)
+        basis_columns.extend((s, c))
+        dbasis_columns.extend((two_pi * mode * c, -(two_pi * mode) * s))
 
-    return basis, dbasis
+    return jnp.stack(basis_columns, axis=1), jnp.stack(dbasis_columns, axis=1)
 
 
 def fixed_surface_flux_integral_from_B(B, flux_spec: FixedSurfaceFluxSpec):

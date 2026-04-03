@@ -245,6 +245,136 @@ def test_transfer_guard_disallow_rejects_implicit_host_to_device_jit_inputs():
     )
 
 
+def test_transfer_guard_disallow_allows_curvecwsfouriercpp_init():
+    """CurveCWSFourierCPP should explicitly materialize quadpoints under disallow mode."""
+    _assert_import_check_passes(
+        """
+        import numpy as np
+        import simsopt.config as simsopt_config
+        from simsopt.geo import SurfaceRZFourier
+        from simsopt.geo.curvecwsfourier import CurveCWSFourierCPP
+
+        simsopt_config.set_backend("jax_cpu_parity", transfer_guard="disallow")
+        quadpoints = np.linspace(0.0, 1.0, 33, endpoint=False)
+        surf = SurfaceRZFourier(
+            nfp=5,
+            stellsym=True,
+            mpol=1,
+            ntor=0,
+            quadpoints_phi=np.arange(64) / 64,
+            quadpoints_theta=np.arange(64) / 64,
+        )
+        curve = CurveCWSFourierCPP(quadpoints, 3, surf, G=0, H=0)
+        assert curve.numquadpoints == 33
+    """,
+        failure_message="CurveCWSFourierCPP transfer-guard init smoke failed",
+    )
+
+
+def test_transfer_guard_disallow_allows_surfacerzfourier_spec_defaults():
+    """SurfaceRZFourier spec defaults should avoid zeros_like scalar materialization."""
+    _assert_import_check_passes(
+        """
+        import numpy as np
+        import simsopt.config as simsopt_config
+        from simsopt.geo import SurfaceRZFourier
+
+        simsopt_config.set_backend("jax_cpu_parity", transfer_guard="disallow")
+        surf = SurfaceRZFourier(
+            nfp=5,
+            stellsym=True,
+            mpol=1,
+            ntor=0,
+            quadpoints_phi=np.arange(16) / 16,
+            quadpoints_theta=np.arange(16) / 16,
+        )
+        spec = surf.surface_spec()
+        assert spec.rs.shape == spec.rc.shape
+        assert spec.zc.shape == spec.rc.shape
+    """,
+        failure_message="SurfaceRZFourier transfer-guard spec smoke failed",
+    )
+
+
+def test_transfer_guard_disallow_allows_surface_rzfourier_gamma_from_spec():
+    """Surface gamma evaluation should avoid implicit eager scalar transfers."""
+    _assert_import_check_passes(
+        """
+        import numpy as np
+        import simsopt.config as simsopt_config
+        from simsopt.geo import SurfaceRZFourier
+        from simsopt.jax_core.surface_rzfourier import surface_rz_fourier_gamma_from_spec
+
+        simsopt_config.set_backend("jax_cpu_parity", transfer_guard="disallow")
+        surf = SurfaceRZFourier(
+            nfp=5,
+            stellsym=True,
+            mpol=1,
+            ntor=0,
+            quadpoints_phi=np.arange(16) / 16,
+            quadpoints_theta=np.arange(16) / 16,
+        )
+        gamma = surface_rz_fourier_gamma_from_spec(surf.surface_spec())
+        assert gamma.shape == (16, 16, 3)
+    """,
+        failure_message="SurfaceRZFourier gamma transfer-guard smoke failed",
+    )
+
+
+def test_transfer_guard_disallow_allows_surface_rzfourier_normal_from_spec():
+    """Surface normal evaluation should stay transfer-clean under disallow mode."""
+    _assert_import_check_passes(
+        """
+        import numpy as np
+        import simsopt.config as simsopt_config
+        from simsopt.geo import SurfaceRZFourier
+        from simsopt.jax_core.surface_rzfourier import surface_rz_fourier_normal_from_spec
+
+        simsopt_config.set_backend("jax_cpu_parity", transfer_guard="disallow")
+        surf = SurfaceRZFourier(
+            nfp=5,
+            stellsym=True,
+            mpol=1,
+            ntor=0,
+            quadpoints_phi=np.arange(16) / 16,
+            quadpoints_theta=np.arange(16) / 16,
+        )
+        normal = surface_rz_fourier_normal_from_spec(surf.surface_spec())
+        assert normal.shape == (16, 16, 3)
+    """,
+        failure_message="SurfaceRZFourier normal transfer-guard smoke failed",
+    )
+
+
+def test_transfer_guard_disallow_allows_squaredfluxjax_construction():
+    """SquaredFluxJAX construction should not fail in fixed-surface setup."""
+    _assert_import_check_passes(
+        """
+        import numpy as np
+        import simsopt.config as simsopt_config
+        from simsopt.geo import SurfaceRZFourier, CurveXYZFourier
+        from simsopt.field import BiotSavartJAX, Coil, Current
+        from simsopt.objectives import SquaredFluxJAX
+
+        simsopt_config.set_backend("jax_cpu_parity", transfer_guard="disallow")
+        surf = SurfaceRZFourier(
+            nfp=1,
+            stellsym=True,
+            mpol=1,
+            ntor=0,
+            quadpoints_phi=np.arange(8) / 8,
+            quadpoints_theta=np.arange(8) / 8,
+        )
+        curve = CurveXYZFourier(16, 1)
+        curve.x = np.array([1.0, 0.1, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.1])
+        bs_jax = BiotSavartJAX([Coil(curve, Current(1.0))])
+        objective = SquaredFluxJAX(surf, bs_jax)
+        assert objective._flux_spec.normal.shape == (8, 8, 3)
+    """,
+        failure_message="SquaredFluxJAX transfer-guard construction smoke failed",
+    )
+
+
 def test_native_cpu_backend_selection_does_not_require_jax_runtime():
     """native_cpu config must not force a JAX import when only CPU mode is selected."""
     rc, err = _run_import_check("""
