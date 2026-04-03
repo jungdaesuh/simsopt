@@ -1897,9 +1897,9 @@ if __name__ == "__main__":
     if args.ss_dist < 0.04:
         print(f"WARNING: --ss-dist {args.ss_dist} below baseline default, clamped to 0.04")
     CURVATURE_WEIGHT = args.curvature_weight
-    CURVATURE_THRESHOLD = max(args.curvature_threshold, 20)  # Minimum floor; current HBT policy default is 40
-    if args.curvature_threshold < 20:
-        print(f"WARNING: --curvature-threshold {args.curvature_threshold} below minimum floor, clamped to 20")
+    CURVATURE_THRESHOLD = max(args.curvature_threshold, 40)
+    if args.curvature_threshold < 40:
+        print(f"WARNING: --curvature-threshold {args.curvature_threshold} below hardware floor, clamped to 40")
     SURFACE_GAP_THRESHOLD = max(args.surface_gap_threshold, 0.0)
     if len(surface_data) > 1 and SURF_DIST_WEIGHT != 0:
         print("WARNING: SURF_DIST_WEIGHT is diagnostic-only in multi-surface mode; outer-vessel spacing is enforced as a rejection gate.")

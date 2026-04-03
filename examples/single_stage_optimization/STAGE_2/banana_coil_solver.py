@@ -544,9 +544,9 @@ if __name__ == "__main__":
 
     # Threshold and weight for the coil curvature penalty
     CURVATURE_WEIGHT = args.curvature_weight
-    CURVATURE_THRESHOLD = max(args.curvature_threshold, 20)  # Baseline default floor
-    if args.curvature_threshold < 20:
-        print(f"WARNING: --curvature-threshold {args.curvature_threshold} below minimum floor, clamped to 20")
+    CURVATURE_THRESHOLD = max(args.curvature_threshold, 40)
+    if args.curvature_threshold < 40:
+        print(f"WARNING: --curvature-threshold {args.curvature_threshold} below hardware floor, clamped to 40")
 
     # Define the individual terms objective function:
     Jf = SquaredFlux(new_surf, new_bs) # penalty on B dot n
