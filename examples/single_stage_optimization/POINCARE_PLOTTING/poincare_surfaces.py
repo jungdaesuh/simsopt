@@ -15,7 +15,7 @@ from simsopt.field import (
     MaxRStoppingCriterion,
     MinRStoppingCriterion,
 )
-from simsopt.geo import SurfaceClassifier
+from simsopt.geo import SurfaceClassifier, curves_to_vtk
 
 # Shared topology scorer — single source of truth for helpers and metrics
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -153,6 +153,10 @@ if __name__ == "__main__":
             print(f"WARNING: mismatched opt files (bs={os.path.exists(opt_bs_path)}, surf={os.path.exists(opt_surf_path)}). Using init for both.")
         else:
             print(f"Loaded INITIAL field + surface (no opt found)")
+
+    # Export the exact geometry used by this Poincare run for ParaView inspection.
+    curves_to_vtk([coil.curve for coil in bs.coils], os.path.join(OUT_DIR, f"curves_{field_label}_poincare"), close=True)
+    surf.to_vtk(os.path.join(OUT_DIR, f"surf_{field_label}_poincare"))
 
     # Build stopping criteria from the shared module (single source of truth)
     nfp = surf.nfp
