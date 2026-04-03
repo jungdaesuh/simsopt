@@ -238,6 +238,19 @@ def _normalized_line_lifetimes(line_metrics, tmax):
     return np.asarray(lifetimes, dtype=float)
 
 
+def _empty_confinement_surrogate(effective_k, early_exit_threshold):
+    return {
+        "mean_line_loss": 0.0,
+        "worst_k_line_loss": 0.0,
+        "early_exit_fraction": 0.0,
+        "confinement_loss": 0.0,
+        "confinement_surrogate_k": effective_k,
+        "confinement_early_exit_threshold": float(early_exit_threshold),
+        "line_lifetimes": [],
+        "line_losses": [],
+    }
+
+
 def summarize_confinement_surrogate(
     line_metrics,
     tmax,
@@ -249,20 +262,12 @@ def summarize_confinement_surrogate(
 ):
     """Build a tail-sensitive confinement surrogate from traced line metrics."""
     lifetimes = _normalized_line_lifetimes(line_metrics, tmax)
+    effective_k = max(int(worst_k), 1)
     if lifetimes.size == 0:
-        return {
-            "mean_line_loss": 0.0,
-            "worst_k_line_loss": 0.0,
-            "early_exit_fraction": 0.0,
-            "confinement_loss": 0.0,
-            "confinement_surrogate_k": int(max(worst_k, 1)),
-            "confinement_early_exit_threshold": float(early_exit_threshold),
-            "line_lifetimes": [],
-            "line_losses": [],
-        }
+        return _empty_confinement_surrogate(effective_k, early_exit_threshold)
 
     losses = 1.0 - lifetimes
-    effective_k = min(max(int(worst_k), 1), losses.size)
+    effective_k = min(effective_k, losses.size)
     worst_losses = np.partition(losses, -effective_k)[-effective_k:]
     early_exit_fraction = float(np.mean(lifetimes < early_exit_threshold))
     mean_line_loss = float(np.mean(losses))

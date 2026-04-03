@@ -1726,9 +1726,7 @@ class ConfinementSurrogateTests(unittest.TestCase):
 
 
 class RunIdentityTests(unittest.TestCase):
-    def test_run_identity_changes_when_only_confinement_settings_change(self):
-        module = load_single_stage_example_module()
-
+    def _configure_module_defaults(self, module):
         module.MULTISURFACE_RAMP_ITERATIONS = 0
         module.INNER_SURFACE_INITIAL_WEIGHT = 1.0
         module.TOPOLOGY_GATE_FIELDLINES = 4
@@ -1745,7 +1743,8 @@ class RunIdentityTests(unittest.TestCase):
         module.CONFINEMENT_SURROGATE_WORST_WEIGHT = 0.6
         module.CONFINEMENT_SURROGATE_EARLY_WEIGHT = 0.2
 
-        base_args = SimpleNamespace(
+    def _make_identity_args(self):
+        return SimpleNamespace(
             cc_dist=0.05,
             cc_weight=100.0,
             curvature_weight=0.0001,
@@ -1762,8 +1761,9 @@ class RunIdentityTests(unittest.TestCase):
             multisurface_initial_step_maxiter=0,
         )
 
-        base_config = module.build_run_identity_config(
-            base_args,
+    def _build_identity(self, module, args):
+        return module.build_run_identity_config(
+            args,
             "stage2-seed.json",
             "final",
             0.1,
@@ -1776,20 +1776,14 @@ class RunIdentityTests(unittest.TestCase):
             None,
         )
 
+    def test_run_identity_changes_when_only_confinement_settings_change(self):
+        module = load_single_stage_example_module()
+        self._configure_module_defaults(module)
+        base_args = self._make_identity_args()
+
+        base_config = self._build_identity(module, base_args)
         module.CONFINEMENT_OBJECTIVE_WEIGHT = 5.0
-        weighted_config = module.build_run_identity_config(
-            base_args,
-            "stage2-seed.json",
-            "final",
-            0.1,
-            0.15,
-            0.15,
-            0.37,
-            0.22,
-            80,
-            80,
-            None,
-        )
+        weighted_config = self._build_identity(module, base_args)
 
         self.assertNotEqual(base_config, weighted_config)
 
