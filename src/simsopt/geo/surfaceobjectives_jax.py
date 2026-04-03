@@ -467,7 +467,9 @@ class BoozerResidualJAX(Optimizable):
 
     def _inner_objective_state(self, iota, G, *, sdofs=None):
         """Return the packed inner decision vector and optimize-G flag."""
-        surface_dofs = self.boozer_surface._get_surface_dofs() if sdofs is None else sdofs
+        surface_dofs = (
+            self.boozer_surface._get_surface_dofs() if sdofs is None else sdofs
+        )
         optimize_G = G is not None
         return (
             self.boozer_surface._pack_decision_vector(iota, G, sdofs=surface_dofs),
@@ -1195,60 +1197,6 @@ def _build_traceable_objective_compiled_bundle(booz_jax, bs_jax, iota_target):
     }
 
 
-def _build_traceable_value_and_grad_runtime(booz_jax, bs_jax, iota_target):
-    """Build the minimal compiled runtime needed by the ondevice target lane."""
-    state = _build_traceable_objective_state(booz_jax, bs_jax, iota_target)
-    objective_kwargs = state["objective_kwargs"]
-    baseline_x = state["baseline_x"]
-    baseline_value = state["baseline_value"]
-    baseline_plu = state["baseline_plu"]
-    baseline_coil_dofs = state["baseline_coil_dofs"]
-    optimize_G = state["optimize_G"]
-    predictor_kind = state["predictor_kind"]
-    failure_value = state["failure_value"]
-    failure_scale = state["failure_scale"]
-    baseline_value_jax = jnp.asarray(baseline_value, dtype=jnp.float64)
-
-    def _failure_gradient_for(coil_dofs):
-        return failure_scale * (coil_dofs - baseline_coil_dofs)
-
-    def _value_and_grad_for(coil_dofs):
-        result = _traceable_forward_result(
-            booz_jax,
-            bs_jax,
-            coil_dofs=coil_dofs,
-            baseline_x=baseline_x,
-            baseline_value=baseline_value_jax,
-            baseline_plu=baseline_plu,
-            optimize_G=optimize_G,
-            baseline_coil_dofs=baseline_coil_dofs,
-            failure_value=failure_value,
-            failure_scale=failure_scale,
-            predictor_kind=predictor_kind,
-            objective_kwargs=objective_kwargs,
-        )
-
-        def _success(_):
-            return _traceable_total_gradient(
-                booz_jax,
-                bs_jax,
-                coil_dofs=coil_dofs,
-                solved_x=result["x"],
-                solved_plu=result["plu"],
-                objective_kwargs=objective_kwargs,
-            )
-
-        grad = jax.lax.cond(
-            result["success"],
-            _success,
-            lambda _: _failure_gradient_for(coil_dofs),
-            operand=None,
-        )
-        return result["value"], grad
-
-    return jax.jit(_value_and_grad_for)
-
-
 def make_traceable_objective(booz_jax, bs_jax, iota_target):
     """Build a pure function ``f(coil_dofs) -> scalar`` for single-stage optimization.
 
@@ -1280,7 +1228,6 @@ def make_traceable_objective(booz_jax, bs_jax, iota_target):
         bs_jax,
         iota_target,
     )
-    baseline_coil_dofs = compiled_bundle["state"]["baseline_coil_dofs"]
     compiled_forward_result_for = compiled_bundle["compiled_forward_result_for"]
     compiled_total_gradient_for = compiled_bundle["compiled_total_gradient_for"]
     failure_gradient_for = compiled_bundle["failure_gradient_for"]
@@ -1370,10 +1317,12 @@ def _make_traceable_objective_profile_suite_from_compiled_bundle(
     def _solve_for(coil_dofs):
         coil_set_spec = bs_jax.coil_set_spec_from_dofs(coil_dofs)
         warmstart_x = _warmstart_for(coil_dofs)
-        warmstart_sdofs, warmstart_iota, warmstart_G = booz_jax._unpack_decision_vector_jax(
-            warmstart_x,
-            optimize_G,
-            coil_set_spec=coil_set_spec,
+        warmstart_sdofs, warmstart_iota, warmstart_G = (
+            booz_jax._unpack_decision_vector_jax(
+                warmstart_x,
+                optimize_G,
+                coil_set_spec=coil_set_spec,
+            )
         )
         solve_result = booz_jax.run_code_traceable(
             coil_set_spec,
@@ -1434,7 +1383,9 @@ def _make_traceable_objective_profile_suite_from_compiled_bundle(
 
     return {
         "forward_result": compiled_forward_result_for,
-        "forward_value": jax.jit(lambda coil_dofs: compiled_forward_result_for(coil_dofs)["value"]),
+        "forward_value": jax.jit(
+            lambda coil_dofs: compiled_forward_result_for(coil_dofs)["value"]
+        ),
         "warmstart_predict": jax.jit(_warmstart_for),
         "inner_solve": jax.jit(_solve_for),
         "surface_geometry": jax.jit(_surface_geometry_for),
@@ -1453,22 +1404,18 @@ def make_traceable_objective_runtime_bundle(
     include_profile_suite=False,
 ):
     """Build the shared runtime bundle for the target single-stage objective path."""
-    compiled_value_and_grad_for = _build_traceable_value_and_grad_runtime(
+    compiled_bundle = _build_traceable_objective_compiled_bundle(
         booz_jax,
         bs_jax,
         iota_target,
     )
+    compiled_value_and_grad_for = compiled_bundle["compiled_value_and_grad_for"]
     if not include_profile_suite:
         return {"value_and_grad": compiled_value_and_grad_for}
-    profile_bundle = _build_traceable_objective_compiled_bundle(
-        booz_jax,
-        bs_jax,
-        iota_target,
-    )
     return {
         "value_and_grad": compiled_value_and_grad_for,
         "profile_suite": _make_traceable_objective_profile_suite_from_compiled_bundle(
-            profile_bundle,
+            compiled_bundle,
             booz_jax,
             bs_jax,
             value_and_grad_pipeline=compiled_value_and_grad_for,
