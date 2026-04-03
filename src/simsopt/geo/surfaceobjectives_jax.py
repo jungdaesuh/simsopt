@@ -1195,6 +1195,60 @@ def _build_traceable_objective_compiled_bundle(booz_jax, bs_jax, iota_target):
     }
 
 
+def _build_traceable_value_and_grad_runtime(booz_jax, bs_jax, iota_target):
+    """Build the minimal compiled runtime needed by the ondevice target lane."""
+    state = _build_traceable_objective_state(booz_jax, bs_jax, iota_target)
+    objective_kwargs = state["objective_kwargs"]
+    baseline_x = state["baseline_x"]
+    baseline_value = state["baseline_value"]
+    baseline_plu = state["baseline_plu"]
+    baseline_coil_dofs = state["baseline_coil_dofs"]
+    optimize_G = state["optimize_G"]
+    predictor_kind = state["predictor_kind"]
+    failure_value = state["failure_value"]
+    failure_scale = state["failure_scale"]
+    baseline_value_jax = jnp.asarray(baseline_value, dtype=jnp.float64)
+
+    def _failure_gradient_for(coil_dofs):
+        return failure_scale * (coil_dofs - baseline_coil_dofs)
+
+    def _value_and_grad_for(coil_dofs):
+        result = _traceable_forward_result(
+            booz_jax,
+            bs_jax,
+            coil_dofs=coil_dofs,
+            baseline_x=baseline_x,
+            baseline_value=baseline_value_jax,
+            baseline_plu=baseline_plu,
+            optimize_G=optimize_G,
+            baseline_coil_dofs=baseline_coil_dofs,
+            failure_value=failure_value,
+            failure_scale=failure_scale,
+            predictor_kind=predictor_kind,
+            objective_kwargs=objective_kwargs,
+        )
+
+        def _success(_):
+            return _traceable_total_gradient(
+                booz_jax,
+                bs_jax,
+                coil_dofs=coil_dofs,
+                solved_x=result["x"],
+                solved_plu=result["plu"],
+                objective_kwargs=objective_kwargs,
+            )
+
+        grad = jax.lax.cond(
+            result["success"],
+            _success,
+            lambda _: _failure_gradient_for(coil_dofs),
+            operand=None,
+        )
+        return result["value"], grad
+
+    return jax.jit(_value_and_grad_for)
+
+
 def make_traceable_objective(booz_jax, bs_jax, iota_target):
     """Build a pure function ``f(coil_dofs) -> scalar`` for single-stage optimization.
 
@@ -1283,6 +1337,8 @@ def _make_traceable_objective_profile_suite_from_compiled_bundle(
     compiled_bundle,
     booz_jax,
     bs_jax,
+    *,
+    value_and_grad_pipeline=None,
 ):
     """Build profiling closures from the shared traceable runtime bundle."""
     state = compiled_bundle["state"]
@@ -1293,6 +1349,11 @@ def _make_traceable_objective_profile_suite_from_compiled_bundle(
     optimize_G = state["optimize_G"]
     predictor_kind = state["predictor_kind"]
     compiled_forward_result_for = compiled_bundle["compiled_forward_result_for"]
+    resolved_value_and_grad_pipeline = (
+        compiled_bundle["compiled_value_and_grad_for"]
+        if value_and_grad_pipeline is None
+        else value_and_grad_pipeline
+    )
 
     def _warmstart_for(coil_dofs):
         return _traceable_predict_warmstart_x(
@@ -1380,7 +1441,7 @@ def _make_traceable_objective_profile_suite_from_compiled_bundle(
         "field_eval": jax.jit(_field_for),
         "solved_total_objective": jax.jit(_solved_total_objective_for),
         "solved_total_gradient": jax.jit(_total_gradient_for),
-        "value_and_grad_pipeline": compiled_bundle["compiled_value_and_grad_for"],
+        "value_and_grad_pipeline": resolved_value_and_grad_pipeline,
     }
 
 
@@ -1392,19 +1453,25 @@ def make_traceable_objective_runtime_bundle(
     include_profile_suite=False,
 ):
     """Build the shared runtime bundle for the target single-stage objective path."""
-    compiled_bundle = _build_traceable_objective_compiled_bundle(
+    compiled_value_and_grad_for = _build_traceable_value_and_grad_runtime(
         booz_jax,
         bs_jax,
         iota_target,
     )
     if not include_profile_suite:
-        return {"value_and_grad": compiled_bundle["compiled_value_and_grad_for"]}
+        return {"value_and_grad": compiled_value_and_grad_for}
+    profile_bundle = _build_traceable_objective_compiled_bundle(
+        booz_jax,
+        bs_jax,
+        iota_target,
+    )
     return {
-        "value_and_grad": compiled_bundle["compiled_value_and_grad_for"],
+        "value_and_grad": compiled_value_and_grad_for,
         "profile_suite": _make_traceable_objective_profile_suite_from_compiled_bundle(
-            compiled_bundle,
+            profile_bundle,
             booz_jax,
             bs_jax,
+            value_and_grad_pipeline=compiled_value_and_grad_for,
         ),
     }
 
