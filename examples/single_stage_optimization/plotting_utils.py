@@ -7,18 +7,11 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 
-def norm_field_plot(surf, bs, filename):
-    """Plot the relative normal magnetic field B·n/|B| on a surface.
+def norm_field_summary(surf, bs):
+    """Return the relative normal-field summary used by the single-stage plots.
 
-    Computes the area-weighted mean |B·n|/|B| and generates a contourf plot.
-
-    Args:
-        surf: Surface object with gamma(), normal(), quadpoints_phi/theta.
-        bs: BiotSavart field object.
-        filename: Output path (without extension; .png is appended).
-
-    Returns:
-        mean_abs_relBfinal_norm: Area-weighted mean of |B·n|/|B|.
+    Computes the area-weighted mean |B·n|/|B| and the intermediate arrays
+    needed for the contour plot without performing any plotting itself.
     """
     theta = surf.quadpoints_theta
     phi = surf.quadpoints_phi
@@ -34,6 +27,30 @@ def norm_field_plot(surf, bs, filename):
     relBfinal_norm = Bfinal_norm / modBfinal
     abs_relBfinal_norm_dA = np.abs(relBfinal_norm.reshape((-1, 1))) * surf_area
     mean_abs_relBfinal_norm = np.sum(abs_relBfinal_norm_dA) / np.sum(surf_area)
+    return mean_abs_relBfinal_norm, modBfinal, surf_area, phi, theta, relBfinal_norm
+
+
+def norm_field_plot(surf, bs, filename):
+    """Plot the relative normal magnetic field B·n/|B| on a surface.
+
+    Computes the area-weighted mean |B·n|/|B| and generates a contourf plot.
+
+    Args:
+        surf: Surface object with gamma(), normal(), quadpoints_phi/theta.
+        bs: BiotSavart field object.
+        filename: Output path (without extension; .png is appended).
+
+    Returns:
+        mean_abs_relBfinal_norm: Area-weighted mean of |B·n|/|B|.
+    """
+    (
+        mean_abs_relBfinal_norm,
+        modBfinal,
+        surf_area,
+        phi,
+        theta,
+        relBfinal_norm,
+    ) = norm_field_summary(surf, bs)
     max_rnorm = np.max(np.abs(relBfinal_norm))
 
     fig, ax = plt.subplots()

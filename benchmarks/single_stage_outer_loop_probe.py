@@ -15,7 +15,10 @@ SRC_ROOT = REPO_ROOT / "src"
 sys.path.insert(0, str(REPO_ROOT))
 sys.path.insert(0, str(SRC_ROOT))
 
-from benchmarks.single_stage_init_parity import _run_single_stage_case
+from benchmarks.single_stage_init_parity import (
+    _prefix_phase_timings,
+    _run_single_stage_case,
+)
 from benchmarks.single_stage_backend_routing import (
     resolve_boozer_optimizer_backend,
     resolve_boozer_optimizer_method,
@@ -155,6 +158,11 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_OUTER_PROOF_MAXITER,
         help="Single-stage outer-loop iteration budget for the proof rung.",
     )
+    parser.add_argument(
+        "--profile-target-lane",
+        action="store_true",
+        help="Record target-lane objective profiling breakdowns in the probe payload.",
+    )
     return parser.parse_args()
 
 
@@ -244,7 +252,14 @@ def main() -> None:
     )
     print_provenance(provenance)
 
-    case = _run_single_stage_case(args, "jax", platform=args.platform)
+    case = _run_single_stage_case(
+        args,
+        "jax",
+        platform=args.platform,
+        benchmark_mode=True,
+        load_surface_gamma=False,
+        profile_target_lane=args.profile_target_lane,
+    )
     summary, failures = evaluate_single_stage_outer_loop_probe(
         case["results"],
         expected_boozer_optimizer_backend=resolved_boozer_optimizer_backend,
@@ -256,10 +271,16 @@ def main() -> None:
         "provenance": provenance,
         "results": case["results"],
         "probe": summary,
-        "timings": {"jax_elapsed_s": float(case["elapsed_s"])},
+        "timings": {
+            "jax_elapsed_s": float(case["elapsed_s"]),
+            "jax_outer_elapsed_s": float(case["elapsed_s"]),
+            **_prefix_phase_timings("jax", case["phase_timings"]),
+        },
         "failures": failures,
         "passed": not failures,
     }
+    if "TARGET_LANE_PROFILE" in case["results"]:
+        payload["target_lane_profile"] = case["results"]["TARGET_LANE_PROFILE"]
     write_json(args.output_json, payload)
     if failures:
         print("SINGLE-STAGE OUTER-LOOP PROBE FAILED")

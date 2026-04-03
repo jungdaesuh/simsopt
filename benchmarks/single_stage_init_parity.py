@@ -203,11 +203,29 @@ def _resolve_target_lane_sync_policy(
     return _TARGET_LANE_FINAL_ONLY_SYNC
 
 
+def _extract_phase_timings(results: dict[str, Any]) -> dict[str, float]:
+    raw_timings = results.get("TIMINGS")
+    if not isinstance(raw_timings, dict):
+        return {}
+    timings: dict[str, float] = {}
+    for key, value in raw_timings.items():
+        if isinstance(value, (int, float, np.integer, np.floating)):
+            timings[str(key)] = float(value)
+    return timings
+
+
+def _prefix_phase_timings(prefix: str, timings: dict[str, float]) -> dict[str, float]:
+    return {f"{prefix}_{key}": float(value) for key, value in timings.items()}
+
+
 def _run_single_stage_case(
     args: argparse.Namespace,
     backend: str,
     *,
     platform: str,
+    benchmark_mode: bool = False,
+    load_surface_gamma: bool = True,
+    profile_target_lane: bool = False,
 ) -> dict[str, Any]:
     script_path = _single_stage_script_path()
     effective_platform = platform if backend == "jax" else "cpu"
@@ -250,6 +268,10 @@ def _run_single_stage_case(
                         args.boozer_optimizer_backend,
                     ]
                 )
+        if benchmark_mode:
+            command.append("--benchmark-mode")
+        if profile_target_lane:
+            command.append("--profile-target-lane")
         command.extend(
             [
                 "--target-lane-accepted-step-sync",
@@ -276,14 +298,17 @@ def _run_single_stage_case(
         elapsed_s = time.perf_counter() - start
 
         results_json = find_single_file(output_root, "results.json")
-        surf_json = find_single_file(output_root, "surf_init.json")
         results = dict(load_json(results_json))
-        surface_gamma = _load_surface_gamma_artifact(str(surf_json))
-        return {
+        payload = {
             "results": results,
-            "surface_gamma": surface_gamma,
+            "surface_gamma": None,
             "elapsed_s": float(elapsed_s),
+            "phase_timings": _extract_phase_timings(results),
         }
+        if load_surface_gamma:
+            surf_json = find_single_file(output_root, "surf_init.json")
+            payload["surface_gamma"] = _load_surface_gamma_artifact(str(surf_json))
+        return payload
 
 
 def _load_surface_gamma_artifact(surface_json_path: str) -> np.ndarray:
@@ -476,6 +501,8 @@ def main() -> None:
         "timings": {
             "cpu_elapsed_s": float(cpu_case["elapsed_s"]),
             "jax_elapsed_s": float(jax_case["elapsed_s"]),
+            **_prefix_phase_timings("cpu", cpu_case["phase_timings"]),
+            **_prefix_phase_timings("jax", jax_case["phase_timings"]),
         },
         "warnings": warnings,
         "failures": failures,
