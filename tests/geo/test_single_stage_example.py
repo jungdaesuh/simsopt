@@ -26,6 +26,12 @@ BOOZER_SURFACE_PATH = (
     / "geo"
     / "boozersurface.py"
 )
+TOPOLOGY_SCORER_MODULE_PATH = (
+    Path(__file__).resolve().parents[2]
+    / "examples"
+    / "single_stage_optimization"
+    / "topology_scorer.py"
+)
 TEST_MPOL = 8
 TEST_NTOR = 6
 TEST_VOL_TARGET = 0.1
@@ -38,6 +44,17 @@ def load_single_stage_example_module():
     spec = importlib.util.spec_from_file_location(
         f"single_stage_banana_example_{uuid.uuid4().hex}",
         EXAMPLE_MODULE_PATH,
+    )
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
+
+
+def load_topology_scorer_module():
+    spec = importlib.util.spec_from_file_location(
+        f"topology_scorer_{uuid.uuid4().hex}",
+        TOPOLOGY_SCORER_MODULE_PATH,
     )
     module = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
@@ -1667,6 +1684,114 @@ class FtolGtolDefaultTests(unittest.TestCase):
         source = EXAMPLE_MODULE_PATH.read_text()
         self.assertNotIn("ftol_by_mpol", source)
         self.assertNotIn("gtol_by_mpol", source)
+
+
+class ConfinementSurrogateTests(unittest.TestCase):
+    def test_topology_scorer_surrogate_emphasizes_tail_failures(self):
+        topology_module = load_topology_scorer_module()
+
+        line_metrics = [
+            {"survived": True, "first_exit_time": None},
+            {"survived": False, "first_exit_time": 80.0},
+            {"survived": False, "first_exit_time": 20.0},
+            {"survived": False, "first_exit_time": 10.0},
+        ]
+
+        surrogate = topology_module.summarize_confinement_surrogate(
+            line_metrics,
+            tmax=100.0,
+            worst_k=2,
+            early_exit_threshold=0.2,
+            mean_weight=0.2,
+            worst_weight=0.6,
+            early_weight=0.2,
+        )
+
+        self.assertAlmostEqual(surrogate["mean_line_loss"], 0.475)
+        self.assertAlmostEqual(surrogate["worst_k_line_loss"], 0.85)
+        self.assertAlmostEqual(surrogate["early_exit_fraction"], 0.25)
+        self.assertAlmostEqual(surrogate["confinement_loss"], 0.655)
+        self.assertEqual(surrogate["confinement_surrogate_k"], 2)
+
+    def test_checkpoint_confinement_objective_adds_weighted_loss(self):
+        module = load_single_stage_example_module()
+
+        objective = module.checkpoint_confinement_objective(
+            0.125,
+            {"confinement_loss": 0.4},
+            3.0,
+        )
+
+        self.assertAlmostEqual(objective, 1.325)
+
+
+class RunIdentityTests(unittest.TestCase):
+    def test_run_identity_changes_when_only_confinement_settings_change(self):
+        module = load_single_stage_example_module()
+
+        module.MULTISURFACE_RAMP_ITERATIONS = 0
+        module.INNER_SURFACE_INITIAL_WEIGHT = 1.0
+        module.TOPOLOGY_GATE_FIELDLINES = 4
+        module.TOPOLOGY_GATE_TMAX = 2.0
+        module.TOPOLOGY_GATE_TOL = 1e-7
+        module.TOPOLOGY_GATE_SURVIVAL_THRESHOLD = 0.25
+        module.TOPOLOGY_SCORER_EVERY = 10
+        module.TOPOLOGY_SCORER_NFIELDLINES = 12
+        module.TOPOLOGY_SCORER_TMAX = 50.0
+        module.CONFINEMENT_OBJECTIVE_WEIGHT = 0.0
+        module.CONFINEMENT_SURROGATE_WORST_K = 3
+        module.CONFINEMENT_SURROGATE_EARLY_THRESHOLD = 0.2
+        module.CONFINEMENT_SURROGATE_MEAN_WEIGHT = 0.2
+        module.CONFINEMENT_SURROGATE_WORST_WEIGHT = 0.6
+        module.CONFINEMENT_SURROGATE_EARLY_WEIGHT = 0.2
+
+        base_args = SimpleNamespace(
+            cc_dist=0.05,
+            cc_weight=100.0,
+            curvature_weight=0.0001,
+            curvature_threshold=40.0,
+            init_only=False,
+            basin_hops=0,
+            basin_stepsize=0.01,
+            ftol=None,
+            gtol=None,
+            num_surfaces=1,
+            inner_surface_ratio=0.8,
+            surface_gap_threshold=0.0,
+            multisurface_initial_step_scale=1.0,
+            multisurface_initial_step_maxiter=0,
+        )
+
+        base_config = module.build_run_identity_config(
+            base_args,
+            "stage2-seed.json",
+            "final",
+            0.1,
+            0.15,
+            0.15,
+            0.37,
+            0.22,
+            80,
+            80,
+            None,
+        )
+
+        module.CONFINEMENT_OBJECTIVE_WEIGHT = 5.0
+        weighted_config = module.build_run_identity_config(
+            base_args,
+            "stage2-seed.json",
+            "final",
+            0.1,
+            0.15,
+            0.15,
+            0.37,
+            0.22,
+            80,
+            80,
+            None,
+        )
+
+        self.assertNotEqual(base_config, weighted_config)
 
 
 if __name__ == "__main__":

@@ -226,11 +226,82 @@ def trace_metrics(fieldlines_tys, fieldlines_phi_hits, phis, stop_labels, mode="
     }
 
 
+def _normalized_line_lifetimes(line_metrics, tmax):
+    """Return normalized line lifetimes in [0, 1], where 1 means full survival."""
+    lifetimes = []
+    for metric in line_metrics:
+        if metric["survived"]:
+            lifetimes.append(1.0)
+            continue
+        exit_time = float(metric["first_exit_time"])
+        lifetimes.append(min(max(exit_time / tmax, 0.0), 1.0))
+    return np.asarray(lifetimes, dtype=float)
+
+
+def summarize_confinement_surrogate(
+    line_metrics,
+    tmax,
+    worst_k=3,
+    early_exit_threshold=0.2,
+    mean_weight=0.2,
+    worst_weight=0.6,
+    early_weight=0.2,
+):
+    """Build a tail-sensitive confinement surrogate from traced line metrics."""
+    lifetimes = _normalized_line_lifetimes(line_metrics, tmax)
+    if lifetimes.size == 0:
+        return {
+            "mean_line_loss": 0.0,
+            "worst_k_line_loss": 0.0,
+            "early_exit_fraction": 0.0,
+            "confinement_loss": 0.0,
+            "confinement_surrogate_k": int(max(worst_k, 1)),
+            "confinement_early_exit_threshold": float(early_exit_threshold),
+            "line_lifetimes": [],
+            "line_losses": [],
+        }
+
+    losses = 1.0 - lifetimes
+    effective_k = min(max(int(worst_k), 1), losses.size)
+    worst_losses = np.partition(losses, -effective_k)[-effective_k:]
+    early_exit_fraction = float(np.mean(lifetimes < early_exit_threshold))
+    mean_line_loss = float(np.mean(losses))
+    worst_k_line_loss = float(np.mean(worst_losses))
+    confinement_loss = float(
+        mean_weight * mean_line_loss
+        + worst_weight * worst_k_line_loss
+        + early_weight * early_exit_fraction
+    )
+
+    return {
+        "mean_line_loss": mean_line_loss,
+        "worst_k_line_loss": worst_k_line_loss,
+        "early_exit_fraction": early_exit_fraction,
+        "confinement_loss": confinement_loss,
+        "confinement_surrogate_k": effective_k,
+        "confinement_early_exit_threshold": float(early_exit_threshold),
+        "line_lifetimes": lifetimes.tolist(),
+        "line_losses": losses.tolist(),
+    }
+
+
 # ---------------------------------------------------------------------------
 # Entry point: score_topology
 # ---------------------------------------------------------------------------
 
-def score_topology(surface, bfield, nfieldlines=12, tmax=50.0, tol=1e-7, nphis=4):
+def score_topology(
+    surface,
+    bfield,
+    nfieldlines=12,
+    tmax=50.0,
+    tol=1e-7,
+    nphis=4,
+    surrogate_worst_k=3,
+    surrogate_early_exit_threshold=0.2,
+    surrogate_mean_weight=0.2,
+    surrogate_worst_weight=0.6,
+    surrogate_early_weight=0.2,
+):
     """Score field-line confinement on a Boozer surface.
 
     This is the reusable entry point for all topology scoring:
@@ -266,6 +337,15 @@ def score_topology(surface, bfield, nfieldlines=12, tmax=50.0, tol=1e-7, nphis=4
     survived_times = [tmax for m in metrics["line_metrics"] if m["survived"]]
     all_times = exit_times + survived_times
     confinement_score = float(np.mean(all_times) / tmax) if all_times else 0.0
+    surrogate = summarize_confinement_surrogate(
+        metrics["line_metrics"],
+        tmax,
+        worst_k=surrogate_worst_k,
+        early_exit_threshold=surrogate_early_exit_threshold,
+        mean_weight=surrogate_mean_weight,
+        worst_weight=surrogate_worst_weight,
+        early_weight=surrogate_early_weight,
+    )
 
     return {
         "survival_fraction": metrics["survival_fraction"],
@@ -274,8 +354,16 @@ def score_topology(surface, bfield, nfieldlines=12, tmax=50.0, tol=1e-7, nphis=4
         "tmax": tmax,
         "mean_exit_time": metrics["mean_exit_time"],
         "confinement_score": confinement_score,
+        "mean_line_loss": surrogate["mean_line_loss"],
+        "worst_k_line_loss": surrogate["worst_k_line_loss"],
+        "early_exit_fraction": surrogate["early_exit_fraction"],
+        "confinement_loss": surrogate["confinement_loss"],
+        "confinement_surrogate_k": surrogate["confinement_surrogate_k"],
+        "confinement_early_exit_threshold": surrogate["confinement_early_exit_threshold"],
         "stop_reason_counts": metrics["stop_reason_counts"],
         "first_exit": metrics["first_exit"],
         "per_phi_hit_counts": metrics["per_phi_hit_counts"],
         "line_metrics": metrics["line_metrics"],
+        "line_lifetimes": surrogate["line_lifetimes"],
+        "line_losses": surrogate["line_losses"],
     }

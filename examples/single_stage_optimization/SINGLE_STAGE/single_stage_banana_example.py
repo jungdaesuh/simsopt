@@ -89,6 +89,45 @@ def format_compact_float(value):
     return f"{value:g}"
 
 
+def add_confinement_surrogate_args(parser):
+    parser.add_argument(
+        "--confinement-objective-weight",
+        type=float,
+        default=float(os.environ.get("CONFINEMENT_OBJECTIVE_WEIGHT", "0.0")),
+        help="Checkpoint-ranking weight for the tail-sensitive confinement surrogate (0 = disabled).",
+    )
+    parser.add_argument(
+        "--confinement-surrogate-worst-k",
+        type=int,
+        default=int(os.environ.get("CONFINEMENT_SURROGATE_WORST_K", "3")),
+        help="Number of worst field lines emphasized by the confinement surrogate (default 3).",
+    )
+    parser.add_argument(
+        "--confinement-surrogate-early-threshold",
+        type=float,
+        default=float(os.environ.get("CONFINEMENT_SURROGATE_EARLY_THRESHOLD", "0.2")),
+        help="Normalized exit-time threshold below which lines count as early exits (default 0.2).",
+    )
+    parser.add_argument(
+        "--confinement-surrogate-mean-weight",
+        type=float,
+        default=float(os.environ.get("CONFINEMENT_SURROGATE_MEAN_WEIGHT", "0.2")),
+        help="Weight on mean line loss in the checkpoint confinement surrogate (default 0.2).",
+    )
+    parser.add_argument(
+        "--confinement-surrogate-worst-weight",
+        type=float,
+        default=float(os.environ.get("CONFINEMENT_SURROGATE_WORST_WEIGHT", "0.6")),
+        help="Weight on worst-k line loss in the checkpoint confinement surrogate (default 0.6).",
+    )
+    parser.add_argument(
+        "--confinement-surrogate-early-weight",
+        type=float,
+        default=float(os.environ.get("CONFINEMENT_SURROGATE_EARLY_WEIGHT", "0.2")),
+        help="Weight on early-exit fraction in the checkpoint confinement surrogate (default 0.2).",
+    )
+
+
 def format_local_stage2_seed_dir(major_radius, toroidal_flux, length_weight, cc_weight, cc_threshold, curvature_weight, curvature_threshold, banana_surf_radius, order):
     return (
         f"R0={format_compact_float(major_radius)}"
@@ -522,6 +561,7 @@ def parse_args():
         default=float(os.environ.get("TOPOLOGY_SCORER_TMAX", "50.0")),
         help="Integration horizon for callback topology scorer (default 50.0).",
     )
+    add_confinement_surrogate_args(parser)
     parser.add_argument(
         "--basin-hops",
         type=int,
@@ -1124,6 +1164,65 @@ def topology_gate_rejection_increment(last_objective, status, penalty_scale):
     return base_increment * (1.0 + penalty_scale * deficit)
 
 
+def confinement_surrogate_kwargs():
+    return {
+        "surrogate_worst_k": CONFINEMENT_SURROGATE_WORST_K,
+        "surrogate_early_exit_threshold": CONFINEMENT_SURROGATE_EARLY_THRESHOLD,
+        "surrogate_mean_weight": CONFINEMENT_SURROGATE_MEAN_WEIGHT,
+        "surrogate_worst_weight": CONFINEMENT_SURROGATE_WORST_WEIGHT,
+        "surrogate_early_weight": CONFINEMENT_SURROGATE_EARLY_WEIGHT,
+    }
+
+
+def checkpoint_confinement_objective(proxy_objective, topology_result, confinement_weight):
+    return float(proxy_objective) + float(confinement_weight) * float(topology_result["confinement_loss"])
+
+
+def validate_confinement_surrogate_args(args):
+    if args.confinement_objective_weight < 0.0:
+        raise ValueError("--confinement-objective-weight must be non-negative")
+    if args.confinement_surrogate_worst_k <= 0:
+        raise ValueError("--confinement-surrogate-worst-k must be positive")
+    if not (0.0 < args.confinement_surrogate_early_threshold <= 1.0):
+        raise ValueError("--confinement-surrogate-early-threshold must be in (0, 1]")
+    if min(
+        args.confinement_surrogate_mean_weight,
+        args.confinement_surrogate_worst_weight,
+        args.confinement_surrogate_early_weight,
+    ) < 0.0:
+        raise ValueError("--confinement-surrogate-* weights must be non-negative")
+
+
+def build_run_identity_config(
+    args,
+    stage2_bs_path,
+    stage,
+    constraint_weight,
+    vol_target,
+    iota_target,
+    boozer_I,
+    banana_surf_radius,
+    nphi,
+    ntheta,
+    rng_seed,
+):
+    return (
+        f"{stage2_bs_path}|{stage}|{constraint_weight}|{vol_target}|{iota_target}|{boozer_I}"
+        f"|{args.cc_dist}|{args.cc_weight}|{args.curvature_weight}|{args.curvature_threshold}"
+        f"|{banana_surf_radius}|{nphi}|{ntheta}|{args.init_only}"
+        f"|{args.basin_hops}|{args.basin_stepsize}|{rng_seed}"
+        f"|{args.ftol}|{args.gtol}"
+        f"|{args.num_surfaces}|{args.inner_surface_ratio}|{args.surface_gap_threshold}"
+        f"|{MULTISURFACE_RAMP_ITERATIONS}|{INNER_SURFACE_INITIAL_WEIGHT}"
+        f"|{args.multisurface_initial_step_scale}|{args.multisurface_initial_step_maxiter}"
+        f"|{TOPOLOGY_GATE_FIELDLINES}|{TOPOLOGY_GATE_TMAX}|{TOPOLOGY_GATE_TOL}|{TOPOLOGY_GATE_SURVIVAL_THRESHOLD}"
+        f"|{TOPOLOGY_SCORER_EVERY}|{TOPOLOGY_SCORER_NFIELDLINES}|{TOPOLOGY_SCORER_TMAX}"
+        f"|{CONFINEMENT_OBJECTIVE_WEIGHT}|{CONFINEMENT_SURROGATE_WORST_K}"
+        f"|{CONFINEMENT_SURROGATE_EARLY_THRESHOLD}|{CONFINEMENT_SURROGATE_MEAN_WEIGHT}"
+        f"|{CONFINEMENT_SURROGATE_WORST_WEIGHT}|{CONFINEMENT_SURROGATE_EARLY_WEIGHT}"
+    )
+
+
 def evaluate_search_topology_gate(num_surfaces, outer_surface, bfield):
     if num_surfaces <= 1 or TOPOLOGY_GATE_FIELDLINES <= 0:
         return disabled_topology_gate_status(
@@ -1635,16 +1734,29 @@ def callback(x):
             outer_surf, bs,
             nfieldlines=TOPOLOGY_SCORER_NFIELDLINES,
             tmax=TOPOLOGY_SCORER_TMAX,
+            **confinement_surrogate_kwargs(),
+        )
+        checkpoint_objective_total = checkpoint_confinement_objective(
+            J,
+            topo_result,
+            CONFINEMENT_OBJECTIVE_WEIGHT,
         )
         topo_entry = {
             "accepted_iteration": run_dict['accepted_iterations'],
             "J": float(J),
+            "checkpoint_objective_total": checkpoint_objective_total,
             "survival_fraction": topo_result["survival_fraction"],
             "survived_lines": topo_result["survived_lines"],
             "nfieldlines": topo_result["nfieldlines"],
             "tmax": topo_result["tmax"],
             "mean_exit_time": topo_result["mean_exit_time"],
             "confinement_score": topo_result["confinement_score"],
+            "mean_line_loss": topo_result["mean_line_loss"],
+            "worst_k_line_loss": topo_result["worst_k_line_loss"],
+            "early_exit_fraction": topo_result["early_exit_fraction"],
+            "confinement_loss": topo_result["confinement_loss"],
+            "confinement_surrogate_k": topo_result["confinement_surrogate_k"],
+            "confinement_early_exit_threshold": topo_result["confinement_early_exit_threshold"],
             "stop_reason_counts": topo_result["stop_reason_counts"],
         }
         # Append to archive JSONL
@@ -1661,10 +1773,21 @@ def callback(x):
             bs.save(os.path.join(best_dir, "biot_savart.json"))
             save_surface_artifacts(surface_data, bs, best_dir, "surf", also_write_outer_legacy=False)
 
+        if CONFINEMENT_OBJECTIVE_WEIGHT > 0.0 and (
+            'best_confinement_objective' not in run_dict
+            or topo_entry['checkpoint_objective_total'] < run_dict['best_confinement_objective']['checkpoint_objective_total']
+        ):
+            run_dict['best_confinement_objective'] = topo_entry
+            best_dir = os.path.join(OUT_DIR_ITER, "best_confinement_objective")
+            os.makedirs(best_dir, exist_ok=True)
+            bs.save(os.path.join(best_dir, "biot_savart.json"))
+            save_surface_artifacts(surface_data, bs, best_dir, "surf", also_write_outer_legacy=False)
+
         print(
             f"  [topology] iter={run_dict['accepted_iterations']}: "
             f"survival={topo_result['survived_lines']}/{topo_result['nfieldlines']}, "
             f"confinement={topo_result['confinement_score']:.4f}, "
+            f"loss={topo_result['confinement_loss']:.4f}, "
             f"mean_exit={topo_result['mean_exit_time']}"
         )
 
@@ -1680,6 +1803,12 @@ CHECKPOINT_EVERY = 0
 TOPOLOGY_SCORER_EVERY = 0
 TOPOLOGY_SCORER_NFIELDLINES = 12
 TOPOLOGY_SCORER_TMAX = 50.0
+CONFINEMENT_OBJECTIVE_WEIGHT = 0.0
+CONFINEMENT_SURROGATE_WORST_K = 3
+CONFINEMENT_SURROGATE_EARLY_THRESHOLD = 0.2
+CONFINEMENT_SURROGATE_MEAN_WEIGHT = 0.2
+CONFINEMENT_SURROGATE_WORST_WEIGHT = 0.6
+CONFINEMENT_SURROGATE_EARLY_WEIGHT = 0.2
 
 
 if __name__ == "__main__":
@@ -1709,6 +1838,12 @@ if __name__ == "__main__":
     TOPOLOGY_SCORER_EVERY = args.topology_scorer_every
     TOPOLOGY_SCORER_NFIELDLINES = args.topology_scorer_nfieldlines
     TOPOLOGY_SCORER_TMAX = args.topology_scorer_tmax
+    CONFINEMENT_OBJECTIVE_WEIGHT = args.confinement_objective_weight
+    CONFINEMENT_SURROGATE_WORST_K = args.confinement_surrogate_worst_k
+    CONFINEMENT_SURROGATE_EARLY_THRESHOLD = args.confinement_surrogate_early_threshold
+    CONFINEMENT_SURROGATE_MEAN_WEIGHT = args.confinement_surrogate_mean_weight
+    CONFINEMENT_SURROGATE_WORST_WEIGHT = args.confinement_surrogate_worst_weight
+    CONFINEMENT_SURROGATE_EARLY_WEIGHT = args.confinement_surrogate_early_weight
     iota_target = args.iota_target
     num_tf_coils = args.num_tf_coils
     if not (0.0 <= args.inner_surface_initial_weight <= 1.0):
@@ -1729,6 +1864,7 @@ if __name__ == "__main__":
         raise ValueError("--topology-gate-survival-threshold must be between 0 and 1")
     if args.topology_gate_penalty_scale < 0.0:
         raise ValueError("--topology-gate-penalty-scale must be non-negative")
+    validate_confinement_surrogate_args(args)
     MULTISURFACE_RAMP_ITERATIONS = args.multisurface_ramp_iterations
     INNER_SURFACE_INITIAL_WEIGHT = args.inner_surface_initial_weight
     TOPOLOGY_GATE_FIELDLINES = args.topology_gate_fieldlines
@@ -1809,16 +1945,18 @@ if __name__ == "__main__":
     else:
         rng_seed = None
 
-    config_str = (
-        f"{stage2_bs_path}|{stage}|{CONSTRAINT_WEIGHT}|{vol_target}|{iota_target}|{boozer_I}"
-        f"|{args.cc_dist}|{args.cc_weight}|{args.curvature_weight}|{args.curvature_threshold}"
-        f"|{banana_surf_radius}|{nphi}|{ntheta}|{args.init_only}"
-        f"|{args.basin_hops}|{args.basin_stepsize}|{rng_seed}"
-        f"|{args.ftol}|{args.gtol}"
-        f"|{args.num_surfaces}|{args.inner_surface_ratio}|{args.surface_gap_threshold}"
-        f"|{MULTISURFACE_RAMP_ITERATIONS}|{INNER_SURFACE_INITIAL_WEIGHT}"
-        f"|{args.multisurface_initial_step_scale}|{args.multisurface_initial_step_maxiter}"
-        f"|{TOPOLOGY_GATE_FIELDLINES}|{TOPOLOGY_GATE_TMAX}|{TOPOLOGY_GATE_TOL}|{TOPOLOGY_GATE_SURVIVAL_THRESHOLD}"
+    config_str = build_run_identity_config(
+        args,
+        stage2_bs_path,
+        stage,
+        CONSTRAINT_WEIGHT,
+        vol_target,
+        iota_target,
+        boozer_I,
+        banana_surf_radius,
+        nphi,
+        ntheta,
+        rng_seed,
     )
     config_hash = hashlib.sha256(config_str.encode()).hexdigest()[:8]
     OUT_DIR_ITER = OUT_DIR + f"/mpol={mpol}-ntor={ntor}-{config_hash}"
@@ -2266,6 +2404,12 @@ if __name__ == "__main__":
         "TOPOLOGY_SCORER_EVERY": TOPOLOGY_SCORER_EVERY,
         "TOPOLOGY_SCORER_NFIELDLINES": TOPOLOGY_SCORER_NFIELDLINES,
         "TOPOLOGY_SCORER_TMAX": TOPOLOGY_SCORER_TMAX,
+        "CONFINEMENT_OBJECTIVE_WEIGHT": CONFINEMENT_OBJECTIVE_WEIGHT,
+        "CONFINEMENT_SURROGATE_WORST_K": CONFINEMENT_SURROGATE_WORST_K,
+        "CONFINEMENT_SURROGATE_EARLY_THRESHOLD": CONFINEMENT_SURROGATE_EARLY_THRESHOLD,
+        "CONFINEMENT_SURROGATE_MEAN_WEIGHT": CONFINEMENT_SURROGATE_MEAN_WEIGHT,
+        "CONFINEMENT_SURROGATE_WORST_WEIGHT": CONFINEMENT_SURROGATE_WORST_WEIGHT,
+        "CONFINEMENT_SURROGATE_EARLY_WEIGHT": CONFINEMENT_SURROGATE_EARLY_WEIGHT,
         "basin_hops": args.basin_hops,
         "basin_stepsize": args.basin_stepsize if args.basin_hops > 0 else None,
         "basin_seed": rng_seed if args.basin_hops > 0 else None,
@@ -2305,6 +2449,13 @@ if __name__ == "__main__":
         "INITIAL_IOTA": float(initial_iota),
         "INITIAL_FIELD_ERROR": float(initial_field_error),
         "INITIAL_MAX_CURVATURE": float(initial_max_curvature),
+        "BEST_TOPOLOGY_ACCEPTED_ITERATION": run_dict.get("best_topology", {}).get("accepted_iteration"),
+        "BEST_TOPOLOGY_CONFINEMENT_SCORE": run_dict.get("best_topology", {}).get("confinement_score"),
+        "BEST_TOPOLOGY_CONFINEMENT_LOSS": run_dict.get("best_topology", {}).get("confinement_loss"),
+        "BEST_CONFINEMENT_OBJECTIVE_ACCEPTED_ITERATION": run_dict.get("best_confinement_objective", {}).get("accepted_iteration"),
+        "BEST_CONFINEMENT_OBJECTIVE_TOTAL": run_dict.get("best_confinement_objective", {}).get("checkpoint_objective_total"),
+        "BEST_CONFINEMENT_OBJECTIVE_PROXY_J": run_dict.get("best_confinement_objective", {}).get("J"),
+        "BEST_CONFINEMENT_OBJECTIVE_LOSS": run_dict.get("best_confinement_objective", {}).get("confinement_loss"),
     }
     results.update(
         collect_surface_run_metadata(
