@@ -25,6 +25,10 @@ def test_explicit_private_backend_allowed_on_supported_runtime(_supported_runtim
     assert benchmark_common.resolve_benchmark_backends(["ondevice"]) == ("ondevice",)
 
 
+def test_default_benchmark_backend_uses_target_lane(_supported_runtime):
+    assert benchmark_common.resolve_benchmark_backends() == ("ondevice",)
+
+
 def test_private_backend_rejected_on_wrong_runtime(monkeypatch):
     monkeypatch.setattr(
         benchmark_common,

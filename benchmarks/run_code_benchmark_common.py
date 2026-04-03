@@ -25,7 +25,7 @@ EXPECTED_BENCHMARK_JAX_VERSION = os.environ.get(
     "SIMSOPT_BENCHMARK_JAX_VERSION", "0.9.2"
 )
 BENCHMARK_BACKEND_CHOICES = ("scipy", "ondevice", "hybrid")
-DEFAULT_PUBLIC_BACKENDS = ("scipy",)
+DEFAULT_PUBLIC_BACKENDS = ("ondevice",)
 PRIVATE_ONLY_BACKENDS = frozenset({"ondevice", "hybrid"})
 SOLVER_VERBOSE = os.environ.get("SIMSOPT_BENCHMARK_SOLVER_VERBOSE", "").lower() in {
     "1",
@@ -74,7 +74,9 @@ def _validate_benchmark_runtime(backends: tuple[str, ...]) -> None:
     private_backends = _requested_private_backends(backends)
     if version != EXPECTED_BENCHMARK_JAX_VERSION:
         requested = ", ".join(private_backends or backends)
-        lane_label = f"benchmark backends {requested}" if requested else "benchmark runtime"
+        lane_label = (
+            f"benchmark backends {requested}" if requested else "benchmark runtime"
+        )
         raise RuntimeError(
             f"{lane_label} are configured for JAX "
             f"{EXPECTED_BENCHMARK_JAX_VERSION}; found {version}. "
@@ -173,7 +175,9 @@ def summarize_result_fun(res: dict) -> float:
     return 0.5 * float(np.mean(np.square(arr)))
 
 
-def time_run_code(config: BenchmarkConfig, optimizer_backend: str, *, option_overrides=None):
+def time_run_code(
+    config: BenchmarkConfig, optimizer_backend: str, *, option_overrides=None
+):
     _progress(f"    [{optimizer_backend}] building run_code problem")
     booz, iota0, G0 = _make_boozer_surface(
         config,
@@ -257,8 +261,7 @@ def benchmark_backend(
     repeat_res = compile_res
     for repeat_index in range(repeats):
         _progress(
-            f"    [{optimizer_backend}] repeat fresh solve "
-            f"{repeat_index + 1}/{repeats}"
+            f"    [{optimizer_backend}] repeat fresh solve {repeat_index + 1}/{repeats}"
         )
         elapsed, repeat_res = time_run_code(
             config,

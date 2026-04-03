@@ -14,9 +14,9 @@ Usage:
     PYTHONPATH=src hf jobs uv run benchmarks/cpu_run_code_benchmark.py --flavor cpu-xl --timeout 15m
 
 This benchmark requires a full repo environment with ``simsoptpp`` available.
-It defaults to ``optimizer_backend="scipy"``. ``ondevice`` and ``hybrid``
-share the same JAX ``0.9.2`` runtime but remain separate private-optimizer
-benchmark backends.
+It defaults to ``optimizer_backend="ondevice"`` so the benchmark measures the
+target device-resident optimizer lane. Pass ``--backend scipy`` explicitly to
+time the host reference lane.
 
 This script is a diagnostic timing benchmark, not the CPU/GPU correctness gate.
 Use ``benchmarks/run_code_parity_probe.py`` for solver parity checks.
