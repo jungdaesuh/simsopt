@@ -559,7 +559,7 @@ class SingleStageExampleTests(unittest.TestCase):
     def test_run_single_stage_optimizer_routes_target_lane_to_ondevice_adapter(self):
         module = self.load_module()
         captured = {}
-        target_fun = object()
+        scalar_fun = object()
 
         def fake_require_target_backend_x64(optimizer_backend):
             captured["x64_backend"] = optimizer_backend
@@ -584,7 +584,7 @@ class SingleStageExampleTests(unittest.TestCase):
             callback = object()
             contract = module.resolve_single_stage_optimizer_contract("jax", "ondevice")
             result = module.run_single_stage_optimizer(
-                target_fun,
+                lambda x: (1.0, np.asarray(x)),
                 np.array([1.0, -2.0]),
                 contract=contract,
                 maxiter=7,
@@ -592,45 +592,50 @@ class SingleStageExampleTests(unittest.TestCase):
                 gtol=1e-6,
                 maxcor=9,
                 callback=callback,
-                scalar_fun=object(),
+                scalar_fun=scalar_fun,
             )
 
         self.assertEqual(captured["x64_backend"], "ondevice")
-        self.assertIs(captured["fun"], target_fun)
+        self.assertIs(captured["fun"], scalar_fun)
         self.assertEqual(captured["method"], "lbfgs-ondevice")
         np.testing.assert_allclose(captured["x0"], np.array([1.0, -2.0]))
         self.assertEqual(captured["tol"], 1e-6)
         self.assertEqual(captured["maxiter"], 7)
         self.assertEqual(captured["options"], {"maxcor": 9, "ftol": 1e-8})
-        self.assertTrue(captured["value_and_grad"])
+        self.assertFalse(captured["value_and_grad"])
         self.assertIs(captured["callback"], callback)
         self.assertEqual(result.message, "ok")
 
-    def test_run_single_stage_optimizer_requires_objective_contract(self):
+    def test_run_single_stage_optimizer_target_lane_requires_scalar_objective(self):
         module = self.load_module()
         target_contract = types.SimpleNamespace(
             method="lbfgs-ondevice", use_scalar_objective=True
         )
 
-        with self.assertRaisesRegex(
-            RuntimeError,
-            "Single-stage optimization requires an explicit value-and-gradient "
-            "objective, or a scalar JAX objective on the scalar target lane",
+        with self.patch_optimizer_jax_module(
+            require_target_backend_x64=lambda _optimizer_backend: None,
+            jax_minimize=lambda *args, **kwargs: (_ for _ in ()).throw(
+                AssertionError("jax_minimize should not run without a scalar objective")
+            ),
         ):
-            module.run_single_stage_optimizer(
-                None,
-                np.array([1.0, -2.0]),
-                contract=target_contract,
-                maxiter=7,
-                ftol=1e-8,
-                gtol=1e-6,
-                maxcor=9,
-                callback=None,
-            )
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "Single-stage target-lane optimization requires a scalar JAX objective",
+            ):
+                module.run_single_stage_optimizer(
+                    lambda x: (1.0, np.asarray(x)),
+                    np.array([1.0, -2.0]),
+                    contract=target_contract,
+                    maxiter=7,
+                    ftol=1e-8,
+                    gtol=1e-6,
+                    maxcor=9,
+                    callback=None,
+                )
 
     def test_run_single_stage_optimizer_ondevice_does_not_enter_scipy_minimize(self):
         module = self.load_module()
-        target_fun = object()
+        scalar_fun = object()
 
         def fake_require_target_backend_x64(_optimizer_backend):
             return None
@@ -638,10 +643,10 @@ class SingleStageExampleTests(unittest.TestCase):
         def fake_jax_minimize(
             fun, x0, *, method, tol, maxiter, options, value_and_grad, callback
         ):
-            self.assertIs(fun, target_fun)
+            self.assertIs(fun, scalar_fun)
             del x0, tol, maxiter, options, callback
             self.assertEqual(method, "lbfgs-ondevice")
-            self.assertTrue(value_and_grad)
+            self.assertFalse(value_and_grad)
             return types.SimpleNamespace(x=np.zeros(2), nit=0, message="ok")
 
         with self.patch_optimizer_jax_module(
@@ -651,7 +656,7 @@ class SingleStageExampleTests(unittest.TestCase):
         ):
             contract = module.resolve_single_stage_optimizer_contract("jax", "ondevice")
             result = module.run_single_stage_optimizer(
-                target_fun,
+                lambda x: (1.0, np.asarray(x)),
                 np.array([0.0, 0.0]),
                 contract=contract,
                 maxiter=1,
@@ -659,7 +664,7 @@ class SingleStageExampleTests(unittest.TestCase):
                 gtol=1e-6,
                 maxcor=5,
                 callback=lambda _x: None,
-                scalar_fun=object(),
+                scalar_fun=scalar_fun,
             )
 
         self.assertEqual(result.message, "ok")

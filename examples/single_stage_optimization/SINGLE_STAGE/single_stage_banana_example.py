@@ -620,7 +620,7 @@ def parse_args():
         action="store_true",
         help=(
             "Record first-vs-warm timing breakdowns for the traceable target-lane "
-            "objective closures used by the outer optimizer."
+            "objective closure suite used to study the outer optimization path."
         ),
     )
     return parser.parse_args()
@@ -1225,16 +1225,21 @@ def run_single_stage_optimizer(
     """Run the single-stage outer optimization through the shared adapter."""
     from simsopt.geo.optimizer_jax import jax_minimize
 
-    optimizer_fun = fun
-    value_and_grad = True
-    if contract.use_scalar_objective and optimizer_fun is None:
+    if contract.use_scalar_objective:
+        if scalar_fun is None:
+            raise RuntimeError(
+                "Single-stage target-lane optimization requires a scalar JAX objective."
+            )
         optimizer_fun = scalar_fun
         value_and_grad = False
-    if optimizer_fun is None:
+    elif fun is None:
         raise RuntimeError(
-            "Single-stage optimization requires an explicit value-and-gradient "
-            "objective, or a scalar JAX objective on the scalar target lane."
+            "Single-stage reference-lane optimization requires an explicit "
+            "value-and-gradient objective."
         )
+    else:
+        optimizer_fun = fun
+        value_and_grad = True
     return jax_minimize(
         optimizer_fun,
         dofs,
@@ -2052,16 +2057,22 @@ if __name__ == "__main__":
         print("Skipping single-stage optimizer because --init-only was provided.")
     else:
         outer_optimizer_start_s = _perf_counter_s()
-        target_value_and_grad_objective = None
+        target_scalar_objective = None
         if use_target_lane:
-            target_lane_runtime_bundle = get_traceable_single_stage_runtime_bundle_builder()(
+            target_scalar_objective = get_traceable_single_stage_objective_builder()(
                 boozer_surface,
                 bs,
                 iota_target,
-                include_profile_suite=args.profile_target_lane,
             )
-            target_value_and_grad_objective = target_lane_runtime_bundle["value_and_grad"]
             if args.profile_target_lane:
+                target_lane_runtime_bundle = (
+                    get_traceable_single_stage_runtime_bundle_builder()(
+                        boozer_surface,
+                        bs,
+                        iota_target,
+                        include_profile_suite=True,
+                    )
+                )
                 target_lane_profile = profile_traceable_target_lane_objective(
                     target_lane_runtime_bundle["profile_suite"],
                     np.asarray(dofs, dtype=float),
@@ -2072,7 +2083,7 @@ if __name__ == "__main__":
             sync_policy=effective_target_lane_sync_policy,
         )
         res = run_single_stage_optimizer(
-            target_value_and_grad_objective if use_target_lane else adapter,
+            adapter,
             dofs,
             callback=accepted_step_callback,
             contract=outer_contract,
@@ -2080,7 +2091,7 @@ if __name__ == "__main__":
             ftol=ftol,
             gtol=gtol,
             maxcor=args.maxcor,
-            scalar_fun=None,
+            scalar_fun=target_scalar_objective,
         )
         outer_optimizer_end_s = _perf_counter_s()
         _record_timing(
