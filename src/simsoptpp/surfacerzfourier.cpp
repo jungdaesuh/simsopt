@@ -1,4 +1,5 @@
 #include "surfacerzfourier.h"
+#include "xtensor_compat.h"
 #include "simdhelpers.h"
 
 // Optimization notes:
@@ -1038,7 +1039,7 @@ Array SurfaceRZFourier<Array>::dgammadash1_by_dcoeff_vjp(Array& v) {
             }
         }
     }
-    res *= 2*M_PI;
+    simsoptpp::scale_array(res, 2 * M_PI);
     return res;
 }
 
@@ -1116,7 +1117,7 @@ Array SurfaceRZFourier<Array>::dgammadash1_by_dcoeff_vjp(Array& v) {
             }
         }
     }
-    res *= 2*M_PI;
+    simsoptpp::scale_array(res, 2 * M_PI);
     return res;
 }
 
@@ -1362,7 +1363,7 @@ Array SurfaceRZFourier<Array>::dgammadash2_by_dcoeff_vjp(Array& v) {
             }
         }
     }
-    res *= 2*M_PI;
+    simsoptpp::scale_array(res, 2 * M_PI);
     return res;
 }
 
@@ -1440,7 +1441,7 @@ Array SurfaceRZFourier<Array>::dgammadash2_by_dcoeff_vjp(Array& v) {
             }
         }
     }
-    res *= 2*M_PI;
+    simsoptpp::scale_array(res, 2 * M_PI);
     return res;
 }
 
