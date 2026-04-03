@@ -10,7 +10,7 @@
 #endif
 
 #if defined(USE_XSIMD)
-template<class T, int deriv> void boozer_residual_impl(double G, double iota, T& B, T& dB_dx, T& d2B_dx2, T& xphi, T& xtheta, T& dx_ds, T& dxphi_ds, T& dxtheta_ds, double& res, T& dres, T& d2res, size_t ndofs, bool weight_inv_modB){
+template<class T, int deriv> void boozer_residual_impl(double G, double I, double iota, T& B, T& dB_dx, T& d2B_dx2, T& xphi, T& xtheta, T& dx_ds, T& dxphi_ds, T& dxtheta_ds, double& res, T& dres, T& d2res, size_t ndofs, bool weight_inv_modB){
     int nphi = xphi.shape(0);
     int ntheta = xtheta.shape(1);
     int num_points = 3 * nphi * ntheta;
@@ -47,7 +47,8 @@ template<class T, int deriv> void boozer_residual_impl(double G, double iota, T&
     auto dmodB_ij = AlignedPaddedVec(ndofs+2, 0);
      
     simd_t it(iota); 
-    simd_t GG(G); 
+    simd_t II(I);
+    simd_t alpha(G + iota * I);
     
     for(int i=0; i<nphi; i++){
         for(int j=0; j<ntheta; j++){
@@ -61,9 +62,9 @@ template<class T, int deriv> void boozer_residual_impl(double G, double iota, T&
             double tang_ij1 = xphi(i,j,1)+iota*xtheta(i,j,1); 
             double tang_ij2 = xphi(i,j,2)+iota*xtheta(i,j,2);  
 
-            double resij0 = G*B(i, j, 0)  - B2ij * tang_ij0;
-            double resij1 = G*B(i, j, 1)  - B2ij * tang_ij1;
-            double resij2 = G*B(i, j, 2)  - B2ij * tang_ij2;
+            double resij0 = (G + iota * I) * B(i, j, 0)  - B2ij * tang_ij0;
+            double resij1 = (G + iota * I) * B(i, j, 1)  - B2ij * tang_ij1;
+            double resij2 = (G + iota * I) * B(i, j, 2)  - B2ij * tang_ij2;
             
             double rtil_ij0, rtil_ij1, rtil_ij2;
 
@@ -134,9 +135,9 @@ template<class T, int deriv> void boozer_residual_impl(double G, double iota, T&
                     auto tang_ij1m = xsimd::fma(it, dxtheta_ds_ij1m , dxphi_ds_ij1m);
                     auto tang_ij2m = xsimd::fma(it, dxtheta_ds_ij2m , dxphi_ds_ij2m);
 
-                    auto dresij0m = xsimd::fms(GG , dBij0m , xsimd::fma(dB2_ijm , btang_ij0 , B2ij * tang_ij0m));
-                    auto dresij1m = xsimd::fms(GG , dBij1m , xsimd::fma(dB2_ijm , btang_ij1 , B2ij * tang_ij1m));
-                    auto dresij2m = xsimd::fms(GG , dBij2m , xsimd::fma(dB2_ijm , btang_ij2 , B2ij * tang_ij2m));
+                    auto dresij0m = xsimd::fms(alpha , dBij0m , xsimd::fma(dB2_ijm , btang_ij0 , B2ij * tang_ij0m));
+                    auto dresij1m = xsimd::fms(alpha , dBij1m , xsimd::fma(dB2_ijm , btang_ij1 , B2ij * tang_ij1m));
+                    auto dresij2m = xsimd::fms(alpha , dBij2m , xsimd::fma(dB2_ijm , btang_ij2 , B2ij * tang_ij2m));
 
                     auto dmodB_ijm = 0.5 * dB2_ijm * wij;
                     auto dw_ijm = weight_inv_modB ? -dmodB_ijm * rB2ij : simd_t(0.);
@@ -173,9 +174,9 @@ template<class T, int deriv> void boozer_residual_impl(double G, double iota, T&
                     }
                 }
                 
-                double dres_ij0iota = -B2ij * xtheta(i, j, 0);
-                double dres_ij1iota = -B2ij * xtheta(i, j, 1);
-                double dres_ij2iota = -B2ij * xtheta(i, j, 2);
+                double dres_ij0iota = I * B(i, j, 0) - B2ij * xtheta(i, j, 0);
+                double dres_ij1iota = I * B(i, j, 1) - B2ij * xtheta(i, j, 1);
+                double dres_ij2iota = I * B(i, j, 2) - B2ij * xtheta(i, j, 2);
                  
                 double drtil_ij0iota = dres_ij0iota * wij; 
                 double drtil_ij1iota = dres_ij1iota * wij; 
@@ -280,9 +281,9 @@ template<class T, int deriv> void boozer_residual_impl(double G, double iota, T&
                             auto term3_1 = -tang_ij1 * d2B2_ijmn;
                             auto term3_2 = -tang_ij2 * d2B2_ijmn;
 
-                            auto d2res_ij0mn = xsimd::fma(GG , d2Bij0_mn , term1_0) + term2_0 + term3_0;
-                            auto d2res_ij1mn = xsimd::fma(GG , d2Bij1_mn , term1_1) + term2_1 + term3_1;
-                            auto d2res_ij2mn = xsimd::fma(GG , d2Bij2_mn , term1_2) + term2_2 + term3_2;
+                            auto d2res_ij0mn = xsimd::fma(alpha , d2Bij0_mn , term1_0) + term2_0 + term3_0;
+                            auto d2res_ij1mn = xsimd::fma(alpha , d2Bij1_mn , term1_1) + term2_1 + term3_1;
+                            auto d2res_ij2mn = xsimd::fma(alpha , d2Bij2_mn , term1_2) + term2_2 + term3_2;
                             
                             auto d2modB_ijmn = (2 * B2ij * d2B2_ijmn - dB2_ijm*dB2_ij[n]) * powrmodBijthree / 4. ;
                             auto d2wij_mn = weight_inv_modB ? (2. * dmodB_ijm * dmodB_ij[n] - modB_ij * d2modB_ijmn) * powrmodBijthree : simd_t(0.);
@@ -298,9 +299,9 @@ template<class T, int deriv> void boozer_residual_impl(double G, double iota, T&
                                 d2res(m+jj, n) += d2res_mn[jj];
                             }
                         }
-                        auto d2res_ij0miota = -(dB2_ijm * xtheta(i, j, 0) + B2ij * dxtheta_ds_ij0m); 
-                        auto d2res_ij1miota = -(dB2_ijm * xtheta(i, j, 1) + B2ij * dxtheta_ds_ij1m);
-                        auto d2res_ij2miota = -(dB2_ijm * xtheta(i, j, 2) + B2ij * dxtheta_ds_ij2m);
+                        auto d2res_ij0miota = II * dBij0m - (dB2_ijm * xtheta(i, j, 0) + B2ij * dxtheta_ds_ij0m); 
+                        auto d2res_ij1miota = II * dBij1m - (dB2_ijm * xtheta(i, j, 1) + B2ij * dxtheta_ds_ij1m);
+                        auto d2res_ij2miota = II * dBij2m - (dB2_ijm * xtheta(i, j, 2) + B2ij * dxtheta_ds_ij2m);
                         
 
                         auto d2rtil_ij0miota = d2res_ij0miota * wij + dres_ij0iota * dw_ijm ;
@@ -343,7 +344,7 @@ template<class T, int deriv> void boozer_residual_impl(double G, double iota, T&
 }
 
 #else
-template<class T, int deriv> void boozer_residual_impl(double G, double iota, T& B, T& dB_dx, T& d2B_dx2, T& xphi, T& xtheta, T& dx_ds, T& dxphi_ds, T& dxtheta_ds, double& res, T& dres, T& d2res, size_t ndofs, bool weight_inv_modB){
+template<class T, int deriv> void boozer_residual_impl(double G, double I, double iota, T& B, T& dB_dx, T& d2B_dx2, T& xphi, T& xtheta, T& dx_ds, T& dxphi_ds, T& dxtheta_ds, double& res, T& dres, T& d2res, size_t ndofs, bool weight_inv_modB){
     int nphi = xphi.shape(0);
     int ntheta = xtheta.shape(1);
 
@@ -359,9 +360,10 @@ template<class T, int deriv> void boozer_residual_impl(double G, double iota, T&
             double tang_ij1 = xphi(i,j,1)+iota*xtheta(i,j,1); 
             double tang_ij2 = xphi(i,j,2)+iota*xtheta(i,j,2);  
 
-            double resij0 = G*B(i, j, 0)  - B2ij * tang_ij0;
-            double resij1 = G*B(i, j, 1)  - B2ij * tang_ij1;
-            double resij2 = G*B(i, j, 2)  - B2ij * tang_ij2;
+            double alpha = G + iota * I;
+            double resij0 = alpha * B(i, j, 0)  - B2ij * tang_ij0;
+            double resij1 = alpha * B(i, j, 1)  - B2ij * tang_ij1;
+            double resij2 = alpha * B(i, j, 2)  - B2ij * tang_ij2;
             
             double rtil_ij0, rtil_ij1, rtil_ij2;
 
@@ -402,9 +404,9 @@ template<class T, int deriv> void boozer_residual_impl(double G, double iota, T&
                     double tang_ij1m = iota*dxtheta_ds(i,j,1,m) + dxphi_ds(i,j,1,m);
                     double tang_ij2m = iota*dxtheta_ds(i,j,2,m) + dxphi_ds(i,j,2,m);
 
-                    double dresij0m = G * dBij0m - (dB2_ijm * tang_ij0 + B2ij * tang_ij0m);
-                    double dresij1m = G * dBij1m - (dB2_ijm * tang_ij1 + B2ij * tang_ij1m);
-                    double dresij2m = G * dBij2m - (dB2_ijm * tang_ij2 + B2ij * tang_ij2m);
+                    double dresij0m = alpha * dBij0m - (dB2_ijm * tang_ij0 + B2ij * tang_ij0m);
+                    double dresij1m = alpha * dBij1m - (dB2_ijm * tang_ij1 + B2ij * tang_ij1m);
+                    double dresij2m = alpha * dBij2m - (dB2_ijm * tang_ij2 + B2ij * tang_ij2m);
 
                     double dmodB_ijm = 0.5 * dB2_ijm * wij;
                     double dw_ijm = weight_inv_modB ? -dmodB_ijm * rB2ij : 0.;
@@ -436,9 +438,9 @@ template<class T, int deriv> void boozer_residual_impl(double G, double iota, T&
                     dmodB_ij[m] = dmodB_ijm;
                 }
                 
-                double dres_ij0iota = -B2ij * xtheta(i, j, 0);
-                double dres_ij1iota = -B2ij * xtheta(i, j, 1);
-                double dres_ij2iota = -B2ij * xtheta(i, j, 2);
+                double dres_ij0iota = I * B(i, j, 0) - B2ij * xtheta(i, j, 0);
+                double dres_ij1iota = I * B(i, j, 1) - B2ij * xtheta(i, j, 1);
+                double dres_ij2iota = I * B(i, j, 2) - B2ij * xtheta(i, j, 2);
                  
                 double drtil_ij0iota = dres_ij0iota * wij; 
                 double drtil_ij1iota = dres_ij1iota * wij; 
@@ -501,9 +503,9 @@ template<class T, int deriv> void boozer_residual_impl(double G, double iota, T&
                             auto term3_1 = -tang_ij1 * d2B2_ijmn;
                             auto term3_2 = -tang_ij2 * d2B2_ijmn;
 
-                            auto d2res_ij0mn = G * d2Bij0_mn + term1_0 + term2_0 + term3_0;
-                            auto d2res_ij1mn = G * d2Bij1_mn + term1_1 + term2_1 + term3_1;
-                            auto d2res_ij2mn = G * d2Bij2_mn + term1_2 + term2_2 + term3_2;
+                            auto d2res_ij0mn = alpha * d2Bij0_mn + term1_0 + term2_0 + term3_0;
+                            auto d2res_ij1mn = alpha * d2Bij1_mn + term1_1 + term2_1 + term3_1;
+                            auto d2res_ij2mn = alpha * d2Bij2_mn + term1_2 + term2_2 + term3_2;
                             
                             auto d2modB_ijmn = (2 * B2ij * d2B2_ijmn - dB2_ij[m]*dB2_ij[n]) * powrmodBijthree / 4. ;
                             auto d2wij_mn = weight_inv_modB ? (2. * dmodB_ij[m] * dmodB_ij[n] - modB_ij * d2modB_ijmn) * powrmodBijthree : 0.;
@@ -516,9 +518,9 @@ template<class T, int deriv> void boozer_residual_impl(double G, double iota, T&
 
                             d2res(m, n) += d2res_mn;
                         }
-                        auto d2res_ij0miota = -(dB2_ij[m] * xtheta(i, j, 0) + B2ij * dxtheta_ds(i,j,0,m)); 
-                        auto d2res_ij1miota = -(dB2_ij[m] * xtheta(i, j, 1) + B2ij * dxtheta_ds(i,j,1,m));
-                        auto d2res_ij2miota = -(dB2_ij[m] * xtheta(i, j, 2) + B2ij * dxtheta_ds(i,j,2,m));
+                        auto d2res_ij0miota = I * dBij0[m] - (dB2_ij[m] * xtheta(i, j, 0) + B2ij * dxtheta_ds(i,j,0,m)); 
+                        auto d2res_ij1miota = I * dBij1[m] - (dB2_ij[m] * xtheta(i, j, 1) + B2ij * dxtheta_ds(i,j,1,m));
+                        auto d2res_ij2miota = I * dBij2[m] - (dB2_ij[m] * xtheta(i, j, 2) + B2ij * dxtheta_ds(i,j,2,m));
                         
 
                         auto d2rtil_ij0miota = d2res_ij0miota * wij + dres_ij0iota * dw_ij[m] ;

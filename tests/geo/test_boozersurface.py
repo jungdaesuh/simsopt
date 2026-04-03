@@ -5,7 +5,14 @@ from simsopt.field.coil import coils_via_symmetries
 from simsopt.geo.boozersurface import BoozerSurface
 from simsopt.field.biotsavart import BiotSavart
 from simsopt.geo import SurfaceXYZTensorFourier, SurfaceRZFourier
-from simsopt.geo.surfaceobjectives import ToroidalFlux, Area
+from simsopt.geo.surfaceobjectives import (
+    Area,
+    ToroidalFlux,
+    boozer_surface_dexactresidual_dcoils_dcurrents_vjp,
+    boozer_surface_dlsqgrad_dcoils_vjp,
+    boozer_surface_residual,
+    boozer_surface_residual_dB,
+)
 from simsopt.configs.zoo import get_ncsx_data, get_hsx_data, get_giuliani_data
 from .surface_test_helpers import get_surface, get_exact_surface, get_boozer_surface
 
@@ -15,6 +22,79 @@ stellsym_list = [True, False]
 
 
 class BoozerSurfaceTests(unittest.TestCase):
+    def _make_area_boozer_surface(self, *, current_I, mpol, ntor, phis, thetas, constraint_weight, options):
+        curves, currents, ma = get_ncsx_data()
+        coils = coils_via_symmetries(curves, currents, 3, True)
+        bs = BiotSavart(coils)
+        current_sum = sum(abs(c.current.get_value()) for c in coils)
+        G0 = 2. * np.pi * current_sum * (4 * np.pi * 10**(-7) / (2 * np.pi))
+        surface = SurfaceXYZTensorFourier(
+            mpol=mpol, ntor=ntor, stellsym=True, nfp=3,
+            quadpoints_phi=phis, quadpoints_theta=thetas,
+        )
+        surface.fit_to_curve(ma, 0.1, flip_theta=True)
+        label = Area(surface)
+        boozer_surface = BoozerSurface(
+            bs, surface, label, label.J(), constraint_weight=constraint_weight,
+            options=options, I=current_I,
+        )
+        return bs, G0, boozer_surface
+
+    def _assert_directional_fd_convergence(self, f, coeffs, direction, directional_derivative):
+        err_old = 1e9
+        epsilons = np.power(2., -np.asarray(range(11, 18)))
+        for eps in epsilons:
+            dfdx_fd = (f(coeffs + eps * direction) - f(coeffs - eps * direction)) / (2 * eps)
+            err = np.abs(dfdx_fd - directional_derivative)
+            self.assertLess(err, err_old * 0.31)
+            err_old = err
+
+    def _assert_penalty_constraints_cpp_python_match(self, boozer_surface, x, *, optimize_G, weight_inv_modB):
+        w = 0.
+        f0 = boozer_surface.boozer_penalty_constraints(
+            x, derivatives=0, constraint_weight=w, optimize_G=optimize_G, weight_inv_modB=weight_inv_modB)
+        f1 = boozer_surface.boozer_penalty_constraints_vectorized(
+            x, derivatives=0, constraint_weight=w, optimize_G=optimize_G, weight_inv_modB=weight_inv_modB)
+        np.testing.assert_allclose(f0, f1, atol=1e-13, rtol=1e-13)
+        print(np.abs(f0-f1)/np.abs(f0))
+
+        f0, J0 = boozer_surface.boozer_penalty_constraints(
+            x, derivatives=1, constraint_weight=w, optimize_G=optimize_G, weight_inv_modB=weight_inv_modB)
+        f1, J1 = boozer_surface.boozer_penalty_constraints_vectorized(
+            x, derivatives=1, constraint_weight=w, optimize_G=optimize_G, weight_inv_modB=weight_inv_modB)
+        np.testing.assert_allclose(f0, f1, atol=1e-13, rtol=1e-13)
+        np.testing.assert_allclose(J0, J1, atol=1e-11, rtol=1e-11)
+
+        h1 = np.random.rand(J0.size)-0.5
+        np.testing.assert_allclose(J0@h1, J1@h1, atol=1e-13, rtol=1e-13)
+        print(np.abs(f0-f1)/np.abs(f0), np.abs(J0@h1-J1@h1)/np.abs(J0@h1))
+
+        f0, J0, H0 = boozer_surface.boozer_penalty_constraints(
+            x, derivatives=2, constraint_weight=w, optimize_G=optimize_G, weight_inv_modB=weight_inv_modB)
+        f1, J1, H1 = boozer_surface.boozer_penalty_constraints_vectorized(
+            x, derivatives=2, constraint_weight=w, optimize_G=optimize_G, weight_inv_modB=weight_inv_modB)
+        np.testing.assert_allclose(f0, f1, atol=1e-13, rtol=1e-13)
+        np.testing.assert_allclose(J0, J1, atol=1e-11, rtol=1e-11)
+        np.testing.assert_allclose(H0, H1, atol=1e-10, rtol=1e-10)
+
+        h2 = np.random.rand(J0.size)-0.5
+        np.testing.assert_allclose(J0@h1, J1@h1, atol=1e-13, rtol=1e-13)
+        np.testing.assert_allclose((H0@h1)@h2, (H1@h1)@h2, atol=1e-13, rtol=1e-13)
+        print(np.abs(f0-f1)/np.abs(f0), np.abs(J0@h1-J1@h1)/np.abs(J0@h1), np.abs((H0@h1)@h2-(H1@h1)@h2)/np.abs((H0@h1)@h2))
+        return H0, H1
+
+    def _print_hessian_differences(self, Ha, Hb):
+        diff = np.abs(Ha.flatten() - Hb.flatten())
+        rel_diff = diff/np.abs(Ha.flatten())
+        ij1 = np.where(diff.reshape(Ha.shape) == np.max(diff))
+        i1 = ij1[0][0]
+        j1 = ij1[1][0]
+
+        ij2 = np.where(rel_diff.reshape(Ha.shape) == np.max(rel_diff))
+        i2 = ij2[0][0]
+        j2 = ij2[1][0]
+        print(f'max err     ({i1:03}, {j1:03}): {np.max(diff):.6e}, {Ha[i1, j1]:.6e}\nmax rel err ({i2:03}, {j2:03}): {np.max(rel_diff):.6e}, {Ha[i2,j2]:.6e}\n')
+
     def test_residual(self):
         """
         This test loads a SurfaceXYZFourier that interpolates the xyz
@@ -472,63 +552,94 @@ class BoozerSurfaceTests(unittest.TestCase):
         tf = ToroidalFlux(s, bs_tf, nphi=51, ntheta=51)
 
         tf_target = 0.1
-        boozer_surface = BoozerSurface(bs, s, tf, tf_target)
+        for current_I in [0.0, 0.37]:
+            boozer_surface = BoozerSurface(bs, s, tf, tf_target, I=current_I)
 
+            iota = -0.3
+            x = np.concatenate((s.get_dofs(), [iota]))
+            if optimize_G:
+                x = np.concatenate((x, [2.*np.pi*current_sum*(4*np.pi*10**(-7)/(2 * np.pi))]))
+            H0, H1 = self._assert_penalty_constraints_cpp_python_match(
+                boozer_surface, x, optimize_G=optimize_G, weight_inv_modB=weight_inv_modB,
+            )
+
+        self._print_hessian_differences(H0, H1)
+
+    def test_boozer_exact_coil_vjp_finite_current(self):
+        """
+        Taylor test for the exact-path coil VJP with nonzero net toroidal current I.
+        """
+        np.random.seed(2)
+        current_I = 0.37
+        phis = np.linspace(0, 1/3, 13, endpoint=False)
+        thetas = np.linspace(0, 1, 13, endpoint=False)
+        bs, G0, boozer_surface = self._make_area_boozer_surface(
+            current_I=current_I, mpol=6, ntor=6, phis=phis, thetas=thetas,
+            constraint_weight=None,
+            options={"verbose": False},
+        )
+        res = boozer_surface.run_code(-0.406, G=G0)
+
+        coeffs = bs.x.copy()
+        direction = np.random.rand(*coeffs.shape) - 0.5
+        lm = np.random.rand(int(res["mask"].sum()) + 1) - 0.5
+        dfdx = boozer_surface_dexactresidual_dcoils_dcurrents_vjp(
+            lm, boozer_surface, res["iota"], res["G"]
+        )(bs)
+        directional_derivative = dfdx @ direction
+
+        def f(dofs):
+            bs.x = dofs
+            residual = boozer_surface_residual(
+                boozer_surface.surface, res["iota"], res["G"], bs,
+                derivatives=0, I=current_I,
+            )[0]
+            return np.dot(lm[:-1], residual[res["mask"]])
+
+        self._assert_directional_fd_convergence(f, coeffs, direction, directional_derivative)
+        bs.x = coeffs
+
+    def test_boozer_lsqgrad_coil_vjp_finite_current(self):
+        """
+        Taylor test for the least-squares gradient coil VJP with nonzero net toroidal current I.
+        """
+        np.random.seed(3)
+        current_I = 0.37
+        phis = np.linspace(0, 1/3, 20, endpoint=False)
+        thetas = np.linspace(0, 1, 20, endpoint=False)
+        bs, G0, boozer_surface = self._make_area_boozer_surface(
+            current_I=current_I, mpol=3, ntor=3, phis=phis, thetas=thetas,
+            constraint_weight=100.0,
+            options={"verbose": False, "weight_inv_modB": True},
+        )
+        boozer_surface.res = {"I": current_I}
+
+        coeffs = bs.x.copy()
+        direction = np.random.rand(*coeffs.shape) - 0.5
         iota = -0.3
-        x = np.concatenate((s.get_dofs(), [iota]))
-        if optimize_G:
-            x = np.concatenate((x, [2.*np.pi*current_sum*(4*np.pi*10**(-7)/(2 * np.pi))]))
+        boozer = boozer_surface_residual_dB(
+            boozer_surface.surface, iota, G0, bs, derivatives=1,
+            weight_inv_modB=True, I=current_I,
+        )
+        num_points = 3 * boozer_surface.surface.quadpoints_phi.size * boozer_surface.surface.quadpoints_theta.size
+        lm = np.random.rand(boozer[2].shape[1]) - 0.5
+        dfdx = boozer_surface_dlsqgrad_dcoils_vjp(
+            lm, boozer_surface, iota, G0, weight_inv_modB=True
+        )(bs)
+        directional_derivative = dfdx @ direction
 
-        # deriv = 0
-        w = 0.
-        f0 = boozer_surface.boozer_penalty_constraints(
-            x, derivatives=0, constraint_weight=w, optimize_G=optimize_G, weight_inv_modB=weight_inv_modB)
-        f1 = boozer_surface.boozer_penalty_constraints_vectorized(
-            x, derivatives=0, constraint_weight=w, optimize_G=optimize_G, weight_inv_modB=weight_inv_modB)
-        np.testing.assert_allclose(f0, f1, atol=1e-13, rtol=1e-13)
-        print(np.abs(f0-f1)/np.abs(f0))
+        def f(dofs):
+            bs.x = dofs
+            residual_terms = boozer_surface_residual_dB(
+                boozer_surface.surface, iota, G0, bs, derivatives=1,
+                weight_inv_modB=True, I=current_I,
+            )
+            residual = residual_terms[0] / np.sqrt(num_points)
+            lsq_gradient = residual_terms[2].T @ residual / np.sqrt(num_points)
+            return lm @ lsq_gradient
 
-        # deriv = 1
-        f0, J0 = boozer_surface.boozer_penalty_constraints(
-            x, derivatives=1, constraint_weight=w, optimize_G=optimize_G, weight_inv_modB=weight_inv_modB)
-        f1, J1 = boozer_surface.boozer_penalty_constraints_vectorized(
-            x, derivatives=1, constraint_weight=w, optimize_G=optimize_G, weight_inv_modB=weight_inv_modB)
-        np.testing.assert_allclose(f0, f1, atol=1e-13, rtol=1e-13)
-        np.testing.assert_allclose(J0, J1, atol=1e-11, rtol=1e-11)
-
-        # check directional derivative
-        h1 = np.random.rand(J0.size)-0.5
-        np.testing.assert_allclose(J0@h1, J1@h1, atol=1e-13, rtol=1e-13)
-        print(np.abs(f0-f1)/np.abs(f0), np.abs(J0@h1-J1@h1)/np.abs(J0@h1))
-
-        # deriv = 2
-        f0, J0, H0 = boozer_surface.boozer_penalty_constraints(
-            x, derivatives=2, constraint_weight=w, optimize_G=optimize_G, weight_inv_modB=weight_inv_modB)
-        f1, J1, H1 = boozer_surface.boozer_penalty_constraints_vectorized(
-            x, derivatives=2, constraint_weight=w, optimize_G=optimize_G, weight_inv_modB=weight_inv_modB)
-
-        np.testing.assert_allclose(f0, f1, atol=1e-13, rtol=1e-13)
-        np.testing.assert_allclose(J0, J1, atol=1e-11, rtol=1e-11)
-        np.testing.assert_allclose(H0, H1, atol=1e-10, rtol=1e-10)
-        h2 = np.random.rand(J0.size)-0.5
-
-        np.testing.assert_allclose(f0, f1, atol=1e-13, rtol=1e-13)
-        np.testing.assert_allclose(J0@h1, J1@h1, atol=1e-13, rtol=1e-13)
-        np.testing.assert_allclose((H0@h1)@h2, (H1@h1)@h2, atol=1e-13, rtol=1e-13)
-        print(np.abs(f0-f1)/np.abs(f0), np.abs(J0@h1-J1@h1)/np.abs(J0@h1), np.abs((H0@h1)@h2-(H1@h1)@h2)/np.abs((H0@h1)@h2))
-
-        def compute_differences(Ha, Hb):
-            diff = np.abs(Ha.flatten() - Hb.flatten())
-            rel_diff = diff/np.abs(Ha.flatten())
-            ij1 = np.where(diff.reshape(Ha.shape) == np.max(diff))
-            i1 = ij1[0][0]
-            j1 = ij1[1][0]
-
-            ij2 = np.where(rel_diff.reshape(Ha.shape) == np.max(rel_diff))
-            i2 = ij2[0][0]
-            j2 = ij2[1][0]
-            print(f'max err     ({i1:03}, {j1:03}): {np.max(diff):.6e}, {Ha[i1, j1]:.6e}\nmax rel err ({i2:03}, {j2:03}): {np.max(rel_diff):.6e}, {Ha[i2,j2]:.6e}\n')
-        compute_differences(H0, H1)
+        self._assert_directional_fd_convergence(f, coeffs, direction, directional_derivative)
+        bs.x = coeffs
 
     def test_boozer_surface_quadpoints(self):
         """ 

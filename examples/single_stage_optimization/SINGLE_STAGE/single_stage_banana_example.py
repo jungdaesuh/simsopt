@@ -283,7 +283,16 @@ def parse_args():
     parser.add_argument("--mpol", type=int, default=int(os.environ.get("MPOL", "8")))
     parser.add_argument("--ntor", type=int, default=int(os.environ.get("NTOR", "6")))
     parser.add_argument("--vol-target", type=float, default=float(os.environ.get("VOL_TARGET", "0.10")))
-    parser.add_argument("--constraint-weight", type=float, default=float(os.environ.get("CONSTRAINT_WEIGHT", "1.0")))
+    parser.add_argument(
+        "--constraint-weight",
+        type=float,
+        default=float(os.environ.get("CONSTRAINT_WEIGHT", "1.0")),
+        help=(
+            "Boozer constraint weight. Use a non-negative value for least-squares mode "
+            "(default 1.0). Use a negative value to select the exact Boozer Newton solver."
+        ),
+    )
+    parser.add_argument("--boozer-I", type=float, default=float(os.environ.get("BOOZER_I", "0.0")))
     parser.add_argument("--maxiter", type=int, default=int(os.environ.get("MAXITER", "300")))
     parser.add_argument(
         "--num-surfaces",
@@ -386,14 +395,14 @@ def parse_args():
     parser.add_argument(
         "--ftol",
         type=float,
-        default=float(os.environ["FTOL"]) if "FTOL" in os.environ else None,
-        help="Override the default mpol-based L-BFGS-B function tolerance.",
+        default=float(os.environ.get("FTOL", "1e-15")),
+        help="L-BFGS-B function tolerance (default: 1e-15).",
     )
     parser.add_argument(
         "--gtol",
         type=float,
-        default=float(os.environ["GTOL"]) if "GTOL" in os.environ else None,
-        help="Override the default mpol-based L-BFGS-B gradient tolerance.",
+        default=float(os.environ.get("GTOL", "1e-15")),
+        help="L-BFGS-B gradient tolerance (default: 1e-15).",
     )
     parser.add_argument("--iota-target", type=float, default=float(os.environ.get("IOTA_TARGET", "0.15")))
     parser.add_argument("--num-tf-coils", type=int, default=int(os.environ.get("NUM_TF_COILS", "20")))
@@ -544,7 +553,7 @@ class BoozerResidualExact(Optimizable):
     where
     
     .. math::
-        \mathbf r = \frac{1}{\|\mathbf B\|}[G\mathbf B_\text{BS}(\mathbf x) - ||\mathbf B_\text{BS}(\mathbf x)||^2  (\mathbf x_\varphi + \iota  \mathbf x_\theta)]
+        \mathbf r = \frac{1}{\|\mathbf B\|}[(G + \iota I)\mathbf B_\text{BS}(\mathbf x) - ||\mathbf B_\text{BS}(\mathbf x)||^2  (\mathbf x_\varphi + \iota  \mathbf x_\theta)]
     
     """
 
@@ -593,6 +602,9 @@ class BoozerResidualExact(Optimizable):
         self._J = None
         self._dJ = None
 
+    def _boozer_current_I(self):
+        return self.boozer_surface.res.get("I", getattr(self.boozer_surface, "I", 0.0))
+
     def compute(self):
         if self.boozer_surface.need_to_run_code:
             res = self.boozer_surface.res
@@ -609,7 +621,8 @@ class BoozerResidualExact(Optimizable):
         surface = self.surface
         iota = self.boozer_surface.res['iota']
         G = self.boozer_surface.res['G']
-        r, J = boozer_surface_residual(surface, iota, G, self.biotsavart, derivatives=1, weight_inv_modB=True)
+        I = self._boozer_current_I()
+        r, J = boozer_surface_residual(surface, iota, G, self.biotsavart, derivatives=1, weight_inv_modB=True, I=I)
         rtil = np.concatenate((r/np.sqrt(num_points), [np.sqrt(self.constraint_weight)*(self.boozer_surface.label.J()-self.boozer_surface.targetlabel)]))
         self._J = 0.5*np.sum(rtil**2)
         
@@ -641,7 +654,8 @@ class BoozerResidualExact(Optimizable):
         nphi = self.surface.quadpoints_phi.size
         ntheta = self.surface.quadpoints_theta.size
         num_points = 3 * nphi * ntheta
-        r, r_dB = boozer_surface_residual_dB(surface, self.boozer_surface.res['iota'], self.boozer_surface.res['G'], self.biotsavart, derivatives=0, weight_inv_modB=True)
+        I = self._boozer_current_I()
+        r, r_dB = boozer_surface_residual_dB(surface, self.boozer_surface.res['iota'], self.boozer_surface.res['G'], self.biotsavart, derivatives=0, weight_inv_modB=True, I=I)
 
         r /= np.sqrt(num_points)
         r_dB /= np.sqrt(num_points)
@@ -650,7 +664,7 @@ class BoozerResidualExact(Optimizable):
         dJ_by_dB = np.sum(dJ_by_dB.reshape((-1, 3, 3)), axis=1)
         return dJ_by_dB
 
-def initialize_boozer_surface(surf_prev, mpol, ntor, bs, vol_target, constraint_weight, iota, G0):
+def initialize_boozer_surface(surf_prev, mpol, ntor, bs, vol_target, constraint_weight, iota, G0, boozer_I=0.0):
     """
     This initializes the boozer surface, using either the boozer "exact" algorithm, or the boozer "least squares" algorithm
     
@@ -673,7 +687,7 @@ def initialize_boozer_surface(surf_prev, mpol, ntor, bs, vol_target, constraint_
         # Boozer least square approach
         print("Generating Boozer least squares surface...")
         vol = Volume(surf)
-        boozer_surface = BoozerSurface(bs, surf, vol, vol_target, constraint_weight, options={'verbose':True})
+        boozer_surface = BoozerSurface(bs, surf, vol, vol_target, constraint_weight, options={'verbose':True}, I=boozer_I)
     else:
         # Boozer exact approach
         print("Generating Boozer exact surface...")
@@ -685,7 +699,7 @@ def initialize_boozer_surface(surf_prev, mpol, ntor, bs, vol_target, constraint_
               )
     
         vol = Volume(surf_exact)
-        boozer_surface = BoozerSurface(bs, surf_exact, vol, vol_target, None, options={'verbose':True})
+        boozer_surface = BoozerSurface(bs, surf_exact, vol, vol_target, None, options={'verbose':True}, I=boozer_I)
 
     # Run boozer surface algorithm
     res = boozer_surface.run_code(iota, G0)
@@ -694,7 +708,10 @@ def initialize_boozer_surface(surf_prev, mpol, ntor, bs, vol_target, constraint_
 
     # Check if boozer algo is successful
     success1 = res['success'] # True if the boozer surface algo converged
-    success2 = not boozer_surface.surface.is_self_intersecting() # True if surface is not self intersecting
+    try:
+        success2 = not boozer_surface.surface.is_self_intersecting() # True if surface is not self intersecting
+    except Exception:
+        success2 = False  # surface that folds is self-intersecting
     success = success1 and success2
     if not success:
         print(
@@ -823,7 +840,12 @@ def evaluate_surface_stack(
     volumes = [entry["boozer_surface"].surface.volume() for entry in surface_data]
     iotas = [entry["boozer_surface"].res["iota"] for entry in surface_data]
     solve_success = [bool(entry["boozer_surface"].res["success"]) for entry in surface_data]
-    self_intersections = [bool(entry["boozer_surface"].surface.is_self_intersecting()) for entry in surface_data]
+    def _safe_is_self_intersecting(surface):
+        try:
+            return bool(surface.is_self_intersecting())
+        except Exception:
+            return True  # surface that folds is self-intersecting
+    self_intersections = [_safe_is_self_intersecting(entry["boozer_surface"].surface) for entry in surface_data]
     adjacent_gaps = []
     for left, right in zip(surface_data[:-1], surface_data[1:]):
         adjacent_gaps.append(surface_pointcloud_gap(left["boozer_surface"].surface, right["boozer_surface"].surface))
@@ -841,10 +863,13 @@ def evaluate_surface_stack(
         and len(surface_data) > 1
         and all(hasattr(entry["boozer_surface"].surface, "cross_section") for entry in surface_data)
     ):
-        nesting_ok, bad_nesting_phis = cross_sections_are_nested(
-            surface_data[0]["boozer_surface"].surface,
-            surface_data[-1]["boozer_surface"].surface,
-        )
+        try:
+            nesting_ok, bad_nesting_phis = cross_sections_are_nested(
+                surface_data[0]["boozer_surface"].surface,
+                surface_data[-1]["boozer_surface"].surface,
+            )
+        except Exception:
+            nesting_ok = False  # surface that folds is not properly nested
     success = all(solve_success) and not any(self_intersections) and volumes_ordered and gap_ok and vessel_gap_ok and nesting_ok
     return {
         "success": success,
@@ -1645,8 +1670,6 @@ def callback(x):
 
 
 # Convergence tolerances for different mpol values (module-level for testability)
-ftol_by_mpol = {8: 1e-5, 9: 5e-6, 10: 1e-6, 11: 5e-7, 12: 1e-7, 13: 5e-8, 14: 1e-8, 15: 5e-9, 16: 1e-9, 17: 5e-10, 18: 1e-10}
-gtol_by_mpol = {8: 1e-2, 9: 5e-3, 10: 1e-3, 11: 5e-4, 12: 1e-4, 13: 5e-5, 14: 1e-5, 15: 5e-6, 16: 1e-6, 17: 5e-7, 18: 1e-7}
 MULTISURFACE_RAMP_ITERATIONS = 0
 INNER_SURFACE_INITIAL_WEIGHT = 1.0
 TOPOLOGY_GATE_FIELDLINES = 0
@@ -1679,7 +1702,8 @@ if __name__ == "__main__":
 
     # Optimization targets and weights
     vol_target = args.vol_target
-    CONSTRAINT_WEIGHT = args.constraint_weight
+    CONSTRAINT_WEIGHT = None if args.constraint_weight < 0 else args.constraint_weight
+    boozer_I = args.boozer_I
     MAXITER = args.maxiter
     CHECKPOINT_EVERY = args.checkpoint_every
     TOPOLOGY_SCORER_EVERY = args.topology_scorer_every
@@ -1786,7 +1810,7 @@ if __name__ == "__main__":
         rng_seed = None
 
     config_str = (
-        f"{stage2_bs_path}|{stage}|{CONSTRAINT_WEIGHT}|{vol_target}|{iota_target}"
+        f"{stage2_bs_path}|{stage}|{CONSTRAINT_WEIGHT}|{vol_target}|{iota_target}|{boozer_I}"
         f"|{args.cc_dist}|{args.cc_weight}|{args.curvature_weight}|{args.curvature_threshold}"
         f"|{banana_surf_radius}|{nphi}|{ntheta}|{args.init_only}"
         f"|{args.basin_hops}|{args.basin_stepsize}|{rng_seed}"
@@ -1812,6 +1836,7 @@ if __name__ == "__main__":
             CONSTRAINT_WEIGHT,
             iota_target,
             G0,
+            boozer_I,
         )
         surface_data.append({
             "name": config["name"],
@@ -1833,7 +1858,10 @@ if __name__ == "__main__":
 
     # Generate initial diagnostic plots
     initial_field_error = normPlot(outer_surface_data['boozer_surface'].surface, bs, OUT_DIR_ITER + "/NormPlotInitial")
-    cross_section_plot(surf_coils, outer_surface_data['boozer_surface'].surface, banana_curve, OUT_DIR_ITER + "/CrossSectionInitial", hbt, VV)
+    try:
+        cross_section_plot(surf_coils, outer_surface_data['boozer_surface'].surface, banana_curve, OUT_DIR_ITER + "/CrossSectionInitial", hbt, VV)
+    except Exception as e:
+        print(f"WARNING: CrossSectionInitial plot failed (surface may fold at high mpol): {e}")
     initial_volume = outer_surface_data['boozer_surface'].surface.volume()
     initial_iota = Iotas(outer_surface_data['boozer_surface']).J()
     initial_max_curvature = np.max(banana_curve.kappa())
@@ -1982,8 +2010,8 @@ if __name__ == "__main__":
     # RUN OPTIMIZATION
     # ==============================================================================
     # Get convergence tolerances for current mpol
-    ftol = args.ftol if args.ftol is not None else ftol_by_mpol.get(mpol, 1e-5 if mpol < 8 else 1e-10)
-    gtol = args.gtol if args.gtol is not None else gtol_by_mpol.get(mpol, 1e-2 if mpol < 8 else 1e-7)
+    ftol = args.ftol
+    gtol = args.gtol
 
     basin_hop_count = None
     basin_minimization_failures = None
@@ -2149,7 +2177,10 @@ if __name__ == "__main__":
 
         # Generate final diagnostic plots
         fieldError = normPlot(outer_surface_data['boozer_surface'].surface, bs, OUT_DIR_ITER + "/NormPlotOptimized")
-        cross_section_plot(surf_coils, outer_surface_data['boozer_surface'].surface, banana_curve, OUT_DIR_ITER + "/CrossSectionOptimized", hbt, VV)
+        try:
+            cross_section_plot(surf_coils, outer_surface_data['boozer_surface'].surface, banana_curve, OUT_DIR_ITER + "/CrossSectionOptimized", hbt, VV)
+        except Exception as e:
+            print(f"WARNING: CrossSectionOptimized plot failed (surface may fold at high mpol): {e}")
     else:
         final_surface_volumes = initial_surface_volumes
         final_surface_iotas = initial_surface_iotas
@@ -2252,6 +2283,7 @@ if __name__ == "__main__":
         "FINAL_TOPOLOGY_STOP_REASON_COUNTS": final_topology_status["stop_reason_counts"],
         "TARGET_VOLUME": float(vol_target),
         "TARGET_IOTA": float(iota_target),
+        "BOOZER_I": float(boozer_I),
         "FINAL_VOLUME": float(final_volume),
         "FINAL_IOTA": float(final_iota),
         "FIELD_ERROR": float(fieldError),

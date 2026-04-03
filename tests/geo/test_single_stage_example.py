@@ -19,11 +19,19 @@ EXAMPLE_MODULE_PATH = (
     / "SINGLE_STAGE"
     / "single_stage_banana_example.py"
 )
+BOOZER_SURFACE_PATH = (
+    Path(__file__).resolve().parents[2]
+    / "src"
+    / "simsopt"
+    / "geo"
+    / "boozersurface.py"
+)
 TEST_MPOL = 8
 TEST_NTOR = 6
 TEST_VOL_TARGET = 0.1
 TEST_IOTA = 0.15
 TEST_G0 = 1.0
+TEST_BOOZER_I = 0.37
 
 
 def load_single_stage_example_module():
@@ -86,17 +94,85 @@ class FakeVolume:
 
 
 class FakeBoozerSurface:
-    def __init__(self, bs, surface, label, targetlabel, constraint_weight, options=None):
+    def __init__(self, bs, surface, label, targetlabel, constraint_weight, options=None, I=0.0):
         self.bs = bs
         self.surface = surface
         self.label = label
         self.targetlabel = targetlabel
         self.constraint_weight = constraint_weight
         self.options = options or {}
-        self.res = {"success": True, "iota": 0.15, "G": 1.0}
+        self.I = I
+        self.res = {"success": True, "iota": 0.15, "G": 1.0, "I": I}
 
     def run_code(self, iota, G):
         return self.res
+
+
+class FakeResolvedSurface:
+    def __init__(
+        self,
+        *,
+        mpol,
+        ntor,
+        stellsym,
+        nfp,
+        quadpoints_phi,
+        quadpoints_theta,
+    ):
+        self.mpol = mpol
+        self.ntor = ntor
+        self.stellsym = stellsym
+        self.nfp = nfp
+        self.quadpoints_phi = np.asarray(quadpoints_phi)
+        self.quadpoints_theta = np.asarray(quadpoints_theta)
+        self._dofs = np.zeros(2)
+
+    def set_dofs(self, dofs):
+        self._dofs = np.asarray(dofs, dtype=float)
+
+    def get_dofs(self):
+        return self._dofs.copy()
+
+    def gamma(self):
+        return np.zeros((self.quadpoints_phi.size, self.quadpoints_theta.size, 3))
+
+
+class FakeLabel:
+    def J(self):
+        return 0.0
+
+    def dJ_by_dsurfacecoefficients(self):
+        return np.zeros(2)
+
+
+class FakeObjectiveBiotSavart:
+    def __init__(self):
+        self.points = None
+        self.last_vjp_input = None
+
+    def set_points(self, points):
+        self.points = np.asarray(points, dtype=float)
+
+    def B_vjp(self, dJ_by_dB):
+        self.last_vjp_input = np.asarray(dJ_by_dB, dtype=float)
+        return np.array([3.0, -1.0])
+
+
+class FakeParentBoozerSurface:
+    def __init__(self, *, surface, label, targetlabel, need_to_run_code, res):
+        self.surface = surface
+        self.label = label
+        self.targetlabel = targetlabel
+        self.need_to_run_code = need_to_run_code
+        self.res = res
+        self.ancestors = []
+        self.name = "FakeBoozerSurface"
+        self.dofs = object()
+        self.local_full_dof_size = 0
+        self.local_dof_size = 0
+
+    def _add_child(self, child):
+        del child
 
 
 class FakeAlgebraicObjective:
@@ -145,6 +221,57 @@ class SingleStageExampleTests(unittest.TestCase):
                 G0=TEST_G0,
             )
 
+    def run_exact_boozer_objective(self, module, *, current_I):
+        input_surface = FakeResolvedSurface(
+            mpol=2,
+            ntor=2,
+            stellsym=True,
+            nfp=5,
+            quadpoints_phi=np.linspace(0, 1 / 5, 2, endpoint=False),
+            quadpoints_theta=np.linspace(0, 1, 3, endpoint=False),
+        )
+        input_surface.set_dofs(np.array([1.0, -2.0]))
+        fake_boozer_surface = FakeParentBoozerSurface(
+            surface=input_surface,
+            label=FakeLabel(),
+            targetlabel=0.0,
+            need_to_run_code=False,
+            res={
+                "iota": -0.4,
+                "G": 1.2,
+                "I": current_I,
+                "PLU": (None, None, None),
+                "vjp": lambda adj, booz_surf, iota, G: np.zeros(2),
+            },
+        )
+        fake_bs = FakeObjectiveBiotSavart()
+        nsurfdofs = input_surface.get_dofs().size
+        residual_calls = []
+        residual_dB_calls = []
+
+        def fake_residual(surface, iota, G, biotsavart, derivatives=0, weight_inv_modB=False, I=0.0):
+            num_points = 3 * surface.quadpoints_phi.size * surface.quadpoints_theta.size
+            residual_calls.append((derivatives, weight_inv_modB, I))
+            return np.ones(num_points), np.zeros((num_points, nsurfdofs + 2))
+
+        def fake_residual_dB(surface, iota, G, biotsavart, derivatives=0, weight_inv_modB=False, I=0.0):
+            num_points = 3 * surface.quadpoints_phi.size * surface.quadpoints_theta.size
+            residual_dB_calls.append((derivatives, weight_inv_modB, I))
+            return np.ones(num_points), np.ones((num_points, 3))
+
+        with patch.object(module, "SurfaceXYZTensorFourier", FakeResolvedSurface), patch.object(
+            module, "boozer_surface_residual", side_effect=fake_residual
+        ), patch.object(
+            module, "boozer_surface_residual_dB", side_effect=fake_residual_dB
+        ), patch.object(
+            module, "forward_backward", return_value=np.zeros(nsurfdofs + 2)
+        ):
+            objective = module.BoozerResidualExact(fake_boozer_surface, fake_bs)
+            value = objective.J()
+            gradient = objective.dJ(partials=True)
+
+        return objective, fake_bs, residual_calls, residual_dB_calls, value, gradient
+
     def test_exact_boozer_helpers_are_imported(self):
         module = self.load_module()
 
@@ -175,6 +302,25 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertIsInstance(boozer_surface, FakeBoozerSurface)
         self.assertEqual(len(FakeSurfaceXYZTensorFourier.instances), 1)
         self.assertIs(boozer_surface.surface, FakeSurfaceXYZTensorFourier.instances[0])
+
+    def test_real_boozersurface_source_treats_zero_constraint_weight_as_least_squares(self):
+        source = BOOZER_SURFACE_PATH.read_text()
+        self.assertIn("self.boozer_type = 'ls' if constraint_weight is not None else 'exact'", source)
+
+    def test_boozer_residual_exact_threads_fixed_current_into_example_adjoint_path(self):
+        module = self.load_module()
+        objective, fake_bs, residual_calls, residual_dB_calls, value, gradient = self.run_exact_boozer_objective(
+            module,
+            current_I=TEST_BOOZER_I,
+        )
+
+        self.assertIsInstance(value, float)
+        np.testing.assert_allclose(gradient, np.array([3.0, -1.0]))
+        self.assertEqual(residual_calls, [(1, True, TEST_BOOZER_I)])
+        self.assertEqual(residual_dB_calls, [(0, True, TEST_BOOZER_I)])
+        expected_point_count = objective.surface.quadpoints_phi.size * objective.surface.quadpoints_theta.size
+        self.assertEqual(fake_bs.points.shape, (expected_point_count, 3))
+        self.assertEqual(fake_bs.last_vjp_input.shape, (expected_point_count, 3))
 
     def test_fun_fallback_returns_elevated_j_and_same_sign_gradient(self):
         """Issue #2: failed Boozer must return elevated J + same-sign gradient,
@@ -1514,36 +1660,13 @@ class CrossSectionNormalizationTests(unittest.TestCase):
 
 
 class FtolGtolDefaultTests(unittest.TestCase):
-    """Issue #31: ftol/gtol must not be None for any mpol value."""
+    """ftol/gtol should be explicit tight defaults, not mpol-dependent."""
 
-    def test_ftol_gtol_have_defaults_for_all_mpol(self):
-        module = load_single_stage_example_module()
-        ftol_by_mpol = module.ftol_by_mpol
-        gtol_by_mpol = module.gtol_by_mpol
-        for mpol in range(1, 30):
-            ftol = ftol_by_mpol.get(mpol, 1e-5 if mpol < 8 else 1e-10)
-            gtol = gtol_by_mpol.get(mpol, 1e-2 if mpol < 8 else 1e-7)
-            self.assertIsNotNone(ftol, f"ftol is None for mpol={mpol}")
-            self.assertIsNotNone(gtol, f"gtol is None for mpol={mpol}")
-            self.assertIsInstance(ftol, float, f"ftol not float for mpol={mpol}")
-            self.assertIsInstance(gtol, float, f"gtol not float for mpol={mpol}")
-            self.assertGreater(ftol, 0, f"ftol not positive for mpol={mpol}")
-            self.assertGreater(gtol, 0, f"gtol not positive for mpol={mpol}")
-
-    def test_defaults_match_dictionary_endpoints(self):
-        module = load_single_stage_example_module()
-        ftol_by_mpol = module.ftol_by_mpol
-        gtol_by_mpol = module.gtol_by_mpol
-        self.assertEqual(ftol_by_mpol.get(7, 1e-5 if 7 < 8 else 1e-10), 1e-5)
-        self.assertEqual(ftol_by_mpol.get(19, 1e-5 if 19 < 8 else 1e-10), 1e-10)
-        self.assertEqual(gtol_by_mpol.get(7, 1e-2 if 7 < 8 else 1e-7), 1e-2)
-        self.assertEqual(gtol_by_mpol.get(19, 1e-2 if 19 < 8 else 1e-7), 1e-7)
-
-    def test_source_uses_default_argument(self):
-        """The deployed .get() calls must include a default, not bare .get(mpol)."""
+    def test_no_mpol_based_tolerance_table(self):
+        """ftol/gtol are tight defaults, not mpol-dependent lookups."""
         source = EXAMPLE_MODULE_PATH.read_text()
-        self.assertNotIn("ftol_by_mpol.get(mpol)", source)
-        self.assertNotIn("gtol_by_mpol.get(mpol)", source)
+        self.assertNotIn("ftol_by_mpol", source)
+        self.assertNotIn("gtol_by_mpol", source)
 
 
 if __name__ == "__main__":
