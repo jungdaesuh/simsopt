@@ -855,6 +855,42 @@ class TestBoozerSurfaceJAXClassPrivate:
         assert bool(result["success"]) is True
 
     @PRIVATE_OPTIMIZER_RUNTIME
+    @REQUIRES_PRIVATE_OPTIMIZER_RUNTIME
+    def test_newton_polish_traceable_rejected_step_keeps_zero_iterations(
+        self, monkeypatch
+    ):
+        """Rejected traceable Newton steps must not increment nit or emit progress."""
+        observed = {"progress_calls": 0}
+
+        def fake_gmres_solve(_hvp_fn, _x, rhs, *, stab, tol):
+            del _hvp_fn, _x, stab, tol
+            return -rhs, jnp.zeros_like(rhs), None
+
+        monkeypatch.setattr(
+            _opt,
+            "_gmres_solve_newton_system",
+            fake_gmres_solve,
+        )
+
+        x0 = jnp.asarray([1.0, -2.0], dtype=jnp.float64)
+        result = _opt.newton_polish_traceable(
+            lambda x: 0.5 * jnp.dot(x, x),
+            x0,
+            maxiter=3,
+            tol=1e-12,
+            stab=0.0,
+            progress_callback=lambda *_args: observed.__setitem__(
+                "progress_calls",
+                observed["progress_calls"] + 1,
+            ),
+        )
+
+        np.testing.assert_allclose(np.asarray(result["x"]), np.asarray(x0))
+        assert int(result["nit"]) == 0
+        assert bool(result["success"]) is False
+        assert observed["progress_calls"] == 0
+
+    @PRIVATE_OPTIMIZER_RUNTIME
     def test_run_code_ondevice_limited_memory_routes_to_lbfgs(self, monkeypatch):
         """limited_memory=True must route LS solves through lbfgs-ondevice."""
         booz = _make_mock_boozer_surface()

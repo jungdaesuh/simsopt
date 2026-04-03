@@ -99,6 +99,10 @@ def _emit_newton_progress(progress_callback):
     progress_callback(2, 0.05, 1.0e-4)
 
 
+def _assert_lu_is_not_called(message):
+    raise AssertionError(message)
+
+
 _enable_strict_jax_backend = partial(enable_strict_jax_backend, mode="jax_gpu_parity")
 _enable_non_strict_jax_backend = partial(
     enable_non_strict_jax_backend,
@@ -1808,6 +1812,88 @@ class TestBoozerSurfaceJAXExactPath:
             np.asarray(expected_grad),
         )
 
+    def test_run_code_traceable_ls_skips_lu_for_nonfinite_newton_result(self, monkeypatch):
+        """LS traceable failures must not build LU factors for non-finite Hessians."""
+        booz = _make_mock_boozer_surface()
+        booz.options["optimizer_backend"] = "ondevice"
+        booz.options["limited_memory"] = True
+        coil_set_spec = booz.coil_set_spec
+        sdofs = jnp.asarray(booz.surface.get_dofs(), dtype=jnp.float64)
+        iota = jnp.asarray(0.3, dtype=jnp.float64)
+        G = jnp.asarray(0.05, dtype=jnp.float64)
+
+        def fake_minimize(_fun, x0, **_kwargs):
+            return types.SimpleNamespace(x_k=x0)
+
+        def fake_newton_polish(
+            obj_fn,
+            x0,
+            *,
+            maxiter,
+            tol,
+            stab,
+            progress_callback=None,
+        ):
+            del obj_fn, maxiter, tol, stab, progress_callback
+            return {
+                "x": x0,
+                "fun": jnp.asarray(jnp.nan, dtype=x0.dtype),
+                "grad": jnp.full_like(x0, jnp.nan),
+                "hessian": jnp.full((x0.shape[0], x0.shape[0]), jnp.nan, dtype=x0.dtype),
+                "nit": 0,
+                "success": False,
+            }
+
+        monkeypatch.setattr(_opt, "_minimize_lbfgs_private", fake_minimize)
+        monkeypatch.setattr(
+            _bsj.jax.scipy.linalg,
+            "lu",
+            lambda *_args, **_kwargs: _assert_lu_is_not_called(
+                "non-finite traceable LS solves must skip LU"
+            ),
+        )
+        _patch_newton_polish_runner(monkeypatch, fake_newton_polish)
+
+        result = booz.run_code_traceable(coil_set_spec, sdofs, iota, G)
+
+        assert result["type"] == "ls"
+        assert bool(result["success"]) is False
+
+    def test_run_code_traceable_exact_skips_lu_for_nonfinite_newton_result(
+        self, monkeypatch
+    ):
+        """Exact traceable failures must not build LU factors for non-finite Jacobians."""
+        booz = _make_mock_boozer_surface_exact()
+        coil_set_spec = booz.coil_set_spec
+        sdofs = jnp.asarray(booz.surface.get_dofs(), dtype=jnp.float64)
+        iota = jnp.asarray(0.3, dtype=jnp.float64)
+        G = jnp.asarray(0.05, dtype=jnp.float64)
+
+        def fake_newton_exact_traceable(_residual_fn, x0, *, maxiter, tol):
+            del maxiter, tol
+            n = x0.shape[0]
+            return {
+                "x": x0,
+                "residual": jnp.full((n - 1,), jnp.nan, dtype=x0.dtype),
+                "jacobian": jnp.full((n, n), jnp.nan, dtype=x0.dtype),
+                "nit": 0,
+                "success": False,
+            }
+
+        monkeypatch.setattr(_bsj, "newton_exact_traceable", fake_newton_exact_traceable)
+        monkeypatch.setattr(
+            _bsj.jax.scipy.linalg,
+            "lu",
+            lambda *_args, **_kwargs: _assert_lu_is_not_called(
+                "non-finite traceable exact solves must skip LU"
+            ),
+        )
+
+        result = booz.run_code_traceable(coil_set_spec, sdofs, iota, G)
+
+        assert result["type"] == "exact"
+        assert bool(result["success"]) is False
+
     def test_exact_accepts_and_ignores_optimizer_backend_option(self):
         """Exact solves accept optimizer_backend but ignore it."""
         bs = _MockBiotSavart(_make_mock_coils())
@@ -1948,6 +2034,48 @@ class TestBoozerSurfaceJAXExactPath:
         assert res["vjp"] is None
         assert res["mask"] is None
         np.testing.assert_allclose(booz.surface.get_dofs(), dofs_before)
+
+    def test_newton_residual_uses_call_weight_override(self, monkeypatch):
+        """Newton residual reconstruction must respect the call-time weighting flag."""
+        booz = _make_mock_boozer_surface()
+        captured = {}
+
+        def fake_newton_polish(
+            _objective_fn, x0, *, maxiter, tol, stab, progress_callback=None
+        ):
+            del maxiter, tol, stab, progress_callback
+            return {
+                "x": x0,
+                "fun": jnp.asarray(0.0, dtype=x0.dtype),
+                "grad": jnp.zeros_like(x0),
+                "hessian": jnp.eye(x0.shape[0], dtype=x0.dtype),
+                "nit": 0,
+                "success": True,
+            }
+
+        def fake_boozer_residual_vector(G, iota, B, xphi, xtheta, weight_inv_modB):
+            del G, iota, B
+            captured["weight_inv_modB"] = bool(weight_inv_modB)
+            nphi, ntheta = xphi.shape[:2]
+            return jnp.zeros((3 * nphi * ntheta,), dtype=xtheta.dtype)
+
+        _patch_newton_polish_runner(monkeypatch, fake_newton_polish)
+        monkeypatch.setattr(
+            _bsj,
+            "boozer_residual_vector",
+            fake_boozer_residual_vector,
+        )
+
+        res = booz.minimize_boozer_penalty_constraints_newton(
+            constraint_weight=booz.constraint_weight,
+            iota=0.3,
+            G=0.05,
+            weight_inv_modB=False,
+            verbose=False,
+        )
+
+        assert captured["weight_inv_modB"] is False
+        assert res["weight_inv_modB"] is False
 
 
 # ---------------------------------------------------------------------------

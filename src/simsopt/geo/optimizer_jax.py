@@ -526,19 +526,25 @@ def newton_polish_traceable(
         accepted, candidate_norm = _newton_candidate_status(
             state["norm"], x_next, grad_next
         )
+        next_nit = state["nit"] + 1
         if progress_callback is not None:
-            jax.debug.callback(
-                progress_callback,
-                state["nit"] + 1,
-                lax.select(accepted, val_next, state["val"]),
-                lax.select(accepted, candidate_norm, state["norm"]),
+            lax.cond(
+                accepted,
+                lambda _: jax.debug.callback(
+                    progress_callback,
+                    next_nit,
+                    val_next,
+                    candidate_norm,
+                ),
+                lambda _: None,
+                operand=None,
             )
         return {
             "x": lax.select(accepted, x_next, state["x"]),
             "val": lax.select(accepted, val_next, state["val"]),
             "grad": lax.select(accepted, grad_next, state["grad"]),
             "norm": lax.select(accepted, candidate_norm, state["norm"]),
-            "nit": state["nit"] + 1,
+            "nit": lax.select(accepted, next_nit, state["nit"]),
             "stalled": ~accepted,
         }
 

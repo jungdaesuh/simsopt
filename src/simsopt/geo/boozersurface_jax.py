@@ -942,6 +942,22 @@ def _directional_derivative(objective, x, tangent):
     return directional
 
 
+def _traceable_plu_or_dummy(matrix, *, finite):
+    """Build PLU factors only for finite matrices on traceable paths."""
+
+    def compute_plu(mat):
+        return jax.scipy.linalg.lu(mat)
+
+    def dummy_plu(mat):
+        zeros = jnp.zeros_like(mat)
+        return zeros, zeros, zeros
+
+    if not isinstance(finite, jax.core.Tracer):
+        return compute_plu(matrix) if bool(finite) else dummy_plu(matrix)
+
+    return jax.lax.cond(finite, compute_plu, dummy_plu, matrix)
+
+
 _DEFAULT_OPTIONS_LS = {
     "verbose": True,
     "bfgs_tol": 1e-10,
@@ -1337,11 +1353,14 @@ class BoozerSurfaceJAX(Optimizable):
                 maxiter=self.options["newton_maxiter"],
                 tol=self.options["newton_tol"],
             )
-            P, L, U = jax.scipy.linalg.lu(result["jacobian"])
             finite = (
                 jnp.all(jnp.isfinite(result["x"]))
                 & jnp.all(jnp.isfinite(result["residual"]))
                 & jnp.all(jnp.isfinite(result["jacobian"]))
+            )
+            P, L, U = _traceable_plu_or_dummy(
+                result["jacobian"],
+                finite=finite,
             )
             return {
                 "x": result["x"],
@@ -1408,7 +1427,6 @@ class BoozerSurfaceJAX(Optimizable):
             tol=self.options["newton_tol"],
             stab=self.options["newton_stab"],
         )
-        P, L, U = jax.scipy.linalg.lu(newton_result["hessian"])
         sdofs_out, iota_out, G_out = self._unpack_decision_vector_jax(
             newton_result["x"],
             optimize_G,
@@ -1418,6 +1436,10 @@ class BoozerSurfaceJAX(Optimizable):
             jnp.all(jnp.isfinite(newton_result["x"]))
             & jnp.all(jnp.isfinite(newton_result["grad"]))
             & jnp.all(jnp.isfinite(newton_result["hessian"]))
+        )
+        P, L, U = _traceable_plu_or_dummy(
+            newton_result["hessian"],
+            finite=finite,
         )
         return {
             "x": newton_result["x"],
@@ -1440,6 +1462,7 @@ class BoozerSurfaceJAX(Optimizable):
         sdofs,
         iota,
         G,
+        weight_inv_modB,
         coil_set_spec=None,
         coil_arrays=None,
     ):
@@ -1476,7 +1499,7 @@ class BoozerSurfaceJAX(Optimizable):
         ).reshape(nphi, ntheta, 3)
 
         r_boozer_raw = boozer_residual_vector(
-            G, iota, B, xphi, xtheta, self.options["weight_inv_modB"]
+            G, iota, B, xphi, xtheta, weight_inv_modB
         )
         num_res = 3 * nphi * ntheta
         r_boozer = r_boozer_raw / jnp.sqrt(num_res)
@@ -1729,7 +1752,12 @@ class BoozerSurfaceJAX(Optimizable):
             if G_out is not None
             else float(compute_G_from_currents(self.coil_currents))
         )
-        residual_vec = self._compute_residual_vector(sdofs_final, iota_out, G_for_res)
+        residual_vec = self._compute_residual_vector(
+            sdofs_final,
+            iota_out,
+            G_for_res,
+            weight_inv_modB=weight_inv_modB,
+        )
 
         res = {
             "residual": residual_vec,
@@ -2170,6 +2198,7 @@ class BoozerSurfaceJAX(Optimizable):
             sdofs_final,
             iota_out,
             G_for_res,
+            weight_inv_modB=weight_inv_modB,
             coil_arrays=coil_arrays,
         )
 
