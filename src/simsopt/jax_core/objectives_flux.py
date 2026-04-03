@@ -5,6 +5,7 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 
+from ._device_scalars import float_scalar, two_pi
 from .field import grouped_biot_savart_B_from_spec
 from .specs import (
     FieldEvalSpec,
@@ -19,19 +20,6 @@ from .surface_rzfourier import (
 from ..objectives.integral_bdotn_jax import integral_BdotN as integral_BdotN_jax
 
 
-def _device_one(reference):
-    return jnp.exp(jnp.sum(reference - reference))
-
-
-def _two_pi(reference):
-    pi = jnp.arccos(-_device_one(reference))
-    return pi + pi
-
-
-def _float_scalar(value: int, reference):
-    return jnp.sum(jnp.broadcast_to(_device_one(reference), (value,)))
-
-
 def _fixed_surface_target_array(normal, target):
     if target is None:
         zero_target = jnp.sum(normal, axis=-1)
@@ -44,14 +32,14 @@ def build_fourier_basis(quadpoints_jax, order):
     zeros = quadpoints_jax - quadpoints_jax
     basis_columns = [jnp.exp(zeros)]
     dbasis_columns = [zeros]
-    two_pi = _two_pi(quadpoints_jax)
+    angle_scale = two_pi(quadpoints_jax)
     for j in range(1, order + 1):
-        mode = _float_scalar(j, quadpoints_jax)
-        arg = two_pi * mode * quadpoints_jax
+        mode = float_scalar(j, quadpoints_jax)
+        arg = angle_scale * mode * quadpoints_jax
         s = jnp.sin(arg)
         c = jnp.cos(arg)
         basis_columns.extend((s, c))
-        dbasis_columns.extend((two_pi * mode * c, -(two_pi * mode) * s))
+        dbasis_columns.extend((angle_scale * mode * c, -(angle_scale * mode) * s))
 
     return jnp.stack(basis_columns, axis=1), jnp.stack(dbasis_columns, axis=1)
 
