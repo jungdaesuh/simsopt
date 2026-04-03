@@ -755,8 +755,8 @@ class TestLBFGSMethodPrivate:
         """lbfgs-ondevice must support explicit value/grad objectives."""
 
         def quad_value_and_grad(x):
-            x = np.asarray(x, dtype=float)
-            return 0.5 * float(np.dot(x, x)), x.copy()
+            x = jnp.asarray(x, dtype=jnp.float64)
+            return 0.5 * jnp.dot(x, x), x
 
         callback_calls = []
         x0 = jnp.array([1.0, -2.0], dtype=jnp.float64)

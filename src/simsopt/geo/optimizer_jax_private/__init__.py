@@ -17,6 +17,7 @@ from ._line_search import (
     _binary_replace,
     _cubicmin,
     _line_search,
+    _line_search_value_and_grad,
     _quadmin,
     _zoom,
 )
@@ -26,6 +27,7 @@ from ._bfgs import (
 )
 from ._lbfgs import (
     _minimize_lbfgs_private,
+    _minimize_lbfgs_private_value_and_grad,
     _two_loop_recursion,
     _update_history_scalars,
     _update_history_vectors,

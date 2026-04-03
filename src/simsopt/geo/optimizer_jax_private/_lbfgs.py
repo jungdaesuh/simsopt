@@ -14,7 +14,7 @@ from ._common import (
     _require_private_optimizer_runtime,
     _resolve_lbfgs_limits,
 )
-from ._line_search import _line_search
+from ._line_search import _line_search_value_and_grad
 from ._types import _LBFGSResults
 
 
@@ -54,8 +54,20 @@ def _two_loop_recursion(state):
     return lax.fori_loop(0, curr_size, body_fun2, q)
 
 
-def _minimize_lbfgs_private(
-    fun,
+def _coerce_value_and_grad_result(fun, x):
+    value, grad = fun(x)
+    value = jnp.asarray(value, dtype=x.dtype)
+    grad = jnp.asarray(grad, dtype=x.dtype)
+    if grad.shape != x.shape:
+        raise ValueError(
+            "On-device explicit value-and-gradient objectives must return a "
+            f"gradient matching x.shape={x.shape}, got {grad.shape}."
+        )
+    return value, grad
+
+
+def _minimize_lbfgs_private_impl(
+    value_and_grad_fun,
     x0,
     *,
     maxiter=None,
@@ -74,7 +86,7 @@ def _minimize_lbfgs_private(
     dtype = x0.dtype
     maxiter, maxfun, maxgrad = _resolve_lbfgs_limits(d, maxiter, maxfun, maxgrad)
 
-    f_0, g_0 = value_and_grad(fun)(x0)
+    f_0, g_0 = _coerce_value_and_grad_result(value_and_grad_fun, x0)
     state_initial = _LBFGSResults(
         converged=_norm(g_0, ord=norm) < gtol,
         failed=jnp.array(False, dtype=bool),
@@ -110,8 +122,8 @@ def _minimize_lbfgs_private(
 
     def body_fun(state):
         p_k = _two_loop_recursion(state)
-        ls_results = _line_search(
-            f=fun,
+        ls_results = _line_search_value_and_grad(
+            fun=value_and_grad_fun,
             xk=state.x_k,
             pk=p_k,
             old_fval=state.f_k,
@@ -171,7 +183,7 @@ def _minimize_lbfgs_private(
         return lax.cond(ls_results.failed, failed_step, accepted_step, operand=None)
 
     state = lax.while_loop(cond_fun, body_fun, state_initial)
-    f_final, g_final = value_and_grad(fun)(state.x_k)
+    f_final, g_final = _coerce_value_and_grad_result(value_and_grad_fun, state.x_k)
     converged_final = _norm(g_final, ord=norm) < gtol
     state = state._replace(
         converged=converged_final,
@@ -196,3 +208,65 @@ def _minimize_lbfgs_private(
         ),
     )
     return state._replace(status=status)
+
+
+def _minimize_lbfgs_private(
+    fun,
+    x0,
+    *,
+    maxiter=None,
+    norm=np.inf,
+    maxcor=200,
+    ftol=0.0,
+    gtol=1e-5,
+    maxfun=None,
+    maxgrad=None,
+    maxls=20,
+    callback=None,
+    progress_callback=None,
+):
+    return _minimize_lbfgs_private_impl(
+        value_and_grad(fun),
+        x0,
+        maxiter=maxiter,
+        norm=norm,
+        maxcor=maxcor,
+        ftol=ftol,
+        gtol=gtol,
+        maxfun=maxfun,
+        maxgrad=maxgrad,
+        maxls=maxls,
+        callback=callback,
+        progress_callback=progress_callback,
+    )
+
+
+def _minimize_lbfgs_private_value_and_grad(
+    fun,
+    x0,
+    *,
+    maxiter=None,
+    norm=np.inf,
+    maxcor=200,
+    ftol=0.0,
+    gtol=1e-5,
+    maxfun=None,
+    maxgrad=None,
+    maxls=20,
+    callback=None,
+    progress_callback=None,
+):
+    return _minimize_lbfgs_private_impl(
+        fun,
+        x0,
+        maxiter=maxiter,
+        norm=norm,
+        maxcor=maxcor,
+        ftol=ftol,
+        gtol=gtol,
+        maxfun=maxfun,
+        maxgrad=maxgrad,
+        maxls=maxls,
+        callback=callback,
+        progress_callback=progress_callback,
+    )

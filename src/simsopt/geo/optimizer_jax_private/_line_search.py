@@ -225,17 +225,17 @@ def _zoom(
     )
 
 
-def _line_search(
-    f, xk, pk, old_fval=None, old_old_fval=None, gfk=None, c1=1e-4, c2=0.9, maxiter=20
+def _line_search_from_restricted_func_and_grad(
+    restricted_func_and_grad,
+    *,
+    pk,
+    old_fval=None,
+    old_old_fval=None,
+    gfk=None,
+    c1=1e-4,
+    c2=0.9,
+    maxiter=20,
 ):
-    xk, pk = _promote_dtypes_inexact(xk, pk)
-
-    def restricted_func_and_grad(t):
-        t = jnp.array(t, dtype=pk.dtype)
-        phi, g = value_and_grad(f)(xk + t * pk)
-        dphi = jnp.real(_dot(g, pk))
-        return phi, dphi, g
-
     if old_fval is None or gfk is None:
         phi_0, dphi_0, gfk = restricted_func_and_grad(0)
     else:
@@ -450,4 +450,60 @@ def _line_search(
         f_k=state.phi_star,
         g_k=state.g_star,
         status=status,
+    )
+
+
+def _line_search(
+    f, xk, pk, old_fval=None, old_old_fval=None, gfk=None, c1=1e-4, c2=0.9, maxiter=20
+):
+    xk, pk = _promote_dtypes_inexact(xk, pk)
+
+    def restricted_func_and_grad(t):
+        t = jnp.array(t, dtype=pk.dtype)
+        phi, g = value_and_grad(f)(xk + t * pk)
+        dphi = jnp.real(_dot(g, pk))
+        return phi, dphi, g
+
+    return _line_search_from_restricted_func_and_grad(
+        restricted_func_and_grad,
+        pk=pk,
+        old_fval=old_fval,
+        old_old_fval=old_old_fval,
+        gfk=gfk,
+        c1=c1,
+        c2=c2,
+        maxiter=maxiter,
+    )
+
+
+def _line_search_value_and_grad(
+    fun,
+    xk,
+    pk,
+    old_fval=None,
+    old_old_fval=None,
+    gfk=None,
+    c1=1e-4,
+    c2=0.9,
+    maxiter=20,
+):
+    xk, pk = _promote_dtypes_inexact(xk, pk)
+
+    def restricted_func_and_grad(t):
+        t = jnp.array(t, dtype=pk.dtype)
+        phi, g = fun(xk + t * pk)
+        phi = jnp.asarray(phi, dtype=pk.dtype)
+        g = jnp.asarray(g, dtype=pk.dtype)
+        dphi = jnp.real(_dot(g, pk))
+        return phi, dphi, g
+
+    return _line_search_from_restricted_func_and_grad(
+        restricted_func_and_grad,
+        pk=pk,
+        old_fval=old_fval,
+        old_old_fval=old_old_fval,
+        gfk=gfk,
+        c1=c1,
+        c2=c2,
+        maxiter=maxiter,
     )

@@ -69,9 +69,6 @@ _SUPPORTED_METHODS = {
 }
 _REFERENCE_METHODS = frozenset({"bfgs", "lbfgs"})
 _STRICT_REFERENCE_OPTIMIZER_DETAIL = "the host-side SciPy reference optimizer lane"
-_STRICT_EXPLICIT_VALUE_GRAD_DETAIL = (
-    "the explicit host-loop value-and-gradient optimizer fallback"
-)
 _STRICT_HYBRID_OPTIMIZER_DETAIL = "the transitional SciPy-prefix hybrid optimizer lane"
 
 
@@ -103,10 +100,12 @@ _PRIVATE_LAZY_NAMES = frozenset(
     {
         "_BFGSResults",
         "_line_search",
+        "_line_search_value_and_grad",
         "_make_bfgs_continuation_state",
         "_minimize_bfgs_private",
         "_minimize_lbfgs_explicit_value_and_grad",
         "_minimize_lbfgs_private",
+        "_minimize_lbfgs_private_value_and_grad",
         "_private_bfgs_result_to_optimize_result",
         "_private_lbfgs_result_to_optimize_result",
         "_scipy_result_is_continuable",
@@ -708,7 +707,9 @@ def jax_minimize(
     If ``value_and_grad=True``, ``fun`` must return ``(value, grad)`` directly.
     That explicit value/gradient contract is supported on the trusted SciPy
     reference methods and on the ``lbfgs-ondevice`` target method used by the
-    single-stage outer loop.
+    single-stage outer loop. The ``lbfgs-ondevice`` explicit path expects a
+    JAX-traceable callable; host-loop NumPy fallbacks remain private helpers,
+    not the production target lane.
     """
     if method not in _SUPPORTED_METHODS:
         raise ValueError(
@@ -746,11 +747,7 @@ def jax_minimize(
                 "Explicit value-and-gradient objectives are only supported on the "
                 "trusted SciPy reference methods and lbfgs-ondevice today."
             )
-        _raise_if_strict_optimizer_fallback(
-            method=method,
-            detail=_STRICT_EXPLICIT_VALUE_GRAD_DETAIL,
-        )
-        return _minimize_lbfgs_explicit_value_and_grad(
+        state = _minimize_lbfgs_private_value_and_grad(
             fun,
             x0,
             maxiter=maxiter,
@@ -761,7 +758,9 @@ def jax_minimize(
             maxgrad=options.get("maxgrad"),
             maxls=int(options.get("maxls", 20)),
             callback=options.get("callback"),
+            progress_callback=options.get("progress_callback"),
         )
+        return _private_lbfgs_result_to_optimize_result(state)
 
     if method == "bfgs-ondevice":
         state = _minimize_bfgs_private(
