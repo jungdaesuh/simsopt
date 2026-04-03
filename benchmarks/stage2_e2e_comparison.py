@@ -57,10 +57,10 @@ MATCHED_GRADIENT_RTOL = _TIER1_BASE_TOLERANCES["gradient_rtol"]
 MATCHED_GRADIENT_ATOL = _TIER1_BASE_TOLERANCES["gradient_atol"]
 STAGE2_MATCHED_GRADIENT_ATOL = max(MATCHED_GRADIENT_ATOL, 5e-12)
 MATCHED_FIELD_REL_TOL = 1e-10
-STAGE2_CURVATURE_BARRIER_EDGE_MARGIN = 1e-6
-STAGE2_CURVATURE_BARRIER_EDGE_GRADIENT_RTOL = 1e-5
-STAGE2_CURVATURE_BARRIER_EDGE_OBJECTIVE_REL_TOL = 5e-4
-STAGE2_CURVATURE_BARRIER_TERM_NAME = "curvature_barrier"
+STAGE2_CURVATURE_THRESHOLD_EDGE_MARGIN = 1e-6
+STAGE2_CURVATURE_THRESHOLD_EDGE_GRADIENT_RTOL = 1e-5
+STAGE2_CURVATURE_THRESHOLD_EDGE_OBJECTIVE_REL_TOL = 5e-4
+STAGE2_CURVATURE_TERM_NAME = "curvature_penalty"
 
 _CPU_ONDEVICE_ENDPOINT_LANE = ("jax", "cpu", "cpu-ondevice")
 _CPU_REFERENCE_ENDPOINT_LANE = ("cpu", "auto", "cpu-reference")
@@ -98,12 +98,12 @@ def _curvature_within_threshold(curvature: float, threshold: float) -> bool:
     return float(curvature) <= float(threshold)
 
 
-def _curvature_barrier_edge_active(
+def _curvature_threshold_edge_active(
     curvature: float,
     threshold: float,
 ) -> bool:
     margin = _curvature_margin(curvature, threshold)
-    return 0.0 <= margin <= STAGE2_CURVATURE_BARRIER_EDGE_MARGIN
+    return 0.0 <= margin <= STAGE2_CURVATURE_THRESHOLD_EDGE_MARGIN
 
 
 def _stage2_final_objective_rel_tol(
@@ -113,14 +113,14 @@ def _stage2_final_objective_rel_tol(
     jax_max_curvature: float,
     curvature_threshold: float,
 ) -> float:
-    if _curvature_barrier_edge_active(
+    if _curvature_threshold_edge_active(
         cpu_max_curvature,
         curvature_threshold,
-    ) and _curvature_barrier_edge_active(
+    ) and _curvature_threshold_edge_active(
         jax_max_curvature,
         curvature_threshold,
     ):
-        return max(base_rel_tol, STAGE2_CURVATURE_BARRIER_EDGE_OBJECTIVE_REL_TOL)
+        return max(base_rel_tol, STAGE2_CURVATURE_THRESHOLD_EDGE_OBJECTIVE_REL_TOL)
     return base_rel_tol
 
 
@@ -183,11 +183,11 @@ def _build_ondevice_stage2_metrics(
             jax_max_curvature,
             curvature_threshold,
         ),
-        "cpu_curvature_barrier_edge_active": _curvature_barrier_edge_active(
+        "cpu_curvature_threshold_edge_active": _curvature_threshold_edge_active(
             cpu_max_curvature,
             curvature_threshold,
         ),
-        "jax_curvature_barrier_edge_active": _curvature_barrier_edge_active(
+        "jax_curvature_threshold_edge_active": _curvature_threshold_edge_active(
             jax_max_curvature,
             curvature_threshold,
         ),
@@ -433,26 +433,16 @@ def _run_stage2_matched_state_probes(
 
 def _trajectory_is_finite(trajectory: list[dict]) -> bool:
     for entry in trajectory:
-        barrier_rejection = bool(entry.get("distance_constraint_violated", False))
         objective_value = float(entry["J"])
-        if barrier_rejection and np.isposinf(objective_value):
-            values = (
-                entry["Jf"],
-                entry["mean_abs_relBfinal_norm"],
-                entry["curve_length"],
-                entry["coil_coil_distance"],
-                entry["curvature"],
-            )
-        else:
-            values = (
-                objective_value,
-                entry["Jf"],
-                entry["mean_abs_relBfinal_norm"],
-                entry["curve_length"],
-                entry["coil_coil_distance"],
-                entry["curvature"],
-                entry["grad_norm"],
-            )
+        values = (
+            objective_value,
+            entry["Jf"],
+            entry["mean_abs_relBfinal_norm"],
+            entry["curve_length"],
+            entry["coil_coil_distance"],
+            entry["curvature"],
+            entry["grad_norm"],
+        )
         if not np.all(np.isfinite(values)):
             return False
     return True
@@ -574,7 +564,7 @@ def _build_matched_state_metrics(
             jax_curvature,
             curvature_threshold,
         ),
-        "curvature_barrier_edge_active": _curvature_barrier_edge_active(
+        "curvature_threshold_edge_active": _curvature_threshold_edge_active(
             jax_curvature,
             curvature_threshold,
         ),
@@ -584,16 +574,17 @@ def _build_matched_state_metrics(
     }
 
 
-def _matched_gradient_barrier_edge_portable(state: dict[str, Any]) -> bool:
-    if not bool(state.get("curvature_barrier_edge_active", False)):
+def _matched_gradient_threshold_edge_portable(state: dict[str, Any]) -> bool:
+    if not bool(state.get("curvature_threshold_edge_active", False)):
         return False
     worst_term = state.get("worst_gradient_term")
     if not isinstance(worst_term, dict):
         return False
-    if str(worst_term.get("name")) != STAGE2_CURVATURE_BARRIER_TERM_NAME:
+    if str(worst_term.get("name")) != STAGE2_CURVATURE_TERM_NAME:
         return False
-    return float(worst_term["gradient_l2_rel_diff"]) <= (
-        STAGE2_CURVATURE_BARRIER_EDGE_GRADIENT_RTOL
+    return (
+        float(worst_term["gradient_l2_rel_diff"])
+        <= STAGE2_CURVATURE_THRESHOLD_EDGE_GRADIENT_RTOL
     )
 
 
@@ -662,7 +653,7 @@ def _append_matched_state_failures(
             f"{float(jax_state['field_error_rel_diff']):.2e}"
         )
     if not bool(cpu_state["gradient_allclose"]):
-        if not _matched_gradient_barrier_edge_portable(cpu_state):
+        if not _matched_gradient_threshold_edge_portable(cpu_state):
             failures.append(
                 _matched_gradient_failure_message(
                     cpu_state,
@@ -670,7 +661,7 @@ def _append_matched_state_failures(
                 )
             )
     if not bool(jax_state["gradient_allclose"]):
-        if not _matched_gradient_barrier_edge_portable(jax_state):
+        if not _matched_gradient_threshold_edge_portable(jax_state):
             failures.append(
                 _matched_gradient_failure_message(
                     jax_state,

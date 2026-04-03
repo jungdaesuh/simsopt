@@ -49,9 +49,9 @@ from simsopt.geo import (  # noqa: E402
     CurveCWSFourierCPP,
     CurveXYZFourier,
     create_equally_spaced_curves,
-    CurveCurveDistanceBarrier,
+    CurveCurveDistance,
     CurveLength,
-    LpCurveCurvatureBarrier,
+    LpCurveCurvature,
 )
 from simsopt.objectives import SquaredFlux, QuadraticPenalty  # noqa: E402
 
@@ -394,8 +394,8 @@ def _build_stage2_target_objective_contract_case(
     bs_jax = BiotSavartJAX(all_coils)
     jf = SquaredFluxJAX(eval_surf, bs_jax, definition=definition)
     jls = CurveLength(banana_curve)
-    jccdist = CurveCurveDistanceBarrier([coil.curve for coil in all_coils], 0.05)
-    jc = LpCurveCurvatureBarrier(banana_curve, 40)
+    jccdist = CurveCurveDistance([coil.curve for coil in all_coils], 0.05)
+    jc = LpCurveCurvature(banana_curve, 4, 40)
     objective = (
         jf + 0.0005 * QuadraticPenalty(jls, 1.75, "max") + 100.0 * jccdist + 0.0001 * jc
     )
@@ -460,6 +460,14 @@ def _assert_first_order_taylor_contract(fun, x, grad, *, seed):
     assert errors[1] < 0.55 * errors[0], (
         f"Taylor convergence stalled: err0={errors[0]:.3e}, err1={errors[1]:.3e}"
     )
+
+
+def test_stage2_curvature_threshold_policy_caps_at_40():
+    stage2_script = _load_stage2_script_module()
+
+    assert stage2_script.resolve_curvature_threshold(10.0) == pytest.approx(20.0)
+    assert stage2_script.resolve_curvature_threshold(30.0) == pytest.approx(30.0)
+    assert stage2_script.resolve_curvature_threshold(80.0) == pytest.approx(40.0)
 
 
 class _FakeStage2SquaredFluxTerm:
@@ -861,9 +869,7 @@ _LENGTH_TARGET = 5.0
 def _stage2_relative_l2_error(lhs, rhs) -> float:
     lhs_array = np.asarray(lhs, dtype=float)
     rhs_array = np.asarray(rhs, dtype=float)
-    return float(
-        np.linalg.norm(lhs_array - rhs_array) / np.linalg.norm(lhs_array)
-    )
+    return float(np.linalg.norm(lhs_array - rhs_array) / np.linalg.norm(lhs_array))
 
 
 def _stage2_basin_perturbation(dofs, rng) -> np.ndarray:
@@ -886,9 +892,7 @@ def _stage2_coil_lengths(curves) -> list[float]:
     return [float(CurveLength(curve).J()) for curve in curves]
 
 
-def _build_and_run_stage2(
-    use_jax, maxiter=_TRAJECTORY_MAXITER, dof_perturbation=None
-):
+def _build_and_run_stage2(use_jax, maxiter=_TRAJECTORY_MAXITER, dof_perturbation=None):
     """Build a Stage 2 composite problem, run L-BFGS-B, return full results.
 
     Shared helper for P28/P29/P30.  Creates all objects from scratch — no
@@ -2230,10 +2234,8 @@ class TestStage2BananaBoundary:
             bs_jax = BiotSavartJAX(all_coils)
             jf = SquaredFluxJAX(eval_surf, bs_jax)
             jls = CurveLength(curve)
-            jccdist = CurveCurveDistanceBarrier(
-                [coil.curve for coil in all_coils], 0.05
-            )
-            jc = LpCurveCurvatureBarrier(curve, 40)
+            jccdist = CurveCurveDistance([coil.curve for coil in all_coils], 0.05)
+            jc = LpCurveCurvature(curve, 4, 40)
             objective = (
                 jf
                 + 0.0005 * QuadraticPenalty(jls, 1.75, "max")
@@ -2246,7 +2248,7 @@ class TestStage2BananaBoundary:
         objective_jax, grad_jax = build_objective(CurveCWSFourier)
 
         np.testing.assert_allclose(objective_jax, objective_cpp, rtol=1e-12, atol=1e-18)
-        # CurveCurveDistanceBarrier pulls back through different implementations
+        # CurveCurveDistance pulls back through different implementations
         # for the wrapper and native curve classes. The resulting drift is
         # confined to nominally flat ~1e-13 components, while the resolved
         # objective value and large gradient entries remain parity-clean.
@@ -3462,7 +3464,7 @@ class TestStage2OptimizerContract:
             ),
             terms=(
                 types.SimpleNamespace(name="squared_flux", weight=1.0),
-                types.SimpleNamespace(name="curvature_barrier", weight=0.5),
+                types.SimpleNamespace(name="curvature_penalty", weight=0.5),
             ),
         )
 
@@ -3527,7 +3529,7 @@ class TestStage2OptimizerContract:
                         float(np.linalg.norm(expected_term_grads[0]))
                     ),
                 },
-                "curvature_barrier": {
+                "curvature_penalty": {
                     "weight": pytest.approx(0.5),
                     "raw_J": pytest.approx(expected_terms[1]),
                     "J": pytest.approx(0.5 * expected_terms[1]),

@@ -24,8 +24,8 @@ from ..jax_core.objectives_flux import (
     fixed_surface_flux_specs_from_surface,
 )
 from ..geo.curveobjectives import (
-    curvature_barrier_pure,
-    cc_distance_barrier_pure,
+    Lp_curvature_pure,
+    cc_distance_pure,
     curve_length_pure,
 )
 
@@ -67,7 +67,7 @@ def _fixed_curve_penalty(curves, minimum_distance):
     total = jnp.asarray(0.0, dtype=jnp.float64)
     for i, (gamma_i, gammadash_i) in enumerate(curves):
         for gamma_j, gammadash_j in curves[:i]:
-            total = total + cc_distance_barrier_pure(
+            total = total + cc_distance_pure(
                 gamma_i,
                 gammadash_i,
                 gamma_j,
@@ -120,7 +120,7 @@ def _dynamic_curve_distance_penalty(
     total = initial_penalty
     for gamma, gammadash in dynamic_pairs:
         for tf_gamma, tf_gammadash in tf_curve_data:
-            total = total + cc_distance_barrier_pure(
+            total = total + cc_distance_pure(
                 gamma,
                 gammadash,
                 tf_gamma,
@@ -129,7 +129,7 @@ def _dynamic_curve_distance_penalty(
             )
     for i, (gamma_i, gammadash_i) in enumerate(dynamic_pairs):
         for gamma_j, gammadash_j in dynamic_pairs[:i]:
-            total = total + cc_distance_barrier_pure(
+            total = total + cc_distance_pure(
                 gamma_i,
                 gammadash_i,
                 gamma_j,
@@ -159,6 +159,7 @@ def build_stage2_target_objective(
     cc_threshold = penalty_config.cc_threshold
     curvature_weight = penalty_config.curvature_weight
     curvature_threshold = penalty_config.curvature_threshold
+    curvature_p_norm = penalty_config.curvature_p_norm
 
     field_eval_spec, flux_spec = fixed_surface_flux_specs_from_surface(
         surface,
@@ -225,9 +226,10 @@ def build_stage2_target_objective(
         curve_length = curve_length_pure(incremental_arclength)
         length_penalty = 0.5 * jnp.maximum(curve_length - length_target, 0.0) ** 2
 
-        curvature_penalty = curvature_barrier_pure(
+        curvature_penalty = Lp_curvature_pure(
             kappa_pure(base_gammadash, base_gammadashdash),
             base_gammadash,
+            curvature_p_norm,
             curvature_threshold,
         )
 
@@ -250,8 +252,8 @@ def build_stage2_target_objective(
     terms = (
         Stage2TargetObjectiveTerm("squared_flux", float(squared_flux_weight)),
         Stage2TargetObjectiveTerm("length_penalty", float(length_weight)),
-        Stage2TargetObjectiveTerm("coil_distance_barrier", float(cc_weight)),
-        Stage2TargetObjectiveTerm("curvature_barrier", float(curvature_weight)),
+        Stage2TargetObjectiveTerm("coil_distance_penalty", float(cc_weight)),
+        Stage2TargetObjectiveTerm("curvature_penalty", float(curvature_weight)),
     )
 
     def objective(dofs):

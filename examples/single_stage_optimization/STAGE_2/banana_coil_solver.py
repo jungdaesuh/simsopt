@@ -33,6 +33,16 @@ DEFAULT_EQUILIBRIA_DIR = (
 STAGE2_TARGET_OBJECTIVE_DOF_LAYOUT_ERROR = (
     "Stage 2 target objective DOF layout does not match the composite objective."
 )
+CURVATURE_THRESHOLD_FLOOR = 20.0
+CURVATURE_THRESHOLD_CEILING = 40.0
+
+
+def resolve_curvature_threshold(value: float) -> float:
+    """Apply the shared HBT curvature-threshold policy for Stage 2."""
+    return min(
+        max(float(value), CURVATURE_THRESHOLD_FLOOR),
+        CURVATURE_THRESHOLD_CEILING,
+    )
 
 
 def parse_args():
@@ -312,7 +322,7 @@ def initializeCoils(
     # Keep the production banana-coil class shared across CPU and JAX lanes.
     # CurveCWSFourierCPP now exposes the JAX geometry/VJP surface needed by the
     # target lane, and reusing it here avoids backend-specific curve-derivative
-    # drift in barrier-active Stage 2 states.
+    # drift in near-threshold Stage 2 states.
     banana_curve = CurveCWSFourierCPP(
         np.linspace(0, 1, num_quadpoints, endpoint=False), order=order, surf=surf_coils
     )
@@ -835,12 +845,12 @@ def _build_stage2_explicit_term_payload(context):
             length_penalty,
             length_grad,
         ),
-        "coil_distance_barrier": _stage2_term_payload_entry(
+        "coil_distance_penalty": _stage2_term_payload_entry(
             context.cc_weight,
             coil_distance_penalty,
             coil_distance_grad,
         ),
-        "curvature_barrier": _stage2_term_payload_entry(
+        "curvature_penalty": _stage2_term_payload_entry(
             context.curvature_weight,
             curvature_penalty,
             curvature_grad,
@@ -880,7 +890,7 @@ def compute_stage2_length_penalty_gradient(
 @dataclass(frozen=True)
 class Stage2DistanceConstraintState:
     coil_coil_distance: float
-    coil_distance_barrier: float
+    coil_distance_penalty: float
     cc_threshold: float
     violated: bool
 
@@ -897,14 +907,14 @@ def compute_stage2_distance_constraint_state(
     hard minimum-distance gate must never depend on diagnostic caching.
     """
     coil_coil_distance = float(context.Jccdist.shortest_distance())
-    coil_distance_barrier = float(term_entries["coil_distance_barrier"]["raw_J"])
+    coil_distance_penalty = float(term_entries["coil_distance_penalty"]["raw_J"])
     cc_threshold = float(context.cc_threshold)
     violated = coil_coil_distance <= cc_threshold or not np.isfinite(
-        coil_distance_barrier
+        coil_distance_penalty
     )
     return Stage2DistanceConstraintState(
         coil_coil_distance=coil_coil_distance,
-        coil_distance_barrier=coil_distance_barrier,
+        coil_distance_penalty=coil_distance_penalty,
         cc_threshold=cc_threshold,
         violated=bool(violated),
     )
@@ -1387,6 +1397,7 @@ if __name__ == "__main__":
     # PRE-INITIALIZATION
     # ---------------------------------------------------------------------------------------
     args = parse_args()
+    args.curvature_threshold = resolve_curvature_threshold(args.curvature_threshold)
 
     # Deferred imports — simsopt modules require simsoptpp (C++ extension)
     # for coil/surface setup.  Placing them after arg parsing lets --help work
@@ -1398,8 +1409,8 @@ if __name__ == "__main__":
         curves_to_vtk,
         create_equally_spaced_curves,
         CurveLength,
-        CurveCurveDistanceBarrier,
-        LpCurveCurvatureBarrier,
+        CurveCurveDistance,
+        LpCurveCurvature,
         CurveCWSFourierCPP,
     )
     from simsopt.objectives import SquaredFlux, QuadraticPenalty
@@ -1515,7 +1526,7 @@ if __name__ == "__main__":
 
     # Threshold and weight for the coil curvature penalty
     CURVATURE_WEIGHT = args.curvature_weight
-    CURVATURE_THRESHOLD = max(args.curvature_threshold, 20)  # Hardware minimum: 20
+    CURVATURE_THRESHOLD = args.curvature_threshold
 
     # Define the individual terms objective function:
     new_bs_jax = None
@@ -1531,12 +1542,16 @@ if __name__ == "__main__":
         Jf = SquaredFlux(new_surf, new_bs)  # penalty on B dot n
         print("Stage 2 backend: CPU (simsoptpp)")
     Jls = CurveLength(new_banana_curve)  # penalty on curve length
-    Jccdist = CurveCurveDistanceBarrier(
+    Jccdist = CurveCurveDistance(
         new_curves, CC_THRESHOLD
-    )  # hard barrier on coil-to-coil distance
+    )  # penalty on coil-to-coil distance
 
     # Lp-norm curvature penalty (configurable via --curvature-p-norm)
-    Jc = LpCurveCurvatureBarrier(new_banana_curve, CURVATURE_THRESHOLD)
+    Jc = LpCurveCurvature(
+        new_banana_curve,
+        args.curvature_p_norm,
+        CURVATURE_THRESHOLD,
+    )
     print(f"Initial coil length: {Jls.J():.2f} [m]")
     Jls_penalty = QuadraticPenalty(Jls, LENGTH_TARGET, "max")
 
