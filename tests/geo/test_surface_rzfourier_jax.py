@@ -182,6 +182,29 @@ def test_surface_rzfourier_spec_is_jittable():
     assert normal.shape == (4, 5, 3)
 
 
+def test_surface_rzfourier_geometry_avoids_jnp_arange(monkeypatch):
+    import simsopt.jax_core.surface_rzfourier as sr_jax
+
+    def _fail(*_args, **_kwargs):
+        raise AssertionError("surface_rzfourier geometry should not call jnp.arange")
+
+    spec = make_surface_rzfourier_spec(
+        rc=np.asarray([[1.0, 0.0, 0.0], [0.1, 0.0, 0.0]]),
+        zs=np.asarray([[0.0, 0.0, 0.0], [0.1, 0.0, 0.0]]),
+        quadpoints_phi=np.linspace(0.0, 0.5, 4, endpoint=False),
+        quadpoints_theta=np.linspace(0.0, 1.0, 5, endpoint=False),
+        nfp=2,
+        stellsym=True,
+    )
+    monkeypatch.setattr(sr_jax.jnp, "arange", _fail)
+
+    gamma = sr_jax.surface_rz_fourier_gamma_from_spec(spec)
+    normal = sr_jax.surface_rz_fourier_normal_from_spec(spec)
+
+    assert gamma.shape == (4, 5, 3)
+    assert normal.shape == (4, 5, 3)
+
+
 def test_surface_rzfourier_unitnormal_degenerate_surface_stays_finite():
     spec = make_surface_rzfourier_spec(
         rc=np.zeros((2, 1), dtype=np.float64),

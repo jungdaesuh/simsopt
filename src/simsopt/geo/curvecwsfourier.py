@@ -1,7 +1,7 @@
 from math import sin, cos
 
 import numpy as np
-from jax import vjp, jacfwd, jvp, hessian, grad
+from jax import device_put, vjp, jacfwd, jvp, hessian, grad
 import jax.numpy as jnp
 
 import simsoptpp as sopp
@@ -183,8 +183,9 @@ class CurveCWSFourierCPP( Curve, sopp.Curve ):
         self.numquadpoints = self.quadpoints.size
 
         # useful functions
-        points = np.asarray(self.quadpoints)
-        ones = jnp.ones_like(points)
+        quadpoints = np.asarray(self.quadpoints, dtype=np.float64)
+        points = device_put(quadpoints)
+        ones = device_put(np.ones_like(quadpoints))
         current_curve_dofs = lambda: self.get_dofs()
         current_surface_dofs = lambda: self.surf.get_dofs()
 

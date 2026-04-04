@@ -5,17 +5,31 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 
-from ._device_scalars import float_scalar, two_pi
+from ._device_scalars import device_one, float_scalar, two_pi
 from .specs import make_surface_rzfourier_spec
 from .specs import SurfaceRZFourierSpec
+
+
+def _zero_based_mode_range(count: int, reference: jax.Array) -> jax.Array:
+    ones = jnp.broadcast_to(device_one(reference), (count,))
+    return jnp.cumsum(ones) - ones
+
+
+def _poloidal_modes(spec: SurfaceRZFourierSpec) -> jax.Array:
+    return _zero_based_mode_range(spec.mpol + 1, spec.quadpoints_theta)
+
+
+def _toroidal_modes(spec: SurfaceRZFourierSpec) -> jax.Array:
+    zero_based = _zero_based_mode_range(2 * spec.ntor + 1, spec.quadpoints_phi)
+    return zero_based - float_scalar(spec.ntor, zero_based)
 
 
 def _mode_angles(spec: SurfaceRZFourierSpec) -> tuple[jax.Array, jax.Array, jax.Array]:
     angle_scale = two_pi(spec.quadpoints_theta)
     theta = angle_scale * spec.quadpoints_theta
     phi = angle_scale * spec.quadpoints_phi
-    m = jnp.arange(spec.mpol + 1, dtype=jnp.float64)
-    n = jnp.arange(-spec.ntor, spec.ntor + 1, dtype=jnp.float64)
+    m = _poloidal_modes(spec)
+    n = _toroidal_modes(spec)
     nfp = float_scalar(spec.nfp, n)
     angles = (
         m[None, None, :, None] * theta[None, :, None, None]
@@ -225,7 +239,7 @@ def surface_rz_fourier_gamma_from_spec(spec: SurfaceRZFourierSpec):
 
 def surface_rz_fourier_gammadash1_from_spec(spec: SurfaceRZFourierSpec):
     phi, cos_terms, sin_terms = _mode_angles(spec)
-    n = jnp.arange(-spec.ntor, spec.ntor + 1, dtype=jnp.float64)
+    n = _toroidal_modes(spec)
     angle_scale = two_pi(n)
     nfp = float_scalar(spec.nfp, n)
     scale = angle_scale * nfp * n[None, None, None, :]
@@ -253,7 +267,7 @@ def surface_rz_fourier_gammadash1_from_spec(spec: SurfaceRZFourierSpec):
 
 def surface_rz_fourier_gammadash2_from_spec(spec: SurfaceRZFourierSpec):
     phi, cos_terms, sin_terms = _mode_angles(spec)
-    m = jnp.arange(spec.mpol + 1, dtype=jnp.float64)
+    m = _poloidal_modes(spec)
     scale = two_pi(m) * m[None, None, :, None]
     d_r = jnp.sum(
         -spec.rc[None, None, :, :] * sin_terms * scale

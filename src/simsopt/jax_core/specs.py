@@ -707,7 +707,7 @@ def make_surface_rzfourier_spec(
 ) -> SurfaceRZFourierSpec:
     rc_jax = _as_float64_array(rc)
     zs_jax = _as_float64_array(zs)
-    zero_like_rc = jnp.zeros_like(rc_jax)
+    zero_like_rc = rc_jax - rc_jax
     rs_jax = zero_like_rc if rs is None else _as_float64_array(rs)
     zc_jax = zero_like_rc if zc is None else _as_float64_array(zc)
     return SurfaceRZFourierSpec(
