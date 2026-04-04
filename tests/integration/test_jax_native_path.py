@@ -91,6 +91,36 @@ def _jaxfouriercurve_pure(dofs, quadpoints, order):
     return gamma
 
 
+def _jaxfouriercurve_geometry_ref(dofs, quadpoints, order):
+    """Reference loop implementation for XYZ Fourier geometry derivatives."""
+    k = len(dofs) // 3
+    coeffs = [dofs[:k], dofs[k : 2 * k], dofs[2 * k :]]
+    points = quadpoints
+    gamma = jnp.zeros((len(points), 3))
+    gammadash = jnp.zeros((len(points), 3))
+    gammadashdash = jnp.zeros((len(points), 3))
+    gammadashdashdash = jnp.zeros((len(points), 3))
+    two_pi = 2.0 * jnp.pi
+    for i in range(3):
+        gamma = gamma.at[:, i].add(coeffs[i][0])
+        for j in range(1, order + 1):
+            scale = two_pi * j
+            arg = scale * points
+            s = jnp.sin(arg)
+            c = jnp.cos(arg)
+            xs = coeffs[i][2 * j - 1]
+            xc = coeffs[i][2 * j]
+            gamma = gamma.at[:, i].add(xs * s + xc * c)
+            gammadash = gammadash.at[:, i].add(scale * (xs * c - xc * s))
+            gammadashdash = gammadashdash.at[:, i].add(
+                -(scale * scale) * (xs * s + xc * c)
+            )
+            gammadashdashdash = gammadashdashdash.at[:, i].add(
+                -(scale * scale * scale) * (xs * c - xc * s)
+            )
+    return gamma, gammadash, gammadashdash, gammadashdashdash
+
+
 # -----------------------------------------------------------------------
 # Test 1: Fourier basis matches reference
 # -----------------------------------------------------------------------
@@ -160,6 +190,26 @@ class TestFourierBasis:
         gd_fd = np.array((basis_p @ coeffs.T - basis_m @ coeffs.T) / (2 * eps))
 
         np.testing.assert_allclose(gd_basis, gd_fd, rtol=1e-5, atol=1e-10)
+
+    @pytest.mark.parametrize("order", [1, 3, 6])
+    def test_geometry_parity(self, order):
+        from simsopt.geo.curvexyzfourier import jaxfouriercurve_geometry_pure
+
+        quadpoints = jnp.array([0.0, 0.13, 0.37, 0.61, 0.92], dtype=jnp.float64)
+        rng = np.random.RandomState(12 + order)
+        dofs = jnp.array(rng.randn(3 * (2 * order + 1)))
+
+        actual = tuple(
+            np.asarray(part)
+            for part in jaxfouriercurve_geometry_pure(dofs, quadpoints, order)
+        )
+        expected = tuple(
+            np.asarray(part)
+            for part in _jaxfouriercurve_geometry_ref(dofs, quadpoints, order)
+        )
+
+        for actual_part, expected_part in zip(actual, expected):
+            np.testing.assert_allclose(actual_part, expected_part, atol=1e-13)
 
 
 # -----------------------------------------------------------------------

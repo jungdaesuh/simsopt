@@ -6,8 +6,9 @@ from dataclasses import dataclass
 from typing import Literal, TypeAlias
 
 import jax
-import jax.numpy as jnp
 import numpy as np
+
+from ._math_utils import as_jax_float64 as _as_float64_array
 
 
 @dataclass(frozen=True)
@@ -410,12 +411,6 @@ def curve_spec_kind(spec: CurveSpec) -> CurveSpecKind:
     if isinstance(spec, CurveFilamentSpec):
         return "filament"
     raise TypeError(f"Unsupported curve spec type: {type(spec).__name__}")
-
-
-def _as_float64_array(value: object) -> jax.Array:
-    if isinstance(value, jax.Array):
-        return jnp.asarray(value, dtype=jnp.float64)
-    return jax.device_put(np.asarray(value, dtype=np.float64))
 
 
 def make_coil_group_spec(

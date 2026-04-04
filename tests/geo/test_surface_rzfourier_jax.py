@@ -9,6 +9,7 @@ from simsopt.jax_core import (
     make_surface_rzfourier_spec,
     surface_rz_fourier_area_from_dofs,
     surface_rz_fourier_area_from_spec,
+    surface_rz_fourier_dofs_from_spec,
     surface_rz_fourier_gamma_from_dofs,
     surface_rz_fourier_gamma_from_spec,
     surface_rz_fourier_gammadash1_from_dofs,
@@ -55,6 +56,28 @@ def _make_surface(*, stellsym: bool) -> SurfaceRZFourier:
         surface.zc[0, : surface.ntor] = 0.0
     surface.local_full_x = surface.get_dofs()
     return surface
+
+
+def _surface_spec_from_surface(surface: SurfaceRZFourier):
+    return surface_rz_fourier_spec_from_dofs(
+        surface.get_dofs(),
+        quadpoints_phi=surface.quadpoints_phi,
+        quadpoints_theta=surface.quadpoints_theta,
+        mpol=surface.mpol,
+        ntor=surface.ntor,
+        nfp=surface.nfp,
+        stellsym=surface.stellsym,
+    )
+
+
+def _assert_dofs_round_trip(surface: SurfaceRZFourier) -> None:
+    spec = _surface_spec_from_surface(surface)
+    np.testing.assert_allclose(
+        np.asarray(surface_rz_fourier_dofs_from_spec(spec)),
+        np.asarray(surface.get_dofs()),
+        rtol=0.0,
+        atol=1e-12,
+    )
 
 
 def _assert_surface_parity(surface: SurfaceRZFourier) -> None:
@@ -334,15 +357,7 @@ def test_surface_rzfourier_area_volume_gradient_parity_non_stellsym():
 
 def test_surface_rzfourier_spec_from_dofs_round_trip():
     surface = _make_surface(stellsym=False)
-    spec = surface_rz_fourier_spec_from_dofs(
-        surface.get_dofs(),
-        quadpoints_phi=surface.quadpoints_phi,
-        quadpoints_theta=surface.quadpoints_theta,
-        mpol=surface.mpol,
-        ntor=surface.ntor,
-        nfp=surface.nfp,
-        stellsym=surface.stellsym,
-    )
+    spec = _surface_spec_from_surface(surface)
     np.testing.assert_allclose(
         np.asarray(spec.rc), np.asarray(surface.rc), rtol=0.0, atol=1e-12
     )
@@ -355,3 +370,11 @@ def test_surface_rzfourier_spec_from_dofs_round_trip():
     np.testing.assert_allclose(
         np.asarray(spec.zs), np.asarray(surface.zs), rtol=0.0, atol=1e-12
     )
+
+
+def test_surface_rzfourier_dofs_round_trip_stellsym():
+    _assert_dofs_round_trip(_make_surface(stellsym=True))
+
+
+def test_surface_rzfourier_dofs_round_trip_non_stellsym():
+    _assert_dofs_round_trip(_make_surface(stellsym=False))

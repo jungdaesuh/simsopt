@@ -107,7 +107,6 @@ _PRIVATE_LAZY_NAMES = frozenset(
         "_line_search_value_and_grad",
         "_make_bfgs_continuation_state",
         "_minimize_bfgs_private",
-        "_minimize_lbfgs_explicit_value_and_grad",
         "_minimize_lbfgs_private",
         "_minimize_lbfgs_private_value_and_grad",
         "_private_bfgs_result_to_optimize_result",
@@ -733,8 +732,8 @@ def jax_minimize(
     That explicit value/gradient contract is supported on the trusted SciPy
     reference methods and on the ``lbfgs-ondevice`` target method used by the
     single-stage outer loop. The ``lbfgs-ondevice`` explicit path expects a
-    JAX-traceable callable; host-loop NumPy fallbacks remain private helpers,
-    not the production target lane.
+    JAX-traceable callable and routes through the private on-device
+    implementation directly.
     """
     if method not in _SUPPORTED_METHODS:
         raise ValueError(

@@ -10,29 +10,18 @@ from jax import lax
 
 from ._common import (
     _as_jax_dtype,
+    _bool_scalar,
     _dot,
     _emit_iteration_callbacks,
+    _int_scalar,
     _norm,
     _require_private_optimizer_runtime,
     _resolve_lbfgs_limits,
     _scalar_value_and_grad,
+    _zeros,
 )
 from ._line_search import _line_search_value_and_grad
 from ._types import _LBFGSResults
-
-
-def _int_scalar(value):
-    return _as_jax_dtype(value, jnp.int32)
-
-
-def _bool_scalar(value):
-    return _as_jax_dtype(value, jnp.bool_)
-
-
-def _zeros(shape, dtype):
-    return jax.device_put(
-        np.zeros(tuple(int(dim) for dim in shape), dtype=np.dtype(dtype))
-    )
 
 
 def _shift_history(history, new):
@@ -128,9 +117,9 @@ def _minimize_lbfgs_private_impl(
     maxiter, maxfun, maxgrad = _resolve_lbfgs_limits(d, maxiter, maxfun, maxgrad)
     ftol_jax = _as_jax_dtype(ftol, dtype)
     gtol_jax = _as_jax_dtype(gtol, dtype)
-    maxiter_limit = _as_jax_dtype(maxiter, dtype)
-    maxfun_limit = _as_jax_dtype(maxfun, dtype)
-    maxgrad_limit = _as_jax_dtype(maxgrad, dtype)
+    maxiter_limit = _int_scalar(maxiter)
+    maxfun_limit = _int_scalar(maxfun)
+    maxgrad_limit = _int_scalar(maxgrad)
 
     f_0, g_0 = _coerce_value_and_grad_result(value_and_grad_fun, x0)
     state_initial = _LBFGSResults(

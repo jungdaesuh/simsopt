@@ -32,13 +32,6 @@ from ._lbfgs import (
     _update_history_scalars,
     _update_history_vectors,
 )
-from ._lbfgs_explicit import (
-    _evaluate_explicit_value_and_grad,
-    _explicit_line_search_result,
-    _line_search_explicit_value_and_grad,
-    _minimize_lbfgs_explicit_value_and_grad,
-    _two_loop_recursion_explicit,
-)
 from ._result_converters import (
     _coerce_dense_hess_inv,
     _private_bfgs_result_to_optimize_result,

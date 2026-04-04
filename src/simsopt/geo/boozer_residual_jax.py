@@ -37,6 +37,13 @@ import numpy as np
 import jax
 import jax.numpy as jnp
 
+from ..jax_core._math_utils import (
+    as_jax_float64 as _as_jax_float64,
+    concat_jax_float64 as _concat_jax_float64,
+    explicit_inv as _explicit_inv,
+    explicit_rsqrt as _explicit_rsqrt,
+    scalar_at_axis0 as _scalar_at_axis0,
+)
 from ..jax_core.surface_rzfourier import (
     surface_rz_fourier_gamma_from_spec,
     surface_rz_fourier_gammadash1_from_spec,
@@ -56,26 +63,6 @@ __all__ = [
 ]
 
 
-def _as_jax_float64(value):
-    if isinstance(value, jax.Array):
-        return jnp.asarray(value, dtype=jnp.float64)
-    return jax.device_put(np.asarray(value, dtype=np.float64))
-
-
-def _concat_jax_float64(*parts):
-    return jnp.concatenate(tuple(_as_jax_float64(part) for part in parts))
-
-
-def _scalar_like(reference, value):
-    return jax.device_put(np.asarray(value, dtype=np.dtype(reference.dtype)))
-
-
-def _scalar_at_axis0(array, index: int):
-    selector = np.zeros(array.shape[0], dtype=np.float64)
-    selector[index] = 1.0
-    return jnp.dot(array, jax.device_put(selector))
-
-
 def _split_decision_vector(x, *, optimize_G):
     x_jax = _as_jax_float64(x)
     total_size = int(x_jax.shape[0])
@@ -88,40 +75,6 @@ def _split_decision_vector(x, *, optimize_G):
         G = _scalar_at_axis0(x_jax, surface_size + 1)
         return sdofs, iota, G
     return sdofs, iota, None
-
-
-def _explicit_inv_impl(x):
-    return jnp.divide(_scalar_like(x, 1.0), x)
-
-
-@jax.custom_jvp
-def _explicit_inv(x):
-    return _explicit_inv_impl(x)
-
-
-@_explicit_inv.defjvp
-def _explicit_inv_jvp(primals, tangents):
-    (x,), (x_dot,) = primals, tangents
-    primal_out = _explicit_inv_impl(x)
-    tangent_out = jnp.negative(x_dot * primal_out * primal_out)
-    return primal_out, tangent_out
-
-
-def _explicit_rsqrt_impl(x):
-    return jnp.divide(_scalar_like(x, 1.0), jnp.sqrt(x))
-
-
-@jax.custom_jvp
-def _explicit_rsqrt(x):
-    return _explicit_rsqrt_impl(x)
-
-
-@_explicit_rsqrt.defjvp
-def _explicit_rsqrt_jvp(primals, tangents):
-    (x,), (x_dot,) = primals, tangents
-    primal_out = _explicit_rsqrt_impl(x)
-    tangent_out = x_dot * _scalar_like(x, -0.5) * primal_out * _explicit_inv_impl(x)
-    return primal_out, tangent_out
 
 
 def _safe_inverse_modB(B2):

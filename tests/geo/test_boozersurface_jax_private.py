@@ -6,6 +6,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
+import simsopt.geo.optimizer_jax_private._common as _opt_common
 
 from .boozersurface_jax_test_helpers import (
     PRIVATE_OPTIMIZER_JAX_VERSION,
@@ -36,6 +37,57 @@ def test_solve_boozer_adjoint_enables_iterative_refinement(monkeypatch):
     assert result == "adjoint"
     assert recorded["args"] == ("P", "L", "U", "rhs")
     assert recorded["iterative_refinement"] is True
+
+
+def _assert_plu_tuple_matches(actual, expected) -> None:
+    for actual_part, expected_part in zip(actual, expected):
+        np.testing.assert_allclose(actual_part, expected_part, atol=1e-14)
+
+
+def _assert_plu_tuple_is_zero(parts) -> None:
+    for part in parts:
+        np.testing.assert_array_equal(part, np.zeros_like(part))
+
+
+def test_traceable_plu_or_dummy_accepts_python_and_traced_predicates():
+    matrix = jnp.asarray([[3.0, 1.0], [2.0, 4.0]], dtype=jnp.float64)
+    expected = tuple(np.asarray(part) for part in jax.scipy.linalg.lu(matrix))
+
+    eager_true = tuple(
+        np.asarray(part) for part in _bsj._traceable_plu_or_dummy(matrix, finite=True)
+    )
+    eager_false = tuple(
+        np.asarray(part) for part in _bsj._traceable_plu_or_dummy(matrix, finite=False)
+    )
+
+    _assert_plu_tuple_matches(eager_true, expected)
+    _assert_plu_tuple_is_zero(eager_false)
+
+    @jax.jit
+    def traceable(finite):
+        return _bsj._traceable_plu_or_dummy(matrix, finite=finite)
+
+    traced_true = tuple(np.asarray(part) for part in traceable(jnp.asarray(True)))
+    traced_false = tuple(np.asarray(part) for part in traceable(jnp.asarray(False)))
+
+    _assert_plu_tuple_matches(traced_true, expected)
+    _assert_plu_tuple_is_zero(traced_false)
+
+
+def test_resolve_lbfgs_limits_normalizes_to_int32_counter_domain():
+    maxiter, maxfun, maxgrad = _opt_common._resolve_lbfgs_limits(
+        4,
+        1.2,
+        None,
+        np.inf,
+    )
+
+    assert isinstance(maxiter, np.int32)
+    assert isinstance(maxfun, np.int32)
+    assert isinstance(maxgrad, np.int32)
+    assert int(maxiter) == 2
+    assert int(maxfun) == np.iinfo(np.int32).max
+    assert int(maxgrad) == np.iinfo(np.int32).max
 
 
 # ---------------------------------------------------------------------------
@@ -832,7 +884,9 @@ class TestBoozerSurfaceJAXClassPrivate:
 
         def forbidden_debug_callback(*_args, **_kwargs):
             observed["called"] = True
-            raise AssertionError("jax.debug.callback must not run without progress_callback")
+            raise AssertionError(
+                "jax.debug.callback must not run without progress_callback"
+            )
 
         monkeypatch.setattr(_opt.jax.debug, "callback", forbidden_debug_callback)
 

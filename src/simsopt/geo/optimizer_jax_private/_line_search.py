@@ -11,19 +11,13 @@ from jax import lax
 
 from ._common import (
     _as_jax_dtype,
+    _bool_scalar,
     _dot,
+    _int_scalar,
     _promote_dtypes_inexact,
     _scalar_value_and_grad,
 )
 from ._types import _LineSearchResults, _LineSearchState, _ZoomState
-
-
-def _int_scalar(value):
-    return _as_jax_dtype(value, jnp.int32)
-
-
-def _bool_scalar(value):
-    return _as_jax_dtype(value, jnp.bool_)
 
 
 def _cubicmin(a, fa, fpa, b, fb, c, fc):

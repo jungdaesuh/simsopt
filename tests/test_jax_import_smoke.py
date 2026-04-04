@@ -522,6 +522,55 @@ def test_transfer_guard_disallow_allows_biot_savart_point_chunking():
     )
 
 
+def test_transfer_guard_disallow_preserves_shifted_grid_axis_sample():
+    """Shifted quadrature grids must use the sampled surface point for axis-z."""
+    _assert_import_check_passes(
+        """
+        import jax
+        import numpy as np
+        import simsopt.config as simsopt_config
+        from simsopt.geo import SurfaceRZFourier, SurfaceXYZTensorFourier
+        from simsopt.geo.boozersurface_jax import _surface_sample_z
+
+        simsopt_config.set_backend(
+            "jax_cpu_parity",
+            strict=True,
+            transfer_guard="disallow",
+        )
+
+        rz = SurfaceRZFourier(
+            nfp=5,
+            stellsym=True,
+            mpol=1,
+            ntor=0,
+            quadpoints_phi=np.array([0.17]),
+            quadpoints_theta=np.array([0.31]),
+        )
+        rz.set_zs(1, 0, 1.0)
+        rz_gamma = np.asarray(rz.gamma(), dtype=np.float64)
+        rz_sample = float(_surface_sample_z(jax.device_put(rz_gamma)))
+        assert np.isclose(rz_sample, float(rz_gamma[0, 0, 2]))
+
+        xyz = SurfaceXYZTensorFourier(
+            mpol=1,
+            ntor=1,
+            stellsym=True,
+            nfp=1,
+            quadpoints_phi=np.array([0.23]),
+            quadpoints_theta=np.array([0.37]),
+        )
+        xyz_dofs = xyz.get_dofs().copy()
+        for i in range(min(6, xyz_dofs.size)):
+            xyz_dofs[-(i + 1)] += 0.01 * (i + 1)
+        xyz.set_dofs(xyz_dofs)
+        xyz_gamma = np.asarray(xyz.gamma(), dtype=np.float64)
+        xyz_sample = float(_surface_sample_z(jax.device_put(xyz_gamma)))
+        assert np.isclose(xyz_sample, float(xyz_gamma[0, 0, 2]))
+    """,
+        failure_message="shifted-grid axis sample smoke failed",
+    )
+
+
 def test_transfer_guard_disallow_allows_curvecwsfouriercpp_init():
     """CurveCWSFourierCPP should explicitly materialize quadpoints under disallow mode."""
     _assert_import_check_passes(

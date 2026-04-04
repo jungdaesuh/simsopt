@@ -70,6 +70,7 @@ from simsopt.geo.optimizer_jax import (
 from simsopt.objectives.fluxobjective_jax import SquaredFluxJAX
 from simsopt.objectives.stage2_target_objective_jax import (
     Stage2PenaltyConfig,
+    _split_stage2_dofs,
     build_stage2_target_objective,
 )
 
@@ -122,6 +123,17 @@ _SQUARED_FLUX_DEFINITIONS = (
     "normalized",
     "local",
 )
+
+
+def test_split_stage2_dofs_matches_legacy_slice_layout():
+    dofs = jnp.asarray([7.5, -1.2, 0.3, 4.4, -8.1], dtype=jnp.float64)
+
+    current, curve_dofs = _split_stage2_dofs(dofs, curve_dof_count=4)
+
+    np.testing.assert_allclose(np.asarray(current), np.asarray(dofs[0]), atol=0.0)
+    np.testing.assert_allclose(np.asarray(curve_dofs), np.asarray(dofs[1:]), atol=0.0)
+
+
 _TARGET_OBJECTIVE_GRAD_ATOL = 5e-12
 _TARGET_OBJECTIVE_COMPOSITE_GRAD_ATOL = 1.5e-11
 _TARGET_OBJECTIVE_FD_EPS = 1e-6

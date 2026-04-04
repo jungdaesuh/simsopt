@@ -19,6 +19,7 @@ from ..optimizer_jax import PRIVATE_OPTIMIZER_JAX_VERSION, _x64_enabled
 
 _dot = partial(jnp.dot, precision=lax.Precision.HIGHEST)
 _einsum = partial(jnp.einsum, precision=lax.Precision.HIGHEST)
+_INT32_COUNTER_MAX = np.iinfo(np.int32).max
 
 
 def _as_jax_dtype(value, dtype):
@@ -31,6 +32,22 @@ def _as_jax_dtype(value, dtype):
 
 def _eye(n, dtype):
     return jax.device_put(np.eye(int(n), dtype=np.dtype(dtype)))
+
+
+def _zeros(shape, dtype):
+    if np.isscalar(shape):
+        shape = (int(shape),)
+    else:
+        shape = tuple(int(dim) for dim in shape)
+    return jax.device_put(np.zeros(shape, dtype=np.dtype(dtype)))
+
+
+def _int_scalar(value):
+    return _as_jax_dtype(value, jnp.int32)
+
+
+def _bool_scalar(value):
+    return _as_jax_dtype(value, jnp.bool_)
 
 
 def _reduce_sum_all(x):
@@ -95,18 +112,31 @@ def _require_private_optimizer_runtime(x0):
 
 
 def _resolve_lbfgs_limits(d, maxiter, maxfun, maxgrad):
-    """Resolve None defaults for L-BFGS iteration/eval/grad limits."""
-    import numpy as np
-
+    """Resolve None defaults onto the int32 counter domain used by L-BFGS."""
     if (maxiter is None) and (maxfun is None) and (maxgrad is None):
         maxiter = d * 200
-    if maxiter is None:
-        maxiter = np.inf
-    if maxfun is None:
-        maxfun = np.inf
-    if maxgrad is None:
-        maxgrad = np.inf
-    return maxiter, maxfun, maxgrad
+    return tuple(
+        _normalize_lbfgs_counter_limit(limit)
+        for limit in (
+            np.inf if maxiter is None else maxiter,
+            np.inf if maxfun is None else maxfun,
+            np.inf if maxgrad is None else maxgrad,
+        )
+    )
+
+
+def _normalize_lbfgs_counter_limit(limit) -> np.int32:
+    """Map user limits onto the integer counter space used inside the solver.
+
+    The solver state tracks ``k``/``nfev``/``ngev`` as int32 counters, so keep
+    comparison limits in the same domain. Finite non-integer inputs are rounded
+    up to preserve the old ``counter >= float_limit`` semantics.
+    """
+
+    scalar_limit = np.asarray(limit).item()
+    if np.isinf(scalar_limit):
+        return np.int32(_INT32_COUNTER_MAX)
+    return np.int32(min(int(np.ceil(scalar_limit)), _INT32_COUNTER_MAX))
 
 
 def _emit_iteration_callbacks(callback, progress_callback, x_kp1, next_k, f_kp1, g_kp1):

@@ -21,6 +21,13 @@ from ..backend import (
     get_point_chunk_size,
 )
 from ..backend.runtime import register_backend_cache_clear
+from ._math_utils import (
+    explicit_inv as _explicit_inv,
+    explicit_rsqrt as _explicit_rsqrt,
+    eye as _eye,
+    scalar_like as _scalar_like,
+    zeros as _zeros,
+)
 
 __all__ = [
     "biot_savart_B",
@@ -78,20 +85,8 @@ def _slice_prefix(array, size: int):
     return jnp.take(array, _index_range(size), axis=0)
 
 
-def _zeros(shape, dtype=jnp.float64):
-    return jax.device_put(np.zeros(shape, dtype=np.dtype(dtype)))
-
-
-def _eye(size: int, dtype=jnp.float64):
-    return jax.device_put(np.eye(size, dtype=np.dtype(dtype)))
-
-
 def _float64_scalar(value):
     return jax.device_put(np.asarray(value, dtype=np.float64))
-
-
-def _scalar_like(reference, value):
-    return jax.device_put(np.asarray(value, dtype=np.dtype(reference.dtype)))
 
 
 def _as_int32_scalar(value):
@@ -152,40 +147,6 @@ def _pad_axis1(array, padded_size: int):
         return array
     padding_config = [(0, 0, 0), (0, pad_cols, 0)] + [(0, 0, 0)] * (array.ndim - 2)
     return lax.pad(array, _zero_scalar(array.dtype), padding_config)
-
-
-def _explicit_rsqrt_impl(x):
-    return jnp.reciprocal(jnp.sqrt(x))
-
-
-def _explicit_inv_impl(x):
-    return jnp.divide(_scalar_like(x, 1.0), x)
-
-
-@jax.custom_jvp
-def _explicit_inv(x):
-    return _explicit_inv_impl(x)
-
-
-@_explicit_inv.defjvp
-def _explicit_inv_jvp(primals, tangents):
-    (x,), (x_dot,) = primals, tangents
-    primal_out = _explicit_inv_impl(x)
-    tangent_out = jnp.negative(x_dot * primal_out * primal_out)
-    return primal_out, tangent_out
-
-
-@jax.custom_jvp
-def _explicit_rsqrt(x):
-    return _explicit_rsqrt_impl(x)
-
-
-@_explicit_rsqrt.defjvp
-def _explicit_rsqrt_jvp(primals, tangents):
-    (x,), (x_dot,) = primals, tangents
-    primal_out = _explicit_rsqrt_impl(x)
-    tangent_out = x_dot * _scalar_like(x, -0.5) * primal_out * _explicit_inv_impl(x)
-    return primal_out, tangent_out
 
 
 # ── Tree utilities ────────────────────────────────────────────────────

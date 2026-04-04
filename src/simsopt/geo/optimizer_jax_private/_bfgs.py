@@ -10,10 +10,12 @@ from jax import lax
 
 from ._common import (
     _as_jax_dtype,
+    _bool_scalar,
     _dot,
     _eye,
     _einsum,
     _emit_iteration_callbacks,
+    _int_scalar,
     _norm,
     _require_private_optimizer_runtime,
     _scalar_value_and_grad,
@@ -21,14 +23,6 @@ from ._common import (
 from ._line_search import _line_search
 from ._result_converters import _coerce_dense_hess_inv
 from ._types import _BFGSResults
-
-
-def _int_scalar(value):
-    return _as_jax_dtype(value, jnp.int32)
-
-
-def _bool_scalar(value):
-    return _as_jax_dtype(value, jnp.bool_)
 
 
 def _minimize_bfgs_private(
