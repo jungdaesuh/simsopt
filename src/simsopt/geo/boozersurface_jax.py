@@ -1058,6 +1058,12 @@ class BoozerSurfaceJAX(Optimizable):
 
     Mirrors the CPU ``BoozerSurface`` API — inherits ``Optimizable``,
     carries ``self.label``, and returns result dicts with ``vjp`` hooks.
+    The object wrapper is intentionally stateful and should be treated as
+    thread-confined: ``run_code()``, ``recompute_bell()``, and related helpers
+    mutate ``self.res``, ``self.surface``, ``self.need_to_run_code``, and the
+    cached grouped-coil data. Use ``run_code_traceable()`` plus immutable coil
+    specs/arrays when you need a pure array contract for the target ondevice
+    lane.
 
     Args:
         biotsavart: ``BiotSavartJAX`` instance (or any object with
@@ -1314,7 +1320,7 @@ class BoozerSurfaceJAX(Optimizable):
         )
 
     def run_code_traceable(self, coil_source, sdofs, iota, G):
-        """Trace-safe pure-array inner solve for the Section 3 target path.
+        """Trace-safe pure-array inner solve for the production target lane.
 
         Accepts a preferred immutable ``GroupedCoilSetSpec`` or the legacy
         grouped-array payload plus warm-start state, returns only JAX arrays /
@@ -1498,9 +1504,7 @@ class BoozerSurfaceJAX(Optimizable):
             coil_set_spec=coil_set_spec,
         ).reshape(nphi, ntheta, 3)
 
-        r_boozer_raw = boozer_residual_vector(
-            G, iota, B, xphi, xtheta, weight_inv_modB
-        )
+        r_boozer_raw = boozer_residual_vector(G, iota, B, xphi, xtheta, weight_inv_modB)
         num_res = 3 * nphi * ntheta
         r_boozer = r_boozer_raw / jnp.sqrt(num_res)
 
@@ -2094,14 +2098,13 @@ class BoozerSurfaceJAX(Optimizable):
         Does NOT set ``self.res``, ``self.need_to_run_code``, or
         ``self.surface`` DOFs.
 
-        This is the pure-functional prerequisite for a JAX-traceable
-        outer objective.  It eliminates self-mutation so that a future
-        ``make_traceable_objective`` wrapper can close over this method
-        and differentiate through the solve.  **This method is not
-        itself JIT/grad-traceable** — it still uses ``float()`` casts,
-        ``np.asarray`` conversions, and Python ``if`` on solver outputs.
-        Making those trace-safe is deferred to the traceable-objective
-        implementation (Section 3 items 2-7).
+        This is the transitional pure-functional seam between the legacy
+        object API and the fully trace-safe target lane. It eliminates self
+        mutation, but **it is not itself JIT/grad-traceable** because it still
+        uses ``float()`` casts, ``np.asarray`` conversions, and Python ``if``
+        on solver outputs. The fully trace-safe path lives in
+        ``run_code_traceable()`` plus
+        ``make_traceable_objective_runtime_bundle()``.
 
         Differences from the stateful ``run_code()`` result dict:
 

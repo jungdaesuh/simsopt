@@ -174,6 +174,22 @@ def _dense_reference_fields(module, points, gammas, gammadashs, currents):
     return dense_B, dense_A, dense_dB, dense_dA
 
 
+def _dense_B_vjp(module, points, v, gammas, gammadashs, currents):
+    def _dense_B(group_gammas, group_gammadashs, group_currents):
+        return jax.vmap(
+            lambda x: module._one_point_dense(
+                x,
+                group_gammas,
+                group_gammadashs,
+                group_currents,
+                integrand=module._biot_savart_B_integrand,
+            )
+        )(points)
+
+    _, pullback = jax.vjp(_dense_B, gammas, gammadashs, currents)
+    return pullback(v)
+
+
 def _evaluate_field_family(module, points, gammas, gammadashs, currents):
     B = module.biot_savart_B(points, gammas, gammadashs, currents)
     A = module.biot_savart_A(points, gammas, gammadashs, currents)
@@ -395,13 +411,70 @@ class TestBiotSavartJaxChunkedParity:
             core_bs.invalidate_kernel_cache()
             gammas, gammadashs, currents = _make_shifted_circular_coils(4, nquad=16)
             points = jnp.array([[0.2, -0.1, 0.05]], dtype=jnp.float64)
+            v = jnp.array([[0.3, -0.2, 0.1]], dtype=jnp.float64)
 
             core_bs.biot_savart_B(points, gammas, gammadashs, currents)
+            core_bs.biot_savart_B_vjp(points, v, gammas, gammadashs, currents)
             assert core_bs._make_kernel.cache_info().currsize > 0
+            assert core_bs._make_B_vjp_kernel.cache_info().currsize > 0
 
             invalidate_backend_cache()
 
             assert core_bs._make_kernel.cache_info().currsize == 0
+            assert core_bs._make_B_vjp_kernel.cache_info().currsize == 0
+
+    def test_B_vjp_rebuilds_when_tuning_changes_in_process(self, monkeypatch):
+        with _kernel_tuning_env("jax_cpu_parity"):
+            chunked_bs = _load_chunked_biotsavart()
+            from simsopt.jax_core import biotsavart as core_bs
+
+            points, gammas, gammadashs, currents = _make_random_fixture(
+                seed=11,
+                ncoils=7,
+                nquad=19,
+                npoints=4,
+            )
+            v = jnp.linspace(0.2, 1.3, points.shape[0] * 3, dtype=jnp.float64).reshape(
+                points.shape[0],
+                3,
+            )
+
+            monkeypatch.setattr(core_bs, "_read_tuning_config", lambda: (3, 5, 0))
+            core_bs.invalidate_kernel_cache()
+            first_vjp = core_bs.biot_savart_B_vjp(
+                points,
+                v,
+                gammas,
+                gammadashs,
+                currents,
+            )
+            assert core_bs._make_B_vjp_kernel.cache_info().currsize == 1
+
+            monkeypatch.setattr(core_bs, "_read_tuning_config", lambda: (2, 4, 0))
+            second_vjp = core_bs.biot_savart_B_vjp(
+                points,
+                v,
+                gammas,
+                gammadashs,
+                currents,
+            )
+            assert core_bs._make_B_vjp_kernel.cache_info().currsize == 2
+
+            dense_vjp = _dense_B_vjp(
+                chunked_bs,
+                points,
+                v,
+                gammas,
+                gammadashs,
+                currents,
+            )
+            for chunked_out in (first_vjp, second_vjp):
+                for chunked_leaf, dense_leaf in zip(chunked_out, dense_vjp):
+                    np.testing.assert_allclose(
+                        np.asarray(chunked_leaf),
+                        np.asarray(dense_leaf),
+                        atol=1e-14,
+                    )
 
     def test_two_chunk_coil_and_quadrature_paths_match_dense_reference(
         self, monkeypatch

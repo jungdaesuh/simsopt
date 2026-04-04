@@ -193,7 +193,7 @@ def use_experimental_target_lane_value_and_grad(
     optimizer_backend: str | None,
     enabled: bool,
 ) -> bool:
-    """Return whether the legacy experimental flag is applicable here."""
+    """Return whether the legacy compatibility flag was requested here."""
     return bool(enabled and backend == "jax" and optimizer_backend == "ondevice")
 
 
@@ -202,7 +202,8 @@ def use_target_lane_value_and_grad(
     backend: str,
     optimizer_backend: str | None,
 ) -> bool:
-    """Return whether the fused target-lane value/grad contract is active."""
+    """Return whether the production fused target-lane
+    value/grad contract is active."""
     return bool(backend == "jax" and optimizer_backend == "ondevice")
 
 

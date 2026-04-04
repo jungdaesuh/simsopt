@@ -421,6 +421,45 @@ def _get_kernel(integrand_key, diff_mode):
     return _make_kernel(integrand_key, diff_mode, coil_cs, quad_bs, point_cs)
 
 
+@lru_cache(maxsize=16)
+def _make_B_vjp_kernel(coil_cs, quad_bs, point_cs):
+    """Build the tuning-keyed compiled VJP kernel for ``biot_savart_B``.
+
+    ``biot_savart_B_vjp`` differentiates through the forward field kernel, so it
+    must be rebuilt when the backend tuning changes in the same process.  Keying
+    this factory on the same tuning tuple as the forward kernels keeps the
+    backend/performance contract consistent across both paths.
+    """
+    forward_kernel = _make_kernel(
+        _Integrand.B,
+        _DiffMode.VALUE,
+        coil_cs,
+        quad_bs,
+        point_cs,
+    )
+
+    @jax.jit
+    def kernel(points, v, gammas, gammadashs, currents):
+        def fwd(group_gammas, group_gammadashs, group_currents):
+            return forward_kernel(
+                points,
+                group_gammas,
+                group_gammadashs,
+                group_currents,
+            )
+
+        _, pullback = jax.vjp(fwd, gammas, gammadashs, currents)
+        return pullback(v)
+
+    return kernel
+
+
+def _get_B_vjp_kernel():
+    """Read tuning config and return the cached JIT-compiled VJP kernel."""
+    coil_cs, quad_bs, point_cs = _read_tuning_config()
+    return _make_B_vjp_kernel(coil_cs, quad_bs, point_cs)
+
+
 def invalidate_kernel_cache() -> None:
     """Drop all cached JIT-compiled Biot-Savart kernels and tuning config.
 
@@ -428,6 +467,7 @@ def invalidate_kernel_cache() -> None:
     to ensure the next ``biot_savart_*`` call rebuilds with the new config.
     """
     _make_kernel.cache_clear()
+    _make_B_vjp_kernel.cache_clear()
 
 
 register_backend_cache_clear(invalidate_kernel_cache)
@@ -478,23 +518,14 @@ def biot_savart_d2A_by_dXdX(points, gammas, gammadashs, currents):
     )
 
 
-@jax.jit
 def biot_savart_B_vjp(points, v, gammas, gammadashs, currents):
     """VJP of ``biot_savart_B`` w.r.t. coil data.
 
-    Uses bare ``@jax.jit`` (not the kernel factory) because the VJP
-    structure differs from a plain field eval.  The inner
-    ``biot_savart_B`` call goes through ``_get_kernel`` at trace time,
-    so tuning config IS respected on first compilation.  However, a
-    mid-process config change will not invalidate the outer JIT cache —
-    acceptable because the backend mode is set once at startup.
+    Uses a dedicated tuning-keyed kernel factory so backend mode and chunking
+    changes rebuild the compiled closure in the same process, matching the
+    cache invalidation behavior of the forward ``biot_savart_B`` kernels.
     """
-
-    def fwd(group_gammas, group_gammadashs, group_currents):
-        return biot_savart_B(points, group_gammas, group_gammadashs, group_currents)
-
-    _, pullback = jax.vjp(fwd, gammas, gammadashs, currents)
-    return pullback(v)
+    return _get_B_vjp_kernel()(points, v, gammas, gammadashs, currents)
 
 
 # ── Grouped coil utilities ───────────────────────────────────────────

@@ -459,6 +459,11 @@ class BiotSavartJAX(Optimizable):
     chain runs through the coil list so that the outer framework
     correctly composes DOFs and derivatives.
 
+    The wrapper itself is mutable and not safe for concurrent use from
+    multiple threads. ``set_points()`` / ``set_points_from_spec()`` update the
+    cached evaluation points in-place, so shared instances should be treated as
+    thread-confined object adapters around the immutable grouped-coil specs.
+
     When all coils use ``CurveXYZFourier`` (possibly wrapped in
     ``RotatedCurve``), the JAX-native path is enabled: coil geometry
     is evaluated from DOFs via a precomputed Fourier basis matrix
@@ -788,7 +793,9 @@ class BiotSavartJAX(Optimizable):
         """Set evaluation points (converted to a JAX array once).
 
         Accepts both NumPy and JAX arrays.  JAX arrays stay on device
-        without a host round-trip.
+        without a host round-trip. Mutates the cached point buffer on this
+        instance, so callers should not share one ``BiotSavartJAX`` across
+        concurrent evaluation threads.
         """
         points_array = (
             points if isinstance(points, jax.Array) else np.ascontiguousarray(points)
@@ -797,7 +804,10 @@ class BiotSavartJAX(Optimizable):
         self._points_version += 1
 
     def set_points_from_spec(self, field_eval_spec):
-        """Set evaluation points from an immutable field-evaluation spec."""
+        """Set evaluation points from an immutable field-evaluation spec.
+
+        This still mutates the receiving ``BiotSavartJAX`` instance.
+        """
         self._points_jax = jnp.asarray(field_eval_spec.points, dtype=jnp.float64)
         self._points_version += 1
 
