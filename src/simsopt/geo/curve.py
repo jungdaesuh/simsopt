@@ -48,7 +48,10 @@ def _as_jax_float64(value):
         return np.asarray(value, dtype=np.float64)
     if isinstance(value, jax.Array):
         return jnp.asarray(value, dtype=jnp.float64)
-    return jax.device_put(np.asarray(value, dtype=np.float64))
+    return jax.device_put(np.array(value, dtype=np.float64))
+
+
+_TWO_PI_JAX = _as_jax_float64(2.0 * np.pi) if _HAS_JAX else 2.0 * np.pi
 
 
 def _as_numpy_float64(value):
@@ -57,6 +60,43 @@ def _as_numpy_float64(value):
     if not _HAS_JAX:
         return np.asarray(value, dtype=np.float64)
     return np.asarray(jax.device_get(value), dtype=np.float64)
+
+
+def _selector_matrix(size, positions):
+    matrix = np.zeros((len(positions), size), dtype=np.float64)
+    if positions:
+        matrix[np.arange(len(positions)), positions] = 1.0
+    return _as_jax_float64(matrix)
+
+
+def _curve_mode_selectors(order):
+    size = 4 * order + 2
+    return (
+        _selector_matrix(size, list(range(0, order + 1))),
+        _selector_matrix(size, list(range(order + 1, 2 * order + 1))),
+        _selector_matrix(size, list(range(2 * order + 1, 3 * order + 2))),
+        _selector_matrix(size, list(range(3 * order + 2, 4 * order + 2))),
+    )
+
+
+def _harmonic_terms(qpts, start_mode, count, trig_fn):
+    modes = _as_jax_float64(np.arange(start_mode, start_mode + count, dtype=np.float64))
+    angles = qpts[:, None] * _TWO_PI_JAX * modes[None, :]
+    return trig_fn(angles)
+
+
+def _paired_rz_angles(quadpoints_phi, quadpoints_theta, *, mpol, ntor, nfp):
+    phi = _as_jax_float64(quadpoints_phi)
+    theta = _as_jax_float64(quadpoints_theta)
+    m = _as_jax_float64(np.arange(mpol + 1, dtype=np.float64))
+    n = _as_jax_float64(np.arange(-ntor, ntor + 1, dtype=np.float64))
+    phi_angles = _TWO_PI_JAX * phi
+    theta_angles = _TWO_PI_JAX * theta
+    angles = (
+        theta_angles[:, None, None] * m[None, :, None]
+        - phi_angles[:, None, None] * _as_jax_float64(nfp) * n[None, None, :]
+    )
+    return phi_angles, jnp.cos(angles), jnp.sin(angles)
 
 
 def _require_jax(feature_name):
@@ -1610,29 +1650,18 @@ def gamma_2d(modes, qpts, order, G: int = 0, H: int = 0):
      - phi: Array of size N x 1.
      - theta: Array of size N x 1.
     """
-    # Unpack dofs
-    phic = modes[: order + 1]
-    phis = modes[order + 1 : 2 * order + 1]
-    thetac = modes[2 * order + 1 : 3 * order + 2]
-    thetas = modes[3 * order + 2 :]
+    modes_jax = _as_jax_float64(modes)
+    qpts_jax = _as_jax_float64(qpts)
+    phic_sel, phis_sel, thetac_sel, thetas_sel = _curve_mode_selectors(order)
+    phic = phic_sel @ modes_jax
+    phis = phis_sel @ modes_jax
+    thetac = thetac_sel @ modes_jax
+    thetas = thetas_sel @ modes_jax
 
-    # Construct theta and phi arrays
-    theta = jnp.zeros((qpts.size,))
-    phi = jnp.zeros((qpts.size,))
-
-    ll = qpts * 2.0 * jnp.pi
-    for ii in range(order + 1):
-        theta = theta + thetac[ii] * jnp.cos(ii * ll)
-        phi = phi + phic[ii] * jnp.cos(ii * ll)
-
-    for ii in range(order):
-        theta = theta + thetas[ii] * jnp.sin((ii + 1) * ll)
-        phi = phi + phis[ii] * jnp.sin((ii + 1) * ll)
-
-    # Add secular terms
-    theta = theta + G * qpts
-    phi = phi + H * qpts
-
+    cos_terms = _harmonic_terms(qpts_jax, 0, order + 1, jnp.cos)
+    sin_terms = _harmonic_terms(qpts_jax, 1, order, jnp.sin)
+    theta = cos_terms @ thetac + sin_terms @ thetas + _as_jax_float64(G) * qpts_jax
+    phi = cos_terms @ phic + sin_terms @ phis + _as_jax_float64(H) * qpts_jax
     return phi, theta
 
 
@@ -1669,47 +1698,36 @@ def gamma_curve_on_surface(
 def surfrz_gamma_lin(
     quadpoints_phi, quadpoints_theta, mpol, ntor, surf_dofs, nfp, stellsym
 ):
-    npts = quadpoints_phi.size
-    th = quadpoints_theta * 2.0 * jnp.pi
-    ph = quadpoints_phi * 2.0 * jnp.pi
+    from ..jax_core.surface_rzfourier import surface_rz_fourier_spec_from_dofs
 
-    # Construct curve on surface
-    r = jnp.zeros((npts,))
-    z = jnp.zeros((npts,))
-
-    nmn_cos = ntor + 1 + mpol * (2 * ntor + 1)
-    nmn_sin = ntor + mpol * (2 * ntor + 1)
-
-    rc_offset = 0
-    rs_offset = nmn_cos
-    zc_offset = rs_offset + (0 if stellsym else nmn_sin)
-    zs_offset = zc_offset + (0 if stellsym else nmn_cos)
-
-    cos_counter = -1
-    sin_counter = -1
-    for mm in range(mpol + 1):
-        for nn in range(-ntor, ntor + 1):
-            angle = mm * th - nn * ph * nfp
-            if not (mm == 0 and nn < 0):
-                cos_counter += 1
-                r = r + surf_dofs[rc_offset + cos_counter] * jnp.cos(angle)
-                if not stellsym:
-                    z = z + surf_dofs[zc_offset + cos_counter] * jnp.cos(angle)
-
-            if mm == 0 and nn <= 0:
-                continue
-
-            sin_counter += 1
-            if not stellsym:
-                r = r + surf_dofs[rs_offset + sin_counter] * jnp.sin(angle)
-            z = z + surf_dofs[zs_offset + sin_counter] * jnp.sin(angle)
-
-    gamma = jnp.zeros((quadpoints_phi.size, 3))
-    gamma = gamma.at[:, 0].set(r * jnp.cos(ph))
-    gamma = gamma.at[:, 1].set(r * jnp.sin(ph))
-    gamma = gamma.at[:, 2].set(z)
-
-    return gamma
+    spec = surface_rz_fourier_spec_from_dofs(
+        _as_jax_float64(surf_dofs),
+        quadpoints_phi=_as_jax_float64(quadpoints_phi),
+        quadpoints_theta=_as_jax_float64(quadpoints_theta),
+        mpol=mpol,
+        ntor=ntor,
+        nfp=nfp,
+        stellsym=stellsym,
+    )
+    phi_angles, cos_terms, sin_terms = _paired_rz_angles(
+        quadpoints_phi,
+        quadpoints_theta,
+        mpol=mpol,
+        ntor=ntor,
+        nfp=nfp,
+    )
+    r = jnp.sum(
+        spec.rc[None, :, :] * cos_terms + spec.rs[None, :, :] * sin_terms,
+        axis=(1, 2),
+    )
+    z = jnp.sum(
+        spec.zc[None, :, :] * cos_terms + spec.zs[None, :, :] * sin_terms,
+        axis=(1, 2),
+    )
+    return jnp.stack(
+        [r * jnp.cos(phi_angles), r * jnp.sin(phi_angles), z],
+        axis=1,
+    )
 
 
 def skip(ii, m, n, stellsym, mpol, ntor):

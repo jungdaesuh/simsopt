@@ -4,10 +4,19 @@ from __future__ import annotations
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 from ._device_scalars import device_one, float_scalar, two_pi
 from .specs import make_surface_rzfourier_spec
 from .specs import SurfaceRZFourierSpec
+
+
+def _as_jax_float64(value) -> jax.Array:
+    if isinstance(value, jax.Array):
+        return jnp.asarray(value, dtype=jnp.float64)
+    if isinstance(value, (np.ndarray, np.generic, list, tuple)) or np.isscalar(value):
+        return jax.device_put(np.asarray(value, dtype=np.float64))
+    return jnp.asarray(value, dtype=jnp.float64)
 
 
 def _zero_based_mode_range(count: int, reference: jax.Array) -> jax.Array:
@@ -86,9 +95,48 @@ def _block_mode_indices(
             n_idx.append(n + ntor)
 
     return (
-        jnp.asarray(m_idx, dtype=jnp.int32),
-        jnp.asarray(n_idx, dtype=jnp.int32),
+        jax.device_put(np.asarray(m_idx, dtype=np.int32)),
+        jax.device_put(np.asarray(n_idx, dtype=np.int32)),
     )
+
+
+def _block_mode_positions(
+    *,
+    mpol: int,
+    ntor: int,
+    include_zero_mode: bool,
+) -> np.ndarray:
+    width = 2 * ntor + 1
+    positions: list[int] = []
+
+    start_n = 0 if include_zero_mode else 1
+    for n in range(start_n, ntor + 1):
+        positions.append(n + ntor)
+
+    for m in range(1, mpol + 1):
+        for n in range(-ntor, ntor + 1):
+            positions.append(m * width + n + ntor)
+
+    return np.asarray(positions, dtype=np.int64)
+
+
+def _gather_matrix(positions: np.ndarray, source_size: int) -> jax.Array:
+    matrix = np.zeros((positions.size, source_size), dtype=np.float64)
+    matrix[np.arange(positions.size), positions] = 1.0
+    return _as_jax_float64(matrix)
+
+
+def _scatter_matrix(
+    positions: np.ndarray,
+    *,
+    target_size: int,
+    source_size: int,
+    source_offset: int,
+) -> jax.Array:
+    matrix = np.zeros((target_size, source_size), dtype=np.float64)
+    source_columns = np.arange(positions.size) + source_offset
+    matrix[positions, source_columns] = 1.0
+    return _as_jax_float64(matrix)
 
 
 def _coefficients_from_dofs(
@@ -99,75 +147,106 @@ def _coefficients_from_dofs(
     stellsym: bool,
 ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
     coeff_shape = (mpol + 1, 2 * ntor + 1)
-    include_m, include_n = _block_mode_indices(
+    flat_size = coeff_shape[0] * coeff_shape[1]
+    include_positions = _block_mode_positions(
         mpol=mpol,
         ntor=ntor,
         include_zero_mode=True,
     )
-    exclude_m, exclude_n = _block_mode_indices(
+    exclude_positions = _block_mode_positions(
         mpol=mpol,
         ntor=ntor,
         include_zero_mode=False,
     )
 
-    rc_count = int(include_m.shape[0])
-    tail_count = int(exclude_m.shape[0])
-    dofs = jnp.asarray(dofs, dtype=jnp.float64)
+    rc_count = int(include_positions.size)
+    tail_count = int(exclude_positions.size)
+    dofs = _as_jax_float64(dofs)
+    total_dofs = rc_count + tail_count if stellsym else 2 * rc_count + 2 * tail_count
+    zero_flat = _as_jax_float64(np.zeros(flat_size, dtype=np.float64))
 
-    rc = (
-        jnp.zeros(coeff_shape, dtype=jnp.float64)
-        .at[include_m, include_n]
-        .set(dofs[:rc_count])
+    rc = jnp.reshape(
+        _scatter_matrix(
+            include_positions,
+            target_size=flat_size,
+            source_size=total_dofs,
+            source_offset=0,
+        )
+        @ dofs,
+        coeff_shape,
     )
     if stellsym:
-        zs = (
-            jnp.zeros(coeff_shape, dtype=jnp.float64)
-            .at[exclude_m, exclude_n]
-            .set(dofs[rc_count : rc_count + tail_count])
+        zs = jnp.reshape(
+            _scatter_matrix(
+                exclude_positions,
+                target_size=flat_size,
+                source_size=total_dofs,
+                source_offset=rc_count,
+            )
+            @ dofs,
+            coeff_shape,
         )
-        zero = jnp.zeros(coeff_shape, dtype=jnp.float64)
+        zero = jnp.reshape(zero_flat, coeff_shape)
         return rc, zero, zero, zs
 
     rs_start = rc_count
     zc_start = rs_start + tail_count
     zs_start = zc_start + rc_count
 
-    rs = (
-        jnp.zeros(coeff_shape, dtype=jnp.float64)
-        .at[exclude_m, exclude_n]
-        .set(dofs[rs_start : rs_start + tail_count])
+    rs = jnp.reshape(
+        _scatter_matrix(
+            exclude_positions,
+            target_size=flat_size,
+            source_size=total_dofs,
+            source_offset=rs_start,
+        )
+        @ dofs,
+        coeff_shape,
     )
-    zc = (
-        jnp.zeros(coeff_shape, dtype=jnp.float64)
-        .at[include_m, include_n]
-        .set(dofs[zc_start : zc_start + rc_count])
+    zc = jnp.reshape(
+        _scatter_matrix(
+            include_positions,
+            target_size=flat_size,
+            source_size=total_dofs,
+            source_offset=zc_start,
+        )
+        @ dofs,
+        coeff_shape,
     )
-    zs = (
-        jnp.zeros(coeff_shape, dtype=jnp.float64)
-        .at[exclude_m, exclude_n]
-        .set(dofs[zs_start : zs_start + tail_count])
+    zs = jnp.reshape(
+        _scatter_matrix(
+            exclude_positions,
+            target_size=flat_size,
+            source_size=total_dofs,
+            source_offset=zs_start,
+        )
+        @ dofs,
+        coeff_shape,
     )
     return rc, rs, zc, zs
 
 
 def surface_rz_fourier_dofs_from_spec(spec: SurfaceRZFourierSpec) -> jax.Array:
-    include_m, include_n = _block_mode_indices(
+    include_positions = _block_mode_positions(
         mpol=spec.mpol,
         ntor=spec.ntor,
         include_zero_mode=True,
     )
-    exclude_m, exclude_n = _block_mode_indices(
+    exclude_positions = _block_mode_positions(
         mpol=spec.mpol,
         ntor=spec.ntor,
         include_zero_mode=False,
     )
-    rc = spec.rc[include_m, include_n]
+    flat_size = int((spec.mpol + 1) * (2 * spec.ntor + 1))
+    include_selector = _gather_matrix(include_positions, flat_size)
+    exclude_selector = _gather_matrix(exclude_positions, flat_size)
+    rc = include_selector @ jnp.reshape(spec.rc, (flat_size,))
     if spec.stellsym:
-        zs = spec.zs[exclude_m, exclude_n]
+        zs = exclude_selector @ jnp.reshape(spec.zs, (flat_size,))
         return jnp.concatenate((rc, zs))
-    rs = spec.rs[exclude_m, exclude_n]
-    zc = spec.zc[include_m, include_n]
-    zs = spec.zs[exclude_m, exclude_n]
+    rs = exclude_selector @ jnp.reshape(spec.rs, (flat_size,))
+    zc = include_selector @ jnp.reshape(spec.zc, (flat_size,))
+    zs = exclude_selector @ jnp.reshape(spec.zs, (flat_size,))
     return jnp.concatenate((rc, rs, zc, zs))
 
 
@@ -226,7 +305,7 @@ def _evaluate_jacobian_from_dofs(
     spec: SurfaceRZFourierSpec,
     dofs: jax.Array,
 ):
-    dofs_jax = jnp.asarray(dofs, dtype=jnp.float64)
+    dofs_jax = _as_jax_float64(dofs)
     return jax.jacfwd(lambda x: evaluator(_spec_from_dofs(spec, x)))(dofs_jax)
 
 

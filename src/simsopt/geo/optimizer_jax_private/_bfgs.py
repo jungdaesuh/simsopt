@@ -4,19 +4,31 @@ from __future__ import annotations
 
 import numpy as np
 
+import jax
 import jax.numpy as jnp
-from jax import lax, value_and_grad
+from jax import lax
 
 from ._common import (
+    _as_jax_dtype,
     _dot,
+    _eye,
     _einsum,
     _emit_iteration_callbacks,
     _norm,
     _require_private_optimizer_runtime,
+    _scalar_value_and_grad,
 )
 from ._line_search import _line_search
 from ._result_converters import _coerce_dense_hess_inv
 from ._types import _BFGSResults
+
+
+def _int_scalar(value):
+    return _as_jax_dtype(value, jnp.int32)
+
+
+def _bool_scalar(value):
+    return _as_jax_dtype(value, jnp.bool_)
 
 
 def _minimize_bfgs_private(
@@ -37,38 +49,45 @@ def _minimize_bfgs_private(
     maxiter = int(maxiter)
 
     d = x0.shape[0]
+    scalar_value_and_grad = _scalar_value_and_grad(fun)
+    gtol_jax = _as_jax_dtype(gtol, x0.dtype)
+    half = _as_jax_dtype(0.5, x0.dtype)
+    wolfe_c1 = _as_jax_dtype(1e-4, x0.dtype)
+    wolfe_c2 = _as_jax_dtype(0.9, x0.dtype)
+    maxiter_jax = _as_jax_dtype(maxiter, jnp.int32)
+    base_identity = _eye(d, x0.dtype)
     if initial_state is None:
-        initial_H = jnp.eye(d, dtype=x0.dtype)
-        f_0, g_0 = value_and_grad(fun)(x0)
+        initial_H = base_identity
+        f_0, g_0 = scalar_value_and_grad(x0)
         state = _BFGSResults(
-            converged=_norm(g_0, ord=norm) < gtol,
-            failed=False,
-            k=0,
-            nfev=1,
-            ngev=1,
-            nhev=0,
+            converged=_norm(g_0, ord=norm) < gtol_jax,
+            failed=_bool_scalar(False),
+            k=_int_scalar(0),
+            nfev=_int_scalar(1),
+            ngev=_int_scalar(1),
+            nhev=_int_scalar(0),
             x_k=x0,
             f_k=f_0,
             g_k=g_0,
             H_k=initial_H,
-            old_old_fval=f_0 + _norm(g_0) / 2.0,
-            status=0,
-            line_search_status=0,
+            old_old_fval=f_0 + _norm(g_0) * half,
+            status=_int_scalar(0),
+            line_search_status=_int_scalar(0),
         )
     else:
         state = initial_state._replace(
-            x_k=jnp.asarray(initial_state.x_k, dtype=x0.dtype),
-            f_k=jnp.asarray(initial_state.f_k, dtype=x0.dtype),
-            g_k=jnp.asarray(initial_state.g_k, dtype=x0.dtype),
-            H_k=jnp.asarray(initial_state.H_k, dtype=x0.dtype),
-            old_old_fval=jnp.asarray(initial_state.old_old_fval, dtype=x0.dtype),
+            x_k=_as_jax_dtype(initial_state.x_k, x0.dtype),
+            f_k=_as_jax_dtype(initial_state.f_k, x0.dtype),
+            g_k=_as_jax_dtype(initial_state.g_k, x0.dtype),
+            H_k=_as_jax_dtype(initial_state.H_k, x0.dtype),
+            old_old_fval=_as_jax_dtype(initial_state.old_old_fval, x0.dtype),
         )
 
     def cond_fun(state):
         return (
             jnp.logical_not(state.converged)
             & jnp.logical_not(state.failed)
-            & (state.k < maxiter)
+            & (state.k < maxiter_jax)
             & jnp.isfinite(state.f_k)
             & jnp.all(jnp.isfinite(state.g_k))
         )
@@ -94,27 +113,28 @@ def _minimize_bfgs_private(
         rho_k = jnp.reciprocal(_dot(y_k, s_k))
 
         sy_k = s_k[:, np.newaxis] * y_k[np.newaxis, :]
-        w = jnp.eye(d, dtype=rho_k.dtype) - rho_k * sy_k
+        identity = _as_jax_dtype(base_identity, rho_k.dtype)
+        w = identity - rho_k * sy_k
         H_kp1 = (
             _einsum("ij,jk,lk", w, state.H_k, w)
             + rho_k * s_k[:, np.newaxis] * s_k[np.newaxis, :]
         )
         H_kp1 = jnp.where(jnp.isfinite(rho_k), H_kp1, state.H_k)
-        converged = _norm(g_kp1, ord=norm) < gtol
-        next_k = state.k + 1
+        converged = _norm(g_kp1, ord=norm) < gtol_jax
+        next_k = state.k + _int_scalar(1)
         dphi_0 = jnp.real(_dot(state.g_k, p_k))
         dphi_kp1 = jnp.real(_dot(g_kp1, p_k))
         strong_wolfe = (
             jnp.isfinite(f_kp1)
             & jnp.all(jnp.isfinite(g_kp1))
-            & (f_kp1 <= state.f_k + 1e-4 * line_search_results.a_k * dphi_0)
-            & (jnp.abs(dphi_kp1) <= -0.9 * dphi_0)
+            & (f_kp1 <= state.f_k + wolfe_c1 * line_search_results.a_k * dphi_0)
+            & (jnp.abs(dphi_kp1) <= -wolfe_c2 * dphi_0)
         )
         step_eps = jnp.sqrt(
-            jnp.asarray(jnp.finfo(state.x_k.dtype).eps, dtype=state.x_k.dtype)
+            _as_jax_dtype(jnp.finfo(state.x_k.dtype).eps, state.x_k.dtype)
         )
         step_tol = step_eps * jnp.maximum(
-            jnp.asarray(1.0, dtype=state.x_k.dtype),
+            _as_jax_dtype(1.0, state.x_k.dtype),
             _norm(state.x_k),
         )
         stalled_step = (~converged) & (_norm(s_k) <= step_tol)
@@ -124,15 +144,15 @@ def _minimize_bfgs_private(
             line_search_results.status,
             jnp.where(
                 stalled_step | (~strong_wolfe),
-                jnp.asarray(0, dtype=line_search_results.status.dtype),
+                _as_jax_dtype(0, line_search_results.status.dtype),
                 line_search_results.status,
             ),
         )
 
         def nonfinite_step_result(_):
             return state._replace(
-                converged=False,
-                failed=True,
+                converged=_bool_scalar(False),
+                failed=_bool_scalar(True),
                 k=next_k,
                 nfev=next_nfev,
                 ngev=next_ngev,
@@ -141,8 +161,8 @@ def _minimize_bfgs_private(
 
         def failed_step(_):
             return state._replace(
-                converged=False,
-                failed=True,
+                converged=_bool_scalar(False),
+                failed=_bool_scalar(True),
                 k=next_k,
                 nfev=next_nfev,
                 ngev=next_ngev,
@@ -178,51 +198,58 @@ def _minimize_bfgs_private(
             operand=None,
         )
 
-    state = lax.while_loop(cond_fun, body_fun, state)
-    f_final, g_final = value_and_grad(fun)(state.x_k)
-    converged_final = _norm(g_final, ord=norm) < gtol
-    state = state._replace(
-        converged=converged_final,
-        nfev=state.nfev + 1,
-        ngev=state.ngev + 1,
-        f_k=jnp.asarray(f_final, dtype=state.f_k.dtype),
-        g_k=jnp.asarray(g_final, dtype=state.g_k.dtype),
-    )
-    status = jnp.where(
-        state.converged,
-        0,
-        jnp.where(
-            state.k == maxiter,
-            1,
-            jnp.where(state.failed, 2 + state.line_search_status, -1),
-        ),
-    )
-    return state._replace(status=status)
+    def run_solver(initial_state):
+        state = lax.while_loop(cond_fun, body_fun, initial_state)
+        f_final, g_final = scalar_value_and_grad(state.x_k)
+        converged_final = _norm(g_final, ord=norm) < gtol_jax
+        state = state._replace(
+            converged=converged_final,
+            nfev=state.nfev + _int_scalar(1),
+            ngev=state.ngev + _int_scalar(1),
+            f_k=_as_jax_dtype(f_final, state.f_k.dtype),
+            g_k=_as_jax_dtype(g_final, state.g_k.dtype),
+        )
+        status = jnp.where(
+            state.converged,
+            _int_scalar(0),
+            jnp.where(
+                state.k == maxiter_jax,
+                _int_scalar(1),
+                jnp.where(
+                    state.failed,
+                    _int_scalar(2) + state.line_search_status,
+                    _int_scalar(-1),
+                ),
+            ),
+        )
+        return state._replace(status=status)
+
+    return jax.jit(run_solver)(state)
 
 
 def _make_bfgs_continuation_state(result, *, gtol, norm):
-    x_k = jnp.asarray(result.x, dtype=jnp.float64)
-    f_k = jnp.asarray(result.fun, dtype=x_k.dtype)
-    g_k = jnp.asarray(result.jac, dtype=x_k.dtype)
+    x_k = _as_jax_dtype(result.x, jnp.float64)
+    f_k = _as_jax_dtype(result.fun, x_k.dtype)
+    g_k = _as_jax_dtype(result.jac, x_k.dtype)
     H_k = _coerce_dense_hess_inv(
         getattr(result, "hess_inv", None), x_k.shape[0], x_k.dtype
     )
 
     dphi_0 = _dot(g_k, -_dot(H_k, g_k))
-    H_k = jnp.where(dphi_0 < 0, H_k, jnp.eye(H_k.shape[0], dtype=x_k.dtype))
+    H_k = jnp.where(dphi_0 < 0, H_k, _eye(H_k.shape[0], x_k.dtype))
 
     return _BFGSResults(
-        converged=False,
-        failed=False,
-        k=0,
-        nfev=int(getattr(result, "nfev", 0)),
-        ngev=int(getattr(result, "njev", getattr(result, "nfev", 0))),
-        nhev=0,
+        converged=_bool_scalar(False),
+        failed=_bool_scalar(False),
+        k=_int_scalar(0),
+        nfev=_int_scalar(int(getattr(result, "nfev", 0))),
+        ngev=_int_scalar(int(getattr(result, "njev", getattr(result, "nfev", 0)))),
+        nhev=_int_scalar(0),
         x_k=x_k,
         f_k=f_k,
         g_k=g_k,
         H_k=H_k,
-        old_old_fval=f_k + _norm(g_k) / 2.0,
-        status=0,
-        line_search_status=0,
+        old_old_fval=f_k + _norm(g_k) * _as_jax_dtype(0.5, x_k.dtype),
+        status=_int_scalar(0),
+        line_search_status=_int_scalar(0),
     )

@@ -38,7 +38,7 @@ def curve_length_pure(l):
 def _as_jax_float64(value):
     if isinstance(value, jax.Array):
         return jnp.asarray(value, dtype=jnp.float64)
-    return jax.device_put(np.asarray(value, dtype=np.float64))
+    return jax.device_put(np.array(value, dtype=np.float64))
 
 
 def _as_numpy_float64(value):
@@ -86,8 +86,13 @@ def Lp_curvature_pure(kappa, gammadash, p, desired_kappa):
     """
     This function is used in a Python+Jax implementation of the curvature penalty term.
     """
+    p_jax = _as_jax_float64(p)
+    desired_kappa_jax = _as_jax_float64(desired_kappa)
+    zero = _as_jax_float64(0.0)
+    one = _as_jax_float64(1.0)
     arc_length = jnp.linalg.norm(gammadash, axis=1)
-    return (1.0 / p) * jnp.mean(jnp.maximum(kappa - desired_kappa, 0) ** p * arc_length)
+    excess = jnp.maximum(kappa - desired_kappa_jax, zero)
+    return (one / p_jax) * jnp.mean((excess**p_jax) * arc_length)
 
 
 @jit
@@ -102,9 +107,11 @@ def curvature_barrier_pure(kappa, gammadash, threshold):
     feasible region. The value is therefore finite only when every sampled
     curvature stays strictly below ``threshold``.
     """
+    threshold_jax = _as_jax_float64(threshold)
+    two = _as_jax_float64(2.0)
     arc_length = jnp.linalg.norm(gammadash, axis=1)
-    feasible = kappa < threshold
-    safe_ratio = jnp.where(feasible, kappa / threshold, 2.0)
+    feasible = kappa < threshold_jax
+    safe_ratio = jnp.where(feasible, kappa / threshold_jax, two)
     barrier = -jnp.log1p(-safe_ratio)
     barrier = jnp.where(feasible, barrier, jnp.inf)
     return jnp.mean(barrier * arc_length)
@@ -211,15 +218,18 @@ def Lp_torsion_pure(torsion, gammadash, p, threshold):
     """
     This function is used in a Python+Jax implementation of the formula for the torsion penalty term.
     """
+    p_jax = _as_jax_float64(p)
+    threshold_jax = _as_jax_float64(threshold)
+    zero = _as_jax_float64(0.0)
+    one = _as_jax_float64(1.0)
     arc_length = jnp.linalg.norm(gammadash, axis=1)
     # jax.debug.print("arc_length: {arc_length}",arc_length=arc_length)
     # jax.debug.print('p: {p}',p=p)
     # jax.debug.print('threshold: {threshold}',threshold=threshold)
     # jax.debug.print('binorm: {binorm}',binorm=torsion)
     # jax.debug.print('integrand: {integrand}',integrand=jnp.maximum(jnp.abs(torsion)-threshold, 0)**p)
-    return (1.0 / p) * jnp.mean(
-        jnp.maximum(jnp.abs(torsion) - threshold, 0) ** p * arc_length
-    )
+    excess = jnp.maximum(jnp.abs(torsion) - threshold_jax, zero)
+    return (one / p_jax) * jnp.mean((excess**p_jax) * arc_length)
 
 
 class LpCurveTorsion(Optimizable):
@@ -271,10 +281,14 @@ def cc_distance_pure(gamma1, l1, gamma2, l2, minimum_distance):
     """
     This function is used in a Python+Jax implementation of the curve-curve distance formula.
     """
+    minimum_distance_jax = _as_jax_float64(minimum_distance)
+    zero = _as_jax_float64(0.0)
     dists = jnp.sqrt(jnp.sum((gamma1[:, None, :] - gamma2[None, :, :]) ** 2, axis=2))
     alen = jnp.linalg.norm(l1, axis=1)[:, None] * jnp.linalg.norm(l2, axis=1)[None, :]
-    return jnp.sum(alen * jnp.maximum(minimum_distance - dists, 0) ** 2) / (
-        gamma1.shape[0] * gamma2.shape[0]
+    normalization = _as_jax_float64(gamma1.shape[0] * gamma2.shape[0])
+    return (
+        jnp.sum(alen * jnp.maximum(minimum_distance_jax - dists, zero) ** 2)
+        / normalization
     )
 
 
@@ -285,13 +299,16 @@ def cc_distance_barrier_pure(gamma1, l1, gamma2, l2, minimum_distance):
     stays strictly above ``minimum_distance`` and diverges at the constraint
     boundary.
     """
+    minimum_distance_jax = _as_jax_float64(minimum_distance)
+    half = _as_jax_float64(0.5)
     dists = jnp.sqrt(jnp.sum((gamma1[:, None, :] - gamma2[None, :, :]) ** 2, axis=2))
     alen = jnp.linalg.norm(l1, axis=1)[:, None] * jnp.linalg.norm(l2, axis=1)[None, :]
-    feasible = dists > minimum_distance
-    safe_ratio = jnp.where(feasible, minimum_distance / dists, 0.5)
+    feasible = dists > minimum_distance_jax
+    safe_ratio = jnp.where(feasible, minimum_distance_jax / dists, half)
     barrier = -jnp.log1p(-safe_ratio)
     barrier = jnp.where(feasible, barrier, jnp.inf)
-    return jnp.sum(alen * barrier) / (gamma1.shape[0] * gamma2.shape[0])
+    normalization = _as_jax_float64(gamma1.shape[0] * gamma2.shape[0])
+    return jnp.sum(alen * barrier) / normalization
 
 
 class CurveCurveDistanceBarrier(Optimizable):
@@ -554,11 +571,15 @@ def cs_distance_pure(gammac, lc, gammas, ns, minimum_distance):
     This function is used in a Python+Jax implementation of the curve-surface distance
     formula.
     """
+    minimum_distance_jax = _as_jax_float64(minimum_distance)
+    zero = _as_jax_float64(0.0)
     dists = jnp.sqrt(jnp.sum((gammac[:, None, :] - gammas[None, :, :]) ** 2, axis=2))
     integralweight = (
         jnp.linalg.norm(lc, axis=1)[:, None] * jnp.linalg.norm(ns, axis=1)[None, :]
     )
-    return jnp.mean(integralweight * jnp.maximum(minimum_distance - dists, 0) ** 2)
+    return jnp.mean(
+        integralweight * jnp.maximum(minimum_distance_jax - dists, zero) ** 2
+    )
 
 
 class CurveSurfaceDistance(Optimizable):

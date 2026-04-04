@@ -3,7 +3,7 @@ from itertools import chain
 import numpy as np
 from scipy.fft import rfft
 
-from .curve import Curve, JaxCurve, jnp
+from .curve import Curve, JaxCurve, _as_jax_float64, jnp
 import simsoptpp as sopp
 
 
@@ -13,6 +13,72 @@ __all__ = [
     "jaxfouriercurve_pure",
     "jaxfouriercurve_geometry_pure",
 ]
+
+_TWO_PI_JAX = _as_jax_float64(2.0 * np.pi)
+
+
+def _mode_numbers(order):
+    return _as_jax_float64(np.arange(1, order + 1, dtype=np.float64))
+
+
+def _constant_row(length, value):
+    return _as_jax_float64(np.full((1, length), value, dtype=np.float64))
+
+
+def _interleave_harmonics(first, second):
+    return jnp.reshape(jnp.stack((first, second), axis=1), (-1, first.shape[1]))
+
+
+def _fourier_basis_terms(quadpoints, order):
+    quadpoints = _as_jax_float64(quadpoints)
+    points = _TWO_PI_JAX * quadpoints
+    mode_numbers = _mode_numbers(order)
+    phase = jnp.expand_dims(mode_numbers, axis=1) * jnp.expand_dims(points, axis=0)
+    sin_phase = jnp.sin(phase)
+    cos_phase = jnp.cos(phase)
+    mode_scale = _TWO_PI_JAX * mode_numbers
+    mode_scale_sq = mode_scale * mode_scale
+    mode_scale_cu = mode_scale_sq * mode_scale
+    zero_row = _constant_row(points.shape[0], 0.0)
+
+    basis = jnp.concatenate(
+        (
+            _constant_row(points.shape[0], 1.0),
+            _interleave_harmonics(sin_phase, cos_phase),
+        ),
+        axis=0,
+    )
+    dash_basis = jnp.concatenate(
+        (
+            zero_row,
+            _interleave_harmonics(
+                jnp.expand_dims(mode_scale, axis=1) * cos_phase,
+                -jnp.expand_dims(mode_scale, axis=1) * sin_phase,
+            ),
+        ),
+        axis=0,
+    )
+    dashdash_basis = jnp.concatenate(
+        (
+            zero_row,
+            _interleave_harmonics(
+                -jnp.expand_dims(mode_scale_sq, axis=1) * sin_phase,
+                -jnp.expand_dims(mode_scale_sq, axis=1) * cos_phase,
+            ),
+        ),
+        axis=0,
+    )
+    dashdashdash_basis = jnp.concatenate(
+        (
+            zero_row,
+            _interleave_harmonics(
+                -jnp.expand_dims(mode_scale_cu, axis=1) * cos_phase,
+                jnp.expand_dims(mode_scale_cu, axis=1) * sin_phase,
+            ),
+        ),
+        axis=0,
+    )
+    return basis, dash_basis, dashdash_basis, dashdashdash_basis
 
 
 class CurveXYZFourier(sopp.CurveXYZFourier, Curve):
@@ -237,66 +303,28 @@ def jaxfouriercurve_pure(dofs, quadpoints, order):
     Returns:
         Array of curve points, shape (N, 3)
     """
-    k = jnp.shape(dofs)[0] // 3
-    coeffs = [dofs[:k], dofs[k : (2 * k)], dofs[(2 * k) :]]
-    points = 2 * np.pi * quadpoints
-    jrange = jnp.arange(1, order + 1)
-    jp = jrange[:, None] * points[None, :]
-    sjp = jnp.sin(jp)
-    cjp = jnp.cos(jp)
-    gamma_x = coeffs[0][0] + jnp.sum(
-        coeffs[0][2 * jrange - 1, None] * sjp + coeffs[0][2 * jrange, None] * cjp,
-        axis=0,
-    )
-    gamma_y = coeffs[1][0] + jnp.sum(
-        coeffs[1][2 * jrange - 1, None] * sjp + coeffs[1][2 * jrange, None] * cjp,
-        axis=0,
-    )
-    gamma_z = coeffs[2][0] + jnp.sum(
-        coeffs[2][2 * jrange - 1, None] * sjp + coeffs[2][2 * jrange, None] * cjp,
-        axis=0,
-    )
-    return jnp.stack((gamma_x, gamma_y, gamma_z), axis=-1)
-
-
-def _fourier_component_geometry_pure(coeffs, sin_phase, cos_phase, mode_scale):
-    sin_coeffs = coeffs[1::2]
-    cos_coeffs = coeffs[2::2]
-    phase_terms = sin_coeffs[:, None] * sin_phase + cos_coeffs[:, None] * cos_phase
-    dash_terms = sin_coeffs[:, None] * cos_phase - cos_coeffs[:, None] * sin_phase
-    mode_scale_sq = mode_scale * mode_scale
-    mode_scale_cu = mode_scale_sq * mode_scale
-    gamma = coeffs[0] + jnp.sum(phase_terms, axis=0)
-    gammadash = jnp.sum(mode_scale * dash_terms, axis=0)
-    gammadashdash = -jnp.sum(mode_scale_sq * phase_terms, axis=0)
-    gammadashdashdash = -jnp.sum(mode_scale_cu * dash_terms, axis=0)
-    return gamma, gammadash, gammadashdash, gammadashdashdash
+    dofs = _as_jax_float64(dofs)
+    coeffs = jnp.reshape(dofs, (3, dofs.shape[0] // 3))
+    basis, _, _, _ = _fourier_basis_terms(quadpoints, order)
+    gamma = coeffs @ basis
+    return jnp.moveaxis(gamma, 0, -1)
 
 
 def jaxfouriercurve_geometry_pure(dofs, quadpoints, order):
     """Return XYZ Fourier geometry and its first three quadpoint derivatives."""
-    quadpoints = jnp.asarray(quadpoints, dtype=jnp.float64)
-    k = jnp.shape(dofs)[0] // 3
-    coeffs = (dofs[:k], dofs[k : (2 * k)], dofs[(2 * k) :])
-    points = 2.0 * np.pi * quadpoints
-    mode_numbers = jnp.arange(1, order + 1, dtype=jnp.float64)
-    phase = mode_numbers[:, None] * points[None, :]
-    sin_phase = jnp.sin(phase)
-    cos_phase = jnp.cos(phase)
-    mode_scale = (2.0 * np.pi) * mode_numbers[:, None]
-
-    component_geometry = tuple(
-        _fourier_component_geometry_pure(
-            component_coeffs,
-            sin_phase,
-            cos_phase,
-            mode_scale,
-        )
-        for component_coeffs in coeffs
+    dofs = _as_jax_float64(dofs)
+    coeffs = jnp.reshape(dofs, (3, dofs.shape[0] // 3))
+    basis, dash_basis, dashdash_basis, dashdashdash_basis = _fourier_basis_terms(
+        quadpoints,
+        order,
     )
-
+    gamma = coeffs @ basis
+    gammadash = coeffs @ dash_basis
+    gammadashdash = coeffs @ dashdash_basis
+    gammadashdashdash = coeffs @ dashdashdash_basis
     return tuple(
-        jnp.stack(components, axis=-1) for components in zip(*component_geometry)
+        jnp.moveaxis(component, 0, -1)
+        for component in (gamma, gammadash, gammadashdash, gammadashdashdash)
     )
 
 

@@ -14,6 +14,7 @@ from functools import lru_cache
 import jax
 from jax import lax
 import jax.numpy as jnp
+import numpy as np
 
 from ..backend import (
     get_field_kernel_tuning,
@@ -59,28 +60,132 @@ def _read_tuning_config() -> tuple:
 
 
 def _slice_coil_chunk(array, start: int, chunk_size: int):
-    trailing_shape = tuple(array.shape[1:])
-    return lax.dynamic_slice(
-        array,
-        (start,) + (0,) * len(trailing_shape),
-        (chunk_size,) + trailing_shape,
-    )
+    indices = _as_int32_scalar(start) + _index_range(chunk_size)
+    return jnp.take(array, indices, axis=0)
 
 
 def _slice_quadrature_block(array, start: int, block_size: int):
-    return lax.dynamic_slice(
-        array,
-        (0, start, 0),
-        (array.shape[0], block_size, array.shape[2]),
-    )
+    indices = _as_int32_scalar(start) + _index_range(block_size)
+    return jnp.take(array, indices, axis=1)
 
 
 def _slice_point_chunk(points: object, start: int, chunk_size: int):
-    return lax.dynamic_slice(
-        points,
-        (start, 0),
-        (chunk_size, points.shape[1]),
+    indices = _as_int32_scalar(start) + _index_range(chunk_size)
+    return jnp.take(points, indices, axis=0)
+
+
+def _slice_prefix(array, size: int):
+    return jnp.take(array, _index_range(size), axis=0)
+
+
+def _zeros(shape, dtype=jnp.float64):
+    return jax.device_put(np.zeros(shape, dtype=np.dtype(dtype)))
+
+
+def _eye(size: int, dtype=jnp.float64):
+    return jax.device_put(np.eye(size, dtype=np.dtype(dtype)))
+
+
+def _float64_scalar(value):
+    return jax.device_put(np.asarray(value, dtype=np.float64))
+
+
+def _scalar_like(reference, value):
+    return jax.device_put(np.asarray(value, dtype=np.dtype(reference.dtype)))
+
+
+def _as_int32_scalar(value):
+    if isinstance(value, jax.Array):
+        return jnp.asarray(value, dtype=jnp.int32)
+    return jax.device_put(np.asarray(value, dtype=np.int32))
+
+
+def _index_range(size: int):
+    return jax.device_put(np.arange(size, dtype=np.int32))
+
+
+def _zero_scalar(dtype):
+    return jax.device_put(np.array(0, dtype=np.dtype(dtype)))
+
+
+_XYZ_COMPONENT_SELECTORS = tuple(
+    jax.device_put(np.eye(3, dtype=np.float64)[i]) for i in range(3)
+)
+
+
+def _vector_component(array, component_index: int):
+    return jnp.einsum(
+        "...i,i->...",
+        array,
+        _XYZ_COMPONENT_SELECTORS[component_index].astype(array.dtype),
     )
+
+
+def _cross_product(left, right):
+    left_x = _vector_component(left, 0)
+    left_y = _vector_component(left, 1)
+    left_z = _vector_component(left, 2)
+    right_x = _vector_component(right, 0)
+    right_y = _vector_component(right, 1)
+    right_z = _vector_component(right, 2)
+    return jnp.stack(
+        (
+            left_y * right_z - left_z * right_y,
+            left_z * right_x - left_x * right_z,
+            left_x * right_y - left_y * right_x,
+        ),
+        axis=-1,
+    )
+
+
+def _pad_axis0(array, padded_size: int):
+    pad_rows = padded_size - array.shape[0]
+    if pad_rows <= 0:
+        return array
+    padding_config = [(0, pad_rows, 0)] + [(0, 0, 0)] * (array.ndim - 1)
+    return lax.pad(array, _zero_scalar(array.dtype), padding_config)
+
+
+def _pad_axis1(array, padded_size: int):
+    pad_cols = padded_size - array.shape[1]
+    if pad_cols <= 0:
+        return array
+    padding_config = [(0, 0, 0), (0, pad_cols, 0)] + [(0, 0, 0)] * (array.ndim - 2)
+    return lax.pad(array, _zero_scalar(array.dtype), padding_config)
+
+
+def _explicit_rsqrt_impl(x):
+    return jnp.reciprocal(jnp.sqrt(x))
+
+
+def _explicit_inv_impl(x):
+    return jnp.divide(_scalar_like(x, 1.0), x)
+
+
+@jax.custom_jvp
+def _explicit_inv(x):
+    return _explicit_inv_impl(x)
+
+
+@_explicit_inv.defjvp
+def _explicit_inv_jvp(primals, tangents):
+    (x,), (x_dot,) = primals, tangents
+    primal_out = _explicit_inv_impl(x)
+    tangent_out = jnp.negative(x_dot * primal_out * primal_out)
+    return primal_out, tangent_out
+
+
+@jax.custom_jvp
+def _explicit_rsqrt(x):
+    return _explicit_rsqrt_impl(x)
+
+
+@_explicit_rsqrt.defjvp
+def _explicit_rsqrt_jvp(primals, tangents):
+    (x,), (x_dot,) = primals, tangents
+    primal_out = _explicit_rsqrt_impl(x)
+    tangent_out = x_dot * _scalar_like(x, -0.5) * primal_out * _explicit_inv_impl(x)
+    return primal_out, tangent_out
 
 
 # ── Tree utilities ────────────────────────────────────────────────────
@@ -91,7 +196,7 @@ def _tree_dynamic_update(prefix_tree, chunk_tree, start_index: int):
         lambda acc, update: lax.dynamic_update_slice(
             acc,
             update,
-            (start_index,) + (0,) * (acc.ndim - 1),
+            (_as_int32_scalar(start_index),) + (_as_int32_scalar(0),) * (acc.ndim - 1),
         ),
         prefix_tree,
         chunk_tree,
@@ -99,7 +204,7 @@ def _tree_dynamic_update(prefix_tree, chunk_tree, start_index: int):
 
 
 def _tree_trim(prefix_tree, size: int):
-    return jax.tree_util.tree_map(lambda leaf: leaf[:size], prefix_tree)
+    return jax.tree_util.tree_map(lambda leaf: _slice_prefix(leaf, size), prefix_tree)
 
 
 def _tree_concatenate(left, right):
@@ -110,7 +215,7 @@ def _tree_concatenate(left, right):
 
 def _tree_zeros_like_prefix(reference_tree, prefix_size: int):
     return jax.tree_util.tree_map(
-        lambda leaf: jnp.zeros(
+        lambda leaf: _zeros(
             (prefix_size,) + tuple(leaf.shape[1:]),
             dtype=leaf.dtype,
         ),
@@ -149,25 +254,25 @@ def _coil_chunk_reduce(
 
     chunk_count = (coil_count + chunk_size - 1) // chunk_size
     if chunk_count == 2:
+        second_chunk_size = coil_count - chunk_size
         return _two_chunk_sum(
             (
-                gammas[:chunk_size],
-                gammadashs[:chunk_size],
-                currents[:chunk_size],
+                _slice_coil_chunk(gammas, 0, chunk_size),
+                _slice_coil_chunk(gammadashs, 0, chunk_size),
+                lax.dynamic_slice(currents, (0,), (chunk_size,)),
             ),
             (
-                gammas[chunk_size:],
-                gammadashs[chunk_size:],
-                currents[chunk_size:],
+                _slice_coil_chunk(gammas, chunk_size, second_chunk_size),
+                _slice_coil_chunk(gammadashs, chunk_size, second_chunk_size),
+                lax.dynamic_slice(currents, (chunk_size,), (second_chunk_size,)),
             ),
             reduce_chunk,
         )
 
     padded_coil_count = chunk_count * chunk_size
-    pad_width = ((0, padded_coil_count - coil_count), (0, 0), (0, 0))
-    padded_gammas = jnp.pad(gammas, pad_width)
-    padded_gammadashs = jnp.pad(gammadashs, pad_width)
-    padded_currents = jnp.pad(currents, ((0, padded_coil_count - coil_count),))
+    padded_gammas = _pad_axis0(gammas, padded_coil_count)
+    padded_gammadashs = _pad_axis0(gammadashs, padded_coil_count)
+    padded_currents = _pad_axis0(currents, padded_coil_count)
 
     def body(chunk_index: int, acc):
         start = chunk_index * chunk_size
@@ -193,19 +298,28 @@ def _quadrature_block_integral(
 ):
     quadrature_count = gammas.shape[1]
     if block_size <= 0 or quadrature_count <= block_size:
-        return jnp.mean(integrand(x, gammas, gammadashs), axis=1)
+        values = integrand(x, gammas, gammadashs)
+        return jnp.sum(values, axis=1) * _scalar_like(
+            values,
+            1.0 / values.shape[1],
+        )
 
     block_count = (quadrature_count + block_size - 1) // block_size
     if block_count == 2:
+        second_block_size = quadrature_count - block_size
         return (
             _two_chunk_sum(
                 (
-                    gammas[:, :block_size, :],
-                    gammadashs[:, :block_size, :],
+                    _slice_quadrature_block(gammas, 0, block_size),
+                    _slice_quadrature_block(gammadashs, 0, block_size),
                 ),
                 (
-                    gammas[:, block_size:, :],
-                    gammadashs[:, block_size:, :],
+                    _slice_quadrature_block(gammas, block_size, second_block_size),
+                    _slice_quadrature_block(
+                        gammadashs,
+                        block_size,
+                        second_block_size,
+                    ),
                 ),
                 lambda gg, ggd: jnp.sum(integrand(x, gg, ggd), axis=1),
             )
@@ -213,10 +327,9 @@ def _quadrature_block_integral(
         )
 
     padded_quadrature_count = block_count * block_size
-    pad_width = ((0, 0), (0, padded_quadrature_count - quadrature_count), (0, 0))
-    padded_gammas = jnp.pad(gammas, pad_width)
-    padded_gammadashs = jnp.pad(gammadashs, pad_width)
-    zero = jnp.zeros((gammas.shape[0], 3), dtype=jnp.float64)
+    padded_gammas = _pad_axis1(gammas, padded_quadrature_count)
+    padded_gammadashs = _pad_axis1(gammadashs, padded_quadrature_count)
+    zero = _zeros((gammas.shape[0], 3), dtype=jnp.float64)
 
     def body(block_index: int, acc):
         start = block_index * block_size
@@ -245,33 +358,26 @@ def _point_chunk_reduce(points, chunk_kernel, chunk_size):
         return chunk_kernel(points)
 
     chunk_count = (point_count + chunk_size - 1) // chunk_size
-    if chunk_count == 2:
-        return _tree_concatenate(
-            chunk_kernel(points[:chunk_size]),
-            chunk_kernel(points[chunk_size:]),
-        )
-
-    padded_point_count = chunk_count * chunk_size
-    padded_points = jnp.pad(
-        points,
-        ((0, padded_point_count - point_count), (0, 0)),
-    )
-    first_chunk_points = _slice_point_chunk(padded_points, 0, chunk_size)
+    first_chunk_points = _slice_point_chunk(points, 0, chunk_size)
     first_result = chunk_kernel(first_chunk_points)
     padded_result = _tree_dynamic_update(
-        _tree_zeros_like_prefix(first_result, padded_point_count),
+        _tree_zeros_like_prefix(first_result, point_count),
         first_result,
         0,
     )
 
     def body(chunk_index: int, acc):
         start = chunk_index * chunk_size
-        chunk_points = _slice_point_chunk(padded_points, start, chunk_size)
+        safe_start = jnp.minimum(
+            _as_int32_scalar(start),
+            _as_int32_scalar(point_count - chunk_size),
+        )
+        chunk_points = _slice_point_chunk(points, safe_start, chunk_size)
         chunk_result = chunk_kernel(chunk_points)
-        return _tree_dynamic_update(acc, chunk_result, start)
+        return _tree_dynamic_update(acc, chunk_result, safe_start)
 
     padded_result = lax.fori_loop(1, chunk_count, body, padded_result)
-    return _tree_trim(padded_result, point_count)
+    return padded_result
 
 
 # ── Physics integrands ────────────────────────────────────────────────
@@ -280,17 +386,20 @@ def _point_chunk_reduce(points, chunk_kernel, chunk_size):
 def _biot_savart_B_integrand(x, gammas, gammadashs):
     diff = gammas - x
     r2 = jnp.sum(diff * diff, axis=-1)
-    safe_r2 = jnp.where(r2 > 0, r2, 1.0)
-    r_inv3 = jnp.where(r2 > 0, safe_r2 ** (-1.5), 0.0)
-    cross = jnp.cross(diff, gammadashs)
+    # Exact point-on-coil evaluation is outside the physical domain; use a tiny
+    # branchless floor so traced audit lanes do not rely on select/where.
+    safe_r2 = r2 + _float64_scalar(np.finfo(np.float64).tiny)
+    r_inv = _explicit_rsqrt(safe_r2)
+    r_inv3 = r_inv * _explicit_inv(safe_r2)
+    cross = _cross_product(diff, gammadashs)
     return cross * r_inv3[..., None]
 
 
 def _biot_savart_A_integrand(x, gammas, gammadashs):
     diff = gammas - x
     r2 = jnp.sum(diff * diff, axis=-1)
-    safe_r2 = jnp.where(r2 > 0, r2, 1.0)
-    r_inv = jnp.where(r2 > 0, safe_r2 ** (-0.5), 0.0)
+    safe_r2 = r2 + _float64_scalar(np.finfo(np.float64).tiny)
+    r_inv = _explicit_rsqrt(safe_r2)
     return gammadashs * r_inv[..., None]
 
 
@@ -325,7 +434,7 @@ def _one_point_dense(
         block_size=quadrature_block_size,
         integrand=integrand,
     )
-    return _MU0_OVER_4PI * jnp.einsum("c,cj->j", currents, integral)
+    return _float64_scalar(_MU0_OVER_4PI) * jnp.einsum("c,cj->j", currents, integral)
 
 
 # ── Kernel factory ────────────────────────────────────────────────────
@@ -355,7 +464,7 @@ def _make_kernel(integrand_key, diff_mode, coil_cs, quad_bs, point_cs):
             gammadashs,
             currents,
             chunk_size=coil_cs,
-            zero=jnp.zeros((3,), dtype=jnp.float64),
+            zero=_zeros((3,), dtype=jnp.float64),
             reduce_chunk=lambda cg, cgd, cc: _one_point_dense(
                 x,
                 cg,
@@ -398,7 +507,7 @@ def _make_kernel(integrand_key, diff_mode, coil_cs, quad_bs, point_cs):
         def per_point(x, gammas, gammadashs, currents):
             f = lambda xx: one_point(xx, gammas, gammadashs, currents)
             primals, tangents_fn = jax.linearize(f, x)
-            return primals, jax.vmap(tangents_fn)(jnp.eye(3))
+            return primals, jax.vmap(tangents_fn)(_eye(3, dtype=jnp.float64))
 
     else:
         raise ValueError(f"Unknown diff_mode: {diff_mode!r}")

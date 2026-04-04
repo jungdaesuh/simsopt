@@ -33,6 +33,7 @@ The scalar objective is
 where ``N = 3 · nphi · ntheta`` (matching the C++ normalization).
 """
 
+import numpy as np
 import jax
 import jax.numpy as jnp
 
@@ -55,10 +56,78 @@ __all__ = [
 ]
 
 
+def _as_jax_float64(value):
+    if isinstance(value, jax.Array):
+        return jnp.asarray(value, dtype=jnp.float64)
+    return jax.device_put(np.asarray(value, dtype=np.float64))
+
+
+def _concat_jax_float64(*parts):
+    return jnp.concatenate(tuple(_as_jax_float64(part) for part in parts))
+
+
+def _scalar_like(reference, value):
+    return jax.device_put(np.asarray(value, dtype=np.dtype(reference.dtype)))
+
+
+def _scalar_at_axis0(array, index: int):
+    selector = np.zeros(array.shape[0], dtype=np.float64)
+    selector[index] = 1.0
+    return jnp.dot(array, jax.device_put(selector))
+
+
+def _split_decision_vector(x, *, optimize_G):
+    x_jax = _as_jax_float64(x)
+    total_size = int(x_jax.shape[0])
+    tail_size = 2 if optimize_G else 1
+    surface_size = total_size - tail_size
+    prefix_selector = np.eye(surface_size, total_size, dtype=np.float64)
+    sdofs = jax.device_put(prefix_selector) @ x_jax
+    iota = _scalar_at_axis0(x_jax, surface_size)
+    if optimize_G:
+        G = _scalar_at_axis0(x_jax, surface_size + 1)
+        return sdofs, iota, G
+    return sdofs, iota, None
+
+
+def _explicit_inv_impl(x):
+    return jnp.divide(_scalar_like(x, 1.0), x)
+
+
+@jax.custom_jvp
+def _explicit_inv(x):
+    return _explicit_inv_impl(x)
+
+
+@_explicit_inv.defjvp
+def _explicit_inv_jvp(primals, tangents):
+    (x,), (x_dot,) = primals, tangents
+    primal_out = _explicit_inv_impl(x)
+    tangent_out = jnp.negative(x_dot * primal_out * primal_out)
+    return primal_out, tangent_out
+
+
+def _explicit_rsqrt_impl(x):
+    return jnp.divide(_scalar_like(x, 1.0), jnp.sqrt(x))
+
+
+@jax.custom_jvp
+def _explicit_rsqrt(x):
+    return _explicit_rsqrt_impl(x)
+
+
+@_explicit_rsqrt.defjvp
+def _explicit_rsqrt_jvp(primals, tangents):
+    (x,), (x_dot,) = primals, tangents
+    primal_out = _explicit_rsqrt_impl(x)
+    tangent_out = x_dot * _scalar_like(x, -0.5) * primal_out * _explicit_inv_impl(x)
+    return primal_out, tangent_out
+
+
 def _safe_inverse_modB(B2):
     """Return ``1 / |B|`` with a zero-field guard suitable for traced code."""
-    safe_B2 = jnp.where(B2 > 0.0, B2, 1.0)
-    return jnp.where(B2 > 0.0, 1.0 / jnp.sqrt(safe_B2), 0.0)
+    safe_B2 = B2 + _as_jax_float64(np.finfo(np.float64).tiny)
+    return B2 * _explicit_rsqrt(safe_B2) * _explicit_inv(safe_B2)
 
 
 def boozer_residual_scalar(G, iota, B, xphi, xtheta, weight_inv_modB=True):
@@ -75,8 +144,10 @@ def boozer_residual_scalar(G, iota, B, xphi, xtheta, weight_inv_modB=True):
     Returns:
         J: scalar objective value.
     """
+    G = _as_jax_float64(G)
+    iota = _as_jax_float64(iota)
     nphi, ntheta, _ = B.shape
-    num_res = 3 * nphi * ntheta
+    num_res = _as_jax_float64(3 * nphi * ntheta)
 
     tang = xphi + iota * xtheta  # (nphi, ntheta, 3)
     B2 = jnp.sum(B * B, axis=-1)  # (nphi, ntheta)
@@ -88,7 +159,7 @@ def boozer_residual_scalar(G, iota, B, xphi, xtheta, weight_inv_modB=True):
     else:
         rtil = residual
 
-    return 0.5 * jnp.sum(rtil * rtil) / num_res
+    return _as_jax_float64(0.5) * jnp.sum(rtil * rtil) / num_res
 
 
 # ---------------------------------------------------------------------------
@@ -100,12 +171,13 @@ def boozer_residual_scalar(G, iota, B, xphi, xtheta, weight_inv_modB=True):
 
 def _pack(surface_dofs, iota, G):
     """Pack (surface_dofs, iota, G) into a single vector for autodiff."""
-    return jnp.concatenate([surface_dofs, jnp.array([iota, G])])
+    return _concat_jax_float64(surface_dofs, [iota, G])
 
 
 def _unpack(x, nsurfdofs):
     """Unpack a single vector into (surface_dofs, iota, G)."""
-    return x[:nsurfdofs], x[nsurfdofs], x[nsurfdofs + 1]
+    del nsurfdofs
+    return _split_decision_vector(x, optimize_G=True)
 
 
 def _boozer_objective_from_packed(x, nsurfdofs, B, xphi, xtheta, weight_inv_modB):
@@ -127,7 +199,7 @@ def boozer_residual_grad(G, iota, B, xphi, xtheta, nsurfdofs, weight_inv_modB=Tr
     Returns:
         grad: (nsurfdofs + 2,) gradient vector.
     """
-    x0 = _pack(jnp.zeros(nsurfdofs), iota, G)
+    x0 = _pack(_as_jax_float64(np.zeros(nsurfdofs, dtype=np.float64)), iota, G)
     grad_fn = jax.grad(
         lambda x: _boozer_objective_from_packed(
             x, nsurfdofs, B, xphi, xtheta, weight_inv_modB
@@ -146,7 +218,7 @@ def boozer_residual_hessian(G, iota, B, xphi, xtheta, nsurfdofs, weight_inv_modB
     Returns:
         H: (nsurfdofs + 2, nsurfdofs + 2) Hessian matrix.
     """
-    x0 = _pack(jnp.zeros(nsurfdofs), iota, G)
+    x0 = _pack(_as_jax_float64(np.zeros(nsurfdofs, dtype=np.float64)), iota, G)
     hess_fn = jax.hessian(
         lambda x: _boozer_objective_from_packed(
             x, nsurfdofs, B, xphi, xtheta, weight_inv_modB
@@ -175,6 +247,8 @@ def boozer_residual_vector(G, iota, B, xphi, xtheta, weight_inv_modB=True):
     Returns:
         (nphi*ntheta*3,) flattened residual vector.
     """
+    G = _as_jax_float64(G)
+    iota = _as_jax_float64(iota)
     tang = xphi + iota * xtheta
     B2 = jnp.sum(B * B, axis=-1)
     residual = G * B - B2[..., None] * tang
@@ -289,11 +363,12 @@ def _unpack_decision_vector(x, coil_arrays, optimize_G):
     Args:
         coil_arrays: list of ``(gammas, gammadashs, currents)`` tuples.
     """
+    sdofs, iota, G = _split_decision_vector(x, optimize_G=optimize_G)
     if optimize_G:
-        return x[:-2], x[-2], x[-1]
-    mu0 = 4.0 * jnp.pi * 1e-7
+        return sdofs, iota, G
+    mu0 = _as_jax_float64(4.0e-7 * np.pi)
     all_currents = jnp.concatenate([c for _, _, c in coil_arrays])
-    return x[:-1], x[-1], mu0 * jnp.sum(jnp.abs(all_currents))
+    return sdofs, iota, mu0 * jnp.sum(jnp.abs(all_currents))
 
 
 def _composed_pipeline(

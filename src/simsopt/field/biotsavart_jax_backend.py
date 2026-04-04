@@ -214,21 +214,29 @@ def _curve_dof_mode(curve):
     return getattr(curve, "_jax_curve_dof_mode", "local")
 
 
+def _as_jax_float64(value) -> jax.Array:
+    if isinstance(value, jax.Array):
+        return jnp.asarray(value, dtype=jnp.float64)
+    if isinstance(value, (np.ndarray, np.generic, list, tuple)) or np.isscalar(value):
+        return jax.device_put(np.asarray(value, dtype=np.float64))
+    return jnp.asarray(value, dtype=jnp.float64)
+
+
 def _curve_live_dofs(curve):
     if _curve_dof_mode(curve) == "full":
-        return jnp.asarray(curve.full_x, dtype=jnp.float64)
-    return jnp.asarray(curve.get_dofs(), dtype=jnp.float64)
+        return _as_jax_float64(curve.full_x)
+    return _as_jax_float64(curve.get_dofs())
 
 
 def _curve_quadpoints_jax(curve):
-    return jnp.asarray(curve.quadpoints, dtype=jnp.float64)
+    return _as_jax_float64(curve.quadpoints)
 
 
 def _curve_surface_dofs(curve):
     surf = getattr(curve, "surf", None)
     if surf is None or surf.dof_size == 0:
         return None
-    return jnp.asarray(surf.get_dofs(), dtype=jnp.float64)
+    return _as_jax_float64(surf.get_dofs())
 
 
 def _supports_jax_curve_pullback(curve):
@@ -272,7 +280,7 @@ def _merge_derivative_data(target, derivative_like):
 
 
 def _full_curve_cotangent_to_derivative(curve, full_cotangent):
-    full_cotangent = jnp.asarray(full_cotangent, dtype=jnp.float64)
+    full_cotangent = _as_jax_float64(full_cotangent)
     deriv_data = {}
     for opt, (start, end) in curve._full_dof_indices.items():
         if opt.local_full_dof_size == 0:
@@ -281,25 +289,20 @@ def _full_curve_cotangent_to_derivative(curve, full_cotangent):
     return deriv_data
 
 
-def _explicit_int_index(value) -> jax.Array:
-    return jax.device_put(np.asarray(int(value), dtype=np.int32))
-
-
 def _slice_1d(array: jax.Array, start: int, end: int) -> jax.Array:
-    return jax.lax.dynamic_slice_in_dim(
-        array,
-        _explicit_int_index(start),
-        slice_size=int(end - start),
-        axis=0,
-    )
+    positions = np.arange(int(start), int(end), dtype=np.int64)
+    selector = np.zeros((positions.size, array.shape[0]), dtype=np.float64)
+    selector[np.arange(positions.size), positions] = 1.0
+    return _as_jax_float64(selector) @ array
 
 
 def _update_1d(array: jax.Array, start: int, values: jax.Array) -> jax.Array:
-    return jax.lax.dynamic_update_slice(
-        array,
-        values,
-        (_explicit_int_index(start),),
-    )
+    positions = np.arange(int(start), int(start) + values.shape[0], dtype=np.int64)
+    insert = np.zeros((array.shape[0], positions.size), dtype=np.float64)
+    insert[positions, np.arange(positions.size)] = 1.0
+    keep_mask = np.ones(array.shape[0], dtype=np.float64)
+    keep_mask[positions] = 0.0
+    return array * _as_jax_float64(keep_mask) + _as_jax_float64(insert) @ values
 
 
 def _ones_like_float64(array: jax.Array) -> jax.Array:
@@ -307,6 +310,15 @@ def _ones_like_float64(array: jax.Array) -> jax.Array:
         jax.device_put(np.array(1.0, dtype=np.float64)),
         array.shape,
     )
+
+
+def _scatter_free_values(template: jax.Array, free_positions, free_values: jax.Array):
+    free_positions = np.asarray(free_positions, dtype=np.int64)
+    insert = np.zeros((template.shape[0], free_positions.size), dtype=np.float64)
+    insert[free_positions, np.arange(free_positions.size)] = 1.0
+    keep_mask = np.ones(template.shape[0], dtype=np.float64)
+    keep_mask[free_positions] = 0.0
+    return template * _as_jax_float64(keep_mask) + _as_jax_float64(insert) @ free_values
 
 
 def _curve_pullback_data_from_spec(curve, dg, dgd):
@@ -408,7 +420,7 @@ def _project_single_coil_cotangent_data(coil, dg, dgd, dc):
     supports_cpu_pullback = _supports_cpu_curve_pullback(curve)
 
     if rotmat is not None and (supports_jax_pullback or supports_cpu_pullback):
-        rotmat_t = jnp.asarray(rotmat, dtype=jnp.float64).T
+        rotmat_t = _as_jax_float64(rotmat).T
         dg = dg @ rotmat_t
         dgd = dgd @ rotmat_t
 
@@ -417,8 +429,7 @@ def _project_single_coil_cotangent_data(coil, dg, dgd, dc):
         _merge_curve_pullback_data(deriv_data, curve, dg, dgd)
         if current.dof_size > 0:
             current_cotangent = jnp.atleast_1d(
-                jnp.asarray(scale, dtype=jnp.float64)
-                * jnp.asarray(dc, dtype=jnp.float64)
+                _as_jax_float64(scale) * _as_jax_float64(dc)
             )
             _merge_derivative_data(deriv_data, current.vjp(current_cotangent))
         return deriv_data
@@ -471,7 +482,7 @@ def _unwrap_coil_curve_and_current(coil):
     )
     return (
         curve,
-        (None if rotmat is None else jnp.asarray(rotmat, dtype=jnp.float64)),
+        (None if rotmat is None else _as_jax_float64(rotmat)),
         current,
         scale,
     )
@@ -560,7 +571,7 @@ class BiotSavartJAX(Optimizable):
                 (
                     base_curve_ids[cid],
                     base_current_ids[kid],
-                    jnp.asarray(rotmat) if rotmat is not None else None,
+                    _as_jax_float64(rotmat) if rotmat is not None else None,
                     scale,
                 )
             )
@@ -623,7 +634,7 @@ class BiotSavartJAX(Optimizable):
             coil_gammas.append(gamma)
             coil_gammadashs.append(gammadash)
             coil_currents.append(
-                jnp.asarray(scale, dtype=jnp.float64)
+                _as_jax_float64(scale)
                 * self._scalar_current_value_from_dofs(
                     current,
                     coil_dofs,
@@ -641,32 +652,29 @@ class BiotSavartJAX(Optimizable):
         block from its own free-DOF slice so mixed free-current / free-curve
         graphs decode correctly.
         """
-        full_x = jnp.asarray(opt.local_full_x, dtype=jnp.float64)
+        full_x = _as_jax_float64(opt.local_full_x)
         if opt.local_dof_size == 0:
             return full_x
 
         start, end = self.dof_indices[opt]
-        free_indices = jax.device_put(
-            np.asarray(np.flatnonzero(opt.local_dofs_free_status), dtype=np.int32)
-        )
+        free_positions = np.flatnonzero(opt.local_dofs_free_status)
         coil_slice = _slice_1d(coil_dofs, start, end)
-        return full_x.at[free_indices].set(coil_slice)
+        return _scatter_free_values(full_x, free_positions, coil_slice)
 
     def _full_dofs_from_free_vector(self, opt, coil_dofs):
         """Rebuild one Optimizable graph's full DOF vector from ``coil_dofs``."""
-        full_x = jnp.asarray(opt.full_x, dtype=jnp.float64)
+        full_x = _as_jax_float64(opt.full_x)
         for dep_opt, (start, end) in opt._full_dof_indices.items():
-            dep_full_x = jnp.asarray(dep_opt.local_full_x, dtype=jnp.float64)
+            dep_full_x = _as_jax_float64(dep_opt.local_full_x)
             if dep_opt.local_dof_size > 0:
                 dep_start, dep_end = self.dof_indices[dep_opt]
-                free_indices = jax.device_put(
-                    np.asarray(
-                        np.flatnonzero(dep_opt.local_dofs_free_status),
-                        dtype=np.int32,
-                    )
-                )
+                free_positions = np.flatnonzero(dep_opt.local_dofs_free_status)
                 dep_slice = _slice_1d(coil_dofs, dep_start, dep_end)
-                dep_full_x = dep_full_x.at[free_indices].set(dep_slice)
+                dep_full_x = _scatter_free_values(
+                    dep_full_x,
+                    free_positions,
+                    dep_slice,
+                )
             full_x = _update_1d(full_x, start, dep_full_x)
         return full_x
 
@@ -676,7 +684,7 @@ class BiotSavartJAX(Optimizable):
         return self._local_full_dofs_from_free_vector(curve, coil_dofs)
 
     def _normalize_explicit_coil_dofs(self, coil_dofs):
-        coil_dofs = jnp.asarray(coil_dofs, dtype=jnp.float64)
+        coil_dofs = _as_jax_float64(coil_dofs)
         expected_dofs = self.dof_size
         if coil_dofs.shape[0] != expected_dofs:
             raise ValueError(
@@ -804,9 +812,7 @@ class BiotSavartJAX(Optimizable):
                 gammadash = gammadash @ rotmat
             coil_gammas.append(gamma)
             coil_gammadashs.append(gammadash)
-            coil_currents.append(
-                jnp.asarray(scale, dtype=jnp.float64) * current_values[current_idx]
-            )
+            coil_currents.append(_as_jax_float64(scale) * current_values[current_idx])
 
         return coil_gammas, coil_gammadashs, coil_currents
 
@@ -835,7 +841,7 @@ class BiotSavartJAX(Optimizable):
         points_array = (
             points if isinstance(points, jax.Array) else np.ascontiguousarray(points)
         )
-        self._points_jax = jnp.asarray(points_array, dtype=jnp.float64)
+        self._points_jax = _as_jax_float64(points_array)
         self._points_version += 1
 
     def set_points_from_spec(self, field_eval_spec):
@@ -843,7 +849,7 @@ class BiotSavartJAX(Optimizable):
 
         This still mutates the receiving ``BiotSavartJAX`` instance.
         """
-        self._points_jax = jnp.asarray(field_eval_spec.points, dtype=jnp.float64)
+        self._points_jax = _as_jax_float64(field_eval_spec.points)
         self._points_version += 1
 
     def field_eval_spec(self):
@@ -874,8 +880,8 @@ class BiotSavartJAX(Optimizable):
             )
             geometry_s, (base_gamma, base_gammadash) = _time_call_result(
                 lambda: (
-                    jnp.asarray(curve.gamma(), dtype=jnp.float64),
-                    jnp.asarray(curve.gammadash(), dtype=jnp.float64),
+                    _as_jax_float64(curve.gamma()),
+                    _as_jax_float64(curve.gammadash()),
                 )
             )
 
@@ -887,7 +893,7 @@ class BiotSavartJAX(Optimizable):
         curve, rotmat, current, scale = _unwrap_coil_curve_and_current(coil)
         gamma, gammadash = self._base_curve_geometry(curve, geometry_cache)
         gamma, gammadash = _rotate_curve_geometry(gamma, gammadash, rotmat)
-        current_value = jnp.asarray(current.get_value() * scale, dtype=jnp.float64)
+        current_value = _as_jax_float64(current.get_value() * scale)
         return curve, rotmat, current, scale, gamma, gammadash, current_value
 
     def _coil_has_free_dofs(self, coil):
@@ -993,9 +999,7 @@ class BiotSavartJAX(Optimizable):
     def coil_set_spec(self):
         """Build the immutable grouped coil spec from the live coil graph."""
         try:
-            return self._coil_set_spec_from_dofs_prefer_specs(
-                jnp.asarray(self.x, dtype=jnp.float64)
-            )
+            return self._coil_set_spec_from_dofs_prefer_specs(_as_jax_float64(self.x))
         except NotImplementedError:
             _handle_grouped_spec_compat_fallback(
                 "coil_set_spec",
@@ -1061,7 +1065,7 @@ class BiotSavartJAX(Optimizable):
         )
         gamma, gammadash = _rotate_curve_geometry(base_gamma, base_gammadash, rotmat)
         current_s, current_value = _time_call_result(
-            lambda: jnp.asarray(current.get_value() * scale, dtype=jnp.float64)
+            lambda: _as_jax_float64(current.get_value() * scale)
         )
         timings = {
             "curve_geometry_s": geometry_s,
@@ -1091,7 +1095,7 @@ class BiotSavartJAX(Optimizable):
         """
         deriv_data = {}
         points = self._points_jax
-        v_jax = jnp.asarray(v)
+        v_jax = _as_jax_float64(v)
         geometry_cache = {}
         coil_infos = self._collect_free_coil_vjp_infos(geometry_cache)
         for group in self._group_coil_vjp_infos(coil_infos):
@@ -1141,7 +1145,7 @@ class BiotSavartJAX(Optimizable):
     def profile_B_vjp(self, v):
         """Return a timing breakdown for ``B_vjp`` at the current points."""
         points = self._points_jax
-        v_jax = jnp.asarray(v)
+        v_jax = _as_jax_float64(v)
         geometry_cache = {}
         component_totals = {
             "curve_geometry_s": 0.0,

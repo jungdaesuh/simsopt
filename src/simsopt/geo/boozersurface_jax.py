@@ -36,6 +36,7 @@ import numpy as np
 import jax
 import jax.numpy as jnp
 import jax.scipy.linalg
+from jax import lax
 
 from ..backend import raise_if_strict_jax_fallback, warn_if_jax_fallback
 from ..backend.runtime import register_backend_cache_clear
@@ -51,7 +52,11 @@ except (ImportError, ModuleNotFoundError):
             pass
 
 
-from .surface_fourier_jax import stellsym_scatter_indices
+from .surface_fourier_jax import (
+    stellsym_scatter_indices,
+    _dofs_to_xyzc_any,
+    _scatter_surface_xyzfourier_dofs,
+)
 from ..jax_core.field import (
     grouped_biot_savart_A_from_inputs,
     grouped_biot_savart_A_from_spec,
@@ -66,6 +71,7 @@ from ..jax_core.field import (
     grouped_field_data_from_spec,
     grouped_field_inputs_from_spec,
 )
+from ..jax_core.surface_rzfourier import surface_rz_fourier_spec_from_dofs
 from .boozer_residual_jax import (
     boozer_residual_scalar,
     boozer_residual_vector,
@@ -96,6 +102,132 @@ _GROUPED_EXTRACTOR_FALLBACK_DETAIL = (
 )
 _COILS_LIST_FALLBACK_DETAIL = "_coils list extraction in _refresh_coil_data()"
 _WARNED_HIDDEN_GROUPED_FALLBACK_DETAILS: set[str] = set()
+
+
+def _as_jax_float64(value):
+    if isinstance(value, jax.Array):
+        return jnp.asarray(value, dtype=jnp.float64)
+    if isinstance(value, (np.ndarray, np.generic, list, tuple)) or np.isscalar(value):
+        return jax.device_put(np.asarray(value, dtype=np.float64))
+    return jnp.asarray(value, dtype=jnp.float64)
+
+
+def _as_jax_int32(value):
+    if isinstance(value, jax.Array):
+        return jnp.asarray(value, dtype=jnp.int32)
+    return jax.device_put(np.asarray(value, dtype=np.int32))
+
+
+def _concat_jax_float64(*parts):
+    return jnp.concatenate(tuple(_as_jax_float64(part) for part in parts))
+
+
+def _scalar_at_axis0(array, index: int):
+    selector = np.zeros(array.shape[0], dtype=np.float64)
+    selector[index] = 1.0
+    return jnp.dot(array, jax.device_put(selector))
+
+
+def _split_decision_vector_jax(x, *, optimize_G):
+    x_jax = _as_jax_float64(x)
+    total_size = int(x_jax.shape[0])
+    tail_size = 2 if optimize_G else 1
+    surface_size = total_size - tail_size
+    prefix_selector = np.eye(surface_size, total_size, dtype=np.float64)
+    sdofs = jax.device_put(prefix_selector) @ x_jax
+    iota = _scalar_at_axis0(x_jax, surface_size)
+    if optimize_G:
+        G = _scalar_at_axis0(x_jax, surface_size + 1)
+        return sdofs, iota, G
+    return sdofs, iota, None
+
+
+def _decision_vector_split_selectors(surface_size: int, optimize_G: bool):
+    total_size = surface_size + (2 if optimize_G else 1)
+    prefix_selector = jax.device_put(np.eye(surface_size, total_size, dtype=np.float64))
+
+    iota_selector = np.zeros(total_size, dtype=np.float64)
+    iota_selector[surface_size] = 1.0
+    iota_selector_jax = jax.device_put(iota_selector)
+
+    G_selector_jax = None
+    if optimize_G:
+        G_selector = np.zeros(total_size, dtype=np.float64)
+        G_selector[surface_size + 1] = 1.0
+        G_selector_jax = jax.device_put(G_selector)
+
+    return prefix_selector, iota_selector_jax, G_selector_jax
+
+
+def _generic_surface_scatter_operator(mpol: int, ntor: int):
+    positions = np.asarray(stellsym_scatter_indices(mpol, ntor), dtype=np.int32)
+    n_per_coord = int((2 * mpol + 1) * (2 * ntor + 1))
+    operator = np.zeros((3 * n_per_coord, positions.size), dtype=np.float64)
+    operator[positions, np.arange(positions.size)] = 1.0
+    return _as_jax_float64(operator)
+
+
+def _surface_axis_z_from_dofs(
+    sdofs,
+    *,
+    quadpoints_phi,
+    quadpoints_theta,
+    mpol,
+    ntor,
+    nfp,
+    stellsym,
+    scatter_indices,
+    surface_kind,
+):
+    sdofs_jax = _as_jax_float64(sdofs)
+    if surface_kind == "rzfourier":
+        surface_spec = surface_rz_fourier_spec_from_dofs(
+            sdofs_jax,
+            quadpoints_phi=quadpoints_phi,
+            quadpoints_theta=quadpoints_theta,
+            mpol=mpol,
+            ntor=ntor,
+            nfp=nfp,
+            stellsym=stellsym,
+        )
+        return jnp.sum(surface_spec.zc)
+    if surface_kind == "xyzfourier":
+        _xc, _xs, _yc, _ys, zc, _zs = _scatter_surface_xyzfourier_dofs(
+            sdofs_jax,
+            mpol,
+            ntor,
+            stellsym,
+        )
+        return jnp.sum(zc)
+    if (
+        isinstance(scatter_indices, jax.Array) and scatter_indices.ndim == 2
+    ) or np.ndim(scatter_indices) == 2:
+        n_per_coord = int((2 * mpol + 1) * (2 * ntor + 1))
+        selector = np.zeros(3 * n_per_coord, dtype=np.float64)
+        width = 2 * ntor + 1
+        for m_idx in range(mpol + 1):
+            for n_idx in range(ntor + 1):
+                selector[2 * n_per_coord + m_idx * width + n_idx] = 1.0
+        flat = _as_jax_float64(scatter_indices) @ sdofs_jax
+        return jnp.dot(flat, _as_jax_float64(selector))
+    _xc, _yc, zc = _dofs_to_xyzc_any(
+        sdofs_jax,
+        mpol,
+        ntor,
+        stellsym,
+        scatter_indices,
+    )
+    z_mask = np.zeros(zc.shape, dtype=np.float64)
+    z_mask[: mpol + 1, : ntor + 1] = 1.0
+    return jnp.sum(zc * _as_jax_float64(z_mask))
+
+
+def _cross_product(left, right):
+    return jnp.cross(left, right, axis=-1)
+
+
+def _select_axis0(array, index: int):
+    return jnp.sum(lax.slice_in_dim(array, index, index + 1, axis=0), axis=0)
 
 
 def _clear_hidden_grouped_fallback_warning_cache() -> None:
@@ -251,7 +383,7 @@ def _compute_label(
 
     Shared by penalty objective, exact residual, and residual vector.
     """
-    normal = jnp.cross(xphi, xtheta)
+    normal = _cross_product(xphi, xtheta)
     if label_type == "volume":
         return volume_jax(gamma, normal)
     if label_type == "area":
@@ -263,7 +395,11 @@ def _compute_label(
         coil_set_spec=coil_set_spec,
     )
     A = A.reshape(gamma.shape)
-    return toroidal_flux_jax(A[phi_idx], xtheta[phi_idx], ntheta)
+    return toroidal_flux_jax(
+        _select_axis0(A, phi_idx),
+        _select_axis0(xtheta, phi_idx),
+        ntheta,
+    )
 
 
 def _boozer_penalty_objective(
@@ -271,6 +407,9 @@ def _boozer_penalty_objective(
     *,
     coil_arrays=None,
     coil_set_spec=None,
+    sdofs_selector,
+    iota_selector,
+    G_selector,
     quadpoints_phi,
     quadpoints_theta,
     mpol,
@@ -296,10 +435,11 @@ def _boozer_penalty_objective(
     The decision vector is ``x = [surface_dofs, iota]`` (optimize_G=False)
     or ``x = [surface_dofs, iota, G]`` (optimize_G=True).
     """
-    if optimize_G:
-        sdofs, iota, G = x[:-2], x[-2], x[-1]
-    else:
-        sdofs, iota = x[:-1], x[-1]
+    x_jax = _as_jax_float64(x)
+    sdofs = sdofs_selector @ x_jax
+    iota = jnp.dot(x_jax, iota_selector)
+    G = jnp.dot(x_jax, G_selector) if optimize_G else None
+    if not optimize_G:
         G = compute_G_from_currents(
             _grouped_coil_currents(coil_arrays=coil_arrays, coil_set_spec=coil_set_spec)
         )
@@ -337,9 +477,24 @@ def _boozer_penalty_objective(
         coil_arrays=coil_arrays,
         coil_set_spec=coil_set_spec,
     )
+    gamma_axis_z = _surface_axis_z_from_dofs(
+        sdofs,
+        quadpoints_phi=quadpoints_phi,
+        quadpoints_theta=quadpoints_theta,
+        mpol=mpol,
+        ntor=ntor,
+        nfp=nfp,
+        stellsym=stellsym,
+        scatter_indices=scatter_indices,
+        surface_kind=surface_kind,
+    )
 
-    J_label = 0.5 * constraint_weight * (label_val - targetlabel) ** 2
-    J_z = 0.5 * constraint_weight * gamma[0, 0, 2] ** 2
+    half = _as_jax_float64(0.5)
+    constraint_weight_jax = _as_jax_float64(constraint_weight)
+    targetlabel_jax = _as_jax_float64(targetlabel)
+    label_delta = label_val - targetlabel_jax
+    J_label = half * constraint_weight_jax * label_delta * label_delta
+    J_z = half * constraint_weight_jax * gamma_axis_z * gamma_axis_z
 
     return J_boozer + J_label + J_z
 
@@ -432,7 +587,7 @@ def _boozer_exact_residual_impl(
     Returns: (n_eq,) residual vector where ``r(x) = 0`` at the solution.
     The decision vector is always ``x = [surface_dofs, iota, G]``.
     """
-    sdofs, iota, G = x[:-2], x[-2], x[-1]
+    sdofs, iota, G = _split_decision_vector_jax(x, optimize_G=True)
 
     gamma, xphi, xtheta = _surface_geometry_from_dofs(
         sdofs,
@@ -468,13 +623,24 @@ def _boozer_exact_residual_impl(
         coil_arrays=coil_arrays,
         coil_set_spec=coil_set_spec,
     )
-    r_label = label_val - targetlabel
+    r_label = label_val - _as_jax_float64(targetlabel)
 
+    gamma_axis_z = _surface_axis_z_from_dofs(
+        sdofs,
+        quadpoints_phi=quadpoints_phi,
+        quadpoints_theta=quadpoints_theta,
+        mpol=mpol,
+        ntor=ntor,
+        nfp=nfp,
+        stellsym=stellsym,
+        scatter_indices=scatter_indices,
+        surface_kind=surface_kind,
+    )
     if include_axis_constraint:
-        residual_tail = jnp.array([r_label, gamma[0, 0, 2]])
+        residual_tail = _as_jax_float64([r_label, gamma_axis_z])
     else:
-        residual_tail = jnp.array([r_label])
-    return jnp.concatenate([r_masked, residual_tail])
+        residual_tail = _as_jax_float64([r_label])
+    return _concat_jax_float64(r_masked, residual_tail)
 
 
 def _boozer_exact_residual_stellsym(
@@ -578,7 +744,7 @@ def _boozer_exact_coil_vjp(lm, booz_surf, iota, G):
         the coil_arrays pytree structure.
     """
     sdofs = booz_surf._get_surface_dofs()
-    x = jnp.concatenate([sdofs, jnp.array([iota, G])])
+    x = _concat_jax_float64(sdofs, [iota, G])
     mask_indices = booz_surf._compute_stellsym_mask_indices()
 
     coil_arrays = booz_surf._coil_arrays
@@ -623,7 +789,7 @@ def _boozer_exact_coil_vjp_groups(lm, booz_surf, iota, G):
 def _build_exact_group_vjp_callback(booz_surf, iota, G):
     """Build stable exact-solve group runners for repeated streaming VJPs."""
     sdofs = booz_surf._get_surface_dofs()
-    x = jnp.concatenate([sdofs, jnp.array([iota, G])])
+    x = _concat_jax_float64(sdofs, [iota, G])
     mask_indices = booz_surf._compute_stellsym_mask_indices()
 
     coil_arrays = booz_surf._coil_arrays
@@ -804,9 +970,9 @@ def _ls_decision_vector(booz_surf, iota, G):
     optimize_G = G is not None
     sdofs = booz_surf._get_surface_dofs()
     if optimize_G:
-        x = jnp.concatenate([sdofs, jnp.array([iota, G])])
+        x = _concat_jax_float64(sdofs, [iota, G])
     else:
-        x = jnp.concatenate([sdofs, jnp.array([iota])])
+        x = _concat_jax_float64(sdofs, [iota])
     return x, optimize_G
 
 
@@ -1139,8 +1305,8 @@ class BoozerSurfaceJAX(Optimizable):
         self.ntor = s.ntor
         self.nfp = s.nfp
         self.stellsym = s.stellsym
-        self.quadpoints_phi = jnp.asarray(s.quadpoints_phi, dtype=jnp.float64)
-        self.quadpoints_theta = jnp.asarray(s.quadpoints_theta, dtype=jnp.float64)
+        self.quadpoints_phi = _as_jax_float64(s.quadpoints_phi)
+        self.quadpoints_theta = _as_jax_float64(s.quadpoints_theta)
         surface_type_name = type(s).__name__
         if surface_type_name == "SurfaceRZFourier":
             self._surface_geometry_kind = "rzfourier"
@@ -1151,9 +1317,15 @@ class BoozerSurfaceJAX(Optimizable):
 
         # Stellsym DOF scatter indices
         if self.stellsym:
-            self.scatter_indices = jnp.asarray(
-                stellsym_scatter_indices(self.mpol, self.ntor)
-            )
+            if self._surface_geometry_kind == "generic":
+                self.scatter_indices = _generic_surface_scatter_operator(
+                    self.mpol,
+                    self.ntor,
+                )
+            else:
+                self.scatter_indices = _as_jax_int32(
+                    stellsym_scatter_indices(self.mpol, self.ntor)
+                )
         else:
             self.scatter_indices = None
 
@@ -1242,7 +1414,7 @@ class BoozerSurfaceJAX(Optimizable):
 
     def _get_surface_dofs(self):
         """Get current surface DOFs as JAX array."""
-        return jnp.asarray(self.surface.get_dofs(), dtype=jnp.float64)
+        return _as_jax_float64(self.surface.get_dofs())
 
     def _set_surface_dofs(self, dofs_jax):
         """Write JAX DOFs back to CPU surface."""
@@ -1253,14 +1425,15 @@ class BoozerSurfaceJAX(Optimizable):
         if sdofs is None:
             sdofs = self._get_surface_dofs()
         if G is not None:
-            return jnp.concatenate([sdofs, jnp.array([iota, G])])
-        return jnp.concatenate([sdofs, jnp.array([iota])])
+            return _concat_jax_float64(sdofs, [iota, G])
+        return _concat_jax_float64(sdofs, [iota])
 
     def _unpack_decision_vector(self, x, optimize_G):
         """Unpack decision vector → (sdofs, iota, G_or_None)."""
+        sdofs, iota, G = _split_decision_vector_jax(x, optimize_G=optimize_G)
         if optimize_G:
-            return x[:-2], float(x[-2]), float(x[-1])
-        return x[:-1], float(x[-1]), None
+            return np.asarray(sdofs), float(iota), float(G)
+        return np.asarray(sdofs), float(iota), None
 
     def _unpack_decision_vector_jax(
         self,
@@ -1270,8 +1443,9 @@ class BoozerSurfaceJAX(Optimizable):
         coil_arrays=None,
     ):
         """JAX-array version of ``_unpack_decision_vector``."""
+        sdofs, iota, G = _split_decision_vector_jax(x, optimize_G=optimize_G)
         if optimize_G:
-            return x[:-2], x[-2], x[-1]
+            return sdofs, iota, G
         G = compute_G_from_currents(
             _grouped_coil_currents(
                 coil_arrays=coil_arrays,
@@ -1282,7 +1456,7 @@ class BoozerSurfaceJAX(Optimizable):
                 ),
             )
         )
-        return x[:-1], x[-1], G
+        return sdofs, iota, G
 
     def _make_penalty_objective_with(
         self,
@@ -1293,6 +1467,11 @@ class BoozerSurfaceJAX(Optimizable):
         coil_arrays=None,
     ):
         """Build penalty objective with explicit overrides."""
+        surface_size = int(np.asarray(self.surface.x).size)
+        sdofs_selector, iota_selector, G_selector = _decision_vector_split_selectors(
+            surface_size,
+            optimize_G,
+        )
         return partial(
             _boozer_penalty_objective,
             coil_arrays=coil_arrays,
@@ -1301,6 +1480,9 @@ class BoozerSurfaceJAX(Optimizable):
                 coil_arrays=coil_arrays,
                 coil_set_spec=coil_set_spec,
             ),
+            sdofs_selector=sdofs_selector,
+            iota_selector=iota_selector,
+            G_selector=G_selector,
             quadpoints_phi=self.quadpoints_phi,
             quadpoints_theta=self.quadpoints_theta,
             mpol=self.mpol,
@@ -1342,12 +1524,7 @@ class BoozerSurfaceJAX(Optimizable):
                     grouped_coil_currents_from_spec(coil_set_spec)
                 )
             )
-            x0 = jnp.concatenate(
-                [
-                    jnp.asarray(sdofs, dtype=jnp.float64),
-                    jnp.array([iota, G_exact], dtype=jnp.float64),
-                ]
-            )
+            x0 = _concat_jax_float64(sdofs, [iota, G_exact])
             mask_indices = self._compute_stellsym_mask_indices()
             res_fn = self._make_exact_residual_with(
                 mask_indices,
@@ -1395,9 +1572,7 @@ class BoozerSurfaceJAX(Optimizable):
             weight_inv_modB,
             coil_set_spec=coil_set_spec,
         )
-        x0 = self._pack_decision_vector(
-            iota, G, sdofs=jnp.asarray(sdofs, dtype=jnp.float64)
-        )
+        x0 = self._pack_decision_vector(iota, G, sdofs=_as_jax_float64(sdofs))
         optimizer_options = self._collect_optimizer_options()
 
         if method == "bfgs-ondevice":
@@ -1505,26 +1680,39 @@ class BoozerSurfaceJAX(Optimizable):
         ).reshape(nphi, ntheta, 3)
 
         r_boozer_raw = boozer_residual_vector(G, iota, B, xphi, xtheta, weight_inv_modB)
-        num_res = 3 * nphi * ntheta
+        num_res = _as_jax_float64(3 * nphi * ntheta)
         r_boozer = r_boozer_raw / jnp.sqrt(num_res)
 
-        cw = self.constraint_weight if self.constraint_weight is not None else 1.0
-        lab = float(
-            _compute_label(
-                self.label_type,
-                gamma,
-                xphi,
-                xtheta,
-                self.phi_idx,
-                points,
-                coil_arrays=coil_arrays,
-                coil_set_spec=coil_set_spec,
-            )
+        constraint_weight = (
+            self.constraint_weight if self.constraint_weight is not None else 1.0
         )
-        rl = jnp.sqrt(cw) * (lab - self.targetlabel)
-        rz = jnp.sqrt(cw) * gamma[0, 0, 2]
+        constraint_weight = _as_jax_float64(constraint_weight)
+        label_value = _compute_label(
+            self.label_type,
+            gamma,
+            xphi,
+            xtheta,
+            self.phi_idx,
+            points,
+            coil_arrays=coil_arrays,
+            coil_set_spec=coil_set_spec,
+        )
+        gamma_axis_z = _surface_axis_z_from_dofs(
+            sdofs,
+            quadpoints_phi=self.quadpoints_phi,
+            quadpoints_theta=self.quadpoints_theta,
+            mpol=self.mpol,
+            ntor=self.ntor,
+            nfp=self.nfp,
+            stellsym=self.stellsym,
+            scatter_indices=self.scatter_indices,
+            surface_kind=self._surface_geometry_kind,
+        )
+        weight_sqrt = jnp.sqrt(constraint_weight)
+        rl = weight_sqrt * (label_value - _as_jax_float64(self.targetlabel))
+        rz = weight_sqrt * gamma_axis_z
 
-        return jnp.concatenate([r_boozer, jnp.array([rl, rz])])
+        return _concat_jax_float64(r_boozer, [rl, rz])
 
     def _resolve_optimizer_method(self, limited_memory=None):
         """Resolve optimizer method string from options."""
@@ -1843,7 +2031,7 @@ class BoozerSurfaceJAX(Optimizable):
         mask = np.repeat(m[..., None], 3, axis=2)
         if s.stellsym:
             mask[0, 0, 0] = False
-        return jnp.asarray(np.flatnonzero(mask), dtype=jnp.int32)
+        return _as_jax_int32(np.flatnonzero(mask))
 
     def solve_residual_equation_exactly_newton(
         self,
@@ -1892,7 +2080,7 @@ class BoozerSurfaceJAX(Optimizable):
             G = float(compute_G_from_currents(self.coil_currents))
 
         sdofs = self._get_surface_dofs()
-        x0 = jnp.concatenate([sdofs, jnp.array([iota, G])])
+        x0 = _concat_jax_float64(sdofs, [iota, G])
 
         mask_indices = self._compute_stellsym_mask_indices()
         res_fn = self._make_exact_residual(mask_indices)
@@ -2131,7 +2319,7 @@ class BoozerSurfaceJAX(Optimizable):
         weight_inv_modB = self.options["weight_inv_modB"]
 
         # Pack from explicit sdofs (not self.surface)
-        sdofs_jax = jnp.asarray(sdofs, dtype=jnp.float64)
+        sdofs_jax = _as_jax_float64(sdofs)
         x0 = self._pack_decision_vector(iota, G, sdofs=sdofs_jax)
         obj_fn = self._make_penalty_objective_with(
             optimize_G,

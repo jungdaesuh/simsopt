@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import jax
-import jax.numpy as jnp
+import numpy as np
 
 from .biotsavart import (
     biot_savart_A,
@@ -21,17 +21,20 @@ from .specs import (
 )
 
 
+def _zeros_float64(shape):
+    return jax.device_put(np.zeros(shape, dtype=np.float64))
+
+
 def _empty_grouped_field_result(points: object, kernel):
     point_count = points.shape[0]
-    zeros = jnp.zeros
     if kernel in {biot_savart_B, biot_savart_A}:
-        return zeros((point_count, 3), dtype=jnp.float64)
+        return _zeros_float64((point_count, 3))
     if kernel is biot_savart_dB_by_dX:
-        return zeros((point_count, 3, 3), dtype=jnp.float64)
+        return _zeros_float64((point_count, 3, 3))
     if kernel is biot_savart_B_and_dB:
         return (
-            zeros((point_count, 3), dtype=jnp.float64),
-            zeros((point_count, 3, 3), dtype=jnp.float64),
+            _zeros_float64((point_count, 3)),
+            _zeros_float64((point_count, 3, 3)),
         )
     raise ValueError(f"Unsupported grouped-field kernel: {kernel!r}")
 
@@ -140,10 +143,17 @@ def grouped_coil_currents_from_spec(
             )
             + 1
         )
-    currents = jnp.zeros((coil_count,), dtype=jnp.float64)
+    currents = _zeros_float64((coil_count,))
     for group in coil_spec.groups:
-        index_array = jnp.asarray(group.coil_indices, dtype=jnp.int32)
-        currents = currents.at[index_array].set(group.currents)
+        positions = np.asarray(group.coil_indices, dtype=np.int64)
+        insert = np.zeros((coil_count, positions.size), dtype=np.float64)
+        insert[positions, np.arange(positions.size)] = 1.0
+        keep_mask = np.ones(coil_count, dtype=np.float64)
+        keep_mask[positions] = 0.0
+        currents = (
+            currents * jax.device_put(keep_mask)
+            + jax.device_put(insert) @ group.currents
+        )
     return currents
 
 

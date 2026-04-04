@@ -521,15 +521,23 @@ def get_field_kernel_tuning(mode: str | None = None) -> FieldKernelTuning:
         return _cached_field_kernel_tuning
     resolved_mode = _resolve_mode(mode)
     policy = get_backend_policy(resolved_mode)
-    tuning = FieldKernelTuning(
-        mode=resolved_mode,
-        chunk_policy=policy.chunk_policy,
-        coil_chunk_size=_field_kernel_value(resolved_mode, "coil_chunk_size"),
-        quadrature_block_size=_field_kernel_value(
-            resolved_mode,
-            "quadrature_block_size",
-        ),
-    )
+    if policy.transfer_guard == "disallow":
+        tuning = FieldKernelTuning(
+            mode=resolved_mode,
+            chunk_policy=f"{policy.chunk_policy}_dense_audit",
+            coil_chunk_size=0,
+            quadrature_block_size=0,
+        )
+    else:
+        tuning = FieldKernelTuning(
+            mode=resolved_mode,
+            chunk_policy=policy.chunk_policy,
+            coil_chunk_size=_field_kernel_value(resolved_mode, "coil_chunk_size"),
+            quadrature_block_size=_field_kernel_value(
+                resolved_mode,
+                "quadrature_block_size",
+            ),
+        )
     if mode is None:
         _cached_field_kernel_tuning = tuning
     return tuning
@@ -547,6 +555,13 @@ def get_quadrature_block_size(mode: str | None = None) -> int:
 
 def get_point_chunk_size(mode: str | None = None) -> int:
     """Return the grouped-field point chunk size for the resolved mode."""
+    if get_transfer_guard(mode) == "disallow":
+        # The strict transfer-audit lane is a correctness/debug path, not a
+        # throughput benchmark. On JAX 0.9.2 the point-chunk implementation
+        # relies on index-manipulation primitives that still trigger
+        # host->device transfer-guard failures even when the surrounding solver
+        # is otherwise JAX-native. Use the dense point path in this audit mode.
+        return 0
     chunk_policy = get_chunk_policy(mode)
     return _POINT_CHUNK_SIZE_BY_POLICY.get(chunk_policy, 0)
 

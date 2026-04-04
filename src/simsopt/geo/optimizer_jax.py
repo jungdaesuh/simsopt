@@ -89,6 +89,10 @@ def _x64_enabled():
     return bool(jax.config.jax_enable_x64)
 
 
+def _device_scalar(value, *, dtype=jnp.float64):
+    return jax.device_put(np.asarray(value, dtype=np.dtype(dtype)))
+
+
 # ---------------------------------------------------------------------------
 # Private package — lazy, one-way (private imports only constants defined above).
 # The package is loaded on first access to a private symbol, so importing
@@ -462,120 +466,132 @@ def newton_polish_traceable(
     """
     val_and_grad_fn = jax.value_and_grad(objective_fn)
     hvp_fn = _hessian_vector_product_fn(objective_fn)
-    val0, grad0 = val_and_grad_fn(x0)
-    norm0 = jnp.linalg.norm(grad0)
-    linear_tol = jnp.minimum(1e-10, jnp.maximum(jnp.asarray(tol) * 0.1, 1e-14))
+    tol_value = _device_scalar(tol)
+    linear_tol = jnp.minimum(
+        _device_scalar(1e-10),
+        jnp.maximum(tol_value * _device_scalar(0.1), _device_scalar(1e-14)),
+    )
 
-    def cond_fun(state):
-        return (state["nit"] < maxiter) & (state["norm"] > tol) & (~state["stalled"])
+    def run_solver(x_init):
+        val0, grad0 = val_and_grad_fn(x_init)
+        norm0 = jnp.linalg.norm(grad0)
 
-    def body_fun(state):
-        dx, linear_residual, _ = _gmres_solve_newton_system(
-            hvp_fn,
-            state["x"],
-            state["grad"],
-            stab=stab,
-            tol=linear_tol,
-        )
-        linear_residual_norm = jnp.linalg.norm(linear_residual)
-        dense_threshold = jnp.maximum(1e-10, 1e-3 * state["norm"])
-
-        def use_dense_fallback(_):
-            H_solve = _stabilize_dense_hessian(
-                _materialize_dense_hessian(hvp_fn, state["x"]),
-                stab,
+        def cond_fun(state):
+            return (
+                (state["nit"] < maxiter)
+                & (state["norm"] > tol_value)
+                & (~state["stalled"])
             )
-            dx_dense = jnp.linalg.solve(H_solve, state["grad"])
-            residual_dense = state["grad"] - H_solve @ dx_dense
-            return dx_dense, residual_dense, jnp.linalg.norm(residual_dense)
 
-        def keep_gmres_step(_):
-            return dx, linear_residual, linear_residual_norm
-
-        dx, linear_residual, linear_residual_norm = lax.cond(
-            (~jnp.all(jnp.isfinite(dx))) | (linear_residual_norm > dense_threshold),
-            use_dense_fallback,
-            keep_gmres_step,
-            operand=None,
-        )
-
-        def add_correction(current_dx):
-            correction, _, _ = _gmres_solve_newton_system(
+        def body_fun(state):
+            dx, linear_residual, _ = _gmres_solve_newton_system(
                 hvp_fn,
                 state["x"],
-                linear_residual,
+                state["grad"],
                 stab=stab,
                 tol=linear_tol,
             )
-            return lax.cond(
-                jnp.all(jnp.isfinite(correction)),
-                lambda corr: current_dx + corr,
-                lambda _corr: current_dx,
-                correction,
-            )
+            linear_residual_norm = jnp.linalg.norm(linear_residual)
+            dense_threshold = jnp.maximum(1e-10, 1e-3 * state["norm"])
 
-        dx = lax.cond(
-            linear_residual_norm > linear_tol,
-            add_correction,
-            lambda current_dx: current_dx,
-            dx,
-        )
+            def use_dense_fallback(_):
+                H_solve = _stabilize_dense_hessian(
+                    _materialize_dense_hessian(hvp_fn, state["x"]),
+                    stab,
+                )
+                dx_dense = jnp.linalg.solve(H_solve, state["grad"])
+                residual_dense = state["grad"] - H_solve @ dx_dense
+                return dx_dense, residual_dense, jnp.linalg.norm(residual_dense)
 
-        x_next = state["x"] - dx
-        val_next, grad_next = val_and_grad_fn(x_next)
-        accepted, candidate_norm = _newton_candidate_status(
-            state["norm"], x_next, grad_next
-        )
-        next_nit = state["nit"] + 1
-        if progress_callback is not None:
-            lax.cond(
-                accepted,
-                lambda _: jax.debug.callback(
-                    progress_callback,
-                    next_nit,
-                    val_next,
-                    candidate_norm,
-                ),
-                lambda _: None,
+            def keep_gmres_step(_):
+                return dx, linear_residual, linear_residual_norm
+
+            dx, linear_residual, linear_residual_norm = lax.cond(
+                (~jnp.all(jnp.isfinite(dx))) | (linear_residual_norm > dense_threshold),
+                use_dense_fallback,
+                keep_gmres_step,
                 operand=None,
             )
+
+            def add_correction(current_dx):
+                correction, _, _ = _gmres_solve_newton_system(
+                    hvp_fn,
+                    state["x"],
+                    linear_residual,
+                    stab=stab,
+                    tol=linear_tol,
+                )
+                return lax.cond(
+                    jnp.all(jnp.isfinite(correction)),
+                    lambda corr: current_dx + corr,
+                    lambda _corr: current_dx,
+                    correction,
+                )
+
+            dx = lax.cond(
+                linear_residual_norm > linear_tol,
+                add_correction,
+                lambda current_dx: current_dx,
+                dx,
+            )
+
+            x_next = state["x"] - dx
+            val_next, grad_next = val_and_grad_fn(x_next)
+            accepted, candidate_norm = _newton_candidate_status(
+                state["norm"], x_next, grad_next
+            )
+            next_nit = state["nit"] + 1
+            if progress_callback is not None:
+                lax.cond(
+                    accepted,
+                    lambda _: jax.debug.callback(
+                        progress_callback,
+                        next_nit,
+                        val_next,
+                        candidate_norm,
+                    ),
+                    lambda _: None,
+                    operand=None,
+                )
+            return {
+                "x": lax.select(accepted, x_next, state["x"]),
+                "val": lax.select(accepted, val_next, state["val"]),
+                "grad": lax.select(accepted, grad_next, state["grad"]),
+                "norm": lax.select(accepted, candidate_norm, state["norm"]),
+                "nit": lax.select(accepted, next_nit, state["nit"]),
+                "stalled": ~accepted,
+            }
+
+        state = lax.while_loop(
+            cond_fun,
+            body_fun,
+            {
+                "x": x_init,
+                "val": val0,
+                "grad": grad0,
+                "norm": norm0,
+                "nit": jnp.asarray(0, dtype=jnp.int32),
+                "stalled": jnp.asarray(False),
+            },
+        )
+
+        val_final, grad_final = val_and_grad_fn(state["x"])
+        norm_final = jnp.linalg.norm(grad_final)
+        H = _stabilize_dense_hessian(
+            _materialize_dense_hessian(hvp_fn, state["x"]),
+            stab,
+        )
+
         return {
-            "x": lax.select(accepted, x_next, state["x"]),
-            "val": lax.select(accepted, val_next, state["val"]),
-            "grad": lax.select(accepted, grad_next, state["grad"]),
-            "norm": lax.select(accepted, candidate_norm, state["norm"]),
-            "nit": lax.select(accepted, next_nit, state["nit"]),
-            "stalled": ~accepted,
+            "x": state["x"],
+            "fun": val_final,
+            "grad": grad_final,
+            "hessian": H,
+            "nit": state["nit"],
+            "success": norm_final <= tol_value,
         }
 
-    state = lax.while_loop(
-        cond_fun,
-        body_fun,
-        {
-            "x": x0,
-            "val": val0,
-            "grad": grad0,
-            "norm": norm0,
-            "nit": jnp.asarray(0, dtype=jnp.int32),
-            "stalled": jnp.asarray(False),
-        },
-    )
-
-    val_final, grad_final = val_and_grad_fn(state["x"])
-    norm_final = jnp.linalg.norm(grad_final)
-    H = _stabilize_dense_hessian(
-        _materialize_dense_hessian(hvp_fn, state["x"]),
-        stab,
-    )
-
-    return {
-        "x": state["x"],
-        "fun": val_final,
-        "grad": grad_final,
-        "hessian": H,
-        "nit": state["nit"],
-        "success": norm_final <= tol,
-    }
+    return jax.jit(run_solver)(x0)
 
 
 def newton_exact(
@@ -623,49 +639,52 @@ def newton_exact_traceable(
     """Trace-safe Newton solver for the exact Boozer residual system."""
     jac_fn = jax.jacfwd(residual_fn)
 
-    r0 = residual_fn(x0)
-    J0 = jac_fn(x0)
-    norm0 = jnp.linalg.norm(r0)
+    def run_solver(x_init):
+        r0 = residual_fn(x_init)
+        J0 = jac_fn(x_init)
+        norm0 = jnp.linalg.norm(r0)
 
-    def cond_fun(state):
-        return (state["nit"] < maxiter) & (state["norm"] > tol)
+        def cond_fun(state):
+            return (state["nit"] < maxiter) & (state["norm"] > tol)
 
-    def body_fun(state):
-        dx = jnp.linalg.solve(state["jacobian"], state["residual"])
-        correction = jnp.linalg.solve(
-            state["jacobian"],
-            state["residual"] - state["jacobian"] @ dx,
+        def body_fun(state):
+            dx = jnp.linalg.solve(state["jacobian"], state["residual"])
+            correction = jnp.linalg.solve(
+                state["jacobian"],
+                state["residual"] - state["jacobian"] @ dx,
+            )
+            x_next = state["x"] - (dx + correction)
+            residual_next = residual_fn(x_next)
+            jacobian_next = jac_fn(x_next)
+            return {
+                "x": x_next,
+                "residual": residual_next,
+                "jacobian": jacobian_next,
+                "norm": jnp.linalg.norm(residual_next),
+                "nit": state["nit"] + 1,
+            }
+
+        state = lax.while_loop(
+            cond_fun,
+            body_fun,
+            {
+                "x": x_init,
+                "residual": r0,
+                "jacobian": J0,
+                "norm": norm0,
+                "nit": jnp.asarray(0, dtype=jnp.int32),
+            },
         )
-        x_next = state["x"] - (dx + correction)
-        residual_next = residual_fn(x_next)
-        jacobian_next = jac_fn(x_next)
+
         return {
-            "x": x_next,
-            "residual": residual_next,
-            "jacobian": jacobian_next,
-            "norm": jnp.linalg.norm(residual_next),
-            "nit": state["nit"] + 1,
+            "x": state["x"],
+            "residual": state["residual"],
+            "jacobian": state["jacobian"],
+            "nit": state["nit"],
+            "success": state["norm"] <= tol,
         }
 
-    state = lax.while_loop(
-        cond_fun,
-        body_fun,
-        {
-            "x": x0,
-            "residual": r0,
-            "jacobian": J0,
-            "norm": norm0,
-            "nit": jnp.asarray(0, dtype=jnp.int32),
-        },
-    )
-
-    return {
-        "x": state["x"],
-        "residual": state["residual"],
-        "jacobian": state["jacobian"],
-        "nit": state["nit"],
-        "success": state["norm"] <= tol,
-    }
+    return jax.jit(run_solver)(x0)
 
 
 # ---------------------------------------------------------------------------

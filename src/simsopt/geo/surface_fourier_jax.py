@@ -47,6 +47,47 @@ __all__ = [
     "dgammadash2_by_dcoeff",
 ]
 
+
+def _as_jax_float64(value):
+    if isinstance(value, jax.Array):
+        return jnp.asarray(value, dtype=jnp.float64)
+    return jax.device_put(np.asarray(value, dtype=np.float64))
+
+
+def _as_jax_int32(value):
+    if isinstance(value, jax.Array):
+        return jnp.asarray(value, dtype=jnp.int32)
+    return jax.device_put(np.asarray(value, dtype=np.int32))
+
+
+def _zeros(shape, dtype):
+    return jax.device_put(np.zeros(shape, dtype=np.dtype(dtype)))
+
+
+_TWO_PI = _as_jax_float64(2.0 * np.pi)
+_BASIS_X3 = _as_jax_float64([1.0, 0.0, 0.0])
+_BASIS_Y3 = _as_jax_float64([0.0, 1.0, 0.0])
+_BASIS_Z3 = _as_jax_float64([0.0, 0.0, 1.0])
+
+
+def _mode_range(start, stop):
+    return _as_jax_float64(np.arange(start, stop, dtype=np.float64))
+
+
+def _selector_matrix(size, positions):
+    matrix = np.zeros((len(positions), size), dtype=np.float64)
+    if positions:
+        matrix[np.arange(len(positions)), positions] = 1.0
+    return _as_jax_float64(matrix)
+
+
+def _scatter_matrix(target_size, positions):
+    matrix = np.zeros((target_size, len(positions)), dtype=np.float64)
+    if positions:
+        matrix[positions, np.arange(len(positions))] = 1.0
+    return _as_jax_float64(matrix)
+
+
 # ---------------------------------------------------------------------------
 # Basis matrix construction
 # ---------------------------------------------------------------------------
@@ -63,10 +104,11 @@ def build_theta_basis(quadpoints_theta, mpol):
         W:  (ntheta, 2*mpol+1) basis values.
         dW: (ntheta, 2*mpol+1) derivatives d/d(quadpoints_theta).
     """
-    theta = 2.0 * jnp.pi * quadpoints_theta  # (ntheta,)
+    quadpoints_theta = _as_jax_float64(quadpoints_theta)
+    theta = _TWO_PI * quadpoints_theta  # (ntheta,)
 
-    m_cos = jnp.arange(0, mpol + 1, dtype=theta.dtype)  # [0 .. mpol]
-    m_sin = jnp.arange(1, mpol + 1, dtype=theta.dtype)  # [1 .. mpol]
+    m_cos = _mode_range(0, mpol + 1)  # [0 .. mpol]
+    m_sin = _mode_range(1, mpol + 1)  # [1 .. mpol]
 
     arg_cos = m_cos[None, :] * theta[:, None]  # (ntheta, mpol+1)
     arg_sin = m_sin[None, :] * theta[:, None]  # (ntheta, mpol)
@@ -76,8 +118,8 @@ def build_theta_basis(quadpoints_theta, mpol):
     # d/d(quadpoints_theta) = d/dθ_param  (chain rule: dθ/dθ_param = 2π)
     dW = jnp.concatenate(
         [
-            -m_cos[None, :] * 2.0 * jnp.pi * jnp.sin(arg_cos),
-            m_sin[None, :] * 2.0 * jnp.pi * jnp.cos(arg_sin),
+            -m_cos[None, :] * _TWO_PI * jnp.sin(arg_cos),
+            m_sin[None, :] * _TWO_PI * jnp.cos(arg_sin),
         ],
         axis=1,
     )
@@ -97,11 +139,13 @@ def build_phi_basis(quadpoints_phi, ntor, nfp):
         V:  (nphi, 2*ntor+1) basis values.
         dV: (nphi, 2*ntor+1) derivatives d/d(quadpoints_phi).
     """
-    phi = 2.0 * jnp.pi * quadpoints_phi  # (nphi,)
+    quadpoints_phi = _as_jax_float64(quadpoints_phi)
+    phi = _TWO_PI * quadpoints_phi  # (nphi,)
 
     # frequencies: [0, nfp, 2*nfp, …, ntor*nfp]
-    n_cos = jnp.arange(0, ntor + 1, dtype=phi.dtype) * nfp
-    n_sin = jnp.arange(1, ntor + 1, dtype=phi.dtype) * nfp
+    nfp_scale = _as_jax_float64(nfp)
+    n_cos = _mode_range(0, ntor + 1) * nfp_scale
+    n_sin = _mode_range(1, ntor + 1) * nfp_scale
 
     arg_cos = n_cos[None, :] * phi[:, None]  # (nphi, ntor+1)
     arg_sin = n_sin[None, :] * phi[:, None]  # (nphi, ntor)
@@ -110,8 +154,8 @@ def build_phi_basis(quadpoints_phi, ntor, nfp):
 
     dV = jnp.concatenate(
         [
-            -n_cos[None, :] * 2.0 * jnp.pi * jnp.sin(arg_cos),
-            n_sin[None, :] * 2.0 * jnp.pi * jnp.cos(arg_sin),
+            -n_cos[None, :] * _TWO_PI * jnp.sin(arg_cos),
+            n_sin[None, :] * _TWO_PI * jnp.cos(arg_sin),
         ],
         axis=1,
     )
@@ -155,7 +199,7 @@ def surface_gamma(quadpoints_phi, quadpoints_theta, xc, yc, zc, mpol, ntor, nfp)
     yhat = _eval_hat(V, W, yc)
     z = _eval_hat(V, W, zc)
 
-    phi_angle = 2.0 * jnp.pi * quadpoints_phi  # (nphi,)
+    phi_angle = _TWO_PI * _as_jax_float64(quadpoints_phi)  # (nphi,)
     cphi = jnp.cos(phi_angle)[:, None]  # (nphi, 1)
     sphi = jnp.sin(phi_angle)[:, None]
 
@@ -181,10 +225,10 @@ def surface_gammadash1(quadpoints_phi, quadpoints_theta, xc, yc, zc, mpol, ntor,
     dyhat_dphi = _eval_hat(dV, W, yc)
     dz_dphi = _eval_hat(dV, W, zc)
 
-    phi_angle = 2.0 * jnp.pi * quadpoints_phi
+    phi_angle = _TWO_PI * _as_jax_float64(quadpoints_phi)
     cphi = jnp.cos(phi_angle)[:, None]
     sphi = jnp.sin(phi_angle)[:, None]
-    two_pi = 2.0 * jnp.pi
+    two_pi = _TWO_PI
 
     # d/d(phi_param):  x = x̂·cos(2πφ) − ŷ·sin(2πφ)
     # dx/dφ = dx̂/dφ·cosφ − x̂·2π·sinφ − dŷ/dφ·sinφ − ŷ·2π·cosφ
@@ -218,7 +262,7 @@ def surface_gammadash2(quadpoints_phi, quadpoints_theta, xc, yc, zc, mpol, ntor,
     dyhat_dtheta = _eval_hat(V, dW, yc)
     dz_dtheta = _eval_hat(V, dW, zc)
 
-    phi_angle = 2.0 * jnp.pi * quadpoints_phi
+    phi_angle = _TWO_PI * _as_jax_float64(quadpoints_phi)
     cphi = jnp.cos(phi_angle)[:, None]
     sphi = jnp.sin(phi_angle)[:, None]
 
@@ -320,10 +364,13 @@ def _split_flat_to_xyzc(flat, mpol, ntor):
     """
     n_per_coord = int((2 * mpol + 1) * (2 * ntor + 1))
     shape = (int(2 * mpol + 1), int(2 * ntor + 1))
-    xc = flat[:n_per_coord].reshape(shape)
-    yc = flat[n_per_coord : 2 * n_per_coord].reshape(shape)
-    zc = flat[2 * n_per_coord :].reshape(shape)
-    return xc, yc, zc
+    flat_jax = _as_jax_float64(flat)
+    stacked = jnp.reshape(flat_jax, (3, n_per_coord))
+    return (
+        jnp.reshape(jnp.dot(_BASIS_X3, stacked), shape),
+        jnp.reshape(jnp.dot(_BASIS_Y3, stacked), shape),
+        jnp.reshape(jnp.dot(_BASIS_Z3, stacked), shape),
+    )
 
 
 def dofs_to_xyzc(sdofs, scatter_indices, mpol, ntor):
@@ -339,8 +386,18 @@ def dofs_to_xyzc(sdofs, scatter_indices, mpol, ntor):
     Returns:
         xc, yc, zc: each (2*mpol+1, 2*ntor+1).
     """
+    sdofs_jax = _as_jax_float64(sdofs)
+    scatter_operand = scatter_indices
+    if isinstance(scatter_operand, jax.Array) and scatter_operand.ndim == 2:
+        flat = _as_jax_float64(scatter_operand) @ sdofs_jax
+        return _split_flat_to_xyzc(flat, mpol, ntor)
+    if np.ndim(scatter_operand) == 2:
+        flat = _as_jax_float64(scatter_operand) @ sdofs_jax
+        return _split_flat_to_xyzc(flat, mpol, ntor)
+
     n_per_coord = int((2 * mpol + 1) * (2 * ntor + 1))
-    flat = jnp.zeros(3 * n_per_coord).at[scatter_indices].set(sdofs)
+    flat = _zeros(3 * n_per_coord, sdofs_jax.dtype)
+    flat = flat.at[_as_jax_int32(scatter_operand)].set(sdofs_jax)
     return _split_flat_to_xyzc(flat, mpol, ntor)
 
 
@@ -364,7 +421,7 @@ def _scatter_surface_xyzfourier_dofs(dofs, mpol, ntor, stellsym):
     sin_count = n_per - (ntor + 1)
 
     def _scatter_segment(source, start, count, fill_start):
-        flat = jnp.zeros(n_per, dtype=source.dtype)
+        flat = _zeros(n_per, source.dtype)
         return flat.at[fill_start : fill_start + count].set(
             source[start : start + count]
         )
@@ -378,7 +435,7 @@ def _scatter_surface_xyzfourier_dofs(dofs, mpol, ntor, stellsym):
             sin_count,
             ntor + 1,
         ).reshape(shape)
-        zeros = jnp.zeros(shape, dtype=dofs.dtype)
+        zeros = _zeros(shape, dofs.dtype)
         return xc, zeros, zeros, ys, zeros, zs
 
     offset = 0
@@ -398,10 +455,10 @@ def _scatter_surface_xyzfourier_dofs(dofs, mpol, ntor, stellsym):
 
 def _surface_xyzfourier_basis(quadpoints_phi, quadpoints_theta, mpol, ntor, nfp):
     """Return ``SurfaceXYZFourier`` phase terms and mode indices."""
-    theta = 2.0 * jnp.pi * quadpoints_theta
-    phi = 2.0 * jnp.pi * quadpoints_phi
-    m = jnp.arange(0, mpol + 1, dtype=theta.dtype)
-    n = jnp.arange(-ntor, ntor + 1, dtype=phi.dtype) * nfp
+    theta = _TWO_PI * _as_jax_float64(quadpoints_theta)
+    phi = _TWO_PI * _as_jax_float64(quadpoints_phi)
+    m = _mode_range(0, mpol + 1)
+    n = _mode_range(-ntor, ntor + 1) * _as_jax_float64(nfp)
 
     angle = (
         theta[None, :, None, None] * m[None, None, :, None]
@@ -465,7 +522,7 @@ def surface_xyzfourier_gamma_from_dofs(
     yhat = _surface_xyzfourier_hat(yc, ys, cos_angle, sin_angle)
     z = _surface_xyzfourier_hat(zc, zs, cos_angle, sin_angle)
 
-    phi_angle = 2.0 * jnp.pi * quadpoints_phi
+    phi_angle = _TWO_PI * _as_jax_float64(quadpoints_phi)
     x, y = _surface_xyzfourier_rotate(phi_angle, xhat, yhat)
     return jnp.stack([x, y, z], axis=-1)
 
@@ -493,7 +550,7 @@ def surface_xyzfourier_gammadash1_from_dofs(
         ntor,
         nfp,
     )
-    two_pi = 2.0 * jnp.pi
+    two_pi = _TWO_PI
     n_factor = two_pi * n[None, None, None, :]
 
     xhat = _surface_xyzfourier_hat(xc, xs, cos_angle, sin_angle)
@@ -508,7 +565,7 @@ def surface_xyzfourier_gammadash1_from_dofs(
         zc, zs, -n_factor, cos_angle, sin_angle
     )
 
-    phi_angle = 2.0 * jnp.pi * quadpoints_phi
+    phi_angle = _TWO_PI * _as_jax_float64(quadpoints_phi)
     cphi = jnp.cos(phi_angle)[:, None]
     sphi = jnp.sin(phi_angle)[:, None]
 
@@ -543,7 +600,7 @@ def surface_xyzfourier_gammadash2_from_dofs(
         ntor,
         nfp,
     )
-    two_pi = 2.0 * jnp.pi
+    two_pi = _TWO_PI
     m_factor = two_pi * m[None, None, :, None]
 
     dxhat_dtheta = _surface_xyzfourier_derivative_hat(
@@ -556,7 +613,7 @@ def surface_xyzfourier_gammadash2_from_dofs(
         zc, zs, m_factor, cos_angle, sin_angle
     )
 
-    phi_angle = 2.0 * jnp.pi * quadpoints_phi
+    phi_angle = _TWO_PI * _as_jax_float64(quadpoints_phi)
     dx, dy = _surface_xyzfourier_rotate(phi_angle, dxhat_dtheta, dyhat_dtheta)
     return jnp.stack([dx, dy, dz_dtheta], axis=-1)
 
@@ -664,7 +721,7 @@ def surface_volume(gamma, normal):
     """
     nphi, ntheta = gamma.shape[:2]
     integrand = jnp.sum(gamma * normal, axis=-1)  # (nphi, ntheta)
-    return jnp.sum(integrand) / (3.0 * nphi * ntheta)
+    return jnp.sum(integrand) / _as_jax_float64(3.0 * nphi * ntheta)
 
 
 def surface_area(normal):
@@ -681,7 +738,7 @@ def surface_area(normal):
     """
     nphi, ntheta = normal.shape[:2]
     norm_n = jnp.sqrt(jnp.sum(normal * normal, axis=-1))  # (nphi, ntheta)
-    return jnp.sum(norm_n) / (nphi * ntheta)
+    return jnp.sum(norm_n) / _as_jax_float64(nphi * ntheta)
 
 
 # ---------------------------------------------------------------------------

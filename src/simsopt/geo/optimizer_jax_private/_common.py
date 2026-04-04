@@ -10,7 +10,9 @@ from __future__ import annotations
 
 from functools import partial
 
+import jax
 import jax.numpy as jnp
+import numpy as np
 from jax import lax
 
 from ..optimizer_jax import PRIVATE_OPTIMIZER_JAX_VERSION, _x64_enabled
@@ -19,8 +21,46 @@ _dot = partial(jnp.dot, precision=lax.Precision.HIGHEST)
 _einsum = partial(jnp.einsum, precision=lax.Precision.HIGHEST)
 
 
+def _as_jax_dtype(value, dtype):
+    if isinstance(value, jax.Array):
+        return jnp.asarray(value, dtype=dtype)
+    if isinstance(value, (np.ndarray, np.generic, list, tuple)) or np.isscalar(value):
+        return jax.device_put(np.asarray(value, dtype=np.dtype(dtype)))
+    return jnp.asarray(value, dtype=dtype)
+
+
+def _eye(n, dtype):
+    return jax.device_put(np.eye(int(n), dtype=np.dtype(dtype)))
+
+
+def _reduce_sum_all(x):
+    flat = jnp.reshape(jnp.asarray(x), (-1,))
+    return lax.reduce(flat, _as_jax_dtype(0.0, flat.dtype), lax.add, (0,))
+
+
+def _reduce_max_all(x):
+    flat = jnp.reshape(jnp.asarray(x), (-1,))
+    return lax.reduce(flat, _as_jax_dtype(-np.inf, flat.dtype), lax.max, (0,))
+
+
 def _norm(x, *, ord=None):
+    abs_x = jnp.abs(x)
+    if ord in (None, 2):
+        return jnp.sqrt(_reduce_sum_all(abs_x * abs_x))
+    if ord == np.inf:
+        return _reduce_max_all(abs_x)
     return jnp.linalg.norm(x, ord=ord)
+
+
+def _scalar_value_and_grad(fun):
+    def wrapped(x):
+        value, pullback = jax.vjp(fun, x)
+        value = jnp.asarray(value, dtype=x.dtype)
+        cotangent = _as_jax_dtype(1.0, value.dtype)
+        (grad,) = pullback(cotangent)
+        return value, jnp.asarray(grad, dtype=x.dtype)
+
+    return wrapped
 
 
 def _promote_dtypes_inexact(*args):
@@ -28,7 +68,7 @@ def _promote_dtypes_inexact(*args):
     dtype = jnp.result_type(*args)
     if not jnp.issubdtype(dtype, jnp.inexact):
         dtype = jnp.promote_types(dtype, jnp.float32)
-    return tuple(jnp.asarray(arg, dtype=dtype) for arg in args)
+    return tuple(_as_jax_dtype(arg, dtype) for arg in args)
 
 
 def _require_private_optimizer_runtime(x0):
@@ -46,7 +86,7 @@ def _require_private_optimizer_runtime(x0):
             "On-device optimizer requires jax_enable_x64=True before import/use."
         )
 
-    x0 = jnp.asarray(x0, dtype=jnp.float64)
+    x0 = _as_jax_dtype(x0, jnp.float64)
     if x0.ndim != 1:
         raise ValueError(
             f"On-device optimizer expects a flat 1-D decision vector, got {x0.shape}."

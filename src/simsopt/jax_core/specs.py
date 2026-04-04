@@ -654,7 +654,7 @@ def apply_coil_symmetry(
     if symmetry.has_rotation:
         gamma = gamma @ symmetry.rotmat
         gammadash = gammadash @ symmetry.rotmat
-    return gamma, gammadash, current * symmetry.scale
+    return gamma, gammadash, current * _as_float64_array(symmetry.scale)
 
 
 def make_field_eval_spec(points: object) -> FieldEvalSpec:

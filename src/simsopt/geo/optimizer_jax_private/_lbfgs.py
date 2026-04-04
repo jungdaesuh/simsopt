@@ -4,60 +4,101 @@ from __future__ import annotations
 
 import numpy as np
 
+import jax
 import jax.numpy as jnp
-from jax import lax, value_and_grad
+from jax import lax
 
 from ._common import (
+    _as_jax_dtype,
     _dot,
     _emit_iteration_callbacks,
     _norm,
     _require_private_optimizer_runtime,
     _resolve_lbfgs_limits,
+    _scalar_value_and_grad,
 )
 from ._line_search import _line_search_value_and_grad
 from ._types import _LBFGSResults
 
 
+def _int_scalar(value):
+    return _as_jax_dtype(value, jnp.int32)
+
+
+def _bool_scalar(value):
+    return _as_jax_dtype(value, jnp.bool_)
+
+
+def _zeros(shape, dtype):
+    return jax.device_put(
+        np.zeros(tuple(int(dim) for dim in shape), dtype=np.dtype(dtype))
+    )
+
+
+def _shift_history(history, new):
+    length = history.shape[0]
+    if length == 1:
+        return jnp.reshape(new, history.shape)
+    shifted = lax.slice_in_dim(history, 1, length, axis=0)
+    new_row = jnp.expand_dims(new, axis=0)
+    return lax.concatenate((shifted, new_row), dimension=0)
+
+
 def _update_history_vectors(history, new):
-    return jnp.roll(history, -1, axis=0).at[-1, :].set(new)
+    return _shift_history(history, new)
 
 
 def _update_history_scalars(history, new):
-    return jnp.roll(history, -1, axis=0).at[-1].set(new)
+    length = history.shape[0]
+    if length == 1:
+        return jnp.reshape(new, history.shape)
+    shifted = lax.slice_in_dim(history, 1, length, axis=0)
+    return lax.concatenate((shifted, jnp.reshape(new, (1,))), dimension=0)
+
+
+def _take_axis0(array, index):
+    index = _as_jax_dtype(index, jnp.int32)
+    return jnp.squeeze(lax.dynamic_slice_in_dim(array, index, 1, axis=0), axis=0)
 
 
 def _two_loop_recursion(state):
     dtype = state.rho_history.dtype
     his_size = len(state.rho_history)
-    curr_size = jnp.where(state.k < his_size, state.k, his_size)
+    his_size_jax = _int_scalar(his_size)
+    curr_size = jnp.where(state.k < his_size_jax, state.k, his_size_jax)
     q = -jnp.conj(state.g_k)
     a_his = jnp.zeros_like(state.rho_history)
 
     def body_fun1(j, carry):
-        i = his_size - 1 - j
+        i = _int_scalar(his_size - 1) - j
         _q, _a_his = carry
-        a_i = state.rho_history[i] * _dot(jnp.conj(state.s_history[i]), _q).real.astype(
-            dtype
-        )
+        rho_i = _take_axis0(state.rho_history, i)
+        s_i = _take_axis0(state.s_history, i)
+        y_i = _take_axis0(state.y_history, i)
+        a_i = rho_i * _dot(jnp.conj(s_i), _q).real.astype(dtype)
         _a_his = _a_his.at[i].set(a_i)
-        _q = _q - a_i * jnp.conj(state.y_history[i])
+        _q = _q - a_i * jnp.conj(y_i)
         return _q, _a_his
 
-    q, a_his = lax.fori_loop(0, curr_size, body_fun1, (q, a_his))
+    q, a_his = lax.fori_loop(_int_scalar(0), curr_size, body_fun1, (q, a_his))
     q = state.gamma * q
 
     def body_fun2(j, _q):
-        i = his_size - curr_size + j
-        b_i = state.rho_history[i] * _dot(state.y_history[i], _q).real.astype(dtype)
-        return _q + (a_his[i] - b_i) * state.s_history[i]
+        i = (his_size_jax - curr_size) + j
+        rho_i = _take_axis0(state.rho_history, i)
+        y_i = _take_axis0(state.y_history, i)
+        s_i = _take_axis0(state.s_history, i)
+        a_i = _take_axis0(a_his, i)
+        b_i = rho_i * _dot(y_i, _q).real.astype(dtype)
+        return _q + (a_i - b_i) * s_i
 
-    return lax.fori_loop(0, curr_size, body_fun2, q)
+    return lax.fori_loop(_int_scalar(0), curr_size, body_fun2, q)
 
 
 def _coerce_value_and_grad_result(fun, x):
     value, grad = fun(x)
-    value = jnp.asarray(value, dtype=x.dtype)
-    grad = jnp.asarray(grad, dtype=x.dtype)
+    value = _as_jax_dtype(value, x.dtype)
+    grad = _as_jax_dtype(grad, x.dtype)
     if grad.shape != x.shape:
         raise ValueError(
             "On-device explicit value-and-gradient objectives must return a "
@@ -85,31 +126,42 @@ def _minimize_lbfgs_private_impl(
     d = len(x0)
     dtype = x0.dtype
     maxiter, maxfun, maxgrad = _resolve_lbfgs_limits(d, maxiter, maxfun, maxgrad)
+    ftol_jax = _as_jax_dtype(ftol, dtype)
+    gtol_jax = _as_jax_dtype(gtol, dtype)
+    maxiter_limit = _as_jax_dtype(maxiter, dtype)
+    maxfun_limit = _as_jax_dtype(maxfun, dtype)
+    maxgrad_limit = _as_jax_dtype(maxgrad, dtype)
 
     f_0, g_0 = _coerce_value_and_grad_result(value_and_grad_fun, x0)
     state_initial = _LBFGSResults(
-        converged=_norm(g_0, ord=norm) < gtol,
-        failed=jnp.array(False, dtype=bool),
-        k=0,
-        nfev=1,
-        ngev=1,
+        converged=_norm(g_0, ord=norm) < gtol_jax,
+        failed=_bool_scalar(False),
+        k=_int_scalar(0),
+        nfev=_int_scalar(1),
+        ngev=_int_scalar(1),
         x_k=x0,
         f_k=f_0,
         g_k=g_0,
-        s_history=jnp.zeros((maxcor, d), dtype=dtype),
-        y_history=jnp.zeros((maxcor, d), dtype=dtype),
-        rho_history=jnp.zeros((maxcor,), dtype=dtype),
-        gamma=1.0,
-        status=0,
-        ls_status=0,
+        s_history=_zeros((maxcor, d), dtype),
+        y_history=_zeros((maxcor, d), dtype),
+        rho_history=_zeros((maxcor,), dtype),
+        gamma=_as_jax_dtype(1.0, dtype),
+        status=_int_scalar(0),
+        ls_status=_int_scalar(0),
     )
-    initial_status = jnp.array(0)
-    initial_status = jnp.where(state_initial.ngev >= maxgrad, 3, initial_status)
-    initial_status = jnp.where(state_initial.nfev >= maxfun, 2, initial_status)
-    initial_status = jnp.where(state_initial.k >= maxiter, 1, initial_status)
+    initial_status = _int_scalar(0)
+    initial_status = jnp.where(
+        state_initial.ngev >= maxgrad_limit, _int_scalar(3), initial_status
+    )
+    initial_status = jnp.where(
+        state_initial.nfev >= maxfun_limit, _int_scalar(2), initial_status
+    )
+    initial_status = jnp.where(
+        state_initial.k >= maxiter_limit, _int_scalar(1), initial_status
+    )
     state_initial = state_initial._replace(
-        failed=(initial_status > 0) & (~state_initial.converged),
-        status=jnp.where(state_initial.converged, 0, initial_status),
+        failed=(initial_status > _int_scalar(0)) & (~state_initial.converged),
+        status=jnp.where(state_initial.converged, _int_scalar(0), initial_status),
     )
 
     def cond_fun(state):
@@ -141,73 +193,78 @@ def _minimize_lbfgs_private_impl(
         rho_k_inv = jnp.real(_dot(y_k, s_k))
         rho_k = jnp.reciprocal(rho_k_inv).astype(y_k.dtype)
         gamma = rho_k_inv / jnp.real(_dot(jnp.conj(y_k), y_k))
-        next_k = state.k + 1
+        next_k = state.k + _int_scalar(1)
 
         def failed_step(_):
             return state._replace(
-                converged=False,
-                failed=True,
+                converged=_bool_scalar(False),
+                failed=_bool_scalar(True),
                 nfev=next_nfev,
                 ngev=next_ngev,
-                status=jnp.array(5),
+                status=_int_scalar(5),
                 ls_status=ls_results.status,
             )
 
         def accepted_step(_):
-            status = jnp.array(0)
-            status = jnp.where(state.f_k - f_kp1 < ftol, 4, status)
-            status = jnp.where(next_ngev >= maxgrad, 3, status)
-            status = jnp.where(next_nfev >= maxfun, 2, status)
-            status = jnp.where(next_k >= maxiter, 1, status)
-            converged = _norm(g_kp1, ord=norm) < gtol
+            status = _int_scalar(0)
+            status = jnp.where(state.f_k - f_kp1 < ftol_jax, _int_scalar(4), status)
+            status = jnp.where(next_ngev >= maxgrad_limit, _int_scalar(3), status)
+            status = jnp.where(next_nfev >= maxfun_limit, _int_scalar(2), status)
+            status = jnp.where(next_k >= maxiter_limit, _int_scalar(1), status)
+            converged = _norm(g_kp1, ord=norm) < gtol_jax
             _emit_iteration_callbacks(
                 callback, progress_callback, x_kp1, next_k, f_kp1, g_kp1
             )
             return state._replace(
                 converged=converged,
-                failed=(status > 0) & (~converged),
+                failed=(status > _int_scalar(0)) & (~converged),
                 k=next_k,
                 nfev=next_nfev,
                 ngev=next_ngev,
-                x_k=x_kp1.astype(state.x_k.dtype),
-                f_k=f_kp1.astype(state.f_k.dtype),
-                g_k=g_kp1.astype(state.g_k.dtype),
+                x_k=_as_jax_dtype(x_kp1, state.x_k.dtype),
+                f_k=_as_jax_dtype(f_kp1, state.f_k.dtype),
+                g_k=_as_jax_dtype(g_kp1, state.g_k.dtype),
                 s_history=_update_history_vectors(state.s_history, s_k),
                 y_history=_update_history_vectors(state.y_history, y_k),
                 rho_history=_update_history_scalars(state.rho_history, rho_k),
-                gamma=gamma.astype(state.g_k.dtype),
-                status=jnp.where(converged, 0, status),
+                gamma=_as_jax_dtype(gamma, state.g_k.dtype),
+                status=jnp.where(converged, _int_scalar(0), status),
                 ls_status=ls_results.status,
             )
 
         return lax.cond(ls_results.failed, failed_step, accepted_step, operand=None)
 
-    state = lax.while_loop(cond_fun, body_fun, state_initial)
-    f_final, g_final = _coerce_value_and_grad_result(value_and_grad_fun, state.x_k)
-    converged_final = _norm(g_final, ord=norm) < gtol
-    state = state._replace(
-        converged=converged_final,
-        nfev=state.nfev + 1,
-        ngev=state.ngev + 1,
-        f_k=jnp.asarray(f_final, dtype=state.f_k.dtype),
-        g_k=jnp.asarray(g_final, dtype=state.g_k.dtype),
-    )
-    status = jnp.where(
-        state.converged,
-        0,
-        jnp.where(
-            state.k >= maxiter,
-            1,
+    def run_solver(initial_state):
+        state = lax.while_loop(cond_fun, body_fun, initial_state)
+        f_final, g_final = _coerce_value_and_grad_result(value_and_grad_fun, state.x_k)
+        converged_final = _norm(g_final, ord=norm) < gtol_jax
+        state = state._replace(
+            converged=converged_final,
+            nfev=state.nfev + _int_scalar(1),
+            ngev=state.ngev + _int_scalar(1),
+            f_k=_as_jax_dtype(f_final, state.f_k.dtype),
+            g_k=_as_jax_dtype(g_final, state.g_k.dtype),
+        )
+        status = jnp.where(
+            state.converged,
+            _int_scalar(0),
             jnp.where(
-                state.nfev >= maxfun,
-                2,
+                state.k >= maxiter_limit,
+                _int_scalar(1),
                 jnp.where(
-                    state.ngev >= maxgrad, 3, jnp.where(state.failed, 5, state.status)
+                    state.nfev >= maxfun_limit,
+                    _int_scalar(2),
+                    jnp.where(
+                        state.ngev >= maxgrad_limit,
+                        _int_scalar(3),
+                        jnp.where(state.failed, _int_scalar(5), state.status),
+                    ),
                 ),
             ),
-        ),
-    )
-    return state._replace(status=status)
+        )
+        return state._replace(status=status)
+
+    return jax.jit(run_solver)(state_initial)
 
 
 def _minimize_lbfgs_private(
@@ -226,7 +283,7 @@ def _minimize_lbfgs_private(
     progress_callback=None,
 ):
     return _minimize_lbfgs_private_impl(
-        value_and_grad(fun),
+        _scalar_value_and_grad(fun),
         x0,
         maxiter=maxiter,
         norm=norm,

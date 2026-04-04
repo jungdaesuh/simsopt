@@ -217,10 +217,11 @@ def _rotation_alpha_and_dash_from_dofs(
         return zeros, zeros
 
     rotation_dofs = _mapped_input_dofs(rotation_map, owner_dofs)
+    rotation_scale = _explicit_scalar(rotation_spec.scale)
     return (
-        rotation_spec.scale
+        rotation_scale
         * jaxrotation_pure(rotation_dofs, quadpoints, rotation_spec.order),
-        rotation_spec.scale
+        rotation_scale
         * jaxrotationdash_pure(rotation_dofs, quadpoints, rotation_spec.order),
     )
 

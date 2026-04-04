@@ -329,6 +329,199 @@ def test_transfer_guard_disallow_allows_target_backend_x64_guard():
     )
 
 
+def test_transfer_guard_disallow_allows_lbfgs_ondevice_quadratic_smokes():
+    """Private ondevice L-BFGS lanes must stay transfer-clean under disallow."""
+    _assert_import_check_passes(
+        """
+        import jax
+        import jax.numpy as jnp
+        import numpy as np
+        import simsopt.config as simsopt_config
+        from simsopt.geo.optimizer_jax import (
+            PRIVATE_OPTIMIZER_JAX_VERSION,
+            jax_minimize,
+        )
+
+        simsopt_config.set_backend(
+            "jax_cpu_parity",
+            strict=True,
+            transfer_guard="disallow",
+        )
+        if jax.__version__ != PRIVATE_OPTIMIZER_JAX_VERSION:
+            raise SystemExit(0)
+
+        half = jax.device_put(np.asarray(0.5, dtype=np.float64))
+
+        def quad(x):
+            x = jnp.asarray(x, dtype=jnp.float64)
+            return half * jnp.dot(x, x)
+
+        def quad_value_and_grad(x):
+            x = jnp.asarray(x, dtype=jnp.float64)
+            return half * jnp.dot(x, x), x
+
+        x0 = jnp.asarray(np.array([1.0, -2.0], dtype=np.float64))
+        result = jax_minimize(quad, x0, method="lbfgs-ondevice", maxiter=5)
+        result_vg = jax_minimize(
+            quad_value_and_grad,
+            x0,
+            method="lbfgs-ondevice",
+            maxiter=5,
+            value_and_grad=True,
+        )
+
+        assert result.success is True
+        assert result_vg.success is True
+        assert float(result.fun) < float(quad(x0))
+        assert float(result_vg.fun) < float(quad(x0))
+    """,
+        failure_message="lbfgs-ondevice transfer-guard smoke failed",
+    )
+
+
+def test_transfer_guard_disallow_allows_ondevice_loops_with_host_closure_constants():
+    """Ondevice optimizer loops must compile even when objectives capture host arrays."""
+    _assert_import_check_passes(
+        """
+        import jax
+        import jax.numpy as jnp
+        import numpy as np
+        import simsopt.config as simsopt_config
+        from simsopt.geo.optimizer_jax import (
+            PRIVATE_OPTIMIZER_JAX_VERSION,
+            jax_minimize,
+        )
+
+        simsopt_config.set_backend(
+            "jax_cpu_parity",
+            strict=True,
+            transfer_guard="disallow",
+        )
+        if jax.__version__ != PRIVATE_OPTIMIZER_JAX_VERSION:
+            raise SystemExit(0)
+
+        captured = np.arange(9, dtype=np.float64)
+        half = jax.device_put(np.asarray(0.5, dtype=np.float64))
+        x0 = jax.device_put(np.ones(9, dtype=np.float64))
+
+        def closure_quad(x):
+            x = jnp.asarray(x, dtype=jnp.float64)
+            target = jax.device_put(captured)
+            diff = x - target
+            return half * jnp.dot(diff, diff)
+
+        baseline = float(closure_quad(x0))
+        bfgs = jax_minimize(closure_quad, x0, method="bfgs-ondevice", maxiter=5)
+        lbfgs = jax_minimize(closure_quad, x0, method="lbfgs-ondevice", maxiter=5)
+
+        assert float(bfgs.fun) < baseline
+        assert float(lbfgs.fun) < baseline
+        assert int(bfgs.nit) > 0
+        assert int(lbfgs.nit) > 0
+    """,
+        failure_message="ondevice optimizer loop closure-constant smoke failed",
+    )
+
+
+def test_transfer_guard_disallow_allows_traceable_newton_with_host_closure_constants():
+    """Traceable Newton helpers must not eagerly cross host/device boundaries."""
+    _assert_import_check_passes(
+        """
+        import jax
+        import jax.numpy as jnp
+        import numpy as np
+        import simsopt.config as simsopt_config
+        from simsopt.geo.optimizer_jax import newton_polish_traceable
+
+        simsopt_config.set_backend(
+            "jax_cpu_parity",
+            strict=True,
+            transfer_guard="disallow",
+        )
+
+        captured = np.arange(9, dtype=np.float64)
+        half = jax.device_put(np.asarray(0.5, dtype=np.float64))
+        x0 = jax.device_put(np.ones(9, dtype=np.float64))
+
+        def closure_quad(x):
+            x = jnp.asarray(x, dtype=jnp.float64)
+            target = jax.device_put(captured)
+            diff = x - target
+            return half * jnp.dot(diff, diff)
+
+        result = newton_polish_traceable(closure_quad, x0, maxiter=3, tol=1e-9)
+
+        assert result["x"].shape == x0.shape
+        assert result["grad"].shape == x0.shape
+        assert jnp.all(jnp.isfinite(result["x"]))
+        assert jnp.all(jnp.isfinite(result["grad"]))
+    """,
+        failure_message="traceable Newton closure-constant smoke failed",
+    )
+
+
+def test_transfer_guard_disallow_allows_boozer_residual_host_scalars():
+    """Boozer residual kernels must explicitly materialize legacy host scalars."""
+    _assert_import_check_passes(
+        """
+        import jax
+        import jax.numpy as jnp
+        import numpy as np
+        import simsopt.config as simsopt_config
+        from simsopt.geo.boozer_residual_jax import (
+            boozer_residual_scalar,
+            boozer_residual_vector,
+        )
+
+        simsopt_config.set_backend(
+            "jax_cpu_parity",
+            strict=True,
+            transfer_guard="disallow",
+        )
+
+        B = jax.device_put(np.ones((2, 3, 3), dtype=np.float64))
+        xphi = jax.device_put(np.full((2, 3, 3), 2.0, dtype=np.float64))
+        xtheta = jax.device_put(np.full((2, 3, 3), -0.5, dtype=np.float64))
+        scalar_value = boozer_residual_scalar(1.25, -0.2, B, xphi, xtheta, True)
+        vector_value = boozer_residual_vector(1.25, -0.2, B, xphi, xtheta, True)
+
+        assert scalar_value.shape == ()
+        assert vector_value.shape == (18,)
+        assert jnp.all(jnp.isfinite(vector_value))
+    """,
+        failure_message="boozer residual host-scalar transfer smoke failed",
+    )
+
+
+def test_transfer_guard_disallow_allows_biot_savart_point_chunking():
+    """Point-chunked Biot-Savart kernels must stay traceable under JAX loops."""
+    _assert_import_check_passes(
+        """
+        import jax
+        import numpy as np
+        import simsopt.config as simsopt_config
+        from simsopt.jax_core.biotsavart import biot_savart_B
+
+        simsopt_config.set_backend(
+            "jax_cpu_parity",
+            strict=True,
+            transfer_guard="disallow",
+        )
+
+        points = jax.device_put(np.arange(257 * 3, dtype=np.float64).reshape(257, 3) * 1e-3)
+        gammas = jax.device_put(np.linspace(0.0, 1.0, 2 * 8 * 3, dtype=np.float64).reshape(2, 8, 3))
+        gammadashs = jax.device_put(np.full((2, 8, 3), 0.25, dtype=np.float64))
+        currents = jax.device_put(np.array([1.0, -0.5], dtype=np.float64))
+
+        B = biot_savart_B(points, gammas, gammadashs, currents)
+
+        assert B.shape == (257, 3)
+        assert np.all(np.isfinite(np.asarray(B)))
+    """,
+        failure_message="Biot-Savart point-chunking smoke failed",
+    )
+
+
 def test_transfer_guard_disallow_allows_curvecwsfouriercpp_init():
     """CurveCWSFourierCPP should explicitly materialize quadpoints under disallow mode."""
     _assert_import_check_passes(

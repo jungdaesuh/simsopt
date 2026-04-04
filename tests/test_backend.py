@@ -328,6 +328,24 @@ def test_field_kernel_tuning_allows_explicit_env_overrides(monkeypatch):
     assert tuning.quadrature_block_size == 11
 
 
+def test_transfer_guard_disallow_forces_dense_audit_field_tuning(monkeypatch):
+    _clear_backend_env(monkeypatch)
+    backend = _fresh_backend()
+
+    backend.set_backend(
+        "jax_cpu_parity",
+        strict=True,
+        transfer_guard="disallow",
+        configure_runtime=False,
+    )
+    tuning = backend.get_field_kernel_tuning("jax_cpu_parity")
+
+    assert backend.get_point_chunk_size("jax_cpu_parity") == 0
+    assert tuning.chunk_policy == "stable_default_dense_audit"
+    assert tuning.coil_chunk_size == 0
+    assert tuning.quadrature_block_size == 0
+
+
 def test_explicit_current_mode_policy_preserves_strict_state(monkeypatch):
     _clear_backend_env(monkeypatch)
     backend = _fresh_backend()
