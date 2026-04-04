@@ -315,6 +315,20 @@ def test_transfer_guard_disallow_rejects_implicit_host_to_device_jit_inputs():
     )
 
 
+def test_transfer_guard_disallow_allows_target_backend_x64_guard():
+    """Target-lane x64 checks must not allocate JAX arrays under disallow mode."""
+    _assert_import_check_passes(
+        """
+        import simsopt.config as simsopt_config
+        from simsopt.geo.optimizer_jax import require_target_backend_x64
+
+        simsopt_config.set_backend("jax_cpu_parity", transfer_guard="disallow")
+        require_target_backend_x64("ondevice")
+    """,
+        failure_message="target-backend x64 guard should be transfer-clean",
+    )
+
+
 def test_transfer_guard_disallow_allows_curvecwsfouriercpp_init():
     """CurveCWSFourierCPP should explicitly materialize quadpoints under disallow mode."""
     _assert_import_check_passes(
@@ -338,6 +352,97 @@ def test_transfer_guard_disallow_allows_curvecwsfouriercpp_init():
         assert curve.numquadpoints == 33
     """,
         failure_message="CurveCWSFourierCPP transfer-guard init smoke failed",
+    )
+
+
+def test_transfer_guard_disallow_allows_coil_symmetry_spec_identity_default():
+    """Coil symmetry defaults should build the identity rotation explicitly."""
+    _assert_import_check_passes(
+        """
+        import numpy as np
+        import simsopt.config as simsopt_config
+        from simsopt.jax_core.specs import make_coil_symmetry_spec
+
+        simsopt_config.set_backend("jax_cpu_parity", transfer_guard="disallow")
+        symmetry = make_coil_symmetry_spec(scale=2.5)
+        assert symmetry.rotmat.shape == (3, 3)
+        assert np.allclose(np.asarray(symmetry.rotmat), np.eye(3))
+        assert symmetry.has_rotation is False
+    """,
+        failure_message="coil symmetry identity default should be transfer-clean",
+    )
+
+
+@pytest.mark.parametrize(
+    ("label", "code"),
+    [
+        (
+            "CurveLength",
+            """
+            value = CurveLength(curves[0]).J()
+            assert np.isfinite(float(value))
+            """,
+        ),
+        (
+            "LpCurveCurvature",
+            """
+            value = LpCurveCurvature(curves[0], p=4, threshold=10.0).J()
+            assert np.isfinite(float(value))
+            """,
+        ),
+        (
+            "CurveCurveDistance",
+            """
+            value = CurveCurveDistance(curves, 0.05).J()
+            assert np.isfinite(float(value))
+            """,
+        ),
+        (
+            "CurveSurfaceDistance",
+            """
+            value = CurveSurfaceDistance(curves, surface, 0.02).J()
+            assert np.isfinite(float(value))
+            """,
+        ),
+    ],
+)
+def test_transfer_guard_disallow_allows_legacy_curve_objective_values(label, code):
+    """Legacy curve objectives must use explicit host/device boundaries under disallow."""
+    objective_code = textwrap.indent(textwrap.dedent(code).strip(), " " * 8)
+    _assert_import_check_passes(
+        f"""
+        import numpy as np
+        import simsopt.config as simsopt_config
+        from simsopt.geo import SurfaceRZFourier, create_equally_spaced_curves
+        from simsopt.geo.curveobjectives import (
+            CurveCurveDistance,
+            CurveLength,
+            CurveSurfaceDistance,
+            LpCurveCurvature,
+        )
+
+        simsopt_config.set_backend("jax_cpu_parity", transfer_guard="disallow")
+        curves = create_equally_spaced_curves(
+            2,
+            1,
+            stellsym=False,
+            R0=1.0,
+            R1=0.2,
+            order=3,
+            numquadpoints=33,
+        )
+        surface = SurfaceRZFourier(
+            nfp=1,
+            stellsym=False,
+            mpol=1,
+            ntor=0,
+            quadpoints_phi=np.arange(16) / 16,
+            quadpoints_theta=np.arange(16) / 16,
+        )
+
+{objective_code}
+    """,
+        failure_message=f"{label} transfer-guard value smoke failed",
     )
 
 

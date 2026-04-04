@@ -277,8 +277,36 @@ def _full_curve_cotangent_to_derivative(curve, full_cotangent):
     for opt, (start, end) in curve._full_dof_indices.items():
         if opt.local_full_dof_size == 0:
             continue
-        deriv_data[opt] = full_cotangent[start:end]
+        deriv_data[opt] = _slice_1d(full_cotangent, start, end)
     return deriv_data
+
+
+def _explicit_int_index(value) -> jax.Array:
+    return jax.device_put(np.asarray(int(value), dtype=np.int32))
+
+
+def _slice_1d(array: jax.Array, start: int, end: int) -> jax.Array:
+    return jax.lax.dynamic_slice_in_dim(
+        array,
+        _explicit_int_index(start),
+        slice_size=int(end - start),
+        axis=0,
+    )
+
+
+def _update_1d(array: jax.Array, start: int, values: jax.Array) -> jax.Array:
+    return jax.lax.dynamic_update_slice(
+        array,
+        values,
+        (_explicit_int_index(start),),
+    )
+
+
+def _ones_like_float64(array: jax.Array) -> jax.Array:
+    return jnp.broadcast_to(
+        jax.device_put(np.array(1.0, dtype=np.float64)),
+        array.shape,
+    )
 
 
 def _curve_pullback_data_from_spec(curve, dg, dgd):
@@ -618,8 +646,11 @@ class BiotSavartJAX(Optimizable):
             return full_x
 
         start, end = self.dof_indices[opt]
-        free_indices = np.flatnonzero(opt.local_dofs_free_status)
-        return full_x.at[free_indices].set(coil_dofs[start:end])
+        free_indices = jax.device_put(
+            np.asarray(np.flatnonzero(opt.local_dofs_free_status), dtype=np.int32)
+        )
+        coil_slice = _slice_1d(coil_dofs, start, end)
+        return full_x.at[free_indices].set(coil_slice)
 
     def _full_dofs_from_free_vector(self, opt, coil_dofs):
         """Rebuild one Optimizable graph's full DOF vector from ``coil_dofs``."""
@@ -628,11 +659,15 @@ class BiotSavartJAX(Optimizable):
             dep_full_x = jnp.asarray(dep_opt.local_full_x, dtype=jnp.float64)
             if dep_opt.local_dof_size > 0:
                 dep_start, dep_end = self.dof_indices[dep_opt]
-                free_indices = np.flatnonzero(dep_opt.local_dofs_free_status)
-                dep_full_x = dep_full_x.at[free_indices].set(
-                    coil_dofs[dep_start:dep_end]
+                free_indices = jax.device_put(
+                    np.asarray(
+                        np.flatnonzero(dep_opt.local_dofs_free_status),
+                        dtype=np.int32,
+                    )
                 )
-            full_x = full_x.at[start:end].set(dep_full_x)
+                dep_slice = _slice_1d(coil_dofs, dep_start, dep_end)
+                dep_full_x = dep_full_x.at[free_indices].set(dep_slice)
+            full_x = _update_1d(full_x, start, dep_full_x)
         return full_x
 
     def _curve_dofs_from_free_vector(self, curve, coil_dofs):
@@ -724,7 +759,7 @@ class BiotSavartJAX(Optimizable):
         coil_dofs = self._normalize_explicit_coil_dofs(coil_dofs)
 
         quadpoints = self._curve_quadpoints_jax
-        ones = jnp.ones_like(quadpoints)
+        ones = _ones_like_float64(quadpoints)
 
         curve_dofs = []
         for curve in self._unique_base_curves:

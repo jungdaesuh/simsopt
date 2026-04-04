@@ -86,7 +86,7 @@ def _raise_if_strict_optimizer_fallback(*, method: str, detail: str) -> None:
 
 
 def _x64_enabled():
-    return bool(jnp.zeros(1).dtype == jnp.float64)
+    return bool(jax.config.jax_enable_x64)
 
 
 # ---------------------------------------------------------------------------

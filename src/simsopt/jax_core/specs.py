@@ -7,6 +7,7 @@ from typing import Literal, TypeAlias
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 
 @dataclass(frozen=True)
@@ -412,7 +413,9 @@ def curve_spec_kind(spec: CurveSpec) -> CurveSpecKind:
 
 
 def _as_float64_array(value: object) -> jax.Array:
-    return jnp.asarray(value, dtype=jnp.float64)
+    if isinstance(value, jax.Array):
+        return jnp.asarray(value, dtype=jnp.float64)
+    return jax.device_put(np.asarray(value, dtype=np.float64))
 
 
 def make_coil_group_spec(
@@ -610,7 +613,7 @@ def make_current_value_spec(value: object) -> CurrentValueSpec:
 
 def _normalize_rotmat(rotmat: object | None) -> tuple[jax.Array, bool]:
     if rotmat is None:
-        return jnp.eye(3, dtype=jnp.float64), False
+        return jax.device_put(np.eye(3, dtype=np.float64)), False
     return _as_float64_array(rotmat), True
 
 

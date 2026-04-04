@@ -7,6 +7,7 @@ from typing import cast
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 from ..geo.curve import gamma_curve_on_surface
 from ..geo.framedcurve import (
@@ -41,6 +42,18 @@ from .specs import (
 )
 
 _SURF_TYPE_RZ_FOURIER = "RZ_Fourier"
+
+
+def _explicit_scalar(value: float) -> jax.Array:
+    return jax.device_put(np.array(value, dtype=np.float64))
+
+
+def _ones_like_float64(array: jax.Array) -> jax.Array:
+    return jnp.broadcast_to(_explicit_scalar(1.0), array.shape)
+
+
+def _zeros_like_float64(array: jax.Array) -> jax.Array:
+    return jnp.broadcast_to(_explicit_scalar(0.0), array.shape)
 
 
 def curve_spec_from_curve(curve):
@@ -137,7 +150,7 @@ def _curve_gamma_kernel(spec: CurveSpec, dofs=None):
 
 def _curve_quadpoints(spec: CurveSpec):
     quadpoints = jnp.asarray(spec.quadpoints, dtype=jnp.float64)
-    return quadpoints, jnp.ones_like(quadpoints)
+    return quadpoints, _ones_like_float64(quadpoints)
 
 
 def _curve_geometry_terms_from_kernel(gamma_kernel, quadpoints, tangents, *, order):
@@ -200,7 +213,7 @@ def _rotation_alpha_and_dash_from_dofs(
 ):
     quadpoints = jnp.asarray(rotation_spec.quadpoints, dtype=jnp.float64)
     if isinstance(rotation_spec, ZeroRotationSpec):
-        zeros = jnp.zeros_like(quadpoints)
+        zeros = _zeros_like_float64(quadpoints)
         return zeros, zeros
 
     rotation_dofs = _mapped_input_dofs(rotation_map, owner_dofs)

@@ -3,6 +3,7 @@ from math import sin, cos
 import numpy as np
 
 try:
+    import jax
     from jax import grad as _jax_grad
     from jax import hessian as _jax_hessian
     from jax import jacfwd as _jax_jacfwd
@@ -10,6 +11,7 @@ try:
     from jax import vjp as _jax_vjp
     import jax.numpy as jnp
 except ImportError:
+    jax = None
     _jax_grad = None
     _jax_hessian = None
     _jax_jacfwd = None
@@ -39,6 +41,22 @@ __all__ = [
 
 
 _HAS_JAX = _jax_vjp is not None
+
+
+def _as_jax_float64(value):
+    if not _HAS_JAX:
+        return np.asarray(value, dtype=np.float64)
+    if isinstance(value, jax.Array):
+        return jnp.asarray(value, dtype=jnp.float64)
+    return jax.device_put(np.asarray(value, dtype=np.float64))
+
+
+def _as_numpy_float64(value):
+    if isinstance(value, np.ndarray):
+        return np.asarray(value, dtype=np.float64)
+    if not _HAS_JAX:
+        return np.asarray(value, dtype=np.float64)
+    return np.asarray(jax.device_get(value), dtype=np.float64)
 
 
 def _require_jax(feature_name):
@@ -469,14 +487,24 @@ class Curve(Optimizable):
         """
 
         return self.dgammadash_by_dcoeff_vjp(
-            incremental_arclength_vjp(self.gammadash(), v)
+            _as_numpy_float64(
+                incremental_arclength_vjp(
+                    _as_jax_float64(self.gammadash()),
+                    _as_jax_float64(v),
+                )
+            )
         )
 
     def kappa_impl(self, kappa):
         r"""
         This function implements the curvature, :math:`\kappa(\varphi)`.
         """
-        kappa[:] = np.asarray(kappa_pure(self.gammadash(), self.gammadashdash()))
+        kappa[:] = _as_numpy_float64(
+            kappa_pure(
+                _as_jax_float64(self.gammadash()),
+                _as_jax_float64(self.gammadashdash()),
+            )
+        )
 
     def dkappa_by_dcoeff_impl(self, dkappa_by_dcoeff):
         r"""
@@ -523,8 +551,12 @@ class Curve(Optimizable):
         r"""
         This function returns the torsion, :math:`\tau`, of a curve.
         """
-        torsion[:] = torsion_pure(
-            self.gammadash(), self.gammadashdash(), self.gammadashdashdash()
+        torsion[:] = _as_numpy_float64(
+            torsion_pure(
+                _as_jax_float64(self.gammadash()),
+                _as_jax_float64(self.gammadashdash()),
+                _as_jax_float64(self.gammadashdashdash()),
+            )
         )
 
     def dtorsion_by_dcoeff_impl(self, dtorsion_by_dcoeff):
@@ -580,9 +612,21 @@ class Curve(Optimizable):
         """
 
         return self.dgammadash_by_dcoeff_vjp(
-            kappavjp0(self.gammadash(), self.gammadashdash(), v)
+            _as_numpy_float64(
+                kappavjp0(
+                    _as_jax_float64(self.gammadash()),
+                    _as_jax_float64(self.gammadashdash()),
+                    _as_jax_float64(v),
+                )
+            )
         ) + self.dgammadashdash_by_dcoeff_vjp(
-            kappavjp1(self.gammadash(), self.gammadashdash(), v)
+            _as_numpy_float64(
+                kappavjp1(
+                    _as_jax_float64(self.gammadash()),
+                    _as_jax_float64(self.gammadashdash()),
+                    _as_jax_float64(v),
+                )
+            )
         )
 
     def dtorsion_by_dcoeff_vjp(self, v):
@@ -597,18 +641,33 @@ class Curve(Optimizable):
 
         return (
             self.dgammadash_by_dcoeff_vjp(
-                torsionvjp0(
-                    self.gammadash(), self.gammadashdash(), self.gammadashdashdash(), v
+                _as_numpy_float64(
+                    torsionvjp0(
+                        _as_jax_float64(self.gammadash()),
+                        _as_jax_float64(self.gammadashdash()),
+                        _as_jax_float64(self.gammadashdashdash()),
+                        _as_jax_float64(v),
+                    )
                 )
             )
             + self.dgammadashdash_by_dcoeff_vjp(
-                torsionvjp1(
-                    self.gammadash(), self.gammadashdash(), self.gammadashdashdash(), v
+                _as_numpy_float64(
+                    torsionvjp1(
+                        _as_jax_float64(self.gammadash()),
+                        _as_jax_float64(self.gammadashdash()),
+                        _as_jax_float64(self.gammadashdashdash()),
+                        _as_jax_float64(v),
+                    )
                 )
             )
             + self.dgammadashdashdash_by_dcoeff_vjp(
-                torsionvjp2(
-                    self.gammadash(), self.gammadashdash(), self.gammadashdashdash(), v
+                _as_numpy_float64(
+                    torsionvjp2(
+                        _as_jax_float64(self.gammadash()),
+                        _as_jax_float64(self.gammadashdash()),
+                        _as_jax_float64(self.gammadashdashdash()),
+                        _as_jax_float64(v),
+                    )
                 )
             )
         )
