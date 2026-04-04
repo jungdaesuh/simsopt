@@ -934,6 +934,10 @@ class BiotSavartJAX(Optimizable):
 
         Compatibility wrapper over the immutable grouped-coil spec.
 
+        For legacy curve families that still cannot reconstruct immutable
+        grouped specs directly, this can still end up using the guarded
+        live-graph geometry fallback inside ``coil_set_spec()``.
+
         Returns:
             list of ``(gammas, gammadashs, currents, coil_indices)``
             tuples, one per distinct quadrature count.
@@ -946,7 +950,11 @@ class BiotSavartJAX(Optimizable):
         return list(grouped_field_data_from_spec(self.coil_set_spec()))
 
     def _coil_set_spec_from_live_geometry(self):
-        """Build a grouped coil spec directly from the live coil graph."""
+        """Build a grouped coil spec directly from the live coil graph.
+
+        This is the last compatibility seam after immutable-spec
+        reconstruction has failed.
+        """
         geometry_cache = {}
         gammas = []
         gammadashs = []
@@ -962,7 +970,15 @@ class BiotSavartJAX(Optimizable):
         return grouped_coil_set_spec_from_lists(gammas, gammadashs, currents)
 
     def coil_set_spec(self):
-        """Build the immutable grouped coil spec from the live coil graph."""
+        """Build the grouped coil spec for the current coil graph.
+
+        The preferred path stays in immutable-spec space:
+        1. Reconstruct from the live DOF vector with explicit grouped specs.
+        2. Rebuild from per-coil immutable specs.
+
+        If both fail for a legacy curve family, non-strict mode still takes the
+        guarded live-graph compatibility fallback while strict mode rejects it.
+        """
         try:
             return self._coil_set_spec_from_dofs_prefer_specs(_as_jax_float64(self.x))
         except NotImplementedError:
@@ -979,6 +995,8 @@ class BiotSavartJAX(Optimizable):
                 "live-graph geometry extraction",
             )
 
+        # Legacy compatibility seam: explicit immutable reconstruction is not
+        # available, so rebuild grouped arrays from the live coil graph.
         return self._coil_set_spec_from_live_geometry()
 
     def coil_specs(self):

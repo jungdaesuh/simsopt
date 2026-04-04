@@ -560,7 +560,8 @@ According to a document from March 31, 2026, here is the module-by-module implem
    residual legacy wrapper families and thread it through the remaining
    non-hot-path objective families.
 
-   `BiotSavartJAX` is also thinner than the earlier draft state: explicit DOF
+   `BiotSavartJAX` is also thinner than the earlier draft state: the old CPU
+   curve-geometry / coil-pullback fallbacks are gone, explicit DOF
    reconstruction now prefers immutable per-coil specs, and grouped array
    rebuilding is reduced to a compatibility fallback for legacy curve families
    that still lack immutable-spec support. In strict mode, the hidden

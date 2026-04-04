@@ -193,7 +193,29 @@ def _assert_hidden_spec_fallback_warns(
             + rf".*{re.escape(api_name)}\(\).*legacy adapter seam"
         ),
     ):
-        callback()
+        return callback()
+
+
+def _assert_grouped_coil_set_spec_allclose(observed, expected, *, atol=1e-12):
+    assert isinstance(observed, GroupedCoilSetSpec)
+    assert len(observed.groups) == len(expected.groups)
+    for observed_group, expected_group in zip(observed.groups, expected.groups):
+        assert observed_group.coil_indices == expected_group.coil_indices
+        np.testing.assert_allclose(
+            np.asarray(observed_group.gammas),
+            np.asarray(expected_group.gammas),
+            atol=atol,
+        )
+        np.testing.assert_allclose(
+            np.asarray(observed_group.gammadashs),
+            np.asarray(expected_group.gammadashs),
+            atol=atol,
+        )
+        np.testing.assert_allclose(
+            np.asarray(observed_group.currents),
+            np.asarray(expected_group.currents),
+            atol=atol,
+        )
 
 
 def _explicit_grouped_coil_derivative(coils, d_coil_arrays, coil_indices):
@@ -1690,6 +1712,34 @@ class TestAdjointSolveConsistency:
             bs_jax.coil_set_spec,
             api_name="coil_set_spec",
         )
+
+    def test_non_strict_mode_live_graph_spec_fallback_in_coil_set_spec_matches_legacy_path(
+        self,
+        monkeypatch,
+        request,
+    ):
+        curve = CurveXYZFourier(16, 1)
+        curve.x = np.array([0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9])
+        current = Current(1.23)
+        bs_jax = BiotSavartJAX([Coil(curve, current)])
+        monkeypatch.setattr(
+            bs_jax,
+            "_coil_set_spec_from_dofs_prefer_specs",
+            lambda _coil_dofs: (_ for _ in ()).throw(NotImplementedError),
+        )
+        monkeypatch.setattr(
+            bs_jax,
+            "coil_specs",
+            lambda: (_ for _ in ()).throw(NotImplementedError),
+        )
+        expected = bs_jax._coil_set_spec_from_live_geometry()
+        observed = _assert_hidden_spec_fallback_warns(
+            monkeypatch,
+            request,
+            bs_jax.coil_set_spec,
+            api_name="coil_set_spec",
+        )
+        _assert_grouped_coil_set_spec_allclose(observed, expected)
 
     def test_legacy_objects_expose_curve_current_coil_specs(self):
         """Legacy hot-path objects should expose immutable JAX specs."""
