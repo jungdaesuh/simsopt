@@ -21,7 +21,7 @@ SINGLE_STAGE_MPOL="8"
 SINGLE_STAGE_NTOR="6"
 SINGLE_STAGE_MAXITER="300"
 SINGLE_STAGE_OPTIMIZER_BACKEND="ondevice"
-SINGLE_STAGE_BOOZER_OPTIMIZER_BACKEND="scipy"
+SINGLE_STAGE_BOOZER_OPTIMIZER_BACKEND=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -183,34 +183,33 @@ if [[ " ${STAGE2_RUNG_NAMES[*]} " == *" stage2_warm_repro "* ]]; then
       --output-json "${RESULTS_DIR}/stage2_warm_repro.json" || OVERALL_RC=1
 fi
 
+single_stage_probe_args=(
+  --equilibria-dir "${EQUILIBRIA_DIR}"
+  --plasma-surf-filename "${PLASMA_SURF_FILENAME}"
+  --stage2-bs-path "${STAGE2_BS_PATH}"
+  --nphi "${SINGLE_STAGE_NPHI}"
+  --ntheta "${SINGLE_STAGE_NTHETA}"
+  --mpol "${SINGLE_STAGE_MPOL}"
+  --ntor "${SINGLE_STAGE_NTOR}"
+  --optimizer-backend "${SINGLE_STAGE_OPTIMIZER_BACKEND}"
+  --maxiter "${SINGLE_STAGE_MAXITER}"
+)
+if [[ -n "${SINGLE_STAGE_BOOZER_OPTIMIZER_BACKEND}" ]]; then
+  single_stage_probe_args+=(
+    --boozer-optimizer-backend "${SINGLE_STAGE_BOOZER_OPTIMIZER_BACKEND}"
+  )
+fi
+
 run_probe single_stage_cold "${RESULTS_DIR}/single_stage_cold.json" \
   python "${REPO_ROOT}/benchmarks/single_stage_init_parity.py" \
     --platform "${SINGLE_STAGE_PLATFORM}" \
-    --equilibria-dir "${EQUILIBRIA_DIR}" \
-    --plasma-surf-filename "${PLASMA_SURF_FILENAME}" \
-    --stage2-bs-path "${STAGE2_BS_PATH}" \
-    --nphi "${SINGLE_STAGE_NPHI}" \
-    --ntheta "${SINGLE_STAGE_NTHETA}" \
-    --mpol "${SINGLE_STAGE_MPOL}" \
-    --ntor "${SINGLE_STAGE_NTOR}" \
-    --optimizer-backend "${SINGLE_STAGE_OPTIMIZER_BACKEND}" \
-    --boozer-optimizer-backend "${SINGLE_STAGE_BOOZER_OPTIMIZER_BACKEND}" \
-    --maxiter "${SINGLE_STAGE_MAXITER}" \
+    "${single_stage_probe_args[@]}" \
     --output-json "${RESULTS_DIR}/single_stage_cold.json" || OVERALL_RC=1
 
 run_probe single_stage_warm "${RESULTS_DIR}/single_stage_warm.json" \
   python "${REPO_ROOT}/benchmarks/single_stage_init_parity.py" \
     --platform "${SINGLE_STAGE_PLATFORM}" \
-    --equilibria-dir "${EQUILIBRIA_DIR}" \
-    --plasma-surf-filename "${PLASMA_SURF_FILENAME}" \
-    --stage2-bs-path "${STAGE2_BS_PATH}" \
-    --nphi "${SINGLE_STAGE_NPHI}" \
-    --ntheta "${SINGLE_STAGE_NTHETA}" \
-    --mpol "${SINGLE_STAGE_MPOL}" \
-    --ntor "${SINGLE_STAGE_NTOR}" \
-    --optimizer-backend "${SINGLE_STAGE_OPTIMIZER_BACKEND}" \
-    --boozer-optimizer-backend "${SINGLE_STAGE_BOOZER_OPTIMIZER_BACKEND}" \
-    --maxiter "${SINGLE_STAGE_MAXITER}" \
+    "${single_stage_probe_args[@]}" \
     --output-json "${RESULTS_DIR}/single_stage_warm.json" || OVERALL_RC=1
 
 python - "${RESULTS_DIR}" "${EXPECTED_PROBES[@]}" <<'PY'

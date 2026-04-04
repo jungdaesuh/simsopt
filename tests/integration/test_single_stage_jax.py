@@ -4106,6 +4106,8 @@ class TestBoozerResidualAdjointFD:
 # validate the pure array-backed custom_vjp objective built by
 # make_traceable_objective(), while Tests 3a/3b continue to pin the lower-level
 # functional transition seam exposed by run_code_functional().
+# This does not claim that the whole repo is fallback-free: reference/transitional
+# optimizer lanes and compatibility adapters still exist elsewhere by design.
 # =======================================================================
 
 

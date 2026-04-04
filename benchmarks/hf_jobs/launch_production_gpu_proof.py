@@ -122,6 +122,17 @@ def _build_optional_stage2_geometry_flag(args: argparse.Namespace) -> str:
     )
 
 
+def _build_optional_single_stage_boozer_backend_flag(
+    args: argparse.Namespace,
+) -> str:
+    if args.single_stage_boozer_optimizer_backend is None:
+        return ""
+    return (
+        "--single-stage-boozer-optimizer-backend "
+        f"{shlex.quote(args.single_stage_boozer_optimizer_backend)}"
+    )
+
+
 def _resolve_repo_defaults(args: argparse.Namespace) -> argparse.Namespace:
     if args.repo_url is None:
         args.repo_url = _resolve_default_repo_url()
@@ -338,7 +349,7 @@ def _build_job_command(args: argparse.Namespace, *, resolved_repo_sha: str) -> s
             f"--single-stage-ntor {args.single_stage_ntor} "
             f"--single-stage-maxiter {args.single_stage_maxiter} "
             f"--single-stage-optimizer-backend {shlex.quote(args.single_stage_optimizer_backend)} "
-            f"--single-stage-boozer-optimizer-backend {shlex.quote(args.single_stage_boozer_optimizer_backend)}"
+            f"{_build_optional_single_stage_boozer_backend_flag(args)}"
         ),
     ]
     return "\n".join(command_lines)
@@ -410,7 +421,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--single-stage-boozer-optimizer-backend",
         choices=("scipy", "hybrid", "ondevice"),
-        default="scipy",
+        default=None,
+        help=(
+            "Optional override for the single-stage inner Boozer LS backend. "
+            "Defaults to the outer single-stage optimizer backend when omitted."
+        ),
     )
     parser.add_argument("--single-stage-nphi", type=int, default=255)
     parser.add_argument("--single-stage-ntheta", type=int, default=64)

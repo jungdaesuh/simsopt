@@ -335,7 +335,7 @@ The clearest evidence is that you already have:
 * a distinct backend selector (`cpu` vs `jax`, plus JAX platform selection), 
 * a `BoozerSurfaceJAX` class that explicitly defines `scipy` as the trusted reference lane, `hybrid` as the transitional lane, and `ondevice` as the target full-GPU lane, 
 * a substantial parity and validation ladder covering Stage 2 value/gradient parity, single-stage init parity, run-code parity, and adjoint/FD validation,    
-* and, most importantly, a **traceable functional path** around `run_code_functional()` / `make_traceable_objective()` that is explicitly intended to avoid the stateful path and route through JAX control flow. 
+* and, most importantly, a **traceable target path** around `run_code_traceable()` / `make_traceable_objective()` that is explicitly intended to avoid the stateful path and route through JAX control flow, while `run_code_functional()` remains the lower-level transition seam.
 
 That aligns very well with the right JAX direction, because JAX transformations fundamentally want **pure functions**, not hidden mutable state. ([JAX][1])
 
@@ -352,7 +352,7 @@ The second major strength is the **testing philosophy**. The repo is not just te
 
 That is exactly the kind of parity contract I recommended: not vague “GPU should match CPU,” but concrete staged checks.
 
-The third major strength is the **traceable objective contract**. Your tests explicitly say the goal is to make the single-stage objective fully JAX-traceable so the outer optimizer can route through JAX control flow rather than the host-callback fallback, and they describe `run_code_functional()` as a pure functional inner solve that takes explicit arrays and does not mutate `self.*`.  That is the right long-term architecture, because it matches JAX’s pure-function model. ([JAX][1])
+The third major strength is the **traceable objective contract**. Your tests explicitly say the goal is to make the single-stage objective fully JAX-traceable so the outer optimizer can route through JAX control flow rather than the host-callback fallback, and they now distinguish `run_code_functional()` as the non-mutating but still transitional seam from the actual trace-safe route built around `run_code_traceable()` plus the traceable objective builders. That is the right long-term architecture, because it matches JAX’s pure-function model. ([JAX][1])
 
 You are also testing purity rather than just assuming it. The traceable-path tests snapshot `bs_jax.x`, surface DOFs, `booz_jax.res`, dirty flags, and caches, then verify the traceable objective does **not** mutate them and does **not** accumulate child graph state.   That is very good engineering.
 

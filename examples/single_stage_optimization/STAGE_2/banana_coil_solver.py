@@ -244,7 +244,7 @@ def parse_args():
         help=(
             "Stage 2 optimizer backend. "
             "'scipy' is the trusted reference lane; "
-            "'ondevice' is the private full-GPU target lane. "
+            "'ondevice' is the private JAX target optimizer lane. "
             "'hybrid' is accepted for contract consistency but not currently "
             "supported for the Stage 2 outer loop."
         ),

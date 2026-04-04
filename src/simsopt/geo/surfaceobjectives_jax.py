@@ -1045,7 +1045,13 @@ def _traceable_predict_warmstart_x(
 
 
 def _build_traceable_objective_state(booz_jax, bs_jax, iota_target):
-    """Return the shared pure-JAX state used by the traceable objective builders."""
+    """Return the shared state used by the traceable objective builders.
+
+    This setup intentionally performs one-time host-flavored warm-start and
+    baseline-value materialization before building the compiled target-lane
+    closures. The resulting closures are the trace-safe hot path; this helper
+    itself is bootstrap code, not the compiled optimization loop.
+    """
     _ensure_solved(booz_jax)
 
     if booz_jax.boozer_type == "ls":
@@ -1267,11 +1273,11 @@ def make_traceable_objective(booz_jax, bs_jax, iota_target):
 def make_traceable_objective_value_and_grad(booz_jax, bs_jax, iota_target):
     """Build a pure function ``f(coil_dofs) -> (value, grad)`` for ondevice L-BFGS.
 
-    This is the production fused value-and-gradient contract for the single-stage
-    target lane. It shares the exact forward and implicit-gradient implementation
-    used by :func:`make_traceable_objective`, but returns both outputs from one
-    compiled entrypoint so the outer optimizer can avoid rebuilding autodiff
-    transforms around a scalar objective.
+    This is the fused outer-optimizer objective contract for the single-stage
+    ondevice target lane. It shares the exact forward and implicit-gradient
+    implementation used by :func:`make_traceable_objective`, but returns both
+    outputs from one compiled entrypoint so the outer optimizer can avoid
+    rebuilding autodiff transforms around a scalar objective.
     """
     return make_traceable_objective_runtime_bundle(
         booz_jax,

@@ -222,6 +222,42 @@ def test_run_production_gpu_proof_adds_optional_repro_rung(tmp_path):
     assert "--geometry-rel-tol" in repro_calls[0]["argv"]
 
 
+def test_run_production_gpu_proof_omits_boozer_override_by_default(tmp_path):
+    repo_root, call_log = _build_fake_proof_repo(tmp_path)
+    results_dir = tmp_path / "results"
+    stage2_seed = tmp_path / "stage2_seed.json"
+    stage2_seed.write_text("{}", encoding="utf-8")
+
+    completed = subprocess.run(
+        [
+            "bash",
+            str(repo_root / "benchmarks" / "hf_jobs" / "run_production_gpu_proof.sh"),
+            "--results-dir",
+            str(results_dir),
+            "--equilibria-dir",
+            str(repo_root / "examples" / "single_stage_optimization" / "equilibria"),
+            "--stage2-bs-path",
+            str(stage2_seed),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={**os.environ, "HEARTBEAT_INTERVAL_S": "0.01"},
+    )
+
+    assert completed.returncode == 0
+    call_records = [
+        json.loads(line) for line in call_log.read_text(encoding="utf-8").splitlines()
+    ]
+    single_stage_calls = [
+        record
+        for record in call_records
+        if record["output_json"].endswith("single_stage_cold.json")
+    ]
+    assert len(single_stage_calls) == 1
+    assert "--boozer-optimizer-backend" not in single_stage_calls[0]["argv"]
+
+
 def test_build_stage2_hf_plan_keeps_smoke_jobs_geometry_report_only():
     plan = build_stage2_hf_plan(20, None)
 
@@ -417,6 +453,7 @@ def test_launch_production_gpu_proof_dry_run_omits_smoke_geometry_override(tmp_p
     assert '"effective_geometry_rel_tol": null' in completed.stdout
     assert '"stage2_geometry_policy": "report-only"' in completed.stdout
     assert "--geometry-rel-tol" not in completed.stdout
+    assert "--single-stage-boozer-optimizer-backend" not in completed.stdout
     assert "stage2_warm_repro" not in completed.stdout
 
 

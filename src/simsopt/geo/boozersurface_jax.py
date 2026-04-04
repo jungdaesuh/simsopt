@@ -1450,7 +1450,7 @@ class BoozerSurfaceJAX(Optimizable):
         )
 
     def run_code_traceable(self, coil_source, sdofs, iota, G):
-        """Trace-safe pure-array inner solve for the production target lane.
+        """Trace-safe pure-array inner solve for the ondevice target lane.
 
         Accepts a preferred immutable ``GroupedCoilSetSpec`` or the legacy
         grouped-array payload plus warm-start state, returns only JAX arrays /
@@ -2224,11 +2224,11 @@ class BoozerSurfaceJAX(Optimizable):
         ``self.surface`` DOFs.
 
         This is the transitional pure-functional seam between the legacy
-        object API and the fully trace-safe target lane. It eliminates self
-        mutation, but **it is not itself JIT/grad-traceable** because it still
-        uses ``float()`` casts, ``np.asarray`` conversions, and Python ``if``
-        on solver outputs. The fully trace-safe path lives in
-        ``run_code_traceable()`` plus
+        object API and the current pure-JAX single-stage target-lane path.
+        It eliminates self mutation, but **it is not itself JIT/grad-traceable**
+        because it still uses ``float()`` casts, ``np.asarray`` conversions,
+        and Python ``if`` on solver outputs. The trace-safe target-lane path
+        lives in ``run_code_traceable()`` plus
         ``make_traceable_objective_runtime_bundle()``.
 
         Differences from the stateful ``run_code()`` result dict:
