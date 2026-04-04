@@ -1,8 +1,8 @@
 # Conda environment for simsopt JAX development.
 # All Python dependency versions are defined in pyproject.toml (SSOT).
-# This file only adds conda-specific packages (compilers, system libs)
-# and installs simsopt in editable mode with the [JAX,dev] extras.
-name: columbia-jax-0.9.2
+# This file only adds conda-specific packages (compilers, system libs).
+# Install simsopt and the desired JAX extras separately after activation.
+name: jax-0.9.2
 channels:
   - conda-forge
 dependencies:
@@ -12,5 +12,3 @@ dependencies:
   - cmake
   - ninja
   - pybind11<3
-  - pip:
-      - -e ".[JAX,dev]"

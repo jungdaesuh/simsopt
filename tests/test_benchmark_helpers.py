@@ -1930,11 +1930,18 @@ def test_weekly_tier5_manifest_targets_ondevice_benchmark_mode():
 def test_weekly_tier5_workflow_sets_cache_and_ondevice_contract():
     workflow_text = _weekly_tier5_workflow_path().read_text(encoding="utf-8")
 
+    assert "BENCHMARK_ENV_NAME: jax-0.9.2" in workflow_text
+    assert "BENCHMARK_ENV_FILE: envs/jax-0.9.2.yml" in workflow_text
     assert "JAX_COMPILATION_CACHE_DIR" in workflow_text
     assert "SIMSOPT_BACKEND_MODE: jax_gpu_fast" in workflow_text
     assert 'SIMSOPT_BACKEND_STRICT: "1"' in workflow_text
     assert "SIMSOPT_JAX_TRANSFER_GUARD: disallow" in workflow_text
     assert "setuptools_scm" not in workflow_text
+    assert 'grep -Fxq "$BENCHMARK_ENV_NAME"' in workflow_text
+    assert 'conda env create -f "$BENCHMARK_ENV_FILE"' in workflow_text
+    assert 'conda env update -n "$BENCHMARK_ENV_NAME" -f "$BENCHMARK_ENV_FILE" --prune' in workflow_text
+    assert 'python -m pip install -e ".[JAX_GPU,dev]"' in workflow_text
+    assert 'conda run --no-capture-output -n "$BENCHMARK_ENV_NAME" python -V' in workflow_text
     assert "--optimizer-backend ondevice" in workflow_text
     assert "--benchmark-mode" in workflow_text
 

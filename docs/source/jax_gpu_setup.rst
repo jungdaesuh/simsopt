@@ -28,16 +28,16 @@ Dependencies
 
 Base install (CPU development/testing)::
 
-    conda env create -f envs/columbia-jax-0.9.2.yml
-    conda activate columbia-jax-0.9.2
-    pip install -e ".[JAX]"
+    conda env create -f envs/jax-0.9.2.yml
+    conda activate jax-0.9.2
+    pip install -e ".[JAX,dev]"
 
 GPU install (CUDA 12)::
 
-    pip install "simsopt[JAX_GPU]"
+    pip install -e ".[JAX_GPU,dev]"
 
-    # or manually:
-    pip install "jax[cuda12]==0.9.2"
+    # or for a non-editable runtime:
+    pip install "simsopt[JAX_GPU]"
 
 Both the public and private optimizer lanes are Python ``3.11+`` with JAX /
 jaxlib ``0.9.2``. The trusted reference backend remains
@@ -189,14 +189,13 @@ GPU Node Quick-Start
 
 2. **Create environment**::
 
-       conda env create -f envs/columbia-jax-0.9.2.yml
-       conda activate columbia-jax-0.9.2
-       pip install "jax[cuda12]==0.9.2"
+       conda env create -f envs/jax-0.9.2.yml
+       conda activate jax-0.9.2
 
 3. **Install simsopt**::
 
        cd simsopt-jax
-       pip install -e ".[JAX_GPU]"
+       pip install -e ".[JAX_GPU,dev]"
 
 4. **Verify GPU access**::
 

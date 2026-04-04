@@ -38,7 +38,7 @@ def _require_private_optimizer_runtime(x0):
         raise RuntimeError(
             f"On-device optimizer is validated on JAX "
             f"{PRIVATE_OPTIMIZER_JAX_VERSION}; found {jax.__version__}. "
-            "Use envs/columbia-jax-0.9.2.yml for the supported runtime or "
+            "Use envs/jax-0.9.2.yml for the supported runtime or "
             "fall back to optimizer_backend='scipy'."
         )
     if not _x64_enabled():
