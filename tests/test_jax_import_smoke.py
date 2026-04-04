@@ -80,11 +80,10 @@ def _block_private_optimizer_imports():
     """
 
 
-def _strip_simsopt_editable_finders():
-    return """
-        import sys
-
-        sys.meta_path = [
+def _strip_simsopt_editable_finders(*, include_import=True):
+    import_block = "import sys\n\n" if include_import else ""
+    return f"""
+        {import_block}sys.meta_path = [
             finder
             for finder in sys.meta_path
             if type(finder).__module__ != "_simsopt_editable"
@@ -100,6 +99,49 @@ def test_import_package_root():
         assert hasattr(simsopt, "__version__")
     """)
     assert rc == 0, f"import simsopt failed:\n{err}"
+
+
+def test_import_package_root_without_generated_version_file():
+    """Raw source imports should tolerate a missing generated _version.py."""
+    init_path = Path(_SRC_DIR) / "simsopt" / "__init__.py"
+    strip_editable_finders = textwrap.indent(
+        textwrap.dedent(_strip_simsopt_editable_finders(include_import=False)).strip(),
+        " " * 12,
+    )
+    _assert_import_check_passes(
+        f"""
+        import sys
+        import tempfile
+        from pathlib import Path
+
+        src_init = Path({str(init_path)!r}).read_text(encoding="utf-8")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            src_root = Path(tmp) / "src"
+            package_root = src_root / "simsopt"
+            (package_root / "backend").mkdir(parents=True)
+            (package_root / "_core").mkdir(parents=True)
+            (package_root / "__init__.py").write_text(src_init, encoding="utf-8")
+            (package_root / "backend" / "__init__.py").write_text(
+                "def apply_jax_runtime_config():\\n    return None\\n\\n"
+                "def should_eagerly_configure_jax():\\n    return False\\n",
+                encoding="utf-8",
+            )
+            (package_root / "_core" / "__init__.py").write_text(
+                "def make_optimizable(*args, **kwargs):\\n    return None\\n\\n"
+                "def load(*args, **kwargs):\\n    return None\\n\\n"
+                "def save(*args, **kwargs):\\n    return None\\n",
+                encoding="utf-8",
+            )
+{strip_editable_finders}
+            sys.path.insert(0, str(src_root))
+            import simsopt
+
+            assert Path(simsopt.__file__).resolve().is_relative_to(package_root.resolve())
+            assert simsopt.__version__ == "0+unknown"
+        """,
+        failure_message="raw source import should not require generated _version.py",
+    )
 
 
 def test_repo_bootstrap_synthesizes_version_for_clean_source_tree():

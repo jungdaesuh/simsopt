@@ -42,7 +42,10 @@ except ImportError:
 from ._core import make_optimizable, load, save
 
 # VERSION info
-from ._version import version as __version__
+try:
+    from ._version import version as __version__
+except ImportError:
+    __version__ = "0+unknown"
 
 # Expose XSIMD dependency in simsoptpp (optional: absent in JAX-only envs)
 try:

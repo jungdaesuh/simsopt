@@ -1044,6 +1044,36 @@ def should_build_stage2_target_objective(field_backend, optimizer_backend):
     ).use_scalar_objective
 
 
+def resolve_stage2_target_lane_requirements(
+    field_backend,
+    optimizer_backend,
+    *,
+    probe_only,
+    export_objective_json,
+):
+    """Resolve target-lane requirements before building explicit objectives."""
+    needs_target_probe_payload = (
+        export_objective_json is not None and optimizer_backend == "ondevice"
+    )
+    probe_only_target_payload = (
+        probe_only and needs_target_probe_payload and field_backend != "jax"
+    )
+    outer_contract = None
+    use_scalar_objective = False
+    if not probe_only_target_payload:
+        outer_contract = resolve_stage2_optimizer_contract(
+            field_backend,
+            optimizer_backend,
+        )
+        use_scalar_objective = outer_contract.use_scalar_objective
+    return (
+        outer_contract,
+        use_scalar_objective,
+        needs_target_probe_payload,
+        probe_only_target_payload,
+    )
+
+
 def validate_stage2_target_objective_dof_layout(
     target_objective_bundle,
     dofs,
@@ -1527,6 +1557,39 @@ if __name__ == "__main__":
     # Threshold and weight for the coil curvature penalty
     CURVATURE_WEIGHT = args.curvature_weight
     CURVATURE_THRESHOLD = args.curvature_threshold
+    SQUARED_FLUX_WEIGHT = args.squared_flux_weight
+
+    (
+        outer_contract,
+        use_scalar_objective,
+        needs_target_probe_payload,
+        probe_only_target_payload,
+    ) = resolve_stage2_target_lane_requirements(
+        args.backend,
+        args.optimizer_backend,
+        probe_only=args.probe_only,
+        export_objective_json=args.export_objective_json,
+    )
+
+    target_objective_bundle = None
+    needs_target_objective_bundle = use_scalar_objective or needs_target_probe_payload
+    if needs_target_objective_bundle:
+        target_objective_bundle = build_stage2_target_objective(
+            surface=new_surf,
+            tf_coils=tf_coils,
+            banana_coils=new_banana_coils,
+            banana_curve=new_banana_curve,
+            penalty_config=Stage2PenaltyConfig(
+                squared_flux_weight=SQUARED_FLUX_WEIGHT,
+                length_weight=LENGTH_WEIGHT,
+                length_target=LENGTH_TARGET,
+                cc_weight=CC_WEIGHT,
+                cc_threshold=CC_THRESHOLD,
+                curvature_weight=CURVATURE_WEIGHT,
+                curvature_threshold=CURVATURE_THRESHOLD,
+                curvature_p_norm=args.curvature_p_norm,
+            ),
+        )
 
     # Define the individual terms objective function:
     new_bs_jax = None
@@ -1557,7 +1620,6 @@ if __name__ == "__main__":
 
     # TOTAL OBJECTIVE FUNCTION -
     # we'll penalize the coil length, coil-coil distance, and curvature while minimizing the normal field
-    SQUARED_FLUX_WEIGHT = args.squared_flux_weight
     JF = (
         SQUARED_FLUX_WEIGHT * Jf
         + LENGTH_WEIGHT * Jls_penalty
@@ -1575,46 +1637,14 @@ if __name__ == "__main__":
             args.override_dofs_json, np.asarray(dofs).shape
         )
         JF.x = np.asarray(dofs, dtype=float)
-    trajectory: list[dict[str, object]] | None = [] if args.trajectory_json else None
-    final_snapshot = None
-    optimizer_timings = None
-    target_objective_bundle = None
-    needs_target_probe_payload = (
-        args.export_objective_json is not None and args.optimizer_backend == "ondevice"
-    )
-    probe_only_target_payload = (
-        args.probe_only and needs_target_probe_payload and args.backend != "jax"
-    )
-    outer_contract = None
-    use_scalar_objective = False
-    if not probe_only_target_payload:
-        outer_contract = resolve_stage2_optimizer_contract(
-            args.backend,
-            args.optimizer_backend,
-        )
-        use_scalar_objective = outer_contract.use_scalar_objective
-    needs_target_objective_bundle = use_scalar_objective or needs_target_probe_payload
-    if needs_target_objective_bundle:
-        target_objective_bundle = build_stage2_target_objective(
-            surface=new_surf,
-            tf_coils=tf_coils,
-            banana_coils=new_banana_coils,
-            banana_curve=new_banana_curve,
-            penalty_config=Stage2PenaltyConfig(
-                squared_flux_weight=SQUARED_FLUX_WEIGHT,
-                length_weight=LENGTH_WEIGHT,
-                length_target=LENGTH_TARGET,
-                cc_weight=CC_WEIGHT,
-                cc_threshold=CC_THRESHOLD,
-                curvature_weight=CURVATURE_WEIGHT,
-                curvature_threshold=CURVATURE_THRESHOLD,
-                curvature_p_norm=args.curvature_p_norm,
-            ),
-        )
+    if target_objective_bundle is not None:
         validate_stage2_target_objective_dof_layout(
             target_objective_bundle,
             dofs,
         )
+    trajectory: list[dict[str, object]] | None = [] if args.trajectory_json else None
+    final_snapshot = None
+    optimizer_timings = None
     if args.record_warm_timings and not use_scalar_objective:
         raise ValueError(
             "--record-warm-timings is only supported on the JAX Stage 2 ondevice lane."

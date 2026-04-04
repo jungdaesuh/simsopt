@@ -463,7 +463,7 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertEqual(args.optimizer_backend, "ondevice")
         self.assertIsNone(args.boozer_optimizer_backend)
 
-    def test_parse_args_defaults_target_lane_sync_to_per_accept(self):
+    def test_parse_args_defaults_target_lane_sync_to_final_only(self):
         module = self.load_module()
 
         with patch.object(
@@ -473,7 +473,7 @@ class SingleStageExampleTests(unittest.TestCase):
         ):
             args = module.parse_args()
 
-        self.assertEqual(args.target_lane_accepted_step_sync, "per-accept")
+        self.assertEqual(args.target_lane_accepted_step_sync, "final-only")
         self.assertFalse(args.profile_target_lane)
         self.assertFalse(args.experimental_target_lane_value_and_grad)
 

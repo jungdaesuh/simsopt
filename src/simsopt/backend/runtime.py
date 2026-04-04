@@ -146,7 +146,7 @@ _DEFAULT_TRANSFER_GUARD_BY_MODE = {
     "native_cpu": None,
     "jax_cpu_parity": "log",
     "jax_gpu_parity": "log",
-    "jax_gpu_fast": None,
+    "jax_gpu_fast": "log",
 }
 _BackendCacheClearCallbackKey = tuple[str, str]
 _backend_cache_clear_callbacks: dict[

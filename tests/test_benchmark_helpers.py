@@ -1934,6 +1934,7 @@ def test_weekly_tier5_workflow_sets_cache_and_ondevice_contract():
     assert "SIMSOPT_BACKEND_MODE: jax_gpu_fast" in workflow_text
     assert 'SIMSOPT_BACKEND_STRICT: "1"' in workflow_text
     assert "SIMSOPT_JAX_TRANSFER_GUARD: disallow" in workflow_text
+    assert "setuptools_scm" not in workflow_text
     assert "--optimizer-backend ondevice" in workflow_text
     assert "--benchmark-mode" in workflow_text
 

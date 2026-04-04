@@ -240,7 +240,7 @@ def test_fast_mode_policy_helpers(monkeypatch):
     _assert_transfer_guard_resolution(
         backend,
         mode="jax_gpu_fast",
-        expected=None,
+        expected="log",
     )
 
 
@@ -382,7 +382,7 @@ def test_jax_modes_do_not_enable_compilation_cache_without_opt_in(monkeypatch):
     assert policy.compilation_cache_dir is None
 
 
-def test_apply_jax_runtime_config_skips_none_transfer_guard(monkeypatch):
+def test_apply_jax_runtime_config_applies_fast_mode_transfer_guard(monkeypatch):
     _clear_backend_env(monkeypatch)
     backend = _fresh_backend()
     calls: list[tuple[str, object]] = []
@@ -399,7 +399,7 @@ def test_apply_jax_runtime_config_skips_none_transfer_guard(monkeypatch):
     assert ("jax_platforms", "cuda") in calls
     assert ("jax_enable_x64", True) in calls
     assert ("jax_debug_nans", False) in calls
-    assert ("jax_transfer_guard", None) not in calls
+    assert ("jax_transfer_guard", "log") in calls
 
 
 def test_strict_fallback_helper_ignores_native_cpu(monkeypatch):

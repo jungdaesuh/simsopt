@@ -2420,6 +2420,55 @@ class TestStage2OptimizerContract:
             is expected
         )
 
+    @pytest.mark.parametrize(
+        (
+            "field_backend",
+            "optimizer_backend",
+            "probe_only",
+            "export_objective_json",
+            "expects_contract",
+            "expects_scalar_objective",
+            "expects_target_probe_payload",
+            "expects_probe_only_target_payload",
+        ),
+        [
+            ("cpu", "scipy", False, None, True, False, False, False),
+            ("jax", "scipy", False, "probe.json", True, False, False, False),
+            ("jax", "ondevice", False, None, True, True, False, False),
+            ("jax", "ondevice", False, "probe.json", True, True, True, False),
+            ("cpu", "ondevice", True, "probe.json", False, False, True, True),
+        ],
+    )
+    def test_resolve_stage2_target_lane_requirements(
+        self,
+        field_backend,
+        optimizer_backend,
+        probe_only,
+        export_objective_json,
+        expects_contract,
+        expects_scalar_objective,
+        expects_target_probe_payload,
+        expects_probe_only_target_payload,
+    ):
+        stage2_script = _load_stage2_script_module()
+
+        (
+            outer_contract,
+            use_scalar_objective,
+            needs_target_probe_payload,
+            probe_only_target_payload,
+        ) = stage2_script.resolve_stage2_target_lane_requirements(
+            field_backend,
+            optimizer_backend,
+            probe_only=probe_only,
+            export_objective_json=export_objective_json,
+        )
+
+        assert (outer_contract is not None) is expects_contract
+        assert use_scalar_objective is expects_scalar_objective
+        assert needs_target_probe_payload is expects_target_probe_payload
+        assert probe_only_target_payload is expects_probe_only_target_payload
+
     def test_run_stage2_optimizer_uses_shared_adapter(
         self,
         monkeypatch,
