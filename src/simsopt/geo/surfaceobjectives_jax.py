@@ -1047,10 +1047,11 @@ def _traceable_predict_warmstart_x(
 def _build_traceable_objective_state(booz_jax, bs_jax, iota_target):
     """Return the shared state used by the traceable objective builders.
 
-    This setup intentionally performs one-time host-flavored warm-start and
-    baseline-value materialization before building the compiled target-lane
-    closures. The resulting closures are the trace-safe hot path; this helper
-    itself is bootstrap code, not the compiled optimization loop.
+    This setup reads the solved mutable object state once, then keeps the
+    warm-start and baseline objective data in explicit JAX arrays before
+    building the compiled target-lane closures. The resulting closures are the
+    trace-safe hot path; this helper itself is bootstrap code, not the compiled
+    optimization loop.
     """
     _ensure_solved(booz_jax)
 
@@ -1095,25 +1096,23 @@ def _build_traceable_objective_state(booz_jax, bs_jax, iota_target):
     baseline_plu = booz_jax.res["PLU"]
 
     baseline_x = booz_jax._pack_decision_vector(
-        float(warmstart_iota),
-        None if warmstart_G is None else float(warmstart_G),
+        warmstart_iota,
+        warmstart_G,
         sdofs=warmstart_sdofs,
     )
 
-    baseline_value = float(
-        jax.jit(
-            lambda x, coil_set_spec: _evaluate_traceable_total_objective(
-                x,
-                coil_set_spec,
-                objective_kwargs,
-            )
-        )(
-            baseline_x,
-            bs_jax.coil_set_spec_from_dofs(baseline_coil_dofs),
+    baseline_value = jax.jit(
+        lambda x, coil_set_spec: _evaluate_traceable_total_objective(
+            x,
+            coil_set_spec,
+            objective_kwargs,
         )
+    )(
+        baseline_x,
+        bs_jax.coil_set_spec_from_dofs(baseline_coil_dofs),
     )
     failure_value = jnp.asarray(
-        baseline_value + max(abs(baseline_value), 1.0),
+        baseline_value + jnp.maximum(jnp.abs(baseline_value), 1.0),
         dtype=jnp.float64,
     )
     failure_scale = jnp.asarray(1.0, dtype=jnp.float64)

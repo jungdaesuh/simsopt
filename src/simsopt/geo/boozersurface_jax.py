@@ -30,7 +30,6 @@ Builds on M3's composed derivative path:
 """
 
 from functools import partial
-import warnings
 
 import numpy as np
 import jax
@@ -38,15 +37,12 @@ import jax.numpy as jnp
 import jax.scipy.linalg
 
 from ..backend import raise_if_strict_jax_fallback, warn_if_jax_fallback
-from ..backend.runtime import register_backend_cache_clear
 from ..jax_core._math_utils import (
     as_jax_float64 as _as_jax_float64,
     as_jax_int32 as _as_jax_int32,
     concat_jax_float64 as _concat_jax_float64,
     scalar_at_axis0 as _scalar_at_axis0,
 )
-from ..jax_core.specs import make_coil_spec
-
 try:
     from simsopt._core.optimizable import Optimizable
 except (ImportError, ModuleNotFoundError):
@@ -68,8 +64,6 @@ from ..jax_core.field import (
     grouped_coil_currents_from_inputs,
     grouped_coil_currents_from_spec,
     grouped_coil_index_lists_from_spec,
-    grouped_coil_set_spec_from_coil_specs,
-    grouped_coil_set_spec_from_grouped_data,
     grouped_coil_set_spec_from_source,
     grouped_field_data_from_spec,
     grouped_field_inputs_from_spec,
@@ -98,12 +92,6 @@ from .optimizer_jax import (
 )
 
 __all__ = ["BoozerSurfaceJAX"]
-
-_GROUPED_EXTRACTOR_FALLBACK_DETAIL = (
-    "_extract_coil_data_grouped() in _refresh_coil_data()"
-)
-_COILS_LIST_FALLBACK_DETAIL = "_coils list extraction in _refresh_coil_data()"
-_WARNED_HIDDEN_GROUPED_FALLBACK_DETAILS: set[str] = set()
 
 
 def _split_decision_vector_jax(x, *, optimize_G):
@@ -160,33 +148,6 @@ def _surface_sample_z(gamma):
     return jnp.dot(sample, _as_jax_float64([0.0, 0.0, 1.0]))
 
 
-def _clear_hidden_grouped_fallback_warning_cache() -> None:
-    _WARNED_HIDDEN_GROUPED_FALLBACK_DETAILS.clear()
-
-
-register_backend_cache_clear(_clear_hidden_grouped_fallback_warning_cache)
-
-
-def _raise_if_strict_hidden_grouped_coil_spec_fallback(detail: str) -> None:
-    raise_if_strict_jax_fallback(
-        component="BoozerSurfaceJAX",
-        detail=f"the hidden grouped-coil spec compatibility fallback via {detail}",
-    )
-
-
-def _warn_hidden_grouped_coil_spec_fallback(detail: str) -> None:
-    if detail in _WARNED_HIDDEN_GROUPED_FALLBACK_DETAILS:
-        return
-    _WARNED_HIDDEN_GROUPED_FALLBACK_DETAILS.add(detail)
-    warnings.warn(
-        "BoozerSurfaceJAX is using a hidden grouped-coil compatibility fallback "
-        f"via {detail}. This path snapshots compatibility data from the live "
-        "coil graph and should be treated as a legacy adapter seam.",
-        RuntimeWarning,
-        stacklevel=3,
-    )
-
-
 def _replace_group_coil_array(coil_arrays, group_index, group_array):
     grouped_arrays = list(coil_arrays)
     grouped_arrays[group_index] = group_array
@@ -206,68 +167,19 @@ def _yield_group_vjps(lm, group_runners, coil_arrays, coil_indices):
 def _extract_grouped_coil_set_spec(biotsavart):
     """Return the immutable grouped-coil spec for a biotsavart-like object.
 
-    ``BiotSavartJAX`` provides a dedicated grouped extractor. Fallback callers,
-    including compatibility shims, may only expose a hidden ``_coils`` list.
+    ``BoozerSurfaceJAX`` now requires its field adapter to expose explicit
+    immutable grouped-coil state through ``coil_set_spec()``. Hidden grouped
+    extractors and raw ``_coils`` snapshots are no longer accepted here.
     """
     coil_set_spec = getattr(biotsavart, "coil_set_spec", None)
-    if coil_set_spec is not None:
-        return coil_set_spec()
-
-    grouped_extractor = getattr(biotsavart, "_extract_coil_data_grouped", None)
-    if grouped_extractor is not None:
-        _raise_if_strict_hidden_grouped_coil_spec_fallback(
-            _GROUPED_EXTRACTOR_FALLBACK_DETAIL
-        )
-        _warn_hidden_grouped_coil_spec_fallback(_GROUPED_EXTRACTOR_FALLBACK_DETAIL)
-        return grouped_coil_set_spec_from_grouped_data(grouped_extractor())
-
-    coils = getattr(biotsavart, "_coils", None)
-    if coils is None:
+    if coil_set_spec is None or not callable(coil_set_spec):
         raise AttributeError(
-            "BoozerSurfaceJAX requires a biotsavart object that provides either "
-            "coil_set_spec(), _extract_coil_data_grouped(), or a _coils list."
+            "BoozerSurfaceJAX requires a biotsavart object that provides "
+            "coil_set_spec() for explicit immutable grouped-coil state. "
+            "Hidden _extract_coil_data_grouped() and _coils compatibility seams "
+            "are no longer supported."
         )
-
-    _raise_if_strict_hidden_grouped_coil_spec_fallback(_COILS_LIST_FALLBACK_DETAIL)
-    _warn_hidden_grouped_coil_spec_fallback(_COILS_LIST_FALLBACK_DETAIL)
-    return grouped_coil_set_spec_from_coil_specs(
-        tuple(_coil_spec_from_hidden_fallback_coil(coil) for coil in coils)
-    )
-
-
-def _coil_spec_from_hidden_fallback_coil(coil):
-    coil_to_spec = getattr(coil, "to_spec", None)
-    if coil_to_spec is not None:
-        return coil_to_spec()
-
-    curve = getattr(coil, "curve", None)
-    current = getattr(coil, "current", None)
-    curve_to_spec = getattr(curve, "to_spec", None) if curve is not None else None
-    current_to_spec = getattr(current, "to_spec", None) if current is not None else None
-    if curve_to_spec is None or current_to_spec is None:
-        raise AttributeError(
-            "BoozerSurfaceJAX hidden _coils compatibility fallback requires "
-            "coils that expose immutable spec builders via coil.to_spec() "
-            "or curve.to_spec()/current.to_spec()."
-        )
-
-    return make_coil_spec(
-        curve=curve_to_spec(),
-        current=current_to_spec(),
-    )
-
-
-def _coil_count_from_spec_or_coils(biotsavart, coil_set_spec):
-    coils = getattr(biotsavart, "_coils", None)
-    if coils is not None:
-        return len(coils)
-    return (
-        max(
-            (max(indices) for indices in coil_set_spec.coil_index_lists()),
-            default=-1,
-        )
-        + 1
-    )
+    return grouped_coil_set_spec_from_source(coil_set_spec())
 
 
 def _coil_currents_are_fixed(biotsavart):
@@ -1180,8 +1092,8 @@ class BoozerSurfaceJAX(Optimizable):
     lane.
 
     Args:
-        biotsavart: ``BiotSavartJAX`` instance (or any object with
-            ``_coils`` attribute providing curve geometry and currents).
+        biotsavart: ``BiotSavartJAX`` instance (or any adapter exposing
+            ``coil_set_spec()`` for explicit immutable grouped-coil state).
         surface: CPU ``SurfaceXYZTensorFourier`` instance.
         label: An ``Optimizable`` that computes a flux surface label
             (e.g. ``Volume``, ``ToroidalFlux``).  Stored as ``self.label``
@@ -1306,13 +1218,7 @@ class BoozerSurfaceJAX(Optimizable):
         """
         self.coil_set_spec = _extract_grouped_coil_set_spec(self.biotsavart)
         self.coil_groups = list(grouped_field_data_from_spec(self.coil_set_spec))
-        self.coil_currents = grouped_coil_currents_from_spec(
-            self.coil_set_spec,
-            coil_count=_coil_count_from_spec_or_coils(
-                self.biotsavart,
-                self.coil_set_spec,
-            ),
-        )
+        self.coil_currents = grouped_coil_currents_from_spec(self.coil_set_spec)
 
     def _emit_stage_callback(
         self,
@@ -2223,13 +2129,11 @@ class BoozerSurfaceJAX(Optimizable):
         Does NOT set ``self.res``, ``self.need_to_run_code``, or
         ``self.surface`` DOFs.
 
-        This is the transitional pure-functional seam between the legacy
-        object API and the current pure-JAX single-stage target-lane path.
-        It eliminates self mutation, but **it is not itself JIT/grad-traceable**
-        because it still uses ``float()`` casts, ``np.asarray`` conversions,
-        and Python ``if`` on solver outputs. The trace-safe target-lane path
-        lives in ``run_code_traceable()`` plus
-        ``make_traceable_objective_runtime_bundle()``.
+        This is the legacy-result compatibility wrapper over the trace-safe
+        array solve in ``run_code_traceable()``. The inner computation stays on
+        the pure-array target lane; this wrapper only repackages that result
+        into the historical ``run_code()``-shaped dict with ``s=None`` and
+        CPU-only adjoint hooks omitted.
 
         Differences from the stateful ``run_code()`` result dict:
 
@@ -2252,99 +2156,72 @@ class BoozerSurfaceJAX(Optimizable):
             dict with solver results.  See docstring for keys that
             differ from the stateful ``run_code()`` path.
         """
-        optimize_G = G is not None
-        weight_inv_modB = self.options["weight_inv_modB"]
-
-        # Pack from explicit sdofs (not self.surface)
-        sdofs_jax = _as_jax_float64(sdofs)
-        x0 = self._pack_decision_vector(iota, G, sdofs=sdofs_jax)
-        obj_fn = self._make_penalty_objective_with(
-            optimize_G,
-            weight_inv_modB,
-            coil_arrays=coil_arrays,
+        traceable_result = self.run_code_traceable(
+            coil_arrays,
+            _as_jax_float64(sdofs),
+            iota,
+            G,
         )
-        method = self._resolve_optimizer_method()
-        optimizer_options = self._collect_optimizer_options()
-
-        # LBFGS → Newton polish
-        ls_result = jax_minimize(
-            obj_fn,
-            x0,
-            method=method,
-            tol=self.options["bfgs_tol"],
-            maxiter=self.options["bfgs_maxiter"],
-            options=optimizer_options,
-        )
-        newton_result = self._run_newton_polish_for_method(
-            method,
-            obj_fn,
-            ls_result.x,
-            maxiter=self.options["newton_maxiter"],
-            tol=self.options["newton_tol"],
-            stab=self.options["newton_stab"],
-        )
-
-        sdofs_final, iota_out, G_out = self._unpack_decision_vector(
-            newton_result["x"], optimize_G
-        )
-
-        if (
-            not np.all(np.isfinite(np.asarray(newton_result["x"])))
-            or not np.all(np.isfinite(np.asarray(newton_result["grad"])))
-            or not np.all(np.isfinite(np.asarray(newton_result["hessian"])))
-        ):
-            return {
-                "residual": None,
-                "jacobian": None,
-                "hessian": None,
-                "iter": newton_result["nit"],
-                "success": False,
-                "G": G_out,
-                "s": None,
-                "sdofs": sdofs_final,
-                "iota": iota_out,
-                "PLU": None,
-                "vjp": None,
-                "vjp_groups": None,
-                "type": "ls",
-                "weight_inv_modB": weight_inv_modB,
-                "fun": float(np.asarray(newton_result["fun"])),
-                "optimizer_method": method,
-            }
-
-        H = newton_result["hessian"]
-        P, L, U = jax.scipy.linalg.lu(H)
-
-        G_for_res = (
-            G_out
-            if G_out is not None
-            else float(
-                compute_G_from_currents(jnp.concatenate([c for _, _, c in coil_arrays]))
-            )
-        )
-        residual_vec = self._compute_residual_vector(
-            sdofs_final,
-            iota_out,
-            G_for_res,
-            weight_inv_modB=weight_inv_modB,
-            coil_arrays=coil_arrays,
-        )
-
-        return {
-            "residual": residual_vec,
-            "jacobian": newton_result["grad"],
-            "hessian": H,
-            "iter": newton_result["nit"],
-            "success": bool(newton_result["success"]),
-            "G": G_out,
+        success = bool(np.asarray(traceable_result["success"]))
+        result_type = traceable_result["type"]
+        legacy_result = {
+            "iter": int(np.asarray(traceable_result["nit"])),
+            "success": success,
+            "G": traceable_result["G"],
             "s": None,
-            "sdofs": sdofs_final,
-            "iota": iota_out,
-            "PLU": (P, L, U),
+            "sdofs": traceable_result["sdofs"],
+            "iota": traceable_result["iota"],
+            "PLU": None,
             "vjp": None,
             "vjp_groups": None,
-            "type": "ls",
-            "weight_inv_modB": weight_inv_modB,
-            "fun": float(newton_result["fun"]),
-            "optimizer_method": method,
+            "type": result_type,
+            "weight_inv_modB": traceable_result["weight_inv_modB"],
+            "fun": float(np.asarray(traceable_result["fun"])),
         }
+
+        if result_type == "exact":
+            mask = None
+            if success:
+                mask_indices = np.asarray(self._compute_stellsym_mask_indices())
+                mask = np.zeros(
+                    3 * len(self.quadpoints_phi) * len(self.quadpoints_theta),
+                    dtype=bool,
+                )
+                mask[mask_indices] = True
+            legacy_result.update(
+                {
+                    "residual": None if not success else traceable_result["residual"],
+                    "jacobian": None if not success else traceable_result["jacobian"],
+                    "mask": mask,
+                }
+            )
+            if success:
+                legacy_result["PLU"] = tuple(traceable_result["plu"])
+            return legacy_result
+
+        legacy_result["optimizer_method"] = traceable_result["optimizer_method"]
+        if not success:
+            legacy_result.update(
+                {
+                    "residual": None,
+                    "jacobian": None,
+                    "hessian": None,
+                }
+            )
+            return legacy_result
+
+        legacy_result.update(
+            {
+                "residual": self._compute_residual_vector(
+                    traceable_result["sdofs"],
+                    traceable_result["iota"],
+                    traceable_result["G"],
+                    weight_inv_modB=traceable_result["weight_inv_modB"],
+                    coil_arrays=coil_arrays,
+                ),
+                "jacobian": traceable_result["grad"],
+                "hessian": traceable_result["hessian"],
+                "PLU": tuple(traceable_result["plu"]),
+            }
+        )
+        return legacy_result

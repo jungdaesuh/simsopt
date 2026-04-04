@@ -3,7 +3,6 @@
 import importlib.util
 import sys
 import types
-import warnings
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -110,14 +109,6 @@ _UPSTREAM_BOOZER_TF_TARGET = 0.1
 _UPSTREAM_BOOZER_IOTA0 = -0.3
 _UPSTREAM_EXACT_IOTA0 = -0.44856192
 _UPSTREAM_EXACT_TF_TARGET = 0.41431152
-_LEGACY_COILS_LIST_FALLBACK_WARNING = (
-    "BoozerSurfaceJAX is using a hidden grouped-coil compatibility fallback "
-    "via _coils list extraction in _refresh_coil_data(). This path snapshots "
-    "compatibility data from the live coil graph and should be treated as a "
-    "legacy adapter seam."
-)
-
-
 @dataclass(frozen=True)
 class UpstreamBoozerPenaltyCase:
     surfacetype: str
@@ -155,21 +146,6 @@ def _build_upstream_penalty_decision_vector(
     return np.concatenate([x, [_upstream_initial_G(current_values, nfp)]])
 
 
-def _construct_boozer_surface_jax_preserving_warning_state(*args, **kwargs):
-    warned_details = set(_bsj._WARNED_HIDDEN_GROUPED_FALLBACK_DETAILS)
-    try:
-        with warnings.catch_warnings():
-            warnings.filterwarnings(
-                "ignore",
-                message=_LEGACY_COILS_LIST_FALLBACK_WARNING,
-                category=RuntimeWarning,
-            )
-            return BoozerSurfaceJAX(*args, **kwargs)
-    finally:
-        _bsj._WARNED_HIDDEN_GROUPED_FALLBACK_DETAILS.clear()
-        _bsj._WARNED_HIDDEN_GROUPED_FALLBACK_DETAILS.update(warned_details)
-
-
 def _make_toroidal_flux_label(surface, coils):
     from simsopt.field import BiotSavart
     from simsopt.geo import ToroidalFlux
@@ -178,7 +154,7 @@ def _make_toroidal_flux_label(surface, coils):
 
 
 def _build_upstream_jax_boozer(surface, bs, label, target, *, constraint_weight=None):
-    return _construct_boozer_surface_jax_preserving_warning_state(
+    return BoozerSurfaceJAX(
         BiotSavartJAX(bs.coils),
         surface,
         label,

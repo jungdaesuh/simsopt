@@ -1568,39 +1568,16 @@ class TestMixedQuadratureParity:
 
 
 class TestStrictFieldFallbacks:
-    def test_non_strict_mode_warns_on_biot_savart_cpu_geometry_fallback(
-        self,
-        coil_surf_setup,
-        monkeypatch,
-        request,
-    ):
-        coils, surf, _, _ = coil_surf_setup
-        expected_points = surf.gamma().reshape((-1, 3))
-        _enable_non_strict_jax_backend(monkeypatch, request)
+    def test_biotsavart_rejects_removed_cpu_geometry_fallback(self):
+        class _UnsupportedCurve:
+            pass
 
-        bs_jax = BiotSavartJAX(coils)
-        bs_jax._jax_native = False
-        bs_jax.set_points(expected_points)
-        # Bypass coil_set_spec()'s spec-compatibility fallback warnings so this
-        # test isolates the live-geometry CPU fallback path.
-        monkeypatch.setattr(
-            bs_jax,
-            "coil_set_spec",
-            bs_jax._coil_set_spec_from_live_geometry,
-        )
-        monkeypatch.setattr(
-            biotsavart_jax_backend_module,
-            "_supports_native_curve_geometry",
-            lambda curve: False,
-        )
-
-        with pytest.warns(
-            RuntimeWarning,
-            match="BiotSavartJAX.*CPU curve-geometry fallback.*legacy adapter seam",
+        bs_jax = object.__new__(BiotSavartJAX)
+        with pytest.raises(
+            TypeError,
+            match="BiotSavartJAX.*JAX geometry hooks.*CPU curve-geometry fallback was removed",
         ):
-            field_value = bs_jax.B()
-
-        assert np.asarray(field_value).shape == np.asarray(expected_points).shape
+            bs_jax._base_curve_geometry_with_timings(_UnsupportedCurve())
 
     def test_strict_mode_uses_spec_native_forward_path_before_cpu_geometry_fallback(
         self,
@@ -1629,65 +1606,39 @@ class TestStrictFieldFallbacks:
         field_value = bs_jax.B()
         assert np.asarray(field_value).shape == np.asarray(expected_points).shape
 
-    def test_strict_mode_rejects_biot_savart_cpu_pullback_fallback(
+    @pytest.mark.parametrize("strict_mode", [False, True])
+    def test_biotsavart_rejects_removed_cpu_pullback_fallback(
         self,
-        coil_surf_setup,
         monkeypatch,
         request,
+        strict_mode,
     ):
-        coils, surf, _, _ = coil_surf_setup
-        _enable_strict_jax_backend(monkeypatch, request)
+        if strict_mode:
+            _enable_strict_jax_backend(monkeypatch, request)
+        else:
+            _enable_non_strict_jax_backend(monkeypatch, request)
 
-        bs_jax = BiotSavartJAX(coils)
-        bs_jax.set_points(surf.gamma().reshape((-1, 3)))
-        field_value = bs_jax.B()
-        monkeypatch.setattr(
-            biotsavart_jax_backend_module,
-            "_supports_jax_curve_pullback",
-            lambda curve: False,
-        )
-        monkeypatch.setattr(
-            biotsavart_jax_backend_module,
-            "_supports_cpu_curve_pullback",
-            lambda curve: True,
-        )
+        class _UnsupportedCurve:
+            pass
+
+        class _FrozenCurrent:
+            dof_size = 0
+
+        class _Coil:
+            def __init__(self):
+                self.curve = _UnsupportedCurve()
+                self.current = _FrozenCurrent()
 
         with pytest.raises(
-            RuntimeError,
-            match="BiotSavartJAX.*coil-pullback fallback",
+            TypeError,
+            match="BiotSavartJAX.*JAX pullback hooks.*CPU coil-pullback fallback was removed",
         ):
-            bs_jax.B_vjp(jax.numpy.ones_like(field_value))
-
-    def test_non_strict_mode_warns_on_biot_savart_cpu_pullback_fallback(
-        self,
-        coil_surf_setup,
-        monkeypatch,
-        request,
-    ):
-        coils, surf, _, _ = coil_surf_setup
-        _enable_non_strict_jax_backend(monkeypatch, request)
-
-        bs_jax = BiotSavartJAX(coils)
-        bs_jax.set_points(surf.gamma().reshape((-1, 3)))
-        field_value = bs_jax.B()
-        monkeypatch.setattr(
-            biotsavart_jax_backend_module,
-            "_supports_jax_curve_pullback",
-            lambda curve: False,
-        )
-        monkeypatch.setattr(
-            biotsavart_jax_backend_module,
-            "_supports_cpu_curve_pullback",
-            lambda curve: True,
-        )
-
-        with pytest.warns(
-            RuntimeWarning,
-            match="BiotSavartJAX.*CPU coil-pullback fallback.*legacy adapter seam",
-        ):
-            derivative = bs_jax.B_vjp(jax.numpy.ones_like(field_value))
-
-        assert np.asarray(derivative(bs_jax._coils[0].curve)).shape[0] > 0
+            biotsavart_jax_backend_module._project_single_coil_cotangent_data(
+                _Coil(),
+                jnp.ones((1, 3), dtype=jnp.float64),
+                jnp.ones((1, 3), dtype=jnp.float64),
+                jnp.ones((1,), dtype=jnp.float64),
+            )
 
 
 # -----------------------------------------------------------------------

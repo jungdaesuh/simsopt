@@ -4105,14 +4105,14 @@ class TestBoozerResidualAdjointFD:
 # This slice is green for the current traceable-objective path. Tests 1-7
 # validate the pure array-backed custom_vjp objective built by
 # make_traceable_objective(), while Tests 3a/3b continue to pin the lower-level
-# functional transition seam exposed by run_code_functional().
+# legacy-result wrapper exposed by run_code_functional().
 # This does not claim that the whole repo is fallback-free: reference/transitional
 # optimizer lanes and compatibility adapters still exist elsewhere by design.
 # =======================================================================
 
 
 class TestRunCodeFunctional:
-    """Test 3: BoozerSurfaceJAX.run_code_functional() — pure functional inner solve.
+    """Test 3: BoozerSurfaceJAX.run_code_functional() — compatibility wrapper.
 
     The current run_code() mutates self state (need_to_run_code, surface DOFs
     via _set_surface_dofs), uses Python assertions, and branches on dirty flags.
@@ -4124,11 +4124,10 @@ class TestRunCodeFunctional:
       contract); sdofs=solved surface DOFs array
     - NOT mutate any self.* state
 
-    Note: this method still uses Python if/float()/np.asarray() on
-    solver outputs. Full JIT/grad traceability is achieved one layer
-    up via make_traceable_objective(), which rebuilds the single-stage
-    objective on pure arrays and differentiates it with custom-VJP
-    (tests 1-7).
+    Internally the solve now reuses run_code_traceable(), so the inner
+    computation stays on the same pure-array target lane as the traceable
+    single-stage objective. This wrapper still returns the historical
+    run_code()-shaped dict, so the wrapper itself is not the JIT boundary.
     """
 
     def test_run_code_functional_exists_and_matches(self):

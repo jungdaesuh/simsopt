@@ -13,7 +13,6 @@ Validates:
 
 import sys
 import types
-import warnings
 from contextlib import contextmanager
 from functools import partial
 
@@ -110,29 +109,11 @@ _enable_non_strict_jax_backend = partial(
 )
 
 
-_STRICT_GROUPED_EXTRACTOR_FALLBACK_PATTERN = (
-    r"BoozerSurfaceJAX.*hidden grouped-coil spec compatibility "
-    r"fallback.*_extract_coil_data_grouped\(\).*strict=True"
+_EXPLICIT_COIL_SPEC_REQUIRED_PATTERN = (
+    r"BoozerSurfaceJAX requires a biotsavart object that provides "
+    r"coil_set_spec\(\) for explicit immutable grouped-coil state"
 )
-_STRICT_COILS_LIST_FALLBACK_PATTERN = (
-    r"BoozerSurfaceJAX.*hidden grouped-coil spec compatibility "
-    r"fallback.*_coils list extraction.*strict=True"
-)
-_LEGACY_FALLBACK_WARNING_PATTERN = "legacy adapter seam"
 _LEGACY_CURVE_X = np.array([1.0, 0.2, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
-
-
-@contextmanager
-def _strict_backend_mode(monkeypatch, mode="jax_gpu_parity"):
-    from simsopt.backend import invalidate_backend_cache
-
-    monkeypatch.setenv("SIMSOPT_BACKEND_MODE", mode)
-    monkeypatch.setenv("SIMSOPT_BACKEND_STRICT", "1")
-    invalidate_backend_cache()
-    try:
-        yield
-    finally:
-        invalidate_backend_cache()
 
 
 def _assert_strict_jax_minimize_rejection(
@@ -152,13 +133,6 @@ def _assert_strict_jax_minimize_rejection(
             method=method,
             value_and_grad=value_and_grad,
         )
-
-
-def _enable_non_strict_backend_with_clean_warning_cache(monkeypatch, request):
-    from simsopt.backend import invalidate_backend_cache
-
-    _enable_non_strict_jax_backend(monkeypatch, request)
-    invalidate_backend_cache()
 
 
 def _make_legacy_coils_list_biotsavart(coils):
@@ -205,12 +179,6 @@ def _make_curve_current_spec_only_legacy_coils():
             self.current = legacy_current
 
     return [_CurveCurrentSpecOnlyCoil(_CurveSpecOnly(), _CurrentSpecOnly())]
-
-
-def _extract_legacy_coils_fallback_spec(bs, monkeypatch, request):
-    _enable_non_strict_backend_with_clean_warning_cache(monkeypatch, request)
-    with pytest.warns(RuntimeWarning, match=_LEGACY_FALLBACK_WARNING_PATTERN):
-        return _bsj._extract_grouped_coil_set_spec(bs)
 
 
 # ---------------------------------------------------------------------------
@@ -747,41 +715,34 @@ class TestBoozerSurfaceJAXClass:
             np.asarray([coil.current.get_value() for coil in coils]),
         )
 
-    def test_strict_mode_rejects_hidden_grouped_extractor_fallback(self, monkeypatch):
-        """Strict JAX mode must reject grouped extractor compatibility fallback."""
-        with _strict_backend_mode(monkeypatch):
-            coils = _make_mixed_quad_mock_coils()
-            bs = _make_grouped_extractor_only_biotsavart(coils)
-            surf, label = _make_basic_mock_surface_and_label()
+    def test_instantiation_rejects_grouped_extractor_only_adapter(self):
+        """BoozerSurfaceJAX now requires explicit ``coil_set_spec()`` state."""
+        coils = _make_mixed_quad_mock_coils()
+        bs = _make_grouped_extractor_only_biotsavart(coils)
+        surf, label = _make_basic_mock_surface_and_label()
 
-            with pytest.raises(
-                RuntimeError,
-                match=_STRICT_GROUPED_EXTRACTOR_FALLBACK_PATTERN,
-            ):
-                BoozerSurfaceJAX(
-                    bs,
-                    surf,
-                    label,
-                    1.0,
-                    constraint_weight=1.0,
-                )
+        with pytest.raises(AttributeError, match=_EXPLICIT_COIL_SPEC_REQUIRED_PATTERN):
+            BoozerSurfaceJAX(
+                bs,
+                surf,
+                label,
+                1.0,
+                constraint_weight=1.0,
+            )
 
-    def test_strict_mode_rejects_hidden_coils_list_fallback(self, monkeypatch):
-        """Strict JAX mode must reject raw ``_coils`` compatibility extraction."""
-        with _strict_backend_mode(monkeypatch):
-            bs = _make_legacy_coils_list_biotsavart(_make_legacy_spec_capable_coils())
-            surf, label = _make_basic_mock_surface_and_label()
-            with pytest.raises(
-                RuntimeError,
-                match=_STRICT_COILS_LIST_FALLBACK_PATTERN,
-            ):
-                BoozerSurfaceJAX(
-                    bs,
-                    surf,
-                    label,
-                    1.0,
-                    constraint_weight=1.0,
-                )
+    def test_instantiation_rejects_hidden_coils_list_adapter(self):
+        """Raw ``_coils`` compatibility extraction is no longer supported."""
+        bs = _make_legacy_coils_list_biotsavart(_make_legacy_spec_capable_coils())
+        surf, label = _make_basic_mock_surface_and_label()
+
+        with pytest.raises(AttributeError, match=_EXPLICIT_COIL_SPEC_REQUIRED_PATTERN):
+            BoozerSurfaceJAX(
+                bs,
+                surf,
+                label,
+                1.0,
+                constraint_weight=1.0,
+            )
 
     def test_spec_only_biotsavart_supports_G_none_ls_path(self):
         """Spec-driven grouped-field state should work without a legacy ``_coils`` list."""
@@ -1859,6 +1820,56 @@ class TestBoozerSurfaceJAXExactPath:
         assert result["type"] == "ls"
         assert bool(result["success"]) is False
 
+    def test_run_code_functional_reuses_traceable_inner_solve(self, monkeypatch):
+        """run_code_functional() should just repackage run_code_traceable()."""
+        booz = _make_mock_boozer_surface()
+        coil_arrays = booz._coil_arrays
+        sdofs = jnp.asarray(booz.surface.get_dofs(), dtype=jnp.float64)
+        iota = jnp.asarray(0.3, dtype=jnp.float64)
+        G = jnp.asarray(0.05, dtype=jnp.float64)
+        captured = {}
+
+        def fake_run_code_traceable(coil_source, sdofs_arg, iota_arg, G_arg):
+            captured["coil_source"] = coil_source
+            captured["sdofs"] = sdofs_arg
+            captured["iota"] = iota_arg
+            captured["G"] = G_arg
+            return {
+                "x": booz._pack_decision_vector(iota_arg, G_arg, sdofs=sdofs_arg),
+                "sdofs": sdofs_arg,
+                "iota": iota_arg,
+                "G": G_arg,
+                "fun": jnp.asarray(1.25, dtype=jnp.float64),
+                "grad": jnp.arange(sdofs_arg.size + 2, dtype=jnp.float64),
+                "hessian": jnp.eye(sdofs_arg.size + 2, dtype=jnp.float64),
+                "plu": tuple(
+                    jnp.eye(sdofs_arg.size + 2, dtype=jnp.float64) for _ in range(3)
+                ),
+                "nit": jnp.asarray(3, dtype=jnp.int32),
+                "success": jnp.asarray(True),
+                "optimizer_method": "lbfgs-ondevice",
+                "type": "ls",
+                "weight_inv_modB": booz.options["weight_inv_modB"],
+            }
+
+        monkeypatch.setattr(booz, "run_code_traceable", fake_run_code_traceable)
+        monkeypatch.setattr(
+            _bsj,
+            "jax_minimize",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("run_code_functional() should not rerun jax_minimize")
+            ),
+        )
+
+        result = booz.run_code_functional(coil_arrays, sdofs, iota, G)
+
+        assert captured["coil_source"] is coil_arrays
+        np.testing.assert_allclose(np.asarray(captured["sdofs"]), np.asarray(sdofs))
+        np.testing.assert_allclose(np.asarray(result["sdofs"]), np.asarray(sdofs))
+        assert result["optimizer_method"] == "lbfgs-ondevice"
+        assert result["success"] is True
+        assert result["PLU"] is not None
+
     def test_run_code_traceable_exact_skips_lu_for_nonfinite_newton_result(
         self, monkeypatch
     ):
@@ -2115,47 +2126,19 @@ class TestVJPHooks:
 class TestNegativeCases:
     """Test error handling for unsupported inputs."""
 
-    def test_extract_grouped_coil_set_spec_warns_on_legacy_coils_fallback(
-        self, monkeypatch, request
+    def test_extract_grouped_coil_set_spec_rejects_legacy_coils_fallback(
+        self,
     ):
         bs = _make_legacy_coils_list_biotsavart(_make_legacy_spec_capable_coils())
-        spec = _extract_legacy_coils_fallback_spec(bs, monkeypatch, request)
+        with pytest.raises(AttributeError, match=_EXPLICIT_COIL_SPEC_REQUIRED_PATTERN):
+            _bsj._extract_grouped_coil_set_spec(bs)
 
-        assert isinstance(spec, GroupedCoilSetSpec)
-
-    def test_extract_grouped_coil_set_spec_hidden_coils_uses_spec_builders(
-        self, monkeypatch, request
+    def test_extract_grouped_coil_set_spec_rejects_hidden_coils_even_if_spec_capable(
+        self,
     ):
         coils = _make_curve_current_spec_only_legacy_coils()
         bs = _make_legacy_coils_list_biotsavart(coils)
-        spec = _extract_legacy_coils_fallback_spec(bs, monkeypatch, request)
-
-        assert isinstance(spec, GroupedCoilSetSpec)
-
-    def test_extract_grouped_coil_set_spec_warning_reemits_after_backend_reset(
-        self,
-        monkeypatch,
-        request,
-    ):
-        from simsopt.backend import invalidate_backend_cache
-
-        bs = _make_legacy_coils_list_biotsavart(_make_legacy_spec_capable_coils())
-        _enable_non_strict_backend_with_clean_warning_cache(monkeypatch, request)
-
-        with pytest.warns(RuntimeWarning, match=_LEGACY_FALLBACK_WARNING_PATTERN):
-            _bsj._extract_grouped_coil_set_spec(bs)
-
-        # Second call is suppressed (same cache key)
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always")
-            _bsj._extract_grouped_coil_set_spec(bs)
-        assert caught == []
-
-        # After cache reset, warning re-emits
-        invalidate_backend_cache()
-        _enable_non_strict_backend_with_clean_warning_cache(monkeypatch, request)
-
-        with pytest.warns(RuntimeWarning, match=_LEGACY_FALLBACK_WARNING_PATTERN):
+        with pytest.raises(AttributeError, match=_EXPLICIT_COIL_SPEC_REQUIRED_PATTERN):
             _bsj._extract_grouped_coil_set_spec(bs)
 
     def test_unsupported_label_raises(self):
