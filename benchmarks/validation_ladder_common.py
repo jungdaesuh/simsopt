@@ -90,6 +90,7 @@ def repo_pythonpath_env(
     *,
     platform: str = "auto",
     disable_compilation_cache: bool = False,
+    clear_backend_guardrails: bool = False,
 ) -> dict[str, str]:
     """Return an environment that resolves in-repo imports for subprocess probes."""
     env = dict(os.environ)
@@ -97,6 +98,10 @@ def repo_pythonpath_env(
     env.pop(_SIMSOPT_DISABLE_COMPILATION_CACHE_ENV_VAR, None)
     env.pop(_SIMSOPT_COMPILATION_CACHE_POLICY_ENV_VAR, None)
     env.pop(_TARGET_LANE_ACCEPTED_STEP_SYNC_ENV_VAR, None)
+    if clear_backend_guardrails:
+        env.pop(_SIMSOPT_BACKEND_MODE_ENV_VAR, None)
+        env.pop(_SIMSOPT_BACKEND_STRICT_ENV_VAR, None)
+        env.pop(_SIMSOPT_TRANSFER_GUARD_ENV_VAR, None)
     if disable_compilation_cache:
         env.pop(_JAX_COMPILATION_CACHE_ENV_VAR, None)
         env[_SIMSOPT_DISABLE_COMPILATION_CACHE_ENV_VAR] = "1"
@@ -126,6 +131,10 @@ def _apply_platform_env(env: dict[str, str], platform: str) -> None:
 
 def _x64_enabled(jax_module) -> bool:
     """Return whether the active JAX runtime is operating in float64 mode."""
+    config = getattr(jax_module, "config", None)
+    config_x64 = getattr(config, "jax_enable_x64", None)
+    if config_x64 is not None:
+        return bool(config_x64)
     return bool(jax_module.numpy.zeros(1).dtype == jax_module.numpy.float64)
 
 

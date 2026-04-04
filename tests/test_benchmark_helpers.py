@@ -525,6 +525,30 @@ def test_repo_pythonpath_env_clears_stale_disable_flags_when_cache_is_enabled(
     assert _SIMSOPT_COMPILATION_CACHE_POLICY_ENV_VAR not in env
 
 
+def test_repo_pythonpath_env_clears_backend_guardrails_when_requested(monkeypatch):
+    monkeypatch.setenv("SIMSOPT_BACKEND_MODE", "jax_gpu_fast")
+    monkeypatch.setenv("SIMSOPT_BACKEND_STRICT", "1")
+    monkeypatch.setenv("SIMSOPT_JAX_TRANSFER_GUARD", "disallow")
+
+    env = repo_pythonpath_env(platform="cpu", clear_backend_guardrails=True)
+
+    assert "SIMSOPT_BACKEND_MODE" not in env
+    assert "SIMSOPT_BACKEND_STRICT" not in env
+    assert "SIMSOPT_JAX_TRANSFER_GUARD" not in env
+
+
+def test_repo_pythonpath_env_preserves_backend_guardrails_by_default(monkeypatch):
+    monkeypatch.setenv("SIMSOPT_BACKEND_MODE", "jax_gpu_fast")
+    monkeypatch.setenv("SIMSOPT_BACKEND_STRICT", "1")
+    monkeypatch.setenv("SIMSOPT_JAX_TRANSFER_GUARD", "disallow")
+
+    env = repo_pythonpath_env(platform="cuda")
+
+    assert env["SIMSOPT_BACKEND_MODE"] == "jax_gpu_fast"
+    assert env["SIMSOPT_BACKEND_STRICT"] == "1"
+    assert env["SIMSOPT_JAX_TRANSFER_GUARD"] == "disallow"
+
+
 def test_apply_compilation_cache_policy_defaults_to_disabled(monkeypatch):
     monkeypatch.delenv(_JAX_COMPILATION_CACHE_ENV_VAR, raising=False)
     monkeypatch.delenv(_SIMSOPT_DISABLE_COMPILATION_CACHE_ENV_VAR, raising=False)
@@ -631,6 +655,18 @@ def test_require_x64_runtime_rejects_float32_runtime():
 
     with pytest.raises(RuntimeError, match="Tier 5 requires jax_enable_x64=True"):
         require_x64_runtime(fake_jax, context="Tier 5")
+
+
+def test_require_x64_runtime_prefers_config_flag_without_array_probe():
+    fake_jax = types.SimpleNamespace(
+        config=types.SimpleNamespace(jax_enable_x64=True),
+        numpy=types.SimpleNamespace(
+            zeros=lambda n: (_ for _ in ()).throw(AssertionError("should not probe")),
+            float64=np.float64,
+        ),
+    )
+
+    require_x64_runtime(fake_jax, context="Tier 5")
 
 
 def test_build_provenance_includes_compilation_cache_metadata(monkeypatch):

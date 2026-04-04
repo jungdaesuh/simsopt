@@ -335,6 +335,7 @@ def _run_stage2_case(args: argparse.Namespace, backend: str, *, platform: str) -
             env=repo_pythonpath_env(
                 platform=effective_platform,
                 disable_compilation_cache=(effective_platform == "cpu"),
+                clear_backend_guardrails=(backend != "jax"),
             ),
             cwd=REPO_ROOT,
             bootstrap_repo=True,
@@ -399,6 +400,7 @@ def _run_stage2_probe(
             env=repo_pythonpath_env(
                 platform=effective_platform,
                 disable_compilation_cache=(effective_platform == "cpu"),
+                clear_backend_guardrails=(backend != "jax"),
             ),
             cwd=REPO_ROOT,
             bootstrap_repo=True,

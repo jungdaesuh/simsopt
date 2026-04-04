@@ -122,6 +122,7 @@ def _run_single_stage_script(
             env=repo_pythonpath_env(
                 platform=platform,
                 disable_compilation_cache=True,
+                clear_backend_guardrails=(backend != "jax"),
             ),
             cwd=REPO_ROOT,
             bootstrap_repo=True,

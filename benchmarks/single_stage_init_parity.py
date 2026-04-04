@@ -319,6 +319,7 @@ def _run_single_stage_case(
             env=repo_pythonpath_env(
                 platform=effective_platform,
                 disable_compilation_cache=(effective_platform == "cpu"),
+                clear_backend_guardrails=(backend != "jax"),
             ),
             cwd=REPO_ROOT,
             bootstrap_repo=True,

@@ -232,7 +232,10 @@ def run_real_fixture(args: argparse.Namespace) -> dict:
         cpu_result = run_python_script(
             stage2_script,
             ["--backend", "cpu", "--export-objective-json", cpu_json, *common_args],
-            env=repo_pythonpath_env(platform="cpu"),
+            env=repo_pythonpath_env(
+                platform="cpu",
+                clear_backend_guardrails=True,
+            ),
             cwd=REPO_ROOT,
             bootstrap_repo=True,
             stream_output=True,
