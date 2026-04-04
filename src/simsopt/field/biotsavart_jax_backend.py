@@ -159,6 +159,14 @@ def _handle_grouped_spec_compat_fallback(api_name: str, detail: str) -> None:
     _handle_hidden_spec_fallback(f"{detail} in {api_name}()")
 
 
+def _removed_live_graph_spec_seam_error(api_name: str) -> RuntimeError:
+    return RuntimeError(
+        "BiotSavartJAX requires explicit immutable grouped-coil state in "
+        f"{api_name}(); legacy adapter seam via live-graph geometry extraction "
+        "was removed."
+    )
+
+
 def _build_pullback_group_profile_entry(*, kind, coil_indices, elapsed_s, native_curve):
     return {
         "kind": kind,
@@ -932,27 +940,30 @@ class BiotSavartJAX(Optimizable):
     def _extract_coil_data_grouped(self):
         """Read coil geometry grouped by quadrature point count.
 
-        Compatibility wrapper over the immutable grouped-coil spec.
+        Explicit compatibility wrapper over the immutable grouped-coil spec.
 
-        For legacy curve families that still cannot reconstruct immutable
-        grouped specs directly, this can still end up using the guarded
-        live-graph geometry fallback inside ``coil_set_spec()``.
+        ``coil_set_spec()`` now requires explicit immutable grouped-coil state.
+        Legacy callers that still need grouped arrays rebuilt from the live
+        coil graph must opt in through this helper instead.
 
         Returns:
             list of ``(gammas, gammadashs, currents, coil_indices)``
             tuples, one per distinct quadrature count.
         """
         if not hasattr(self, "_unique_dof_opts"):
-            return list(
-                grouped_field_data_from_spec(self._coil_set_spec_from_live_geometry())
-            )
+            coil_set_spec = self._coil_set_spec_from_live_geometry()
+        else:
+            try:
+                coil_set_spec = self._coil_set_spec_from_explicit_state()
+            except NotImplementedError:
+                coil_set_spec = self._coil_set_spec_from_live_geometry()
 
-        return list(grouped_field_data_from_spec(self.coil_set_spec()))
+        return list(grouped_field_data_from_spec(coil_set_spec))
 
     def _coil_set_spec_from_live_geometry(self):
         """Build a grouped coil spec directly from the live coil graph.
 
-        This is the last compatibility seam after immutable-spec
+        This is the last explicit compatibility seam after immutable-spec
         reconstruction has failed.
         """
         geometry_cache = {}
@@ -969,6 +980,12 @@ class BiotSavartJAX(Optimizable):
             currents.append(current_value)
         return grouped_coil_set_spec_from_lists(gammas, gammadashs, currents)
 
+    def _coil_set_spec_from_explicit_state(self):
+        try:
+            return self._coil_set_spec_from_dofs_prefer_specs(_as_jax_float64(self.x))
+        except NotImplementedError:
+            return grouped_coil_set_spec_from_coil_specs(self.coil_specs())
+
     def coil_set_spec(self):
         """Build the grouped coil spec for the current coil graph.
 
@@ -976,28 +993,15 @@ class BiotSavartJAX(Optimizable):
         1. Reconstruct from the live DOF vector with explicit grouped specs.
         2. Rebuild from per-coil immutable specs.
 
-        If both fail for a legacy curve family, non-strict mode still takes the
-        guarded live-graph compatibility fallback while strict mode rejects it.
+        If both fail for a legacy curve family, ``coil_set_spec()`` now rejects
+        that hidden live-graph compatibility seam outright. Legacy callers that
+        still need grouped arrays from the live coil graph must use
+        ``_extract_coil_data_grouped()`` explicitly.
         """
         try:
-            return self._coil_set_spec_from_dofs_prefer_specs(_as_jax_float64(self.x))
-        except NotImplementedError:
-            _handle_grouped_spec_compat_fallback(
-                "coil_set_spec",
-                "explicit-DOF grouped-array reconstruction",
-            )
-
-        try:
-            return grouped_coil_set_spec_from_coil_specs(self.coil_specs())
-        except NotImplementedError:
-            _handle_grouped_spec_compat_fallback(
-                "coil_set_spec",
-                "live-graph geometry extraction",
-            )
-
-        # Legacy compatibility seam: explicit immutable reconstruction is not
-        # available, so rebuild grouped arrays from the live coil graph.
-        return self._coil_set_spec_from_live_geometry()
+            return self._coil_set_spec_from_explicit_state()
+        except NotImplementedError as exc:
+            raise _removed_live_graph_spec_seam_error("coil_set_spec") from exc
 
     def coil_specs(self):
         """Build immutable per-coil specs from the live coil graph."""

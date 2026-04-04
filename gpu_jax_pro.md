@@ -18,9 +18,10 @@ Update as of 2026-04-01:
 * grouped forward-field compatibility paths now route through `jax_core`
 * the grouped forward field path now has a first chunked point-axis reduction
   implementation in `jax_core.field`
-* `BiotSavartJAX` spec adapters now reject hidden grouped-array/live-graph
-  compatibility fallback in strict mode instead of silently taking those paths
-* `BoozerSurfaceJAX` strict mode now rejects hidden grouped-coil compatibility
+* `BiotSavartJAX.coil_set_spec()` now requires explicit immutable grouped-coil
+  state; the legacy live-graph geometry seam is only available through the
+  explicit compatibility wrapper
+* `BoozerSurfaceJAX` now rejects hidden grouped-coil compatibility
   reconstruction in `_refresh_coil_data()` instead of silently using
   `_extract_coil_data_grouped()` or raw `_coils` list extraction
 * a first broader non-hot-path objective-family migration is landed:
