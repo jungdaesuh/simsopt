@@ -12,6 +12,7 @@ All tests require ``simsoptpp`` for the CPU reference.
 import json
 import importlib
 import importlib.util
+import warnings
 from contextlib import contextmanager
 from functools import partial
 import os
@@ -168,6 +169,11 @@ def _assert_stage2_gradient_parity(actual, reference, *, err_msg):
         atol=_STAGE2_GRADIENT_PARITY_ATOL,
         err_msg=err_msg,
     )
+
+
+def _assert_jax_objective_fallback_active(squared_flux_jax):
+    assert not squared_flux_jax._use_jax_native
+    assert squared_flux_jax._uses_jax_objective_fallback
 
 
 def _stage2_context_kwargs():
@@ -1516,7 +1522,7 @@ class TestMixedQuadratureParity:
         assert np.asarray(grad).shape[0] > 0
         assert calls == {"B": 2, "B_vjp": 1}
 
-    def test_strict_mode_rejects_squared_flux_fallback(
+    def test_strict_mode_allows_squared_flux_jax_objective_fallback(
         self,
         mixed_quad_setup,
         monkeypatch,
@@ -1526,14 +1532,12 @@ class TestMixedQuadratureParity:
         _enable_strict_jax_backend(monkeypatch, request)
 
         bs_jax = BiotSavartJAX(coils)
+        jf_jax = SquaredFluxJAX(surf, bs_jax)
 
-        with pytest.raises(
-            RuntimeError,
-            match="SquaredFluxJAX.*strict=True",
-        ):
-            SquaredFluxJAX(surf, bs_jax)
+        _assert_jax_objective_fallback_active(jf_jax)
+        assert jf_jax.J() >= 0.0
 
-    def test_non_strict_squared_flux_fallback_warns(
+    def test_non_strict_squared_flux_jax_objective_fallback_is_silent(
         self,
         mixed_quad_setup,
         monkeypatch,
@@ -1543,14 +1547,12 @@ class TestMixedQuadratureParity:
         _enable_non_strict_jax_backend(monkeypatch, request)
 
         bs_jax = BiotSavartJAX(coils)
-
-        with pytest.warns(
-            RuntimeWarning,
-            match="SquaredFluxJAX.*CPU fallback objective path.*legacy adapter seam",
-        ):
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
             jf_jax = SquaredFluxJAX(surf, bs_jax)
 
-        assert not jf_jax._use_jax_native
+        _assert_jax_objective_fallback_active(jf_jax)
+        assert not caught
 
 
 class TestStrictFieldFallbacks:
@@ -1898,6 +1900,21 @@ class TestCurveCWSFourierCPPParity:
 
 
 class TestCurveCWSFourierCPPJaxFieldPath:
+    def test_strict_mode_allows_squared_flux_for_curvecwsfouriercpp(
+        self,
+        banana_coil_cpp_setup,
+        monkeypatch,
+        request,
+    ):
+        coils, surf, _banana_coil = banana_coil_cpp_setup
+        _enable_strict_jax_backend(monkeypatch, request)
+
+        bs_jax = BiotSavartJAX(coils)
+        jf_jax = SquaredFluxJAX(surf, bs_jax)
+
+        _assert_jax_objective_fallback_active(jf_jax)
+        assert jf_jax.J() >= 0.0
+
     def test_b_uses_jax_curvecwsfouriercpp_geometry(
         self, banana_coil_cpp_setup, monkeypatch
     ):

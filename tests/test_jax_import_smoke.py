@@ -102,6 +102,34 @@ def test_import_package_root():
     assert rc == 0, f"import simsopt failed:\n{err}"
 
 
+def test_repo_bootstrap_synthesizes_version_for_clean_source_tree():
+    """repo_bootstrap should tolerate source trees without generated _version.py."""
+    _assert_import_check_passes(
+        """
+        import tempfile
+        from pathlib import Path
+
+        from repo_bootstrap import bootstrap_local_simsopt
+
+        with tempfile.TemporaryDirectory() as tmp:
+            src_root = Path(tmp) / "src"
+            package_root = src_root / "simsopt"
+            package_root.mkdir(parents=True)
+            (package_root / "__init__.py").write_text(
+                "from ._version import version as __version__\\n",
+                encoding="utf-8",
+            )
+
+            bootstrap_local_simsopt(src_root)
+
+            import simsopt
+
+            assert simsopt.__version__ == "0.0.dev0+source"
+    """,
+        failure_message="repo_bootstrap clean-source version smoke failed",
+    )
+
+
 def test_import_package_root_native_cpu_does_not_require_jax_runtime():
     """Importing package root without JAX selectors must not force a JAX import."""
     rc, err = _run_import_check("""

@@ -2,7 +2,31 @@ from __future__ import annotations
 
 import importlib.util
 import sys
+import types
 from pathlib import Path
+
+_BOOTSTRAP_VERSION = "0.0.dev0+source"
+_BOOTSTRAP_VERSION_TUPLE = (0, 0, "dev0", "source")
+
+
+def _install_bootstrap_version_stub(package_root: Path) -> None:
+    """Provide ``simsopt._version`` when bootstrapping a clean source tree."""
+    version_file = package_root / "_version.py"
+    if version_file.exists():
+        return
+
+    module = types.ModuleType("simsopt._version")
+    module.version = _BOOTSTRAP_VERSION
+    module.__version__ = _BOOTSTRAP_VERSION
+    module.version_tuple = _BOOTSTRAP_VERSION_TUPLE
+    module.__version_tuple__ = _BOOTSTRAP_VERSION_TUPLE
+    module.__all__ = (
+        "__version__",
+        "__version_tuple__",
+        "version",
+        "version_tuple",
+    )
+    sys.modules["simsopt._version"] = module
 
 
 def bootstrap_local_simsopt(src_root: str | Path) -> None:
@@ -19,6 +43,7 @@ def bootstrap_local_simsopt(src_root: str | Path) -> None:
     for name in list(sys.modules):
         if name == "simsopt" or name.startswith("simsopt."):
             del sys.modules[name]
+    _install_bootstrap_version_stub(package_root)
     spec = importlib.util.spec_from_file_location(
         "simsopt",
         package_root / "__init__.py",

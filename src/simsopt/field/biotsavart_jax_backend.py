@@ -549,6 +549,16 @@ class BiotSavartJAX(Optimizable):
         self._curve_dof_size = 3 * (2 * self._curve_order + 1)
         self._curve_quadpoints_jax = _curve_quadpoints_jax(base_curves[0])
 
+    def supports_jax_objective_fallback(self):
+        """Return whether the mixed-quadrature objective path stays JAX-native."""
+        return all(
+            _supports_native_curve_geometry(curve)
+            and _supports_jax_curve_pullback(curve)
+            for curve, _rotmat, _current, _scale in (
+                _unwrap_coil_curve_and_current(coil) for coil in self._coils
+            )
+        )
+
     def _coil_arrays_in_order_from_dofs_generic_jax(self, coil_dofs):
         """Rebuild per-coil arrays for any JAX-geometry-capable curve set."""
         from .coil import Current

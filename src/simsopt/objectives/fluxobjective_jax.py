@@ -46,6 +46,13 @@ def _handle_squared_flux_fallback(detail: str) -> None:
     warn_if_jax_fallback(component="SquaredFluxJAX", detail=detail)
 
 
+def _supports_jax_objective_fallback(field) -> bool:
+    supports_fallback = getattr(field, "supports_jax_objective_fallback", None)
+    if not callable(supports_fallback):
+        return False
+    return bool(supports_fallback())
+
+
 # -----------------------------------------------------------------------
 # SquaredFluxJAX
 # -----------------------------------------------------------------------
@@ -98,8 +105,12 @@ class SquaredFluxJAX(Optimizable):
 
         # Choose path: JAX-native (end-to-end) or fallback (via Coil.vjp).
         self._use_jax_native = field._jax_native
+        self._uses_jax_objective_fallback = False
         if self._use_jax_native:
             self._init_jax_native(field, definition)
+        elif _supports_jax_objective_fallback(field):
+            self._uses_jax_objective_fallback = True
+            self._init_fallback(field, definition)
         else:
             _handle_squared_flux_fallback(
                 "the CPU fallback objective path for non-JAX-native coils"
