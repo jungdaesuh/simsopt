@@ -40,9 +40,10 @@ from ..backend import raise_if_strict_jax_fallback, warn_if_jax_fallback
 from ..jax_core._math_utils import (
     as_jax_float64 as _as_jax_float64,
     as_jax_int32 as _as_jax_int32,
+    as_runtime_float64 as _as_runtime_float64,
     concat_jax_float64 as _concat_jax_float64,
-    scalar_at_axis0 as _scalar_at_axis0,
 )
+
 try:
     from simsopt._core.optimizable import Optimizable
 except (ImportError, ModuleNotFoundError):
@@ -69,6 +70,7 @@ from ..jax_core.field import (
     grouped_field_inputs_from_spec,
 )
 from .boozer_residual_jax import (
+    _split_decision_vector as _split_boozer_decision_vector,
     boozer_residual_scalar,
     boozer_residual_vector,
     _surface_geometry_from_dofs,
@@ -95,34 +97,7 @@ __all__ = ["BoozerSurfaceJAX"]
 
 
 def _split_decision_vector_jax(x, *, optimize_G):
-    x_jax = _as_jax_float64(x)
-    total_size = int(x_jax.shape[0])
-    tail_size = 2 if optimize_G else 1
-    surface_size = total_size - tail_size
-    prefix_selector = np.eye(surface_size, total_size, dtype=np.float64)
-    sdofs = jax.device_put(prefix_selector) @ x_jax
-    iota = _scalar_at_axis0(x_jax, surface_size)
-    if optimize_G:
-        G = _scalar_at_axis0(x_jax, surface_size + 1)
-        return sdofs, iota, G
-    return sdofs, iota, None
-
-
-def _decision_vector_split_selectors(surface_size: int, optimize_G: bool):
-    total_size = surface_size + (2 if optimize_G else 1)
-    prefix_selector = jax.device_put(np.eye(surface_size, total_size, dtype=np.float64))
-
-    iota_selector = np.zeros(total_size, dtype=np.float64)
-    iota_selector[surface_size] = 1.0
-    iota_selector_jax = jax.device_put(iota_selector)
-
-    G_selector_jax = None
-    if optimize_G:
-        G_selector = np.zeros(total_size, dtype=np.float64)
-        G_selector[surface_size + 1] = 1.0
-        G_selector_jax = jax.device_put(G_selector)
-
-    return prefix_selector, iota_selector_jax, G_selector_jax
+    return _split_boozer_decision_vector(x, optimize_G=optimize_G)
 
 
 def _generic_surface_scatter_operator(mpol: int, ntor: int):
@@ -138,14 +113,18 @@ def _cross_product(left, right):
 
 
 def _select_axis0(array, index: int):
-    selector = np.zeros(array.shape[0], dtype=np.float64)
-    selector[index] = 1.0
-    return jnp.tensordot(_as_jax_float64(selector), array, axes=((0,), (0,)))
+    selector = np.zeros(int(array.shape[0]), dtype=np.float64)
+    selector[int(index)] = 1.0
+    return jnp.tensordot(
+        _as_runtime_float64(selector, reference=array),
+        jnp.asarray(array),
+        axes=((0,), (0,)),
+    )
 
 
 def _surface_sample_z(gamma):
     sample = _select_axis0(_select_axis0(gamma, 0), 0)
-    return jnp.dot(sample, _as_jax_float64([0.0, 0.0, 1.0]))
+    return _select_axis0(sample, 2)
 
 
 def _replace_group_coil_array(coil_arrays, group_index, group_array):
@@ -197,6 +176,19 @@ def _grouped_coil_currents(*, coil_arrays=None, coil_set_spec=None):
 
 def _resolved_coil_set_spec(default_spec, *, coil_arrays=None, coil_set_spec=None):
     return default_spec if coil_set_spec is None else coil_set_spec
+
+
+def _hostify_tree(value):
+    def _hostify_leaf(leaf):
+        if isinstance(leaf, jax.core.Tracer):
+            return leaf
+        if isinstance(leaf, jax.Array):
+            return np.asarray(jax.device_get(leaf), dtype=np.dtype(leaf.dtype))
+        if isinstance(leaf, np.ndarray):
+            return np.asarray(leaf, dtype=leaf.dtype)
+        return leaf
+
+    return jax.tree_util.tree_map(_hostify_leaf, value)
 
 
 def _grouped_biot_savart_B_points(points, *, coil_arrays=None, coil_set_spec=None):
@@ -273,9 +265,6 @@ def _boozer_penalty_objective(
     *,
     coil_arrays=None,
     coil_set_spec=None,
-    sdofs_selector,
-    iota_selector,
-    G_selector,
     quadpoints_phi,
     quadpoints_theta,
     mpol,
@@ -302,9 +291,7 @@ def _boozer_penalty_objective(
     or ``x = [surface_dofs, iota, G]`` (optimize_G=True).
     """
     x_jax = _as_jax_float64(x)
-    sdofs = sdofs_selector @ x_jax
-    iota = jnp.dot(x_jax, iota_selector)
-    G = jnp.dot(x_jax, G_selector) if optimize_G else None
+    sdofs, iota, G = _split_decision_vector_jax(x_jax, optimize_G=optimize_G)
     if not optimize_G:
         G = compute_G_from_currents(
             _grouped_coil_currents(coil_arrays=coil_arrays, coil_set_spec=coil_set_spec)
@@ -911,9 +898,6 @@ def _make_boozer_penalty_objective_closure(
     *,
     coil_arrays=None,
     coil_set_spec=None,
-    sdofs_selector=None,
-    iota_selector=None,
-    G_selector=None,
     quadpoints_phi,
     quadpoints_theta,
     mpol,
@@ -929,19 +913,17 @@ def _make_boozer_penalty_objective_closure(
     optimize_G,
     weight_inv_modB,
 ):
+    # Quadrature and scatter metadata are static bootstrap state, but the
+    # traceable target lane may pass coil_set_spec leaves as active tracers.
+    quadpoints_phi = _hostify_tree(quadpoints_phi)
+    quadpoints_theta = _hostify_tree(quadpoints_theta)
+    scatter_indices = _hostify_tree(scatter_indices)
+
     def _objective(xx):
-        selectors = (sdofs_selector, iota_selector, G_selector)
-        if any(selector is None for selector in selectors):
-            surface_size = int(xx.shape[0]) - (2 if optimize_G else 1)
-            selectors = _decision_vector_split_selectors(surface_size, optimize_G)
-        local_sdofs_selector, local_iota_selector, local_G_selector = selectors
         return _boozer_penalty_objective(
             xx,
             coil_arrays=coil_arrays,
             coil_set_spec=coil_set_spec,
-            sdofs_selector=local_sdofs_selector,
-            iota_selector=local_iota_selector,
-            G_selector=local_G_selector,
             quadpoints_phi=quadpoints_phi,
             quadpoints_theta=quadpoints_theta,
             mpol=mpol,
@@ -1321,22 +1303,13 @@ class BoozerSurfaceJAX(Optimizable):
         coil_arrays=None,
     ):
         """Build penalty objective with explicit overrides."""
-        surface_size = int(np.asarray(self.surface.x).size)
-        sdofs_selector, iota_selector, G_selector = _decision_vector_split_selectors(
-            surface_size,
-            optimize_G,
-        )
-        return partial(
-            _boozer_penalty_objective,
+        return _make_boozer_penalty_objective_closure(
             coil_arrays=coil_arrays,
             coil_set_spec=_resolved_coil_set_spec(
                 self.coil_set_spec,
                 coil_arrays=coil_arrays,
                 coil_set_spec=coil_set_spec,
             ),
-            sdofs_selector=sdofs_selector,
-            iota_selector=iota_selector,
-            G_selector=G_selector,
             quadpoints_phi=self.quadpoints_phi,
             quadpoints_theta=self.quadpoints_theta,
             mpol=self.mpol,
