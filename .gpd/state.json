@@ -1,0 +1,280 @@
+{
+  "project_reference": {
+    "project_md_updated": null,
+    "core_research_question": null,
+    "current_focus": null
+  },
+  "project_contract": {
+    "schema_version": 1,
+    "scope": {
+      "question": "Can a self-referential, metacognitive algorithm-discovery system co-evolve solver code and search policy to discover new families of constrained stellarator optimizers that outperform current incumbents?",
+      "in_scope": [
+        "Locking gold suite and baseline contract",
+        "Discovery of new optimizer families via SkyDiscover/HyperAgents substrate",
+        "Co-evolution of search strategy (EvoX-style)",
+        "Distillation and simplification of top winners",
+        "Rigorous ablation studies"
+      ],
+      "out_of_scope": [
+        "Generic hyperparameter tuning of existing ALM",
+        "Framework-specific solver improvements only"
+      ],
+      "unresolved_questions": [
+        "Which blind matched-budget benchmark problems will constitute the Gold Suite?",
+        "How to faithfully reproduce the 2025 SIMSOPT coil-optimization ALM workflow?"
+      ]
+    },
+    "context_intake": {
+      "must_read_refs": [
+        "ref-desc-alm",
+        "ref-simsopt-alm"
+      ],
+      "must_include_prior_outputs": [
+        "gpu_jax_pro.md",
+        "jax_single_stage_parity_audit_2026-03-29.md"
+      ],
+      "user_asserted_anchors": [
+        "DESC lsq-auglag",
+        "2025 coil-optimization paper ALM workflow"
+      ],
+      "known_good_baselines": [
+        "simsopt-jax current best single-stage optimization"
+      ],
+      "context_gaps": [
+        "Detailed implementation of SIMSOPT 2025 ALM workflow not verified"
+      ],
+      "crucial_inputs": [
+        "SkyDiscover substrate",
+        "HyperAgents meta-procedure",
+        "AlphaEvolve evaluation pattern"
+      ]
+    },
+    "approach_policy": {
+      "formulations": [
+        "Co-evolution of solver code and search policy"
+      ],
+      "allowed_estimator_families": [
+        "Semantic code mutation on proxy tasks",
+        "Multiobjective selection"
+      ],
+      "forbidden_estimator_families": [
+        "Direct tuning of existing ALM parameters"
+      ],
+      "allowed_fit_families": [
+        "Self-improving meta-agent architectures"
+      ],
+      "forbidden_fit_families": [
+        "Hand-tuned heuristics without evolutionary grounding"
+      ],
+      "stop_and_rethink_conditions": [
+        "New algorithm disappears under specified ablations"
+      ]
+    },
+    "observables": [
+      {
+        "id": "obs-convergence",
+        "name": "Matched-budget convergence",
+        "kind": "curve",
+        "definition": "Objective value vs. wall-clock time or JAX-traceable op count",
+        "regime": null,
+        "units": null
+      },
+      {
+        "id": "obs-final-resid",
+        "name": "Final equilibrium residual",
+        "kind": "scalar",
+        "definition": "Boozer residual magnitude at converged point",
+        "regime": null,
+        "units": null
+      }
+    ],
+    "claims": [
+      {
+        "id": "claim-superiority",
+        "statement": "The discovered optimizer family beats DESC lsq-auglag and SIMSOPT ALM on blind matched-budget benchmarks.",
+        "observables": [
+          "obs-convergence",
+          "obs-final-resid"
+        ],
+        "deliverables": [
+          "deliv-benchmark-report"
+        ],
+        "acceptance_tests": [
+          "test-blind-oracle"
+        ],
+        "references": [
+          "ref-desc-alm",
+          "ref-simsopt-alm"
+        ]
+      }
+    ],
+    "deliverables": [
+      {
+        "id": "deliv-gold-suite",
+        "kind": "code",
+        "path": null,
+        "description": "Gold benchmark suite spanning boundary, equilibrium, and coil optimization",
+        "must_contain": [
+          "Blind evaluation interface",
+          "Matched-budget enforcement"
+        ]
+      },
+      {
+        "id": "deliv-benchmark-report",
+        "kind": "report",
+        "path": null,
+        "description": "Comparison report between discovered optimizer and incumbents",
+        "must_contain": [
+          "Ablation results",
+          "Statistical significance"
+        ]
+      }
+    ],
+    "acceptance_tests": [
+      {
+        "id": "test-blind-oracle",
+        "subject": "claim-superiority",
+        "kind": "oracle",
+        "procedure": "Evaluate discovered optimizer on Gold Suite with sealed oracle assessment",
+        "pass_condition": "Statistically significant improvement over incumbents within matched budget",
+        "evidence_required": [
+          "deliv-benchmark-report"
+        ],
+        "automation": "automated"
+      }
+    ],
+    "references": [
+      {
+        "id": "ref-desc-alm",
+        "kind": "paper",
+        "locator": "DESC Docs: lsq-auglag",
+        "aliases": [
+          "DESC-ALM"
+        ],
+        "role": "benchmark",
+        "why_it_matters": "Primary documented incumbent",
+        "applies_to": [
+          "claim-superiority"
+        ],
+        "carry_forward_to": [
+          "planning",
+          "execution",
+          "verification"
+        ],
+        "must_surface": true,
+        "required_actions": [
+          "read",
+          "compare"
+        ]
+      },
+      {
+        "id": "ref-simsopt-alm",
+        "kind": "paper",
+        "locator": "2025 coil-optimization paper",
+        "aliases": [
+          "SIMSOPT-ALM-2025"
+        ],
+        "role": "benchmark",
+        "why_it_matters": "Strongest published ALM workflow in SIMSOPT ecosystem",
+        "applies_to": [
+          "claim-superiority"
+        ],
+        "carry_forward_to": [
+          "planning",
+          "execution",
+          "verification"
+        ],
+        "must_surface": true,
+        "required_actions": [
+          "use",
+          "compare"
+        ]
+      }
+    ],
+    "forbidden_proxies": [
+      {
+        "id": "fp-tuning",
+        "subject": "claim-superiority",
+        "proxy": "Hyperparameter tuning of existing solvers",
+        "reason": "Goal is to discover new algorithm families, not tune existing ones"
+      }
+    ],
+    "links": [
+      {
+        "id": "link-report-superiority",
+        "source": "claim-superiority",
+        "target": "deliv-benchmark-report",
+        "relation": "evaluated_by",
+        "verified_by": [
+          "test-blind-oracle"
+        ]
+      }
+    ],
+    "uncertainty_markers": {
+      "weakest_anchors": [
+        "Fidelity of SIMSOPT 2025 ALM reproduction"
+      ],
+      "unvalidated_assumptions": [
+        "Co-evolved search strategy generalizes to unseen problems"
+      ],
+      "competing_explanations": [
+        "Observed wins are due to better hyperparameter defaults rather than structural discovery"
+      ],
+      "disconfirming_observations": [
+        "Discovery vanishes under Phase 5 ablations"
+      ]
+    }
+  },
+  "position": {
+    "current_phase": null,
+    "current_phase_name": null,
+    "total_phases": null,
+    "current_plan": null,
+    "total_plans_in_phase": null,
+    "status": null,
+    "last_activity": null,
+    "last_activity_desc": null,
+    "progress_percent": 0,
+    "paused_at": null
+  },
+  "active_calculations": [],
+  "intermediate_results": [],
+  "open_questions": [
+    "Which blind matched-budget benchmark problems will constitute the Gold Suite?",
+    "How to faithfully reproduce the 2025 SIMSOPT coil-optimization ALM workflow?"
+  ],
+  "performance_metrics": {
+    "rows": []
+  },
+  "decisions": [],
+  "approximations": [],
+  "convention_lock": {
+    "metric_signature": null,
+    "fourier_convention": null,
+    "natural_units": null,
+    "gauge_choice": null,
+    "regularization_scheme": null,
+    "renormalization_scheme": null,
+    "coordinate_system": null,
+    "spin_basis": null,
+    "state_normalization": null,
+    "coupling_convention": null,
+    "index_positioning": null,
+    "time_ordering": null,
+    "commutation_convention": null,
+    "levi_civita_sign": null,
+    "generator_normalization": null,
+    "covariant_derivative_sign": null,
+    "gamma_matrix_convention": null,
+    "creation_annihilation_order": null,
+    "custom_conventions": {}
+  },
+  "propagated_uncertainties": [],
+  "pending_todos": [],
+  "blockers": [],
+  "session": {
+    "last_date": null,
+    "stopped_at": null,
+    "resume_file": null
+  }
+}
