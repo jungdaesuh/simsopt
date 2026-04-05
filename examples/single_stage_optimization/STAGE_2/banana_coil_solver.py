@@ -101,6 +101,8 @@ def evaluate_stage2_hardware_constraints(
 
 
 def parse_args():
+    from simsopt.geo.optimizer_jax import VALID_LEAST_SQUARES_ALGORITHMS
+
     parser = argparse.ArgumentParser(
         description="Run Stage 2 banana coil optimization against a fixed plasma surface.",
     )
@@ -197,13 +199,19 @@ def parse_args():
         "--ftol",
         type=float,
         default=float(os.environ.get("FTOL", "1e-15")),
-        help="L-BFGS-B function change tolerance. Default 1e-15 (factr~4.5) effectively lets maxiter control termination.",
+        help=(
+            "L-BFGS-B function change tolerance. Ignored by the LM lane. "
+            "Default 1e-15 (factr~4.5) effectively lets maxiter control termination."
+        ),
     )
     parser.add_argument(
         "--gtol",
         type=float,
         default=float(os.environ.get("GTOL", "1e-15")),
-        help="L-BFGS-B projected gradient tolerance. Default 1e-15 effectively lets maxiter control termination.",
+        help=(
+            "Optimizer termination tolerance. On the LM lane this is the "
+            "least-squares gradient infinity-norm tolerance."
+        ),
     )
     parser.add_argument(
         "--length-weight",
@@ -307,6 +315,17 @@ def parse_args():
         ),
     )
     parser.add_argument(
+        "--least-squares-algorithm",
+        choices=sorted(VALID_LEAST_SQUARES_ALGORITHMS),
+        default=os.environ.get("STAGE2_LEAST_SQUARES_ALGORITHM"),
+        help=(
+            "Stage 2 least-squares algorithm. 'lm' routes the JAX ondevice "
+            "lane through the pure JAX LM residual solver. Defaults to 'lm' "
+            "on the JAX ondevice lane and 'quasi-newton' elsewhere when no "
+            "explicit override is provided."
+        ),
+    )
+    parser.add_argument(
         "--record-warm-timings",
         action="store_true",
         help=(
@@ -338,6 +357,11 @@ def parse_args():
         args.backend,
         args.optimizer_backend,
     )
+    args.least_squares_algorithm = resolve_stage2_default_least_squares_algorithm(
+        args.backend,
+        args.optimizer_backend,
+        args.least_squares_algorithm,
+    )
     return args
 
 
@@ -348,6 +372,19 @@ def resolve_stage2_default_optimizer_backend(field_backend, optimizer_backend=No
     if field_backend == "jax":
         return "ondevice"
     return "scipy"
+
+
+def resolve_stage2_default_least_squares_algorithm(
+    field_backend,
+    optimizer_backend,
+    least_squares_algorithm=None,
+):
+    """Resolve the implicit Stage 2 least-squares algorithm for the active lane."""
+    if least_squares_algorithm is not None:
+        return least_squares_algorithm
+    if field_backend == "jax" and optimizer_backend == "ondevice":
+        return "lm"
+    return "quasi-newton"
 
 
 def build_equilibrium_path(args):
@@ -1095,9 +1132,34 @@ def profile_stage2_explicit_step(
 _STAGE2_COMPONENT_LABEL = "the Stage 2 outer loop"
 
 
-def resolve_stage2_optimizer_contract(field_backend, optimizer_backend):
+def resolve_stage2_optimizer_contract(
+    field_backend,
+    optimizer_backend,
+    *,
+    least_squares_algorithm="quasi-newton",
+):
     """Resolve the optimizer contract for the Stage 2 outer loop."""
-    from simsopt.geo.optimizer_jax import resolve_outer_loop_optimizer_contract
+    from simsopt.geo.optimizer_jax import (
+        ContinuousOptimizerContract,
+        resolve_least_squares_optimizer_method,
+        resolve_outer_loop_optimizer_contract,
+    )
+
+    if least_squares_algorithm == "lm":
+        if field_backend != "jax" or optimizer_backend != "ondevice":
+            raise ValueError(
+                "Stage 2 least_squares_algorithm='lm' currently requires "
+                "backend='jax' and optimizer_backend='ondevice'."
+            )
+        return ContinuousOptimizerContract(
+            method=resolve_least_squares_optimizer_method(
+                optimizer_backend,
+                limited_memory=False,
+                least_squares_algorithm=least_squares_algorithm,
+            ),
+            use_scalar_objective=False,
+            use_least_squares_objective=True,
+        )
 
     return resolve_outer_loop_optimizer_contract(
         field_backend,
@@ -1106,22 +1168,40 @@ def resolve_stage2_optimizer_contract(field_backend, optimizer_backend):
     )
 
 
-def resolve_stage2_optimizer_method(field_backend, optimizer_backend):
+def resolve_stage2_optimizer_method(
+    field_backend,
+    optimizer_backend,
+    *,
+    least_squares_algorithm="quasi-newton",
+):
     """Resolve the shared optimizer substrate for the Stage 2 outer loop."""
-    return resolve_stage2_optimizer_contract(field_backend, optimizer_backend).method
-
-
-def should_build_stage2_target_objective(field_backend, optimizer_backend):
-    """Return whether the JAX Stage 2 target objective should drive optimization."""
     return resolve_stage2_optimizer_contract(
-        field_backend, optimizer_backend
-    ).use_scalar_objective
+        field_backend,
+        optimizer_backend,
+        least_squares_algorithm=least_squares_algorithm,
+    ).method
+
+
+def should_build_stage2_target_objective(
+    field_backend,
+    optimizer_backend,
+    *,
+    least_squares_algorithm="quasi-newton",
+):
+    """Return whether the JAX Stage 2 target objective should drive optimization."""
+    contract = resolve_stage2_optimizer_contract(
+        field_backend,
+        optimizer_backend,
+        least_squares_algorithm=least_squares_algorithm,
+    )
+    return contract.use_scalar_objective or contract.use_least_squares_objective
 
 
 def resolve_stage2_target_lane_requirements(
     field_backend,
     optimizer_backend,
     *,
+    least_squares_algorithm,
     probe_only,
     export_objective_json,
 ):
@@ -1138,10 +1218,12 @@ def resolve_stage2_target_lane_requirements(
         outer_contract = resolve_stage2_optimizer_contract(
             field_backend,
             optimizer_backend,
+            least_squares_algorithm=least_squares_algorithm,
         )
         use_target_objective_lane = should_build_stage2_target_objective(
             field_backend,
             optimizer_backend,
+            least_squares_algorithm=least_squares_algorithm,
         )
     return (
         outer_contract,
@@ -1165,6 +1247,12 @@ def resolve_stage2_target_value_and_grad(target_objective_bundle):
     if target_objective_bundle.value_and_grad is not None:
         return target_objective_bundle.value_and_grad
     return jax.jit(jax.value_and_grad(target_objective_bundle.objective))
+
+
+def resolve_stage2_target_least_squares_residual(target_objective_bundle):
+    if target_objective_bundle is None:
+        return None
+    return getattr(target_objective_bundle, "least_squares_residual", None)
 
 
 def build_stage2_target_optimizer_state(target_objective_bundle, dofs):
@@ -1210,11 +1298,24 @@ def run_stage2_optimizer(
     gtol,
     maxcor=300,
     scalar_fun=None,
+    residual_fun=None,
 ):
     """Run the Stage 2 outer optimization through the shared optimizer substrate."""
-    from simsopt.geo.optimizer_jax import jax_minimize
+    from simsopt.geo.optimizer_jax import jax_least_squares, jax_minimize
 
     use_explicit_value_and_grad = value_and_grad_fun is not None
+    if contract.use_least_squares_objective:
+        if residual_fun is None:
+            raise RuntimeError(
+                "Stage 2 LM optimization requires an explicit residual-vector objective."
+            )
+        return jax_least_squares(
+            residual_fun,
+            dofs,
+            method=contract.method,
+            tol=gtol,
+            maxiter=maxiter,
+        )
     if contract.use_scalar_objective and scalar_fun is None and not use_explicit_value_and_grad:
         raise RuntimeError(
             "Stage 2 target-lane optimization requires a JAX target objective."
@@ -1249,6 +1350,7 @@ def run_stage2_optimizer_timed(
     gtol,
     maxcor=300,
     scalar_fun=None,
+    residual_fun=None,
 ):
     """Run the Stage 2 optimizer and return both result and elapsed time."""
     start = time.perf_counter()
@@ -1261,6 +1363,7 @@ def run_stage2_optimizer_timed(
         gtol=gtol,
         maxcor=maxcor,
         scalar_fun=scalar_fun,
+        residual_fun=residual_fun,
     )
     return result, float(time.perf_counter() - start)
 
@@ -1680,6 +1783,7 @@ if __name__ == "__main__":
     ) = resolve_stage2_target_lane_requirements(
         args.backend,
         args.optimizer_backend,
+        least_squares_algorithm=args.least_squares_algorithm,
         probe_only=args.probe_only,
         export_objective_json=args.export_objective_json,
     )
@@ -1890,6 +1994,9 @@ if __name__ == "__main__":
         target_value_and_grad = resolve_stage2_target_value_and_grad(
             target_objective_bundle
         )
+        target_residual = resolve_stage2_target_least_squares_residual(
+            target_objective_bundle
+        )
         res, cold_elapsed_s = run_stage2_optimizer_timed(
             target_value_and_grad if target_value_and_grad is not None else fun,
             optimizer_dofs,
@@ -1903,6 +2010,7 @@ if __name__ == "__main__":
                 if target_objective_bundle is None
                 else target_objective_bundle.objective
             ),
+            residual_fun=target_residual,
         )
         JF.x = flatten_stage2_target_optimizer_state(res.x)
         res_nit = res.nit
@@ -1935,7 +2043,13 @@ if __name__ == "__main__":
                 target_value_and_grad = resolve_stage2_target_value_and_grad(
                     target_objective_bundle
                 )
-                assert target_value_and_grad is not None
+                target_residual = resolve_stage2_target_least_squares_residual(
+                    target_objective_bundle
+                )
+                if outer_contract.use_least_squares_objective:
+                    assert target_residual is not None
+                else:
+                    assert target_value_and_grad is not None
                 warm_optimizer_dofs = build_stage2_target_optimizer_state(
                     target_objective_bundle,
                     initial_dofs,
@@ -1949,6 +2063,7 @@ if __name__ == "__main__":
                     ftol=args.ftol,
                     gtol=args.gtol,
                     scalar_fun=target_objective_bundle.objective,
+                    residual_fun=target_residual,
                 )
                 optimizer_timings["warm_run_s"] = float(warm_elapsed_s)
                 optimizer_timings["compile_overhead_s"] = max(
@@ -2086,6 +2201,7 @@ if __name__ == "__main__":
         "squared_flux_weight": SQUARED_FLUX_WEIGHT,
         "backend": args.backend,
         "optimizer_backend": args.optimizer_backend,
+        "least_squares_algorithm": args.least_squares_algorithm,
         "field_diagnostic_stride": int(field_diagnostic_stride),
         "banana_curve_class": type(new_banana_curve).__name__,
         "init_only": args.init_only,

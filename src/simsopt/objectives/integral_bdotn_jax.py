@@ -20,7 +20,34 @@ import jax
 import jax.numpy as jnp
 from functools import partial
 
-__all__ = ["integral_BdotN"]
+__all__ = ["integral_BdotN", "residual_BdotN"]
+
+
+@partial(jax.jit, static_argnames=("definition",))
+def residual_BdotN(Bcoil, target, normal, definition="quadratic flux"):
+    """Return a least-squares residual vector for the selected flux definition."""
+    nphi, ntheta, _ = Bcoil.shape
+
+    norm_n = jnp.sqrt(jnp.sum(normal * normal, axis=-1))
+    unit_n = normal / norm_n[..., None]
+    BdotN = jnp.sum(Bcoil * unit_n, axis=-1) - target
+
+    if definition == "quadratic flux":
+        weight = norm_n / (nphi * ntheta)
+        residual = BdotN * jnp.sqrt(weight)
+    elif definition == "normalized":
+        B2 = jnp.sum(Bcoil * Bcoil, axis=-1)
+        denominator = jnp.sum(B2 * norm_n)
+        residual = BdotN * jnp.sqrt(norm_n / denominator)
+    elif definition == "local":
+        B2 = jnp.sum(Bcoil * Bcoil, axis=-1)
+        safe_B2 = jnp.where(B2 > 0.0, B2, 1.0)
+        inv_B2 = jnp.where(B2 > 0.0, 1.0 / safe_B2, 0.0)
+        residual = BdotN * jnp.sqrt(inv_B2 * norm_n / (nphi * ntheta))
+    else:
+        raise ValueError(f"Unknown definition: {definition!r}")
+
+    return jnp.ravel(residual)
 
 
 @partial(jax.jit, static_argnames=("definition",))
@@ -38,27 +65,10 @@ def integral_BdotN(Bcoil, target, normal, definition="quadratic flux"):
     Returns:
         J: scalar objective value.
     """
-    nphi, ntheta, _ = Bcoil.shape
-
-    norm_n = jnp.sqrt(jnp.sum(normal * normal, axis=-1))  # (nphi, ntheta)
-    unit_n = normal / norm_n[..., None]  # (nphi, ntheta, 3)
-
-    BdotN = jnp.sum(Bcoil * unit_n, axis=-1) - target  # (nphi, ntheta)
-
-    if definition == "quadratic flux":
-        return 0.5 * jnp.sum(BdotN * BdotN * norm_n) / (nphi * ntheta)
-
-    elif definition == "normalized":
-        B2 = jnp.sum(Bcoil * Bcoil, axis=-1)  # (nphi, ntheta)
-        numerator = jnp.sum(BdotN * BdotN * norm_n)
-        denominator = jnp.sum(B2 * norm_n)
-        return 0.5 * numerator / denominator
-
-    elif definition == "local":
-        B2 = jnp.sum(Bcoil * Bcoil, axis=-1)
-        safe_B2 = jnp.where(B2 > 0.0, B2, 1.0)
-        inv_B2 = jnp.where(B2 > 0.0, 1.0 / safe_B2, 0.0)
-        return 0.5 * jnp.sum(BdotN * BdotN * inv_B2 * norm_n) / (nphi * ntheta)
-
-    else:
-        raise ValueError(f"Unknown definition: {definition!r}")
+    residual = residual_BdotN(
+        Bcoil,
+        target,
+        normal,
+        definition=definition,
+    )
+    return 0.5 * jnp.vdot(residual, residual).real

@@ -2385,6 +2385,7 @@ class TestStage2OptimizerContract:
 
         assert args.backend == "jax"
         assert args.optimizer_backend == "ondevice"
+        assert args.least_squares_algorithm == "lm"
 
     def test_parse_args_preserves_cpu_default_reference_lane(self, monkeypatch):
         stage2_script = _load_stage2_script_module()
@@ -2398,19 +2399,47 @@ class TestStage2OptimizerContract:
 
         assert args.backend == "cpu"
         assert args.optimizer_backend == "scipy"
+        assert args.least_squares_algorithm == "quasi-newton"
+
+    def test_parse_args_accepts_least_squares_algorithm_override(self, monkeypatch):
+        stage2_script = _load_stage2_script_module()
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "banana_coil_solver.py",
+                "--backend",
+                "jax",
+                "--least-squares-algorithm",
+                "quasi-newton",
+            ],
+        )
+
+        args = stage2_script.parse_args()
+
+        assert args.backend == "jax"
+        assert args.optimizer_backend == "ondevice"
+        assert args.least_squares_algorithm == "quasi-newton"
 
     @pytest.mark.parametrize(
-        ("field_backend", "optimizer_backend", "expected_method"),
+        (
+            "field_backend",
+            "optimizer_backend",
+            "least_squares_algorithm",
+            "expected_method",
+        ),
         [
-            ("cpu", "scipy", "lbfgs"),
-            ("jax", "scipy", "lbfgs"),
-            ("jax", "ondevice", "lbfgs-ondevice"),
+            ("cpu", "scipy", "quasi-newton", "lbfgs"),
+            ("jax", "scipy", "quasi-newton", "lbfgs"),
+            ("jax", "ondevice", "quasi-newton", "lbfgs-ondevice"),
+            ("jax", "ondevice", "lm", "lm-ondevice"),
         ],
     )
     def test_resolve_stage2_optimizer_method_contract(
         self,
         field_backend,
         optimizer_backend,
+        least_squares_algorithm,
         expected_method,
     ):
         stage2_script = _load_stage2_script_module()
@@ -2418,6 +2447,7 @@ class TestStage2OptimizerContract:
             stage2_script.resolve_stage2_optimizer_method(
                 field_backend,
                 optimizer_backend,
+                least_squares_algorithm=least_squares_algorithm,
             )
             == expected_method
         )
@@ -2430,18 +2460,33 @@ class TestStage2OptimizerContract:
         ):
             stage2_script.resolve_stage2_optimizer_method("jax", "hybrid")
 
+    def test_resolve_stage2_optimizer_method_rejects_reference_lm(self):
+        stage2_script = _load_stage2_script_module()
+        with pytest.raises(
+            ValueError,
+            match="Stage 2 least_squares_algorithm='lm' currently requires "
+            "backend='jax' and optimizer_backend='ondevice'",
+        ):
+            stage2_script.resolve_stage2_optimizer_method(
+                "jax",
+                "scipy",
+                least_squares_algorithm="lm",
+            )
+
     @pytest.mark.parametrize(
-        ("field_backend", "optimizer_backend", "expected"),
+        ("field_backend", "optimizer_backend", "least_squares_algorithm", "expected"),
         [
-            ("cpu", "scipy", False),
-            ("jax", "scipy", False),
-            ("jax", "ondevice", True),
+            ("cpu", "scipy", "quasi-newton", False),
+            ("jax", "scipy", "quasi-newton", False),
+            ("jax", "ondevice", "quasi-newton", True),
+            ("jax", "ondevice", "lm", True),
         ],
     )
     def test_target_objective_bundle_is_built_only_for_target_lane(
         self,
         field_backend,
         optimizer_backend,
+        least_squares_algorithm,
         expected,
     ):
         stage2_script = _load_stage2_script_module()
@@ -2449,6 +2494,7 @@ class TestStage2OptimizerContract:
             stage2_script.should_build_stage2_target_objective(
                 field_backend,
                 optimizer_backend,
+                least_squares_algorithm=least_squares_algorithm,
             )
             is expected
         )
@@ -2457,6 +2503,7 @@ class TestStage2OptimizerContract:
         (
             "field_backend",
             "optimizer_backend",
+            "least_squares_algorithm",
             "probe_only",
             "export_objective_json",
             "expects_contract",
@@ -2465,17 +2512,79 @@ class TestStage2OptimizerContract:
             "expects_probe_only_target_payload",
         ),
         [
-            ("cpu", "scipy", False, None, True, False, False, False),
-            ("jax", "scipy", False, "probe.json", True, False, False, False),
-            ("jax", "ondevice", False, None, True, True, False, False),
-            ("jax", "ondevice", False, "probe.json", True, True, True, False),
-            ("cpu", "ondevice", True, "probe.json", False, False, True, True),
+            (
+                "cpu",
+                "scipy",
+                "quasi-newton",
+                False,
+                None,
+                True,
+                False,
+                False,
+                False,
+            ),
+            (
+                "jax",
+                "scipy",
+                "quasi-newton",
+                False,
+                "probe.json",
+                True,
+                False,
+                False,
+                False,
+            ),
+            (
+                "jax",
+                "ondevice",
+                "quasi-newton",
+                False,
+                None,
+                True,
+                True,
+                False,
+                False,
+            ),
+            (
+                "jax",
+                "ondevice",
+                "lm",
+                False,
+                None,
+                True,
+                True,
+                False,
+                False,
+            ),
+            (
+                "jax",
+                "ondevice",
+                "lm",
+                False,
+                "probe.json",
+                True,
+                True,
+                True,
+                False,
+            ),
+            (
+                "cpu",
+                "ondevice",
+                "quasi-newton",
+                True,
+                "probe.json",
+                False,
+                False,
+                True,
+                True,
+            ),
         ],
     )
     def test_resolve_stage2_target_lane_requirements(
         self,
         field_backend,
         optimizer_backend,
+        least_squares_algorithm,
         probe_only,
         export_objective_json,
         expects_contract,
@@ -2493,6 +2602,7 @@ class TestStage2OptimizerContract:
         ) = stage2_script.resolve_stage2_target_lane_requirements(
             field_backend,
             optimizer_backend,
+            least_squares_algorithm=least_squares_algorithm,
             probe_only=probe_only,
             export_objective_json=export_objective_json,
         )
@@ -3367,17 +3477,27 @@ class TestStage2OptimizerContract:
         value = target_bundle.objective(dofs)
         assert target_bundle.value_and_grad is not None
         value_vg, grad_vg = target_bundle.value_and_grad(dofs)
+        assert target_bundle.least_squares_residual is not None
+        residual = target_bundle.least_squares_residual(dofs)
         assert target_bundle.raw_terms is not None
         raw_terms = target_bundle.raw_terms(dofs)
         grad = jax.grad(target_bundle.objective)(dofs)
         vg_jaxpr = jax.make_jaxpr(target_bundle.value_and_grad)(dofs)
+        residual_jaxpr = jax.make_jaxpr(target_bundle.least_squares_residual)(dofs)
 
         assert np.isfinite(float(value))
         assert np.isfinite(float(value_vg))
+        assert np.all(np.isfinite(np.asarray(residual, dtype=float)))
         assert np.all(np.isfinite(np.asarray(raw_terms, dtype=float)))
         assert np.all(np.isfinite(np.asarray(grad, dtype=float)))
         assert np.all(np.isfinite(np.asarray(grad_vg, dtype=float)))
         np.testing.assert_allclose(float(value_vg), float(value), rtol=0.0, atol=0.0)
+        np.testing.assert_allclose(
+            0.5 * float(np.vdot(np.asarray(residual, dtype=float), np.asarray(residual, dtype=float))),
+            float(value),
+            rtol=1e-12,
+            atol=1e-18,
+        )
         np.testing.assert_allclose(
             np.asarray(grad_vg, dtype=float),
             np.asarray(grad, dtype=float),
@@ -3385,6 +3505,7 @@ class TestStage2OptimizerContract:
             atol=1e-15,
         )
         assert "pure_callback" not in str(vg_jaxpr)
+        assert "pure_callback" not in str(residual_jaxpr)
 
     def test_target_scalar_objective_accepts_structured_optimizer_state(self):
         objective, target_bundle = _build_stage2_target_objective_contract_case()
@@ -3397,8 +3518,16 @@ class TestStage2OptimizerContract:
         value = target_bundle.objective(optimizer_state)
         assert target_bundle.value_and_grad is not None
         value_vg, grad_vg = target_bundle.value_and_grad(optimizer_state)
+        assert target_bundle.least_squares_residual is not None
+        residual = target_bundle.least_squares_residual(optimizer_state)
 
         np.testing.assert_allclose(float(value_vg), float(value), rtol=0.0, atol=0.0)
+        np.testing.assert_allclose(
+            0.5 * float(np.vdot(np.asarray(residual, dtype=float), np.asarray(residual, dtype=float))),
+            float(value),
+            rtol=1e-12,
+            atol=1e-18,
+        )
         np.testing.assert_allclose(
             np.asarray(stage2_target_optimizer_state_to_dofs(grad_vg), dtype=float),
             np.asarray(jax.grad(target_bundle.objective)(dofs), dtype=float),
@@ -3433,12 +3562,15 @@ class TestStage2OptimizerContract:
         value = target_bundle.objective(dofs)
         assert target_bundle.value_and_grad is not None
         value_vg, grad_vg = target_bundle.value_and_grad(dofs)
+        assert target_bundle.least_squares_residual is not None
+        residual = target_bundle.least_squares_residual(dofs)
         assert target_bundle.raw_terms is not None
         raw_terms = target_bundle.raw_terms(dofs)
         grad = jax.grad(target_bundle.objective)(dofs)
 
         assert np.isfinite(float(value))
         assert np.isfinite(float(value_vg))
+        assert np.all(np.isfinite(np.asarray(residual, dtype=float)))
         assert np.all(np.isfinite(np.asarray(raw_terms, dtype=float)))
         assert np.all(np.isfinite(np.asarray(grad, dtype=float)))
         assert np.all(np.isfinite(np.asarray(grad_vg, dtype=float)))
@@ -3458,6 +3590,11 @@ class TestStage2OptimizerContract:
         value_target, grad_target = target_bundle.value_and_grad(
             np.asarray(dofs, dtype=np.float64)
         )
+        assert target_bundle.least_squares_residual is not None
+        residual = np.asarray(
+            target_bundle.least_squares_residual(np.asarray(dofs, dtype=np.float64)),
+            dtype=float,
+        )
 
         assert target_bundle.expected_dof_count == dofs.size
         np.testing.assert_allclose(
@@ -3471,6 +3608,12 @@ class TestStage2OptimizerContract:
             grad_ref,
             rtol=1e-9,
             atol=_TARGET_OBJECTIVE_COMPOSITE_GRAD_ATOL,
+        )
+        np.testing.assert_allclose(
+            0.5 * float(np.vdot(residual, residual)),
+            float(value_target),
+            rtol=1e-12,
+            atol=1e-18,
         )
         assert target_bundle.raw_terms is not None
         raw_terms = np.asarray(target_bundle.raw_terms(dofs), dtype=float)
@@ -3579,6 +3722,8 @@ class TestStage2OptimizerContract:
         assert not _closure_has_jax_array_leaf(target_bundle.value_and_grad)
         assert target_bundle.raw_terms is not None
         assert not _closure_has_jax_array_leaf(target_bundle.raw_terms)
+        assert target_bundle.least_squares_residual is not None
+        assert not _closure_has_jax_array_leaf(target_bundle.least_squares_residual)
 
     @pytest.mark.parametrize(
         ("field_backend", "optimizer_backend", "export_objective_json"),
@@ -3690,6 +3835,94 @@ class TestStage2OptimizerContract:
         )
         assert calls["maxiter"] == 20
         assert calls["options"]["maxcor"] == 7
+
+    def test_stage2_run_optimizer_routes_lm_target_lane_through_jax_least_squares(
+        self,
+        monkeypatch,
+    ):
+        stage2_script = _load_stage2_script_module()
+        contract = stage2_script.resolve_stage2_optimizer_contract(
+            "jax",
+            "ondevice",
+            least_squares_algorithm="lm",
+        )
+        dofs = np.asarray([0.25, -0.5], dtype=np.float64)
+        optimizer_state = stage2_script.build_stage2_target_optimizer_state(
+            types.SimpleNamespace(expected_dof_count=2),
+            dofs,
+        )
+
+        calls = {}
+
+        def fake_jax_least_squares(
+            residual_fn,
+            x0,
+            *,
+            method,
+            tol,
+            maxiter,
+            options=None,
+            callback=None,
+            progress_callback=None,
+        ):
+            calls["residual_fn"] = residual_fn
+            calls["x0"] = x0
+            calls["method"] = method
+            calls["tol"] = tol
+            calls["maxiter"] = maxiter
+            calls["options"] = options
+            calls["callback"] = callback
+            calls["progress_callback"] = progress_callback
+            residual = residual_fn(x0)
+            value = 0.5 * jax.numpy.vdot(residual, residual).real
+            grad = jax.grad(
+                lambda state: 0.5
+                * jax.numpy.vdot(residual_fn(state), residual_fn(state)).real
+            )(x0)
+            return types.SimpleNamespace(
+                x=x0,
+                fun=value,
+                jac=grad,
+                nit=0,
+                success=True,
+                message="ok",
+            )
+
+        optimizer_jax_module = _fresh_import("simsopt.geo.optimizer_jax")
+        monkeypatch.setattr(
+            optimizer_jax_module,
+            "jax_least_squares",
+            fake_jax_least_squares,
+        )
+
+        def target_residual(x):
+            flat_x = jax.numpy.asarray(
+                stage2_target_optimizer_state_to_dofs(x),
+                dtype=jax.numpy.float64,
+            )
+            return flat_x + 1.0
+
+        stage2_script.run_stage2_optimizer(
+            dofs=optimizer_state,
+            contract=contract,
+            maxiter=9,
+            ftol=0.0,
+            gtol=1e-9,
+            residual_fun=target_residual,
+        )
+
+        assert calls["residual_fn"] is target_residual
+        assert calls["method"] == "lm-ondevice"
+        assert calls["tol"] == pytest.approx(1e-9)
+        assert calls["maxiter"] == 9
+        assert calls["options"] is None
+        assert calls["callback"] is None
+        assert calls["progress_callback"] is None
+        assert hasattr(calls["x0"], "current_dof")
+        np.testing.assert_allclose(
+            stage2_script.flatten_stage2_target_optimizer_state(calls["x0"]),
+            dofs,
+        )
 
     @pytest.mark.parametrize(
         ("optimizer_backend", "expected_source"),

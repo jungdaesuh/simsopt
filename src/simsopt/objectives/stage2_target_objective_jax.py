@@ -25,6 +25,7 @@ from ..jax_core import (
 )
 from ..jax_core.objectives_flux import (
     fixed_surface_flux_integral_from_B,
+    fixed_surface_flux_residual_from_B,
     fixed_surface_flux_specs_from_surface,
 )
 from ..geo.curveobjectives import (
@@ -45,6 +46,7 @@ __all__ = [
 
 Stage2ObjectiveFn = Callable[[jnp.ndarray], jnp.ndarray]
 Stage2ValueAndGradFn = Callable[[jnp.ndarray], tuple[jnp.ndarray, jnp.ndarray]]
+Stage2ResidualFn = Callable[[jnp.ndarray], jnp.ndarray]
 
 
 class Stage2TargetObjectiveTerm(NamedTuple):
@@ -85,6 +87,7 @@ class Stage2TargetObjectiveBundle(NamedTuple):
     value_and_grad: Stage2ValueAndGradFn | None = None
     terms: tuple[Stage2TargetObjectiveTerm, ...] = ()
     raw_terms: Stage2ObjectiveFn | None = None
+    least_squares_residual: Stage2ResidualFn | None = None
 
 
 def _as_jax_float64(value) -> jax.Array:
@@ -330,8 +333,9 @@ def build_stage2_target_objective(
         ),
         dtype=np.float64,
     )
+    least_squares_weights = np.asarray(objective_weights, dtype=np.float64)
 
-    def _raw_terms(dofs):
+    def _evaluate_dynamic_stage2_state(dofs):
         state = stage2_target_optimizer_state_from_dofs(
             dofs,
             curve_dof_count=curve_dof_count,
@@ -373,17 +377,14 @@ def build_stage2_target_objective(
             dynamic_gammadashs,
             dynamic_current_array,
         )
-        dynamic_field = grouped_biot_savart_B_from_spec(points_jax, dynamic_coil_spec)
-        flux = fixed_surface_flux_integral_from_B(
-            fixed_field_jax + dynamic_field,
-            flux_spec_runtime,
+        total_field = fixed_field_jax + grouped_biot_savart_B_from_spec(
+            points_jax,
+            dynamic_coil_spec,
         )
 
         incremental_arclength = incremental_arclength_pure(base_gammadash)
         curve_length = curve_length_pure(incremental_arclength)
         length_excess = jnp.maximum(curve_length - length_target_jax, zero_jax)
-        length_penalty = half_jax * (length_excess * length_excess)
-
         curvature_penalty = Lp_curvature_pure(
             kappa_pure(base_gammadash, base_gammadashdash),
             base_gammadash,
@@ -398,12 +399,70 @@ def build_stage2_target_objective(
             fixed_curve_penalty,
         )
 
+        return (
+            flat_dofs,
+            total_field,
+            length_excess,
+            curvature_penalty,
+            coil_distance_penalty,
+            half_jax,
+            zero_jax,
+        )
+
+    def _raw_terms(dofs):
+        (
+            _flat_dofs,
+            total_field,
+            length_excess,
+            curvature_penalty,
+            coil_distance_penalty,
+            half_jax,
+            _zero_jax,
+        ) = _evaluate_dynamic_stage2_state(dofs)
+        flux = fixed_surface_flux_integral_from_B(total_field, flux_spec_runtime)
+        length_penalty = half_jax * (length_excess * length_excess)
+
         return jnp.stack(
             (
                 flux,
                 length_penalty,
                 coil_distance_penalty,
                 curvature_penalty,
+            )
+        )
+
+    def _least_squares_residual(dofs):
+        (
+            flat_dofs,
+            total_field,
+            length_excess,
+            curvature_penalty,
+            coil_distance_penalty,
+            _half_jax,
+            _zero_jax,
+        ) = _evaluate_dynamic_stage2_state(dofs)
+        two_jax = _runtime_float64_scalar(2.0, reference=flat_dofs)
+        least_squares_weights_jax = _runtime_float64_array(
+            least_squares_weights,
+            reference=flat_dofs,
+        )
+        flux_residual = fixed_surface_flux_residual_from_B(
+            total_field,
+            flux_spec_runtime,
+        )
+
+        penalty_terms = jnp.asarray(
+            (
+                length_excess * jnp.sqrt(least_squares_weights_jax[1]),
+                jnp.sqrt(two_jax * least_squares_weights_jax[2] * coil_distance_penalty),
+                jnp.sqrt(two_jax * least_squares_weights_jax[3] * curvature_penalty),
+            ),
+            dtype=jnp.float64,
+        )
+        return jnp.concatenate(
+            (
+                flux_residual * jnp.sqrt(least_squares_weights_jax[0]),
+                penalty_terms,
             )
         )
 
@@ -415,6 +474,7 @@ def build_stage2_target_objective(
     )
 
     raw_terms_fun = jax.jit(_raw_terms)
+    least_squares_residual = jax.jit(_least_squares_residual)
 
     def objective_impl(dofs):
         raw_terms_value = raw_terms_fun(dofs)
@@ -430,4 +490,5 @@ def build_stage2_target_objective(
         value_and_grad=value_and_grad,
         terms=terms,
         raw_terms=raw_terms_fun,
+        least_squares_residual=least_squares_residual,
     )

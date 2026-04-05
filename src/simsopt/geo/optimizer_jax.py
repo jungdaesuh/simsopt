@@ -95,6 +95,7 @@ _STRICT_HYBRID_OPTIMIZER_DETAIL = "the transitional SciPy-prefix hybrid optimize
 class ContinuousOptimizerContract:
     method: str
     use_scalar_objective: bool
+    use_least_squares_objective: bool = False
 
 
 @dataclass(frozen=True)

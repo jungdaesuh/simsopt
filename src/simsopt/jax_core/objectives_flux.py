@@ -18,7 +18,10 @@ from .surface_rzfourier import (
     surface_rz_fourier_gamma_from_spec,
     surface_rz_fourier_normal_from_spec,
 )
-from ..objectives.integral_bdotn_jax import integral_BdotN as integral_BdotN_jax
+from ..objectives.integral_bdotn_jax import (
+    integral_BdotN as integral_BdotN_jax,
+    residual_BdotN as residual_BdotN_jax,
+)
 
 
 def _fixed_surface_target_array(normal, target):
@@ -48,6 +51,16 @@ def build_fourier_basis(quadpoints_jax, order):
 def fixed_surface_flux_integral_from_B(B, flux_spec: FixedSurfaceFluxSpec):
     Bcoil = B.reshape((flux_spec.nphi, flux_spec.ntheta, 3))
     return integral_BdotN_jax(
+        Bcoil,
+        _as_runtime_float64(flux_spec.target, reference=B),
+        _as_runtime_float64(flux_spec.normal, reference=B),
+        flux_spec.definition,
+    )
+
+
+def fixed_surface_flux_residual_from_B(B, flux_spec: FixedSurfaceFluxSpec):
+    Bcoil = B.reshape((flux_spec.nphi, flux_spec.ntheta, 3))
+    return residual_BdotN_jax(
         Bcoil,
         _as_runtime_float64(flux_spec.target, reference=B),
         _as_runtime_float64(flux_spec.normal, reference=B),
