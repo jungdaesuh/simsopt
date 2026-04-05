@@ -742,6 +742,15 @@ def parse_args():
         ),
     )
     parser.add_argument(
+        "--boozer-least-squares-algorithm",
+        choices=["quasi-newton", "lm"],
+        default=os.environ.get("BOOZER_LEAST_SQUARES_ALGORITHM"),
+        help=(
+            "Optional override for the inner JAX Boozer LS algorithm. "
+            "Defaults to the historical quasi-Newton path when omitted."
+        ),
+    )
+    parser.add_argument(
         "--target-lane-accepted-step-sync",
         choices=TARGET_LANE_ACCEPTED_STEP_SYNC_CHOICES,
         default=os.environ.get(
@@ -934,6 +943,7 @@ def initialize_boozer_surface(
     G0,
     backend="cpu",
     optimizer_backend="scipy",
+    boozer_least_squares_algorithm=None,
     boozer_limited_memory=False,
     surface_dofs_override=None,
     iota_override=None,
@@ -953,6 +963,7 @@ def initialize_boozer_surface(
     G0: Value of net current going through the torus hole
     backend: "cpu" or "jax"
     optimizer_backend: JAX inner optimizer selector recorded in metadata
+    boozer_least_squares_algorithm: optional JAX Boozer LS algorithm override
     boozer_limited_memory: force the JAX Boozer LS solve through ondevice
         limited-memory routing without changing the default contract elsewhere
     surface_dofs_override: optional converged surface DOFs to reuse as the
@@ -1023,6 +1034,8 @@ def initialize_boozer_surface(
         options = {"verbose": True}
         if backend == "jax":
             options["optimizer_backend"] = optimizer_backend
+            if boozer_least_squares_algorithm is not None:
+                options["least_squares_algorithm"] = boozer_least_squares_algorithm
             if optimizer_backend == "ondevice" and boozer_limited_memory:
                 options["force_ondevice_limited_memory"] = True
             options.update(build_jax_stage_options())
@@ -2236,6 +2249,11 @@ if __name__ == "__main__":
         args.optimizer_backend,
         args.boozer_optimizer_backend,
     )
+    boozer_least_squares_algorithm_record = (
+        getattr(args, "boozer_least_squares_algorithm", None)
+        if args.backend == "jax"
+        else None
+    )
     boozer_optimizer_backend_hash_record = (
         args.boozer_optimizer_backend if args.backend == "jax" else None
     )
@@ -2294,6 +2312,8 @@ if __name__ == "__main__":
     ]
     if boozer_optimizer_backend_hash_record is not None:
         config_parts.append(str(boozer_optimizer_backend_hash_record))
+    if boozer_least_squares_algorithm_record is not None:
+        config_parts.append(str(boozer_least_squares_algorithm_record))
     config_str = "|".join(config_parts)
     config_hash = hashlib.sha256(config_str.encode()).hexdigest()[:8]
     OUT_DIR_ITER = OUT_DIR + f"/mpol={mpol}-ntor={ntor}-{config_hash}"
@@ -2312,6 +2332,7 @@ if __name__ == "__main__":
         G0,
         backend=args.backend,
         optimizer_backend=boozer_optimizer_backend_record,
+        boozer_least_squares_algorithm=boozer_least_squares_algorithm_record,
         timings_out=timings,
     )
 
@@ -2696,6 +2717,7 @@ if __name__ == "__main__":
         "backend": args.backend,
         "optimizer_backend": optimizer_backend_record,
         "boozer_optimizer_backend": boozer_optimizer_backend_record,
+        "boozer_least_squares_algorithm": boozer_least_squares_algorithm_record,
         "boozer_optimizer_method": boozer_surface.res.get("optimizer_method"),
         "outer_optimizer_method": outer_contract.method,
         "target_lane_accepted_step_sync": target_lane_sync_record,

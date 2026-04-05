@@ -60,9 +60,11 @@ from .boozersurface_jax_test_helpers import (
     compute_G_from_currents,
     dofs_to_xyzc,
     jax_minimize,
+    jax_least_squares,
     newton_exact,
     newton_polish,
     require_target_backend_x64,
+    resolve_least_squares_optimizer_method,
     resolve_optimizer_backend_method,
     stellsym_scatter_indices,
     UPSTREAM_BOOZER_OPTIMIZE_G,
@@ -974,6 +976,54 @@ class TestBoozerSurfaceJAXClass:
         with pytest.raises(ValueError, match="optimizer_backend must be one of"):
             resolve_optimizer_backend_method("bogus", limited_memory=False)
 
+    @pytest.mark.parametrize(
+        ("optimizer_backend", "limited_memory", "least_squares_algorithm", "expected_method"),
+        [
+            ("scipy", False, "quasi-newton", "bfgs"),
+            ("scipy", True, "quasi-newton", "lbfgs"),
+            ("ondevice", False, "quasi-newton", "bfgs-ondevice"),
+            ("ondevice", False, "lm", "lm-ondevice"),
+            ("scipy", False, "lm", "lm"),
+        ],
+    )
+    def test_resolve_least_squares_optimizer_method_contract(
+        self,
+        optimizer_backend,
+        limited_memory,
+        least_squares_algorithm,
+        expected_method,
+    ):
+        assert (
+            resolve_least_squares_optimizer_method(
+                optimizer_backend,
+                limited_memory=limited_memory,
+                least_squares_algorithm=least_squares_algorithm,
+            )
+            == expected_method
+        )
+
+    def test_resolve_least_squares_optimizer_method_rejects_hybrid_lm(self):
+        with pytest.raises(
+            ValueError,
+            match="least_squares_algorithm='lm'.*optimizer_backend='hybrid'",
+        ):
+            resolve_least_squares_optimizer_method(
+                "hybrid",
+                limited_memory=False,
+                least_squares_algorithm="lm",
+            )
+
+    def test_resolve_least_squares_optimizer_method_rejects_limited_memory_lm(self):
+        with pytest.raises(
+            ValueError,
+            match="least_squares_algorithm='lm'.*limited_memory=True",
+        ):
+            resolve_least_squares_optimizer_method(
+                "ondevice",
+                limited_memory=True,
+                least_squares_algorithm="lm",
+            )
+
     @pytest.mark.parametrize("optimizer_backend", ["hybrid", "ondevice"])
     def test_require_target_backend_x64_rejects_disabled_float64(
         self, monkeypatch, optimizer_backend
@@ -1113,6 +1163,57 @@ class TestBoozerSurfaceJAXClass:
         with pytest.raises(ValueError, match="optimizer_backend must be one of"):
             booz.run_code(iota=0.3, G=0.05)
 
+    def test_run_code_routes_lm_least_squares_contract(self, monkeypatch):
+        booz = _make_mock_boozer_surface()
+        booz.options["optimizer_backend"] = "ondevice"
+        booz.options["least_squares_algorithm"] = "lm"
+
+        captured = {}
+
+        def fake_jax_least_squares(
+            residual_fn,
+            x0,
+            *,
+            method,
+            tol,
+            maxiter,
+            options=None,
+            callback=None,
+            progress_callback=None,
+        ):
+            del residual_fn, tol, maxiter, options, callback, progress_callback
+            captured["method"] = method
+            flat_x0, _ = ravel_pytree(x0)
+            return types.SimpleNamespace(
+                x=x0,
+                fun=0.0,
+                jac=jnp.zeros_like(flat_x0),
+                residual=jnp.zeros_like(flat_x0),
+                residual_jacobian=jnp.eye(flat_x0.size, dtype=flat_x0.dtype),
+                hessian=jnp.eye(flat_x0.size, dtype=flat_x0.dtype),
+                damping=jnp.asarray(1.0e-3, dtype=flat_x0.dtype),
+                nit=0,
+                nfev=1,
+                njev=1,
+                status=0,
+                success=True,
+            )
+
+        def fake_newton_polish(
+            _objective_fn, x0, *, maxiter, tol, stab, progress_callback=None
+        ):
+            del maxiter, tol, stab, progress_callback
+            return _successful_newton_polish_result(x0)
+
+        monkeypatch.setattr(_bsj, "jax_least_squares", fake_jax_least_squares)
+        _patch_newton_polish_runner(monkeypatch, fake_newton_polish)
+
+        res = booz.run_code(iota=0.3, G=0.05)
+
+        assert captured["method"] == "lm-ondevice"
+        assert res["optimizer_method"] == "lm-ondevice"
+        assert res["success"] is True
+
     @pytest.mark.parametrize("optimizer_backend", ["scipy", "hybrid"])
     def test_run_code_rejects_non_ondevice_ls_lane_in_strict_mode(
         self,
@@ -1163,6 +1264,30 @@ class TestBoozerSurfaceJAXClass:
             match=rf"optimizer_jax\.jax_minimize.*method='{method}'.*strict=True",
             fun=lambda x: jnp.sum(x**2),
         )
+
+    def test_jax_least_squares_solves_simple_structured_problem(self):
+        def residual_fn(state):
+            return jnp.asarray(
+                [
+                    state["surface"][0] - 2.0,
+                    state["surface"][1] + 1.0,
+                    state["iota"] - 0.25,
+                ],
+                dtype=jnp.float64,
+            )
+
+        x0 = {
+            "surface": jnp.asarray([5.0, 3.0], dtype=jnp.float64),
+            "iota": jnp.asarray(0.0, dtype=jnp.float64),
+        }
+
+        result = jax_least_squares(residual_fn, x0, method="lm", maxiter=25, tol=1e-12)
+
+        assert result.success is True
+        np.testing.assert_allclose(result.x["surface"], np.asarray([2.0, -1.0]))
+        np.testing.assert_allclose(result.x["iota"], 0.25)
+        np.testing.assert_allclose(result.jac["surface"], np.zeros(2), atol=1e-10)
+        np.testing.assert_allclose(result.jac["iota"], 0.0, atol=1e-10)
 
     def test_jax_minimize_rejects_explicit_value_grad_fallback_in_strict_mode(
         self,
@@ -1775,6 +1900,58 @@ class TestBoozerSurfaceJAXExactPath:
             np.asarray(result["grad"]),
             np.asarray(expected_grad),
         )
+
+    def test_run_code_traceable_ls_routes_lm_ondevice(self, monkeypatch):
+        booz = _make_mock_boozer_surface()
+        booz.options["optimizer_backend"] = "ondevice"
+        booz.options["least_squares_algorithm"] = "lm"
+        coil_set_spec = booz.coil_set_spec
+        sdofs = jnp.asarray(booz.surface.get_dofs(), dtype=jnp.float64)
+        iota = jnp.asarray(0.3, dtype=jnp.float64)
+        G = jnp.asarray(0.05, dtype=jnp.float64)
+        captured = {}
+
+        def forbidden_private_minimize(*_args, **_kwargs):
+            raise AssertionError("LM route should not enter private BFGS/L-BFGS")
+
+        def fake_lm(residual_fn, x0, *, maxiter, tol, callback=None, progress_callback=None):
+            del maxiter, tol, callback, progress_callback
+            captured["residual"] = residual_fn(x0)
+            return {
+                "x": x0,
+                "residual": captured["residual"],
+                "residual_jacobian": jnp.eye(x0.shape[0], dtype=x0.dtype),
+                "fun": jnp.asarray(1.25, dtype=x0.dtype),
+                "grad": jnp.zeros_like(x0),
+                "hessian": jnp.eye(x0.shape[0], dtype=x0.dtype),
+                "damping": jnp.asarray(1.0e-3, dtype=x0.dtype),
+                "nit": jnp.asarray(1, dtype=jnp.int32),
+                "status": jnp.asarray(0, dtype=jnp.int32),
+                "success": jnp.asarray(True),
+            }
+
+        def fake_newton_polish(
+            obj_fn,
+            x0,
+            *,
+            maxiter,
+            tol,
+            stab,
+            progress_callback=None,
+        ):
+            del obj_fn, maxiter, tol, stab, progress_callback
+            return _successful_newton_polish_result(x0)
+
+        monkeypatch.setattr(_opt, "_minimize_bfgs_private", forbidden_private_minimize)
+        monkeypatch.setattr(_opt, "_minimize_lbfgs_private", forbidden_private_minimize)
+        monkeypatch.setattr(_bsj, "levenberg_marquardt_traceable", fake_lm)
+        _patch_newton_polish_runner(monkeypatch, fake_newton_polish)
+
+        result = booz.run_code_traceable(coil_set_spec, sdofs, iota, G)
+
+        assert result["optimizer_method"] == "lm-ondevice"
+        assert bool(result["success"])
+        assert jnp.all(jnp.isfinite(captured["residual"]))
 
     def test_run_code_traceable_ls_skips_lu_for_nonfinite_newton_result(self, monkeypatch):
         """LS traceable failures must not build LU factors for non-finite Hessians."""

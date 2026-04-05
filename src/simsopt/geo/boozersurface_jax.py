@@ -84,14 +84,17 @@ from .label_constraints_jax import (
 )
 from . import optimizer_jax as _optimizer_jax
 from .optimizer_jax import (
+    VALID_LEAST_SQUARES_ALGORITHMS,
     VALID_OPTIMIZER_BACKENDS,
+    jax_least_squares,
+    levenberg_marquardt_traceable,
     jax_minimize,
     newton_exact,
     newton_exact_traceable,
     newton_polish,
     newton_polish_traceable,
     require_target_backend_x64,
-    resolve_optimizer_backend_method,
+    resolve_least_squares_optimizer_method,
 )
 
 __all__ = ["BoozerSurfaceJAX"]
@@ -1035,6 +1038,7 @@ _DEFAULT_OPTIONS_LS = {
     "bfgs_tol": 1e-10,
     "bfgs_maxiter": 1500,
     "optimizer_backend": "scipy",
+    "least_squares_algorithm": "quasi-newton",
     "limited_memory": False,
     "newton_tol": 1e-11,
     "newton_maxiter": 40,
@@ -1064,7 +1068,9 @@ _LBFGS_TUNING_OPTIONS = frozenset({"maxcor", "ftol", "maxfun", "maxls"})
 
 # Callback options accepted by all backends.
 _CALLBACK_OPTIONS = frozenset({"stage_callback", "progress_callback"})
-_ONDEVICE_OPTIMIZER_METHODS = frozenset({"bfgs-ondevice", "lbfgs-ondevice"})
+_ONDEVICE_OPTIMIZER_METHODS = frozenset(
+    {"bfgs-ondevice", "lbfgs-ondevice", "lm-ondevice"}
+)
 
 _ALLOWED_OPTIONS_LS = (
     frozenset(_DEFAULT_OPTIONS_LS)
@@ -1100,6 +1106,15 @@ def _normalize_solver_options(raw_options, boozer_type):
         and optimizer_backend not in VALID_OPTIMIZER_BACKENDS
     ):
         raise ValueError("optimizer_backend must be one of: scipy, hybrid, ondevice.")
+    least_squares_algorithm = raw_options.get("least_squares_algorithm")
+    if (
+        least_squares_algorithm is not None
+        and least_squares_algorithm not in VALID_LEAST_SQUARES_ALGORITHMS
+    ):
+        allowed = ", ".join(sorted(VALID_LEAST_SQUARES_ALGORITHMS))
+        raise ValueError(
+            f"least_squares_algorithm must be one of: {allowed}."
+        )
 
     if boozer_type == "ls":
         effective_backend = raw_options.get("optimizer_backend", "scipy")
@@ -1156,7 +1171,9 @@ class BoozerSurfaceJAX(Optimizable):
             For LS solves, ``optimizer_backend="scipy"`` is the trusted
             reference lane, ``"hybrid"`` is the transitional migration lane,
             and ``"ondevice"`` is the target on-device lane for the eventual
-            full-GPU workflow.
+            full-GPU workflow. ``least_squares_algorithm="quasi-newton"``
+            preserves the historical BFGS/L-BFGS route; ``"lm"`` enables the
+            residual-vector Levenberg-Marquardt route on supported backends.
     """
 
     def __init__(
@@ -1425,6 +1442,53 @@ class BoozerSurfaceJAX(Optimizable):
             weight_inv_modB=weight_inv_modB,
         )
 
+    def _make_penalty_residual_with(
+        self,
+        optimize_G,
+        weight_inv_modB,
+        constraint_weight=None,
+        coil_set_spec=None,
+        coil_arrays=None,
+    ):
+        """Build the LS residual-vector closure with explicit grouped-field inputs."""
+        resolved_coil_set_spec = _resolved_coil_set_spec(
+            self.coil_set_spec,
+            coil_arrays=coil_arrays,
+            coil_set_spec=coil_set_spec,
+        )
+        resolved_constraint_weight = (
+            self.constraint_weight
+            if constraint_weight is None
+            else constraint_weight
+        )
+
+        def residual_fn(x):
+            optimizer_state = _as_boozer_penalty_optimizer_state(
+                x,
+                optimize_G=optimize_G,
+            )
+            G_value = (
+                optimizer_state.G
+                if optimize_G
+                else compute_G_from_currents(
+                    _grouped_coil_currents(
+                        coil_arrays=coil_arrays,
+                        coil_set_spec=resolved_coil_set_spec,
+                    )
+                )
+            )
+            return self._compute_residual_vector(
+                optimizer_state.surface_dofs,
+                optimizer_state.iota,
+                G_value,
+                weight_inv_modB=weight_inv_modB,
+                constraint_weight=resolved_constraint_weight,
+                coil_set_spec=resolved_coil_set_spec,
+                coil_arrays=coil_arrays,
+            )
+
+        return residual_fn
+
     def run_code_traceable(self, coil_source, sdofs, iota, G):
         """Trace-safe pure-array inner solve for the ondevice target lane.
 
@@ -1485,44 +1549,64 @@ class BoozerSurfaceJAX(Optimizable):
             }
 
         method = self._resolve_optimizer_method()
-        if method not in {"bfgs-ondevice", "lbfgs-ondevice"}:
+        if method not in _ONDEVICE_OPTIMIZER_METHODS:
             raise RuntimeError(
                 "run_code_traceable() requires optimizer_backend='ondevice' for LS solves."
             )
 
         optimize_G = G is not None
+        x0 = self._pack_decision_vector(iota, G, sdofs=_as_jax_float64(sdofs))
+        if method == "lm-ondevice":
+            residual_fn = self._make_penalty_residual_with(
+                optimize_G,
+                weight_inv_modB,
+                coil_set_spec=coil_set_spec,
+            )
+            ls_state = levenberg_marquardt_traceable(
+                residual_fn,
+                x0,
+                maxiter=self.options["bfgs_maxiter"],
+                tol=self.options["bfgs_tol"],
+            )
+            x_ls = ls_state["x"]
+        else:
+            obj_fn = self._make_penalty_objective_with(
+                optimize_G,
+                weight_inv_modB,
+                coil_set_spec=coil_set_spec,
+            )
+            optimizer_options = self._collect_optimizer_options()
+
+            if method == "bfgs-ondevice":
+                ls_state = _optimizer_jax._minimize_bfgs_private(
+                    obj_fn,
+                    x0,
+                    maxiter=self.options["bfgs_maxiter"],
+                    gtol=self.options["bfgs_tol"],
+                    line_search_maxiter=int(
+                        optimizer_options.get("line_search_maxiter", 10)
+                    ),
+                )
+                x_ls = ls_state.x_k
+            else:
+                ls_state = _optimizer_jax._minimize_lbfgs_private(
+                    obj_fn,
+                    x0,
+                    maxiter=self.options["bfgs_maxiter"],
+                    gtol=self.options["bfgs_tol"],
+                    maxcor=int(optimizer_options.get("maxcor", 200)),
+                    ftol=float(optimizer_options.get("ftol", 0.0)),
+                    maxfun=optimizer_options.get("maxfun"),
+                    maxgrad=optimizer_options.get("maxgrad"),
+                    maxls=int(optimizer_options.get("maxls", 20)),
+                )
+                x_ls = ls_state.x_k
+
         obj_fn = self._make_penalty_objective_with(
             optimize_G,
             weight_inv_modB,
             coil_set_spec=coil_set_spec,
         )
-        x0 = self._pack_decision_vector(iota, G, sdofs=_as_jax_float64(sdofs))
-        optimizer_options = self._collect_optimizer_options()
-
-        if method == "bfgs-ondevice":
-            ls_state = _optimizer_jax._minimize_bfgs_private(
-                obj_fn,
-                x0,
-                maxiter=self.options["bfgs_maxiter"],
-                gtol=self.options["bfgs_tol"],
-                line_search_maxiter=int(
-                    optimizer_options.get("line_search_maxiter", 10)
-                ),
-            )
-            x_ls = ls_state.x_k
-        else:
-            ls_state = _optimizer_jax._minimize_lbfgs_private(
-                obj_fn,
-                x0,
-                maxiter=self.options["bfgs_maxiter"],
-                gtol=self.options["bfgs_tol"],
-                maxcor=int(optimizer_options.get("maxcor", 200)),
-                ftol=float(optimizer_options.get("ftol", 0.0)),
-                maxfun=optimizer_options.get("maxfun"),
-                maxgrad=optimizer_options.get("maxgrad"),
-                maxls=int(optimizer_options.get("maxls", 20)),
-            )
-            x_ls = ls_state.x_k
 
         newton_result = self._run_newton_polish_for_method(
             method,
@@ -1568,6 +1652,7 @@ class BoozerSurfaceJAX(Optimizable):
         iota,
         G,
         weight_inv_modB,
+        constraint_weight=None,
         coil_set_spec=None,
         coil_arrays=None,
     ):
@@ -1608,7 +1693,12 @@ class BoozerSurfaceJAX(Optimizable):
         r_boozer = r_boozer_raw / jnp.sqrt(num_res)
 
         constraint_weight = (
-            self.constraint_weight if self.constraint_weight is not None else 1.0
+            self.constraint_weight
+            if constraint_weight is None
+            else constraint_weight
+        )
+        constraint_weight = (
+            constraint_weight if constraint_weight is not None else 1.0
         )
         constraint_weight = _as_jax_float64(constraint_weight)
         label_value, gamma_axis_z = _compute_label_and_axis_z(
@@ -1653,9 +1743,10 @@ class BoozerSurfaceJAX(Optimizable):
             "force_ondevice_limited_memory", False
         ):
             effective_limited_memory = True
-        return resolve_optimizer_backend_method(
+        return resolve_least_squares_optimizer_method(
             optimizer_backend,
             limited_memory=effective_limited_memory,
+            least_squares_algorithm=self.options["least_squares_algorithm"],
         )
 
     def _collect_optimizer_options(self):
@@ -1715,7 +1806,7 @@ class BoozerSurfaceJAX(Optimizable):
         limited_memory=False,
         weight_inv_modB=None,
     ):
-        """BFGS/L-BFGS stage of the LS solve. Matches CPU public API."""
+        """Least-squares first stage of the LS solve. Matches CPU public API."""
         if not self.need_to_run_code:
             return self.res
         tol = tol if tol is not None else self.options["bfgs_tol"]
@@ -1730,22 +1821,37 @@ class BoozerSurfaceJAX(Optimizable):
         optimize_G = G is not None
         s = self.surface
         x0 = self._make_penalty_optimizer_state(iota, G)
-        obj_fn = self._make_penalty_objective_with(
-            optimize_G, weight_inv_modB, constraint_weight
-        )
-
         method = self._resolve_optimizer_method(limited_memory=limited_memory)
-        optimizer_options = self._collect_optimizer_options()
-
-        result = jax_minimize(
-            obj_fn,
-            x0,
-            method=method,
-            tol=tol,
-            maxiter=maxiter,
-            options=optimizer_options,
-            progress_callback=self._make_solver_progress_callback(method),
-        )
+        progress_callback = self._make_solver_progress_callback(method)
+        if method in {"lm", "lm-ondevice"}:
+            residual_fn = self._make_penalty_residual_with(
+                optimize_G,
+                weight_inv_modB,
+                constraint_weight,
+            )
+            result = jax_least_squares(
+                residual_fn,
+                x0,
+                method=method,
+                tol=tol,
+                maxiter=maxiter,
+                progress_callback=progress_callback,
+            )
+        else:
+            obj_fn = self._make_penalty_objective_with(
+                optimize_G,
+                weight_inv_modB,
+                constraint_weight,
+            )
+            result = jax_minimize(
+                obj_fn,
+                x0,
+                method=method,
+                tol=tol,
+                maxiter=maxiter,
+                options=self._collect_optimizer_options(),
+                progress_callback=progress_callback,
+            )
 
         sdofs_final, iota_out, G_out = self._unpack_penalty_optimizer_state(
             result.x, optimize_G

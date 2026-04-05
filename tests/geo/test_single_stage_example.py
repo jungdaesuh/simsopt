@@ -453,6 +453,33 @@ class SingleStageExampleTests(unittest.TestCase):
             "ondevice",
         )
 
+    def test_initialize_boozer_surface_threads_nondefault_least_squares_algorithm(self):
+        module = self.load_module()
+        surf_prev = FakeSurfPrev()
+        fake_boozer_surface_jax = self.build_fake_boozer_surface_jax_class(
+            record_run_calls=False
+        )
+
+        with self.patch_initialize_boozer_surface_jax(module, fake_boozer_surface_jax):
+            module.initialize_boozer_surface(
+                surf_prev,
+                mpol=TEST_MPOL,
+                ntor=TEST_NTOR,
+                bs=object(),
+                vol_target=TEST_VOL_TARGET,
+                constraint_weight=1.0,
+                iota=TEST_IOTA,
+                G0=TEST_G0,
+                backend="jax",
+                boozer_least_squares_algorithm="lm",
+            )
+
+        self.assertEqual(len(fake_boozer_surface_jax.instances), 1)
+        self.assertEqual(
+            fake_boozer_surface_jax.instances[0].options["least_squares_algorithm"],
+            "lm",
+        )
+
     def test_resolve_boozer_optimizer_backend_defaults_and_overrides(self):
         module = self.load_module()
 
@@ -498,6 +525,22 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertEqual(args.target_lane_accepted_step_sync, "final-only")
         self.assertFalse(args.profile_target_lane)
         self.assertFalse(args.experimental_target_lane_value_and_grad)
+
+    def test_parse_args_accepts_boozer_least_squares_algorithm_override(self):
+        module = self.load_module()
+
+        with patch.object(
+            sys,
+            "argv",
+            [
+                "single_stage_banana_example.py",
+                "--boozer-least-squares-algorithm",
+                "lm",
+            ],
+        ):
+            args = module.parse_args()
+
+        self.assertEqual(args.boozer_least_squares_algorithm, "lm")
 
     def test_use_experimental_target_lane_value_and_grad_only_on_jax_ondevice(self):
         module = self.load_module()

@@ -5,6 +5,12 @@ Reference/oracle methods:
   - ``method="bfgs"``: host-driven SciPy BFGS loop with JAX value/grad.
   - ``method="lbfgs"``: host-driven SciPy L-BFGS-B loop with JAX value/grad.
 
+Least-squares methods:
+  - ``method="lm"``: host-driven Levenberg-Marquardt for residual-vector
+    objectives on the reference lane.
+  - ``method="lm-ondevice"``: trace-safe Levenberg-Marquardt for
+    residual-vector objectives on the target lane.
+
 Transitional private method (validated on JAX 0.9.2):
   - ``method="bfgs-hybrid"``: SciPy BFGS prefix, then JAX on-device BFGS.
 
@@ -33,6 +39,7 @@ import jax.numpy as jnp
 from jax.flatten_util import ravel_pytree
 from jax import lax
 from jax.scipy.sparse.linalg import gmres
+from scipy.optimize import OptimizeResult
 from scipy.optimize import minimize as scipy_minimize
 
 from ..backend import raise_if_strict_jax_fallback
@@ -40,14 +47,19 @@ from ..backend import raise_if_strict_jax_fallback
 __all__ = [
     "ContinuousOptimizerContract",
     "PRIVATE_OPTIMIZER_JAX_VERSION",
+    "VALID_LEAST_SQUARES_ALGORITHMS",
     "VALID_OPTIMIZER_BACKENDS",
     "TARGET_X64_REQUIRED_OPTIMIZER_BACKENDS",
+    "jax_least_squares",
     "jax_minimize",
+    "levenberg_marquardt",
+    "levenberg_marquardt_traceable",
     "newton_polish",
     "newton_polish_traceable",
     "newton_exact",
     "newton_exact_traceable",
     "require_target_backend_x64",
+    "resolve_least_squares_optimizer_method",
     "resolve_continuous_optimizer_contract",
     "resolve_optimizer_backend_method",
     "resolve_outer_loop_optimizer_contract",
@@ -62,6 +74,7 @@ OPTIMIZER_BACKEND_ROLE = {
     "ondevice": "target",
 }
 TARGET_X64_REQUIRED_OPTIMIZER_BACKENDS = frozenset({"hybrid", "ondevice"})
+VALID_LEAST_SQUARES_ALGORITHMS = frozenset({"quasi-newton", "lm"})
 _SUPPORTED_METHODS = {
     "bfgs",
     "lbfgs",
@@ -69,8 +82,12 @@ _SUPPORTED_METHODS = {
     "bfgs-ondevice",
     "lbfgs-ondevice",
 }
+_SUPPORTED_LEAST_SQUARES_METHODS = frozenset({"lm", "lm-ondevice"})
 _REFERENCE_METHODS = frozenset({"bfgs", "lbfgs"})
 _STRICT_REFERENCE_OPTIMIZER_DETAIL = "the host-side SciPy reference optimizer lane"
+_STRICT_REFERENCE_LEAST_SQUARES_DETAIL = (
+    "the host-side reference least-squares optimizer lane"
+)
 _STRICT_HYBRID_OPTIMIZER_DETAIL = "the transitional SciPy-prefix hybrid optimizer lane"
 
 
@@ -270,6 +287,37 @@ def resolve_optimizer_backend_method(optimizer_backend, *, limited_memory):
     return "lbfgs-ondevice" if limited_memory else "bfgs-ondevice"
 
 
+def resolve_least_squares_optimizer_method(
+    optimizer_backend,
+    *,
+    limited_memory,
+    least_squares_algorithm,
+):
+    """Map the LS backend contract to the concrete least-squares method."""
+    if least_squares_algorithm not in VALID_LEAST_SQUARES_ALGORITHMS:
+        allowed = ", ".join(sorted(VALID_LEAST_SQUARES_ALGORITHMS))
+        raise ValueError(
+            f"least_squares_algorithm must be one of: {allowed}."
+        )
+    if least_squares_algorithm == "quasi-newton":
+        return resolve_optimizer_backend_method(
+            optimizer_backend,
+            limited_memory=limited_memory,
+        )
+    if limited_memory:
+        raise ValueError(
+            "least_squares_algorithm='lm' is incompatible with limited_memory=True."
+        )
+    if optimizer_backend not in VALID_OPTIMIZER_BACKENDS:
+        raise ValueError("optimizer_backend must be one of: scipy, hybrid, ondevice.")
+    if optimizer_backend == "hybrid":
+        raise ValueError(
+            "least_squares_algorithm='lm' is unsupported for "
+            "optimizer_backend='hybrid'."
+        )
+    return "lm" if optimizer_backend == "scipy" else "lm-ondevice"
+
+
 def require_target_backend_x64(optimizer_backend):
     """Fail fast when a target-lane backend is requested without float64."""
     if optimizer_backend not in TARGET_X64_REQUIRED_OPTIMIZER_BACKENDS:
@@ -420,6 +468,302 @@ def _scipy_minimize_value_and_grad(fun, x0, *, method, tol, maxiter, options):
     return _scipy_dispatch(
         scipy_fun, x0, method=method, tol=tol, maxiter=maxiter, options=options
     )
+
+
+def _least_squares_cost(residual):
+    residual = jnp.ravel(jnp.asarray(residual))
+    return _device_scalar(0.5, dtype=residual.dtype) * jnp.vdot(residual, residual).real
+
+
+def _least_squares_linearization(residual, jacobian):
+    residual = jnp.ravel(jnp.asarray(residual))
+    jacobian = jnp.asarray(jacobian)
+    gradient = jacobian.T @ residual
+    hessian = jacobian.T @ jacobian
+    return gradient, hessian
+
+
+def _clip_lm_damping(damping, *, dtype):
+    minimum = _device_scalar(1.0e-12, dtype=dtype)
+    maximum = _device_scalar(1.0e12, dtype=dtype)
+    return jnp.clip(jnp.asarray(damping, dtype=dtype), minimum, maximum)
+
+
+def _lm_defaults(dtype):
+    return {
+        "initial_damping": _device_scalar(1.0e-3, dtype=dtype),
+        "accept_threshold": _device_scalar(0.0, dtype=dtype),
+        "expand_factor": _device_scalar(4.0, dtype=dtype),
+        "shrink_factor": _device_scalar(0.5, dtype=dtype),
+        "mild_shrink_factor": _device_scalar(0.8, dtype=dtype),
+        "ratio_low": _device_scalar(0.25, dtype=dtype),
+        "ratio_high": _device_scalar(0.75, dtype=dtype),
+        "predicted_floor": _device_scalar(1.0e-18, dtype=dtype),
+    }
+
+
+def _lm_iteration(
+    residual_fn,
+    jacobian_fn,
+    state,
+    *,
+    tol,
+):
+    defaults = _lm_defaults(state["x"].dtype)
+    damping = _clip_lm_damping(state["damping"], dtype=state["x"].dtype)
+    damped_hessian = state["hessian"] + damping * jnp.eye(
+        state["hessian"].shape[0],
+        dtype=state["hessian"].dtype,
+    )
+    step = jnp.linalg.solve(damped_hessian, state["grad"])
+    x_candidate = state["x"] - step
+    residual_candidate = residual_fn(x_candidate)
+    jacobian_candidate = jacobian_fn(x_candidate)
+    cost_candidate = _least_squares_cost(residual_candidate)
+    grad_candidate, hessian_candidate = _least_squares_linearization(
+        residual_candidate,
+        jacobian_candidate,
+    )
+    grad_norm_candidate = jnp.linalg.norm(grad_candidate, ord=jnp.inf)
+
+    predicted_reduction = _device_scalar(0.5, dtype=state["x"].dtype) * jnp.dot(
+        step,
+        damping * step + state["grad"],
+    )
+    actual_reduction = state["cost"] - cost_candidate
+    ratio = actual_reduction / jnp.maximum(
+        predicted_reduction,
+        defaults["predicted_floor"],
+    )
+    finite_candidate = (
+        jnp.all(jnp.isfinite(x_candidate))
+        & jnp.all(jnp.isfinite(residual_candidate))
+        & jnp.all(jnp.isfinite(jacobian_candidate))
+        & jnp.isfinite(cost_candidate)
+        & jnp.all(jnp.isfinite(grad_candidate))
+        & jnp.all(jnp.isfinite(hessian_candidate))
+    )
+    accepted = finite_candidate & (actual_reduction > defaults["accept_threshold"])
+
+    damping_after_accept = lax.cond(
+        ratio > defaults["ratio_high"],
+        lambda _: damping * defaults["shrink_factor"],
+        lambda _: lax.cond(
+            ratio < defaults["ratio_low"],
+            lambda __: damping * defaults["expand_factor"],
+            lambda __: damping * defaults["mild_shrink_factor"],
+            operand=None,
+        ),
+        operand=None,
+    )
+    next_damping = lax.cond(
+        accepted,
+        lambda _: _clip_lm_damping(damping_after_accept, dtype=state["x"].dtype),
+        lambda _: _clip_lm_damping(
+            damping * defaults["expand_factor"],
+            dtype=state["x"].dtype,
+        ),
+        operand=None,
+    )
+
+    return {
+        "x": lax.select(accepted, x_candidate, state["x"]),
+        "residual": lax.select(accepted, residual_candidate, state["residual"]),
+        "residual_jacobian": lax.select(
+            accepted,
+            jacobian_candidate,
+            state["residual_jacobian"],
+        ),
+        "cost": lax.select(accepted, cost_candidate, state["cost"]),
+        "grad": lax.select(accepted, grad_candidate, state["grad"]),
+        "hessian": lax.select(accepted, hessian_candidate, state["hessian"]),
+        "grad_norm_inf": lax.select(
+            accepted,
+            grad_norm_candidate,
+            state["grad_norm_inf"],
+        ),
+        "damping": next_damping,
+        "nit": state["nit"] + 1,
+        "status": lax.select(
+            finite_candidate,
+            jnp.asarray(1, dtype=jnp.int32),
+            jnp.asarray(2, dtype=jnp.int32),
+        ),
+        "accepted": accepted,
+        "success": finite_candidate & (grad_norm_candidate <= tol),
+    }
+
+
+def _least_squares_result_message(status, success):
+    if bool(success):
+        return "converged"
+    if int(status) == 2:
+        return "non-finite residual, jacobian, or step encountered"
+    return "maximum iterations reached"
+
+
+def levenberg_marquardt(
+    residual_fn,
+    x0,
+    *,
+    maxiter=1500,
+    tol=1e-10,
+    callback=None,
+    progress_callback=None,
+):
+    """Host-driven Levenberg-Marquardt solver for least-squares residuals."""
+    residual_eval = jax.jit(residual_fn)
+    jacobian_eval = jax.jit(jax.jacfwd(residual_fn))
+
+    x = jnp.asarray(x0)
+    residual = residual_eval(x)
+    residual_jacobian = jacobian_eval(x)
+    cost = _least_squares_cost(residual)
+    grad, hessian = _least_squares_linearization(residual, residual_jacobian)
+    grad_norm_inf = jnp.linalg.norm(grad, ord=jnp.inf)
+    damping = _lm_defaults(x.dtype)["initial_damping"]
+    status = 1
+    success = bool(grad_norm_inf <= tol)
+    nit = 0
+
+    while nit < maxiter and not success:
+        step_state = _lm_iteration(
+            residual_eval,
+            jacobian_eval,
+            {
+                "x": x,
+                "residual": residual,
+                "residual_jacobian": residual_jacobian,
+                "cost": cost,
+                "grad": grad,
+                "hessian": hessian,
+                "grad_norm_inf": grad_norm_inf,
+                "damping": damping,
+                "nit": jnp.asarray(nit, dtype=jnp.int32),
+                "status": jnp.asarray(status, dtype=jnp.int32),
+                "accepted": jnp.asarray(False),
+                "success": jnp.asarray(False),
+            },
+            tol=jnp.asarray(tol, dtype=x.dtype),
+        )
+        nit = int(step_state["nit"])
+        status = int(step_state["status"])
+        damping = step_state["damping"]
+        if bool(step_state["accepted"]):
+            x = step_state["x"]
+            residual = step_state["residual"]
+            residual_jacobian = step_state["residual_jacobian"]
+            cost = step_state["cost"]
+            grad = step_state["grad"]
+            hessian = step_state["hessian"]
+            grad_norm_inf = step_state["grad_norm_inf"]
+            if callback is not None:
+                callback(x)
+            if progress_callback is not None:
+                progress_callback(nit, float(cost), float(grad_norm_inf))
+        success = bool(step_state["success"])
+        if status == 2:
+            break
+
+    return {
+        "x": x,
+        "residual": residual,
+        "residual_jacobian": residual_jacobian,
+        "fun": cost,
+        "grad": grad,
+        "hessian": hessian,
+        "damping": damping,
+        "nit": nit,
+        "status": status,
+        "success": success,
+    }
+
+
+def levenberg_marquardt_traceable(
+    residual_fn,
+    x0,
+    *,
+    maxiter=1500,
+    tol=1e-10,
+    callback=None,
+    progress_callback=None,
+):
+    """Trace-safe Levenberg-Marquardt solver for least-squares residuals."""
+    residual_eval = residual_fn
+    jacobian_eval = jax.jacfwd(residual_fn)
+    tol_value = _device_scalar(tol, dtype=jnp.asarray(x0).dtype)
+
+    def run_solver(x_init):
+        residual0 = residual_eval(x_init)
+        residual_jacobian0 = jacobian_eval(x_init)
+        cost0 = _least_squares_cost(residual0)
+        grad0, hessian0 = _least_squares_linearization(residual0, residual_jacobian0)
+        grad_norm_inf0 = jnp.linalg.norm(grad0, ord=jnp.inf)
+        state0 = {
+            "x": x_init,
+            "residual": residual0,
+            "residual_jacobian": residual_jacobian0,
+            "cost": cost0,
+            "grad": grad0,
+            "hessian": hessian0,
+            "grad_norm_inf": grad_norm_inf0,
+            "damping": _lm_defaults(x_init.dtype)["initial_damping"],
+            "nit": jnp.asarray(0, dtype=jnp.int32),
+            "status": jnp.asarray(0, dtype=jnp.int32),
+            "accepted": jnp.asarray(False),
+            "success": grad_norm_inf0 <= tol_value,
+        }
+
+        def cond_fun(state):
+            return (
+                (state["nit"] < maxiter)
+                & (~state["success"])
+                & (state["status"] != 2)
+            )
+
+        def body_fun(state):
+            next_state = _lm_iteration(
+                residual_eval,
+                jacobian_eval,
+                state,
+                tol=tol_value,
+            )
+            if callback is not None:
+                lax.cond(
+                    next_state["accepted"],
+                    lambda _: jax.debug.callback(callback, next_state["x"]),
+                    lambda _: None,
+                    operand=None,
+                )
+            if progress_callback is not None:
+                lax.cond(
+                    next_state["accepted"],
+                    lambda _: jax.debug.callback(
+                        progress_callback,
+                        next_state["nit"],
+                        next_state["cost"],
+                        next_state["grad_norm_inf"],
+                    ),
+                    lambda _: None,
+                    operand=None,
+                )
+            return next_state
+
+        state = lax.while_loop(cond_fun, body_fun, state0)
+        return {
+            "x": state["x"],
+            "residual": state["residual"],
+            "residual_jacobian": state["residual_jacobian"],
+            "fun": state["cost"],
+            "grad": state["grad"],
+            "hessian": state["hessian"],
+            "damping": state["damping"],
+            "nit": state["nit"],
+            "status": state["status"],
+            "success": state["success"],
+        }
+
+    return jax.jit(run_solver)(x0)
 
 
 # ---------------------------------------------------------------------------
@@ -817,6 +1161,100 @@ def _require_private_package(method):
             globals()[name] = getattr(pkg, name)
 
 
+def jax_least_squares(
+    residual_fn,
+    x0,
+    *,
+    method="lm",
+    tol=1e-10,
+    maxiter=1500,
+    options=None,
+    callback=None,
+    progress_callback=None,
+):
+    """Least-squares optimizer adapter for residual-vector objectives.
+
+    Contract by method family:
+
+    - ``lm``:
+      host-driven Levenberg-Marquardt reference lane.
+    - ``lm-ondevice``:
+      trace-safe Levenberg-Marquardt target lane.
+
+    ``x0`` may be either the historical flat 1-D vector or a structured pytree.
+    Structured states are flattened once inside this adapter, then callbacks and
+    ``OptimizeResult.x`` / ``OptimizeResult.jac`` are restored to the original
+    pytree structure on return. ``result.jac`` is the final least-squares
+    gradient vector, not the residual Jacobian matrix; the dense residual
+    Jacobian is exposed separately as ``result.residual_jacobian``.
+    """
+    if method not in _SUPPORTED_LEAST_SQUARES_METHODS:
+        raise ValueError(
+            "Unknown least-squares method "
+            f"{method!r}. Supported: {sorted(_SUPPORTED_LEAST_SQUARES_METHODS)}."
+        )
+
+    residual_fn, x0, callback, pytree_adapter = _prepare_optimizer_callable_inputs(
+        residual_fn,
+        x0,
+        value_and_grad=False,
+        callback=callback,
+    )
+
+    def finalize(result):
+        return _finalize_optimizer_result(result, pytree_adapter)
+
+    options = dict(options or {})
+    if callback is not None:
+        options["callback"] = callback
+    if progress_callback is not None:
+        options["progress_callback"] = progress_callback
+
+    if method == "lm":
+        _raise_if_strict_optimizer_fallback(
+            method=method,
+            detail=_STRICT_REFERENCE_LEAST_SQUARES_DETAIL,
+        )
+        result = levenberg_marquardt(
+            residual_fn,
+            x0,
+            maxiter=maxiter,
+            tol=tol,
+            callback=options.get("callback"),
+            progress_callback=options.get("progress_callback"),
+        )
+    else:
+        require_target_backend_x64("ondevice")
+        result = levenberg_marquardt_traceable(
+            residual_fn,
+            x0,
+            maxiter=maxiter,
+            tol=tol,
+            callback=options.get("callback"),
+            progress_callback=options.get("progress_callback"),
+        )
+
+    optimize_result = OptimizeResult(
+        x=result["x"],
+        fun=result["fun"],
+        jac=result["grad"],
+        residual=result["residual"],
+        residual_jacobian=result["residual_jacobian"],
+        hessian=result["hessian"],
+        damping=result["damping"],
+        nit=int(result["nit"]),
+        nfev=int(result["nit"]) + 1,
+        njev=int(result["nit"]) + 1,
+        status=int(result["status"]),
+        success=bool(result["success"]),
+        message=_least_squares_result_message(
+            result["status"],
+            result["success"],
+        ),
+    )
+    return finalize(optimize_result)
+
+
 def jax_minimize(
     fun,
     x0,
@@ -888,8 +1326,7 @@ def jax_minimize(
                 tol=tol,
                 maxiter=maxiter,
                 options=options,
-            ),
-            pytree_adapter,
+            )
         )
 
     # All remaining methods require the private optimizer package.
