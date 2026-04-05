@@ -2132,6 +2132,14 @@ def test_smoke_workflow_adds_cuda_e2e_target_lane_gate():
     assert "benchmarks/single_stage_init_parity.py" in workflow_text
     assert "--platform cuda" in workflow_text
     assert "--optimizer-backend ondevice" in workflow_text
+    for required_path in (
+        "benchmarks/grouped_adjoint_memory_probe.py",
+        "benchmarks/tier5_performance_characterization.py",
+        "benchmarks/render_benchmark_report.py",
+        "benchmarks/manifests/stable_hardware_weekly_tier5.json",
+        ".github/workflows/jax_benchmark_reporting.yml",
+    ):
+        assert required_path in workflow_text
 
 
 def test_single_stage_outer_loop_probe_resolves_expected_boozer_method():
