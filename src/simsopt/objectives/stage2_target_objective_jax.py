@@ -66,36 +66,31 @@ class Stage2TargetObjectiveBundle(NamedTuple):
 
 
 def _as_jax_float64(value) -> jax.Array:
-    if isinstance(value, jax.Array):
-        return jnp.asarray(value, dtype=jnp.float64)
-    if isinstance(value, (np.ndarray, np.generic, list, tuple)) or np.isscalar(value):
-        return jax.device_put(np.asarray(value, dtype=np.float64))
     return jnp.asarray(value, dtype=jnp.float64)
 
 
-def _zero_scalar():
-    return _as_jax_float64(0.0)
+def _as_host_float64(value) -> np.ndarray:
+    return np.asarray(jax.device_get(value), dtype=np.float64)
+
+
+def _hostify_tree(value):
+    def _hostify_leaf(leaf):
+        if isinstance(leaf, jax.Array):
+            return _as_host_float64(leaf)
+        if isinstance(leaf, np.ndarray):
+            return np.asarray(leaf, dtype=np.float64)
+        return leaf
+
+    return jax.tree_util.tree_map(_hostify_leaf, value)
 
 
 def _split_stage2_dofs(dofs, curve_dof_count):
     dofs = _as_jax_float64(dofs)
-    total_dofs = curve_dof_count + 1
-    current_selector = _as_jax_float64(
-        np.concatenate(
-            (
-                np.array([1.0], dtype=np.float64),
-                np.zeros(curve_dof_count, dtype=np.float64),
-            )
-        )
-    )
-    curve_selector = _as_jax_float64(
-        np.eye(curve_dof_count, total_dofs, k=1, dtype=np.float64)
-    )
-    return jnp.vdot(current_selector, dofs), curve_selector @ dofs
+    return dofs[0], dofs[1 : curve_dof_count + 1]
 
 
 def _fixed_curve_penalty(curves, minimum_distance):
-    total = _zero_scalar()
+    total = 0.0
     for i, (gamma_i, gammadash_i) in enumerate(curves):
         for gamma_j, gammadash_j in curves[:i]:
             total = total + cc_distance_pure(
@@ -114,7 +109,7 @@ def _curve_pairs_from_grouped_coil_set_spec(coil_set_spec):
         gammas = np.asarray(jax.device_get(group.gammas), dtype=np.float64)
         gammadashs = np.asarray(jax.device_get(group.gammadashs), dtype=np.float64)
         for gamma, gammadash in zip(gammas, gammadashs):
-            curve_pairs.append((_as_jax_float64(gamma), _as_jax_float64(gammadash)))
+            curve_pairs.append((gamma, gammadash))
     return tuple(curve_pairs)
 
 
@@ -199,29 +194,33 @@ def build_stage2_target_objective(
         definition=penalty_config.squared_flux_definition,
     )
     del field_eval_spec
-    points = flux_spec.points
-    banana_curve_spec = curve_spec_from_curve(banana_curve)
-    curve_dof_count = int(banana_curve_spec.dofs.shape[0])
-    length_target_jax = _as_jax_float64(length_target)
-    cc_threshold_jax = _as_jax_float64(cc_threshold)
-    curvature_p_norm_jax = _as_jax_float64(curvature_p_norm)
-    curvature_threshold_jax = _as_jax_float64(curvature_threshold)
-    half = _as_jax_float64(0.5)
-    zero = _zero_scalar()
+    flux_spec = _hostify_tree(flux_spec)
+    points = np.asarray(flux_spec.points, dtype=np.float64)
+    banana_curve_spec = _hostify_tree(curve_spec_from_curve(banana_curve))
+    curve_dof_count = int(np.asarray(banana_curve_spec.dofs, dtype=np.float64).shape[0])
+    length_target = float(length_target)
+    cc_threshold = float(cc_threshold)
+    curvature_p_norm = float(curvature_p_norm)
+    curvature_threshold = float(curvature_threshold)
+    half = 0.5
+    zero = 0.0
 
     if tf_coils:
         tf_coil_spec = grouped_coil_set_spec_from_coil_specs(
             tuple(coil.to_spec() for coil in tf_coils)
         )
-        fixed_field = grouped_biot_savart_B_from_spec(points, tf_coil_spec)
+        fixed_field = _as_host_float64(
+            grouped_biot_savart_B_from_spec(points, tf_coil_spec)
+        )
         tf_curve_data = _curve_pairs_from_grouped_coil_set_spec(tf_coil_spec)
-        fixed_curve_penalty = _fixed_curve_penalty(tf_curve_data, cc_threshold_jax)
+        fixed_curve_penalty = float(_fixed_curve_penalty(tf_curve_data, cc_threshold))
     else:
-        fixed_field = _as_jax_float64(np.zeros((points.shape[0], 3), dtype=np.float64))
+        fixed_field = np.zeros((points.shape[0], 3), dtype=np.float64)
         tf_curve_data = ()
-        fixed_curve_penalty = _zero_scalar()
+        fixed_curve_penalty = 0.0
 
-    banana_symmetry_specs = tuple(
+    banana_symmetry_specs = _hostify_tree(
+        tuple(
         make_coil_symmetry_spec(
             rotmat=rotmat,
             scale=scale,
@@ -229,6 +228,7 @@ def build_stage2_target_objective(
         for _, rotmat, _, scale in (
             _unwrap_coil_curve_and_current(coil) for coil in banana_coils
         )
+    )
     )
 
     def _raw_terms(dofs):
@@ -255,26 +255,26 @@ def build_stage2_target_objective(
         )
         dynamic_field = grouped_biot_savart_B_from_spec(points, dynamic_coil_spec)
         flux = fixed_surface_flux_integral_from_B(
-            fixed_field + dynamic_field,
+            _as_jax_float64(fixed_field) + dynamic_field,
             flux_spec,
         )
 
         incremental_arclength = incremental_arclength_pure(base_gammadash)
         curve_length = curve_length_pure(incremental_arclength)
-        length_excess = jnp.maximum(curve_length - length_target_jax, zero)
+        length_excess = jnp.maximum(curve_length - length_target, zero)
         length_penalty = half * (length_excess * length_excess)
 
         curvature_penalty = Lp_curvature_pure(
             kappa_pure(base_gammadash, base_gammadashdash),
             base_gammadash,
-            curvature_p_norm_jax,
-            curvature_threshold_jax,
+            curvature_p_norm,
+            curvature_threshold,
         )
 
         coil_distance_penalty = _dynamic_curve_distance_penalty(
             dynamic_pairs,
             tf_curve_data,
-            cc_threshold_jax,
+            cc_threshold,
             fixed_curve_penalty,
         )
 
@@ -293,20 +293,15 @@ def build_stage2_target_objective(
         Stage2TargetObjectiveTerm("coil_distance_penalty", float(cc_weight)),
         Stage2TargetObjectiveTerm("curvature_penalty", float(curvature_weight)),
     )
-    term_weights = _as_jax_float64(
-        np.array(
-            [
-                squared_flux_weight,
-                length_weight,
-                cc_weight,
-                curvature_weight,
-            ],
-            dtype=np.float64,
-        )
-    )
 
     def objective(dofs):
-        return jnp.vdot(term_weights, _raw_terms(dofs))
+        raw_terms = _raw_terms(dofs)
+        return (
+            float(squared_flux_weight) * raw_terms[0]
+            + float(length_weight) * raw_terms[1]
+            + float(cc_weight) * raw_terms[2]
+            + float(curvature_weight) * raw_terms[3]
+        )
 
     return Stage2TargetObjectiveBundle(
         objective=objective,

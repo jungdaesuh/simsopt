@@ -90,6 +90,26 @@ def test_resolve_lbfgs_limits_normalizes_to_int32_counter_domain():
     assert int(maxgrad) == np.iinfo(np.int32).max
 
 
+def test_reduction_helpers_pass_host_init_values_to_lax_reduce(monkeypatch):
+    recorded_inits = []
+
+    def fake_reduce(flat, init_value, reducer, dims):
+        del reducer, dims
+        recorded_inits.append(init_value)
+        return flat[0]
+
+    monkeypatch.setattr(_opt_common.lax, "reduce", fake_reduce)
+    sample = jax.device_put(np.asarray([3.0, -2.0], dtype=np.float64))
+
+    _opt_common._reduce_sum_all(sample)
+    _opt_common._reduce_max_all(sample)
+
+    assert len(recorded_inits) == 2
+    for init_value in recorded_inits:
+        assert not isinstance(init_value, jax.Array)
+        assert isinstance(init_value, np.ndarray)
+
+
 # ---------------------------------------------------------------------------
 # Marker constants
 # ---------------------------------------------------------------------------

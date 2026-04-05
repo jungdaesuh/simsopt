@@ -40,6 +40,7 @@ EXAMPLE_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, ".."))
 import sys
 
 sys.path.insert(0, EXAMPLE_ROOT)
+from jax_host_boundary import host_array, host_bool, host_float
 from plotting_utils import cross_section_plot, norm_field_plot, norm_field_summary
 
 SIMSOPT_ROOT = os.path.abspath(os.path.join(EXAMPLE_ROOT, "..", ".."))
@@ -966,14 +967,14 @@ def initialize_boozer_surface(
     _record_timing(timings, "boozer_solve_s", solve_start_s, solve_end_s)
     emit_stage(
         "after_boozer_solve",
-        solve_success=bool(res["success"]),
-        iterations=float(res["iter"]),
+        solve_success=host_bool(res["success"]),
+        iterations=host_float(res["iter"]),
     )
-    print(f"G0 from solve: {res['G']}")
-    print(f"iota from solve: {res['iota']}")
+    print(f"G0 from solve: {host_float(res['G'])}")
+    print(f"iota from solve: {host_float(res['iota'])}")
 
     # Check if boozer algo is successful
-    success1 = res["success"]  # True if the boozer surface algo converged
+    success1 = host_bool(res["success"])  # True if the boozer surface algo converged
     postprocess_start_s = _perf_counter_s()
     (
         self_intersecting,
@@ -991,9 +992,9 @@ def initialize_boozer_surface(
             "Boozer initialization failed: "
             f"solve_success={success1}, "
             f"self_intersecting={self_intersecting}, "
-            f"volume={boozer_surface.surface.volume()}, "
+            f"volume={host_float(boozer_surface.surface.volume())}, "
             f"iota_guess={solve_iota}, "
-            f"iota_solved={res['iota']}"
+            f"iota_solved={host_float(res['iota'])}"
         )
         raise RuntimeError("Something went wrong with the Boozer solve...")
 
@@ -1269,7 +1270,7 @@ def profile_traceable_target_lane_objective(profile_suite, coil_dofs):
         profile_suite["value_and_grad_pipeline"],
         coil_dofs,
     )
-    profiled["solve_success"] = bool(np.asarray(solve_result["success"]).item())
+    profiled["solve_success"] = host_bool(solve_result["success"])
     return profiled
 
 
@@ -1415,15 +1416,15 @@ def _evaluate_candidate_impl(
         boozer_surface.run_code(
             run_dict["iota"], run_dict["G"], sdofs=run_dict["sdofs"]
         )
-    success_solve = bool(boozer_surface.res["success"])
+    success_solve = host_bool(boozer_surface.res["success"])
     is_intersecting = update_self_intersection_status(run_dict, boozer_surface.surface)
     success = success_solve and not is_intersecting
 
     if success:
         J = JF.J()
         dJ = JF.dJ()
-        logger.info("Volume: %s", boozer_surface.surface.volume())
-        logger.info("Iota: %s", boozer_surface.res["iota"])
+        logger.info("Volume: %s", host_float(boozer_surface.surface.volume()))
+        logger.info("Iota: %s", host_float(boozer_surface.res["iota"]))
     else:
         if not success_solve:
             logger.warning("Boozer solver failed")
@@ -1458,10 +1459,10 @@ def snapshot_accepted_step_state(run_dict, boozer_surface, JF):
     """Persist the accepted-step solver/objective state into run_dict."""
     run_dict["lscount"] = 0
     run_dict["sdofs"] = boozer_surface.surface.x.copy()
-    run_dict["iota"] = boozer_surface.res["iota"]
-    run_dict["G"] = boozer_surface.res["G"]
-    run_dict["J"] = JF.J()
-    run_dict["dJ"] = JF.dJ().copy()
+    run_dict["iota"] = host_float(boozer_surface.res["iota"])
+    run_dict["G"] = host_float(boozer_surface.res["G"])
+    run_dict["J"] = host_float(JF.J())
+    run_dict["dJ"] = host_array(JF.dJ())
     return run_dict["J"], run_dict["dJ"]
 
 
@@ -1491,7 +1492,8 @@ def accept_step(
     # Per-component diagnostics
     diag = {}
     for name, obj in objectives.items():
-        diag[name] = (obj.J(), np.linalg.norm(obj.dJ()))
+        grad = host_array(obj.dJ())
+        diag[name] = (host_float(obj.J()), float(np.linalg.norm(grad)))
 
     iota_obj = diagnostics_refs["iota"]
     banana_curve = diagnostics_refs["banana_curve"]
@@ -1499,16 +1501,16 @@ def accept_step(
     JCurveCurve_obj = objectives["cc"]
     JCurveSurface_obj = objectives["cs"]
 
-    iota_str = f"{iota_obj.J():.4f}"
-    volume_str = f"{boozer_surface.surface.volume():.4f}"
+    iota_str = f"{host_float(iota_obj.J()):.4f}"
+    volume_str = f"{host_float(boozer_surface.surface.volume()):.4f}"
 
     gamma = banana_curve.gamma()
     max_r = np.max(np.sqrt(gamma[:, 0] ** 2 + gamma[:, 1] ** 2))
     max_z = np.max(np.abs(gamma[:, 2]))
     max_curvature = np.max(banana_curve.kappa())
-    length = curvelength_obj.J()
-    curvecurve_min = JCurveCurve_obj.shortest_distance()
-    curvesurf_min = JCurveSurface_obj.shortest_distance()
+    length = host_float(curvelength_obj.J())
+    curvecurve_min = host_float(JCurveCurve_obj.shortest_distance())
+    curvesurf_min = host_float(JCurveSurface_obj.shortest_distance())
 
     # Save bs evaluation points so we can restore after the diagnostic
     _bs_pts_before = None
@@ -1519,7 +1521,11 @@ def accept_step(
 
     bs.set_points(boozer_surface.surface.gamma().reshape((-1, 3)))
     unitn = boozer_surface.surface.unitnormal()
-    BdotN = np.mean(np.abs(np.sum(bs.B().reshape(unitn.shape) * unitn, axis=2)))
+    BdotN = host_float(
+        np.mean(
+            np.abs(np.sum(host_array(bs.B()).reshape(unitn.shape) * unitn, axis=2))
+        )
+    )
 
     # Restore bs state — no persistent mutation
     if _bs_pts_before is not None:
@@ -1691,10 +1697,10 @@ def snapshot_to_pytree(JF, boozer_surface, bs, *, num_tf_coils):
 
     run_dict = {
         "sdofs": boozer_surface.surface.x.copy(),
-        "iota": boozer_surface.res["iota"],
-        "G": boozer_surface.res["G"],
-        "J": JF.J(),
-        "dJ": JF.dJ().copy(),
+        "iota": host_float(boozer_surface.res["iota"]),
+        "G": host_float(boozer_surface.res["G"]),
+        "J": host_float(JF.J()),
+        "dJ": host_array(JF.dJ()),
         "it": 1,
         "lscount": 0,
         "x_prev": coil_dofs.copy(),
@@ -2001,7 +2007,7 @@ if __name__ == "__main__":
         }
         boozer_surface.surface.to_vtk(OUT_DIR_ITER + "/surf_init", extra_data=pointData)
         boozer_surface.surface.save(OUT_DIR_ITER + "/surf_init.json")
-    print(f"Volume: {boozer_surface.surface.volume()}")
+    print(f"Volume: {host_float(boozer_surface.surface.volume())}")
 
     # Generate initial diagnostic plots
     if write_artifacts:
@@ -2021,8 +2027,8 @@ if __name__ == "__main__":
             boozer_surface.surface,
             bs_diag,
         )
-    initial_volume = boozer_surface.surface.volume()
-    initial_iota = build_iota_objective(boozer_surface, iota_cls).J()
+    initial_volume = host_float(boozer_surface.surface.volume())
+    initial_iota = host_float(build_iota_objective(boozer_surface, iota_cls).J())
     initial_max_curvature = np.max(banana_curve.kappa())
     _record_timing(
         timings,
@@ -2069,7 +2075,7 @@ if __name__ == "__main__":
     # Individual objective terms
     iota = build_iota_objective(boozer_surface, iota_cls)
     curvelength = CurveLength(banana_curves[0])
-    length_target = curvelength.J()
+    length_target = host_float(curvelength.J())
 
     Jiota = QuadraticPenalty(iota, iota_target)
     JnonQSRatio = sum(nonQSs)
@@ -2252,8 +2258,8 @@ if __name__ == "__main__":
             )
             boozer_surface.surface.save(OUT_DIR_ITER + "/surf_opt.json")
 
-        final_volume = boozer_surface.surface.volume()
-        final_iota = build_iota_objective(boozer_surface, iota_cls).J()
+        final_volume = host_float(boozer_surface.surface.volume())
+        final_iota = host_float(build_iota_objective(boozer_surface, iota_cls).J())
         final_max_curvature = np.max(banana_curve.kappa())
         print(f"Volume: {final_volume}")
         print(f"Iota: {final_iota}")

@@ -30,6 +30,10 @@ def _as_jax_dtype(value, dtype):
     return jnp.asarray(value, dtype=dtype)
 
 
+def _as_numpy_dtype(value, dtype):
+    return np.asarray(value, dtype=np.dtype(dtype))
+
+
 def _eye(n, dtype):
     return jax.device_put(np.eye(int(n), dtype=np.dtype(dtype)))
 
@@ -52,12 +56,12 @@ def _bool_scalar(value):
 
 def _reduce_sum_all(x):
     flat = jnp.reshape(jnp.asarray(x), (-1,))
-    return lax.reduce(flat, _as_jax_dtype(0.0, flat.dtype), lax.add, (0,))
+    return lax.reduce(flat, _as_numpy_dtype(0.0, flat.dtype), lax.add, (0,))
 
 
 def _reduce_max_all(x):
     flat = jnp.reshape(jnp.asarray(x), (-1,))
-    return lax.reduce(flat, _as_jax_dtype(-np.inf, flat.dtype), lax.max, (0,))
+    return lax.reduce(flat, _as_numpy_dtype(-np.inf, flat.dtype), lax.max, (0,))
 
 
 def _norm(x, *, ord=None):

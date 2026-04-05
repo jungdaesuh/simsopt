@@ -21,10 +21,20 @@ class OptimizableDefaultDict(collections.defaultdict):
         return value
 
 
+def _coerce_derivative_block(value):
+    if isinstance(value, np.ndarray):
+        return value
+    if hasattr(value, "devices"):
+        import jax
+
+        return np.asarray(jax.device_get(value))
+    return np.asarray(value)
+
+
 def copy_numpy_dict(d):
     res = OptimizableDefaultDict({})
     for k, v in d.items():
-        res[k] = v.copy()
+        res[k] = _coerce_derivative_block(v).copy()
     return res
 
 
@@ -41,6 +51,7 @@ def _iter_local_free_derivative_blocks(derivative_data, optim, *, populate_missi
             )
             if dep_deriv is None:
                 continue
+            dep_deriv = _coerce_derivative_block(dep_deriv)
             local_derivs += dep_deriv[dep_opt.local_dofs_free_status]
         yield local_derivs
 
@@ -210,7 +221,7 @@ class Derivative:
                     # empty values e.g. if there are no local DOFs to opt, then self.data[opt]
                     # returns np.array([]).
                     if opt.local_full_dof_size > 0:
-                        derivs.append(self.data[opt])
+                        derivs.append(_coerce_derivative_block(self.data[opt]))
                         keys.append(opt)
 
             return Derivative({k: d for k, d in zip(keys, derivs)})

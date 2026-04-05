@@ -20,6 +20,7 @@ sys.path.insert(0, SRC_ROOT)
 sys.path.insert(0, SIMSOPT_ROOT)
 sys.path.insert(0, REPO_ROOT)
 
+from jax_host_boundary import host_array, host_float
 from repo_bootstrap import bootstrap_local_simsopt
 
 
@@ -549,12 +550,12 @@ def compute_mean_abs_relbn(surf, bs):
     sqrt_area = np.sqrt(absn.reshape((-1, 1)) / float(absn.size))
     surf_area = sqrt_area**2
     bs.set_points(surf.gamma().reshape((-1, 3)))
-    Bfinal = bs.B().reshape(n.shape)
+    Bfinal = host_array(bs.B()).reshape(n.shape)
     Bfinal_norm = np.sum(Bfinal * unitn, axis=2)[:, :, None]
     modBfinal = np.sqrt(np.sum(Bfinal**2, axis=2))[:, :, None]
     relBfinal_norm = Bfinal_norm / modBfinal
     abs_relBfinal_norm_dA = np.abs(relBfinal_norm.reshape((-1, 1))) * surf_area
-    return float(np.sum(abs_relBfinal_norm_dA) / np.sum(surf_area))
+    return host_float(np.sum(abs_relBfinal_norm_dA) / np.sum(surf_area))
 
 
 def resolve_stage2_field_bs(new_bs, bs_jax):
@@ -617,7 +618,7 @@ def build_stage2_objective_term_callbacks(
                 context.length_target,
             ),
             "dJ": lambda: compute_stage2_length_penalty_gradient(
-                float(context.Jls.J()),
+                host_float(context.Jls.J()),
                 context.length_target,
                 context.Jls,
                 context.JF,
@@ -670,7 +671,7 @@ def profile_stage2_squared_flux_internal_components(Jf):
     dominant_field_B_vjp_components = []
     dominant_field_B_vjp_coils = []
     if hasattr(Jf.field, "profile_B_vjp"):
-        field_B_vjp_profile = Jf.field.profile_B_vjp(np.asarray(dJ_dB))
+        field_B_vjp_profile = Jf.field.profile_B_vjp(host_array(dJ_dB))
         field_B_vjp_s = float(field_B_vjp_profile["wall_time_s"])
         field_B_vjp_component_timings = {
             name: float(elapsed_s)
@@ -682,7 +683,7 @@ def profile_stage2_squared_flux_internal_components(Jf):
         dominant_field_B_vjp_coils = list(field_B_vjp_profile["dominant_coils"])
     else:
         field_B_vjp_s, _ = time_stage2_callback_result(
-            lambda: Jf.field.B_vjp(np.asarray(dJ_dB))
+            lambda: Jf.field.B_vjp(host_array(dJ_dB))
         )
     timings = {
         "field_B_for_J_s": field_B_for_J_s,
@@ -772,31 +773,33 @@ def compute_stage2_field_diagnostics(
 
 
 def compute_stage2_length_penalty_value(curve_length, length_target):
-    return 0.5 * max(float(curve_length) - float(length_target), 0.0) ** 2
+    return 0.5 * max(host_float(curve_length) - host_float(length_target), 0.0) ** 2
 
 
 def compute_stage2_max_curvature_value(Jc):
     banana_curve = getattr(Jc, "curve", None)
     if banana_curve is not None:
         return float(np.max(banana_curve.kappa()))
-    return float(Jc.J())
+    return host_float(Jc.J())
 
 
 def stage2_curvature_within_threshold(curvature: float, threshold: float) -> bool:
-    return float(curvature) <= float(threshold)
+    return host_float(curvature) <= host_float(threshold)
 
 
 def compute_stage2_term_gradient(term, root_objective):
-    return np.asarray(term.dJ(partials=True)(root_objective), dtype=float)
+    return host_array(term.dJ(partials=True)(root_objective))
 
 
 def _stage2_term_payload_entry(weight, raw_value, raw_grad):
-    raw_grad_array = np.asarray(raw_grad, dtype=float)
-    weighted_grad = float(weight) * raw_grad_array
+    raw_grad_array = host_array(raw_grad)
+    weight_float = host_float(weight)
+    raw_value_float = host_float(raw_value)
+    weighted_grad = weight_float * raw_grad_array
     return {
-        "weight": float(weight),
-        "raw_J": float(raw_value),
-        "J": float(weight) * float(raw_value),
+        "weight": weight_float,
+        "raw_J": raw_value_float,
+        "J": weight_float * raw_value_float,
         "dJ": weighted_grad,
         "grad_norm": float(np.linalg.norm(weighted_grad)),
     }
@@ -817,8 +820,8 @@ def _serialize_stage2_term_payload(entries):
 
 def _build_stage2_explicit_term_payload(context):
     squared_flux_grad = compute_stage2_term_gradient(context.Jf, context.JF)
-    squared_flux = float(context.Jf.J())
-    curve_length = float(context.Jls.J())
+    squared_flux = host_float(context.Jf.J())
+    curve_length = host_float(context.Jls.J())
     length_penalty = compute_stage2_length_penalty_value(
         curve_length,
         context.length_target,
@@ -829,9 +832,9 @@ def _build_stage2_explicit_term_payload(context):
         context.Jls,
         context.JF,
     )
-    coil_distance_penalty = float(context.Jccdist.J())
+    coil_distance_penalty = host_float(context.Jccdist.J())
     coil_distance_grad = compute_stage2_term_gradient(context.Jccdist, context.JF)
-    curvature_penalty = float(context.Jc.J())
+    curvature_penalty = host_float(context.Jc.J())
     curvature = compute_stage2_max_curvature_value(context.Jc)
     curvature_grad = compute_stage2_term_gradient(context.Jc, context.JF)
     entries = {
@@ -864,9 +867,9 @@ def _build_stage2_target_term_payload(target_objective_bundle, dofs):
     terms = getattr(target_objective_bundle, "terms", ())
     if raw_terms is None or not terms:
         return None
-    dofs64 = np.asarray(dofs, dtype=np.float64)
-    raw_values = np.asarray(raw_terms(dofs64), dtype=float)
-    raw_gradients = np.asarray(jax.jacrev(raw_terms)(dofs64), dtype=float)
+    dofs64 = host_array(dofs)
+    raw_values = host_array(raw_terms(dofs64))
+    raw_gradients = host_array(jax.jacrev(raw_terms)(dofs64))
     entries = {}
     for index, term in enumerate(terms):
         entries[term.name] = _stage2_term_payload_entry(
@@ -883,7 +886,7 @@ def compute_stage2_length_penalty_gradient(
     Jls,
     root_objective,
 ):
-    active_diff = max(curve_length - float(length_target), 0.0)
+    active_diff = max(host_float(curve_length) - host_float(length_target), 0.0)
     return active_diff * compute_stage2_term_gradient(Jls, root_objective)
 
 
@@ -906,9 +909,9 @@ def compute_stage2_distance_constraint_state(
     of whether field diagnostics were reused or skipped by stride policy. The
     hard minimum-distance gate must never depend on diagnostic caching.
     """
-    coil_coil_distance = float(context.Jccdist.shortest_distance())
-    coil_distance_penalty = float(term_entries["coil_distance_penalty"]["raw_J"])
-    cc_threshold = float(context.cc_threshold)
+    coil_coil_distance = host_float(context.Jccdist.shortest_distance())
+    coil_distance_penalty = host_float(term_entries["coil_distance_penalty"]["raw_J"])
+    cc_threshold = host_float(context.cc_threshold)
     violated = coil_coil_distance <= cc_threshold or not np.isfinite(
         coil_distance_penalty
     )
@@ -929,8 +932,8 @@ def evaluate_stage2_objective(
     """Return composite objective diagnostics using the currently loaded DOFs."""
     term_entries, curve_length, curvature = _build_stage2_explicit_term_payload(context)
     grad = sum(np.asarray(entry["dJ"], dtype=float) for entry in term_entries.values())
-    J = sum(float(entry["J"]) for entry in term_entries.values())
-    squared_flux = float(term_entries["squared_flux"]["raw_J"])
+    J = sum(host_float(entry["J"]) for entry in term_entries.values())
+    squared_flux = host_float(term_entries["squared_flux"]["raw_J"])
     if recompute_diagnostics or diagnostics is None:
         diagnostics = compute_stage2_field_diagnostics(
             context.new_bs,
@@ -945,7 +948,7 @@ def evaluate_stage2_objective(
     snapshot = {
         "J": J,
         "Jf": squared_flux,
-        "mean_abs_relBfinal_norm": float(diagnostics["mean_abs_relBfinal_norm"]),
+        "mean_abs_relBfinal_norm": host_float(diagnostics["mean_abs_relBfinal_norm"]),
         "curve_length": curve_length,
         "coil_coil_distance": distance_state.coil_coil_distance,
         "curvature": curvature,
@@ -972,12 +975,12 @@ def profile_stage2_explicit_step(
 
     field_bs = resolve_stage2_field_bs(context.new_bs, context.bs_jax)
     extra_diagnostic_callbacks = {
-        "Jf_J_s": lambda: float(context.Jf.J()),
+        "Jf_J_s": lambda: host_float(context.Jf.J()),
         "mean_abs_relBfinal_norm_s": lambda: compute_mean_abs_relbn(
             context.new_surf, field_bs
         ),
-        "curve_length_s": lambda: float(context.Jls.J()),
-        "coil_coil_distance_s": lambda: float(context.Jccdist.shortest_distance()),
+        "curve_length_s": lambda: host_float(context.Jls.J()),
+        "coil_coil_distance_s": lambda: host_float(context.Jccdist.shortest_distance()),
         "curvature_s": lambda: compute_stage2_max_curvature_value(context.Jc),
     }
     extra_diagnostic_timings = profile_stage2_named_callbacks(
@@ -1165,19 +1168,19 @@ def _build_stage2_probe_composite_payload(
         context,
     )
     objective_source = "explicit-composite"
-    composite_value = float(explicit_snapshot["J"])
-    composite_grad = np.asarray(explicit_grad, dtype=float)
+    composite_value = host_float(explicit_snapshot["J"])
+    composite_grad = host_array(explicit_grad)
     composite_terms = None
     if target_objective_bundle is not None:
         composite_value, composite_grad = jax.value_and_grad(
             target_objective_bundle.objective
-        )(np.asarray(context.JF.x, dtype=np.float64))
-        composite_value = float(composite_value)
-        composite_grad = np.asarray(composite_grad, dtype=float)
+        )(host_array(context.JF.x))
+        composite_value = host_float(composite_value)
+        composite_grad = host_array(composite_grad)
         objective_source = "target-objective"
         composite_terms = _build_stage2_target_term_payload(
             target_objective_bundle,
-            np.asarray(context.JF.x, dtype=np.float64),
+            host_array(context.JF.x),
         )
     return (
         {
@@ -1238,9 +1241,9 @@ def build_stage2_probe_payload(
             target_objective_bundle=target_objective_bundle,
         )
     )
-    flux_grad = np.asarray(Jf.dJ(), dtype=float)
-    curvature_threshold = float(context.Jc.threshold)
-    curvature = float(composite_snapshot["curvature"])
+    flux_grad = host_array(Jf.dJ())
+    curvature_threshold = host_float(context.Jc.threshold)
+    curvature = host_float(composite_snapshot["curvature"])
     return {
         "backend": backend,
         "optimizer_backend": optimizer_backend,
@@ -1256,7 +1259,7 @@ def build_stage2_probe_payload(
         ),
         "curvature_margin": curvature_threshold - curvature,
         "squared_flux": {
-            "J": float(Jf.J()),
+            "J": host_float(Jf.J()),
             "dJ": flux_grad.tolist(),
             "grad_norm": float(np.linalg.norm(flux_grad)),
         },
@@ -1615,7 +1618,7 @@ if __name__ == "__main__":
         args.curvature_p_norm,
         CURVATURE_THRESHOLD,
     )
-    print(f"Initial coil length: {Jls.J():.2f} [m]")
+    print(f"Initial coil length: {host_float(Jls.J()):.2f} [m]")
     Jls_penalty = QuadraticPenalty(Jls, LENGTH_TARGET, "max")
 
     # TOTAL OBJECTIVE FUNCTION -
@@ -1743,7 +1746,7 @@ if __name__ == "__main__":
         res_nit = 0
         print("Skipping Stage 2 optimizer because --init-only was provided.")
     else:
-        initial_dofs = np.asarray(dofs, dtype=float).copy()
+        initial_dofs = host_array(dofs).copy()
         assert outer_contract is not None
         if use_scalar_objective:
             capture_stage2_trajectory_snapshot(
@@ -1777,7 +1780,7 @@ if __name__ == "__main__":
                 else target_objective_bundle.objective
             ),
         )
-        JF.x = np.asarray(res.x, dtype=float)
+        JF.x = host_array(res.x)
         res_nit = res.nit
         if use_scalar_objective:
             assert target_objective_bundle is not None
@@ -1818,7 +1821,7 @@ if __name__ == "__main__":
                     float(cold_elapsed_s) - float(warm_elapsed_s),
                     0.0,
                 )
-                JF.x = np.asarray(res.x, dtype=float)
+                JF.x = host_array(res.x)
         print(res.message)
     if args.trajectory_json:
         write_json_file(
@@ -1940,7 +1943,7 @@ if __name__ == "__main__":
         "init_only": args.init_only,
         "max_iterations": MAXITER,
         "iterations": res_nit,
-        "FINAL_DOFS": np.asarray(JF.x, dtype=float).tolist(),
+        "FINAL_DOFS": host_array(JF.x).tolist(),
         "FINAL_OBJECTIVE": final_snapshot["J"],
         "FINAL_SQUARED_FLUX": final_snapshot["Jf"],
         "FINAL_CURVE_LENGTH": final_snapshot["curve_length"],

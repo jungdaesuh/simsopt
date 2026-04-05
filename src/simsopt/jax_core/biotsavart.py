@@ -103,17 +103,8 @@ def _zero_scalar(dtype):
     return jax.device_put(np.array(0, dtype=np.dtype(dtype)))
 
 
-_XYZ_COMPONENT_SELECTORS = tuple(
-    jax.device_put(np.eye(3, dtype=np.float64)[i]) for i in range(3)
-)
-
-
 def _vector_component(array, component_index: int):
-    return jnp.einsum(
-        "...i,i->...",
-        array,
-        _XYZ_COMPONENT_SELECTORS[component_index].astype(array.dtype),
-    )
+    return array[..., component_index]
 
 
 def _cross_product(left, right):
@@ -601,9 +592,33 @@ def biot_savart_B_vjp(points, v, gammas, gammadashs, currents):
 # ── Grouped coil utilities ───────────────────────────────────────────
 
 
+def _axis0_entries(array: object) -> tuple[jax.Array, ...]:
+    array_jax = jnp.asarray(array)
+    if array_jax.ndim == 0:
+        return (array_jax,)
+    length = int(array_jax.shape[0])
+    if length == 0:
+        return ()
+    return tuple(
+        jnp.squeeze(chunk, axis=0)
+        for chunk in jnp.split(array_jax, length, axis=0)
+    )
+
+
+def _coil_entry_sequence(values: object) -> tuple[object, ...]:
+    if isinstance(values, tuple):
+        return values
+    if isinstance(values, list):
+        return tuple(values)
+    return _axis0_entries(values)
+
+
 def group_coil_data(gammas_list, gammadashs_list, currents_list):
+    gamma_entries = _coil_entry_sequence(gammas_list)
+    gammadash_entries = _coil_entry_sequence(gammadashs_list)
+    current_entries = _coil_entry_sequence(currents_list)
     by_nquad = {}
-    for i, gamma in enumerate(gammas_list):
+    for i, gamma in enumerate(gamma_entries):
         by_nquad.setdefault(gamma.shape[0], []).append(i)
 
     groups = []
@@ -611,16 +626,16 @@ def group_coil_data(gammas_list, gammadashs_list, currents_list):
         groups.append(
             (
                 jnp.stack(
-                    [jnp.asarray(gammas_list[i], dtype=jnp.float64) for i in indices]
+                    [jnp.asarray(gamma_entries[i], dtype=jnp.float64) for i in indices]
                 ),
                 jnp.stack(
                     [
-                        jnp.asarray(gammadashs_list[i], dtype=jnp.float64)
+                        jnp.asarray(gammadash_entries[i], dtype=jnp.float64)
                         for i in indices
                     ]
                 ),
                 jnp.stack(
-                    [jnp.asarray(currents_list[i], dtype=jnp.float64) for i in indices]
+                    [jnp.asarray(current_entries[i], dtype=jnp.float64) for i in indices]
                 ),
                 indices,
             )

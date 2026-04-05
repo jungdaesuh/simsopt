@@ -10,6 +10,7 @@ All tests require ``simsoptpp`` for the CPU reference.
 """
 
 import json
+import inspect
 import importlib
 import importlib.util
 import warnings
@@ -450,6 +451,17 @@ def _build_stage2_target_objective_contract_case(
             },
         )
     return objective, target_bundle
+
+
+def _closure_has_jax_array_leaf(fn) -> bool:
+    for value in inspect.getclosurevars(fn).nonlocals.values():
+        if callable(value):
+            continue
+        if any(
+            isinstance(leaf, jax.Array) for leaf in jax.tree_util.tree_leaves(value)
+        ):
+            return True
+    return False
 
 
 def _centered_fd_gradient(fun, x, *, eps):
@@ -1548,6 +1560,8 @@ class TestMixedQuadratureParity:
 
         _assert_jax_objective_fallback_active(jf_jax)
         assert jf_jax.J() >= 0.0
+        grad = jf_jax.dJ()
+        assert np.asarray(grad).shape[0] > 0
 
     def test_non_strict_squared_flux_jax_objective_fallback_is_silent(
         self,
@@ -1877,6 +1891,8 @@ class TestCurveCWSFourierCPPJaxFieldPath:
 
         _assert_jax_objective_fallback_active(jf_jax)
         assert jf_jax.J() >= 0.0
+        grad = jf_jax.dJ()
+        assert np.asarray(grad).shape[0] > 0
 
     def test_b_uses_jax_curvecwsfouriercpp_geometry(
         self, banana_coil_cpp_setup, monkeypatch
@@ -3275,6 +3291,23 @@ class TestStage2OptimizerContract:
             return
         _assert_stage2_script_failure(result, WARM_TIMING_NO_OPTIMIZATION_ERROR)
 
+    def test_strict_mode_allows_target_scalar_objective_evaluation(
+        self,
+        monkeypatch,
+        request,
+    ):
+        _enable_strict_jax_backend(monkeypatch, request)
+        objective, target_bundle = _build_stage2_target_objective_contract_case()
+        dofs = jax.device_put(np.asarray(objective.x, dtype=np.float64))
+        value = target_bundle.objective(dofs)
+        assert target_bundle.raw_terms is not None
+        raw_terms = target_bundle.raw_terms(dofs)
+        grad = jax.grad(target_bundle.objective)(dofs)
+
+        assert np.isfinite(float(value))
+        assert np.all(np.isfinite(np.asarray(raw_terms, dtype=float)))
+        assert np.all(np.isfinite(np.asarray(grad, dtype=float)))
+
     @pytest.mark.parametrize("definition", _SQUARED_FLUX_DEFINITIONS)
     def test_target_scalar_objective_matches_stage2_composite_contract(
         self,
@@ -3394,6 +3427,13 @@ class TestStage2OptimizerContract:
 
         np.testing.assert_allclose(value, baseline_value, rtol=1e-12, atol=1e-18)
         np.testing.assert_allclose(grad, baseline_grad, rtol=1e-12, atol=1e-18)
+
+    def test_target_scalar_objective_closures_do_not_capture_device_arrays(self):
+        _objective, target_bundle = _build_stage2_target_objective_contract_case()
+
+        assert not _closure_has_jax_array_leaf(target_bundle.objective)
+        assert target_bundle.raw_terms is not None
+        assert not _closure_has_jax_array_leaf(target_bundle.raw_terms)
 
     @pytest.mark.parametrize(
         ("field_backend", "optimizer_backend", "export_objective_json"),
@@ -3577,6 +3617,50 @@ class TestStage2OptimizerContract:
                 atol=0.0,
             )
             assert "terms" not in payload["composite"]
+
+    def test_compute_mean_abs_relbn_explicitly_materializes_jax_field_output(
+        self, monkeypatch
+    ):
+        stage2_script = _load_stage2_script_module()
+        host_calls = {"float": 0, "array": 0}
+        original_host_float = stage2_script.host_float
+        original_host_array = stage2_script.host_array
+
+        def counted_host_float(value):
+            host_calls["float"] += 1
+            return original_host_float(value)
+
+        def counted_host_array(value, *, dtype=np.float64):
+            host_calls["array"] += 1
+            return original_host_array(value, dtype=dtype)
+
+        monkeypatch.setattr(stage2_script, "host_float", counted_host_float)
+        monkeypatch.setattr(stage2_script, "host_array", counted_host_array)
+
+        class _Surface:
+            quadpoints_theta = np.linspace(0.0, 1.0, 4, endpoint=False)
+            quadpoints_phi = np.linspace(0.0, 1.0, 3, endpoint=False)
+
+            def normal(self):
+                normal = np.zeros((3, 4, 3))
+                normal[..., 2] = 2.0
+                return normal
+
+            def gamma(self):
+                return np.ones((3, 4, 3))
+
+        class _Field:
+            def set_points(self, points):
+                self._points = np.asarray(points)
+
+            def B(self):
+                return jnp.ones((self._points.shape[0], 3), dtype=jnp.float64)
+
+        result = stage2_script.compute_mean_abs_relbn(_Surface(), _Field())
+
+        assert np.isfinite(result)
+        assert host_calls["array"] >= 1
+        assert host_calls["float"] >= 1
 
     @pytest.mark.parametrize(
         ("backend", "optimizer_backend", "expected_error"),

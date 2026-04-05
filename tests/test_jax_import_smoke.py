@@ -522,6 +522,113 @@ def test_transfer_guard_disallow_allows_biot_savart_point_chunking():
     )
 
 
+def test_transfer_guard_disallow_allows_grouped_biot_savart_gpu_spec_eval():
+    """GPU grouped-field kernels must not close over device-backed selector constants."""
+    _assert_import_check_passes(
+        """
+        import jax
+        import numpy as np
+        import simsopt.config as simsopt_config
+        from simsopt.jax_core.field import (
+            grouped_biot_savart_B_from_spec,
+            grouped_coil_set_spec_from_lists,
+        )
+
+        gpu = next((device for device in jax.devices() if device.platform == "gpu"), None)
+        if gpu is None:
+            raise SystemExit(0)
+
+        simsopt_config.set_backend(
+            "jax_gpu_fast",
+            strict=True,
+            transfer_guard="disallow",
+        )
+
+        points = jax.device_put(
+            np.linspace(0.0, 1.0, 4 * 3, dtype=np.float64).reshape(4, 3),
+            device=gpu,
+        )
+        gamma = jax.device_put(
+            np.linspace(0.2, 0.8, 8 * 3, dtype=np.float64).reshape(8, 3),
+            device=gpu,
+        )
+        gammadash = jax.device_put(
+            np.full((8, 3), 0.1, dtype=np.float64),
+            device=gpu,
+        )
+        current = jax.device_put(np.asarray(1.25, dtype=np.float64), device=gpu)
+
+        coil_spec = grouped_coil_set_spec_from_lists([gamma], [gammadash], [current])
+        B = grouped_biot_savart_B_from_spec(points, coil_spec)
+
+        assert B.shape == (4, 3)
+        assert jax.numpy.all(jax.numpy.isfinite(B))
+    """,
+        failure_message="grouped Biot-Savart GPU spec transfer-guard smoke failed",
+    )
+
+
+def test_transfer_guard_disallow_allows_grouped_biot_savart_gpu_current_arrays():
+    """Grouped coil specs should accept staged current arrays without Python indexing."""
+    _assert_import_check_passes(
+        """
+        import jax
+        import numpy as np
+        import simsopt.config as simsopt_config
+        from simsopt.jax_core.field import (
+            grouped_biot_savart_B_from_spec,
+            grouped_coil_set_spec_from_lists,
+        )
+
+        gpu = next((device for device in jax.devices() if device.platform == "gpu"), None)
+        if gpu is None:
+            raise SystemExit(0)
+
+        simsopt_config.set_backend(
+            "jax_gpu_fast",
+            strict=True,
+            transfer_guard="disallow",
+        )
+
+        points = jax.device_put(
+            np.linspace(0.0, 1.0, 4 * 3, dtype=np.float64).reshape(4, 3),
+            device=gpu,
+        )
+        gamma0 = jax.device_put(
+            np.linspace(0.2, 0.8, 8 * 3, dtype=np.float64).reshape(8, 3),
+            device=gpu,
+        )
+        gamma1 = jax.device_put(
+            np.linspace(0.3, 0.9, 8 * 3, dtype=np.float64).reshape(8, 3),
+            device=gpu,
+        )
+        gammadash0 = jax.device_put(
+            np.full((8, 3), 0.1, dtype=np.float64),
+            device=gpu,
+        )
+        gammadash1 = jax.device_put(
+            np.full((8, 3), 0.15, dtype=np.float64),
+            device=gpu,
+        )
+        currents = jax.device_put(
+            np.asarray([1.25, -0.75], dtype=np.float64),
+            device=gpu,
+        )
+
+        coil_spec = grouped_coil_set_spec_from_lists(
+            (gamma0, gamma1),
+            (gammadash0, gammadash1),
+            currents,
+        )
+        B = grouped_biot_savart_B_from_spec(points, coil_spec)
+
+        assert B.shape == (4, 3)
+        assert jax.numpy.all(jax.numpy.isfinite(B))
+    """,
+        failure_message="grouped Biot-Savart GPU current-array transfer-guard smoke failed",
+    )
+
+
 def test_transfer_guard_disallow_preserves_shifted_grid_axis_sample():
     """Shifted quadrature grids must use the sampled surface point for axis-z."""
     _assert_import_check_passes(
@@ -594,6 +701,82 @@ def test_transfer_guard_disallow_allows_curvecwsfouriercpp_init():
         assert curve.numquadpoints == 33
     """,
         failure_message="CurveCWSFourierCPP transfer-guard init smoke failed",
+    )
+
+
+def test_transfer_guard_disallow_allows_curvecwsfouriercpp_curve_length_gradient():
+    """CurveCWSFourierCPP length gradient should use explicit host/device boundaries."""
+    _assert_import_check_passes(
+        """
+        import numpy as np
+        import simsopt.config as simsopt_config
+        from simsopt.geo import SurfaceRZFourier
+        from simsopt.geo.curveobjectives import CurveLength
+        from simsopt.geo.curvecwsfourier import CurveCWSFourierCPP
+
+        simsopt_config.set_backend("jax_cpu_parity", transfer_guard="disallow")
+        quadpoints = np.linspace(0.0, 1.0, 33, endpoint=False)
+        surf = SurfaceRZFourier(
+            nfp=5,
+            stellsym=True,
+            mpol=1,
+            ntor=0,
+            quadpoints_phi=np.arange(64) / 64,
+            quadpoints_theta=np.arange(64) / 64,
+        )
+        curve = CurveCWSFourierCPP(quadpoints, 3, surf, G=0, H=0)
+        curve.set("thetas(1)", 0.1)
+        curve.set("phic(1)", 0.05)
+        value = CurveLength(curve).J()
+        grad = CurveLength(curve).dJ(partials=True)(curve)
+        assert np.isfinite(float(value))
+        assert grad.shape == (curve.dof_size,)
+        assert np.all(np.isfinite(grad))
+    """,
+        failure_message="CurveCWSFourierCPP CurveLength transfer-guard smoke failed",
+    )
+
+
+def test_transfer_guard_disallow_allows_curvecwsfouriercpp_curve_distance_gradient():
+    """CurveCWSFourierCPP distance gradients should materialize JAX geometry before slicing."""
+    _assert_import_check_passes(
+        """
+        import numpy as np
+        import simsopt.config as simsopt_config
+        from simsopt.geo import SurfaceRZFourier, create_equally_spaced_curves
+        from simsopt.geo.curveobjectives import CurveCurveDistance
+        from simsopt.geo.curvecwsfourier import CurveCWSFourierCPP
+
+        simsopt_config.set_backend("jax_cpu_parity", transfer_guard="disallow")
+        quadpoints = np.linspace(0.0, 1.0, 33, endpoint=False)
+        surf = SurfaceRZFourier(
+            nfp=5,
+            stellsym=True,
+            mpol=1,
+            ntor=0,
+            quadpoints_phi=np.arange(64) / 64,
+            quadpoints_theta=np.arange(64) / 64,
+        )
+        banana_curve = CurveCWSFourierCPP(quadpoints, 3, surf, G=0, H=0)
+        banana_curve.set("phic(0)", 0.05)
+        banana_curve.set("thetas(1)", 0.1)
+        tf_curves = create_equally_spaced_curves(
+            2,
+            5,
+            stellsym=False,
+            R0=1.0,
+            R1=0.35,
+            order=1,
+            numquadpoints=33,
+        )
+        objective = CurveCurveDistance([banana_curve, *tf_curves], 0.05)
+        value = objective.J()
+        grad = objective.dJ(partials=True)(banana_curve)
+        assert np.isfinite(float(value))
+        assert grad.shape == (banana_curve.dof_size,)
+        assert np.all(np.isfinite(grad))
+    """,
+        failure_message="CurveCWSFourierCPP CurveCurveDistance transfer-guard smoke failed",
     )
 
 

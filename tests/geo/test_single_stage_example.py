@@ -9,6 +9,7 @@ import uuid
 from pathlib import Path
 from unittest.mock import patch
 
+import jax.numpy as jnp
 import numpy as np
 
 from simsopt.geo.surfaceobjectives import (
@@ -1477,6 +1478,133 @@ class SingleStageExampleTests(unittest.TestCase):
         # set_points must have been called twice: once for gamma, once for restore
         self.assertEqual(len(bs.set_points_calls), 2)
         np.testing.assert_array_equal(bs.set_points_calls[1], INITIAL_PTS)
+
+    def test_accept_step_explicitly_materializes_jax_diagnostics(self):
+        module = self.load_module()
+        host_calls = {"float": 0, "array": 0}
+        original_host_float = module.host_float
+        original_host_array = module.host_array
+
+        def counted_host_float(value):
+            host_calls["float"] += 1
+            return original_host_float(value)
+
+        def counted_host_array(value, *, dtype=np.float64):
+            host_calls["array"] += 1
+            return original_host_array(value, dtype=dtype)
+
+        class _BS:
+            def __init__(self):
+                self._current_pts = np.array([[1.0, 2.0, 3.0]])
+
+            def get_points_cart_ref(self):
+                return self._current_pts
+
+            def set_points(self, pts):
+                self._current_pts = np.asarray(pts).copy()
+
+            def B(self):
+                n = self._current_pts.shape[0]
+                return jnp.ones((n, 3), dtype=jnp.float64) * 0.01
+
+        class _Surface:
+            def __init__(self):
+                self.x = np.zeros(5)
+
+            def gamma(self):
+                return np.ones((1, 2, 3))
+
+            def unitnormal(self):
+                normal = np.zeros((1, 2, 3))
+                normal[..., 2] = 1.0
+                return normal
+
+            def volume(self):
+                return jnp.asarray(1.0, dtype=jnp.float64)
+
+        class _BoozerSurface:
+            def __init__(self):
+                self.surface = _Surface()
+                self.res = {
+                    "success": jnp.asarray(True),
+                    "iter": jnp.asarray(1),
+                    "iota": jnp.asarray(0.15, dtype=jnp.float64),
+                    "G": jnp.asarray(1.0, dtype=jnp.float64),
+                }
+
+        class _JF:
+            def J(self):
+                return jnp.asarray(1.0, dtype=jnp.float64)
+
+            def dJ(self):
+                return jnp.arange(5, dtype=jnp.float64)
+
+        class _Objective:
+            def J(self):
+                return jnp.asarray(0.5, dtype=jnp.float64)
+
+            def dJ(self):
+                return jnp.zeros(5, dtype=jnp.float64)
+
+            def shortest_distance(self):
+                return jnp.asarray(0.1, dtype=jnp.float64)
+
+        class _IotaObj:
+            def J(self):
+                return jnp.asarray(0.15, dtype=jnp.float64)
+
+        class _Curve:
+            def gamma(self):
+                return np.zeros((10, 3))
+
+            def kappa(self):
+                return np.ones(10)
+
+        class _CurveLength:
+            def J(self):
+                return jnp.asarray(6.0, dtype=jnp.float64)
+
+        run_dict = {
+            "lscount": 5,
+            "sdofs": np.zeros(5),
+            "iota": 0.15,
+            "G": 1.0,
+            "J": 1.0,
+            "dJ": np.zeros(5),
+            "it": 1,
+            "intersecting": False,
+            "self_intersection_check_available": False,
+        }
+        objectives = {"cc": _Objective(), "cs": _Objective(), "boozer": _Objective()}
+        diagnostics_refs = {
+            "iota": _IotaObj(),
+            "banana_curve": _Curve(),
+            "curvelength": _CurveLength(),
+        }
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log_path = os.path.join(tmpdir, "test.log")
+            with patch.object(
+                module, "host_float", counted_host_float
+            ), patch.object(
+                module, "host_array", counted_host_array
+            ), patch.object(
+                module, "update_self_intersection_status", return_value=False
+            ), patch.object(
+                module, "BiotSavart", _BS
+            ):
+                module.accept_step(
+                    run_dict,
+                    _BoozerSurface(),
+                    _JF(),
+                    _BS(),
+                    objectives,
+                    diagnostics_refs,
+                    log_path,
+                )
+
+        self.assertGreaterEqual(host_calls["float"], 6)
+        self.assertGreaterEqual(host_calls["array"], 3)
 
     def test_evaluate_candidate_cpu_path_does_not_pass_sdofs(self):
         """CPU BoozerSurface.run_code() does not accept sdofs=.

@@ -292,6 +292,16 @@ def _slice_1d(array: jax.Array, start: int, end: int) -> jax.Array:
     return _as_jax_float64(selector) @ array
 
 
+def _axis0_entries(array: jax.Array) -> tuple[jax.Array, ...]:
+    length = int(array.shape[0])
+    if length == 0:
+        return ()
+    return tuple(
+        jnp.squeeze(chunk, axis=0)
+        for chunk in jnp.split(array, length, axis=0)
+    )
+
+
 def _update_1d(array: jax.Array, start: int, values: jax.Array) -> jax.Array:
     positions = np.arange(int(start), int(start) + values.shape[0], dtype=np.int64)
     insert = np.zeros((array.shape[0], positions.size), dtype=np.float64)
@@ -430,14 +440,19 @@ def project_coil_cotangents_to_derivative(coils, d_coil_arrays, coil_indices):
     """Project grouped coil cotangents to a single public ``Derivative``."""
     deriv_data = {}
     for (d_g, d_gd, d_c), indices in zip(d_coil_arrays, coil_indices):
-        for local_i, global_i in enumerate(indices):
+        for dg_i, dgd_i, dc_i, global_i in zip(
+            _axis0_entries(d_g),
+            _axis0_entries(d_gd),
+            _axis0_entries(d_c),
+            indices,
+        ):
             _merge_derivative_data(
                 deriv_data,
                 _project_single_coil_cotangent_data(
                     coils[global_i],
-                    d_g[local_i],
-                    d_gd[local_i],
-                    d_c[local_i],
+                    dg_i,
+                    dgd_i,
+                    dc_i,
                 ),
             )
     return Derivative(deriv_data)
@@ -1092,14 +1107,19 @@ class BiotSavartJAX(Optimizable):
                 group["gammadashs"],
                 group["currents"],
             )
-            for group_index, info in enumerate(group["infos"]):
+            for dg_i, dgd_i, dc_i, info in zip(
+                _axis0_entries(dg_group),
+                _axis0_entries(dgd_group),
+                _axis0_entries(dc_group),
+                group["infos"],
+            ):
                 _merge_derivative_data(
                     deriv_data,
                     _project_single_coil_cotangent_data(
                         info.coil,
-                        dg_group[group_index],
-                        dgd_group[group_index],
-                        dc_group[group_index],
+                        dg_i,
+                        dgd_i,
+                        dc_i,
                     ),
                 )
         return Derivative(deriv_data)
@@ -1183,13 +1203,18 @@ class BiotSavartJAX(Optimizable):
                     native_curve=group["native_curve"],
                 )
             )
-            for group_index, info in enumerate(group["infos"]):
+            for dg_i, dgd_i, dc_i, info in zip(
+                _axis0_entries(dg_group),
+                _axis0_entries(dgd_group),
+                _axis0_entries(dc_group),
+                group["infos"],
+            ):
                 coil_vjp_s, _ = _time_call_result(
                     lambda: _project_single_coil_cotangent_data(
                         info.coil,
-                        dg_group[group_index],
-                        dgd_group[group_index],
-                        dc_group[group_index],
+                        dg_i,
+                        dgd_i,
+                        dc_i,
                     )
                 )
                 component_totals["coil_vjp_s"] += coil_vjp_s

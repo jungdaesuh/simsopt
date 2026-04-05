@@ -1914,6 +1914,25 @@ def test_tier5_single_stage_probe_args_thread_benchmark_mode():
     assert "--benchmark-mode" in command
 
 
+def test_tier5_stage2_e2e_probe_args_thread_optimizer_backend():
+    args = argparse.Namespace(
+        platform="cuda",
+        equilibrium_path=None,
+        plasma_surf_filename="fixture.nc",
+        equilibria_dir="/tmp/equilibria",
+        stage2_nphi=255,
+        stage2_ntheta=64,
+        maxiter=20,
+        optimizer_backend="ondevice",
+    )
+
+    command = tier5_performance_characterization._stage2_e2e_probe_args(args)
+
+    assert "--optimizer-backend" in command
+    optimizer_backend_idx = command.index("--optimizer-backend")
+    assert command[optimizer_backend_idx + 1] == "ondevice"
+
+
 def test_weekly_tier5_manifest_targets_ondevice_benchmark_mode():
     manifest = json.loads(_weekly_tier5_manifest_path().read_text(encoding="utf-8"))
     args = manifest["commands"][0]["args"]

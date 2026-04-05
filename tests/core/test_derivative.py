@@ -1,5 +1,6 @@
 import unittest
 import numpy as np
+import jax.numpy as jnp
 from simsopt._core.optimizable import Optimizable, ScaledOptimizable, OptimizableSum
 from simsopt._core.derivative import Derivative, derivative_dec
 from simsopt.objectives.utilities import Weight
@@ -115,6 +116,16 @@ def taylor_test(obj):
 
 
 class DerivativeTests(unittest.TestCase):
+
+    def test_jax_blocks_materialize_to_numpy(self):
+        opt = Opt(n=3)
+        deriv = Derivative({opt: jnp.arange(3, dtype=jnp.float64)})
+
+        self.assertFalse(isinstance(deriv.data[opt], np.ndarray))
+        np.testing.assert_allclose(deriv(opt), np.arange(3, dtype=float))
+        as_deriv = deriv(opt, as_derivative=True)
+        self.assertIsInstance(as_deriv.data[opt], np.ndarray)
+        np.testing.assert_allclose(as_deriv.data[opt], np.arange(3, dtype=float))
 
     def test_taylor_graph(self):
         # built a reasonably complex graph of two inputs, that both feed into

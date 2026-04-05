@@ -1,6 +1,7 @@
 from math import sin, cos
 
 import numpy as np
+import jax
 from jax import device_put, vjp, jacfwd, jvp, hessian, grad
 import jax.numpy as jnp
 
@@ -18,6 +19,20 @@ from .._core.derivative import derivative_dec
 from .plotting import fix_matplotlib_3d
 
 __all__ = ['CurveCWSFourierCPP']
+
+
+def _as_jax_float64(value):
+    if hasattr(value, "devices"):
+        return jnp.asarray(value, dtype=jnp.float64)
+    return device_put(np.asarray(value, dtype=np.float64))
+
+
+def _as_numpy_float64(value):
+    if isinstance(value, np.ndarray):
+        return np.asarray(value, dtype=np.float64)
+    if hasattr(value, "devices"):
+        return np.asarray(jax.device_get(value), dtype=np.float64)
+    return np.asarray(value, dtype=np.float64)
 
 def gamma_2d(cdofs, qpts, order, G:int=0, H:int=0):
     """Given some dofs, return curve position in 2D cartesian coordinate
@@ -184,10 +199,10 @@ class CurveCWSFourierCPP( Curve, sopp.Curve ):
 
         # useful functions
         quadpoints = np.asarray(self.quadpoints, dtype=np.float64)
-        points = device_put(quadpoints)
-        ones = device_put(np.ones_like(quadpoints))
-        current_curve_dofs = lambda: self.get_dofs()
-        current_surface_dofs = lambda: self.surf.get_dofs()
+        points = quadpoints
+        ones = np.ones_like(quadpoints)
+        current_curve_dofs = lambda: _as_jax_float64(self.get_dofs())
+        current_surface_dofs = lambda: _as_jax_float64(self.surf.get_dofs())
 
         def gamma_on_surface(curve_dofs, surface_dofs, qpts):
             return gamma_curve_on_surface(
@@ -314,20 +329,20 @@ class CurveCWSFourierCPP( Curve, sopp.Curve ):
         )
 
         ## gamma
-        self.gamma_2d_pure = jit(lambda cdofs, qpts: gamma_2d(cdofs, qpts, self.order, self.G, self.H)) 
-        self.gamma_2d_jax = jit(lambda cdofs: self.gamma_2d_pure(cdofs, self.quadpoints)) 
+        self.gamma_2d_pure = jit(lambda cdofs, qpts: gamma_2d(cdofs, qpts, self.order, self.G, self.H))
+        self.gamma_2d_jax = jit(lambda cdofs: self.gamma_2d_pure(cdofs, points))
         self.dgamma_2d_by_dcoeff_jax = jit(lambda cdofs: jacfwd(self.gamma_2d_jax)(cdofs))
         self.dgamma_2d_by_dcoeff_vjp = jit(lambda cdofs, v: vjp(self.gamma_2d_jax, cdofs)[1](v)[0])
 
         ## gammadash
         self.gammadash_2d_pure = jit(lambda cdofs, q: jvp(lambda qpts: self.gamma_2d_pure(cdofs, qpts), (q,), (ones,))[1])
-        self.gammadash_2d_jax = jit(lambda cdofs: self.gammadash_2d_pure(cdofs, self.quadpoints))
+        self.gammadash_2d_jax = jit(lambda cdofs: self.gammadash_2d_pure(cdofs, points))
         self.dgammadash_2d_by_dcoeff_jax = jit(lambda cdofs: jacfwd(self.gammadash_2d_jax)(cdofs))
         self.dgammadash_2d_by_dcoeff_vjp = jit(lambda cdofs, v: vjp(self.gammadash_2d_jax, cdofs)[1](v)[0])
 
         ## gammadashdash
         self.gammadashdash_2d_pure = jit(lambda cdofs, q: jvp(lambda qpts: self.gammadash_2d_pure(cdofs, qpts), (q,), (ones,))[1])
-        self.gammadashdash_2d_jax = jit(lambda cdofs: self.gammadashdash_2d_pure(cdofs, self.quadpoints))
+        self.gammadashdash_2d_jax = jit(lambda cdofs: self.gammadashdash_2d_pure(cdofs, points))
         self.dgammadashdash_2d_by_dcoeff_jax = jit(lambda cdofs: jacfwd(self.gammadashdash_2d_jax)(cdofs))
         self.dgammadashdash_2d_by_dcoeff_vjp = jit(lambda cdofs, v: vjp(self.gammadashdash_2d_jax, cdofs)[1](v)[0])
 
@@ -361,12 +376,13 @@ class CurveCWSFourierCPP( Curve, sopp.Curve ):
 
     @staticmethod
     def _surface_lin_inputs(phi, theta):
-        phi_arr = np.ascontiguousarray(np.asarray(phi, dtype=np.float64))
-        theta_arr = np.ascontiguousarray(np.asarray(theta, dtype=np.float64))
+        phi_arr = np.ascontiguousarray(_as_numpy_float64(phi))
+        theta_arr = np.ascontiguousarray(_as_numpy_float64(theta))
         return phi_arr, theta_arr
 
     def _surface_lin_inputs_from_gamma2d(self, g2):
-        return self._surface_lin_inputs(g2[:, 0], g2[:, 1])
+        g2_arr = _as_numpy_float64(g2)
+        return self._surface_lin_inputs(g2_arr[:, 0], g2_arr[:, 1])
     
     def get_dofs(self):
         return np.concatenate(self.modes)
@@ -395,7 +411,7 @@ class CurveCWSFourierCPP( Curve, sopp.Curve ):
     # GAMMA
     # -----
     def gamma_2d(self):
-        cdofs = self.get_dofs()
+        cdofs = _as_jax_float64(self.get_dofs())
         return self.gamma_2d_jax(cdofs)
     
     def gamma_2d_impl(self, g2, quadpoints):
@@ -416,7 +432,7 @@ class CurveCWSFourierCPP( Curve, sopp.Curve ):
         self.surf.gamma_lin(gamma, phi, theta)
 
     def dgamma_2d_by_dcoeff(self):
-        cdofs = self.get_dofs()
+        cdofs = _as_jax_float64(self.get_dofs())
         return self.dgamma_2d_by_dcoeff_jax(cdofs)
 
     def dgamma_by_dcoeff(self):
@@ -427,7 +443,9 @@ class CurveCWSFourierCPP( Curve, sopp.Curve ):
         self.surf.gammadash1_lin(dsurf_dphi, phi, theta)
         self.surf.gammadash2_lin(dsurf_dtheta, phi, theta)
 
-        dg2_by_dcoeff = self.dgamma_2d_by_dcoeff() # shape nqpts x 2 x ndofs
+        dg2_by_dcoeff = _as_numpy_float64(
+            self.dgamma_2d_by_dcoeff()
+        )  # shape nqpts x 2 x ndofs
         dphi_by_dcoeff = dg2_by_dcoeff[:,0,:] # shape nqpts x ndofs
         dtheta_by_dcoeff = dg2_by_dcoeff[:,1,:] # shape nqpts x ndofs
 
@@ -447,7 +465,7 @@ class CurveCWSFourierCPP( Curve, sopp.Curve ):
     # GAMMADASH
     # ---------
     def gammadash_2d(self):
-        cdofs = self.get_dofs()
+        cdofs = _as_jax_float64(self.get_dofs())
         return self.gammadash_2d_jax(cdofs)
     
     def gammadash_2d_impl(self, g2, quadpoints):
@@ -455,7 +473,7 @@ class CurveCWSFourierCPP( Curve, sopp.Curve ):
         g2[:, :] = gammadash_2d_numpy(cdofs, quadpoints, self.order, self.G, self.H)
 
     def dgammadash_2d_by_dcoeff(self):
-        cdofs = self.get_dofs()
+        cdofs = _as_jax_float64(self.get_dofs())
         return self.dgammadash_2d_by_dcoeff_jax(cdofs)
     
     def gammadash(self):
@@ -490,15 +508,15 @@ class CurveCWSFourierCPP( Curve, sopp.Curve ):
         self.surf.gammadash1dash2_lin(dsurf_dphidtheta, phi, theta)
         self.surf.gammadash2dash2_lin(dsurf_dthetadtheta, phi, theta)
 
-        g2dash = self.gammadash_2d()
+        g2dash = _as_numpy_float64(self.gammadash_2d())
         phidash = g2dash[:,0]
         thetadash = g2dash[:,1]
 
-        dg2_by_dcoef = self.dgamma_2d_by_dcoeff()
+        dg2_by_dcoef = _as_numpy_float64(self.dgamma_2d_by_dcoeff())
         dphi_by_dcoef = dg2_by_dcoef[:,0,:]
         dtheta_by_dcoef = dg2_by_dcoef[:,1,:]
 
-        dg2dash_by_dcoeff = self.dgammadash_2d_by_dcoeff()
+        dg2dash_by_dcoeff = _as_numpy_float64(self.dgammadash_2d_by_dcoeff())
         dphidash_by_dcoeff = dg2dash_by_dcoeff[:,0,:] # shape nqpts x ndofs
         dthetadash_by_dcoeff = dg2dash_by_dcoeff[:,1,:] # shape nqpts x ndofs
 
@@ -524,7 +542,7 @@ class CurveCWSFourierCPP( Curve, sopp.Curve ):
     # GAMMADASHDASH
     # -------------
     def gammadashdash_2d(self):
-        cdofs = self.get_dofs()
+        cdofs = _as_jax_float64(self.get_dofs())
         return self.gammadashdash_2d_jax(cdofs)
     
     def gammadashdash_2d_impl(self, g2, quadpoints):
@@ -592,24 +610,26 @@ class CurveCWSFourierCPP( Curve, sopp.Curve ):
         self.surf.gammadash1dash2dash2_lin(dsurf_dphidthetadtheta, phi, theta)
         self.surf.gammadash2dash2dash2_lin(dsurf_dthetadthetadtheta, phi, theta)
 
-        cdofs = self.get_dofs()
-        dg2_by_dcoef = self.dgamma_2d_by_dcoeff_jax(cdofs)
+        cdofs = _as_jax_float64(self.get_dofs())
+        dg2_by_dcoef = _as_numpy_float64(self.dgamma_2d_by_dcoeff_jax(cdofs))
         dphi_by_dcoef = dg2_by_dcoef[:,0,:]
         dtheta_by_dcoef = dg2_by_dcoef[:,1,:]
 
-        g2dash = self.gammadash_2d_jax(cdofs)
+        g2dash = _as_numpy_float64(self.gammadash_2d_jax(cdofs))
         phidash = g2dash[:,0] # self.numquadpoints
         thetadash = g2dash[:,1] # self.numquadpoints
 
-        g2dashdash = self.gammadashdash_2d_jax(cdofs)
+        g2dashdash = _as_numpy_float64(self.gammadashdash_2d_jax(cdofs))
         phidashdash = g2dashdash[:,0] # self.numquadpoints
         thetadashdash = g2dashdash[:,1] # self.numquadpoints
 
-        dg2dash_by_dcoeff = self.dgammadash_2d_by_dcoeff_jax(cdofs)
+        dg2dash_by_dcoeff = _as_numpy_float64(self.dgammadash_2d_by_dcoeff_jax(cdofs))
         dphidash_by_dcoeff = dg2dash_by_dcoeff[:,0] # self.numquadpoints
         dthetadash_by_dcoeff = dg2dash_by_dcoeff[:,1] # self.numquadpoints
 
-        dg2dashdash_by_dcoeff = self.dgammadashdash_2d_by_dcoeff_jax(cdofs)
+        dg2dashdash_by_dcoeff = _as_numpy_float64(
+            self.dgammadashdash_2d_by_dcoeff_jax(cdofs)
+        )
         dphidashdash_by_dcoeff = dg2dashdash_by_dcoeff[:,0] # self.numquadpoints
         dthetadashdash_by_dcoeff = dg2dashdash_by_dcoeff[:,1] # self.numquadpoints
 
@@ -684,7 +704,7 @@ class CurveCWSFourierCPP( Curve, sopp.Curve ):
         normal = np.cross(dxdphi, dxdtheta)
         normal_norm = np.linalg.norm( normal, axis=1 )
 
-        dg2_by_dcoeff = self.dgamma_2d_by_dcoeff()
+        dg2_by_dcoeff = _as_numpy_float64(self.dgamma_2d_by_dcoeff())
         dxdthetadtheta = np.zeros((self.numquadpoints,3))
         dxdphidtheta = np.zeros((self.numquadpoints,3))
         dxdphidphi = np.zeros((self.numquadpoints,3))
@@ -722,7 +742,7 @@ class CurveCWSFourierCPP( Curve, sopp.Curve ):
     
     def drfactor_by_dcoeff(self):
         g2 = gamma_2d_numpy(self.get_dofs(), self.quadpoints, self.order, self.G, self.H)
-        dg2_by_dcoef = self.dgamma_2d_by_dcoeff()
+        dg2_by_dcoef = _as_numpy_float64(self.dgamma_2d_by_dcoeff())
         unit_normal = self.unit_normal()
         dunit_normal_by_dcoef = self.dunit_normal_by_dcoeff()
 

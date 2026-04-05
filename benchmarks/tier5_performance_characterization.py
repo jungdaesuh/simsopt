@@ -232,6 +232,22 @@ def _single_stage_init_probe_args(args: argparse.Namespace) -> list[str]:
     return command
 
 
+def _stage2_e2e_probe_args(args: argparse.Namespace) -> list[str]:
+    return [
+        "--platform",
+        args.platform,
+        "--nphi",
+        str(args.stage2_nphi),
+        "--ntheta",
+        str(args.stage2_ntheta),
+        "--maxiter",
+        str(args.maxiter),
+        "--optimizer-backend",
+        args.optimizer_backend,
+        *_common_equilibrium_args(args),
+    ]
+
+
 def safe_speedup(reference_s: float | None, candidate_s: float | None) -> float | None:
     if reference_s is None or candidate_s is None or candidate_s <= 0.0:
         return None
@@ -383,17 +399,7 @@ def main() -> None:
     )
     tier2_payload, tier2_outer = _timed_probe(
         _stage2_e2e_script(),
-        [
-            "--platform",
-            args.platform,
-            "--nphi",
-            str(args.stage2_nphi),
-            "--ntheta",
-            str(args.stage2_ntheta),
-            "--maxiter",
-            str(args.maxiter),
-            *_common_equilibrium_args(args),
-        ],
+        _stage2_e2e_probe_args(args),
         platform=args.platform,
     )
     tier3_payload, tier3_outer = _timed_probe(

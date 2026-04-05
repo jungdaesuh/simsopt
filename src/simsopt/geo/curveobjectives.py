@@ -47,6 +47,11 @@ def _as_numpy_float64(value):
     return np.asarray(jax.device_get(value), dtype=np.float64)
 
 
+def _pairwise_distances(gamma1, gamma2):
+    delta = gamma1[:, None, :] - gamma2[None, :, :]
+    return jnp.sqrt(jnp.sum(jnp.square(delta), axis=2))
+
+
 class CurveLength(Optimizable):
     r"""
     CurveLength is a class that computes the length of a curve, i.e.
@@ -283,13 +288,11 @@ def cc_distance_pure(gamma1, l1, gamma2, l2, minimum_distance):
     """
     minimum_distance_jax = _as_jax_float64(minimum_distance)
     zero = _as_jax_float64(0.0)
-    dists = jnp.sqrt(jnp.sum((gamma1[:, None, :] - gamma2[None, :, :]) ** 2, axis=2))
+    dists = _pairwise_distances(gamma1, gamma2)
     alen = jnp.linalg.norm(l1, axis=1)[:, None] * jnp.linalg.norm(l2, axis=1)[None, :]
     normalization = _as_jax_float64(gamma1.shape[0] * gamma2.shape[0])
-    return (
-        jnp.sum(alen * jnp.maximum(minimum_distance_jax - dists, zero) ** 2)
-        / normalization
-    )
+    excess = jnp.maximum(minimum_distance_jax - dists, zero)
+    return jnp.sum(alen * jnp.square(excess)) / normalization
 
 
 def cc_distance_barrier_pure(gamma1, l1, gamma2, l2, minimum_distance):
@@ -301,7 +304,7 @@ def cc_distance_barrier_pure(gamma1, l1, gamma2, l2, minimum_distance):
     """
     minimum_distance_jax = _as_jax_float64(minimum_distance)
     half = _as_jax_float64(0.5)
-    dists = jnp.sqrt(jnp.sum((gamma1[:, None, :] - gamma2[None, :, :]) ** 2, axis=2))
+    dists = _pairwise_distances(gamma1, gamma2)
     alen = jnp.linalg.norm(l1, axis=1)[:, None] * jnp.linalg.norm(l2, axis=1)[None, :]
     feasible = dists > minimum_distance_jax
     safe_ratio = jnp.where(feasible, minimum_distance_jax / dists, half)
@@ -573,13 +576,12 @@ def cs_distance_pure(gammac, lc, gammas, ns, minimum_distance):
     """
     minimum_distance_jax = _as_jax_float64(minimum_distance)
     zero = _as_jax_float64(0.0)
-    dists = jnp.sqrt(jnp.sum((gammac[:, None, :] - gammas[None, :, :]) ** 2, axis=2))
+    dists = _pairwise_distances(gammac, gammas)
     integralweight = (
         jnp.linalg.norm(lc, axis=1)[:, None] * jnp.linalg.norm(ns, axis=1)[None, :]
     )
-    return jnp.mean(
-        integralweight * jnp.maximum(minimum_distance_jax - dists, zero) ** 2
-    )
+    excess = jnp.maximum(minimum_distance_jax - dists, zero)
+    return jnp.mean(integralweight * jnp.square(excess))
 
 
 class CurveSurfaceDistance(Optimizable):
@@ -1105,14 +1107,14 @@ def max_distance_pure(g1, g2, dmax, p):
     Otherwise, returns the sum of |g2-g1_i|-dmax where only points further than dmax are considered.
     The minimum distance between a point g1_i and g2 is obtained using the p-norm, with p < -1.
     """
-    dists = jnp.sqrt(jnp.sum((g1[:, None, :] - g2[None, :, :]) ** 2, axis=2))
+    dists = _pairwise_distances(g1, g2)
 
     # Estimate min of dists using p-norm. The minimum is taken along the axis=1. mindists is then an array of length g1.size, where mindists[i]=min_j(|g1[i]-g2[j]|)
     mindists = jnp.sum(dists**p, axis=1) ** (1.0 / p)
 
     # We now evaluate if any of mindists is larger than dmax. If yes, we add the value of (mindists[i]-dmax)**2 to the output.
     # We normalize by the number of quadrature points along the first curve g1.
-    return jnp.sum(jnp.maximum(mindists - dmax, 0) ** 2) / g1.shape[0]
+    return jnp.sum(jnp.square(jnp.maximum(mindists - dmax, 0))) / g1.shape[0]
 
 
 class MinCurveCurveDistance(Optimizable):
@@ -1138,7 +1140,7 @@ class MinCurveCurveDistance(Optimizable):
         """
         g1 = self.curve1.gamma()
         g2 = self.curve2.gamma()
-        dists = jnp.sqrt(jnp.sum((g1[:, None, :] - g2[None, :, :]) ** 2, axis=2))
+        dists = _pairwise_distances(g1, g2)
         mindists = jnp.min(dists, axis=1)
 
         return jnp.max(mindists)
@@ -1149,7 +1151,7 @@ class MinCurveCurveDistance(Optimizable):
         """
         g1 = self.curve1.gamma()
         g2 = self.curve2.gamma()
-        dists = jnp.sqrt(jnp.sum((g1[:, None, :] - g2[None, :, :]) ** 2, axis=2))
+        dists = _pairwise_distances(g1, g2)
         print(np.shape(dists))
         mindists = jnp.min(dists, axis=1)
 
@@ -1162,7 +1164,7 @@ class MinCurveCurveDistance(Optimizable):
         p = self.p
         g1 = self.curve1.gamma()
         g2 = self.curve2.gamma()
-        dists = jnp.sqrt(jnp.sum((g1[:, None, :] - g2[None, :, :]) ** 2, axis=2))
+        dists = _pairwise_distances(g1, g2)
         mindists = jnp.sum(dists**p, axis=1) ** (1.0 / p)
 
         return mindists

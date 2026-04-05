@@ -53,6 +53,14 @@ def _supports_jax_objective_fallback(field) -> bool:
     return bool(supports_fallback())
 
 
+def _host_float(value) -> float:
+    return float(np.asarray(jax.device_get(value), dtype=np.float64))
+
+
+def _host_array(value) -> np.ndarray:
+    return np.asarray(jax.device_get(value), dtype=np.float64)
+
+
 # -----------------------------------------------------------------------
 # SquaredFluxJAX
 # -----------------------------------------------------------------------
@@ -144,11 +152,7 @@ class SquaredFluxJAX(Optimizable):
         current_scales = tuple(d[3] for d in field._coil_descs)
         n_coils = len(field._coil_descs)
 
-        # Closure-captured constants
-        points_jax = field._points_jax
-        flux_spec = self._flux_spec
-
-        def forward(flat_dofs):
+        def forward(flat_dofs, flux_spec):
             # Per-base-curve DOF slices
             curve_dofs = [
                 flat_dofs[i * curve_dof_size : (i + 1) * curve_dof_size]
@@ -178,15 +182,24 @@ class SquaredFluxJAX(Optimizable):
                 )
 
             B = biot_savart_B(
-                points_jax,
+                flux_spec.points,
                 jnp.stack(gammas),
                 jnp.stack(gammadashs),
                 jnp.array(currents),
             )
             return fixed_surface_flux_integral_from_B(B, flux_spec)
 
-        self._jit_forward_dofs = jax.jit(forward)
-        self._jit_val_grad_dofs = jax.jit(jax.value_and_grad(forward))
+        jit_forward = jax.jit(forward)
+        jit_val_grad = jax.jit(jax.value_and_grad(forward, argnums=0))
+
+        def _jit_forward_dofs(flat_dofs):
+            return jit_forward(flat_dofs, self._flux_spec)
+
+        def _jit_val_grad_dofs(flat_dofs):
+            return jit_val_grad(flat_dofs, self._flux_spec)
+
+        self._jit_forward_dofs = _jit_forward_dofs
+        self._jit_val_grad_dofs = _jit_val_grad_dofs
 
     # ------------------------------------------------------------------
     # Fallback path: geometry via C++ gamma(), gradient via Coil.vjp()
@@ -200,13 +213,23 @@ class SquaredFluxJAX(Optimizable):
         the integral computation and its gradient w.r.t. B.
         """
         del field, definition
-        flux_spec = self._flux_spec
 
-        def _integral_from_B(B):
+        def _integral_from_B(B, flux_spec):
             return fixed_surface_flux_integral_from_B(B, flux_spec)
 
-        self._jit_integral = jax.jit(_integral_from_B)
-        self._jit_integral_value_grad = jax.jit(jax.value_and_grad(_integral_from_B))
+        jit_integral = jax.jit(_integral_from_B)
+        jit_integral_value_grad = jax.jit(
+            jax.value_and_grad(_integral_from_B, argnums=0)
+        )
+
+        def _jit_integral(B):
+            return jit_integral(B, self._flux_spec)
+
+        def _jit_integral_value_grad(B):
+            return jit_integral_value_grad(B, self._flux_spec)
+
+        self._jit_integral = _jit_integral
+        self._jit_integral_value_grad = _jit_integral_value_grad
 
     # ------------------------------------------------------------------
     # DOF gathering (JAX-native path)
@@ -252,12 +275,12 @@ class SquaredFluxJAX(Optimizable):
             return self._cached_value
 
         if self._use_jax_native:
-            self._cached_value = float(
+            self._cached_value = _host_float(
                 self._jit_forward_dofs(self._gather_unique_full_dofs())
             )
             value = self._cached_value
         else:
-            value = float(self._jit_integral(self.field.B()))
+            value = _host_float(self._jit_integral(self.field.B()))
             self._cached_value = value
 
         self._cached_partials = None
@@ -291,7 +314,7 @@ class SquaredFluxJAX(Optimizable):
         """Combined value and gradient via end-to-end JAX value_and_grad."""
         flat_dofs = self._gather_unique_full_dofs()
         value, grad = self._jit_val_grad_dofs(flat_dofs)
-        grad_np = np.asarray(grad)
+        grad_np = _host_array(grad)
 
         # Map the flat gradient back to per-Optimizable Derivative entries.
         deriv_data = {}
@@ -303,10 +326,10 @@ class SquaredFluxJAX(Optimizable):
         for i, current in enumerate(self.field._unique_base_currents):
             deriv_data[current] = grad_np[current_start + i : current_start + i + 1]
 
-        return float(value), Derivative(deriv_data)
+        return _host_float(value), Derivative(deriv_data)
 
     def _value_and_dJ_fallback(self):
         """Combined value and gradient via field.B_vjp() (mixed quadrature)."""
         B = self.field.B()
         value, dJ_dB = self._jit_integral_value_grad(B)
-        return float(value), self.field.B_vjp(np.asarray(dJ_dB))
+        return _host_float(value), self.field.B_vjp(_host_array(dJ_dB))
