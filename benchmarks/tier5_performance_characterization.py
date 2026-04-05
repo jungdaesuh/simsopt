@@ -53,6 +53,10 @@ import jaxlib
 jax.config.update("jax_enable_x64", True)
 require_x64_runtime(jax, context="Tier 5 performance characterization")
 
+TIER1_PARITY_RUNG = "tier1b_real_stage2"
+TIER2_PERFORMANCE_RUNG = "tier2_stage2_e2e"
+TIER3_INIT_RUNG = "tier3_single_stage_init"
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -254,6 +258,19 @@ def safe_speedup(reference_s: float | None, candidate_s: float | None) -> float 
     return float(reference_s / candidate_s)
 
 
+def _float_or_none(value: Any) -> float | None:
+    return float(value) if value is not None else None
+
+
+def _format_elapsed_s(value: Any) -> str:
+    elapsed_s = _float_or_none(value)
+    return f"{(elapsed_s if elapsed_s is not None else float('nan')):.2f}s"
+
+
+def _format_speedup(value: Any) -> str:
+    return f"{value:.2f}x" if isinstance(value, float) else "n/a"
+
+
 def _timed_probe(
     script_path: Path,
     command_args: list[str],
@@ -295,6 +312,105 @@ def summarize_pair_probe(
     }
 
 
+def _with_performance_contract(
+    summary: dict[str, Any],
+    *,
+    timing_semantics: str,
+    recommended_question: str,
+    supports_performance_headline: bool,
+    headline_metric: str | None = None,
+    headline_speedup_vs_cpu: float | None = None,
+    extra_fields: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    enriched = dict(summary)
+    enriched["timing_semantics"] = timing_semantics
+    enriched["recommended_question"] = recommended_question
+    enriched["supports_performance_headline"] = bool(supports_performance_headline)
+    if headline_metric is not None:
+        enriched["headline_metric"] = headline_metric
+    if headline_speedup_vs_cpu is not None:
+        enriched["headline_speedup_vs_cpu"] = float(headline_speedup_vs_cpu)
+    if extra_fields:
+        enriched.update(extra_fields)
+    return enriched
+
+
+def summarize_informational_pair_probe(
+    *,
+    name: str,
+    payload: dict[str, Any],
+    outer_elapsed_s: float,
+    cpu_elapsed_s: float,
+    lane_elapsed_s: float,
+    lane_label: str,
+    timing_semantics: str,
+    recommended_question: str,
+) -> dict[str, Any]:
+    return _with_performance_contract(
+        summarize_pair_probe(
+            name=name,
+            payload=payload,
+            outer_elapsed_s=outer_elapsed_s,
+            cpu_elapsed_s=cpu_elapsed_s,
+            lane_elapsed_s=lane_elapsed_s,
+            lane_label=lane_label,
+        ),
+        timing_semantics=timing_semantics,
+        recommended_question=recommended_question,
+        supports_performance_headline=False,
+    )
+
+
+def summarize_stage2_e2e_performance_probe(
+    *,
+    payload: dict[str, Any],
+    outer_elapsed_s: float,
+    lane_label: str,
+) -> dict[str, Any]:
+    comparison = payload["comparison"]
+    timings = payload["timings"]
+    cpu_elapsed_s = float(comparison["cpu_elapsed_s"])
+    cold_elapsed_s = float(comparison["jax_elapsed_s"])
+    outer_lane_elapsed_s = float(timings.get("jax_outer_elapsed_s", cold_elapsed_s))
+    warm_elapsed_s = _float_or_none(timings.get("jax_optimizer_warm_run_s"))
+    warm_speedup_vs_cpu = (
+        safe_speedup(cpu_elapsed_s, warm_elapsed_s) if warm_elapsed_s is not None else None
+    )
+    headline_metric = (
+        "warm_speedup_vs_cpu" if warm_speedup_vs_cpu is not None else "speedup_vs_cpu"
+    )
+    headline_speedup_vs_cpu = (
+        warm_speedup_vs_cpu
+        if warm_speedup_vs_cpu is not None
+        else safe_speedup(cpu_elapsed_s, cold_elapsed_s)
+    )
+    return _with_performance_contract(
+        summarize_pair_probe(
+            name=TIER2_PERFORMANCE_RUNG,
+            payload=payload,
+            outer_elapsed_s=outer_elapsed_s,
+            cpu_elapsed_s=cpu_elapsed_s,
+            lane_elapsed_s=cold_elapsed_s,
+            lane_label=lane_label,
+        ),
+        timing_semantics="separate_cold_end_to_end_and_warm_steady_state",
+        recommended_question="cold_and_warm_performance",
+        supports_performance_headline=True,
+        headline_metric=headline_metric,
+        headline_speedup_vs_cpu=headline_speedup_vs_cpu,
+        extra_fields={
+            "cpu_outer_elapsed_s": float(timings.get("cpu_outer_elapsed_s", cpu_elapsed_s)),
+            "lane_outer_elapsed_s": outer_lane_elapsed_s,
+            "outer_speedup_vs_cpu": safe_speedup(cpu_elapsed_s, outer_lane_elapsed_s),
+            "lane_warm_elapsed_s": warm_elapsed_s,
+            "warm_speedup_vs_cpu": warm_speedup_vs_cpu,
+            "lane_compile_overhead_s": _float_or_none(
+                timings.get("jax_optimizer_compile_overhead_s")
+            ),
+        },
+    )
+
+
 def summarize_single_lane_probe(
     *,
     name: str,
@@ -308,6 +424,77 @@ def summarize_single_lane_probe(
         "outer_elapsed_s": float(outer_elapsed_s),
         "lane_label": lane_label,
     }
+
+
+def build_tier5_performance_contract(summary: list[dict[str, Any]]) -> dict[str, Any]:
+    by_name = {item["name"]: item for item in summary}
+    tier1 = by_name[TIER1_PARITY_RUNG]
+    tier2 = by_name[TIER2_PERFORMANCE_RUNG]
+    tier3 = by_name[TIER3_INIT_RUNG]
+    headline_metric = str(tier2.get("headline_metric", "speedup_vs_cpu"))
+    headline_speedup = tier2.get("headline_speedup_vs_cpu")
+
+    return {
+        "parity_source": {
+            "rung": tier1["name"],
+            "metric_path": f"rungs.{TIER1_PARITY_RUNG}.results.comparisons",
+            "timing_semantics": tier1["timing_semantics"],
+        },
+        "cold_end_to_end_source": {
+            "rung": tier2["name"],
+            "metric_path": f"summary.{TIER2_PERFORMANCE_RUNG}.outer_speedup_vs_cpu",
+            "speedup_vs_cpu": tier2.get("outer_speedup_vs_cpu"),
+        },
+        "warm_steady_state_source": (
+            {
+                "rung": tier2["name"],
+                "metric_path": f"summary.{TIER2_PERFORMANCE_RUNG}.warm_speedup_vs_cpu",
+                "speedup_vs_cpu": tier2.get("warm_speedup_vs_cpu"),
+            }
+            if tier2.get("warm_speedup_vs_cpu") is not None
+            else None
+        ),
+        "headline_performance_source": {
+            "rung": tier2["name"],
+            "metric_path": f"summary.{TIER2_PERFORMANCE_RUNG}.{headline_metric}",
+            "speedup_vs_cpu": headline_speedup,
+        },
+        "do_not_use_for_performance_headline": [
+            rung["name"]
+            for rung in (tier1, tier3)
+            if not bool(rung.get("supports_performance_headline", False))
+        ],
+    }
+
+
+def _render_tier5_summary_line(item: dict[str, Any]) -> str:
+    if item.get("name") == TIER2_PERFORMANCE_RUNG:
+        return (
+            f"{item['name']}: passed={item['passed']}  "
+            f"outer={item['outer_elapsed_s']:.2f}s  "
+            f"cpu={_format_elapsed_s(item.get('cpu_elapsed_s'))}  "
+            f"{item['lane_label']}_cold={_format_elapsed_s(item.get('lane_elapsed_s'))}  "
+            f"{item['lane_label']}_outer={_format_elapsed_s(item.get('lane_outer_elapsed_s'))}  "
+            f"{item['lane_label']}_warm={_format_elapsed_s(item.get('lane_warm_elapsed_s'))}  "
+            f"cold_speedup_vs_cpu={_format_speedup(item.get('speedup_vs_cpu'))}  "
+            f"outer_speedup_vs_cpu={_format_speedup(item.get('outer_speedup_vs_cpu'))}  "
+            f"warm_speedup_vs_cpu={_format_speedup(item.get('warm_speedup_vs_cpu'))}"
+        )
+    if item.get("supports_performance_headline") is False:
+        return (
+            f"{item['name']}: passed={item['passed']}  "
+            f"outer={item['outer_elapsed_s']:.2f}s  "
+            f"cpu={_format_elapsed_s(item.get('cpu_elapsed_s'))}  "
+            f"{item['lane_label']}={_format_elapsed_s(item.get('lane_elapsed_s'))}  "
+            "timings=informational-only"
+        )
+    return (
+        f"{item['name']}: passed={item['passed']}  "
+        f"outer={item['outer_elapsed_s']:.2f}s  "
+        f"cpu={_format_elapsed_s(item.get('cpu_elapsed_s'))}  "
+        f"{item['lane_label']}={_format_elapsed_s(item.get('lane_elapsed_s'))}  "
+        f"speedup_vs_cpu={_format_speedup(item.get('speedup_vs_cpu'))}"
+    )
 
 
 def _run_tier4_pair(args: argparse.Namespace) -> dict[str, Any]:
@@ -409,33 +596,35 @@ def main() -> None:
     )
     tier4_pair = _run_tier4_pair(args)
 
-    tier1b_summary = summarize_pair_probe(
-        name="tier1b_real_stage2",
+    tier1b_summary = summarize_informational_pair_probe(
+        name=TIER1_PARITY_RUNG,
         payload=tier1b_payload,
         outer_elapsed_s=tier1b_outer,
         cpu_elapsed_s=float(tier1b_payload["results"]["cpu"]["elapsed_s"]),
         lane_elapsed_s=float(tier1b_payload["results"]["jax"]["elapsed_s"]),
         lane_label=lane_label,
+        timing_semantics="correctness_probe_only",
+        recommended_question="parity",
     )
-    tier2_summary = summarize_pair_probe(
-        name="tier2_stage2_e2e",
+    tier2_summary = summarize_stage2_e2e_performance_probe(
         payload=tier2_payload,
         outer_elapsed_s=tier2_outer,
-        cpu_elapsed_s=float(tier2_payload["comparison"]["cpu_elapsed_s"]),
-        lane_elapsed_s=float(tier2_payload["comparison"]["jax_elapsed_s"]),
         lane_label=lane_label,
     )
-    tier3_summary = summarize_pair_probe(
-        name="tier3_single_stage_init",
+    tier3_summary = summarize_informational_pair_probe(
+        name=TIER3_INIT_RUNG,
         payload=tier3_payload,
         outer_elapsed_s=tier3_outer,
         cpu_elapsed_s=float(tier3_payload["timings"]["cpu_elapsed_s"]),
         lane_elapsed_s=float(tier3_payload["timings"]["jax_elapsed_s"]),
         lane_label=lane_label,
+        timing_semantics="initialization_probe_only",
+        recommended_question="initialization_diagnostics",
     )
 
     summary = [tier1b_summary, tier2_summary, tier3_summary, tier4_pair["summary"]]
     total_outer_elapsed_s = float(sum(item["outer_elapsed_s"] for item in summary))
+    performance_contract = build_tier5_performance_contract(summary)
 
     payload = {
         "provenance": provenance,
@@ -451,6 +640,7 @@ def main() -> None:
             "lane_label": lane_label,
             "total_outer_elapsed_s": total_outer_elapsed_s,
             "passed": all(bool(item["passed"]) for item in summary),
+            "performance_contract": performance_contract,
         },
     }
     write_json(args.output_json, payload)
@@ -458,16 +648,15 @@ def main() -> None:
     print("\nTier 5 summary")
     print("--------------")
     for item in summary:
-        speedup = item.get("speedup_vs_cpu")
-        speedup_str = f"{speedup:.2f}x" if isinstance(speedup, float) else "n/a"
-        print(
-            f"{item['name']}: passed={item['passed']}  "
-            f"outer={item['outer_elapsed_s']:.2f}s  "
-            f"cpu={item.get('cpu_elapsed_s', float('nan')):.2f}s  "
-            f"{item['lane_label']}={item.get('lane_elapsed_s', float('nan')):.2f}s  "
-            f"speedup_vs_cpu={speedup_str}"
-        )
+        print(_render_tier5_summary_line(item))
     print(f"total outer elapsed: {total_outer_elapsed_s:.2f}s")
+    print(
+        "performance contract: "
+        f"use {TIER1_PARITY_RUNG} for parity, "
+        f"{TIER2_PERFORMANCE_RUNG}.outer_speedup_vs_cpu for cold first-run wall clock, "
+        f"and {TIER2_PERFORMANCE_RUNG}.{performance_contract['headline_performance_source']['metric_path'].split('.')[-1]} "
+        "for the main Stage 2 speed headline"
+    )
 
 
 if __name__ == "__main__":

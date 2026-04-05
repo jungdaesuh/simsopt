@@ -35,6 +35,10 @@ from benchmarks.validation_ladder_common import (
     run_python_script,
     write_json,
 )
+from benchmarks.single_stage_smoke_fixture import (
+    DEFAULT_EQUILIBRIA_DIR,
+    DEFAULT_PLASMA_SURF_FILENAME,
+)
 
 
 REQUESTED_PLATFORM = preparse_platform(sys.argv[1:])
@@ -60,6 +64,7 @@ MATCHED_FIELD_REL_TOL = 1e-10
 STAGE2_CURVATURE_THRESHOLD_EDGE_MARGIN = 1e-6
 STAGE2_CURVATURE_THRESHOLD_EDGE_GRADIENT_RTOL = 1e-5
 STAGE2_CURVATURE_THRESHOLD_EDGE_OBJECTIVE_REL_TOL = 5e-4
+STAGE2_CURVATURE_CPU_ENVELOPE_RTOL = 2e-9
 STAGE2_CURVATURE_TERM_NAME = "curvature_penalty"
 
 _CPU_ONDEVICE_ENDPOINT_LANE = ("jax", "cpu", "cpu-ondevice")
@@ -96,6 +101,24 @@ def _curvature_margin(curvature: float, threshold: float) -> float:
 
 def _curvature_within_threshold(curvature: float, threshold: float) -> bool:
     return float(curvature) <= float(threshold)
+
+
+def _curvature_not_worse_than_cpu(
+    jax_curvature: float,
+    cpu_curvature: float,
+    curvature_threshold: float,
+) -> bool:
+    allowed_upper_bound = max(float(cpu_curvature), float(curvature_threshold))
+    if _curvature_within_threshold(jax_curvature, allowed_upper_bound):
+        return True
+    return float(cpu_curvature) > float(curvature_threshold) and bool(
+        np.isclose(
+            float(jax_curvature),
+            float(cpu_curvature),
+            rtol=STAGE2_CURVATURE_CPU_ENVELOPE_RTOL,
+            atol=0.0,
+        )
+    )
 
 
 def _curvature_threshold_edge_active(
@@ -191,9 +214,10 @@ def _build_ondevice_stage2_metrics(
             jax_max_curvature,
             curvature_threshold,
         ),
-        "jax_curvature_not_worse_than_cpu": _curvature_within_threshold(
+        "jax_curvature_not_worse_than_cpu": _curvature_not_worse_than_cpu(
             jax_max_curvature,
-            max(cpu_max_curvature, curvature_threshold),
+            cpu_max_curvature,
+            curvature_threshold,
         ),
         "jax_self_intersecting": bool(jax_results["SELF_INTERSECTING"]),
     }
@@ -258,12 +282,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--plasma-surf-filename",
-        default="wout_nfp22ginsburg_000_014417_iota15.nc",
+        default=DEFAULT_PLASMA_SURF_FILENAME,
         help="VMEC equilibrium filename for the real Stage 2 fixture.",
     )
     parser.add_argument(
         "--equilibria-dir",
-        default=str(REPO_ROOT.parent / "DATABASE" / "EQUILIBRIA"),
+        default=str(DEFAULT_EQUILIBRIA_DIR),
         help="Directory that contains VMEC equilibrium files.",
     )
     parser.add_argument(

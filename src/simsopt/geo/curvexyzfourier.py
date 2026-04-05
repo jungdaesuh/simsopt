@@ -3,7 +3,7 @@ from itertools import chain
 import numpy as np
 from scipy.fft import rfft
 
-from .curve import Curve, JaxCurve, _as_jax_float64, jnp
+from .curve import Curve, JaxCurve, _HAS_JAX, _as_jax_float64, jax, jnp
 import simsoptpp as sopp
 
 
@@ -14,15 +14,42 @@ __all__ = [
     "jaxfouriercurve_geometry_pure",
 ]
 
-_TWO_PI_JAX = _as_jax_float64(2.0 * np.pi)
+_TWO_PI = 2.0 * np.pi
 
 
-def _mode_numbers(order):
-    return _as_jax_float64(np.arange(1, order + 1, dtype=np.float64))
+def _contains_jax_leaves(value):
+    if not _HAS_JAX:
+        return False
+    return any(
+        isinstance(leaf, jax.Array) or hasattr(leaf, "aval")
+        for leaf in jax.tree_util.tree_leaves(value)
+    )
 
 
-def _constant_row(length, value):
-    return _as_jax_float64(np.full((1, length), value, dtype=np.float64))
+def _is_tracer(value):
+    return _HAS_JAX and hasattr(value, "aval") and not isinstance(value, jax.Array)
+
+
+def _as_runtime_float64(value, *, reference):
+    if not _HAS_JAX:
+        return np.asarray(value, dtype=np.float64)
+    if _is_tracer(reference) and not _contains_jax_leaves(value):
+        return np.asarray(value, dtype=np.float64)
+    return _as_jax_float64(value)
+
+
+def _mode_numbers(order, *, reference):
+    return _as_runtime_float64(
+        np.arange(1, order + 1, dtype=np.float64),
+        reference=reference,
+    )
+
+
+def _constant_row(length, value, *, reference):
+    return _as_runtime_float64(
+        np.full((1, int(length)), value, dtype=np.float64),
+        reference=reference,
+    )
 
 
 def _interleave_harmonics(first, second):
@@ -31,19 +58,20 @@ def _interleave_harmonics(first, second):
 
 def _fourier_basis_terms(quadpoints, order):
     quadpoints = _as_jax_float64(quadpoints)
-    points = _TWO_PI_JAX * quadpoints
-    mode_numbers = _mode_numbers(order)
+    two_pi = _as_runtime_float64(_TWO_PI, reference=quadpoints)
+    points = two_pi * quadpoints
+    mode_numbers = _mode_numbers(order, reference=points)
     phase = jnp.expand_dims(mode_numbers, axis=1) * jnp.expand_dims(points, axis=0)
     sin_phase = jnp.sin(phase)
     cos_phase = jnp.cos(phase)
-    mode_scale = _TWO_PI_JAX * mode_numbers
+    mode_scale = two_pi * mode_numbers
     mode_scale_sq = mode_scale * mode_scale
     mode_scale_cu = mode_scale_sq * mode_scale
-    zero_row = _constant_row(points.shape[0], 0.0)
+    zero_row = _constant_row(points.shape[0], 0.0, reference=points)
 
     basis = jnp.concatenate(
         (
-            _constant_row(points.shape[0], 1.0),
+            _constant_row(points.shape[0], 1.0, reference=points),
             _interleave_harmonics(sin_phase, cos_phase),
         ),
         axis=0,

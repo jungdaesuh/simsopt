@@ -44,17 +44,17 @@ def _minimize_bfgs_private(
 
     d = x0.shape[0]
     scalar_value_and_grad = _scalar_value_and_grad(fun)
-    gtol_jax = _as_jax_dtype(gtol, x0.dtype)
-    half = _as_jax_dtype(0.5, x0.dtype)
-    wolfe_c1 = _as_jax_dtype(1e-4, x0.dtype)
-    wolfe_c2 = _as_jax_dtype(0.9, x0.dtype)
-    maxiter_jax = _as_jax_dtype(maxiter, jnp.int32)
-    base_identity = _eye(d, x0.dtype)
+    gtol_value = np.asarray(gtol, dtype=np.dtype(x0.dtype)).item()
+    half_value = np.asarray(0.5, dtype=np.dtype(x0.dtype)).item()
+    wolfe_c1_value = np.asarray(1e-4, dtype=np.dtype(x0.dtype)).item()
+    wolfe_c2_value = np.asarray(0.9, dtype=np.dtype(x0.dtype)).item()
+    maxiter_value = np.int32(maxiter)
+    base_identity_host = np.eye(d, dtype=np.dtype(x0.dtype))
     if initial_state is None:
-        initial_H = base_identity
+        initial_H = _eye(d, x0.dtype)
         f_0, g_0 = scalar_value_and_grad(x0)
         state = _BFGSResults(
-            converged=_norm(g_0, ord=norm) < gtol_jax,
+            converged=_norm(g_0, ord=norm) < _as_jax_dtype(gtol_value, x0.dtype),
             failed=_bool_scalar(False),
             k=_int_scalar(0),
             nfev=_int_scalar(1),
@@ -64,7 +64,7 @@ def _minimize_bfgs_private(
             f_k=f_0,
             g_k=g_0,
             H_k=initial_H,
-            old_old_fval=f_0 + _norm(g_0) * half,
+            old_old_fval=f_0 + _norm(g_0) * _as_jax_dtype(half_value, x0.dtype),
             status=_int_scalar(0),
             line_search_status=_int_scalar(0),
         )
@@ -78,6 +78,7 @@ def _minimize_bfgs_private(
         )
 
     def cond_fun(state):
+        maxiter_jax = _as_jax_dtype(maxiter_value, state.k.dtype)
         return (
             jnp.logical_not(state.converged)
             & jnp.logical_not(state.failed)
@@ -87,6 +88,9 @@ def _minimize_bfgs_private(
         )
 
     def body_fun(state):
+        gtol_jax = _as_jax_dtype(gtol_value, state.g_k.dtype)
+        wolfe_c1 = _as_jax_dtype(wolfe_c1_value, state.f_k.dtype)
+        wolfe_c2 = _as_jax_dtype(wolfe_c2_value, state.f_k.dtype)
         p_k = -_dot(state.H_k, state.g_k)
         line_search_results = _line_search(
             fun,
@@ -107,7 +111,7 @@ def _minimize_bfgs_private(
         rho_k = jnp.reciprocal(_dot(y_k, s_k))
 
         sy_k = s_k[:, np.newaxis] * y_k[np.newaxis, :]
-        identity = _as_jax_dtype(base_identity, rho_k.dtype)
+        identity = _as_jax_dtype(base_identity_host, rho_k.dtype)
         w = identity - rho_k * sy_k
         H_kp1 = (
             _einsum("ij,jk,lk", w, state.H_k, w)
@@ -193,6 +197,8 @@ def _minimize_bfgs_private(
         )
 
     def run_solver(initial_state):
+        gtol_jax = _as_jax_dtype(gtol_value, initial_state.g_k.dtype)
+        maxiter_jax = _as_jax_dtype(maxiter_value, initial_state.k.dtype)
         state = lax.while_loop(cond_fun, body_fun, initial_state)
         f_final, g_final = scalar_value_and_grad(state.x_k)
         converged_final = _norm(g_final, ord=norm) < gtol_jax

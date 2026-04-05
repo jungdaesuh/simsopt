@@ -25,6 +25,7 @@ from ..geo.curvexyzfourier import (
     jaxfouriercurve_geometry_pure,
     jaxfouriercurve_pure,
 )
+from ._math_utils import as_runtime_float64 as _as_runtime_float64
 from .specs import (
     CurveCWSFourierRZSpec,
     CurveFilamentSpec,
@@ -44,16 +45,24 @@ from .specs import (
 _SURF_TYPE_RZ_FOURIER = "RZ_Fourier"
 
 
-def _explicit_scalar(value: float) -> jax.Array:
-    return jax.device_put(np.array(value, dtype=np.float64))
+def _as_explicit_float64(value, *, reference=None) -> jax.Array:
+    if reference is not None:
+        return _as_runtime_float64(value, reference=reference)
+    if isinstance(value, (np.ndarray, np.generic, list, tuple)) or np.isscalar(value):
+        return jax.device_put(np.asarray(value, dtype=np.float64))
+    return jnp.asarray(value, dtype=jnp.float64)
+
+
+def _explicit_scalar(value: float, *, reference=None) -> jax.Array:
+    return _as_explicit_float64(value, reference=reference)
 
 
 def _ones_like_float64(array: jax.Array) -> jax.Array:
-    return jnp.broadcast_to(_explicit_scalar(1.0), array.shape)
+    return jnp.broadcast_to(_explicit_scalar(1.0, reference=array), array.shape)
 
 
 def _zeros_like_float64(array: jax.Array) -> jax.Array:
-    return jnp.broadcast_to(_explicit_scalar(0.0), array.shape)
+    return jnp.broadcast_to(_explicit_scalar(0.0, reference=array), array.shape)
 
 
 def curve_spec_from_curve(curve):
@@ -90,7 +99,7 @@ def curve_spec_from_curve(curve):
 
 
 def _curve_gamma_kernel(spec: CurveSpec, dofs=None):
-    curve_dofs = spec.dofs if dofs is None else jnp.asarray(dofs, dtype=jnp.float64)
+    curve_dofs = spec.dofs if dofs is None else _as_explicit_float64(dofs)
     spec_kind = curve_spec_kind(spec)
     if spec_kind == "xyz_fourier":
         spec = cast(CurveXYZFourierSpec, spec)
@@ -148,8 +157,8 @@ def _curve_gamma_kernel(spec: CurveSpec, dofs=None):
     )
 
 
-def _curve_quadpoints(spec: CurveSpec):
-    quadpoints = jnp.asarray(spec.quadpoints, dtype=jnp.float64)
+def _curve_quadpoints(spec: CurveSpec, *, reference):
+    quadpoints = _as_explicit_float64(spec.quadpoints, reference=reference)
     return quadpoints, _ones_like_float64(quadpoints)
 
 
@@ -190,8 +199,8 @@ def _direct_curve_geometry_terms(spec: CurveSpec, dofs, *, order):
 
 
 def _mapped_full_dofs(map_spec: OptimizableDofMapSpec, owner_dofs):
-    mapped = jnp.asarray(map_spec.template_full_dofs, dtype=jnp.float64)
-    owner_dofs = jnp.asarray(owner_dofs, dtype=jnp.float64)
+    mapped = _as_explicit_float64(map_spec.template_full_dofs, reference=owner_dofs)
+    owner_dofs = _as_explicit_float64(owner_dofs, reference=owner_dofs)
     for owner_start, owner_end, target_start, target_end in map_spec.owner_segments:
         mapped = mapped.at[target_start:target_end].set(
             owner_dofs[owner_start:owner_end]
@@ -211,13 +220,13 @@ def _rotation_alpha_and_dash_from_dofs(
     rotation_map: OptimizableDofMapSpec,
     owner_dofs,
 ):
-    quadpoints = jnp.asarray(rotation_spec.quadpoints, dtype=jnp.float64)
+    quadpoints = _as_explicit_float64(rotation_spec.quadpoints, reference=owner_dofs)
     if isinstance(rotation_spec, ZeroRotationSpec):
         zeros = _zeros_like_float64(quadpoints)
         return zeros, zeros
 
     rotation_dofs = _mapped_input_dofs(rotation_map, owner_dofs)
-    rotation_scale = _explicit_scalar(rotation_spec.scale)
+    rotation_scale = _explicit_scalar(rotation_spec.scale, reference=owner_dofs)
     return (
         rotation_scale
         * jaxrotation_pure(rotation_dofs, quadpoints, rotation_spec.order),
@@ -234,7 +243,7 @@ def _curve_geometry_with_third_derivative_from_dofs(spec: CurveSpec, dofs):
             _curve_perturbed_base_dofs(spec, dofs),
         )
         return _add_curve_perturbation(spec, *base_geometry)
-    quadpoints, tangents = _curve_quadpoints(spec)
+    quadpoints, tangents = _curve_quadpoints(spec, reference=dofs)
     direct_geometry = _direct_curve_geometry_terms(spec, dofs, order=3)
     if direct_geometry is not None:
         return direct_geometry
@@ -281,7 +290,7 @@ def _curve_perturbed_geometry_from_dofs(spec: CurvePerturbedSpec, dofs):
 
 
 def _curve_spec_with_quadpoints(spec: CurveSpec, quadpoints):
-    quadpoints_jax = jnp.asarray(quadpoints, dtype=jnp.float64)
+    quadpoints_jax = _as_explicit_float64(quadpoints)
     spec_kind = curve_spec_kind(spec)
     if spec_kind == "perturbed":
         spec = cast(CurvePerturbedSpec, spec)
@@ -332,7 +341,7 @@ def _curve_filament_geometry_from_dofs(spec: CurveFilamentSpec, dofs):
             )
         return gamma + quad_spec.dn * normal + quad_spec.db * binormal
 
-    quadpoints, tangents = _curve_quadpoints(spec)
+    quadpoints, tangents = _curve_quadpoints(spec, reference=dofs)
     gamma, gammadash = jax.jvp(gamma_kernel, (quadpoints,), (tangents,))
     gammadash_kernel = lambda qp: jax.jvp(gamma_kernel, (qp,), (tangents,))[1]
     _, gammadashdash = jax.jvp(gammadash_kernel, (quadpoints,), (tangents,))
@@ -388,7 +397,7 @@ def _curve_filament_gamma_and_dash_from_dofs(spec: CurveFilamentSpec, dofs):
 
 
 def curve_spec_with_dofs(spec: CurveSpec, dofs):
-    return replace(spec, dofs=jnp.asarray(dofs, dtype=jnp.float64))
+    return replace(spec, dofs=_as_explicit_float64(dofs))
 
 
 def curve_gamma_and_dash_from_spec(spec: CurveSpec):
@@ -404,7 +413,7 @@ def curve_gamma_and_dash_from_dofs(spec: CurveSpec, dofs):
     if spec_kind == "filament":
         spec = cast(CurveFilamentSpec, spec)
         return _curve_filament_gamma_and_dash_from_dofs(spec, dofs)
-    quadpoints, tangents = _curve_quadpoints(spec)
+    quadpoints, tangents = _curve_quadpoints(spec, reference=dofs)
     direct_geometry = _direct_curve_geometry_terms(spec, dofs, order=1)
     if direct_geometry is not None:
         return direct_geometry
@@ -430,7 +439,7 @@ def curve_geometry_from_dofs(spec: CurveSpec, dofs):
     if spec_kind == "filament":
         spec = cast(CurveFilamentSpec, spec)
         return _curve_filament_geometry_from_dofs(spec, dofs)
-    quadpoints, tangents = _curve_quadpoints(spec)
+    quadpoints, tangents = _curve_quadpoints(spec, reference=dofs)
     direct_geometry = _direct_curve_geometry_terms(spec, dofs, order=2)
     if direct_geometry is not None:
         return direct_geometry
@@ -448,7 +457,7 @@ def _curve_cws_gamma_and_dash_from_parts(
     curve_dofs,
     surface_dofs,
 ):
-    quadpoints, tangents = _curve_quadpoints(spec)
+    quadpoints, tangents = _curve_quadpoints(spec, reference=curve_dofs)
 
     def gamma_kernel(qp):
         return gamma_curve_on_surface(
@@ -474,9 +483,9 @@ def curve_pullback_from_spec(spec: CurveSpec, dg, dgd):
 
 def curve_pullback_from_dofs(spec: CurveSpec, dofs, dg, dgd):
     """Return coefficient and optional surface cotangents for one curve spec."""
-    curve_dofs = jnp.asarray(dofs, dtype=jnp.float64)
-    dg_jax = jnp.asarray(dg, dtype=jnp.float64)
-    dgd_jax = jnp.asarray(dgd, dtype=jnp.float64)
+    curve_dofs = _as_explicit_float64(dofs)
+    dg_jax = _as_explicit_float64(dg)
+    dgd_jax = _as_explicit_float64(dgd)
 
     if curve_spec_kind(spec) == "cws_fourier_rz":
         spec = cast(CurveCWSFourierRZSpec, spec)

@@ -40,25 +40,33 @@ _BACKEND_SELECTOR_ENV_VARS = (
 )
 
 
-def _run_import_check(code):
+def _run_import_check(code, *, timeout=30, extra_env=None):
     """Run *code* in a clean subprocess and return (returncode, stderr)."""
     env = os.environ.copy()
     for name in _BACKEND_SELECTOR_ENV_VARS:
         env.pop(name, None)
     env["PYTHONPATH"] = _SRC_DIR + os.pathsep + env.get("PYTHONPATH", "")
+    if extra_env is not None:
+        env.update(extra_env)
     result = subprocess.run(
         [sys.executable, "-c", textwrap.dedent(code)],
         capture_output=True,
         text=True,
-        timeout=30,
+        timeout=timeout,
         cwd=_REPO_ROOT,
         env=env,
     )
     return result.returncode, result.stderr.strip()
 
 
-def _assert_import_check_passes(code, *, failure_message):
-    rc, err = _run_import_check(code)
+def _assert_import_check_passes(
+    code,
+    *,
+    failure_message,
+    timeout=30,
+    extra_env=None,
+):
+    rc, err = _run_import_check(code, timeout=timeout, extra_env=extra_env)
     assert rc == 0, f"{failure_message}:\n{err}"
 
 
@@ -410,7 +418,7 @@ def test_transfer_guard_disallow_allows_ondevice_loops_with_host_closure_constan
             diff = x - target
             return half * jnp.dot(diff, diff)
 
-        baseline = float(closure_quad(x0))
+        baseline = float(jax.device_get(closure_quad(x0)))
         bfgs = jax_minimize(closure_quad, x0, method="bfgs-ondevice", maxiter=5)
         lbfgs = jax_minimize(closure_quad, x0, method="lbfgs-ondevice", maxiter=5)
 
@@ -420,6 +428,52 @@ def test_transfer_guard_disallow_allows_ondevice_loops_with_host_closure_constan
         assert int(lbfgs.nit) > 0
     """,
         failure_message="ondevice optimizer loop closure-constant smoke failed",
+    )
+
+
+def test_transfer_guard_disallow_allows_gpu_ondevice_loops_with_host_constants():
+    """GPU ondevice optimizers must not capture device-backed compile constants."""
+    _assert_import_check_passes(
+        """
+        import jax
+        import jax.numpy as jnp
+        import numpy as np
+        import simsopt.config as simsopt_config
+        from simsopt.geo.optimizer_jax import (
+            PRIVATE_OPTIMIZER_JAX_VERSION,
+            jax_minimize,
+        )
+
+        gpu = next((device for device in jax.devices() if device.platform == "gpu"), None)
+        if gpu is None or jax.__version__ != PRIVATE_OPTIMIZER_JAX_VERSION:
+            raise SystemExit(0)
+
+        simsopt_config.set_backend(
+            "jax_gpu_fast",
+            strict=True,
+            transfer_guard="disallow",
+        )
+
+        captured = np.arange(9, dtype=np.float64)
+        x0 = jax.device_put(np.ones(9, dtype=np.float64), device=gpu)
+
+        def closure_quad(x):
+            x = jnp.asarray(x, dtype=jnp.float64)
+            target = jax.device_put(captured, device=gpu)
+            diff = x - target
+            half = jax.device_put(np.asarray(0.5, dtype=np.float64), device=gpu)
+            return half * jnp.dot(diff, diff)
+
+        baseline = float(jax.device_get(closure_quad(x0)))
+        bfgs = jax_minimize(closure_quad, x0, method="bfgs-ondevice", maxiter=5)
+        lbfgs = jax_minimize(closure_quad, x0, method="lbfgs-ondevice", maxiter=5)
+
+        assert float(bfgs.fun) < baseline
+        assert float(lbfgs.fun) < baseline
+        assert int(bfgs.nit) > 0
+        assert int(lbfgs.nit) > 0
+    """,
+        failure_message="GPU ondevice optimizer transfer-guard smoke failed",
     )
 
 
@@ -777,6 +831,272 @@ def test_transfer_guard_disallow_allows_curvecwsfouriercpp_curve_distance_gradie
         assert np.all(np.isfinite(grad))
     """,
         failure_message="CurveCWSFourierCPP CurveCurveDistance transfer-guard smoke failed",
+    )
+
+
+def test_transfer_guard_disallow_allows_stage2_target_objective_host_closure_constants():
+    """Direct Stage 2 objective evaluation must tolerate strict transfer guard."""
+    _assert_import_check_passes(
+        """
+        import jax
+        import numpy as np
+        import simsopt.config as simsopt_config
+        from simsopt.field import Coil, Current, ScaledCurrent, coils_via_symmetries
+        from simsopt.geo import SurfaceRZFourier, create_equally_spaced_curves
+        from simsopt.geo.curvecwsfourier import CurveCWSFourierCPP
+        from simsopt.objectives.stage2_target_objective_jax import (
+            Stage2PenaltyConfig,
+            build_stage2_target_objective,
+        )
+
+        gpu = next((device for device in jax.devices() if device.platform == "gpu"), None)
+        if gpu is None:
+            raise SystemExit(0)
+
+        simsopt_config.set_backend(
+            "jax_gpu_fast",
+            strict=True,
+            transfer_guard="disallow",
+        )
+
+        eval_surf = SurfaceRZFourier.from_nphi_ntheta(
+            nfp=1,
+            stellsym=True,
+            mpol=1,
+            ntor=0,
+            nphi=16,
+            ntheta=16,
+        )
+        eval_dofs = eval_surf.get_dofs()
+        eval_dofs[0] = 1.0
+        eval_dofs[1] = 0.15
+        eval_surf.set_dofs(eval_dofs)
+
+        coil_surf = SurfaceRZFourier.from_nphi_ntheta(
+            nfp=1,
+            stellsym=True,
+            mpol=1,
+            ntor=0,
+            nphi=16,
+            ntheta=16,
+        )
+        coil_dofs = coil_surf.get_dofs()
+        coil_dofs[0] = 1.15
+        coil_dofs[1] = 0.18
+        coil_surf.set_dofs(coil_dofs)
+
+        tf_curves = create_equally_spaced_curves(
+            2,
+            1,
+            stellsym=False,
+            R0=1.0,
+            R1=0.25,
+            order=1,
+            numquadpoints=33,
+        )
+        tf_currents = [Current(1.0) * 1e5 for _ in tf_curves]
+        for tf_curve in tf_curves:
+            tf_curve.fix_all()
+        for tf_current in tf_currents:
+            tf_current.fix_all()
+        tf_coils = [Coil(curve, current) for curve, current in zip(tf_curves, tf_currents)]
+
+        quadpoints = np.linspace(0.0, 1.0, 33, endpoint=False)
+        banana_curve = CurveCWSFourierCPP(quadpoints, 2, coil_surf, G=0, H=0)
+        banana_curve.set("phic(0)", 0.05)
+        banana_curve.set("thetac(0)", 0.45)
+        banana_curve.set("phic(1)", 0.03)
+        banana_curve.set("thetas(1)", 0.08)
+        banana_current = Current(1.0)
+        banana_coils = coils_via_symmetries(
+            [banana_curve],
+            [ScaledCurrent(banana_current, 1e4)],
+            coil_surf.nfp,
+            coil_surf.stellsym,
+        )
+
+        bundle = build_stage2_target_objective(
+            surface=eval_surf,
+            tf_coils=tf_coils,
+            banana_coils=banana_coils,
+            banana_curve=banana_curve,
+            penalty_config=Stage2PenaltyConfig(
+                squared_flux_weight=1.0,
+                length_weight=0.0005,
+                length_target=1.75,
+                cc_weight=100.0,
+                cc_threshold=0.05,
+                curvature_weight=0.0001,
+                curvature_threshold=40.0,
+                curvature_p_norm=4,
+            ),
+        )
+
+        dofs = np.concatenate(
+            (
+                np.array([1.0], dtype=np.float64),
+                np.asarray(banana_curve.get_dofs(), dtype=np.float64),
+            )
+        )
+        dofs_jax = jax.device_put(dofs, device=gpu)
+        value = bundle.objective(dofs_jax)
+
+        assert np.isfinite(float(jax.device_get(value)))
+    """,
+        failure_message="Stage 2 direct objective transfer-guard smoke failed",
+    )
+
+
+def test_transfer_guard_disallow_allows_stage2_target_objective_ondevice_entry():
+    """The real ondevice optimizer entry must tolerate strict transfer guard."""
+    _assert_import_check_passes(
+        """
+        import numpy as np
+        import jax
+        import simsopt.config as simsopt_config
+        from simsopt.geo import (
+            SurfaceRZFourier,
+            CurveCWSFourierCPP,
+            create_equally_spaced_curves,
+        )
+        from simsopt.field import Current, Coil, coils_via_symmetries
+        from simsopt.field.coil import ScaledCurrent
+        from simsopt.geo.optimizer_jax import jax_minimize
+        from simsopt.objectives.stage2_target_objective_jax import (
+            Stage2PenaltyConfig,
+            build_stage2_target_objective,
+        )
+
+        gpu = next((device for device in jax.devices() if device.platform == "gpu"), None)
+        if gpu is None:
+            raise SystemExit(0)
+
+        simsopt_config.set_backend(
+            "jax_gpu_fast",
+            strict=True,
+            transfer_guard="disallow",
+        )
+
+        eval_surf = SurfaceRZFourier.from_nphi_ntheta(
+            nfp=1,
+            stellsym=True,
+            mpol=1,
+            ntor=0,
+            nphi=16,
+            ntheta=16,
+        )
+        eval_dofs = eval_surf.get_dofs()
+        eval_dofs[0] = 1.0
+        eval_dofs[1] = 0.15
+        eval_surf.set_dofs(eval_dofs)
+
+        coil_surf = SurfaceRZFourier.from_nphi_ntheta(
+            nfp=1,
+            stellsym=True,
+            mpol=1,
+            ntor=0,
+            nphi=16,
+            ntheta=16,
+        )
+        coil_dofs = coil_surf.get_dofs()
+        coil_dofs[0] = 1.15
+        coil_dofs[1] = 0.18
+        coil_surf.set_dofs(coil_dofs)
+
+        tf_curves = create_equally_spaced_curves(
+            2,
+            1,
+            stellsym=False,
+            R0=1.0,
+            R1=0.25,
+            order=1,
+            numquadpoints=33,
+        )
+        tf_currents = [Current(1.0) * 1e5 for _ in tf_curves]
+        for tf_curve in tf_curves:
+            tf_curve.fix_all()
+        for tf_current in tf_currents:
+            tf_current.fix_all()
+        tf_coils = [Coil(curve, current) for curve, current in zip(tf_curves, tf_currents)]
+
+        quadpoints = np.linspace(0.0, 1.0, 33, endpoint=False)
+        banana_curve = CurveCWSFourierCPP(quadpoints, 2, coil_surf, G=0, H=0)
+        banana_curve.set("phic(0)", 0.05)
+        banana_curve.set("thetac(0)", 0.45)
+        banana_curve.set("phic(1)", 0.03)
+        banana_curve.set("thetas(1)", 0.08)
+        banana_current = Current(1.0)
+        banana_coils = coils_via_symmetries(
+            [banana_curve],
+            [ScaledCurrent(banana_current, 1e4)],
+            coil_surf.nfp,
+            coil_surf.stellsym,
+        )
+
+        bundle = build_stage2_target_objective(
+            surface=eval_surf,
+            tf_coils=tf_coils,
+            banana_coils=banana_coils,
+            banana_curve=banana_curve,
+            penalty_config=Stage2PenaltyConfig(
+                squared_flux_weight=1.0,
+                length_weight=0.0005,
+                length_target=1.75,
+                cc_weight=100.0,
+                cc_threshold=0.05,
+                curvature_weight=0.0001,
+                curvature_threshold=40.0,
+                curvature_p_norm=4,
+            ),
+        )
+
+        dofs = np.concatenate(
+            (
+                np.array([1.0], dtype=np.float64),
+                np.asarray(banana_curve.get_dofs(), dtype=np.float64),
+            )
+        )
+        dofs_jax = jax.device_put(dofs, device=gpu)
+        _, vjp = jax.vjp(bundle.objective, dofs_jax)
+        grad = vjp(jax.device_put(np.array(1.0, dtype=np.float64), device=gpu))[0]
+        result = jax_minimize(bundle.objective, dofs_jax, method="lbfgs-ondevice", maxiter=1)
+
+        assert np.isfinite(float(jax.device_get(bundle.objective(dofs_jax))))
+        assert np.all(np.isfinite(np.asarray(jax.device_get(grad), dtype=np.float64)))
+        assert hasattr(result, "success")
+        """,
+        failure_message="Stage 2 ondevice transfer-guard entry smoke failed",
+        timeout=120,
+        extra_env={"XLA_PYTHON_CLIENT_PREALLOCATE": "false"},
+    )
+
+
+def test_transfer_guard_disallow_allows_gamma_2d_eager_host_constants():
+    """Eager curve geometry helpers must keep host literals explicit under strict guard."""
+    _assert_import_check_passes(
+        """
+        import numpy as np
+        import jax
+        import simsopt.config as simsopt_config
+        from simsopt.geo.curve import gamma_2d
+
+        gpu = next((device for device in jax.devices() if device.platform == "gpu"), None)
+        if gpu is None:
+            raise SystemExit(0)
+
+        simsopt_config.set_backend(
+            "jax_gpu_fast",
+            strict=True,
+            transfer_guard="disallow",
+        )
+        modes = np.zeros(10, dtype=np.float64)
+        qpts = np.linspace(0.0, 1.0, 8, endpoint=False)
+        phi, theta = gamma_2d(modes, qpts, 2, G=1, H=0)
+
+        assert phi.shape == (8,)
+        assert theta.shape == (8,)
+        """,
+        failure_message="gamma_2d strict transfer-guard smoke failed",
     )
 
 

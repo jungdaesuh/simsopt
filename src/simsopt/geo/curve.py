@@ -48,10 +48,37 @@ def _as_jax_float64(value):
         return np.asarray(value, dtype=np.float64)
     if isinstance(value, jax.Array):
         return jnp.asarray(value, dtype=jnp.float64)
-    return jax.device_put(np.array(value, dtype=np.float64))
+    return jax.device_put(np.asarray(value, dtype=np.float64))
 
 
-_TWO_PI_JAX = _as_jax_float64(2.0 * np.pi) if _HAS_JAX else 2.0 * np.pi
+def _as_runtime_jax_float64(value):
+    if not _HAS_JAX:
+        return np.asarray(value, dtype=np.float64)
+    return _as_jax_float64(value)
+
+
+def _contains_jax_leaves(value):
+    if not _HAS_JAX:
+        return False
+    return any(
+        isinstance(leaf, jax.Array) or hasattr(leaf, "aval")
+        for leaf in jax.tree_util.tree_leaves(value)
+    )
+
+
+def _is_tracer(value):
+    return _HAS_JAX and hasattr(value, "aval") and not isinstance(value, jax.Array)
+
+
+def _as_runtime_float64_ref(value, *, reference):
+    if not _HAS_JAX:
+        return np.asarray(value, dtype=np.float64)
+    if _is_tracer(reference) and not _contains_jax_leaves(value):
+        return np.asarray(value, dtype=np.float64)
+    return _as_jax_float64(value)
+
+
+_TWO_PI = 2.0 * np.pi
 
 
 def _as_numpy_float64(value):
@@ -62,39 +89,75 @@ def _as_numpy_float64(value):
     return np.asarray(jax.device_get(value), dtype=np.float64)
 
 
-def _selector_matrix(size, positions):
+def _one_like(reference):
+    if not _HAS_JAX:
+        return np.float64(1.0)
+    return _as_runtime_float64_ref(1.0, reference=reference)
+
+
+def _two_pi_like(reference):
+    if not _HAS_JAX:
+        return np.float64(_TWO_PI)
+    return _as_runtime_float64_ref(_TWO_PI, reference=reference)
+
+
+def _float_scalar_like(value, reference):
+    if not _HAS_JAX:
+        return np.float64(value)
+    return _as_runtime_float64_ref(float(value), reference=reference)
+
+
+def _selector_matrix(size, positions, *, reference):
     matrix = np.zeros((len(positions), size), dtype=np.float64)
     if positions:
         matrix[np.arange(len(positions)), positions] = 1.0
-    return _as_jax_float64(matrix)
+    return _as_runtime_float64_ref(matrix, reference=reference)
 
 
-def _curve_mode_selectors(order):
+def _curve_mode_selectors(order, *, reference):
     size = 4 * order + 2
     return (
-        _selector_matrix(size, list(range(0, order + 1))),
-        _selector_matrix(size, list(range(order + 1, 2 * order + 1))),
-        _selector_matrix(size, list(range(2 * order + 1, 3 * order + 2))),
-        _selector_matrix(size, list(range(3 * order + 2, 4 * order + 2))),
+        _selector_matrix(size, list(range(0, order + 1)), reference=reference),
+        _selector_matrix(
+            size,
+            list(range(order + 1, 2 * order + 1)),
+            reference=reference,
+        ),
+        _selector_matrix(
+            size,
+            list(range(2 * order + 1, 3 * order + 2)),
+            reference=reference,
+        ),
+        _selector_matrix(
+            size,
+            list(range(3 * order + 2, 4 * order + 2)),
+            reference=reference,
+        ),
     )
 
 
 def _harmonic_terms(qpts, start_mode, count, trig_fn):
-    modes = _as_jax_float64(np.arange(start_mode, start_mode + count, dtype=np.float64))
-    angles = qpts[:, None] * _TWO_PI_JAX * modes[None, :]
+    modes = _as_runtime_float64_ref(
+        np.arange(start_mode, start_mode + count, dtype=np.float64),
+        reference=qpts,
+    )
+    angles = qpts[:, None] * _two_pi_like(qpts) * modes[None, :]
     return trig_fn(angles)
 
 
 def _paired_rz_angles(quadpoints_phi, quadpoints_theta, *, mpol, ntor, nfp):
-    phi = _as_jax_float64(quadpoints_phi)
-    theta = _as_jax_float64(quadpoints_theta)
-    m = _as_jax_float64(np.arange(mpol + 1, dtype=np.float64))
-    n = _as_jax_float64(np.arange(-ntor, ntor + 1, dtype=np.float64))
-    phi_angles = _TWO_PI_JAX * phi
-    theta_angles = _TWO_PI_JAX * theta
+    phi = _as_runtime_jax_float64(quadpoints_phi)
+    theta = _as_runtime_jax_float64(quadpoints_theta)
+    m = _as_runtime_float64_ref(np.arange(mpol + 1, dtype=np.float64), reference=theta)
+    n = _as_runtime_float64_ref(
+        np.arange(-ntor, ntor + 1, dtype=np.float64),
+        reference=phi,
+    )
+    phi_angles = _two_pi_like(phi) * phi
+    theta_angles = _two_pi_like(theta) * theta
     angles = (
         theta_angles[:, None, None] * m[None, :, None]
-        - phi_angles[:, None, None] * _as_jax_float64(nfp) * n[None, None, :]
+        - phi_angles[:, None, None] * _float_scalar_like(nfp, n) * n[None, None, :]
     )
     return phi_angles, jnp.cos(angles), jnp.sin(angles)
 
@@ -1650,9 +1713,12 @@ def gamma_2d(modes, qpts, order, G: int = 0, H: int = 0):
      - phi: Array of size N x 1.
      - theta: Array of size N x 1.
     """
-    modes_jax = _as_jax_float64(modes)
-    qpts_jax = _as_jax_float64(qpts)
-    phic_sel, phis_sel, thetac_sel, thetas_sel = _curve_mode_selectors(order)
+    modes_jax = _as_runtime_jax_float64(modes)
+    qpts_jax = _as_runtime_jax_float64(qpts)
+    phic_sel, phis_sel, thetac_sel, thetas_sel = _curve_mode_selectors(
+        order,
+        reference=modes_jax,
+    )
     phic = phic_sel @ modes_jax
     phis = phis_sel @ modes_jax
     thetac = thetac_sel @ modes_jax
@@ -1660,8 +1726,16 @@ def gamma_2d(modes, qpts, order, G: int = 0, H: int = 0):
 
     cos_terms = _harmonic_terms(qpts_jax, 0, order + 1, jnp.cos)
     sin_terms = _harmonic_terms(qpts_jax, 1, order, jnp.sin)
-    theta = cos_terms @ thetac + sin_terms @ thetas + _as_jax_float64(G) * qpts_jax
-    phi = cos_terms @ phic + sin_terms @ phis + _as_jax_float64(H) * qpts_jax
+    theta = (
+        cos_terms @ thetac
+        + sin_terms @ thetas
+        + _float_scalar_like(G, qpts_jax) * qpts_jax
+    )
+    phi = (
+        cos_terms @ phic
+        + sin_terms @ phis
+        + _float_scalar_like(H, qpts_jax) * qpts_jax
+    )
     return phi, theta
 
 
@@ -1701,9 +1775,9 @@ def surfrz_gamma_lin(
     from ..jax_core.surface_rzfourier import surface_rz_fourier_spec_from_dofs
 
     spec = surface_rz_fourier_spec_from_dofs(
-        _as_jax_float64(surf_dofs),
-        quadpoints_phi=_as_jax_float64(quadpoints_phi),
-        quadpoints_theta=_as_jax_float64(quadpoints_theta),
+        _as_runtime_jax_float64(surf_dofs),
+        quadpoints_phi=_as_runtime_jax_float64(quadpoints_phi),
+        quadpoints_theta=_as_runtime_jax_float64(quadpoints_theta),
         mpol=mpol,
         ntor=ntor,
         nfp=nfp,

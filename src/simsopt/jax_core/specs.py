@@ -8,7 +8,10 @@ from typing import Literal, TypeAlias
 import jax
 import numpy as np
 
-from ._math_utils import as_jax_float64 as _as_float64_array
+from ._math_utils import (
+    as_jax_float64 as _as_float64_array,
+    as_runtime_float64 as _as_runtime_float64,
+)
 
 
 @dataclass(frozen=True)
@@ -647,9 +650,14 @@ def apply_coil_symmetry(
 ) -> tuple[jax.Array, jax.Array, jax.Array]:
     """Apply rotation/scale transform to curve geometry and current."""
     if symmetry.has_rotation:
-        gamma = gamma @ symmetry.rotmat
-        gammadash = gammadash @ symmetry.rotmat
-    return gamma, gammadash, current * _as_float64_array(symmetry.scale)
+        rotmat = _as_runtime_float64(symmetry.rotmat, reference=gamma)
+        gamma = gamma @ rotmat
+        gammadash = gammadash @ rotmat
+    return (
+        gamma,
+        gammadash,
+        current * _as_runtime_float64(symmetry.scale, reference=current),
+    )
 
 
 def make_field_eval_spec(points: object) -> FieldEvalSpec:

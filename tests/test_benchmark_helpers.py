@@ -46,8 +46,13 @@ from benchmarks.benchmark_problem import (
     clone_tensor_surface,
 )
 import benchmarks.run_code_benchmark_common as run_code_benchmark_common
+import benchmarks.stage2_value_gradient_parity as stage2_value_gradient_parity_module
 import benchmarks.tier5_performance_characterization as tier5_performance_characterization
 from benchmarks.run_code_benchmark_common import summarize_result_fun
+from benchmarks.single_stage_smoke_fixture import (
+    DEFAULT_EQUILIBRIA_DIR,
+    DEFAULT_PLASMA_SURF_FILENAME,
+)
 from benchmarks.single_stage_init_parity import (
     DEFAULT_OUTER_MAXITER,
     DEFAULT_STAGE2_BS_PATH,
@@ -67,8 +72,11 @@ from benchmarks.stage2_e2e_comparison import (
 )
 import benchmarks.stage2_e2e_comparison as stage2_e2e_comparison_module
 from benchmarks.tier5_performance_characterization import (
+    build_tier5_performance_contract,
     safe_speedup,
+    summarize_informational_pair_probe,
     summarize_pair_probe,
+    summarize_stage2_e2e_performance_probe,
     summarize_single_lane_probe,
 )
 from benchmarks.validation_ladder_common import (
@@ -1933,6 +1941,34 @@ def test_tier5_stage2_e2e_probe_args_thread_optimizer_backend():
     assert command[optimizer_backend_idx + 1] == "ondevice"
 
 
+def test_stage2_benchmark_scripts_default_to_repo_fixture_equilibria_dir(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "stage2_value_gradient_parity.py",
+            "--output-json",
+            str(tmp_path / "stage2-tier1.json"),
+        ],
+    )
+    stage2_value_gradient_args = stage2_value_gradient_parity_module.parse_args()
+    assert stage2_value_gradient_args.plasma_surf_filename == DEFAULT_PLASMA_SURF_FILENAME
+    assert stage2_value_gradient_args.equilibria_dir == str(DEFAULT_EQUILIBRIA_DIR)
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "stage2_e2e_comparison.py",
+            "--output-json",
+            str(tmp_path / "stage2-tier2.json"),
+        ],
+    )
+    stage2_e2e_args = stage2_e2e_comparison_module.parse_args()
+    assert stage2_e2e_args.plasma_surf_filename == DEFAULT_PLASMA_SURF_FILENAME
+    assert stage2_e2e_args.equilibria_dir == str(DEFAULT_EQUILIBRIA_DIR)
+
+
 def test_weekly_tier5_manifest_targets_ondevice_benchmark_mode():
     manifest = json.loads(_weekly_tier5_manifest_path().read_text(encoding="utf-8"))
     args = manifest["commands"][0]["args"]
@@ -2376,6 +2412,21 @@ def test_stage2_e2e_comparison_accepts_curvature_exactly_at_threshold():
     assert failures == []
 
 
+def test_stage2_e2e_comparison_accepts_machine_scale_curvature_drift_when_cpu_already_violates_threshold():
+    failures = evaluate_stage2_e2e_comparison(
+        _stage2_ondevice_quality_case(
+            cpu_max_curvature=41.599461283993726,
+            jax_max_curvature=41.59946134324458,
+            curvature_threshold=40.0,
+            cpu_curvature_margin=-1.5994612839937261,
+            jax_curvature_margin=-1.5994613432445774,
+            jax_curvature_not_worse_than_cpu=True,
+        )
+    )
+
+    assert failures == []
+
+
 def test_stage2_e2e_comparison_rejects_large_threshold_edge_objective_drift():
     failures = evaluate_stage2_e2e_comparison(
         _stage2_ondevice_quality_case(
@@ -2791,6 +2842,123 @@ def test_summarize_pair_probe_records_speedup():
     assert summary["passed"] is True
     assert summary["outer_elapsed_s"] == pytest.approx(50.0)
     assert summary["speedup_vs_cpu"] == pytest.approx(4.0)
+
+
+def test_summarize_informational_pair_probe_marks_timing_as_non_headline():
+    summary = summarize_informational_pair_probe(
+        name="tier1b_real_stage2",
+        payload={"passed": True},
+        outer_elapsed_s=50.0,
+        cpu_elapsed_s=20.0,
+        lane_elapsed_s=5.0,
+        lane_label="jax-cuda",
+        timing_semantics="correctness_probe_only",
+        recommended_question="parity",
+    )
+
+    assert summary["speedup_vs_cpu"] == pytest.approx(4.0)
+    assert summary["timing_semantics"] == "correctness_probe_only"
+    assert summary["recommended_question"] == "parity"
+    assert summary["supports_performance_headline"] is False
+    assert "headline_metric" not in summary
+
+
+def _stage2_e2e_performance_probe_payload(
+    *, warm_run_s: float | None = None, compile_overhead_s: float | None = None
+):
+    timings = {
+        "cpu_outer_elapsed_s": 20.0,
+        "jax_outer_elapsed_s": 25.0,
+    }
+    if warm_run_s is not None:
+        timings["jax_optimizer_warm_run_s"] = warm_run_s
+    if compile_overhead_s is not None:
+        timings["jax_optimizer_compile_overhead_s"] = compile_overhead_s
+    return {
+        "passed": True,
+        "comparison": {
+            "cpu_elapsed_s": 20.0,
+            "jax_elapsed_s": 10.0,
+        },
+        "timings": timings,
+    }
+
+
+def test_summarize_stage2_e2e_performance_probe_separates_cold_outer_and_warm():
+    payload = _stage2_e2e_performance_probe_payload(
+        warm_run_s=5.0, compile_overhead_s=5.0
+    )
+
+    summary = summarize_stage2_e2e_performance_probe(
+        payload=payload,
+        outer_elapsed_s=55.0,
+        lane_label="jax-cuda",
+    )
+
+    assert summary["name"] == "tier2_stage2_e2e"
+    assert summary["speedup_vs_cpu"] == pytest.approx(2.0)
+    assert summary["outer_speedup_vs_cpu"] == pytest.approx(0.8)
+    assert summary["warm_speedup_vs_cpu"] == pytest.approx(4.0)
+    assert summary["headline_metric"] == "warm_speedup_vs_cpu"
+    assert summary["headline_speedup_vs_cpu"] == pytest.approx(4.0)
+    assert summary["supports_performance_headline"] is True
+    assert summary["timing_semantics"] == "separate_cold_end_to_end_and_warm_steady_state"
+
+
+def test_summarize_stage2_e2e_performance_probe_falls_back_to_cold_without_warm_timing():
+    payload = _stage2_e2e_performance_probe_payload()
+
+    summary = summarize_stage2_e2e_performance_probe(
+        payload=payload,
+        outer_elapsed_s=55.0,
+        lane_label="jax-cuda",
+    )
+
+    assert summary["warm_speedup_vs_cpu"] is None
+    assert summary["lane_warm_elapsed_s"] is None
+    assert summary["headline_metric"] == "speedup_vs_cpu"
+    assert summary["headline_speedup_vs_cpu"] == pytest.approx(2.0)
+
+
+def test_build_tier5_performance_contract_routes_parity_and_headline_sources():
+    summary = [
+        {
+            "name": "tier1b_real_stage2",
+            "timing_semantics": "correctness_probe_only",
+            "supports_performance_headline": False,
+        },
+        {
+            "name": "tier2_stage2_e2e",
+            "headline_metric": "warm_speedup_vs_cpu",
+            "headline_speedup_vs_cpu": 4.0,
+            "warm_speedup_vs_cpu": 4.0,
+            "outer_speedup_vs_cpu": 0.8,
+            "supports_performance_headline": True,
+        },
+        {
+            "name": "tier3_single_stage_init",
+            "timing_semantics": "initialization_probe_only",
+            "supports_performance_headline": False,
+        },
+        {
+            "name": "tier4_adjoint_fd",
+            "supports_performance_headline": False,
+        },
+    ]
+
+    contract = build_tier5_performance_contract(summary)
+
+    assert contract["parity_source"]["rung"] == "tier1b_real_stage2"
+    assert contract["cold_end_to_end_source"]["rung"] == "tier2_stage2_e2e"
+    assert contract["cold_end_to_end_source"]["speedup_vs_cpu"] == pytest.approx(0.8)
+    assert contract["warm_steady_state_source"]["speedup_vs_cpu"] == pytest.approx(4.0)
+    assert contract["headline_performance_source"]["metric_path"].endswith(
+        "warm_speedup_vs_cpu"
+    )
+    assert contract["do_not_use_for_performance_headline"] == [
+        "tier1b_real_stage2",
+        "tier3_single_stage_init",
+    ]
 
 
 def test_summarize_single_lane_probe_keeps_outer_elapsed():

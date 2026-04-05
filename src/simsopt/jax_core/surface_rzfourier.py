@@ -240,13 +240,13 @@ def surface_rz_fourier_dofs_from_spec(spec: SurfaceRZFourierSpec) -> jax.Array:
     flat_size = int((spec.mpol + 1) * (2 * spec.ntor + 1))
     include_selector = _gather_matrix(include_positions, flat_size)
     exclude_selector = _gather_matrix(exclude_positions, flat_size)
-    rc = include_selector @ jnp.reshape(spec.rc, (flat_size,))
+    rc = include_selector @ jnp.reshape(_as_jax_float64(spec.rc), (flat_size,))
     if spec.stellsym:
-        zs = exclude_selector @ jnp.reshape(spec.zs, (flat_size,))
+        zs = exclude_selector @ jnp.reshape(_as_jax_float64(spec.zs), (flat_size,))
         return jnp.concatenate((rc, zs))
-    rs = exclude_selector @ jnp.reshape(spec.rs, (flat_size,))
-    zc = include_selector @ jnp.reshape(spec.zc, (flat_size,))
-    zs = exclude_selector @ jnp.reshape(spec.zs, (flat_size,))
+    rs = exclude_selector @ jnp.reshape(_as_jax_float64(spec.rs), (flat_size,))
+    zc = include_selector @ jnp.reshape(_as_jax_float64(spec.zc), (flat_size,))
+    zs = exclude_selector @ jnp.reshape(_as_jax_float64(spec.zs), (flat_size,))
     return jnp.concatenate((rc, rs, zc, zs))
 
 

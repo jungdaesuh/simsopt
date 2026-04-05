@@ -35,6 +35,10 @@ from benchmarks.validation_ladder_common import (
     run_python_script,
     write_json,
 )
+from benchmarks.single_stage_smoke_fixture import (
+    DEFAULT_EQUILIBRIA_DIR,
+    DEFAULT_PLASMA_SURF_FILENAME,
+)
 
 
 REQUESTED_PLATFORM = preparse_platform(sys.argv[1:])
@@ -79,12 +83,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--plasma-surf-filename",
-        default="wout_nfp22ginsburg_000_014417_iota15.nc",
+        default=DEFAULT_PLASMA_SURF_FILENAME,
         help="VMEC equilibrium filename for the real Stage 2 fixture.",
     )
     parser.add_argument(
         "--equilibria-dir",
-        default=str(REPO_ROOT.parent / "DATABASE" / "EQUILIBRIA"),
+        default=str(DEFAULT_EQUILIBRIA_DIR),
         help="Directory that contains VMEC equilibrium files.",
     )
     parser.add_argument(

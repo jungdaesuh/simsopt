@@ -114,16 +114,15 @@ def _minimize_lbfgs_private_impl(
     x0 = _require_private_optimizer_runtime(x0)
     d = len(x0)
     dtype = x0.dtype
-    maxiter, maxfun, maxgrad = _resolve_lbfgs_limits(d, maxiter, maxfun, maxgrad)
-    ftol_jax = _as_jax_dtype(ftol, dtype)
-    gtol_jax = _as_jax_dtype(gtol, dtype)
-    maxiter_limit = _int_scalar(maxiter)
-    maxfun_limit = _int_scalar(maxfun)
-    maxgrad_limit = _int_scalar(maxgrad)
+    maxiter_limit_value, maxfun_limit_value, maxgrad_limit_value = _resolve_lbfgs_limits(
+        d, maxiter, maxfun, maxgrad
+    )
+    ftol_value = np.asarray(ftol, dtype=np.dtype(dtype)).item()
+    gtol_value = np.asarray(gtol, dtype=np.dtype(dtype)).item()
 
     f_0, g_0 = _coerce_value_and_grad_result(value_and_grad_fun, x0)
     state_initial = _LBFGSResults(
-        converged=_norm(g_0, ord=norm) < gtol_jax,
+        converged=_norm(g_0, ord=norm) < _as_jax_dtype(gtol_value, dtype),
         failed=_bool_scalar(False),
         k=_int_scalar(0),
         nfev=_int_scalar(1),
@@ -140,13 +139,19 @@ def _minimize_lbfgs_private_impl(
     )
     initial_status = _int_scalar(0)
     initial_status = jnp.where(
-        state_initial.ngev >= maxgrad_limit, _int_scalar(3), initial_status
+        state_initial.ngev >= _int_scalar(maxgrad_limit_value),
+        _int_scalar(3),
+        initial_status,
     )
     initial_status = jnp.where(
-        state_initial.nfev >= maxfun_limit, _int_scalar(2), initial_status
+        state_initial.nfev >= _int_scalar(maxfun_limit_value),
+        _int_scalar(2),
+        initial_status,
     )
     initial_status = jnp.where(
-        state_initial.k >= maxiter_limit, _int_scalar(1), initial_status
+        state_initial.k >= _int_scalar(maxiter_limit_value),
+        _int_scalar(1),
+        initial_status,
     )
     state_initial = state_initial._replace(
         failed=(initial_status > _int_scalar(0)) & (~state_initial.converged),
@@ -162,6 +167,11 @@ def _minimize_lbfgs_private_impl(
         )
 
     def body_fun(state):
+        ftol_jax = _as_jax_dtype(ftol_value, state.f_k.dtype)
+        gtol_jax = _as_jax_dtype(gtol_value, state.g_k.dtype)
+        maxiter_limit = _as_jax_dtype(maxiter_limit_value, state.k.dtype)
+        maxfun_limit = _as_jax_dtype(maxfun_limit_value, state.nfev.dtype)
+        maxgrad_limit = _as_jax_dtype(maxgrad_limit_value, state.ngev.dtype)
         p_k = _two_loop_recursion(state)
         ls_results = _line_search_value_and_grad(
             fun=value_and_grad_fun,
@@ -224,6 +234,10 @@ def _minimize_lbfgs_private_impl(
         return lax.cond(ls_results.failed, failed_step, accepted_step, operand=None)
 
     def run_solver(initial_state):
+        gtol_jax = _as_jax_dtype(gtol_value, initial_state.g_k.dtype)
+        maxiter_limit = _as_jax_dtype(maxiter_limit_value, initial_state.k.dtype)
+        maxfun_limit = _as_jax_dtype(maxfun_limit_value, initial_state.nfev.dtype)
+        maxgrad_limit = _as_jax_dtype(maxgrad_limit_value, initial_state.ngev.dtype)
         state = lax.while_loop(cond_fun, body_fun, initial_state)
         f_final, g_final = _coerce_value_and_grad_result(value_and_grad_fun, state.x_k)
         converged_final = _norm(g_final, ord=norm) < gtol_jax

@@ -4,15 +4,29 @@ from __future__ import annotations
 
 import warnings
 
+import jax
 import numpy as np
 
 import jax.numpy as jnp
 from scipy.optimize import OptimizeResult
 
 
+def _as_host_numpy(value, *, dtype=None):
+    array = np.asarray(jax.device_get(value))
+    if dtype is None:
+        return array
+    return np.asarray(array, dtype=dtype)
+
+
+def _as_host_scalar(value, *, dtype=None):
+    return _as_host_numpy(value, dtype=dtype).item()
+
+
 def _is_invalid_state(f, g):
     """Check whether objective or gradient contains non-finite values."""
-    return not bool(np.isfinite(np.asarray(f)) and np.all(np.isfinite(np.asarray(g))))
+    return not bool(
+        np.isfinite(_as_host_numpy(f)) and np.all(np.isfinite(_as_host_numpy(g)))
+    )
 
 
 _BFGS_STATUS_MESSAGES = {
@@ -52,38 +66,38 @@ def _status_message_lbfgs(status, invalid_state):
 
 def _private_bfgs_result_to_optimize_result(state, *, total_nit=None):
     invalid_state = _is_invalid_state(state.f_k, state.g_k)
-    status = int(state.status)
-    nit = int(state.k if total_nit is None else total_nit)
+    status = int(_as_host_scalar(state.status))
+    nit = int(_as_host_scalar(state.k if total_nit is None else total_nit))
     return OptimizeResult(
-        x=jnp.asarray(state.x_k),
-        fun=float(np.asarray(state.f_k)),
-        jac=jnp.asarray(state.g_k),
+        x=_as_host_numpy(state.x_k),
+        fun=float(_as_host_scalar(state.f_k)),
+        jac=_as_host_numpy(state.g_k),
         nit=nit,
-        nfev=int(state.nfev),
-        njev=int(state.ngev),
-        nhev=int(state.nhev),
-        success=bool(state.converged) and not invalid_state,
+        nfev=int(_as_host_scalar(state.nfev)),
+        njev=int(_as_host_scalar(state.ngev)),
+        nhev=int(_as_host_scalar(state.nhev)),
+        success=bool(_as_host_scalar(state.converged)) and not invalid_state,
         status=status,
         message=_status_message_bfgs(status, invalid_state),
-        hess_inv=jnp.asarray(state.H_k),
-        line_search_status=int(state.line_search_status),
+        hess_inv=_as_host_numpy(state.H_k),
+        line_search_status=int(_as_host_scalar(state.line_search_status)),
     )
 
 
 def _private_lbfgs_result_to_optimize_result(state):
     invalid_state = _is_invalid_state(state.f_k, state.g_k)
-    status = int(state.status)
+    status = int(_as_host_scalar(state.status))
     return OptimizeResult(
-        x=jnp.asarray(state.x_k),
-        fun=float(np.asarray(state.f_k)),
-        jac=jnp.asarray(state.g_k),
-        nit=int(state.k),
-        nfev=int(state.nfev),
-        njev=int(state.ngev),
-        success=bool(state.converged) and not invalid_state,
+        x=_as_host_numpy(state.x_k),
+        fun=float(_as_host_scalar(state.f_k)),
+        jac=_as_host_numpy(state.g_k),
+        nit=int(_as_host_scalar(state.k)),
+        nfev=int(_as_host_scalar(state.nfev)),
+        njev=int(_as_host_scalar(state.ngev)),
+        success=bool(_as_host_scalar(state.converged)) and not invalid_state,
         status=status,
         message=_status_message_lbfgs(status, invalid_state),
-        ls_status=int(state.ls_status),
+        ls_status=int(_as_host_scalar(state.ls_status)),
     )
 
 
@@ -97,7 +111,7 @@ def _coerce_dense_hess_inv(hess_inv, n, dtype):
         )
         return jnp.eye(n, dtype=dtype)
     try:
-        dense = np.asarray(hess_inv)
+        dense = _as_host_numpy(hess_inv)
     except Exception:
         warnings.warn(
             "Hybrid BFGS continuation could not densify hess_inv; falling back to "
@@ -120,6 +134,6 @@ def _coerce_dense_hess_inv(hess_inv, n, dtype):
 def _scipy_result_is_continuable(result):
     return (
         np.isfinite(getattr(result, "fun", np.nan))
-        and np.all(np.isfinite(np.asarray(result.x)))
-        and np.all(np.isfinite(np.asarray(result.jac)))
+        and np.all(np.isfinite(_as_host_numpy(result.x)))
+        and np.all(np.isfinite(_as_host_numpy(result.jac)))
     )

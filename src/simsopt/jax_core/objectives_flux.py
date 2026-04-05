@@ -6,6 +6,7 @@ import jax
 import jax.numpy as jnp
 
 from ._device_scalars import float_scalar, two_pi
+from ._math_utils import as_runtime_float64 as _as_runtime_float64
 from .field import grouped_biot_savart_B_from_spec
 from .specs import (
     FieldEvalSpec,
@@ -48,8 +49,8 @@ def fixed_surface_flux_integral_from_B(B, flux_spec: FixedSurfaceFluxSpec):
     Bcoil = B.reshape((flux_spec.nphi, flux_spec.ntheta, 3))
     return integral_BdotN_jax(
         Bcoil,
-        flux_spec.target,
-        flux_spec.normal,
+        _as_runtime_float64(flux_spec.target, reference=B),
+        _as_runtime_float64(flux_spec.normal, reference=B),
         flux_spec.definition,
     )
 
