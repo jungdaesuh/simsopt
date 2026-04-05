@@ -73,13 +73,28 @@ def _norm(x, *, ord=None):
     return jnp.linalg.norm(x, ord=ord)
 
 
+def _pytree_inexact_dtype(tree):
+    leaves = jax.tree_util.tree_leaves(tree)
+    if not leaves:
+        return jnp.float32
+    dtype = jnp.result_type(*[jnp.asarray(leaf) for leaf in leaves])
+    if not jnp.issubdtype(dtype, jnp.inexact):
+        dtype = jnp.promote_types(dtype, jnp.float32)
+    return dtype
+
+
 def _scalar_value_and_grad(fun):
     def wrapped(x):
+        dtype = _pytree_inexact_dtype(x)
         value, pullback = jax.vjp(fun, x)
-        value = jnp.asarray(value, dtype=x.dtype)
+        value = jnp.asarray(value, dtype=dtype)
         cotangent = _as_jax_dtype(1.0, value.dtype)
         (grad,) = pullback(cotangent)
-        return value, jnp.asarray(grad, dtype=x.dtype)
+        grad = jax.tree_util.tree_map(
+            lambda leaf: jnp.asarray(leaf, dtype=dtype),
+            grad,
+        )
+        return value, grad
 
     return wrapped
 

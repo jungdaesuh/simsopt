@@ -72,8 +72,11 @@ from simsopt.objectives.fluxobjective_jax import SquaredFluxJAX
 import simsopt.objectives.stage2_target_objective_jax as stage2_target_objective_module
 from simsopt.objectives.stage2_target_objective_jax import (
     Stage2PenaltyConfig,
+    Stage2TargetOptimizerState,
     _split_stage2_dofs,
     build_stage2_target_objective,
+    stage2_target_optimizer_state_from_dofs,
+    stage2_target_optimizer_state_to_dofs,
 )
 
 
@@ -134,6 +137,21 @@ def test_split_stage2_dofs_matches_legacy_slice_layout():
 
     np.testing.assert_allclose(np.asarray(current), np.asarray(dofs[0]), atol=0.0)
     np.testing.assert_allclose(np.asarray(curve_dofs), np.asarray(dofs[1:]), atol=0.0)
+
+
+def test_stage2_target_optimizer_state_round_trips_flat_dofs():
+    dofs = np.asarray([7.5, -1.2, 0.3, 4.4, -8.1], dtype=np.float64)
+
+    state = stage2_target_optimizer_state_from_dofs(dofs, curve_dof_count=4)
+
+    assert isinstance(state, Stage2TargetOptimizerState)
+    np.testing.assert_allclose(np.asarray(state.current_dof), np.asarray(dofs[0]), atol=0.0)
+    np.testing.assert_allclose(np.asarray(state.curve_dofs), np.asarray(dofs[1:]), atol=0.0)
+    np.testing.assert_allclose(
+        np.asarray(stage2_target_optimizer_state_to_dofs(state)),
+        dofs,
+        atol=0.0,
+    )
 
 
 _TARGET_OBJECTIVE_GRAD_ATOL = 5e-12
@@ -455,7 +473,10 @@ def _build_stage2_target_objective_contract_case(
 
 
 def _closure_has_jax_array_leaf(fn) -> bool:
-    for value in inspect.getclosurevars(fn).nonlocals.values():
+    inspect_target = inspect.unwrap(fn)
+    if not inspect.isfunction(inspect_target):
+        return False
+    for value in inspect.getclosurevars(inspect_target).nonlocals.values():
         if callable(value):
             continue
         if any(
@@ -2407,7 +2428,7 @@ class TestStage2OptimizerContract:
             "probe_only",
             "export_objective_json",
             "expects_contract",
-            "expects_scalar_objective",
+            "expects_target_objective_lane",
             "expects_target_probe_payload",
             "expects_probe_only_target_payload",
         ),
@@ -2426,7 +2447,7 @@ class TestStage2OptimizerContract:
         probe_only,
         export_objective_json,
         expects_contract,
-        expects_scalar_objective,
+        expects_target_objective_lane,
         expects_target_probe_payload,
         expects_probe_only_target_payload,
     ):
@@ -2434,7 +2455,7 @@ class TestStage2OptimizerContract:
 
         (
             outer_contract,
-            use_scalar_objective,
+            use_target_objective_lane,
             needs_target_probe_payload,
             probe_only_target_payload,
         ) = stage2_script.resolve_stage2_target_lane_requirements(
@@ -2445,7 +2466,7 @@ class TestStage2OptimizerContract:
         )
 
         assert (outer_contract is not None) is expects_contract
-        assert use_scalar_objective is expects_scalar_objective
+        assert use_target_objective_lane is expects_target_objective_lane
         assert needs_target_probe_payload is expects_target_probe_payload
         assert probe_only_target_payload is expects_probe_only_target_payload
 
@@ -2504,7 +2525,7 @@ class TestStage2OptimizerContract:
 
         ondevice_captured = {}
 
-        def fake_lbfgs_private(
+        def fake_lbfgs_private_value_and_grad(
             fun,
             x0,
             *,
@@ -2528,23 +2549,34 @@ class TestStage2OptimizerContract:
             ondevice_captured["maxls"] = maxls
             ondevice_captured["callback"] = callback
             ondevice_captured["progress_callback"] = progress_callback
-            value = float(fun(np.asarray(x0, dtype=float)))
-            grad = np.asarray(
-                jax.grad(fun)(np.asarray(x0, dtype=np.float64)), dtype=float
-            )
+            value, grad = fun(np.asarray(x0, dtype=np.float64))
             return _build_fake_lbfgs_result(x0, value, grad)
+
+        def _reject_scalar_private(*_args, **_kwargs):
+            raise AssertionError(
+                "Stage 2 ondevice lane should not route through scalar lbfgs_private "
+                "once the fused value_and_grad contract is available."
+            )
 
         monkeypatch.setattr(
             optimizer_jax,
+            "_minimize_lbfgs_private_value_and_grad",
+            fake_lbfgs_private_value_and_grad,
+        )
+        monkeypatch.setattr(
+            optimizer_jax,
             "_minimize_lbfgs_private",
-            fake_lbfgs_private,
+            _reject_scalar_private,
         )
 
         target_contract = stage2_script.resolve_stage2_optimizer_contract(
             "jax", "ondevice"
         )
         target_result = stage2_script.run_stage2_optimizer(
-            lambda x: (float(np.dot(x, x)), np.asarray(2.0 * x, dtype=float)),
+            lambda x: (
+                jax.numpy.dot(x, x),
+                jax.numpy.asarray(2.0 * x, dtype=jax.numpy.float64),
+            ),
             np.asarray([1.0, -2.0], dtype=float),
             contract=target_contract,
             maxiter=12,
@@ -3301,13 +3333,46 @@ class TestStage2OptimizerContract:
         objective, target_bundle = _build_stage2_target_objective_contract_case()
         dofs = jax.device_put(np.asarray(objective.x, dtype=np.float64))
         value = target_bundle.objective(dofs)
+        assert target_bundle.value_and_grad is not None
+        value_vg, grad_vg = target_bundle.value_and_grad(dofs)
         assert target_bundle.raw_terms is not None
         raw_terms = target_bundle.raw_terms(dofs)
         grad = jax.grad(target_bundle.objective)(dofs)
+        vg_jaxpr = jax.make_jaxpr(target_bundle.value_and_grad)(dofs)
 
         assert np.isfinite(float(value))
+        assert np.isfinite(float(value_vg))
         assert np.all(np.isfinite(np.asarray(raw_terms, dtype=float)))
         assert np.all(np.isfinite(np.asarray(grad, dtype=float)))
+        assert np.all(np.isfinite(np.asarray(grad_vg, dtype=float)))
+        np.testing.assert_allclose(float(value_vg), float(value), rtol=0.0, atol=0.0)
+        np.testing.assert_allclose(
+            np.asarray(grad_vg, dtype=float),
+            np.asarray(grad, dtype=float),
+            rtol=1e-15,
+            atol=1e-15,
+        )
+        assert "pure_callback" not in str(vg_jaxpr)
+
+    def test_target_scalar_objective_accepts_structured_optimizer_state(self):
+        objective, target_bundle = _build_stage2_target_objective_contract_case()
+        dofs = np.asarray(objective.x, dtype=np.float64)
+        optimizer_state = stage2_target_optimizer_state_from_dofs(
+            dofs,
+            curve_dof_count=target_bundle.expected_dof_count - 1,
+        )
+
+        value = target_bundle.objective(optimizer_state)
+        assert target_bundle.value_and_grad is not None
+        value_vg, grad_vg = target_bundle.value_and_grad(optimizer_state)
+
+        np.testing.assert_allclose(float(value_vg), float(value), rtol=0.0, atol=0.0)
+        np.testing.assert_allclose(
+            np.asarray(stage2_target_optimizer_state_to_dofs(grad_vg), dtype=float),
+            np.asarray(jax.grad(target_bundle.objective)(dofs), dtype=float),
+            rtol=1e-15,
+            atol=1e-15,
+        )
 
     def test_target_scalar_objective_does_not_reenter_host_snapshot_after_build(
         self,
@@ -3334,13 +3399,17 @@ class TestStage2OptimizerContract:
         )
 
         value = target_bundle.objective(dofs)
+        assert target_bundle.value_and_grad is not None
+        value_vg, grad_vg = target_bundle.value_and_grad(dofs)
         assert target_bundle.raw_terms is not None
         raw_terms = target_bundle.raw_terms(dofs)
         grad = jax.grad(target_bundle.objective)(dofs)
 
         assert np.isfinite(float(value))
+        assert np.isfinite(float(value_vg))
         assert np.all(np.isfinite(np.asarray(raw_terms, dtype=float)))
         assert np.all(np.isfinite(np.asarray(grad, dtype=float)))
+        assert np.all(np.isfinite(np.asarray(grad_vg, dtype=float)))
 
     @pytest.mark.parametrize("definition", _SQUARED_FLUX_DEFINITIONS)
     def test_target_scalar_objective_matches_stage2_composite_contract(
@@ -3353,7 +3422,8 @@ class TestStage2OptimizerContract:
         dofs = np.asarray(objective.x, dtype=float)
         value_ref = float(objective.J())
         grad_ref = np.asarray(objective.dJ(), dtype=float)
-        value_target, grad_target = jax.value_and_grad(target_bundle.objective)(
+        assert target_bundle.value_and_grad is not None
+        value_target, grad_target = target_bundle.value_and_grad(
             np.asarray(dofs, dtype=np.float64)
         )
 
@@ -3405,7 +3475,9 @@ class TestStage2OptimizerContract:
             definition
         )
         dofs = np.asarray(objective.x, dtype=float)
-        grad_target = np.asarray(jax.grad(target_bundle.objective)(dofs), dtype=float)
+        assert target_bundle.value_and_grad is not None
+        _, grad_target = target_bundle.value_and_grad(dofs)
+        grad_target = np.asarray(grad_target, dtype=float)
         grad_fd = _centered_fd_gradient(
             target_bundle.objective,
             dofs,
@@ -3428,7 +3500,9 @@ class TestStage2OptimizerContract:
             definition
         )
         dofs = np.asarray(objective.x, dtype=float)
-        grad_target = np.asarray(jax.grad(target_bundle.objective)(dofs), dtype=float)
+        assert target_bundle.value_and_grad is not None
+        _, grad_target = target_bundle.value_and_grad(dofs)
+        grad_target = np.asarray(grad_target, dtype=float)
         _assert_first_order_taylor_contract(
             target_bundle.objective,
             dofs,
@@ -3444,8 +3518,10 @@ class TestStage2OptimizerContract:
             _build_stage2_target_objective_contract_case(return_context=True)
         )
         dofs = np.asarray(objective.x, dtype=np.float64)
-        baseline_value = float(target_bundle.objective(dofs))
-        baseline_grad = np.asarray(jax.grad(target_bundle.objective)(dofs), dtype=float)
+        assert target_bundle.value_and_grad is not None
+        baseline_value, baseline_grad = target_bundle.value_and_grad(dofs)
+        baseline_value = float(baseline_value)
+        baseline_grad = np.asarray(baseline_grad, dtype=float)
 
         def _fail(*_args, **_kwargs):
             assert False, "target objective should not touch the live banana curve"
@@ -3456,8 +3532,9 @@ class TestStage2OptimizerContract:
         monkeypatch.setattr(banana_curve, "gammadashdash_jax", _fail)
         monkeypatch.setattr(banana_curve.surf, "get_dofs", _fail)
 
-        value = float(target_bundle.objective(dofs))
-        grad = np.asarray(jax.grad(target_bundle.objective)(dofs), dtype=float)
+        value, grad = target_bundle.value_and_grad(dofs)
+        value = float(value)
+        grad = np.asarray(grad, dtype=float)
 
         np.testing.assert_allclose(value, baseline_value, rtol=1e-12, atol=1e-18)
         np.testing.assert_allclose(grad, baseline_grad, rtol=1e-12, atol=1e-18)
@@ -3466,6 +3543,8 @@ class TestStage2OptimizerContract:
         _objective, target_bundle = _build_stage2_target_objective_contract_case()
 
         assert not _closure_has_jax_array_leaf(target_bundle.objective)
+        assert target_bundle.value_and_grad is not None
+        assert not _closure_has_jax_array_leaf(target_bundle.value_and_grad)
         assert target_bundle.raw_terms is not None
         assert not _closure_has_jax_array_leaf(target_bundle.raw_terms)
 
@@ -3501,6 +3580,84 @@ class TestStage2OptimizerContract:
                 target_objective_bundle,
                 dofs,
             )
+
+    def test_stage2_run_optimizer_prefers_fused_target_value_and_grad_on_ondevice_lane(
+        self,
+        monkeypatch,
+    ):
+        stage2_script = _load_stage2_script_module()
+        contract = stage2_script.resolve_stage2_optimizer_contract("jax", "ondevice")
+        dofs = np.asarray([0.25, -0.5], dtype=np.float64)
+        optimizer_state = stage2_script.build_stage2_target_optimizer_state(
+            types.SimpleNamespace(expected_dof_count=2),
+            dofs,
+        )
+
+        calls = {}
+
+        def fake_jax_minimize(
+            fun,
+            x0,
+            *,
+            method,
+            tol,
+            maxiter,
+            options,
+            value_and_grad,
+        ):
+            calls["fun"] = fun
+            calls["x0"] = x0
+            calls["method"] = method
+            calls["tol"] = tol
+            calls["maxiter"] = maxiter
+            calls["options"] = dict(options)
+            calls["value_and_grad"] = value_and_grad
+            return types.SimpleNamespace(
+                x=x0,
+                nit=0,
+                success=True,
+                message="ok",
+            )
+
+        optimizer_jax_module = _fresh_import("simsopt.geo.optimizer_jax")
+        monkeypatch.setattr(optimizer_jax_module, "jax_minimize", fake_jax_minimize)
+
+        def target_value_and_grad(x):
+            x = jax.numpy.asarray(
+                stage2_script.flatten_stage2_target_optimizer_state(x),
+                dtype=jax.numpy.float64,
+            )
+            value = jax.numpy.sum(jax.numpy.square(x))
+            return value, 2.0 * x
+
+        stage2_script.run_stage2_optimizer(
+            value_and_grad_fun=target_value_and_grad,
+            dofs=optimizer_state,
+            contract=contract,
+            maxiter=20,
+            ftol=0.0,
+            gtol=1e-12,
+            maxcor=7,
+            scalar_fun=lambda x: jax.numpy.sum(
+                jax.numpy.square(
+                    jax.numpy.asarray(
+                        stage2_script.flatten_stage2_target_optimizer_state(x),
+                        dtype=jax.numpy.float64,
+                    )
+                )
+            ),
+        )
+
+        assert calls["fun"] is target_value_and_grad
+        assert calls["method"] == "lbfgs-ondevice"
+        assert calls["value_and_grad"] is True
+        assert hasattr(calls["x0"], "current_dof")
+        np.testing.assert_allclose(
+            stage2_script.flatten_stage2_target_optimizer_state(calls["x0"]),
+            dofs,
+        )
+        assert calls["maxiter"] == 20
+        assert calls["options"]["maxcor"] == 7
 
     @pytest.mark.parametrize(
         ("optimizer_backend", "expected_source"),
@@ -3554,10 +3711,23 @@ class TestStage2OptimizerContract:
         fake_root = types.SimpleNamespace(x=dofs.copy())
         fake_flux = _FakeStage2SquaredFluxTerm(0.5, [0.75, -0.25])
         fake_curvature_term = types.SimpleNamespace(threshold=40.0)
+        value_and_grad_calls = {"count": 0}
+
+        def target_value_and_grad(x):
+            value_and_grad_calls["count"] += 1
+            return (
+                jax.numpy.sum(jax.numpy.square(x + 1.0)) + 0.5 * (x[0] + 2.0 * x[1]),
+                jax.numpy.asarray(
+                    (2.0 * (x[0] + 1.0) + 0.5, 2.0 * (x[1] + 1.0) + 1.0),
+                    dtype=jax.numpy.float64,
+                ),
+            )
+
         target_objective_bundle = types.SimpleNamespace(
             objective=lambda x: (
                 jax.numpy.sum(jax.numpy.square(x + 1.0)) + 0.5 * (x[0] + 2.0 * x[1])
             ),
+            value_and_grad=target_value_and_grad,
             raw_terms=lambda x: jax.numpy.asarray(
                 (
                     jax.numpy.sum(jax.numpy.square(x + 1.0)),
@@ -3596,9 +3766,11 @@ class TestStage2OptimizerContract:
             ),
         )
 
-        expected_value, expected_grad = jax.value_and_grad(
-            target_objective_bundle.objective
-        )(dofs.astype(np.float64))
+        expected_value = np.sum(np.square(dofs + 1.0)) + 0.5 * (dofs[0] + 2.0 * dofs[1])
+        expected_grad = np.asarray(
+            (2.0 * (dofs[0] + 1.0) + 0.5, 2.0 * (dofs[1] + 1.0) + 1.0),
+            dtype=float,
+        )
         expected_terms = np.asarray(
             target_objective_bundle.raw_terms(dofs), dtype=float
         )
@@ -3622,6 +3794,7 @@ class TestStage2OptimizerContract:
                 rtol=0.0,
                 atol=0.0,
             )
+            assert value_and_grad_calls["count"] == 1
             assert payload["composite"]["terms"] == {
                 "squared_flux": {
                     "weight": pytest.approx(1.0),

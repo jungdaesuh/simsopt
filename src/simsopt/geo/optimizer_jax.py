@@ -24,11 +24,13 @@ well; both paths use public JAX APIs.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Callable
 
 import numpy as np
 
 import jax
 import jax.numpy as jnp
+from jax.flatten_util import ravel_pytree
 from jax import lax
 from jax.scipy.sparse.linalg import gmres
 from scipy.optimize import minimize as scipy_minimize
@@ -78,6 +80,58 @@ class ContinuousOptimizerContract:
     use_scalar_objective: bool
 
 
+@dataclass(frozen=True)
+class _OptimizerPytreeAdapter:
+    flat_x0: jax.Array
+    unravel: Callable[[jax.Array], object]
+    tree_def: object
+
+    def wrap_fun(self, fun, *, value_and_grad: bool):
+        if not value_and_grad:
+            def wrapped(flat_x):
+                return fun(self.unravel(jnp.asarray(flat_x)))
+
+            return wrapped
+
+        def wrapped(flat_x):
+            flat_x = jnp.asarray(flat_x)
+            value, grad_tree = fun(self.unravel(flat_x))
+            _, grad_tree_def = jax.tree_util.tree_flatten(grad_tree)
+            if grad_tree_def != self.tree_def:
+                raise ValueError(
+                    "Explicit value-and-gradient objectives must return a gradient "
+                    "with the same pytree structure as x0."
+                )
+            flat_grad, _ = ravel_pytree(grad_tree)
+            flat_grad = jnp.asarray(flat_grad, dtype=flat_x.dtype)
+            if flat_grad.shape != flat_x.shape:
+                raise ValueError(
+                    "Explicit value-and-gradient objectives must return a gradient "
+                    f"matching the flattened x0 shape {flat_x.shape}, got {flat_grad.shape}."
+                )
+            return jnp.asarray(value, dtype=flat_x.dtype), flat_grad
+
+        return wrapped
+
+    def wrap_callback(self, callback):
+        if callback is None:
+            return None
+
+        def wrapped(flat_x):
+            callback(_hostify_optimizer_tree(self.unravel(jnp.asarray(flat_x))))
+
+        return wrapped
+
+    def finalize_result(self, result):
+        if hasattr(result, "x"):
+            result.x = _hostify_optimizer_tree(self.unravel(jnp.asarray(result.x)))
+        if hasattr(result, "jac"):
+            result.jac = _hostify_optimizer_tree(
+                self.unravel(jnp.asarray(result.jac))
+            )
+        return result
+
+
 def _raise_if_strict_optimizer_fallback(*, method: str, detail: str) -> None:
     raise_if_strict_jax_fallback(
         component="optimizer_jax.jax_minimize",
@@ -91,6 +145,64 @@ def _x64_enabled():
 
 def _device_scalar(value, *, dtype=jnp.float64):
     return jax.device_put(np.asarray(value, dtype=np.dtype(dtype)))
+
+
+def _hostify_optimizer_leaf(leaf):
+    if isinstance(leaf, jax.Array):
+        array = np.asarray(jax.device_get(leaf))
+    elif isinstance(leaf, (np.ndarray, np.generic)) or np.isscalar(leaf):
+        array = np.asarray(leaf)
+    else:
+        return leaf
+    if array.ndim == 0:
+        return array.item()
+    return array
+
+
+def _hostify_optimizer_tree(value):
+    return jax.tree_util.tree_map(_hostify_optimizer_leaf, value)
+
+
+def _is_flat_optimizer_vector(x0) -> bool:
+    if isinstance(x0, (jax.Array, np.ndarray)):
+        return x0.ndim == 1
+    if isinstance(x0, (list, tuple)):
+        try:
+            array = np.asarray(x0)
+        except Exception:
+            return False
+        return array.dtype != object and array.ndim == 1
+    return False
+
+
+def _prepare_optimizer_pytree_adapter(x0):
+    if _is_flat_optimizer_vector(x0):
+        return None
+    flat_x0, unravel = ravel_pytree(x0)
+    _, tree_def = jax.tree_util.tree_flatten(x0)
+    return _OptimizerPytreeAdapter(
+        flat_x0=jnp.asarray(flat_x0),
+        unravel=unravel,
+        tree_def=tree_def,
+    )
+
+
+def _prepare_optimizer_callable_inputs(fun, x0, *, value_and_grad, callback):
+    adapter = _prepare_optimizer_pytree_adapter(x0)
+    if adapter is None:
+        return fun, x0, callback, None
+    return (
+        adapter.wrap_fun(fun, value_and_grad=value_and_grad),
+        adapter.flat_x0,
+        adapter.wrap_callback(callback),
+        adapter,
+    )
+
+
+def _finalize_optimizer_result(result, adapter):
+    if adapter is None:
+        return result
+    return adapter.finalize_result(result)
 
 
 # ---------------------------------------------------------------------------
@@ -734,11 +846,26 @@ def jax_minimize(
     single-stage outer loop. The ``lbfgs-ondevice`` explicit path expects a
     JAX-traceable callable and routes through the private on-device
     implementation directly.
+
+    ``x0`` may be either the historical flat 1-D vector or a structured pytree.
+    Structured states are flattened once inside this adapter, then callbacks and
+    ``OptimizeResult.x`` / ``OptimizeResult.jac`` are restored to the original
+    pytree structure on return.
     """
     if method not in _SUPPORTED_METHODS:
         raise ValueError(
             f"Unknown method {method!r}. Supported: {sorted(_SUPPORTED_METHODS)}."
         )
+
+    fun, x0, callback, pytree_adapter = _prepare_optimizer_callable_inputs(
+        fun,
+        x0,
+        value_and_grad=value_and_grad,
+        callback=callback,
+    )
+
+    def finalize(result):
+        return _finalize_optimizer_result(result, pytree_adapter)
 
     options = dict(options or {})
     if callback is not None:
@@ -753,13 +880,16 @@ def jax_minimize(
         scipy_adapter = (
             _scipy_minimize_value_and_grad if value_and_grad else _scipy_minimize
         )
-        return scipy_adapter(
-            fun,
-            x0,
-            method=method,
-            tol=tol,
-            maxiter=maxiter,
-            options=options,
+        return finalize(
+            scipy_adapter(
+                fun,
+                x0,
+                method=method,
+                tol=tol,
+                maxiter=maxiter,
+                options=options,
+            ),
+            pytree_adapter,
         )
 
     # All remaining methods require the private optimizer package.
@@ -784,7 +914,7 @@ def jax_minimize(
             callback=options.get("callback"),
             progress_callback=options.get("progress_callback"),
         )
-        return _private_lbfgs_result_to_optimize_result(state)
+        return finalize(_private_lbfgs_result_to_optimize_result(state))
 
     if method == "bfgs-ondevice":
         state = _minimize_bfgs_private(
@@ -796,7 +926,7 @@ def jax_minimize(
             callback=options.get("callback"),
             progress_callback=options.get("progress_callback"),
         )
-        return _private_bfgs_result_to_optimize_result(state)
+        return finalize(_private_bfgs_result_to_optimize_result(state))
 
     if method == "lbfgs-ondevice":
         state = _minimize_lbfgs_private(
@@ -812,7 +942,7 @@ def jax_minimize(
             callback=options.get("callback"),
             progress_callback=options.get("progress_callback"),
         )
-        return _private_lbfgs_result_to_optimize_result(state)
+        return finalize(_private_lbfgs_result_to_optimize_result(state))
 
     # --- bfgs-hybrid: SciPy prefix → on-device continuation ---
     _raise_if_strict_optimizer_fallback(
@@ -831,18 +961,18 @@ def jax_minimize(
         options=options,
     )
     if prefix_result.success:
-        return prefix_result
+        return finalize(prefix_result)
     if not _scipy_result_is_continuable(prefix_result):
         prefix_result.success = False
         prefix_result.message = (
             "SciPy prefix produced a non-finite state; on-device continuation skipped."
         )
-        return prefix_result
+        return finalize(prefix_result)
 
     remaining_maxiter = max(0, total_maxiter - int(prefix_result.nit))
     if remaining_maxiter == 0:
         prefix_result.success = False
-        return prefix_result
+        return finalize(prefix_result)
 
     continuation_state = _make_bfgs_continuation_state(
         prefix_result,
@@ -864,4 +994,4 @@ def jax_minimize(
         total_nit=int(prefix_result.nit) + int(final_state.k),
     )
     result.hess_inv = jnp.asarray(final_state.H_k)
-    return result
+    return finalize(result)

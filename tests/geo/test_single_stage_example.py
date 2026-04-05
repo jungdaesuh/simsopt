@@ -543,9 +543,12 @@ class SingleStageExampleTests(unittest.TestCase):
                 "default target-lane build should not recreate the scalar closure"
             )
 
-        def _runtime_builder(*args, include_profile_suite=False):
-            runtime_calls.append(include_profile_suite)
-            return {"value_and_grad": value_and_grad_marker}
+        def _runtime_builder(*args, include_profile_suite=False, success_filter=None):
+            runtime_calls.append((include_profile_suite, success_filter))
+            return {
+                "objective": object(),
+                "value_and_grad": value_and_grad_marker,
+            }
 
         with patch.object(
             module,
@@ -569,7 +572,43 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertIsNone(scalar_fun)
         self.assertIs(value_and_grad_fun, value_and_grad_marker)
         self.assertIsNone(target_lane_profile)
-        self.assertEqual(runtime_calls, [False])
+        self.assertEqual(runtime_calls, [(False, None)])
+
+    def test_build_target_lane_outer_objectives_threads_success_filter_to_runtime_bundle(
+        self,
+    ):
+        module = self.load_module()
+        objective_marker = object()
+        success_filter_marker = object()
+        runtime_calls = []
+
+        def _runtime_builder(*args, include_profile_suite=False, success_filter=None):
+            runtime_calls.append((include_profile_suite, success_filter))
+            return {
+                "objective": objective_marker,
+                "value_and_grad": object(),
+            }
+
+        with patch.object(
+            module,
+            "get_traceable_single_stage_runtime_bundle_builder",
+            return_value=_runtime_builder,
+        ):
+            scalar_fun, value_and_grad_fun, target_lane_profile = (
+                module.build_target_lane_outer_objectives(
+                    object(),
+                    object(),
+                    object(),
+                    use_value_and_grad=False,
+                    profile_target_lane=False,
+                    success_filter=success_filter_marker,
+                )
+            )
+
+        self.assertIs(scalar_fun, objective_marker)
+        self.assertIsNone(value_and_grad_fun)
+        self.assertIsNone(target_lane_profile)
+        self.assertEqual(runtime_calls, [(False, success_filter_marker)])
 
     def test_resolve_effective_target_lane_sync_forces_final_only_in_benchmark_mode(
         self,
@@ -654,8 +693,8 @@ class SingleStageExampleTests(unittest.TestCase):
     def test_run_single_stage_optimizer_prefers_fused_target_lane_contract(self):
         module = self.load_module()
         captured = {}
-        explicit_fun = object()
-        scalar_fun = object()
+        explicit_fun = lambda x: (float(np.dot(x, x)), np.asarray(2.0 * x, dtype=float))
+        scalar_fun = lambda x: float(np.dot(x, x))
 
         def fake_require_target_backend_x64(optimizer_backend):
             captured["x64_backend"] = optimizer_backend
@@ -665,13 +704,13 @@ class SingleStageExampleTests(unittest.TestCase):
         ):
             captured["fun"] = fun
             captured["method"] = method
-            captured["x0"] = np.asarray(x0)
+            captured["x0"] = x0
             captured["tol"] = tol
             captured["maxiter"] = maxiter
             captured["options"] = dict(options)
             captured["value_and_grad"] = value_and_grad
             captured["callback"] = callback
-            return types.SimpleNamespace(x=np.asarray(x0), nit=0, message="ok")
+            return types.SimpleNamespace(x=x0, nit=0, message="ok")
 
         with self.patch_optimizer_jax_module(
             require_target_backend_x64=fake_require_target_backend_x64,
@@ -692,14 +731,24 @@ class SingleStageExampleTests(unittest.TestCase):
             )
 
         self.assertEqual(captured["x64_backend"], "ondevice")
-        self.assertIs(captured["fun"], explicit_fun)
+        self.assertIsInstance(captured["x0"], module.SingleStageOuterOptimizerState)
         self.assertEqual(captured["method"], "lbfgs-ondevice")
-        np.testing.assert_allclose(captured["x0"], np.array([1.0, -2.0]))
+        np.testing.assert_allclose(
+            module._single_stage_optimizer_dofs_array(captured["x0"]),
+            np.array([1.0, -2.0]),
+        )
         self.assertEqual(captured["tol"], 1e-6)
         self.assertEqual(captured["maxiter"], 7)
         self.assertEqual(captured["options"], {"maxcor": 9, "ftol": 1e-8})
         self.assertTrue(captured["value_and_grad"])
         self.assertIs(captured["callback"], callback)
+        value, grad = captured["fun"](captured["x0"])
+        self.assertEqual(value, 5.0)
+        self.assertIsInstance(grad, module.SingleStageOuterOptimizerState)
+        np.testing.assert_allclose(
+            module._single_stage_optimizer_dofs_array(grad),
+            np.array([2.0, -4.0]),
+        )
         self.assertEqual(result.message, "ok")
 
     def test_run_single_stage_optimizer_target_lane_requires_objective_contract(self):
@@ -732,7 +781,7 @@ class SingleStageExampleTests(unittest.TestCase):
 
     def test_run_single_stage_optimizer_ondevice_does_not_enter_scipy_minimize(self):
         module = self.load_module()
-        explicit_fun = object()
+        explicit_fun = lambda x: (float(np.dot(x, x)), np.asarray(2.0 * x, dtype=float))
 
         def fake_require_target_backend_x64(_optimizer_backend):
             return None
@@ -740,7 +789,14 @@ class SingleStageExampleTests(unittest.TestCase):
         def fake_jax_minimize(
             fun, x0, *, method, tol, maxiter, options, value_and_grad, callback
         ):
-            self.assertIs(fun, explicit_fun)
+            value, grad = fun(x0)
+            self.assertEqual(value, 0.0)
+            self.assertIsInstance(grad, module.SingleStageOuterOptimizerState)
+            np.testing.assert_allclose(
+                module._single_stage_optimizer_dofs_array(grad),
+                np.zeros(2),
+            )
+            self.assertIsInstance(x0, module.SingleStageOuterOptimizerState)
             del x0, tol, maxiter, options, callback
             self.assertEqual(method, "lbfgs-ondevice")
             self.assertTrue(value_and_grad)
@@ -769,7 +825,7 @@ class SingleStageExampleTests(unittest.TestCase):
     def test_run_single_stage_optimizer_allows_explicit_experimental_target_lane(self):
         module = self.load_module()
         captured = {}
-        explicit_fun = object()
+        explicit_fun = lambda x: (float(np.dot(x, x)), np.asarray(2.0 * x, dtype=float))
 
         def fake_require_target_backend_x64(_optimizer_backend):
             return None
@@ -778,8 +834,9 @@ class SingleStageExampleTests(unittest.TestCase):
             fun, x0, *, method, tol, maxiter, options, value_and_grad, callback
         ):
             captured["fun"] = fun
+            captured["x0"] = x0
             captured["value_and_grad"] = value_and_grad
-            return types.SimpleNamespace(x=np.asarray(x0), nit=0, message="ok")
+            return types.SimpleNamespace(x=x0, nit=0, message="ok")
 
         with self.patch_optimizer_jax_module(
             require_target_backend_x64=fake_require_target_backend_x64,
@@ -798,8 +855,11 @@ class SingleStageExampleTests(unittest.TestCase):
                 scalar_fun=None,
             )
 
-        self.assertIs(captured["fun"], explicit_fun)
+        self.assertIsInstance(captured["x0"], module.SingleStageOuterOptimizerState)
         self.assertTrue(captured["value_and_grad"])
+        value, grad = captured["fun"](captured["x0"])
+        self.assertEqual(value, 0.0)
+        self.assertIsInstance(grad, module.SingleStageOuterOptimizerState)
         self.assertEqual(result.message, "ok")
 
     def test_run_single_stage_optimizer_rejects_hybrid_outer_lane(self):
@@ -914,7 +974,11 @@ class SingleStageExampleTests(unittest.TestCase):
             "_evaluate_candidate_impl",
             side_effect=fake_eval,
         ), patch.object(module, "accept_step", side_effect=fake_accept_step):
-            adapter.callback(np.array([2.0, -1.0]))
+            adapter.callback(
+                module.SingleStageOuterOptimizerState(
+                    coil_dofs=np.array([2.0, -1.0]),
+                )
+            )
 
         np.testing.assert_allclose(jf.x, np.array([2.0, -1.0]))
         np.testing.assert_allclose(run_dict["x_prev"], np.array([2.0, -1.0]))
@@ -993,7 +1057,11 @@ class SingleStageExampleTests(unittest.TestCase):
             "_evaluate_candidate_impl",
             side_effect=fake_eval,
         ), patch.object(module, "accept_step", side_effect=fake_accept_step):
-            adapter.sync_accepted_step(np.array([3.0, -4.0]))
+            adapter.sync_accepted_step(
+                module.SingleStageOuterOptimizerState(
+                    coil_dofs=np.array([3.0, -4.0]),
+                )
+            )
 
         np.testing.assert_allclose(jf.x, np.array([3.0, -4.0]))
         np.testing.assert_allclose(run_dict["x_prev"], np.array([3.0, -4.0]))
@@ -1910,12 +1978,14 @@ class SingleStageExampleTests(unittest.TestCase):
             ),
             np.array([1.0, 2.0, 3.0]),
         )
+        target_lane_dofs = module.resolve_single_stage_outer_optimizer_initial_dofs(
+            _JF(),
+            _BS(),
+            use_target_lane=True,
+        )
+        self.assertIsInstance(target_lane_dofs, module.SingleStageOuterOptimizerState)
         np.testing.assert_allclose(
-            module.resolve_single_stage_outer_optimizer_initial_dofs(
-                _JF(),
-                _BS(),
-                use_target_lane=True,
-            ),
+            module._single_stage_optimizer_dofs_array(target_lane_dofs),
             np.array([9.0, 8.0]),
         )
 

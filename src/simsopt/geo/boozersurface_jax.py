@@ -29,6 +29,7 @@ Builds on M3's composed derivative path:
   - ``jax.grad`` / ``jax.hessian`` / ``jax.jacfwd`` for all derivatives
 """
 
+from dataclasses import dataclass
 from functools import partial
 
 import numpy as np
@@ -94,6 +95,72 @@ from .optimizer_jax import (
 )
 
 __all__ = ["BoozerSurfaceJAX"]
+
+
+@dataclass(frozen=True)
+class _BoozerPenaltyOptimizerState:
+    surface_dofs: jax.Array
+    iota: jax.Array
+
+
+@dataclass(frozen=True)
+class _BoozerPenaltyOptimizerStateWithG:
+    surface_dofs: jax.Array
+    iota: jax.Array
+    G: jax.Array
+
+
+jax.tree_util.register_dataclass(
+    _BoozerPenaltyOptimizerState,
+    data_fields=["surface_dofs", "iota"],
+    meta_fields=[],
+)
+jax.tree_util.register_dataclass(
+    _BoozerPenaltyOptimizerStateWithG,
+    data_fields=["surface_dofs", "iota", "G"],
+    meta_fields=[],
+)
+
+
+def _as_boozer_penalty_optimizer_state(x, *, optimize_G):
+    if optimize_G:
+        if isinstance(x, _BoozerPenaltyOptimizerStateWithG):
+            return _BoozerPenaltyOptimizerStateWithG(
+                surface_dofs=_as_jax_float64(x.surface_dofs),
+                iota=_as_jax_float64(x.iota),
+                G=_as_jax_float64(x.G),
+            )
+    elif isinstance(x, _BoozerPenaltyOptimizerState):
+        return _BoozerPenaltyOptimizerState(
+            surface_dofs=_as_jax_float64(x.surface_dofs),
+            iota=_as_jax_float64(x.iota),
+        )
+
+    x_jax = _as_jax_float64(x)
+    sdofs, iota, G = _split_decision_vector_jax(x_jax, optimize_G=optimize_G)
+    if optimize_G:
+        return _BoozerPenaltyOptimizerStateWithG(
+            surface_dofs=sdofs,
+            iota=iota,
+            G=G,
+        )
+    return _BoozerPenaltyOptimizerState(
+        surface_dofs=sdofs,
+        iota=iota,
+    )
+
+
+def _boozer_penalty_optimizer_state_to_vector(x, *, optimize_G):
+    optimizer_state = _as_boozer_penalty_optimizer_state(x, optimize_G=optimize_G)
+    if optimize_G:
+        return _concat_jax_float64(
+            optimizer_state.surface_dofs,
+            [optimizer_state.iota, optimizer_state.G],
+        )
+    return _concat_jax_float64(
+        optimizer_state.surface_dofs,
+        [optimizer_state.iota],
+    )
 
 
 def _split_decision_vector_jax(x, *, optimize_G):
@@ -287,11 +354,14 @@ def _boozer_penalty_objective(
     Pure function: ``x → scalar``.  JAX autodiff gives gradient and
     Hessian for free.
 
-    The decision vector is ``x = [surface_dofs, iota]`` (optimize_G=False)
-    or ``x = [surface_dofs, iota, G]`` (optimize_G=True).
+    The optimizer state may be either the historical flat decision vector
+    ``[surface_dofs, iota]`` / ``[surface_dofs, iota, G]`` or the structured
+    Boozer penalty optimizer pytree that carries the same fields explicitly.
     """
-    x_jax = _as_jax_float64(x)
-    sdofs, iota, G = _split_decision_vector_jax(x_jax, optimize_G=optimize_G)
+    optimizer_state = _as_boozer_penalty_optimizer_state(x, optimize_G=optimize_G)
+    sdofs = optimizer_state.surface_dofs
+    iota = optimizer_state.iota
+    G = optimizer_state.G if optimize_G else None
     if not optimize_G:
         G = compute_G_from_currents(
             _grouped_coil_currents(coil_arrays=coil_arrays, coil_set_spec=coil_set_spec)
@@ -1067,6 +1137,11 @@ class BoozerSurfaceJAX(Optimizable):
     specs/arrays when you need a pure array contract for the target ondevice
     lane.
 
+    This class therefore sits at the current architecture boundary:
+    immutable grouped-coil specs feed the traceable JAX kernels, while the
+    public wrapper still owns mutable solve state and flat decision-vector
+    orchestration for compatibility with the existing outer optimizer stack.
+
     Args:
         biotsavart: ``BiotSavartJAX`` instance (or any adapter exposing
             ``coil_set_spec()`` for explicit immutable grouped-coil state).
@@ -1258,12 +1333,40 @@ class BoozerSurfaceJAX(Optimizable):
             return _concat_jax_float64(sdofs, [iota, G])
         return _concat_jax_float64(sdofs, [iota])
 
+    def _make_penalty_optimizer_state(self, iota, G, *, sdofs=None):
+        if sdofs is None:
+            sdofs = self._get_surface_dofs()
+        if G is None:
+            return _BoozerPenaltyOptimizerState(
+                surface_dofs=_as_jax_float64(sdofs),
+                iota=_as_jax_float64(iota),
+            )
+        return _BoozerPenaltyOptimizerStateWithG(
+            surface_dofs=_as_jax_float64(sdofs),
+            iota=_as_jax_float64(iota),
+            G=_as_jax_float64(G),
+        )
+
     def _unpack_decision_vector(self, x, optimize_G):
         """Unpack decision vector → (sdofs, iota, G_or_None)."""
         sdofs, iota, G = _split_decision_vector_jax(x, optimize_G=optimize_G)
         if optimize_G:
             return np.asarray(sdofs), float(iota), float(G)
         return np.asarray(sdofs), float(iota), None
+
+    def _unpack_penalty_optimizer_state(self, x, optimize_G):
+        optimizer_state = _as_boozer_penalty_optimizer_state(x, optimize_G=optimize_G)
+        if optimize_G:
+            return (
+                np.asarray(optimizer_state.surface_dofs),
+                float(optimizer_state.iota),
+                float(optimizer_state.G),
+            )
+        return (
+            np.asarray(optimizer_state.surface_dofs),
+            float(optimizer_state.iota),
+            None,
+        )
 
     def _unpack_decision_vector_jax(
         self,
@@ -1626,7 +1729,7 @@ class BoozerSurfaceJAX(Optimizable):
 
         optimize_G = G is not None
         s = self.surface
-        x0 = self._pack_decision_vector(iota, G)
+        x0 = self._make_penalty_optimizer_state(iota, G)
         obj_fn = self._make_penalty_objective_with(
             optimize_G, weight_inv_modB, constraint_weight
         )
@@ -1644,14 +1747,21 @@ class BoozerSurfaceJAX(Optimizable):
             progress_callback=self._make_solver_progress_callback(method),
         )
 
-        sdofs_final, iota_out, G_out = self._unpack_decision_vector(
+        sdofs_final, iota_out, G_out = self._unpack_penalty_optimizer_state(
             result.x, optimize_G
         )
         self._set_surface_dofs(sdofs_final)
 
+        gradient = np.asarray(
+            _boozer_penalty_optimizer_state_to_vector(
+                result.jac,
+                optimize_G=optimize_G,
+            )
+        )
+
         resdict = {
             "fun": float(result.fun),
-            "gradient": result.jac,
+            "gradient": gradient,
             "iter": int(result.nit),
             "info": result,
             "success": bool(result.success),
@@ -1670,7 +1780,7 @@ class BoozerSurfaceJAX(Optimizable):
                 f"{method} solve - "
                 f"success={resdict['success']}  iter={resdict['iter']}, "
                 f"iota={iota_out:.16f}, ||grad||_inf="
-                f"{float(jnp.max(jnp.abs(resdict['gradient']))):.3e}",
+                f"{float(jnp.max(jnp.abs(jnp.asarray(resdict['gradient'])))):.3e}",
                 flush=True,
             )
         return resdict

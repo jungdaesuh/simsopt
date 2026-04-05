@@ -1,10 +1,12 @@
 import argparse
+from dataclasses import dataclass
 import hashlib
 import logging
 import os
 import io
 import json
 import time
+import jax
 import numpy as np
 
 # SIMSOPT imports
@@ -99,6 +101,18 @@ DEFAULT_STAGE2_SEEDS_BY_PLASMA = {
         "order": 2,
     },
 }
+
+
+@dataclass(frozen=True)
+class SingleStageOuterOptimizerState:
+    coil_dofs: object
+
+
+jax.tree_util.register_dataclass(
+    SingleStageOuterOptimizerState,
+    data_fields=["coil_dofs"],
+    meta_fields=[],
+)
 
 
 def format_compact_float(value):
@@ -1184,6 +1198,137 @@ def get_traceable_single_stage_runtime_bundle_builder():
     return make_traceable_objective_runtime_bundle
 
 
+def build_single_stage_target_lane_hardware_success_filter(
+    boozer_surface,
+    bs,
+    banana_curve,
+    vessel_surface,
+    *,
+    cc_dist,
+    cs_dist,
+    ss_dist,
+    curvature_threshold,
+):
+    """Build the pure-JAX feasibility filter for the ondevice target lane."""
+    import jax
+    import jax.numpy as jnp
+
+    from simsopt.geo.curve import kappa_pure
+    from simsopt.jax_core.curve_geometry import (
+        curve_gamma_and_dash_from_spec,
+        curve_geometry_from_spec,
+    )
+    from simsopt.jax_core.surface_rzfourier import (
+        surface_rz_fourier_gamma_from_spec,
+        surface_rz_fourier_spec_from_dofs,
+    )
+
+    try:
+        banana_curve_index = next(
+            coil_index
+            for coil_index, coil in enumerate(bs.coils)
+            if coil.curve is banana_curve
+        )
+    except StopIteration as exc:
+        raise RuntimeError(
+            "single-stage target-lane hardware filter could not locate the banana "
+            "curve in bs.coils."
+        ) from exc
+
+    optimize_G = boozer_surface.res.get("G") is not None
+    surface_spec = boozer_surface.surface.surface_spec()
+    vessel_gamma = surface_rz_fourier_gamma_from_spec(
+        vessel_surface.surface_spec()
+    ).reshape((-1, 3))
+    cc_dist_jax = jax.device_put(np.asarray(cc_dist, dtype=np.float64))
+    cs_dist_jax = jax.device_put(np.asarray(cs_dist, dtype=np.float64))
+    ss_dist_jax = jax.device_put(np.asarray(ss_dist, dtype=np.float64))
+    curvature_threshold_jax = jax.device_put(
+        np.asarray(curvature_threshold, dtype=np.float64)
+    )
+    inf = jax.device_put(np.asarray(np.inf, dtype=np.float64))
+
+    def _pairwise_min_distance(points_a, points_b):
+        deltas = points_a[:, None, :] - points_b[None, :, :]
+        return jnp.min(jnp.sqrt(jnp.sum(jnp.square(deltas), axis=2)))
+
+    def _coil_gamma_points(coil_spec):
+        gamma, _ = curve_gamma_and_dash_from_spec(coil_spec.curve)
+        if coil_spec.symmetry.has_rotation:
+            gamma = gamma @ coil_spec.symmetry.rotmat
+        return gamma.reshape((-1, 3))
+
+    def _curve_curve_min_distance(coil_gammas):
+        minimum = inf
+        for i, gamma_i in enumerate(coil_gammas):
+            for gamma_j in coil_gammas[:i]:
+                minimum = jnp.minimum(
+                    minimum,
+                    _pairwise_min_distance(gamma_i, gamma_j),
+                )
+        return minimum
+
+    def _curve_surface_min_distance(coil_gammas, surface_gamma):
+        minimum = inf
+        for gamma in coil_gammas:
+            minimum = jnp.minimum(
+                minimum,
+                _pairwise_min_distance(gamma, surface_gamma),
+            )
+        return minimum
+
+    def _surface_spec_from_sdofs(sdofs):
+        return surface_rz_fourier_spec_from_dofs(
+            sdofs,
+            quadpoints_phi=surface_spec.quadpoints_phi,
+            quadpoints_theta=surface_spec.quadpoints_theta,
+            mpol=surface_spec.mpol,
+            ntor=surface_spec.ntor,
+            nfp=surface_spec.nfp,
+            stellsym=surface_spec.stellsym,
+        )
+
+    def success_filter(coil_dofs, solved_x):
+        coil_set_spec = bs.coil_set_spec_from_dofs(coil_dofs)
+        coil_specs = bs.coil_specs_from_dofs(coil_dofs)
+        sdofs, _iota, _G = boozer_surface._unpack_decision_vector_jax(
+            solved_x,
+            optimize_G,
+            coil_set_spec=coil_set_spec,
+        )
+        surface_gamma = surface_rz_fourier_gamma_from_spec(
+            _surface_spec_from_sdofs(sdofs)
+        ).reshape((-1, 3))
+        coil_gammas = tuple(_coil_gamma_points(coil_spec) for coil_spec in coil_specs)
+        curve_curve_min_dist = _curve_curve_min_distance(coil_gammas)
+        curve_surface_min_dist = _curve_surface_min_distance(
+            coil_gammas,
+            surface_gamma,
+        )
+        surface_vessel_min_dist = _pairwise_min_distance(surface_gamma, vessel_gamma)
+        _gamma, banana_gammadash, banana_gammadashdash = curve_geometry_from_spec(
+            coil_specs[banana_curve_index].curve
+        )
+        max_curvature = jnp.max(kappa_pure(banana_gammadash, banana_gammadashdash))
+        metrics = jnp.stack(
+            (
+                curve_curve_min_dist,
+                curve_surface_min_dist,
+                surface_vessel_min_dist,
+                max_curvature,
+            )
+        )
+        return (
+            jnp.all(jnp.isfinite(metrics))
+            & (curve_curve_min_dist >= cc_dist_jax)
+            & (curve_surface_min_dist >= cs_dist_jax)
+            & (surface_vessel_min_dist >= ss_dist_jax)
+            & (max_curvature <= curvature_threshold_jax)
+        )
+
+    return success_filter
+
+
 def build_target_lane_outer_objectives(
     boozer_surface,
     bs,
@@ -1191,6 +1336,7 @@ def build_target_lane_outer_objectives(
     *,
     use_value_and_grad: bool,
     profile_target_lane: bool,
+    success_filter=None,
 ):
     """Build the target-lane objective(s) needed by the selected outer-loop mode."""
     target_scalar_objective = None
@@ -1198,23 +1344,20 @@ def build_target_lane_outer_objectives(
     target_lane_profile = None
     runtime_bundle = None
 
-    needs_runtime_bundle = use_value_and_grad or profile_target_lane
+    needs_runtime_bundle = True
     if needs_runtime_bundle:
         runtime_bundle = get_traceable_single_stage_runtime_bundle_builder()(
             boozer_surface,
             bs,
             iota_target,
             include_profile_suite=profile_target_lane,
+            success_filter=success_filter,
         )
 
     if use_value_and_grad:
         target_value_and_grad_objective = runtime_bundle["value_and_grad"]
     else:
-        target_scalar_objective = get_traceable_single_stage_objective_builder()(
-            boozer_surface,
-            bs,
-            iota_target,
-        )
+        target_scalar_objective = runtime_bundle["objective"]
 
     if profile_target_lane:
         target_lane_profile = profile_traceable_target_lane_objective(
@@ -1280,7 +1423,37 @@ def resolve_single_stage_outer_optimizer_method(field_backend, optimizer_backend
 
 def _single_stage_optimizer_dofs_array(x):
     """Normalize outer-loop DOFs to the float array contract used in this file."""
+    if isinstance(x, SingleStageOuterOptimizerState):
+        x = x.coil_dofs
     return np.asarray(x, dtype=float)
+
+
+def _single_stage_outer_optimizer_state(x):
+    if isinstance(x, SingleStageOuterOptimizerState):
+        return x
+    return SingleStageOuterOptimizerState(coil_dofs=x)
+
+
+def _wrap_single_stage_outer_scalar_objective(fun):
+    if fun is None:
+        return None
+
+    def wrapped(state):
+        return fun(_single_stage_outer_optimizer_state(state).coil_dofs)
+
+    return wrapped
+
+
+def _wrap_single_stage_outer_value_and_grad_objective(fun):
+    if fun is None:
+        return None
+
+    def wrapped(state):
+        optimizer_state = _single_stage_outer_optimizer_state(state)
+        value, grad = fun(optimizer_state.coil_dofs)
+        return value, SingleStageOuterOptimizerState(coil_dofs=grad)
+
+    return wrapped
 
 
 def _block_tree_until_ready(tree):
@@ -1376,7 +1549,7 @@ def resolve_single_stage_outer_optimizer_initial_dofs(
 ):
     """Return the optimizer-space DOFs for the selected outer-loop contract."""
     if use_target_lane:
-        return _single_stage_optimizer_dofs_array(bs.x.copy())
+        return _single_stage_outer_optimizer_state(bs.x.copy())
     return _single_stage_optimizer_dofs_array(JF.x.copy())
 
 
@@ -1392,8 +1565,6 @@ def resolve_single_stage_outer_dof_setter(
     def _set_dofs(x):
         target.x = _single_stage_optimizer_dofs_array(x)
 
-    if use_target_lane:
-        return _set_dofs
     return _set_dofs
 
 
@@ -1412,6 +1583,7 @@ def run_single_stage_optimizer(
     """Run the single-stage outer optimization through the shared adapter."""
     from simsopt.geo.optimizer_jax import jax_minimize
 
+    optimizer_dofs = dofs
     if fun is not None:
         optimizer_fun = fun
         value_and_grad = True
@@ -1428,9 +1600,17 @@ def run_single_stage_optimizer(
             "Single-stage optimization requires an explicit value-and-gradient "
             "objective for the selected lane."
         )
+    if contract.use_scalar_objective:
+        optimizer_dofs = _single_stage_outer_optimizer_state(dofs)
+        if value_and_grad:
+            optimizer_fun = _wrap_single_stage_outer_value_and_grad_objective(
+                optimizer_fun
+            )
+        else:
+            optimizer_fun = _wrap_single_stage_outer_scalar_objective(optimizer_fun)
     return jax_minimize(
         optimizer_fun,
-        dofs,
+        optimizer_dofs,
         method=contract.method,
         tol=gtol,
         maxiter=maxiter,
@@ -1749,16 +1929,17 @@ class SingleStageAdapter:
         accepted point refreshes the mutable state that diagnostics
         and ``accept_step`` depend on.
         """
-        self.apply_coil_dofs(x)
+        x_array = _single_stage_optimizer_dofs_array(x)
+        self.apply_coil_dofs(x_array)
         _evaluate_candidate_impl(
-            x,
+            x_array,
             self.run_dict,
             self.boozer_surface,
             self.JF,
             self.objectives,
             self.diagnostics,
         )
-        self.run_dict["x_prev"] = np.array(x, copy=True)
+        self.run_dict["x_prev"] = x_array.copy()
 
     def sync_accepted_step(self, x):
         """Refresh mutable state if needed, then snapshot one accepted step."""
@@ -1788,9 +1969,10 @@ class SingleStageAdapter:
         before delegating.  This is the only mutation site for the outer
         loop — ``evaluate_candidate`` itself is mutation-free.
         """
-        self.apply_coil_dofs(x)
+        x_array = _single_stage_optimizer_dofs_array(x)
+        self.apply_coil_dofs(x_array)
         return evaluate_candidate(
-            x,
+            x_array,
             self.run_dict,
             self.boozer_surface,
             self.JF,
@@ -1894,6 +2076,7 @@ def restore_from_pytree(
             the coil DOFs in the graph are left unchanged.
     """
     if coil_dofs is not None:
+        coil_dofs = _single_stage_optimizer_dofs_array(coil_dofs)
         if apply_coil_dofs is None:
             JF.x = coil_dofs
         else:
@@ -2270,7 +2453,7 @@ if __name__ == "__main__":
         bs,
         use_target_lane=use_target_lane,
     )
-    run_dict["x_prev"] = np.array(dofs, copy=True)
+    run_dict["x_prev"] = _single_stage_optimizer_dofs_array(dofs).copy()
     target_lane_profile = None
     adapter = SingleStageAdapter(
         run_dict=run_dict,
@@ -2318,7 +2501,20 @@ if __name__ == "__main__":
         outer_optimizer_start_s = _perf_counter_s()
         target_scalar_objective = None
         target_value_and_grad_objective = None
+        target_lane_success_filter = None
         if use_target_lane:
+            target_lane_success_filter = (
+                build_single_stage_target_lane_hardware_success_filter(
+                    boozer_surface,
+                    bs,
+                    banana_curve,
+                    VV,
+                    cc_dist=CC_DIST,
+                    cs_dist=CS_DIST,
+                    ss_dist=SS_DIST,
+                    curvature_threshold=CURVATURE_THRESHOLD,
+                )
+            )
             (
                 target_scalar_objective,
                 target_value_and_grad_objective,
@@ -2329,6 +2525,7 @@ if __name__ == "__main__":
                 iota_target,
                 use_value_and_grad=use_target_lane_vg,
                 profile_target_lane=args.profile_target_lane,
+                success_filter=target_lane_success_filter,
             )
         accepted_step_callback = resolve_target_lane_accepted_step_callback(
             adapter,

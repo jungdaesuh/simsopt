@@ -9,6 +9,7 @@ from pathlib import Path
 import jax
 import jax.numpy as jnp
 import numpy as np
+from jax.flatten_util import ravel_pytree
 
 jax.config.update("jax_enable_x64", True)
 
@@ -469,10 +470,11 @@ def _successful_minimize_result(
     nfev=1,
     njev=1,
 ):
+    flat_x0, _ = ravel_pytree(x0)
     return types.SimpleNamespace(
-        x=jnp.asarray(x0),
+        x=x0,
         fun=0.0,
-        jac=jnp.zeros_like(x0),
+        jac=jnp.zeros_like(flat_x0),
         nit=nit,
         nfev=nfev,
         njev=njev,

@@ -1,7 +1,8 @@
-"""Scalar JAX objective used by the Stage 2 ondevice target lane."""
+"""JAX objective bundle used by the Stage 2 ondevice target lane."""
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Callable, NamedTuple
 
 import jax
@@ -35,11 +36,15 @@ from ..geo.curveobjectives import (
 __all__ = [
     "Stage2PenaltyConfig",
     "Stage2TargetObjectiveBundle",
+    "Stage2TargetOptimizerState",
     "Stage2TargetObjectiveTerm",
     "build_stage2_target_objective",
+    "stage2_target_optimizer_state_from_dofs",
+    "stage2_target_optimizer_state_to_dofs",
 ]
 
 Stage2ObjectiveFn = Callable[[jnp.ndarray], jnp.ndarray]
+Stage2ValueAndGradFn = Callable[[jnp.ndarray], tuple[jnp.ndarray, jnp.ndarray]]
 
 
 class Stage2TargetObjectiveTerm(NamedTuple):
@@ -59,9 +64,25 @@ class Stage2PenaltyConfig(NamedTuple):
     squared_flux_definition: str = "quadratic flux"
 
 
+@dataclass(frozen=True)
+class Stage2TargetOptimizerState:
+    """Structured optimizer state for the Stage 2 target lane."""
+
+    current_dof: jax.Array
+    curve_dofs: jax.Array
+
+
+jax.tree_util.register_dataclass(
+    Stage2TargetOptimizerState,
+    data_fields=["current_dof", "curve_dofs"],
+    meta_fields=[],
+)
+
+
 class Stage2TargetObjectiveBundle(NamedTuple):
     objective: Stage2ObjectiveFn
     expected_dof_count: int
+    value_and_grad: Stage2ValueAndGradFn | None = None
     terms: tuple[Stage2TargetObjectiveTerm, ...] = ()
     raw_terms: Stage2ObjectiveFn | None = None
 
@@ -107,13 +128,45 @@ def _runtimeify_tree(value):
     return _hostify_tree(value)
 
 
-def _split_stage2_dofs(dofs, current_selector, curve_selector):
+def _split_stage2_dofs(dofs, curve_dof_count=None):
+    state = stage2_target_optimizer_state_from_dofs(
+        dofs,
+        curve_dof_count=curve_dof_count,
+    )
+    return state.current_dof, state.curve_dofs
+
+
+def stage2_target_optimizer_state_from_dofs(dofs, *, curve_dof_count=None):
+    if isinstance(dofs, Stage2TargetOptimizerState):
+        return Stage2TargetOptimizerState(
+            current_dof=_as_objective_dofs(dofs.current_dof),
+            curve_dofs=_as_objective_dofs(dofs.curve_dofs),
+        )
     dofs = _as_objective_dofs(dofs)
-    current_selector_jax = _runtime_float64_array(current_selector, reference=dofs)
-    curve_selector_jax = _runtime_float64_array(curve_selector, reference=dofs)
-    current_dof = jnp.dot(current_selector_jax, dofs)
-    curve_dofs = curve_selector_jax @ dofs
-    return current_dof, curve_dofs
+    current_dof = dofs[0]
+    if curve_dof_count is None:
+        curve_dofs = dofs[1:]
+    else:
+        curve_dofs = jax.lax.dynamic_slice_in_dim(
+            dofs,
+            start_index=1,
+            slice_size=int(curve_dof_count),
+            axis=0,
+        )
+    return Stage2TargetOptimizerState(
+        current_dof=current_dof,
+        curve_dofs=curve_dofs,
+    )
+
+
+def stage2_target_optimizer_state_to_dofs(state) -> jax.Array:
+    state = stage2_target_optimizer_state_from_dofs(state)
+    return jnp.concatenate(
+        (
+            jnp.reshape(_as_objective_dofs(state.current_dof), (1,)),
+            _as_objective_dofs(state.curve_dofs),
+        )
+    )
 
 
 def _fixed_curve_penalty(curves, minimum_distance):
@@ -205,10 +258,11 @@ def build_stage2_target_objective(
     banana_curve,
     penalty_config: Stage2PenaltyConfig,
 ):
-    """Build a scalar JAX objective for the target Stage 2 lane.
+    """Build the JAX objective bundle for the target Stage 2 lane.
 
-    The returned callable consumes the Stage 2 free-vector in the same order as
-    the existing composite objective contract: ``[banana_current, curve_dofs...]``.
+    The returned bundle accepts either the historical Stage 2 free-vector
+    ``[banana_current, curve_dofs...]`` or ``Stage2TargetOptimizerState`` with
+    the same logical payload split into named fields.
     """
     squared_flux_weight = penalty_config.squared_flux_weight
     length_weight = penalty_config.length_weight
@@ -267,9 +321,6 @@ def build_stage2_target_objective(
     banana_symmetry_specs_runtime = _runtimeify_tree(banana_symmetry_specs)
     tf_curve_data_runtime = _runtimeify_tree(tf_curve_data)
     flux_spec_runtime = _runtimeify_tree(flux_spec)
-    current_selector = np.zeros((curve_dof_count + 1,), dtype=np.float64)
-    current_selector[0] = 1.0
-    curve_selector = np.eye(curve_dof_count + 1, dtype=np.float64)[1:, :]
     objective_weights = np.array(
         (
             squared_flux_weight,
@@ -281,22 +332,27 @@ def build_stage2_target_objective(
     )
 
     def _raw_terms(dofs):
-        fixed_field_jax = _runtime_float64_array(fixed_field, reference=dofs)
-        points_jax = _runtime_float64_array(points, reference=dofs)
-        length_target_jax = _runtime_float64_scalar(length_target, reference=dofs)
-        cc_threshold_jax = _runtime_float64_scalar(cc_threshold, reference=dofs)
-        curvature_p_norm_jax = _runtime_float64_scalar(curvature_p_norm, reference=dofs)
+        state = stage2_target_optimizer_state_from_dofs(
+            dofs,
+            curve_dof_count=curve_dof_count,
+        )
+        current_dof = state.current_dof
+        curve_dofs = state.curve_dofs
+        flat_dofs = stage2_target_optimizer_state_to_dofs(state)
+        fixed_field_jax = _runtime_float64_array(fixed_field, reference=flat_dofs)
+        points_jax = _runtime_float64_array(points, reference=flat_dofs)
+        length_target_jax = _runtime_float64_scalar(length_target, reference=flat_dofs)
+        cc_threshold_jax = _runtime_float64_scalar(cc_threshold, reference=flat_dofs)
+        curvature_p_norm_jax = _runtime_float64_scalar(
+            curvature_p_norm,
+            reference=flat_dofs,
+        )
         curvature_threshold_jax = _runtime_float64_scalar(
             curvature_threshold,
-            reference=dofs,
+            reference=flat_dofs,
         )
-        half_jax = _runtime_float64_scalar(half, reference=dofs)
-        zero_jax = _runtime_float64_scalar(zero, reference=dofs)
-        current_dof, curve_dofs = _split_stage2_dofs(
-            dofs,
-            current_selector,
-            curve_selector,
-        )
+        half_jax = _runtime_float64_scalar(half, reference=flat_dofs)
+        zero_jax = _runtime_float64_scalar(zero, reference=flat_dofs)
 
         base_gamma, base_gammadash, base_gammadashdash = curve_geometry_from_dofs(
             banana_curve_spec_runtime,
@@ -358,14 +414,20 @@ def build_stage2_target_objective(
         Stage2TargetObjectiveTerm("curvature_penalty", float(curvature_weight)),
     )
 
-    def objective(dofs):
-        raw_terms = _raw_terms(dofs)
-        weights = _runtime_float64_array(objective_weights, reference=raw_terms)
-        return jnp.dot(weights, raw_terms)
+    raw_terms_fun = jax.jit(_raw_terms)
+
+    def objective_impl(dofs):
+        raw_terms_value = raw_terms_fun(dofs)
+        weights = _runtime_float64_array(objective_weights, reference=raw_terms_value)
+        return jnp.dot(weights, raw_terms_value)
+
+    objective = jax.jit(objective_impl)
+    value_and_grad = jax.jit(jax.value_and_grad(objective_impl))
 
     return Stage2TargetObjectiveBundle(
         objective=objective,
         expected_dof_count=curve_dof_count + 1,
+        value_and_grad=value_and_grad,
         terms=terms,
-        raw_terms=_raw_terms,
+        raw_terms=raw_terms_fun,
     )

@@ -20,6 +20,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
+from jax.flatten_util import ravel_pytree
 from conftest import enable_non_strict_jax_backend, enable_strict_jax_backend
 from simsopt.field.coil import Coil, Current
 from simsopt.jax_core import (
@@ -1061,10 +1062,11 @@ class TestBoozerSurfaceJAXClass:
         ):
             del fun, tol, maxiter, options, progress_callback
             captured["method"] = method
+            flat_x0, _ = ravel_pytree(x0)
             return types.SimpleNamespace(
-                x=jnp.asarray(x0),
+                x=x0,
                 fun=0.0,
-                jac=jnp.zeros_like(x0),
+                jac=jnp.zeros_like(flat_x0),
                 nit=0,
                 nfev=1,
                 njev=1,
@@ -1504,10 +1506,11 @@ class TestBoozerSurfaceJAXClass:
             progress_callback=None,
         ):
             del fun, method, tol, maxiter, options, progress_callback
+            flat_x0, _ = ravel_pytree(x0)
             return types.SimpleNamespace(
-                x=jnp.asarray(x0),
+                x=x0,
                 fun=0.0,
-                jac=jnp.zeros_like(x0),
+                jac=jnp.zeros_like(flat_x0),
                 nit=0,
                 nfev=1,
                 njev=1,

@@ -7,6 +7,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 import simsopt.geo.optimizer_jax_private._common as _opt_common
+from jax.flatten_util import ravel_pytree
 
 from .boozersurface_jax_test_helpers import (
     PRIVATE_OPTIMIZER_JAX_VERSION,
@@ -655,15 +656,64 @@ class TestOptimizerAdapterPrivate:
 
     @PRIVATE_OPTIMIZER_RUNTIME
     @REQUIRES_PRIVATE_OPTIMIZER_RUNTIME
-    def test_bfgs_ondevice_rejects_nonvector_x0(self):
-        """bfgs-ondevice must reject non-flat decision vectors."""
-        with pytest.raises(ValueError, match="flat 1-D decision vector"):
-            jax_minimize(
-                lambda x: jnp.sum(x**2),
-                jnp.zeros((2, 2), dtype=jnp.float64),
-                method="bfgs-ondevice",
-                maxiter=3,
+    def test_bfgs_ondevice_accepts_pytree_x0_and_restores_result_structure(self):
+        """bfgs-ondevice should flatten pytrees internally and restore them on return."""
+
+        def quad(state):
+            return 0.5 * (
+                jnp.dot(state["surface"], state["surface"])
+                + jnp.dot(state["current"], state["current"])
             )
+
+        x0 = {
+            "surface": jnp.array([1.0, -2.0], dtype=jnp.float64),
+            "current": jnp.array([0.5], dtype=jnp.float64),
+        }
+        callback_calls = []
+
+        result = jax_minimize(
+            quad,
+            x0,
+            method="bfgs-ondevice",
+            maxiter=5,
+            callback=lambda state: callback_calls.append(state),
+        )
+
+        assert isinstance(result.x, dict)
+        assert isinstance(result.jac, dict)
+        np.testing.assert_allclose(result.x["surface"], np.zeros(2), atol=1e-12)
+        np.testing.assert_allclose(result.x["current"], np.zeros(1), atol=1e-12)
+        np.testing.assert_allclose(result.jac["surface"], np.zeros(2), atol=1e-12)
+        np.testing.assert_allclose(result.jac["current"], np.zeros(1), atol=1e-12)
+        assert callback_calls
+        assert isinstance(callback_calls[0], dict)
+
+    @PRIVATE_OPTIMIZER_RUNTIME
+    @REQUIRES_PRIVATE_OPTIMIZER_RUNTIME
+    def test_minimize_lbfgs_private_accepts_pytree_x0(self):
+        """Direct private L-BFGS entry should flatten pytrees before runtime checks."""
+
+        def quad(state):
+            return 0.5 * (
+                jnp.dot(state["surface"], state["surface"])
+                + jnp.dot(state["current"], state["current"])
+            )
+
+        x0 = {
+            "surface": jnp.array([1.0, -2.0], dtype=jnp.float64),
+            "current": jnp.array([0.5], dtype=jnp.float64),
+        }
+        flat_x0, _ = ravel_pytree(x0)
+
+        state = _opt._minimize_lbfgs_private(
+            quad,
+            x0,
+            maxiter=10,
+            gtol=1e-8,
+        )
+
+        np.testing.assert_allclose(np.asarray(state.x_k), np.zeros_like(flat_x0), atol=1e-12)
+        np.testing.assert_allclose(np.asarray(state.g_k), np.zeros_like(flat_x0), atol=1e-12)
 
     @PRIVATE_OPTIMIZER_RUNTIME
     @REQUIRES_PRIVATE_OPTIMIZER_RUNTIME
@@ -1024,16 +1074,7 @@ class TestBoozerSurfaceJAXClassPrivate:
         ):
             del fun, tol, maxiter, options, progress_callback
             captured["method"] = method
-            return types.SimpleNamespace(
-                x=jnp.asarray(x0),
-                fun=0.0,
-                jac=jnp.zeros_like(x0),
-                nit=0,
-                nfev=1,
-                njev=1,
-                success=True,
-                status=0,
-            )
+            return _successful_minimize_result(x0)
 
         def fake_newton_polish(
             _objective_fn, x0, *, maxiter, tol, stab, progress_callback=None

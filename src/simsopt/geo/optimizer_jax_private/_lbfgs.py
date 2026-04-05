@@ -8,6 +8,7 @@ import jax
 import jax.numpy as jnp
 from jax import lax
 
+from ..optimizer_jax import _prepare_optimizer_callable_inputs
 from ._common import (
     _as_jax_dtype,
     _bool_scalar,
@@ -111,6 +112,12 @@ def _minimize_lbfgs_private_impl(
     callback=None,
     progress_callback=None,
 ):
+    value_and_grad_fun, x0, callback, _ = _prepare_optimizer_callable_inputs(
+        value_and_grad_fun,
+        x0,
+        value_and_grad=True,
+        callback=callback,
+    )
     x0 = _require_private_optimizer_runtime(x0)
     d = len(x0)
     dtype = x0.dtype

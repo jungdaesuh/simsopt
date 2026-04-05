@@ -1096,7 +1096,7 @@ def resolve_stage2_optimizer_method(field_backend, optimizer_backend):
 
 
 def should_build_stage2_target_objective(field_backend, optimizer_backend):
-    """Return whether the scalar JAX Stage 2 objective should drive optimization."""
+    """Return whether the JAX Stage 2 target objective should drive optimization."""
     return resolve_stage2_optimizer_contract(
         field_backend, optimizer_backend
     ).use_scalar_objective
@@ -1117,16 +1117,19 @@ def resolve_stage2_target_lane_requirements(
         probe_only and needs_target_probe_payload and field_backend != "jax"
     )
     outer_contract = None
-    use_scalar_objective = False
+    use_target_objective_lane = False
     if not probe_only_target_payload:
         outer_contract = resolve_stage2_optimizer_contract(
             field_backend,
             optimizer_backend,
         )
-        use_scalar_objective = outer_contract.use_scalar_objective
+        use_target_objective_lane = should_build_stage2_target_objective(
+            field_backend,
+            optimizer_backend,
+        )
     return (
         outer_contract,
-        use_scalar_objective,
+        use_target_objective_lane,
         needs_target_probe_payload,
         probe_only_target_payload,
     )
@@ -1138,6 +1141,37 @@ def validate_stage2_target_objective_dof_layout(
 ):
     if target_objective_bundle.expected_dof_count != dofs.size:
         raise RuntimeError(STAGE2_TARGET_OBJECTIVE_DOF_LAYOUT_ERROR)
+
+
+def resolve_stage2_target_value_and_grad(target_objective_bundle):
+    if target_objective_bundle is None:
+        return None
+    if target_objective_bundle.value_and_grad is not None:
+        return target_objective_bundle.value_and_grad
+    return jax.jit(jax.value_and_grad(target_objective_bundle.objective))
+
+
+def build_stage2_target_optimizer_state(target_objective_bundle, dofs):
+    from simsopt.objectives.stage2_target_objective_jax import (
+        stage2_target_optimizer_state_from_dofs,
+    )
+
+    curve_dof_count = int(target_objective_bundle.expected_dof_count) - 1
+    return stage2_target_optimizer_state_from_dofs(
+        dofs,
+        curve_dof_count=curve_dof_count,
+    )
+
+
+def flatten_stage2_target_optimizer_state(dofs):
+    from simsopt.objectives.stage2_target_objective_jax import (
+        Stage2TargetOptimizerState,
+        stage2_target_optimizer_state_to_dofs,
+    )
+
+    if isinstance(dofs, Stage2TargetOptimizerState):
+        return host_array(stage2_target_optimizer_state_to_dofs(dofs))
+    return host_array(dofs)
 
 
 def resolve_stage2_field_diagnostic_stride(args):
@@ -1164,17 +1198,19 @@ def run_stage2_optimizer(
     """Run the Stage 2 outer optimization through the shared optimizer substrate."""
     from simsopt.geo.optimizer_jax import jax_minimize
 
-    if contract.use_scalar_objective and scalar_fun is None:
+    use_explicit_value_and_grad = value_and_grad_fun is not None
+    if contract.use_scalar_objective and scalar_fun is None and not use_explicit_value_and_grad:
         raise RuntimeError(
-            "Stage 2 target-lane optimization requires a scalar JAX objective."
+            "Stage 2 target-lane optimization requires a JAX target objective."
         )
-    if (not contract.use_scalar_objective) and value_and_grad_fun is None:
+    if (not contract.use_scalar_objective) and not use_explicit_value_and_grad:
         raise RuntimeError(
             "Stage 2 reference-lane optimization requires an explicit "
             "value-and-gradient objective."
         )
+    objective_fun = value_and_grad_fun if use_explicit_value_and_grad else scalar_fun
     return jax_minimize(
-        scalar_fun if contract.use_scalar_objective else value_and_grad_fun,
+        objective_fun,
         dofs,
         method=contract.method,
         tol=gtol,
@@ -1183,7 +1219,7 @@ def run_stage2_optimizer(
             "maxcor": int(maxcor),
             "ftol": float(ftol),
         },
-        value_and_grad=not contract.use_scalar_objective,
+        value_and_grad=use_explicit_value_and_grad,
     )
 
 
@@ -1228,9 +1264,11 @@ def _build_stage2_probe_composite_payload(
     composite_terms = None
     if target_objective_bundle is not None:
         dofs_jax = jax.device_put(host_array(context.JF.x))
-        composite_value, composite_grad = jax.jit(
-            jax.value_and_grad(target_objective_bundle.objective)
-        )(dofs_jax)
+        target_value_and_grad = resolve_stage2_target_value_and_grad(
+            target_objective_bundle
+        )
+        assert target_value_and_grad is not None
+        composite_value, composite_grad = target_value_and_grad(dofs_jax)
         composite_value = host_float(composite_value)
         composite_grad = host_array(composite_grad)
         objective_source = "target-objective"
@@ -1620,7 +1658,7 @@ if __name__ == "__main__":
 
     (
         outer_contract,
-        use_scalar_objective,
+        use_target_objective_lane,
         needs_target_probe_payload,
         probe_only_target_payload,
     ) = resolve_stage2_target_lane_requirements(
@@ -1631,7 +1669,9 @@ if __name__ == "__main__":
     )
 
     target_objective_bundle = None
-    needs_target_objective_bundle = use_scalar_objective or needs_target_probe_payload
+    needs_target_objective_bundle = (
+        use_target_objective_lane or needs_target_probe_payload
+    )
     if needs_target_objective_bundle:
         target_objective_bundle = build_stage2_target_objective(
             surface=new_surf,
@@ -1704,11 +1744,11 @@ if __name__ == "__main__":
     trajectory: list[dict[str, object]] | None = [] if args.trajectory_json else None
     final_snapshot = None
     optimizer_timings = None
-    if args.record_warm_timings and not use_scalar_objective:
+    if args.record_warm_timings and not use_target_objective_lane:
         raise ValueError(
             "--record-warm-timings is only supported on the JAX Stage 2 ondevice lane."
         )
-    if args.profile_step_json is not None and use_scalar_objective:
+    if args.profile_step_json is not None and use_target_objective_lane:
         raise ValueError(
             "--profile-step-json is only supported on explicit Stage 2 reference lanes."
         )
@@ -1719,7 +1759,7 @@ if __name__ == "__main__":
         )
     field_diagnostic_stride = resolve_stage2_field_diagnostic_stride(args)
     fun = None
-    if not use_scalar_objective:
+    if not use_target_objective_lane:
         fun = make_fun(
             JF,
             new_bs,
@@ -1805,8 +1845,15 @@ if __name__ == "__main__":
         print("Skipping Stage 2 optimizer because --init-only was provided.")
     else:
         initial_dofs = host_array(dofs).copy()
+        optimizer_dofs = dofs
+        if use_target_objective_lane:
+            assert target_objective_bundle is not None
+            optimizer_dofs = build_stage2_target_optimizer_state(
+                target_objective_bundle,
+                initial_dofs,
+            )
         assert outer_contract is not None
-        if use_scalar_objective:
+        if use_target_objective_lane:
             capture_stage2_trajectory_snapshot(
                 trajectory,
                 JF,
@@ -1824,9 +1871,12 @@ if __name__ == "__main__":
                 CURVATURE_WEIGHT,
                 bs_jax=new_bs_jax,
             )
+        target_value_and_grad = resolve_stage2_target_value_and_grad(
+            target_objective_bundle
+        )
         res, cold_elapsed_s = run_stage2_optimizer_timed(
-            fun,
-            dofs,
+            target_value_and_grad if target_value_and_grad is not None else fun,
+            optimizer_dofs,
             contract=outer_contract,
             maxiter=MAXITER,
             maxcor=300,
@@ -1838,11 +1888,11 @@ if __name__ == "__main__":
                 else target_objective_bundle.objective
             ),
         )
-        JF.x = host_array(res.x)
+        JF.x = flatten_stage2_target_optimizer_state(res.x)
         res_nit = res.nit
         termination_message = str(res.message)
         optimizer_success = bool(res.success)
-        if use_scalar_objective:
+        if use_target_objective_lane:
             assert target_objective_bundle is not None
             final_snapshot = capture_stage2_trajectory_snapshot(
                 trajectory,
@@ -1866,9 +1916,17 @@ if __name__ == "__main__":
             }
             if args.record_warm_timings:
                 JF.x = initial_dofs
-                _, warm_elapsed_s = run_stage2_optimizer_timed(
-                    None,
+                target_value_and_grad = resolve_stage2_target_value_and_grad(
+                    target_objective_bundle
+                )
+                assert target_value_and_grad is not None
+                warm_optimizer_dofs = build_stage2_target_optimizer_state(
+                    target_objective_bundle,
                     initial_dofs,
+                )
+                _, warm_elapsed_s = run_stage2_optimizer_timed(
+                    target_value_and_grad,
+                    warm_optimizer_dofs,
                     contract=outer_contract,
                     maxiter=MAXITER,
                     maxcor=300,
@@ -1881,7 +1939,7 @@ if __name__ == "__main__":
                     float(cold_elapsed_s) - float(warm_elapsed_s),
                     0.0,
                 )
-                JF.x = host_array(res.x)
+                JF.x = flatten_stage2_target_optimizer_state(res.x)
         print(res.message)
     if args.trajectory_json:
         write_json_file(
