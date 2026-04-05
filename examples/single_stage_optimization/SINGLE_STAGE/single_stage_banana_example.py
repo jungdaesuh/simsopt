@@ -29,7 +29,11 @@ from simsopt.geo.surfaceobjectives import (
     boozer_surface_residual,
     boozer_surface_residual_dB,
 )
-from simsopt.geo.curveobjectives import CurveCurveDistance, CurveSurfaceDistance
+from simsopt.geo.curveobjectives import (
+    CurveCurveDistance,
+    CurveSurfaceDistance,
+    pairwise_min_distance_pure,
+)
 from simsopt.field import BiotSavart
 from simsopt.objectives import QuadraticPenalty
 from simsopt.objectives.utilities import forward_backward
@@ -1268,10 +1272,6 @@ def build_single_stage_target_lane_hardware_success_filter(
     )
     inf = jax.device_put(np.asarray(np.inf, dtype=np.float64))
 
-    def _pairwise_min_distance(points_a, points_b):
-        deltas = points_a[:, None, :] - points_b[None, :, :]
-        return jnp.min(jnp.sqrt(jnp.sum(jnp.square(deltas), axis=2)))
-
     def _coil_gamma_points(coil_spec):
         gamma, _ = curve_gamma_and_dash_from_spec(coil_spec.curve)
         if coil_spec.symmetry.has_rotation:
@@ -1284,7 +1284,7 @@ def build_single_stage_target_lane_hardware_success_filter(
             for gamma_j in coil_gammas[:i]:
                 minimum = jnp.minimum(
                     minimum,
-                    _pairwise_min_distance(gamma_i, gamma_j),
+                    pairwise_min_distance_pure(gamma_i, gamma_j),
                 )
         return minimum
 
@@ -1293,7 +1293,7 @@ def build_single_stage_target_lane_hardware_success_filter(
         for gamma in coil_gammas:
             minimum = jnp.minimum(
                 minimum,
-                _pairwise_min_distance(gamma, surface_gamma),
+                pairwise_min_distance_pure(gamma, surface_gamma),
             )
         return minimum
 
@@ -1325,7 +1325,10 @@ def build_single_stage_target_lane_hardware_success_filter(
             coil_gammas,
             surface_gamma,
         )
-        surface_vessel_min_dist = _pairwise_min_distance(surface_gamma, vessel_gamma)
+        surface_vessel_min_dist = pairwise_min_distance_pure(
+            surface_gamma,
+            vessel_gamma,
+        )
         _gamma, banana_gammadash, banana_gammadashdash = curve_geometry_from_spec(
             coil_specs[banana_curve_index].curve
         )

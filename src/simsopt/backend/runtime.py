@@ -35,6 +35,7 @@ _TRANSFER_GUARD_ENV = "SIMSOPT_JAX_TRANSFER_GUARD"
 _COMPILATION_CACHE_DIR_ENV = "SIMSOPT_JAX_COMPILATION_CACHE_DIR"
 _COIL_CHUNK_SIZE_ENV = "SIMSOPT_JAX_COIL_CHUNK_SIZE"
 _QUADRATURE_BLOCK_SIZE_ENV = "SIMSOPT_JAX_QUADRATURE_BLOCK_SIZE"
+_PAIRWISE_PENALTY_CHUNK_SIZE_ENV = "SIMSOPT_JAX_PENALTY_POINT_CHUNK_SIZE"
 _JAX_PLATFORMS_ENV = "JAX_PLATFORMS"
 _VALID_TRANSFER_GUARDS = ("allow", "log", "disallow")
 _GUARDRAIL_ENV_VARS = (
@@ -138,6 +139,7 @@ _POINT_CHUNK_SIZE_BY_POLICY = {
     "stable_default": 256,
     "performance_tuned": 1024,
 }
+_PAIRWISE_PENALTY_CHUNK_SIZE_BY_POLICY = dict(_POINT_CHUNK_SIZE_BY_POLICY)
 _FIELD_KERNEL_ENV_BY_KEY = {
     "coil_chunk_size": _COIL_CHUNK_SIZE_ENV,
     "quadrature_block_size": _QUADRATURE_BLOCK_SIZE_ENV,
@@ -564,6 +566,15 @@ def get_point_chunk_size(mode: str | None = None) -> int:
         return 0
     chunk_policy = get_chunk_policy(mode)
     return _POINT_CHUNK_SIZE_BY_POLICY.get(chunk_policy, 0)
+
+
+def get_pairwise_penalty_chunk_size(mode: str | None = None) -> int:
+    """Return the pairwise-penalty block size for curve/surface reductions."""
+    value = _optional_positive_int_env(_PAIRWISE_PENALTY_CHUNK_SIZE_ENV)
+    if value is not None:
+        return value
+    chunk_policy = get_chunk_policy(mode)
+    return _PAIRWISE_PENALTY_CHUNK_SIZE_BY_POLICY.get(chunk_policy, 0)
 
 
 def get_debug_nans(mode: str | None = None) -> bool:

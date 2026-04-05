@@ -2,6 +2,7 @@ import unittest
 import json
 
 import numpy as np
+import pytest
 
 from _jit_test_state import make_module_jit_hooks
 from simsopt.geo import parameters
@@ -12,14 +13,122 @@ from simsopt.geo.curvehelical import CurveHelical
 from simsopt.geo.curverzfourier import CurveRZFourier
 from simsopt.geo.curveobjectives import CurveLength, LpCurveCurvature, \
     LpCurveCurvatureBarrier, LpCurveTorsion, CurveCurveDistance, CurveCurveDistanceBarrier, ArclengthVariation, \
-    MeanSquaredCurvature, CurveSurfaceDistance, LinkingNumber
+    MeanSquaredCurvature, CurveSurfaceDistance, LinkingNumber, cc_distance_barrier_pure, \
+    cc_distance_pure, cs_distance_pure, max_distance_pure, pairwise_min_distance_pure
 from simsopt.geo.surfacerzfourier import SurfaceRZFourier
 from simsopt.field.coil import coils_via_symmetries
 from simsopt.configs.zoo import get_data
 from simsopt._core.json import GSONDecoder, GSONEncoder, SIMSON
+from simsopt.backend import invalidate_backend_cache
 import simsoptpp as sopp
 
 setUpModule, tearDownModule = make_module_jit_hooks(parameters, value=False)
+
+
+def test_pairwise_penalty_chunking_matches_dense_paths(monkeypatch):
+    gamma1 = np.array(
+        [
+            [0.00, 0.00, 0.00],
+            [0.12, 0.01, 0.00],
+            [0.24, 0.02, 0.01],
+            [0.36, 0.03, 0.02],
+        ],
+        dtype=np.float64,
+    )
+    gamma2 = np.array(
+        [
+            [0.03, 0.01, 0.00],
+            [0.15, 0.04, 0.01],
+            [0.27, 0.05, 0.02],
+        ],
+        dtype=np.float64,
+    )
+    gammadash1 = np.array(
+        [
+            [0.10, 0.01, 0.00],
+            [0.10, 0.01, 0.01],
+            [0.10, 0.01, 0.01],
+            [0.10, 0.01, 0.02],
+        ],
+        dtype=np.float64,
+    )
+    gammadash2 = np.array(
+        [
+            [0.11, 0.02, 0.00],
+            [0.11, 0.02, 0.01],
+            [0.11, 0.02, 0.02],
+        ],
+        dtype=np.float64,
+    )
+    surface_gamma = np.array(
+        [
+            [0.00, 0.20, 0.00],
+            [0.12, 0.21, 0.01],
+            [0.24, 0.22, 0.02],
+            [0.36, 0.23, 0.03],
+            [0.48, 0.24, 0.04],
+        ],
+        dtype=np.float64,
+    )
+    surface_normal = np.array(
+        [
+            [0.00, 1.00, 0.00],
+            [0.00, 1.00, 0.00],
+            [0.00, 1.00, 0.00],
+            [0.00, 1.00, 0.00],
+            [0.00, 1.00, 0.00],
+        ],
+        dtype=np.float64,
+    )
+
+    monkeypatch.setenv("SIMSOPT_JAX_PENALTY_POINT_CHUNK_SIZE", "2")
+    invalidate_backend_cache()
+    try:
+        chunked_cc = float(cc_distance_pure(gamma1, gammadash1, gamma2, gammadash2, 0.09))
+        chunked_cc_barrier = float(
+            cc_distance_barrier_pure(gamma1, gammadash1, gamma2, gammadash2, 0.01)
+        )
+        chunked_cs = float(
+            cs_distance_pure(gamma1, gammadash1, surface_gamma, surface_normal, 0.05)
+        )
+        chunked_max = float(max_distance_pure(gamma1, gamma2, 0.30, -10))
+        chunked_min = float(pairwise_min_distance_pure(gamma1, surface_gamma))
+    finally:
+        monkeypatch.setenv("SIMSOPT_JAX_PENALTY_POINT_CHUNK_SIZE", "0")
+        invalidate_backend_cache()
+
+    dense_cc = float(cc_distance_pure(gamma1, gammadash1, gamma2, gammadash2, 0.09))
+    dense_cc_barrier = float(
+        cc_distance_barrier_pure(gamma1, gammadash1, gamma2, gammadash2, 0.01)
+    )
+    dense_cs = float(cs_distance_pure(gamma1, gammadash1, surface_gamma, surface_normal, 0.05))
+    dense_max = float(max_distance_pure(gamma1, gamma2, 0.30, -10))
+    dense_min = float(pairwise_min_distance_pure(gamma1, surface_gamma))
+
+    monkeypatch.delenv("SIMSOPT_JAX_PENALTY_POINT_CHUNK_SIZE", raising=False)
+    invalidate_backend_cache()
+
+    assert chunked_cc == pytest.approx(dense_cc, rel=1e-12, abs=1e-12)
+    assert chunked_cc_barrier == pytest.approx(dense_cc_barrier, rel=1e-12, abs=1e-12)
+    assert chunked_cs == pytest.approx(dense_cs, rel=1e-12, abs=1e-12)
+    assert chunked_max == pytest.approx(dense_max, rel=1e-12, abs=1e-12)
+    assert chunked_min == pytest.approx(dense_min, rel=1e-12, abs=1e-12)
+
+
+def test_pairwise_penalty_chunking_preserves_infeasible_barrier_inf(monkeypatch):
+    gamma1 = np.array([[0.0, 0.0, 0.0], [0.1, 0.0, 0.0]], dtype=np.float64)
+    gamma2 = np.array([[0.02, 0.0, 0.0], [0.12, 0.0, 0.0]], dtype=np.float64)
+    gammadash = np.array([[0.1, 0.0, 0.0], [0.1, 0.0, 0.0]], dtype=np.float64)
+
+    monkeypatch.setenv("SIMSOPT_JAX_PENALTY_POINT_CHUNK_SIZE", "1")
+    invalidate_backend_cache()
+    try:
+        value = cc_distance_barrier_pure(gamma1, gammadash, gamma2, gammadash, 0.05)
+    finally:
+        monkeypatch.delenv("SIMSOPT_JAX_PENALTY_POINT_CHUNK_SIZE", raising=False)
+        invalidate_backend_cache()
+
+    assert np.isposinf(float(value))
 
 
 class Testing(unittest.TestCase):

@@ -17,6 +17,7 @@ _BACKEND_ENV_VARS = (
     "SIMSOPT_JAX_COMPILATION_CACHE_DIR",
     "SIMSOPT_JAX_COIL_CHUNK_SIZE",
     "SIMSOPT_JAX_QUADRATURE_BLOCK_SIZE",
+    "SIMSOPT_JAX_PENALTY_POINT_CHUNK_SIZE",
     "SIMSOPT_BACKEND",
     "STAGE2_BACKEND",
     "SIMSOPT_JAX_PLATFORM",
@@ -302,6 +303,15 @@ def test_point_chunk_size_defaults_follow_mode(monkeypatch):
     assert backend.get_point_chunk_size("jax_gpu_fast") == 1024
 
 
+def test_pairwise_penalty_chunk_size_defaults_follow_mode(monkeypatch):
+    _clear_backend_env(monkeypatch)
+    backend = _fresh_backend()
+
+    assert backend.get_pairwise_penalty_chunk_size("native_cpu") == 0
+    assert backend.get_pairwise_penalty_chunk_size("jax_cpu_parity") == 256
+    assert backend.get_pairwise_penalty_chunk_size("jax_gpu_fast") == 1024
+
+
 def test_field_kernel_tuning_defaults_follow_mode(monkeypatch):
     _clear_backend_env(monkeypatch)
     backend = _fresh_backend()
@@ -328,6 +338,14 @@ def test_field_kernel_tuning_allows_explicit_env_overrides(monkeypatch):
     assert tuning.quadrature_block_size == 11
 
 
+def test_pairwise_penalty_chunk_size_allows_explicit_env_override(monkeypatch):
+    _clear_backend_env(monkeypatch)
+    monkeypatch.setenv("SIMSOPT_JAX_PENALTY_POINT_CHUNK_SIZE", "37")
+    backend = _fresh_backend()
+
+    assert backend.get_pairwise_penalty_chunk_size("jax_gpu_fast") == 37
+
+
 def test_transfer_guard_disallow_forces_dense_audit_field_tuning(monkeypatch):
     _clear_backend_env(monkeypatch)
     backend = _fresh_backend()
@@ -344,6 +362,7 @@ def test_transfer_guard_disallow_forces_dense_audit_field_tuning(monkeypatch):
     assert tuning.chunk_policy == "stable_default_dense_audit"
     assert tuning.coil_chunk_size == 0
     assert tuning.quadrature_block_size == 0
+    assert backend.get_pairwise_penalty_chunk_size("jax_cpu_parity") == 256
 
 
 def test_explicit_current_mode_policy_preserves_strict_state(monkeypatch):
