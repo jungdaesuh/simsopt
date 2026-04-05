@@ -726,10 +726,12 @@ def parse_args():
     parser.add_argument(
         "--optimizer-backend",
         choices=["scipy", "hybrid", "ondevice"],
-        default=os.environ.get("OPTIMIZER_BACKEND", "scipy"),
+        default=os.environ.get("OPTIMIZER_BACKEND"),
         help=(
             "JAX outer single-stage optimizer backend. Recorded in the run "
-            "fingerprint and used to select the outer optimization path."
+            "fingerprint and used to select the outer optimization path. "
+            "Defaults to 'ondevice' on the JAX backend and 'scipy' on the "
+            "CPU/reference backend when no explicit override is provided."
         ),
     )
     parser.add_argument(
@@ -786,7 +788,12 @@ def parse_args():
             "now uses the fused runtime-bundle (value, grad) contract by default."
         ),
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+    args.optimizer_backend = resolve_single_stage_default_optimizer_backend(
+        args.backend,
+        args.optimizer_backend,
+    )
+    return args
 
 
 class BoozerResidualExact(Optimizable):
@@ -1411,6 +1418,18 @@ def resolve_boozer_optimizer_backend(
     if boozer_optimizer_backend is None:
         return optimizer_backend
     return boozer_optimizer_backend
+
+
+def resolve_single_stage_default_optimizer_backend(
+    field_backend,
+    optimizer_backend=None,
+):
+    """Resolve the implicit single-stage outer-loop optimizer lane."""
+    if optimizer_backend is not None:
+        return optimizer_backend
+    if field_backend == "jax":
+        return "ondevice"
+    return "scipy"
 
 
 _SINGLE_STAGE_COMPONENT_LABEL = "the single-stage outer loop"

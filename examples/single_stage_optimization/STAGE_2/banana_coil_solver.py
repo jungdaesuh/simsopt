@@ -295,13 +295,15 @@ def parse_args():
         "--optimizer-backend",
         choices=["scipy", "hybrid", "ondevice"],
         default=os.environ.get("STAGE2_OPTIMIZER_BACKEND")
-        or os.environ.get("OPTIMIZER_BACKEND", "scipy"),
+        or os.environ.get("OPTIMIZER_BACKEND"),
         help=(
             "Stage 2 optimizer backend. "
             "'scipy' is the trusted reference lane; "
             "'ondevice' is the private JAX target optimizer lane. "
             "'hybrid' is accepted for contract consistency but not currently "
-            "supported for the Stage 2 outer loop."
+            "supported for the Stage 2 outer loop. Defaults to 'ondevice' on "
+            "the JAX backend and 'scipy' on the CPU/reference backend when no "
+            "explicit override is provided."
         ),
     )
     parser.add_argument(
@@ -331,7 +333,21 @@ def parse_args():
             "Supported on reference/value-and-gradient lanes only."
         ),
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+    args.optimizer_backend = resolve_stage2_default_optimizer_backend(
+        args.backend,
+        args.optimizer_backend,
+    )
+    return args
+
+
+def resolve_stage2_default_optimizer_backend(field_backend, optimizer_backend=None):
+    """Resolve the implicit Stage 2 optimizer lane from the selected backend."""
+    if optimizer_backend is not None:
+        return optimizer_backend
+    if field_backend == "jax":
+        return "ondevice"
+    return "scipy"
 
 
 def build_equilibrium_path(args):

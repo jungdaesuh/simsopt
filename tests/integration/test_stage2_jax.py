@@ -2367,6 +2367,38 @@ class TestStage2BananaBoundary:
 
 
 class TestStage2OptimizerContract:
+    def test_parse_args_defaults_jax_backend_to_ondevice_optimizer_lane(
+        self, monkeypatch
+    ):
+        stage2_script = _load_stage2_script_module()
+        monkeypatch.delenv("SIMSOPT_BACKEND", raising=False)
+        monkeypatch.delenv("STAGE2_BACKEND", raising=False)
+        monkeypatch.delenv("STAGE2_OPTIMIZER_BACKEND", raising=False)
+        monkeypatch.delenv("OPTIMIZER_BACKEND", raising=False)
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            ["banana_coil_solver.py", "--backend", "jax"],
+        )
+
+        args = stage2_script.parse_args()
+
+        assert args.backend == "jax"
+        assert args.optimizer_backend == "ondevice"
+
+    def test_parse_args_preserves_cpu_default_reference_lane(self, monkeypatch):
+        stage2_script = _load_stage2_script_module()
+        monkeypatch.delenv("SIMSOPT_BACKEND", raising=False)
+        monkeypatch.delenv("STAGE2_BACKEND", raising=False)
+        monkeypatch.delenv("STAGE2_OPTIMIZER_BACKEND", raising=False)
+        monkeypatch.delenv("OPTIMIZER_BACKEND", raising=False)
+        monkeypatch.setattr(sys, "argv", ["banana_coil_solver.py"])
+
+        args = stage2_script.parse_args()
+
+        assert args.backend == "cpu"
+        assert args.optimizer_backend == "scipy"
+
     @pytest.mark.parametrize(
         ("field_backend", "optimizer_backend", "expected_method"),
         [
