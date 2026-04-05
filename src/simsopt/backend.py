@@ -10,6 +10,7 @@ __path__ = [str(_BACKEND_PACKAGE_DIR)]
 from simsopt.backend.runtime import (  # noqa: E402
     VALID_BACKEND_MODES,
     BackendConfig,
+    ChunkTuning,
     FieldKernelTuning,
     BackendPolicy,
     apply_jax_runtime_config,
@@ -18,6 +19,7 @@ from simsopt.backend.runtime import (  # noqa: E402
     get_backend_mode,
     get_backend_policy,
     get_chunk_policy,
+    get_chunk_tuning,
     get_coil_chunk_size,
     get_compilation_cache_dir,
     get_compilation_cache_policy,
@@ -44,6 +46,7 @@ from simsopt.backend.runtime import (  # noqa: E402
 __all__ = (
     "VALID_BACKEND_MODES",
     "BackendConfig",
+    "ChunkTuning",
     "FieldKernelTuning",
     "BackendPolicy",
     "apply_jax_runtime_config",
@@ -52,6 +55,7 @@ __all__ = (
     "get_backend_mode",
     "get_backend_policy",
     "get_chunk_policy",
+    "get_chunk_tuning",
     "get_coil_chunk_size",
     "get_compilation_cache_dir",
     "get_compilation_cache_policy",

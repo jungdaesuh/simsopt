@@ -5,6 +5,7 @@ from __future__ import annotations
 from .backend import (
     BackendConfig,
     BackendPolicy,
+    ChunkTuning,
     VALID_BACKEND_MODES,
     apply_jax_runtime_config,
     get_backend,
@@ -12,6 +13,7 @@ from .backend import (
     get_backend_mode,
     get_backend_policy,
     get_chunk_policy,
+    get_chunk_tuning,
     get_compilation_cache_dir,
     get_compilation_cache_policy,
     get_debug_nans,
@@ -30,6 +32,7 @@ from .backend import (
 __all__ = [
     "BackendConfig",
     "BackendPolicy",
+    "ChunkTuning",
     "VALID_BACKEND_MODES",
     "apply_jax_runtime_config",
     "get_backend",
@@ -37,6 +40,7 @@ __all__ = [
     "get_backend_mode",
     "get_backend_policy",
     "get_chunk_policy",
+    "get_chunk_tuning",
     "get_compilation_cache_dir",
     "get_compilation_cache_policy",
     "get_debug_nans",

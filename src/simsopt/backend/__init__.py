@@ -3,6 +3,7 @@
 from .runtime import (
     VALID_BACKEND_MODES,
     BackendConfig,
+    ChunkTuning,
     FieldKernelTuning,
     BackendPolicy,
     apply_jax_runtime_config,
@@ -11,6 +12,7 @@ from .runtime import (
     get_backend_mode,
     get_backend_policy,
     get_chunk_policy,
+    get_chunk_tuning,
     get_coil_chunk_size,
     get_compilation_cache_dir,
     get_compilation_cache_policy,
@@ -37,6 +39,7 @@ from .runtime import (
 __all__ = [
     "VALID_BACKEND_MODES",
     "BackendConfig",
+    "ChunkTuning",
     "FieldKernelTuning",
     "BackendPolicy",
     "apply_jax_runtime_config",
@@ -45,6 +48,7 @@ __all__ = [
     "get_backend_mode",
     "get_backend_policy",
     "get_chunk_policy",
+    "get_chunk_tuning",
     "get_coil_chunk_size",
     "get_compilation_cache_dir",
     "get_compilation_cache_policy",

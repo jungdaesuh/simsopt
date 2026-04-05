@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import os
+import subprocess
 from typing import Callable
 import warnings
 
@@ -36,6 +37,8 @@ _COMPILATION_CACHE_DIR_ENV = "SIMSOPT_JAX_COMPILATION_CACHE_DIR"
 _COIL_CHUNK_SIZE_ENV = "SIMSOPT_JAX_COIL_CHUNK_SIZE"
 _QUADRATURE_BLOCK_SIZE_ENV = "SIMSOPT_JAX_QUADRATURE_BLOCK_SIZE"
 _PAIRWISE_PENALTY_CHUNK_SIZE_ENV = "SIMSOPT_JAX_PENALTY_POINT_CHUNK_SIZE"
+_CHUNK_AUTOTUNE_ENV = "SIMSOPT_JAX_CHUNK_AUTOTUNE"
+_GPU_MEMORY_TOTAL_MB_ENV = "SIMSOPT_JAX_GPU_MEMORY_TOTAL_MB"
 _JAX_PLATFORMS_ENV = "JAX_PLATFORMS"
 _VALID_TRANSFER_GUARDS = ("allow", "log", "disallow")
 _GUARDRAIL_ENV_VARS = (
@@ -140,6 +143,85 @@ _POINT_CHUNK_SIZE_BY_POLICY = {
     "performance_tuned": 1024,
 }
 _PAIRWISE_PENALTY_CHUNK_SIZE_BY_POLICY = dict(_POINT_CHUNK_SIZE_BY_POLICY)
+_AUTOTUNED_CHUNK_SIZES_BY_POLICY = {
+    "host_reference": (),
+    "stable_default": (
+        (
+            8192,
+            {
+                "coil_chunk_size": 8,
+                "quadrature_block_size": 0,
+                "point_chunk_size": 128,
+                "pairwise_penalty_chunk_size": 128,
+            },
+        ),
+        (
+            16384,
+            {
+                "coil_chunk_size": 16,
+                "quadrature_block_size": 0,
+                "point_chunk_size": 256,
+                "pairwise_penalty_chunk_size": 256,
+            },
+        ),
+        (
+            32768,
+            {
+                "coil_chunk_size": 32,
+                "quadrature_block_size": 0,
+                "point_chunk_size": 512,
+                "pairwise_penalty_chunk_size": 512,
+            },
+        ),
+        (
+            None,
+            {
+                "coil_chunk_size": 64,
+                "quadrature_block_size": 0,
+                "point_chunk_size": 1024,
+                "pairwise_penalty_chunk_size": 1024,
+            },
+        ),
+    ),
+    "performance_tuned": (
+        (
+            8192,
+            {
+                "coil_chunk_size": 32,
+                "quadrature_block_size": 32,
+                "point_chunk_size": 512,
+                "pairwise_penalty_chunk_size": 512,
+            },
+        ),
+        (
+            16384,
+            {
+                "coil_chunk_size": 64,
+                "quadrature_block_size": 64,
+                "point_chunk_size": 1024,
+                "pairwise_penalty_chunk_size": 1024,
+            },
+        ),
+        (
+            32768,
+            {
+                "coil_chunk_size": 128,
+                "quadrature_block_size": 128,
+                "point_chunk_size": 2048,
+                "pairwise_penalty_chunk_size": 2048,
+            },
+        ),
+        (
+            None,
+            {
+                "coil_chunk_size": 256,
+                "quadrature_block_size": 256,
+                "point_chunk_size": 4096,
+                "pairwise_penalty_chunk_size": 4096,
+            },
+        ),
+    ),
+}
 _FIELD_KERNEL_ENV_BY_KEY = {
     "coil_chunk_size": _COIL_CHUNK_SIZE_ENV,
     "quadrature_block_size": _QUADRATURE_BLOCK_SIZE_ENV,
@@ -195,6 +277,19 @@ class FieldKernelTuning:
     chunk_policy: str
     coil_chunk_size: int
     quadrature_block_size: int
+
+
+@dataclass(frozen=True)
+class ChunkTuning:
+    mode: str
+    chunk_policy: str
+    coil_chunk_size: int
+    quadrature_block_size: int
+    point_chunk_size: int
+    pairwise_penalty_chunk_size: int
+    autotuned: bool
+    autotune_source: str | None
+    gpu_total_memory_mb: int | None
 
 
 def _env_bool(name: str) -> bool:
@@ -258,12 +353,132 @@ def _optional_positive_int_env(name: str) -> int | None:
     return value
 
 
-def _field_kernel_value(mode: str, key: str) -> int:
-    env_name = _FIELD_KERNEL_ENV_BY_KEY[key]
-    value = _optional_positive_int_env(env_name)
-    if value is not None:
-        return value
-    return _FIELD_KERNEL_DEFAULTS[mode][key]
+def _point_chunk_size_default(chunk_policy: str) -> int:
+    return _POINT_CHUNK_SIZE_BY_POLICY.get(chunk_policy, 0)
+
+
+def _pairwise_penalty_chunk_size_default(chunk_policy: str) -> int:
+    return _PAIRWISE_PENALTY_CHUNK_SIZE_BY_POLICY.get(chunk_policy, 0)
+
+
+def _resolve_chunk_autotune_enabled(policy: BackendPolicy) -> bool:
+    raw_value = _optional_env_value(_CHUNK_AUTOTUNE_ENV)
+    if raw_value is not None:
+        return raw_value.strip().lower() in _TRUTHY_ENV_VALUES
+    return policy.backend == "jax" and policy.jax_platform == "cuda"
+
+
+def _query_gpu_total_memory_mb_from_nvidia_smi() -> int | None:
+    try:
+        result = subprocess.run(
+            [
+                "nvidia-smi",
+                "--query-gpu=memory.total",
+                "--format=csv,noheader,nounits",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        return None
+    lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    if not lines:
+        return None
+    try:
+        value = int(float(lines[0]))
+    except ValueError:
+        return None
+    return value if value > 0 else None
+
+
+def _resolve_gpu_total_memory_mb(policy: BackendPolicy) -> tuple[int | None, str | None]:
+    if policy.jax_platform != "cuda":
+        return None, None
+    env_value = _optional_positive_int_env(_GPU_MEMORY_TOTAL_MB_ENV)
+    if env_value is not None:
+        if env_value == 0:
+            raise ValueError(f"{_GPU_MEMORY_TOTAL_MB_ENV} must be > 0 when set")
+        return env_value, _GPU_MEMORY_TOTAL_MB_ENV
+    detected = _query_gpu_total_memory_mb_from_nvidia_smi()
+    if detected is None:
+        return None, None
+    return detected, "nvidia-smi"
+
+
+def _resolve_autotuned_chunk_sizes(
+    chunk_policy: str,
+    gpu_total_memory_mb: int | None,
+) -> dict[str, int] | None:
+    if gpu_total_memory_mb is None:
+        return None
+    buckets = _AUTOTUNED_CHUNK_SIZES_BY_POLICY.get(chunk_policy, ())
+    for max_total_mb, sizes in buckets:
+        if max_total_mb is None or gpu_total_memory_mb <= max_total_mb:
+            return dict(sizes)
+    return None
+
+
+def _static_chunk_sizes(mode: str, chunk_policy: str) -> dict[str, int]:
+    return {
+        "coil_chunk_size": _FIELD_KERNEL_DEFAULTS[mode]["coil_chunk_size"],
+        "quadrature_block_size": _FIELD_KERNEL_DEFAULTS[mode][
+            "quadrature_block_size"
+        ],
+        "point_chunk_size": _point_chunk_size_default(chunk_policy),
+        "pairwise_penalty_chunk_size": _pairwise_penalty_chunk_size_default(
+            chunk_policy
+        ),
+    }
+
+
+def _apply_chunk_env_overrides(chunk_sizes: dict[str, int]) -> dict[str, int]:
+    resolved = dict(chunk_sizes)
+    for key, env_name in _FIELD_KERNEL_ENV_BY_KEY.items():
+        value = _optional_positive_int_env(env_name)
+        if value is not None:
+            resolved[key] = value
+    pairwise_value = _optional_positive_int_env(_PAIRWISE_PENALTY_CHUNK_SIZE_ENV)
+    if pairwise_value is not None:
+        resolved["pairwise_penalty_chunk_size"] = pairwise_value
+    return resolved
+
+
+def _build_chunk_tuning(
+    mode: str,
+    policy: BackendPolicy,
+) -> ChunkTuning:
+    chunk_sizes = _static_chunk_sizes(mode, policy.chunk_policy)
+    autotuned = False
+    autotune_source = None
+    gpu_total_memory_mb = None
+    if _resolve_chunk_autotune_enabled(policy):
+        gpu_total_memory_mb, autotune_source = _resolve_gpu_total_memory_mb(policy)
+        autotuned_chunk_sizes = _resolve_autotuned_chunk_sizes(
+            policy.chunk_policy,
+            gpu_total_memory_mb,
+        )
+        if autotuned_chunk_sizes is not None:
+            chunk_sizes.update(autotuned_chunk_sizes)
+            autotuned = True
+    chunk_sizes = _apply_chunk_env_overrides(chunk_sizes)
+    effective_chunk_policy = policy.chunk_policy
+    if policy.transfer_guard == "disallow":
+        effective_chunk_policy = f"{policy.chunk_policy}_dense_audit"
+        chunk_sizes["coil_chunk_size"] = 0
+        chunk_sizes["quadrature_block_size"] = 0
+        chunk_sizes["point_chunk_size"] = 0
+    return ChunkTuning(
+        mode=mode,
+        chunk_policy=effective_chunk_policy,
+        coil_chunk_size=chunk_sizes["coil_chunk_size"],
+        quadrature_block_size=chunk_sizes["quadrature_block_size"],
+        point_chunk_size=chunk_sizes["point_chunk_size"],
+        pairwise_penalty_chunk_size=chunk_sizes["pairwise_penalty_chunk_size"],
+        autotuned=autotuned,
+        autotune_source=autotune_source,
+        gpu_total_memory_mb=gpu_total_memory_mb,
+    )
 
 
 def _resolve_debug_nans(debug_nans: bool | None) -> bool:
@@ -514,6 +729,22 @@ def get_provenance_label(mode: str | None = None) -> str:
 
 
 _cached_field_kernel_tuning: FieldKernelTuning | None = None
+_cached_chunk_tuning: ChunkTuning | None = None
+
+
+def get_chunk_tuning(mode: str | None = None) -> ChunkTuning:
+    """Return the resolved chunk sizes and autotuning metadata."""
+    global _cached_chunk_tuning
+    if mode is None and _cached_chunk_tuning is not None:
+        return _cached_chunk_tuning
+    resolved_mode = _resolve_mode(mode)
+    tuning = _build_chunk_tuning(
+        resolved_mode,
+        get_backend_policy(resolved_mode),
+    )
+    if mode is None:
+        _cached_chunk_tuning = tuning
+    return tuning
 
 
 def get_field_kernel_tuning(mode: str | None = None) -> FieldKernelTuning:
@@ -521,25 +752,13 @@ def get_field_kernel_tuning(mode: str | None = None) -> FieldKernelTuning:
     global _cached_field_kernel_tuning
     if mode is None and _cached_field_kernel_tuning is not None:
         return _cached_field_kernel_tuning
-    resolved_mode = _resolve_mode(mode)
-    policy = get_backend_policy(resolved_mode)
-    if policy.transfer_guard == "disallow":
-        tuning = FieldKernelTuning(
-            mode=resolved_mode,
-            chunk_policy=f"{policy.chunk_policy}_dense_audit",
-            coil_chunk_size=0,
-            quadrature_block_size=0,
-        )
-    else:
-        tuning = FieldKernelTuning(
-            mode=resolved_mode,
-            chunk_policy=policy.chunk_policy,
-            coil_chunk_size=_field_kernel_value(resolved_mode, "coil_chunk_size"),
-            quadrature_block_size=_field_kernel_value(
-                resolved_mode,
-                "quadrature_block_size",
-            ),
-        )
+    chunk_tuning = get_chunk_tuning(mode)
+    tuning = FieldKernelTuning(
+        mode=chunk_tuning.mode,
+        chunk_policy=chunk_tuning.chunk_policy,
+        coil_chunk_size=chunk_tuning.coil_chunk_size,
+        quadrature_block_size=chunk_tuning.quadrature_block_size,
+    )
     if mode is None:
         _cached_field_kernel_tuning = tuning
     return tuning
@@ -557,24 +776,12 @@ def get_quadrature_block_size(mode: str | None = None) -> int:
 
 def get_point_chunk_size(mode: str | None = None) -> int:
     """Return the grouped-field point chunk size for the resolved mode."""
-    if get_transfer_guard(mode) == "disallow":
-        # The strict transfer-audit lane is a correctness/debug path, not a
-        # throughput benchmark. On JAX 0.9.2 the point-chunk implementation
-        # relies on index-manipulation primitives that still trigger
-        # host->device transfer-guard failures even when the surrounding solver
-        # is otherwise JAX-native. Use the dense point path in this audit mode.
-        return 0
-    chunk_policy = get_chunk_policy(mode)
-    return _POINT_CHUNK_SIZE_BY_POLICY.get(chunk_policy, 0)
+    return get_chunk_tuning(mode).point_chunk_size
 
 
 def get_pairwise_penalty_chunk_size(mode: str | None = None) -> int:
     """Return the pairwise-penalty block size for curve/surface reductions."""
-    value = _optional_positive_int_env(_PAIRWISE_PENALTY_CHUNK_SIZE_ENV)
-    if value is not None:
-        return value
-    chunk_policy = get_chunk_policy(mode)
-    return _PAIRWISE_PENALTY_CHUNK_SIZE_BY_POLICY.get(chunk_policy, 0)
+    return get_chunk_tuning(mode).pairwise_penalty_chunk_size
 
 
 def get_debug_nans(mode: str | None = None) -> bool:
@@ -611,8 +818,9 @@ def _run_backend_cache_clear_callbacks() -> None:
 
 
 def _reset_backend_runtime_caches() -> None:
-    global _cached_backend_policy, _cached_field_kernel_tuning
+    global _cached_backend_policy, _cached_chunk_tuning, _cached_field_kernel_tuning
     _cached_backend_policy = None
+    _cached_chunk_tuning = None
     _cached_field_kernel_tuning = None
     _run_backend_cache_clear_callbacks()
     _warned_jax_fallbacks.clear()

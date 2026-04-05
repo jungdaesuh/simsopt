@@ -125,14 +125,17 @@ Programmatic access::
         get_backend,
         get_backend_mode,
         get_backend_policy,
+        get_chunk_tuning,
         is_jax_backend,
     )
 
     simsopt_config.set_backend("jax_gpu_parity", strict=True)
     policy = get_backend_policy()
+    chunk_tuning = get_chunk_tuning()
 
     assert get_backend_mode() == "jax_gpu_parity"
     assert policy.chunk_policy == "stable_default"
+    assert chunk_tuning.point_chunk_size >= 0
     assert policy.tolerance_tier == "parity"
     if is_jax_backend():
         from simsopt.field import BiotSavartJAX
@@ -179,6 +182,20 @@ appear in provenance and validation output.
 These labels do not mean every kernel already implements the final chunked
 parity/fast architecture. They define the runtime contract and provenance
 surface while the remaining kernel work is still in progress.
+
+Chunk autotuning
+----------------
+
+The runtime now resolves one effective chunk-tuning contract for the active
+mode:
+
+- explicit env overrides still win for coil/quadrature/pairwise chunk sizes
+- otherwise, JAX CUDA modes try to bucket chunk sizes from available GPU VRAM
+- if VRAM cannot be detected, the checked-in mode defaults remain the fallback
+
+The VRAM probe looks at ``SIMSOPT_JAX_GPU_MEMORY_TOTAL_MB`` first and then
+falls back to ``nvidia-smi``. Set ``SIMSOPT_JAX_CHUNK_AUTOTUNE=0`` to disable
+autotuning and force the checked-in mode defaults.
 
 GPU Node Quick-Start
 --------------------
