@@ -93,7 +93,7 @@ _boozer_exact_coil_vjp = _bsj._boozer_exact_coil_vjp
 _boozer_ls_coil_vjp = _bsj._boozer_ls_coil_vjp
 require_target_backend_x64 = _bsj.require_target_backend_x64
 resolve_least_squares_optimizer_method = _opt.resolve_least_squares_optimizer_method
-resolve_optimizer_backend_method = _bsj.resolve_optimizer_backend_method
+resolve_optimizer_backend_method = _opt.resolve_optimizer_backend_method
 BoozerSurfaceJAX = _bsj.BoozerSurfaceJAX
 BiotSavartJAX = _bs_backend.BiotSavartJAX
 

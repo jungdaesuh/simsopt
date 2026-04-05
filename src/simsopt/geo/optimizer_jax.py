@@ -771,16 +771,28 @@ def levenberg_marquardt_traceable(
 # ---------------------------------------------------------------------------
 
 
+def _materialize_dense_linear_operator(linear_operator_fn, x):
+    eye = jnp.eye(x.shape[0], dtype=x.dtype)
+    cols = lax.map(lambda basis: linear_operator_fn(x, basis), eye)
+    return jnp.swapaxes(cols, 0, 1)
+
+
 def _hessian_vector_product_fn(objective_fn):
     grad_fn = jax.grad(objective_fn)
     return jax.jit(lambda x, v: jax.jvp(grad_fn, (x,), (v,))[1])
 
 
+def _jacobian_vector_product_fn(residual_fn):
+    return jax.jit(lambda x, v: jax.jvp(residual_fn, (x,), (v,))[1])
+
+
 def _materialize_dense_hessian(hvp_fn, x):
-    eye = jnp.eye(x.shape[0], dtype=x.dtype)
-    cols = lax.map(lambda basis: hvp_fn(x, basis), eye)
-    dense = jnp.swapaxes(cols, 0, 1)
+    dense = _materialize_dense_linear_operator(hvp_fn, x)
     return 0.5 * (dense + dense.T)
+
+
+def _materialize_dense_jacobian(jvp_fn, x):
+    return _materialize_dense_linear_operator(jvp_fn, x)
 
 
 def _stabilize_dense_hessian(H, stab):
@@ -806,6 +818,26 @@ def _gmres_solve_newton_system(hvp_fn, x, rhs, *, stab, tol):
 
     def matvec(v):
         return hvp_fn(x, v) + stab_value * v
+
+    dx, _ = gmres(
+        matvec,
+        rhs,
+        tol=tol,
+        atol=0.0,
+        restart=restart,
+        maxiter=maxiter,
+    )
+    residual = rhs - matvec(dx)
+    return dx, residual, matvec
+
+
+def _gmres_solve_exact_newton_system(jvp_fn, x, rhs, *, tol):
+    n = rhs.shape[0]
+    restart = max(5, min(n, 50))
+    maxiter = max(10, min(4 * n, 200))
+
+    def matvec(v):
+        return jvp_fn(x, v)
 
     dx, _ = gmres(
         matvec,
@@ -1056,24 +1088,45 @@ def newton_exact(
     maxiter=40,
     tol=1e-13,
 ):
-    """Newton solver for the exact Boozer residual system ``r(x) = 0``."""
-    jac_fn = jax.jit(jax.jacfwd(residual_fn))
+    """Newton solver for the exact Boozer residual system ``r(x) = 0``.
+
+    Iterations solve the linearized system with GMRES against exact
+    Jacobian-vector products, avoiding dense Jacobian materialization in the
+    hot loop. The dense Jacobian is rebuilt once at the final iterate so the
+    existing Boozer PLU / adjoint contract stays intact.
+    """
     res_fn = jax.jit(residual_fn)
+    jvp_fn = _jacobian_vector_product_fn(residual_fn)
 
     x = x0
     r = res_fn(x)
-    J = jac_fn(x)
     norm = jnp.linalg.norm(r)
+    linear_tol = min(1e-10, max(float(tol) * 0.1, 1e-14))
 
     nit = 0
     while nit < maxiter and float(norm) > tol:
-        dx = jnp.linalg.solve(J, r)
-        dx = dx + jnp.linalg.solve(J, r - J @ dx)
+        dx, linear_residual, _ = _gmres_solve_exact_newton_system(
+            jvp_fn,
+            x,
+            r,
+            tol=linear_tol,
+        )
+        linear_residual_norm = float(np.linalg.norm(np.asarray(linear_residual)))
+        if np.all(np.isfinite(np.asarray(dx))) and linear_residual_norm > linear_tol:
+            correction, _, _ = _gmres_solve_exact_newton_system(
+                jvp_fn,
+                x,
+                linear_residual,
+                tol=linear_tol,
+            )
+            if np.all(np.isfinite(np.asarray(correction))):
+                dx = dx + correction
         x = x - dx
         r = res_fn(x)
-        J = jac_fn(x)
         norm = jnp.linalg.norm(r)
         nit += 1
+
+    J = _materialize_dense_jacobian(jvp_fn, x)
 
     return {
         "x": x,
@@ -1091,30 +1144,64 @@ def newton_exact_traceable(
     maxiter=40,
     tol=1e-13,
 ):
-    """Trace-safe Newton solver for the exact Boozer residual system."""
-    jac_fn = jax.jacfwd(residual_fn)
+    """Trace-safe Newton solver for the exact Boozer residual system.
+
+    The loop keeps Jacobian application matrix-free via JVPs and materializes a
+    dense Jacobian only once at the final iterate for downstream LU-based
+    contracts.
+    """
+    dtype = jnp.asarray(x0).dtype
+    tol_value = _device_scalar(tol, dtype=dtype)
+    linear_tol = jnp.minimum(
+        _device_scalar(1e-10, dtype=dtype),
+        jnp.maximum(
+            tol_value * _device_scalar(0.1, dtype=dtype),
+            _device_scalar(1e-14, dtype=dtype),
+        ),
+    )
+    jvp_fn = _jacobian_vector_product_fn(residual_fn)
 
     def run_solver(x_init):
         r0 = residual_fn(x_init)
-        J0 = jac_fn(x_init)
         norm0 = jnp.linalg.norm(r0)
 
         def cond_fun(state):
-            return (state["nit"] < maxiter) & (state["norm"] > tol)
+            return (state["nit"] < maxiter) & (state["norm"] > tol_value)
 
         def body_fun(state):
-            dx = jnp.linalg.solve(state["jacobian"], state["residual"])
-            correction = jnp.linalg.solve(
-                state["jacobian"],
-                state["residual"] - state["jacobian"] @ dx,
+            dx, linear_residual, _ = _gmres_solve_exact_newton_system(
+                jvp_fn,
+                state["x"],
+                state["residual"],
+                tol=linear_tol,
             )
-            x_next = state["x"] - (dx + correction)
+            linear_residual_norm = jnp.linalg.norm(linear_residual)
+
+            def add_correction(current_dx):
+                correction, _, _ = _gmres_solve_exact_newton_system(
+                    jvp_fn,
+                    state["x"],
+                    linear_residual,
+                    tol=linear_tol,
+                )
+                return lax.cond(
+                    jnp.all(jnp.isfinite(correction)),
+                    lambda corr: current_dx + corr,
+                    lambda _corr: current_dx,
+                    correction,
+                )
+
+            dx = lax.cond(
+                jnp.all(jnp.isfinite(dx)) & (linear_residual_norm > linear_tol),
+                add_correction,
+                lambda current_dx: current_dx,
+                dx,
+            )
+            x_next = state["x"] - dx
             residual_next = residual_fn(x_next)
-            jacobian_next = jac_fn(x_next)
             return {
                 "x": x_next,
                 "residual": residual_next,
-                "jacobian": jacobian_next,
                 "norm": jnp.linalg.norm(residual_next),
                 "nit": state["nit"] + 1,
             }
@@ -1125,18 +1212,18 @@ def newton_exact_traceable(
             {
                 "x": x_init,
                 "residual": r0,
-                "jacobian": J0,
                 "norm": norm0,
                 "nit": jnp.asarray(0, dtype=jnp.int32),
             },
         )
+        jacobian_final = _materialize_dense_jacobian(jvp_fn, state["x"])
 
         return {
             "x": state["x"],
             "residual": state["residual"],
-            "jacobian": state["jacobian"],
+            "jacobian": jacobian_final,
             "nit": state["nit"],
-            "success": state["norm"] <= tol,
+            "success": state["norm"] <= tol_value,
         }
 
     return jax.jit(run_solver)(x0)

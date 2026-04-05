@@ -1027,6 +1027,13 @@ def _traceable_plu_or_dummy(matrix, *, finite):
 
     if isinstance(finite, (bool, np.bool_)):
         return compute_plu(matrix) if bool(finite) else dummy_plu(matrix)
+    if (
+        isinstance(finite, jax.Array)
+        and finite.shape == ()
+        and not isinstance(finite, jax.core.Tracer)
+    ):
+        finite_value = bool(np.asarray(jax.device_get(finite)))
+        return compute_plu(matrix) if finite_value else dummy_plu(matrix)
 
     return jax.lax.cond(
         jnp.asarray(finite, dtype=jnp.bool_), compute_plu, dummy_plu, matrix

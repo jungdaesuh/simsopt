@@ -101,6 +101,28 @@ def _emit_newton_progress(progress_callback):
     progress_callback(2, 0.05, 1.0e-4)
 
 
+def _patch_matrix_free_exact_linear_solver(monkeypatch, *, A):
+    dense_calls = []
+
+    def fake_jvp_fn(_residual_fn):
+        return lambda _x, v: A @ v
+
+    def fake_gmres(_jvp_fn, _x, rhs, *, tol):
+        del _jvp_fn, _x, tol
+        dx = jnp.linalg.solve(A, rhs)
+        return dx, rhs - A @ dx, None
+
+    def fake_materialize(_jvp_fn, _x):
+        del _jvp_fn, _x
+        dense_calls.append(True)
+        return A
+
+    monkeypatch.setattr(_opt, "_jacobian_vector_product_fn", fake_jvp_fn)
+    monkeypatch.setattr(_opt, "_gmres_solve_exact_newton_system", fake_gmres)
+    monkeypatch.setattr(_opt, "_materialize_dense_jacobian", fake_materialize)
+    return dense_calls
+
+
 def _assert_lu_is_not_called(message):
     raise AssertionError(message)
 
@@ -497,7 +519,51 @@ class TestOptimizerAdapter:
         result = newton_exact(residual, x0, maxiter=5, tol=1e-14)
         x_exact = jnp.linalg.solve(A, b)
         np.testing.assert_allclose(result["x"], x_exact, atol=1e-12)
+        np.testing.assert_allclose(result["jacobian"], np.asarray(A), atol=1e-12)
         assert result["success"]
+
+    def test_newton_exact_materializes_dense_jacobian_once_at_final_iterate(
+        self, monkeypatch
+    ):
+        """Exact Newton keeps the loop matrix-free and rebuilds ``J`` once at the end."""
+        A = jnp.array([[3.0, 1.0], [1.0, 4.0]])
+        b = jnp.array([5.0, 7.0])
+        dense_calls = _patch_matrix_free_exact_linear_solver(monkeypatch, A=A)
+        x_exact = np.linalg.solve(np.asarray(A), np.asarray(b))
+
+        def residual(x):
+            return A @ x - b
+
+        result = newton_exact(residual, jnp.zeros(2), maxiter=5, tol=1e-14)
+
+        assert len(dense_calls) == 1
+        np.testing.assert_allclose(result["x"], x_exact)
+        np.testing.assert_allclose(result["jacobian"], np.asarray(A), atol=1e-12)
+        assert result["success"]
+
+    def test_newton_exact_traceable_materializes_dense_jacobian_once_at_final_iterate(
+        self, monkeypatch
+    ):
+        """Traceable exact Newton rebuilds the dense Jacobian only at the final boundary."""
+        A = jnp.array([[3.0, 1.0], [1.0, 4.0]])
+        b = jnp.array([5.0, 7.0])
+        dense_calls = _patch_matrix_free_exact_linear_solver(monkeypatch, A=A)
+        x_exact = np.linalg.solve(np.asarray(A), np.asarray(b))
+
+        def residual(x):
+            return A @ x - b
+
+        result = _opt.newton_exact_traceable(
+            residual,
+            jnp.zeros(2),
+            maxiter=5,
+            tol=1e-14,
+        )
+
+        assert len(dense_calls) == 1
+        np.testing.assert_allclose(result["x"], x_exact)
+        np.testing.assert_allclose(result["jacobian"], np.asarray(A), atol=1e-12)
+        assert bool(result["success"])
 
 
 class TestNewtonPolishBoozer:
@@ -1954,7 +2020,7 @@ class TestBoozerSurfaceJAXExactPath:
         assert jnp.all(jnp.isfinite(captured["residual"]))
 
     def test_run_code_traceable_ls_skips_lu_for_nonfinite_newton_result(self, monkeypatch):
-        """LS traceable failures must not build LU factors for non-finite Hessians."""
+        """LS traceable failures must return the dummy PLU payload."""
         booz = _make_mock_boozer_surface()
         booz.options["optimizer_backend"] = "ondevice"
         booz.options["limited_memory"] = True
@@ -1999,6 +2065,13 @@ class TestBoozerSurfaceJAXExactPath:
 
         assert result["type"] == "ls"
         assert bool(result["success"]) is False
+        assert result["plu"] is not None
+        for factor in result["plu"]:
+            np.testing.assert_allclose(
+                np.asarray(factor),
+                np.zeros((sdofs.size + 2, sdofs.size + 2)),
+                atol=0.0,
+            )
 
     def test_run_code_functional_reuses_traceable_inner_solve(self, monkeypatch):
         """run_code_functional() should just repackage run_code_traceable()."""
@@ -2053,7 +2126,7 @@ class TestBoozerSurfaceJAXExactPath:
     def test_run_code_traceable_exact_skips_lu_for_nonfinite_newton_result(
         self, monkeypatch
     ):
-        """Exact traceable failures must not build LU factors for non-finite Jacobians."""
+        """Exact traceable failures must return the dummy PLU payload."""
         booz = _make_mock_boozer_surface_exact()
         coil_set_spec = booz.coil_set_spec
         sdofs = jnp.asarray(booz.surface.get_dofs(), dtype=jnp.float64)
@@ -2084,6 +2157,13 @@ class TestBoozerSurfaceJAXExactPath:
 
         assert result["type"] == "exact"
         assert bool(result["success"]) is False
+        assert result["plu"] is not None
+        for factor in result["plu"]:
+            np.testing.assert_allclose(
+                np.asarray(factor),
+                np.zeros((sdofs.size + 2, sdofs.size + 2)),
+                atol=0.0,
+            )
 
     def test_exact_accepts_and_ignores_optimizer_backend_option(self):
         """Exact solves accept optimizer_backend but ignore it."""
