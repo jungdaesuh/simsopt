@@ -9,14 +9,14 @@ See: .gpd/PROJECT.md (updated 2026-04-06)
 
 ## Current Position
 
-**Current Phase:** 1
-**Current Phase Name:** Baseline & Gold Suite
+**Current Phase:** 2
+**Current Phase Name:** Discovery
 **Total Phases:** 5
 **Current Plan:** 0
 **Total Plans in Phase:** 0
 **Status:** Ready to plan
 **Last Activity:** 2026-04-06
-**Last Activity Description:** Project initialized (minimal)
+**Last Activity Description:** Phase 1 Baseline & Gold Suite execution complete
 
 **Progress:** [░░░░░░░░░░] 0%
 
@@ -40,10 +40,12 @@ None yet.
 | - | - | - | - |
 
 ## Accumulated Context
+| Phase 01 P01 | 15m | 5 tasks | 5 files |
 
 ### Decisions
 
 - [Phase 1]: Minimal mode — scoping contract approved before phase planning
+- [Phase 1]: Research and Plan for Gold Suite and Baseline Contract established
 
 ### Active Approximations
 
@@ -60,5 +62,5 @@ None yet.
 ## Session Continuity
 
 **Last session:** 2026-04-06
-**Stopped at:** Project initialized (minimal)
-**Resume file:** —
+**Stopped at:** Phase 1 planned
+**Resume file:** .gpd/phases/01-baseline-gold-suite/01-PLAN.md

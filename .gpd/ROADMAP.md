@@ -62,7 +62,7 @@ This project follows a structured discovery loop to evolve new constrained stell
 
 | Phase | Plans Complete | Status | Completed |
 | --- | --- | --- | --- |
-| 1. Baseline & Gold Suite | 0/TBD | Not started | - |
+| 1. Baseline & Gold Suite | 1/1 | Complete | 2026-04-06 |
 | 2. Discovery | 0/TBD | Not started | - |
 | 3. Co-evolution | 0/TBD | Not started | - |
 | 4. Distillation | 0/TBD | Not started | - |
