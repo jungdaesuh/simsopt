@@ -4370,6 +4370,7 @@ class TestTraceableObjective:
         *,
         iota_target_shift=0.0,
         include_profile_suite=True,
+        success_filter=None,
     ):
         """Build the shared traceable runtime bundle and coil DOFs."""
         iota_target, coil_dofs = TestTraceableObjective._traceable_target_inputs(
@@ -4387,8 +4388,38 @@ class TestTraceableObjective:
             bs_jax,
             iota_target,
             include_profile_suite=include_profile_suite,
+            success_filter=success_filter,
         )
         return runtime_bundle, coil_dofs
+
+    def test_runtime_bundle_success_filter_blocks_infeasible_states(self, boozer_setup):
+        """A target-lane success filter must demote infeasible states to failure."""
+        (_, _, _, _, bs_jax, _, booz_jax, _) = boozer_setup
+        unconstrained_bundle, coil_dofs = self._make_traceable_runtime_bundle(
+            bs_jax,
+            booz_jax,
+            include_profile_suite=False,
+        )
+        gated_bundle, _ = self._make_traceable_runtime_bundle(
+            bs_jax,
+            booz_jax,
+            include_profile_suite=False,
+            success_filter=lambda _coil_dofs, _solved_x: jnp.array(False, dtype=bool),
+        )
+
+        unconstrained_value = float(unconstrained_bundle["objective"](coil_dofs))
+        gated_value = float(gated_bundle["objective"](coil_dofs))
+        gated_value_vg, gated_grad = gated_bundle["value_and_grad"](coil_dofs)
+
+        assert gated_value > unconstrained_value
+        np.testing.assert_allclose(
+            float(gated_value_vg),
+            gated_value,
+            rtol=0.0,
+            atol=0.0,
+            err_msg="Fused value_and_grad path must use the same gated failure value.",
+        )
+        assert np.all(np.isfinite(np.asarray(gated_grad)))
 
     def test_pure_objective_matches_optimizable_value(self, boozer_setup):
         """Test 1: Pure JAX objective returns same value as JF.J()."""
@@ -4530,6 +4561,43 @@ class TestTraceableObjective:
         assert "pure_callback" not in str(jaxpr), (
             "Traceable objective still routes through jax.pure_callback"
         )
+
+    def test_traceable_objective_does_not_reenter_host_snapshot_after_build(
+        self,
+        boozer_setup,
+        monkeypatch,
+    ):
+        """Target-lane evaluation must stay off the host after bundle construction."""
+        import simsopt.geo.boozersurface_jax as bsj
+
+        (_, _, _, _, bs_jax, _, booz_jax, _) = boozer_setup
+        runtime_bundle, coil_dofs = self._make_traceable_runtime_bundle(
+            bs_jax,
+            booz_jax,
+            include_profile_suite=False,
+        )
+
+        def _reject_host_snapshot(*_args, **_kwargs):
+            raise AssertionError(
+                "Single-stage ondevice objective should not hostify mutable state "
+                "inside the compiled hot path."
+            )
+
+        monkeypatch.setattr(bsj, "_hostify_tree", _reject_host_snapshot)
+
+        value = runtime_bundle["objective"](coil_dofs)
+        value_vg, grad = runtime_bundle["value_and_grad"](coil_dofs)
+        jaxpr = jax.make_jaxpr(runtime_bundle["objective"])(coil_dofs)
+
+        assert np.isfinite(float(value))
+        np.testing.assert_allclose(
+            float(value_vg),
+            float(value),
+            rtol=0.0,
+            atol=0.0,
+        )
+        assert np.all(np.isfinite(np.asarray(grad)))
+        assert jaxpr is not None
 
     def test_traceable_objective_has_no_optimizable_dependency(self):
         """Test 5: Traced objective needs no run_dict, no JF.x mutation."""

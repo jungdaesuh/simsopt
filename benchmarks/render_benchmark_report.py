@@ -58,6 +58,14 @@ def render_report(manifest: dict, payload: dict) -> str:
     aggregate = payload["aggregate"]
     summary = payload["summary"]
     notes = "\n".join(f"- {note}" for note in hardware["notes"])
+    performance_budget = manifest.get("performance_budget", {})
+    memory_budget = manifest.get("memory_budget", {})
+    performance_failures = aggregate.get("performance_failures", [])
+    failure_lines = (
+        "\n".join(f"- {failure}" for failure in performance_failures)
+        if performance_failures
+        else "- none"
+    )
 
     return f"""# {manifest['title']}
 
@@ -104,12 +112,23 @@ def render_report(manifest: dict, payload: dict) -> str:
 
 - peak RSS MB: `{_format_float(provenance.get('peak_rss_mb'))}`
 - GPU memory MB: `{_format_float(provenance.get('gpu_memory_mb'))}`
+- grouped-adjoint budget fixture: `{memory_budget.get('fixture', 'n/a')}`
+- grouped-adjoint RSS ceiling MB: `{_format_float(memory_budget.get('max_peak_rss_mb'))}`
+- grouped-adjoint GPU ceiling MB: `{_format_float(memory_budget.get('max_peak_gpu_memory_mb'))}`
 
 ## Aggregate
 
 - aggregate passed: `{str(bool(aggregate['passed'])).lower()}`
 - aggregate lane label: `{aggregate['lane_label']}`
 - total outer elapsed s: `{_format_float(aggregate['total_outer_elapsed_s'])}`
+- performance budget profile: `{performance_budget.get('profile', 'n/a')}`
+- Stage 2 cold speed floor: `{_format_speedup(performance_budget.get('tier2_stage2_e2e', {}).get('min_outer_speedup_vs_cpu'))}`
+- Stage 2 warm speed floor: `{_format_speedup(performance_budget.get('tier2_stage2_e2e', {}).get('min_warm_speedup_vs_cpu'))}`
+- Stage 2 compile ceiling s: `{_format_float(performance_budget.get('tier2_stage2_e2e', {}).get('max_compile_overhead_s'))}`
+
+## Regression Gates
+
+{failure_lines}
 
 ## Honest Interpretation
 

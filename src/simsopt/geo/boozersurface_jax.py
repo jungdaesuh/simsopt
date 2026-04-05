@@ -913,12 +913,6 @@ def _make_boozer_penalty_objective_closure(
     optimize_G,
     weight_inv_modB,
 ):
-    # Quadrature and scatter metadata are static bootstrap state, but the
-    # traceable target lane may pass coil_set_spec leaves as active tracers.
-    quadpoints_phi = _hostify_tree(quadpoints_phi)
-    quadpoints_theta = _hostify_tree(quadpoints_theta)
-    scatter_indices = _hostify_tree(scatter_indices)
-
     def _objective(xx):
         return _boozer_penalty_objective(
             xx,

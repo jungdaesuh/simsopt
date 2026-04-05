@@ -32,6 +32,7 @@ from benchmarks.validation_ladder_common import (
     apply_requested_platform,
     build_provenance,
     describe_compile_behavior,
+    evaluate_tier5_performance_budget,
     load_json,
     preparse_platform,
     print_provenance,
@@ -39,6 +40,7 @@ from benchmarks.validation_ladder_common import (
     resolve_probe_lane,
     repo_pythonpath_env,
     run_python_script,
+    tier5_performance_budget,
     write_json,
 )
 
@@ -56,6 +58,7 @@ require_x64_runtime(jax, context="Tier 5 performance characterization")
 TIER1_PARITY_RUNG = "tier1b_real_stage2"
 TIER2_PERFORMANCE_RUNG = "tier2_stage2_e2e"
 TIER3_INIT_RUNG = "tier3_single_stage_init"
+_TIER5_PERFORMANCE_BUDGET_PROFILE = "stable_hardware_weekly"
 
 
 def parse_args() -> argparse.Namespace:
@@ -442,13 +445,17 @@ def build_tier5_performance_contract(summary: list[dict[str, Any]]) -> dict[str,
         },
         "cold_end_to_end_source": {
             "rung": tier2["name"],
-            "metric_path": f"summary.{TIER2_PERFORMANCE_RUNG}.outer_speedup_vs_cpu",
+            "metric_path": (
+                f"summary_by_name.{TIER2_PERFORMANCE_RUNG}.outer_speedup_vs_cpu"
+            ),
             "speedup_vs_cpu": tier2.get("outer_speedup_vs_cpu"),
         },
         "warm_steady_state_source": (
             {
                 "rung": tier2["name"],
-                "metric_path": f"summary.{TIER2_PERFORMANCE_RUNG}.warm_speedup_vs_cpu",
+                "metric_path": (
+                    f"summary_by_name.{TIER2_PERFORMANCE_RUNG}.warm_speedup_vs_cpu"
+                ),
                 "speedup_vs_cpu": tier2.get("warm_speedup_vs_cpu"),
             }
             if tier2.get("warm_speedup_vs_cpu") is not None
@@ -456,7 +463,9 @@ def build_tier5_performance_contract(summary: list[dict[str, Any]]) -> dict[str,
         ),
         "headline_performance_source": {
             "rung": tier2["name"],
-            "metric_path": f"summary.{TIER2_PERFORMANCE_RUNG}.{headline_metric}",
+            "metric_path": (
+                f"summary_by_name.{TIER2_PERFORMANCE_RUNG}.{headline_metric}"
+            ),
             "speedup_vs_cpu": headline_speedup,
         },
         "do_not_use_for_performance_headline": [
@@ -623,8 +632,17 @@ def main() -> None:
     )
 
     summary = [tier1b_summary, tier2_summary, tier3_summary, tier4_pair["summary"]]
+    summary_by_name = {item["name"]: item for item in summary}
     total_outer_elapsed_s = float(sum(item["outer_elapsed_s"] for item in summary))
     performance_contract = build_tier5_performance_contract(summary)
+    performance_budget = tier5_performance_budget(
+        profile=_TIER5_PERFORMANCE_BUDGET_PROFILE
+    )
+    performance_failures = evaluate_tier5_performance_budget(
+        summary_by_name,
+        performance_budget,
+    )
+    aggregate_passed = all(bool(item["passed"]) for item in summary) and not performance_failures
 
     payload = {
         "provenance": provenance,
@@ -636,11 +654,15 @@ def main() -> None:
             "tier4_adjoint_fd_lane": tier4_pair["lane_payload"],
         },
         "summary": summary,
+        "summary_by_name": summary_by_name,
         "aggregate": {
             "lane_label": lane_label,
             "total_outer_elapsed_s": total_outer_elapsed_s,
-            "passed": all(bool(item["passed"]) for item in summary),
+            "passed": aggregate_passed,
             "performance_contract": performance_contract,
+            "performance_budget_profile": _TIER5_PERFORMANCE_BUDGET_PROFILE,
+            "performance_budget": performance_budget,
+            "performance_failures": performance_failures,
         },
     }
     write_json(args.output_json, payload)
@@ -657,6 +679,11 @@ def main() -> None:
         f"and {TIER2_PERFORMANCE_RUNG}.{performance_contract['headline_performance_source']['metric_path'].split('.')[-1]} "
         "for the main Stage 2 speed headline"
     )
+    if performance_failures:
+        print("Tier 5 performance gate failed")
+        for failure in performance_failures:
+            print(f"  - {failure}")
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

@@ -24,6 +24,20 @@
     "transfer_guard": "disallow",
     "compilation_cache": "required_persistent"
   },
+  "performance_budget": {
+    "profile": "stable_hardware_weekly",
+    "tier2_stage2_e2e": {
+      "min_outer_speedup_vs_cpu": 1.25,
+      "min_warm_speedup_vs_cpu": 1.25,
+      "max_compile_overhead_s": 60.0
+    }
+  },
+  "memory_budget": {
+    "fixture": "real-single-stage-init",
+    "platform": "cuda",
+    "max_peak_rss_mb": 8192.0,
+    "max_peak_gpu_memory_mb": 12288.0
+  },
   "commands": [
     {
       "name": "tier5_performance_characterization",
@@ -38,6 +52,20 @@
         "20",
         "--output-json",
         "benchmark_artifacts/tier5_performance_characterization.json"
+      ]
+    },
+    {
+      "name": "grouped_adjoint_memory_probe",
+      "script": "benchmarks/grouped_adjoint_memory_probe.py",
+      "args": [
+        "--platform",
+        "cuda",
+        "--optimizer-backend",
+        "ondevice",
+        "--output-json",
+        "benchmark_artifacts/grouped_adjoint_memory_probe.json",
+        "--device-memory-profile-out",
+        "benchmark_artifacts/grouped_adjoint_memory_profile.prof"
       ]
     }
   ],

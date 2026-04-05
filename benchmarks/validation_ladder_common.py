@@ -47,6 +47,12 @@ short_run_geometry_rel_tolerance = ladder_contract.short_run_geometry_rel_tolera
 short_run_stage2_final_objective_rel_tolerance = (
     ladder_contract.short_run_stage2_final_objective_rel_tolerance
 )
+evaluate_grouped_adjoint_memory_budget = (
+    ladder_contract.evaluate_grouped_adjoint_memory_budget
+)
+evaluate_tier5_performance_budget = ladder_contract.evaluate_tier5_performance_budget
+grouped_adjoint_memory_budget = ladder_contract.grouped_adjoint_memory_budget
+tier5_performance_budget = ladder_contract.tier5_performance_budget
 
 
 def preparse_platform(argv: list[str]) -> str:

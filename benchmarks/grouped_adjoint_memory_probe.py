@@ -45,6 +45,8 @@ from benchmarks.validation_ladder_common import (
     bootstrap_local_simsopt,
     build_provenance,
     describe_compile_behavior,
+    evaluate_grouped_adjoint_memory_budget,
+    grouped_adjoint_memory_budget,
     preparse_platform,
     print_provenance,
     query_gpu_memory_mb,
@@ -63,6 +65,8 @@ import jaxlib
 
 jax.config.update("jax_enable_x64", True)
 require_x64_runtime(jax, context="Grouped adjoint memory probe")
+
+_GROUPED_ADJOINT_FIXTURE = "real-single-stage-init"
 
 
 def parse_args() -> argparse.Namespace:
@@ -159,7 +163,16 @@ def parse_args() -> argparse.Namespace:
             "This only takes effect when --boozer-optimizer-backend=ondevice."
         ),
     )
+    parser.add_argument(
+        "--device-memory-profile-out",
+        default=None,
+        help=(
+            "Optional JAX device-memory profile artifact to write when the "
+            "probe fails."
+        ),
+    )
     return parser.parse_args()
+
 
 def _rss_high_water_mark_mb() -> float:
     rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
@@ -267,10 +280,12 @@ def _build_grouped_adjoint_payload(
     fixture: dict[str, object],
     base_result: dict[str, Any],
     metrics: dict[str, Any],
+    memory_budget: dict[str, float | None],
     failures: list[str],
     snapshots: list[dict[str, float | str | None]],
     boozer_limited_memory: bool,
     boozer_limited_memory_requested: bool,
+    device_memory_profile_path: str | None,
 ) -> dict[str, Any]:
     return {
         "provenance": provenance,
@@ -296,6 +311,8 @@ def _build_grouped_adjoint_payload(
             "snapshots": snapshots,
             "peak_rss_mb": _peak_snapshot_value(snapshots, "rss_mb"),
             "peak_gpu_memory_mb": _peak_snapshot_value(snapshots, "gpu_memory_mb"),
+            "budget": memory_budget,
+            "device_memory_profile_path": device_memory_profile_path,
         },
         "failures": failures,
         "passed": not failures,
@@ -336,7 +353,11 @@ def _build_probe_provenance(args: argparse.Namespace) -> dict[str, Any]:
     )
 
 
-def evaluate_grouped_adjoint_memory_probe(metrics: dict[str, Any]) -> list[str]:
+def evaluate_grouped_adjoint_memory_probe(
+    metrics: dict[str, Any],
+    *,
+    budget: dict[str, float | None] | None = None,
+) -> list[str]:
     failures: list[str] = []
     snapshots = list(metrics.get("snapshots", []))
     required_labels = {
@@ -375,7 +396,24 @@ def evaluate_grouped_adjoint_memory_probe(metrics: dict[str, Any]) -> list[str]:
         failures.append("Grouped-adjoint memory probe produced a zero implicit gradient.")
     if not np.isfinite(float(metrics.get("adjoint_residual_rel", np.inf))):
         failures.append("Grouped-adjoint memory probe adjoint residual is not finite.")
+    if budget is not None:
+        metric_with_peaks = dict(metrics)
+        metric_with_peaks["peak_rss_mb"] = _peak_snapshot_value(snapshots, "rss_mb")
+        metric_with_peaks["peak_gpu_memory_mb"] = _peak_snapshot_value(
+            snapshots, "gpu_memory_mb"
+        )
+        failures.extend(
+            evaluate_grouped_adjoint_memory_budget(metric_with_peaks, budget)
+        )
     return failures
+
+
+def _save_device_memory_profile(path: str) -> str:
+    profile_path = Path(path)
+    profile_path.parent.mkdir(parents=True, exist_ok=True)
+    jax.device_put(np.asarray(0.0, dtype=np.float64)).block_until_ready()
+    jax.profiler.save_device_memory_profile(str(profile_path))
+    return str(profile_path)
 
 
 def main() -> None:
@@ -453,17 +491,31 @@ def main() -> None:
         implicit_gradient_finite,
         snapshots,
     )
-    failures = evaluate_grouped_adjoint_memory_probe(metrics)
+    budget_platform = (
+        args.platform if args.platform != "auto" else str(jax.default_backend())
+    )
+    memory_budget = grouped_adjoint_memory_budget(
+        fixture=_GROUPED_ADJOINT_FIXTURE,
+        platform=budget_platform,
+    )
+    failures = evaluate_grouped_adjoint_memory_probe(metrics, budget=memory_budget)
+    device_memory_profile_path = None
+    if failures and args.device_memory_profile_out is not None:
+        device_memory_profile_path = _save_device_memory_profile(
+            args.device_memory_profile_out
+        )
 
     payload = _build_grouped_adjoint_payload(
         provenance=provenance,
         fixture=fixture,
         base_result=base_result,
         metrics=metrics,
+        memory_budget=memory_budget,
         failures=failures,
         snapshots=snapshots,
         boozer_limited_memory=boozer_limited_memory,
         boozer_limited_memory_requested=boozer_limited_memory_requested,
+        device_memory_profile_path=device_memory_profile_path,
     )
     write_json(args.output_json, payload)
     if failures:

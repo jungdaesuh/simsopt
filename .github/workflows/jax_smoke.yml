@@ -35,7 +35,11 @@ on:
       - 'tests/test_benchmark_helpers.py'
       - 'tests/test_jax_import_smoke.py'
       - 'examples/single_stage_optimization/**'
+      - 'benchmarks/stage2_e2e_comparison.py'
+      - 'benchmarks/single_stage_init_parity.py'
+      - 'benchmarks/validation_ladder_common.py'
       - 'benchmarks/validation_ladder_contract.py'
+      - 'envs/jax-0.9.2.yml'
       - 'scripts/jax_ci_contract.py'
   pull_request:
     branches: [jax-port, master]
@@ -71,7 +75,11 @@ on:
       - 'tests/test_benchmark_helpers.py'
       - 'tests/test_jax_import_smoke.py'
       - 'examples/single_stage_optimization/**'
+      - 'benchmarks/stage2_e2e_comparison.py'
+      - 'benchmarks/single_stage_init_parity.py'
+      - 'benchmarks/validation_ladder_common.py'
       - 'benchmarks/validation_ladder_contract.py'
+      - 'envs/jax-0.9.2.yml'
       - 'scripts/jax_ci_contract.py'
 
 jobs:
@@ -229,6 +237,69 @@ jobs:
             tests/integration/test_stage2_jax.py -k "strict_mode_rejects" \
             tests/integration/test_single_stage_jax.py -k "strict_mode" \
             -v --tb=short
+
+  jax-gpu-e2e:
+    name: JAX GPU e2e smoke (CUDA, ondevice)
+    runs-on: [self-hosted, gpu]
+    timeout-minutes: 45
+    env:
+      BENCHMARK_ENV_NAME: jax-0.9.2
+      BENCHMARK_ENV_FILE: envs/jax-0.9.2.yml
+      SIMSOPT_BACKEND_MODE: jax_gpu_parity
+      SIMSOPT_BACKEND_STRICT: "1"
+      SIMSOPT_JAX_TRANSFER_GUARD: disallow
+      JAX_PLATFORMS: cuda
+      JAX_ENABLE_X64: "1"
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Provision GPU e2e environment from recipe
+        run: |
+          if conda env list | awk '{print $1}' | grep -Fxq "$BENCHMARK_ENV_NAME"; then
+            conda env update -n "$BENCHMARK_ENV_NAME" -f "$BENCHMARK_ENV_FILE" --prune
+          else
+            conda env create -f "$BENCHMARK_ENV_FILE"
+          fi
+          conda run --no-capture-output -n "$BENCHMARK_ENV_NAME" \
+            python -m pip install -e ".[JAX_GPU,dev]"
+
+      - name: Verify CUDA runtime and x64 contract
+        run: |
+          conda run --no-capture-output -n "$BENCHMARK_ENV_NAME" \
+            python -c "import jax; print(jax.devices()); print(jax.default_backend()); assert any(device.platform in {'cuda', 'gpu'} for device in jax.devices()); assert jax.config.jax_enable_x64"
+
+      - name: Run Stage 2 CUDA e2e smoke
+        run: |
+          mkdir -p benchmark_artifacts
+          conda run --no-capture-output -n "$BENCHMARK_ENV_NAME" \
+            python benchmarks/stage2_e2e_comparison.py \
+            --platform cuda \
+            --optimizer-backend ondevice \
+            --maxiter 20 \
+            --output-json benchmark_artifacts/stage2_e2e_cuda.json
+
+      - name: Run single-stage CUDA init parity smoke
+        run: |
+          mkdir -p benchmark_artifacts
+          conda run --no-capture-output -n "$BENCHMARK_ENV_NAME" \
+            python benchmarks/single_stage_init_parity.py \
+            --platform cuda \
+            --optimizer-backend ondevice \
+            --benchmark-mode \
+            --output-json benchmark_artifacts/single_stage_init_cuda.json
+
+      - name: Publish CUDA e2e smoke artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: jax-gpu-e2e-smoke
+          if-no-files-found: ignore
+          path: |
+            benchmark_artifacts/stage2_e2e_cuda.json
+            benchmark_artifacts/single_stage_init_cuda.json
 
   jax-private-optimizer:
     name: JAX private optimizer lane (0.9.2, with simsoptpp)

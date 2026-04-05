@@ -45,6 +45,160 @@ CI_REPRODUCIBILITY_CONTRACT = {
     "tolerance_ratchet_factor": 10.0,
 }
 
+# Initial reduced-fixture ratchet for the grouped-adjoint memory probe.
+GROUPED_ADJOINT_MEMORY_BUDGETS = {
+    "real_single_stage_init": {
+        "cpu": {
+            "max_peak_rss_mb": 8192.0,
+            "max_peak_gpu_memory_mb": None,
+        },
+        "cuda": {
+            "max_peak_rss_mb": 8192.0,
+            "max_peak_gpu_memory_mb": 12288.0,
+        },
+    }
+}
+
+# Stage 2 floors mirror docs/source/jax_acceptance.rst.
+TIER5_PERFORMANCE_BUDGETS = {
+    "stable_hardware_weekly": {
+        "tier2_stage2_e2e": {
+            "min_outer_speedup_vs_cpu": 1.25,
+            "min_warm_speedup_vs_cpu": 1.25,
+            "max_compile_overhead_s": 60.0,
+        }
+    }
+}
+
+
+def _normalize_contract_key(value: str) -> str:
+    return str(value).strip().lower().replace("-", "_")
+
+
+def _normalize_platform_key(value: str) -> str:
+    platform_key = _normalize_contract_key(value)
+    if platform_key == "gpu":
+        return "cuda"
+    return platform_key
+
+
+def grouped_adjoint_memory_budget(
+    *,
+    fixture: str,
+    platform: str,
+) -> dict[str, float | None]:
+    fixture_key = _normalize_contract_key(fixture)
+    if fixture_key not in GROUPED_ADJOINT_MEMORY_BUDGETS:
+        valid = ", ".join(sorted(GROUPED_ADJOINT_MEMORY_BUDGETS))
+        raise ValueError(
+            f"Unknown grouped-adjoint fixture {fixture!r}. Expected one of: {valid}."
+        )
+    fixture_budgets = GROUPED_ADJOINT_MEMORY_BUDGETS[fixture_key]
+    platform_key = _normalize_platform_key(platform)
+    if platform_key == "auto":
+        platform_key = "cpu"
+    if platform_key not in fixture_budgets:
+        valid = ", ".join(sorted(fixture_budgets))
+        raise ValueError(
+            f"Unknown grouped-adjoint platform {platform!r} for fixture "
+            f"{fixture!r}. Expected one of: {valid}."
+        )
+    return dict(fixture_budgets[platform_key])
+
+
+def evaluate_grouped_adjoint_memory_budget(
+    metrics: dict[str, object],
+    budget: dict[str, float | None],
+) -> list[str]:
+    failures: list[str] = []
+    peak_rss_mb = metrics.get("peak_rss_mb")
+    max_peak_rss_mb = budget.get("max_peak_rss_mb")
+    if (
+        max_peak_rss_mb is not None
+        and peak_rss_mb is not None
+        and float(peak_rss_mb) > float(max_peak_rss_mb)
+    ):
+        failures.append(
+            "Grouped-adjoint memory probe peak RSS "
+            f"{float(peak_rss_mb):.2f} MB exceeded checked-in budget "
+            f"{float(max_peak_rss_mb):.2f} MB."
+        )
+    peak_gpu_memory_mb = metrics.get("peak_gpu_memory_mb")
+    max_peak_gpu_memory_mb = budget.get("max_peak_gpu_memory_mb")
+    if (
+        max_peak_gpu_memory_mb is not None
+        and peak_gpu_memory_mb is not None
+        and float(peak_gpu_memory_mb) > float(max_peak_gpu_memory_mb)
+    ):
+        failures.append(
+            "Grouped-adjoint memory probe peak GPU memory "
+            f"{float(peak_gpu_memory_mb):.2f} MB exceeded checked-in budget "
+            f"{float(max_peak_gpu_memory_mb):.2f} MB."
+        )
+    return failures
+
+
+def tier5_performance_budget(
+    *,
+    profile: str,
+) -> dict[str, dict[str, float | None]]:
+    profile_key = _normalize_contract_key(profile)
+    if profile_key not in TIER5_PERFORMANCE_BUDGETS:
+        valid = ", ".join(sorted(TIER5_PERFORMANCE_BUDGETS))
+        raise ValueError(
+            f"Unknown Tier 5 performance budget profile {profile!r}. "
+            f"Expected one of: {valid}."
+        )
+    return {
+        rung: dict(rung_budget)
+        for rung, rung_budget in TIER5_PERFORMANCE_BUDGETS[profile_key].items()
+    }
+
+
+def evaluate_tier5_performance_budget(
+    summary_by_name: dict[str, dict[str, object]],
+    budget: dict[str, dict[str, float | None]],
+) -> list[str]:
+    failures: list[str] = []
+    for rung_name, rung_budget in budget.items():
+        rung_summary = summary_by_name.get(rung_name)
+        if rung_summary is None:
+            failures.append(
+                f"Tier 5 performance budget references missing summary rung {rung_name!r}."
+            )
+            continue
+        min_outer_speedup = rung_budget.get("min_outer_speedup_vs_cpu")
+        outer_speedup = rung_summary.get("outer_speedup_vs_cpu")
+        if min_outer_speedup is not None:
+            if outer_speedup is None or float(outer_speedup) < float(min_outer_speedup):
+                failures.append(
+                    f"{rung_name} cold end-to-end speedup "
+                    f"{'n/a' if outer_speedup is None else f'{float(outer_speedup):.2f}x'} "
+                    f"fell below checked-in floor {float(min_outer_speedup):.2f}x."
+                )
+        min_warm_speedup = rung_budget.get("min_warm_speedup_vs_cpu")
+        warm_speedup = rung_summary.get("warm_speedup_vs_cpu")
+        if min_warm_speedup is not None:
+            if warm_speedup is None or float(warm_speedup) < float(min_warm_speedup):
+                failures.append(
+                    f"{rung_name} warm steady-state speedup "
+                    f"{'n/a' if warm_speedup is None else f'{float(warm_speedup):.2f}x'} "
+                    f"fell below checked-in floor {float(min_warm_speedup):.2f}x."
+                )
+        max_compile_overhead = rung_budget.get("max_compile_overhead_s")
+        compile_overhead = rung_summary.get("lane_compile_overhead_s")
+        if max_compile_overhead is not None:
+            if (
+                compile_overhead is None
+                or float(compile_overhead) > float(max_compile_overhead)
+            ):
+                failures.append(
+                    f"{rung_name} compile overhead "
+                    f"{'n/a' if compile_overhead is None else f'{float(compile_overhead):.2f}s'} "
+                    f"exceeded checked-in ceiling {float(max_compile_overhead):.2f}s."
+                )
+    return failures
+
 
 def resolve_probe_lane(*, optimizer_backend: str | None = None) -> str:
     """Map benchmark/probe options to the intended lane label."""

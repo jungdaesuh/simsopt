@@ -87,6 +87,8 @@ from benchmarks.validation_ladder_common import (
     apply_compilation_cache_policy,
     build_provenance,
     describe_compile_behavior,
+    evaluate_tier5_performance_budget,
+    grouped_adjoint_memory_budget,
     max_pointwise_geometry_drift,
     optimizer_drift_tolerances,
     repo_pythonpath_env,
@@ -96,6 +98,7 @@ from benchmarks.validation_ladder_common import (
     run_python_script,
     short_run_stage2_final_objective_rel_tolerance,
     short_run_geometry_rel_tolerance,
+    tier5_performance_budget,
 )
 
 
@@ -475,6 +478,37 @@ def test_single_stage_init_parity_passes_on_real_cuda_runtime(tmp_path):
     assert payload["passed"] is True
     assert payload["provenance"]["platform_request"] == "cuda"
     assert str(payload["provenance"]["backend"]).lower() in {"gpu", "cuda"}
+
+
+@pytest.mark.skipif(
+    not _single_stage_cuda_runtime_available(),
+    reason="requires a real CUDA JAX runtime",
+)
+def test_single_stage_init_parity_ondevice_passes_on_real_cuda_runtime(tmp_path):
+    output_json = tmp_path / "single-stage-init-ondevice-cuda.json"
+
+    run_python_script(
+        Path(single_stage_init_parity_module.__file__),
+        [
+            "--platform",
+            "cuda",
+            "--optimizer-backend",
+            single_stage_init_parity_module.TARGET_OPTIMIZER_BACKEND,
+            "--benchmark-mode",
+            "--output-json",
+            str(output_json),
+        ],
+        cwd=single_stage_init_parity_module.REPO_ROOT,
+        env=repo_pythonpath_env(platform="cuda"),
+        bootstrap_repo=True,
+        stream_output=True,
+    )
+
+    payload = json.loads(output_json.read_text(encoding="utf-8"))
+
+    assert payload["passed"] is True
+    assert payload["comparison"]["jax_outer_optimizer_method"] == TARGET_OUTER_OPTIMIZER_METHOD
+    assert payload["comparison"]["jax_self_intersecting"] is False
 
 
 def test_repo_pythonpath_env_sets_all_platform_selectors(monkeypatch):
@@ -1529,13 +1563,20 @@ def _grouped_adjoint_memory_metrics(*, snapshots, **overrides):
     return metrics
 
 
-def _grouped_adjoint_snapshot(label, rss_mb):
+def _grouped_adjoint_snapshot(label, rss_mb, gpu_memory_mb=None):
     return {
         "label": label,
         "elapsed_s": rss_mb * 0.5,
         "rss_mb": rss_mb,
-        "gpu_memory_mb": None,
+        "gpu_memory_mb": gpu_memory_mb,
     }
+
+
+def _grouped_adjoint_budget(platform: str) -> dict[str, float | None]:
+    return grouped_adjoint_memory_budget(
+        fixture="real-single-stage-init",
+        platform=platform,
+    )
 
 
 def _complete_grouped_adjoint_snapshots():
@@ -1577,6 +1618,15 @@ def _weekly_tier5_workflow_path() -> Path:
         / ".github"
         / "workflows"
         / "jax_benchmark_reporting.yml"
+    )
+
+
+def _smoke_workflow_path() -> Path:
+    return (
+        Path(__file__).resolve().parents[1]
+        / ".github"
+        / "workflows"
+        / "jax_smoke.yml"
     )
 
 
@@ -1799,7 +1849,8 @@ def test_compute_direct_and_total_gradients_uses_live_boozer_g(monkeypatch):
 
 def test_grouped_adjoint_memory_probe_requires_complete_finite_metrics():
     failures = evaluate_grouped_adjoint_memory_probe(
-        _grouped_adjoint_memory_metrics(snapshots=_complete_grouped_adjoint_snapshots())
+        _grouped_adjoint_memory_metrics(snapshots=_complete_grouped_adjoint_snapshots()),
+        budget=_grouped_adjoint_budget("cpu"),
     )
 
     assert failures == []
@@ -1812,11 +1863,26 @@ def test_grouped_adjoint_memory_probe_rejects_missing_snapshots_or_nonfinite_gra
             implicit_gradient_finite=False,
             implicit_gradient_norm=0.0,
             snapshots=[_grouped_adjoint_snapshot("start", 1.0)],
-        )
+        ),
+        budget=_grouped_adjoint_budget("cpu"),
     )
 
     assert any("required snapshots" in failure for failure in failures)
     assert any("non-finite implicit gradient" in failure for failure in failures)
+
+
+def test_grouped_adjoint_memory_probe_rejects_budget_regressions():
+    snapshots = _complete_grouped_adjoint_snapshots()
+    snapshots[-1]["rss_mb"] = 9000.0
+    snapshots[-1]["gpu_memory_mb"] = 13000.0
+
+    failures = evaluate_grouped_adjoint_memory_probe(
+        _grouped_adjoint_memory_metrics(snapshots=snapshots),
+        budget=_grouped_adjoint_budget("cuda"),
+    )
+
+    assert any("peak RSS" in failure for failure in failures)
+    assert any("peak GPU memory" in failure for failure in failures)
 
 
 def test_grouped_adjoint_memory_payload_records_limited_memory_route():
@@ -1841,10 +1907,12 @@ def test_grouped_adjoint_memory_payload_records_limited_memory_route():
             "optimizer_method": "lbfgs-ondevice",
         },
         metrics=metrics,
+        memory_budget=_grouped_adjoint_budget("cuda"),
         failures=[],
         snapshots=snapshots,
         boozer_limited_memory=True,
         boozer_limited_memory_requested=True,
+        device_memory_profile_path="/tmp/grouped.prof",
     )
 
     assert payload["provenance"]["boozer_limited_memory"] is True
@@ -1853,6 +1921,8 @@ def test_grouped_adjoint_memory_payload_records_limited_memory_route():
     assert payload["baseline"]["optimizer_method"] == "lbfgs-ondevice"
     assert payload["baseline"]["boozer_limited_memory"] is True
     assert payload["baseline"]["boozer_limited_memory_requested"] is True
+    assert payload["memory"]["budget"]["max_peak_gpu_memory_mb"] == pytest.approx(12288.0)
+    assert payload["memory"]["device_memory_profile_path"] == "/tmp/grouped.prof"
 
 
 def test_grouped_adjoint_memory_payload_records_requested_but_inactive_limited_memory():
@@ -1877,10 +1947,12 @@ def test_grouped_adjoint_memory_payload_records_requested_but_inactive_limited_m
             "optimizer_method": "bfgs",
         },
         metrics=metrics,
+        memory_budget=_grouped_adjoint_budget("cpu"),
         failures=[],
         snapshots=snapshots,
         boozer_limited_memory=False,
         boozer_limited_memory_requested=True,
+        device_memory_profile_path=None,
     )
 
     assert payload["provenance"]["boozer_limited_memory"] is False
@@ -1895,6 +1967,10 @@ def test_grouped_adjoint_memory_resolves_effective_limited_memory_route():
     assert resolve_boozer_limited_memory("ondevice", True) is True
     assert resolve_boozer_limited_memory("scipy", True) is False
     assert resolve_boozer_limited_memory("ondevice", False) is False
+
+
+def test_grouped_adjoint_memory_budget_accepts_gpu_platform_alias():
+    assert _grouped_adjoint_budget("gpu") == _grouped_adjoint_budget("cuda")
 
 
 def test_tier5_single_stage_probe_args_thread_benchmark_mode():
@@ -1980,6 +2056,30 @@ def test_weekly_tier5_manifest_targets_ondevice_benchmark_mode():
     assert manifest["runtime_contract"]["backend_mode"] == "jax_gpu_fast"
     assert manifest["runtime_contract"]["strict_backend"] is True
     assert manifest["runtime_contract"]["transfer_guard"] == "disallow"
+    assert manifest["performance_budget"]["profile"] == "stable_hardware_weekly"
+    assert (
+        manifest["performance_budget"]["tier2_stage2_e2e"]["min_outer_speedup_vs_cpu"]
+        == pytest.approx(1.25)
+    )
+    assert (
+        manifest["performance_budget"]["tier2_stage2_e2e"]["max_compile_overhead_s"]
+        == pytest.approx(60.0)
+    )
+    assert (
+        manifest["memory_budget"]["max_peak_gpu_memory_mb"] == pytest.approx(12288.0)
+    )
+
+
+def test_weekly_tier5_manifest_includes_grouped_adjoint_memory_probe_command():
+    manifest = json.loads(_weekly_tier5_manifest_path().read_text(encoding="utf-8"))
+    grouped_command = manifest["commands"][1]
+
+    assert grouped_command["name"] == "grouped_adjoint_memory_probe"
+    assert grouped_command["script"] == "benchmarks/grouped_adjoint_memory_probe.py"
+    assert grouped_command["args"][-2:] == [
+        "--device-memory-profile-out",
+        "benchmark_artifacts/grouped_adjoint_memory_profile.prof",
+    ]
 
 
 def test_weekly_tier5_workflow_sets_cache_and_ondevice_contract():
@@ -1999,6 +2099,11 @@ def test_weekly_tier5_workflow_sets_cache_and_ondevice_contract():
     assert 'conda run --no-capture-output -n "$BENCHMARK_ENV_NAME" python -V' in workflow_text
     assert "--optimizer-backend ondevice" in workflow_text
     assert "--benchmark-mode" in workflow_text
+    assert "continue-on-error: true" in workflow_text
+    assert "benchmarks/grouped_adjoint_memory_probe.py" in workflow_text
+    assert "--device-memory-profile-out benchmark_artifacts/grouped_adjoint_memory_profile.prof" in workflow_text
+    assert "if-no-files-found: ignore" in workflow_text
+    assert "Fail on benchmark gate regressions" in workflow_text
 
 
 def test_gpu_parity_workflow_enforces_strict_transfer_guard_contract():
@@ -2012,6 +2117,21 @@ def test_gpu_parity_workflow_enforces_strict_transfer_guard_contract():
     assert "SIMSOPT_BACKEND_MODE: jax_gpu_parity" in workflow_text
     assert 'SIMSOPT_BACKEND_STRICT: "1"' in workflow_text
     assert "SIMSOPT_JAX_TRANSFER_GUARD: disallow" in workflow_text
+
+
+def test_smoke_workflow_adds_cuda_e2e_target_lane_gate():
+    workflow_text = _smoke_workflow_path().read_text(encoding="utf-8")
+
+    assert "jax-gpu-e2e:" in workflow_text
+    assert "name: JAX GPU e2e smoke (CUDA, ondevice)" in workflow_text
+    assert "runs-on: [self-hosted, gpu]" in workflow_text
+    assert 'SIMSOPT_BACKEND_STRICT: "1"' in workflow_text
+    assert "SIMSOPT_JAX_TRANSFER_GUARD: disallow" in workflow_text
+    assert 'JAX_ENABLE_X64: "1"' in workflow_text
+    assert "benchmarks/stage2_e2e_comparison.py" in workflow_text
+    assert "benchmarks/single_stage_init_parity.py" in workflow_text
+    assert "--platform cuda" in workflow_text
+    assert "--optimizer-backend ondevice" in workflow_text
 
 
 def test_single_stage_outer_loop_probe_resolves_expected_boozer_method():
@@ -2950,15 +3070,39 @@ def test_build_tier5_performance_contract_routes_parity_and_headline_sources():
 
     assert contract["parity_source"]["rung"] == "tier1b_real_stage2"
     assert contract["cold_end_to_end_source"]["rung"] == "tier2_stage2_e2e"
+    assert contract["cold_end_to_end_source"]["metric_path"] == (
+        "summary_by_name.tier2_stage2_e2e.outer_speedup_vs_cpu"
+    )
     assert contract["cold_end_to_end_source"]["speedup_vs_cpu"] == pytest.approx(0.8)
+    assert contract["warm_steady_state_source"]["metric_path"] == (
+        "summary_by_name.tier2_stage2_e2e.warm_speedup_vs_cpu"
+    )
     assert contract["warm_steady_state_source"]["speedup_vs_cpu"] == pytest.approx(4.0)
-    assert contract["headline_performance_source"]["metric_path"].endswith(
-        "warm_speedup_vs_cpu"
+    assert contract["headline_performance_source"]["metric_path"] == (
+        "summary_by_name.tier2_stage2_e2e.warm_speedup_vs_cpu"
     )
     assert contract["do_not_use_for_performance_headline"] == [
         "tier1b_real_stage2",
         "tier3_single_stage_init",
     ]
+
+
+def test_evaluate_tier5_performance_budget_rejects_stage2_speed_regressions():
+    budget = tier5_performance_budget(profile="stable_hardware_weekly")
+    failures = evaluate_tier5_performance_budget(
+        {
+            "tier2_stage2_e2e": {
+                "outer_speedup_vs_cpu": 0.1,
+                "warm_speedup_vs_cpu": 0.25,
+                "lane_compile_overhead_s": 75.0,
+            }
+        },
+        budget,
+    )
+
+    assert any("cold end-to-end speedup" in failure for failure in failures)
+    assert any("warm steady-state speedup" in failure for failure in failures)
+    assert any("compile overhead" in failure for failure in failures)
 
 
 def test_summarize_single_lane_probe_keeps_outer_elapsed():

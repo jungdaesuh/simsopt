@@ -69,6 +69,7 @@ from simsopt.geo.optimizer_jax import (
     jax_minimize,
 )
 from simsopt.objectives.fluxobjective_jax import SquaredFluxJAX
+import simsopt.objectives.stage2_target_objective_jax as stage2_target_objective_module
 from simsopt.objectives.stage2_target_objective_jax import (
     Stage2PenaltyConfig,
     _split_stage2_dofs,
@@ -3299,6 +3300,39 @@ class TestStage2OptimizerContract:
         _enable_strict_jax_backend(monkeypatch, request)
         objective, target_bundle = _build_stage2_target_objective_contract_case()
         dofs = jax.device_put(np.asarray(objective.x, dtype=np.float64))
+        value = target_bundle.objective(dofs)
+        assert target_bundle.raw_terms is not None
+        raw_terms = target_bundle.raw_terms(dofs)
+        grad = jax.grad(target_bundle.objective)(dofs)
+
+        assert np.isfinite(float(value))
+        assert np.all(np.isfinite(np.asarray(raw_terms, dtype=float)))
+        assert np.all(np.isfinite(np.asarray(grad, dtype=float)))
+
+    def test_target_scalar_objective_does_not_reenter_host_snapshot_after_build(
+        self,
+        monkeypatch,
+    ):
+        objective, target_bundle = _build_stage2_target_objective_contract_case()
+        dofs = jax.device_put(np.asarray(objective.x, dtype=np.float64))
+
+        def _reject_host_snapshot(*_args, **_kwargs):
+            raise AssertionError(
+                "Stage 2 ondevice objective should not hostify immutable state "
+                "inside the compiled hot path."
+            )
+
+        monkeypatch.setattr(
+            stage2_target_objective_module,
+            "_hostify_tree",
+            _reject_host_snapshot,
+        )
+        monkeypatch.setattr(
+            stage2_target_objective_module,
+            "_as_host_float64",
+            _reject_host_snapshot,
+        )
+
         value = target_bundle.objective(dofs)
         assert target_bundle.raw_terms is not None
         raw_terms = target_bundle.raw_terms(dofs)
