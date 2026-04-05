@@ -40,6 +40,10 @@ EXAMPLE_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, ".."))
 import sys
 
 sys.path.insert(0, EXAMPLE_ROOT)
+from hardware_constraints import (
+    apply_hardware_constraint_verdict,
+    sanitize_json_payload,
+)
 from jax_host_boundary import host_array, host_bool, host_float
 from plotting_utils import cross_section_plot, norm_field_plot, norm_field_summary
 
@@ -135,10 +139,100 @@ def _record_prefixed_stage_timings(timings, stage_marks, *, prefix, solve_start_
 
 
 def resolve_curvature_threshold(value: float) -> float:
-    """Apply the shared HBT curvature-threshold policy for single-stage runs."""
+    """Clamp single-stage curvature thresholds into the shared HBT [20, 40] band."""
     return min(
         max(float(value), CURVATURE_THRESHOLD_FLOOR),
         CURVATURE_THRESHOLD_CEILING,
+    )
+
+
+def evaluate_single_stage_hardware_constraints(
+    curve_curve_min_dist,
+    cc_dist,
+    curve_surface_min_dist,
+    cs_dist,
+    surface_vessel_min_dist,
+    ss_dist,
+    max_curvature,
+    curvature_threshold,
+):
+    """Evaluate hard single-stage hardware constraints against realized geometry."""
+    curve_curve_min_dist = float(curve_curve_min_dist)
+    cc_dist = float(cc_dist)
+    curve_surface_min_dist = float(curve_surface_min_dist)
+    cs_dist = float(cs_dist)
+    surface_vessel_min_dist = float(surface_vessel_min_dist)
+    ss_dist = float(ss_dist)
+    max_curvature = float(max_curvature)
+    curvature_threshold = float(curvature_threshold)
+    violations = []
+    for metric_name, metric_value in (
+        ("coil_coil_min_dist", curve_curve_min_dist),
+        ("cc_dist", cc_dist),
+        ("coil_surface_min_dist", curve_surface_min_dist),
+        ("cs_dist", cs_dist),
+        ("surface_vessel_min_dist", surface_vessel_min_dist),
+        ("ss_dist", ss_dist),
+        ("max_curvature", max_curvature),
+        ("curvature_threshold", curvature_threshold),
+    ):
+        if not np.isfinite(metric_value):
+            violations.append(f"{metric_name} {metric_value} is not finite")
+    if curve_curve_min_dist < cc_dist:
+        violations.append(
+            f"coil_coil_min_dist {curve_curve_min_dist:.6f} below threshold {cc_dist:.6f}"
+        )
+    if curve_surface_min_dist < cs_dist:
+        violations.append(
+            f"coil_surface_min_dist {curve_surface_min_dist:.6f} below threshold {cs_dist:.6f}"
+        )
+    if surface_vessel_min_dist < ss_dist:
+        violations.append(
+            f"surface_vessel_min_dist {surface_vessel_min_dist:.6f} below threshold {ss_dist:.6f}"
+        )
+    if max_curvature > curvature_threshold:
+        violations.append(
+            f"max_curvature {max_curvature:.6f} exceeds threshold {curvature_threshold:.6f}"
+        )
+    return {
+        "success": len(violations) == 0,
+        "violations": violations,
+        "curve_curve_min_dist": curve_curve_min_dist,
+        "cc_dist": cc_dist,
+        "curve_surface_min_dist": curve_surface_min_dist,
+        "cs_dist": cs_dist,
+        "surface_vessel_min_dist": surface_vessel_min_dist,
+        "ss_dist": ss_dist,
+        "max_curvature": max_curvature,
+        "curvature_threshold": curvature_threshold,
+    }
+
+
+def _can_evaluate_single_stage_hardware_status(objectives, diagnostics):
+    return (
+        objectives is not None
+        and diagnostics is not None
+        and "cc" in objectives
+        and "cs" in objectives
+        and "surf" in objectives
+        and "banana_curve" in diagnostics
+    )
+
+
+def _evaluate_single_stage_hardware_status(objectives, diagnostics):
+    curve_curve_min_dist = host_float(objectives["cc"].shortest_distance())
+    curve_surface_min_dist = host_float(objectives["cs"].shortest_distance())
+    surface_vessel_min_dist = host_float(objectives["surf"].shortest_distance())
+    max_curvature = float(np.max(diagnostics["banana_curve"].kappa()))
+    return evaluate_single_stage_hardware_constraints(
+        curve_curve_min_dist,
+        CC_DIST,
+        curve_surface_min_dist,
+        CS_DIST,
+        surface_vessel_min_dist,
+        SS_DIST,
+        max_curvature,
+        CURVATURE_THRESHOLD,
     )
 
 
@@ -1383,6 +1477,8 @@ def _evaluate_candidate_impl(
     run_dict,
     boozer_surface,
     JF,
+    objectives=None,
+    diagnostics=None,
 ):
     """Evaluate a candidate coil configuration against the mutable objective graph.
 
@@ -1420,6 +1516,16 @@ def _evaluate_candidate_impl(
     is_intersecting = update_self_intersection_status(run_dict, boozer_surface.surface)
     success = success_solve and not is_intersecting
 
+    if success and _can_evaluate_single_stage_hardware_status(objectives, diagnostics):
+        hardware_status = _evaluate_single_stage_hardware_status(
+            objectives,
+            diagnostics,
+        )
+        run_dict["hardware_constraint_status"] = hardware_status
+        success = hardware_status["success"]
+    else:
+        run_dict.pop("hardware_constraint_status", None)
+
     if success:
         J = JF.J()
         dJ = JF.dJ()
@@ -1430,6 +1536,9 @@ def _evaluate_candidate_impl(
             logger.warning("Boozer solver failed")
         if is_intersecting:
             logger.warning("Surface is self-intersecting")
+        hardware_status = run_dict.get("hardware_constraint_status")
+        if hardware_status is not None and not hardware_status["success"]:
+            logger.warning("Hardware constraints violated")
 
         # Elevated J triggers line-search backtracking.
         # Returning dJ (not the derivative of J) is intentionally
@@ -1445,14 +1554,28 @@ def _evaluate_candidate_impl(
     return J, dJ
 
 
-def evaluate_candidate(x, run_dict, boozer_surface, JF):
+def evaluate_candidate(
+    x,
+    run_dict,
+    boozer_surface,
+    JF,
+    objectives=None,
+    diagnostics=None,
+):
     """Evaluate a candidate coil configuration.
 
     This is the line-search/objective entry used by the explicit outer
     optimizer contract.  Tracks line-search state before evaluating.
     """
     _update_line_search_state(x, run_dict)
-    return _evaluate_candidate_impl(x, run_dict, boozer_surface, JF)
+    return _evaluate_candidate_impl(
+        x,
+        run_dict,
+        boozer_surface,
+        JF,
+        objectives,
+        diagnostics,
+    )
 
 
 def snapshot_accepted_step_state(run_dict, boozer_surface, JF):
@@ -1498,8 +1621,6 @@ def accept_step(
     iota_obj = diagnostics_refs["iota"]
     banana_curve = diagnostics_refs["banana_curve"]
     curvelength_obj = diagnostics_refs["curvelength"]
-    JCurveCurve_obj = objectives["cc"]
-    JCurveSurface_obj = objectives["cs"]
 
     iota_str = f"{host_float(iota_obj.J()):.4f}"
     volume_str = f"{host_float(boozer_surface.surface.volume()):.4f}"
@@ -1507,10 +1628,16 @@ def accept_step(
     gamma = banana_curve.gamma()
     max_r = np.max(np.sqrt(gamma[:, 0] ** 2 + gamma[:, 1] ** 2))
     max_z = np.max(np.abs(gamma[:, 2]))
-    max_curvature = np.max(banana_curve.kappa())
     length = host_float(curvelength_obj.J())
-    curvecurve_min = host_float(JCurveCurve_obj.shortest_distance())
-    curvesurf_min = host_float(JCurveSurface_obj.shortest_distance())
+    hardware_status = _evaluate_single_stage_hardware_status(
+        objectives,
+        diagnostics_refs,
+    )
+    run_dict["hardware_constraint_status"] = hardware_status
+    max_curvature = hardware_status["max_curvature"]
+    curvecurve_min = hardware_status["curve_curve_min_dist"]
+    curvesurf_min = hardware_status["curve_surface_min_dist"]
+    surface_vessel_min = hardware_status["surface_vessel_min_dist"]
 
     # Save bs evaluation points so we can restore after the diagnostic
     _bs_pts_before = None
@@ -1560,6 +1687,10 @@ def accept_step(
     print(f"{'Max Curve Z':{width}} = {max_z:.6e}", file=buffer)
     print(f"{'Max Curvature':{width}} = {max_curvature:.6e}", file=buffer)
     print(f"{'Curve Length':{width}} = {length:.6e}", file=buffer)
+    print(f"{'Surface-Vessel Min Dist':{width}} = {surface_vessel_min:.6e}", file=buffer)
+    print(f"{'Hardware Constraints OK':{width}} = {hardware_status['success']}", file=buffer)
+    if hardware_status["violations"]:
+        print(f"{'Hardware Violations':{width}} = {hardware_status['violations']}", file=buffer)
     print("=" * 70, file=buffer)
 
     output_str = buffer.getvalue()
@@ -1619,7 +1750,14 @@ class SingleStageAdapter:
         and ``accept_step`` depend on.
         """
         self.apply_coil_dofs(x)
-        _evaluate_candidate_impl(x, self.run_dict, self.boozer_surface, self.JF)
+        _evaluate_candidate_impl(
+            x,
+            self.run_dict,
+            self.boozer_surface,
+            self.JF,
+            self.objectives,
+            self.diagnostics,
+        )
         self.run_dict["x_prev"] = np.array(x, copy=True)
 
     def sync_accepted_step(self, x):
@@ -1651,7 +1789,14 @@ class SingleStageAdapter:
         loop — ``evaluate_candidate`` itself is mutation-free.
         """
         self.apply_coil_dofs(x)
-        return evaluate_candidate(x, self.run_dict, self.boozer_surface, self.JF)
+        return evaluate_candidate(
+            x,
+            self.run_dict,
+            self.boozer_surface,
+            self.JF,
+            self.objectives,
+            self.diagnostics,
+        )
 
     def callback(self, x):
         """Accepted-step callback — delegates to accept_step.
@@ -2162,6 +2307,8 @@ if __name__ == "__main__":
 
     if args.init_only:
         res_nit = 0
+        optimizer_success = True
+        termination_message = "init_only"
         final_volume = initial_volume
         final_iota = initial_iota
         final_max_curvature = initial_max_curvature
@@ -2200,6 +2347,8 @@ if __name__ == "__main__":
             scalar_fun=target_scalar_objective,
         )
         outer_optimizer_end_s = _perf_counter_s()
+        termination_message = str(res.message)
+        optimizer_success = bool(res.success)
         _record_timing(
             timings,
             "outer_optimizer_s",
@@ -2300,6 +2449,22 @@ if __name__ == "__main__":
     ]
 
     # Save the results of optimization to a separate file
+    final_hardware_status = evaluate_single_stage_hardware_constraints(
+        float(JCurveCurve.shortest_distance()),
+        CC_DIST,
+        float(JCurveSurface.shortest_distance()),
+        CS_DIST,
+        float(JSurfSurf.shortest_distance()),
+        SS_DIST,
+        float(final_max_curvature),
+        CURVATURE_THRESHOLD,
+    )
+    optimizer_success, termination_message = apply_hardware_constraint_verdict(
+        optimizer_success,
+        termination_message,
+        final_hardware_status,
+        init_only=args.init_only,
+    )
     results = {
         "PLASMA_SURF_FILENAME": plasma_surf_filename,
         "PLASMA_SURF_PATH": file_loc,
@@ -2345,6 +2510,8 @@ if __name__ == "__main__":
         "max_iterations": MAXITER,
         "maxcor": args.maxcor,
         "iterations": res_nit,
+        "TERMINATION_MESSAGE": termination_message,
+        "OPTIMIZER_SUCCESS": optimizer_success,
         "TARGET_VOLUME": float(vol_target),
         "TARGET_IOTA": float(iota_target),
         "FINAL_VOLUME": float(final_volume),
@@ -2353,6 +2520,12 @@ if __name__ == "__main__":
         "SELF_INTERSECTING": final_self_intersecting,
         "SELF_INTERSECTION_CHECK_AVAILABLE": final_self_intersection_check_available,
         "MAX_CURVATURE": float(final_max_curvature),
+        "COIL_LENGTH": float(curvelength.J()),
+        "CURVE_CURVE_MIN_DIST": float(JCurveCurve.shortest_distance()),
+        "CURVE_SURFACE_MIN_DIST": float(JCurveSurface.shortest_distance()),
+        "SURFACE_VESSEL_MIN_DIST": float(JSurfSurf.shortest_distance()),
+        "HARDWARE_CONSTRAINTS_OK": final_hardware_status["success"],
+        "HARDWARE_CONSTRAINT_VIOLATIONS": final_hardware_status["violations"],
         "INITIAL_VOLUME": float(initial_volume),
         "INITIAL_IOTA": float(initial_iota),
         "INITIAL_FIELD_ERROR": float(initial_field_error),
@@ -2365,4 +2538,4 @@ if __name__ == "__main__":
     if target_lane_profile is not None:
         results["TARGET_LANE_PROFILE"] = target_lane_profile
     with open(os.path.join(OUT_DIR_ITER, "results.json"), "w") as outfile:
-        json.dump(results, outfile, indent=2)
+        json.dump(sanitize_json_payload(results), outfile, indent=2, allow_nan=False)

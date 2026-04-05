@@ -21,6 +21,10 @@ sys.path.insert(0, SIMSOPT_ROOT)
 sys.path.insert(0, REPO_ROOT)
 
 from jax_host_boundary import host_array, host_float
+from hardware_constraints import (
+    apply_hardware_constraint_verdict,
+    sanitize_json_payload,
+)
 from repo_bootstrap import bootstrap_local_simsopt
 
 
@@ -39,11 +43,61 @@ CURVATURE_THRESHOLD_CEILING = 40.0
 
 
 def resolve_curvature_threshold(value: float) -> float:
-    """Apply the shared HBT curvature-threshold policy for Stage 2."""
+    """Clamp Stage 2 curvature thresholds into the shared HBT [20, 40] band."""
     return min(
         max(float(value), CURVATURE_THRESHOLD_FLOOR),
         CURVATURE_THRESHOLD_CEILING,
     )
+
+
+def evaluate_stage2_hardware_constraints(
+    coil_length,
+    length_target,
+    curve_curve_min_dist,
+    cc_threshold,
+    max_curvature,
+    curvature_threshold,
+):
+    """Evaluate hard Stage 2 hardware constraints against realized geometry."""
+    coil_length = float(coil_length)
+    length_target = float(length_target)
+    curve_curve_min_dist = float(curve_curve_min_dist)
+    cc_threshold = float(cc_threshold)
+    max_curvature = float(max_curvature)
+    curvature_threshold = float(curvature_threshold)
+    violations = []
+    for metric_name, metric_value in (
+        ("coil_length", coil_length),
+        ("length_target", length_target),
+        ("coil_coil_min_dist", curve_curve_min_dist),
+        ("cc_threshold", cc_threshold),
+        ("max_curvature", max_curvature),
+        ("curvature_threshold", curvature_threshold),
+    ):
+        if not np.isfinite(metric_value):
+            violations.append(f"{metric_name} {metric_value} is not finite")
+    if coil_length > length_target:
+        violations.append(
+            f"coil_length {coil_length:.6f} exceeds target {length_target:.6f}"
+        )
+    if curve_curve_min_dist < cc_threshold:
+        violations.append(
+            f"coil_coil_min_dist {curve_curve_min_dist:.6f} below threshold {cc_threshold:.6f}"
+        )
+    if max_curvature > curvature_threshold:
+        violations.append(
+            f"max_curvature {max_curvature:.6f} exceeds threshold {curvature_threshold:.6f}"
+        )
+    return {
+        "success": len(violations) == 0,
+        "violations": violations,
+        "coil_length": coil_length,
+        "length_target": length_target,
+        "curve_curve_min_dist": curve_curve_min_dist,
+        "cc_threshold": cc_threshold,
+        "max_curvature": max_curvature,
+        "curvature_threshold": curvature_threshold,
+    }
 
 
 def parse_args():
@@ -868,8 +922,9 @@ def _build_stage2_target_term_payload(target_objective_bundle, dofs):
     if raw_terms is None or not terms:
         return None
     dofs64 = host_array(dofs)
-    raw_values = host_array(raw_terms(dofs64))
-    raw_gradients = host_array(jax.jacrev(raw_terms)(dofs64))
+    dofs_jax = jax.device_put(dofs64)
+    raw_values = host_array(jax.jit(raw_terms)(dofs_jax))
+    raw_gradients = host_array(jax.jit(jax.jacrev(raw_terms))(dofs_jax))
     entries = {}
     for index, term in enumerate(terms):
         entries[term.name] = _stage2_term_payload_entry(
@@ -1172,9 +1227,10 @@ def _build_stage2_probe_composite_payload(
     composite_grad = host_array(explicit_grad)
     composite_terms = None
     if target_objective_bundle is not None:
-        composite_value, composite_grad = jax.value_and_grad(
-            target_objective_bundle.objective
-        )(host_array(context.JF.x))
+        dofs_jax = jax.device_put(host_array(context.JF.x))
+        composite_value, composite_grad = jax.jit(
+            jax.value_and_grad(target_objective_bundle.objective)
+        )(dofs_jax)
         composite_value = host_float(composite_value)
         composite_grad = host_array(composite_grad)
         objective_source = "target-objective"
@@ -1277,7 +1333,7 @@ def write_json_file(path, payload):
     if output_dir:
         os.makedirs(output_dir, exist_ok=True)
     with open(path, "w", encoding="utf-8") as outfile:
-        json.dump(payload, outfile, indent=2)
+        json.dump(sanitize_json_payload(payload), outfile, indent=2, allow_nan=False)
 
 
 def load_stage2_override_dofs(path, expected_shape):
@@ -1744,6 +1800,8 @@ if __name__ == "__main__":
         sys.exit(0)
     if args.init_only:
         res_nit = 0
+        optimizer_success = True
+        termination_message = "init_only"
         print("Skipping Stage 2 optimizer because --init-only was provided.")
     else:
         initial_dofs = host_array(dofs).copy()
@@ -1782,6 +1840,8 @@ if __name__ == "__main__":
         )
         JF.x = host_array(res.x)
         res_nit = res.nit
+        termination_message = str(res.message)
+        optimizer_success = bool(res.success)
         if use_scalar_objective:
             assert target_objective_bundle is not None
             final_snapshot = capture_stage2_trajectory_snapshot(
@@ -1916,6 +1976,20 @@ if __name__ == "__main__":
         final_snapshot, _, _ = evaluate_stage2_objective(
             final_context,
         )
+    hardware_status = evaluate_stage2_hardware_constraints(
+        final_snapshot["curve_length"],
+        LENGTH_TARGET,
+        final_snapshot["coil_coil_distance"],
+        CC_THRESHOLD,
+        float(np.max(new_banana_curve.kappa())),
+        CURVATURE_THRESHOLD,
+    )
+    optimizer_success, termination_message = apply_hardware_constraint_verdict(
+        optimizer_success,
+        termination_message,
+        hardware_status,
+        init_only=args.init_only,
+    )
     results = {
         "PLASMA_SURF_FILENAME": plasma_surf_filename,
         "PLASMA_SURF_PATH": file_loc,
@@ -1943,8 +2017,11 @@ if __name__ == "__main__":
         "init_only": args.init_only,
         "max_iterations": MAXITER,
         "iterations": res_nit,
+        "TERMINATION_MESSAGE": termination_message,
+        "OPTIMIZER_SUCCESS": optimizer_success,
         "FINAL_DOFS": host_array(JF.x).tolist(),
         "FINAL_OBJECTIVE": final_snapshot["J"],
+        "OBJECTIVE_J": final_snapshot["J"],
         "FINAL_SQUARED_FLUX": final_snapshot["Jf"],
         "FINAL_CURVE_LENGTH": final_snapshot["curve_length"],
         "FINAL_CC_DISTANCE": final_snapshot["coil_coil_distance"],
@@ -1953,6 +2030,10 @@ if __name__ == "__main__":
         "FIELD_ERROR": float(fieldError),
         "SELF_INTERSECTING": intersecting,
         "MAX_CURVATURE": float(np.max(new_banana_curve.kappa())),
+        "COIL_LENGTH": float(final_snapshot["curve_length"]),
+        "CURVE_CURVE_MIN_DIST": float(final_snapshot["coil_coil_distance"]),
+        "HARDWARE_CONSTRAINTS_OK": hardware_status["success"],
+        "HARDWARE_CONSTRAINT_VIOLATIONS": hardware_status["violations"],
         "FINAL_BANANA_GAMMA": np.asarray(
             new_banana_curve.gamma(), dtype=float
         ).tolist(),

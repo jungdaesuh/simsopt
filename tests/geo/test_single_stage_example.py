@@ -1,6 +1,7 @@
 from contextlib import contextmanager
 import importlib.util
 import os
+import json
 import sys
 import tempfile
 import types
@@ -12,7 +13,9 @@ from unittest.mock import patch
 import jax.numpy as jnp
 import numpy as np
 
+from simsopt._core.optimizable import Optimizable
 from simsopt.geo.surfaceobjectives import (
+    SurfaceSurfaceDistance,
     boozer_surface_residual,
     boozer_surface_residual_dB,
 )
@@ -25,6 +28,13 @@ EXAMPLE_MODULE_PATH = (
     / "single_stage_optimization"
     / "SINGLE_STAGE"
     / "single_stage_banana_example.py"
+)
+STAGE2_MODULE_PATH = (
+    Path(__file__).resolve().parents[2]
+    / "examples"
+    / "single_stage_optimization"
+    / "STAGE_2"
+    / "banana_coil_solver.py"
 )
 TEST_MPOL = 8
 TEST_NTOR = 6
@@ -44,6 +54,17 @@ def load_single_stage_example_module():
     spec = importlib.util.spec_from_file_location(
         f"single_stage_banana_example_{uuid.uuid4().hex}",
         EXAMPLE_MODULE_PATH,
+    )
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
+
+
+def load_stage2_module():
+    spec = importlib.util.spec_from_file_location(
+        f"banana_coil_solver_{uuid.uuid4().hex}",
+        STAGE2_MODULE_PATH,
     )
     module = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
@@ -846,12 +867,21 @@ class SingleStageExampleTests(unittest.TestCase):
         run_dict = {"x_prev": np.zeros(2), "lscount": 3}
         captured = {}
 
-        def fake_eval(x, state, booz, objective):
+        def fake_eval(
+            x,
+            state,
+            booz,
+            objective,
+            objectives=None,
+            diagnostics=None,
+        ):
             captured["eval"] = {
                 "x": np.asarray(x),
                 "state": state,
                 "booz": booz,
                 "objective": objective,
+                "objectives": objectives,
+                "diagnostics": diagnostics,
             }
             return 1.0, np.zeros(2)
 
@@ -892,6 +922,8 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertEqual(run_dict["lscount"], 3)
         self.assertIs(captured["accept"]["state"], run_dict)
         self.assertEqual(captured["accept"]["log_path"], "/tmp/log.txt")
+        self.assertEqual(captured["eval"]["objectives"], {"qs": "obj"})
+        self.assertEqual(captured["eval"]["diagnostics"], {"iota": "diag"})
 
     def test_single_stage_adapter_sync_accepted_step_refreshes_target_lane_state(
         self,
@@ -914,12 +946,21 @@ class SingleStageExampleTests(unittest.TestCase):
         run_dict = {"x_prev": np.zeros(2), "lscount": 5}
         captured = {}
 
-        def fake_eval(x, state, booz, objective):
+        def fake_eval(
+            x,
+            state,
+            booz,
+            objective,
+            objectives=None,
+            diagnostics=None,
+        ):
             captured["eval"] = {
                 "x": np.asarray(x),
                 "state": state,
                 "booz": booz,
                 "objective": objective,
+                "objectives": objectives,
+                "diagnostics": diagnostics,
             }
             return 1.0, np.zeros(2)
 
@@ -959,6 +1000,8 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertEqual(run_dict["lscount"], 5)
         self.assertIs(captured["accept"]["state"], run_dict)
         self.assertEqual(captured["accept"]["log_path"], "/tmp/log.txt")
+        self.assertEqual(captured["eval"]["objectives"], {"qs": "obj"})
+        self.assertEqual(captured["eval"]["diagnostics"], {"iota": "diag"})
 
     def test_single_stage_adapter_uses_custom_target_lane_dof_setter(self):
         module = self.load_module()
@@ -982,8 +1025,17 @@ class SingleStageExampleTests(unittest.TestCase):
         def fake_setter(value):
             captured["setter"].append(np.asarray(value))
 
-        def fake_eval(x, state, booz, objective):
+        def fake_eval(
+            x,
+            state,
+            booz,
+            objective,
+            objectives=None,
+            diagnostics=None,
+        ):
             captured["eval_x"] = np.asarray(x)
+            captured["eval_objectives"] = objectives
+            captured["eval_diagnostics"] = diagnostics
             return 1.0, np.zeros(2)
 
         adapter = module.SingleStageAdapter(
@@ -1006,6 +1058,8 @@ class SingleStageExampleTests(unittest.TestCase):
         assert len(captured["setter"]) == 1
         np.testing.assert_allclose(captured["setter"][0], np.array([7.0, -8.0]))
         np.testing.assert_allclose(captured["eval_x"], np.array([7.0, -8.0]))
+        self.assertEqual(captured["eval_objectives"], {"qs": "obj"})
+        self.assertEqual(captured["eval_diagnostics"], {"iota": "diag"})
         np.testing.assert_allclose(jf.x, np.array([1.0, 2.0]))
 
     def test_single_stage_adapter_sync_accepted_step_uses_benchmark_snapshot_path(
@@ -1458,12 +1512,21 @@ class SingleStageExampleTests(unittest.TestCase):
             "intersecting": False,
             "self_intersection_check_available": False,
         }
-        objectives = {"cc": _Objective(), "cs": _Objective(), "boozer": _Objective()}
+        objectives = {
+            "cc": _Objective(),
+            "cs": _Objective(),
+            "surf": _Objective(),
+            "boozer": _Objective(),
+        }
         diagnostics_refs = {
             "iota": _IotaObj(),
             "banana_curve": _Curve(),
             "curvelength": _CurveLength(),
         }
+        module.CC_DIST = 0.05
+        module.CS_DIST = 0.02
+        module.SS_DIST = 0.04
+        module.CURVATURE_THRESHOLD = 40.0
         with tempfile.TemporaryDirectory() as tmpdir:
             log_path = os.path.join(tmpdir, "test.log")
             with patch.object(
@@ -1575,12 +1638,21 @@ class SingleStageExampleTests(unittest.TestCase):
             "intersecting": False,
             "self_intersection_check_available": False,
         }
-        objectives = {"cc": _Objective(), "cs": _Objective(), "boozer": _Objective()}
+        objectives = {
+            "cc": _Objective(),
+            "cs": _Objective(),
+            "surf": _Objective(),
+            "boozer": _Objective(),
+        }
         diagnostics_refs = {
             "iota": _IotaObj(),
             "banana_curve": _Curve(),
             "curvelength": _CurveLength(),
         }
+        module.CC_DIST = 0.05
+        module.CS_DIST = 0.02
+        module.SS_DIST = 0.04
+        module.CURVATURE_THRESHOLD = 40.0
 
         with tempfile.TemporaryDirectory() as tmpdir:
             log_path = os.path.join(tmpdir, "test.log")
@@ -2043,15 +2115,6 @@ class BoozerFallbackLBFGSBTests(unittest.TestCase):
         self.assertGreater(res.hess_inv.n_corrs, 0)
 
 
-STAGE2_MODULE_PATH = (
-    Path(__file__).resolve().parents[2]
-    / "examples"
-    / "single_stage_optimization"
-    / "STAGE_2"
-    / "banana_coil_solver.py"
-)
-
-
 def _load_segment_distance_from_source():
     """Extract the deployed segment_segment_distance from banana_coil_solver.py via AST.
 
@@ -2211,6 +2274,507 @@ class SegmentDistanceTests(unittest.TestCase):
                 places=9,
                 msg=f"Mismatch: algo={d_algo}, brute={d_brute}",
             )
+
+
+class HardwareConstraintTests(unittest.TestCase):
+    def test_jax_curvature_threshold_respects_floor_and_ceiling(self):
+        stage2_module = load_stage2_module()
+        single_stage_module = load_single_stage_example_module()
+
+        self.assertEqual(stage2_module.resolve_curvature_threshold(10.0), 20.0)
+        self.assertEqual(stage2_module.resolve_curvature_threshold(20.0), 20.0)
+        self.assertEqual(stage2_module.resolve_curvature_threshold(39.0), 39.0)
+        self.assertEqual(stage2_module.resolve_curvature_threshold(41.0), 40.0)
+        self.assertEqual(single_stage_module.resolve_curvature_threshold(10.0), 20.0)
+        self.assertEqual(single_stage_module.resolve_curvature_threshold(20.0), 20.0)
+        self.assertEqual(single_stage_module.resolve_curvature_threshold(39.0), 39.0)
+        self.assertEqual(single_stage_module.resolve_curvature_threshold(41.0), 40.0)
+
+    def test_stage2_hardware_constraints_pass_at_boundaries(self):
+        module = load_stage2_module()
+
+        status = module.evaluate_stage2_hardware_constraints(
+            coil_length=1.75,
+            length_target=1.75,
+            curve_curve_min_dist=0.05,
+            cc_threshold=0.05,
+            max_curvature=40.0,
+            curvature_threshold=40.0,
+        )
+
+        self.assertTrue(status["success"])
+        self.assertEqual(status["violations"], [])
+
+    def test_stage2_hardware_constraints_report_each_violation(self):
+        module = load_stage2_module()
+
+        status = module.evaluate_stage2_hardware_constraints(
+            coil_length=1.8,
+            length_target=1.75,
+            curve_curve_min_dist=0.04,
+            cc_threshold=0.05,
+            max_curvature=41.0,
+            curvature_threshold=40.0,
+        )
+
+        self.assertFalse(status["success"])
+        self.assertEqual(len(status["violations"]), 3)
+        self.assertIn("coil_length", status["violations"][0])
+        self.assertIn("coil_coil_min_dist", status["violations"][1])
+        self.assertIn("max_curvature", status["violations"][2])
+
+    def test_stage2_hardware_constraints_report_isolated_violations(self):
+        module = load_stage2_module()
+
+        for expected_label, kwargs in (
+            (
+                "coil_length",
+                dict(
+                    coil_length=1.8,
+                    length_target=1.75,
+                    curve_curve_min_dist=0.05,
+                    cc_threshold=0.05,
+                    max_curvature=40.0,
+                    curvature_threshold=40.0,
+                ),
+            ),
+            (
+                "coil_coil_min_dist",
+                dict(
+                    coil_length=1.75,
+                    length_target=1.75,
+                    curve_curve_min_dist=0.04,
+                    cc_threshold=0.05,
+                    max_curvature=40.0,
+                    curvature_threshold=40.0,
+                ),
+            ),
+            (
+                "max_curvature",
+                dict(
+                    coil_length=1.75,
+                    length_target=1.75,
+                    curve_curve_min_dist=0.05,
+                    cc_threshold=0.05,
+                    max_curvature=41.0,
+                    curvature_threshold=40.0,
+                ),
+            ),
+        ):
+            with self.subTest(metric=expected_label):
+                status = module.evaluate_stage2_hardware_constraints(**kwargs)
+                self.assertFalse(status["success"])
+                self.assertEqual(len(status["violations"]), 1)
+                self.assertIn(expected_label, status["violations"][0])
+
+    def test_stage2_hardware_constraints_reject_non_finite_metrics(self):
+        module = load_stage2_module()
+
+        for metric_name, bad_value, kwargs in (
+            (
+                "coil_length",
+                np.nan,
+                dict(
+                    coil_length=np.nan,
+                    length_target=1.75,
+                    curve_curve_min_dist=0.05,
+                    cc_threshold=0.05,
+                    max_curvature=40.0,
+                    curvature_threshold=40.0,
+                ),
+            ),
+            (
+                "coil_coil_min_dist",
+                np.nan,
+                dict(
+                    coil_length=1.75,
+                    length_target=1.75,
+                    curve_curve_min_dist=np.nan,
+                    cc_threshold=0.05,
+                    max_curvature=40.0,
+                    curvature_threshold=40.0,
+                ),
+            ),
+            (
+                "max_curvature",
+                np.nan,
+                dict(
+                    coil_length=1.75,
+                    length_target=1.75,
+                    curve_curve_min_dist=0.05,
+                    cc_threshold=0.05,
+                    max_curvature=np.nan,
+                    curvature_threshold=40.0,
+                ),
+            ),
+            (
+                "coil_coil_min_dist",
+                np.inf,
+                dict(
+                    coil_length=1.75,
+                    length_target=1.75,
+                    curve_curve_min_dist=np.inf,
+                    cc_threshold=0.05,
+                    max_curvature=40.0,
+                    curvature_threshold=40.0,
+                ),
+            ),
+        ):
+            with self.subTest(metric=metric_name, bad_value=bad_value):
+                status = module.evaluate_stage2_hardware_constraints(**kwargs)
+                self.assertFalse(status["success"])
+                self.assertEqual(len(status["violations"]), 1)
+                self.assertIn(metric_name, status["violations"][0])
+                self.assertIn("not finite", status["violations"][0])
+
+    def test_single_stage_hardware_constraints_pass_at_boundaries(self):
+        module = load_single_stage_example_module()
+
+        status = module.evaluate_single_stage_hardware_constraints(
+            curve_curve_min_dist=0.05,
+            cc_dist=0.05,
+            curve_surface_min_dist=0.02,
+            cs_dist=0.02,
+            surface_vessel_min_dist=0.04,
+            ss_dist=0.04,
+            max_curvature=40.0,
+            curvature_threshold=40.0,
+        )
+
+        self.assertTrue(status["success"])
+        self.assertEqual(status["violations"], [])
+
+    def test_single_stage_hardware_constraints_report_each_violation(self):
+        module = load_single_stage_example_module()
+
+        status = module.evaluate_single_stage_hardware_constraints(
+            curve_curve_min_dist=0.04,
+            cc_dist=0.05,
+            curve_surface_min_dist=0.01,
+            cs_dist=0.02,
+            surface_vessel_min_dist=0.03,
+            ss_dist=0.04,
+            max_curvature=41.0,
+            curvature_threshold=40.0,
+        )
+
+        self.assertFalse(status["success"])
+        self.assertEqual(len(status["violations"]), 4)
+        self.assertIn("coil_coil_min_dist", status["violations"][0])
+        self.assertIn("coil_surface_min_dist", status["violations"][1])
+        self.assertIn("surface_vessel_min_dist", status["violations"][2])
+        self.assertIn("max_curvature", status["violations"][3])
+
+    def test_single_stage_hardware_constraints_report_isolated_violations(self):
+        module = load_single_stage_example_module()
+
+        for expected_label, kwargs in (
+            (
+                "coil_coil_min_dist",
+                dict(
+                    curve_curve_min_dist=0.04,
+                    cc_dist=0.05,
+                    curve_surface_min_dist=0.02,
+                    cs_dist=0.02,
+                    surface_vessel_min_dist=0.04,
+                    ss_dist=0.04,
+                    max_curvature=40.0,
+                    curvature_threshold=40.0,
+                ),
+            ),
+            (
+                "coil_surface_min_dist",
+                dict(
+                    curve_curve_min_dist=0.05,
+                    cc_dist=0.05,
+                    curve_surface_min_dist=0.01,
+                    cs_dist=0.02,
+                    surface_vessel_min_dist=0.04,
+                    ss_dist=0.04,
+                    max_curvature=40.0,
+                    curvature_threshold=40.0,
+                ),
+            ),
+            (
+                "surface_vessel_min_dist",
+                dict(
+                    curve_curve_min_dist=0.05,
+                    cc_dist=0.05,
+                    curve_surface_min_dist=0.02,
+                    cs_dist=0.02,
+                    surface_vessel_min_dist=0.03,
+                    ss_dist=0.04,
+                    max_curvature=40.0,
+                    curvature_threshold=40.0,
+                ),
+            ),
+            (
+                "max_curvature",
+                dict(
+                    curve_curve_min_dist=0.05,
+                    cc_dist=0.05,
+                    curve_surface_min_dist=0.02,
+                    cs_dist=0.02,
+                    surface_vessel_min_dist=0.04,
+                    ss_dist=0.04,
+                    max_curvature=41.0,
+                    curvature_threshold=40.0,
+                ),
+            ),
+        ):
+            with self.subTest(metric=expected_label):
+                status = module.evaluate_single_stage_hardware_constraints(**kwargs)
+                self.assertFalse(status["success"])
+                self.assertEqual(len(status["violations"]), 1)
+                self.assertIn(expected_label, status["violations"][0])
+
+    def test_single_stage_hardware_constraints_reject_non_finite_metrics(self):
+        module = load_single_stage_example_module()
+
+        for metric_name, bad_value, kwargs in (
+            (
+                "coil_coil_min_dist",
+                np.nan,
+                dict(
+                    curve_curve_min_dist=np.nan,
+                    cc_dist=0.05,
+                    curve_surface_min_dist=0.02,
+                    cs_dist=0.02,
+                    surface_vessel_min_dist=0.04,
+                    ss_dist=0.04,
+                    max_curvature=40.0,
+                    curvature_threshold=40.0,
+                ),
+            ),
+            (
+                "coil_surface_min_dist",
+                np.nan,
+                dict(
+                    curve_curve_min_dist=0.05,
+                    cc_dist=0.05,
+                    curve_surface_min_dist=np.nan,
+                    cs_dist=0.02,
+                    surface_vessel_min_dist=0.04,
+                    ss_dist=0.04,
+                    max_curvature=40.0,
+                    curvature_threshold=40.0,
+                ),
+            ),
+            (
+                "surface_vessel_min_dist",
+                np.nan,
+                dict(
+                    curve_curve_min_dist=0.05,
+                    cc_dist=0.05,
+                    curve_surface_min_dist=0.02,
+                    cs_dist=0.02,
+                    surface_vessel_min_dist=np.nan,
+                    ss_dist=0.04,
+                    max_curvature=40.0,
+                    curvature_threshold=40.0,
+                ),
+            ),
+            (
+                "max_curvature",
+                np.nan,
+                dict(
+                    curve_curve_min_dist=0.05,
+                    cc_dist=0.05,
+                    curve_surface_min_dist=0.02,
+                    cs_dist=0.02,
+                    surface_vessel_min_dist=0.04,
+                    ss_dist=0.04,
+                    max_curvature=np.nan,
+                    curvature_threshold=40.0,
+                ),
+            ),
+            (
+                "surface_vessel_min_dist",
+                np.inf,
+                dict(
+                    curve_curve_min_dist=0.05,
+                    cc_dist=0.05,
+                    curve_surface_min_dist=0.02,
+                    cs_dist=0.02,
+                    surface_vessel_min_dist=np.inf,
+                    ss_dist=0.04,
+                    max_curvature=40.0,
+                    curvature_threshold=40.0,
+                ),
+            ),
+        ):
+            with self.subTest(metric=metric_name, bad_value=bad_value):
+                status = module.evaluate_single_stage_hardware_constraints(**kwargs)
+                self.assertFalse(status["success"])
+                self.assertEqual(len(status["violations"]), 1)
+                self.assertIn(metric_name, status["violations"][0])
+                self.assertIn("not finite", status["violations"][0])
+
+    def test_evaluate_candidate_rejects_on_hardware_constraint_failure(self):
+        module = load_single_stage_example_module()
+        last_J = 12.0
+        last_dJ = np.array([1.0, -1.0, 2.0])
+
+        class _Surface:
+            def __init__(self):
+                self.x = np.ones(2)
+
+            def is_self_intersecting(self):
+                return False
+
+            def volume(self):
+                return 1.0
+
+        class _BoozerSurface:
+            def __init__(self):
+                self.surface = _Surface()
+                self.res = {
+                    "success": True,
+                    "iota": TEST_IOTA,
+                    "G": TEST_G0,
+                }
+
+            def run_code(self, iota, G, *, sdofs=None):
+                return self.res
+
+        class _JF:
+            def __init__(self):
+                self.x = np.zeros(3)
+
+            def J(self):
+                raise AssertionError("JF.J must not be called on hardware failure")
+
+            def dJ(self):
+                raise AssertionError("JF.dJ must not be called on hardware failure")
+
+        class _DistanceObjective:
+            def __init__(self, distance):
+                self.distance = distance
+
+            def shortest_distance(self):
+                return self.distance
+
+        class _Curve:
+            def kappa(self):
+                return np.array([41.0])
+
+        run_dict = {
+            "x_prev": np.zeros(3),
+            "lscount": 0,
+            "sdofs": np.ones(2),
+            "iota": TEST_IOTA,
+            "G": TEST_G0,
+            "J": last_J,
+            "dJ": last_dJ.copy(),
+        }
+        booz = _BoozerSurface()
+        jf = _JF()
+        objectives = {
+            "cc": _DistanceObjective(0.04),
+            "cs": _DistanceObjective(0.03),
+            "surf": _DistanceObjective(0.05),
+        }
+        diagnostics = {"banana_curve": _Curve()}
+        module.CC_DIST = 0.05
+        module.CS_DIST = 0.02
+        module.SS_DIST = 0.04
+        module.CURVATURE_THRESHOLD = 40.0
+
+        with patch.object(module, "update_self_intersection_status", return_value=False):
+            J_out, dJ_out = module._evaluate_candidate_impl(
+                np.ones(3),
+                run_dict,
+                booz,
+                jf,
+                objectives,
+                diagnostics,
+            )
+
+        self.assertEqual(J_out, 24.0)
+        np.testing.assert_array_equal(dJ_out, last_dJ)
+        self.assertFalse(run_dict["hardware_constraint_status"]["success"])
+
+    def test_surface_surface_distance_exposes_shortest_distance(self):
+        class _Surface(Optimizable):
+            def __init__(self, gamma):
+                self._gamma = np.asarray(gamma, dtype=float)
+                super().__init__()
+
+            def gamma(self):
+                return self._gamma
+
+        surf1 = _Surface([[[0.0, 0.0, 0.0], [2.0, 0.0, 0.0]]])
+        surf2 = _Surface([[[0.5, 0.0, 0.0], [4.0, 0.0, 0.0]]])
+
+        objective = SurfaceSurfaceDistance(surf1, surf2, minimum_distance=0.4)
+
+        self.assertAlmostEqual(float(objective.shortest_distance()), 0.5, places=12)
+
+    def test_apply_hardware_constraint_verdict_preserves_init_only_success(self):
+        for loader in (load_single_stage_example_module, load_stage2_module):
+            with self.subTest(module_loader=loader.__name__):
+                module = loader()
+
+                success, termination = module.apply_hardware_constraint_verdict(
+                    True,
+                    "init_only",
+                    {"success": False, "violations": ["too close"]},
+                    init_only=True,
+                )
+
+                self.assertTrue(success)
+                self.assertEqual(termination, "init_only")
+
+    def test_apply_hardware_constraint_verdict_marks_real_failures(self):
+        for loader in (load_single_stage_example_module, load_stage2_module):
+            with self.subTest(module_loader=loader.__name__):
+                module = loader()
+
+                success, termination = module.apply_hardware_constraint_verdict(
+                    True,
+                    "converged",
+                    {"success": False, "violations": ["too close"]},
+                    init_only=False,
+                )
+
+                self.assertFalse(success)
+                self.assertEqual(
+                    termination,
+                    "converged; hardware_constraints_failed",
+                )
+
+    def test_sanitize_json_payload_replaces_non_finite_numbers(self):
+        module = load_single_stage_example_module()
+
+        payload = {
+            "finite": 1.25,
+            "nan": float("nan"),
+            "inf": float("inf"),
+            "nested": [np.float64(2.0), np.float64(np.nan)],
+        }
+
+        sanitized = module.sanitize_json_payload(payload)
+
+        self.assertEqual(sanitized["finite"], 1.25)
+        self.assertIsNone(sanitized["nan"])
+        self.assertIsNone(sanitized["inf"])
+        self.assertEqual(sanitized["nested"][0], 2.0)
+        self.assertIsNone(sanitized["nested"][1])
+
+    def test_stage2_write_json_file_sanitizes_non_finite_payloads(self):
+        module = load_stage2_module()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_path = os.path.join(tmpdir, "payload.json")
+            module.write_json_file(
+                output_path,
+                {"nan_value": float("nan"), "inf_value": float("inf")},
+            )
+            with open(output_path, "r", encoding="utf-8") as infile:
+                payload = json.load(infile)
+
+        self.assertIsNone(payload["nan_value"])
+        self.assertIsNone(payload["inf_value"])
 
 
 class CrossSectionNormalizationTests(unittest.TestCase):
