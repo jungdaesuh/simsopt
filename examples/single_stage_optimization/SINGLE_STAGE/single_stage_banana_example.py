@@ -1242,6 +1242,10 @@ def build_single_stage_target_lane_hardware_success_filter(
         curve_gamma_and_dash_from_spec,
         curve_geometry_from_spec,
     )
+    from simsopt.jax_core.field import (
+        coil_set_spec_from_dof_extraction_spec,
+        coil_specs_from_dof_extraction_spec,
+    )
     from simsopt.jax_core.surface_rzfourier import (
         surface_rz_fourier_gamma_from_spec,
         surface_rz_fourier_spec_from_dofs,
@@ -1260,6 +1264,7 @@ def build_single_stage_target_lane_hardware_success_filter(
         ) from exc
 
     optimize_G = boozer_surface.res.get("G") is not None
+    coil_dof_extraction_spec = bs.coil_dof_extraction_spec()
     surface_spec = boozer_surface.surface.surface_spec()
     vessel_gamma = surface_rz_fourier_gamma_from_spec(
         vessel_surface.surface_spec()
@@ -1309,8 +1314,14 @@ def build_single_stage_target_lane_hardware_success_filter(
         )
 
     def success_filter(coil_dofs, solved_x):
-        coil_set_spec = bs.coil_set_spec_from_dofs(coil_dofs)
-        coil_specs = bs.coil_specs_from_dofs(coil_dofs)
+        coil_set_spec = coil_set_spec_from_dof_extraction_spec(
+            coil_dof_extraction_spec,
+            coil_dofs,
+        )
+        coil_specs = coil_specs_from_dof_extraction_spec(
+            coil_dof_extraction_spec,
+            coil_dofs,
+        )
         sdofs, _iota, _G = boozer_surface._unpack_decision_vector_jax(
             solved_x,
             optimize_G,

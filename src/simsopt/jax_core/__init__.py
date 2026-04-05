@@ -23,6 +23,8 @@ from .biotsavart import (
     invalidate_kernel_cache,
 )
 from .field import (
+    coil_set_spec_from_dof_extraction_spec,
+    coil_specs_from_dof_extraction_spec,
     grouped_biot_savart_A_from_inputs,
     grouped_biot_savart_A_from_spec,
     grouped_biot_savart_B_and_dB_from_spec,
@@ -67,6 +69,8 @@ from .surface_rzfourier import (
     surface_rz_fourier_volume_from_dofs,
 )
 from .specs import (
+    CoilDofExtractionSpec,
+    CoilSetDofExtractionSpec,
     CoilSpec,
     CoilGroupSpec,
     CoilSymmetrySpec,
@@ -90,9 +94,11 @@ from .specs import (
     ZeroRotationSpec,
     apply_coil_symmetry,
     curve_spec_kind,
+    make_coil_dof_extraction_spec,
     make_coil_spec,
     make_coil_symmetry_spec,
     make_coil_group_spec,
+    make_coil_set_dof_extraction_spec,
     make_current_value_spec,
     make_curve_cwsfourier_rz_spec,
     make_curve_filament_spec,
@@ -113,6 +119,8 @@ from .specs import (
 __all__ = [
     "CoilSpec",
     "CoilGroupSpec",
+    "CoilDofExtractionSpec",
+    "CoilSetDofExtractionSpec",
     "CoilSymmetrySpec",
     "apply_coil_symmetry",
     "CurveCWSFourierRZSpec",
@@ -143,6 +151,8 @@ __all__ = [
     "curve_spec_kind",
     "curve_spec_from_curve",
     "curve_spec_with_dofs",
+    "coil_set_spec_from_dof_extraction_spec",
+    "coil_specs_from_dof_extraction_spec",
     "biot_savart_A",
     "biot_savart_B",
     "biot_savart_B_and_dB",
@@ -173,8 +183,10 @@ __all__ = [
     "grouped_field_data_from_spec",
     "grouped_field_inputs_from_spec",
     "make_coil_spec",
+    "make_coil_dof_extraction_spec",
     "make_coil_symmetry_spec",
     "make_coil_group_spec",
+    "make_coil_set_dof_extraction_spec",
     "make_current_value_spec",
     "make_curve_cwsfourier_rz_spec",
     "make_curve_filament_spec",

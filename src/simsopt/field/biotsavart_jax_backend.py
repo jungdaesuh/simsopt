@@ -20,12 +20,14 @@ from ..backend import raise_if_strict_jax_fallback, warn_if_jax_fallback
 from .._core.derivative import Derivative
 from .._core.optimizable import Optimizable
 from ..jax_core import (
+    coil_set_spec_from_dof_extraction_spec,
+    coil_specs_from_dof_extraction_spec,
     curve_gamma_and_dash_from_dofs as curve_gamma_and_dash_from_spec_dofs,
     curve_pullback_from_dofs,
     curve_spec_from_curve,
-    curve_spec_with_dofs,
-    make_coil_spec,
-    make_current_value_spec,
+    make_coil_dof_extraction_spec,
+    make_coil_set_dof_extraction_spec,
+    make_optimizable_dof_map_spec,
 )
 from ..jax_core.field import (
     grouped_biot_savart_B_and_dB_from_spec,
@@ -487,6 +489,12 @@ class BiotSavartJAX(Optimizable):
     chain runs through the coil list so that the outer framework
     correctly composes DOFs and derivatives.
 
+    The immutable spec layer is already the hot-path contract here:
+    ``coil_specs()`` / ``coil_set_spec()`` expose grouped pytree payloads
+    consumed by the pure JAX field kernels. The wrapper remains a mutable
+    ``Optimizable`` adapter so legacy flat-vector workflows, caching, and
+    derivative plumbing continue to compose around that spec boundary.
+
     The wrapper itself is mutable and not safe for concurrent use from
     multiple threads. ``set_points()`` / ``set_points_from_spec()`` update the
     cached evaluation points in-place, so shared instances should be treated as
@@ -519,6 +527,11 @@ class BiotSavartJAX(Optimizable):
         self._curve_dof_size = 0
         self._curve_quadpoints_jax = None
         self._introspect_coils()
+        self._coil_dof_extraction_spec = None
+        try:
+            self._coil_dof_extraction_spec = self._build_coil_dof_extraction_spec()
+        except NotImplementedError:
+            pass
 
     def _introspect_coils(self):
         """Walk coil tree to identify unique base curves/currents.
@@ -584,6 +597,35 @@ class BiotSavartJAX(Optimizable):
         self._curve_order = orders.pop()
         self._curve_dof_size = 3 * (2 * self._curve_order + 1)
         self._curve_quadpoints_jax = _curve_quadpoints_jax(base_curves[0])
+
+    def _build_coil_dof_extraction_spec(self):
+        return make_coil_set_dof_extraction_spec(
+            make_coil_dof_extraction_spec(
+                curve=curve_spec_from_curve(curve),
+                curve_map=self._free_vector_dof_map_spec(
+                    curve,
+                    full_graph=_curve_dof_mode(curve) == "full",
+                ),
+                current_map=self._free_vector_dof_map_spec(
+                    current,
+                    full_graph=False,
+                ),
+                rotmat=rotmat,
+                scale=scale,
+            )
+            for curve, rotmat, current, scale in (
+                _unwrap_coil_curve_and_current(coil) for coil in self._coils
+            )
+        )
+
+    def coil_dof_extraction_spec(self):
+        """Return the cached immutable owner-DOF reconstruction contract."""
+        if self._coil_dof_extraction_spec is None:
+            raise NotImplementedError(
+                "coil_dof_extraction_spec() requires immutable JAX curve specs for "
+                "every base curve."
+            )
+        return self._coil_dof_extraction_spec
 
     def supports_jax_objective_fallback(self):
         """Return whether the mixed-quadrature objective path stays JAX-native."""
@@ -675,6 +717,49 @@ class BiotSavartJAX(Optimizable):
             return self._full_dofs_from_free_vector(curve, coil_dofs)
         return self._local_full_dofs_from_free_vector(curve, coil_dofs)
 
+    def _free_vector_dof_map_spec(self, opt, *, full_graph):
+        if full_graph:
+            owner_segments = tuple(
+                (
+                    owner_start,
+                    owner_end,
+                    int(target_start),
+                    int(target_end),
+                )
+                for dep_opt, (target_start, target_end) in opt._full_dof_indices.items()
+                if dep_opt.local_dof_size > 0
+                for owner_start, owner_end in (self.dof_indices[dep_opt],)
+            )
+            template_full_dofs = _as_jax_float64(opt.full_x)
+            return self._full_input_dof_map_spec(template_full_dofs, owner_segments)
+
+        template_full_dofs = _as_jax_float64(opt.local_full_x)
+        if opt.local_dof_size == 0:
+            return self._full_input_dof_map_spec(template_full_dofs, ())
+
+        owner_start, _owner_end = self.dof_indices[opt]
+        owner_segments = tuple(
+            (
+                int(owner_start + source_offset),
+                int(owner_start + source_offset + 1),
+                int(target_position),
+                int(target_position + 1),
+            )
+            for source_offset, target_position in enumerate(
+                np.flatnonzero(opt.local_dofs_free_status)
+            )
+        )
+        return self._full_input_dof_map_spec(template_full_dofs, owner_segments)
+
+    def _full_input_dof_map_spec(self, template_full_dofs, owner_segments):
+        return make_optimizable_dof_map_spec(
+            template_full_dofs=template_full_dofs,
+            owner_segments=owner_segments,
+            input_mode="full",
+            input_start=0,
+            input_end=int(template_full_dofs.shape[0]),
+        )
+
     def _normalize_explicit_coil_dofs(self, coil_dofs):
         coil_dofs = _as_jax_float64(coil_dofs)
         expected_dofs = self.dof_size
@@ -684,42 +769,20 @@ class BiotSavartJAX(Optimizable):
             )
         return coil_dofs
 
-    def _coil_spec_from_dofs(self, coil, coil_dofs):
-        curve, rotmat, current, scale = _unwrap_coil_curve_and_current(coil)
-        curve_dofs = self._curve_dofs_from_free_vector(curve, coil_dofs)
-        try:
-            curve_spec = curve_spec_with_dofs(
-                curve_spec_from_curve(curve),
-                curve_dofs,
-            )
-        except NotImplementedError as exc:
-            raise NotImplementedError(
-                "coil_specs_from_dofs() requires immutable JAX curve specs for "
-                f"every base curve; unsupported type {type(curve).__name__}."
-            ) from exc
-
-        current_value = self._scalar_current_value_from_dofs(
-            current,
-            coil_dofs,
-            "immutable-spec lane",
-        )
-        return make_coil_spec(
-            curve=curve_spec,
-            current=make_current_value_spec(current_value),
-            rotmat=rotmat,
-            scale=scale,
-        )
-
     def coil_specs_from_dofs(self, coil_dofs):
         """Build immutable per-coil specs from an explicit flat DOF vector."""
         coil_dofs = self._normalize_explicit_coil_dofs(coil_dofs)
-        return tuple(self._coil_spec_from_dofs(coil, coil_dofs) for coil in self._coils)
+        return coil_specs_from_dof_extraction_spec(
+            self.coil_dof_extraction_spec(),
+            coil_dofs,
+        )
 
     def _coil_set_spec_from_dofs_prefer_specs(self, coil_dofs):
         coil_dofs = self._normalize_explicit_coil_dofs(coil_dofs)
         try:
-            return grouped_coil_set_spec_from_coil_specs(
-                self.coil_specs_from_dofs(coil_dofs)
+            return coil_set_spec_from_dof_extraction_spec(
+                self.coil_dof_extraction_spec(),
+                coil_dofs,
             )
         except NotImplementedError:
             _handle_grouped_spec_compat_fallback(

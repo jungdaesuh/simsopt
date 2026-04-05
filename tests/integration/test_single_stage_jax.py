@@ -83,6 +83,7 @@ from simsopt.objectives import QuadraticPenalty  # noqa: E402
 
 from simsopt.field.biotsavart_jax_backend import BiotSavartJAX  # noqa: E402
 from simsopt.jax_core import (  # noqa: E402
+    CoilSetDofExtractionSpec,
     CoilSpec,
     CurveCWSFourierRZSpec,
     CurveFilamentSpec,
@@ -1683,6 +1684,46 @@ class TestAdjointSolveConsistency:
         np.testing.assert_allclose(
             np.asarray(coil_set_spec.groups[0].gammas[0]),
             curve.gamma(),
+            atol=1e-12,
+        )
+
+    def test_coil_specs_from_dofs_uses_cached_pytree_extraction_spec(
+        self,
+        monkeypatch,
+    ):
+        """Explicit coil reconstruction should stay off the live curve graph after init."""
+        import simsopt.field.biotsavart_jax_backend as bsj
+
+        curve = CurveXYZFourier(16, 1)
+        curve.x = np.array([0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9])
+        current = Current(1.23)
+        bs_jax = BiotSavartJAX([Coil(curve, current)])
+
+        extraction_spec = bs_jax.coil_dof_extraction_spec()
+        assert isinstance(extraction_spec, CoilSetDofExtractionSpec)
+
+        monkeypatch.setattr(
+            bsj,
+            "curve_spec_from_curve",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError(
+                    "coil_specs_from_dofs() should use the cached immutable "
+                    "extraction spec after adapter initialization"
+                )
+            ),
+        )
+
+        coil_specs = bs_jax.coil_specs_from_dofs(jnp.asarray(bs_jax.x))
+
+        assert len(coil_specs) == 1
+        np.testing.assert_allclose(
+            np.asarray(coil_specs[0].current.value),
+            np.array([1.23]),
+            atol=1e-12,
+        )
+        np.testing.assert_allclose(
+            np.asarray(coil_specs[0].curve.dofs),
+            np.asarray(curve.full_x),
             atol=1e-12,
         )
 
@@ -4421,6 +4462,96 @@ class TestTraceableObjective:
         )
         assert np.all(np.isfinite(np.asarray(gated_grad)))
 
+    def test_single_stage_hardware_success_filter_uses_cached_pytree_extraction_state(
+        self,
+        monkeypatch,
+    ):
+        """The target-lane feasibility filter should not reenter BiotSavart extraction methods."""
+        (
+            _coils,
+            _surf_cpu,
+            _surf_jax,
+            _bs_cpu,
+            bs_jax,
+            _booz_cpu,
+            _booz_jax,
+            _vol_cpu,
+            _iota0,
+            _G0,
+        ) = _make_boozer_setup(constraint_weight=1.0)
+
+        plasma_surface = SurfaceRZFourier(
+            nfp=2,
+            stellsym=True,
+            mpol=1,
+            ntor=0,
+            quadpoints_phi=np.linspace(0.0, 0.5, 5, endpoint=False),
+            quadpoints_theta=np.linspace(0.0, 1.0, 5, endpoint=False),
+        )
+        plasma_surface.set_rc(0, 0, 1.0)
+        plasma_surface.set_rc(1, 0, 0.15)
+        plasma_surface.set_zs(1, 0, 0.15)
+
+        vessel_surface = SurfaceRZFourier(
+            nfp=plasma_surface.nfp,
+            stellsym=plasma_surface.stellsym,
+            mpol=1,
+            ntor=0,
+            quadpoints_phi=plasma_surface.quadpoints_phi,
+            quadpoints_theta=plasma_surface.quadpoints_theta,
+        )
+        vessel_surface.set_rc(0, 0, 2.0)
+        vessel_surface.set_rc(1, 0, 0.5)
+        vessel_surface.set_zs(1, 0, 0.5)
+
+        class _FakeBoozerSurface:
+            def __init__(self, surface):
+                self.surface = surface
+                self.res = {"G": jnp.asarray(1.0, dtype=jnp.float64)}
+
+            def _unpack_decision_vector_jax(self, x, optimize_G, coil_set_spec=None):
+                del coil_set_spec
+                if optimize_G:
+                    return x[:-2], x[-2], x[-1]
+                return x[:-1], x[-1], None
+
+        fake_boozer_surface = _FakeBoozerSurface(plasma_surface)
+        success_filter = (
+            single_stage_example.build_single_stage_target_lane_hardware_success_filter(
+                fake_boozer_surface,
+                bs_jax,
+                bs_jax.coils[0].curve,
+                vessel_surface,
+                cc_dist=0.0,
+                cs_dist=0.0,
+                ss_dist=0.0,
+                curvature_threshold=1.0e9,
+            )
+        )
+
+        solved_x = jnp.concatenate(
+            (
+                jnp.asarray(plasma_surface.get_dofs(), dtype=jnp.float64),
+                jnp.asarray([0.3, 1.0], dtype=jnp.float64),
+            )
+        )
+
+        def _reject_reconstruction(*_args, **_kwargs):
+            raise AssertionError(
+                "Single-stage hardware success filter should use cached immutable "
+                "pytree extraction state after construction"
+            )
+
+        monkeypatch.setattr(bs_jax, "coil_set_spec_from_dofs", _reject_reconstruction)
+        monkeypatch.setattr(bs_jax, "coil_specs_from_dofs", _reject_reconstruction)
+
+        feasible = success_filter(
+            jnp.asarray(bs_jax.x.copy(), dtype=jnp.float64),
+            solved_x,
+        )
+
+        assert bool(np.asarray(feasible))
+
     def test_pure_objective_matches_optimizable_value(self, boozer_setup):
         """Test 1: Pure JAX objective returns same value as JF.J()."""
         (_, _, _, _, bs_jax, _, booz_jax, _) = boozer_setup
@@ -4598,6 +4729,35 @@ class TestTraceableObjective:
         )
         assert np.all(np.isfinite(np.asarray(grad)))
         assert jaxpr is not None
+
+    def test_traceable_runtime_bundle_does_not_call_biotsavart_reconstruction_methods_after_build(
+        self,
+        boozer_setup,
+        monkeypatch,
+    ):
+        """The compiled target lane should use cached pytree extraction state only."""
+        (_, _, _, _, bs_jax, _, booz_jax, _) = boozer_setup
+        runtime_bundle, coil_dofs = self._make_traceable_runtime_bundle(
+            bs_jax,
+            booz_jax,
+            include_profile_suite=False,
+        )
+
+        def _reject_reconstruction(*_args, **_kwargs):
+            raise AssertionError(
+                "Single-stage runtime bundle should not call BiotSavartJAX "
+                "reconstruction helpers after bundle construction"
+            )
+
+        monkeypatch.setattr(bs_jax, "coil_set_spec_from_dofs", _reject_reconstruction)
+        monkeypatch.setattr(bs_jax, "coil_specs_from_dofs", _reject_reconstruction)
+
+        value = runtime_bundle["objective"](coil_dofs)
+        value_vg, grad = runtime_bundle["value_and_grad"](coil_dofs)
+
+        assert np.isfinite(float(value))
+        np.testing.assert_allclose(float(value_vg), float(value), rtol=0.0, atol=0.0)
+        assert np.all(np.isfinite(np.asarray(grad)))
 
     def test_traceable_objective_has_no_optimizable_dependency(self):
         """Test 5: Traced objective needs no run_dict, no JF.x mutation."""

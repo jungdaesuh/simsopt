@@ -12,9 +12,17 @@ from .biotsavart import (
     biot_savart_dB_by_dX,
     group_coil_data,
 )
-from .curve_geometry import curve_gamma_and_dash_from_spec
+from ._math_utils import as_runtime_float64 as _as_runtime_float64
+from .curve_geometry import (
+    curve_gamma_and_dash_from_spec,
+    curve_spec_with_dofs,
+    optimizable_input_dofs_from_map_spec,
+)
 from .specs import (
+    CoilDofExtractionSpec,
+    CoilSetDofExtractionSpec,
     CoilSpec,
+    CurrentValueSpec,
     GroupedCoilSetSpec,
     apply_coil_symmetry,
     make_grouped_coil_set_spec,
@@ -43,14 +51,28 @@ def _tree_add(left, right):
     return jax.tree_util.tree_map(lambda x, y: x + y, left, right)
 
 
+def _runtime_group_inputs(reference, gammas, gammadashs, currents):
+    return (
+        _as_runtime_float64(gammas, reference=reference),
+        _as_runtime_float64(gammadashs, reference=reference),
+        _as_runtime_float64(currents, reference=reference),
+    )
+
+
 def _accumulate_grouped_field(points: object, coil_spec: GroupedCoilSetSpec, kernel):
     coil_arrays = grouped_field_inputs_from_spec(coil_spec)
     if not coil_arrays:
         return _empty_grouped_field_result(points, kernel)
 
-    gammas, gammadashs, currents = coil_arrays[0]
+    gammas, gammadashs, currents = _runtime_group_inputs(points, *coil_arrays[0])
     result = kernel(points, gammas, gammadashs, currents)
     for gammas, gammadashs, currents in coil_arrays[1:]:
+        gammas, gammadashs, currents = _runtime_group_inputs(
+            points,
+            gammas,
+            gammadashs,
+            currents,
+        )
         result = _tree_add(result, kernel(points, gammas, gammadashs, currents))
     return result
 
@@ -87,6 +109,52 @@ def grouped_coil_set_spec_from_coil_specs(
         gammadashs.append(gammadash)
         currents.append(current)
     return grouped_coil_set_spec_from_lists(gammas, gammadashs, currents)
+
+
+def _coil_current_value_from_dofs(
+    extraction_spec: CoilDofExtractionSpec,
+    owner_dofs: object,
+) -> CurrentValueSpec:
+    current_dofs = optimizable_input_dofs_from_map_spec(
+        extraction_spec.current_map,
+        owner_dofs,
+    )
+    if current_dofs.shape[0] != 1:
+        raise RuntimeError(
+            "coil_specs_from_dof_extraction_spec() only supports scalar Current "
+            "degrees of freedom."
+        )
+    return CurrentValueSpec(value=current_dofs[:1])
+
+
+def coil_specs_from_dof_extraction_spec(
+    extraction_spec: CoilSetDofExtractionSpec,
+    owner_dofs: object,
+) -> tuple[CoilSpec, ...]:
+    owner_dofs = _as_runtime_float64(owner_dofs, reference=owner_dofs)
+    return tuple(
+        CoilSpec(
+            curve=curve_spec_with_dofs(
+                coil_spec.curve,
+                optimizable_input_dofs_from_map_spec(
+                    coil_spec.curve_map,
+                    owner_dofs,
+                ),
+            ),
+            current=_coil_current_value_from_dofs(coil_spec, owner_dofs),
+            symmetry=coil_spec.symmetry,
+        )
+        for coil_spec in extraction_spec.coils
+    )
+
+
+def coil_set_spec_from_dof_extraction_spec(
+    extraction_spec: CoilSetDofExtractionSpec,
+    owner_dofs: object,
+) -> GroupedCoilSetSpec:
+    return grouped_coil_set_spec_from_coil_specs(
+        coil_specs_from_dof_extraction_spec(extraction_spec, owner_dofs)
+    )
 
 
 def grouped_coil_set_spec_from_inputs(coil_arrays: object) -> GroupedCoilSetSpec:

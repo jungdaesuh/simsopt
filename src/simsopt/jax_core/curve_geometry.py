@@ -215,6 +215,20 @@ def _mapped_input_dofs(map_spec: OptimizableDofMapSpec, owner_dofs):
     return mapped_full[map_spec.input_start : map_spec.input_end]
 
 
+def optimizable_full_dofs_from_map_spec(
+    map_spec: OptimizableDofMapSpec,
+    owner_dofs,
+):
+    return _mapped_full_dofs(map_spec, owner_dofs)
+
+
+def optimizable_input_dofs_from_map_spec(
+    map_spec: OptimizableDofMapSpec,
+    owner_dofs,
+):
+    return _mapped_input_dofs(map_spec, owner_dofs)
+
+
 def _rotation_alpha_and_dash_from_dofs(
     rotation_spec: RotationSpec,
     rotation_map: OptimizableDofMapSpec,

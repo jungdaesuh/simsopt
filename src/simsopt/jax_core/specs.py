@@ -180,6 +180,37 @@ jax.tree_util.register_dataclass(
 
 
 @dataclass(frozen=True)
+class CoilDofExtractionSpec:
+    """Immutable owner-DOF -> coil-spec reconstruction payload."""
+
+    curve: CurveSpec
+    curve_map: OptimizableDofMapSpec
+    current_map: OptimizableDofMapSpec
+    symmetry: CoilSymmetrySpec
+
+
+jax.tree_util.register_dataclass(
+    CoilDofExtractionSpec,
+    data_fields=["curve", "curve_map", "current_map", "symmetry"],
+    meta_fields=[],
+)
+
+
+@dataclass(frozen=True)
+class CoilSetDofExtractionSpec:
+    """Immutable owner-DOF -> grouped-coil reconstruction payload."""
+
+    coils: tuple[CoilDofExtractionSpec, ...]
+
+
+jax.tree_util.register_dataclass(
+    CoilSetDofExtractionSpec,
+    data_fields=["coils"],
+    meta_fields=[],
+)
+
+
+@dataclass(frozen=True)
 class FieldEvalSpec:
     """Immutable field-evaluation point cloud."""
 
@@ -640,6 +671,28 @@ def make_coil_symmetry_spec(
         scale=float(scale),
         has_rotation=has_rotation,
     )
+
+
+def make_coil_dof_extraction_spec(
+    *,
+    curve: CurveSpec,
+    curve_map: OptimizableDofMapSpec,
+    current_map: OptimizableDofMapSpec,
+    rotmat: object | None = None,
+    scale: float = 1.0,
+) -> CoilDofExtractionSpec:
+    return CoilDofExtractionSpec(
+        curve=curve,
+        curve_map=curve_map,
+        current_map=current_map,
+        symmetry=make_coil_symmetry_spec(rotmat=rotmat, scale=scale),
+    )
+
+
+def make_coil_set_dof_extraction_spec(
+    coils: object,
+) -> CoilSetDofExtractionSpec:
+    return CoilSetDofExtractionSpec(coils=tuple(coils))
 
 
 def apply_coil_symmetry(

@@ -5,9 +5,11 @@ import jax.numpy as jnp
 from simsopt.jax_core import (
     apply_coil_symmetry,
     curve_spec_kind,
+    make_coil_dof_extraction_spec,
     make_coil_group_spec,
     make_coil_spec,
     make_coil_symmetry_spec,
+    make_coil_set_dof_extraction_spec,
     make_current_value_spec,
     make_curve_cwsfourier_rz_spec,
     make_curve_filament_spec,
@@ -232,6 +234,35 @@ def test_make_grouped_coil_set_spec_accepts_group_specs_and_raw_group_tuples():
     assert grouped.groups[1].coil_indices == (1, 4)
     _assert_is_float64_array(grouped.groups[1].gammas)
     _assert_is_float64_array(grouped.groups[1].currents)
+
+
+def test_coil_set_dof_extraction_spec_is_a_real_jittable_pytree():
+    extraction_spec = make_coil_set_dof_extraction_spec(
+        [
+            make_coil_dof_extraction_spec(
+                curve=_make_curve_spec(),
+                curve_map=_make_identity_dof_map(9),
+                current_map=_make_identity_dof_map(1),
+                scale=2.0,
+            )
+        ]
+    )
+
+    leaves, treedef = jax.tree_util.tree_flatten(extraction_spec)
+    rebuilt = jax.tree_util.tree_unflatten(treedef, leaves)
+
+    assert treedef == jax.tree_util.tree_structure(rebuilt)
+    assert len(rebuilt.coils) == 1
+    assert rebuilt.coils[0].symmetry.scale == 2.0
+
+    @jax.jit
+    def current_value(spec, owner_dofs):
+        return spec.coils[0].current_map.template_full_dofs[0] + owner_dofs[0]
+
+    np.testing.assert_allclose(
+        current_value(extraction_spec, jnp.asarray([3.0], dtype=jnp.float64)),
+        np.array(3.0),
+    )
 
 
 def test_make_surface_rzfourier_spec_fills_rs_zc_defaults_from_rc_shape():
