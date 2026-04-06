@@ -25,6 +25,7 @@ from benchmarks.validation_ladder_common import (
     find_single_file,
     load_json,
     max_pointwise_geometry_drift,
+    maybe_initialize_distributed_runtime,
     optimizer_drift_tolerances,
     preparse_platform,
     print_provenance,
@@ -48,6 +49,7 @@ apply_compilation_cache_policy()
 import jax
 import jaxlib
 
+maybe_initialize_distributed_runtime()
 jax.config.update("jax_enable_x64", True)
 require_x64_runtime(jax, context="Stage 2 end-to-end comparison")
 

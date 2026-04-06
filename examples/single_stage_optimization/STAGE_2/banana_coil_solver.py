@@ -29,6 +29,9 @@ from repo_bootstrap import bootstrap_local_simsopt
 
 
 bootstrap_local_simsopt(SRC_ROOT)
+from simsopt.config import maybe_initialize_distributed_jax
+
+maybe_initialize_distributed_jax()
 DATABASE_EQUILIBRIA_DIR = os.path.join(REPO_ROOT, "DATABASE", "EQUILIBRIA")
 DEFAULT_EQUILIBRIA_DIR = (
     DATABASE_EQUILIBRIA_DIR

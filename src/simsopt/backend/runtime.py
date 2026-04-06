@@ -42,9 +42,15 @@ _GPU_MEMORY_TOTAL_MB_ENV = "SIMSOPT_JAX_GPU_MEMORY_TOTAL_MB"
 _SHARDING_STRATEGY_ENV = "SIMSOPT_JAX_SHARDING"
 _SHARDING_AXIS_ENV = "SIMSOPT_JAX_SHARDING_AXIS"
 _MIN_POINTS_TO_SHARD_ENV = "SIMSOPT_JAX_MIN_POINTS_TO_SHARD"
+_MIN_PAIRWISE_ROWS_TO_SHARD_ENV = "SIMSOPT_JAX_MIN_PAIRWISE_ROWS_TO_SHARD"
+_DISTRIBUTED_INIT_ENV = "SIMSOPT_JAX_DISTRIBUTED_INIT"
+_DISTRIBUTED_COORDINATOR_ADDRESS_ENV = "SIMSOPT_JAX_COORDINATOR_ADDRESS"
+_DISTRIBUTED_NUM_PROCESSES_ENV = "SIMSOPT_JAX_NUM_PROCESSES"
+_DISTRIBUTED_PROCESS_ID_ENV = "SIMSOPT_JAX_PROCESS_ID"
+_DISTRIBUTED_LOCAL_DEVICE_IDS_ENV = "SIMSOPT_JAX_LOCAL_DEVICE_IDS"
 _JAX_PLATFORMS_ENV = "JAX_PLATFORMS"
 _VALID_TRANSFER_GUARDS = ("allow", "log", "disallow")
-_VALID_SHARDING_STRATEGIES = ("none", "points")
+_VALID_SHARDING_STRATEGIES = ("none", "points", "pairwise_rows", "hybrid")
 _GUARDRAIL_ENV_VARS = (
     _DEBUG_NANS_ENV,
     _TRANSFER_GUARD_ENV,
@@ -151,13 +157,18 @@ _MODE_SHARDING_DEFAULTS = {
     "native_cpu": "none",
     "jax_cpu_parity": "none",
     "jax_gpu_parity": "none",
-    "jax_gpu_fast": "points",
+    "jax_gpu_fast": "hybrid",
 }
 _DEFAULT_SHARDING_AXIS_NAME = "d"
 _MIN_POINTS_TO_SHARD_BY_POLICY = {
     "host_reference": 1 << 30,
     "stable_default": 4096,
     "performance_tuned": 2048,
+}
+_MIN_PAIRWISE_ROWS_TO_SHARD_BY_POLICY = {
+    "host_reference": 1 << 30,
+    "stable_default": 64,
+    "performance_tuned": 32,
 }
 _AUTOTUNED_CHUNK_SIZES_BY_POLICY = {
     "host_reference": (),
@@ -314,9 +325,38 @@ class ShardingTuning:
     strategy: str
     mesh_axis_name: str
     min_points_to_shard: int
+    min_pairwise_rows_to_shard: int
     device_count: int
+    local_device_count: int
     active: bool
     platform: str
+    distributed_enabled: bool
+    distributed_initialized: bool
+
+
+@dataclass(frozen=True)
+class DistributedRuntimeConfig:
+    enabled: bool
+    coordinator_address: str | None
+    num_processes: int | None
+    process_id: int | None
+    local_device_ids: tuple[int, ...] | None
+    initialized: bool
+
+
+def _with_distributed_initialized(
+    config: DistributedRuntimeConfig,
+    *,
+    initialized: bool,
+) -> DistributedRuntimeConfig:
+    return DistributedRuntimeConfig(
+        enabled=config.enabled,
+        coordinator_address=config.coordinator_address,
+        num_processes=config.num_processes,
+        process_id=config.process_id,
+        local_device_ids=config.local_device_ids,
+        initialized=initialized,
+    )
 
 
 def _env_bool(name: str) -> bool:
@@ -435,6 +475,13 @@ def _resolve_min_points_to_shard(policy: BackendPolicy) -> int:
     return _MIN_POINTS_TO_SHARD_BY_POLICY.get(policy.chunk_policy, 0)
 
 
+def _resolve_min_pairwise_rows_to_shard(policy: BackendPolicy) -> int:
+    env_value = _optional_positive_int_env(_MIN_PAIRWISE_ROWS_TO_SHARD_ENV)
+    if env_value is not None:
+        return env_value
+    return _MIN_PAIRWISE_ROWS_TO_SHARD_BY_POLICY.get(policy.chunk_policy, 0)
+
+
 def _detect_local_jax_device_count(policy: BackendPolicy) -> int:
     try:
         import jax
@@ -443,6 +490,18 @@ def _detect_local_jax_device_count(policy: BackendPolicy) -> int:
     try:
         backend_name = "gpu" if policy.jax_platform == "cuda" else policy.jax_platform
         return len(jax.local_devices(backend=backend_name))
+    except Exception:
+        return 0
+
+
+def _detect_global_jax_device_count(policy: BackendPolicy) -> int:
+    try:
+        import jax
+    except ImportError:
+        return 0
+    try:
+        backend_name = "gpu" if policy.jax_platform == "cuda" else policy.jax_platform
+        return len(jax.devices(backend=backend_name))
     except Exception:
         return 0
 
@@ -624,15 +683,25 @@ def _build_sharding_tuning(
     strategy = _resolve_sharding_strategy(mode, policy)
     if policy.backend != "jax":
         strategy = "none"
-    device_count = _detect_local_jax_device_count(policy)
+    distributed = get_distributed_runtime_config()
+    local_device_count = _detect_local_jax_device_count(policy)
+    device_count = (
+        _detect_global_jax_device_count(policy)
+        if distributed.initialized
+        else local_device_count
+    )
     return ShardingTuning(
         mode=mode,
         strategy=strategy,
         mesh_axis_name=_resolve_sharding_axis_name(),
         min_points_to_shard=_resolve_min_points_to_shard(policy),
+        min_pairwise_rows_to_shard=_resolve_min_pairwise_rows_to_shard(policy),
         device_count=device_count,
+        local_device_count=local_device_count,
         active=strategy != "none" and device_count > 1,
         platform=policy.jax_platform,
+        distributed_enabled=distributed.enabled,
+        distributed_initialized=distributed.initialized,
     )
 
 
@@ -886,6 +955,7 @@ def get_provenance_label(mode: str | None = None) -> str:
 _cached_field_kernel_tuning: FieldKernelTuning | None = None
 _cached_chunk_tuning: ChunkTuning | None = None
 _cached_sharding_tuning: ShardingTuning | None = None
+_cached_distributed_runtime_config: DistributedRuntimeConfig | None = None
 
 
 def get_chunk_tuning(mode: str | None = None) -> ChunkTuning:
@@ -963,7 +1033,13 @@ def get_sharding_strategy(mode: str | None = None) -> str:
 def should_shard_points(mode: str | None = None) -> bool:
     """Return ``True`` when point-axis sharding is active for the mode."""
     tuning = get_sharding_tuning(mode)
-    return tuning.active and tuning.strategy == "points"
+    return tuning.active and tuning.strategy in {"points", "hybrid"}
+
+
+def should_shard_pairwise_rows(mode: str | None = None) -> bool:
+    """Return ``True`` when row-owned pairwise sharding is active for the mode."""
+    tuning = get_sharding_tuning(mode)
+    return tuning.active and tuning.strategy in {"pairwise_rows", "hybrid"}
 
 
 def get_debug_nans(mode: str | None = None) -> bool:
@@ -1000,13 +1076,138 @@ def _run_backend_cache_clear_callbacks() -> None:
 
 
 def _reset_backend_runtime_caches() -> None:
-    global _cached_backend_policy, _cached_chunk_tuning, _cached_field_kernel_tuning, _cached_sharding_tuning
+    global _cached_backend_policy, _cached_chunk_tuning, _cached_field_kernel_tuning, _cached_sharding_tuning, _cached_distributed_runtime_config
     _cached_backend_policy = None
     _cached_chunk_tuning = None
     _cached_field_kernel_tuning = None
     _cached_sharding_tuning = None
+    _cached_distributed_runtime_config = None
     _run_backend_cache_clear_callbacks()
     _warned_jax_fallbacks.clear()
+
+
+def _parse_local_device_ids(raw_value: str | None) -> tuple[int, ...] | None:
+    if raw_value in (None, ""):
+        return None
+    values = []
+    for field in raw_value.split(","):
+        stripped = field.strip()
+        if not stripped:
+            continue
+        value = int(stripped)
+        if value < 0:
+            raise ValueError(
+                f"{_DISTRIBUTED_LOCAL_DEVICE_IDS_ENV} entries must be >= 0."
+            )
+        values.append(value)
+    return tuple(values) if values else None
+
+
+def _build_distributed_runtime_config() -> DistributedRuntimeConfig:
+    enabled = _env_bool(_DISTRIBUTED_INIT_ENV)
+    coordinator_address = _optional_nonempty_env(_DISTRIBUTED_COORDINATOR_ADDRESS_ENV)
+    num_processes = _optional_positive_int_env(_DISTRIBUTED_NUM_PROCESSES_ENV)
+    process_id = _optional_positive_int_env(_DISTRIBUTED_PROCESS_ID_ENV)
+    local_device_ids = _parse_local_device_ids(
+        _optional_nonempty_env(_DISTRIBUTED_LOCAL_DEVICE_IDS_ENV)
+    )
+    initialized = False
+    if not enabled:
+        return DistributedRuntimeConfig(
+            enabled=False,
+            coordinator_address=None,
+            num_processes=None,
+            process_id=None,
+            local_device_ids=None,
+            initialized=False,
+        )
+
+    missing = [
+        name
+        for name, value in (
+            (_DISTRIBUTED_COORDINATOR_ADDRESS_ENV, coordinator_address),
+            (_DISTRIBUTED_NUM_PROCESSES_ENV, num_processes),
+            (_DISTRIBUTED_PROCESS_ID_ENV, process_id),
+        )
+        if value is None
+    ]
+    if missing:
+        missing_list = ", ".join(missing)
+        raise ValueError(
+            "Distributed JAX bootstrap requires the following env vars when "
+            f"{_DISTRIBUTED_INIT_ENV}=1: {missing_list}."
+        )
+    if int(num_processes) <= 0:
+        raise ValueError(
+            f"{_DISTRIBUTED_NUM_PROCESSES_ENV} must be > 0 when "
+            f"{_DISTRIBUTED_INIT_ENV}=1."
+        )
+    if int(process_id) >= int(num_processes):
+        raise ValueError(
+            f"{_DISTRIBUTED_PROCESS_ID_ENV}={process_id} must be smaller than "
+            f"{_DISTRIBUTED_NUM_PROCESSES_ENV}={num_processes}."
+        )
+    return DistributedRuntimeConfig(
+        enabled=True,
+        coordinator_address=coordinator_address,
+        num_processes=num_processes,
+        process_id=process_id,
+        local_device_ids=local_device_ids,
+        initialized=initialized,
+    )
+
+
+def get_distributed_runtime_config() -> DistributedRuntimeConfig:
+    """Return the configured distributed-JAX bootstrap contract."""
+    global _cached_distributed_runtime_config
+    if _cached_distributed_runtime_config is not None:
+        return _cached_distributed_runtime_config
+    config = _build_distributed_runtime_config()
+    _cached_distributed_runtime_config = config
+    return config
+
+
+def maybe_initialize_distributed_jax() -> DistributedRuntimeConfig:
+    """Initialize multi-host JAX when explicitly configured through env vars."""
+    global _cached_distributed_runtime_config, _cached_sharding_tuning
+    config = get_distributed_runtime_config()
+    if not config.enabled:
+        return config
+
+    import jax
+
+    distributed_module = getattr(jax, "distributed", None)
+    if distributed_module is None:
+        raise RuntimeError("Installed JAX runtime does not expose jax.distributed.")
+    is_initialized = getattr(distributed_module, "is_initialized", None)
+    if callable(is_initialized) and bool(is_initialized()):
+        initialized_config = _with_distributed_initialized(
+            config,
+            initialized=True,
+        )
+        _cached_distributed_runtime_config = initialized_config
+        return initialized_config
+
+    initialize = getattr(distributed_module, "initialize", None)
+    if initialize is None:
+        raise RuntimeError("Installed JAX runtime does not expose jax.distributed.initialize.")
+    initialize(
+        coordinator_address=config.coordinator_address,
+        num_processes=int(config.num_processes),
+        process_id=int(config.process_id),
+        local_device_ids=(
+            None
+            if config.local_device_ids is None
+            else list(config.local_device_ids)
+        ),
+    )
+    initialized_config = _with_distributed_initialized(
+        config,
+        initialized=True,
+    )
+    _cached_distributed_runtime_config = initialized_config
+    _cached_sharding_tuning = None
+    return initialized_config
 
 
 def invalidate_backend_cache() -> None:

@@ -47,6 +47,7 @@ from benchmarks.validation_ladder_common import (
     describe_compile_behavior,
     evaluate_grouped_adjoint_memory_budget,
     grouped_adjoint_memory_budget,
+    maybe_initialize_distributed_runtime,
     preparse_platform,
     print_provenance,
     query_gpu_memory_mb,
@@ -63,6 +64,7 @@ apply_compilation_cache_policy()
 import jax
 import jaxlib
 
+maybe_initialize_distributed_runtime()
 jax.config.update("jax_enable_x64", True)
 require_x64_runtime(jax, context="Grouped adjoint memory probe")
 

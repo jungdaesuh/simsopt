@@ -26,6 +26,7 @@ from benchmarks.validation_ladder_common import (
     find_single_file,
     load_json,
     max_pointwise_geometry_drift,
+    maybe_initialize_distributed_runtime,
     optimizer_drift_tolerances,
     preparse_platform,
     print_provenance,
@@ -57,6 +58,7 @@ apply_compilation_cache_policy()
 import jax
 import jaxlib
 
+maybe_initialize_distributed_runtime()
 _RUNTIME_CONTEXT = "Single-stage init parity"
 
 jax.config.update("jax_enable_x64", True)

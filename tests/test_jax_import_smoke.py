@@ -748,6 +748,31 @@ def test_grouped_biot_savart_accepts_explicit_point_sharding():
     )
 
 
+def test_pairwise_penalty_accepts_explicit_row_sharding():
+    """Pairwise penalty kernels should accept explicitly sharded row-owned inputs."""
+    _assert_import_check_passes(
+        """
+        import jax
+        import numpy as np
+        from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
+        from simsopt.geo.curveobjectives import pairwise_min_distance_pure
+
+        mesh = Mesh(np.asarray(jax.devices(), dtype=object), ("d",))
+        points_a = jax.device_put(
+            np.linspace(0.0, 0.9, 4 * 3, dtype=np.float64).reshape(4, 3),
+            NamedSharding(mesh, P("d", None)),
+        )
+        points_b = np.linspace(0.1, 0.7, 3 * 3, dtype=np.float64).reshape(3, 3)
+
+        value = pairwise_min_distance_pure(points_a, points_b, chunk_size=2)
+
+        assert np.isfinite(float(value))
+        assert float(value) >= 0.0
+    """,
+        failure_message="pairwise penalty explicit row sharding smoke failed",
+    )
+
+
 def test_transfer_guard_disallow_allows_grouped_biot_savart_gpu_current_arrays():
     """Grouped coil specs should accept staged current arrays without Python indexing."""
     _assert_import_check_passes(

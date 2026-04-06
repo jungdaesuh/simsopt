@@ -732,6 +732,24 @@ def test_build_provenance_includes_compilation_cache_metadata(monkeypatch):
         "benchmarks.validation_ladder_common.query_gpu_memory_mb",
         lambda: None,
     )
+    monkeypatch.setattr(
+        "benchmarks.validation_ladder_common._current_sharding_metadata",
+        lambda: {
+            "sharding_strategy": "hybrid",
+            "sharding_active": True,
+            "sharding_axis_name": "d",
+            "sharding_device_count": 4,
+            "sharding_local_device_count": 2,
+            "sharding_min_points_to_shard": 128,
+            "sharding_min_pairwise_rows_to_shard": 8,
+            "distributed_enabled": True,
+            "distributed_initialized": True,
+            "distributed_process_count": 2,
+            "distributed_process_id": 1,
+            "distributed_coordinator_address": "127.0.0.1:12345",
+            "distributed_local_device_ids": [0, 1],
+        },
+    )
     fake_jax = types.SimpleNamespace(
         __version__=run_code_benchmark_common.EXPECTED_BENCHMARK_JAX_VERSION,
         default_backend=lambda: "cpu",
@@ -759,6 +777,10 @@ def test_build_provenance_includes_compilation_cache_metadata(monkeypatch):
     assert provenance["transfer_guard"] == "disallow"
     assert provenance["compilation_cache_enabled"] is True
     assert provenance["compilation_cache_dir"] == "/tmp/probe-cache"
+    assert provenance["sharding_strategy"] == "hybrid"
+    assert provenance["sharding_active"] is True
+    assert provenance["sharding_min_pairwise_rows_to_shard"] == 8
+    assert provenance["distributed_initialized"] is True
 
 
 def _fake_jax_runtime(*, backend: str, devices: list[str]) -> types.SimpleNamespace:
@@ -3154,10 +3176,29 @@ def test_build_tier5_performance_contract_routes_parity_and_headline_sources():
     assert contract["headline_performance_source"]["metric_path"] == (
         "summary_by_name.tier2_stage2_e2e.warm_speedup_vs_cpu"
     )
+    assert contract["sharding_source"]["active_path"] == (
+        "rungs.tier2_stage2_e2e.provenance.sharding_active"
+    )
+    assert contract["sharding_source"]["strategy_path"] == (
+        "rungs.tier2_stage2_e2e.provenance.sharding_strategy"
+    )
     assert contract["do_not_use_for_performance_headline"] == [
         "tier1b_real_stage2",
         "tier3_single_stage_init",
     ]
+
+
+def test_evaluate_tier5_sharding_contract_rejects_inactive_multi_device_lane():
+    failures = tier5_performance_characterization.evaluate_tier5_sharding_contract(
+        {
+            "sharding_strategy": "hybrid",
+            "sharding_active": False,
+            "sharding_device_count": 4,
+        }
+    )
+
+    assert failures
+    assert "sharding_active" in failures[0]
 
 
 def test_evaluate_tier5_performance_budget_rejects_stage2_speed_regressions():

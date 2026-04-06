@@ -3596,6 +3596,55 @@ class TestStage2OptimizerContract:
         assert np.all(np.isfinite(np.asarray(grad, dtype=float)))
         assert np.all(np.isfinite(np.asarray(grad_vg, dtype=float)))
 
+    def test_target_scalar_objective_matches_sharded_field_contract(
+        self,
+        monkeypatch,
+    ):
+        import simsopt.jax_core.sharding as sharding_core
+
+        objective, target_bundle = _build_stage2_target_objective_contract_case()
+        dofs = jax.device_put(np.asarray(objective.x, dtype=np.float64))
+        dense_value = target_bundle.objective(dofs)
+        dense_value_vg, dense_grad = target_bundle.value_and_grad(dofs)
+
+        monkeypatch.setattr(
+            sharding_core,
+            "get_sharding_tuning",
+            lambda mode=None: types.SimpleNamespace(
+                active=True,
+                strategy="hybrid",
+                min_points_to_shard=1,
+                min_pairwise_rows_to_shard=1,
+                platform="cpu",
+                mesh_axis_name="d",
+            ),
+        )
+
+        sharded_value = target_bundle.objective(dofs)
+        sharded_value_vg, sharded_grad = target_bundle.value_and_grad(dofs)
+        summary = target_bundle.field_sharding_summary(dofs)
+
+        np.testing.assert_allclose(
+            float(sharded_value),
+            float(dense_value),
+            rtol=1e-12,
+            atol=1e-18,
+        )
+        np.testing.assert_allclose(
+            float(sharded_value_vg),
+            float(dense_value_vg),
+            rtol=1e-12,
+            atol=1e-18,
+        )
+        np.testing.assert_allclose(
+            np.asarray(sharded_grad, dtype=float),
+            np.asarray(dense_grad, dtype=float),
+            rtol=1e-12,
+            atol=1e-12,
+        )
+        assert summary["kind"] in {"NamedSharding", "SingleDeviceSharding"}
+        assert summary["device_count"] >= 1
+
     def test_target_dynamic_curve_builder_matches_apply_coil_symmetry(self):
         _objective, _target_bundle, context = _build_stage2_target_objective_contract_case(
             return_context=True

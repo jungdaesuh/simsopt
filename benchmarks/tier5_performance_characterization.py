@@ -34,6 +34,7 @@ from benchmarks.validation_ladder_common import (
     describe_compile_behavior,
     evaluate_tier5_performance_budget,
     load_json,
+    maybe_initialize_distributed_runtime,
     preparse_platform,
     print_provenance,
     require_x64_runtime,
@@ -52,6 +53,7 @@ apply_compilation_cache_policy()
 import jax
 import jaxlib
 
+maybe_initialize_distributed_runtime()
 jax.config.update("jax_enable_x64", True)
 require_x64_runtime(jax, context="Tier 5 performance characterization")
 
@@ -468,12 +470,36 @@ def build_tier5_performance_contract(summary: list[dict[str, Any]]) -> dict[str,
             ),
             "speedup_vs_cpu": headline_speedup,
         },
+        "sharding_source": {
+            "rung": tier2["name"],
+            "active_path": f"rungs.{TIER2_PERFORMANCE_RUNG}.provenance.sharding_active",
+            "strategy_path": (
+                f"rungs.{TIER2_PERFORMANCE_RUNG}.provenance.sharding_strategy"
+            ),
+            "device_count_path": (
+                f"rungs.{TIER2_PERFORMANCE_RUNG}.provenance.sharding_device_count"
+            ),
+        },
         "do_not_use_for_performance_headline": [
             rung["name"]
             for rung in (tier1, tier3)
             if not bool(rung.get("supports_performance_headline", False))
         ],
     }
+
+
+def evaluate_tier5_sharding_contract(provenance: dict[str, Any]) -> list[str]:
+    """Require active sharding when a multi-device sharded lane is configured."""
+    device_count = int(provenance.get("sharding_device_count") or 0)
+    strategy = str(provenance.get("sharding_strategy") or "none")
+    if device_count <= 1 or strategy == "none":
+        return []
+    if bool(provenance.get("sharding_active")):
+        return []
+    return [
+        "Tier 5 sharded lane reported multiple visible devices and sharding "
+        f"strategy {strategy!r}, but provenance.sharding_active was false."
+    ]
 
 
 def _render_tier5_summary_line(item: dict[str, Any]) -> str:
@@ -642,7 +668,11 @@ def main() -> None:
         summary_by_name,
         performance_budget,
     )
-    aggregate_passed = all(bool(item["passed"]) for item in summary) and not performance_failures
+    sharding_failures = evaluate_tier5_sharding_contract(
+        dict(tier2_payload.get("provenance", provenance))
+    )
+    aggregate_failures = [*performance_failures, *sharding_failures]
+    aggregate_passed = all(bool(item["passed"]) for item in summary) and not aggregate_failures
 
     payload = {
         "provenance": provenance,
@@ -663,6 +693,7 @@ def main() -> None:
             "performance_budget_profile": _TIER5_PERFORMANCE_BUDGET_PROFILE,
             "performance_budget": performance_budget,
             "performance_failures": performance_failures,
+            "sharding_failures": sharding_failures,
         },
     }
     write_json(args.output_json, payload)
@@ -679,9 +710,9 @@ def main() -> None:
         f"and {TIER2_PERFORMANCE_RUNG}.{performance_contract['headline_performance_source']['metric_path'].split('.')[-1]} "
         "for the main Stage 2 speed headline"
     )
-    if performance_failures:
+    if aggregate_failures:
         print("Tier 5 performance gate failed")
-        for failure in performance_failures:
+        for failure in aggregate_failures:
             print(f"  - {failure}")
         raise SystemExit(1)
 

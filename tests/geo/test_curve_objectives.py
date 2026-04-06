@@ -1,10 +1,13 @@
 import unittest
 import json
 
+import jax
+from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
 import numpy as np
 import pytest
 
 from _jit_test_state import make_module_jit_hooks
+import simsopt.geo.curveobjectives as curveobjectives_module
 from simsopt.geo import parameters
 from simsopt.geo.curve import RotatedCurve, create_equally_spaced_curves, create_equally_spaced_planar_curves
 from simsopt.geo.curvexyzfourier import CurveXYZFourier, JaxCurveXYZFourier
@@ -129,6 +132,46 @@ def test_pairwise_penalty_chunking_preserves_infeasible_barrier_inf(monkeypatch)
         invalidate_backend_cache()
 
     assert np.isposinf(float(value))
+
+
+def test_pairwise_penalty_accepts_explicit_row_sharding():
+    mesh = Mesh(np.asarray(jax.devices(), dtype=object), ("d",))
+    gamma1 = jax.device_put(
+        np.array(
+            [
+                [0.00, 0.00, 0.00],
+                [0.12, 0.01, 0.00],
+                [0.24, 0.02, 0.01],
+                [0.36, 0.03, 0.02],
+            ],
+            dtype=np.float64,
+        ),
+        NamedSharding(mesh, P("d", None)),
+    )
+    gamma2 = np.array(
+        [
+            [0.03, 0.01, 0.00],
+            [0.15, 0.04, 0.01],
+            [0.27, 0.05, 0.02],
+        ],
+        dtype=np.float64,
+    )
+
+    rowwise = curveobjectives_module._pairwise_rowwise_min_distance(
+        gamma1,
+        gamma2,
+        chunk_size=2,
+    )
+    dense_rowwise = curveobjectives_module._pairwise_rowwise_min_distance(
+        np.asarray(gamma1),
+        gamma2,
+        chunk_size=0,
+    )
+    sharded_min = float(pairwise_min_distance_pure(gamma1, gamma2, chunk_size=2))
+    dense_min = float(pairwise_min_distance_pure(np.asarray(gamma1), gamma2, chunk_size=0))
+
+    np.testing.assert_allclose(np.asarray(rowwise), np.asarray(dense_rowwise), atol=1e-12)
+    assert sharded_min == pytest.approx(dense_min, rel=1e-12, abs=1e-12)
 
 
 class Testing(unittest.TestCase):

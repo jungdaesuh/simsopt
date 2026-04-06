@@ -24,6 +24,7 @@ from benchmarks.validation_ladder_common import (
     describe_compile_behavior,
     l2_relative_error,
     load_json,
+    maybe_initialize_distributed_runtime,
     optimizer_drift_tolerances,
     max_relative_error,
     preparse_platform,
@@ -48,6 +49,7 @@ apply_compilation_cache_policy()
 import jax
 import jaxlib
 
+maybe_initialize_distributed_runtime()
 jax.config.update("jax_enable_x64", True)
 require_x64_runtime(jax, context="Stage 2 value/gradient parity")
 

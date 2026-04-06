@@ -307,6 +307,49 @@ def query_gpu_memory_mb() -> float | None:
         return None
 
 
+def _distributed_provenance_fields(config) -> dict[str, Any]:
+    return {
+        "distributed_enabled": bool(config.enabled),
+        "distributed_initialized": bool(config.initialized),
+        "distributed_process_count": config.num_processes,
+        "distributed_process_id": config.process_id,
+        "distributed_coordinator_address": config.coordinator_address,
+        "distributed_local_device_ids": (
+            None if config.local_device_ids is None else list(config.local_device_ids)
+        ),
+    }
+
+
+def maybe_initialize_distributed_runtime() -> dict[str, Any]:
+    """Initialize distributed JAX when the repo runtime contract requests it."""
+    from simsopt.config import maybe_initialize_distributed_jax
+
+    config = maybe_initialize_distributed_jax()
+    return _distributed_provenance_fields(config)
+
+
+def _current_sharding_metadata() -> dict[str, Any]:
+    from simsopt.config import (
+        get_distributed_runtime_config,
+        get_sharding_tuning,
+    )
+
+    sharding = get_sharding_tuning()
+    distributed = get_distributed_runtime_config()
+    return {
+        "sharding_strategy": sharding.strategy,
+        "sharding_active": bool(sharding.active),
+        "sharding_axis_name": sharding.mesh_axis_name,
+        "sharding_device_count": int(sharding.device_count),
+        "sharding_local_device_count": int(sharding.local_device_count),
+        "sharding_min_points_to_shard": int(sharding.min_points_to_shard),
+        "sharding_min_pairwise_rows_to_shard": int(
+            sharding.min_pairwise_rows_to_shard
+        ),
+        **_distributed_provenance_fields(distributed),
+    }
+
+
 def build_provenance(
     jax_module, jaxlib_module, *, title: str, extra: dict[str, Any] | None = None
 ) -> dict[str, Any]:
@@ -324,6 +367,7 @@ def build_provenance(
         "peak_rss_mb": peak_rss_mb(),
         **backend_guardrails,
         **compilation_cache,
+        **_current_sharding_metadata(),
     }
     gpu_memory_mb = query_gpu_memory_mb()
     if gpu_memory_mb is not None:

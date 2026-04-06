@@ -23,6 +23,7 @@ All tests require ``simsoptpp`` for the CPU reference.
 import gc
 import re
 from functools import partial
+import types
 
 import pytest
 from conftest import (
@@ -4696,6 +4697,61 @@ class TestTraceableObjective:
         assert "pure_callback" not in str(jaxpr), (
             "Traceable objective still routes through jax.pure_callback"
         )
+
+    def test_traceable_runtime_bundle_matches_sharded_field_contract(
+        self,
+        boozer_setup,
+        monkeypatch,
+    ):
+        import simsopt.jax_core.sharding as sharding_core
+
+        (_, _, _, _, bs_jax, _, booz_jax, _) = boozer_setup
+        runtime_bundle, coil_dofs = self._make_traceable_runtime_bundle(
+            bs_jax,
+            booz_jax,
+            include_profile_suite=True,
+        )
+
+        dense_value = runtime_bundle["objective"](coil_dofs)
+        dense_value_vg, dense_grad = runtime_bundle["value_and_grad"](coil_dofs)
+
+        monkeypatch.setattr(
+            sharding_core,
+            "get_sharding_tuning",
+            lambda mode=None: types.SimpleNamespace(
+                active=True,
+                strategy="hybrid",
+                min_points_to_shard=1,
+                min_pairwise_rows_to_shard=1,
+                platform="cpu",
+                mesh_axis_name="d",
+            ),
+        )
+
+        sharded_value = runtime_bundle["objective"](coil_dofs)
+        sharded_value_vg, sharded_grad = runtime_bundle["value_and_grad"](coil_dofs)
+        summary = runtime_bundle["profile_suite"]["field_eval_sharding"](coil_dofs)
+
+        np.testing.assert_allclose(
+            float(sharded_value),
+            float(dense_value),
+            rtol=1e-10,
+            atol=_TRACEABLE_OBJECTIVE_ABS_TOL,
+        )
+        np.testing.assert_allclose(
+            float(sharded_value_vg),
+            float(dense_value_vg),
+            rtol=1e-10,
+            atol=_TRACEABLE_OBJECTIVE_ABS_TOL,
+        )
+        np.testing.assert_allclose(
+            np.asarray(sharded_grad),
+            np.asarray(dense_grad),
+            rtol=1e-10,
+            atol=1e-10,
+        )
+        assert summary["kind"] in {"NamedSharding", "SingleDeviceSharding"}
+        assert summary["device_count"] >= 1
 
     def test_traceable_objective_accepts_lm_ondevice_inner_solve(self, boozer_setup):
         """The single-stage target lane must allow the LM Boozer inner solve."""

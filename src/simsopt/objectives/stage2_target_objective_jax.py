@@ -26,6 +26,7 @@ from ..jax_core.objectives_flux import (
     fixed_surface_flux_residual_from_B,
     fixed_surface_flux_specs_from_surface,
 )
+from ..jax_core.sharding import summarize_array_sharding
 from ..geo.curveobjectives import (
     Lp_curvature_pure,
     cc_distance_pure,
@@ -86,6 +87,7 @@ class Stage2TargetObjectiveBundle(NamedTuple):
     terms: tuple[Stage2TargetObjectiveTerm, ...] = ()
     raw_terms: Stage2ObjectiveFn | None = None
     least_squares_residual: Stage2ResidualFn | None = None
+    field_sharding_summary: Callable[[jnp.ndarray], dict[str, object]] | None = None
 
 
 def _as_jax_float64(value) -> jax.Array:
@@ -562,6 +564,10 @@ def build_stage2_target_objective(
     objective = jax.jit(objective_impl)
     value_and_grad = jax.jit(jax.value_and_grad(objective_impl))
 
+    def field_sharding_summary(dofs):
+        _, total_field, *_ = _evaluate_dynamic_stage2_state(dofs)
+        return summarize_array_sharding(total_field)
+
     return Stage2TargetObjectiveBundle(
         objective=objective,
         expected_dof_count=curve_dof_count + 1,
@@ -569,4 +575,5 @@ def build_stage2_target_objective(
         terms=terms,
         raw_terms=raw_terms_fun,
         least_squares_residual=least_squares_residual,
+        field_sharding_summary=field_sharding_summary,
     )

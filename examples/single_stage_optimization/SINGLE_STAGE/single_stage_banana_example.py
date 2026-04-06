@@ -11,6 +11,7 @@ import numpy as np
 
 # SIMSOPT imports
 from simsopt._core.optimizable import Optimizable
+from simsopt.config import maybe_initialize_distributed_jax
 from simsopt.geo import (
     SurfaceRZFourier,
     SurfaceXYZTensorFourier,
@@ -105,6 +106,8 @@ DEFAULT_STAGE2_SEEDS_BY_PLASMA = {
         "order": 2,
     },
 }
+
+maybe_initialize_distributed_jax()
 
 
 @dataclass(frozen=True)

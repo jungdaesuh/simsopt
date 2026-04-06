@@ -9,6 +9,7 @@ from .jit import jit
 from .._core.optimizable import Optimizable
 from .._core.derivative import derivative_dec, Derivative
 from ..backend import get_pairwise_penalty_chunk_size
+from ..jax_core.sharding import maybe_shard_pairwise_row_inputs
 import simsoptpp as sopp
 from simsopt.geo.framedcurve import FramedCurveCentroid
 
@@ -80,6 +81,7 @@ def _chunk_rows(array, chunk_size: int):
 def _pairwise_rowwise_min_distance(points_a, points_b, *, chunk_size=None):
     points_a = _as_jax_float64(points_a)
     points_b = _as_jax_float64(points_b)
+    points_a, points_b = maybe_shard_pairwise_row_inputs(points_a, points_b)
     row_count = int(points_a.shape[0])
     col_count = int(points_b.shape[0])
     inf = _as_jax_float64(np.inf)
@@ -124,6 +126,7 @@ def _pairwise_rowwise_min_distance(points_a, points_b, *, chunk_size=None):
 def _pairwise_rowwise_pnorm_distance(points_a, points_b, p, *, chunk_size=None):
     points_a = _as_jax_float64(points_a)
     points_b = _as_jax_float64(points_b)
+    points_a, points_b = maybe_shard_pairwise_row_inputs(points_a, points_b)
     p_jax = _as_jax_float64(p)
     one = _as_jax_float64(1.0)
     zero = _as_jax_float64(0.0)

@@ -33,6 +33,7 @@ from ..jax_core.field import (
     coil_set_spec_from_dof_extraction_spec,
     grouped_coil_currents_from_spec,
 )
+from ..jax_core.sharding import inspect_array_sharding_summary
 from ..objectives.utilities import forward_backward_jax, plu_solve_jax
 from .boozer_residual_jax import (
     boozer_residual_vector,
@@ -1439,6 +1440,9 @@ def _make_traceable_objective_profile_suite_from_compiled_bundle(
         points = gamma.reshape(-1, 3)
         return grouped_biot_savart_B_from_spec(points, coil_set_spec)
 
+    def _field_at_solution_for(coil_dofs):
+        return _field_for(coil_dofs, _solve_for(coil_dofs)["x"])
+
     def _solved_total_objective_for(coil_dofs, solved_x):
         return _evaluate_traceable_total_objective(
             solved_x,
@@ -1468,6 +1472,9 @@ def _make_traceable_objective_profile_suite_from_compiled_bundle(
         "inner_solve": jax.jit(_solve_for),
         "surface_geometry": jax.jit(_surface_geometry_for),
         "field_eval": jax.jit(_field_for),
+        "field_eval_sharding": lambda coil_dofs: inspect_array_sharding_summary(
+            jax.jit(_field_at_solution_for)(coil_dofs)
+        ),
         "solved_total_objective": jax.jit(_solved_total_objective_for),
         "solved_total_gradient": jax.jit(_total_gradient_for),
         "value_and_grad_pipeline": resolved_value_and_grad_pipeline,
