@@ -211,7 +211,7 @@ def _adjoint_coil_derivative(vjp_groups_fn, booz_surf, iota, G, adjoint, biotsav
 
 def _coil_dofs_gradient_to_derivative(biotsavart, coil_dofs_gradient):
     """Convert a flat free-DOF gradient into the public ``Derivative`` contract."""
-    coil_dofs_gradient = np.asarray(coil_dofs_gradient, dtype=float)
+    coil_dofs_gradient = np.asarray(jax.device_get(coil_dofs_gradient), dtype=float)
     deriv_data = {}
     start = 0
     for lineage_opt in biotsavart.unique_dof_lineage:
