@@ -151,10 +151,10 @@ def stage2_target_optimizer_state_from_dofs(dofs, *, curve_dof_count=None):
     if curve_dof_count is None:
         curve_dofs = jax.lax.slice_in_dim(dofs, 1, dofs.shape[0], axis=0)
     else:
-        curve_dofs = jax.lax.dynamic_slice_in_dim(
+        curve_dofs = jax.lax.slice_in_dim(
             dofs,
             start_index=1,
-            slice_size=int(curve_dof_count),
+            limit_index=1 + int(curve_dof_count),
             axis=0,
         )
     return Stage2TargetOptimizerState(
