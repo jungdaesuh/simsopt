@@ -1,24 +1,39 @@
 import numpy as np
-from .curve import JaxCurve, jnp
+from .curve import JaxCurve, _as_runtime_float64_ref, jax, jnp
 
 __all__ = ["CurveHelical"]
 
 
 def curve_helical_pure(dofs, quadpoints, order, m, ell, R0, r):
     """Pure function for the position vector used by CurveHelical."""
-    A = dofs[: order + 1]
+    dofs = _as_runtime_float64_ref(dofs, reference=quadpoints)
+    quadpoints = _as_runtime_float64_ref(quadpoints, reference=dofs)
+    A = jax.lax.slice_in_dim(dofs, 0, order + 1, axis=0)
     B = jnp.concatenate(
-        (jnp.zeros(1), dofs[order + 1 :])
+        (
+            _as_runtime_float64_ref(np.zeros(1, dtype=np.float64), reference=dofs),
+            jax.lax.slice_in_dim(dofs, order + 1, dofs.shape[0], axis=0),
+        )
     )  # Add 0 at the start for k = 0
-    phi = quadpoints * 2 * jnp.pi * ell
-    k, phi_2D = jnp.meshgrid(jnp.arange(order + 1), phi)
-    eta = m * phi / ell + jnp.sum(
-        A * jnp.cos(k * phi_2D * m / ell) + B * jnp.sin(k * phi_2D * m / ell), axis=1
+    two_pi = _as_runtime_float64_ref(2.0 * np.pi, reference=quadpoints)
+    ell_scale = _as_runtime_float64_ref(float(ell), reference=quadpoints)
+    m_scale = _as_runtime_float64_ref(float(m), reference=quadpoints)
+    phi = quadpoints * two_pi * ell_scale
+    mode_numbers = _as_runtime_float64_ref(
+        np.arange(order + 1, dtype=np.float64),
+        reference=phi,
     )
-    R = R0 + r * jnp.cos(eta)
+    k, phi_2d = jnp.meshgrid(mode_numbers, phi)
+    phase = k * phi_2d * m_scale / ell_scale
+    eta = m_scale * phi / ell_scale + jnp.sum(
+        A * jnp.cos(phase) + B * jnp.sin(phase), axis=1
+    )
+    R0_scale = _as_runtime_float64_ref(float(R0), reference=eta)
+    r_scale = _as_runtime_float64_ref(float(r), reference=eta)
+    R = R0_scale + r_scale * jnp.cos(eta)
     x = R * jnp.cos(phi)
     y = R * jnp.sin(phi)
-    z = -r * jnp.sin(eta)
+    z = -r_scale * jnp.sin(eta)
     gamma = jnp.column_stack((x, y, z))
     return gamma
 

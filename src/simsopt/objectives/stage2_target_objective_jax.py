@@ -11,7 +11,10 @@ import numpy as np
 
 from ..field.biotsavart_jax_backend import _unwrap_coil_curve_and_current
 from ..geo.curve import incremental_arclength_pure, kappa_pure
-from ..jax_core._math_utils import as_runtime_float64 as _as_runtime_float64
+from ..jax_core._math_utils import (
+    as_jax_float64 as _math_as_jax_float64,
+    as_runtime_float64 as _as_runtime_float64,
+)
 from ..jax_core.field import (
     grouped_biot_savart_B_from_spec,
     grouped_coil_set_spec_from_coil_specs,
@@ -97,7 +100,7 @@ class Stage2TargetObjectiveBundle(NamedTuple):
 
 
 def _as_jax_float64(value) -> jax.Array:
-    return jnp.asarray(value, dtype=jnp.float64)
+    return _math_as_jax_float64(value)
 
 
 def _device_float64_array(value) -> jax.Array:
@@ -121,9 +124,9 @@ def _as_objective_dofs(value) -> jax.Array:
 def _runtimeify_tree(value):
     def _runtimeify_leaf(leaf):
         if isinstance(leaf, jax.Array):
-            return _as_jax_float64(leaf)
+            return np.asarray(jax.device_get(leaf), dtype=np.float64)
         if isinstance(leaf, (np.ndarray, np.generic)) or np.isscalar(leaf):
-            return _device_float64_array(leaf)
+            return np.asarray(leaf, dtype=np.float64)
         return leaf
 
     return jax.tree_util.tree_map(_runtimeify_leaf, value)
@@ -190,7 +193,7 @@ def _fixed_curve_penalty(curves, minimum_distance):
 def _curve_pairs_from_grouped_coil_set_spec(coil_set_spec):
     curve_pairs = []
     for group in coil_set_spec.groups:
-        gammas, gammadashs = _curve_group_arrays(group)
+        gammas, gammadashs = _curve_group_host_arrays(group)
         group_size = int(gammas.shape[0])
         for coil_index in range(group_size):
             curve_pairs.append(
@@ -206,10 +209,25 @@ def _curve_group_arrays(group):
     return _as_jax_float64(group.gammas), _as_jax_float64(group.gammadashs)
 
 
+def _curve_group_host_arrays(group):
+    return (
+        np.asarray(jax.device_get(group.gammas), dtype=np.float64),
+        np.asarray(jax.device_get(group.gammadashs), dtype=np.float64),
+    )
+
+
+def _host_float64_array(value):
+    return np.asarray(jax.device_get(value), dtype=np.float64)
+
+
+def _host_float64_scalar(value) -> float:
+    return float(_host_float64_array(value).reshape(()))
+
+
 def _curve_groups_from_grouped_coil_set_spec(coil_set_spec):
     curve_groups = []
     for group in coil_set_spec.groups:
-        curve_groups.append(_curve_group_arrays(group))
+        curve_groups.append(_curve_group_host_arrays(group))
     return tuple(curve_groups)
 
 
@@ -221,8 +239,8 @@ def _banana_symmetry_runtime_inputs_from_coils(banana_coils):
     ):
         if rotmat is None:
             rotmat = np.eye(3, dtype=np.float64)
-        banana_rotmats.append(np.asarray(rotmat, dtype=np.float64))
-        banana_current_scales.append(float(scale))
+        banana_rotmats.append(_host_float64_array(rotmat))
+        banana_current_scales.append(_host_float64_scalar(scale))
     return (
         np.asarray(banana_rotmats, dtype=np.float64),
         np.asarray(banana_current_scales, dtype=np.float64),
@@ -401,7 +419,7 @@ def build_stage2_target_objective(
         definition=penalty_config.squared_flux_definition,
     )
     del field_eval_spec
-    points = _as_jax_float64(flux_spec.points)
+    points = _host_float64_array(flux_spec.points)
     banana_curve_spec = curve_spec_from_curve(banana_curve)
     curve_dof_count = int(banana_curve_spec.dofs.shape[0])
     length_target = float(length_target)
@@ -415,14 +433,18 @@ def build_stage2_target_objective(
         tf_coil_spec = grouped_coil_set_spec_from_coil_specs(
             tuple(coil.to_spec() for coil in tf_coils)
         )
-        fixed_field = grouped_biot_savart_B_from_spec(points, tf_coil_spec)
+        fixed_field = _host_float64_array(
+            grouped_biot_savart_B_from_spec(_as_jax_float64(points), tf_coil_spec)
+        )
         tf_curve_data = _curve_pairs_from_grouped_coil_set_spec(tf_coil_spec)
         tf_curve_groups = _curve_groups_from_grouped_coil_set_spec(tf_coil_spec)
-        fixed_curve_penalty = _fixed_curve_penalty(tf_curve_data, cc_threshold)
+        fixed_curve_penalty = _host_float64_scalar(
+            _fixed_curve_penalty(tf_curve_data, cc_threshold)
+        )
     else:
-        fixed_field = jnp.zeros((points.shape[0], 3), dtype=jnp.float64)
+        fixed_field = np.zeros((points.shape[0], 3), dtype=np.float64)
         tf_curve_groups = ()
-        fixed_curve_penalty = _as_jax_float64(0.0)
+        fixed_curve_penalty = 0.0
 
     banana_rotmats, banana_current_scales = _banana_symmetry_runtime_inputs_from_coils(
         banana_coils
@@ -430,17 +452,6 @@ def build_stage2_target_objective(
     banana_curve_spec_runtime = _runtimeify_tree(banana_curve_spec)
     tf_curve_groups_runtime = _runtimeify_tree(tf_curve_groups)
     flux_spec_runtime = _runtimeify_tree(flux_spec)
-    objective_weights = np.array(
-        (
-            squared_flux_weight,
-            length_weight,
-            cc_weight,
-            curvature_weight,
-        ),
-        dtype=np.float64,
-    )
-    least_squares_weights = np.asarray(objective_weights, dtype=np.float64)
-
     def _dynamic_curve_runtime_state(dofs):
         state = stage2_target_optimizer_state_from_dofs(
             dofs,
@@ -577,8 +588,20 @@ def build_stage2_target_objective(
             _zero_jax,
         ) = _evaluate_dynamic_stage2_state(dofs)
         two_jax = _runtime_float64_scalar(2.0, reference=flat_dofs)
-        least_squares_weights_jax = _runtime_float64_array(
-            least_squares_weights,
+        squared_flux_weight_jax = _runtime_float64_scalar(
+            squared_flux_weight,
+            reference=flat_dofs,
+        )
+        length_weight_jax = _runtime_float64_scalar(
+            length_weight,
+            reference=flat_dofs,
+        )
+        cc_weight_jax = _runtime_float64_scalar(
+            cc_weight,
+            reference=flat_dofs,
+        )
+        curvature_weight_jax = _runtime_float64_scalar(
+            curvature_weight,
             reference=flat_dofs,
         )
         flux_residual = fixed_surface_flux_residual_from_B(
@@ -588,17 +611,15 @@ def build_stage2_target_objective(
 
         penalty_terms = jnp.asarray(
             (
-                length_excess * jnp.sqrt(least_squares_weights_jax[1]),
-                jnp.sqrt(
-                    two_jax * least_squares_weights_jax[2] * coil_distance_penalty
-                ),
-                jnp.sqrt(two_jax * least_squares_weights_jax[3] * curvature_penalty),
+                length_excess * jnp.sqrt(length_weight_jax),
+                jnp.sqrt(two_jax * cc_weight_jax * coil_distance_penalty),
+                jnp.sqrt(two_jax * curvature_weight_jax * curvature_penalty),
             ),
             dtype=jnp.float64,
         )
         return jnp.concatenate(
             (
-                flux_residual * jnp.sqrt(least_squares_weights_jax[0]),
+                flux_residual * jnp.sqrt(squared_flux_weight_jax),
                 penalty_terms,
             )
         )
@@ -615,8 +636,28 @@ def build_stage2_target_objective(
 
     def objective_impl(dofs):
         raw_terms_value = raw_terms_fun(dofs)
-        weights = _runtime_float64_array(objective_weights, reference=raw_terms_value)
-        return jnp.dot(weights, raw_terms_value)
+        squared_flux_weight_jax = _runtime_float64_scalar(
+            squared_flux_weight,
+            reference=raw_terms_value,
+        )
+        length_weight_jax = _runtime_float64_scalar(
+            length_weight,
+            reference=raw_terms_value,
+        )
+        cc_weight_jax = _runtime_float64_scalar(
+            cc_weight,
+            reference=raw_terms_value,
+        )
+        curvature_weight_jax = _runtime_float64_scalar(
+            curvature_weight,
+            reference=raw_terms_value,
+        )
+        return (
+            squared_flux_weight_jax * raw_terms_value[0]
+            + length_weight_jax * raw_terms_value[1]
+            + cc_weight_jax * raw_terms_value[2]
+            + curvature_weight_jax * raw_terms_value[3]
+        )
 
     objective = jax.jit(objective_impl)
     value_and_grad = jax.jit(jax.value_and_grad(objective_impl))

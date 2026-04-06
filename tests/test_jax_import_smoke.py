@@ -706,7 +706,7 @@ def test_transfer_guard_disallow_allows_grouped_biot_savart_gpu_spec_eval():
         B = grouped_biot_savart_B_from_spec(points, coil_spec)
 
         assert B.shape == (4, 3)
-        assert jax.numpy.all(jax.numpy.isfinite(B))
+        assert np.all(np.isfinite(np.asarray(jax.device_get(B))))
     """,
         failure_message="grouped Biot-Savart GPU spec transfer-guard smoke failed",
     )
@@ -828,7 +828,7 @@ def test_transfer_guard_disallow_allows_grouped_biot_savart_gpu_current_arrays()
         B = grouped_biot_savart_B_from_spec(points, coil_spec)
 
         assert B.shape == (4, 3)
-        assert jax.numpy.all(jax.numpy.isfinite(B))
+        assert np.all(np.isfinite(np.asarray(jax.device_get(B))))
     """,
         failure_message="grouped Biot-Savart GPU current-array transfer-guard smoke failed",
     )
@@ -1717,8 +1717,14 @@ def test_jax_core_specs_are_pytrees():
 
         coil_spec = make_grouped_coil_set_spec([
             (
-                jnp.zeros((1, 2, 3)),
-                jnp.ones((1, 2, 3)),
+                jnp.asarray(
+                    [[[1.0, 0.0, 0.0], [1.1, 0.2, 0.1]]],
+                    dtype=jnp.float64,
+                ),
+                jnp.asarray(
+                    [[[0.0, 0.8, 0.1], [0.0, 0.6, 0.1]]],
+                    dtype=jnp.float64,
+                ),
                 jnp.asarray([1.0]),
                 [0],
             )
@@ -1956,7 +1962,7 @@ def test_jax_core_specs_are_pytrees():
         assert curve_cws_gammadashdash.shape == (2, 3)
         assert curve_cws_gammadashdash_from_dofs.shape == (2, 3)
         assert gamma.shape == (2, 2, 3)
-        assert jnp.isfinite(value)
+        assert np.isfinite(np.asarray(value))
     """)
     assert rc == 0, f"jax_core pytree contract failed:\n{err}"
 
@@ -2285,10 +2291,15 @@ def test_import_cpu_geo_core_entrypoints_without_jax():
     except (ImportError, AttributeError):
         pytest.skip("compiled simsoptpp symbols are not available in this environment")
 
+    strip_editable_finders = textwrap.indent(
+        textwrap.dedent(_strip_simsopt_editable_finders(include_import=False)).strip(),
+        " " * 8,
+    )
     rc, err = _run_import_check(f"""
         import importlib.abc
+        import sys
 
-        {_strip_simsopt_editable_finders()}
+{strip_editable_finders}
 
         class _BlockJax(importlib.abc.MetaPathFinder):
             def find_spec(self, fullname, path=None, target=None):

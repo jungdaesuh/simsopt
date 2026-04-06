@@ -1,33 +1,42 @@
+import jax
 import numpy as np
 
 import simsoptpp as sopp
-from .curve import Curve, _install_curve_jax_contract, jnp
+from .curve import Curve, _as_runtime_float64_ref, _install_curve_jax_contract, _two_pi_like, jnp
 
 __all__ = ["CurveRZFourier"]
 
 
 def curverzfourier_pure(dofs, quadpoints, order, nfp, stellsym):
-    phi = 2.0 * jnp.pi * quadpoints
+    quadpoints = _as_runtime_float64_ref(quadpoints, reference=dofs)
+    phi = _two_pi_like(quadpoints) * quadpoints
     cosphi = jnp.cos(phi)
     sinphi = jnp.sin(phi)
 
-    rc = dofs[: order + 1]
+    rc = jax.lax.slice_in_dim(dofs, 0, order + 1, axis=0)
     if stellsym:
         rs = None
         zc = None
-        zs = dofs[order + 1 :]
+        zs = jax.lax.slice_in_dim(dofs, order + 1, dofs.shape[0], axis=0)
     else:
-        rs = dofs[order + 1 : 2 * order + 1]
-        zc = dofs[2 * order + 1 : 3 * order + 2]
-        zs = dofs[3 * order + 2 :]
+        rs = jax.lax.slice_in_dim(dofs, order + 1, 2 * order + 1, axis=0)
+        zc = jax.lax.slice_in_dim(dofs, 2 * order + 1, 3 * order + 2, axis=0)
+        zs = jax.lax.slice_in_dim(dofs, 3 * order + 2, dofs.shape[0], axis=0)
 
-    cos_modes = jnp.arange(order + 1, dtype=jnp.float64)
-    cos_phase = phi[:, None] * (nfp * cos_modes)[None, :]
+    cos_modes = _as_runtime_float64_ref(
+        np.arange(order + 1, dtype=np.float64),
+        reference=phi,
+    )
+    nfp_scale = _as_runtime_float64_ref(float(nfp), reference=phi)
+    cos_phase = phi[:, None] * (nfp_scale * cos_modes)[None, :]
     radius = jnp.sum(rc[None, :] * jnp.cos(cos_phase), axis=1)
 
-    sin_modes = jnp.arange(1, order + 1, dtype=jnp.float64)
+    sin_modes = _as_runtime_float64_ref(
+        np.arange(1, order + 1, dtype=np.float64),
+        reference=phi,
+    )
     if order > 0:
-        sin_phase = phi[:, None] * (nfp * sin_modes)[None, :]
+        sin_phase = phi[:, None] * (nfp_scale * sin_modes)[None, :]
         z = jnp.sum(zs[None, :] * jnp.sin(sin_phase), axis=1)
         if not stellsym:
             radius = radius + jnp.sum(rs[None, :] * jnp.sin(sin_phase), axis=1)

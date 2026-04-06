@@ -64,6 +64,22 @@ biot_savart_d2A_by_dXdX = _bs.biot_savart_d2A_by_dXdX
 # ---------------------------------------------------------------------------
 
 
+def _device_float64_array(value):
+    return jax.device_put(np.asarray(value, dtype=np.float64))
+
+
+def _device_float64_scalar(value):
+    return _device_float64_array(value)
+
+
+def _host_array(value):
+    return np.asarray(jax.device_get(value))
+
+
+def _host_float(value):
+    return float(np.asarray(jax.device_get(value), dtype=np.float64))
+
+
 def _make_fourier_coil(nquad=200):
     """Replicate upstream ``get_curve(nquad)`` as pure arrays.
 
@@ -89,8 +105,8 @@ def _make_fourier_coil(nquad=200):
     gammadash = np.stack([dx, dy, dz], axis=-1)
 
     return (
-        jnp.array(gamma[None, :, :]),  # (1, nquad, 3)
-        jnp.array(gammadash[None, :, :]),  # (1, nquad, 3)
+        _device_float64_array(gamma[None, :, :]),  # (1, nquad, 3)
+        _device_float64_array(gammadash[None, :, :]),  # (1, nquad, 3)
     )
 
 
@@ -114,23 +130,25 @@ def _assert_point_perturbation_taylor_convergence(
     currents,
     idx,
 ):
-    field_0 = field_fn(points, gammas, gammadashs, currents)[idx]
-    derivative = derivative_fn(points, gammas, gammadashs, currents)[idx]
+    field_0 = _host_array(field_fn(points, gammas, gammadashs, currents))[idx]
+    derivative = _host_array(derivative_fn(points, gammas, gammadashs, currents))[idx]
 
-    for direction in [
-        jnp.array([1.0, 0.0, 0.0]),
-        jnp.array([0.0, 1.0, 0.0]),
-        jnp.array([0.0, 0.0, 1.0]),
+    for direction_host in [
+        np.asarray([1.0, 0.0, 0.0], dtype=np.float64),
+        np.asarray([0.0, 1.0, 0.0], dtype=np.float64),
+        np.asarray([0.0, 0.0, 1.0], dtype=np.float64),
     ]:
-        directional_derivative = derivative.T @ direction
+        direction = _device_float64_array(direction_host)
+        directional_derivative = derivative.T @ direction_host
         err = 1e6
         for i in range(5, 10):
             eps = 0.5**i
-            field_eps = field_fn(
-                points + eps * direction, gammas, gammadashs, currents
+            eps_device = _device_float64_scalar(eps)
+            field_eps = _host_array(
+                field_fn(points + eps_device * direction, gammas, gammadashs, currents)
             )[idx]
             derivative_est = (field_eps - field_0) / eps
-            new_err = float(jnp.linalg.norm(directional_derivative - derivative_est))
+            new_err = float(np.linalg.norm(directional_derivative - derivative_est))
             if new_err < 1e-14:
                 break  # machine precision reached
             assert new_err < 0.55 * err
@@ -146,29 +164,38 @@ def _assert_second_derivative_taylor_convergence(
     currents,
     idx,
 ):
-    second_derivative = second_derivative_fn(points, gammas, gammadashs, currents)[idx]
+    second_derivative = _host_array(
+        second_derivative_fn(points, gammas, gammadashs, currents)
+    )[idx]
 
     for d1 in range(3):
         for d2 in range(3):
             target = second_derivative[d1, d2]
-            direction = jnp.zeros((1, 3), dtype=jnp.float64).at[0, d2].set(1.0)
+            direction = _device_float64_array(
+                np.eye(1, 3, k=d2, dtype=np.float64)
+            )
             err = 1e6
             for i in range(5, 10):
                 eps = 0.5**i
-                derivative_plus = derivative_fn(
-                    points + eps * direction,
-                    gammas,
-                    gammadashs,
-                    currents,
+                eps_device = _device_float64_scalar(eps)
+                derivative_plus = _host_array(
+                    derivative_fn(
+                        points + eps_device * direction,
+                        gammas,
+                        gammadashs,
+                        currents,
+                    )
                 )[idx, d1]
-                derivative_minus = derivative_fn(
-                    points - eps * direction,
-                    gammas,
-                    gammadashs,
-                    currents,
+                derivative_minus = _host_array(
+                    derivative_fn(
+                        points - eps_device * direction,
+                        gammas,
+                        gammadashs,
+                        currents,
+                    )
                 )[idx, d1]
                 second_derivative_est = (derivative_plus - derivative_minus) / (2 * eps)
-                new_err = float(jnp.linalg.norm(target - second_derivative_est))
+                new_err = float(np.linalg.norm(target - second_derivative_est))
                 if new_err < 1e-13:
                     break
                 assert new_err < 0.30 * err
@@ -176,22 +203,26 @@ def _assert_second_derivative_taylor_convergence(
 
 
 def _assert_current_linearity(quantity_fn, points, gammas, gammadashs, current):
-    currents_full = jnp.array([current])
-    currents_zero = jnp.array([0.0])
-    currents_unit = jnp.array([1.0])
+    currents_full = _device_float64_array([current])
+    currents_zero = _device_float64_array([0.0])
+    currents_unit = _device_float64_array([1.0])
 
     quantity_full = quantity_fn(points, gammas, gammadashs, currents_full)
     quantity_zero = quantity_fn(points, gammas, gammadashs, currents_zero)
     quantity_unit = quantity_fn(points, gammas, gammadashs, currents_unit)
+    quantity_full_host = _host_array(quantity_full)
+    quantity_zero_host = _host_array(quantity_zero)
+    quantity_unit_host = _host_array(quantity_unit)
 
     assert (
-        float(jnp.linalg.norm(quantity_full - current * quantity_unit))
+        float(np.linalg.norm(quantity_full_host - current * quantity_unit_host))
         < _CURRENT_LINEARITY_TOL
     )
 
-    quantity_approx = (quantity_full - quantity_zero) / current
+    quantity_approx = (quantity_full_host - quantity_zero_host) / current
     assert (
-        float(jnp.linalg.norm(quantity_approx - quantity_unit)) < _CURRENT_LINEARITY_TOL
+        float(np.linalg.norm(quantity_approx - quantity_unit_host))
+        < _CURRENT_LINEARITY_TOL
     )
 
 
@@ -206,8 +237,8 @@ class TestBiotSavartParitySuite:
         with a machine-precision floor (the smooth Fourier coil converges
         super-exponentially, so coarser levels may already be at ε_mach).
         """
-        points = jnp.array(_BASE_POINTS)
-        currents = jnp.array([_CURRENT])
+        points = _device_float64_array(_BASE_POINTS)
+        currents = _device_float64_array([_CURRENT])
 
         g_ref, gd_ref = _make_fourier_coil(1000)
         B_ref = biot_savart_B(points, g_ref, gd_ref, currents)
@@ -220,8 +251,8 @@ class TestBiotSavartParitySuite:
             B = biot_savart_B(points, g, gd, currents)
             dB = biot_savart_dB_by_dX(points, g, gd, currents)
 
-            B_err = float(jnp.linalg.norm(B - B_ref))
-            dB_err = float(jnp.linalg.norm(dB - dB_ref))
+            B_err = _host_float(jnp.linalg.norm(B - B_ref))
+            dB_err = _host_float(jnp.linalg.norm(dB - dB_ref))
 
             if prev_B_err > 1e-14:
                 assert B_err < 0.5 * prev_B_err, (
@@ -241,14 +272,14 @@ class TestBiotSavartParitySuite:
         Matches ``test_biotsavart_B_is_curlA``.
         """
         gammas, gammadashs = _make_fourier_coil(200)
-        currents = jnp.array([_CURRENT])
-        points = jnp.array(_BASE_POINTS)
+        currents = _device_float64_array([_CURRENT])
+        points = _device_float64_array(_BASE_POINTS)
 
-        B = biot_savart_B(points, gammas, gammadashs, currents)
-        dA_dX = biot_savart_dA_by_dX(points, gammas, gammadashs, currents)
+        B = _host_array(biot_savart_B(points, gammas, gammadashs, currents))
+        dA_dX = _host_array(biot_savart_dA_by_dX(points, gammas, gammadashs, currents))
 
         # curl(A)_i = ε_{ijk} ∂_j A_k
-        curl_A = jnp.stack(
+        curl_A = np.stack(
             [
                 dA_dX[:, 1, 2] - dA_dX[:, 2, 1],
                 dA_dX[:, 2, 0] - dA_dX[:, 0, 2],
@@ -257,7 +288,7 @@ class TestBiotSavartParitySuite:
             axis=1,
         )
 
-        np.testing.assert_allclose(np.array(curl_A), np.array(B), atol=1e-14)
+        np.testing.assert_allclose(curl_A, B, atol=1e-14)
 
     @pytest.mark.parametrize("idx", [0, 16])
     def test_dA_dX_finite_difference(self, idx):
@@ -267,9 +298,9 @@ class TestBiotSavartParitySuite:
         """
         np.random.seed(42)
         gammas, gammadashs = _make_fourier_coil(200)
-        currents = jnp.array([_CURRENT])
+        currents = _device_float64_array([_CURRENT])
 
-        points = jnp.array(
+        points = _device_float64_array(
             _BASE_POINTS + 0.001 * (np.random.rand(*_BASE_POINTS.shape) - 0.5)
         )
         _assert_point_perturbation_taylor_convergence(
@@ -291,9 +322,9 @@ class TestBiotSavartParitySuite:
         """
         np.random.seed(42)
         gammas, gammadashs = _make_fourier_coil(200)
-        currents = jnp.array([_CURRENT])
+        currents = _device_float64_array([_CURRENT])
 
-        points = jnp.array(
+        points = _device_float64_array(
             _BASE_POINTS + 0.001 * (np.random.rand(*_BASE_POINTS.shape) - 0.5)
         )
         _assert_point_perturbation_taylor_convergence(
@@ -315,13 +346,14 @@ class TestBiotSavartParitySuite:
         """
         np.random.seed(42)
         gammas, gammadashs = _make_fourier_coil(200)
-        currents = jnp.array([_CURRENT])
+        currents = _device_float64_array([_CURRENT])
 
-        points = jnp.array(
+        points = _device_float64_array(
             _BASE_POINTS + 0.001 * (np.random.rand(*_BASE_POINTS.shape) - 0.5)
         )
-        dB = biot_savart_dB_by_dX(points, gammas, gammadashs, currents)
-        dB_idx = np.array(dB[idx])
+        dB_idx = _host_array(biot_savart_dB_by_dX(points, gammas, gammadashs, currents))[
+            idx
+        ]
 
         # Divergence-free: Tr(dB/dX) = 0
         assert abs(dB_idx[0, 0] + dB_idx[1, 1] + dB_idx[2, 2]) < 1e-14
@@ -336,16 +368,18 @@ class TestBiotSavartParitySuite:
         """
         np.random.seed(42)
         gammas, gammadashs = _make_fourier_coil(200)
-        currents = jnp.array([_CURRENT])
-        points = jnp.array(
+        currents = _device_float64_array([_CURRENT])
+        points = _device_float64_array(
             _BASE_POINTS + 0.001 * (np.random.rand(*_BASE_POINTS.shape) - 0.5)
         )
 
-        d2B = biot_savart_d2B_by_dXdX(points, gammas, gammadashs, currents)[idx]
+        d2B = _host_array(
+            biot_savart_d2B_by_dXdX(points, gammas, gammadashs, currents)
+        )[idx]
         for component in range(3):
             np.testing.assert_allclose(
-                np.array(d2B[:, :, component]),
-                np.array(d2B[:, :, component].T),
+                d2B[:, :, component],
+                d2B[:, :, component].T,
                 atol=1e-14,
             )
 
@@ -361,8 +395,8 @@ class TestBiotSavartParitySuite:
     def test_d2_dXdX_taylor_test(self, derivative_fn, second_derivative_fn, idx):
         """Second spatial derivative matches central FD of first derivative."""
         gammas, gammadashs = _make_fourier_coil(200)
-        currents = jnp.array([_CURRENT])
-        points = jnp.array(_BASE_POINTS)
+        currents = _device_float64_array([_CURRENT])
+        points = _device_float64_array(_BASE_POINTS)
         _assert_second_derivative_taylor_convergence(
             derivative_fn,
             second_derivative_fn,
@@ -386,29 +420,32 @@ class TestBiotSavartParitySuite:
         """
         np.random.seed(seed)
         gammas, gammadashs = _make_fourier_coil(200)
-        currents = jnp.array([_CURRENT])
+        currents = _device_float64_array([_CURRENT])
 
-        points = jnp.array(
+        points = _device_float64_array(
             _BASE_POINTS + 0.001 * (np.random.rand(*_BASE_POINTS.shape) - 0.5)
         )
 
         inputs = [gammas, gammadashs, currents]
         B = biot_savart_B(points, *inputs)
-        J0 = float(jnp.sum(B**2))
+        J0 = _host_float(jnp.sum(jnp.square(B)))
 
         vjp_out = biot_savart_B_vjp(points, B, *inputs)
         grad = vjp_out[channel_idx]
 
-        h = 1e-2 * jnp.array(np.random.rand(*inputs[channel_idx].shape))
-        dJ_dh = float(2 * jnp.sum(grad * h))
+        h = _device_float64_scalar(1e-2) * _device_float64_array(
+            np.random.rand(*inputs[channel_idx].shape)
+        )
+        dJ_dh = 2.0 * _host_float(jnp.sum(grad * h))
 
         err = 1e6
         for i in range(5, 10):
             eps = 0.5**i
+            eps_device = _device_float64_scalar(eps)
             perturbed = list(inputs)
-            perturbed[channel_idx] = inputs[channel_idx] + eps * h
+            perturbed[channel_idx] = inputs[channel_idx] + eps_device * h
             B_eps = biot_savart_B(points, *perturbed)
-            J_eps = float(jnp.sum(B_eps**2))
+            J_eps = _host_float(jnp.sum(jnp.square(B_eps)))
             deriv_est = (J_eps - J0) / eps
             new_err = abs(deriv_est - dJ_dh)
             if new_err < 1e-14:
@@ -421,8 +458,8 @@ class TestBiotSavartParitySuite:
 
         Mirrors ``test_quadrature_convergence`` for the vector potential.
         """
-        points = jnp.array(_BASE_POINTS)
-        currents = jnp.array([_CURRENT])
+        points = _device_float64_array(_BASE_POINTS)
+        currents = _device_float64_array([_CURRENT])
 
         g_ref, gd_ref = _make_fourier_coil(1000)
         A_ref = biot_savart_A(points, g_ref, gd_ref, currents)
@@ -435,8 +472,8 @@ class TestBiotSavartParitySuite:
             A = biot_savart_A(points, g, gd, currents)
             dA = biot_savart_dA_by_dX(points, g, gd, currents)
 
-            A_err = float(jnp.linalg.norm(A - A_ref))
-            dA_err = float(jnp.linalg.norm(dA - dA_ref))
+            A_err = _host_float(jnp.linalg.norm(A - A_ref))
+            dA_err = _host_float(jnp.linalg.norm(dA - dA_ref))
 
             if prev_A_err > 1e-14:
                 assert A_err < 0.5 * prev_A_err, (
@@ -459,7 +496,7 @@ class TestBiotSavartParitySuite:
         series needed.
         """
         gammas, gammadashs = _make_fourier_coil(200)
-        points = jnp.array(_BASE_POINTS)
+        points = _device_float64_array(_BASE_POINTS)
         I = _CURRENT
 
         for quantity_fn in (
@@ -506,9 +543,9 @@ class TestGroupedBiotSavartGradient:
             g1_np[i, :, 1] = R_coil * np.sin(t + phi_off)
             gd1_np[i, :, 0] = -R_coil * twopi * np.sin(t + phi_off)
             gd1_np[i, :, 1] = R_coil * twopi * np.cos(t + phi_off)
-        g1 = jnp.array(g1_np)
-        gd1 = jnp.array(gd1_np)
-        c1 = jnp.array([1e5, 1e5])
+        g1 = _device_float64_array(g1_np)
+        gd1 = _device_float64_array(gd1_np)
+        c1 = _device_float64_array([1e5, 1e5])
 
         # Group 2: 1 coil with 64 quadrature points
         nq2 = 64
@@ -520,9 +557,9 @@ class TestGroupedBiotSavartGradient:
         g2_np[0, :, 1] = R_coil * np.sin(t + phi_off)
         gd2_np[0, :, 0] = -R_coil * twopi * np.sin(t + phi_off)
         gd2_np[0, :, 1] = R_coil * twopi * np.cos(t + phi_off)
-        g2 = jnp.array(g2_np)
-        gd2 = jnp.array(gd2_np)
-        c2 = jnp.array([1e5])
+        g2 = _device_float64_array(g2_np)
+        gd2 = _device_float64_array(gd2_np)
+        c2 = _device_float64_array([1e5])
 
         coil_arrays = [(g1, gd1, c1), (g2, gd2, c2)]
 
@@ -531,7 +568,7 @@ class TestGroupedBiotSavartGradient:
         pts_R = 0.8 + 0.2 * rng.rand(15)
         pts_phi = twopi * rng.rand(15)
         pts_z = 0.1 * (rng.rand(15) - 0.5)
-        points = jnp.array(
+        points = _device_float64_array(
             np.stack(
                 [pts_R * np.cos(pts_phi), pts_R * np.sin(pts_phi), pts_z],
                 axis=-1,
@@ -540,17 +577,22 @@ class TestGroupedBiotSavartGradient:
 
         def J(ca):
             B = grouped_biot_savart_B(points, ca)
-            return jnp.sum(B**2)
+            return jnp.sum(jnp.square(B))
 
-        grad_ca = jax.grad(J)(coil_arrays)
+        _, pullback = jax.vjp(J, coil_arrays)
+        grad_ca = pullback(_device_float64_scalar(1.0))[0]
 
         def _check_fd(grad, h, perturb, label):
             """Central FD convergence check for one gradient component."""
-            dJ_dh = float(jnp.sum(grad * h))
+            dJ_dh = _host_float(jnp.sum(grad * h))
             err = 1e9
             for i in range(8, 18):
                 eps = 0.5**i
-                fd = (float(J(perturb(eps * h))) - float(J(perturb(-eps * h)))) / (
+                eps_device = _device_float64_scalar(eps)
+                fd = (
+                    _host_float(J(perturb(eps_device * h)))
+                    - _host_float(J(perturb(-eps_device * h)))
+                ) / (
                     2 * eps
                 )
                 new_err = abs(fd - dJ_dh)
@@ -564,19 +606,19 @@ class TestGroupedBiotSavartGradient:
 
         _check_fd(
             grad_ca[0][0],
-            jnp.array(1e-2 * rng.randn(*g1.shape)),
+            _device_float64_array(1e-2 * rng.randn(*g1.shape)),
             lambda d: [(g1 + d, gd1, c1), (g2, gd2, c2)],
             "Group 1 gammas",
         )
         _check_fd(
             grad_ca[1][0],
-            jnp.array(1e-2 * rng.randn(*g2.shape)),
+            _device_float64_array(1e-2 * rng.randn(*g2.shape)),
             lambda d: [(g1, gd1, c1), (g2 + d, gd2, c2)],
             "Group 2 gammas",
         )
         _check_fd(
             grad_ca[1][2],
-            jnp.array(rng.randn(*c2.shape)),
+            _device_float64_array(rng.randn(*c2.shape)),
             lambda d: [(g1, gd1, c1), (g2, gd2, c2 + d)],
             "Group 2 currents",
         )
@@ -693,7 +735,7 @@ def _make_curve_type_fixture(curvetype, nquad=100):
     gammas = gamma[None, :, :]
     gammadashs = gammadash[None, :, :]
     centroid = jnp.mean(gamma, axis=0)
-    points = (centroid + jnp.array([0.0, 0.0, 0.05]))[None, :]
+    points = (centroid + _device_float64_array([0.0, 0.0, 0.05]))[None, :]
     return spec, gamma, gammadash, gammas, gammadashs, points
 
 
@@ -708,8 +750,8 @@ class TestCurveTypeParametrization:
     def test_gamma_nontrivial(self, curvetype):
         """Gamma and gammadash from each spec type are non-degenerate."""
         _, gamma, gammadash, _, _, _ = _make_curve_type_fixture(curvetype)
-        gamma_np = np.asarray(gamma)
-        gammadash_np = np.asarray(gammadash)
+        gamma_np = _host_array(gamma)
+        gammadash_np = _host_array(gammadash)
 
         assert gamma_np.shape == (100, 3)
         gamma_extent = gamma_np.max(axis=0) - gamma_np.min(axis=0)
@@ -725,8 +767,8 @@ class TestCurveTypeParametrization:
     def test_B_field_nontrivial(self, curvetype):
         """B field from each curve type is non-zero and has physical magnitude."""
         _, _, _, gammas, gammadashs, points = _make_curve_type_fixture(curvetype)
-        B = biot_savart_B(points, gammas, gammadashs, jnp.array([1e4]))
-        B_norm = float(jnp.linalg.norm(B))
+        B = biot_savart_B(points, gammas, gammadashs, _device_float64_array([1e4]))
+        B_norm = _host_float(jnp.linalg.norm(B))
         assert B_norm > 1e-10, (
             f"{curvetype}: B field norm {B_norm:.2e} is negligibly small"
         )
@@ -738,10 +780,10 @@ class TestCurveTypeParametrization:
         centroid = jnp.mean(gamma, axis=0)
         rng = np.random.RandomState(42)
         offsets = 0.05 * (rng.rand(5, 3) - 0.5)
-        points = jnp.array(np.asarray(centroid)[None, :] + offsets)
+        points = _device_float64_array(_host_array(centroid)[None, :] + offsets)
 
-        dB = biot_savart_dB_by_dX(points, gammas, gammadashs, jnp.array([1e4]))
-        dB_np = np.asarray(dB)
+        dB = biot_savart_dB_by_dX(points, gammas, gammadashs, _device_float64_array([1e4]))
+        dB_np = _host_array(dB)
         for i in range(dB_np.shape[0]):
             div_B = dB_np[i, 0, 0] + dB_np[i, 1, 1] + dB_np[i, 2, 2]
             assert abs(div_B) < 1e-12, (
@@ -753,32 +795,35 @@ class TestCurveTypeParametrization:
         """B scales linearly with current for each curve type."""
         _, _, _, gammas, gammadashs, points = _make_curve_type_fixture(curvetype)
         I = 1e4
-        B_full = biot_savart_B(points, gammas, gammadashs, jnp.array([I]))
-        B_unit = biot_savart_B(points, gammas, gammadashs, jnp.array([1.0]))
-        err = float(jnp.linalg.norm(B_full - I * B_unit))
+        B_full = biot_savart_B(points, gammas, gammadashs, _device_float64_array([I]))
+        B_unit = biot_savart_B(
+            points, gammas, gammadashs, _device_float64_array([1.0])
+        )
+        err = float(np.linalg.norm(_host_array(B_full) - I * _host_array(B_unit)))
         assert err < 1e-15, f"{curvetype}: B linearity error {err:.2e}"
 
     @pytest.mark.parametrize("curvetype", list(_CURVE_SPEC_FACTORIES))
     def test_B_cross_type_consistency(self, curvetype):
         """B field changes non-trivially when curve DOFs are perturbed."""
         spec, _, _, gammas, gammadashs, points = _make_curve_type_fixture(curvetype)
-        currents = jnp.array([1e4])
+        currents = _device_float64_array([1e4])
         B_orig = biot_savart_B(points, gammas, gammadashs, currents)
 
         np.random.seed(99)
-        perturbed_dofs = jnp.asarray(spec.dofs) + 0.05 * jnp.array(
-            np.random.rand(len(spec.dofs))
+        perturbed_dofs = _device_float64_array(
+            _host_array(spec.dofs)
+            + 0.05 * np.random.rand(len(spec.dofs))
         )
         from simsopt.jax_core import curve_spec_with_dofs
 
         perturbed_spec = curve_spec_with_dofs(spec, perturbed_dofs)
         gamma_p, gammadash_p = curve_gamma_and_dash_from_spec(perturbed_spec)
         centroid_p = jnp.mean(gamma_p, axis=0)
-        points_p = (centroid_p + jnp.array([0.0, 0.0, 0.05]))[None, :]
+        points_p = (centroid_p + _device_float64_array([0.0, 0.0, 0.05]))[None, :]
         B_pert = biot_savart_B(
             points_p, gamma_p[None, :, :], gammadash_p[None, :, :], currents
         )
-        diff = float(jnp.linalg.norm(B_pert - B_orig))
+        diff = _host_float(jnp.linalg.norm(B_pert - B_orig))
         assert diff > 1e-10, (
             f"{curvetype}: B unchanged after DOF perturbation (diff={diff:.2e})"
         )

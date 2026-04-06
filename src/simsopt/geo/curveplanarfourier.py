@@ -1,37 +1,47 @@
+import jax
 import numpy as np
 import simsoptpp as sopp
-from .curve import Curve, JaxCurve, _install_curve_jax_contract, jnp
+from .curve import Curve, JaxCurve, _as_runtime_float64_ref, _install_curve_jax_contract, jnp
 
 __all__ = ["CurvePlanarFourier", "JaxCurvePlanarFourier"]
 
 
 def _normalized_quaternion(quaternion):
     norm_sq = jnp.sum(quaternion * quaternion)
-    inv_norm = jnp.where(norm_sq > 0.0, 1.0 / jnp.sqrt(norm_sq), 1.0)
+    zero = _as_runtime_float64_ref(0.0, reference=norm_sq)
+    one = _as_runtime_float64_ref(1.0, reference=norm_sq)
+    inv_norm = jnp.where(norm_sq > zero, one / jnp.sqrt(norm_sq), one)
     return quaternion * inv_norm
 
 
 def _quaternion_rotation_matrix(quaternion):
     q0, q1, q2, q3 = quaternion
-    return jnp.array(
-        [
-            [
-                1.0 - 2.0 * (q2 * q2 + q3 * q3),
-                2.0 * (q1 * q2 - q3 * q0),
-                2.0 * (q1 * q3 + q2 * q0),
-            ],
-            [
-                2.0 * (q1 * q2 + q3 * q0),
-                1.0 - 2.0 * (q1 * q1 + q3 * q3),
-                2.0 * (q2 * q3 - q1 * q0),
-            ],
-            [
-                2.0 * (q1 * q3 - q2 * q0),
-                2.0 * (q2 * q3 + q1 * q0),
-                1.0 - 2.0 * (q1 * q1 + q2 * q2),
-            ],
-        ],
-        dtype=jnp.float64,
+    one = _as_runtime_float64_ref(1.0, reference=quaternion)
+    two = _as_runtime_float64_ref(2.0, reference=quaternion)
+    return jnp.stack(
+        (
+            jnp.stack(
+                (
+                    one - two * (q2 * q2 + q3 * q3),
+                    two * (q1 * q2 - q3 * q0),
+                    two * (q1 * q3 + q2 * q0),
+                )
+            ),
+            jnp.stack(
+                (
+                    two * (q1 * q2 + q3 * q0),
+                    one - two * (q1 * q1 + q3 * q3),
+                    two * (q2 * q3 - q1 * q0),
+                )
+            ),
+            jnp.stack(
+                (
+                    two * (q1 * q3 - q2 * q0),
+                    two * (q2 * q3 + q1 * q0),
+                    one - two * (q1 * q1 + q2 * q2),
+                )
+            ),
+        )
     )
 
 
@@ -39,21 +49,29 @@ def curveplanarfourier_pure(dofs, quadpoints, order):
     rc_end = order + 1
     rs_end = rc_end + order
 
-    rc = dofs[:rc_end]
-    rs = dofs[rc_end:rs_end]
-    quaternion = _normalized_quaternion(dofs[rs_end : rs_end + 4])
-    center = dofs[rs_end + 4 :]
+    rc = jax.lax.slice_in_dim(dofs, 0, rc_end, axis=0)
+    rs = jax.lax.slice_in_dim(dofs, rc_end, rs_end, axis=0)
+    quaternion = _normalized_quaternion(
+        jax.lax.slice_in_dim(dofs, rs_end, rs_end + 4, axis=0)
+    )
+    center = jax.lax.slice_in_dim(dofs, rs_end + 4, dofs.shape[0], axis=0)
 
-    phi = 2.0 * jnp.pi * quadpoints
+    quadpoints = _as_runtime_float64_ref(quadpoints, reference=dofs)
+    phi = _as_runtime_float64_ref(2.0 * np.pi, reference=quadpoints) * quadpoints
     cosphi = jnp.cos(phi)
     sinphi = jnp.sin(phi)
+    zero = _as_runtime_float64_ref(0.0, reference=phi)
 
-    radius = rc[0] * jnp.ones_like(phi)
+    radius = jnp.broadcast_to(jnp.sum(jax.lax.slice_in_dim(rc, 0, 1, axis=0)), phi.shape)
     if order > 0:
-        modes = jnp.arange(1, order + 1, dtype=jnp.float64)
+        rc_tail = jax.lax.slice_in_dim(rc, 1, rc.shape[0], axis=0)
+        modes = _as_runtime_float64_ref(
+            np.arange(1, order + 1, dtype=np.float64),
+            reference=phi,
+        )
         phase = phi[:, None] * modes[None, :]
         radius = radius + jnp.sum(
-            rc[1:][None, :] * jnp.cos(phase) + rs[None, :] * jnp.sin(phase),
+            rc_tail[None, :] * jnp.cos(phase) + rs[None, :] * jnp.sin(phase),
             axis=1,
         )
 
@@ -61,7 +79,7 @@ def curveplanarfourier_pure(dofs, quadpoints, order):
         (
             radius * cosphi,
             radius * sinphi,
-            jnp.zeros_like(phi),
+            phi * zero,
         )
     )
     rotation = _quaternion_rotation_matrix(quaternion)
