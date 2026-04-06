@@ -1976,7 +1976,7 @@ class BoozerSurfaceJAX(Optimizable):
                 "residual": None,
                 "jacobian": None,
                 "hessian": None,
-                "iter": result["nit"],
+                "iter": int(_host_scalar(result["nit"], dtype=np.int64)),
                 "success": False,
                 "G": G_out,
                 "s": s,
@@ -1986,7 +1986,7 @@ class BoozerSurfaceJAX(Optimizable):
                 "vjp_groups": None,
                 "type": "ls",
                 "weight_inv_modB": weight_inv_modB,
-                "fun": float(np.asarray(result["fun"])),
+                "fun": float(_host_scalar(result["fun"])),
             }
             self.res = res
             self.need_to_run_code = False
@@ -2012,8 +2012,8 @@ class BoozerSurfaceJAX(Optimizable):
             "residual": residual_vec,
             "jacobian": result["grad"],
             "hessian": H,
-            "iter": result["nit"],
-            "success": bool(result["success"]),
+            "iter": int(_host_scalar(result["nit"], dtype=np.int64)),
+            "success": bool(_host_scalar(result["success"])),
             "G": G_out,
             "s": s,
             "iota": iota_out,
@@ -2150,11 +2150,11 @@ class BoozerSurfaceJAX(Optimizable):
         x_final = result["x"]
         exact_residual = res_fn(x_final)
         sdofs_final = x_final[:-2]
-        iota_final = float(x_final[-2])
-        G_final = float(x_final[-1])
+        iota_final = float(_host_scalar(x_final[-2]))
+        G_final = float(_host_scalar(x_final[-1]))
 
         if (
-            not bool(result["success"])
+            not bool(_host_scalar(result["success"]))
             or not _host_all_finite(x_final)
             or not _host_all_finite(exact_residual)
             or not _host_all_finite(result["jacobian"])
@@ -2163,7 +2163,7 @@ class BoozerSurfaceJAX(Optimizable):
                 "residual": None,
                 "fun": float(0.5 * np.mean(np.square(_host_numpy(exact_residual)))),
                 "jacobian": None,
-                "iter": result["nit"],
+                "iter": int(_host_scalar(result["nit"], dtype=np.int64)),
                 "success": False,
                 "G": G_final,
                 "s": s,
@@ -2216,10 +2216,10 @@ class BoozerSurfaceJAX(Optimizable):
 
         res = {
             "residual": r_raw,
-            "fun": float(0.5 * jnp.mean(jnp.square(exact_residual))),
+            "fun": float(0.5 * np.mean(np.square(_host_numpy(exact_residual)))),
             "jacobian": J,
-            "iter": result["nit"],
-            "success": bool(result["success"]),
+            "iter": int(_host_scalar(result["nit"], dtype=np.int64)),
+            "success": bool(_host_scalar(result["success"])),
             "G": G_final,
             "s": s,
             "iota": iota_final,
@@ -2393,7 +2393,7 @@ class BoozerSurfaceJAX(Optimizable):
             "vjp_groups": None,
             "type": result_type,
             "weight_inv_modB": traceable_result["weight_inv_modB"],
-            "fun": float(np.asarray(traceable_result["fun"])),
+            "fun": float(_host_scalar(traceable_result["fun"])),
         }
 
         if result_type == "exact":
