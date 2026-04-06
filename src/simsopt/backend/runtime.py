@@ -542,20 +542,23 @@ def _detect_active_jax_cuda_device_index() -> int | None:
     return None
 
 
-def _parse_nvidia_smi_memory_row(raw_row: str) -> tuple[int, int] | None:
+def _parse_nvidia_smi_indexed_value_row(raw_row: str) -> tuple[int, float] | None:
     fields = [field.strip() for field in raw_row.split(",")]
     if len(fields) != 2:
         return None
     try:
-        return int(float(fields[0])), int(float(fields[1]))
+        return int(float(fields[0])), float(fields[1])
     except ValueError:
         return None
 
 
-def _query_gpu_total_memory_mb_from_nvidia_smi(device_index: int | None = None) -> int | None:
+def _query_gpu_metric_mb_from_nvidia_smi(
+    metric_name: str,
+    device_index: int | None = None,
+) -> float | None:
     command = [
         "nvidia-smi",
-        "--query-gpu=index,memory.total",
+        f"--query-gpu=index,{metric_name}",
         "--format=csv,noheader,nounits",
     ]
     if device_index is not None:
@@ -573,15 +576,22 @@ def _query_gpu_total_memory_mb_from_nvidia_smi(device_index: int | None = None) 
     if not lines:
         return None
     for line in lines:
-        parsed = _parse_nvidia_smi_memory_row(line)
+        parsed = _parse_nvidia_smi_indexed_value_row(line)
         if parsed is None:
             continue
         index, value = parsed
         if device_index is not None and index != device_index:
             continue
-        if value > 0:
-            return value
+        if value >= 0:
+            return float(value)
     return None
+
+
+def _query_gpu_total_memory_mb_from_nvidia_smi(device_index: int | None = None) -> int | None:
+    value = _query_gpu_metric_mb_from_nvidia_smi("memory.total", device_index)
+    if value is None or value <= 0:
+        return None
+    return int(value)
 
 
 def _resolve_gpu_total_memory_mb(policy: BackendPolicy) -> tuple[int | None, str | None]:
@@ -1025,6 +1035,23 @@ def get_pairwise_penalty_chunk_size(mode: str | None = None) -> int:
     return get_chunk_tuning(mode).pairwise_penalty_chunk_size
 
 
+def get_active_cuda_device_index(mode: str | None = None) -> int | None:
+    """Return the active CUDA device index implied by env or JAX runtime state."""
+    policy = get_backend_policy(mode)
+    if policy.jax_platform != "cuda":
+        return None
+    return _detect_active_jax_cuda_device_index()
+
+
+def query_active_gpu_memory_mb(mode: str | None = None) -> float | None:
+    """Return coarse memory usage for the active CUDA device when available."""
+    policy = get_backend_policy(mode)
+    if policy.jax_platform != "cuda":
+        return None
+    device_index = get_active_cuda_device_index(mode)
+    return _query_gpu_metric_mb_from_nvidia_smi("memory.used", device_index)
+
+
 def get_sharding_strategy(mode: str | None = None) -> str:
     """Return the resolved sharding strategy label for the mode."""
     return get_sharding_tuning(mode).strategy
@@ -1262,6 +1289,34 @@ def should_eagerly_configure_jax() -> bool:
     return explicit_selector_present and is_jax_backend()
 
 
+def _expected_runtime_backend_names(jax_platform: str) -> frozenset[str]:
+    if jax_platform == "cuda":
+        return frozenset({"cuda", "gpu"})
+    return frozenset({jax_platform})
+
+
+def _validate_initialized_jax_runtime(jax_module, config: BackendConfig) -> None:
+    default_backend = getattr(jax_module, "default_backend", None)
+    if not callable(default_backend):
+        return
+    try:
+        active_backend = str(default_backend())
+    except Exception:
+        return
+    expected_backends = _expected_runtime_backend_names(config.jax_platform)
+    if active_backend in expected_backends:
+        return
+    message = (
+        f"Requested JAX platform {config.jax_platform!r} for backend mode "
+        f"{config.mode!r}, but the active JAX default backend is "
+        f"{active_backend!r}. Set backend environment variables before "
+        "importing or touching JAX devices."
+    )
+    if config.strict:
+        raise RuntimeError(message)
+    warnings.warn(message, RuntimeWarning, stacklevel=2)
+
+
 def apply_jax_runtime_config() -> None:
     """Apply the resolved JAX runtime settings to the active process."""
     config = get_backend_config()
@@ -1277,6 +1332,7 @@ def apply_jax_runtime_config() -> None:
         jax.config.update("jax_transfer_guard", config.transfer_guard)
     if config.compilation_cache_dir is not None:
         jax.config.update("jax_compilation_cache_dir", config.compilation_cache_dir)
+    _validate_initialized_jax_runtime(jax, config)
 
 
 def set_backend(

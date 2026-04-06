@@ -2113,7 +2113,7 @@ def test_weekly_tier5_manifest_targets_ondevice_benchmark_mode():
     assert "--benchmark-mode" in args
     assert manifest["runtime_contract"]["backend_mode"] == "jax_gpu_fast"
     assert manifest["runtime_contract"]["strict_backend"] is True
-    assert manifest["runtime_contract"]["transfer_guard"] == "disallow"
+    assert manifest["runtime_contract"]["transfer_guard"] == "log"
     assert manifest["performance_budget"]["profile"] == "stable_hardware_weekly"
     assert (
         manifest["performance_budget"]["tier2_stage2_e2e"]["min_outer_speedup_vs_cpu"]
@@ -2134,6 +2134,12 @@ def test_weekly_tier5_manifest_includes_grouped_adjoint_memory_probe_command():
 
     assert grouped_command["name"] == "grouped_adjoint_memory_probe"
     assert grouped_command["script"] == "benchmarks/grouped_adjoint_memory_probe.py"
+    assert grouped_command["env"] == {
+        "SIMSOPT_JAX_TRANSFER_GUARD": "disallow",
+        "JAX_COMPILATION_CACHE_DIR": (
+            "benchmark_artifacts/jax-compilation-cache/jax_gpu_fast-dense-audit"
+        ),
+    }
     assert grouped_command["args"][-2:] == [
         "--device-memory-profile-out",
         "benchmark_artifacts/grouped_adjoint_memory_profile.prof",
@@ -2147,7 +2153,9 @@ def test_weekly_tier5_workflow_sets_cache_and_ondevice_contract():
     assert "JAX_COMPILATION_CACHE_DIR" in workflow_text
     assert "SIMSOPT_BACKEND_MODE: jax_gpu_fast" in workflow_text
     assert 'SIMSOPT_BACKEND_STRICT: "1"' in workflow_text
+    assert "SIMSOPT_JAX_TRANSFER_GUARD: log" in workflow_text
     assert "SIMSOPT_JAX_TRANSFER_GUARD: disallow" in workflow_text
+    assert "jax_gpu_fast-dense-audit" in workflow_text
     assert "setuptools_scm" not in workflow_text
     assert "--optimizer-backend ondevice" in workflow_text
     assert "--benchmark-mode" in workflow_text

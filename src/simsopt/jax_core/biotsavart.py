@@ -310,26 +310,24 @@ def _point_chunk_reduce(points, chunk_kernel, chunk_size):
         return chunk_kernel(points)
 
     chunk_count = (point_count + chunk_size - 1) // chunk_size
-    first_chunk_points = _slice_point_chunk(points, 0, chunk_size)
+    padded_point_count = chunk_count * chunk_size
+    padded_points = _pad_axis0(points, padded_point_count)
+    first_chunk_points = _slice_point_chunk(padded_points, 0, chunk_size)
     first_result = chunk_kernel(first_chunk_points)
     padded_result = _tree_dynamic_update(
-        _tree_zeros_like_prefix(first_result, point_count),
+        _tree_zeros_like_prefix(first_result, padded_point_count),
         first_result,
         0,
     )
 
     def body(chunk_index: int, acc):
         start = chunk_index * chunk_size
-        safe_start = jnp.minimum(
-            _as_int32_scalar(start),
-            _as_int32_scalar(point_count - chunk_size),
-        )
-        chunk_points = _slice_point_chunk(points, safe_start, chunk_size)
+        chunk_points = _slice_point_chunk(padded_points, start, chunk_size)
         chunk_result = chunk_kernel(chunk_points)
-        return _tree_dynamic_update(acc, chunk_result, safe_start)
+        return _tree_dynamic_update(acc, chunk_result, start)
 
     padded_result = lax.fori_loop(1, chunk_count, body, padded_result)
-    return padded_result
+    return _tree_trim(padded_result, point_count)
 
 
 # ── Physics integrands ────────────────────────────────────────────────

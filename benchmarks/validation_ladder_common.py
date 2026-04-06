@@ -284,27 +284,10 @@ def peak_rss_mb() -> float:
 
 
 def query_gpu_memory_mb() -> float | None:
-    """Return coarse GPU memory usage from nvidia-smi when available."""
-    try:
-        result = subprocess.run(
-            [
-                "nvidia-smi",
-                "--query-gpu=memory.used",
-                "--format=csv,noheader,nounits",
-            ],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-    except (FileNotFoundError, subprocess.CalledProcessError):
-        return None
-    lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
-    if not lines:
-        return None
-    try:
-        return float(lines[0])
-    except ValueError:
-        return None
+    """Return coarse memory usage for the active CUDA device when available."""
+    from simsopt.config import query_active_gpu_memory_mb
+
+    return query_active_gpu_memory_mb()
 
 
 def _distributed_provenance_fields(config) -> dict[str, Any]:

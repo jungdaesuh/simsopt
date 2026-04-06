@@ -432,14 +432,7 @@ def _assert_gpu_chunk_autotune_probe(monkeypatch, *, env_value, expected_index, 
         monkeypatch.setenv("CUDA_VISIBLE_DEVICES", env_value)
     if fake_jax is not None:
         monkeypatch.setitem(sys.modules, "jax", fake_jax)
-    calls = []
-
-    def fake_run(cmd, *, check, capture_output, text):
-        del check, capture_output, text
-        calls.append(cmd)
-        return types.SimpleNamespace(stdout=stdout)
-
-    monkeypatch.setattr("subprocess.run", fake_run)
+    calls = _install_fake_nvidia_smi(monkeypatch, stdout)
     backend = _fresh_backend()
     tuning = backend.get_chunk_tuning()
 
@@ -448,6 +441,18 @@ def _assert_gpu_chunk_autotune_probe(monkeypatch, *, env_value, expected_index, 
     assert tuning.gpu_total_memory_mb == int(stdout.split(",", 1)[1].strip())
     assert calls
     assert calls[0][-2:] == ["-i", str(expected_index)]
+
+
+def _install_fake_nvidia_smi(monkeypatch, stdout):
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, *, check, capture_output, text):
+        del check, capture_output, text
+        calls.append(cmd)
+        return types.SimpleNamespace(stdout=stdout)
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+    return calls
 
 
 def test_chunk_tuning_autotunes_from_visible_cuda_device(monkeypatch):
@@ -470,6 +475,39 @@ def test_chunk_tuning_autotunes_from_active_jax_cuda_device(monkeypatch):
         stdout="2, 24576\n",
         fake_jax=types.SimpleNamespace(local_devices=lambda backend=None: [_FakeDevice()]),
     )
+
+
+def test_query_active_gpu_memory_mb_uses_visible_cuda_device(monkeypatch):
+    _clear_backend_env(monkeypatch)
+    monkeypatch.setenv("SIMSOPT_BACKEND_MODE", "jax_gpu_fast")
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "3,1")
+    calls = _install_fake_nvidia_smi(monkeypatch, "3, 512\n")
+    backend = _fresh_backend()
+
+    assert backend.get_active_cuda_device_index() == 3
+    assert backend.query_active_gpu_memory_mb() == pytest.approx(512.0)
+    assert calls
+    assert calls[0][-2:] == ["-i", "3"]
+
+
+def test_query_active_gpu_memory_mb_uses_active_jax_device_when_env_is_unset(monkeypatch):
+    class _FakeDevice:
+        local_hardware_id = 2
+
+    _clear_backend_env(monkeypatch)
+    monkeypatch.setenv("SIMSOPT_BACKEND_MODE", "jax_gpu_fast")
+    monkeypatch.setitem(
+        sys.modules,
+        "jax",
+        types.SimpleNamespace(local_devices=lambda backend=None: [_FakeDevice()]),
+    )
+    calls = _install_fake_nvidia_smi(monkeypatch, "2, 768\n")
+    backend = _fresh_backend()
+
+    assert backend.get_active_cuda_device_index() == 2
+    assert backend.query_active_gpu_memory_mb() == pytest.approx(768.0)
+    assert calls
+    assert calls[0][-2:] == ["-i", "2"]
 
 
 def test_chunk_tuning_rejects_nonpositive_gpu_memory_override(monkeypatch):
@@ -747,6 +785,41 @@ def test_apply_jax_runtime_config_applies_fast_mode_transfer_guard(monkeypatch):
     assert ("jax_enable_x64", True) in calls
     assert ("jax_debug_nans", False) in calls
     assert ("jax_transfer_guard", "log") in calls
+
+
+def test_apply_jax_runtime_config_warns_on_initialized_backend_mismatch(monkeypatch):
+    _clear_backend_env(monkeypatch)
+    backend = _fresh_backend()
+    calls: list[tuple[str, object]] = []
+    fake_jax = types.SimpleNamespace(
+        config=types.SimpleNamespace(
+            update=lambda name, value: calls.append((name, value))
+        ),
+        default_backend=lambda: "cpu",
+    )
+    monkeypatch.setitem(sys.modules, "jax", fake_jax)
+
+    backend.set_backend("jax_gpu_fast", configure_runtime=False)
+    with pytest.warns(RuntimeWarning, match="active JAX default backend is 'cpu'"):
+        backend.apply_jax_runtime_config()
+
+    assert ("jax_platforms", "cuda") in calls
+
+
+def test_apply_jax_runtime_config_raises_on_initialized_backend_mismatch_in_strict_mode(
+    monkeypatch,
+):
+    _clear_backend_env(monkeypatch)
+    backend = _fresh_backend()
+    fake_jax = types.SimpleNamespace(
+        config=types.SimpleNamespace(update=lambda name, value: None),
+        default_backend=lambda: "cpu",
+    )
+    monkeypatch.setitem(sys.modules, "jax", fake_jax)
+
+    backend.set_backend("jax_gpu_fast", strict=True, configure_runtime=False)
+    with pytest.raises(RuntimeError, match="active JAX default backend is 'cpu'"):
+        backend.apply_jax_runtime_config()
 
 
 def test_strict_fallback_helper_ignores_native_cpu(monkeypatch):

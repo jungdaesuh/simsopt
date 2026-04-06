@@ -21,7 +21,7 @@
   "runtime_contract": {
     "backend_mode": "jax_gpu_fast",
     "strict_backend": true,
-    "transfer_guard": "disallow",
+    "transfer_guard": "log",
     "compilation_cache": "required_persistent"
   },
   "performance_budget": {
@@ -57,6 +57,10 @@
     {
       "name": "grouped_adjoint_memory_probe",
       "script": "benchmarks/grouped_adjoint_memory_probe.py",
+      "env": {
+        "SIMSOPT_JAX_TRANSFER_GUARD": "disallow",
+        "JAX_COMPILATION_CACHE_DIR": "benchmark_artifacts/jax-compilation-cache/jax_gpu_fast-dense-audit"
+      },
       "args": [
         "--platform",
         "cuda",
