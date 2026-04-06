@@ -47,6 +47,7 @@ on:
       - 'benchmarks/manifests/stable_hardware_weekly_tier5.json'
       - 'envs/jax-0.9.2.yml'
       - 'scripts/jax_ci_contract.py'
+      - '.github/workflows/jax_gpu_parity.yml'
       - '.github/workflows/jax_benchmark_reporting.yml'
   pull_request:
     branches: [jax-port, master]
@@ -94,6 +95,7 @@ on:
       - 'benchmarks/manifests/stable_hardware_weekly_tier5.json'
       - 'envs/jax-0.9.2.yml'
       - 'scripts/jax_ci_contract.py'
+      - '.github/workflows/jax_gpu_parity.yml'
       - '.github/workflows/jax_benchmark_reporting.yml'
 
 jobs:

@@ -2161,6 +2161,16 @@ def test_gpu_parity_workflow_enforces_strict_transfer_guard_contract():
 
 def test_smoke_workflow_adds_cuda_e2e_target_lane_gate():
     workflow_text = _smoke_workflow_path().read_text(encoding="utf-8")
+    required_paths = (
+        "benchmarks/stage2_value_gradient_parity.py",
+        "benchmarks/single_stage_outer_loop_probe.py",
+        "benchmarks/grouped_adjoint_memory_probe.py",
+        "benchmarks/tier5_performance_characterization.py",
+        "benchmarks/render_benchmark_report.py",
+        "benchmarks/manifests/stable_hardware_weekly_tier5.json",
+        ".github/workflows/jax_gpu_parity.yml",
+        ".github/workflows/jax_benchmark_reporting.yml",
+    )
 
     _assert_named_benchmark_env_bootstrap(workflow_text)
     assert "jax-gpu-e2e:" in workflow_text
@@ -2173,15 +2183,7 @@ def test_smoke_workflow_adds_cuda_e2e_target_lane_gate():
     assert "benchmarks/single_stage_init_parity.py" in workflow_text
     assert "--platform cuda" in workflow_text
     assert "--optimizer-backend ondevice" in workflow_text
-    for required_path in (
-        "benchmarks/stage2_value_gradient_parity.py",
-        "benchmarks/single_stage_outer_loop_probe.py",
-        "benchmarks/grouped_adjoint_memory_probe.py",
-        "benchmarks/tier5_performance_characterization.py",
-        "benchmarks/render_benchmark_report.py",
-        "benchmarks/manifests/stable_hardware_weekly_tier5.json",
-        ".github/workflows/jax_benchmark_reporting.yml",
-    ):
+    for required_path in required_paths:
         assert required_path in workflow_text
 
 
