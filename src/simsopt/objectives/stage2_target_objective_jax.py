@@ -115,21 +115,6 @@ def _as_objective_dofs(value) -> jax.Array:
     return _as_jax_float64(value)
 
 
-def _as_host_float64(value) -> np.ndarray:
-    return np.asarray(jax.device_get(value), dtype=np.float64)
-
-
-def _hostify_tree(value):
-    def _hostify_leaf(leaf):
-        if isinstance(leaf, jax.Array):
-            return _as_host_float64(leaf)
-        if isinstance(leaf, np.ndarray):
-            return np.asarray(leaf, dtype=np.float64)
-        return leaf
-
-    return jax.tree_util.tree_map(_hostify_leaf, value)
-
-
 def _runtimeify_tree(value):
     def _runtimeify_leaf(leaf):
         if isinstance(leaf, jax.Array):

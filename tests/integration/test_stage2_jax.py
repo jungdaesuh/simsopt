@@ -480,6 +480,20 @@ def _build_stage2_target_objective_contract_case(
     return objective, target_bundle
 
 
+@contextmanager
+def _forbid_stage2_host_materialization(monkeypatch, message: str):
+    def _reject_device_get(*_args, **_kwargs):
+        raise AssertionError(message)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            stage2_target_objective_module.jax,
+            "device_get",
+            _reject_device_get,
+        )
+        yield
+
+
 def _closure_has_jax_array_leaf(fn) -> bool:
     inspect_target = inspect.unwrap(fn)
     if not inspect.isfunction(inspect_target):
@@ -3574,31 +3588,19 @@ class TestStage2OptimizerContract:
         self,
         monkeypatch,
     ):
-        def _reject_host_snapshot(*_args, **_kwargs):
-            raise AssertionError(
-                "Stage 2 target-objective build should keep immutable runtime "
-                "state in JAX form rather than hostifying it."
-            )
+        with _forbid_stage2_host_materialization(
+            monkeypatch,
+            "Stage 2 target-objective build should keep immutable runtime "
+            "state in JAX form rather than hostifying it.",
+        ):
+            objective, target_bundle = _build_stage2_target_objective_contract_case()
+            dofs = jax.device_put(np.asarray(objective.x, dtype=np.float64))
 
-        monkeypatch.setattr(
-            stage2_target_objective_module,
-            "_hostify_tree",
-            _reject_host_snapshot,
-        )
-        monkeypatch.setattr(
-            stage2_target_objective_module,
-            "_as_host_float64",
-            _reject_host_snapshot,
-        )
-
-        objective, target_bundle = _build_stage2_target_objective_contract_case()
-        dofs = jax.device_put(np.asarray(objective.x, dtype=np.float64))
-
-        value = target_bundle.objective(dofs)
-        assert target_bundle.value_and_grad is not None
-        value_vg, grad_vg = target_bundle.value_and_grad(dofs)
-        assert target_bundle.least_squares_residual is not None
-        residual = target_bundle.least_squares_residual(dofs)
+            value = target_bundle.objective(dofs)
+            assert target_bundle.value_and_grad is not None
+            value_vg, grad_vg = target_bundle.value_and_grad(dofs)
+            assert target_bundle.least_squares_residual is not None
+            residual = target_bundle.least_squares_residual(dofs)
 
         assert np.isfinite(float(value))
         assert np.isfinite(float(value_vg))
@@ -3612,31 +3614,19 @@ class TestStage2OptimizerContract:
         objective, target_bundle = _build_stage2_target_objective_contract_case()
         dofs = jax.device_put(np.asarray(objective.x, dtype=np.float64))
 
-        def _reject_host_snapshot(*_args, **_kwargs):
-            raise AssertionError(
-                "Stage 2 ondevice objective should not hostify immutable state "
-                "inside the compiled hot path."
-            )
-
-        monkeypatch.setattr(
-            stage2_target_objective_module,
-            "_hostify_tree",
-            _reject_host_snapshot,
-        )
-        monkeypatch.setattr(
-            stage2_target_objective_module,
-            "_as_host_float64",
-            _reject_host_snapshot,
-        )
-
-        value = target_bundle.objective(dofs)
-        assert target_bundle.value_and_grad is not None
-        value_vg, grad_vg = target_bundle.value_and_grad(dofs)
-        assert target_bundle.least_squares_residual is not None
-        residual = target_bundle.least_squares_residual(dofs)
-        assert target_bundle.raw_terms is not None
-        raw_terms = target_bundle.raw_terms(dofs)
-        grad = jax.grad(target_bundle.objective)(dofs)
+        with _forbid_stage2_host_materialization(
+            monkeypatch,
+            "Stage 2 ondevice objective should not hostify immutable state "
+            "inside the compiled hot path.",
+        ):
+            value = target_bundle.objective(dofs)
+            assert target_bundle.value_and_grad is not None
+            value_vg, grad_vg = target_bundle.value_and_grad(dofs)
+            assert target_bundle.least_squares_residual is not None
+            residual = target_bundle.least_squares_residual(dofs)
+            assert target_bundle.raw_terms is not None
+            raw_terms = target_bundle.raw_terms(dofs)
+            grad = jax.grad(target_bundle.objective)(dofs)
 
         assert np.isfinite(float(value))
         assert np.isfinite(float(value_vg))
