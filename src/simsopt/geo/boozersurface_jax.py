@@ -844,11 +844,7 @@ def _build_ls_group_vjp_callback(booz_surf, iota, G, weight_inv_modB=True):
             coil_arrays,
             coil_indices,
         ):
-
-            def directional_of_group(updated_group_array):
-                return group_runner(updated_group_array, lm)
-
-            yield jax.grad(directional_of_group)(group_array), group_index_list
+            yield jax.grad(group_runner, argnums=0)(group_array, lm), group_index_list
 
     return vjp_groups
 
