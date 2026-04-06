@@ -1088,7 +1088,7 @@ def _build_traceable_objective_state(booz_jax, bs_jax, iota_target):
 
     if booz_jax.boozer_type == "ls":
         objective_method = booz_jax._resolve_optimizer_method()
-        if objective_method not in {"bfgs-ondevice", "lbfgs-ondevice"}:
+        if objective_method not in {"bfgs-ondevice", "lbfgs-ondevice", "lm-ondevice"}:
             raise RuntimeError(
                 "make_traceable_objective() requires optimizer_backend='ondevice'."
             )

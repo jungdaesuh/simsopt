@@ -123,6 +123,49 @@ def _patch_matrix_free_exact_linear_solver(monkeypatch, *, A):
     return dense_calls
 
 
+def _patch_matrix_free_lm_solver(monkeypatch, *, A):
+    dense_calls = []
+    gmres_calls = []
+
+    def fake_gmres(_flat_residual_fn, _x, grad, _pullback, *, damping, tol):
+        del _flat_residual_fn, _x, _pullback, tol
+        gmres_calls.append(True)
+        hessian = A.T @ A + damping * jnp.eye(A.shape[1], dtype=A.dtype)
+        step = jnp.linalg.solve(hessian, grad)
+        return step, grad - hessian @ step, None
+
+    def fake_materialize(flat_residual_fn, x):
+        dense_calls.append(True)
+        residual = flat_residual_fn(x)
+        jacobian = A
+        grad, hessian = _opt._least_squares_linearization_from_jacobian(
+            residual,
+            jacobian,
+        )
+        return residual, jacobian, grad, hessian
+
+    monkeypatch.setattr(_opt, "_gmres_solve_least_squares_system", fake_gmres)
+    monkeypatch.setattr(
+        _opt,
+        "_materialize_dense_least_squares_linearization",
+        fake_materialize,
+    )
+    return dense_calls, gmres_calls
+
+
+def _assert_linear_lm_result(result, *, A, b):
+    np.testing.assert_allclose(
+        result["x"],
+        np.linalg.solve(np.asarray(A), np.asarray(b)),
+        atol=1e-10,
+    )
+    np.testing.assert_allclose(
+        result["residual_jacobian"],
+        np.asarray(A),
+        atol=1e-12,
+    )
+
+
 def _assert_lu_is_not_called(message):
     raise AssertionError(message)
 
@@ -1354,6 +1397,83 @@ class TestBoozerSurfaceJAXClass:
         np.testing.assert_allclose(result.x["iota"], 0.25)
         np.testing.assert_allclose(result.jac["surface"], np.zeros(2), atol=1e-10)
         np.testing.assert_allclose(result.jac["iota"], 0.0, atol=1e-10)
+
+    def test_jax_least_squares_pytree_hot_path_skips_flattening_adapter(
+        self,
+        monkeypatch,
+    ):
+        def residual_fn(state):
+            return jnp.asarray(
+                [
+                    state["surface"][0] - 2.0,
+                    state["surface"][1] + 1.0,
+                    state["iota"] - 0.25,
+                ],
+                dtype=jnp.float64,
+            )
+
+        x0 = {
+            "surface": jnp.asarray([5.0, 3.0], dtype=jnp.float64),
+            "iota": jnp.asarray(0.0, dtype=jnp.float64),
+        }
+
+        monkeypatch.setattr(
+            _opt,
+            "_prepare_optimizer_callable_inputs",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError(
+                    "LM least-squares hot path should not route through the "
+                    "flat-vector pytree adapter."
+                )
+            ),
+        )
+
+        result = jax_least_squares(residual_fn, x0, method="lm", maxiter=25, tol=1e-12)
+
+        assert result.success is True
+        np.testing.assert_allclose(result.x["surface"], np.asarray([2.0, -1.0]))
+        np.testing.assert_allclose(result.x["iota"], 0.25)
+
+    def test_levenberg_marquardt_materializes_dense_linearization_once_at_final_iterate(
+        self,
+        monkeypatch,
+    ):
+        A = jnp.array([[3.0, 1.0], [1.0, 4.0]], dtype=jnp.float64)
+        b = jnp.array([5.0, 7.0], dtype=jnp.float64)
+        dense_calls, gmres_calls = _patch_matrix_free_lm_solver(monkeypatch, A=A)
+
+        def residual(x):
+            return A @ x - b
+
+        result = _opt.levenberg_marquardt(residual, jnp.zeros(2), maxiter=25, tol=1e-14)
+
+        assert gmres_calls
+        assert len(dense_calls) == 1
+        _assert_linear_lm_result(result, A=A, b=b)
+        assert result["success"]
+
+    def test_levenberg_marquardt_traceable_materializes_dense_linearization_once_at_final_iterate(
+        self,
+        monkeypatch,
+    ):
+        A = jnp.array([[3.0, 1.0], [1.0, 4.0]], dtype=jnp.float64)
+        b = jnp.array([5.0, 7.0], dtype=jnp.float64)
+        dense_calls, gmres_calls = _patch_matrix_free_lm_solver(monkeypatch, A=A)
+
+        def residual(x):
+            return A @ x - b
+
+        result = _opt.levenberg_marquardt_traceable(
+            residual,
+            jnp.zeros(2),
+            maxiter=25,
+            tol=1e-14,
+        )
+
+        assert gmres_calls
+        assert len(dense_calls) == 1
+        _assert_linear_lm_result(result, A=A, b=b)
+        assert bool(result["success"])
 
     def test_jax_minimize_rejects_explicit_value_grad_fallback_in_strict_mode(
         self,

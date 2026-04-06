@@ -15,7 +15,11 @@ import jax.numpy as jnp
 import numpy as np
 from jax import lax
 
-from ..optimizer_jax import PRIVATE_OPTIMIZER_JAX_VERSION, _x64_enabled
+from ..optimizer_jax import (
+    PRIVATE_OPTIMIZER_JAX_VERSION,
+    _x64_enabled,
+    private_optimizer_runtime_is_supported,
+)
 
 _dot = partial(jnp.dot, precision=lax.Precision.HIGHEST)
 _einsum = partial(jnp.einsum, precision=lax.Precision.HIGHEST)
@@ -110,11 +114,11 @@ def _promote_dtypes_inexact(*args):
 def _require_private_optimizer_runtime(x0):
     import jax
 
-    if jax.__version__ != PRIVATE_OPTIMIZER_JAX_VERSION:
+    if not private_optimizer_runtime_is_supported(jax.__version__):
         raise RuntimeError(
-            f"On-device optimizer is validated on JAX "
+            f"On-device optimizer requires JAX >= "
             f"{PRIVATE_OPTIMIZER_JAX_VERSION}; found {jax.__version__}. "
-            "Use envs/jax-0.9.2.yml for the supported runtime or "
+            "Use a supported JAX runtime or "
             "fall back to optimizer_backend='scipy'."
         )
     if not _x64_enabled():

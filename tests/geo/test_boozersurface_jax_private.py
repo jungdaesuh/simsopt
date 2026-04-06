@@ -132,19 +132,19 @@ PRIVATE_LIMITED_MEMORY_REASON = (
     f"{PRIVATE_OPTIMIZER_JAX_VERSION} runtime."
 )
 REQUIRES_PRIVATE_OPTIMIZER_RUNTIME = pytest.mark.skipif(
-    jax.__version__ != PRIVATE_OPTIMIZER_JAX_VERSION,
+    not _opt.private_optimizer_runtime_is_supported(jax.__version__),
     reason=PRIVATE_RUNTIME_REASON,
 )
 REQUIRES_PRIVATE_LBFGS_RUNTIME = pytest.mark.skipif(
-    jax.__version__ != PRIVATE_OPTIMIZER_JAX_VERSION,
+    not _opt.private_optimizer_runtime_is_supported(jax.__version__),
     reason=PRIVATE_LBFGS_RUNTIME_REASON,
 )
 REQUIRES_PRIVATE_LBFGS_BUDGET_RUNTIME = pytest.mark.skipif(
-    jax.__version__ != PRIVATE_OPTIMIZER_JAX_VERSION,
+    not _opt.private_optimizer_runtime_is_supported(jax.__version__),
     reason=PRIVATE_LBFGS_BUDGET_REASON,
 )
 REQUIRES_PRIVATE_LIMITED_MEMORY_RUNTIME = pytest.mark.skipif(
-    jax.__version__ != PRIVATE_OPTIMIZER_JAX_VERSION,
+    not _opt.private_optimizer_runtime_is_supported(jax.__version__),
     reason=PRIVATE_LIMITED_MEMORY_REASON,
 )
 

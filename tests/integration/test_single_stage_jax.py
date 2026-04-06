@@ -112,7 +112,11 @@ from simsopt.geo.boozersurface_jax import (  # noqa: E402
     _make_ls_penalty_objective,
     _select_exact_residual_fn,
 )
-from simsopt.geo.optimizer_jax import PRIVATE_OPTIMIZER_JAX_VERSION, jax_minimize  # noqa: E402
+from simsopt.geo.optimizer_jax import (  # noqa: E402
+    PRIVATE_OPTIMIZER_JAX_VERSION,
+    jax_minimize,
+    private_optimizer_runtime_is_supported,
+)
 from simsopt.geo.surfaceobjectives_jax import (  # noqa: E402
     BoozerResidualJAX,
     IotasJAX,
@@ -3566,8 +3570,8 @@ class TestOnDeviceBackendIntegration:
     """Exercise the real on-device LS solve against simsoptpp-backed fixtures."""
 
     @pytest.mark.skipif(
-        jax.__version__ != PRIVATE_OPTIMIZER_JAX_VERSION,
-        reason=f"On-device backend integration requires the validated JAX {PRIVATE_OPTIMIZER_JAX_VERSION} runtime.",
+        not private_optimizer_runtime_is_supported(jax.__version__),
+        reason=f"On-device backend integration requires JAX >= {PRIVATE_OPTIMIZER_JAX_VERSION}.",
     )
     @pytest.mark.parametrize("optimizer_backend", ["ondevice", "hybrid"])
     @pytest.mark.parametrize("pass_explicit_G", [True, False])
@@ -4692,6 +4696,25 @@ class TestTraceableObjective:
         assert "pure_callback" not in str(jaxpr), (
             "Traceable objective still routes through jax.pure_callback"
         )
+
+    def test_traceable_objective_accepts_lm_ondevice_inner_solve(self, boozer_setup):
+        """The single-stage target lane must allow the LM Boozer inner solve."""
+        (_, _, _, _, bs_jax, _, booz_jax, _) = boozer_setup
+        booz_jax.options["least_squares_algorithm"] = "lm"
+        runtime_bundle, coil_dofs = self._make_traceable_runtime_bundle(
+            bs_jax,
+            booz_jax,
+            include_profile_suite=False,
+        )
+
+        value = runtime_bundle["objective"](coil_dofs)
+        value_vg, grad = runtime_bundle["value_and_grad"](coil_dofs)
+        jaxpr = jax.make_jaxpr(runtime_bundle["objective"])(coil_dofs)
+
+        assert np.isfinite(float(value))
+        np.testing.assert_allclose(float(value_vg), float(value), rtol=0.0, atol=0.0)
+        assert np.all(np.isfinite(np.asarray(grad)))
+        assert jaxpr is not None
 
     def test_traceable_objective_does_not_reenter_host_snapshot_after_build(
         self,

@@ -368,14 +368,63 @@ def _resolve_chunk_autotune_enabled(policy: BackendPolicy) -> bool:
     return policy.backend == "jax" and policy.jax_platform == "cuda"
 
 
-def _query_gpu_total_memory_mb_from_nvidia_smi() -> int | None:
+def _parse_visible_cuda_device_index() -> int | None:
+    raw_value = _optional_env_value("CUDA_VISIBLE_DEVICES")
+    if raw_value is None:
+        return None
+    first = raw_value.split(",", 1)[0].strip()
+    if not first or first in {"-1", "none", "NoDevFiles"}:
+        return None
+    try:
+        value = int(first)
+    except ValueError:
+        return None
+    return value if value >= 0 else None
+
+
+def _detect_active_jax_cuda_device_index() -> int | None:
+    env_index = _parse_visible_cuda_device_index()
+    if env_index is not None:
+        return env_index
+    try:
+        import jax
+    except ImportError:
+        return None
+    try:
+        devices = jax.local_devices(backend="gpu")
+    except Exception:
+        return None
+    if not devices:
+        return None
+    device = devices[0]
+    for attr in ("local_hardware_id", "id"):
+        value = getattr(device, attr, None)
+        if isinstance(value, int) and value >= 0:
+            return value
+    return None
+
+
+def _parse_nvidia_smi_memory_row(raw_row: str) -> tuple[int, int] | None:
+    fields = [field.strip() for field in raw_row.split(",")]
+    if len(fields) != 2:
+        return None
+    try:
+        return int(float(fields[0])), int(float(fields[1]))
+    except ValueError:
+        return None
+
+
+def _query_gpu_total_memory_mb_from_nvidia_smi(device_index: int | None = None) -> int | None:
+    command = [
+        "nvidia-smi",
+        "--query-gpu=index,memory.total",
+        "--format=csv,noheader,nounits",
+    ]
+    if device_index is not None:
+        command.extend(["-i", str(device_index)])
     try:
         result = subprocess.run(
-            [
-                "nvidia-smi",
-                "--query-gpu=memory.total",
-                "--format=csv,noheader,nounits",
-            ],
+            command,
             check=True,
             capture_output=True,
             text=True,
@@ -385,11 +434,16 @@ def _query_gpu_total_memory_mb_from_nvidia_smi() -> int | None:
     lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
     if not lines:
         return None
-    try:
-        value = int(float(lines[0]))
-    except ValueError:
-        return None
-    return value if value > 0 else None
+    for line in lines:
+        parsed = _parse_nvidia_smi_memory_row(line)
+        if parsed is None:
+            continue
+        index, value = parsed
+        if device_index is not None and index != device_index:
+            continue
+        if value > 0:
+            return value
+    return None
 
 
 def _resolve_gpu_total_memory_mb(policy: BackendPolicy) -> tuple[int | None, str | None]:
@@ -400,10 +454,13 @@ def _resolve_gpu_total_memory_mb(policy: BackendPolicy) -> tuple[int | None, str
         if env_value == 0:
             raise ValueError(f"{_GPU_MEMORY_TOTAL_MB_ENV} must be > 0 when set")
         return env_value, _GPU_MEMORY_TOTAL_MB_ENV
-    detected = _query_gpu_total_memory_mb_from_nvidia_smi()
+    device_index = _detect_active_jax_cuda_device_index()
+    detected = _query_gpu_total_memory_mb_from_nvidia_smi(device_index)
     if detected is None:
         return None, None
-    return detected, "nvidia-smi"
+    if device_index is None:
+        return detected, "nvidia-smi"
+    return detected, f"nvidia-smi[{device_index}]"
 
 
 def _resolve_autotuned_chunk_sizes(

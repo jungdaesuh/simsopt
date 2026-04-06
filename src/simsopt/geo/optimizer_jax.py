@@ -11,10 +11,10 @@ Least-squares methods:
   - ``method="lm-ondevice"``: trace-safe Levenberg-Marquardt for
     residual-vector objectives on the target lane.
 
-Transitional private method (validated on JAX 0.9.2):
+Transitional private method (minimum supported JAX floor 0.9.2):
   - ``method="bfgs-hybrid"``: SciPy BFGS prefix, then JAX on-device BFGS.
 
-Target private methods (validated on JAX 0.9.2):
+Target private methods (minimum supported JAX floor 0.9.2):
   - ``method="bfgs-ondevice"``: JAX on-device BFGS.
   - ``method="lbfgs-ondevice"``: JAX on-device L-BFGS.
 
@@ -30,6 +30,7 @@ well; both paths use public JAX APIs.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import re
 from typing import Callable
 
 import numpy as np
@@ -47,6 +48,7 @@ from ..backend import raise_if_strict_jax_fallback
 __all__ = [
     "ContinuousOptimizerContract",
     "PRIVATE_OPTIMIZER_JAX_VERSION",
+    "private_optimizer_runtime_is_supported",
     "VALID_LEAST_SQUARES_ALGORITHMS",
     "VALID_OPTIMIZER_BACKENDS",
     "TARGET_X64_REQUIRED_OPTIMIZER_BACKENDS",
@@ -89,6 +91,17 @@ _STRICT_REFERENCE_LEAST_SQUARES_DETAIL = (
     "the host-side reference least-squares optimizer lane"
 )
 _STRICT_HYBRID_OPTIMIZER_DETAIL = "the transitional SciPy-prefix hybrid optimizer lane"
+
+
+def _version_key(raw_version: str) -> tuple[int, ...]:
+    base = raw_version.split("+", 1)[0]
+    parts = re.findall(r"\d+", base)
+    return tuple(int(part) for part in parts)
+
+
+def private_optimizer_runtime_is_supported(version: str) -> bool:
+    """Return True when the runtime meets the minimum supported JAX floor."""
+    return _version_key(version) >= _version_key(PRIVATE_OPTIMIZER_JAX_VERSION)
 
 
 @dataclass(frozen=True)
@@ -476,12 +489,146 @@ def _least_squares_cost(residual):
     return _device_scalar(0.5, dtype=residual.dtype) * jnp.vdot(residual, residual).real
 
 
-def _least_squares_linearization(residual, jacobian):
+def _least_squares_linearization_from_jacobian(residual, jacobian):
     residual = jnp.ravel(jnp.asarray(residual))
     jacobian = jnp.asarray(jacobian)
     gradient = jacobian.T @ residual
     hessian = jacobian.T @ jacobian
     return gradient, hessian
+
+
+def _require_tree_first_leaf(tree, *, detail):
+    leaves = jax.tree_util.tree_leaves(tree)
+    if not leaves:
+        raise ValueError(detail)
+    return jnp.asarray(leaves[0])
+
+
+def _tree_vdot_real(lhs, rhs):
+    lhs_leaves, lhs_tree = jax.tree_util.tree_flatten(lhs)
+    rhs_leaves, rhs_tree = jax.tree_util.tree_flatten(rhs)
+    if lhs_tree != rhs_tree:
+        raise ValueError("Tree dot products require matching pytree structures.")
+    if not lhs_leaves:
+        return _device_scalar(0.0)
+    dtype = jnp.result_type(
+        *[jnp.asarray(leaf).dtype for leaf in lhs_leaves + rhs_leaves]
+    )
+    total = jnp.asarray(0.0, dtype=dtype)
+    for lhs_leaf, rhs_leaf in zip(lhs_leaves, rhs_leaves):
+        total = total + jnp.vdot(
+            jnp.ravel(jnp.asarray(lhs_leaf)),
+            jnp.ravel(jnp.asarray(rhs_leaf)),
+        ).real.astype(dtype)
+    return total
+
+
+def _tree_inf_norm(tree):
+    leaves = jax.tree_util.tree_leaves(tree)
+    if not leaves:
+        return _device_scalar(0.0)
+    dtype = jnp.result_type(*[jnp.asarray(leaf).dtype for leaf in leaves])
+    max_value = jnp.asarray(0.0, dtype=dtype)
+    for leaf in leaves:
+        leaf = jnp.ravel(jnp.asarray(leaf))
+        leaf_norm = jnp.asarray(0.0, dtype=dtype)
+        if leaf.size:
+            leaf_norm = jnp.max(jnp.abs(leaf)).astype(dtype)
+        max_value = jnp.maximum(max_value, leaf_norm)
+    return max_value
+
+
+def _tree_all_finite(tree):
+    leaves = jax.tree_util.tree_leaves(tree)
+    finite = jnp.asarray(True)
+    for leaf in leaves:
+        finite = finite & jnp.all(jnp.isfinite(jnp.asarray(leaf)))
+    return finite
+
+
+def _tree_select(pred, candidate, current):
+    return jax.tree_util.tree_map(
+        lambda cand, curr: lax.select(pred, jnp.asarray(cand), jnp.asarray(curr)),
+        candidate,
+        current,
+    )
+
+
+def _flattened_residual_output(residual_fn):
+    def wrapped(x):
+        return jnp.ravel(jnp.asarray(residual_fn(x)))
+
+    return wrapped
+
+
+def _least_squares_gradient_state(flat_residual_fn, x):
+    residual, pullback = jax.vjp(flat_residual_fn, x)
+    grad = pullback(residual)[0]
+    cost = _least_squares_cost(residual)
+    grad_norm_inf = _tree_inf_norm(grad)
+    return residual, cost, grad, grad_norm_inf, pullback
+
+
+def _least_squares_matvec(flat_residual_fn, x, pullback, tangent):
+    jvp_residual = jax.jvp(flat_residual_fn, (x,), (tangent,))[1]
+    return pullback(jvp_residual)[0]
+
+
+def _gmres_solve_least_squares_system(
+    flat_residual_fn,
+    x,
+    grad,
+    pullback,
+    *,
+    damping,
+    tol,
+):
+    grad_leaves = jax.tree_util.tree_leaves(grad)
+    first_grad_leaf = _require_tree_first_leaf(
+        grad,
+        detail="Least-squares gradients must contain at least one leaf.",
+    )
+    dtype = first_grad_leaf.dtype
+    n = sum(int(np.asarray(jnp.asarray(leaf).size)) for leaf in grad_leaves)
+    restart = max(5, min(n, 50))
+    maxiter = max(10, min(4 * n, 200))
+    damping_value = jnp.asarray(damping, dtype=dtype)
+
+    def matvec(v):
+        jt_j_v = _least_squares_matvec(flat_residual_fn, x, pullback, v)
+        return jax.tree_util.tree_map(
+            lambda jt_j_leaf, v_leaf: jt_j_leaf + damping_value * v_leaf,
+            jt_j_v,
+            v,
+        )
+
+    step, _ = gmres(
+        matvec,
+        grad,
+        tol=tol,
+        atol=0.0,
+        restart=restart,
+        maxiter=maxiter,
+    )
+    residual = jax.tree_util.tree_map(
+        lambda grad_leaf, matvec_leaf: grad_leaf - matvec_leaf,
+        grad,
+        matvec(step),
+    )
+    return step, residual, matvec
+
+
+def _materialize_dense_least_squares_linearization(flat_residual_fn, x):
+    flat_x, unravel = ravel_pytree(x)
+    flat_x = jnp.asarray(flat_x)
+    jvp_fn = _jacobian_vector_product_fn(lambda flat: flat_residual_fn(unravel(flat)))
+    residual = flat_residual_fn(x)
+    jacobian = _materialize_dense_jacobian(jvp_fn, flat_x)
+    gradient, hessian = _least_squares_linearization_from_jacobian(
+        residual,
+        jacobian,
+    )
+    return residual, jacobian, gradient, hessian
 
 
 def _clip_lm_damping(damping, *, dtype):
@@ -503,33 +650,49 @@ def _lm_defaults(dtype):
     }
 
 
-def _lm_iteration(
-    residual_fn,
-    jacobian_fn,
-    state,
-    *,
-    tol,
-):
-    defaults = _lm_defaults(state["x"].dtype)
-    damping = _clip_lm_damping(state["damping"], dtype=state["x"].dtype)
-    damped_hessian = state["hessian"] + damping * jnp.eye(
-        state["hessian"].shape[0],
-        dtype=state["hessian"].dtype,
+def _lm_iteration(flat_residual_fn, state, *, tol):
+    state_dtype = _require_tree_first_leaf(
+        state["x"],
+        detail="Least-squares state x must contain at least one leaf.",
+    ).dtype
+    defaults = _lm_defaults(state_dtype)
+    damping = _clip_lm_damping(state["damping"], dtype=state_dtype)
+    linear_tol = jnp.minimum(
+        _device_scalar(1.0e-10, dtype=state["cost"].dtype),
+        jnp.maximum(
+            jnp.asarray(tol, dtype=state["cost"].dtype)
+            * _device_scalar(0.1, dtype=state["cost"].dtype),
+            _device_scalar(1.0e-14, dtype=state["cost"].dtype),
+        ),
     )
-    step = jnp.linalg.solve(damped_hessian, state["grad"])
-    x_candidate = state["x"] - step
-    residual_candidate = residual_fn(x_candidate)
-    jacobian_candidate = jacobian_fn(x_candidate)
-    cost_candidate = _least_squares_cost(residual_candidate)
-    grad_candidate, hessian_candidate = _least_squares_linearization(
-        residual_candidate,
-        jacobian_candidate,
+    _, _, _, _, current_pullback = _least_squares_gradient_state(
+        flat_residual_fn,
+        state["x"],
     )
-    grad_norm_candidate = jnp.linalg.norm(grad_candidate, ord=jnp.inf)
-
-    predicted_reduction = _device_scalar(0.5, dtype=state["x"].dtype) * jnp.dot(
+    step, linear_residual, _ = _gmres_solve_least_squares_system(
+        flat_residual_fn,
+        state["x"],
+        state["grad"],
+        current_pullback,
+        damping=damping,
+        tol=linear_tol,
+    )
+    x_candidate = jax.tree_util.tree_map(
+        lambda x_leaf, step_leaf: x_leaf - step_leaf,
+        state["x"],
         step,
-        damping * step + state["grad"],
+    )
+    residual_candidate, cost_candidate, grad_candidate, grad_norm_candidate, _ = (
+        _least_squares_gradient_state(flat_residual_fn, x_candidate)
+    )
+
+    predicted_reduction = _device_scalar(
+        0.5,
+        dtype=state["cost"].dtype,
+    ) * (
+        jnp.asarray(damping, dtype=state["cost"].dtype)
+        * _tree_vdot_real(step, step)
+        + _tree_vdot_real(step, state["grad"])
     )
     actual_reduction = state["cost"] - cost_candidate
     ratio = actual_reduction / jnp.maximum(
@@ -537,12 +700,11 @@ def _lm_iteration(
         defaults["predicted_floor"],
     )
     finite_candidate = (
-        jnp.all(jnp.isfinite(x_candidate))
+        _tree_all_finite(x_candidate)
         & jnp.all(jnp.isfinite(residual_candidate))
-        & jnp.all(jnp.isfinite(jacobian_candidate))
         & jnp.isfinite(cost_candidate)
-        & jnp.all(jnp.isfinite(grad_candidate))
-        & jnp.all(jnp.isfinite(hessian_candidate))
+        & _tree_all_finite(grad_candidate)
+        & _tree_all_finite(linear_residual)
     )
     accepted = finite_candidate & (actual_reduction > defaults["accept_threshold"])
 
@@ -559,25 +721,19 @@ def _lm_iteration(
     )
     next_damping = lax.cond(
         accepted,
-        lambda _: _clip_lm_damping(damping_after_accept, dtype=state["x"].dtype),
+        lambda _: _clip_lm_damping(damping_after_accept, dtype=state_dtype),
         lambda _: _clip_lm_damping(
             damping * defaults["expand_factor"],
-            dtype=state["x"].dtype,
+            dtype=state_dtype,
         ),
         operand=None,
     )
 
     return {
-        "x": lax.select(accepted, x_candidate, state["x"]),
+        "x": _tree_select(accepted, x_candidate, state["x"]),
         "residual": lax.select(accepted, residual_candidate, state["residual"]),
-        "residual_jacobian": lax.select(
-            accepted,
-            jacobian_candidate,
-            state["residual_jacobian"],
-        ),
         "cost": lax.select(accepted, cost_candidate, state["cost"]),
-        "grad": lax.select(accepted, grad_candidate, state["grad"]),
-        "hessian": lax.select(accepted, hessian_candidate, state["hessian"]),
+        "grad": _tree_select(accepted, grad_candidate, state["grad"]),
         "grad_norm_inf": lax.select(
             accepted,
             grad_norm_candidate,
@@ -599,7 +755,7 @@ def _least_squares_result_message(status, success):
     if bool(success):
         return "converged"
     if int(status) == 2:
-        return "non-finite residual, jacobian, or step encountered"
+        return "non-finite residual, gradient, or linear solve encountered"
     return "maximum iterations reached"
 
 
@@ -612,17 +768,24 @@ def levenberg_marquardt(
     callback=None,
     progress_callback=None,
 ):
-    """Host-driven Levenberg-Marquardt solver for least-squares residuals."""
-    residual_eval = jax.jit(residual_fn)
-    jacobian_eval = jax.jit(jax.jacfwd(residual_fn))
+    """Host-driven Levenberg-Marquardt solver for least-squares residuals.
 
-    x = jnp.asarray(x0)
-    residual = residual_eval(x)
-    residual_jacobian = jacobian_eval(x)
-    cost = _least_squares_cost(residual)
-    grad, hessian = _least_squares_linearization(residual, residual_jacobian)
-    grad_norm_inf = jnp.linalg.norm(grad, ord=jnp.inf)
-    damping = _lm_defaults(x.dtype)["initial_damping"]
+    The LM loop is matrix-free: it uses ``jvp``/``vjp`` products inside GMRES
+    and only rebuilds the dense residual Jacobian/Hessian once at the final
+    iterate so existing Boozer adjoint consumers retain their contract.
+    """
+    residual_eval = jax.jit(_flattened_residual_output(residual_fn))
+
+    x = jax.tree_util.tree_map(jnp.asarray, x0)
+    residual, cost, grad, grad_norm_inf, _ = _least_squares_gradient_state(
+        residual_eval,
+        x,
+    )
+    x_dtype = _require_tree_first_leaf(
+        x,
+        detail="Least-squares initial state must contain at least one leaf.",
+    ).dtype
+    damping = _lm_defaults(x_dtype)["initial_damping"]
     status = 1
     success = bool(grad_norm_inf <= tol)
     nit = 0
@@ -630,14 +793,11 @@ def levenberg_marquardt(
     while nit < maxiter and not success:
         step_state = _lm_iteration(
             residual_eval,
-            jacobian_eval,
             {
                 "x": x,
                 "residual": residual,
-                "residual_jacobian": residual_jacobian,
                 "cost": cost,
                 "grad": grad,
-                "hessian": hessian,
                 "grad_norm_inf": grad_norm_inf,
                 "damping": damping,
                 "nit": jnp.asarray(nit, dtype=jnp.int32),
@@ -645,7 +805,7 @@ def levenberg_marquardt(
                 "accepted": jnp.asarray(False),
                 "success": jnp.asarray(False),
             },
-            tol=jnp.asarray(tol, dtype=x.dtype),
+            tol=jnp.asarray(tol, dtype=x_dtype),
         )
         nit = int(step_state["nit"])
         status = int(step_state["status"])
@@ -653,18 +813,20 @@ def levenberg_marquardt(
         if bool(step_state["accepted"]):
             x = step_state["x"]
             residual = step_state["residual"]
-            residual_jacobian = step_state["residual_jacobian"]
             cost = step_state["cost"]
             grad = step_state["grad"]
-            hessian = step_state["hessian"]
             grad_norm_inf = step_state["grad_norm_inf"]
             if callback is not None:
-                callback(x)
+                callback(_hostify_optimizer_tree(x))
             if progress_callback is not None:
                 progress_callback(nit, float(cost), float(grad_norm_inf))
         success = bool(step_state["success"])
         if status == 2:
             break
+
+    residual, residual_jacobian, _flat_grad, hessian = (
+        _materialize_dense_least_squares_linearization(residual_eval, x)
+    )
 
     return {
         "x": x,
@@ -690,25 +852,25 @@ def levenberg_marquardt_traceable(
     progress_callback=None,
 ):
     """Trace-safe Levenberg-Marquardt solver for least-squares residuals."""
-    residual_eval = residual_fn
-    jacobian_eval = jax.jacfwd(residual_fn)
-    tol_value = _device_scalar(tol, dtype=jnp.asarray(x0).dtype)
+    residual_eval = _flattened_residual_output(residual_fn)
+    x_dtype = _require_tree_first_leaf(
+        x0,
+        detail="Least-squares initial state must contain at least one leaf.",
+    ).dtype
+    tol_value = _device_scalar(tol, dtype=x_dtype)
 
     def run_solver(x_init):
-        residual0 = residual_eval(x_init)
-        residual_jacobian0 = jacobian_eval(x_init)
-        cost0 = _least_squares_cost(residual0)
-        grad0, hessian0 = _least_squares_linearization(residual0, residual_jacobian0)
-        grad_norm_inf0 = jnp.linalg.norm(grad0, ord=jnp.inf)
+        residual0, cost0, grad0, grad_norm_inf0, _ = _least_squares_gradient_state(
+            residual_eval,
+            x_init,
+        )
         state0 = {
             "x": x_init,
             "residual": residual0,
-            "residual_jacobian": residual_jacobian0,
             "cost": cost0,
             "grad": grad0,
-            "hessian": hessian0,
             "grad_norm_inf": grad_norm_inf0,
-            "damping": _lm_defaults(x_init.dtype)["initial_damping"],
+            "damping": _lm_defaults(x_dtype)["initial_damping"],
             "nit": jnp.asarray(0, dtype=jnp.int32),
             "status": jnp.asarray(0, dtype=jnp.int32),
             "accepted": jnp.asarray(False),
@@ -725,14 +887,16 @@ def levenberg_marquardt_traceable(
         def body_fun(state):
             next_state = _lm_iteration(
                 residual_eval,
-                jacobian_eval,
                 state,
                 tol=tol_value,
             )
             if callback is not None:
                 lax.cond(
                     next_state["accepted"],
-                    lambda _: jax.debug.callback(callback, next_state["x"]),
+                    lambda _: jax.debug.callback(
+                        lambda x: callback(_hostify_optimizer_tree(x)),
+                        next_state["x"],
+                    ),
                     lambda _: None,
                     operand=None,
                 )
@@ -751,13 +915,19 @@ def levenberg_marquardt_traceable(
             return next_state
 
         state = lax.while_loop(cond_fun, body_fun, state0)
+        residual_final, residual_jacobian, _flat_grad, hessian = (
+            _materialize_dense_least_squares_linearization(
+                residual_eval,
+                state["x"],
+            )
+        )
         return {
             "x": state["x"],
-            "residual": state["residual"],
-            "residual_jacobian": state["residual_jacobian"],
+            "residual": residual_final,
+            "residual_jacobian": residual_jacobian,
             "fun": state["cost"],
             "grad": state["grad"],
-            "hessian": state["hessian"],
+            "hessian": hessian,
             "damping": state["damping"],
             "nit": state["nit"],
             "status": state["status"],
@@ -1270,27 +1440,19 @@ def jax_least_squares(
       trace-safe Levenberg-Marquardt target lane.
 
     ``x0`` may be either the historical flat 1-D vector or a structured pytree.
-    Structured states are flattened once inside this adapter, then callbacks and
-    ``OptimizeResult.x`` / ``OptimizeResult.jac`` are restored to the original
-    pytree structure on return. ``result.jac`` is the final least-squares
-    gradient vector, not the residual Jacobian matrix; the dense residual
-    Jacobian is exposed separately as ``result.residual_jacobian``.
+    The LM loop itself is pytree-native: it keeps ``x`` and the least-squares
+    gradient in the original structure and uses ``jvp``/``vjp`` products inside
+    GMRES. Dense Jacobian/Hessian materialization is deferred until the final
+    result boundary for compatibility. ``result.jac`` is the final least-squares
+    gradient tree/vector, while the dense residual Jacobian is exposed
+    separately as ``result.residual_jacobian`` with respect to the flattened
+    decision vector.
     """
     if method not in _SUPPORTED_LEAST_SQUARES_METHODS:
         raise ValueError(
             "Unknown least-squares method "
             f"{method!r}. Supported: {sorted(_SUPPORTED_LEAST_SQUARES_METHODS)}."
         )
-
-    residual_fn, x0, callback, pytree_adapter = _prepare_optimizer_callable_inputs(
-        residual_fn,
-        x0,
-        value_and_grad=False,
-        callback=callback,
-    )
-
-    def finalize(result):
-        return _finalize_optimizer_result(result, pytree_adapter)
 
     options = dict(options or {})
     if callback is not None:
@@ -1340,7 +1502,7 @@ def jax_least_squares(
             result["success"],
         ),
     )
-    return finalize(optimize_result)
+    return optimize_result
 
 
 def jax_minimize(

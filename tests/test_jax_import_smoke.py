@@ -348,6 +348,7 @@ def test_transfer_guard_disallow_allows_lbfgs_ondevice_quadratic_smokes():
         from simsopt.geo.optimizer_jax import (
             PRIVATE_OPTIMIZER_JAX_VERSION,
             jax_minimize,
+            private_optimizer_runtime_is_supported,
         )
 
         simsopt_config.set_backend(
@@ -355,7 +356,7 @@ def test_transfer_guard_disallow_allows_lbfgs_ondevice_quadratic_smokes():
             strict=True,
             transfer_guard="disallow",
         )
-        if jax.__version__ != PRIVATE_OPTIMIZER_JAX_VERSION:
+        if not private_optimizer_runtime_is_supported(jax.__version__):
             raise SystemExit(0)
 
         half = jax.device_put(np.asarray(0.5, dtype=np.float64))
@@ -398,6 +399,7 @@ def test_transfer_guard_disallow_allows_lm_ondevice_quadratic_smokes():
         from simsopt.geo.optimizer_jax import (
             PRIVATE_OPTIMIZER_JAX_VERSION,
             jax_least_squares,
+            private_optimizer_runtime_is_supported,
         )
 
         simsopt_config.set_backend(
@@ -405,7 +407,7 @@ def test_transfer_guard_disallow_allows_lm_ondevice_quadratic_smokes():
             strict=True,
             transfer_guard="disallow",
         )
-        if jax.__version__ != PRIVATE_OPTIMIZER_JAX_VERSION:
+        if not private_optimizer_runtime_is_supported(jax.__version__):
             raise SystemExit(0)
 
         x0 = jnp.asarray(np.array([1.5, -2.5], dtype=np.float64))
@@ -436,6 +438,7 @@ def test_transfer_guard_disallow_allows_ondevice_loops_with_host_closure_constan
         from simsopt.geo.optimizer_jax import (
             PRIVATE_OPTIMIZER_JAX_VERSION,
             jax_minimize,
+            private_optimizer_runtime_is_supported,
         )
 
         simsopt_config.set_backend(
@@ -443,7 +446,7 @@ def test_transfer_guard_disallow_allows_ondevice_loops_with_host_closure_constan
             strict=True,
             transfer_guard="disallow",
         )
-        if jax.__version__ != PRIVATE_OPTIMIZER_JAX_VERSION:
+        if not private_optimizer_runtime_is_supported(jax.__version__):
             raise SystemExit(0)
 
         captured = np.arange(9, dtype=np.float64)
@@ -480,10 +483,11 @@ def test_transfer_guard_disallow_allows_gpu_ondevice_loops_with_host_constants()
         from simsopt.geo.optimizer_jax import (
             PRIVATE_OPTIMIZER_JAX_VERSION,
             jax_minimize,
+            private_optimizer_runtime_is_supported,
         )
 
         gpu = next((device for device in jax.devices() if device.platform == "gpu"), None)
-        if gpu is None or jax.__version__ != PRIVATE_OPTIMIZER_JAX_VERSION:
+        if gpu is None or not private_optimizer_runtime_is_supported(jax.__version__):
             raise SystemExit(0)
 
         simsopt_config.set_backend(

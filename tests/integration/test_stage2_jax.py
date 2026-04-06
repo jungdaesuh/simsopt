@@ -70,6 +70,7 @@ from simsopt.jax_core import (
 from simsopt.geo.optimizer_jax import (
     PRIVATE_OPTIMIZER_JAX_VERSION,
     jax_minimize,
+    private_optimizer_runtime_is_supported,
 )
 from simsopt.objectives.fluxobjective_jax import SquaredFluxJAX
 import simsopt.objectives.stage2_target_objective_jax as stage2_target_objective_module
@@ -272,11 +273,11 @@ def _assert_stage2_script_failure(result, expected_error):
 
 
 def _assert_target_backend_runtime_gate(result):
-    if jax.__version__ == PRIVATE_OPTIMIZER_JAX_VERSION:
+    if private_optimizer_runtime_is_supported(jax.__version__):
         return True
     _assert_stage2_script_failure(
         result,
-        f"On-device optimizer is validated on JAX {PRIVATE_OPTIMIZER_JAX_VERSION}",
+        f"On-device optimizer requires JAX >= {PRIVATE_OPTIMIZER_JAX_VERSION}",
     )
     return False
 
@@ -4358,12 +4359,12 @@ class TestStage2OptimizerContract:
         )
 
         output = f"{result.stdout}\n{result.stderr}"
-        if jax.__version__ == PRIVATE_OPTIMIZER_JAX_VERSION:
+        if private_optimizer_runtime_is_supported(jax.__version__):
             assert result.returncode == 0, output
         else:
             assert result.returncode != 0
             assert (
-                f"On-device optimizer is validated on JAX "
+                f"On-device optimizer requires JAX >= "
                 f"{PRIVATE_OPTIMIZER_JAX_VERSION}" in output
             )
 

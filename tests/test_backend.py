@@ -25,6 +25,7 @@ _BACKEND_ENV_VARS = (
     "SIMSOPT_JAX_PLATFORM",
     "SIMSOPT_JAX_BACKEND",
     "JAX_PLATFORMS",
+    "CUDA_VISIBLE_DEVICES",
 )
 
 
@@ -413,6 +414,53 @@ def test_chunk_tuning_autotune_respects_explicit_env_overrides(monkeypatch):
     assert tuning.quadrature_block_size == 7
     assert tuning.point_chunk_size == 2048
     assert tuning.pairwise_penalty_chunk_size == 11
+
+
+def _assert_gpu_chunk_autotune_probe(monkeypatch, *, env_value, expected_index, stdout, fake_jax=None):
+    _clear_backend_env(monkeypatch)
+    monkeypatch.setenv("SIMSOPT_BACKEND_MODE", "jax_gpu_fast")
+    if env_value is not None:
+        monkeypatch.setenv("CUDA_VISIBLE_DEVICES", env_value)
+    if fake_jax is not None:
+        monkeypatch.setitem(sys.modules, "jax", fake_jax)
+    calls = []
+
+    def fake_run(cmd, *, check, capture_output, text):
+        del check, capture_output, text
+        calls.append(cmd)
+        return types.SimpleNamespace(stdout=stdout)
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+    backend = _fresh_backend()
+    tuning = backend.get_chunk_tuning()
+
+    assert tuning.autotuned is True
+    assert tuning.autotune_source == f"nvidia-smi[{expected_index}]"
+    assert tuning.gpu_total_memory_mb == int(stdout.split(",", 1)[1].strip())
+    assert calls
+    assert calls[0][-2:] == ["-i", str(expected_index)]
+
+
+def test_chunk_tuning_autotunes_from_visible_cuda_device(monkeypatch):
+    _assert_gpu_chunk_autotune_probe(
+        monkeypatch,
+        env_value="3,1",
+        expected_index=3,
+        stdout="3, 16384\n",
+    )
+
+
+def test_chunk_tuning_autotunes_from_active_jax_cuda_device(monkeypatch):
+    class _FakeDevice:
+        local_hardware_id = 2
+
+    _assert_gpu_chunk_autotune_probe(
+        monkeypatch,
+        env_value=None,
+        expected_index=2,
+        stdout="2, 24576\n",
+        fake_jax=types.SimpleNamespace(local_devices=lambda backend=None: [_FakeDevice()]),
+    )
 
 
 def test_chunk_tuning_rejects_nonpositive_gpu_memory_override(monkeypatch):
