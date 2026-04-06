@@ -28,7 +28,10 @@ import jax.numpy as jnp
 
 from .._core.derivative import Derivative, derivative_dec
 from .._core.optimizable import Optimizable
-from ..jax_core._math_utils import zeros as _zeros
+from ..jax_core._math_utils import (
+    as_runtime_float64 as _as_runtime_float64,
+    zeros as _zeros,
+)
 from ..jax_core.field import (
     grouped_biot_savart_B_from_spec,
     coil_set_spec_from_dof_extraction_spec,
@@ -113,6 +116,10 @@ def _split_x_inner_runtime(x_inner, optimize_G):
     if optimize_G:
         return sdofs, iota, _take_runtime_scalar(x_inner, sdof_count + 1)
     return sdofs, iota, None
+
+
+def _runtime_float64_scalar(value, *, reference):
+    return _as_runtime_float64(value, reference=reference)
 
 
 def _compute_stellsym_mask_indices_for_grid(
@@ -419,7 +426,9 @@ def _boozer_residual_J_of_x_inner(
     )
 
     r_flat = boozer_residual_vector(G, iota, B, xphi, xtheta, weight_inv_modB)
-    J_boozer = 0.5 * jnp.sum(r_flat * r_flat) / num_points
+    half = _runtime_float64_scalar(0.5, reference=r_flat)
+    num_points_jax = _runtime_float64_scalar(float(num_points), reference=r_flat)
+    J_boozer = half * jnp.sum(r_flat * r_flat) / num_points_jax
 
     label_val = _compute_label(
         label_type,
@@ -430,8 +439,13 @@ def _boozer_residual_J_of_x_inner(
         points,
         coil_set_spec=coil_set_spec,
     )
-    label_delta = label_val - targetlabel
-    J_label = 0.5 * constraint_weight * (label_delta * label_delta)
+    targetlabel_jax = _runtime_float64_scalar(targetlabel, reference=label_val)
+    constraint_weight_jax = _runtime_float64_scalar(
+        constraint_weight,
+        reference=label_val,
+    )
+    label_delta = label_val - targetlabel_jax
+    J_label = half * constraint_weight_jax * (label_delta * label_delta)
     return J_boozer + J_label
 
 
@@ -802,8 +816,10 @@ def _traceable_iota_from_x_inner(x_inner, optimize_G):
 def _traceable_iota_target_penalty(x_inner, *, optimize_G, iota_target):
     """Quadratic iota-target penalty at an explicit inner state."""
     iota = _traceable_iota_from_x_inner(x_inner, optimize_G)
-    delta = iota - iota_target
-    return 0.5 * (delta * delta)
+    half = _runtime_float64_scalar(0.5, reference=iota)
+    iota_target_jax = _runtime_float64_scalar(iota_target, reference=iota)
+    delta = iota - iota_target_jax
+    return half * (delta * delta)
 
 
 _TRACEABLE_INNER_OBJECTIVE_KEYS = (
@@ -1010,7 +1026,13 @@ def _traceable_forward_result(
                 operand=None,
             )
         delta = coil_dofs - baseline_coil_dofs
-        failure_penalty = failure_value + 0.5 * failure_scale * jnp.dot(delta, delta)
+        failure_half = _runtime_float64_scalar(0.5, reference=delta)
+        failure_value_jax = _runtime_float64_scalar(failure_value, reference=delta)
+        failure_scale_jax = _runtime_float64_scalar(failure_scale, reference=delta)
+        failure_penalty = (
+            failure_value_jax
+            + failure_half * failure_scale_jax * jnp.dot(delta, delta)
+        )
         return {
             "value": jnp.where(
                 success,

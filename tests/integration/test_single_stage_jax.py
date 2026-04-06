@@ -1673,6 +1673,107 @@ class TestAdjointSolveConsistency:
         assert G is None
         assert calls["count"] >= 4
 
+    def test_boozer_residual_inner_objective_uses_runtime_scalar_constants(
+        self, monkeypatch
+    ):
+        """Strict-safe inner-objective math should runtimeify host-backed scalars."""
+        import simsopt.geo.surfaceobjectives_jax as soj
+
+        calls = {"count": 0}
+        original_runtime_scalar = soj._runtime_float64_scalar
+
+        def _counting_runtime_scalar(value, *, reference):
+            calls["count"] += 1
+            return original_runtime_scalar(value, reference=reference)
+
+        monkeypatch.setattr(soj, "_runtime_float64_scalar", _counting_runtime_scalar)
+        monkeypatch.setattr(
+            soj,
+            "_surface_geometry_from_dofs",
+            lambda *args, **kwargs: (
+                jnp.zeros((1, 1, 3), dtype=jnp.float64),
+                jnp.ones((1, 1, 3), dtype=jnp.float64),
+                jnp.ones((1, 1, 3), dtype=jnp.float64),
+            ),
+        )
+        monkeypatch.setattr(
+            soj,
+            "grouped_biot_savart_B_from_spec",
+            lambda points, coil_set_spec: jnp.ones(
+                (points.shape[0], 3),
+                dtype=jnp.float64,
+            ),
+        )
+        monkeypatch.setattr(
+            soj,
+            "boozer_residual_vector",
+            lambda G, iota, B, xphi, xtheta, weight_inv_modB: jnp.array(
+                [1.0, 2.0],
+                dtype=jnp.float64,
+            ),
+        )
+        monkeypatch.setattr(
+            soj,
+            "_compute_label",
+            lambda *args, **kwargs: jnp.asarray(1.5, dtype=jnp.float64),
+        )
+
+        value = soj._boozer_residual_J_of_x_inner(
+            jnp.array([4.0, 0.25, 0.75], dtype=jnp.float64),
+            coil_set_spec=object(),
+            quadpoints_phi=jnp.asarray([0.0], dtype=jnp.float64),
+            quadpoints_theta=jnp.asarray([0.0], dtype=jnp.float64),
+            mpol=1,
+            ntor=1,
+            nfp=1,
+            stellsym=True,
+            scatter_indices=jnp.asarray([0], dtype=jnp.int32),
+            surface_kind="tensor",
+            optimize_G=True,
+            weight_inv_modB=True,
+            constraint_weight=3.0,
+            targetlabel=1.0,
+            label_type="axis",
+            phi_idx=0,
+        )
+
+        assert calls["count"] >= 4
+        np.testing.assert_allclose(
+            np.asarray(value),
+            5.0 / 6.0 + 0.375,
+            rtol=1e-12,
+            atol=1e-12,
+        )
+
+    def test_traceable_iota_target_penalty_uses_runtime_scalar_constants(
+        self, monkeypatch
+    ):
+        """The traceable iota penalty should avoid implicit host scalar promotion."""
+        import simsopt.geo.surfaceobjectives_jax as soj
+
+        calls = {"count": 0}
+        original_runtime_scalar = soj._runtime_float64_scalar
+
+        def _counting_runtime_scalar(value, *, reference):
+            calls["count"] += 1
+            return original_runtime_scalar(value, reference=reference)
+
+        monkeypatch.setattr(soj, "_runtime_float64_scalar", _counting_runtime_scalar)
+
+        penalty = soj._traceable_iota_target_penalty(
+            jnp.array([1.0, 2.0, 3.0], dtype=jnp.float64),
+            optimize_G=False,
+            iota_target=2.5,
+        )
+
+        assert calls["count"] >= 2
+        np.testing.assert_allclose(
+            np.asarray(penalty),
+            0.125,
+            rtol=1e-12,
+            atol=1e-12,
+        )
+
     def test_coil_cotangent_projection_avoids_whole_group_host_materialization(self):
         """Projection should convert one coil slice at a time, not a whole group."""
         coils = [_FallbackBombCoil(), _FallbackBombCoil()]
