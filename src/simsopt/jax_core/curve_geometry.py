@@ -65,6 +65,24 @@ def _zeros_like_float64(array: jax.Array) -> jax.Array:
     return jnp.broadcast_to(_explicit_scalar(0.0, reference=array), array.shape)
 
 
+def _slice_1d_static(array: jax.Array, start: int, end: int) -> jax.Array:
+    positions = np.arange(int(start), int(end), dtype=np.int64)
+    selector = np.zeros((positions.size, array.shape[0]), dtype=np.float64)
+    selector[np.arange(positions.size), positions] = 1.0
+    return _as_explicit_float64(selector, reference=array) @ array
+
+
+def _update_1d_static(array: jax.Array, start: int, values: jax.Array) -> jax.Array:
+    positions = np.arange(int(start), int(start) + values.shape[0], dtype=np.int64)
+    insert = np.zeros((array.shape[0], positions.size), dtype=np.float64)
+    insert[positions, np.arange(positions.size)] = 1.0
+    keep_mask = np.ones(array.shape[0], dtype=np.float64)
+    keep_mask[positions] = 0.0
+    return array * _as_explicit_float64(keep_mask, reference=array) + (
+        _as_explicit_float64(insert, reference=array) @ values
+    )
+
+
 def curve_spec_from_curve(curve):
     to_spec = getattr(curve, "to_spec", None)
     if callable(to_spec):
@@ -202,10 +220,9 @@ def _mapped_full_dofs(map_spec: OptimizableDofMapSpec, owner_dofs):
     mapped = _as_explicit_float64(map_spec.template_full_dofs, reference=owner_dofs)
     owner_dofs = _as_explicit_float64(owner_dofs, reference=owner_dofs)
     for owner_start, owner_end, target_start, target_end in map_spec.owner_segments:
-        segment = jax.lax.slice_in_dim(owner_dofs, owner_start, owner_end, axis=0)
-        mapped = mapped.at[target_start:target_end].set(
-            segment
-        )
+        del target_end
+        segment = _slice_1d_static(owner_dofs, owner_start, owner_end)
+        mapped = _update_1d_static(mapped, target_start, segment)
     return mapped
 
 
@@ -213,12 +230,7 @@ def _mapped_input_dofs(map_spec: OptimizableDofMapSpec, owner_dofs):
     mapped_full = _mapped_full_dofs(map_spec, owner_dofs)
     if map_spec.input_mode == "full":
         return mapped_full
-    return jax.lax.slice_in_dim(
-        mapped_full,
-        map_spec.input_start,
-        map_spec.input_end,
-        axis=0,
-    )
+    return _slice_1d_static(mapped_full, map_spec.input_start, map_spec.input_end)
 
 
 def optimizable_full_dofs_from_map_spec(
