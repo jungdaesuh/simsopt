@@ -223,6 +223,25 @@ def initSurface(R0, s, file_loc, nphi, ntheta):
     print('Minor radius: ', surf.minor_radius())
     return surf
 
+
+def build_hbt_reference_surfaces(nfp, banana_surf_radius):
+    hbt = SurfaceRZFourier(nfp=nfp, stellsym=True)
+    hbt.set_rc(0, 0, 0.9115)    # R0 of LCFS semi-circle center
+    hbt.set_rc(1, 0, 0.1605)    # Minor radius (thick metal walls)
+    hbt.set_zs(1, 0, 0.152)    # Z extent = ±0.152 m (flat top/bottom)
+
+    surf_coils = SurfaceRZFourier(nfp=nfp, stellsym=True)
+    surf_coils.set_rc(0, 0, 0.976)
+    surf_coils.set_rc(1, 0, banana_surf_radius)
+    surf_coils.set_zs(1, 0, banana_surf_radius)
+
+    vv = SurfaceRZFourier(nfp=nfp, stellsym=True)
+    vv.set_rc(0, 0, 0.976)
+    vv.set_rc(1, 0, 0.222)
+    vv.set_zs(1, 0, 0.222)
+    return hbt, surf_coils, vv
+
+
 def initializeCoils(surf, surf_coils, tf_coils, num_quadpoints, order,
                     phi_center, theta_center, phi_width, theta_width, OUT_DIR):
     # Initialize banana coils on the coil winding surface
@@ -446,6 +465,40 @@ def make_fun(JF, new_bs, new_surf, Jf, Jls, Jccdist, Jc):
     return fun
 
 
+def evaluate_stage2_hardware_constraints(
+    coil_length,
+    length_target,
+    curve_curve_min_dist,
+    cc_threshold,
+    max_curvature,
+    curvature_threshold,
+):
+    """Evaluate hard Stage 2 hardware constraints against realized geometry."""
+    violations = []
+    if coil_length > length_target:
+        violations.append(
+            f"coil_length {coil_length:.6f} exceeds target {length_target:.6f}"
+        )
+    if curve_curve_min_dist < cc_threshold:
+        violations.append(
+            f"coil_coil_min_dist {curve_curve_min_dist:.6f} below threshold {cc_threshold:.6f}"
+        )
+    if max_curvature > curvature_threshold:
+        violations.append(
+            f"max_curvature {max_curvature:.6f} exceeds threshold {curvature_threshold:.6f}"
+        )
+    return {
+        "success": len(violations) == 0,
+        "violations": violations,
+        "coil_length": float(coil_length),
+        "length_target": float(length_target),
+        "curve_curve_min_dist": float(curve_curve_min_dist),
+        "cc_threshold": float(cc_threshold),
+        "max_curvature": float(max_curvature),
+        "curvature_threshold": float(curvature_threshold),
+    }
+
+
 
 if __name__ == "__main__":
     # PRE-INITIALIZATION
@@ -460,30 +513,9 @@ if __name__ == "__main__":
     OUT_DIR = os.path.join(args.output_root, f"outputs-{plasma_surf_filename}") + "/"
     os.makedirs(OUT_DIR, exist_ok=True)
 
-    # The proposed new HBT LCFS
-    hbt = SurfaceRZFourier(nfp=5, stellsym=True)
-    hbt.set_rc(0, 0, 0.9115)    # R0 of LCFS semi-circle center
-    hbt.set_rc(1, 0, 0.1605)    # Minor radius (thick metal walls)
-    hbt.set_zs(1, 0, 0.152)    # Z extent = ±0.152 m (flat top/bottom)
-
     nphi = args.nphi
     ntheta = args.ntheta
     surf = None
-
-    # The surface the coils can lie on from Jeff - R0 = 0.976 and a~=0.22
-    banana_surf_radius = args.banana_surf_radius
-    banana_surf_nfp = 5
-    surf_coils = SurfaceRZFourier(nfp=banana_surf_nfp, stellsym=True)
-    surf_coils.set_rc(0, 0, 0.976)
-    surf_coils.set_rc(1, 0, banana_surf_radius)
-    surf_coils.set_zs(1, 0, banana_surf_radius)
-
-    # The outer vacuum vessel of HBT, R0 = 0.976, a = 0.222
-    # Solely for visualization purposes
-    VV = SurfaceRZFourier(nfp=5, stellsym=True)
-    VV.set_rc(0, 0, 0.976)
-    VV.set_rc(1, 0, 0.222)
-    VV.set_zs(1, 0, 0.222)
 
     # Create the TF coils in HBT - these will be fixed but create background toroidal field:
     tf_curves = create_equally_spaced_curves(20, 1, stellsym=False, R0=0.976, R1=0.4, order=1)
@@ -513,6 +545,11 @@ if __name__ == "__main__":
     s = args.toroidal_flux # VMEC flux-surface label
 
     new_surf = initSurface(R0, s, file_loc, nphi, ntheta)
+    banana_surf_nfp = new_surf.nfp
+
+    banana_surf_radius = args.banana_surf_radius
+    hbt, surf_coils, VV = build_hbt_reference_surfaces(banana_surf_nfp, banana_surf_radius)
+
     init_coil_array = initializeCoils(new_surf, surf_coils, tf_coils, num_quadpoints, order,
                                       phi_center, theta_center, phi_width, theta_width, OUT_DIR)
     new_bs = init_coil_array[0]
@@ -581,6 +618,8 @@ if __name__ == "__main__":
     fun = make_fun(JF, new_bs, new_surf, Jf, Jls, Jccdist, Jc)
     if args.init_only:
         res_nit = 0
+        optimizer_success = True
+        termination_message = "init_only"
         print("Skipping Stage 2 optimizer because --init-only was provided.")
     elif args.basin_hops > 0:
         # Basin-hopping: perturb DOFs and re-run L-BFGS-B multiple times, keep best
@@ -605,11 +644,19 @@ if __name__ == "__main__":
             res_nit = res.lowest_optimization_result.nit
         else:
             res_nit = basin_hop_count
+        if hasattr(res, 'lowest_optimization_result'):
+            termination_message = str(getattr(res.lowest_optimization_result, 'message', 'basinhopping_complete'))
+            optimizer_success = bool(getattr(res.lowest_optimization_result, 'success', True))
+        else:
+            termination_message = str(getattr(res, 'message', 'basinhopping_complete'))
+            optimizer_success = True
         print(f"Basin-hopping complete. Best fun={res.fun:.6e}, hops={args.basin_hops}, seed={rng_seed}")
     else:
         res = minimize(fun, dofs, jac=True, method='L-BFGS-B',
                        options={'maxiter': MAXITER, 'maxcor': 300, 'ftol': args.ftol, 'gtol': args.gtol})
         res_nit = res.nit
+        termination_message = str(res.message)
+        optimizer_success = bool(res.success)
         print(res.message)
 
 
@@ -622,6 +669,27 @@ if __name__ == "__main__":
     if is_self_intersecting(new_banana_curve):
         print("BANANA COIL IS SELF-INTERSECTING!")
         intersecting = True
+
+    final_coil_length = float(Jls.J())
+    final_curve_curve_min_dist = float(Jccdist.shortest_distance())
+    final_max_curvature = float(np.max(new_banana_curve.kappa()))
+    hardware_status = evaluate_stage2_hardware_constraints(
+        final_coil_length,
+        LENGTH_TARGET,
+        final_curve_curve_min_dist,
+        CC_THRESHOLD,
+        final_max_curvature,
+        CURVATURE_THRESHOLD,
+    )
+    if not hardware_status["success"]:
+        optimizer_success = False
+        constraint_summary = "; ".join(hardware_status["violations"])
+        if termination_message:
+            termination_message = f"{termination_message}; hardware_constraints_failed"
+        else:
+            termination_message = "hardware_constraints_failed"
+        print("/!\\ /!\\ Stage 2 hardware constraint violation /!\\ /!\\")
+        print(constraint_summary)
 
     curves_to_vtk(new_curves, OUT_DIR_ITER + "curves_opt", close=True)
     new_bs.set_points(new_surf.gamma().reshape((-1, 3)))
@@ -657,11 +725,14 @@ if __name__ == "__main__":
         "LENGTH_TARGET": LENGTH_TARGET,
         "MAJOR_RADIUS": R0,
         "TOROIDAL_FLUX": s,
+        "NFP": int(banana_surf_nfp),
         "banana_surf_radius": banana_surf_radius,
         "order": order,
         "init_only": args.init_only,
         "max_iterations": MAXITER,
         "iterations": res_nit,
+        "TERMINATION_MESSAGE": termination_message,
+        "OPTIMIZER_SUCCESS": optimizer_success,
         "basin_hops": args.basin_hops,
         "basin_stepsize": args.basin_stepsize if args.basin_hops > 0 else None,
         "basin_seed": rng_seed if args.basin_hops > 0 else None,
@@ -670,7 +741,11 @@ if __name__ == "__main__":
         "FINAL_VOLUME": float(new_surf.volume()),
         "FIELD_ERROR": float(fieldError),
         "SELF_INTERSECTING": intersecting,
-        "MAX_CURVATURE": float(np.max(new_banana_curve.kappa()))
+        "MAX_CURVATURE": final_max_curvature,
+        "COIL_LENGTH": final_coil_length,
+        "CURVE_CURVE_MIN_DIST": final_curve_curve_min_dist,
+        "HARDWARE_CONSTRAINTS_OK": hardware_status["success"],
+        "HARDWARE_CONSTRAINT_VIOLATIONS": hardware_status["violations"],
     }
     with open(os.path.join(OUT_DIR_ITER, "results.json"), "w") as outfile:
         json.dump(results, outfile, indent=2)

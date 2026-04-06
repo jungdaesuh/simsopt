@@ -704,10 +704,10 @@ class BoozerResidualExact(Optimizable):
         dJ_by_dB = np.sum(dJ_by_dB.reshape((-1, 3, 3)), axis=1)
         return dJ_by_dB
 
-def initialize_boozer_surface(surf_prev, mpol, ntor, bs, vol_target, constraint_weight, iota, G0, boozer_I=0.0):
+def initialize_boozer_surface(surf_prev, mpol, ntor, bs, vol_target, constraint_weight, iota, G0, boozer_I=0.0, nfp=5):
     """
     This initializes the boozer surface, using either the boozer "exact" algorithm, or the boozer "least squares" algorithm
-    
+
     surf_prev: Any instance of simsopt.geo.Surface. This is the initial guess for the boozer surface solver
     mpol: SurfaceXYZTensorFourier resolution (both toroidal and poloidal)
     bs: simsopt.field.BiotSavart instance
@@ -715,9 +715,10 @@ def initialize_boozer_surface(surf_prev, mpol, ntor, bs, vol_target, constraint_
     constraint_weight: Set to 1.0 to use Boozer least square, None to use Boozer exact
     iota: initial guess for iota value on the surface
     G0: Value of net current going through the torus hole
+    nfp: number of field periods (default 5 for banana coils)
     """
     surf = SurfaceXYZTensorFourier(
-          mpol=mpol,ntor=ntor,nfp=5,stellsym=True,
+          mpol=mpol,ntor=ntor,nfp=nfp,stellsym=True,
           quadpoints_theta=surf_prev.quadpoints_theta,
           quadpoints_phi=surf_prev.quadpoints_phi
           )
@@ -732,9 +733,9 @@ def initialize_boozer_surface(surf_prev, mpol, ntor, bs, vol_target, constraint_
         # Boozer exact approach
         print("Generating Boozer exact surface...")
         surf_exact = SurfaceXYZTensorFourier(
-              mpol=mpol,ntor=ntor,nfp=5,stellsym=True,
+              mpol=mpol,ntor=ntor,nfp=nfp,stellsym=True,
               quadpoints_theta=np.linspace(0,1,2*mpol+1,endpoint=False),
-              quadpoints_phi=np.linspace(0,1./surf.nfp,2*ntor+1,endpoint=False),
+              quadpoints_phi=np.linspace(0,1./nfp,2*ntor+1,endpoint=False),
               dofs=surf.dofs
               )
     
@@ -805,6 +806,24 @@ def build_surface_configs(file_loc, nphi, ntheta, seed_label, major_radius, oute
         },
         configs[0],
     ]
+
+
+def build_hbt_reference_surfaces(nfp, banana_surf_radius):
+    vv = SurfaceRZFourier(nfp=nfp, stellsym=True)
+    vv.set_rc(0, 0, 0.976)
+    vv.set_rc(1, 0, 0.222)
+    vv.set_zs(1, 0, 0.222)
+
+    hbt = SurfaceRZFourier(nfp=nfp, stellsym=True)
+    hbt.set_rc(0, 0, 0.9115)    # R0 of LCFS semi-circle center
+    hbt.set_rc(1, 0, 0.1605)    # Minor radius (thick metal walls)
+    hbt.set_zs(1, 0, 0.152)    # Z extent = ±0.152 m (flat top/bottom)
+
+    surf_coils = SurfaceRZFourier(nfp=nfp, stellsym=True)
+    surf_coils.set_rc(0, 0, 0.976)
+    surf_coils.set_rc(1, 0, banana_surf_radius)
+    surf_coils.set_zs(1, 0, banana_surf_radius)
+    return vv, hbt, surf_coils
 
 
 def surface_pointcloud_gap(surface_a, surface_b):
@@ -925,6 +944,73 @@ def evaluate_surface_stack(
         "nesting_ok": nesting_ok,
         "bad_nesting_phis": bad_nesting_phis,
     }
+
+
+def evaluate_single_stage_hardware_constraints(
+    curve_curve_min_dist,
+    cc_dist,
+    curve_surface_min_dist,
+    cs_dist,
+    surface_vessel_min_dist,
+    ss_dist,
+    max_curvature,
+    curvature_threshold,
+):
+    """Evaluate hard single-stage hardware constraints against realized geometry."""
+    violations = []
+    if curve_curve_min_dist < cc_dist:
+        violations.append(
+            f"coil_coil_min_dist {curve_curve_min_dist:.6f} below threshold {cc_dist:.6f}"
+        )
+    if curve_surface_min_dist < cs_dist:
+        violations.append(
+            f"coil_surface_min_dist {curve_surface_min_dist:.6f} below threshold {cs_dist:.6f}"
+        )
+    if surface_vessel_min_dist < ss_dist:
+        violations.append(
+            f"surface_vessel_min_dist {surface_vessel_min_dist:.6f} below threshold {ss_dist:.6f}"
+        )
+    if max_curvature > curvature_threshold:
+        violations.append(
+            f"max_curvature {max_curvature:.6f} exceeds threshold {curvature_threshold:.6f}"
+        )
+    return {
+        "success": len(violations) == 0,
+        "violations": violations,
+        "curve_curve_min_dist": float(curve_curve_min_dist),
+        "cc_dist": float(cc_dist),
+        "curve_surface_min_dist": float(curve_surface_min_dist),
+        "cs_dist": float(cs_dist),
+        "surface_vessel_min_dist": float(surface_vessel_min_dist),
+        "ss_dist": float(ss_dist),
+        "max_curvature": float(max_curvature),
+        "curvature_threshold": float(curvature_threshold),
+    }
+
+
+def compute_single_stage_surface_vessel_min_dist(
+    surface_vessel_distance_obj,
+    surface_status,
+    outer_surface=None,
+    vessel_surface=None,
+):
+    if surface_vessel_distance_obj is not None and hasattr(surface_vessel_distance_obj, "shortest_distance"):
+        return float(surface_vessel_distance_obj.shortest_distance())
+    outer_vessel_gap = surface_status.get("outer_vessel_gap")
+    if outer_vessel_gap is not None:
+        return float(outer_vessel_gap)
+    if outer_surface is None or vessel_surface is None:
+        raise ValueError(
+            "Need outer_surface and vessel_surface when no surface-vessel distance object or cached gap is available."
+        )
+    return float(
+        np.min(
+            cdist(
+                outer_surface.gamma().reshape((-1, 3)),
+                vessel_surface.gamma().reshape((-1, 3)),
+            )
+        )
+    )
 
 
 def snapshot_surface_states(surface_data):
@@ -1240,6 +1326,27 @@ def evaluate_search_topology_gate(num_surfaces, outer_surface, bfield):
     )
 
 
+def skipped_topology_gate_status():
+    return {
+        "evaluated": False,
+        "success": None,
+        "survived_lines": None,
+        "survival_fraction": None,
+        "first_exit_time": None,
+        "first_exit_angle": None,
+        "first_exit_reason": None,
+        "stop_reason_counts": None,
+    }
+
+
+def final_topology_gate_for_results(init_only, num_surfaces, outer_surface, bfield):
+    if init_only:
+        return skipped_topology_gate_status()
+    status = evaluate_search_topology_gate(num_surfaces, outer_surface, bfield)
+    status["evaluated"] = True
+    return status
+
+
 def evaluate_total_objective(
     surface_weights,
     nonQSs,
@@ -1498,6 +1605,9 @@ def fun(x):
                     f"reason={topology_status['first_exit_reason']}"
                 )
 
+        # Hardware metrics computed in callback(), not here — computing
+        # shortest_distance() inside fun() can corrupt optimizer state.
+
         if success:
             print(f"Volume: {outer_entry['boozer_surface'].surface.volume()}")
             print(f"Iota: {surface_iota_terms[-1].J()}")
@@ -1530,6 +1640,9 @@ def fun(x):
                 print(f"Outer surface too close to vessel: {stack_status['outer_vessel_gap']}")
             if search_gate['enforce_nesting'] and not stack_status['nesting_ok']:
                 print(f"Surfaces are not nested on phi slices: {stack_status['bad_nesting_phis']}")
+        hardware_status = run_dict.get("hardware_constraint_status")
+        if hardware_status is not None and not hardware_status["success"]:
+            print("Hardware constraints violated")
 
         # Elevated J violates Armijo, so the line search backtracks.
         # Returning dJ_old (not negated) avoids the old -dJ corruption path
@@ -1653,6 +1766,23 @@ def callback(x):
     length = curvelength.J()
     curvecurve_min = JCurveCurve.shortest_distance()
     curvesurf_min = JCurveSurface.shortest_distance()
+    surface_vessel_min = compute_single_stage_surface_vessel_min_dist(
+        JSurfSurf,
+        full_stack_status,
+        outer_entry["boozer_surface"].surface,
+        VV,
+    )
+    hardware_status = evaluate_single_stage_hardware_constraints(
+        curvecurve_min,
+        CC_DIST,
+        curvesurf_min,
+        CS_DIST,
+        surface_vessel_min,
+        SS_DIST,
+        max_curvature,
+        CURVATURE_THRESHOLD,
+    )
+    run_dict['hardware_constraint_status'] = hardware_status
 
     bs.set_points(outer_entry['boozer_surface'].surface.gamma().reshape((-1, 3)))
     unitn = outer_entry['boozer_surface'].surface.unitnormal()
@@ -1704,6 +1834,10 @@ def callback(x):
     print(f"{'Max Curve Z':{width}} = {max_z:.6e}", file=buffer)
     print(f"{'Max Curvature':{width}} = {max_curvature:.6e}", file=buffer)
     print(f"{'Curve Length':{width}} = {length:.6e}", file=buffer)
+    print(f"{'Surface-Vessel Min Dist':{width}} = {surface_vessel_min:.6e}", file=buffer)
+    print(f"{'Hardware Constraints OK':{width}} = {hardware_status['success']}", file=buffer)
+    if hardware_status["violations"]:
+        print(f"{'Hardware Violations':{width}} = {hardware_status['violations']}", file=buffer)
     print("="*70, file=buffer)
 
     output_str = buffer.getvalue()
@@ -1823,7 +1957,6 @@ if __name__ == "__main__":
     order = int(stage2_results.get("order", args.stage2_seed_order))
 
     banana_surf_radius = args.banana_surf_radius if args.banana_surf_radius is not None else float(stage2_results["banana_surf_radius"])
-    banana_surf_nfp = 5
     nphi = args.nphi
     ntheta = args.ntheta
     mpol = args.mpol
@@ -1880,28 +2013,6 @@ if __name__ == "__main__":
     stage = args.boozer_stage
 
     # ==============================================================================
-    # SURFACE GEOMETRY DEFINITIONS
-    # ==============================================================================
-    # The outer vacuum vessel of HBT, R0 = 0.976, a = 0.222
-    # Solely for visualization purposes
-    VV = SurfaceRZFourier(nfp=5, stellsym=True)
-    VV.set_rc(0, 0, 0.976)
-    VV.set_rc(1, 0, 0.222)
-    VV.set_zs(1, 0, 0.222)
-
-    # The proposed new HBT LCFS
-    hbt = SurfaceRZFourier(nfp=5, stellsym=True)
-    hbt.set_rc(0, 0, 0.9115)    # R0 of LCFS semi-circle center
-    hbt.set_rc(1, 0, 0.1605)    # Minor radius (thick metal walls)
-    hbt.set_zs(1, 0, 0.152)    # Z extent = ±0.152 m (flat top/bottom)
-
-    # The surface the coils can lie on from Jeff - R0 = 0.976 and a=0.22
-    surf_coils = SurfaceRZFourier(nfp=banana_surf_nfp, stellsym=True)
-    surf_coils.set_rc(0, 0, 0.976)
-    surf_coils.set_rc(1, 0, banana_surf_radius)
-    surf_coils.set_zs(1, 0, banana_surf_radius)
-
-    # ==============================================================================
     # LOAD EQUILIBRIUM AND COILS
     # ==============================================================================
     plasma_surf_filename = args.plasma_surf_filename
@@ -1920,6 +2031,9 @@ if __name__ == "__main__":
         args.inner_surface_ratio,
     )
     surf = surface_configs[-1]["initial_surface"]
+    banana_surf_nfp = surf.nfp
+
+    VV, hbt, surf_coils = build_hbt_reference_surfaces(banana_surf_nfp, banana_surf_radius)
 
     # Extract coil information
     coils = bs.coils
@@ -1975,6 +2089,7 @@ if __name__ == "__main__":
             iota_target,
             G0,
             boozer_I,
+            nfp=banana_surf_nfp,
         )
         surface_data.append({
             "name": config["name"],
@@ -2122,7 +2237,7 @@ if __name__ == "__main__":
         'lscount': 0,
         'x_prev': dofs.copy(),
         'accepted_x': dofs.copy(),
-        'intersecting': False,
+        'intersecting': any(entry["boozer_surface"].surface.is_self_intersecting() for entry in surface_data),
         'surface_status': evaluate_surface_stack(
             surface_data,
             vessel_surface=VV if len(surface_data) > 1 else None,
@@ -2137,7 +2252,8 @@ if __name__ == "__main__":
             vessel_gap_threshold=initial_search_gate['vessel_gap_threshold'],
             enforce_nesting=initial_search_gate['enforce_nesting'],
         ),
-        'topology_gate_status': evaluate_search_topology_gate(
+        'topology_gate_status': final_topology_gate_for_results(
+            args.init_only,
             len(surface_data),
             outer_surface_data['boozer_surface'].surface,
             bs,
@@ -2322,32 +2438,46 @@ if __name__ == "__main__":
     else:
         final_surface_volumes = initial_surface_volumes
         final_surface_iotas = initial_surface_iotas
-        run_dict['full_eval'] = evaluate_total_objective(
-            np.ones(len(surface_data)),
-            nonQSs,
-            brs,
-            RES_WEIGHT,
-            Jiota,
-            IOTAS_WEIGHT,
-            JCurveLength,
-            LENGTH_WEIGHT,
-            JCurveCurve,
-            CC_WEIGHT,
-            JCurveSurface,
-            CS_WEIGHT,
-            JCurvature,
-            CURVATURE_WEIGHT,
-            JSurfSurf=JSurfSurf,
-            SURF_DIST_WEIGHT=SURF_DIST_WEIGHT,
-        )
-        run_dict['J'] = run_dict['full_eval']['total']
-        run_dict['dJ'] = run_dict['full_eval']['grad'].copy()
+        run_dict['full_eval'] = None
+        run_dict['J'] = None
+        run_dict['dJ'] = None
 
-    final_topology_status = evaluate_search_topology_gate(
+    final_topology_status = final_topology_gate_for_results(
+        args.init_only,
         len(surface_data),
         outer_surface_data['boozer_surface'].surface,
         bs,
     )
+    objective_j = float(run_dict['J']) if run_dict['J'] is not None else None
+    search_objective_j = float(run_dict['search_eval']['total'])
+    final_search_surface_weights = run_dict['search_eval']['surface_weights'].tolist()
+    coil_length = float(curvelength.J())
+    curve_curve_min_dist = float(JCurveCurve.shortest_distance())
+    curve_surface_min_dist = float(JCurveSurface.shortest_distance())
+    surface_vessel_min_dist = compute_single_stage_surface_vessel_min_dist(
+        JSurfSurf,
+        run_dict["surface_status"],
+        outer_surface_data["boozer_surface"].surface,
+        VV,
+    )
+    nonqs_ratio = None if args.init_only else float(JnonQSRatio.J())
+    boozer_residual = None if args.init_only else float(JBoozerResidual.J())
+    final_hardware_status = evaluate_single_stage_hardware_constraints(
+        curve_curve_min_dist,
+        CC_DIST,
+        curve_surface_min_dist,
+        CS_DIST,
+        surface_vessel_min_dist,
+        SS_DIST,
+        float(final_max_curvature),
+        CURVATURE_THRESHOLD,
+    )
+    if not final_hardware_status["success"]:
+        optimizer_success = False
+        if termination_message:
+            termination_message = f"{termination_message}; hardware_constraints_failed"
+        else:
+            termination_message = "hardware_constraints_failed"
 
     # Save the results of optimization to a separate file
     results = {
@@ -2418,9 +2548,11 @@ if __name__ == "__main__":
         "PHASE1_ITERATIONS": phase1_iterations,
         "PHASE1_TERMINATION_MESSAGE": phase1_termination_message,
         "PHASE1_SUCCESS": phase1_success,
-        "FINAL_TOPOLOGY_GATE_SUCCESS": bool(final_topology_status["success"]),
-        "FINAL_TOPOLOGY_SURVIVED_LINES": int(final_topology_status["survived_lines"]),
-        "FINAL_TOPOLOGY_SURVIVAL_FRACTION": float(final_topology_status["survival_fraction"]),
+        "NFP": int(banana_surf_nfp),
+        "FINAL_TOPOLOGY_GATE_EVALUATED": final_topology_status["evaluated"],
+        "FINAL_TOPOLOGY_GATE_SUCCESS": final_topology_status["success"],
+        "FINAL_TOPOLOGY_SURVIVED_LINES": final_topology_status["survived_lines"],
+        "FINAL_TOPOLOGY_SURVIVAL_FRACTION": final_topology_status["survival_fraction"],
         "FINAL_TOPOLOGY_FIRST_EXIT_TIME": final_topology_status["first_exit_time"],
         "FINAL_TOPOLOGY_FIRST_EXIT_ANGLE": final_topology_status["first_exit_angle"],
         "FINAL_TOPOLOGY_FIRST_EXIT_REASON": final_topology_status["first_exit_reason"],
@@ -2431,20 +2563,19 @@ if __name__ == "__main__":
         "FINAL_VOLUME": float(final_volume),
         "FINAL_IOTA": float(final_iota),
         "FIELD_ERROR": float(fieldError),
-        "OBJECTIVE_J": float(run_dict['J']),
-        "SEARCH_OBJECTIVE_J": float(run_dict['search_eval']['total']),
-        "FINAL_SEARCH_SURFACE_WEIGHTS": run_dict['search_eval']['surface_weights'].tolist(),
+        "OBJECTIVE_J": objective_j,
+        "SEARCH_OBJECTIVE_J": search_objective_j,
+        "FINAL_SEARCH_SURFACE_WEIGHTS": final_search_surface_weights,
         "SELF_INTERSECTING": run_dict['intersecting'],
         "MAX_CURVATURE": float(final_max_curvature),
-        "COIL_LENGTH": float(curvelength.J()),
-        "CURVE_CURVE_MIN_DIST": float(JCurveCurve.shortest_distance()),
-        "CURVE_SURFACE_MIN_DIST": float(JCurveSurface.shortest_distance()),
-        "SURFACE_VESSEL_MIN_DIST": float(np.min(cdist(
-            outer_surface_data['boozer_surface'].surface.gamma().reshape((-1, 3)),
-            VV.gamma().reshape((-1, 3)),
-        ))),
-        "NONQS_RATIO": float(JnonQSRatio.J()),
-        "BOOZER_RESIDUAL": float(JBoozerResidual.J()),
+        "COIL_LENGTH": coil_length,
+        "CURVE_CURVE_MIN_DIST": curve_curve_min_dist,
+        "CURVE_SURFACE_MIN_DIST": curve_surface_min_dist,
+        "SURFACE_VESSEL_MIN_DIST": surface_vessel_min_dist,
+        "HARDWARE_CONSTRAINTS_OK": final_hardware_status["success"],
+        "HARDWARE_CONSTRAINT_VIOLATIONS": final_hardware_status["violations"],
+        "NONQS_RATIO": nonqs_ratio,
+        "BOOZER_RESIDUAL": boozer_residual,
         "INITIAL_VOLUME": float(initial_volume),
         "INITIAL_IOTA": float(initial_iota),
         "INITIAL_FIELD_ERROR": float(initial_field_error),
