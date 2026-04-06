@@ -50,6 +50,12 @@ EXAMPLE_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, ".."))
 
 import sys
 sys.path.insert(0, EXAMPLE_ROOT)
+from alm_utils import (
+    ALMSettings,
+    augmented_objective,
+    minimize_alm,
+    validate_alm_cli_args,
+)
 from plotting_utils import norm_field_plot, cross_section_plot
 from topology_scorer import midplane_seed_radii as _midplane_seed_radii, score_topology, stop_reason_label as _topology_stop_reason, toroidal_angle as _topology_toroidal_angle
 SIMSOPT_ROOT = os.path.abspath(os.path.join(EXAMPLE_ROOT, "..", ".."))
@@ -442,6 +448,42 @@ def parse_args():
         type=float,
         default=float(os.environ.get("GTOL", "1e-15")),
         help="L-BFGS-B gradient tolerance (default: 1e-15).",
+    )
+    parser.add_argument(
+        "--constraint-method",
+        choices=["penalty", "alm"],
+        default=os.environ.get("CONSTRAINT_METHOD", "penalty"),
+        help="Use the legacy weighted-penalty objective or the augmented Lagrangian outer loop.",
+    )
+    parser.add_argument(
+        "--alm-max-outer-iters",
+        type=int,
+        default=int(os.environ.get("ALM_MAX_OUTER_ITERS", "10")),
+        help="Maximum number of ALM outer iterations (default 10).",
+    )
+    parser.add_argument(
+        "--alm-penalty-init",
+        type=float,
+        default=float(os.environ.get("ALM_PENALTY_INIT", "1.0")),
+        help="Initial ALM penalty parameter (default 1.0).",
+    )
+    parser.add_argument(
+        "--alm-penalty-scale",
+        type=float,
+        default=float(os.environ.get("ALM_PENALTY_SCALE", "10.0")),
+        help="Multiplicative ALM penalty growth factor (default 10.0).",
+    )
+    parser.add_argument(
+        "--alm-feas-tol",
+        type=float,
+        default=float(os.environ.get("ALM_FEAS_TOL", "1e-6")),
+        help="ALM max-violation stopping tolerance (default 1e-6).",
+    )
+    parser.add_argument(
+        "--alm-stationarity-tol",
+        type=float,
+        default=float(os.environ.get("ALM_STATIONARITY_TOL", "1e-6")),
+        help="ALM augmented-gradient stopping tolerance (default 1e-6).",
     )
     parser.add_argument("--iota-target", type=float, default=float(os.environ.get("IOTA_TARGET", "0.15")))
     parser.add_argument("--num-tf-coils", type=int, default=int(os.environ.get("NUM_TF_COILS", "20")))
@@ -1284,6 +1326,7 @@ def build_run_identity_config(
     stage2_bs_path,
     stage,
     constraint_weight,
+    constraint_method,
     vol_target,
     iota_target,
     boozer_I,
@@ -1293,11 +1336,13 @@ def build_run_identity_config(
     rng_seed,
 ):
     return (
-        f"{stage2_bs_path}|{stage}|{constraint_weight}|{vol_target}|{iota_target}|{boozer_I}"
+        f"{stage2_bs_path}|{stage}|{constraint_weight}|{constraint_method}|{vol_target}|{iota_target}|{boozer_I}"
         f"|{args.cc_dist}|{args.cc_weight}|{args.curvature_weight}|{args.curvature_threshold}"
         f"|{banana_surf_radius}|{nphi}|{ntheta}|{args.init_only}"
         f"|{args.basin_hops}|{args.basin_stepsize}|{rng_seed}"
         f"|{args.ftol}|{args.gtol}"
+        f"|{args.alm_max_outer_iters}|{args.alm_penalty_init}|{args.alm_penalty_scale}"
+        f"|{args.alm_feas_tol}|{args.alm_stationarity_tol}"
         f"|{args.num_surfaces}|{args.inner_surface_ratio}|{args.surface_gap_threshold}"
         f"|{MULTISURFACE_RAMP_ITERATIONS}|{INNER_SURFACE_INITIAL_WEIGHT}"
         f"|{args.multisurface_initial_step_scale}|{args.multisurface_initial_step_maxiter}"
@@ -1407,6 +1452,157 @@ def evaluate_total_objective(
     }
 
 
+def evaluate_base_objective(
+    surface_weights,
+    nonQSs,
+    brs,
+    RES_WEIGHT,
+    Jiota,
+    IOTAS_WEIGHT,
+    JCurveLength,
+    LENGTH_WEIGHT,
+):
+    J_QS_obj = average_surface_objectives(nonQSs, weights=surface_weights)
+    J_Boozer_obj = average_surface_objectives(brs, weights=surface_weights)
+    base_objective = (
+        J_QS_obj
+        + RES_WEIGHT * J_Boozer_obj
+        + IOTAS_WEIGHT * Jiota
+        + LENGTH_WEIGHT * JCurveLength
+    )
+    return {
+        "total": base_objective.J(),
+        "grad": base_objective.dJ(),
+        "J_QS": J_QS_obj.J(),
+        "dJ_QS": J_QS_obj.dJ(),
+        "J_Boozer": J_Boozer_obj.J(),
+        "dJ_Boozer": J_Boozer_obj.dJ(),
+        "J_iota": Jiota.J(),
+        "dJ_iota": Jiota.dJ(),
+        "J_len": JCurveLength.J(),
+        "dJ_len": JCurveLength.dJ(),
+        "surface_weights": np.asarray(surface_weights, dtype=float).copy(),
+    }
+
+
+def evaluate_alm_objective(
+    surface_weights,
+    nonQSs,
+    brs,
+    RES_WEIGHT,
+    Jiota,
+    IOTAS_WEIGHT,
+    JCurveLength,
+    LENGTH_WEIGHT,
+    JCurveCurve,
+    JCurveSurface,
+    JCurvature,
+    multipliers,
+    penalty,
+    JSurfSurf=None,
+):
+    base_eval = evaluate_base_objective(
+        surface_weights,
+        nonQSs,
+        brs,
+        RES_WEIGHT,
+        Jiota,
+        IOTAS_WEIGHT,
+        JCurveLength,
+        LENGTH_WEIGHT,
+    )
+
+    constraint_names = [
+        "coil_coil_spacing",
+        "coil_surface_spacing",
+        "max_curvature",
+    ]
+    constraint_values = [
+        float(JCurveCurve.J()),
+        float(JCurveSurface.J()),
+        float(JCurvature.J()),
+    ]
+    constraint_grads = [
+        np.asarray(JCurveCurve.dJ(), dtype=float),
+        np.asarray(JCurveSurface.dJ(), dtype=float),
+        np.asarray(JCurvature.dJ(), dtype=float),
+    ]
+    if JSurfSurf is not None:
+        constraint_names.append("surface_vessel_spacing")
+        constraint_values.append(float(JSurfSurf.J()))
+        constraint_grads.append(np.asarray(JSurfSurf.dJ(), dtype=float))
+
+    alm_eval = augmented_objective(
+        base_eval["total"],
+        base_eval["grad"],
+        constraint_values,
+        constraint_grads,
+        multipliers,
+        penalty,
+    )
+    base_total = float(base_eval["total"])
+    base_eval.update(alm_eval)
+    base_eval["base_total"] = base_total
+    base_eval["constraint_names"] = constraint_names
+    base_eval["J_cc"] = float(JCurveCurve.J())
+    base_eval["dJ_cc"] = np.asarray(JCurveCurve.dJ(), dtype=float)
+    base_eval["J_cs"] = float(JCurveSurface.J())
+    base_eval["dJ_cs"] = np.asarray(JCurveSurface.dJ(), dtype=float)
+    base_eval["J_surf"] = 0.0 if JSurfSurf is None else float(JSurfSurf.J())
+    base_eval["dJ_surf"] = (
+        np.zeros_like(np.asarray(base_eval["grad"], dtype=float))
+        if JSurfSurf is None
+        else np.asarray(JSurfSurf.dJ(), dtype=float)
+    )
+    base_eval["J_curvature"] = float(JCurvature.J())
+    base_eval["dJ_curvature"] = np.asarray(JCurvature.dJ(), dtype=float)
+    return base_eval
+
+
+def evaluate_search_objective(surface_weights):
+    if CONSTRAINT_METHOD == "alm":
+        return evaluate_alm_objective(
+            surface_weights,
+            nonQSs,
+            brs,
+            RES_WEIGHT,
+            Jiota,
+            IOTAS_WEIGHT,
+            JCurveLength,
+            LENGTH_WEIGHT,
+            JCurveCurve,
+            JCurveSurface,
+            JCurvature,
+            ALM_MULTIPLIERS,
+            ALM_PENALTY,
+            JSurfSurf=JSurfSurf,
+        )
+    return evaluate_total_objective(
+        surface_weights,
+        nonQSs,
+        brs,
+        RES_WEIGHT,
+        Jiota,
+        IOTAS_WEIGHT,
+        JCurveLength,
+        LENGTH_WEIGHT,
+        JCurveCurve,
+        CC_WEIGHT,
+        JCurveSurface,
+        CS_WEIGHT,
+        JCurvature,
+        CURVATURE_WEIGHT,
+        JSurfSurf=JSurfSurf,
+        SURF_DIST_WEIGHT=SURF_DIST_WEIGHT,
+    )
+
+
+def set_alm_runtime_state(multipliers, penalty):
+    global ALM_MULTIPLIERS, ALM_PENALTY
+    ALM_MULTIPLIERS = np.asarray(multipliers, dtype=float).copy()
+    ALM_PENALTY = float(penalty)
+
+
 def build_total_objective(JnonQSRatio, RES_WEIGHT, JBoozerResidual, IOTAS_WEIGHT, Jiota, LENGTH_WEIGHT, JCurveLength, CC_WEIGHT, JCurveCurve, CS_WEIGHT, JCurveSurface, CURVATURE_WEIGHT, JCurvature, SURF_DIST_WEIGHT=0.0, JSurfSurf=None):
     objective = (
         JnonQSRatio
@@ -1501,7 +1697,7 @@ def normPlot(surf, bs, filename):
     return mean_abs_relBfinal_norm
 
 
-def fun(x):
+def evaluate_search_step(x):
     """
     Objective function for L-BFGS-B optimization.
 
@@ -1515,8 +1711,7 @@ def fun(x):
         x: Current degrees of freedom (coil parameters)
 
     Returns:
-        J: Objective function value
-        dJ: Gradient of objective function
+        Dictionary with objective value and gradient for the current search step.
     """
     dx = np.linalg.norm(x - run_dict['x_prev'])
     outer_entry = surface_data[-1]
@@ -1554,24 +1749,7 @@ def fun(x):
             MULTISURFACE_RAMP_ITERATIONS,
             INNER_SURFACE_INITIAL_WEIGHT,
         )
-        objective_eval = evaluate_total_objective(
-            search_surface_weights,
-            nonQSs,
-            brs,
-            RES_WEIGHT,
-            Jiota,
-            IOTAS_WEIGHT,
-            JCurveLength,
-            LENGTH_WEIGHT,
-            JCurveCurve,
-            CC_WEIGHT,
-            JCurveSurface,
-            CS_WEIGHT,
-            JCurvature,
-            CURVATURE_WEIGHT,
-            JSurfSurf=JSurfSurf,
-            SURF_DIST_WEIGHT=SURF_DIST_WEIGHT,
-        )
+        objective_eval = evaluate_search_objective(search_surface_weights)
         J = objective_eval['total']
         dJ = objective_eval['grad']
         run_dict['last_successful_eval'] = objective_eval
@@ -1655,7 +1833,30 @@ def fun(x):
         JF.x = run_dict['accepted_x']
         restore_surface_states(surface_data, run_dict['surface_state'])
 
-    return J, dJ
+    evaluation = {"total": J, "grad": dJ}
+    if CONSTRAINT_METHOD == "alm":
+        accepted_eval = run_dict.get("last_successful_eval", run_dict.get("search_eval"))
+        if accepted_eval is not None and "constraint_values" in accepted_eval:
+            evaluation.update(
+                {
+                    "constraint_values": np.asarray(accepted_eval["constraint_values"], dtype=float),
+                    "max_violation": float(accepted_eval["max_violation"]),
+                    "stationarity_norm": float(accepted_eval["stationarity_norm"]),
+                    "constraint_names": list(accepted_eval.get("constraint_names", [])),
+                    "base_total": float(
+                        accepted_eval.get(
+                            "base_total",
+                            accepted_eval.get("total", run_dict["J"]),
+                        )
+                    ),
+                }
+            )
+    return evaluation
+
+
+def fun(x):
+    evaluation = evaluate_search_step(x)
+    return evaluation["total"], evaluation["grad"]
 
 def callback(x):
     """
@@ -1691,24 +1892,7 @@ def callback(x):
     if 'last_successful_eval' in run_dict and np.array_equal(run_dict.get('last_successful_eval_weights', None), search_surface_weights):
         objective_eval = run_dict['last_successful_eval']
     else:
-        objective_eval = evaluate_total_objective(
-            search_surface_weights,
-            nonQSs,
-            brs,
-            RES_WEIGHT,
-            Jiota,
-            IOTAS_WEIGHT,
-            JCurveLength,
-            LENGTH_WEIGHT,
-            JCurveCurve,
-            CC_WEIGHT,
-            JCurveSurface,
-            CS_WEIGHT,
-            JCurvature,
-            CURVATURE_WEIGHT,
-            JSurfSurf=JSurfSurf,
-            SURF_DIST_WEIGHT=SURF_DIST_WEIGHT,
-        )
+        objective_eval = evaluate_search_objective(search_surface_weights)
     run_dict['surface_state'] = snapshot_surface_states(surface_data)
     run_dict['accepted_x'] = x.copy()
     run_dict['J'] = objective_eval['total']
@@ -1794,6 +1978,11 @@ def callback(x):
     print("="*70, file=buffer)
     print(f"ITERATION {run_dict['it']}", file=buffer)
     print(f"{'Objective J':{width}} = {J:.6e}", file=buffer)
+    if CONSTRAINT_METHOD == "alm":
+        print(f"{'Base Objective J':{width}} = {objective_eval['base_total']:.6e}", file=buffer)
+        print(f"{'ALM outer iter':{width}} = {run_dict.get('alm_outer_iteration')}", file=buffer)
+        print(f"{'ALM penalty μ':{width}} = {ALM_PENALTY:.6e}", file=buffer)
+        print(f"{'ALM multipliers':{width}} = {ALM_MULTIPLIERS.tolist()}", file=buffer)
     print(f"{'||∇J||':{width}} = {np.linalg.norm(grad):.6e}", file=buffer)
     print(f"{'nonQS ratio':{width}} = {J_QS:.6e} (dJ = {dJ_QS:.6e})", file=buffer)
     print(f"{'Boozer Residual':{width}} = {J_Boozer:.6e} (dJ = {dJ_Boozer:.6e})", file=buffer)
@@ -1933,6 +2122,9 @@ TOPOLOGY_GATE_FIELDLINES = 0
 TOPOLOGY_GATE_TMAX = 2.0
 TOPOLOGY_GATE_TOL = 1e-7
 TOPOLOGY_GATE_SURVIVAL_THRESHOLD = 0.0
+CONSTRAINT_METHOD = "penalty"
+ALM_MULTIPLIERS = np.zeros(0, dtype=float)
+ALM_PENALTY = 1.0
 CHECKPOINT_EVERY = 0
 TOPOLOGY_SCORER_EVERY = 0
 TOPOLOGY_SCORER_NFIELDLINES = 12
@@ -1965,6 +2157,9 @@ if __name__ == "__main__":
     # Optimization targets and weights
     vol_target = args.vol_target
     CONSTRAINT_WEIGHT = None if args.constraint_weight < 0 else args.constraint_weight
+    CONSTRAINT_METHOD = args.constraint_method
+    ALM_MULTIPLIERS = np.zeros(0, dtype=float)
+    ALM_PENALTY = args.alm_penalty_init
     boozer_I = args.boozer_I
     MAXITER = args.maxiter
     CHECKPOINT_EVERY = args.checkpoint_every
@@ -1997,6 +2192,7 @@ if __name__ == "__main__":
         raise ValueError("--topology-gate-survival-threshold must be between 0 and 1")
     if args.topology_gate_penalty_scale < 0.0:
         raise ValueError("--topology-gate-penalty-scale must be non-negative")
+    validate_alm_cli_args(args)
     validate_confinement_surrogate_args(args)
     MULTISURFACE_RAMP_ITERATIONS = args.multisurface_ramp_iterations
     INNER_SURFACE_INITIAL_WEIGHT = args.inner_surface_initial_weight
@@ -2064,6 +2260,7 @@ if __name__ == "__main__":
         stage2_bs_path,
         stage,
         CONSTRAINT_WEIGHT,
+        args.constraint_method,
         vol_target,
         iota_target,
         boozer_I,
@@ -2190,6 +2387,9 @@ if __name__ == "__main__":
 
     # Extract degrees of freedom
     dofs = JF.x
+    if CONSTRAINT_METHOD == "alm":
+        ALM_MULTIPLIERS = np.zeros(4 if JSurfSurf is not None else 3, dtype=float)
+        ALM_PENALTY = args.alm_penalty_init
 
     # ==============================================================================
     # INITIALIZE OPTIMIZATION STATE
@@ -2201,24 +2401,7 @@ if __name__ == "__main__":
         MULTISURFACE_RAMP_ITERATIONS,
         INNER_SURFACE_INITIAL_WEIGHT,
     )
-    initial_search_eval = evaluate_total_objective(
-        initial_search_surface_weights,
-        nonQSs,
-        brs,
-        RES_WEIGHT,
-        Jiota,
-        IOTAS_WEIGHT,
-        JCurveLength,
-        LENGTH_WEIGHT,
-        JCurveCurve,
-        CC_WEIGHT,
-        JCurveSurface,
-        CS_WEIGHT,
-        JCurvature,
-        CURVATURE_WEIGHT,
-        JSurfSurf=JSurfSurf,
-        SURF_DIST_WEIGHT=SURF_DIST_WEIGHT,
-    )
+    initial_search_eval = evaluate_search_objective(initial_search_surface_weights)
     initial_search_gate = build_surface_search_gate(
         len(surface_data),
         0,
@@ -2274,6 +2457,9 @@ if __name__ == "__main__":
     phase1_iterations = None
     phase1_termination_message = None
     phase1_success = None
+    alm_result = None
+    if CONSTRAINT_METHOD == "alm" and args.num_surfaces != 1:
+        raise ValueError("--constraint-method=alm currently requires --num-surfaces=1")
     if args.init_only:
         res_nit = 0
         final_volume = initial_volume
@@ -2283,6 +2469,54 @@ if __name__ == "__main__":
         termination_message = "init_only"
         optimizer_success = True
         print("Skipping single-stage optimizer because --init-only was provided.")
+    elif CONSTRAINT_METHOD == "alm":
+        if args.basin_hops > 0:
+            raise ValueError("--basin-hops is not supported with --constraint-method=alm")
+        alm_settings = ALMSettings(
+            max_outer_iterations=args.alm_max_outer_iters,
+            penalty_init=args.alm_penalty_init,
+            penalty_scale=args.alm_penalty_scale,
+            feasibility_tol=args.alm_feas_tol,
+            stationarity_tol=args.alm_stationarity_tol,
+        )
+
+        def evaluate_problem(inner_x, multipliers, penalty):
+            set_alm_runtime_state(multipliers, penalty)
+            return evaluate_search_step(inner_x)
+
+        def outer_state_callback(outer_iteration, multipliers, penalty):
+            set_alm_runtime_state(multipliers, penalty)
+            run_dict["alm_outer_iteration"] = int(outer_iteration)
+            print(
+                f"[ALM] outer_iteration={outer_iteration}, "
+                f"multipliers={np.asarray(multipliers, dtype=float).tolist()}, "
+                f"penalty={float(penalty):.3e}"
+            )
+
+        set_alm_runtime_state(
+            np.zeros(4 if JSurfSurf is not None else 3, dtype=float),
+            args.alm_penalty_init,
+        )
+        res = minimize_alm(
+            dofs,
+            ["coil_coil_spacing", "coil_surface_spacing", "max_curvature"]
+            + (["surface_vessel_spacing"] if JSurfSurf is not None else []),
+            evaluate_problem,
+            alm_settings,
+            {
+                "maxiter": MAXITER,
+                "maxcor": args.maxcor,
+                "ftol": ftol,
+                "gtol": gtol,
+            },
+            inner_callback=callback,
+            outer_state_callback=outer_state_callback,
+        )
+        alm_result = res
+        res_nit = res.nit
+        termination_message = str(res.message)
+        optimizer_success = bool(res.success)
+        print(res.message)
     elif args.basin_hops > 0:
         # Basin-hopping: perturb DOFs and re-run L-BFGS-B multiple times, keep best
         minimizer_kwargs = {
@@ -2375,6 +2609,9 @@ if __name__ == "__main__":
             optimizer_success = bool(res.success)
             print(termination_message)
 
+    if alm_result is not None:
+        set_alm_runtime_state(alm_result.multipliers, alm_result.penalty)
+
     # ==============================================================================
     # SAVE OPTIMIZED STATE
     # ==============================================================================
@@ -2392,7 +2629,11 @@ if __name__ == "__main__":
             vessel_gap_threshold=SS_DIST if len(surface_data) > 1 else 0.0,
         )
 
-        full_objective_eval = evaluate_total_objective(
+        full_objective_eval = evaluate_search_objective(np.ones(len(surface_data)))
+        run_dict['J'] = full_objective_eval['total']
+        run_dict['dJ'] = full_objective_eval['grad'].copy()
+        run_dict['full_eval'] = full_objective_eval
+        run_dict['base_eval'] = evaluate_base_objective(
             np.ones(len(surface_data)),
             nonQSs,
             brs,
@@ -2401,18 +2642,7 @@ if __name__ == "__main__":
             IOTAS_WEIGHT,
             JCurveLength,
             LENGTH_WEIGHT,
-            JCurveCurve,
-            CC_WEIGHT,
-            JCurveSurface,
-            CS_WEIGHT,
-            JCurvature,
-            CURVATURE_WEIGHT,
-            JSurfSurf=JSurfSurf,
-            SURF_DIST_WEIGHT=SURF_DIST_WEIGHT,
         )
-        run_dict['J'] = full_objective_eval['total']
-        run_dict['dJ'] = full_objective_eval['grad'].copy()
-        run_dict['full_eval'] = full_objective_eval
 
         # Save optimized coil configurations
         curves_to_vtk(curves, OUT_DIR_ITER + "/curves_opt", close=True)
@@ -2439,6 +2669,7 @@ if __name__ == "__main__":
         final_surface_volumes = initial_surface_volumes
         final_surface_iotas = initial_surface_iotas
         run_dict['full_eval'] = None
+        run_dict['base_eval'] = None
         run_dict['J'] = None
         run_dict['dJ'] = None
 
@@ -2449,6 +2680,7 @@ if __name__ == "__main__":
         bs,
     )
     objective_j = float(run_dict['J']) if run_dict['J'] is not None else None
+    base_objective_j = None if run_dict['base_eval'] is None else float(run_dict['base_eval']['total'])
     search_objective_j = float(run_dict['search_eval']['total'])
     final_search_surface_weights = run_dict['search_eval']['surface_weights'].tolist()
     coil_length = float(curvelength.J())
@@ -2508,6 +2740,7 @@ if __name__ == "__main__":
         "TOPOLOGY_GATE_PENALTY_SCALE": TOPOLOGY_GATE_PENALTY_SCALE,
         "boozer_stage": stage,
         "CONSTRAINT_WEIGHT": CONSTRAINT_WEIGHT,
+        "CONSTRAINT_METHOD": CONSTRAINT_METHOD,
         "CC_DIST": CC_DIST,
         "CC_WEIGHT": CC_WEIGHT,
         "CS_DIST": CS_DIST,
@@ -2528,6 +2761,16 @@ if __name__ == "__main__":
         "iterations": res_nit,
         "FTOL": ftol,
         "GTOL": gtol,
+        "ALM_MAX_OUTER_ITERS": args.alm_max_outer_iters if CONSTRAINT_METHOD == "alm" else None,
+        "ALM_OUTER_ITERATIONS": getattr(alm_result, "outer_iterations", None),
+        "ALM_PENALTY_INIT": args.alm_penalty_init if CONSTRAINT_METHOD == "alm" else None,
+        "ALM_PENALTY_SCALE": args.alm_penalty_scale if CONSTRAINT_METHOD == "alm" else None,
+        "ALM_FEAS_TOL": args.alm_feas_tol if CONSTRAINT_METHOD == "alm" else None,
+        "ALM_STATIONARITY_TOL": args.alm_stationarity_tol if CONSTRAINT_METHOD == "alm" else None,
+        "ALM_FINAL_PENALTY": getattr(alm_result, "penalty", None),
+        "ALM_FINAL_MULTIPLIERS": getattr(alm_result, "multipliers", None),
+        "ALM_FINAL_CONSTRAINT_VALUES": getattr(alm_result, "constraint_values", None),
+        "ALM_HISTORY": getattr(alm_result, "history", None),
         "TERMINATION_MESSAGE": termination_message,
         "OPTIMIZER_SUCCESS": optimizer_success,
         "CHECKPOINT_EVERY": CHECKPOINT_EVERY,
@@ -2564,6 +2807,7 @@ if __name__ == "__main__":
         "FINAL_IOTA": float(final_iota),
         "FIELD_ERROR": float(fieldError),
         "OBJECTIVE_J": objective_j,
+        "BASE_OBJECTIVE_J": base_objective_j,
         "SEARCH_OBJECTIVE_J": search_objective_j,
         "FINAL_SEARCH_SURFACE_WEIGHTS": final_search_surface_weights,
         "SELF_INTERSECTING": run_dict['intersecting'],

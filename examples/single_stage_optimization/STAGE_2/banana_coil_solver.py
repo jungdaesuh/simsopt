@@ -11,13 +11,31 @@ from simsopt.geo import (SurfaceRZFourier, curves_to_vtk, create_equally_spaced_
 from simsopt.objectives import SquaredFlux, QuadraticPenalty
 from simsopt.geo import CurveCWSFourierCPP
 import json
-from numba import njit
+try:
+    from numba import njit
+except ModuleNotFoundError:
+    def njit(*args, **kwargs):
+        if args and callable(args[0]) and len(args) == 1 and not kwargs:
+            return args[0]
+
+        def decorator(func):
+            return func
+
+        return decorator
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 EXAMPLE_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, ".."))
 
 import sys
 sys.path.insert(0, EXAMPLE_ROOT)
+from alm_utils import (
+    ALMSettings,
+    augmented_objective,
+    minimize_alm,
+    upper_bound_residual,
+    validate_alm_cli_args,
+    zero_gradient_like,
+)
 from plotting_utils import norm_field_plot, magnitude_field_plot, cross_section_plot
 
 SIMSOPT_ROOT = os.path.abspath(os.path.join(EXAMPLE_ROOT, "..", ".."))
@@ -98,6 +116,42 @@ def parse_args():
         type=float,
         default=float(os.environ.get("GTOL", "1e-15")),
         help="L-BFGS-B projected gradient tolerance. Default 1e-15 effectively lets maxiter control termination.",
+    )
+    parser.add_argument(
+        "--constraint-method",
+        choices=["penalty", "alm"],
+        default=os.environ.get("CONSTRAINT_METHOD", "penalty"),
+        help="Use the legacy weighted-penalty objective or the augmented Lagrangian outer loop.",
+    )
+    parser.add_argument(
+        "--alm-max-outer-iters",
+        type=int,
+        default=int(os.environ.get("ALM_MAX_OUTER_ITERS", "10")),
+        help="Maximum number of ALM outer iterations (default 10).",
+    )
+    parser.add_argument(
+        "--alm-penalty-init",
+        type=float,
+        default=float(os.environ.get("ALM_PENALTY_INIT", "1.0")),
+        help="Initial ALM penalty parameter (default 1.0).",
+    )
+    parser.add_argument(
+        "--alm-penalty-scale",
+        type=float,
+        default=float(os.environ.get("ALM_PENALTY_SCALE", "10.0")),
+        help="Multiplicative ALM penalty growth factor (default 10.0).",
+    )
+    parser.add_argument(
+        "--alm-feas-tol",
+        type=float,
+        default=float(os.environ.get("ALM_FEAS_TOL", "1e-6")),
+        help="ALM max-violation stopping tolerance (default 1e-6).",
+    )
+    parser.add_argument(
+        "--alm-stationarity-tol",
+        type=float,
+        default=float(os.environ.get("ALM_STATIONARITY_TOL", "1e-6")),
+        help="ALM augmented-gradient stopping tolerance (default 1e-6).",
     )
     parser.add_argument(
         "--length-weight",
@@ -499,11 +553,71 @@ def evaluate_stage2_hardware_constraints(
     }
 
 
+def evaluate_stage2_alm_problem(
+    dofs,
+    base_objective,
+    new_bs,
+    new_surf,
+    Jf,
+    Jls,
+    length_target,
+    Jccdist,
+    Jc,
+    multipliers,
+    penalty,
+):
+    base_objective.x = dofs
+    base_value = float(base_objective.J())
+    base_grad = np.asarray(base_objective.dJ(), dtype=float)
+
+    coil_length = float(Jls.J())
+    length_violation = upper_bound_residual(coil_length, length_target)
+    if length_violation > 0.0:
+        length_grad = np.asarray(Jls.dJ(), dtype=float)
+    else:
+        length_grad = zero_gradient_like(base_grad)
+
+    curve_curve_violation = float(Jccdist.J())
+    curve_curve_grad = np.asarray(Jccdist.dJ(), dtype=float)
+    curvature_violation = float(Jc.J())
+    curvature_grad = np.asarray(Jc.dJ(), dtype=float)
+
+    evaluation = augmented_objective(
+        base_value,
+        base_grad,
+        [length_violation, curve_curve_violation, curvature_violation],
+        [length_grad, curve_curve_grad, curvature_grad],
+        multipliers,
+        penalty,
+    )
+    evaluation.update(
+        {
+            "base_value": base_value,
+            "constraint_names": [
+                "coil_length_upper_bound",
+                "coil_coil_spacing",
+                "max_curvature",
+            ],
+        }
+    )
+
+    unitn = new_surf.unitnormal()
+    BdotN = np.mean(np.abs(np.sum(new_bs.B().reshape(unitn.shape) * unitn, axis=2)))
+    outstr = f"ALM J={evaluation['total']:.1e}, Jflux={base_value:.1e}, Jf={Jf.J():.1e}, ⟨B·n⟩={BdotN:.1e}"
+    outstr += f", Len={coil_length:.1f}m, Len+={length_violation:.2e}"
+    outstr += f", C-C-Sep={Jccdist.shortest_distance():.2f}m, CC+={curve_curve_violation:.2e}"
+    outstr += f", Curvature={np.max(Jc.curve.kappa()):.2f}, Curv+={curvature_violation:.2e}"
+    outstr += f", ║∇L_A║={evaluation['stationarity_norm']:.1e}, μ={penalty:.1e}"
+    print(outstr)
+    return evaluation
+
+
 
 if __name__ == "__main__":
     # PRE-INITIALIZATION
     # ---------------------------------------------------------------------------------------
     args = parse_args()
+    validate_alm_cli_args(args)
 
     # File for the desired boundary magnetic surface:
     plasma_surf_filename = args.plasma_surf_filename
@@ -597,10 +711,12 @@ if __name__ == "__main__":
     # TOTAL OBJECTIVE FUNCTION -
     # we'll penalize the coil length, coil-coil distance, and curvature while minimizing the normal field
     SQUARED_FLUX_WEIGHT = args.squared_flux_weight
+    CONSTRAINT_METHOD = args.constraint_method
     JF = SQUARED_FLUX_WEIGHT * Jf \
         + LENGTH_WEIGHT * QuadraticPenalty(Jls, LENGTH_TARGET, "max") \
         + CC_WEIGHT * Jccdist \
         + CURVATURE_WEIGHT * Jc
+    BASE_OBJECTIVE = SQUARED_FLUX_WEIGHT * Jf
 
     rng_seed = None
     basin_hop_count = None
@@ -610,17 +726,76 @@ if __name__ == "__main__":
         bh_suffix = f"-BH={args.basin_hops}-BS={args.basin_stepsize:g}-BSeed={rng_seed}"
     else:
         bh_suffix = ""
-    OUT_DIR_ITER = f"{OUT_DIR}R0={R0:g}-s={s:g}-LW={LENGTH_WEIGHT:g}-CCW={CC_WEIGHT:g}-CCT={CC_THRESHOLD:g}-CW={CURVATURE_WEIGHT:g}-CT={CURVATURE_THRESHOLD:g}-SR={banana_surf_radius:0.3f}-Order={order}{bh_suffix}/"
+    alm_suffix = ""
+    if CONSTRAINT_METHOD == "alm":
+        alm_suffix = (
+            f"-CM=alm-ALMOuter={args.alm_max_outer_iters}"
+            f"-ALMMu={args.alm_penalty_init:g}-ALMScale={args.alm_penalty_scale:g}"
+        )
+    else:
+        alm_suffix = "-CM=penalty"
+    OUT_DIR_ITER = f"{OUT_DIR}R0={R0:g}-s={s:g}-LW={LENGTH_WEIGHT:g}-CCW={CC_WEIGHT:g}-CCT={CC_THRESHOLD:g}-CW={CURVATURE_WEIGHT:g}-CT={CURVATURE_THRESHOLD:g}-SR={banana_surf_radius:0.3f}-Order={order}{alm_suffix}{bh_suffix}/"
     os.makedirs(OUT_DIR_ITER, exist_ok=True)
 
     # minimize gets called, optimizes based on degrees of freedom from objective function
-    dofs = JF.x
+    dofs = BASE_OBJECTIVE.x if CONSTRAINT_METHOD == "alm" else JF.x
     fun = make_fun(JF, new_bs, new_surf, Jf, Jls, Jccdist, Jc)
+    alm_result = None
     if args.init_only:
         res_nit = 0
         optimizer_success = True
         termination_message = "init_only"
         print("Skipping Stage 2 optimizer because --init-only was provided.")
+    elif CONSTRAINT_METHOD == "alm":
+        if args.basin_hops > 0:
+            raise ValueError("--basin-hops is not supported with --constraint-method=alm")
+        alm_settings = ALMSettings(
+            max_outer_iterations=args.alm_max_outer_iters,
+            penalty_init=args.alm_penalty_init,
+            penalty_scale=args.alm_penalty_scale,
+            feasibility_tol=args.alm_feas_tol,
+            stationarity_tol=args.alm_stationarity_tol,
+        )
+
+        def evaluate_problem(inner_dofs, multipliers, penalty):
+            return evaluate_stage2_alm_problem(
+                inner_dofs,
+                BASE_OBJECTIVE,
+                new_bs,
+                new_surf,
+                Jf,
+                Jls,
+                LENGTH_TARGET,
+                Jccdist,
+                Jc,
+                multipliers,
+                penalty,
+            )
+
+        def outer_state_callback(outer_iteration, multipliers, penalty):
+            print(
+                f"[ALM] outer_iteration={outer_iteration}, "
+                f"multipliers={multipliers.tolist()}, penalty={penalty:.3e}"
+            )
+
+        res = minimize_alm(
+            dofs,
+            ["coil_length_upper_bound", "coil_coil_spacing", "max_curvature"],
+            evaluate_problem,
+            alm_settings,
+            {
+                "maxiter": MAXITER,
+                "maxcor": 300,
+                "ftol": args.ftol,
+                "gtol": args.gtol,
+            },
+            outer_state_callback=outer_state_callback,
+        )
+        alm_result = res
+        res_nit = res.nit
+        termination_message = str(res.message)
+        optimizer_success = bool(res.success)
+        print(res.message)
     elif args.basin_hops > 0:
         # Basin-hopping: perturb DOFs and re-run L-BFGS-B multiple times, keep best
         minimizer_kwargs = {
@@ -663,6 +838,7 @@ if __name__ == "__main__":
     # Ensure SIMSOPT state matches the best result (needed after basin-hopping)
     if not args.init_only:
         JF.x = res.x
+        BASE_OBJECTIVE.x = res.x
 
     # POST-OPTIMIZATION PROCESSING AND OUTPUTS
     # ---------------------------------------------------------------------------------------
@@ -718,6 +894,7 @@ if __name__ == "__main__":
         "CURVATURE_WEIGHT": CURVATURE_WEIGHT,
         "CURVATURE_THRESHOLD": CURVATURE_THRESHOLD,
         "LENGTH_WEIGHT": LENGTH_WEIGHT,
+        "CONSTRAINT_METHOD": CONSTRAINT_METHOD,
         "theta_center": theta_center,
         "phi_center": phi_center,
         "theta_width": theta_width,
@@ -738,6 +915,16 @@ if __name__ == "__main__":
         "basin_seed": rng_seed if args.basin_hops > 0 else None,
         "basin_iterations": basin_hop_count,
         "basin_minimization_failures": basin_minimization_failures,
+        "ALM_MAX_OUTER_ITERS": args.alm_max_outer_iters if CONSTRAINT_METHOD == "alm" else None,
+        "ALM_OUTER_ITERATIONS": getattr(alm_result, "outer_iterations", None),
+        "ALM_PENALTY_INIT": args.alm_penalty_init if CONSTRAINT_METHOD == "alm" else None,
+        "ALM_PENALTY_SCALE": args.alm_penalty_scale if CONSTRAINT_METHOD == "alm" else None,
+        "ALM_FEAS_TOL": args.alm_feas_tol if CONSTRAINT_METHOD == "alm" else None,
+        "ALM_STATIONARITY_TOL": args.alm_stationarity_tol if CONSTRAINT_METHOD == "alm" else None,
+        "ALM_FINAL_PENALTY": getattr(alm_result, "penalty", None),
+        "ALM_FINAL_MULTIPLIERS": getattr(alm_result, "multipliers", None),
+        "ALM_FINAL_CONSTRAINT_VALUES": getattr(alm_result, "constraint_values", None),
+        "ALM_HISTORY": getattr(alm_result, "history", None),
         "FINAL_VOLUME": float(new_surf.volume()),
         "FIELD_ERROR": float(fieldError),
         "SELF_INTERSECTING": intersecting,
