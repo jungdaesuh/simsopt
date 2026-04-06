@@ -39,3 +39,12 @@ __all__ = (
     + _module_all("utilities")
     + _module_all("constrained")
 )
+
+
+def __getattr__(name):
+    if name != "SquaredFluxJAX":
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    from .fluxobjective_jax import SquaredFluxJAX
+
+    globals()[name] = SquaredFluxJAX
+    return SquaredFluxJAX
