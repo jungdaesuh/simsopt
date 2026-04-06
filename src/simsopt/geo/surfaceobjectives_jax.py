@@ -67,6 +67,10 @@ _LEGACY_PROJECTION_HELPER_ERROR = (
 )
 
 
+def _host_scalar(value):
+    return np.asarray(jax.device_get(value)).item()
+
+
 def _explicit_cotangent_basis(length: int, index: int, *, dtype):
     basis = np.zeros(int(length), dtype=np.dtype(dtype))
     basis[int(index)] = 1.0
@@ -704,7 +708,7 @@ class NonQuasiSymmetricRatioJAX(Optimizable):
             axis=self.axis,
         )
 
-        self._J = float(_qs_ratio_pure(sdofs, coil_set_spec, **qs_kwargs))
+        self._J = float(_host_scalar(_qs_ratio_pure(sdofs, coil_set_spec, **qs_kwargs)))
 
         def J_of_coils(coil_dofs):
             return _qs_ratio_from_coil_dofs(
