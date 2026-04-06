@@ -131,7 +131,14 @@ def _hostify_tree(value):
 
 
 def _runtimeify_tree(value):
-    return _hostify_tree(value)
+    def _runtimeify_leaf(leaf):
+        if isinstance(leaf, jax.Array):
+            return _as_jax_float64(leaf)
+        if isinstance(leaf, (np.ndarray, np.generic)) or np.isscalar(leaf):
+            return _device_float64_array(leaf)
+        return leaf
+
+    return jax.tree_util.tree_map(_runtimeify_leaf, value)
 
 
 def _split_stage2_dofs(dofs, curve_dof_count=None):
@@ -176,17 +183,17 @@ def stage2_target_optimizer_state_to_dofs(state) -> jax.Array:
 
 
 def _fixed_curve_penalty(curves, minimum_distance):
-    total = _device_float64_array(0.0)
-    minimum_distance_jax = _device_float64_array(minimum_distance)
+    total = _as_jax_float64(0.0)
+    minimum_distance_jax = _as_jax_float64(minimum_distance)
     for i, (gamma_i, gammadash_i) in enumerate(curves):
-        gamma_i_jax = _device_float64_array(gamma_i)
-        gammadash_i_jax = _device_float64_array(gammadash_i)
+        gamma_i_jax = _as_jax_float64(gamma_i)
+        gammadash_i_jax = _as_jax_float64(gammadash_i)
         for gamma_j, gammadash_j in curves[:i]:
             total = total + cc_distance_pure(
                 gamma_i_jax,
                 gammadash_i_jax,
-                _device_float64_array(gamma_j),
-                _device_float64_array(gammadash_j),
+                _as_jax_float64(gamma_j),
+                _as_jax_float64(gammadash_j),
                 minimum_distance_jax,
             )
     return total
@@ -195,22 +202,26 @@ def _fixed_curve_penalty(curves, minimum_distance):
 def _curve_pairs_from_grouped_coil_set_spec(coil_set_spec):
     curve_pairs = []
     for group in coil_set_spec.groups:
-        gammas = np.asarray(jax.device_get(group.gammas), dtype=np.float64)
-        gammadashs = np.asarray(jax.device_get(group.gammadashs), dtype=np.float64)
-        for gamma, gammadash in zip(gammas, gammadashs):
-            curve_pairs.append((gamma, gammadash))
+        gammas, gammadashs = _curve_group_arrays(group)
+        group_size = int(gammas.shape[0])
+        for coil_index in range(group_size):
+            curve_pairs.append(
+                (
+                    gammas[coil_index],
+                    gammadashs[coil_index],
+                )
+            )
     return tuple(curve_pairs)
+
+
+def _curve_group_arrays(group):
+    return _as_jax_float64(group.gammas), _as_jax_float64(group.gammadashs)
 
 
 def _curve_groups_from_grouped_coil_set_spec(coil_set_spec):
     curve_groups = []
     for group in coil_set_spec.groups:
-        curve_groups.append(
-            (
-                np.asarray(jax.device_get(group.gammas), dtype=np.float64),
-                np.asarray(jax.device_get(group.gammadashs), dtype=np.float64),
-            )
-        )
+        curve_groups.append(_curve_group_arrays(group))
     return tuple(curve_groups)
 
 
@@ -378,10 +389,9 @@ def build_stage2_target_objective(
         definition=penalty_config.squared_flux_definition,
     )
     del field_eval_spec
-    flux_spec = _hostify_tree(flux_spec)
-    points = np.asarray(flux_spec.points, dtype=np.float64)
-    banana_curve_spec = _hostify_tree(curve_spec_from_curve(banana_curve))
-    curve_dof_count = int(np.asarray(banana_curve_spec.dofs, dtype=np.float64).shape[0])
+    points = _as_jax_float64(flux_spec.points)
+    banana_curve_spec = curve_spec_from_curve(banana_curve)
+    curve_dof_count = int(banana_curve_spec.dofs.shape[0])
     length_target = float(length_target)
     cc_threshold = float(cc_threshold)
     curvature_p_norm = float(curvature_p_norm)
@@ -393,22 +403,17 @@ def build_stage2_target_objective(
         tf_coil_spec = grouped_coil_set_spec_from_coil_specs(
             tuple(coil.to_spec() for coil in tf_coils)
         )
-        points_jax = _device_float64_array(points)
-        fixed_field = _as_host_float64(
-            grouped_biot_savart_B_from_spec(points_jax, tf_coil_spec)
-        )
+        fixed_field = grouped_biot_savart_B_from_spec(points, tf_coil_spec)
         tf_curve_data = _curve_pairs_from_grouped_coil_set_spec(tf_coil_spec)
         tf_curve_groups = _curve_groups_from_grouped_coil_set_spec(tf_coil_spec)
-        fixed_curve_penalty = float(
-            _as_host_float64(_fixed_curve_penalty(tf_curve_data, cc_threshold))
-        )
+        fixed_curve_penalty = _fixed_curve_penalty(tf_curve_data, cc_threshold)
     else:
-        fixed_field = np.zeros((points.shape[0], 3), dtype=np.float64)
+        fixed_field = jnp.zeros((points.shape[0], 3), dtype=jnp.float64)
         tf_curve_groups = ()
-        fixed_curve_penalty = 0.0
+        fixed_curve_penalty = _as_jax_float64(0.0)
 
-    banana_rotmats, banana_current_scales = (
-        _banana_symmetry_runtime_inputs_from_coils(banana_coils)
+    banana_rotmats, banana_current_scales = _banana_symmetry_runtime_inputs_from_coils(
+        banana_coils
     )
     banana_curve_spec_runtime = _runtimeify_tree(banana_curve_spec)
     tf_curve_groups_runtime = _runtimeify_tree(tf_curve_groups)
@@ -552,7 +557,9 @@ def build_stage2_target_objective(
         penalty_terms = jnp.asarray(
             (
                 length_excess * jnp.sqrt(least_squares_weights_jax[1]),
-                jnp.sqrt(two_jax * least_squares_weights_jax[2] * coil_distance_penalty),
+                jnp.sqrt(
+                    two_jax * least_squares_weights_jax[2] * coil_distance_penalty
+                ),
                 jnp.sqrt(two_jax * least_squares_weights_jax[3] * curvature_penalty),
             ),
             dtype=jnp.float64,

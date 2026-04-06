@@ -149,8 +149,12 @@ def test_stage2_target_optimizer_state_round_trips_flat_dofs():
     state = stage2_target_optimizer_state_from_dofs(dofs, curve_dof_count=4)
 
     assert isinstance(state, Stage2TargetOptimizerState)
-    np.testing.assert_allclose(np.asarray(state.current_dof), np.asarray(dofs[0]), atol=0.0)
-    np.testing.assert_allclose(np.asarray(state.curve_dofs), np.asarray(dofs[1:]), atol=0.0)
+    np.testing.assert_allclose(
+        np.asarray(state.current_dof), np.asarray(dofs[0]), atol=0.0
+    )
+    np.testing.assert_allclose(
+        np.asarray(state.curve_dofs), np.asarray(dofs[1:]), atol=0.0
+    )
     np.testing.assert_allclose(
         np.asarray(stage2_target_optimizer_state_to_dofs(state)),
         dofs,
@@ -3514,7 +3518,12 @@ class TestStage2OptimizerContract:
         assert np.all(np.isfinite(np.asarray(grad_vg, dtype=float)))
         np.testing.assert_allclose(float(value_vg), float(value), rtol=0.0, atol=0.0)
         np.testing.assert_allclose(
-            0.5 * float(np.vdot(np.asarray(residual, dtype=float), np.asarray(residual, dtype=float))),
+            0.5
+            * float(
+                np.vdot(
+                    np.asarray(residual, dtype=float), np.asarray(residual, dtype=float)
+                )
+            ),
             float(value),
             rtol=1e-12,
             atol=1e-18,
@@ -3544,7 +3553,12 @@ class TestStage2OptimizerContract:
 
         np.testing.assert_allclose(float(value_vg), float(value), rtol=0.0, atol=0.0)
         np.testing.assert_allclose(
-            0.5 * float(np.vdot(np.asarray(residual, dtype=float), np.asarray(residual, dtype=float))),
+            0.5
+            * float(
+                np.vdot(
+                    np.asarray(residual, dtype=float), np.asarray(residual, dtype=float)
+                )
+            ),
             float(value),
             rtol=1e-12,
             atol=1e-18,
@@ -3555,6 +3569,41 @@ class TestStage2OptimizerContract:
             rtol=1e-15,
             atol=1e-15,
         )
+
+    def test_target_scalar_objective_build_does_not_hostify_immutable_state(
+        self,
+        monkeypatch,
+    ):
+        def _reject_host_snapshot(*_args, **_kwargs):
+            raise AssertionError(
+                "Stage 2 target-objective build should keep immutable runtime "
+                "state in JAX form rather than hostifying it."
+            )
+
+        monkeypatch.setattr(
+            stage2_target_objective_module,
+            "_hostify_tree",
+            _reject_host_snapshot,
+        )
+        monkeypatch.setattr(
+            stage2_target_objective_module,
+            "_as_host_float64",
+            _reject_host_snapshot,
+        )
+
+        objective, target_bundle = _build_stage2_target_objective_contract_case()
+        dofs = jax.device_put(np.asarray(objective.x, dtype=np.float64))
+
+        value = target_bundle.objective(dofs)
+        assert target_bundle.value_and_grad is not None
+        value_vg, grad_vg = target_bundle.value_and_grad(dofs)
+        assert target_bundle.least_squares_residual is not None
+        residual = target_bundle.least_squares_residual(dofs)
+
+        assert np.isfinite(float(value))
+        assert np.isfinite(float(value_vg))
+        assert np.all(np.isfinite(np.asarray(grad_vg, dtype=float)))
+        assert np.all(np.isfinite(np.asarray(residual, dtype=float)))
 
     def test_target_scalar_objective_does_not_reenter_host_snapshot_after_build(
         self,
@@ -3646,8 +3695,8 @@ class TestStage2OptimizerContract:
         assert summary["device_count"] >= 1
 
     def test_target_dynamic_curve_builder_matches_apply_coil_symmetry(self):
-        _objective, _target_bundle, context = _build_stage2_target_objective_contract_case(
-            return_context=True
+        _objective, _target_bundle, context = (
+            _build_stage2_target_objective_contract_case(return_context=True)
         )
         banana_curve = context["banana_curve"]
         banana_coils = context["banana_coils"]
@@ -3703,8 +3752,8 @@ class TestStage2OptimizerContract:
         )
 
     def test_target_curve_distance_scan_matches_legacy_nested_loops(self):
-        _objective, _target_bundle, context = _build_stage2_target_objective_contract_case(
-            return_context=True
+        _objective, _target_bundle, context = (
+            _build_stage2_target_objective_contract_case(return_context=True)
         )
         banana_curve = context["banana_curve"]
         banana_coils = context["banana_coils"]
@@ -3728,11 +3777,15 @@ class TestStage2OptimizerContract:
             )
         )
 
-        tf_coil_spec = stage2_target_objective_module.grouped_coil_set_spec_from_coil_specs(
-            tuple(coil.to_spec() for coil in tf_coils)
+        tf_coil_spec = (
+            stage2_target_objective_module.grouped_coil_set_spec_from_coil_specs(
+                tuple(coil.to_spec() for coil in tf_coils)
+            )
         )
-        tf_curve_data = stage2_target_objective_module._curve_pairs_from_grouped_coil_set_spec(
-            tf_coil_spec
+        tf_curve_data = (
+            stage2_target_objective_module._curve_pairs_from_grouped_coil_set_spec(
+                tf_coil_spec
+            )
         )
         tf_curve_groups = (
             stage2_target_objective_module._curve_groups_from_grouped_coil_set_spec(
@@ -3751,27 +3804,33 @@ class TestStage2OptimizerContract:
         dynamic_pairs = tuple(zip(dynamic_gammas, dynamic_gammadashs))
         for gamma, gammadash in dynamic_pairs:
             for tf_gamma, tf_gammadash in tf_curve_data:
-                legacy_total = legacy_total + stage2_target_objective_module.cc_distance_pure(
-                    gamma,
-                    gammadash,
-                    stage2_target_objective_module._runtime_float64_array(
-                        tf_gamma,
-                        reference=gamma,
-                    ),
-                    stage2_target_objective_module._runtime_float64_array(
-                        tf_gammadash,
-                        reference=gammadash,
-                    ),
-                    minimum_distance,
+                legacy_total = (
+                    legacy_total
+                    + stage2_target_objective_module.cc_distance_pure(
+                        gamma,
+                        gammadash,
+                        stage2_target_objective_module._runtime_float64_array(
+                            tf_gamma,
+                            reference=gamma,
+                        ),
+                        stage2_target_objective_module._runtime_float64_array(
+                            tf_gammadash,
+                            reference=gammadash,
+                        ),
+                        minimum_distance,
+                    )
                 )
         for i, (gamma_i, gammadash_i) in enumerate(dynamic_pairs):
             for gamma_j, gammadash_j in dynamic_pairs[:i]:
-                legacy_total = legacy_total + stage2_target_objective_module.cc_distance_pure(
-                    gamma_i,
-                    gammadash_i,
-                    gamma_j,
-                    gammadash_j,
-                    minimum_distance,
+                legacy_total = (
+                    legacy_total
+                    + stage2_target_objective_module.cc_distance_pure(
+                        gamma_i,
+                        gammadash_i,
+                        gamma_j,
+                        gammadash_j,
+                        minimum_distance,
+                    )
                 )
 
         scan_total = stage2_target_objective_module._dynamic_curve_distance_penalty(
