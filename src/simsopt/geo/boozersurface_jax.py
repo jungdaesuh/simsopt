@@ -2027,13 +2027,13 @@ class BoozerSurfaceJAX(Optimizable):
             ),
             "type": "ls",
             "weight_inv_modB": weight_inv_modB,
-            "fun": float(result["fun"]),
+            "fun": float(_host_scalar(result["fun"])),
         }
         self.res = res
         self.need_to_run_code = False
 
         if verbose:
-            grad_norm = float(jnp.linalg.norm(res["jacobian"]))
+            grad_norm = float(np.linalg.norm(_host_numpy(res["jacobian"])))
             print(
                 f"NEWTON solve - success={res['success']}  "
                 f"iter={res['iter']}, iota={iota_out:.16f}, "
