@@ -61,6 +61,9 @@ from simsopt.field.biotsavart_jax_backend import BiotSavartJAX
 import simsopt.field.biotsavart_jax_backend as biotsavart_jax_backend_module
 from simsopt.field.biotsavart_jax import grouped_biot_savart_A
 from simsopt.jax_core import (
+    apply_coil_symmetry,
+    curve_spec_from_curve,
+    make_coil_symmetry_spec,
     grouped_biot_savart_B_from_inputs,
     grouped_biot_savart_B_from_spec,
 )
@@ -484,6 +487,23 @@ def _closure_has_jax_array_leaf(fn) -> bool:
         ):
             return True
     return False
+
+
+def _stage2_contract_case_base_curve_geometry(banana_curve):
+    banana_curve_spec = curve_spec_from_curve(banana_curve)
+    base_gamma, base_gammadash, _base_gammadashdash = (
+        stage2_target_objective_module.curve_geometry_from_dofs(
+            banana_curve_spec,
+            jnp.asarray(banana_curve_spec.dofs, dtype=jnp.float64),
+        )
+    )
+    return base_gamma, base_gammadash
+
+
+def _stage2_contract_case_banana_symmetry_inputs(banana_coils):
+    return stage2_target_objective_module._banana_symmetry_runtime_inputs_from_coils(
+        banana_coils
+    )
 
 
 def _centered_fd_gradient(fun, x, *, eps):
@@ -3574,6 +3594,160 @@ class TestStage2OptimizerContract:
         assert np.all(np.isfinite(np.asarray(raw_terms, dtype=float)))
         assert np.all(np.isfinite(np.asarray(grad, dtype=float)))
         assert np.all(np.isfinite(np.asarray(grad_vg, dtype=float)))
+
+    def test_target_dynamic_curve_builder_matches_apply_coil_symmetry(self):
+        _objective, _target_bundle, context = _build_stage2_target_objective_contract_case(
+            return_context=True
+        )
+        banana_curve = context["banana_curve"]
+        banana_coils = context["banana_coils"]
+        current_dof = jnp.asarray(1.25e4, dtype=jnp.float64)
+        base_gamma, base_gammadash = _stage2_contract_case_base_curve_geometry(
+            banana_curve
+        )
+        banana_rotmats, banana_current_scales = (
+            _stage2_contract_case_banana_symmetry_inputs(banana_coils)
+        )
+
+        dynamic_gammas, dynamic_gammadashs, dynamic_currents = (
+            stage2_target_objective_module._build_dynamic_curve_data(
+                base_gamma,
+                base_gammadash,
+                jnp.asarray(banana_rotmats, dtype=jnp.float64),
+                jnp.asarray(banana_current_scales, dtype=jnp.float64),
+                current_dof,
+            )
+        )
+
+        expected_gammas = []
+        expected_gammadashs = []
+        expected_currents = []
+        for rotmat, scale in zip(banana_rotmats, banana_current_scales):
+            gamma, gammadash, current = apply_coil_symmetry(
+                base_gamma,
+                base_gammadash,
+                current_dof,
+                make_coil_symmetry_spec(rotmat=rotmat, scale=scale),
+            )
+            expected_gammas.append(gamma)
+            expected_gammadashs.append(gammadash)
+            expected_currents.append(current)
+
+        np.testing.assert_allclose(
+            np.asarray(dynamic_gammas, dtype=float),
+            np.asarray(jnp.stack(expected_gammas), dtype=float),
+            rtol=0.0,
+            atol=0.0,
+        )
+        np.testing.assert_allclose(
+            np.asarray(dynamic_gammadashs, dtype=float),
+            np.asarray(jnp.stack(expected_gammadashs), dtype=float),
+            rtol=0.0,
+            atol=0.0,
+        )
+        np.testing.assert_allclose(
+            np.asarray(dynamic_currents, dtype=float),
+            np.asarray(jnp.stack(expected_currents), dtype=float),
+            rtol=0.0,
+            atol=0.0,
+        )
+
+    def test_target_curve_distance_scan_matches_legacy_nested_loops(self):
+        _objective, _target_bundle, context = _build_stage2_target_objective_contract_case(
+            return_context=True
+        )
+        banana_curve = context["banana_curve"]
+        banana_coils = context["banana_coils"]
+        tf_coils = context["tf_coils"]
+        current_dof = jnp.asarray(1.25e4, dtype=jnp.float64)
+        minimum_distance = jnp.asarray(0.05, dtype=jnp.float64)
+        base_gamma, base_gammadash = _stage2_contract_case_base_curve_geometry(
+            banana_curve
+        )
+        banana_rotmats, banana_current_scales = (
+            _stage2_contract_case_banana_symmetry_inputs(banana_coils)
+        )
+
+        dynamic_gammas, dynamic_gammadashs, _dynamic_currents = (
+            stage2_target_objective_module._build_dynamic_curve_data(
+                base_gamma,
+                base_gammadash,
+                jnp.asarray(banana_rotmats, dtype=jnp.float64),
+                jnp.asarray(banana_current_scales, dtype=jnp.float64),
+                current_dof,
+            )
+        )
+
+        tf_coil_spec = stage2_target_objective_module.grouped_coil_set_spec_from_coil_specs(
+            tuple(coil.to_spec() for coil in tf_coils)
+        )
+        tf_curve_data = stage2_target_objective_module._curve_pairs_from_grouped_coil_set_spec(
+            tf_coil_spec
+        )
+        tf_curve_groups = (
+            stage2_target_objective_module._curve_groups_from_grouped_coil_set_spec(
+                tf_coil_spec
+            )
+        )
+        fixed_curve_penalty = stage2_target_objective_module._fixed_curve_penalty(
+            tf_curve_data,
+            float(minimum_distance),
+        )
+
+        legacy_total = stage2_target_objective_module._runtime_float64_scalar(
+            fixed_curve_penalty,
+            reference=minimum_distance,
+        )
+        dynamic_pairs = tuple(zip(dynamic_gammas, dynamic_gammadashs))
+        for gamma, gammadash in dynamic_pairs:
+            for tf_gamma, tf_gammadash in tf_curve_data:
+                legacy_total = legacy_total + stage2_target_objective_module.cc_distance_pure(
+                    gamma,
+                    gammadash,
+                    stage2_target_objective_module._runtime_float64_array(
+                        tf_gamma,
+                        reference=gamma,
+                    ),
+                    stage2_target_objective_module._runtime_float64_array(
+                        tf_gammadash,
+                        reference=gammadash,
+                    ),
+                    minimum_distance,
+                )
+        for i, (gamma_i, gammadash_i) in enumerate(dynamic_pairs):
+            for gamma_j, gammadash_j in dynamic_pairs[:i]:
+                legacy_total = legacy_total + stage2_target_objective_module.cc_distance_pure(
+                    gamma_i,
+                    gammadash_i,
+                    gamma_j,
+                    gammadash_j,
+                    minimum_distance,
+                )
+
+        scan_total = stage2_target_objective_module._dynamic_curve_distance_penalty(
+            dynamic_gammas,
+            dynamic_gammadashs,
+            stage2_target_objective_module._runtimeify_tree(tf_curve_groups),
+            minimum_distance,
+            float(fixed_curve_penalty),
+        )
+
+        np.testing.assert_allclose(
+            float(scan_total),
+            float(legacy_total),
+            rtol=1e-12,
+            atol=1e-18,
+        )
+        scan_jaxpr = jax.make_jaxpr(
+            stage2_target_objective_module._dynamic_curve_distance_penalty
+        )(
+            dynamic_gammas,
+            dynamic_gammadashs,
+            stage2_target_objective_module._runtimeify_tree(tf_curve_groups),
+            minimum_distance,
+            float(fixed_curve_penalty),
+        )
+        assert "scan[" in str(scan_jaxpr)
 
     @pytest.mark.parametrize("definition", _SQUARED_FLUX_DEFINITIONS)
     def test_target_scalar_objective_matches_stage2_composite_contract(

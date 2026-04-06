@@ -18,10 +18,8 @@ from ..jax_core.field import (
     grouped_coil_set_spec_from_lists,
 )
 from ..jax_core import (
-    apply_coil_symmetry,
     curve_geometry_from_dofs,
     curve_spec_from_curve,
-    make_coil_symmetry_spec,
 )
 from ..jax_core.objectives_flux import (
     fixed_surface_flux_integral_from_B,
@@ -199,58 +197,137 @@ def _curve_pairs_from_grouped_coil_set_spec(coil_set_spec):
     return tuple(curve_pairs)
 
 
-def _build_dynamic_curve_data(
-    base_gamma,
-    base_gammadash,
-    banana_symmetry_specs,
-    current_dof,
-):
-    dynamic_gammas = []
-    dynamic_gammadashs = []
-    dynamic_currents = []
-    for symmetry_spec in banana_symmetry_specs:
-        gamma, gammadash, current = apply_coil_symmetry(
-            base_gamma,
-            base_gammadash,
-            current_dof,
-            symmetry_spec,
+def _curve_groups_from_grouped_coil_set_spec(coil_set_spec):
+    curve_groups = []
+    for group in coil_set_spec.groups:
+        curve_groups.append(
+            (
+                np.asarray(jax.device_get(group.gammas), dtype=np.float64),
+                np.asarray(jax.device_get(group.gammadashs), dtype=np.float64),
+            )
         )
-        dynamic_gammas.append(gamma)
-        dynamic_gammadashs.append(gammadash)
-        dynamic_currents.append(current)
+    return tuple(curve_groups)
+
+
+def _banana_symmetry_runtime_inputs_from_coils(banana_coils):
+    banana_rotmats = []
+    banana_current_scales = []
+    for _, rotmat, _, scale in (
+        _unwrap_coil_curve_and_current(coil) for coil in banana_coils
+    ):
+        if rotmat is None:
+            rotmat = np.eye(3, dtype=np.float64)
+        banana_rotmats.append(np.asarray(rotmat, dtype=np.float64))
+        banana_current_scales.append(float(scale))
     return (
-        tuple(dynamic_gammas),
-        tuple(dynamic_gammadashs),
-        jnp.stack(dynamic_currents),
+        np.asarray(banana_rotmats, dtype=np.float64),
+        np.asarray(banana_current_scales, dtype=np.float64),
     )
 
 
+def _build_dynamic_curve_data(
+    base_gamma,
+    base_gammadash,
+    banana_rotmats,
+    banana_current_scales,
+    current_dof,
+):
+    def _apply_one(rotmat, current_scale):
+        return (
+            base_gamma @ rotmat,
+            base_gammadash @ rotmat,
+            current_dof * current_scale,
+        )
+
+    return jax.vmap(_apply_one, in_axes=(0, 0))(
+        banana_rotmats,
+        banana_current_scales,
+    )
+
+
+def _pairwise_curve_distance_penalty_scan(
+    left_gammas,
+    left_gammadashs,
+    right_gammas,
+    right_gammadashs,
+    minimum_distance,
+    *,
+    strict_lower_triangle=False,
+):
+    zero = _runtime_float64_scalar(0.0, reference=minimum_distance)
+    if int(left_gammas.shape[0]) == 0 or int(right_gammas.shape[0]) == 0:
+        return zero
+
+    left_indices = jnp.arange(left_gammas.shape[0], dtype=jnp.int32)
+    right_indices = jnp.arange(right_gammas.shape[0], dtype=jnp.int32)
+
+    def _scan_left_chunks(total, left_inputs):
+        left_index, left_gamma, left_gammadash = left_inputs
+
+        def _scan_right_chunks(row_total, right_inputs):
+            right_index, right_gamma, right_gammadash = right_inputs
+            if strict_lower_triangle:
+                pair_penalty = jax.lax.cond(
+                    right_index < left_index,
+                    lambda _: cc_distance_pure(
+                        left_gamma,
+                        left_gammadash,
+                        right_gamma,
+                        right_gammadash,
+                        minimum_distance,
+                    ),
+                    lambda _: zero,
+                    operand=None,
+                )
+            else:
+                pair_penalty = cc_distance_pure(
+                    left_gamma,
+                    left_gammadash,
+                    right_gamma,
+                    right_gammadash,
+                    minimum_distance,
+                )
+            return row_total + pair_penalty, None
+
+        row_total, _ = jax.lax.scan(
+            _scan_right_chunks,
+            zero,
+            (right_indices, right_gammas, right_gammadashs),
+        )
+        return total + row_total, None
+
+    total, _ = jax.lax.scan(
+        _scan_left_chunks,
+        zero,
+        (left_indices, left_gammas, left_gammadashs),
+    )
+    return total
+
+
 def _dynamic_curve_distance_penalty(
-    dynamic_pairs,
-    tf_curve_data,
+    dynamic_gammas,
+    dynamic_gammadashs,
+    tf_curve_groups,
     minimum_distance,
     initial_penalty,
 ):
     total = _runtime_float64_scalar(initial_penalty, reference=minimum_distance)
-    for gamma, gammadash in dynamic_pairs:
-        for tf_gamma, tf_gammadash in tf_curve_data:
-            total = total + cc_distance_pure(
-                gamma,
-                gammadash,
-                _runtime_float64_array(tf_gamma, reference=gamma),
-                _runtime_float64_array(tf_gammadash, reference=gammadash),
-                minimum_distance,
-            )
-    for i, (gamma_i, gammadash_i) in enumerate(dynamic_pairs):
-        for gamma_j, gammadash_j in dynamic_pairs[:i]:
-            total = total + cc_distance_pure(
-                gamma_i,
-                gammadash_i,
-                gamma_j,
-                gammadash_j,
-                minimum_distance,
-            )
-    return total
+    for tf_gammas, tf_gammadashs in tf_curve_groups:
+        total = total + _pairwise_curve_distance_penalty_scan(
+            dynamic_gammas,
+            dynamic_gammadashs,
+            _runtime_float64_array(tf_gammas, reference=dynamic_gammas),
+            _runtime_float64_array(tf_gammadashs, reference=dynamic_gammadashs),
+            minimum_distance,
+        )
+    return total + _pairwise_curve_distance_penalty_scan(
+        dynamic_gammas,
+        dynamic_gammadashs,
+        dynamic_gammas,
+        dynamic_gammadashs,
+        minimum_distance,
+        strict_lower_triangle=True,
+    )
 
 
 def build_stage2_target_objective(
@@ -301,28 +378,20 @@ def build_stage2_target_objective(
             grouped_biot_savart_B_from_spec(points_jax, tf_coil_spec)
         )
         tf_curve_data = _curve_pairs_from_grouped_coil_set_spec(tf_coil_spec)
+        tf_curve_groups = _curve_groups_from_grouped_coil_set_spec(tf_coil_spec)
         fixed_curve_penalty = float(
             _as_host_float64(_fixed_curve_penalty(tf_curve_data, cc_threshold))
         )
     else:
         fixed_field = np.zeros((points.shape[0], 3), dtype=np.float64)
-        tf_curve_data = ()
+        tf_curve_groups = ()
         fixed_curve_penalty = 0.0
 
-    banana_symmetry_specs = _hostify_tree(
-        tuple(
-            make_coil_symmetry_spec(
-                rotmat=rotmat,
-                scale=scale,
-            )
-            for _, rotmat, _, scale in (
-                _unwrap_coil_curve_and_current(coil) for coil in banana_coils
-            )
-        )
+    banana_rotmats, banana_current_scales = (
+        _banana_symmetry_runtime_inputs_from_coils(banana_coils)
     )
     banana_curve_spec_runtime = _runtimeify_tree(banana_curve_spec)
-    banana_symmetry_specs_runtime = _runtimeify_tree(banana_symmetry_specs)
-    tf_curve_data_runtime = _runtimeify_tree(tf_curve_data)
+    tf_curve_groups_runtime = _runtimeify_tree(tf_curve_groups)
     flux_spec_runtime = _runtimeify_tree(flux_spec)
     objective_weights = np.array(
         (
@@ -355,6 +424,14 @@ def build_stage2_target_objective(
             curvature_threshold,
             reference=flat_dofs,
         )
+        banana_rotmats_jax = _runtime_float64_array(
+            banana_rotmats,
+            reference=flat_dofs,
+        )
+        banana_current_scales_jax = _runtime_float64_array(
+            banana_current_scales,
+            reference=flat_dofs,
+        )
         half_jax = _runtime_float64_scalar(half, reference=flat_dofs)
         zero_jax = _runtime_float64_scalar(zero, reference=flat_dofs)
 
@@ -367,11 +444,11 @@ def build_stage2_target_objective(
             _build_dynamic_curve_data(
                 base_gamma,
                 base_gammadash,
-                banana_symmetry_specs_runtime,
+                banana_rotmats_jax,
+                banana_current_scales_jax,
                 current_dof,
             )
         )
-        dynamic_pairs = tuple(zip(dynamic_gammas, dynamic_gammadashs))
         dynamic_coil_spec = grouped_coil_set_spec_from_lists(
             dynamic_gammas,
             dynamic_gammadashs,
@@ -393,8 +470,9 @@ def build_stage2_target_objective(
         )
 
         coil_distance_penalty = _dynamic_curve_distance_penalty(
-            dynamic_pairs,
-            tf_curve_data_runtime,
+            dynamic_gammas,
+            dynamic_gammadashs,
+            tf_curve_groups_runtime,
             cc_threshold_jax,
             fixed_curve_penalty,
         )
