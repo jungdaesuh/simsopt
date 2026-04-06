@@ -202,8 +202,9 @@ def _mapped_full_dofs(map_spec: OptimizableDofMapSpec, owner_dofs):
     mapped = _as_explicit_float64(map_spec.template_full_dofs, reference=owner_dofs)
     owner_dofs = _as_explicit_float64(owner_dofs, reference=owner_dofs)
     for owner_start, owner_end, target_start, target_end in map_spec.owner_segments:
+        segment = jax.lax.slice_in_dim(owner_dofs, owner_start, owner_end, axis=0)
         mapped = mapped.at[target_start:target_end].set(
-            owner_dofs[owner_start:owner_end]
+            segment
         )
     return mapped
 
@@ -212,7 +213,12 @@ def _mapped_input_dofs(map_spec: OptimizableDofMapSpec, owner_dofs):
     mapped_full = _mapped_full_dofs(map_spec, owner_dofs)
     if map_spec.input_mode == "full":
         return mapped_full
-    return mapped_full[map_spec.input_start : map_spec.input_end]
+    return jax.lax.slice_in_dim(
+        mapped_full,
+        map_spec.input_start,
+        map_spec.input_end,
+        axis=0,
+    )
 
 
 def optimizable_full_dofs_from_map_spec(
