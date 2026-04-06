@@ -1,8 +1,14 @@
-import jax
 import numpy as np
 
 import simsoptpp as sopp
-from .curve import Curve, _as_runtime_float64_ref, _install_curve_jax_contract, _two_pi_like, jnp
+from .curve import (
+    Curve,
+    _as_runtime_float64_ref,
+    _install_curve_jax_contract,
+    _two_pi_like,
+    jax,
+    jnp,
+)
 
 __all__ = ["CurveRZFourier"]
 

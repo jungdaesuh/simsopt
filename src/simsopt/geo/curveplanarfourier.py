@@ -1,7 +1,13 @@
-import jax
 import numpy as np
 import simsoptpp as sopp
-from .curve import Curve, JaxCurve, _as_runtime_float64_ref, _install_curve_jax_contract, jnp
+from .curve import (
+    Curve,
+    JaxCurve,
+    _as_runtime_float64_ref,
+    _install_curve_jax_contract,
+    jax,
+    jnp,
+)
 
 __all__ = ["CurvePlanarFourier", "JaxCurvePlanarFourier"]
 
