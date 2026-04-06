@@ -301,7 +301,7 @@ def _value_and_direct_coil_derivative(
         biotsavart,
         coil_dofs_gradient,
     )
-    return float(objective_value), direct_derivative
+    return _host_scalar(objective_value), direct_derivative
 
 
 def _qs_ratio_from_coil_dofs(sdofs, coil_dofs, biotsavart, **qs_kwargs):

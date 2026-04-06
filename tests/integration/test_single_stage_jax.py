@@ -1804,6 +1804,68 @@ class TestAdjointSolveConsistency:
             atol=1e-12,
         )
 
+    def test_value_and_direct_coil_derivative_hostifies_objective_value(
+        self, monkeypatch
+    ):
+        """Objective scalars should cross back to Python only via explicit device_get."""
+        import simsopt.geo.surfaceobjectives_jax as soj
+
+        calls = {"count": 0}
+        original_host_scalar = soj._host_scalar
+
+        def _counting_host_scalar(value):
+            calls["count"] += 1
+            return original_host_scalar(value)
+
+        monkeypatch.setattr(soj, "_host_scalar", _counting_host_scalar)
+        monkeypatch.setattr(
+            soj,
+            "_strict_scalar_value_and_grad",
+            lambda objective, coil_dofs, *args: (
+                jnp.asarray(3.5, dtype=jnp.float64),
+                jnp.asarray([2.0, -3.0], dtype=jnp.float64),
+            ),
+        )
+
+        class _SharedDepOpt:
+            def __init__(self):
+                self.local_full_dof_size = 3
+                self.local_dofs_free_status = np.array([True, True, False])
+
+        class _SharedDofs:
+            def __init__(self, dep_opts):
+                self._dep_opts = dep_opts
+
+            def dep_opts(self):
+                return self._dep_opts
+
+        dep_opt_a = _SharedDepOpt()
+        dep_opt_b = _SharedDepOpt()
+        lineage = type("_SharedLineage", (), {})()
+        lineage.local_dof_size = 2
+        lineage.local_full_dof_size = 3
+        lineage.dofs_free_status = np.array([True, True, False])
+        lineage.local_dofs_free_status = np.array([True, True, False])
+        lineage.dofs = _SharedDofs((dep_opt_a, dep_opt_b))
+
+        bs_jax = object.__new__(BiotSavartJAX)
+        bs_jax._unique_dof_opts = [lineage]
+
+        value, derivative = soj._value_and_direct_coil_derivative(
+            bs_jax,
+            lambda coil_dofs: jnp.asarray(0.0, dtype=jnp.float64),
+            jnp.asarray([0.0, 0.0], dtype=jnp.float64),
+        )
+
+        assert calls["count"] == 1
+        assert value == pytest.approx(3.5)
+        np.testing.assert_allclose(
+            np.asarray(derivative(bs_jax), dtype=float),
+            np.array([2.0, -3.0]),
+            rtol=1e-12,
+            atol=1e-12,
+        )
+
     def test_coil_cotangent_projection_avoids_whole_group_host_materialization(self):
         """Projection should convert one coil slice at a time, not a whole group."""
         coils = [_FallbackBombCoil(), _FallbackBombCoil()]
