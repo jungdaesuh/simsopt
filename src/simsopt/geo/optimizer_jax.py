@@ -1451,13 +1451,17 @@ def newton_polish_traceable(
     """
     val_and_grad_fn = jax.value_and_grad(objective_fn)
     hvp_fn = _hessian_vector_product_fn(objective_fn)
-    tol_value = _device_scalar(tol)
-    linear_tol = jnp.minimum(
-        _device_scalar(1e-10),
-        jnp.maximum(tol_value * _device_scalar(0.1), _device_scalar(1e-14)),
-    )
 
     def run_solver(x_init):
+        dtype = jnp.asarray(x_init).dtype
+        tol_value = jnp.asarray(tol, dtype=dtype)
+        linear_tol = jnp.minimum(
+            jnp.asarray(1e-10, dtype=dtype),
+            jnp.maximum(
+                tol_value * jnp.asarray(0.1, dtype=dtype),
+                jnp.asarray(1e-14, dtype=dtype),
+            ),
+        )
         val0, grad0 = val_and_grad_fn(x_init)
         norm0 = jnp.linalg.norm(grad0)
 
@@ -1648,18 +1652,18 @@ def newton_exact_traceable(
     dense Jacobian only once at the final iterate for downstream LU-based
     contracts.
     """
-    dtype = jnp.asarray(x0).dtype
-    tol_value = _device_scalar(tol, dtype=dtype)
-    linear_tol = jnp.minimum(
-        _device_scalar(1e-10, dtype=dtype),
-        jnp.maximum(
-            tol_value * _device_scalar(0.1, dtype=dtype),
-            _device_scalar(1e-14, dtype=dtype),
-        ),
-    )
     jvp_fn = _jacobian_vector_product_fn(residual_fn)
 
     def run_solver(x_init):
+        dtype = jnp.asarray(x_init).dtype
+        tol_value = jnp.asarray(tol, dtype=dtype)
+        linear_tol = jnp.minimum(
+            jnp.asarray(1e-10, dtype=dtype),
+            jnp.maximum(
+                tol_value * jnp.asarray(0.1, dtype=dtype),
+                jnp.asarray(1e-14, dtype=dtype),
+            ),
+        )
         r0 = residual_fn(x_init)
         norm0 = jnp.linalg.norm(r0)
 
