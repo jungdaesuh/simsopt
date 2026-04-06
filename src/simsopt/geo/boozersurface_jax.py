@@ -276,6 +276,10 @@ def _host_inf_norm(value, *, dtype=None):
     return float(np.max(np.abs(_host_numpy(value, dtype=dtype))))
 
 
+def _host_all_finite(value, *, dtype=None):
+    return bool(np.all(np.isfinite(_host_numpy(value, dtype=dtype))))
+
+
 def _grouped_biot_savart_B_points(points, *, coil_arrays=None, coil_set_spec=None):
     if coil_set_spec is not None:
         return grouped_biot_savart_B_from_spec(points, coil_set_spec)
@@ -1964,9 +1968,9 @@ class BoozerSurfaceJAX(Optimizable):
         )
 
         if (
-            not np.all(np.isfinite(np.asarray(result["x"])))
-            or not np.all(np.isfinite(np.asarray(result["grad"])))
-            or not np.all(np.isfinite(np.asarray(result["hessian"])))
+            not _host_all_finite(result["x"])
+            or not _host_all_finite(result["grad"])
+            or not _host_all_finite(result["hessian"])
         ):
             res = {
                 "residual": None,
@@ -2151,13 +2155,13 @@ class BoozerSurfaceJAX(Optimizable):
 
         if (
             not bool(result["success"])
-            or not np.all(np.isfinite(np.asarray(x_final)))
-            or not np.all(np.isfinite(np.asarray(exact_residual)))
-            or not np.all(np.isfinite(np.asarray(result["jacobian"])))
+            or not _host_all_finite(x_final)
+            or not _host_all_finite(exact_residual)
+            or not _host_all_finite(result["jacobian"])
         ):
             res = {
                 "residual": None,
-                "fun": float(0.5 * np.mean(np.square(np.asarray(exact_residual)))),
+                "fun": float(0.5 * np.mean(np.square(_host_numpy(exact_residual)))),
                 "jacobian": None,
                 "iter": result["nit"],
                 "success": False,
