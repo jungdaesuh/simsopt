@@ -119,6 +119,10 @@ biot_savart_kernel_scaling = _load_benchmark_module(
     "biot_savart_kernel_scaling",
     "benchmarks/biot_savart_kernel_scaling.py",
 )
+gpu_benchmark_module = _load_benchmark_module(
+    "gpu_benchmark_module",
+    "benchmarks/gpu_benchmark.py",
+)
 jax_ci_contract = _load_benchmark_module(
     "jax_ci_contract",
     "scripts/jax_ci_contract.py",
@@ -2220,6 +2224,72 @@ def test_legacy_gpu_benchmark_wrapper_delegates_to_local_validation_ladder():
     assert "render_benchmark_report.py" in wrapper_text
     assert "git clone" not in wrapper_text
     assert "https://github.com" not in wrapper_text
+
+
+def test_legacy_gpu_benchmark_wrapper_applies_grouped_probe_env_override(
+    monkeypatch, tmp_path
+):
+    artifacts_dir = tmp_path / "artifacts"
+    dense_audit_cache_dir = tmp_path / "jax-compilation-cache" / "jax_gpu_fast-dense-audit"
+    manifest_path = tmp_path / "stable_hardware_weekly_tier5.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "commands": [
+                    {
+                        "name": "tier5_performance_characterization",
+                        "script": "benchmarks/tier5_performance_characterization.py",
+                        "args": [],
+                    },
+                    {
+                        "name": "grouped_adjoint_memory_probe",
+                        "script": "benchmarks/grouped_adjoint_memory_probe.py",
+                        "env": {
+                            "SIMSOPT_JAX_TRANSFER_GUARD": "disallow",
+                            "JAX_COMPILATION_CACHE_DIR": str(dense_audit_cache_dir),
+                        },
+                        "args": [],
+                    },
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    args = argparse.Namespace(
+        platform="cuda",
+        optimizer_backend="ondevice",
+        maxiter=20,
+        artifacts_dir=str(artifacts_dir),
+        manifest_json=str(manifest_path),
+        benchmark_mode=True,
+    )
+    observed_invocations: list[tuple[list[str], dict[str, str]]] = []
+    monkeypatch.setenv("SIMSOPT_JAX_TRANSFER_GUARD", "log")
+    monkeypatch.setenv("JAX_COMPILATION_CACHE_DIR", "/tmp/jax_gpu_fast-cuda")
+    monkeypatch.setattr(gpu_benchmark_module, "parse_args", lambda: (args, []))
+
+    def fake_run(command, *, cwd, check, env):
+        del cwd, check
+        observed_invocations.append((list(command), dict(env)))
+        return types.SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(gpu_benchmark_module.subprocess, "run", fake_run)
+
+    gpu_benchmark_module.main()
+
+    assert len(observed_invocations) == 3
+    tier5_command, tier5_env = observed_invocations[0]
+    grouped_command, grouped_env = observed_invocations[1]
+    report_command, report_env = observed_invocations[2]
+    assert "tier5_performance_characterization.py" in tier5_command[1]
+    assert tier5_env["SIMSOPT_JAX_TRANSFER_GUARD"] == "log"
+    assert tier5_env["JAX_COMPILATION_CACHE_DIR"] == "/tmp/jax_gpu_fast-cuda"
+    assert "grouped_adjoint_memory_probe.py" in grouped_command[1]
+    assert grouped_env["SIMSOPT_JAX_TRANSFER_GUARD"] == "disallow"
+    assert grouped_env["JAX_COMPILATION_CACHE_DIR"] == str(dense_audit_cache_dir)
+    assert "render_benchmark_report.py" in report_command[1]
+    assert report_env["SIMSOPT_JAX_TRANSFER_GUARD"] == "log"
+    assert dense_audit_cache_dir.is_dir()
 
 
 def test_single_stage_outer_loop_probe_resolves_expected_boozer_method():

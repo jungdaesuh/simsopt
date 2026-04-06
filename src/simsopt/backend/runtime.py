@@ -18,6 +18,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import os
 import subprocess
+import sys
 from typing import Callable
 import warnings
 
@@ -520,13 +521,22 @@ def _parse_visible_cuda_device_index() -> int | None:
     return value if value >= 0 else None
 
 
-def _detect_active_jax_cuda_device_index() -> int | None:
-    env_index = _parse_visible_cuda_device_index()
-    if env_index is not None:
-        return env_index
+def _imported_jax_backends_are_initialized(jax_module) -> bool:
+    xla_bridge = getattr(getattr(jax_module, "_src", None), "xla_bridge", None)
+    backends_are_initialized = getattr(xla_bridge, "backends_are_initialized", None)
+    if not callable(backends_are_initialized):
+        return True
     try:
-        import jax
-    except ImportError:
+        return bool(backends_are_initialized())
+    except Exception:
+        return False
+
+
+def _detect_imported_jax_cuda_device_index() -> int | None:
+    jax = sys.modules.get("jax")
+    if jax is None:
+        return None
+    if not _imported_jax_backends_are_initialized(jax):
         return None
     try:
         devices = jax.local_devices(backend="gpu")
@@ -540,6 +550,13 @@ def _detect_active_jax_cuda_device_index() -> int | None:
         if isinstance(value, int) and value >= 0:
             return value
     return None
+
+
+def _detect_active_jax_cuda_device_index() -> int | None:
+    runtime_index = _detect_imported_jax_cuda_device_index()
+    if runtime_index is not None:
+        return runtime_index
+    return _parse_visible_cuda_device_index()
 
 
 def _parse_nvidia_smi_indexed_value_row(raw_row: str) -> tuple[int, float] | None:

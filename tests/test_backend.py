@@ -432,6 +432,8 @@ def _assert_gpu_chunk_autotune_probe(monkeypatch, *, env_value, expected_index, 
         monkeypatch.setenv("CUDA_VISIBLE_DEVICES", env_value)
     if fake_jax is not None:
         monkeypatch.setitem(sys.modules, "jax", fake_jax)
+    else:
+        monkeypatch.delitem(sys.modules, "jax", raising=False)
     calls = _install_fake_nvidia_smi(monkeypatch, stdout)
     backend = _fresh_backend()
     tuning = backend.get_chunk_tuning()
@@ -477,15 +479,57 @@ def test_chunk_tuning_autotunes_from_active_jax_cuda_device(monkeypatch):
     )
 
 
+def test_chunk_tuning_prefers_imported_jax_cuda_device_over_visible_env(monkeypatch):
+    class _FakeDevice:
+        local_hardware_id = 1
+
+    _assert_gpu_chunk_autotune_probe(
+        monkeypatch,
+        env_value="3,1",
+        expected_index=1,
+        stdout="1, 24576\n",
+        fake_jax=types.SimpleNamespace(local_devices=lambda backend=None: [_FakeDevice()]),
+    )
+
+
 def test_query_active_gpu_memory_mb_uses_visible_cuda_device(monkeypatch):
     _clear_backend_env(monkeypatch)
     monkeypatch.setenv("SIMSOPT_BACKEND_MODE", "jax_gpu_fast")
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "3,1")
+    monkeypatch.delitem(sys.modules, "jax", raising=False)
     calls = _install_fake_nvidia_smi(monkeypatch, "3, 512\n")
     backend = _fresh_backend()
 
     assert backend.get_active_cuda_device_index() == 3
     assert backend.query_active_gpu_memory_mb() == pytest.approx(512.0)
+    assert calls
+    assert calls[0][-2:] == ["-i", "3"]
+
+
+def test_query_active_gpu_memory_mb_falls_back_to_visible_env_before_jax_init(
+    monkeypatch,
+):
+    class _FakeDevice:
+        local_hardware_id = 1
+
+    _clear_backend_env(monkeypatch)
+    monkeypatch.setenv("SIMSOPT_BACKEND_MODE", "jax_gpu_fast")
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "3,1")
+    monkeypatch.setitem(
+        sys.modules,
+        "jax",
+        types.SimpleNamespace(
+            _src=types.SimpleNamespace(
+                xla_bridge=types.SimpleNamespace(backends_are_initialized=lambda: False)
+            ),
+            local_devices=lambda backend=None: [_FakeDevice()],
+        ),
+    )
+    calls = _install_fake_nvidia_smi(monkeypatch, "3, 640\n")
+    backend = _fresh_backend()
+
+    assert backend.get_active_cuda_device_index() == 3
+    assert backend.query_active_gpu_memory_mb() == pytest.approx(640.0)
     assert calls
     assert calls[0][-2:] == ["-i", "3"]
 
@@ -508,6 +552,29 @@ def test_query_active_gpu_memory_mb_uses_active_jax_device_when_env_is_unset(mon
     assert backend.query_active_gpu_memory_mb() == pytest.approx(768.0)
     assert calls
     assert calls[0][-2:] == ["-i", "2"]
+
+
+def test_query_active_gpu_memory_mb_prefers_imported_jax_device_over_visible_env(
+    monkeypatch,
+):
+    class _FakeDevice:
+        local_hardware_id = 1
+
+    _clear_backend_env(monkeypatch)
+    monkeypatch.setenv("SIMSOPT_BACKEND_MODE", "jax_gpu_fast")
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "3,1")
+    monkeypatch.setitem(
+        sys.modules,
+        "jax",
+        types.SimpleNamespace(local_devices=lambda backend=None: [_FakeDevice()]),
+    )
+    calls = _install_fake_nvidia_smi(monkeypatch, "1, 256\n")
+    backend = _fresh_backend()
+
+    assert backend.get_active_cuda_device_index() == 1
+    assert backend.query_active_gpu_memory_mb() == pytest.approx(256.0)
+    assert calls
+    assert calls[0][-2:] == ["-i", "1"]
 
 
 def test_chunk_tuning_rejects_nonpositive_gpu_memory_override(monkeypatch):
