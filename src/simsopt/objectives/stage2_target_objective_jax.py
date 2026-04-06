@@ -147,9 +147,9 @@ def stage2_target_optimizer_state_from_dofs(dofs, *, curve_dof_count=None):
             curve_dofs=_as_objective_dofs(dofs.curve_dofs),
         )
     dofs = _as_objective_dofs(dofs)
-    current_dof = dofs[0]
+    current_dof = jnp.sum(jax.lax.slice_in_dim(dofs, 0, 1, axis=0))
     if curve_dof_count is None:
-        curve_dofs = dofs[1:]
+        curve_dofs = jax.lax.slice_in_dim(dofs, 1, dofs.shape[0], axis=0)
     else:
         curve_dofs = jax.lax.dynamic_slice_in_dim(
             dofs,
