@@ -6,6 +6,10 @@ from pathlib import Path
 
 import numpy as np
 
+from examples.single_stage_optimization.equilibria_paths import (
+    DEFAULT_EQUILIBRIA_DIR,
+    resolve_equilibrium_path as _resolve_equilibrium_path,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_PLASMA_SURF_FILENAME = "wout_nfp22ginsburg_000_014417_iota15.nc"
@@ -13,9 +17,6 @@ DEFAULT_STAGE2_SEED_DIR = (
     REPO_ROOT / "benchmarks" / "fixtures" / "single_stage_seed_iota15"
 )
 DEFAULT_STAGE2_BS_PATH = DEFAULT_STAGE2_SEED_DIR / "biot_savart_opt.json"
-DEFAULT_EQUILIBRIA_DIR = (
-    REPO_ROOT / "examples" / "single_stage_optimization" / "equilibria"
-)
 DEFAULT_SMOKE_NPHI = 31
 DEFAULT_SMOKE_NTHETA = 16
 DEFAULT_SMOKE_MPOL = 2
@@ -43,13 +44,11 @@ def resolve_equilibrium_path(
     equilibrium_path: str | Path | None = None,
 ) -> Path:
     """Resolve the equilibrium file for the real single-stage seed family."""
-    if equilibrium_path is not None:
-        return Path(equilibrium_path)
-
-    candidate = Path(equilibria_dir) / plasma_surf_filename
-    if candidate.exists():
-        return candidate
-    return candidate
+    return _resolve_equilibrium_path(
+        plasma_surf_filename=plasma_surf_filename,
+        equilibria_dir=equilibria_dir,
+        equilibrium_path=equilibrium_path,
+    )
 
 
 def build_real_single_stage_init_fixture(

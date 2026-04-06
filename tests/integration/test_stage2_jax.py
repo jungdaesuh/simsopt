@@ -2442,6 +2442,15 @@ class TestStage2BananaBoundary:
 
 
 class TestStage2OptimizerContract:
+    def test_parse_args_defaults_to_repo_fixture_equilibria_dir(self, monkeypatch):
+        stage2_script = _load_stage2_script_module()
+        monkeypatch.delenv("EQUILIBRIA_DIR", raising=False)
+        monkeypatch.setattr(sys, "argv", ["banana_coil_solver.py"])
+
+        args = stage2_script.parse_args()
+
+        assert args.equilibria_dir == str(stage2_script.DEFAULT_EQUILIBRIA_DIR)
+
     def test_parse_args_defaults_jax_backend_to_ondevice_optimizer_lane(
         self, monkeypatch
     ):
@@ -2495,6 +2504,29 @@ class TestStage2OptimizerContract:
         assert args.backend == "jax"
         assert args.optimizer_backend == "ondevice"
         assert args.least_squares_algorithm == "quasi-newton"
+
+    def test_build_equilibrium_path_falls_back_to_repo_fixture_when_workspace_file_is_missing(
+        self,
+    ):
+        stage2_script = _load_stage2_script_module()
+        plasma_surf_filename = "wout_nfp22ginsburg_000_014417_iota15.nc"
+        repo_fixture = (
+            Path(stage2_script.DEFAULT_EQUILIBRIA_DIR) / plasma_surf_filename
+        )
+        workspace_candidate = (
+            Path(stage2_script.DATABASE_EQUILIBRIA_DIR) / plasma_surf_filename
+        )
+        assert repo_fixture.exists()
+        assert workspace_candidate.parent.is_dir()
+        assert not workspace_candidate.exists()
+
+        args = types.SimpleNamespace(
+            equilibrium_path=None,
+            equilibria_dir=str(workspace_candidate.parent),
+            plasma_surf_filename=plasma_surf_filename,
+        )
+
+        assert stage2_script.build_equilibrium_path(args) == str(repo_fixture)
 
     def test_stage2_hardware_constraints_fail_on_self_intersection(self):
         stage2_script = _load_stage2_script_module()

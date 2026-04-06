@@ -20,6 +20,11 @@ sys.path.insert(0, SIMSOPT_ROOT)
 sys.path.insert(0, REPO_ROOT)
 
 from jax_host_boundary import host_array, host_bool, host_float
+from equilibria_paths import (
+    DEFAULT_EQUILIBRIA_DIR,
+    WORKSPACE_EQUILIBRIA_DIR,
+    resolve_equilibrium_path,
+)
 from hardware_constraints import (
     apply_hardware_constraint_verdict,
     sanitize_json_payload,
@@ -37,12 +42,7 @@ from simsopt.jax_core import (
 )
 
 maybe_initialize_distributed_jax()
-DATABASE_EQUILIBRIA_DIR = os.path.join(REPO_ROOT, "DATABASE", "EQUILIBRIA")
-DEFAULT_EQUILIBRIA_DIR = (
-    DATABASE_EQUILIBRIA_DIR
-    if os.path.isdir(DATABASE_EQUILIBRIA_DIR)
-    else os.path.join(EXAMPLE_ROOT, "equilibria")
-)
+DATABASE_EQUILIBRIA_DIR = str(WORKSPACE_EQUILIBRIA_DIR)
 STAGE2_TARGET_OBJECTIVE_DOF_LAYOUT_ERROR = (
     "Stage 2 target objective DOF layout does not match the composite objective."
 )
@@ -128,7 +128,7 @@ def parse_args():
     )
     parser.add_argument(
         "--equilibria-dir",
-        default=os.environ.get("EQUILIBRIA_DIR", DEFAULT_EQUILIBRIA_DIR),
+        default=os.environ.get("EQUILIBRIA_DIR", str(DEFAULT_EQUILIBRIA_DIR)),
         help="Directory that contains the equilibrium wout files.",
     )
     parser.add_argument(
@@ -401,17 +401,14 @@ def resolve_stage2_default_least_squares_algorithm(
 
 
 def build_equilibrium_path(args):
-    if args.equilibrium_path is not None:
-        return args.equilibrium_path
-
-    candidate_paths = [
-        os.path.join(args.equilibria_dir, args.plasma_surf_filename),
-        os.path.join(DATABASE_EQUILIBRIA_DIR, args.plasma_surf_filename),
-    ]
-    for candidate_path in candidate_paths:
-        if os.path.exists(candidate_path):
-            return candidate_path
-    return candidate_paths[0]
+    return str(
+        resolve_equilibrium_path(
+            plasma_surf_filename=args.plasma_surf_filename,
+            equilibria_dir=args.equilibria_dir,
+            equilibrium_path=args.equilibrium_path,
+            fallback_dirs=(DEFAULT_EQUILIBRIA_DIR, WORKSPACE_EQUILIBRIA_DIR),
+        )
+    )
 
 
 def initSurface(R0, s, file_loc, nphi, ntheta):
