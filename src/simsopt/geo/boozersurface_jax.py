@@ -272,6 +272,10 @@ def _host_scalar(value, *, dtype=None):
     return _host_numpy(value, dtype=dtype).item()
 
 
+def _host_inf_norm(value, *, dtype=None):
+    return float(np.max(np.abs(_host_numpy(value, dtype=dtype))))
+
+
 def _grouped_biot_savart_B_points(points, *, coil_arrays=None, coil_set_spec=None):
     if coil_set_spec is not None:
         return grouped_biot_savart_B_from_spec(points, coil_set_spec)
@@ -1909,7 +1913,7 @@ class BoozerSurfaceJAX(Optimizable):
                 f"{method} solve - "
                 f"success={resdict['success']}  iter={resdict['iter']}, "
                 f"iota={iota_out:.16f}, ||grad||_inf="
-                f"{float(jnp.max(jnp.abs(jnp.asarray(resdict['gradient'])))):.3e}",
+                f"{_host_inf_norm(resdict['gradient']):.3e}",
                 flush=True,
             )
         return resdict
@@ -2230,7 +2234,7 @@ class BoozerSurfaceJAX(Optimizable):
         self.need_to_run_code = False
 
         if verbose:
-            res_norm = float(jnp.max(jnp.abs(res["residual"])))
+            res_norm = _host_inf_norm(res["residual"])
             print(
                 f"NEWTON solve - success={res['success']}  "
                 f"iter={res['iter']}, iota={iota_final:.16f}, "
