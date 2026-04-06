@@ -38,6 +38,13 @@ import jax.numpy as jnp
 import jax.scipy.linalg
 
 from ..backend import raise_if_strict_jax_fallback, warn_if_jax_fallback
+from .._core.jax_host_boundary import (
+    host_all_finite as _host_all_finite,
+    host_array as _host_numpy,
+    host_inf_norm as _host_inf_norm,
+    host_scalar as _host_scalar,
+    host_tree as _hostify_tree,
+)
 from ..jax_core._math_utils import (
     as_jax_float64 as _as_jax_float64,
     as_jax_int32 as _as_jax_int32,
@@ -246,38 +253,6 @@ def _grouped_coil_currents(*, coil_arrays=None, coil_set_spec=None):
 
 def _resolved_coil_set_spec(default_spec, *, coil_arrays=None, coil_set_spec=None):
     return default_spec if coil_set_spec is None else coil_set_spec
-
-
-def _hostify_tree(value):
-    def _hostify_leaf(leaf):
-        if isinstance(leaf, jax.core.Tracer):
-            return leaf
-        if isinstance(leaf, jax.Array):
-            return np.asarray(jax.device_get(leaf), dtype=np.dtype(leaf.dtype))
-        if isinstance(leaf, np.ndarray):
-            return np.asarray(leaf, dtype=leaf.dtype)
-        return leaf
-
-    return jax.tree_util.tree_map(_hostify_leaf, value)
-
-
-def _host_numpy(value, *, dtype=None):
-    array = np.asarray(jax.device_get(value))
-    if dtype is None:
-        return array
-    return np.asarray(array, dtype=dtype)
-
-
-def _host_scalar(value, *, dtype=None):
-    return _host_numpy(value, dtype=dtype).item()
-
-
-def _host_inf_norm(value, *, dtype=None):
-    return float(np.max(np.abs(_host_numpy(value, dtype=dtype))))
-
-
-def _host_all_finite(value, *, dtype=None):
-    return bool(np.all(np.isfinite(_host_numpy(value, dtype=dtype))))
 
 
 def _grouped_biot_savart_B_points(points, *, coil_arrays=None, coil_set_spec=None):

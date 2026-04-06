@@ -27,6 +27,12 @@ import jax
 import jax.numpy as jnp
 
 from .._core.derivative import Derivative, derivative_dec
+from .._core.jax_host_boundary import (
+    explicit_cotangent_basis as _explicit_cotangent_basis,
+    host_scalar as _host_scalar,
+    strict_scalar_grad as _strict_scalar_grad,
+    strict_scalar_value_and_grad as _strict_scalar_value_and_grad,
+)
 from .._core.optimizable import Optimizable
 from ..jax_core._math_utils import (
     as_runtime_float64 as _as_runtime_float64,
@@ -68,36 +74,6 @@ _LEGACY_PROJECTION_HELPER_ERROR = (
     "surfaceobjectives_jax._coil_cotangents_to_derivative() is no longer "
     "supported; use BiotSavartJAX.coil_cotangents_to_derivative()."
 )
-
-
-def _host_scalar(value):
-    return np.asarray(jax.device_get(value)).item()
-
-
-def _explicit_scalar_pullback_seed(value):
-    return jax.device_put(np.array(1.0, dtype=np.dtype(value.dtype)))
-
-
-def _strict_scalar_grad(fun, arg):
-    value, pullback = jax.vjp(fun, arg)
-    (gradient,) = pullback(_explicit_scalar_pullback_seed(value))
-    return gradient
-
-
-def _strict_scalar_value_and_grad(fun, arg, *args):
-    def _objective(first_arg):
-        return fun(first_arg, *args)
-
-    value, pullback = jax.vjp(_objective, arg)
-    (gradient,) = pullback(_explicit_scalar_pullback_seed(value))
-    return value, gradient
-
-
-def _explicit_cotangent_basis(length: int, index: int, *, dtype):
-    basis = np.zeros(int(length), dtype=np.dtype(dtype))
-    basis[int(index)] = 1.0
-    return jax.device_put(basis)
-
 
 def _explicit_index_array(indices):
     return jax.device_put(np.asarray(indices, dtype=np.int32))

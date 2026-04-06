@@ -1,8 +1,8 @@
 import numpy as np
-import jax
 import scipy
 # from monty.json import MSONable, MontyDecoder
 
+from .._core.jax_host_boundary import host_scalar as _shared_host_scalar
 from .._core.optimizable import Optimizable
 from .._core.derivative import Derivative, derivative_dec
 
@@ -18,9 +18,7 @@ __all__ = [
 
 
 def _host_float_scalar(value):
-    if isinstance(value, jax.Array) or hasattr(value, "aval"):
-        return np.asarray(jax.device_get(value), dtype=float).item()
-    return float(value)
+    return float(_shared_host_scalar(value, dtype=float))
 
 
 def forward_backward(P, L, U, rhs, iterative_refinement=False):

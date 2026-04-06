@@ -4,22 +4,15 @@ from __future__ import annotations
 
 import warnings
 
-import jax
 import numpy as np
 
 import jax.numpy as jnp
 from scipy.optimize import OptimizeResult
 
-
-def _as_host_numpy(value, *, dtype=None):
-    array = np.asarray(jax.device_get(value))
-    if dtype is None:
-        return array
-    return np.asarray(array, dtype=dtype)
-
-
-def _as_host_scalar(value, *, dtype=None):
-    return _as_host_numpy(value, dtype=dtype).item()
+from ..._core.jax_host_boundary import (
+    host_array as _as_host_numpy,
+    host_scalar as _as_host_scalar,
+)
 
 
 def _is_invalid_state(f, g):
