@@ -419,7 +419,7 @@ def _boozer_residual_J_of_x_inner(
     )
 
     r_flat = boozer_residual_vector(G, iota, B, xphi, xtheta, weight_inv_modB)
-    J_boozer = 0.5 * jnp.sum(r_flat**2) / num_points
+    J_boozer = 0.5 * jnp.sum(r_flat * r_flat) / num_points
 
     label_val = _compute_label(
         label_type,
@@ -430,7 +430,8 @@ def _boozer_residual_J_of_x_inner(
         points,
         coil_set_spec=coil_set_spec,
     )
-    J_label = 0.5 * constraint_weight * (label_val - targetlabel) ** 2
+    label_delta = label_val - targetlabel
+    J_label = 0.5 * constraint_weight * (label_delta * label_delta)
     return J_boozer + J_label
 
 
@@ -801,7 +802,8 @@ def _traceable_iota_from_x_inner(x_inner, optimize_G):
 def _traceable_iota_target_penalty(x_inner, *, optimize_G, iota_target):
     """Quadratic iota-target penalty at an explicit inner state."""
     iota = _traceable_iota_from_x_inner(x_inner, optimize_G)
-    return 0.5 * (iota - iota_target) ** 2
+    delta = iota - iota_target
+    return 0.5 * (delta * delta)
 
 
 _TRACEABLE_INNER_OBJECTIVE_KEYS = (
