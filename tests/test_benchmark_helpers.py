@@ -1615,22 +1615,20 @@ def _weekly_tier5_manifest_path() -> Path:
     )
 
 
+def _workflow_path(filename: str) -> Path:
+    return Path(__file__).resolve().parents[1] / ".github" / "workflows" / filename
+
+
 def _weekly_tier5_workflow_path() -> Path:
-    return (
-        Path(__file__).resolve().parents[1]
-        / ".github"
-        / "workflows"
-        / "jax_benchmark_reporting.yml"
-    )
+    return _workflow_path("jax_benchmark_reporting.yml")
 
 
 def _smoke_workflow_path() -> Path:
-    return (
-        Path(__file__).resolve().parents[1]
-        / ".github"
-        / "workflows"
-        / "jax_smoke.yml"
-    )
+    return _workflow_path("jax_smoke.yml")
+
+
+def _gpu_parity_workflow_path() -> Path:
+    return _workflow_path("jax_gpu_parity.yml")
 
 
 def _assert_named_benchmark_env_bootstrap(
@@ -2139,12 +2137,7 @@ def test_weekly_tier5_workflow_sets_cache_and_ondevice_contract():
 
 
 def test_gpu_parity_workflow_enforces_strict_transfer_guard_contract():
-    workflow_text = (
-        Path(__file__).resolve().parents[1]
-        / ".github"
-        / "workflows"
-        / "jax_gpu_parity.yml"
-    ).read_text(encoding="utf-8")
+    workflow_text = _gpu_parity_workflow_path().read_text(encoding="utf-8")
 
     _assert_named_benchmark_env_bootstrap(workflow_text)
     assert "SIMSOPT_BACKEND_MODE: jax_gpu_parity" in workflow_text
