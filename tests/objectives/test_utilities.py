@@ -1,6 +1,7 @@
 import unittest
 import json
 
+import jax.numpy as jnp
 import numpy as np
 
 from _jit_test_state import make_module_jit_hooks
@@ -8,6 +9,7 @@ from simsopt.geo import SurfaceXYZTensorFourier
 from simsopt.geo.curvexyzfourier import CurveXYZFourier
 from simsopt.geo.curveobjectives import CurveLength, LpCurveTorsion
 from simsopt.objectives.utilities import MPIObjective, QuadraticPenalty, MPIOptimizable
+from simsopt._core.optimizable import Optimizable
 from simsopt.geo import parameters
 from simsopt._core.json import GSONDecoder, GSONEncoder, SIMSON
 from simsopt._core.util import parallel_loop_bounds
@@ -65,6 +67,37 @@ class UtilityObjectiveTesting(unittest.TestCase):
             self.subtest_quadratic_penalty(curve, J.J()-0.1, f)
         with self.assertRaises(Exception):
             self.subtest_quadratic_penalty(curve, J.J()+0.1, 'NotInList')
+
+    def test_quadratic_penalty_hostifies_jax_scalar_objective(self):
+        from simsopt.objectives import utilities as utilities_mod
+
+        class _JaxScalarObjective(Optimizable):
+            def __init__(self):
+                super().__init__(x0=np.asarray([]))
+
+            def J(self):
+                return jnp.asarray(2.5, dtype=jnp.float64)
+
+            def dJ(self, partials=False):
+                return np.asarray([])
+
+        calls = {"count": 0}
+        original_host_float_scalar = utilities_mod._host_float_scalar
+
+        def _counting_host_float_scalar(value):
+            calls["count"] += 1
+            return original_host_float_scalar(value)
+
+        old_helper = utilities_mod._host_float_scalar
+        utilities_mod._host_float_scalar = _counting_host_float_scalar
+        try:
+            penalty = QuadraticPenalty(_JaxScalarObjective(), cons=2.0, f="identity")
+            self.assertAlmostEqual(penalty.J(), 0.125)
+            np.testing.assert_allclose(penalty.dJ(partials=True), np.asarray([]))
+        finally:
+            utilities_mod._host_float_scalar = old_helper
+
+        self.assertGreaterEqual(calls["count"], 4)
 
     @unittest.skipIf(MPI is None, "mpi4py not found")
     def test_mpi_objective(self):

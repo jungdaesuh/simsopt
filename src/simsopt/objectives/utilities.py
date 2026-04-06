@@ -1,4 +1,5 @@
 import numpy as np
+import jax
 import scipy
 # from monty.json import MSONable, MontyDecoder
 
@@ -14,6 +15,12 @@ __all__ = [
     'forward_backward_jax',
     'plu_solve_jax',
 ]
+
+
+def _host_float_scalar(value):
+    if isinstance(value, jax.Array) or hasattr(value, "aval"):
+        return np.asarray(jax.device_get(value), dtype=float).item()
+    return float(value)
 
 
 def forward_backward(P, L, U, rhs, iterative_refinement=False):
@@ -238,7 +245,7 @@ class QuadraticPenalty(Optimizable):
 
     def J(self):
         val = self.obj.J()
-        diff = float(val - self.cons)
+        diff = _host_float_scalar(val) - _host_float_scalar(self.cons)
 
         if self.f == 'max':
             return 0.5*np.maximum(diff, 0)**2
@@ -253,7 +260,7 @@ class QuadraticPenalty(Optimizable):
     def dJ(self):
         val = self.obj.J()
         dval = self.obj.dJ(partials=True)
-        diff = float(val - self.cons)
+        diff = _host_float_scalar(val) - _host_float_scalar(self.cons)
 
         if self.f == 'max':
             return np.maximum(diff, 0)*dval
