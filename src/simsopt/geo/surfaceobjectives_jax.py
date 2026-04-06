@@ -28,6 +28,7 @@ import jax.numpy as jnp
 
 from .._core.derivative import Derivative, derivative_dec
 from .._core.optimizable import Optimizable
+from ..jax_core._math_utils import scalar_like as _scalar_like
 from ..jax_core._math_utils import zeros as _zeros
 from ..jax_core.field import (
     grouped_biot_savart_B_from_spec,
@@ -592,10 +593,11 @@ class IotasJAX(Optimizable):
         L = booz_surf.res["PLU"][1]
         n = L.shape[0]
         dJ_ds = _zeros(n, dtype=L.dtype)
+        one = _scalar_like(dJ_ds, 1.0)
         if G is not None:
-            dJ_ds = dJ_ds.at[-2].set(1.0)  # [surface_dofs..., iota, G]
+            dJ_ds = dJ_ds.at[-2].set(one)  # [surface_dofs..., iota, G]
         else:
-            dJ_ds = dJ_ds.at[-1].set(1.0)  # [surface_dofs..., iota]
+            dJ_ds = dJ_ds.at[-1].set(one)  # [surface_dofs..., iota]
 
         adj = _solve_boozer_adjoint(booz_surf, dJ_ds)
 
