@@ -4108,72 +4108,39 @@ class TestExactSolveCPUJAXParity:
     def test_gradient_wrappers_healthy_on_exact_state(self):
         """IotasJAX.dJ() and NonQuasiSymmetricRatioJAX.dJ() are healthy on exact surface.
 
-        Both CPU and JAX solvers converge to the same exact Newton solution
-        (verified by test_exact_solve_parity at 1e-12).  However, the exact
-        Newton Jacobian is ill-conditioned: scipy and JAX PLU factorizations
-        choose different pivots, producing adjoint vectors that both satisfy
-        J^T adj = rhs to machine precision but differ in norm by ~3x.  This
-        makes direct gradient parity impossible on the exact path.
+        The exact Newton Jacobian is ill-conditioned: scipy and JAX PLU
+        factorizations choose different pivots, producing adjoint vectors
+        that both satisfy J^T adj = rhs to machine precision but differ in
+        norm by ~3x.  This makes direct gradient parity impossible on the
+        exact path.
 
         Direct gradient parity IS validated on the LS scipy path at
         rtol=1e-10 in test_real_fixture_scipy_parity_and_wrapper_gradients.
         Correctness of each path is validated independently via FD in
-        TestIotasJAXResolveFD, TestNonQSRatioJAXResolveFD, and
-        test_exact_coil_vjp_matches_fixed_state_directional_fd.
-
-        BoozerResidualJAX is excluded: it intentionally rejects exact surfaces.
+        TestIotasJAXResolveFD and TestNonQSRatioJAXResolveFD.
         """
         exact_pair = _solve_exact_cpu_jax_parity_pair()
 
-        # Iotas gradient health
         iotas_cpu_grad = np.array(Iotas(exact_pair.booz_cpu_exact).dJ())
         iotas_jax_grad = np.array(IotasJAX(exact_pair.booz_jax_exact).dJ())
         assert iotas_cpu_grad.shape == iotas_jax_grad.shape
-        assert np.all(np.isfinite(iotas_cpu_grad)), "CPU Iotas.dJ() not finite"
-        assert np.all(np.isfinite(iotas_jax_grad)), "JAX IotasJAX.dJ() not finite"
-        assert np.linalg.norm(iotas_cpu_grad) > 0, "CPU Iotas.dJ() is zero"
-        assert np.linalg.norm(iotas_jax_grad) > 0, "JAX IotasJAX.dJ() is zero"
+        _assert_gradients_finite_nonzero(
+            [iotas_cpu_grad, iotas_jax_grad], "Exact-path Iotas.dJ()"
+        )
 
-        # NonQuasiSymmetricRatio gradient health
         nqs_cpu_grad = np.array(
             NonQuasiSymmetricRatio(
-                exact_pair.booz_cpu_exact,
-                exact_pair.bs_cpu,
-                sDIM=6,
+                exact_pair.booz_cpu_exact, exact_pair.bs_cpu, sDIM=6
             ).dJ()
         )
         nqs_jax_grad = np.array(
             NonQuasiSymmetricRatioJAX(
-                exact_pair.booz_jax_exact,
-                exact_pair.bs_jax,
-                sDIM=6,
+                exact_pair.booz_jax_exact, exact_pair.bs_jax, sDIM=6
             ).dJ()
         )
         assert nqs_cpu_grad.shape == nqs_jax_grad.shape
-        assert np.all(np.isfinite(nqs_cpu_grad)), (
-            "CPU NonQuasiSymmetricRatio.dJ() not finite"
-        )
-        assert np.all(np.isfinite(nqs_jax_grad)), (
-            "JAX NonQuasiSymmetricRatioJAX.dJ() not finite"
-        )
-        assert np.linalg.norm(nqs_cpu_grad) > 0, (
-            "CPU NonQuasiSymmetricRatio.dJ() is zero"
-        )
-        assert np.linalg.norm(nqs_jax_grad) > 0, (
-            "JAX NonQuasiSymmetricRatioJAX.dJ() is zero"
-        )
-
-        # Verify both adjoint solutions satisfy the linear system
-        J = exact_pair.res_cpu["jacobian"]
-        P_cpu, L_cpu, U_cpu = exact_pair.res_cpu["PLU"]
-        from simsopt.objectives.utilities import forward_backward
-
-        n = L_cpu.shape[0]
-        dJ_ds = np.zeros(n)
-        dJ_ds[-2] = 1.0
-        adj_cpu = forward_backward(P_cpu, L_cpu, U_cpu, dJ_ds)
-        assert np.linalg.norm(J.T @ adj_cpu - dJ_ds) < 1e-12, (
-            "CPU adjoint does not satisfy J^T adj = rhs"
+        _assert_gradients_finite_nonzero(
+            [nqs_cpu_grad, nqs_jax_grad], "Exact-path NonQuasiSymmetricRatio.dJ()"
         )
 
     def test_exact_coil_vjp_matches_fixed_state_directional_fd(self):
