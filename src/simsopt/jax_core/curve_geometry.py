@@ -432,6 +432,248 @@ def curve_spec_with_dofs(spec: CurveSpec, dofs):
     return replace(spec, dofs=_as_explicit_float64(dofs))
 
 
+def curve_spec_with_quadpoints(spec: CurveSpec, quadpoints):
+    return _curve_spec_with_quadpoints(
+        spec,
+        _as_explicit_float64(quadpoints, reference=spec.dofs),
+    )
+
+
+def _clamp_unit_interval(value: jax.Array) -> jax.Array:
+    return jnp.clip(value, 0.0, 1.0)
+
+
+def _distance_sq(vector: jax.Array) -> jax.Array:
+    return jnp.maximum(jnp.dot(vector, vector), 0.0)
+
+
+def _distance(vector: jax.Array) -> jax.Array:
+    return jnp.sqrt(_distance_sq(vector))
+
+
+def segment_segment_distance_pure(
+    segment_start: jax.Array,
+    segment_end: jax.Array,
+    other_start: jax.Array,
+    other_end: jax.Array,
+) -> jax.Array:
+    """Return the minimum distance between two 3D line segments.
+
+    This is the JAX-native Sunday/Lumelsky-style kernel used for curve
+    self-intersection checks and penalties. The branching stays entirely in JAX
+    control flow so the result is differentiable with respect to the input
+    segment endpoints.
+    """
+    segment_start = _as_explicit_float64(segment_start)
+    segment_end = _as_explicit_float64(segment_end, reference=segment_start)
+    other_start = _as_explicit_float64(other_start, reference=segment_start)
+    other_end = _as_explicit_float64(other_end, reference=segment_start)
+    zero_len = _explicit_scalar(1e-30, reference=segment_start)
+    parallel_eps = _explicit_scalar(1e-10, reference=segment_start)
+    zero = _explicit_scalar(0.0, reference=segment_start)
+    one = _explicit_scalar(1.0, reference=segment_start)
+
+    u = segment_end - segment_start
+    v = other_end - other_start
+    w0 = segment_start - other_start
+
+    a = jnp.dot(u, u)
+    b = jnp.dot(u, v)
+    c = jnp.dot(v, v)
+    d = jnp.dot(u, w0)
+    e = jnp.dot(v, w0)
+
+    def _both_degenerate(_):
+        return _distance(w0)
+
+    def _segment_is_point(_):
+        def _other_is_point(__):
+            return _both_degenerate(None)
+
+        def _project_to_other(__):
+            projected = w0 - _clamp_unit_interval(e / c) * v
+            return _distance(projected)
+
+        return jax.lax.cond(c < zero_len, _other_is_point, _project_to_other, None)
+
+    def _other_is_point(_):
+        projected = w0 + _clamp_unit_interval(-d / a) * u
+        return _distance(projected)
+
+    def _general_case(_):
+        denom = a * c - b * b
+
+        def _near_parallel(__):
+            best_sq = _distance_sq(w0 - _clamp_unit_interval(e / c) * v)
+            best_sq = jnp.minimum(
+                best_sq,
+                _distance_sq(w0 + u - _clamp_unit_interval((e + b) / c) * v),
+            )
+            best_sq = jnp.minimum(
+                best_sq,
+                _distance_sq(w0 + _clamp_unit_interval(-d / a) * u),
+            )
+            best_sq = jnp.minimum(
+                best_sq,
+                _distance_sq(w0 + _clamp_unit_interval((b - d) / a) * u - v),
+            )
+
+            def _interior_sq(_operand):
+                sc_int = (b * e - c * d) / denom
+                tc_int = (a * e - b * d) / denom
+                interior_valid = (
+                    (sc_int >= zero)
+                    & (sc_int <= one)
+                    & (tc_int >= zero)
+                    & (tc_int <= one)
+                )
+                candidate_sq = _distance_sq(w0 + sc_int * u - tc_int * v)
+                inf_sq = _explicit_scalar(jnp.inf, reference=segment_start)
+                return jnp.where(interior_valid, candidate_sq, inf_sq)
+
+            interior_sq = jax.lax.cond(
+                denom > zero,
+                _interior_sq,
+                lambda _: _explicit_scalar(jnp.inf, reference=segment_start),
+                None,
+            )
+            return jnp.sqrt(jnp.minimum(best_sq, interior_sq))
+
+        def _non_parallel(__):
+            sc = (b * e - c * d) / denom
+            tc = (a * e - b * d) / denom
+
+            sc = jnp.where(sc < zero, zero, sc)
+            tc = jnp.where(sc == zero, e / c, tc)
+
+            sc = jnp.where(sc > one, one, sc)
+            tc = jnp.where(sc == one, (e + b) / c, tc)
+
+            tc = jnp.where(tc < zero, zero, tc)
+            sc = jnp.where(tc == zero, _clamp_unit_interval(-d / a), sc)
+
+            tc = jnp.where(tc > one, one, tc)
+            sc = jnp.where(tc == one, _clamp_unit_interval((b - d) / a), sc)
+
+            return _distance(w0 + sc * u - tc * v)
+
+        return jax.lax.cond(
+            denom < parallel_eps * a * c,
+            _near_parallel,
+            _non_parallel,
+            None,
+        )
+
+    return jax.lax.cond(
+        a < zero_len,
+        _segment_is_point,
+        lambda _: jax.lax.cond(c < zero_len, _other_is_point, _general_case, None),
+        None,
+    )
+
+
+def _closed_curve_segment_arrays(gamma: jax.Array) -> tuple[jax.Array, jax.Array]:
+    gamma = _as_explicit_float64(gamma)
+    return gamma, jnp.roll(gamma, shift=-1, axis=0)
+
+
+def closed_curve_self_intersection_min_distance(
+    gamma: jax.Array,
+    *,
+    neighbor_skip: int = 3,
+) -> jax.Array:
+    """Return the minimum non-neighbor segment distance of a closed curve."""
+    segment_start, segment_end = _closed_curve_segment_arrays(gamma)
+    segment_count = segment_start.shape[0]
+    inf_distance = _explicit_scalar(jnp.inf, reference=segment_start)
+    if int(segment_count) <= (2 * int(neighbor_skip) + 1):
+        return inf_distance
+
+    segment_indices = jnp.arange(segment_count, dtype=jnp.int32)
+
+    def _row_minimum(best_distance, row_inputs):
+        left_index, left_start, left_end = row_inputs
+
+        def _pair_distance(right_index, right_start, right_end):
+            distance = segment_segment_distance_pure(
+                left_start,
+                left_end,
+                right_start,
+                right_end,
+            )
+            delta = jnp.abs(left_index - right_index)
+            wrapped_delta = jnp.minimum(delta, segment_count - delta)
+            return jnp.where(wrapped_delta > neighbor_skip, distance, inf_distance)
+
+        row_distances = jax.vmap(_pair_distance)(
+            segment_indices,
+            segment_start,
+            segment_end,
+        )
+        return jnp.minimum(best_distance, jnp.min(row_distances)), None
+
+    minimum_distance, _ = jax.lax.scan(
+        _row_minimum,
+        inf_distance,
+        (segment_indices, segment_start, segment_end),
+    )
+    return minimum_distance
+
+
+def closed_curve_self_intersection_tolerance(
+    gamma: jax.Array,
+    *,
+    tolerance_factor: float = 0.1,
+) -> jax.Array:
+    """Return the segment-length-scaled self-intersection tolerance."""
+    segment_start, segment_end = _closed_curve_segment_arrays(gamma)
+    segment_lengths = jnp.linalg.norm(segment_end - segment_start, axis=1)
+    average_segment_length = jnp.sum(segment_lengths) / segment_lengths.shape[0]
+    return _explicit_scalar(tolerance_factor, reference=gamma) * average_segment_length
+
+
+def closed_curve_self_intersection_penalty(
+    gamma: jax.Array,
+    *,
+    tolerance_factor: float = 0.1,
+    neighbor_skip: int = 3,
+) -> jax.Array:
+    """Return a soft quadratic penalty for closed-curve self intersection."""
+    minimum_distance = closed_curve_self_intersection_min_distance(
+        gamma,
+        neighbor_skip=neighbor_skip,
+    )
+    tolerance = closed_curve_self_intersection_tolerance(
+        gamma,
+        tolerance_factor=tolerance_factor,
+    )
+    deficit = jnp.maximum(tolerance - minimum_distance, 0.0)
+    return _explicit_scalar(0.5, reference=gamma) * deficit * deficit
+
+
+def closed_curve_self_intersection_summary(
+    gamma: jax.Array,
+    *,
+    tolerance_factor: float = 0.1,
+    neighbor_skip: int = 3,
+) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
+    """Return (min_distance, tolerance, penalty, intersecting) for a closed curve."""
+    minimum_distance = closed_curve_self_intersection_min_distance(
+        gamma,
+        neighbor_skip=neighbor_skip,
+    )
+    tolerance = closed_curve_self_intersection_tolerance(
+        gamma,
+        tolerance_factor=tolerance_factor,
+    )
+    penalty = closed_curve_self_intersection_penalty(
+        gamma,
+        tolerance_factor=tolerance_factor,
+        neighbor_skip=neighbor_skip,
+    )
+    return minimum_distance, tolerance, penalty, minimum_distance < tolerance
+
+
 def curve_gamma_and_dash_from_spec(spec: CurveSpec):
     return curve_gamma_and_dash_from_dofs(spec, spec.dofs)
 

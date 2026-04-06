@@ -10,6 +10,7 @@ import uuid
 from pathlib import Path
 from unittest.mock import patch
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 
@@ -499,6 +500,42 @@ class SingleStageExampleTests(unittest.TestCase):
             "scipy",
         )
 
+    def test_resolve_boozer_least_squares_algorithm_defaults_follow_effective_backend(
+        self,
+    ):
+        module = self.load_module()
+
+        self.assertIsNone(
+            module.resolve_single_stage_default_boozer_least_squares_algorithm(
+                "cpu",
+                "scipy",
+            )
+        )
+        self.assertEqual(
+            module.resolve_single_stage_default_boozer_least_squares_algorithm(
+                "jax",
+                "ondevice",
+            ),
+            "lm",
+        )
+        self.assertEqual(
+            module.resolve_single_stage_default_boozer_least_squares_algorithm(
+                "jax",
+                "ondevice",
+                "scipy",
+            ),
+            "quasi-newton",
+        )
+        self.assertEqual(
+            module.resolve_single_stage_default_boozer_least_squares_algorithm(
+                "jax",
+                "ondevice",
+                None,
+                "quasi-newton",
+            ),
+            "quasi-newton",
+        )
+
     def test_parse_args_does_not_treat_optimizer_env_as_explicit_boozer_override(self):
         module = self.load_module()
 
@@ -511,6 +548,7 @@ class SingleStageExampleTests(unittest.TestCase):
 
         self.assertEqual(args.optimizer_backend, "ondevice")
         self.assertIsNone(args.boozer_optimizer_backend)
+        self.assertIsNone(args.boozer_least_squares_algorithm)
 
     def test_parse_args_defaults_jax_backend_to_ondevice_optimizer_lane(self):
         module = self.load_module()
@@ -524,6 +562,7 @@ class SingleStageExampleTests(unittest.TestCase):
 
         self.assertEqual(args.optimizer_backend, "ondevice")
         self.assertIsNone(args.boozer_optimizer_backend)
+        self.assertEqual(args.boozer_least_squares_algorithm, "lm")
 
     def test_parse_args_preserves_cpu_default_reference_lane(self):
         module = self.load_module()
@@ -538,6 +577,27 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertEqual(args.backend, "cpu")
         self.assertEqual(args.optimizer_backend, "scipy")
         self.assertIsNone(args.boozer_optimizer_backend)
+        self.assertIsNone(args.boozer_least_squares_algorithm)
+
+    def test_parse_args_defaults_boozer_algorithm_from_explicit_inner_backend(self):
+        module = self.load_module()
+
+        with patch.dict(os.environ, {}, clear=True), patch.object(
+            sys,
+            "argv",
+            [
+                "single_stage_banana_example.py",
+                "--backend",
+                "jax",
+                "--boozer-optimizer-backend",
+                "scipy",
+            ],
+        ):
+            args = module.parse_args()
+
+        self.assertEqual(args.optimizer_backend, "ondevice")
+        self.assertEqual(args.boozer_optimizer_backend, "scipy")
+        self.assertEqual(args.boozer_least_squares_algorithm, "quasi-newton")
 
     def test_parse_args_defaults_target_lane_sync_to_final_only(self):
         module = self.load_module()
@@ -2255,34 +2315,26 @@ class BoozerFallbackLBFGSBTests(unittest.TestCase):
         self.assertGreater(res.hess_inv.n_corrs, 0)
 
 
-def _load_segment_distance_from_source():
-    """Extract the deployed segment_segment_distance from banana_coil_solver.py via AST.
+def _compiled_segment_segment_distance():
+    from simsopt.jax_core import segment_segment_distance_pure
 
-    Parses the source file, extracts just the _clamp01 and segment_segment_distance
-    function definitions (stripping @njit decorators), and compiles them in an
-    isolated namespace. This executes the REAL deployed algorithm without requiring
-    numba or triggering module-level code (arg parsing, VMEC file loading, etc.).
-    """
-    import ast
-
-    source = STAGE2_MODULE_PATH.read_text()
-    tree = ast.parse(source)
-    func_nodes = []
-    for node in ast.iter_child_nodes(tree):
-        if isinstance(node, ast.FunctionDef) and node.name in (
-            "_clamp01",
-            "segment_segment_distance",
-        ):
-            node.decorator_list = []
-            func_nodes.append(node)
-    extracted = ast.Module(body=func_nodes, type_ignores=[])
-    ast.fix_missing_locations(extracted)
-    namespace = {"np": np}
-    exec(compile(extracted, str(STAGE2_MODULE_PATH), "exec"), namespace)
-    return namespace["segment_segment_distance"]
+    return jax.jit(segment_segment_distance_pure)
 
 
-_segment_segment_distance = _load_segment_distance_from_source()
+_SEGMENT_SEGMENT_DISTANCE = _compiled_segment_segment_distance()
+
+
+def _segment_segment_distance(P1, P2, Q1, Q2):
+    return float(
+        np.asarray(
+            _SEGMENT_SEGMENT_DISTANCE(
+                np.asarray(P1, dtype=np.float64),
+                np.asarray(P2, dtype=np.float64),
+                np.asarray(Q1, dtype=np.float64),
+                np.asarray(Q2, dtype=np.float64),
+            )
+        )
+    )
 
 
 def _brute_force_segment_distance(P1, P2, Q1, Q2):
@@ -2462,6 +2514,22 @@ class HardwareConstraintTests(unittest.TestCase):
         self.assertIn("coil_length", status["violations"][0])
         self.assertIn("coil_coil_min_dist", status["violations"][1])
         self.assertIn("max_curvature", status["violations"][2])
+
+    def test_stage2_hardware_constraints_report_self_intersection_violation(self):
+        module = load_stage2_module()
+
+        status = module.evaluate_stage2_hardware_constraints(
+            coil_length=1.75,
+            length_target=1.75,
+            curve_curve_min_dist=0.05,
+            cc_threshold=0.05,
+            max_curvature=40.0,
+            curvature_threshold=40.0,
+            self_intersecting=True,
+        )
+
+        self.assertFalse(status["success"])
+        self.assertEqual(status["violations"], ["banana_curve is self-intersecting"])
 
     def test_stage2_hardware_constraints_report_isolated_violations(self):
         module = load_stage2_module()

@@ -756,7 +756,8 @@ def parse_args():
         default=os.environ.get("BOOZER_LEAST_SQUARES_ALGORITHM"),
         help=(
             "Optional override for the inner JAX Boozer LS algorithm. "
-            "Defaults to the historical quasi-Newton path when omitted."
+            "Defaults to 'lm' on the JAX ondevice lane and 'quasi-newton' "
+            "elsewhere when omitted."
         ),
     )
     parser.add_argument(
@@ -799,6 +800,14 @@ def parse_args():
     args.optimizer_backend = resolve_single_stage_default_optimizer_backend(
         args.backend,
         args.optimizer_backend,
+    )
+    args.boozer_least_squares_algorithm = (
+        resolve_single_stage_default_boozer_least_squares_algorithm(
+            args.backend,
+            args.optimizer_backend,
+            args.boozer_optimizer_backend,
+            args.boozer_least_squares_algorithm,
+        )
     )
     return args
 
@@ -1435,6 +1444,27 @@ def resolve_boozer_optimizer_backend(
     if boozer_optimizer_backend is None:
         return optimizer_backend
     return boozer_optimizer_backend
+
+
+def resolve_single_stage_default_boozer_least_squares_algorithm(
+    field_backend,
+    optimizer_backend,
+    boozer_optimizer_backend=None,
+    boozer_least_squares_algorithm=None,
+):
+    """Resolve the effective inner Boozer LS algorithm for the active lane."""
+    if boozer_least_squares_algorithm is not None or field_backend != "jax":
+        return boozer_least_squares_algorithm
+    from simsopt.geo.boozersurface_jax import (
+        default_least_squares_algorithm_for_backend,
+    )
+
+    effective_boozer_backend = resolve_boozer_optimizer_backend(
+        field_backend,
+        optimizer_backend,
+        boozer_optimizer_backend,
+    )
+    return default_least_squares_algorithm_for_backend(effective_boozer_backend)
 
 
 def resolve_single_stage_default_optimizer_backend(

@@ -1,6 +1,10 @@
 """Pure JAX kernel-layer specs and helpers."""
 
 from .curve_geometry import (
+    closed_curve_self_intersection_min_distance,
+    closed_curve_self_intersection_penalty,
+    closed_curve_self_intersection_summary,
+    closed_curve_self_intersection_tolerance,
     curve_gamma_and_dash_from_dofs,
     curve_gamma_and_dash_from_spec,
     curve_geometry_from_dofs,
@@ -9,6 +13,8 @@ from .curve_geometry import (
     curve_pullback_from_spec,
     curve_spec_from_curve,
     curve_spec_with_dofs,
+    curve_spec_with_quadpoints,
+    segment_segment_distance_pure,
 )
 from .biotsavart import (
     biot_savart_A,
@@ -142,6 +148,10 @@ __all__ = [
     "SurfaceRZFourierSpec",
     "ZeroRotationSpec",
     "build_fourier_basis",
+    "closed_curve_self_intersection_min_distance",
+    "closed_curve_self_intersection_penalty",
+    "closed_curve_self_intersection_summary",
+    "closed_curve_self_intersection_tolerance",
     "curve_gamma_and_dash_from_dofs",
     "curve_gamma_and_dash_from_spec",
     "curve_geometry_from_dofs",
@@ -151,6 +161,7 @@ __all__ = [
     "curve_spec_kind",
     "curve_spec_from_curve",
     "curve_spec_with_dofs",
+    "curve_spec_with_quadpoints",
     "coil_set_spec_from_dof_extraction_spec",
     "coil_specs_from_dof_extraction_spec",
     "biot_savart_A",
@@ -202,6 +213,7 @@ __all__ = [
     "make_optimizable_dof_map_spec",
     "make_surface_rzfourier_spec",
     "make_zero_rotation_spec",
+    "segment_segment_distance_pure",
     "surface_rz_fourier_area_from_spec",
     "surface_rz_fourier_area_from_dofs",
     "surface_rz_fourier_dofs_from_spec",

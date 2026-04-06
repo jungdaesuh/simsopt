@@ -846,6 +846,32 @@ class TestBoozerSurfaceJAXClass:
             np.asarray([coil.current.get_value() for coil in coils]),
         )
 
+    @pytest.mark.parametrize(
+        ("optimizer_backend", "expected_algorithm"),
+        [
+            ("scipy", "quasi-newton"),
+            ("ondevice", "lm"),
+        ],
+    )
+    def test_instantiation_defaults_least_squares_algorithm_from_backend(
+        self,
+        optimizer_backend,
+        expected_algorithm,
+    ):
+        bs = _MockBiotSavart(_make_mock_coils())
+        surf, label = _make_basic_mock_surface_and_label()
+
+        booz = BoozerSurfaceJAX(
+            bs,
+            surf,
+            label,
+            1.0,
+            constraint_weight=1.0,
+            options={"optimizer_backend": optimizer_backend},
+        )
+
+        assert booz.options["least_squares_algorithm"] == expected_algorithm
+
     def test_instantiation_rejects_grouped_extractor_only_adapter(self):
         """BoozerSurfaceJAX now requires explicit ``coil_set_spec()`` state."""
         coils = _make_mixed_quad_mock_coils()

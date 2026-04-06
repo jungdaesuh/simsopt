@@ -62,6 +62,7 @@ import simsopt.field.biotsavart_jax_backend as biotsavart_jax_backend_module
 from simsopt.field.biotsavart_jax import grouped_biot_savart_A
 from simsopt.jax_core import (
     apply_coil_symmetry,
+    closed_curve_self_intersection_summary,
     curve_spec_from_curve,
     make_coil_symmetry_spec,
     grouped_biot_savart_B_from_inputs,
@@ -268,6 +269,41 @@ def _run_stage2_script(*args):
         capture_output=True,
         text=True,
     )
+
+
+def test_closed_curve_self_intersection_summary_detects_crossing_curve():
+    crossing_gamma = jnp.asarray(
+        (
+            (0.0, 0.0, 0.0),
+            (1.0, 1.0, 0.0),
+            (0.0, 1.0, 0.0),
+            (1.0, 0.0, 0.0),
+        ),
+        dtype=jnp.float64,
+    )
+    square_gamma = jnp.asarray(
+        (
+            (0.0, 0.0, 0.0),
+            (1.0, 0.0, 0.0),
+            (1.0, 1.0, 0.0),
+            (0.0, 1.0, 0.0),
+        ),
+        dtype=jnp.float64,
+    )
+
+    crossing_summary = closed_curve_self_intersection_summary(
+        crossing_gamma,
+        neighbor_skip=1,
+    )
+    square_summary = closed_curve_self_intersection_summary(
+        square_gamma,
+        neighbor_skip=1,
+    )
+
+    assert bool(np.asarray(crossing_summary[3]))
+    assert float(np.asarray(crossing_summary[2])) > 0.0
+    assert not bool(np.asarray(square_summary[3]))
+    assert float(np.asarray(square_summary[2])) == pytest.approx(0.0)
 
 
 def _assert_stage2_script_failure(result, expected_error):
@@ -2460,6 +2496,23 @@ class TestStage2OptimizerContract:
         assert args.optimizer_backend == "ondevice"
         assert args.least_squares_algorithm == "quasi-newton"
 
+    def test_stage2_hardware_constraints_fail_on_self_intersection(self):
+        stage2_script = _load_stage2_script_module()
+
+        status = stage2_script.evaluate_stage2_hardware_constraints(
+            1.7,
+            1.75,
+            0.06,
+            0.05,
+            39.0,
+            40.0,
+            self_intersecting=True,
+        )
+
+        assert status["success"] is False
+        assert status["self_intersecting"] is True
+        assert "banana_curve is self-intersecting" in status["violations"]
+
     @pytest.mark.parametrize(
         (
             "field_backend",
@@ -4432,6 +4485,15 @@ class TestStage2OptimizerContract:
                 },
             },
         )
+        expected_self_intersection = {
+            "min_distance": 0.25,
+            "tolerance": 0.05,
+            "penalty": 0.0,
+            "intersecting": False,
+            "npts": 2000,
+            "tolerance_factor": 0.1,
+            "neighbor_skip": 3,
+        }
 
         payload = stage2_script.build_stage2_probe_payload(
             fake_root,
@@ -4453,6 +4515,7 @@ class TestStage2OptimizerContract:
             cc_weight=10.0,
             cc_threshold=0.05,
             curvature_weight=1e-4,
+            self_intersection_summary=expected_self_intersection,
             target_objective_bundle=(
                 target_objective_bundle if optimizer_backend == "ondevice" else None
             ),
@@ -4478,6 +4541,7 @@ class TestStage2OptimizerContract:
         assert payload["curvature_threshold"] == pytest.approx(40.0)
         assert payload["curvature_within_threshold"] is True
         assert payload["curvature_margin"] == pytest.approx(22.0)
+        assert payload["self_intersection"] == expected_self_intersection
         if optimizer_backend == "ondevice":
             assert payload["composite"]["J"] == pytest.approx(float(expected_value))
             np.testing.assert_allclose(

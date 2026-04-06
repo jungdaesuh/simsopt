@@ -7,7 +7,6 @@ import time
 
 import jax
 import numpy as np
-from numba import njit
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 EXAMPLE_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, ".."))
@@ -20,7 +19,7 @@ sys.path.insert(0, SRC_ROOT)
 sys.path.insert(0, SIMSOPT_ROOT)
 sys.path.insert(0, REPO_ROOT)
 
-from jax_host_boundary import host_array, host_float
+from jax_host_boundary import host_array, host_bool, host_float
 from hardware_constraints import (
     apply_hardware_constraint_verdict,
     sanitize_json_payload,
@@ -30,6 +29,12 @@ from repo_bootstrap import bootstrap_local_simsopt
 
 bootstrap_local_simsopt(SRC_ROOT)
 from simsopt.config import maybe_initialize_distributed_jax
+from simsopt.jax_core import (
+    closed_curve_self_intersection_summary,
+    curve_gamma_and_dash_from_spec,
+    curve_spec_from_curve,
+    curve_spec_with_quadpoints,
+)
 
 maybe_initialize_distributed_jax()
 DATABASE_EQUILIBRIA_DIR = os.path.join(REPO_ROOT, "DATABASE", "EQUILIBRIA")
@@ -60,6 +65,8 @@ def evaluate_stage2_hardware_constraints(
     cc_threshold,
     max_curvature,
     curvature_threshold,
+    *,
+    self_intersecting=False,
 ):
     """Evaluate hard Stage 2 hardware constraints against realized geometry."""
     coil_length = float(coil_length)
@@ -91,6 +98,8 @@ def evaluate_stage2_hardware_constraints(
         violations.append(
             f"max_curvature {max_curvature:.6f} exceeds threshold {curvature_threshold:.6f}"
         )
+    if self_intersecting:
+        violations.append("banana_curve is self-intersecting")
     return {
         "success": len(violations) == 0,
         "violations": violations,
@@ -100,6 +109,7 @@ def evaluate_stage2_hardware_constraints(
         "cc_threshold": cc_threshold,
         "max_curvature": max_curvature,
         "curvature_threshold": curvature_threshold,
+        "self_intersecting": bool(self_intersecting),
     }
 
 
@@ -464,178 +474,33 @@ def initializeCoils(
     return bs, curves, banana_curve, banana_coils
 
 
-# Helper: evaluate gamma for the Stage 2 banana-curve winding-surface class.
-def gamma_at_t(curve, t):
-    out = np.zeros((len(t), 3))
-    curve.gamma_impl(out, np.asarray(t, dtype=np.float64))
-    return out
-
-
-# Compute total curve length
-def compute_curve_length(pts):
-    diffs = pts[1:] - pts[:-1]
-    seg_lengths = np.linalg.norm(diffs, axis=1)
-    total_length = np.sum(seg_lengths)
-    return total_length
-
-
-@njit
-def _clamp01(x):
-    if x < 0.0:
-        return 0.0
-    if x > 1.0:
-        return 1.0
-    return x
-
-
-@njit
-def segment_segment_distance(P1, P2, Q1, Q2):
-    """
-    Minimum distance between segments P1P2 and Q1Q2.
-    Sunday/Lumelsky algorithm with correct re-projection after clamping
-    and relative parallelism threshold.
-    """
-    u = P2 - P1
-    v = Q2 - Q1
-    w0 = P1 - Q1
-
-    a = np.dot(u, u)  # |u|^2
-    b = np.dot(u, v)
-    c = np.dot(v, v)  # |v|^2
-    d = np.dot(u, w0)
-    e = np.dot(v, w0)
-
-    ZERO_LEN = 1e-30  # degenerate segment threshold
-    PAR_EPS = 1e-10  # relative parallelism: sin^2(theta) < PAR_EPS
-
-    # Degenerate: P is a point
-    if a < ZERO_LEN:
-        if c < ZERO_LEN:
-            return np.linalg.norm(w0)
-        return np.linalg.norm(w0 - _clamp01(e / c) * v)
-
-    # Degenerate: Q is a point
-    if c < ZERO_LEN:
-        return np.linalg.norm(w0 + _clamp01(-d / a) * u)
-
-    denom = a * c - b * b  # >= 0 by Cauchy-Schwarz
-
-    if denom < PAR_EPS * a * c:
-        # Near-parallel: check all four endpoint-to-segment projections
-        best_sq = np.inf
-
-        # P1 -> segment Q
-        dp = w0 - _clamp01(e / c) * v
-        dsq = np.dot(dp, dp)
-        if dsq < best_sq:
-            best_sq = dsq
-
-        # P2 -> segment Q
-        dp = w0 + u - _clamp01((e + b) / c) * v
-        dsq = np.dot(dp, dp)
-        if dsq < best_sq:
-            best_sq = dsq
-
-        # Q1 -> segment P
-        dp = w0 + _clamp01(-d / a) * u
-        dsq = np.dot(dp, dp)
-        if dsq < best_sq:
-            best_sq = dsq
-
-        # Q2 -> segment P
-        dp = w0 + _clamp01((b - d) / a) * u - v
-        dsq = np.dot(dp, dp)
-        if dsq < best_sq:
-            best_sq = dsq
-
-        # Interior check: when the true minimum is interior, numerators
-        # scale with denom so the division is well-conditioned.
-        if denom > 0.0:
-            sc_int = (b * e - c * d) / denom
-            tc_int = (a * e - b * d) / denom
-            if 0.0 <= sc_int <= 1.0 and 0.0 <= tc_int <= 1.0:
-                dp = w0 + sc_int * u - tc_int * v
-                dsq = np.dot(dp, dp)
-                if dsq < best_sq:
-                    best_sq = dsq
-
-        return np.sqrt(best_sq)
-
-    # General case: unclamped line-line closest-point parameters
-    sc = (b * e - c * d) / denom
-    tc = (a * e - b * d) / denom
-
-    # Clamp s and re-project t
-    if sc < 0.0:
-        sc = 0.0
-        tc = e / c
-    elif sc > 1.0:
-        sc = 1.0
-        tc = (e + b) / c
-
-    # Clamp t and re-project s
-    if tc < 0.0:
-        tc = 0.0
-        sc = _clamp01(-d / a)
-    elif tc > 1.0:
-        tc = 1.0
-        sc = _clamp01((b - d) / a)
-
-    dp = w0 + sc * u - tc * v
-    return np.sqrt(np.dot(dp, dp))
-
-
-@njit
-def check_all_pairs(segments, tol, neighbor_skip):
-    n_segments = segments.shape[0]
-    for i in range(n_segments):
-        for j in range(n_segments):
-            if i == j:
-                continue
-            # compute minimal periodic distance between segments
-            delta = abs(i - j)
-            wrapped_delta = min(delta, n_segments - delta)
-            if wrapped_delta <= neighbor_skip:
-                continue
-            P1, P2 = segments[i, 0], segments[i, 1]
-            Q1, Q2 = segments[j, 0], segments[j, 1]
-            dist = segment_segment_distance(P1, P2, Q1, Q2)
-            if dist < tol:
-                return True
-    return False
-
-
-def is_self_intersecting(
-    curve, npts=2000, tol_factor=0.1, neighbor_skip=3
-):  # maybe different skip works better
-    """
-    3D self-intersection checker for Stage 2 banana-curve objects.
-
-    Parameters:
-        curve: winding-surface banana curve
-        npts: number of discretization points (higher is better)
-        tol_factor: tolerance as fraction of segment length (default 5%)
-        neighbor_skip: number of neighboring segments to skip (default 3)
-
-    Returns:
-        True if self-intersecting, False otherwise
-    """
-    t = np.linspace(0, 1, npts + 1)  # closed curve, include endpoint
-    pts = gamma_at_t(curve, t)
-
-    # Build segments
-    segments = np.zeros((npts, 2, 3))
-    for i in range(npts):
-        segments[i, 0] = pts[i]
-        segments[i, 1] = pts[i + 1]
-
-    # Compute segment length and tolerance
-    total_length = compute_curve_length(pts)
-    seg_length = total_length / npts
-    tol = tol_factor * seg_length
-
-    # Run pairwise checking
-    return check_all_pairs(segments, tol, neighbor_skip)
+def build_curve_self_intersection_summary(
+    curve,
+    *,
+    npts=2000,
+    tol_factor=0.1,
+    neighbor_skip=3,
+):
+    """Return Stage 2 closed-curve self-intersection diagnostics from the JAX SSOT."""
+    quadpoints = np.linspace(0.0, 1.0, int(npts), endpoint=False, dtype=np.float64)
+    curve_spec = curve_spec_with_quadpoints(curve_spec_from_curve(curve), quadpoints)
+    gamma, _ = curve_gamma_and_dash_from_spec(curve_spec)
+    min_distance, tolerance, penalty, intersecting = (
+        closed_curve_self_intersection_summary(
+            gamma,
+            tolerance_factor=tol_factor,
+            neighbor_skip=neighbor_skip,
+        )
+    )
+    return {
+        "min_distance": host_float(min_distance),
+        "tolerance": host_float(tolerance),
+        "penalty": host_float(penalty),
+        "intersecting": host_bool(intersecting),
+        "npts": int(npts),
+        "tolerance_factor": float(tol_factor),
+        "neighbor_skip": int(neighbor_skip),
+    }
 
 
 def magneticFieldPlots(surf, bs, OUT_DIR_ITER):
@@ -1447,6 +1312,7 @@ def build_stage2_probe_payload(
     cc_weight,
     cc_threshold,
     curvature_weight,
+    self_intersection_summary=None,
     target_objective_bundle=None,
 ):
     """Serialize the initialized Stage 2 objective state for parity probes."""
@@ -1507,6 +1373,8 @@ def build_stage2_probe_payload(
             **({"terms": composite_terms} if composite_terms is not None else {}),
         },
     }
+    if self_intersection_summary is not None:
+        payload["self_intersection"] = dict(self_intersection_summary)
     if sharding_summaries is not None:
         payload["sharding_summaries"] = sharding_summaries
     return payload
@@ -1927,6 +1795,9 @@ if __name__ == "__main__":
             field_diagnostic_stride=field_diagnostic_stride,
         )
     if args.export_objective_json:
+        initial_self_intersection_summary = build_curve_self_intersection_summary(
+            new_banana_curve
+        )
         probe_payload = build_stage2_probe_payload(
             JF,
             new_bs,
@@ -1948,6 +1819,7 @@ if __name__ == "__main__":
             cc_weight=CC_WEIGHT,
             cc_threshold=CC_THRESHOLD,
             curvature_weight=CURVATURE_WEIGHT,
+            self_intersection_summary=initial_self_intersection_summary,
             target_objective_bundle=(
                 target_objective_bundle
                 if args.optimizer_backend == "ondevice"
@@ -2112,9 +1984,12 @@ if __name__ == "__main__":
     # require numpy arrays.  set_points() below forces fresh evaluation
     # with the optimized coil DOFs (shared coil objects).
     # ---------------------------------------------------------------------------------------
-    if is_self_intersecting(new_banana_curve):
+    final_self_intersection_summary = build_curve_self_intersection_summary(
+        new_banana_curve
+    )
+    intersecting = final_self_intersection_summary["intersecting"]
+    if intersecting:
         print("BANANA COIL IS SELF-INTERSECTING!")
-        intersecting = True
 
     new_bs.set_points(new_surf.gamma().reshape((-1, 3)))
     unitn = new_surf.unitnormal()
@@ -2200,6 +2075,7 @@ if __name__ == "__main__":
         CC_THRESHOLD,
         float(np.max(new_banana_curve.kappa())),
         CURVATURE_THRESHOLD,
+        self_intersecting=intersecting,
     )
     optimizer_success, termination_message = apply_hardware_constraint_verdict(
         optimizer_success,
@@ -2255,6 +2131,11 @@ if __name__ == "__main__":
         "FINAL_BANANA_GAMMA": np.asarray(
             new_banana_curve.gamma(), dtype=float
         ).tolist(),
+        "SELF_INTERSECTION_MIN_DISTANCE": final_self_intersection_summary[
+            "min_distance"
+        ],
+        "SELF_INTERSECTION_TOLERANCE": final_self_intersection_summary["tolerance"],
+        "SELF_INTERSECTION_PENALTY": final_self_intersection_summary["penalty"],
     }
     if optimizer_timings is not None:
         results["OPTIMIZER_TIMINGS"] = optimizer_timings

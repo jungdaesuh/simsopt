@@ -1061,7 +1061,6 @@ _DEFAULT_OPTIONS_LS = {
     "bfgs_tol": 1e-10,
     "bfgs_maxiter": 1500,
     "optimizer_backend": "scipy",
-    "least_squares_algorithm": "quasi-newton",
     "limited_memory": False,
     "newton_tol": 1e-11,
     "newton_maxiter": 40,
@@ -1094,9 +1093,11 @@ _CALLBACK_OPTIONS = frozenset({"stage_callback", "progress_callback"})
 _ONDEVICE_OPTIMIZER_METHODS = frozenset(
     {"bfgs-ondevice", "lbfgs-ondevice", "lm-ondevice"}
 )
+_LS_DYNAMIC_OPTION_KEYS = frozenset({"least_squares_algorithm"})
 
 _ALLOWED_OPTIONS_LS = (
     frozenset(_DEFAULT_OPTIONS_LS)
+    | _LS_DYNAMIC_OPTION_KEYS
     | _PRIVATE_OPTIMIZER_OPTIONS
     | _LBFGS_TUNING_OPTIONS
     | _CALLBACK_OPTIONS
@@ -1105,6 +1106,12 @@ _ALLOWED_OPTIONS_EXACT = frozenset(_DEFAULT_OPTIONS_EXACT) | {
     "optimizer_backend",
     "stage_callback",
 }
+
+
+def default_least_squares_algorithm_for_backend(optimizer_backend):
+    if optimizer_backend == "ondevice":
+        return "lm"
+    return "quasi-newton"
 
 
 def _normalize_solver_options(raw_options, boozer_type):
@@ -1158,6 +1165,12 @@ def _normalize_solver_options(raw_options, boozer_type):
             )
 
     normalized_options = dict(raw_options)
+    if boozer_type == "ls" and "least_squares_algorithm" not in normalized_options:
+        normalized_options["least_squares_algorithm"] = (
+            default_least_squares_algorithm_for_backend(
+                normalized_options.get("optimizer_backend", "scipy")
+            )
+        )
     if boozer_type == "exact":
         normalized_options.pop("optimizer_backend", None)
     return normalized_options
