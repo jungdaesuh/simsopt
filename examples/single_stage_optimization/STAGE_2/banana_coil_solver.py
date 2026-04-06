@@ -31,7 +31,10 @@ sys.path.insert(0, EXAMPLE_ROOT)
 from alm_utils import (
     ALMSettings,
     augmented_objective,
+    lower_bound_residual,
     minimize_alm,
+    normalized_lp_penalty_residual,
+    normalized_quadratic_penalty_residual,
     upper_bound_residual,
     validate_alm_cli_args,
     zero_gradient_like,
@@ -152,6 +155,36 @@ def parse_args():
         type=float,
         default=float(os.environ.get("ALM_STATIONARITY_TOL", "1e-6")),
         help="ALM augmented-gradient stopping tolerance (default 1e-6).",
+    )
+    parser.add_argument(
+        "--alm-trust-radius-init",
+        type=float,
+        default=float(os.environ.get("ALM_TRUST_RADIUS_INIT", "0.05")),
+        help="Initial relative trust radius for bounded ALM inner solves (0 disables bounds).",
+    )
+    parser.add_argument(
+        "--alm-trust-radius-min",
+        type=float,
+        default=float(os.environ.get("ALM_TRUST_RADIUS_MIN", "1e-4")),
+        help="Minimum relative trust radius for bounded ALM inner solves.",
+    )
+    parser.add_argument(
+        "--alm-trust-radius-shrink",
+        type=float,
+        default=float(os.environ.get("ALM_TRUST_RADIUS_SHRINK", "0.5")),
+        help="Multiplicative shrink factor for the ALM inner trust radius.",
+    )
+    parser.add_argument(
+        "--alm-trust-radius-grow",
+        type=float,
+        default=float(os.environ.get("ALM_TRUST_RADIUS_GROW", "1.5")),
+        help="Multiplicative growth factor for the ALM inner trust radius after good steps.",
+    )
+    parser.add_argument(
+        "--alm-max-inner-attempts",
+        type=int,
+        default=int(os.environ.get("ALM_MAX_INNER_ATTEMPTS", "4")),
+        help="Maximum number of trust-radius retries per ALM outer iteration.",
     )
     parser.add_argument(
         "--length-weight",
@@ -553,6 +586,26 @@ def evaluate_stage2_hardware_constraints(
     }
 
 
+def mean_curve_curve_violation_scale(curve_curve_distance):
+    curve_curve_distance.compute_candidates()
+    if len(curve_curve_distance.candidates) == 0:
+        return 1.0
+
+    scales = []
+    for i, j in curve_curve_distance.candidates:
+        speed_i = np.linalg.norm(curve_curve_distance.curves[i].gammadash(), axis=1)
+        speed_j = np.linalg.norm(curve_curve_distance.curves[j].gammadash(), axis=1)
+        scales.append(float(np.mean(speed_i[:, None] * speed_j[None, :])))
+    return max(float(np.mean(scales)), np.finfo(float).eps)
+
+
+def mean_curve_speed(curve):
+    return max(
+        float(np.mean(np.linalg.norm(curve.gammadash(), axis=1))),
+        np.finfo(float).eps,
+    )
+
+
 def evaluate_stage2_alm_problem(
     dofs,
     base_objective,
@@ -569,23 +622,48 @@ def evaluate_stage2_alm_problem(
     base_objective.x = dofs
     base_value = float(base_objective.J())
     base_grad = np.asarray(base_objective.dJ(), dtype=float)
+    base_objective_optimizable = base_objective
 
     coil_length = float(Jls.J())
     length_violation = upper_bound_residual(coil_length, length_target)
     if length_violation > 0.0:
-        length_grad = np.asarray(Jls.dJ(), dtype=float)
+        length_grad = np.asarray(Jls.dJ(partials=True)(base_objective_optimizable), dtype=float)
     else:
         length_grad = zero_gradient_like(base_grad)
 
-    curve_curve_violation = float(Jccdist.J())
-    curve_curve_grad = np.asarray(Jccdist.dJ(), dtype=float)
-    curvature_violation = float(Jc.J())
-    curvature_grad = np.asarray(Jc.dJ(), dtype=float)
+    curve_curve_penalty = float(Jccdist.J())
+    curve_curve_penalty_grad = np.asarray(
+        Jccdist.dJ(partials=True)(base_objective_optimizable),
+        dtype=float,
+    )
+    curve_curve_min_dist = float(Jccdist.shortest_distance())
+    curve_curve_violation = lower_bound_residual(curve_curve_min_dist, Jccdist.minimum_distance)
+    curve_curve_residual, curve_curve_grad = normalized_quadratic_penalty_residual(
+        curve_curve_penalty,
+        curve_curve_penalty_grad,
+        normalization=mean_curve_curve_violation_scale(Jccdist),
+        reference_grad=base_grad,
+    )
+
+    curvature_penalty = float(Jc.J())
+    curvature_penalty_grad = np.asarray(
+        Jc.dJ(partials=True)(base_objective_optimizable),
+        dtype=float,
+    )
+    max_curvature = float(np.max(Jc.curve.kappa()))
+    curvature_violation = upper_bound_residual(max_curvature, Jc.threshold)
+    curvature_residual, curvature_grad = normalized_lp_penalty_residual(
+        curvature_penalty,
+        curvature_penalty_grad,
+        p=Jc.p,
+        normalization=mean_curve_speed(Jc.curve),
+        reference_grad=base_grad,
+    )
 
     evaluation = augmented_objective(
         base_value,
         base_grad,
-        [length_violation, curve_curve_violation, curvature_violation],
+        [length_violation, curve_curve_residual, curvature_residual],
         [length_grad, curve_curve_grad, curvature_grad],
         multipliers,
         penalty,
@@ -598,6 +676,16 @@ def evaluate_stage2_alm_problem(
                 "coil_coil_spacing",
                 "max_curvature",
             ],
+            "feasibility_values": [
+                length_violation,
+                curve_curve_violation,
+                curvature_violation,
+            ],
+            "max_feasibility_violation": max(
+                length_violation,
+                curve_curve_violation,
+                curvature_violation,
+            ),
         }
     )
 
@@ -605,8 +693,8 @@ def evaluate_stage2_alm_problem(
     BdotN = np.mean(np.abs(np.sum(new_bs.B().reshape(unitn.shape) * unitn, axis=2)))
     outstr = f"ALM J={evaluation['total']:.1e}, Jflux={base_value:.1e}, Jf={Jf.J():.1e}, ⟨B·n⟩={BdotN:.1e}"
     outstr += f", Len={coil_length:.1f}m, Len+={length_violation:.2e}"
-    outstr += f", C-C-Sep={Jccdist.shortest_distance():.2f}m, CC+={curve_curve_violation:.2e}"
-    outstr += f", Curvature={np.max(Jc.curve.kappa()):.2f}, Curv+={curvature_violation:.2e}"
+    outstr += f", C-C-Sep={curve_curve_min_dist:.2f}m, CC+={curve_curve_violation:.2e}, CCr={curve_curve_residual:.2e}"
+    outstr += f", Curvature={max_curvature:.2f}, Curv+={curvature_violation:.2e}, Curvr={curvature_residual:.2e}"
     outstr += f", ║∇L_A║={evaluation['stationarity_norm']:.1e}, μ={penalty:.1e}"
     print(outstr)
     return evaluation
@@ -755,6 +843,13 @@ if __name__ == "__main__":
             penalty_scale=args.alm_penalty_scale,
             feasibility_tol=args.alm_feas_tol,
             stationarity_tol=args.alm_stationarity_tol,
+            trust_radius_init=(
+                None if args.alm_trust_radius_init == 0.0 else args.alm_trust_radius_init
+            ),
+            trust_radius_min=args.alm_trust_radius_min,
+            trust_radius_shrink=args.alm_trust_radius_shrink,
+            trust_radius_grow=args.alm_trust_radius_grow,
+            max_inner_attempts=args.alm_max_inner_attempts,
         )
 
         def evaluate_problem(inner_dofs, multipliers, penalty):
@@ -921,9 +1016,16 @@ if __name__ == "__main__":
         "ALM_PENALTY_SCALE": args.alm_penalty_scale if CONSTRAINT_METHOD == "alm" else None,
         "ALM_FEAS_TOL": args.alm_feas_tol if CONSTRAINT_METHOD == "alm" else None,
         "ALM_STATIONARITY_TOL": args.alm_stationarity_tol if CONSTRAINT_METHOD == "alm" else None,
+        "ALM_TRUST_RADIUS_INIT": args.alm_trust_radius_init if CONSTRAINT_METHOD == "alm" else None,
+        "ALM_TRUST_RADIUS_MIN": args.alm_trust_radius_min if CONSTRAINT_METHOD == "alm" else None,
+        "ALM_TRUST_RADIUS_SHRINK": args.alm_trust_radius_shrink if CONSTRAINT_METHOD == "alm" else None,
+        "ALM_TRUST_RADIUS_GROW": args.alm_trust_radius_grow if CONSTRAINT_METHOD == "alm" else None,
+        "ALM_MAX_INNER_ATTEMPTS": args.alm_max_inner_attempts if CONSTRAINT_METHOD == "alm" else None,
         "ALM_FINAL_PENALTY": getattr(alm_result, "penalty", None),
         "ALM_FINAL_MULTIPLIERS": getattr(alm_result, "multipliers", None),
         "ALM_FINAL_CONSTRAINT_VALUES": getattr(alm_result, "constraint_values", None),
+        "ALM_FINAL_SOLVER_CONSTRAINT_VALUES": getattr(alm_result, "solver_constraint_values", None),
+        "ALM_FINAL_TRUST_RADIUS": getattr(alm_result, "trust_radius", None),
         "ALM_HISTORY": getattr(alm_result, "history", None),
         "FINAL_VOLUME": float(new_surf.volume()),
         "FIELD_ERROR": float(fieldError),
