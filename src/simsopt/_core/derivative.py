@@ -143,11 +143,12 @@ class Derivative:
         x = self.data
         y = other.data
         z = copy_numpy_dict(x)
-        for k in y:
+        for k, yk in y.items():
+            yk = _coerce_derivative_block(yk)
             if k in z:
-                z[k] += y[k]
+                z[k] += yk
             else:
-                z[k] = y[k].copy()
+                z[k] = yk.copy()
         return Derivative(z)
 
     def __sub__(self, other):
@@ -155,6 +156,7 @@ class Derivative:
         y = other.data
         z = copy_numpy_dict(x)
         for k, yk in y.items():
+            yk = _coerce_derivative_block(yk)
             if k in z:
                 z[k] -= yk
             else:
@@ -165,6 +167,7 @@ class Derivative:
         x = self.data
         y = other.data
         for k, yk in y.items():
+            yk = _coerce_derivative_block(yk)
             if k in x:
                 x[k] += yk
             else:
@@ -175,6 +178,7 @@ class Derivative:
         x = self.data
         y = other.data
         for k, yk in y.items():
+            yk = _coerce_derivative_block(yk)
             if k in x:
                 x[k] -= yk
             else:

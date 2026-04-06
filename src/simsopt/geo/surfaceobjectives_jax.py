@@ -71,6 +71,16 @@ def _host_scalar(value):
     return np.asarray(jax.device_get(value)).item()
 
 
+def _explicit_scalar_pullback_seed(value):
+    return jax.device_put(np.array(1.0, dtype=np.dtype(value.dtype)))
+
+
+def _strict_scalar_grad(fun, arg):
+    value, pullback = jax.vjp(fun, arg)
+    (gradient,) = pullback(_explicit_scalar_pullback_seed(value))
+    return gradient
+
+
 def _explicit_cotangent_basis(length: int, index: int, *, dtype):
     basis = np.zeros(int(length), dtype=np.dtype(dtype))
     basis[int(index)] = 1.0
@@ -312,21 +322,21 @@ def _qs_ratio_pure(
         surface_kind=surface_kind,
     )
     normal = jnp.cross(xphi, xtheta)
-    dS = jnp.sqrt(jnp.sum(normal**2, axis=-1))
+    dS = jnp.sqrt(jnp.sum(normal * normal, axis=-1))
 
     nphi, ntheta = gamma.shape[:2]
     points = gamma.reshape(-1, 3)
     B = grouped_biot_savart_B_from_spec(points, coil_set_spec)
     B = B.reshape(nphi, ntheta, 3)
-    modB = jnp.sqrt(jnp.sum(B**2, axis=-1))
+    modB = jnp.sqrt(jnp.sum(B * B, axis=-1))
 
-    B_QS = jnp.mean(modB * dS, axis=axis) / jnp.mean(dS, axis=axis)
+    B_QS = jnp.sum(modB * dS, axis=axis) / jnp.sum(dS, axis=axis)
 
     # Broadcast back to (nphi, ntheta)
     B_QS = jnp.expand_dims(B_QS, axis=axis)
 
     B_nonQS = modB - B_QS
-    return jnp.mean(dS * B_nonQS**2) / jnp.mean(dS * B_QS**2)
+    return jnp.sum(dS * (B_nonQS * B_nonQS)) / jnp.sum(dS * (B_QS * B_QS))
 
 
 def _boozer_residual_J_of_x_inner(
@@ -528,13 +538,19 @@ class BoozerResidualJAX(Optimizable):
         """Compute ∂J_BR/∂[surface_dofs, iota, G] via JAX autodiff."""
         x_inner, optimize_G = self._inner_objective_state(iota, G)
 
-        dJ_ds_jax = jax.grad(_boozer_residual_J_of_x_inner)(
+        def objective(x):
+            return _boozer_residual_J_of_x_inner(
+                x,
+                coil_set_spec=coil_set_spec,
+                **self._residual_objective_kwargs(
+                    optimize_G=optimize_G,
+                    weight_inv_modB=weight_inv_modB,
+                ),
+            )
+
+        dJ_ds_jax = _strict_scalar_grad(
+            objective,
             x_inner,
-            coil_set_spec=coil_set_spec,
-            **self._residual_objective_kwargs(
-                optimize_G=optimize_G,
-                weight_inv_modB=weight_inv_modB,
-            ),
         )
         return dJ_ds_jax
 
@@ -720,13 +736,13 @@ class NonQuasiSymmetricRatioJAX(Optimizable):
 
         dJ_by_dcoils = _coil_dofs_gradient_to_derivative(
             self.biotsavart,
-            jax.grad(J_of_coils)(current_coil_dofs),
+            _strict_scalar_grad(J_of_coils, current_coil_dofs),
         )
 
         def J_of_sdofs(s):
             return _qs_ratio_pure(s, coil_set_spec, **qs_kwargs)
 
-        dJ_ds_surface = jax.grad(J_of_sdofs)(sdofs)
+        dJ_ds_surface = _strict_scalar_grad(J_of_sdofs, sdofs)
 
         n = booz_surf.res["PLU"][1].shape[0]
         dJ_ds = jnp.concatenate(

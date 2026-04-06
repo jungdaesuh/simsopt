@@ -127,6 +127,18 @@ class DerivativeTests(unittest.TestCase):
         self.assertIsInstance(as_deriv.data[opt], np.ndarray)
         np.testing.assert_allclose(as_deriv.data[opt], np.arange(3, dtype=float))
 
+    def test_mixed_numpy_and_jax_blocks_are_hostified_in_arithmetic(self):
+        opt = Opt(n=3)
+        left = Derivative({opt: np.array([1.0, 2.0, 3.0])})
+        right = Derivative({opt: jnp.array([0.5, 1.5, 2.5], dtype=jnp.float64)})
+
+        added = left + right
+        subtracted = left - right
+        self.assertIsInstance(added.data[opt], np.ndarray)
+        self.assertIsInstance(subtracted.data[opt], np.ndarray)
+        np.testing.assert_allclose(added.data[opt], np.array([1.5, 3.5, 5.5]))
+        np.testing.assert_allclose(subtracted.data[opt], np.array([0.5, 0.5, 0.5]))
+
     def test_taylor_graph(self):
         # built a reasonably complex graph of two inputs, that both feed into
         # two intermediary results and then are combined into a final result.
