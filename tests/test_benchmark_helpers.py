@@ -2107,6 +2107,78 @@ def test_stage2_benchmark_scripts_default_to_repo_fixture_equilibria_dir(tmp_pat
     assert single_stage_outer_loop_args.equilibria_dir == str(DEFAULT_EQUILIBRIA_DIR)
 
 
+def test_stage2_value_gradient_real_fixture_preserves_sharding_summaries(
+    tmp_path,
+    monkeypatch,
+):
+    cpu_payload = {
+        "dof_count": 2,
+        "equilibrium_path": "cpu.nc",
+        "squared_flux": {
+            "J": 1.0,
+            "dJ": [0.5, -0.25],
+            "grad_norm": 0.5590169943749475,
+        },
+        "sharding_summaries": {"field": {"kind": "SingleDeviceSharding"}},
+    }
+    jax_payload = {
+        "dof_count": 2,
+        "equilibrium_path": "jax.nc",
+        "squared_flux": {
+            "J": 1.0,
+            "dJ": [0.5, -0.25],
+            "grad_norm": 0.5590169943749475,
+        },
+        "sharding_summaries": {
+            "pairwise_penalty": {
+                "dynamic_self": {
+                    "left": {"gammas": {"kind": "NamedSharding"}},
+                }
+            }
+        },
+    }
+
+    perf_counter_values = iter((10.0, 11.0, 20.0, 22.5))
+    monkeypatch.setattr(
+        stage2_value_gradient_parity_module.time,
+        "perf_counter",
+        lambda: next(perf_counter_values),
+    )
+    monkeypatch.setattr(
+        stage2_value_gradient_parity_module,
+        "repo_pythonpath_env",
+        lambda **_kwargs: {},
+    )
+
+    def _fake_run_python_script(_script, argv, **_kwargs):
+        payload = cpu_payload if argv[1] == "cpu" else jax_payload
+        export_path = Path(argv[3])
+        export_path.write_text(json.dumps(payload), encoding="utf-8")
+        return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(
+        stage2_value_gradient_parity_module,
+        "run_python_script",
+        _fake_run_python_script,
+    )
+
+    args = argparse.Namespace(
+        nphi=31,
+        ntheta=16,
+        equilibrium_path="dummy.nc",
+        plasma_surf_filename="unused.nc",
+        equilibria_dir=str(tmp_path),
+        platform="cpu",
+    )
+
+    results = stage2_value_gradient_parity_module.run_real_fixture(args)
+
+    assert results["cpu"]["elapsed_s"] == pytest.approx(1.0)
+    assert results["jax"]["elapsed_s"] == pytest.approx(2.5)
+    assert results["cpu"]["sharding_summaries"] == cpu_payload["sharding_summaries"]
+    assert results["jax"]["sharding_summaries"] == jax_payload["sharding_summaries"]
+
+
 def test_weekly_tier5_manifest_targets_ondevice_benchmark_mode():
     manifest = json.loads(_weekly_tier5_manifest_path().read_text(encoding="utf-8"))
     args = manifest["commands"][0]["args"]

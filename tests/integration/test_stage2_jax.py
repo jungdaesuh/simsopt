@@ -3684,6 +3684,48 @@ class TestStage2OptimizerContract:
         assert summary["kind"] in {"NamedSharding", "SingleDeviceSharding"}
         assert summary["device_count"] >= 1
 
+    def test_target_scalar_objective_exposes_pairwise_penalty_sharding_summary(
+        self,
+        monkeypatch,
+    ):
+        import simsopt.jax_core.sharding as sharding_core
+
+        objective, target_bundle = _build_stage2_target_objective_contract_case()
+        dofs = jax.device_put(np.asarray(objective.x, dtype=np.float64))
+
+        monkeypatch.setattr(
+            sharding_core,
+            "get_sharding_tuning",
+            lambda mode=None: types.SimpleNamespace(
+                active=True,
+                strategy="hybrid",
+                min_points_to_shard=1,
+                min_pairwise_rows_to_shard=1,
+                platform="cpu",
+                mesh_axis_name="d",
+            ),
+        )
+
+        assert target_bundle.pairwise_penalty_sharding_summary is not None
+        summary = target_bundle.pairwise_penalty_sharding_summary(dofs)
+
+        assert summary["dynamic_row_count"] >= 1
+        assert len(summary["dynamic_vs_tf_groups"]) >= 1
+        for pair_summary in [
+            *summary["dynamic_vs_tf_groups"],
+            summary["dynamic_self"],
+        ]:
+            assert pair_summary["left"]["gammas"]["kind"] in {
+                "NamedSharding",
+                "SingleDeviceSharding",
+            }
+            assert pair_summary["left"]["gammas"]["device_count"] >= 1
+            assert pair_summary["right"]["gammas"]["kind"] in {
+                "NamedSharding",
+                "SingleDeviceSharding",
+            }
+            assert pair_summary["right"]["gammas"]["device_count"] >= 1
+
     def test_target_dynamic_curve_builder_matches_apply_coil_symmetry(self):
         _objective, _target_bundle, context = (
             _build_stage2_target_objective_contract_case(return_context=True)
@@ -4377,6 +4419,18 @@ class TestStage2OptimizerContract:
                 types.SimpleNamespace(name="squared_flux", weight=1.0),
                 types.SimpleNamespace(name="curvature_penalty", weight=0.5),
             ),
+            field_sharding_summary=lambda x: {
+                "kind": "SingleDeviceSharding",
+                "dof_count": int(np.asarray(x).size),
+            },
+            pairwise_penalty_sharding_summary=lambda x: {
+                "dynamic_row_count": int(np.asarray(x).size),
+                "dynamic_vs_tf_groups": [],
+                "dynamic_self": {
+                    "left": {"gammas": {"kind": "SingleDeviceSharding"}},
+                    "right": {"gammas": {"kind": "SingleDeviceSharding"}},
+                },
+            },
         )
 
         payload = stage2_script.build_stage2_probe_payload(
@@ -4433,6 +4487,18 @@ class TestStage2OptimizerContract:
                 atol=0.0,
             )
             assert value_and_grad_calls["count"] == 1
+            assert payload["sharding_summaries"]["field"] == {
+                "kind": "SingleDeviceSharding",
+                "dof_count": 2,
+            }
+            assert payload["sharding_summaries"]["pairwise_penalty"] == {
+                "dynamic_row_count": 2,
+                "dynamic_vs_tf_groups": [],
+                "dynamic_self": {
+                    "left": {"gammas": {"kind": "SingleDeviceSharding"}},
+                    "right": {"gammas": {"kind": "SingleDeviceSharding"}},
+                },
+            }
             assert payload["composite"]["terms"] == {
                 "squared_flux": {
                     "weight": pytest.approx(1.0),
@@ -4462,6 +4528,7 @@ class TestStage2OptimizerContract:
                 atol=0.0,
             )
             assert "terms" not in payload["composite"]
+            assert "sharding_summaries" not in payload
 
     def test_compute_mean_abs_relbn_explicitly_materializes_jax_field_output(
         self, monkeypatch

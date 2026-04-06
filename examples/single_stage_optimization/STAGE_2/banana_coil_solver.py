@@ -991,6 +991,21 @@ def _build_stage2_target_term_payload(target_objective_bundle, dofs):
     return _serialize_stage2_term_payload(entries)
 
 
+def _build_stage2_target_sharding_payload(target_objective_bundle, dofs):
+    field_summary_fn = getattr(target_objective_bundle, "field_sharding_summary", None)
+    pairwise_summary_fn = getattr(
+        target_objective_bundle,
+        "pairwise_penalty_sharding_summary",
+        None,
+    )
+    summaries = {}
+    if callable(field_summary_fn):
+        summaries["field"] = field_summary_fn(dofs)
+    if callable(pairwise_summary_fn):
+        summaries["pairwise_penalty"] = pairwise_summary_fn(dofs)
+    return summaries or None
+
+
 def compute_stage2_length_penalty_gradient(
     curve_length,
     length_target,
@@ -1435,6 +1450,7 @@ def build_stage2_probe_payload(
     target_objective_bundle=None,
 ):
     """Serialize the initialized Stage 2 objective state for parity probes."""
+    dofs = host_array(JF.x)
     context = make_stage2_objective_context(
         JF,
         new_bs,
@@ -1457,10 +1473,16 @@ def build_stage2_probe_payload(
             target_objective_bundle=target_objective_bundle,
         )
     )
+    sharding_summaries = None
+    if target_objective_bundle is not None:
+        sharding_summaries = _build_stage2_target_sharding_payload(
+            target_objective_bundle,
+            dofs,
+        )
     flux_grad = host_array(Jf.dJ())
     curvature_threshold = host_float(context.Jc.threshold)
     curvature = host_float(composite_snapshot["curvature"])
-    return {
+    payload = {
         "backend": backend,
         "optimizer_backend": optimizer_backend,
         "banana_curve_class": type(banana_curve).__name__,
@@ -1485,6 +1507,9 @@ def build_stage2_probe_payload(
             **({"terms": composite_terms} if composite_terms is not None else {}),
         },
     }
+    if sharding_summaries is not None:
+        payload["sharding_summaries"] = sharding_summaries
+    return payload
 
 
 def write_json_file(path, payload):

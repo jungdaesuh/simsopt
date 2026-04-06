@@ -91,6 +91,9 @@ class Stage2TargetObjectiveBundle(NamedTuple):
     raw_terms: Stage2ObjectiveFn | None = None
     least_squares_residual: Stage2ResidualFn | None = None
     field_sharding_summary: Callable[[jnp.ndarray], dict[str, object]] | None = None
+    pairwise_penalty_sharding_summary: (
+        Callable[[jnp.ndarray], dict[str, object]] | None
+    ) = None
 
 
 def _as_jax_float64(value) -> jax.Array:
@@ -346,6 +349,30 @@ def _dynamic_curve_distance_penalty(
     )
 
 
+def _summarize_pairwise_row_triplet_sharding(
+    left_triplet,
+    right_triplet,
+) -> dict[str, object]:
+    sharded_left, sharded_right = maybe_shard_pairwise_row_trees(
+        left_triplet,
+        right_triplet,
+    )
+    left_indices, left_gammas, left_gammadashs = sharded_left
+    right_indices, right_gammas, right_gammadashs = sharded_right
+    return {
+        "left": {
+            "indices": summarize_array_sharding(left_indices),
+            "gammas": summarize_array_sharding(left_gammas),
+            "gammadashs": summarize_array_sharding(left_gammadashs),
+        },
+        "right": {
+            "indices": summarize_array_sharding(right_indices),
+            "gammas": summarize_array_sharding(right_gammas),
+            "gammadashs": summarize_array_sharding(right_gammadashs),
+        },
+    }
+
+
 def build_stage2_target_objective(
     *,
     surface,
@@ -414,7 +441,7 @@ def build_stage2_target_objective(
     )
     least_squares_weights = np.asarray(objective_weights, dtype=np.float64)
 
-    def _evaluate_dynamic_stage2_state(dofs):
+    def _dynamic_curve_runtime_state(dofs):
         state = stage2_target_optimizer_state_from_dofs(
             dofs,
             curve_dof_count=curve_dof_count,
@@ -422,18 +449,6 @@ def build_stage2_target_objective(
         current_dof = state.current_dof
         curve_dofs = state.curve_dofs
         flat_dofs = stage2_target_optimizer_state_to_dofs(state)
-        fixed_field_jax = _runtime_float64_array(fixed_field, reference=flat_dofs)
-        points_jax = _runtime_float64_array(points, reference=flat_dofs)
-        length_target_jax = _runtime_float64_scalar(length_target, reference=flat_dofs)
-        cc_threshold_jax = _runtime_float64_scalar(cc_threshold, reference=flat_dofs)
-        curvature_p_norm_jax = _runtime_float64_scalar(
-            curvature_p_norm,
-            reference=flat_dofs,
-        )
-        curvature_threshold_jax = _runtime_float64_scalar(
-            curvature_threshold,
-            reference=flat_dofs,
-        )
         banana_rotmats_jax = _runtime_float64_array(
             banana_rotmats,
             reference=flat_dofs,
@@ -442,9 +457,6 @@ def build_stage2_target_objective(
             banana_current_scales,
             reference=flat_dofs,
         )
-        half_jax = _runtime_float64_scalar(half, reference=flat_dofs)
-        zero_jax = _runtime_float64_scalar(zero, reference=flat_dofs)
-
         base_gamma, base_gammadash, base_gammadashdash = curve_geometry_from_dofs(
             banana_curve_spec_runtime,
             curve_dofs,
@@ -459,6 +471,41 @@ def build_stage2_target_objective(
                 current_dof,
             )
         )
+        return (
+            flat_dofs,
+            base_gamma,
+            base_gammadash,
+            base_gammadashdash,
+            dynamic_gammas,
+            dynamic_gammadashs,
+            dynamic_current_array,
+        )
+
+    def _evaluate_dynamic_stage2_state(dofs):
+        (
+            flat_dofs,
+            _base_gamma,
+            base_gammadash,
+            base_gammadashdash,
+            dynamic_gammas,
+            dynamic_gammadashs,
+            dynamic_current_array,
+        ) = _dynamic_curve_runtime_state(dofs)
+        fixed_field_jax = _runtime_float64_array(fixed_field, reference=flat_dofs)
+        points_jax = _runtime_float64_array(points, reference=flat_dofs)
+        length_target_jax = _runtime_float64_scalar(length_target, reference=flat_dofs)
+        cc_threshold_jax = _runtime_float64_scalar(cc_threshold, reference=flat_dofs)
+        curvature_p_norm_jax = _runtime_float64_scalar(
+            curvature_p_norm,
+            reference=flat_dofs,
+        )
+        curvature_threshold_jax = _runtime_float64_scalar(
+            curvature_threshold,
+            reference=flat_dofs,
+        )
+        half_jax = _runtime_float64_scalar(half, reference=flat_dofs)
+        zero_jax = _runtime_float64_scalar(zero, reference=flat_dofs)
+
         dynamic_coil_spec = grouped_coil_set_spec_from_lists(
             dynamic_gammas,
             dynamic_gammadashs,
@@ -578,6 +625,51 @@ def build_stage2_target_objective(
         _, total_field, *_ = _evaluate_dynamic_stage2_state(dofs)
         return summarize_array_sharding(total_field)
 
+    def pairwise_penalty_sharding_summary(dofs):
+        (
+            _flat_dofs,
+            _base_gamma,
+            _base_gammadash,
+            _base_gammadashdash,
+            dynamic_gammas,
+            dynamic_gammadashs,
+            _dynamic_current_array,
+        ) = _dynamic_curve_runtime_state(dofs)
+        dynamic_triplet = (
+            jnp.arange(dynamic_gammas.shape[0], dtype=jnp.int32),
+            dynamic_gammas,
+            dynamic_gammadashs,
+        )
+        tf_group_summaries = []
+        for group_index, (tf_gammas, tf_gammadashs) in enumerate(tf_curve_groups_runtime):
+            tf_group_triplet = (
+                jnp.arange(tf_gammas.shape[0], dtype=jnp.int32),
+                _runtime_float64_array(tf_gammas, reference=dynamic_gammas),
+                _runtime_float64_array(tf_gammadashs, reference=dynamic_gammadashs),
+            )
+            tf_group_summaries.append(
+                {
+                    "group_index": group_index,
+                    "right_row_count": int(tf_gammas.shape[0]),
+                    **_summarize_pairwise_row_triplet_sharding(
+                        dynamic_triplet,
+                        tf_group_triplet,
+                    ),
+                }
+            )
+        return {
+            "dynamic_row_count": int(dynamic_gammas.shape[0]),
+            "dynamic_vs_tf_groups": tf_group_summaries,
+            "dynamic_self": {
+                "right_row_count": int(dynamic_gammas.shape[0]),
+                "strict_lower_triangle": True,
+                **_summarize_pairwise_row_triplet_sharding(
+                    dynamic_triplet,
+                    dynamic_triplet,
+                ),
+            },
+        }
+
     return Stage2TargetObjectiveBundle(
         objective=objective,
         expected_dof_count=curve_dof_count + 1,
@@ -586,4 +678,5 @@ def build_stage2_target_objective(
         raw_terms=raw_terms_fun,
         least_squares_residual=least_squares_residual,
         field_sharding_summary=field_sharding_summary,
+        pairwise_penalty_sharding_summary=pairwise_penalty_sharding_summary,
     )

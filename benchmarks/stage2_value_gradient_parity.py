@@ -235,7 +235,7 @@ def run_real_fixture(args: argparse.Namespace) -> dict:
         jax_json = str(Path(temp_dir) / "jax_snapshot.json")
 
         cpu_start = time.perf_counter()
-        cpu_result = run_python_script(
+        run_python_script(
             stage2_script,
             ["--backend", "cpu", "--export-objective-json", cpu_json, *common_args],
             env=repo_pythonpath_env(
@@ -249,7 +249,7 @@ def run_real_fixture(args: argparse.Namespace) -> dict:
         cpu_elapsed_s = time.perf_counter() - cpu_start
 
         jax_start = time.perf_counter()
-        jax_result = run_python_script(
+        run_python_script(
             stage2_script,
             ["--backend", "jax", "--export-objective-json", jax_json, *common_args],
             env=repo_pythonpath_env(platform=args.platform),
@@ -274,6 +274,11 @@ def run_real_fixture(args: argparse.Namespace) -> dict:
             "dof_count": int(cpu_payload["dof_count"]),
             "equilibrium_path": cpu_payload["equilibrium_path"],
             "elapsed_s": float(cpu_elapsed_s),
+            **(
+                {"sharding_summaries": cpu_payload["sharding_summaries"]}
+                if "sharding_summaries" in cpu_payload
+                else {}
+            ),
         },
         "jax": {
             "J": float(jax_flux["J"]),
@@ -281,6 +286,11 @@ def run_real_fixture(args: argparse.Namespace) -> dict:
             "dof_count": int(jax_payload["dof_count"]),
             "equilibrium_path": jax_payload["equilibrium_path"],
             "elapsed_s": float(jax_elapsed_s),
+            **(
+                {"sharding_summaries": jax_payload["sharding_summaries"]}
+                if "sharding_summaries" in jax_payload
+                else {}
+            ),
         },
         "comparisons": {
             "j_rel_err": relative_error(float(jax_flux["J"]), float(cpu_flux["J"])),
