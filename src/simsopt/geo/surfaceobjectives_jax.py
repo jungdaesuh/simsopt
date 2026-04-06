@@ -28,7 +28,6 @@ import jax.numpy as jnp
 
 from .._core.derivative import Derivative, derivative_dec
 from .._core.optimizable import Optimizable
-from ..jax_core._math_utils import scalar_like as _scalar_like
 from ..jax_core._math_utils import zeros as _zeros
 from ..jax_core.field import (
     grouped_biot_savart_B_from_spec,
@@ -66,6 +65,12 @@ _LEGACY_PROJECTION_HELPER_ERROR = (
     "surfaceobjectives_jax._coil_cotangents_to_derivative() is no longer "
     "supported; use BiotSavartJAX.coil_cotangents_to_derivative()."
 )
+
+
+def _explicit_cotangent_basis(length: int, index: int, *, dtype):
+    basis = np.zeros(int(length), dtype=np.dtype(dtype))
+    basis[int(index)] = 1.0
+    return jax.device_put(basis)
 
 
 def _compute_stellsym_mask_indices_for_grid(
@@ -592,12 +597,10 @@ class IotasJAX(Optimizable):
         # dJ/dx_inner for iota: unit vector at the iota position
         L = booz_surf.res["PLU"][1]
         n = L.shape[0]
-        dJ_ds = _zeros(n, dtype=L.dtype)
-        one = _scalar_like(dJ_ds, 1.0)
         if G is not None:
-            dJ_ds = dJ_ds.at[-2].set(one)  # [surface_dofs..., iota, G]
+            dJ_ds = _explicit_cotangent_basis(n, n - 2, dtype=L.dtype)
         else:
-            dJ_ds = dJ_ds.at[-1].set(one)  # [surface_dofs..., iota]
+            dJ_ds = _explicit_cotangent_basis(n, n - 1, dtype=L.dtype)
 
         adj = _solve_boozer_adjoint(booz_surf, dJ_ds)
 
@@ -722,8 +725,12 @@ class NonQuasiSymmetricRatioJAX(Optimizable):
         dJ_ds_surface = jax.grad(J_of_sdofs)(sdofs)
 
         n = booz_surf.res["PLU"][1].shape[0]
-        dJ_ds = _zeros(n, dtype=dJ_ds_surface.dtype)
-        dJ_ds = dJ_ds.at[: dJ_ds_surface.size].set(dJ_ds_surface)
+        dJ_ds = jnp.concatenate(
+            (
+                dJ_ds_surface,
+                _zeros(n - dJ_ds_surface.size, dtype=dJ_ds_surface.dtype),
+            )
+        )
 
         adj = _solve_boozer_adjoint(booz_surf, dJ_ds)
 
