@@ -12,6 +12,7 @@ from .biotsavart import (
     biot_savart_dB_by_dX,
     group_coil_data,
 )
+from .sharding import maybe_shard_grouped_field_inputs
 from ._math_utils import as_runtime_float64 as _as_runtime_float64
 from .curve_geometry import (
     curve_gamma_and_dash_from_spec,
@@ -63,6 +64,7 @@ def _accumulate_grouped_field(points: object, coil_spec: GroupedCoilSetSpec, ker
     coil_arrays = grouped_field_inputs_from_spec(coil_spec)
     if not coil_arrays:
         return _empty_grouped_field_result(points, kernel)
+    points, coil_arrays = maybe_shard_grouped_field_inputs(points, coil_arrays)
 
     gammas, gammadashs, currents = _runtime_group_inputs(points, *coil_arrays[0])
     result = kernel(points, gammas, gammadashs, currents)

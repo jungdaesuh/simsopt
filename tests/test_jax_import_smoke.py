@@ -712,6 +712,42 @@ def test_transfer_guard_disallow_allows_grouped_biot_savart_gpu_spec_eval():
     )
 
 
+def test_grouped_biot_savart_accepts_explicit_point_sharding():
+    """Grouped-field kernels should accept explicitly sharded point clouds."""
+    _assert_import_check_passes(
+        """
+        import jax
+        import numpy as np
+        from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
+        from simsopt.jax_core.field import (
+            grouped_biot_savart_B_from_spec,
+            grouped_coil_set_spec_from_lists,
+        )
+
+        mesh = Mesh(np.asarray(jax.devices(), dtype=object), ("d",))
+        points = jax.device_put(
+            np.linspace(0.0, 1.0, 4 * 3, dtype=np.float64).reshape(4, 3),
+            NamedSharding(mesh, P("d", None)),
+        )
+        gamma = jax.device_put(
+            np.linspace(0.2, 0.8, 8 * 3, dtype=np.float64).reshape(8, 3),
+        )
+        gammadash = jax.device_put(
+            np.full((8, 3), 0.1, dtype=np.float64),
+        )
+        current = jax.device_put(np.asarray(1.25, dtype=np.float64))
+
+        coil_spec = grouped_coil_set_spec_from_lists([gamma], [gammadash], [current])
+        B = grouped_biot_savart_B_from_spec(points, coil_spec)
+
+        assert B.shape == (4, 3)
+        assert isinstance(B.sharding, NamedSharding)
+        assert jax.numpy.all(jax.numpy.isfinite(B))
+    """,
+        failure_message="grouped Biot-Savart explicit point sharding smoke failed",
+    )
+
+
 def test_transfer_guard_disallow_allows_grouped_biot_savart_gpu_current_arrays():
     """Grouped coil specs should accept staged current arrays without Python indexing."""
     _assert_import_check_passes(

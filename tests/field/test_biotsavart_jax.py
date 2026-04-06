@@ -12,6 +12,7 @@ from contextlib import contextmanager
 import os
 from pathlib import Path
 import sys
+import types
 
 import pytest
 import numpy as np
@@ -20,6 +21,7 @@ import jax
 
 jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp
+from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from repo_bootstrap import bootstrap_local_simsopt
@@ -27,6 +29,11 @@ from repo_bootstrap import bootstrap_local_simsopt
 bootstrap_local_simsopt(Path(__file__).resolve().parents[2] / "src")
 
 from simsopt.backend import invalidate_backend_cache
+from simsopt.jax_core.field import (
+    grouped_biot_savart_B_from_spec,
+    grouped_coil_set_spec_from_lists,
+)
+from simsopt.jax_core import sharding as sharding_core
 
 # Load JAX module directly (avoids simsopt/__init__.py → simsoptpp dep)
 _SRC = Path(__file__).resolve().parents[2] / "src" / "simsopt"
@@ -706,6 +713,67 @@ class TestBiotSavartJaxChunkedParity:
                 np.asarray(dense_dB),
                 atol=1e-14,
             )
+
+    def test_grouped_biot_savart_accepts_explicit_point_sharding(self):
+        mesh = Mesh(np.asarray(jax.devices(), dtype=object), ("d",))
+        points = jax.device_put(
+            np.array(
+                [
+                    [0.2, 0.1, -0.3],
+                    [0.1, -0.4, 0.0],
+                    [-0.3, 0.2, 0.35],
+                    [0.05, 0.25, -0.15],
+                ],
+                dtype=np.float64,
+            ),
+            NamedSharding(mesh, P("d", None)),
+        )
+        gammas, gammadashs, currents = _make_shifted_circular_coils(3, nquad=16)
+        coil_spec = grouped_coil_set_spec_from_lists(
+            [gammas[0], gammas[1], gammas[2]],
+            [gammadashs[0], gammadashs[1], gammadashs[2]],
+            [currents[0], currents[1], currents[2]],
+        )
+
+        dense_B = biot_savart_B(points, gammas, gammadashs, currents)
+        grouped_B = grouped_biot_savart_B_from_spec(points, coil_spec)
+
+        np.testing.assert_allclose(np.asarray(grouped_B), np.asarray(dense_B), atol=1e-14)
+        assert isinstance(grouped_B.sharding, NamedSharding)
+
+    def test_grouped_biot_savart_jit_accepts_forced_point_sharding(self, monkeypatch):
+        monkeypatch.setattr(
+            sharding_core,
+            "get_sharding_tuning",
+            lambda mode=None: types.SimpleNamespace(
+                active=True,
+                strategy="points",
+                min_points_to_shard=1,
+                platform="cpu",
+                mesh_axis_name="d",
+            ),
+        )
+
+        points = jnp.array(
+            [
+                [0.2, 0.1, -0.3],
+                [0.1, -0.4, 0.0],
+                [-0.3, 0.2, 0.35],
+                [0.05, 0.25, -0.15],
+            ],
+            dtype=jnp.float64,
+        )
+        gammas, gammadashs, currents = _make_shifted_circular_coils(2, nquad=16)
+        coil_spec = grouped_coil_set_spec_from_lists(
+            [gammas[0], gammas[1]],
+            [gammadashs[0], gammadashs[1]],
+            [currents[0], currents[1]],
+        )
+
+        result = jax.jit(grouped_biot_savart_B_from_spec)(points, coil_spec)
+
+        assert result.shape == (4, 3)
+        assert jnp.all(jnp.isfinite(result))
 
     @pytest.mark.parametrize(
         ("mode", "rtol", "atol"),

@@ -39,8 +39,12 @@ _QUADRATURE_BLOCK_SIZE_ENV = "SIMSOPT_JAX_QUADRATURE_BLOCK_SIZE"
 _PAIRWISE_PENALTY_CHUNK_SIZE_ENV = "SIMSOPT_JAX_PENALTY_POINT_CHUNK_SIZE"
 _CHUNK_AUTOTUNE_ENV = "SIMSOPT_JAX_CHUNK_AUTOTUNE"
 _GPU_MEMORY_TOTAL_MB_ENV = "SIMSOPT_JAX_GPU_MEMORY_TOTAL_MB"
+_SHARDING_STRATEGY_ENV = "SIMSOPT_JAX_SHARDING"
+_SHARDING_AXIS_ENV = "SIMSOPT_JAX_SHARDING_AXIS"
+_MIN_POINTS_TO_SHARD_ENV = "SIMSOPT_JAX_MIN_POINTS_TO_SHARD"
 _JAX_PLATFORMS_ENV = "JAX_PLATFORMS"
 _VALID_TRANSFER_GUARDS = ("allow", "log", "disallow")
+_VALID_SHARDING_STRATEGIES = ("none", "points")
 _GUARDRAIL_ENV_VARS = (
     _DEBUG_NANS_ENV,
     _TRANSFER_GUARD_ENV,
@@ -143,6 +147,18 @@ _POINT_CHUNK_SIZE_BY_POLICY = {
     "performance_tuned": 1024,
 }
 _PAIRWISE_PENALTY_CHUNK_SIZE_BY_POLICY = dict(_POINT_CHUNK_SIZE_BY_POLICY)
+_MODE_SHARDING_DEFAULTS = {
+    "native_cpu": "none",
+    "jax_cpu_parity": "none",
+    "jax_gpu_parity": "none",
+    "jax_gpu_fast": "points",
+}
+_DEFAULT_SHARDING_AXIS_NAME = "d"
+_MIN_POINTS_TO_SHARD_BY_POLICY = {
+    "host_reference": 1 << 30,
+    "stable_default": 4096,
+    "performance_tuned": 2048,
+}
 _AUTOTUNED_CHUNK_SIZES_BY_POLICY = {
     "host_reference": (),
     "stable_default": (
@@ -292,6 +308,17 @@ class ChunkTuning:
     gpu_total_memory_mb: int | None
 
 
+@dataclass(frozen=True)
+class ShardingTuning:
+    mode: str
+    strategy: str
+    mesh_axis_name: str
+    min_points_to_shard: int
+    device_count: int
+    active: bool
+    platform: str
+
+
 def _env_bool(name: str) -> bool:
     raw = os.environ.get(name, "")
     return raw.strip().lower() in _TRUTHY_ENV_VALUES
@@ -331,6 +358,14 @@ def _validate_transfer_guard(value: str | None, *, source: str) -> str | None:
     return value
 
 
+def _validate_sharding_strategy(value: str, *, source: str) -> str:
+    if value not in _VALID_SHARDING_STRATEGIES:
+        raise ValueError(
+            f"{source}={value!r} is not valid. Accepted: {_VALID_SHARDING_STRATEGIES}"
+        )
+    return value
+
+
 def _default_compilation_cache_dir(mode: str) -> str | None:
     del mode
     return None
@@ -353,6 +388,16 @@ def _optional_positive_int_env(name: str) -> int | None:
     return value
 
 
+def _optional_nonempty_env(name: str) -> str | None:
+    raw_value = _optional_env_value(name)
+    if raw_value is None:
+        return None
+    stripped = raw_value.strip()
+    if stripped == "":
+        return None
+    return stripped
+
+
 def _point_chunk_size_default(chunk_policy: str) -> int:
     return _POINT_CHUNK_SIZE_BY_POLICY.get(chunk_policy, 0)
 
@@ -366,6 +411,40 @@ def _resolve_chunk_autotune_enabled(policy: BackendPolicy) -> bool:
     if raw_value is not None:
         return raw_value.strip().lower() in _TRUTHY_ENV_VALUES
     return policy.backend == "jax" and policy.jax_platform == "cuda"
+
+
+def _resolve_sharding_strategy(mode: str, policy: BackendPolicy) -> str:
+    del policy
+    raw_value = _optional_nonempty_env(_SHARDING_STRATEGY_ENV)
+    if raw_value is not None:
+        return _validate_sharding_strategy(raw_value, source=_SHARDING_STRATEGY_ENV)
+    return _MODE_SHARDING_DEFAULTS[mode]
+
+
+def _resolve_sharding_axis_name() -> str:
+    raw_value = _optional_nonempty_env(_SHARDING_AXIS_ENV)
+    if raw_value is None:
+        return _DEFAULT_SHARDING_AXIS_NAME
+    return raw_value
+
+
+def _resolve_min_points_to_shard(policy: BackendPolicy) -> int:
+    env_value = _optional_positive_int_env(_MIN_POINTS_TO_SHARD_ENV)
+    if env_value is not None:
+        return env_value
+    return _MIN_POINTS_TO_SHARD_BY_POLICY.get(policy.chunk_policy, 0)
+
+
+def _detect_local_jax_device_count(policy: BackendPolicy) -> int:
+    try:
+        import jax
+    except ImportError:
+        return 0
+    try:
+        backend_name = "gpu" if policy.jax_platform == "cuda" else policy.jax_platform
+        return len(jax.local_devices(backend=backend_name))
+    except Exception:
+        return 0
 
 
 def _parse_visible_cuda_device_index() -> int | None:
@@ -535,6 +614,25 @@ def _build_chunk_tuning(
         autotuned=autotuned,
         autotune_source=autotune_source,
         gpu_total_memory_mb=gpu_total_memory_mb,
+    )
+
+
+def _build_sharding_tuning(
+    mode: str,
+    policy: BackendPolicy,
+) -> ShardingTuning:
+    strategy = _resolve_sharding_strategy(mode, policy)
+    if policy.backend != "jax":
+        strategy = "none"
+    device_count = _detect_local_jax_device_count(policy)
+    return ShardingTuning(
+        mode=mode,
+        strategy=strategy,
+        mesh_axis_name=_resolve_sharding_axis_name(),
+        min_points_to_shard=_resolve_min_points_to_shard(policy),
+        device_count=device_count,
+        active=strategy != "none" and device_count > 1,
+        platform=policy.jax_platform,
     )
 
 
@@ -787,6 +885,7 @@ def get_provenance_label(mode: str | None = None) -> str:
 
 _cached_field_kernel_tuning: FieldKernelTuning | None = None
 _cached_chunk_tuning: ChunkTuning | None = None
+_cached_sharding_tuning: ShardingTuning | None = None
 
 
 def get_chunk_tuning(mode: str | None = None) -> ChunkTuning:
@@ -801,6 +900,21 @@ def get_chunk_tuning(mode: str | None = None) -> ChunkTuning:
     )
     if mode is None:
         _cached_chunk_tuning = tuning
+    return tuning
+
+
+def get_sharding_tuning(mode: str | None = None) -> ShardingTuning:
+    """Return the resolved sharding strategy and mesh activation metadata."""
+    global _cached_sharding_tuning
+    if mode is None and _cached_sharding_tuning is not None:
+        return _cached_sharding_tuning
+    resolved_mode = _resolve_mode(mode)
+    tuning = _build_sharding_tuning(
+        resolved_mode,
+        get_backend_policy(resolved_mode),
+    )
+    if mode is None:
+        _cached_sharding_tuning = tuning
     return tuning
 
 
@@ -841,6 +955,17 @@ def get_pairwise_penalty_chunk_size(mode: str | None = None) -> int:
     return get_chunk_tuning(mode).pairwise_penalty_chunk_size
 
 
+def get_sharding_strategy(mode: str | None = None) -> str:
+    """Return the resolved sharding strategy label for the mode."""
+    return get_sharding_tuning(mode).strategy
+
+
+def should_shard_points(mode: str | None = None) -> bool:
+    """Return ``True`` when point-axis sharding is active for the mode."""
+    tuning = get_sharding_tuning(mode)
+    return tuning.active and tuning.strategy == "points"
+
+
 def get_debug_nans(mode: str | None = None) -> bool:
     """Return the debug-NaN runtime guardrail state for the resolved mode."""
     return get_backend_policy(mode).debug_nans
@@ -875,10 +1000,11 @@ def _run_backend_cache_clear_callbacks() -> None:
 
 
 def _reset_backend_runtime_caches() -> None:
-    global _cached_backend_policy, _cached_chunk_tuning, _cached_field_kernel_tuning
+    global _cached_backend_policy, _cached_chunk_tuning, _cached_field_kernel_tuning, _cached_sharding_tuning
     _cached_backend_policy = None
     _cached_chunk_tuning = None
     _cached_field_kernel_tuning = None
+    _cached_sharding_tuning = None
     _run_backend_cache_clear_callbacks()
     _warned_jax_fallbacks.clear()
 

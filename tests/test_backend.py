@@ -20,6 +20,9 @@ _BACKEND_ENV_VARS = (
     "SIMSOPT_JAX_PENALTY_POINT_CHUNK_SIZE",
     "SIMSOPT_JAX_CHUNK_AUTOTUNE",
     "SIMSOPT_JAX_GPU_MEMORY_TOTAL_MB",
+    "SIMSOPT_JAX_SHARDING",
+    "SIMSOPT_JAX_SHARDING_AXIS",
+    "SIMSOPT_JAX_MIN_POINTS_TO_SHARD",
     "SIMSOPT_BACKEND",
     "STAGE2_BACKEND",
     "SIMSOPT_JAX_PLATFORM",
@@ -496,6 +499,77 @@ def test_transfer_guard_dense_audit_keeps_pairwise_chunk_autotuning(monkeypatch)
     assert tuning.quadrature_block_size == 0
     assert tuning.point_chunk_size == 0
     assert tuning.pairwise_penalty_chunk_size == 2048
+
+
+def test_sharding_tuning_defaults_fast_mode_to_point_strategy(monkeypatch):
+    _clear_backend_env(monkeypatch)
+    monkeypatch.setenv("SIMSOPT_BACKEND_MODE", "jax_gpu_fast")
+    backend = _fresh_backend()
+    runtime = sys.modules["simsopt.backend.runtime"]
+    monkeypatch.setattr(runtime, "_detect_local_jax_device_count", lambda policy: 4)
+
+    tuning = backend.get_sharding_tuning()
+
+    assert tuning.mode == "jax_gpu_fast"
+    assert tuning.strategy == "points"
+    assert tuning.mesh_axis_name == "d"
+    assert tuning.min_points_to_shard == 2048
+    assert tuning.device_count == 4
+    assert tuning.active is True
+    assert backend.get_sharding_strategy() == "points"
+    assert backend.should_shard_points() is True
+
+
+def test_sharding_tuning_defaults_parity_modes_to_none(monkeypatch):
+    _clear_backend_env(monkeypatch)
+    monkeypatch.setenv("SIMSOPT_BACKEND_MODE", "jax_gpu_parity")
+    backend = _fresh_backend()
+    runtime = sys.modules["simsopt.backend.runtime"]
+    monkeypatch.setattr(runtime, "_detect_local_jax_device_count", lambda policy: 8)
+
+    tuning = backend.get_sharding_tuning()
+
+    assert tuning.strategy == "none"
+    assert tuning.active is False
+    assert backend.should_shard_points() is False
+
+
+def test_sharding_tuning_respects_env_overrides(monkeypatch):
+    _clear_backend_env(monkeypatch)
+    monkeypatch.setenv("SIMSOPT_BACKEND_MODE", "jax_gpu_fast")
+    monkeypatch.setenv("SIMSOPT_JAX_SHARDING", "none")
+    monkeypatch.setenv("SIMSOPT_JAX_SHARDING_AXIS", "pts")
+    monkeypatch.setenv("SIMSOPT_JAX_MIN_POINTS_TO_SHARD", "123")
+    backend = _fresh_backend()
+    runtime = sys.modules["simsopt.backend.runtime"]
+    monkeypatch.setattr(runtime, "_detect_local_jax_device_count", lambda policy: 8)
+
+    tuning = backend.get_sharding_tuning()
+
+    assert tuning.strategy == "none"
+    assert tuning.mesh_axis_name == "pts"
+    assert tuning.min_points_to_shard == 123
+    assert tuning.active is False
+
+
+def test_sharding_tuning_stays_separate_from_dense_audit_transfer_guard(monkeypatch):
+    _clear_backend_env(monkeypatch)
+    monkeypatch.setenv("SIMSOPT_BACKEND_MODE", "jax_gpu_fast")
+    backend = _fresh_backend()
+    runtime = sys.modules["simsopt.backend.runtime"]
+    monkeypatch.setattr(runtime, "_detect_local_jax_device_count", lambda policy: 2)
+
+    backend.set_backend(
+        "jax_gpu_fast",
+        strict=True,
+        transfer_guard="disallow",
+        configure_runtime=False,
+    )
+    tuning = backend.get_sharding_tuning()
+
+    assert tuning.strategy == "points"
+    assert tuning.active is True
+    assert tuning.device_count == 2
 
 
 def test_explicit_current_mode_policy_preserves_strict_state(monkeypatch):
