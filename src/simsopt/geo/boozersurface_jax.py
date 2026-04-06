@@ -1424,20 +1424,23 @@ class BoozerSurfaceJAX(Optimizable):
         coil_arrays=None,
     ):
         """Build penalty objective with explicit overrides."""
-        return _make_boozer_penalty_objective_closure(
-            coil_arrays=coil_arrays,
-            coil_set_spec=_resolved_coil_set_spec(
+        resolved_coil_set_spec = _hostify_tree(
+            _resolved_coil_set_spec(
                 self.coil_set_spec,
                 coil_arrays=coil_arrays,
                 coil_set_spec=coil_set_spec,
-            ),
-            quadpoints_phi=self.quadpoints_phi,
-            quadpoints_theta=self.quadpoints_theta,
+            )
+        )
+        return _make_boozer_penalty_objective_closure(
+            coil_arrays=coil_arrays,
+            coil_set_spec=resolved_coil_set_spec,
+            quadpoints_phi=_hostify_tree(self.quadpoints_phi),
+            quadpoints_theta=_hostify_tree(self.quadpoints_theta),
             mpol=self.mpol,
             ntor=self.ntor,
             nfp=self.nfp,
             stellsym=self.stellsym,
-            scatter_indices=self.scatter_indices,
+            scatter_indices=_hostify_tree(self.scatter_indices),
             surface_kind=self._surface_geometry_kind,
             targetlabel=self.targetlabel,
             constraint_weight=constraint_weight
@@ -1458,10 +1461,12 @@ class BoozerSurfaceJAX(Optimizable):
         coil_arrays=None,
     ):
         """Build the LS residual-vector closure with explicit grouped-field inputs."""
-        resolved_coil_set_spec = _resolved_coil_set_spec(
-            self.coil_set_spec,
-            coil_arrays=coil_arrays,
-            coil_set_spec=coil_set_spec,
+        resolved_coil_set_spec = _hostify_tree(
+            _resolved_coil_set_spec(
+                self.coil_set_spec,
+                coil_arrays=coil_arrays,
+                coil_set_spec=coil_set_spec,
+            )
         )
         resolved_constraint_weight = (
             self.constraint_weight
@@ -2026,21 +2031,24 @@ class BoozerSurfaceJAX(Optimizable):
     ):
         """Build the exact residual function with explicit grouped-field inputs."""
         residual_fn = _select_exact_residual_fn(self.stellsym)
-        return partial(
-            residual_fn,
-            coil_arrays=coil_arrays,
-            coil_set_spec=_resolved_coil_set_spec(
+        resolved_coil_set_spec = _hostify_tree(
+            _resolved_coil_set_spec(
                 self.coil_set_spec,
                 coil_arrays=coil_arrays,
                 coil_set_spec=coil_set_spec,
-            ),
-            quadpoints_phi=self.quadpoints_phi,
-            quadpoints_theta=self.quadpoints_theta,
+            )
+        )
+        return partial(
+            residual_fn,
+            coil_arrays=coil_arrays,
+            coil_set_spec=resolved_coil_set_spec,
+            quadpoints_phi=_hostify_tree(self.quadpoints_phi),
+            quadpoints_theta=_hostify_tree(self.quadpoints_theta),
             mpol=self.mpol,
             ntor=self.ntor,
             nfp=self.nfp,
             stellsym=self.stellsym,
-            scatter_indices=self.scatter_indices,
+            scatter_indices=_hostify_tree(self.scatter_indices),
             surface_kind=self._surface_geometry_kind,
             targetlabel=self.targetlabel,
             label_type=self.label_type,
