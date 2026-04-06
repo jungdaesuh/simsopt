@@ -844,7 +844,8 @@ def _build_ls_group_vjp_callback(booz_surf, iota, G, weight_inv_modB=True):
             coil_arrays,
             coil_indices,
         ):
-            yield jax.grad(group_runner, argnums=0)(group_array, lm), group_index_list
+            _, pullback = jax.vjp(group_runner, group_array, lm)
+            yield pullback(_as_jax_float64(1.0))[0], group_index_list
 
     return vjp_groups
 
