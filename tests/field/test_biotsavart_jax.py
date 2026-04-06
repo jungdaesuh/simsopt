@@ -610,6 +610,48 @@ class TestBiotSavartJaxChunkedParity:
 
             np.testing.assert_allclose(np.asarray(A), np.asarray(dense_A), atol=1e-14)
 
+    @pytest.mark.parametrize(
+        ("mode", "rtol", "atol"),
+        [
+            ("jax_cpu_parity", 1e-12, 1e-14),
+            ("jax_gpu_parity", 1e-12, 1e-13),
+        ],
+    )
+    def test_chunked_B_matches_dense_reference_under_accumulation_stress(
+        self, mode, rtol, atol
+    ):
+        with _kernel_tuning_env(
+            mode,
+            coil_chunk_size=5,
+            quadrature_block_size=17,
+        ):
+            stressed_bs = _load_with_backend_mode(mode)
+            points, gammas, gammadashs, currents = _make_random_fixture(
+                seed=23,
+                ncoils=37,
+                nquad=149,
+                npoints=113,
+            )
+
+            def _dense_B(x):
+                return stressed_bs._one_point_dense(
+                    x,
+                    gammas,
+                    gammadashs,
+                    currents,
+                    integrand=stressed_bs._biot_savart_B_integrand,
+                )
+
+            dense_B = jax.vmap(_dense_B)(points)
+            chunked_B = stressed_bs.biot_savart_B(points, gammas, gammadashs, currents)
+
+            np.testing.assert_allclose(
+                np.asarray(chunked_B),
+                np.asarray(dense_B),
+                rtol=rtol,
+                atol=atol,
+            )
+
     def test_point_chunked_B_A_dB_dA_match_dense_reference(self, monkeypatch):
         with _kernel_tuning_env("jax_cpu_parity"):
             chunked_bs = _load_chunked_biotsavart()

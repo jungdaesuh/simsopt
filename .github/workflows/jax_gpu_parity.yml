@@ -14,48 +14,47 @@ jobs:
   gpu-parity:
     name: GPU parity (CUDA, JAX 0.9.2)
     runs-on: [self-hosted, gpu]
-    timeout-minutes: 30
+    timeout-minutes: 45
 
     env:
-      PYTHONPATH: src
+      BENCHMARK_ENV_NAME: jax-0.9.2
+      BENCHMARK_ENV_FILE: envs/jax-0.9.2.yml
       SIMSOPT_BACKEND_MODE: jax_gpu_parity
       SIMSOPT_BACKEND_STRICT: "1"
       SIMSOPT_JAX_TRANSFER_GUARD: disallow
       JAX_PLATFORMS: cuda
+      JAX_ENABLE_X64: "1"
 
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Set up Python 3.11
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Install JAX with CUDA support
+      - name: Provision GPU parity environment from recipe
         run: |
-          python -m pip install --upgrade pip
-          pip install "numpy>=2.0" "scipy>=1.13" \
-            "jax[cuda12]==0.9.2" pytest monty setuptools-scm
-
-      - name: Generate version file (setuptools-scm)
-        run: python -c "from setuptools_scm import get_version; get_version(write_to='src/simsopt/_version.py')"
+          if conda env list | awk '{print $1}' | grep -Fxq "$BENCHMARK_ENV_NAME"; then
+            conda env update -n "$BENCHMARK_ENV_NAME" -f "$BENCHMARK_ENV_FILE" --prune
+          else
+            conda env create -n "$BENCHMARK_ENV_NAME" -f "$BENCHMARK_ENV_FILE"
+          fi
+          conda run --no-capture-output -n "$BENCHMARK_ENV_NAME" \
+            python -m pip install -e ".[JAX_GPU,dev]"
 
       # ------------------------------------------------------------------
       # GPU device verification
       # ------------------------------------------------------------------
       - name: Verify JAX sees a GPU device
         run: |
-          python -c "
+          conda run --no-capture-output -n "$BENCHMARK_ENV_NAME" python -c "
           import jax
           devices = jax.devices()
           print('JAX devices:', devices)
           print('Default backend:', jax.default_backend())
-          gpu_devices = [d for d in devices if d.platform == 'gpu']
+          gpu_devices = [d for d in devices if d.platform in {'cuda', 'gpu'}]
           assert len(gpu_devices) > 0, (
               f'No GPU devices found. Available: {devices}'
           )
+          assert jax.config.jax_enable_x64
           print(f'GPU count: {len(gpu_devices)}')
           "
 
@@ -67,36 +66,70 @@ jobs:
       - name: Import smoke tests
         id: smoke
         continue-on-error: true
-        run: python -m pytest tests/test_jax_import_smoke.py -v --tb=short
+        run: |
+          conda run --no-capture-output -n "$BENCHMARK_ENV_NAME" \
+            python -m pytest tests/test_jax_import_smoke.py -v --tb=short
 
       - name: Biot-Savart JAX parity
         id: bs_parity
         continue-on-error: true
-        run: python -m pytest tests/field/test_biotsavart_jax_parity.py -v --tb=short
+        run: |
+          conda run --no-capture-output -n "$BENCHMARK_ENV_NAME" \
+            python -m pytest tests/field/test_biotsavart_jax_parity.py -v --tb=short
 
       - name: Biot-Savart JAX unit
         id: bs_unit
         continue-on-error: true
-        run: python -m pytest tests/field/test_biotsavart_jax.py -v --tb=short
+        run: |
+          conda run --no-capture-output -n "$BENCHMARK_ENV_NAME" \
+            python -m pytest tests/field/test_biotsavart_jax.py -v --tb=short
+
+      - name: Stage 2 value and gradient parity (real fixture)
+        id: stage2_parity
+        continue-on-error: true
+        run: |
+          mkdir -p benchmark_artifacts
+          conda run --no-capture-output -n "$BENCHMARK_ENV_NAME" \
+            python benchmarks/stage2_value_gradient_parity.py \
+            --platform cuda \
+            --fixture real \
+            --output-json benchmark_artifacts/stage2_value_gradient_parity_real_cuda.json
 
       - name: Boozer residual JAX
         id: boozer
         continue-on-error: true
-        run: python -m pytest tests/geo/test_boozer_residual_jax.py -v --tb=short
+        run: |
+          conda run --no-capture-output -n "$BENCHMARK_ENV_NAME" \
+            python -m pytest tests/geo/test_boozer_residual_jax.py -v --tb=short
 
       - name: Surface Fourier JAX
         id: surface
         continue-on-error: true
-        run: python -m pytest tests/geo/test_surface_fourier_jax.py -v --tb=short
+        run: |
+          conda run --no-capture-output -n "$BENCHMARK_ENV_NAME" \
+            python -m pytest tests/geo/test_surface_fourier_jax.py -v --tb=short
+
+      - name: Single-stage outer-loop proof
+        id: single_stage_outer_loop
+        continue-on-error: true
+        run: |
+          mkdir -p benchmark_artifacts
+          conda run --no-capture-output -n "$BENCHMARK_ENV_NAME" \
+            python benchmarks/single_stage_outer_loop_probe.py \
+            --platform cuda \
+            --optimizer-backend ondevice \
+            --output-json benchmark_artifacts/single_stage_outer_loop_cuda.json
 
       - name: GPU reproducibility contract
         id: ci_contract
         continue-on-error: true
         run: |
-          python scripts/jax_ci_contract.py \
-            --platform cuda \
-            --output-json benchmark_artifacts/jax_ci_contract.json \
-            --output-md benchmark_artifacts/jax_ci_contract.md
+          mkdir -p benchmark_artifacts
+          conda run --no-capture-output -n "$BENCHMARK_ENV_NAME" \
+            python scripts/jax_ci_contract.py \
+              --platform cuda \
+              --output-json benchmark_artifacts/jax_ci_contract.json \
+              --output-md benchmark_artifacts/jax_ci_contract.md
 
       # ------------------------------------------------------------------
       # Summary gate — fail the job if any test step failed
@@ -111,8 +144,10 @@ jobs:
           echo "| Import smoke | ${{ steps.smoke.outcome }} |" >> "$GITHUB_STEP_SUMMARY"
           echo "| Biot-Savart parity | ${{ steps.bs_parity.outcome }} |" >> "$GITHUB_STEP_SUMMARY"
           echo "| Biot-Savart unit | ${{ steps.bs_unit.outcome }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Stage 2 value/gradient parity | ${{ steps.stage2_parity.outcome }} |" >> "$GITHUB_STEP_SUMMARY"
           echo "| Boozer residual | ${{ steps.boozer.outcome }} |" >> "$GITHUB_STEP_SUMMARY"
           echo "| Surface Fourier | ${{ steps.surface.outcome }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Single-stage outer-loop proof | ${{ steps.single_stage_outer_loop.outcome }} |" >> "$GITHUB_STEP_SUMMARY"
           echo "| GPU reproducibility contract | ${{ steps.ci_contract.outcome }} |" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
 
@@ -125,18 +160,22 @@ jobs:
           if [ "${{ steps.smoke.outcome }}" != "success" ] || \
              [ "${{ steps.bs_parity.outcome }}" != "success" ] || \
              [ "${{ steps.bs_unit.outcome }}" != "success" ] || \
+             [ "${{ steps.stage2_parity.outcome }}" != "success" ] || \
              [ "${{ steps.boozer.outcome }}" != "success" ] || \
              [ "${{ steps.surface.outcome }}" != "success" ] || \
+             [ "${{ steps.single_stage_outer_loop.outcome }}" != "success" ] || \
              [ "${{ steps.ci_contract.outcome }}" != "success" ]; then
             echo "One or more GPU parity tests failed."
             exit 1
           fi
 
-      - name: Publish GPU contract artifact
-        if: always() && steps.ci_contract.outcome == 'success'
+      - name: Publish GPU parity artifacts
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: jax-gpu-repro-contract
+          name: jax-gpu-parity-artifacts
           path: |
+            benchmark_artifacts/stage2_value_gradient_parity_real_cuda.json
+            benchmark_artifacts/single_stage_outer_loop_cuda.json
             benchmark_artifacts/jax_ci_contract.json
             benchmark_artifacts/jax_ci_contract.md

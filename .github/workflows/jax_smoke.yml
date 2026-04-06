@@ -36,7 +36,9 @@ on:
       - 'tests/test_jax_import_smoke.py'
       - 'examples/single_stage_optimization/**'
       - 'benchmarks/stage2_e2e_comparison.py'
+      - 'benchmarks/stage2_value_gradient_parity.py'
       - 'benchmarks/single_stage_init_parity.py'
+      - 'benchmarks/single_stage_outer_loop_probe.py'
       - 'benchmarks/grouped_adjoint_memory_probe.py'
       - 'benchmarks/tier5_performance_characterization.py'
       - 'benchmarks/render_benchmark_report.py'
@@ -81,7 +83,9 @@ on:
       - 'tests/test_jax_import_smoke.py'
       - 'examples/single_stage_optimization/**'
       - 'benchmarks/stage2_e2e_comparison.py'
+      - 'benchmarks/stage2_value_gradient_parity.py'
       - 'benchmarks/single_stage_init_parity.py'
+      - 'benchmarks/single_stage_outer_loop_probe.py'
       - 'benchmarks/grouped_adjoint_memory_probe.py'
       - 'benchmarks/tier5_performance_characterization.py'
       - 'benchmarks/render_benchmark_report.py'
@@ -271,7 +275,7 @@ jobs:
           if conda env list | awk '{print $1}' | grep -Fxq "$BENCHMARK_ENV_NAME"; then
             conda env update -n "$BENCHMARK_ENV_NAME" -f "$BENCHMARK_ENV_FILE" --prune
           else
-            conda env create -f "$BENCHMARK_ENV_FILE"
+            conda env create -n "$BENCHMARK_ENV_NAME" -f "$BENCHMARK_ENV_FILE"
           fi
           conda run --no-capture-output -n "$BENCHMARK_ENV_NAME" \
             python -m pip install -e ".[JAX_GPU,dev]"

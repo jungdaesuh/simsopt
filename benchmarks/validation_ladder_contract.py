@@ -6,6 +6,7 @@ from __future__ import annotations
 SHORT_RUN_SMOKE_MAXITER = 20
 _SMOKE_STAGE2_RUNG_NAMES = ("stage2_cold", "stage2_warm")
 _GEOMETRY_REPRO_STAGE2_RUNG_NAME = "stage2_warm_repro"
+TIER3_SINGLE_STAGE_OUTER_LOOP_RUNG = "tier3_single_stage_outer_loop"
 
 OPTIMIZER_DRIFT_TOLERANCES = {
     "tier1_stage2_value_gradient": {
@@ -67,6 +68,20 @@ TIER5_PERFORMANCE_BUDGETS = {
             "min_warm_speedup_vs_cpu": 1.25,
             "max_compile_overhead_s": 60.0,
         }
+    }
+}
+
+SINGLE_STAGE_PROOF_CONTRACTS = {
+    TIER3_SINGLE_STAGE_OUTER_LOOP_RUNG: {
+        "default_maxiter": 1,
+        "min_iterations": 1,
+        "required_outer_optimizer_method": "lbfgs-ondevice",
+        "required_result_keys": (
+            "FINAL_IOTA",
+            "FINAL_VOLUME",
+            "FIELD_ERROR",
+            "MAX_CURVATURE",
+        ),
     }
 }
 
@@ -153,6 +168,20 @@ def tier5_performance_budget(
         rung: dict(rung_budget)
         for rung, rung_budget in TIER5_PERFORMANCE_BUDGETS[profile_key].items()
     }
+
+
+def single_stage_proof_contract(
+    rung: str = TIER3_SINGLE_STAGE_OUTER_LOOP_RUNG,
+) -> dict[str, object]:
+    """Return the documented contract for reduced single-stage proof rungs."""
+    if rung not in SINGLE_STAGE_PROOF_CONTRACTS:
+        valid = ", ".join(sorted(SINGLE_STAGE_PROOF_CONTRACTS))
+        raise ValueError(
+            f"Unknown single-stage proof rung {rung!r}. Expected one of: {valid}."
+        )
+    contract = dict(SINGLE_STAGE_PROOF_CONTRACTS[rung])
+    contract["required_result_keys"] = tuple(contract["required_result_keys"])
+    return contract
 
 
 def evaluate_tier5_performance_budget(

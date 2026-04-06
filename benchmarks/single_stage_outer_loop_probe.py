@@ -44,6 +44,8 @@ from benchmarks.validation_ladder_common import (
     print_provenance,
     require_x64_runtime,
     resolve_probe_lane,
+    TIER3_SINGLE_STAGE_OUTER_LOOP_RUNG,
+    single_stage_proof_contract,
     write_json,
 )
 
@@ -58,9 +60,14 @@ import jaxlib
 jax.config.update("jax_enable_x64", True)
 require_x64_runtime(jax, context="Single-stage outer-loop probe")
 
-TARGET_OUTER_OPTIMIZER_METHOD = "lbfgs-ondevice"
-DEFAULT_OUTER_PROOF_MAXITER = 1
-_REQUIRED_RESULT_KEYS = ("FINAL_IOTA", "FINAL_VOLUME", "FIELD_ERROR", "MAX_CURVATURE")
+LADDER_RUNG = TIER3_SINGLE_STAGE_OUTER_LOOP_RUNG
+_OUTER_LOOP_PROOF_CONTRACT = single_stage_proof_contract(LADDER_RUNG)
+TARGET_OUTER_OPTIMIZER_METHOD = str(
+    _OUTER_LOOP_PROOF_CONTRACT["required_outer_optimizer_method"]
+)
+DEFAULT_OUTER_PROOF_MAXITER = int(_OUTER_LOOP_PROOF_CONTRACT["default_maxiter"])
+_MIN_ACCEPTED_ITERATIONS = int(_OUTER_LOOP_PROOF_CONTRACT["min_iterations"])
+_REQUIRED_RESULT_KEYS = tuple(_OUTER_LOOP_PROOF_CONTRACT["required_result_keys"])
 
 
 def parse_args() -> argparse.Namespace:
@@ -188,6 +195,7 @@ def evaluate_single_stage_outer_loop_probe(
     expected_boozer_optimizer_method: str | None = None,
 ) -> tuple[dict[str, Any], list[str]]:
     summary = {
+        "rung": LADDER_RUNG,
         "iterations": int(results.get("iterations", 0)),
         "boozer_optimizer_backend": results.get("boozer_optimizer_backend"),
         "boozer_optimizer_method": results.get("boozer_optimizer_method"),
@@ -200,7 +208,7 @@ def evaluate_single_stage_outer_loop_probe(
     }
 
     failures: list[str] = []
-    if summary["iterations"] < 1:
+    if summary["iterations"] < _MIN_ACCEPTED_ITERATIONS:
         failures.append(
             "Single-stage outer-loop probe did not accept an optimizer step."
         )
@@ -250,6 +258,7 @@ def main() -> None:
         title="Single-stage outer-loop probe",
         extra={
             "lane": resolve_probe_lane(optimizer_backend=args.optimizer_backend),
+            "ladder_rung": LADDER_RUNG,
             "fixture": "real-single-stage-init",
             "platform_request": args.platform,
             "plasma_surf_filename": args.plasma_surf_filename,
@@ -286,6 +295,7 @@ def main() -> None:
         ),
     )
     payload = {
+        "rung": LADDER_RUNG,
         "provenance": provenance,
         "results": case["results"],
         "probe": summary,

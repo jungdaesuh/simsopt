@@ -41,6 +41,7 @@ _REQUESTED_PLATFORM_RUNTIME_BACKENDS = {
 }
 OPTIMIZER_DRIFT_TOLERANCES = ladder_contract.OPTIMIZER_DRIFT_TOLERANCES
 _SHORT_RUN_SMOKE_MAXITER = ladder_contract.SHORT_RUN_SMOKE_MAXITER
+TIER3_SINGLE_STAGE_OUTER_LOOP_RUNG = ladder_contract.TIER3_SINGLE_STAGE_OUTER_LOOP_RUNG
 optimizer_drift_tolerances = ladder_contract.optimizer_drift_tolerances
 resolve_probe_lane = ladder_contract.resolve_probe_lane
 short_run_geometry_rel_tolerance = ladder_contract.short_run_geometry_rel_tolerance
@@ -52,6 +53,7 @@ evaluate_grouped_adjoint_memory_budget = (
 )
 evaluate_tier5_performance_budget = ladder_contract.evaluate_tier5_performance_budget
 grouped_adjoint_memory_budget = ladder_contract.grouped_adjoint_memory_budget
+single_stage_proof_contract = ladder_contract.single_stage_proof_contract
 tier5_performance_budget = ladder_contract.tier5_performance_budget
 
 

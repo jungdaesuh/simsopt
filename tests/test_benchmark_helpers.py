@@ -35,6 +35,7 @@ from benchmarks.grouped_adjoint_memory_probe import (
     evaluate_grouped_adjoint_memory_probe,
 )
 import benchmarks.single_stage_init_parity as single_stage_init_parity_module
+import benchmarks.single_stage_outer_loop_probe as single_stage_outer_loop_probe
 from benchmarks.single_stage_outer_loop_probe import (
     TARGET_OUTER_OPTIMIZER_METHOD,
     evaluate_single_stage_outer_loop_probe,
@@ -84,6 +85,7 @@ from benchmarks.validation_ladder_common import (
     _SIMSOPT_COMPILATION_CACHE_POLICY_ENV_VAR,
     _SIMSOPT_DISABLE_COMPILATION_CACHE_ENV_VAR,
     _TARGET_LANE_ACCEPTED_STEP_SYNC_ENV_VAR,
+    TIER3_SINGLE_STAGE_OUTER_LOOP_RUNG,
     apply_compilation_cache_policy,
     build_provenance,
     describe_compile_behavior,
@@ -98,6 +100,7 @@ from benchmarks.validation_ladder_common import (
     run_python_script,
     short_run_stage2_final_objective_rel_tolerance,
     short_run_geometry_rel_tolerance,
+    single_stage_proof_contract,
     tier5_performance_budget,
 )
 
@@ -1630,6 +1633,25 @@ def _smoke_workflow_path() -> Path:
     )
 
 
+def _assert_named_benchmark_env_bootstrap(
+    workflow_text: str, *, verify_python: bool = False
+) -> None:
+    assert "BENCHMARK_ENV_NAME: jax-0.9.2" in workflow_text
+    assert "BENCHMARK_ENV_FILE: envs/jax-0.9.2.yml" in workflow_text
+    assert 'grep -Fxq "$BENCHMARK_ENV_NAME"' in workflow_text
+    assert (
+        'conda env create -n "$BENCHMARK_ENV_NAME" -f "$BENCHMARK_ENV_FILE"'
+        in workflow_text
+    )
+    assert (
+        'conda env update -n "$BENCHMARK_ENV_NAME" -f "$BENCHMARK_ENV_FILE" --prune'
+        in workflow_text
+    )
+    assert 'python -m pip install -e ".[JAX_GPU,dev]"' in workflow_text
+    if verify_python:
+        assert 'conda run --no-capture-output -n "$BENCHMARK_ENV_NAME" python -V' in workflow_text
+
+
 def test_compute_derivative_l2_metrics_ignores_missing_dependency_keys():
     class _DepOpt:
         __slots__ = ("local_dofs_free_status",)
@@ -2044,6 +2066,22 @@ def test_stage2_benchmark_scripts_default_to_repo_fixture_equilibria_dir(tmp_pat
     assert stage2_e2e_args.plasma_surf_filename == DEFAULT_PLASMA_SURF_FILENAME
     assert stage2_e2e_args.equilibria_dir == str(DEFAULT_EQUILIBRIA_DIR)
 
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "single_stage_outer_loop_probe.py",
+            "--output-json",
+            str(tmp_path / "single-stage-outer-loop.json"),
+        ],
+    )
+    single_stage_outer_loop_args = single_stage_outer_loop_probe.parse_args()
+    assert (
+        single_stage_outer_loop_args.plasma_surf_filename
+        == DEFAULT_PLASMA_SURF_FILENAME
+    )
+    assert single_stage_outer_loop_args.equilibria_dir == str(DEFAULT_EQUILIBRIA_DIR)
+
 
 def test_weekly_tier5_manifest_targets_ondevice_benchmark_mode():
     manifest = json.loads(_weekly_tier5_manifest_path().read_text(encoding="utf-8"))
@@ -2085,18 +2123,12 @@ def test_weekly_tier5_manifest_includes_grouped_adjoint_memory_probe_command():
 def test_weekly_tier5_workflow_sets_cache_and_ondevice_contract():
     workflow_text = _weekly_tier5_workflow_path().read_text(encoding="utf-8")
 
-    assert "BENCHMARK_ENV_NAME: jax-0.9.2" in workflow_text
-    assert "BENCHMARK_ENV_FILE: envs/jax-0.9.2.yml" in workflow_text
+    _assert_named_benchmark_env_bootstrap(workflow_text, verify_python=True)
     assert "JAX_COMPILATION_CACHE_DIR" in workflow_text
     assert "SIMSOPT_BACKEND_MODE: jax_gpu_fast" in workflow_text
     assert 'SIMSOPT_BACKEND_STRICT: "1"' in workflow_text
     assert "SIMSOPT_JAX_TRANSFER_GUARD: disallow" in workflow_text
     assert "setuptools_scm" not in workflow_text
-    assert 'grep -Fxq "$BENCHMARK_ENV_NAME"' in workflow_text
-    assert 'conda env create -f "$BENCHMARK_ENV_FILE"' in workflow_text
-    assert 'conda env update -n "$BENCHMARK_ENV_NAME" -f "$BENCHMARK_ENV_FILE" --prune' in workflow_text
-    assert 'python -m pip install -e ".[JAX_GPU,dev]"' in workflow_text
-    assert 'conda run --no-capture-output -n "$BENCHMARK_ENV_NAME" python -V' in workflow_text
     assert "--optimizer-backend ondevice" in workflow_text
     assert "--benchmark-mode" in workflow_text
     assert "continue-on-error: true" in workflow_text
@@ -2114,14 +2146,23 @@ def test_gpu_parity_workflow_enforces_strict_transfer_guard_contract():
         / "jax_gpu_parity.yml"
     ).read_text(encoding="utf-8")
 
+    _assert_named_benchmark_env_bootstrap(workflow_text)
     assert "SIMSOPT_BACKEND_MODE: jax_gpu_parity" in workflow_text
     assert 'SIMSOPT_BACKEND_STRICT: "1"' in workflow_text
     assert "SIMSOPT_JAX_TRANSFER_GUARD: disallow" in workflow_text
+    assert "setuptools_scm" not in workflow_text
+    assert "benchmarks/stage2_value_gradient_parity.py" in workflow_text
+    assert "--fixture real" in workflow_text
+    assert "benchmarks/single_stage_outer_loop_probe.py" in workflow_text
+    assert "--optimizer-backend ondevice" in workflow_text
+    assert "benchmark_artifacts/stage2_value_gradient_parity_real_cuda.json" in workflow_text
+    assert "benchmark_artifacts/single_stage_outer_loop_cuda.json" in workflow_text
 
 
 def test_smoke_workflow_adds_cuda_e2e_target_lane_gate():
     workflow_text = _smoke_workflow_path().read_text(encoding="utf-8")
 
+    _assert_named_benchmark_env_bootstrap(workflow_text)
     assert "jax-gpu-e2e:" in workflow_text
     assert "name: JAX GPU e2e smoke (CUDA, ondevice)" in workflow_text
     assert "runs-on: [self-hosted, gpu]" in workflow_text
@@ -2133,6 +2174,8 @@ def test_smoke_workflow_adds_cuda_e2e_target_lane_gate():
     assert "--platform cuda" in workflow_text
     assert "--optimizer-backend ondevice" in workflow_text
     for required_path in (
+        "benchmarks/stage2_value_gradient_parity.py",
+        "benchmarks/single_stage_outer_loop_probe.py",
         "benchmarks/grouped_adjoint_memory_probe.py",
         "benchmarks/tier5_performance_characterization.py",
         "benchmarks/render_benchmark_report.py",
@@ -2165,6 +2208,21 @@ def test_single_stage_outer_loop_probe_resolves_expected_boozer_method():
         resolve_boozer_optimizer_method("ondevice", limited_memory=True)
         == "lbfgs-ondevice"
     )
+
+
+def test_single_stage_outer_loop_contract_matches_probe_defaults():
+    contract = single_stage_proof_contract()
+
+    assert contract["default_maxiter"] == 1
+    assert contract["min_iterations"] == 1
+    assert contract["required_outer_optimizer_method"] == TARGET_OUTER_OPTIMIZER_METHOD
+    assert contract["required_result_keys"] == (
+        "FINAL_IOTA",
+        "FINAL_VOLUME",
+        "FIELD_ERROR",
+        "MAX_CURVATURE",
+    )
+    assert TIER3_SINGLE_STAGE_OUTER_LOOP_RUNG == "tier3_single_stage_outer_loop"
 
 
 def test_canonicalize_traceable_exact_quadrature_rewrites_shifted_half_period_grid():
