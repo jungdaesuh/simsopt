@@ -17,6 +17,7 @@ __all__ = [
     "inspect_array_sharding_summary",
     "maybe_shard_grouped_field_inputs",
     "maybe_shard_pairwise_row_inputs",
+    "maybe_shard_pairwise_row_trees",
     "summarize_array_sharding",
 ]
 
@@ -45,7 +46,9 @@ def _partition_spec_for_axis(axis_name: str, ndim: int) -> P:
 
 
 @lru_cache(maxsize=16)
-def _point_sharding_for(platform: str, axis_name: str, ndim: int) -> NamedSharding | None:
+def _point_sharding_for(
+    platform: str, axis_name: str, ndim: int
+) -> NamedSharding | None:
     mesh = _mesh_for(platform, axis_name)
     if mesh is None:
         return None
@@ -64,6 +67,45 @@ def _place_array(array, sharding):
     if isinstance(array, (np.ndarray, jax.Array)):
         return jax.device_put(array, sharding)
     return lax.with_sharding_constraint(jnp.asarray(array), sharding)
+
+
+def _array_leaf_ndim(leaf) -> int | None:
+    if not isinstance(leaf, (np.ndarray, jax.Array)):
+        return None
+    return int(jnp.ndim(leaf))
+
+
+def _first_row_array_leaf(tree):
+    for leaf in jax.tree_util.tree_leaves(tree):
+        ndim = _array_leaf_ndim(leaf)
+        if ndim is not None and ndim > 0:
+            return leaf
+    return None
+
+
+def _place_tree(
+    tree,
+    *,
+    platform: str,
+    axis_name: str,
+    replicated_sharding,
+    shard_rows: bool,
+):
+    def _place_leaf(leaf):
+        ndim = _array_leaf_ndim(leaf)
+        if ndim is None:
+            return leaf
+        if ndim == 0:
+            return _place_array(leaf, replicated_sharding)
+        sharding = replicated_sharding
+        if shard_rows:
+            axis_sharding = _point_sharding_for(platform, axis_name, ndim)
+            if axis_sharding is None:
+                return leaf
+            sharding = axis_sharding
+        return _place_array(leaf, sharding)
+
+    return jax.tree_util.tree_map(_place_leaf, tree)
 
 
 def _should_shard_points(points, tuning) -> bool:
@@ -115,25 +157,53 @@ def maybe_shard_pairwise_row_inputs(
     mode: str | None = None,
 ):
     """Shard the row-owned side of pairwise kernels while replicating RHS inputs."""
+    (sharded_points_a,), (sharded_points_b,) = maybe_shard_pairwise_row_trees(
+        (points_a,),
+        (points_b,),
+        mode=mode,
+    )
+    return sharded_points_a, sharded_points_b
+
+
+def maybe_shard_pairwise_row_trees(
+    left_tree,
+    right_tree,
+    *,
+    mode: str | None = None,
+):
+    """Shard row-owned pairwise pytrees while replicating the RHS pytrees."""
     tuning = get_sharding_tuning(mode)
-    if not _should_shard_pairwise_rows(points_a, tuning):
-        return points_a, points_b
+    left_row_leaf = _first_row_array_leaf(left_tree)
+    if left_row_leaf is None or not _should_shard_pairwise_rows(left_row_leaf, tuning):
+        return left_tree, right_tree
 
     left_sharding = _point_sharding_for(
         tuning.platform,
         tuning.mesh_axis_name,
-        int(jnp.ndim(points_a)),
+        int(jnp.ndim(left_row_leaf)),
     )
     replicated_sharding = _replicated_sharding_for(
         tuning.platform,
         tuning.mesh_axis_name,
     )
     if left_sharding is None or replicated_sharding is None:
-        return points_a, points_b
+        return left_tree, right_tree
 
     return (
-        _place_array(points_a, left_sharding),
-        _place_array(points_b, replicated_sharding),
+        _place_tree(
+            left_tree,
+            platform=tuning.platform,
+            axis_name=tuning.mesh_axis_name,
+            replicated_sharding=replicated_sharding,
+            shard_rows=True,
+        ),
+        _place_tree(
+            right_tree,
+            platform=tuning.platform,
+            axis_name=tuning.mesh_axis_name,
+            replicated_sharding=replicated_sharding,
+            shard_rows=False,
+        ),
     )
 
 

@@ -26,7 +26,10 @@ from ..jax_core.objectives_flux import (
     fixed_surface_flux_residual_from_B,
     fixed_surface_flux_specs_from_surface,
 )
-from ..jax_core.sharding import summarize_array_sharding
+from ..jax_core.sharding import (
+    maybe_shard_pairwise_row_trees,
+    summarize_array_sharding,
+)
 from ..geo.curveobjectives import (
     Lp_curvature_pure,
     cc_distance_pure,
@@ -262,6 +265,21 @@ def _pairwise_curve_distance_penalty_scan(
 
     left_indices = jnp.arange(left_gammas.shape[0], dtype=jnp.int32)
     right_indices = jnp.arange(right_gammas.shape[0], dtype=jnp.int32)
+    (
+        (
+            left_indices,
+            left_gammas,
+            left_gammadashs,
+        ),
+        (
+            right_indices,
+            right_gammas,
+            right_gammadashs,
+        ),
+    ) = maybe_shard_pairwise_row_trees(
+        (left_indices, left_gammas, left_gammadashs),
+        (right_indices, right_gammas, right_gammadashs),
+    )
 
     def _scan_left_chunks(total, left_inputs):
         left_index, left_gamma, left_gammadash = left_inputs

@@ -3799,6 +3799,106 @@ class TestStage2OptimizerContract:
         )
         assert "scan[" in str(scan_jaxpr)
 
+    def test_target_curve_distance_scan_routes_pairwise_row_sharding(
+        self,
+        monkeypatch,
+    ):
+        import simsopt.jax_core.sharding as sharding_core
+
+        _objective, _target_bundle, context = (
+            _build_stage2_target_objective_contract_case(return_context=True)
+        )
+        banana_curve = context["banana_curve"]
+        banana_coils = context["banana_coils"]
+        tf_coils = context["tf_coils"]
+        current_dof = jnp.asarray(1.25e4, dtype=jnp.float64)
+        minimum_distance = jnp.asarray(0.05, dtype=jnp.float64)
+        base_gamma, base_gammadash = _stage2_contract_case_base_curve_geometry(
+            banana_curve
+        )
+        banana_rotmats, banana_current_scales = (
+            _stage2_contract_case_banana_symmetry_inputs(banana_coils)
+        )
+        dynamic_gammas, dynamic_gammadashs, _dynamic_currents = (
+            stage2_target_objective_module._build_dynamic_curve_data(
+                base_gamma,
+                base_gammadash,
+                jnp.asarray(banana_rotmats, dtype=jnp.float64),
+                jnp.asarray(banana_current_scales, dtype=jnp.float64),
+                current_dof,
+            )
+        )
+        tf_coil_spec = (
+            stage2_target_objective_module.grouped_coil_set_spec_from_coil_specs(
+                tuple(coil.to_spec() for coil in tf_coils)
+            )
+        )
+        tf_curve_groups = (
+            stage2_target_objective_module._curve_groups_from_grouped_coil_set_spec(
+                tf_coil_spec
+            )
+        )
+        fixed_curve_penalty = stage2_target_objective_module._fixed_curve_penalty(
+            stage2_target_objective_module._curve_pairs_from_grouped_coil_set_spec(
+                tf_coil_spec
+            ),
+            float(minimum_distance),
+        )
+
+        monkeypatch.setattr(
+            sharding_core,
+            "get_sharding_tuning",
+            lambda mode=None: types.SimpleNamespace(
+                active=True,
+                strategy="hybrid",
+                min_points_to_shard=1,
+                min_pairwise_rows_to_shard=1,
+                platform="cpu",
+                mesh_axis_name="d",
+            ),
+        )
+
+        observed_summaries: list[tuple[dict[str, object], dict[str, object]]] = []
+        real_maybe_shard_pairwise_row_trees = (
+            stage2_target_objective_module.maybe_shard_pairwise_row_trees
+        )
+
+        def _record_pairwise_row_sharding(left_tree, right_tree, *, mode=None):
+            sharded_left, sharded_right = real_maybe_shard_pairwise_row_trees(
+                left_tree,
+                right_tree,
+                mode=mode,
+            )
+            observed_summaries.append(
+                (
+                    sharding_core.summarize_array_sharding(sharded_left[1]),
+                    sharding_core.summarize_array_sharding(sharded_right[1]),
+                )
+            )
+            return sharded_left, sharded_right
+
+        monkeypatch.setattr(
+            stage2_target_objective_module,
+            "maybe_shard_pairwise_row_trees",
+            _record_pairwise_row_sharding,
+        )
+
+        scan_total = stage2_target_objective_module._dynamic_curve_distance_penalty(
+            dynamic_gammas,
+            dynamic_gammadashs,
+            stage2_target_objective_module._runtimeify_tree(tf_curve_groups),
+            minimum_distance,
+            float(fixed_curve_penalty),
+        )
+
+        assert jnp.isfinite(scan_total)
+        assert len(observed_summaries) == len(tf_curve_groups) + 1
+        for left_summary, right_summary in observed_summaries:
+            assert left_summary["kind"] in {"NamedSharding", "SingleDeviceSharding"}
+            assert left_summary["device_count"] >= 1
+            assert right_summary["kind"] in {"NamedSharding", "SingleDeviceSharding"}
+            assert right_summary["device_count"] >= 1
+
     @pytest.mark.parametrize("definition", _SQUARED_FLUX_DEFINITIONS)
     def test_target_scalar_objective_matches_stage2_composite_contract(
         self,
