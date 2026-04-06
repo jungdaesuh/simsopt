@@ -28,10 +28,10 @@ import os
 from pathlib import Path
 from numpy.random import PCG64DXSM, Generator
 import numpy as np
-from scipy.optimize import minimize
 from simsopt.field import BiotSavart, Current, Coil, coils_via_symmetries
 from simsopt.geo import (CurveLength, CurveCurveDistance, curves_to_vtk, create_equally_spaced_curves, SurfaceRZFourier,
                          MeanSquaredCurvature, LpCurveCurvature, ArclengthVariation, GaussianSampler, CurvePerturbed, PerturbationSample)
+from simsopt.geo.optimizer_jax import jax_minimize
 from simsopt.objectives import QuadraticPenalty, MPIObjective, SquaredFlux
 from simsopt.util import in_github_actions, proc0_print, comm_world
 
@@ -195,7 +195,15 @@ proc0_print("""
 ### Run the optimisation #######################################################
 ################################################################################
 """)
-res = minimize(fun, dofs, jac=True, method='L-BFGS-B', options={'maxiter': MAXITER, 'maxcor': 400}, tol=1e-15)
+res = jax_minimize(
+    fun,
+    dofs,
+    method="adam",
+    maxiter=MAXITER,
+    tol=1e-15,
+    value_and_grad=True,
+    options={"step_size": 5e-3},
+)
 alen_string = ", ".join([f"{np.max(c.incremental_arclength())/np.min(c.incremental_arclength())-1:.2e}" for c in base_curves])
 proc0_print(f"Final arclength variation max(|ℓ|)/min(|ℓ|) - 1=[{alen_string}]")
 

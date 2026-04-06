@@ -166,6 +166,25 @@ def _assert_linear_lm_result(result, *, A, b):
     )
 
 
+def _make_structured_quadratic_problem():
+    target_surface = jnp.asarray([2.0, -1.0], dtype=jnp.float64)
+    target_iota = jnp.asarray(0.25, dtype=jnp.float64)
+
+    def objective_fn(state):
+        surface = jnp.asarray(state["surface"], dtype=jnp.float64)
+        iota = jnp.asarray(state["iota"], dtype=jnp.float64)
+        return 0.5 * (
+            jnp.sum((surface - target_surface) ** 2)
+            + (iota - target_iota) ** 2
+        )
+
+    x0 = {
+        "surface": jnp.asarray([5.0, 3.0], dtype=jnp.float64),
+        "iota": jnp.asarray(0.0, dtype=jnp.float64),
+    }
+    return objective_fn, x0, np.asarray(target_surface), float(target_iota)
+
+
 def _assert_lu_is_not_called(message):
     raise AssertionError(message)
 
@@ -1358,7 +1377,7 @@ class TestBoozerSurfaceJAXClass:
         ):
             booz._resolve_optimizer_method()
 
-    @pytest.mark.parametrize("method", ["bfgs", "lbfgs", "bfgs-hybrid"])
+    @pytest.mark.parametrize("method", ["adam", "bfgs", "lbfgs", "bfgs-hybrid"])
     def test_jax_minimize_rejects_fallback_methods_in_strict_mode(
         self,
         monkeypatch,
@@ -1397,6 +1416,59 @@ class TestBoozerSurfaceJAXClass:
         np.testing.assert_allclose(result.x["iota"], 0.25)
         np.testing.assert_allclose(result.jac["surface"], np.zeros(2), atol=1e-10)
         np.testing.assert_allclose(result.jac["iota"], 0.0, atol=1e-10)
+
+    def test_jax_minimize_adam_solves_simple_structured_problem(self):
+        objective_fn, x0, target_surface, target_iota = _make_structured_quadratic_problem()
+
+        result = jax_minimize(
+            objective_fn,
+            x0,
+            method="adam",
+            maxiter=800,
+            tol=1e-8,
+            options={"step_size": 0.1},
+        )
+
+        assert result.success is True
+        np.testing.assert_allclose(result.x["surface"], target_surface, atol=1e-4)
+        np.testing.assert_allclose(result.x["iota"], target_iota, atol=1e-4)
+
+    def test_jax_minimize_adam_supports_explicit_value_and_grad(self):
+        target = np.asarray([2.0, -1.0], dtype=float)
+
+        def objective_value_and_grad(x):
+            x = np.asarray(x, dtype=float)
+            diff = x - target
+            return 0.5 * float(np.dot(diff, diff)), diff
+
+        result = jax_minimize(
+            objective_value_and_grad,
+            np.asarray([5.0, 3.0], dtype=float),
+            method="adam",
+            maxiter=800,
+            tol=1e-8,
+            value_and_grad=True,
+            options={"step_size": 0.1},
+        )
+
+        assert result.success is True
+        np.testing.assert_allclose(result.x, target, atol=1e-4)
+
+    def test_jax_minimize_adam_ondevice_solves_simple_structured_problem(self):
+        objective_fn, x0, target_surface, target_iota = _make_structured_quadratic_problem()
+
+        result = jax_minimize(
+            objective_fn,
+            x0,
+            method="adam-ondevice",
+            maxiter=800,
+            tol=1e-8,
+            options={"step_size": 0.1},
+        )
+
+        assert result.success is True
+        np.testing.assert_allclose(result.x["surface"], target_surface, atol=1e-4)
+        np.testing.assert_allclose(result.x["iota"], target_iota, atol=1e-4)
 
     def test_jax_least_squares_pytree_hot_path_skips_flattening_adapter(
         self,

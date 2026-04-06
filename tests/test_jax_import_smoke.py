@@ -388,6 +388,54 @@ def test_transfer_guard_disallow_allows_lbfgs_ondevice_quadratic_smokes():
     )
 
 
+def test_transfer_guard_disallow_allows_adam_ondevice_quadratic_smokes():
+    """Public ondevice Adam lane must stay transfer-clean under disallow."""
+    _assert_import_check_passes(
+        """
+        import jax
+        import jax.numpy as jnp
+        import numpy as np
+        import simsopt.config as simsopt_config
+        from simsopt.geo.optimizer_jax import (
+            PRIVATE_OPTIMIZER_JAX_VERSION,
+            jax_minimize,
+            private_optimizer_runtime_is_supported,
+        )
+
+        simsopt_config.set_backend(
+            "jax_cpu_parity",
+            strict=True,
+            transfer_guard="disallow",
+        )
+        if not private_optimizer_runtime_is_supported(jax.__version__):
+            raise SystemExit(0)
+
+        half = jax.device_put(np.asarray(0.5, dtype=np.float64))
+        target = jax.device_put(np.asarray([0.25, -0.75], dtype=np.float64))
+
+        def quad(x):
+            x = jnp.asarray(x, dtype=jnp.float64)
+            diff = x - target
+            return half * jnp.dot(diff, diff)
+
+        x0 = jnp.asarray(np.array([1.5, -2.5], dtype=np.float64))
+        result = jax_minimize(
+            quad,
+            x0,
+            method="adam-ondevice",
+            maxiter=200,
+            tol=1e-5,
+            options={"step_size": 0.05},
+        )
+
+        assert result.success is True
+        assert float(result.fun) < float(quad(x0))
+        assert np.allclose(np.asarray(result.x), np.asarray([0.25, -0.75]), atol=1e-4)
+    """,
+        failure_message="adam-ondevice transfer-guard smoke failed",
+    )
+
+
 def test_transfer_guard_disallow_allows_lm_ondevice_quadratic_smokes():
     """Ondevice LM least-squares must stay transfer-clean under disallow."""
     _assert_import_check_passes(
