@@ -261,6 +261,17 @@ def _hostify_tree(value):
     return jax.tree_util.tree_map(_hostify_leaf, value)
 
 
+def _host_numpy(value, *, dtype=None):
+    array = np.asarray(jax.device_get(value))
+    if dtype is None:
+        return array
+    return np.asarray(array, dtype=dtype)
+
+
+def _host_scalar(value, *, dtype=None):
+    return _host_numpy(value, dtype=dtype).item()
+
+
 def _grouped_biot_savart_B_points(points, *, coil_arrays=None, coil_set_spec=None):
     if coil_set_spec is not None:
         return grouped_biot_savart_B_from_spec(points, coil_set_spec)
@@ -1347,7 +1358,7 @@ class BoozerSurfaceJAX(Optimizable):
 
     def _set_surface_dofs(self, dofs_jax):
         """Write JAX DOFs back to CPU surface."""
-        self.surface.set_dofs(np.asarray(dofs_jax))
+        self.surface.set_dofs(_host_numpy(dofs_jax))
 
     def _pack_decision_vector(self, iota, G, sdofs=None):
         """Pack [surface_dofs, iota] or [surface_dofs, iota, G]."""
@@ -1375,20 +1386,20 @@ class BoozerSurfaceJAX(Optimizable):
         """Unpack decision vector → (sdofs, iota, G_or_None)."""
         sdofs, iota, G = _split_decision_vector_jax(x, optimize_G=optimize_G)
         if optimize_G:
-            return np.asarray(sdofs), float(iota), float(G)
-        return np.asarray(sdofs), float(iota), None
+            return _host_numpy(sdofs), float(_host_scalar(iota)), float(_host_scalar(G))
+        return _host_numpy(sdofs), float(_host_scalar(iota)), None
 
     def _unpack_penalty_optimizer_state(self, x, optimize_G):
         optimizer_state = _as_boozer_penalty_optimizer_state(x, optimize_G=optimize_G)
         if optimize_G:
             return (
-                np.asarray(optimizer_state.surface_dofs),
-                float(optimizer_state.iota),
-                float(optimizer_state.G),
+                _host_numpy(optimizer_state.surface_dofs),
+                float(_host_scalar(optimizer_state.iota)),
+                float(_host_scalar(optimizer_state.G)),
             )
         return (
-            np.asarray(optimizer_state.surface_dofs),
-            float(optimizer_state.iota),
+            _host_numpy(optimizer_state.surface_dofs),
+            float(_host_scalar(optimizer_state.iota)),
             None,
         )
 
@@ -1870,7 +1881,7 @@ class BoozerSurfaceJAX(Optimizable):
         )
         self._set_surface_dofs(sdofs_final)
 
-        gradient = np.asarray(
+        gradient = _host_numpy(
             _boozer_penalty_optimizer_state_to_vector(
                 result.jac,
                 optimize_G=optimize_G,
@@ -1878,11 +1889,11 @@ class BoozerSurfaceJAX(Optimizable):
         )
 
         resdict = {
-            "fun": float(result.fun),
+            "fun": float(_host_scalar(result.fun)),
             "gradient": gradient,
-            "iter": int(result.nit),
+            "iter": int(_host_scalar(result.nit)),
             "info": result,
-            "success": bool(result.success),
+            "success": bool(_host_scalar(result.success)),
             "G": G_out,
             "s": s,
             "iota": iota_out,
