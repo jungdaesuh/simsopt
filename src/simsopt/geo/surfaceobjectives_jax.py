@@ -30,8 +30,7 @@ from .._core.derivative import Derivative, derivative_dec
 from .._core.jax_host_boundary import (
     explicit_cotangent_basis as _explicit_cotangent_basis,
     host_scalar as _host_scalar,
-    strict_scalar_grad as _strict_scalar_grad,
-    strict_scalar_value_and_grad as _strict_scalar_value_and_grad,
+    scalar_pullback_seed as _explicit_scalar_pullback_seed,
 )
 from .._core.optimizable import Optimizable
 from ..jax_core._math_utils import (
@@ -74,6 +73,22 @@ _LEGACY_PROJECTION_HELPER_ERROR = (
     "surfaceobjectives_jax._coil_cotangents_to_derivative() is no longer "
     "supported; use BiotSavartJAX.coil_cotangents_to_derivative()."
 )
+
+
+def _strict_scalar_grad(fun, arg):
+    value, pullback = jax.vjp(fun, arg)
+    (gradient,) = pullback(_explicit_scalar_pullback_seed(value))
+    return gradient
+
+
+def _strict_scalar_value_and_grad(fun, arg, *args):
+    def _objective(first_arg):
+        return fun(first_arg, *args)
+
+    value, pullback = jax.vjp(_objective, arg)
+    (gradient,) = pullback(_explicit_scalar_pullback_seed(value))
+    return value, gradient
+
 
 def _explicit_index_array(indices):
     return jax.device_put(np.asarray(indices, dtype=np.int32))
@@ -255,6 +270,31 @@ def _coil_dofs_gradient_to_derivative(biotsavart, coil_dofs_gradient):
     return Derivative(deriv_data)
 
 
+def _make_cached_strict_scalar_value_and_grad(fun):
+    """Cache a strict scalar value/grad callable behind a stable helper contract."""
+
+    def value_and_grad(arg, *args):
+        return _strict_scalar_value_and_grad(fun, arg, *args)
+
+    value_and_grad._simsopt_value_and_grad = True
+    return value_and_grad
+
+
+def _evaluate_scalar_or_value_and_grad(
+    objective_or_value_and_grad,
+    coil_dofs,
+    *objective_args,
+):
+    """Evaluate either a cached value/grad callable or a scalar objective."""
+    if getattr(objective_or_value_and_grad, "_simsopt_value_and_grad", False):
+        return objective_or_value_and_grad(coil_dofs, *objective_args)
+    return _strict_scalar_value_and_grad(
+        objective_or_value_and_grad,
+        coil_dofs,
+        *objective_args,
+    )
+
+
 def _current_coil_dofs_and_spec(biotsavart):
     """Return the current free coil DOFs and their immutable grouped spec."""
     current_coil_dofs = jnp.asarray(biotsavart.x.copy(), dtype=jnp.float64)
@@ -263,13 +303,13 @@ def _current_coil_dofs_and_spec(biotsavart):
 
 def _value_and_direct_coil_derivative(
     biotsavart,
-    objective,
+    objective_or_value_and_grad,
     coil_dofs,
     *objective_args,
 ):
     """Evaluate a cached coil-DOF objective/gradient pair and map its gradient."""
-    objective_value, coil_dofs_gradient = _strict_scalar_value_and_grad(
-        objective,
+    objective_value, coil_dofs_gradient = _evaluate_scalar_or_value_and_grad(
+        objective_or_value_and_grad,
         coil_dofs,
         *objective_args,
     )
@@ -478,6 +518,9 @@ class BoozerResidualJAX(Optimizable):
         self.surface.set_dofs(s.get_dofs())
 
         self.constraint_weight = float(boozer_surface.constraint_weight)
+        self._direct_objective_value_and_grad = _make_cached_strict_scalar_value_and_grad(
+            self._direct_objective_of_coils
+        )
         self.recompute_bell()
 
     def recompute_bell(self, parent=None):
@@ -536,7 +579,7 @@ class BoozerResidualJAX(Optimizable):
 
         self._J, dJ_by_dcoils = _value_and_direct_coil_derivative(
             self.biotsavart,
-            self._direct_objective_of_coils,
+            self._direct_objective_value_and_grad,
             current_coil_dofs,
             x_inner,
             optimize_G,

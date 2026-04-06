@@ -1396,15 +1396,19 @@ class TestBoozerResidualValue:
         import simsopt.geo.surfaceobjectives_jax as soj
 
         (_, _, _, _, bs_jax, _, booz_jax, _) = boozer_setup
-        original_value_and_grad = soj.jax.value_and_grad
+        original_factory = soj._make_cached_strict_scalar_value_and_grad
         build_count = 0
 
-        def counting_value_and_grad(*args, **kwargs):
+        def counting_factory(*args, **kwargs):
             nonlocal build_count
             build_count += 1
-            return original_value_and_grad(*args, **kwargs)
+            return original_factory(*args, **kwargs)
 
-        monkeypatch.setattr(soj.jax, "value_and_grad", counting_value_and_grad)
+        monkeypatch.setattr(
+            soj,
+            "_make_cached_strict_scalar_value_and_grad",
+            counting_factory,
+        )
 
         jr_jax = BoozerResidualJAX(booz_jax, bs_jax)
         cached_transform = jr_jax._direct_objective_value_and_grad
