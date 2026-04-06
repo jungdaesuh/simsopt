@@ -7,15 +7,18 @@ Validates:
 3. NonQuasiSymmetricRatioJAX.J() is finite and non-negative.
 4. Adjoint-solve consistency (H^T adj = dJ_ds).
 5. VJP produces finite, non-zero derivative.
-6. Fixed-surface FD validates direct gradient term.
-7. Composite objective value and gradient are finite and non-zero.
-8. Backend selection constructs correct object types.
+6. Reduced real-fixture scipy wrappers match CPU values and gradients.
+7. Fixed-surface and re-solve FD validate the composed JAX gradient path.
+8. Composite objective value and gradient are finite and non-zero.
+9. Backend selection constructs correct object types.
 
-Gradient tests use finite-difference validation against the JAX objective
-wrappers directly, because CPU and JAX use mathematically equivalent but
-numerically distinct Hessian factorizations (CPU: Gauss-Newton based
-Newton polish, JAX: exact Hessian), making direct gradient comparison
-unreliable at ill-conditioned solution points.
+Gradient validation uses two complementary lanes:
+- direct CPU-vs-JAX parity on the shared reduced real-fixture scipy path
+- finite-difference checks on the JAX fixed-surface and re-solve paths
+
+The FD checks remain necessary for the full re-solve lane, where CPU and JAX
+can use different internal linear algebra while still targeting the same
+outer objective.
 
 All tests require ``simsoptpp`` for the CPU reference.
 """
@@ -386,12 +389,32 @@ def _assert_gradients_finite_nonzero(gradients, message_prefix):
         assert np.linalg.norm(grad) > 0, f"{message_prefix} produced zero gradient"
 
 
+def _cpu_single_stage_wrapper_gradients(booz_cpu, bs_cpu):
+    return [
+        np.array(BoozerResidual(booz_cpu, bs_cpu).dJ()),
+        np.array(Iotas(booz_cpu).dJ()),
+        np.array(NonQuasiSymmetricRatio(booz_cpu, bs_cpu, sDIM=6).dJ()),
+    ]
+
+
 def _jax_single_stage_wrapper_gradients(booz_jax, bs_jax):
     return [
         np.array(BoozerResidualJAX(booz_jax, bs_jax).dJ()),
         np.array(IotasJAX(booz_jax).dJ()),
         np.array(NonQuasiSymmetricRatioJAX(booz_jax, bs_jax, sDIM=6).dJ()),
     ]
+
+
+def _build_real_fixture_scipy_m5_pair():
+    cpu_fixture = build_real_single_stage_init_fixture(
+        backend="cpu",
+        optimizer_backend="scipy",
+    )
+    jax_fixture = build_real_single_stage_init_fixture(
+        backend="jax",
+        optimizer_backend="scipy",
+    )
+    return cpu_fixture, jax_fixture
 
 
 def _assert_streaming_group_vjp_matches_full(
@@ -3351,14 +3374,7 @@ class TestRealFixtureScipyM5Parity:
 
     def test_real_fixture_scipy_parity_and_wrapper_gradients(self):
         """CPU and JAX reduced-real scipy fixtures agree, and JAX wrappers stay healthy."""
-        cpu_fixture = build_real_single_stage_init_fixture(
-            backend="cpu",
-            optimizer_backend="scipy",
-        )
-        jax_fixture = build_real_single_stage_init_fixture(
-            backend="jax",
-            optimizer_backend="scipy",
-        )
+        cpu_fixture, jax_fixture = _build_real_fixture_scipy_m5_pair()
 
         booz_cpu = cpu_fixture["boozer_surface"]
         bs_cpu = cpu_fixture["bs"]
@@ -3399,8 +3415,29 @@ class TestRealFixtureScipyM5Parity:
         )
         np.testing.assert_allclose(nqs_jax, nqs_cpu, rtol=1e-12, atol=1e-12)
 
-        gradients = _jax_single_stage_wrapper_gradients(booz_jax, bs_jax)
-        _assert_gradients_finite_nonzero(gradients, "Real-fixture scipy M5 path")
+        cpu_gradients = _cpu_single_stage_wrapper_gradients(booz_cpu, bs_cpu)
+        jax_gradients = _jax_single_stage_wrapper_gradients(booz_jax, bs_jax)
+        _assert_gradients_finite_nonzero(
+            cpu_gradients,
+            "Real-fixture scipy CPU wrapper path",
+        )
+        _assert_gradients_finite_nonzero(
+            jax_gradients,
+            "Real-fixture scipy JAX wrapper path",
+        )
+
+        for label, cpu_gradient, jax_gradient in zip(
+            ("BoozerResidual", "Iotas", "NonQuasiSymmetricRatio"),
+            cpu_gradients,
+            jax_gradients,
+        ):
+            np.testing.assert_allclose(
+                jax_gradient,
+                cpu_gradient,
+                rtol=1e-10,
+                atol=1e-12,
+                err_msg=f"{label} gradient mismatch on reduced real scipy fixture",
+            )
 
 
 # -----------------------------------------------------------------------
@@ -3979,8 +4016,8 @@ class TestExactSolveCPUJAXParity:
         exact_pair = _solve_exact_cpu_jax_parity_pair()
         res_cpu = exact_pair.res_cpu
         res_jax = exact_pair.res_jax
-        exact_residual_tol = 1e-6
-        exact_solution_abs_tol = 1e-5
+        exact_residual_tol = 1e-12
+        exact_solution_abs_tol = 1e-12
 
         iota_diff = abs(res_cpu["iota"] - res_jax["iota"])
         G_diff = abs(res_cpu["G"] - res_jax["G"])

@@ -884,9 +884,9 @@ def test_single_stage_init_parity_accepts_small_real_fixture_differences():
         "SELF_INTERSECTION_CHECK_AVAILABLE": True,
     }
     jax_results = {
-        "FINAL_IOTA": 0.1505,
-        "FINAL_VOLUME": 0.10000005,
-        "FIELD_ERROR": 0.0030002,
+        "FINAL_IOTA": 0.15000000005,
+        "FINAL_VOLUME": 0.100000000005,
+        "FIELD_ERROR": 0.003000000012,
         "MAX_CURVATURE": 12.1,
         "SELF_INTERSECTING": False,
         "SELF_INTERSECTION_CHECK_AVAILABLE": True,
@@ -895,8 +895,8 @@ def test_single_stage_init_parity_accepts_small_real_fixture_differences():
     comparison, failures = evaluate_single_stage_init_parity(
         cpu_results,
         jax_results,
-        max_surface_geometry_abs=1e-6,
-        max_surface_geometry_rel=5e-6,
+        max_surface_geometry_abs=1e-12,
+        max_surface_geometry_rel=5e-10,
     )
 
     assert comparison["final_iota_abs_diff"] < IOTA_ABS_TOL
@@ -969,8 +969,8 @@ def test_single_stage_init_parity_tracks_self_intersection_check_availability():
     comparison, failures = evaluate_single_stage_init_parity(
         cpu_results,
         jax_results,
-        max_surface_geometry_abs=1e-6,
-        max_surface_geometry_rel=5e-6,
+        max_surface_geometry_abs=1e-12,
+        max_surface_geometry_rel=5e-10,
     )
 
     assert failures == []

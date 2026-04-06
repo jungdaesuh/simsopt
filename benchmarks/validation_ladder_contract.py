@@ -22,10 +22,10 @@ OPTIMIZER_DRIFT_TOLERANCES = {
         "geometry_rel_tol_default": 1e-6,
     },
     "tier3_single_stage_init": {
-        "final_iota_abs_tol": 1e-3,
-        "final_volume_rel_tol": 1e-6,
-        "field_error_rel_tol": 1e-4,
-        "surface_geometry_rel_tol": 1e-5,
+        "final_iota_abs_tol": 1e-10,
+        "final_volume_rel_tol": 1e-10,
+        "field_error_rel_tol": 1e-8,
+        "surface_geometry_rel_tol": 1e-9,
     },
     "tier4_adjoint_fd": {
         "adjoint_residual_rel_tol": 1e-10,
