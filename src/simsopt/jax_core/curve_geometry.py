@@ -632,13 +632,12 @@ def closed_curve_self_intersection_tolerance(
     return _explicit_scalar(tolerance_factor, reference=gamma) * average_segment_length
 
 
-def closed_curve_self_intersection_penalty(
+def _closed_curve_self_intersection_terms(
     gamma: jax.Array,
     *,
     tolerance_factor: float = 0.1,
     neighbor_skip: int = 3,
-) -> jax.Array:
-    """Return a soft quadratic penalty for closed-curve self intersection."""
+) -> tuple[jax.Array, jax.Array, jax.Array]:
     minimum_distance = closed_curve_self_intersection_min_distance(
         gamma,
         neighbor_skip=neighbor_skip,
@@ -648,6 +647,21 @@ def closed_curve_self_intersection_penalty(
         tolerance_factor=tolerance_factor,
     )
     deficit = jnp.maximum(tolerance - minimum_distance, 0.0)
+    return minimum_distance, tolerance, deficit
+
+
+def closed_curve_self_intersection_penalty(
+    gamma: jax.Array,
+    *,
+    tolerance_factor: float = 0.1,
+    neighbor_skip: int = 3,
+) -> jax.Array:
+    """Return a soft quadratic penalty for closed-curve self intersection."""
+    _minimum_distance, _tolerance, deficit = _closed_curve_self_intersection_terms(
+        gamma,
+        tolerance_factor=tolerance_factor,
+        neighbor_skip=neighbor_skip,
+    )
     return _explicit_scalar(0.5, reference=gamma) * deficit * deficit
 
 
@@ -658,19 +672,12 @@ def closed_curve_self_intersection_summary(
     neighbor_skip: int = 3,
 ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
     """Return (min_distance, tolerance, penalty, intersecting) for a closed curve."""
-    minimum_distance = closed_curve_self_intersection_min_distance(
-        gamma,
-        neighbor_skip=neighbor_skip,
-    )
-    tolerance = closed_curve_self_intersection_tolerance(
-        gamma,
-        tolerance_factor=tolerance_factor,
-    )
-    penalty = closed_curve_self_intersection_penalty(
+    minimum_distance, tolerance, deficit = _closed_curve_self_intersection_terms(
         gamma,
         tolerance_factor=tolerance_factor,
         neighbor_skip=neighbor_skip,
     )
+    penalty = _explicit_scalar(0.5, reference=gamma) * deficit * deficit
     return minimum_distance, tolerance, penalty, minimum_distance < tolerance
 
 
