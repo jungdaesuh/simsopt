@@ -2142,6 +2142,18 @@ def test_smoke_workflow_adds_cuda_e2e_target_lane_gate():
         assert required_path in workflow_text
 
 
+def test_legacy_gpu_benchmark_wrapper_delegates_to_local_validation_ladder():
+    wrapper_text = (
+        Path(__file__).resolve().parents[1] / "benchmarks" / "gpu_benchmark.py"
+    ).read_text(encoding="utf-8")
+
+    assert "tier5_performance_characterization.py" in wrapper_text
+    assert "grouped_adjoint_memory_probe.py" in wrapper_text
+    assert "render_benchmark_report.py" in wrapper_text
+    assert "git clone" not in wrapper_text
+    assert "https://github.com" not in wrapper_text
+
+
 def test_single_stage_outer_loop_probe_resolves_expected_boozer_method():
     assert resolve_boozer_optimizer_method("scipy") == "bfgs"
     assert resolve_boozer_optimizer_method("scipy", limited_memory=True) == "lbfgs"

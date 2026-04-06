@@ -24,6 +24,8 @@ import numpy as np
 import jax
 import jax.numpy as jnp
 
+from ..jax_core._math_utils import as_runtime_float64 as _as_runtime_float64
+
 __all__ = [
     "build_theta_basis",
     "build_phi_basis",
@@ -64,10 +66,16 @@ def _zeros(shape, dtype):
     return jax.device_put(np.zeros(shape, dtype=np.dtype(dtype)))
 
 
-_TWO_PI = _as_jax_float64(2.0 * np.pi)
-_BASIS_X3 = _as_jax_float64([1.0, 0.0, 0.0])
-_BASIS_Y3 = _as_jax_float64([0.0, 1.0, 0.0])
-_BASIS_Z3 = _as_jax_float64([0.0, 0.0, 1.0])
+_TWO_PI_HOST = np.float64(2.0 * np.pi)
+_BASIS_SELECTORS3_HOST = np.eye(3, dtype=np.float64)
+
+
+def _two_pi(reference):
+    return _as_runtime_float64(_TWO_PI_HOST, reference=reference)
+
+
+def _basis_selector(index: int, *, reference):
+    return _as_runtime_float64(_BASIS_SELECTORS3_HOST[int(index)], reference=reference)
 
 
 def _mode_range(start, stop):
@@ -105,7 +113,8 @@ def build_theta_basis(quadpoints_theta, mpol):
         dW: (ntheta, 2*mpol+1) derivatives d/d(quadpoints_theta).
     """
     quadpoints_theta = _as_jax_float64(quadpoints_theta)
-    theta = _TWO_PI * quadpoints_theta  # (ntheta,)
+    two_pi = _two_pi(quadpoints_theta)
+    theta = two_pi * quadpoints_theta  # (ntheta,)
 
     m_cos = _mode_range(0, mpol + 1)  # [0 .. mpol]
     m_sin = _mode_range(1, mpol + 1)  # [1 .. mpol]
@@ -118,8 +127,8 @@ def build_theta_basis(quadpoints_theta, mpol):
     # d/d(quadpoints_theta) = d/dθ_param  (chain rule: dθ/dθ_param = 2π)
     dW = jnp.concatenate(
         [
-            -m_cos[None, :] * _TWO_PI * jnp.sin(arg_cos),
-            m_sin[None, :] * _TWO_PI * jnp.cos(arg_sin),
+            -m_cos[None, :] * two_pi * jnp.sin(arg_cos),
+            m_sin[None, :] * two_pi * jnp.cos(arg_sin),
         ],
         axis=1,
     )
@@ -140,7 +149,8 @@ def build_phi_basis(quadpoints_phi, ntor, nfp):
         dV: (nphi, 2*ntor+1) derivatives d/d(quadpoints_phi).
     """
     quadpoints_phi = _as_jax_float64(quadpoints_phi)
-    phi = _TWO_PI * quadpoints_phi  # (nphi,)
+    two_pi = _two_pi(quadpoints_phi)
+    phi = two_pi * quadpoints_phi  # (nphi,)
 
     # frequencies: [0, nfp, 2*nfp, …, ntor*nfp]
     nfp_scale = _as_jax_float64(nfp)
@@ -154,8 +164,8 @@ def build_phi_basis(quadpoints_phi, ntor, nfp):
 
     dV = jnp.concatenate(
         [
-            -n_cos[None, :] * _TWO_PI * jnp.sin(arg_cos),
-            n_sin[None, :] * _TWO_PI * jnp.cos(arg_sin),
+            -n_cos[None, :] * two_pi * jnp.sin(arg_cos),
+            n_sin[None, :] * two_pi * jnp.cos(arg_sin),
         ],
         axis=1,
     )
@@ -199,7 +209,8 @@ def surface_gamma(quadpoints_phi, quadpoints_theta, xc, yc, zc, mpol, ntor, nfp)
     yhat = _eval_hat(V, W, yc)
     z = _eval_hat(V, W, zc)
 
-    phi_angle = _TWO_PI * _as_jax_float64(quadpoints_phi)  # (nphi,)
+    quadpoints_phi_jax = _as_jax_float64(quadpoints_phi)
+    phi_angle = _two_pi(quadpoints_phi_jax) * quadpoints_phi_jax  # (nphi,)
     cphi = jnp.cos(phi_angle)[:, None]  # (nphi, 1)
     sphi = jnp.sin(phi_angle)[:, None]
 
@@ -225,10 +236,11 @@ def surface_gammadash1(quadpoints_phi, quadpoints_theta, xc, yc, zc, mpol, ntor,
     dyhat_dphi = _eval_hat(dV, W, yc)
     dz_dphi = _eval_hat(dV, W, zc)
 
-    phi_angle = _TWO_PI * _as_jax_float64(quadpoints_phi)
+    quadpoints_phi_jax = _as_jax_float64(quadpoints_phi)
+    two_pi = _two_pi(quadpoints_phi_jax)
+    phi_angle = two_pi * quadpoints_phi_jax
     cphi = jnp.cos(phi_angle)[:, None]
     sphi = jnp.sin(phi_angle)[:, None]
-    two_pi = _TWO_PI
 
     # d/d(phi_param):  x = x̂·cos(2πφ) − ŷ·sin(2πφ)
     # dx/dφ = dx̂/dφ·cosφ − x̂·2π·sinφ − dŷ/dφ·sinφ − ŷ·2π·cosφ
@@ -262,7 +274,8 @@ def surface_gammadash2(quadpoints_phi, quadpoints_theta, xc, yc, zc, mpol, ntor,
     dyhat_dtheta = _eval_hat(V, dW, yc)
     dz_dtheta = _eval_hat(V, dW, zc)
 
-    phi_angle = _TWO_PI * _as_jax_float64(quadpoints_phi)
+    quadpoints_phi_jax = _as_jax_float64(quadpoints_phi)
+    phi_angle = _two_pi(quadpoints_phi_jax) * quadpoints_phi_jax
     cphi = jnp.cos(phi_angle)[:, None]
     sphi = jnp.sin(phi_angle)[:, None]
 
@@ -367,9 +380,9 @@ def _split_flat_to_xyzc(flat, mpol, ntor):
     flat_jax = _as_jax_float64(flat)
     stacked = jnp.reshape(flat_jax, (3, n_per_coord))
     return (
-        jnp.reshape(jnp.dot(_BASIS_X3, stacked), shape),
-        jnp.reshape(jnp.dot(_BASIS_Y3, stacked), shape),
-        jnp.reshape(jnp.dot(_BASIS_Z3, stacked), shape),
+        jnp.reshape(jnp.dot(_basis_selector(0, reference=stacked), stacked), shape),
+        jnp.reshape(jnp.dot(_basis_selector(1, reference=stacked), stacked), shape),
+        jnp.reshape(jnp.dot(_basis_selector(2, reference=stacked), stacked), shape),
     )
 
 
@@ -455,8 +468,10 @@ def _scatter_surface_xyzfourier_dofs(dofs, mpol, ntor, stellsym):
 
 def _surface_xyzfourier_basis(quadpoints_phi, quadpoints_theta, mpol, ntor, nfp):
     """Return ``SurfaceXYZFourier`` phase terms and mode indices."""
-    theta = _TWO_PI * _as_jax_float64(quadpoints_theta)
-    phi = _TWO_PI * _as_jax_float64(quadpoints_phi)
+    quadpoints_theta_jax = _as_jax_float64(quadpoints_theta)
+    quadpoints_phi_jax = _as_jax_float64(quadpoints_phi)
+    theta = _two_pi(quadpoints_theta_jax) * quadpoints_theta_jax
+    phi = _two_pi(quadpoints_phi_jax) * quadpoints_phi_jax
     m = _mode_range(0, mpol + 1)
     n = _mode_range(-ntor, ntor + 1) * _as_jax_float64(nfp)
 
@@ -522,7 +537,8 @@ def surface_xyzfourier_gamma_from_dofs(
     yhat = _surface_xyzfourier_hat(yc, ys, cos_angle, sin_angle)
     z = _surface_xyzfourier_hat(zc, zs, cos_angle, sin_angle)
 
-    phi_angle = _TWO_PI * _as_jax_float64(quadpoints_phi)
+    quadpoints_phi_jax = _as_jax_float64(quadpoints_phi)
+    phi_angle = _two_pi(quadpoints_phi_jax) * quadpoints_phi_jax
     x, y = _surface_xyzfourier_rotate(phi_angle, xhat, yhat)
     return jnp.stack([x, y, z], axis=-1)
 
@@ -550,7 +566,8 @@ def surface_xyzfourier_gammadash1_from_dofs(
         ntor,
         nfp,
     )
-    two_pi = _TWO_PI
+    quadpoints_phi_jax = _as_jax_float64(quadpoints_phi)
+    two_pi = _two_pi(quadpoints_phi_jax)
     n_factor = two_pi * n[None, None, None, :]
 
     xhat = _surface_xyzfourier_hat(xc, xs, cos_angle, sin_angle)
@@ -565,7 +582,7 @@ def surface_xyzfourier_gammadash1_from_dofs(
         zc, zs, -n_factor, cos_angle, sin_angle
     )
 
-    phi_angle = _TWO_PI * _as_jax_float64(quadpoints_phi)
+    phi_angle = two_pi * quadpoints_phi_jax
     cphi = jnp.cos(phi_angle)[:, None]
     sphi = jnp.sin(phi_angle)[:, None]
 
@@ -600,7 +617,8 @@ def surface_xyzfourier_gammadash2_from_dofs(
         ntor,
         nfp,
     )
-    two_pi = _TWO_PI
+    quadpoints_phi_jax = _as_jax_float64(quadpoints_phi)
+    two_pi = _two_pi(quadpoints_phi_jax)
     m_factor = two_pi * m[None, None, :, None]
 
     dxhat_dtheta = _surface_xyzfourier_derivative_hat(
@@ -613,7 +631,7 @@ def surface_xyzfourier_gammadash2_from_dofs(
         zc, zs, m_factor, cos_angle, sin_angle
     )
 
-    phi_angle = _TWO_PI * _as_jax_float64(quadpoints_phi)
+    phi_angle = two_pi * quadpoints_phi_jax
     dx, dy = _surface_xyzfourier_rotate(phi_angle, dxhat_dtheta, dyhat_dtheta)
     return jnp.stack([dx, dy, dz_dtheta], axis=-1)
 

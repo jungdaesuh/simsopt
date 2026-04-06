@@ -1,4 +1,10 @@
-"""Immutable specs for the pure JAX kernel layer."""
+"""Immutable pytree specs for the pure JAX kernel layer.
+
+These dataclasses are the stable JAX-facing state boundary for geometry,
+field, and fixed-surface kernels. The public ``Optimizable`` wrappers still
+own mutable compatibility state and flat-DOF orchestration, but compiled JAX
+paths should consume these explicit specs rather than live object graphs.
+"""
 
 from __future__ import annotations
 

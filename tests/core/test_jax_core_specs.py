@@ -236,6 +236,43 @@ def test_make_grouped_coil_set_spec_accepts_group_specs_and_raw_group_tuples():
     _assert_is_float64_array(grouped.groups[1].currents)
 
 
+def test_grouped_coil_set_spec_is_a_real_jittable_pytree():
+    grouped = make_grouped_coil_set_spec(
+        [
+            (
+                np.full((1, 4, 3), 2.0, dtype=np.float32),
+                np.full((1, 4, 3), -1.0, dtype=np.float32),
+                np.array([3.0], dtype=np.float32),
+                [1],
+            ),
+            (
+                np.full((2, 4, 3), 4.0, dtype=np.float32),
+                np.full((2, 4, 3), -2.0, dtype=np.float32),
+                np.array([5.0, -7.0], dtype=np.float32),
+                [2, 9],
+            ),
+        ]
+    )
+
+    leaves, treedef = jax.tree_util.tree_flatten(grouped)
+    rebuilt = jax.tree_util.tree_unflatten(treedef, leaves)
+
+    assert treedef == jax.tree_util.tree_structure(rebuilt)
+    assert rebuilt.groups[0].coil_indices == (1,)
+    assert rebuilt.groups[1].coil_indices == (2, 9)
+    np.testing.assert_allclose(rebuilt.groups[0].gammas, grouped.groups[0].gammas)
+    np.testing.assert_allclose(rebuilt.groups[1].currents, grouped.groups[1].currents)
+
+    @jax.jit
+    def current_sum(spec):
+        total = jnp.asarray(0.0, dtype=jnp.float64)
+        for group in spec.groups:
+            total = total + jnp.sum(group.currents)
+        return total
+
+    np.testing.assert_allclose(current_sum(grouped), np.array(1.0))
+
+
 def test_coil_set_dof_extraction_spec_is_a_real_jittable_pytree():
     extraction_spec = make_coil_set_dof_extraction_spec(
         [

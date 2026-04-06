@@ -721,6 +721,55 @@ def test_transfer_guard_disallow_allows_grouped_biot_savart_gpu_current_arrays()
     )
 
 
+def test_transfer_guard_disallow_allows_grouped_biot_savart_host_spec_vjp():
+    """Host-backed grouped coil specs must remain usable in eager VJP paths."""
+    _assert_import_check_passes(
+        """
+        import jax
+        import jax.numpy as jnp
+        import numpy as np
+        import simsopt.config as simsopt_config
+        from simsopt.jax_core.field import (
+            grouped_biot_savart_B_from_spec,
+            grouped_coil_set_spec_from_lists,
+        )
+
+        gpu = next((device for device in jax.devices() if device.platform == "gpu"), None)
+        if gpu is None:
+            raise SystemExit(0)
+
+        simsopt_config.set_backend(
+            "jax_gpu_fast",
+            strict=True,
+            transfer_guard="disallow",
+        )
+
+        points = jax.device_put(
+            np.linspace(0.0, 1.0, 4 * 3, dtype=np.float64).reshape(4, 3),
+            device=gpu,
+        )
+        gamma = np.linspace(0.2, 0.8, 8 * 3, dtype=np.float64).reshape(8, 3)
+        gammadash = np.full((8, 3), 0.1, dtype=np.float64)
+        current = np.asarray(1.25, dtype=np.float64)
+
+        coil_spec = grouped_coil_set_spec_from_lists([gamma], [gammadash], [current])
+
+        def objective(eval_points):
+            return jnp.sum(grouped_biot_savart_B_from_spec(eval_points, coil_spec))
+
+        value, pullback = jax.vjp(objective, points)
+        grad = pullback(
+            jax.device_put(np.asarray(1.0, dtype=np.float64), device=gpu)
+        )[0]
+
+        assert np.isfinite(float(jax.device_get(value)))
+        assert grad.shape == points.shape
+        assert bool(jax.device_get(jnp.all(jnp.isfinite(grad))))
+    """,
+        failure_message="grouped Biot-Savart host-spec VJP transfer-guard smoke failed",
+    )
+
+
 def test_transfer_guard_disallow_preserves_shifted_grid_axis_sample():
     """Shifted quadrature grids must use the sampled surface point for axis-z."""
     _assert_import_check_passes(
@@ -747,7 +796,7 @@ def test_transfer_guard_disallow_preserves_shifted_grid_axis_sample():
         )
         rz.set_zs(1, 0, 1.0)
         rz_gamma = np.asarray(rz.gamma(), dtype=np.float64)
-        rz_sample = float(_surface_sample_z(jax.device_put(rz_gamma)))
+        rz_sample = float(jax.device_get(_surface_sample_z(jax.device_put(rz_gamma))))
         assert np.isclose(rz_sample, float(rz_gamma[0, 0, 2]))
 
         xyz = SurfaceXYZTensorFourier(
@@ -763,7 +812,7 @@ def test_transfer_guard_disallow_preserves_shifted_grid_axis_sample():
             xyz_dofs[-(i + 1)] += 0.01 * (i + 1)
         xyz.set_dofs(xyz_dofs)
         xyz_gamma = np.asarray(xyz.gamma(), dtype=np.float64)
-        xyz_sample = float(_surface_sample_z(jax.device_put(xyz_gamma)))
+        xyz_sample = float(jax.device_get(_surface_sample_z(jax.device_put(xyz_gamma))))
         assert np.isclose(xyz_sample, float(xyz_gamma[0, 0, 2]))
     """,
         failure_message="shifted-grid axis sample smoke failed",
@@ -1135,6 +1184,61 @@ def test_transfer_guard_disallow_allows_gamma_2d_eager_host_constants():
         assert theta.shape == (8,)
         """,
         failure_message="gamma_2d strict transfer-guard smoke failed",
+    )
+
+
+def test_transfer_guard_disallow_allows_surface_xyztensorfourier_gamma_from_dofs():
+    """SurfaceXYZTensorFourier geometry should not close over device constants."""
+    _assert_import_check_passes(
+        """
+        import jax
+        import jax.numpy as jnp
+        import numpy as np
+        import simsopt.config as simsopt_config
+        from simsopt.geo import SurfaceXYZTensorFourier
+        from simsopt.geo.surface_fourier_jax import (
+            stellsym_scatter_indices,
+            surface_gamma_from_dofs,
+        )
+
+        gpu = next((device for device in jax.devices() if device.platform == "gpu"), None)
+        if gpu is None:
+            raise SystemExit(0)
+
+        simsopt_config.set_backend(
+            "jax_gpu_fast",
+            strict=True,
+            transfer_guard="disallow",
+        )
+        surf = SurfaceXYZTensorFourier(
+            mpol=1,
+            ntor=1,
+            stellsym=True,
+            nfp=1,
+            quadpoints_phi=np.array([0.23, 0.41]),
+            quadpoints_theta=np.array([0.37, 0.59]),
+        )
+        dofs = np.asarray(surf.get_dofs(), dtype=np.float64)
+        scatter = stellsym_scatter_indices(surf.mpol, surf.ntor)
+        gamma_fn = lambda d: surface_gamma_from_dofs(
+            d,
+            surf.quadpoints_phi,
+            surf.quadpoints_theta,
+            surf.mpol,
+            surf.ntor,
+            surf.nfp,
+            surf.stellsym,
+            scatter,
+        )
+
+        gamma = jax.jit(gamma_fn)(jax.device_put(dofs, device=gpu))
+
+        assert gamma.shape == (2, 2, 3)
+        assert bool(jax.device_get(jnp.all(jnp.isfinite(gamma))))
+        """,
+        failure_message="SurfaceXYZTensorFourier gamma strict transfer-guard smoke failed",
+        timeout=120,
+        extra_env={"XLA_PYTHON_CLIENT_PREALLOCATE": "false"},
     )
 
 

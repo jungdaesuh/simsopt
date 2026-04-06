@@ -33,16 +33,18 @@ The scalar objective is
 where ``N = 3 · nphi · ntheta`` (matching the C++ normalization).
 """
 
+from functools import lru_cache
+
 import numpy as np
 import jax
 import jax.numpy as jnp
 
 from ..jax_core._math_utils import (
     as_jax_float64 as _as_jax_float64,
+    as_runtime_float64 as _as_runtime_float64,
     concat_jax_float64 as _concat_jax_float64,
     explicit_inv as _explicit_inv,
     explicit_rsqrt as _explicit_rsqrt,
-    scalar_at_axis0 as _scalar_at_axis0,
 )
 from ..jax_core.surface_rzfourier import (
     surface_rz_fourier_gamma_from_spec,
@@ -63,16 +65,32 @@ __all__ = [
 ]
 
 
+@lru_cache(maxsize=None)
+def _decision_vector_selector_arrays(surface_size: int, optimize_G: bool):
+    total_size = surface_size + (2 if optimize_G else 1)
+    prefix_selector = np.eye(surface_size, total_size, dtype=np.float64)
+    iota_selector = np.zeros(total_size, dtype=np.float64)
+    iota_selector[surface_size] = 1.0
+    G_selector = None
+    if optimize_G:
+        G_selector = np.zeros(total_size, dtype=np.float64)
+        G_selector[surface_size + 1] = 1.0
+    return prefix_selector, iota_selector, G_selector
+
+
 def _split_decision_vector(x, *, optimize_G):
     x_jax = _as_jax_float64(x)
     total_size = int(x_jax.shape[0])
     tail_size = 2 if optimize_G else 1
     surface_size = total_size - tail_size
-    prefix_selector = np.eye(surface_size, total_size, dtype=np.float64)
-    sdofs = jax.device_put(prefix_selector) @ x_jax
-    iota = _scalar_at_axis0(x_jax, surface_size)
+    prefix_selector, iota_selector, G_selector = _decision_vector_selector_arrays(
+        surface_size,
+        optimize_G,
+    )
+    sdofs = _as_runtime_float64(prefix_selector, reference=x_jax) @ x_jax
+    iota = jnp.dot(_as_runtime_float64(iota_selector, reference=x_jax), x_jax)
     if optimize_G:
-        G = _scalar_at_axis0(x_jax, surface_size + 1)
+        G = jnp.dot(_as_runtime_float64(G_selector, reference=x_jax), x_jax)
         return sdofs, iota, G
     return sdofs, iota, None
 
