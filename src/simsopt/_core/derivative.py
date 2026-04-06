@@ -2,6 +2,8 @@ import numpy as np
 import numbers
 import collections
 
+from .optimizable_contract import has_optimizable_contract
+
 __all__ = ['Derivative']
 
 
@@ -15,8 +17,7 @@ class OptimizableDefaultDict(collections.defaultdict):
         super().__init__(None, d)
 
     def __missing__(self, key):
-        from .optimizable import Optimizable  # Import here to avoid circular import
-        assert isinstance(key, Optimizable)
+        assert has_optimizable_contract(key)
         self[key] = value = np.zeros((key.local_full_dof_size, ))
         return value
 
@@ -212,8 +213,7 @@ class Derivative:
                            If False, return as a numpy array.  The entries of the array correspond only to free
                            DOFs, and fixed ones are removed out.
         """
-        from .optimizable import Optimizable  # Import here to avoid circular import
-        assert isinstance(optim, Optimizable)
+        assert has_optimizable_contract(optim)
         derivs = []
 
         if as_derivative:

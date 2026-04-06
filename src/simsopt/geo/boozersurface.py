@@ -8,6 +8,8 @@ from .surfaceobjectives import (
     boozer_surface_dexactresidual_dcoils_dcurrents_vjp,
     boozer_surface_dlsqgrad_dcoils_vjp,
 )
+from .surfacexyzfourier import SurfaceXYZFourier
+from .surfacexyztensorfourier import SurfaceXYZTensorFourier
 from .._core.optimizable import Optimizable
 from functools import partial
 
@@ -119,11 +121,7 @@ class BoozerSurface(Optimizable):
         """
         super().__init__(depends_on=[biotsavart])
 
-        from simsopt.geo import SurfaceXYZFourier, SurfaceXYZTensorFourier
-
-        if not isinstance(surface, SurfaceXYZTensorFourier) and not isinstance(
-            surface, SurfaceXYZFourier
-        ):
+        if not isinstance(surface, (SurfaceXYZTensorFourier, SurfaceXYZFourier)):
             raise Exception(
                 "The input surface must be a SurfaceXYZTensorFourier or SurfaceXYZFourier."
             )
@@ -1166,8 +1164,6 @@ class BoozerSurface(Optimizable):
         """
         if not self.need_to_run_code:
             return self.res
-
-        from simsopt.geo.surfacexyztensorfourier import SurfaceXYZTensorFourier
 
         s = self.surface
         if not isinstance(s, SurfaceXYZTensorFourier):

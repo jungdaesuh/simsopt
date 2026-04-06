@@ -27,7 +27,7 @@ except ImportError:
 
 from .types import RealArray
 from .dev import SimsoptRequires
-from .optimizable import Optimizable
+from .optimizable_contract import has_optimizable_contract
 from .util import finite_difference_steps
 
 logger = logging.getLogger(__name__)
@@ -49,7 +49,7 @@ class FiniteDifference:
                  diff_method: str = "forward") -> None:
 
         try:
-            if not isinstance(func.__self__, Optimizable):
+            if not has_optimizable_contract(func.__self__):
                 raise TypeError("Function supplied should be a method of Optimizable")
         except:
             raise TypeError("Function supplied should be a method of Optimizable")
@@ -135,7 +135,7 @@ class MPIFiniteDifference:
                  log_file: Union[str, IO] = "jac_log") -> None:
 
         try:
-            if not isinstance(func.__self__, Optimizable):
+            if not has_optimizable_contract(func.__self__):
                 raise TypeError(
                     "Function supplied should be a method of Optimizable")
         except:
