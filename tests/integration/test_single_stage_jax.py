@@ -4194,8 +4194,9 @@ class TestExactSolveCPUJAXParity:
 
         Direct gradient parity IS validated on the LS scipy path at
         rtol=1e-10 in test_real_fixture_scipy_parity_and_wrapper_gradients.
-        Correctness of each path is validated independently via FD in
-        TestIotasJAXResolveFD and TestNonQSRatioJAXResolveFD.
+        FD correctness is validated on the LS re-solve path (not exact) in
+        TestIotasJAXResolveFD and TestNonQSRatioJAXResolveFD.  This test
+        covers only gradient health (finite, non-zero) on the exact state.
         """
         exact_pair = _solve_exact_cpu_jax_parity_pair()
 
