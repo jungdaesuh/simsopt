@@ -24,9 +24,12 @@ All tests require ``simsoptpp`` for the CPU reference.
 """
 
 import gc
+import logging
 import re
 from functools import partial
 import types
+
+logger = logging.getLogger(__name__)
 
 import pytest
 from conftest import (
@@ -1092,7 +1095,7 @@ def _assert_wrapper_resolve_fd_matches_real_fixture(
 
             directional_fd = (plus["value"] - minus["value"]) / (2.0 * eps)
             abs_err = abs(directional_adjoint - directional_fd)
-            print(
+            logger.info(
                 f"{wrapper_label} reduced-real FD[{sample_index}, eps={eps:.1e}]: "
                 f"adjoint={directional_adjoint:.6e} fd={directional_fd:.6e} "
                 f"abs={abs_err:.2e}"
@@ -1295,7 +1298,7 @@ class TestBoozerResidualValue:
         j_cpu = jr_cpu.J()
         j_jax = jr_jax.J()
 
-        print(f"BoozerResidual J: cpu={j_cpu:.12e} jax={j_jax:.12e}")
+        logger.info(f"BoozerResidual J: cpu={j_cpu:.12e} jax={j_jax:.12e}")
         # Both should be small on the shared reduced fixture.
         assert j_jax < 1e-3, f"JAX BoozerResidual too large: {j_jax:.2e}"
         assert j_cpu < 1e-3, f"CPU BoozerResidual too large: {j_cpu:.2e}"
@@ -1444,7 +1447,7 @@ class TestIotasValue:
         j_cpu = iotas_cpu.J()
         j_jax = iotas_jax.J()
 
-        print(f"Iotas J: cpu={j_cpu:.12e} jax={j_jax:.12e}")
+        logger.info(f"Iotas J: cpu={j_cpu:.12e} jax={j_jax:.12e}")
         # Both must be finite (solvers may converge to different branches)
         assert np.isfinite(j_cpu) and np.isfinite(j_jax), "Iotas J not finite"
 
@@ -1493,7 +1496,7 @@ class TestAdjointSolveConsistency:
         H = P @ L @ U
         residual = H.T @ adj - dJ_ds
         rel = np.linalg.norm(residual) / (np.linalg.norm(dJ_ds) + 1e-30)
-        print(f"Adjoint residual: ||H^T adj - dJ_ds|| / ||dJ_ds|| = {rel:.2e}")
+        logger.info(f"Adjoint residual: ||H^T adj - dJ_ds|| / ||dJ_ds|| = {rel:.2e}")
         assert rel < 1e-10, f"Adjoint solve residual too large: {rel:.2e}"
 
     def test_vjp_produces_finite_derivative(self, boozer_setup):
@@ -1512,7 +1515,7 @@ class TestAdjointSolveConsistency:
         adj_deriv = bs_jax.coil_cotangents_to_derivative(*adj_cot)
         g = np.array(adj_deriv(bs_jax))
 
-        print(f"||VJP result|| = {np.linalg.norm(g):.6e}")
+        logger.info(f"||VJP result|| = {np.linalg.norm(g):.6e}")
         assert np.all(np.isfinite(g)), "VJP produced NaN/inf"
         assert np.linalg.norm(g) > 0, "VJP produced zero gradient"
 
@@ -2966,7 +2969,7 @@ class TestNonQSRatioValue:
         j_cpu = nqs_cpu.J()
         j_jax = nqs_jax.J()
 
-        print(f"NonQSRatio J: cpu={j_cpu:.12e} jax={j_jax:.12e}")
+        logger.info(f"NonQSRatio J: cpu={j_cpu:.12e} jax={j_jax:.12e}")
         # Both must be finite and non-negative (solvers converge to different
         # surfaces, so exact parity is not expected)
         assert np.isfinite(j_jax) and j_jax >= 0, f"JAX NonQSRatio invalid: {j_jax}"
@@ -3095,7 +3098,7 @@ class TestCompositeObjective:
         j = JF_jax.J()
         g = JF_jax.dJ()
 
-        print(f"Composite JAX: J={j:.12e} ||dJ||={np.linalg.norm(g):.6e}")
+        logger.info(f"Composite JAX: J={j:.12e} ||dJ||={np.linalg.norm(g):.6e}")
         assert np.isfinite(j), "Composite J is not finite"
         assert np.all(np.isfinite(g)), "Composite dJ contains NaN/inf"
 
@@ -3197,7 +3200,7 @@ class TestBoozerResidualGradientFD:
 
             abs_err = abs(dd_composed - dd_fd)
             rel_err = abs_err / (abs(dd_fd) + 1e-30)
-            print(
+            logger.info(
                 f"E2E FD[{i}]: composed={dd_composed:.6e} fd={dd_fd:.6e} "
                 f"rel={rel_err:.2e} abs={abs_err:.2e}"
             )
@@ -3242,7 +3245,7 @@ class TestCompositeGradientPipeline:
         dj0 = JF_jax.dJ()
         grad_norm = np.linalg.norm(dj0)
 
-        print(f"Composite: J={j0:.6e}, ||dJ||={grad_norm:.6e}")
+        logger.info(f"Composite: J={j0:.6e}, ||dJ||={grad_norm:.6e}")
 
         assert np.isfinite(j0), "Composite J is not finite"
         assert np.all(np.isfinite(dj0)), "Composite dJ contains NaN/inf"
@@ -3321,7 +3324,7 @@ class TestScriptBackendSelection:
                 )
 
         assert recorder.called, "BoozerSurfaceJAX was not constructed"
-        print("initialize_boozer_surface(backend='jax') -> BoozerSurfaceJAX OK")
+        logger.info("initialize_boozer_surface(backend='jax') -> BoozerSurfaceJAX OK")
 
     def test_real_fixture_cpu_warm_start_overrides_do_not_crash(self):
         """Reduced real CPU fixture must accept warm-start overrides without sdofs=."""
@@ -3469,7 +3472,7 @@ class TestRunCodeLSParity:
         label_err_jax = abs(vol_jax.J() - vol_target)
         iota_diff = abs(res_cpu["iota"] - res_jax["iota"])
 
-        print(
+        logger.info(
             f"CPU: iota={res_cpu['iota']:.6e} |label|={label_err_cpu:.6e}\n"
             f"JAX: iota={res_jax['iota']:.6e} |label|={label_err_jax:.6e}\n"
             f"|iota diff|={iota_diff:.6e}"
@@ -3596,7 +3599,7 @@ class TestShortSingleStageOptRun:
         )
         j_final = result.fun
 
-        print(
+        logger.info(
             f"Short opt: J0={j0:.6e} -> J_final={j_final:.6e} "
             f"nit={result.nit} success={result.success}"
         )
@@ -3708,7 +3711,7 @@ class TestExactPathSolve:
         assert res["type"] == "exact", f"Expected 'exact', got {res['type']}"
         assert "weight_inv_modB" in res, "Missing weight_inv_modB key"
         residual_norm = np.linalg.norm(res["residual"], ord=np.inf)
-        print(
+        logger.info(
             f"Exact path: success={res['success']} iter={res['iter']} "
             f"||residual||_inf={residual_norm:.3e} iota={res['iota']:.6f}"
         )
@@ -3964,7 +3967,7 @@ class TestBVjpCPUParityPerComponent:
         bs_cpu.set_points(old_points_cpu)
         bs_jax._points_jax = old_points_jax
 
-        print(
+        logger.info(
             f"B_vjp parity: ||cpu||={np.linalg.norm(grad_cpu):.6e} "
             f"||jax||={np.linalg.norm(grad_jax):.6e} "
             f"||diff||={np.linalg.norm(grad_cpu - grad_jax):.6e}"
@@ -4138,7 +4141,7 @@ class TestExactSolveCPUJAXParity:
         resid_cpu = np.linalg.norm(res_cpu["residual"], ord=np.inf)
         resid_jax = np.linalg.norm(res_jax["residual"], ord=np.inf)
 
-        print(
+        logger.info(
             f"Exact parity:\n"
             f"  CPU: iota={res_cpu['iota']:.10e} G={res_cpu['G']:.10e} "
             f"||r||_inf={resid_cpu:.3e}\n"
@@ -4400,7 +4403,7 @@ class TestBoozerResidualAdjointFD:
         total_norm = np.linalg.norm(np.asarray(jr.dJ()))
         adjoint_fraction = adj_norm / (direct_norm + 1e-30)
 
-        print(
+        logger.info(
             f"Adjoint fraction diagnostic:\n"
             f"  ||direct||  = {direct_norm:.6e}\n"
             f"  ||adjoint|| = {adj_norm:.6e}\n"
@@ -5378,7 +5381,7 @@ class TestBoozerResidualCPUParity:
             )
         )
 
-        print(
+        logger.info(
             f"Boozer residual scalar parity (weight_inv_modB=True):\n"
             f"  CPU: {val_cpu_normalized:.15e}\n"
             f"  JAX: {val_jax:.15e}\n"
@@ -5420,7 +5423,7 @@ class TestBoozerResidualCPUParity:
             )
         )
 
-        print(
+        logger.info(
             f"Boozer residual scalar parity (weight_inv_modB=False):\n"
             f"  CPU: {val_cpu_normalized:.15e}\n"
             f"  JAX: {val_jax:.15e}\n"
@@ -5476,7 +5479,7 @@ class TestBoozerResidualCPUParity:
 
         val_cpu = sopp.boozer_residual(G, iota, xphi, xtheta, B, True) / num_res
 
-        print(
+        logger.info(
             f"Vector consistency:\n"
             f"  0.5||r||^2/N from vector: {scalar_from_vec:.15e}\n"
             f"  boozer_residual_scalar:    {scalar_direct:.15e}\n"
@@ -5571,7 +5574,7 @@ class TestBoozerResidualCPUParity:
         )
         val_jax = float(obj_fn(x_jax))
 
-        print(
+        logger.info(
             f"Full penalty objective parity:\n"
             f"  CPU: {val_cpu:.15e}\n"
             f"  JAX: {val_jax:.15e}\n"
