@@ -1055,6 +1055,47 @@ def compute_single_stage_surface_vessel_min_dist(
     )
 
 
+def evaluate_single_stage_hardware_snapshot(
+    curve_curve_distance_obj,
+    cc_dist,
+    curve_surface_distance_obj,
+    cs_dist,
+    surface_vessel_distance_obj,
+    surface_status,
+    ss_dist,
+    banana_curve,
+    curvature_threshold,
+    outer_surface=None,
+    vessel_surface=None,
+):
+    curve_curve_min_dist = float(curve_curve_distance_obj.shortest_distance())
+    curve_surface_min_dist = float(curve_surface_distance_obj.shortest_distance())
+    surface_vessel_min_dist = compute_single_stage_surface_vessel_min_dist(
+        surface_vessel_distance_obj,
+        surface_status,
+        outer_surface,
+        vessel_surface,
+    )
+    max_curvature = float(np.max(banana_curve.kappa()))
+    status = evaluate_single_stage_hardware_constraints(
+        curve_curve_min_dist,
+        cc_dist,
+        curve_surface_min_dist,
+        cs_dist,
+        surface_vessel_min_dist,
+        ss_dist,
+        max_curvature,
+        curvature_threshold,
+    )
+    return {
+        "curve_curve_min_dist": curve_curve_min_dist,
+        "curve_surface_min_dist": curve_surface_min_dist,
+        "surface_vessel_min_dist": surface_vessel_min_dist,
+        "max_curvature": max_curvature,
+        "status": status,
+    }
+
+
 def snapshot_surface_states(surface_data):
     return {
         "sdofs": [entry["boozer_surface"].surface.x.copy() for entry in surface_data],
@@ -1783,8 +1824,26 @@ def evaluate_search_step(x):
                     f"reason={topology_status['first_exit_reason']}"
                 )
 
-        # Hardware metrics computed in callback(), not here — computing
-        # shortest_distance() inside fun() can corrupt optimizer state.
+        if success:
+            hardware_snapshot = evaluate_single_stage_hardware_snapshot(
+                JCurveCurve,
+                CC_DIST,
+                JCurveSurface,
+                CS_DIST,
+                JSurfSurf,
+                stack_status,
+                SS_DIST,
+                banana_curve,
+                CURVATURE_THRESHOLD,
+            )
+            hardware_status = hardware_snapshot["status"]
+            run_dict["hardware_constraint_status"] = hardware_status
+            if not hardware_status["success"]:
+                success = False
+                rejection_increment = max(abs(run_dict['J']), 1.0)
+                print("/!\\ /!\\ Hardware gate rejected candidate /!\\ /!\\")
+                for violation in hardware_status["violations"]:
+                    print(violation)
 
         if success:
             print(f"Volume: {outer_entry['boozer_surface'].surface.volume()}")
@@ -1946,26 +2005,25 @@ def callback(x):
     gamma = banana_curve.gamma()
     max_r = np.max(np.sqrt(gamma[:,0]**2 + gamma[:,1]**2))
     max_z = np.max(np.abs(gamma[:,2]))
-    max_curvature = np.max(banana_curve.kappa())
     length = curvelength.J()
-    curvecurve_min = JCurveCurve.shortest_distance()
-    curvesurf_min = JCurveSurface.shortest_distance()
-    surface_vessel_min = compute_single_stage_surface_vessel_min_dist(
+    hardware_snapshot = evaluate_single_stage_hardware_snapshot(
+        JCurveCurve,
+        CC_DIST,
+        JCurveSurface,
+        CS_DIST,
         JSurfSurf,
         full_stack_status,
+        SS_DIST,
+        banana_curve,
+        CURVATURE_THRESHOLD,
         outer_entry["boozer_surface"].surface,
         VV,
     )
-    hardware_status = evaluate_single_stage_hardware_constraints(
-        curvecurve_min,
-        CC_DIST,
-        curvesurf_min,
-        CS_DIST,
-        surface_vessel_min,
-        SS_DIST,
-        max_curvature,
-        CURVATURE_THRESHOLD,
-    )
+    curvecurve_min = hardware_snapshot["curve_curve_min_dist"]
+    curvesurf_min = hardware_snapshot["curve_surface_min_dist"]
+    surface_vessel_min = hardware_snapshot["surface_vessel_min_dist"]
+    max_curvature = hardware_snapshot["max_curvature"]
+    hardware_status = hardware_snapshot["status"]
     run_dict['hardware_constraint_status'] = hardware_status
 
     bs.set_points(outer_entry['boozer_surface'].surface.gamma().reshape((-1, 3)))
@@ -2615,6 +2673,7 @@ if __name__ == "__main__":
     # ==============================================================================
     # SAVE OPTIMIZED STATE
     # ==============================================================================
+    final_hardware_snapshot = None
     if not args.init_only:
         # Re-solve the surface stack at the reported optimizer endpoint so saved
         # artifacts reflect the actual final coil DOFs rather than the last
@@ -2652,7 +2711,20 @@ if __name__ == "__main__":
 
         final_volume = outer_surface_data['boozer_surface'].surface.volume()
         final_iota = Iotas(outer_surface_data['boozer_surface']).J()
-        final_max_curvature = np.max(banana_curve.kappa())
+        final_hardware_snapshot = evaluate_single_stage_hardware_snapshot(
+            JCurveCurve,
+            CC_DIST,
+            JCurveSurface,
+            CS_DIST,
+            JSurfSurf,
+            run_dict["surface_status"],
+            SS_DIST,
+            banana_curve,
+            CURVATURE_THRESHOLD,
+            outer_surface_data["boozer_surface"].surface,
+            VV,
+        )
+        final_max_curvature = final_hardware_snapshot["max_curvature"]
         final_surface_volumes = [entry["boozer_surface"].surface.volume() for entry in surface_data]
         final_surface_iotas = [Iotas(entry["boozer_surface"]).J() for entry in surface_data]
         print(f"Volume: {final_volume}")
@@ -2683,27 +2755,27 @@ if __name__ == "__main__":
     base_objective_j = None if run_dict['base_eval'] is None else float(run_dict['base_eval']['total'])
     search_objective_j = float(run_dict['search_eval']['total'])
     final_search_surface_weights = run_dict['search_eval']['surface_weights'].tolist()
+    if final_hardware_snapshot is None:
+        final_hardware_snapshot = evaluate_single_stage_hardware_snapshot(
+            JCurveCurve,
+            CC_DIST,
+            JCurveSurface,
+            CS_DIST,
+            JSurfSurf,
+            run_dict["surface_status"],
+            SS_DIST,
+            banana_curve,
+            CURVATURE_THRESHOLD,
+            outer_surface_data["boozer_surface"].surface,
+            VV,
+        )
     coil_length = float(curvelength.J())
-    curve_curve_min_dist = float(JCurveCurve.shortest_distance())
-    curve_surface_min_dist = float(JCurveSurface.shortest_distance())
-    surface_vessel_min_dist = compute_single_stage_surface_vessel_min_dist(
-        JSurfSurf,
-        run_dict["surface_status"],
-        outer_surface_data["boozer_surface"].surface,
-        VV,
-    )
+    curve_curve_min_dist = final_hardware_snapshot["curve_curve_min_dist"]
+    curve_surface_min_dist = final_hardware_snapshot["curve_surface_min_dist"]
+    surface_vessel_min_dist = final_hardware_snapshot["surface_vessel_min_dist"]
     nonqs_ratio = None if args.init_only else float(JnonQSRatio.J())
     boozer_residual = None if args.init_only else float(JBoozerResidual.J())
-    final_hardware_status = evaluate_single_stage_hardware_constraints(
-        curve_curve_min_dist,
-        CC_DIST,
-        curve_surface_min_dist,
-        CS_DIST,
-        surface_vessel_min_dist,
-        SS_DIST,
-        float(final_max_curvature),
-        CURVATURE_THRESHOLD,
-    )
+    final_hardware_status = final_hardware_snapshot["status"]
     if not final_hardware_status["success"]:
         optimizer_success = False
         if termination_message:
