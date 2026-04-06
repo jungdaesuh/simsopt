@@ -84,6 +84,15 @@ def _strict_scalar_grad(fun, arg):
     return gradient
 
 
+def _strict_scalar_value_and_grad(fun, arg, *args):
+    def _objective(first_arg):
+        return fun(first_arg, *args)
+
+    value, pullback = jax.vjp(_objective, arg)
+    (gradient,) = pullback(_explicit_scalar_pullback_seed(value))
+    return value, gradient
+
+
 def _explicit_cotangent_basis(length: int, index: int, *, dtype):
     basis = np.zeros(int(length), dtype=np.dtype(dtype))
     basis[int(index)] = 1.0
@@ -278,12 +287,13 @@ def _current_coil_dofs_and_spec(biotsavart):
 
 def _value_and_direct_coil_derivative(
     biotsavart,
-    objective_value_and_grad,
+    objective,
     coil_dofs,
     *objective_args,
 ):
     """Evaluate a cached coil-DOF objective/gradient pair and map its gradient."""
-    objective_value, coil_dofs_gradient = objective_value_and_grad(
+    objective_value, coil_dofs_gradient = _strict_scalar_value_and_grad(
+        objective,
         coil_dofs,
         *objective_args,
     )
@@ -492,9 +502,6 @@ class BoozerResidualJAX(Optimizable):
         self.surface.set_dofs(s.get_dofs())
 
         self.constraint_weight = float(boozer_surface.constraint_weight)
-        self._direct_objective_value_and_grad = jax.value_and_grad(
-            self._direct_objective_of_coils
-        )
         self.recompute_bell()
 
     def recompute_bell(self, parent=None):
@@ -553,7 +560,7 @@ class BoozerResidualJAX(Optimizable):
 
         self._J, dJ_by_dcoils = _value_and_direct_coil_derivative(
             self.biotsavart,
-            self._direct_objective_value_and_grad,
+            self._direct_objective_of_coils,
             current_coil_dofs,
             x_inner,
             optimize_G,

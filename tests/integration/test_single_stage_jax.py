@@ -1745,6 +1745,36 @@ class TestAdjointSolveConsistency:
             atol=1e-12,
         )
 
+    def test_strict_scalar_value_and_grad_uses_explicit_pullback_seed(
+        self, monkeypatch
+    ):
+        """Strict scalar gradients should avoid JAX's implicit host seed creation."""
+        import simsopt.geo.surfaceobjectives_jax as soj
+
+        calls = {"count": 0}
+        original_seed = soj._explicit_scalar_pullback_seed
+
+        def _counting_seed(value):
+            calls["count"] += 1
+            return original_seed(value)
+
+        monkeypatch.setattr(soj, "_explicit_scalar_pullback_seed", _counting_seed)
+
+        value, grad = soj._strict_scalar_value_and_grad(
+            lambda x, scale: jnp.sum(scale * (x * x)),
+            jnp.array([2.0, -3.0], dtype=jnp.float64),
+            0.5,
+        )
+
+        assert calls["count"] == 1
+        np.testing.assert_allclose(np.asarray(value), 6.5, rtol=1e-12, atol=1e-12)
+        np.testing.assert_allclose(
+            np.asarray(grad),
+            np.array([2.0, -3.0]),
+            rtol=1e-12,
+            atol=1e-12,
+        )
+
     def test_traceable_iota_target_penalty_uses_runtime_scalar_constants(
         self, monkeypatch
     ):
