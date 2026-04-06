@@ -1644,6 +1644,32 @@ class TestAdjointSolveConsistency:
             atol=1e-12,
         )
 
+    def test_split_x_inner_runtime_preserves_surface_iota_and_G(self, monkeypatch):
+        """Explicit runtime splitting should preserve inner-state semantics."""
+        import simsopt.geo.surfaceobjectives_jax as soj
+
+        calls = {"count": 0}
+        original_device_put = soj.jax.device_put
+
+        def _counting_device_put(value):
+            calls["count"] += 1
+            return original_device_put(value)
+
+        monkeypatch.setattr(soj.jax, "device_put", _counting_device_put)
+
+        x_with_G = jnp.array([1.0, 2.0, 3.0, 4.0], dtype=jnp.float64)
+        sdofs, iota, G = soj._split_x_inner_runtime(x_with_G, True)
+        np.testing.assert_allclose(np.asarray(sdofs), np.array([1.0, 2.0]))
+        np.testing.assert_allclose(np.asarray(iota), 3.0)
+        np.testing.assert_allclose(np.asarray(G), 4.0)
+
+        x_without_G = jnp.array([5.0, 6.0, 7.0], dtype=jnp.float64)
+        sdofs, iota, G = soj._split_x_inner_runtime(x_without_G, False)
+        np.testing.assert_allclose(np.asarray(sdofs), np.array([5.0, 6.0]))
+        np.testing.assert_allclose(np.asarray(iota), 7.0)
+        assert G is None
+        assert calls["count"] >= 4
+
     def test_coil_cotangent_projection_avoids_whole_group_host_materialization(self):
         """Projection should convert one coil slice at a time, not a whole group."""
         coils = [_FallbackBombCoil(), _FallbackBombCoil()]

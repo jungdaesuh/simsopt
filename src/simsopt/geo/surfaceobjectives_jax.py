@@ -87,6 +87,34 @@ def _explicit_cotangent_basis(length: int, index: int, *, dtype):
     return jax.device_put(basis)
 
 
+def _explicit_index_array(indices):
+    return jax.device_put(np.asarray(indices, dtype=np.int32))
+
+
+def _take_runtime_entries(array, indices):
+    indices = np.asarray(indices, dtype=np.int32)
+    if indices.size == 0:
+        return _zeros(0, dtype=array.dtype)
+    return jnp.take(array, _explicit_index_array(indices), axis=0)
+
+
+def _take_runtime_scalar(array, index):
+    return jnp.reshape(
+        _take_runtime_entries(array, np.array([int(index)], dtype=np.int32)),
+        (),
+    )
+
+
+def _split_x_inner_runtime(x_inner, optimize_G):
+    length = int(x_inner.shape[0])
+    sdof_count = length - (2 if optimize_G else 1)
+    sdofs = _take_runtime_entries(x_inner, np.arange(sdof_count, dtype=np.int32))
+    iota = _take_runtime_scalar(x_inner, sdof_count)
+    if optimize_G:
+        return sdofs, iota, _take_runtime_scalar(x_inner, sdof_count + 1)
+    return sdofs, iota, None
+
+
 def _compute_stellsym_mask_indices_for_grid(
     *,
     mpol,
@@ -365,10 +393,8 @@ def _boozer_residual_J_of_x_inner(
     Args:
         coil_set_spec: immutable grouped-coil geometry/current payload.
     """
-    if optimize_G:
-        sdofs, iota, G = x_inner[:-2], x_inner[-2], x_inner[-1]
-    else:
-        sdofs, iota = x_inner[:-1], x_inner[-1]
+    sdofs, iota, G = _split_x_inner_runtime(x_inner, optimize_G)
+    if not optimize_G:
         G = compute_G_from_currents(grouped_coil_currents_from_spec(coil_set_spec))
 
     gamma, xphi, xtheta = _surface_geometry_from_dofs(
@@ -768,7 +794,8 @@ class NonQuasiSymmetricRatioJAX(Optimizable):
 
 def _traceable_iota_from_x_inner(x_inner, optimize_G):
     """Extract iota from the inner decision vector."""
-    return x_inner[-2] if optimize_G else x_inner[-1]
+    _, iota, _ = _split_x_inner_runtime(x_inner, optimize_G)
+    return iota
 
 
 def _traceable_iota_target_penalty(x_inner, *, optimize_G, iota_target):
@@ -1445,10 +1472,7 @@ def _make_traceable_objective_profile_suite_from_compiled_bundle(
         }
 
     def _surface_geometry_for(solved_x):
-        if optimize_G:
-            sdofs = solved_x[:-2]
-        else:
-            sdofs = solved_x[:-1]
+        sdofs, _, _ = _split_x_inner_runtime(solved_x, optimize_G)
         return _surface_geometry_from_dofs(
             sdofs,
             objective_kwargs["quadpoints_phi"],
