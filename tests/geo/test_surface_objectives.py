@@ -226,7 +226,8 @@ class ParameterDerivativesTest(unittest.TestCase):
 
 
 class SurfaceSurfaceDistanceTests(unittest.TestCase):
-    def test_shortest_distance_matches_sampled_point_cloud_minimum(self):
+    @staticmethod
+    def _fake_surface(gamma):
         class _FakeSurface(Optimizable):
             def __init__(self, gamma):
                 self._gamma = np.asarray(gamma, dtype=float)
@@ -238,13 +239,16 @@ class SurfaceSurfaceDistanceTests(unittest.TestCase):
             def dgamma_by_dcoeff_vjp(self, grad):
                 return np.asarray(grad, dtype=float)
 
-        surf1 = _FakeSurface(
+        return _FakeSurface(gamma)
+
+    def test_shortest_distance_matches_sampled_point_cloud_minimum(self):
+        surf1 = self._fake_surface(
             [
                 [[0.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
                 [[1.0, 0.0, 0.0], [1.0, 1.0, 0.0]],
             ]
         )
-        surf2 = _FakeSurface(
+        surf2 = self._fake_surface(
             [
                 [[0.0, 0.0, 0.5], [2.0, 2.0, 2.0]],
             ]
@@ -252,6 +256,25 @@ class SurfaceSurfaceDistanceTests(unittest.TestCase):
         objective = SurfaceSurfaceDistance(surf1, surf2, minimum_distance=0.1)
 
         self.assertAlmostEqual(objective.shortest_distance(), 0.5)
+
+    def test_shortest_distance_is_symmetric_for_unequal_point_counts(self):
+        surf1 = self._fake_surface(
+            [
+                [[0.0, 0.0, 0.25], [1.0, 0.0, 0.25]],
+            ]
+        )
+        surf2 = self._fake_surface(
+            [
+                [[0.0, 0.0, 0.0], [5.0, 5.0, 5.0]],
+                [[2.0, 0.0, 2.0], [8.0, 8.0, 8.0]],
+            ]
+        )
+
+        forward = SurfaceSurfaceDistance(surf1, surf2, minimum_distance=0.1)
+        reverse = SurfaceSurfaceDistance(surf2, surf1, minimum_distance=0.1)
+
+        self.assertAlmostEqual(forward.shortest_distance(), 0.25)
+        self.assertAlmostEqual(reverse.shortest_distance(), 0.25)
 
 
 class QfmTests(unittest.TestCase):

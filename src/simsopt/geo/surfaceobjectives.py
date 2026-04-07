@@ -1,4 +1,5 @@
 import numpy as np
+from scipy.spatial import cKDTree
 
 import simsoptpp as sopp
 from .._core.optimizable import Optimizable
@@ -983,10 +984,13 @@ class SurfaceSurfaceDistance(Optimizable):
 
     def shortest_distance(self):
         """Return the minimum sampled distance between the two surface point clouds."""
-        from scipy.spatial.distance import cdist
         gamma1 = self.surf1.gamma().reshape((-1, 3))
         gamma2 = self.surf2.gamma().reshape((-1, 3))
-        return float(np.min(cdist(gamma1, gamma2)))
+        if gamma1.shape[0] <= gamma2.shape[0]:
+            nearest, _ = cKDTree(gamma1).query(gamma2, k=1)
+        else:
+            nearest, _ = cKDTree(gamma2).query(gamma1, k=1)
+        return float(np.min(nearest))
 
 
 class BoozerResidual(Optimizable):
