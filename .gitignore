@@ -18,6 +18,7 @@ pip-wheel-metadata/
 .DS_Store
 .coverage
 .tox
+.venv/
 *fort.9
 	
 # f90wrap related
@@ -69,4 +70,3 @@ tests/boundary*
 
 # Version file
 src/simsopt/_version.py
-
