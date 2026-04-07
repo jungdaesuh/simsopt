@@ -17,6 +17,7 @@ from workflow_runner_common import (  # noqa: E402
     discover_single_results_path,
     ensure_stage2_artifact,
     load_json,
+    load_stage2_artifact_results,
     parse_csv,
     run_command,
     snapshot_single_results_paths,
@@ -144,7 +145,22 @@ def build_smoke_command(
     return command
 
 
-def validate_smoke_results(results: dict, *, requested_current_A: float, tf_current_A: float) -> dict:
+def resolve_expected_stage2_tf_current_A(stage2_artifact_results: dict) -> float:
+    tf_current_A = stage2_artifact_results.get("TF_CURRENT_A")
+    if tf_current_A is None:
+        raise ValueError(
+            "Stage 2 artifact results.json is missing TF_CURRENT_A; cannot validate "
+            "smoke provenance against the loaded artifact."
+        )
+    return float(tf_current_A)
+
+
+def validate_smoke_results(
+    results: dict,
+    *,
+    requested_current_A: float,
+    expected_stage2_tf_current_A: float,
+) -> dict:
     required_keys = (
         "PLASMA_CURRENT_A",
         "PLASMA_CURRENT_INPUT_SOURCE",
@@ -170,7 +186,7 @@ def validate_smoke_results(results: dict, *, requested_current_A: float, tf_curr
         ),
         "stage2_tf_current_matches": math.isclose(
             float(results.get("STAGE2_TF_CURRENT_A", float("nan"))),
-            tf_current_A,
+            expected_stage2_tf_current_A,
             rel_tol=0.0,
             abs_tol=1e-12,
         ),
@@ -188,6 +204,7 @@ def run_smoke_case(
     *,
     current_A: float,
     stage2_bs_path: Path,
+    expected_stage2_tf_current_A: float,
     smoke_output_root: Path,
 ) -> dict:
     current_label = str(current_A).replace("-", "m").replace(".", "p")
@@ -218,7 +235,7 @@ def run_smoke_case(
     validation = validate_smoke_results(
         results,
         requested_current_A=current_A,
-        tf_current_A=args.tf_current_A,
+        expected_stage2_tf_current_A=expected_stage2_tf_current_A,
     )
     return {
         "requested_current_A": current_A,
@@ -242,6 +259,16 @@ def main() -> int:
             dry_run=args.dry_run,
         )
     )
+    stage2_results_path = None
+    stage2_artifact_results = None
+    expected_stage2_tf_current_A = None
+    if not args.dry_run:
+        stage2_results_path, stage2_artifact_results = load_stage2_artifact_results(
+            stage2_bs_path
+        )
+        expected_stage2_tf_current_A = resolve_expected_stage2_tf_current_A(
+            stage2_artifact_results
+        )
     smoke_output_root = Path(args.output_root)
     summary_path = (
         Path(args.summary_json)
@@ -254,12 +281,15 @@ def main() -> int:
             args,
             current_A=current_A,
             stage2_bs_path=stage2_bs_path,
+            expected_stage2_tf_current_A=expected_stage2_tf_current_A,
             smoke_output_root=smoke_output_root,
         )
         for current_A in currents
     ]
     summary = {
         "stage2_bs_path": str(stage2_bs_path),
+        "stage2_results_path": str(stage2_results_path) if stage2_results_path is not None else None,
+        "stage2_artifact_results": stage2_artifact_results,
         "stage2_command": build_stage2_command(
             stage2_config,
             python_executable=args.python_executable,

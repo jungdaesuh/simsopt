@@ -21,6 +21,7 @@ from workflow_runner_common import (  # noqa: E402
     discover_single_results_path,
     ensure_stage2_artifact,
     load_json,
+    load_stage2_artifact_results,
     parse_csv,
     run_command,
     snapshot_single_results_paths,
@@ -195,7 +196,21 @@ def build_case_record(case_name: str, case_output_root: Path, results: dict) -> 
     return record
 
 
-def build_summary(stage2_bs_path: Path, stage2_config: Stage2ArtifactConfig, records: list[dict]) -> dict:
+def _stage2_requested_config_payload(config: Stage2ArtifactConfig) -> dict:
+    return {
+        key: str(value) if isinstance(value, Path) else value
+        for key, value in asdict(config).items()
+    }
+
+
+def build_summary(
+    stage2_bs_path: Path,
+    stage2_requested_config: Stage2ArtifactConfig,
+    records: list[dict],
+) -> dict:
+    stage2_results_path, stage2_artifact_results = load_stage2_artifact_results(
+        stage2_bs_path
+    )
     nondominated_metrics = [
         "FIELD_ERROR",
         "IOTA_ERROR_ABS",
@@ -204,13 +219,11 @@ def build_summary(stage2_bs_path: Path, stage2_config: Stage2ArtifactConfig, rec
         "NEG_CURVE_CURVE_MIN_DIST",
     ]
     non_dominated = select_non_dominated_records(records, nondominated_metrics)
-    stage2_config_payload = {
-        key: str(value) if isinstance(value, Path) else value
-        for key, value in asdict(stage2_config).items()
-    }
     return {
         "stage2_bs_path": str(stage2_bs_path),
-        "stage2_config": stage2_config_payload,
+        "stage2_results_path": str(stage2_results_path),
+        "stage2_artifact_results": stage2_artifact_results,
+        "stage2_requested_config": _stage2_requested_config_payload(stage2_requested_config),
         "records": records,
         "nondominated_metrics": nondominated_metrics,
         "non_dominated_case_names": [record["CASE_NAME"] for record in non_dominated],
@@ -296,14 +309,21 @@ def main() -> int:
         )
         for case in cases
     ]
-    summary = build_summary(stage2_bs_path, stage2_config, records) if not args.dry_run else {
-        "stage2_bs_path": str(stage2_bs_path),
-        "stage2_command": build_stage2_command(
-            stage2_config,
-            python_executable=args.python_executable,
-        ) if args.stage2_bs_path is None else None,
-        "records": records,
-    }
+    summary = (
+        build_summary(stage2_bs_path, stage2_config, records)
+        if not args.dry_run
+        else {
+            "stage2_bs_path": str(stage2_bs_path),
+            "stage2_command": build_stage2_command(
+                stage2_config,
+                python_executable=args.python_executable,
+            )
+            if args.stage2_bs_path is None
+            else None,
+            "stage2_requested_config": _stage2_requested_config_payload(stage2_config),
+            "records": records,
+        }
+    )
     if args.dry_run:
         print(json.dumps(summary, indent=2))
         return 0

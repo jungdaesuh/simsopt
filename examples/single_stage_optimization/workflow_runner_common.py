@@ -184,6 +184,12 @@ def ensure_stage2_artifact(
     return artifact_path
 
 
+def load_stage2_artifact_results(stage2_bs_path: str | Path) -> tuple[Path, dict]:
+    stage2_bs_path = Path(stage2_bs_path)
+    stage2_results_path = stage2_bs_path.with_name("results.json")
+    return stage2_results_path, load_json(stage2_results_path)
+
+
 def _single_results_matches(output_root: str | Path) -> list[Path]:
     return sorted(Path(output_root).glob("mpol=*-ntor=*/results.json"))
 

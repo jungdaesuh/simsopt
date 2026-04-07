@@ -68,6 +68,7 @@ from workflow_helpers import (
     format_local_stage2_seed_dir,
     format_local_stage2_seed_dir_without_tf,
 )
+from workflow_runner_common import load_stage2_artifact_results
 from banana_opt.reference_surfaces import build_banana_reference_surfaces
 from banana_opt.single_stage_geometry import (
     build_scaled_outer_problem,
@@ -330,13 +331,6 @@ def build_stage2_bs_path(args):
         return legacy_matches
 
     return current_penalty_candidate
-
-
-def load_stage2_results(stage2_bs_path):
-    stage2_results_path = os.path.join(os.path.dirname(stage2_bs_path), "results.json")
-    with open(stage2_results_path, "r", encoding="utf-8") as infile:
-        stage2_results = json.load(infile)
-    return stage2_results_path, stage2_results
 
 
 def infer_uniform_tf_current_A(tf_coils):
@@ -2028,7 +2022,7 @@ if __name__ == "__main__":
     # ==============================================================================
     args = apply_default_stage2_seed_args(parse_args())
     stage2_bs_path = build_stage2_bs_path(args)
-    stage2_results_path, stage2_results = load_stage2_results(stage2_bs_path)
+    stage2_results_path, stage2_results = load_stage2_artifact_results(stage2_bs_path)
     R0 = float(stage2_results["MAJOR_RADIUS"])
     s = float(stage2_results["TOROIDAL_FLUX"])
     order = int(stage2_results.get("order", args.stage2_seed_order))
@@ -2618,7 +2612,7 @@ if __name__ == "__main__":
         "PLASMA_SURF_PATH": file_loc,
         "STAGE2_SOURCE": args.stage2_source,
         "STAGE2_BS_PATH": stage2_bs_path,
-        "STAGE2_RESULTS_PATH": stage2_results_path,
+        "STAGE2_RESULTS_PATH": str(stage2_results_path),
         "STAGE2_SEED_MAJOR_RADIUS": R0,
         "STAGE2_SEED_TOROIDAL_FLUX": s,
         "STAGE2_SEED_BANANA_SURF_RADIUS": float(stage2_results["banana_surf_radius"]),
