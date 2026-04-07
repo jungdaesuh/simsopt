@@ -470,7 +470,7 @@ class SingleStageConstraintModuleTests(_ModuleTestCase):
             gamma_points=[[[0.1, 0.0, 0.0], [1.1, 0.0, 0.0]]]
         )
 
-        with mock.patch.object(self.module, "Derivative", _FakeDerivative):
+        with mock.patch.object(self.module, "_new_derivative", side_effect=lambda: _FakeDerivative({})):
             signed_value, grad, violation = self.module.smooth_min_surface_surface_signed_constraint(
                 surface_1,
                 surface_2,

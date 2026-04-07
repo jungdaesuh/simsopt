@@ -7,10 +7,15 @@ from alm_utils import (
     zero_gradient_like,
 )
 from banana_opt.smoothing import smoothmax_selected, smoothmin_selected
-from simsopt._core.derivative import Derivative
 
 
 _SMOOTHING_EPS = float(np.finfo(float).eps)
+
+
+def _new_derivative():
+    from simsopt._core.derivative import Derivative
+
+    return Derivative({})
 
 
 def make_stage2_fun(JF, new_bs, new_surf, Jf, Jls, Jccdist, Jc):
@@ -149,7 +154,7 @@ def smooth_min_distance_signed_constraint(
         np.add.at(point_gradients[i], rows, local_weights[:, None] * directions)
         np.add.at(point_gradients[j], cols, -local_weights[:, None] * directions)
 
-    derivative = Derivative({})
+    derivative = _new_derivative()
     for curve, point_gradient in zip(curves, point_gradients):
         if np.any(point_gradient):
             derivative += curve.dgamma_by_dcoeff_vjp(point_gradient)

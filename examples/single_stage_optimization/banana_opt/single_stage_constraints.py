@@ -2,10 +2,15 @@ import numpy as np
 
 from alm_utils import zero_gradient_like
 from banana_opt.smoothing import smoothmax_selected, smoothmin_selected
-from simsopt._core.derivative import Derivative
 
 
 _SMOOTHING_EPS = float(np.finfo(float).eps)
+
+
+def _new_derivative():
+    from simsopt._core.derivative import Derivative
+
+    return Derivative({})
 
 
 def smooth_max_curvature_signed_constraint(
@@ -87,7 +92,7 @@ def smooth_min_curve_curve_signed_constraint(
         np.add.at(point_gradients[i], rows, local_weights[:, None] * directions)
         np.add.at(point_gradients[j], cols, -local_weights[:, None] * directions)
 
-    derivative = Derivative({})
+    derivative = _new_derivative()
     for curve, point_gradient in zip(curves, point_gradients):
         if np.any(point_gradient):
             derivative += curve.dgamma_by_dcoeff_vjp(point_gradient)
@@ -143,7 +148,7 @@ def smooth_min_curve_surface_signed_constraint(
         np.add.at(curve_gradients[curve_index], rows, local_weights[:, None] * directions)
         np.add.at(surface_gradient, cols, -local_weights[:, None] * directions)
 
-    derivative = Derivative({})
+    derivative = _new_derivative()
     for curve, point_gradient in zip(curves, curve_gradients):
         if np.any(point_gradient):
             derivative += curve.dgamma_by_dcoeff_vjp(point_gradient)
@@ -186,7 +191,7 @@ def smooth_min_surface_surface_signed_constraint(
     np.add.at(gradient_1, rows, weights[:, None] * directions)
     np.add.at(gradient_2, cols, -weights[:, None] * directions)
 
-    derivative = Derivative({})
+    derivative = _new_derivative()
     derivative += surface_1.dgamma_by_dcoeff_vjp(gradient_1.reshape(gamma_1.shape))
     derivative += surface_2.dgamma_by_dcoeff_vjp(gradient_2.reshape(gamma_2.shape))
     grad = np.asarray(derivative(objective_optimizable), dtype=float)
