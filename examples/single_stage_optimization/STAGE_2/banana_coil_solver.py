@@ -404,6 +404,7 @@ def load_stage2_seed_configuration(seed_bs_path, surf, num_tf_coils, out_dir):
     tf_coils = coils[:num_tf_coils]
     return bs, curves, banana_curve, banana_coils, tf_coils
 
+
 def main(parsed_args=None):
     # PRE-INITIALIZATION
     # ---------------------------------------------------------------------------------------

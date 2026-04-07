@@ -2661,6 +2661,7 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
 
         fake_bs = FakeBiotSavart()
         fake_surface = FakeSurface()
+        fake_curve_names = ["curve_a", "curve_b", "curve_c"]
         fake_banana_curve = SimpleNamespace(kappa=lambda: np.array([39.0, 41.0], dtype=float))
         fake_banana_coils = [SimpleNamespace(curve=fake_banana_curve, current=FakeCurrent(9500.0))]
         fake_tf_coils = [
@@ -2674,7 +2675,7 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
             self.assertIs(surf, fake_surface)
             return (
                 fake_bs,
-                ["curve_a", "curve_b", "curve_c"],
+                fake_curve_names,
                 fake_banana_curve,
                 fake_banana_coils,
                 fake_tf_coils,
@@ -2705,7 +2706,7 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
             self.assertTrue(str(out_dir).endswith("outputs-demo.nc/"))
             return (
                 fake_bs,
-                ["curve_a", "curve_b", "curve_c"],
+                fake_curve_names,
                 fake_banana_curve,
                 fake_banana_coils,
             )
@@ -2736,53 +2737,119 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
             )
 
         with tempfile.TemporaryDirectory() as tmpdir:
+            stage2_bs_path = str(Path(tmpdir) / "seed.json") if use_seed else None
             args = self._make_stage2_args(
                 tmpdir,
                 init_only=init_only,
                 constraint_method=constraint_method,
-                stage2_bs_path=(str(Path(tmpdir) / "seed.json") if use_seed else None),
+                stage2_bs_path=stage2_bs_path,
                 equilibrium_path=str(Path(tmpdir) / "demo.nc"),
             )
 
             with ExitStack() as stack:
-                stack.enter_context(patch.object(module, "validate_alm_cli_args", lambda *_args: None))
-                stack.enter_context(patch.object(module, "build_equilibrium_path", lambda _args: args.equilibrium_path))
-                stack.enter_context(patch.object(module, "create_equally_spaced_curves", lambda *_args, **_kwargs: [FakeCurve() for _ in range(20)]))
-                stack.enter_context(patch.object(module, "Current", FakeCurrent))
-                stack.enter_context(patch.object(module, "Coil", lambda curve, current: SimpleNamespace(curve=curve, current=current)))
-                stack.enter_context(patch.object(module, "_init_surface", lambda *_args, **_kwargs: fake_surface))
-                stack.enter_context(patch.object(module, "build_hbt_reference_surfaces", lambda *_args, **_kwargs: ("hbt", "surf_coils", SimpleNamespace(to_vtk=lambda *_a, **_k: None))))
+                common_patches = [
+                    patch.object(module, "validate_alm_cli_args", lambda *_args: None),
+                    patch.object(module, "build_equilibrium_path", lambda _args: args.equilibrium_path),
+                    patch.object(
+                        module,
+                        "create_equally_spaced_curves",
+                        lambda *_args, **_kwargs: [FakeCurve() for _ in range(20)],
+                    ),
+                    patch.object(module, "Current", FakeCurrent),
+                    patch.object(
+                        module,
+                        "Coil",
+                        lambda curve, current: SimpleNamespace(curve=curve, current=current),
+                    ),
+                    patch.object(module, "_init_surface", lambda *_args, **_kwargs: fake_surface),
+                    patch.object(
+                        module,
+                        "build_hbt_reference_surfaces",
+                        lambda *_args, **_kwargs: (
+                            "hbt",
+                            "surf_coils",
+                            SimpleNamespace(to_vtk=lambda *_a, **_k: None),
+                        ),
+                    ),
+                    patch.object(
+                        module,
+                        "SquaredFlux",
+                        lambda *_args, **_kwargs: FakeStage2Objective(0.5, [1.0, 1.0]),
+                    ),
+                    patch.object(
+                        module,
+                        "CurveLength",
+                        lambda *_args, **_kwargs: FakeStage2Objective(1.8, [0.1, 0.2]),
+                    ),
+                    patch.object(
+                        module,
+                        "CurveCurveDistance",
+                        lambda *_args, **_kwargs: FakeCurveDistance(),
+                    ),
+                    patch.object(
+                        module,
+                        "LpCurveCurvature",
+                        lambda *_args, **_kwargs: FakeCurvatureObjective(),
+                    ),
+                    patch.object(
+                        module,
+                        "QuadraticPenalty",
+                        lambda *_args, **_kwargs: FakeStage2Objective(0.05, [0.01, 0.02]),
+                    ),
+                    patch.object(module, "format_local_stage2_run_dir", lambda *_args, **_kwargs: "runtime-smoke"),
+                    patch.object(module, "curves_to_vtk", lambda *_args, **_kwargs: None),
+                    patch.object(module, "cross_section_plot", lambda *_args, **_kwargs: None),
+                    patch.object(module, "_magnetic_field_plots", lambda *_args, **_kwargs: 0.03),
+                    patch.object(module, "is_self_intersecting", lambda *_args, **_kwargs: False),
+                    patch.object(
+                        module,
+                        "_evaluate_stage2_hardware_constraints",
+                        lambda *_args, **_kwargs: {"success": True, "violations": []},
+                    ),
+                    patch.object(module, "minimize", side_effect=fake_minimize),
+                    patch.object(module, "minimize_alm", side_effect=fake_minimize_alm),
+                    patch.object(
+                        module.json,
+                        "dump",
+                        side_effect=lambda data, _outfile, indent=2: runtime.__setitem__("results", data),
+                    ),
+                ]
+                for patcher in common_patches:
+                    stack.enter_context(patcher)
                 if use_seed:
                     stack.enter_context(patch.object(module, "load_stage2_seed_configuration", side_effect=fake_seed_loader))
                     stack.enter_context(patch.object(module, "_initialize_coils", side_effect=AssertionError("unexpected fresh initialization")))
                 else:
                     stack.enter_context(patch.object(module, "load_stage2_seed_configuration", side_effect=AssertionError("unexpected seed load")))
                     stack.enter_context(patch.object(module, "_initialize_coils", side_effect=fake_initialize_coils))
-                stack.enter_context(patch.object(module, "SquaredFlux", lambda *_args, **_kwargs: FakeStage2Objective(0.5, [1.0, 1.0])))
-                stack.enter_context(patch.object(module, "CurveLength", lambda *_args, **_kwargs: FakeStage2Objective(1.8, [0.1, 0.2])))
-                stack.enter_context(patch.object(module, "CurveCurveDistance", lambda *_args, **_kwargs: FakeCurveDistance()))
-                stack.enter_context(patch.object(module, "LpCurveCurvature", lambda *_args, **_kwargs: FakeCurvatureObjective()))
-                stack.enter_context(patch.object(module, "QuadraticPenalty", lambda *_args, **_kwargs: FakeStage2Objective(0.05, [0.01, 0.02])))
-                stack.enter_context(patch.object(module, "format_local_stage2_run_dir", lambda *_args, **_kwargs: "runtime-smoke"))
-                stack.enter_context(patch.object(module, "curves_to_vtk", lambda *_args, **_kwargs: None))
-                stack.enter_context(patch.object(module, "cross_section_plot", lambda *_args, **_kwargs: None))
-                stack.enter_context(patch.object(module, "_magnetic_field_plots", lambda *_args, **_kwargs: 0.03))
-                stack.enter_context(patch.object(module, "is_self_intersecting", lambda *_args, **_kwargs: False))
-                stack.enter_context(patch.object(module, "_evaluate_stage2_hardware_constraints", lambda *_args, **_kwargs: {"success": True, "violations": []}))
-                stack.enter_context(patch.object(module, "minimize", side_effect=fake_minimize))
-                stack.enter_context(patch.object(module, "minimize_alm", side_effect=fake_minimize_alm))
-                stack.enter_context(patch.object(module.json, "dump", side_effect=lambda data, _outfile, indent=2: runtime.__setitem__("results", data)))
                 module.main(args)
 
         return runtime
 
+    def _assert_runtime_counts(
+        self,
+        runtime,
+        *,
+        seed_loads,
+        initialize_calls,
+        minimize_calls,
+        minimize_alm_calls,
+    ):
+        self.assertEqual(runtime["seed_loads"], seed_loads)
+        self.assertEqual(runtime["initialize_calls"], initialize_calls)
+        self.assertEqual(runtime["minimize_calls"], minimize_calls)
+        self.assertEqual(runtime["minimize_alm_calls"], minimize_alm_calls)
+
     def test_stage2_main_init_only_loads_seed_and_writes_results(self):
         runtime = self._run_stage2_main(init_only=True, constraint_method="penalty", use_seed=True)
 
-        self.assertEqual(runtime["seed_loads"], 1)
-        self.assertEqual(runtime["initialize_calls"], 0)
-        self.assertEqual(runtime["minimize_calls"], 0)
-        self.assertEqual(runtime["minimize_alm_calls"], 0)
+        self._assert_runtime_counts(
+            runtime,
+            seed_loads=1,
+            initialize_calls=0,
+            minimize_calls=0,
+            minimize_alm_calls=0,
+        )
         self.assertEqual(runtime["results"]["TERMINATION_MESSAGE"], "init_only")
         self.assertTrue(runtime["results"]["OPTIMIZER_SUCCESS"])
         self.assertEqual(runtime["results"]["iterations"], 0)
@@ -2792,10 +2859,13 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
     def test_stage2_main_alm_path_uses_minimize_alm(self):
         runtime = self._run_stage2_main(init_only=False, constraint_method="alm", use_seed=True)
 
-        self.assertEqual(runtime["seed_loads"], 1)
-        self.assertEqual(runtime["initialize_calls"], 0)
-        self.assertEqual(runtime["minimize_calls"], 0)
-        self.assertEqual(runtime["minimize_alm_calls"], 1)
+        self._assert_runtime_counts(
+            runtime,
+            seed_loads=1,
+            initialize_calls=0,
+            minimize_calls=0,
+            minimize_alm_calls=1,
+        )
         self.assertEqual(runtime["results"]["CONSTRAINT_METHOD"], "alm")
         self.assertEqual(runtime["results"]["ALM_OUTER_ITERATIONS"], 2)
         self.assertEqual(runtime["results"]["TERMINATION_MESSAGE"], "alm_ok")
@@ -2803,20 +2873,26 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
     def test_stage2_main_penalty_path_uses_lbfgsb(self):
         runtime = self._run_stage2_main(init_only=False, constraint_method="penalty", use_seed=True)
 
-        self.assertEqual(runtime["seed_loads"], 1)
-        self.assertEqual(runtime["initialize_calls"], 0)
-        self.assertEqual(runtime["minimize_calls"], 1)
-        self.assertEqual(runtime["minimize_alm_calls"], 0)
+        self._assert_runtime_counts(
+            runtime,
+            seed_loads=1,
+            initialize_calls=0,
+            minimize_calls=1,
+            minimize_alm_calls=0,
+        )
         self.assertEqual(runtime["results"]["CONSTRAINT_METHOD"], "penalty")
         self.assertEqual(runtime["results"]["TERMINATION_MESSAGE"], "penalty_ok")
 
     def test_stage2_main_fresh_init_path_uses_initialize_coils(self):
         runtime = self._run_stage2_main(init_only=True, constraint_method="penalty", use_seed=False)
 
-        self.assertEqual(runtime["seed_loads"], 0)
-        self.assertEqual(runtime["initialize_calls"], 1)
-        self.assertEqual(runtime["minimize_calls"], 0)
-        self.assertEqual(runtime["minimize_alm_calls"], 0)
+        self._assert_runtime_counts(
+            runtime,
+            seed_loads=0,
+            initialize_calls=1,
+            minimize_calls=0,
+            minimize_alm_calls=0,
+        )
         self.assertEqual(runtime["results"]["TERMINATION_MESSAGE"], "init_only")
         self.assertIsNone(runtime["results"]["STAGE2_BS_PATH"])
 
