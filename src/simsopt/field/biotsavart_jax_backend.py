@@ -301,6 +301,14 @@ def _slice_1d(array: jax.Array, start: int, end: int) -> jax.Array:
 
 def _axis0_entries(array):
     """Yield axis-0 slices without materializing the whole grouped object."""
+    if isinstance(array, jax.Array):
+        length = int(array.shape[0])
+        if length == 0:
+            return
+        for chunk in jnp.split(array, length, axis=0):
+            yield jnp.squeeze(chunk, axis=0)
+        return
+
     shape = getattr(array, "shape", None)
     if shape is not None:
         for index in range(int(shape[0])):
@@ -468,7 +476,8 @@ def _project_single_coil_cotangent_data(coil, dg, dgd, dc):
 
     raise TypeError(
         "BiotSavartJAX coil cotangent projection requires curves that expose "
-        "a supported JAX or CPU pullback contract; unsupported type "
+        "a supported JAX or CPU pullback contract with JAX pullback hooks; "
+        "CPU coil-pullback fallback was removed. Unsupported type "
         f"{type(curve).__name__}."
     )
 
