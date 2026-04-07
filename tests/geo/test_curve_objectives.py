@@ -8,16 +8,34 @@ import pytest
 
 from _jit_test_state import make_module_jit_hooks
 import simsopt.geo.curveobjectives as curveobjectives_module
+from simsopt.geo import FrameRotation, FramedCurveCentroid
 from simsopt.geo import parameters
-from simsopt.geo.curve import RotatedCurve, create_equally_spaced_curves, create_equally_spaced_planar_curves
+from simsopt.geo.curve import (
+    RotatedCurve,
+    create_equally_spaced_curves,
+)
 from simsopt.geo.curvexyzfourier import CurveXYZFourier, JaxCurveXYZFourier
 from simsopt.geo.curveplanarfourier import CurvePlanarFourier, JaxCurvePlanarFourier
 from simsopt.geo.curvehelical import CurveHelical
 from simsopt.geo.curverzfourier import CurveRZFourier
-from simsopt.geo.curveobjectives import CurveLength, LpCurveCurvature, \
-    LpCurveCurvatureBarrier, LpCurveTorsion, CurveCurveDistance, CurveCurveDistanceBarrier, ArclengthVariation, \
-    MeanSquaredCurvature, CurveSurfaceDistance, LinkingNumber, cc_distance_barrier_pure, \
-    cc_distance_pure, cs_distance_pure, max_distance_pure, pairwise_min_distance_pure
+from simsopt.geo.curveobjectives import (
+    CurveLength,
+    LpCurveCurvature,
+    LpCurveCurvatureBarrier,
+    LpCurveTorsion,
+    CurveCurveDistance,
+    CurveCurveDistanceBarrier,
+    ArclengthVariation,
+    MeanSquaredCurvature,
+    CurveSurfaceDistance,
+    FramedCurveTwist,
+    LinkingNumber,
+    cc_distance_barrier_pure,
+    cc_distance_pure,
+    cs_distance_pure,
+    max_distance_pure,
+    pairwise_min_distance_pure,
+)
 from simsopt.geo.surfacerzfourier import SurfaceRZFourier
 from simsopt.field.coil import coils_via_symmetries
 from simsopt.configs.zoo import get_data
@@ -26,6 +44,92 @@ from simsopt.backend import invalidate_backend_cache
 import simsoptpp as sopp
 
 setUpModule, tearDownModule = make_module_jit_hooks(parameters, value=False)
+
+
+def _make_cache_test_curve(offset=0.0):
+    quadpoints = np.linspace(0, 1, 32, endpoint=False)
+    curve = CurveXYZFourier(quadpoints, order=3)
+    curve.x = np.linspace(
+        0.1 + offset,
+        0.1 + offset + 0.01 * (curve.dof_size - 1),
+        curve.dof_size,
+    )
+    return curve
+
+
+def _legacy_curveobjective_jit_attrs(objective):
+    return [
+        name
+        for name in vars(objective)
+        if name == "J_jax"
+        or name.startswith("thisgrad")
+        or name.startswith("frametwist_vjp")
+        or name in {"range_grad", "net_grad"}
+    ]
+
+
+@pytest.fixture
+def _clear_curveobjective_shared_jit_caches():
+    cache_fns = (
+        curveobjectives_module.Lp_torsion_pure,
+        curveobjectives_module._lp_curve_torsion_grad,
+        curveobjectives_module.frametwist_lp_pure,
+        curveobjectives_module._frametwist_lp_grad,
+        curveobjectives_module._frametwist_vjp,
+    )
+    for fn in cache_fns:
+        fn.clear_cache()
+    yield
+    for fn in cache_fns:
+        fn.clear_cache()
+
+
+def test_lp_curve_torsion_reuses_shared_jit_kernels(
+    _clear_curveobjective_shared_jit_caches,
+):
+    objective1 = LpCurveTorsion(_make_cache_test_curve(0.0), p=2, threshold=0.0)
+    float(objective1.J())
+    np.asarray(objective1.dJ(), dtype=float)
+
+    assert curveobjectives_module.Lp_torsion_pure._cache_size() == 1
+    assert curveobjectives_module._lp_curve_torsion_grad._cache_size() == 1
+    assert _legacy_curveobjective_jit_attrs(objective1) == []
+
+    objective2 = LpCurveTorsion(_make_cache_test_curve(0.02), p=2, threshold=0.0)
+    float(objective2.J())
+    np.asarray(objective2.dJ(), dtype=float)
+
+    assert curveobjectives_module.Lp_torsion_pure._cache_size() == 1
+    assert curveobjectives_module._lp_curve_torsion_grad._cache_size() == 1
+    assert _legacy_curveobjective_jit_attrs(objective2) == []
+
+
+def test_framed_curve_twist_reuses_shared_jit_kernels(
+    _clear_curveobjective_shared_jit_caches,
+):
+    curve1 = _make_cache_test_curve(0.03)
+    rotation1 = FrameRotation(curve1.quadpoints, order=1)
+    rotation1.x = np.array([0.1, -0.2, 0.05])
+    objective1 = FramedCurveTwist(FramedCurveCentroid(curve1, rotation1), f="lp", p=2)
+    float(objective1.J())
+    np.asarray(objective1.dJ(), dtype=float)
+
+    assert curveobjectives_module.frametwist_lp_pure._cache_size() == 1
+    assert curveobjectives_module._frametwist_lp_grad._cache_size() == 1
+    assert curveobjectives_module._frametwist_vjp._cache_size() == 1
+    assert _legacy_curveobjective_jit_attrs(objective1) == []
+
+    curve2 = _make_cache_test_curve(0.04)
+    rotation2 = FrameRotation(curve2.quadpoints, order=1)
+    rotation2.x = np.array([-0.3, 0.15, 0.02])
+    objective2 = FramedCurveTwist(FramedCurveCentroid(curve2, rotation2), f="lp", p=2)
+    float(objective2.J())
+    np.asarray(objective2.dJ(), dtype=float)
+
+    assert curveobjectives_module.frametwist_lp_pure._cache_size() == 1
+    assert curveobjectives_module._frametwist_lp_grad._cache_size() == 1
+    assert curveobjectives_module._frametwist_vjp._cache_size() == 1
+    assert _legacy_curveobjective_jit_attrs(objective2) == []
 
 
 def test_pairwise_penalty_chunking_matches_dense_paths(monkeypatch):
@@ -87,7 +191,9 @@ def test_pairwise_penalty_chunking_matches_dense_paths(monkeypatch):
     monkeypatch.setenv("SIMSOPT_JAX_PENALTY_POINT_CHUNK_SIZE", "2")
     invalidate_backend_cache()
     try:
-        chunked_cc = float(cc_distance_pure(gamma1, gammadash1, gamma2, gammadash2, 0.09))
+        chunked_cc = float(
+            cc_distance_pure(gamma1, gammadash1, gamma2, gammadash2, 0.09)
+        )
         chunked_cc_barrier = float(
             cc_distance_barrier_pure(gamma1, gammadash1, gamma2, gammadash2, 0.01)
         )
@@ -104,7 +210,9 @@ def test_pairwise_penalty_chunking_matches_dense_paths(monkeypatch):
     dense_cc_barrier = float(
         cc_distance_barrier_pure(gamma1, gammadash1, gamma2, gammadash2, 0.01)
     )
-    dense_cs = float(cs_distance_pure(gamma1, gammadash1, surface_gamma, surface_normal, 0.05))
+    dense_cs = float(
+        cs_distance_pure(gamma1, gammadash1, surface_gamma, surface_normal, 0.05)
+    )
     dense_max = float(max_distance_pure(gamma1, gamma2, 0.30, -10))
     dense_min = float(pairwise_min_distance_pure(gamma1, surface_gamma))
 
@@ -168,15 +276,25 @@ def test_pairwise_penalty_accepts_explicit_row_sharding():
         chunk_size=0,
     )
     sharded_min = float(pairwise_min_distance_pure(gamma1, gamma2, chunk_size=2))
-    dense_min = float(pairwise_min_distance_pure(np.asarray(gamma1), gamma2, chunk_size=0))
+    dense_min = float(
+        pairwise_min_distance_pure(np.asarray(gamma1), gamma2, chunk_size=0)
+    )
 
-    np.testing.assert_allclose(np.asarray(rowwise), np.asarray(dense_rowwise), atol=1e-12)
+    np.testing.assert_allclose(
+        np.asarray(rowwise), np.asarray(dense_rowwise), atol=1e-12
+    )
     assert sharded_min == pytest.approx(dense_min, rel=1e-12, abs=1e-12)
 
 
 class Testing(unittest.TestCase):
-
-    curvetypes = ["CurveXYZFourier", "JaxCurveXYZFourier", "CurveRZFourier", "CurvePlanarFourier", "JaxCurvePlanarFourier", "CurveHelical"]
+    curvetypes = [
+        "CurveXYZFourier",
+        "JaxCurveXYZFourier",
+        "CurveRZFourier",
+        "CurvePlanarFourier",
+        "JaxCurvePlanarFourier",
+        "CurveHelical",
+    ]
     _BARRIER_TAYLOR_FLOOR = 5e-12
 
     def create_curve(self, curvetype, rotated):
@@ -200,24 +318,24 @@ class Testing(unittest.TestCase):
         else:
             # print('Could not find' + curvetype)
             assert False
-        dofs = np.zeros((coil.dof_size, ))
+        dofs = np.zeros((coil.dof_size,))
         if curvetype in ["CurveXYZFourier", "JaxCurveXYZFourier"]:
-            dofs[1] = 1.
-            dofs[2*order+3] = 1.
-            dofs[4*order+3] = 1.
+            dofs[1] = 1.0
+            dofs[2 * order + 3] = 1.0
+            dofs[4 * order + 3] = 1.0
         elif curvetype in ["CurveRZFourier"]:
-            dofs[0] = 1.
+            dofs[0] = 1.0
             dofs[1] = 0.1
-            dofs[order+1] = 0.1
+            dofs[order + 1] = 0.1
         elif curvetype in ["CurvePlanarFourier", "JaxCurvePlanarFourier"]:
-            dofs[0] = 1.
-            dofs[:2*order+1] = 0.1
-            dofs[2*order + 1] = 1.
-            dofs[2*order + 2] = 0.
-            dofs[2*order + 3] = 0.
-            dofs[2*order + 4] = 0.
+            dofs[0] = 1.0
+            dofs[: 2 * order + 1] = 0.1
+            dofs[2 * order + 1] = 1.0
+            dofs[2 * order + 2] = 0.0
+            dofs[2 * order + 3] = 0.0
+            dofs[2 * order + 4] = 0.0
         elif curvetype in ["CurveHelical"]:
-            dofs[0] = np.pi/2
+            dofs[0] = np.pi / 2
         else:
             assert False
 
@@ -257,8 +375,8 @@ class Testing(unittest.TestCase):
             eps = 0.5**i
             curve.x = curve_dofs + eps * h
             Jh = J.J()
-            deriv_est = (Jh-J0)/eps
-            err_new = np.linalg.norm(deriv_est-deriv)
+            deriv_est = (Jh - J0) / eps
+            err_new = np.linalg.norm(deriv_est - deriv)
             # print("err_new %s" % (err_new))
             assert err_new < 0.55 * err
             err = err_new
@@ -286,8 +404,8 @@ class Testing(unittest.TestCase):
             eps = 0.5**i
             curve.x = curve_dofs + eps * h
             Jh = J.J()
-            deriv_est = (Jh-J0)/eps
-            err_new = np.linalg.norm(deriv_est-deriv)
+            deriv_est = (Jh - J0) / eps
+            err_new = np.linalg.norm(deriv_est - deriv)
             # print("err_new %s" % (err_new))
             assert err_new < 0.55 * err
             err = err_new
@@ -346,8 +464,8 @@ class Testing(unittest.TestCase):
             eps = 0.5**i
             curve.x = curve_dofs + eps * h
             Jh = J.J()
-            deriv_est = (Jh-J0)/eps
-            err_new = np.linalg.norm(deriv_est-deriv)
+            deriv_est = (Jh - J0) / eps
+            err_new = np.linalg.norm(deriv_est - deriv)
             # print("err_new %s" % (err_new))
             assert err_new < 0.55 * err
             err = err_new
@@ -365,14 +483,30 @@ class Testing(unittest.TestCase):
 
     def subtest_curve_minimum_distance_taylor_test(self, curve):
         ncurves = 3
-        curve_t = curve.curve.__class__.__name__ if isinstance(curve, RotatedCurve) else curve.__class__.__name__
-        curves = [curve] + [RotatedCurve(self.create_curve(curve_t, False), 0.1*i, True) for i in range(1, ncurves)]
+        curve_t = (
+            curve.curve.__class__.__name__
+            if isinstance(curve, RotatedCurve)
+            else curve.__class__.__name__
+        )
+        curves = [curve] + [
+            RotatedCurve(self.create_curve(curve_t, False), 0.1 * i, True)
+            for i in range(1, ncurves)
+        ]
         distance_threshold = 0.4 if curve_t == "CurveHelical" else 0.2
         J = CurveCurveDistance(curves, distance_threshold)
         mindist = 1e10
         for i in range(len(curves)):
             for j in range(i):
-                mindist = min(mindist, np.min(np.linalg.norm(curves[i].gamma()[:, None, :] - curves[j].gamma()[None, :, :], axis=2)))
+                mindist = min(
+                    mindist,
+                    np.min(
+                        np.linalg.norm(
+                            curves[i].gamma()[:, None, :]
+                            - curves[j].gamma()[None, :, :],
+                            axis=2,
+                        )
+                    ),
+                )
         assert abs(J.shortest_distance() - mindist) < 1e-14
         assert mindist > 1e-10
 
@@ -380,7 +514,9 @@ class Testing(unittest.TestCase):
             curve_dofs = curves[k].x
             h = 1e-3 * np.random.rand(len(curve_dofs)).reshape(curve_dofs.shape)
             J0 = J.J()
-            dJ = J.dJ(partials=True)(curves[k].curve if isinstance(curves[k], RotatedCurve) else curves[k])
+            dJ = J.dJ(partials=True)(
+                curves[k].curve if isinstance(curves[k], RotatedCurve) else curves[k]
+            )
             deriv = np.sum(dJ * h)
             assert np.abs(deriv) > 1e-10
             err = 1e6
@@ -388,8 +524,8 @@ class Testing(unittest.TestCase):
                 eps = 0.5**i
                 curves[k].x = curve_dofs + eps * h
                 Jh = J.J()
-                deriv_est = (Jh-J0)/eps
-                err_new = np.linalg.norm(deriv_est-deriv)
+                deriv_est = (Jh - J0) / eps
+                err_new = np.linalg.norm(deriv_est - deriv)
                 assert err_new < 0.6 * err
                 err = err_new
         J_str = json.dumps(SIMSON(J), cls=GSONEncoder)
@@ -405,8 +541,15 @@ class Testing(unittest.TestCase):
 
     def subtest_curve_minimum_distance_barrier_taylor_test(self, curve):
         ncurves = 3
-        curve_t = curve.curve.__class__.__name__ if isinstance(curve, RotatedCurve) else curve.__class__.__name__
-        curves = [curve] + [RotatedCurve(self.create_curve(curve_t, False), 0.1*i, True) for i in range(1, ncurves)]
+        curve_t = (
+            curve.curve.__class__.__name__
+            if isinstance(curve, RotatedCurve)
+            else curve.__class__.__name__
+        )
+        curves = [curve] + [
+            RotatedCurve(self.create_curve(curve_t, False), 0.1 * i, True)
+            for i in range(1, ncurves)
+        ]
         mindist = self._curve_collection_min_distance(curves)
         assert mindist > 1e-6
 
@@ -420,7 +563,9 @@ class Testing(unittest.TestCase):
             curve_dofs = curves[k].x
             h = 1e-4 * np.random.rand(len(curve_dofs)).reshape(curve_dofs.shape)
             J0 = J.J()
-            dJ = J.dJ(partials=True)(curves[k].curve if isinstance(curves[k], RotatedCurve) else curves[k])
+            dJ = J.dJ(partials=True)(
+                curves[k].curve if isinstance(curves[k], RotatedCurve) else curves[k]
+            )
             deriv = np.sum(dJ * h)
             assert np.abs(deriv) > 1e-10
             err = 1e6
@@ -460,8 +605,8 @@ class Testing(unittest.TestCase):
             Jp = J.J()
             curve.x = curve_dofs - eps * h
             Jm = J.J()
-            deriv_est = (Jp-Jm)/(2*eps)
-            err_new = np.linalg.norm(deriv_est-deriv)
+            deriv_est = (Jp - Jm) / (2 * eps)
+            err_new = np.linalg.norm(deriv_est - deriv)
             # print("err_new %s" % (err_new))
             assert err_new < 0.3 * err
             err = err_new
@@ -477,10 +622,10 @@ class Testing(unittest.TestCase):
                     self.subtest_curve_arclengthvariation_taylor_test(curve, nintervals)
 
     def test_arclength_variation_circle(self):
-        """ For a circle, the arclength variation should be 0. """
+        """For a circle, the arclength variation should be 0."""
         c = CurveXYZFourier(16, 1)
-        c.set('xc(1)', 4.0)
-        c.set('ys(1)', 4.0)
+        c.set("xc(1)", 4.0)
+        c.set("ys(1)", 4.0)
         for nintervals in ["full", "partial", 2]:
             a = ArclengthVariation(c, nintervals=nintervals)
             assert np.abs(a.J()) < 1.0e-12
@@ -499,8 +644,8 @@ class Testing(unittest.TestCase):
             Jp = J.J()
             curve.x = curve_dofs - eps * h
             Jm = J.J()
-            deriv_est = (Jp-Jm)/(2*eps)
-            err_new = np.linalg.norm(deriv_est-deriv)
+            deriv_est = (Jp - Jm) / (2 * eps)
+            err_new = np.linalg.norm(deriv_est - deriv)
             # print("err_new %s" % (err_new))
             assert err_new < 0.3 * err
             err = err_new
@@ -518,7 +663,9 @@ class Testing(unittest.TestCase):
     def test_minimum_distance_candidates_one_collection(self):
         np.random.seed(0)
         n_clouds = 4
-        pointClouds = [np.random.uniform(low=-1.0, high=+1.0, size=(5, 3)) for _ in range(n_clouds)]
+        pointClouds = [
+            np.random.uniform(low=-1.0, high=+1.0, size=(5, 3)) for _ in range(n_clouds)
+        ]
         true_min_dists = {}
         from scipy.spatial.distance import cdist
 
@@ -527,18 +674,26 @@ class Testing(unittest.TestCase):
                 true_min_dists[(i, j)] = np.min(cdist(pointClouds[i], pointClouds[j]))
 
         threshold = max(true_min_dists.values()) * 1.0001
-        candidates = sopp.get_pointclouds_closer_than_threshold_within_collection(pointClouds, threshold, n_clouds)
+        candidates = sopp.get_pointclouds_closer_than_threshold_within_collection(
+            pointClouds, threshold, n_clouds
+        )
         assert len(candidates) == len(true_min_dists)
 
         threshold = min(true_min_dists.values()) * 1.0001
-        candidates = sopp.get_pointclouds_closer_than_threshold_within_collection(pointClouds, threshold, n_clouds)
+        candidates = sopp.get_pointclouds_closer_than_threshold_within_collection(
+            pointClouds, threshold, n_clouds
+        )
         assert len(candidates) == 1
 
     def test_minimum_distance_candidates_two_collections(self):
         np.random.seed(0)
         n_clouds = 4
-        pointCloudsA = [np.random.uniform(low=-1.0, high=+1.0, size=(5, 3)) for _ in range(n_clouds)]
-        pointCloudsB = [np.random.uniform(low=-1.0, high=+1.0, size=(5, 3)) for _ in range(n_clouds)]
+        pointCloudsA = [
+            np.random.uniform(low=-1.0, high=+1.0, size=(5, 3)) for _ in range(n_clouds)
+        ]
+        pointCloudsB = [
+            np.random.uniform(low=-1.0, high=+1.0, size=(5, 3)) for _ in range(n_clouds)
+        ]
         true_min_dists = {}
         from scipy.spatial.distance import cdist
 
@@ -547,42 +702,68 @@ class Testing(unittest.TestCase):
                 true_min_dists[(i, j)] = np.min(cdist(pointCloudsA[i], pointCloudsB[j]))
 
         threshold = max(true_min_dists.values()) * 1.0001
-        candidates = sopp.get_pointclouds_closer_than_threshold_between_two_collections(pointCloudsA, pointCloudsB, threshold)
+        candidates = sopp.get_pointclouds_closer_than_threshold_between_two_collections(
+            pointCloudsA, pointCloudsB, threshold
+        )
         assert len(candidates) == len(true_min_dists)
 
         threshold = min(true_min_dists.values()) * 1.0001
-        candidates = sopp.get_pointclouds_closer_than_threshold_between_two_collections(pointCloudsA, pointCloudsB, threshold)
+        candidates = sopp.get_pointclouds_closer_than_threshold_between_two_collections(
+            pointCloudsA, pointCloudsB, threshold
+        )
         assert len(candidates) == 1
 
     def test_minimum_distance_candidates_symmetry(self):
         from scipy.spatial.distance import cdist
+
         base_curves, base_currents, _, _, _ = get_data("ncsx", coil_order=10)
-        curves = [c.curve for c in coils_via_symmetries(base_curves, base_currents, 3, True)]
+        curves = [
+            c.curve for c in coils_via_symmetries(base_curves, base_currents, 3, True)
+        ]
         for t in np.linspace(0.05, 0.5, num=10):
             Jnosym = CurveCurveDistance(curves, t)
             Jsym = CurveCurveDistance(curves, t, num_basecurves=3)
-            assert abs(Jnosym.shortest_distance_among_candidates() - Jsym.shortest_distance_among_candidates()) < 1e-15
-            print(len(Jnosym.candidates), len(Jsym.candidates), Jnosym.shortest_distance_among_candidates())
-            distsnosym = [np.min(cdist(Jnosym.curves[i].gamma(), Jnosym.curves[j].gamma())) for i, j in Jnosym.candidates]
-            distssym = [np.min(cdist(Jsym.curves[i].gamma(), Jsym.curves[j].gamma())) for i, j in Jsym.candidates]
+            assert (
+                abs(
+                    Jnosym.shortest_distance_among_candidates()
+                    - Jsym.shortest_distance_among_candidates()
+                )
+                < 1e-15
+            )
+            print(
+                len(Jnosym.candidates),
+                len(Jsym.candidates),
+                Jnosym.shortest_distance_among_candidates(),
+            )
+            distsnosym = [
+                np.min(cdist(Jnosym.curves[i].gamma(), Jnosym.curves[j].gamma()))
+                for i, j in Jnosym.candidates
+            ]
+            distssym = [
+                np.min(cdist(Jsym.curves[i].gamma(), Jsym.curves[j].gamma()))
+                for i, j in Jsym.candidates
+            ]
             print("distsnosym", distsnosym)
             print("distssym", distssym)
             print((Jnosym.candidates), (Jsym.candidates))
 
             assert np.allclose(
-                np.unique(np.round(distsnosym, 8)),
-                np.unique(np.round(distssym, 8))
+                np.unique(np.round(distsnosym, 8)), np.unique(np.round(distssym, 8))
             )
 
     def test_curve_surface_distance(self):
         np.random.seed(0)
         base_curves, base_currents, _, _, _ = get_data("ncsx", coil_order=10)
-        curves = [c.curve for c in coils_via_symmetries(base_curves, base_currents, 3, True)]
+        curves = [
+            c.curve for c in coils_via_symmetries(base_curves, base_currents, 3, True)
+        ]
         ntor = 0
-        surface = SurfaceRZFourier.from_nphi_ntheta(nfp=3, nphi=32, ntheta=32, ntor=ntor)
-        surface.set(f'rc(0,{ntor})', 1.6)
-        surface.set(f'rc(1,{ntor})', 0.2)
-        surface.set(f'zs(1,{ntor})', 0.2)
+        surface = SurfaceRZFourier.from_nphi_ntheta(
+            nfp=3, nphi=32, ntheta=32, ntor=ntor
+        )
+        surface.set(f"rc(0,{ntor})", 1.6)
+        surface.set(f"rc(1,{ntor})", 0.2)
+        surface.set(f"zs(1,{ntor})", 0.2)
 
         last_num_candidates = 0
         for t in np.linspace(0.01, 1.0, num=10):
@@ -611,19 +792,21 @@ class Testing(unittest.TestCase):
             Jp = J.J()
             J.x = curve_dofs - eps * h
             Jm = J.J()
-            deriv_est = (Jp-Jm)/(2*eps)
-            err_new = np.linalg.norm(deriv_est-deriv)
+            deriv_est = (Jp - Jm) / (2 * eps)
+            err_new = np.linalg.norm(deriv_est - deriv)
             print("err_new %s" % (err_new))
-            print(err_new/err)
+            print(err_new / err)
             assert err_new < 0.3 * err
             err = err_new
 
     def test_linking_number(self):
         for downsample in [1, 2, 5]:
-            curves1 = create_equally_spaced_curves(2, 1, stellsym=True, R0=1, R1=0.5, order=5, numquadpoints=120)
+            curves1 = create_equally_spaced_curves(
+                2, 1, stellsym=True, R0=1, R1=0.5, order=5, numquadpoints=120
+            )
             curve1 = CurveXYZFourier(200, 3)
             coeffs = curve1.dofs_matrix
-            coeffs[1][0] = 1.
+            coeffs[1][0] = 1.0
             coeffs[1][1] = 0.5
             coeffs[2][2] = 0.5
             curve1.set_dofs(np.concatenate(coeffs))
@@ -642,7 +825,12 @@ class Testing(unittest.TestCase):
             objective2 = LinkingNumber(curves2, downsample)
             objective3 = LinkingNumber(curves3, downsample)
 
-            print("Linking number testing (should be 0, 1, 1):", objective1.J(), objective2.J(), objective3.J())
+            print(
+                "Linking number testing (should be 0, 1, 1):",
+                objective1.J(),
+                objective2.J(),
+                objective3.J(),
+            )
             np.testing.assert_allclose(objective1.J(), 0, atol=1e-14, rtol=1e-14)
             np.testing.assert_allclose(objective2.J(), 1, atol=1e-14, rtol=1e-14)
             np.testing.assert_allclose(objective3.J(), 1, atol=1e-14, rtol=1e-14)

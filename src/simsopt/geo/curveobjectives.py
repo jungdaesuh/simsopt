@@ -38,6 +38,11 @@ def curve_length_pure(l):
     return jnp.mean(l)
 
 
+@jit
+def _curve_length_grad(l):
+    return grad(curve_length_pure)(l)
+
+
 def _as_jax_float64(value):
     if isinstance(value, jax.Array):
         return jnp.asarray(value, dtype=jnp.float64)
@@ -48,6 +53,32 @@ def _as_numpy_float64(value):
     if isinstance(value, np.ndarray):
         return np.asarray(value, dtype=np.float64)
     return np.asarray(jax.device_get(value), dtype=np.float64)
+
+
+def _curve_jax_position_and_tangent(curve):
+    return _as_jax_float64(curve.gamma()), _as_jax_float64(curve.gammadash())
+
+
+def _curve_pair_jax_data(curves, i, j):
+    gamma1, l1 = _curve_jax_position_and_tangent(curves[i])
+    gamma2, l2 = _curve_jax_position_and_tangent(curves[j])
+    return gamma1, l1, gamma2, l2
+
+
+def _curve_vjp_buffers(curves):
+    return [np.zeros_like(c.gamma()) for c in curves], [
+        np.zeros_like(c.gammadash()) for c in curves
+    ]
+
+
+def _sum_curve_vjp_contributions(curves, dgamma_vjps, dgammadash_vjps):
+    return sum(
+        curve.dgamma_by_dcoeff_vjp(dgamma_vjp)
+        + curve.dgammadash_by_dcoeff_vjp(dgammadash_vjp)
+        for curve, dgamma_vjp, dgammadash_vjp in zip(
+            curves, dgamma_vjps, dgammadash_vjps
+        )
+    )
 
 
 def _pairwise_distances(gamma1, gamma2):
@@ -74,7 +105,9 @@ def _chunk_rows(array, chunk_size: int):
     padded = jnp.pad(array, pad_config)
     chunk_shape = (chunk_count, chunk_size, *array.shape[1:])
     chunks = padded.reshape(chunk_shape)
-    valid = (jnp.arange(padded_row_count) < row_count).reshape((chunk_count, chunk_size))
+    valid = (jnp.arange(padded_row_count) < row_count).reshape(
+        (chunk_count, chunk_size)
+    )
     return chunks, valid
 
 
@@ -199,7 +232,6 @@ class CurveLength(Optimizable):
 
     def __init__(self, curve):
         self.curve = curve
-        self.thisgrad = jit(lambda l: grad(curve_length_pure)(l))
         super().__init__(depends_on=[curve])
 
     def J(self):
@@ -215,7 +247,7 @@ class CurveLength(Optimizable):
         """
         return self.curve.dincremental_arclength_by_dcoeff_vjp(
             _as_numpy_float64(
-                self.thisgrad(_as_jax_float64(self.curve.incremental_arclength()))
+                _curve_length_grad(_as_jax_float64(self.curve.incremental_arclength()))
             )
         )
 
@@ -234,6 +266,11 @@ def Lp_curvature_pure(kappa, gammadash, p, desired_kappa):
     arc_length = jnp.linalg.norm(gammadash, axis=1)
     excess = jnp.maximum(kappa - desired_kappa_jax, zero)
     return (one / p_jax) * jnp.mean((excess**p_jax) * arc_length)
+
+
+@jit
+def _lp_curve_curvature_grad(kappa, gammadash, p, threshold):
+    return grad(Lp_curvature_pure, argnums=(0, 1))(kappa, gammadash, p, threshold)
 
 
 @jit
@@ -258,6 +295,11 @@ def curvature_barrier_pure(kappa, gammadash, threshold):
     return jnp.mean(barrier * arc_length)
 
 
+@jit
+def _curvature_barrier_grad(kappa, gammadash, threshold):
+    return grad(curvature_barrier_pure, argnums=(0, 1))(kappa, gammadash, threshold)
+
+
 class LpCurveCurvature(Optimizable):
     r"""
     This class computes a penalty term based on the :math:`L_p` norm
@@ -274,23 +316,16 @@ class LpCurveCurvature(Optimizable):
         self.p = p
         self.threshold = threshold
         super().__init__(depends_on=[curve])
-        self.J_jax = jit(
-            lambda kappa, gammadash: Lp_curvature_pure(kappa, gammadash, p, threshold)
-        )
-        self.thisgrad0 = jit(
-            lambda kappa, gammadash: grad(self.J_jax, argnums=0)(kappa, gammadash)
-        )
-        self.thisgrad1 = jit(
-            lambda kappa, gammadash: grad(self.J_jax, argnums=1)(kappa, gammadash)
-        )
 
     def J(self):
         """
         This returns the value of the quantity.
         """
-        return self.J_jax(
+        return Lp_curvature_pure(
             _as_jax_float64(self.curve.kappa()),
             _as_jax_float64(self.curve.gammadash()),
+            self.p,
+            self.threshold,
         )
 
     @derivative_dec
@@ -300,8 +335,14 @@ class LpCurveCurvature(Optimizable):
         """
         kappa = _as_jax_float64(self.curve.kappa())
         gammadash = _as_jax_float64(self.curve.gammadash())
-        grad0 = _as_numpy_float64(self.thisgrad0(kappa, gammadash))
-        grad1 = _as_numpy_float64(self.thisgrad1(kappa, gammadash))
+        grad0, grad1 = _lp_curve_curvature_grad(
+            kappa,
+            gammadash,
+            self.p,
+            self.threshold,
+        )
+        grad0 = _as_numpy_float64(grad0)
+        grad1 = _as_numpy_float64(grad1)
         return self.curve.dkappa_by_dcoeff_vjp(
             grad0
         ) + self.curve.dgammadash_by_dcoeff_vjp(grad1)
@@ -326,27 +367,19 @@ class LpCurveCurvatureBarrier(Optimizable):
         self.curve = curve
         self.threshold = threshold
         super().__init__(depends_on=[curve])
-        self.J_jax = jit(
-            lambda kappa, gammadash: curvature_barrier_pure(
-                kappa,
-                gammadash,
-                threshold,
-            )
-        )
-        self.thisgrad0 = jit(
-            lambda kappa, gammadash: grad(self.J_jax, argnums=0)(kappa, gammadash)
-        )
-        self.thisgrad1 = jit(
-            lambda kappa, gammadash: grad(self.J_jax, argnums=1)(kappa, gammadash)
-        )
 
     def J(self):
-        return self.J_jax(self.curve.kappa(), self.curve.gammadash())
+        return curvature_barrier_pure(
+            self.curve.kappa(), self.curve.gammadash(), self.threshold
+        )
 
     @derivative_dec
     def dJ(self):
-        grad0 = self.thisgrad0(self.curve.kappa(), self.curve.gammadash())
-        grad1 = self.thisgrad1(self.curve.kappa(), self.curve.gammadash())
+        grad0, grad1 = _curvature_barrier_grad(
+            self.curve.kappa(),
+            self.curve.gammadash(),
+            self.threshold,
+        )
         return self.curve.dkappa_by_dcoeff_vjp(
             grad0
         ) + self.curve.dgammadash_by_dcoeff_vjp(grad1)
@@ -373,6 +406,11 @@ def Lp_torsion_pure(torsion, gammadash, p, threshold):
     return (one / p_jax) * jnp.mean((excess**p_jax) * arc_length)
 
 
+@jit
+def _lp_curve_torsion_grad(torsion, gammadash, p, threshold):
+    return grad(Lp_torsion_pure, argnums=(0, 1))(torsion, gammadash, p, threshold)
+
+
 class LpCurveTorsion(Optimizable):
     r"""
     LpCurveTorsion is a class that computes a penalty term based on the :math:`L_p` norm
@@ -388,29 +426,29 @@ class LpCurveTorsion(Optimizable):
         self.p = p
         self.threshold = threshold
         super().__init__(depends_on=[curve])
-        self.J_jax = jit(
-            lambda torsion, gammadash: Lp_torsion_pure(torsion, gammadash, p, threshold)
-        )
-        self.thisgrad0 = jit(
-            lambda torsion, gammadash: grad(self.J_jax, argnums=0)(torsion, gammadash)
-        )
-        self.thisgrad1 = jit(
-            lambda torsion, gammadash: grad(self.J_jax, argnums=1)(torsion, gammadash)
-        )
 
     def J(self):
         """
         This returns the value of the quantity.
         """
-        return self.J_jax(self.curve.torsion(), self.curve.gammadash())
+        return Lp_torsion_pure(
+            self.curve.torsion(),
+            self.curve.gammadash(),
+            self.p,
+            self.threshold,
+        )
 
     @derivative_dec
     def dJ(self):
         """
         This returns the derivative of the quantity with respect to the curve dofs.
         """
-        grad0 = self.thisgrad0(self.curve.torsion(), self.curve.gammadash())
-        grad1 = self.thisgrad1(self.curve.torsion(), self.curve.gammadash())
+        grad0, grad1 = _lp_curve_torsion_grad(
+            self.curve.torsion(),
+            self.curve.gammadash(),
+            self.p,
+            self.threshold,
+        )
         return self.curve.dtorsion_by_dcoeff_vjp(
             grad0
         ) + self.curve.dgammadash_by_dcoeff_vjp(grad1)
@@ -457,9 +495,7 @@ def cc_distance_pure(gamma1, l1, gamma2, l2, minimum_distance):
             valid = gamma1_mask[:, None] & gamma2_mask[None, :]
             alen = arc_length_1_chunk[:, None] * arc_length_2_chunk[None, :]
             excess = jnp.maximum(minimum_distance_jax - dists, zero)
-            block_total = jnp.sum(
-                jnp.where(valid, alen * jnp.square(excess), zero)
-            )
+            block_total = jnp.sum(jnp.where(valid, alen * jnp.square(excess), zero))
             return row_total + block_total, None
 
         total, _ = lax.scan(
@@ -549,6 +585,28 @@ def cc_distance_barrier_pure(gamma1, l1, gamma2, l2, minimum_distance):
     return jnp.where(feasible_all, total / normalization, jnp.inf)
 
 
+@jit
+def _cc_distance_barrier_grad(gamma1, l1, gamma2, l2, minimum_distance):
+    return grad(cc_distance_barrier_pure, argnums=(0, 1, 2, 3))(
+        gamma1,
+        l1,
+        gamma2,
+        l2,
+        minimum_distance,
+    )
+
+
+@jit
+def _cc_distance_grad(gamma1, l1, gamma2, l2, minimum_distance):
+    return grad(cc_distance_pure, argnums=(0, 1, 2, 3))(
+        gamma1,
+        l1,
+        gamma2,
+        l2,
+        minimum_distance,
+    )
+
+
 class CurveCurveDistanceBarrier(Optimizable):
     r"""
     ``CurveCurveDistanceBarrier`` is a strict interior-point barrier for
@@ -573,32 +631,6 @@ class CurveCurveDistanceBarrier(Optimizable):
         self.curves = curves
         self.minimum_distance = minimum_distance
         self.num_basecurves = num_basecurves or len(curves)
-
-        self.J_jax = jit(
-            lambda gamma1, l1, gamma2, l2: cc_distance_barrier_pure(
-                gamma1, l1, gamma2, l2, minimum_distance
-            )
-        )
-        self.thisgrad0 = jit(
-            lambda gamma1, l1, gamma2, l2: grad(self.J_jax, argnums=0)(
-                gamma1, l1, gamma2, l2
-            )
-        )
-        self.thisgrad1 = jit(
-            lambda gamma1, l1, gamma2, l2: grad(self.J_jax, argnums=1)(
-                gamma1, l1, gamma2, l2
-            )
-        )
-        self.thisgrad2 = jit(
-            lambda gamma1, l1, gamma2, l2: grad(self.J_jax, argnums=2)(
-                gamma1, l1, gamma2, l2
-            )
-        )
-        self.thisgrad3 = jit(
-            lambda gamma1, l1, gamma2, l2: grad(self.J_jax, argnums=3)(
-                gamma1, l1, gamma2, l2
-            )
-        )
         super().__init__(depends_on=curves)
 
     def _iter_curve_pair_indices(self):
@@ -620,11 +652,14 @@ class CurveCurveDistanceBarrier(Optimizable):
         """
         res = 0
         for i, j in self._iter_curve_pair_indices():
-            gamma1 = self.curves[i].gamma()
-            l1 = self.curves[i].gammadash()
-            gamma2 = self.curves[j].gamma()
-            l2 = self.curves[j].gammadash()
-            res += self.J_jax(gamma1, l1, gamma2, l2)
+            gamma1, l1, gamma2, l2 = _curve_pair_jax_data(self.curves, i, j)
+            res += cc_distance_barrier_pure(
+                gamma1,
+                l1,
+                gamma2,
+                l2,
+                self.minimum_distance,
+            )
         return res
 
     @derivative_dec
@@ -632,27 +667,29 @@ class CurveCurveDistanceBarrier(Optimizable):
         """
         This returns the derivative of the quantity with respect to the curve dofs.
         """
-        dgamma_by_dcoeff_vjp_vecs = [np.zeros_like(c.gamma()) for c in self.curves]
-        dgammadash_by_dcoeff_vjp_vecs = [
-            np.zeros_like(c.gammadash()) for c in self.curves
-        ]
+        dgamma_by_dcoeff_vjp_vecs, dgammadash_by_dcoeff_vjp_vecs = _curve_vjp_buffers(
+            self.curves
+        )
 
         for i, j in self._iter_curve_pair_indices():
-            gamma1 = self.curves[i].gamma()
-            l1 = self.curves[i].gammadash()
-            gamma2 = self.curves[j].gamma()
-            l2 = self.curves[j].gammadash()
-            dgamma_by_dcoeff_vjp_vecs[i] += self.thisgrad0(gamma1, l1, gamma2, l2)
-            dgammadash_by_dcoeff_vjp_vecs[i] += self.thisgrad1(gamma1, l1, gamma2, l2)
-            dgamma_by_dcoeff_vjp_vecs[j] += self.thisgrad2(gamma1, l1, gamma2, l2)
-            dgammadash_by_dcoeff_vjp_vecs[j] += self.thisgrad3(gamma1, l1, gamma2, l2)
+            gamma1, l1, gamma2, l2 = _curve_pair_jax_data(self.curves, i, j)
+            grad0, grad1, grad2, grad3 = _cc_distance_barrier_grad(
+                gamma1,
+                l1,
+                gamma2,
+                l2,
+                self.minimum_distance,
+            )
+            dgamma_by_dcoeff_vjp_vecs[i] += _as_numpy_float64(grad0)
+            dgammadash_by_dcoeff_vjp_vecs[i] += _as_numpy_float64(grad1)
+            dgamma_by_dcoeff_vjp_vecs[j] += _as_numpy_float64(grad2)
+            dgammadash_by_dcoeff_vjp_vecs[j] += _as_numpy_float64(grad3)
 
-        res = [
-            self.curves[i].dgamma_by_dcoeff_vjp(dgamma_by_dcoeff_vjp_vecs[i])
-            + self.curves[i].dgammadash_by_dcoeff_vjp(dgammadash_by_dcoeff_vjp_vecs[i])
-            for i in range(len(self.curves))
-        ]
-        return sum(res)
+        return _sum_curve_vjp_contributions(
+            self.curves,
+            dgamma_by_dcoeff_vjp_vecs,
+            dgammadash_by_dcoeff_vjp_vecs,
+        )
 
     return_fn_map = {"J": J, "dJ": dJ}
 
@@ -682,32 +719,6 @@ class CurveCurveDistance(Optimizable):
     def __init__(self, curves, minimum_distance, num_basecurves=None):
         self.curves = curves
         self.minimum_distance = minimum_distance
-
-        self.J_jax = jit(
-            lambda gamma1, l1, gamma2, l2: cc_distance_pure(
-                gamma1, l1, gamma2, l2, minimum_distance
-            )
-        )
-        self.thisgrad0 = jit(
-            lambda gamma1, l1, gamma2, l2: grad(self.J_jax, argnums=0)(
-                gamma1, l1, gamma2, l2
-            )
-        )
-        self.thisgrad1 = jit(
-            lambda gamma1, l1, gamma2, l2: grad(self.J_jax, argnums=1)(
-                gamma1, l1, gamma2, l2
-            )
-        )
-        self.thisgrad2 = jit(
-            lambda gamma1, l1, gamma2, l2: grad(self.J_jax, argnums=2)(
-                gamma1, l1, gamma2, l2
-            )
-        )
-        self.thisgrad3 = jit(
-            lambda gamma1, l1, gamma2, l2: grad(self.J_jax, argnums=3)(
-                gamma1, l1, gamma2, l2
-            )
-        )
         self.candidates = None
         self.num_basecurves = num_basecurves or len(curves)
         super().__init__(depends_on=curves)
@@ -757,11 +768,8 @@ class CurveCurveDistance(Optimizable):
         self.compute_candidates()
         res = 0.0
         for i, j in self.candidates:
-            gamma1 = _as_jax_float64(self.curves[i].gamma())
-            l1 = _as_jax_float64(self.curves[i].gammadash())
-            gamma2 = _as_jax_float64(self.curves[j].gamma())
-            l2 = _as_jax_float64(self.curves[j].gammadash())
-            res += self.J_jax(gamma1, l1, gamma2, l2)
+            gamma1, l1, gamma2, l2 = _curve_pair_jax_data(self.curves, i, j)
+            res += cc_distance_pure(gamma1, l1, gamma2, l2, self.minimum_distance)
 
         return res
 
@@ -771,35 +779,29 @@ class CurveCurveDistance(Optimizable):
         This returns the derivative of the quantity with respect to the curve dofs.
         """
         self.compute_candidates()
-        dgamma_by_dcoeff_vjp_vecs = [np.zeros_like(c.gamma()) for c in self.curves]
-        dgammadash_by_dcoeff_vjp_vecs = [
-            np.zeros_like(c.gammadash()) for c in self.curves
-        ]
+        dgamma_by_dcoeff_vjp_vecs, dgammadash_by_dcoeff_vjp_vecs = _curve_vjp_buffers(
+            self.curves
+        )
 
         for i, j in self.candidates:
-            gamma1 = _as_jax_float64(self.curves[i].gamma())
-            l1 = _as_jax_float64(self.curves[i].gammadash())
-            gamma2 = _as_jax_float64(self.curves[j].gamma())
-            l2 = _as_jax_float64(self.curves[j].gammadash())
-            dgamma_by_dcoeff_vjp_vecs[i] += _as_numpy_float64(
-                self.thisgrad0(gamma1, l1, gamma2, l2)
+            gamma1, l1, gamma2, l2 = _curve_pair_jax_data(self.curves, i, j)
+            grad0, grad1, grad2, grad3 = _cc_distance_grad(
+                gamma1,
+                l1,
+                gamma2,
+                l2,
+                self.minimum_distance,
             )
-            dgammadash_by_dcoeff_vjp_vecs[i] += _as_numpy_float64(
-                self.thisgrad1(gamma1, l1, gamma2, l2)
-            )
-            dgamma_by_dcoeff_vjp_vecs[j] += _as_numpy_float64(
-                self.thisgrad2(gamma1, l1, gamma2, l2)
-            )
-            dgammadash_by_dcoeff_vjp_vecs[j] += _as_numpy_float64(
-                self.thisgrad3(gamma1, l1, gamma2, l2)
-            )
+            dgamma_by_dcoeff_vjp_vecs[i] += _as_numpy_float64(grad0)
+            dgammadash_by_dcoeff_vjp_vecs[i] += _as_numpy_float64(grad1)
+            dgamma_by_dcoeff_vjp_vecs[j] += _as_numpy_float64(grad2)
+            dgammadash_by_dcoeff_vjp_vecs[j] += _as_numpy_float64(grad3)
 
-        res = [
-            self.curves[i].dgamma_by_dcoeff_vjp(dgamma_by_dcoeff_vjp_vecs[i])
-            + self.curves[i].dgammadash_by_dcoeff_vjp(dgammadash_by_dcoeff_vjp_vecs[i])
-            for i in range(len(self.curves))
-        ]
-        return sum(res)
+        return _sum_curve_vjp_contributions(
+            self.curves,
+            dgamma_by_dcoeff_vjp_vecs,
+            dgammadash_by_dcoeff_vjp_vecs,
+        )
 
     return_fn_map = {"J": J, "dJ": dJ}
 
@@ -864,6 +866,17 @@ def cs_distance_pure(gammac, lc, gammas, ns, minimum_distance):
     return total / normalization
 
 
+@jit
+def _cs_distance_grad(gammac, lc, gammas, ns, minimum_distance):
+    return grad(cs_distance_pure, argnums=(0, 1))(
+        gammac,
+        lc,
+        gammas,
+        ns,
+        minimum_distance,
+    )
+
+
 class CurveSurfaceDistance(Optimizable):
     r"""
     CurveSurfaceDistance is a class that computes
@@ -888,22 +901,6 @@ class CurveSurfaceDistance(Optimizable):
         self.curves = curves
         self.surface = surface
         self.minimum_distance = minimum_distance
-
-        self.J_jax = jit(
-            lambda gammac, lc, gammas, ns: cs_distance_pure(
-                gammac, lc, gammas, ns, minimum_distance
-            )
-        )
-        self.thisgrad0 = jit(
-            lambda gammac, lc, gammas, ns: grad(self.J_jax, argnums=0)(
-                gammac, lc, gammas, ns
-            )
-        )
-        self.thisgrad1 = jit(
-            lambda gammac, lc, gammas, ns: grad(self.J_jax, argnums=1)(
-                gammac, lc, gammas, ns
-            )
-        )
         self.candidates = None
         super().__init__(
             depends_on=curves
@@ -959,9 +956,8 @@ class CurveSurfaceDistance(Optimizable):
         gammas = _as_jax_float64(self.surface.gamma().reshape((-1, 3)))
         ns = _as_jax_float64(self.surface.normal().reshape((-1, 3)))
         for i, _ in self.candidates:
-            gammac = _as_jax_float64(self.curves[i].gamma())
-            lc = _as_jax_float64(self.curves[i].gammadash())
-            res += self.J_jax(gammac, lc, gammas, ns)
+            gammac, lc = _curve_jax_position_and_tangent(self.curves[i])
+            res += cs_distance_pure(gammac, lc, gammas, ns, self.minimum_distance)
         return res
 
     @derivative_dec
@@ -970,27 +966,27 @@ class CurveSurfaceDistance(Optimizable):
         This returns the derivative of the quantity with respect to the curve dofs.
         """
         self.compute_candidates()
-        dgamma_by_dcoeff_vjp_vecs = [np.zeros_like(c.gamma()) for c in self.curves]
-        dgammadash_by_dcoeff_vjp_vecs = [
-            np.zeros_like(c.gammadash()) for c in self.curves
-        ]
+        dgamma_by_dcoeff_vjp_vecs, dgammadash_by_dcoeff_vjp_vecs = _curve_vjp_buffers(
+            self.curves
+        )
         gammas = _as_jax_float64(self.surface.gamma().reshape((-1, 3)))
         ns = _as_jax_float64(self.surface.normal().reshape((-1, 3)))
         for i, _ in self.candidates:
-            gammac = _as_jax_float64(self.curves[i].gamma())
-            lc = _as_jax_float64(self.curves[i].gammadash())
-            dgamma_by_dcoeff_vjp_vecs[i] += _as_numpy_float64(
-                self.thisgrad0(gammac, lc, gammas, ns)
+            gammac, lc = _curve_jax_position_and_tangent(self.curves[i])
+            grad0, grad1 = _cs_distance_grad(
+                gammac,
+                lc,
+                gammas,
+                ns,
+                self.minimum_distance,
             )
-            dgammadash_by_dcoeff_vjp_vecs[i] += _as_numpy_float64(
-                self.thisgrad1(gammac, lc, gammas, ns)
-            )
-        res = [
-            self.curves[i].dgamma_by_dcoeff_vjp(dgamma_by_dcoeff_vjp_vecs[i])
-            + self.curves[i].dgammadash_by_dcoeff_vjp(dgammadash_by_dcoeff_vjp_vecs[i])
-            for i in range(len(self.curves))
-        ]
-        return sum(res)
+            dgamma_by_dcoeff_vjp_vecs[i] += _as_numpy_float64(grad0)
+            dgammadash_by_dcoeff_vjp_vecs[i] += _as_numpy_float64(grad1)
+        return _sum_curve_vjp_contributions(
+            self.curves,
+            dgamma_by_dcoeff_vjp_vecs,
+            dgammadash_by_dcoeff_vjp_vecs,
+        )
 
     return_fn_map = {"J": J, "dJ": dJ}
 
@@ -1001,6 +997,11 @@ def curve_arclengthvariation_pure(l, mat):
     This function is used in a Python+Jax implementation of the curve arclength variation.
     """
     return jnp.var(mat @ l)
+
+
+@jit
+def _curve_arclengthvariation_grad(l, mat):
+    return grad(curve_arclengthvariation_pure, argnums=0)(l, mat)
 
 
 class ArclengthVariation(Optimizable):
@@ -1064,9 +1065,6 @@ class ArclengthVariation(Optimizable):
         for i in range(nintervals):
             mat[i, indices[i] : indices[i + 1]] = 1 / (indices[i + 1] - indices[i])
         self.mat = mat
-        self.thisgrad = jit(
-            lambda l: grad(lambda x: curve_arclengthvariation_pure(x, mat))(l)
-        )
 
     def J(self):
         return float(
@@ -1079,7 +1077,10 @@ class ArclengthVariation(Optimizable):
         This returns the derivative of the quantity with respect to the curve dofs.
         """
         return self.curve.dincremental_arclength_by_dcoeff_vjp(
-            self.thisgrad(self.curve.incremental_arclength())
+            _curve_arclengthvariation_grad(
+                self.curve.incremental_arclength(),
+                self.mat,
+            )
         )
 
     return_fn_map = {"J": J, "dJ": dJ}
@@ -1092,6 +1093,11 @@ def curve_msc_pure(kappa, gammadash):
     """
     arc_length = jnp.linalg.norm(gammadash, axis=1)
     return jnp.mean(kappa**2 * arc_length) / jnp.mean(arc_length)
+
+
+@jit
+def _curve_msc_grad(kappa, gammadash):
+    return grad(curve_msc_pure, argnums=(0, 1))(kappa, gammadash)
 
 
 class MeanSquaredCurvature(Optimizable):
@@ -1110,20 +1116,13 @@ class MeanSquaredCurvature(Optimizable):
         """
         super().__init__(depends_on=[curve])
         self.curve = curve
-        self.thisgrad0 = jit(
-            lambda kappa, gammadash: grad(curve_msc_pure, argnums=0)(kappa, gammadash)
-        )
-        self.thisgrad1 = jit(
-            lambda kappa, gammadash: grad(curve_msc_pure, argnums=1)(kappa, gammadash)
-        )
 
     def J(self):
         return float(curve_msc_pure(self.curve.kappa(), self.curve.gammadash()))
 
     @derivative_dec
     def dJ(self):
-        grad0 = self.thisgrad0(self.curve.kappa(), self.curve.gammadash())
-        grad1 = self.thisgrad1(self.curve.kappa(), self.curve.gammadash())
+        grad0, grad1 = _curve_msc_grad(self.curve.kappa(), self.curve.gammadash())
         return self.curve.dkappa_by_dcoeff_vjp(
             grad0
         ) + self.curve.dgammadash_by_dcoeff_vjp(grad1)
@@ -1229,6 +1228,16 @@ def frametwist_lp_pure(frametwist, gammadash, p):
     return (jnp.mean(frametwist**p * arc_length) / jnp.mean(arc_length)) ** (1 / p)
 
 
+@jit
+def _frametwist_lp_grad(frametwist, gammadash, p):
+    return grad(frametwist_lp_pure, argnums=(0, 1))(frametwist, gammadash, p)
+
+
+@jit
+def _frametwist_vjp(n1, n2, b1, b2, b1dash, n2dash, v):
+    return vjp(frametwist_pure, n1, n2, b1, b2, b1dash, n2dash)[1](v)
+
+
 class FramedCurveTwist(Optimizable):
     def __init__(self, framedcurve, f="lp", p=2):
         r"""
@@ -1251,50 +1260,6 @@ class FramedCurveTwist(Optimizable):
         self.framedcurve = framedcurve
         self.framedcurve_centroid = FramedCurveCentroid(framedcurve.curve)
         self.framedcurve_centroid.rotation.fix_all()
-        self.frametwist_vjp0 = jit(
-            lambda n1, n2, b1, b2, b1dash, n2dash, v: vjp(
-                lambda g: frametwist_pure(g, n2, b1, b2, b1dash, n2dash), n1
-            )[1](v)[0]
-        )
-        self.frametwist_vjp1 = jit(
-            lambda n1, n2, b1, b2, b1dash, n2dash, v: vjp(
-                lambda g: frametwist_pure(n1, g, b1, b2, b1dash, n2dash), n2
-            )[1](v)[0]
-        )
-        self.frametwist_vjp2 = jit(
-            lambda n1, n2, b1, b2, b1dash, n2dash, v: vjp(
-                lambda g: frametwist_pure(n1, n2, g, b2, b1dash, n2dash), b1
-            )[1](v)[0]
-        )
-        self.frametwist_vjp3 = jit(
-            lambda n1, n2, b1, b2, b1dash, n2dash, v: vjp(
-                lambda g: frametwist_pure(n1, n2, b1, g, b1dash, n2dash), b2
-            )[1](v)[0]
-        )
-        self.frametwist_vjp4 = jit(
-            lambda n1, n2, b1, b2, b1dash, n2dash, v: vjp(
-                lambda g: frametwist_pure(n1, n2, b1, b2, g, n2dash), b1dash
-            )[1](v)[0]
-        )
-        self.frametwist_vjp5 = jit(
-            lambda n1, n2, b1, b2, b1dash, n2dash, v: vjp(
-                lambda g: frametwist_pure(n1, n2, b1, b2, b1dash, g), n2dash
-            )[1](v)[0]
-        )
-        self.range_grad = jit(
-            lambda twist: grad(frametwist_range_pure, argnums=0)(twist)
-        )
-        self.net_grad = jit(lambda twist: grad(frametwist_net_pure, argnums=0)(twist))
-        self.lp_grad0 = jit(
-            lambda twist, gammadash, p: grad(frametwist_lp_pure, argnums=0)(
-                twist, gammadash, p
-            )
-        )
-        self.lp_grad1 = jit(
-            lambda twist, gammadash, p: grad(frametwist_lp_pure, argnums=1)(
-                twist, gammadash, p
-            )
-        )
 
     def angle_profile(self, endpoint=False):
         """
@@ -1321,52 +1286,39 @@ class FramedCurveTwist(Optimizable):
         data = self.angle_profile()
         if f == "net":
             return frametwist_net_pure(data)
-        elif f == "range":
+        if f == "range":
             return frametwist_range_pure(data)
-        elif f == "max":
+        if f == "max":
             return frametwist_max_pure(data)
-        elif f == "lp":
+        if f == "lp":
             if p is None:
                 p = self.p
-            data = self.angle_profile()
             gammadash = self.framedcurve.curve.gammadash()
             return frametwist_lp_pure(data, gammadash, p)
-        else:
-            raise Exception("incorrect wrapping function f provided")
+        raise Exception("incorrect wrapping function f provided")
 
     @derivative_dec
     def dJ(self):
-        # if (self.f == "net"):
-        #     return Derivative({})
-        #     # endpoint = True
-        #     # data = self.angle_profile(endpoint=endpoint)
-        #     # grad0 = self.net_grad(data)
-        # elif (self.f == "range"):
-        #     return Derivative({})
-
-        # endpoint = False
-        # data = self.angle_profile(endpoint=endpoint)
-        # grad0 = self.range_grad(data)
         if self.f == "lp":
-            endpoint = False
-            data = self.angle_profile(endpoint=endpoint)
+            data = self.angle_profile(endpoint=False)
             gammadash = self.framedcurve.curve.gammadash()
-            grad0 = self.lp_grad0(data, gammadash, self.p)
-            grad1 = self.lp_grad1(data, gammadash, self.p)
+            grad0, grad1 = _frametwist_lp_grad(data, gammadash, self.p)
         else:
             return Derivative({})
-            # raise Exception('incorrect wrapping function f provided')
         _, n1, b1 = self.framedcurve.rotated_frame()
         _, n2, b2 = self.framedcurve_centroid.rotated_frame()
         _, _, b1dash = self.framedcurve.rotated_frame_dash()
         _, n2dash, _ = self.framedcurve_centroid.rotated_frame_dash()
 
-        vjp0 = self.frametwist_vjp0(n1, n2, b1, b2, b1dash, n2dash, grad0)
-        vjp1 = self.frametwist_vjp1(n1, n2, b1, b2, b1dash, n2dash, grad0)
-        vjp2 = self.frametwist_vjp2(n1, n2, b1, b2, b1dash, n2dash, grad0)
-        vjp3 = self.frametwist_vjp3(n1, n2, b1, b2, b1dash, n2dash, grad0)
-        vjp4 = self.frametwist_vjp4(n1, n2, b1, b2, b1dash, n2dash, grad0)
-        vjp5 = self.frametwist_vjp5(n1, n2, b1, b2, b1dash, n2dash, grad0)
+        vjp0, vjp1, vjp2, vjp3, vjp4, vjp5 = _frametwist_vjp(
+            n1,
+            n2,
+            b1,
+            b2,
+            b1dash,
+            n2dash,
+            grad0,
+        )
         zero = np.zeros_like(vjp0)
 
         grad = (
@@ -1394,6 +1346,11 @@ def max_distance_pure(g1, g2, dmax, p):
     return jnp.sum(jnp.square(jnp.maximum(mindists - dmax, 0))) / g1.shape[0]
 
 
+@jit
+def _max_distance_grad(g1, g2, dmax, p):
+    return grad(max_distance_pure, argnums=(0, 1))(g1, g2, dmax, p)
+
+
 class MinCurveCurveDistance(Optimizable):
     """
     This class can be used to constrain a curve to remain close
@@ -1405,9 +1362,6 @@ class MinCurveCurveDistance(Optimizable):
         self.curve2 = curve2
         self.maximum_distance = maximum_distance
         self.p = p
-        self.J_jax = lambda g1, g2: max_distance_pure(g1, g2, self.maximum_distance, p)
-        self.this_grad_0 = jit(lambda g1, g2: grad(self.J_jax, argnums=0)(g1, g2))
-        self.this_grad_1 = jit(lambda g1, g2: grad(self.J_jax, argnums=1)(g1, g2))
 
         Optimizable.__init__(self, depends_on=[curve1, curve2])
 
@@ -1431,24 +1385,22 @@ class MinCurveCurveDistance(Optimizable):
         """
         returns the an array of the minimum distance between curve1 and curve2 (approximated w/ p norm)
         """
-        p = self.p
         g1 = self.curve1.gamma()
         g2 = self.curve2.gamma()
-        return _pairwise_rowwise_pnorm_distance(g1, g2, p)
+        return _pairwise_rowwise_pnorm_distance(g1, g2, self.p)
 
     def J(self):
         g1 = self.curve1.gamma()
         g2 = self.curve2.gamma()
 
-        return self.J_jax(g1, g2)
+        return max_distance_pure(g1, g2, self.maximum_distance, self.p)
 
     @derivative_dec
     def dJ(self):
         g1 = self.curve1.gamma()
         g2 = self.curve2.gamma()
 
-        grad0 = self.this_grad_0(g1, g2)
-        grad1 = self.this_grad_1(g1, g2)
+        grad0, grad1 = _max_distance_grad(g1, g2, self.maximum_distance, self.p)
 
         return self.curve1.dgamma_by_dcoeff_vjp(
             grad0
