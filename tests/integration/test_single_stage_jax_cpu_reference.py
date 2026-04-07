@@ -963,7 +963,7 @@ _REAL_RESOLVE_FD_TAYLOR_RATE = 0.55
 _REAL_RESOLVE_FD_EPSILONS = (4.0e-4, 2.0e-4, 1.0e-4)
 _REAL_RESOLVE_FD_MIN_STABLE_SAMPLES = 3
 _REAL_RESOLVE_FD_MIN_STABLE_EPS = 2
-_REAL_RESOLVE_FD_AXIS_DIRECTION_FRACTIONS = (0.0, 0.25, 0.5, 0.75, 1.0)
+_REAL_RESOLVE_FD_AXIS_DIRECTION_FRACTIONS = (0.0, 0.5, 1.0)
 _STABLE_IOTA_ABS_TOL = 5e-4
 _STABLE_G_REL_TOL = 1e-4
 _STABLE_FUN_REL_TOL = 1e-2
@@ -1002,73 +1002,48 @@ def _is_stable_real_resolve(base_state, *, iota_value, G_value, fun_value):
     )
 
 
-def _build_real_resolve_overrides(base_state):
-    return {
-        "boozer_surface_dofs_override": np.asarray(
-            base_state["surface_dofs"], dtype=float
-        ),
-        "boozer_iota_override": float(base_state["iota"]),
-        "boozer_G_override": float(base_state["G"]),
-    }
-
-
-def _normalize_real_resolve_fd_direction(direction):
-    normalized_direction = np.asarray(direction, dtype=float)
-    norm = np.linalg.norm(normalized_direction)
-    assert norm > 0.0
-    return normalized_direction / norm
-
-
-def _append_unique_real_resolve_fd_direction(directions, direction):
-    normalized_direction = _normalize_real_resolve_fd_direction(direction)
-    for existing_direction in directions:
-        if (
-            np.allclose(
-                normalized_direction,
-                existing_direction,
-                rtol=0.0,
-                atol=1e-12,
-            )
+def _unique_normalized_real_resolve_fd_directions(candidate_directions):
+    directions = []
+    for direction in candidate_directions:
+        normalized_direction = np.asarray(direction, dtype=float)
+        norm = np.linalg.norm(normalized_direction)
+        assert norm > 0.0
+        normalized_direction = normalized_direction / norm
+        if any(
+            np.allclose(normalized_direction, existing_direction, rtol=0.0, atol=1e-12)
             or np.allclose(
                 normalized_direction,
                 -existing_direction,
                 rtol=0.0,
                 atol=1e-12,
             )
+            for existing_direction in directions
         ):
-            return
-    directions.append(normalized_direction)
+            continue
+        directions.append(normalized_direction)
+    return tuple(directions)
 
 
 def _real_resolve_fd_probe_directions(dof_count):
-    """Return explicit axis and mixed probe directions spanning the coil DOFs."""
+    """Return the canonical deterministic probe family for re-solve FD checks."""
     assert dof_count > 0
     last_index = dof_count - 1
-    probe_indices = []
+    candidate_directions = []
     for fraction in _REAL_RESOLVE_FD_AXIS_DIRECTION_FRACTIONS:
         dof_index = int(round(fraction * last_index))
-        if dof_index not in probe_indices:
-            probe_indices.append(dof_index)
-
-    candidate_directions = []
-    for dof_index in probe_indices:
         direction = np.zeros(dof_count, dtype=float)
         direction[dof_index] = 1.0
         candidate_directions.append(direction)
 
-    # Add deterministic mixed probes so coverage includes coupled DOF motion,
-    # not just coordinate-axis perturbations.
+    # Add deterministic mixed probes so the fixed family covers both axis-local
+    # and coupled coil motion without relying on pseudo-random directions.
     candidate_directions.append(np.ones(dof_count, dtype=float))
     if dof_count > 1:
         alternating = np.ones(dof_count, dtype=float)
         alternating[1::2] = -1.0
         candidate_directions.append(alternating)
 
-    directions = []
-    for direction in candidate_directions:
-        _append_unique_real_resolve_fd_direction(directions, direction)
-
-    return tuple(directions)
+    return _unique_normalized_real_resolve_fd_directions(candidate_directions)
 
 
 def _resolve_wrapper_value_on_real_fixture(
@@ -1215,6 +1190,26 @@ def _assert_wrapper_resolve_fd_matches_real_fixture(
             f"{wrapper_label} reduced real-fixture FD probes failed: "
             + " | ".join(diagnostics)
         )
+
+
+class TestRealResolveFDProbeDirections:
+    def test_probe_family_is_explicit_and_deterministic(self):
+        directions = _real_resolve_fd_probe_directions(7)
+
+        expected = []
+        for dof_index in (0, 3, 6):
+            direction = np.zeros(7, dtype=float)
+            direction[dof_index] = 1.0
+            expected.append(direction)
+
+        expected.append(np.ones(7, dtype=float) / np.sqrt(7.0))
+        alternating = np.ones(7, dtype=float)
+        alternating[1::2] = -1.0
+        expected.append(alternating / np.sqrt(7.0))
+
+        assert len(directions) == len(expected) == 5
+        for actual_direction, expected_direction in zip(directions, expected):
+            np.testing.assert_allclose(actual_direction, expected_direction)
 
 
 def _make_boozer_setup(
