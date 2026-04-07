@@ -1,3 +1,4 @@
+from functools import partial
 import unittest
 from simsopt.geo import FrameRotation, ZeroRotation, FramedCurveCentroid, FramedCurveFrenet
 from simsopt.configs.zoo import get_data
@@ -5,6 +6,99 @@ from simsopt.geo.strain_optimization import LPBinormalCurvatureStrainPenalty, LP
 import numpy as np
 from simsopt.geo.curvexyzfourier import CurveXYZFourier
 from scipy.optimize import minimize
+
+
+def _make_reference_curve():
+    base_curves, _, _, _, _ = get_data(
+        "ncsx",
+        coil_order=6,
+        points_per_period=120,
+    )
+    return base_curves[0]
+
+
+def _make_rotation(curve, order, *, allow_none):
+    if order == 1:
+        rotation = FrameRotation(curve.quadpoints, order)
+        rotation.x = np.array([0, 0.1, 0.3])
+        rotation_shared = FrameRotation(curve.quadpoints, order, dofs=rotation.dofs)
+        assert np.allclose(rotation.x, rotation_shared.x)
+        assert np.allclose(
+            rotation.alpha(curve.quadpoints),
+            rotation_shared.alpha(curve.quadpoints),
+        )
+        return rotation
+    if allow_none:
+        return None
+    return ZeroRotation(curve.quadpoints)
+
+
+def _make_framedcurve(order, centroid, *, allow_none):
+    curve = _make_reference_curve()
+    rotation = _make_rotation(curve, order, allow_none=allow_none)
+    if centroid:
+        return FramedCurveCentroid(curve, rotation)
+    return FramedCurveFrenet(curve, rotation)
+
+
+def _make_strain_objective(
+    objective_cls,
+    order,
+    centroid,
+    *,
+    allow_none,
+    threshold,
+):
+    return objective_cls(
+        _make_framedcurve(order, centroid, allow_none=allow_none),
+        width=1e-3,
+        p=2,
+        threshold=threshold,
+    )
+
+
+def _make_binormal_objective(order, centroid):
+    return _make_strain_objective(
+        LPBinormalCurvatureStrainPenalty,
+        order,
+        centroid,
+        allow_none=True,
+        threshold=1e-4,
+    )
+
+
+def _make_torsion_objective(order, centroid):
+    return _make_strain_objective(
+        LPTorsionalStrainPenalty,
+        order,
+        centroid,
+        allow_none=False,
+        threshold=1e-8,
+    )
+
+
+def _evaluate_objective(objective_builder, dofs):
+    objective = objective_builder()
+    objective.x = dofs
+    return objective.J()
+
+
+def _assert_central_difference_contraction(objective_builder):
+    objective = objective_builder()
+    dofs = np.asarray(objective.x, dtype=float).copy()
+
+    np.random.seed(1)
+    h = np.random.standard_normal(size=dofs.shape)
+    df = np.sum(np.asarray(objective.dJ(), dtype=float) * h)
+
+    errf_old = 1e10
+    for i in range(9, 14):
+        eps = 0.5**i
+        f1 = _evaluate_objective(objective_builder, dofs + eps * h)
+        f2 = _evaluate_objective(objective_builder, dofs - eps * h)
+        errf = np.abs((f1 - f2) / (2 * eps) - df)
+        assert errf < 0.3 * errf_old
+        errf_old = errf
 
 
 class CoilStrainTesting(unittest.TestCase):
@@ -25,10 +119,8 @@ class CoilStrainTesting(unittest.TestCase):
             np.random.seed(1)
             rotation = FrameRotation(quadpoints, order)
             rotation.x = np.random.standard_normal(size=(2*order+1,))
-            if centroid:
-                framedcurve = FramedCurveCentroid(curve, rotation)
-            else:
-                framedcurve = FramedCurveFrenet(curve, rotation)
+            framedcurve_cls = FramedCurveCentroid if centroid else FramedCurveFrenet
+            framedcurve = framedcurve_cls(curve, rotation)
             Jt = LPTorsionalStrainPenalty(framedcurve, width=1e-3, p=2, threshold=0)
             Jb = LPBinormalCurvatureStrainPenalty(framedcurve, width=1e-3, p=2, threshold=0)
             J = Jt+Jb
@@ -56,80 +148,17 @@ class CoilStrainTesting(unittest.TestCase):
 
     def subtest_binormal_curvature(self, order, centroid):
         assert order in [1, None]
-        base_curves, base_currents, ma, nfp, bs = get_data("ncsx", coil_order=6, points_per_period=120)
-        c = base_curves[0]
+        build_objective = partial(_make_binormal_objective, order, centroid)
 
-        if order == 1:
-            rotation = FrameRotation(c.quadpoints, order)
-            rotation.x = np.array([0, 0.1, 0.3])
-            rotationShared = FrameRotation(base_curves[0].quadpoints, order, dofs=rotation.dofs)
-            assert np.allclose(rotation.x, rotationShared.x)
-            assert np.allclose(rotation.alpha(c.quadpoints), rotationShared.alpha(c.quadpoints))
-        else:
-            rotation = None
-
-        if centroid:
-            framedcurve = FramedCurveCentroid(c, rotation)
-        else:
-            framedcurve = FramedCurveFrenet(c, rotation)
-
-        J = LPBinormalCurvatureStrainPenalty(framedcurve, width=1e-3, p=2, threshold=1e-4)
-
-        if (not (not centroid and order is None)):
-            dofs = J.x
-
-            np.random.seed(1)
-            h = np.random.standard_normal(size=dofs.shape)
-            df = np.sum(J.dJ()*h)
-
-            errf_old = 1e10
-            for i in range(9, 14):
-                eps = 0.5**i
-                J.x = dofs + eps*h
-                f1 = J.J()
-                J.x = dofs - eps*h
-                f2 = J.J()
-                errf = np.abs((f1-f2)/(2*eps) - df)
-                assert errf < 0.3 * errf_old
-                errf_old = errf
-        else:
+        if not centroid and order is None:
             # Binormal curvature vanishes in Frenet frame
-            assert J.J() < 1e-12
+            assert build_objective().J() < 1e-12
+            return
+
+        _assert_central_difference_contraction(build_objective)
 
     def subtest_torsion(self, order, centroid):
         assert order in [1, None]
-        base_curves, base_currents, ma, nfp, bs = get_data("ncsx", coil_order=6, points_per_period=120)
-        c = base_curves[0]
-
-        if order == 1:
-            rotation = FrameRotation(c.quadpoints, order)
-            rotation.x = np.array([0, 0.1, 0.3])
-            rotationShared = FrameRotation(base_curves[0].quadpoints, order, dofs=rotation.dofs)
-            assert np.allclose(rotation.x, rotationShared.x)
-            assert np.allclose(rotation.alpha(c.quadpoints), rotationShared.alpha(c.quadpoints))
-        else:
-            rotation = ZeroRotation(c.quadpoints)
-
-        if centroid:
-            framedcurve = FramedCurveCentroid(c, rotation)
-        else:
-            framedcurve = FramedCurveFrenet(c, rotation)
-
-        J = LPTorsionalStrainPenalty(framedcurve, width=1e-3, p=2, threshold=1e-8)
-
-        dofs = J.x
-
-        np.random.seed(1)
-        h = np.random.standard_normal(size=dofs.shape)
-        df = np.sum(J.dJ()*h)
-
-        errf_old = 1e10
-        for i in range(9, 14):
-            eps = 0.5**i
-            J.x = dofs + eps*h
-            f1 = J.J()
-            J.x = dofs - eps*h
-            f2 = J.J()
-            errf = np.abs((f1-f2)/(2*eps) - df)
-            assert errf < 0.3 * errf_old
-            errf_old = errf
+        _assert_central_difference_contraction(
+            partial(_make_torsion_objective, order, centroid)
+        )
