@@ -981,6 +981,12 @@ class SurfaceSurfaceDistance(Optimizable):
             self.surf2: self.surf2.dgamma_by_dcoeff_vjp(grad1)
         })
 
+    def shortest_distance(self):
+        """Return the minimum sampled distance between the two surface point clouds."""
+        from scipy.spatial.distance import cdist
+        gamma1 = self.surf1.gamma().reshape((-1, 3))
+        gamma2 = self.surf2.gamma().reshape((-1, 3))
+        return float(np.min(cdist(gamma1, gamma2)))
 
 
 class BoozerResidual(Optimizable):

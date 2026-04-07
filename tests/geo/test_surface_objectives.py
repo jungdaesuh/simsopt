@@ -1,8 +1,9 @@
 import unittest
 import numpy as np
+from simsopt._core.optimizable import Optimizable
 from simsopt.field.biotsavart import BiotSavart
 from simsopt.field.coil import coils_via_symmetries
-from simsopt.geo.surfaceobjectives import ToroidalFlux, QfmResidual, parameter_derivatives, Volume, PrincipalCurvature, MajorRadius, Iotas, NonQuasiSymmetricRatio, BoozerResidual
+from simsopt.geo.surfaceobjectives import ToroidalFlux, QfmResidual, parameter_derivatives, Volume, PrincipalCurvature, MajorRadius, Iotas, NonQuasiSymmetricRatio, BoozerResidual, SurfaceSurfaceDistance
 from simsopt.configs.zoo import get_ncsx_data
 from .surface_test_helpers import get_surface, get_exact_surface, get_boozer_surface
 
@@ -222,6 +223,35 @@ class ParameterDerivativesTest(unittest.TestCase):
         dvol = vol.dJ_by_dsurfacecoefficients()
         for i in range(len(dofs)):
             self.assertAlmostEqual(dvol_sg[i], dvol[i], places=10)
+
+
+class SurfaceSurfaceDistanceTests(unittest.TestCase):
+    def test_shortest_distance_matches_sampled_point_cloud_minimum(self):
+        class _FakeSurface(Optimizable):
+            def __init__(self, gamma):
+                self._gamma = np.asarray(gamma, dtype=float)
+                super().__init__(x0=np.zeros(0))
+
+            def gamma(self):
+                return self._gamma
+
+            def dgamma_by_dcoeff_vjp(self, grad):
+                return np.asarray(grad, dtype=float)
+
+        surf1 = _FakeSurface(
+            [
+                [[0.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+                [[1.0, 0.0, 0.0], [1.0, 1.0, 0.0]],
+            ]
+        )
+        surf2 = _FakeSurface(
+            [
+                [[0.0, 0.0, 0.5], [2.0, 2.0, 2.0]],
+            ]
+        )
+        objective = SurfaceSurfaceDistance(surf1, surf2, minimum_distance=0.1)
+
+        self.assertAlmostEqual(objective.shortest_distance(), 0.5)
 
 
 class QfmTests(unittest.TestCase):
