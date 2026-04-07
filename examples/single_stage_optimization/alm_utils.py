@@ -188,25 +188,29 @@ def augmented_objective(
     penalty: float,
 ):
     constraint_values = np.asarray(constraint_values, dtype=float)
+    constraint_grad_list = [
+        np.asarray(constraint_grad, dtype=float) for constraint_grad in constraint_grads
+    ]
     multipliers = np.asarray(multipliers, dtype=float)
     total_value = float(base_value) + float(np.dot(multipliers, constraint_values))
     total_value += 0.5 * float(penalty) * float(np.dot(constraint_values, constraint_values))
 
     total_grad = np.array(base_grad, copy=True)
     for multiplier, constraint_value, constraint_grad in zip(
-        multipliers, constraint_values, constraint_grads
+        multipliers, constraint_values, constraint_grad_list
     ):
         weight = float(multiplier) + float(penalty) * float(constraint_value)
-        total_grad = total_grad + weight * np.asarray(constraint_grad)
+        total_grad = total_grad + weight * constraint_grad
 
-    return {
-        "total": total_value,
-        "base_value": float(base_value),
-        "grad": total_grad,
-        "constraint_values": constraint_values,
-        "max_violation": float(np.max(constraint_values)) if constraint_values.size > 0 else 0.0,
-        "stationarity_norm": float(np.linalg.norm(total_grad)),
-    }
+    return _build_augmented_evaluation(
+        base_value=float(base_value),
+        total_value=total_value,
+        total_grad=total_grad,
+        constraint_values=constraint_values,
+        constraint_grads=constraint_grad_list,
+        dual_update_values=constraint_values,
+        feasibility_values=constraint_values,
+    )
 
 
 def augmented_inequality_objective(
@@ -218,6 +222,9 @@ def augmented_inequality_objective(
     penalty: float,
 ):
     constraint_values = np.asarray(constraint_values, dtype=float)
+    constraint_grad_list = [
+        np.asarray(constraint_grad, dtype=float) for constraint_grad in constraint_grads
+    ]
     multipliers = np.asarray(multipliers, dtype=float)
     positive_shift = np.maximum(0.0, multipliers + float(penalty) * constraint_values)
 
@@ -228,24 +235,51 @@ def augmented_inequality_objective(
         )
 
     total_grad = np.array(base_grad, copy=True)
-    for active_multiplier, constraint_grad in zip(positive_shift, constraint_grads):
-        total_grad = total_grad + float(active_multiplier) * np.asarray(
-            constraint_grad,
-            dtype=float,
-        )
+    for active_multiplier, constraint_grad in zip(positive_shift, constraint_grad_list):
+        total_grad = total_grad + float(active_multiplier) * constraint_grad
 
-    return {
-        "total": total_value,
-        "base_value": float(base_value),
-        "grad": total_grad,
-        "constraint_values": constraint_values,
-        "max_violation": float(np.max(constraint_values)) if constraint_values.size > 0 else 0.0,
-        "stationarity_norm": float(np.linalg.norm(total_grad)),
-    }
+    feasibility_values = np.maximum(constraint_values, 0.0)
+    return _build_augmented_evaluation(
+        base_value=float(base_value),
+        total_value=total_value,
+        total_grad=total_grad,
+        constraint_values=constraint_values,
+        constraint_grads=constraint_grad_list,
+        dual_update_values=constraint_values,
+        feasibility_values=feasibility_values,
+    )
 
 
 def zero_gradient_like(reference_grad):
     return np.zeros_like(np.asarray(reference_grad))
+
+
+def _build_augmented_evaluation(
+    *,
+    base_value: float,
+    total_value: float,
+    total_grad,
+    constraint_values: np.ndarray,
+    constraint_grads: Sequence[np.ndarray],
+    dual_update_values,
+    feasibility_values,
+):
+    dual_update_array = np.asarray(dual_update_values, dtype=float)
+    feasibility_array = np.asarray(feasibility_values, dtype=float)
+    stationarity_norm = float(np.linalg.norm(np.asarray(total_grad, dtype=float)))
+    max_feasibility_violation = _max_value(feasibility_array)
+    return {
+        "total": float(total_value),
+        "base_value": float(base_value),
+        "grad": np.asarray(total_grad, dtype=float),
+        "constraint_values": np.asarray(constraint_values, dtype=float),
+        "constraint_grads": [np.asarray(constraint_grad, dtype=float) for constraint_grad in constraint_grads],
+        "dual_update_values": dual_update_array,
+        "feasibility_values": feasibility_array,
+        "max_violation": max_feasibility_violation,
+        "max_feasibility_violation": max_feasibility_violation,
+        "stationarity_norm": stationarity_norm,
+    }
 
 
 def _as_float_array(values) -> np.ndarray:

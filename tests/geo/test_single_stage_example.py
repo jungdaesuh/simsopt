@@ -2441,7 +2441,7 @@ class AlmUtilsTests(unittest.TestCase):
         np.testing.assert_allclose(evaluation["grad"], np.array([13.0, -1.0]))
         self.assertAlmostEqual(evaluation["max_violation"], 0.5)
 
-    def test_minimize_alm_solves_simple_quadratic_with_upper_bound_constraint(self):
+    def test_minimize_alm_solves_simple_quadratic_with_signed_upper_bound_constraint(self):
         module = load_alm_utils_module()
         settings = module.ALMSettings(
             max_outer_iterations=6,
@@ -2454,13 +2454,13 @@ class AlmUtilsTests(unittest.TestCase):
         def evaluate_problem(x, multipliers, penalty):
             value = 0.5 * (x[0] - 2.0) ** 2
             grad = np.array([x[0] - 2.0])
-            constraint_value = module.upper_bound_residual(x[0], 1.0)
-            constraint_grad = np.array([1.0]) if constraint_value > 0.0 else np.array([0.0])
-            return module.augmented_objective(
+            signed_constraint_value = np.array([x[0] - 1.0])
+            constraint_grad = [np.array([1.0])]
+            return module.augmented_inequality_objective(
                 value,
                 grad,
-                [constraint_value],
-                [constraint_grad],
+                signed_constraint_value,
+                constraint_grad,
                 multipliers,
                 penalty,
             )

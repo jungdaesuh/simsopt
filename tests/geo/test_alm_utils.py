@@ -76,6 +76,35 @@ class ResidualHelperTests(unittest.TestCase):
         self.assertAlmostEqual(evaluation["total"], 3.6875)
         np.testing.assert_allclose(evaluation["grad"], np.array([1.0, 7.0]))
         self.assertAlmostEqual(evaluation["max_violation"], 0.5)
+        np.testing.assert_allclose(evaluation["dual_update_values"], np.array([-1.0, 0.5]))
+        np.testing.assert_allclose(evaluation["feasibility_values"], np.array([0.0, 0.5]))
+        np.testing.assert_allclose(
+            evaluation["constraint_grads"],
+            [np.array([2.0, 0.0]), np.array([0.0, 4.0])],
+        )
+        self.assertAlmostEqual(evaluation["max_feasibility_violation"], 0.5)
+
+    def test_augmented_objective_exposes_solver_constraint_metadata(self):
+        module = load_alm_utils_module()
+
+        evaluation = module.augmented_objective(
+            base_value=3.0,
+            base_grad=np.array([1.0, -1.0]),
+            constraint_values=[0.5, 0.0],
+            constraint_grads=[np.array([2.0, 0.0]), np.array([0.0, 0.0])],
+            multipliers=np.array([1.0, 7.0]),
+            penalty=10.0,
+        )
+
+        self.assertAlmostEqual(evaluation["total"], 4.75)
+        np.testing.assert_allclose(evaluation["grad"], np.array([13.0, -1.0]))
+        np.testing.assert_allclose(evaluation["dual_update_values"], np.array([0.5, 0.0]))
+        np.testing.assert_allclose(evaluation["feasibility_values"], np.array([0.5, 0.0]))
+        np.testing.assert_allclose(
+            evaluation["constraint_grads"],
+            [np.array([2.0, 0.0]), np.array([0.0, 0.0])],
+        )
+        self.assertAlmostEqual(evaluation["max_feasibility_violation"], 0.5)
 
 
 class MinimizeAlmTests(unittest.TestCase):
@@ -209,6 +238,79 @@ class MinimizeAlmTests(unittest.TestCase):
 
         self.assertFalse(result["passed"])
         self.assertGreater(result["max_ratio"], result["ratio_threshold"])
+
+    def test_minimize_alm_solves_simple_quadratic_with_signed_upper_bound_constraint(self):
+        module = load_alm_utils_module()
+        settings = module.ALMSettings(
+            max_outer_iterations=6,
+            penalty_init=1.0,
+            penalty_scale=10.0,
+            feasibility_tol=1e-8,
+            stationarity_tol=1e-8,
+        )
+
+        def evaluate_problem(x, multipliers, penalty):
+            value = 0.5 * (x[0] - 2.0) ** 2
+            grad = np.array([x[0] - 2.0])
+            signed_constraint_value = np.array([x[0] - 1.0])
+            constraint_grad = [np.array([1.0])]
+            return module.augmented_inequality_objective(
+                value,
+                grad,
+                signed_constraint_value,
+                constraint_grad,
+                multipliers,
+                penalty,
+            )
+
+        result = module.minimize_alm(
+            np.array([0.0]),
+            ["x_upper_bound"],
+            evaluate_problem,
+            settings,
+            {"maxiter": 50, "maxcor": 20, "ftol": 1e-12, "gtol": 1e-12},
+        )
+
+        self.assertTrue(result.success)
+        self.assertLessEqual(result.x[0], 1.0 + 1e-6)
+        self.assertLessEqual(result.constraint_values[0], 1e-6)
+        self.assertAlmostEqual(result.history[0]["kkt_stationarity_norm"], 0.0)
+
+    def test_minimize_alm_requires_signed_constraint_activity_for_boundary_kkt_success(self):
+        module = load_alm_utils_module()
+        settings = module.ALMSettings(
+            max_outer_iterations=1,
+            penalty_init=1.0,
+            penalty_scale=10.0,
+            feasibility_tol=1e-12,
+            stationarity_tol=1e-12,
+        )
+
+        def evaluate_problem(x, multipliers, penalty):
+            value = 0.5 * (x[0] - 2.0) ** 2
+            grad = np.array([x[0] - 2.0])
+            residual = module.upper_bound_residual(x[0], 1.0)
+            constraint_grad = np.array([1.0]) if residual > 0.0 else np.array([0.0])
+            return module.augmented_objective(
+                value,
+                grad,
+                [residual],
+                [constraint_grad],
+                multipliers,
+                penalty,
+            )
+
+        result = module.minimize_alm(
+            np.array([0.0]),
+            ["x_upper_bound"],
+            evaluate_problem,
+            settings,
+            {"maxiter": 50, "maxcor": 20, "ftol": 1e-12, "gtol": 1e-12},
+        )
+
+        self.assertFalse(result.success)
+        self.assertAlmostEqual(result.x[0], 1.0)
+        self.assertEqual(result.multipliers, [0.0])
 
     def test_minimize_alm_keeps_current_iterate_after_all_trials_are_rejected(self):
         module = load_alm_utils_module()
