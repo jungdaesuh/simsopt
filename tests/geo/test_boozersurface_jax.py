@@ -1368,6 +1368,48 @@ class TestBoozerSurfaceJAXClass:
         assert res["optimizer_method"] == "lm-ondevice"
         assert res["success"] is True
 
+    def test_run_code_uses_quasi_newton_for_fixed_G_ondevice_lm_option(
+        self, monkeypatch
+    ):
+        booz = _make_mock_boozer_surface()
+        booz.options["optimizer_backend"] = "ondevice"
+        booz.options["least_squares_algorithm"] = "lm"
+
+        captured = {}
+
+        def forbidden_jax_least_squares(*args, **kwargs):
+            raise AssertionError("fixed-G ondevice path should not enter lm-ondevice")
+
+        def fake_jax_minimize(
+            fun,
+            x0,
+            *,
+            method,
+            tol,
+            maxiter,
+            options,
+            progress_callback=None,
+        ):
+            del fun, tol, maxiter, options, progress_callback
+            captured["method"] = method
+            return _successful_minimize_result(x0)
+
+        def fake_newton_polish(
+            _objective_fn, x0, *, maxiter, tol, stab, progress_callback=None
+        ):
+            del maxiter, tol, stab, progress_callback
+            return _successful_newton_polish_result(x0)
+
+        monkeypatch.setattr(_bsj, "jax_least_squares", forbidden_jax_least_squares)
+        monkeypatch.setattr(_bsj, "jax_minimize", fake_jax_minimize)
+        _patch_newton_polish_runner(monkeypatch, fake_newton_polish)
+
+        res = booz.run_code(iota=0.3, G=None)
+
+        assert captured["method"] == "bfgs-ondevice"
+        assert res["optimizer_method"] == "bfgs-ondevice"
+        assert res["success"] is True
+
     @pytest.mark.parametrize("optimizer_backend", ["scipy", "hybrid"])
     def test_run_code_rejects_non_ondevice_ls_lane_in_strict_mode(
         self,
@@ -1573,25 +1615,31 @@ class TestBoozerSurfaceJAXClass:
         _assert_linear_lm_result(result, A=A, b=b)
         assert bool(result["success"])
 
-    def test_jax_minimize_rejects_explicit_value_grad_fallback_in_strict_mode(
+    def test_jax_minimize_allows_explicit_value_grad_ondevice_in_strict_mode(
         self,
         monkeypatch,
         request,
     ):
-        """Strict JAX mode must reject the host-loop explicit value/grad path."""
+        """Strict JAX mode must allow the JAX-native explicit value/grad path."""
 
-        def _explicit_value_grad(x):
-            x = jnp.asarray(x, dtype=jnp.float64)
-            return jnp.sum(x**2), 2.0 * x
+        target = jnp.asarray([2.0, -1.0], dtype=jnp.float64)
+        x0 = jnp.asarray([5.0, 3.0], dtype=jnp.float64)
 
-        _assert_strict_jax_minimize_rejection(
-            monkeypatch,
-            request,
+        def objective_value_and_grad(x):
+            diff = jnp.asarray(x, dtype=jnp.float64) - target
+            return 0.5 * jnp.dot(diff, diff), diff
+
+        _enable_strict_jax_backend(monkeypatch, request)
+        result = jax_minimize(
+            objective_value_and_grad,
+            x0,
             method="lbfgs-ondevice",
-            match="explicit host-loop value-and-gradient optimizer fallback.*strict=True",
-            fun=_explicit_value_grad,
             value_and_grad=True,
         )
+
+        assert result.success is True
+        assert result.nit > 0
+        np.testing.assert_allclose(result.x, np.asarray(target), atol=1e-10)
 
     @pytest.mark.parametrize("optimizer_backend", ["hybrid", "ondevice"])
     def test_run_code_rejects_target_backend_without_x64(
