@@ -21,6 +21,58 @@ class ALMSettings:
     max_inner_attempts: int = 4
 
 
+@dataclass(frozen=True)
+class ALMInnerSolveProfile:
+    name: str
+    maxiter_cap: int | None
+    maxls_cap: int | None
+    ftol_floor: float | None
+    default_maxls: int = 20
+
+
+_UNBOUNDED_INNER_PROFILE = ALMInnerSolveProfile(
+    name="unbounded",
+    maxiter_cap=None,
+    maxls_cap=None,
+    ftol_floor=None,
+)
+_BOXED_INFEASIBLE_INITIAL_PROFILE = ALMInnerSolveProfile(
+    name="boxed_infeasible_initial",
+    maxiter_cap=16,
+    maxls_cap=12,
+    ftol_floor=1e-13,
+)
+_BOXED_INFEASIBLE_CONTINUATION_PROFILE = ALMInnerSolveProfile(
+    name="boxed_infeasible_continuation",
+    maxiter_cap=10,
+    maxls_cap=10,
+    ftol_floor=1e-13,
+)
+_BOXED_FEASIBLE_INITIAL_PROFILE = ALMInnerSolveProfile(
+    name="boxed_feasible_initial",
+    maxiter_cap=12,
+    maxls_cap=8,
+    ftol_floor=1e-11,
+)
+_BOXED_FEASIBLE_CONTINUATION_PROFILE = ALMInnerSolveProfile(
+    name="boxed_feasible_continuation",
+    maxiter_cap=8,
+    maxls_cap=8,
+    ftol_floor=1e-11,
+)
+_DEFAULT_TAYLOR_EPSILONS = tuple(float(0.5**power) for power in range(7, 13))
+_BOXED_INNER_PROFILES = {
+    (False, False): _BOXED_INFEASIBLE_INITIAL_PROFILE,
+    (False, True): _BOXED_INFEASIBLE_CONTINUATION_PROFILE,
+    (True, False): _BOXED_FEASIBLE_INITIAL_PROFILE,
+    (True, True): _BOXED_FEASIBLE_CONTINUATION_PROFILE,
+}
+_ACCEPTANCE_TOTAL_ATOL = 1e-10
+_ACCEPTANCE_TOTAL_RTOL = 1e-3
+_ACCEPTANCE_MOVE_TOL = 1e-12
+_PLATEAU_STALL_LIMIT = 2
+
+
 class _EarlyStopInnerSolve(RuntimeError):
     def __init__(self, x, evaluation: dict):
         super().__init__("ALM inner solve satisfied the KKT stationarity gate.")
@@ -214,13 +266,97 @@ def _made_meaningful_inner_progress(
     return moved or improved_objective or improved_stationarity
 
 
-def _build_box_bounds(center: np.ndarray, trust_radius: float | None):
+def _acceptable_total_upper_bound(current_total: float) -> float:
+    total_scale = max(np.finfo(float).eps, abs(float(current_total)))
+    return float(current_total) + _ACCEPTANCE_TOTAL_ATOL + (
+        _ACCEPTANCE_TOTAL_RTOL * total_scale
+    )
+
+
+def _candidate_is_acceptable(
+    current_eval: dict,
+    candidate_eval: dict,
+    result,
+    moved_norm: float,
+    update_feasibility_tol: float,
+) -> bool:
+    if not (
+        bool(getattr(result, "success", False))
+        or int(getattr(result, "nit", 0)) > 0
+        or float(moved_norm) > _ACCEPTANCE_MOVE_TOL
+    ):
+        return False
+
+    (
+        _current_solver_values,
+        _current_feasibility_values,
+        _current_dual_update_values,
+        current_max_feasibility_violation,
+    ) = _extract_constraint_state(current_eval)
+    (
+        _candidate_solver_values,
+        _candidate_feasibility_values,
+        _candidate_dual_update_values,
+        candidate_max_feasibility_violation,
+    ) = _extract_constraint_state(candidate_eval)
+    allowed_max_feasibility = max(
+        float(update_feasibility_tol),
+        float(current_max_feasibility_violation),
+    ) + _ACCEPTANCE_TOTAL_ATOL
+    if float(candidate_max_feasibility_violation) > allowed_max_feasibility:
+        return False
+
+    candidate_total = float(candidate_eval["total"])
+    return candidate_total <= _acceptable_total_upper_bound(float(current_eval["total"]))
+
+
+def _should_converge_on_feasible_plateau(
+    *,
+    max_feasibility_violation: float,
+    stationarity_norm: float,
+    settings: ALMSettings,
+    update_stationarity_tol: float,
+    initial_update_stationarity_tol: float,
+) -> bool:
+    return (
+        float(max_feasibility_violation) <= float(settings.feasibility_tol)
+        and float(stationarity_norm) <= float(update_stationarity_tol)
+        and float(update_stationarity_tol) < float(initial_update_stationarity_tol)
+    )
+
+
+def _normalize_trust_radius(trust_radius: float | None) -> float | None:
     if trust_radius is None:
         return None
-    widths = float(trust_radius) * np.maximum(1.0, np.abs(np.asarray(center, dtype=float)))
+    normalized = float(trust_radius)
+    if normalized <= 0.0:
+        return None
+    return normalized
+
+
+def _build_box_bounds(center: np.ndarray, trust_radius: float | None):
+    normalized_trust_radius = _normalize_trust_radius(trust_radius)
+    if normalized_trust_radius is None:
+        return None
+    widths = normalized_trust_radius * np.maximum(
+        1.0, np.abs(np.asarray(center, dtype=float))
+    )
     return [
         (float(value - width), float(value + width))
         for value, width in zip(np.asarray(center, dtype=float), widths)
+    ]
+
+
+def _select_inner_solve_profile(
+    *,
+    trust_radius: float | None,
+    continuation_iteration: int,
+    feasible_enough: bool,
+) -> ALMInnerSolveProfile:
+    if _normalize_trust_radius(trust_radius) is None:
+        return _UNBOUNDED_INNER_PROFILE
+    return _BOXED_INNER_PROFILES[
+        (bool(feasible_enough), bool(continuation_iteration > 0))
     ]
 
 
@@ -228,9 +364,7 @@ def _build_inner_options(
     inner_options: dict,
     update_stationarity_tol: float,
     *,
-    trust_radius: float | None,
-    continuation_iteration: int,
-    feasible_enough: bool,
+    profile: ALMInnerSolveProfile,
 ) -> dict:
     options = dict(inner_options)
     base_gtol = float(options.get("gtol", 1e-12))
@@ -239,28 +373,19 @@ def _build_inner_options(
         min(1e-4, 0.1 * float(update_stationarity_tol)),
     )
     options["gtol"] = max(base_gtol, staged_gtol)
-    options["maxls"] = max(1, int(options.get("maxls", 20)))
+    options["maxls"] = max(1, int(options.get("maxls", profile.default_maxls)))
 
-    if trust_radius is None:
+    if profile.maxiter_cap is None or profile.maxls_cap is None or profile.ftol_floor is None:
         return options
 
     requested_maxiter = max(1, int(options.get("maxiter", 150)))
-    requested_maxls = max(1, int(options.get("maxls", 20)))
+    requested_maxls = max(1, int(options.get("maxls", profile.default_maxls)))
     requested_maxfun = options.get("maxfun")
     base_ftol = float(options.get("ftol", 1e-15))
 
-    if feasible_enough:
-        maxiter_cap = 8 if continuation_iteration > 0 else 12
-        maxls_cap = 8
-        ftol_floor = 1e-11
-    else:
-        maxiter_cap = 10 if continuation_iteration > 0 else 16
-        maxls_cap = 10 if continuation_iteration > 0 else 12
-        ftol_floor = 1e-13
-
-    options["maxiter"] = min(requested_maxiter, maxiter_cap)
-    options["maxls"] = min(requested_maxls, maxls_cap)
-    options["ftol"] = max(base_ftol, ftol_floor)
+    options["maxiter"] = min(requested_maxiter, profile.maxiter_cap)
+    options["maxls"] = min(requested_maxls, profile.maxls_cap)
+    options["ftol"] = max(base_ftol, profile.ftol_floor)
 
     maxfun_cap = max(
         20,
@@ -271,6 +396,85 @@ def _build_inner_options(
     else:
         options["maxfun"] = min(max(1, int(requested_maxfun)), maxfun_cap)
     return options
+
+
+def run_directional_taylor_test(
+    evaluate_problem: Callable[[np.ndarray, np.ndarray, float], dict],
+    x0,
+    multipliers,
+    penalty: float,
+    *,
+    direction=None,
+    epsilons: Sequence[float] | None = None,
+    seed: int = 1,
+    ratio_threshold: float = 0.6,
+) -> dict:
+    x = np.asarray(x0, dtype=float).copy()
+    multiplier_array = np.asarray(multipliers, dtype=float).copy()
+    if direction is None:
+        rng = np.random.RandomState(seed)
+        direction_array = rng.standard_normal(size=x.shape)
+    else:
+        direction_array = np.asarray(direction, dtype=float).copy()
+    if direction_array.shape != x.shape:
+        raise ValueError("direction must have the same shape as x0")
+    direction_norm = float(np.linalg.norm(direction_array))
+    if direction_norm <= np.finfo(float).eps:
+        raise ValueError("direction must be nonzero")
+    unit_direction = direction_array / direction_norm
+
+    taylor_epsilons = (
+        _DEFAULT_TAYLOR_EPSILONS
+        if epsilons is None
+        else tuple(float(epsilon) for epsilon in epsilons)
+    )
+    if len(taylor_epsilons) == 0:
+        raise ValueError("epsilons must be non-empty")
+
+    base_eval = evaluate_problem(x, multiplier_array, float(penalty))
+    base_total = float(base_eval["total"])
+    base_grad = np.asarray(base_eval["grad"], dtype=float)
+    directional_derivative = float(np.dot(base_grad.reshape(-1), unit_direction.reshape(-1)))
+    error_floor = 1e-10 * max(1.0, abs(directional_derivative))
+
+    errors = []
+    central_estimates = []
+    ratios = []
+    passed = True
+    previous_error = None
+    for epsilon in taylor_epsilons:
+        plus_eval = evaluate_problem(x + float(epsilon) * unit_direction, multiplier_array, float(penalty))
+        minus_eval = evaluate_problem(x - float(epsilon) * unit_direction, multiplier_array, float(penalty))
+        central_estimate = (
+            float(plus_eval["total"]) - float(minus_eval["total"])
+        ) / (2.0 * float(epsilon))
+        error = abs(central_estimate - directional_derivative)
+        central_estimates.append(float(central_estimate))
+        errors.append(float(error))
+
+        ratio = None
+        if previous_error is not None and previous_error > error_floor:
+            ratio = float(error / previous_error)
+            if error > error_floor and ratio > float(ratio_threshold):
+                passed = False
+        ratios.append(ratio)
+        previous_error = error
+
+    finite_ratios = [ratio for ratio in ratios if ratio is not None]
+    return {
+        "passed": bool(passed),
+        "seed": int(seed),
+        "penalty": float(penalty),
+        "direction": unit_direction.tolist(),
+        "directional_derivative": directional_derivative,
+        "base_total": base_total,
+        "epsilons": [float(epsilon) for epsilon in taylor_epsilons],
+        "central_estimates": central_estimates,
+        "errors": errors,
+        "ratios": finite_ratios,
+        "max_ratio": max(finite_ratios) if finite_ratios else None,
+        "ratio_threshold": float(ratio_threshold),
+    }
 
 
 def _extract_constraint_state(evaluation: dict):
@@ -351,9 +555,18 @@ def _stationarity_metrics(
     feasibility_values: np.ndarray,
     feasibility_gate: float,
 ) -> tuple[float, float | None, float]:
-    raw_stationarity_norm = float(evaluation["stationarity_norm"])
+    metric_grad = np.asarray(
+        evaluation.get("metric_grad", evaluation["grad"]),
+        dtype=float,
+    )
+    raw_stationarity_norm = float(
+        evaluation.get(
+            "metric_stationarity_norm",
+            evaluation.get("stationarity_norm", np.linalg.norm(metric_grad)),
+        )
+    )
     kkt_stationarity_norm = _kkt_stationarity_norm(
-        evaluation["grad"],
+        metric_grad,
         evaluation.get("constraint_grads"),
         dual_update_values,
         feasibility_values,
@@ -375,6 +588,7 @@ def minimize_alm(
     settings: ALMSettings,
     inner_options: dict,
     inner_callback: Callable[[np.ndarray], None] | None = None,
+    accepted_callback: Callable[[np.ndarray], None] | None = None,
     outer_state_callback: Callable[[int, np.ndarray, float], None] | None = None,
 ):
     x = np.asarray(x0, dtype=float).copy()
@@ -386,16 +600,48 @@ def minimize_alm(
     last_result = None
     final_multipliers = multipliers.copy()
     final_penalty = penalty
-    trust_radius = (
-        None
-        if settings.trust_radius_init is None
-        else float(settings.trust_radius_init)
-    )
+    last_outer_iteration = 0
+    trust_radius = _normalize_trust_radius(settings.trust_radius_init)
     update_feasibility_tol = max(settings.feasibility_tol, 1.0 / penalty)
     update_stationarity_tol = max(settings.stationarity_tol, 1.0 / penalty)
+    initial_update_stationarity_tol = float(update_stationarity_tol)
     termination_reason = "max_outer"
 
+    def _build_result(
+        *,
+        success: bool,
+        message: str,
+        outer_iterations: int,
+        evaluation: dict,
+        multipliers_state: np.ndarray,
+        penalty_state: float,
+        inner_result,
+    ):
+        (
+            solver_constraint_values,
+            feasibility_values,
+            _dual_update_values,
+            _max_feasibility_violation,
+        ) = _extract_constraint_state(evaluation)
+        return SimpleNamespace(
+            x=x.copy(),
+            success=bool(success),
+            message=message,
+            nit=total_inner_iterations,
+            outer_iterations=int(outer_iterations),
+            constraint_names=list(constraint_names),
+            constraint_values=[float(value) for value in feasibility_values],
+            solver_constraint_values=[float(value) for value in solver_constraint_values],
+            multipliers=[float(value) for value in multipliers_state],
+            penalty=float(penalty_state),
+            trust_radius=trust_radius,
+            history=history,
+            inner_result=inner_result,
+            final_objective=float(evaluation["total"]),
+        )
+
     for outer_iteration in range(1, settings.max_outer_iterations + 1):
+        last_outer_iteration = outer_iteration
         if outer_state_callback is not None:
             outer_state_callback(outer_iteration, multipliers.copy(), penalty)
 
@@ -457,23 +703,14 @@ def minimize_alm(
                     f"max_violation={current_max_feasibility_violation:.3e}, "
                     f"stationarity={current_stationarity_norm:.3e}"
                 )
-                return SimpleNamespace(
-                    x=x,
+                return _build_result(
                     success=True,
                     message=message,
-                    nit=total_inner_iterations,
                     outer_iterations=outer_iteration,
-                    constraint_names=list(constraint_names),
-                    constraint_values=[float(value) for value in current_feasibility_values],
-                    solver_constraint_values=[
-                        float(value) for value in current_solver_constraint_values
-                    ],
-                    multipliers=[float(value) for value in multipliers],
-                    penalty=float(penalty),
-                    trust_radius=trust_radius,
-                    history=history,
+                    evaluation=current_eval,
+                    multipliers_state=multipliers,
+                    penalty_state=penalty,
                     inner_result=last_result,
-                    final_objective=float(current_eval["total"]),
                 )
 
             def inner_fun(inner_x):
@@ -514,17 +751,22 @@ def minimize_alm(
             last_attempt_result = None
             current_feasible_enough = current_max_feasibility_violation <= update_feasibility_tol
             last_inner_options = None
+            last_inner_profile = None
 
             for attempt_index in range(1, settings.max_inner_attempts + 1):
                 attempts = attempt_index
-                inner_attempt_options = _build_inner_options(
-                    inner_options,
-                    update_stationarity_tol,
+                current_inner_profile = _select_inner_solve_profile(
                     trust_radius=attempt_radius,
                     continuation_iteration=continuation_iteration,
                     feasible_enough=current_feasible_enough,
                 )
+                inner_attempt_options = _build_inner_options(
+                    inner_options,
+                    update_stationarity_tol,
+                    profile=current_inner_profile,
+                )
                 last_inner_options = dict(inner_attempt_options)
+                last_inner_profile = current_inner_profile.name
                 try:
                     result = minimize(
                         inner_fun,
@@ -548,12 +790,13 @@ def minimize_alm(
                     candidate_eval = early_stop.evaluation
                 last_attempt_result = result
                 attempt_iterations += int(getattr(result, "nit", 0))
-                candidate_total = float(candidate_eval["total"])
                 moved_norm = float(np.linalg.norm(candidate_x - x))
-                acceptable = candidate_total <= float(current_eval["total"]) + 1e-12 and (
-                    bool(getattr(result, "success", False))
-                    or int(getattr(result, "nit", 0)) > 0
-                    or moved_norm > 1e-12
+                acceptable = _candidate_is_acceptable(
+                    current_eval,
+                    candidate_eval,
+                    result,
+                    moved_norm,
+                    update_feasibility_tol,
                 )
                 if acceptable:
                     accepted_result = result
@@ -598,6 +841,8 @@ def minimize_alm(
             else:
                 x = candidate_x
                 final_eval = accepted_eval
+                if accepted_callback is not None:
+                    accepted_callback(x.copy())
             accepted_move_norm = float(np.linalg.norm(x - start_x))
             (
                 solver_constraint_values,
@@ -654,6 +899,7 @@ def minimize_alm(
                 "inner_maxfun": None
                 if last_inner_options is None or "maxfun" not in last_inner_options
                 else int(last_inner_options["maxfun"]),
+                "inner_profile": last_inner_profile,
                 "inner_attempts": int(attempts),
                 "accepted_move_norm": accepted_move_norm,
                 "objective_delta": float(current_eval["total"]) - float(final_eval["total"]),
@@ -673,23 +919,14 @@ def minimize_alm(
                     f"max_violation={max_feasibility_violation:.3e}, "
                     f"stationarity={stationarity_norm:.3e}"
                 )
-                return SimpleNamespace(
-                    x=x,
+                return _build_result(
                     success=True,
                     message=message,
-                    nit=total_inner_iterations,
                     outer_iterations=outer_iteration,
-                    constraint_names=list(constraint_names),
-                    constraint_values=[
-                        float(value) for value in feasibility_values
-                    ],
-                    solver_constraint_values=[float(value) for value in solver_constraint_values],
-                    multipliers=[float(value) for value in multipliers],
-                    penalty=float(penalty),
-                    trust_radius=trust_radius,
-                    history=history,
+                    evaluation=final_eval,
+                    multipliers_state=multipliers,
+                    penalty_state=penalty,
                     inner_result=result,
-                    final_objective=float(final_eval["total"]),
                 )
 
             if (
@@ -713,16 +950,25 @@ def minimize_alm(
 
             if max_feasibility_violation <= update_feasibility_tol:
                 feasible_stall_count = 0 if made_inner_progress else feasible_stall_count + 1
-                if continuation_iteration == settings.max_subproblem_continuations:
-                    history_entry["action"] = "subproblem_limit"
+                plateau_converged = _should_converge_on_feasible_plateau(
+                    max_feasibility_violation=max_feasibility_violation,
+                    stationarity_norm=stationarity_norm,
+                    settings=settings,
+                    update_stationarity_tol=update_stationarity_tol,
+                    initial_update_stationarity_tol=initial_update_stationarity_tol,
+                )
+                hit_stall_limit = (
+                    continuation_iteration == settings.max_subproblem_continuations
+                    or feasible_stall_count >= _PLATEAU_STALL_LIMIT
+                )
+                if hit_stall_limit:
                     history_entry["trust_radius"] = trust_radius
                     history_entry["feasible_stall_count"] = int(feasible_stall_count)
-                    termination_reason = "subproblem_limit"
-                    break
-                if feasible_stall_count >= 2:
+                    if plateau_converged:
+                        history_entry["action"] = "feasible_plateau"
+                        termination_reason = "feasible_plateau"
+                        break
                     history_entry["action"] = "subproblem_limit"
-                    history_entry["trust_radius"] = trust_radius
-                    history_entry["feasible_stall_count"] = int(feasible_stall_count)
                     termination_reason = "subproblem_limit"
                     break
                 if trust_radius is not None:
@@ -751,10 +997,13 @@ def minimize_alm(
             history_entry["trust_radius"] = trust_radius
             break
 
-        if termination_reason == "subproblem_limit":
+        if termination_reason in {"subproblem_limit", "feasible_plateau"}:
             break
 
-        if outer_iteration == settings.max_outer_iterations:
+        if (
+            outer_iteration == settings.max_outer_iterations
+            and termination_reason == "max_outer"
+        ):
             history[-1]["action"] = "max_outer"
             break
 
@@ -768,7 +1017,15 @@ def minimize_alm(
         max_feasibility_violation,
     ) = _extract_constraint_state(final_eval)
     stationarity_norm = float(final_eval["stationarity_norm"])
-    if termination_reason == "subproblem_limit":
+    if termination_reason == "feasible_plateau":
+        message = (
+            "ALM reached a feasible stationary plateau before final tolerance: "
+            f"max_violation={max_feasibility_violation:.3e}, "
+            f"stationarity={stationarity_norm:.3e}, "
+            f"final_feas_tol={settings.feasibility_tol:.3e}, "
+            f"final_stationarity_tol={settings.stationarity_tol:.3e}"
+        )
+    elif termination_reason == "subproblem_limit":
         message = (
             "ALM reached subproblem continuation limit: "
             f"max_violation={max_feasibility_violation:.3e}, "
@@ -780,21 +1037,12 @@ def minimize_alm(
             f"max_violation={max_feasibility_violation:.3e}, "
             f"stationarity={stationarity_norm:.3e}"
         )
-    return SimpleNamespace(
-        x=x,
+    return _build_result(
         success=False,
         message=message,
-        nit=total_inner_iterations,
-        outer_iterations=settings.max_outer_iterations,
-        constraint_names=list(constraint_names),
-        constraint_values=[
-            float(value) for value in feasibility_values
-        ],
-        solver_constraint_values=[float(value) for value in solver_constraint_values],
-        multipliers=[float(value) for value in final_multipliers],
-        penalty=float(final_penalty),
-        trust_radius=trust_radius,
-        history=history,
+        outer_iterations=last_outer_iteration,
+        evaluation=final_eval,
+        multipliers_state=final_multipliers,
+        penalty_state=final_penalty,
         inner_result=last_result,
-        final_objective=float(final_eval["total"]),
     )

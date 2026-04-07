@@ -43,7 +43,7 @@ from simsopt.field import (
 from simsopt.objectives import QuadraticPenalty
 from simsopt.objectives.utilities import forward_backward
 from simsopt._core.optimizable import load
-from simsopt._core.derivative import derivative_dec
+from simsopt._core.derivative import Derivative, derivative_dec
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 EXAMPLE_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, ".."))
@@ -52,8 +52,9 @@ import sys
 sys.path.insert(0, EXAMPLE_ROOT)
 from alm_utils import (
     ALMSettings,
-    augmented_objective,
+    augmented_inequality_objective,
     minimize_alm,
+    zero_gradient_like,
     validate_alm_cli_args,
 )
 from plotting_utils import norm_field_plot, cross_section_plot
@@ -65,6 +66,14 @@ DEFAULT_EQUILIBRIA_DIR = DATABASE_EQUILIBRIA_DIR if os.path.isdir(DATABASE_EQUIL
 DEFAULT_LOCAL_STAGE2_ROOT = os.path.join(EXAMPLE_ROOT, "STAGE_2")
 DEFAULT_DATABASE_STAGE2_ROOT = os.path.join(REPO_ROOT, "DATABASE", "COIL_OPTIMIZATION", "outputs")
 DEFAULT_SINGLE_STAGE_OUTPUT_ROOT = os.path.join(SCRIPT_DIR, "outputs")
+MU0_OVER_2PI = 2.0e-7
+_SMOOTHING_EPS = float(np.finfo(float).eps)
+SINGLE_STAGE_ALM_CONSTRAINT_NAMES = (
+    "coil_coil_spacing",
+    "coil_surface_spacing",
+    "max_curvature",
+    "surface_vessel_spacing",
+)
 DEFAULT_STAGE2_SEEDS_BY_PLASMA = {
     "wout_nfp22ginsburg_000_014417_iota15.nc": {
         "major_radius": 0.915,
@@ -75,6 +84,7 @@ DEFAULT_STAGE2_SEEDS_BY_PLASMA = {
         "curvature_weight": 0.0001,
         "curvature_threshold": 40.0,
         "banana_surf_radius": 0.22,
+        "tf_current_A": 1.0e5,
         "order": 2,
     },
     "wout_nfp22ginsburg_000_002084_iota20.nc": {
@@ -86,13 +96,226 @@ DEFAULT_STAGE2_SEEDS_BY_PLASMA = {
         "curvature_weight": 0.0001,
         "curvature_threshold": 40.0,
         "banana_surf_radius": 0.22,
+        "tf_current_A": 1.0e5,
         "order": 2,
     },
 }
 
 
+def _stable_softmax(values):
+    shifted = np.asarray(values, dtype=float) - float(np.max(values))
+    weights = np.exp(shifted)
+    return weights / float(np.sum(weights))
+
+
+def _smoothmax_selected(values, temperature):
+    temperature = max(float(temperature), _SMOOTHING_EPS)
+    shifted = (np.asarray(values, dtype=float) - float(np.max(values))) / temperature
+    weights = _stable_softmax(shifted)
+    smooth_value = float(np.max(values)) + temperature * float(np.log(np.sum(np.exp(shifted))))
+    return smooth_value, weights
+
+
+def _smoothmin_selected(values, temperature):
+    temperature = max(float(temperature), _SMOOTHING_EPS)
+    minimum_value = float(np.min(values))
+    shifted = -(np.asarray(values, dtype=float) - minimum_value) / temperature
+    weights = _stable_softmax(shifted)
+    smooth_value = minimum_value - temperature * float(np.log(np.sum(np.exp(shifted))))
+    return smooth_value, weights
+
+
+def _smooth_max_curvature_signed_constraint(curve, threshold, temperature, objective_optimizable):
+    kappa = np.asarray(curve.kappa(), dtype=float)
+    hard_max = float(np.max(kappa))
+    active_mask = kappa >= (hard_max - 4.0 * float(temperature))
+    if not np.any(active_mask):
+        active_mask[np.argmax(kappa)] = True
+    smooth_max, active_weights = _smoothmax_selected(kappa[active_mask], temperature)
+    full_weights = np.zeros_like(kappa)
+    full_weights[active_mask] = active_weights
+    grad = np.asarray(
+        curve.dkappa_by_dcoeff_vjp(full_weights)(objective_optimizable),
+        dtype=float,
+    )
+    signed_value = float(smooth_max - float(threshold))
+    return signed_value, grad, max(0.0, signed_value)
+
+
+def _smooth_min_curve_curve_signed_constraint(
+    curves,
+    minimum_distance,
+    temperature,
+    objective_optimizable,
+):
+    pair_blocks = []
+    hard_min = np.inf
+    for i, curve_i in enumerate(curves):
+        gamma_i = np.asarray(curve_i.gamma(), dtype=float)
+        for j in range(i):
+            curve_j = curves[j]
+            gamma_j = np.asarray(curve_j.gamma(), dtype=float)
+            diffs = gamma_i[:, None, :] - gamma_j[None, :, :]
+            dists = np.linalg.norm(diffs, axis=2)
+            hard_min = min(hard_min, float(np.min(dists)))
+            pair_blocks.append((i, j, diffs, dists))
+
+    if not pair_blocks:
+        return (
+            float(minimum_distance),
+            zero_gradient_like(objective_optimizable.x),
+            0.0,
+        )
+
+    selection_window = 4.0 * float(temperature)
+    selected_distances = []
+    selected_entries = []
+    for i, j, diffs, dists in pair_blocks:
+        mask = dists <= (hard_min + selection_window)
+        if not np.any(mask):
+            mask[np.unravel_index(np.argmin(dists), dists.shape)] = True
+        rows, cols = np.nonzero(mask)
+        selected_distances.append(dists[rows, cols])
+        selected_entries.append((i, j, rows, cols, diffs[rows, cols], dists[rows, cols]))
+
+    flat_distances = np.concatenate(selected_distances)
+    smooth_min, flat_weights = _smoothmin_selected(flat_distances, temperature)
+
+    point_gradients = [np.zeros_like(np.asarray(curve.gamma(), dtype=float)) for curve in curves]
+    offset = 0
+    for i, j, rows, cols, diffs, distances in selected_entries:
+        count = len(distances)
+        local_weights = flat_weights[offset:offset + count]
+        offset += count
+        directions = diffs / np.maximum(distances[:, None], _SMOOTHING_EPS)
+        np.add.at(point_gradients[i], rows, local_weights[:, None] * directions)
+        np.add.at(point_gradients[j], cols, -local_weights[:, None] * directions)
+
+    derivative = Derivative({})
+    for curve, point_gradient in zip(curves, point_gradients):
+        if np.any(point_gradient):
+            derivative += curve.dgamma_by_dcoeff_vjp(point_gradient)
+    grad = np.asarray(derivative(objective_optimizable), dtype=float)
+    signed_value = float(minimum_distance) - float(smooth_min)
+    return signed_value, grad, max(0.0, signed_value)
+
+
+def _smooth_min_curve_surface_signed_constraint(
+    curves,
+    surface,
+    minimum_distance,
+    temperature,
+    objective_optimizable,
+):
+    surface_gamma = np.asarray(surface.gamma(), dtype=float)
+    flat_surface = surface_gamma.reshape((-1, 3))
+    hard_min = np.inf
+    curve_blocks = []
+    for curve_index, curve in enumerate(curves):
+        curve_gamma = np.asarray(curve.gamma(), dtype=float)
+        diffs = curve_gamma[:, None, :] - flat_surface[None, :, :]
+        dists = np.linalg.norm(diffs, axis=2)
+        hard_min = min(hard_min, float(np.min(dists)))
+        curve_blocks.append((curve_index, diffs, dists))
+
+    selection_window = 4.0 * float(temperature)
+    selected_distances = []
+    selected_entries = []
+    for curve_index, diffs, dists in curve_blocks:
+        mask = dists <= (hard_min + selection_window)
+        if not np.any(mask):
+            mask[np.unravel_index(np.argmin(dists), dists.shape)] = True
+        rows, cols = np.nonzero(mask)
+        selected_distances.append(dists[rows, cols])
+        selected_entries.append((curve_index, rows, cols, diffs[rows, cols], dists[rows, cols]))
+
+    flat_distances = np.concatenate(selected_distances)
+    smooth_min, flat_weights = _smoothmin_selected(flat_distances, temperature)
+
+    curve_gradients = [np.zeros_like(np.asarray(curve.gamma(), dtype=float)) for curve in curves]
+    surface_gradient = np.zeros_like(flat_surface)
+    offset = 0
+    for curve_index, rows, cols, diffs, distances in selected_entries:
+        count = len(distances)
+        local_weights = flat_weights[offset:offset + count]
+        offset += count
+        directions = diffs / np.maximum(distances[:, None], _SMOOTHING_EPS)
+        np.add.at(curve_gradients[curve_index], rows, local_weights[:, None] * directions)
+        np.add.at(surface_gradient, cols, -local_weights[:, None] * directions)
+
+    derivative = Derivative({})
+    for curve, point_gradient in zip(curves, curve_gradients):
+        if np.any(point_gradient):
+            derivative += curve.dgamma_by_dcoeff_vjp(point_gradient)
+    if np.any(surface_gradient):
+        derivative += surface.dgamma_by_dcoeff_vjp(surface_gradient.reshape(surface_gamma.shape))
+    grad = np.asarray(derivative(objective_optimizable), dtype=float)
+    signed_value = float(minimum_distance) - float(smooth_min)
+    return signed_value, grad, max(0.0, signed_value)
+
+
+def _smooth_min_surface_surface_signed_constraint(
+    surface_1,
+    surface_2,
+    minimum_distance,
+    temperature,
+    objective_optimizable,
+):
+    gamma_1 = np.asarray(surface_1.gamma(), dtype=float)
+    gamma_2 = np.asarray(surface_2.gamma(), dtype=float)
+    flat_gamma_1 = gamma_1.reshape((-1, 3))
+    flat_gamma_2 = gamma_2.reshape((-1, 3))
+    diffs = flat_gamma_1[:, None, :] - flat_gamma_2[None, :, :]
+    dists = np.linalg.norm(diffs, axis=2)
+    hard_min = float(np.min(dists))
+    selection_window = 4.0 * float(temperature)
+    mask = dists <= (hard_min + selection_window)
+    if not np.any(mask):
+        mask[np.unravel_index(np.argmin(dists), dists.shape)] = True
+    rows, cols = np.nonzero(mask)
+    selected_distances = dists[rows, cols]
+    smooth_min, weights = _smoothmin_selected(selected_distances, temperature)
+
+    directions = diffs[rows, cols] / np.maximum(selected_distances[:, None], _SMOOTHING_EPS)
+    gradient_1 = np.zeros_like(flat_gamma_1)
+    gradient_2 = np.zeros_like(flat_gamma_2)
+    np.add.at(gradient_1, rows, weights[:, None] * directions)
+    np.add.at(gradient_2, cols, -weights[:, None] * directions)
+
+    derivative = Derivative({})
+    derivative += surface_1.dgamma_by_dcoeff_vjp(gradient_1.reshape(gamma_1.shape))
+    derivative += surface_2.dgamma_by_dcoeff_vjp(gradient_2.reshape(gamma_2.shape))
+    grad = np.asarray(derivative(objective_optimizable), dtype=float)
+    signed_value = float(minimum_distance) - float(smooth_min)
+    return signed_value, grad, max(0.0, signed_value)
+
+
 def format_compact_float(value):
     return f"{value:g}"
+
+
+def single_stage_constraint_activity_tolerances(
+    distance_smoothing,
+    curvature_smoothing,
+    *,
+    include_surface_surface,
+):
+    tolerances = [
+        4.0 * float(distance_smoothing),
+        4.0 * float(distance_smoothing),
+        4.0 * float(curvature_smoothing),
+    ]
+    if include_surface_surface:
+        tolerances.append(4.0 * float(distance_smoothing))
+    return np.asarray([max(value, _SMOOTHING_EPS) for value in tolerances], dtype=float)
+
+
+def physical_current_to_boozer_I(plasma_current_A):
+    return MU0_OVER_2PI * plasma_current_A
+
+
+def boozer_I_to_physical_current_A(boozer_I):
+    return boozer_I / MU0_OVER_2PI
 
 
 def add_confinement_surrogate_args(parser):
@@ -134,7 +357,18 @@ def add_confinement_surrogate_args(parser):
     )
 
 
-def format_local_stage2_seed_dir(major_radius, toroidal_flux, length_weight, cc_weight, cc_threshold, curvature_weight, curvature_threshold, banana_surf_radius, order):
+def format_local_stage2_seed_dir(
+    major_radius,
+    toroidal_flux,
+    length_weight,
+    cc_weight,
+    cc_threshold,
+    curvature_weight,
+    curvature_threshold,
+    banana_surf_radius,
+    tf_current_A,
+    order,
+):
     return (
         f"R0={format_compact_float(major_radius)}"
         f"-s={format_compact_float(toroidal_flux)}"
@@ -144,11 +378,21 @@ def format_local_stage2_seed_dir(major_radius, toroidal_flux, length_weight, cc_
         f"-CW={format_compact_float(curvature_weight)}"
         f"-CT={format_compact_float(curvature_threshold)}"
         f"-SR={banana_surf_radius:0.3f}"
+        f"-TFC={format_compact_float(tf_current_A)}"
         f"-Order={order}"
     )
 
 
-def format_database_stage2_seed_dir(major_radius, toroidal_flux, length_weight, cc_weight, curvature_weight, banana_surf_radius, order):
+def format_database_stage2_seed_dir(
+    major_radius,
+    toroidal_flux,
+    length_weight,
+    cc_weight,
+    curvature_weight,
+    banana_surf_radius,
+    tf_current_A,
+    order,
+):
     return (
         f"MR={format_compact_float(major_radius)}"
         f"-TF={format_compact_float(toroidal_flux)}"
@@ -156,6 +400,7 @@ def format_database_stage2_seed_dir(major_radius, toroidal_flux, length_weight, 
         f"-CCW={format_compact_float(cc_weight)}"
         f"-CW={format_compact_float(curvature_weight)}"
         f"-SR={format_compact_float(banana_surf_radius)}"
+        f"-TFC={format_compact_float(tf_current_A)}"
         f"-Order={order}"
     )
 
@@ -172,14 +417,37 @@ def build_stage2_bs_path(args):
             args.stage2_seed_cc_weight,
             args.stage2_seed_curvature_weight,
             args.stage2_seed_banana_surf_radius,
+            args.stage2_seed_tf_current_A,
             args.stage2_seed_order,
         )
-        return os.path.join(
+        candidate = os.path.join(
             args.database_stage2_root,
             f"outputs-{args.plasma_surf_filename}",
             seed_dir,
             "biot_savart_opt.json",
         )
+        if os.path.exists(candidate):
+            return candidate
+
+        legacy_dir = (
+            f"MR={format_compact_float(args.stage2_seed_major_radius)}"
+            f"-TF={format_compact_float(args.stage2_seed_toroidal_flux)}"
+            f"-LW={format_compact_float(args.stage2_seed_length_weight)}"
+            f"-CCW={format_compact_float(args.stage2_seed_cc_weight)}"
+            f"-CW={format_compact_float(args.stage2_seed_curvature_weight)}"
+            f"-SR={format_compact_float(args.stage2_seed_banana_surf_radius)}"
+            f"-Order={args.stage2_seed_order}"
+        )
+        legacy = os.path.join(
+            args.database_stage2_root,
+            f"outputs-{args.plasma_surf_filename}",
+            legacy_dir,
+            "biot_savart_opt.json",
+        )
+        if os.path.exists(legacy):
+            print(f"Note: found legacy Stage 2 database output at {legacy_dir}/ (missing TFC segment)")
+            return legacy
+        return candidate
 
     seed_dir = format_local_stage2_seed_dir(
         args.stage2_seed_major_radius,
@@ -190,6 +458,7 @@ def build_stage2_bs_path(args):
         args.stage2_seed_curvature_weight,
         args.stage2_seed_curvature_threshold,
         args.stage2_seed_banana_surf_radius,
+        args.stage2_seed_tf_current_A,
         args.stage2_seed_order,
     )
     candidate = os.path.join(
@@ -200,6 +469,27 @@ def build_stage2_bs_path(args):
     )
     if os.path.exists(candidate):
         return candidate
+
+    no_tfc_dir = (
+        f"R0={format_compact_float(args.stage2_seed_major_radius)}"
+        f"-s={format_compact_float(args.stage2_seed_toroidal_flux)}"
+        f"-LW={format_compact_float(args.stage2_seed_length_weight)}"
+        f"-CCW={format_compact_float(args.stage2_seed_cc_weight)}"
+        f"-CCT={format_compact_float(args.stage2_seed_cc_threshold)}"
+        f"-CW={format_compact_float(args.stage2_seed_curvature_weight)}"
+        f"-CT={format_compact_float(args.stage2_seed_curvature_threshold)}"
+        f"-SR={args.stage2_seed_banana_surf_radius:0.3f}"
+        f"-Order={args.stage2_seed_order}"
+    )
+    no_tfc_candidate = os.path.join(
+        args.local_stage2_root,
+        f"outputs-{args.plasma_surf_filename}",
+        no_tfc_dir,
+        "biot_savart_opt.json",
+    )
+    if os.path.exists(no_tfc_candidate):
+        print(f"Note: found legacy Stage 2 output at {no_tfc_dir}/ (missing TFC segment)")
+        return no_tfc_candidate
 
     # Fallback: legacy directory format without CCT/CT segments
     legacy_dir = (
@@ -233,6 +523,18 @@ def build_stage2_bs_path(args):
     if len(matches) == 1:
         print(f"Note: found unique basin-hopped Stage 2 output at {os.path.dirname(matches[0])}")
         return matches[0]
+    if len(matches) == 0:
+        legacy_pattern = os.path.join(parent, no_tfc_dir + "-BH=*", "biot_savart_opt.json")
+        matches = sorted(_glob(legacy_pattern))
+        if len(matches) == 1:
+            print(f"Note: found unique basin-hopped Stage 2 output at {os.path.dirname(matches[0])}")
+            return matches[0]
+    if len(matches) == 0:
+        legacy_pattern = os.path.join(parent, legacy_dir + "-BH=*", "biot_savart_opt.json")
+        matches = sorted(_glob(legacy_pattern))
+        if len(matches) == 1:
+            print(f"Note: found unique basin-hopped Stage 2 output at {os.path.dirname(matches[0])}")
+            return matches[0]
     if len(matches) > 1:
         match_dirs = "\n".join(f"  - {os.path.dirname(match)}" for match in matches)
         raise FileNotFoundError(
@@ -249,6 +551,52 @@ def load_stage2_results(stage2_bs_path):
     with open(stage2_results_path, "r", encoding="utf-8") as infile:
         stage2_results = json.load(infile)
     return stage2_results_path, stage2_results
+
+
+def infer_uniform_tf_current_A(tf_coils):
+    if not tf_coils:
+        return None
+    tf_currents = np.asarray([coil.current.get_value() for coil in tf_coils], dtype=float)
+    if np.allclose(tf_currents, tf_currents[0]):
+        return float(tf_currents[0])
+    return None
+
+
+def resolve_stage2_tf_current_A(stage2_results, tf_coils):
+    recorded_tf_current = stage2_results.get("TF_CURRENT_A")
+    if recorded_tf_current is not None:
+        return float(recorded_tf_current)
+    return infer_uniform_tf_current_A(tf_coils)
+
+
+def resolve_plasma_current_settings(args):
+    raw_boozer_I = args.boozer_I
+    plasma_current_A = args.plasma_current_A
+
+    if plasma_current_A is not None:
+        if raw_boozer_I is not None:
+            raise ValueError("Cannot use --plasma-current-A together with --boozer-I")
+        return {
+            "boozer_I": physical_current_to_boozer_I(plasma_current_A),
+            "plasma_current_A": float(plasma_current_A),
+            "input_source": "physical_A",
+            "mode": "boozer_surrogate",
+        }
+
+    if raw_boozer_I is not None:
+        return {
+            "boozer_I": float(raw_boozer_I),
+            "plasma_current_A": boozer_I_to_physical_current_A(raw_boozer_I),
+            "input_source": "raw_boozer_I",
+            "mode": "boozer_surrogate",
+        }
+
+    return {
+        "boozer_I": 0.0,
+        "plasma_current_A": 0.0,
+        "input_source": "default_zero",
+        "mode": "disabled",
+    }
 
 
 def build_equilibrium_path(args):
@@ -283,6 +631,8 @@ def apply_default_stage2_seed_args(args):
         args.stage2_seed_curvature_threshold = default_seed.get("curvature_threshold", 40.0)
     if args.stage2_seed_banana_surf_radius is None:
         args.stage2_seed_banana_surf_radius = default_seed.get("banana_surf_radius", 0.22)
+    if args.stage2_seed_tf_current_A is None:
+        args.stage2_seed_tf_current_A = default_seed.get("tf_current_A", 1.0e5)
     if args.stage2_seed_order is None:
         args.stage2_seed_order = default_seed.get("order", 2)
     return args
@@ -337,7 +687,18 @@ def parse_args():
             "(default 1.0). Use a negative value to select the exact Boozer Newton solver."
         ),
     )
-    parser.add_argument("--boozer-I", type=float, default=float(os.environ.get("BOOZER_I", "0.0")))
+    parser.add_argument(
+        "--boozer-I",
+        type=float,
+        default=float(os.environ["BOOZER_I"]) if "BOOZER_I" in os.environ else None,
+        help="Expert/internal Boozer-current input. Prefer --plasma-current-A.",
+    )
+    parser.add_argument(
+        "--plasma-current-A",
+        type=float,
+        default=float(os.environ["PLASMA_CURRENT_A"]) if "PLASMA_CURRENT_A" in os.environ else None,
+        help="User-facing enclosed toroidal plasma current in physical SI amperes.",
+    )
     parser.add_argument("--maxiter", type=int, default=int(os.environ.get("MAXITER", "300")))
     parser.add_argument(
         "--num-surfaces",
@@ -485,6 +846,54 @@ def parse_args():
         default=float(os.environ.get("ALM_STATIONARITY_TOL", "1e-6")),
         help="ALM augmented-gradient stopping tolerance (default 1e-6).",
     )
+    parser.add_argument(
+        "--alm-trust-radius-init",
+        type=float,
+        default=float(os.environ.get("ALM_TRUST_RADIUS_INIT", "0.05")),
+        help="Initial relative trust radius for bounded ALM inner solves (0 disables bounds).",
+    )
+    parser.add_argument(
+        "--alm-trust-radius-min",
+        type=float,
+        default=float(os.environ.get("ALM_TRUST_RADIUS_MIN", "1e-4")),
+        help="Minimum relative trust radius for bounded ALM inner solves.",
+    )
+    parser.add_argument(
+        "--alm-trust-radius-shrink",
+        type=float,
+        default=float(os.environ.get("ALM_TRUST_RADIUS_SHRINK", "0.5")),
+        help="Multiplicative shrink factor for the ALM inner trust radius.",
+    )
+    parser.add_argument(
+        "--alm-trust-radius-grow",
+        type=float,
+        default=float(os.environ.get("ALM_TRUST_RADIUS_GROW", "1.5")),
+        help="Multiplicative growth factor for the ALM inner trust radius after good steps.",
+    )
+    parser.add_argument(
+        "--alm-max-inner-attempts",
+        type=int,
+        default=int(os.environ.get("ALM_MAX_INNER_ATTEMPTS", "4")),
+        help="Maximum number of trust-radius retries per ALM outer iteration.",
+    )
+    parser.add_argument(
+        "--alm-max-subproblem-continuations",
+        type=int,
+        default=int(os.environ.get("ALM_MAX_SUBPROBLEM_CONTINUATIONS", "20")),
+        help="Maximum accepted-feasible continuation solves before forcing an ALM return.",
+    )
+    parser.add_argument(
+        "--alm-distance-smoothing",
+        type=float,
+        default=float(os.environ.get("ALM_DISTANCE_SMOOTHING", "0.005")),
+        help="Distance soft-min temperature for single-stage ALM spacing constraints.",
+    )
+    parser.add_argument(
+        "--alm-curvature-smoothing",
+        type=float,
+        default=float(os.environ.get("ALM_CURVATURE_SMOOTHING", "0.05")),
+        help="Curvature smooth-max temperature for single-stage ALM curvature constraints.",
+    )
     parser.add_argument("--iota-target", type=float, default=float(os.environ.get("IOTA_TARGET", "0.15")))
     parser.add_argument("--num-tf-coils", type=int, default=int(os.environ.get("NUM_TF_COILS", "20")))
     parser.add_argument(
@@ -573,6 +982,11 @@ def parse_args():
         "--stage2-seed-banana-surf-radius",
         type=float,
         default=float(os.environ["STAGE2_SEED_BANANA_SURF_RADIUS"]) if "STAGE2_SEED_BANANA_SURF_RADIUS" in os.environ else None,
+    )
+    parser.add_argument(
+        "--stage2-seed-tf-current-A",
+        type=float,
+        default=float(os.environ["STAGE2_SEED_TF_CURRENT_A"]) if "STAGE2_SEED_TF_CURRENT_A" in os.environ else None,
     )
     parser.add_argument(
         "--stage2-seed-order",
@@ -1371,6 +1785,8 @@ def build_run_identity_config(
     vol_target,
     iota_target,
     boozer_I,
+    plasma_current_A,
+    plasma_current_input_source,
     banana_surf_radius,
     nphi,
     ntheta,
@@ -1378,6 +1794,7 @@ def build_run_identity_config(
 ):
     return (
         f"{stage2_bs_path}|{stage}|{constraint_weight}|{constraint_method}|{vol_target}|{iota_target}|{boozer_I}"
+        f"|{plasma_current_A}"
         f"|{args.cc_dist}|{args.cc_weight}|{args.curvature_weight}|{args.curvature_threshold}"
         f"|{banana_surf_radius}|{nphi}|{ntheta}|{args.init_only}"
         f"|{args.basin_hops}|{args.basin_stepsize}|{rng_seed}"
@@ -1385,13 +1802,17 @@ def build_run_identity_config(
         f"|{args.alm_max_outer_iters}|{args.alm_penalty_init}|{args.alm_penalty_scale}"
         f"|{args.alm_feas_tol}|{args.alm_stationarity_tol}"
         f"|{args.num_surfaces}|{args.inner_surface_ratio}|{args.surface_gap_threshold}"
-        f"|{MULTISURFACE_RAMP_ITERATIONS}|{INNER_SURFACE_INITIAL_WEIGHT}"
+        f"|{args.multisurface_ramp_iterations}|{args.inner_surface_initial_weight}"
         f"|{args.multisurface_initial_step_scale}|{args.multisurface_initial_step_maxiter}"
-        f"|{TOPOLOGY_GATE_FIELDLINES}|{TOPOLOGY_GATE_TMAX}|{TOPOLOGY_GATE_TOL}|{TOPOLOGY_GATE_SURVIVAL_THRESHOLD}"
-        f"|{TOPOLOGY_SCORER_EVERY}|{TOPOLOGY_SCORER_NFIELDLINES}|{TOPOLOGY_SCORER_TMAX}"
-        f"|{CONFINEMENT_OBJECTIVE_WEIGHT}|{CONFINEMENT_SURROGATE_WORST_K}"
-        f"|{CONFINEMENT_SURROGATE_EARLY_THRESHOLD}|{CONFINEMENT_SURROGATE_MEAN_WEIGHT}"
-        f"|{CONFINEMENT_SURROGATE_WORST_WEIGHT}|{CONFINEMENT_SURROGATE_EARLY_WEIGHT}"
+        f"|{args.topology_gate_fieldlines}|{args.topology_gate_tmax}|{args.topology_gate_tol}|{args.topology_gate_survival_threshold}"
+        f"|{args.topology_gate_penalty_scale}"
+        f"|{args.topology_scorer_every}|{args.topology_scorer_nfieldlines}|{args.topology_scorer_tmax}"
+        f"|{args.confinement_objective_weight}|{args.confinement_surrogate_worst_k}"
+        f"|{args.confinement_surrogate_early_threshold}|{args.confinement_surrogate_mean_weight}"
+        f"|{args.confinement_surrogate_worst_weight}|{args.confinement_surrogate_early_weight}"
+        f"|{args.alm_trust_radius_init}|{args.alm_trust_radius_min}|{args.alm_trust_radius_shrink}"
+        f"|{args.alm_trust_radius_grow}|{args.alm_max_inner_attempts}|{args.alm_max_subproblem_continuations}"
+        f"|{args.alm_distance_smoothing}|{args.alm_curvature_smoothing}"
     )
 
 
@@ -1553,27 +1974,64 @@ def evaluate_alm_objective(
         LENGTH_WEIGHT,
     )
 
-    constraint_names = [
-        "coil_coil_spacing",
-        "coil_surface_spacing",
-        "max_curvature",
-    ]
+    curve_curve_signed_value, curve_curve_grad, curve_curve_violation = (
+        _smooth_min_curve_curve_signed_constraint(
+            curves,
+            CC_DIST,
+            args.alm_distance_smoothing,
+            JF,
+        )
+    )
+    curve_surface_signed_value, curve_surface_grad, curve_surface_violation = (
+        _smooth_min_curve_surface_signed_constraint(
+            curves,
+            outer_surface_data["boozer_surface"].surface,
+            CS_DIST,
+            args.alm_distance_smoothing,
+            JF,
+        )
+    )
+    curvature_signed_value, curvature_grad, curvature_violation = (
+        _smooth_max_curvature_signed_constraint(
+            banana_curve,
+            CURVATURE_THRESHOLD,
+            args.alm_curvature_smoothing,
+            JF,
+        )
+    )
+
+    constraint_names = list(SINGLE_STAGE_ALM_CONSTRAINT_NAMES[:3])
     constraint_values = [
-        float(JCurveCurve.J()),
-        float(JCurveSurface.J()),
-        float(JCurvature.J()),
+        curve_curve_signed_value,
+        curve_surface_signed_value,
+        curvature_signed_value,
     ]
     constraint_grads = [
-        np.asarray(JCurveCurve.dJ(), dtype=float),
-        np.asarray(JCurveSurface.dJ(), dtype=float),
-        np.asarray(JCurvature.dJ(), dtype=float),
+        curve_curve_grad,
+        curve_surface_grad,
+        curvature_grad,
+    ]
+    feasibility_values = [
+        curve_curve_violation,
+        curve_surface_violation,
+        curvature_violation,
     ]
     if JSurfSurf is not None:
-        constraint_names.append("surface_vessel_spacing")
-        constraint_values.append(float(JSurfSurf.J()))
-        constraint_grads.append(np.asarray(JSurfSurf.dJ(), dtype=float))
+        surface_vessel_signed_value, surface_vessel_grad, surface_vessel_violation = (
+            _smooth_min_surface_surface_signed_constraint(
+                outer_surface_data["boozer_surface"].surface,
+                VV,
+                SS_DIST,
+                args.alm_distance_smoothing,
+                JF,
+            )
+        )
+        constraint_names.append(SINGLE_STAGE_ALM_CONSTRAINT_NAMES[3])
+        constraint_values.append(surface_vessel_signed_value)
+        constraint_grads.append(surface_vessel_grad)
+        feasibility_values.append(surface_vessel_violation)
 
-    alm_eval = augmented_objective(
+    alm_eval = augmented_inequality_objective(
         base_eval["total"],
         base_eval["grad"],
         constraint_values,
@@ -1585,6 +2043,15 @@ def evaluate_alm_objective(
     base_eval.update(alm_eval)
     base_eval["base_total"] = base_total
     base_eval["constraint_names"] = constraint_names
+    base_eval["dual_update_values"] = np.asarray(constraint_values, dtype=float)
+    base_eval["feasibility_values"] = np.asarray(feasibility_values, dtype=float)
+    base_eval["max_feasibility_violation"] = float(max(feasibility_values))
+    base_eval["constraint_grads"] = [np.asarray(grad, dtype=float) for grad in constraint_grads]
+    base_eval["constraint_activity_tolerances"] = single_stage_constraint_activity_tolerances(
+        args.alm_distance_smoothing,
+        args.alm_curvature_smoothing,
+        include_surface_surface=JSurfSurf is not None,
+    )
     base_eval["J_cc"] = float(JCurveCurve.J())
     base_eval["dJ_cc"] = np.asarray(JCurveCurve.dJ(), dtype=float)
     base_eval["J_cs"] = float(JCurveSurface.J())
@@ -1642,6 +2109,24 @@ def set_alm_runtime_state(multipliers, penalty):
     global ALM_MULTIPLIERS, ALM_PENALTY
     ALM_MULTIPLIERS = np.asarray(multipliers, dtype=float).copy()
     ALM_PENALTY = float(penalty)
+
+
+def build_single_stage_alm_settings(args):
+    return ALMSettings(
+        max_outer_iterations=args.alm_max_outer_iters,
+        max_subproblem_continuations=args.alm_max_subproblem_continuations,
+        penalty_init=args.alm_penalty_init,
+        penalty_scale=args.alm_penalty_scale,
+        feasibility_tol=args.alm_feas_tol,
+        stationarity_tol=args.alm_stationarity_tol,
+        trust_radius_init=(
+            None if float(args.alm_trust_radius_init) == 0.0 else args.alm_trust_radius_init
+        ),
+        trust_radius_min=args.alm_trust_radius_min,
+        trust_radius_shrink=args.alm_trust_radius_shrink,
+        trust_radius_grow=args.alm_trust_radius_grow,
+        max_inner_attempts=args.alm_max_inner_attempts,
+    )
 
 
 def build_total_objective(JnonQSRatio, RES_WEIGHT, JBoozerResidual, IOTAS_WEIGHT, Jiota, LENGTH_WEIGHT, JCurveLength, CC_WEIGHT, JCurveCurve, CS_WEIGHT, JCurveSurface, CURVATURE_WEIGHT, JCurvature, SURF_DIST_WEIGHT=0.0, JSurfSurf=None):
@@ -1782,6 +2267,7 @@ def evaluate_search_step(x):
     success = stack_status['success']
 
     rejection_increment = None
+    objective_eval = None
 
     if success:
         search_surface_weights = build_surface_search_weights(
@@ -1793,8 +2279,6 @@ def evaluate_search_step(x):
         objective_eval = evaluate_search_objective(search_surface_weights)
         J = objective_eval['total']
         dJ = objective_eval['grad']
-        run_dict['last_successful_eval'] = objective_eval
-        run_dict['last_successful_eval_weights'] = np.asarray(search_surface_weights).copy()
         topology_status = evaluate_search_topology_gate(
             len(surface_data),
             outer_entry['boozer_surface'].surface,
@@ -1841,11 +2325,13 @@ def evaluate_search_step(x):
             if not hardware_status["success"]:
                 success = False
                 rejection_increment = max(abs(run_dict['J']), 1.0)
-                print("/!\\ /!\\ Hardware gate rejected candidate /!\\ /!\\")
+                print("/!\\ /!\\ Hardware constraints violated /!\\ /!\\")
                 for violation in hardware_status["violations"]:
                     print(violation)
 
         if success:
+            run_dict['last_successful_eval'] = objective_eval
+            run_dict['last_successful_eval_weights'] = np.asarray(search_surface_weights).copy()
             print(f"Volume: {outer_entry['boozer_surface'].surface.volume()}")
             print(f"Iota: {surface_iota_terms[-1].J()}")
             if len(surface_data) > 1:
@@ -1894,18 +2380,47 @@ def evaluate_search_step(x):
 
     evaluation = {"total": J, "grad": dJ}
     if CONSTRAINT_METHOD == "alm":
-        accepted_eval = run_dict.get("last_successful_eval", run_dict.get("search_eval"))
-        if accepted_eval is not None and "constraint_values" in accepted_eval:
+        metric_eval = objective_eval
+        if metric_eval is None or "constraint_values" not in metric_eval:
+            metric_eval = run_dict.get("last_successful_eval", run_dict.get("search_eval"))
+        if metric_eval is not None and "constraint_values" in metric_eval:
             evaluation.update(
                 {
-                    "constraint_values": np.asarray(accepted_eval["constraint_values"], dtype=float),
-                    "max_violation": float(accepted_eval["max_violation"]),
-                    "stationarity_norm": float(accepted_eval["stationarity_norm"]),
-                    "constraint_names": list(accepted_eval.get("constraint_names", [])),
+                    "constraint_values": np.asarray(metric_eval["constraint_values"], dtype=float),
+                    "max_violation": float(metric_eval["max_violation"]),
+                    "stationarity_norm": float(metric_eval["stationarity_norm"]),
+                    "metric_grad": np.asarray(
+                        metric_eval.get("grad", dJ),
+                        dtype=float,
+                    ),
+                    "metric_stationarity_norm": float(metric_eval["stationarity_norm"]),
+                    "constraint_names": list(metric_eval.get("constraint_names", [])),
+                    "constraint_grads": [
+                        np.asarray(grad, dtype=float)
+                        for grad in metric_eval.get("constraint_grads", [])
+                    ],
+                    "constraint_activity_tolerances": np.asarray(
+                        metric_eval.get("constraint_activity_tolerances", []),
+                        dtype=float,
+                    ),
+                    "feasibility_values": np.asarray(
+                        metric_eval.get("feasibility_values", metric_eval["constraint_values"]),
+                        dtype=float,
+                    ),
+                    "dual_update_values": np.asarray(
+                        metric_eval.get("dual_update_values", metric_eval["constraint_values"]),
+                        dtype=float,
+                    ),
+                    "max_feasibility_violation": float(
+                        metric_eval.get(
+                            "max_feasibility_violation",
+                            metric_eval["max_violation"],
+                        )
+                    ),
                     "base_total": float(
-                        accepted_eval.get(
+                        metric_eval.get(
                             "base_total",
-                            accepted_eval.get("total", run_dict["J"]),
+                            metric_eval.get("total", run_dict["J"]),
                         )
                     ),
                 }
@@ -2218,7 +2733,11 @@ if __name__ == "__main__":
     CONSTRAINT_METHOD = args.constraint_method
     ALM_MULTIPLIERS = np.zeros(0, dtype=float)
     ALM_PENALTY = args.alm_penalty_init
-    boozer_I = args.boozer_I
+    plasma_current_settings = resolve_plasma_current_settings(args)
+    boozer_I = plasma_current_settings["boozer_I"]
+    plasma_current_A = plasma_current_settings["plasma_current_A"]
+    plasma_current_input_source = plasma_current_settings["input_source"]
+    finite_current_mode = plasma_current_settings["mode"]
     MAXITER = args.maxiter
     CHECKPOINT_EVERY = args.checkpoint_every
     TOPOLOGY_SCORER_EVERY = args.topology_scorer_every
@@ -2297,7 +2816,9 @@ if __name__ == "__main__":
     banana_coils = coils[num_tf_coils:]
     banana_curves = [c.curve for c in banana_coils]
     banana_curve = banana_curves[0]
-    current_sum = sum(abs(c.current.get_value()) for c in tf_coils)
+    stage2_tf_current_A = resolve_stage2_tf_current_A(stage2_results, tf_coils)
+    tf_current_sum_abs_A = float(sum(abs(c.current.get_value()) for c in tf_coils))
+    current_sum = tf_current_sum_abs_A
 
     # Calculate G0 parameter from TF coil currents
     G0 = 2. * np.pi * current_sum * (4 * np.pi * 10**(-7) / (2 * np.pi))
@@ -2322,6 +2843,8 @@ if __name__ == "__main__":
         vol_target,
         iota_target,
         boozer_I,
+        plasma_current_A,
+        plasma_current_input_source,
         banana_surf_radius,
         nphi,
         ntheta,
@@ -2530,13 +3053,7 @@ if __name__ == "__main__":
     elif CONSTRAINT_METHOD == "alm":
         if args.basin_hops > 0:
             raise ValueError("--basin-hops is not supported with --constraint-method=alm")
-        alm_settings = ALMSettings(
-            max_outer_iterations=args.alm_max_outer_iters,
-            penalty_init=args.alm_penalty_init,
-            penalty_scale=args.alm_penalty_scale,
-            feasibility_tol=args.alm_feas_tol,
-            stationarity_tol=args.alm_stationarity_tol,
-        )
+        alm_settings = build_single_stage_alm_settings(args)
 
         def evaluate_problem(inner_x, multipliers, penalty):
             set_alm_runtime_state(multipliers, penalty)
@@ -2557,8 +3074,8 @@ if __name__ == "__main__":
         )
         res = minimize_alm(
             dofs,
-            ["coil_coil_spacing", "coil_surface_spacing", "max_curvature"]
-            + (["surface_vessel_spacing"] if JSurfSurf is not None else []),
+            list(SINGLE_STAGE_ALM_CONSTRAINT_NAMES[:3])
+            + ([SINGLE_STAGE_ALM_CONSTRAINT_NAMES[3]] if JSurfSurf is not None else []),
             evaluate_problem,
             alm_settings,
             {
@@ -2567,7 +3084,7 @@ if __name__ == "__main__":
                 "ftol": ftol,
                 "gtol": gtol,
             },
-            inner_callback=callback,
+            accepted_callback=callback,
             outer_state_callback=outer_state_callback,
         )
         alm_result = res
@@ -2793,7 +3310,10 @@ if __name__ == "__main__":
         "STAGE2_SEED_MAJOR_RADIUS": R0,
         "STAGE2_SEED_TOROIDAL_FLUX": s,
         "STAGE2_SEED_BANANA_SURF_RADIUS": float(stage2_results["banana_surf_radius"]),
+        "STAGE2_SEED_TF_CURRENT_A": stage2_tf_current_A,
         "STAGE2_SEED_ORDER": order,
+        "STAGE2_TF_CURRENT_A": stage2_tf_current_A,
+        "STAGE2_TF_CURRENT_SUM_ABS_A": tf_current_sum_abs_A,
         "mpol": mpol,
         "ntor": ntor,
         "nphi": nphi,
@@ -2839,6 +3359,14 @@ if __name__ == "__main__":
         "ALM_PENALTY_SCALE": args.alm_penalty_scale if CONSTRAINT_METHOD == "alm" else None,
         "ALM_FEAS_TOL": args.alm_feas_tol if CONSTRAINT_METHOD == "alm" else None,
         "ALM_STATIONARITY_TOL": args.alm_stationarity_tol if CONSTRAINT_METHOD == "alm" else None,
+        "ALM_TRUST_RADIUS_INIT": args.alm_trust_radius_init if CONSTRAINT_METHOD == "alm" else None,
+        "ALM_TRUST_RADIUS_MIN": args.alm_trust_radius_min if CONSTRAINT_METHOD == "alm" else None,
+        "ALM_TRUST_RADIUS_SHRINK": args.alm_trust_radius_shrink if CONSTRAINT_METHOD == "alm" else None,
+        "ALM_TRUST_RADIUS_GROW": args.alm_trust_radius_grow if CONSTRAINT_METHOD == "alm" else None,
+        "ALM_MAX_INNER_ATTEMPTS": args.alm_max_inner_attempts if CONSTRAINT_METHOD == "alm" else None,
+        "ALM_MAX_SUBPROBLEM_CONTINUATIONS": args.alm_max_subproblem_continuations if CONSTRAINT_METHOD == "alm" else None,
+        "ALM_DISTANCE_SMOOTHING": args.alm_distance_smoothing if CONSTRAINT_METHOD == "alm" else None,
+        "ALM_CURVATURE_SMOOTHING": args.alm_curvature_smoothing if CONSTRAINT_METHOD == "alm" else None,
         "ALM_FINAL_PENALTY": getattr(alm_result, "penalty", None),
         "ALM_FINAL_MULTIPLIERS": getattr(alm_result, "multipliers", None),
         "ALM_FINAL_CONSTRAINT_VALUES": getattr(alm_result, "constraint_values", None),
@@ -2874,6 +3402,10 @@ if __name__ == "__main__":
         "FINAL_TOPOLOGY_STOP_REASON_COUNTS": final_topology_status["stop_reason_counts"],
         "TARGET_VOLUME": float(vol_target),
         "TARGET_IOTA": float(iota_target),
+        "PLASMA_CURRENT_A": float(plasma_current_A),
+        "PLASMA_CURRENT_INPUT_SOURCE": plasma_current_input_source,
+        "PLASMA_CURRENT_SURROGATE_SCOPE": "shared_all_surfaces" if args.num_surfaces > 1 else "single_surface",
+        "FINITE_CURRENT_MODE": finite_current_mode,
         "BOOZER_I": float(boozer_I),
         "FINAL_VOLUME": float(final_volume),
         "FINAL_IOTA": float(final_iota),

@@ -34,6 +34,7 @@ from alm_utils import (
     augmented_inequality_objective,
     lower_bound_residual,
     minimize_alm,
+    run_directional_taylor_test,
     upper_bound_residual,
     validate_alm_cli_args,
     zero_gradient_like,
@@ -45,6 +46,26 @@ REPO_ROOT = os.path.abspath(os.path.join(SIMSOPT_ROOT, ".."))
 DATABASE_EQUILIBRIA_DIR = os.path.join(REPO_ROOT, "DATABASE", "EQUILIBRIA")
 DEFAULT_EQUILIBRIA_DIR = DATABASE_EQUILIBRIA_DIR if os.path.isdir(DATABASE_EQUILIBRIA_DIR) else os.path.join(EXAMPLE_ROOT, "equilibria")
 _SMOOTHING_EPS = float(np.finfo(float).eps)
+STAGE2_ALM_CONSTRAINT_NAMES = (
+    "coil_length_upper_bound",
+    "coil_coil_spacing",
+    "max_curvature",
+)
+
+
+def format_compact_float(value):
+    return f"{value:g}"
+
+
+def stage2_constraint_activity_tolerances(
+    distance_smoothing: float,
+    curvature_smoothing: float,
+):
+    return [
+        1e-3,
+        max(4.0 * float(distance_smoothing), _SMOOTHING_EPS),
+        max(4.0 * float(curvature_smoothing), _SMOOTHING_EPS),
+    ]
 
 
 def _stable_softmax(values: np.ndarray) -> np.ndarray:
@@ -144,6 +165,18 @@ def smooth_min_distance_signed_constraint(
     return float(minimum_distance) - smooth_min, grad
 
 
+def _print_taylor_test_summary(name: str, result: dict) -> None:
+    max_ratio = result["max_ratio"]
+    max_ratio_str = "n/a" if max_ratio is None else f"{max_ratio:.3e}"
+    print(
+        f"[{name}] passed={result['passed']}, "
+        f"directional_derivative={result['directional_derivative']:.6e}, "
+        f"max_ratio={max_ratio_str}"
+    )
+    for epsilon, error in zip(result["epsilons"], result["errors"]):
+        print(f"[{name}] eps={epsilon:.3e}, err={error:.3e}")
+
+
 def parse_args():
     parser = argparse.ArgumentParser(
         description="Run Stage 2 banana coil optimization against a fixed plasma surface.",
@@ -180,6 +213,12 @@ def parse_args():
         type=float,
         default=float(os.environ.get("BANANA_SURF_RADIUS", "0.22")),
         help="Coil surface minor radius.",
+    )
+    parser.add_argument(
+        "--tf-current-A",
+        type=float,
+        default=float(os.environ.get("TF_CURRENT_A", "1e5")),
+        help="Per-TF-coil current in physical SI amperes (default 1e5).",
     )
     parser.add_argument(
         "--major-radius",
@@ -300,6 +339,17 @@ def parse_args():
         type=float,
         default=float(os.environ.get("ALM_CURVATURE_SMOOTHING", "0.25")),
         help="Curvature soft-max temperature for Stage 2 ALM curvature constraints.",
+    )
+    parser.add_argument(
+        "--alm-taylor-test",
+        action="store_true",
+        help="Run a directional Taylor test on the initialized Stage 2 ALM subproblem before optimization.",
+    )
+    parser.add_argument(
+        "--alm-taylor-test-seed",
+        type=int,
+        default=int(os.environ.get("ALM_TAYLOR_TEST_SEED", "1")),
+        help="Random seed used to build the Stage 2 ALM Taylor-test direction.",
     )
     parser.add_argument(
         "--length-weight",
@@ -768,11 +818,10 @@ def evaluate_stage2_alm_problem(
                 curvature_signed_value,
             ],
             "constraint_grads": [length_grad, curve_curve_grad, curvature_grad],
-            "constraint_activity_tolerances": [
-                1e-3,
-                1.0 / distance_smoothing,
-                1.0 / curvature_smoothing,
-            ],
+            "constraint_activity_tolerances": stage2_constraint_activity_tolerances(
+                distance_smoothing,
+                curvature_smoothing,
+            ),
             "feasibility_values": [
                 length_violation,
                 curve_curve_violation,
@@ -818,7 +867,8 @@ if __name__ == "__main__":
 
     # Create the TF coils in HBT - these will be fixed but create background toroidal field:
     tf_curves = create_equally_spaced_curves(20, 1, stellsym=False, R0=0.976, R1=0.4, order=1)
-    tf_currents = [Current(1.0) * 1e5 for i in range(20)]   # At some point, update with actual HBT TF current
+    tf_current_A = args.tf_current_A
+    tf_currents = [Current(1.0) * tf_current_A for i in range(20)]
 
     # All the TF degrees of freedom are fixed
     for tf_curve in tf_curves:
@@ -902,10 +952,14 @@ if __name__ == "__main__":
         + CC_WEIGHT * Jccdist \
         + CURVATURE_WEIGHT * Jc
     BASE_OBJECTIVE = SQUARED_FLUX_WEIGHT * Jf
+    if args.alm_taylor_test and CONSTRAINT_METHOD != "alm":
+        raise ValueError("--alm-taylor-test requires --constraint-method=alm")
 
     rng_seed = None
     basin_hop_count = None
     basin_minimization_failures = None
+    alm_settings = None
+    alm_taylor_result = None
     if args.basin_hops > 0:
         rng_seed = args.basin_seed if args.basin_seed >= 0 else int.from_bytes(os.urandom(4), 'big')
         bh_suffix = f"-BH={args.basin_hops}-BS={args.basin_stepsize:g}-BSeed={rng_seed}"
@@ -919,21 +973,19 @@ if __name__ == "__main__":
         )
     else:
         alm_suffix = "-CM=penalty"
-    OUT_DIR_ITER = f"{OUT_DIR}R0={R0:g}-s={s:g}-LW={LENGTH_WEIGHT:g}-CCW={CC_WEIGHT:g}-CCT={CC_THRESHOLD:g}-CW={CURVATURE_WEIGHT:g}-CT={CURVATURE_THRESHOLD:g}-SR={banana_surf_radius:0.3f}-Order={order}{alm_suffix}{bh_suffix}/"
+    OUT_DIR_ITER = (
+        f"{OUT_DIR}R0={R0:g}-s={s:g}-LW={LENGTH_WEIGHT:g}-CCW={CC_WEIGHT:g}"
+        f"-CCT={CC_THRESHOLD:g}-CW={CURVATURE_WEIGHT:g}-CT={CURVATURE_THRESHOLD:g}"
+        f"-SR={banana_surf_radius:0.3f}-TFC={format_compact_float(tf_current_A)}"
+        f"-Order={order}{alm_suffix}{bh_suffix}/"
+    )
     os.makedirs(OUT_DIR_ITER, exist_ok=True)
 
     # minimize gets called, optimizes based on degrees of freedom from objective function
     dofs = BASE_OBJECTIVE.x if CONSTRAINT_METHOD == "alm" else JF.x
     fun = make_fun(JF, new_bs, new_surf, Jf, Jls, Jccdist, Jc)
     alm_result = None
-    if args.init_only:
-        res_nit = 0
-        optimizer_success = True
-        termination_message = "init_only"
-        print("Skipping Stage 2 optimizer because --init-only was provided.")
-    elif CONSTRAINT_METHOD == "alm":
-        if args.basin_hops > 0:
-            raise ValueError("--basin-hops is not supported with --constraint-method=alm")
+    if CONSTRAINT_METHOD == "alm":
         alm_settings = ALMSettings(
             max_outer_iterations=args.alm_max_outer_iters,
             max_subproblem_continuations=args.alm_max_subproblem_continuations,
@@ -973,9 +1025,27 @@ if __name__ == "__main__":
                 f"multipliers={multipliers.tolist()}, penalty={penalty:.3e}"
             )
 
+        if args.alm_taylor_test:
+            alm_taylor_result = run_directional_taylor_test(
+                evaluate_problem,
+                dofs,
+                np.zeros(len(STAGE2_ALM_CONSTRAINT_NAMES), dtype=float),
+                alm_settings.penalty_init,
+                seed=args.alm_taylor_test_seed,
+            )
+            _print_taylor_test_summary("ALM Taylor", alm_taylor_result)
+
+    if args.init_only:
+        res_nit = 0
+        optimizer_success = True
+        termination_message = "init_only"
+        print("Skipping Stage 2 optimizer because --init-only was provided.")
+    elif CONSTRAINT_METHOD == "alm":
+        if args.basin_hops > 0:
+            raise ValueError("--basin-hops is not supported with --constraint-method=alm")
         res = minimize_alm(
             dofs,
-            ["coil_length_upper_bound", "coil_coil_spacing", "max_curvature"],
+            STAGE2_ALM_CONSTRAINT_NAMES,
             evaluate_problem,
             alm_settings,
             {
@@ -1084,6 +1154,11 @@ if __name__ == "__main__":
     results = {
         "PLASMA_SURF_FILENAME": plasma_surf_filename,
         "PLASMA_SURF_PATH": file_loc,
+        "TF_CURRENT_A": float(tf_current_A),
+        "TF_CURRENT_SUM_ABS_A": float(sum(abs(coil.current.get_value()) for coil in new_tf_coils)),
+        "NUM_TF_COILS": len(new_tf_coils),
+        "BANANA_CURRENT_A": float(new_banana_coils[0].current.get_value()),
+        "BANANA_TO_TF_CURRENT_RATIO": float(new_banana_coils[0].current.get_value() / new_tf_coils[0].current.get_value()),
         "CC_THRESHOLD": CC_THRESHOLD,
         "CC_WEIGHT": CC_WEIGHT,
         "CURVATURE_WEIGHT": CURVATURE_WEIGHT,
@@ -1124,6 +1199,9 @@ if __name__ == "__main__":
         "ALM_MAX_INNER_ATTEMPTS": args.alm_max_inner_attempts if CONSTRAINT_METHOD == "alm" else None,
         "ALM_DISTANCE_SMOOTHING": args.alm_distance_smoothing if CONSTRAINT_METHOD == "alm" else None,
         "ALM_CURVATURE_SMOOTHING": args.alm_curvature_smoothing if CONSTRAINT_METHOD == "alm" else None,
+        "ALM_TAYLOR_TEST_ENABLED": args.alm_taylor_test if CONSTRAINT_METHOD == "alm" else None,
+        "ALM_TAYLOR_TEST_SEED": args.alm_taylor_test_seed if CONSTRAINT_METHOD == "alm" else None,
+        "ALM_TAYLOR_RESULT": alm_taylor_result,
         "ALM_FINAL_PENALTY": getattr(alm_result, "penalty", None),
         "ALM_FINAL_MULTIPLIERS": getattr(alm_result, "multipliers", None),
         "ALM_FINAL_CONSTRAINT_VALUES": getattr(alm_result, "constraint_values", None),

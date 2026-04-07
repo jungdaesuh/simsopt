@@ -79,15 +79,50 @@ class ResidualHelperTests(unittest.TestCase):
 
 
 class MinimizeAlmTests(unittest.TestCase):
-    def test_build_inner_options_caps_boxed_inner_work_in_feasible_continuations(self):
+    @staticmethod
+    def _quadratic_taylor_evaluation(x, gradient_scale: float):
+        x = np.asarray(x, dtype=float)
+        return {
+            "total": 0.5 * float(np.dot(x, x)),
+            "grad": float(gradient_scale) * x,
+            "constraint_values": np.zeros(1),
+            "stationarity_norm": float(np.linalg.norm(float(gradient_scale) * x)),
+        }
+
+    def test_select_inner_solve_profile_uses_explicit_boxed_feasible_continuation_profile(self):
         module = load_alm_utils_module()
 
-        options = module._build_inner_options(
-            {"maxiter": 300, "ftol": 1e-15, "gtol": 1e-15},
-            update_stationarity_tol=1.0,
+        profile = module._select_inner_solve_profile(
             trust_radius=0.05,
             continuation_iteration=1,
             feasible_enough=True,
+        )
+
+        self.assertEqual(profile.name, "boxed_feasible_continuation")
+
+    def test_zero_trust_radius_disables_box_bounds_and_boxed_profile(self):
+        module = load_alm_utils_module()
+
+        self.assertIsNone(module._build_box_bounds(np.array([1.0, -2.0]), 0.0))
+        profile = module._select_inner_solve_profile(
+            trust_radius=0.0,
+            continuation_iteration=0,
+            feasible_enough=False,
+        )
+
+        self.assertEqual(profile.name, "unbounded")
+
+    def test_build_inner_options_caps_boxed_inner_work_in_feasible_continuations(self):
+        module = load_alm_utils_module()
+        profile = module._select_inner_solve_profile(
+            trust_radius=0.05,
+            continuation_iteration=1,
+            feasible_enough=True,
+        )
+        options = module._build_inner_options(
+            {"maxiter": 300, "ftol": 1e-15, "gtol": 1e-15},
+            update_stationarity_tol=1.0,
+            profile=profile,
         )
 
         self.assertEqual(options["maxiter"], 8)
@@ -99,18 +134,81 @@ class MinimizeAlmTests(unittest.TestCase):
     def test_build_inner_options_leaves_unbounded_solves_on_default_linesearch_budget(self):
         module = load_alm_utils_module()
 
-        options = module._build_inner_options(
-            {"maxiter": 300, "ftol": 1e-15, "gtol": 1e-15},
-            update_stationarity_tol=1.0,
+        profile = module._select_inner_solve_profile(
             trust_radius=None,
             continuation_iteration=0,
             feasible_enough=False,
+        )
+        options = module._build_inner_options(
+            {"maxiter": 300, "ftol": 1e-15, "gtol": 1e-15},
+            update_stationarity_tol=1.0,
+            profile=profile,
         )
 
         self.assertEqual(options["maxiter"], 300)
         self.assertEqual(options["maxls"], 20)
         self.assertNotIn("maxfun", options)
         self.assertGreaterEqual(options["gtol"], 1e-4)
+
+    def test_candidate_is_acceptable_allows_near_equal_feasible_trial(self):
+        module = load_alm_utils_module()
+
+        current_eval = {
+            "total": 1.0e-3,
+            "grad": np.array([0.1]),
+            "constraint_values": np.array([0.0]),
+            "stationarity_norm": 0.1,
+        }
+        candidate_eval = {
+            "total": 1.0005e-3,
+            "grad": np.array([0.08]),
+            "constraint_values": np.array([0.0]),
+            "stationarity_norm": 0.08,
+        }
+
+        acceptable = module._candidate_is_acceptable(
+            current_eval,
+            candidate_eval,
+            SimpleNamespace(success=False, nit=2, message="plateau"),
+            moved_norm=0.0,
+            update_feasibility_tol=1e-6,
+        )
+
+        self.assertTrue(acceptable)
+
+    def test_directional_taylor_test_passes_for_consistent_quadratic_gradient(self):
+        module = load_alm_utils_module()
+
+        def evaluate_problem(x, multipliers, penalty):
+            return self._quadratic_taylor_evaluation(x, 1.0)
+
+        result = module.run_directional_taylor_test(
+            evaluate_problem,
+            np.array([0.2, -0.4]),
+            np.zeros(1),
+            1.0,
+            seed=7,
+        )
+
+        self.assertTrue(result["passed"])
+        self.assertTrue(result["max_ratio"] is None or result["max_ratio"] < 0.3)
+
+    def test_directional_taylor_test_flags_inconsistent_gradient(self):
+        module = load_alm_utils_module()
+
+        def evaluate_problem(x, multipliers, penalty):
+            return self._quadratic_taylor_evaluation(x, 2.0)
+
+        result = module.run_directional_taylor_test(
+            evaluate_problem,
+            np.array([0.2, -0.4]),
+            np.zeros(1),
+            1.0,
+            seed=7,
+        )
+
+        self.assertFalse(result["passed"])
+        self.assertGreater(result["max_ratio"], result["ratio_threshold"])
 
     def test_minimize_alm_keeps_current_iterate_after_all_trials_are_rejected(self):
         module = load_alm_utils_module()
@@ -459,6 +557,134 @@ class MinimizeAlmTests(unittest.TestCase):
         self.assertEqual(result.history[1]["action"], "subproblem_limit")
         self.assertEqual(result.history[1]["feasible_stall_count"], 2)
 
+    def test_minimize_alm_reports_feasible_plateau_after_tolerance_tightens(self):
+        module = load_alm_utils_module()
+        settings = module.ALMSettings(
+            max_outer_iterations=2,
+            max_subproblem_continuations=1,
+            trust_radius_init=0.1,
+            trust_radius_min=0.01,
+            trust_radius_shrink=0.5,
+            trust_radius_grow=1.5,
+            max_inner_attempts=1,
+            penalty_init=1.0,
+            penalty_scale=10.0,
+            feasibility_tol=1e-8,
+            stationarity_tol=1e-8,
+        )
+        minimize_calls = {"count": 0}
+
+        def evaluate_problem(x, multipliers, penalty):
+            x = np.asarray(x, dtype=float)
+            if float(multipliers[0]) <= 0.0:
+                return {
+                    "total": float(np.dot(x, x)),
+                    "grad": 2.0 * x,
+                    "constraint_values": np.array([0.01]),
+                    "stationarity_norm": float(np.linalg.norm(2.0 * x)),
+                }
+            return {
+                "total": 0.0,
+                "grad": np.array([0.02]),
+                "constraint_values": np.array([0.0]),
+                "stationarity_norm": 0.02,
+            }
+
+        def fake_minimize(fun, x, jac, method, bounds, callback, options):
+            minimize_calls["count"] += 1
+            if minimize_calls["count"] == 1:
+                return SimpleNamespace(
+                    x=np.array([0.0]),
+                    nit=1,
+                    success=True,
+                    message="CONVERGENCE",
+                )
+            return SimpleNamespace(
+                x=np.asarray(x, dtype=float),
+                nit=2,
+                success=False,
+                message="STOP: plateau",
+            )
+
+        with patch.object(module, "minimize", side_effect=fake_minimize):
+            result = module.minimize_alm(
+                np.array([0.1]),
+                ["demo_constraint"],
+                evaluate_problem,
+                settings,
+                {"maxiter": 300, "ftol": 1e-15, "gtol": 1e-15},
+            )
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.history[0]["action"], "dual_update")
+        self.assertEqual(result.history[1]["action"], "subproblem_continue")
+        self.assertEqual(result.history[2]["action"], "feasible_plateau")
+        self.assertEqual(result.outer_iterations, 2)
+        self.assertIn("before final tolerance", result.message)
+
+    def test_minimize_alm_stops_outer_loop_once_feasible_plateau_is_declared(self):
+        module = load_alm_utils_module()
+        settings = module.ALMSettings(
+            max_outer_iterations=4,
+            max_subproblem_continuations=1,
+            trust_radius_init=0.1,
+            trust_radius_min=0.01,
+            trust_radius_shrink=0.5,
+            trust_radius_grow=1.5,
+            max_inner_attempts=1,
+            penalty_init=1.0,
+            penalty_scale=10.0,
+            feasibility_tol=1e-8,
+            stationarity_tol=1e-8,
+        )
+        minimize_calls = {"count": 0}
+
+        def evaluate_problem(x, multipliers, penalty):
+            x = np.asarray(x, dtype=float)
+            if float(multipliers[0]) <= 0.0:
+                return {
+                    "total": float(np.dot(x, x)),
+                    "grad": 2.0 * x,
+                    "constraint_values": np.array([0.01]),
+                    "stationarity_norm": float(np.linalg.norm(2.0 * x)),
+                }
+            return {
+                "total": 0.0,
+                "grad": np.array([0.02]),
+                "constraint_values": np.array([0.0]),
+                "stationarity_norm": 0.02,
+            }
+
+        def fake_minimize(fun, x, jac, method, bounds, callback, options):
+            minimize_calls["count"] += 1
+            if minimize_calls["count"] == 1:
+                return SimpleNamespace(
+                    x=np.array([0.0]),
+                    nit=1,
+                    success=True,
+                    message="CONVERGENCE",
+                )
+            return SimpleNamespace(
+                x=np.asarray(x, dtype=float),
+                nit=2,
+                success=False,
+                message="STOP: plateau",
+            )
+
+        with patch.object(module, "minimize", side_effect=fake_minimize):
+            result = module.minimize_alm(
+                np.array([0.1]),
+                ["demo_constraint"],
+                evaluate_problem,
+                settings,
+                {"maxiter": 300, "ftol": 1e-15, "gtol": 1e-15},
+            )
+
+        self.assertFalse(result.success)
+        self.assertEqual(minimize_calls["count"], 3)
+        self.assertEqual(result.outer_iterations, 2)
+        self.assertEqual(result.history[-1]["action"], "feasible_plateau")
+
     def test_minimize_alm_retries_subproblem_before_escalating_penalty(self):
         module = load_alm_utils_module()
         settings = module.ALMSettings(
@@ -603,6 +829,86 @@ class MinimizeAlmTests(unittest.TestCase):
         self.assertTrue(result.success)
         self.assertEqual(result.history[0]["inner_iterations"], 0)
         self.assertIn("current iterate already satisfies", result.history[0]["inner_message"])
+
+    def test_minimize_alm_reports_inner_and_accepted_callbacks_separately(self):
+        module = load_alm_utils_module()
+        settings = module.ALMSettings(
+            max_outer_iterations=1,
+            max_subproblem_continuations=1,
+            feasibility_tol=1e-8,
+            stationarity_tol=1e-8,
+        )
+        inner_points = []
+        accepted_points = []
+
+        def evaluate_problem(x, multipliers, penalty):
+            x = np.asarray(x, dtype=float)
+            return {
+                "total": 0.5 * float(np.dot(x, x)),
+                "grad": x.copy(),
+                "constraint_values": np.zeros(1),
+                "stationarity_norm": float(np.linalg.norm(x)),
+            }
+
+        def fake_minimize(fun, x, jac, method, bounds, callback, options):
+            callback(np.array([2.0]))
+            return SimpleNamespace(
+                x=np.array([0.0]),
+                nit=1,
+                success=True,
+                message="CONVERGENCE",
+            )
+
+        with patch.object(module, "minimize", side_effect=fake_minimize):
+            result = module.minimize_alm(
+                np.array([1.0]),
+                ["demo_constraint"],
+                evaluate_problem,
+                settings,
+                {"maxiter": 5, "ftol": 1e-12, "gtol": 1e-12},
+                inner_callback=lambda x: inner_points.append(float(np.asarray(x)[0])),
+                accepted_callback=lambda x: accepted_points.append(float(np.asarray(x)[0])),
+            )
+
+        self.assertTrue(result.success)
+        self.assertEqual(inner_points, [2.0])
+        self.assertEqual(accepted_points, [0.0])
+
+    def test_minimize_alm_uses_metric_gradient_for_convergence_diagnostics(self):
+        module = load_alm_utils_module()
+        settings = module.ALMSettings(
+            max_outer_iterations=1,
+            max_subproblem_continuations=1,
+            feasibility_tol=1e-8,
+            stationarity_tol=1e-8,
+        )
+
+        def evaluate_problem(x, multipliers, penalty):
+            return {
+                "total": 0.0,
+                "grad": np.array([10.0]),
+                "metric_grad": np.array([0.0]),
+                "constraint_values": np.array([-1.0e-4]),
+                "dual_update_values": np.array([-1.0e-4]),
+                "feasibility_values": np.array([0.0]),
+                "constraint_grads": [np.array([-1.0])],
+                "constraint_activity_tolerances": np.array([1.0e-3]),
+                "stationarity_norm": 10.0,
+                "metric_stationarity_norm": 0.0,
+            }
+
+        with patch.object(module, "minimize", side_effect=AssertionError("minimize should not run")):
+            result = module.minimize_alm(
+                np.array([0.0]),
+                ["demo_constraint"],
+                evaluate_problem,
+                settings,
+                {"maxiter": 5, "ftol": 1e-12, "gtol": 1e-12},
+            )
+
+        self.assertTrue(result.success)
+        self.assertAlmostEqual(result.history[0]["raw_stationarity_norm"], 0.0)
+        self.assertAlmostEqual(result.history[0]["stationarity_norm"], 0.0)
 
 
 if __name__ == "__main__":
