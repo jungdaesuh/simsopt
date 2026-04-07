@@ -22,7 +22,6 @@ EXAMPLE_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, ".."))
 import sys
 sys.path.insert(0, EXAMPLE_ROOT)
 from alm_utils import (
-    ALMSettings,
     minimize_alm,
     run_directional_taylor_test,
     validate_alm_cli_args,
@@ -40,6 +39,8 @@ from banana_opt.stage2_geometry import (
     magnetic_field_plots as _magnetic_field_plots,
 )
 from banana_opt.stage2_objectives import (
+    build_stage2_alm_settings,
+    build_stage2_results as _build_stage2_results_impl,
     evaluate_stage2_alm_problem as _evaluate_stage2_alm_problem,
     evaluate_stage2_hardware_constraints as _evaluate_stage2_hardware_constraints,
     make_stage2_fun,
@@ -576,21 +577,7 @@ if __name__ == "__main__":
     fun = make_stage2_fun(JF, new_bs, new_surf, Jf, Jls, Jccdist, Jc)
     alm_result = None
     if CONSTRAINT_METHOD == "alm":
-        alm_settings = ALMSettings(
-            max_outer_iterations=args.alm_max_outer_iters,
-            max_subproblem_continuations=args.alm_max_subproblem_continuations,
-            penalty_init=args.alm_penalty_init,
-            penalty_scale=args.alm_penalty_scale,
-            feasibility_tol=args.alm_feas_tol,
-            stationarity_tol=args.alm_stationarity_tol,
-            trust_radius_init=(
-                None if args.alm_trust_radius_init == 0.0 else args.alm_trust_radius_init
-            ),
-            trust_radius_min=args.alm_trust_radius_min,
-            trust_radius_shrink=args.alm_trust_radius_shrink,
-            trust_radius_grow=args.alm_trust_radius_grow,
-            max_inner_attempts=args.alm_max_inner_attempts,
-        )
+        alm_settings = build_stage2_alm_settings(args)
 
         def evaluate_problem(inner_dofs, multipliers, penalty):
             return _evaluate_stage2_alm_problem(
@@ -744,72 +731,50 @@ if __name__ == "__main__":
     print(f'Banana Coil Current / TF Current = {new_banana_coils[0].current.get_value() / new_tf_coils[0].current.get_value():.3f}\n')
 
     # Save the results of optimization to a separate file
-    results = {
-        "PLASMA_SURF_FILENAME": plasma_surf_filename,
-        "PLASMA_SURF_PATH": file_loc,
-        "STAGE2_BS_PATH": args.stage2_bs_path,
-        "TF_CURRENT_A": float(tf_current_A),
-        "TF_CURRENT_SUM_ABS_A": float(sum(abs(coil.current.get_value()) for coil in new_tf_coils)),
-        "NUM_TF_COILS": len(new_tf_coils),
-        "BANANA_CURRENT_A": float(new_banana_coils[0].current.get_value()),
-        "BANANA_TO_TF_CURRENT_RATIO": float(new_banana_coils[0].current.get_value() / new_tf_coils[0].current.get_value()),
-        "CC_THRESHOLD": CC_THRESHOLD,
-        "CC_WEIGHT": CC_WEIGHT,
-        "CURVATURE_WEIGHT": CURVATURE_WEIGHT,
-        "CURVATURE_THRESHOLD": CURVATURE_THRESHOLD,
-        "LENGTH_WEIGHT": LENGTH_WEIGHT,
-        "CONSTRAINT_METHOD": CONSTRAINT_METHOD,
-        "theta_center": theta_center,
-        "phi_center": phi_center,
-        "theta_width": theta_width,
-        "phi_width": phi_width,
-        "LENGTH_TARGET": LENGTH_TARGET,
-        "MAJOR_RADIUS": R0,
-        "TOROIDAL_FLUX": s,
-        "NFP": int(banana_surf_nfp),
-        "banana_surf_radius": banana_surf_radius,
-        "order": order,
-        "init_only": args.init_only,
-        "max_iterations": MAXITER,
-        "iterations": res_nit,
-        "TERMINATION_MESSAGE": termination_message,
-        "OPTIMIZER_SUCCESS": optimizer_success,
-        "basin_hops": args.basin_hops,
-        "basin_stepsize": args.basin_stepsize if args.basin_hops > 0 else None,
-        "basin_seed": rng_seed if args.basin_hops > 0 else None,
-        "basin_iterations": basin_hop_count,
-        "basin_minimization_failures": basin_minimization_failures,
-        "ALM_MAX_OUTER_ITERS": args.alm_max_outer_iters if CONSTRAINT_METHOD == "alm" else None,
-        "ALM_MAX_SUBPROBLEM_CONTINUATIONS": args.alm_max_subproblem_continuations if CONSTRAINT_METHOD == "alm" else None,
-        "ALM_OUTER_ITERATIONS": getattr(alm_result, "outer_iterations", None),
-        "ALM_PENALTY_INIT": args.alm_penalty_init if CONSTRAINT_METHOD == "alm" else None,
-        "ALM_PENALTY_SCALE": args.alm_penalty_scale if CONSTRAINT_METHOD == "alm" else None,
-        "ALM_FEAS_TOL": args.alm_feas_tol if CONSTRAINT_METHOD == "alm" else None,
-        "ALM_STATIONARITY_TOL": args.alm_stationarity_tol if CONSTRAINT_METHOD == "alm" else None,
-        "ALM_TRUST_RADIUS_INIT": args.alm_trust_radius_init if CONSTRAINT_METHOD == "alm" else None,
-        "ALM_TRUST_RADIUS_MIN": args.alm_trust_radius_min if CONSTRAINT_METHOD == "alm" else None,
-        "ALM_TRUST_RADIUS_SHRINK": args.alm_trust_radius_shrink if CONSTRAINT_METHOD == "alm" else None,
-        "ALM_TRUST_RADIUS_GROW": args.alm_trust_radius_grow if CONSTRAINT_METHOD == "alm" else None,
-        "ALM_MAX_INNER_ATTEMPTS": args.alm_max_inner_attempts if CONSTRAINT_METHOD == "alm" else None,
-        "ALM_DISTANCE_SMOOTHING": args.alm_distance_smoothing if CONSTRAINT_METHOD == "alm" else None,
-        "ALM_CURVATURE_SMOOTHING": args.alm_curvature_smoothing if CONSTRAINT_METHOD == "alm" else None,
-        "ALM_TAYLOR_TEST_ENABLED": args.alm_taylor_test if CONSTRAINT_METHOD == "alm" else None,
-        "ALM_TAYLOR_TEST_SEED": args.alm_taylor_test_seed if CONSTRAINT_METHOD == "alm" else None,
-        "ALM_TAYLOR_RESULT": alm_taylor_result,
-        "ALM_FINAL_PENALTY": getattr(alm_result, "penalty", None),
-        "ALM_FINAL_MULTIPLIERS": getattr(alm_result, "multipliers", None),
-        "ALM_FINAL_CONSTRAINT_VALUES": getattr(alm_result, "constraint_values", None),
-        "ALM_FINAL_SOLVER_CONSTRAINT_VALUES": getattr(alm_result, "solver_constraint_values", None),
-        "ALM_FINAL_TRUST_RADIUS": getattr(alm_result, "trust_radius", None),
-        "ALM_HISTORY": getattr(alm_result, "history", None),
-        "FINAL_VOLUME": float(new_surf.volume()),
-        "FIELD_ERROR": float(fieldError),
-        "SELF_INTERSECTING": intersecting,
-        "MAX_CURVATURE": final_max_curvature,
-        "COIL_LENGTH": final_coil_length,
-        "CURVE_CURVE_MIN_DIST": final_curve_curve_min_dist,
-        "HARDWARE_CONSTRAINTS_OK": hardware_status["success"],
-        "HARDWARE_CONSTRAINT_VIOLATIONS": hardware_status["violations"],
-    }
+    results = _build_stage2_results_impl(
+        args=args,
+        plasma_surf_filename=plasma_surf_filename,
+        file_loc=file_loc,
+        stage2_bs_path=args.stage2_bs_path,
+        tf_current_A=tf_current_A,
+        tf_current_sum_abs_A=sum(abs(coil.current.get_value()) for coil in new_tf_coils),
+        num_tf_coils=len(new_tf_coils),
+        banana_current_A=new_banana_coils[0].current.get_value(),
+        banana_to_tf_current_ratio=(
+            new_banana_coils[0].current.get_value() / new_tf_coils[0].current.get_value()
+        ),
+        cc_threshold=CC_THRESHOLD,
+        cc_weight=CC_WEIGHT,
+        curvature_weight=CURVATURE_WEIGHT,
+        curvature_threshold=CURVATURE_THRESHOLD,
+        length_weight=LENGTH_WEIGHT,
+        constraint_method=CONSTRAINT_METHOD,
+        theta_center=theta_center,
+        phi_center=phi_center,
+        theta_width=theta_width,
+        phi_width=phi_width,
+        length_target=LENGTH_TARGET,
+        major_radius=R0,
+        toroidal_flux=s,
+        nfp=banana_surf_nfp,
+        banana_surf_radius=banana_surf_radius,
+        order=order,
+        max_iterations=MAXITER,
+        iterations=res_nit,
+        termination_message=termination_message,
+        optimizer_success=optimizer_success,
+        basin_seed=rng_seed if args.basin_hops > 0 else None,
+        basin_iterations=basin_hop_count,
+        basin_minimization_failures=basin_minimization_failures,
+        alm_result=alm_result,
+        alm_taylor_result=alm_taylor_result,
+        final_volume=new_surf.volume(),
+        field_error=fieldError,
+        intersecting=intersecting,
+        final_max_curvature=final_max_curvature,
+        final_coil_length=final_coil_length,
+        final_curve_curve_min_dist=final_curve_curve_min_dist,
+        hardware_status=hardware_status,
+    )
     with open(os.path.join(OUT_DIR_ITER, "results.json"), "w") as outfile:
         json.dump(results, outfile, indent=2)

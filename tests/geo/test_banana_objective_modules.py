@@ -314,6 +314,114 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
         tolerances = self.module.stage2_constraint_activity_tolerances(0.005, 0.05)
         self.assertEqual(tolerances, [1e-3, 0.02, 0.2])
 
+    def test_build_stage2_alm_settings_converts_zero_trust_radius_to_none(self):
+        settings = self.module.build_stage2_alm_settings(
+            SimpleNamespace(
+                alm_max_outer_iters=7,
+                alm_max_subproblem_continuations=9,
+                alm_penalty_init=2.0,
+                alm_penalty_scale=3.0,
+                alm_feas_tol=1e-4,
+                alm_stationarity_tol=2e-4,
+                alm_trust_radius_init=0.0,
+                alm_trust_radius_min=1e-3,
+                alm_trust_radius_shrink=0.4,
+                alm_trust_radius_grow=1.8,
+                alm_max_inner_attempts=5,
+            )
+        )
+
+        self.assertEqual(settings.max_outer_iterations, 7)
+        self.assertEqual(settings.max_subproblem_continuations, 9)
+        self.assertEqual(settings.penalty_init, 2.0)
+        self.assertIsNone(settings.trust_radius_init)
+        self.assertEqual(settings.trust_radius_min, 1e-3)
+        self.assertEqual(settings.max_inner_attempts, 5)
+
+    def test_build_stage2_results_maps_hardware_and_alm_fields(self):
+        args = SimpleNamespace(
+            init_only=False,
+            basin_hops=2,
+            basin_stepsize=0.01,
+            alm_max_outer_iters=7,
+            alm_max_subproblem_continuations=9,
+            alm_penalty_init=2.0,
+            alm_penalty_scale=3.0,
+            alm_feas_tol=1e-4,
+            alm_stationarity_tol=2e-4,
+            alm_trust_radius_init=0.15,
+            alm_trust_radius_min=1e-3,
+            alm_trust_radius_shrink=0.4,
+            alm_trust_radius_grow=1.8,
+            alm_max_inner_attempts=5,
+            alm_distance_smoothing=0.005,
+            alm_curvature_smoothing=0.05,
+            alm_taylor_test=True,
+            alm_taylor_test_seed=123,
+        )
+        alm_result = SimpleNamespace(
+            outer_iterations=4,
+            penalty=8.0,
+            multipliers=np.array([0.1, 0.2, 0.3]),
+            constraint_values=np.array([0.0, 0.01, 0.0]),
+            solver_constraint_values=np.array([0.0, 0.2, 0.0]),
+            trust_radius=0.125,
+            history=[{"outer_iteration": 1}],
+        )
+        hardware_status = {"success": False, "violations": ["too_curved"]}
+
+        result = self.module.build_stage2_results(
+            args=args,
+            plasma_surf_filename="demo.nc",
+            file_loc="/tmp/demo.nc",
+            stage2_bs_path="/tmp/seed.json",
+            tf_current_A=8.0e4,
+            tf_current_sum_abs_A=1.6e5,
+            num_tf_coils=2,
+            banana_current_A=9.5e3,
+            banana_to_tf_current_ratio=0.11875,
+            cc_threshold=0.05,
+            cc_weight=100.0,
+            curvature_weight=1.0e-4,
+            curvature_threshold=40.0,
+            length_weight=5.0e-4,
+            constraint_method="alm",
+            theta_center=np.pi,
+            phi_center=np.pi / 4.0,
+            theta_width=np.pi / 6.0,
+            phi_width=np.pi / 8.0,
+            length_target=1.75,
+            major_radius=0.915,
+            toroidal_flux=0.24,
+            nfp=22,
+            banana_surf_radius=0.22,
+            order=2,
+            max_iterations=300,
+            iterations=17,
+            termination_message="hardware_constraints_failed",
+            optimizer_success=False,
+            basin_seed=7,
+            basin_iterations=3,
+            basin_minimization_failures=1,
+            alm_result=alm_result,
+            alm_taylor_result={"passed": True},
+            final_volume=0.12,
+            field_error=0.03,
+            intersecting=True,
+            final_max_curvature=41.0,
+            final_coil_length=1.8,
+            final_curve_curve_min_dist=0.04,
+            hardware_status=hardware_status,
+        )
+
+        self.assertFalse(result["HARDWARE_CONSTRAINTS_OK"])
+        self.assertEqual(result["HARDWARE_CONSTRAINT_VIOLATIONS"], ["too_curved"])
+        self.assertEqual(result["ALM_MAX_OUTER_ITERS"], 7)
+        self.assertEqual(result["ALM_OUTER_ITERATIONS"], 4)
+        self.assertEqual(result["ALM_FINAL_TRUST_RADIUS"], 0.125)
+        self.assertEqual(result["basin_seed"], 7)
+        self.assertAlmostEqual(result["BANANA_TO_TF_CURRENT_RATIO"], 0.11875)
+
     def test_smooth_max_curvature_signed_constraint_uses_active_window(self):
         curve = _FakeCurve(
             gamma_points=[[0.0, 0.0, 0.0]],

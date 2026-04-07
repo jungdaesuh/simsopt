@@ -100,7 +100,47 @@ def find_assigned_dict(module_path: Path, variable_name: str) -> ast.Dict:
     return visitor.dict_node
 
 
+def find_function_return_dict(module_path: Path, function_name: str) -> ast.Dict:
+    tree = ast.parse(module_path.read_text(), filename=str(module_path))
+
+    class ReturnDictVisitor(ast.NodeVisitor):
+        def __init__(self):
+            self.dict_node = None
+
+        def visit_FunctionDef(self, node):
+            if node.name != function_name or self.dict_node is not None:
+                return
+            for child in ast.walk(node):
+                if isinstance(child, ast.Return) and isinstance(child.value, ast.Dict):
+                    self.dict_node = child.value
+                    return
+
+    visitor = ReturnDictVisitor()
+    visitor.visit(tree)
+    if visitor.dict_node is None:
+        raise AssertionError(f"Could not find return dict for {function_name}")
+    return visitor.dict_node
+
+
 def make_single_stage_alm_args(**overrides):
+    defaults = {
+        "alm_max_outer_iters": 7,
+        "alm_max_subproblem_continuations": 9,
+        "alm_penalty_init": 2.0,
+        "alm_penalty_scale": 3.0,
+        "alm_feas_tol": 1e-4,
+        "alm_stationarity_tol": 2e-4,
+        "alm_trust_radius_init": 0.15,
+        "alm_trust_radius_min": 1e-3,
+        "alm_trust_radius_shrink": 0.4,
+        "alm_trust_radius_grow": 1.8,
+        "alm_max_inner_attempts": 5,
+    }
+    defaults.update(overrides)
+    return SimpleNamespace(**defaults)
+
+
+def make_stage2_alm_args(**overrides):
     defaults = {
         "alm_max_outer_iters": 7,
         "alm_max_subproblem_continuations": 9,
@@ -205,6 +245,37 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
 
         self.assertEqual(tolerances, [1e-3, 0.02, 0.2])
 
+    def test_stage2_builds_bounded_alm_settings(self):
+        alm_utils = load_alm_utils_module()
+        functions = extract_functions(
+            STAGE2_OBJECTIVES_MODULE_PATH,
+            ["build_stage2_alm_settings"],
+            {"ALMSettings": alm_utils.ALMSettings},
+        )
+        build_stage2_alm_settings = functions["build_stage2_alm_settings"]
+        settings = build_stage2_alm_settings(make_stage2_alm_args())
+
+        self.assertEqual(settings.max_outer_iterations, 7)
+        self.assertEqual(settings.max_subproblem_continuations, 9)
+        self.assertEqual(settings.penalty_init, 2.0)
+        self.assertEqual(settings.trust_radius_init, 0.15)
+        self.assertEqual(settings.trust_radius_min, 1e-3)
+        self.assertEqual(settings.max_inner_attempts, 5)
+
+    def test_stage2_zero_trust_radius_disables_bounds_in_settings(self):
+        alm_utils = load_alm_utils_module()
+        functions = extract_functions(
+            STAGE2_OBJECTIVES_MODULE_PATH,
+            ["build_stage2_alm_settings"],
+            {"ALMSettings": alm_utils.ALMSettings},
+        )
+        build_stage2_alm_settings = functions["build_stage2_alm_settings"]
+        settings = build_stage2_alm_settings(
+            make_stage2_alm_args(alm_trust_radius_init=0.0)
+        )
+
+        self.assertIsNone(settings.trust_radius_init)
+
     def test_stage2_parse_args_exposes_restart_seed_flag(self):
         source = STAGE2_MODULE_PATH.read_text()
 
@@ -212,7 +283,13 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
         self.assertIn('"STAGE2_BS_PATH"', source)
 
     def test_stage2_results_contract_records_hardware_status_fields(self):
-        results_dict = find_assigned_dict(STAGE2_MODULE_PATH, "results")
+        source = STAGE2_MODULE_PATH.read_text()
+        self.assertIn("_build_stage2_results_impl(", source)
+
+        results_dict = find_function_return_dict(
+            STAGE2_OBJECTIVES_MODULE_PATH,
+            "build_stage2_results",
+        )
 
         entries = {
             key.value: value
