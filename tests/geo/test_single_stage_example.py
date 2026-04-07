@@ -1,4 +1,5 @@
 import importlib.util
+import sys
 import tempfile
 import unittest
 import uuid
@@ -32,6 +33,12 @@ TOPOLOGY_SCORER_MODULE_PATH = (
     / "single_stage_optimization"
     / "topology_scorer.py"
 )
+ALM_UTILS_MODULE_PATH = (
+    Path(__file__).resolve().parents[2]
+    / "examples"
+    / "single_stage_optimization"
+    / "alm_utils.py"
+)
 TEST_MPOL = 8
 TEST_NTOR = 6
 TEST_VOL_TARGET = 0.1
@@ -55,6 +62,17 @@ def load_topology_scorer_module():
     spec = importlib.util.spec_from_file_location(
         f"topology_scorer_{uuid.uuid4().hex}",
         TOPOLOGY_SCORER_MODULE_PATH,
+    )
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
+
+
+def load_alm_utils_module():
+    spec = importlib.util.spec_from_file_location(
+        f"alm_utils_{uuid.uuid4().hex}",
+        ALM_UTILS_MODULE_PATH,
     )
     module = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
@@ -187,6 +205,7 @@ class FakeParentBoozerSurface:
         self.dofs = object()
         self.local_full_dof_size = 0
         self.local_dof_size = 0
+        self._id = SimpleNamespace(id=0)
 
     def _add_child(self, child):
         del child
@@ -236,6 +255,7 @@ class SingleStageExampleTests(unittest.TestCase):
                 constraint_weight=constraint_weight,
                 iota=TEST_IOTA,
                 G0=TEST_G0,
+                boozer_I=TEST_BOOZER_I,
             )
 
     def run_exact_boozer_objective(self, module, *, current_I):
@@ -319,6 +339,29 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertIsInstance(boozer_surface, FakeBoozerSurface)
         self.assertEqual(len(FakeSurfaceXYZTensorFourier.instances), 1)
         self.assertIs(boozer_surface.surface, FakeSurfaceXYZTensorFourier.instances[0])
+        self.assertEqual(boozer_surface.I, TEST_BOOZER_I)
+
+    def test_initialize_boozer_surface_exact_threads_negative_current(self):
+        module = self.load_module()
+        surf_prev = FakeSurfPrev()
+
+        with patch.object(module, "SurfaceXYZTensorFourier", FakeSurfaceXYZTensorFourier), patch.object(
+            module, "Volume", FakeVolume
+        ), patch.object(module, "BoozerSurface", FakeBoozerSurface):
+            boozer_surface = module.initialize_boozer_surface(
+                surf_prev,
+                mpol=TEST_MPOL,
+                ntor=TEST_NTOR,
+                bs=object(),
+                vol_target=TEST_VOL_TARGET,
+                constraint_weight=None,
+                iota=TEST_IOTA,
+                G0=TEST_G0,
+                boozer_I=-TEST_BOOZER_I,
+            )
+
+        self.assertIsInstance(boozer_surface, FakeBoozerSurface)
+        self.assertEqual(boozer_surface.I, -TEST_BOOZER_I)
 
     def test_real_boozersurface_source_treats_zero_constraint_weight_as_least_squares(self):
         source = BOOZER_SURFACE_PATH.read_text()
@@ -338,6 +381,60 @@ class SingleStageExampleTests(unittest.TestCase):
         expected_point_count = objective.surface.quadpoints_phi.size * objective.surface.quadpoints_theta.size
         self.assertEqual(fake_bs.points.shape, (expected_point_count, 3))
         self.assertEqual(fake_bs.last_vjp_input.shape, (expected_point_count, 3))
+
+    def test_resolve_plasma_current_settings_accepts_physical_amps(self):
+        module = self.load_module()
+
+        settings = module.resolve_plasma_current_settings(
+            SimpleNamespace(
+                boozer_I=None,
+                plasma_current_A=8000.0,
+            )
+        )
+
+        self.assertEqual(settings["input_source"], "physical_A")
+        self.assertEqual(settings["mode"], "boozer_surrogate")
+        self.assertEqual(settings["plasma_current_A"], 8000.0)
+        self.assertAlmostEqual(settings["boozer_I"], 0.0016)
+
+    def test_resolve_plasma_current_settings_accepts_negative_physical_amps(self):
+        module = self.load_module()
+
+        settings = module.resolve_plasma_current_settings(
+            SimpleNamespace(
+                boozer_I=None,
+                plasma_current_A=-35200.0,
+            )
+        )
+
+        self.assertEqual(settings["plasma_current_A"], -35200.0)
+        self.assertAlmostEqual(settings["boozer_I"], -0.00704)
+
+    def test_resolve_plasma_current_settings_rejects_mixed_raw_and_physical_inputs(self):
+        module = self.load_module()
+
+        with self.assertRaisesRegex(ValueError, "--plasma-current-A"):
+            module.resolve_plasma_current_settings(
+                SimpleNamespace(
+                    boozer_I=0.5,
+                    plasma_current_A=8000.0,
+                )
+            )
+
+    def test_resolve_plasma_current_settings_defaults_to_disabled_zero(self):
+        module = self.load_module()
+
+        settings = module.resolve_plasma_current_settings(
+            SimpleNamespace(
+                boozer_I=None,
+                plasma_current_A=None,
+            )
+        )
+
+        self.assertEqual(settings["input_source"], "default_zero")
+        self.assertEqual(settings["mode"], "disabled")
+        self.assertEqual(settings["plasma_current_A"], 0.0)
+        self.assertEqual(settings["boozer_I"], 0.0)
 
     def test_fun_fallback_returns_elevated_j_and_same_sign_gradient(self):
         """Issue #2: failed Boozer must return elevated J + same-sign gradient,
@@ -756,6 +853,309 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertAlmostEqual(done["vessel_gap_threshold"], 0.04)
         self.assertTrue(done["enforce_nesting"])
         self.assertAlmostEqual(done["gate_scale"], 1.0)
+
+
+class HardwareConstraintTests(unittest.TestCase):
+    def load_module(self):
+        return load_single_stage_example_module()
+
+    def test_stage2_hardware_constraints_report_each_violation(self):
+        module = load_stage2_module()
+
+        status = module.evaluate_stage2_hardware_constraints(
+            coil_length=1.8,
+            length_target=1.75,
+            curve_curve_min_dist=0.04,
+            cc_threshold=0.05,
+            max_curvature=41.0,
+            curvature_threshold=40.0,
+        )
+
+        self.assertFalse(status["success"])
+        self.assertEqual(len(status["violations"]), 3)
+        self.assertIn("coil_length", status["violations"][0])
+        self.assertIn("coil_coil_min_dist", status["violations"][1])
+        self.assertIn("max_curvature", status["violations"][2])
+
+    def test_single_stage_hardware_constraints_report_each_violation(self):
+        module = load_single_stage_example_module()
+
+        status = module.evaluate_single_stage_hardware_constraints(
+            curve_curve_min_dist=0.04,
+            cc_dist=0.05,
+            curve_surface_min_dist=0.01,
+            cs_dist=0.02,
+            surface_vessel_min_dist=0.03,
+            ss_dist=0.04,
+            max_curvature=41.0,
+            curvature_threshold=40.0,
+        )
+
+        self.assertFalse(status["success"])
+        self.assertEqual(len(status["violations"]), 4)
+        self.assertIn("coil_coil_min_dist", status["violations"][0])
+        self.assertIn("coil_surface_min_dist", status["violations"][1])
+        self.assertIn("surface_vessel_min_dist", status["violations"][2])
+        self.assertIn("max_curvature", status["violations"][3])
+
+    def test_surface_vessel_min_dist_uses_single_source_for_results(self):
+        module = load_single_stage_example_module()
+
+        class _DistanceObjective:
+            def shortest_distance(self):
+                return 0.123
+
+        class _Surface:
+            def __init__(self, points):
+                self._points = np.asarray(points, dtype=float).reshape((-1, 1, 3))
+
+            def gamma(self):
+                return self._points
+
+        self.assertEqual(
+            module.compute_single_stage_surface_vessel_min_dist(
+                _DistanceObjective(),
+                {"outer_vessel_gap": 0.456},
+            ),
+            0.123,
+        )
+        self.assertEqual(
+            module.compute_single_stage_surface_vessel_min_dist(
+                None,
+                {"outer_vessel_gap": 0.456},
+            ),
+            0.456,
+        )
+        self.assertEqual(
+            module.compute_single_stage_surface_vessel_min_dist(
+                None,
+                {"outer_vessel_gap": None},
+                _Surface([[0.0, 0.0, 0.0]]),
+                _Surface([[0.0, 0.3, 0.4]]),
+            ),
+            0.5,
+        )
+
+    def test_fun_rejects_candidate_on_hardware_constraint_failure(self):
+        module = load_single_stage_example_module()
+
+        last_J = 12.0
+        last_dJ = np.array([1.0, -1.0, 2.0])
+
+        class _Surface:
+            x = np.ones(2)
+
+            def is_self_intersecting(self):
+                return False
+
+            def volume(self):
+                return 1.0
+
+            def gamma(self):
+                return np.zeros((1, 1, 3))
+
+        class _BoozerSurface:
+            surface = _Surface()
+            res = {"success": True, "iota": TEST_IOTA, "G": TEST_G0}
+
+            def run_code(self, iota, G):
+                return self.res
+
+        class _JF:
+            x = np.zeros(3)
+
+        class _DistanceObjective:
+            def __init__(self, distance):
+                self.distance = distance
+
+            def shortest_distance(self):
+                return self.distance
+
+        class _CurvatureObjective:
+            def J(self):
+                return 1.0
+
+            def dJ(self):
+                return np.zeros(3)
+
+        class _LengthObjective:
+            def J(self):
+                return 1.0
+
+            def dJ(self):
+                return np.zeros(3)
+
+        class _Curve:
+            def kappa(self):
+                return np.array([41.0])
+
+            def gamma(self):
+                return np.zeros((2, 3))
+
+        surface_data = [{"boozer_surface": _BoozerSurface()}, {"boozer_surface": _BoozerSurface()}]
+        module.run_dict = {
+            "x_prev": np.zeros(3),
+            "lscount": 0,
+            "surface_state": {"sdofs": [np.ones(2), np.ones(2)], "iota": [TEST_IOTA, TEST_IOTA], "G": [TEST_G0, TEST_G0]},
+            "J": last_J,
+            "dJ": last_dJ.copy(),
+            "accepted_iterations": 0,
+            "accepted_x": np.zeros(3),
+        }
+        module.surface_data = surface_data
+        module.outer_surface_data = surface_data[-1]
+        module.surface_iota_terms = [SimpleNamespace(J=lambda: TEST_IOTA), SimpleNamespace(J=lambda: TEST_IOTA)]
+        module.VV = object()
+        module.SURFACE_GAP_THRESHOLD = 0.0
+        module.SS_DIST = 0.04
+        module.JF = _JF()
+        module.bs = object()
+        module.nonQSs = []
+        module.brs = []
+        module.Jiota = object()
+        module.IOTAS_WEIGHT = 1.0
+        module.JCurveLength = _LengthObjective()
+        module.LENGTH_WEIGHT = 1.0
+        module.JCurveCurve = _DistanceObjective(0.04)
+        module.CC_WEIGHT = 1.0
+        module.CC_DIST = 0.05
+        module.JCurveSurface = _DistanceObjective(0.03)
+        module.CS_WEIGHT = 1.0
+        module.CS_DIST = 0.02
+        module.JCurvature = _CurvatureObjective()
+        module.CURVATURE_WEIGHT = 1.0
+        module.CURVATURE_THRESHOLD = 40.0
+        module.JSurfSurf = _DistanceObjective(0.05)
+        module.SURF_DIST_WEIGHT = 1.0
+        module.RES_WEIGHT = 1.0
+        module.MULTISURFACE_RAMP_ITERATIONS = 0
+        module.INNER_SURFACE_INITIAL_WEIGHT = 1.0
+        module.TOPOLOGY_GATE_FIELDLINES = 0
+        module.TOPOLOGY_GATE_TMAX = 2.0
+        module.TOPOLOGY_GATE_TOL = 1e-7
+        module.TOPOLOGY_GATE_SURVIVAL_THRESHOLD = 0.25
+        module.TOPOLOGY_GATE_PENALTY_SCALE = 4.0
+        module.banana_curve = _Curve()
+
+        with patch.object(
+            module,
+            "solve_surface_stack_at_dofs",
+            return_value={
+                "success": True,
+                "solve_success": [True, True],
+                "self_intersections": [False, False],
+                "volumes_ordered": True,
+                "gap_ok": True,
+                "vessel_gap_ok": True,
+                "nesting_ok": True,
+                "adjacent_gaps": [0.1],
+                "outer_vessel_gap": 0.05,
+                "bad_nesting_phis": [],
+            },
+        ), patch.object(
+            module,
+            "evaluate_total_objective",
+            return_value={
+                "total": 7.0,
+                "grad": np.arange(3, dtype=float),
+                "surface_weights": np.array([1.0, 1.0]),
+                "J_QS": 0.0,
+                "dJ_QS": np.zeros(3),
+                "J_Boozer": 0.0,
+                "dJ_Boozer": np.zeros(3),
+                "J_iota": 0.0,
+                "dJ_iota": np.zeros(3),
+                "J_surf": 0.0,
+                "dJ_surf": np.zeros(3),
+                "J_curvature": 0.0,
+                "dJ_curvature": np.zeros(3),
+            },
+        ), patch.object(module, "restore_surface_states") as restore_mock, patch.object(
+            module,
+            "evaluate_search_topology_gate",
+            return_value={
+                "enabled": False,
+                "success": True,
+                "nfieldlines": 0,
+                "survived_lines": 0,
+                "survival_fraction": 1.0,
+                "survival_threshold": 0.25,
+                "tmax": 2.0,
+                "tol": 1e-7,
+                "stop_reason_counts": {},
+                "first_exit_time": None,
+                "first_exit_angle": None,
+                "first_exit_reason": None,
+            },
+        ):
+            J_out, dJ_out = module.fun(np.ones(3))
+
+        self.assertEqual(J_out, 24.0)
+        np.testing.assert_array_equal(dJ_out, last_dJ)
+        restore_mock.assert_called_once()
+        self.assertFalse(module.run_dict["hardware_constraint_status"]["success"])
+
+    def test_alm_rejection_preserves_constraint_metadata_for_outer_updates(self):
+        module = load_single_stage_example_module()
+        module.CONSTRAINT_METHOD = "alm"
+        module.MULTISURFACE_RAMP_ITERATIONS = 0
+        module.INNER_SURFACE_INITIAL_WEIGHT = 1.0
+        module.SURFACE_GAP_THRESHOLD = 0.0
+        module.SS_DIST = 0.04
+        module.TOPOLOGY_GATE_TMAX = 2.0
+        module.TOPOLOGY_GATE_TOL = 1e-7
+        module.TOPOLOGY_GATE_SURVIVAL_THRESHOLD = 0.25
+        module.JF = SimpleNamespace(x=np.zeros(2))
+        module.surface_data = [{"boozer_surface": SimpleNamespace(surface=object())}]
+        module.run_dict = {
+            "x_prev": np.zeros(2),
+            "lscount": 0,
+            "accepted_iterations": 0,
+            "surface_state": {"sdofs": [], "iota": [], "G": []},
+            "accepted_x": np.zeros(2),
+            "J": 7.0,
+            "dJ": np.array([3.0, -1.0]),
+            "search_eval": {
+                "constraint_values": np.array([0.4, 0.1, 0.0]),
+                "max_violation": 0.4,
+                "stationarity_norm": 2.5,
+                "constraint_names": ["coil_coil_spacing", "coil_surface_spacing", "max_curvature"],
+                "base_total": 5.0,
+            },
+        }
+
+        with patch.object(
+            module,
+            "solve_surface_stack_at_dofs",
+            return_value={
+                "success": False,
+                "solve_success": [False],
+                "self_intersections": [False],
+                "volumes_ordered": True,
+                "gap_ok": True,
+                "vessel_gap_ok": True,
+                "nesting_ok": True,
+                "adjacent_gaps": [],
+                "outer_vessel_gap": None,
+                "bad_nesting_phis": [],
+            },
+        ), patch.object(module, "restore_surface_states") as restore_mock:
+            evaluation = module.evaluate_search_step(np.ones(2))
+
+        self.assertEqual(evaluation["total"], 14.0)
+        np.testing.assert_array_equal(evaluation["grad"], np.array([3.0, -1.0]))
+        np.testing.assert_array_equal(
+            evaluation["constraint_values"],
+            np.array([0.4, 0.1, 0.0]),
+        )
+        self.assertAlmostEqual(evaluation["max_violation"], 0.4)
+        self.assertAlmostEqual(evaluation["stationarity_norm"], 2.5)
+        self.assertEqual(
+            evaluation["constraint_names"],
+            ["coil_coil_spacing", "coil_surface_spacing", "max_curvature"],
+        )
+        self.assertAlmostEqual(evaluation["base_total"], 5.0)
+        restore_mock.assert_called_once()
 
     def test_build_scaled_outer_problem_scales_coordinates_gradients_and_callback(self):
         module = self.load_module()
@@ -1178,8 +1578,11 @@ class SingleStageExampleTests(unittest.TestCase):
             module.IOTAS_WEIGHT = 200.0
             module.LENGTH_WEIGHT = 1.0
             module.CC_WEIGHT = 100.0
+            module.CC_DIST = 0.05
             module.CS_WEIGHT = 1.0
+            module.CS_DIST = 0.02
             module.CURVATURE_WEIGHT = 0.1
+            module.CURVATURE_THRESHOLD = 40.0
             module.SURF_DIST_WEIGHT = 1000.0
             module.banana_curve = _Curve()
             module.curvelength = _CurveLength()
@@ -1328,8 +1731,11 @@ class SingleStageExampleTests(unittest.TestCase):
             module.IOTAS_WEIGHT = 200.0
             module.LENGTH_WEIGHT = 1.0
             module.CC_WEIGHT = 100.0
+            module.CC_DIST = 0.05
             module.CS_WEIGHT = 1.0
+            module.CS_DIST = 0.02
             module.CURVATURE_WEIGHT = 0.1
+            module.CURVATURE_THRESHOLD = 40.0
             module.SURF_DIST_WEIGHT = 1000.0
             module.banana_curve = _Curve()
             module.curvelength = _CurveLength()
@@ -1512,18 +1918,36 @@ STAGE2_MODULE_PATH = (
     / "STAGE_2"
     / "banana_coil_solver.py"
 )
+STAGE2_GEOMETRY_MODULE_PATH = (
+    Path(__file__).resolve().parents[2]
+    / "examples"
+    / "single_stage_optimization"
+    / "banana_opt"
+    / "stage2_geometry.py"
+)
+
+
+def load_stage2_module():
+    spec = importlib.util.spec_from_file_location(
+        f"banana_coil_solver_{uuid.uuid4().hex}",
+        STAGE2_MODULE_PATH,
+    )
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
 
 
 def _load_segment_distance_from_source():
-    """Extract the deployed segment_segment_distance from banana_coil_solver.py via AST.
+    """Extract the deployed segment-distance kernel from the SSOT stage2 module via AST.
 
     Parses the source file, extracts just the _clamp01 and segment_segment_distance
     function definitions (stripping @njit decorators), and compiles them in an
-    isolated namespace. This executes the REAL deployed algorithm without requiring
-    numba or triggering module-level code (arg parsing, VMEC file loading, etc.).
+    isolated namespace. This executes the real deployed algorithm without requiring
+    numba or importing the full Stage 2 workflow module.
     """
     import ast
-    source = STAGE2_MODULE_PATH.read_text()
+    source = STAGE2_GEOMETRY_MODULE_PATH.read_text()
     tree = ast.parse(source)
     func_nodes = []
     for node in ast.iter_child_nodes(tree):
@@ -1533,7 +1957,7 @@ def _load_segment_distance_from_source():
     extracted = ast.Module(body=func_nodes, type_ignores=[])
     ast.fix_missing_locations(extracted)
     namespace = {"np": np}
-    exec(compile(extracted, str(STAGE2_MODULE_PATH), "exec"), namespace)
+    exec(compile(extracted, str(STAGE2_GEOMETRY_MODULE_PATH), "exec"), namespace)
     return namespace["segment_segment_distance"]
 
 
@@ -1726,66 +2150,380 @@ class ConfinementSurrogateTests(unittest.TestCase):
 
 
 class RunIdentityTests(unittest.TestCase):
-    def _configure_module_defaults(self, module):
-        module.MULTISURFACE_RAMP_ITERATIONS = 0
-        module.INNER_SURFACE_INITIAL_WEIGHT = 1.0
-        module.TOPOLOGY_GATE_FIELDLINES = 4
-        module.TOPOLOGY_GATE_TMAX = 2.0
-        module.TOPOLOGY_GATE_TOL = 1e-7
-        module.TOPOLOGY_GATE_SURVIVAL_THRESHOLD = 0.25
-        module.TOPOLOGY_SCORER_EVERY = 10
-        module.TOPOLOGY_SCORER_NFIELDLINES = 12
-        module.TOPOLOGY_SCORER_TMAX = 50.0
-        module.CONFINEMENT_OBJECTIVE_WEIGHT = 0.0
-        module.CONFINEMENT_SURROGATE_WORST_K = 3
-        module.CONFINEMENT_SURROGATE_EARLY_THRESHOLD = 0.2
-        module.CONFINEMENT_SURROGATE_MEAN_WEIGHT = 0.2
-        module.CONFINEMENT_SURROGATE_WORST_WEIGHT = 0.6
-        module.CONFINEMENT_SURROGATE_EARLY_WEIGHT = 0.2
-
     def _make_identity_args(self):
         return SimpleNamespace(
             cc_dist=0.05,
             cc_weight=100.0,
             curvature_weight=0.0001,
             curvature_threshold=40.0,
+            constraint_method="penalty",
             init_only=False,
             basin_hops=0,
             basin_stepsize=0.01,
             ftol=None,
             gtol=None,
+            alm_max_outer_iters=10,
+            alm_penalty_init=1.0,
+            alm_penalty_scale=10.0,
+            alm_feas_tol=1e-6,
+            alm_stationarity_tol=1e-6,
+            alm_trust_radius_init=0.0,
+            alm_trust_radius_min=1e-9,
+            alm_trust_radius_shrink=0.5,
+            alm_trust_radius_grow=2.0,
+            alm_max_inner_attempts=4,
+            alm_max_subproblem_continuations=0,
+            alm_distance_smoothing=1e-3,
+            alm_curvature_smoothing=1e-3,
             num_surfaces=1,
             inner_surface_ratio=0.8,
             surface_gap_threshold=0.0,
+            multisurface_ramp_iterations=0,
+            inner_surface_initial_weight=1.0,
             multisurface_initial_step_scale=1.0,
             multisurface_initial_step_maxiter=0,
+            topology_gate_fieldlines=4,
+            topology_gate_tmax=2.0,
+            topology_gate_tol=1e-7,
+            topology_gate_survival_threshold=0.25,
+            topology_gate_penalty_scale=4.0,
+            topology_scorer_every=10,
+            topology_scorer_nfieldlines=12,
+            topology_scorer_tmax=50.0,
+            confinement_objective_weight=0.0,
+            confinement_surrogate_worst_k=3,
+            confinement_surrogate_early_threshold=0.2,
+            confinement_surrogate_mean_weight=0.2,
+            confinement_surrogate_worst_weight=0.6,
+            confinement_surrogate_early_weight=0.2,
         )
 
-    def _build_identity(self, module, args):
-        return module.build_run_identity_config(
+    def _make_identity_config(self, module, args, boozer_I=0.37, plasma_current_A=1850000.0):
+        return module.make_run_identity_config(
             args,
             "stage2-seed.json",
             "final",
             0.1,
+            args.constraint_method,
             0.15,
             0.15,
-            0.37,
+            boozer_I,
+            plasma_current_A,
             0.22,
             80,
             80,
             None,
         )
 
+    def _build_identity(self, module, args, boozer_I=0.37, plasma_current_A=1850000.0):
+        return module.build_run_identity_config(
+            self._make_identity_config(
+                module,
+                args,
+                boozer_I=boozer_I,
+                plasma_current_A=plasma_current_A,
+            )
+        )
+
+    def test_run_identity_config_is_frozen(self):
+        module = load_single_stage_example_module()
+        args = self._make_identity_args()
+        config = self._make_identity_config(module, args)
+
+        with self.assertRaisesRegex(Exception, "cannot assign to field"):
+            config.stage = "other"
+
     def test_run_identity_changes_when_only_confinement_settings_change(self):
         module = load_single_stage_example_module()
-        self._configure_module_defaults(module)
+        base_args = self._make_identity_args()
+        weighted_args = self._make_identity_args()
+        weighted_args.confinement_objective_weight = 5.0
+
+        base_config = self._build_identity(module, base_args)
+        weighted_config = self._build_identity(module, weighted_args)
+
+        self.assertNotEqual(base_config, weighted_config)
+
+    def test_run_identity_changes_when_constraint_method_changes(self):
+        module = load_single_stage_example_module()
+        base_args = self._make_identity_args()
+        alm_args = self._make_identity_args()
+        alm_args.constraint_method = "alm"
+
+        penalty_config = self._build_identity(module, base_args)
+        alm_config = self._build_identity(module, alm_args)
+
+        self.assertNotEqual(penalty_config, alm_config)
+
+    def test_run_identity_changes_when_physical_plasma_current_changes(self):
+        module = load_single_stage_example_module()
+        base_args = self._make_identity_args()
+
+        base_config = self._build_identity(module, base_args, boozer_I=0.0, plasma_current_A=0.0)
+        physical_config = self._build_identity(module, base_args, boozer_I=0.0016, plasma_current_A=8000.0)
+
+        self.assertNotEqual(base_config, physical_config)
+
+    def test_run_identity_ignores_plasma_current_input_source_when_realized_current_matches(self):
+        module = load_single_stage_example_module()
+        base_args = self._make_identity_args()
+
+        physical_config = self._build_identity(module, base_args, boozer_I=0.0016, plasma_current_A=8000.0)
+        raw_config = self._build_identity(module, base_args, boozer_I=0.0016, plasma_current_A=8000.0)
+
+        self.assertEqual(physical_config, raw_config)
+
+    def test_run_identity_changes_when_topology_gate_penalty_scale_changes(self):
+        module = load_single_stage_example_module()
+        base_args = self._make_identity_args()
+        changed_args = self._make_identity_args()
+        changed_args.topology_gate_penalty_scale = 9.0
+
+        self.assertNotEqual(
+            self._build_identity(module, base_args),
+            self._build_identity(module, changed_args),
+        )
+
+    def test_run_identity_does_not_depend_on_module_globals(self):
+        module = load_single_stage_example_module()
         base_args = self._make_identity_args()
 
         base_config = self._build_identity(module, base_args)
-        module.CONFINEMENT_OBJECTIVE_WEIGHT = 5.0
-        weighted_config = self._build_identity(module, base_args)
+        module.MULTISURFACE_RAMP_ITERATIONS = 17
+        module.INNER_SURFACE_INITIAL_WEIGHT = 0.25
+        module.TOPOLOGY_GATE_FIELDLINES = 99
+        module.TOPOLOGY_GATE_TMAX = 9.0
+        module.TOPOLOGY_GATE_TOL = 1e-3
+        module.TOPOLOGY_GATE_SURVIVAL_THRESHOLD = 0.9
+        module.TOPOLOGY_SCORER_EVERY = 77
+        module.TOPOLOGY_SCORER_NFIELDLINES = 42
+        module.TOPOLOGY_SCORER_TMAX = 88.0
+        module.CONFINEMENT_OBJECTIVE_WEIGHT = 9.0
+        module.CONFINEMENT_SURROGATE_WORST_K = 11
+        module.CONFINEMENT_SURROGATE_EARLY_THRESHOLD = 0.9
+        module.CONFINEMENT_SURROGATE_MEAN_WEIGHT = 0.7
+        module.CONFINEMENT_SURROGATE_WORST_WEIGHT = 0.2
+        module.CONFINEMENT_SURROGATE_EARLY_WEIGHT = 0.1
 
-        self.assertNotEqual(base_config, weighted_config)
+        self.assertEqual(base_config, self._build_identity(module, base_args))
+
+
+class CurrentBaselineContractTests(unittest.TestCase):
+    def test_stage2_seed_dir_formats_include_tf_current_segment(self):
+        module = load_single_stage_example_module()
+        seed_spec = module.Stage2SeedSpec(
+            plasma_surf_filename="dummy.nc",
+            major_radius=0.915,
+            toroidal_flux=0.24,
+            length_weight=0.0005,
+            cc_weight=100.0,
+            cc_threshold=0.05,
+            curvature_weight=0.0001,
+            curvature_threshold=40.0,
+            banana_surf_radius=0.22,
+            tf_current_A=8.0e4,
+            order=2,
+        )
+        local_dir = module.format_local_stage2_seed_dir(seed_spec)
+        database_dir = module.format_database_stage2_seed_dir(seed_spec)
+
+        self.assertIn("TFC=80000", local_dir)
+        self.assertIn("TFC=80000", database_dir)
+
+    def test_resolve_stage2_tf_current_prefers_recorded_stage2_result(self):
+        module = load_single_stage_example_module()
+
+        tf_coils = [
+            SimpleNamespace(current=SimpleNamespace(get_value=lambda: 1.0e5)),
+            SimpleNamespace(current=SimpleNamespace(get_value=lambda: 1.0e5)),
+        ]
+
+        self.assertEqual(
+            module.resolve_stage2_tf_current_A({"TF_CURRENT_A": 8.0e4}, tf_coils),
+            8.0e4,
+        )
+
+    def test_build_stage2_bs_path_prefers_current_penalty_dir(self):
+        module = load_single_stage_example_module()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            outputs_dir = Path(tmpdir) / "outputs-demo.nc"
+            current_dir = (
+                outputs_dir
+                / "R0=0.915-s=0.24-LW=0.0005-CCW=100-CCT=0.05-CW=0.0001-CT=40-SR=0.220-TFC=80000-Order=2-CM=penalty"
+            )
+            current_dir.mkdir(parents=True)
+            expected_path = current_dir / "biot_savart_opt.json"
+            expected_path.write_text("{}", encoding="utf-8")
+
+            args = SimpleNamespace(
+                stage2_bs_path=None,
+                stage2_source="local",
+                local_stage2_root=tmpdir,
+                database_stage2_root="/unused",
+                plasma_surf_filename="demo.nc",
+                stage2_seed_major_radius=0.915,
+                stage2_seed_toroidal_flux=0.24,
+                stage2_seed_length_weight=0.0005,
+                stage2_seed_cc_weight=100.0,
+                stage2_seed_cc_threshold=0.05,
+                stage2_seed_curvature_weight=0.0001,
+                stage2_seed_curvature_threshold=40.0,
+                stage2_seed_banana_surf_radius=0.22,
+                stage2_seed_tf_current_A=8.0e4,
+                stage2_seed_order=2,
+            )
+
+            self.assertEqual(module.build_stage2_bs_path(args), str(expected_path))
+
+    def test_build_stage2_bs_path_falls_back_to_legacy_basin_hop_without_tf_segment(self):
+        module = load_single_stage_example_module()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            outputs_dir = Path(tmpdir) / "outputs-demo.nc"
+            legacy_dir = (
+                outputs_dir
+                / "R0=0.915-s=0.24-LW=0.0005-CCW=100-CW=0.0001-SR=0.220-Order=2-BH=3-BS=0.01-BSeed=7"
+            )
+            legacy_dir.mkdir(parents=True)
+            expected_path = legacy_dir / "biot_savart_opt.json"
+            expected_path.write_text("{}", encoding="utf-8")
+
+            args = SimpleNamespace(
+                stage2_bs_path=None,
+                stage2_source="local",
+                local_stage2_root=tmpdir,
+                database_stage2_root="/unused",
+                plasma_surf_filename="demo.nc",
+                stage2_seed_major_radius=0.915,
+                stage2_seed_toroidal_flux=0.24,
+                stage2_seed_length_weight=0.0005,
+                stage2_seed_cc_weight=100.0,
+                stage2_seed_cc_threshold=0.05,
+                stage2_seed_curvature_weight=0.0001,
+                stage2_seed_curvature_threshold=40.0,
+                stage2_seed_banana_surf_radius=0.22,
+                stage2_seed_tf_current_A=8.0e4,
+                stage2_seed_order=2,
+            )
+
+            self.assertEqual(module.build_stage2_bs_path(args), str(expected_path))
+
+    def test_stage2_parse_args_accepts_tf_current_A(self):
+        module = load_stage2_module()
+
+        with patch.object(sys, "argv", ["banana_coil_solver.py", "--tf-current-A", "80000"]):
+            args = module.parse_args()
+
+        self.assertEqual(args.tf_current_A, 80000.0)
+
+
+class AlmUtilsTests(unittest.TestCase):
+    def test_upper_bound_residual_clamps_negative_values(self):
+        module = load_alm_utils_module()
+
+        self.assertEqual(module.upper_bound_residual(1.0, 2.0), 0.0)
+        self.assertEqual(module.upper_bound_residual(2.5, 2.0), 0.5)
+
+    def test_augmented_objective_combines_base_and_constraints(self):
+        module = load_alm_utils_module()
+
+        evaluation = module.augmented_objective(
+            base_value=3.0,
+            base_grad=np.array([1.0, -1.0]),
+            constraint_values=[0.5, 0.0],
+            constraint_grads=[np.array([2.0, 0.0]), np.array([0.0, 0.0])],
+            multipliers=np.array([1.0, 7.0]),
+            penalty=10.0,
+        )
+
+        self.assertAlmostEqual(evaluation["total"], 4.75)
+        np.testing.assert_allclose(evaluation["grad"], np.array([13.0, -1.0]))
+        self.assertAlmostEqual(evaluation["max_violation"], 0.5)
+
+    def test_minimize_alm_solves_simple_quadratic_with_upper_bound_constraint(self):
+        module = load_alm_utils_module()
+        settings = module.ALMSettings(
+            max_outer_iterations=6,
+            penalty_init=1.0,
+            penalty_scale=10.0,
+            feasibility_tol=1e-8,
+            stationarity_tol=1e-8,
+        )
+
+        def evaluate_problem(x, multipliers, penalty):
+            value = 0.5 * (x[0] - 2.0) ** 2
+            grad = np.array([x[0] - 2.0])
+            constraint_value = module.upper_bound_residual(x[0], 1.0)
+            constraint_grad = np.array([1.0]) if constraint_value > 0.0 else np.array([0.0])
+            return module.augmented_objective(
+                value,
+                grad,
+                [constraint_value],
+                [constraint_grad],
+                multipliers,
+                penalty,
+            )
+
+        result = module.minimize_alm(
+            np.array([0.0]),
+            ["x_upper_bound"],
+            evaluate_problem,
+            settings,
+            {"maxiter": 50, "maxcor": 20, "ftol": 1e-12, "gtol": 1e-12},
+        )
+
+        self.assertTrue(result.success)
+        self.assertLessEqual(result.x[0], 1.0 + 1e-6)
+        self.assertLessEqual(result.constraint_values[0], 1e-6)
+
+    def test_minimize_alm_failure_reports_last_solved_subproblem_state(self):
+        module = load_alm_utils_module()
+        settings = module.ALMSettings(
+            max_outer_iterations=1,
+            penalty_init=1.0,
+            penalty_scale=10.0,
+            feasibility_tol=1e-12,
+            stationarity_tol=1e-12,
+        )
+
+        def evaluate_problem(x, multipliers, penalty):
+            value = 0.5 * (x[0] - 2.0) ** 2
+            grad = np.array([x[0] - 2.0])
+            constraint_value = module.upper_bound_residual(x[0], 1.0)
+            constraint_grad = np.array([1.0]) if constraint_value > 0.0 else np.array([0.0])
+            return module.augmented_objective(
+                value,
+                grad,
+                [constraint_value],
+                [constraint_grad],
+                multipliers,
+                penalty,
+            )
+
+        result = module.minimize_alm(
+            np.array([0.0]),
+            ["x_upper_bound"],
+            evaluate_problem,
+            settings,
+            {"maxiter": 50, "maxcor": 20, "ftol": 1e-12, "gtol": 1e-12},
+        )
+
+        self.assertFalse(result.success)
+        self.assertAlmostEqual(result.penalty, 1.0)
+        self.assertEqual(result.multipliers, [0.0])
+
+
+class InitOnlyResultTests(unittest.TestCase):
+    def test_final_topology_gate_for_results_skips_expensive_probe_in_init_only(self):
+        module = load_single_stage_example_module()
+
+        with patch.object(module, "evaluate_search_topology_gate", side_effect=AssertionError("should not run")):
+            status = module.final_topology_gate_for_results(True, 2, object(), object())
+
+        self.assertFalse(status["evaluated"])
+        self.assertIsNone(status["success"])
+        self.assertIsNone(status["stop_reason_counts"])
 
 
 if __name__ == "__main__":
