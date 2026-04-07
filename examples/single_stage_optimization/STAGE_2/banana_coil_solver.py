@@ -8,6 +8,7 @@ from simsopt.field import BiotSavart, Current, Coil, coils_via_symmetries
 from simsopt.field.coil import ScaledCurrent
 from simsopt.geo import (SurfaceRZFourier, curves_to_vtk, create_equally_spaced_curves, \
                          CurveLength, CurveCurveDistance, LpCurveCurvature)
+from simsopt._core.optimizable import load
 from simsopt.objectives import SquaredFlux, QuadraticPenalty
 from simsopt._core.derivative import Derivative
 from simsopt.geo import CurveCWSFourierCPP
@@ -200,6 +201,11 @@ def parse_args():
         "--output-root",
         default=os.environ.get("STAGE2_OUTPUT_ROOT", SCRIPT_DIR),
         help="Directory where outputs-[plasma] will be written.",
+    )
+    parser.add_argument(
+        "--stage2-bs-path",
+        default=os.environ.get("STAGE2_BS_PATH"),
+        help="Optional path to a saved Stage 2 biot_savart_opt.json seed to restart from.",
     )
     parser.add_argument("--nphi", type=int, default=int(os.environ.get("NPHI", "255")))
     parser.add_argument("--ntheta", type=int, default=int(os.environ.get("NTHETA", "64")))
@@ -518,6 +524,24 @@ def initializeCoils(surf, surf_coils, tf_coils, num_quadpoints, order,
     pointData = {"B_N": np.sum(bs.B().reshape(unitn.shape) * unitn, axis=2)[:, :, None]}
     surf.to_vtk(OUT_DIR + "surf_init", extra_data=pointData)
     return bs, curves, banana_curve, banana_coils
+
+
+def load_stage2_seed_configuration(seed_bs_path, surf, num_tf_coils, out_dir):
+    bs = load(seed_bs_path)
+    bs.set_points(surf.gamma().reshape((-1, 3)))
+
+    coils = bs.coils
+    curves = [c.curve for c in coils]
+    curves_to_vtk(curves, out_dir + "curves_init", close=True)
+    unitn = surf.unitnormal()
+    pointData = {"B_N": np.sum(bs.B().reshape(unitn.shape) * unitn, axis=2)[:, :, None]}
+    surf.to_vtk(out_dir + "surf_init", extra_data=pointData)
+
+    banana_coils = coils[num_tf_coils:]
+    banana_curve = banana_coils[0].curve
+    tf_coils = coils[:num_tf_coils]
+    return bs, curves, banana_curve, banana_coils, tf_coils
+
 
 # Helper: evaluate gamma for CurveCWSFourier
 def gamma_at_t(curve, t):
@@ -899,13 +923,34 @@ if __name__ == "__main__":
     banana_surf_radius = args.banana_surf_radius
     hbt, surf_coils, VV = build_hbt_reference_surfaces(banana_surf_nfp, banana_surf_radius)
 
-    init_coil_array = initializeCoils(new_surf, surf_coils, tf_coils, num_quadpoints, order,
-                                      phi_center, theta_center, phi_width, theta_width, OUT_DIR)
+    if args.stage2_bs_path:
+        print(f"Loading Stage 2 seed from {args.stage2_bs_path}")
+        init_coil_array = load_stage2_seed_configuration(
+            args.stage2_bs_path,
+            new_surf,
+            len(tf_coils),
+            OUT_DIR,
+        )
+        new_tf_coils = init_coil_array[4]
+        tf_current_A = float(new_tf_coils[0].current.get_value())
+    else:
+        init_coil_array = initializeCoils(
+            new_surf,
+            surf_coils,
+            tf_coils,
+            num_quadpoints,
+            order,
+            phi_center,
+            theta_center,
+            phi_width,
+            theta_width,
+            OUT_DIR,
+        )
+        new_tf_coils = tf_coils
     new_bs = init_coil_array[0]
     new_curves = init_coil_array[1]
     new_banana_curve = init_coil_array[2]
     new_banana_coils = init_coil_array[3]
-    new_tf_coils = tf_coils
     new_surf_coils = surf_coils
 
     # MAIN OPTIMIZATION
@@ -1154,6 +1199,7 @@ if __name__ == "__main__":
     results = {
         "PLASMA_SURF_FILENAME": plasma_surf_filename,
         "PLASMA_SURF_PATH": file_loc,
+        "STAGE2_BS_PATH": args.stage2_bs_path,
         "TF_CURRENT_A": float(tf_current_A),
         "TF_CURRENT_SUM_ABS_A": float(sum(abs(coil.current.get_value()) for coil in new_tf_coils)),
         "NUM_TF_COILS": len(new_tf_coils),

@@ -151,6 +151,91 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
 
         self.assertEqual(tolerances, [1e-3, 0.02, 0.2])
 
+    def test_stage2_parse_args_exposes_restart_seed_flag(self):
+        source = STAGE2_MODULE_PATH.read_text()
+
+        self.assertIn('"--stage2-bs-path"', source)
+        self.assertIn('"STAGE2_BS_PATH"', source)
+
+    def test_stage2_seed_loader_reuses_saved_biot_savart_configuration(self):
+        functions = extract_functions(
+            STAGE2_MODULE_PATH,
+            ["load_stage2_seed_configuration"],
+            {"np": np, "load": None, "curves_to_vtk": None},
+        )
+        load_stage2_seed_configuration = functions["load_stage2_seed_configuration"]
+
+        class FakeCurrent:
+            def __init__(self, value):
+                self._value = value
+
+            def get_value(self):
+                return self._value
+
+        class FakeCurve:
+            pass
+
+        class FakeCoil:
+            def __init__(self, curve, current):
+                self.curve = curve
+                self.current = current
+
+        class FakeBiotSavart:
+            def __init__(self, coils):
+                self.coils = coils
+                self.points = None
+
+            def set_points(self, points):
+                self.points = points
+
+            def B(self):
+                return np.zeros_like(self.points)
+
+        class FakeSurface:
+            def __init__(self):
+                self.saved_path = None
+                self.extra_data = None
+
+            def gamma(self):
+                return np.zeros((2, 2, 3))
+
+            def unitnormal(self):
+                return np.ones((2, 2, 3))
+
+            def to_vtk(self, path, extra_data):
+                self.saved_path = path
+                self.extra_data = extra_data
+
+        coils = [
+            FakeCoil(FakeCurve(), FakeCurrent(100000.0)),
+            FakeCoil(FakeCurve(), FakeCurrent(100000.0)),
+            FakeCoil(FakeCurve(), FakeCurrent(9500.0)),
+            FakeCoil(FakeCurve(), FakeCurrent(-9500.0)),
+        ]
+        fake_bs = FakeBiotSavart(coils)
+        vtk_calls = {}
+
+        load_stage2_seed_configuration.__globals__["load"] = lambda path: fake_bs
+        load_stage2_seed_configuration.__globals__["curves_to_vtk"] = (
+            lambda curves, path, close=True: vtk_calls.update(
+                {"curves": curves, "path": path, "close": close}
+            )
+        )
+
+        surf = FakeSurface()
+        result = load_stage2_seed_configuration("/tmp/seed.json", surf, 2, "/tmp/out/")
+
+        self.assertIs(result[0], fake_bs)
+        self.assertEqual(result[1], [coil.curve for coil in coils])
+        self.assertIs(result[2], coils[2].curve)
+        self.assertEqual(result[3], coils[2:])
+        self.assertEqual(result[4], coils[:2])
+        self.assertEqual(fake_bs.points.shape, (4, 3))
+        self.assertEqual(vtk_calls["path"], "/tmp/out/curves_init")
+        self.assertTrue(vtk_calls["close"])
+        self.assertEqual(surf.saved_path, "/tmp/out/surf_init")
+        self.assertEqual(surf.extra_data["B_N"].shape, (2, 2, 1))
+
     def test_single_stage_constraint_activity_tolerances_match_selection_windows(self):
         functions = extract_functions(
             SINGLE_STAGE_MODULE_PATH,
