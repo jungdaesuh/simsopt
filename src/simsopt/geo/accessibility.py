@@ -817,6 +817,27 @@ def _curve_sample_batches(curves):
     ]
 
 
+def _contract_projected_cc_distance_port_hessian_terms(
+    hess00,
+    hess01,
+    hess11,
+    grad0,
+    grad1,
+    dg1dx,
+    dl1dx,
+    gamma_hessian,
+    gammadash_hessian,
+):
+    return (
+        np.einsum("ijkl,ijm,kln->mn", hess00, dg1dx, dg1dx, optimize=True)
+        + np.einsum("ijkl,ijm,kln->mn", hess11, dl1dx, dl1dx, optimize=True)
+        + np.einsum("ij,ijkl->kl", grad0, gamma_hessian, optimize=True)
+        + np.einsum("ij,ijkl->kl", grad1, gammadash_hessian, optimize=True)
+        + np.einsum("kilj,kim,ljn->mn", hess01, dg1dx, dl1dx, optimize=True)
+        + np.einsum("kilj,kin,ljm->mn", hess01, dg1dx, dl1dx, optimize=True)
+    )
+
+
 class CurveInPortPenalty(Optimizable):
     def __init__(self, port, curves, threshold, projection="zphi"):
         self.port = port
@@ -1398,13 +1419,16 @@ class ProjectedCurveCurveDistance(Optimizable):
                     self.minimum_distance,
                 )
 
-                res += (
-                    np.einsum("ijkl,ijm,kln->mn", hess00, dg1dx, dg1dx)
-                    + np.einsum("ijkl,ijm,kln->mn", hess11, dl1dx, dl1dx)
-                    + np.einsum("ij,ijkl->kl", grad0, gamma_hessian)
-                    + np.einsum("ij,ijkl->kl", grad1, gammadash_hessian)
-                    + np.einsum("kilj,kim,ljn->mn", hess01, dg1dx, dl1dx)
-                    + np.einsum("kilj,kin,ljm->mn", hess01, dg1dx, dl1dx)
+                res += _contract_projected_cc_distance_port_hessian_terms(
+                    hess00,
+                    hess01,
+                    hess11,
+                    np.asarray(grad0),
+                    np.asarray(grad1),
+                    dg1dx,
+                    dl1dx,
+                    gamma_hessian,
+                    gammadash_hessian,
                 )
                 continue
 
@@ -1452,16 +1476,16 @@ class ProjectedCurveCurveDistance(Optimizable):
                 self.projection,
                 self.minimum_distance,
             )
-            grad0 = np.asarray(grad0)
-            grad1 = np.asarray(grad1)
-
-            res += (
-                np.einsum("aijkl,ijm,kln->mn", hess00, dg1dx, dg1dx)
-                + np.einsum("aijkl,ijm,kln->mn", hess11, dl1dx, dl1dx)
-                + np.einsum("aij,ijkl->kl", grad0, gamma_hessian)
-                + np.einsum("aij,ijkl->kl", grad1, gammadash_hessian)
-                + np.einsum("akilj,kim,ljn->mn", hess01, dg1dx, dl1dx)
-                + np.einsum("akilj,kin,ljm->mn", hess01, dg1dx, dl1dx)
+            res += _contract_projected_cc_distance_port_hessian_terms(
+                np.sum(hess00, axis=0),
+                np.sum(hess01, axis=0),
+                np.sum(hess11, axis=0),
+                np.sum(np.asarray(grad0), axis=0),
+                np.sum(np.asarray(grad1), axis=0),
+                dg1dx,
+                dl1dx,
+                gamma_hessian,
+                gammadash_hessian,
             )
 
         return res
