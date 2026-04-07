@@ -50,7 +50,6 @@ import sys
 sys.path.insert(0, EXAMPLE_ROOT)
 from alm_utils import (
     ALMSettings,
-    augmented_inequality_objective,
     minimize_alm,
     validate_alm_cli_args,
 )
@@ -90,11 +89,17 @@ from banana_opt.single_stage_geometry import (
     topology_gate_rejection_increment,
 )
 from banana_opt.single_stage_constraints import (
-    single_stage_constraint_activity_tolerances,
     smooth_max_curvature_signed_constraint as _smooth_max_curvature_signed_constraint,
     smooth_min_curve_curve_signed_constraint as _smooth_min_curve_curve_signed_constraint,
     smooth_min_curve_surface_signed_constraint as _smooth_min_curve_surface_signed_constraint,
     smooth_min_surface_surface_signed_constraint as _smooth_min_surface_surface_signed_constraint,
+)
+from banana_opt.single_stage_objectives import (
+    average_surface_objectives as _average_surface_objectives_impl,
+    build_total_objective as _build_total_objective_impl,
+    evaluate_base_objective as _evaluate_base_objective_impl,
+    evaluate_total_objective as _evaluate_total_objective_impl,
+    evaluate_alm_objective as _evaluate_alm_objective_impl,
 )
 SIMSOPT_ROOT = os.path.abspath(os.path.join(EXAMPLE_ROOT, "..", ".."))
 REPO_ROOT = os.path.abspath(os.path.join(SIMSOPT_ROOT, ".."))
@@ -1095,21 +1100,7 @@ def topology_gate_deficit(status):
 
 
 def average_surface_objectives(objectives, weights=None):
-    if len(objectives) == 0:
-        raise ValueError("Need at least one surface objective to average")
-    if weights is None:
-        weights = np.ones(len(objectives))
-    if len(objectives) != len(weights):
-        raise ValueError("Number of objectives and weights must match")
-    total_weight = float(np.sum(weights))
-    if total_weight <= 0.0:
-        raise ValueError("Sum of weights must be positive")
-
-    weighted_sum = None
-    for weight, objective in zip(weights, objectives):
-        weighted_objective = weight * objective
-        weighted_sum = weighted_objective if weighted_sum is None else weighted_sum + weighted_objective
-    return (1.0 / total_weight) * weighted_sum
+    return _average_surface_objectives_impl(objectives, weights=weights)
 
 
 def confinement_surrogate_kwargs():
@@ -1334,46 +1325,24 @@ def evaluate_total_objective(
     JSurfSurf=None,
     SURF_DIST_WEIGHT=0.0,
 ):
-    J_QS_obj = average_surface_objectives(nonQSs, weights=surface_weights)
-    J_Boozer_obj = average_surface_objectives(brs, weights=surface_weights)
-    total_objective = build_total_objective(
-        J_QS_obj,
+    return _evaluate_total_objective_impl(
+        surface_weights,
+        nonQSs,
+        brs,
         RES_WEIGHT,
-        J_Boozer_obj,
-        IOTAS_WEIGHT,
         Jiota,
-        LENGTH_WEIGHT,
+        IOTAS_WEIGHT,
         JCurveLength,
-        CC_WEIGHT,
+        LENGTH_WEIGHT,
         JCurveCurve,
-        CS_WEIGHT,
+        CC_WEIGHT,
         JCurveSurface,
-        CURVATURE_WEIGHT,
+        CS_WEIGHT,
         JCurvature,
-        SURF_DIST_WEIGHT=SURF_DIST_WEIGHT,
+        CURVATURE_WEIGHT,
         JSurfSurf=JSurfSurf,
+        SURF_DIST_WEIGHT=SURF_DIST_WEIGHT,
     )
-    return {
-        "total": total_objective.J(),
-        "grad": total_objective.dJ(),
-        "J_QS": J_QS_obj.J(),
-        "dJ_QS": J_QS_obj.dJ(),
-        "J_Boozer": J_Boozer_obj.J(),
-        "dJ_Boozer": J_Boozer_obj.dJ(),
-        "J_iota": Jiota.J(),
-        "dJ_iota": Jiota.dJ(),
-        "J_len": JCurveLength.J(),
-        "dJ_len": JCurveLength.dJ(),
-        "J_cc": JCurveCurve.J(),
-        "dJ_cc": JCurveCurve.dJ(),
-        "J_cs": JCurveSurface.J(),
-        "dJ_cs": JCurveSurface.dJ(),
-        "J_surf": JSurfSurf.J() if JSurfSurf is not None else 0.0,
-        "dJ_surf": JSurfSurf.dJ() if JSurfSurf is not None else np.zeros_like(total_objective.dJ()),
-        "J_curvature": JCurvature.J(),
-        "dJ_curvature": JCurvature.dJ(),
-        "surface_weights": np.asarray(surface_weights, dtype=float).copy(),
-    }
 
 
 def evaluate_base_objective(
@@ -1386,27 +1355,16 @@ def evaluate_base_objective(
     JCurveLength,
     LENGTH_WEIGHT,
 ):
-    J_QS_obj = average_surface_objectives(nonQSs, weights=surface_weights)
-    J_Boozer_obj = average_surface_objectives(brs, weights=surface_weights)
-    base_objective = (
-        J_QS_obj
-        + RES_WEIGHT * J_Boozer_obj
-        + IOTAS_WEIGHT * Jiota
-        + LENGTH_WEIGHT * JCurveLength
+    return _evaluate_base_objective_impl(
+        surface_weights,
+        nonQSs,
+        brs,
+        RES_WEIGHT,
+        Jiota,
+        IOTAS_WEIGHT,
+        JCurveLength,
+        LENGTH_WEIGHT,
     )
-    return {
-        "total": base_objective.J(),
-        "grad": base_objective.dJ(),
-        "J_QS": J_QS_obj.J(),
-        "dJ_QS": J_QS_obj.dJ(),
-        "J_Boozer": J_Boozer_obj.J(),
-        "dJ_Boozer": J_Boozer_obj.dJ(),
-        "J_iota": Jiota.J(),
-        "dJ_iota": Jiota.dJ(),
-        "J_len": JCurveLength.J(),
-        "dJ_len": JCurveLength.dJ(),
-        "surface_weights": np.asarray(surface_weights, dtype=float).copy(),
-    }
 
 
 def evaluate_alm_objective(
@@ -1425,7 +1383,7 @@ def evaluate_alm_objective(
     penalty,
     JSurfSurf=None,
 ):
-    base_eval = evaluate_base_objective(
+    return _evaluate_alm_objective_impl(
         surface_weights,
         nonQSs,
         brs,
@@ -1434,99 +1392,29 @@ def evaluate_alm_objective(
         IOTAS_WEIGHT,
         JCurveLength,
         LENGTH_WEIGHT,
-    )
-
-    curve_curve_signed_value, curve_curve_grad, curve_curve_violation = (
-        _smooth_min_curve_curve_signed_constraint(
-            curves,
-            CC_DIST,
-            args.alm_distance_smoothing,
-            JF,
-        )
-    )
-    curve_surface_signed_value, curve_surface_grad, curve_surface_violation = (
-        _smooth_min_curve_surface_signed_constraint(
-            curves,
-            outer_surface_data["boozer_surface"].surface,
-            CS_DIST,
-            args.alm_distance_smoothing,
-            JF,
-        )
-    )
-    curvature_signed_value, curvature_grad, curvature_violation = (
-        _smooth_max_curvature_signed_constraint(
-            banana_curve,
-            CURVATURE_THRESHOLD,
-            args.alm_curvature_smoothing,
-            JF,
-        )
-    )
-
-    constraint_names = list(SINGLE_STAGE_ALM_CONSTRAINT_NAMES[:3])
-    constraint_values = [
-        curve_curve_signed_value,
-        curve_surface_signed_value,
-        curvature_signed_value,
-    ]
-    constraint_grads = [
-        curve_curve_grad,
-        curve_surface_grad,
-        curvature_grad,
-    ]
-    feasibility_values = [
-        curve_curve_violation,
-        curve_surface_violation,
-        curvature_violation,
-    ]
-    if JSurfSurf is not None:
-        surface_vessel_signed_value, surface_vessel_grad, surface_vessel_violation = (
-            _smooth_min_surface_surface_signed_constraint(
-                outer_surface_data["boozer_surface"].surface,
-                VV,
-                SS_DIST,
-                args.alm_distance_smoothing,
-                JF,
-            )
-        )
-        constraint_names.append(SINGLE_STAGE_ALM_CONSTRAINT_NAMES[3])
-        constraint_values.append(surface_vessel_signed_value)
-        constraint_grads.append(surface_vessel_grad)
-        feasibility_values.append(surface_vessel_violation)
-
-    alm_eval = augmented_inequality_objective(
-        base_eval["total"],
-        base_eval["grad"],
-        constraint_values,
-        constraint_grads,
+        JCurveCurve,
+        JCurveSurface,
+        JCurvature,
         multipliers,
         penalty,
+        objective_optimizable=JF,
+        curves=curves,
+        curve_curve_min_distance=CC_DIST,
+        outer_surface=outer_surface_data["boozer_surface"].surface,
+        curve_surface_min_distance=CS_DIST,
+        banana_curve=banana_curve,
+        curvature_threshold=CURVATURE_THRESHOLD,
+        distance_smoothing=args.alm_distance_smoothing,
+        curvature_smoothing=args.alm_curvature_smoothing,
+        constraint_names=SINGLE_STAGE_ALM_CONSTRAINT_NAMES,
+        curve_curve_constraint_fn=_smooth_min_curve_curve_signed_constraint,
+        curve_surface_constraint_fn=_smooth_min_curve_surface_signed_constraint,
+        curvature_constraint_fn=_smooth_max_curvature_signed_constraint,
+        JSurfSurf=JSurfSurf,
+        vessel_surface=VV,
+        surface_surface_min_distance=SS_DIST,
+        surface_surface_constraint_fn=_smooth_min_surface_surface_signed_constraint,
     )
-    base_total = float(base_eval["total"])
-    base_eval.update(alm_eval)
-    base_eval["base_total"] = base_total
-    base_eval["constraint_names"] = constraint_names
-    base_eval["dual_update_values"] = np.asarray(constraint_values, dtype=float)
-    base_eval["feasibility_values"] = np.asarray(feasibility_values, dtype=float)
-    base_eval["max_feasibility_violation"] = float(max(feasibility_values))
-    base_eval["constraint_grads"] = [np.asarray(grad, dtype=float) for grad in constraint_grads]
-    base_eval["constraint_activity_tolerances"] = single_stage_constraint_activity_tolerances(
-        args.alm_distance_smoothing,
-        args.alm_curvature_smoothing,
-        include_surface_surface=JSurfSurf is not None,
-    )
-    base_eval["J_cc"] = float(JCurveCurve.J())
-    base_eval["dJ_cc"] = np.asarray(JCurveCurve.dJ(), dtype=float)
-    base_eval["J_cs"] = float(JCurveSurface.J())
-    base_eval["dJ_cs"] = np.asarray(JCurveSurface.dJ(), dtype=float)
-    base_eval["J_surf"] = 0.0 if JSurfSurf is None else float(JSurfSurf.J())
-    base_eval["dJ_surf"] = (
-        np.zeros_like(np.asarray(base_eval["grad"], dtype=float))
-        if JSurfSurf is None
-        else np.asarray(JSurfSurf.dJ(), dtype=float)
-    )
-    base_eval["J_curvature"] = float(JCurvature.J())
-    base_eval["dJ_curvature"] = np.asarray(JCurvature.dJ(), dtype=float)
-    return base_eval
 
 
 def evaluate_search_objective(surface_weights):
@@ -1592,18 +1480,23 @@ def build_single_stage_alm_settings(args):
 
 
 def build_total_objective(JnonQSRatio, RES_WEIGHT, JBoozerResidual, IOTAS_WEIGHT, Jiota, LENGTH_WEIGHT, JCurveLength, CC_WEIGHT, JCurveCurve, CS_WEIGHT, JCurveSurface, CURVATURE_WEIGHT, JCurvature, SURF_DIST_WEIGHT=0.0, JSurfSurf=None):
-    objective = (
-        JnonQSRatio
-        + RES_WEIGHT * JBoozerResidual
-        + IOTAS_WEIGHT * Jiota
-        + LENGTH_WEIGHT * JCurveLength
-        + CC_WEIGHT * JCurveCurve
-        + CS_WEIGHT * JCurveSurface
-        + CURVATURE_WEIGHT * JCurvature
+    return _build_total_objective_impl(
+        JnonQSRatio,
+        RES_WEIGHT,
+        JBoozerResidual,
+        IOTAS_WEIGHT,
+        Jiota,
+        LENGTH_WEIGHT,
+        JCurveLength,
+        CC_WEIGHT,
+        JCurveCurve,
+        CS_WEIGHT,
+        JCurveSurface,
+        CURVATURE_WEIGHT,
+        JCurvature,
+        SURF_DIST_WEIGHT=SURF_DIST_WEIGHT,
+        JSurfSurf=JSurfSurf,
     )
-    if JSurfSurf is not None:
-        objective = objective + SURF_DIST_WEIGHT * JSurfSurf
-    return objective
 
 
 def finalize_surface_stack(x, objective, surface_data, run_state, vessel_surface=None, surface_gap_threshold=0.0, vessel_gap_threshold=0.0):

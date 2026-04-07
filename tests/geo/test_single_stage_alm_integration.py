@@ -22,6 +22,13 @@ SINGLE_STAGE_CONSTRAINTS_MODULE_PATH = (
     / "banana_opt"
     / "single_stage_constraints.py"
 )
+SINGLE_STAGE_OBJECTIVES_MODULE_PATH = (
+    Path(__file__).resolve().parents[2]
+    / "examples"
+    / "single_stage_optimization"
+    / "banana_opt"
+    / "single_stage_objectives.py"
+)
 STAGE2_MODULE_PATH = (
     Path(__file__).resolve().parents[2]
     / "examples"
@@ -145,9 +152,14 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
 
     def test_single_stage_source_uses_projected_inequality_alm_and_outer_accept_callback(self):
         source = SINGLE_STAGE_MODULE_PATH.read_text()
+        objectives_source = SINGLE_STAGE_OBJECTIVES_MODULE_PATH.read_text()
 
-        self.assertIn("augmented_inequality_objective(", source)
-        self.assertNotIn("augmented_objective(", source)
+        self.assertIn("_evaluate_alm_objective_impl(", source)
+        self.assertIn(
+            "augmented_inequality_objective_fn=augmented_inequality_objective",
+            objectives_source,
+        )
+        self.assertNotIn("augmented_objective(", objectives_source)
         self.assertIn("accepted_callback=callback", source)
         self.assertNotIn("inner_callback=callback", source)
 
@@ -254,7 +266,7 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
         self.assertEqual(surf.extra_data["B_N"].shape, (2, 2, 1))
 
     def test_single_stage_constraint_activity_tolerances_match_selection_windows(self):
-        source = SINGLE_STAGE_MODULE_PATH.read_text()
+        source = SINGLE_STAGE_CONSTRAINTS_MODULE_PATH.read_text()
         self.assertIn("single_stage_constraint_activity_tolerances", source)
 
         functions = extract_functions(
