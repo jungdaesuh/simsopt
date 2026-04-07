@@ -141,7 +141,7 @@ def _pairwise_rowwise_min_distance(points_a, points_b, *, chunk_size=None):
             return jnp.minimum(row_min, block_row_min), None
 
         row_min, _ = lax.scan(
-            _scan_other_chunks,
+            jax.checkpoint(_scan_other_chunks),
             initial_row_min,
             (other_chunks, other_masks),
         )
@@ -193,7 +193,7 @@ def _pairwise_rowwise_pnorm_distance(points_a, points_b, p, *, chunk_size=None):
             return row_sum + block_power_sum, None
 
         row_sum, _ = lax.scan(
-            _scan_other_chunks,
+            jax.checkpoint(_scan_other_chunks),
             initial_row_sum,
             (other_chunks, other_masks),
         )
