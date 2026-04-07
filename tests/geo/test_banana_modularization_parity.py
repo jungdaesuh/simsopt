@@ -7,6 +7,7 @@ import unittest
 import uuid
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
 
 import numpy as np
 
@@ -350,6 +351,36 @@ class SnapshotParityTests(unittest.TestCase):
             np.testing.assert_allclose(
                 actual_entry["initial_surface"].get_dofs(),
                 expected_entry["initial_surface"].get_dofs(),
+            )
+
+    def test_single_stage_reference_surface_wrapper_order(self):
+        surfaces = SimpleNamespace(vessel="VV", hbt="HBT", coil_winding_surface="CWS")
+
+        with mock.patch.object(
+            self.current_single_stage,
+            "build_banana_reference_surfaces",
+            return_value=surfaces,
+        ):
+            self.assertEqual(
+                self.current_single_stage.build_hbt_reference_surfaces(5, 0.2),
+                ("VV", "HBT", "CWS"),
+            )
+
+    def test_stage2_reference_surface_wrapper_order(self):
+        stage2_module = _load_module(
+            EXAMPLES_ROOT / "STAGE_2" / "banana_coil_solver.py",
+            "banana_stage2_solver",
+        )
+        surfaces = SimpleNamespace(vessel="VV", hbt="HBT", coil_winding_surface="CWS")
+
+        with mock.patch.object(
+            stage2_module,
+            "build_banana_reference_surfaces",
+            return_value=surfaces,
+        ):
+            self.assertEqual(
+                stage2_module.build_hbt_reference_surfaces(5, 0.2),
+                ("HBT", "CWS", "VV"),
             )
 
     def test_compute_surface_vessel_min_dist_matches_snapshot(self):
