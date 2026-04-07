@@ -404,13 +404,10 @@ def load_stage2_seed_configuration(seed_bs_path, surf, num_tf_coils, out_dir):
     tf_coils = coils[:num_tf_coils]
     return bs, curves, banana_curve, banana_coils, tf_coils
 
-
-
-
-if __name__ == "__main__":
+def main(parsed_args=None):
     # PRE-INITIALIZATION
     # ---------------------------------------------------------------------------------------
-    args = parse_args()
+    args = parse_args() if parsed_args is None else parsed_args
     validate_alm_cli_args(args)
 
     # File for the desired boundary magnetic surface:
@@ -778,3 +775,7 @@ if __name__ == "__main__":
     )
     with open(os.path.join(OUT_DIR_ITER, "results.json"), "w") as outfile:
         json.dump(results, outfile, indent=2)
+
+
+if __name__ == "__main__":
+    main()

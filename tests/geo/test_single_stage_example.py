@@ -1,4 +1,5 @@
 import importlib.util
+from contextlib import ExitStack
 import sys
 import tempfile
 import unittest
@@ -2494,6 +2495,330 @@ class CurrentBaselineContractTests(unittest.TestCase):
             args = module.parse_args()
 
         self.assertEqual(args.tf_current_A, 80000.0)
+
+
+class Stage2RuntimeSmokeTests(unittest.TestCase):
+    def _make_stage2_args(self, output_root, **overrides):
+        defaults = {
+            "plasma_surf_filename": "demo.nc",
+            "equilibria_dir": str(output_root),
+            "equilibrium_path": str(Path(output_root) / "demo.nc"),
+            "output_root": str(output_root),
+            "stage2_bs_path": str(Path(output_root) / "seed.json"),
+            "nphi": 8,
+            "ntheta": 8,
+            "init_only": True,
+            "banana_surf_radius": 0.22,
+            "tf_current_A": 8.0e4,
+            "major_radius": 0.915,
+            "toroidal_flux": 0.24,
+            "order": 2,
+            "maxiter": 30,
+            "ftol": 1e-15,
+            "gtol": 1e-15,
+            "constraint_method": "penalty",
+            "alm_max_outer_iters": 7,
+            "alm_penalty_init": 2.0,
+            "alm_penalty_scale": 3.0,
+            "alm_feas_tol": 1e-4,
+            "alm_stationarity_tol": 2e-4,
+            "alm_trust_radius_init": 0.15,
+            "alm_trust_radius_min": 1e-3,
+            "alm_trust_radius_shrink": 0.4,
+            "alm_trust_radius_grow": 1.8,
+            "alm_max_inner_attempts": 5,
+            "alm_max_subproblem_continuations": 9,
+            "alm_distance_smoothing": 0.005,
+            "alm_curvature_smoothing": 0.05,
+            "alm_taylor_test": False,
+            "alm_taylor_test_seed": 123,
+            "length_weight": 5e-4,
+            "length_target": 1.75,
+            "cc_threshold": 0.05,
+            "cc_weight": 100.0,
+            "curvature_weight": 1e-4,
+            "curvature_threshold": 40.0,
+            "curvature_p_norm": 2,
+            "squared_flux_weight": 1.0,
+            "basin_hops": 0,
+            "basin_stepsize": 0.01,
+            "basin_seed": 7,
+            "theta_center": np.pi,
+            "phi_center": np.pi / 4.0,
+            "theta_width": np.pi / 6.0,
+            "phi_width": np.pi / 8.0,
+            "num_quadpoints": 16,
+        }
+        defaults.update(overrides)
+        return SimpleNamespace(**defaults)
+
+    def _run_stage2_main(self, *, init_only, constraint_method, use_seed):
+        module = load_stage2_module()
+        runtime = {
+            "seed_loads": 0,
+            "initialize_calls": 0,
+            "minimize_calls": 0,
+            "minimize_alm_calls": 0,
+            "results": None,
+        }
+
+        class FakeStage2Objective:
+            def __init__(self, value, gradient, x=None):
+                self._value = float(value)
+                self._gradient = np.asarray(gradient, dtype=float)
+                self.x = np.zeros(2, dtype=float) if x is None else np.asarray(x, dtype=float)
+
+            def J(self):
+                return self._value
+
+            def dJ(self, partials=False):
+                if partials:
+                    return lambda _objective: self._gradient.copy()
+                return self._gradient.copy()
+
+            def __add__(self, other):
+                if other == 0:
+                    return self
+                return FakeStage2Objective(
+                    self._value + other.J(),
+                    self._gradient + other.dJ(),
+                    self.x.copy(),
+                )
+
+            __radd__ = __add__
+
+            def __mul__(self, scalar):
+                return FakeStage2Objective(
+                    self._value * float(scalar),
+                    self._gradient * float(scalar),
+                    self.x.copy(),
+                )
+
+            __rmul__ = __mul__
+
+        class FakeCurrent:
+            def __init__(self, value):
+                self._value = float(value)
+
+            def __mul__(self, scalar):
+                return FakeCurrent(self._value * float(scalar))
+
+            __rmul__ = __mul__
+
+            def fix_all(self):
+                return None
+
+            def get_value(self):
+                return self._value
+
+        class FakeCurve:
+            def fix_all(self):
+                return None
+
+        class FakeSurface:
+            def __init__(self):
+                self.nfp = 22
+
+            def gamma(self):
+                return np.zeros((2, 2, 3), dtype=float)
+
+            def unitnormal(self):
+                return np.ones((2, 2, 3), dtype=float)
+
+            def to_vtk(self, *_args, **_kwargs):
+                return None
+
+            def volume(self):
+                return 0.12
+
+        class FakeBiotSavart:
+            def __init__(self):
+                self.points = np.zeros((4, 3), dtype=float)
+
+            def set_points(self, points):
+                self.points = np.asarray(points, dtype=float)
+
+            def B(self):
+                return np.ones_like(self.points)
+
+            def save(self, *_args, **_kwargs):
+                return None
+
+        class FakeCurveDistance(FakeStage2Objective):
+            def __init__(self):
+                super().__init__(0.25, [0.3, 0.4])
+                self.minimum_distance = 0.05
+                self.curves = ["curve_a", "curve_b"]
+
+            def shortest_distance(self):
+                return 0.04
+
+        class FakeCurvatureObjective(FakeStage2Objective):
+            def __init__(self):
+                super().__init__(0.35, [0.2, 0.3])
+                self.threshold = 40.0
+                self.curve = SimpleNamespace(kappa=lambda: np.array([39.0, 41.0], dtype=float))
+
+        fake_bs = FakeBiotSavart()
+        fake_surface = FakeSurface()
+        fake_banana_curve = SimpleNamespace(kappa=lambda: np.array([39.0, 41.0], dtype=float))
+        fake_banana_coils = [SimpleNamespace(curve=fake_banana_curve, current=FakeCurrent(9500.0))]
+        fake_tf_coils = [
+            SimpleNamespace(curve=FakeCurve(), current=FakeCurrent(8.0e4)),
+            SimpleNamespace(curve=FakeCurve(), current=FakeCurrent(8.0e4)),
+        ]
+
+        def fake_seed_loader(seed_bs_path, surf, num_tf_coils, out_dir):
+            runtime["seed_loads"] += 1
+            self.assertEqual(num_tf_coils, 20)
+            self.assertIs(surf, fake_surface)
+            return (
+                fake_bs,
+                ["curve_a", "curve_b", "curve_c"],
+                fake_banana_curve,
+                fake_banana_coils,
+                fake_tf_coils,
+            )
+
+        def fake_initialize_coils(
+            surf,
+            surf_coils,
+            tf_coils,
+            num_quadpoints,
+            order,
+            phi_center,
+            theta_center,
+            phi_width,
+            theta_width,
+            out_dir,
+        ):
+            runtime["initialize_calls"] += 1
+            self.assertIs(surf, fake_surface)
+            self.assertEqual(surf_coils, "surf_coils")
+            self.assertEqual(len(tf_coils), 20)
+            self.assertEqual(num_quadpoints, 16)
+            self.assertEqual(order, 2)
+            self.assertEqual(phi_center, np.pi / 4.0)
+            self.assertEqual(theta_center, np.pi)
+            self.assertEqual(phi_width, np.pi / 8.0)
+            self.assertEqual(theta_width, np.pi / 6.0)
+            self.assertTrue(str(out_dir).endswith("outputs-demo.nc/"))
+            return (
+                fake_bs,
+                ["curve_a", "curve_b", "curve_c"],
+                fake_banana_curve,
+                fake_banana_coils,
+            )
+
+        def fake_minimize(*_args, **_kwargs):
+            runtime["minimize_calls"] += 1
+            return SimpleNamespace(
+                x=np.array([0.3, -0.2], dtype=float),
+                nit=4,
+                message="penalty_ok",
+                success=True,
+            )
+
+        def fake_minimize_alm(*_args, **_kwargs):
+            runtime["minimize_alm_calls"] += 1
+            return SimpleNamespace(
+                x=np.array([0.1, 0.2], dtype=float),
+                nit=5,
+                message="alm_ok",
+                success=True,
+                outer_iterations=2,
+                penalty=3.5,
+                multipliers=np.array([0.1, 0.2, 0.3], dtype=float),
+                constraint_values=np.array([0.0, 0.01, 0.0], dtype=float),
+                solver_constraint_values=np.array([0.0, 0.2, 0.0], dtype=float),
+                trust_radius=0.1,
+                history=[{"outer_iteration": 1}],
+            )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            args = self._make_stage2_args(
+                tmpdir,
+                init_only=init_only,
+                constraint_method=constraint_method,
+                stage2_bs_path=(str(Path(tmpdir) / "seed.json") if use_seed else None),
+                equilibrium_path=str(Path(tmpdir) / "demo.nc"),
+            )
+
+            with ExitStack() as stack:
+                stack.enter_context(patch.object(module, "validate_alm_cli_args", lambda *_args: None))
+                stack.enter_context(patch.object(module, "build_equilibrium_path", lambda _args: args.equilibrium_path))
+                stack.enter_context(patch.object(module, "create_equally_spaced_curves", lambda *_args, **_kwargs: [FakeCurve() for _ in range(20)]))
+                stack.enter_context(patch.object(module, "Current", FakeCurrent))
+                stack.enter_context(patch.object(module, "Coil", lambda curve, current: SimpleNamespace(curve=curve, current=current)))
+                stack.enter_context(patch.object(module, "_init_surface", lambda *_args, **_kwargs: fake_surface))
+                stack.enter_context(patch.object(module, "build_hbt_reference_surfaces", lambda *_args, **_kwargs: ("hbt", "surf_coils", SimpleNamespace(to_vtk=lambda *_a, **_k: None))))
+                if use_seed:
+                    stack.enter_context(patch.object(module, "load_stage2_seed_configuration", side_effect=fake_seed_loader))
+                    stack.enter_context(patch.object(module, "_initialize_coils", side_effect=AssertionError("unexpected fresh initialization")))
+                else:
+                    stack.enter_context(patch.object(module, "load_stage2_seed_configuration", side_effect=AssertionError("unexpected seed load")))
+                    stack.enter_context(patch.object(module, "_initialize_coils", side_effect=fake_initialize_coils))
+                stack.enter_context(patch.object(module, "SquaredFlux", lambda *_args, **_kwargs: FakeStage2Objective(0.5, [1.0, 1.0])))
+                stack.enter_context(patch.object(module, "CurveLength", lambda *_args, **_kwargs: FakeStage2Objective(1.8, [0.1, 0.2])))
+                stack.enter_context(patch.object(module, "CurveCurveDistance", lambda *_args, **_kwargs: FakeCurveDistance()))
+                stack.enter_context(patch.object(module, "LpCurveCurvature", lambda *_args, **_kwargs: FakeCurvatureObjective()))
+                stack.enter_context(patch.object(module, "QuadraticPenalty", lambda *_args, **_kwargs: FakeStage2Objective(0.05, [0.01, 0.02])))
+                stack.enter_context(patch.object(module, "format_local_stage2_run_dir", lambda *_args, **_kwargs: "runtime-smoke"))
+                stack.enter_context(patch.object(module, "curves_to_vtk", lambda *_args, **_kwargs: None))
+                stack.enter_context(patch.object(module, "cross_section_plot", lambda *_args, **_kwargs: None))
+                stack.enter_context(patch.object(module, "_magnetic_field_plots", lambda *_args, **_kwargs: 0.03))
+                stack.enter_context(patch.object(module, "is_self_intersecting", lambda *_args, **_kwargs: False))
+                stack.enter_context(patch.object(module, "_evaluate_stage2_hardware_constraints", lambda *_args, **_kwargs: {"success": True, "violations": []}))
+                stack.enter_context(patch.object(module, "minimize", side_effect=fake_minimize))
+                stack.enter_context(patch.object(module, "minimize_alm", side_effect=fake_minimize_alm))
+                stack.enter_context(patch.object(module.json, "dump", side_effect=lambda data, _outfile, indent=2: runtime.__setitem__("results", data)))
+                module.main(args)
+
+        return runtime
+
+    def test_stage2_main_init_only_loads_seed_and_writes_results(self):
+        runtime = self._run_stage2_main(init_only=True, constraint_method="penalty", use_seed=True)
+
+        self.assertEqual(runtime["seed_loads"], 1)
+        self.assertEqual(runtime["initialize_calls"], 0)
+        self.assertEqual(runtime["minimize_calls"], 0)
+        self.assertEqual(runtime["minimize_alm_calls"], 0)
+        self.assertEqual(runtime["results"]["TERMINATION_MESSAGE"], "init_only")
+        self.assertTrue(runtime["results"]["OPTIMIZER_SUCCESS"])
+        self.assertEqual(runtime["results"]["iterations"], 0)
+        self.assertTrue(runtime["results"]["HARDWARE_CONSTRAINTS_OK"])
+        self.assertTrue(runtime["results"]["STAGE2_BS_PATH"].endswith("seed.json"))
+
+    def test_stage2_main_alm_path_uses_minimize_alm(self):
+        runtime = self._run_stage2_main(init_only=False, constraint_method="alm", use_seed=True)
+
+        self.assertEqual(runtime["seed_loads"], 1)
+        self.assertEqual(runtime["initialize_calls"], 0)
+        self.assertEqual(runtime["minimize_calls"], 0)
+        self.assertEqual(runtime["minimize_alm_calls"], 1)
+        self.assertEqual(runtime["results"]["CONSTRAINT_METHOD"], "alm")
+        self.assertEqual(runtime["results"]["ALM_OUTER_ITERATIONS"], 2)
+        self.assertEqual(runtime["results"]["TERMINATION_MESSAGE"], "alm_ok")
+
+    def test_stage2_main_penalty_path_uses_lbfgsb(self):
+        runtime = self._run_stage2_main(init_only=False, constraint_method="penalty", use_seed=True)
+
+        self.assertEqual(runtime["seed_loads"], 1)
+        self.assertEqual(runtime["initialize_calls"], 0)
+        self.assertEqual(runtime["minimize_calls"], 1)
+        self.assertEqual(runtime["minimize_alm_calls"], 0)
+        self.assertEqual(runtime["results"]["CONSTRAINT_METHOD"], "penalty")
+        self.assertEqual(runtime["results"]["TERMINATION_MESSAGE"], "penalty_ok")
+
+    def test_stage2_main_fresh_init_path_uses_initialize_coils(self):
+        runtime = self._run_stage2_main(init_only=True, constraint_method="penalty", use_seed=False)
+
+        self.assertEqual(runtime["seed_loads"], 0)
+        self.assertEqual(runtime["initialize_calls"], 1)
+        self.assertEqual(runtime["minimize_calls"], 0)
+        self.assertEqual(runtime["minimize_alm_calls"], 0)
+        self.assertEqual(runtime["results"]["TERMINATION_MESSAGE"], "init_only")
+        self.assertIsNone(runtime["results"]["STAGE2_BS_PATH"])
 
 
 class AlmUtilsTests(unittest.TestCase):
