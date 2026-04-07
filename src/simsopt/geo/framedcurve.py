@@ -1,7 +1,10 @@
 import numpy as np
 import jax.numpy as jnp
-from jax import vjp, jvp, grad
-import simsoptpp as sopp
+from jax import vjp, jvp
+
+from ._simsoptpp import sopp_namespace
+
+sopp = sopp_namespace("Curve")
 from .._core.optimizable import Optimizable
 from .._core.derivative import Derivative
 from .curve import Curve
@@ -30,13 +33,11 @@ class FramedCurve(sopp.Curve, Curve):
         self.rotation = rotation
         Curve.__init__(self, depends_on=deps)
 
-        self.frame_twist_jax = jit(lambda gammadash, t, n, ndash: frame_twist_pure(gammadash,t,n,ndash))
-        self.frame_twistgrad_vjp0 = jit(lambda gammadash, t, n, ndash, v: vjp(
-            lambda g: self.frame_twist_jax(g, t, n, ndash), t)[1](v)[0])
-        self.frame_twistgrad_vjp1 = jit(lambda gammadash, t, n, ndash, v: vjp(
-            lambda g: self.frame_twist_jax(gammadash, t, g, ndash), n)[1](v)[0])
-        self.frame_twistgrad_vjp2 = jit(lambda gammadash, t, n, ndash, v: vjp(
-            lambda g: self.frame_twist_jax(gammadash, t, n, g), ndash)[1](v)[0])
+    def _frame_twist_inputs(self):
+        gammadash = self.curve.gammadash()
+        t, n, _ = self.rotated_frame()
+        _, ndash, _ = self.rotated_frame_dash()
+        return gammadash, t, n, ndash
 
     def frame_twist(self):
         """
@@ -44,22 +45,15 @@ class FramedCurve(sopp.Curve, Curve):
         of the given frame, quantifying the winding of the normal about the given 
         curve. 
         """
-        gammadash = self.curve.gammadash()
-        t, n, _ = self.rotated_frame()
-        _, ndash, _ = self.rotated_frame_dash()
-        return self.frame_twist_jax(gammadash, t, n, ndash)
+        gammadash, t, n, ndash = self._frame_twist_inputs()
+        return _frame_twist_eval(gammadash, t, n, ndash)
 
     def dframe_twist_by_dcoeff_vjp(self, v):
-        gammadash = self.curve.gammadash()
-        t, n, _ = self.rotated_frame()
-        _, ndash, _ = self.rotated_frame_dash()
-
-        grad0 = self.frame_twistgrad_vjp0(gammadash, t, n, ndash, v)
-        grad1 = self.frame_twistgrad_vjp1(gammadash, t, n, ndash, v)
-        grad2 = self.frame_twistgrad_vjp2(gammadash, t, n, ndash, v)
- 
-        return self.rotated_frame_dcoeff_vjp(grad0,grad1,np.zeros_like(grad0)) \
-            +  self.rotated_frame_dash_dcoeff_vjp(np.zeros_like(grad0),grad2,np.zeros_like(grad0))
+        gammadash, t, n, ndash = self._frame_twist_inputs()
+        grad0, grad1, grad2 = _frame_twist_vjps(gammadash, t, n, ndash, v)
+        zeros = np.zeros_like(grad0)
+        return self.rotated_frame_dcoeff_vjp(grad0, grad1, zeros) \
+            + self.rotated_frame_dash_dcoeff_vjp(zeros, grad2, zeros)
 
 class FramedCurveFrenet(FramedCurve):
     r"""
@@ -80,60 +74,24 @@ class FramedCurveFrenet(FramedCurve):
     def __init__(self, curve, rotation=None):
         FramedCurve.__init__(self, curve, rotation)
 
-        self.binorm = jit(lambda gamma, gammadash, gammadashdash, gammadashdashdash, alpha, alphadash: binormal_curvature_pure_frenet(
-            gamma, gammadash, gammadashdash, gammadashdashdash, alpha, alphadash))
-        self.binormgrad_vjp0 = jit(lambda gamma, gammadash, gammadashdash, gammadashdashdash, alpha, alphadash, v: vjp(
-            lambda g: self.binorm(g, gammadash, gammadashdash, gammadashdashdash, alpha, alphadash), gamma)[1](v)[0])
-        self.binormgrad_vjp1 = jit(lambda gamma, gammadash, gammadashdash, gammadashdashdash, alpha, alphadash, v: vjp(
-            lambda g: self.binorm(gamma, g, gammadashdash, gammadashdashdash, alpha, alphadash), gammadash)[1](v)[0])
-        self.binormgrad_vjp2 = jit(lambda gamma, gammadash, gammadashdash, gammadashdashdash, alpha, alphadash, v: vjp(
-            lambda g: self.binorm(gamma, gammadash, g, gammadashdashdash, alpha, alphadash), gammadashdash)[1](v)[0])
-        self.binormgrad_vjp3 = jit(lambda gamma, gammadash, gammadashdash, gammadashdashdash, alpha, alphadash, v: vjp(
-            lambda g: self.binorm(gamma, gammadash, gammadashdash, g, alpha, alphadash), gammadashdashdash)[1](v)[0])
-        self.binormgrad_vjp4 = jit(lambda gamma, gammadash, gammadashdash, gammadashdashdash, alpha, alphadash, v: vjp(
-            lambda g: self.binorm(gamma, gammadash, gammadashdash, gammadashdashdash, g, alphadash), alpha)[1](v)[0])
-        self.binormgrad_vjp5 = jit(lambda gamma, gammadash, gammadashdash, gammadashdashdash, alpha, alphadash, v: vjp(
-            lambda g: self.binorm(gamma, gammadash, gammadashdash, gammadashdashdash, alpha, g), alphadash)[1](v)[0])
-
-        self.torsion = jit(lambda gamma, gammadash, gammadashdash, gammadashdashdash, alpha, alphadash: torsion_pure_frenet(
-            gamma, gammadash, gammadashdash, gammadashdashdash, alpha, alphadash))
-        self.torsiongrad_vjp0 = jit(lambda gamma, gammadash, gammadashdash, gammadashdashdash, alpha, alphadash, v: vjp(
-            lambda g: self.torsion(g, gammadash, gammadashdash, gammadashdashdash, alpha, alphadash), gamma)[1](v)[0])
-        self.torsiongrad_vjp1 = jit(lambda gamma, gammadash, gammadashdash, gammadashdashdash, alpha, alphadash, v: vjp(
-            lambda g: self.torsion(gamma, g, gammadashdash, gammadashdashdash, alpha, alphadash), gammadash)[1](v)[0])
-        self.torsiongrad_vjp2 = jit(lambda gamma, gammadash, gammadashdash, gammadashdashdash, alpha, alphadash, v: vjp(
-            lambda g: self.torsion(gamma, gammadash, g, gammadashdashdash, alpha, alphadash), gammadashdash)[1](v)[0])
-        self.torsiongrad_vjp3 = jit(lambda gamma, gammadash, gammadashdash, gammadashdashdash, alpha, alphadash, v: vjp(
-            lambda g: self.torsion(gamma, gammadash, gammadashdash, g, alpha, alphadash), gammadashdashdash)[1](v)[0])
-        self.torsiongrad_vjp4 = jit(lambda gamma, gammadash, gammadashdash, gammadashdashdash, alpha, alphadash, v: vjp(
-            lambda g: self.torsion(gamma, gammadash, gammadashdash, gammadashdashdash, g, alphadash), alpha)[1](v)[0])
-        self.torsiongrad_vjp5 = jit(lambda gamma, gammadash, gammadashdash, gammadashdashdash, alpha, alphadash, v: vjp(
-            lambda g: self.torsion(gamma, gammadash, gammadashdash, gammadashdashdash, alpha, g), alphadash)[1](v)[0])
-
-        self.twist_pure = jit(lambda gamma, gammadash, gammadashdash, gammadashdashdash, alpha, alphadash: twist_pure_frenet(
-            gamma, gammadash, gammadashdash, gammadashdashdash, alpha, alphadash))
-        self.twistgrad0 = jit(lambda gamma, gammadash, gammadashdash, gammadashdashdash, alpha, alphadash, v: vjp(
-            lambda g: self.twist_pure(g, gammadash, gammadashdash, gammadashdashdash, alpha, alphadash), gamma)[1](v)[0])
-        self.twistgrad1 = jit(lambda gamma, gammadash, gammadashdash, gammadashdashdash, alpha, alphadash, v: vjp(
-            lambda g: self.twist_pure(gamma, g, gammadashdash, gammadashdashdash, alpha, alphadash), gammadash)[1](v)[0])
-        self.twistgrad2 = jit(lambda gamma, gammadash, gammadashdash, gammadashdashdash, alpha, alphadash, v: vjp(
-            lambda g: self.twist_pure(gamma, gammadash, g, gammadashdashdash, alpha, alphadash), gammadashdash)[1](v)[0])
-        self.twistgrad3 = jit(lambda gamma, gammadash, gammadashdash, gammadashdashdash, alpha, alphadash, v: vjp(
-            lambda g: self.twist_pure(gamma, gammadash, gammadashdash, g, alpha, alphadash), gammadashdashdash)[1](v)[0])
-        self.twistgrad4 = jit(lambda gamma, gammadash, gammadashdash, gammadashdashdash, alpha, alphadash, v: vjp(
-            lambda g: self.twist_pure(gamma, gammadash, gammadashdash, gammadashdashdash, g, alphadash), alpha)[1](v)[0])
-        self.twistgrad5 = jit(lambda gamma, gammadash, gammadashdash, gammadashdashdash, alpha, alphadash, v: vjp(
-            lambda g: self.twist_pure(gamma, gammadash, gammadashdash, gammadashdashdash, alpha, g), alphadash)[1](v)[0])
+    def _frame_scalar_inputs(self):
+        gamma = self.curve.gamma()
+        d1gamma = self.curve.gammadash()
+        d2gamma = self.curve.gammadashdash()
+        d3gamma = self.curve.gammadashdashdash()
+        alpha = self.rotation.alpha(self.curve.quadpoints)
+        alphadash = self.rotation.alphadash(self.curve.quadpoints)
+        return gamma, d1gamma, d2gamma, d3gamma, alpha, alphadash
 
     def rotated_frame(self):
-        """
+        r"""
         Returns the frame :math:`(\hat{\textbf{t}}, \hat{\textbf{n}}, \hat{\textbf{b}})`, which is rotated 
         with respect to the reference Frenet frame by the rotation. 
         """
         return rotated_frenet_frame(self.curve.gamma(), self.curve.gammadash(), self.curve.gammadashdash(), self.rotation.alpha(self.curve.quadpoints))
 
     def rotated_frame_dash(self):
-        """
+        r"""
         Returns the derivative of the frame with respect to the parameterization of the curve,
         :math:`(\hat{\textbf{t}}'(\phi), \hat{\textbf{n}}'(\phi), \hat{\textbf{b}})'(\phi)`.
         The frame is obtained by rotating with respect to the reference Frenet frame by the rotation. 
@@ -144,55 +102,30 @@ class FramedCurveFrenet(FramedCurve):
         )
 
     def frame_torsion(self):
-        """
+        r"""
         Returns the frame torsion, :math:`\hat{\textbf{n}}'(l) \cdot \hat{\textbf{b}}`,
-        along the curve.  
+        along the curve.
         """
-        gamma = self.curve.gamma()
-        d1gamma = self.curve.gammadash()
-        d2gamma = self.curve.gammadashdash()
-        d3gamma = self.curve.gammadashdashdash()
-        alpha = self.rotation.alpha(self.curve.quadpoints)
-        alphadash = self.rotation.alphadash(self.curve.quadpoints)
-        return self.torsion(gamma, d1gamma, d2gamma, d3gamma, alpha, alphadash)
+        gamma, d1gamma, d2gamma, d3gamma, alpha, alphadash = self._frame_scalar_inputs()
+        return _frenet_torsion_eval(gamma, d1gamma, d2gamma, d3gamma, alpha, alphadash)
 
     def frame_binormal_curvature(self):
-        """
+        r"""
         Returns the frame binormal curvature, :math:`\hat{\textbf{t}}'(l) \cdot \hat{\textbf{b}}`,
         where prime indicates derivative with respect to curve length. 
         """
-        gamma = self.curve.gamma()
-        d1gamma = self.curve.gammadash()
-        d2gamma = self.curve.gammadashdash()
-        d3gamma = self.curve.gammadashdashdash()
-        alpha = self.rotation.alpha(self.curve.quadpoints)
-        alphadash = self.rotation.alphadash(self.curve.quadpoints)
-        return self.binorm(gamma, d1gamma, d2gamma, d3gamma, alpha, alphadash)
+        gamma, d1gamma, d2gamma, d3gamma, alpha, alphadash = self._frame_scalar_inputs()
+        return _frenet_binorm_eval(gamma, d1gamma, d2gamma, d3gamma, alpha, alphadash)
 
     def dframe_torsion_by_dcoeff_vjp(self, v):
         """
         VJP function for derivatives of the frame torsion with respect to the 
         curve and rotation dofs. 
         """
-        gamma = self.curve.gamma()
-        d1gamma = self.curve.gammadash()
-        d2gamma = self.curve.gammadashdash()
-        d3gamma = self.curve.gammadashdashdash()
-        alpha = self.rotation.alpha(self.curve.quadpoints)
-        alphadash = self.rotation.alphadash(self.curve.quadpoints)
-
-        grad0 = self.torsiongrad_vjp0(gamma, d1gamma, d2gamma,
-                                      d3gamma, alpha, alphadash, v)
-        grad1 = self.torsiongrad_vjp1(gamma, d1gamma, d2gamma,
-                                      d3gamma, alpha, alphadash, v)
-        grad2 = self.torsiongrad_vjp2(gamma, d1gamma, d2gamma,
-                                      d3gamma, alpha, alphadash, v)
-        grad3 = self.torsiongrad_vjp3(gamma, d1gamma, d2gamma,
-                                      d3gamma, alpha, alphadash, v)
-        grad4 = self.torsiongrad_vjp4(gamma, d1gamma, d2gamma,
-                                      d3gamma, alpha, alphadash, v)
-        grad5 = self.torsiongrad_vjp5(gamma, d1gamma, d2gamma,
-                                      d3gamma, alpha, alphadash, v)
+        gamma, d1gamma, d2gamma, d3gamma, alpha, alphadash = self._frame_scalar_inputs()
+        grad0, grad1, grad2, grad3, grad4, grad5 = _frenet_torsion_vjps(
+            gamma, d1gamma, d2gamma, d3gamma, alpha, alphadash, v
+        )
 
         return self.curve.dgamma_by_dcoeff_vjp(grad0) \
             + self.curve.dgammadash_by_dcoeff_vjp(grad1) \
@@ -206,25 +139,10 @@ class FramedCurveFrenet(FramedCurve):
         VJP function for the derivatives of the binormal curvature with respect to the curve
         and rotation dofs. 
         """
-        gamma = self.curve.gamma()
-        d1gamma = self.curve.gammadash()
-        d2gamma = self.curve.gammadashdash()
-        d3gamma = self.curve.gammadashdashdash()
-        alpha = self.rotation.alpha(self.curve.quadpoints)
-        alphadash = self.rotation.alphadash(self.curve.quadpoints)
-
-        grad0 = self.binormgrad_vjp0(gamma, d1gamma, d2gamma,
-                                     d3gamma, alpha, alphadash, v)
-        grad1 = self.binormgrad_vjp1(gamma, d1gamma, d2gamma,
-                                     d3gamma, alpha, alphadash, v)
-        grad2 = self.binormgrad_vjp2(gamma, d1gamma, d2gamma,
-                                     d3gamma, alpha, alphadash, v)
-        grad3 = self.binormgrad_vjp3(gamma, d1gamma, d2gamma,
-                                     d3gamma, alpha, alphadash, v)
-        grad4 = self.binormgrad_vjp4(gamma, d1gamma, d2gamma,
-                                     d3gamma, alpha, alphadash, v)
-        grad5 = self.binormgrad_vjp5(gamma, d1gamma, d2gamma,
-                                     d3gamma, alpha, alphadash, v)
+        gamma, d1gamma, d2gamma, d3gamma, alpha, alphadash = self._frame_scalar_inputs()
+        grad0, grad1, grad2, grad3, grad4, grad5 = _frenet_binorm_vjps(
+            gamma, d1gamma, d2gamma, d3gamma, alpha, alphadash, v
+        )
 
         return self.curve.dgamma_by_dcoeff_vjp(grad0) \
             + self.curve.dgammadash_by_dcoeff_vjp(grad1) \
@@ -234,7 +152,7 @@ class FramedCurveFrenet(FramedCurve):
             + self.rotation.dalphadash_by_dcoeff_vjp(self.curve.quadpoints, grad5)
 
     def rotated_frame_dcoeff_vjp(self, v0, v1, v2):
-        """
+        r"""
         VJP function for the derivatives of the frame 
         :math:`(\hat{\textbf{t}}, \hat{\textbf{n}}, \hat{\textbf{b}})`,
         with respect to the curve and rotation dofs. 
@@ -259,7 +177,7 @@ class FramedCurveFrenet(FramedCurve):
              + self.rotation.dalpha_by_dcoeff_vjp(self.curve.quadpoints, vjp3)
 
     def rotated_frame_dash_dcoeff_vjp(self, v0, v1, v2):
-        """
+        r"""
         VJP function for the derivatives of the frame parameter derivatives,
         :math:`(\hat{\textbf{t}}'(\phi), \hat{\textbf{n}}'(\phi), \hat{\textbf{b}}'(\phi))`,
         with respect to the curve and rotation dofs. 
@@ -307,78 +225,31 @@ class FramedCurveCentroid(FramedCurve):
     def __init__(self, curve, rotation=None):
         FramedCurve.__init__(self, curve, rotation)
 
-        self.torsion = jit(lambda gamma, gammadash, gammadashdash, alpha, alphadash: torsion_pure_centroid(
-            gamma, gammadash, gammadashdash, alpha, alphadash))
-        self.torsiongrad_vjp0 = jit(lambda gamma, gammadash, gammadashdash, alpha, alphadash, v: vjp(
-            lambda g: self.torsion(g, gammadash, gammadashdash, alpha, alphadash), gamma)[1](v)[0])
-        self.torsiongrad_vjp1 = jit(lambda gamma, gammadash, gammadashdash, alpha, alphadash, v: vjp(
-            lambda g: self.torsion(gamma, g, gammadashdash, alpha, alphadash), gammadash)[1](v)[0])
-        self.torsiongrad_vjp2 = jit(lambda gamma, gammadash, gammadashdash, alpha, alphadash, v: vjp(
-            lambda g: self.torsion(gamma, gammadash, g, alpha, alphadash), gammadashdash)[1](v)[0])
-        self.torsiongrad_vjp4 = jit(lambda gamma, gammadash, gammadashdash, alpha, alphadash, v: vjp(
-            lambda g: self.torsion(gamma, gammadash, gammadashdash, g, alphadash), alpha)[1](v)[0])
-        self.torsiongrad_vjp5 = jit(lambda gamma, gammadash, gammadashdash, alpha, alphadash, v: vjp(
-            lambda g: self.torsion(gamma, gammadash, gammadashdash, alpha, g), alphadash)[1](v)[0])
-
-        self.binorm = jit(lambda gamma, gammadash, gammadashdash, alpha, alphadash: binormal_curvature_pure_centroid(
-            gamma, gammadash, gammadashdash, alpha, alphadash))
-        self.binormgrad_vjp0 = jit(lambda gamma, gammadash, gammadashdash, alpha, alphadash, v: vjp(
-            lambda g: self.binorm(g, gammadash, gammadashdash, alpha, alphadash), gamma)[1](v)[0])
-        self.binormgrad_vjp1 = jit(lambda gamma, gammadash, gammadashdash, alpha, alphadash, v: vjp(
-            lambda g: self.binorm(gamma, g, gammadashdash, alpha, alphadash), gammadash)[1](v)[0])
-        self.binormgrad_vjp2 = jit(lambda gamma, gammadash, gammadashdash, alpha, alphadash, v: vjp(
-            lambda g: self.binorm(gamma, gammadash, g, alpha, alphadash), gammadashdash)[1](v)[0])
-        self.binormgrad_vjp4 = jit(lambda gamma, gammadash, gammadashdash, alpha, alphadash, v: vjp(
-            lambda g: self.binorm(gamma, gammadash, gammadashdash, g, alphadash), alpha)[1](v)[0])
-        self.binormgrad_vjp5 = jit(lambda gamma, gammadash, gammadashdash, alpha, alphadash, v: vjp(
-            lambda g: self.binorm(gamma, gammadash, gammadashdash, alpha, g), alphadash)[1](v)[0])
-
-        self.twist_pure = jit(lambda gamma, gammadash, gammadashdash, alpha, alphadash: twist_pure_frenet(
-            gamma, gammadash, gammadashdash, alpha, alphadash))
-        self.twistgrad0 = jit(lambda gamma, gammadash, gammadashdash, alpha, alphadash, v: vjp(
-            lambda g: self.twist_pure(g, gammadash, gammadashdash, alpha, alphadash), gamma)[1](v)[0])
-        self.twistgrad1 = jit(lambda gamma, gammadash, gammadashdash, alpha, alphadash, v: vjp(
-            lambda g: self.twist_pure(gamma, g, gammadashdash, alpha, alphadash), gammadash)[1](v)[0])
-        self.twistgrad2 = jit(lambda gamma, gammadash, gammadashdash,  alpha, alphadash, v: vjp(
-            lambda g: self.twist_pure(gamma, gammadash, g, alpha, alphadash), gammadashdash)[1](v)[0])
-        self.twistgrad4 = jit(lambda gamma, gammadash, gammadashdash, alpha, alphadash, v: vjp(
-            lambda g: self.twist_pure(gamma, gammadash, gammadashdash, g, alphadash), alpha)[1](v)[0])
-        self.twistgrad5 = jit(lambda gamma, gammadash, gammadashdash, alpha, alphadash, v: vjp(
-            lambda g: self.twist_pure(gamma, gammadash, gammadashdash, alpha, g), alphadash)[1](v)[0])
-
-    def frame_torsion(self):
-        """
-        Returns the frame torsion, :math:`\hat{\textbf{n}}'(l) \cdot \hat{\textbf{b}}`,
-        along the curve.  
-        """
+    def _frame_scalar_inputs(self):
         gamma = self.curve.gamma()
         d1gamma = self.curve.gammadash()
         d2gamma = self.curve.gammadashdash()
         alpha = self.rotation.alpha(self.curve.quadpoints)
         alphadash = self.rotation.alphadash(self.curve.quadpoints)
-        return self.torsion(gamma, d1gamma, d2gamma, alpha, alphadash)
+        return gamma, d1gamma, d2gamma, alpha, alphadash
+
+    def frame_torsion(self):
+        r"""
+        Returns the frame torsion, :math:`\hat{\textbf{n}}'(l) \cdot \hat{\textbf{b}}`,
+        along the curve.
+        """
+        gamma, d1gamma, d2gamma, alpha, alphadash = self._frame_scalar_inputs()
+        return _centroid_torsion_eval(gamma, d1gamma, d2gamma, alpha, alphadash)
 
     def dframe_torsion_by_dcoeff_vjp(self, v):
         """
         VJP function for derivatives of the frame torsion with respect to the 
         curve and rotation dofs. 
         """
-        gamma = self.curve.gamma()
-        d1gamma = self.curve.gammadash()
-        d2gamma = self.curve.gammadashdash()
-        alpha = self.rotation.alpha(self.curve.quadpoints)
-        alphadash = self.rotation.alphadash(self.curve.quadpoints)
-
-        grad0 = self.torsiongrad_vjp0(gamma, d1gamma, d2gamma,
-                                      alpha, alphadash, v)
-        grad1 = self.torsiongrad_vjp1(gamma, d1gamma, d2gamma,
-                                      alpha, alphadash, v)
-        grad2 = self.torsiongrad_vjp2(gamma, d1gamma, d2gamma,
-                                      alpha, alphadash, v)
-        grad4 = self.torsiongrad_vjp4(gamma, d1gamma, d2gamma,
-                                      alpha, alphadash, v)
-        grad5 = self.torsiongrad_vjp5(gamma, d1gamma, d2gamma,
-                                      alpha, alphadash, v)
+        gamma, d1gamma, d2gamma, alpha, alphadash = self._frame_scalar_inputs()
+        grad0, grad1, grad2, grad4, grad5 = _centroid_torsion_vjps(
+            gamma, d1gamma, d2gamma, alpha, alphadash, v
+        )
 
         return self.curve.dgamma_by_dcoeff_vjp(grad0) \
             + self.curve.dgammadash_by_dcoeff_vjp(grad1) \
@@ -387,19 +258,15 @@ class FramedCurveCentroid(FramedCurve):
             + self.rotation.dalphadash_by_dcoeff_vjp(self.curve.quadpoints, grad5)
 
     def frame_binormal_curvature(self):
-        """
+        r"""
         Returns the frame binormal curvature, :math:`\hat{\textbf{t}}'(l) \cdot \hat{\textbf{b}}`,
         where prime indicates derivative with respect to curve length. 
         """
-        gamma = self.curve.gamma()
-        d1gamma = self.curve.gammadash()
-        d2gamma = self.curve.gammadashdash()
-        alpha = self.rotation.alpha(self.curve.quadpoints)
-        alphadash = self.rotation.alphadash(self.curve.quadpoints)
-        return self.binorm(gamma, d1gamma, d2gamma, alpha, alphadash)
+        gamma, d1gamma, d2gamma, alpha, alphadash = self._frame_scalar_inputs()
+        return _centroid_binorm_eval(gamma, d1gamma, d2gamma, alpha, alphadash)
 
     def rotated_frame(self):
-        """
+        r"""
         Returns the frame :math:`(\hat{\textbf{t}}, \hat{\textbf{n}}, \hat{\textbf{b}})`, which is rotated 
         with respect to the reference centroid frame by the rotation. 
         """
@@ -407,7 +274,7 @@ class FramedCurveCentroid(FramedCurve):
                                       self.rotation.alpha(self.curve.quadpoints))
 
     def rotated_frame_dash(self):
-        """
+        r"""
         Returns the derivative of the frame with respect to the parameterization of the curve,
         :math:`(\hat{\textbf{t}}'(\phi), \hat{\textbf{n}}'(\phi), \hat{\textbf{b}})'(\phi)`.
         The frame is obtained by rotating with respect to the reference centroid frame by the rotation. 
@@ -422,22 +289,10 @@ class FramedCurveCentroid(FramedCurve):
         VJP function for the derivatives of the binormal curvature with respect to the curve
         and rotation dofs. 
         """
-        gamma = self.curve.gamma()
-        d1gamma = self.curve.gammadash()
-        d2gamma = self.curve.gammadashdash()
-        alpha = self.rotation.alpha(self.curve.quadpoints)
-        alphadash = self.rotation.alphadash(self.curve.quadpoints)
-
-        grad0 = self.binormgrad_vjp0(gamma, d1gamma, d2gamma,
-                                     alpha, alphadash, v)
-        grad1 = self.binormgrad_vjp1(gamma, d1gamma, d2gamma,
-                                     alpha, alphadash, v)
-        grad2 = self.binormgrad_vjp2(gamma, d1gamma, d2gamma,
-                                     alpha, alphadash, v)
-        grad4 = self.binormgrad_vjp4(gamma, d1gamma, d2gamma,
-                                     alpha, alphadash, v)
-        grad5 = self.binormgrad_vjp5(gamma, d1gamma, d2gamma,
-                                     alpha, alphadash, v)
+        gamma, d1gamma, d2gamma, alpha, alphadash = self._frame_scalar_inputs()
+        grad0, grad1, grad2, grad4, grad5 = _centroid_binorm_vjps(
+            gamma, d1gamma, d2gamma, alpha, alphadash, v
+        )
 
         return self.curve.dgamma_by_dcoeff_vjp(grad0) \
             + self.curve.dgammadash_by_dcoeff_vjp(grad1) \
@@ -446,7 +301,7 @@ class FramedCurveCentroid(FramedCurve):
             + self.rotation.dalphadash_by_dcoeff_vjp(self.curve.quadpoints, grad5)
 
     def rotated_frame_dcoeff_vjp(self, v0, v1, v2):
-        """
+        r"""
         VJP function for the derivatives of the frame 
         :math:`(\hat{\textbf{t}}, \hat{\textbf{n}}, \hat{\textbf{b}})`,
         with respect to the curve and rotation dofs. 
@@ -467,7 +322,7 @@ class FramedCurveCentroid(FramedCurve):
              + self.rotation.dalpha_by_dcoeff_vjp(self.curve.quadpoints, vjp2)
 
     def rotated_frame_dash_dcoeff_vjp(self, v0, v1, v2):
-        """
+        r"""
         VJP function for the derivatives of the frame parameter derivatives,
         :math:`(\hat{\textbf{t}}'(\phi), \hat{\textbf{n}}'(\phi), \hat{\textbf{b}}'(\phi))`,
         with respect to the curve and rotation dofs. 
@@ -514,8 +369,12 @@ class FrameRotation(Optimizable):
         self.scale = scale
         self.jac = rotation_dcoeff(quadpoints, order)
         self.jacdash = rotationdash_dcoeff(quadpoints, order)
-        self.jax_alpha = jit(lambda dofs, points: jaxrotation_pure(dofs, points, self.order))
-        self.jax_alphadash = jit(lambda dofs, points: jaxrotationdash_pure(dofs, points, self.order))
+
+    def jax_alpha(self, dofs, points):
+        return _rotation_eval(dofs, points, self.order)
+
+    def jax_alphadash(self, dofs, points):
+        return _rotationdash_eval(dofs, points, self.order)
 
     def alpha(self, quadpoints):
         return self.scale * self.jax_alpha(self._dofs.full_x, quadpoints)
@@ -560,12 +419,12 @@ class ZeroRotation(Optimizable):
 
 @jit
 def rotated_centroid_frame(gamma, gammadash, alpha):
-    t = gammadash
-    t *= 1./jnp.linalg.norm(gammadash, axis=1)[:, None]
+    arc_length = jnp.linalg.norm(gammadash, axis=1)[:, None]
+    t = gammadash / arc_length
     R = jnp.mean(gamma, axis=0)  # centroid
     delta = gamma - R[None, :]
     n = delta - jnp.sum(delta * t, axis=1)[:, None] * t
-    n *= 1./jnp.linalg.norm(n, axis=1)[:, None]
+    n = n / jnp.linalg.norm(n, axis=1)[:, None]
     b = jnp.cross(t, n, axis=1)
 
     # now rotate the frame by alpha
@@ -616,16 +475,16 @@ rotated_centroid_frame_dash_dcoeff_vjp5 = jit(
 def rotated_frenet_frame(gamma, gammadash, gammadashdash, alpha):
     """Frenet frame of a curve rotated by a angle that varies along the coil path"""
 
-    N = gamma.shape[0]
-    t, n, b = (np.zeros((N, 3)), np.zeros((N, 3)), np.zeros((N, 3)))
-    t = gammadash
-    t *= 1./jnp.linalg.norm(gammadash, axis=1)[:, None]
+    arc_length = jnp.linalg.norm(gammadash, axis=1)
+    arc_length_col = arc_length[:, None]
+    t = gammadash / arc_length_col
 
-    tdash = (1./jnp.linalg.norm(gammadash, axis=1)[:, None])**2 * (jnp.linalg.norm(gammadash, axis=1)[:, None] * gammadashdash
-                                                                   - (inner(gammadash, gammadashdash)/jnp.linalg.norm(gammadash, axis=1))[:, None] * gammadash)
+    tdash = (1.0 / arc_length_col) ** 2 * (
+        arc_length_col * gammadashdash
+        - (inner(gammadash, gammadashdash) / arc_length)[:, None] * gammadash
+    )
 
-    n = tdash
-    n *= 1/jnp.linalg.norm(tdash, axis=1)[:, None]
+    n = tdash / jnp.linalg.norm(tdash, axis=1)[:, None]
     b = jnp.cross(t, n, axis=1)
     # now rotate the frame by alpha
     nn = jnp.cos(alpha)[:, None] * n - jnp.sin(alpha)[:, None] * b
@@ -680,6 +539,90 @@ rotated_frenet_frame_dash_dcoeff_vjp5 = jit(
         lambda ad: rotated_frenet_frame_dash(gamma, gammadash, gammadashdash, gammadashdashdash, alpha, ad), alphadash)[1](v)[0])
 
 
+@jit
+def _frame_twist_eval(gammadash, t, n, ndash):
+    return frame_twist_pure(gammadash, t, n, ndash)
+
+
+@jit
+def _frame_twist_vjps(gammadash, t, n, ndash, v):
+    return (
+        vjp(lambda g: _frame_twist_eval(g, t, n, ndash), gammadash)[1](v)[0],
+        vjp(lambda g: _frame_twist_eval(gammadash, t, g, ndash), n)[1](v)[0],
+        vjp(lambda g: _frame_twist_eval(gammadash, t, n, g), ndash)[1](v)[0],
+    )
+
+
+@jit
+def _frenet_torsion_eval(gamma, gammadash, gammadashdash, gammadashdashdash, alpha, alphadash):
+    return torsion_pure_frenet(
+        gamma, gammadash, gammadashdash, gammadashdashdash, alpha, alphadash
+    )
+
+
+@jit
+def _frenet_torsion_vjps(gamma, gammadash, gammadashdash, gammadashdashdash, alpha, alphadash, v):
+    return (
+        vjp(lambda g: _frenet_torsion_eval(g, gammadash, gammadashdash, gammadashdashdash, alpha, alphadash), gamma)[1](v)[0],
+        vjp(lambda g: _frenet_torsion_eval(gamma, g, gammadashdash, gammadashdashdash, alpha, alphadash), gammadash)[1](v)[0],
+        vjp(lambda g: _frenet_torsion_eval(gamma, gammadash, g, gammadashdashdash, alpha, alphadash), gammadashdash)[1](v)[0],
+        vjp(lambda g: _frenet_torsion_eval(gamma, gammadash, gammadashdash, g, alpha, alphadash), gammadashdashdash)[1](v)[0],
+        vjp(lambda g: _frenet_torsion_eval(gamma, gammadash, gammadashdash, gammadashdashdash, g, alphadash), alpha)[1](v)[0],
+        vjp(lambda g: _frenet_torsion_eval(gamma, gammadash, gammadashdash, gammadashdashdash, alpha, g), alphadash)[1](v)[0],
+    )
+
+
+@jit
+def _frenet_binorm_eval(gamma, gammadash, gammadashdash, gammadashdashdash, alpha, alphadash):
+    return binormal_curvature_pure_frenet(
+        gamma, gammadash, gammadashdash, gammadashdashdash, alpha, alphadash
+    )
+
+
+@jit
+def _frenet_binorm_vjps(gamma, gammadash, gammadashdash, gammadashdashdash, alpha, alphadash, v):
+    return (
+        vjp(lambda g: _frenet_binorm_eval(g, gammadash, gammadashdash, gammadashdashdash, alpha, alphadash), gamma)[1](v)[0],
+        vjp(lambda g: _frenet_binorm_eval(gamma, g, gammadashdash, gammadashdashdash, alpha, alphadash), gammadash)[1](v)[0],
+        vjp(lambda g: _frenet_binorm_eval(gamma, gammadash, g, gammadashdashdash, alpha, alphadash), gammadashdash)[1](v)[0],
+        vjp(lambda g: _frenet_binorm_eval(gamma, gammadash, gammadashdash, g, alpha, alphadash), gammadashdashdash)[1](v)[0],
+        vjp(lambda g: _frenet_binorm_eval(gamma, gammadash, gammadashdash, gammadashdashdash, g, alphadash), alpha)[1](v)[0],
+        vjp(lambda g: _frenet_binorm_eval(gamma, gammadash, gammadashdash, gammadashdashdash, alpha, g), alphadash)[1](v)[0],
+    )
+
+
+@jit
+def _centroid_torsion_eval(gamma, gammadash, gammadashdash, alpha, alphadash):
+    return torsion_pure_centroid(gamma, gammadash, gammadashdash, alpha, alphadash)
+
+
+@jit
+def _centroid_torsion_vjps(gamma, gammadash, gammadashdash, alpha, alphadash, v):
+    return (
+        vjp(lambda g: _centroid_torsion_eval(g, gammadash, gammadashdash, alpha, alphadash), gamma)[1](v)[0],
+        vjp(lambda g: _centroid_torsion_eval(gamma, g, gammadashdash, alpha, alphadash), gammadash)[1](v)[0],
+        vjp(lambda g: _centroid_torsion_eval(gamma, gammadash, g, alpha, alphadash), gammadashdash)[1](v)[0],
+        vjp(lambda g: _centroid_torsion_eval(gamma, gammadash, gammadashdash, g, alphadash), alpha)[1](v)[0],
+        vjp(lambda g: _centroid_torsion_eval(gamma, gammadash, gammadashdash, alpha, g), alphadash)[1](v)[0],
+    )
+
+
+@jit
+def _centroid_binorm_eval(gamma, gammadash, gammadashdash, alpha, alphadash):
+    return binormal_curvature_pure_centroid(gamma, gammadash, gammadashdash, alpha, alphadash)
+
+
+@jit
+def _centroid_binorm_vjps(gamma, gammadash, gammadashdash, alpha, alphadash, v):
+    return (
+        vjp(lambda g: _centroid_binorm_eval(g, gammadash, gammadashdash, alpha, alphadash), gamma)[1](v)[0],
+        vjp(lambda g: _centroid_binorm_eval(gamma, g, gammadashdash, alpha, alphadash), gammadash)[1](v)[0],
+        vjp(lambda g: _centroid_binorm_eval(gamma, gammadash, g, alpha, alphadash), gammadashdash)[1](v)[0],
+        vjp(lambda g: _centroid_binorm_eval(gamma, gammadash, gammadashdash, g, alphadash), alpha)[1](v)[0],
+        vjp(lambda g: _centroid_binorm_eval(gamma, gammadash, gammadashdash, alpha, g), alphadash)[1](v)[0],
+    )
+
+
 def jaxrotation_pure(dofs, points, order):
     rotation = jnp.zeros((len(points), ))
     rotation += dofs[0]
@@ -695,6 +638,10 @@ def jaxrotationdash_pure(dofs, points, order):
         rotation += dofs[2*j-1] * 2*np.pi*j*jnp.cos(2*np.pi*j*points)
         rotation -= dofs[2*j] * 2*np.pi*j*jnp.sin(2*np.pi*j*points)
     return rotation
+
+
+_rotation_eval = jit(jaxrotation_pure, static_argnums=(2,))
+_rotationdash_eval = jit(jaxrotationdash_pure, static_argnums=(2,))
 
 
 def rotation_dcoeff(points, order):
@@ -716,7 +663,7 @@ def rotationdash_dcoeff(points, order):
 
 def inner(a, b):
     """Inner product for arrays of shape (N, 3)"""
-    return np.sum(a*b, axis=1)
+    return jnp.sum(a*b, axis=1)
 
 def torsion_pure_frenet(gamma, gammadash, gammadashdash, gammadashdashdash,
                         alpha, alphadash):
@@ -724,7 +671,7 @@ def torsion_pure_frenet(gamma, gammadash, gammadashdash, gammadashdashdash,
     _, ndash, _ = rotated_frenet_frame_dash(
         gamma, gammadash, gammadashdash, gammadashdashdash, alpha, alphadash)
 
-    ndash *= 1/jnp.linalg.norm(gammadash, axis=1)[:, None]
+    ndash = ndash / jnp.linalg.norm(gammadash, axis=1)[:, None]
     return inner(ndash, b)
 
 def binormal_curvature_pure_frenet(gamma, gammadash, gammadashdash, gammadashdashdash,
@@ -733,7 +680,7 @@ def binormal_curvature_pure_frenet(gamma, gammadash, gammadashdash, gammadashdas
     tdash, _, _ = rotated_frenet_frame_dash(
         gamma, gammadash, gammadashdash, gammadashdashdash, alpha, alphadash)
 
-    tdash *= 1/jnp.linalg.norm(gammadash, axis=1)[:, None]
+    tdash = tdash / jnp.linalg.norm(gammadash, axis=1)[:, None]
     return inner(tdash, b)
 
 def torsion_pure_centroid(gamma, gammadash, gammadashdash,
@@ -742,7 +689,7 @@ def torsion_pure_centroid(gamma, gammadash, gammadashdash,
     _, ndash, _ = rotated_centroid_frame_dash(
         gamma, gammadash, gammadashdash, alpha, alphadash)
 
-    ndash *= 1/jnp.linalg.norm(gammadash, axis=1)[:, None]
+    ndash = ndash / jnp.linalg.norm(gammadash, axis=1)[:, None]
     return inner(ndash, b)
 
 def binormal_curvature_pure_centroid(gamma, gammadash, gammadashdash,
@@ -751,7 +698,7 @@ def binormal_curvature_pure_centroid(gamma, gammadash, gammadashdash,
     tdash, _, _ = rotated_centroid_frame_dash(
         gamma, gammadash, gammadashdash, alpha, alphadash)
 
-    tdash *= 1/jnp.linalg.norm(gammadash, axis=1)[:, None]
+    tdash = tdash / jnp.linalg.norm(gammadash, axis=1)[:, None]
     return inner(tdash, b)
 
 def frame_twist_pure(gammadash,t,n,ndash):
