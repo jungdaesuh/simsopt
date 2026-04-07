@@ -122,8 +122,8 @@ def test_directed_facing_port_reuses_shared_jit_kernels():
 
 def test_curve_in_port_penalty_reuses_shared_jit_kernels():
     _clear_caches(
-        accessibility_module._curve_in_port_penalty_xy_value,
-        accessibility_module._curve_in_port_penalty_xy_grad,
+        accessibility_module._curve_in_port_penalty_xy_values,
+        accessibility_module._curve_in_port_penalty_xy_grads,
     )
     port1 = _make_xyz_curve()
     curves1 = [_make_xyz_curve(dy=0.4), _make_xyz_curve(dy=-0.4, dz=0.2)]
@@ -131,8 +131,8 @@ def test_curve_in_port_penalty_reuses_shared_jit_kernels():
     float(objective1.J())
     np.asarray(objective1.dJ(), dtype=float)
 
-    assert accessibility_module._curve_in_port_penalty_xy_value._cache_size() == 1
-    assert accessibility_module._curve_in_port_penalty_xy_grad._cache_size() == 1
+    assert accessibility_module._curve_in_port_penalty_xy_values._cache_size() == 1
+    assert accessibility_module._curve_in_port_penalty_xy_grads._cache_size() == 1
     _assert_no_legacy_jit_attrs(objective1)
 
     port2 = _make_xyz_curve(dz=0.1)
@@ -141,21 +141,23 @@ def test_curve_in_port_penalty_reuses_shared_jit_kernels():
     float(objective2.J())
     np.asarray(objective2.dJ(), dtype=float)
 
-    assert accessibility_module._curve_in_port_penalty_xy_value._cache_size() == 1
-    assert accessibility_module._curve_in_port_penalty_xy_grad._cache_size() == 1
+    assert accessibility_module._curve_in_port_penalty_xy_values._cache_size() == 1
+    assert accessibility_module._curve_in_port_penalty_xy_grads._cache_size() == 1
     _assert_no_legacy_jit_attrs(objective2)
 
 
 def test_projected_curve_curve_distance_reuses_shared_jit_kernels():
     _clear_caches(
-        accessibility_module._projected_cc_distance_xy_value,
-        accessibility_module._projected_cc_distance_xy_grad,
+        accessibility_module._projected_cc_distance_xy_values,
+        accessibility_module._projected_cc_distance_xy_grads,
         accessibility_module._projected_cc_distance_xy_hessian,
+        accessibility_module._projected_cc_distance_xy_hessians,
     )
     port1 = _make_cws_curve(0.0)
     base1 = _make_xyz_curve(dy=0.4)
+    base1b = _make_xyz_curve(dy=-0.3, dz=0.1)
     objective1 = ProjectedCurveCurveDistance(
-        [base1],
+        [base1, base1b],
         port1,
         minimum_distance=0.1,
         projection="xy",
@@ -167,16 +169,21 @@ def test_projected_curve_curve_distance_reuses_shared_jit_kernels():
     hessian_cache_size = (
         accessibility_module._projected_cc_distance_xy_hessian._cache_size()
     )
+    batch_hessian_cache_size = (
+        accessibility_module._projected_cc_distance_xy_hessians._cache_size()
+    )
 
-    assert accessibility_module._projected_cc_distance_xy_value._cache_size() == 1
-    assert accessibility_module._projected_cc_distance_xy_grad._cache_size() == 1
+    assert accessibility_module._projected_cc_distance_xy_values._cache_size() == 1
+    assert accessibility_module._projected_cc_distance_xy_grads._cache_size() == 1
     assert hessian_cache_size > 0
+    assert batch_hessian_cache_size > 0
     _assert_no_legacy_jit_attrs(objective1)
 
     port2 = _make_cws_curve(0.1)
     base2 = _make_xyz_curve(dy=0.3)
+    base2b = _make_xyz_curve(dy=-0.2, dz=0.15)
     objective2 = ProjectedCurveCurveDistance(
-        [base2],
+        [base2, base2b],
         port2,
         minimum_distance=0.2,
         projection="xy",
@@ -186,11 +193,15 @@ def test_projected_curve_curve_distance_reuses_shared_jit_kernels():
     objective2.ddJ_ddport()
     objective2.ddJ_dportdcoil(base2)
 
-    assert accessibility_module._projected_cc_distance_xy_value._cache_size() == 1
-    assert accessibility_module._projected_cc_distance_xy_grad._cache_size() == 1
+    assert accessibility_module._projected_cc_distance_xy_values._cache_size() == 1
+    assert accessibility_module._projected_cc_distance_xy_grads._cache_size() == 1
     assert (
         accessibility_module._projected_cc_distance_xy_hessian._cache_size()
         == hessian_cache_size
+    )
+    assert (
+        accessibility_module._projected_cc_distance_xy_hessians._cache_size()
+        == batch_hessian_cache_size
     )
     _assert_no_legacy_jit_attrs(objective2)
 

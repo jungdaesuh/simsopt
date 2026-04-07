@@ -1,7 +1,7 @@
 from functools import partial
 
 import numpy as np
-from jax import grad, hessian, jacfwd, jacrev
+from jax import grad, hessian, jacfwd, jacrev, vmap
 import jax.numpy as jnp
 import matplotlib.pyplot as plt
 from .curve import Curve, CurveCWSFourier
@@ -575,6 +575,70 @@ def _curve_in_port_penalty_zphi_grad(
     )
 
 
+@jit
+def _curve_in_port_penalty_xy_values(
+    gamma_port, gammadash_port, gamma_curves, gammadash_curves, threshold
+):
+    return vmap(
+        _curve_in_port_penalty_xy_value,
+        in_axes=(None, None, 0, 0, None),
+    )(
+        gamma_port,
+        gammadash_port,
+        gamma_curves,
+        gammadash_curves,
+        threshold,
+    )
+
+
+@jit
+def _curve_in_port_penalty_zphi_values(
+    gamma_port, gammadash_port, gamma_curves, gammadash_curves, threshold
+):
+    return vmap(
+        _curve_in_port_penalty_zphi_value,
+        in_axes=(None, None, 0, 0, None),
+    )(
+        gamma_port,
+        gammadash_port,
+        gamma_curves,
+        gammadash_curves,
+        threshold,
+    )
+
+
+@jit
+def _curve_in_port_penalty_xy_grads(
+    gamma_port, gammadash_port, gamma_curves, gammadash_curves, threshold
+):
+    return vmap(
+        _curve_in_port_penalty_xy_grad,
+        in_axes=(None, None, 0, 0, None),
+    )(
+        gamma_port,
+        gammadash_port,
+        gamma_curves,
+        gammadash_curves,
+        threshold,
+    )
+
+
+@jit
+def _curve_in_port_penalty_zphi_grads(
+    gamma_port, gammadash_port, gamma_curves, gammadash_curves, threshold
+):
+    return vmap(
+        _curve_in_port_penalty_zphi_grad,
+        in_axes=(None, None, 0, 0, None),
+    )(
+        gamma_port,
+        gammadash_port,
+        gamma_curves,
+        gammadash_curves,
+        threshold,
+    )
+
+
 @partial(jit, static_argnums=(5, 6))
 def _curve_in_port_penalty_xy_hessian(
     gamma_port,
@@ -635,6 +699,50 @@ def _curve_in_port_penalty_grad(
     raise ValueError(f"Unknown projection '{projection}'")
 
 
+def _curve_in_port_penalty_values(
+    gamma_port, gammadash_port, gamma_curves, gammadash_curves, projection, threshold
+):
+    if projection == "xy":
+        return _curve_in_port_penalty_xy_values(
+            gamma_port,
+            gammadash_port,
+            gamma_curves,
+            gammadash_curves,
+            threshold,
+        )
+    if projection == "zphi":
+        return _curve_in_port_penalty_zphi_values(
+            gamma_port,
+            gammadash_port,
+            gamma_curves,
+            gammadash_curves,
+            threshold,
+        )
+    raise ValueError(f"Unknown projection '{projection}'")
+
+
+def _curve_in_port_penalty_grads(
+    gamma_port, gammadash_port, gamma_curves, gammadash_curves, projection, threshold
+):
+    if projection == "xy":
+        return _curve_in_port_penalty_xy_grads(
+            gamma_port,
+            gammadash_port,
+            gamma_curves,
+            gammadash_curves,
+            threshold,
+        )
+    if projection == "zphi":
+        return _curve_in_port_penalty_zphi_grads(
+            gamma_port,
+            gammadash_port,
+            gamma_curves,
+            gammadash_curves,
+            threshold,
+        )
+    raise ValueError(f"Unknown projection '{projection}'")
+
+
 def _curve_in_port_penalty_hessian(
     gamma_port,
     gammadash_port,
@@ -691,6 +799,24 @@ def count_inside_points(
     )
 
 
+def _curve_sample_batches(curves):
+    grouped_samples = {}
+    for idx, curve in enumerate(curves):
+        gamma = curve.gamma()
+        gammadash = curve.gammadash()
+        key = (tuple(gamma.shape), tuple(gammadash.shape))
+        if key not in grouped_samples:
+            grouped_samples[key] = ([], [], [])
+        indices, gammas, gammadashes = grouped_samples[key]
+        indices.append(idx)
+        gammas.append(gamma)
+        gammadashes.append(gammadash)
+    return [
+        (indices, jnp.stack(gammas), jnp.stack(gammadashes))
+        for indices, gammas, gammadashes in grouped_samples.values()
+    ]
+
+
 class CurveInPortPenalty(Optimizable):
     def __init__(self, port, curves, threshold, projection="zphi"):
         self.port = port
@@ -717,12 +843,27 @@ class CurveInPortPenalty(Optimizable):
         gp = self.port.gamma()
         l1 = self.port.gammadash()
 
-        out = 0
-        for c in self.curves:
-            gc = c.gamma()
-            l2 = c.gammadash()
-            out += _curve_in_port_penalty_value(
-                gp, l1, gc, l2, self.projection, self.threshold
+        out = 0.0
+        for indices, gammas, gammadashes in _curve_sample_batches(self.curves):
+            if len(indices) == 1:
+                out += _curve_in_port_penalty_value(
+                    gp,
+                    l1,
+                    gammas[0],
+                    gammadashes[0],
+                    self.projection,
+                    self.threshold,
+                )
+                continue
+            out += jnp.sum(
+                _curve_in_port_penalty_values(
+                    gp,
+                    l1,
+                    gammas,
+                    gammadashes,
+                    self.projection,
+                    self.threshold,
+                )
             )
 
         return out
@@ -736,20 +877,42 @@ class CurveInPortPenalty(Optimizable):
 
         gp = self.port.gamma()
         l1 = self.port.gammadash()
-        for i, c in enumerate(self.curves):
-            gc = c.gamma()
-            l2 = c.gammadash()
-            grad0, grad1, grad2, grad3 = _curve_in_port_penalty_grad(
-                gp, l1, gc, l2, self.projection, self.threshold
-            )
+        for indices, gammas, gammadashes in _curve_sample_batches(self.curves):
+            if len(indices) == 1:
+                grad0, grad1, grad2, grad3 = _curve_in_port_penalty_grad(
+                    gp,
+                    l1,
+                    gammas[0],
+                    gammadashes[0],
+                    self.projection,
+                    self.threshold,
+                )
+                grad0 = np.asarray(grad0)[None, ...]
+                grad1 = np.asarray(grad1)[None, ...]
+                grad2 = np.asarray(grad2)[None, ...]
+                grad3 = np.asarray(grad3)[None, ...]
+            else:
+                grad0, grad1, grad2, grad3 = _curve_in_port_penalty_grads(
+                    gp,
+                    l1,
+                    gammas,
+                    gammadashes,
+                    self.projection,
+                    self.threshold,
+                )
+                grad0 = np.asarray(grad0)
+                grad1 = np.asarray(grad1)
+                grad2 = np.asarray(grad2)
+                grad3 = np.asarray(grad3)
 
             # derivatives w.r.t port
-            dgamma_by_dcoeff_vjp_vecs[-1] += grad0
-            dgammadash_by_dcoeff_vjp_vecs[-1] += grad1
+            dgamma_by_dcoeff_vjp_vecs[-1] += np.sum(grad0, axis=0)
+            dgammadash_by_dcoeff_vjp_vecs[-1] += np.sum(grad1, axis=0)
 
             # derivatives w.r.t curves
-            dgamma_by_dcoeff_vjp_vecs[i] += grad2
-            dgammadash_by_dcoeff_vjp_vecs[i] += grad3
+            for idx, curve_grad0, curve_grad1 in zip(indices, grad2, grad3):
+                dgamma_by_dcoeff_vjp_vecs[idx] += curve_grad0
+                dgammadash_by_dcoeff_vjp_vecs[idx] += curve_grad1
 
         res = [
             self.curves[i].dgamma_by_dcoeff_vjp(dgamma_by_dcoeff_vjp_vecs[i])
@@ -875,6 +1038,38 @@ def _projected_cc_distance_zphi_grad(gamma1, l1, gamma2, l2, minimum_distance):
     )
 
 
+@jit
+def _projected_cc_distance_xy_values(gamma1, l1, gamma2s, l2s, minimum_distance):
+    return vmap(
+        _projected_cc_distance_xy_value,
+        in_axes=(None, None, 0, 0, None),
+    )(gamma1, l1, gamma2s, l2s, minimum_distance)
+
+
+@jit
+def _projected_cc_distance_zphi_values(gamma1, l1, gamma2s, l2s, minimum_distance):
+    return vmap(
+        _projected_cc_distance_zphi_value,
+        in_axes=(None, None, 0, 0, None),
+    )(gamma1, l1, gamma2s, l2s, minimum_distance)
+
+
+@jit
+def _projected_cc_distance_xy_grads(gamma1, l1, gamma2s, l2s, minimum_distance):
+    return vmap(
+        _projected_cc_distance_xy_grad,
+        in_axes=(None, None, 0, 0, None),
+    )(gamma1, l1, gamma2s, l2s, minimum_distance)
+
+
+@jit
+def _projected_cc_distance_zphi_grads(gamma1, l1, gamma2s, l2s, minimum_distance):
+    return vmap(
+        _projected_cc_distance_zphi_grad,
+        in_axes=(None, None, 0, 0, None),
+    )(gamma1, l1, gamma2s, l2s, minimum_distance)
+
+
 @partial(jit, static_argnums=(5, 6))
 def _projected_cc_distance_xy_hessian(
     gamma1, l1, gamma2, l2, minimum_distance, left_argnum, right_argnum
@@ -893,6 +1088,26 @@ def _projected_cc_distance_zphi_hessian(
         jacrev(_projected_cc_distance_zphi_value, argnums=left_argnum),
         argnums=right_argnum,
     )(gamma1, l1, gamma2, l2, minimum_distance)
+
+
+@partial(jit, static_argnums=(5, 6))
+def _projected_cc_distance_xy_hessians(
+    gamma1, l1, gamma2s, l2s, minimum_distance, left_argnum, right_argnum
+):
+    return vmap(
+        _projected_cc_distance_xy_hessian,
+        in_axes=(None, None, 0, 0, None, None, None),
+    )(gamma1, l1, gamma2s, l2s, minimum_distance, left_argnum, right_argnum)
+
+
+@partial(jit, static_argnums=(5, 6))
+def _projected_cc_distance_zphi_hessians(
+    gamma1, l1, gamma2s, l2s, minimum_distance, left_argnum, right_argnum
+):
+    return vmap(
+        _projected_cc_distance_zphi_hessian,
+        in_axes=(None, None, 0, 0, None, None, None),
+    )(gamma1, l1, gamma2s, l2s, minimum_distance, left_argnum, right_argnum)
 
 
 def _projected_cc_distance_value(gamma1, l1, gamma2, l2, projection, minimum_distance):
@@ -915,6 +1130,50 @@ def _projected_cc_distance_grad(gamma1, l1, gamma2, l2, projection, minimum_dist
     raise ValueError(f"Unknown projection '{projection}'")
 
 
+def _projected_cc_distance_values(
+    gamma1, l1, gamma2s, l2s, projection, minimum_distance
+):
+    if projection == "xy":
+        return _projected_cc_distance_xy_values(
+            gamma1,
+            l1,
+            gamma2s,
+            l2s,
+            minimum_distance,
+        )
+    if projection == "zphi":
+        return _projected_cc_distance_zphi_values(
+            gamma1,
+            l1,
+            gamma2s,
+            l2s,
+            minimum_distance,
+        )
+    raise ValueError(f"Unknown projection '{projection}'")
+
+
+def _projected_cc_distance_grads(
+    gamma1, l1, gamma2s, l2s, projection, minimum_distance
+):
+    if projection == "xy":
+        return _projected_cc_distance_xy_grads(
+            gamma1,
+            l1,
+            gamma2s,
+            l2s,
+            minimum_distance,
+        )
+    if projection == "zphi":
+        return _projected_cc_distance_zphi_grads(
+            gamma1,
+            l1,
+            gamma2s,
+            l2s,
+            minimum_distance,
+        )
+    raise ValueError(f"Unknown projection '{projection}'")
+
+
 def _projected_cc_distance_hessian(
     gamma1,
     l1,
@@ -932,6 +1191,39 @@ def _projected_cc_distance_hessian(
     if projection == "zphi":
         return _projected_cc_distance_zphi_hessian(
             gamma1, l1, gamma2, l2, minimum_distance, left_argnum, right_argnum
+        )
+    raise ValueError(f"Unknown projection '{projection}'")
+
+
+def _projected_cc_distance_hessians(
+    gamma1,
+    l1,
+    gamma2s,
+    l2s,
+    projection,
+    minimum_distance,
+    left_argnum,
+    right_argnum,
+):
+    if projection == "xy":
+        return _projected_cc_distance_xy_hessians(
+            gamma1,
+            l1,
+            gamma2s,
+            l2s,
+            minimum_distance,
+            left_argnum,
+            right_argnum,
+        )
+    if projection == "zphi":
+        return _projected_cc_distance_zphi_hessians(
+            gamma1,
+            l1,
+            gamma2s,
+            l2s,
+            minimum_distance,
+            left_argnum,
+            right_argnum,
         )
     raise ValueError(f"Unknown projection '{projection}'")
 
@@ -963,16 +1255,30 @@ class ProjectedCurveCurveDistance(Optimizable):
             return np.min(res[~np.isnan(res)])
 
     def J(self):
-        res = 0
+        res = 0.0
 
         gamma = self.curve.gamma()
         l = self.curve.gammadash()
-        for c in self.base_curves:
-            gamma2 = c.gamma()
-            l2 = c.gammadash()
-
-            res += _projected_cc_distance_value(
-                gamma, l, gamma2, l2, self.projection, self.minimum_distance
+        for indices, gammas, gammadashes in _curve_sample_batches(self.base_curves):
+            if len(indices) == 1:
+                res += _projected_cc_distance_value(
+                    gamma,
+                    l,
+                    gammas[0],
+                    gammadashes[0],
+                    self.projection,
+                    self.minimum_distance,
+                )
+                continue
+            res += jnp.sum(
+                _projected_cc_distance_values(
+                    gamma,
+                    l,
+                    gammas,
+                    gammadashes,
+                    self.projection,
+                    self.minimum_distance,
+                )
             )
 
         return res
@@ -986,16 +1292,38 @@ class ProjectedCurveCurveDistance(Optimizable):
 
         gamma1 = self.curve.gamma()
         l1 = self.curve.gammadash()
-        for i, c in enumerate(self.base_curves):
-            gamma2 = c.gamma()
-            l2 = c.gammadash()
-            grad0, grad1, grad2, grad3 = _projected_cc_distance_grad(
-                gamma1, l1, gamma2, l2, self.projection, self.minimum_distance
-            )
-            dgamma_by_dcoeff_vjp_vecs[-1] += grad0
-            dgammadash_by_dcoeff_vjp_vecs[-1] += grad1
-            dgamma_by_dcoeff_vjp_vecs[i] += grad2
-            dgammadash_by_dcoeff_vjp_vecs[i] += grad3
+        for indices, gammas, gammadashes in _curve_sample_batches(self.base_curves):
+            if len(indices) == 1:
+                grad0, grad1, grad2, grad3 = _projected_cc_distance_grad(
+                    gamma1,
+                    l1,
+                    gammas[0],
+                    gammadashes[0],
+                    self.projection,
+                    self.minimum_distance,
+                )
+                grad0 = np.asarray(grad0)[None, ...]
+                grad1 = np.asarray(grad1)[None, ...]
+                grad2 = np.asarray(grad2)[None, ...]
+                grad3 = np.asarray(grad3)[None, ...]
+            else:
+                grad0, grad1, grad2, grad3 = _projected_cc_distance_grads(
+                    gamma1,
+                    l1,
+                    gammas,
+                    gammadashes,
+                    self.projection,
+                    self.minimum_distance,
+                )
+                grad0 = np.asarray(grad0)
+                grad1 = np.asarray(grad1)
+                grad2 = np.asarray(grad2)
+                grad3 = np.asarray(grad3)
+            dgamma_by_dcoeff_vjp_vecs[-1] += np.sum(grad0, axis=0)
+            dgammadash_by_dcoeff_vjp_vecs[-1] += np.sum(grad1, axis=0)
+            for idx, curve_grad0, curve_grad1 in zip(indices, grad2, grad3):
+                dgamma_by_dcoeff_vjp_vecs[idx] += curve_grad0
+                dgammadash_by_dcoeff_vjp_vecs[idx] += curve_grad1
 
         res = [
             self.base_curves[i].dgamma_by_dcoeff_vjp(dgamma_by_dcoeff_vjp_vecs[i])
@@ -1028,30 +1356,112 @@ class ProjectedCurveCurveDistance(Optimizable):
 
         ndofs_port = self.curve.num_dofs()
         res = np.zeros((ndofs_port, ndofs_port))
-        for c in self.base_curves:
-            g2 = c.gamma()
-            l2 = c.gammadash()
-            hess00 = _projected_cc_distance_hessian(
-                g1, l1, g2, l2, self.projection, self.minimum_distance, 0, 0
-            )
-            hess01 = _projected_cc_distance_hessian(
-                g1, l1, g2, l2, self.projection, self.minimum_distance, 0, 1
-            )
-            hess11 = _projected_cc_distance_hessian(
-                g1, l1, g2, l2, self.projection, self.minimum_distance, 1, 1
-            )
+        for indices, gammas, gammadashes in _curve_sample_batches(self.base_curves):
+            if len(indices) == 1:
+                hess00 = _projected_cc_distance_hessian(
+                    g1,
+                    l1,
+                    gammas[0],
+                    gammadashes[0],
+                    self.projection,
+                    self.minimum_distance,
+                    0,
+                    0,
+                )
+                hess01 = _projected_cc_distance_hessian(
+                    g1,
+                    l1,
+                    gammas[0],
+                    gammadashes[0],
+                    self.projection,
+                    self.minimum_distance,
+                    0,
+                    1,
+                )
+                hess11 = _projected_cc_distance_hessian(
+                    g1,
+                    l1,
+                    gammas[0],
+                    gammadashes[0],
+                    self.projection,
+                    self.minimum_distance,
+                    1,
+                    1,
+                )
 
-            grad0, grad1, _, _ = _projected_cc_distance_grad(
-                g1, l1, g2, l2, self.projection, self.minimum_distance
-            )  # this is dJ/dgamma, size npts x 3 / dJ/dgammadash, size npts x 3
+                grad0, grad1, _, _ = _projected_cc_distance_grad(
+                    g1,
+                    l1,
+                    gammas[0],
+                    gammadashes[0],
+                    self.projection,
+                    self.minimum_distance,
+                )
+
+                res += (
+                    np.einsum("ijkl,ijm,kln->mn", hess00, dg1dx, dg1dx)
+                    + np.einsum("ijkl,ijm,kln->mn", hess11, dl1dx, dl1dx)
+                    + np.einsum("ij,ijkl->kl", grad0, gamma_hessian)
+                    + np.einsum("ij,ijkl->kl", grad1, gammadash_hessian)
+                    + np.einsum("kilj,kim,ljn->mn", hess01, dg1dx, dl1dx)
+                    + np.einsum("kilj,kin,ljm->mn", hess01, dg1dx, dl1dx)
+                )
+                continue
+
+            hess00 = np.asarray(
+                _projected_cc_distance_hessians(
+                    g1,
+                    l1,
+                    gammas,
+                    gammadashes,
+                    self.projection,
+                    self.minimum_distance,
+                    0,
+                    0,
+                )
+            )
+            hess01 = np.asarray(
+                _projected_cc_distance_hessians(
+                    g1,
+                    l1,
+                    gammas,
+                    gammadashes,
+                    self.projection,
+                    self.minimum_distance,
+                    0,
+                    1,
+                )
+            )
+            hess11 = np.asarray(
+                _projected_cc_distance_hessians(
+                    g1,
+                    l1,
+                    gammas,
+                    gammadashes,
+                    self.projection,
+                    self.minimum_distance,
+                    1,
+                    1,
+                )
+            )
+            grad0, grad1, _, _ = _projected_cc_distance_grads(
+                g1,
+                l1,
+                gammas,
+                gammadashes,
+                self.projection,
+                self.minimum_distance,
+            )
+            grad0 = np.asarray(grad0)
+            grad1 = np.asarray(grad1)
 
             res += (
-                np.einsum("ijkl,ijm,kln->mn", hess00, dg1dx, dg1dx)
-                + np.einsum("ijkl,ijm,kln->mn", hess11, dl1dx, dl1dx)
-                + np.einsum("ij,ijkl->kl", grad0, gamma_hessian)
-                + np.einsum("ij,ijkl->kl", grad1, gammadash_hessian)
-                + np.einsum("kilj,kim,ljn->mn", hess01, dg1dx, dl1dx)
-                + np.einsum("kilj,kin,ljm->mn", hess01, dg1dx, dl1dx)
+                np.einsum("aijkl,ijm,kln->mn", hess00, dg1dx, dg1dx)
+                + np.einsum("aijkl,ijm,kln->mn", hess11, dl1dx, dl1dx)
+                + np.einsum("aij,ijkl->kl", grad0, gamma_hessian)
+                + np.einsum("aij,ijkl->kl", grad1, gammadash_hessian)
+                + np.einsum("akilj,kim,ljn->mn", hess01, dg1dx, dl1dx)
+                + np.einsum("akilj,kin,ljm->mn", hess01, dg1dx, dl1dx)
             )
 
         return res
