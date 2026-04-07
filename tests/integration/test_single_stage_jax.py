@@ -1247,8 +1247,73 @@ def _make_boozer_setup(
     )
 
 
+def _copy_optional_array(value):
+    if value is None:
+        return None
+    return np.asarray(value, dtype=float).copy()
+
+
+def _snapshot_solver_state(booz):
+    return {
+        "need_to_run_code": booz.need_to_run_code,
+        "run_code": booz.run_code,
+        "res_ref": booz.res,
+        "res": None if booz.res is None else dict(booz.res),
+    }
+
+
+def _snapshot_boozer_setup_state(setup):
+    (_, surf_cpu, surf_jax, bs_cpu, bs_jax, booz_cpu, booz_jax, _) = setup
+    return {
+        "surf_cpu_dofs": np.asarray(surf_cpu.get_dofs(), dtype=float).copy(),
+        "surf_jax_dofs": np.asarray(surf_jax.get_dofs(), dtype=float).copy(),
+        "bs_cpu_points": _copy_optional_array(bs_cpu.get_points_cart_ref()),
+        "bs_jax_points": _copy_optional_array(bs_jax._points_jax),
+        "bs_jax_points_version": bs_jax._points_version,
+        "bs_jax_x": np.asarray(bs_jax.x, dtype=float).copy(),
+        "booz_cpu": _snapshot_solver_state(booz_cpu),
+        "booz_jax": _snapshot_solver_state(booz_jax),
+    }
+
+
+def _restore_boozer_result(obj, res_ref, res_snapshot):
+    if res_ref is None or res_snapshot is None:
+        obj.res = None
+        return
+    res_ref.clear()
+    res_ref.update(res_snapshot)
+    obj.res = res_ref
+
+
+def _restore_solver_state(booz, state):
+    booz.run_code = state["run_code"]
+    _restore_boozer_result(
+        booz,
+        state["res_ref"],
+        state["res"],
+    )
+    booz.need_to_run_code = state["need_to_run_code"]
+
+
+def _restore_boozer_setup_state(setup, state):
+    (_, surf_cpu, surf_jax, bs_cpu, bs_jax, booz_cpu, booz_jax, _) = setup
+    surf_cpu.set_dofs(state["surf_cpu_dofs"])
+    surf_jax.set_dofs(state["surf_jax_dofs"])
+    bs_jax.x = state["bs_jax_x"]
+    if state["bs_cpu_points"] is not None:
+        bs_cpu.set_points(state["bs_cpu_points"])
+    bs_jax._points_jax = (
+        None
+        if state["bs_jax_points"] is None
+        else jnp.asarray(state["bs_jax_points"], dtype=jnp.float64)
+    )
+    bs_jax._points_version = state["bs_jax_points_version"]
+    _restore_solver_state(booz_cpu, state["booz_cpu"])
+    _restore_solver_state(booz_jax, state["booz_jax"])
+
+
 @pytest.fixture(scope="module")
-def boozer_setup():
+def _boozer_setup_module():
     """Module-scoped Boozer surface setup with LS constraint."""
     setup = _make_boozer_setup(constraint_weight=1.0)
     (
@@ -1286,6 +1351,14 @@ def boozer_setup():
         booz_jax,
         vol_cpu,
     )
+
+
+@pytest.fixture
+def boozer_setup(_boozer_setup_module):
+    """Function-scoped view of the shared Boozer setup with guaranteed restore."""
+    state = _snapshot_boozer_setup_state(_boozer_setup_module)
+    yield _boozer_setup_module
+    _restore_boozer_setup_state(_boozer_setup_module, state)
 
 
 def test_make_boozer_setup_propagates_weight_inv_modB_to_cpu_and_jax():
