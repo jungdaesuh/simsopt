@@ -547,6 +547,15 @@ class isSelfIntersecting(unittest.TestCase):
         assert s.is_self_intersecting(angle=0.123*np.pi/(2*np.pi), thetas=200)
         assert s.is_self_intersecting(thetas=202)
 
+    def test_is_self_intersecting_supports_installed_ground_api(self):
+        if ground is None or bentley_ottmann is None:
+            self.skipTest("ground and bentley_ottmann are required")
+
+        s = SurfaceRZFourier(mpol=1, ntor=0, stellsym=True, nfp=1)
+        result = s.is_self_intersecting()
+
+        self.assertIsInstance(result, (bool, np.bool_))
+
 
 class UtilTests(unittest.TestCase):
     def test_extend_via_normal(self):

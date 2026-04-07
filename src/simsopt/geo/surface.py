@@ -1,4 +1,5 @@
 import abc
+import math
 
 import numpy as np
 from scipy import interpolate
@@ -9,9 +10,14 @@ except ImportError:
     gridToVTK = None
 
 try:
-    from ground.base import get_context
+    from ground.base import get_context as _legacy_ground_get_context
 except ImportError:
-    get_context = None
+    _legacy_ground_get_context = None
+
+try:
+    from ground.context import Context as _GroundContext
+except ImportError:
+    _GroundContext = None
 
 try:
     from bentley_ottmann.planar import contour_self_intersects
@@ -25,6 +31,14 @@ from .plotting import fix_matplotlib_3d
 from .._core.json import GSONable
 
 __all__ = ['Surface', 'signed_distance_from_surface', 'SurfaceClassifier', 'SurfaceScaled', 'best_nphi_over_ntheta']
+
+
+def _get_ground_context():
+    if _legacy_ground_get_context is not None:
+        return _legacy_ground_get_context()
+    if _GroundContext is not None:
+        return _GroundContext(coordinate_factory=float, sqrt=math.sqrt)
+    return None
 
 
 class Surface(Optimizable):
@@ -435,7 +449,8 @@ class Surface(Optimizable):
         self.gamma_lin(cross_section, varphi_root, thetas)
         return cross_section
 
-    @SimsoptRequires(get_context is not None, "is_self_intersecting requires ground package")
+    @SimsoptRequires(_legacy_ground_get_context is not None or _GroundContext is not None,
+                     "is_self_intersecting requires ground package")
     @SimsoptRequires(contour_self_intersects is not None, "is_self_intersecting requires the bentley_ottmann package")
     def is_self_intersecting(self, angle=0., thetas=None):
         r"""
@@ -462,10 +477,13 @@ class Surface(Optimizable):
         R = np.sqrt(cs[:, 0]**2 + cs[:, 1]**2)
         Z = cs[:, 2]
 
-        context = get_context()
+        context = _get_ground_context()
         Point, Contour = context.point_cls, context.contour_cls
-        contour = Contour([Point(R[i], Z[i]) for i in range(cs.shape[0])])
-        return contour_self_intersects(contour)
+        contour = Contour([Point(float(R[i]), float(Z[i])) for i in range(cs.shape[0])])
+        try:
+            return contour_self_intersects(contour, context=context)
+        except TypeError:
+            return contour_self_intersects(contour)
 
     def aspect_ratio(self):
         r"""

@@ -436,6 +436,84 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertEqual(settings["plasma_current_A"], 0.0)
         self.assertEqual(settings["boozer_I"], 0.0)
 
+    def test_build_stage2_bs_path_uses_unique_globbed_current_match(self):
+        module = self.load_module()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            parent = root / "local" / "outputs-demo.nc"
+            parent.mkdir(parents=True)
+            matched = (
+                parent
+                / "R0=0.915-s=0.24-LW=0.0005-CCW=100-CCT=0.05-CW=0.0001-CT=40-SR=0.220-TFC=80000-Order=2-CM=penalty-BH=3"
+                / "biot_savart_opt.json"
+            )
+            matched.parent.mkdir(parents=True)
+            matched.write_text("{}", encoding="utf-8")
+
+            args = SimpleNamespace(
+                stage2_bs_path=None,
+                plasma_surf_filename="demo.nc",
+                stage2_seed_major_radius=0.915,
+                stage2_seed_toroidal_flux=0.24,
+                stage2_seed_length_weight=0.0005,
+                stage2_seed_cc_weight=100.0,
+                stage2_seed_cc_threshold=0.05,
+                stage2_seed_curvature_weight=0.0001,
+                stage2_seed_curvature_threshold=40.0,
+                stage2_seed_banana_surf_radius=0.22,
+                stage2_seed_tf_current_A=8.0e4,
+                stage2_seed_order=2,
+                stage2_source="local",
+                local_stage2_root=str(root / "local"),
+                database_stage2_root=str(root / "database"),
+            )
+
+            self.assertEqual(module.build_stage2_bs_path(args), str(matched))
+
+    def test_build_stage2_bs_path_rejects_ambiguous_globbed_current_matches(self):
+        module = self.load_module()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            parent = root / "local" / "outputs-demo.nc"
+            parent.mkdir(parents=True)
+            for suffix in ("-CM=penalty-BH=3", "-CM=penalty-BH=4"):
+                candidate = (
+                    parent
+                    / (
+                        "R0=0.915-s=0.24-LW=0.0005-CCW=100-CCT=0.05-CW=0.0001-CT=40-"
+                        f"SR=0.220-TFC=80000-Order=2{suffix}"
+                    )
+                    / "biot_savart_opt.json"
+                )
+                candidate.parent.mkdir(parents=True)
+                candidate.write_text("{}", encoding="utf-8")
+
+            args = SimpleNamespace(
+                stage2_bs_path=None,
+                plasma_surf_filename="demo.nc",
+                stage2_seed_major_radius=0.915,
+                stage2_seed_toroidal_flux=0.24,
+                stage2_seed_length_weight=0.0005,
+                stage2_seed_cc_weight=100.0,
+                stage2_seed_cc_threshold=0.05,
+                stage2_seed_curvature_weight=0.0001,
+                stage2_seed_curvature_threshold=40.0,
+                stage2_seed_banana_surf_radius=0.22,
+                stage2_seed_tf_current_A=8.0e4,
+                stage2_seed_order=2,
+                stage2_source="local",
+                local_stage2_root=str(root / "local"),
+                database_stage2_root=str(root / "database"),
+            )
+
+            with self.assertRaisesRegex(
+                FileNotFoundError,
+                "Multiple Stage 2 outputs match the requested seed specification",
+            ):
+                module.build_stage2_bs_path(args)
+
     def test_fun_fallback_returns_elevated_j_and_same_sign_gradient(self):
         """Issue #2: failed Boozer must return elevated J + same-sign gradient,
         not (J_old, -dJ_old)."""

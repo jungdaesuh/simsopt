@@ -75,6 +75,31 @@ def extract_functions(module_path: Path, function_names: list[str], global_bindi
     return {name: namespace[name] for name in function_names}
 
 
+def find_assigned_dict(module_path: Path, variable_name: str) -> ast.Dict:
+    tree = ast.parse(module_path.read_text(), filename=str(module_path))
+
+    class DictAssignmentVisitor(ast.NodeVisitor):
+        def __init__(self):
+            self.dict_node = None
+
+        def visit_Assign(self, node):
+            if self.dict_node is not None:
+                return
+            if not isinstance(node.value, ast.Dict):
+                return
+            if any(
+                isinstance(target, ast.Name) and target.id == variable_name
+                for target in node.targets
+            ):
+                self.dict_node = node.value
+
+    visitor = DictAssignmentVisitor()
+    visitor.visit(tree)
+    if visitor.dict_node is None:
+        raise AssertionError(f"Could not find dict assignment for {variable_name}")
+    return visitor.dict_node
+
+
 def make_single_stage_alm_args(**overrides):
     defaults = {
         "alm_max_outer_iters": 7,
@@ -185,6 +210,29 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
 
         self.assertIn('"--stage2-bs-path"', source)
         self.assertIn('"STAGE2_BS_PATH"', source)
+
+    def test_stage2_results_contract_records_hardware_status_fields(self):
+        results_dict = find_assigned_dict(STAGE2_MODULE_PATH, "results")
+
+        entries = {
+            key.value: value
+            for key, value in zip(results_dict.keys, results_dict.values)
+            if isinstance(key, ast.Constant) and isinstance(key.value, str)
+        }
+
+        self.assertIn("HARDWARE_CONSTRAINTS_OK", entries)
+        self.assertIn("HARDWARE_CONSTRAINT_VIOLATIONS", entries)
+
+        for field_name, expected_status_key in (
+            ("HARDWARE_CONSTRAINTS_OK", "success"),
+            ("HARDWARE_CONSTRAINT_VIOLATIONS", "violations"),
+        ):
+            value_node = entries[field_name]
+            self.assertIsInstance(value_node, ast.Subscript)
+            self.assertIsInstance(value_node.value, ast.Name)
+            self.assertEqual(value_node.value.id, "hardware_status")
+            self.assertIsInstance(value_node.slice, ast.Constant)
+            self.assertEqual(value_node.slice.value, expected_status_key)
 
     def test_stage2_seed_loader_reuses_saved_biot_savart_configuration(self):
         functions = extract_functions(
