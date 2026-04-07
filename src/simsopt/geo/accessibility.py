@@ -11,7 +11,7 @@ from .jit import jit
 from .._core.optimizable import Optimizable
 from .._core.derivative import derivative_dec, Derivative
 
-from scipy.linalg import lu
+from scipy.linalg import lu, lu_factor, lu_solve
 from scipy.optimize import minimize
 
 __all__ = [
@@ -91,9 +91,15 @@ class PortSize(Optimizable):
 
         # Some cache boolean
         self.need_to_run_code = True
+        self._reset_port_solve_cache()
+
+    def _reset_port_solve_cache(self):
+        self._port_hessian_lu = None
+        self._port_area_solve = None
 
     def recompute_bell(self, parent=None):
         self.need_to_run_code = True
+        self._reset_port_solve_cache()
 
     def objective(self, dofs, hessian_bool):
         self.port.x = dofs  # We only optimize the port dofs
@@ -216,6 +222,12 @@ class PortSize(Optimizable):
             "vjp": None,
         }
 
+        self._port_hessian_lu = lu_factor(d2J)
+        self._port_area_solve = lu_solve(
+            self._port_hessian_lu,
+            np.asarray(self.Jxyarea.dJ(), dtype=np.float64),
+        )
+
         if verbose:
             print(
                 f"NEWTON solve - {res_newton['success']}  iter={res_newton['iter']}, ||grad||_inf = {np.linalg.norm(res_newton['jacobian'], ord=np.inf):.3e}",
@@ -233,12 +245,7 @@ class PortSize(Optimizable):
     @derivative_dec
     def dJ(self):
         self.explicit_solve()
-        U1 = self.Jxyarea.ddJ_ddport()
-        U2 = self.port_coil_distance_weight * self.Jccxydist.ddJ_ddport()
-        U3 = self.port_forward_facing_weight * self.Jufp.ddJ_ddport()
-        U = -U1 + U2 + U3
-
-        x = np.linalg.solve(U, self.Jxyarea.dJ())
+        x = self._port_area_solve
 
         d = Derivative()
         for c in self.curves:
@@ -835,6 +842,24 @@ def _contract_projected_cc_distance_port_hessian_terms(
         + np.einsum("ij,ijkl->kl", grad1, gammadash_hessian, optimize=True)
         + np.einsum("kilj,kim,ljn->mn", hess01, dg1dx, dl1dx, optimize=True)
         + np.einsum("kilj,kin,ljm->mn", hess01, dg1dx, dl1dx, optimize=True)
+    )
+
+
+def _contract_projected_cc_distance_port_coil_hessian_terms(
+    hess_g1g2,
+    hess_l1g2,
+    hess_g1l2,
+    hess_l1l2,
+    dg1dx,
+    dl1dx,
+    dg2dx,
+    dl2dx,
+):
+    return (
+        np.einsum("ijkl,ijm,kln->nm", hess_g1g2, dg1dx, dg2dx, optimize=True)
+        + np.einsum("ijkl,ijm,kln->nm", hess_l1g2, dl1dx, dg2dx, optimize=True)
+        + np.einsum("ijkl,ijm,kln->nm", hess_g1l2, dg1dx, dl2dx, optimize=True)
+        + np.einsum("ijkl,ijm,kln->nm", hess_l1l2, dl1dx, dl2dx, optimize=True)
     )
 
 
@@ -1537,12 +1562,18 @@ class ProjectedCurveCurveDistance(Optimizable):
                             g1, l1, g2, l2, self.projection, self.minimum_distance, 1, 3
                         )
 
-                        a = np.einsum("ijkl,ijm,kln->nm", hg1g2, dg1dx, dg2dx)
-                        b = np.einsum("ijkl,ijm,kln->nm", hl1g2, dl1dx, dg2dx)
-                        c = np.einsum("ijkl,ijm,kln->nm", hg1l2, dg1dx, dl2dx)
-                        d = np.einsum("ijkl,ijm,kln->nm", hl1l2, dl1dx, dl2dx)
-
-                        res[:, :] += a + b + c + d
+                        res[:, :] += (
+                            _contract_projected_cc_distance_port_coil_hessian_terms(
+                                hg1g2,
+                                hl1g2,
+                                hg1l2,
+                                hl1l2,
+                                dg1dx,
+                                dl1dx,
+                                dg2dx,
+                                dl2dx,
+                            )
+                        )
 
                 hess.append(res)
 

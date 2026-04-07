@@ -4,6 +4,7 @@ import simsopt.geo.accessibility as accessibility_module
 from simsopt.geo.accessibility import (
     CurveInPortPenalty,
     DirectedFacingPort,
+    PortSize,
     ProjectedCurveConvexity,
     ProjectedCurveCurveDistance,
     ProjectedEnclosedArea,
@@ -46,6 +47,23 @@ def _make_xyz_curve(dy=0.0, dz=0.0):
     dofs[4] = dz
     curve.x = dofs
     return curve
+
+
+def _make_port_size_objective():
+    port = _make_cws_curve(0.0)
+    curves = [
+        _make_xyz_curve(dy=0.4),
+        _make_xyz_curve(dy=-0.3, dz=0.1),
+        _make_xyz_curve(dy=0.25, dz=-0.1),
+    ]
+    objective = PortSize(
+        port,
+        curves,
+        curve_port_distance_threshold=0.1,
+        direction="vertical",
+        solver="explicit",
+    )
+    return objective, curves
 
 
 def _legacy_accessibility_jit_attrs(objective):
@@ -228,3 +246,26 @@ def test_projected_curve_convexity_reuses_shared_jit_kernels():
     assert accessibility_module._projected_curve_convexity_zphi_value._cache_size() == 1
     assert accessibility_module._projected_curve_convexity_zphi_grad._cache_size() == 1
     _assert_no_legacy_jit_attrs(objective2)
+
+
+def test_port_size_refreshes_cached_port_solve_on_parent_curve_mutation():
+    objective, curves = _make_port_size_objective()
+
+    objective.dJ()
+    initial_port_solve = objective._port_area_solve.copy()
+
+    assert objective.need_to_run_code is False
+    assert objective._port_area_solve is not None
+
+    curve_dofs = np.asarray(curves[0].x).copy()
+    curve_dofs[2] += 0.02
+    curves[0].x = curve_dofs
+
+    assert objective.need_to_run_code is True
+    assert objective._port_area_solve is None
+
+    objective.dJ()
+
+    assert objective.need_to_run_code is False
+    assert objective._port_area_solve is not None
+    assert not np.allclose(objective._port_area_solve, initial_port_solve)
