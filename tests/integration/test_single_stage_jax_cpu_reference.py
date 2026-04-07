@@ -961,10 +961,9 @@ def _assert_curve_spec_gamma_and_dash_gradient_matches_fd(curve, *, eps=1.0e-7):
 _REAL_RESOLVE_FD_ABS_TOL = 1e-8
 _REAL_RESOLVE_FD_TAYLOR_RATE = 0.55
 _REAL_RESOLVE_FD_EPSILONS = (4.0e-4, 2.0e-4, 1.0e-4)
-_REAL_RESOLVE_FD_NUM_DIRECTIONS = 5
 _REAL_RESOLVE_FD_MIN_STABLE_SAMPLES = 3
 _REAL_RESOLVE_FD_MIN_STABLE_EPS = 2
-_REAL_RESOLVE_FD_DIRECTION_FRACTIONS = (0.0, 0.25, 0.5, 0.75, 1.0)
+_REAL_RESOLVE_FD_AXIS_DIRECTION_FRACTIONS = (0.0, 0.25, 0.5, 0.75, 1.0)
 _STABLE_IOTA_ABS_TOL = 5e-4
 _STABLE_G_REL_TOL = 1e-4
 _STABLE_FUN_REL_TOL = 1e-2
@@ -1013,27 +1012,62 @@ def _build_real_resolve_overrides(base_state):
     }
 
 
+def _normalize_real_resolve_fd_direction(direction):
+    normalized_direction = np.asarray(direction, dtype=float)
+    norm = np.linalg.norm(normalized_direction)
+    assert norm > 0.0
+    return normalized_direction / norm
+
+
+def _append_unique_real_resolve_fd_direction(directions, direction):
+    normalized_direction = _normalize_real_resolve_fd_direction(direction)
+    for existing_direction in directions:
+        if (
+            np.allclose(
+                normalized_direction,
+                existing_direction,
+                rtol=0.0,
+                atol=1e-12,
+            )
+            or np.allclose(
+                normalized_direction,
+                -existing_direction,
+                rtol=0.0,
+                atol=1e-12,
+            )
+        ):
+            return
+    directions.append(normalized_direction)
+
+
 def _real_resolve_fd_probe_directions(dof_count):
-    """Return an explicit, readable probe set spanning the coil-DOF vector."""
+    """Return explicit axis and mixed probe directions spanning the coil DOFs."""
     assert dof_count > 0
     last_index = dof_count - 1
     probe_indices = []
-    for fraction in _REAL_RESOLVE_FD_DIRECTION_FRACTIONS:
+    for fraction in _REAL_RESOLVE_FD_AXIS_DIRECTION_FRACTIONS:
         dof_index = int(round(fraction * last_index))
         if dof_index not in probe_indices:
             probe_indices.append(dof_index)
 
-    next_index = 0
-    while len(probe_indices) < _REAL_RESOLVE_FD_NUM_DIRECTIONS:
-        if next_index not in probe_indices:
-            probe_indices.append(next_index)
-        next_index += 1
-
-    directions = []
+    candidate_directions = []
     for dof_index in probe_indices:
         direction = np.zeros(dof_count, dtype=float)
         direction[dof_index] = 1.0
-        directions.append(direction)
+        candidate_directions.append(direction)
+
+    # Add deterministic mixed probes so coverage includes coupled DOF motion,
+    # not just coordinate-axis perturbations.
+    candidate_directions.append(np.ones(dof_count, dtype=float))
+    if dof_count > 1:
+        alternating = np.ones(dof_count, dtype=float)
+        alternating[1::2] = -1.0
+        candidate_directions.append(alternating)
+
+    directions = []
+    for direction in candidate_directions:
+        _append_unique_real_resolve_fd_direction(directions, direction)
+
     return tuple(directions)
 
 
@@ -1097,6 +1131,7 @@ def _assert_wrapper_resolve_fd_matches_real_fixture(
     gradient = np.asarray(gradient_builder(booz_jax, bs_jax), dtype=float)
     x0 = np.asarray(base_state["coil_dofs"], dtype=float)
     directions = _real_resolve_fd_probe_directions(len(x0))
+    num_directions = len(directions)
 
     stable_samples = 0
     instability_reasons = []
@@ -1170,7 +1205,7 @@ def _assert_wrapper_resolve_fd_matches_real_fixture(
         instability_detail = "; ".join(instability_reasons) if instability_reasons else "none"
         short_series_detail = "; ".join(short_series_reasons) if short_series_reasons else "none"
         diagnostics.append(
-            f"stable directions={stable_samples}/{_REAL_RESOLVE_FD_NUM_DIRECTIONS} "
+            f"stable directions={stable_samples}/{num_directions} "
             f"(required {_REAL_RESOLVE_FD_MIN_STABLE_SAMPLES}); "
             f"instabilities: {instability_detail}; "
             f"short stable series: {short_series_detail}"
