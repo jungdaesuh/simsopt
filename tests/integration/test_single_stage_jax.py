@@ -1200,13 +1200,29 @@ def _make_boozer_setup(
     G0 = mu0 * sum(abs(c.current.get_value()) for c in coils)
     iota0 = 0.3
 
+    shared_ls_options = {
+        "verbose": False,
+        "bfgs_maxiter": 300,
+        "bfgs_tol": 1e-8,
+        "newton_maxiter": 20,
+        "newton_tol": 1e-9,
+    }
+    cpu_ls_options = {
+        **shared_ls_options,
+        "weight_inv_modB": weight_inv_modB,
+    }
+    jax_ls_options = {
+        **shared_ls_options,
+        "optimizer_backend": optimizer_backend,
+        "weight_inv_modB": weight_inv_modB,
+    }
     booz_cpu = BoozerSurface(
         bs_cpu,
         surf_cpu,
         vol_cpu,
         vol_target,
         constraint_weight=constraint_weight,
-        options={"verbose": False, "bfgs_maxiter": 50, "newton_maxiter": 0},
+        options=cpu_ls_options,
     )
     booz_jax = BoozerSurfaceJAX(
         bs_jax,
@@ -1214,15 +1230,7 @@ def _make_boozer_setup(
         vol_jax,
         vol_target,
         constraint_weight=constraint_weight,
-        options={
-            "verbose": False,
-            "bfgs_maxiter": 300,
-            "bfgs_tol": 1e-8,
-            "newton_maxiter": 20,
-            "newton_tol": 1e-9,
-            "optimizer_backend": optimizer_backend,
-            "weight_inv_modB": weight_inv_modB,
-        },
+        options=jax_ls_options,
     )
 
     return (
@@ -1260,6 +1268,7 @@ def boozer_setup():
     # This validates the real all-JAX path, not a CPU-state injection.
     res_cpu = booz_cpu.run_code(iota0, G0)
     assert res_cpu is not None, "CPU BoozerSurface.run_code() returned None"
+    assert res_cpu.get("success", False), "CPU solver did not converge"
     assert "PLU" in res_cpu, "CPU solver did not produce PLU"
 
     res_jax = booz_jax.run_code(iota0, G0)
@@ -1277,6 +1286,17 @@ def boozer_setup():
         booz_jax,
         vol_cpu,
     )
+
+
+def test_make_boozer_setup_propagates_weight_inv_modB_to_cpu_and_jax():
+    """Helper options should keep CPU and JAX LS weighting in sync."""
+    (_, _, _, _, _, booz_cpu, booz_jax, _, _, _) = _make_boozer_setup(
+        constraint_weight=1.0,
+        weight_inv_modB=False,
+    )
+
+    assert booz_cpu.options["weight_inv_modB"] is False
+    assert booz_jax.options["weight_inv_modB"] is False
 
 
 # -----------------------------------------------------------------------
