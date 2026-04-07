@@ -14,7 +14,6 @@ from simsopt.geo import (
 )
 from simsopt._core.optimizable import load
 from simsopt.objectives import SquaredFlux, QuadraticPenalty
-from simsopt._core.derivative import Derivative
 import json
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -27,7 +26,6 @@ from alm_utils import (
     minimize_alm,
     run_directional_taylor_test,
     validate_alm_cli_args,
-    zero_gradient_like,
 )
 from plotting_utils import cross_section_plot
 from workflow_helpers import (
@@ -35,11 +33,6 @@ from workflow_helpers import (
     format_local_stage2_run_dir,
 )
 from banana_opt.reference_surfaces import build_banana_reference_surfaces
-from banana_opt.smoothing import (
-    smoothmax_selected,
-    smoothmin_selected,
-    stable_softmax,
-)
 from banana_opt.stage2_geometry import (
     init_surface as _init_surface,
     initialize_coils as _initialize_coils,
@@ -50,115 +43,20 @@ from banana_opt.stage2_objectives import (
     evaluate_stage2_alm_problem as _evaluate_stage2_alm_problem,
     evaluate_stage2_hardware_constraints as _evaluate_stage2_hardware_constraints,
     make_stage2_fun,
+    smooth_max_curvature_signed_constraint,
+    smooth_min_distance_signed_constraint,
+    stage2_constraint_activity_tolerances,
 )
 
 SIMSOPT_ROOT = os.path.abspath(os.path.join(EXAMPLE_ROOT, "..", ".."))
 REPO_ROOT = os.path.abspath(os.path.join(SIMSOPT_ROOT, ".."))
 DATABASE_EQUILIBRIA_DIR = os.path.join(REPO_ROOT, "DATABASE", "EQUILIBRIA")
 DEFAULT_EQUILIBRIA_DIR = DATABASE_EQUILIBRIA_DIR if os.path.isdir(DATABASE_EQUILIBRIA_DIR) else os.path.join(EXAMPLE_ROOT, "equilibria")
-_SMOOTHING_EPS = float(np.finfo(float).eps)
 STAGE2_ALM_CONSTRAINT_NAMES = (
     "coil_length_upper_bound",
     "coil_coil_spacing",
     "max_curvature",
 )
-
-
-def stage2_constraint_activity_tolerances(
-    distance_smoothing: float,
-    curvature_smoothing: float,
-):
-    return [
-        1e-3,
-        max(4.0 * float(distance_smoothing), _SMOOTHING_EPS),
-        max(4.0 * float(curvature_smoothing), _SMOOTHING_EPS),
-    ]
-
-
-def _stable_softmax(values: np.ndarray) -> np.ndarray:
-    return stable_softmax(values, _SMOOTHING_EPS)
-
-
-def _smoothmax_selected(values: np.ndarray, temperature: float) -> tuple[float, np.ndarray]:
-    return smoothmax_selected(values, temperature, _SMOOTHING_EPS)
-
-
-def _smoothmin_selected(values: np.ndarray, temperature: float) -> tuple[float, np.ndarray]:
-    return smoothmin_selected(values, temperature, _SMOOTHING_EPS)
-
-
-def smooth_max_curvature_signed_constraint(
-    curve,
-    threshold: float,
-    temperature: float,
-    base_objective_optimizable,
-):
-    kappa = np.asarray(curve.kappa(), dtype=float)
-    hard_max = float(np.max(kappa))
-    active_mask = kappa >= (hard_max - 4.0 * float(temperature))
-    if not np.any(active_mask):
-        active_mask[np.argmax(kappa)] = True
-    smooth_max, active_weights = _smoothmax_selected(kappa[active_mask], temperature)
-    full_weights = np.zeros_like(kappa)
-    full_weights[active_mask] = active_weights
-    grad = np.asarray(
-        curve.dkappa_by_dcoeff_vjp(full_weights)(base_objective_optimizable),
-        dtype=float,
-    )
-    return smooth_max - float(threshold), grad
-
-
-def smooth_min_distance_signed_constraint(
-    curves,
-    minimum_distance: float,
-    temperature: float,
-    base_objective_optimizable,
-):
-    pair_blocks = []
-    hard_min = np.inf
-    for i, curve_i in enumerate(curves):
-        gamma_i = np.asarray(curve_i.gamma(), dtype=float)
-        for j in range(i):
-            curve_j = curves[j]
-            gamma_j = np.asarray(curve_j.gamma(), dtype=float)
-            diffs = gamma_i[:, None, :] - gamma_j[None, :, :]
-            dists = np.linalg.norm(diffs, axis=2)
-            hard_min = min(hard_min, float(np.min(dists)))
-            pair_blocks.append((i, j, diffs, dists))
-
-    if not pair_blocks:
-        return float(minimum_distance), zero_gradient_like(base_objective_optimizable.x)
-
-    selection_window = 4.0 * float(temperature)
-    selected_distances = []
-    selected_entries = []
-    for i, j, diffs, dists in pair_blocks:
-        mask = dists <= (hard_min + selection_window)
-        if not np.any(mask):
-            mask[np.unravel_index(np.argmin(dists), dists.shape)] = True
-        rows, cols = np.nonzero(mask)
-        selected_distances.append(dists[rows, cols])
-        selected_entries.append((i, j, rows, cols, diffs[rows, cols], dists[rows, cols]))
-
-    flat_distances = np.concatenate(selected_distances)
-    smooth_min, flat_weights = _smoothmin_selected(flat_distances, temperature)
-
-    point_gradients = [np.zeros_like(np.asarray(curve.gamma(), dtype=float)) for curve in curves]
-    offset = 0
-    for i, j, rows, cols, diffs, distances in selected_entries:
-        count = len(distances)
-        local_weights = flat_weights[offset:offset + count]
-        offset += count
-        directions = diffs / np.maximum(distances[:, None], _SMOOTHING_EPS)
-        np.add.at(point_gradients[i], rows, local_weights[:, None] * directions)
-        np.add.at(point_gradients[j], cols, -local_weights[:, None] * directions)
-
-    derivative = Derivative({})
-    for curve, point_gradient in zip(curves, point_gradients):
-        if np.any(point_gradient):
-            derivative += curve.dgamma_by_dcoeff_vjp(point_gradient)
-    grad = np.asarray(derivative(base_objective_optimizable), dtype=float)
-    return float(minimum_distance) - smooth_min, grad
 
 
 def _print_taylor_test_summary(name: str, result: dict) -> None:

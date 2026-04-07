@@ -15,12 +15,26 @@ SINGLE_STAGE_MODULE_PATH = (
     / "SINGLE_STAGE"
     / "single_stage_banana_example.py"
 )
+SINGLE_STAGE_CONSTRAINTS_MODULE_PATH = (
+    Path(__file__).resolve().parents[2]
+    / "examples"
+    / "single_stage_optimization"
+    / "banana_opt"
+    / "single_stage_constraints.py"
+)
 STAGE2_MODULE_PATH = (
     Path(__file__).resolve().parents[2]
     / "examples"
     / "single_stage_optimization"
     / "STAGE_2"
     / "banana_coil_solver.py"
+)
+STAGE2_OBJECTIVES_MODULE_PATH = (
+    Path(__file__).resolve().parents[2]
+    / "examples"
+    / "single_stage_optimization"
+    / "banana_opt"
+    / "stage2_objectives.py"
 )
 
 
@@ -138,8 +152,11 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
         self.assertNotIn("inner_callback=callback", source)
 
     def test_stage2_constraint_activity_tolerances_track_smoothing_windows(self):
+        source = STAGE2_MODULE_PATH.read_text()
+        self.assertIn("stage2_constraint_activity_tolerances", source)
+
         functions = extract_functions(
-            STAGE2_MODULE_PATH,
+            STAGE2_OBJECTIVES_MODULE_PATH,
             ["stage2_constraint_activity_tolerances"],
             {"_SMOOTHING_EPS": np.finfo(float).eps},
         )
@@ -237,8 +254,11 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
         self.assertEqual(surf.extra_data["B_N"].shape, (2, 2, 1))
 
     def test_single_stage_constraint_activity_tolerances_match_selection_windows(self):
+        source = SINGLE_STAGE_MODULE_PATH.read_text()
+        self.assertIn("single_stage_constraint_activity_tolerances", source)
+
         functions = extract_functions(
-            SINGLE_STAGE_MODULE_PATH,
+            SINGLE_STAGE_CONSTRAINTS_MODULE_PATH,
             ["single_stage_constraint_activity_tolerances"],
             {"np": np, "_SMOOTHING_EPS": np.finfo(float).eps},
         )

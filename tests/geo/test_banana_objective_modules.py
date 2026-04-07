@@ -13,6 +13,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 EXAMPLES_ROOT = REPO_ROOT / "examples" / "single_stage_optimization"
 STAGE2_OBJECTIVES_PATH = EXAMPLES_ROOT / "banana_opt" / "stage2_objectives.py"
 SINGLE_STAGE_GEOMETRY_PATH = EXAMPLES_ROOT / "banana_opt" / "single_stage_geometry.py"
+SINGLE_STAGE_CONSTRAINTS_PATH = EXAMPLES_ROOT / "banana_opt" / "single_stage_constraints.py"
 
 
 def _load_module(module_path: Path, prefix: str):
@@ -82,6 +83,61 @@ class _FakeCurvatureObjective:
 
     def J(self):
         return self._objective_value
+
+
+class _FakeCurve:
+    def __init__(self, gamma_points, kappa_values=None):
+        self._gamma = np.asarray(gamma_points, dtype=float)
+        self._kappa = np.asarray(kappa_values if kappa_values is not None else [], dtype=float)
+
+    def gamma(self):
+        return self._gamma.copy()
+
+    def kappa(self):
+        return self._kappa.copy()
+
+    def dkappa_by_dcoeff_vjp(self, weights):
+        weighted_sum = float(np.sum(weights))
+        return lambda _objective: np.array([weighted_sum, -weighted_sum], dtype=float)
+
+    def dgamma_by_dcoeff_vjp(self, point_gradient):
+        gradient_sum = np.sum(point_gradient, axis=0)
+        return _FakeDerivative(np.array([gradient_sum[0], gradient_sum[1]], dtype=float))
+
+
+class _FakeSurfaceWithGradient:
+    def __init__(self, gamma_points):
+        self._gamma = np.asarray(gamma_points, dtype=float)
+
+    def gamma(self):
+        return self._gamma.copy()
+
+    def dgamma_by_dcoeff_vjp(self, point_gradient):
+        gradient_sum = np.sum(point_gradient.reshape((-1, 3)), axis=0)
+        return _FakeDerivative(np.array([gradient_sum[0], gradient_sum[2]], dtype=float))
+
+
+class _FakeDerivative:
+    def __init__(self, gradient=None):
+        if isinstance(gradient, dict) or gradient is None:
+            self._gradient = np.zeros(2, dtype=float)
+        else:
+            self._gradient = np.asarray(gradient, dtype=float)
+
+    def __call__(self, _objective):
+        return self._gradient.copy()
+
+    def __add__(self, other):
+        return _FakeDerivative(self._gradient + other._gradient)
+
+    def __iadd__(self, other):
+        self._gradient = self._gradient + other._gradient
+        return self
+
+    def __radd__(self, other):
+        if other == 0:
+            return self
+        return self.__add__(other)
 
 
 class _FakeBiotSavart:
@@ -226,6 +282,40 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
         self.assertAlmostEqual(result["total"], 9.0)
         np.testing.assert_allclose(result["grad"], [7.0, -3.0])
 
+    def test_stage2_constraint_activity_tolerances_track_smoothing_windows(self):
+        tolerances = self.module.stage2_constraint_activity_tolerances(0.005, 0.05)
+        self.assertEqual(tolerances, [1e-3, 0.02, 0.2])
+
+    def test_smooth_max_curvature_signed_constraint_uses_active_window(self):
+        curve = _FakeCurve(
+            gamma_points=[[0.0, 0.0, 0.0]],
+            kappa_values=[3.0, 5.0, 4.4],
+        )
+
+        signed_value, grad = self.module.smooth_max_curvature_signed_constraint(
+            curve,
+            threshold=4.0,
+            temperature=0.2,
+            base_objective_optimizable=SimpleNamespace(),
+        )
+
+        self.assertGreater(signed_value, 1.0)
+        np.testing.assert_allclose(grad, [1.0, -1.0])
+
+    def test_smooth_min_distance_signed_constraint_returns_zero_grad_without_pairs(self):
+        objective = SimpleNamespace(x=np.array([2.0, -3.0]))
+        curve = _FakeCurve(gamma_points=[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]])
+
+        signed_value, grad = self.module.smooth_min_distance_signed_constraint(
+            [curve],
+            minimum_distance=0.05,
+            temperature=0.01,
+            base_objective_optimizable=objective,
+        )
+
+        self.assertAlmostEqual(signed_value, 0.05)
+        np.testing.assert_allclose(grad, [0.0, 0.0])
+
 
 class SingleStageGeometryModuleTests(_ModuleTestCase):
     MODULE_PATH = SINGLE_STAGE_GEOMETRY_PATH
@@ -326,3 +416,69 @@ class SingleStageGeometryModuleTests(_ModuleTestCase):
         self.assertAlmostEqual(result["max_curvature"], 41.0)
         self.assertFalse(result["status"]["success"])
         self.assertEqual(len(result["status"]["violations"]), 3)
+
+
+class SingleStageConstraintModuleTests(_ModuleTestCase):
+    MODULE_PATH = SINGLE_STAGE_CONSTRAINTS_PATH
+    MODULE_PREFIX = "banana_single_stage_constraints"
+
+    def test_single_stage_constraint_activity_tolerances_match_selection_windows(self):
+        tolerances = self.module.single_stage_constraint_activity_tolerances(
+            0.005,
+            0.05,
+            include_surface_surface=True,
+        )
+        np.testing.assert_allclose(tolerances, [0.02, 0.02, 0.2, 0.02])
+
+    def test_smooth_max_curvature_signed_constraint_uses_active_window(self):
+        curve = _FakeCurve(
+            gamma_points=[[0.0, 0.0, 0.0]],
+            kappa_values=[3.0, 5.0, 4.4],
+        )
+
+        signed_value, grad, violation = self.module.smooth_max_curvature_signed_constraint(
+            curve,
+            threshold=4.0,
+            temperature=0.2,
+            objective_optimizable=SimpleNamespace(),
+        )
+
+        self.assertGreater(signed_value, 1.0)
+        self.assertEqual(violation, signed_value)
+        np.testing.assert_allclose(grad, [1.0, -1.0])
+
+    def test_smooth_min_curve_curve_signed_constraint_returns_zero_grad_without_pairs(self):
+        objective = SimpleNamespace(x=np.array([2.0, -3.0]))
+        curve = _FakeCurve(gamma_points=[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]])
+
+        signed_value, grad, violation = self.module.smooth_min_curve_curve_signed_constraint(
+            [curve],
+            minimum_distance=0.05,
+            temperature=0.01,
+            objective_optimizable=objective,
+        )
+
+        self.assertAlmostEqual(signed_value, 0.05)
+        self.assertEqual(violation, 0.0)
+        np.testing.assert_allclose(grad, [0.0, 0.0])
+
+    def test_smooth_min_surface_surface_signed_constraint_reports_positive_violation(self):
+        surface_1 = _FakeSurfaceWithGradient(
+            gamma_points=[[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]]]
+        )
+        surface_2 = _FakeSurfaceWithGradient(
+            gamma_points=[[[0.1, 0.0, 0.0], [1.1, 0.0, 0.0]]]
+        )
+
+        with mock.patch.object(self.module, "Derivative", _FakeDerivative):
+            signed_value, grad, violation = self.module.smooth_min_surface_surface_signed_constraint(
+                surface_1,
+                surface_2,
+                minimum_distance=0.5,
+                temperature=0.01,
+                objective_optimizable=SimpleNamespace(),
+            )
+
+        self.assertGreater(violation, 0.0)
+        self.assertAlmostEqual(violation, signed_value)
+        self.assertEqual(grad.shape, (2,))
