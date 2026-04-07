@@ -125,9 +125,9 @@ class MinimizeAlmTests(unittest.TestCase):
             profile=profile,
         )
 
-        self.assertEqual(options["maxiter"], 8)
-        self.assertEqual(options["maxls"], 8)
-        self.assertEqual(options["maxfun"], 128)
+        self.assertEqual(options["maxiter"], 80)
+        self.assertEqual(options["maxls"], 40)
+        self.assertEqual(options["maxfun"], 6400)
         self.assertGreaterEqual(options["ftol"], 1e-11)
         self.assertGreaterEqual(options["gtol"], 1e-4)
 
@@ -250,12 +250,12 @@ class MinimizeAlmTests(unittest.TestCase):
 
         self.assertFalse(result.success)
         np.testing.assert_allclose(result.x, np.array([0.2]))
-        self.assertEqual(result.nit, 4)
-        self.assertEqual(result.history[0]["action"], "subproblem_continue")
+        self.assertEqual(result.nit, 2)
+        self.assertEqual(result.history[0]["action"], "dual_update")
         self.assertEqual(result.history[0]["inner_attempts"], 2)
         self.assertFalse(result.history[0]["meaningful_progress"])
         self.assertAlmostEqual(result.history[0]["accepted_move_norm"], 0.0)
-        self.assertEqual(result.history[1]["action"], "subproblem_limit")
+        self.assertEqual(result.history[0]["outer_termination"], "max_outer")
 
     def test_minimize_alm_retries_with_smaller_trust_radius_after_abnormal_step(self):
         module = load_alm_utils_module()
@@ -368,7 +368,8 @@ class MinimizeAlmTests(unittest.TestCase):
         self.assertFalse(result.success)
         self.assertEqual(result.penalty, 10.0)
         self.assertEqual(result.history[0]["action"], "penalty_increase")
-        self.assertEqual(result.history[1]["action"], "max_outer")
+        self.assertEqual(result.history[1]["action"], "penalty_increase")
+        self.assertEqual(result.history[1]["outer_termination"], "max_outer")
 
     def test_minimize_alm_updates_duals_without_growing_penalty_after_meaningful_progress(self):
         module = load_alm_utils_module()
@@ -412,7 +413,7 @@ class MinimizeAlmTests(unittest.TestCase):
         self.assertTrue(result.history[0]["meaningful_progress"])
         self.assertEqual(result.history[1]["multipliers"], [0.25])
 
-    def test_minimize_alm_does_not_dual_update_after_zero_work_feasible_stall(self):
+    def test_minimize_alm_dual_updates_after_zero_work_feasible_stall_when_tolerances_are_met(self):
         module = load_alm_utils_module()
         settings = module.ALMSettings(
             max_outer_iterations=2,
@@ -454,13 +455,13 @@ class MinimizeAlmTests(unittest.TestCase):
             )
 
         self.assertFalse(result.success)
-        self.assertEqual(result.history[0]["action"], "subproblem_continue")
+        self.assertEqual(result.history[0]["action"], "dual_update")
         self.assertEqual(result.history[0]["multipliers"], [0.0])
-        self.assertAlmostEqual(result.history[0]["trust_radius"], 0.15000000000000002)
-        self.assertEqual(result.history[1]["action"], "subproblem_limit")
-        self.assertAlmostEqual(result.trust_radius, 0.15000000000000002)
+        self.assertAlmostEqual(result.history[0]["trust_radius"], 0.1)
+        self.assertEqual(result.history[1]["action"], "dual_update")
+        self.assertAlmostEqual(result.trust_radius, 0.1)
 
-    def test_minimize_alm_treats_same_point_after_nonzero_iterations_as_stall(self):
+    def test_minimize_alm_dual_updates_same_point_after_nonzero_iterations_when_tolerances_are_met(self):
         module = load_alm_utils_module()
         settings = module.ALMSettings(
             max_outer_iterations=2,
@@ -502,14 +503,14 @@ class MinimizeAlmTests(unittest.TestCase):
             )
 
         self.assertFalse(result.success)
-        self.assertEqual(result.history[0]["action"], "subproblem_continue")
+        self.assertEqual(result.history[0]["action"], "dual_update")
         self.assertFalse(result.history[0]["meaningful_progress"])
         self.assertEqual(result.history[0]["inner_iterations"], 3)
         self.assertAlmostEqual(result.history[0]["accepted_move_norm"], 0.0)
-        self.assertEqual(result.history[1]["action"], "subproblem_limit")
-        self.assertAlmostEqual(result.trust_radius, 0.15000000000000002)
+        self.assertEqual(result.history[1]["action"], "dual_update")
+        self.assertAlmostEqual(result.trust_radius, 0.1)
 
-    def test_minimize_alm_limits_feasible_plateau_before_full_continuation_budget(self):
+    def test_minimize_alm_dual_updates_immediately_when_feasible_stall_meets_current_tolerances(self):
         module = load_alm_utils_module()
         settings = module.ALMSettings(
             max_outer_iterations=1,
@@ -551,13 +552,12 @@ class MinimizeAlmTests(unittest.TestCase):
             )
 
         self.assertFalse(result.success)
-        self.assertEqual(len(result.history), 2)
-        self.assertEqual(result.history[0]["action"], "subproblem_continue")
-        self.assertEqual(result.history[0]["feasible_stall_count"], 1)
-        self.assertEqual(result.history[1]["action"], "subproblem_limit")
-        self.assertEqual(result.history[1]["feasible_stall_count"], 2)
+        self.assertEqual(len(result.history), 1)
+        self.assertEqual(result.history[0]["action"], "dual_update")
+        self.assertEqual(result.history[0]["feasible_stall_count"], 0)
+        self.assertEqual(result.history[0]["outer_termination"], "max_outer")
 
-    def test_minimize_alm_reports_feasible_plateau_after_tolerance_tightens(self):
+    def test_minimize_alm_uses_full_outer_budget_after_tolerance_tightens(self):
         module = load_alm_utils_module()
         settings = module.ALMSettings(
             max_outer_iterations=2,
@@ -617,12 +617,12 @@ class MinimizeAlmTests(unittest.TestCase):
 
         self.assertFalse(result.success)
         self.assertEqual(result.history[0]["action"], "dual_update")
-        self.assertEqual(result.history[1]["action"], "subproblem_continue")
-        self.assertEqual(result.history[2]["action"], "feasible_plateau")
+        self.assertEqual(result.history[1]["action"], "dual_update")
+        self.assertEqual(result.history[1]["outer_termination"], "max_outer")
         self.assertEqual(result.outer_iterations, 2)
-        self.assertIn("before final tolerance", result.message)
+        self.assertIn("max outer iterations", result.message)
 
-    def test_minimize_alm_stops_outer_loop_once_feasible_plateau_is_declared(self):
+    def test_minimize_alm_keeps_outer_loop_running_after_feasible_stall(self):
         module = load_alm_utils_module()
         settings = module.ALMSettings(
             max_outer_iterations=4,
@@ -681,9 +681,13 @@ class MinimizeAlmTests(unittest.TestCase):
             )
 
         self.assertFalse(result.success)
-        self.assertEqual(minimize_calls["count"], 3)
-        self.assertEqual(result.outer_iterations, 2)
-        self.assertEqual(result.history[-1]["action"], "feasible_plateau")
+        self.assertEqual(minimize_calls["count"], 6)
+        self.assertEqual(result.outer_iterations, 4)
+        self.assertEqual(result.history[0]["action"], "dual_update")
+        self.assertEqual(result.history[1]["action"], "dual_update")
+        self.assertEqual(result.history[-2]["action"], "subproblem_continue")
+        self.assertEqual(result.history[-1]["action"], "subproblem_limit")
+        self.assertEqual(result.history[-1]["outer_termination"], "max_outer")
 
     def test_minimize_alm_retries_subproblem_before_escalating_penalty(self):
         module = load_alm_utils_module()
@@ -758,6 +762,84 @@ class MinimizeAlmTests(unittest.TestCase):
         self.assertAlmostEqual(result.history[0]["raw_stationarity_norm"], 1.0)
         self.assertAlmostEqual(result.history[0]["kkt_stationarity_norm"], 0.0)
         self.assertAlmostEqual(result.history[0]["stationarity_norm"], 0.0)
+
+    def test_minimize_alm_restores_best_feasible_incumbent_by_base_objective(self):
+        module = load_alm_utils_module()
+        settings = module.ALMSettings(
+            max_outer_iterations=3,
+            max_subproblem_continuations=0,
+            trust_radius_init=0.1,
+            trust_radius_min=0.01,
+            trust_radius_shrink=0.5,
+            trust_radius_grow=1.5,
+            max_inner_attempts=1,
+            penalty_init=1.0,
+            penalty_scale=10.0,
+            feasibility_tol=1e-8,
+            stationarity_tol=1e-3,
+        )
+        minimize_calls = {"count": 0}
+
+        def evaluate_problem(x, multipliers, penalty):
+            point = float(np.asarray(x, dtype=float)[0])
+            if point < 0.5:
+                return {
+                    "total": 20.0,
+                    "base_value": 20.0,
+                    "grad": np.array([0.5]),
+                    "constraint_values": np.array([0.5]),
+                    "stationarity_norm": 0.5,
+                }
+            if point < 1.5:
+                return {
+                    "total": 10.0,
+                    "base_value": 10.0,
+                    "grad": np.zeros(1),
+                    "constraint_values": np.array([0.5]),
+                    "stationarity_norm": 0.0,
+                }
+            if point < 2.5:
+                return {
+                    "total": 1.0,
+                    "base_value": 1.0,
+                    "grad": np.array([0.05]),
+                    "constraint_values": np.array([0.0]),
+                    "stationarity_norm": 0.05,
+                }
+            return {
+                "total": 0.5,
+                "base_value": 5.0,
+                "grad": np.array([0.2]),
+                "constraint_values": np.array([0.0]),
+                "stationarity_norm": 0.2,
+            }
+
+        def fake_minimize(fun, x, jac, method, bounds, callback, options):
+            minimize_calls["count"] += 1
+            return SimpleNamespace(
+                x=np.array([float(minimize_calls["count"])]),
+                nit=1,
+                success=True,
+                message="CONVERGENCE",
+            )
+
+        with patch.object(module, "minimize", side_effect=fake_minimize):
+            result = module.minimize_alm(
+                np.array([0.0]),
+                ["demo_constraint"],
+                evaluate_problem,
+                settings,
+                {"maxiter": 5, "ftol": 1e-12, "gtol": 1e-12},
+            )
+
+        self.assertFalse(result.success)
+        np.testing.assert_allclose(result.x, np.array([2.0]))
+        np.testing.assert_allclose(result.inner_result.x, np.array([2.0]))
+        self.assertEqual(minimize_calls["count"], 3)
+        self.assertEqual(result.history[0]["action"], "dual_update")
+        self.assertEqual(result.history[1]["action"], "dual_update")
+        self.assertEqual(result.history[2]["action"], "subproblem_limit")
+        self.assertEqual(result.history[2]["outer_termination"], "max_outer")
 
     def test_minimize_alm_interrupts_inner_solver_when_kkt_gate_is_hit_in_callback(self):
         module = load_alm_utils_module()
