@@ -19,11 +19,24 @@ except ImportError:
     _jax_vjp = None
     jnp = np
 
-import simsoptpp as sopp
+from ._simsoptpp import has_simsoptpp_symbol, sopp_namespace
+
+sopp = sopp_namespace("Curve")
 from .._core.optimizable import Optimizable
 from .._core.derivative import Derivative
-from .surfacerzfourier import SurfaceRZFourier
-from .surfacexyztensorfourier import SurfaceXYZTensorFourier
+if has_simsoptpp_symbol("SurfaceRZFourier"):
+    from .surfacerzfourier import SurfaceRZFourier
+else:
+    class SurfaceRZFourier:
+        pass
+
+if has_simsoptpp_symbol("SurfaceRZFourier") and has_simsoptpp_symbol(
+    "SurfaceXYZTensorFourier"
+):
+    from .surfacexyztensorfourier import SurfaceXYZTensorFourier
+else:
+    class SurfaceXYZTensorFourier:
+        pass
 
 from .jit import jit
 from .plotting import fix_matplotlib_3d
@@ -2290,10 +2303,10 @@ class CurveCWSFourier(Curve, sopp.Curve):
             )
         )
 
-        self.dsnz_by_dcoeff_jax = lambda cdofs, sdofs: jacfwd(self.snz)(cdofs, sdofs)
-        self.dsnr_by_dcoeff_jax = lambda cdofs, sdofs: jacfwd(self.snr)(cdofs, sdofs)
-        self.snr_hessian_jax = lambda cdofs, sdofs: hessian(self.snr)(cdofs, sdofs)
-        self.snz_hessian_jax = lambda cdofs, sdofs: hessian(self.snz)(cdofs, sdofs)
+        self.dsnz_by_dcoeff_jax = jit(jacfwd(self.snz))
+        self.dsnr_by_dcoeff_jax = jit(jacfwd(self.snr))
+        self.snr_hessian_jax = jit(hessian(self.snr))
+        self.snz_hessian_jax = jit(hessian(self.snz))
         self.dsnz_by_dcoeff_vjp_jax = jit(
             lambda cdofs, sdofs, v: vjp(lambda x: self.snz(x, sdofs), cdofs)[1](v)[0]
         )
