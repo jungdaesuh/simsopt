@@ -444,11 +444,15 @@ def curve_spec_with_quadpoints(spec: CurveSpec, quadpoints):
 
 
 def _clamp_unit_interval(value: jax.Array) -> jax.Array:
-    return jnp.clip(value, 0.0, 1.0)
+    return jnp.clip(
+        value,
+        _explicit_scalar(0.0, reference=value),
+        _explicit_scalar(1.0, reference=value),
+    )
 
 
 def _distance_sq(vector: jax.Array) -> jax.Array:
-    return jnp.maximum(jnp.dot(vector, vector), 0.0)
+    return jnp.maximum(jnp.dot(vector, vector), _explicit_scalar(0.0, reference=vector))
 
 
 def _distance(vector: jax.Array) -> jax.Array:
@@ -652,7 +656,10 @@ def _closed_curve_self_intersection_terms(
         gamma,
         tolerance_factor=tolerance_factor,
     )
-    deficit = jnp.maximum(tolerance - minimum_distance, 0.0)
+    deficit = jnp.maximum(
+        tolerance - minimum_distance,
+        _explicit_scalar(0.0, reference=gamma),
+    )
     return minimum_distance, tolerance, deficit
 
 
