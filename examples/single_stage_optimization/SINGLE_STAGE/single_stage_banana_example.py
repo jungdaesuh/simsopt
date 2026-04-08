@@ -69,6 +69,11 @@ from workflow_helpers import (
     format_local_stage2_seed_dir_without_tf,
 )
 from workflow_runner_common import load_stage2_artifact_results
+from banana_opt.current_contracts import (
+    boozer_I_to_physical_current_A,
+    physical_current_to_boozer_I,
+    resolve_plasma_current_settings as _resolve_plasma_current_settings_impl,
+)
 from banana_opt.reference_surfaces import build_banana_reference_surfaces
 from banana_opt.single_stage_geometry import (
     build_scaled_outer_problem,
@@ -114,7 +119,6 @@ DEFAULT_EQUILIBRIA_DIR = DATABASE_EQUILIBRIA_DIR if os.path.isdir(DATABASE_EQUIL
 DEFAULT_LOCAL_STAGE2_ROOT = os.path.join(EXAMPLE_ROOT, "STAGE_2")
 DEFAULT_DATABASE_STAGE2_ROOT = os.path.join(REPO_ROOT, "DATABASE", "COIL_OPTIMIZATION", "outputs")
 DEFAULT_SINGLE_STAGE_OUTPUT_ROOT = os.path.join(SCRIPT_DIR, "outputs")
-MU0_OVER_2PI = 2.0e-7
 DEFAULT_HARDWARE_SEARCH_MODE = "hard"
 DEFAULT_HARDWARE_SEARCH_SOFT_ITERATIONS = 0
 SINGLE_STAGE_ALM_CONSTRAINT_NAMES = (
@@ -149,14 +153,6 @@ DEFAULT_STAGE2_SEEDS_BY_PLASMA = {
         "order": 2,
     },
 }
-def physical_current_to_boozer_I(plasma_current_A):
-    return MU0_OVER_2PI * plasma_current_A
-
-
-def boozer_I_to_physical_current_A(boozer_I):
-    return boozer_I / MU0_OVER_2PI
-
-
 def add_confinement_surrogate_args(parser):
     parser.add_argument(
         "--confinement-objective-weight",
@@ -357,32 +353,15 @@ def resolve_stage2_tf_current_A(stage2_results, tf_coils):
 
 
 def resolve_plasma_current_settings(args):
-    raw_boozer_I = args.boozer_I
-    plasma_current_A = args.plasma_current_A
-
-    if plasma_current_A is not None:
-        if raw_boozer_I is not None:
-            raise ValueError("Cannot use --plasma-current-A together with --boozer-I")
-        return {
-            "boozer_I": physical_current_to_boozer_I(plasma_current_A),
-            "plasma_current_A": float(plasma_current_A),
-            "input_source": "physical_A",
-            "mode": "boozer_surrogate",
-        }
-
-    if raw_boozer_I is not None:
-        return {
-            "boozer_I": float(raw_boozer_I),
-            "plasma_current_A": boozer_I_to_physical_current_A(raw_boozer_I),
-            "input_source": "raw_boozer_I",
-            "mode": "boozer_surrogate",
-        }
-
+    settings = _resolve_plasma_current_settings_impl(
+        raw_boozer_I=args.boozer_I,
+        plasma_current_A=args.plasma_current_A,
+    )
     return {
-        "boozer_I": 0.0,
-        "plasma_current_A": 0.0,
-        "input_source": "default_zero",
-        "mode": "disabled",
+        "boozer_I": settings.boozer_I,
+        "plasma_current_A": settings.plasma_current_A,
+        "input_source": settings.input_source,
+        "mode": settings.mode,
     }
 
 

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import math
 import sys
 from pathlib import Path
 
@@ -22,12 +21,15 @@ from workflow_runner_common import (  # noqa: E402
     run_command,
     snapshot_single_results_paths,
 )
+from banana_opt.artifact_contracts import (  # noqa: E402
+    resolve_expected_stage2_tf_current_A,
+    resolve_expected_stage2_tf_current_sum_abs_A,
+    validate_smoke_results as _validate_smoke_results_impl,
+)
+from banana_opt.current_contracts import physical_current_to_boozer_I  # noqa: E402
 
 DEFAULT_PLASMA_SURF_FILENAME = "wout_nfp22ginsburg_000_014417_iota15.nc"
 DEFAULT_SMOKE_OUTPUT_ROOT = SCRIPT_DIR / "outputs_finite_current_smoke"
-MU0_OVER_2PI = 2.0e-7
-
-
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
@@ -145,79 +147,6 @@ def build_smoke_command(
     return command
 
 
-def _require_stage2_artifact_float(stage2_artifact_results: dict, key: str) -> float:
-    value = stage2_artifact_results.get(key)
-    if value is None:
-        raise ValueError(
-            f"Stage 2 artifact results.json is missing {key}; cannot validate "
-            "smoke provenance against the loaded artifact."
-        )
-    return float(value)
-
-
-def resolve_expected_stage2_tf_current_A(stage2_artifact_results: dict) -> float:
-    return _require_stage2_artifact_float(stage2_artifact_results, "TF_CURRENT_A")
-
-
-def resolve_expected_stage2_tf_current_sum_abs_A(stage2_artifact_results: dict) -> float:
-    return _require_stage2_artifact_float(
-        stage2_artifact_results,
-        "TF_CURRENT_SUM_ABS_A",
-    )
-
-
-def validate_smoke_results(
-    results: dict,
-    *,
-    requested_current_A: float,
-    expected_stage2_tf_current_A: float,
-    expected_stage2_tf_current_sum_abs_A: float,
-) -> dict:
-    required_keys = (
-        "PLASMA_CURRENT_A",
-        "PLASMA_CURRENT_INPUT_SOURCE",
-        "BOOZER_I",
-        "STAGE2_TF_CURRENT_A",
-        "STAGE2_TF_CURRENT_SUM_ABS_A",
-        "FINITE_CURRENT_MODE",
-    )
-    missing_keys = [key for key in required_keys if key not in results]
-    expected_boozer_I = MU0_OVER_2PI * requested_current_A
-    checks = {
-        "missing_keys": missing_keys,
-        "plasma_current_matches": math.isclose(
-            float(results.get("PLASMA_CURRENT_A", float("nan"))),
-            requested_current_A,
-            rel_tol=0.0,
-            abs_tol=1e-12,
-        ),
-        "boozer_I_matches": math.isclose(
-            float(results.get("BOOZER_I", float("nan"))),
-            expected_boozer_I,
-            rel_tol=0.0,
-            abs_tol=1e-12,
-        ),
-        "stage2_tf_current_matches": math.isclose(
-            float(results.get("STAGE2_TF_CURRENT_A", float("nan"))),
-            expected_stage2_tf_current_A,
-            rel_tol=0.0,
-            abs_tol=1e-12,
-        ),
-        "stage2_tf_current_sum_abs_matches": math.isclose(
-            float(results.get("STAGE2_TF_CURRENT_SUM_ABS_A", float("nan"))),
-            expected_stage2_tf_current_sum_abs_A,
-            rel_tol=0.0,
-            abs_tol=1e-12,
-        ),
-        "input_source_matches": results.get("PLASMA_CURRENT_INPUT_SOURCE") == "physical_A",
-        "mode_matches": results.get("FINITE_CURRENT_MODE") == "boozer_surrogate",
-    }
-    checks["passed"] = not missing_keys and all(
-        value for key, value in checks.items() if key not in {"missing_keys", "passed"}
-    )
-    return checks
-
-
 def run_smoke_case(
     args: argparse.Namespace,
     *,
@@ -265,6 +194,22 @@ def run_smoke_case(
         "validation": validation,
         "results": results,
     }
+
+
+def validate_smoke_results(
+    results: dict,
+    *,
+    requested_current_A: float,
+    expected_stage2_tf_current_A: float,
+    expected_stage2_tf_current_sum_abs_A: float,
+) -> dict:
+    return _validate_smoke_results_impl(
+        results,
+        requested_current_A=requested_current_A,
+        expected_boozer_I=physical_current_to_boozer_I(requested_current_A),
+        expected_stage2_tf_current_A=expected_stage2_tf_current_A,
+        expected_stage2_tf_current_sum_abs_A=expected_stage2_tf_current_sum_abs_A,
+    )
 
 
 def main() -> int:

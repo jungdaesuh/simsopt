@@ -27,6 +27,10 @@ from workflow_runner_common import (  # noqa: E402
     run_command,
     snapshot_single_results_paths,
 )
+from banana_opt.artifact_contracts import (  # noqa: E402
+    expected_locked_baseline_stage2_artifact_metadata as _expected_locked_baseline_stage2_artifact_metadata_impl,
+    validate_stage2_artifact_metadata,
+)
 
 DEFAULT_PLASMA_SURF_FILENAME = "wout_nfp22ginsburg_000_014417_iota15.nc"
 DEFAULT_SWEEP_OUTPUT_ROOT = SCRIPT_DIR / "outputs_80ka_baseline_sweep"
@@ -196,26 +200,10 @@ def locked_baseline_requested_stage2_contract() -> tuple[tuple[str, str, object]
 
 
 def expected_locked_baseline_stage2_artifact_metadata(config: Stage2ArtifactConfig) -> dict:
-    return {
-        "PLASMA_SURF_FILENAME": config.plasma_surf_filename,
-        "TF_CURRENT_A": config.tf_current_A,
-        "TF_CURRENT_SUM_ABS_A": LOCKED_BASELINE_NUM_TF_COILS * config.tf_current_A,
-        "NUM_TF_COILS": LOCKED_BASELINE_NUM_TF_COILS,
-        "MAJOR_RADIUS": config.major_radius,
-        "TOROIDAL_FLUX": config.toroidal_flux,
-        "LENGTH_WEIGHT": config.length_weight,
-        "CC_WEIGHT": config.cc_weight,
-        "CC_THRESHOLD": config.cc_threshold,
-        "CURVATURE_WEIGHT": config.curvature_weight,
-        "CURVATURE_THRESHOLD": config.curvature_threshold,
-        "banana_surf_radius": config.banana_surf_radius,
-        "order": config.order,
-        "CONSTRAINT_METHOD": config.constraint_method,
-        "basin_hops": config.basin_hops,
-        "basin_stepsize": None if config.basin_hops == 0 else config.basin_stepsize,
-        "basin_seed": config.basin_seed,
-        "init_only": config.init_only,
-    }
+    return _expected_locked_baseline_stage2_artifact_metadata_impl(
+        config,
+        num_tf_coils=LOCKED_BASELINE_NUM_TF_COILS,
+    )
 
 
 def validate_locked_baseline_args(args: argparse.Namespace) -> None:
@@ -235,34 +223,15 @@ def load_locked_baseline_stage2_artifact(
     stage2_results_path, stage2_artifact_results = load_stage2_artifact_results(
         stage2_bs_path
     )
-    for key, expected in expected_locked_baseline_stage2_artifact_metadata(
-        expected_config
-    ).items():
-        actual = stage2_artifact_results.get(key)
-        if actual is None and expected is not None:
-            raise ValueError(
-                f"Stage 2 artifact results.json is missing {key}; cannot verify the "
-                f"locked {EXPERIMENT_FAMILY} identity."
-            )
-        if isinstance(expected, float):
-            if not math.isclose(
-                float(actual),
-                expected,
-                rel_tol=0.0,
-                abs_tol=1e-12,
-            ):
-                raise ValueError(
-                    f"run_80ka_baseline_tradeoff_sweep.py is locked to {key}={expected!r} "
-                    f"for the {EXPERIMENT_FAMILY} lane, but {stage2_results_path} "
-                    f"reports {actual!r}."
-                )
-            continue
-        if actual != expected:
-            raise ValueError(
-                f"run_80ka_baseline_tradeoff_sweep.py is locked to {key}={expected!r} "
-                f"for the {EXPERIMENT_FAMILY} lane, but {stage2_results_path} "
-                f"reports {actual!r}."
-            )
+    validate_stage2_artifact_metadata(
+        stage2_results_path,
+        stage2_artifact_results,
+        expected_metadata=expected_locked_baseline_stage2_artifact_metadata(
+            expected_config
+        ),
+        owner_label="run_80ka_baseline_tradeoff_sweep.py",
+        experiment_family=EXPERIMENT_FAMILY,
+    )
     return stage2_results_path, stage2_artifact_results
 
 
