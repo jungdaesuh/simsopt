@@ -15,6 +15,81 @@ from functools import partial
 
 __all__ = ["BoozerSurface"]
 
+_BOOZER_SURFACE_REQUIRED_ATTRIBUTES = (
+    "quadpoints_phi",
+    "quadpoints_theta",
+    "set_dofs",
+    "gamma",
+    "gammadash1",
+    "gammadash2",
+    "dgamma_by_dcoeff",
+    "dgammadash1_by_dcoeff",
+    "dgammadash2_by_dcoeff",
+)
+_BOOZER_EXACT_SURFACE_REQUIRED_ATTRIBUTES = (
+    *_BOOZER_SURFACE_REQUIRED_ATTRIBUTES,
+    "get_stellsym_mask",
+)
+_BOOZER_SURFACE_SPECS = (
+    (
+        SurfaceXYZTensorFourier,
+        "simsopt.geo.surfacexyztensorfourier",
+        "SurfaceXYZTensorFourier",
+        _BOOZER_SURFACE_REQUIRED_ATTRIBUTES,
+    ),
+    (
+        SurfaceXYZFourier,
+        "simsopt.geo.surfacexyzfourier",
+        "SurfaceXYZFourier",
+        _BOOZER_SURFACE_REQUIRED_ATTRIBUTES,
+    ),
+)
+_BOOZER_EXACT_SURFACE_SPEC = (
+    SurfaceXYZTensorFourier,
+    "simsopt.geo.surfacexyztensorfourier",
+    "SurfaceXYZTensorFourier",
+    _BOOZER_EXACT_SURFACE_REQUIRED_ATTRIBUTES,
+)
+
+
+def _matches_supported_surface_spec(surface, surface_spec):
+    supported_type, module_name, class_name, required_attributes = surface_spec
+    if isinstance(surface, supported_type):
+        return True
+    surface_cls = type(surface)
+    if surface_cls.__module__ != module_name or surface_cls.__name__ != class_name:
+        return False
+    return all(hasattr(surface, attr) for attr in required_attributes)
+
+
+def _is_supported_boozer_surface(surface):
+    return any(
+        _matches_supported_surface_spec(surface, surface_spec)
+        for surface_spec in _BOOZER_SURFACE_SPECS
+    )
+
+
+def _is_supported_boozer_exact_surface(surface):
+    return _matches_supported_surface_spec(surface, _BOOZER_EXACT_SURFACE_SPEC)
+
+
+def _coil_currents_are_fixed(biotsavart):
+    coils = getattr(biotsavart, "coils", None)
+    if coils is None:
+        coils = getattr(biotsavart, "_coils", None)
+    if coils is None:
+        return True
+    return all(coil.current.dofs.all_fixed() for coil in coils)
+
+
+def _require_fixed_currents_for_none_G(biotsavart, *, component):
+    if _coil_currents_are_fixed(biotsavart):
+        return
+    raise ValueError(
+        f"{component} requires fixed coil currents when G=None to avoid "
+        "incorrect coil gradients."
+    )
+
 
 class BoozerSurface(Optimizable):
     r"""
@@ -123,7 +198,7 @@ class BoozerSurface(Optimizable):
         """
         super().__init__(depends_on=[biotsavart])
 
-        if not isinstance(surface, (SurfaceXYZTensorFourier, SurfaceXYZFourier)):
+        if not _is_supported_boozer_surface(surface):
             raise Exception(
                 "The input surface must be a SurfaceXYZTensorFourier or SurfaceXYZFourier."
             )
@@ -194,7 +269,10 @@ class BoozerSurface(Optimizable):
 
         # for coil optimizations, the gradient calculations of the objective assume that the coil currents are fixed when G is None.
         if G is None:
-            assert np.all([c.current.dofs.all_fixed() for c in self.biotsavart.coils])
+            _require_fixed_currents_for_none_G(
+                self.biotsavart,
+                component="BoozerSurface",
+            )
 
         # BoozerExact default solver
         if self.boozer_type == "exact":
@@ -1168,7 +1246,7 @@ class BoozerSurface(Optimizable):
             return self.res
 
         s = self.surface
-        if not isinstance(s, SurfaceXYZTensorFourier):
+        if not _is_supported_boozer_exact_surface(s):
             raise RuntimeError(
                 "Exact solution of Boozer Surfaces only supported for SurfaceXYZTensorFourier"
             )

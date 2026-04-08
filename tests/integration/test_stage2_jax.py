@@ -15,7 +15,7 @@ import importlib
 import importlib.util
 import warnings
 from contextlib import contextmanager
-from functools import partial
+from functools import lru_cache, partial
 import os
 from pathlib import Path
 import subprocess
@@ -32,6 +32,50 @@ from conftest import (
     relative_error,
 )
 import numpy as np
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+STAGE2_SCRIPT = (
+    REPO_ROOT
+    / "examples"
+    / "single_stage_optimization"
+    / "STAGE_2"
+    / "banana_coil_solver.py"
+)
+_EQUILIBRIA_PATHS_MODULE = (
+    REPO_ROOT / "examples" / "single_stage_optimization" / "equilibria_paths.py"
+)
+_STAGE2_EQUILIBRIUM_FILENAME = "wout_nfp22ginsburg_000_014417_iota15.nc"
+
+
+@lru_cache(maxsize=1)
+def _load_equilibria_paths_module():
+    spec = importlib.util.spec_from_file_location(
+        "stage2_equilibria_paths",
+        _EQUILIBRIA_PATHS_MODULE,
+    )
+    if spec is None or spec.loader is None:
+        raise RuntimeError(
+            f"Failed to load equilibrium-path helper from {_EQUILIBRIA_PATHS_MODULE}"
+        )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _resolve_stage2_equilibrium_fixture():
+    equilibria_paths = _load_equilibria_paths_module()
+    return equilibria_paths.maybe_resolve_equilibrium_path(
+        plasma_surf_filename=_STAGE2_EQUILIBRIUM_FILENAME,
+        equilibria_dir=equilibria_paths.DEFAULT_EQUILIBRIA_DIR,
+        fallback_dirs=(equilibria_paths.WORKSPACE_EQUILIBRIA_DIR,),
+    )
+
+
+@pytest.fixture(autouse=True, scope="module")
+def _skip_if_missing_equilibrium_fixture():
+    if _resolve_stage2_equilibrium_fixture() is None:
+        pytest.skip("Missing Stage 2 external equilibrium fixture.")
+
 
 sopp = pytest.importorskip(
     "simsoptpp",
@@ -84,14 +128,6 @@ from simsopt.objectives.stage2_target_objective_jax import (
     stage2_target_optimizer_state_to_dofs,
 )
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-STAGE2_SCRIPT = (
-    REPO_ROOT
-    / "examples"
-    / "single_stage_optimization"
-    / "STAGE_2"
-    / "banana_coil_solver.py"
-)
 WARM_TIMING_REFERENCE_LANE_ERROR = (
     "--record-warm-timings is only supported on the JAX Stage 2 ondevice lane."
 )
@@ -2387,6 +2423,9 @@ class TestStage2BananaBoundary:
 
     @pytest.mark.parametrize("backend", ["cpu", "jax"])
     def test_stage2_probe_reports_shared_production_banana_curve(self, backend):
+        if _resolve_stage2_equilibrium_fixture() is None:
+            pytest.skip("Missing stage2 external equilibrium fixture")
+
         result, payload = _run_stage2_probe_and_load_payload(
             "--backend",
             backend,

@@ -2,6 +2,8 @@ import unittest
 import inspect
 
 import numpy as np
+from simsopt._core.optimizable import Optimizable
+import simsopt.geo.boozersurface as boozersurface_module
 from simsopt.field.coil import coils_via_symmetries
 from simsopt.geo.boozersurface import BoozerSurface
 from simsopt.field.biotsavart import BiotSavart
@@ -15,6 +17,31 @@ surfacetypes_list = ["SurfaceXYZFourier", "SurfaceXYZTensorFourier"]
 stellsym_list = [True, False]
 
 
+class _DummyOptimizable(Optimizable):
+    def __init__(self):
+        super().__init__(x0=np.asarray([]))
+
+
+def _make_duplicate_tensor_surface():
+    return type(
+        "SurfaceXYZTensorFourier",
+        (),
+        {
+            "__module__": "simsopt.geo.surfacexyztensorfourier",
+            "quadpoints_phi": np.asarray([0.0]),
+            "quadpoints_theta": np.asarray([0.0]),
+            "set_dofs": lambda self, dofs: None,
+            "gamma": lambda self: np.zeros((1, 1, 3)),
+            "gammadash1": lambda self: np.zeros((1, 1, 3)),
+            "gammadash2": lambda self: np.zeros((1, 1, 3)),
+            "dgamma_by_dcoeff": lambda self: np.zeros((1, 1, 3, 0)),
+            "dgammadash1_by_dcoeff": lambda self: np.zeros((1, 1, 3, 0)),
+            "dgammadash2_by_dcoeff": lambda self: np.zeros((1, 1, 3, 0)),
+            "get_stellsym_mask": lambda self: np.ones((1, 1), dtype=bool),
+        },
+    )()
+
+
 class BoozerSurfaceTests(unittest.TestCase):
     def test_solver_signatures_do_not_expose_vectorize(self):
         lbfgs_params = inspect.signature(
@@ -26,6 +53,54 @@ class BoozerSurfaceTests(unittest.TestCase):
 
         self.assertNotIn("vectorize", lbfgs_params)
         self.assertNotIn("vectorize", newton_params)
+
+    def test_constructor_rejects_spoof_surface_names(self):
+        spoof_surface = type("SurfaceXYZFourier", (), {})()
+
+        with self.assertRaises(Exception):
+            BoozerSurface(
+                _DummyOptimizable(),
+                spoof_surface,
+                _DummyOptimizable(),
+                0.0,
+            )
+
+    def test_duplicate_import_surface_helpers_accept_canonical_surface_shapes(self):
+        duplicate_tensor_surface = _make_duplicate_tensor_surface()
+
+        self.assertTrue(
+            boozersurface_module._is_supported_boozer_surface(
+                duplicate_tensor_surface
+            )
+        )
+        self.assertTrue(
+            boozersurface_module._is_supported_boozer_exact_surface(
+                duplicate_tensor_surface
+            )
+        )
+
+    def test_run_code_rejects_G_none_with_free_currents(self):
+        class _FreeDofs:
+            def all_fixed(self):
+                return False
+
+        class _Current:
+            def __init__(self):
+                self.dofs = _FreeDofs()
+
+        class _Coil:
+            def __init__(self):
+                self.current = _Current()
+
+        booz = BoozerSurface.__new__(BoozerSurface)
+        booz.need_to_run_code = True
+        booz.biotsavart = type("BiotSavartLike", (), {"coils": [_Coil()]})()
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "fixed coil currents when G=None",
+        ):
+            BoozerSurface.run_code(booz, 0.1, None)
 
     def test_residual(self):
         """
