@@ -239,6 +239,17 @@ def _hostify_optimizer_tree(value):
     return jax.tree_util.tree_map(_hostify_optimizer_leaf, value)
 
 
+def _host_scalar(value, *, dtype=None):
+    scalar = _hostify_optimizer_leaf(value)
+    if dtype is None:
+        return scalar
+    return np.asarray(scalar, dtype=dtype).item()
+
+
+def _host_bool(value) -> bool:
+    return bool(_host_scalar(value, dtype=np.bool_))
+
+
 def _is_flat_optimizer_vector(x0) -> bool:
     if isinstance(x0, (jax.Array, np.ndarray)):
         return x0.ndim == 1
@@ -740,26 +751,29 @@ def _adam_hyperparameters(options, *, dtype):
 
 
 def _adam_result_message(status, success):
-    if bool(success):
+    if _host_bool(success):
         return "converged"
-    if int(status) == 2:
+    if int(_host_scalar(status, dtype=np.int64)) == 2:
         return "non-finite objective, gradient, or step encountered"
     return "maximum iterations reached"
 
 
 def _adam_result_to_optimize_result(result):
+    nit = int(_host_scalar(result["nit"], dtype=np.int64))
+    status = int(_host_scalar(result["status"], dtype=np.int64))
+    success = _host_bool(result["success"])
     return OptimizeResult(
         x=result["x"],
         fun=result["fun"],
         jac=result["grad"],
-        nit=int(result["nit"]),
-        nfev=int(result["nit"]) + 1,
-        njev=int(result["nit"]) + 1,
-        status=int(result["status"]),
-        success=bool(result["success"]),
+        nit=nit,
+        nfev=nit + 1,
+        njev=nit + 1,
+        status=status,
+        success=success,
         mean=result["mean"],
         variance=result["variance"],
-        message=_adam_result_message(result["status"], result["success"]),
+        message=_adam_result_message(status, success),
     )
 
 
@@ -1241,9 +1255,9 @@ def _lm_iteration(flat_residual_fn, state, *, tol):
 
 
 def _least_squares_result_message(status, success):
-    if bool(success):
+    if _host_bool(success):
         return "converged"
-    if int(status) == 2:
+    if int(_host_scalar(status, dtype=np.int64)) == 2:
         return "non-finite residual, gradient, or linear solve encountered"
     return "maximum iterations reached"
 
@@ -1948,6 +1962,9 @@ def jax_least_squares(
             progress_callback=options.get("progress_callback"),
         )
 
+    nit = int(_host_scalar(result["nit"], dtype=np.int64))
+    status = int(_host_scalar(result["status"], dtype=np.int64))
+    success = _host_bool(result["success"])
     optimize_result = OptimizeResult(
         x=result["x"],
         fun=result["fun"],
@@ -1956,14 +1973,14 @@ def jax_least_squares(
         residual_jacobian=result["residual_jacobian"],
         hessian=result["hessian"],
         damping=result["damping"],
-        nit=int(result["nit"]),
-        nfev=int(result["nit"]) + 1,
-        njev=int(result["nit"]) + 1,
-        status=int(result["status"]),
-        success=bool(result["success"]),
+        nit=nit,
+        nfev=nit + 1,
+        njev=nit + 1,
+        status=status,
+        success=success,
         message=_least_squares_result_message(
-            result["status"],
-            result["success"],
+            status,
+            success,
         ),
     )
     return optimize_result
