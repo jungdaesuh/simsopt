@@ -1,6 +1,7 @@
-import sys
+import importlib
 
-from .config import *
+from .._lazy_exports import build_lazy_export_map, resolve_lazy_export
+from .config import parameters
 
 # Check simsoptpp availability once; probe a compiled symbol to
 # distinguish the real extension from the src/simsoptpp/ namespace package.
@@ -18,94 +19,82 @@ try:
 except ImportError:
     _has_jax = False
 
+_BASE_CPU_GEO_MODULES = (
+    "curve",
+    "curverzfourier",
+    "curvexyzfourier",
+    "curveperturbed",
+    "curveplanarfourier",
+    "plotting",
+    "boozersurface",
+    "qfmsurface",
+    "surface",
+    "surfacegarabedian",
+    "surfacehenneberg",
+    "surfaceobjectives",
+    "surfacerzfourier",
+    "surfacexyzfourier",
+    "surfacexyztensorfourier",
+    "hull",
+    "wireframe_toroidal",
+    "ports",
+    "permanent_magnet_grid",
+)
+_ORDERED_JAX_CPU_GEO_BLOCK = (
+    "curvehelical",
+    "curvexyzfouriersymmetries",
+    "curveobjectives",
+    "framedcurve",
+    "finitebuild",
+    "strain_optimization",
+    "orientedcurve",
+    "accessibility",
+    "curvecwsfourier",
+)
+_JAX_GEO_MODULES = ("boozersurface_jax",)
+_SIMSOPT_JAX_GEO_MODULES = ("surfaceobjectives_jax",)
+_DYNAMIC_JAX_EXPORTS = {
+    "CurveCWSFourier": "curve",
+    "SurfaceSurfaceDistance": "surfaceobjectives",
+}
 
-def _module_all(name):
-    return list(sys.modules[f"{__name__}.{name}"].__all__)
-
-
-_cpu_geo_all = []
+_cpu_geo_modules = ()
 if _has_simsoptpp:
-    from .curve import *
-    from .curverzfourier import *
-    from .curvexyzfourier import *
-    from .curveperturbed import *
-    from .curveplanarfourier import *
-    from .plotting import *
-
-    from .boozersurface import *
-    from .qfmsurface import *
-    from .surface import *
-    from .surfacegarabedian import *
-    from .surfacehenneberg import *
-    from .surfaceobjectives import *
-    from .surfacerzfourier import *
-    from .surfacexyzfourier import *
-    from .surfacexyztensorfourier import *
-    from .hull import *
-    from .wireframe_toroidal import *
-    from .ports import *
-
-    from .permanent_magnet_grid import *
-
-    _cpu_geo_all = (
-        _module_all("curve")
-        + _module_all("curverzfourier")
-        + _module_all("curvexyzfourier")
-        + _module_all("curveperturbed")
-        + _module_all("curveplanarfourier")
-        + _module_all("plotting")
-        + _module_all("boozersurface")
-        + _module_all("qfmsurface")
-        + _module_all("surface")
-        + _module_all("surfacegarabedian")
-        + _module_all("surfacehenneberg")
-        + _module_all("surfacerzfourier")
-        + _module_all("surfacexyzfourier")
-        + _module_all("surfacexyztensorfourier")
-        + _module_all("surfaceobjectives")
-        + _module_all("permanent_magnet_grid")
-        + _module_all("hull")
-        + _module_all("wireframe_toroidal")
-        + _module_all("ports")
-    )
-
+    _cpu_geo_modules = _BASE_CPU_GEO_MODULES
     if _has_jax:
-        from .curvehelical import *
-        from .curvexyzfouriersymmetries import *
-        from .curveobjectives import *
-        from .framedcurve import *
-        from .finitebuild import *
-        from .strain_optimization import *
-        from .orientedcurve import *
-        from .accessibility import *
-        from .curvecwsfourier import *
+        _cpu_geo_modules += _ORDERED_JAX_CPU_GEO_BLOCK
 
-        _cpu_geo_all += (
-            _module_all("curvehelical")
-            + _module_all("curvexyzfouriersymmetries")
-            + _module_all("curveobjectives")
-            + _module_all("framedcurve")
-            + _module_all("finitebuild")
-            + _module_all("strain_optimization")
-            + _module_all("orientedcurve")
-            + _module_all("accessibility")
-            + _module_all("curvecwsfourier")
-        )
+_jax_geo_modules = _JAX_GEO_MODULES if _has_jax else ()
+if _has_simsoptpp and _has_jax:
+    _jax_geo_modules += _SIMSOPT_JAX_GEO_MODULES
 
-# JAX modules (optional — requires jax)
-_jax_geo_all = []
-try:
-    from .boozersurface_jax import *
+_EXPORT_TO_MODULE, _lazy_all = build_lazy_export_map(
+    __file__, _cpu_geo_modules + _jax_geo_modules
+)
+__all__ = list(_lazy_all)
+if _has_simsoptpp and _has_jax:
+    for export_name, module_name in _DYNAMIC_JAX_EXPORTS.items():
+        _EXPORT_TO_MODULE[export_name] = module_name
+        __all__.append(export_name)
 
-    _jax_geo_all += _module_all("boozersurface_jax")
-except (ImportError, AttributeError):
-    pass
-if _has_simsoptpp:
-    try:
-        from .surfaceobjectives_jax import *
 
-        _jax_geo_all += _module_all("surfaceobjectives_jax")
-    except (ImportError, AttributeError):
-        pass
+def _import_geo_block_through(target_module):
+    for module_name in _ORDERED_JAX_CPU_GEO_BLOCK:
+        importlib.import_module(f".{module_name}", __name__)
+        if module_name == target_module:
+            return
 
-__all__ = _cpu_geo_all + _jax_geo_all
+
+def __getattr__(name):
+    module_name = _EXPORT_TO_MODULE.get(name)
+    if module_name is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    if module_name in _ORDERED_JAX_CPU_GEO_BLOCK:
+        _import_geo_block_through(module_name)
+    value = resolve_lazy_export(__name__, _EXPORT_TO_MODULE, name)
+    globals()[name] = value
+    return value
+
+
+def __dir__():
+    return sorted(set(globals()) | set(__all__))

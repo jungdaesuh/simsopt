@@ -1879,9 +1879,10 @@ class SingleStageExampleTests(unittest.TestCase):
     def test_evaluate_candidate_cpu_path_does_not_pass_sdofs(self):
         """CPU BoozerSurface.run_code() does not accept sdofs=.
 
-        Regression test: evaluate_candidate must detect the CPU backend
-        via isinstance and use the old warm-start path (surface.x and
-        res mutation) instead of passing sdofs= to run_code.
+        Regression test: evaluate_candidate must detect the legacy CPU
+        warm-start contract from the run_code signature and use the old
+        warm-start path (surface.x and res mutation) instead of passing
+        sdofs= to run_code.
         """
         module = self.load_module()
         CpuBoozerSurface = module.BoozerSurface
@@ -1946,6 +1947,71 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertEqual(booz.run_code_calls[0], (TEST_IOTA, TEST_G0))
         # CPU path must warm-start surface.x from run_dict before run_code
         np.testing.assert_array_equal(booz.surface.x, sdofs_warm)
+
+    def test_evaluate_candidate_prefers_explicit_warm_start_capability(self):
+        """Explicit warm-start capability must override BoozerSurface identity."""
+        module = self.load_module()
+        CpuBoozerSurface = module.BoozerSurface
+
+        class _Surface:
+            def __init__(self):
+                self.x = np.array([9.0, 8.0, 7.0])
+
+            def volume(self):
+                return 1.0
+
+            def is_self_intersecting(self):
+                return False
+
+        class _WarmStartCapableCpuSubclass(CpuBoozerSurface):
+            supports_explicit_surface_warm_start = True
+
+            def __init__(self):
+                self.surface = _Surface()
+                self.res = {
+                    "success": True,
+                    "iter": 1,
+                    "iota": TEST_IOTA,
+                    "G": TEST_G0,
+                }
+                self.run_code_calls = []
+
+            def run_code(self, iota, G=None, *, sdofs=None):
+                self.run_code_calls.append((iota, G, None if sdofs is None else sdofs.copy()))
+                return self.res
+
+        class _JF:
+            x = np.zeros(5)
+
+            def J(self):
+                return 3.14
+
+            def dJ(self):
+                return np.arange(5.0)
+
+        sdofs_warm = np.array([1.0, 2.0, 3.0])
+        run_dict = {
+            "x_prev": np.zeros(5),
+            "lscount": 0,
+            "sdofs": sdofs_warm.copy(),
+            "iota": TEST_IOTA,
+            "G": TEST_G0,
+            "J": 1.0,
+            "dJ": np.zeros(5),
+        }
+        booz = _WarmStartCapableCpuSubclass()
+        jf = _JF()
+
+        with patch.object(
+            module, "update_self_intersection_status", return_value=False
+        ):
+            module.evaluate_candidate(np.ones(5), run_dict, booz, jf)
+
+        self.assertEqual(len(booz.run_code_calls), 1)
+        call_iota, call_G, call_sdofs = booz.run_code_calls[0]
+        self.assertEqual(call_iota, TEST_IOTA)
+        self.assertEqual(call_G, TEST_G0)
+        np.testing.assert_array_equal(call_sdofs, sdofs_warm)
 
     def test_snapshot_restore_round_trip(self):
         """Wave 1.4: snapshot → restore → snapshot produces identical arrays."""

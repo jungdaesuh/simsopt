@@ -46,7 +46,7 @@ from ..jax_core.specs import make_field_eval_spec
 from ..jax_core.biotsavart import (
     biot_savart_B_vjp,
 )
-from .coil import _unwrap_coil_curve_and_current_objects
+from ._coil_graph import _unwrap_coil_curve_and_current_objects
 
 __all__ = ["BiotSavartJAX"]
 

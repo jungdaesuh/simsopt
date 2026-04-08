@@ -6,6 +6,7 @@ from simsopt._core.derivative import Derivative
 from simsopt.geo.curvexyzfourier import CurveXYZFourier
 from simsopt.geo.curve import RotatedCurve
 import simsoptpp as sopp
+from ._coil_graph import _unwrap_coil_curve_and_current_objects
 
 __all__ = [
     "Coil",
@@ -22,23 +23,6 @@ __all__ = [
     "coils_to_focus",
     "coils_to_vtk",
 ]
-
-
-def _unwrap_coil_curve_and_current_objects(curve, current):
-    scale = 1.0
-    while isinstance(current, ScaledCurrent):
-        scale *= float(current.scale)
-        current = current.current_to_scale
-
-    rotmat = None
-    while isinstance(curve, RotatedCurve):
-        next_rotmat = np.asarray(curve.rotmat, dtype=np.float64)
-        rotmat = next_rotmat if rotmat is None else next_rotmat @ rotmat
-        curve = curve.curve
-
-    return curve, rotmat, current, scale
-
-
 class Coil(sopp.Coil, Optimizable):
     """
     Represents a magnetic coil as a combination of a geometric curve and an electric current.

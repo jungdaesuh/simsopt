@@ -135,6 +135,47 @@ def _runtime_float64_scalar(value, *, reference):
     return _as_runtime_float64(value, reference=reference)
 
 
+def _surface_stellsym_mask_for_grid(
+    *,
+    ntor,
+    mpol,
+    nfp,
+    stellsym,
+    quadpoints_phi,
+    quadpoints_theta,
+):
+    phis = np.asarray(quadpoints_phi, dtype=float)
+    thetas = np.asarray(quadpoints_theta, dtype=float)
+    mask = np.ones((phis.size, thetas.size), dtype=bool)
+    if not stellsym:
+        return mask
+
+    def _same_grid(lhs, rhs):
+        return lhs.shape == rhs.shape and np.allclose(lhs, rhs)
+
+    full_phi = np.linspace(0.0, 1.0 / nfp, 2 * ntor + 1, endpoint=False)
+    full_theta = np.linspace(0.0, 1.0, 2 * mpol + 1, endpoint=False)
+    half_theta = np.linspace(0.0, 0.5, mpol + 1, endpoint=False)
+    half_phi = np.linspace(0.0, 1.0 / (2.0 * nfp), ntor + 1, endpoint=False)
+
+    if _same_grid(phis, full_phi) and _same_grid(thetas, full_theta):
+        mask[:, mpol + 1 :] = False
+        mask[ntor + 1 :, 0] = False
+        return mask
+    if _same_grid(phis, full_phi) and _same_grid(thetas, half_theta):
+        mask[ntor + 1 :, 0] = False
+        return mask
+    if _same_grid(phis, half_phi) and _same_grid(thetas, full_theta):
+        mask[0, mpol + 1 :] = False
+        return mask
+    raise Exception(
+        "Stellarator symmetric BoozerExact surfaces require a specific set of "
+        "quadrature points on the surface. See the "
+        "SurfaceXYZTensorFourier.get_stellsym_mask() docstring for more "
+        "information."
+    )
+
+
 def _compute_stellsym_mask_indices_for_grid(
     *,
     mpol,
@@ -145,18 +186,19 @@ def _compute_stellsym_mask_indices_for_grid(
     quadpoints_theta,
 ):
     """Return exact-residual mask indices for a specific surface quadrature."""
-    from .surfacexyztensorfourier import SurfaceXYZTensorFourier
-
-    surface = SurfaceXYZTensorFourier(
-        mpol=mpol,
-        ntor=ntor,
-        nfp=nfp,
-        stellsym=stellsym,
-        quadpoints_phi=np.asarray(quadpoints_phi, dtype=float),
-        quadpoints_theta=np.asarray(quadpoints_theta, dtype=float),
+    mask = np.repeat(
+        _surface_stellsym_mask_for_grid(
+            mpol=mpol,
+            ntor=ntor,
+            nfp=nfp,
+            stellsym=stellsym,
+            quadpoints_phi=quadpoints_phi,
+            quadpoints_theta=quadpoints_theta,
+        )[..., None],
+        3,
+        axis=2,
     )
-    mask = np.repeat(surface.get_stellsym_mask()[..., None], 3, axis=2)
-    if surface.stellsym:
+    if stellsym:
         mask[0, 0, 0] = False
     return jnp.asarray(np.flatnonzero(mask), dtype=jnp.int32)
 
@@ -545,20 +587,7 @@ class BoozerResidualJAX(Optimizable):
         self.boozer_surface = boozer_surface
         self.biotsavart = biotsavart
         self.in_surface = boozer_surface.surface
-
-        # Auxiliary surface (same quadrature, independent DOF copy)
-        from .surfacexyztensorfourier import SurfaceXYZTensorFourier
-
-        s = self.in_surface
-        self.surface = SurfaceXYZTensorFourier(
-            mpol=s.mpol,
-            ntor=s.ntor,
-            stellsym=s.stellsym,
-            nfp=s.nfp,
-            quadpoints_phi=s.quadpoints_phi,
-            quadpoints_theta=s.quadpoints_theta,
-        )
-        self.surface.set_dofs(s.get_dofs())
+        self.surface = self.in_surface
 
         self.constraint_weight = float(boozer_surface.constraint_weight)
         self._direct_objective_value_and_grad = _make_cached_strict_scalar_value_and_grad(
@@ -774,21 +803,10 @@ class NonQuasiSymmetricRatioJAX(Optimizable):
         self.axis = 1 if quasi_poloidal else 0
         self.in_surface = boozer_surface.surface
 
-        # Auxiliary surface with finer quadrature (matches CPU)
-        from .surfacexyztensorfourier import SurfaceXYZTensorFourier
-
         s = self.in_surface
         aux_phi = np.linspace(0, 1 / s.nfp, 2 * sDIM, endpoint=False)
         aux_theta = np.linspace(0, 1.0, 2 * sDIM, endpoint=False)
-        self.surface = SurfaceXYZTensorFourier(
-            mpol=s.mpol,
-            ntor=s.ntor,
-            stellsym=s.stellsym,
-            nfp=s.nfp,
-            quadpoints_phi=aux_phi,
-            quadpoints_theta=aux_theta,
-            dofs=s.dofs,
-        )
+        self.surface = self.in_surface
         self._aux_phi_jax = jnp.asarray(aux_phi)
         self._aux_theta_jax = jnp.asarray(aux_theta)
 
@@ -812,8 +830,6 @@ class NonQuasiSymmetricRatioJAX(Optimizable):
     def compute(self):
         booz_surf = self.boozer_surface
         _ensure_solved(booz_surf)
-
-        self.surface.set_dofs(self.in_surface.get_dofs())
 
         iota = booz_surf.res["iota"]
         G = booz_surf.res["G"]
@@ -1365,11 +1381,13 @@ def _build_traceable_objective_compiled_bundle_from_state(
         )
         return result["value"], grad
 
+    compiled_value_and_grad_for = jax.jit(_value_and_grad_for)
+
     return {
         "state": state,
         "compiled_forward_result_for": compiled_forward_result_for,
         "compiled_total_gradient_for": compiled_total_gradient_for,
-        "compiled_value_and_grad_for": jax.jit(_value_and_grad_for),
+        "compiled_value_and_grad_for": compiled_value_and_grad_for,
         "failure_gradient_for": _failure_gradient_for,
     }
 
@@ -1539,6 +1557,24 @@ def make_traceable_objective_value_and_grad(
     )["value_and_grad"]
 
 
+def _make_traceable_forward_value_pipeline(compiled_forward_result_for):
+    def _forward_value_for(coil_dofs):
+        return compiled_forward_result_for(coil_dofs)["value"]
+
+    return jax.jit(_forward_value_for)
+
+
+def _make_traceable_field_eval_sharding_pipeline(field_at_solution_for):
+    compiled_field_at_solution_for = jax.jit(field_at_solution_for)
+
+    def _field_eval_sharding(coil_dofs):
+        return inspect_array_sharding_summary(
+            compiled_field_at_solution_for(coil_dofs)
+        )
+
+    return _field_eval_sharding
+
+
 def _make_traceable_objective_profile_suite_from_compiled_bundle(
     compiled_bundle,
     booz_jax,
@@ -1641,20 +1677,29 @@ def _make_traceable_objective_profile_suite_from_compiled_bundle(
             objective_kwargs=objective_kwargs,
         )
 
+    compiled_forward_value_for = _make_traceable_forward_value_pipeline(
+        compiled_forward_result_for
+    )
+    compiled_warmstart_for = jax.jit(_warmstart_for)
+    compiled_inner_solve_for = jax.jit(_solve_for)
+    compiled_surface_geometry_for = jax.jit(_surface_geometry_for)
+    compiled_field_for = jax.jit(_field_for)
+    compiled_field_eval_sharding = _make_traceable_field_eval_sharding_pipeline(
+        _field_at_solution_for
+    )
+    compiled_solved_total_objective_for = jax.jit(_solved_total_objective_for)
+    compiled_solved_total_gradient_for = jax.jit(_total_gradient_for)
+
     return {
         "forward_result": compiled_forward_result_for,
-        "forward_value": jax.jit(
-            lambda coil_dofs: compiled_forward_result_for(coil_dofs)["value"]
-        ),
-        "warmstart_predict": jax.jit(_warmstart_for),
-        "inner_solve": jax.jit(_solve_for),
-        "surface_geometry": jax.jit(_surface_geometry_for),
-        "field_eval": jax.jit(_field_for),
-        "field_eval_sharding": lambda coil_dofs: inspect_array_sharding_summary(
-            jax.jit(_field_at_solution_for)(coil_dofs)
-        ),
-        "solved_total_objective": jax.jit(_solved_total_objective_for),
-        "solved_total_gradient": jax.jit(_total_gradient_for),
+        "forward_value": compiled_forward_value_for,
+        "warmstart_predict": compiled_warmstart_for,
+        "inner_solve": compiled_inner_solve_for,
+        "surface_geometry": compiled_surface_geometry_for,
+        "field_eval": compiled_field_for,
+        "field_eval_sharding": compiled_field_eval_sharding,
+        "solved_total_objective": compiled_solved_total_objective_for,
+        "solved_total_gradient": compiled_solved_total_gradient_for,
         "value_and_grad_pipeline": resolved_value_and_grad_pipeline,
     }
 

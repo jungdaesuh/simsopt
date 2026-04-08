@@ -1,6 +1,7 @@
 import argparse
 from dataclasses import dataclass
 import hashlib
+import inspect
 import logging
 import os
 import io
@@ -1723,6 +1724,22 @@ def _restore_cpu_boozer_state(boozer_surface, run_dict):
     boozer_surface.res["G"] = run_dict["G"]
 
 
+def _boozer_surface_supports_explicit_surface_warm_start(boozer_surface):
+    support = getattr(
+        boozer_surface,
+        "supports_explicit_surface_warm_start",
+        None,
+    )
+    if support is not None:
+        return bool(support)
+
+    run_code_signature = inspect.signature(boozer_surface.run_code)
+    return "sdofs" in run_code_signature.parameters or any(
+        parameter.kind is inspect.Parameter.VAR_KEYWORD
+        for parameter in run_code_signature.parameters.values()
+    )
+
+
 def _update_line_search_state(x, run_dict):
     """Track step size and increment line-search counter."""
     dx = np.linalg.norm(x - run_dict["x_prev"])
@@ -1763,8 +1780,10 @@ def _evaluate_candidate_impl(
     Returns:
         (J, dJ): Objective value and gradient.
     """
-    is_cpu = isinstance(boozer_surface, BoozerSurface)
-    if is_cpu:
+    supports_explicit_surface_warm_start = (
+        _boozer_surface_supports_explicit_surface_warm_start(boozer_surface)
+    )
+    if not supports_explicit_surface_warm_start:
         _restore_cpu_boozer_state(boozer_surface, run_dict)
         boozer_surface.run_code(run_dict["iota"], run_dict["G"])
     else:

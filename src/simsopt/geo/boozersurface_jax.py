@@ -1231,6 +1231,8 @@ class BoozerSurfaceJAX(Optimizable):
             residual-vector Levenberg-Marquardt route on supported backends.
     """
 
+    supports_explicit_surface_warm_start = True
+
     def __init__(
         self,
         biotsavart,

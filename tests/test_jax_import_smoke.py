@@ -248,6 +248,139 @@ def test_repo_bootstrap_synthesizes_version_for_clean_source_tree():
     )
 
 
+def test_repo_bootstrap_is_idempotent_for_local_source_tree():
+    """Repeated bootstrap calls must not churn class identity for local imports."""
+    _assert_import_check_passes(
+        """
+        import importlib
+        from pathlib import Path
+
+        from repo_bootstrap import bootstrap_local_simsopt
+
+        src_root = Path.cwd() / "src"
+        bootstrap_local_simsopt(src_root)
+
+        import simsopt
+        from simsopt.configs.zoo import get_data
+        from simsopt.geo import Curve
+
+        curve_before = Curve
+        package_before = simsopt
+
+        bootstrap_local_simsopt(src_root)
+
+        import simsopt as simsopt_after
+
+        curve_after = importlib.import_module("simsopt.geo.curve").Curve
+        base_curves, *_ = get_data("STAR_Lite-A_low")
+
+        assert package_before is simsopt_after
+        assert curve_before is curve_after
+        assert isinstance(base_curves[0], curve_before)
+    """,
+        failure_message="repo_bootstrap should be idempotent for local source imports",
+    )
+
+
+def test_repo_bootstrap_purges_detached_local_submodules():
+    """A second bootstrap must purge detached ``simsopt.*`` submodules."""
+    _assert_import_check_passes(
+        """
+        import importlib
+        import sys
+        import types
+        from pathlib import Path
+
+        from repo_bootstrap import bootstrap_local_simsopt
+
+        src_root = Path.cwd() / "src"
+        bootstrap_local_simsopt(src_root)
+
+        import simsopt
+
+        real_module = importlib.import_module("simsopt.geo.optimizer_jax")
+        fake_module = types.ModuleType("simsopt.geo.optimizer_jax")
+        fake_module.marker = "fake"
+        sys.modules["simsopt.geo.optimizer_jax"] = fake_module
+
+        bootstrap_local_simsopt(src_root)
+
+        assert "simsopt.geo.optimizer_jax" not in sys.modules
+
+        reloaded_module = importlib.import_module("simsopt.geo.optimizer_jax")
+
+        assert reloaded_module is not fake_module
+        assert reloaded_module is not real_module
+        assert Path(reloaded_module.__file__).resolve() == (
+            src_root / "simsopt" / "geo" / "optimizer_jax.py"
+        ).resolve()
+        assert getattr(importlib.import_module("simsopt.geo"), "optimizer_jax") is reloaded_module
+        assert simsopt is sys.modules["simsopt"]
+    """,
+        failure_message="repo_bootstrap should purge detached local submodules",
+    )
+
+
+def test_repo_bootstrap_strips_editable_meta_path_finders_on_fast_path():
+    """Warm bootstraps must remove editable finders before later submodule imports."""
+    _assert_import_check_passes(
+        """
+        import importlib
+        import importlib.abc
+        import importlib.util
+        import sys
+        from pathlib import Path
+
+        from repo_bootstrap import bootstrap_local_simsopt
+
+        src_root = Path.cwd() / "src"
+        bootstrap_local_simsopt(src_root)
+
+        import simsopt
+
+        class _FakeEditableLoader(importlib.abc.Loader):
+            def create_module(self, spec):
+                del spec
+                return None
+
+            def exec_module(self, module):
+                module.marker = "fake-editable"
+                module.__file__ = "/tmp/fake_optimizer_jax.py"
+
+        class _FakeEditableFinder(importlib.abc.MetaPathFinder):
+            def find_spec(self, fullname, path=None, target=None):
+                del path, target
+                if fullname == "simsopt.geo.optimizer_jax":
+                    return importlib.util.spec_from_loader(
+                        fullname,
+                        _FakeEditableLoader(),
+                    )
+                return None
+
+        _FakeEditableFinder.__module__ = "__editable___demo"
+        fake_finder = _FakeEditableFinder()
+        sys.meta_path.insert(0, fake_finder)
+
+        bootstrap_local_simsopt(src_root)
+
+        assert fake_finder not in sys.meta_path
+        assert not any(
+            type(finder).__module__.startswith("__editable__")
+            for finder in sys.meta_path
+        )
+
+        reloaded_module = importlib.import_module("simsopt.geo.optimizer_jax")
+
+        assert getattr(reloaded_module, "marker", None) is None
+        assert Path(reloaded_module.__file__).resolve() == (
+            src_root / "simsopt" / "geo" / "optimizer_jax.py"
+        ).resolve()
+        assert simsopt is sys.modules["simsopt"]
+    """,
+        failure_message="repo_bootstrap should strip editable meta_path finders",
+    )
+
+
 def test_import_package_root_native_cpu_does_not_require_jax_runtime():
     """Importing package root without JAX selectors must not force a JAX import."""
     rc, err = _run_import_check("""
@@ -1441,6 +1574,101 @@ def test_transfer_guard_disallow_allows_coil_symmetry_spec_identity_default():
     )
 
 
+def _assert_transfer_guard_curve_objective_smoke(
+    *,
+    objective_imports: str,
+    setup_code: str,
+    objective_code: str,
+    failure_message: str,
+):
+    objective_code = textwrap.indent(textwrap.dedent(objective_code).strip(), " " * 8)
+    setup_code = textwrap.indent(textwrap.dedent(setup_code).strip(), " " * 8)
+    _assert_import_check_passes(
+        f"""
+        import numpy as np
+        import simsopt.config as simsopt_config
+{textwrap.indent(textwrap.dedent(objective_imports).strip(), " " * 8)}
+
+        simsopt_config.set_backend("jax_cpu_parity", transfer_guard="disallow")
+{setup_code}
+
+{objective_code}
+    """,
+        failure_message=failure_message,
+    )
+
+
+_TRANSFER_GUARD_CURVE_VALUE_IMPORTS = """
+from simsopt.geo import (
+    FrameRotation,
+    FramedCurveCentroid,
+    SurfaceRZFourier,
+    create_equally_spaced_curves,
+)
+from simsopt.geo.curveobjectives import (
+    CurveCurveDistance,
+    CurveLength,
+    CurveSurfaceDistance,
+    FramedCurveTwist,
+    LpCurveCurvature,
+    LpCurveCurvatureBarrier,
+    LpCurveTorsion,
+)
+"""
+
+
+_TRANSFER_GUARD_CURVE_VALUE_SETUP = """
+curves = create_equally_spaced_curves(
+    2,
+    1,
+    stellsym=False,
+    R0=1.0,
+    R1=0.2,
+    order=3,
+    numquadpoints=33,
+)
+surface = SurfaceRZFourier(
+    nfp=1,
+    stellsym=False,
+    mpol=1,
+    ntor=0,
+    quadpoints_phi=np.arange(16) / 16,
+    quadpoints_theta=np.arange(16) / 16,
+)
+rotation = FrameRotation(curves[0].quadpoints, order=1)
+rotation.x = np.array([0.1, -0.2, 0.05])
+"""
+
+
+_TRANSFER_GUARD_CURVE_GRADIENT_IMPORTS = """
+from simsopt.geo import (
+    FrameRotation,
+    FramedCurveCentroid,
+    create_equally_spaced_curves,
+)
+from simsopt.geo.curveobjectives import (
+    FramedCurveTwist,
+    LpCurveCurvatureBarrier,
+    LpCurveTorsion,
+)
+"""
+
+
+_TRANSFER_GUARD_CURVE_GRADIENT_SETUP = """
+curves = create_equally_spaced_curves(
+    2,
+    1,
+    stellsym=False,
+    R0=1.0,
+    R1=0.2,
+    order=3,
+    numquadpoints=33,
+)
+rotation = FrameRotation(curves[0].quadpoints, order=1)
+rotation.x = np.array([0.1, -0.2, 0.05])
+"""
+
+
 @pytest.mark.parametrize(
     ("label", "code"),
     [
@@ -1472,45 +1700,92 @@ def test_transfer_guard_disallow_allows_coil_symmetry_spec_identity_default():
             assert np.isfinite(float(value))
             """,
         ),
+        (
+            "LpCurveCurvatureBarrier",
+            """
+            value = LpCurveCurvatureBarrier(curves[0], threshold=10.0).J()
+            assert np.isfinite(float(value))
+            """,
+        ),
+        (
+            "LpCurveTorsion",
+            """
+            value = LpCurveTorsion(curves[0], p=4, threshold=10.0).J()
+            assert np.isfinite(float(value))
+            """,
+        ),
+        (
+            "FramedCurveTwist",
+            """
+            value = FramedCurveTwist(
+                FramedCurveCentroid(curves[0], rotation),
+                f="lp",
+                p=2,
+            ).J()
+            assert np.isfinite(float(value))
+            """,
+        ),
     ],
 )
 def test_transfer_guard_disallow_allows_legacy_curve_objective_values(label, code):
     """Legacy curve objectives must use explicit host/device boundaries under disallow."""
-    objective_code = textwrap.indent(textwrap.dedent(code).strip(), " " * 8)
-    _assert_import_check_passes(
-        f"""
-        import numpy as np
-        import simsopt.config as simsopt_config
-        from simsopt.geo import SurfaceRZFourier, create_equally_spaced_curves
-        from simsopt.geo.curveobjectives import (
-            CurveCurveDistance,
-            CurveLength,
-            CurveSurfaceDistance,
-            LpCurveCurvature,
-        )
-
-        simsopt_config.set_backend("jax_cpu_parity", transfer_guard="disallow")
-        curves = create_equally_spaced_curves(
-            2,
-            1,
-            stellsym=False,
-            R0=1.0,
-            R1=0.2,
-            order=3,
-            numquadpoints=33,
-        )
-        surface = SurfaceRZFourier(
-            nfp=1,
-            stellsym=False,
-            mpol=1,
-            ntor=0,
-            quadpoints_phi=np.arange(16) / 16,
-            quadpoints_theta=np.arange(16) / 16,
-        )
-
-{objective_code}
-    """,
+    _assert_transfer_guard_curve_objective_smoke(
+        objective_imports=_TRANSFER_GUARD_CURVE_VALUE_IMPORTS,
+        setup_code=_TRANSFER_GUARD_CURVE_VALUE_SETUP,
+        objective_code=code,
         failure_message=f"{label} transfer-guard value smoke failed",
+    )
+
+
+@pytest.mark.parametrize(
+    ("label", "code"),
+    [
+        (
+            "LpCurveCurvatureBarrier",
+            """
+            grad = np.asarray(
+                LpCurveCurvatureBarrier(curves[0], threshold=10.0).dJ(),
+                dtype=float,
+            )
+            assert grad.size > 0
+            assert np.all(np.isfinite(grad))
+            """,
+        ),
+        (
+            "LpCurveTorsion",
+            """
+            grad = np.asarray(
+                LpCurveTorsion(curves[0], p=4, threshold=10.0).dJ(),
+                dtype=float,
+            )
+            assert grad.size > 0
+            assert np.all(np.isfinite(grad))
+            """,
+        ),
+        (
+            "FramedCurveTwist",
+            """
+            grad = np.asarray(
+                FramedCurveTwist(
+                    FramedCurveCentroid(curves[0], rotation),
+                    f="lp",
+                    p=2,
+                ).dJ(),
+                dtype=float,
+            )
+            assert grad.size > 0
+            assert np.all(np.isfinite(grad))
+            """,
+        ),
+    ],
+)
+def test_transfer_guard_disallow_allows_legacy_curve_objective_gradients(label, code):
+    """Legacy curve-objective gradients must keep host/device transfers explicit."""
+    _assert_transfer_guard_curve_objective_smoke(
+        objective_imports=_TRANSFER_GUARD_CURVE_GRADIENT_IMPORTS,
+        setup_code=_TRANSFER_GUARD_CURVE_GRADIENT_SETUP,
+        objective_code=code,
+        failure_message=f"{label} transfer-guard gradient smoke failed",
     )
 
 
@@ -1623,6 +1898,8 @@ def test_native_cpu_backend_selection_does_not_require_jax_runtime():
     rc, err = _run_import_check("""
         import importlib.abc
         import sys
+        import types
+        import types
 
         class _BlockJax(importlib.abc.MetaPathFinder):
             def find_spec(self, fullname, path=None, target=None):
@@ -2287,12 +2564,7 @@ def test_import_pure_jax_modules():
 
 
 def test_m5_classes_require_simsoptpp():
-    """M5 single-stage wrappers need SurfaceXYZTensorFourier (CPU class).
-
-    BoozerResidualJAX, IotasJAX, NonQuasiSymmetricRatioJAX use CPU surface
-    objects at the boundary (M0 adapter pattern). Without simsoptpp they
-    are not importable via the package entrypoint. This is expected.
-    """
+    """M5 single-stage wrappers remain package-gated on simsoptpp availability."""
     rc, err = _run_import_check("""
         import simsopt.geo
 
@@ -2310,6 +2582,91 @@ def test_m5_classes_require_simsoptpp():
                 assert not available, f"{name} should NOT be available without simsoptpp"
     """)
     assert rc == 0, f"M5 availability check failed:\n{err}"
+
+
+def test_direct_curve_modules_raise_clear_importerror_without_simsoptpp():
+    """Direct curve-module imports should fail clearly at instantiation time."""
+    rc, err = _run_import_check("""
+        import importlib.abc
+        import sys
+        import types
+
+        class _BlockSimsoptpp(importlib.abc.MetaPathFinder):
+            def find_spec(self, fullname, path=None, target=None):
+                del path, target
+                if fullname == "simsoptpp" or fullname.startswith("simsoptpp."):
+                    raise ImportError("blocked simsoptpp for smoke test")
+                return None
+
+        sys.meta_path.insert(0, _BlockSimsoptpp())
+
+        from simsopt.geo.curveplanarfourier import CurvePlanarFourier
+        from simsopt.geo.curveperturbed import CurvePerturbed
+        from simsopt.geo.curverzfourier import CurveRZFourier
+        from simsopt.geo.curvexyzfourier import CurveXYZFourier
+
+        def _assert_missing(factory, expected_name):
+            try:
+                factory()
+            except ImportError as exc:
+                message = str(exc)
+                assert expected_name in message
+                assert "simsoptpp is required to instantiate" in message
+            else:
+                raise AssertionError(f"{expected_name} should require simsoptpp")
+
+        _assert_missing(lambda: CurvePlanarFourier([0.0], 1), "CurvePlanarFourier")
+        _assert_missing(lambda: CurveRZFourier([0.0], 1, 1, True), "CurveRZFourier")
+        _assert_missing(lambda: CurveXYZFourier([0.0], 1), "CurveXYZFourier")
+        _assert_missing(
+            lambda: CurvePerturbed(types.SimpleNamespace(quadpoints=[0.0]), object()),
+            "CurvePerturbed",
+        )
+    """)
+    assert rc == 0, f"direct curve-module simsoptpp fallback smoke failed:\n{err}"
+
+
+def test_biotsavart_jax_backend_does_not_import_coil_unwrap_helper():
+    """The JAX backend must not depend on field/coil.py for graph unwrapping."""
+    backend_path = Path(_SRC_DIR) / "simsopt" / "field" / "biotsavart_jax_backend.py"
+    tree = ast.parse(backend_path.read_text(encoding="utf-8"))
+
+    direct_coil_imports = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ImportFrom):
+            continue
+        if node.module != "simsopt.field.coil" and node.module != "coil":
+            continue
+        imported_names = {alias.name for alias in node.names}
+        if "_unwrap_coil_curve_and_current_objects" in imported_names:
+            direct_coil_imports.append(node.lineno)
+
+    assert not direct_coil_imports, (
+        "biotsavart_jax_backend.py must not import "
+        "_unwrap_coil_curve_and_current_objects from field/coil.py"
+    )
+
+
+def test_surfaceobjectives_jax_has_no_tensor_surface_imports():
+    """Single-stage JAX wrappers should not instantiate tensor surfaces internally."""
+    objectives_path = Path(_SRC_DIR) / "simsopt" / "geo" / "surfaceobjectives_jax.py"
+    tree = ast.parse(objectives_path.read_text(encoding="utf-8"))
+
+    tensor_surface_import_lines = [
+        node.lineno
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom)
+        and node.module in (
+            "simsopt.geo.surfacexyztensorfourier",
+            "surfacexyztensorfourier",
+        )
+        and any(alias.name == "SurfaceXYZTensorFourier" for alias in node.names)
+    ]
+
+    assert not tensor_surface_import_lines, (
+        "surfaceobjectives_jax.py must not import SurfaceXYZTensorFourier "
+        "for its JAX wrapper/runtime helpers"
+    )
 
 
 def test_import_cpu_package_entrypoints_with_simsoptpp():
@@ -2332,6 +2689,46 @@ def test_import_cpu_package_entrypoints_with_simsoptpp():
         assert hasattr(simsopt.objectives, "LeastSquaresProblem")
     """)
     assert rc == 0, f"CPU entrypoint import check failed:\n{err}"
+
+
+def test_field_package_import_is_lazy_with_simsoptpp():
+    """Bare package import must not eagerly load CPU field modules."""
+    try:
+        from simsoptpp import Curve as _  # noqa: F401
+    except (ImportError, AttributeError):
+        pytest.skip("compiled simsoptpp symbols are not available in this environment")
+
+    rc, err = _run_import_check("""
+        import sys
+        import simsopt.field
+
+        assert "simsopt.field.coil" not in sys.modules
+        assert "simsopt.field.biotsavart" not in sys.modules
+
+        from simsopt.field import BiotSavartJAX
+
+        assert BiotSavartJAX is not None
+        assert "simsopt.field.coil" not in sys.modules
+    """)
+    assert rc == 0, f"field package import was not lazy:\n{err}"
+
+
+def test_geo_package_import_is_lazy_with_simsoptpp():
+    """Bare package import must not eagerly load CPU geometry modules."""
+    try:
+        from simsoptpp import Curve as _  # noqa: F401
+    except (ImportError, AttributeError):
+        pytest.skip("compiled simsoptpp symbols are not available in this environment")
+
+    rc, err = _run_import_check("""
+        import sys
+        import simsopt.geo
+
+        assert "simsopt.geo.surfacexyztensorfourier" not in sys.modules
+        assert "simsopt.geo.boozersurface" not in sys.modules
+        assert simsopt.geo.parameters["jit"] in (True, False)
+    """)
+    assert rc == 0, f"geo package import was not lazy:\n{err}"
 
 
 def test_import_cpu_geo_core_entrypoints_without_jax():
