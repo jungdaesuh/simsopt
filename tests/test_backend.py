@@ -1017,7 +1017,10 @@ def test_maybe_initialize_distributed_jax_invalidates_preinit_chunk_caches(
     assert [cmd[-2:] for cmd in calls] == [["-i", "3"], ["-i", "1"], ["-i", "1"]]
 
 
-def test_as_jax_array_initializes_distributed_runtime_before_device_put(monkeypatch):
+def _assert_distributed_runtime_initializes_before_device_put(
+    monkeypatch,
+    invoke,
+):
     _clear_backend_env(monkeypatch)
     backend = _fresh_backend()
     math_utils = importlib.import_module("simsopt.jax_core._math_utils")
@@ -1067,10 +1070,43 @@ def test_as_jax_array_initializes_distributed_runtime_before_device_put(monkeypa
     )
     monkeypatch.setattr(math_utils.jax, "device_put", _device_put)
 
-    value = math_utils.as_jax_float64([1.0, 2.0])
+    value = invoke(math_utils)
 
     np.testing.assert_allclose(value, np.array([1.0, 2.0], dtype=np.float64))
     assert initialize_calls == [expected_initialize_call]
+
+
+def test_as_jax_array_initializes_distributed_runtime_before_device_put(monkeypatch):
+    _assert_distributed_runtime_initializes_before_device_put(
+        monkeypatch,
+        lambda math_utils: math_utils.as_jax_float64([1.0, 2.0]),
+    )
+
+
+def test_curveobjectives_as_jax_float64_initializes_distributed_runtime_before_device_put(
+    monkeypatch,
+):
+    curveobjectives = importlib.import_module("simsopt.geo.curveobjectives")
+
+    _assert_distributed_runtime_initializes_before_device_put(
+        monkeypatch,
+        lambda _math_utils: curveobjectives._as_jax_float64(
+            np.array([1.0, 2.0], dtype=np.float64)
+        ),
+    )
+
+
+def test_framedcurve_as_jax_float64_array_initializes_distributed_runtime_before_device_put(
+    monkeypatch,
+):
+    framedcurve = importlib.import_module("simsopt.geo.framedcurve")
+
+    _assert_distributed_runtime_initializes_before_device_put(
+        monkeypatch,
+        lambda _math_utils: framedcurve._as_jax_float64_array(
+            np.array([1.0, 2.0], dtype=np.float64)
+        ),
+    )
 
 
 def test_explicit_current_mode_policy_preserves_strict_state(monkeypatch):
