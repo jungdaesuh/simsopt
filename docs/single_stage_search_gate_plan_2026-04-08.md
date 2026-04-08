@@ -1,7 +1,7 @@
 # Single-Stage Search Gate Plan
 
 Date: 2026-04-08
-Status: Draft plan
+Status: Follow-on plan after baseline hardware-search policy landing
 Scope: `examples/single_stage_optimization/SINGLE_STAGE/single_stage_banana_example.py` and supporting `banana_opt/` modules
 
 ## Goal
@@ -14,13 +14,29 @@ Replace the current single-stage search-time hardware gate with a deterministic,
 - keeps final certification hard
 - stays aligned with the existing Stage 2 / ALM direction without pretending single-stage already has full restoration-phase behavior
 
+## Already Landed
+
+The baseline single-stage hardware-search policy seam is already implemented and committed:
+
+- [x] Pure search-policy module exists in `banana_opt/single_stage_search_policy.py`
+- [x] Single-stage CLI exposes:
+  - `--hardware-search-mode`
+  - `--hardware-search-soft-iterations`
+- [x] Results metadata records:
+  - `HARDWARE_SEARCH_MODE`
+  - `HARDWARE_SEARCH_SOFT_ITERATIONS`
+- [x] Search bookkeeping already distinguishes trial and accepted hardware status
+- [x] Final hard certification remains in place
+
+This document now tracks the remaining deeper adaptive-gate work beyond that landed baseline.
+
 ## Why This Is Needed
 
 The current single-stage gate and the recent discussions exposed several issues:
 
-- The existing adaptive seam is too weak.
+- The existing adaptive seam is intentionally narrow.
   - `single_stage_search_policy.py` currently uses an accepted-iteration window and `gate_scale < 1.0`.
-  - That is a soft window, not a principled infeasibility policy.
+  - That is a pragmatic soft window, not a principled infeasibility policy with rollback/restoration.
 - Broken states and modeled infeasibility need to be separated.
   - Boozer collapse, self-intersection, NaN / inf, invalid geometry state, and invalid topology evaluation are not useful search states.
   - Hardware-threshold misses and normal topology-gate failures are modeled infeasibility, not automatic corruption.
@@ -230,7 +246,7 @@ Use outer-loop chunked `L-BFGS-B` only for `adaptive` mode.
 
 ## Code Split Todo
 
-- [ ] Refactor `single_stage_search_policy.py` to own the real search-time decision logic
+- [ ] Extend `single_stage_search_policy.py` from the landed baseline seam into the real search-time decision logic
 - [ ] Keep policy core pure:
   - config dataclasses
   - classification inputs
@@ -300,6 +316,22 @@ Use outer-loop chunked `L-BFGS-B` only for `adaptive` mode.
 - [ ] `tests/geo/test_single_stage_alm_integration.py`
 - [ ] Replay validation on real archived runs before changing defaults
 - [ ] Validate deterministic chunk accounting and run-identity changes when adaptive tunables change
+
+## Upstream / Downstream Contracts
+
+- [ ] Keep wrapper-owned workflow policy separate from solver search policy
+  - wrappers decide lane identity and artifact compatibility
+  - solver decides search-time acceptance on normalized inputs
+- [ ] Preserve current-contract SSOT in `banana_opt/current_contracts.py`
+  - public `--plasma-current-A`
+  - expert/internal `--boozer-I`
+- [ ] Preserve artifact-contract SSOT in `banana_opt/artifact_contracts.py`
+  - strict validator stays strict
+  - only wrapper-owned flows may apply unambiguous legacy upgrades
+- [ ] Keep downstream results/schema alignment explicit when adaptive behavior changes
+  - update emitted fields
+  - update replay tooling / docs
+  - update focused tests that assert hardware-status reporting
 
 ## Proposed Implementation Order
 

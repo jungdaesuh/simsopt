@@ -9,6 +9,18 @@ The optimization process consists of two sequential stages:
 1. **Stage 2 (Coil Design)**: `banana_coil_solver.py` - Optimizes the banana coil geometry to minimize normal magnetic field errors on the plasma surface
 2. **Single Stage (Quasi-Symmetry)**: `single_stage_banana_example.py` - Further optimizes the system for quasi-symmetry and Boozer coordinates using outputs from Stage 2
 
+There are also two workflow entrypoints that sit on top of those scripts:
+
+- **Locked 80 kA baseline sweep**: `run_80ka_baseline_tradeoff_sweep.py`
+- **Finite-current smoke validation**: `run_finite_current_smoke.py`
+
+These two workflows are intentionally separate:
+
+- The `80 kA` baseline lane is `coil-only, zero-plasma-current`.
+- The finite-current lane reuses a frozen Stage 2 artifact and varies only plasma current.
+- User-facing plasma current is specified in SI `A` via `--plasma-current-A`.
+- Raw `--boozer-I` remains an expert/internal input, not the recommended public interface.
+
 ## Directory Structure
 
 ```
@@ -78,6 +90,7 @@ wout_nfp22ginsburg_000_014417_iota15.nc
 - `--major-radius` / `MAJOR_RADIUS`: Major radius target
 - `--toroidal-flux` / `TOROIDAL_FLUX`: Normalized toroidal flux surface
 - `--banana-surf-radius` / `BANANA_SURF_RADIUS`: Coil surface radius
+- `--tf-current-A` / `TF_CURRENT_A`: TF current per coil in physical amps
 - `--cc-threshold` / `CC_THRESHOLD`: Coil-coil spacing threshold
 - `--curvature-threshold` / `CURVATURE_THRESHOLD`: Curvature threshold
 - `--maxiter` / `MAXITER`: Maximum optimization iterations
@@ -113,6 +126,41 @@ The script can resolve the seed either from the local Stage 2 outputs or from th
 - `--stage2-source local` uses `STAGE_2/outputs-[plasma]/...`
 - `--stage2-bs-path /full/path/to/biot_savart_opt.json` overrides both
 
+### Recommended Workflow Entry Points
+
+For current Columbia finite-current work, prefer these wrappers over hand-running the lower-level scripts:
+
+#### A. Locked `80 kA` Coil-Only Baseline Sweep
+
+This workflow is for the baseline lane only:
+
+- TF current per coil is locked to `80000 A`
+- plasma current is locked to `0 A`
+- the workflow runs a weighted tradeoff sweep and summarizes the non-dominated set afterward
+- the script rejects non-baseline Stage 2 artifacts instead of silently drifting
+
+```bash
+cd /path/to/simsopt-surrogate
+python examples/single_stage_optimization/run_80ka_baseline_tradeoff_sweep.py
+```
+
+Use `--stage2-bs-path` only when you want to reuse a frozen Stage 2 artifact. The script validates the loaded artifact metadata against the locked baseline identity before launching the sweep.
+
+#### B. Finite-Current Smoke Validation
+
+This workflow is for quick contract validation of the finite-current surrogate:
+
+- it consumes one frozen Stage 2 artifact
+- it varies only plasma current in physical amps
+- it validates the actual loaded Stage 2 artifact provenance, not just requested CLI defaults
+
+```bash
+cd /path/to/simsopt-surrogate
+python examples/single_stage_optimization/run_finite_current_smoke.py --currents-A 0,8000,-35200
+```
+
+This is a workflow/surrogate validation tool, not a self-consistent finite-current equilibrium run.
+
 ### Step 4: Run Single Stage - Quasi-Symmetry Optimization
 
 **Purpose**: Optimize for quasi-symmetry and proper Boozer coordinates using the coils from Stage 2.
@@ -124,12 +172,16 @@ The script can resolve the seed either from the local Stage 2 outputs or from th
 - `--ntor` / `NTOR`
 - `--vol-target` / `VOL_TARGET`
 - `--iota-target` / `IOTA_TARGET`
+- `--plasma-current-A` / `PLASMA_CURRENT_A`: User-facing enclosed toroidal plasma current in physical amps
+- `--boozer-I` / `BOOZER_I`: Expert/internal surrogate current knob; prefer `--plasma-current-A`
 - `--cc-dist` / `CC_DIST`
 - `--curvature-threshold` / `CURVATURE_THRESHOLD`
 - `--stage2-seed-major-radius` / `STAGE2_SEED_MAJOR_RADIUS`
 - `--stage2-seed-toroidal-flux` / `STAGE2_SEED_TOROIDAL_FLUX`
 - `--stage2-seed-banana-surf-radius` / `STAGE2_SEED_BANANA_SURF_RADIUS`
 - `--stage2-bs-path` / `STAGE2_BS_PATH`
+- `--hardware-search-mode` / `HARDWARE_SEARCH_MODE`: Search-time realized-hardware gate policy (`hard`, `warn`, `adaptive`)
+- `--hardware-search-soft-iterations` / `HARDWARE_SEARCH_SOFT_ITERATIONS`: Adaptive soft-window budget for early continuation
 - `--maxiter` / `MAXITER`
 
 **Run**:
@@ -148,6 +200,15 @@ python single_stage_banana_example.py \
   --ntor 6 \
   --output-root ./outputs/CC_convergence-CC7-iota17-vol10
 ```
+
+For finite-current surrogate runs, prefer `--plasma-current-A` over raw `--boozer-I`. Do not pass both together.
+
+Search-time realized hardware handling is now explicit:
+
+- `--hardware-search-mode hard` is the default and rejects hardware-invalid trial candidates during search.
+- `--hardware-search-mode warn` keeps the run moving but records the realized hardware violation as warning-only.
+- `--hardware-search-mode adaptive` uses the same warning-only handling only during the early soft phase, then reverts to hard rejection.
+- Final certification remains hard in all modes. A run that ends hardware-invalid still reports failure even if search-time handling was softened.
 
 For the hard-iota seed A/B test, change only the Stage 2 seed and plasma file:
 
@@ -170,6 +231,14 @@ python single_stage_banana_example.py \
 - `NormPlotInitial.png`, `NormPlotOptimized.png` - Field error diagnostics
 - `CrossSectionInitial.png`, `CrossSectionOptimized.png` - Cross-section plots
 - `log.txt` - Detailed optimization log
+
+Relevant result metadata now also records:
+
+- `PLASMA_CURRENT_A`
+- `STAGE2_TF_CURRENT_A`
+- `STAGE2_TF_CURRENT_SUM_ABS_A`
+- `HARDWARE_SEARCH_MODE`
+- `HARDWARE_SEARCH_SOFT_ITERATIONS`
 
 ### Step 5 (Optional): Generate Poincaré Plots
 
