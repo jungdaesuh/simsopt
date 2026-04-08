@@ -68,6 +68,29 @@ def _disable_chunk_autotune(monkeypatch) -> None:
     monkeypatch.setenv("SIMSOPT_JAX_CHUNK_AUTOTUNE", "0")
 
 
+def _set_distributed_init_env(
+    monkeypatch,
+    *,
+    coordinator_address: str = "127.0.0.1:12345",
+    num_processes: str = "4",
+    process_id: str = "1",
+    local_device_ids: str | None = None,
+    visible_devices: str | None = None,
+) -> None:
+    monkeypatch.setenv("SIMSOPT_JAX_DISTRIBUTED_INIT", "1")
+    monkeypatch.setenv("SIMSOPT_JAX_COORDINATOR_ADDRESS", coordinator_address)
+    monkeypatch.setenv("SIMSOPT_JAX_NUM_PROCESSES", num_processes)
+    monkeypatch.setenv("SIMSOPT_JAX_PROCESS_ID", process_id)
+    if local_device_ids is None:
+        monkeypatch.delenv("SIMSOPT_JAX_LOCAL_DEVICE_IDS", raising=False)
+    else:
+        monkeypatch.setenv("SIMSOPT_JAX_LOCAL_DEVICE_IDS", local_device_ids)
+    if visible_devices is None:
+        monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+    else:
+        monkeypatch.setenv("CUDA_VISIBLE_DEVICES", visible_devices)
+
+
 def _assert_synced_runtime_env(
     backend, *, mode: str, backend_name: str, platform: str, strict: bool
 ) -> None:
@@ -457,6 +480,33 @@ def _install_fake_nvidia_smi(monkeypatch, stdout):
     return calls
 
 
+def _make_recording_local_devices(*, result=None, error: Exception | None = None):
+    calls: list[str | None] = []
+
+    def _local_devices(*, backend=None):
+        calls.append(backend)
+        if error is not None:
+            raise error
+        return [] if result is None else result
+
+    return _local_devices, calls
+
+
+def _make_fake_cuda_device(local_hardware_id: int):
+    return types.SimpleNamespace(local_hardware_id=local_hardware_id)
+
+
+def _make_recording_cuda_device_probe(local_hardware_id: int):
+    return _make_recording_local_devices(
+        result=[_make_fake_cuda_device(local_hardware_id)]
+    )
+
+
+def _assert_public_gpu_local_device_calls(calls: list[str | None]):
+    assert len(calls) >= 1
+    assert calls == ["gpu"] * len(calls)
+
+
 def test_chunk_tuning_autotunes_from_visible_cuda_device(monkeypatch):
     _assert_gpu_chunk_autotune_probe(
         monkeypatch,
@@ -467,29 +517,27 @@ def test_chunk_tuning_autotunes_from_visible_cuda_device(monkeypatch):
 
 
 def test_chunk_tuning_autotunes_from_active_jax_cuda_device(monkeypatch):
-    class _FakeDevice:
-        local_hardware_id = 2
-
+    local_devices, local_device_calls = _make_recording_cuda_device_probe(2)
     _assert_gpu_chunk_autotune_probe(
         monkeypatch,
         env_value=None,
         expected_index=2,
         stdout="2, 24576\n",
-        fake_jax=types.SimpleNamespace(local_devices=lambda backend=None: [_FakeDevice()]),
+        fake_jax=types.SimpleNamespace(local_devices=local_devices),
     )
+    _assert_public_gpu_local_device_calls(local_device_calls)
 
 
 def test_chunk_tuning_prefers_imported_jax_cuda_device_over_visible_env(monkeypatch):
-    class _FakeDevice:
-        local_hardware_id = 1
-
+    local_devices, local_device_calls = _make_recording_cuda_device_probe(1)
     _assert_gpu_chunk_autotune_probe(
         monkeypatch,
         env_value="3,1",
         expected_index=1,
         stdout="1, 24576\n",
-        fake_jax=types.SimpleNamespace(local_devices=lambda backend=None: [_FakeDevice()]),
+        fake_jax=types.SimpleNamespace(local_devices=local_devices),
     )
+    _assert_public_gpu_local_device_calls(local_device_calls)
 
 
 def test_query_active_gpu_memory_mb_uses_visible_cuda_device(monkeypatch):
@@ -509,8 +557,9 @@ def test_query_active_gpu_memory_mb_uses_visible_cuda_device(monkeypatch):
 def test_query_active_gpu_memory_mb_falls_back_to_visible_env_when_jax_device_query_fails(
     monkeypatch,
 ):
-    def _raise_local_devices_failure(*, backend=None):
-        raise RuntimeError(f"cannot resolve devices for backend={backend!r} yet")
+    local_devices, local_device_calls = _make_recording_local_devices(
+        error=RuntimeError("cannot resolve devices for backend='gpu' yet")
+    )
 
     _clear_backend_env(monkeypatch)
     monkeypatch.setenv("SIMSOPT_BACKEND_MODE", "jax_gpu_fast")
@@ -518,13 +567,14 @@ def test_query_active_gpu_memory_mb_falls_back_to_visible_env_when_jax_device_qu
     monkeypatch.setitem(
         sys.modules,
         "jax",
-        types.SimpleNamespace(local_devices=_raise_local_devices_failure),
+        types.SimpleNamespace(local_devices=local_devices),
     )
     calls = _install_fake_nvidia_smi(monkeypatch, "3, 640\n")
     backend = _fresh_backend()
 
     assert backend.get_active_cuda_device_index() == 3
     assert backend.query_active_gpu_memory_mb() == pytest.approx(640.0)
+    _assert_public_gpu_local_device_calls(local_device_calls)
     assert calls
     assert calls[0][-2:] == ["-i", "3"]
 
@@ -532,18 +582,17 @@ def test_query_active_gpu_memory_mb_falls_back_to_visible_env_when_jax_device_qu
 def test_query_active_gpu_memory_mb_falls_back_to_visible_env_before_distributed_init(
     monkeypatch,
 ):
+    local_device_calls: list[str | None] = []
+
     def _unexpected_local_devices(*, backend=None):
+        local_device_calls.append(backend)
         raise AssertionError(
             f"local_devices should not run before distributed init for backend={backend!r}"
         )
 
     _clear_backend_env(monkeypatch)
     monkeypatch.setenv("SIMSOPT_BACKEND_MODE", "jax_gpu_fast")
-    monkeypatch.setenv("SIMSOPT_JAX_DISTRIBUTED_INIT", "1")
-    monkeypatch.setenv("SIMSOPT_JAX_COORDINATOR_ADDRESS", "127.0.0.1:12345")
-    monkeypatch.setenv("SIMSOPT_JAX_NUM_PROCESSES", "4")
-    monkeypatch.setenv("SIMSOPT_JAX_PROCESS_ID", "1")
-    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "3,1")
+    _set_distributed_init_env(monkeypatch, visible_devices="3,1")
     monkeypatch.setitem(
         sys.modules,
         "jax",
@@ -557,26 +606,26 @@ def test_query_active_gpu_memory_mb_falls_back_to_visible_env_before_distributed
 
     assert backend.get_active_cuda_device_index() == 3
     assert backend.query_active_gpu_memory_mb() == pytest.approx(640.0)
+    assert local_device_calls == []
     assert calls
     assert calls[0][-2:] == ["-i", "3"]
 
 
 def test_query_active_gpu_memory_mb_uses_active_jax_device_when_env_is_unset(monkeypatch):
-    class _FakeDevice:
-        local_hardware_id = 2
-
+    local_devices, local_device_calls = _make_recording_cuda_device_probe(2)
     _clear_backend_env(monkeypatch)
     monkeypatch.setenv("SIMSOPT_BACKEND_MODE", "jax_gpu_fast")
     monkeypatch.setitem(
         sys.modules,
         "jax",
-        types.SimpleNamespace(local_devices=lambda backend=None: [_FakeDevice()]),
+        types.SimpleNamespace(local_devices=local_devices),
     )
     calls = _install_fake_nvidia_smi(monkeypatch, "2, 768\n")
     backend = _fresh_backend()
 
     assert backend.get_active_cuda_device_index() == 2
     assert backend.query_active_gpu_memory_mb() == pytest.approx(768.0)
+    _assert_public_gpu_local_device_calls(local_device_calls)
     assert calls
     assert calls[0][-2:] == ["-i", "2"]
 
@@ -584,22 +633,21 @@ def test_query_active_gpu_memory_mb_uses_active_jax_device_when_env_is_unset(mon
 def test_query_active_gpu_memory_mb_prefers_imported_jax_device_over_visible_env(
     monkeypatch,
 ):
-    class _FakeDevice:
-        local_hardware_id = 1
-
+    local_devices, local_device_calls = _make_recording_cuda_device_probe(1)
     _clear_backend_env(monkeypatch)
     monkeypatch.setenv("SIMSOPT_BACKEND_MODE", "jax_gpu_fast")
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "3,1")
     monkeypatch.setitem(
         sys.modules,
         "jax",
-        types.SimpleNamespace(local_devices=lambda backend=None: [_FakeDevice()]),
+        types.SimpleNamespace(local_devices=local_devices),
     )
     calls = _install_fake_nvidia_smi(monkeypatch, "1, 256\n")
     backend = _fresh_backend()
 
     assert backend.get_active_cuda_device_index() == 1
     assert backend.query_active_gpu_memory_mb() == pytest.approx(256.0)
+    _assert_public_gpu_local_device_calls(local_device_calls)
     assert calls
     assert calls[0][-2:] == ["-i", "1"]
 
@@ -607,18 +655,17 @@ def test_query_active_gpu_memory_mb_prefers_imported_jax_device_over_visible_env
 def test_chunk_tuning_autotunes_from_visible_cuda_device_before_distributed_init(
     monkeypatch,
 ):
+    local_device_calls: list[str | None] = []
+
     def _unexpected_local_devices(*, backend=None):
+        local_device_calls.append(backend)
         raise AssertionError(
             f"local_devices should not run before distributed init for backend={backend!r}"
         )
 
     _clear_backend_env(monkeypatch)
     monkeypatch.setenv("SIMSOPT_BACKEND_MODE", "jax_gpu_fast")
-    monkeypatch.setenv("SIMSOPT_JAX_DISTRIBUTED_INIT", "1")
-    monkeypatch.setenv("SIMSOPT_JAX_COORDINATOR_ADDRESS", "127.0.0.1:12345")
-    monkeypatch.setenv("SIMSOPT_JAX_NUM_PROCESSES", "4")
-    monkeypatch.setenv("SIMSOPT_JAX_PROCESS_ID", "1")
-    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "3,1")
+    _set_distributed_init_env(monkeypatch, visible_devices="3,1")
     monkeypatch.setitem(
         sys.modules,
         "jax",
@@ -635,6 +682,7 @@ def test_chunk_tuning_autotunes_from_visible_cuda_device_before_distributed_init
     assert tuning.autotuned is True
     assert tuning.autotune_source == "nvidia-smi[3]"
     assert tuning.gpu_total_memory_mb == 24576
+    assert local_device_calls == []
     assert calls
     assert calls[0][-2:] == ["-i", "3"]
 
@@ -769,11 +817,11 @@ def test_sharding_tuning_accepts_pairwise_rows_strategy(monkeypatch):
 
 def test_distributed_runtime_config_reads_env(monkeypatch):
     _clear_backend_env(monkeypatch)
-    monkeypatch.setenv("SIMSOPT_JAX_DISTRIBUTED_INIT", "1")
-    monkeypatch.setenv("SIMSOPT_JAX_COORDINATOR_ADDRESS", "127.0.0.1:12345")
-    monkeypatch.setenv("SIMSOPT_JAX_NUM_PROCESSES", "4")
-    monkeypatch.setenv("SIMSOPT_JAX_PROCESS_ID", "2")
-    monkeypatch.setenv("SIMSOPT_JAX_LOCAL_DEVICE_IDS", "3,5")
+    _set_distributed_init_env(
+        monkeypatch,
+        process_id="2",
+        local_device_ids="3,5",
+    )
     backend = _fresh_backend()
 
     config = backend.get_distributed_runtime_config()
@@ -788,10 +836,7 @@ def test_distributed_runtime_config_reads_env(monkeypatch):
 
 def test_distributed_runtime_config_rejects_invalid_process_ids(monkeypatch):
     _clear_backend_env(monkeypatch)
-    monkeypatch.setenv("SIMSOPT_JAX_DISTRIBUTED_INIT", "1")
-    monkeypatch.setenv("SIMSOPT_JAX_COORDINATOR_ADDRESS", "127.0.0.1:12345")
-    monkeypatch.setenv("SIMSOPT_JAX_NUM_PROCESSES", "2")
-    monkeypatch.setenv("SIMSOPT_JAX_PROCESS_ID", "2")
+    _set_distributed_init_env(monkeypatch, num_processes="2", process_id="2")
     backend = _fresh_backend()
 
     with pytest.raises(
@@ -804,10 +849,7 @@ def test_distributed_runtime_config_rejects_invalid_process_ids(monkeypatch):
 def test_maybe_initialize_distributed_jax_updates_sharding_device_counts(monkeypatch):
     _clear_backend_env(monkeypatch)
     monkeypatch.setenv("SIMSOPT_BACKEND_MODE", "jax_gpu_fast")
-    monkeypatch.setenv("SIMSOPT_JAX_DISTRIBUTED_INIT", "1")
-    monkeypatch.setenv("SIMSOPT_JAX_COORDINATOR_ADDRESS", "127.0.0.1:12345")
-    monkeypatch.setenv("SIMSOPT_JAX_NUM_PROCESSES", "4")
-    monkeypatch.setenv("SIMSOPT_JAX_PROCESS_ID", "1")
+    _set_distributed_init_env(monkeypatch)
 
     calls: list[dict[str, object]] = []
     fake_distributed = types.SimpleNamespace(
@@ -855,9 +897,6 @@ def test_maybe_initialize_distributed_jax_invalidates_preinit_chunk_caches(
         }
         return types.SimpleNamespace(stdout=stdout_by_index[index])
 
-    class _FakeDevice:
-        local_hardware_id = 1
-
     def _is_initialized():
         return distributed_state["initialized"]
 
@@ -870,15 +909,11 @@ def test_maybe_initialize_distributed_jax_invalidates_preinit_chunk_caches(
             raise AssertionError(
                 f"local_devices should not run before distributed init for backend={backend!r}"
             )
-        return [_FakeDevice()]
+        return [_make_fake_cuda_device(1)]
 
     _clear_backend_env(monkeypatch)
     monkeypatch.setenv("SIMSOPT_BACKEND_MODE", "jax_gpu_fast")
-    monkeypatch.setenv("SIMSOPT_JAX_DISTRIBUTED_INIT", "1")
-    monkeypatch.setenv("SIMSOPT_JAX_COORDINATOR_ADDRESS", "127.0.0.1:12345")
-    monkeypatch.setenv("SIMSOPT_JAX_NUM_PROCESSES", "4")
-    monkeypatch.setenv("SIMSOPT_JAX_PROCESS_ID", "1")
-    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "3,1")
+    _set_distributed_init_env(monkeypatch, visible_devices="3,1")
     distributed_state = {"initialized": False}
     monkeypatch.setitem(
         sys.modules,
