@@ -49,7 +49,11 @@ from jax.scipy.sparse.linalg import gmres
 from scipy.optimize import OptimizeResult
 from scipy.optimize import minimize as scipy_minimize
 
-from ..backend import raise_if_strict_jax_fallback
+from ..backend import (
+    get_backend_config,
+    is_parity_mode,
+    raise_if_strict_jax_fallback,
+)
 
 __all__ = [
     "ContinuousOptimizerContract",
@@ -185,6 +189,26 @@ def _raise_if_strict_optimizer_fallback(
         component=component,
         detail=f"{detail} for method={method!r}",
     )
+
+
+def _raise_if_target_lane_required(
+    *,
+    component: str,
+    method: str,
+    detail: str,
+) -> None:
+    backend_config = get_backend_config()
+    if (
+        backend_config.backend == "jax"
+        and not backend_config.strict
+        and not is_parity_mode(backend_config.mode)
+    ):
+        raise RuntimeError(
+            f"{component} cannot use {detail} for method={method!r} while simsopt "
+            f"backend mode {backend_config.mode!r} targets the fast/ondevice lane. "
+            "Select an ondevice target-lane optimizer method or switch to a "
+            "CPU/reference or parity backend mode."
+        )
 
 
 def _x64_enabled():

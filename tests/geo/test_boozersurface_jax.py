@@ -197,6 +197,8 @@ _enable_fast_non_strict_jax_backend = partial(
     enable_non_strict_jax_backend,
     mode="jax_gpu_fast",
 )
+_NON_ONDEVICE_LS_BACKENDS = ("scipy", "hybrid")
+_NON_TARGET_MINIMIZE_METHODS = ("adam", "bfgs", "lbfgs", "bfgs-hybrid")
 
 
 _EXPLICIT_COIL_SPEC_REQUIRED_PATTERN = (
@@ -1457,7 +1459,7 @@ class TestBoozerSurfaceJAXClass:
         ):
             booz.run_code(iota=0.3, G=0.05)
 
-    @pytest.mark.parametrize("optimizer_backend", ["scipy", "hybrid"])
+    @pytest.mark.parametrize("optimizer_backend", _NON_ONDEVICE_LS_BACKENDS)
     def test_resolve_optimizer_method_warns_on_non_ondevice_ls_lane_in_non_strict_mode(
         self,
         monkeypatch,
@@ -1474,7 +1476,7 @@ class TestBoozerSurfaceJAXClass:
         ):
             booz._resolve_optimizer_method()
 
-    @pytest.mark.parametrize("optimizer_backend", ["scipy", "hybrid"])
+    @pytest.mark.parametrize("optimizer_backend", _NON_ONDEVICE_LS_BACKENDS)
     def test_resolve_optimizer_method_rejects_non_target_ls_lane_in_fast_backend_mode(
         self,
         monkeypatch,
@@ -1491,7 +1493,7 @@ class TestBoozerSurfaceJAXClass:
         ):
             booz._resolve_optimizer_method()
 
-    @pytest.mark.parametrize("method", ["adam", "bfgs", "lbfgs", "bfgs-hybrid"])
+    @pytest.mark.parametrize("method", _NON_TARGET_MINIMIZE_METHODS)
     def test_jax_minimize_rejects_fallback_methods_in_strict_mode(
         self,
         monkeypatch,
@@ -1506,6 +1508,31 @@ class TestBoozerSurfaceJAXClass:
             match=rf"optimizer_jax\.jax_minimize.*method='{method}'.*strict=True",
             fun=lambda x: jnp.sum(x**2),
         )
+
+    def test_jax_minimize_rejects_hybrid_before_private_package_load_in_fast_backend_mode(
+        self,
+        monkeypatch,
+        request,
+    ):
+        _enable_fast_non_strict_jax_backend(monkeypatch, request)
+
+        def _fail_private_package_load():
+            raise AssertionError(
+                "fast/ondevice lane contract rejection must happen before "
+                "private optimizer package loading."
+            )
+
+        monkeypatch.setattr(_opt, "_load_private_pkg", _fail_private_package_load)
+
+        with pytest.raises(
+            RuntimeError,
+            match="optimizer_jax\\.jax_minimize.*method='bfgs-hybrid'.*jax_gpu_fast.*fast/ondevice lane",
+        ):
+            jax_minimize(
+                lambda x: jnp.sum(x**2),
+                jnp.array([1.0], dtype=jnp.float64),
+                method="bfgs-hybrid",
+            )
 
     @pytest.mark.parametrize(
         ("method", "maxiter", "options", "atol"),
