@@ -383,6 +383,12 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertEqual(fake_bs.points.shape, (expected_point_count, 3))
         self.assertEqual(fake_bs.last_vjp_input.shape, (expected_point_count, 3))
 
+    def test_boozer_residual_exact_no_longer_accepts_unused_constraint_weight(self):
+        module = self.load_module()
+
+        with self.assertRaises(TypeError):
+            module.BoozerResidualExact(object(), object(), constraint_weight=0.0)
+
     def test_resolve_plasma_current_settings_accepts_physical_amps(self):
         module = self.load_module()
 
@@ -1250,6 +1256,8 @@ class HardwareConstraintTests(unittest.TestCase):
             boozer_stage="initial",
             refinement_boozer_stage="final",
             refinement_maxiter=20,
+            refinement_chunk_maxiter=10,
+            refinement_max_stalled_chunks=2,
         )
 
         with self.assertRaisesRegex(ValueError, "--constraint-method=penalty"):
@@ -1258,6 +1266,11 @@ class HardwareConstraintTests(unittest.TestCase):
         args.constraint_method = "penalty"
         args.num_surfaces = 2
         with self.assertRaisesRegex(ValueError, "--num-surfaces=1"):
+            module.validate_boozer_stage_refinement_args(args, constraint_weight=1.0)
+
+        args.num_surfaces = 1
+        args.refinement_chunk_maxiter = 0
+        with self.assertRaisesRegex(ValueError, "--refinement-chunk-maxiter must be positive"):
             module.validate_boozer_stage_refinement_args(args, constraint_weight=1.0)
 
     def test_refinement_improves_phase1_metric_uses_phase1_stage_basis(self):
@@ -1303,6 +1316,132 @@ class HardwareConstraintTests(unittest.TestCase):
         module = load_single_stage_example_module()
         self.assertEqual(module.reported_boozer_stage("initial", "final"), "final")
         self.assertEqual(module.reported_boozer_stage("initial", None), "initial")
+
+    def test_run_chunked_refinement_aborts_after_stalled_chunks_without_improvement(self):
+        module = load_single_stage_example_module()
+        phase1_incumbent = SimpleNamespace(name="phase1")
+        stalled_incumbent = SimpleNamespace(name="stalled")
+        chunk_results = [
+            (SimpleNamespace(nit=5, success=False, message="chunk1"), stalled_incumbent),
+            (SimpleNamespace(nit=4, success=False, message="chunk2"), stalled_incumbent),
+        ]
+
+        with patch.object(module, "run_refinement_chunk", side_effect=chunk_results), patch.object(
+            module,
+            "refinement_improves_phase1_metric",
+            side_effect=[(6.0, False), (6.0, False)],
+        ):
+            result = module.run_chunked_refinement(
+                {},
+                phase1_incumbent,
+                5.0,
+                "initial",
+                "final",
+                lambda stage_name: None,
+                20,
+                10,
+                2,
+                300,
+                1e-9,
+                1e-9,
+            )
+
+        self.assertIsNone(result["best_incumbent"])
+        self.assertEqual(result["iterations"], 9)
+        self.assertEqual(result["chunks"], 2)
+        self.assertEqual(result["abort_reason"], "stalled_without_improvement")
+        self.assertEqual(result["termination_message"], "chunk2; stalled_without_improvement")
+
+    def test_run_chunked_refinement_keeps_best_improvement_after_later_stall(self):
+        module = load_single_stage_example_module()
+        phase1_incumbent = SimpleNamespace(name="phase1")
+        improved_incumbent = SimpleNamespace(name="improved")
+        chunk_results = [
+            (SimpleNamespace(nit=6, success=False, message="chunk1"), improved_incumbent),
+            (SimpleNamespace(nit=3, success=False, message="chunk2"), improved_incumbent),
+        ]
+
+        with patch.object(module, "run_refinement_chunk", side_effect=chunk_results), patch.object(
+            module,
+            "refinement_improves_phase1_metric",
+            side_effect=[(4.0, True), (4.0, False)],
+        ):
+            result = module.run_chunked_refinement(
+                {},
+                phase1_incumbent,
+                5.0,
+                "initial",
+                "final",
+                lambda stage_name: None,
+                20,
+                10,
+                1,
+                300,
+                1e-9,
+                1e-9,
+            )
+
+        self.assertIs(result["best_incumbent"], improved_incumbent)
+        self.assertEqual(result["best_metric"], 4.0)
+        self.assertEqual(result["iterations"], 9)
+        self.assertEqual(result["chunks"], 2)
+        self.assertEqual(result["abort_reason"], "stalled_after_improvement")
+        self.assertEqual(result["termination_message"], "chunk2; stalled_after_improvement")
+
+    def test_run_chunked_refinement_reports_budget_exhaustion_after_improvement(self):
+        module = load_single_stage_example_module()
+        phase1_incumbent = SimpleNamespace(name="phase1")
+        improved_incumbent = SimpleNamespace(name="improved")
+
+        with patch.object(
+            module,
+            "run_refinement_chunk",
+            return_value=(SimpleNamespace(nit=5, success=False, message="chunk1"), improved_incumbent),
+        ), patch.object(
+            module,
+            "refinement_improves_phase1_metric",
+            return_value=(4.0, True),
+        ):
+            result = module.run_chunked_refinement(
+                {},
+                phase1_incumbent,
+                5.0,
+                "initial",
+                "final",
+                lambda stage_name: None,
+                5,
+                5,
+                2,
+                300,
+                1e-9,
+                1e-9,
+            )
+
+        self.assertIs(result["best_incumbent"], improved_incumbent)
+        self.assertEqual(result["best_metric"], 4.0)
+        self.assertEqual(result["abort_reason"], "budget_exhausted_after_improvement")
+        self.assertEqual(result["termination_message"], "chunk1; budget_exhausted_after_improvement")
+
+    def test_summarize_refinement_result_uses_refinement_status(self):
+        module = load_single_stage_example_module()
+        accepted_x = np.array([1.0, 2.0])
+        refinement_result = {
+            "termination_message": "stalled_without_improvement",
+            "success": False,
+        }
+
+        termination_message, optimizer_success, result = module.summarize_refinement_result(
+            refinement_result,
+            total_iterations=13,
+            accepted_x=accepted_x,
+        )
+
+        self.assertEqual(termination_message, "stalled_without_improvement")
+        self.assertFalse(optimizer_success)
+        self.assertEqual(result.nit, 13)
+        self.assertEqual(result.message, "stalled_without_improvement")
+        self.assertFalse(result.success)
+        np.testing.assert_array_equal(result.x, accepted_x)
 
     def test_fun_rejects_candidate_on_hardware_constraint_failure(self):
         module, J_out, dJ_out, last_dJ, restore_mock = self._run_fun_with_hardware_violation(
@@ -2812,6 +2951,8 @@ class RunIdentityTests(unittest.TestCase):
             boozer_stage_refinement=False,
             refinement_boozer_stage="final",
             refinement_maxiter=100,
+            refinement_chunk_maxiter=20,
+            refinement_max_stalled_chunks=2,
             cc_dist=0.05,
             cc_weight=100.0,
             curvature_weight=0.0001,
@@ -2970,6 +3111,17 @@ class RunIdentityTests(unittest.TestCase):
             self._build_identity(module, changed_args),
         )
 
+    def test_run_identity_changes_when_refinement_chunk_policy_changes(self):
+        module = load_single_stage_example_module()
+        base_args = self._make_identity_args()
+        changed_args = self._make_identity_args()
+        changed_args.refinement_chunk_maxiter = 8
+
+        self.assertNotEqual(
+            self._build_identity(module, base_args),
+            self._build_identity(module, changed_args),
+        )
+
     def test_run_identity_does_not_depend_on_module_globals(self):
         module = load_single_stage_example_module()
         base_args = self._make_identity_args()
@@ -3028,6 +3180,34 @@ class CurrentBaselineContractTests(unittest.TestCase):
             module.resolve_stage2_tf_current_A({"TF_CURRENT_A": 8.0e4}, tf_coils),
             8.0e4,
         )
+
+    def test_resolve_stage2_num_tf_coils_prefers_recorded_artifact_count(self):
+        module = load_single_stage_example_module()
+        stage2_results = {"NUM_TF_COILS": 20}
+
+        self.assertEqual(
+            module.resolve_stage2_num_tf_coils(stage2_results, requested_num_tf_coils=20),
+            20,
+        )
+
+    def test_resolve_stage2_num_tf_coils_rejects_cli_mismatch(self):
+        module = load_single_stage_example_module()
+        stage2_results = {"NUM_TF_COILS": 18}
+
+        with self.assertRaisesRegex(ValueError, "NUM_TF_COILS=18.*--num-tf-coils=20"):
+            module.resolve_stage2_num_tf_coils(stage2_results, requested_num_tf_coils=20)
+
+    def test_validate_loaded_stage2_coils_partition_rejects_too_few_loaded_coils(self):
+        module = load_single_stage_example_module()
+
+        with self.assertRaisesRegex(ValueError, "has only 19 coils.*NUM_TF_COILS=20"):
+            module.validate_loaded_stage2_coils_partition([object()] * 19, num_tf_coils=20)
+
+    def test_validate_loaded_stage2_coils_partition_rejects_missing_banana_coils(self):
+        module = load_single_stage_example_module()
+
+        with self.assertRaisesRegex(ValueError, "leaving no banana coils"):
+            module.validate_loaded_stage2_coils_partition([object()] * 20, num_tf_coils=20)
 
     def test_build_stage2_bs_path_prefers_current_penalty_dir(self):
         module = load_single_stage_example_module()
@@ -3127,6 +3307,10 @@ class CurrentBaselineContractTests(unittest.TestCase):
                 "final",
                 "--refinement-maxiter",
                 "25",
+                "--refinement-chunk-maxiter",
+                "7",
+                "--refinement-max-stalled-chunks",
+                "3",
             ],
         ):
             args = module.parse_args()
@@ -3134,6 +3318,8 @@ class CurrentBaselineContractTests(unittest.TestCase):
         self.assertTrue(args.boozer_stage_refinement)
         self.assertEqual(args.refinement_boozer_stage, "final")
         self.assertEqual(args.refinement_maxiter, 25)
+        self.assertEqual(args.refinement_chunk_maxiter, 7)
+        self.assertEqual(args.refinement_max_stalled_chunks, 3)
 
     def test_stage2_parse_args_accepts_tf_current_A(self):
         module = load_stage2_module()

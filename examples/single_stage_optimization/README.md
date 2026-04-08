@@ -203,6 +203,11 @@ python single_stage_banana_example.py \
 
 For finite-current surrogate runs, prefer `--plasma-current-A` over raw `--boozer-I`. Do not pass both together.
 
+Branch-local implementation notes for this surrogate tree:
+
+- Single-stage reload treats the Stage 2 artifact as the source of truth for TF-coil partitioning. If the loaded `results.json` records `NUM_TF_COILS`, it must agree with `--num-tf-coils`; otherwise the run aborts instead of silently re-slicing `bs.coils`.
+- This branch's Boozer residual contract is the `I`-augmented form `(G + \iota I) B - |B|^2 (x_\varphi + \iota x_\theta)`. Public upstream SIMSOPT docs/source may still show the older vacuum-style `G`-only residual, so treat this repository's local source as the authority when reviewing finite-current surrogate behavior.
+
 Search-time realized hardware handling is now explicit:
 
 - `--hardware-search-mode hard` is the default and rejects hardware-invalid trial candidates during search.

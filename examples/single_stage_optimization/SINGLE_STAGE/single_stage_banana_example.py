@@ -69,6 +69,7 @@ from workflow_helpers import (
     format_local_stage2_seed_dir_without_tf,
 )
 from workflow_runner_common import load_stage2_artifact_results
+from banana_opt.artifact_contracts import upgrade_legacy_stage2_artifact_results
 from banana_opt.current_contracts import (
     boozer_I_to_physical_current_A,
     physical_current_to_boozer_I,
@@ -354,6 +355,40 @@ def resolve_stage2_tf_current_A(stage2_results, tf_coils):
     if recorded_tf_current is not None:
         return float(recorded_tf_current)
     return infer_uniform_tf_current_A(tf_coils)
+
+
+def resolve_stage2_num_tf_coils(stage2_results, requested_num_tf_coils):
+    requested_num_tf_coils = int(requested_num_tf_coils)
+    recorded_num_tf_coils = stage2_results.get("NUM_TF_COILS")
+    if recorded_num_tf_coils is None:
+        return requested_num_tf_coils
+    resolved_num_tf_coils = int(recorded_num_tf_coils)
+    if resolved_num_tf_coils <= 0:
+        raise ValueError(
+            f"Stage 2 artifact reports invalid NUM_TF_COILS={recorded_num_tf_coils!r}; "
+            "cannot partition loaded coils."
+        )
+    if resolved_num_tf_coils != requested_num_tf_coils:
+        raise ValueError(
+            "Loaded Stage 2 artifact reports "
+            f"NUM_TF_COILS={resolved_num_tf_coils}, but --num-tf-coils={requested_num_tf_coils}. "
+            "Single-stage reload now refuses to re-slice coils with inconsistent TF-count provenance."
+        )
+    return resolved_num_tf_coils
+
+
+def validate_loaded_stage2_coils_partition(coils, num_tf_coils):
+    total_coils = len(coils)
+    if num_tf_coils > total_coils:
+        raise ValueError(
+            f"Loaded Stage 2 BiotSavart artifact has only {total_coils} coils, but "
+            f"NUM_TF_COILS={num_tf_coils}. Cannot partition TF and banana coils."
+        )
+    if num_tf_coils == total_coils:
+        raise ValueError(
+            f"Loaded Stage 2 BiotSavart artifact has {total_coils} coils and "
+            f"NUM_TF_COILS={num_tf_coils}, leaving no banana coils to optimize."
+        )
 
 
 def resolve_plasma_current_settings(args):
@@ -720,6 +755,18 @@ def parse_args():
         default=int(os.environ.get("REFINEMENT_MAXITER", "100")),
         help="Maximum L-BFGS-B iterations for the optional Boozer-stage refinement restart.",
     )
+    parser.add_argument(
+        "--refinement-chunk-maxiter",
+        type=int,
+        default=int(os.environ.get("REFINEMENT_CHUNK_MAXITER", "20")),
+        help="Maximum L-BFGS-B iterations per optional Boozer-stage refinement chunk.",
+    )
+    parser.add_argument(
+        "--refinement-max-stalled-chunks",
+        type=int,
+        default=int(os.environ.get("REFINEMENT_MAX_STALLED_CHUNKS", "2")),
+        help="Abort refinement after this many consecutive chunks without accepted-state improvement.",
+    )
     parser.add_argument("--cc-dist", type=float, default=float(os.environ.get("CC_DIST", "0.05")))
     parser.add_argument("--curvature-threshold", type=float, default=float(os.environ.get("CURVATURE_THRESHOLD", "40")))
     parser.add_argument("--cc-weight", type=float, default=float(os.environ.get("CC_WEIGHT", "100")))
@@ -859,19 +906,19 @@ def parse_args():
 
 class BoozerResidualExact(Optimizable):
     r"""
-    This term returns the Boozer residual penalty term
-    
+    This term returns the exact-stage Boozer residual penalty term
+
     .. math::
-       J = \int_0^{1/n_{\text{fp}}} \int_0^1 \| \mathbf r \|^2 ~d\theta ~d\varphi + w (\text{label.J()-boozer_surface.constraint_weight})^2.
-    
+       J = \int_0^{1/n_{\text{fp}}} \int_0^1 \| \mathbf r \|^2 ~d\theta ~d\varphi.
+
     where
-    
+
     .. math::
         \mathbf r = \frac{1}{\|\mathbf B\|}[(G + \iota I)\mathbf B_\text{BS}(\mathbf x) - ||\mathbf B_\text{BS}(\mathbf x)||^2  (\mathbf x_\varphi + \iota  \mathbf x_\theta)]
     
     """
 
-    def __init__(self, boozer_surface, bs, constraint_weight=0.0):
+    def __init__(self, boozer_surface, bs):
         Optimizable.__init__(self, depends_on=[boozer_surface])
         in_surface = boozer_surface.surface
         self.boozer_surface = boozer_surface
@@ -885,7 +932,6 @@ class BoozerResidualExact(Optimizable):
         s = SurfaceXYZTensorFourier(mpol=in_surface.mpol, ntor=in_surface.ntor, stellsym=in_surface.stellsym, nfp=in_surface.nfp, quadpoints_phi=phis, quadpoints_theta=thetas)
         s.set_dofs(in_surface.get_dofs())
 
-        self.constraint_weight = 0.0
         self.in_surface = in_surface
         self.surface = s
         self.biotsavart = bs
@@ -935,7 +981,7 @@ class BoozerResidualExact(Optimizable):
         G = self.boozer_surface.res['G']
         I = self._boozer_current_I()
         r, J = boozer_surface_residual(surface, iota, G, self.biotsavart, derivatives=1, weight_inv_modB=True, I=I)
-        rtil = np.concatenate((r/np.sqrt(num_points), [np.sqrt(self.constraint_weight)*(self.boozer_surface.label.J()-self.boozer_surface.targetlabel)]))
+        rtil = r / np.sqrt(num_points)
         self._J = 0.5*np.sum(rtil**2)
         
         booz_surf = self.boozer_surface
@@ -946,10 +992,7 @@ class BoozerResidualExact(Optimizable):
         dJ_by_dcoils = self.biotsavart.B_vjp(dJ_by_dB)
 
         # dJ_diota, dJ_dG  to the end of dJ_ds are on the end
-        dl = np.zeros((J.shape[1],))
-        dlabel_dsurface = self.boozer_surface.label.dJ_by_dsurfacecoefficients()
-        dl[:dlabel_dsurface.size] = dlabel_dsurface
-        Jtil = np.concatenate((J/np.sqrt(num_points), np.sqrt(self.constraint_weight) * dl[None, :]), axis=0)
+        Jtil = J / np.sqrt(num_points)
         dJ_ds = Jtil.T@rtil
         
         adj = forward_backward(P, L, U, dJ_ds)
@@ -1169,6 +1212,8 @@ class RunIdentityConfig:
     boozer_stage_refinement: bool
     refinement_boozer_stage: str
     refinement_maxiter: int
+    refinement_chunk_maxiter: int
+    refinement_max_stalled_chunks: int
     constraint_weight: float
     constraint_method: str
     vol_target: float
@@ -1247,6 +1292,8 @@ def make_run_identity_config(
         boozer_stage_refinement=bool(args.boozer_stage_refinement),
         refinement_boozer_stage=args.refinement_boozer_stage,
         refinement_maxiter=args.refinement_maxiter,
+        refinement_chunk_maxiter=args.refinement_chunk_maxiter,
+        refinement_max_stalled_chunks=args.refinement_max_stalled_chunks,
         constraint_weight=constraint_weight,
         constraint_method=constraint_method,
         vol_target=vol_target,
@@ -1329,6 +1376,12 @@ def validate_boozer_stage_refinement_args(args, constraint_weight):
         )
     if args.refinement_maxiter <= 0:
         raise ValueError("--refinement-maxiter must be positive when --boozer-stage-refinement is enabled")
+    if args.refinement_chunk_maxiter <= 0:
+        raise ValueError("--refinement-chunk-maxiter must be positive when --boozer-stage-refinement is enabled")
+    if args.refinement_max_stalled_chunks <= 0:
+        raise ValueError(
+            "--refinement-max-stalled-chunks must be positive when --boozer-stage-refinement is enabled"
+        )
 
 
 def evaluate_search_topology_gate(num_surfaces, outer_surface, bfield):
@@ -1574,6 +1627,164 @@ def refinement_improves_phase1_metric(
 
 def reported_boozer_stage(requested_stage, final_source_stage):
     return str(requested_stage if final_source_stage is None else final_source_stage)
+
+
+def refinement_chunk_improves_metric(reference_metric, candidate_metric):
+    return candidate_metric is not None and candidate_metric < reference_metric
+
+
+def run_refinement_chunk(
+    run_dict,
+    seed_incumbent,
+    refinement_stage,
+    rebuild_stage_objective_bundle,
+    refinement_chunk_maxiter,
+    maxcor,
+    ftol,
+    gtol,
+):
+    restore_incumbent_for_stage(
+        run_dict,
+        seed_incumbent,
+        refinement_stage,
+        rebuild_stage_objective_bundle,
+    )
+    run_dict["best_feasible_incumbent"] = None
+    run_dict["best_feasible_metric"] = None
+    run_dict["best_feasible_stage"] = None
+    maybe_update_best_feasible_incumbent(run_dict, refinement_stage)
+    chunk_result = minimize(
+        fun,
+        run_dict["accepted_x"].copy(),
+        jac=True,
+        method="L-BFGS-B",
+        callback=callback,
+        options={
+            "maxiter": refinement_chunk_maxiter,
+            "maxcor": maxcor,
+            "ftol": ftol,
+            "gtol": gtol,
+        },
+    )
+    return chunk_result, run_dict.get("best_feasible_incumbent")
+
+
+def run_chunked_refinement(
+    run_dict,
+    phase1_incumbent,
+    phase1_metric,
+    phase1_stage,
+    refinement_stage,
+    rebuild_stage_objective_bundle,
+    refinement_maxiter,
+    refinement_chunk_maxiter,
+    refinement_max_stalled_chunks,
+    maxcor,
+    ftol,
+    gtol,
+):
+    total_iterations = 0
+    chunk_count = 0
+    stalled_chunks = 0
+    best_metric = phase1_metric
+    current_seed_incumbent = phase1_incumbent
+    best_refinement_incumbent = None
+    last_chunk_success = False
+    last_chunk_message = None
+    abort_reason = None
+
+    while total_iterations < refinement_maxiter:
+        chunk_budget = min(refinement_chunk_maxiter, refinement_maxiter - total_iterations)
+        chunk_result, chunk_incumbent = run_refinement_chunk(
+            run_dict,
+            current_seed_incumbent,
+            refinement_stage,
+            rebuild_stage_objective_bundle,
+            chunk_budget,
+            maxcor,
+            ftol,
+            gtol,
+        )
+        chunk_count += 1
+        total_iterations += int(chunk_result.nit)
+        last_chunk_success = bool(chunk_result.success)
+        last_chunk_message = str(chunk_result.message)
+
+        chunk_metric, _ = refinement_improves_phase1_metric(
+            best_metric,
+            phase1_stage,
+            run_dict,
+            chunk_incumbent,
+            rebuild_stage_objective_bundle,
+        )
+        if refinement_chunk_improves_metric(best_metric, chunk_metric):
+            best_metric = float(chunk_metric)
+            best_refinement_incumbent = chunk_incumbent
+            current_seed_incumbent = chunk_incumbent
+            stalled_chunks = 0
+            if last_chunk_success:
+                abort_reason = "converged_after_improvement"
+                break
+            continue
+
+        stalled_chunks += 1
+        if total_iterations >= refinement_maxiter:
+            abort_reason = (
+                "budget_exhausted_after_improvement"
+                if best_refinement_incumbent is not None
+                else "budget_exhausted_without_improvement"
+            )
+            break
+        if last_chunk_success:
+            abort_reason = (
+                "converged_without_additional_improvement"
+                if best_refinement_incumbent is not None
+                else "converged_without_improvement"
+            )
+            break
+        if stalled_chunks >= refinement_max_stalled_chunks:
+            abort_reason = (
+                "stalled_after_improvement"
+                if best_refinement_incumbent is not None
+                else "stalled_without_improvement"
+            )
+            break
+
+    if abort_reason is None and total_iterations >= refinement_maxiter:
+        abort_reason = (
+            "budget_exhausted_after_improvement"
+            if best_refinement_incumbent is not None
+            else "budget_exhausted_without_improvement"
+        )
+
+    termination_message = last_chunk_message
+    if abort_reason is not None:
+        termination_message = (
+            abort_reason
+            if termination_message is None
+            else f"{termination_message}; {abort_reason}"
+        )
+    return {
+        "best_incumbent": best_refinement_incumbent,
+        "best_metric": None if best_refinement_incumbent is None else best_metric,
+        "iterations": total_iterations,
+        "chunks": chunk_count,
+        "termination_message": termination_message,
+        "abort_reason": abort_reason,
+        "success": last_chunk_success,
+    }
+
+
+def summarize_refinement_result(refinement_result, total_iterations, accepted_x):
+    termination_message = refinement_result["termination_message"]
+    optimizer_success = bool(refinement_result["success"])
+    result = SimpleNamespace(
+        x=accepted_x.copy(),
+        nit=total_iterations,
+        message=termination_message,
+        success=optimizer_success,
+    )
+    return termination_message, optimizer_success, result
 
 
 def evaluate_total_objective(
@@ -2317,6 +2528,10 @@ if __name__ == "__main__":
     args = apply_default_stage2_seed_args(parse_args())
     stage2_bs_path = build_stage2_bs_path(args)
     stage2_results_path, stage2_results = load_stage2_artifact_results(stage2_bs_path)
+    stage2_results = upgrade_legacy_stage2_artifact_results(
+        stage2_results,
+        known_num_tf_coils=args.num_tf_coils,
+    )
     R0 = float(stage2_results["MAJOR_RADIUS"])
     s = float(stage2_results["TOROIDAL_FLUX"])
     order = int(stage2_results.get("order", args.stage2_seed_order))
@@ -2350,7 +2565,7 @@ if __name__ == "__main__":
     CONFINEMENT_SURROGATE_WORST_WEIGHT = args.confinement_surrogate_worst_weight
     CONFINEMENT_SURROGATE_EARLY_WEIGHT = args.confinement_surrogate_early_weight
     iota_target = args.iota_target
-    num_tf_coils = args.num_tf_coils
+    num_tf_coils = resolve_stage2_num_tf_coils(stage2_results, args.num_tf_coils)
     if not (0.0 <= args.inner_surface_initial_weight <= 1.0):
         raise ValueError("--inner-surface-initial-weight must be between 0 and 1")
     if args.multisurface_ramp_iterations < 0:
@@ -2414,6 +2629,7 @@ if __name__ == "__main__":
 
     # Extract coil information
     coils = bs.coils
+    validate_loaded_stage2_coils_partition(coils, num_tf_coils)
     curves = [c.curve for c in coils]
     tf_coils = coils[:num_tf_coils]
     tf_curves = [c.curve for c in tf_coils]
@@ -2659,6 +2875,8 @@ if __name__ == "__main__":
     refinement_attempted = False
     refinement_success = None
     refinement_iterations = None
+    refinement_chunks = None
+    refinement_abort_reason = None
     refinement_termination_message = None
     final_source_stage = stage
     alm_result = None
@@ -2829,44 +3047,40 @@ if __name__ == "__main__":
         if phase1_incumbent is not None and phase1_metric is not None:
             refinement_attempted = True
             stage = args.refinement_boozer_stage
-            objective_bundle = restore_incumbent_for_stage(
+            refinement_result = run_chunked_refinement(
                 run_dict,
                 phase1_incumbent,
-                stage,
-                rebuild_stage_objective_bundle,
-            )
-            length_target = objective_bundle["length_target"]
-            run_dict["best_feasible_incumbent"] = None
-            run_dict["best_feasible_metric"] = None
-            run_dict["best_feasible_stage"] = None
-            maybe_update_best_feasible_incumbent(run_dict, stage)
-
-            refinement_result = minimize(
-                fun,
-                run_dict["accepted_x"].copy(),
-                jac=True,
-                method="L-BFGS-B",
-                callback=callback,
-                options={
-                    "maxiter": args.refinement_maxiter,
-                    "maxcor": args.maxcor,
-                    "ftol": ftol,
-                    "gtol": gtol,
-                },
-            )
-            refinement_iterations = refinement_result.nit
-            refinement_termination_message = str(refinement_result.message)
-            print(refinement_result.message)
-
-            refinement_incumbent = run_dict.get("best_feasible_incumbent")
-            refinement_metric, refinement_improved = refinement_improves_phase1_metric(
                 phase1_metric,
                 phase1_stage,
-                run_dict,
-                refinement_incumbent,
+                stage,
                 rebuild_stage_objective_bundle,
+                args.refinement_maxiter,
+                args.refinement_chunk_maxiter,
+                args.refinement_max_stalled_chunks,
+                args.maxcor,
+                ftol,
+                gtol,
             )
-            if refinement_improved:
+            refinement_iterations = refinement_result["iterations"]
+            refinement_chunks = refinement_result["chunks"]
+            refinement_abort_reason = refinement_result["abort_reason"]
+            refinement_termination_message = refinement_result["termination_message"]
+            if refinement_termination_message is not None:
+                print(refinement_termination_message)
+
+            refinement_incumbent = refinement_result["best_incumbent"]
+            refinement_metric = refinement_result["best_metric"]
+            refinement_total_iterations = (res_nit or 0) + refinement_iterations
+            (
+                refinement_status_message,
+                refinement_status_success,
+                refinement_status_result,
+            ) = summarize_refinement_result(
+                refinement_result,
+                refinement_total_iterations,
+                run_dict["accepted_x"],
+            )
+            if refinement_incumbent is not None:
                 refinement_success = True
                 stage = args.refinement_boozer_stage
                 objective_bundle = restore_incumbent_for_stage(
@@ -2877,13 +3091,13 @@ if __name__ == "__main__":
                 )
                 length_target = objective_bundle["length_target"]
                 run_dict["best_feasible_incumbent"] = refinement_incumbent
-                run_dict["best_feasible_metric"] = accepted_search_metric(run_dict)
+                run_dict["best_feasible_metric"] = refinement_metric
                 run_dict["best_feasible_stage"] = stage
                 final_source_stage = stage
-                res = refinement_result
-                res_nit = (res_nit or 0) + refinement_result.nit
-                termination_message = refinement_termination_message
-                optimizer_success = bool(refinement_result.success)
+                res_nit = refinement_total_iterations
+                termination_message = refinement_status_message
+                optimizer_success = refinement_status_success
+                res = refinement_status_result
             else:
                 refinement_success = False
                 stage = phase1_stage
@@ -2898,13 +3112,10 @@ if __name__ == "__main__":
                 run_dict["best_feasible_metric"] = phase1_metric
                 run_dict["best_feasible_stage"] = phase1_stage
                 final_source_stage = phase1_stage
-                res_nit = (res_nit or 0) + refinement_result.nit
-                res = SimpleNamespace(
-                    x=run_dict["accepted_x"].copy(),
-                    nit=res_nit,
-                    message=termination_message,
-                    success=optimizer_success,
-                )
+                res_nit = refinement_total_iterations
+                termination_message = refinement_status_message
+                optimizer_success = refinement_status_success
+                res = refinement_status_result
 
     if alm_result is not None:
         set_alm_runtime_state(alm_result.multipliers, alm_result.penalty)
@@ -3060,10 +3271,14 @@ if __name__ == "__main__":
         "BOOZER_STAGE_REFINEMENT": bool(args.boozer_stage_refinement),
         "REFINEMENT_BOOZER_STAGE": args.refinement_boozer_stage if args.boozer_stage_refinement else None,
         "REFINEMENT_MAXITER": args.refinement_maxiter if args.boozer_stage_refinement else None,
+        "REFINEMENT_CHUNK_MAXITER": args.refinement_chunk_maxiter if args.boozer_stage_refinement else None,
+        "REFINEMENT_MAX_STALLED_CHUNKS": args.refinement_max_stalled_chunks if args.boozer_stage_refinement else None,
         "REFINEMENT_ATTEMPTED": refinement_attempted,
         "REFINEMENT_SUCCESS": refinement_success,
         "REFINEMENT_ITERATIONS": refinement_iterations,
+        "REFINEMENT_CHUNKS": refinement_chunks,
         "REFINEMENT_TERMINATION_MESSAGE": refinement_termination_message,
+        "REFINEMENT_ABORT_REASON": refinement_abort_reason,
         "FINAL_SOURCE_STAGE": final_source_stage,
         "CONSTRAINT_WEIGHT": CONSTRAINT_WEIGHT,
         "CONSTRAINT_METHOD": CONSTRAINT_METHOD,
