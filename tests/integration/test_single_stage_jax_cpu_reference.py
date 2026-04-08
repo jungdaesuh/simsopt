@@ -4828,6 +4828,16 @@ class TestTraceableObjective:
         )
         return runtime_bundle, coil_dofs
 
+    @staticmethod
+    def _assert_runtime_bundle_core_reused(runtime_bundle_a, runtime_bundle_b):
+        assert runtime_bundle_a["objective"] is runtime_bundle_b["objective"]
+        assert runtime_bundle_a["value_and_grad"] is runtime_bundle_b["value_and_grad"]
+
+    @staticmethod
+    def _assert_runtime_bundle_core_rebuilt(runtime_bundle_a, runtime_bundle_b):
+        assert runtime_bundle_a["objective"] is not runtime_bundle_b["objective"]
+        assert runtime_bundle_a["value_and_grad"] is not runtime_bundle_b["value_and_grad"]
+
     def test_runtime_bundle_success_filter_blocks_infeasible_states(self, boozer_setup):
         """A target-lane success filter must demote infeasible states to failure."""
         (_, _, _, _, bs_jax, _, booz_jax, _) = boozer_setup
@@ -4856,6 +4866,94 @@ class TestTraceableObjective:
             err_msg="Fused value_and_grad path must use the same gated failure value.",
         )
         assert np.all(np.isfinite(np.asarray(gated_grad)))
+
+    def test_runtime_bundle_reuses_cached_compiled_callables(self, boozer_setup):
+        """Repeated bundle construction should reuse the same compiled target-lane callables."""
+        (_, _, _, _, bs_jax, _, booz_jax, _) = boozer_setup
+        runtime_bundle_a, _ = self._make_traceable_runtime_bundle(
+            bs_jax,
+            booz_jax,
+            include_profile_suite=True,
+        )
+        runtime_bundle_b, _ = self._make_traceable_runtime_bundle(
+            bs_jax,
+            booz_jax,
+            include_profile_suite=True,
+        )
+
+        self._assert_runtime_bundle_core_reused(runtime_bundle_a, runtime_bundle_b)
+        assert (
+            runtime_bundle_a["profile_suite"]["forward_value"]
+            is runtime_bundle_b["profile_suite"]["forward_value"]
+        )
+        assert (
+            runtime_bundle_a["profile_suite"]["field_eval"]
+            is runtime_bundle_b["profile_suite"]["field_eval"]
+        )
+        assert (
+            runtime_bundle_a["profile_suite"]["field_eval_sharding"]
+            is runtime_bundle_b["profile_suite"]["field_eval_sharding"]
+        )
+
+    def test_runtime_bundle_rebuilds_when_target_changes(self, boozer_setup):
+        """Changing the target objective inputs must invalidate the cached runtime bundle."""
+        (_, _, _, _, bs_jax, _, booz_jax, _) = boozer_setup
+        runtime_bundle_a, _ = self._make_traceable_runtime_bundle(
+            bs_jax,
+            booz_jax,
+            include_profile_suite=False,
+        )
+        runtime_bundle_b, _ = self._make_traceable_runtime_bundle(
+            bs_jax,
+            booz_jax,
+            iota_target_shift=0.05,
+            include_profile_suite=False,
+        )
+
+        self._assert_runtime_bundle_core_rebuilt(runtime_bundle_a, runtime_bundle_b)
+
+    def test_runtime_bundle_rebuilds_after_solver_option_change_post_compile(
+        self,
+        boozer_setup,
+    ):
+        """Changing the traced inner-solver options must invalidate the cached bundle."""
+        (_, _, _, _, bs_jax, _, booz_jax, _) = boozer_setup
+        runtime_bundle_a, coil_dofs = self._make_traceable_runtime_bundle(
+            bs_jax,
+            booz_jax,
+            include_profile_suite=False,
+        )
+
+        first_value = runtime_bundle_a["objective"](coil_dofs)
+        assert np.isfinite(float(first_value))
+
+        original_method = booz_jax._resolve_optimizer_method()
+        original_algorithm = booz_jax.options["least_squares_algorithm"]
+        booz_jax.options["least_squares_algorithm"] = (
+            "quasi-newton" if original_algorithm == "lm" else "lm"
+        )
+        booz_jax.options["limited_memory"] = False
+
+        assert booz_jax._resolve_optimizer_method() != original_method
+
+        runtime_bundle_b, _ = self._make_traceable_runtime_bundle(
+            bs_jax,
+            booz_jax,
+            include_profile_suite=False,
+        )
+
+        self._assert_runtime_bundle_core_rebuilt(runtime_bundle_a, runtime_bundle_b)
+        second_value = runtime_bundle_b["objective"](coil_dofs)
+        second_value_vg, second_grad = runtime_bundle_b["value_and_grad"](coil_dofs)
+
+        assert np.isfinite(float(second_value))
+        np.testing.assert_allclose(
+            float(second_value_vg),
+            float(second_value),
+            rtol=0.0,
+            atol=0.0,
+        )
+        assert np.all(np.isfinite(np.asarray(second_grad)))
 
     def test_single_stage_hardware_success_filter_uses_cached_pytree_extraction_state(
         self,
