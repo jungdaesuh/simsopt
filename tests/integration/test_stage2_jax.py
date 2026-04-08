@@ -84,7 +84,6 @@ from simsopt.objectives.stage2_target_objective_jax import (
     stage2_target_optimizer_state_to_dofs,
 )
 
-
 REPO_ROOT = Path(__file__).resolve().parents[2]
 STAGE2_SCRIPT = (
     REPO_ROOT
@@ -259,15 +258,38 @@ def _fresh_import(module_name):
 
 
 def _run_stage2_script(*args):
-    return subprocess.run(
-        [
-            sys.executable,
-            str(STAGE2_SCRIPT),
-            *args,
-        ],
+    command = [
+        sys.executable,
+        str(STAGE2_SCRIPT),
+        *args,
+    ]
+    if os.environ.get("SIMSOPT_STAGE2_TEST_STREAM_LOGS") != "1":
+        return subprocess.run(
+            command,
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+        )
+
+    process = subprocess.Popen(
+        command,
         cwd=REPO_ROOT,
-        capture_output=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
         text=True,
+        bufsize=1,
+    )
+    streamed_output = []
+    assert process.stdout is not None
+    for line in process.stdout:
+        sys.stdout.write(line)
+        sys.stdout.flush()
+        streamed_output.append(line)
+    return subprocess.CompletedProcess(
+        command,
+        process.wait(),
+        stdout="".join(streamed_output),
+        stderr="",
     )
 
 
@@ -357,6 +379,7 @@ def _isolated_backend_runtime(mode: str):
     from simsopt.jax_core import invalidate_kernel_cache
 
     previous_env = {name: os.environ.get(name) for name in _BACKEND_RUNTIME_ENV_VARS}
+    invalidate_backend_cache()
     try:
         if mode == "native_cpu":
             set_backend(mode, strict=False, configure_runtime=False)
@@ -365,6 +388,7 @@ def _isolated_backend_runtime(mode: str):
         invalidate_kernel_cache()
         yield
     finally:
+        invalidate_backend_cache()
         for name, value in previous_env.items():
             if value is None:
                 os.environ.pop(name, None)
@@ -4727,6 +4751,30 @@ class TestStage2OptimizerContract:
             )
             assert "terms" not in payload["composite"]
             assert "sharding_summaries" not in payload
+
+    def test_stage2_probe_payload_reuses_cached_raw_term_jacobian_helper(self):
+        stage2_script = _load_stage2_script_module()
+
+        def raw_terms(x):
+            x = jax.numpy.asarray(x, dtype=jax.numpy.float64)
+            return jax.numpy.asarray(
+                (
+                    jax.numpy.sum(jax.numpy.square(x + 1.0)),
+                    x[0] + 2.0 * x[1],
+                ),
+                dtype=jax.numpy.float64,
+            )
+
+        cached_jacobian = stage2_script._cached_raw_terms_jacobian(raw_terms)
+        assert cached_jacobian is stage2_script._cached_raw_terms_jacobian(raw_terms)
+
+        dofs = np.asarray([0.25, -0.5], dtype=float)
+        np.testing.assert_allclose(
+            np.asarray(cached_jacobian(dofs), dtype=float),
+            np.asarray(jax.jacrev(raw_terms)(dofs), dtype=float),
+            rtol=0.0,
+            atol=0.0,
+        )
 
     def test_compute_mean_abs_relbn_explicitly_materializes_jax_field_output(
         self, monkeypatch

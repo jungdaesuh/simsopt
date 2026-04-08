@@ -7,6 +7,13 @@ import jax.numpy as jnp
 import numpy as np
 
 
+def _explicit_device_array(value, *, dtype) -> jax.Array:
+    from simsopt.backend import maybe_initialize_distributed_jax
+
+    maybe_initialize_distributed_jax()
+    return jax.device_put(np.asarray(value, dtype=np.dtype(dtype)))
+
+
 def _shape_tuple(shape) -> tuple[int, ...]:
     if np.isscalar(shape):
         return (int(shape),)
@@ -30,7 +37,7 @@ def as_jax_array(value, *, dtype) -> jax.Array:
     if isinstance(value, (list, tuple)) and _contains_jax_leaves(value):
         return jnp.asarray(value, dtype=dtype)
     if isinstance(value, (np.ndarray, np.generic, list, tuple)) or np.isscalar(value):
-        return jax.device_put(np.asarray(value, dtype=np.dtype(dtype)))
+        return _explicit_device_array(value, dtype=dtype)
     return jnp.asarray(value, dtype=dtype)
 
 
@@ -59,19 +66,25 @@ def concat_jax_float64(*parts) -> jax.Array:
 def scalar_at_axis0(array, index: int) -> jax.Array:
     selector = np.zeros(int(array.shape[0]), dtype=np.float64)
     selector[int(index)] = 1.0
-    return jnp.dot(array, jax.device_put(selector))
+    return jnp.dot(array, _explicit_device_array(selector, dtype=np.float64))
 
 
 def scalar_like(reference, value) -> jax.Array:
-    return jax.device_put(np.asarray(value, dtype=np.dtype(reference.dtype)))
+    return _explicit_device_array(value, dtype=reference.dtype)
 
 
 def zeros(shape, dtype=jnp.float64) -> jax.Array:
-    return jax.device_put(np.zeros(_shape_tuple(shape), dtype=np.dtype(dtype)))
+    return _explicit_device_array(
+        np.zeros(_shape_tuple(shape), dtype=np.dtype(dtype)),
+        dtype=dtype,
+    )
 
 
 def eye(size: int, dtype=jnp.float64) -> jax.Array:
-    return jax.device_put(np.eye(int(size), dtype=np.dtype(dtype)))
+    return _explicit_device_array(
+        np.eye(int(size), dtype=np.dtype(dtype)),
+        dtype=dtype,
+    )
 
 
 def _explicit_inv_impl(x):

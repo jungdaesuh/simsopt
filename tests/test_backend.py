@@ -7,6 +7,7 @@ import sys
 import types
 import warnings
 
+import numpy as np
 import pytest
 
 _BACKEND_ENV_VARS = (
@@ -36,13 +37,44 @@ _BACKEND_ENV_VARS = (
     "JAX_PLATFORMS",
     "CUDA_VISIBLE_DEVICES",
 )
+_BACKEND_MODULE_NAMES = (
+    "simsopt",
+    "simsopt.backend",
+    "simsopt.backend.runtime",
+)
+_MISSING_MODULE = object()
+_backend_module_guard_reloaded: dict[str, object] = {}
+
+
+def _snapshot_backend_modules() -> dict[str, object]:
+    return {name: sys.modules.get(name, _MISSING_MODULE) for name in _BACKEND_MODULE_NAMES}
+
+
+def _restore_backend_module_snapshot(snapshot: dict[str, object]) -> None:
+    for name, module in snapshot.items():
+        if module is _MISSING_MODULE:
+            sys.modules.pop(name, None)
+        else:
+            sys.modules[name] = module
+
+
+def _clear_backend_modules() -> None:
+    for name in reversed(_BACKEND_MODULE_NAMES):
+        sys.modules.pop(name, None)
+
+
+@pytest.fixture(autouse=True)
+def _restore_backend_modules():
+    snapshot = _snapshot_backend_modules()
+    try:
+        yield
+    finally:
+        _restore_backend_module_snapshot(snapshot)
 
 
 def _fresh_backend():
     package_root = Path(__file__).resolve().parents[1] / "src" / "simsopt"
-    sys.modules.pop("simsopt.backend.runtime", None)
-    sys.modules.pop("simsopt.backend", None)
-    sys.modules.pop("simsopt", None)
+    _clear_backend_modules()
     package = types.ModuleType("simsopt")
     package.__path__ = [str(package_root)]
     sys.modules["simsopt"] = package
@@ -985,6 +1017,62 @@ def test_maybe_initialize_distributed_jax_invalidates_preinit_chunk_caches(
     assert [cmd[-2:] for cmd in calls] == [["-i", "3"], ["-i", "1"], ["-i", "1"]]
 
 
+def test_as_jax_array_initializes_distributed_runtime_before_device_put(monkeypatch):
+    _clear_backend_env(monkeypatch)
+    backend = _fresh_backend()
+    math_utils = importlib.import_module("simsopt.jax_core._math_utils")
+
+    backend.set_backend("jax_gpu_fast", configure_runtime=False)
+    _set_distributed_init_env(monkeypatch)
+    backend.invalidate_backend_cache()
+
+    distributed_state = {"initialized": False}
+    initialize_calls: list[dict[str, object]] = []
+    expected_initialize_call = {
+        "coordinator_address": "127.0.0.1:12345",
+        "num_processes": 4,
+        "process_id": 1,
+        "local_device_ids": None,
+    }
+
+    def _initialize(
+        *,
+        coordinator_address,
+        num_processes,
+        process_id,
+        local_device_ids,
+    ):
+        initialize_calls.append(
+            {
+                "coordinator_address": coordinator_address,
+                "num_processes": num_processes,
+                "process_id": process_id,
+                "local_device_ids": local_device_ids,
+            }
+        )
+        distributed_state["initialized"] = True
+
+    def _device_put(value):
+        assert distributed_state["initialized"] is True
+        return np.asarray(value)
+
+    monkeypatch.setattr(
+        math_utils.jax,
+        "distributed",
+        types.SimpleNamespace(
+            is_initialized=lambda: distributed_state["initialized"],
+            initialize=_initialize,
+        ),
+        raising=False,
+    )
+    monkeypatch.setattr(math_utils.jax, "device_put", _device_put)
+
+    value = math_utils.as_jax_float64([1.0, 2.0])
+
+    np.testing.assert_allclose(value, np.array([1.0, 2.0], dtype=np.float64))
+    assert initialize_calls == [expected_initialize_call]
+
+
 def test_explicit_current_mode_policy_preserves_strict_state(monkeypatch):
     _clear_backend_env(monkeypatch)
     backend = _fresh_backend()
@@ -1169,3 +1257,64 @@ def test_warn_fallback_helper_ignores_strict_jax_mode(monkeypatch):
     )
 
     assert caught == []
+
+
+def test_backend_state_guard_sequence_01_leaves_strict_backend_override():
+    backend = _fresh_backend()
+    backend.set_backend("jax_gpu_parity", strict=True, configure_runtime=False)
+
+    assert os.environ["SIMSOPT_BACKEND_MODE"] == "jax_gpu_parity"
+    assert os.environ["SIMSOPT_BACKEND_STRICT"] == "1"
+    assert backend.get_backend_config().strict is True
+
+
+def test_backend_state_guard_sequence_02_restores_native_cpu_defaults():
+    backend = _fresh_backend()
+    config = backend.get_backend_config()
+
+    assert config.mode == "native_cpu"
+    assert config.strict is False
+
+
+def test_backend_state_guard_sequence_03_leaves_distributed_fast_runtime():
+    backend = _fresh_backend()
+    backend.set_backend("jax_gpu_fast", configure_runtime=False)
+    os.environ["SIMSOPT_JAX_DISTRIBUTED_INIT"] = "1"
+    os.environ["SIMSOPT_JAX_COORDINATOR_ADDRESS"] = "127.0.0.1:12345"
+    os.environ["SIMSOPT_JAX_NUM_PROCESSES"] = "4"
+    os.environ["SIMSOPT_JAX_PROCESS_ID"] = "1"
+    backend.invalidate_backend_cache()
+
+    config = backend.get_distributed_runtime_config()
+
+    assert backend.get_backend_config().mode == "jax_gpu_fast"
+    assert config.enabled is True
+    assert config.initialized is False
+
+
+def test_backend_state_guard_sequence_04_restores_public_lane_after_distributed_runtime():
+    backend = _fresh_backend()
+    config = backend.get_backend_config()
+    tuning = backend.get_sharding_tuning()
+
+    assert config.mode == "native_cpu"
+    assert config.strict is False
+    assert tuning.mode == "native_cpu"
+    assert tuning.distributed_initialized is False
+
+
+def test_backend_module_guard_sequence_01_reloads_backend_modules():
+    runtime_module = sys.modules.get("simsopt.backend.runtime")
+
+    reloaded_backend = _fresh_backend()
+    _backend_module_guard_reloaded.update(_snapshot_backend_modules())
+
+    assert sys.modules["simsopt.backend"] is reloaded_backend
+    if runtime_module is not None:
+        assert sys.modules["simsopt.backend.runtime"] is not runtime_module
+
+
+def test_backend_module_guard_sequence_02_restores_original_backend_modules():
+    for name in _BACKEND_MODULE_NAMES:
+        current = sys.modules.get(name)
+        assert current is None or current is not _backend_module_guard_reloaded[name]
