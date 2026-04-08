@@ -885,8 +885,6 @@ class BoozerResidualExact(Optimizable):
         s = SurfaceXYZTensorFourier(mpol=in_surface.mpol, ntor=in_surface.ntor, stellsym=in_surface.stellsym, nfp=in_surface.nfp, quadpoints_phi=phis, quadpoints_theta=thetas)
         s.set_dofs(in_surface.get_dofs())
 
-        import warnings
-        warnings.warn("BoozerResidualExact: constraint_weight forced to 0.0", stacklevel=2)
         self.constraint_weight = 0.0
         self.in_surface = in_surface
         self.surface = s
