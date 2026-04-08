@@ -753,6 +753,109 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertIsNone(target_lane_profile)
         self.assertEqual(runtime_calls, [(False, success_filter_marker)])
 
+    def test_prepare_target_lane_outer_objectives_still_builds_objective_when_filter_disabled(
+        self,
+    ):
+        module = self.load_module()
+        objective_marker = object()
+        profile_marker = object()
+
+        with patch.object(
+            module,
+            "build_single_stage_target_lane_hardware_success_filter",
+            side_effect=AssertionError(
+                "success filter should not be built when explicitly disabled"
+            ),
+        ), patch.object(
+            module,
+            "build_target_lane_outer_objectives",
+            return_value=(objective_marker, None, profile_marker),
+        ) as build_objectives:
+            (
+                scalar_fun,
+                value_and_grad_fun,
+                target_lane_profile,
+                success_filter,
+            ) = module.prepare_target_lane_outer_objectives(
+                object(),
+                object(),
+                object(),
+                object(),
+                object(),
+                use_target_lane=True,
+                use_value_and_grad=False,
+                profile_target_lane=True,
+                disable_success_filter=True,
+                cc_dist=0.05,
+                cs_dist=0.01,
+                ss_dist=0.02,
+                curvature_threshold=40.0,
+            )
+
+        self.assertIs(scalar_fun, objective_marker)
+        self.assertIsNone(value_and_grad_fun)
+        self.assertIs(target_lane_profile, profile_marker)
+        self.assertIsNone(success_filter)
+        build_objectives.assert_called_once_with(
+            unittest.mock.ANY,
+            unittest.mock.ANY,
+            unittest.mock.ANY,
+            use_value_and_grad=False,
+            profile_target_lane=True,
+            success_filter=None,
+        )
+
+    def test_prepare_target_lane_outer_objectives_threads_enabled_success_filter(
+        self,
+    ):
+        module = self.load_module()
+        success_filter_marker = object()
+        value_and_grad_marker = object()
+
+        with patch.object(
+            module,
+            "build_single_stage_target_lane_hardware_success_filter",
+            return_value=success_filter_marker,
+        ) as build_success_filter, patch.object(
+            module,
+            "build_target_lane_outer_objectives",
+            return_value=(None, value_and_grad_marker, None),
+        ) as build_objectives:
+            (
+                scalar_fun,
+                value_and_grad_fun,
+                target_lane_profile,
+                success_filter,
+            ) = module.prepare_target_lane_outer_objectives(
+                object(),
+                object(),
+                object(),
+                object(),
+                object(),
+                use_target_lane=True,
+                use_value_and_grad=True,
+                profile_target_lane=False,
+                disable_success_filter=False,
+                cc_dist=0.05,
+                cs_dist=0.01,
+                ss_dist=0.02,
+                curvature_threshold=40.0,
+            )
+
+        self.assertIsNone(scalar_fun)
+        self.assertIs(value_and_grad_fun, value_and_grad_marker)
+        self.assertIsNone(target_lane_profile)
+        self.assertIs(success_filter, success_filter_marker)
+        build_success_filter.assert_called_once()
+        build_objectives.assert_called_once_with(
+            unittest.mock.ANY,
+            unittest.mock.ANY,
+            unittest.mock.ANY,
+            use_value_and_grad=True,
+            profile_target_lane=False,
+            success_filter=success_filter_marker,
+        )
+
     def test_resolve_effective_target_lane_sync_forces_final_only_in_benchmark_mode(
         self,
     ):

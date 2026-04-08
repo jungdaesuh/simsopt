@@ -1466,6 +1466,70 @@ def build_target_lane_outer_objectives(
     )
 
 
+def prepare_target_lane_outer_objectives(
+    boozer_surface,
+    bs,
+    banana_curve,
+    VV,
+    iota_target,
+    *,
+    use_target_lane: bool,
+    use_value_and_grad: bool,
+    profile_target_lane: bool,
+    disable_success_filter: bool,
+    cc_dist,
+    cs_dist,
+    ss_dist,
+    curvature_threshold,
+):
+    """Build target-lane outer objectives with an optional hard success filter."""
+    target_scalar_objective = None
+    target_value_and_grad_objective = None
+    target_lane_profile = None
+    target_lane_success_filter = None
+
+    if not use_target_lane:
+        return (
+            target_scalar_objective,
+            target_value_and_grad_objective,
+            target_lane_profile,
+            target_lane_success_filter,
+        )
+
+    if not disable_success_filter:
+        target_lane_success_filter = (
+            build_single_stage_target_lane_hardware_success_filter(
+                boozer_surface,
+                bs,
+                banana_curve,
+                VV,
+                cc_dist=cc_dist,
+                cs_dist=cs_dist,
+                ss_dist=ss_dist,
+                curvature_threshold=curvature_threshold,
+            )
+        )
+
+    (
+        target_scalar_objective,
+        target_value_and_grad_objective,
+        target_lane_profile,
+    ) = build_target_lane_outer_objectives(
+        boozer_surface,
+        bs,
+        iota_target,
+        use_value_and_grad=use_value_and_grad,
+        profile_target_lane=profile_target_lane,
+        success_filter=target_lane_success_filter,
+    )
+    return (
+        target_scalar_objective,
+        target_value_and_grad_objective,
+        target_lane_profile,
+        target_lane_success_filter,
+    )
+
+
 def select_boozer_residual_class(use_jax, boozer_kind):
     """Select the stage- and backend-matched Boozer residual wrapper."""
     if boozer_kind == "exact":
@@ -2661,34 +2725,26 @@ if __name__ == "__main__":
         print("Skipping single-stage optimizer because --init-only was provided.")
     else:
         outer_optimizer_start_s = _perf_counter_s()
-        target_scalar_objective = None
-        target_value_and_grad_objective = None
-        target_lane_success_filter = None
-        if use_target_lane and not args.disable_target_lane_success_filter:
-            target_lane_success_filter = (
-                build_single_stage_target_lane_hardware_success_filter(
-                    boozer_surface,
-                    bs,
-                    banana_curve,
-                    VV,
-                    cc_dist=CC_DIST,
-                    cs_dist=CS_DIST,
-                    ss_dist=SS_DIST,
-                    curvature_threshold=CURVATURE_THRESHOLD,
-                )
-            )
-            (
-                target_scalar_objective,
-                target_value_and_grad_objective,
-                target_lane_profile,
-            ) = build_target_lane_outer_objectives(
-                boozer_surface,
-                bs,
-                iota_target,
-                use_value_and_grad=use_target_lane_vg,
-                profile_target_lane=args.profile_target_lane,
-                success_filter=target_lane_success_filter,
-            )
+        (
+            target_scalar_objective,
+            target_value_and_grad_objective,
+            target_lane_profile,
+            target_lane_success_filter,
+        ) = prepare_target_lane_outer_objectives(
+            boozer_surface,
+            bs,
+            banana_curve,
+            VV,
+            iota_target,
+            use_target_lane=use_target_lane,
+            use_value_and_grad=use_target_lane_vg,
+            profile_target_lane=args.profile_target_lane,
+            disable_success_filter=args.disable_target_lane_success_filter,
+            cc_dist=CC_DIST,
+            cs_dist=CS_DIST,
+            ss_dist=SS_DIST,
+            curvature_threshold=CURVATURE_THRESHOLD,
+        )
         accepted_step_callback = resolve_target_lane_accepted_step_callback(
             adapter,
             use_target_lane=use_target_lane,
