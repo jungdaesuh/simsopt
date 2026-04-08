@@ -2065,6 +2065,78 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertIsNone(call_sdofs)
         np.testing.assert_array_equal(booz.surface.x, sdofs_warm)
 
+    def test_evaluate_candidate_failure_restores_cpu_state_on_legacy_path(self):
+        """Legacy CPU warm-start path must restore state after failed evaluation."""
+        module = self.load_module()
+        CpuBoozerSurface = module.BoozerSurface
+
+        class _Surface:
+            def __init__(self):
+                self.x = np.array([9.0, 8.0, 7.0])
+
+            def volume(self):
+                return 1.0
+
+            def is_self_intersecting(self):
+                return False
+
+        class _CpuMock(CpuBoozerSurface):
+            supports_explicit_surface_warm_start = False
+
+            def __init__(self):
+                self.surface = _Surface()
+                self.res = {
+                    "success": True,
+                    "iter": 1,
+                    "iota": -1.0,
+                    "G": -2.0,
+                }
+                self.run_code_calls = []
+
+            def run_code(self, iota, G=None, *, sdofs=None):
+                self.run_code_calls.append((iota, G, sdofs))
+                self.surface.x = np.array([-9.0, -8.0, -7.0])
+                self.res["success"] = False
+                self.res["iota"] = 99.0
+                self.res["G"] = 77.0
+                return self.res
+
+        class _JF:
+            x = np.zeros(5)
+
+            def J(self):
+                raise AssertionError("JF.J must not be called on failed solve")
+
+            def dJ(self):
+                raise AssertionError("JF.dJ must not be called on failed solve")
+
+        last_J = 12.0
+        last_dJ = np.arange(5.0)
+        expected_failure_value = last_J + max(abs(last_J), 1.0)
+        sdofs_warm = np.array([1.0, 2.0, 3.0])
+        run_dict = self._make_candidate_run_dict(sdofs_warm)
+        run_dict["J"] = last_J
+        run_dict["dJ"] = last_dJ.copy()
+        booz = _CpuMock()
+        jf = _JF()
+
+        with patch.object(
+            module, "update_self_intersection_status", return_value=False
+        ):
+            J_out, dJ_out = module.evaluate_candidate(np.ones(5), run_dict, booz, jf)
+
+        self.assertEqual(len(booz.run_code_calls), 1)
+        call_iota, call_G, call_sdofs = booz.run_code_calls[0]
+        self.assertEqual(call_iota, TEST_IOTA)
+        self.assertEqual(call_G, TEST_G0)
+        self.assertIsNone(call_sdofs)
+        self.assertEqual(J_out, expected_failure_value)
+        np.testing.assert_array_equal(dJ_out, last_dJ)
+        np.testing.assert_array_equal(booz.surface.x, sdofs_warm)
+        self.assertEqual(booz.res["iota"], TEST_IOTA)
+        self.assertEqual(booz.res["G"], TEST_G0)
+        self.assertFalse(booz.res["success"])
+
     def test_snapshot_restore_round_trip(self):
         """Wave 1.4: snapshot → restore → snapshot produces identical arrays."""
         module = self.load_module()

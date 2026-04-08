@@ -1780,10 +1780,10 @@ def _evaluate_candidate_impl(
     Returns:
         (J, dJ): Objective value and gradient.
     """
-    supports_explicit_surface_warm_start = (
-        _boozer_surface_supports_explicit_surface_warm_start(boozer_surface)
+    uses_legacy_warm_start = not _boozer_surface_supports_explicit_surface_warm_start(
+        boozer_surface
     )
-    if not supports_explicit_surface_warm_start:
+    if uses_legacy_warm_start:
         _restore_cpu_boozer_state(boozer_surface, run_dict)
         boozer_surface.run_code(run_dict["iota"], run_dict["G"])
     else:
@@ -1826,7 +1826,7 @@ def _evaluate_candidate_impl(
         J = run_dict["J"] + max(abs(run_dict["J"]), 1.0)
         dJ = run_dict["dJ"].copy()
 
-        if is_cpu:
+        if uses_legacy_warm_start:
             _restore_cpu_boozer_state(boozer_surface, run_dict)
 
     return J, dJ
@@ -2064,8 +2064,10 @@ class SingleStageAdapter:
         """Objective for L-BFGS — delegates to evaluate_candidate.
 
         Sets ``JF.x = x`` to update coil DOFs on the Optimizable graph
-        before delegating.  This is the only mutation site for the outer
-        loop — ``evaluate_candidate`` itself is mutation-free.
+        before delegating.  This is the only place the outer loop writes
+        candidate coil DOFs onto ``JF``; ``evaluate_candidate`` then
+        updates ``run_dict`` and warm-start state as part of the explicit
+        outer-loop contract.
         """
         x_array = _single_stage_optimizer_dofs_array(x)
         self.apply_coil_dofs(x_array)
