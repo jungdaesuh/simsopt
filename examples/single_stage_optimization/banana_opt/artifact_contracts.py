@@ -4,6 +4,24 @@ import math
 from pathlib import Path
 
 
+def upgrade_legacy_stage2_artifact_results(
+    stage2_artifact_results: dict,
+    *,
+    known_num_tf_coils: int | None = None,
+) -> dict:
+    upgraded_results = dict(stage2_artifact_results)
+    if upgraded_results.get("NUM_TF_COILS") is None and known_num_tf_coils is not None:
+        upgraded_results["NUM_TF_COILS"] = int(known_num_tf_coils)
+    if upgraded_results.get("TF_CURRENT_SUM_ABS_A") is None:
+        tf_current_A = upgraded_results.get("TF_CURRENT_A")
+        num_tf_coils = upgraded_results.get("NUM_TF_COILS")
+        if tf_current_A is not None and num_tf_coils is not None:
+            upgraded_results["TF_CURRENT_SUM_ABS_A"] = float(tf_current_A) * float(
+                num_tf_coils
+            )
+    return upgraded_results
+
+
 def require_stage2_artifact_float(
     stage2_artifact_results: dict,
     key: str,

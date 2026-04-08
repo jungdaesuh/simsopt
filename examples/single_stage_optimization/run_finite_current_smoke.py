@@ -24,6 +24,7 @@ from workflow_runner_common import (  # noqa: E402
 from banana_opt.artifact_contracts import (  # noqa: E402
     resolve_expected_stage2_tf_current_A,
     resolve_expected_stage2_tf_current_sum_abs_A,
+    upgrade_legacy_stage2_artifact_results,
     validate_smoke_results as _validate_smoke_results_impl,
 )
 from banana_opt.current_contracts import physical_current_to_boozer_I  # noqa: E402
@@ -232,6 +233,9 @@ def main() -> int:
     if not args.dry_run:
         stage2_results_path, stage2_artifact_results = load_stage2_artifact_results(
             stage2_bs_path
+        )
+        stage2_artifact_results = upgrade_legacy_stage2_artifact_results(
+            stage2_artifact_results
         )
         expected_stage2_tf_current_A = resolve_expected_stage2_tf_current_A(
             stage2_artifact_results

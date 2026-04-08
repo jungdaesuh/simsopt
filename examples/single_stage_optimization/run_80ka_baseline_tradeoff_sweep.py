@@ -29,6 +29,7 @@ from workflow_runner_common import (  # noqa: E402
 )
 from banana_opt.artifact_contracts import (  # noqa: E402
     expected_locked_baseline_stage2_artifact_metadata as _expected_locked_baseline_stage2_artifact_metadata_impl,
+    upgrade_legacy_stage2_artifact_results,
     validate_stage2_artifact_metadata,
 )
 
@@ -222,6 +223,10 @@ def load_locked_baseline_stage2_artifact(
 ) -> tuple[Path, dict]:
     stage2_results_path, stage2_artifact_results = load_stage2_artifact_results(
         stage2_bs_path
+    )
+    stage2_artifact_results = upgrade_legacy_stage2_artifact_results(
+        stage2_artifact_results,
+        known_num_tf_coils=LOCKED_BASELINE_NUM_TF_COILS,
     )
     validate_stage2_artifact_metadata(
         stage2_results_path,

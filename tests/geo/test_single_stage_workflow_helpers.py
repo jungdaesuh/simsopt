@@ -440,6 +440,33 @@ class BaselineSweepScriptTests(unittest.TestCase):
                     expected_config,
                 )
 
+    def test_load_locked_baseline_stage2_artifact_upgrades_legacy_tf_metadata(self):
+        module = load_baseline_sweep_module()
+        common = load_workflow_common_module()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            stage2_dir = Path(tmpdir)
+            stage2_bs_path = stage2_dir / "biot_savart_opt.json"
+            stage2_bs_path.write_text("{}", encoding="utf-8")
+            legacy_results = self._make_stage2_artifact_results()
+            legacy_results.pop("TF_CURRENT_SUM_ABS_A")
+            legacy_results.pop("NUM_TF_COILS")
+            stage2_results_path = stage2_dir / "results.json"
+            stage2_results_path.write_text(
+                json.dumps(legacy_results),
+                encoding="utf-8",
+            )
+            expected_config = self._make_expected_stage2_config(common, stage2_dir)
+
+            loaded_results_path, loaded_results = module.load_locked_baseline_stage2_artifact(
+                stage2_bs_path,
+                expected_config,
+            )
+
+        self.assertEqual(loaded_results_path, stage2_results_path)
+        self.assertEqual(loaded_results["NUM_TF_COILS"], 20)
+        self.assertEqual(loaded_results["TF_CURRENT_SUM_ABS_A"], 1.6e6)
+
     def test_build_summary_reports_non_dominated_cases_and_artifact_provenance(self):
         module = load_baseline_sweep_module()
         common = load_workflow_common_module()
@@ -581,3 +608,25 @@ class FiniteCurrentSmokeScriptTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "missing TF_CURRENT_SUM_ABS_A"):
             module.resolve_expected_stage2_tf_current_sum_abs_A({})
+
+    def test_legacy_smoke_artifact_upgrades_total_tf_current_when_num_coils_present(self):
+        module = load_finite_current_smoke_module()
+        legacy_results = {
+            "TF_CURRENT_A": 8.0e4,
+            "NUM_TF_COILS": 20,
+        }
+
+        upgraded_results = module.upgrade_legacy_stage2_artifact_results(legacy_results)
+
+        self.assertEqual(upgraded_results["TF_CURRENT_SUM_ABS_A"], 1.6e6)
+
+    def test_legacy_smoke_artifact_still_fails_when_total_tf_current_is_ambiguous(self):
+        module = load_finite_current_smoke_module()
+        legacy_results = {
+            "TF_CURRENT_A": 8.0e4,
+        }
+
+        upgraded_results = module.upgrade_legacy_stage2_artifact_results(legacy_results)
+
+        with self.assertRaisesRegex(ValueError, "missing TF_CURRENT_SUM_ABS_A"):
+            module.resolve_expected_stage2_tf_current_sum_abs_A(upgraded_results)
