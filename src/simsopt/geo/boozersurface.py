@@ -9,6 +9,7 @@ from .surfaceobjectives import (
     boozer_surface_dlsqgrad_dcoils_vjp,
 )
 from ._boozersurface_current_guard import (
+    guard_none_G_coil_gradient_callback as _guard_none_G_coil_gradient_callback,
     require_fixed_currents_for_none_G as _require_fixed_currents_for_none_G,
 )
 from .surfacexyzfourier import SurfaceXYZFourier
@@ -236,11 +237,6 @@ class BoozerSurface(Optimizable):
             coil_attrs=("coils", "_coils"),
         )
 
-    def _validate_implicit_G_precondition(self, optimize_G):
-        if optimize_G:
-            return
-        self._validate_none_G_precondition(None)
-
     def run_code(self, iota, G=None):
         """
         Run the default solvers, i.e., run Newton's method directly if you are computing a BoozerExact surface,
@@ -362,7 +358,6 @@ class BoozerSurface(Optimizable):
         """
 
         assert derivatives in [0, 1, 2]
-        self._validate_implicit_G_precondition(optimize_G)
         if optimize_G:
             sdofs = x[:-2]
             iota = x[-2]
@@ -474,7 +469,6 @@ class BoozerSurface(Optimizable):
         """
 
         assert derivatives in [0, 1, 2]
-        self._validate_implicit_G_precondition(optimize_G)
         if optimize_G:
             sdofs = dofs[:-2]
             iota = dofs[-2]
@@ -624,7 +618,6 @@ class BoozerSurface(Optimizable):
             If ``derivatives=1``, return ``(res, dres)`` the residual and the Jacobian of the optimization problem.
         """
         assert derivatives in [0, 1]
-        self._validate_implicit_G_precondition(optimize_G)
         if optimize_G:
             sdofs = xl[:-4]
             iota = xl[-4]
@@ -726,7 +719,6 @@ class BoozerSurface(Optimizable):
 
         if not self.need_to_run_code:
             return self.res
-        self._validate_none_G_precondition(G)
 
         s = self.surface
         if G is None:
@@ -825,9 +817,9 @@ class BoozerSurface(Optimizable):
         """
         if not self.need_to_run_code:
             return self.res
-        self._validate_none_G_precondition(G)
 
         s = self.surface
+        G_provided = G is not None
         if G is None:
             x = np.concatenate((s.get_dofs(), [iota]))
         else:
@@ -877,8 +869,15 @@ class BoozerSurface(Optimizable):
             "success": norm <= tol,
             "G": None,
             "PLU": (P, L, U),
-            "vjp": partial(
-                boozer_surface_dlsqgrad_dcoils_vjp, weight_inv_modB=weight_inv_modB
+            "vjp": _guard_none_G_coil_gradient_callback(
+                partial(
+                    boozer_surface_dlsqgrad_dcoils_vjp,
+                    weight_inv_modB=weight_inv_modB,
+                ),
+                biotsavart=self.biotsavart,
+                component="BoozerSurface",
+                coil_attrs=("coils", "_coils"),
+                G_provided=G_provided,
             ),
             "type": "ls",
             "weight_inv_modB": weight_inv_modB,
@@ -944,7 +943,6 @@ class BoozerSurface(Optimizable):
 
         if not self.need_to_run_code:
             return self.res
-        self._validate_none_G_precondition(G)
 
         s = self.surface
         if G is None:
@@ -1088,7 +1086,6 @@ class BoozerSurface(Optimizable):
 
         if not self.need_to_run_code:
             return self.res
-        self._validate_none_G_precondition(G)
 
         s = self.surface
         if G is not None:
@@ -1245,11 +1242,11 @@ class BoozerSurface(Optimizable):
                 - 'type': 'exact'.
                 - 'vjp': the vector-Jacobian product for the optimization
         """
-        self._validate_none_G_precondition(G)
         if not self.need_to_run_code:
             return self.res
 
         s = self.surface
+        G_provided = G is not None
         if not _is_supported_boozer_exact_surface(s):
             raise RuntimeError(
                 "Exact solution of Boozer Surfaces only supported for SurfaceXYZTensorFourier"
@@ -1342,7 +1339,13 @@ class BoozerSurface(Optimizable):
             "PLU": (P, L, U),
             "mask": mask,
             "type": "exact",
-            "vjp": boozer_surface_dexactresidual_dcoils_dcurrents_vjp,
+            "vjp": _guard_none_G_coil_gradient_callback(
+                boozer_surface_dexactresidual_dcoils_dcurrents_vjp,
+                biotsavart=self.biotsavart,
+                component="BoozerSurface",
+                coil_attrs=("coils", "_coils"),
+                G_provided=G_provided,
+            ),
         }
 
         if verbose:

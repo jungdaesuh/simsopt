@@ -72,6 +72,7 @@ from .surface_fourier_jax import (
     stellsym_scatter_indices,
 )
 from ._boozersurface_current_guard import (
+    guard_none_G_coil_gradient_callback as _guard_none_G_coil_gradient_callback,
     require_fixed_currents_for_none_G as _require_fixed_currents_for_none_G,
 )
 from ..jax_core.field import (
@@ -2100,7 +2101,6 @@ class BoozerSurfaceJAX(Optimizable):
         """Least-squares first stage of the LS solve. Matches CPU public API."""
         if not self.need_to_run_code:
             return self.res
-        self._validate_none_G_precondition(G)
         tol = tol if tol is not None else self.options["bfgs_tol"]
         maxiter = maxiter if maxiter is not None else self.options["bfgs_maxiter"]
         verbose = verbose if verbose is not None else self.options["verbose"]
@@ -2200,7 +2200,6 @@ class BoozerSurfaceJAX(Optimizable):
         """Newton polish stage of the LS solve. Matches CPU public API."""
         if not self.need_to_run_code:
             return self.res
-        self._validate_none_G_precondition(G)
         tol = tol if tol is not None else self.options["newton_tol"]
         maxiter = maxiter if maxiter is not None else self.options["newton_maxiter"]
         verbose = verbose if verbose is not None else self.options["verbose"]
@@ -2211,6 +2210,7 @@ class BoozerSurfaceJAX(Optimizable):
         )
 
         optimize_G = G is not None
+        G_provided = optimize_G
         s = self.surface
         x0 = self._pack_decision_vector(iota, G)
         obj_fn = self._make_penalty_objective_with(
@@ -2283,12 +2283,24 @@ class BoozerSurfaceJAX(Optimizable):
             "s": s,
             "iota": iota_out,
             "PLU": (P, L, U),
-            "vjp": partial(_boozer_ls_coil_vjp, weight_inv_modB=weight_inv_modB),
-            "vjp_groups": _build_ls_group_vjp_callback(
-                self,
-                iota_out,
-                G_out,
-                weight_inv_modB=weight_inv_modB,
+            "vjp": _guard_none_G_coil_gradient_callback(
+                partial(_boozer_ls_coil_vjp, weight_inv_modB=weight_inv_modB),
+                biotsavart=self.biotsavart,
+                component="BoozerSurfaceJAX",
+                coil_attrs=("_coils",),
+                G_provided=G_provided,
+            ),
+            "vjp_groups": _guard_none_G_coil_gradient_callback(
+                _build_ls_group_vjp_callback(
+                    self,
+                    iota_out,
+                    G_out,
+                    weight_inv_modB=weight_inv_modB,
+                ),
+                biotsavart=self.biotsavart,
+                component="BoozerSurfaceJAX",
+                coil_attrs=("_coils",),
+                G_provided=G_provided,
             ),
             "type": "ls",
             "weight_inv_modB": weight_inv_modB,
@@ -2397,9 +2409,9 @@ class BoozerSurfaceJAX(Optimizable):
         """
         if not self.need_to_run_code:
             return self.res
-        self._validate_none_G_precondition(G)
 
         s = self.surface
+        G_provided = G is not None
         try:
             from simsopt.geo.surfacexyztensorfourier import SurfaceXYZTensorFourier
 
@@ -2506,11 +2518,23 @@ class BoozerSurfaceJAX(Optimizable):
             "PLU": (P, L, U),
             "mask": bool_mask,
             "type": "exact",
-            "vjp": _boozer_exact_coil_vjp,
-            "vjp_groups": _build_exact_group_vjp_callback(
-                self,
-                iota_final,
-                G_final,
+            "vjp": _guard_none_G_coil_gradient_callback(
+                _boozer_exact_coil_vjp,
+                biotsavart=self.biotsavart,
+                component="BoozerSurfaceJAX",
+                coil_attrs=("_coils",),
+                G_provided=G_provided,
+            ),
+            "vjp_groups": _guard_none_G_coil_gradient_callback(
+                _build_exact_group_vjp_callback(
+                    self,
+                    iota_final,
+                    G_final,
+                ),
+                biotsavart=self.biotsavart,
+                component="BoozerSurfaceJAX",
+                coil_attrs=("_coils",),
+                G_provided=G_provided,
             ),
             "weight_inv_modB": self.options["weight_inv_modB"],
         }

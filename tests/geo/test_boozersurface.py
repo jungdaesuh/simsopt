@@ -4,6 +4,9 @@ import inspect
 import numpy as np
 from simsopt._core.optimizable import Optimizable
 import simsopt.geo.boozersurface as boozersurface_module
+from simsopt.geo._boozersurface_current_guard import (
+    guard_none_G_coil_gradient_callback,
+)
 from simsopt.field.coil import coils_via_symmetries
 from simsopt.geo.boozersurface import BoozerSurface
 from simsopt.field.biotsavart import BiotSavart
@@ -115,61 +118,30 @@ class BoozerSurfaceTests(unittest.TestCase):
         ):
             BoozerSurface.run_code(booz, 0.1, None)
 
-    def test_public_entrypoints_reject_G_none_with_free_currents(self):
-        booz = BoozerSurface.__new__(BoozerSurface)
-        booz.need_to_run_code = True
-        booz.biotsavart = _make_free_current_biotsavart("coils")
-
-        method_calls = (
-            (
-                BoozerSurface.minimize_boozer_penalty_constraints_LBFGS,
-                (),
-                {"iota": 0.1, "G": None},
-            ),
-            (
-                BoozerSurface.minimize_boozer_penalty_constraints_newton,
-                (),
-                {"iota": 0.1, "G": None},
-            ),
-            (
-                BoozerSurface.minimize_boozer_penalty_constraints_ls,
-                (),
-                {"iota": 0.1, "G": None},
-            ),
-            (
-                BoozerSurface.minimize_boozer_exact_constraints_newton,
-                (),
-                {"iota": 0.1, "G": None},
-            ),
-            (
-                BoozerSurface.solve_residual_equation_exactly_newton,
-                (),
-                {"iota": 0.1, "G": None},
-            ),
-            (
-                BoozerSurface.boozer_penalty_constraints,
-                (np.zeros(1),),
-                {"optimize_G": False},
-            ),
-            (
-                BoozerSurface.boozer_penalty_constraints_vectorized,
-                (np.zeros(1),),
-                {"optimize_G": False},
-            ),
-            (
-                BoozerSurface.boozer_exact_constraints,
-                (np.zeros(3),),
-                {"optimize_G": False},
-            ),
+    def test_none_G_coil_gradient_callback_rejects_free_currents(self):
+        callback = lambda *_args, **_kwargs: None
+        guarded = guard_none_G_coil_gradient_callback(
+            callback,
+            biotsavart=_make_free_current_biotsavart("coils"),
+            component="BoozerSurface",
+            coil_attrs=("coils", "_coils"),
+            G_provided=False,
         )
 
-        for method, args, kwargs in method_calls:
-            with self.subTest(method=method.__name__):
-                with self.assertRaisesRegex(
-                    ValueError,
-                    "fixed coil currents when G=None",
-                ):
-                    method(booz, *args, **kwargs)
+        with self.assertRaisesRegex(ValueError, "fixed coil currents when G=None"):
+            guarded(None)
+
+    def test_none_G_coil_gradient_callback_allows_explicit_G(self):
+        callback = lambda *_args, **_kwargs: None
+        guarded = guard_none_G_coil_gradient_callback(
+            callback,
+            biotsavart=_make_free_current_biotsavart("coils"),
+            component="BoozerSurface",
+            coil_attrs=("coils", "_coils"),
+            G_provided=True,
+        )
+
+        self.assertIs(guarded, callback)
 
     def test_residual(self):
         """

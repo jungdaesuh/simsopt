@@ -101,7 +101,7 @@ def _strict_scalar_value_and_grad(fun, arg, *args):
 
     value, pullback = jax.vjp(_objective, arg)
     (gradient,) = pullback(_explicit_scalar_pullback_seed(value))
-    return value, gradient
+    return _host_scalar(value), gradient
 
 
 def _explicit_index_array(indices):
@@ -403,7 +403,7 @@ def _value_and_direct_coil_derivative(
         biotsavart,
         coil_dofs_gradient,
     )
-    return _host_scalar(objective_value), direct_derivative
+    return objective_value, direct_derivative
 
 
 def _qs_ratio_from_coil_dofs(sdofs, coil_dofs, biotsavart, **qs_kwargs):
@@ -591,8 +591,8 @@ class BoozerResidualJAX(Optimizable):
         self.surface = self.in_surface
 
         self.constraint_weight = float(boozer_surface.constraint_weight)
-        self._direct_objective_value_and_grad = _make_cached_strict_scalar_value_and_grad(
-            self._direct_objective_of_coils
+        self._direct_objective_value_and_grad = (
+            _make_cached_strict_scalar_value_and_grad(self._direct_objective_of_coils)
         )
         self.recompute_bell()
 
@@ -602,13 +602,13 @@ class BoozerResidualJAX(Optimizable):
 
     def J(self):
         if self._J is None:
-            self.compute()
+            self.compute(compute_gradient=False)
         return self._J
 
     @derivative_dec
     def dJ(self):
         if self._dJ is None:
-            self.compute()
+            self.compute(compute_gradient=True)
         return self._dJ
 
     def _direct_objective_of_coils(
@@ -639,7 +639,7 @@ class BoozerResidualJAX(Optimizable):
             optimize_G,
         )
 
-    def compute(self):
+    def compute(self, *, compute_gradient=True):
         booz_surf = self.boozer_surface
         _ensure_solved(booz_surf)
 
@@ -649,6 +649,17 @@ class BoozerResidualJAX(Optimizable):
         weight_inv_modB = booz_surf.res.get("weight_inv_modB", True)
         x_inner, optimize_G = self._inner_objective_state(iota, G, sdofs=sdofs)
         current_coil_dofs, coil_set_spec = _current_coil_dofs_and_spec(self.biotsavart)
+
+        if not compute_gradient:
+            self._J = _host_scalar(
+                self._direct_objective_of_coils(
+                    current_coil_dofs,
+                    x_inner,
+                    optimize_G,
+                    weight_inv_modB,
+                )
+            )
+            return
 
         self._J, dJ_by_dcoils = _value_and_direct_coil_derivative(
             self.biotsavart,
@@ -736,22 +747,24 @@ class IotasJAX(Optimizable):
 
     def J(self):
         if self._J is None:
-            self.compute()
+            self.compute(compute_gradient=False)
         return self._J
 
     @derivative_dec
     def dJ(self):
         if self._dJ is None:
-            self.compute()
+            self.compute(compute_gradient=True)
         return self._dJ
 
-    def compute(self):
+    def compute(self, *, compute_gradient=True):
         booz_surf = self.boozer_surface
         _ensure_solved(booz_surf)
 
         iota = booz_surf.res["iota"]
         G = booz_surf.res["G"]
         self._J = iota
+        if not compute_gradient:
+            return
         vjp_groups_fn = booz_surf.res.get("vjp_groups")
 
         # dJ/dx_inner for iota: unit vector at the iota position
@@ -819,16 +832,16 @@ class NonQuasiSymmetricRatioJAX(Optimizable):
 
     def J(self):
         if self._J is None:
-            self.compute()
+            self.compute(compute_gradient=False)
         return self._J
 
     @derivative_dec
     def dJ(self):
         if self._dJ is None:
-            self.compute()
+            self.compute(compute_gradient=True)
         return self._dJ
 
-    def compute(self):
+    def compute(self, *, compute_gradient=True):
         booz_surf = self.boozer_surface
         _ensure_solved(booz_surf)
 
@@ -852,6 +865,8 @@ class NonQuasiSymmetricRatioJAX(Optimizable):
         )
 
         self._J = float(_host_scalar(_qs_ratio_pure(sdofs, coil_set_spec, **qs_kwargs)))
+        if not compute_gradient:
+            return
 
         def J_of_coils(coil_dofs):
             return _qs_ratio_from_coil_dofs(
@@ -1113,8 +1128,7 @@ def _traceable_forward_result(
         failure_value_jax = _runtime_float64_scalar(failure_value, reference=delta)
         failure_scale_jax = _runtime_float64_scalar(failure_scale, reference=delta)
         failure_penalty = (
-            failure_value_jax
-            + failure_half * failure_scale_jax * jnp.dot(delta, delta)
+            failure_value_jax + failure_half * failure_scale_jax * jnp.dot(delta, delta)
         )
         return {
             "value": jnp.where(
@@ -1396,8 +1410,7 @@ def _build_traceable_objective_compiled_bundle_from_state(
 def _traceable_runtime_option_signature(booz_jax):
     """Capture the solver options that affect traceable runtime compilation."""
     option_state = {
-        key: booz_jax.options.get(key)
-        for key in _TRACEABLE_RUNTIME_OPTION_KEYS
+        key: booz_jax.options.get(key) for key in _TRACEABLE_RUNTIME_OPTION_KEYS
     }
     option_state["optimizer_options"] = booz_jax._collect_optimizer_options()
     return _traceable_cache_tree_signature(option_state)
@@ -1605,9 +1618,7 @@ def _make_traceable_field_eval_sharding_pipeline(field_at_solution_for):
     compiled_field_at_solution_for = jax.jit(field_at_solution_for)
 
     def _field_eval_sharding(coil_dofs):
-        return inspect_array_sharding_summary(
-            compiled_field_at_solution_for(coil_dofs)
-        )
+        return inspect_array_sharding_summary(compiled_field_at_solution_for(coil_dofs))
 
     return _field_eval_sharding
 

@@ -23,6 +23,9 @@ import pytest
 from jax.flatten_util import ravel_pytree
 from conftest import enable_non_strict_jax_backend, enable_strict_jax_backend
 from simsopt.field.coil import Coil, Current
+from simsopt.geo._boozersurface_current_guard import (
+    guard_none_G_coil_gradient_callback,
+)
 from simsopt.jax_core import (
     GroupedCoilSetSpec,
     grouped_coil_set_spec_from_lists,
@@ -1012,30 +1015,32 @@ class TestBoozerSurfaceJAXClass:
         with pytest.raises(ValueError, match="fixed coil currents when G=None"):
             booz.run_code(iota=0.2, G=None)
 
-    def test_public_entrypoints_reject_G_none_with_free_legacy_currents(self):
-        method_calls = (
-            (
-                "minimize_boozer_penalty_constraints_LBFGS",
-                (),
-                {"iota": 0.2, "G": None},
-            ),
-            (
-                "minimize_boozer_penalty_constraints_newton",
-                (),
-                {"iota": 0.2, "G": None},
-            ),
-            (
-                "solve_residual_equation_exactly_newton",
-                (),
-                {"iota": 0.2, "G": None},
-            ),
+    def test_none_G_coil_gradient_callback_rejects_free_legacy_currents(self):
+        callback = lambda *_args, **_kwargs: None
+        booz = _make_mock_boozer_surface_with_free_currents()
+        guarded = guard_none_G_coil_gradient_callback(
+            callback,
+            biotsavart=booz.biotsavart,
+            component="BoozerSurfaceJAX",
+            coil_attrs=("_coils",),
+            G_provided=False,
         )
 
-        for method_name, args, kwargs in method_calls:
-            booz = _make_mock_boozer_surface_with_free_currents()
-            method = getattr(booz, method_name)
-            with pytest.raises(ValueError, match="fixed coil currents when G=None"):
-                method(*args, **kwargs)
+        with pytest.raises(ValueError, match="fixed coil currents when G=None"):
+            guarded(None)
+
+    def test_none_G_coil_gradient_callback_allows_explicit_G(self):
+        callback = lambda *_args, **_kwargs: None
+        booz = _make_mock_boozer_surface_with_free_currents()
+        guarded = guard_none_G_coil_gradient_callback(
+            callback,
+            biotsavart=booz.biotsavart,
+            component="BoozerSurfaceJAX",
+            coil_attrs=("_coils",),
+            G_provided=True,
+        )
+
+        assert guarded is callback
 
     def test_reference_ls_reuses_cached_scipy_value_and_grad_transform(
         self,

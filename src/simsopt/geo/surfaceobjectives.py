@@ -767,26 +767,28 @@ class MajorRadius(Optimizable):
 
     def J(self):
         if self._J is None:
-            self.compute()
+            self.compute(compute_gradient=False)
         return self._J
 
     @derivative_dec
     def dJ(self):
         if self._dJ is None:
-            self.compute()
+            self.compute(compute_gradient=True)
         return self._dJ
 
     def recompute_bell(self, parent=None):
         self._J = None
         self._dJ = None
 
-    def compute(self):
+    def compute(self, *, compute_gradient=True):
         if self.boozer_surface.need_to_run_code:
             res = self.boozer_surface.res
             res = self.boozer_surface.run_code(res["iota"], G=res["G"])
 
         surface = self.surface
         self._J = surface.major_radius()
+        if not compute_gradient:
+            return
 
         booz_surf = self.boozer_surface
         iota = booz_surf.res["iota"]
@@ -867,16 +869,16 @@ class NonQuasiSymmetricRatio(Optimizable):
 
     def J(self):
         if self._J is None:
-            self.compute()
+            self.compute(compute_gradient=False)
         return self._J
 
     @derivative_dec
     def dJ(self):
         if self._dJ is None:
-            self.compute()
+            self.compute(compute_gradient=True)
         return self._dJ
 
-    def compute(self):
+    def compute(self, *, compute_gradient=True):
         if self.boozer_surface.need_to_run_code:
             res = self.boozer_surface.res
             res = self.boozer_surface.run_code(res["iota"], G=res["G"])
@@ -905,6 +907,8 @@ class NonQuasiSymmetricRatio(Optimizable):
 
         B_nonQS = modB - B_QS
         self._J = np.mean(dS * B_nonQS**2) / np.mean(dS * B_QS**2)
+        if not compute_gradient:
+            return
 
         booz_surf = self.boozer_surface
         iota = booz_surf.res["iota"]
@@ -1048,13 +1052,13 @@ class Iotas(Optimizable):
 
     def J(self):
         if self._J is None:
-            self.compute()
+            self.compute(compute_gradient=False)
         return self._J
 
     @derivative_dec
     def dJ(self):
         if self._dJ is None:
-            self.compute()
+            self.compute(compute_gradient=True)
         return self._dJ
 
     def recompute_bell(self, parent=None):
@@ -1063,12 +1067,14 @@ class Iotas(Optimizable):
         self._dJ_by_dcoefficients = None
         self._dJ_by_dcoilcurrents = None
 
-    def compute(self):
+    def compute(self, *, compute_gradient=True):
         if self.boozer_surface.need_to_run_code:
             res = self.boozer_surface.res
             res = self.boozer_surface.run_code(res["iota"], G=res["G"])
 
         self._J = self.boozer_surface.res["iota"]
+        if not compute_gradient:
+            return
 
         booz_surf = self.boozer_surface
         iota = booz_surf.res["iota"]
@@ -1101,9 +1107,7 @@ if _HAS_JAX:
     def surface_to_surface_pairwise_distances(gamma1, gamma2):
         gamma1 = gamma1.reshape((-1, 3))
         gamma2 = gamma2.reshape((-1, 3))
-        return jnp.sqrt(
-            jnp.sum((gamma1[:, None, :] - gamma2[None, :, :]) ** 2, axis=2)
-        )
+        return jnp.sqrt(jnp.sum((gamma1[:, None, :] - gamma2[None, :, :]) ** 2, axis=2))
 
     def surface_to_surface_shortest_distance_pure(gamma1, gamma2):
         return jnp.min(surface_to_surface_pairwise_distances(gamma1, gamma2))
@@ -1196,7 +1200,7 @@ class BoozerResidual(Optimizable):
         """
 
         if self._J is None:
-            self.compute()
+            self.compute(compute_gradient=False)
         return self._J
 
     @derivative_dec
@@ -1206,14 +1210,14 @@ class BoozerResidual(Optimizable):
         """
 
         if self._dJ is None:
-            self.compute()
+            self.compute(compute_gradient=True)
         return self._dJ
 
     def recompute_bell(self, parent=None):
         self._J = None
         self._dJ = None
 
-    def compute(self):
+    def compute(self, *, compute_gradient=True):
         if self.boozer_surface.need_to_run_code:
             res = self.boozer_surface.res
             res = self.boozer_surface.run_code(res["iota"], G=res["G"])
@@ -1229,14 +1233,15 @@ class BoozerResidual(Optimizable):
         surface = self.surface
         iota = self.boozer_surface.res["iota"]
         G = self.boozer_surface.res["G"]
-        r, J = boozer_surface_residual(
+        residual_parts = boozer_surface_residual(
             surface,
             iota,
             G,
             self.biotsavart,
-            derivatives=1,
+            derivatives=1 if compute_gradient else 0,
             weight_inv_modB=self.boozer_surface.res["weight_inv_modB"],
         )
+        r = residual_parts[0]
         rtil = np.concatenate(
             (
                 r / np.sqrt(num_points),
@@ -1247,6 +1252,9 @@ class BoozerResidual(Optimizable):
             )
         )
         self._J = 0.5 * np.sum(rtil**2)
+        if not compute_gradient:
+            return
+        J = residual_parts[1]
 
         booz_surf = self.boozer_surface
         P, L, U = booz_surf.res["PLU"]

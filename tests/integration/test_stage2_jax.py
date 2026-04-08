@@ -118,6 +118,7 @@ from simsopt.geo.optimizer_jax import (
     private_optimizer_runtime_is_supported,
 )
 from simsopt.objectives.fluxobjective_jax import SquaredFluxJAX
+from simsopt._core.util import ObjectiveFailure
 import simsopt.objectives.stage2_target_objective_jax as stage2_target_objective_module
 from simsopt.objectives.stage2_target_objective_jax import (
     Stage2PenaltyConfig,
@@ -710,6 +711,11 @@ def _build_fake_lbfgs_result(x0, value, grad):
     )
 
 
+def _build_zero_current_coils(base_curves, surf):
+    zero_currents = [Current(0.0) for _ in range(len(base_curves))]
+    return coils_via_symmetries(base_curves, zero_currents, surf.nfp, surf.stellsym)
+
+
 # -----------------------------------------------------------------------
 # Fixtures
 # -----------------------------------------------------------------------
@@ -805,6 +811,25 @@ class TestObjectiveValueParity:
 
         _assert_stage2_value_parity(j_jax, j_cpu)
 
+    @pytest.mark.parametrize("definition", ("normalized", "local"))
+    def test_singular_zero_current_objectives_return_inf(
+        self,
+        coil_surf_setup,
+        definition,
+    ):
+        _, surf, base_curves, _ = coil_surf_setup
+        zero_current_coils = _build_zero_current_coils(base_curves, surf)
+
+        bs_cpu = BiotSavart(zero_current_coils)
+        bs_cpu.set_points(surf.gamma().reshape((-1, 3)))
+        jf_cpu = SquaredFlux(surf, bs_cpu, definition=definition)
+
+        bs_jax = BiotSavartJAX(zero_current_coils)
+        jf_jax = SquaredFluxJAX(surf, bs_jax, definition=definition)
+
+        assert np.isinf(jf_cpu.J())
+        assert np.isinf(jf_jax.J())
+
 
 # -----------------------------------------------------------------------
 # Test 2: Gradient parity
@@ -832,6 +857,27 @@ class TestGradientParity:
             grad_cpu,
             err_msg=f"Gradient mismatch between JAX and CPU for {definition!r}",
         )
+
+    @pytest.mark.parametrize("definition", ("normalized", "local"))
+    def test_singular_zero_current_gradients_raise_objective_failure(
+        self,
+        coil_surf_setup,
+        definition,
+    ):
+        _, surf, base_curves, _ = coil_surf_setup
+        zero_current_coils = _build_zero_current_coils(base_curves, surf)
+
+        bs_cpu = BiotSavart(zero_current_coils)
+        bs_cpu.set_points(surf.gamma().reshape((-1, 3)))
+        jf_cpu = SquaredFlux(surf, bs_cpu, definition=definition)
+
+        bs_jax = BiotSavartJAX(zero_current_coils)
+        jf_jax = SquaredFluxJAX(surf, bs_jax, definition=definition)
+
+        with pytest.raises(ObjectiveFailure, match="gradient is singular"):
+            jf_cpu.dJ()
+        with pytest.raises(ObjectiveFailure, match="gradient is singular"):
+            jf_jax.dJ()
 
     def test_j_only_uses_forward_path_until_gradient_is_requested(
         self, coil_surf_setup, monkeypatch

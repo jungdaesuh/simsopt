@@ -121,6 +121,9 @@ from simsopt.geo.boozersurface_jax import (  # noqa: E402
     _make_ls_penalty_objective,
     _select_exact_residual_fn,
 )
+from simsopt.geo._boozersurface_current_guard import (  # noqa: E402
+    _none_G_coil_gradient_error,
+)
 from simsopt.geo.optimizer_jax import (  # noqa: E402
     PRIVATE_OPTIMIZER_JAX_VERSION,
     jax_minimize,
@@ -179,6 +182,33 @@ def _iota_unit_rhs(plu):
     rhs = np.zeros(n)
     rhs[-2] = 1.0
     return rhs
+
+
+def _build_boozer_wrapper(wrapper_name, booz_surf, biotsavart):
+    """Instantiate a CPU or JAX Boozer wrapper by test label."""
+    builders = {
+        "BoozerResidual": lambda: BoozerResidual(booz_surf, biotsavart),
+        "Iotas": lambda: Iotas(booz_surf),
+        "NonQuasiSymmetricRatio": lambda: NonQuasiSymmetricRatio(
+            booz_surf, biotsavart, sDIM=6
+        ),
+        "BoozerResidualJAX": lambda: BoozerResidualJAX(booz_surf, biotsavart),
+        "IotasJAX": lambda: IotasJAX(booz_surf),
+        "NonQuasiSymmetricRatioJAX": lambda: NonQuasiSymmetricRatioJAX(
+            booz_surf, biotsavart, sDIM=6
+        ),
+    }
+    return builders[wrapper_name]()
+
+
+def _make_guarded_gradient_failure(component):
+    """Return a callback that raises the canonical none-G gradient error."""
+
+    def reject_gradient(*args, **kwargs):
+        del args, kwargs
+        raise ValueError(_none_G_coil_gradient_error(component))
+
+    return reject_gradient
 
 
 _enable_strict_jax_backend = partial(enable_strict_jax_backend, mode="jax_gpu_parity")
@@ -4442,6 +4472,60 @@ class TestEnsureSolvedCrashGuard:
             booz_jax.res = old_res
             booz_jax.need_to_run_code = old_dirty
             booz_jax.run_code = old_run_code
+
+    @pytest.mark.parametrize(
+        "wrapper_name",
+        ["BoozerResidual", "Iotas", "NonQuasiSymmetricRatio"],
+    )
+    def test_cpu_wrappers_defer_guarded_adjoint_failure_to_dJ(
+        self, boozer_setup, wrapper_name
+    ):
+        """A guarded adjoint callback must not break the value path."""
+        (_, _, _, bs_cpu, _, booz_cpu, _, _) = boozer_setup
+        old_res = booz_cpu.res
+        old_dirty = booz_cpu.need_to_run_code
+
+        bad_res = dict(old_res)
+        bad_res["vjp"] = _make_guarded_gradient_failure("BoozerSurface")
+        booz_cpu.res = bad_res
+        booz_cpu.need_to_run_code = False
+        try:
+            obj = _build_boozer_wrapper(wrapper_name, booz_cpu, bs_cpu)
+            assert np.isfinite(float(obj.J()))
+            with pytest.raises(
+                ValueError, match="requires fixed coil currents when G=None"
+            ):
+                obj.dJ()
+        finally:
+            booz_cpu.res = old_res
+            booz_cpu.need_to_run_code = old_dirty
+
+    @pytest.mark.parametrize(
+        "wrapper_name",
+        ["BoozerResidualJAX", "IotasJAX", "NonQuasiSymmetricRatioJAX"],
+    )
+    def test_jax_wrappers_defer_guarded_adjoint_failure_to_dJ(
+        self, boozer_setup, wrapper_name
+    ):
+        """A guarded grouped-adjoint callback must not break the value path."""
+        (_, _, _, _, bs_jax, _, booz_jax, _) = boozer_setup
+        old_res = booz_jax.res
+        old_dirty = booz_jax.need_to_run_code
+
+        bad_res = dict(old_res)
+        bad_res["vjp_groups"] = _make_guarded_gradient_failure("BoozerSurfaceJAX")
+        booz_jax.res = bad_res
+        booz_jax.need_to_run_code = False
+        try:
+            obj = _build_boozer_wrapper(wrapper_name, booz_jax, bs_jax)
+            assert np.isfinite(float(obj.J()))
+            with pytest.raises(
+                ValueError, match="requires fixed coil currents when G=None"
+            ):
+                obj.dJ()
+        finally:
+            booz_jax.res = old_res
+            booz_jax.need_to_run_code = old_dirty
 
 
 # -----------------------------------------------------------------------
