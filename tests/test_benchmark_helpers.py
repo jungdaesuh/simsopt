@@ -2794,6 +2794,24 @@ def test_stage2_e2e_comparison_accepts_machine_scale_curvature_drift_when_cpu_al
     assert failures == []
 
 
+def test_stage2_e2e_trajectory_improves_accepts_machine_scale_roundoff_drift():
+    trajectory = [
+        {"J": 0.001435769751044976},
+        {"J": 0.0014357697510449764},
+    ]
+
+    assert stage2_e2e_comparison_module._trajectory_improves(trajectory)
+
+
+def test_stage2_e2e_trajectory_improves_rejects_real_objective_regression():
+    trajectory = [
+        {"J": 0.001435769751044976},
+        {"J": 0.001435769752044976},
+    ]
+
+    assert not stage2_e2e_comparison_module._trajectory_improves(trajectory)
+
+
 def test_stage2_e2e_comparison_rejects_large_threshold_edge_objective_drift():
     failures = evaluate_stage2_e2e_comparison(
         _stage2_ondevice_quality_case(

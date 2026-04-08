@@ -67,6 +67,8 @@ STAGE2_CURVATURE_THRESHOLD_EDGE_MARGIN = 1e-6
 STAGE2_CURVATURE_THRESHOLD_EDGE_GRADIENT_RTOL = 1e-5
 STAGE2_CURVATURE_THRESHOLD_EDGE_OBJECTIVE_REL_TOL = 5e-4
 STAGE2_CURVATURE_CPU_ENVELOPE_RTOL = 2e-9
+STAGE2_TRAJECTORY_IMPROVEMENT_REL_TOL = 1e-12
+STAGE2_TRAJECTORY_IMPROVEMENT_ABS_TOL = 1e-18
 STAGE2_CURVATURE_TERM_NAME = "curvature_penalty"
 
 _CPU_ONDEVICE_ENDPOINT_LANE = ("jax", "cpu", "cpu-ondevice")
@@ -479,7 +481,16 @@ def _trajectory_is_finite(trajectory: list[dict]) -> bool:
 def _trajectory_improves(trajectory: list[dict]) -> bool:
     if not trajectory:
         return False
-    return float(trajectory[-1]["J"]) <= float(trajectory[0]["J"])
+    initial_objective = float(trajectory[0]["J"])
+    final_objective = float(trajectory[-1]["J"])
+    return final_objective <= initial_objective or bool(
+        np.isclose(
+            final_objective,
+            initial_objective,
+            rtol=STAGE2_TRAJECTORY_IMPROVEMENT_REL_TOL,
+            atol=STAGE2_TRAJECTORY_IMPROVEMENT_ABS_TOL,
+        )
+    )
 
 
 def _max_geometry_deviation(
