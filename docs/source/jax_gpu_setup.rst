@@ -30,10 +30,14 @@ Base install (CPU development/testing)::
 
     conda env create -f envs/jax-0.9.2.yml
     conda activate jax-0.9.2
-    pip install -e ".[JAX,dev]"
+
+The environment recipe already performs the editable CPU-side
+``simsopt[JAX,dev]`` install, so no extra ``pip install`` step is needed for
+the public CPU development lane.
 
 GPU install (CUDA 12)::
 
+    # From the repo root:
     pip install -e ".[JAX_GPU,dev]"
 
     # or for a non-editable runtime:
@@ -209,7 +213,7 @@ GPU Node Quick-Start
        conda env create -f envs/jax-0.9.2.yml
        conda activate jax-0.9.2
 
-3. **Install simsopt**::
+3. **Upgrade the editable install to the CUDA extra set**::
 
        cd simsopt-jax
        pip install -e ".[JAX_GPU,dev]"

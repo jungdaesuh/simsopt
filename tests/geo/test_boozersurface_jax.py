@@ -188,6 +188,33 @@ def _assert_lu_is_not_called(message):
     raise AssertionError(message)
 
 
+def _patch_counting_scipy_minimize(monkeypatch):
+    state = {"jit_call_count": 0}
+    original_jit = _opt.jax.jit
+
+    def counting_jit(*args, **kwargs):
+        state["jit_call_count"] += 1
+        return original_jit(*args, **kwargs)
+
+    def fake_scipy_minimize(fun, x0, jac, method, options, callback=None):
+        del jac, method, options, callback
+        value, grad = fun(np.asarray(x0))
+        return types.SimpleNamespace(
+            x=np.asarray(x0),
+            jac=np.asarray(grad),
+            fun=float(value),
+            nit=0,
+            nfev=1,
+            njev=1,
+            success=True,
+            status=0,
+        )
+
+    monkeypatch.setattr(_opt.jax, "jit", counting_jit)
+    monkeypatch.setattr(_opt, "scipy_minimize", fake_scipy_minimize)
+    return state
+
+
 _enable_strict_jax_backend = partial(enable_strict_jax_backend, mode="jax_gpu_parity")
 _enable_non_strict_jax_backend = partial(
     enable_non_strict_jax_backend,
@@ -511,6 +538,33 @@ class TestOptimizerAdapter:
         assert captured["options"]["maxfun"] == 55
         assert captured["options"]["maxls"] == 66
         assert captured["callback"] is None  # no callback in this call
+
+    def test_scipy_minimize_does_not_cache_unmarked_objective(self, monkeypatch):
+        """Generic optimizer callables should keep the historical fresh-jit semantics."""
+        state = _patch_counting_scipy_minimize(monkeypatch)
+
+        def quad(x):
+            return jnp.sum((x - 1.0) ** 2)
+
+        x0 = jnp.array([0.0, 2.0], dtype=jnp.float64)
+        _opt._scipy_minimize(
+            quad,
+            x0,
+            method="lbfgs",
+            tol=1e-8,
+            maxiter=1,
+            options={},
+        )
+        _opt._scipy_minimize(
+            quad,
+            x0,
+            method="lbfgs",
+            tol=1e-8,
+            maxiter=1,
+            options={},
+        )
+
+        assert state["jit_call_count"] == 2
 
     def test_newton_polish_quadratic(self):
         """Newton polish converges in 1 iteration for a quadratic."""
@@ -932,6 +986,38 @@ class TestBoozerSurfaceJAXClass:
 
         assert result is not None
         assert result["type"] == "ls"
+
+    def test_reference_ls_reuses_cached_scipy_value_and_grad_transform(
+        self,
+        monkeypatch,
+    ):
+        """Repeated SciPy reference solves should not rebuild the JIT transform."""
+        booz = _make_mock_boozer_surface()
+        booz.options["optimizer_backend"] = "scipy"
+        booz.options["least_squares_algorithm"] = "quasi-newton"
+        booz.options["limited_memory"] = True
+        booz.options["verbose"] = False
+
+        state = _patch_counting_scipy_minimize(monkeypatch)
+
+        booz.minimize_boozer_penalty_constraints_LBFGS(
+            iota=-0.3,
+            G=None,
+            maxiter=1,
+            verbose=False,
+        )
+        first_call_jit_count = state["jit_call_count"]
+        assert first_call_jit_count > 0
+
+        booz.recompute_bell()
+        booz.minimize_boozer_penalty_constraints_LBFGS(
+            iota=-0.3,
+            G=None,
+            maxiter=1,
+            verbose=False,
+        )
+
+        assert state["jit_call_count"] == first_call_jit_count
 
     def test_stale_bfgs_method_rejected(self):
         """The removed bfgs_method option must fail fast."""

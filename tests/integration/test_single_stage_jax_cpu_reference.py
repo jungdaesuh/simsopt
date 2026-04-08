@@ -130,6 +130,8 @@ from simsopt.geo.surfaceobjectives_jax import (  # noqa: E402
     BoozerResidualJAX,
     IotasJAX,
     NonQuasiSymmetricRatioJAX,
+    _boozer_residual_J_of_x_inner,
+    _qs_ratio_pure,
 )
 from simsopt.geo.curve import Curve, RotatedCurve  # noqa: E402
 
@@ -1032,9 +1034,161 @@ _REAL_RESOLVE_FD_EPSILONS = (4.0e-4, 2.0e-4, 1.0e-4)
 _REAL_RESOLVE_FD_MIN_STABLE_SAMPLES = 3
 _REAL_RESOLVE_FD_MIN_STABLE_EPS = 2
 _REAL_RESOLVE_FD_AXIS_DIRECTION_FRACTIONS = (0.0, 0.5, 1.0)
+_REAL_RESOLVE_FD_NQSR_SDIM = 6
 _STABLE_IOTA_ABS_TOL = 5e-4
 _STABLE_G_REL_TOL = 1e-4
 _STABLE_FUN_REL_TOL = 1e-2
+
+
+class _RealResolveFDWrapperSpec(NamedTuple):
+    label: str
+    gradient_builder: object
+    value_builder: object
+
+
+class _RealResolveFDBaselineState(NamedTuple):
+    coil_dofs: np.ndarray
+    surface_dofs: np.ndarray
+    iota: float
+    G: float
+    fun: float
+    result: dict[str, object]
+
+
+class _RealResolveFDProbeOutcome(NamedTuple):
+    stable: bool
+    reason: str
+    coil_dofs: np.ndarray | None
+    surface_dofs: np.ndarray | None
+    iota: float | None
+    G: float | None
+    weight_inv_modB: bool | None
+
+
+class _RealResolveFDEpsilonSample(NamedTuple):
+    eps: float
+    plus: _RealResolveFDProbeOutcome
+    minus: _RealResolveFDProbeOutcome
+
+
+class _RealResolveFDDirectionSample(NamedTuple):
+    direction: np.ndarray
+    epsilon_samples: tuple[_RealResolveFDEpsilonSample, ...]
+
+
+class _RealResolveFDSuite(NamedTuple):
+    bs_jax: BiotSavartJAX
+    booz_jax: BoozerSurfaceJAX
+    baseline_state: _RealResolveFDBaselineState
+    gradients: dict[str, np.ndarray]
+    direction_samples: tuple[_RealResolveFDDirectionSample, ...]
+    nqsr_aux_phi: jax.Array
+    nqsr_aux_theta: jax.Array
+
+
+def _real_resolve_fd_iotas_gradient(booz_jax, bs_jax):
+    del bs_jax
+    return IotasJAX(booz_jax).dJ()
+
+
+def _real_resolve_fd_iotas_value(real_resolve_fd_suite, outcome):
+    del real_resolve_fd_suite
+    assert outcome.iota is not None
+    return float(outcome.iota)
+
+
+def _real_resolve_fd_nqsr_gradient(booz_jax, bs_jax):
+    return NonQuasiSymmetricRatioJAX(
+        booz_jax,
+        bs_jax,
+        sDIM=_REAL_RESOLVE_FD_NQSR_SDIM,
+    ).dJ()
+
+
+def _real_resolve_fd_nqsr_value(real_resolve_fd_suite, outcome):
+    assert outcome.coil_dofs is not None
+    assert outcome.surface_dofs is not None
+    bs_jax = real_resolve_fd_suite.bs_jax
+    booz_jax = real_resolve_fd_suite.booz_jax
+    coil_set_spec = bs_jax.coil_set_spec_from_dofs(
+        jnp.asarray(outcome.coil_dofs, dtype=jnp.float64)
+    )
+    objective_value = _qs_ratio_pure(
+        jnp.asarray(outcome.surface_dofs, dtype=jnp.float64),
+        coil_set_spec,
+        quadpoints_phi=real_resolve_fd_suite.nqsr_aux_phi,
+        quadpoints_theta=real_resolve_fd_suite.nqsr_aux_theta,
+        mpol=booz_jax.mpol,
+        ntor=booz_jax.ntor,
+        nfp=booz_jax.nfp,
+        stellsym=booz_jax.stellsym,
+        scatter_indices=booz_jax.scatter_indices,
+        surface_kind=booz_jax._surface_geometry_kind,
+        axis=0,
+    )
+    return float(np.asarray(jax.device_get(objective_value)))
+
+
+def _real_resolve_fd_boozer_residual_gradient(booz_jax, bs_jax):
+    return BoozerResidualJAX(booz_jax, bs_jax).dJ()
+
+
+def _real_resolve_fd_boozer_residual_value(real_resolve_fd_suite, outcome):
+    assert outcome.iota is not None
+    assert outcome.coil_dofs is not None
+    assert outcome.surface_dofs is not None
+    bs_jax = real_resolve_fd_suite.bs_jax
+    booz_jax = real_resolve_fd_suite.booz_jax
+    optimize_G = outcome.G is not None
+    coil_set_spec = bs_jax.coil_set_spec_from_dofs(
+        jnp.asarray(outcome.coil_dofs, dtype=jnp.float64)
+    )
+    x_inner = booz_jax._pack_decision_vector(
+        float(outcome.iota),
+        None if outcome.G is None else float(outcome.G),
+        sdofs=jnp.asarray(outcome.surface_dofs, dtype=jnp.float64),
+    )
+    objective_value = _boozer_residual_J_of_x_inner(
+        x_inner,
+        coil_set_spec=coil_set_spec,
+        quadpoints_phi=booz_jax.quadpoints_phi,
+        quadpoints_theta=booz_jax.quadpoints_theta,
+        mpol=booz_jax.mpol,
+        ntor=booz_jax.ntor,
+        nfp=booz_jax.nfp,
+        stellsym=booz_jax.stellsym,
+        scatter_indices=booz_jax.scatter_indices,
+        surface_kind=booz_jax._surface_geometry_kind,
+        optimize_G=optimize_G,
+        weight_inv_modB=bool(outcome.weight_inv_modB),
+        constraint_weight=booz_jax.constraint_weight,
+        targetlabel=booz_jax.targetlabel,
+        label_type=booz_jax.label_type,
+        phi_idx=booz_jax.phi_idx,
+    )
+    return float(np.asarray(jax.device_get(objective_value)))
+
+
+_REAL_RESOLVE_FD_WRAPPER_SPECS = (
+    _RealResolveFDWrapperSpec(
+        label="IotasJAX",
+        gradient_builder=_real_resolve_fd_iotas_gradient,
+        value_builder=_real_resolve_fd_iotas_value,
+    ),
+    _RealResolveFDWrapperSpec(
+        label="NonQuasiSymmetricRatioJAX",
+        gradient_builder=_real_resolve_fd_nqsr_gradient,
+        value_builder=_real_resolve_fd_nqsr_value,
+    ),
+    _RealResolveFDWrapperSpec(
+        label="BoozerResidualJAX",
+        gradient_builder=_real_resolve_fd_boozer_residual_gradient,
+        value_builder=_real_resolve_fd_boozer_residual_value,
+    ),
+)
+_REAL_RESOLVE_FD_WRAPPER_SPECS_BY_LABEL = {
+    spec.label: spec for spec in _REAL_RESOLVE_FD_WRAPPER_SPECS
+}
 
 
 def _make_real_resolve_fd_setup():
@@ -1052,21 +1206,22 @@ def _make_real_resolve_fd_setup():
     return (
         bs_jax,
         booz_jax,
-        {
-            "coil_dofs": np.asarray(bs_jax.x, dtype=float).copy(),
-            "surface_dofs": np.asarray(booz_jax.surface.get_dofs(), dtype=float).copy(),
-            "iota": float(result["iota"]),
-            "G": float(result["G"]),
-            "fun": float(summarize_result_fun(result)),
-        },
+        _RealResolveFDBaselineState(
+            coil_dofs=np.asarray(bs_jax.x, dtype=float).copy(),
+            surface_dofs=np.asarray(booz_jax.surface.get_dofs(), dtype=float).copy(),
+            iota=float(result["iota"]),
+            G=float(result["G"]),
+            fun=float(summarize_result_fun(result)),
+            result=result,
+        ),
     )
 
 
-def _is_stable_real_resolve(base_state, *, iota_value, G_value, fun_value):
+def _is_stable_real_resolve(baseline_state, *, iota_value, G_value, fun_value):
     return (
-        abs(iota_value - float(base_state["iota"])) < _STABLE_IOTA_ABS_TOL
-        and relative_error(G_value, float(base_state["G"])) < _STABLE_G_REL_TOL
-        and relative_error(fun_value, float(base_state["fun"])) < _STABLE_FUN_REL_TOL
+        abs(iota_value - baseline_state.iota) < _STABLE_IOTA_ABS_TOL
+        and relative_error(G_value, baseline_state.G) < _STABLE_G_REL_TOL
+        and relative_error(fun_value, baseline_state.fun) < _STABLE_FUN_REL_TOL
     )
 
 
@@ -1114,67 +1269,173 @@ def _real_resolve_fd_probe_directions(dof_count):
     return _unique_normalized_real_resolve_fd_directions(candidate_directions)
 
 
-def _resolve_wrapper_value_on_real_fixture(
-    base_state, bs_jax, booz_jax, coil_dofs, wrapper_factory
-):
+def _restore_real_resolve_fd_seed_state(baseline_state, bs_jax, booz_jax):
+    bs_jax.x = np.asarray(baseline_state.coil_dofs, dtype=float)
+    booz_jax.surface.set_dofs(np.asarray(baseline_state.surface_dofs, dtype=float))
+
+
+def _resolve_real_fixture_probe_outcome(baseline_state, bs_jax, booz_jax, coil_dofs):
     # Reset to base seed state before applying the perturbation
+    _restore_real_resolve_fd_seed_state(baseline_state, bs_jax, booz_jax)
     bs_jax.x = np.asarray(coil_dofs, dtype=float)
-    booz_jax.surface.set_dofs(np.asarray(base_state["surface_dofs"], dtype=float))
     booz_jax.need_to_run_code = True
 
     # Re-solve from the warm-start guess
     result = booz_jax.run_code(
-        iota=float(base_state["iota"]),
-        G=float(base_state["G"]),
+        iota=baseline_state.iota,
+        G=baseline_state.G,
     )
 
     if result is None or not result.get("success", False):
-        return {"stable": False, "reason": "solve_failed"}
+        return _RealResolveFDProbeOutcome(
+            stable=False,
+            reason="solve_failed",
+            coil_dofs=None,
+            surface_dofs=None,
+            iota=None,
+            G=None,
+            weight_inv_modB=None,
+        )
 
     is_self_intersecting, check_available = (
         single_stage_example.evaluate_surface_self_intersection(booz_jax.surface)
     )
     if check_available and is_self_intersecting:
-        return {"stable": False, "reason": "self_intersecting"}
+        return _RealResolveFDProbeOutcome(
+            stable=False,
+            reason="self_intersecting",
+            coil_dofs=None,
+            surface_dofs=None,
+            iota=None,
+            G=None,
+            weight_inv_modB=None,
+        )
 
     iota_value = float(result["iota"])
     G_value = float(result["G"])
     fun_value = float(summarize_result_fun(result))
     if not _is_stable_real_resolve(
-        base_state,
+        baseline_state,
         iota_value=iota_value,
         G_value=G_value,
         fun_value=fun_value,
     ):
-        return {
-            "stable": False,
-            "reason": "branch_switch",
-            "iota": iota_value,
-            "G": G_value,
-            "fun": fun_value,
-        }
+        return _RealResolveFDProbeOutcome(
+            stable=False,
+            reason="branch_switch",
+            coil_dofs=None,
+            surface_dofs=None,
+            iota=iota_value,
+            G=G_value,
+            weight_inv_modB=None,
+        )
 
-    return {
-        "stable": True,
-        "reason": "ok",
-        "value": float(wrapper_factory(booz_jax, bs_jax).J()),
-        "iota": iota_value,
-        "G": G_value,
-        "fun": fun_value,
+    return _RealResolveFDProbeOutcome(
+        stable=True,
+        reason="ok",
+        coil_dofs=np.asarray(coil_dofs, dtype=float).copy(),
+        surface_dofs=np.asarray(booz_jax.surface.get_dofs(), dtype=float).copy(),
+        iota=iota_value,
+        G=G_value,
+        weight_inv_modB=bool(result.get("weight_inv_modB", True)),
+    )
+
+
+def _build_real_resolve_fd_suite():
+    bs_jax, booz_jax, baseline_state = _make_real_resolve_fd_setup()
+    gradients = {
+        spec.label: np.asarray(spec.gradient_builder(booz_jax, bs_jax), dtype=float)
+        for spec in _REAL_RESOLVE_FD_WRAPPER_SPECS
     }
+    x0 = np.asarray(baseline_state.coil_dofs, dtype=float)
+    directions = _real_resolve_fd_probe_directions(len(x0))
+    direction_samples = []
+    for direction in directions:
+        epsilon_samples = []
+        for eps in _REAL_RESOLVE_FD_EPSILONS:
+            epsilon_samples.append(
+                _RealResolveFDEpsilonSample(
+                    eps=eps,
+                    plus=_resolve_real_fixture_probe_outcome(
+                        baseline_state,
+                        bs_jax,
+                        booz_jax,
+                        x0 + eps * direction,
+                    ),
+                    minus=_resolve_real_fixture_probe_outcome(
+                        baseline_state,
+                        bs_jax,
+                        booz_jax,
+                        x0 - eps * direction,
+                    ),
+                )
+            )
+        direction_samples.append(
+            _RealResolveFDDirectionSample(
+                direction=direction,
+                epsilon_samples=tuple(epsilon_samples),
+            )
+        )
+
+    _restore_real_resolve_fd_seed_state(baseline_state, bs_jax, booz_jax)
+    booz_jax.res = baseline_state.result
+    booz_jax.need_to_run_code = False
+
+    return _RealResolveFDSuite(
+        bs_jax=bs_jax,
+        booz_jax=booz_jax,
+        baseline_state=baseline_state,
+        gradients=gradients,
+        direction_samples=tuple(direction_samples),
+        nqsr_aux_phi=jnp.asarray(
+            np.linspace(
+                0.0,
+                1.0 / float(booz_jax.nfp),
+                2 * _REAL_RESOLVE_FD_NQSR_SDIM,
+                endpoint=False,
+            ),
+            dtype=jnp.float64,
+        ),
+        nqsr_aux_theta=jnp.asarray(
+            np.linspace(
+                0.0,
+                1.0,
+                2 * _REAL_RESOLVE_FD_NQSR_SDIM,
+                endpoint=False,
+            ),
+            dtype=jnp.float64,
+        ),
+    )
+
+
+@pytest.fixture(scope="module")
+def real_resolve_fd_suite():
+    # The reduced real-fixture re-solves dominate this lane's runtime.
+    # Build the perturbation dataset once and reuse it across all wrappers.
+    return _build_real_resolve_fd_suite()
+
+
+def _real_resolve_fd_wrapper_value(
+    real_resolve_fd_suite: _RealResolveFDSuite,
+    *,
+    wrapper_spec,
+    outcome: _RealResolveFDProbeOutcome,
+):
+    if not outcome.stable:
+        raise AssertionError("Expected a stable reduced real-fixture outcome")
+    return wrapper_spec.value_builder(real_resolve_fd_suite, outcome)
 
 
 def _assert_wrapper_resolve_fd_matches_real_fixture(
     *,
     wrapper_label,
-    gradient_builder,
-    wrapper_factory,
+    real_resolve_fd_suite,
 ):
-    bs_jax, booz_jax, base_state = _make_real_resolve_fd_setup()
-    gradient = np.asarray(gradient_builder(booz_jax, bs_jax), dtype=float)
-    x0 = np.asarray(base_state["coil_dofs"], dtype=float)
-    directions = _real_resolve_fd_probe_directions(len(x0))
-    num_directions = len(directions)
+    wrapper_spec = _REAL_RESOLVE_FD_WRAPPER_SPECS_BY_LABEL[wrapper_label]
+    gradient = np.asarray(
+        real_resolve_fd_suite.gradients[wrapper_spec.label], dtype=float
+    )
+    num_directions = len(real_resolve_fd_suite.direction_samples)
 
     stable_samples = 0
     instability_reasons = []
@@ -1183,35 +1444,38 @@ def _assert_wrapper_resolve_fd_matches_real_fixture(
 
     # Probe an explicit direction set and require several stable passes so the
     # test cannot succeed by exiting after one easy pseudo-random direction.
-    for sample_index, direction in enumerate(directions):
+    for sample_index, direction_sample in enumerate(
+        real_resolve_fd_suite.direction_samples
+    ):
+        direction = direction_sample.direction
         directional_adjoint = float(np.dot(gradient, direction))
         err_old = None
         stable_eps_count = 0
         direction_ok = True
 
-        for eps in _REAL_RESOLVE_FD_EPSILONS:
-            plus = _resolve_wrapper_value_on_real_fixture(
-                base_state,
-                bs_jax,
-                booz_jax,
-                x0 + eps * direction,
-                wrapper_factory,
-            )
-            minus = _resolve_wrapper_value_on_real_fixture(
-                base_state,
-                bs_jax,
-                booz_jax,
-                x0 - eps * direction,
-                wrapper_factory,
-            )
-            if not plus["stable"] or not minus["stable"]:
+        for epsilon_sample in direction_sample.epsilon_samples:
+            eps = epsilon_sample.eps
+            plus = epsilon_sample.plus
+            minus = epsilon_sample.minus
+            if not plus.stable or not minus.stable:
                 instability_reasons.append(
                     f"sample {sample_index} eps={eps:.1e}: "
-                    f"plus={plus['reason']} minus={minus['reason']}"
+                    f"plus={plus.reason} minus={minus.reason}"
                 )
                 continue
 
-            directional_fd = (plus["value"] - minus["value"]) / (2.0 * eps)
+            directional_fd = (
+                _real_resolve_fd_wrapper_value(
+                    real_resolve_fd_suite,
+                    wrapper_spec=wrapper_spec,
+                    outcome=plus,
+                )
+                - _real_resolve_fd_wrapper_value(
+                    real_resolve_fd_suite,
+                    wrapper_spec=wrapper_spec,
+                    outcome=minus,
+                )
+            ) / (2.0 * eps)
             abs_err = abs(directional_adjoint - directional_fd)
             stable_eps_count += 1
             logger.info(
@@ -1282,6 +1546,27 @@ class TestRealResolveFDProbeDirections:
         assert len(directions) == len(expected) == 5
         for actual_direction, expected_direction in zip(directions, expected):
             np.testing.assert_allclose(actual_direction, expected_direction)
+
+
+class TestRealResolveFDSuite:
+    @pytest.mark.slow
+    def test_shared_suite_restores_baseline_state(self, real_resolve_fd_suite):
+        baseline_state = real_resolve_fd_suite.baseline_state
+        np.testing.assert_allclose(
+            np.asarray(real_resolve_fd_suite.bs_jax.x, dtype=float),
+            np.asarray(baseline_state.coil_dofs, dtype=float),
+        )
+        np.testing.assert_allclose(
+            np.asarray(real_resolve_fd_suite.booz_jax.surface.get_dofs(), dtype=float),
+            np.asarray(baseline_state.surface_dofs, dtype=float),
+        )
+
+        result = real_resolve_fd_suite.booz_jax.res
+        assert result is not None and result.get("success", False)
+        assert real_resolve_fd_suite.booz_jax.need_to_run_code is False
+        assert float(result["iota"]) == pytest.approx(baseline_state.iota)
+        assert float(result["G"]) == pytest.approx(baseline_state.G)
+        assert float(summarize_result_fun(result)) == pytest.approx(baseline_state.fun)
 
 
 def _make_boozer_setup(
@@ -4515,11 +4800,10 @@ class TestIotasJAXResolveFD:
     """
 
     @pytest.mark.slow
-    def test_iotas_resolve_fd(self):
+    def test_iotas_resolve_fd(self, real_resolve_fd_suite):
         _assert_wrapper_resolve_fd_matches_real_fixture(
             wrapper_label="IotasJAX",
-            gradient_builder=lambda booz_jax, bs_jax: IotasJAX(booz_jax).dJ(),
-            wrapper_factory=lambda booz_jax, bs_jax: IotasJAX(booz_jax),
+            real_resolve_fd_suite=real_resolve_fd_suite,
         )
 
 
@@ -4535,15 +4819,10 @@ class TestNonQSRatioJAXResolveFD:
     """
 
     @pytest.mark.slow
-    def test_nqsr_resolve_fd(self):
+    def test_nqsr_resolve_fd(self, real_resolve_fd_suite):
         _assert_wrapper_resolve_fd_matches_real_fixture(
             wrapper_label="NonQuasiSymmetricRatioJAX",
-            gradient_builder=lambda booz_jax, bs_jax: NonQuasiSymmetricRatioJAX(
-                booz_jax, bs_jax, sDIM=6
-            ).dJ(),
-            wrapper_factory=lambda booz_jax, bs_jax: NonQuasiSymmetricRatioJAX(
-                booz_jax, bs_jax, sDIM=6
-            ),
+            real_resolve_fd_suite=real_resolve_fd_suite,
         )
 
 
@@ -4568,15 +4847,10 @@ class TestBoozerResidualAdjointFD:
     """
 
     @pytest.mark.slow
-    def test_boozer_residual_resolve_fd(self):
+    def test_boozer_residual_resolve_fd(self, real_resolve_fd_suite):
         _assert_wrapper_resolve_fd_matches_real_fixture(
             wrapper_label="BoozerResidualJAX",
-            gradient_builder=lambda booz_jax, bs_jax: BoozerResidualJAX(
-                booz_jax, bs_jax
-            ).dJ(),
-            wrapper_factory=lambda booz_jax, bs_jax: BoozerResidualJAX(
-                booz_jax, bs_jax
-            ),
+            real_resolve_fd_suite=real_resolve_fd_suite,
         )
 
     def test_adjoint_fraction_diagnostic(self):
@@ -5196,6 +5470,37 @@ class TestTraceableObjective:
             runtime_bundle["profile_suite"]["value_and_grad_pipeline"]
             is runtime_bundle["value_and_grad"]
         )
+
+    def test_traceable_profile_suite_field_eval_sharding_reuses_compiled_pipeline(
+        self,
+        boozer_setup,
+        monkeypatch,
+    ):
+        import simsopt.geo.surfaceobjectives_jax as soj
+
+        (_, _, _, _, bs_jax, _, booz_jax, _) = boozer_setup
+        runtime_bundle, coil_dofs = self._make_traceable_runtime_bundle(
+            bs_jax,
+            booz_jax,
+            include_profile_suite=True,
+        )
+        field_eval_sharding = runtime_bundle["profile_suite"]["field_eval_sharding"]
+        original_jit = soj.jax.jit
+        jit_call_count = 0
+
+        def counting_jit(*args, **kwargs):
+            nonlocal jit_call_count
+            jit_call_count += 1
+            return original_jit(*args, **kwargs)
+
+        monkeypatch.setattr(soj.jax, "jit", counting_jit)
+
+        summary_a = field_eval_sharding(coil_dofs)
+        first_call_jit_count = jit_call_count
+        summary_b = field_eval_sharding(coil_dofs)
+
+        assert summary_a == summary_b
+        assert jit_call_count == first_call_jit_count
 
     def test_traceable_runtime_bundle_skips_profile_suite_by_default(
         self, boozer_setup

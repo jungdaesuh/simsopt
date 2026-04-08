@@ -29,6 +29,7 @@ Builds on M3's composed derivative path:
   - ``jax.grad`` / ``jax.hessian`` / ``jax.jacfwd`` for all derivatives
 """
 
+import hashlib
 from dataclasses import dataclass
 from functools import partial
 
@@ -174,6 +175,34 @@ def _traceable_array_signature(array):
         str(array_np.dtype),
         tuple(int(dim) for dim in array_np.shape),
         array_np.tobytes(),
+    )
+
+
+def _runtime_cache_leaf_signature(leaf):
+    if isinstance(leaf, (jax.Array, np.ndarray)):
+        array = np.asarray(jax.device_get(leaf))
+        return (
+            "array",
+            str(array.dtype),
+            tuple(int(dim) for dim in array.shape),
+            hashlib.blake2b(array.tobytes(), digest_size=16).hexdigest(),
+        )
+    if isinstance(leaf, np.generic):
+        return ("numpy_scalar", str(leaf.dtype), leaf.item())
+    if isinstance(leaf, (str, int, float, bool, type(None))):
+        return ("scalar", leaf)
+    return ("repr", type(leaf).__qualname__, repr(leaf))
+
+
+def _runtime_cache_tree_signature(tree):
+    try:
+        leaves, treedef = jax.tree_util.tree_flatten(tree)
+    except TypeError:
+        return _runtime_cache_leaf_signature(tree)
+    return (
+        "tree",
+        repr(treedef),
+        tuple(_runtime_cache_leaf_signature(leaf) for leaf in leaves),
     )
 
 
@@ -1289,6 +1318,7 @@ class BoozerSurfaceJAX(Optimizable):
         self._traceable_penalty_objective_cache = {}
         self._traceable_penalty_residual_cache = {}
         self._traceable_exact_residual_cache = {}
+        self._reference_penalty_objective_cache = {}
 
         # Coil data (extracted once, updated via _refresh_coil_data)
         self._refresh_coil_data()
@@ -1317,6 +1347,7 @@ class BoozerSurfaceJAX(Optimizable):
         self.coil_set_spec = _extract_grouped_coil_set_spec(self.biotsavart)
         self.coil_groups = list(grouped_field_data_from_spec(self.coil_set_spec))
         self.coil_currents = grouped_coil_currents_from_spec(self.coil_set_spec)
+        self._reference_penalty_objective_cache.clear()
 
     def _emit_stage_callback(
         self,
@@ -1454,35 +1485,53 @@ class BoozerSurfaceJAX(Optimizable):
             coil_arrays=coil_arrays,
             coil_set_spec=coil_set_spec,
         )
+        resolved_constraint_weight = self._resolve_constraint_weight(constraint_weight)
         if hostify_inputs:
             resolved_coil_set_spec = _hostify_tree(resolved_coil_set_spec)
+            key = self._reference_penalty_cache_key(
+                optimize_G,
+                weight_inv_modB,
+                resolved_constraint_weight,
+                resolved_coil_set_spec,
+            )
+            objective_fn = self._reference_penalty_objective_cache.get(key)
+            if objective_fn is None:
+                objective_fn = _make_boozer_penalty_objective_closure(
+                    coil_arrays=coil_arrays,
+                    coil_set_spec=resolved_coil_set_spec,
+                    quadpoints_phi=_hostify_tree(self.quadpoints_phi),
+                    quadpoints_theta=_hostify_tree(self.quadpoints_theta),
+                    mpol=self.mpol,
+                    ntor=self.ntor,
+                    nfp=self.nfp,
+                    stellsym=self.stellsym,
+                    scatter_indices=_hostify_tree(self.scatter_indices),
+                    surface_kind=self._surface_geometry_kind,
+                    targetlabel=self.targetlabel,
+                    constraint_weight=resolved_constraint_weight,
+                    label_type=self.label_type,
+                    phi_idx=self.phi_idx,
+                    optimize_G=optimize_G,
+                    weight_inv_modB=weight_inv_modB,
+                )
+                objective_fn = _optimizer_jax._mark_cacheable_jit_value_and_grad(
+                    objective_fn
+                )
+                self._reference_penalty_objective_cache[key] = objective_fn
+            return objective_fn
         return _make_boozer_penalty_objective_closure(
             coil_arrays=coil_arrays,
             coil_set_spec=resolved_coil_set_spec,
-            quadpoints_phi=(
-                _hostify_tree(self.quadpoints_phi)
-                if hostify_inputs
-                else self.quadpoints_phi
-            ),
-            quadpoints_theta=(
-                _hostify_tree(self.quadpoints_theta)
-                if hostify_inputs
-                else self.quadpoints_theta
-            ),
+            quadpoints_phi=self.quadpoints_phi,
+            quadpoints_theta=self.quadpoints_theta,
             mpol=self.mpol,
             ntor=self.ntor,
             nfp=self.nfp,
             stellsym=self.stellsym,
-            scatter_indices=(
-                _hostify_tree(self.scatter_indices)
-                if hostify_inputs
-                else self.scatter_indices
-            ),
+            scatter_indices=self.scatter_indices,
             surface_kind=self._surface_geometry_kind,
             targetlabel=self.targetlabel,
-            constraint_weight=constraint_weight
-            if constraint_weight is not None
-            else self.constraint_weight,
+            constraint_weight=resolved_constraint_weight,
             label_type=self.label_type,
             phi_idx=self.phi_idx,
             optimize_G=optimize_G,
@@ -1557,6 +1606,21 @@ class BoozerSurfaceJAX(Optimizable):
     def _resolve_constraint_weight(self, constraint_weight):
         return (
             self.constraint_weight if constraint_weight is None else constraint_weight
+        )
+
+    def _reference_penalty_cache_key(
+        self,
+        optimize_G,
+        weight_inv_modB,
+        constraint_weight,
+        coil_set_spec,
+    ):
+        return (
+            bool(optimize_G),
+            bool(weight_inv_modB),
+            float(constraint_weight),
+            self._traceable_surface_signature(),
+            _runtime_cache_tree_signature(coil_set_spec),
         )
 
     def _traceable_penalty_cache_key(
@@ -2040,7 +2104,7 @@ class BoozerSurfaceJAX(Optimizable):
 
         optimize_G = G is not None
         s = self.surface
-        x0 = self._make_penalty_optimizer_state(iota, G)
+        x0 = self._pack_decision_vector(iota, G)
         method = self._resolve_optimizer_method(
             limited_memory=limited_memory,
             optimize_G=optimize_G,

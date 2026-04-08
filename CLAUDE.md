@@ -13,11 +13,10 @@ Two environments are relevant:
 ```bash
 conda env create -f envs/jax-0.9.2.yml
 conda activate jax-0.9.2
-pip install -e ".[JAX,dev]"
 ```
 - JAX 0.9.2, jaxlib 0.9.2, NumPy 2.x, Python 3.11
-- env recipe provides the build toolchain; the editable install pulls in the
-  JAX/test/dev extras used by local validation
+- env recipe provides the build toolchain and performs the editable
+  `simsopt[JAX,dev]` install used by local validation, including `ruff`
 - use this lane for import smoke, pure-JAX unit tests, Stage 2 parity, and the
   public CPU/GPU parity work
 

@@ -37,6 +37,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from functools import lru_cache
 import re
+from threading import Lock
 from typing import Callable
 
 import numpy as np
@@ -108,6 +109,9 @@ _STRICT_REFERENCE_LEAST_SQUARES_DETAIL = (
     "the host-side reference least-squares optimizer lane"
 )
 _STRICT_HYBRID_OPTIMIZER_DETAIL = "the transitional SciPy-prefix hybrid optimizer lane"
+_SCALAR_VALUE_AND_GRAD_CACHE_LOCK = Lock()
+_CACHEABLE_VALUE_AND_GRAD_ATTR = "_simsopt_cache_jit_value_and_grad"
+_CACHED_VALUE_AND_GRAD_ATTR = "_simsopt_cached_jit_value_and_grad"
 
 
 def _version_key(raw_version: str) -> tuple[int, ...]:
@@ -257,6 +261,32 @@ def _prepare_optimizer_pytree_adapter(x0):
         unravel=unravel,
         tree_def=tree_def,
     )
+
+
+def _mark_cacheable_jit_value_and_grad(fun):
+    try:
+        setattr(fun, _CACHEABLE_VALUE_AND_GRAD_ATTR, True)
+    except (AttributeError, TypeError):
+        pass
+    return fun
+
+
+def _cached_jit_value_and_grad(fun):
+    if not getattr(fun, _CACHEABLE_VALUE_AND_GRAD_ATTR, False):
+        return jax.jit(jax.value_and_grad(fun))
+    cached = getattr(fun, _CACHED_VALUE_AND_GRAD_ATTR, None)
+    if cached is not None:
+        return cached
+    compiled = jax.jit(jax.value_and_grad(fun))
+    try:
+        with _SCALAR_VALUE_AND_GRAD_CACHE_LOCK:
+            cached = getattr(fun, _CACHED_VALUE_AND_GRAD_ATTR, None)
+            if cached is None:
+                setattr(fun, _CACHED_VALUE_AND_GRAD_ATTR, compiled)
+                return compiled
+            return cached
+    except (AttributeError, TypeError):
+        return compiled
 
 
 def _prepare_optimizer_callable_inputs(fun, x0, *, value_and_grad, callback):
@@ -501,7 +531,7 @@ def _scipy_dispatch(scipy_fun, x0, *, method, tol, maxiter, options):
 
 
 def _scipy_minimize(fun, x0, *, method, tol, maxiter, options):
-    val_and_grad_fn = jax.jit(jax.value_and_grad(fun))
+    val_and_grad_fn = _cached_jit_value_and_grad(fun)
 
     def scipy_fun(x_np):
         x_jax = jnp.asarray(x_np)
@@ -583,9 +613,11 @@ def _tree_adam_step(mean, variance, *, step_size, eps):
     step_size = jnp.asarray(step_size)
     eps = jnp.asarray(eps)
     return jax.tree_util.tree_map(
-        lambda mean_leaf, variance_leaf: step_size
-        * jnp.asarray(mean_leaf)
-        / (jnp.sqrt(jnp.asarray(variance_leaf)) + eps),
+        lambda mean_leaf, variance_leaf: (
+            step_size
+            * jnp.asarray(mean_leaf)
+            / (jnp.sqrt(jnp.asarray(variance_leaf)) + eps)
+        ),
         mean,
         variance,
     )
@@ -682,7 +714,7 @@ def _wrap_value_and_grad_fun(fun, x0, *, host_inputs):
 def _prepare_adam_eval_fn(fun, x0, *, value_and_grad, host_inputs):
     if value_and_grad:
         return _wrap_value_and_grad_fun(fun, x0, host_inputs=host_inputs)
-    return jax.jit(jax.value_and_grad(fun))
+    return _cached_jit_value_and_grad(fun)
 
 
 def _adam_defaults(dtype):
@@ -1423,7 +1455,7 @@ def newton_polish(
     The dense Hessian is still materialized once at the final iterate so
     callers retain the existing adjoint/PLU contract.
     """
-    val_and_grad_fn = jax.jit(jax.value_and_grad(objective_fn))
+    val_and_grad_fn = _cached_jit_value_and_grad(objective_fn)
     hvp_fn = _hessian_vector_product_fn(objective_fn)
 
     x = x0
