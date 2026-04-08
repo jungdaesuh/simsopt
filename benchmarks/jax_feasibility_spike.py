@@ -16,11 +16,21 @@ Usage:
     conda run -n <env> python benchmarks/jax_feasibility_spike.py
 """
 
+import argparse
 import importlib.util
+import sys
 import time
 from pathlib import Path
 
 import numpy as np
+
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(_REPO_ROOT))
+
+from repo_bootstrap import configure_entrypoint_jax_runtime
+
+
+configure_entrypoint_jax_runtime(sys.argv[1:])
 
 import jax
 
@@ -44,6 +54,17 @@ _bs = _load("biotsavart_jax", "field/biotsavart_jax.py")
 _sf = _load("surface_fourier_jax", "geo/surface_fourier_jax.py")
 _br = _load("boozer_residual_jax", "geo/boozer_residual_jax.py")
 _ib = _load("integral_bdotn_jax", "objectives/integral_bdotn_jax.py")
+
+
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument(
+        "--platform",
+        choices=("auto", "cpu", "cuda"),
+        default="auto",
+        help="JAX platform to request before import/use.",
+    )
+    return parser.parse_known_args()[0]
 
 
 # ---------------------------------------------------------------------------
@@ -287,4 +308,5 @@ def main():
 
 
 if __name__ == "__main__":
+    _parse_args()
     main()

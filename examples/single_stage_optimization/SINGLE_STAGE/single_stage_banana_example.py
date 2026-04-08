@@ -2,52 +2,64 @@ import argparse
 from dataclasses import dataclass
 import hashlib
 import inspect
-import logging
-import os
 import io
 import json
+import logging
+import os
+import sys
 import time
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+EXAMPLE_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, ".."))
+sys.path.insert(0, EXAMPLE_ROOT)
+
+SIMSOPT_ROOT = os.path.abspath(os.path.join(EXAMPLE_ROOT, "..", ".."))
+REPO_ROOT = os.path.abspath(os.path.join(SIMSOPT_ROOT, ".."))
+SRC_ROOT = os.path.join(SIMSOPT_ROOT, "src")
+sys.path.insert(0, SRC_ROOT)
+sys.path.insert(0, SIMSOPT_ROOT)
+sys.path.insert(0, REPO_ROOT)
+
+from repo_bootstrap import bootstrap_local_simsopt, configure_entrypoint_jax_runtime
+
+
+configure_entrypoint_jax_runtime(sys.argv[1:])
+
 import jax
 import numpy as np
 
+bootstrap_local_simsopt(SRC_ROOT)
+
 # SIMSOPT imports
-from simsopt._core.optimizable import Optimizable
+from simsopt._core.derivative import derivative_dec
+from simsopt._core.optimizable import Optimizable, load
 from simsopt.config import maybe_initialize_distributed_jax
+from simsopt.field import BiotSavart
 from simsopt.geo import (
-    SurfaceRZFourier,
-    SurfaceXYZTensorFourier,
     BoozerSurface,
-    curves_to_vtk,
     CurveLength,
     LpCurveCurvature,
-)
-import simsopt.geo.surface as surface_module
-from simsopt.geo.surfaceobjectives import (
-    Volume,
-    BoozerResidual,
-    Iotas,
-    NonQuasiSymmetricRatio,
-    SurfaceSurfaceDistance,
-    boozer_surface_residual,
-    boozer_surface_residual_dB,
+    SurfaceRZFourier,
+    SurfaceXYZTensorFourier,
+    curves_to_vtk,
 )
 from simsopt.geo.curveobjectives import (
     CurveCurveDistance,
     CurveSurfaceDistance,
     pairwise_min_distance_pure,
 )
-from simsopt.field import BiotSavart
+import simsopt.geo.surface as surface_module
+from simsopt.geo.surfaceobjectives import (
+    BoozerResidual,
+    Iotas,
+    NonQuasiSymmetricRatio,
+    SurfaceSurfaceDistance,
+    Volume,
+    boozer_surface_residual,
+    boozer_surface_residual_dB,
+)
 from simsopt.objectives import QuadraticPenalty
 from simsopt.objectives.utilities import forward_backward
-from simsopt._core.optimizable import load
-from simsopt._core.derivative import derivative_dec
-
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-EXAMPLE_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, ".."))
-
-import sys
-
-sys.path.insert(0, EXAMPLE_ROOT)
 from hardware_constraints import (
     apply_hardware_constraint_verdict,
     sanitize_json_payload,
@@ -55,8 +67,6 @@ from hardware_constraints import (
 from jax_host_boundary import host_array, host_bool, host_float
 from plotting_utils import cross_section_plot, norm_field_plot, norm_field_summary
 
-SIMSOPT_ROOT = os.path.abspath(os.path.join(EXAMPLE_ROOT, "..", ".."))
-REPO_ROOT = os.path.abspath(os.path.join(SIMSOPT_ROOT, ".."))
 DATABASE_EQUILIBRIA_DIR = os.path.join(REPO_ROOT, "DATABASE", "EQUILIBRIA")
 DEFAULT_EQUILIBRIA_DIR = (
     DATABASE_EQUILIBRIA_DIR
@@ -1927,9 +1937,7 @@ def accept_step(
     bs.set_points(boozer_surface.surface.gamma().reshape((-1, 3)))
     unitn = boozer_surface.surface.unitnormal()
     BdotN = host_float(
-        np.mean(
-            np.abs(np.sum(host_array(bs.B()).reshape(unitn.shape) * unitn, axis=2))
-        )
+        np.mean(np.abs(np.sum(host_array(bs.B()).reshape(unitn.shape) * unitn, axis=2)))
     )
 
     # Restore bs state — no persistent mutation
@@ -1965,10 +1973,18 @@ def accept_step(
     print(f"{'Max Curve Z':{width}} = {max_z:.6e}", file=buffer)
     print(f"{'Max Curvature':{width}} = {max_curvature:.6e}", file=buffer)
     print(f"{'Curve Length':{width}} = {length:.6e}", file=buffer)
-    print(f"{'Surface-Vessel Min Dist':{width}} = {surface_vessel_min:.6e}", file=buffer)
-    print(f"{'Hardware Constraints OK':{width}} = {hardware_status['success']}", file=buffer)
+    print(
+        f"{'Surface-Vessel Min Dist':{width}} = {surface_vessel_min:.6e}", file=buffer
+    )
+    print(
+        f"{'Hardware Constraints OK':{width}} = {hardware_status['success']}",
+        file=buffer,
+    )
     if hardware_status["violations"]:
-        print(f"{'Hardware Violations':{width}} = {hardware_status['violations']}", file=buffer)
+        print(
+            f"{'Hardware Violations':{width}} = {hardware_status['violations']}",
+            file=buffer,
+        )
     print("=" * 70, file=buffer)
 
     output_str = buffer.getvalue()

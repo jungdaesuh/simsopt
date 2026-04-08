@@ -2,16 +2,13 @@
 
 from __future__ import annotations
 
+from functools import lru_cache
 import os
 from pathlib import Path
 import subprocess
 import time
 
 import numpy as np
-
-import jax
-import jaxlib
-import jax.numpy as jnp
 
 from benchmarks.benchmark_config import BenchmarkConfig, DEFAULT_CONFIGS
 from benchmarks.benchmark_problem import build_synthetic_boozer_problem
@@ -35,6 +32,15 @@ SOLVER_VERBOSE = os.environ.get("SIMSOPT_BENCHMARK_SOLVER_VERBOSE", "").lower() 
 }
 
 
+@lru_cache(maxsize=1)
+def _jax_modules():
+    import jax
+    import jaxlib
+    import jax.numpy as jnp
+
+    return jax, jaxlib, jnp
+
+
 def _progress(message: str) -> None:
     print(message, flush=True)
 
@@ -49,10 +55,12 @@ def _get_git_sha() -> str:
 
 
 def _current_jax_version() -> str:
+    jax, _, _ = _jax_modules()
     return jax.__version__
 
 
 def _x64_enabled() -> bool:
+    _, _, jnp = _jax_modules()
     return jnp.zeros(1).dtype == jnp.float64
 
 
@@ -95,6 +103,7 @@ def resolve_benchmark_backends(requested_backends=None) -> tuple[str, ...]:
 
 
 def print_provenance(title: str, backends: tuple[str, ...]) -> None:
+    jax, jaxlib, _ = _jax_modules()
     _validate_benchmark_runtime(backends)
     compilation_cache = current_compilation_cache_metadata()
     _progress(f"\n{'=' * 70}")
@@ -148,6 +157,7 @@ def _make_boozer_surface(
 
 
 def _sync_result(res: dict) -> None:
+    jax, _, jnp = _jax_modules()
     if res is None:
         return
     for key in ("fun", "jacobian", "hessian", "residual"):

@@ -13,12 +13,21 @@ Usage:
 
 from __future__ import annotations
 
+import argparse
 import importlib.util
 import logging
 import sys
 import time
 import types
 from pathlib import Path
+
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(_REPO_ROOT))
+
+from repo_bootstrap import configure_entrypoint_jax_runtime
+
+
+configure_entrypoint_jax_runtime(sys.argv[1:])
 
 import jax
 import jax.numpy as jnp
@@ -35,6 +44,17 @@ _SRC = Path(__file__).resolve().parents[1] / "src" / "simsopt"
 
 _boozer_penalty_objective = None
 _minimize_bfgs_private = None
+
+
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument(
+        "--platform",
+        choices=("auto", "cpu", "cuda"),
+        default="auto",
+        help="JAX platform to request before import/use.",
+    )
+    return parser.parse_known_args()[0]
 
 
 def _init_modules():
@@ -384,4 +404,5 @@ def main():
 
 
 if __name__ == "__main__":
+    _parse_args()
     main()

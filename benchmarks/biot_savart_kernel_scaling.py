@@ -4,8 +4,18 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import asdict, dataclass
+from pathlib import Path
+import sys
 import time
 from typing import Callable
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO_ROOT))
+
+from repo_bootstrap import configure_entrypoint_jax_runtime
+
+
+configure_entrypoint_jax_runtime(sys.argv[1:])
 
 import jax
 import jax.numpy as jnp
@@ -53,6 +63,12 @@ _KERNEL_BENCHMARKS = (
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--platform",
+        choices=("auto", "cpu", "cuda"),
+        default="auto",
+        help="JAX platform to request before import/use.",
+    )
     parser.add_argument(
         "--mode",
         choices=simsopt_backend.VALID_BACKEND_MODES,

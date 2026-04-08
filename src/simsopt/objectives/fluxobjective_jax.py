@@ -28,6 +28,7 @@ from .._core.jax_host_boundary import (
     host_array as _host_array,
     host_scalar as _host_scalar,
 )
+from .._core.util import ObjectiveFailure
 from .._core.optimizable import Optimizable
 from .._core.derivative import derivative_dec, Derivative
 from ..jax_core.biotsavart import biot_savart_B
@@ -57,6 +58,18 @@ def _supports_jax_objective_fallback(field) -> bool:
     return bool(supports_fallback())
 
 
+def _raise_if_nonfinite_squared_flux_gradient(*, definition: str, value, grad) -> None:
+    value_array = np.asarray(value, dtype=np.float64)
+    grad_array = np.asarray(grad, dtype=np.float64)
+    if np.all(np.isfinite(value_array)) and np.all(np.isfinite(grad_array)):
+        return
+    raise ObjectiveFailure(
+        "SquaredFluxJAX "
+        f"{definition} gradient is singular because the objective or its "
+        "derivative is non-finite."
+    )
+
+
 # -----------------------------------------------------------------------
 # SquaredFluxJAX
 # -----------------------------------------------------------------------
@@ -77,6 +90,11 @@ class SquaredFluxJAX(Optimizable):
     .. note::
         The plasma surface must be fixed during the optimization.
         Surface geometry arrays are captured at construction time.
+
+    Degenerate quadrature points follow the same contract as
+    :class:`SquaredFlux`: zero-area elements contribute zero, while
+    invalid ``"normalized"`` and ``"local"`` singular configurations
+    evaluate to ``inf``.
 
     Args:
         surface: a :class:`Surface` providing ``gamma()`` and ``normal()``.
@@ -315,7 +333,13 @@ class SquaredFluxJAX(Optimizable):
         """Combined value and gradient via end-to-end JAX value_and_grad."""
         flat_dofs = self._gather_unique_full_dofs()
         value, grad = self._jit_val_grad_dofs(flat_dofs)
+        value_float = float(_host_scalar(value, dtype=np.float64))
         grad_np = _host_array(grad, dtype=np.float64)
+        _raise_if_nonfinite_squared_flux_gradient(
+            definition=self.definition,
+            value=value_float,
+            grad=grad_np,
+        )
 
         # Map the flat gradient back to per-Optimizable Derivative entries.
         deriv_data = {}
@@ -327,12 +351,17 @@ class SquaredFluxJAX(Optimizable):
         for i, current in enumerate(self.field._unique_base_currents):
             deriv_data[current] = grad_np[current_start + i : current_start + i + 1]
 
-        return float(_host_scalar(value, dtype=np.float64)), Derivative(deriv_data)
+        return value_float, Derivative(deriv_data)
 
     def _value_and_dJ_fallback(self):
         """Combined value and gradient via field.B_vjp() (mixed quadrature)."""
         B = self.field.B()
         value, dJ_dB = self._jit_integral_value_grad(B)
-        return float(_host_scalar(value, dtype=np.float64)), self.field.B_vjp(
-            _host_array(dJ_dB, dtype=np.float64)
+        value_float = float(_host_scalar(value, dtype=np.float64))
+        dJ_dB_host = _host_array(dJ_dB, dtype=np.float64)
+        _raise_if_nonfinite_squared_flux_gradient(
+            definition=self.definition,
+            value=value_float,
+            grad=dJ_dB_host,
         )
+        return value_float, self.field.B_vjp(dJ_dB_host)

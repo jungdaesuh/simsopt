@@ -3,6 +3,9 @@ import json
 
 import numpy as np
 
+from simsopt._core.derivative import Derivative
+from simsopt._core.optimizable import Optimizable
+from simsopt._core.util import ObjectiveFailure
 from simsopt.geo.surfacerzfourier import SurfaceRZFourier
 from simsopt.field.coil import coils_via_symmetries, Current
 from simsopt.geo.curve import create_equally_spaced_curves
@@ -13,12 +16,50 @@ from simsopt._core.json import GSONDecoder, GSONEncoder, SIMSON
 
 
 from pathlib import Path
+
 TEST_DIR = (Path(__file__).parent / ".." / "test_files").resolve()
-filename = TEST_DIR / 'input.LandremanPaul2021_QA'
+filename = TEST_DIR / "input.LandremanPaul2021_QA"
+
+
+class _FluxObjectiveFakeSurface:
+    def __init__(self, normal):
+        self._normal = np.asarray(normal, dtype=np.float64)
+
+    def gamma(self):
+        return np.zeros_like(self._normal)
+
+    def normal(self):
+        return self._normal
+
+
+class _FluxObjectiveFakeField(Optimizable):
+    def __init__(self, B):
+        self._B = np.asarray(B, dtype=np.float64)
+        super().__init__(x0=np.zeros(self._B.size))
+
+    def recompute_bell(self, parent=None):
+        del parent
+
+    def set_points(self, xyz):
+        del xyz
+
+    def B(self):
+        return self._B.reshape((-1, 3))
+
+    def B_vjp(self, dJdB):
+        return Derivative({self: np.asarray(dJdB).reshape((-1,))})
+
+
+def _make_fake_flux_objective(*, definition, normal, B, target):
+    surface = _FluxObjectiveFakeSurface(normal)
+    field = _FluxObjectiveFakeField(B)
+    objective = SquaredFlux(
+        surface, field, target=np.asarray(target), definition=definition
+    )
+    return objective, field
 
 
 class FluxObjectiveTests(unittest.TestCase):
-
     def test_definitions(self):
         """Verify the available definitions."""
         surf = SurfaceRZFourier.from_vmec_input(filename)
@@ -30,7 +71,9 @@ class FluxObjectiveTests(unittest.TestCase):
             ncoils, surf.nfp, stellsym=surf.stellsym, R0=1.0, R1=0.5, order=6
         )
         base_currents = [Current(1e5) for i in range(ncoils)]
-        coils = coils_via_symmetries(base_curves, base_currents, surf.nfp, surf.stellsym)
+        coils = coils_via_symmetries(
+            base_curves, base_currents, surf.nfp, surf.stellsym
+        )
         bs = BiotSavart(coils)
 
         # Test definition = "quadratic flux":
@@ -39,25 +82,33 @@ class FluxObjectiveTests(unittest.TestCase):
         bs.set_points(surf.gamma().reshape((-1, 3)))
         B = bs.B()
         normal = surf.normal().reshape((-1, 3))
-        norm_normal = np.sqrt(normal[:, 0]**2 + normal[:, 1]**2 + normal[:, 2]**2)
+        norm_normal = np.sqrt(normal[:, 0] ** 2 + normal[:, 1] ** 2 + normal[:, 2] ** 2)
         B_dot_n = np.sum(B * surf.unitnormal().reshape((-1, 3)), axis=1)
-        should_be = 0.5 * sum((B_dot_n - target.reshape((-1,)))**2 * norm_normal) / (ntheta * nphi)
+        should_be = (
+            0.5
+            * sum((B_dot_n - target.reshape((-1,))) ** 2 * norm_normal)
+            / (ntheta * nphi)
+        )
         np.testing.assert_allclose(J, should_be)
 
         # Test definition = "normalized":
         J2 = SquaredFlux(surf, bs, target, definition="normalized").J()
         mod_B_squared = np.sum(B * B, axis=1)
-        numerator = 0.5 * sum(
-            (B_dot_n - target.reshape((-1,)))**2 * norm_normal
-        ) / (ntheta * nphi)
+        numerator = (
+            0.5
+            * sum((B_dot_n - target.reshape((-1,))) ** 2 * norm_normal)
+            / (ntheta * nphi)
+        )
         denominator = sum(mod_B_squared * norm_normal) / (ntheta * nphi)
         np.testing.assert_allclose(J2, numerator / denominator)
 
         # Test definition = "local":
         J3 = SquaredFlux(surf, bs, target, definition="local").J()
-        should_be3 = 0.5 * sum(
-            (B_dot_n - target.reshape((-1,)))**2 / mod_B_squared * norm_normal
-        ) / (ntheta * nphi)
+        should_be3 = (
+            0.5
+            * sum((B_dot_n - target.reshape((-1,))) ** 2 / mod_B_squared * norm_normal)
+            / (ntheta * nphi)
+        )
         np.testing.assert_allclose(J3, should_be3)
 
         with self.assertRaises(ValueError):
@@ -71,14 +122,14 @@ class FluxObjectiveTests(unittest.TestCase):
         dJh = sum(dJ0 * h)
         err_old = 1e10
         for i in range(11, 17):
-            eps = 0.5 ** i
+            eps = 0.5**i
             J.x = dofs + eps * h
             J1 = J.J()
             J.x = dofs - eps * h
             J2 = J.J()
             err = np.abs((J1 - J2) / (2 * eps) - dJh)
             # print(f"i: {i}  err: {err}  err_old: {err_old}  err/err_old: {err/err_old}")
-            assert err < 0.6 ** 2 * err_old
+            assert err < 0.6**2 * err_old
             err_old = err
 
         J_str = json.dumps(SIMSON(J), cls=GSONEncoder)
@@ -90,7 +141,9 @@ class FluxObjectiveTests(unittest.TestCase):
         s = SurfaceRZFourier.from_vmec_input(filename)
         ncoils = 4
 
-        base_curves = create_equally_spaced_curves(ncoils, s.nfp, stellsym=s.stellsym, R0=1.0, R1=0.5, order=6)
+        base_curves = create_equally_spaced_curves(
+            ncoils, s.nfp, stellsym=s.stellsym, R0=1.0, R1=0.5, order=6
+        )
         base_currents = [Current(1e5) for i in range(ncoils)]
         coils = coils_via_symmetries(base_curves, base_currents, s.nfp, s.stellsym)
         bs = BiotSavart(coils)
@@ -112,3 +165,37 @@ class FluxObjectiveTests(unittest.TestCase):
                 ALPHA = 1e-5
                 JF_scaled_summed = Jf + ALPHA * sum(Jls)
                 self.check_taylor_test(JF_scaled_summed)
+
+    def test_quadratic_flux_gradient_handles_zero_normals(self):
+        objective, field = _make_fake_flux_objective(
+            definition="quadratic flux",
+            normal=np.zeros((1, 1, 3)),
+            B=np.zeros((1, 1, 3)),
+            target=[[1.0]],
+        )
+
+        np.testing.assert_allclose(objective.dJ(), np.zeros(field.local_dof_size))
+
+    def test_singular_local_returns_inf_and_raises_gradient_failure(self):
+        objective, _field = _make_fake_flux_objective(
+            definition="local",
+            normal=[[[1.0, 0.0, 0.0]]],
+            B=[[[0.0, 0.0, 0.0]]],
+            target=[[1.0]],
+        )
+
+        self.assertTrue(np.isinf(objective.J()))
+        with self.assertRaisesRegex(ObjectiveFailure, "gradient is singular"):
+            objective.dJ()
+
+    def test_singular_normalized_returns_inf_and_raises_gradient_failure(self):
+        objective, _field = _make_fake_flux_objective(
+            definition="normalized",
+            normal=[[[1.0, 0.0, 0.0]]],
+            B=[[[0.0, 0.0, 0.0]]],
+            target=[[1.0]],
+        )
+
+        self.assertTrue(np.isinf(objective.J()))
+        with self.assertRaisesRegex(ObjectiveFailure, "gradient is singular"):
+            objective.dJ()

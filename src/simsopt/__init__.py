@@ -9,6 +9,12 @@
 # We keep the global x64 toggle at package import time so existing scientific
 # code paths and optimizer smoke tests continue to see the expected float64
 # runtime. Platform pinning still routes through the backend selector.
+#
+# Important: this import hook is recovery-oriented, not the primary launcher
+# contract. Scripts that import ``jax`` directly must set platform/backend env
+# vars before their first ``import jax`` so JAX initializes on the intended
+# runtime. Importing ``simsopt`` can eagerly validate an explicit selector, but
+# it cannot retroactively fix a backend that was already initialized too early.
 try:
     import os as _os
     import sys as _sys

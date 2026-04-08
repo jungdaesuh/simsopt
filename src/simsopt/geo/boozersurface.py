@@ -8,6 +8,9 @@ from .surfaceobjectives import (
     boozer_surface_dexactresidual_dcoils_dcurrents_vjp,
     boozer_surface_dlsqgrad_dcoils_vjp,
 )
+from ._boozersurface_current_guard import (
+    require_fixed_currents_for_none_G as _require_fixed_currents_for_none_G,
+)
 from .surfacexyzfourier import SurfaceXYZFourier
 from .surfacexyztensorfourier import SurfaceXYZTensorFourier
 from .._core.optimizable import Optimizable
@@ -71,24 +74,6 @@ def _is_supported_boozer_surface(surface):
 
 def _is_supported_boozer_exact_surface(surface):
     return _matches_supported_surface_spec(surface, _BOOZER_EXACT_SURFACE_SPEC)
-
-
-def _coil_currents_are_fixed(biotsavart):
-    coils = getattr(biotsavart, "coils", None)
-    if coils is None:
-        coils = getattr(biotsavart, "_coils", None)
-    if coils is None:
-        return True
-    return all(coil.current.dofs.all_fixed() for coil in coils)
-
-
-def _require_fixed_currents_for_none_G(biotsavart, *, component):
-    if _coil_currents_are_fixed(biotsavart):
-        return
-    raise ValueError(
-        f"{component} requires fixed coil currents when G=None to avoid "
-        "incorrect coil gradients."
-    )
 
 
 class BoozerSurface(Optimizable):
@@ -242,6 +227,20 @@ class BoozerSurface(Optimizable):
     def recompute_bell(self, parent=None):
         self.need_to_run_code = True
 
+    def _validate_none_G_precondition(self, G):
+        if G is not None:
+            return
+        _require_fixed_currents_for_none_G(
+            self.biotsavart,
+            component="BoozerSurface",
+            coil_attrs=("coils", "_coils"),
+        )
+
+    def _validate_implicit_G_precondition(self, optimize_G):
+        if optimize_G:
+            return
+        self._validate_none_G_precondition(None)
+
     def run_code(self, iota, G=None):
         """
         Run the default solvers, i.e., run Newton's method directly if you are computing a BoozerExact surface,
@@ -267,12 +266,9 @@ class BoozerSurface(Optimizable):
         if not self.need_to_run_code:
             return
 
-        # for coil optimizations, the gradient calculations of the objective assume that the coil currents are fixed when G is None.
-        if G is None:
-            _require_fixed_currents_for_none_G(
-                self.biotsavart,
-                component="BoozerSurface",
-            )
+        # for coil optimizations, the gradient calculations of the objective assume
+        # that the coil currents are fixed when G is None.
+        self._validate_none_G_precondition(G)
 
         # BoozerExact default solver
         if self.boozer_type == "exact":
@@ -366,6 +362,7 @@ class BoozerSurface(Optimizable):
         """
 
         assert derivatives in [0, 1, 2]
+        self._validate_implicit_G_precondition(optimize_G)
         if optimize_G:
             sdofs = x[:-2]
             iota = x[-2]
@@ -477,6 +474,7 @@ class BoozerSurface(Optimizable):
         """
 
         assert derivatives in [0, 1, 2]
+        self._validate_implicit_G_precondition(optimize_G)
         if optimize_G:
             sdofs = dofs[:-2]
             iota = dofs[-2]
@@ -626,6 +624,7 @@ class BoozerSurface(Optimizable):
             If ``derivatives=1``, return ``(res, dres)`` the residual and the Jacobian of the optimization problem.
         """
         assert derivatives in [0, 1]
+        self._validate_implicit_G_precondition(optimize_G)
         if optimize_G:
             sdofs = xl[:-4]
             iota = xl[-4]
@@ -727,6 +726,7 @@ class BoozerSurface(Optimizable):
 
         if not self.need_to_run_code:
             return self.res
+        self._validate_none_G_precondition(G)
 
         s = self.surface
         if G is None:
@@ -825,6 +825,7 @@ class BoozerSurface(Optimizable):
         """
         if not self.need_to_run_code:
             return self.res
+        self._validate_none_G_precondition(G)
 
         s = self.surface
         if G is None:
@@ -943,6 +944,7 @@ class BoozerSurface(Optimizable):
 
         if not self.need_to_run_code:
             return self.res
+        self._validate_none_G_precondition(G)
 
         s = self.surface
         if G is None:
@@ -1086,6 +1088,7 @@ class BoozerSurface(Optimizable):
 
         if not self.need_to_run_code:
             return self.res
+        self._validate_none_G_precondition(G)
 
         s = self.surface
         if G is not None:
@@ -1242,6 +1245,7 @@ class BoozerSurface(Optimizable):
                 - 'type': 'exact'.
                 - 'vjp': the vector-Jacobian product for the optimization
         """
+        self._validate_none_G_precondition(G)
         if not self.need_to_run_code:
             return self.res
 

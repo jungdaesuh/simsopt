@@ -1,12 +1,10 @@
 import argparse
 from dataclasses import dataclass
+from functools import lru_cache
 import os
 import sys
 import json
 import time
-
-import jax
-import numpy as np
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 EXAMPLE_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, ".."))
@@ -19,6 +17,14 @@ sys.path.insert(0, SRC_ROOT)
 sys.path.insert(0, SIMSOPT_ROOT)
 sys.path.insert(0, REPO_ROOT)
 
+from repo_bootstrap import bootstrap_local_simsopt, configure_entrypoint_jax_runtime
+
+
+configure_entrypoint_jax_runtime(sys.argv[1:])
+
+import jax
+import numpy as np
+
 from jax_host_boundary import host_array, host_bool, host_float
 from equilibria_paths import (
     DEFAULT_EQUILIBRIA_DIR,
@@ -29,7 +35,6 @@ from hardware_constraints import (
     apply_hardware_constraint_verdict,
     sanitize_json_payload,
 )
-from repo_bootstrap import bootstrap_local_simsopt
 
 
 bootstrap_local_simsopt(SRC_ROOT)
@@ -48,6 +53,11 @@ STAGE2_TARGET_OBJECTIVE_DOF_LAYOUT_ERROR = (
 )
 CURVATURE_THRESHOLD_FLOOR = 20.0
 CURVATURE_THRESHOLD_CEILING = 40.0
+
+
+@lru_cache(maxsize=32)
+def _cached_raw_terms_jacobian(raw_terms):
+    return jax.jit(jax.jacrev(raw_terms))
 
 
 def resolve_curvature_threshold(value: float) -> float:
@@ -841,8 +851,8 @@ def _build_stage2_target_term_payload(target_objective_bundle, dofs):
         return None
     dofs64 = host_array(dofs)
     dofs_jax = jax.device_put(dofs64)
-    raw_values = host_array(jax.jit(raw_terms)(dofs_jax))
-    raw_gradients = host_array(jax.jit(jax.jacrev(raw_terms))(dofs_jax))
+    raw_values = host_array(raw_terms(dofs_jax))
+    raw_gradients = host_array(_cached_raw_terms_jacobian(raw_terms)(dofs_jax))
     entries = {}
     for index, term in enumerate(terms):
         entries[term.name] = _stage2_term_payload_entry(
@@ -1196,7 +1206,11 @@ def run_stage2_optimizer(
             tol=gtol,
             maxiter=maxiter,
         )
-    if contract.use_scalar_objective and scalar_fun is None and not use_explicit_value_and_grad:
+    if (
+        contract.use_scalar_objective
+        and scalar_fun is None
+        and not use_explicit_value_and_grad
+    ):
         raise RuntimeError(
             "Stage 2 target-lane optimization requires a JAX target objective."
         )

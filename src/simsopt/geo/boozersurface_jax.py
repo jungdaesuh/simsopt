@@ -71,6 +71,9 @@ except (ImportError, ModuleNotFoundError):
 from .surface_fourier_jax import (
     stellsym_scatter_indices,
 )
+from ._boozersurface_current_guard import (
+    require_fixed_currents_for_none_G as _require_fixed_currents_for_none_G,
+)
 from ..jax_core.field import (
     grouped_biot_savart_A_from_inputs,
     grouped_biot_savart_A_from_spec,
@@ -282,13 +285,6 @@ def _extract_grouped_coil_set_spec(biotsavart):
             "are no longer supported."
         )
     return grouped_coil_set_spec_from_source(coil_set_spec())
-
-
-def _coil_currents_are_fixed(biotsavart):
-    coils = getattr(biotsavart, "_coils", None)
-    if coils is None:
-        return True
-    return all(coil.current.dofs.all_fixed() for coil in coils)
 
 
 def _grouped_coil_currents(*, coil_arrays=None, coil_set_spec=None):
@@ -1339,6 +1335,15 @@ class BoozerSurfaceJAX(Optimizable):
         """Mark solver as needing re-execution (dirty flag)."""
         self.need_to_run_code = True
 
+    def _validate_none_G_precondition(self, G):
+        if G is not None:
+            return
+        _require_fixed_currents_for_none_G(
+            self.biotsavart,
+            component="BoozerSurfaceJAX",
+            coil_attrs=("_coils",),
+        )
+
     def _refresh_coil_data(self):
         """Extract coil geometry and currents as JAX arrays.
 
@@ -2095,6 +2100,7 @@ class BoozerSurfaceJAX(Optimizable):
         """Least-squares first stage of the LS solve. Matches CPU public API."""
         if not self.need_to_run_code:
             return self.res
+        self._validate_none_G_precondition(G)
         tol = tol if tol is not None else self.options["bfgs_tol"]
         maxiter = maxiter if maxiter is not None else self.options["bfgs_maxiter"]
         verbose = verbose if verbose is not None else self.options["verbose"]
@@ -2194,6 +2200,7 @@ class BoozerSurfaceJAX(Optimizable):
         """Newton polish stage of the LS solve. Matches CPU public API."""
         if not self.need_to_run_code:
             return self.res
+        self._validate_none_G_precondition(G)
         tol = tol if tol is not None else self.options["newton_tol"]
         maxiter = maxiter if maxiter is not None else self.options["newton_maxiter"]
         verbose = verbose if verbose is not None else self.options["verbose"]
@@ -2390,6 +2397,7 @@ class BoozerSurfaceJAX(Optimizable):
         """
         if not self.need_to_run_code:
             return self.res
+        self._validate_none_G_precondition(G)
 
         s = self.surface
         try:
@@ -2548,10 +2556,7 @@ class BoozerSurfaceJAX(Optimizable):
 
         # When G=None the gradient treats currents as constants,
         # so coil currents must be fixed to avoid silent gradient errors.
-        if G is None:
-            assert _coil_currents_are_fixed(self.biotsavart), (
-                "Coil currents must be fixed when G=None"
-            )
+        self._validate_none_G_precondition(G)
 
         # Refresh coil data in case coils changed
         self._refresh_coil_data()

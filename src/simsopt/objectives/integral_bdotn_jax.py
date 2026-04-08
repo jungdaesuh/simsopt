@@ -13,6 +13,11 @@ optimization.  The three supported definitions are:
 * ``"local"``:
   ``J = 0.5 / (nphi·ntheta) · Σ (B·n̂ − B_T)² / |B|² · |n|``
 
+Zero-area quadrature points contribute zero. For ``"normalized"``,
+nonpositive global ``Σ |B|² |n|`` is treated as invalid and returns
+``inf``. For ``"local"``, any positive-area quadrature point with
+``|B|² = 0`` is treated as invalid and also returns ``inf``.
+
 All functions accept and return JAX arrays.
 """
 
@@ -29,7 +34,13 @@ def residual_BdotN(Bcoil, target, normal, definition="quadratic flux"):
     nphi, ntheta, _ = Bcoil.shape
 
     norm_n = jnp.sqrt(jnp.sum(normal * normal, axis=-1))
-    unit_n = normal / norm_n[..., None]
+    has_normal = norm_n > 0.0
+    safe_norm_n = jnp.where(has_normal, norm_n, 1.0)
+    unit_n = jnp.where(
+        has_normal[..., None],
+        normal / safe_norm_n[..., None],
+        0.0,
+    )
     BdotN = jnp.sum(Bcoil * unit_n, axis=-1) - target
 
     if definition == "quadratic flux":
@@ -38,12 +49,26 @@ def residual_BdotN(Bcoil, target, normal, definition="quadratic flux"):
     elif definition == "normalized":
         B2 = jnp.sum(Bcoil * Bcoil, axis=-1)
         denominator = jnp.sum(B2 * norm_n)
-        residual = BdotN * jnp.sqrt(norm_n / denominator)
+        safe_denominator = jnp.where(denominator > 0.0, denominator, 1.0)
+        residual = jnp.where(
+            denominator > 0.0,
+            BdotN * jnp.sqrt(norm_n / safe_denominator),
+            jnp.full_like(BdotN, jnp.inf),
+        )
     elif definition == "local":
         B2 = jnp.sum(Bcoil * Bcoil, axis=-1)
+        singular = has_normal & (B2 <= 0.0)
         safe_B2 = jnp.where(B2 > 0.0, B2, 1.0)
-        inv_B2 = jnp.where(B2 > 0.0, 1.0 / safe_B2, 0.0)
-        residual = BdotN * jnp.sqrt(inv_B2 * norm_n / (nphi * ntheta))
+        weight = jnp.where(
+            singular,
+            0.0,
+            norm_n / (safe_B2 * (nphi * ntheta)),
+        )
+        residual = jnp.where(
+            singular,
+            jnp.full_like(BdotN, jnp.inf),
+            BdotN * jnp.sqrt(weight),
+        )
     else:
         raise ValueError(f"Unknown definition: {definition!r}")
 

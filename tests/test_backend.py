@@ -47,7 +47,9 @@ _backend_module_guard_reloaded: dict[str, object] = {}
 
 
 def _snapshot_backend_modules() -> dict[str, object]:
-    return {name: sys.modules.get(name, _MISSING_MODULE) for name in _BACKEND_MODULE_NAMES}
+    return {
+        name: sys.modules.get(name, _MISSING_MODULE) for name in _BACKEND_MODULE_NAMES
+    }
 
 
 def _restore_backend_module_snapshot(snapshot: dict[str, object]) -> None:
@@ -480,7 +482,14 @@ def test_chunk_tuning_autotune_respects_explicit_env_overrides(monkeypatch):
     assert tuning.pairwise_penalty_chunk_size == 11
 
 
-def _assert_gpu_chunk_autotune_probe(monkeypatch, *, env_value, expected_index, stdout, fake_jax=None):
+def _assert_gpu_chunk_autotune_probe(
+    monkeypatch,
+    *,
+    env_value,
+    expected_selector,
+    stdout,
+    fake_jax=None,
+):
     _clear_backend_env(monkeypatch)
     monkeypatch.setenv("SIMSOPT_BACKEND_MODE", "jax_gpu_fast")
     if env_value is not None:
@@ -494,10 +503,10 @@ def _assert_gpu_chunk_autotune_probe(monkeypatch, *, env_value, expected_index, 
     tuning = backend.get_chunk_tuning()
 
     assert tuning.autotuned is True
-    assert tuning.autotune_source == f"nvidia-smi[{expected_index}]"
+    assert tuning.autotune_source == f"nvidia-smi[{expected_selector}]"
     assert tuning.gpu_total_memory_mb == int(stdout.split(",", 1)[1].strip())
     assert calls
-    assert calls[0][-2:] == ["-i", str(expected_index)]
+    assert calls[0][-2:] == ["-i", str(expected_selector)]
 
 
 def _install_fake_nvidia_smi(monkeypatch, stdout):
@@ -543,7 +552,7 @@ def test_chunk_tuning_autotunes_from_visible_cuda_device(monkeypatch):
     _assert_gpu_chunk_autotune_probe(
         monkeypatch,
         env_value="3,1",
-        expected_index=3,
+        expected_selector=3,
         stdout="3, 16384\n",
     )
 
@@ -553,7 +562,7 @@ def test_chunk_tuning_autotunes_from_active_jax_cuda_device(monkeypatch):
     _assert_gpu_chunk_autotune_probe(
         monkeypatch,
         env_value=None,
-        expected_index=2,
+        expected_selector=2,
         stdout="2, 24576\n",
         fake_jax=types.SimpleNamespace(local_devices=local_devices),
     )
@@ -565,11 +574,54 @@ def test_chunk_tuning_prefers_imported_jax_cuda_device_over_visible_env(monkeypa
     _assert_gpu_chunk_autotune_probe(
         monkeypatch,
         env_value="3,1",
-        expected_index=1,
+        expected_selector=1,
         stdout="1, 24576\n",
         fake_jax=types.SimpleNamespace(local_devices=local_devices),
     )
     _assert_public_gpu_local_device_calls(local_device_calls)
+
+
+def test_chunk_tuning_autotunes_from_visible_cuda_uuid_selector(monkeypatch):
+    uuid_selector = "GPU-8932f937-d72c-4106-c12f-20bd9faed9f6"
+    _assert_gpu_chunk_autotune_probe(
+        monkeypatch,
+        env_value=uuid_selector,
+        expected_selector=uuid_selector,
+        stdout="7, 24576\n",
+    )
+    backend = _fresh_backend()
+
+    assert backend.get_active_cuda_device_index() is None
+
+
+def test_query_active_gpu_memory_mb_uses_visible_cuda_uuid_selector(monkeypatch):
+    _clear_backend_env(monkeypatch)
+    uuid_selector = "GPU-8932f937-d72c-4106-c12f-20bd9faed9f6"
+    monkeypatch.setenv("SIMSOPT_BACKEND_MODE", "jax_gpu_fast")
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", uuid_selector)
+    monkeypatch.delitem(sys.modules, "jax", raising=False)
+    calls = _install_fake_nvidia_smi(monkeypatch, "7, 512\n")
+    backend = _fresh_backend()
+
+    assert backend.get_active_cuda_device_index() is None
+    assert backend.query_active_gpu_memory_mb() == pytest.approx(512.0)
+    assert calls
+    assert calls[0][-2:] == ["-i", uuid_selector]
+
+
+def test_query_active_gpu_memory_mb_uses_visible_cuda_mig_selector(monkeypatch):
+    _clear_backend_env(monkeypatch)
+    mig_selector = "MIG-GPU-8932f937-d72c-4106-c12f-20bd9faed9f6/1/2"
+    monkeypatch.setenv("SIMSOPT_BACKEND_MODE", "jax_gpu_fast")
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", mig_selector)
+    monkeypatch.delitem(sys.modules, "jax", raising=False)
+    calls = _install_fake_nvidia_smi(monkeypatch, "7, 768\n")
+    backend = _fresh_backend()
+
+    assert backend.get_active_cuda_device_index() is None
+    assert backend.query_active_gpu_memory_mb() == pytest.approx(768.0)
+    assert calls
+    assert calls[0][-2:] == ["-i", mig_selector]
 
 
 def test_query_active_gpu_memory_mb_uses_visible_cuda_device(monkeypatch):
@@ -643,7 +695,9 @@ def test_query_active_gpu_memory_mb_falls_back_to_visible_env_before_distributed
     assert calls[0][-2:] == ["-i", "3"]
 
 
-def test_query_active_gpu_memory_mb_uses_active_jax_device_when_env_is_unset(monkeypatch):
+def test_query_active_gpu_memory_mb_uses_active_jax_device_when_env_is_unset(
+    monkeypatch,
+):
     local_devices, local_device_calls = _make_recording_cuda_device_probe(2)
     _clear_backend_env(monkeypatch)
     monkeypatch.setenv("SIMSOPT_BACKEND_MODE", "jax_gpu_fast")

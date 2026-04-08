@@ -507,15 +507,22 @@ def _detect_global_jax_device_count(policy: BackendPolicy) -> int:
         return 0
 
 
-def _parse_visible_cuda_device_index() -> int | None:
+def _visible_cuda_device_selector() -> str | None:
     raw_value = _optional_env_value("CUDA_VISIBLE_DEVICES")
     if raw_value is None:
         return None
     first = raw_value.split(",", 1)[0].strip()
     if not first or first in {"-1", "none", "NoDevFiles"}:
         return None
+    return first
+
+
+def _parse_visible_cuda_device_index() -> int | None:
+    selector = _visible_cuda_device_selector()
+    if selector is None:
+        return None
     try:
-        value = int(first)
+        value = int(selector)
     except ValueError:
         return None
     return value if value >= 0 else None
@@ -560,6 +567,13 @@ def _detect_active_jax_cuda_device_index() -> int | None:
     return _parse_visible_cuda_device_index()
 
 
+def _detect_active_jax_cuda_device_selector() -> int | str | None:
+    runtime_index = _detect_imported_jax_cuda_device_index()
+    if runtime_index is not None:
+        return runtime_index
+    return _visible_cuda_device_selector()
+
+
 def _parse_nvidia_smi_indexed_value_row(raw_row: str) -> tuple[int, float] | None:
     fields = [field.strip() for field in raw_row.split(",")]
     if len(fields) != 2:
@@ -572,15 +586,15 @@ def _parse_nvidia_smi_indexed_value_row(raw_row: str) -> tuple[int, float] | Non
 
 def _query_gpu_metric_mb_from_nvidia_smi(
     metric_name: str,
-    device_index: int | None = None,
+    device_selector: int | str | None = None,
 ) -> float | None:
     command = [
         "nvidia-smi",
         f"--query-gpu=index,{metric_name}",
         "--format=csv,noheader,nounits",
     ]
-    if device_index is not None:
-        command.extend(["-i", str(device_index)])
+    if device_selector is not None:
+        command.extend(["-i", str(device_selector)])
     try:
         result = subprocess.run(
             command,
@@ -598,21 +612,25 @@ def _query_gpu_metric_mb_from_nvidia_smi(
         if parsed is None:
             continue
         index, value = parsed
-        if device_index is not None and index != device_index:
+        if isinstance(device_selector, int) and index != device_selector:
             continue
         if value >= 0:
             return float(value)
     return None
 
 
-def _query_gpu_total_memory_mb_from_nvidia_smi(device_index: int | None = None) -> int | None:
-    value = _query_gpu_metric_mb_from_nvidia_smi("memory.total", device_index)
+def _query_gpu_total_memory_mb_from_nvidia_smi(
+    device_selector: int | str | None = None,
+) -> int | None:
+    value = _query_gpu_metric_mb_from_nvidia_smi("memory.total", device_selector)
     if value is None or value <= 0:
         return None
     return int(value)
 
 
-def _resolve_gpu_total_memory_mb(policy: BackendPolicy) -> tuple[int | None, str | None]:
+def _resolve_gpu_total_memory_mb(
+    policy: BackendPolicy,
+) -> tuple[int | None, str | None]:
     if policy.jax_platform != "cuda":
         return None, None
     env_value = _optional_positive_int_env(_GPU_MEMORY_TOTAL_MB_ENV)
@@ -620,13 +638,13 @@ def _resolve_gpu_total_memory_mb(policy: BackendPolicy) -> tuple[int | None, str
         if env_value == 0:
             raise ValueError(f"{_GPU_MEMORY_TOTAL_MB_ENV} must be > 0 when set")
         return env_value, _GPU_MEMORY_TOTAL_MB_ENV
-    device_index = _detect_active_jax_cuda_device_index()
-    detected = _query_gpu_total_memory_mb_from_nvidia_smi(device_index)
+    device_selector = _detect_active_jax_cuda_device_selector()
+    detected = _query_gpu_total_memory_mb_from_nvidia_smi(device_selector)
     if detected is None:
         return None, None
-    if device_index is None:
+    if device_selector is None:
         return detected, "nvidia-smi"
-    return detected, f"nvidia-smi[{device_index}]"
+    return detected, f"nvidia-smi[{device_selector}]"
 
 
 def _resolve_autotuned_chunk_sizes(
@@ -645,9 +663,7 @@ def _resolve_autotuned_chunk_sizes(
 def _static_chunk_sizes(mode: str, chunk_policy: str) -> dict[str, int]:
     return {
         "coil_chunk_size": _FIELD_KERNEL_DEFAULTS[mode]["coil_chunk_size"],
-        "quadrature_block_size": _FIELD_KERNEL_DEFAULTS[mode][
-            "quadrature_block_size"
-        ],
+        "quadrature_block_size": _FIELD_KERNEL_DEFAULTS[mode]["quadrature_block_size"],
         "point_chunk_size": _point_chunk_size_default(chunk_policy),
         "pairwise_penalty_chunk_size": _pairwise_penalty_chunk_size_default(
             chunk_policy
@@ -1109,8 +1125,8 @@ def query_active_gpu_memory_mb(mode: str | None = None) -> float | None:
     policy = get_backend_policy(mode)
     if policy.jax_platform != "cuda":
         return None
-    device_index = get_active_cuda_device_index(mode)
-    return _query_gpu_metric_mb_from_nvidia_smi("memory.used", device_index)
+    device_selector = _detect_active_jax_cuda_device_selector()
+    return _query_gpu_metric_mb_from_nvidia_smi("memory.used", device_selector)
 
 
 def get_sharding_strategy(mode: str | None = None) -> str:
@@ -1270,15 +1286,15 @@ def maybe_initialize_distributed_jax() -> DistributedRuntimeConfig:
 
     initialize = getattr(distributed_module, "initialize", None)
     if initialize is None:
-        raise RuntimeError("Installed JAX runtime does not expose jax.distributed.initialize.")
+        raise RuntimeError(
+            "Installed JAX runtime does not expose jax.distributed.initialize."
+        )
     initialize(
         coordinator_address=config.coordinator_address,
         num_processes=int(config.num_processes),
         process_id=int(config.process_id),
         local_device_ids=(
-            None
-            if config.local_device_ids is None
-            else list(config.local_device_ids)
+            None if config.local_device_ids is None else list(config.local_device_ids)
         ),
     )
     return _cache_distributed_initialized_config(config)

@@ -9,9 +9,10 @@ Measures compile-time vs steady-state runtime for:
 5. Composed penalty Hessian
 
 Usage:
-    conda run -n columbia-repro-b4815f18 python benchmarks/jax_derivative_benchmark.py
+    conda run -n <conda-env> python benchmarks/jax_derivative_benchmark.py
 """
 
+import argparse
 import importlib.util
 import sys
 import time
@@ -19,12 +20,32 @@ import types
 from pathlib import Path
 
 import numpy as np
+
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(_REPO_ROOT))
+
+from repo_bootstrap import configure_entrypoint_jax_runtime
+
+
+configure_entrypoint_jax_runtime(sys.argv[1:])
+
 import jax
 
 jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp
 
 _SRC = Path(__file__).resolve().parents[1] / "src" / "simsopt"
+
+
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument(
+        "--platform",
+        choices=("auto", "cpu", "cuda"),
+        default="auto",
+        help="JAX platform to request before import/use.",
+    )
+    return parser.parse_known_args()[0]
 
 
 def _load(name, relpath):
@@ -209,4 +230,5 @@ def run_benchmarks():
 
 
 if __name__ == "__main__":
+    _parse_args()
     run_benchmarks()

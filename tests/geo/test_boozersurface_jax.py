@@ -300,6 +300,25 @@ def _make_curve_current_spec_only_legacy_coils():
     return [_CurveCurrentSpecOnlyCoil(_CurveSpecOnly(), _CurrentSpecOnly())]
 
 
+def _make_mock_boozer_surface_with_free_currents():
+    class _MutableCurrent:
+        def __init__(self, value):
+            self._value = value
+            self.dofs = self
+
+        def get_value(self):
+            return self._value
+
+        def all_fixed(self):
+            return False
+
+    booz = _make_mock_boozer_surface()
+    booz.biotsavart._coils[0].current = _MutableCurrent(
+        booz.biotsavart._coils[0].current.get_value()
+    )
+    return booz
+
+
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
@@ -986,6 +1005,37 @@ class TestBoozerSurfaceJAXClass:
 
         assert result is not None
         assert result["type"] == "ls"
+
+    def test_run_code_rejects_G_none_with_free_legacy_currents(self):
+        booz = _make_mock_boozer_surface_with_free_currents()
+
+        with pytest.raises(ValueError, match="fixed coil currents when G=None"):
+            booz.run_code(iota=0.2, G=None)
+
+    def test_public_entrypoints_reject_G_none_with_free_legacy_currents(self):
+        method_calls = (
+            (
+                "minimize_boozer_penalty_constraints_LBFGS",
+                (),
+                {"iota": 0.2, "G": None},
+            ),
+            (
+                "minimize_boozer_penalty_constraints_newton",
+                (),
+                {"iota": 0.2, "G": None},
+            ),
+            (
+                "solve_residual_equation_exactly_newton",
+                (),
+                {"iota": 0.2, "G": None},
+            ),
+        )
+
+        for method_name, args, kwargs in method_calls:
+            booz = _make_mock_boozer_surface_with_free_currents()
+            method = getattr(booz, method_name)
+            with pytest.raises(ValueError, match="fixed coil currents when G=None"):
+                method(*args, **kwargs)
 
     def test_reference_ls_reuses_cached_scipy_value_and_grad_transform(
         self,

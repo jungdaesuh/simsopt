@@ -1,5 +1,6 @@
 #include "xtensor-python/pyarray.hpp"
 typedef xt::pyarray<double> PyArray;
+#include <limits>
 #include <math.h>
 
 /** Compute quadratic flux and similar quantities.
@@ -57,8 +58,9 @@ double integral_BdotN(PyArray& Bcoil, PyArray& Btarget, PyArray& n, std::string 
     }
     double numerator_sum = 0.0;
     double denominator_sum = 0.0;
+    int has_local_singularity = 0;
 
-    #pragma omp parallel for reduction(+:numerator_sum, denominator_sum)
+    #pragma omp parallel for reduction(+:numerator_sum, denominator_sum) reduction(max:has_local_singularity)
     for(int i=0; i<nphi*ntheta; i++){
         double mod_B_squared = 0.0;
         double normN = std::sqrt(
@@ -66,9 +68,14 @@ double integral_BdotN(PyArray& Bcoil, PyArray& Btarget, PyArray& n, std::string 
             + n_ptr[3 * i + 1] * n_ptr[3 * i + 1] 
             + n_ptr[3 * i + 2] * n_ptr[3 * i + 2]
         );
-        double Nx = n_ptr[3 * i + 0] / normN;
-        double Ny = n_ptr[3 * i + 1] / normN;
-        double Nz = n_ptr[3 * i + 2] / normN;
+        double Nx = 0.0;
+        double Ny = 0.0;
+        double Nz = 0.0;
+        if (normN > 0.0) {
+            Nx = n_ptr[3 * i + 0] / normN;
+            Ny = n_ptr[3 * i + 1] / normN;
+            Nz = n_ptr[3 * i + 2] / normN;
+        }
         double BcoildotN = (
             Bcoil_ptr[3 * i + 0] * Nx 
             + Bcoil_ptr[3 * i + 1] * Ny 
@@ -89,7 +96,11 @@ double integral_BdotN(PyArray& Bcoil, PyArray& Btarget, PyArray& n, std::string 
             numerator_sum += (BcoildotN * BcoildotN) * normN;
             denominator_sum += mod_B_squared * normN;
         } else if (definition_int == DEFINITION_LOCAL) {
-            numerator_sum += (BcoildotN * BcoildotN) / mod_B_squared * normN;
+            if (normN > 0.0 && mod_B_squared <= 0.0) {
+                has_local_singularity = 1;
+            } else if (mod_B_squared > 0.0) {
+                numerator_sum += (BcoildotN * BcoildotN) / mod_B_squared * normN;
+            }
         } else {
             throw std::runtime_error("Should never reach this point.");
         }
@@ -97,8 +108,14 @@ double integral_BdotN(PyArray& Bcoil, PyArray& Btarget, PyArray& n, std::string 
 
     double result;
     if (definition_int == DEFINITION_NORMALIZED) {
+        if (denominator_sum <= 0.0) {
+            return std::numeric_limits<double>::infinity();
+        }
         result = 0.5 * numerator_sum / denominator_sum;
     } else {
+        if (definition_int == DEFINITION_LOCAL && has_local_singularity != 0) {
+            return std::numeric_limits<double>::infinity();
+        }
         result = 0.5 * numerator_sum / (nphi * ntheta);
     }
 

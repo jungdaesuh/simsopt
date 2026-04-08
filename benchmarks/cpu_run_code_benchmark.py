@@ -25,7 +25,6 @@ Use ``benchmarks/run_code_parity_probe.py`` for solver parity checks.
 from __future__ import annotations
 
 import argparse
-import os
 import sys
 from pathlib import Path
 
@@ -35,7 +34,13 @@ SRC_ROOT = REPO_ROOT / "src"
 sys.path.insert(0, str(REPO_ROOT))
 sys.path.insert(0, str(SRC_ROOT))
 
-os.environ["JAX_PLATFORMS"] = "cpu"
+from repo_bootstrap import configure_entrypoint_jax_runtime
+
+
+configure_entrypoint_jax_runtime(
+    default_platform="cpu",
+    respect_existing_env=False,
+)
 import jax
 
 jax.config.update("jax_enable_x64", True)

@@ -26,6 +26,31 @@ _REPO_ROOT = str(Path(__file__).resolve().parents[1])
 _OPTIMIZER_JAX_PATH = Path(_SRC_DIR) / "simsopt" / "geo" / "optimizer_jax.py"
 _OPTIMIZER_PRIVATE_DIR = Path(_SRC_DIR) / "simsopt" / "geo" / "optimizer_jax_private"
 _RUNTIME_BACKEND_PATH = Path(_SRC_DIR) / "simsopt" / "backend" / "runtime.py"
+_CPU_RUN_CODE_BENCHMARK_PATH = (
+    Path(_REPO_ROOT) / "benchmarks" / "cpu_run_code_benchmark.py"
+)
+_ENTRYPOINT_RUNTIME_AUDIT_PATHS = (
+    Path(_REPO_ROOT) / "benchmarks" / "biot_savart_kernel_scaling.py",
+    Path(_REPO_ROOT) / "benchmarks" / "cpu_run_code_benchmark.py",
+    Path(_REPO_ROOT) / "benchmarks" / "gpu_run_code_benchmark.py",
+    Path(_REPO_ROOT) / "benchmarks" / "jax_derivative_benchmark.py",
+    Path(_REPO_ROOT) / "benchmarks" / "jax_feasibility_spike.py",
+    Path(_REPO_ROOT) / "benchmarks" / "optimistix_eval.py",
+    (
+        Path(_REPO_ROOT)
+        / "examples"
+        / "single_stage_optimization"
+        / "SINGLE_STAGE"
+        / "single_stage_banana_example.py"
+    ),
+    (
+        Path(_REPO_ROOT)
+        / "examples"
+        / "single_stage_optimization"
+        / "STAGE_2"
+        / "banana_coil_solver.py"
+    ),
+)
 _BACKEND_SELECTOR_ENV_VARS = (
     "SIMSOPT_BACKEND_MODE",
     "SIMSOPT_BACKEND_STRICT",
@@ -112,7 +137,10 @@ def _strip_simsopt_editable_finders(*, include_import=True):
             finder
             for finder in sys.meta_path
             if type(finder).__module__ != "_simsopt_editable"
-            and not type(finder).__module__.startswith("__editable__")
+            and (
+                not type(finder).__module__.startswith("__editable__")
+                or "simsopt" not in type(finder).__module__.lower()
+            )
         ]
     """
 
@@ -167,6 +195,29 @@ def _find_private_jax_src_usages(path: Path) -> list[str]:
 def _assert_no_private_jax_src_usage(path: Path, *, label: str) -> None:
     forbidden_usages = _find_private_jax_src_usages(path)
     assert forbidden_usages == [], f"{label} must not use jax._src: {forbidden_usages}"
+
+
+def _find_import_line(path: Path, module_name: str) -> int | None:
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    import_lines = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            if any(alias.name == module_name for alias in node.names):
+                import_lines.append(node.lineno)
+        elif isinstance(node, ast.ImportFrom):
+            if node.module == module_name:
+                import_lines.append(node.lineno)
+    return min(import_lines) if import_lines else None
+
+
+def _find_named_call_lines(path: Path, function_name: str) -> list[int]:
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    call_lines = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+            if node.func.id == function_name:
+                call_lines.append(node.lineno)
+    return sorted(call_lines)
 
 
 def test_find_private_jax_src_usages_detects_alias_attribute_access(tmp_path):
@@ -371,7 +422,7 @@ def test_repo_bootstrap_strips_editable_meta_path_finders_on_fast_path():
                     )
                 return None
 
-        _FakeEditableFinder.__module__ = "__editable___demo"
+        _FakeEditableFinder.__module__ = "__editable___simsopt_demo"
         fake_finder = _FakeEditableFinder()
         sys.meta_path.insert(0, fake_finder)
 
@@ -379,7 +430,11 @@ def test_repo_bootstrap_strips_editable_meta_path_finders_on_fast_path():
 
         assert fake_finder not in sys.meta_path
         assert not any(
-            type(finder).__module__.startswith("__editable__")
+            type(finder).__module__ == "_simsopt_editable"
+            or (
+                type(finder).__module__.startswith("__editable__")
+                and "simsopt" in type(finder).__module__.lower()
+            )
             for finder in sys.meta_path
         )
 
@@ -392,6 +447,35 @@ def test_repo_bootstrap_strips_editable_meta_path_finders_on_fast_path():
         assert simsopt is sys.modules["simsopt"]
     """,
         failure_message="repo_bootstrap should strip editable meta_path finders",
+    )
+
+
+def test_repo_bootstrap_preserves_unrelated_editable_meta_path_finders():
+    """Warm bootstraps must not remove editable finders for unrelated packages."""
+    _assert_import_check_passes(
+        """
+        import importlib.abc
+        import sys
+        from pathlib import Path
+
+        from repo_bootstrap import bootstrap_local_simsopt
+
+        src_root = Path.cwd() / "src"
+
+        class _UnrelatedEditableFinder(importlib.abc.MetaPathFinder):
+            def find_spec(self, fullname, path=None, target=None):
+                del fullname, path, target
+                return None
+
+        _UnrelatedEditableFinder.__module__ = "__editable___otherpkg"
+        unrelated_finder = _UnrelatedEditableFinder()
+        sys.meta_path.insert(0, unrelated_finder)
+
+        bootstrap_local_simsopt(src_root)
+
+        assert unrelated_finder in sys.meta_path
+    """,
+        failure_message="repo_bootstrap should preserve unrelated editable finders",
     )
 
 
@@ -417,6 +501,118 @@ def test_import_package_root_native_cpu_does_not_require_jax_runtime():
         assert os.environ["JAX_ENABLE_X64"] == "True"
     """)
     assert rc == 0, f"package root import unexpectedly required jax:\n{err}"
+
+
+def test_entrypoint_runtime_helper_configures_cpu_before_import():
+    _assert_import_check_passes(
+        """
+        import os
+
+        from repo_bootstrap import configure_entrypoint_jax_runtime
+
+        requested = configure_entrypoint_jax_runtime(
+            ["--platform", "cpu"],
+            default_platform="cuda",
+            respect_existing_env=False,
+        )
+
+        import jax
+
+        assert requested == "cpu"
+        assert jax.default_backend() == "cpu"
+        assert os.environ["JAX_PLATFORMS"] == "cpu"
+        assert os.environ["SIMSOPT_JAX_PLATFORM"] == "cpu"
+        assert os.environ["SIMSOPT_JAX_BACKEND"] == "cpu"
+        assert os.environ["JAX_ENABLE_X64"] == "True"
+    """,
+        failure_message="entrypoint runtime helper should pin CPU before importing jax",
+    )
+
+
+def test_entrypoint_runtime_helper_auto_clears_stale_platform_env():
+    _assert_import_check_passes(
+        """
+        import os
+
+        from repo_bootstrap import configure_entrypoint_jax_runtime
+
+        os.environ["JAX_PLATFORMS"] = "cpu"
+        os.environ["SIMSOPT_JAX_PLATFORM"] = "cpu"
+        os.environ["SIMSOPT_JAX_BACKEND"] = "cpu"
+        os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
+
+        requested = configure_entrypoint_jax_runtime(
+            ["--platform", "auto"],
+            respect_existing_env=False,
+        )
+
+        assert requested is None
+        assert "JAX_PLATFORMS" not in os.environ
+        assert "SIMSOPT_JAX_PLATFORM" not in os.environ
+        assert "SIMSOPT_JAX_BACKEND" not in os.environ
+        assert "XLA_PYTHON_CLIENT_PREALLOCATE" not in os.environ
+        assert os.environ["JAX_ENABLE_X64"] == "True"
+    """,
+        failure_message="entrypoint runtime helper should clear stale platform env when auto is requested",
+    )
+
+
+def test_run_code_benchmark_common_import_is_jax_cold():
+    _assert_import_check_passes(
+        f"""
+        import importlib.abc
+
+        class _BlockJax(importlib.abc.MetaPathFinder):
+            def find_spec(self, fullname, path=None, target=None):
+                del path, target
+                if fullname == "jax" or fullname.startswith("jax."):
+                    raise ImportError("blocked jax import for benchmark helper smoke")
+                return None
+
+        import sys
+
+        sys.meta_path.insert(0, _BlockJax())
+        sys.path.insert(0, {str(Path(_REPO_ROOT))!r})
+
+        import benchmarks.run_code_benchmark_common as benchmark_common
+
+        assert callable(benchmark_common.resolve_benchmark_backends)
+    """,
+        failure_message="run_code_benchmark_common import should not initialize jax",
+    )
+
+
+def test_cpu_run_code_benchmark_pins_cpu_before_import():
+    _assert_import_check_passes(
+        f"""
+        import runpy
+        import sys
+
+        sys.argv = [{str(_CPU_RUN_CODE_BENCHMARK_PATH)!r}]
+        runpy.run_path({str(_CPU_RUN_CODE_BENCHMARK_PATH)!r}, run_name="benchmark_smoke")
+
+        import jax
+
+        assert jax.default_backend() == "cpu"
+    """,
+        failure_message="cpu_run_code_benchmark should request CPU before importing jax",
+    )
+
+
+def test_audited_entrypoints_configure_runtime_before_importing_jax():
+    for path in _ENTRYPOINT_RUNTIME_AUDIT_PATHS:
+        configure_lines = _find_named_call_lines(
+            path, "configure_entrypoint_jax_runtime"
+        )
+        first_jax_import = _find_import_line(path, "jax")
+
+        assert configure_lines, (
+            f"{path.name} must call configure_entrypoint_jax_runtime"
+        )
+        assert first_jax_import is not None, f"{path.name} must import jax explicitly"
+        assert min(configure_lines) < first_jax_import, (
+            f"{path.name} must configure the JAX runtime before importing jax"
+        )
 
 
 def test_programmatic_backend_selection_configures_jax_runtime():
@@ -2698,6 +2894,15 @@ def test_curveobjectives_optional_cpp_helpers_raise_clear_importerror_without_si
                     [
                         [[0.0, 0.2, 0.0], [0.1, 0.2, 0.0]],
                         [[0.0, 0.3, 0.0], [0.1, 0.3, 0.0]],
+                    ],
+                    dtype=np.float64,
+                )
+
+            def normal(self):
+                return np.array(
+                    [
+                        [[0.0, 0.0, 1.0], [0.0, 0.0, 1.0]],
+                        [[0.0, 0.0, 1.0], [0.0, 0.0, 1.0]],
                     ],
                     dtype=np.float64,
                 )
