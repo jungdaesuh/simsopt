@@ -451,6 +451,83 @@ def _boozer_penalty_objective(
     return J_boozer + J_label + J_z
 
 
+def _boozer_penalty_residual_vector(
+    x,
+    *,
+    coil_arrays=None,
+    coil_set_spec=None,
+    quadpoints_phi,
+    quadpoints_theta,
+    mpol,
+    ntor,
+    nfp,
+    stellsym,
+    scatter_indices,
+    surface_kind,
+    targetlabel,
+    constraint_weight,
+    label_type,
+    phi_idx,
+    optimize_G,
+    weight_inv_modB,
+):
+    optimizer_state = _as_boozer_penalty_optimizer_state(x, optimize_G=optimize_G)
+    G_value = (
+        optimizer_state.G
+        if optimize_G
+        else compute_G_from_currents(
+            _grouped_coil_currents(coil_arrays=coil_arrays, coil_set_spec=coil_set_spec)
+        )
+    )
+    gamma, xphi, xtheta = _surface_geometry_from_dofs(
+        optimizer_state.surface_dofs,
+        quadpoints_phi,
+        quadpoints_theta,
+        mpol,
+        ntor,
+        nfp,
+        stellsym,
+        scatter_indices,
+        surface_kind=surface_kind,
+    )
+    nphi, ntheta = int(gamma.shape[0]), int(gamma.shape[1])
+    points = gamma.reshape(-1, 3)
+    B = _grouped_biot_savart_B_points(
+        points,
+        coil_arrays=coil_arrays,
+        coil_set_spec=coil_set_spec,
+    ).reshape(nphi, ntheta, 3)
+
+    r_boozer_raw = boozer_residual_vector(
+        G_value,
+        optimizer_state.iota,
+        B,
+        xphi,
+        xtheta,
+        weight_inv_modB,
+    )
+    num_res = _as_jax_float64(3 * nphi * ntheta)
+    r_boozer = r_boozer_raw / jnp.sqrt(num_res)
+
+    constraint_weight = constraint_weight if constraint_weight is not None else 1.0
+    constraint_weight = _as_jax_float64(constraint_weight)
+    label_value, gamma_axis_z = _compute_label_and_axis_z(
+        gamma=gamma,
+        xphi=xphi,
+        xtheta=xtheta,
+        points=points,
+        label_type=label_type,
+        phi_idx=phi_idx,
+        coil_arrays=coil_arrays,
+        coil_set_spec=coil_set_spec,
+    )
+    weight_sqrt = jnp.sqrt(constraint_weight)
+    rl = weight_sqrt * (label_value - _as_jax_float64(targetlabel))
+    rz = weight_sqrt * gamma_axis_z
+
+    return _concat_jax_float64(r_boozer, [rl, rz])
+
+
 def _boozer_exact_residual(
     x,
     *,
@@ -1611,6 +1688,21 @@ class BoozerSurfaceJAX(Optimizable):
             _traceable_array_signature(self.scatter_indices),
         )
 
+    def _traceable_surface_runtime_args(self):
+        return {
+            "quadpoints_phi": _hostify_tree(self.quadpoints_phi),
+            "quadpoints_theta": _hostify_tree(self.quadpoints_theta),
+            "mpol": self.mpol,
+            "ntor": self.ntor,
+            "nfp": self.nfp,
+            "stellsym": self.stellsym,
+            "scatter_indices": _hostify_tree(self.scatter_indices),
+            "surface_kind": self._surface_geometry_kind,
+            "targetlabel": self.targetlabel,
+            "label_type": self.label_type,
+            "phi_idx": self.phi_idx,
+        }
+
     def _resolve_constraint_weight(self, constraint_weight):
         return (
             self.constraint_weight if constraint_weight is None else constraint_weight
@@ -1665,25 +1757,16 @@ class BoozerSurfaceJAX(Optimizable):
         )
         objective_fn = self._traceable_penalty_objective_cache.get(key)
         if objective_fn is None:
+            surface_args = self._traceable_surface_runtime_args()
 
             def objective_fn(x, coil_set_spec):
                 return _boozer_penalty_objective(
                     x,
                     coil_set_spec=coil_set_spec,
-                    quadpoints_phi=self.quadpoints_phi,
-                    quadpoints_theta=self.quadpoints_theta,
-                    mpol=self.mpol,
-                    ntor=self.ntor,
-                    nfp=self.nfp,
-                    stellsym=self.stellsym,
-                    scatter_indices=self.scatter_indices,
-                    surface_kind=self._surface_geometry_kind,
-                    targetlabel=self.targetlabel,
                     constraint_weight=resolved_constraint_weight,
-                    label_type=self.label_type,
-                    phi_idx=self.phi_idx,
                     optimize_G=optimize_G,
                     weight_inv_modB=weight_inv_modB,
+                    **surface_args,
                 )
 
             self._traceable_penalty_objective_cache[key] = objective_fn
@@ -1703,26 +1786,16 @@ class BoozerSurfaceJAX(Optimizable):
         )
         residual_fn = self._traceable_penalty_residual_cache.get(key)
         if residual_fn is None:
+            surface_args = self._traceable_surface_runtime_args()
 
             def residual_fn(x, coil_set_spec):
-                optimizer_state = _as_boozer_penalty_optimizer_state(
+                return _boozer_penalty_residual_vector(
                     x,
-                    optimize_G=optimize_G,
-                )
-                G_value = (
-                    optimizer_state.G
-                    if optimize_G
-                    else compute_G_from_currents(
-                        _grouped_coil_currents(coil_set_spec=coil_set_spec)
-                    )
-                )
-                return self._compute_residual_vector(
-                    optimizer_state.surface_dofs,
-                    optimizer_state.iota,
-                    G_value,
-                    weight_inv_modB=weight_inv_modB,
-                    constraint_weight=resolved_constraint_weight,
                     coil_set_spec=coil_set_spec,
+                    constraint_weight=resolved_constraint_weight,
+                    optimize_G=optimize_G,
+                    weight_inv_modB=weight_inv_modB,
+                    **surface_args,
                 )
 
             self._traceable_penalty_residual_cache[key] = residual_fn
@@ -1734,24 +1807,16 @@ class BoozerSurfaceJAX(Optimizable):
         residual_fn = self._traceable_exact_residual_cache.get(key)
         if residual_fn is None:
             exact_residual = _select_exact_residual_fn(self.stellsym)
+            surface_args = self._traceable_surface_runtime_args()
+            host_mask_indices = _hostify_tree(mask_indices)
 
             def residual_fn(x, coil_set_spec):
                 return exact_residual(
                     x,
                     coil_set_spec=coil_set_spec,
-                    quadpoints_phi=self.quadpoints_phi,
-                    quadpoints_theta=self.quadpoints_theta,
-                    mpol=self.mpol,
-                    ntor=self.ntor,
-                    nfp=self.nfp,
-                    stellsym=self.stellsym,
-                    scatter_indices=self.scatter_indices,
-                    surface_kind=self._surface_geometry_kind,
-                    targetlabel=self.targetlabel,
-                    label_type=self.label_type,
-                    phi_idx=self.phi_idx,
-                    mask_indices=mask_indices,
+                    mask_indices=host_mask_indices,
                     weight_inv_modB=weight_inv_modB,
+                    **surface_args,
                 )
 
             self._traceable_exact_residual_cache[key] = residual_fn
