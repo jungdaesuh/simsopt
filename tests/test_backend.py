@@ -846,6 +846,43 @@ def test_distributed_runtime_config_rejects_invalid_process_ids(monkeypatch):
         backend.get_distributed_runtime_config()
 
 
+def test_distributed_runtime_config_self_heals_after_external_init(monkeypatch):
+    _clear_backend_env(monkeypatch)
+    monkeypatch.setenv("SIMSOPT_BACKEND_MODE", "jax_gpu_fast")
+    _set_distributed_init_env(monkeypatch)
+    distributed_state = {"initialized": False}
+    monkeypatch.setitem(
+        sys.modules,
+        "jax",
+        types.SimpleNamespace(
+            distributed=types.SimpleNamespace(
+                is_initialized=lambda: distributed_state["initialized"]
+            )
+        ),
+    )
+
+    backend = _fresh_backend()
+    runtime = sys.modules["simsopt.backend.runtime"]
+    monkeypatch.setattr(runtime, "_detect_local_jax_device_count", lambda policy: 2)
+    monkeypatch.setattr(runtime, "_detect_global_jax_device_count", lambda policy: 8)
+
+    pre_config = backend.get_distributed_runtime_config()
+    pre_tuning = backend.get_sharding_tuning()
+
+    assert pre_config.initialized is False
+    assert pre_tuning.distributed_initialized is False
+    assert pre_tuning.device_count == 2
+
+    distributed_state["initialized"] = True
+
+    post_config = backend.get_distributed_runtime_config()
+    post_tuning = backend.get_sharding_tuning()
+
+    assert post_config.initialized is True
+    assert post_tuning.distributed_initialized is True
+    assert post_tuning.device_count == 8
+
+
 def test_maybe_initialize_distributed_jax_updates_sharding_device_counts(monkeypatch):
     _clear_backend_env(monkeypatch)
     monkeypatch.setenv("SIMSOPT_BACKEND_MODE", "jax_gpu_fast")

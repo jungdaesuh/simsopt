@@ -986,6 +986,20 @@ _cached_sharding_tuning: ShardingTuning | None = None
 _cached_distributed_runtime_config: DistributedRuntimeConfig | None = None
 
 
+def _jax_distributed_runtime_is_initialized() -> bool:
+    jax_module = sys.modules.get("jax")
+    if jax_module is None:
+        return False
+    distributed_module = getattr(jax_module, "distributed", None)
+    is_initialized = getattr(distributed_module, "is_initialized", None)
+    if not callable(is_initialized):
+        return False
+    try:
+        return bool(is_initialized())
+    except Exception:
+        return False
+
+
 def _invalidate_distributed_tuning_caches() -> None:
     global _cached_chunk_tuning, _cached_field_kernel_tuning, _cached_sharding_tuning
     _cached_chunk_tuning = None
@@ -1001,6 +1015,18 @@ def _cache_distributed_initialized_config(
     _cached_distributed_runtime_config = initialized_config
     _invalidate_distributed_tuning_caches()
     return initialized_config
+
+
+def _resolve_distributed_runtime_config(
+    config: DistributedRuntimeConfig,
+) -> DistributedRuntimeConfig:
+    if (
+        config.enabled
+        and not config.initialized
+        and _jax_distributed_runtime_is_initialized()
+    ):
+        return _cache_distributed_initialized_config(config)
+    return config
 
 
 def get_chunk_tuning(mode: str | None = None) -> ChunkTuning:
@@ -1171,7 +1197,6 @@ def _build_distributed_runtime_config() -> DistributedRuntimeConfig:
     local_device_ids = _parse_local_device_ids(
         _optional_nonempty_env(_DISTRIBUTED_LOCAL_DEVICE_IDS_ENV)
     )
-    initialized = False
     if not enabled:
         return DistributedRuntimeConfig(
             enabled=False,
@@ -1213,18 +1238,19 @@ def _build_distributed_runtime_config() -> DistributedRuntimeConfig:
         num_processes=num_processes,
         process_id=process_id,
         local_device_ids=local_device_ids,
-        initialized=initialized,
+        initialized=False,
     )
 
 
 def get_distributed_runtime_config() -> DistributedRuntimeConfig:
     """Return the configured distributed-JAX bootstrap contract."""
     global _cached_distributed_runtime_config
-    if _cached_distributed_runtime_config is not None:
-        return _cached_distributed_runtime_config
-    config = _build_distributed_runtime_config()
-    _cached_distributed_runtime_config = config
-    return config
+    if _cached_distributed_runtime_config is None:
+        _cached_distributed_runtime_config = _build_distributed_runtime_config()
+    _cached_distributed_runtime_config = _resolve_distributed_runtime_config(
+        _cached_distributed_runtime_config
+    )
+    return _cached_distributed_runtime_config
 
 
 def maybe_initialize_distributed_jax() -> DistributedRuntimeConfig:
