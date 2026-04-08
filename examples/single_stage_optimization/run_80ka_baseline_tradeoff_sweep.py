@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
 from dataclasses import asdict
 from pathlib import Path
@@ -29,6 +30,24 @@ from workflow_runner_common import (  # noqa: E402
 
 DEFAULT_PLASMA_SURF_FILENAME = "wout_nfp22ginsburg_000_014417_iota15.nc"
 DEFAULT_SWEEP_OUTPUT_ROOT = SCRIPT_DIR / "outputs_80ka_baseline_sweep"
+LOCKED_BASELINE_TF_CURRENT_A = 8.0e4
+LOCKED_BASELINE_NUM_TF_COILS = 20
+LOCKED_BASELINE_PLASMA_CURRENT_A = 0.0
+LOCKED_BASELINE_MAJOR_RADIUS = 0.915
+LOCKED_BASELINE_TOROIDAL_FLUX = 0.24
+LOCKED_BASELINE_STAGE2_LENGTH_WEIGHT = 0.0005
+LOCKED_BASELINE_STAGE2_CC_WEIGHT = 100.0
+LOCKED_BASELINE_STAGE2_CC_THRESHOLD = 0.05
+LOCKED_BASELINE_STAGE2_CURVATURE_WEIGHT = 0.0001
+LOCKED_BASELINE_STAGE2_CURVATURE_THRESHOLD = 40.0
+LOCKED_BASELINE_BANANA_SURF_RADIUS = 0.22
+LOCKED_BASELINE_STAGE2_ORDER = 2
+LOCKED_BASELINE_CONSTRAINT_METHOD = "penalty"
+LOCKED_BASELINE_STAGE2_BASIN_HOPS = 0
+LOCKED_BASELINE_STAGE2_BASIN_STEPSIZE = 0.01
+LOCKED_BASELINE_STAGE2_BASIN_SEED = -1
+LOCKED_BASELINE_STAGE2_INIT_ONLY = False
+EXPERIMENT_FAMILY = "coil_only_baseline"
 
 
 def parse_args() -> argparse.Namespace:
@@ -112,6 +131,139 @@ def parse_args() -> argparse.Namespace:
 
 def _timeout_or_none(timeout_seconds: float) -> float | None:
     return None if timeout_seconds <= 0.0 else float(timeout_seconds)
+
+
+def _raise_locked_baseline_arg_error(flag: str, expected, actual) -> None:
+    raise ValueError(
+        f"run_80ka_baseline_tradeoff_sweep.py is locked to {flag}={expected!r} for "
+        f"the {EXPERIMENT_FAMILY} lane, but received {actual!r}."
+    )
+
+
+def _validate_locked_baseline_scalar(flag: str, actual, expected) -> None:
+    if isinstance(expected, float):
+        if not math.isclose(
+            float(actual),
+            expected,
+            rel_tol=0.0,
+            abs_tol=1e-12,
+        ):
+            _raise_locked_baseline_arg_error(flag, expected, actual)
+        return
+    if actual != expected:
+        _raise_locked_baseline_arg_error(flag, expected, actual)
+
+
+def locked_baseline_requested_stage2_contract() -> tuple[tuple[str, str, object], ...]:
+    return (
+        ("--plasma-surf-filename", "plasma_surf_filename", DEFAULT_PLASMA_SURF_FILENAME),
+        ("--tf-current-A", "tf_current_A", LOCKED_BASELINE_TF_CURRENT_A),
+        ("--major-radius", "major_radius", LOCKED_BASELINE_MAJOR_RADIUS),
+        ("--toroidal-flux", "toroidal_flux", LOCKED_BASELINE_TOROIDAL_FLUX),
+        ("--stage2-length-weight", "stage2_length_weight", LOCKED_BASELINE_STAGE2_LENGTH_WEIGHT),
+        ("--stage2-cc-weight", "stage2_cc_weight", LOCKED_BASELINE_STAGE2_CC_WEIGHT),
+        ("--stage2-cc-threshold", "stage2_cc_threshold", LOCKED_BASELINE_STAGE2_CC_THRESHOLD),
+        (
+            "--stage2-curvature-weight",
+            "stage2_curvature_weight",
+            LOCKED_BASELINE_STAGE2_CURVATURE_WEIGHT,
+        ),
+        (
+            "--stage2-curvature-threshold",
+            "stage2_curvature_threshold",
+            LOCKED_BASELINE_STAGE2_CURVATURE_THRESHOLD,
+        ),
+        (
+            "--banana-surf-radius",
+            "banana_surf_radius",
+            LOCKED_BASELINE_BANANA_SURF_RADIUS,
+        ),
+        ("--stage2-order", "stage2_order", LOCKED_BASELINE_STAGE2_ORDER),
+        (
+            "--stage2-constraint-method",
+            "stage2_constraint_method",
+            LOCKED_BASELINE_CONSTRAINT_METHOD,
+        ),
+        ("--stage2-basin-hops", "stage2_basin_hops", LOCKED_BASELINE_STAGE2_BASIN_HOPS),
+        (
+            "--stage2-basin-stepsize",
+            "stage2_basin_stepsize",
+            LOCKED_BASELINE_STAGE2_BASIN_STEPSIZE,
+        ),
+        ("--stage2-basin-seed", "stage2_basin_seed", LOCKED_BASELINE_STAGE2_BASIN_SEED),
+        ("--stage2-init-only", "stage2_init_only", LOCKED_BASELINE_STAGE2_INIT_ONLY),
+    )
+
+
+def expected_locked_baseline_stage2_artifact_metadata(config: Stage2ArtifactConfig) -> dict:
+    return {
+        "PLASMA_SURF_FILENAME": config.plasma_surf_filename,
+        "TF_CURRENT_A": config.tf_current_A,
+        "TF_CURRENT_SUM_ABS_A": LOCKED_BASELINE_NUM_TF_COILS * config.tf_current_A,
+        "NUM_TF_COILS": LOCKED_BASELINE_NUM_TF_COILS,
+        "MAJOR_RADIUS": config.major_radius,
+        "TOROIDAL_FLUX": config.toroidal_flux,
+        "LENGTH_WEIGHT": config.length_weight,
+        "CC_WEIGHT": config.cc_weight,
+        "CC_THRESHOLD": config.cc_threshold,
+        "CURVATURE_WEIGHT": config.curvature_weight,
+        "CURVATURE_THRESHOLD": config.curvature_threshold,
+        "banana_surf_radius": config.banana_surf_radius,
+        "order": config.order,
+        "CONSTRAINT_METHOD": config.constraint_method,
+        "basin_hops": config.basin_hops,
+        "basin_stepsize": None if config.basin_hops == 0 else config.basin_stepsize,
+        "basin_seed": config.basin_seed,
+        "init_only": config.init_only,
+    }
+
+
+def validate_locked_baseline_args(args: argparse.Namespace) -> None:
+    _validate_locked_baseline_scalar(
+        "--plasma-current-A",
+        args.plasma_current_A,
+        LOCKED_BASELINE_PLASMA_CURRENT_A,
+    )
+    for flag, attr_name, expected in locked_baseline_requested_stage2_contract():
+        _validate_locked_baseline_scalar(flag, getattr(args, attr_name), expected)
+
+
+def load_locked_baseline_stage2_artifact(
+    stage2_bs_path: Path,
+    expected_config: Stage2ArtifactConfig,
+) -> tuple[Path, dict]:
+    stage2_results_path, stage2_artifact_results = load_stage2_artifact_results(
+        stage2_bs_path
+    )
+    for key, expected in expected_locked_baseline_stage2_artifact_metadata(
+        expected_config
+    ).items():
+        actual = stage2_artifact_results.get(key)
+        if actual is None and expected is not None:
+            raise ValueError(
+                f"Stage 2 artifact results.json is missing {key}; cannot verify the "
+                f"locked {EXPERIMENT_FAMILY} identity."
+            )
+        if isinstance(expected, float):
+            if not math.isclose(
+                float(actual),
+                expected,
+                rel_tol=0.0,
+                abs_tol=1e-12,
+            ):
+                raise ValueError(
+                    f"run_80ka_baseline_tradeoff_sweep.py is locked to {key}={expected!r} "
+                    f"for the {EXPERIMENT_FAMILY} lane, but {stage2_results_path} "
+                    f"reports {actual!r}."
+                )
+            continue
+        if actual != expected:
+            raise ValueError(
+                f"run_80ka_baseline_tradeoff_sweep.py is locked to {key}={expected!r} "
+                f"for the {EXPERIMENT_FAMILY} lane, but {stage2_results_path} "
+                f"reports {actual!r}."
+            )
+    return stage2_results_path, stage2_artifact_results
 
 
 def make_stage2_config(args: argparse.Namespace) -> Stage2ArtifactConfig:
@@ -208,8 +360,9 @@ def build_summary(
     stage2_requested_config: Stage2ArtifactConfig,
     records: list[dict],
 ) -> dict:
-    stage2_results_path, stage2_artifact_results = load_stage2_artifact_results(
-        stage2_bs_path
+    stage2_results_path, stage2_artifact_results = load_locked_baseline_stage2_artifact(
+        stage2_bs_path,
+        stage2_requested_config,
     )
     nondominated_metrics = [
         "FIELD_ERROR",
@@ -220,6 +373,9 @@ def build_summary(
     ]
     non_dominated = select_non_dominated_records(records, nondominated_metrics)
     return {
+        "experiment_family": EXPERIMENT_FAMILY,
+        "plasma_current_locked_A": LOCKED_BASELINE_PLASMA_CURRENT_A,
+        "tf_current_locked_A": LOCKED_BASELINE_TF_CURRENT_A,
         "stage2_bs_path": str(stage2_bs_path),
         "stage2_results_path": str(stage2_results_path),
         "stage2_artifact_results": stage2_artifact_results,
@@ -282,6 +438,7 @@ def build_sweep_cases(args: argparse.Namespace):
 
 def main() -> int:
     args = parse_args()
+    validate_locked_baseline_args(args)
     stage2_config = make_stage2_config(args)
     stage2_bs_path = (
         Path(args.stage2_bs_path)
@@ -293,6 +450,13 @@ def main() -> int:
             dry_run=args.dry_run,
         )
     )
+    validated_stage2_results_path = None
+    validated_stage2_artifact_results = None
+    if args.stage2_bs_path is not None or not args.dry_run:
+        (
+            validated_stage2_results_path,
+            validated_stage2_artifact_results,
+        ) = load_locked_baseline_stage2_artifact(stage2_bs_path, stage2_config)
     sweep_output_root = Path(args.output_root)
     summary_path = (
         Path(args.summary_json)
@@ -313,7 +477,14 @@ def main() -> int:
         build_summary(stage2_bs_path, stage2_config, records)
         if not args.dry_run
         else {
+            "experiment_family": EXPERIMENT_FAMILY,
+            "plasma_current_locked_A": LOCKED_BASELINE_PLASMA_CURRENT_A,
+            "tf_current_locked_A": LOCKED_BASELINE_TF_CURRENT_A,
             "stage2_bs_path": str(stage2_bs_path),
+            "stage2_results_path": str(validated_stage2_results_path)
+            if validated_stage2_results_path is not None
+            else None,
+            "stage2_artifact_results": validated_stage2_artifact_results,
             "stage2_command": build_stage2_command(
                 stage2_config,
                 python_executable=args.python_executable,

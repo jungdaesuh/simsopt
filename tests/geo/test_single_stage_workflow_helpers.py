@@ -224,11 +224,77 @@ class WorkflowRunnerCommonTests(unittest.TestCase):
 
 
 class BaselineSweepScriptTests(unittest.TestCase):
+    def _make_stage2_artifact_results(self, **overrides):
+        results = {
+            "PLASMA_SURF_FILENAME": "demo.nc",
+            "TF_CURRENT_A": 8.0e4,
+            "TF_CURRENT_SUM_ABS_A": 1.6e6,
+            "NUM_TF_COILS": 20,
+            "MAJOR_RADIUS": 0.915,
+            "TOROIDAL_FLUX": 0.24,
+            "LENGTH_WEIGHT": 0.0005,
+            "CC_WEIGHT": 100.0,
+            "CC_THRESHOLD": 0.05,
+            "CURVATURE_WEIGHT": 0.0001,
+            "CURVATURE_THRESHOLD": 40.0,
+            "banana_surf_radius": 0.22,
+            "order": 2,
+            "CONSTRAINT_METHOD": "penalty",
+            "basin_hops": 0,
+            "basin_stepsize": None,
+            "basin_seed": None,
+            "init_only": False,
+        }
+        results.update(overrides)
+        return results
+
+    def _make_expected_stage2_config(self, common, output_root: Path, **overrides):
+        config = {
+            "plasma_surf_filename": "demo.nc",
+            "output_root": output_root,
+            "equilibria_dir": None,
+            "tf_current_A": 8.0e4,
+            "major_radius": 0.915,
+            "toroidal_flux": 0.24,
+            "length_weight": 0.0005,
+            "cc_weight": 100.0,
+            "cc_threshold": 0.05,
+            "curvature_weight": 0.0001,
+            "curvature_threshold": 40.0,
+            "banana_surf_radius": 0.22,
+            "order": 2,
+            "constraint_method": "penalty",
+            "alm_max_outer_iters": 10,
+            "alm_penalty_init": 1.0,
+            "alm_penalty_scale": 10.0,
+            "basin_hops": 0,
+            "basin_stepsize": 0.01,
+            "basin_seed": None,
+            "init_only": False,
+        }
+        config.update(overrides)
+        return common.Stage2ArtifactConfig(**config)
+
     def _make_args(self):
         return SimpleNamespace(
             python_executable="python",
-            plasma_surf_filename="demo.nc",
+            plasma_surf_filename="wout_nfp22ginsburg_000_014417_iota15.nc",
             equilibria_dir=None,
+            tf_current_A=8.0e4,
+            major_radius=0.915,
+            toroidal_flux=0.24,
+            stage2_length_weight=0.0005,
+            stage2_cc_weight=100.0,
+            stage2_cc_threshold=0.05,
+            stage2_curvature_weight=0.0001,
+            stage2_curvature_threshold=40.0,
+            banana_surf_radius=0.22,
+            stage2_order=2,
+            stage2_constraint_method="penalty",
+            stage2_basin_hops=0,
+            stage2_basin_stepsize=0.01,
+            stage2_basin_seed=-1,
+            stage2_init_only=False,
             single_stage_constraint_method="penalty",
             single_stage_maxiter=25,
             single_stage_init_only=True,
@@ -270,6 +336,110 @@ class BaselineSweepScriptTests(unittest.TestCase):
         self.assertIn("0.0", command)
         self.assertIn("--init-only", command)
 
+    def test_validate_locked_baseline_args_rejects_nonzero_plasma_current(self):
+        module = load_baseline_sweep_module()
+        args = self._make_args()
+        args.plasma_current_A = 8000.0
+
+        with self.assertRaisesRegex(ValueError, "--plasma-current-A"):
+            module.validate_locked_baseline_args(args)
+
+    def test_validate_locked_baseline_args_rejects_non_80ka_tf_current(self):
+        module = load_baseline_sweep_module()
+        args = self._make_args()
+        args.tf_current_A = 1.0e5
+
+        with self.assertRaisesRegex(ValueError, "--tf-current-A"):
+            module.validate_locked_baseline_args(args)
+
+    def test_validate_locked_baseline_args_rejects_nonbaseline_stage2_geometry(self):
+        module = load_baseline_sweep_module()
+        args = self._make_args()
+        args.major_radius = 1.23
+
+        with self.assertRaisesRegex(ValueError, "--major-radius"):
+            module.validate_locked_baseline_args(args)
+
+    def test_validate_locked_baseline_args_rejects_nonbaseline_constraint_method(self):
+        module = load_baseline_sweep_module()
+        args = self._make_args()
+        args.stage2_constraint_method = "alm"
+
+        with self.assertRaisesRegex(ValueError, "--stage2-constraint-method"):
+            module.validate_locked_baseline_args(args)
+
+    def test_load_locked_baseline_stage2_artifact_rejects_wrong_tf_current(self):
+        module = load_baseline_sweep_module()
+        common = load_workflow_common_module()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            stage2_dir = Path(tmpdir)
+            stage2_bs_path = stage2_dir / "biot_savart_opt.json"
+            stage2_bs_path.write_text("{}", encoding="utf-8")
+            (stage2_dir / "results.json").write_text(
+                json.dumps(
+                    self._make_stage2_artifact_results(
+                        TF_CURRENT_A=1.0e5,
+                        TF_CURRENT_SUM_ABS_A=2.0e6,
+                    )
+                ),
+                encoding="utf-8",
+            )
+            expected_config = self._make_expected_stage2_config(common, stage2_dir)
+
+            with self.assertRaisesRegex(ValueError, "TF_CURRENT_A"):
+                module.load_locked_baseline_stage2_artifact(
+                    stage2_bs_path,
+                    expected_config,
+                )
+
+    def test_load_locked_baseline_stage2_artifact_rejects_wrong_geometry_identity(self):
+        module = load_baseline_sweep_module()
+        common = load_workflow_common_module()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            stage2_dir = Path(tmpdir)
+            stage2_bs_path = stage2_dir / "biot_savart_opt.json"
+            stage2_bs_path.write_text("{}", encoding="utf-8")
+            (stage2_dir / "results.json").write_text(
+                json.dumps(
+                    self._make_stage2_artifact_results(MAJOR_RADIUS=1.23)
+                ),
+                encoding="utf-8",
+            )
+            expected_config = self._make_expected_stage2_config(common, stage2_dir)
+
+            with self.assertRaisesRegex(ValueError, "MAJOR_RADIUS"):
+                module.load_locked_baseline_stage2_artifact(
+                    stage2_bs_path,
+                    expected_config,
+                )
+
+    def test_load_locked_baseline_stage2_artifact_rejects_wrong_total_tf_current(self):
+        module = load_baseline_sweep_module()
+        common = load_workflow_common_module()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            stage2_dir = Path(tmpdir)
+            stage2_bs_path = stage2_dir / "biot_savart_opt.json"
+            stage2_bs_path.write_text("{}", encoding="utf-8")
+            (stage2_dir / "results.json").write_text(
+                json.dumps(
+                    self._make_stage2_artifact_results(
+                        TF_CURRENT_SUM_ABS_A=8.0e5,
+                        NUM_TF_COILS=10,
+                    )
+                ),
+                encoding="utf-8",
+            )
+            expected_config = self._make_expected_stage2_config(common, stage2_dir)
+
+            with self.assertRaisesRegex(ValueError, "TF_CURRENT_SUM_ABS_A|NUM_TF_COILS"):
+                module.load_locked_baseline_stage2_artifact(
+                    stage2_bs_path,
+                    expected_config,
+                )
+
     def test_build_summary_reports_non_dominated_cases_and_artifact_provenance(self):
         module = load_baseline_sweep_module()
         common = load_workflow_common_module()
@@ -299,49 +469,36 @@ class BaselineSweepScriptTests(unittest.TestCase):
             stage2_bs_path.write_text("{}", encoding="utf-8")
             stage2_results_path = stage2_dir / "results.json"
             stage2_results_path.write_text(
-                json.dumps(
-                    {
-                        "TF_CURRENT_A": 1.0e5,
-                        "MAJOR_RADIUS": 0.915,
-                        "TOROIDAL_FLUX": 0.24,
-                    }
-                ),
+                json.dumps(self._make_stage2_artifact_results()),
                 encoding="utf-8",
             )
-            requested_config = common.Stage2ArtifactConfig(
-                plasma_surf_filename="demo.nc",
-                output_root=stage2_dir,
-                equilibria_dir=None,
-                tf_current_A=8.0e4,
-                major_radius=0.915,
-                toroidal_flux=0.24,
-                length_weight=0.0005,
-                cc_weight=100.0,
-                cc_threshold=0.05,
-                curvature_weight=0.0001,
-                curvature_threshold=40.0,
-                banana_surf_radius=0.22,
-                order=2,
-                constraint_method="penalty",
-                alm_max_outer_iters=10,
-                alm_penalty_init=1.0,
-                alm_penalty_scale=10.0,
-                basin_hops=0,
-                basin_stepsize=0.01,
-                basin_seed=None,
-                init_only=True,
-            )
+            requested_config = self._make_expected_stage2_config(common, stage2_dir)
 
             summary = module.build_summary(stage2_bs_path, requested_config, records)
 
+        self.assertEqual(summary["experiment_family"], "coil_only_baseline")
+        self.assertEqual(summary["plasma_current_locked_A"], 0.0)
+        self.assertEqual(summary["tf_current_locked_A"], 8.0e4)
         self.assertEqual(summary["non_dominated_case_names"], ["better"])
         self.assertEqual(summary["stage2_requested_config"]["tf_current_A"], 8.0e4)
-        self.assertEqual(summary["stage2_artifact_results"]["TF_CURRENT_A"], 1.0e5)
+        self.assertEqual(summary["stage2_artifact_results"]["TF_CURRENT_A"], 8.0e4)
         self.assertEqual(summary["stage2_results_path"], str(stage2_results_path))
         self.assertEqual(summary["stage2_bs_path"], str(stage2_bs_path))
 
 
 class FiniteCurrentSmokeScriptTests(unittest.TestCase):
+    def _make_smoke_results(self, **overrides):
+        results = {
+            "PLASMA_CURRENT_A": 0.0,
+            "PLASMA_CURRENT_INPUT_SOURCE": "physical_A",
+            "BOOZER_I": 0.0,
+            "STAGE2_TF_CURRENT_A": 8.0e4,
+            "STAGE2_TF_CURRENT_SUM_ABS_A": 1.6e6,
+            "FINITE_CURRENT_MODE": "boozer_surrogate",
+        }
+        results.update(overrides)
+        return results
+
     def _make_args(self):
         return SimpleNamespace(
             python_executable="python",
@@ -370,36 +527,45 @@ class FiniteCurrentSmokeScriptTests(unittest.TestCase):
 
     def test_validate_smoke_results_checks_current_contract(self):
         module = load_finite_current_smoke_module()
-        results = {
-            "PLASMA_CURRENT_A": -35200.0,
-            "PLASMA_CURRENT_INPUT_SOURCE": "physical_A",
-            "BOOZER_I": -0.00704,
-            "STAGE2_TF_CURRENT_A": 8.0e4,
-            "FINITE_CURRENT_MODE": "boozer_surrogate",
-        }
+        results = self._make_smoke_results(
+            PLASMA_CURRENT_A=-35200.0,
+            BOOZER_I=-0.00704,
+        )
 
         validation = module.validate_smoke_results(
             results,
             requested_current_A=-35200.0,
             expected_stage2_tf_current_A=8.0e4,
+            expected_stage2_tf_current_sum_abs_A=1.6e6,
         )
 
         self.assertTrue(validation["passed"])
 
     def test_validate_smoke_results_uses_actual_artifact_tf_current(self):
         module = load_finite_current_smoke_module()
-        results = {
-            "PLASMA_CURRENT_A": 0.0,
-            "PLASMA_CURRENT_INPUT_SOURCE": "physical_A",
-            "BOOZER_I": 0.0,
-            "STAGE2_TF_CURRENT_A": 1.0e5,
-            "FINITE_CURRENT_MODE": "boozer_surrogate",
-        }
+        results = self._make_smoke_results(
+            STAGE2_TF_CURRENT_A=1.0e5,
+            STAGE2_TF_CURRENT_SUM_ABS_A=2.0e6,
+        )
 
         validation = module.validate_smoke_results(
             results,
             requested_current_A=0.0,
             expected_stage2_tf_current_A=1.0e5,
+            expected_stage2_tf_current_sum_abs_A=2.0e6,
+        )
+
+        self.assertTrue(validation["passed"])
+
+    def test_validate_smoke_results_uses_actual_artifact_total_tf_current(self):
+        module = load_finite_current_smoke_module()
+        results = self._make_smoke_results()
+
+        validation = module.validate_smoke_results(
+            results,
+            requested_current_A=0.0,
+            expected_stage2_tf_current_A=8.0e4,
+            expected_stage2_tf_current_sum_abs_A=1.6e6,
         )
 
         self.assertTrue(validation["passed"])
@@ -409,3 +575,9 @@ class FiniteCurrentSmokeScriptTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "missing TF_CURRENT_A"):
             module.resolve_expected_stage2_tf_current_A({})
+
+    def test_resolve_expected_stage2_tf_current_sum_abs_A_requires_artifact_metadata(self):
+        module = load_finite_current_smoke_module()
+
+        with self.assertRaisesRegex(ValueError, "missing TF_CURRENT_SUM_ABS_A"):
+            module.resolve_expected_stage2_tf_current_sum_abs_A({})
