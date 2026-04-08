@@ -1,17 +1,12 @@
-import jax
 import numpy as np
 
-
-def host_array(value, *, dtype=np.float64) -> np.ndarray:
-    """Materialize a value on the host through an explicit JAX boundary."""
-    return np.asarray(jax.device_get(value), dtype=dtype)
+from simsopt._core.jax_host_boundary import (
+    host_array,
+    host_bool,
+    host_scalar,
+)
 
 
 def host_float(value) -> float:
     """Materialize a scalar on the host through an explicit JAX boundary."""
-    return float(host_array(value))
-
-
-def host_bool(value) -> bool:
-    """Materialize a boolean on the host through an explicit JAX boundary."""
-    return bool(host_array(value, dtype=np.bool_))
+    return float(host_scalar(value, dtype=np.float64))

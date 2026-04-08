@@ -58,7 +58,8 @@ def _status_message_lbfgs(status, invalid_state):
 
 
 def _private_bfgs_result_to_optimize_result(state, *, total_nit=None):
-    invalid_state = _is_invalid_state(state.f_k, state.g_k)
+    line_search_status = int(_as_host_scalar(state.line_search_status))
+    invalid_state = _is_invalid_state(state.f_k, state.g_k) or line_search_status < 0
     status = int(_as_host_scalar(state.status))
     nit = int(_as_host_scalar(state.k if total_nit is None else total_nit))
     return OptimizeResult(
@@ -73,7 +74,7 @@ def _private_bfgs_result_to_optimize_result(state, *, total_nit=None):
         status=status,
         message=_status_message_bfgs(status, invalid_state),
         hess_inv=_as_host_numpy(state.H_k),
-        line_search_status=int(_as_host_scalar(state.line_search_status)),
+        line_search_status=line_search_status,
     )
 
 

@@ -24,7 +24,7 @@ import numpy as np
 import jax
 import jax.numpy as jnp
 
-from ..jax_core._math_utils import as_runtime_float64 as _as_runtime_float64
+from simsopt.jax_core._math_utils import as_runtime_float64 as _as_runtime_float64
 
 __all__ = [
     "build_theta_basis",

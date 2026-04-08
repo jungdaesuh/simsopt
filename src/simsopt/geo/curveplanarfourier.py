@@ -1,5 +1,7 @@
 import numpy as np
-import simsoptpp as sopp
+from ._simsoptpp import sopp_namespace
+
+sopp = sopp_namespace("CurvePlanarFourier")
 from .curve import (
     Curve,
     JaxCurve,

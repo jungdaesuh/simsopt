@@ -3,8 +3,10 @@ from itertools import chain
 import numpy as np
 from scipy.fft import rfft
 
+from ._simsoptpp import sopp_namespace
 from .curve import Curve, JaxCurve, _HAS_JAX, _as_jax_float64, jax, jnp
-import simsoptpp as sopp
+
+sopp = sopp_namespace("CurveXYZFourier")
 
 
 __all__ = [

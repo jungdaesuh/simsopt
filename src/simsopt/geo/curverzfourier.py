@@ -1,6 +1,8 @@
 import numpy as np
 
-import simsoptpp as sopp
+from ._simsoptpp import sopp_namespace
+
+sopp = sopp_namespace("CurveRZFourier")
 from .curve import (
     Curve,
     _as_runtime_float64_ref,

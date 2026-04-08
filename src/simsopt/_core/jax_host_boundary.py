@@ -76,7 +76,7 @@ def strict_scalar_value_and_grad(fun, arg, *args):
 
     value, pullback = jax.vjp(_objective, arg)
     (gradient,) = pullback(scalar_pullback_seed(value))
-    return value, gradient
+    return host_scalar(value), gradient
 
 
 def explicit_cotangent_basis(length: int, index: int, *, dtype):

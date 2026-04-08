@@ -246,9 +246,9 @@ class QuadraticPenalty(Optimizable):
         diff = _host_float_scalar(val) - _host_float_scalar(self.cons)
 
         if self.f == 'max':
-            return 0.5*np.maximum(diff, 0)**2
+            return 0.5*max(diff, 0.0)**2
         elif self.f == 'min':
-            return 0.5*np.minimum(diff, 0)**2
+            return 0.5*min(diff, 0.0)**2
         elif self.f == 'identity':
             return 0.5*diff**2
         else:
