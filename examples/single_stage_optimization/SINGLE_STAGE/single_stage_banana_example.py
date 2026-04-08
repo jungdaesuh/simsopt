@@ -95,6 +95,11 @@ from banana_opt.single_stage_constraints import (
     smooth_min_curve_surface_signed_constraint as _smooth_min_curve_surface_signed_constraint,
     smooth_min_surface_surface_signed_constraint as _smooth_min_surface_surface_signed_constraint,
 )
+from banana_opt.single_stage_search_policy import (
+    HardwareSearchPolicy,
+    SearchContext,
+    decide_hardware_search_action,
+)
 from banana_opt.single_stage_objectives import (
     average_surface_objectives as _average_surface_objectives_impl,
     build_total_objective as _build_total_objective_impl,
@@ -110,6 +115,8 @@ DEFAULT_LOCAL_STAGE2_ROOT = os.path.join(EXAMPLE_ROOT, "STAGE_2")
 DEFAULT_DATABASE_STAGE2_ROOT = os.path.join(REPO_ROOT, "DATABASE", "COIL_OPTIMIZATION", "outputs")
 DEFAULT_SINGLE_STAGE_OUTPUT_ROOT = os.path.join(SCRIPT_DIR, "outputs")
 MU0_OVER_2PI = 2.0e-7
+DEFAULT_HARDWARE_SEARCH_MODE = "hard"
+DEFAULT_HARDWARE_SEARCH_SOFT_ITERATIONS = 0
 SINGLE_STAGE_ALM_CONSTRAINT_NAMES = (
     "coil_coil_spacing",
     "coil_surface_spacing",
@@ -576,6 +583,30 @@ def parse_args():
             "Scale factor for topology-deficit rejection severity. Applied only when a "
             "candidate fails the search-time topology gate and the solver falls back to "
             "the last accepted gradient."
+        ),
+    )
+    parser.add_argument(
+        "--hardware-search-mode",
+        choices=["hard", "warn", "adaptive"],
+        default=os.environ.get("HARDWARE_SEARCH_MODE", DEFAULT_HARDWARE_SEARCH_MODE),
+        help=(
+            "Search-time policy for realized hardware violations: hard reject, warn only, "
+            "or adaptive softening during early continuation."
+        ),
+    )
+    parser.add_argument(
+        "--hardware-search-soft-iterations",
+        type=int,
+        default=int(
+            os.environ.get(
+                "HARDWARE_SEARCH_SOFT_ITERATIONS",
+                str(DEFAULT_HARDWARE_SEARCH_SOFT_ITERATIONS),
+            )
+        ),
+        help=(
+            "For --hardware-search-mode=adaptive, allow warning-only handling during the "
+            "first N accepted iterations and while the surface search gate remains relaxed "
+            "(gate_scale < 1.0) before reverting to hard rejection."
         ),
     )
     parser.add_argument(
@@ -1166,6 +1197,8 @@ class RunIdentityConfig:
     topology_gate_tol: float
     topology_gate_survival_threshold: float
     topology_gate_penalty_scale: float
+    hardware_search_mode: str
+    hardware_search_soft_iterations: int
     topology_scorer_every: int
     topology_scorer_nfieldlines: int
     topology_scorer_tmax: float
@@ -1239,6 +1272,8 @@ def make_run_identity_config(
         topology_gate_tol=args.topology_gate_tol,
         topology_gate_survival_threshold=args.topology_gate_survival_threshold,
         topology_gate_penalty_scale=args.topology_gate_penalty_scale,
+        hardware_search_mode=args.hardware_search_mode,
+        hardware_search_soft_iterations=args.hardware_search_soft_iterations,
         topology_scorer_every=args.topology_scorer_every,
         topology_scorer_nfieldlines=args.topology_scorer_nfieldlines,
         topology_scorer_tmax=args.topology_scorer_tmax,
@@ -1551,6 +1586,7 @@ def evaluate_search_step(x):
     print(f"Step size: {dx:.2e}")
 
     run_dict['lscount']+=1
+    run_dict["trial_hardware_status"] = None
     search_gate = build_surface_search_gate(
         len(surface_data),
         run_dict['accepted_iterations'],
@@ -1627,11 +1663,26 @@ def evaluate_search_step(x):
                 CURVATURE_THRESHOLD,
             )
             hardware_status = hardware_snapshot["status"]
-            run_dict["hardware_constraint_status"] = hardware_status
+            run_dict["trial_hardware_status"] = hardware_status
             if not hardware_status["success"]:
-                success = False
-                rejection_increment = max(abs(run_dict['J']), 1.0)
-                print("/!\\ /!\\ Hardware constraints violated /!\\ /!\\")
+                decision = decide_hardware_search_action(
+                    HardwareSearchPolicy(
+                        HARDWARE_SEARCH_MODE,
+                        HARDWARE_SEARCH_SOFT_ITERATIONS,
+                    ),
+                    hardware_status,
+                    SearchContext(
+                        accepted_iterations=run_dict["accepted_iterations"],
+                        gate_scale=search_gate["gate_scale"],
+                        previous_objective=run_dict["J"],
+                    ),
+                )
+                if decision.reject:
+                    success = False
+                    rejection_increment = decision.rejection_increment
+                    print("/!\\ /!\\ Hardware constraints violated /!\\ /!\\")
+                elif decision.warning_only:
+                    print("/!\\ /!\\ Hardware constraints violated (warning only) /!\\ /!\\")
                 for violation in hardware_status["violations"]:
                     print(violation)
 
@@ -1669,7 +1720,7 @@ def evaluate_search_step(x):
                 print(f"Outer surface too close to vessel: {stack_status['outer_vessel_gap']}")
             if search_gate['enforce_nesting'] and not stack_status['nesting_ok']:
                 print(f"Surfaces are not nested on phi slices: {stack_status['bad_nesting_phis']}")
-        hardware_status = run_dict.get("hardware_constraint_status")
+        hardware_status = run_dict.get("trial_hardware_status")
         if hardware_status is not None and not hardware_status["success"]:
             print("Hardware constraints violated")
 
@@ -1845,7 +1896,7 @@ def callback(x):
     surface_vessel_min = hardware_snapshot["surface_vessel_min_dist"]
     max_curvature = hardware_snapshot["max_curvature"]
     hardware_status = hardware_snapshot["status"]
-    run_dict['hardware_constraint_status'] = hardware_status
+    run_dict['accepted_hardware_status'] = hardware_status
 
     bs.set_points(outer_entry['boozer_surface'].surface.gamma().reshape((-1, 3)))
     unitn = outer_entry['boozer_surface'].surface.unitnormal()
@@ -2075,6 +2126,8 @@ if __name__ == "__main__":
         raise ValueError("--topology-gate-survival-threshold must be between 0 and 1")
     if args.topology_gate_penalty_scale < 0.0:
         raise ValueError("--topology-gate-penalty-scale must be non-negative")
+    if args.hardware_search_soft_iterations < 0:
+        raise ValueError("--hardware-search-soft-iterations must be non-negative")
     validate_alm_cli_args(args)
     validate_confinement_surrogate_args(args)
     MULTISURFACE_RAMP_ITERATIONS = args.multisurface_ramp_iterations
@@ -2084,6 +2137,8 @@ if __name__ == "__main__":
     TOPOLOGY_GATE_TOL = args.topology_gate_tol
     TOPOLOGY_GATE_SURVIVAL_THRESHOLD = args.topology_gate_survival_threshold
     TOPOLOGY_GATE_PENALTY_SCALE = args.topology_gate_penalty_scale
+    HARDWARE_SEARCH_MODE = args.hardware_search_mode
+    HARDWARE_SEARCH_SOFT_ITERATIONS = args.hardware_search_soft_iterations
 
     # Output directory setup
     OUT_DIR = args.output_root
@@ -2308,6 +2363,8 @@ if __name__ == "__main__":
         'x_prev': dofs.copy(),
         'accepted_x': dofs.copy(),
         'intersecting': any(entry["boozer_surface"].surface.is_self_intersecting() for entry in surface_data),
+        'trial_hardware_status': None,
+        'accepted_hardware_status': None,
         'surface_status': evaluate_surface_stack(
             surface_data,
             vessel_surface=VV if len(surface_data) > 1 else None,
@@ -2636,6 +2693,8 @@ if __name__ == "__main__":
         "TOPOLOGY_GATE_TOL": TOPOLOGY_GATE_TOL,
         "TOPOLOGY_GATE_SURVIVAL_THRESHOLD": TOPOLOGY_GATE_SURVIVAL_THRESHOLD,
         "TOPOLOGY_GATE_PENALTY_SCALE": TOPOLOGY_GATE_PENALTY_SCALE,
+        "HARDWARE_SEARCH_MODE": HARDWARE_SEARCH_MODE,
+        "HARDWARE_SEARCH_SOFT_ITERATIONS": HARDWARE_SEARCH_SOFT_ITERATIONS,
         "boozer_stage": stage,
         "CONSTRAINT_WEIGHT": CONSTRAINT_WEIGHT,
         "CONSTRAINT_METHOD": CONSTRAINT_METHOD,

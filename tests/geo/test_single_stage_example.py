@@ -938,6 +938,176 @@ class HardwareConstraintTests(unittest.TestCase):
     def load_module(self):
         return load_single_stage_example_module()
 
+    def _run_fun_with_hardware_violation(
+        self,
+        *,
+        hardware_search_mode="hard",
+        hardware_search_soft_iterations=0,
+        accepted_iterations=0,
+    ):
+        module = load_single_stage_example_module()
+
+        last_J = 12.0
+        last_dJ = np.array([1.0, -1.0, 2.0])
+
+        class _Surface:
+            x = np.ones(2)
+
+            def is_self_intersecting(self):
+                return False
+
+            def volume(self):
+                return 1.0
+
+            def gamma(self):
+                return np.zeros((1, 1, 3))
+
+        class _BoozerSurface:
+            surface = _Surface()
+            res = {"success": True, "iota": TEST_IOTA, "G": TEST_G0}
+
+            def run_code(self, iota, G):
+                return self.res
+
+        class _JF:
+            x = np.zeros(3)
+
+        class _DistanceObjective:
+            def __init__(self, distance):
+                self.distance = distance
+
+            def shortest_distance(self):
+                return self.distance
+
+        class _CurvatureObjective:
+            def J(self):
+                return 1.0
+
+            def dJ(self):
+                return np.zeros(3)
+
+        class _LengthObjective:
+            def J(self):
+                return 1.0
+
+            def dJ(self):
+                return np.zeros(3)
+
+        class _Curve:
+            def kappa(self):
+                return np.array([41.0])
+
+            def gamma(self):
+                return np.zeros((2, 3))
+
+        surface_data = [{"boozer_surface": _BoozerSurface()}, {"boozer_surface": _BoozerSurface()}]
+        module.run_dict = {
+            "x_prev": np.zeros(3),
+            "lscount": 0,
+            "surface_state": {
+                "sdofs": [np.ones(2), np.ones(2)],
+                "iota": [TEST_IOTA, TEST_IOTA],
+                "G": [TEST_G0, TEST_G0],
+            },
+            "J": last_J,
+            "dJ": last_dJ.copy(),
+            "accepted_iterations": accepted_iterations,
+            "accepted_x": np.zeros(3),
+            "trial_hardware_status": None,
+            "accepted_hardware_status": None,
+        }
+        module.surface_data = surface_data
+        module.outer_surface_data = surface_data[-1]
+        module.surface_iota_terms = [SimpleNamespace(J=lambda: TEST_IOTA), SimpleNamespace(J=lambda: TEST_IOTA)]
+        module.VV = object()
+        module.SURFACE_GAP_THRESHOLD = 0.0
+        module.SS_DIST = 0.04
+        module.JF = _JF()
+        module.bs = object()
+        module.nonQSs = []
+        module.brs = []
+        module.Jiota = object()
+        module.IOTAS_WEIGHT = 1.0
+        module.JCurveLength = _LengthObjective()
+        module.LENGTH_WEIGHT = 1.0
+        module.JCurveCurve = _DistanceObjective(0.04)
+        module.CC_WEIGHT = 1.0
+        module.CC_DIST = 0.05
+        module.JCurveSurface = _DistanceObjective(0.03)
+        module.CS_WEIGHT = 1.0
+        module.CS_DIST = 0.02
+        module.JCurvature = _CurvatureObjective()
+        module.CURVATURE_WEIGHT = 1.0
+        module.CURVATURE_THRESHOLD = 40.0
+        module.JSurfSurf = _DistanceObjective(0.05)
+        module.SURF_DIST_WEIGHT = 1.0
+        module.RES_WEIGHT = 1.0
+        module.MULTISURFACE_RAMP_ITERATIONS = 0
+        module.INNER_SURFACE_INITIAL_WEIGHT = 1.0
+        module.TOPOLOGY_GATE_FIELDLINES = 0
+        module.TOPOLOGY_GATE_TMAX = 2.0
+        module.TOPOLOGY_GATE_TOL = 1e-7
+        module.TOPOLOGY_GATE_SURVIVAL_THRESHOLD = 0.25
+        module.TOPOLOGY_GATE_PENALTY_SCALE = 4.0
+        module.HARDWARE_SEARCH_MODE = hardware_search_mode
+        module.HARDWARE_SEARCH_SOFT_ITERATIONS = hardware_search_soft_iterations
+        module.banana_curve = _Curve()
+
+        with patch.object(
+            module,
+            "solve_surface_stack_at_dofs",
+            return_value={
+                "success": True,
+                "solve_success": [True, True],
+                "self_intersections": [False, False],
+                "volumes_ordered": True,
+                "gap_ok": True,
+                "vessel_gap_ok": True,
+                "nesting_ok": True,
+                "adjacent_gaps": [0.1],
+                "outer_vessel_gap": 0.05,
+                "bad_nesting_phis": [],
+            },
+        ), patch.object(
+            module,
+            "evaluate_total_objective",
+            return_value={
+                "total": 7.0,
+                "grad": np.arange(3, dtype=float),
+                "surface_weights": np.array([1.0, 1.0]),
+                "J_QS": 0.0,
+                "dJ_QS": np.zeros(3),
+                "J_Boozer": 0.0,
+                "dJ_Boozer": np.zeros(3),
+                "J_iota": 0.0,
+                "dJ_iota": np.zeros(3),
+                "J_surf": 0.0,
+                "dJ_surf": np.zeros(3),
+                "J_curvature": 0.0,
+                "dJ_curvature": np.zeros(3),
+            },
+        ), patch.object(module, "restore_surface_states") as restore_mock, patch.object(
+            module,
+            "evaluate_search_topology_gate",
+            return_value={
+                "enabled": False,
+                "success": True,
+                "nfieldlines": 0,
+                "survived_lines": 0,
+                "survival_fraction": 1.0,
+                "survival_threshold": 0.25,
+                "tmax": 2.0,
+                "tol": 1e-7,
+                "stop_reason_counts": {},
+                "first_exit_time": None,
+                "first_exit_angle": None,
+                "first_exit_reason": None,
+            },
+        ):
+            J_out, dJ_out = module.fun(np.ones(3))
+
+        return module, J_out, dJ_out, last_dJ, restore_mock
+
     def test_stage2_hardware_constraints_report_each_violation(self):
         module = load_stage2_module()
 
@@ -1016,163 +1186,198 @@ class HardwareConstraintTests(unittest.TestCase):
         )
 
     def test_fun_rejects_candidate_on_hardware_constraint_failure(self):
-        module = load_single_stage_example_module()
+        module, J_out, dJ_out, last_dJ, restore_mock = self._run_fun_with_hardware_violation(
+            hardware_search_mode="hard",
+        )
 
-        last_J = 12.0
-        last_dJ = np.array([1.0, -1.0, 2.0])
+        self.assertEqual(J_out, 24.0)
+        np.testing.assert_array_equal(dJ_out, last_dJ)
+        restore_mock.assert_called_once()
+        self.assertFalse(module.run_dict["trial_hardware_status"]["success"])
+        self.assertIsNone(module.run_dict["accepted_hardware_status"])
+
+    def test_fun_warns_only_on_hardware_constraint_failure_in_warn_mode(self):
+        module, J_out, dJ_out, _last_dJ, restore_mock = self._run_fun_with_hardware_violation(
+            hardware_search_mode="warn",
+        )
+
+        self.assertEqual(J_out, 7.0)
+        np.testing.assert_array_equal(dJ_out, np.arange(3, dtype=float))
+        restore_mock.assert_not_called()
+        self.assertFalse(module.run_dict["trial_hardware_status"]["success"])
+        self.assertIsNone(module.run_dict["accepted_hardware_status"])
+
+    def test_fun_warns_only_during_adaptive_soft_window(self):
+        module, J_out, dJ_out, _last_dJ, restore_mock = self._run_fun_with_hardware_violation(
+            hardware_search_mode="adaptive",
+            hardware_search_soft_iterations=1,
+            accepted_iterations=0,
+        )
+
+        self.assertEqual(J_out, 7.0)
+        np.testing.assert_array_equal(dJ_out, np.arange(3, dtype=float))
+        restore_mock.assert_not_called()
+        self.assertFalse(module.run_dict["trial_hardware_status"]["success"])
+        self.assertIsNone(module.run_dict["accepted_hardware_status"])
+
+    def test_callback_records_accepted_invalid_hardware_status_after_warn_mode_step(self):
+        module, J_out, _dJ_out, _last_dJ, restore_mock = self._run_fun_with_hardware_violation(
+            hardware_search_mode="warn",
+        )
+
+        self.assertEqual(J_out, 7.0)
+        restore_mock.assert_not_called()
 
         class _Surface:
-            x = np.ones(2)
+            nfp = 5
 
-            def is_self_intersecting(self):
-                return False
+            def __init__(self):
+                self.x = np.array([0.1])
 
             def volume(self):
                 return 1.0
 
             def gamma(self):
-                return np.zeros((1, 1, 3))
+                return np.array([[[0.0, 0.0, 0.0]]])
 
-        class _BoozerSurface:
-            surface = _Surface()
-            res = {"success": True, "iota": TEST_IOTA, "G": TEST_G0}
+            def unitnormal(self):
+                return np.array([[[1.0, 0.0, 0.0]]])
 
-            def run_code(self, iota, G):
-                return self.res
+        class _ScalarObjective:
+            def __init__(self, value):
+                self._value = value
 
-        class _JF:
-            x = np.zeros(3)
+            def J(self):
+                return self._value
 
-        class _DistanceObjective:
-            def __init__(self, distance):
-                self.distance = distance
+            def dJ(self):
+                return np.array([self._value, -self._value, 0.0])
+
+        class _DistanceObjective(_ScalarObjective):
+            def __init__(self, value, min_distance):
+                super().__init__(value)
+                self._min_distance = min_distance
 
             def shortest_distance(self):
-                return self.distance
-
-        class _CurvatureObjective:
-            def J(self):
-                return 1.0
-
-            def dJ(self):
-                return np.zeros(3)
-
-        class _LengthObjective:
-            def J(self):
-                return 1.0
-
-            def dJ(self):
-                return np.zeros(3)
+                return self._min_distance
 
         class _Curve:
+            def gamma(self):
+                return np.array([[1.0, 0.0, 0.0]])
+
             def kappa(self):
                 return np.array([41.0])
 
-            def gamma(self):
-                return np.zeros((2, 3))
+        class _CurveLength:
+            def J(self):
+                return 1.7
 
-        surface_data = [{"boozer_surface": _BoozerSurface()}, {"boozer_surface": _BoozerSurface()}]
-        module.run_dict = {
-            "x_prev": np.zeros(3),
-            "lscount": 0,
-            "surface_state": {"sdofs": [np.ones(2), np.ones(2)], "iota": [TEST_IOTA, TEST_IOTA], "G": [TEST_G0, TEST_G0]},
-            "J": last_J,
-            "dJ": last_dJ.copy(),
-            "accepted_iterations": 0,
-            "accepted_x": np.zeros(3),
+        class _BS:
+            def set_points(self, pts):
+                self._points = pts
+
+            def B(self):
+                return np.array([[1.0, 0.0, 0.0]])
+
+        surface = _Surface()
+        surface_entry = {
+            "name": "outer",
+            "seed_label": 0.16,
+            "target_volume": 1.0,
+            "boozer_surface": SimpleNamespace(
+                surface=surface,
+                res={"success": True, "iota": TEST_IOTA, "G": TEST_G0},
+            ),
         }
-        module.surface_data = surface_data
-        module.outer_surface_data = surface_data[-1]
-        module.surface_iota_terms = [SimpleNamespace(J=lambda: TEST_IOTA), SimpleNamespace(J=lambda: TEST_IOTA)]
-        module.VV = object()
-        module.SURFACE_GAP_THRESHOLD = 0.0
-        module.SS_DIST = 0.04
-        module.JF = _JF()
-        module.bs = object()
-        module.nonQSs = []
-        module.brs = []
-        module.Jiota = object()
-        module.IOTAS_WEIGHT = 1.0
-        module.JCurveLength = _LengthObjective()
-        module.LENGTH_WEIGHT = 1.0
-        module.JCurveCurve = _DistanceObjective(0.04)
-        module.CC_WEIGHT = 1.0
-        module.CC_DIST = 0.05
-        module.JCurveSurface = _DistanceObjective(0.03)
-        module.CS_WEIGHT = 1.0
-        module.CS_DIST = 0.02
-        module.JCurvature = _CurvatureObjective()
-        module.CURVATURE_WEIGHT = 1.0
-        module.CURVATURE_THRESHOLD = 40.0
-        module.JSurfSurf = _DistanceObjective(0.05)
-        module.SURF_DIST_WEIGHT = 1.0
-        module.RES_WEIGHT = 1.0
-        module.MULTISURFACE_RAMP_ITERATIONS = 0
-        module.INNER_SURFACE_INITIAL_WEIGHT = 1.0
-        module.TOPOLOGY_GATE_FIELDLINES = 0
-        module.TOPOLOGY_GATE_TMAX = 2.0
-        module.TOPOLOGY_GATE_TOL = 1e-7
-        module.TOPOLOGY_GATE_SURVIVAL_THRESHOLD = 0.25
-        module.TOPOLOGY_GATE_PENALTY_SCALE = 4.0
+        objective_eval = {
+            "total": 7.0,
+            "grad": np.arange(3, dtype=float),
+            "surface_weights": np.array([1.0]),
+            "J_QS": 0.0,
+            "dJ_QS": np.zeros(3),
+            "J_Boozer": 0.0,
+            "dJ_Boozer": np.zeros(3),
+            "J_iota": 0.0,
+            "dJ_iota": np.zeros(3),
+            "J_surf": 0.0,
+            "dJ_surf": np.zeros(3),
+            "J_curvature": 0.0,
+            "dJ_curvature": np.zeros(3),
+        }
+        stack_status = {
+            "success": True,
+            "solve_success": [True],
+            "self_intersections": [False],
+            "volumes_ordered": True,
+            "gap_ok": True,
+            "vessel_gap_ok": True,
+            "nesting_ok": True,
+            "adjacent_gaps": [],
+            "outer_vessel_gap": None,
+            "bad_nesting_phis": [],
+        }
+        accepted_surface_state = {
+            "sdofs": [np.array([0.1])],
+            "iota": [TEST_IOTA],
+            "G": [TEST_G0],
+        }
+        hardware_snapshot = {
+            "curve_curve_min_dist": 0.04,
+            "curve_surface_min_dist": 0.03,
+            "surface_vessel_min_dist": 0.0,
+            "max_curvature": 41.0,
+            "status": {
+                "success": False,
+                "violations": ["coil_coil_min_dist=0.040000 < threshold=0.050000"],
+            },
+        }
+
+        module.surface_data = [surface_entry]
+        module.outer_surface_data = surface_entry
+        module.surface_iota_terms = [SimpleNamespace(J=lambda: TEST_IOTA)]
+        module.JCurveLength = _ScalarObjective(0.44)
+        module.JCurveCurve = _DistanceObjective(0.55, 0.04)
+        module.JCurveSurface = _DistanceObjective(0.77, 0.03)
+        module.JCurvature = _ScalarObjective(0.99)
+        module.JSurfSurf = None
         module.banana_curve = _Curve()
+        module.curvelength = _CurveLength()
+        module.bs = _BS()
+        module.VV = object()
+        module.CHECKPOINT_EVERY = 0
+        module.TOPOLOGY_SCORER_EVERY = 0
+        module.CONSTRAINT_METHOD = "penalty"
+        module.run_dict["surface_state"] = accepted_surface_state
+        module.run_dict["it"] = 1
 
-        with patch.object(
-            module,
-            "solve_surface_stack_at_dofs",
-            return_value={
-                "success": True,
-                "solve_success": [True, True],
-                "self_intersections": [False, False],
-                "volumes_ordered": True,
-                "gap_ok": True,
-                "vessel_gap_ok": True,
-                "nesting_ok": True,
-                "adjacent_gaps": [0.1],
-                "outer_vessel_gap": 0.05,
-                "bad_nesting_phis": [],
-            },
-        ), patch.object(
-            module,
-            "evaluate_total_objective",
-            return_value={
-                "total": 7.0,
-                "grad": np.arange(3, dtype=float),
-                "surface_weights": np.array([1.0, 1.0]),
-                "J_QS": 0.0,
-                "dJ_QS": np.zeros(3),
-                "J_Boozer": 0.0,
-                "dJ_Boozer": np.zeros(3),
-                "J_iota": 0.0,
-                "dJ_iota": np.zeros(3),
-                "J_surf": 0.0,
-                "dJ_surf": np.zeros(3),
-                "J_curvature": 0.0,
-                "dJ_curvature": np.zeros(3),
-            },
-        ), patch.object(module, "restore_surface_states") as restore_mock, patch.object(
-            module,
-            "evaluate_search_topology_gate",
-            return_value={
-                "enabled": False,
-                "success": True,
-                "nfieldlines": 0,
-                "survived_lines": 0,
-                "survival_fraction": 1.0,
-                "survival_threshold": 0.25,
-                "tmax": 2.0,
-                "tol": 1e-7,
-                "stop_reason_counts": {},
-                "first_exit_time": None,
-                "first_exit_angle": None,
-                "first_exit_reason": None,
-            },
-        ):
-            J_out, dJ_out = module.fun(np.ones(3))
+        with tempfile.TemporaryDirectory() as tmpdir:
+            module.OUT_DIR_ITER = tmpdir
 
-        self.assertEqual(J_out, 24.0)
-        np.testing.assert_array_equal(dJ_out, last_dJ)
-        restore_mock.assert_called_once()
-        self.assertFalse(module.run_dict["hardware_constraint_status"]["success"])
+            with patch.object(
+                module,
+                "evaluate_search_objective",
+                return_value=objective_eval,
+            ), patch.object(
+                module,
+                "snapshot_surface_states",
+                return_value=accepted_surface_state,
+            ), patch.object(
+                module,
+                "evaluate_surface_stack",
+                return_value=stack_status,
+            ), patch.object(
+                module,
+                "evaluate_single_stage_hardware_snapshot",
+                return_value=hardware_snapshot,
+            ):
+                module.callback(np.ones(3))
+
+            self.assertFalse(module.run_dict["accepted_hardware_status"]["success"])
+            log_text = (Path(tmpdir) / "log.txt").read_text()
+
+        self.assertIn("Hardware Constraints OK", log_text)
+        self.assertIn("Hardware Violations", log_text)
+        self.assertIn("coil_coil_min_dist=0.040000 < threshold=0.050000", log_text)
 
     def test_alm_rejection_preserves_constraint_metadata_for_outer_updates(self):
         module = load_single_stage_example_module()
@@ -2266,6 +2471,8 @@ class RunIdentityTests(unittest.TestCase):
             topology_gate_tol=1e-7,
             topology_gate_survival_threshold=0.25,
             topology_gate_penalty_scale=4.0,
+            hardware_search_mode="hard",
+            hardware_search_soft_iterations=0,
             topology_scorer_every=10,
             topology_scorer_nfieldlines=12,
             topology_scorer_tmax=50.0,
@@ -2357,6 +2564,18 @@ class RunIdentityTests(unittest.TestCase):
         base_args = self._make_identity_args()
         changed_args = self._make_identity_args()
         changed_args.topology_gate_penalty_scale = 9.0
+
+        self.assertNotEqual(
+            self._build_identity(module, base_args),
+            self._build_identity(module, changed_args),
+        )
+
+    def test_run_identity_changes_when_hardware_search_policy_changes(self):
+        module = load_single_stage_example_module()
+        base_args = self._make_identity_args()
+        changed_args = self._make_identity_args()
+        changed_args.hardware_search_mode = "adaptive"
+        changed_args.hardware_search_soft_iterations = 3
 
         self.assertNotEqual(
             self._build_identity(module, base_args),
@@ -2487,6 +2706,25 @@ class CurrentBaselineContractTests(unittest.TestCase):
             )
 
             self.assertEqual(module.build_stage2_bs_path(args), str(expected_path))
+
+    def test_single_stage_parse_args_accepts_hardware_search_flags(self):
+        module = load_single_stage_example_module()
+
+        with patch.object(
+            sys,
+            "argv",
+            [
+                "single_stage_banana_example.py",
+                "--hardware-search-mode",
+                "adaptive",
+                "--hardware-search-soft-iterations",
+                "3",
+            ],
+        ):
+            args = module.parse_args()
+
+        self.assertEqual(args.hardware_search_mode, "adaptive")
+        self.assertEqual(args.hardware_search_soft_iterations, 3)
 
     def test_stage2_parse_args_accepts_tf_current_A(self):
         module = load_stage2_module()

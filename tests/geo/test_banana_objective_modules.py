@@ -15,6 +15,7 @@ STAGE2_OBJECTIVES_PATH = EXAMPLES_ROOT / "banana_opt" / "stage2_objectives.py"
 SINGLE_STAGE_GEOMETRY_PATH = EXAMPLES_ROOT / "banana_opt" / "single_stage_geometry.py"
 SINGLE_STAGE_CONSTRAINTS_PATH = EXAMPLES_ROOT / "banana_opt" / "single_stage_constraints.py"
 SINGLE_STAGE_OBJECTIVES_PATH = EXAMPLES_ROOT / "banana_opt" / "single_stage_objectives.py"
+SINGLE_STAGE_SEARCH_POLICY_PATH = EXAMPLES_ROOT / "banana_opt" / "single_stage_search_policy.py"
 
 
 def _load_module(module_path: Path, prefix: str):
@@ -765,3 +766,86 @@ class SingleStageConstraintModuleTests(_ModuleTestCase):
         self.assertGreater(violation, 0.0)
         self.assertAlmostEqual(violation, signed_value)
         self.assertEqual(grad.shape, (2,))
+
+
+class SingleStageSearchPolicyModuleTests(_ModuleTestCase):
+    MODULE_PATH = SINGLE_STAGE_SEARCH_POLICY_PATH
+    MODULE_PREFIX = "banana_single_stage_search_policy"
+
+    def test_hard_mode_rejects_hardware_violation(self):
+        decision = self.module.decide_hardware_search_action(
+            self.module.HardwareSearchPolicy("hard", 0),
+            {"success": False},
+            self.module.SearchContext(
+                accepted_iterations=0,
+                gate_scale=1.0,
+                previous_objective=12.0,
+            ),
+        )
+
+        self.assertTrue(decision.reject)
+        self.assertFalse(decision.warning_only)
+        self.assertEqual(decision.rejection_increment, 12.0)
+        self.assertEqual(decision.reason, "hard_reject")
+
+    def test_warn_mode_keeps_hardware_violation_warning_only(self):
+        decision = self.module.decide_hardware_search_action(
+            self.module.HardwareSearchPolicy("warn", 0),
+            {"success": False},
+            self.module.SearchContext(
+                accepted_iterations=9,
+                gate_scale=1.0,
+                previous_objective=3.5,
+            ),
+        )
+
+        self.assertFalse(decision.reject)
+        self.assertTrue(decision.warning_only)
+        self.assertIsNone(decision.rejection_increment)
+        self.assertEqual(decision.reason, "warn_mode")
+
+    def test_adaptive_mode_warns_during_soft_window(self):
+        decision = self.module.decide_hardware_search_action(
+            self.module.HardwareSearchPolicy("adaptive", 2),
+            {"success": False},
+            self.module.SearchContext(
+                accepted_iterations=1,
+                gate_scale=1.0,
+                previous_objective=5.0,
+            ),
+        )
+
+        self.assertFalse(decision.reject)
+        self.assertTrue(decision.warning_only)
+        self.assertEqual(decision.reason, "adaptive_soft_phase")
+
+    def test_adaptive_mode_warns_while_gate_scale_is_relaxed(self):
+        decision = self.module.decide_hardware_search_action(
+            self.module.HardwareSearchPolicy("adaptive", 0),
+            {"success": False},
+            self.module.SearchContext(
+                accepted_iterations=4,
+                gate_scale=0.4,
+                previous_objective=5.0,
+            ),
+        )
+
+        self.assertFalse(decision.reject)
+        self.assertTrue(decision.warning_only)
+        self.assertEqual(decision.reason, "adaptive_soft_phase")
+
+    def test_adaptive_mode_rejects_after_soft_window(self):
+        decision = self.module.decide_hardware_search_action(
+            self.module.HardwareSearchPolicy("adaptive", 1),
+            {"success": False},
+            self.module.SearchContext(
+                accepted_iterations=2,
+                gate_scale=1.0,
+                previous_objective=-7.0,
+            ),
+        )
+
+        self.assertTrue(decision.reject)
+        self.assertFalse(decision.warning_only)
+        self.assertEqual(decision.rejection_increment, 7.0)
+        self.assertEqual(decision.reason, "hard_reject")
