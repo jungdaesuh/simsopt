@@ -77,7 +77,7 @@ When To Use Which Backend
 +---------------------+-----+-----+-----------------------------------------+
 | Stage 2 (GPU)       |     | Yes | Value + gradient parity validated        |
 +---------------------+-----+-----+-----------------------------------------+
-| Single-stage (GPU)  |     |     | Blocked on gradient validation          |
+| Single-stage (GPU)  |     |     | Separate ``hybrid`` / ``ondevice`` validation track only |
 +---------------------+-----+-----+-----------------------------------------+
 | Development/testing  | Yes | Yes | Both paths exercised in CI              |
 +---------------------+-----+-----+-----------------------------------------+

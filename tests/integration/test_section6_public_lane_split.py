@@ -27,7 +27,12 @@ _PYTHONPATH = os.pathsep.join(
 )
 
 
-def _run_real_fixture_probe(*, optimizer_backend: str, block_private: bool) -> dict:
+def _run_real_fixture_probe(
+    *,
+    optimizer_backend: str,
+    block_private: bool,
+    boozer_least_squares_algorithm: str | None = None,
+) -> dict:
     env = os.environ.copy()
     env["PYTHONPATH"] = _PYTHONPATH
     code = f"""
@@ -55,6 +60,7 @@ def _run_real_fixture_probe(*, optimizer_backend: str, block_private: bool) -> d
             fixture = build_real_single_stage_init_fixture(
                 backend="jax",
                 optimizer_backend={optimizer_backend!r},
+                boozer_least_squares_algorithm={boozer_least_squares_algorithm!r},
             )
         except Exception as exc:
             payload["exc_type"] = type(exc).__name__
@@ -142,6 +148,7 @@ class TestSection6PublicLaneRealFixture:
         blocked = _run_real_fixture_probe(
             optimizer_backend="ondevice",
             block_private=True,
+            boozer_least_squares_algorithm="quasi-newton",
         )
 
         assert blocked["exc_type"] == "ImportError"

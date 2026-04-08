@@ -369,16 +369,22 @@ def init_baseline_runs() -> tuple[
 
 
 class TestSingleStagePhysicsSmokeParity:
-    def test_outer_loop_physics_quantity_smoke_parity(self, outer_baseline_runs):
-        """One-iteration outer-loop smoke parity for key physics quantities."""
+    def test_outer_loop_physics_quantity_single_step_budget_smoke_parity(
+        self,
+        outer_baseline_runs,
+    ):
+        """One-step-budget outer-loop smoke parity for key physics quantities."""
         cpu_run, jax_run = outer_baseline_runs
         _assert_physics_quantity_parity(
             cpu_run.summary,
             jax_run.summary,
             context="single-stage outer-loop smoke parity",
         )
-        assert cpu_run.results["iterations"] >= 1
-        assert jax_run.results["iterations"] >= 1
+        assert cpu_run.results["max_iterations"] == 1
+        assert jax_run.results["max_iterations"] == 1
+        assert cpu_run.results["TERMINATION_MESSAGE"] != "init_only"
+        assert jax_run.results["TERMINATION_MESSAGE"] != "init_only"
+        assert cpu_run.results["iterations"] == jax_run.results["iterations"]
 
     def test_init_state_sensitivity_smoke_parity_under_small_initial_coil_perturbation(
         self, init_baseline_runs

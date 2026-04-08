@@ -156,4 +156,9 @@ source = [
 testpaths = ["tests"]
 markers = [
     "private_optimizer_runtime: tests validated on the private JAX optimizer runtime",
+    "slow: long-running solver, integration, or compilation-heavy tests",
+    "integration: cross-module integration tests",
+    "single_stage: single-stage optimization tests and probes",
+    "stage2: Stage 2 optimization tests and probes",
+    "boozer: BoozerSurface and Boozer optimizer tests",
 ]

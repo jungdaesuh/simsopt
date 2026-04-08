@@ -43,6 +43,30 @@ def resolve_equilibrium_path(
     fallback_dirs: tuple[str | Path, ...] = (WORKSPACE_EQUILIBRIA_DIR,),
 ) -> Path:
     """Resolve the first existing equilibrium file from the ordered candidates."""
+    path = maybe_resolve_equilibrium_path(
+        plasma_surf_filename=plasma_surf_filename,
+        equilibria_dir=equilibria_dir,
+        equilibrium_path=equilibrium_path,
+        fallback_dirs=fallback_dirs,
+    )
+    if path is not None:
+        return path
+    return equilibrium_candidate_paths(
+        plasma_surf_filename=plasma_surf_filename,
+        equilibria_dir=equilibria_dir,
+        equilibrium_path=equilibrium_path,
+        fallback_dirs=fallback_dirs,
+    )[0]
+
+
+def maybe_resolve_equilibrium_path(
+    *,
+    plasma_surf_filename: str,
+    equilibria_dir: str | Path = DEFAULT_EQUILIBRIA_DIR,
+    equilibrium_path: str | Path | None = None,
+    fallback_dirs: tuple[str | Path, ...] = (WORKSPACE_EQUILIBRIA_DIR,),
+) -> Path | None:
+    """Resolve the first existing equilibrium file from the ordered candidates, or return None."""
     candidates = equilibrium_candidate_paths(
         plasma_surf_filename=plasma_surf_filename,
         equilibria_dir=equilibria_dir,
@@ -52,4 +76,4 @@ def resolve_equilibrium_path(
     for candidate in candidates:
         if candidate.exists():
             return candidate
-    return candidates[0]
+    return None
