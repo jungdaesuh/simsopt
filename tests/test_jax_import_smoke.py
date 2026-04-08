@@ -1711,6 +1711,49 @@ def test_transfer_guard_disallow_allows_gamma_2d_eager_host_constants():
     )
 
 
+def test_transfer_guard_disallow_allows_closed_curve_self_intersection_summary():
+    """Strict GPU geometry probes must not materialize shape scalars on the host."""
+    _assert_import_check_passes(
+        """
+        import numpy as np
+        import jax
+        import simsopt.config as simsopt_config
+        from simsopt.jax_core.curve_geometry import closed_curve_self_intersection_summary
+
+        gpu = next((device for device in jax.devices() if device.platform == "gpu"), None)
+        if gpu is None:
+            raise SystemExit(0)
+
+        simsopt_config.set_backend(
+            "jax_gpu_fast",
+            strict=True,
+            transfer_guard="disallow",
+        )
+        gamma = jax.device_put(
+            np.asarray(
+                (
+                    (0.0, 0.0, 0.0),
+                    (1.0, 1.0, 0.0),
+                    (0.0, 1.0, 0.0),
+                    (1.0, 0.0, 0.0),
+                ),
+                dtype=np.float64,
+            ),
+            device=gpu,
+        )
+        summary = closed_curve_self_intersection_summary(gamma, neighbor_skip=1)
+        min_distance = jax.device_get(summary[0])
+        penalty = jax.device_get(summary[2])
+        violation = jax.device_get(summary[3])
+
+        assert np.isfinite(float(min_distance))
+        assert np.isfinite(float(penalty))
+        assert bool(violation)
+        """,
+        failure_message="closed-curve self-intersection strict transfer-guard smoke failed",
+    )
+
+
 def test_transfer_guard_disallow_allows_surface_xyztensorfourier_gamma_from_dofs():
     """SurfaceXYZTensorFourier geometry should not close over device constants."""
     _assert_import_check_passes(

@@ -65,6 +65,10 @@ def _zeros_like_float64(array: jax.Array) -> jax.Array:
     return jnp.broadcast_to(_explicit_scalar(0.0, reference=array), array.shape)
 
 
+def _element_count_float64(array: jax.Array) -> jax.Array:
+    return jnp.sum(_ones_like_float64(array))
+
+
 def _slice_1d_static(array: jax.Array, start: int, end: int) -> jax.Array:
     positions = np.arange(int(start), int(end), dtype=np.int64)
     selector = np.zeros((positions.size, array.shape[0]), dtype=np.float64)
@@ -628,7 +632,9 @@ def closed_curve_self_intersection_tolerance(
     """Return the segment-length-scaled self-intersection tolerance."""
     segment_start, segment_end = _closed_curve_segment_arrays(gamma)
     segment_lengths = jnp.linalg.norm(segment_end - segment_start, axis=1)
-    average_segment_length = jnp.sum(segment_lengths) / segment_lengths.shape[0]
+    average_segment_length = jnp.sum(segment_lengths) / _element_count_float64(
+        segment_lengths
+    )
     return _explicit_scalar(tolerance_factor, reference=gamma) * average_segment_length
 
 
