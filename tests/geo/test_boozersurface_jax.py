@@ -11,6 +11,7 @@ Validates:
 7. Vector potential A correctness.
 """
 
+import inspect
 import sys
 import types
 from contextlib import contextmanager
@@ -1532,6 +1533,22 @@ class TestBoozerSurfaceJAXClass:
         assert captured["method"] == "lm-ondevice"
         assert res["optimizer_method"] == "lm-ondevice"
         assert res["success"] is True
+
+    def test_penalty_residual_closure_hostifies_surface_metadata(self):
+        booz = _make_mock_boozer_surface(stellsym=True, mpol=2, ntor=2)
+        residual_fn = booz._make_penalty_residual_with(
+            True,
+            booz.options["weight_inv_modB"],
+            1.0,
+        )
+        closure_nonlocals = inspect.getclosurevars(inspect.unwrap(residual_fn)).nonlocals
+
+        assert "self" not in closure_nonlocals
+        assert not any(
+            isinstance(leaf, jax.Array)
+            for value in closure_nonlocals.values()
+            for leaf in jax.tree_util.tree_leaves(value)
+        )
 
     def test_run_code_uses_quasi_newton_for_fixed_G_ondevice_lm_option(
         self, monkeypatch

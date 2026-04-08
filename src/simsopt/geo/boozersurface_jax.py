@@ -174,7 +174,10 @@ def _traceable_array_signature(array):
     """Return a value-based signature for traced static array-like inputs."""
     if array is None:
         return None
-    array_np = np.asarray(array)
+    if isinstance(array, jax.Array):
+        array_np = np.asarray(jax.device_get(array))
+    else:
+        array_np = np.asarray(array)
     return (
         str(array_np.dtype),
         tuple(int(dim) for dim in array_np.shape),
@@ -1121,6 +1124,49 @@ def _make_boozer_penalty_objective_closure(
     return _objective
 
 
+def _make_boozer_penalty_residual_closure(
+    *,
+    coil_arrays=None,
+    coil_set_spec=None,
+    quadpoints_phi,
+    quadpoints_theta,
+    mpol,
+    ntor,
+    nfp,
+    stellsym,
+    scatter_indices,
+    surface_kind,
+    targetlabel,
+    constraint_weight,
+    label_type,
+    phi_idx,
+    optimize_G,
+    weight_inv_modB,
+):
+    def _residual(xx):
+        return _boozer_penalty_residual_vector(
+            xx,
+            coil_arrays=coil_arrays,
+            coil_set_spec=coil_set_spec,
+            quadpoints_phi=quadpoints_phi,
+            quadpoints_theta=quadpoints_theta,
+            mpol=mpol,
+            ntor=ntor,
+            nfp=nfp,
+            stellsym=stellsym,
+            scatter_indices=scatter_indices,
+            surface_kind=surface_kind,
+            targetlabel=targetlabel,
+            constraint_weight=constraint_weight,
+            label_type=label_type,
+            phi_idx=phi_idx,
+            optimize_G=optimize_G,
+            weight_inv_modB=weight_inv_modB,
+        )
+
+    return _residual
+
+
 def _directional_derivative(objective, x, tangent):
     _, directional = jax.jvp(objective, (x,), (tangent,))
     return directional
@@ -1395,6 +1441,7 @@ class BoozerSurfaceJAX(Optimizable):
         self._traceable_penalty_residual_cache = {}
         self._traceable_exact_residual_cache = {}
         self._reference_penalty_objective_cache = {}
+        self._reference_penalty_residual_cache = {}
 
         # Coil data (extracted once, updated via _refresh_coil_data)
         self._refresh_coil_data()
@@ -1433,6 +1480,7 @@ class BoozerSurfaceJAX(Optimizable):
         self.coil_groups = list(grouped_field_data_from_spec(self.coil_set_spec))
         self.coil_currents = grouped_coil_currents_from_spec(self.coil_set_spec)
         self._reference_penalty_objective_cache.clear()
+        self._reference_penalty_residual_cache.clear()
 
     def _emit_stage_callback(
         self,
@@ -1639,38 +1687,45 @@ class BoozerSurfaceJAX(Optimizable):
             coil_arrays=coil_arrays,
             coil_set_spec=coil_set_spec,
         )
+        resolved_constraint_weight = self._resolve_constraint_weight(constraint_weight)
         if hostify_inputs:
             resolved_coil_set_spec = _hostify_tree(resolved_coil_set_spec)
-        resolved_constraint_weight = (
-            self.constraint_weight if constraint_weight is None else constraint_weight
-        )
-
-        def residual_fn(x):
-            optimizer_state = _as_boozer_penalty_optimizer_state(
-                x,
-                optimize_G=optimize_G,
+            key = self._reference_penalty_cache_key(
+                optimize_G,
+                weight_inv_modB,
+                resolved_constraint_weight,
+                resolved_coil_set_spec,
             )
-            G_value = (
-                optimizer_state.G
-                if optimize_G
-                else compute_G_from_currents(
-                    _grouped_coil_currents(
-                        coil_arrays=coil_arrays,
-                        coil_set_spec=resolved_coil_set_spec,
-                    )
+            residual_fn = self._reference_penalty_residual_cache.get(key)
+            if residual_fn is None:
+                residual_fn = _make_boozer_penalty_residual_closure(
+                    coil_arrays=coil_arrays,
+                    coil_set_spec=resolved_coil_set_spec,
+                    constraint_weight=resolved_constraint_weight,
+                    optimize_G=optimize_G,
+                    weight_inv_modB=weight_inv_modB,
+                    **self._traceable_surface_runtime_args(),
                 )
-            )
-            return self._compute_residual_vector(
-                optimizer_state.surface_dofs,
-                optimizer_state.iota,
-                G_value,
-                weight_inv_modB=weight_inv_modB,
-                constraint_weight=resolved_constraint_weight,
-                coil_set_spec=resolved_coil_set_spec,
-                coil_arrays=coil_arrays,
-            )
-
-        return residual_fn
+                self._reference_penalty_residual_cache[key] = residual_fn
+            return residual_fn
+        return _make_boozer_penalty_residual_closure(
+            coil_arrays=coil_arrays,
+            coil_set_spec=resolved_coil_set_spec,
+            quadpoints_phi=self.quadpoints_phi,
+            quadpoints_theta=self.quadpoints_theta,
+            mpol=self.mpol,
+            ntor=self.ntor,
+            nfp=self.nfp,
+            stellsym=self.stellsym,
+            scatter_indices=self.scatter_indices,
+            surface_kind=self._surface_geometry_kind,
+            targetlabel=self.targetlabel,
+            constraint_weight=resolved_constraint_weight,
+            label_type=self.label_type,
+            phi_idx=self.phi_idx,
+            optimize_G=optimize_G,
+            weight_inv_modB=weight_inv_modB,
+        )
 
     def _traceable_surface_signature(self):
         """Signature for metadata that becomes a traced constant in JAX closures."""
