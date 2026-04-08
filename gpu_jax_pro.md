@@ -325,7 +325,7 @@ That is the combined plan I would trust: **keep the public Simsopt surface, repl
 [10]: https://docs.jax.dev/en/latest/ffi.html?utm_source=chatgpt.com "Foreign function interface (FFI)"
 [11]: https://docs.jax.dev/en/latest/_autosummary/jax.pure_callback.html?utm_source=chatgpt.com "jax.pure_callback"
 
-I reviewed the current port-in-progress, and overall my reaction is positive: this is **well past “prototype” stage**. The strongest parts are the **validation/parity ladder**, the **traceable objective path**, and the explicit **reference → transitional → target** optimizer lanes. The main weakness is that the project is now at the point where **architectural cleanup matters**: the pure JAX core is emerging, but parts of the public implementation still lean on mutable adapter state, and the Biot–Savart kernel shape needs a more GPU-native memory strategy.   
+I reviewed the current port-in-progress, and overall my reaction is positive: this is **well past “prototype” stage**. The strongest parts are the **validation/parity ladder**, the **traceable objective path**, the explicit **reference → transitional → target** optimizer lanes, and the now-real immutable `jax_core` spec/pytree layer. The main weakness is no longer “missing a strict spec layer”; it is that architectural cleanup still matters because parts of the public implementation lean on mutable adapter state and flat-vector orchestration around that spec boundary, and the Biot–Savart kernel shape still needs a more GPU-native memory strategy.
 
 ## Overall verdict
 
@@ -337,6 +337,10 @@ The clearest evidence is that you already have:
 * a `BoozerSurfaceJAX` class that explicitly defines `scipy` as the trusted reference lane, `hybrid` as the transitional lane, and `ondevice` as the target full-GPU lane, 
 * a substantial parity and validation ladder covering Stage 2 value/gradient parity, single-stage init parity, run-code parity, and adjoint/FD validation,    
 * and, most importantly, a **traceable target path** around `run_code_traceable()` / `make_traceable_objective()` that is explicitly intended to avoid the stateful path and route through JAX control flow, while `run_code_functional()` remains the lower-level transition seam.
+
+That still leaves the public acceptance posture intentionally conservative:
+the trusted public gates remain `scipy`-centric, while `hybrid` / `ondevice`
+stay on a separate validation track until their own acceptance criteria close.
 
 That aligns very well with the right JAX direction, because JAX transformations fundamentally want **pure functions**, not hidden mutable state. ([JAX][1])
 
@@ -365,7 +369,9 @@ The main issue is that the project currently has **two architectural stories at 
 
 2. the **legacy-compatible present story**: `Optimizable` wrappers, `need_to_run_code`, cached `res`, mutable point state in `BiotSavartJAX`, and adapter methods that still behave like stateful Simsopt objects.  
 
-That is fine temporarily, but now it needs to be **made explicit** as a layered design rather than continuing as a mixed style.
+That is fine temporarily, but the remaining work is to keep that layered design
+explicit outside the hot path as well, rather than letting the mixed
+mutable-wrapper / pure-kernel style harden into permanent complexity.
 
 In particular, the backend abstraction is now materially better than it was
 when this note was first written. The public runtime modes now exist, but the
@@ -551,10 +557,10 @@ According to a document from March 31, 2026, here is the module-by-module implem
    where profiling still shows remaining quadrature/block materialization
    pressure, with the existing memory-scaling benchmarks as the gate.
 
-3. **Broaden the pure JAX layer from the current first slice.**
-   You already have it in spirit via `make_traceable_objective()` and `run_code_functional()`, and now also through the new `jax_core` subtree and first-wave specs. The next step is to widen that architecture instead of letting pure and mutable styles keep mixing.  
+3. **Broaden the pure JAX layer beyond the current hot-path coverage.**
+   You already have it concretely via `make_traceable_objective()`, `run_code_functional()`, the `jax_core` subtree, and the current immutable spec pytrees. The next step is to widen that coverage instead of letting pure kernels and mutable wrapper/orchestration code keep mixing.
 
-   The hot-path spec layer is now broader than a toy first slice: concrete
+   The hot-path spec layer is already broader than a toy first slice: concrete
    curve/current/coil/field-eval specs and `to_spec()` adapters already exist
    for the main Fourier/coil objects plus the current full-graph wrapper
    families. The remaining work is to extend that coverage through any
