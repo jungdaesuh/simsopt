@@ -155,7 +155,19 @@ The currently strongest JAX-backed lanes are:
 - Boozer and single-stage objective slices already routed through immutable
   specs where documented in the roadmap docs
 
+Single-stage traceable target-lane contract:
+
+- `make_traceable_objective()` returns a pure JAX scalar callable for traced /
+  ondevice optimizer paths.
+- `make_traceable_objective_value_and_grad()` returns the fused pure JAX
+  `(value, grad)` callable for ondevice L-BFGS.
+- `make_traceable_objective_runtime_bundle()` exposes those pure-JAX callables
+  plus `host_objective` and `host_value_and_grad` wrappers for Python-float /
+  NumPy consumers that need an explicit host boundary.
+
 The current CPU reference lane remains the oracle for broad workflow trust.
+Public acceptance still centers on the `scipy`-backed reference/parity lanes.
+The `hybrid` / `ondevice` optimizer lanes remain separate validation tracks.
 
 ## Copy-paste workflow examples
 
@@ -211,7 +223,7 @@ python examples/single_stage_optimization/SINGLE_STAGE/single_stage_banana_examp
 
 This is the safest single-stage initialization proof lane.
 
-### Single-stage on the JAX parity / target lanes
+### Single-stage on the JAX parity lane
 
 ```bash
 SIMSOPT_BACKEND_MODE=jax_cpu_parity \
@@ -224,7 +236,9 @@ python examples/single_stage_optimization/SINGLE_STAGE/single_stage_banana_examp
   --init-only
 ```
 
-After that is green, the target-lane outer optimizer path is:
+After that is green, the target-lane outer optimizer path is a separate
+validation track. Do not treat it as a replacement for the public `scipy`
+acceptance lane:
 
 ```bash
 SIMSOPT_BACKEND_MODE=jax_gpu_parity \
@@ -317,10 +331,17 @@ The benchmark/productization SSOT now includes:
   - [`/Users/suhjungdae/code/columbia/simsopt-jax/benchmarks/render_benchmark_report.py`](/Users/suhjungdae/code/columbia/simsopt-jax/benchmarks/render_benchmark_report.py)
 - scheduled reporting workflow:
   - [`/Users/suhjungdae/code/columbia/simsopt-jax/.github/workflows/jax_benchmark_reporting.yml`](/Users/suhjungdae/code/columbia/simsopt-jax/.github/workflows/jax_benchmark_reporting.yml)
+- legacy compatibility wrapper:
+  - [`/Users/suhjungdae/code/columbia/simsopt-jax/benchmarks/gpu_benchmark.py`](/Users/suhjungdae/code/columbia/simsopt-jax/benchmarks/gpu_benchmark.py)
 
 The scheduled benchmark workflow assumes a dedicated self-hosted runner for the
 stable benchmark lane. If that runner is not provisioned, use
 `workflow_dispatch` manually after preparing the benchmark environment.
+
+Treat the checked-in Tier 2 / Tier 3 probes, the PR CUDA smoke job, and the
+stable-hardware weekly workflow as the authoritative evidence path. The legacy
+`gpu_benchmark.py` wrapper is for manual convenience and delegates to that
+checked-in ladder rather than defining an independent source of truth.
 
 ## Performance expectations
 

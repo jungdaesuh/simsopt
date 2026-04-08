@@ -30,6 +30,7 @@ import jax.numpy as jnp
 from .._core.derivative import Derivative, derivative_dec
 from .._core.jax_host_boundary import (
     explicit_cotangent_basis as _explicit_cotangent_basis,
+    host_array as _host_array,
     host_scalar as _host_scalar,
     scalar_pullback_seed as _explicit_scalar_pullback_seed,
 )
@@ -1446,10 +1447,15 @@ def _get_cached_traceable_runtime_entry(
         state,
         success_filter=success_filter,
     )
+    objective = _make_traceable_objective_from_compiled_bundle(compiled_bundle)
     cached_entry = {
         "cache_key": cache_key,
         "compiled_bundle": compiled_bundle,
-        "objective": _make_traceable_objective_from_compiled_bundle(compiled_bundle),
+        "objective": objective,
+        "host_objective": _make_traceable_host_objective(objective),
+        "host_value_and_grad": _make_traceable_host_value_and_grad(
+            compiled_bundle["compiled_value_and_grad_for"]
+        ),
         "profile_suite": None,
     }
     booz_jax._traceable_runtime_entry_cache = cached_entry
@@ -1494,6 +1500,28 @@ def _make_traceable_objective_from_compiled_bundle(compiled_bundle):
     return f
 
 
+def _make_traceable_host_objective(pure_objective):
+    """Build a host-normalized scalar wrapper around the pure JAX objective."""
+
+    def host_objective(coil_dofs):
+        return float(_host_scalar(pure_objective(coil_dofs), dtype=np.float64))
+
+    return host_objective
+
+
+def _make_traceable_host_value_and_grad(compiled_value_and_grad_for):
+    """Build a host-normalized wrapper around the fused JAX value/grad callable."""
+
+    def host_value_and_grad(coil_dofs):
+        value, grad = compiled_value_and_grad_for(coil_dofs)
+        return (
+            float(_host_scalar(value, dtype=np.float64)),
+            _host_array(grad, dtype=np.float64),
+        )
+
+    return host_value_and_grad
+
+
 def make_traceable_objective(
     booz_jax,
     bs_jax,
@@ -1525,6 +1553,12 @@ def make_traceable_objective(
 
     Returns:
         ``f(coil_dofs) -> jax.Array`` — traceable scalar objective.
+
+        This is the pure-JAX optimizer contract used by the single-stage
+        ondevice lane. Callers that need Python/NumPy materialization should
+        use :func:`make_traceable_objective_runtime_bundle` and the returned
+        ``host_objective`` / ``host_value_and_grad`` wrappers instead of
+        coercing this traced scalar directly.
     """
     return _get_cached_traceable_runtime_entry(
         booz_jax,
@@ -1541,13 +1575,16 @@ def make_traceable_objective_value_and_grad(
     *,
     success_filter=None,
 ):
-    """Build a pure function ``f(coil_dofs) -> (value, grad)`` for ondevice L-BFGS.
+    """Build a pure-JAX function ``f(coil_dofs) -> (value, grad)`` for ondevice L-BFGS.
 
     This is the fused outer-optimizer objective contract for the single-stage
     ondevice target lane. It shares the exact forward and implicit-gradient
     implementation used by :func:`make_traceable_objective`, but returns both
     outputs from one compiled entrypoint so the outer optimizer can avoid
     rebuilding autodiff transforms around a scalar objective.
+
+    For host-normalized outputs, use ``make_traceable_objective_runtime_bundle()``
+    and call ``runtime_bundle["host_value_and_grad"]``.
     """
     return make_traceable_objective_runtime_bundle(
         booz_jax,
@@ -1712,7 +1749,21 @@ def make_traceable_objective_runtime_bundle(
     include_profile_suite=False,
     success_filter=None,
 ):
-    """Build the shared runtime bundle for the target single-stage objective path."""
+    """Build the shared runtime bundle for the target single-stage objective path.
+
+    Returned keys:
+
+    ``objective``
+        Pure JAX scalar callable returning a 0-d ``jax.Array``.
+    ``value_and_grad``
+        Pure JAX callable returning ``(0-d jax.Array, grad jax.Array)``.
+    ``host_objective``
+        Host-normalized callable returning a Python ``float``.
+    ``host_value_and_grad``
+        Host-normalized callable returning ``(float, np.ndarray)``.
+    ``profile_suite``
+        Optional profiled pure-JAX closures when ``include_profile_suite=True``.
+    """
     runtime_entry = _get_cached_traceable_runtime_entry(
         booz_jax,
         bs_jax,
@@ -1725,6 +1776,8 @@ def make_traceable_objective_runtime_bundle(
         return {
             "objective": runtime_entry["objective"],
             "value_and_grad": compiled_value_and_grad_for,
+            "host_objective": runtime_entry["host_objective"],
+            "host_value_and_grad": runtime_entry["host_value_and_grad"],
         }
     if runtime_entry["profile_suite"] is None:
         runtime_entry["profile_suite"] = (
@@ -1738,6 +1791,8 @@ def make_traceable_objective_runtime_bundle(
     return {
         "objective": runtime_entry["objective"],
         "value_and_grad": compiled_value_and_grad_for,
+        "host_objective": runtime_entry["host_objective"],
+        "host_value_and_grad": runtime_entry["host_value_and_grad"],
         "profile_suite": runtime_entry["profile_suite"],
     }
 

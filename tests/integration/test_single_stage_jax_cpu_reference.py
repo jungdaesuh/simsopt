@@ -5471,6 +5471,46 @@ class TestTraceableObjective:
             is runtime_bundle["value_and_grad"]
         )
 
+    def test_traceable_runtime_bundle_exposes_host_normalized_wrappers(
+        self,
+        boozer_setup,
+    ):
+        """The runtime bundle should expose explicit host-boundary companions."""
+        (_, _, _, _, bs_jax, _, booz_jax, _) = boozer_setup
+        runtime_bundle, coil_dofs = self._make_traceable_runtime_bundle(
+            bs_jax,
+            booz_jax,
+            include_profile_suite=False,
+        )
+
+        pure_value = runtime_bundle["objective"](coil_dofs)
+        pure_value_vg, pure_grad = runtime_bundle["value_and_grad"](coil_dofs)
+        host_value = runtime_bundle["host_objective"](coil_dofs)
+        host_value_vg, host_grad = runtime_bundle["host_value_and_grad"](coil_dofs)
+
+        assert isinstance(pure_value, jax.Array)
+        assert np.asarray(pure_value).shape == ()
+        assert isinstance(pure_value_vg, jax.Array)
+        assert np.asarray(pure_value_vg).shape == ()
+        assert isinstance(pure_grad, jax.Array)
+        assert isinstance(host_value, float)
+        assert isinstance(host_value_vg, float)
+        assert isinstance(host_grad, np.ndarray)
+
+        np.testing.assert_allclose(host_value, float(pure_value), rtol=0.0, atol=0.0)
+        np.testing.assert_allclose(
+            host_value_vg,
+            float(pure_value_vg),
+            rtol=0.0,
+            atol=0.0,
+        )
+        np.testing.assert_allclose(
+            host_grad,
+            np.asarray(pure_grad),
+            rtol=0.0,
+            atol=0.0,
+        )
+
     def test_traceable_profile_suite_field_eval_sharding_reuses_compiled_pipeline(
         self,
         boozer_setup,

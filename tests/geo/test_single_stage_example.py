@@ -168,6 +168,18 @@ class SingleStageExampleTests(unittest.TestCase):
         FakeSurfaceXYZTensorFourier.instances = []
         RecordingCPUBoozerSurface.instances = []
 
+    @staticmethod
+    def _make_candidate_run_dict(sdofs):
+        return {
+            "x_prev": np.zeros(5),
+            "lscount": 0,
+            "sdofs": np.asarray(sdofs).copy(),
+            "iota": TEST_IOTA,
+            "G": TEST_G0,
+            "J": 1.0,
+            "dJ": np.zeros(5),
+        }
+
     def load_module(self):
         return load_single_stage_example_module()
 
@@ -1925,15 +1937,7 @@ class SingleStageExampleTests(unittest.TestCase):
                 return np.arange(5.0)
 
         sdofs_warm = np.array([1.0, 2.0, 3.0])
-        run_dict = {
-            "x_prev": np.zeros(5),
-            "lscount": 0,
-            "sdofs": sdofs_warm.copy(),
-            "iota": TEST_IOTA,
-            "G": TEST_G0,
-            "J": 1.0,
-            "dJ": np.zeros(5),
-        }
+        run_dict = self._make_candidate_run_dict(sdofs_warm)
         booz = _CpuMock()
         jf = _JF()
 
@@ -1990,15 +1994,7 @@ class SingleStageExampleTests(unittest.TestCase):
                 return np.arange(5.0)
 
         sdofs_warm = np.array([1.0, 2.0, 3.0])
-        run_dict = {
-            "x_prev": np.zeros(5),
-            "lscount": 0,
-            "sdofs": sdofs_warm.copy(),
-            "iota": TEST_IOTA,
-            "G": TEST_G0,
-            "J": 1.0,
-            "dJ": np.zeros(5),
-        }
+        run_dict = self._make_candidate_run_dict(sdofs_warm)
         booz = _WarmStartCapableCpuSubclass()
         jf = _JF()
 
@@ -2012,6 +2008,62 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertEqual(call_iota, TEST_IOTA)
         self.assertEqual(call_G, TEST_G0)
         np.testing.assert_array_equal(call_sdofs, sdofs_warm)
+
+    def test_evaluate_candidate_prefers_explicit_false_capability_over_signature(self):
+        """Explicit false capability must keep CPU subclasses on the legacy path."""
+        module = self.load_module()
+        CpuBoozerSurface = module.BoozerSurface
+
+        class _Surface:
+            def __init__(self):
+                self.x = np.array([9.0, 8.0, 7.0])
+
+            def volume(self):
+                return 1.0
+
+            def is_self_intersecting(self):
+                return False
+
+        class _CpuMock(CpuBoozerSurface):
+            def __init__(self):
+                self.surface = _Surface()
+                self.res = {
+                    "success": True,
+                    "iter": 1,
+                    "iota": TEST_IOTA,
+                    "G": TEST_G0,
+                }
+                self.run_code_calls = []
+
+            def run_code(self, iota, G=None, *, sdofs=None):
+                self.run_code_calls.append((iota, G, sdofs))
+                return self.res
+
+        class _JF:
+            x = np.zeros(5)
+
+            def J(self):
+                return 3.14
+
+            def dJ(self):
+                return np.arange(5.0)
+
+        sdofs_warm = np.array([1.0, 2.0, 3.0])
+        run_dict = self._make_candidate_run_dict(sdofs_warm)
+        booz = _CpuMock()
+        jf = _JF()
+
+        with patch.object(
+            module, "update_self_intersection_status", return_value=False
+        ):
+            module.evaluate_candidate(np.ones(5), run_dict, booz, jf)
+
+        self.assertEqual(len(booz.run_code_calls), 1)
+        call_iota, call_G, call_sdofs = booz.run_code_calls[0]
+        self.assertEqual(call_iota, TEST_IOTA)
+        self.assertEqual(call_G, TEST_G0)
+        self.assertIsNone(call_sdofs)
+        np.testing.assert_array_equal(booz.surface.x, sdofs_warm)
 
     def test_snapshot_restore_round_trip(self):
         """Wave 1.4: snapshot → restore → snapshot produces identical arrays."""

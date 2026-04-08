@@ -90,6 +90,8 @@ class BoozerSurface(Optimizable):
     *[2]: Giuliani, A., Wechsung, F., Cerfon, A., Landreman, M., & Stadler, G. (2023). Direct stellarator coil optimization for nested magnetic surfaces with precise quasi-symmetry. Physics of Plasmas, 30(4).*
     """
 
+    supports_explicit_surface_warm_start = False
+
     def __init__(
         self,
         biotsavart,
