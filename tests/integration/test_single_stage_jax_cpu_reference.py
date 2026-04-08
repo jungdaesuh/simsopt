@@ -147,6 +147,14 @@ _REMOVED_LIVE_GRAPH_SPEC_SEAM_PATTERN = (
     "BiotSavartJAX.*coil_set_spec\\(\\).*legacy adapter seam via "
     "live-graph geometry extraction was removed"
 )
+_PUBLIC_COIL_VJP_WARNING_PATTERN = (
+    "BiotSavartJAX.*public CPU coil\\.vjp\\(\\) pullback compatibility "
+    "path.*legacy adapter seam"
+)
+_PUBLIC_COIL_VJP_STRICT_PATTERN = (
+    "BiotSavartJAX.*public CPU coil\\.vjp\\(\\) pullback compatibility "
+    "path.*strict=True"
+)
 # Solved-state objective parity can land in the ~1e-24 range, where tiny
 # evaluation-order differences need a small absolute floor to stay meaningful.
 _TRACEABLE_OBJECTIVE_ABS_TOL = 1e-28
@@ -230,6 +238,22 @@ def _assert_removed_live_graph_spec_seam(
         match=_REMOVED_LIVE_GRAPH_SPEC_SEAM_PATTERN,
     ):
         callback()
+
+
+def _make_biotsavart_jax_for_coils(coils):
+    bs_jax = object.__new__(BiotSavartJAX)
+    bs_jax._coils = coils
+    return bs_jax
+
+
+def _single_coil_cotangent_arrays(d_gamma, d_gammadash, d_current):
+    return [
+        (
+            jnp.asarray([d_gamma]),
+            jnp.asarray([d_gammadash]),
+            jnp.asarray([d_current]),
+        )
+    ]
 
 
 def _assert_grouped_coil_set_spec_allclose(observed, expected, *, atol=1e-12):
@@ -503,6 +527,17 @@ class _RecordingVJPCoil:
         return Derivative({})
 
 
+class _UnsupportedCurveForRotation(Curve):
+    """Minimal curve stub with no public pullback hooks."""
+
+    def __init__(self):
+        self.quadpoints = np.array([0.0, 0.5])
+        super().__init__(x0=np.array([]))
+
+    def invalidate_cache(self):
+        pass
+
+
 class _CpuProjectableCurve(Curve):
     """Non-JAX curve stub exposing the public CPU pullback contract."""
 
@@ -561,16 +596,45 @@ class _FallbackBombCoil:
         raise AssertionError("JAX-projectable coils should not fall back to coil.vjp()")
 
 
-class _CpuFallbackBombCoil:
-    """Coil stub whose curve only supports the public CPU pullback contract."""
+class _CpuFallbackRecordingCoil:
+    """Coil stub that records use of the public CPU ``coil.vjp()`` contract."""
 
     def __init__(self, *, rotated=False, phi=np.pi / 2.0):
         curve = _CpuProjectableCurve()
         self.curve = RotatedCurve(curve, phi=phi, flip=False) if rotated else curve
         self.current = _RecordingCurrent()
+        self.calls = []
 
     def vjp(self, dg, dgd, dc):
-        raise AssertionError("CPU-projectable coils should not fall back to coil.vjp()")
+        dg_arr = np.asarray(dg, dtype=float)
+        dgd_arr = np.asarray(dgd, dtype=float)
+        dc_arr = np.atleast_1d(np.asarray(dc, dtype=float))
+        self.calls.append((dg_arr, dgd_arr, dc_arr))
+        curve = self.curve
+        if isinstance(curve, RotatedCurve):
+            dg_arr = dg_arr @ np.asarray(curve.rotmatT, dtype=float)
+            dgd_arr = dgd_arr @ np.asarray(curve.rotmatT, dtype=float)
+            curve = curve.curve
+        return (
+            curve.dgamma_by_dcoeff_vjp(dg_arr)
+            + curve.dgammadash_by_dcoeff_vjp(dgd_arr)
+            + self.current.vjp(dc_arr)
+        )
+
+
+class _RotatedUnsupportedRecordingCoil:
+    """Rotated unsupported coil stub that must be rejected before ``coil.vjp()``."""
+
+    def __init__(self):
+        self.curve = RotatedCurve(_UnsupportedCurveForRotation(), np.pi / 4.0, False)
+        self.current = _RecordingCurrent()
+        self.calls = []
+
+    def vjp(self, dg, dgd, dc):
+        self.calls.append((dg, dgd, dc))
+        raise AssertionError(
+            "Rotated unsupported curves should be rejected before coil.vjp()"
+        )
 
 
 _GENERIC_JAXCURVE_DOFS = np.array([0.1, -0.03, 0.02, 0.04, -0.01])
@@ -2437,11 +2501,15 @@ class TestAdjointSolveConsistency:
             "BiotSavartJAX.B_vjp() should bypass Coil.vjp() for finite-build CWS curves",
         )
 
-    def test_biotsavart_projection_uses_cpu_curve_pullbacks_for_non_jax_curves(self):
-        """Non-JAX curves should project through public CPU curve/current VJPs."""
-        bs_jax = object.__new__(BiotSavartJAX)
-        coils = [_CpuFallbackBombCoil(), _CpuFallbackBombCoil()]
-        bs_jax._coils = coils
+    def test_non_strict_mode_warns_on_public_cpu_coil_vjp_pullback(
+        self,
+        monkeypatch,
+        request,
+    ):
+        """Non-strict JAX mode should warn before using the public CPU pullback seam."""
+        _enable_non_strict_jax_backend(monkeypatch, request)
+        coils = [_CpuFallbackRecordingCoil(), _CpuFallbackRecordingCoil()]
+        bs_jax = _make_biotsavart_jax_for_coils(coils)
         d_coil_arrays = [
             (
                 _WholeGroupArrayConversionBomb(
@@ -2460,7 +2528,11 @@ class TestAdjointSolveConsistency:
             )
         ]
 
-        derivative = bs_jax.coil_cotangents_to_derivative(d_coil_arrays, [[0, 1]])
+        with pytest.warns(
+            RuntimeWarning,
+            match=_PUBLIC_COIL_VJP_WARNING_PATTERN,
+        ):
+            derivative = bs_jax.coil_cotangents_to_derivative(d_coil_arrays, [[0, 1]])
 
         np.testing.assert_allclose(
             np.asarray(derivative.data[coils[0].curve], dtype=float),
@@ -2482,21 +2554,57 @@ class TestAdjointSolveConsistency:
             np.array([2.5]),
             atol=1e-12,
         )
+        assert len(coils[0].calls) == 1
+        assert len(coils[1].calls) == 1
         assert len(coils[0].current.calls) == 1
         assert len(coils[1].current.calls) == 1
 
-    def test_biotsavart_projection_rotates_cpu_curve_cotangents(self):
-        """Rotated non-JAX curves should apply inverse rotation before CPU VJPs."""
-        bs_jax = object.__new__(BiotSavartJAX)
-        coils = [_CpuFallbackBombCoil(rotated=True, phi=np.pi / 2.0)]
-        bs_jax._coils = coils
+    def test_strict_mode_rejects_public_cpu_coil_vjp_pullback(
+        self,
+        monkeypatch,
+        request,
+    ):
+        """Strict JAX mode should reject the public CPU pullback seam outright."""
+        _enable_strict_jax_backend(monkeypatch, request)
+        coils = [_CpuFallbackRecordingCoil()]
+        bs_jax = _make_biotsavart_jax_for_coils(coils)
+
+        with pytest.raises(
+            RuntimeError,
+            match=_PUBLIC_COIL_VJP_STRICT_PATTERN,
+        ):
+            bs_jax.coil_cotangents_to_derivative(
+                _single_coil_cotangent_arrays(
+                    np.array([1.0, 2.0, 3.0]),
+                    np.array([4.0, 5.0, 6.0]),
+                    1.5,
+                ),
+                [[0]],
+            )
+
+        assert coils[0].calls == []
+        assert coils[0].current.calls == []
+
+    def test_biotsavart_projection_preserves_raw_rotated_cpu_coil_vjp_inputs(
+        self,
+        monkeypatch,
+        request,
+    ):
+        """Rotated public fallback coils should receive raw cotangents at ``coil.vjp()``."""
+        _enable_non_strict_jax_backend(monkeypatch, request)
+        coils = [_CpuFallbackRecordingCoil(rotated=True, phi=np.pi / 2.0)]
+        bs_jax = _make_biotsavart_jax_for_coils(coils)
         d_gamma = np.array([1.0, 2.0, 3.0])
         d_gammadash = np.array([4.0, 5.0, 6.0])
 
-        derivative = bs_jax.coil_cotangents_to_derivative(
-            [(jnp.asarray([d_gamma]), jnp.asarray([d_gammadash]), jnp.asarray([1.5]))],
-            [[0]],
-        )
+        with pytest.warns(
+            RuntimeWarning,
+            match=_PUBLIC_COIL_VJP_WARNING_PATTERN,
+        ):
+            derivative = bs_jax.coil_cotangents_to_derivative(
+                _single_coil_cotangent_arrays(d_gamma, d_gammadash, 1.5),
+                [[0]],
+            )
 
         np.testing.assert_allclose(
             np.asarray(derivative.data[coils[0].curve.curve], dtype=float),
@@ -2508,29 +2616,50 @@ class TestAdjointSolveConsistency:
             np.array([1.5]),
             atol=1e-12,
         )
+        np.testing.assert_allclose(coils[0].calls[0][0], d_gamma, atol=1e-12)
+        np.testing.assert_allclose(coils[0].calls[0][1], d_gammadash, atol=1e-12)
+        np.testing.assert_allclose(coils[0].calls[0][2], np.array([1.5]), atol=1e-12)
+        assert len(coils[0].calls) == 1
         assert len(coils[0].current.calls) == 1
 
     def test_biotsavart_projection_rejects_unsupported_curves_without_coil_fallback(
         self,
     ):
         """Unsupported curves should fail fast instead of falling back to ``coil.vjp()``."""
-        bs_jax = object.__new__(BiotSavartJAX)
         coils = [_RecordingVJPCoil()]
-        bs_jax._coils = coils
+        bs_jax = _make_biotsavart_jax_for_coils(coils)
 
         with pytest.raises(TypeError, match="supported JAX or CPU pullback contract"):
             bs_jax.coil_cotangents_to_derivative(
-                [
-                    (
-                        jnp.array([[1.0, 2.0, 3.0]]),
-                        jnp.array([[4.0, 5.0, 6.0]]),
-                        jnp.array([1.5]),
-                    )
-                ],
+                _single_coil_cotangent_arrays(
+                    np.array([1.0, 2.0, 3.0]),
+                    np.array([4.0, 5.0, 6.0]),
+                    1.5,
+                ),
                 [[0]],
             )
 
         assert coils[0].calls == []
+
+    def test_biotsavart_projection_rejects_rotated_unsupported_curves_without_coil_fallback(
+        self,
+    ):
+        """Rotated wrappers must not make unsupported base curves look pullback-capable."""
+        coils = [_RotatedUnsupportedRecordingCoil()]
+        bs_jax = _make_biotsavart_jax_for_coils(coils)
+
+        with pytest.raises(TypeError, match="supported JAX or CPU pullback contract"):
+            bs_jax.coil_cotangents_to_derivative(
+                _single_coil_cotangent_arrays(
+                    np.array([1.0, 2.0, 3.0]),
+                    np.array([4.0, 5.0, 6.0]),
+                    1.5,
+                ),
+                [[0]],
+            )
+
+        assert coils[0].calls == []
+        assert coils[0].current.calls == []
 
     def test_biotsavart_projection_uses_jax_pullbacks_for_projectable_curves(self):
         """JAX-capable curves should bypass ``coil.vjp()`` even if they are not native."""

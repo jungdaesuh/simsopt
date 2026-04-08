@@ -263,10 +263,35 @@ def _supports_jax_curve_pullback(curve):
     )
 
 
-def _supports_public_curve_pullback(curve):
-    return hasattr(curve, "dgamma_by_dcoeff_vjp") and hasattr(
-        curve, "dgammadash_by_dcoeff_vjp"
+_PUBLIC_CURVE_PULLBACK_METHODS = (
+    ("dgamma_by_dcoeff_vjp", "dgamma_by_dcoeff_vjp_impl"),
+    ("dgammadash_by_dcoeff_vjp", "dgammadash_by_dcoeff_vjp_impl"),
+)
+
+
+def _has_concrete_curve_pullback_method(curve, method_name, impl_name):
+    from ..geo.curve import Curve
+
+    curve_type = type(curve)
+    curve_method = getattr(curve_type, method_name, None)
+    curve_impl = getattr(curve_type, impl_name, None)
+    base_method = getattr(Curve, method_name, None)
+    base_impl = getattr(Curve, impl_name, None)
+    return (curve_method is not None and curve_method is not base_method) or (
+        curve_impl is not None and curve_impl is not base_impl
     )
+
+
+def _supports_public_curve_pullback(curve):
+    return all(
+        _has_concrete_curve_pullback_method(curve, method_name, impl_name)
+        for method_name, impl_name in _PUBLIC_CURVE_PULLBACK_METHODS
+    )
+
+
+_PUBLIC_COIL_VJP_PULLBACK_DETAIL = (
+    "the public CPU coil.vjp() pullback compatibility path"
+)
 
 
 def _merge_derivative_data(target, derivative_like):
@@ -432,25 +457,43 @@ def _curve_surface_pullback_data(curve, dg, dgd):
     }
 
 
-def _curve_pullback_data_from_public_methods(curve, dg, dgd):
-    deriv_data = {}
-    _merge_derivative_data(
-        deriv_data,
-        curve.dgamma_by_dcoeff_vjp(np.asarray(dg, dtype=np.float64)),
+def _nonzero_dof_derivative_data(derivative_like):
+    items = (
+        derivative_like.data.items()
+        if isinstance(derivative_like, Derivative)
+        else derivative_like.items()
     )
-    _merge_derivative_data(
-        deriv_data,
-        curve.dgammadash_by_dcoeff_vjp(np.asarray(dgd, dtype=np.float64)),
+    filtered = {}
+    for opt, block in items:
+        if getattr(opt, "dof_size", None) == 0:
+            continue
+        filtered[opt] = block
+    return filtered
+
+
+def _handle_public_coil_vjp_pullback_fallback() -> None:
+    _raise_if_strict_biot_savart_fallback(_PUBLIC_COIL_VJP_PULLBACK_DETAIL)
+    _warn_biot_savart_fallback(_PUBLIC_COIL_VJP_PULLBACK_DETAIL)
+
+
+def _coil_pullback_data_from_public_vjp(coil, dg, dgd, dc):
+    return _nonzero_dof_derivative_data(
+        coil.vjp(
+            np.asarray(dg, dtype=np.float64),
+            np.asarray(dgd, dtype=np.float64),
+            np.atleast_1d(np.asarray(dc, dtype=np.float64)),
+        )
     )
-    return deriv_data
 
 
 def _project_single_coil_cotangent_data(coil, dg, dgd, dc):
     curve, rotmat, current, scale = _unwrap_coil_curve_and_current(coil)
     supports_jax_pullback = _supports_jax_curve_pullback(curve)
-    supports_public_pullback = _supports_public_curve_pullback(curve)
+    supports_public_pullback = hasattr(coil, "vjp") and _supports_public_curve_pullback(
+        curve
+    )
 
-    if rotmat is not None and (supports_jax_pullback or supports_public_pullback):
+    if rotmat is not None and supports_jax_pullback:
         rotmat_t = _as_jax_float64(rotmat).T
         dg = _as_jax_float64(dg) @ rotmat_t
         dgd = _as_jax_float64(dgd) @ rotmat_t
@@ -466,13 +509,8 @@ def _project_single_coil_cotangent_data(coil, dg, dgd, dc):
         return deriv_data
 
     if supports_public_pullback:
-        deriv_data = _curve_pullback_data_from_public_methods(curve, dg, dgd)
-        if current.dof_size > 0:
-            current_cotangent = np.atleast_1d(
-                np.asarray(scale, dtype=np.float64) * np.asarray(dc, dtype=np.float64)
-            )
-            _merge_derivative_data(deriv_data, current.vjp(current_cotangent))
-        return deriv_data
+        _handle_public_coil_vjp_pullback_fallback()
+        return _coil_pullback_data_from_public_vjp(coil, dg, dgd, dc)
 
     raise TypeError(
         "BiotSavartJAX coil cotangent projection requires curves that expose "
@@ -1190,9 +1228,10 @@ class BiotSavartJAX(Optimizable):
 
         Uses ``jax.vjp`` through the pure Biot-Savart kernel, then
         projects each coil's geometry/current cotangents back to coil
-        DOFs. Curves can project through either the JAX pullback hooks
-        used by ``BiotSavartJAX`` or the public CPU curve/current VJP
-        contract. Unsupported curves are rejected explicitly.
+        DOFs. Curves with JAX pullback hooks stay on the JAX path.
+        A public CPU ``coil.vjp()`` compatibility path remains for
+        non-strict JAX mode only; unsupported curves are rejected
+        explicitly.
 
         Args:
             v: (npoints, 3) cotangent, same shape as ``B()``.
@@ -1236,9 +1275,9 @@ class BiotSavartJAX(Optimizable):
         This is the JAX-native replacement for the standalone
         ``_coil_cotangents_to_derivative()`` helper. Curves that
         expose JAX pullback methods stay on the JAX path through the
-        projection step, while CPU/projected curves still use the
-        public curve/current VJP contract. Unsupported curves are
-        rejected explicitly.
+        projection step, while CPU/projected curves use the public
+        ``coil.vjp()`` compatibility path only in non-strict mode.
+        Unsupported curves are rejected explicitly.
 
         Args:
             d_coil_arrays: list of ``(d_gammas, d_gammadashs, d_currents)``
