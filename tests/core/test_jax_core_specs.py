@@ -1,6 +1,7 @@
 import numpy as np
 import jax
 import jax.numpy as jnp
+import pytest
 
 from simsopt.jax_core import (
     apply_coil_symmetry,
@@ -164,6 +165,15 @@ def test_make_coil_spec_uses_default_symmetry_contract():
 def test_curve_spec_kind_covers_all_supported_curve_variants():
     for expected_kind, curve_spec in _make_curve_spec_kind_samples().items():
         assert curve_spec_kind(curve_spec) == expected_kind
+
+
+def test_curve_spec_kind_rejects_unrelated_same_name_lookalike():
+    impostor = type("CurveXYZFourierSpec", (), {})()
+
+    with pytest.raises(
+        TypeError, match="Unsupported curve spec type: CurveXYZFourierSpec"
+    ):
+        curve_spec_kind(impostor)
 
 
 def test_apply_coil_symmetry_rotates_geometry_and_scales_current():

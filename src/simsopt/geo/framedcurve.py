@@ -7,8 +7,7 @@ from ._simsoptpp import sopp_namespace
 sopp = sopp_namespace("Curve")
 from .._core.optimizable import Optimizable
 from .._core.derivative import Derivative
-from ..jax_core._math_utils import as_jax_float64 as _runtime_as_jax_float64
-from .curve import Curve
+from .curve import Curve, _as_runtime_jax_float64
 from .jit import jit
 
 __all__ = [
@@ -22,7 +21,7 @@ __all__ = [
 
 
 def _as_jax_float64_array(values):
-    return _runtime_as_jax_float64(values)
+    return _as_runtime_jax_float64(values)
 
 
 def _as_jax_float64_arrays(*values):

@@ -541,15 +541,23 @@ def _build_stage2_target_objective_contract_case(
 
 
 @contextmanager
-def _forbid_stage2_host_materialization(monkeypatch, message: str):
-    def _reject_device_get(*_args, **_kwargs):
+def _forbid_stage2_host_boundary_helpers(monkeypatch, message: str):
+    def _reject_host_array(*_args, **_kwargs):
+        raise AssertionError(message)
+
+    def _reject_host_tree(*_args, **_kwargs):
         raise AssertionError(message)
 
     with monkeypatch.context() as patch:
         patch.setattr(
-            stage2_target_objective_module.jax,
-            "device_get",
-            _reject_device_get,
+            stage2_target_objective_module,
+            "_shared_host_array",
+            _reject_host_array,
+        )
+        patch.setattr(
+            stage2_target_objective_module,
+            "_shared_host_tree",
+            _reject_host_tree,
         )
         yield
 
@@ -2636,9 +2644,7 @@ class TestStage2OptimizerContract:
     ):
         stage2_script = _load_stage2_script_module()
         plasma_surf_filename = "wout_nfp22ginsburg_000_014417_iota15.nc"
-        repo_fixture = (
-            Path(stage2_script.DEFAULT_EQUILIBRIA_DIR) / plasma_surf_filename
-        )
+        repo_fixture = Path(stage2_script.DEFAULT_EQUILIBRIA_DIR) / plasma_surf_filename
         workspace_candidate = (
             Path(stage2_script.DATABASE_EQUILIBRIA_DIR) / plasma_surf_filename
         )
@@ -3795,24 +3801,46 @@ class TestStage2OptimizerContract:
             atol=1e-15,
         )
 
-    def test_target_scalar_objective_build_does_not_hostify_immutable_state(
+    def test_target_scalar_objective_build_materializes_immutable_state_via_explicit_host_boundary(
         self,
         monkeypatch,
     ):
-        with _forbid_stage2_host_materialization(
-            monkeypatch,
-            "Stage 2 target-objective build should keep immutable runtime "
-            "state in JAX form rather than hostifying it.",
-        ):
-            objective, target_bundle = _build_stage2_target_objective_contract_case()
-            dofs = jax.device_put(np.asarray(objective.x, dtype=np.float64))
+        counts = {"array": 0, "tree": 0}
+        original_host_array = stage2_target_objective_module._shared_host_array
+        original_host_tree = stage2_target_objective_module._shared_host_tree
 
-            value = target_bundle.objective(dofs)
-            assert target_bundle.value_and_grad is not None
-            value_vg, grad_vg = target_bundle.value_and_grad(dofs)
-            assert target_bundle.least_squares_residual is not None
-            residual = target_bundle.least_squares_residual(dofs)
+        def _counted_host_array(value, *, dtype=None):
+            counts["array"] += 1
+            return original_host_array(value, dtype=dtype)
 
+        def _counted_host_tree(value, *, dtype=None):
+            counts["tree"] += 1
+            return original_host_tree(value, dtype=dtype)
+
+        monkeypatch.setattr(
+            stage2_target_objective_module,
+            "_shared_host_array",
+            _counted_host_array,
+        )
+        monkeypatch.setattr(
+            stage2_target_objective_module,
+            "_shared_host_tree",
+            _counted_host_tree,
+        )
+
+        objective, target_bundle = _build_stage2_target_objective_contract_case()
+        build_counts = dict(counts)
+        dofs = jax.device_put(np.asarray(objective.x, dtype=np.float64))
+
+        value = target_bundle.objective(dofs)
+        assert target_bundle.value_and_grad is not None
+        value_vg, grad_vg = target_bundle.value_and_grad(dofs)
+        assert target_bundle.least_squares_residual is not None
+        residual = target_bundle.least_squares_residual(dofs)
+
+        assert build_counts["array"] > 0
+        assert build_counts["tree"] > 0
+        assert counts == build_counts
         assert np.isfinite(float(value))
         assert np.isfinite(float(value_vg))
         assert np.all(np.isfinite(np.asarray(grad_vg, dtype=float)))
@@ -3825,10 +3853,10 @@ class TestStage2OptimizerContract:
         objective, target_bundle = _build_stage2_target_objective_contract_case()
         dofs = jax.device_put(np.asarray(objective.x, dtype=np.float64))
 
-        with _forbid_stage2_host_materialization(
+        with _forbid_stage2_host_boundary_helpers(
             monkeypatch,
-            "Stage 2 ondevice objective should not hostify immutable state "
-            "inside the compiled hot path.",
+            "Stage 2 ondevice objective should not re-enter explicit "
+            "host-boundary helpers inside the compiled hot path.",
         ):
             value = target_bundle.objective(dofs)
             assert target_bundle.value_and_grad is not None
@@ -4502,8 +4530,9 @@ class TestStage2OptimizerContract:
             residual = residual_fn(x0)
             value = 0.5 * jax.numpy.vdot(residual, residual).real
             grad = jax.grad(
-                lambda state: 0.5
-                * jax.numpy.vdot(residual_fn(state), residual_fn(state)).real
+                lambda state: (
+                    0.5 * jax.numpy.vdot(residual_fn(state), residual_fn(state)).real
+                )
             )(x0)
             return types.SimpleNamespace(
                 x=x0,

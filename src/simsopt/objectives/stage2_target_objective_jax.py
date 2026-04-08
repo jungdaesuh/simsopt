@@ -9,6 +9,10 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from .._core.jax_host_boundary import (
+    host_array as _shared_host_array,
+    host_tree as _shared_host_tree,
+)
 from ..field.biotsavart_jax_backend import _unwrap_coil_curve_and_current
 from ..geo.curve import incremental_arclength_pure, kappa_pure
 from ..jax_core._math_utils import (
@@ -122,14 +126,7 @@ def _as_objective_dofs(value) -> jax.Array:
 
 
 def _runtimeify_tree(value):
-    def _runtimeify_leaf(leaf):
-        if isinstance(leaf, jax.Array):
-            return np.asarray(jax.device_get(leaf), dtype=np.float64)
-        if isinstance(leaf, (np.ndarray, np.generic)) or np.isscalar(leaf):
-            return np.asarray(leaf, dtype=np.float64)
-        return leaf
-
-    return jax.tree_util.tree_map(_runtimeify_leaf, value)
+    return _shared_host_tree(value, dtype=np.float64)
 
 
 def _split_stage2_dofs(dofs, curve_dof_count=None):
@@ -211,13 +208,13 @@ def _curve_group_arrays(group):
 
 def _curve_group_host_arrays(group):
     return (
-        np.asarray(jax.device_get(group.gammas), dtype=np.float64),
-        np.asarray(jax.device_get(group.gammadashs), dtype=np.float64),
+        _shared_host_array(group.gammas, dtype=np.float64),
+        _shared_host_array(group.gammadashs, dtype=np.float64),
     )
 
 
 def _host_float64_array(value):
-    return np.asarray(jax.device_get(value), dtype=np.float64)
+    return _shared_host_array(value, dtype=np.float64)
 
 
 def _host_float64_scalar(value) -> float:
@@ -452,6 +449,7 @@ def build_stage2_target_objective(
     banana_curve_spec_runtime = _runtimeify_tree(banana_curve_spec)
     tf_curve_groups_runtime = _runtimeify_tree(tf_curve_groups)
     flux_spec_runtime = _runtimeify_tree(flux_spec)
+
     def _dynamic_curve_runtime_state(dofs):
         state = stage2_target_optimizer_state_from_dofs(
             dofs,
@@ -682,7 +680,9 @@ def build_stage2_target_objective(
             dynamic_gammadashs,
         )
         tf_group_summaries = []
-        for group_index, (tf_gammas, tf_gammadashs) in enumerate(tf_curve_groups_runtime):
+        for group_index, (tf_gammas, tf_gammadashs) in enumerate(
+            tf_curve_groups_runtime
+        ):
             tf_group_triplet = (
                 jnp.arange(tf_gammas.shape[0], dtype=jnp.int32),
                 _runtime_float64_array(tf_gammas, reference=dynamic_gammas),

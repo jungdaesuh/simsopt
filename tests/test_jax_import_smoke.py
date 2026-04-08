@@ -150,15 +150,13 @@ def _find_private_jax_src_usages(path: Path) -> list[str]:
 
 def _assert_no_private_jax_src_usage(path: Path, *, label: str) -> None:
     forbidden_usages = _find_private_jax_src_usages(path)
-    assert forbidden_usages == [], (
-        f"{label} must not use jax._src: {forbidden_usages}"
-    )
+    assert forbidden_usages == [], f"{label} must not use jax._src: {forbidden_usages}"
 
 
 def test_find_private_jax_src_usages_detects_alias_attribute_access(tmp_path):
     path = tmp_path / "module.py"
     path.write_text(
-        "import jax as jj\nvalue = jj._src\nshadow = getattr(jj, \"_src\")\n",
+        'import jax as jj\nvalue = jj._src\nshadow = getattr(jj, "_src")\n',
         encoding="utf-8",
     )
 
@@ -2521,7 +2519,9 @@ def test_optimizer_jax_private_package_has_no_private_jax_src_usage():
     for path in sorted(_OPTIMIZER_PRIVATE_DIR.glob("*.py")):
         usages = _find_private_jax_src_usages(path)
         if usages:
-            forbidden_usages[str(path.relative_to(_OPTIMIZER_PRIVATE_DIR.parent))] = usages
+            forbidden_usages[str(path.relative_to(_OPTIMIZER_PRIVATE_DIR.parent))] = (
+                usages
+            )
 
     assert forbidden_usages == {}, (
         f"optimizer_jax_private must not use jax._src: {forbidden_usages}"
@@ -2585,11 +2585,10 @@ def test_m5_classes_require_simsoptpp():
 
 
 def test_direct_curve_modules_raise_clear_importerror_without_simsoptpp():
-    """Direct curve-module imports should fail clearly at instantiation time."""
+    """Direct geo-module imports should fail clearly at instantiation time."""
     rc, err = _run_import_check("""
         import importlib.abc
         import sys
-        import types
 
         class _BlockSimsoptpp(importlib.abc.MetaPathFinder):
             def find_spec(self, fullname, path=None, target=None):
@@ -2600,6 +2599,7 @@ def test_direct_curve_modules_raise_clear_importerror_without_simsoptpp():
 
         sys.meta_path.insert(0, _BlockSimsoptpp())
 
+        from simsopt.geo.framedcurve import FramedCurve
         from simsopt.geo.curveplanarfourier import CurvePlanarFourier
         from simsopt.geo.curveperturbed import CurvePerturbed
         from simsopt.geo.curverzfourier import CurveRZFourier
@@ -2615,15 +2615,29 @@ def test_direct_curve_modules_raise_clear_importerror_without_simsoptpp():
             else:
                 raise AssertionError(f"{expected_name} should require simsoptpp")
 
-        _assert_missing(lambda: CurvePlanarFourier([0.0], 1), "CurvePlanarFourier")
-        _assert_missing(lambda: CurveRZFourier([0.0], 1, 1, True), "CurveRZFourier")
-        _assert_missing(lambda: CurveXYZFourier([0.0], 1), "CurveXYZFourier")
-        _assert_missing(
-            lambda: CurvePerturbed(types.SimpleNamespace(quadpoints=[0.0]), object()),
-            "CurvePerturbed",
+        constructors = (
+            (lambda: FramedCurve(object()), "FramedCurve"),
+            (lambda: CurvePlanarFourier([0.0], 1), "CurvePlanarFourier"),
+            (lambda: CurveRZFourier([0.0], 1, 1, True), "CurveRZFourier"),
+            (lambda: CurveXYZFourier([0.0], 1), "CurveXYZFourier"),
+            (lambda: CurvePerturbed(object(), object()), "CurvePerturbed"),
         )
+        for factory, expected_name in constructors:
+            _assert_missing(factory, expected_name)
     """)
-    assert rc == 0, f"direct curve-module simsoptpp fallback smoke failed:\n{err}"
+    assert rc == 0, f"direct geo-module simsoptpp fallback smoke failed:\n{err}"
+
+
+def test_framedcurve_direct_module_import_smoke():
+    """Direct import of simsopt.geo.framedcurve should not hit jax_core cycles."""
+    rc, err = _run_import_check("""
+        import simsopt.geo.framedcurve as framedcurve
+
+        assert hasattr(framedcurve, "FramedCurve")
+        assert hasattr(framedcurve, "FramedCurveCentroid")
+        assert hasattr(framedcurve, "FramedCurveFrenet")
+    """)
+    assert rc == 0, f"direct framedcurve import smoke failed:\n{err}"
 
 
 def test_biotsavart_jax_backend_does_not_import_coil_unwrap_helper():
@@ -2656,7 +2670,8 @@ def test_surfaceobjectives_jax_has_no_tensor_surface_imports():
         node.lineno
         for node in ast.walk(tree)
         if isinstance(node, ast.ImportFrom)
-        and node.module in (
+        and node.module
+        in (
             "simsopt.geo.surfacexyztensorfourier",
             "surfacexyztensorfourier",
         )
