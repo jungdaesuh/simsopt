@@ -64,9 +64,9 @@ _HAS_JAX = _jax_vjp is not None
 def _as_jax_float64(value):
     if not _HAS_JAX:
         return np.asarray(value, dtype=np.float64)
-    if isinstance(value, jax.Array):
-        return jnp.asarray(value, dtype=jnp.float64)
-    return jax.device_put(np.asarray(value, dtype=np.float64))
+    from ..jax_core._math_utils import as_jax_float64 as _distributed_as_jax_float64
+
+    return _distributed_as_jax_float64(value)
 
 
 def _as_runtime_jax_float64(value):

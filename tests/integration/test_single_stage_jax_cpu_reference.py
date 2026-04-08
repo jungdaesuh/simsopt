@@ -1886,23 +1886,25 @@ class TestBoozerResidualValue:
         coil_dofs = jnp.array(bs_jax.x.copy())
         coil_set_spec = bs_jax.coil_set_spec_from_dofs(coil_dofs)
 
-        def fake_value_and_direct_coil_derivative(
-            biotsavart,
-            objective_value_and_grad,
-            coil_dofs,
-            *objective_args,
-        ):
-            del biotsavart
-            value, _ = objective_value_and_grad(coil_dofs, *objective_args)
-            value = float(value)
-            captured["value"] = value
-            return value, Derivative({})
+        jr_jax = BoozerResidualJAX(booz_jax, bs_jax)
+
+        original_direct_objective = jr_jax._direct_objective_of_coils
+
+        def raise_unexpected_call(message):
+            raise AssertionError(message)
+
+        def recording_direct_objective(coil_dofs, *objective_args):
+            value = original_direct_objective(coil_dofs, *objective_args)
+            captured["value"] = float(value)
+            return value
 
         monkeypatch.setattr(soj, "_ensure_solved", lambda _booz: None)
         monkeypatch.setattr(
             soj,
             "_value_and_direct_coil_derivative",
-            fake_value_and_direct_coil_derivative,
+            lambda *args, **kwargs: raise_unexpected_call(
+                "BoozerResidualJAX.J() must not request the direct coil gradient"
+            ),
         )
         monkeypatch.setattr(
             soj, "_solve_boozer_adjoint", lambda booz_surf, dJ_ds: dJ_ds
@@ -1913,16 +1915,18 @@ class TestBoozerResidualValue:
         monkeypatch.setattr(
             soj,
             "_boozer_penalty_objective",
-            lambda *args, **kwargs: (_ for _ in ()).throw(
-                AssertionError(
-                    "BoozerResidualJAX.compute() must not route through "
-                    "_boozer_penalty_objective()"
-                )
+            lambda *args, **kwargs: raise_unexpected_call(
+                "BoozerResidualJAX.compute() must not route through "
+                "_boozer_penalty_objective()"
             ),
             raising=False,
         )
+        monkeypatch.setattr(
+            jr_jax,
+            "_direct_objective_of_coils",
+            recording_direct_objective,
+        )
 
-        jr_jax = BoozerResidualJAX(booz_jax, bs_jax)
         value = jr_jax.J()
 
         x_inner = booz_jax._pack_decision_vector(
@@ -3844,28 +3848,26 @@ class TestScriptBackendSelection:
             ),
         )
 
-        with patch.dict(
-            "sys.modules",
-            {"simsopt.geo.boozersurface_jax": MagicMock(BoozerSurfaceJAX=recorder)},
-        ):
-            spec.loader.exec_module(mod)
+        spec.loader.exec_module(mod)
 
-            fake_vol = MagicMock()
-            fake_vol.return_value = MagicMock()
-            with patch.object(mod, "Volume", fake_vol), patch.object(
-                mod, "SurfaceXYZTensorFourier", MagicMock(return_value=fake_surf)
-            ):
-                mod.initialize_boozer_surface(
-                    fake_surf,
-                    mpol=2,
-                    ntor=2,
-                    bs=fake_bs,
-                    vol_target=0.1,
-                    constraint_weight=1.0,
-                    iota=0.3,
-                    G0=1.0,
-                    backend="jax",
-                )
+        fake_vol = MagicMock()
+        fake_vol.return_value = type("Volume", (), {})()
+        with patch(
+            "simsopt.geo.boozersurface_jax.BoozerSurfaceJAX", recorder
+        ), patch.object(mod, "Volume", fake_vol), patch.object(
+            mod, "SurfaceXYZTensorFourier", MagicMock(return_value=fake_surf)
+        ):
+            mod.initialize_boozer_surface(
+                fake_surf,
+                mpol=2,
+                ntor=2,
+                bs=fake_bs,
+                vol_target=0.1,
+                constraint_weight=1.0,
+                iota=0.3,
+                G0=1.0,
+                backend="jax",
+            )
 
         assert recorder.called, "BoozerSurfaceJAX was not constructed"
         logger.info("initialize_boozer_surface(backend='jax') -> BoozerSurfaceJAX OK")

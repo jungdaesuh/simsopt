@@ -101,7 +101,7 @@ def _strict_scalar_value_and_grad(fun, arg, *args):
 
     value, pullback = jax.vjp(_objective, arg)
     (gradient,) = pullback(_explicit_scalar_pullback_seed(value))
-    return _host_scalar(value), gradient
+    return value, gradient
 
 
 def _explicit_index_array(indices):
@@ -381,6 +381,15 @@ def _evaluate_scalar_or_value_and_grad(
     )
 
 
+def _evaluate_direct_coil_objective_value(
+    objective,
+    coil_dofs,
+    *objective_args,
+):
+    """Evaluate a direct coil objective value without building its gradient."""
+    return _host_scalar(objective(coil_dofs, *objective_args))
+
+
 def _current_coil_dofs_and_spec(biotsavart):
     """Return the current free coil DOFs and their immutable grouped spec."""
     current_coil_dofs = jnp.asarray(biotsavart.x.copy(), dtype=jnp.float64)
@@ -403,7 +412,7 @@ def _value_and_direct_coil_derivative(
         biotsavart,
         coil_dofs_gradient,
     )
-    return objective_value, direct_derivative
+    return _host_scalar(objective_value), direct_derivative
 
 
 def _qs_ratio_from_coil_dofs(sdofs, coil_dofs, biotsavart, **qs_kwargs):
@@ -649,15 +658,13 @@ class BoozerResidualJAX(Optimizable):
         weight_inv_modB = booz_surf.res.get("weight_inv_modB", True)
         x_inner, optimize_G = self._inner_objective_state(iota, G, sdofs=sdofs)
         current_coil_dofs, coil_set_spec = _current_coil_dofs_and_spec(self.biotsavart)
+        direct_objective_args = (x_inner, optimize_G, weight_inv_modB)
 
         if not compute_gradient:
-            self._J = _host_scalar(
-                self._direct_objective_of_coils(
-                    current_coil_dofs,
-                    x_inner,
-                    optimize_G,
-                    weight_inv_modB,
-                )
+            self._J = _evaluate_direct_coil_objective_value(
+                self._direct_objective_of_coils,
+                current_coil_dofs,
+                *direct_objective_args,
             )
             return
 
@@ -665,9 +672,7 @@ class BoozerResidualJAX(Optimizable):
             self.biotsavart,
             self._direct_objective_value_and_grad,
             current_coil_dofs,
-            x_inner,
-            optimize_G,
-            weight_inv_modB,
+            *direct_objective_args,
         )
         vjp_groups_fn = booz_surf.res.get("vjp_groups")
 
