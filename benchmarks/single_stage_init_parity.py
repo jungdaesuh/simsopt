@@ -235,6 +235,7 @@ def _append_optional_single_stage_flags(
     benchmark_mode: bool,
     profile_target_lane: bool,
     experimental_target_lane_value_and_grad: bool,
+    disable_target_lane_success_filter: bool,
 ) -> None:
     if benchmark_mode:
         command.append("--benchmark-mode")
@@ -242,6 +243,8 @@ def _append_optional_single_stage_flags(
         command.append("--profile-target-lane")
     if experimental_target_lane_value_and_grad:
         command.append("--experimental-target-lane-value-and-grad")
+    if disable_target_lane_success_filter:
+        command.append("--disable-target-lane-success-filter")
 
 
 def _run_single_stage_case(
@@ -301,6 +304,9 @@ def _run_single_stage_case(
             profile_target_lane=profile_target_lane,
             experimental_target_lane_value_and_grad=(
                 experimental_target_lane_value_and_grad
+            ),
+            disable_target_lane_success_filter=bool(
+                getattr(args, "disable_target_lane_success_filter", False)
             ),
         )
         command.extend(

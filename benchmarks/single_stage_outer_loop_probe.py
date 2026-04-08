@@ -250,6 +250,7 @@ def evaluate_single_stage_outer_loop_probe(
 
 def main() -> None:
     args = parse_args()
+    args.disable_target_lane_success_filter = True
     bootstrap_local_simsopt()
     resolved_boozer_optimizer_backend = resolve_boozer_optimizer_backend(
         args.optimizer_backend,

@@ -792,6 +792,15 @@ def parse_args():
         ),
     )
     parser.add_argument(
+        "--disable-target-lane-success-filter",
+        action="store_true",
+        help=(
+            "Benchmark/proof-only: bypass the target-lane hard hardware success "
+            "filter during outer objective evaluation. Final hardware verdicts "
+            "are still applied to the recorded results."
+        ),
+    )
+    parser.add_argument(
         "--profile-target-lane",
         action="store_true",
         help=(
@@ -2432,6 +2441,7 @@ if __name__ == "__main__":
         str(ntheta),
         str(args.init_only),
         str(args.benchmark_mode),
+        str(args.disable_target_lane_success_filter),
         str(args.profile_target_lane),
         str(args.backend),
         str(optimizer_backend_record),
@@ -2654,7 +2664,7 @@ if __name__ == "__main__":
         target_scalar_objective = None
         target_value_and_grad_objective = None
         target_lane_success_filter = None
-        if use_target_lane:
+        if use_target_lane and not args.disable_target_lane_success_filter:
             target_lane_success_filter = (
                 build_single_stage_target_lane_hardware_success_filter(
                     boozer_surface,
@@ -2855,6 +2865,9 @@ if __name__ == "__main__":
         "experimental_target_lane_value_and_grad": requested_experimental_target_lane_vg,
         "target_lane_value_and_grad": use_target_lane_vg,
         "benchmark_mode": bool(args.benchmark_mode),
+        "disable_target_lane_success_filter": bool(
+            args.disable_target_lane_success_filter
+        ),
         "profile_target_lane": bool(args.profile_target_lane),
         "init_only": args.init_only,
         "max_iterations": MAXITER,

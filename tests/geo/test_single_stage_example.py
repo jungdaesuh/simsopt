@@ -624,6 +624,7 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertEqual(args.target_lane_accepted_step_sync, "final-only")
         self.assertFalse(args.profile_target_lane)
         self.assertFalse(args.experimental_target_lane_value_and_grad)
+        self.assertFalse(args.disable_target_lane_success_filter)
 
     def test_parse_args_accepts_boozer_least_squares_algorithm_override(self):
         module = self.load_module()
