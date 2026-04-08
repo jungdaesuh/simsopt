@@ -2132,6 +2132,207 @@ class HardwareConstraintTests(unittest.TestCase):
         np.testing.assert_allclose(surface_data[1]["boozer_surface"].surface.x, [1.0])
         self.assertEqual(run_state["surface_state"]["iota"], [0.12, 0.15])
 
+    def test_minimize_alm_restores_single_stage_incumbent_state_before_finalization(self):
+        module = self.load_module()
+        alm_globals = module.minimize_alm.__globals__
+        augmented_inequality_objective = alm_globals["augmented_inequality_objective"]
+        grad = np.array([1.0], dtype=float)
+        search_weights = np.array([1.0], dtype=float)
+
+        class _Objective:
+            def __init__(self, x):
+                self.x = np.array([x], dtype=float)
+
+            def J(self):
+                return float(self.x[0])
+
+            def dJ(self):
+                return np.array([1.0], dtype=float)
+
+        class _Surface:
+            nfp = 5
+
+            def __init__(self, x, volume, point):
+                self.x = np.array([x], dtype=float)
+                self._volume = volume
+                self._point = np.asarray(point, dtype=float)
+
+            def volume(self):
+                return self._volume
+
+            def gamma(self):
+                return self._point.reshape((1, 1, 3))
+
+            def is_self_intersecting(self):
+                return False
+
+            def cross_section(self, phi, thetas=None, tol=1e-13):
+                radius = self._point[0]
+                return np.array([
+                    [radius - 0.05, 0.0, -0.05],
+                    [radius + 0.05, 0.0, -0.05],
+                    [radius + 0.05, 0.0, 0.05],
+                    [radius - 0.05, 0.0, 0.05],
+                ])
+
+        class _BoozerSurface:
+            def __init__(self, surface, objective, success_iota):
+                self.surface = surface
+                self._objective = objective
+                self._success_iota = success_iota
+                self.res = {"success": True, "iota": success_iota, "G": 1.0}
+
+            def run_code(self, iota, G):
+                current = float(self._objective.x[0])
+                self.surface.x = np.array([current], dtype=float)
+                self.res["success"] = True
+                self.res["iota"] = self._success_iota
+                self.res["G"] = G
+                return self.res
+
+        objective = _Objective(1.0)
+        surface = _Surface(1.0, 0.08, [0.4, 0.0, 0.0])
+        surface_data = [
+            {"boozer_surface": _BoozerSurface(surface, objective, success_iota=0.12)}
+        ]
+        topology_status = {
+            "enabled": False,
+            "success": True,
+            "nfieldlines": 0,
+            "survived_lines": 0,
+            "survival_fraction": 1.0,
+            "survival_threshold": 0.25,
+            "tmax": 2.0,
+            "tol": 1e-7,
+            "stop_reason_counts": {},
+            "first_exit_time": None,
+            "first_exit_angle": None,
+            "first_exit_reason": None,
+        }
+
+        def make_stack_status():
+            return module.evaluate_surface_stack(surface_data)
+
+        def make_search_eval(base_value, total):
+            return {
+                "total": float(total),
+                "base_value": float(base_value),
+                "grad": grad.copy(),
+            }
+
+        run_dict = {
+            "accepted_x": np.array([1.0], dtype=float),
+            "surface_state": module.snapshot_surface_states(surface_data),
+            "J": 9.0,
+            "dJ": grad.copy(),
+            "search_eval": make_search_eval(9.0, 9.0),
+            "surface_status": make_stack_status(),
+            "search_surface_status": make_stack_status(),
+            "accepted_hardware_status": {"success": True, "violations": []},
+            "topology_gate_status": topology_status,
+            "last_successful_eval": {"total": 999.0},
+            "last_successful_eval_weights": search_weights.copy(),
+        }
+        settings = module.ALMSettings(
+            max_outer_iterations=2,
+            max_subproblem_continuations=0,
+            penalty_init=1.0,
+            penalty_scale=10.0,
+            feasibility_tol=1e-8,
+            stationarity_tol=1e-12,
+        )
+        minimize_targets = iter([2.0, 3.0])
+
+        def evaluation_profile(x):
+            point = float(np.asarray(x, dtype=float)[0])
+            if point >= 2.5:
+                return 5.0, 0.5
+            if point >= 1.5:
+                return 1.0, 1.0
+            return 9.0, 9.0
+
+        def update_single_stage_state(x):
+            base_value, total = evaluation_profile(x)
+            x_array = np.asarray(x, dtype=float).copy()
+            objective.x = x_array.copy()
+            surface_data[0]["boozer_surface"].surface.x = x_array.copy()
+            surface_data[0]["boozer_surface"].res["success"] = True
+            surface_data[0]["boozer_surface"].res["iota"] = 0.12
+            surface_data[0]["boozer_surface"].res["G"] = 1.0
+            run_dict["accepted_x"] = x_array.copy()
+            run_dict["surface_state"] = module.snapshot_surface_states(surface_data)
+            run_dict["J"] = float(total)
+            run_dict["dJ"] = grad.copy()
+            run_dict["search_eval"] = make_search_eval(base_value, total)
+            run_dict["surface_status"] = make_stack_status()
+            run_dict["search_surface_status"] = make_stack_status()
+            run_dict["accepted_hardware_status"] = {"success": True, "violations": []}
+            run_dict["topology_gate_status"] = dict(topology_status)
+            run_dict["last_successful_eval"] = {"total": float(total)}
+            run_dict["last_successful_eval_weights"] = search_weights.copy()
+
+        def evaluate_problem(x, multipliers, penalty):
+            base_value, total = evaluation_profile(x)
+            evaluation = augmented_inequality_objective(
+                base_value=base_value,
+                base_grad=grad.copy(),
+                constraint_values=np.array([-1.0], dtype=float),
+                constraint_grads=[np.zeros(1, dtype=float)],
+                multipliers=np.asarray(multipliers, dtype=float),
+                penalty=float(penalty),
+            )
+            evaluation["total"] = float(total)
+            evaluation["base_value"] = float(base_value)
+            evaluation["stationarity_norm"] = 1.0
+            return evaluation
+
+        def accepted_callback(x):
+            update_single_stage_state(x)
+
+        def snapshot_accepted_state():
+            return module.snapshot_single_stage_incumbent_state(run_dict)
+
+        def restore_incumbent_state(incumbent_state):
+            module.restore_single_stage_incumbent_state(run_dict, incumbent_state)
+            objective.x = run_dict["accepted_x"].copy()
+            module.restore_surface_states(surface_data, run_dict["surface_state"])
+
+        def fake_minimize(fun, x, jac, method, bounds, callback, options):
+            del x, jac, method, bounds, callback, options
+            target = np.array([next(minimize_targets)], dtype=float)
+            fun(target)
+            return SimpleNamespace(
+                x=target,
+                nit=1,
+                success=True,
+                message="synthetic",
+            )
+
+        with patch.dict(alm_globals, {"minimize": fake_minimize}):
+            result = module.minimize_alm(
+                np.array([0.0], dtype=float),
+                ["demo_constraint"],
+                evaluate_problem,
+                settings,
+                {"maxiter": 5, "ftol": 1e-12, "gtol": 1e-12},
+                accepted_callback=accepted_callback,
+                snapshot_accepted_state_fn=snapshot_accepted_state,
+                restore_incumbent_state_fn=restore_incumbent_state,
+            )
+
+        np.testing.assert_allclose(result.x, [2.0])
+        np.testing.assert_allclose(run_dict["accepted_x"], [2.0])
+        np.testing.assert_allclose(objective.x, [2.0])
+        np.testing.assert_allclose(surface_data[0]["boozer_surface"].surface.x, [2.0])
+        self.assertNotIn("last_successful_eval", run_dict)
+        self.assertNotIn("last_successful_eval_weights", run_dict)
+
+        status = module.finalize_surface_stack(result.x, objective, surface_data, run_dict)
+
+        self.assertTrue(status["success"])
+        np.testing.assert_allclose(run_dict["accepted_x"], [2.0])
+        np.testing.assert_allclose(surface_data[0]["boozer_surface"].surface.x, [2.0])
+
     def test_collect_surface_run_metadata_serializes_multisurface_fields(self):
         module = self.load_module()
         surface_data = [

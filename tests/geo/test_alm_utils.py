@@ -141,6 +141,30 @@ class MinimizeAlmTests(unittest.TestCase):
 
         self.assertEqual(profile.name, "unbounded")
 
+    def test_minimize_alm_rejects_asymmetric_incumbent_hooks(self):
+        module = load_alm_utils_module()
+        settings = module.ALMSettings(max_outer_iterations=1)
+
+        def evaluate_problem(x, multipliers, penalty):
+            del multipliers, penalty
+            x = np.asarray(x, dtype=float)
+            return {
+                "total": float(np.dot(x, x)),
+                "grad": 2.0 * x,
+                "constraint_values": np.zeros(1),
+                "stationarity_norm": float(np.linalg.norm(2.0 * x)),
+            }
+
+        with self.assertRaisesRegex(ValueError, "must be provided together"):
+            module.minimize_alm(
+                np.array([0.0]),
+                ["dummy"],
+                evaluate_problem,
+                settings,
+                {"maxiter": 1},
+                snapshot_accepted_state_fn=lambda: {"x": 0.0},
+            )
+
     def test_build_inner_options_caps_boxed_inner_work_in_feasible_continuations(self):
         module = load_alm_utils_module()
         profile = module._select_inner_solve_profile(
@@ -942,6 +966,90 @@ class MinimizeAlmTests(unittest.TestCase):
         self.assertEqual(result.history[1]["action"], "dual_update")
         self.assertEqual(result.history[2]["action"], "subproblem_limit")
         self.assertEqual(result.history[2]["outer_termination"], "max_outer")
+
+    def test_minimize_alm_restores_best_feasible_solver_owned_incumbent_state(self):
+        module = load_alm_utils_module()
+        settings = module.ALMSettings(
+            max_outer_iterations=3,
+            max_subproblem_continuations=0,
+            trust_radius_init=0.1,
+            trust_radius_min=0.01,
+            trust_radius_shrink=0.5,
+            trust_radius_grow=1.5,
+            max_inner_attempts=1,
+            penalty_init=1.0,
+            penalty_scale=10.0,
+            feasibility_tol=1e-8,
+            stationarity_tol=1e-3,
+        )
+        minimize_calls = {"count": 0}
+        restored = {"state": None}
+        snapshot_calls = {"count": 0}
+
+        def evaluate_problem(x, multipliers, penalty):
+            point = float(np.asarray(x, dtype=float)[0])
+            if point < 0.5:
+                return {
+                    "total": 20.0,
+                    "base_value": 20.0,
+                    "grad": np.array([0.5]),
+                    "constraint_values": np.array([0.5]),
+                    "stationarity_norm": 0.5,
+                }
+            if point < 1.5:
+                return {
+                    "total": 10.0,
+                    "base_value": 10.0,
+                    "grad": np.zeros(1),
+                    "constraint_values": np.array([0.5]),
+                    "stationarity_norm": 0.0,
+                }
+            if point < 2.5:
+                return {
+                    "total": 1.0,
+                    "base_value": 1.0,
+                    "grad": np.array([0.05]),
+                    "constraint_values": np.array([0.0]),
+                    "stationarity_norm": 0.05,
+                }
+            return {
+                "total": 0.5,
+                "base_value": 5.0,
+                "grad": np.array([0.2]),
+                "constraint_values": np.array([0.0]),
+                "stationarity_norm": 0.2,
+            }
+
+        def fake_minimize(fun, x, jac, method, bounds, callback, options):
+            minimize_calls["count"] += 1
+            return SimpleNamespace(
+                x=np.array([float(minimize_calls["count"])]),
+                nit=1,
+                success=True,
+                message="CONVERGENCE",
+            )
+
+        def snapshot_state():
+            snapshot_calls["count"] += 1
+            return {"accepted_point": float(minimize_calls["count"])}
+
+        def restore_state(state):
+            restored["state"] = state
+
+        with patch.object(module, "minimize", side_effect=fake_minimize):
+            result = module.minimize_alm(
+                np.array([0.0]),
+                ["demo_constraint"],
+                evaluate_problem,
+                settings,
+                {"maxiter": 5, "ftol": 1e-12, "gtol": 1e-12},
+                snapshot_accepted_state_fn=snapshot_state,
+                restore_incumbent_state_fn=restore_state,
+            )
+
+        np.testing.assert_allclose(result.x, np.array([2.0]))
+        self.assertEqual(restored["state"], {"accepted_point": 2.0})
+        self.assertEqual(snapshot_calls["count"], 1)
 
     def test_minimize_alm_interrupts_inner_solver_when_kkt_gate_is_hit_in_callback(self):
         module = load_alm_utils_module()

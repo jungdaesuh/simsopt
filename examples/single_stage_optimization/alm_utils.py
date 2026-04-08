@@ -37,6 +37,7 @@ class ALMFeasibleIncumbent:
     multipliers: np.ndarray
     penalty: float
     inner_result: object
+    incumbent_state: object | None = None
 
 
 _UNBOUNDED_INNER_PROFILE = ALMInnerSolveProfile(
@@ -632,7 +633,13 @@ def minimize_alm(
     inner_callback: Callable[[np.ndarray], None] | None = None,
     accepted_callback: Callable[[np.ndarray], None] | None = None,
     outer_state_callback: Callable[[int, np.ndarray, float], None] | None = None,
+    snapshot_accepted_state_fn: Callable[[], object] | None = None,
+    restore_incumbent_state_fn: Callable[[object], None] | None = None,
 ):
+    if (snapshot_accepted_state_fn is None) != (restore_incumbent_state_fn is None):
+        raise ValueError(
+            "snapshot_accepted_state_fn and restore_incumbent_state_fn must be provided together"
+        )
     x = np.asarray(x0, dtype=float).copy()
     multipliers = np.zeros(len(constraint_names), dtype=float)
     penalty = float(settings.penalty_init)
@@ -913,19 +920,25 @@ def minimize_alm(
             )
 
             if max_feasibility_violation <= settings.feasibility_tol:
-                feasible_incumbent = ALMFeasibleIncumbent(
-                    x=x.copy(),
-                    evaluation=final_eval,
-                    multipliers=multipliers.copy(),
-                    penalty=penalty,
-                    inner_result=result,
-                )
-                if (
+                improves_best_feasible = (
                     best_feasible is None
-                    or _incumbent_objective_value(feasible_incumbent.evaluation)
+                    or _incumbent_objective_value(final_eval)
                     < _incumbent_objective_value(best_feasible.evaluation)
-                ):
-                    best_feasible = feasible_incumbent
+                )
+                if improves_best_feasible:
+                    incumbent_state = (
+                        None
+                        if snapshot_accepted_state_fn is None
+                        else snapshot_accepted_state_fn()
+                    )
+                    best_feasible = ALMFeasibleIncumbent(
+                        x=x.copy(),
+                        evaluation=final_eval,
+                        multipliers=multipliers.copy(),
+                        penalty=penalty,
+                        inner_result=result,
+                        incumbent_state=incumbent_state,
+                    )
 
             history_entry = {
                 "outer_iteration": int(outer_iteration),
@@ -1063,6 +1076,11 @@ def minimize_alm(
         final_multipliers = best_feasible.multipliers.copy()
         final_penalty = best_feasible.penalty
         last_result = best_feasible.inner_result
+        if (
+            restore_incumbent_state_fn is not None
+            and best_feasible.incumbent_state is not None
+        ):
+            restore_incumbent_state_fn(best_feasible.incumbent_state)
 
     (
         solver_constraint_values,

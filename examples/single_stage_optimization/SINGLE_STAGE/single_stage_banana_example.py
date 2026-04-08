@@ -74,6 +74,10 @@ from banana_opt.current_contracts import (
     physical_current_to_boozer_I,
     resolve_plasma_current_settings as _resolve_plasma_current_settings_impl,
 )
+from banana_opt.incumbents import (
+    restore_single_stage_incumbent_state,
+    snapshot_single_stage_incumbent_state,
+)
 from banana_opt.reference_surfaces import build_banana_reference_surfaces
 from banana_opt.single_stage_geometry import (
     build_scaled_outer_problem,
@@ -2410,6 +2414,14 @@ if __name__ == "__main__":
                 f"penalty={float(penalty):.3e}"
             )
 
+        def snapshot_accepted_state():
+            return snapshot_single_stage_incumbent_state(run_dict)
+
+        def restore_incumbent_state(incumbent_state):
+            restore_single_stage_incumbent_state(run_dict, incumbent_state)
+            JF.x = run_dict["accepted_x"].copy()
+            restore_surface_states(surface_data, run_dict["surface_state"])
+
         set_alm_runtime_state(
             np.zeros(4 if JSurfSurf is not None else 3, dtype=float),
             args.alm_penalty_init,
@@ -2428,6 +2440,8 @@ if __name__ == "__main__":
             },
             accepted_callback=callback,
             outer_state_callback=outer_state_callback,
+            snapshot_accepted_state_fn=snapshot_accepted_state,
+            restore_incumbent_state_fn=restore_incumbent_state,
         )
         alm_result = res
         res_nit = res.nit

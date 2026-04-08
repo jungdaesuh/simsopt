@@ -16,6 +16,7 @@ SINGLE_STAGE_GEOMETRY_PATH = EXAMPLES_ROOT / "banana_opt" / "single_stage_geomet
 SINGLE_STAGE_CONSTRAINTS_PATH = EXAMPLES_ROOT / "banana_opt" / "single_stage_constraints.py"
 SINGLE_STAGE_OBJECTIVES_PATH = EXAMPLES_ROOT / "banana_opt" / "single_stage_objectives.py"
 SINGLE_STAGE_SEARCH_POLICY_PATH = EXAMPLES_ROOT / "banana_opt" / "single_stage_search_policy.py"
+SINGLE_STAGE_INCUMBENTS_PATH = EXAMPLES_ROOT / "banana_opt" / "incumbents.py"
 
 
 def _load_module(module_path: Path, prefix: str):
@@ -700,6 +701,50 @@ class SingleStageGeometryModuleTests(_ModuleTestCase):
         self.assertAlmostEqual(result["max_curvature"], 41.0)
         self.assertFalse(result["status"]["success"])
         self.assertEqual(len(result["status"]["violations"]), 3)
+
+
+class SingleStageIncumbentsModuleTests(_ModuleTestCase):
+    MODULE_PATH = SINGLE_STAGE_INCUMBENTS_PATH
+    MODULE_PREFIX = "banana_single_stage_incumbents"
+
+    def test_snapshot_and_restore_single_stage_incumbent_state_round_trip(self):
+        run_dict = {
+            "accepted_x": np.array([1.0, -2.0]),
+            "surface_state": {
+                "sdofs": [np.array([1.0, 2.0])],
+                "iota": [0.3],
+                "G": [4.0],
+            },
+            "J": 3.5,
+            "dJ": np.array([0.25, -0.5]),
+            "search_eval": {"total": 3.5, "grad": np.array([0.25, -0.5])},
+            "surface_status": {"success": True, "values": [1.0]},
+            "search_surface_status": {"success": False, "bad_phis": [2]},
+            "accepted_hardware_status": {"success": True, "violations": []},
+            "topology_gate_status": {"success": False, "reason": "ridge"},
+            "last_successful_eval": {"total": 9.0},
+            "last_successful_eval_weights": np.array([1.0]),
+        }
+
+        incumbent = self.module.snapshot_single_stage_incumbent_state(run_dict)
+        run_dict["accepted_x"][:] = 99.0
+        run_dict["surface_state"]["sdofs"][0][:] = -1.0
+        run_dict["dJ"][:] = 7.0
+        run_dict["search_eval"]["grad"][:] = 8.0
+        run_dict["surface_status"]["success"] = False
+        run_dict["accepted_hardware_status"]["success"] = False
+
+        self.module.restore_single_stage_incumbent_state(run_dict, incumbent)
+
+        np.testing.assert_allclose(run_dict["accepted_x"], [1.0, -2.0])
+        np.testing.assert_allclose(run_dict["surface_state"]["sdofs"][0], [1.0, 2.0])
+        np.testing.assert_allclose(run_dict["dJ"], [0.25, -0.5])
+        np.testing.assert_allclose(run_dict["search_eval"]["grad"], [0.25, -0.5])
+        self.assertTrue(run_dict["surface_status"]["success"])
+        self.assertTrue(run_dict["accepted_hardware_status"]["success"])
+        self.assertFalse(run_dict["topology_gate_status"]["success"])
+        self.assertNotIn("last_successful_eval", run_dict)
+        self.assertNotIn("last_successful_eval_weights", run_dict)
 
 
 class SingleStageConstraintModuleTests(_ModuleTestCase):
