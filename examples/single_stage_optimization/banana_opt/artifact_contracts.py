@@ -16,7 +16,7 @@ def upgrade_legacy_stage2_artifact_results(
         tf_current_A = upgraded_results.get("TF_CURRENT_A")
         num_tf_coils = upgraded_results.get("NUM_TF_COILS")
         if tf_current_A is not None and num_tf_coils is not None:
-            upgraded_results["TF_CURRENT_SUM_ABS_A"] = float(tf_current_A) * float(
+            upgraded_results["TF_CURRENT_SUM_ABS_A"] = abs(float(tf_current_A)) * float(
                 num_tf_coils
             )
     return upgraded_results
