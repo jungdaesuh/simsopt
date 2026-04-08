@@ -2440,6 +2440,108 @@ class TestStage2BananaBoundary:
             atol=1e-18,
         )
 
+    def test_stage2_script_import_invalidates_preinit_sharding_cache_under_distributed_env(
+        self,
+        monkeypatch,
+        request,
+    ):
+        import jax
+
+        from simsopt.backend import (
+            get_distributed_runtime_config,
+            get_sharding_tuning,
+            invalidate_backend_cache,
+        )
+
+        invalidate_backend_cache()
+        request.addfinalizer(invalidate_backend_cache)
+        monkeypatch.setenv("SIMSOPT_BACKEND_MODE", "jax_gpu_fast")
+        monkeypatch.setenv("SIMSOPT_JAX_DISTRIBUTED_INIT", "1")
+        monkeypatch.setenv("SIMSOPT_JAX_COORDINATOR_ADDRESS", "127.0.0.1:12345")
+        monkeypatch.setenv("SIMSOPT_JAX_NUM_PROCESSES", "4")
+        monkeypatch.setenv("SIMSOPT_JAX_PROCESS_ID", "1")
+
+        distributed_initialized = {"value": False}
+        initialize_calls: list[dict[str, object]] = []
+        expected_initialize_call = {
+            "coordinator_address": "127.0.0.1:12345",
+            "num_processes": 4,
+            "process_id": 1,
+            "local_device_ids": None,
+        }
+
+        def _is_initialized():
+            return distributed_initialized["value"]
+
+        def _initialize(
+            *,
+            coordinator_address,
+            num_processes,
+            process_id,
+            local_device_ids,
+        ):
+            initialize_calls.append(
+                {
+                    "coordinator_address": coordinator_address,
+                    "num_processes": num_processes,
+                    "process_id": process_id,
+                    "local_device_ids": local_device_ids,
+                }
+            )
+            distributed_initialized["value"] = True
+
+        def _local_devices(backend=None):
+            if backend != "gpu":
+                return []
+            return [types.SimpleNamespace(local_hardware_id=3)]
+
+        def _devices(backend=None):
+            if backend != "gpu":
+                return []
+            if distributed_initialized["value"]:
+                return [types.SimpleNamespace(id=i) for i in range(4)]
+            return [types.SimpleNamespace(id=3)]
+
+        monkeypatch.setattr(
+            jax,
+            "distributed",
+            types.SimpleNamespace(
+                is_initialized=_is_initialized,
+                initialize=_initialize,
+            ),
+            raising=False,
+        )
+        monkeypatch.setattr(
+            jax,
+            "local_devices",
+            _local_devices,
+            raising=False,
+        )
+        monkeypatch.setattr(
+            jax,
+            "devices",
+            _devices,
+            raising=False,
+        )
+
+        pre_config = get_distributed_runtime_config()
+        pre_sharding = get_sharding_tuning()
+
+        assert pre_config.initialized is False
+        assert pre_sharding.distributed_initialized is False
+        assert pre_sharding.device_count == 1
+
+        _load_stage2_script_module()
+
+        post_config = get_distributed_runtime_config()
+        post_sharding = get_sharding_tuning()
+
+        assert initialize_calls == [expected_initialize_call]
+        assert post_config.initialized is True
+        assert post_sharding.distributed_initialized is True
+        assert post_sharding.local_device_count == 1
+        assert post_sharding.device_count == 4
+
 
 class TestStage2OptimizerContract:
     def test_parse_args_defaults_to_repo_fixture_equilibria_dir(self, monkeypatch):

@@ -993,6 +993,16 @@ def _invalidate_distributed_tuning_caches() -> None:
     _cached_sharding_tuning = None
 
 
+def _cache_distributed_initialized_config(
+    config: DistributedRuntimeConfig,
+) -> DistributedRuntimeConfig:
+    global _cached_distributed_runtime_config
+    initialized_config = _with_distributed_initialized(config, initialized=True)
+    _cached_distributed_runtime_config = initialized_config
+    _invalidate_distributed_tuning_caches()
+    return initialized_config
+
+
 def get_chunk_tuning(mode: str | None = None) -> ChunkTuning:
     """Return the resolved chunk sizes and autotuning metadata."""
     global _cached_chunk_tuning
@@ -1128,11 +1138,9 @@ def _run_backend_cache_clear_callbacks() -> None:
 
 
 def _reset_backend_runtime_caches() -> None:
-    global _cached_backend_policy, _cached_chunk_tuning, _cached_field_kernel_tuning, _cached_sharding_tuning, _cached_distributed_runtime_config
+    global _cached_backend_policy, _cached_distributed_runtime_config
     _cached_backend_policy = None
-    _cached_chunk_tuning = None
-    _cached_field_kernel_tuning = None
-    _cached_sharding_tuning = None
+    _invalidate_distributed_tuning_caches()
     _cached_distributed_runtime_config = None
     _run_backend_cache_clear_callbacks()
     _warned_jax_fallbacks.clear()
@@ -1221,7 +1229,6 @@ def get_distributed_runtime_config() -> DistributedRuntimeConfig:
 
 def maybe_initialize_distributed_jax() -> DistributedRuntimeConfig:
     """Initialize multi-host JAX when explicitly configured through env vars."""
-    global _cached_distributed_runtime_config
     config = get_distributed_runtime_config()
     if not config.enabled:
         return config
@@ -1233,13 +1240,7 @@ def maybe_initialize_distributed_jax() -> DistributedRuntimeConfig:
         raise RuntimeError("Installed JAX runtime does not expose jax.distributed.")
     is_initialized = getattr(distributed_module, "is_initialized", None)
     if callable(is_initialized) and bool(is_initialized()):
-        initialized_config = _with_distributed_initialized(
-            config,
-            initialized=True,
-        )
-        _cached_distributed_runtime_config = initialized_config
-        _invalidate_distributed_tuning_caches()
-        return initialized_config
+        return _cache_distributed_initialized_config(config)
 
     initialize = getattr(distributed_module, "initialize", None)
     if initialize is None:
@@ -1254,13 +1255,7 @@ def maybe_initialize_distributed_jax() -> DistributedRuntimeConfig:
             else list(config.local_device_ids)
         ),
     )
-    initialized_config = _with_distributed_initialized(
-        config,
-        initialized=True,
-    )
-    _cached_distributed_runtime_config = initialized_config
-    _invalidate_distributed_tuning_caches()
-    return initialized_config
+    return _cache_distributed_initialized_config(config)
 
 
 def invalidate_backend_cache() -> None:
