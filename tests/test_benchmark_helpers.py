@@ -10,6 +10,7 @@ import types
 import numpy as np
 import pytest
 from simsopt.geo.surface import Surface
+import simsopt.geo.surfaceobjectives_jax as surfaceobjectives_jax_module
 from simsopt.geo.surfaceobjectives_jax import _canonicalize_traceable_exact_quadrature
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -1861,7 +1862,8 @@ def test_compute_direct_and_total_gradients_uses_live_boozer_g(monkeypatch):
     bs_jax = types.SimpleNamespace(x=np.array([9.0, 8.0]))
 
     monkeypatch.setattr(
-        "simsopt.geo.surfaceobjectives_jax._value_and_direct_coil_derivative",
+        surfaceobjectives_jax_module,
+        "_value_and_direct_coil_derivative",
         fake_value_and_direct_coil_derivative,
     )
     direct, total, recomposed_rel = compute_direct_and_total_gradients(

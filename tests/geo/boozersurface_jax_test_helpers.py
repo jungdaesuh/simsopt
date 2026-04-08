@@ -1,10 +1,10 @@
 """Shared helpers for BoozerSurfaceJAX test modules."""
 
-import importlib.util
+import inspect
 import sys
-import types
 from dataclasses import dataclass
 from pathlib import Path
+import types
 
 import jax
 import jax.numpy as jnp
@@ -13,54 +13,24 @@ from jax.flatten_util import ravel_pytree
 
 jax.config.update("jax_enable_x64", True)
 
-_SRC = Path(__file__).resolve().parents[2] / "src" / "simsopt"
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_SRC_ROOT = _REPO_ROOT / "src"
+_REPO_ROOT_STR = str(_REPO_ROOT)
+if _REPO_ROOT_STR not in sys.path:
+    sys.path.insert(0, _REPO_ROOT_STR)
 
+from repo_bootstrap import bootstrap_local_simsopt
 
-def _ensure_package(pkg, path):
-    if pkg in sys.modules:
-        return
-    try:
-        __import__(pkg)
-    except ImportError:
-        module = types.ModuleType(pkg)
-        module.__path__ = [str(path)]
-        sys.modules[pkg] = module
+bootstrap_local_simsopt(_SRC_ROOT)
 
-
-def _load_and_register(module_fqn, relpath):
-    spec = importlib.util.spec_from_file_location(module_fqn, str(_SRC / relpath))
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[module_fqn] = module
-    spec.loader.exec_module(module)
-    return module
-
-
-_ensure_package("simsopt", _SRC)
-_ensure_package("simsopt.geo", _SRC / "geo")
-_ensure_package("simsopt.field", _SRC / "field")
-_ensure_package("simsopt.objectives", _SRC / "objectives")
-
-_sf = _load_and_register(
-    "simsopt.geo.surface_fourier_jax", "geo/surface_fourier_jax.py"
-)
-_bs_jax = _load_and_register("simsopt.field.biotsavart_jax", "field/biotsavart_jax.py")
-_bs_backend = _load_and_register(
-    "simsopt.field.biotsavart_jax_backend", "field/biotsavart_jax_backend.py"
-)
-_obj_utils = _load_and_register(
-    "simsopt.objectives.utilities", "objectives/utilities.py"
-)
-_br = _load_and_register(
-    "simsopt.geo.boozer_residual_jax", "geo/boozer_residual_jax.py"
-)
-_lc = _load_and_register(
-    "simsopt.geo.label_constraints_jax", "geo/label_constraints_jax.py"
-)
-_opt = _load_and_register("simsopt.geo.optimizer_jax", "geo/optimizer_jax.py")
-_bsj = _load_and_register("simsopt.geo.boozersurface_jax", "geo/boozersurface_jax.py")
-_soj = _load_and_register(
-    "simsopt.geo.surfaceobjectives_jax", "geo/surfaceobjectives_jax.py"
-)
+import simsopt.field.biotsavart_jax as _bs_jax
+import simsopt.field.biotsavart_jax_backend as _bs_backend
+import simsopt.geo.boozer_residual_jax as _br
+import simsopt.geo.boozersurface_jax as _bsj
+import simsopt.geo.label_constraints_jax as _lc
+import simsopt.geo.optimizer_jax as _opt
+import simsopt.geo.surface_fourier_jax as _sf
+import simsopt.geo.surfaceobjectives_jax as _soj
 
 surface_gamma = _sf.surface_gamma
 surface_gammadash1 = _sf.surface_gammadash1
@@ -112,6 +82,8 @@ _UPSTREAM_BOOZER_TF_TARGET = 0.1
 _UPSTREAM_BOOZER_IOTA0 = -0.3
 _UPSTREAM_EXACT_IOTA0 = -0.44856192
 _UPSTREAM_EXACT_TF_TARGET = 0.41431152
+
+
 @dataclass(frozen=True)
 class UpstreamBoozerPenaltyCase:
     surfacetype: str
@@ -499,6 +471,9 @@ def _successful_newton_polish_result(x0, *, nit=0):
 
 def _patch_newton_polish_runner(monkeypatch, fake_newton_polish):
     """Patch the centralized Newton-polish dispatch seam used by run_code()."""
+    supports_objective_args = (
+        "objective_args" in inspect.signature(fake_newton_polish).parameters
+    )
 
     def fake_runner(
         self,
@@ -510,16 +485,18 @@ def _patch_newton_polish_runner(monkeypatch, fake_newton_polish):
         tol,
         stab,
         progress_callback=None,
+        objective_args=(),
     ):
         del self, method
-        return fake_newton_polish(
-            obj_fn,
-            x0,
-            maxiter=maxiter,
-            tol=tol,
-            stab=stab,
-            progress_callback=progress_callback,
-        )
+        kwargs = {
+            "maxiter": maxiter,
+            "tol": tol,
+            "stab": stab,
+            "progress_callback": progress_callback,
+        }
+        if supports_objective_args:
+            kwargs["objective_args"] = objective_args
+        return fake_newton_polish(obj_fn, x0, **kwargs)
 
     monkeypatch.setattr(
         _bsj.BoozerSurfaceJAX,

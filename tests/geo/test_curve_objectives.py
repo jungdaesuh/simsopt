@@ -68,6 +68,10 @@ def _legacy_curveobjective_jit_attrs(objective):
     ]
 
 
+def _jit_cache_sizes(*functions):
+    return tuple(fn._cache_size() for fn in functions)
+
+
 @pytest.fixture
 def _clear_curveobjective_shared_jit_caches():
     cache_fns = (
@@ -87,26 +91,33 @@ def _clear_curveobjective_shared_jit_caches():
 def test_lp_curve_torsion_reuses_shared_jit_kernels(
     _clear_curveobjective_shared_jit_caches,
 ):
+    cache_fns = (
+        curveobjectives_module.Lp_torsion_pure,
+        curveobjectives_module._lp_curve_torsion_grad,
+    )
     objective1 = LpCurveTorsion(_make_cache_test_curve(0.0), p=2, threshold=0.0)
     float(objective1.J())
     np.asarray(objective1.dJ(), dtype=float)
 
-    assert curveobjectives_module.Lp_torsion_pure._cache_size() == 1
-    assert curveobjectives_module._lp_curve_torsion_grad._cache_size() == 1
+    first_cache_sizes = _jit_cache_sizes(*cache_fns)
     assert _legacy_curveobjective_jit_attrs(objective1) == []
 
     objective2 = LpCurveTorsion(_make_cache_test_curve(0.02), p=2, threshold=0.0)
     float(objective2.J())
     np.asarray(objective2.dJ(), dtype=float)
 
-    assert curveobjectives_module.Lp_torsion_pure._cache_size() == 1
-    assert curveobjectives_module._lp_curve_torsion_grad._cache_size() == 1
+    assert _jit_cache_sizes(*cache_fns) == first_cache_sizes
     assert _legacy_curveobjective_jit_attrs(objective2) == []
 
 
 def test_framed_curve_twist_reuses_shared_jit_kernels(
     _clear_curveobjective_shared_jit_caches,
 ):
+    cache_fns = (
+        curveobjectives_module.frametwist_lp_pure,
+        curveobjectives_module._frametwist_lp_grad,
+        curveobjectives_module._frametwist_vjp,
+    )
     curve1 = _make_cache_test_curve(0.03)
     rotation1 = FrameRotation(curve1.quadpoints, order=1)
     rotation1.x = np.array([0.1, -0.2, 0.05])
@@ -114,9 +125,7 @@ def test_framed_curve_twist_reuses_shared_jit_kernels(
     float(objective1.J())
     np.asarray(objective1.dJ(), dtype=float)
 
-    assert curveobjectives_module.frametwist_lp_pure._cache_size() == 1
-    assert curveobjectives_module._frametwist_lp_grad._cache_size() == 1
-    assert curveobjectives_module._frametwist_vjp._cache_size() == 1
+    first_cache_sizes = _jit_cache_sizes(*cache_fns)
     assert _legacy_curveobjective_jit_attrs(objective1) == []
 
     curve2 = _make_cache_test_curve(0.04)
@@ -126,9 +135,7 @@ def test_framed_curve_twist_reuses_shared_jit_kernels(
     float(objective2.J())
     np.asarray(objective2.dJ(), dtype=float)
 
-    assert curveobjectives_module.frametwist_lp_pure._cache_size() == 1
-    assert curveobjectives_module._frametwist_lp_grad._cache_size() == 1
-    assert curveobjectives_module._frametwist_vjp._cache_size() == 1
+    assert _jit_cache_sizes(*cache_fns) == first_cache_sizes
     assert _legacy_curveobjective_jit_attrs(objective2) == []
 
 
