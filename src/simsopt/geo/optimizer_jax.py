@@ -35,6 +35,7 @@ well; both paths use public JAX APIs.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import lru_cache
 import re
 from typing import Callable
 
@@ -131,6 +132,7 @@ class _OptimizerPytreeAdapter:
 
     def wrap_fun(self, fun, *, value_and_grad: bool):
         if not value_and_grad:
+
             def wrapped(flat_x):
                 return fun(self.unravel(jnp.asarray(flat_x)))
 
@@ -169,15 +171,18 @@ class _OptimizerPytreeAdapter:
         if hasattr(result, "x"):
             result.x = _hostify_optimizer_tree(self.unravel(jnp.asarray(result.x)))
         if hasattr(result, "jac"):
-            result.jac = _hostify_optimizer_tree(
-                self.unravel(jnp.asarray(result.jac))
-            )
+            result.jac = _hostify_optimizer_tree(self.unravel(jnp.asarray(result.jac)))
         return result
 
 
-def _raise_if_strict_optimizer_fallback(*, method: str, detail: str) -> None:
+def _raise_if_strict_optimizer_fallback(
+    *,
+    component: str,
+    method: str,
+    detail: str,
+) -> None:
     raise_if_strict_jax_fallback(
-        component="optimizer_jax.jax_minimize",
+        component=component,
         detail=f"{detail} for method={method!r}",
     )
 
@@ -322,9 +327,7 @@ def resolve_least_squares_optimizer_method(
     """Map the LS backend contract to the concrete least-squares method."""
     if least_squares_algorithm not in VALID_LEAST_SQUARES_ALGORITHMS:
         allowed = ", ".join(sorted(VALID_LEAST_SQUARES_ALGORITHMS))
-        raise ValueError(
-            f"least_squares_algorithm must be one of: {allowed}."
-        )
+        raise ValueError(f"least_squares_algorithm must be one of: {allowed}.")
     if least_squares_algorithm == "quasi-newton":
         return resolve_optimizer_backend_method(
             optimizer_backend,
@@ -628,6 +631,14 @@ def _flattened_residual_output(residual_fn):
     return wrapped
 
 
+def _normalize_solver_args(args):
+    if args is None:
+        return ()
+    if isinstance(args, tuple):
+        return args
+    return (args,)
+
+
 def _wrap_value_and_grad_fun(fun, x0, *, host_inputs):
     expected_tree = jax.tree_util.tree_structure(x0)
 
@@ -663,7 +674,9 @@ def _adam_hyperparameters(options, *, dtype):
     defaults = _adam_defaults(dtype)
     options = options or {}
     return {
-        "step_size": _device_scalar(options.get("step_size", defaults["step_size"]), dtype=dtype),
+        "step_size": _device_scalar(
+            options.get("step_size", defaults["step_size"]), dtype=dtype
+        ),
         "beta1": _device_scalar(options.get("beta1", defaults["beta1"]), dtype=dtype),
         "beta2": _device_scalar(options.get("beta2", defaults["beta2"]), dtype=dtype),
         "eps": _device_scalar(options.get("eps", defaults["eps"]), dtype=dtype),
@@ -767,7 +780,9 @@ def adam_optimize(
         x,
         detail="Adam initial state must contain at least one leaf.",
     ).dtype
-    eval_fn = _prepare_adam_eval_fn(fun, x, value_and_grad=value_and_grad, host_inputs=True)
+    eval_fn = _prepare_adam_eval_fn(
+        fun, x, value_and_grad=value_and_grad, host_inputs=True
+    )
     hyperparameters = _adam_hyperparameters(options, dtype=x_dtype)
     fun_value, grad = eval_fn(x)
     grad_norm_inf = _tree_inf_norm(grad)
@@ -837,7 +852,9 @@ def adam_optimize_traceable(
         x,
         detail="Adam initial state must contain at least one leaf.",
     ).dtype
-    eval_fn = _prepare_adam_eval_fn(fun, x, value_and_grad=value_and_grad, host_inputs=False)
+    eval_fn = _prepare_adam_eval_fn(
+        fun, x, value_and_grad=value_and_grad, host_inputs=False
+    )
     hyperparameters = _adam_hyperparameters(options, dtype=x_dtype)
     tol_value = _device_scalar(tol, dtype=x_dtype)
 
@@ -857,9 +874,7 @@ def adam_optimize_traceable(
 
         def cond_fun(state):
             return (
-                (state["nit"] < maxiter)
-                & (~state["success"])
-                & (state["status"] != 2)
+                (state["nit"] < maxiter) & (~state["success"]) & (state["status"] != 2)
             )
 
         def body_fun(state):
@@ -894,6 +909,98 @@ def _least_squares_gradient_state(flat_residual_fn, x):
     cost = _least_squares_cost(residual)
     grad_norm_inf = _tree_inf_norm(grad)
     return residual, cost, grad, grad_norm_inf, pullback
+
+
+@lru_cache(maxsize=128)
+def _make_traceable_levenberg_marquardt_runner(
+    residual_fn,
+    maxiter,
+    tol,
+    callback,
+    progress_callback,
+):
+    def run_solver(x_init, fn_args):
+        def residual_eval(x):
+            return jnp.ravel(jnp.asarray(residual_fn(x, *fn_args)))
+
+        x_dtype = _require_tree_first_leaf(
+            x_init,
+            detail="Least-squares initial state must contain at least one leaf.",
+        ).dtype
+        tol_value = _device_scalar(tol, dtype=x_dtype)
+        residual0, cost0, grad0, grad_norm_inf0, _ = _least_squares_gradient_state(
+            residual_eval,
+            x_init,
+        )
+        state0 = {
+            "x": x_init,
+            "residual": residual0,
+            "cost": cost0,
+            "grad": grad0,
+            "grad_norm_inf": grad_norm_inf0,
+            "damping": _lm_defaults(x_dtype)["initial_damping"],
+            "nit": jnp.asarray(0, dtype=jnp.int32),
+            "status": jnp.asarray(0, dtype=jnp.int32),
+            "accepted": jnp.asarray(False),
+            "success": grad_norm_inf0 <= tol_value,
+        }
+
+        def cond_fun(state):
+            return (
+                (state["nit"] < maxiter) & (~state["success"]) & (state["status"] != 2)
+            )
+
+        def body_fun(state):
+            next_state = _lm_iteration(
+                residual_eval,
+                state,
+                tol=tol_value,
+            )
+            if callback is not None:
+                lax.cond(
+                    next_state["accepted"],
+                    lambda _: jax.debug.callback(
+                        lambda x: callback(_hostify_optimizer_tree(x)),
+                        next_state["x"],
+                    ),
+                    lambda _: None,
+                    operand=None,
+                )
+            if progress_callback is not None:
+                lax.cond(
+                    next_state["accepted"],
+                    lambda _: jax.debug.callback(
+                        progress_callback,
+                        next_state["nit"],
+                        next_state["cost"],
+                        next_state["grad_norm_inf"],
+                    ),
+                    lambda _: None,
+                    operand=None,
+                )
+            return next_state
+
+        state = lax.while_loop(cond_fun, body_fun, state0)
+        residual_final, residual_jacobian, _flat_grad, hessian = (
+            _materialize_dense_least_squares_linearization(
+                residual_eval,
+                state["x"],
+            )
+        )
+        return {
+            "x": state["x"],
+            "residual": residual_final,
+            "residual_jacobian": residual_jacobian,
+            "fun": state["cost"],
+            "grad": state["grad"],
+            "hessian": hessian,
+            "damping": state["damping"],
+            "nit": state["nit"],
+            "status": state["status"],
+            "success": state["success"],
+        }
+
+    return jax.jit(run_solver)
 
 
 def _least_squares_matvec(flat_residual_fn, x, pullback, tangent):
@@ -1017,8 +1124,7 @@ def _lm_iteration(flat_residual_fn, state, *, tol):
         0.5,
         dtype=state["cost"].dtype,
     ) * (
-        jnp.asarray(damping, dtype=state["cost"].dtype)
-        * _tree_vdot_real(step, step)
+        jnp.asarray(damping, dtype=state["cost"].dtype) * _tree_vdot_real(step, step)
         + _tree_vdot_real(step, state["grad"])
     )
     actual_reduction = state["cost"] - cost_candidate
@@ -1177,91 +1283,17 @@ def levenberg_marquardt_traceable(
     tol=1e-10,
     callback=None,
     progress_callback=None,
+    args=(),
 ):
     """Trace-safe Levenberg-Marquardt solver for least-squares residuals."""
-    residual_eval = _flattened_residual_output(residual_fn)
-    x_dtype = _require_tree_first_leaf(
-        x0,
-        detail="Least-squares initial state must contain at least one leaf.",
-    ).dtype
-    tol_value = _device_scalar(tol, dtype=x_dtype)
-
-    def run_solver(x_init):
-        residual0, cost0, grad0, grad_norm_inf0, _ = _least_squares_gradient_state(
-            residual_eval,
-            x_init,
-        )
-        state0 = {
-            "x": x_init,
-            "residual": residual0,
-            "cost": cost0,
-            "grad": grad0,
-            "grad_norm_inf": grad_norm_inf0,
-            "damping": _lm_defaults(x_dtype)["initial_damping"],
-            "nit": jnp.asarray(0, dtype=jnp.int32),
-            "status": jnp.asarray(0, dtype=jnp.int32),
-            "accepted": jnp.asarray(False),
-            "success": grad_norm_inf0 <= tol_value,
-        }
-
-        def cond_fun(state):
-            return (
-                (state["nit"] < maxiter)
-                & (~state["success"])
-                & (state["status"] != 2)
-            )
-
-        def body_fun(state):
-            next_state = _lm_iteration(
-                residual_eval,
-                state,
-                tol=tol_value,
-            )
-            if callback is not None:
-                lax.cond(
-                    next_state["accepted"],
-                    lambda _: jax.debug.callback(
-                        lambda x: callback(_hostify_optimizer_tree(x)),
-                        next_state["x"],
-                    ),
-                    lambda _: None,
-                    operand=None,
-                )
-            if progress_callback is not None:
-                lax.cond(
-                    next_state["accepted"],
-                    lambda _: jax.debug.callback(
-                        progress_callback,
-                        next_state["nit"],
-                        next_state["cost"],
-                        next_state["grad_norm_inf"],
-                    ),
-                    lambda _: None,
-                    operand=None,
-                )
-            return next_state
-
-        state = lax.while_loop(cond_fun, body_fun, state0)
-        residual_final, residual_jacobian, _flat_grad, hessian = (
-            _materialize_dense_least_squares_linearization(
-                residual_eval,
-                state["x"],
-            )
-        )
-        return {
-            "x": state["x"],
-            "residual": residual_final,
-            "residual_jacobian": residual_jacobian,
-            "fun": state["cost"],
-            "grad": state["grad"],
-            "hessian": hessian,
-            "damping": state["damping"],
-            "nit": state["nit"],
-            "status": state["status"],
-            "success": state["success"],
-        }
-
-    return jax.jit(run_solver)(x0)
+    runner = _make_traceable_levenberg_marquardt_runner(
+        residual_fn,
+        int(maxiter),
+        float(tol),
+        callback,
+        progress_callback,
+    )
+    return runner(x0, _normalize_solver_args(args))
 
 
 # ---------------------------------------------------------------------------
@@ -1434,25 +1466,24 @@ def newton_polish(
     }
 
 
-def newton_polish_traceable(
+@lru_cache(maxsize=128)
+def _make_traceable_newton_polish_runner(
     objective_fn,
-    x0,
-    *,
-    maxiter=40,
-    tol=1e-11,
-    stab=0.0,
-    progress_callback=None,
+    maxiter,
+    tol,
+    stab,
+    progress_callback,
 ):
-    """Trace-safe Newton polish for JAX-traceable objective paths.
+    def run_solver(x_init, fn_args):
+        def objective_eval(x):
+            return objective_fn(x, *fn_args)
 
-    This variant keeps all loop state and fallback decisions inside JAX control
-    flow so higher-level traced objectives can invoke the Newton stage without
-    crossing back into Python.
-    """
-    val_and_grad_fn = jax.value_and_grad(objective_fn)
-    hvp_fn = _hessian_vector_product_fn(objective_fn)
+        grad_fn = jax.grad(objective_eval)
+        val_and_grad_fn = jax.value_and_grad(objective_eval)
 
-    def run_solver(x_init):
+        def hvp_fn(x, v):
+            return jax.jvp(grad_fn, (x,), (v,))[1]
+
         dtype = jnp.asarray(x_init).dtype
         tol_value = jnp.asarray(tol, dtype=dtype)
         linear_tol = jnp.minimum(
@@ -1580,7 +1611,33 @@ def newton_polish_traceable(
             "success": norm_final <= tol_value,
         }
 
-    return jax.jit(run_solver)(x0)
+    return jax.jit(run_solver)
+
+
+def newton_polish_traceable(
+    objective_fn,
+    x0,
+    *,
+    maxiter=40,
+    tol=1e-11,
+    stab=0.0,
+    progress_callback=None,
+    args=(),
+):
+    """Trace-safe Newton polish for JAX-traceable objective paths.
+
+    This variant keeps all loop state and fallback decisions inside JAX control
+    flow so higher-level traced objectives can invoke the Newton stage without
+    crossing back into Python.
+    """
+    runner = _make_traceable_newton_polish_runner(
+        objective_fn,
+        int(maxiter),
+        float(tol),
+        float(stab),
+        progress_callback,
+    )
+    return runner(x0, _normalize_solver_args(args))
 
 
 def newton_exact(
@@ -1639,22 +1696,19 @@ def newton_exact(
     }
 
 
-def newton_exact_traceable(
+@lru_cache(maxsize=128)
+def _make_traceable_exact_newton_runner(
     residual_fn,
-    x0,
-    *,
-    maxiter=40,
-    tol=1e-13,
+    maxiter,
+    tol,
 ):
-    """Trace-safe Newton solver for the exact Boozer residual system.
+    def run_solver(x_init, fn_args):
+        def residual_eval(x):
+            return residual_fn(x, *fn_args)
 
-    The loop keeps Jacobian application matrix-free via JVPs and materializes a
-    dense Jacobian only once at the final iterate for downstream LU-based
-    contracts.
-    """
-    jvp_fn = _jacobian_vector_product_fn(residual_fn)
+        def jvp_fn(x, v):
+            return jax.jvp(residual_eval, (x,), (v,))[1]
 
-    def run_solver(x_init):
         dtype = jnp.asarray(x_init).dtype
         tol_value = jnp.asarray(tol, dtype=dtype)
         linear_tol = jnp.minimum(
@@ -1664,7 +1718,7 @@ def newton_exact_traceable(
                 jnp.asarray(1e-14, dtype=dtype),
             ),
         )
-        r0 = residual_fn(x_init)
+        r0 = residual_eval(x_init)
         norm0 = jnp.linalg.norm(r0)
 
         def cond_fun(state):
@@ -1700,7 +1754,7 @@ def newton_exact_traceable(
                 dx,
             )
             x_next = state["x"] - dx
-            residual_next = residual_fn(x_next)
+            residual_next = residual_eval(x_next)
             return {
                 "x": x_next,
                 "residual": residual_next,
@@ -1728,7 +1782,29 @@ def newton_exact_traceable(
             "success": state["norm"] <= tol_value,
         }
 
-    return jax.jit(run_solver)(x0)
+    return jax.jit(run_solver)
+
+
+def newton_exact_traceable(
+    residual_fn,
+    x0,
+    *,
+    maxiter=40,
+    tol=1e-13,
+    args=(),
+):
+    """Trace-safe Newton solver for the exact Boozer residual system.
+
+    The loop keeps Jacobian application matrix-free via JVPs and materializes a
+    dense Jacobian only once at the final iterate for downstream LU-based
+    contracts.
+    """
+    runner = _make_traceable_exact_newton_runner(
+        residual_fn,
+        int(maxiter),
+        float(tol),
+    )
+    return runner(x0, _normalize_solver_args(args))
 
 
 # ---------------------------------------------------------------------------
@@ -1793,6 +1869,7 @@ def jax_least_squares(
 
     if method == "lm":
         _raise_if_strict_optimizer_fallback(
+            component="optimizer_jax.jax_least_squares",
             method=method,
             detail=_STRICT_REFERENCE_LEAST_SQUARES_DETAIL,
         )
@@ -1882,6 +1959,7 @@ def jax_minimize(
 
     if method in _REFERENCE_JAX_METHODS:
         _raise_if_strict_optimizer_fallback(
+            component="optimizer_jax.jax_minimize",
             method=method,
             detail=_STRICT_REFERENCE_JAX_OPTIMIZER_DETAIL,
         )
@@ -1928,6 +2006,7 @@ def jax_minimize(
         options["progress_callback"] = progress_callback
     if method in _REFERENCE_METHODS:
         _raise_if_strict_optimizer_fallback(
+            component="optimizer_jax.jax_minimize",
             method=method,
             detail=_STRICT_REFERENCE_OPTIMIZER_DETAIL,
         )
@@ -1943,6 +2022,18 @@ def jax_minimize(
                 maxiter=maxiter,
                 options=options,
             )
+        )
+
+    if method == "bfgs-hybrid":
+        _raise_if_strict_optimizer_fallback(
+            component="optimizer_jax.jax_minimize",
+            method=method,
+            detail=_STRICT_HYBRID_OPTIMIZER_DETAIL,
+        )
+        _raise_if_target_lane_required(
+            component="optimizer_jax.jax_minimize",
+            method=method,
+            detail=_STRICT_HYBRID_OPTIMIZER_DETAIL,
         )
 
     # All remaining methods require the private optimizer package.
@@ -1998,10 +2089,6 @@ def jax_minimize(
         return finalize(_private_lbfgs_result_to_optimize_result(state))
 
     # --- bfgs-hybrid: SciPy prefix → on-device continuation ---
-    _raise_if_strict_optimizer_fallback(
-        method=method,
-        detail=_STRICT_HYBRID_OPTIMIZER_DETAIL,
-    )
     total_maxiter = int(maxiter)
     prefix_cap = int(options.get("hybrid_scipy_maxiter", min(total_maxiter // 2, 100)))
     prefix_cap = max(0, min(prefix_cap, total_maxiter - 1))

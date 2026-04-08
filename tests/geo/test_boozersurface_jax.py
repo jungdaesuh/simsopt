@@ -174,8 +174,7 @@ def _make_structured_quadratic_problem():
         surface = jnp.asarray(state["surface"], dtype=jnp.float64)
         iota = jnp.asarray(state["iota"], dtype=jnp.float64)
         return 0.5 * (
-            jnp.sum((surface - target_surface) ** 2)
-            + (iota - target_iota) ** 2
+            jnp.sum((surface - target_surface) ** 2) + (iota - target_iota) ** 2
         )
 
     x0 = {
@@ -193,6 +192,10 @@ _enable_strict_jax_backend = partial(enable_strict_jax_backend, mode="jax_gpu_pa
 _enable_non_strict_jax_backend = partial(
     enable_non_strict_jax_backend,
     mode="jax_gpu_parity",
+)
+_enable_fast_non_strict_jax_backend = partial(
+    enable_non_strict_jax_backend,
+    mode="jax_gpu_fast",
 )
 
 
@@ -1131,7 +1134,12 @@ class TestBoozerSurfaceJAXClass:
             resolve_optimizer_backend_method("bogus", limited_memory=False)
 
     @pytest.mark.parametrize(
-        ("optimizer_backend", "limited_memory", "least_squares_algorithm", "expected_method"),
+        (
+            "optimizer_backend",
+            "limited_memory",
+            "least_squares_algorithm",
+            "expected_method",
+        ),
         [
             ("scipy", False, "quasi-newton", "bfgs"),
             ("scipy", True, "quasi-newton", "lbfgs"),
@@ -1279,9 +1287,16 @@ class TestBoozerSurfaceJAXClass:
             )
 
         def fake_newton_polish(
-            _objective_fn, x0, *, maxiter, tol, stab, progress_callback=None
+            _objective_fn,
+            x0,
+            *,
+            maxiter,
+            tol,
+            stab,
+            progress_callback=None,
+            objective_args=(),
         ):
-            del maxiter, tol, stab, progress_callback
+            del maxiter, tol, stab, progress_callback, objective_args
             return _successful_newton_polish_result(x0)
 
         monkeypatch.setattr(_bsj, "jax_minimize", fake_jax_minimize)
@@ -1354,9 +1369,16 @@ class TestBoozerSurfaceJAXClass:
             )
 
         def fake_newton_polish(
-            _objective_fn, x0, *, maxiter, tol, stab, progress_callback=None
+            _objective_fn,
+            x0,
+            *,
+            maxiter,
+            tol,
+            stab,
+            progress_callback=None,
+            objective_args=(),
         ):
-            del maxiter, tol, stab, progress_callback
+            del maxiter, tol, stab, progress_callback, objective_args
             return _successful_newton_polish_result(x0)
 
         monkeypatch.setattr(_bsj, "jax_least_squares", fake_jax_least_squares)
@@ -1395,9 +1417,16 @@ class TestBoozerSurfaceJAXClass:
             return _successful_minimize_result(x0)
 
         def fake_newton_polish(
-            _objective_fn, x0, *, maxiter, tol, stab, progress_callback=None
+            _objective_fn,
+            x0,
+            *,
+            maxiter,
+            tol,
+            stab,
+            progress_callback=None,
+            objective_args=(),
         ):
-            del maxiter, tol, stab, progress_callback
+            del maxiter, tol, stab, progress_callback, objective_args
             return _successful_newton_polish_result(x0)
 
         monkeypatch.setattr(_bsj, "jax_least_squares", forbidden_jax_least_squares)
@@ -1445,6 +1474,23 @@ class TestBoozerSurfaceJAXClass:
         ):
             booz._resolve_optimizer_method()
 
+    @pytest.mark.parametrize("optimizer_backend", ["scipy", "hybrid"])
+    def test_resolve_optimizer_method_rejects_non_target_ls_lane_in_fast_backend_mode(
+        self,
+        monkeypatch,
+        request,
+        optimizer_backend,
+    ):
+        booz = _make_mock_boozer_surface()
+        _enable_fast_non_strict_jax_backend(monkeypatch, request)
+        booz.options["optimizer_backend"] = optimizer_backend
+
+        with pytest.raises(
+            RuntimeError,
+            match=rf"optimizer_backend='{optimizer_backend}'.*jax_gpu_fast.*fast/ondevice lane",
+        ):
+            booz._resolve_optimizer_method()
+
     @pytest.mark.parametrize("method", ["adam", "bfgs", "lbfgs", "bfgs-hybrid"])
     def test_jax_minimize_rejects_fallback_methods_in_strict_mode(
         self,
@@ -1460,6 +1506,68 @@ class TestBoozerSurfaceJAXClass:
             match=rf"optimizer_jax\.jax_minimize.*method='{method}'.*strict=True",
             fun=lambda x: jnp.sum(x**2),
         )
+
+    @pytest.mark.parametrize(
+        ("method", "maxiter", "options", "atol"),
+        [
+            ("adam", 800, {"step_size": 0.1}, 1e-4),
+            ("bfgs", 100, None, 1e-8),
+            ("lbfgs", 100, None, 1e-8),
+        ],
+    )
+    def test_jax_minimize_reference_methods_still_work_in_fast_backend_mode(
+        self,
+        monkeypatch,
+        request,
+        method,
+        maxiter,
+        options,
+        atol,
+    ):
+        _enable_fast_non_strict_jax_backend(monkeypatch, request)
+        target = np.asarray([2.0, -1.0], dtype=float)
+
+        def objective(x):
+            diff = jnp.asarray(x, dtype=jnp.float64) - jnp.asarray(
+                target, dtype=jnp.float64
+            )
+            return 0.5 * jnp.dot(diff, diff)
+
+        result = jax_minimize(
+            objective,
+            jnp.asarray([5.0, 3.0], dtype=jnp.float64),
+            method=method,
+            maxiter=maxiter,
+            tol=1e-8,
+            options=options,
+        )
+
+        assert result.success is True
+        np.testing.assert_allclose(result.x, target, atol=atol)
+
+    def test_jax_least_squares_reference_lm_still_works_in_fast_backend_mode(
+        self,
+        monkeypatch,
+        request,
+    ):
+        _enable_fast_non_strict_jax_backend(monkeypatch, request)
+        target = np.asarray([2.0, -1.0], dtype=float)
+
+        def residual_fn(x):
+            return jnp.asarray(x, dtype=jnp.float64) - jnp.asarray(
+                target, dtype=jnp.float64
+            )
+
+        result = jax_least_squares(
+            residual_fn,
+            jnp.asarray([5.0, 3.0], dtype=jnp.float64),
+            method="lm",
+            maxiter=25,
+            tol=1e-12,
+        )
+
+        assert result.success is True
+        np.testing.assert_allclose(result.x, target, atol=1e-8)
 
     def test_jax_least_squares_solves_simple_structured_problem(self):
         def residual_fn(state):
@@ -1486,7 +1594,9 @@ class TestBoozerSurfaceJAXClass:
         np.testing.assert_allclose(result.jac["iota"], 0.0, atol=1e-10)
 
     def test_jax_minimize_adam_solves_simple_structured_problem(self):
-        objective_fn, x0, target_surface, target_iota = _make_structured_quadratic_problem()
+        objective_fn, x0, target_surface, target_iota = (
+            _make_structured_quadratic_problem()
+        )
 
         result = jax_minimize(
             objective_fn,
@@ -1523,7 +1633,9 @@ class TestBoozerSurfaceJAXClass:
         np.testing.assert_allclose(result.x, target, atol=1e-4)
 
     def test_jax_minimize_adam_ondevice_solves_simple_structured_problem(self):
-        objective_fn, x0, target_surface, target_iota = _make_structured_quadratic_problem()
+        objective_fn, x0, target_surface, target_iota = (
+            _make_structured_quadratic_problem()
+        )
 
         result = jax_minimize(
             objective_fn,
@@ -1782,9 +1894,16 @@ class TestBoozerSurfaceJAXClass:
         booz = _make_mock_boozer_surface()
 
         def fake_newton_polish(
-            _objective_fn, x0, *, maxiter, tol, stab, progress_callback=None
+            _objective_fn,
+            x0,
+            *,
+            maxiter,
+            tol,
+            stab,
+            progress_callback=None,
+            objective_args=(),
         ):
-            del maxiter, tol, stab, progress_callback
+            del maxiter, tol, stab, progress_callback, objective_args
             return {
                 "x": x0,
                 "fun": jnp.asarray(jnp.nan),
@@ -1811,9 +1930,16 @@ class TestBoozerSurfaceJAXClass:
         booz = _make_mock_boozer_surface()
 
         def fake_newton_polish(
-            _objective_fn, x0, *, maxiter, tol, stab, progress_callback=None
+            _objective_fn,
+            x0,
+            *,
+            maxiter,
+            tol,
+            stab,
+            progress_callback=None,
+            objective_args=(),
         ):
-            del maxiter, tol, stab, progress_callback
+            del maxiter, tol, stab, progress_callback, objective_args
             n = x0.shape[0]
             return {
                 "x": x0,
@@ -1857,9 +1983,16 @@ class TestBoozerSurfaceJAXClass:
             return _successful_minimize_result(x0)
 
         def fake_newton_polish(
-            _objective_fn, x0, *, maxiter, tol, stab, progress_callback=None
+            _objective_fn,
+            x0,
+            *,
+            maxiter,
+            tol,
+            stab,
+            progress_callback=None,
+            objective_args=(),
         ):
-            del maxiter, tol, stab
+            del maxiter, tol, stab, objective_args
             assert progress_callback is not None
             _emit_newton_progress(progress_callback)
             return _successful_newton_polish_result(x0, nit=2)
@@ -1914,9 +2047,16 @@ class TestBoozerSurfaceJAXClass:
             return _successful_minimize_result(x0)
 
         def fake_newton_polish_traceable(
-            _objective_fn, x0, *, maxiter, tol, stab, progress_callback=None
+            _objective_fn,
+            x0,
+            *,
+            maxiter,
+            tol,
+            stab,
+            progress_callback=None,
+            args=(),
         ):
-            del maxiter, tol, stab
+            del maxiter, tol, stab, args
             captured["progress_callback"] = progress_callback
             return _successful_newton_polish_result(x0, nit=2)
 
@@ -1976,9 +2116,16 @@ class TestBoozerSurfaceJAXClass:
             )
 
         def fake_newton_polish(
-            _objective_fn, x0, *, maxiter, tol, stab, progress_callback=None
+            _objective_fn,
+            x0,
+            *,
+            maxiter,
+            tol,
+            stab,
+            progress_callback=None,
+            objective_args=(),
         ):
-            del maxiter, tol, progress_callback
+            del maxiter, tol, progress_callback, objective_args
             captured["stab"] = stab
             n = x0.shape[0]
             return {
@@ -2154,9 +2301,9 @@ class TestBoozerSurfaceJAXExactPath:
         G = jnp.asarray(0.05, dtype=jnp.float64)
         captured = {}
 
-        def fake_newton_exact_traceable(residual_fn, x0, *, maxiter, tol):
+        def fake_newton_exact_traceable(residual_fn, x0, *, maxiter, tol, args=()):
             del maxiter, tol
-            residual = residual_fn(x0)
+            residual = residual_fn(x0, *args)
             captured["residual"] = residual
             n = x0.shape[0]
             return {
@@ -2175,6 +2322,75 @@ class TestBoozerSurfaceJAXExactPath:
         assert bool(result["success"])
         assert "residual" in captured
         assert jnp.all(jnp.isfinite(captured["residual"]))
+
+    def test_run_code_traceable_exact_reuses_stable_residual_callable(
+        self, monkeypatch
+    ):
+        booz = _make_mock_boozer_surface_exact()
+        coil_set_spec = booz.coil_set_spec
+        sdofs = jnp.asarray(booz.surface.get_dofs(), dtype=jnp.float64)
+        iota = jnp.asarray(0.3, dtype=jnp.float64)
+        G = jnp.asarray(0.05, dtype=jnp.float64)
+        captured_ids = []
+
+        def fake_newton_exact_traceable(residual_fn, x0, *, maxiter, tol, args=()):
+            del maxiter, tol
+            captured_ids.append(id(residual_fn))
+            residual = residual_fn(x0, *args)
+            n = x0.shape[0]
+            return {
+                "x": x0,
+                "residual": residual,
+                "jacobian": jnp.eye(n, dtype=x0.dtype),
+                "nit": 0,
+                "success": True,
+            }
+
+        monkeypatch.setattr(_bsj, "newton_exact_traceable", fake_newton_exact_traceable)
+
+        first = booz.run_code_traceable(coil_set_spec, sdofs, iota, G)
+        second = booz.run_code_traceable(coil_set_spec, sdofs, iota, G)
+
+        assert bool(first["success"])
+        assert bool(second["success"])
+        assert len(captured_ids) == 2
+        assert captured_ids[0] == captured_ids[1]
+
+    def test_run_code_traceable_exact_rebuilds_residual_callable_after_target_change(
+        self, monkeypatch
+    ):
+        booz = _make_mock_boozer_surface_exact()
+        coil_set_spec = booz.coil_set_spec
+        sdofs = jnp.asarray(booz.surface.get_dofs(), dtype=jnp.float64)
+        iota = jnp.asarray(0.3, dtype=jnp.float64)
+        G = jnp.asarray(0.05, dtype=jnp.float64)
+        residual_ids = []
+        residuals = []
+
+        def fake_newton_exact_traceable(residual_fn, x0, *, maxiter, tol, args=()):
+            del maxiter, tol
+            residual_ids.append(id(residual_fn))
+            residual = residual_fn(x0, *args)
+            residuals.append(np.asarray(residual))
+            n = x0.shape[0]
+            return {
+                "x": x0,
+                "residual": residual,
+                "jacobian": jnp.eye(n, dtype=x0.dtype),
+                "nit": 0,
+                "success": True,
+            }
+
+        monkeypatch.setattr(_bsj, "newton_exact_traceable", fake_newton_exact_traceable)
+
+        first = booz.run_code_traceable(coil_set_spec, sdofs, iota, G)
+        booz.targetlabel = float(booz.targetlabel + 0.5)
+        second = booz.run_code_traceable(coil_set_spec, sdofs, iota, G)
+
+        assert bool(first["success"])
+        assert bool(second["success"])
+        assert residual_ids[0] != residual_ids[1]
+        assert not np.allclose(residuals[0], residuals[1])
 
     def test_run_code_traceable_ls_reuses_newton_fun_and_grad(self, monkeypatch):
         """LS traceable path must reuse Newton outputs instead of re-differentiating."""
@@ -2202,8 +2418,9 @@ class TestBoozerSurfaceJAXExactPath:
             tol,
             stab,
             progress_callback=None,
+            objective_args=(),
         ):
-            del obj_fn, maxiter, tol, stab, progress_callback
+            del obj_fn, maxiter, tol, stab, progress_callback, objective_args
             return {
                 "x": x0,
                 "fun": expected_fun,
@@ -2246,9 +2463,18 @@ class TestBoozerSurfaceJAXExactPath:
         def forbidden_private_minimize(*_args, **_kwargs):
             raise AssertionError("LM route should not enter private BFGS/L-BFGS")
 
-        def fake_lm(residual_fn, x0, *, maxiter, tol, callback=None, progress_callback=None):
+        def fake_lm(
+            residual_fn,
+            x0,
+            *,
+            maxiter,
+            tol,
+            callback=None,
+            progress_callback=None,
+            args=(),
+        ):
             del maxiter, tol, callback, progress_callback
-            captured["residual"] = residual_fn(x0)
+            captured["residual"] = residual_fn(x0, *args)
             return {
                 "x": x0,
                 "residual": captured["residual"],
@@ -2270,8 +2496,9 @@ class TestBoozerSurfaceJAXExactPath:
             tol,
             stab,
             progress_callback=None,
+            objective_args=(),
         ):
-            del obj_fn, maxiter, tol, stab, progress_callback
+            del obj_fn, maxiter, tol, stab, progress_callback, objective_args
             return _successful_newton_polish_result(x0)
 
         monkeypatch.setattr(_opt, "_minimize_bfgs_private", forbidden_private_minimize)
@@ -2285,7 +2512,149 @@ class TestBoozerSurfaceJAXExactPath:
         assert bool(result["success"])
         assert jnp.all(jnp.isfinite(captured["residual"]))
 
-    def test_run_code_traceable_ls_skips_lu_for_nonfinite_newton_result(self, monkeypatch):
+    def test_run_code_traceable_lm_reuses_stable_residual_and_objective_callables(
+        self, monkeypatch
+    ):
+        booz = _make_mock_boozer_surface()
+        booz.options["optimizer_backend"] = "ondevice"
+        booz.options["least_squares_algorithm"] = "lm"
+        coil_set_spec = booz.coil_set_spec
+        sdofs = jnp.asarray(booz.surface.get_dofs(), dtype=jnp.float64)
+        iota = jnp.asarray(0.3, dtype=jnp.float64)
+        G = jnp.asarray(0.05, dtype=jnp.float64)
+        residual_ids = []
+        objective_ids = []
+
+        def fake_lm(
+            residual_fn,
+            x0,
+            *,
+            maxiter,
+            tol,
+            callback=None,
+            progress_callback=None,
+            args=(),
+        ):
+            del maxiter, tol, callback, progress_callback
+            residual_ids.append(id(residual_fn))
+            residual = residual_fn(x0, *args)
+            return {
+                "x": x0,
+                "residual": residual,
+                "residual_jacobian": jnp.eye(x0.shape[0], dtype=x0.dtype),
+                "fun": jnp.asarray(1.25, dtype=x0.dtype),
+                "grad": jnp.zeros_like(x0),
+                "hessian": jnp.eye(x0.shape[0], dtype=x0.dtype),
+                "damping": jnp.asarray(1.0e-3, dtype=x0.dtype),
+                "nit": jnp.asarray(1, dtype=jnp.int32),
+                "status": jnp.asarray(0, dtype=jnp.int32),
+                "success": jnp.asarray(True),
+            }
+
+        def fake_newton_polish(
+            obj_fn,
+            x0,
+            *,
+            maxiter,
+            tol,
+            stab,
+            progress_callback=None,
+            objective_args=(),
+        ):
+            del maxiter, tol, stab, progress_callback
+            objective_ids.append(id(obj_fn))
+            obj_fn(x0, *objective_args)
+            return _successful_newton_polish_result(x0)
+
+        monkeypatch.setattr(_opt, "_minimize_bfgs_private", lambda *_a, **_k: None)
+        monkeypatch.setattr(_opt, "_minimize_lbfgs_private", lambda *_a, **_k: None)
+        monkeypatch.setattr(_bsj, "levenberg_marquardt_traceable", fake_lm)
+        _patch_newton_polish_runner(monkeypatch, fake_newton_polish)
+
+        first = booz.run_code_traceable(coil_set_spec, sdofs, iota, G)
+        second = booz.run_code_traceable(coil_set_spec, sdofs, iota, G)
+
+        assert bool(first["success"])
+        assert bool(second["success"])
+        assert residual_ids == [residual_ids[0], residual_ids[0]]
+        assert objective_ids == [objective_ids[0], objective_ids[0]]
+
+    def test_run_code_traceable_lm_rebuilds_callables_after_target_change(
+        self, monkeypatch
+    ):
+        booz = _make_mock_boozer_surface()
+        booz.options["optimizer_backend"] = "ondevice"
+        booz.options["least_squares_algorithm"] = "lm"
+        coil_set_spec = booz.coil_set_spec
+        sdofs = jnp.asarray(booz.surface.get_dofs(), dtype=jnp.float64)
+        iota = jnp.asarray(0.3, dtype=jnp.float64)
+        G = jnp.asarray(0.05, dtype=jnp.float64)
+        residual_ids = []
+        objective_ids = []
+        residuals = []
+        objective_values = []
+
+        def fake_lm(
+            residual_fn,
+            x0,
+            *,
+            maxiter,
+            tol,
+            callback=None,
+            progress_callback=None,
+            args=(),
+        ):
+            del maxiter, tol, callback, progress_callback
+            residual_ids.append(id(residual_fn))
+            residual = residual_fn(x0, *args)
+            residuals.append(np.asarray(residual))
+            return {
+                "x": x0,
+                "residual": residual,
+                "residual_jacobian": jnp.eye(x0.shape[0], dtype=x0.dtype),
+                "fun": jnp.asarray(1.25, dtype=x0.dtype),
+                "grad": jnp.zeros_like(x0),
+                "hessian": jnp.eye(x0.shape[0], dtype=x0.dtype),
+                "damping": jnp.asarray(1.0e-3, dtype=x0.dtype),
+                "nit": jnp.asarray(1, dtype=jnp.int32),
+                "status": jnp.asarray(0, dtype=jnp.int32),
+                "success": jnp.asarray(True),
+            }
+
+        def fake_newton_polish(
+            obj_fn,
+            x0,
+            *,
+            maxiter,
+            tol,
+            stab,
+            progress_callback=None,
+            objective_args=(),
+        ):
+            del maxiter, tol, stab, progress_callback
+            objective_ids.append(id(obj_fn))
+            objective_values.append(np.asarray(obj_fn(x0, *objective_args)))
+            return _successful_newton_polish_result(x0)
+
+        monkeypatch.setattr(_opt, "_minimize_bfgs_private", lambda *_a, **_k: None)
+        monkeypatch.setattr(_opt, "_minimize_lbfgs_private", lambda *_a, **_k: None)
+        monkeypatch.setattr(_bsj, "levenberg_marquardt_traceable", fake_lm)
+        _patch_newton_polish_runner(monkeypatch, fake_newton_polish)
+
+        first = booz.run_code_traceable(coil_set_spec, sdofs, iota, G)
+        booz.targetlabel = float(booz.targetlabel + 0.5)
+        second = booz.run_code_traceable(coil_set_spec, sdofs, iota, G)
+
+        assert bool(first["success"])
+        assert bool(second["success"])
+        assert residual_ids[0] != residual_ids[1]
+        assert objective_ids[0] != objective_ids[1]
+        assert not np.allclose(residuals[0], residuals[1])
+        assert not np.allclose(objective_values[0], objective_values[1])
+
+    def test_run_code_traceable_ls_skips_lu_for_nonfinite_newton_result(
+        self, monkeypatch
+    ):
         """LS traceable failures must return the dummy PLU payload."""
         booz = _make_mock_boozer_surface()
         booz.options["optimizer_backend"] = "ondevice"
@@ -2306,13 +2675,16 @@ class TestBoozerSurfaceJAXExactPath:
             tol,
             stab,
             progress_callback=None,
+            objective_args=(),
         ):
-            del obj_fn, maxiter, tol, stab, progress_callback
+            del obj_fn, maxiter, tol, stab, progress_callback, objective_args
             return {
                 "x": x0,
                 "fun": jnp.asarray(jnp.nan, dtype=x0.dtype),
                 "grad": jnp.full_like(x0, jnp.nan),
-                "hessian": jnp.full((x0.shape[0], x0.shape[0]), jnp.nan, dtype=x0.dtype),
+                "hessian": jnp.full(
+                    (x0.shape[0], x0.shape[0]), jnp.nan, dtype=x0.dtype
+                ),
                 "nit": 0,
                 "success": False,
             }
@@ -2399,8 +2771,8 @@ class TestBoozerSurfaceJAXExactPath:
         iota = jnp.asarray(0.3, dtype=jnp.float64)
         G = jnp.asarray(0.05, dtype=jnp.float64)
 
-        def fake_newton_exact_traceable(_residual_fn, x0, *, maxiter, tol):
-            del maxiter, tol
+        def fake_newton_exact_traceable(_residual_fn, x0, *, maxiter, tol, args=()):
+            del maxiter, tol, args
             n = x0.shape[0]
             return {
                 "x": x0,
@@ -2578,9 +2950,16 @@ class TestBoozerSurfaceJAXExactPath:
         captured = {}
 
         def fake_newton_polish(
-            _objective_fn, x0, *, maxiter, tol, stab, progress_callback=None
+            _objective_fn,
+            x0,
+            *,
+            maxiter,
+            tol,
+            stab,
+            progress_callback=None,
+            objective_args=(),
         ):
-            del maxiter, tol, stab, progress_callback
+            del maxiter, tol, stab, progress_callback, objective_args
             return {
                 "x": x0,
                 "fun": jnp.asarray(0.0, dtype=x0.dtype),

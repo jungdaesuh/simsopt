@@ -4,6 +4,7 @@ import json
 import os
 
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 import matplotlib.pyplot as plt
@@ -1883,6 +1884,204 @@ class Testing(unittest.TestCase):
                 )
                 self.assertEqual(
                     np.asarray(deriv.data[surf]).shape, surf.get_dofs().shape
+                )
+
+    def _build_surface_bound_cws_curve(self, curve_cls, quadpoints):
+        surf = SurfaceRZFourier(
+            nfp=3,
+            stellsym=True,
+            mpol=1,
+            ntor=0,
+            quadpoints_phi=np.arange(64) / 64,
+            quadpoints_theta=np.arange(64) / 64,
+        )
+        surf.set_rc(0, 0, 1.05)
+        surf.set_rc(1, 0, 0.18)
+        surf.set_zs(1, 0, 0.14)
+
+        curve = curve_cls(quadpoints, 3, surf, G=0, H=0)
+        curve.set("phic(0)", 0.08)
+        curve.set("thetac(0)", 0.35)
+        curve.set("phic(1)", 0.03)
+        curve.set("thetas(1)", 0.07)
+        return curve, surf
+
+    def test_curvecwsfourier_surface_bound_wrappers_refresh_after_surface_mutation(
+        self,
+    ):
+        from simsopt.geo import CurveCWSFourier
+        from simsopt.geo.curvecwsfourier import CurveCWSFourierCPP
+
+        quadpoints = np.linspace(0, 1, 33, endpoint=False)
+
+        for curve_cls in (CurveCWSFourier, CurveCWSFourierCPP):
+            with self.subTest(curve_cls=curve_cls.__name__):
+                curve, surf = self._build_surface_bound_cws_curve(
+                    curve_cls,
+                    quadpoints,
+                )
+
+                curve_dofs = jnp.asarray(curve.get_dofs(), dtype=jnp.float64)
+                gamma_before = np.asarray(curve.gammac_jax(curve_dofs))
+                dgamma_before = np.asarray(curve.dgamma_by_dcoeff_jax(curve_dofs))
+                dgammadash_before = np.asarray(
+                    curve.dgammadash_by_dcoeff_jax(curve_dofs)
+                )
+                if hasattr(curve, "gamma_hessian"):
+                    gamma_hessian_before = np.asarray(curve.gamma_hessian())
+                    gammadash_hessian_before = np.asarray(curve.gammadash_hessian())
+
+                surf.x = np.asarray(surf.x, dtype=np.float64) + np.array(
+                    [0.25, 0.0, 0.0],
+                    dtype=np.float64,
+                )
+                surface_dofs = jnp.asarray(surf.get_dofs(), dtype=jnp.float64)
+
+                gamma_after = np.asarray(curve.gammac_jax(curve_dofs))
+                gamma_expected = np.asarray(curve.gamma_jax(curve_dofs, surface_dofs))
+                dgamma_after = np.asarray(curve.dgamma_by_dcoeff_jax(curve_dofs))
+                dgamma_expected = np.asarray(
+                    jax.jacfwd(curve.gamma_jax, argnums=0)(curve_dofs, surface_dofs)
+                )
+                dgammadash_after = np.asarray(
+                    curve.dgammadash_by_dcoeff_jax(curve_dofs)
+                )
+                dgammadash_expected = np.asarray(
+                    jax.jacfwd(curve.gammadash_jax, argnums=0)(
+                        curve_dofs,
+                        surface_dofs,
+                    )
+                )
+                if hasattr(curve, "gamma_hessian"):
+                    gamma_hessian_after = np.asarray(curve.gamma_hessian())
+                    gamma_hessian_expected = np.asarray(
+                        jax.hessian(
+                            lambda local_curve_dofs: curve.gamma_jax(
+                                local_curve_dofs,
+                                surface_dofs,
+                            )
+                        )(curve_dofs)
+                    )
+                    gammadash_hessian_after = np.asarray(curve.gammadash_hessian())
+                    gammadash_hessian_expected = np.asarray(
+                        jax.hessian(
+                            lambda local_curve_dofs: curve.gammadash_jax(
+                                local_curve_dofs,
+                                surface_dofs,
+                            )
+                        )(curve_dofs)
+                    )
+
+                np.testing.assert_allclose(gamma_after, gamma_expected)
+                np.testing.assert_allclose(dgamma_after, dgamma_expected)
+                np.testing.assert_allclose(dgammadash_after, dgammadash_expected)
+                if hasattr(curve, "gamma_hessian"):
+                    np.testing.assert_allclose(
+                        gamma_hessian_after,
+                        gamma_hessian_expected,
+                    )
+                    np.testing.assert_allclose(
+                        gammadash_hessian_after,
+                        gammadash_hessian_expected,
+                    )
+                self.assertGreater(np.max(np.abs(gamma_after - gamma_before)), 1e-12)
+                self.assertGreater(
+                    np.max(np.abs(dgamma_after - dgamma_before)),
+                    1e-12,
+                )
+                self.assertGreater(
+                    np.max(np.abs(dgammadash_after - dgammadash_before)),
+                    1e-12,
+                )
+                if hasattr(curve, "gamma_hessian"):
+                    self.assertGreater(
+                        np.max(np.abs(gamma_hessian_after - gamma_hessian_before)),
+                        1e-12,
+                    )
+                    self.assertGreater(
+                        np.max(
+                            np.abs(gammadash_hessian_after - gammadash_hessian_before)
+                        ),
+                        1e-12,
+                    )
+
+    def test_curvecwsfourier_surface_bound_wrappers_refresh_after_curve_mutation(self):
+        from simsopt.geo import CurveCWSFourier
+        from simsopt.geo.curvecwsfourier import CurveCWSFourierCPP
+
+        quadpoints = np.linspace(0, 1, 33, endpoint=False)
+
+        for curve_cls in (CurveCWSFourier, CurveCWSFourierCPP):
+            with self.subTest(curve_cls=curve_cls.__name__):
+                curve, surf = self._build_surface_bound_cws_curve(
+                    curve_cls,
+                    quadpoints,
+                )
+
+                surface_dofs = jnp.asarray(surf.get_dofs(), dtype=jnp.float64)
+                cotangent_gamma = jnp.asarray(curve.gamma(), dtype=jnp.float64)
+                cotangent_gammadash = jnp.asarray(curve.gammadash(), dtype=jnp.float64)
+                gamma_before = np.asarray(curve.gammas_jax(surface_dofs))
+                surface_vjp_before = np.asarray(
+                    curve.dgamma_by_dsurf_vjp_jax(surface_dofs, cotangent_gamma)
+                )
+                surface_dash_vjp_before = np.asarray(
+                    curve.dgammadash_by_dsurf_vjp_jax(
+                        surface_dofs,
+                        cotangent_gammadash,
+                    )
+                )
+
+                curve.x = np.asarray(curve.x, dtype=np.float64) + np.array(
+                    [0.17] + [0.0] * (curve.x.size - 1),
+                    dtype=np.float64,
+                )
+                curve_dofs = jnp.asarray(curve.get_dofs(), dtype=jnp.float64)
+
+                gamma_after = np.asarray(curve.gammas_jax(surface_dofs))
+                gamma_expected = np.asarray(curve.gamma_jax(curve_dofs, surface_dofs))
+                _, gamma_pullback = jax.vjp(
+                    lambda local_surface_dofs: curve.gamma_jax(
+                        curve_dofs,
+                        local_surface_dofs,
+                    ),
+                    surface_dofs,
+                )
+                surface_vjp_after = np.asarray(
+                    curve.dgamma_by_dsurf_vjp_jax(surface_dofs, cotangent_gamma)
+                )
+                surface_vjp_expected = np.asarray(gamma_pullback(cotangent_gamma)[0])
+                _, gammadash_pullback = jax.vjp(
+                    lambda local_surface_dofs: curve.gammadash_jax(
+                        curve_dofs,
+                        local_surface_dofs,
+                    ),
+                    surface_dofs,
+                )
+                surface_dash_vjp_after = np.asarray(
+                    curve.dgammadash_by_dsurf_vjp_jax(
+                        surface_dofs,
+                        cotangent_gammadash,
+                    )
+                )
+                surface_dash_vjp_expected = np.asarray(
+                    gammadash_pullback(cotangent_gammadash)[0]
+                )
+
+                np.testing.assert_allclose(gamma_after, gamma_expected)
+                np.testing.assert_allclose(surface_vjp_after, surface_vjp_expected)
+                np.testing.assert_allclose(
+                    surface_dash_vjp_after,
+                    surface_dash_vjp_expected,
+                )
+                self.assertGreater(np.max(np.abs(gamma_after - gamma_before)), 1e-12)
+                self.assertGreater(
+                    np.max(np.abs(surface_vjp_after - surface_vjp_before)),
+                    1e-12,
+                )
+                self.assertGreater(
+                    np.max(np.abs(surface_dash_vjp_after - surface_dash_vjp_before)),
+                    1e-12,
                 )
 
 

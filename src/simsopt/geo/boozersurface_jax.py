@@ -37,7 +37,12 @@ import jax
 import jax.numpy as jnp
 import jax.scipy.linalg
 
-from ..backend import raise_if_strict_jax_fallback, warn_if_jax_fallback
+from ..backend import (
+    get_backend_config,
+    is_parity_mode,
+    raise_if_strict_jax_fallback,
+    warn_if_jax_fallback,
+)
 from .._core.jax_host_boundary import (
     host_all_finite as _host_all_finite,
     host_array as _host_numpy,
@@ -157,6 +162,18 @@ def _as_boozer_penalty_optimizer_state(x, *, optimize_G):
     return _BoozerPenaltyOptimizerState(
         surface_dofs=sdofs,
         iota=iota,
+    )
+
+
+def _traceable_array_signature(array):
+    """Return a value-based signature for traced static array-like inputs."""
+    if array is None:
+        return None
+    array_np = np.asarray(array)
+    return (
+        str(array_np.dtype),
+        tuple(int(dim) for dim in array_np.shape),
+        array_np.tobytes(),
     )
 
 
@@ -1117,9 +1134,7 @@ def _normalize_solver_options(raw_options, boozer_type):
         and least_squares_algorithm not in VALID_LEAST_SQUARES_ALGORITHMS
     ):
         allowed = ", ".join(sorted(VALID_LEAST_SQUARES_ALGORITHMS))
-        raise ValueError(
-            f"least_squares_algorithm must be one of: {allowed}."
-        )
+        raise ValueError(f"least_squares_algorithm must be one of: {allowed}.")
 
     if boozer_type == "ls":
         effective_backend = raw_options.get("optimizer_backend", "scipy")
@@ -1270,6 +1285,10 @@ class BoozerSurfaceJAX(Optimizable):
 
         # Toroidal flux phi index (first phi point by default)
         self.phi_idx = 0
+
+        self._traceable_penalty_objective_cache = {}
+        self._traceable_penalty_residual_cache = {}
+        self._traceable_exact_residual_cache = {}
 
         # Coil data (extracted once, updated via _refresh_coil_data)
         self._refresh_coil_data()
@@ -1426,25 +1445,39 @@ class BoozerSurfaceJAX(Optimizable):
         constraint_weight=None,
         coil_set_spec=None,
         coil_arrays=None,
+        *,
+        hostify_inputs=True,
     ):
         """Build penalty objective with explicit overrides."""
-        resolved_coil_set_spec = _hostify_tree(
-            _resolved_coil_set_spec(
-                self.coil_set_spec,
-                coil_arrays=coil_arrays,
-                coil_set_spec=coil_set_spec,
-            )
+        resolved_coil_set_spec = _resolved_coil_set_spec(
+            self.coil_set_spec,
+            coil_arrays=coil_arrays,
+            coil_set_spec=coil_set_spec,
         )
+        if hostify_inputs:
+            resolved_coil_set_spec = _hostify_tree(resolved_coil_set_spec)
         return _make_boozer_penalty_objective_closure(
             coil_arrays=coil_arrays,
             coil_set_spec=resolved_coil_set_spec,
-            quadpoints_phi=_hostify_tree(self.quadpoints_phi),
-            quadpoints_theta=_hostify_tree(self.quadpoints_theta),
+            quadpoints_phi=(
+                _hostify_tree(self.quadpoints_phi)
+                if hostify_inputs
+                else self.quadpoints_phi
+            ),
+            quadpoints_theta=(
+                _hostify_tree(self.quadpoints_theta)
+                if hostify_inputs
+                else self.quadpoints_theta
+            ),
             mpol=self.mpol,
             ntor=self.ntor,
             nfp=self.nfp,
             stellsym=self.stellsym,
-            scatter_indices=_hostify_tree(self.scatter_indices),
+            scatter_indices=(
+                _hostify_tree(self.scatter_indices)
+                if hostify_inputs
+                else self.scatter_indices
+            ),
             surface_kind=self._surface_geometry_kind,
             targetlabel=self.targetlabel,
             constraint_weight=constraint_weight
@@ -1463,19 +1496,19 @@ class BoozerSurfaceJAX(Optimizable):
         constraint_weight=None,
         coil_set_spec=None,
         coil_arrays=None,
+        *,
+        hostify_inputs=True,
     ):
         """Build the LS residual-vector closure with explicit grouped-field inputs."""
-        resolved_coil_set_spec = _hostify_tree(
-            _resolved_coil_set_spec(
-                self.coil_set_spec,
-                coil_arrays=coil_arrays,
-                coil_set_spec=coil_set_spec,
-            )
+        resolved_coil_set_spec = _resolved_coil_set_spec(
+            self.coil_set_spec,
+            coil_arrays=coil_arrays,
+            coil_set_spec=coil_set_spec,
         )
+        if hostify_inputs:
+            resolved_coil_set_spec = _hostify_tree(resolved_coil_set_spec)
         resolved_constraint_weight = (
-            self.constraint_weight
-            if constraint_weight is None
-            else constraint_weight
+            self.constraint_weight if constraint_weight is None else constraint_weight
         )
 
         def residual_fn(x):
@@ -1505,6 +1538,153 @@ class BoozerSurfaceJAX(Optimizable):
 
         return residual_fn
 
+    def _traceable_surface_signature(self):
+        """Signature for metadata that becomes a traced constant in JAX closures."""
+        return (
+            int(self.mpol),
+            int(self.ntor),
+            int(self.nfp),
+            bool(self.stellsym),
+            str(self._surface_geometry_kind),
+            float(self.targetlabel),
+            str(self.label_type),
+            int(self.phi_idx),
+            _traceable_array_signature(self.quadpoints_phi),
+            _traceable_array_signature(self.quadpoints_theta),
+            _traceable_array_signature(self.scatter_indices),
+        )
+
+    def _resolve_constraint_weight(self, constraint_weight):
+        return (
+            self.constraint_weight if constraint_weight is None else constraint_weight
+        )
+
+    def _traceable_penalty_cache_key(
+        self,
+        optimize_G,
+        weight_inv_modB,
+        constraint_weight=None,
+    ):
+        return (
+            bool(optimize_G),
+            bool(weight_inv_modB),
+            float(self._resolve_constraint_weight(constraint_weight)),
+            self._traceable_surface_signature(),
+        )
+
+    def _traceable_exact_cache_key(self, weight_inv_modB, mask_indices):
+        return (
+            bool(weight_inv_modB),
+            self._traceable_surface_signature(),
+            _traceable_array_signature(mask_indices),
+        )
+
+    def _get_traceable_penalty_objective(
+        self,
+        optimize_G,
+        weight_inv_modB,
+        constraint_weight=None,
+    ):
+        resolved_constraint_weight = self._resolve_constraint_weight(constraint_weight)
+        key = self._traceable_penalty_cache_key(
+            optimize_G,
+            weight_inv_modB,
+            resolved_constraint_weight,
+        )
+        objective_fn = self._traceable_penalty_objective_cache.get(key)
+        if objective_fn is None:
+
+            def objective_fn(x, coil_set_spec):
+                return _boozer_penalty_objective(
+                    x,
+                    coil_set_spec=coil_set_spec,
+                    quadpoints_phi=self.quadpoints_phi,
+                    quadpoints_theta=self.quadpoints_theta,
+                    mpol=self.mpol,
+                    ntor=self.ntor,
+                    nfp=self.nfp,
+                    stellsym=self.stellsym,
+                    scatter_indices=self.scatter_indices,
+                    surface_kind=self._surface_geometry_kind,
+                    targetlabel=self.targetlabel,
+                    constraint_weight=resolved_constraint_weight,
+                    label_type=self.label_type,
+                    phi_idx=self.phi_idx,
+                    optimize_G=optimize_G,
+                    weight_inv_modB=weight_inv_modB,
+                )
+
+            self._traceable_penalty_objective_cache[key] = objective_fn
+        return self._traceable_penalty_objective_cache[key]
+
+    def _get_traceable_penalty_residual(
+        self,
+        optimize_G,
+        weight_inv_modB,
+        constraint_weight=None,
+    ):
+        resolved_constraint_weight = self._resolve_constraint_weight(constraint_weight)
+        key = self._traceable_penalty_cache_key(
+            optimize_G,
+            weight_inv_modB,
+            resolved_constraint_weight,
+        )
+        residual_fn = self._traceable_penalty_residual_cache.get(key)
+        if residual_fn is None:
+
+            def residual_fn(x, coil_set_spec):
+                optimizer_state = _as_boozer_penalty_optimizer_state(
+                    x,
+                    optimize_G=optimize_G,
+                )
+                G_value = (
+                    optimizer_state.G
+                    if optimize_G
+                    else compute_G_from_currents(
+                        _grouped_coil_currents(coil_set_spec=coil_set_spec)
+                    )
+                )
+                return self._compute_residual_vector(
+                    optimizer_state.surface_dofs,
+                    optimizer_state.iota,
+                    G_value,
+                    weight_inv_modB=weight_inv_modB,
+                    constraint_weight=resolved_constraint_weight,
+                    coil_set_spec=coil_set_spec,
+                )
+
+            self._traceable_penalty_residual_cache[key] = residual_fn
+        return self._traceable_penalty_residual_cache[key]
+
+    def _get_traceable_exact_residual(self, weight_inv_modB):
+        mask_indices = self._compute_stellsym_mask_indices()
+        key = self._traceable_exact_cache_key(weight_inv_modB, mask_indices)
+        residual_fn = self._traceable_exact_residual_cache.get(key)
+        if residual_fn is None:
+            exact_residual = _select_exact_residual_fn(self.stellsym)
+
+            def residual_fn(x, coil_set_spec):
+                return exact_residual(
+                    x,
+                    coil_set_spec=coil_set_spec,
+                    quadpoints_phi=self.quadpoints_phi,
+                    quadpoints_theta=self.quadpoints_theta,
+                    mpol=self.mpol,
+                    ntor=self.ntor,
+                    nfp=self.nfp,
+                    stellsym=self.stellsym,
+                    scatter_indices=self.scatter_indices,
+                    surface_kind=self._surface_geometry_kind,
+                    targetlabel=self.targetlabel,
+                    label_type=self.label_type,
+                    phi_idx=self.phi_idx,
+                    mask_indices=mask_indices,
+                    weight_inv_modB=weight_inv_modB,
+                )
+
+            self._traceable_exact_residual_cache[key] = residual_fn
+        return self._traceable_exact_residual_cache[key]
+
     def run_code_traceable(self, coil_source, sdofs, iota, G):
         """Trace-safe pure-array inner solve for the ondevice target lane.
 
@@ -1529,16 +1709,13 @@ class BoozerSurfaceJAX(Optimizable):
                 )
             )
             x0 = _concat_jax_float64(sdofs, [iota, G_exact])
-            mask_indices = self._compute_stellsym_mask_indices()
-            res_fn = self._make_exact_residual_with(
-                mask_indices,
-                coil_set_spec=coil_set_spec,
-            )
+            res_fn = self._get_traceable_exact_residual(weight_inv_modB)
             result = newton_exact_traceable(
                 res_fn,
                 x0,
                 maxiter=self.options["newton_maxiter"],
                 tol=self.options["newton_tol"],
+                args=(coil_set_spec,),
             )
             finite = (
                 jnp.all(jnp.isfinite(result["x"]))
@@ -1564,38 +1741,39 @@ class BoozerSurfaceJAX(Optimizable):
                 "weight_inv_modB": weight_inv_modB,
             }
 
-        method = self._resolve_optimizer_method()
+        optimize_G = G is not None
+        method = self._resolve_optimizer_method(optimize_G=optimize_G)
         if method not in _ONDEVICE_OPTIMIZER_METHODS:
             raise RuntimeError(
                 "run_code_traceable() requires optimizer_backend='ondevice' for LS solves."
             )
 
-        optimize_G = G is not None
         x0 = self._pack_decision_vector(iota, G, sdofs=_as_jax_float64(sdofs))
         if method == "lm-ondevice":
-            residual_fn = self._make_penalty_residual_with(
+            residual_fn = self._get_traceable_penalty_residual(
                 optimize_G,
                 weight_inv_modB,
-                coil_set_spec=coil_set_spec,
             )
             ls_state = levenberg_marquardt_traceable(
                 residual_fn,
                 x0,
                 maxiter=self.options["bfgs_maxiter"],
                 tol=self.options["bfgs_tol"],
+                args=(coil_set_spec,),
             )
             x_ls = ls_state["x"]
         else:
-            obj_fn = self._make_penalty_objective_with(
+            ls_obj_fn = self._make_penalty_objective_with(
                 optimize_G,
                 weight_inv_modB,
                 coil_set_spec=coil_set_spec,
+                hostify_inputs=False,
             )
             optimizer_options = self._collect_optimizer_options()
 
             if method == "bfgs-ondevice":
                 ls_state = _optimizer_jax._minimize_bfgs_private(
-                    obj_fn,
+                    ls_obj_fn,
                     x0,
                     maxiter=self.options["bfgs_maxiter"],
                     gtol=self.options["bfgs_tol"],
@@ -1606,7 +1784,7 @@ class BoozerSurfaceJAX(Optimizable):
                 x_ls = ls_state.x_k
             else:
                 ls_state = _optimizer_jax._minimize_lbfgs_private(
-                    obj_fn,
+                    ls_obj_fn,
                     x0,
                     maxiter=self.options["bfgs_maxiter"],
                     gtol=self.options["bfgs_tol"],
@@ -1618,10 +1796,9 @@ class BoozerSurfaceJAX(Optimizable):
                 )
                 x_ls = ls_state.x_k
 
-        obj_fn = self._make_penalty_objective_with(
+        obj_fn = self._get_traceable_penalty_objective(
             optimize_G,
             weight_inv_modB,
-            coil_set_spec=coil_set_spec,
         )
 
         newton_result = self._run_newton_polish_for_method(
@@ -1631,6 +1808,7 @@ class BoozerSurfaceJAX(Optimizable):
             maxiter=self.options["newton_maxiter"],
             tol=self.options["newton_tol"],
             stab=self.options["newton_stab"],
+            objective_args=(coil_set_spec,),
         )
         sdofs_out, iota_out, G_out = self._unpack_decision_vector_jax(
             newton_result["x"],
@@ -1709,13 +1887,9 @@ class BoozerSurfaceJAX(Optimizable):
         r_boozer = r_boozer_raw / jnp.sqrt(num_res)
 
         constraint_weight = (
-            self.constraint_weight
-            if constraint_weight is None
-            else constraint_weight
+            self.constraint_weight if constraint_weight is None else constraint_weight
         )
-        constraint_weight = (
-            constraint_weight if constraint_weight is not None else 1.0
-        )
+        constraint_weight = constraint_weight if constraint_weight is not None else 1.0
         constraint_weight = _as_jax_float64(constraint_weight)
         label_value, gamma_axis_z = _compute_label_and_axis_z(
             gamma=gamma,
@@ -1733,7 +1907,7 @@ class BoozerSurfaceJAX(Optimizable):
 
         return _concat_jax_float64(r_boozer, [rl, rz])
 
-    def _resolve_optimizer_method(self, limited_memory=None):
+    def _resolve_optimizer_method(self, limited_memory=None, *, optimize_G=True):
         """Resolve optimizer method string from options."""
         optimizer_backend = self.options["optimizer_backend"]
         require_target_backend_x64(optimizer_backend)
@@ -1745,6 +1919,20 @@ class BoozerSurfaceJAX(Optimizable):
                     "reference/transitional solver lane"
                 ),
             )
+            backend_config = get_backend_config()
+            if (
+                backend_config.backend == "jax"
+                and not backend_config.strict
+                and not is_parity_mode(backend_config.mode)
+            ):
+                raise RuntimeError(
+                    "BoozerSurfaceJAX cannot use "
+                    f"optimizer_backend={optimizer_backend!r} on the LS "
+                    "reference/transitional solver lane while simsopt backend mode "
+                    f"{backend_config.mode!r} targets the fast/ondevice lane. "
+                    "Select optimizer_backend='ondevice' or switch to a "
+                    "CPU/reference or parity backend mode."
+                )
             warn_if_jax_fallback(
                 component="BoozerSurfaceJAX",
                 detail=(
@@ -1759,10 +1947,20 @@ class BoozerSurfaceJAX(Optimizable):
             "force_ondevice_limited_memory", False
         ):
             effective_limited_memory = True
+        least_squares_algorithm = self.options["least_squares_algorithm"]
+        if (
+            optimizer_backend == "ondevice"
+            and least_squares_algorithm == "lm"
+            and not optimize_G
+        ):
+            # The explicit-G full-state path is the on-device LM target lane.
+            # The reduced fixed-G compatibility path remains more reliable on
+            # the historical quasi-Newton formulation.
+            least_squares_algorithm = "quasi-newton"
         return resolve_least_squares_optimizer_method(
             optimizer_backend,
             limited_memory=effective_limited_memory,
-            least_squares_algorithm=self.options["least_squares_algorithm"],
+            least_squares_algorithm=least_squares_algorithm,
         )
 
     def _collect_optimizer_options(self):
@@ -1791,6 +1989,7 @@ class BoozerSurfaceJAX(Optimizable):
         tol,
         stab,
         progress_callback=None,
+        objective_args=(),
     ):
         """Run the Newton polish implementation for a resolved optimizer method."""
         if method in _ONDEVICE_OPTIMIZER_METHODS:
@@ -1801,6 +2000,11 @@ class BoozerSurfaceJAX(Optimizable):
                 tol=tol,
                 stab=stab,
                 progress_callback=progress_callback,
+                args=objective_args,
+            )
+        if objective_args:
+            raise ValueError(
+                "Newton objective args are only supported on the ondevice traceable path."
             )
         return newton_polish(
             obj_fn,
@@ -1837,7 +2041,10 @@ class BoozerSurfaceJAX(Optimizable):
         optimize_G = G is not None
         s = self.surface
         x0 = self._make_penalty_optimizer_state(iota, G)
-        method = self._resolve_optimizer_method(limited_memory=limited_memory)
+        method = self._resolve_optimizer_method(
+            limited_memory=limited_memory,
+            optimize_G=optimize_G,
+        )
         progress_callback = self._make_solver_progress_callback(method)
         if method in {"lm", "lm-ondevice"}:
             residual_fn = self._make_penalty_residual_with(
@@ -1937,7 +2144,7 @@ class BoozerSurfaceJAX(Optimizable):
             optimize_G, weight_inv_modB, constraint_weight
         )
 
-        method = self._resolve_optimizer_method()
+        method = self._resolve_optimizer_method(optimize_G=optimize_G)
         result = self._run_newton_polish_for_method(
             method,
             obj_fn,
@@ -2032,27 +2239,41 @@ class BoozerSurfaceJAX(Optimizable):
         mask_indices,
         coil_arrays=None,
         coil_set_spec=None,
+        *,
+        hostify_inputs=True,
     ):
         """Build the exact residual function with explicit grouped-field inputs."""
         residual_fn = _select_exact_residual_fn(self.stellsym)
-        resolved_coil_set_spec = _hostify_tree(
-            _resolved_coil_set_spec(
-                self.coil_set_spec,
-                coil_arrays=coil_arrays,
-                coil_set_spec=coil_set_spec,
-            )
+        resolved_coil_set_spec = _resolved_coil_set_spec(
+            self.coil_set_spec,
+            coil_arrays=coil_arrays,
+            coil_set_spec=coil_set_spec,
         )
+        if hostify_inputs:
+            resolved_coil_set_spec = _hostify_tree(resolved_coil_set_spec)
         return partial(
             residual_fn,
             coil_arrays=coil_arrays,
             coil_set_spec=resolved_coil_set_spec,
-            quadpoints_phi=_hostify_tree(self.quadpoints_phi),
-            quadpoints_theta=_hostify_tree(self.quadpoints_theta),
+            quadpoints_phi=(
+                _hostify_tree(self.quadpoints_phi)
+                if hostify_inputs
+                else self.quadpoints_phi
+            ),
+            quadpoints_theta=(
+                _hostify_tree(self.quadpoints_theta)
+                if hostify_inputs
+                else self.quadpoints_theta
+            ),
             mpol=self.mpol,
             ntor=self.ntor,
             nfp=self.nfp,
             stellsym=self.stellsym,
-            scatter_indices=_hostify_tree(self.scatter_indices),
+            scatter_indices=(
+                _hostify_tree(self.scatter_indices)
+                if hostify_inputs
+                else self.scatter_indices
+            ),
             surface_kind=self._surface_geometry_kind,
             targetlabel=self.targetlabel,
             label_type=self.label_type,

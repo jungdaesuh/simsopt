@@ -184,6 +184,10 @@ _enable_non_strict_jax_backend = partial(
     enable_non_strict_jax_backend,
     mode="jax_gpu_parity",
 )
+_enable_fast_non_strict_jax_backend = partial(
+    enable_non_strict_jax_backend,
+    mode="jax_gpu_fast",
+)
 
 
 def _assert_hidden_spec_fallback_rejected(
@@ -1241,8 +1245,12 @@ def _assert_wrapper_resolve_fd_matches_real_fixture(
     if mismatch_reasons:
         diagnostics.append("Taylor mismatches: " + "; ".join(mismatch_reasons))
     if stable_samples < _REAL_RESOLVE_FD_MIN_STABLE_SAMPLES:
-        instability_detail = "; ".join(instability_reasons) if instability_reasons else "none"
-        short_series_detail = "; ".join(short_series_reasons) if short_series_reasons else "none"
+        instability_detail = (
+            "; ".join(instability_reasons) if instability_reasons else "none"
+        )
+        short_series_detail = (
+            "; ".join(short_series_reasons) if short_series_reasons else "none"
+        )
         diagnostics.append(
             f"stable directions={stable_samples}/{num_directions} "
             f"(required {_REAL_RESOLVE_FD_MIN_STABLE_SAMPLES}); "
@@ -2572,6 +2580,32 @@ class TestAdjointSolveConsistency:
         with pytest.raises(
             RuntimeError,
             match=_PUBLIC_COIL_VJP_STRICT_PATTERN,
+        ):
+            bs_jax.coil_cotangents_to_derivative(
+                _single_coil_cotangent_arrays(
+                    np.array([1.0, 2.0, 3.0]),
+                    np.array([4.0, 5.0, 6.0]),
+                    1.5,
+                ),
+                [[0]],
+            )
+
+        assert coils[0].calls == []
+        assert coils[0].current.calls == []
+
+    def test_fast_mode_rejects_public_cpu_coil_vjp_pullback(
+        self,
+        monkeypatch,
+        request,
+    ):
+        """The fast/ondevice lane must not silently route through ``coil.vjp()``."""
+        _enable_fast_non_strict_jax_backend(monkeypatch, request)
+        coils = [_CpuFallbackRecordingCoil()]
+        bs_jax = _make_biotsavart_jax_for_coils(coils)
+
+        with pytest.raises(
+            RuntimeError,
+            match="BiotSavartJAX.*public CPU coil\\.vjp\\(\\) pullback compatibility path.*jax_gpu_fast.*fast/ondevice lane",
         ):
             bs_jax.coil_cotangents_to_derivative(
                 _single_coil_cotangent_arrays(
@@ -4836,7 +4870,9 @@ class TestTraceableObjective:
     @staticmethod
     def _assert_runtime_bundle_core_rebuilt(runtime_bundle_a, runtime_bundle_b):
         assert runtime_bundle_a["objective"] is not runtime_bundle_b["objective"]
-        assert runtime_bundle_a["value_and_grad"] is not runtime_bundle_b["value_and_grad"]
+        assert (
+            runtime_bundle_a["value_and_grad"] is not runtime_bundle_b["value_and_grad"]
+        )
 
     def test_runtime_bundle_success_filter_blocks_infeasible_states(self, boozer_setup):
         """A target-lane success filter must demote infeasible states to failure."""

@@ -16,7 +16,12 @@ import numpy as np
 import jax
 import jax.numpy as jnp
 
-from ..backend import raise_if_strict_jax_fallback, warn_if_jax_fallback
+from ..backend import (
+    get_backend_config,
+    is_parity_mode,
+    raise_if_strict_jax_fallback,
+    warn_if_jax_fallback,
+)
 from .._core.derivative import Derivative
 from .._core.optimizable import Optimizable
 from ..jax_core import (
@@ -473,6 +478,18 @@ def _nonzero_dof_derivative_data(derivative_like):
 
 def _handle_public_coil_vjp_pullback_fallback() -> None:
     _raise_if_strict_biot_savart_fallback(_PUBLIC_COIL_VJP_PULLBACK_DETAIL)
+    config = get_backend_config()
+    if (
+        config.backend == "jax"
+        and not config.strict
+        and not is_parity_mode(config.mode)
+    ):
+        raise RuntimeError(
+            "BiotSavartJAX cannot use the public CPU coil.vjp() pullback "
+            "compatibility path while simsopt backend mode "
+            f"{config.mode!r} targets the fast/ondevice lane. This legacy "
+            "adapter seam is only supported on CPU/reference or parity lanes."
+        )
     _warn_biot_savart_fallback(_PUBLIC_COIL_VJP_PULLBACK_DETAIL)
 
 
