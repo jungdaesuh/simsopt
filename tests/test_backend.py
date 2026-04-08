@@ -842,6 +842,77 @@ def test_maybe_initialize_distributed_jax_updates_sharding_device_counts(monkeyp
     assert tuning.device_count == 8
 
 
+def test_maybe_initialize_distributed_jax_invalidates_preinit_chunk_caches(
+    monkeypatch,
+):
+    def _fake_run(cmd, *, check, capture_output, text):
+        del check, capture_output, text
+        calls.append(cmd)
+        index = cmd[-1]
+        stdout_by_index = {
+            "3": "3, 24576\n",
+            "1": "1, 8192\n",
+        }
+        return types.SimpleNamespace(stdout=stdout_by_index[index])
+
+    class _FakeDevice:
+        local_hardware_id = 1
+
+    def _is_initialized():
+        return distributed_state["initialized"]
+
+    def _initialize(**kwargs):
+        del kwargs
+        distributed_state["initialized"] = True
+
+    def _local_devices(*, backend=None):
+        if not distributed_state["initialized"]:
+            raise AssertionError(
+                f"local_devices should not run before distributed init for backend={backend!r}"
+            )
+        return [_FakeDevice()]
+
+    _clear_backend_env(monkeypatch)
+    monkeypatch.setenv("SIMSOPT_BACKEND_MODE", "jax_gpu_fast")
+    monkeypatch.setenv("SIMSOPT_JAX_DISTRIBUTED_INIT", "1")
+    monkeypatch.setenv("SIMSOPT_JAX_COORDINATOR_ADDRESS", "127.0.0.1:12345")
+    monkeypatch.setenv("SIMSOPT_JAX_NUM_PROCESSES", "4")
+    monkeypatch.setenv("SIMSOPT_JAX_PROCESS_ID", "1")
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "3,1")
+    distributed_state = {"initialized": False}
+    monkeypatch.setitem(
+        sys.modules,
+        "jax",
+        types.SimpleNamespace(
+            distributed=types.SimpleNamespace(
+                is_initialized=_is_initialized,
+                initialize=_initialize,
+            ),
+            local_devices=_local_devices,
+        ),
+    )
+    calls: list[list[str]] = []
+    monkeypatch.setattr("subprocess.run", _fake_run)
+    backend = _fresh_backend()
+
+    pre_chunk = backend.get_chunk_tuning()
+    pre_field = backend.get_field_kernel_tuning()
+    config = backend.maybe_initialize_distributed_jax()
+    post_chunk = backend.get_chunk_tuning()
+    post_field = backend.get_field_kernel_tuning()
+
+    assert pre_chunk.gpu_total_memory_mb == 24576
+    assert pre_chunk.autotune_source == "nvidia-smi[3]"
+    assert pre_field.coil_chunk_size == 128
+    assert config.initialized is True
+    assert backend.get_active_cuda_device_index() == 1
+    assert backend.query_active_gpu_memory_mb() == pytest.approx(8192.0)
+    assert post_chunk.gpu_total_memory_mb == 8192
+    assert post_chunk.autotune_source == "nvidia-smi[1]"
+    assert post_field.coil_chunk_size == 32
+    assert [cmd[-2:] for cmd in calls] == [["-i", "3"], ["-i", "1"], ["-i", "1"]]
+
+
 def test_explicit_current_mode_policy_preserves_strict_state(monkeypatch):
     _clear_backend_env(monkeypatch)
     backend = _fresh_backend()
