@@ -65,6 +65,24 @@ def _curve_jax_position_and_tangent(curve):
     return _as_jax_float64(curve.gamma()), _as_jax_float64(curve.gammadash())
 
 
+def _curve_numpy_position_and_tangent(curve):
+    return _as_numpy_float64(curve.gamma()).copy(), _as_numpy_float64(
+        curve.gammadash()
+    ).copy()
+
+
+def _curve_surface_geometry_snapshot(curves, surface):
+    curve_positions = []
+    curve_tangents = []
+    for curve in curves:
+        gamma, gammadash = _curve_numpy_position_and_tangent(curve)
+        curve_positions.append(gamma)
+        curve_tangents.append(gammadash)
+    surface_gamma = _as_numpy_float64(surface.gamma().reshape((-1, 3))).copy()
+    surface_normals = _as_numpy_float64(surface.normal().reshape((-1, 3))).copy()
+    return curve_positions, curve_tangents, surface_gamma, surface_normals
+
+
 def _curve_pair_jax_data(curves, i, j):
     gamma1, l1 = _curve_jax_position_and_tangent(curves[i])
     gamma2, l2 = _curve_jax_position_and_tangent(curves[j])
@@ -941,16 +959,34 @@ class CurveSurfaceDistance(Optimizable):
     def recompute_bell(self, parent=None):
         self.candidates = None
 
-    def compute_candidates(self):
+    def compute_candidates(self, curve_positions=None, surface_gamma=None):
         if self.candidates is None:
+            if curve_positions is None or surface_gamma is None:
+                curve_positions, _, surface_gamma, _ = _curve_surface_geometry_snapshot(
+                    self.curves, self.surface
+                )
             candidates = (
                 sopp.get_pointclouds_closer_than_threshold_between_two_collections(
-                    [c.gamma() for c in self.curves],
-                    [self.surface.gamma().reshape((-1, 3))],
+                    curve_positions,
+                    [surface_gamma],
                     self.minimum_distance,
                 )
             )
             self.candidates = candidates
+
+    def _evaluation_geometry(self):
+        curve_positions, curve_tangents, surface_gamma, surface_normals = (
+            _curve_surface_geometry_snapshot(self.curves, self.surface)
+        )
+        self.compute_candidates(
+            curve_positions=curve_positions, surface_gamma=surface_gamma
+        )
+        return (
+            curve_positions,
+            curve_tangents,
+            _as_jax_float64(surface_gamma),
+            _as_jax_float64(surface_normals),
+        )
 
     def shortest_distance_among_candidates(self):
         self.compute_candidates()
@@ -983,13 +1019,13 @@ class CurveSurfaceDistance(Optimizable):
         """
         This returns the value of the quantity.
         """
-        self.compute_candidates()
+        curve_positions, curve_tangents, gammas, normals = self._evaluation_geometry()
         res = 0.0
-        gammas = _as_jax_float64(self.surface.gamma().reshape((-1, 3)))
-        ns = _as_jax_float64(self.surface.normal().reshape((-1, 3)))
+        minimum_distance = _as_jax_float64(self.minimum_distance)
         for i, _ in self.candidates:
-            gammac, lc = _curve_jax_position_and_tangent(self.curves[i])
-            res += cs_distance_pure(gammac, lc, gammas, ns, self.minimum_distance)
+            gammac = _as_jax_float64(curve_positions[i])
+            lc = _as_jax_float64(curve_tangents[i])
+            res += cs_distance_pure(gammac, lc, gammas, normals, minimum_distance)
         return res
 
     @derivative_dec
@@ -997,20 +1033,19 @@ class CurveSurfaceDistance(Optimizable):
         """
         This returns the derivative of the quantity with respect to the curve dofs.
         """
-        self.compute_candidates()
+        curve_positions, curve_tangents, gammas, normals = self._evaluation_geometry()
         dgamma_by_dcoeff_vjp_vecs, dgammadash_by_dcoeff_vjp_vecs = _curve_vjp_buffers(
             self.curves
         )
-        gammas = _as_jax_float64(self.surface.gamma().reshape((-1, 3)))
-        ns = _as_jax_float64(self.surface.normal().reshape((-1, 3)))
+        minimum_distance = _as_jax_float64(self.minimum_distance)
         for i, _ in self.candidates:
-            gammac, lc = _curve_jax_position_and_tangent(self.curves[i])
-            minimum_distance = _as_jax_float64(self.minimum_distance)
+            gammac = _as_jax_float64(curve_positions[i])
+            lc = _as_jax_float64(curve_tangents[i])
             grad0, grad1 = _cs_distance_grad(
                 gammac,
                 lc,
                 gammas,
-                ns,
+                normals,
                 minimum_distance,
             )
             dgamma_by_dcoeff_vjp_vecs[i] += _as_numpy_float64(grad0)
