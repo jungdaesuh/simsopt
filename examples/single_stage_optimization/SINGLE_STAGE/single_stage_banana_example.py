@@ -587,9 +587,10 @@ def parse_args():
             )
         ),
         help=(
-            "For --hardware-search-mode=adaptive, allow warning-only handling during the "
-            "first N accepted iterations and while the surface search gate remains relaxed "
-            "(gate_scale < 1.0) before reverting to hard rejection."
+            "For --hardware-search-mode=adaptive, allow warning-only handling only while the "
+            "multisurface search gate remains relaxed (gate_scale < 1.0). When this value is "
+            "positive, it caps the number of accepted relaxed-gate iterations that may use the "
+            "warning-only path before reverting to hard rejection."
         ),
     )
     parser.add_argument(
@@ -695,6 +696,29 @@ def parse_args():
         choices=["initial", "final"],
         default=os.environ.get("BOOZER_STAGE", "initial"),
         help="Use least-squares Boozer residual during initial stage or exact residual during final stage.",
+    )
+    parser.add_argument(
+        "--boozer-stage-refinement",
+        action="store_true",
+        help=(
+            "Penalty-mode single-surface only: after an initial-stage run, restart from the best "
+            "accepted hardware-feasible incumbent with a different Boozer residual stage."
+        ),
+    )
+    parser.add_argument(
+        "--refinement-boozer-stage",
+        choices=["initial", "final"],
+        default=os.environ.get("REFINEMENT_BOOZER_STAGE", "final"),
+        help=(
+            "Residual stage to use for the optional refinement restart. In v1 this changes only "
+            "the Boozer residual objective term, not the underlying Boozer initialization method."
+        ),
+    )
+    parser.add_argument(
+        "--refinement-maxiter",
+        type=int,
+        default=int(os.environ.get("REFINEMENT_MAXITER", "100")),
+        help="Maximum L-BFGS-B iterations for the optional Boozer-stage refinement restart.",
     )
     parser.add_argument("--cc-dist", type=float, default=float(os.environ.get("CC_DIST", "0.05")))
     parser.add_argument("--curvature-threshold", type=float, default=float(os.environ.get("CURVATURE_THRESHOLD", "40")))
@@ -1144,6 +1168,9 @@ def validate_confinement_surrogate_args(args):
 class RunIdentityConfig:
     stage2_bs_path: str
     stage: str
+    boozer_stage_refinement: bool
+    refinement_boozer_stage: str
+    refinement_maxiter: int
     constraint_weight: float
     constraint_method: str
     vol_target: float
@@ -1219,6 +1246,9 @@ def make_run_identity_config(
     return RunIdentityConfig(
         stage2_bs_path=stage2_bs_path,
         stage=stage,
+        boozer_stage_refinement=bool(args.boozer_stage_refinement),
+        refinement_boozer_stage=args.refinement_boozer_stage,
+        refinement_maxiter=args.refinement_maxiter,
         constraint_weight=constraint_weight,
         constraint_method=constraint_method,
         vol_target=vol_target,
@@ -1281,6 +1311,28 @@ def build_run_identity_config(config):
     return "|".join(str(value) for value in astuple(config))
 
 
+def validate_boozer_stage_refinement_args(args, constraint_weight):
+    if not args.boozer_stage_refinement:
+        return
+    if args.constraint_method != "penalty":
+        raise ValueError("--boozer-stage-refinement currently requires --constraint-method=penalty")
+    if args.num_surfaces != 1:
+        raise ValueError("--boozer-stage-refinement currently requires --num-surfaces=1")
+    if args.basin_hops > 0:
+        raise ValueError("--boozer-stage-refinement is not supported with --basin-hops > 0")
+    if args.boozer_stage != "initial":
+        raise ValueError("--boozer-stage-refinement currently requires --boozer-stage=initial")
+    if args.refinement_boozer_stage != "final":
+        raise ValueError("--boozer-stage-refinement currently requires --refinement-boozer-stage=final")
+    if constraint_weight is None:
+        raise ValueError(
+            "--boozer-stage-refinement currently requires least-squares Boozer initialization "
+            "(--constraint-weight >= 0)"
+        )
+    if args.refinement_maxiter <= 0:
+        raise ValueError("--refinement-maxiter must be positive when --boozer-stage-refinement is enabled")
+
+
 def evaluate_search_topology_gate(num_surfaces, outer_surface, bfield):
     if num_surfaces <= 1 or TOPOLOGY_GATE_FIELDLINES <= 0:
         return disabled_topology_gate_status(
@@ -1317,6 +1369,213 @@ def final_topology_gate_for_results(init_only, num_surfaces, outer_surface, bfie
     status = evaluate_search_topology_gate(num_surfaces, outer_surface, bfield)
     status["evaluated"] = True
     return status
+
+
+def refinement_eligible_incumbent(run_dict):
+    hardware_status = run_dict.get("accepted_hardware_status")
+    surface_status = run_dict.get("surface_status")
+    search_eval = run_dict.get("search_eval")
+    if hardware_status is None or not hardware_status.get("success", False):
+        return False
+    if surface_status is None or not surface_status.get("success", False):
+        return False
+    if bool(run_dict.get("intersecting", False)):
+        return False
+    if search_eval is None or "total" not in search_eval:
+        return False
+    return np.isfinite(float(search_eval["total"]))
+
+
+def accepted_search_metric(run_dict):
+    return float(run_dict["search_eval"]["total"])
+
+
+def maybe_update_best_feasible_incumbent(run_dict, incumbent_stage):
+    if not refinement_eligible_incumbent(run_dict):
+        return False
+    metric = accepted_search_metric(run_dict)
+    best_metric = run_dict.get("best_feasible_metric")
+    if best_metric is not None and metric >= best_metric:
+        return False
+    run_dict["best_feasible_incumbent"] = snapshot_single_stage_incumbent_state(run_dict)
+    run_dict["best_feasible_metric"] = metric
+    run_dict["best_feasible_stage"] = str(incumbent_stage)
+    return True
+
+
+def build_single_stage_objective_bundle(
+    stage,
+    surface_data,
+    coils,
+    curves,
+    banana_curves,
+    iota_target,
+    RES_WEIGHT,
+    IOTAS_WEIGHT,
+    LENGTH_WEIGHT,
+    CC_WEIGHT,
+    CC_DIST,
+    CS_WEIGHT,
+    CS_DIST,
+    CURVATURE_WEIGHT,
+    CURVATURE_THRESHOLD,
+    length_target=None,
+    SURF_DIST_WEIGHT=0.0,
+    vessel_surface=None,
+    vessel_gap_threshold=0.0,
+):
+    surface_iota_terms = [Iotas(entry["boozer_surface"]) for entry in surface_data]
+    nonQSs = [NonQuasiSymmetricRatio(entry["boozer_surface"], BiotSavart(coils)) for entry in surface_data]
+    if stage == "final":
+        brs = [BoozerResidualExact(entry["boozer_surface"], BiotSavart(coils)) for entry in surface_data]
+    else:
+        brs = [BoozerResidual(entry["boozer_surface"], BiotSavart(coils)) for entry in surface_data]
+
+    curvelength = CurveLength(banana_curves[0])
+    if length_target is None:
+        length_target = curvelength.J()
+    Jiota = QuadraticPenalty(surface_iota_terms[-1], iota_target)
+    JnonQSRatio = average_surface_objectives(nonQSs)
+    JBoozerResidual = average_surface_objectives(brs)
+    JCurveLength = QuadraticPenalty(curvelength, length_target, "max")
+    outer_surface = surface_data[-1]["boozer_surface"].surface
+    JCurveCurve = CurveCurveDistance(curves, CC_DIST)
+    JCurveSurface = CurveSurfaceDistance(curves, outer_surface, CS_DIST)
+    JSurfSurf = (
+        SurfaceSurfaceDistance(outer_surface, vessel_surface, vessel_gap_threshold)
+        if len(surface_data) == 1 and vessel_surface is not None
+        else None
+    )
+    JCurvature = LpCurveCurvature(banana_curves[0], 2, CURVATURE_THRESHOLD)
+    JF = build_total_objective(
+        JnonQSRatio,
+        RES_WEIGHT,
+        JBoozerResidual,
+        IOTAS_WEIGHT,
+        Jiota,
+        LENGTH_WEIGHT,
+        JCurveLength,
+        CC_WEIGHT,
+        JCurveCurve,
+        CS_WEIGHT,
+        JCurveSurface,
+        CURVATURE_WEIGHT,
+        JCurvature,
+        SURF_DIST_WEIGHT=SURF_DIST_WEIGHT,
+        JSurfSurf=JSurfSurf,
+    )
+    return {
+        "surface_iota_terms": surface_iota_terms,
+        "nonQSs": nonQSs,
+        "brs": brs,
+        "curvelength": curvelength,
+        "length_target": length_target,
+        "Jiota": Jiota,
+        "JnonQSRatio": JnonQSRatio,
+        "JBoozerResidual": JBoozerResidual,
+        "JCurveLength": JCurveLength,
+        "JCurveCurve": JCurveCurve,
+        "JCurveSurface": JCurveSurface,
+        "JSurfSurf": JSurfSurf,
+        "JCurvature": JCurvature,
+        "JF": JF,
+    }
+
+
+def apply_single_stage_objective_bundle(objective_bundle):
+    global surface_iota_terms
+    global nonQSs
+    global brs
+    global curvelength
+    global Jiota
+    global JnonQSRatio
+    global JBoozerResidual
+    global JCurveLength
+    global JCurveCurve
+    global JCurveSurface
+    global JSurfSurf
+    global JCurvature
+    global JF
+
+    surface_iota_terms = objective_bundle["surface_iota_terms"]
+    nonQSs = objective_bundle["nonQSs"]
+    brs = objective_bundle["brs"]
+    curvelength = objective_bundle["curvelength"]
+    Jiota = objective_bundle["Jiota"]
+    JnonQSRatio = objective_bundle["JnonQSRatio"]
+    JBoozerResidual = objective_bundle["JBoozerResidual"]
+    JCurveLength = objective_bundle["JCurveLength"]
+    JCurveCurve = objective_bundle["JCurveCurve"]
+    JCurveSurface = objective_bundle["JCurveSurface"]
+    JSurfSurf = objective_bundle["JSurfSurf"]
+    JCurvature = objective_bundle["JCurvature"]
+    JF = objective_bundle["JF"]
+
+
+def refresh_accepted_search_state(run_dict, accepted_stage):
+    JF.x = run_dict["accepted_x"].copy()
+    restore_surface_states(surface_data, run_dict["surface_state"])
+    current_search_weights = build_surface_search_weights(
+        len(surface_data),
+        run_dict["accepted_iterations"],
+        MULTISURFACE_RAMP_ITERATIONS,
+        INNER_SURFACE_INITIAL_WEIGHT,
+    )
+    current_search_eval = evaluate_search_objective(current_search_weights)
+    run_dict["J"] = current_search_eval["total"]
+    run_dict["dJ"] = current_search_eval["grad"].copy()
+    run_dict["search_eval"] = current_search_eval
+    run_dict["accepted_boozer_stage"] = accepted_stage
+    run_dict["x_prev"] = run_dict["accepted_x"].copy()
+    run_dict["trial_hardware_status"] = None
+    run_dict.pop("last_successful_eval", None)
+    run_dict.pop("last_successful_eval_weights", None)
+    return float(current_search_eval["total"])
+
+
+def evaluate_incumbent_metric_for_stage(
+    run_dict,
+    incumbent,
+    comparison_stage,
+    rebuild_stage_objective_bundle,
+):
+    restore_single_stage_incumbent_state(run_dict, incumbent)
+    rebuild_stage_objective_bundle(comparison_stage)
+    return refresh_accepted_search_state(run_dict, comparison_stage)
+
+
+def restore_incumbent_for_stage(
+    run_dict,
+    incumbent,
+    incumbent_stage,
+    rebuild_stage_objective_bundle,
+):
+    restore_single_stage_incumbent_state(run_dict, incumbent)
+    objective_bundle = rebuild_stage_objective_bundle(incumbent_stage)
+    refresh_accepted_search_state(run_dict, incumbent_stage)
+    return objective_bundle
+
+
+def refinement_improves_phase1_metric(
+    phase1_metric,
+    phase1_stage,
+    run_dict,
+    refinement_incumbent,
+    rebuild_stage_objective_bundle,
+):
+    if refinement_incumbent is None:
+        return None, False
+    refinement_metric = evaluate_incumbent_metric_for_stage(
+        run_dict,
+        refinement_incumbent,
+        phase1_stage,
+        rebuild_stage_objective_bundle,
+    )
+    return refinement_metric, refinement_metric <= phase1_metric
+
+
+def reported_boozer_stage(requested_stage, final_source_stage):
+    return str(requested_stage if final_source_stage is None else final_source_stage)
 
 
 def evaluate_total_objective(
@@ -1880,6 +2139,9 @@ def callback(x):
     max_curvature = hardware_snapshot["max_curvature"]
     hardware_status = hardware_snapshot["status"]
     run_dict['accepted_hardware_status'] = hardware_status
+    incumbent_stage = run_dict.get("accepted_boozer_stage", globals().get("stage", "initial"))
+    run_dict["accepted_boozer_stage"] = incumbent_stage
+    maybe_update_best_feasible_incumbent(run_dict, incumbent_stage)
 
     bs.set_points(outer_entry['boozer_surface'].surface.gamma().reshape((-1, 3)))
     unitn = outer_entry['boozer_surface'].surface.unitnormal()
@@ -2113,6 +2375,7 @@ if __name__ == "__main__":
         raise ValueError("--hardware-search-soft-iterations must be non-negative")
     validate_alm_cli_args(args)
     validate_confinement_surrogate_args(args)
+    validate_boozer_stage_refinement_args(args, CONSTRAINT_WEIGHT)
     MULTISURFACE_RAMP_ITERATIONS = args.multisurface_ramp_iterations
     INNER_SURFACE_INITIAL_WEIGHT = args.inner_surface_initial_weight
     TOPOLOGY_GATE_FIELDLINES = args.topology_gate_fieldlines
@@ -2126,7 +2389,6 @@ if __name__ == "__main__":
     # Output directory setup
     OUT_DIR = args.output_root
     os.makedirs(OUT_DIR, exist_ok=True)
-    boozer_type = {'initial': 'least_squares', 'final': 'exact'}  # example
     stage = args.boozer_stage
 
     # ==============================================================================
@@ -2246,14 +2508,6 @@ if __name__ == "__main__":
     # ==============================================================================
     # DEFINE OBJECTIVE FUNCTION COMPONENTS
     # ==============================================================================
-    # Quasi-symmetry and Boozer coordinate residuals
-    surface_iota_terms = [Iotas(entry["boozer_surface"]) for entry in surface_data]
-    nonQSs = [NonQuasiSymmetricRatio(entry["boozer_surface"], BiotSavart(coils)) for entry in surface_data]
-    if boozer_type[stage] == 'exact':
-        brs = [BoozerResidualExact(entry["boozer_surface"], BiotSavart(coils)) for entry in surface_data]
-    else:
-        brs = [BoozerResidual(entry["boozer_surface"], BiotSavart(coils)) for entry in surface_data]
-
     # Objective function weights and parameters (all configurable via CLI)
     # Baseline default floors enforced via max() — weights are free, thresholds are clamped.
     LENGTH_WEIGHT = args.length_weight
@@ -2279,36 +2533,35 @@ if __name__ == "__main__":
     if len(surface_data) > 1 and SURF_DIST_WEIGHT != 0:
         print("WARNING: SURF_DIST_WEIGHT is diagnostic-only in multi-surface mode; outer-vessel spacing is enforced as a rejection gate.")
 
-    # Individual objective terms
-    curvelength = CurveLength(banana_curves[0])
-    length_target = curvelength.J()
-    Jiota = QuadraticPenalty(surface_iota_terms[-1], iota_target)
-    JnonQSRatio = average_surface_objectives(nonQSs)
-    JBoozerResidual = average_surface_objectives(brs)
-    JCurveLength = QuadraticPenalty(curvelength, length_target, 'max')
-    JCurveCurve = CurveCurveDistance(curves, CC_DIST)
-    JCurveSurface = CurveSurfaceDistance(curves, outer_surface_data['boozer_surface'].surface, CS_DIST)
-    JSurfSurf = SurfaceSurfaceDistance(outer_surface_data['boozer_surface'].surface, VV, SS_DIST) if len(surface_data) == 1 else None
-    JCurvature = LpCurveCurvature(banana_curves[0], 2, CURVATURE_THRESHOLD)
+    length_target = None
 
-    # Combined objective function
-    JF = build_total_objective(
-        JnonQSRatio,
-        RES_WEIGHT,
-        JBoozerResidual,
-        IOTAS_WEIGHT,
-        Jiota,
-        LENGTH_WEIGHT,
-        JCurveLength,
-        CC_WEIGHT,
-        JCurveCurve,
-        CS_WEIGHT,
-        JCurveSurface,
-        CURVATURE_WEIGHT,
-        JCurvature,
-        SURF_DIST_WEIGHT=SURF_DIST_WEIGHT,
-        JSurfSurf=JSurfSurf,
-    )
+    def rebuild_stage_objective_bundle(stage_name):
+        objective_bundle = build_single_stage_objective_bundle(
+            stage_name,
+            surface_data,
+            coils,
+            curves,
+            banana_curves,
+            iota_target,
+            RES_WEIGHT,
+            IOTAS_WEIGHT,
+            LENGTH_WEIGHT,
+            CC_WEIGHT,
+            CC_DIST,
+            CS_WEIGHT,
+            CS_DIST,
+            CURVATURE_WEIGHT,
+            CURVATURE_THRESHOLD,
+            length_target=length_target,
+            SURF_DIST_WEIGHT=SURF_DIST_WEIGHT,
+            vessel_surface=VV,
+            vessel_gap_threshold=SS_DIST,
+        )
+        apply_single_stage_objective_bundle(objective_bundle)
+        return objective_bundle
+
+    objective_bundle = rebuild_stage_objective_bundle(stage)
+    length_target = objective_bundle["length_target"]
 
     # Extract degrees of freedom
     dofs = JF.x
@@ -2335,6 +2588,39 @@ if __name__ == "__main__":
         SURFACE_GAP_THRESHOLD if len(surface_data) > 1 else 0.0,
         SS_DIST if len(surface_data) > 1 else 0.0,
     )
+    initial_surface_status = evaluate_surface_stack(
+        surface_data,
+        vessel_surface=VV if len(surface_data) > 1 else None,
+        surface_gap_threshold=SURFACE_GAP_THRESHOLD if len(surface_data) > 1 else 0.0,
+        vessel_gap_threshold=SS_DIST if len(surface_data) > 1 else 0.0,
+        enforce_nesting=True,
+    )
+    initial_search_surface_status = evaluate_surface_stack(
+        surface_data,
+        vessel_surface=VV if len(surface_data) > 1 else None,
+        surface_gap_threshold=initial_search_gate["surface_gap_threshold"],
+        vessel_gap_threshold=initial_search_gate["vessel_gap_threshold"],
+        enforce_nesting=initial_search_gate["enforce_nesting"],
+    )
+    initial_topology_status = final_topology_gate_for_results(
+        args.init_only,
+        len(surface_data),
+        outer_surface_data["boozer_surface"].surface,
+        bs,
+    )
+    initial_hardware_snapshot = evaluate_single_stage_hardware_snapshot(
+        JCurveCurve,
+        CC_DIST,
+        JCurveSurface,
+        CS_DIST,
+        JSurfSurf,
+        initial_surface_status,
+        SS_DIST,
+        banana_curve,
+        CURVATURE_THRESHOLD,
+        outer_surface_data["boozer_surface"].surface,
+        VV,
+    )
     run_dict = {
         'surface_state': snapshot_surface_states(surface_data),
         'J': initial_search_eval['total'],
@@ -2347,28 +2633,16 @@ if __name__ == "__main__":
         'accepted_x': dofs.copy(),
         'intersecting': any(entry["boozer_surface"].surface.is_self_intersecting() for entry in surface_data),
         'trial_hardware_status': None,
-        'accepted_hardware_status': None,
-        'surface_status': evaluate_surface_stack(
-            surface_data,
-            vessel_surface=VV if len(surface_data) > 1 else None,
-            surface_gap_threshold=SURFACE_GAP_THRESHOLD if len(surface_data) > 1 else 0.0,
-            vessel_gap_threshold=SS_DIST if len(surface_data) > 1 else 0.0,
-            enforce_nesting=True,
-        ),
-        'search_surface_status': evaluate_surface_stack(
-            surface_data,
-            vessel_surface=VV if len(surface_data) > 1 else None,
-            surface_gap_threshold=initial_search_gate['surface_gap_threshold'],
-            vessel_gap_threshold=initial_search_gate['vessel_gap_threshold'],
-            enforce_nesting=initial_search_gate['enforce_nesting'],
-        ),
-        'topology_gate_status': final_topology_gate_for_results(
-            args.init_only,
-            len(surface_data),
-            outer_surface_data['boozer_surface'].surface,
-            bs,
-        ),
+        'accepted_hardware_status': initial_hardware_snapshot["status"],
+        'surface_status': initial_surface_status,
+        'search_surface_status': initial_search_surface_status,
+        'topology_gate_status': initial_topology_status,
+        'accepted_boozer_stage': stage,
+        'best_feasible_incumbent': None,
+        'best_feasible_metric': None,
+        'best_feasible_stage': None,
     }
+    maybe_update_best_feasible_incumbent(run_dict, stage)
 
     # ==============================================================================
     # RUN OPTIMIZATION
@@ -2384,6 +2658,11 @@ if __name__ == "__main__":
     phase1_iterations = None
     phase1_termination_message = None
     phase1_success = None
+    refinement_attempted = False
+    refinement_success = None
+    refinement_iterations = None
+    refinement_termination_message = None
+    final_source_stage = stage
     alm_result = None
     if CONSTRAINT_METHOD == "alm" and args.num_surfaces != 1:
         raise ValueError("--constraint-method=alm currently requires --num-surfaces=1")
@@ -2540,6 +2819,95 @@ if __name__ == "__main__":
             optimizer_success = bool(res.success)
             print(termination_message)
 
+    if (
+        not args.init_only
+        and args.boozer_stage_refinement
+        and CONSTRAINT_METHOD == "penalty"
+        and args.basin_hops == 0
+    ):
+        phase1_incumbent = run_dict.get("best_feasible_incumbent")
+        phase1_metric = run_dict.get("best_feasible_metric")
+        phase1_stage = run_dict.get("best_feasible_stage", stage)
+        if phase1_incumbent is not None and phase1_metric is not None:
+            refinement_attempted = True
+            stage = args.refinement_boozer_stage
+            objective_bundle = restore_incumbent_for_stage(
+                run_dict,
+                phase1_incumbent,
+                stage,
+                rebuild_stage_objective_bundle,
+            )
+            length_target = objective_bundle["length_target"]
+            run_dict["best_feasible_incumbent"] = None
+            run_dict["best_feasible_metric"] = None
+            run_dict["best_feasible_stage"] = None
+            maybe_update_best_feasible_incumbent(run_dict, stage)
+
+            refinement_result = minimize(
+                fun,
+                run_dict["accepted_x"].copy(),
+                jac=True,
+                method="L-BFGS-B",
+                callback=callback,
+                options={
+                    "maxiter": args.refinement_maxiter,
+                    "maxcor": args.maxcor,
+                    "ftol": ftol,
+                    "gtol": gtol,
+                },
+            )
+            refinement_iterations = refinement_result.nit
+            refinement_termination_message = str(refinement_result.message)
+            print(refinement_result.message)
+
+            refinement_incumbent = run_dict.get("best_feasible_incumbent")
+            refinement_metric, refinement_improved = refinement_improves_phase1_metric(
+                phase1_metric,
+                phase1_stage,
+                run_dict,
+                refinement_incumbent,
+                rebuild_stage_objective_bundle,
+            )
+            if refinement_improved:
+                refinement_success = True
+                stage = args.refinement_boozer_stage
+                objective_bundle = restore_incumbent_for_stage(
+                    run_dict,
+                    refinement_incumbent,
+                    stage,
+                    rebuild_stage_objective_bundle,
+                )
+                length_target = objective_bundle["length_target"]
+                run_dict["best_feasible_incumbent"] = refinement_incumbent
+                run_dict["best_feasible_metric"] = accepted_search_metric(run_dict)
+                run_dict["best_feasible_stage"] = stage
+                final_source_stage = stage
+                res = refinement_result
+                res_nit = (res_nit or 0) + refinement_result.nit
+                termination_message = refinement_termination_message
+                optimizer_success = bool(refinement_result.success)
+            else:
+                refinement_success = False
+                stage = phase1_stage
+                objective_bundle = restore_incumbent_for_stage(
+                    run_dict,
+                    phase1_incumbent,
+                    stage,
+                    rebuild_stage_objective_bundle,
+                )
+                length_target = objective_bundle["length_target"]
+                run_dict["best_feasible_incumbent"] = phase1_incumbent
+                run_dict["best_feasible_metric"] = phase1_metric
+                run_dict["best_feasible_stage"] = phase1_stage
+                final_source_stage = phase1_stage
+                res_nit = (res_nit or 0) + refinement_result.nit
+                res = SimpleNamespace(
+                    x=run_dict["accepted_x"].copy(),
+                    nit=res_nit,
+                    message=termination_message,
+                    success=optimizer_success,
+                )
+
     if alm_result is not None:
         set_alm_runtime_state(alm_result.multipliers, alm_result.penalty)
 
@@ -2560,6 +2928,7 @@ if __name__ == "__main__":
             surface_gap_threshold=SURFACE_GAP_THRESHOLD if len(surface_data) > 1 else 0.0,
             vessel_gap_threshold=SS_DIST if len(surface_data) > 1 else 0.0,
         )
+        final_source_stage = run_dict.get("accepted_boozer_stage", final_source_stage)
 
         full_objective_eval = evaluate_search_objective(np.ones(len(surface_data)))
         run_dict['J'] = full_objective_eval['total']
@@ -2688,7 +3057,16 @@ if __name__ == "__main__":
         "TOPOLOGY_GATE_PENALTY_SCALE": TOPOLOGY_GATE_PENALTY_SCALE,
         "HARDWARE_SEARCH_MODE": HARDWARE_SEARCH_MODE,
         "HARDWARE_SEARCH_SOFT_ITERATIONS": HARDWARE_SEARCH_SOFT_ITERATIONS,
-        "boozer_stage": stage,
+        "boozer_stage": reported_boozer_stage(args.boozer_stage, final_source_stage),
+        "REQUESTED_BOOZER_STAGE": args.boozer_stage,
+        "BOOZER_STAGE_REFINEMENT": bool(args.boozer_stage_refinement),
+        "REFINEMENT_BOOZER_STAGE": args.refinement_boozer_stage if args.boozer_stage_refinement else None,
+        "REFINEMENT_MAXITER": args.refinement_maxiter if args.boozer_stage_refinement else None,
+        "REFINEMENT_ATTEMPTED": refinement_attempted,
+        "REFINEMENT_SUCCESS": refinement_success,
+        "REFINEMENT_ITERATIONS": refinement_iterations,
+        "REFINEMENT_TERMINATION_MESSAGE": refinement_termination_message,
+        "FINAL_SOURCE_STAGE": final_source_stage,
         "CONSTRAINT_WEIGHT": CONSTRAINT_WEIGHT,
         "CONSTRAINT_METHOD": CONSTRAINT_METHOD,
         "CC_DIST": CC_DIST,

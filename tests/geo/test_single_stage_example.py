@@ -1185,6 +1185,125 @@ class HardwareConstraintTests(unittest.TestCase):
             0.5,
         )
 
+    def test_refinement_eligible_incumbent_requires_accepted_hardware_pass(self):
+        module = load_single_stage_example_module()
+        run_dict = {
+            "accepted_x": np.array([1.0, 2.0]),
+            "surface_state": {"sdofs": [np.array([1.0])], "iota": [0.15], "G": [1.0]},
+            "J": 4.0,
+            "dJ": np.array([1.0, -1.0]),
+            "search_eval": {"total": 4.0},
+            "surface_status": {"success": True},
+            "search_surface_status": {"success": True},
+            "accepted_hardware_status": {"success": False, "violations": ["coil_coil_min_dist"]},
+            "topology_gate_status": {"enabled": False, "success": True},
+            "intersecting": False,
+        }
+
+        self.assertFalse(module.refinement_eligible_incumbent(run_dict))
+
+        run_dict["accepted_hardware_status"] = {"success": True, "violations": []}
+        self.assertTrue(module.refinement_eligible_incumbent(run_dict))
+
+    def test_maybe_update_best_feasible_incumbent_uses_search_total_metric(self):
+        module = load_single_stage_example_module()
+        run_dict = {
+            "accepted_x": np.array([1.0, 2.0]),
+            "surface_state": {"sdofs": [np.array([1.0])], "iota": [0.15], "G": [1.0]},
+            "J": 4.0,
+            "dJ": np.array([1.0, -1.0]),
+            "search_eval": {"total": 4.0, "surface_weights": np.array([1.0])},
+            "surface_status": {"success": True},
+            "search_surface_status": {"success": True},
+            "accepted_hardware_status": {"success": True, "violations": []},
+            "topology_gate_status": {"enabled": False, "success": True},
+            "intersecting": False,
+            "best_feasible_incumbent": None,
+            "best_feasible_metric": None,
+            "best_feasible_stage": None,
+        }
+
+        self.assertTrue(module.maybe_update_best_feasible_incumbent(run_dict, "initial"))
+        self.assertEqual(run_dict["best_feasible_metric"], 4.0)
+        self.assertEqual(run_dict["best_feasible_stage"], "initial")
+        np.testing.assert_allclose(run_dict["best_feasible_incumbent"].x, [1.0, 2.0])
+
+        run_dict["search_eval"] = {"total": 5.0, "surface_weights": np.array([1.0])}
+        run_dict["J"] = 5.0
+        self.assertFalse(module.maybe_update_best_feasible_incumbent(run_dict, "final"))
+        self.assertEqual(run_dict["best_feasible_metric"], 4.0)
+        self.assertEqual(run_dict["best_feasible_stage"], "initial")
+
+        run_dict["search_eval"] = {"total": 3.0, "surface_weights": np.array([1.0])}
+        run_dict["J"] = 3.0
+        self.assertTrue(module.maybe_update_best_feasible_incumbent(run_dict, "final"))
+        self.assertEqual(run_dict["best_feasible_metric"], 3.0)
+        self.assertEqual(run_dict["best_feasible_stage"], "final")
+
+    def test_validate_boozer_stage_refinement_args_rejects_unsupported_scope(self):
+        module = load_single_stage_example_module()
+        args = SimpleNamespace(
+            boozer_stage_refinement=True,
+            constraint_method="alm",
+            num_surfaces=1,
+            basin_hops=0,
+            boozer_stage="initial",
+            refinement_boozer_stage="final",
+            refinement_maxiter=20,
+        )
+
+        with self.assertRaisesRegex(ValueError, "--constraint-method=penalty"):
+            module.validate_boozer_stage_refinement_args(args, constraint_weight=1.0)
+
+        args.constraint_method = "penalty"
+        args.num_surfaces = 2
+        with self.assertRaisesRegex(ValueError, "--num-surfaces=1"):
+            module.validate_boozer_stage_refinement_args(args, constraint_weight=1.0)
+
+    def test_refinement_improves_phase1_metric_uses_phase1_stage_basis(self):
+        module = load_single_stage_example_module()
+        run_dict = {
+            "accepted_x": np.array([1.0, 2.0]),
+            "surface_state": {"sdofs": [np.array([1.0])], "iota": [0.15], "G": [1.0]},
+            "J": 6.0,
+            "dJ": np.array([1.0, -1.0]),
+            "search_eval": {"total": 6.0, "surface_weights": np.array([1.0])},
+            "surface_status": {"success": True},
+            "search_surface_status": {"success": True},
+            "accepted_hardware_status": {"success": True, "violations": []},
+            "topology_gate_status": {"enabled": False, "success": True},
+            "intersecting": False,
+            "accepted_iterations": 0,
+        }
+        refinement_incumbent = module.snapshot_single_stage_incumbent_state(run_dict)
+        rebuild_calls = []
+
+        def fake_rebuild(stage_name):
+            rebuild_calls.append(stage_name)
+
+        with patch.object(
+            module,
+            "refresh_accepted_search_state",
+            autospec=True,
+            side_effect=lambda current_run_dict, stage_name: 2.5 if stage_name == "initial" else 9.0,
+        ):
+            refinement_metric, refinement_improved = module.refinement_improves_phase1_metric(
+                3.0,
+                "initial",
+                run_dict,
+                refinement_incumbent,
+                fake_rebuild,
+            )
+
+        self.assertEqual(refinement_metric, 2.5)
+        self.assertTrue(refinement_improved)
+        self.assertEqual(rebuild_calls, ["initial"])
+
+    def test_reported_boozer_stage_follows_saved_final_source(self):
+        module = load_single_stage_example_module()
+        self.assertEqual(module.reported_boozer_stage("initial", "final"), "final")
+        self.assertEqual(module.reported_boozer_stage("initial", None), "initial")
+
     def test_fun_rejects_candidate_on_hardware_constraint_failure(self):
         module, J_out, dJ_out, last_dJ, restore_mock = self._run_fun_with_hardware_violation(
             hardware_search_mode="hard",
@@ -1207,18 +1326,71 @@ class HardwareConstraintTests(unittest.TestCase):
         self.assertFalse(module.run_dict["trial_hardware_status"]["success"])
         self.assertIsNone(module.run_dict["accepted_hardware_status"])
 
-    def test_fun_warns_only_during_adaptive_soft_window(self):
+    def test_fun_rejects_hardware_violation_in_adaptive_mode_when_gate_not_relaxed(self):
         module, J_out, dJ_out, _last_dJ, restore_mock = self._run_fun_with_hardware_violation(
             hardware_search_mode="adaptive",
             hardware_search_soft_iterations=1,
             accepted_iterations=0,
         )
 
-        self.assertEqual(J_out, 7.0)
-        np.testing.assert_array_equal(dJ_out, np.arange(3, dtype=float))
-        restore_mock.assert_not_called()
+        self.assertEqual(J_out, 24.0)
+        np.testing.assert_array_equal(dJ_out, np.array([1.0, -1.0, 2.0]))
+        restore_mock.assert_called_once()
         self.assertFalse(module.run_dict["trial_hardware_status"]["success"])
         self.assertIsNone(module.run_dict["accepted_hardware_status"])
+
+    def test_fun_warns_in_adaptive_mode_only_while_gate_is_relaxed(self):
+        module, J_out, dJ_out, _last_dJ, restore_mock = self._run_fun_with_hardware_violation(
+            hardware_search_mode="adaptive",
+            hardware_search_soft_iterations=1,
+            accepted_iterations=0,
+        )
+
+        module.MULTISURFACE_RAMP_ITERATIONS = 5
+        module.INNER_SURFACE_INITIAL_WEIGHT = 0.0
+        module.run_dict["accepted_iterations"] = 0
+
+        with patch.object(module, "restore_surface_states") as adaptive_restore_mock, patch.object(
+            module,
+            "solve_surface_stack_at_dofs",
+            return_value={
+                "success": True,
+                "solve_success": [True, True],
+                "self_intersections": [False, False],
+                "volumes_ordered": True,
+                "gap_ok": True,
+                "vessel_gap_ok": True,
+                "nesting_ok": True,
+                "adjacent_gaps": [0.1],
+                "outer_vessel_gap": 0.05,
+                "bad_nesting_phis": [],
+            },
+        ), patch.object(
+            module,
+            "evaluate_total_objective",
+            return_value={
+                "total": 7.0,
+                "grad": np.arange(3, dtype=float),
+                "surface_weights": np.array([0.0, 1.0]),
+                "J_QS": 0.0,
+                "dJ_QS": np.zeros(3),
+                "J_Boozer": 0.0,
+                "dJ_Boozer": np.zeros(3),
+                "J_iota": 0.0,
+                "dJ_iota": np.zeros(3),
+                "J_surf": 0.0,
+                "dJ_surf": np.zeros(3),
+                "J_curvature": 0.0,
+                "dJ_curvature": np.zeros(3),
+            },
+        ):
+            J_out, dJ_out = module.fun(np.ones(3))
+
+        self.assertEqual(J_out, 7.0)
+        np.testing.assert_array_equal(dJ_out, np.arange(3, dtype=float))
+        restore_mock.assert_called_once()
+        adaptive_restore_mock.assert_not_called()
+        self.assertFalse(module.run_dict["trial_hardware_status"]["success"])
 
     def test_callback_records_accepted_invalid_hardware_status_after_warn_mode_step(self):
         module, J_out, _dJ_out, _last_dJ, restore_mock = self._run_fun_with_hardware_violation(
@@ -2637,6 +2809,9 @@ class ConfinementSurrogateTests(unittest.TestCase):
 class RunIdentityTests(unittest.TestCase):
     def _make_identity_args(self):
         return SimpleNamespace(
+            boozer_stage_refinement=False,
+            refinement_boozer_stage="final",
+            refinement_maxiter=100,
             cc_dist=0.05,
             cc_weight=100.0,
             curvature_weight=0.0001,
@@ -2777,6 +2952,18 @@ class RunIdentityTests(unittest.TestCase):
         changed_args = self._make_identity_args()
         changed_args.hardware_search_mode = "adaptive"
         changed_args.hardware_search_soft_iterations = 3
+
+        self.assertNotEqual(
+            self._build_identity(module, base_args),
+            self._build_identity(module, changed_args),
+        )
+
+    def test_run_identity_changes_when_refinement_policy_changes(self):
+        module = load_single_stage_example_module()
+        base_args = self._make_identity_args()
+        changed_args = self._make_identity_args()
+        changed_args.boozer_stage_refinement = True
+        changed_args.refinement_maxiter = 25
 
         self.assertNotEqual(
             self._build_identity(module, base_args),
@@ -2926,6 +3113,27 @@ class CurrentBaselineContractTests(unittest.TestCase):
 
         self.assertEqual(args.hardware_search_mode, "adaptive")
         self.assertEqual(args.hardware_search_soft_iterations, 3)
+
+    def test_single_stage_parse_args_accepts_boozer_stage_refinement_flags(self):
+        module = load_single_stage_example_module()
+
+        with patch.object(
+            sys,
+            "argv",
+            [
+                "single_stage_banana_example.py",
+                "--boozer-stage-refinement",
+                "--refinement-boozer-stage",
+                "final",
+                "--refinement-maxiter",
+                "25",
+            ],
+        ):
+            args = module.parse_args()
+
+        self.assertTrue(args.boozer_stage_refinement)
+        self.assertEqual(args.refinement_boozer_stage, "final")
+        self.assertEqual(args.refinement_maxiter, 25)
 
     def test_stage2_parse_args_accepts_tf_current_A(self):
         module = load_stage2_module()
