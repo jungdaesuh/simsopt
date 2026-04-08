@@ -25,6 +25,7 @@ _SRC_DIR = str(Path(__file__).resolve().parents[1] / "src")
 _REPO_ROOT = str(Path(__file__).resolve().parents[1])
 _OPTIMIZER_JAX_PATH = Path(_SRC_DIR) / "simsopt" / "geo" / "optimizer_jax.py"
 _OPTIMIZER_PRIVATE_DIR = Path(_SRC_DIR) / "simsopt" / "geo" / "optimizer_jax_private"
+_RUNTIME_BACKEND_PATH = Path(_SRC_DIR) / "simsopt" / "backend" / "runtime.py"
 _BACKEND_SELECTOR_ENV_VARS = (
     "SIMSOPT_BACKEND_MODE",
     "SIMSOPT_BACKEND_STRICT",
@@ -98,6 +99,73 @@ def _strip_simsopt_editable_finders(*, include_import=True):
             and not type(finder).__module__.startswith("__editable__")
         ]
     """
+
+
+def _find_private_jax_src_usages(path: Path) -> list[str]:
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    jax_names = {"jax"}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == "jax":
+                    jax_names.add(alias.asname or alias.name)
+    usages = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            usages.extend(
+                f"{alias.name} @ L{node.lineno}"
+                for alias in node.names
+                if alias.name.startswith("jax._src")
+            )
+        elif isinstance(node, ast.ImportFrom):
+            module = node.module or ""
+            if module.startswith("jax._src"):
+                usages.append(f"{module} @ L{node.lineno}")
+            elif module == "jax":
+                usages.extend(
+                    f"from jax import {alias.name} @ L{node.lineno}"
+                    for alias in node.names
+                    if alias.name == "_src"
+                )
+        elif (
+            isinstance(node, ast.Attribute)
+            and node.attr == "_src"
+            and isinstance(node.value, ast.Name)
+            and node.value.id in jax_names
+        ):
+            usages.append(f"{node.value.id}._src @ L{node.lineno}")
+        elif (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "getattr"
+            and len(node.args) >= 2
+            and isinstance(node.args[1], ast.Constant)
+            and node.args[1].value == "_src"
+            and isinstance(node.args[0], ast.Name)
+            and node.args[0].id in jax_names
+        ):
+            usages.append(f'getattr({node.args[0].id}, "_src") @ L{node.lineno}')
+    return usages
+
+
+def _assert_no_private_jax_src_usage(path: Path, *, label: str) -> None:
+    forbidden_usages = _find_private_jax_src_usages(path)
+    assert forbidden_usages == [], (
+        f"{label} must not use jax._src: {forbidden_usages}"
+    )
+
+
+def test_find_private_jax_src_usages_detects_alias_attribute_access(tmp_path):
+    path = tmp_path / "module.py"
+    path.write_text(
+        "import jax as jj\nvalue = jj._src\nshadow = getattr(jj, \"_src\")\n",
+        encoding="utf-8",
+    )
+
+    usages = _find_private_jax_src_usages(path)
+
+    assert "jj._src @ L2" in usages
+    assert 'getattr(jj, "_src") @ L3' in usages
 
 
 def test_import_package_root():
@@ -2162,50 +2230,32 @@ def test_optimizer_jax_private_methods_require_private_package_when_blocked():
     assert rc == 0, f"private optimizer import guard failed:\n{err}"
 
 
-def test_optimizer_jax_public_module_has_no_jax_src_imports():
-    """Section 6 public optimizer module must remain free of jax._src imports."""
-    tree = ast.parse(_OPTIMIZER_JAX_PATH.read_text(encoding="utf-8"))
-    forbidden_imports = []
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            forbidden_imports.extend(
-                alias.name for alias in node.names if alias.name.startswith("jax._src")
-            )
-        elif isinstance(node, ast.ImportFrom):
-            module = node.module or ""
-            if module.startswith("jax._src"):
-                forbidden_imports.append(module)
-
-    assert forbidden_imports == [], (
-        "optimizer_jax.py must not import jax._src in the public lane: "
-        f"{forbidden_imports}"
+def test_optimizer_jax_public_module_has_no_private_jax_src_usage():
+    """Section 6 public optimizer module must remain free of jax._src usage."""
+    _assert_no_private_jax_src_usage(
+        _OPTIMIZER_JAX_PATH,
+        label="optimizer_jax.py in the public lane",
     )
 
 
-def test_optimizer_jax_private_package_has_no_jax_src_imports():
+def test_optimizer_jax_private_package_has_no_private_jax_src_usage():
     """Private optimizer modules must also stay on public JAX APIs."""
-    forbidden_imports = {}
+    forbidden_usages = {}
     for path in sorted(_OPTIMIZER_PRIVATE_DIR.glob("*.py")):
-        tree = ast.parse(path.read_text(encoding="utf-8"))
-        imports = []
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Import):
-                imports.extend(
-                    alias.name
-                    for alias in node.names
-                    if alias.name.startswith("jax._src")
-                )
-            elif isinstance(node, ast.ImportFrom):
-                module = node.module or ""
-                if module.startswith("jax._src"):
-                    imports.append(module)
-        if imports:
-            forbidden_imports[str(path.relative_to(_OPTIMIZER_PRIVATE_DIR.parent))] = (
-                imports
-            )
+        usages = _find_private_jax_src_usages(path)
+        if usages:
+            forbidden_usages[str(path.relative_to(_OPTIMIZER_PRIVATE_DIR.parent))] = usages
 
-    assert forbidden_imports == {}, (
-        f"optimizer_jax_private must not import jax._src: {forbidden_imports}"
+    assert forbidden_usages == {}, (
+        f"optimizer_jax_private must not use jax._src: {forbidden_usages}"
+    )
+
+
+def test_backend_runtime_module_has_no_private_jax_src_usage():
+    """Backend runtime helpers must stay on public JAX APIs."""
+    _assert_no_private_jax_src_usage(
+        _RUNTIME_BACKEND_PATH,
+        label="runtime.py in backend helpers",
     )
 
 

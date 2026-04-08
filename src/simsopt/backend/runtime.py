@@ -521,25 +521,26 @@ def _parse_visible_cuda_device_index() -> int | None:
     return value if value >= 0 else None
 
 
-def _imported_jax_backends_are_initialized(jax_module) -> bool:
-    xla_bridge = getattr(getattr(jax_module, "_src", None), "xla_bridge", None)
-    backends_are_initialized = getattr(xla_bridge, "backends_are_initialized", None)
-    if not callable(backends_are_initialized):
-        return True
-    try:
-        return bool(backends_are_initialized())
-    except Exception:
-        return False
-
-
 def _detect_imported_jax_cuda_device_index() -> int | None:
     jax = sys.modules.get("jax")
     if jax is None:
         return None
-    if not _imported_jax_backends_are_initialized(jax):
+    distributed = get_distributed_runtime_config()
+    if distributed.enabled:
+        distributed_module = getattr(jax, "distributed", None)
+        is_initialized = getattr(distributed_module, "is_initialized", None)
+        if not callable(is_initialized):
+            return None
+        try:
+            if not bool(is_initialized()):
+                return None
+        except Exception:
+            return None
+    local_devices = getattr(jax, "local_devices", None)
+    if not callable(local_devices):
         return None
     try:
-        devices = jax.local_devices(backend="gpu")
+        devices = local_devices(backend="gpu")
     except Exception:
         return None
     if not devices:

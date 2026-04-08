@@ -506,11 +506,11 @@ def test_query_active_gpu_memory_mb_uses_visible_cuda_device(monkeypatch):
     assert calls[0][-2:] == ["-i", "3"]
 
 
-def test_query_active_gpu_memory_mb_falls_back_to_visible_env_before_jax_init(
+def test_query_active_gpu_memory_mb_falls_back_to_visible_env_when_jax_device_query_fails(
     monkeypatch,
 ):
-    class _FakeDevice:
-        local_hardware_id = 1
+    def _raise_local_devices_failure(*, backend=None):
+        raise RuntimeError(f"cannot resolve devices for backend={backend!r} yet")
 
     _clear_backend_env(monkeypatch)
     monkeypatch.setenv("SIMSOPT_BACKEND_MODE", "jax_gpu_fast")
@@ -518,11 +518,38 @@ def test_query_active_gpu_memory_mb_falls_back_to_visible_env_before_jax_init(
     monkeypatch.setitem(
         sys.modules,
         "jax",
+        types.SimpleNamespace(local_devices=_raise_local_devices_failure),
+    )
+    calls = _install_fake_nvidia_smi(monkeypatch, "3, 640\n")
+    backend = _fresh_backend()
+
+    assert backend.get_active_cuda_device_index() == 3
+    assert backend.query_active_gpu_memory_mb() == pytest.approx(640.0)
+    assert calls
+    assert calls[0][-2:] == ["-i", "3"]
+
+
+def test_query_active_gpu_memory_mb_falls_back_to_visible_env_before_distributed_init(
+    monkeypatch,
+):
+    def _unexpected_local_devices(*, backend=None):
+        raise AssertionError(
+            f"local_devices should not run before distributed init for backend={backend!r}"
+        )
+
+    _clear_backend_env(monkeypatch)
+    monkeypatch.setenv("SIMSOPT_BACKEND_MODE", "jax_gpu_fast")
+    monkeypatch.setenv("SIMSOPT_JAX_DISTRIBUTED_INIT", "1")
+    monkeypatch.setenv("SIMSOPT_JAX_COORDINATOR_ADDRESS", "127.0.0.1:12345")
+    monkeypatch.setenv("SIMSOPT_JAX_NUM_PROCESSES", "4")
+    monkeypatch.setenv("SIMSOPT_JAX_PROCESS_ID", "1")
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "3,1")
+    monkeypatch.setitem(
+        sys.modules,
+        "jax",
         types.SimpleNamespace(
-            _src=types.SimpleNamespace(
-                xla_bridge=types.SimpleNamespace(backends_are_initialized=lambda: False)
-            ),
-            local_devices=lambda backend=None: [_FakeDevice()],
+            distributed=types.SimpleNamespace(is_initialized=lambda: False),
+            local_devices=_unexpected_local_devices,
         ),
     )
     calls = _install_fake_nvidia_smi(monkeypatch, "3, 640\n")
@@ -575,6 +602,41 @@ def test_query_active_gpu_memory_mb_prefers_imported_jax_device_over_visible_env
     assert backend.query_active_gpu_memory_mb() == pytest.approx(256.0)
     assert calls
     assert calls[0][-2:] == ["-i", "1"]
+
+
+def test_chunk_tuning_autotunes_from_visible_cuda_device_before_distributed_init(
+    monkeypatch,
+):
+    def _unexpected_local_devices(*, backend=None):
+        raise AssertionError(
+            f"local_devices should not run before distributed init for backend={backend!r}"
+        )
+
+    _clear_backend_env(monkeypatch)
+    monkeypatch.setenv("SIMSOPT_BACKEND_MODE", "jax_gpu_fast")
+    monkeypatch.setenv("SIMSOPT_JAX_DISTRIBUTED_INIT", "1")
+    monkeypatch.setenv("SIMSOPT_JAX_COORDINATOR_ADDRESS", "127.0.0.1:12345")
+    monkeypatch.setenv("SIMSOPT_JAX_NUM_PROCESSES", "4")
+    monkeypatch.setenv("SIMSOPT_JAX_PROCESS_ID", "1")
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "3,1")
+    monkeypatch.setitem(
+        sys.modules,
+        "jax",
+        types.SimpleNamespace(
+            distributed=types.SimpleNamespace(is_initialized=lambda: False),
+            local_devices=_unexpected_local_devices,
+        ),
+    )
+    calls = _install_fake_nvidia_smi(monkeypatch, "3, 24576\n")
+    backend = _fresh_backend()
+
+    tuning = backend.get_chunk_tuning()
+
+    assert tuning.autotuned is True
+    assert tuning.autotune_source == "nvidia-smi[3]"
+    assert tuning.gpu_total_memory_mb == 24576
+    assert calls
+    assert calls[0][-2:] == ["-i", "3"]
 
 
 def test_chunk_tuning_rejects_nonpositive_gpu_memory_override(monkeypatch):
