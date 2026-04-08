@@ -13,6 +13,15 @@ def _new_derivative():
     return Derivative({})
 
 
+def _surface_dgamma_by_dcoeff_derivative(surface, point_gradient):
+    from simsopt._core.derivative import Derivative
+
+    surface_vjp = surface.dgamma_by_dcoeff_vjp(point_gradient)
+    if isinstance(surface_vjp, Derivative):
+        return surface_vjp
+    return Derivative({surface: np.asarray(surface_vjp, dtype=float)})
+
+
 def smooth_max_curvature_signed_constraint(
     curve,
     threshold,
@@ -153,7 +162,10 @@ def smooth_min_curve_surface_signed_constraint(
         if np.any(point_gradient):
             derivative += curve.dgamma_by_dcoeff_vjp(point_gradient)
     if np.any(surface_gradient):
-        derivative += surface.dgamma_by_dcoeff_vjp(surface_gradient.reshape(surface_gamma.shape))
+        derivative += _surface_dgamma_by_dcoeff_derivative(
+            surface,
+            surface_gradient.reshape(surface_gamma.shape),
+        )
     grad = np.asarray(derivative(objective_optimizable), dtype=float)
     signed_value = float(minimum_distance) - float(smooth_min)
     return signed_value, grad, max(0.0, signed_value)
@@ -192,8 +204,14 @@ def smooth_min_surface_surface_signed_constraint(
     np.add.at(gradient_2, cols, -weights[:, None] * directions)
 
     derivative = _new_derivative()
-    derivative += surface_1.dgamma_by_dcoeff_vjp(gradient_1.reshape(gamma_1.shape))
-    derivative += surface_2.dgamma_by_dcoeff_vjp(gradient_2.reshape(gamma_2.shape))
+    derivative += _surface_dgamma_by_dcoeff_derivative(
+        surface_1,
+        gradient_1.reshape(gamma_1.shape),
+    )
+    derivative += _surface_dgamma_by_dcoeff_derivative(
+        surface_2,
+        gradient_2.reshape(gamma_2.shape),
+    )
     grad = np.asarray(derivative(objective_optimizable), dtype=float)
     signed_value = float(minimum_distance) - float(smooth_min)
     return signed_value, grad, max(0.0, signed_value)

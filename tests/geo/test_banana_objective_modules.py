@@ -147,6 +147,11 @@ class _FakeSurfaceWithGradient:
         return _FakeDerivative(np.array([gradient_sum[0], gradient_sum[2]], dtype=float))
 
 
+class _FakeSurfaceWithArrayGradient(_FakeSurfaceWithGradient):
+    def dgamma_by_dcoeff_vjp(self, point_gradient):
+        return np.sum(point_gradient.reshape((-1, 3)), axis=0)
+
+
 class _FakeDerivative:
     def __init__(self, gradient=None):
         if isinstance(gradient, dict) or gradient is None:
@@ -792,14 +797,30 @@ class SingleStageConstraintModuleTests(_ModuleTestCase):
         np.testing.assert_allclose(grad, [0.0, 0.0])
 
     def test_smooth_min_surface_surface_signed_constraint_reports_positive_violation(self):
-        surface_1 = _FakeSurfaceWithGradient(
+        surface_1 = _FakeSurfaceWithArrayGradient(
             gamma_points=[[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]]]
         )
-        surface_2 = _FakeSurfaceWithGradient(
+        surface_2 = _FakeSurfaceWithArrayGradient(
             gamma_points=[[[0.1, 0.0, 0.0], [1.1, 0.0, 0.0]]]
         )
 
-        with mock.patch.object(self.module, "_new_derivative", side_effect=lambda: _FakeDerivative({})):
+        with mock.patch.object(
+            self.module,
+            "_new_derivative",
+            side_effect=lambda: _FakeDerivative({}),
+        ), mock.patch.object(
+            self.module,
+            "_surface_dgamma_by_dcoeff_derivative",
+            side_effect=lambda _surface, point_gradient: _FakeDerivative(
+                np.array(
+                    [
+                        np.sum(point_gradient.reshape((-1, 3)), axis=0)[0],
+                        np.sum(point_gradient.reshape((-1, 3)), axis=0)[2],
+                    ],
+                    dtype=float,
+                )
+            ),
+        ):
             signed_value, grad, violation = self.module.smooth_min_surface_surface_signed_constraint(
                 surface_1,
                 surface_2,
@@ -811,6 +832,23 @@ class SingleStageConstraintModuleTests(_ModuleTestCase):
         self.assertGreater(violation, 0.0)
         self.assertAlmostEqual(violation, signed_value)
         self.assertEqual(grad.shape, (2,))
+
+    def test_surface_vjp_helper_wraps_raw_surface_array_output_as_derivative(self):
+        derivative = self.module._new_derivative()
+        surface = _FakeSurfaceWithArrayGradient(
+            gamma_points=[[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]]]
+        )
+
+        derivative += self.module._surface_dgamma_by_dcoeff_derivative(
+            surface,
+            np.array([[[1.0, 0.0, 2.0], [0.5, 0.0, 3.0]]], dtype=float),
+        )
+
+        self.assertTrue(hasattr(derivative, "data"))
+        np.testing.assert_allclose(
+            derivative.data[surface],
+            np.array([1.5, 0.0, 5.0]),
+        )
 
 
 class SingleStageSearchPolicyModuleTests(_ModuleTestCase):
@@ -849,7 +887,22 @@ class SingleStageSearchPolicyModuleTests(_ModuleTestCase):
         self.assertIsNone(decision.rejection_increment)
         self.assertEqual(decision.reason, "warn_mode")
 
-    def test_adaptive_mode_warns_during_soft_window(self):
+    def test_adaptive_mode_warns_only_while_gate_scale_is_relaxed(self):
+        decision = self.module.decide_hardware_search_action(
+            self.module.HardwareSearchPolicy("adaptive", 2),
+            {"success": False},
+            self.module.SearchContext(
+                accepted_iterations=1,
+                gate_scale=0.4,
+                previous_objective=5.0,
+            ),
+        )
+
+        self.assertFalse(decision.reject)
+        self.assertTrue(decision.warning_only)
+        self.assertEqual(decision.reason, "adaptive_soft_phase")
+
+    def test_adaptive_mode_rejects_when_gate_scale_is_not_relaxed(self):
         decision = self.module.decide_hardware_search_action(
             self.module.HardwareSearchPolicy("adaptive", 2),
             {"success": False},
@@ -860,32 +913,17 @@ class SingleStageSearchPolicyModuleTests(_ModuleTestCase):
             ),
         )
 
-        self.assertFalse(decision.reject)
-        self.assertTrue(decision.warning_only)
-        self.assertEqual(decision.reason, "adaptive_soft_phase")
+        self.assertTrue(decision.reject)
+        self.assertFalse(decision.warning_only)
+        self.assertEqual(decision.reason, "hard_reject")
 
-    def test_adaptive_mode_warns_while_gate_scale_is_relaxed(self):
-        decision = self.module.decide_hardware_search_action(
-            self.module.HardwareSearchPolicy("adaptive", 0),
-            {"success": False},
-            self.module.SearchContext(
-                accepted_iterations=4,
-                gate_scale=0.4,
-                previous_objective=5.0,
-            ),
-        )
-
-        self.assertFalse(decision.reject)
-        self.assertTrue(decision.warning_only)
-        self.assertEqual(decision.reason, "adaptive_soft_phase")
-
-    def test_adaptive_mode_rejects_after_soft_window(self):
+    def test_adaptive_mode_rejects_after_relaxed_gate_budget_exhausts(self):
         decision = self.module.decide_hardware_search_action(
             self.module.HardwareSearchPolicy("adaptive", 1),
             {"success": False},
             self.module.SearchContext(
                 accepted_iterations=2,
-                gate_scale=1.0,
+                gate_scale=0.4,
                 previous_objective=-7.0,
             ),
         )

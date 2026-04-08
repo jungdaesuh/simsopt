@@ -304,7 +304,8 @@ class SingleStageExampleTests(unittest.TestCase):
         ), patch.object(
             module, "forward_backward", return_value=np.zeros(nsurfdofs + 2)
         ):
-            objective = module.BoozerResidualExact(fake_boozer_surface, fake_bs)
+            with self.assertWarnsRegex(UserWarning, "constraint_weight forced to 0.0"):
+                objective = module.BoozerResidualExact(fake_boozer_surface, fake_bs)
             value = objective.J()
             gradient = objective.dJ(partials=True)
 

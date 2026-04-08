@@ -39,9 +39,11 @@ def hardware_rejection_increment(previous_objective):
 
 
 def _is_adaptive_soft_phase(policy: HardwareSearchPolicy, context: SearchContext):
-    if context.accepted_iterations < int(policy.soft_iterations):
+    if float(context.gate_scale) >= 1.0:
+        return False
+    if int(policy.soft_iterations) <= 0:
         return True
-    return float(context.gate_scale) < 1.0
+    return context.accepted_iterations < int(policy.soft_iterations)
 
 
 def decide_hardware_search_action(
