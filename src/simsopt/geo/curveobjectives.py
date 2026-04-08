@@ -11,8 +11,15 @@ from .._core.derivative import derivative_dec, Derivative
 from ..backend import get_pairwise_penalty_chunk_size
 from ..jax_core._math_utils import as_jax_float64 as _runtime_as_jax_float64
 from ..jax_core.sharding import maybe_shard_pairwise_row_inputs
-import simsoptpp as sopp
-from simsopt.geo.framedcurve import FramedCurveCentroid
+from ._simsoptpp import sopp_namespace
+from .framedcurve import FramedCurveCentroid
+
+sopp = sopp_namespace(
+    "get_pointclouds_closer_than_threshold_within_collection",
+    "get_pointclouds_closer_than_threshold_between_two_collections",
+    "compute_linking_number",
+    kind="function",
+)
 
 __all__ = [
     "CurveLength",

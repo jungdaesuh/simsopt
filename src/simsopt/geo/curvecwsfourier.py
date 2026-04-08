@@ -3,13 +3,18 @@ import jax
 from jax import device_put, jacfwd, jvp, vjp
 import jax.numpy as jnp
 
-import simsoptpp as sopp
 from .._core.derivative import Derivative
-from .surfacerzfourier import SurfaceRZFourier
-from .surfacexyztensorfourier import SurfaceXYZTensorFourier
-from .curve import Curve, gamma_curve_on_surface
+from ._simsoptpp import sopp_namespace
+from .curve import (
+    Curve,
+    SurfaceRZFourier,
+    SurfaceXYZTensorFourier,
+    gamma_curve_on_surface,
+)
 
 from .jit import jit
+
+sopp = sopp_namespace("Curve")
 
 __all__ = ["CurveCWSFourierCPP"]
 

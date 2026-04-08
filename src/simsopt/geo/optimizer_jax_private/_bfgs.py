@@ -108,6 +108,10 @@ def _minimize_bfgs_private(
             gfk=state.g_k,
             maxiter=line_search_maxiter,
         )
+        line_search_status = _as_jax_dtype(
+            line_search_results.status,
+            state.line_search_status.dtype,
+        )
         next_nfev = state.nfev + line_search_results.nfev
         next_ngev = state.ngev + line_search_results.ngev
         s_k = line_search_results.a_k * p_k
@@ -144,13 +148,17 @@ def _minimize_bfgs_private(
         )
         stalled_step = (~converged) & (_norm(s_k) <= step_tol)
         nonfinite_step = (~jnp.isfinite(f_kp1)) | (~jnp.all(jnp.isfinite(g_kp1)))
+        nonfinite_line_search_status = _as_jax_dtype(
+            -1,
+            state.line_search_status.dtype,
+        )
         failure_line_search_status = jnp.where(
             line_search_results.failed,
-            line_search_results.status,
+            line_search_status,
             jnp.where(
                 stalled_step | (~strong_wolfe),
-                _as_jax_dtype(0, line_search_results.status.dtype),
-                line_search_results.status,
+                _as_jax_dtype(0, state.line_search_status.dtype),
+                line_search_status,
             ),
         )
 
@@ -161,7 +169,7 @@ def _minimize_bfgs_private(
                 k=next_k,
                 nfev=next_nfev,
                 ngev=next_ngev,
-                line_search_status=failure_line_search_status,
+                line_search_status=nonfinite_line_search_status,
             )
 
         def failed_step(_):
@@ -188,7 +196,7 @@ def _minimize_bfgs_private(
                 g_k=g_kp1,
                 H_k=H_kp1,
                 old_old_fval=state.f_k,
-                line_search_status=line_search_results.status,
+                line_search_status=line_search_status,
             )
 
         return lax.cond(
@@ -208,13 +216,18 @@ def _minimize_bfgs_private(
         maxiter_jax = _as_jax_dtype(maxiter_value, initial_state.k.dtype)
         state = lax.while_loop(cond_fun, body_fun, initial_state)
         f_final, g_final = scalar_value_and_grad(state.x_k)
-        converged_final = _norm(g_final, ord=norm) < gtol_jax
+        converged_final = (~state.failed) & (_norm(g_final, ord=norm) < gtol_jax)
         state = state._replace(
             converged=converged_final,
             nfev=state.nfev + _int_scalar(1),
             ngev=state.ngev + _int_scalar(1),
             f_k=_as_jax_dtype(f_final, state.f_k.dtype),
             g_k=_as_jax_dtype(g_final, state.g_k.dtype),
+        )
+        failed_status = jnp.where(
+            state.line_search_status < _int_scalar(0),
+            _int_scalar(2),
+            _int_scalar(2) + state.line_search_status,
         )
         status = jnp.where(
             state.converged,
@@ -224,7 +237,7 @@ def _minimize_bfgs_private(
                 _int_scalar(1),
                 jnp.where(
                     state.failed,
-                    _int_scalar(2) + state.line_search_status,
+                    failed_status,
                     _int_scalar(-1),
                 ),
             ),

@@ -89,6 +89,22 @@ def _block_private_optimizer_imports():
     """
 
 
+def _block_simsoptpp_imports():
+    return """
+        import importlib.abc
+        import sys
+
+        class _BlockSimsoptpp(importlib.abc.MetaPathFinder):
+            def find_spec(self, fullname, path=None, target=None):
+                del path, target
+                if fullname == "simsoptpp" or fullname.startswith("simsoptpp."):
+                    raise ImportError("blocked simsoptpp for smoke test")
+                return None
+
+        sys.meta_path.insert(0, _BlockSimsoptpp())
+    """
+
+
 def _strip_simsopt_editable_finders(*, include_import=True):
     import_block = "import sys\n\n" if include_import else ""
     return f"""
@@ -2586,18 +2602,8 @@ def test_m5_classes_require_simsoptpp():
 
 def test_direct_curve_modules_raise_clear_importerror_without_simsoptpp():
     """Direct geo-module imports should fail clearly at instantiation time."""
-    rc, err = _run_import_check("""
-        import importlib.abc
-        import sys
-
-        class _BlockSimsoptpp(importlib.abc.MetaPathFinder):
-            def find_spec(self, fullname, path=None, target=None):
-                del path, target
-                if fullname == "simsoptpp" or fullname.startswith("simsoptpp."):
-                    raise ImportError("blocked simsoptpp for smoke test")
-                return None
-
-        sys.meta_path.insert(0, _BlockSimsoptpp())
+    rc, err = _run_import_check(f"""
+        {_block_simsoptpp_imports()}
 
         from simsopt.geo.framedcurve import FramedCurve
         from simsopt.geo.curveplanarfourier import CurvePlanarFourier
@@ -2613,7 +2619,7 @@ def test_direct_curve_modules_raise_clear_importerror_without_simsoptpp():
                 assert expected_name in message
                 assert "simsoptpp is required to instantiate" in message
             else:
-                raise AssertionError(f"{expected_name} should require simsoptpp")
+                raise AssertionError(f"{{expected_name}} should require simsoptpp")
 
         constructors = (
             (lambda: FramedCurve(object()), "FramedCurve"),
@@ -2626,6 +2632,103 @@ def test_direct_curve_modules_raise_clear_importerror_without_simsoptpp():
             _assert_missing(factory, expected_name)
     """)
     assert rc == 0, f"direct geo-module simsoptpp fallback smoke failed:\n{err}"
+
+
+def test_direct_optional_geo_modules_import_without_simsoptpp():
+    """Optional geo modules should remain directly importable without simsoptpp."""
+    rc, err = _run_import_check(f"""
+        {_block_simsoptpp_imports()}
+
+        import simsopt.geo.curvecwsfourier as curvecwsfourier
+        import simsopt.geo.curveobjectives as curveobjectives
+
+        assert hasattr(curvecwsfourier, "CurveCWSFourierCPP")
+        for name in (
+            "CurveCurveDistance",
+            "CurveSurfaceDistance",
+            "LinkingNumber",
+            "pairwise_min_distance_pure",
+        ):
+            assert hasattr(curveobjectives, name), name
+    """)
+    assert rc == 0, f"optional geo-module import smoke failed:\n{err}"
+
+
+def test_curveobjectives_optional_cpp_helpers_raise_clear_importerror_without_simsoptpp():
+    """Optional simsoptpp helpers in curveobjectives should fail clearly on use."""
+    rc, err = _run_import_check(f"""
+        {_block_simsoptpp_imports()}
+
+        import numpy as np
+
+        from simsopt._core.optimizable import Optimizable
+        from simsopt.geo.curveobjectives import (
+            CurveCurveDistance,
+            CurveSurfaceDistance,
+            LinkingNumber,
+        )
+
+        class _FakeCurve(Optimizable):
+            def __init__(self, offset):
+                self.quadpoints = np.linspace(0.0, 1.0, 4, endpoint=False)
+                self._gamma = np.array(
+                    [
+                        [offset + 0.00, 0.0, 0.0],
+                        [offset + 0.10, 0.0, 0.0],
+                        [offset + 0.20, 0.0, 0.0],
+                        [offset + 0.30, 0.0, 0.0],
+                    ],
+                    dtype=np.float64,
+                )
+                self._gammadash = np.full((4, 3), [0.1, 0.0, 0.0], dtype=np.float64)
+                super().__init__(x0=np.zeros(0))
+
+            def recompute_bell(self, parent=None):
+                del parent
+
+            def gamma(self):
+                return self._gamma
+
+            def gammadash(self):
+                return self._gammadash
+
+        class _FakeSurface:
+            def gamma(self):
+                return np.array(
+                    [
+                        [[0.0, 0.2, 0.0], [0.1, 0.2, 0.0]],
+                        [[0.0, 0.3, 0.0], [0.1, 0.3, 0.0]],
+                    ],
+                    dtype=np.float64,
+                )
+
+        curves = [_FakeCurve(0.0), _FakeCurve(0.4)]
+        surface = _FakeSurface()
+
+        def _assert_missing(callable_obj, expected_name):
+            try:
+                callable_obj()
+            except ImportError as exc:
+                message = str(exc)
+                assert expected_name in message
+                assert "simsoptpp is required to use" in message
+            else:
+                raise AssertionError(f"{{expected_name}} should require simsoptpp")
+
+        _assert_missing(
+            lambda: CurveCurveDistance(curves, 0.05).compute_candidates(),
+            "get_pointclouds_closer_than_threshold_within_collection",
+        )
+        _assert_missing(
+            lambda: CurveSurfaceDistance(curves, surface, 0.05).compute_candidates(),
+            "get_pointclouds_closer_than_threshold_between_two_collections",
+        )
+        _assert_missing(
+            lambda: LinkingNumber(curves).J(),
+            "compute_linking_number",
+        )
+    """)
+    assert rc == 0, f"curveobjectives simsoptpp helper smoke failed:\n{err}"
 
 
 def test_framedcurve_direct_module_import_smoke():

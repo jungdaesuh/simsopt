@@ -268,6 +268,63 @@ class TestOptimizerAdapterPrivate:
         np.testing.assert_allclose(np.asarray(state.g_k), np.asarray(x0))
 
     @PRIVATE_OPTIMIZER_RUNTIME
+    def test_minimize_bfgs_private_failed_state_does_not_flip_to_converged(
+        self,
+        monkeypatch,
+    ):
+        """Post-loop gradient refresh must not turn a failed iterate into success."""
+        from simsopt.geo.optimizer_jax_private import _LineSearchResults
+        from simsopt.geo.optimizer_jax_private import _bfgs as _bfgs_module
+
+        def quad(x):
+            return 0.5 * jnp.dot(x, x)
+
+        def fake_line_search(*_args, **_kwargs):
+            return _LineSearchResults(
+                failed=jnp.array(True),
+                nit=jnp.array(1),
+                nfev=jnp.array(1),
+                ngev=jnp.array(1),
+                k=jnp.array(1),
+                a_k=jnp.array(0.0, dtype=jnp.float64),
+                f_k=jnp.array(0.0, dtype=jnp.float64),
+                g_k=jnp.array([0.0], dtype=jnp.float64),
+                status=jnp.array(7),
+            )
+
+        monkeypatch.setattr(_bfgs_module, "_line_search", fake_line_search)
+
+        initial_state = _opt._BFGSResults(
+            converged=jnp.array(False),
+            failed=jnp.array(False),
+            k=jnp.array(0, dtype=jnp.int32),
+            nfev=jnp.array(1, dtype=jnp.int32),
+            ngev=jnp.array(1, dtype=jnp.int32),
+            nhev=jnp.array(0, dtype=jnp.int32),
+            x_k=jnp.array([0.0], dtype=jnp.float64),
+            f_k=jnp.array(0.0, dtype=jnp.float64),
+            g_k=jnp.array([1.0], dtype=jnp.float64),
+            H_k=jnp.eye(1, dtype=jnp.float64),
+            old_old_fval=jnp.array(0.5, dtype=jnp.float64),
+            status=jnp.array(0, dtype=jnp.int32),
+            line_search_status=jnp.array(0, dtype=jnp.int32),
+        )
+
+        state = _bfgs_module._minimize_bfgs_private(
+            quad,
+            jnp.array([0.0], dtype=jnp.float64),
+            maxiter=5,
+            gtol=1e-8,
+            initial_state=initial_state,
+        )
+
+        assert bool(state.failed) is True
+        assert bool(state.converged) is False
+        assert int(state.status) == 9
+        np.testing.assert_allclose(np.asarray(state.x_k), np.zeros(1), atol=1e-12)
+        np.testing.assert_allclose(np.asarray(state.g_k), np.zeros(1), atol=1e-12)
+
+    @PRIVATE_OPTIMIZER_RUNTIME
     @REQUIRES_PRIVATE_LBFGS_RUNTIME
     def test_minimize_lbfgs_private_solves_simple_quadratic(self):
         """Direct private L-BFGS should keep its simple quadratic contract."""
@@ -712,8 +769,12 @@ class TestOptimizerAdapterPrivate:
             gtol=1e-8,
         )
 
-        np.testing.assert_allclose(np.asarray(state.x_k), np.zeros_like(flat_x0), atol=1e-12)
-        np.testing.assert_allclose(np.asarray(state.g_k), np.zeros_like(flat_x0), atol=1e-12)
+        np.testing.assert_allclose(
+            np.asarray(state.x_k), np.zeros_like(flat_x0), atol=1e-12
+        )
+        np.testing.assert_allclose(
+            np.asarray(state.g_k), np.zeros_like(flat_x0), atol=1e-12
+        )
 
     @PRIVATE_OPTIMIZER_RUNTIME
     @REQUIRES_PRIVATE_OPTIMIZER_RUNTIME
@@ -766,7 +827,7 @@ class TestOptimizerAdapterPrivate:
     @PRIVATE_OPTIMIZER_RUNTIME
     @REQUIRES_PRIVATE_OPTIMIZER_RUNTIME
     def test_bfgs_ondevice_nan_objective_terminates(self):
-        """A NaN objective encountered mid-loop must fail without extra iterations."""
+        """A NaN objective encountered mid-loop must fail from the last finite iterate."""
 
         def nan_after_first_step(x):
             return jax.lax.cond(
@@ -786,7 +847,9 @@ class TestOptimizerAdapterPrivate:
 
         assert result.success is False
         assert result.nit == 1
-        assert np.isnan(float(result.fun))
+        assert float(result.fun) == pytest.approx(float(0.5 * jnp.dot(x0, x0)))
+        assert np.all(np.isfinite(np.asarray(result.x)))
+        assert np.all(np.isfinite(np.asarray(result.jac)))
         assert "non-finite objective or gradient" in result.message
 
     @PRIVATE_OPTIMIZER_RUNTIME
