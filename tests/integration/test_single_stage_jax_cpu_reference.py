@@ -5363,10 +5363,10 @@ class TestTraceableObjective:
             _bs_cpu,
             bs_jax,
             _booz_cpu,
-            _booz_jax,
+            booz_jax,
             _vol_cpu,
-            _iota0,
-            _G0,
+            iota0,
+            G0,
         ) = _make_boozer_setup(constraint_weight=1.0)
 
         plasma_surface = SurfaceRZFourier(
@@ -5392,22 +5392,11 @@ class TestTraceableObjective:
         vessel_surface.set_rc(0, 0, 2.0)
         vessel_surface.set_rc(1, 0, 0.5)
         vessel_surface.set_zs(1, 0, 0.5)
+        booz_jax.res = {"G": jnp.asarray(G0, dtype=jnp.float64)}
 
-        class _FakeBoozerSurface:
-            def __init__(self, surface):
-                self.surface = surface
-                self.res = {"G": jnp.asarray(1.0, dtype=jnp.float64)}
-
-            def _unpack_decision_vector_jax(self, x, optimize_G, coil_set_spec=None):
-                del coil_set_spec
-                if optimize_G:
-                    return x[:-2], x[-2], x[-1]
-                return x[:-1], x[-1], None
-
-        fake_boozer_surface = _FakeBoozerSurface(plasma_surface)
         success_filter = (
             single_stage_example.build_single_stage_target_lane_hardware_success_filter(
-                fake_boozer_surface,
+                booz_jax,
                 bs_jax,
                 bs_jax.coils[0].curve,
                 vessel_surface,
@@ -5420,8 +5409,8 @@ class TestTraceableObjective:
 
         solved_x = jnp.concatenate(
             (
-                jnp.asarray(plasma_surface.get_dofs(), dtype=jnp.float64),
-                jnp.asarray([0.3, 1.0], dtype=jnp.float64),
+                jnp.asarray(booz_jax.surface.get_dofs(), dtype=jnp.float64),
+                jnp.asarray([iota0, G0], dtype=jnp.float64),
             )
         )
 

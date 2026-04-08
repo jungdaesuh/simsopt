@@ -1261,6 +1261,7 @@ def build_single_stage_target_lane_hardware_success_filter(
     import jax.numpy as jnp
 
     from simsopt.geo.curve import kappa_pure
+    from simsopt.geo.boozer_residual_jax import _surface_geometry_from_dofs
     from simsopt.jax_core.curve_geometry import (
         curve_gamma_and_dash_from_spec,
         curve_geometry_from_spec,
@@ -1271,7 +1272,6 @@ def build_single_stage_target_lane_hardware_success_filter(
     )
     from simsopt.jax_core.surface_rzfourier import (
         surface_rz_fourier_gamma_from_spec,
-        surface_rz_fourier_spec_from_dofs,
     )
 
     try:
@@ -1288,7 +1288,32 @@ def build_single_stage_target_lane_hardware_success_filter(
 
     optimize_G = boozer_surface.res.get("G") is not None
     coil_dof_extraction_spec = bs.coil_dof_extraction_spec()
-    surface_spec = boozer_surface.surface.surface_spec()
+    surface = boozer_surface.surface
+    surface_kind = getattr(boozer_surface, "_surface_geometry_kind", None)
+    if surface_kind is None:
+        surface_type_name = type(surface).__name__
+        if surface_type_name == "SurfaceRZFourier":
+            surface_kind = "rzfourier"
+        elif surface_type_name == "SurfaceXYZFourier":
+            surface_kind = "xyzfourier"
+        else:
+            surface_kind = "generic"
+
+    surface_quadpoints_phi = getattr(
+        boozer_surface,
+        "quadpoints_phi",
+        jax.device_put(np.asarray(surface.quadpoints_phi, dtype=np.float64)),
+    )
+    surface_quadpoints_theta = getattr(
+        boozer_surface,
+        "quadpoints_theta",
+        jax.device_put(np.asarray(surface.quadpoints_theta, dtype=np.float64)),
+    )
+    surface_mpol = int(getattr(boozer_surface, "mpol", surface.mpol))
+    surface_ntor = int(getattr(boozer_surface, "ntor", surface.ntor))
+    surface_nfp = int(getattr(boozer_surface, "nfp", surface.nfp))
+    surface_stellsym = bool(getattr(boozer_surface, "stellsym", surface.stellsym))
+    surface_scatter_indices = getattr(boozer_surface, "scatter_indices", None)
     vessel_gamma = surface_rz_fourier_gamma_from_spec(
         vessel_surface.surface_spec()
     ).reshape((-1, 3))
@@ -1325,16 +1350,21 @@ def build_single_stage_target_lane_hardware_success_filter(
             )
         return minimum
 
-    def _surface_spec_from_sdofs(sdofs):
-        return surface_rz_fourier_spec_from_dofs(
-            sdofs,
-            quadpoints_phi=surface_spec.quadpoints_phi,
-            quadpoints_theta=surface_spec.quadpoints_theta,
-            mpol=surface_spec.mpol,
-            ntor=surface_spec.ntor,
-            nfp=surface_spec.nfp,
-            stellsym=surface_spec.stellsym,
+    def _surface_gamma_from_sdofs(sdofs):
+        surface_gamma, _surface_gammadash1, _surface_gammadash2 = (
+            _surface_geometry_from_dofs(
+                sdofs,
+                quadpoints_phi=surface_quadpoints_phi,
+                quadpoints_theta=surface_quadpoints_theta,
+                mpol=surface_mpol,
+                ntor=surface_ntor,
+                nfp=surface_nfp,
+                stellsym=surface_stellsym,
+                scatter_indices=surface_scatter_indices,
+                surface_kind=surface_kind,
+            )
         )
+        return surface_gamma.reshape((-1, 3))
 
     def success_filter(coil_dofs, solved_x):
         coil_set_spec = coil_set_spec_from_dof_extraction_spec(
@@ -1350,9 +1380,7 @@ def build_single_stage_target_lane_hardware_success_filter(
             optimize_G,
             coil_set_spec=coil_set_spec,
         )
-        surface_gamma = surface_rz_fourier_gamma_from_spec(
-            _surface_spec_from_sdofs(sdofs)
-        ).reshape((-1, 3))
+        surface_gamma = _surface_gamma_from_sdofs(sdofs)
         coil_gammas = tuple(_coil_gamma_points(coil_spec) for coil_spec in coil_specs)
         curve_curve_min_dist = _curve_curve_min_distance(coil_gammas)
         curve_surface_min_dist = _curve_surface_min_distance(
