@@ -239,6 +239,9 @@ Use outer-loop chunked `L-BFGS-B` only for `adaptive` mode.
 - [ ] Reuse `single_stage_geometry.py` as the hardware-snapshot SSOT
 - [ ] Reuse existing objective/ALM outputs rather than inventing a second physics loss
 - [ ] Add a shared incumbent module under `banana_opt/` rather than growing `alm_utils.py` with Boozer-specific state
+- [ ] Keep state snapshot / restore boundaries solver-owned
+  - `alm_utils.py` may store generic incumbent payloads or accept solver-owned snapshot hooks
+  - Boozer / solved-surface mutation logic must remain in the solver layer and `banana_opt/`, not inside `alm_utils.py`
 - [ ] Ensure final-state handoff is explicit:
   - `final_x = incumbent.x if rolled_back else res.x`
   - final surface-stack solve and hard certification must use that same chosen endpoint
