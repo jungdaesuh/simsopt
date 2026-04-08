@@ -28,6 +28,7 @@ from benchmarks.adjoint_fd_validation import (
 import benchmarks.adjoint_probe_common as adjoint_probe_common
 from benchmarks.adjoint_probe_common import compute_derivative_l2_metrics
 from benchmarks.single_stage_backend_routing import (
+    resolve_boozer_least_squares_algorithm,
     resolve_boozer_limited_memory,
     resolve_boozer_optimizer_method,
 )
@@ -2367,16 +2368,32 @@ def test_legacy_gpu_benchmark_wrapper_applies_grouped_probe_env_override(
 
 
 def test_single_stage_outer_loop_probe_resolves_expected_boozer_method():
+    assert resolve_boozer_least_squares_algorithm("scipy") == "quasi-newton"
+    assert resolve_boozer_least_squares_algorithm("hybrid") == "quasi-newton"
+    assert resolve_boozer_least_squares_algorithm("ondevice") == "lm"
     assert resolve_boozer_optimizer_method("scipy") == "bfgs"
     assert resolve_boozer_optimizer_method("scipy", limited_memory=True) == "lbfgs"
     assert resolve_boozer_optimizer_method("hybrid") == "bfgs-hybrid"
     with pytest.raises(ValueError, match="does not support limited_memory=True"):
         resolve_boozer_optimizer_method("hybrid", limited_memory=True)
-    assert resolve_boozer_optimizer_method("ondevice") == "bfgs-ondevice"
+    assert resolve_boozer_optimizer_method("ondevice") == "lm-ondevice"
     assert (
-        resolve_boozer_optimizer_method("ondevice", limited_memory=True)
+        resolve_boozer_optimizer_method(
+            "ondevice",
+            least_squares_algorithm="quasi-newton",
+        )
+        == "bfgs-ondevice"
+    )
+    assert (
+        resolve_boozer_optimizer_method(
+            "ondevice",
+            limited_memory=True,
+            least_squares_algorithm="quasi-newton",
+        )
         == "lbfgs-ondevice"
     )
+    with pytest.raises(ValueError, match="least_squares_algorithm='lm'"):
+        resolve_boozer_optimizer_method("ondevice", limited_memory=True)
 
 
 def test_single_stage_outer_loop_contract_matches_probe_defaults():

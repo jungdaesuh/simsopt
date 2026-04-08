@@ -1085,14 +1085,15 @@ def _traceable_forward_result(
     same_coils = jnp.all(coil_dofs == baseline_coil_dofs)
 
     def baseline_case(_):
-        success = jnp.array(True, dtype=bool)
-        if success_filter is not None:
-            success = success_filter(coil_dofs, baseline_x)
         return {
-            "value": jnp.where(success, baseline_value, failure_value),
+            # The exact baseline state must return the solved reference objective so
+            # the outer optimizer can obtain a real descent direction even when the
+            # seed is hardware-invalid. Candidate (non-baseline) states remain
+            # subject to the hard success filter below.
+            "value": baseline_value,
             "x": baseline_x,
             "plu": baseline_plu,
-            "success": success,
+            "success": jnp.array(True, dtype=bool),
         }
 
     def general_case(_):

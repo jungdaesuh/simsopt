@@ -20,6 +20,7 @@ from benchmarks.single_stage_init_parity import (
     _run_single_stage_case,
 )
 from benchmarks.single_stage_backend_routing import (
+    resolve_boozer_least_squares_algorithm,
     resolve_boozer_optimizer_backend,
     resolve_boozer_optimizer_method,
 )
@@ -293,7 +294,10 @@ def main() -> None:
         case["results"],
         expected_boozer_optimizer_backend=resolved_boozer_optimizer_backend,
         expected_boozer_optimizer_method=resolve_boozer_optimizer_method(
-            resolved_boozer_optimizer_backend
+            resolved_boozer_optimizer_backend,
+            least_squares_algorithm=resolve_boozer_least_squares_algorithm(
+                resolved_boozer_optimizer_backend
+            ),
         ),
     )
     payload = {

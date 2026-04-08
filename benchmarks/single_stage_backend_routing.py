@@ -27,7 +27,19 @@ def resolve_boozer_optimizer_method(
     boozer_optimizer_backend: str,
     *,
     limited_memory: bool = False,
+    least_squares_algorithm: str | None = None,
 ) -> str:
+    if least_squares_algorithm is None:
+        least_squares_algorithm = resolve_boozer_least_squares_algorithm(
+            boozer_optimizer_backend
+        )
+    if least_squares_algorithm == "lm":
+        if limited_memory:
+            raise ValueError(
+                "least_squares_algorithm='lm' is incompatible with "
+                "limited_memory=True."
+            )
+        return "lm" if boozer_optimizer_backend == "scipy" else "lm-ondevice"
     if boozer_optimizer_backend == "scipy":
         return "lbfgs" if limited_memory else "bfgs"
     if boozer_optimizer_backend == "hybrid":
@@ -37,3 +49,14 @@ def resolve_boozer_optimizer_method(
             )
         return "bfgs-hybrid"
     return "lbfgs-ondevice" if limited_memory else "bfgs-ondevice"
+
+
+def resolve_boozer_least_squares_algorithm(
+    boozer_optimizer_backend: str,
+    least_squares_algorithm: str | None = None,
+) -> str:
+    if least_squares_algorithm is not None:
+        return least_squares_algorithm
+    if boozer_optimizer_backend == "ondevice":
+        return "lm"
+    return "quasi-newton"

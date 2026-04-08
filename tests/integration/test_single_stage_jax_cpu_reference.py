@@ -5234,8 +5234,11 @@ class TestTraceableObjective:
             runtime_bundle_a["value_and_grad"] is not runtime_bundle_b["value_and_grad"]
         )
 
-    def test_runtime_bundle_success_filter_blocks_infeasible_states(self, boozer_setup):
-        """A target-lane success filter must demote infeasible states to failure."""
+    def test_runtime_bundle_success_filter_blocks_infeasible_nonbaseline_states(
+        self,
+        boozer_setup,
+    ):
+        """A target-lane success filter must demote infeasible candidate states."""
         (_, _, _, _, bs_jax, _, booz_jax, _) = boozer_setup
         unconstrained_bundle, coil_dofs = self._make_traceable_runtime_bundle(
             bs_jax,
@@ -5249,10 +5252,29 @@ class TestTraceableObjective:
             success_filter=lambda _coil_dofs, _solved_x: jnp.array(False, dtype=bool),
         )
 
-        unconstrained_value = float(unconstrained_bundle["objective"](coil_dofs))
-        gated_value = float(gated_bundle["objective"](coil_dofs))
-        gated_value_vg, gated_grad = gated_bundle["value_and_grad"](coil_dofs)
+        baseline_value = float(unconstrained_bundle["objective"](coil_dofs))
+        gated_baseline_value = float(gated_bundle["objective"](coil_dofs))
+        perturbed_coil_dofs = coil_dofs.at[0].add(
+            jnp.asarray(1.0e-4, dtype=coil_dofs.dtype)
+        )
+        unconstrained_value = float(
+            unconstrained_bundle["objective"](perturbed_coil_dofs)
+        )
+        gated_value = float(gated_bundle["objective"](perturbed_coil_dofs))
+        gated_value_vg, gated_grad = gated_bundle["value_and_grad"](
+            perturbed_coil_dofs
+        )
 
+        np.testing.assert_allclose(
+            gated_baseline_value,
+            baseline_value,
+            rtol=0.0,
+            atol=0.0,
+            err_msg=(
+                "The baseline target-lane state should remain evaluable even when "
+                "the hard success filter rejects candidate states."
+            ),
+        )
         assert gated_value > unconstrained_value
         np.testing.assert_allclose(
             float(gated_value_vg),
