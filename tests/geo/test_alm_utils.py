@@ -84,6 +84,21 @@ class ResidualHelperTests(unittest.TestCase):
         )
         self.assertAlmostEqual(evaluation["max_feasibility_violation"], 0.5)
 
+    def test_incumbent_objective_value_prefers_promoted_physics_total(self):
+        module = load_alm_utils_module()
+
+        self.assertAlmostEqual(
+            module._incumbent_objective_value(
+                {
+                    "physics_total": 7.5,
+                    "base_value": 0.0,
+                    "base_total": 0.0,
+                    "total": 12.0,
+                }
+            ),
+            7.5,
+        )
+
     def test_augmented_objective_exposes_solver_constraint_metadata(self):
         module = load_alm_utils_module()
 

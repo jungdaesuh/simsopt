@@ -656,6 +656,26 @@ class SingleStageObjectiveModuleTests(_ModuleTestCase):
 
         np.testing.assert_allclose(result["grad"], [4.6, 2.8, 0.0, 0.0])
 
+    def test_evaluate_base_objective_gil_formulation_zeros_base_value_and_grad(self):
+        objective, nonqs, brs, jiota, jlength = self._make_projected_base_terms()
+
+        result = self.module.evaluate_base_objective(
+            np.array([1.0]),
+            nonqs,
+            brs,
+            RES_WEIGHT=2.0,
+            Jiota=jiota,
+            IOTAS_WEIGHT=3.0,
+            JCurveLength=jlength,
+            LENGTH_WEIGHT=1.0,
+            objective_optimizable=objective,
+            alm_formulation="gil",
+        )
+
+        self.assertAlmostEqual(result["total"], 0.0)
+        self.assertAlmostEqual(result["physics_total"], 25.0)
+        np.testing.assert_allclose(result["grad"], [0.0, 0.0, 0.0, 0.0])
+
     def test_evaluate_alm_objective_projects_base_gradient_into_constraint_space(self):
         objective, nonqs, brs, jiota, jlength = self._make_projected_base_terms()
 
@@ -714,6 +734,92 @@ class SingleStageObjectiveModuleTests(_ModuleTestCase):
         )
 
         np.testing.assert_allclose(result["grad"], [9.0, -2.0, 0.0, 0.0])
+
+    def test_evaluate_alm_objective_gil_formulation_promotes_physics_terms_to_constraints(self):
+        objective, nonqs, brs, jiota, jlength = self._make_projected_base_terms()
+
+        def fake_augmented(base_value, base_grad, constraint_values, constraint_grads, multipliers, penalty):
+            self.assertAlmostEqual(base_value, 0.0)
+            np.testing.assert_allclose(base_grad, [0.0, 0.0, 0.0, 0.0])
+            np.testing.assert_allclose(
+                constraint_values,
+                [-0.1, 0.2, 0.3, 1.0, 2.0, 3.5, 5.0],
+            )
+            np.testing.assert_allclose(constraint_grads[3], [2.0, 0.0, 0.0, 0.0])
+            np.testing.assert_allclose(constraint_grads[4], [0.5, 0.5, 0.0, 0.0])
+            np.testing.assert_allclose(constraint_grads[5], [0.2, 0.1, 0.0, 0.0])
+            np.testing.assert_allclose(constraint_grads[6], [1.0, 1.5, 0.0, 0.0])
+            np.testing.assert_allclose(multipliers, np.arange(7, dtype=float))
+            self.assertAlmostEqual(penalty, 4.0)
+            return {
+                "total": 11.0,
+                "grad": np.array([7.0, -4.0, 0.0, 0.0]),
+                "stationarity_norm": 0.5,
+            }
+
+        result = self.module.evaluate_alm_objective(
+            np.array([1.0]),
+            nonqs,
+            brs,
+            RES_WEIGHT=2.0,
+            Jiota=jiota,
+            IOTAS_WEIGHT=3.0,
+            JCurveLength=jlength,
+            LENGTH_WEIGHT=1.0,
+            JCurveCurve=_FakeAlgebraicObjective(0.6, [0.3, 0.4]),
+            JCurveSurface=_FakeAlgebraicObjective(0.7, [0.5, 0.6]),
+            JCurvature=_FakeAlgebraicObjective(0.8, [0.7, 0.8]),
+            multipliers=np.arange(7, dtype=float),
+            penalty=4.0,
+            objective_optimizable=objective,
+            curves=["curve_a"],
+            curve_curve_min_distance=0.05,
+            outer_surface="outer",
+            curve_surface_min_distance=0.02,
+            banana_curve="banana",
+            curvature_threshold=40.0,
+            distance_smoothing=0.01,
+            curvature_smoothing=0.05,
+            constraint_names=(
+                "coil_coil_spacing",
+                "coil_surface_spacing",
+                "max_curvature",
+                "qs_error",
+                "boozer_residual",
+                "iota_penalty",
+                "length_penalty",
+            ),
+            curve_curve_constraint_fn=lambda *_args: (-0.1, np.array([1.0, 0.0, 0.0, 0.0]), 0.0),
+            curve_surface_constraint_fn=lambda *_args: (0.2, np.array([0.0, 1.0, 0.0, 0.0]), 0.2),
+            curvature_constraint_fn=lambda *_args: (0.3, np.array([1.0, -1.0, 0.0, 0.0]), 0.3),
+            augmented_inequality_objective_fn=fake_augmented,
+            activity_tolerances_fn=lambda ds, cs, include_surface_surface: np.array(
+                [ds * 4.0, ds * 4.0, cs * 4.0],
+                dtype=float,
+            ),
+            alm_formulation="gil",
+            qs_threshold=1.0,
+            boozer_threshold=1.0,
+            iota_penalty_threshold=0.5,
+            length_penalty_threshold=0.0,
+        )
+
+        self.assertEqual(
+            result["constraint_names"],
+            [
+                "coil_coil_spacing",
+                "coil_surface_spacing",
+                "max_curvature",
+                "qs_error",
+                "boozer_residual",
+                "iota_penalty",
+                "length_penalty",
+            ],
+        )
+        self.assertAlmostEqual(result["physics_total"], 25.0)
+        self.assertAlmostEqual(result["base_total"], 25.0)
+        np.testing.assert_allclose(result["constraint_activity_tolerances"], [0.04, 0.04, 0.2, 0.0, 0.0, 0.0, 0.0])
+        np.testing.assert_allclose(result["grad"], [7.0, -4.0, 0.0, 0.0])
 
 
 class SingleStageGeometryModuleTests(_ModuleTestCase):

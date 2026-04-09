@@ -127,11 +127,17 @@ DEFAULT_DATABASE_STAGE2_ROOT = os.path.join(REPO_ROOT, "DATABASE", "COIL_OPTIMIZ
 DEFAULT_SINGLE_STAGE_OUTPUT_ROOT = os.path.join(SCRIPT_DIR, "outputs")
 DEFAULT_HARDWARE_SEARCH_MODE = "hard"
 DEFAULT_HARDWARE_SEARCH_SOFT_ITERATIONS = 0
-SINGLE_STAGE_ALM_CONSTRAINT_NAMES = (
+SINGLE_STAGE_ALM_GEOMETRY_CONSTRAINT_NAMES = (
     "coil_coil_spacing",
     "coil_surface_spacing",
     "max_curvature",
     "surface_vessel_spacing",
+)
+SINGLE_STAGE_GIL_PHYSICS_CONSTRAINT_NAMES = (
+    "qs_error",
+    "boozer_residual",
+    "iota_penalty",
+    "length_penalty",
 )
 DEFAULT_STAGE2_SEEDS_BY_PLASMA = {
     "wout_nfp22ginsburg_000_014417_iota15.nc": {
@@ -738,6 +744,47 @@ def parse_args():
         default=float(os.environ.get("ALM_CURVATURE_SMOOTHING", "0.05")),
         help="Curvature smooth-max temperature for single-stage ALM curvature constraints.",
     )
+    parser.add_argument(
+        "--alm-formulation",
+        choices=["legacy", "gil"],
+        default=os.environ.get("ALM_FORMULATION", "legacy"),
+        help=(
+            "ALM objective assembly. 'legacy' keeps physics terms in the base objective; "
+            "'gil' uses a dummy zero objective and promotes physics terms to inequality constraints."
+        ),
+    )
+    parser.add_argument(
+        "--alm-qs-threshold",
+        type=float,
+        default=float(os.environ["ALM_QS_THRESHOLD"]) if "ALM_QS_THRESHOLD" in os.environ else None,
+        help="Gil-mode upper bound for the quasi-symmetry objective J_QS.",
+    )
+    parser.add_argument(
+        "--alm-boozer-threshold",
+        type=float,
+        default=float(os.environ["ALM_BOOZER_THRESHOLD"]) if "ALM_BOOZER_THRESHOLD" in os.environ else None,
+        help="Gil-mode upper bound for the Boozer residual objective.",
+    )
+    parser.add_argument(
+        "--alm-iota-penalty-threshold",
+        type=float,
+        default=(
+            float(os.environ["ALM_IOTA_PENALTY_THRESHOLD"])
+            if "ALM_IOTA_PENALTY_THRESHOLD" in os.environ
+            else None
+        ),
+        help="Gil-mode upper bound for the Jiota penalty objective.",
+    )
+    parser.add_argument(
+        "--alm-length-penalty-threshold",
+        type=float,
+        default=(
+            float(os.environ["ALM_LENGTH_PENALTY_THRESHOLD"])
+            if "ALM_LENGTH_PENALTY_THRESHOLD" in os.environ
+            else None
+        ),
+        help="Gil-mode upper bound for the single-stage length penalty objective.",
+    )
     parser.add_argument("--iota-target", type=float, default=float(os.environ.get("IOTA_TARGET", "0.15")))
     parser.add_argument("--num-tf-coils", type=int, default=int(os.environ.get("NUM_TF_COILS", "20")))
     parser.add_argument(
@@ -1242,6 +1289,11 @@ class RunIdentityConfig:
     refinement_max_stalled_chunks: int
     constraint_weight: float
     constraint_method: str
+    alm_formulation: str
+    alm_qs_threshold: float | None
+    alm_boozer_threshold: float | None
+    alm_iota_penalty_threshold: float | None
+    alm_length_penalty_threshold: float | None
     vol_target: float
     iota_target: float
     boozer_I: float
@@ -1324,6 +1376,11 @@ def make_run_identity_config(
         refinement_max_stalled_chunks=args.refinement_max_stalled_chunks,
         constraint_weight=constraint_weight,
         constraint_method=constraint_method,
+        alm_formulation=args.alm_formulation,
+        alm_qs_threshold=args.alm_qs_threshold,
+        alm_boozer_threshold=args.alm_boozer_threshold,
+        alm_iota_penalty_threshold=args.alm_iota_penalty_threshold,
+        alm_length_penalty_threshold=args.alm_length_penalty_threshold,
         vol_target=vol_target,
         iota_target=iota_target,
         boozer_I=boozer_I,
@@ -1412,6 +1469,46 @@ def validate_boozer_stage_refinement_args(args, constraint_weight):
         raise ValueError(
             "--refinement-max-stalled-chunks must be positive when --boozer-stage-refinement is enabled"
         )
+
+
+def validate_single_stage_alm_formulation_args(args):
+    if args.alm_formulation == "legacy":
+        return
+    if args.constraint_method != "alm":
+        raise ValueError("--alm-formulation=gil requires --constraint-method=alm")
+
+    required_thresholds = {
+        "--alm-qs-threshold": args.alm_qs_threshold,
+        "--alm-boozer-threshold": args.alm_boozer_threshold,
+        "--alm-iota-penalty-threshold": args.alm_iota_penalty_threshold,
+        "--alm-length-penalty-threshold": args.alm_length_penalty_threshold,
+    }
+    missing_thresholds = [
+        flag_name for flag_name, value in required_thresholds.items() if value is None
+    ]
+    if missing_thresholds:
+        raise ValueError(
+            "Gil ALM formulation requires explicit thresholds for "
+            + ", ".join(missing_thresholds)
+        )
+
+    negative_thresholds = [
+        flag_name for flag_name, value in required_thresholds.items() if float(value) < 0.0
+    ]
+    if negative_thresholds:
+        raise ValueError(
+            "Gil ALM thresholds must be non-negative: "
+            + ", ".join(negative_thresholds)
+        )
+
+
+def single_stage_alm_constraint_names(*, alm_formulation, include_surface_surface):
+    names = list(SINGLE_STAGE_ALM_GEOMETRY_CONSTRAINT_NAMES[:3])
+    if include_surface_surface:
+        names.append(SINGLE_STAGE_ALM_GEOMETRY_CONSTRAINT_NAMES[3])
+    if alm_formulation == "gil":
+        names.extend(SINGLE_STAGE_GIL_PHYSICS_CONSTRAINT_NAMES)
+    return names
 
 
 def evaluate_search_topology_gate(num_surfaces, outer_surface, bfield):
@@ -1874,6 +1971,7 @@ def evaluate_base_objective(
         IOTAS_WEIGHT,
         JCurveLength,
         LENGTH_WEIGHT,
+        alm_formulation=ALM_FORMULATION if CONSTRAINT_METHOD == "alm" else "legacy",
     )
 
 
@@ -1916,7 +2014,10 @@ def evaluate_alm_objective(
         curvature_threshold=CURVATURE_THRESHOLD,
         distance_smoothing=args.alm_distance_smoothing,
         curvature_smoothing=args.alm_curvature_smoothing,
-        constraint_names=SINGLE_STAGE_ALM_CONSTRAINT_NAMES,
+        constraint_names=single_stage_alm_constraint_names(
+            alm_formulation=args.alm_formulation,
+            include_surface_surface=JSurfSurf is not None,
+        ),
         curve_curve_constraint_fn=_smooth_min_curve_curve_signed_constraint,
         curve_surface_constraint_fn=_smooth_min_curve_surface_signed_constraint,
         curvature_constraint_fn=_smooth_max_curvature_signed_constraint,
@@ -1924,6 +2025,11 @@ def evaluate_alm_objective(
         vessel_surface=VV,
         surface_surface_min_distance=SS_DIST,
         surface_surface_constraint_fn=_smooth_min_surface_surface_signed_constraint,
+        alm_formulation=args.alm_formulation,
+        qs_threshold=args.alm_qs_threshold,
+        boozer_threshold=args.alm_boozer_threshold,
+        iota_penalty_threshold=args.alm_iota_penalty_threshold,
+        length_penalty_threshold=args.alm_length_penalty_threshold,
     )
 
 
@@ -2537,6 +2643,7 @@ TOPOLOGY_GATE_TMAX = 2.0
 TOPOLOGY_GATE_TOL = 1e-7
 TOPOLOGY_GATE_SURVIVAL_THRESHOLD = 0.0
 CONSTRAINT_METHOD = "penalty"
+ALM_FORMULATION = "legacy"
 ALM_MULTIPLIERS = np.zeros(0, dtype=float)
 ALM_PENALTY = 1.0
 CHECKPOINT_EVERY = 0
@@ -2576,6 +2683,7 @@ if __name__ == "__main__":
     vol_target = args.vol_target
     CONSTRAINT_WEIGHT = None if args.constraint_weight < 0 else args.constraint_weight
     CONSTRAINT_METHOD = args.constraint_method
+    ALM_FORMULATION = args.alm_formulation
     ALM_MULTIPLIERS = np.zeros(0, dtype=float)
     ALM_PENALTY = args.alm_penalty_init
     plasma_current_settings = resolve_plasma_current_settings(args)
@@ -2618,6 +2726,7 @@ if __name__ == "__main__":
     if args.hardware_search_soft_iterations < 0:
         raise ValueError("--hardware-search-soft-iterations must be non-negative")
     validate_alm_cli_args(args)
+    validate_single_stage_alm_formulation_args(args)
     validate_confinement_surrogate_args(args)
     validate_boozer_stage_refinement_args(args, CONSTRAINT_WEIGHT)
     MULTISURFACE_RAMP_ITERATIONS = args.multisurface_ramp_iterations
@@ -2811,7 +2920,15 @@ if __name__ == "__main__":
     # Extract degrees of freedom
     dofs = JF.x
     if CONSTRAINT_METHOD == "alm":
-        ALM_MULTIPLIERS = np.zeros(4 if JSurfSurf is not None else 3, dtype=float)
+        ALM_MULTIPLIERS = np.zeros(
+            len(
+                single_stage_alm_constraint_names(
+                    alm_formulation=ALM_FORMULATION,
+                    include_surface_surface=JSurfSurf is not None,
+                )
+            ),
+            dtype=float,
+        )
         ALM_PENALTY = args.alm_penalty_init
 
     # ==============================================================================
@@ -2954,13 +3071,23 @@ if __name__ == "__main__":
             restore_surface_states(surface_data, run_dict["surface_state"])
 
         set_alm_runtime_state(
-            np.zeros(4 if JSurfSurf is not None else 3, dtype=float),
+            np.zeros(
+                len(
+                    single_stage_alm_constraint_names(
+                        alm_formulation=ALM_FORMULATION,
+                        include_surface_surface=JSurfSurf is not None,
+                    )
+                ),
+                dtype=float,
+            ),
             args.alm_penalty_init,
         )
         res = minimize_alm(
             dofs,
-            list(SINGLE_STAGE_ALM_CONSTRAINT_NAMES[:3])
-            + ([SINGLE_STAGE_ALM_CONSTRAINT_NAMES[3]] if JSurfSurf is not None else []),
+            single_stage_alm_constraint_names(
+                alm_formulation=ALM_FORMULATION,
+                include_surface_surface=JSurfSurf is not None,
+            ),
             evaluate_problem,
             alm_settings,
             {
@@ -3333,6 +3460,7 @@ if __name__ == "__main__":
         "FINAL_SOURCE_STAGE": final_source_stage,
         "CONSTRAINT_WEIGHT": CONSTRAINT_WEIGHT,
         "CONSTRAINT_METHOD": CONSTRAINT_METHOD,
+        "ALM_FORMULATION": ALM_FORMULATION if CONSTRAINT_METHOD == "alm" else None,
         "CC_DIST": CC_DIST,
         "CC_WEIGHT": CC_WEIGHT,
         "CS_DIST": CS_DIST,
@@ -3367,6 +3495,14 @@ if __name__ == "__main__":
         "ALM_MAX_SUBPROBLEM_CONTINUATIONS": args.alm_max_subproblem_continuations if CONSTRAINT_METHOD == "alm" else None,
         "ALM_DISTANCE_SMOOTHING": args.alm_distance_smoothing if CONSTRAINT_METHOD == "alm" else None,
         "ALM_CURVATURE_SMOOTHING": args.alm_curvature_smoothing if CONSTRAINT_METHOD == "alm" else None,
+        "ALM_QS_THRESHOLD": args.alm_qs_threshold if CONSTRAINT_METHOD == "alm" else None,
+        "ALM_BOOZER_THRESHOLD": args.alm_boozer_threshold if CONSTRAINT_METHOD == "alm" else None,
+        "ALM_IOTA_PENALTY_THRESHOLD": (
+            args.alm_iota_penalty_threshold if CONSTRAINT_METHOD == "alm" else None
+        ),
+        "ALM_LENGTH_PENALTY_THRESHOLD": (
+            args.alm_length_penalty_threshold if CONSTRAINT_METHOD == "alm" else None
+        ),
         "ALM_FINAL_PENALTY": getattr(alm_result, "penalty", None),
         "ALM_FINAL_MULTIPLIERS": getattr(alm_result, "multipliers", None),
         "ALM_FINAL_CONSTRAINT_VALUES": getattr(alm_result, "constraint_values", None),

@@ -4,6 +4,9 @@ from alm_utils import augmented_inequality_objective
 from banana_opt.single_stage_constraints import single_stage_constraint_activity_tolerances
 
 
+_SUPPORTED_ALM_FORMULATIONS = frozenset({"legacy", "gil"})
+
+
 def average_surface_objectives(objectives, weights=None):
     if len(objectives) == 0:
         raise ValueError("Need at least one surface objective to average")
@@ -63,6 +66,25 @@ def _objective_gradient(objective, objective_optimizable=None):
     if objective_optimizable is None:
         return np.asarray(objective.dJ(), dtype=float)
     return np.asarray(objective.dJ(partials=True)(objective_optimizable), dtype=float)
+
+
+def _validate_alm_formulation(alm_formulation):
+    if alm_formulation not in _SUPPORTED_ALM_FORMULATIONS:
+        raise ValueError(
+            f"Unsupported ALM formulation {alm_formulation!r}; expected one of "
+            f"{sorted(_SUPPORTED_ALM_FORMULATIONS)!r}"
+        )
+    return str(alm_formulation)
+
+
+def _objective_upper_bound_constraint(objective, threshold, objective_optimizable):
+    if threshold is None:
+        raise ValueError("Gil ALM formulation requires explicit objective thresholds")
+    if float(threshold) < 0.0:
+        raise ValueError("Gil ALM thresholds must be non-negative")
+    signed_value = float(objective.J()) - float(threshold)
+    grad = _objective_gradient(objective, objective_optimizable)
+    return signed_value, grad, max(0.0, signed_value)
 
 
 def evaluate_total_objective(
@@ -140,7 +162,9 @@ def evaluate_base_objective(
     LENGTH_WEIGHT,
     *,
     objective_optimizable=None,
+    alm_formulation="legacy",
 ):
+    alm_formulation = _validate_alm_formulation(alm_formulation)
     J_QS_obj, J_Boozer_obj = _surface_objective_pair(surface_weights, nonQSs, brs)
     base_objective = (
         J_QS_obj
@@ -148,9 +172,18 @@ def evaluate_base_objective(
         + IOTAS_WEIGHT * Jiota
         + LENGTH_WEIGHT * JCurveLength
     )
+    physics_total = float(base_objective.J())
+    base_grad = _objective_gradient(base_objective, objective_optimizable)
+    if alm_formulation == "gil":
+        total = 0.0
+        grad = np.zeros_like(base_grad)
+    else:
+        total = physics_total
+        grad = base_grad
     return {
-        "total": float(base_objective.J()),
-        "grad": _objective_gradient(base_objective, objective_optimizable),
+        "total": total,
+        "grad": grad,
+        "physics_total": physics_total,
         "J_QS": float(J_QS_obj.J()),
         "dJ_QS": np.asarray(J_QS_obj.dJ(), dtype=float),
         "J_Boozer": float(J_Boozer_obj.J()),
@@ -197,7 +230,13 @@ def evaluate_alm_objective(
     surface_surface_constraint_fn=None,
     augmented_inequality_objective_fn=augmented_inequality_objective,
     activity_tolerances_fn=single_stage_constraint_activity_tolerances,
+    alm_formulation="legacy",
+    qs_threshold=None,
+    boozer_threshold=None,
+    iota_penalty_threshold=None,
+    length_penalty_threshold=0.0,
 ):
+    alm_formulation = _validate_alm_formulation(alm_formulation)
     base_eval = evaluate_base_objective(
         surface_weights,
         nonQSs,
@@ -208,7 +247,9 @@ def evaluate_alm_objective(
         JCurveLength,
         LENGTH_WEIGHT,
         objective_optimizable=objective_optimizable,
+        alm_formulation=alm_formulation,
     )
+    J_QS_obj, J_Boozer_obj = _surface_objective_pair(surface_weights, nonQSs, brs)
 
     curve_curve_signed_value, curve_curve_grad, curve_curve_violation = curve_curve_constraint_fn(
         curves,
@@ -263,6 +304,42 @@ def evaluate_alm_objective(
         constraint_grads.append(surface_surface_grad)
         feasibility_values.append(surface_surface_violation)
 
+    if alm_formulation == "gil":
+        if len(constraint_names) < len(active_constraint_names) + 4:
+            raise ValueError(
+                "Gil ALM formulation requires four additional physics constraint names"
+            )
+        physics_constraints = [
+            _objective_upper_bound_constraint(
+                J_QS_obj,
+                qs_threshold,
+                objective_optimizable,
+            ),
+            _objective_upper_bound_constraint(
+                J_Boozer_obj,
+                boozer_threshold,
+                objective_optimizable,
+            ),
+            _objective_upper_bound_constraint(
+                Jiota,
+                iota_penalty_threshold,
+                objective_optimizable,
+            ),
+            _objective_upper_bound_constraint(
+                JCurveLength,
+                length_penalty_threshold,
+                objective_optimizable,
+            ),
+        ]
+        for constraint_name, (signed_value, grad, violation) in zip(
+            constraint_names[len(active_constraint_names):],
+            physics_constraints,
+        ):
+            active_constraint_names.append(constraint_name)
+            constraint_values.append(signed_value)
+            constraint_grads.append(grad)
+            feasibility_values.append(violation)
+
     alm_eval = augmented_inequality_objective_fn(
         base_eval["total"],
         base_eval["grad"],
@@ -271,7 +348,7 @@ def evaluate_alm_objective(
         multipliers,
         penalty,
     )
-    base_total = float(base_eval["total"])
+    base_total = float(base_eval.get("physics_total", base_eval["total"]))
     base_eval.update(alm_eval)
     base_eval["base_total"] = base_total
     base_eval["constraint_names"] = active_constraint_names
@@ -279,11 +356,22 @@ def evaluate_alm_objective(
     base_eval["feasibility_values"] = np.asarray(feasibility_values, dtype=float)
     base_eval["max_feasibility_violation"] = float(max(feasibility_values))
     base_eval["constraint_grads"] = [np.asarray(grad, dtype=float) for grad in constraint_grads]
-    base_eval["constraint_activity_tolerances"] = activity_tolerances_fn(
-        distance_smoothing,
-        curvature_smoothing,
-        include_surface_surface=JSurfSurf is not None,
+    constraint_activity_tolerances = np.asarray(
+        activity_tolerances_fn(
+            distance_smoothing,
+            curvature_smoothing,
+            include_surface_surface=JSurfSurf is not None,
+        ),
+        dtype=float,
     )
+    if alm_formulation == "gil":
+        constraint_activity_tolerances = np.concatenate(
+            [
+                constraint_activity_tolerances,
+                np.zeros(4, dtype=float),
+            ]
+        )
+    base_eval["constraint_activity_tolerances"] = constraint_activity_tolerances
     base_eval["J_cc"] = float(JCurveCurve.J())
     base_eval["dJ_cc"] = np.asarray(JCurveCurve.dJ(), dtype=float)
     base_eval["J_cs"] = float(JCurveSurface.J())
@@ -296,4 +384,5 @@ def evaluate_alm_objective(
     )
     base_eval["J_curvature"] = float(JCurvature.J())
     base_eval["dJ_curvature"] = np.asarray(JCurvature.dJ(), dtype=float)
+    base_eval["alm_formulation"] = alm_formulation
     return base_eval

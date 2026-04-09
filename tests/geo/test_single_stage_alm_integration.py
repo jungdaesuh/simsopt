@@ -181,6 +181,77 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
         self.assertIn('"--alm-curvature-smoothing"', source)
         self.assertIn('"ALM_CURVATURE_SMOOTHING", "0.05"', source)
 
+    def test_single_stage_parse_args_exposes_gil_formulation_controls(self):
+        source = SINGLE_STAGE_MODULE_PATH.read_text()
+
+        self.assertIn('"--alm-formulation"', source)
+        self.assertIn('"ALM_FORMULATION", "legacy"', source)
+        self.assertIn('"--alm-qs-threshold"', source)
+        self.assertIn('"ALM_QS_THRESHOLD"', source)
+        self.assertIn('"--alm-boozer-threshold"', source)
+        self.assertIn('"ALM_BOOZER_THRESHOLD"', source)
+        self.assertIn('"--alm-iota-penalty-threshold"', source)
+        self.assertIn('"ALM_IOTA_PENALTY_THRESHOLD"', source)
+        self.assertIn('"--alm-length-penalty-threshold"', source)
+        self.assertIn('"ALM_LENGTH_PENALTY_THRESHOLD"', source)
+
+    def test_single_stage_validate_gil_formulation_requires_explicit_thresholds(self):
+        functions = extract_functions(
+            SINGLE_STAGE_MODULE_PATH,
+            ["validate_single_stage_alm_formulation_args"],
+            {},
+        )
+        validate_args = functions["validate_single_stage_alm_formulation_args"]
+        args = SimpleNamespace(
+            alm_formulation="gil",
+            constraint_method="alm",
+            alm_qs_threshold=None,
+            alm_boozer_threshold=1e-6,
+            alm_iota_penalty_threshold=1e-5,
+            alm_length_penalty_threshold=1e-4,
+        )
+
+        with self.assertRaisesRegex(ValueError, "--alm-qs-threshold"):
+            validate_args(args)
+
+    def test_single_stage_validate_gil_formulation_requires_length_threshold(self):
+        functions = extract_functions(
+            SINGLE_STAGE_MODULE_PATH,
+            ["validate_single_stage_alm_formulation_args"],
+            {},
+        )
+        validate_args = functions["validate_single_stage_alm_formulation_args"]
+        args = SimpleNamespace(
+            alm_formulation="gil",
+            constraint_method="alm",
+            alm_qs_threshold=1e-6,
+            alm_boozer_threshold=1e-6,
+            alm_iota_penalty_threshold=1e-5,
+            alm_length_penalty_threshold=None,
+        )
+
+        with self.assertRaisesRegex(ValueError, "--alm-length-penalty-threshold"):
+            validate_args(args)
+
+    def test_single_stage_validate_gil_formulation_rejects_penalty_mode(self):
+        functions = extract_functions(
+            SINGLE_STAGE_MODULE_PATH,
+            ["validate_single_stage_alm_formulation_args"],
+            {},
+        )
+        validate_args = functions["validate_single_stage_alm_formulation_args"]
+        args = SimpleNamespace(
+            alm_formulation="gil",
+            constraint_method="penalty",
+            alm_qs_threshold=1e-6,
+            alm_boozer_threshold=1e-6,
+            alm_iota_penalty_threshold=1e-5,
+            alm_length_penalty_threshold=1e-4,
+        )
+
+        with self.assertRaisesRegex(ValueError, "--constraint-method=alm"):
+            validate_args(args)
+
     def test_single_stage_builds_bounded_alm_settings(self):
         alm_utils = load_alm_utils_module()
         functions = extract_functions(
@@ -229,6 +300,8 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
         self.assertNotIn("augmented_objective(", objectives_source)
         self.assertIn("accepted_callback=callback", source)
         self.assertNotIn("inner_callback=callback", source)
+        self.assertIn("single_stage_alm_constraint_names(", source)
+        self.assertIn("alm_formulation=args.alm_formulation", source)
 
     def test_single_stage_basin_hopping_uses_shared_helper_and_records_telemetry(self):
         source = SINGLE_STAGE_MODULE_PATH.read_text()

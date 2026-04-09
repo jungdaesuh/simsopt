@@ -396,6 +396,8 @@ def _select_inner_solve_profile(
 
 
 def _incumbent_objective_value(evaluation: dict) -> float:
+    if "physics_total" in evaluation:
+        return float(evaluation["physics_total"])
     if "base_value" in evaluation:
         return float(evaluation["base_value"])
     if "base_total" in evaluation:
