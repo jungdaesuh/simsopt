@@ -799,6 +799,76 @@ def test_transfer_guard_disallow_allows_lbfgs_ondevice_quadratic_smokes():
     )
 
 
+def _assert_ondevice_optimizer_reuses_compiled_solver(method: str) -> None:
+    _assert_import_check_passes(
+        f"""
+        import logging
+        import jax
+        import jax.numpy as jnp
+        import numpy as np
+        import simsopt.config as simsopt_config
+        from simsopt.geo.optimizer_jax import (
+            PRIVATE_OPTIMIZER_JAX_VERSION,
+            jax_minimize,
+            private_optimizer_runtime_is_supported,
+        )
+
+        simsopt_config.set_backend(
+            "jax_cpu_parity",
+            strict=True,
+            transfer_guard="disallow",
+        )
+        if not private_optimizer_runtime_is_supported(jax.__version__):
+            raise SystemExit(0)
+
+        class _CompileCounter(logging.Handler):
+            def __init__(self):
+                super().__init__()
+                self.count = 0
+
+            def emit(self, record):
+                if "Compiling jit(run_solver)" in record.getMessage():
+                    self.count += 1
+
+        logger = logging.getLogger("jax")
+        old_level = logger.level
+        handler = _CompileCounter()
+        logger.addHandler(handler)
+        logger.setLevel(logging.WARNING)
+
+        half = jax.device_put(np.asarray(0.5, dtype=np.float64))
+
+        def quad(x):
+            x = jnp.asarray(x, dtype=jnp.float64)
+            return half * jnp.dot(x, x)
+
+        x0 = jnp.asarray(np.array([1.0, -2.0], dtype=np.float64))
+        try:
+            jax.clear_caches()
+            with jax.log_compiles(True):
+                for _ in range(3):
+                    result = jax_minimize(quad, x0, method={method!r}, maxiter=5)
+                    assert result.success is True
+            assert handler.count == 1, handler.count
+        finally:
+            logger.removeHandler(handler)
+            logger.setLevel(old_level)
+    """,
+        failure_message=f"{method} compile-count smoke failed",
+        extra_env={"JAX_ENABLE_COMPILATION_CACHE": "0"},
+    )
+
+
+def test_lbfgs_ondevice_reuses_compiled_solver_across_identical_calls():
+    """Repeated identical lbfgs-ondevice calls must not recompile run_solver."""
+    _assert_ondevice_optimizer_reuses_compiled_solver("lbfgs-ondevice")
+
+
+def test_bfgs_ondevice_reuses_compiled_solver_across_identical_calls():
+    """Repeated identical bfgs-ondevice calls must not recompile run_solver."""
+    _assert_ondevice_optimizer_reuses_compiled_solver("bfgs-ondevice")
+
+
 def test_transfer_guard_disallow_allows_adam_ondevice_quadratic_smokes():
     """Public ondevice Adam lane must stay transfer-clean under disallow."""
     _assert_import_check_passes(

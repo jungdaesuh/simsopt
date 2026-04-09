@@ -9,6 +9,7 @@ so they exist on the partially-initialized module object when this file loads.
 from __future__ import annotations
 
 from functools import partial
+from threading import Lock
 
 import jax
 import jax.numpy as jnp
@@ -24,6 +25,8 @@ from ..optimizer_jax import (
 _dot = partial(jnp.dot, precision=lax.Precision.HIGHEST)
 _einsum = partial(jnp.einsum, precision=lax.Precision.HIGHEST)
 _INT32_COUNTER_MAX = np.iinfo(np.int32).max
+_PRIVATE_SOLVER_CACHE_LOCK = Lock()
+_PRIVATE_SOLVER_CACHE_ATTR = "_simsopt_cached_private_solver"
 
 
 def _as_jax_dtype(value, dtype):
@@ -101,6 +104,30 @@ def _scalar_value_and_grad(fun):
         return value, grad
 
     return wrapped
+
+
+def _cached_private_solver(cache_owner, *, cache_key, builder):
+    if cache_owner is None:
+        return builder()
+    cached = getattr(cache_owner, _PRIVATE_SOLVER_CACHE_ATTR, None)
+    if cached is not None:
+        compiled = cached.get(cache_key)
+        if compiled is not None:
+            return compiled
+    compiled = builder()
+    try:
+        with _PRIVATE_SOLVER_CACHE_LOCK:
+            cached = getattr(cache_owner, _PRIVATE_SOLVER_CACHE_ATTR, None)
+            if cached is None:
+                cached = {}
+                setattr(cache_owner, _PRIVATE_SOLVER_CACHE_ATTR, cached)
+            existing = cached.get(cache_key)
+            if existing is None:
+                cached[cache_key] = compiled
+                return compiled
+            return existing
+    except (AttributeError, TypeError):
+        return compiled
 
 
 def _promote_dtypes_inexact(*args):

@@ -12,6 +12,7 @@ from ..optimizer_jax import _prepare_optimizer_callable_inputs
 from ._common import (
     _as_jax_dtype,
     _bool_scalar,
+    _cached_private_solver,
     _dot,
     _eye,
     _einsum,
@@ -38,7 +39,7 @@ def _minimize_bfgs_private(
     callback=None,
     progress_callback=None,
 ):
-    fun, x0, callback, _ = _prepare_optimizer_callable_inputs(
+    fun, x0, callback, adapter = _prepare_optimizer_callable_inputs(
         fun,
         x0,
         value_and_grad=False,
@@ -244,7 +245,23 @@ def _minimize_bfgs_private(
         )
         return state._replace(status=status)
 
-    return jax.jit(run_solver)(state)
+    can_cache_solver = (
+        adapter is None
+        and callback is None
+        and progress_callback is None
+    )
+    solver = _cached_private_solver(
+        fun if can_cache_solver else None,
+        cache_key=(
+            "bfgs",
+            norm,
+            int(line_search_maxiter),
+            float(gtol_value),
+            int(maxiter_value),
+        ),
+        builder=lambda: jax.jit(run_solver),
+    )
+    return solver(state)
 
 
 def _make_bfgs_continuation_state(result, *, gtol, norm):
