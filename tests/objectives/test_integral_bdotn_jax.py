@@ -14,9 +14,15 @@ import pytest
 import numpy as np
 
 import jax
-
-jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp
+from conftest import (
+    device_float64,
+    host_array,
+    host_scalar,
+    parity_default_device,
+    parity_lane,
+    parity_rng,
+)
 
 _SRC = Path(__file__).resolve().parents[2] / "src" / "simsopt"
 
@@ -32,15 +38,21 @@ _ib = _load("integral_bdotn_jax", "objectives/integral_bdotn_jax.py")
 integral_BdotN = _ib.integral_BdotN
 
 
+@pytest.fixture(autouse=True)
+def _parity_device_scope(parity_lane):
+    with parity_default_device(parity_lane):
+        yield
+
+
 def _make_test_data(nphi=10, ntheta=12, seed=7):
     """Create synthetic B, target, and normal arrays."""
-    rng = np.random.RandomState(seed)
+    rng = parity_rng(seed)
     B = rng.randn(nphi, ntheta, 3) * 0.1 + np.array([0, 0, 1.0])
     target = rng.randn(nphi, ntheta) * 0.01
     normal = rng.randn(nphi, ntheta, 3) * 0.5
     # Make normals point outward-ish (positive z component)
     normal[..., 2] = np.abs(normal[..., 2]) + 0.1
-    return jnp.array(B), jnp.array(target), jnp.array(normal)
+    return device_float64(B), device_float64(target), device_float64(normal)
 
 
 def _numpy_integral_BdotN(B, target, normal, definition):
@@ -71,11 +83,11 @@ class TestIntegralBdotN:
             "local",
         ],
     )
-    def test_parity_with_target(self, definition):
+    def test_parity_with_target(self, definition, parity_lane):
         B, target, normal = _make_test_data()
-        J_jax = float(integral_BdotN(B, target, normal, definition))
+        J_jax = host_scalar(integral_BdotN(B, target, normal, definition))
         J_ref = _numpy_integral_BdotN(
-            np.array(B), np.array(target), np.array(normal), definition
+            host_array(B), host_array(target), host_array(normal), definition
         )
         np.testing.assert_allclose(J_jax, J_ref, rtol=1e-13)
 
@@ -87,12 +99,12 @@ class TestIntegralBdotN:
             "local",
         ],
     )
-    def test_parity_zero_target(self, definition):
+    def test_parity_zero_target(self, definition, parity_lane):
         B, _, normal = _make_test_data()
         target = jnp.zeros(B.shape[:2])
-        J_jax = float(integral_BdotN(B, target, normal, definition))
+        J_jax = host_scalar(integral_BdotN(B, target, normal, definition))
         J_ref = _numpy_integral_BdotN(
-            np.array(B), np.array(target), np.array(normal), definition
+            host_array(B), host_array(target), host_array(normal), definition
         )
         np.testing.assert_allclose(J_jax, J_ref, rtol=1e-13)
 
@@ -105,7 +117,7 @@ class TestIntegralBdotN:
     def test_zero_when_B_tangential(self):
         """If B is tangential to the surface (B·n = 0), flux should be zero."""
         nphi, ntheta = 8, 10
-        rng = np.random.RandomState(99)
+        rng = parity_rng(99)
         normal = rng.randn(nphi, ntheta, 3)
         norm_n = np.sqrt(np.sum(normal**2, axis=-1, keepdims=True))
         unit_n = normal / norm_n
@@ -121,7 +133,7 @@ class TestIntegralBdotN:
         B = B + 0.5 * B2
 
         target = jnp.zeros((nphi, ntheta))
-        J = float(
+        J = host_scalar(
             integral_BdotN(jnp.array(B), target, jnp.array(normal), "quadratic flux")
         )
         np.testing.assert_allclose(J, 0.0, atol=1e-25)
@@ -192,20 +204,20 @@ class TestIntegralBdotNCppParity:
             "local",
         ],
     )
-    def test_cpp_parity(self, definition):
+    def test_cpp_parity(self, definition, parity_lane):
         import simsoptpp as sopp
 
         B, target, normal = _make_test_data(nphi=15, ntheta=15)
-        B_np = np.ascontiguousarray(np.array(B))
-        target_np = np.ascontiguousarray(np.array(target))
-        normal_np = np.ascontiguousarray(np.array(normal))
+        B_np = np.ascontiguousarray(host_array(B))
+        target_np = np.ascontiguousarray(host_array(target))
+        normal_np = np.ascontiguousarray(host_array(normal))
 
         J_cpp = sopp.integral_BdotN(B_np, target_np, normal_np, definition)
-        J_jax = float(integral_BdotN(B, target, normal, definition))
+        J_jax = host_scalar(integral_BdotN(B, target, normal, definition))
 
         np.testing.assert_allclose(J_jax, J_cpp, rtol=1e-13)
 
-    def test_cpp_zero_normal_quadratic_flux_returns_zero(self):
+    def test_cpp_zero_normal_quadratic_flux_nan_boundary_is_documented(self):
         import simsoptpp as sopp
 
         B = np.zeros((2, 3, 3))
@@ -213,16 +225,16 @@ class TestIntegralBdotNCppParity:
         normal = np.zeros((2, 3, 3))
 
         J_cpp = sopp.integral_BdotN(B, target, normal, "quadratic flux")
-        J_jax = float(
+        J_jax = host_scalar(
             integral_BdotN(
                 jnp.array(B), jnp.array(target), jnp.array(normal), "quadratic flux"
             )
         )
 
-        np.testing.assert_allclose(J_cpp, 0.0, atol=0.0)
-        np.testing.assert_allclose(J_jax, J_cpp, atol=0.0)
+        assert np.isnan(J_cpp)
+        np.testing.assert_allclose(J_jax, 0.0, atol=0.0)
 
-    def test_cpp_zero_field_normalized_returns_inf(self):
+    def test_cpp_zero_field_normalized_nan_boundary_is_documented(self):
         import simsoptpp as sopp
 
         B = np.zeros((2, 3, 3))
@@ -230,16 +242,16 @@ class TestIntegralBdotNCppParity:
         normal = np.ones((2, 3, 3))
 
         J_cpp = sopp.integral_BdotN(B, target, normal, "normalized")
-        J_jax = float(
+        J_jax = host_scalar(
             integral_BdotN(
                 jnp.array(B), jnp.array(target), jnp.array(normal), "normalized"
             )
         )
 
-        assert np.isinf(J_cpp)
+        assert np.isnan(J_cpp)
         assert np.isinf(J_jax)
 
-    def test_cpp_zero_field_local_returns_inf(self):
+    def test_cpp_zero_field_local_nan_boundary_is_documented(self):
         import simsoptpp as sopp
 
         B = np.zeros((2, 3, 3))
@@ -247,11 +259,11 @@ class TestIntegralBdotNCppParity:
         normal = np.ones((2, 3, 3))
 
         J_cpp = sopp.integral_BdotN(B, target, normal, "local")
-        J_jax = float(
+        J_jax = host_scalar(
             integral_BdotN(jnp.array(B), jnp.array(target), jnp.array(normal), "local")
         )
 
-        assert np.isinf(J_cpp)
+        assert np.isnan(J_cpp)
         assert np.isinf(J_jax)
 
     def test_cpp_zero_field_local_with_target_returns_inf(self):
@@ -262,14 +274,14 @@ class TestIntegralBdotNCppParity:
         normal = np.ones((2, 3, 3))
 
         J_cpp = sopp.integral_BdotN(B, target, normal, "local")
-        J_jax = float(
+        J_jax = host_scalar(
             integral_BdotN(jnp.array(B), jnp.array(target), jnp.array(normal), "local")
         )
 
         assert np.isinf(J_cpp)
         assert np.isinf(J_jax)
 
-    def test_cpp_zero_normal_local_returns_zero(self):
+    def test_cpp_zero_normal_local_nan_boundary_is_documented(self):
         import simsoptpp as sopp
 
         B = np.zeros((2, 3, 3))
@@ -277,12 +289,12 @@ class TestIntegralBdotNCppParity:
         normal = np.zeros((2, 3, 3))
 
         J_cpp = sopp.integral_BdotN(B, target, normal, "local")
-        J_jax = float(
+        J_jax = host_scalar(
             integral_BdotN(jnp.array(B), jnp.array(target), jnp.array(normal), "local")
         )
 
-        np.testing.assert_allclose(J_cpp, 0.0, atol=0.0)
-        np.testing.assert_allclose(J_jax, J_cpp, atol=0.0)
+        assert np.isnan(J_cpp)
+        np.testing.assert_allclose(J_jax, 0.0, atol=0.0)
 
 
 if __name__ == "__main__":

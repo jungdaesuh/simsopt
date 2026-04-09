@@ -8,7 +8,14 @@ They run in the no-simsoptpp environment to catch import-chain regressions.
 Each test launches a fresh Python subprocess so that ``sys.modules`` is
 guaranteed clean — other test modules in this repo inject package stubs
 at import time, which would contaminate in-process imports.
+
+This file also keeps a small number of process-isolated JAX runtime
+regressions whose contract depends on a fresh subprocess. The historical
+name stays for continuity, but larger functional subprocess programs
+should live in real Python modules rather than inline ``python -c`` blobs.
 """
+
+from __future__ import annotations
 
 import ast
 import os
@@ -16,6 +23,7 @@ import subprocess
 import sys
 import textwrap
 from pathlib import Path
+from typing import Mapping, Sequence
 
 import pytest
 
@@ -28,6 +36,9 @@ _OPTIMIZER_PRIVATE_DIR = Path(_SRC_DIR) / "simsopt" / "geo" / "optimizer_jax_pri
 _RUNTIME_BACKEND_PATH = Path(_SRC_DIR) / "simsopt" / "backend" / "runtime.py"
 _CPU_RUN_CODE_BENCHMARK_PATH = (
     Path(_REPO_ROOT) / "benchmarks" / "cpu_run_code_benchmark.py"
+)
+_JAX_SUBPROCESS_CASES_PATH = (
+    Path(_REPO_ROOT) / "tests" / "subprocess" / "jax_runtime_cases.py"
 )
 _ENTRYPOINT_RUNTIME_AUDIT_PATHS = (
     Path(_REPO_ROOT) / "benchmarks" / "biot_savart_kernel_scaling.py",
@@ -66,23 +77,65 @@ _BACKEND_SELECTOR_ENV_VARS = (
 )
 
 
-def _run_import_check(code, *, timeout=30, extra_env=None):
-    """Run *code* in a clean subprocess and return (returncode, stderr)."""
+def _build_clean_subprocess_env(
+    extra_env: Mapping[str, str] | None = None,
+) -> dict[str, str]:
     env = os.environ.copy()
     for name in _BACKEND_SELECTOR_ENV_VARS:
         env.pop(name, None)
     env["PYTHONPATH"] = _SRC_DIR + os.pathsep + env.get("PYTHONPATH", "")
     if extra_env is not None:
         env.update(extra_env)
+    return env
+
+
+def _run_import_check(code, *, timeout=30, extra_env=None):
+    """Run *code* in a clean subprocess and return (returncode, stderr)."""
     result = subprocess.run(
         [sys.executable, "-c", textwrap.dedent(code)],
         capture_output=True,
         text=True,
         timeout=timeout,
         cwd=_REPO_ROOT,
-        env=env,
+        env=_build_clean_subprocess_env(extra_env),
     )
     return result.returncode, result.stderr.strip()
+
+
+def _run_python_script(
+    script_path: Path,
+    *,
+    args: Sequence[str] = (),
+    timeout: int = 30,
+    extra_env: dict[str, str] | None = None,
+) -> tuple[int, str]:
+    """Run a repo-local Python script in a clean subprocess."""
+    result = subprocess.run(
+        [sys.executable, str(script_path), *args],
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        cwd=_REPO_ROOT,
+        env=_build_clean_subprocess_env(extra_env),
+    )
+    return result.returncode, result.stderr.strip()
+
+
+def _assert_python_script_passes(
+    script_path: Path,
+    *,
+    args: Sequence[str] = (),
+    failure_message: str,
+    timeout: int = 30,
+    extra_env: dict[str, str] | None = None,
+) -> None:
+    rc, err = _run_python_script(
+        script_path,
+        args=args,
+        timeout=timeout,
+        extra_env=extra_env,
+    )
+    assert rc == 0, f"{failure_message}:\n{err}"
 
 
 def _assert_import_check_passes(
@@ -153,7 +206,7 @@ def _find_private_jax_src_usages(path: Path) -> list[str]:
             for alias in node.names:
                 if alias.name == "jax":
                     jax_names.add(alias.asname or alias.name)
-    usages = []
+    usages: list[str] = []
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             usages.extend(
@@ -344,6 +397,35 @@ def test_repo_bootstrap_is_idempotent_for_local_source_tree():
         assert isinstance(base_curves[0], curve_before)
     """,
         failure_message="repo_bootstrap should be idempotent for local source imports",
+    )
+
+
+def test_root_conftest_imports_without_jax_installed():
+    """Root test fixtures must not fail collection in non-JAX environments."""
+    _assert_import_check_passes(
+        """
+        import importlib.abc
+        import runpy
+        import sys
+        from pathlib import Path
+
+        class _BlockJax(importlib.abc.MetaPathFinder):
+            def find_spec(self, fullname, path=None, target=None):
+                del path, target
+                if fullname == "jax" or fullname.startswith("jax."):
+                    raise ModuleNotFoundError("blocked jax import for smoke test")
+                return None
+
+        sys.meta_path.insert(0, _BlockJax())
+
+        conftest_path = Path.cwd() / "tests" / "conftest.py"
+        module_globals = runpy.run_path(str(conftest_path), run_name="simsopt_tests_conftest")
+
+        assert module_globals["jax"] is None
+        parity_rng = module_globals["parity_rng"]
+        assert parity_rng(3).randint(0, 1000) == parity_rng(3).randint(0, 1000)
+        """,
+        failure_message="root tests/conftest.py should import cleanly without JAX",
     )
 
 
@@ -800,60 +882,9 @@ def test_transfer_guard_disallow_allows_lbfgs_ondevice_quadratic_smokes():
 
 
 def _assert_ondevice_optimizer_reuses_compiled_solver(method: str) -> None:
-    _assert_import_check_passes(
-        f"""
-        import logging
-        import jax
-        import jax.numpy as jnp
-        import numpy as np
-        import simsopt.config as simsopt_config
-        from simsopt.geo.optimizer_jax import (
-            PRIVATE_OPTIMIZER_JAX_VERSION,
-            jax_minimize,
-            private_optimizer_runtime_is_supported,
-        )
-
-        simsopt_config.set_backend(
-            "jax_cpu_parity",
-            strict=True,
-            transfer_guard="disallow",
-        )
-        if not private_optimizer_runtime_is_supported(jax.__version__):
-            raise SystemExit(0)
-
-        class _CompileCounter(logging.Handler):
-            def __init__(self):
-                super().__init__()
-                self.count = 0
-
-            def emit(self, record):
-                if "Compiling jit(run_solver)" in record.getMessage():
-                    self.count += 1
-
-        logger = logging.getLogger("jax")
-        old_level = logger.level
-        handler = _CompileCounter()
-        logger.addHandler(handler)
-        logger.setLevel(logging.WARNING)
-
-        half = jax.device_put(np.asarray(0.5, dtype=np.float64))
-
-        def quad(x):
-            x = jnp.asarray(x, dtype=jnp.float64)
-            return half * jnp.dot(x, x)
-
-        x0 = jnp.asarray(np.array([1.0, -2.0], dtype=np.float64))
-        try:
-            jax.clear_caches()
-            with jax.log_compiles(True):
-                for _ in range(3):
-                    result = jax_minimize(quad, x0, method={method!r}, maxiter=5)
-                    assert result.success is True
-            assert handler.count == 1, handler.count
-        finally:
-            logger.removeHandler(handler)
-            logger.setLevel(old_level)
-    """,
+    _assert_python_script_passes(
+        _JAX_SUBPROCESS_CASES_PATH,
+        args=("compile-count", method),
         failure_message=f"{method} compile-count smoke failed",
         extra_env={"JAX_ENABLE_COMPILATION_CACHE": "0"},
     )
@@ -867,6 +898,15 @@ def test_lbfgs_ondevice_reuses_compiled_solver_across_identical_calls():
 def test_bfgs_ondevice_reuses_compiled_solver_across_identical_calls():
     """Repeated identical bfgs-ondevice calls must not recompile run_solver."""
     _assert_ondevice_optimizer_reuses_compiled_solver("bfgs-ondevice")
+
+
+def test_ondevice_solver_cache_respects_mutable_objective_state():
+    """Unmarked mutable callables must retrace so updated host state is observed."""
+    _assert_python_script_passes(
+        _JAX_SUBPROCESS_CASES_PATH,
+        args=("mutable-objective-state",),
+        failure_message="ondevice solver cache must not freeze mutable objective state",
+    )
 
 
 def test_transfer_guard_disallow_allows_adam_ondevice_quadratic_smokes():
@@ -2216,6 +2256,107 @@ def test_transfer_guard_disallow_allows_squaredfluxjax_construction():
     )
 
 
+def test_transfer_guard_disallow_allows_squaredfluxjax_host_surface_fallback():
+    """SquaredFluxJAX fallback surface geometry must use explicit JAX placement."""
+    _assert_import_check_passes(
+        """
+        import jax
+        import numpy as np
+        import simsopt.config as simsopt_config
+        from simsopt.geo import CurveXYZFourier
+        from simsopt.field import BiotSavartJAX, Coil, Current
+        from simsopt.objectives import SquaredFluxJAX
+
+        class HostSurface:
+            def __init__(self):
+                phi, theta = np.meshgrid(
+                    np.arange(8, dtype=np.float64) / 8.0,
+                    np.arange(8, dtype=np.float64) / 8.0,
+                    indexing="ij",
+                )
+                gamma = np.zeros((8, 8, 3), dtype=np.float64)
+                gamma[..., 0] = 1.0 + 0.1 * np.cos(2.0 * np.pi * theta)
+                gamma[..., 1] = 0.1 * np.sin(2.0 * np.pi * theta)
+                gamma[..., 2] = 0.05 * np.sin(2.0 * np.pi * phi)
+                normal = np.zeros_like(gamma)
+                normal[..., 2] = 1.0
+                self._gamma = gamma
+                self._normal = normal
+
+            def gamma(self):
+                return self._gamma
+
+            def normal(self):
+                return self._normal
+
+        simsopt_config.set_backend(
+            "jax_cpu_parity",
+            strict=True,
+            transfer_guard="disallow",
+        )
+
+        curve = CurveXYZFourier(16, 1)
+        curve.x = np.array([1.0, 0.1, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.1])
+        bs_jax = BiotSavartJAX([Coil(curve, Current(1.0))])
+        objective = SquaredFluxJAX(HostSurface(), bs_jax)
+
+        assert isinstance(objective._flux_spec.normal, jax.Array)
+        assert isinstance(objective._flux_spec.target, jax.Array)
+        assert objective._flux_spec.normal.shape == (8, 8, 3)
+        assert objective._flux_spec.target.shape == (8, 8)
+    """,
+        failure_message="SquaredFluxJAX host-surface fallback transfer-guard smoke failed",
+    )
+
+
+def test_transfer_guard_disallow_allows_lpcurveforce_shared_state_packing():
+    """LpCurveForce shared-state packing must explicitly place host geometry on JAX arrays."""
+    _assert_import_check_passes(
+        """
+        import jax
+        import numpy as np
+        import simsopt.config as simsopt_config
+        from simsopt.field import Current, LpCurveForce, RegularizedCoil
+        from simsopt.geo import CurveXYZFourier
+
+        def make_curve(radius, z):
+            curve = CurveXYZFourier(16, 1)
+            curve.x = np.array(
+                [0.0, 0.0, radius, 0.0, 1.0, 0.0, 0.0, z, 0.0],
+                dtype=np.float64,
+            )
+            return curve
+
+        simsopt_config.set_backend(
+            "jax_cpu_parity",
+            strict=True,
+            transfer_guard="disallow",
+        )
+
+        target = RegularizedCoil(
+            make_curve(1.0, 0.0),
+            Current(1.0),
+            np.float64(0.05**2 / np.sqrt(np.e)),
+        )
+        source = RegularizedCoil(
+            make_curve(1.2, 0.1),
+            Current(-0.6),
+            np.float64(0.04**2 / np.sqrt(np.e)),
+        )
+        objective = LpCurveForce(target, [source], p=2.0, threshold=1.0e-3)
+        value = objective.J()
+        args = objective._J_args()
+
+        assert np.isfinite(float(value))
+        assert not isinstance(objective.p, jax.Array)
+        assert not isinstance(objective.threshold, jax.Array)
+        for array_arg in args[:14]:
+            assert isinstance(array_arg, jax.Array)
+    """,
+        failure_message="LpCurveForce shared-state transfer-guard smoke failed",
+    )
+
+
 def test_native_cpu_backend_selection_does_not_require_jax_runtime():
     """native_cpu config must not force a JAX import when only CPU mode is selected."""
     rc, err = _run_import_check("""
@@ -3108,7 +3249,7 @@ def test_surfaceobjectives_jax_has_no_tensor_surface_imports():
 def test_import_cpu_package_entrypoints_with_simsoptpp():
     """CPU package entrypoints must import cleanly when simsoptpp is available."""
     try:
-        from simsoptpp import Curve as _  # noqa: F401
+        from simsoptpp import Curve as _  # type: ignore[import-untyped]  # noqa: F401
     except (ImportError, AttributeError):
         pytest.skip("compiled simsoptpp symbols are not available in this environment")
 

@@ -48,12 +48,12 @@ External primary-source context:
 
 ## Shared Harness TODOs
 
-- [ ] Add or update a parity manifest mapping `upstream test -> JAX test -> exact / partial / missing`
-- [ ] Standardize `jax_enable_x64=True` before any test arrays are created
-- [ ] Standardize `strict=True` for parity lanes
-- [ ] Standardize explicit host materialization or `block_until_ready()` before timing and cross-device assertions
-- [ ] Standardize seeded fixtures across CPU/JAX lanes
-- [ ] Separate CPU parity and GPU parity assertions in every mirrored test
+- [x] Add or update a parity manifest mapping `upstream test -> JAX test -> exact / partial / missing`
+- [x] Standardize `jax_enable_x64=True` before any test arrays are created
+- [x] Standardize `strict=True` for parity lanes
+- [x] Standardize explicit host materialization or `block_until_ready()` before timing and cross-device assertions
+- [x] Standardize seeded fixtures across CPU/JAX lanes
+- [x] Separate CPU parity and GPU parity assertions in every mirrored test
 
 ## Kernel Matrix
 
@@ -112,8 +112,8 @@ External primary-source context:
 - [ ] Replace denominator accumulation in `"normalized"` mode with the pairwise helper
 - [ ] Evaluate whether final scalar objective accumulation should use compensated summation in strict-oracle mode
 - [ ] Keep `fluxobjective_jax.py` as a wrapper around the stabilized kernel instead of adding arithmetic complexity there
-- [ ] Add a dedicated mirrored `test_fluxobjective_jax_parity.py` instead of relying only on split integration coverage
-- [ ] Add parity cases for `quadratic flux`, `normalized`, and `local` with degenerate normals and singular-field behavior
+- [x] Add a dedicated mirrored `test_fluxobjective_jax_parity.py` instead of relying only on split integration coverage
+- [x] Add parity cases for `quadratic flux`, `normalized`, and `local` with degenerate normals and singular-field behavior
 
 ### 3. Boozer Residual
 
@@ -155,8 +155,8 @@ External primary-source context:
 
 **TODOs**
 
-- [ ] Add a native-only parity mode so wrapper tests fail on fallback seams
-- [ ] Create mirrored object-level tests for definitions, derivatives, and edge-case contracts
+- [x] Add a native-only parity mode so wrapper tests fail on fallback seams
+- [x] Create mirrored object-level tests for definitions, derivatives, and edge-case contracts
 - [ ] Keep arithmetic stabilization work in `integral_bdotn_jax.py`, not here
 
 ### 5. Surface Objectives Family
@@ -175,9 +175,9 @@ External primary-source context:
 
 **TODOs**
 
-- [ ] Complete missing `BiotSavartJAX` object-level methods needed for literal upstream test mirroring
-- [ ] Finish composed derivative plumbing before adding reproducible-arithmetic experiments here
-- [ ] Mirror upstream ToroidalFlux and related objective tests more literally once the API is complete
+- [x] Complete missing `BiotSavartJAX` object-level methods needed for literal upstream test mirroring
+- [x] Finish composed derivative plumbing before adding reproducible-arithmetic experiments here
+- [x] Mirror upstream ToroidalFlux and related objective tests more literally once the API is complete
 - [ ] Keep this family on tolerance-based parity for now
 
 ### 6. BoozerSurface and Optimizer

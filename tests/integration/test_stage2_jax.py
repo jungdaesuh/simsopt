@@ -103,7 +103,6 @@ from simsopt.objectives import SquaredFlux, QuadraticPenalty  # noqa: E402
 
 from simsopt.field.biotsavart_jax_backend import BiotSavartJAX
 import simsopt.field.biotsavart_jax_backend as biotsavart_jax_backend_module
-from simsopt.field.biotsavart_jax import grouped_biot_savart_A
 from simsopt.jax_core import (
     apply_coil_symmetry,
     closed_curve_self_intersection_summary,
@@ -1448,14 +1447,7 @@ class TestBiotSavartJAXParity:
         )
 
     def test_A_parity(self, coil_surf_setup):
-        """Vector potential A must match CPU at the same evaluation points.
-
-        BiotSavartJAX does not expose an A() method, so this test uses the
-        pure function ``grouped_biot_savart_A`` with coil data extracted from
-        the adapter.
-
-        Requires simsoptpp for the CPU reference.
-        """
+        """Vector potential A must match CPU at the same evaluation points."""
         coils, surf, _, _ = coil_surf_setup
         points = surf.gamma().reshape((-1, 3))
 
@@ -1465,9 +1457,7 @@ class TestBiotSavartJAXParity:
 
         bs_jax = BiotSavartJAX(coils)
         bs_jax.set_points(points)
-        groups = bs_jax._extract_coil_data_grouped()
-        coil_arrays = [(g, gd, c) for g, gd, c, _ in groups]
-        A_jax = np.asarray(grouped_biot_savart_A(bs_jax._points_jax, coil_arrays))
+        A_jax = np.asarray(bs_jax.A())
 
         assert A_jax.shape == A_cpu.shape, (
             f"Shape mismatch: JAX {A_jax.shape} vs CPU {A_cpu.shape}"
@@ -1478,8 +1468,58 @@ class TestBiotSavartJAXParity:
             A_cpu,
             rtol=1e-10,
             atol=1e-15,
-            err_msg="biot_savart_A (via grouped_biot_savart_A) does not match CPU",
+            err_msg="BiotSavartJAX.A() does not match CPU",
         )
+
+    def test_A_vjp_parity(self, coil_surf_setup):
+        """A_vjp returns the same Derivative as CPU A_vjp."""
+        coils, surf, _, _ = coil_surf_setup
+        points = surf.gamma().reshape((-1, 3))
+
+        bs_cpu = BiotSavart(coils)
+        bs_cpu.set_points(points)
+        v = bs_cpu.A()
+
+        bs_jax = BiotSavartJAX(coils)
+        bs_jax.set_points(points)
+
+        deriv_cpu = bs_cpu.A_vjp(v)
+        deriv_jax = bs_jax.A_vjp(v)
+        for coil in coils:
+            np.testing.assert_allclose(
+                deriv_jax(coil),
+                deriv_cpu(coil),
+                rtol=1e-10,
+                atol=1e-14,
+                err_msg="BiotSavartJAX.A_vjp() does not match CPU",
+            )
+
+    def test_A_and_dA_vjp_parity(self, coil_surf_setup):
+        """A_and_dA_vjp returns the same pair of Derivatives as CPU."""
+        coils, surf, _, _ = coil_surf_setup
+        points = surf.gamma().reshape((-1, 3))
+
+        bs_cpu = BiotSavart(coils)
+        bs_cpu.set_points(points)
+        A_cpu = bs_cpu.A()
+        dA_cpu = bs_cpu.dA_by_dX()
+
+        bs_jax = BiotSavartJAX(coils)
+        bs_jax.set_points(points)
+        A_jax = np.asarray(bs_jax.A())
+        dA_jax = np.asarray(bs_jax.dA_by_dX())
+
+        derivs_cpu = bs_cpu.A_and_dA_vjp(A_cpu, dA_cpu)
+        derivs_jax = bs_jax.A_and_dA_vjp(A_jax, dA_jax)
+        for deriv_jax, deriv_cpu in zip(derivs_jax, derivs_cpu):
+            for coil in coils:
+                np.testing.assert_allclose(
+                    deriv_jax(coil),
+                    deriv_cpu(coil),
+                    rtol=1e-10,
+                    atol=1e-14,
+                    err_msg="BiotSavartJAX.A_and_dA_vjp() does not match CPU",
+                )
 
 
 # -----------------------------------------------------------------------

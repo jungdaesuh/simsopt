@@ -34,9 +34,15 @@ from ..jax_core import (
     make_optimizable_dof_map_spec,
 )
 from ..jax_core.field import (
+    grouped_biot_savart_A_from_inputs,
+    grouped_biot_savart_A_from_spec,
     grouped_biot_savart_B_and_dB_from_spec,
     grouped_biot_savart_B_from_spec,
+    grouped_biot_savart_d2A_by_dXdX_from_spec,
+    grouped_biot_savart_dA_by_dX_from_inputs,
+    grouped_biot_savart_dA_by_dX_from_spec,
     grouped_biot_savart_dB_by_dX_from_spec,
+    grouped_coil_index_lists_from_spec,
     grouped_coil_set_spec_from_coil_specs,
     grouped_field_data_from_spec,
     grouped_field_inputs_from_spec,
@@ -1195,6 +1201,24 @@ class BiotSavartJAX(Optimizable):
         """
         return grouped_biot_savart_B_from_spec(self._points_jax, self.coil_set_spec())
 
+    def A(self):
+        """Vector potential A at the evaluation points."""
+        return grouped_biot_savart_A_from_spec(self._points_jax, self.coil_set_spec())
+
+    def dA_by_dX(self):
+        """Spatial Jacobian dA/dX at the evaluation points."""
+        return grouped_biot_savart_dA_by_dX_from_spec(
+            self._points_jax,
+            self.coil_set_spec(),
+        )
+
+    def d2A_by_dXdX(self):
+        """Spatial Hessian d2A/dXdX at the evaluation points."""
+        return grouped_biot_savart_d2A_by_dXdX_from_spec(
+            self._points_jax,
+            self.coil_set_spec(),
+        )
+
     def dB_by_dX(self):
         """Spatial Jacobian dB/dX at the evaluation points.
 
@@ -1285,6 +1309,37 @@ class BiotSavartJAX(Optimizable):
                     ),
                 )
         return Derivative(deriv_data)
+
+    def _field_pullback(
+        self,
+        grouped_forward,
+        cotangent,
+    ):
+        coil_spec = self.coil_set_spec()
+        coil_arrays = grouped_field_inputs_from_spec(coil_spec)
+        if not coil_arrays:
+            return Derivative({})
+
+        _, pullback = jax.vjp(
+            lambda grouped_inputs: grouped_forward(self._points_jax, grouped_inputs),
+            coil_arrays,
+        )
+        d_coil_arrays = pullback(_as_jax_float64(cotangent))[0]
+        return self.coil_cotangents_to_derivative(
+            d_coil_arrays,
+            grouped_coil_index_lists_from_spec(coil_spec),
+        )
+
+    def A_vjp(self, v):
+        r"""Vector-Jacobian product of A w.r.t. coil DOFs."""
+        return self._field_pullback(grouped_biot_savart_A_from_inputs, v)
+
+    def A_and_dA_vjp(self, v, vgrad):
+        r"""Separate vector-Jacobian products for A and dA/dX."""
+        return (
+            self._field_pullback(grouped_biot_savart_A_from_inputs, v),
+            self._field_pullback(grouped_biot_savart_dA_by_dX_from_inputs, vgrad),
+        )
 
     def coil_cotangents_to_derivative(self, d_coil_arrays, coil_indices):
         """Project grouped coil cotangent arrays to a :class:`Derivative`.

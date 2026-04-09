@@ -12,9 +12,15 @@ import pytest
 import numpy as np
 
 import jax
-
-jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp
+from conftest import (
+    device_float64,
+    host_array,
+    host_scalar,
+    parity_default_device,
+    parity_lane,
+    parity_rng,
+)
 
 from simsopt.geo.boozer_residual_jax import (
     boozer_residual_scalar,
@@ -24,28 +30,34 @@ from simsopt.geo.boozer_residual_jax import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _parity_device_scope(parity_lane):
+    with parity_default_device(parity_lane):
+        yield
+
+
 def _make_synthetic_data(nphi=10, ntheta=12, seed=42):
     """Create synthetic B, xphi, xtheta arrays for testing."""
-    rng = np.random.RandomState(seed)
+    rng = parity_rng(seed)
     B = rng.randn(nphi, ntheta, 3) * 0.1 + np.array([0.0, 0.0, 1.0])
     xphi = rng.randn(nphi, ntheta, 3) * 0.5
     xtheta = rng.randn(nphi, ntheta, 3) * 0.5
-    return jnp.array(B), jnp.array(xphi), jnp.array(xtheta)
+    return device_float64(B), device_float64(xphi), device_float64(xtheta)
 
 
 class TestBoozerResidualScalar:
     """Test the forward scalar value."""
 
-    def test_matches_numpy(self):
+    def test_matches_numpy(self, parity_lane):
         """JAX scalar matches a direct NumPy computation."""
         nphi, ntheta = 8, 10
         B, xphi, xtheta = _make_synthetic_data(nphi, ntheta)
         G, iota = 1.5, 0.3
 
         # NumPy reference (same formula)
-        B_np = np.array(B)
-        xphi_np = np.array(xphi)
-        xtheta_np = np.array(xtheta)
+        B_np = host_array(B)
+        xphi_np = host_array(xphi)
+        xtheta_np = host_array(xtheta)
         tang = xphi_np + iota * xtheta_np
         B2 = np.sum(B_np**2, axis=-1)
         residual = G * B_np - B2[..., None] * tang
@@ -54,27 +66,27 @@ class TestBoozerResidualScalar:
         rtil = w[..., None] * residual
         J_ref = 0.5 * np.sum(rtil**2) / (3 * nphi * ntheta)
 
-        J_jax = float(
+        J_jax = host_scalar(
             boozer_residual_scalar(G, iota, B, xphi, xtheta, weight_inv_modB=True)
         )
 
         np.testing.assert_allclose(J_jax, J_ref, rtol=1e-14)
 
-    def test_no_weight(self):
+    def test_no_weight(self, parity_lane):
         """Test with weight_inv_modB=False."""
         nphi, ntheta = 8, 10
         B, xphi, xtheta = _make_synthetic_data(nphi, ntheta)
         G, iota = 1.5, 0.3
 
-        B_np = np.array(B)
-        xphi_np = np.array(xphi)
-        xtheta_np = np.array(xtheta)
+        B_np = host_array(B)
+        xphi_np = host_array(xphi)
+        xtheta_np = host_array(xtheta)
         tang = xphi_np + iota * xtheta_np
         B2 = np.sum(B_np**2, axis=-1)
         residual = G * B_np - B2[..., None] * tang
         J_ref = 0.5 * np.sum(residual**2) / (3 * nphi * ntheta)
 
-        J_jax = float(
+        J_jax = host_scalar(
             boozer_residual_scalar(G, iota, B, xphi, xtheta, weight_inv_modB=False)
         )
 
@@ -83,7 +95,7 @@ class TestBoozerResidualScalar:
     def test_zero_residual(self):
         """When B is consistent with Boozer, residual should be near zero."""
         nphi, ntheta = 8, 10
-        rng = np.random.RandomState(0)
+        rng = parity_rng(0)
         xphi = rng.randn(nphi, ntheta, 3)
         xtheta = rng.randn(nphi, ntheta, 3)
         iota = 0.5
@@ -97,7 +109,7 @@ class TestBoozerResidualScalar:
         alpha = G / tang_sq
         B = alpha * tang
 
-        J = float(
+        J = host_scalar(
             boozer_residual_scalar(
                 G,
                 iota,
@@ -136,13 +148,13 @@ class TestBoozerResidualScalar:
         assert jnp.isfinite(scalar_value)
         assert jnp.all(jnp.isfinite(residual_vector))
         np.testing.assert_allclose(float(scalar_value), 0.0, atol=0.0)
-        np.testing.assert_allclose(np.asarray(residual_vector), 0.0, atol=0.0)
+        np.testing.assert_allclose(host_array(residual_vector), 0.0, atol=0.0)
 
 
 class TestBoozerResidualGradient:
     """Test gradient via finite differences."""
 
-    def test_grad_iota(self):
+    def test_grad_iota(self, parity_lane):
         """Gradient w.r.t. iota matches finite differences."""
         B, xphi, xtheta = _make_synthetic_data(8, 10)
         G, iota = 1.5, 0.3
@@ -150,27 +162,27 @@ class TestBoozerResidualGradient:
 
         grad = boozer_residual_grad(G, iota, B, xphi, xtheta, nsurfdofs)
         # grad[-2] = dJ/diota, grad[-1] = dJ/dG
-        dJ_diota_jax = float(grad[-2])
+        dJ_diota_jax = host_scalar(grad[-2])
 
         eps = 1e-6
-        Jp = float(boozer_residual_scalar(G, iota + eps, B, xphi, xtheta))
-        Jm = float(boozer_residual_scalar(G, iota - eps, B, xphi, xtheta))
+        Jp = host_scalar(boozer_residual_scalar(G, iota + eps, B, xphi, xtheta))
+        Jm = host_scalar(boozer_residual_scalar(G, iota - eps, B, xphi, xtheta))
         dJ_diota_fd = (Jp - Jm) / (2 * eps)
 
         np.testing.assert_allclose(dJ_diota_jax, dJ_diota_fd, rtol=1e-5)
 
-    def test_grad_G(self):
+    def test_grad_G(self, parity_lane):
         """Gradient w.r.t. G matches finite differences."""
         B, xphi, xtheta = _make_synthetic_data(8, 10)
         G, iota = 1.5, 0.3
         nsurfdofs = 0
 
         grad = boozer_residual_grad(G, iota, B, xphi, xtheta, nsurfdofs)
-        dJ_dG_jax = float(grad[-1])
+        dJ_dG_jax = host_scalar(grad[-1])
 
         eps = 1e-6
-        Jp = float(boozer_residual_scalar(G + eps, iota, B, xphi, xtheta))
-        Jm = float(boozer_residual_scalar(G - eps, iota, B, xphi, xtheta))
+        Jp = host_scalar(boozer_residual_scalar(G + eps, iota, B, xphi, xtheta))
+        Jm = host_scalar(boozer_residual_scalar(G - eps, iota, B, xphi, xtheta))
         dJ_dG_fd = (Jp - Jm) / (2 * eps)
 
         np.testing.assert_allclose(dJ_dG_jax, dJ_dG_fd, rtol=1e-5)
@@ -179,16 +191,17 @@ class TestBoozerResidualGradient:
 class TestBoozerResidualHessian:
     """Test Hessian properties."""
 
-    def test_hessian_symmetry(self):
+    def test_hessian_symmetry(self, parity_lane):
         """Hessian should be symmetric."""
         B, xphi, xtheta = _make_synthetic_data(6, 8)
         G, iota = 1.5, 0.3
         nsurfdofs = 0
 
         H = boozer_residual_hessian(G, iota, B, xphi, xtheta, nsurfdofs)
-        np.testing.assert_allclose(np.array(H), np.array(H.T), atol=1e-14)
+        H_host = host_array(H)
+        np.testing.assert_allclose(H_host, H_host.T, atol=1e-14)
 
-    def test_hessian_matches_grad_fd(self):
+    def test_hessian_matches_grad_fd(self, parity_lane):
         """Hessian diagonal blocks match FD of gradient."""
         B, xphi, xtheta = _make_synthetic_data(6, 8)
         G, iota = 1.5, 0.3
@@ -200,11 +213,11 @@ class TestBoozerResidualHessian:
         eps = 1e-5
         g_p = boozer_residual_grad(G, iota + eps, B, xphi, xtheta, nsurfdofs)
         g_m = boozer_residual_grad(G, iota - eps, B, xphi, xtheta, nsurfdofs)
-        d2J_diota2_fd = (float(g_p[-2]) - float(g_m[-2])) / (2 * eps)
-        d2J_diotadG_fd = (float(g_p[-1]) - float(g_m[-1])) / (2 * eps)
+        d2J_diota2_fd = (host_scalar(g_p[-2]) - host_scalar(g_m[-2])) / (2 * eps)
+        d2J_diotadG_fd = (host_scalar(g_p[-1]) - host_scalar(g_m[-1])) / (2 * eps)
 
-        np.testing.assert_allclose(float(H[0, 0]), d2J_diota2_fd, rtol=1e-4)
-        np.testing.assert_allclose(float(H[0, 1]), d2J_diotadG_fd, rtol=1e-4)
+        np.testing.assert_allclose(host_scalar(H[0, 0]), d2J_diota2_fd, rtol=1e-4)
+        np.testing.assert_allclose(host_scalar(H[0, 1]), d2J_diotadG_fd, rtol=1e-4)
 
 
 class TestBoozerResidualM1Limitations:
@@ -223,13 +236,13 @@ class TestBoozerResidualM1Limitations:
         grad = boozer_residual_grad(G, iota, B, xphi, xtheta, nsurfdofs)
         # First nsurfdofs entries should be exactly zero
         np.testing.assert_allclose(
-            np.array(grad[:nsurfdofs]),
+            host_array(grad[:nsurfdofs]),
             0.0,
             atol=1e-30,
         )
         # iota and G entries should be nonzero
-        assert float(jnp.abs(grad[-2])) > 1e-10
-        assert float(jnp.abs(grad[-1])) > 1e-10
+        assert host_scalar(jnp.abs(grad[-2])) > 1e-10
+        assert host_scalar(jnp.abs(grad[-1])) > 1e-10
 
 
 if __name__ == "__main__":

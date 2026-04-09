@@ -9,6 +9,8 @@ from .biotsavart import (
     biot_savart_A,
     biot_savart_B,
     biot_savart_B_and_dB,
+    biot_savart_d2A_by_dXdX,
+    biot_savart_dA_by_dX,
     biot_savart_dB_by_dX,
     group_coil_data,
 )
@@ -38,6 +40,10 @@ def _empty_grouped_field_result(points: object, kernel):
     point_count = points.shape[0]
     if kernel in {biot_savart_B, biot_savart_A}:
         return _zeros_float64((point_count, 3))
+    if kernel is biot_savart_dA_by_dX:
+        return _zeros_float64((point_count, 3, 3))
+    if kernel is biot_savart_d2A_by_dXdX:
+        return _zeros_float64((point_count, 3, 3, 3))
     if kernel is biot_savart_dB_by_dX:
         return _zeros_float64((point_count, 3, 3))
     if kernel is biot_savart_B_and_dB:
@@ -250,6 +256,34 @@ def grouped_biot_savart_A_from_spec(points: object, coil_spec: GroupedCoilSetSpe
 
 def grouped_biot_savart_A_from_inputs(points: object, coil_arrays: object):
     return grouped_biot_savart_A_from_spec(
+        points,
+        grouped_coil_set_spec_from_inputs(coil_arrays),
+    )
+
+
+def grouped_biot_savart_dA_by_dX_from_spec(
+    points: object,
+    coil_spec: GroupedCoilSetSpec,
+):
+    return _accumulate_grouped_field(points, coil_spec, biot_savart_dA_by_dX)
+
+
+def grouped_biot_savart_dA_by_dX_from_inputs(points: object, coil_arrays: object):
+    return grouped_biot_savart_dA_by_dX_from_spec(
+        points,
+        grouped_coil_set_spec_from_inputs(coil_arrays),
+    )
+
+
+def grouped_biot_savart_d2A_by_dXdX_from_spec(
+    points: object,
+    coil_spec: GroupedCoilSetSpec,
+):
+    return _accumulate_grouped_field(points, coil_spec, biot_savart_d2A_by_dXdX)
+
+
+def grouped_biot_savart_d2A_by_dXdX_from_inputs(points: object, coil_arrays: object):
+    return grouped_biot_savart_d2A_by_dXdX_from_spec(
         points,
         grouped_coil_set_spec_from_inputs(coil_arrays),
     )

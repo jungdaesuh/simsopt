@@ -2,11 +2,20 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 import os
 import sys
 from pathlib import Path
 
+import numpy as np
 import pytest
+
+try:
+    import jax
+except ModuleNotFoundError:
+    jax = None
+else:
+    jax.config.update("jax_enable_x64", True)
 
 _BACKEND_RUNTIME_ENV_VARS = (
     "SIMSOPT_BACKEND_MODE",
@@ -36,12 +45,23 @@ _BACKEND_RUNTIME_ENV_VARS = (
     "CUDA_VISIBLE_DEVICES",
 )
 _JAX_RUNTIME_CONFIG_DEFAULTS = {
-    "jax_enable_x64": False,
+    "jax_enable_x64": True,
     "jax_debug_nans": False,
     "jax_transfer_guard": None,
     "jax_platforms": None,
     "jax_compilation_cache_dir": None,
 }
+_PARITY_SEED_BASE = 1729
+_PARITY_LANE_TO_MODE = {
+    "cpu": "jax_cpu_parity",
+    "gpu": "jax_gpu_parity",
+}
+
+
+def _require_jax():
+    if jax is None:
+        pytest.skip("JAX not installed in current environment")
+    return jax
 
 
 def _loaded_backend_module():
@@ -113,6 +133,7 @@ def _guard_backend_runtime_state():
 
 
 def _activate_backend_mode(monkeypatch, request, *, mode, strict):
+    _require_jax()
     from simsopt.backend import get_backend_config, invalidate_backend_cache, set_backend
 
     invalidate_backend_cache()
@@ -158,9 +179,8 @@ def _apply_test_transfer_guard(mode, transfer_guard=None):
         if jax_module is not None:
             jax_module.config.update("jax_transfer_guard", "allow")
         return
-    import jax
-
-    jax.config.update(
+    jax_module = _require_jax()
+    jax_module.config.update(
         "jax_transfer_guard",
         "log" if transfer_guard in (None, "") else transfer_guard,
     )
@@ -184,6 +204,80 @@ def enable_non_strict_jax_backend(monkeypatch, request, mode):
     backend mode they intend (e.g. ``"jax_cpu_parity"`` or ``"jax_gpu_parity"``).
     """
     _activate_backend_mode(monkeypatch, request, mode=mode, strict=False)
+
+
+def parity_mode(lane: str) -> str:
+    try:
+        return _PARITY_LANE_TO_MODE[lane]
+    except KeyError as exc:
+        raise ValueError(f"Unknown parity lane {lane!r}") from exc
+
+
+def parity_seed(seed: int = 0) -> int:
+    return _PARITY_SEED_BASE + seed
+
+
+def parity_rng(seed: int = 0) -> np.random.RandomState:
+    return np.random.RandomState(parity_seed(seed))
+
+
+def _parity_device_for_lane(jax_module, lane: str):
+    for device in jax_module.devices():
+        if device.platform == lane:
+            return device
+    if lane == "gpu":
+        pytest.skip("CUDA GPU not available")
+    raise RuntimeError(f"No JAX device available for parity lane {lane!r}")
+
+
+def parity_device(lane: str):
+    return _parity_device_for_lane(_require_jax(), lane)
+
+
+@contextmanager
+def parity_default_device(lane: str):
+    jax_module = _require_jax()
+    with jax_module.default_device(_parity_device_for_lane(jax_module, lane)):
+        yield
+
+
+def _block_until_ready(value, *, jax_module):
+    return jax_module.tree_util.tree_map(
+        lambda leaf: leaf.block_until_ready()
+        if isinstance(leaf, jax_module.Array)
+        else leaf,
+        value,
+    )
+
+
+def host_materialize(value):
+    jax_module = _require_jax()
+    return jax_module.device_get(_block_until_ready(value, jax_module=jax_module))
+
+
+def host_array(value, *, dtype=None):
+    return np.asarray(host_materialize(value), dtype=dtype)
+
+
+def host_scalar(value) -> float:
+    return float(np.asarray(host_materialize(value), dtype=np.float64))
+
+
+def device_float64(value):
+    jax_module = _require_jax()
+    return jax_module.numpy.asarray(
+        np.asarray(value, dtype=np.float64),
+        dtype=jax_module.numpy.float64,
+    )
+
+
+@pytest.fixture(params=("cpu", "gpu"), ids=("cpu_parity", "gpu_parity"))
+def parity_lane(request):
+    return request.param
+
+
+def enable_strict_parity_backend(monkeypatch, request, lane: str) -> None:
+    enable_strict_jax_backend(monkeypatch, request, mode=parity_mode(lane))
 
 
 def relative_error(actual, reference):

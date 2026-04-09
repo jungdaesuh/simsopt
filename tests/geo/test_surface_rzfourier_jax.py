@@ -1,6 +1,8 @@
 import numpy as np
 import jax
 import jax.numpy as jnp
+import pytest
+from conftest import host_array, host_scalar, parity_default_device, parity_rng
 
 from simsopt.geo.surfacerzfourier import SurfaceRZFourier
 from simsopt.geo.boozer_residual_jax import _surface_geometry_from_dofs
@@ -27,12 +29,8 @@ from simsopt.jax_core import (
     surface_rz_fourier_volume_from_spec,
 )
 
-
-jax.config.update("jax_enable_x64", True)
-
-
 def _make_surface(*, stellsym: bool) -> SurfaceRZFourier:
-    rng = np.random.default_rng(7 if stellsym else 11)
+    rng = parity_rng(7 if stellsym else 11)
     surface = SurfaceRZFourier.from_nphi_ntheta(
         nfp=2,
         stellsym=stellsym,
@@ -56,6 +54,12 @@ def _make_surface(*, stellsym: bool) -> SurfaceRZFourier:
         surface.zc[0, : surface.ntor] = 0.0
     surface.local_full_x = surface.get_dofs()
     return surface
+
+
+@pytest.fixture(autouse=True)
+def _parity_device_scope(parity_lane):
+    with parity_default_device(parity_lane):
+        yield
 
 
 def _surface_spec_from_surface(surface: SurfaceRZFourier):
@@ -85,18 +89,16 @@ def _assert_surface_parity(surface: SurfaceRZFourier) -> None:
     dofs = surface.get_dofs()
     assert isinstance(spec, SurfaceRZFourierSpec)
 
-    gamma_jax = np.asarray(surface_rz_fourier_gamma_from_spec(spec))
-    gd1_jax = np.asarray(surface_rz_fourier_gammadash1_from_spec(spec))
-    gd2_jax = np.asarray(surface_rz_fourier_gammadash2_from_spec(spec))
-    normal_jax = np.asarray(surface_rz_fourier_normal_from_spec(spec))
-    unitnormal_jax = np.asarray(surface_rz_fourier_unitnormal_from_spec(spec))
-    gamma_from_dofs = np.asarray(surface_rz_fourier_gamma_from_dofs(spec, dofs))
-    gd1_from_dofs = np.asarray(surface_rz_fourier_gammadash1_from_dofs(spec, dofs))
-    gd2_from_dofs = np.asarray(surface_rz_fourier_gammadash2_from_dofs(spec, dofs))
-    normal_from_dofs = np.asarray(surface_rz_fourier_normal_from_dofs(spec, dofs))
-    unitnormal_from_dofs = np.asarray(
-        surface_rz_fourier_unitnormal_from_dofs(spec, dofs)
-    )
+    gamma_jax = host_array(surface_rz_fourier_gamma_from_spec(spec))
+    gd1_jax = host_array(surface_rz_fourier_gammadash1_from_spec(spec))
+    gd2_jax = host_array(surface_rz_fourier_gammadash2_from_spec(spec))
+    normal_jax = host_array(surface_rz_fourier_normal_from_spec(spec))
+    unitnormal_jax = host_array(surface_rz_fourier_unitnormal_from_spec(spec))
+    gamma_from_dofs = host_array(surface_rz_fourier_gamma_from_dofs(spec, dofs))
+    gd1_from_dofs = host_array(surface_rz_fourier_gammadash1_from_dofs(spec, dofs))
+    gd2_from_dofs = host_array(surface_rz_fourier_gammadash2_from_dofs(spec, dofs))
+    normal_from_dofs = host_array(surface_rz_fourier_normal_from_dofs(spec, dofs))
+    unitnormal_from_dofs = host_array(surface_rz_fourier_unitnormal_from_dofs(spec, dofs))
 
     np.testing.assert_allclose(gamma_jax, surface.gamma(), rtol=1e-12, atol=1e-12)
     np.testing.assert_allclose(gd1_jax, surface.gammadash1(), rtol=1e-12, atol=1e-12)
@@ -120,62 +122,62 @@ def _assert_surface_parity(surface: SurfaceRZFourier) -> None:
     )
 
     np.testing.assert_allclose(
-        np.asarray(surface.gamma_jax()),
+        host_array(surface.gamma_jax()),
         surface.gamma(),
         rtol=1e-12,
         atol=1e-12,
     )
     np.testing.assert_allclose(
-        np.asarray(surface.gamma_jax(dofs)),
+        host_array(surface.gamma_jax(dofs)),
         surface.gamma(),
         rtol=1e-12,
         atol=1e-12,
     )
     np.testing.assert_allclose(
-        np.asarray(surface.normal_jax()),
+        host_array(surface.normal_jax()),
         surface.normal(),
         rtol=1e-12,
         atol=1e-12,
     )
     np.testing.assert_allclose(
-        np.asarray(surface.normal_jax(dofs)),
+        host_array(surface.normal_jax(dofs)),
         surface.normal(),
         rtol=1e-12,
         atol=1e-12,
     )
     np.testing.assert_allclose(
-        np.asarray(surface.unitnormal_jax()),
+        host_array(surface.unitnormal_jax()),
         surface.unitnormal(),
         rtol=1e-12,
         atol=1e-12,
     )
     np.testing.assert_allclose(
-        np.asarray(surface.unitnormal_jax(dofs)),
+        host_array(surface.unitnormal_jax(dofs)),
         surface.unitnormal(),
         rtol=1e-12,
         atol=1e-12,
     )
 
     np.testing.assert_allclose(
-        float(surface_rz_fourier_area_from_spec(spec)),
+        host_scalar(surface_rz_fourier_area_from_spec(spec)),
         surface.area(),
         rtol=1e-12,
         atol=1e-12,
     )
     np.testing.assert_allclose(
-        float(surface_rz_fourier_area_from_dofs(spec, dofs)),
+        host_scalar(surface_rz_fourier_area_from_dofs(spec, dofs)),
         surface.area(),
         rtol=1e-12,
         atol=1e-12,
     )
     np.testing.assert_allclose(
-        float(surface_rz_fourier_volume_from_spec(spec)),
+        host_scalar(surface_rz_fourier_volume_from_spec(spec)),
         surface.volume(),
         rtol=1e-12,
         atol=1e-12,
     )
     np.testing.assert_allclose(
-        float(surface_rz_fourier_volume_from_dofs(spec, dofs)),
+        host_scalar(surface_rz_fourier_volume_from_dofs(spec, dofs)),
         surface.volume(),
         rtol=1e-12,
         atol=1e-12,
@@ -237,7 +239,7 @@ def test_surface_rzfourier_unitnormal_degenerate_surface_stays_finite():
         nfp=2,
         stellsym=True,
     )
-    unitnormal = np.asarray(surface_rz_fourier_unitnormal_from_spec(spec))
+    unitnormal = host_array(surface_rz_fourier_unitnormal_from_spec(spec))
     assert np.all(np.isfinite(unitnormal))
     np.testing.assert_array_equal(unitnormal, np.zeros_like(unitnormal))
 
@@ -257,13 +259,13 @@ def test_surface_rzfourier_geometry_from_dofs_matches_boozer_hot_path():
         surface_kind="rzfourier",
     )
     np.testing.assert_allclose(
-        np.asarray(gamma), surface.gamma(), rtol=1e-12, atol=1e-12
+        host_array(gamma), surface.gamma(), rtol=1e-12, atol=1e-12
     )
     np.testing.assert_allclose(
-        np.asarray(xphi), surface.gammadash1(), rtol=1e-12, atol=1e-12
+        host_array(xphi), surface.gammadash1(), rtol=1e-12, atol=1e-12
     )
     np.testing.assert_allclose(
-        np.asarray(xtheta), surface.gammadash2(), rtol=1e-12, atol=1e-12
+        host_array(xtheta), surface.gammadash2(), rtol=1e-12, atol=1e-12
     )
 
 
@@ -271,8 +273,8 @@ def _assert_surface_jacobian_parity(surface: SurfaceRZFourier) -> None:
     dofs = jnp.asarray(surface.get_dofs(), dtype=jnp.float64)
     spec = surface.surface_spec()
 
-    normal_jacobian = np.asarray(surface_rz_fourier_dnormal_from_dofs(spec, dofs))
-    unitnormal_jacobian = np.asarray(
+    normal_jacobian = host_array(surface_rz_fourier_dnormal_from_dofs(spec, dofs))
+    unitnormal_jacobian = host_array(
         surface_rz_fourier_dunitnormal_from_dofs(spec, dofs)
     )
 
@@ -315,10 +317,10 @@ def _assert_area_volume_gradient_parity(surface: SurfaceRZFourier) -> None:
     spec = surface.surface_spec()
 
     area_grad = np.asarray(
-        jax.grad(lambda x: surface_rz_fourier_area_from_dofs(spec, x))(dofs)
+        host_array(jax.grad(lambda x: surface_rz_fourier_area_from_dofs(spec, x))(dofs))
     )
     volume_grad = np.asarray(
-        jax.grad(lambda x: surface_rz_fourier_volume_from_dofs(spec, x))(dofs)
+        host_array(jax.grad(lambda x: surface_rz_fourier_volume_from_dofs(spec, x))(dofs))
     )
 
     np.testing.assert_allclose(

@@ -58,6 +58,19 @@ def _supports_jax_objective_fallback(field) -> bool:
     return bool(supports_fallback())
 
 
+def _validate_squared_flux_parity_mode(parity_mode: str) -> str:
+    if parity_mode not in {"standard", "native_only"}:
+        raise ValueError(f"Unknown SquaredFluxJAX parity_mode={parity_mode!r}")
+    return parity_mode
+
+
+def _raise_native_only_squared_flux_error(detail: str) -> None:
+    raise RuntimeError(
+        "SquaredFluxJAX parity_mode='native_only' requires the end-to-end "
+        f"JAX-native path; fallback seam via {detail} is not allowed."
+    )
+
+
 def _raise_if_nonfinite_squared_flux_gradient(*, definition: str, value, grad) -> None:
     value_array = np.asarray(value, dtype=np.float64)
     grad_array = np.asarray(grad, dtype=np.float64)
@@ -101,15 +114,26 @@ class SquaredFluxJAX(Optimizable):
         field: a :class:`BiotSavartJAX` instance.
         target: optional ``(nphi, ntheta)`` target normal field (default 0).
         definition: ``"quadratic flux"`` | ``"normalized"`` | ``"local"``.
+        parity_mode: ``"standard"`` allows the documented fallback path,
+            while ``"native_only"`` rejects fallback seams during parity tests.
     """
 
-    def __init__(self, surface, field, target=None, definition="quadratic flux"):
+    def __init__(
+        self,
+        surface,
+        field,
+        target=None,
+        definition="quadratic flux",
+        parity_mode="standard",
+    ):
         if definition not in ("quadratic flux", "normalized", "local"):
             raise ValueError(f"Unknown definition: {definition!r}")
+        parity_mode = _validate_squared_flux_parity_mode(parity_mode)
 
         self.surface = surface
         self.field = field
         self.definition = definition
+        self.parity_mode = parity_mode
 
         target_array = None if target is None else np.ascontiguousarray(target)
         field_eval_spec, self._flux_spec = fixed_surface_flux_specs_from_surface(
@@ -130,6 +154,10 @@ class SquaredFluxJAX(Optimizable):
         self._uses_jax_objective_fallback = False
         if self._use_jax_native:
             self._init_jax_native(field, definition)
+        elif parity_mode == "native_only":
+            _raise_native_only_squared_flux_error(
+                "the mixed-quadrature/objective fallback path"
+            )
         elif _supports_jax_objective_fallback(field):
             self._uses_jax_objective_fallback = True
             self._init_fallback(field, definition)
