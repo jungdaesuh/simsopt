@@ -4,9 +4,6 @@ from alm_utils import augmented_inequality_objective
 from banana_opt.single_stage_constraints import single_stage_constraint_activity_tolerances
 
 
-_SUPPORTED_ALM_FORMULATIONS = frozenset({"legacy", "gil"})
-
-
 def average_surface_objectives(objectives, weights=None):
     if len(objectives) == 0:
         raise ValueError("Need at least one surface objective to average")
@@ -68,20 +65,9 @@ def _objective_gradient(objective, objective_optimizable=None):
     return np.asarray(objective.dJ(partials=True)(objective_optimizable), dtype=float)
 
 
-def _validate_alm_formulation(alm_formulation):
-    if alm_formulation not in _SUPPORTED_ALM_FORMULATIONS:
-        raise ValueError(
-            f"Unsupported ALM formulation {alm_formulation!r}; expected one of "
-            f"{sorted(_SUPPORTED_ALM_FORMULATIONS)!r}"
-        )
-    return str(alm_formulation)
-
-
 def _objective_upper_bound_constraint(objective, threshold, objective_optimizable):
     if threshold is None:
         raise ValueError("Gil ALM formulation requires explicit objective thresholds")
-    if float(threshold) < 0.0:
-        raise ValueError("Gil ALM thresholds must be non-negative")
     signed_value = float(objective.J()) - float(threshold)
     grad = _objective_gradient(objective, objective_optimizable)
     return signed_value, grad, max(0.0, signed_value)
@@ -163,9 +149,12 @@ def evaluate_base_objective(
     *,
     objective_optimizable=None,
     alm_formulation="legacy",
+    _surface_pair=None,
 ):
-    alm_formulation = _validate_alm_formulation(alm_formulation)
-    J_QS_obj, J_Boozer_obj = _surface_objective_pair(surface_weights, nonQSs, brs)
+    if _surface_pair is not None:
+        J_QS_obj, J_Boozer_obj = _surface_pair
+    else:
+        J_QS_obj, J_Boozer_obj = _surface_objective_pair(surface_weights, nonQSs, brs)
     base_objective = (
         J_QS_obj
         + RES_WEIGHT * J_Boozer_obj
@@ -177,9 +166,11 @@ def evaluate_base_objective(
     if alm_formulation == "gil":
         total = 0.0
         grad = np.zeros_like(base_grad)
-    else:
+    elif alm_formulation == "legacy":
         total = physics_total
         grad = base_grad
+    else:
+        raise ValueError(f"Unsupported ALM formulation {alm_formulation!r}")
     return {
         "total": total,
         "grad": grad,
@@ -236,7 +227,8 @@ def evaluate_alm_objective(
     iota_penalty_threshold=None,
     length_penalty_threshold=0.0,
 ):
-    alm_formulation = _validate_alm_formulation(alm_formulation)
+    surface_pair = _surface_objective_pair(surface_weights, nonQSs, brs)
+    J_QS_obj, J_Boozer_obj = surface_pair
     base_eval = evaluate_base_objective(
         surface_weights,
         nonQSs,
@@ -248,8 +240,8 @@ def evaluate_alm_objective(
         LENGTH_WEIGHT,
         objective_optimizable=objective_optimizable,
         alm_formulation=alm_formulation,
+        _surface_pair=surface_pair,
     )
-    J_QS_obj, J_Boozer_obj = _surface_objective_pair(surface_weights, nonQSs, brs)
 
     curve_curve_signed_value, curve_curve_grad, curve_curve_violation = curve_curve_constraint_fn(
         curves,
@@ -304,11 +296,8 @@ def evaluate_alm_objective(
         constraint_grads.append(surface_surface_grad)
         feasibility_values.append(surface_surface_violation)
 
+    n_physics_constraints = 0
     if alm_formulation == "gil":
-        if len(constraint_names) < len(active_constraint_names) + 4:
-            raise ValueError(
-                "Gil ALM formulation requires four additional physics constraint names"
-            )
         physics_constraints = [
             _objective_upper_bound_constraint(
                 J_QS_obj,
@@ -331,6 +320,12 @@ def evaluate_alm_objective(
                 objective_optimizable,
             ),
         ]
+        n_physics_constraints = len(physics_constraints)
+        if len(constraint_names) < len(active_constraint_names) + n_physics_constraints:
+            raise ValueError(
+                f"Gil ALM formulation requires {n_physics_constraints} additional "
+                "physics constraint names"
+            )
         for constraint_name, (signed_value, grad, violation) in zip(
             constraint_names[len(active_constraint_names):],
             physics_constraints,
@@ -348,7 +343,7 @@ def evaluate_alm_objective(
         multipliers,
         penalty,
     )
-    base_total = float(base_eval.get("physics_total", base_eval["total"]))
+    base_total = float(base_eval["physics_total"])
     base_eval.update(alm_eval)
     base_eval["base_total"] = base_total
     base_eval["constraint_names"] = active_constraint_names
@@ -364,11 +359,11 @@ def evaluate_alm_objective(
         ),
         dtype=float,
     )
-    if alm_formulation == "gil":
+    if n_physics_constraints > 0:
         constraint_activity_tolerances = np.concatenate(
             [
                 constraint_activity_tolerances,
-                np.zeros(4, dtype=float),
+                np.zeros(n_physics_constraints, dtype=float),
             ]
         )
     base_eval["constraint_activity_tolerances"] = constraint_activity_tolerances
