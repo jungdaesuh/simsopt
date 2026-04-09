@@ -201,7 +201,7 @@ def evaluate_tier5_performance_budget(
         if min_outer_speedup is not None:
             if outer_speedup is None or float(outer_speedup) < float(min_outer_speedup):
                 failures.append(
-                    f"{rung_name} cold end-to-end speedup "
+                    f"{rung_name} outer first-run wall-clock speedup "
                     f"{'n/a' if outer_speedup is None else f'{float(outer_speedup):.2f}x'} "
                     f"fell below checked-in floor {float(min_outer_speedup):.2f}x."
                 )

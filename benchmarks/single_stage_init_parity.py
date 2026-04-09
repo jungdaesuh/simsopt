@@ -18,6 +18,7 @@ sys.path.insert(0, str(REPO_ROOT))
 sys.path.insert(0, str(SRC_ROOT))
 
 from benchmarks.validation_ladder_common import (
+    TIER3_SINGLE_STAGE_OUTER_LOOP_RUNG,
     apply_compilation_cache_policy,
     apply_requested_platform,
     bootstrap_local_simsopt,
@@ -36,6 +37,7 @@ from benchmarks.validation_ladder_common import (
     resolve_probe_lane,
     repo_pythonpath_env,
     run_python_script,
+    single_stage_proof_contract,
     write_json,
 )
 from benchmarks.single_stage_smoke_fixture import (
@@ -78,6 +80,15 @@ TARGET_OPTIMIZER_BACKEND = "ondevice"
 DEFAULT_OUTER_MAXITER = 0
 _TARGET_LANE_FINAL_ONLY_SYNC = "final-only"
 _TARGET_LANE_PER_ACCEPT_SYNC = "per-accept"
+_OUTER_LOOP_PROOF_CONTRACT = single_stage_proof_contract(
+    TIER3_SINGLE_STAGE_OUTER_LOOP_RUNG
+)
+_OUTER_LOOP_REQUIRED_RESULT_KEYS = tuple(
+    _OUTER_LOOP_PROOF_CONTRACT["required_result_keys"]
+)
+_TARGET_OUTER_OPTIMIZER_METHOD = str(
+    _OUTER_LOOP_PROOF_CONTRACT["required_outer_optimizer_method"]
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -377,6 +388,26 @@ def _resolve_surface_geometry_drift(
     )
 
 
+def _finite_required_result_keys(results: dict[str, Any]) -> dict[str, bool]:
+    return {
+        key: bool(np.isfinite(float(results.get(key, np.nan))))
+        for key in _OUTER_LOOP_REQUIRED_RESULT_KEYS
+    }
+
+
+def _append_nonfinite_outer_loop_failures(
+    failures: list[str],
+    *,
+    lane_label: str,
+    finite_result_keys: dict[str, bool],
+) -> None:
+    for key, is_finite in finite_result_keys.items():
+        if not is_finite:
+            failures.append(
+                f"{lane_label} single-stage outer-loop probe produced a non-finite {key}."
+            )
+
+
 def evaluate_single_stage_init_parity(
     cpu_results: dict[str, Any],
     jax_results: dict[str, Any],
@@ -419,6 +450,8 @@ def evaluate_single_stage_init_parity(
         "jax_outer_optimizer_method": str(
             jax_results.get("outer_optimizer_method", "lbfgs")
         ),
+        "cpu_finite_result_keys": _finite_required_result_keys(cpu_results),
+        "jax_finite_result_keys": _finite_required_result_keys(jax_results),
     }
 
     failures: list[str] = []
@@ -454,10 +487,21 @@ def evaluate_single_stage_init_parity(
             failures.append(
                 "JAX single-stage outer-loop probe did not accept an optimizer step."
             )
-        if comparison["jax_outer_optimizer_method"] != "lbfgs-ondevice":
+        if comparison["jax_outer_optimizer_method"] != _TARGET_OUTER_OPTIMIZER_METHOD:
             failures.append(
-                "JAX target-lane outer-loop probe did not use lbfgs-ondevice."
+                "JAX target-lane outer-loop probe did not use "
+                f"{_TARGET_OUTER_OPTIMIZER_METHOD}."
             )
+        _append_nonfinite_outer_loop_failures(
+            failures,
+            lane_label="CPU",
+            finite_result_keys=comparison["cpu_finite_result_keys"],
+        )
+        _append_nonfinite_outer_loop_failures(
+            failures,
+            lane_label="JAX",
+            finite_result_keys=comparison["jax_finite_result_keys"],
+        )
     return comparison, failures
 
 

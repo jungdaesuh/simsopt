@@ -79,6 +79,7 @@ from benchmarks.tier5_performance_characterization import (
     safe_speedup,
     summarize_informational_pair_probe,
     summarize_pair_probe,
+    summarize_single_stage_outer_loop_performance_probe,
     summarize_stage2_e2e_performance_probe,
     summarize_single_lane_probe,
 )
@@ -1589,7 +1590,7 @@ def test_single_stage_init_parity_requires_accepted_step_on_outer_loop_probe():
     cpu_results = _single_stage_probe_results()
     jax_results = _single_stage_probe_results(
         iterations=0,
-        outer_optimizer_method="lbfgs-ondevice",
+        outer_optimizer_method=TARGET_OUTER_OPTIMIZER_METHOD,
     )
 
     _, failures = evaluate_single_stage_init_parity(
@@ -1601,6 +1602,28 @@ def test_single_stage_init_parity_requires_accepted_step_on_outer_loop_probe():
     )
 
     assert any("did not accept an optimizer step" in failure for failure in failures)
+
+
+def test_single_stage_init_parity_rejects_non_finite_outer_loop_results():
+    cpu_results = _single_stage_probe_results()
+    jax_results = _single_stage_probe_results(
+        FINAL_IOTA=np.nan,
+        MAX_CURVATURE=np.inf,
+        outer_optimizer_method=TARGET_OUTER_OPTIMIZER_METHOD,
+    )
+
+    comparison, failures = evaluate_single_stage_init_parity(
+        cpu_results,
+        jax_results,
+        max_surface_geometry_abs=0.0,
+        max_surface_geometry_rel=0.0,
+        maxiter=1,
+    )
+
+    assert comparison["jax_finite_result_keys"]["FINAL_IOTA"] is False
+    assert comparison["jax_finite_result_keys"]["MAX_CURVATURE"] is False
+    assert any("non-finite FINAL_IOTA" in failure for failure in failures)
+    assert any("non-finite MAX_CURVATURE" in failure for failure in failures)
 
 
 def test_single_stage_outer_loop_probe_accepts_finite_target_lane_result():
@@ -2108,6 +2131,37 @@ def test_tier5_single_stage_probe_args_thread_benchmark_mode():
 
     command = tier5_performance_characterization._single_stage_init_probe_args(args)
 
+    assert "--optimizer-backend" in command
+    optimizer_backend_idx = command.index("--optimizer-backend")
+    assert command[optimizer_backend_idx + 1] == "ondevice"
+    assert "--benchmark-mode" in command
+
+
+def test_tier5_single_stage_outer_loop_probe_args_thread_benchmark_mode():
+    args = argparse.Namespace(
+        platform="cuda",
+        equilibrium_path=None,
+        plasma_surf_filename="fixture.nc",
+        equilibria_dir="/tmp/equilibria",
+        stage2_bs_path="/tmp/biot_savart_opt.json",
+        single_stage_nphi=63,
+        single_stage_ntheta=32,
+        mpol=4,
+        ntor=4,
+        vol_target=0.1,
+        iota_target=0.15,
+        optimizer_backend="ondevice",
+        benchmark_mode=True,
+        single_stage_outer_loop_maxiter=3,
+    )
+
+    command = tier5_performance_characterization._single_stage_outer_loop_probe_args(
+        args
+    )
+
+    assert "--maxiter" in command
+    maxiter_idx = command.index("--maxiter")
+    assert command[maxiter_idx + 1] == "3"
     assert "--optimizer-backend" in command
     optimizer_backend_idx = command.index("--optimizer-backend")
     assert command[optimizer_backend_idx + 1] == "ondevice"
@@ -3389,6 +3443,27 @@ def test_summarize_stage2_e2e_performance_probe_falls_back_to_cold_without_warm_
     assert summary["headline_speedup_vs_cpu"] == pytest.approx(0.8)
 
 
+def test_summarize_single_stage_outer_loop_performance_probe_records_speedup():
+    payload = {
+        "passed": True,
+        "timings": {
+            "cpu_elapsed_s": 20.0,
+            "jax_elapsed_s": 5.0,
+        },
+    }
+
+    summary = summarize_single_stage_outer_loop_performance_probe(
+        payload=payload,
+        outer_elapsed_s=30.0,
+        lane_label="jax-cuda",
+    )
+
+    assert summary["name"] == TIER3_SINGLE_STAGE_OUTER_LOOP_RUNG
+    assert summary["speedup_vs_cpu"] == pytest.approx(4.0)
+    assert summary["timing_semantics"] == "short_outer_loop_probe_with_cpu_reference"
+    assert summary["supports_performance_headline"] is False
+
+
 def test_build_tier5_performance_contract_routes_parity_and_headline_sources():
     summary = [
         {
@@ -3407,6 +3482,11 @@ def test_build_tier5_performance_contract_routes_parity_and_headline_sources():
         {
             "name": "tier3_single_stage_init",
             "timing_semantics": "initialization_probe_only",
+            "supports_performance_headline": False,
+        },
+        {
+            "name": TIER3_SINGLE_STAGE_OUTER_LOOP_RUNG,
+            "timing_semantics": "short_outer_loop_probe_with_cpu_reference",
             "supports_performance_headline": False,
         },
         {
@@ -3440,6 +3520,7 @@ def test_build_tier5_performance_contract_routes_parity_and_headline_sources():
     assert contract["do_not_use_for_performance_headline"] == [
         "tier1b_real_stage2",
         "tier3_single_stage_init",
+        TIER3_SINGLE_STAGE_OUTER_LOOP_RUNG,
         "tier4_adjoint_fd",
     ]
 
@@ -3459,6 +3540,7 @@ def _tier5_gpu_phase_payload(**overrides):
                 },
             },
             "tier3_single_stage_init": {"passed": True},
+            TIER3_SINGLE_STAGE_OUTER_LOOP_RUNG: {"passed": True},
             "tier4_adjoint_fd_lane": {"passed": True},
         },
         "summary": [
@@ -3499,11 +3581,23 @@ def _tier5_gpu_phase_payload(**overrides):
                 "timing_semantics": "initialization_probe_only",
                 "supports_performance_headline": False,
             },
+            {
+                "name": TIER3_SINGLE_STAGE_OUTER_LOOP_RUNG,
+                "passed": True,
+                "outer_elapsed_s": 8.0,
+                "cpu_elapsed_s": 4.0,
+                "lane_elapsed_s": 2.0,
+                "speedup_vs_cpu": 2.0,
+                "lane_label": "jax-cuda",
+                "timing_semantics": "short_outer_loop_probe_with_cpu_reference",
+                "supports_performance_headline": False,
+            },
         ],
         "probe_timings": {
             "tier1b_real_stage2": 3.0,
             "tier2_stage2_e2e": 9.0,
             "tier3_single_stage_init": 7.0,
+            TIER3_SINGLE_STAGE_OUTER_LOOP_RUNG: 8.0,
             "tier4_adjoint_fd_lane": 11.0,
         },
         "aggregate": {
@@ -3532,6 +3626,7 @@ def _tier5_cpu_phase_payload(**overrides):
                 "tier1b_real_stage2",
                 "tier2_stage2_e2e",
                 "tier3_single_stage_init",
+                TIER3_SINGLE_STAGE_OUTER_LOOP_RUNG,
                 "tier4_adjoint_fd",
             ],
         },
@@ -3560,6 +3655,9 @@ def test_build_aggregate_payload_merges_gpu_and_cpu_phase_artifacts():
     assert payload["summary_by_name"]["tier4_adjoint_fd"]["outer_elapsed_s"] == pytest.approx(
         24.0
     )
+    assert payload["summary_by_name"][TIER3_SINGLE_STAGE_OUTER_LOOP_RUNG][
+        "speedup_vs_cpu"
+    ] == pytest.approx(2.0)
     assert payload["aggregate"]["performance_contract"]["headline_performance_source"][
         "metric_path"
     ] == "summary_by_name.tier2_stage2_e2e.outer_speedup_vs_cpu"
@@ -3593,7 +3691,7 @@ def test_partial_phase_payload_tracks_probe_only_wall_time():
         probe_timings=_tier5_cpu_phase_payload()["probe_timings"],
     )
 
-    assert gpu_payload["aggregate"]["total_outer_elapsed_s"] == pytest.approx(30.0)
+    assert gpu_payload["aggregate"]["total_outer_elapsed_s"] == pytest.approx(38.0)
     assert cpu_payload["aggregate"]["total_outer_elapsed_s"] == pytest.approx(13.0)
 
 
@@ -3689,7 +3787,7 @@ def test_evaluate_tier5_performance_budget_rejects_stage2_speed_regressions():
         budget,
     )
 
-    assert any("cold end-to-end speedup" in failure for failure in failures)
+    assert any("outer first-run wall-clock speedup" in failure for failure in failures)
     assert any("warm steady-state speedup" in failure for failure in failures)
     assert any("compile overhead" in failure for failure in failures)
 
