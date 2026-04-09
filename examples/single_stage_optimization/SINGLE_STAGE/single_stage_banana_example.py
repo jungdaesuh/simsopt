@@ -910,6 +910,18 @@ def parse_args():
         help="Perturbation scale for basin-hopping (default 0.01).",
     )
     parser.add_argument(
+        "--basin-temperature",
+        type=float,
+        default=float(os.environ.get("BASIN_TEMPERATURE", "1.0")),
+        help="Metropolis temperature for basin-hopping uphill acceptance (default 1.0).",
+    )
+    parser.add_argument(
+        "--basin-niter-success",
+        type=int,
+        default=int(os.environ.get("BASIN_NITER_SUCCESS", "0")),
+        help="Stop basin-hopping early after this many hops without improvement (0 = disabled, default).",
+    )
+    parser.add_argument(
         "--basin-seed",
         type=int,
         default=int(os.environ.get("BASIN_SEED", "-1")),
@@ -1244,6 +1256,8 @@ class RunIdentityConfig:
     init_only: bool
     basin_hops: int
     basin_stepsize: float
+    basin_temperature: float
+    basin_niter_success: int
     rng_seed: int | None
     ftol: float | None
     gtol: float | None
@@ -1324,6 +1338,8 @@ def make_run_identity_config(
         init_only=args.init_only,
         basin_hops=args.basin_hops,
         basin_stepsize=args.basin_stepsize,
+        basin_temperature=getattr(args, "basin_temperature", 1.0),
+        basin_niter_success=getattr(args, "basin_niter_success", 0),
         rng_seed=rng_seed,
         ftol=args.ftol,
         gtol=args.gtol,
@@ -2971,12 +2987,21 @@ if __name__ == "__main__":
             'callback': callback,
             'options': {'maxiter': MAXITER, 'maxcor': args.maxcor, 'ftol': ftol, 'gtol': gtol},
         }
-        print(f"Basin-hopping with {args.basin_hops} hops, stepsize={args.basin_stepsize}, seed={rng_seed}")
+        basin_niter_success = args.basin_niter_success if args.basin_niter_success > 0 else None
+        print(
+            f"Basin-hopping with {args.basin_hops} hops, "
+            f"stepsize={args.basin_stepsize}, "
+            f"T={args.basin_temperature}, "
+            f"niter_success={basin_niter_success}, "
+            f"seed={rng_seed}"
+        )
         res, basin_telemetry = run_basin_hopping(
             fun,
             dofs,
             basin_hops=args.basin_hops,
             basin_stepsize=args.basin_stepsize,
+            basin_temperature=args.basin_temperature,
+            basin_niter_success=basin_niter_success,
             rng_seed=rng_seed,
             minimizer_kwargs=minimizer_kwargs,
             disp=True,
@@ -3360,6 +3385,12 @@ if __name__ == "__main__":
         "CONFINEMENT_SURROGATE_EARLY_WEIGHT": CONFINEMENT_SURROGATE_EARLY_WEIGHT,
         "basin_hops": args.basin_hops,
         "basin_stepsize": args.basin_stepsize if args.basin_hops > 0 else None,
+        "basin_temperature": args.basin_temperature if args.basin_hops > 0 else None,
+        "basin_niter_success": (
+            args.basin_niter_success
+            if args.basin_hops > 0 and args.basin_niter_success > 0
+            else None
+        ),
         "basin_seed": rng_seed if args.basin_hops > 0 else None,
         "basin_iterations": basin_hop_count,
         "basin_minimization_failures": basin_minimization_failures,

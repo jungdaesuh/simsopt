@@ -3410,6 +3410,8 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
             "squared_flux_weight": 1.0,
             "basin_hops": 0,
             "basin_stepsize": 0.01,
+            "basin_temperature": 2.5,
+            "basin_niter_success": 6,
             "basin_seed": 7,
             "theta_center": np.pi,
             "phi_center": np.pi / 4.0,
@@ -3607,6 +3609,8 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
 
         def fake_run_basin_hopping(*_args, **_kwargs):
             runtime["run_basin_hopping_calls"] += 1
+            self.assertEqual(_kwargs["basin_temperature"], 2.5)
+            self.assertEqual(_kwargs["basin_niter_success"], 6)
             return (
                 SimpleNamespace(
                     x=np.array([0.6, -0.1], dtype=float),
@@ -3792,6 +3796,8 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
         self.assertEqual(runtime["results"]["TERMINATION_MESSAGE"], "basin_ok")
         self.assertEqual(runtime["results"]["basin_iterations"], 2)
         self.assertEqual(runtime["results"]["basin_minimization_failures"], 1)
+        self.assertEqual(runtime["results"]["basin_temperature"], 2.5)
+        self.assertEqual(runtime["results"]["basin_niter_success"], 6)
         for key, expected in self._EXPECTED_BASIN_TELEMETRY.items():
             self.assertEqual(runtime["results"][key], expected)
 

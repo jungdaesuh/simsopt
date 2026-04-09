@@ -342,7 +342,19 @@ def parse_args():
         "--basin-stepsize",
         type=float,
         default=float(os.environ.get("BASIN_STEPSIZE", "0.01")),
-        help="Perturbation scale for basin-hopping (fraction of DOF range, default 0.01).",
+        help="Initial perturbation scale passed to SciPy basin-hopping (default 0.01).",
+    )
+    parser.add_argument(
+        "--basin-temperature",
+        type=float,
+        default=float(os.environ.get("BASIN_TEMPERATURE", "1.0")),
+        help="Metropolis temperature for basin-hopping uphill acceptance (default 1.0).",
+    )
+    parser.add_argument(
+        "--basin-niter-success",
+        type=int,
+        default=int(os.environ.get("BASIN_NITER_SUCCESS", "0")),
+        help="Stop basin-hopping early after this many hops without improvement (0 = disabled, default).",
     )
     parser.add_argument(
         "--basin-seed",
@@ -570,6 +582,8 @@ def main(parsed_args=None):
             alm_penalty_scale=args.alm_penalty_scale,
             basin_hops=args.basin_hops,
             basin_stepsize=args.basin_stepsize,
+            basin_temperature=args.basin_temperature,
+            basin_niter_success=args.basin_niter_success,
             basin_seed=rng_seed,
         )
         + "/"
@@ -652,12 +666,21 @@ def main(parsed_args=None):
             'jac': True,
             'options': {'maxiter': MAXITER, 'maxcor': 300, 'ftol': args.ftol, 'gtol': args.gtol},
         }
-        print(f"Basin-hopping with {args.basin_hops} hops, stepsize={args.basin_stepsize}, seed={rng_seed}")
+        basin_niter_success = args.basin_niter_success if args.basin_niter_success > 0 else None
+        print(
+            f"Basin-hopping with {args.basin_hops} hops, "
+            f"stepsize={args.basin_stepsize}, "
+            f"T={args.basin_temperature}, "
+            f"niter_success={basin_niter_success}, "
+            f"seed={rng_seed}"
+        )
         res, basin_telemetry = run_basin_hopping(
             fun,
             dofs,
             basin_hops=args.basin_hops,
             basin_stepsize=args.basin_stepsize,
+            basin_temperature=args.basin_temperature,
+            basin_niter_success=basin_niter_success,
             rng_seed=rng_seed,
             minimizer_kwargs=minimizer_kwargs,
         )

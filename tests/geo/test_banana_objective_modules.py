@@ -350,6 +350,8 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
             init_only=False,
             basin_hops=2,
             basin_stepsize=0.01,
+            basin_temperature=2.5,
+            basin_niter_success=6,
             alm_max_outer_iters=7,
             alm_max_subproblem_continuations=9,
             alm_penalty_init=2.0,
@@ -432,6 +434,8 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
         self.assertEqual(result["ALM_OUTER_ITERATIONS"], 4)
         self.assertEqual(result["ALM_FINAL_TRUST_RADIUS"], 0.125)
         self.assertEqual(result["basin_seed"], 7)
+        self.assertEqual(result["basin_temperature"], 2.5)
+        self.assertEqual(result["basin_niter_success"], 6)
         self.assertEqual(result["basin_accepted_hops"], 2)
         self.assertEqual(result["basin_rejected_hops"], 1)
         self.assertEqual(result["basin_best_objective"], 0.42)

@@ -69,12 +69,14 @@ class WorkflowHelpersTests(unittest.TestCase):
             alm_penalty_scale=10.0,
             basin_hops=3,
             basin_stepsize=0.01,
+            basin_temperature=2.5,
+            basin_niter_success=8,
             basin_seed=7,
         )
 
         self.assertIn("TFC=80000", run_dir)
         self.assertIn("-CM=penalty", run_dir)
-        self.assertIn("-BH=3-BS=0.01-BSeed=7", run_dir)
+        self.assertIn("-BH=3-BS=0.01-BSeed=7-BT=2.5-BNS=8", run_dir)
 
     def test_local_stage2_bs_path_matches_current_stage2_contract(self):
         module = load_workflow_helpers_module()
@@ -156,6 +158,42 @@ class WorkflowRunnerCommonTests(unittest.TestCase):
         self.assertIn("--tf-current-A", command)
         self.assertIn("--output-root", command)
         self.assertIn("--init-only", command)
+
+    def test_build_stage2_command_threads_extended_basin_controls(self):
+        module = load_workflow_common_module()
+        config = module.Stage2ArtifactConfig(
+            plasma_surf_filename="demo.nc",
+            output_root=Path("/tmp/stage2"),
+            equilibria_dir=None,
+            tf_current_A=8.0e4,
+            major_radius=0.915,
+            toroidal_flux=0.24,
+            length_weight=0.0005,
+            cc_weight=100.0,
+            cc_threshold=0.05,
+            curvature_weight=0.0001,
+            curvature_threshold=40.0,
+            banana_surf_radius=0.22,
+            order=2,
+            constraint_method="penalty",
+            alm_max_outer_iters=10,
+            alm_penalty_init=1.0,
+            alm_penalty_scale=10.0,
+            basin_hops=3,
+            basin_stepsize=0.01,
+            basin_temperature=2.5,
+            basin_niter_success=8,
+            basin_seed=11,
+            init_only=False,
+        )
+
+        command = module.build_stage2_command(config, python_executable="python")
+
+        self.assertIn("--basin-hops", command)
+        self.assertIn("--basin-stepsize", command)
+        self.assertIn("--basin-temperature", command)
+        self.assertIn("--basin-niter-success", command)
+        self.assertIn("--basin-seed", command)
 
     def test_discover_single_results_path_requires_unique_match(self):
         module = load_workflow_common_module()

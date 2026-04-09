@@ -123,6 +123,8 @@ class BasinHoppingHelperTests(unittest.TestCase):
                 np.array([1.0, -1.0]),
                 basin_hops=2,
                 basin_stepsize=0.25,
+                basin_temperature=2.5,
+                basin_niter_success=4,
                 rng_seed=17,
                 minimizer_kwargs={"method": "L-BFGS-B", "jac": True},
                 disp=False,
@@ -132,6 +134,8 @@ class BasinHoppingHelperTests(unittest.TestCase):
         np.testing.assert_allclose(captured["dofs"], [1.0, -1.0])
         self.assertEqual(captured["niter"], 2)
         self.assertEqual(captured["stepsize"], 0.25)
+        self.assertEqual(captured["T"], 2.5)
+        self.assertEqual(captured["niter_success"], 4)
         self.assertEqual(
             captured["minimizer_kwargs"],
             {"method": "L-BFGS-B", "jac": True},

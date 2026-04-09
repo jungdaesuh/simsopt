@@ -236,6 +236,8 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
 
         self.assertIn("from banana_opt.basin_hopping import run_basin_hopping", source)
         self.assertIn("run_basin_hopping(", source)
+        self.assertIn("basin_temperature=args.basin_temperature", source)
+        self.assertIn("basin_niter_success=basin_niter_success", source)
 
         entries = {
             key.value: value
@@ -244,6 +246,8 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
         }
         for field_name in EXPECTED_BASIN_TELEMETRY_FIELDS:
             self.assertIn(field_name, entries)
+        self.assertIn("basin_temperature", entries)
+        self.assertIn("basin_niter_success", entries)
 
     def test_stage2_constraint_activity_tolerances_track_smoothing_windows(self):
         source = STAGE2_MODULE_PATH.read_text()

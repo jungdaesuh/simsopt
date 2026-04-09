@@ -119,6 +119,12 @@ def build_stage2_results(
         "OPTIMIZER_SUCCESS": optimizer_success,
         "basin_hops": args.basin_hops,
         "basin_stepsize": args.basin_stepsize if args.basin_hops > 0 else None,
+        "basin_temperature": args.basin_temperature if args.basin_hops > 0 else None,
+        "basin_niter_success": (
+            args.basin_niter_success
+            if args.basin_hops > 0 and args.basin_niter_success > 0
+            else None
+        ),
         "basin_seed": basin_seed if args.basin_hops > 0 else None,
         "basin_iterations": basin_iterations,
         "basin_minimization_failures": basin_minimization_failures,

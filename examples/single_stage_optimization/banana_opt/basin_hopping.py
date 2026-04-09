@@ -8,6 +8,7 @@ from scipy.optimize import basinhopping
 
 
 DEFAULT_NORMALIZED_STEP_RMS_LIMIT = 5.0
+DEFAULT_BASIN_TEMPERATURE = 1.0
 BASIN_TELEMETRY_FIELDS = (
     "basin_accepted_hops",
     "basin_rejected_hops",
@@ -93,6 +94,8 @@ def run_basin_hopping(
     *,
     basin_hops: int,
     basin_stepsize: float,
+    basin_temperature: float = DEFAULT_BASIN_TEMPERATURE,
+    basin_niter_success: int | None = None,
     rng_seed: int,
     minimizer_kwargs: dict,
     normalized_step_rms_limit: float = DEFAULT_NORMALIZED_STEP_RMS_LIMIT,
@@ -107,6 +110,8 @@ def run_basin_hopping(
         minimizer_kwargs=minimizer_kwargs,
         niter=basin_hops,
         stepsize=basin_stepsize,
+        T=basin_temperature,
+        niter_success=basin_niter_success,
         rng=np.random.default_rng(rng_seed),
         accept_test=monitor.accept_test,
         callback=monitor.callback,

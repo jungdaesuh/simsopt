@@ -40,8 +40,10 @@ class Stage2ArtifactConfig:
     alm_penalty_scale: float
     basin_hops: int
     basin_stepsize: float
-    basin_seed: int | None
-    init_only: bool
+    basin_temperature: float = 1.0
+    basin_niter_success: int = 0
+    basin_seed: int | None = None
+    init_only: bool = False
 
 
 def parse_csv(raw: str, cast: Callable[[str], T]) -> list[T]:
@@ -77,6 +79,8 @@ def resolve_stage2_artifact_path(config: Stage2ArtifactConfig) -> Path:
         alm_penalty_scale=config.alm_penalty_scale,
         basin_hops=config.basin_hops,
         basin_stepsize=config.basin_stepsize,
+        basin_temperature=config.basin_temperature,
+        basin_niter_success=config.basin_niter_success,
         basin_seed=config.basin_seed,
     )
 
@@ -136,8 +140,12 @@ def build_stage2_command(
                 str(config.basin_hops),
                 "--basin-stepsize",
                 str(config.basin_stepsize),
+                "--basin-temperature",
+                str(config.basin_temperature),
             ]
         )
+        if config.basin_niter_success > 0:
+            command.extend(["--basin-niter-success", str(config.basin_niter_success)])
         if config.basin_seed is not None:
             command.extend(["--basin-seed", str(config.basin_seed)])
     if config.init_only:

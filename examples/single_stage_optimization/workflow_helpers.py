@@ -120,16 +120,23 @@ def format_stage2_constraint_suffix(
 def format_stage2_basin_suffix(
     basin_hops: int,
     basin_stepsize: float,
-    basin_seed: int | None,
+    basin_temperature: float = 1.0,
+    basin_niter_success: int = 0,
+    basin_seed: int | None = None,
 ) -> str:
     if basin_hops <= 0:
         return ""
     seed_value = "none" if basin_seed is None else str(basin_seed)
-    return (
+    suffix = (
         f"-BH={basin_hops}"
         f"-BS={format_compact_float(basin_stepsize)}"
         f"-BSeed={seed_value}"
     )
+    if basin_temperature != 1.0:
+        suffix += f"-BT={format_compact_float(basin_temperature)}"
+    if basin_niter_success > 0:
+        suffix += f"-BNS={basin_niter_success}"
+    return suffix
 
 
 def format_local_stage2_run_dir(
@@ -141,7 +148,9 @@ def format_local_stage2_run_dir(
     alm_penalty_scale: float,
     basin_hops: int,
     basin_stepsize: float,
-    basin_seed: int | None,
+    basin_temperature: float = 1.0,
+    basin_niter_success: int = 0,
+    basin_seed: int | None = None,
 ) -> str:
     return (
         format_local_stage2_seed_dir(spec)
@@ -154,6 +163,8 @@ def format_local_stage2_run_dir(
         + format_stage2_basin_suffix(
             basin_hops,
             basin_stepsize,
+            basin_temperature,
+            basin_niter_success,
             basin_seed,
         )
     )
@@ -169,7 +180,9 @@ def local_stage2_bs_path(
     alm_penalty_scale: float,
     basin_hops: int,
     basin_stepsize: float,
-    basin_seed: int | None,
+    basin_temperature: float = 1.0,
+    basin_niter_success: int = 0,
+    basin_seed: int | None = None,
 ) -> Path:
     return (
         Path(output_root)
@@ -182,6 +195,8 @@ def local_stage2_bs_path(
             alm_penalty_scale=alm_penalty_scale,
             basin_hops=basin_hops,
             basin_stepsize=basin_stepsize,
+            basin_temperature=basin_temperature,
+            basin_niter_success=basin_niter_success,
             basin_seed=basin_seed,
         )
         / "biot_savart_opt.json"
