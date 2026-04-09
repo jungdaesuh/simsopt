@@ -164,6 +164,10 @@ Single-stage traceable target-lane contract:
 - `make_traceable_objective_runtime_bundle()` exposes those pure-JAX callables
   plus `host_objective` and `host_value_and_grad` wrappers for Python-float /
   NumPy consumers that need an explicit host boundary.
+- The runtime bundle is cached against deterministic signatures of the solved
+  baseline state, objective kwargs, and coil/runtime specs. Rebuild it after
+  changing those inputs; do not mutate captured objects and expect an existing
+  bundle to retarget itself.
 
 The current CPU reference lane remains the oracle for broad workflow trust.
 Public acceptance still centers on the `scipy`-backed reference/parity lanes.
@@ -176,6 +180,22 @@ Exact Boozer note:
   `BoozerSurfaceJAX(..., options={"max_dense_jacobian_bytes": ...})`.
 - If the dense finalization step would exceed that byte ceiling, the solve now
   fails deterministically instead of attempting a multi-GB allocation.
+- Ceiling hits are reported explicitly as
+  `failure_category="scaling_limit"` at
+  `failure_stage="dense_jacobian_finalization"`, with
+  `jacobian_materialized=False`,
+  `dense_jacobian_shape`, `dense_jacobian_bytes`, and
+  `max_dense_jacobian_bytes` included in the result dict.
+- Treat that outcome as a predictable exact-mode size limit, not as random
+  Newton instability or a physics-correctness failure.
+
+Adjoint and warm-start linear solve note:
+
+- The adjoint and warm-start PLU solves intentionally request iterative
+  refinement.
+- That is a numerical-stability choice for dense Boozer linearizations, not a
+  signal that the primal solve was invalid or that the objective wrapper has
+  fallen back to a different algorithm.
 
 ## Copy-paste workflow examples
 
@@ -327,6 +347,13 @@ print(policy.tolerance_tier)
 print(policy.provenance_label)
 ```
 
+For GPU parity modes, treat the policy fields
+`gpu_reduction_order_max_ulp`, `gpu_reduction_order_rel_tol`,
+`gpu_reproducibility_seed`, `gpu_reproducibility_sample_size`, and
+`tolerance_ratchet_factor` as reporting/acceptance metadata. They document the
+expected tolerance budget and diagnostic defaults; they do not force
+deterministic CUDA/XLA execution by themselves.
+
 ## Benchmark and reporting contract
 
 The benchmark/productization SSOT now includes:
@@ -364,6 +391,12 @@ Keep the timing claims narrow and honest:
 - parity mode:
   - `jax_cpu_parity` and `jax_gpu_parity` favor x64 stability and explicit
     reporting over maximum throughput
+  - Biot-Savart parity lanes now use a fixed pairwise tree for quadrature-axis
+    sums instead of relying on a raw `jnp.sum(..., axis=1)` reduction order
+  - expect some throughput cost from the extra pad/reshape/add stages and the
+    additional temporary arrays versus a flat reduction; keep that cost in the
+    parity lanes and benchmark before promoting the same arithmetic to
+    `jax_gpu_fast`
 - fast mode:
   - `jax_gpu_fast` is the throughput-oriented lane after parity is green
   - it is not the default oracle and should not replace `native_cpu`

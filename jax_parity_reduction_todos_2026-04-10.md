@@ -78,13 +78,14 @@ External primary-source context:
 
 **TODOs**
 
-- [ ] Add a reusable pairwise/tree reduction helper for axis reductions in `src/simsopt/jax_core/biotsavart.py`
-- [ ] Replace `jnp.sum(values, axis=1)` in `_quadrature_block_integral()` with the pairwise helper
-- [ ] Replace `jnp.sum(block_integrand, axis=1)` in `_quadrature_block_integral()` with the pairwise helper
-- [ ] Evaluate whether coil-chunk accumulation should use a fixed binary reduction tree instead of serial `acc + reduce_chunk(...)`
-- [ ] Keep the final `jnp.einsum("c,cj->j", ...)` unchanged unless parity data shows it is a real error source
-- [ ] Add a parity regression test that stresses many-coil / many-quadrature accumulation order
-- [ ] Document the expected performance cost of pairwise reductions before merging
+- [x] Add a reusable pairwise/tree reduction helper for axis reductions in `src/simsopt/jax_core/biotsavart.py`
+- [x] Replace `jnp.sum(values, axis=1)` in `_quadrature_block_integral()` with the pairwise helper
+- [x] Replace `jnp.sum(block_integrand, axis=1)` in `_quadrature_block_integral()` with the pairwise helper
+- [x] Evaluate whether coil-chunk accumulation should use a fixed binary reduction tree instead of serial `acc + reduce_chunk(...)`
+  - Current decision: keep the outer coil-chunk accumulation serial until parity data points there; the new many-coil / many-quadrature stress lane compares dense, quadrature-only chunking, and fully chunked accumulation and did not justify widening the hot-path reduction change further.
+- [x] Keep the final `jnp.einsum("c,cj->j", ...)` unchanged unless parity data shows it is a real error source
+- [x] Add a parity regression test that stresses many-coil / many-quadrature accumulation order
+- [x] Document the expected performance cost of pairwise reductions before merging
 
 ### 2. Integral BdotN
 

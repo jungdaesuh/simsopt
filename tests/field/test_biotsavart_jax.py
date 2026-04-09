@@ -155,6 +155,76 @@ def _make_random_fixture(
     )
 
 
+def _host_array(value):
+    return np.asarray(jax.device_get(jax.block_until_ready(value)))
+
+
+def _make_accumulation_order_fixture(
+    *,
+    seed: int,
+    ncoils: int = 53,
+    nquad: int = 193,
+    npoints: int = 41,
+):
+    rng = np.random.default_rng(seed)
+    t = np.linspace(0.0, 1.0, nquad, endpoint=False)
+    twopi_t = 2.0 * np.pi * t
+
+    gammas = np.empty((ncoils, nquad, 3), dtype=np.float64)
+    gammadashs = np.empty_like(gammas)
+    currents = np.empty((ncoils,), dtype=np.float64)
+
+    for coil_index in range(ncoils):
+        phase = 0.031 * coil_index
+        theta = twopi_t + phase
+        dtheta_dt = 2.0 * np.pi
+        radial_mode = 5.0 * twopi_t + 0.37 * coil_index
+        vertical_mode = 3.0 * twopi_t + 0.19 * coil_index
+
+        base_radius = 0.72 + 0.018 * ((coil_index % 7) - 3)
+        radius = base_radius + 8.0e-4 * np.cos(radial_mode)
+        z = 4.0e-3 * (coil_index - 0.5 * (ncoils - 1)) + 6.0e-4 * np.sin(
+            vertical_mode
+        )
+
+        d_radius_dt = -8.0e-4 * (2.0 * np.pi * 5.0) * np.sin(radial_mode)
+        dz_dt = 6.0e-4 * (2.0 * np.pi * 3.0) * np.cos(vertical_mode)
+
+        cos_theta = np.cos(theta)
+        sin_theta = np.sin(theta)
+        gammas[coil_index, :, 0] = radius * cos_theta
+        gammas[coil_index, :, 1] = radius * sin_theta
+        gammas[coil_index, :, 2] = z
+
+        gammadashs[coil_index, :, 0] = (
+            d_radius_dt * cos_theta - radius * sin_theta * dtheta_dt
+        )
+        gammadashs[coil_index, :, 1] = (
+            d_radius_dt * sin_theta + radius * cos_theta * dtheta_dt
+        )
+        gammadashs[coil_index, :, 2] = dz_dt
+        currents[coil_index] = ((-1.0) ** coil_index) * (
+            5.0e4 + 750.0 * coil_index
+        )
+
+    point_radius = 0.34 + 0.08 * rng.random(npoints)
+    point_phi = 2.0 * np.pi * rng.random(npoints)
+    points = np.stack(
+        (
+            point_radius * np.cos(point_phi),
+            point_radius * np.sin(point_phi),
+            0.03 * (rng.random(npoints) - 0.5),
+        ),
+        axis=-1,
+    )
+    return (
+        jnp.asarray(points, dtype=jnp.float64),
+        jnp.asarray(gammas, dtype=jnp.float64),
+        jnp.asarray(gammadashs, dtype=jnp.float64),
+        jnp.asarray(currents, dtype=jnp.float64),
+    )
+
+
 def _dense_reference_fields(module, points, gammas, gammadashs, currents):
     def _dense_B(x):
         return module._one_point_dense(
@@ -174,11 +244,27 @@ def _dense_reference_fields(module, points, gammas, gammadashs, currents):
             integrand=module._biot_savart_A_integrand,
         )
 
-    dense_B = jax.vmap(_dense_B)(points)
+    dense_B = _dense_B_reference(module, points, gammas, gammadashs, currents)
     dense_A = jax.vmap(_dense_A)(points)
-    dense_dB = jax.vmap(lambda x: jnp.swapaxes(jax.jacfwd(_dense_B)(x), -1, -2))(points)
-    dense_dA = jax.vmap(lambda x: jnp.swapaxes(jax.jacfwd(_dense_A)(x), -1, -2))(points)
+    dense_dB = jax.vmap(lambda x: jnp.swapaxes(jax.jacfwd(_dense_B)(x), -1, -2))(
+        points
+    )
+    dense_dA = jax.vmap(lambda x: jnp.swapaxes(jax.jacfwd(_dense_A)(x), -1, -2))(
+        points
+    )
     return dense_B, dense_A, dense_dB, dense_dA
+
+
+def _dense_B_reference(module, points, gammas, gammadashs, currents):
+    return jax.vmap(
+        lambda x: module._one_point_dense(
+            x,
+            gammas,
+            gammadashs,
+            currents,
+            integrand=module._biot_savart_B_integrand,
+        )
+    )(points)
 
 
 def _dense_B_vjp(module, points, v, gammas, gammadashs, currents):
@@ -639,25 +725,96 @@ class TestBiotSavartJaxChunkedParity:
                 nquad=149,
                 npoints=113,
             )
-
-            def _dense_B(x):
-                return stressed_bs._one_point_dense(
-                    x,
-                    gammas,
-                    gammadashs,
-                    currents,
-                    integrand=stressed_bs._biot_savart_B_integrand,
-                )
-
-            dense_B = jax.vmap(_dense_B)(points)
-            chunked_B = stressed_bs.biot_savart_B(points, gammas, gammadashs, currents)
+            dense_B = _dense_B_reference(
+                stressed_bs,
+                points,
+                gammas,
+                gammadashs,
+                currents,
+            )
+            chunked_B = stressed_bs.biot_savart_B(
+                points,
+                gammas,
+                gammadashs,
+                currents,
+            )
 
             np.testing.assert_allclose(
-                np.asarray(chunked_B),
-                np.asarray(dense_B),
+                _host_array(chunked_B),
+                _host_array(dense_B),
                 rtol=rtol,
                 atol=atol,
             )
+
+    @pytest.mark.parametrize(
+        ("mode", "rtol", "atol"),
+        [
+            ("jax_cpu_parity", 1e-12, 1e-14),
+            ("jax_gpu_parity", 1e-12, 2e-13),
+        ],
+    )
+    def test_many_coil_many_quadrature_reduction_order_matches_dense_reference(
+        self, mode, rtol, atol
+    ):
+        points, gammas, gammadashs, currents = _make_accumulation_order_fixture(
+            seed=41
+        )
+
+        with _kernel_tuning_env(
+            mode,
+            coil_chunk_size=0,
+            quadrature_block_size=19,
+        ):
+            quadrature_chunked_bs = _load_with_backend_mode(mode)
+            dense_B = _dense_B_reference(
+                quadrature_chunked_bs,
+                points,
+                gammas,
+                gammadashs,
+                currents,
+            )
+            quadrature_chunked_B = quadrature_chunked_bs.biot_savart_B(
+                points,
+                gammas,
+                gammadashs,
+                currents,
+            )
+
+        with _kernel_tuning_env(
+            mode,
+            coil_chunk_size=7,
+            quadrature_block_size=19,
+        ):
+            fully_chunked_bs = _load_with_backend_mode(mode)
+            fully_chunked_B = fully_chunked_bs.biot_savart_B(
+                points,
+                gammas,
+                gammadashs,
+                currents,
+            )
+
+        dense_host = _host_array(dense_B)
+        quadrature_chunked_host = _host_array(quadrature_chunked_B)
+        fully_chunked_host = _host_array(fully_chunked_B)
+
+        np.testing.assert_allclose(
+            quadrature_chunked_host,
+            dense_host,
+            rtol=rtol,
+            atol=atol,
+        )
+        np.testing.assert_allclose(
+            fully_chunked_host,
+            dense_host,
+            rtol=rtol,
+            atol=atol,
+        )
+        np.testing.assert_allclose(
+            fully_chunked_host,
+            quadrature_chunked_host,
+            rtol=rtol,
+            atol=atol,
+        )
 
     def test_point_chunked_B_A_dB_dA_match_dense_reference(self, monkeypatch):
         with _kernel_tuning_env("jax_cpu_parity"):

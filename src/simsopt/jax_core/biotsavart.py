@@ -140,6 +140,28 @@ def _pad_axis1(array, padded_size: int):
     return lax.pad(array, _zero_scalar(array.dtype), padding_config)
 
 
+def _next_power_of_two(size: int) -> int:
+    if size <= 1:
+        return 1
+    return 1 << (size - 1).bit_length()
+
+
+def _pairwise_sum_axis(array, *, axis: int):
+    """Reduce ``array`` along ``axis`` using a fixed binary addition tree."""
+    axis_index = axis if axis >= 0 else array.ndim + axis
+    axis_size = array.shape[axis_index]
+    if axis_size == 0:
+        return jnp.sum(array, axis=axis_index)
+
+    reduced = jnp.moveaxis(array, axis_index, 0)
+    reduced = _pad_axis0(reduced, _next_power_of_two(axis_size))
+    while reduced.shape[0] > 1:
+        pair_shape = (reduced.shape[0] // 2, 2) + tuple(reduced.shape[1:])
+        paired = jnp.reshape(reduced, pair_shape)
+        reduced = paired[:, 0, ...] + paired[:, 1, ...]
+    return jnp.squeeze(reduced, axis=0)
+
+
 # ── Tree utilities ────────────────────────────────────────────────────
 
 
@@ -226,6 +248,9 @@ def _coil_chunk_reduce(
     padded_gammadashs = _pad_axis0(gammadashs, padded_coil_count)
     padded_currents = _pad_axis0(currents, padded_coil_count)
 
+    # Keep the outer coil accumulation serial until parity data implicates it;
+    # the quadrature-axis sum dominates the known reduction-order drift, while
+    # tree-reducing chunk outputs would add another staged hot-path combine.
     def body(chunk_index: int, acc):
         start = chunk_index * chunk_size
         chunk_gammas = _slice_coil_chunk(padded_gammas, start, chunk_size)
@@ -251,7 +276,7 @@ def _quadrature_block_integral(
     quadrature_count = gammas.shape[1]
     if block_size <= 0 or quadrature_count <= block_size:
         values = integrand(x, gammas, gammadashs)
-        return jnp.sum(values, axis=1) * _scalar_like(
+        return _pairwise_sum_axis(values, axis=1) * _scalar_like(
             values,
             1.0 / values.shape[1],
         )
@@ -273,7 +298,7 @@ def _quadrature_block_integral(
                         second_block_size,
                     ),
                 ),
-                lambda gg, ggd: jnp.sum(integrand(x, gg, ggd), axis=1),
+                lambda gg, ggd: _pairwise_sum_axis(integrand(x, gg, ggd), axis=1),
             )
             / quadrature_count
         )
@@ -292,7 +317,7 @@ def _quadrature_block_integral(
             block_size,
         )
         block_integrand = integrand(x, block_gammas, block_gammadashs)
-        return acc + jnp.sum(block_integrand, axis=1)
+        return acc + _pairwise_sum_axis(block_integrand, axis=1)
 
     integral_sum = lax.fori_loop(0, block_count, body, zero)
     return integral_sum / quadrature_count
