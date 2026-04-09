@@ -71,6 +71,11 @@ def build_stage2_results(
     basin_seed,
     basin_iterations,
     basin_minimization_failures,
+    basin_accepted_hops,
+    basin_rejected_hops,
+    basin_best_objective,
+    basin_accept_test_rejections,
+    basin_accept_test_triggered,
     alm_result,
     alm_taylor_result,
     final_volume,
@@ -117,6 +122,11 @@ def build_stage2_results(
         "basin_seed": basin_seed if args.basin_hops > 0 else None,
         "basin_iterations": basin_iterations,
         "basin_minimization_failures": basin_minimization_failures,
+        "basin_accepted_hops": basin_accepted_hops,
+        "basin_rejected_hops": basin_rejected_hops,
+        "basin_best_objective": basin_best_objective,
+        "basin_accept_test_rejections": basin_accept_test_rejections,
+        "basin_accept_test_triggered": basin_accept_test_triggered,
         "ALM_MAX_OUTER_ITERS": args.alm_max_outer_iters if alm_enabled else None,
         "ALM_MAX_SUBPROBLEM_CONTINUATIONS": (
             args.alm_max_subproblem_continuations if alm_enabled else None

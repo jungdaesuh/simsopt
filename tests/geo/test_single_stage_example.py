@@ -3331,6 +3331,14 @@ class CurrentBaselineContractTests(unittest.TestCase):
 
 
 class Stage2RuntimeSmokeTests(unittest.TestCase):
+    _EXPECTED_BASIN_TELEMETRY = {
+        "basin_accepted_hops": 1,
+        "basin_rejected_hops": 1,
+        "basin_best_objective": 0.42,
+        "basin_accept_test_rejections": 1,
+        "basin_accept_test_triggered": True,
+    }
+
     def _make_stage2_args(self, output_root, **overrides):
         defaults = {
             "plasma_surf_filename": "demo.nc",
@@ -3385,13 +3393,14 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
         defaults.update(overrides)
         return SimpleNamespace(**defaults)
 
-    def _run_stage2_main(self, *, init_only, constraint_method, use_seed):
+    def _run_stage2_main(self, *, init_only, constraint_method, use_seed, basin_hops=0):
         module = load_stage2_module()
         runtime = {
             "seed_loads": 0,
             "initialize_calls": 0,
             "minimize_calls": 0,
             "minimize_alm_calls": 0,
+            "run_basin_hopping_calls": 0,
             "results": None,
         }
 
@@ -3569,6 +3578,23 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
                 history=[{"outer_iteration": 1}],
             )
 
+        def fake_run_basin_hopping(*_args, **_kwargs):
+            runtime["run_basin_hopping_calls"] += 1
+            return (
+                SimpleNamespace(
+                    x=np.array([0.6, -0.1], dtype=float),
+                    fun=0.42,
+                    nit=2,
+                    minimization_failures=1,
+                    lowest_optimization_result=SimpleNamespace(
+                        nit=6,
+                        message="basin_ok",
+                        success=True,
+                    ),
+                ),
+                self._EXPECTED_BASIN_TELEMETRY.copy(),
+            )
+
         with tempfile.TemporaryDirectory() as tmpdir:
             stage2_bs_path = str(Path(tmpdir) / "seed.json") if use_seed else None
             args = self._make_stage2_args(
@@ -3577,6 +3603,7 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
                 constraint_method=constraint_method,
                 stage2_bs_path=stage2_bs_path,
                 equilibrium_path=str(Path(tmpdir) / "demo.nc"),
+                basin_hops=basin_hops,
             )
 
             with ExitStack() as stack:
@@ -3641,6 +3668,7 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
                     ),
                     patch.object(module, "minimize", side_effect=fake_minimize),
                     patch.object(module, "minimize_alm", side_effect=fake_minimize_alm),
+                    patch.object(module, "run_basin_hopping", side_effect=fake_run_basin_hopping),
                     patch.object(
                         module.json,
                         "dump",
@@ -3672,6 +3700,8 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
         self.assertEqual(runtime["initialize_calls"], initialize_calls)
         self.assertEqual(runtime["minimize_calls"], minimize_calls)
         self.assertEqual(runtime["minimize_alm_calls"], minimize_alm_calls)
+        expected_basin_calls = 1 if runtime["results"]["basin_hops"] > 0 else 0
+        self.assertEqual(runtime["run_basin_hopping_calls"], expected_basin_calls)
 
     def test_stage2_main_init_only_loads_seed_and_writes_results(self):
         runtime = self._run_stage2_main(init_only=True, constraint_method="penalty", use_seed=True)
@@ -3715,6 +3745,28 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
         )
         self.assertEqual(runtime["results"]["CONSTRAINT_METHOD"], "penalty")
         self.assertEqual(runtime["results"]["TERMINATION_MESSAGE"], "penalty_ok")
+
+    def test_stage2_main_basin_hopping_persists_telemetry(self):
+        runtime = self._run_stage2_main(
+            init_only=False,
+            constraint_method="penalty",
+            use_seed=True,
+            basin_hops=2,
+        )
+
+        self._assert_runtime_counts(
+            runtime,
+            seed_loads=1,
+            initialize_calls=0,
+            minimize_calls=0,
+            minimize_alm_calls=0,
+        )
+        self.assertEqual(runtime["results"]["basin_hops"], 2)
+        self.assertEqual(runtime["results"]["TERMINATION_MESSAGE"], "basin_ok")
+        self.assertEqual(runtime["results"]["basin_iterations"], 2)
+        self.assertEqual(runtime["results"]["basin_minimization_failures"], 1)
+        for key, expected in self._EXPECTED_BASIN_TELEMETRY.items():
+            self.assertEqual(runtime["results"][key], expected)
 
     def test_stage2_main_fresh_init_path_uses_initialize_coils(self):
         runtime = self._run_stage2_main(init_only=True, constraint_method="penalty", use_seed=False)

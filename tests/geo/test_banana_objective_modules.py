@@ -410,6 +410,11 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
             basin_seed=7,
             basin_iterations=3,
             basin_minimization_failures=1,
+            basin_accepted_hops=2,
+            basin_rejected_hops=1,
+            basin_best_objective=0.42,
+            basin_accept_test_rejections=1,
+            basin_accept_test_triggered=True,
             alm_result=alm_result,
             alm_taylor_result={"passed": True},
             final_volume=0.12,
@@ -427,6 +432,11 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
         self.assertEqual(result["ALM_OUTER_ITERATIONS"], 4)
         self.assertEqual(result["ALM_FINAL_TRUST_RADIUS"], 0.125)
         self.assertEqual(result["basin_seed"], 7)
+        self.assertEqual(result["basin_accepted_hops"], 2)
+        self.assertEqual(result["basin_rejected_hops"], 1)
+        self.assertEqual(result["basin_best_objective"], 0.42)
+        self.assertEqual(result["basin_accept_test_rejections"], 1)
+        self.assertTrue(result["basin_accept_test_triggered"])
         self.assertAlmostEqual(result["BANANA_TO_TF_CURRENT_RATIO"], 0.11875)
 
     def test_smooth_max_curvature_signed_constraint_uses_active_window(self):

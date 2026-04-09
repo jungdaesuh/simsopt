@@ -6,7 +6,7 @@ import json
 from dataclasses import astuple, dataclass
 from types import SimpleNamespace
 import numpy as np
-from scipy.optimize import minimize, basinhopping
+from scipy.optimize import minimize
 
 # SIMSOPT imports
 from simsopt._core.optimizable import Optimizable
@@ -70,6 +70,7 @@ from workflow_helpers import (
 )
 from workflow_runner_common import load_stage2_artifact_results
 from banana_opt.artifact_contracts import upgrade_legacy_stage2_artifact_results
+from banana_opt.basin_hopping import run_basin_hopping, telemetry_values as basin_telemetry_values
 from banana_opt.current_contracts import (
     boozer_I_to_physical_current_A,
     physical_current_to_boozer_I,
@@ -2867,6 +2868,11 @@ if __name__ == "__main__":
 
     basin_hop_count = None
     basin_minimization_failures = None
+    basin_accepted_hops = None
+    basin_rejected_hops = None
+    basin_best_objective = None
+    basin_accept_test_rejections = None
+    basin_accept_test_triggered = None
     termination_message = None
     optimizer_success = None
     phase1_iterations = None
@@ -2951,16 +2957,23 @@ if __name__ == "__main__":
             'callback': callback,
             'options': {'maxiter': MAXITER, 'maxcor': args.maxcor, 'ftol': ftol, 'gtol': gtol},
         }
-        rng = np.random.RandomState(rng_seed)
         print(f"Basin-hopping with {args.basin_hops} hops, stepsize={args.basin_stepsize}, seed={rng_seed}")
-        res = basinhopping(
-            fun, dofs,
+        res, basin_telemetry = run_basin_hopping(
+            fun,
+            dofs,
+            basin_hops=args.basin_hops,
+            basin_stepsize=args.basin_stepsize,
+            rng_seed=rng_seed,
             minimizer_kwargs=minimizer_kwargs,
-            niter=args.basin_hops,
-            stepsize=args.basin_stepsize,
-            seed=rng,
             disp=True,
         )
+        (
+            basin_accepted_hops,
+            basin_rejected_hops,
+            basin_best_objective,
+            basin_accept_test_rejections,
+            basin_accept_test_triggered,
+        ) = basin_telemetry_values(basin_telemetry)
         basin_hop_count = res.nit if hasattr(res, 'nit') else None
         basin_minimization_failures = res.minimization_failures if hasattr(res, 'minimization_failures') else None
         if hasattr(res, 'lowest_optimization_result') and hasattr(res.lowest_optimization_result, 'nit'):
@@ -3337,6 +3350,11 @@ if __name__ == "__main__":
         "basin_seed": rng_seed if args.basin_hops > 0 else None,
         "basin_iterations": basin_hop_count,
         "basin_minimization_failures": basin_minimization_failures,
+        "basin_accepted_hops": basin_accepted_hops,
+        "basin_rejected_hops": basin_rejected_hops,
+        "basin_best_objective": basin_best_objective,
+        "basin_accept_test_rejections": basin_accept_test_rejections,
+        "basin_accept_test_triggered": basin_accept_test_triggered,
         "PHASE1_ITERATIONS": phase1_iterations,
         "PHASE1_TERMINATION_MESSAGE": phase1_termination_message,
         "PHASE1_SUCCESS": phase1_success,

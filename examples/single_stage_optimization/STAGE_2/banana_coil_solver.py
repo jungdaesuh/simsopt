@@ -3,7 +3,7 @@ import os
 import numpy as np
 
 # SIMSOPT imports
-from scipy.optimize import minimize, basinhopping
+from scipy.optimize import minimize
 from simsopt.field import BiotSavart, Current, Coil
 from simsopt.geo import (
     curves_to_vtk,
@@ -32,6 +32,7 @@ from workflow_helpers import (
     format_local_stage2_run_dir,
 )
 from banana_opt.reference_surfaces import build_banana_reference_surfaces
+from banana_opt.basin_hopping import run_basin_hopping, telemetry_values as basin_telemetry_values
 from banana_opt.stage2_geometry import (
     init_surface as _init_surface,
     initialize_coils as _initialize_coils,
@@ -537,6 +538,11 @@ def main(parsed_args=None):
     rng_seed = None
     basin_hop_count = None
     basin_minimization_failures = None
+    basin_accepted_hops = None
+    basin_rejected_hops = None
+    basin_best_objective = None
+    basin_accept_test_rejections = None
+    basin_accept_test_triggered = None
     alm_settings = None
     alm_taylor_result = None
     if args.basin_hops > 0:
@@ -646,18 +652,24 @@ def main(parsed_args=None):
             'jac': True,
             'options': {'maxiter': MAXITER, 'maxcor': 300, 'ftol': args.ftol, 'gtol': args.gtol},
         }
-        rng = np.random.RandomState(rng_seed)
         print(f"Basin-hopping with {args.basin_hops} hops, stepsize={args.basin_stepsize}, seed={rng_seed}")
-        res = basinhopping(
-            fun, dofs,
+        res, basin_telemetry = run_basin_hopping(
+            fun,
+            dofs,
+            basin_hops=args.basin_hops,
+            basin_stepsize=args.basin_stepsize,
+            rng_seed=rng_seed,
             minimizer_kwargs=minimizer_kwargs,
-            niter=args.basin_hops,
-            stepsize=args.basin_stepsize,
-            seed=rng,
-            disp=True,
         )
         basin_hop_count = res.nit if hasattr(res, 'nit') else None
         basin_minimization_failures = res.minimization_failures if hasattr(res, 'minimization_failures') else None
+        (
+            basin_accepted_hops,
+            basin_rejected_hops,
+            basin_best_objective,
+            basin_accept_test_rejections,
+            basin_accept_test_triggered,
+        ) = basin_telemetry_values(basin_telemetry)
         if hasattr(res, 'lowest_optimization_result') and hasattr(res.lowest_optimization_result, 'nit'):
             res_nit = res.lowest_optimization_result.nit
         else:
@@ -764,6 +776,11 @@ def main(parsed_args=None):
         basin_seed=rng_seed if args.basin_hops > 0 else None,
         basin_iterations=basin_hop_count,
         basin_minimization_failures=basin_minimization_failures,
+        basin_accepted_hops=basin_accepted_hops,
+        basin_rejected_hops=basin_rejected_hops,
+        basin_best_objective=basin_best_objective,
+        basin_accept_test_rejections=basin_accept_test_rejections,
+        basin_accept_test_triggered=basin_accept_test_triggered,
         alm_result=alm_result,
         alm_taylor_result=alm_taylor_result,
         final_volume=new_surf.volume(),

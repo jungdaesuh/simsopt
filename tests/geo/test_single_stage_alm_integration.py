@@ -7,6 +7,8 @@ from types import SimpleNamespace
 
 import numpy as np
 
+from geo.test_basin_hopping import EXPECTED_BASIN_TELEMETRY_FIELDS
+
 
 SINGLE_STAGE_MODULE_PATH = (
     Path(__file__).resolve().parents[2]
@@ -228,6 +230,21 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
         self.assertIn("accepted_callback=callback", source)
         self.assertNotIn("inner_callback=callback", source)
 
+    def test_single_stage_basin_hopping_uses_shared_helper_and_records_telemetry(self):
+        source = SINGLE_STAGE_MODULE_PATH.read_text()
+        results_dict = find_assigned_dict(SINGLE_STAGE_MODULE_PATH, "results")
+
+        self.assertIn("from banana_opt.basin_hopping import run_basin_hopping", source)
+        self.assertIn("run_basin_hopping(", source)
+
+        entries = {
+            key.value: value
+            for key, value in zip(results_dict.keys, results_dict.values)
+            if isinstance(key, ast.Constant) and isinstance(key.value, str)
+        }
+        for field_name in EXPECTED_BASIN_TELEMETRY_FIELDS:
+            self.assertIn(field_name, entries)
+
     def test_stage2_constraint_activity_tolerances_track_smoothing_windows(self):
         source = STAGE2_MODULE_PATH.read_text()
         self.assertIn("stage2_constraint_activity_tolerances", source)
@@ -310,6 +327,24 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
             self.assertEqual(value_node.value.id, "hardware_status")
             self.assertIsInstance(value_node.slice, ast.Constant)
             self.assertEqual(value_node.slice.value, expected_status_key)
+
+    def test_stage2_results_contract_records_basin_hopping_telemetry(self):
+        results_dict = find_function_return_dict(
+            STAGE2_OBJECTIVES_MODULE_PATH,
+            "build_stage2_results",
+        )
+
+        entries = {
+            key.value: value
+            for key, value in zip(results_dict.keys, results_dict.values)
+            if isinstance(key, ast.Constant) and isinstance(key.value, str)
+        }
+
+        for field_name in EXPECTED_BASIN_TELEMETRY_FIELDS:
+            self.assertIn(field_name, entries)
+            value_node = entries[field_name]
+            self.assertIsInstance(value_node, ast.Name)
+            self.assertEqual(value_node.id, field_name)
 
     def test_stage2_seed_loader_reuses_saved_biot_savart_configuration(self):
         functions = extract_functions(
