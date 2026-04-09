@@ -130,8 +130,8 @@ def _minimize_lbfgs_private_impl(
     x0 = _require_private_optimizer_runtime(x0)
     d = len(x0)
     dtype = x0.dtype
-    maxiter_limit_value, maxfun_limit_value, maxgrad_limit_value = _resolve_lbfgs_limits(
-        d, maxiter, maxfun, maxgrad
+    maxiter_limit_value, maxfun_limit_value, maxgrad_limit_value = (
+        _resolve_lbfgs_limits(d, maxiter, maxfun, maxgrad)
     )
     ftol_value = np.asarray(ftol, dtype=np.dtype(dtype)).item()
     gtol_value = np.asarray(gtol, dtype=np.dtype(dtype)).item()
@@ -217,6 +217,8 @@ def _minimize_lbfgs_private_impl(
             gamma_max,
         )
         next_k = state.k + _int_scalar(1)
+        s_k_norm = _norm(s_k)
+        y_k_norm = _norm(y_k)
         converged = _norm(g_kp1, ord=norm) < gtol_jax
         step_tol = step_eps * jnp.maximum(
             _as_jax_dtype(1.0, state.x_k.dtype),
@@ -227,18 +229,18 @@ def _minimize_lbfgs_private_impl(
             jnp.abs(state.f_k),
             jnp.abs(f_kp1),
         )
-        gradient_change = _norm(y_k)
+        gradient_change = y_k_norm
         gradient_tol = step_eps * jnp.maximum(
             _norm(state.g_k),
             _norm(g_kp1),
         )
         stalled_step = (
             (~converged)
-            & (_norm(s_k) <= step_tol)
+            & (s_k_norm <= step_tol)
             & (function_change <= objective_tol)
             & (gradient_change <= gradient_tol)
         )
-        curvature_scale = _norm(s_k) * _norm(y_k)
+        curvature_scale = s_k_norm * y_k_norm
         curvature_tol = step_eps * _as_jax_dtype(curvature_scale, rho_k_inv.dtype)
         valid_curvature = (
             jnp.isfinite(rho_k_inv)
@@ -257,7 +259,9 @@ def _minimize_lbfgs_private_impl(
             | (~jnp.all(jnp.isfinite(x_kp1)))
             | (~jnp.all(jnp.isfinite(y_k)))
         )
-        rejected_step = nonfinite_step | stalled_step | ((~converged) & (~valid_curvature))
+        rejected_step = (
+            nonfinite_step | stalled_step | ((~converged) & (~valid_curvature))
+        )
 
         def failed_step(_):
             return state._replace(

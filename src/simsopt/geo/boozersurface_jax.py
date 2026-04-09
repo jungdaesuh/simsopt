@@ -87,6 +87,7 @@ from ..jax_core.field import (
     grouped_field_data_from_spec,
     grouped_field_inputs_from_spec,
 )
+from ..jax_core.specs import CoilGroupSpec, GroupedCoilSetSpec
 from .boozer_residual_jax import (
     _split_decision_vector as _split_boozer_decision_vector,
     boozer_residual_scalar,
@@ -261,6 +262,23 @@ def _replace_group_coil_array(coil_arrays, group_index, group_array):
     grouped_arrays = list(coil_arrays)
     grouped_arrays[group_index] = group_array
     return grouped_arrays
+
+
+def _replace_group_coil_set_spec(
+    coil_set_spec: GroupedCoilSetSpec,
+    group_index: int,
+    group_array,
+) -> GroupedCoilSetSpec:
+    gammas, gammadashs, currents = group_array
+    groups = list(coil_set_spec.groups)
+    group = groups[group_index]
+    groups[group_index] = CoilGroupSpec(
+        gammas=gammas,
+        gammadashs=gammadashs,
+        currents=currents,
+        coil_indices=group.coil_indices,
+    )
+    return GroupedCoilSetSpec(groups=tuple(groups))
 
 
 def _yield_group_vjps(lm, group_runners, coil_arrays, coil_indices):
@@ -921,13 +939,14 @@ def _build_ls_group_vjp_callback(booz_surf, iota, G, weight_inv_modB=True):
     """Build stable LS group runners for repeated streaming VJPs."""
     x, optimize_G = _ls_decision_vector(booz_surf, iota, G)
 
-    coil_arrays = booz_surf._coil_arrays
+    coil_set_spec = booz_surf.coil_set_spec
+    coil_arrays = grouped_field_inputs_from_spec(coil_set_spec)
     coil_indices = booz_surf._coil_index_lists
 
     group_runners = tuple(
         _make_ls_group_runner(
             x,
-            coil_arrays,
+            coil_set_spec,
             booz_surf,
             optimize_G,
             weight_inv_modB,
@@ -950,7 +969,7 @@ def _build_ls_group_vjp_callback(booz_surf, iota, G, weight_inv_modB=True):
 
 def _make_ls_group_runner(
     x,
-    coil_arrays,
+    coil_set_spec,
     booz_surf,
     optimize_G,
     weight_inv_modB,
@@ -960,8 +979,8 @@ def _make_ls_group_runner(
         return _group_penalty_directional_objective(
             x,
             tangent,
-            _replace_group_coil_array(
-                coil_arrays,
+            _replace_group_coil_set_spec(
+                coil_set_spec,
                 group_index,
                 group_array,
             ),
@@ -1017,7 +1036,7 @@ def _ls_penalty_directional_objective(
 def _group_penalty_directional_objective(
     x,
     tangent,
-    coil_arrays,
+    coil_set_spec,
     quadpoints_phi,
     quadpoints_theta,
     mpol,
@@ -1035,7 +1054,7 @@ def _group_penalty_directional_objective(
 ):
     return _directional_derivative(
         _make_boozer_penalty_objective_closure(
-            coil_arrays=coil_arrays,
+            coil_set_spec=coil_set_spec,
             quadpoints_phi=quadpoints_phi,
             quadpoints_theta=quadpoints_theta,
             mpol=mpol,
@@ -1081,90 +1100,25 @@ def _make_ls_penalty_objective(
     )
 
 
-def _make_boozer_penalty_objective_closure(
-    *,
-    coil_arrays=None,
-    coil_set_spec=None,
-    quadpoints_phi,
-    quadpoints_theta,
-    mpol,
-    ntor,
-    nfp,
-    stellsym,
-    scatter_indices,
-    surface_kind,
-    targetlabel,
-    constraint_weight,
-    label_type,
-    phi_idx,
-    optimize_G,
-    weight_inv_modB,
-):
-    def _objective(xx):
-        return _boozer_penalty_objective(
-            xx,
-            coil_arrays=coil_arrays,
-            coil_set_spec=coil_set_spec,
-            quadpoints_phi=quadpoints_phi,
-            quadpoints_theta=quadpoints_theta,
-            mpol=mpol,
-            ntor=ntor,
-            nfp=nfp,
-            stellsym=stellsym,
-            scatter_indices=scatter_indices,
-            surface_kind=surface_kind,
-            targetlabel=targetlabel,
-            constraint_weight=constraint_weight,
-            label_type=label_type,
-            phi_idx=phi_idx,
-            optimize_G=optimize_G,
-            weight_inv_modB=weight_inv_modB,
-        )
+def _make_boozer_penalty_closure(fn, **kwargs):
+    """Generic closure builder for Boozer penalty functions.
 
-    return _objective
+    Captures all surface/coil keyword arguments and returns a unary
+    ``fn(xx, **kwargs)`` closure suitable for JIT tracing.
+    """
+
+    def _closure(xx):
+        return fn(xx, **kwargs)
+
+    return _closure
 
 
-def _make_boozer_penalty_residual_closure(
-    *,
-    coil_arrays=None,
-    coil_set_spec=None,
-    quadpoints_phi,
-    quadpoints_theta,
-    mpol,
-    ntor,
-    nfp,
-    stellsym,
-    scatter_indices,
-    surface_kind,
-    targetlabel,
-    constraint_weight,
-    label_type,
-    phi_idx,
-    optimize_G,
-    weight_inv_modB,
-):
-    def _residual(xx):
-        return _boozer_penalty_residual_vector(
-            xx,
-            coil_arrays=coil_arrays,
-            coil_set_spec=coil_set_spec,
-            quadpoints_phi=quadpoints_phi,
-            quadpoints_theta=quadpoints_theta,
-            mpol=mpol,
-            ntor=ntor,
-            nfp=nfp,
-            stellsym=stellsym,
-            scatter_indices=scatter_indices,
-            surface_kind=surface_kind,
-            targetlabel=targetlabel,
-            constraint_weight=constraint_weight,
-            label_type=label_type,
-            phi_idx=phi_idx,
-            optimize_G=optimize_G,
-            weight_inv_modB=weight_inv_modB,
-        )
+def _make_boozer_penalty_objective_closure(**kwargs):
+    return _make_boozer_penalty_closure(_boozer_penalty_objective, **kwargs)
 
-    return _residual
+
+def _make_boozer_penalty_residual_closure(**kwargs):
+    return _make_boozer_penalty_closure(_boozer_penalty_residual_vector, **kwargs)
 
 
 def _directional_derivative(objective, x, tangent):
@@ -1195,6 +1149,18 @@ def _traceable_plu_or_dummy(matrix, *, finite):
     return jax.lax.cond(
         jnp.asarray(finite, dtype=jnp.bool_), compute_plu, dummy_plu, matrix
     )
+
+
+def _exact_newton_reporting_fields(result):
+    return {
+        "message": result.get("message"),
+        "failure_category": result.get("failure_category"),
+        "failure_stage": result.get("failure_stage"),
+        "jacobian_materialized": result.get("jacobian_materialized"),
+        "dense_jacobian_shape": result.get("dense_jacobian_shape"),
+        "dense_jacobian_bytes": result.get("dense_jacobian_bytes"),
+        "max_dense_jacobian_bytes": result.get("max_dense_jacobian_bytes"),
+    }
 
 
 _DEFAULT_OPTIONS_LS = {
@@ -1913,9 +1879,8 @@ class BoozerSurfaceJAX(Optimizable):
             )
             jacobian = result["jacobian"]
             jacobian_available = jacobian is not None
-            finite = (
-                jnp.all(jnp.isfinite(result["x"]))
-                & jnp.all(jnp.isfinite(result["residual"]))
+            finite = jnp.all(jnp.isfinite(result["x"])) & jnp.all(
+                jnp.isfinite(result["residual"])
             )
             if jacobian_available:
                 finite = finite & jnp.all(jnp.isfinite(jacobian))
@@ -1939,7 +1904,7 @@ class BoozerSurfaceJAX(Optimizable):
                 "success": result["success"] & finite & jacobian_available,
                 "type": "exact",
                 "weight_inv_modB": weight_inv_modB,
-                "message": result["message"],
+                **_exact_newton_reporting_fields(result),
             }
 
         optimize_G = G is not None
@@ -2534,7 +2499,11 @@ class BoozerSurfaceJAX(Optimizable):
 
         Returns:
             dict with 'residual', 'fun', 'jacobian', 'iter', 'success', 'G',
-            's', 'iota', 'PLU', 'mask', 'type', 'vjp', 'weight_inv_modB'.
+            's', 'iota', 'PLU', 'mask', 'type', 'vjp', 'weight_inv_modB',
+            'message', 'failure_category', 'failure_stage',
+            'jacobian_materialized',
+            'dense_jacobian_shape', 'dense_jacobian_bytes',
+            'max_dense_jacobian_bytes'.
             Exact mode enforces options['max_dense_jacobian_bytes'] before the
             final dense Jacobian/PLU materialization step.
         """
@@ -2583,7 +2552,8 @@ class BoozerSurfaceJAX(Optimizable):
         G_final = float(_host_scalar(x_final[-1]))
         jacobian = result["jacobian"]
         jacobian_available = jacobian is not None
-        materialization_message = result.get("message")
+        exact_reporting = _exact_newton_reporting_fields(result)
+        materialization_message = exact_reporting["message"]
 
         if (
             not bool(_host_scalar(result["success"]))
@@ -2607,10 +2577,12 @@ class BoozerSurfaceJAX(Optimizable):
                 "vjp": None,
                 "vjp_groups": None,
                 "weight_inv_modB": self.options["weight_inv_modB"],
-                "message": materialization_message,
+                **exact_reporting,
             }
             self.res = res
             self.need_to_run_code = False
+            if verbose and materialization_message is not None:
+                print(materialization_message, flush=True)
             return res
 
         self._set_surface_dofs(sdofs_final)
@@ -2679,7 +2651,7 @@ class BoozerSurfaceJAX(Optimizable):
                 G_provided=G_provided,
             ),
             "weight_inv_modB": self.options["weight_inv_modB"],
-            "message": materialization_message,
+            **exact_reporting,
         }
         self.res = res
         self.need_to_run_code = False

@@ -55,6 +55,8 @@ from ..backend import (
     is_parity_mode,
     raise_if_strict_jax_fallback,
 )
+from .._core.jax_host_boundary import host_bool as _host_bool
+from .._core.jax_host_boundary import host_scalar as _host_scalar
 
 __all__ = [
     "ContinuousOptimizerContract",
@@ -237,17 +239,6 @@ def _hostify_optimizer_leaf(leaf):
 
 def _hostify_optimizer_tree(value):
     return jax.tree_util.tree_map(_hostify_optimizer_leaf, value)
-
-
-def _host_scalar(value, *, dtype=None):
-    scalar = _hostify_optimizer_leaf(value)
-    if dtype is None:
-        return scalar
-    return np.asarray(scalar, dtype=dtype).item()
-
-
-def _host_bool(value) -> bool:
-    return bool(_host_scalar(value, dtype=np.bool_))
 
 
 def _is_flat_optimizer_vector(x0) -> bool:
@@ -1405,6 +1396,16 @@ def _dense_operator_exceeds_bytes_limit(rows, cols, dtype, max_dense_bytes):
     return _dense_operator_nbytes(rows, cols, dtype) > int(max_dense_bytes)
 
 
+def _exact_newton_dense_jacobian_report(rows, cols, dtype, max_dense_bytes):
+    return {
+        "dense_jacobian_shape": (int(rows), int(cols)),
+        "dense_jacobian_bytes": _dense_operator_nbytes(rows, cols, dtype),
+        "max_dense_jacobian_bytes": (
+            None if max_dense_bytes is None else int(max_dense_bytes)
+        ),
+    }
+
+
 def _exact_newton_dense_jacobian_message(rows, cols, dtype, max_dense_bytes):
     required_bytes = _dense_operator_nbytes(rows, cols, dtype)
     return (
@@ -1416,21 +1417,31 @@ def _exact_newton_dense_jacobian_message(rows, cols, dtype, max_dense_bytes):
 
 
 def _exact_newton_dense_jacobian_policy(rows, cols, dtype, max_dense_bytes):
+    report = _exact_newton_dense_jacobian_report(
+        rows,
+        cols,
+        dtype,
+        max_dense_bytes,
+    )
     materialize_jacobian = not _dense_operator_exceeds_bytes_limit(
         rows,
         cols,
         dtype,
         max_dense_bytes,
     )
-    message = None
+    report["failure_category"] = None
+    report["failure_stage"] = None
+    report["message"] = None
     if not materialize_jacobian:
-        message = _exact_newton_dense_jacobian_message(
+        report["failure_category"] = "scaling_limit"
+        report["failure_stage"] = "dense_jacobian_finalization"
+        report["message"] = _exact_newton_dense_jacobian_message(
             rows,
             cols,
             dtype,
             max_dense_bytes,
         )
-    return materialize_jacobian, message
+    return materialize_jacobian, report
 
 
 def _stabilize_dense_hessian(H, stab):
@@ -1796,7 +1807,7 @@ def newton_exact(
 
     rows = int(np.prod(np.shape(r)))
     cols = int(np.prod(np.shape(x)))
-    materialize_jacobian, message = _exact_newton_dense_jacobian_policy(
+    materialize_jacobian, report = _exact_newton_dense_jacobian_policy(
         rows,
         cols,
         x.dtype,
@@ -1810,7 +1821,7 @@ def newton_exact(
             "nit": nit,
             "success": bool(float(norm) <= tol),
             "jacobian_materialized": False,
-            "message": message,
+            **report,
         }
 
     J = _materialize_dense_jacobian(jvp_fn, x)
@@ -1822,7 +1833,7 @@ def newton_exact(
         "nit": nit,
         "success": bool(float(norm) <= tol),
         "jacobian_materialized": True,
-        "message": None,
+        **report,
     }
 
 
@@ -1940,8 +1951,8 @@ def newton_exact_traceable(
     ).shape
     rows = int(np.prod(residual_shape))
     cols = int(np.prod(x0_shape))
-    x0_dtype = jnp.asarray(x0).dtype
-    materialize_jacobian, message = _exact_newton_dense_jacobian_policy(
+    x0_dtype = np.dtype(x0.dtype) if hasattr(x0, "dtype") else np.result_type(x0)
+    materialize_jacobian, report = _exact_newton_dense_jacobian_policy(
         rows,
         cols,
         x0_dtype,
@@ -1956,11 +1967,11 @@ def newton_exact_traceable(
     result = runner(x0, normalized_args)
     if materialize_jacobian:
         result["jacobian_materialized"] = True
-        result["message"] = message
+        result.update(report)
         return result
     result["jacobian"] = None
     result["jacobian_materialized"] = False
-    result["message"] = message
+    result.update(report)
     return result
 
 

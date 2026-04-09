@@ -52,6 +52,8 @@ TIER2_PERFORMANCE_RUNG = "tier2_stage2_e2e"
 TIER3_INIT_RUNG = "tier3_single_stage_init"
 TIER3_OUTER_LOOP_RUNG = TIER3_SINGLE_STAGE_OUTER_LOOP_RUNG
 TIER4_ADJOINT_RUNG = "tier4_adjoint_fd"
+TIER4_ADJOINT_CPU_RUNG = "tier4_adjoint_fd_cpu"
+TIER4_ADJOINT_LANE_RUNG = "tier4_adjoint_fd_lane"
 _TIER5_PERFORMANCE_BUDGET_PROFILE = "stable_hardware_weekly"
 _TIER5_PHASE_CHOICES = ("full", "gpu", "cpu", "aggregate")
 _TIER3_OUTER_LOOP_CONTRACT = single_stage_proof_contract(TIER3_OUTER_LOOP_RUNG)
@@ -436,7 +438,9 @@ def summarize_stage2_e2e_performance_probe(
     outer_lane_elapsed_s = float(timings.get("jax_outer_elapsed_s", cold_elapsed_s))
     warm_elapsed_s = _float_or_none(timings.get("jax_optimizer_warm_run_s"))
     warm_speedup_vs_cpu = (
-        safe_speedup(cpu_elapsed_s, warm_elapsed_s) if warm_elapsed_s is not None else None
+        safe_speedup(cpu_elapsed_s, warm_elapsed_s)
+        if warm_elapsed_s is not None
+        else None
     )
     outer_speedup_vs_cpu = safe_speedup(cpu_elapsed_s, outer_lane_elapsed_s)
     return _with_performance_contract(
@@ -454,7 +458,9 @@ def summarize_stage2_e2e_performance_probe(
         headline_metric="outer_speedup_vs_cpu",
         headline_speedup_vs_cpu=outer_speedup_vs_cpu,
         extra_fields={
-            "cpu_outer_elapsed_s": float(timings.get("cpu_outer_elapsed_s", cpu_elapsed_s)),
+            "cpu_outer_elapsed_s": float(
+                timings.get("cpu_outer_elapsed_s", cpu_elapsed_s)
+            ),
             "lane_outer_elapsed_s": outer_lane_elapsed_s,
             "outer_speedup_vs_cpu": outer_speedup_vs_cpu,
             "lane_warm_elapsed_s": warm_elapsed_s,
@@ -662,8 +668,8 @@ def _run_tier4_pair(args: argparse.Namespace) -> dict[str, Any]:
             lane_label="jax-cpu" if args.platform == "cpu" else f"jax-{args.platform}",
         ),
         "probe_timings": {
-            "tier4_adjoint_fd_cpu": float(cpu_outer_elapsed_s),
-            "tier4_adjoint_fd_lane": float(lane_outer_elapsed_s),
+            TIER4_ADJOINT_CPU_RUNG: float(cpu_outer_elapsed_s),
+            TIER4_ADJOINT_LANE_RUNG: float(lane_outer_elapsed_s),
         },
     }
 
@@ -723,8 +729,8 @@ def _combine_phase_payload(
     missing_rungs = sorted(expected_rungs - set(summary_by_name))
     total_outer_elapsed_s = float(sum(item["outer_elapsed_s"] for item in summary))
     if TIER4_ADJOINT_RUNG not in summary_by_name:
-        total_outer_elapsed_s += float(probe_timings.get("tier4_adjoint_fd_cpu", 0.0))
-        total_outer_elapsed_s += float(probe_timings.get("tier4_adjoint_fd_lane", 0.0))
+        total_outer_elapsed_s += float(probe_timings.get(TIER4_ADJOINT_CPU_RUNG, 0.0))
+        total_outer_elapsed_s += float(probe_timings.get(TIER4_ADJOINT_LANE_RUNG, 0.0))
     performance_budget = tier5_performance_budget(
         profile=_TIER5_PERFORMANCE_BUDGET_PROFILE
     )
@@ -744,7 +750,9 @@ def _combine_phase_payload(
         else []
     )
     sharding_failures = (
-        evaluate_tier5_sharding_contract(dict(rungs[TIER2_PERFORMANCE_RUNG].get("provenance", provenance)))
+        evaluate_tier5_sharding_contract(
+            dict(rungs[TIER2_PERFORMANCE_RUNG].get("provenance", provenance))
+        )
         if TIER2_PERFORMANCE_RUNG in rungs
         else []
     )
@@ -910,21 +918,21 @@ def _build_aggregate_payload(
             TIER2_PERFORMANCE_RUNG,
             TIER3_INIT_RUNG,
             TIER3_OUTER_LOOP_RUNG,
-            "tier4_adjoint_fd_lane",
+            TIER4_ADJOINT_LANE_RUNG,
         },
     )
     _validate_phase_artifact(
         cpu_payload,
         expected_phase="cpu",
-        required_rungs={"tier4_adjoint_fd_cpu"},
+        required_rungs={TIER4_ADJOINT_CPU_RUNG},
     )
     lane_label = str(gpu_payload["aggregate"]["lane_label"])
-    cpu_outer_elapsed_s = float(cpu_payload["probe_timings"]["tier4_adjoint_fd_cpu"])
-    lane_outer_elapsed_s = float(gpu_payload["probe_timings"]["tier4_adjoint_fd_lane"])
+    cpu_outer_elapsed_s = float(cpu_payload["probe_timings"][TIER4_ADJOINT_CPU_RUNG])
+    lane_outer_elapsed_s = float(gpu_payload["probe_timings"][TIER4_ADJOINT_LANE_RUNG])
     tier4_summary = _summarize_tier4_pair(
-        cpu_payload=cpu_payload["rungs"]["tier4_adjoint_fd_cpu"],
+        cpu_payload=cpu_payload["rungs"][TIER4_ADJOINT_CPU_RUNG],
         cpu_outer_elapsed_s=cpu_outer_elapsed_s,
-        lane_payload=gpu_payload["rungs"]["tier4_adjoint_fd_lane"],
+        lane_payload=gpu_payload["rungs"][TIER4_ADJOINT_LANE_RUNG],
         lane_outer_elapsed_s=lane_outer_elapsed_s,
         lane_label=lane_label,
     )
@@ -941,8 +949,8 @@ def _build_aggregate_payload(
             TIER2_PERFORMANCE_RUNG: gpu_payload["rungs"][TIER2_PERFORMANCE_RUNG],
             TIER3_INIT_RUNG: gpu_payload["rungs"][TIER3_INIT_RUNG],
             TIER3_OUTER_LOOP_RUNG: gpu_payload["rungs"][TIER3_OUTER_LOOP_RUNG],
-            "tier4_adjoint_fd_cpu": cpu_payload["rungs"]["tier4_adjoint_fd_cpu"],
-            "tier4_adjoint_fd_lane": gpu_payload["rungs"]["tier4_adjoint_fd_lane"],
+            TIER4_ADJOINT_CPU_RUNG: cpu_payload["rungs"][TIER4_ADJOINT_CPU_RUNG],
+            TIER4_ADJOINT_LANE_RUNG: gpu_payload["rungs"][TIER4_ADJOINT_LANE_RUNG],
         },
         summary=summary,
         probe_timings={
@@ -1029,7 +1037,9 @@ def main() -> None:
             "stage2_maxiter": int(args.maxiter),
             "optimizer_backend": args.optimizer_backend,
             "benchmark_mode": benchmark_mode,
-            "single_stage_outer_loop_maxiter": int(args.single_stage_outer_loop_maxiter),
+            "single_stage_outer_loop_maxiter": int(
+                args.single_stage_outer_loop_maxiter
+            ),
             "fd_samples": int(args.samples),
             "fd_eps": float(args.eps),
             "phase": args.phase,
@@ -1046,9 +1056,9 @@ def main() -> None:
             provenance=provenance,
             lane_label=lane_label,
             phase="cpu",
-            rungs={"tier4_adjoint_fd_cpu": tier4_cpu_payload},
+            rungs={TIER4_ADJOINT_CPU_RUNG: tier4_cpu_payload},
             summary=[],
-            probe_timings={"tier4_adjoint_fd_cpu": tier4_cpu_outer},
+            probe_timings={TIER4_ADJOINT_CPU_RUNG: tier4_cpu_outer},
         )
     else:
         (
@@ -1086,12 +1096,12 @@ def main() -> None:
         }
         if args.phase == "gpu":
             tier4_lane_payload, tier4_lane_outer = _run_tier4_lane_probe(args)
-            phase_rungs["tier4_adjoint_fd_lane"] = tier4_lane_payload
-            phase_probe_timings["tier4_adjoint_fd_lane"] = tier4_lane_outer
+            phase_rungs[TIER4_ADJOINT_LANE_RUNG] = tier4_lane_payload
+            phase_probe_timings[TIER4_ADJOINT_LANE_RUNG] = tier4_lane_outer
         else:
             tier4_pair = _run_tier4_pair(args)
-            phase_rungs["tier4_adjoint_fd_cpu"] = tier4_pair["cpu_payload"]
-            phase_rungs["tier4_adjoint_fd_lane"] = tier4_pair["lane_payload"]
+            phase_rungs[TIER4_ADJOINT_CPU_RUNG] = tier4_pair["cpu_payload"]
+            phase_rungs[TIER4_ADJOINT_LANE_RUNG] = tier4_pair["lane_payload"]
             phase_probe_timings.update(tier4_pair["probe_timings"])
         payload = _combine_phase_payload(
             provenance=provenance,

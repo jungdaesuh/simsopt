@@ -66,7 +66,7 @@ def _zeros_like_float64(array: jax.Array) -> jax.Array:
 
 
 def _element_count_float64(array: jax.Array) -> jax.Array:
-    return jnp.sum(_ones_like_float64(array))
+    return _explicit_scalar(float(np.prod(array.shape)), reference=array)
 
 
 def _slice_1d_static(array: jax.Array, start: int, end: int) -> jax.Array:
