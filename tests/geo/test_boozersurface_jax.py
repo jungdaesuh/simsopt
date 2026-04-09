@@ -709,6 +709,88 @@ class TestOptimizerAdapter:
         np.testing.assert_allclose(result["jacobian"], np.asarray(A), atol=1e-12)
         assert bool(result["success"])
 
+    def test_newton_exact_skips_dense_jacobian_when_ceiling_is_exceeded(
+        self, monkeypatch
+    ):
+        """Exact Newton must fail predictably before dense finalization would exceed the ceiling."""
+        A = jnp.array([[3.0, 1.0], [1.0, 4.0]])
+        b = jnp.array([5.0, 7.0])
+        materialize_calls = []
+
+        def fake_materialize(_jvp_fn, _x):
+            materialize_calls.append(True)
+            raise AssertionError("dense Jacobian materialization should be skipped")
+
+        monkeypatch.setattr(_opt, "_materialize_dense_jacobian", fake_materialize)
+
+        def residual(x):
+            return A @ x - b
+
+        result = newton_exact(
+            residual,
+            jnp.zeros(2),
+            maxiter=5,
+            tol=1e-14,
+            max_dense_jacobian_bytes=8,
+        )
+
+        assert not materialize_calls
+        assert result["jacobian"] is None
+        assert result["jacobian_materialized"] is False
+        assert "max_dense_jacobian_bytes=8" in result["message"]
+        assert result["success"]
+
+    def test_newton_exact_traceable_skips_dense_jacobian_when_ceiling_is_exceeded(
+        self, monkeypatch
+    ):
+        """Traceable exact Newton must skip dense finalization once the byte ceiling is hit."""
+        A = jnp.array([[3.0, 1.0], [1.0, 4.0]])
+        b = jnp.array([5.0, 7.0])
+        materialize_calls = []
+
+        def fake_materialize(_jvp_fn, _x):
+            materialize_calls.append(True)
+            raise AssertionError("dense Jacobian materialization should be skipped")
+
+        monkeypatch.setattr(_opt, "_materialize_dense_jacobian", fake_materialize)
+
+        def residual(x):
+            return A @ x - b
+
+        result = _opt.newton_exact_traceable(
+            residual,
+            jnp.zeros(2),
+            maxiter=5,
+            tol=1e-14,
+            max_dense_jacobian_bytes=8,
+        )
+
+        assert not materialize_calls
+        assert result["jacobian"] is None
+        assert result["jacobian_materialized"] is False
+        assert "max_dense_jacobian_bytes=8" in result["message"]
+        assert bool(result["success"])
+
+    def test_newton_exact_traceable_ceiling_remains_jittable(self):
+        """Traceable exact Newton must remain composable under an enclosing jax.jit."""
+        A = jnp.array([[3.0, 1.0], [1.0, 4.0]])
+        b = jnp.array([5.0, 7.0])
+
+        def residual(x):
+            return A @ x - b
+
+        @jax.jit
+        def solve_success(x0):
+            return _opt.newton_exact_traceable(
+                residual,
+                x0,
+                maxiter=5,
+                tol=1e-14,
+                max_dense_jacobian_bytes=8,
+            )["success"]
+
+        assert bool(solve_success(jnp.zeros(2)))
+
 
 class TestNewtonPolishBoozer:
     """Test Newton polish after BFGS on the Boozer penalty objective."""
@@ -2336,7 +2418,9 @@ class TestBoozerSurfaceJAXClass:
 # ---------------------------------------------------------------------------
 
 
-def _make_mock_boozer_surface_exact(mpol=1, ntor=1, nfp=1, stellsym=False):
+def _make_mock_boozer_surface_exact(
+    mpol=1, ntor=1, nfp=1, stellsym=False, options=None
+):
     """Build a BoozerSurfaceJAX in exact (Newton) mode -- constraint_weight=None.
 
     The exact Newton path requires a SQUARE system: n_eq == n_dof.
@@ -2364,7 +2448,14 @@ def _make_mock_boozer_surface_exact(mpol=1, ntor=1, nfp=1, stellsym=False):
     label = _MockVolumeLabel()
     target = 2.0 * np.pi**2 * R0 * r**2
 
-    return BoozerSurfaceJAX(bs, surf, label, target, constraint_weight=None)
+    return BoozerSurfaceJAX(
+        bs,
+        surf,
+        label,
+        target,
+        constraint_weight=None,
+        options=options,
+    )
 
 
 def _run_mock_exact_boozer(booz, iota=0.3, G=0.05):
@@ -2376,14 +2467,17 @@ def _run_mock_exact_boozer(booz, iota=0.3, G=0.05):
 def _patched_exact_newton_result(*, success, step=0.1, nit=3):
     original_newton_exact = _bsj.newton_exact
 
-    def fake_newton_exact(_residual_fn, x0, *, maxiter, tol):
-        del maxiter, tol
+    def fake_newton_exact(
+        _residual_fn, x0, *, maxiter, tol, max_dense_jacobian_bytes=None
+    ):
+        del maxiter, tol, max_dense_jacobian_bytes
         n = x0.shape[0]
         return {
             "x": x0 + step,
             "jacobian": jnp.eye(n, dtype=x0.dtype),
             "nit": nit,
             "success": success,
+            "message": None,
         }
 
     _bsj.newton_exact = fake_newton_exact
@@ -2467,6 +2561,38 @@ class TestBoozerSurfaceJAXExactPath:
         expected_fun = float(0.5 * jnp.mean(jnp.square(res_fn(x_final))))
         assert res["fun"] == pytest.approx(expected_fun)
 
+    def test_run_code_exact_marks_dense_jacobian_ceiling_as_failure(self, monkeypatch):
+        booz = _make_mock_boozer_surface_exact(options={"max_dense_jacobian_bytes": 77})
+        captured = {}
+        original_newton_exact = _bsj.newton_exact
+
+        def fake_newton_exact(
+            _residual_fn, x0, *, maxiter, tol, max_dense_jacobian_bytes=None
+        ):
+            del maxiter, tol
+            captured["max_dense_jacobian_bytes"] = max_dense_jacobian_bytes
+            n = x0.shape[0]
+            return {
+                "x": x0,
+                "residual": jnp.zeros(n, dtype=x0.dtype),
+                "jacobian": None,
+                "nit": 0,
+                "success": True,
+                "message": "dense Jacobian skipped",
+            }
+
+        monkeypatch.setattr(_bsj, "newton_exact", fake_newton_exact)
+        try:
+            res = _run_mock_exact_boozer(booz)
+        finally:
+            monkeypatch.setattr(_bsj, "newton_exact", original_newton_exact)
+
+        assert captured["max_dense_jacobian_bytes"] == 77
+        assert res["jacobian"] is None
+        assert res["PLU"] is None
+        assert res["success"] is False
+        assert res["message"] == "dense Jacobian skipped"
+
     def test_exact_residual_jits_with_integer_mask_indices(self):
         """The exact residual closure must trace with integer mask indices."""
         booz = _make_mock_boozer_surface_exact()
@@ -2486,8 +2612,16 @@ class TestBoozerSurfaceJAXExactPath:
         G = jnp.asarray(0.05, dtype=jnp.float64)
         captured = {}
 
-        def fake_newton_exact_traceable(residual_fn, x0, *, maxiter, tol, args=()):
-            del maxiter, tol
+        def fake_newton_exact_traceable(
+            residual_fn,
+            x0,
+            *,
+            maxiter,
+            tol,
+            args=(),
+            max_dense_jacobian_bytes=None,
+        ):
+            del maxiter, tol, max_dense_jacobian_bytes
             residual = residual_fn(x0, *args)
             captured["residual"] = residual
             n = x0.shape[0]
@@ -2497,6 +2631,7 @@ class TestBoozerSurfaceJAXExactPath:
                 "jacobian": jnp.eye(n, dtype=x0.dtype),
                 "nit": 0,
                 "success": True,
+                "message": None,
             }
 
         monkeypatch.setattr(_bsj, "newton_exact_traceable", fake_newton_exact_traceable)
@@ -2508,6 +2643,49 @@ class TestBoozerSurfaceJAXExactPath:
         assert "residual" in captured
         assert jnp.all(jnp.isfinite(captured["residual"]))
 
+    def test_run_code_traceable_exact_propagates_dense_jacobian_ceiling(
+        self, monkeypatch
+    ):
+        booz = _make_mock_boozer_surface_exact(
+            options={"max_dense_jacobian_bytes": 12345}
+        )
+        coil_set_spec = booz.coil_set_spec
+        sdofs = jnp.asarray(booz.surface.get_dofs(), dtype=jnp.float64)
+        iota = jnp.asarray(0.3, dtype=jnp.float64)
+        G = jnp.asarray(0.05, dtype=jnp.float64)
+        captured = {}
+
+        def fake_newton_exact_traceable(
+            residual_fn,
+            x0,
+            *,
+            maxiter,
+            tol,
+            args=(),
+            max_dense_jacobian_bytes=None,
+        ):
+            del maxiter, tol
+            captured["max_dense_jacobian_bytes"] = max_dense_jacobian_bytes
+            residual = residual_fn(x0, *args)
+            return {
+                "x": x0,
+                "residual": residual,
+                "jacobian": None,
+                "nit": 0,
+                "success": True,
+                "message": "dense Jacobian skipped",
+            }
+
+        monkeypatch.setattr(_bsj, "newton_exact_traceable", fake_newton_exact_traceable)
+
+        result = booz.run_code_traceable(coil_set_spec, sdofs, iota, G)
+
+        assert captured["max_dense_jacobian_bytes"] == 12345
+        assert result["jacobian"] is None
+        assert result["plu"] is None
+        assert bool(result["success"]) is False
+        assert result["message"] == "dense Jacobian skipped"
+
     def test_run_code_traceable_exact_reuses_stable_residual_callable(
         self, monkeypatch
     ):
@@ -2518,8 +2696,16 @@ class TestBoozerSurfaceJAXExactPath:
         G = jnp.asarray(0.05, dtype=jnp.float64)
         captured_ids = []
 
-        def fake_newton_exact_traceable(residual_fn, x0, *, maxiter, tol, args=()):
-            del maxiter, tol
+        def fake_newton_exact_traceable(
+            residual_fn,
+            x0,
+            *,
+            maxiter,
+            tol,
+            args=(),
+            max_dense_jacobian_bytes=None,
+        ):
+            del maxiter, tol, max_dense_jacobian_bytes
             captured_ids.append(id(residual_fn))
             residual = residual_fn(x0, *args)
             n = x0.shape[0]
@@ -2529,6 +2715,7 @@ class TestBoozerSurfaceJAXExactPath:
                 "jacobian": jnp.eye(n, dtype=x0.dtype),
                 "nit": 0,
                 "success": True,
+                "message": None,
             }
 
         monkeypatch.setattr(_bsj, "newton_exact_traceable", fake_newton_exact_traceable)
@@ -2552,8 +2739,16 @@ class TestBoozerSurfaceJAXExactPath:
         residual_ids = []
         residuals = []
 
-        def fake_newton_exact_traceable(residual_fn, x0, *, maxiter, tol, args=()):
-            del maxiter, tol
+        def fake_newton_exact_traceable(
+            residual_fn,
+            x0,
+            *,
+            maxiter,
+            tol,
+            args=(),
+            max_dense_jacobian_bytes=None,
+        ):
+            del maxiter, tol, max_dense_jacobian_bytes
             residual_ids.append(id(residual_fn))
             residual = residual_fn(x0, *args)
             residuals.append(np.asarray(residual))
@@ -2564,6 +2759,7 @@ class TestBoozerSurfaceJAXExactPath:
                 "jacobian": jnp.eye(n, dtype=x0.dtype),
                 "nit": 0,
                 "success": True,
+                "message": None,
             }
 
         monkeypatch.setattr(_bsj, "newton_exact_traceable", fake_newton_exact_traceable)
@@ -2956,8 +3152,16 @@ class TestBoozerSurfaceJAXExactPath:
         iota = jnp.asarray(0.3, dtype=jnp.float64)
         G = jnp.asarray(0.05, dtype=jnp.float64)
 
-        def fake_newton_exact_traceable(_residual_fn, x0, *, maxiter, tol, args=()):
-            del maxiter, tol, args
+        def fake_newton_exact_traceable(
+            _residual_fn,
+            x0,
+            *,
+            maxiter,
+            tol,
+            args=(),
+            max_dense_jacobian_bytes=None,
+        ):
+            del maxiter, tol, args, max_dense_jacobian_bytes
             n = x0.shape[0]
             return {
                 "x": x0,
@@ -2965,6 +3169,7 @@ class TestBoozerSurfaceJAXExactPath:
                 "jacobian": jnp.full((n, n), jnp.nan, dtype=x0.dtype),
                 "nit": 0,
                 "success": False,
+                "message": None,
             }
 
         monkeypatch.setattr(_bsj, "newton_exact_traceable", fake_newton_exact_traceable)

@@ -169,6 +169,14 @@ The current CPU reference lane remains the oracle for broad workflow trust.
 Public acceptance still centers on the `scipy`-backed reference/parity lanes.
 The `hybrid` / `ondevice` optimizer lanes remain separate validation tracks.
 
+Exact Boozer note:
+
+- The exact Newton solve keeps the loop matrix-free with JAX JVP + GMRES.
+- The final dense Jacobian and PLU contract remains size-limited by
+  `BoozerSurfaceJAX(..., options={"max_dense_jacobian_bytes": ...})`.
+- If the dense finalization step would exceed that byte ceiling, the solve now
+  fails deterministically instead of attempting a multi-GB allocation.
+
 ## Copy-paste workflow examples
 
 All commands below assume:

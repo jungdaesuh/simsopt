@@ -1214,6 +1214,7 @@ _DEFAULT_OPTIONS_EXACT = {
     "newton_tol": 1e-13,
     "newton_maxiter": 40,
     "weight_inv_modB": False,
+    "max_dense_jacobian_bytes": 512 * 1024 * 1024,
 }
 
 # Options only meaningful for private optimizer backends (hybrid, ondevice).
@@ -1908,16 +1909,23 @@ class BoozerSurfaceJAX(Optimizable):
                 maxiter=self.options["newton_maxiter"],
                 tol=self.options["newton_tol"],
                 args=(coil_set_spec,),
+                max_dense_jacobian_bytes=self.options["max_dense_jacobian_bytes"],
             )
+            jacobian = result["jacobian"]
+            jacobian_available = jacobian is not None
             finite = (
                 jnp.all(jnp.isfinite(result["x"]))
                 & jnp.all(jnp.isfinite(result["residual"]))
-                & jnp.all(jnp.isfinite(result["jacobian"]))
             )
-            P, L, U = _traceable_plu_or_dummy(
-                result["jacobian"],
-                finite=finite,
-            )
+            if jacobian_available:
+                finite = finite & jnp.all(jnp.isfinite(jacobian))
+                P, L, U = _traceable_plu_or_dummy(
+                    jacobian,
+                    finite=finite,
+                )
+                plu = (P, L, U)
+            else:
+                plu = None
             return {
                 "x": result["x"],
                 "sdofs": result["x"][:-2],
@@ -1925,12 +1933,13 @@ class BoozerSurfaceJAX(Optimizable):
                 "G": result["x"][-1],
                 "fun": 0.5 * jnp.mean(jnp.square(result["residual"])),
                 "residual": result["residual"],
-                "jacobian": result["jacobian"],
-                "plu": (P, L, U),
+                "jacobian": jacobian,
+                "plu": plu,
                 "nit": result["nit"],
-                "success": result["success"] & finite,
+                "success": result["success"] & finite & jacobian_available,
                 "type": "exact",
                 "weight_inv_modB": weight_inv_modB,
+                "message": result["message"],
             }
 
         optimize_G = G is not None
@@ -2526,6 +2535,8 @@ class BoozerSurfaceJAX(Optimizable):
         Returns:
             dict with 'residual', 'fun', 'jacobian', 'iter', 'success', 'G',
             's', 'iota', 'PLU', 'mask', 'type', 'vjp', 'weight_inv_modB'.
+            Exact mode enforces options['max_dense_jacobian_bytes'] before the
+            final dense Jacobian/PLU materialization step.
         """
         if not self.need_to_run_code:
             return self.res
@@ -2557,19 +2568,29 @@ class BoozerSurfaceJAX(Optimizable):
         mask_indices = self._compute_stellsym_mask_indices()
         res_fn = self._make_exact_residual(mask_indices)
 
-        result = newton_exact(res_fn, x0, maxiter=maxiter, tol=tol)
+        result = newton_exact(
+            res_fn,
+            x0,
+            maxiter=maxiter,
+            tol=tol,
+            max_dense_jacobian_bytes=self.options["max_dense_jacobian_bytes"],
+        )
 
         x_final = result["x"]
         exact_residual = res_fn(x_final)
         sdofs_final = x_final[:-2]
         iota_final = float(_host_scalar(x_final[-2]))
         G_final = float(_host_scalar(x_final[-1]))
+        jacobian = result["jacobian"]
+        jacobian_available = jacobian is not None
+        materialization_message = result.get("message")
 
         if (
             not bool(_host_scalar(result["success"]))
             or not _host_all_finite(x_final)
             or not _host_all_finite(exact_residual)
-            or not _host_all_finite(result["jacobian"])
+            or not jacobian_available
+            or not _host_all_finite(jacobian)
         ):
             res = {
                 "residual": None,
@@ -2586,13 +2607,14 @@ class BoozerSurfaceJAX(Optimizable):
                 "vjp": None,
                 "vjp_groups": None,
                 "weight_inv_modB": self.options["weight_inv_modB"],
+                "message": materialization_message,
             }
             self.res = res
             self.need_to_run_code = False
             return res
 
         self._set_surface_dofs(sdofs_final)
-        J = result["jacobian"]
+        J = jacobian
         P, L, U = jax.scipy.linalg.lu(J)
 
         nphi = len(self.quadpoints_phi)
@@ -2657,6 +2679,7 @@ class BoozerSurfaceJAX(Optimizable):
                 G_provided=G_provided,
             ),
             "weight_inv_modB": self.options["weight_inv_modB"],
+            "message": materialization_message,
         }
         self.res = res
         self.need_to_run_code = False
@@ -2815,6 +2838,7 @@ class BoozerSurfaceJAX(Optimizable):
             "type": result_type,
             "weight_inv_modB": traceable_result["weight_inv_modB"],
             "fun": float(_host_scalar(traceable_result["fun"])),
+            "message": traceable_result.get("message"),
         }
 
         if result_type == "exact":

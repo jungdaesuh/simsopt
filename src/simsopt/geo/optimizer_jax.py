@@ -1395,6 +1395,44 @@ def _materialize_dense_jacobian(jvp_fn, x):
     return _materialize_dense_linear_operator(jvp_fn, x)
 
 
+def _dense_operator_nbytes(rows, cols, dtype):
+    return int(rows) * int(cols) * np.dtype(dtype).itemsize
+
+
+def _dense_operator_exceeds_bytes_limit(rows, cols, dtype, max_dense_bytes):
+    if max_dense_bytes is None:
+        return False
+    return _dense_operator_nbytes(rows, cols, dtype) > int(max_dense_bytes)
+
+
+def _exact_newton_dense_jacobian_message(rows, cols, dtype, max_dense_bytes):
+    required_bytes = _dense_operator_nbytes(rows, cols, dtype)
+    return (
+        "Exact Newton skipped dense Jacobian materialization because "
+        f"the final {int(rows)}x{int(cols)} Jacobian in dtype {np.dtype(dtype)} "
+        f"would require {required_bytes} bytes, exceeding "
+        f"max_dense_jacobian_bytes={int(max_dense_bytes)}."
+    )
+
+
+def _exact_newton_dense_jacobian_policy(rows, cols, dtype, max_dense_bytes):
+    materialize_jacobian = not _dense_operator_exceeds_bytes_limit(
+        rows,
+        cols,
+        dtype,
+        max_dense_bytes,
+    )
+    message = None
+    if not materialize_jacobian:
+        message = _exact_newton_dense_jacobian_message(
+            rows,
+            cols,
+            dtype,
+            max_dense_bytes,
+        )
+    return materialize_jacobian, message
+
+
 def _stabilize_dense_hessian(H, stab):
     stab_value = jnp.asarray(stab, dtype=H.dtype)
     return H + stab_value * jnp.eye(H.shape[0], dtype=H.dtype)
@@ -1716,6 +1754,7 @@ def newton_exact(
     *,
     maxiter=40,
     tol=1e-13,
+    max_dense_jacobian_bytes=None,
 ):
     """Newton solver for the exact Boozer residual system ``r(x) = 0``.
 
@@ -1755,6 +1794,25 @@ def newton_exact(
         norm = jnp.linalg.norm(r)
         nit += 1
 
+    rows = int(np.prod(np.shape(r)))
+    cols = int(np.prod(np.shape(x)))
+    materialize_jacobian, message = _exact_newton_dense_jacobian_policy(
+        rows,
+        cols,
+        x.dtype,
+        max_dense_jacobian_bytes,
+    )
+    if not materialize_jacobian:
+        return {
+            "x": x,
+            "residual": r,
+            "jacobian": None,
+            "nit": nit,
+            "success": bool(float(norm) <= tol),
+            "jacobian_materialized": False,
+            "message": message,
+        }
+
     J = _materialize_dense_jacobian(jvp_fn, x)
 
     return {
@@ -1763,6 +1821,8 @@ def newton_exact(
         "jacobian": J,
         "nit": nit,
         "success": bool(float(norm) <= tol),
+        "jacobian_materialized": True,
+        "message": None,
     }
 
 
@@ -1771,6 +1831,7 @@ def _make_traceable_exact_newton_runner(
     residual_fn,
     maxiter,
     tol,
+    materialize_jacobian,
 ):
     def run_solver(x_init, fn_args):
         def residual_eval(x):
@@ -1842,15 +1903,15 @@ def _make_traceable_exact_newton_runner(
                 "nit": jnp.asarray(0, dtype=jnp.int32),
             },
         )
-        jacobian_final = _materialize_dense_jacobian(jvp_fn, state["x"])
-
-        return {
+        result = {
             "x": state["x"],
             "residual": state["residual"],
-            "jacobian": jacobian_final,
             "nit": state["nit"],
             "success": state["norm"] <= tol_value,
         }
+        if materialize_jacobian:
+            result["jacobian"] = _materialize_dense_jacobian(jvp_fn, state["x"])
+        return result
 
     return jax.jit(run_solver)
 
@@ -1862,6 +1923,7 @@ def newton_exact_traceable(
     maxiter=40,
     tol=1e-13,
     args=(),
+    max_dense_jacobian_bytes=None,
 ):
     """Trace-safe Newton solver for the exact Boozer residual system.
 
@@ -1869,12 +1931,37 @@ def newton_exact_traceable(
     dense Jacobian only once at the final iterate for downstream LU-based
     contracts.
     """
+    normalized_args = _normalize_solver_args(args)
+    x0_shape = tuple(int(dim) for dim in np.shape(x0))
+    residual_shape = jax.eval_shape(
+        lambda x, fn_args: residual_fn(x, *fn_args),
+        x0,
+        normalized_args,
+    ).shape
+    rows = int(np.prod(residual_shape))
+    cols = int(np.prod(x0_shape))
+    x0_dtype = jnp.asarray(x0).dtype
+    materialize_jacobian, message = _exact_newton_dense_jacobian_policy(
+        rows,
+        cols,
+        x0_dtype,
+        max_dense_jacobian_bytes,
+    )
     runner = _make_traceable_exact_newton_runner(
         residual_fn,
         int(maxiter),
         float(tol),
+        materialize_jacobian,
     )
-    return runner(x0, _normalize_solver_args(args))
+    result = runner(x0, normalized_args)
+    if materialize_jacobian:
+        result["jacobian_materialized"] = True
+        result["message"] = message
+        return result
+    result["jacobian"] = None
+    result["jacobian_materialized"] = False
+    result["message"] = message
+    return result
 
 
 # ---------------------------------------------------------------------------
