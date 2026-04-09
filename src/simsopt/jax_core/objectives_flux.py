@@ -6,7 +6,10 @@ import jax
 import jax.numpy as jnp
 
 from ._device_scalars import float_scalar, two_pi
-from ._math_utils import as_runtime_float64 as _as_runtime_float64
+from ._math_utils import (
+    as_jax_float64 as _as_jax_float64,
+    as_runtime_float64 as _as_runtime_float64,
+)
 from .field import grouped_biot_savart_B_from_spec
 from .specs import (
     FieldEvalSpec,
@@ -28,7 +31,7 @@ def _fixed_surface_target_array(normal, target):
     if target is None:
         zero_target = jnp.sum(normal, axis=-1)
         return zero_target - zero_target
-    return jax.device_put(target).astype(jnp.float64)
+    return _as_jax_float64(target)
 
 
 def build_fourier_basis(quadpoints_jax, order):
@@ -83,7 +86,7 @@ def fixed_surface_geometry_from_surface(surface):
         gamma = surface_rz_fourier_gamma_from_spec(surface_spec)
         normal = surface_rz_fourier_normal_from_spec(surface_spec)
         return gamma, normal
-    return jnp.asarray(surface.gamma()), jnp.asarray(surface.normal())
+    return _as_jax_float64(surface.gamma()), _as_jax_float64(surface.normal())
 
 
 def fixed_surface_flux_specs_from_surface(

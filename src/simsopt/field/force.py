@@ -31,6 +31,10 @@ from ..jax_core import (
     curve_spec_with_dofs,
     make_coil_symmetry_spec,
 )
+from ..jax_core._math_utils import (
+    as_jax_float64 as _as_jax_float64,
+    zeros as _jax_zeros,
+)
 from ..jax_core.curve_geometry import optimizable_input_dofs_from_map_spec
 from ..jax_core.surface_rzfourier import surface_rz_fourier_spec_from_dofs
 
@@ -237,12 +241,12 @@ def _prepare_target_source_inputs_pure(
         Tuple of arrays: (gammas_targets, gammadashs_targets, gammas_sources, gammadashs_sources, currents_targets, currents_sources).
     """
     return (
-        jnp.asarray(gammas_targets)[:, ::downsample, :],
-        jnp.asarray(gammadashs_targets)[:, ::downsample, :],
-        jnp.asarray(gammas_sources)[:, ::downsample, :],
-        jnp.asarray(gammadashs_sources)[:, ::downsample, :],
-        jnp.asarray(currents_targets),
-        jnp.asarray(currents_sources),
+        _as_jax_float64(gammas_targets)[:, ::downsample, :],
+        _as_jax_float64(gammadashs_targets)[:, ::downsample, :],
+        _as_jax_float64(gammas_sources)[:, ::downsample, :],
+        _as_jax_float64(gammadashs_sources)[:, ::downsample, :],
+        _as_jax_float64(currents_targets),
+        _as_jax_float64(currents_sources),
     )
 
 
@@ -296,29 +300,33 @@ def _prepare_regularized_target_source_inputs_pure(
     return (
         gammas_targets,
         gammadashs_targets,
-        jnp.asarray(gammadashdashs_targets)[:, ::downsample, :],
-        jnp.asarray(quadpoints[0])[::downsample],
+        _as_jax_float64(gammadashdashs_targets)[:, ::downsample, :],
+        _as_jax_float64(quadpoints[0])[::downsample],
         gammas_sources,
         gammadashs_sources,
         currents_targets,
         currents_sources,
-        jnp.asarray(regularizations),
+        _as_jax_float64(regularizations),
     )
 
 
 def _empty_coil_state_arrays(*, include_gammadashdash=False):
-    empty_curve = jnp.zeros((0, 1, 3), dtype=jnp.float64)
-    empty_current = jnp.zeros((0,), dtype=jnp.float64)
+    empty_curve = _jax_zeros((0, 1, 3))
+    empty_current = _jax_zeros((0,))
     if include_gammadashdash:
         return empty_curve, empty_curve, empty_curve, empty_current
     return empty_curve, empty_curve, empty_current
+
+
+def _empty_source_fine_arrays():
+    return _empty_coil_state_arrays(include_gammadashdash=False)
 
 
 def _optimizable_input_dof_map_spec(owner, opt, *, input_mode):
     """Build an owner->optimizable map for either local or full DOF inputs."""
     from ..jax_core import make_optimizable_dof_map_spec
 
-    template_full_dofs = jnp.asarray(opt.full_x, dtype=jnp.float64)
+    template_full_dofs = _as_jax_float64(opt.full_x)
     owner_segments = tuple(
         (
             int(owner._full_dof_indices[dep_opt][0]),
@@ -517,12 +525,12 @@ def _apply_coil_state_symmetry(
     gammadashdash=None,
 ):
     if symmetry.has_rotation:
-        rotmat = jnp.asarray(symmetry.rotmat, dtype=jnp.float64)
+        rotmat = _as_jax_float64(symmetry.rotmat)
         gamma = gamma @ rotmat
         gammadash = gammadash @ rotmat
         if gammadashdash is not None:
             gammadashdash = gammadashdash @ rotmat
-    current = current * jnp.asarray(symmetry.scale, dtype=jnp.float64)
+    current = current * _as_jax_float64(symmetry.scale)
     if gammadashdash is None:
         return gamma, gammadash, current
     return gamma, gammadash, gammadashdash, current
@@ -566,9 +574,7 @@ def _current_value_from_binding(binding, owner_dofs):
             )
         return current_dofs[0]
     if binding.kind == "scaled":
-        return jnp.asarray(
-            binding.scale, dtype=jnp.float64
-        ) * _current_value_from_binding(
+        return _as_jax_float64(binding.scale) * _current_value_from_binding(
             binding.child,
             owner_dofs,
         )
@@ -609,7 +615,7 @@ def _curve_state_from_entry(entry, owner_dofs, *, include_gammadashdash):
 
 def _build_shared_coil_state(entry, *, include_gammadashdash=False):
     """Build one coil's packed state via immutable specs, then JAX hooks."""
-    owner_dofs = jnp.asarray(entry.coil.full_x, dtype=jnp.float64)
+    owner_dofs = _as_jax_float64(entry.coil.full_x)
     state = _curve_state_from_entry(
         entry,
         owner_dofs,
@@ -1017,8 +1023,8 @@ def _coil_coil_inductances_pure(
     Returns:
         array (shape (m,m)): Full inductance matrix Lij.
     """
-    gammas = jnp.asarray(gammas)[:, ::downsample, :]
-    gammadashs = jnp.asarray(gammadashs)[:, ::downsample, :]
+    gammas = _as_jax_float64(gammas)[:, ::downsample, :]
+    gammadashs = _as_jax_float64(gammadashs)[:, ::downsample, :]
     N = gammas.shape[0]
 
     # Compute Lij, i != j
@@ -1255,7 +1261,7 @@ class B2Energy(Optimizable):
             raise ValueError("B2Energy can only be used with RegularizedCoil objects")
         _check_quadpoints_consistency(self.target_coils, "target_coils")
         _check_downsample(self.target_coils, downsample, "target_coils")
-        self.regularizations = jnp.asarray(
+        self.regularizations = _as_jax_float64(
             [c.regularization for c in self.target_coils]
         )
         self.J_jax = _B2ENERGY_JAX
@@ -1642,7 +1648,7 @@ def squared_mean_force_pure(
         else:
             gammas_sources_fine = gammas_sources_fine[:, ::downsample, :]
             gammadashs_sources_fine = gammadashs_sources_fine[:, ::downsample, :]
-        currents_sources_fine = jnp.asarray(currents_sources_fine)
+        currents_sources_fine = _as_jax_float64(currents_sources_fine)
     else:
         gammas_sources_fine = gammadashs_sources_fine = currents_sources_fine = None
 
@@ -1655,9 +1661,9 @@ def squared_mean_force_pure(
 
     # Use empty arrays for fine when not provided
     if gammas_sources_fine is None:
-        gammas_sources_fine = jnp.zeros((0, 1, 3))
-        gammadashs_sources_fine = jnp.zeros((0, 1, 3))
-        currents_sources_fine = jnp.zeros((0,))
+        gammas_sources_fine, gammadashs_sources_fine, currents_sources_fine = (
+            _empty_source_fine_arrays()
+        )
 
     def mean_force_group1(i, gamma_i, tangent_i, gammadash_norm_i, current_i):
         def B_at_pt(pt):
@@ -1991,13 +1997,13 @@ def lp_force_pure(
         or gammadashs_sources_fine is None
         or currents_sources_fine is None
     ):
-        gammas_sources_fine = jnp.zeros((0, 1, 3))
-        gammadashs_sources_fine = jnp.zeros((0, 1, 3))
-        currents_sources_fine = jnp.zeros((0,))
+        gammas_sources_fine, gammadashs_sources_fine, currents_sources_fine = (
+            _empty_source_fine_arrays()
+        )
     elif hasattr(gammas_sources_fine, "shape") and gammas_sources_fine.shape[0] > 0:
         gammas_sources_fine = gammas_sources_fine[:, ::downsample, :]
         gammadashs_sources_fine = gammadashs_sources_fine[:, ::downsample, :]
-        currents_sources_fine = jnp.asarray(currents_sources_fine)
+        currents_sources_fine = _as_jax_float64(currents_sources_fine)
 
     n1 = gammas_targets.shape[0]
     npts1 = gammas_targets.shape[1]
@@ -2125,7 +2131,7 @@ class LpCurveForce(Optimizable):
             raise ValueError(
                 "LpCurveForce can only be used with RegularizedCoil objects"
             )
-        self.regularizations = jnp.asarray([c.regularization for c in target_coils])
+        self.regularizations = _as_jax_float64([c.regularization for c in target_coils])
         self.target_coils = target_coils
         self.source_coils_coarse = [
             c for c in source_coils_coarse if c not in target_coils
@@ -2150,7 +2156,7 @@ class LpCurveForce(Optimizable):
             )
         if len(self.source_coils_fine) > 0:
             _check_quadpoints_consistency(self.source_coils_fine, "source_coils_fine")
-        self.quadpoints = jnp.asarray([c.curve.quadpoints for c in target_coils])
+        self.quadpoints = _as_jax_float64([c.curve.quadpoints for c in target_coils])
         self.p = p
         self.threshold = threshold
         self.downsample = downsample
@@ -2212,8 +2218,8 @@ class LpCurveForce(Optimizable):
                 currents_fine,
                 self.quadpoints,
                 self.regularizations,
-                self.p,
-                self.threshold,
+                _as_jax_float64(self.p),
+                _as_jax_float64(self.threshold),
                 self.downsample,
             )
 
@@ -2374,13 +2380,13 @@ def lp_torque_pure(
         or gammadashs_sources_fine is None
         or currents_sources_fine is None
     ):
-        gammas_sources_fine = jnp.zeros((0, 1, 3))
-        gammadashs_sources_fine = jnp.zeros((0, 1, 3))
-        currents_sources_fine = jnp.zeros((0,))
+        gammas_sources_fine, gammadashs_sources_fine, currents_sources_fine = (
+            _empty_source_fine_arrays()
+        )
     elif hasattr(gammas_sources_fine, "shape") and gammas_sources_fine.shape[0] > 0:
         gammas_sources_fine = gammas_sources_fine[:, ::downsample, :]
         gammadashs_sources_fine = gammadashs_sources_fine[:, ::downsample, :]
-        currents_sources_fine = jnp.asarray(currents_sources_fine)
+        currents_sources_fine = _as_jax_float64(currents_sources_fine)
 
     centers = vmap(centroid_pure, in_axes=(0, 0))(gammas_targets, gammadashs_targets)
 
@@ -2512,7 +2518,7 @@ class LpCurveTorque(Optimizable):
             raise ValueError(
                 "LpCurveTorque can only be used with RegularizedCoil objects"
             )
-        self.regularizations = jnp.asarray([c.regularization for c in target_coils])
+        self.regularizations = _as_jax_float64([c.regularization for c in target_coils])
         self.target_coils = target_coils
         self.source_coils_coarse = [
             c for c in source_coils_coarse if c not in target_coils
@@ -2537,7 +2543,7 @@ class LpCurveTorque(Optimizable):
             )
         if len(self.source_coils_fine) > 0:
             _check_quadpoints_consistency(self.source_coils_fine, "source_coils_fine")
-        self.quadpoints = jnp.asarray([c.curve.quadpoints for c in target_coils])
+        self.quadpoints = _as_jax_float64([c.curve.quadpoints for c in target_coils])
         self.p = p
         self.threshold = threshold
         self.downsample = downsample
@@ -2599,8 +2605,8 @@ class LpCurveTorque(Optimizable):
                 currents_fine,
                 self.quadpoints,
                 self.regularizations,
-                self.p,
-                self.threshold,
+                _as_jax_float64(self.p),
+                _as_jax_float64(self.threshold),
                 self.downsample,
             )
 
@@ -2738,19 +2744,19 @@ def squared_mean_torque(
         or gammadashs_sources_fine is None
         or currents_sources_fine is None
     ):
-        gammas_sources_fine = jnp.zeros((0, 1, 3))
-        gammadashs_sources_fine = jnp.zeros((0, 1, 3))
-        currents_sources_fine = jnp.zeros((0,))
+        gammas_sources_fine, gammadashs_sources_fine, currents_sources_fine = (
+            _empty_source_fine_arrays()
+        )
     elif (
         isinstance(gammas_sources_fine, (list, tuple)) and len(gammas_sources_fine) > 0
     ):
         gammas_sources_fine = jnp.stack(gammas_sources_fine)[:, ::downsample, :]
         gammadashs_sources_fine = jnp.stack(gammadashs_sources_fine)[:, ::downsample, :]
-        currents_sources_fine = jnp.asarray(currents_sources_fine)
+        currents_sources_fine = _as_jax_float64(currents_sources_fine)
     elif hasattr(gammas_sources_fine, "shape") and gammas_sources_fine.shape[0] > 0:
         gammas_sources_fine = gammas_sources_fine[:, ::downsample, :]
         gammadashs_sources_fine = gammadashs_sources_fine[:, ::downsample, :]
-        currents_sources_fine = jnp.asarray(currents_sources_fine)
+        currents_sources_fine = _as_jax_float64(currents_sources_fine)
 
     n1 = gammas_targets.shape[0]
     npts1 = gammas_targets.shape[1]
