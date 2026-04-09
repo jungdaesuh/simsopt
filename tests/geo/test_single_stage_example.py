@@ -401,8 +401,25 @@ class SingleStageExampleTests(unittest.TestCase):
 
         self.assertEqual(settings["input_source"], "physical_A")
         self.assertEqual(settings["mode"], "boozer_surrogate")
+        self.assertEqual(settings["effective_mode"], "boozer_surrogate")
         self.assertEqual(settings["plasma_current_A"], 8000.0)
         self.assertAlmostEqual(settings["boozer_I"], 0.0016)
+
+    def test_resolve_plasma_current_settings_zero_physical_amps_reports_vacuum_effective_mode(self):
+        module = self.load_module()
+
+        settings = module.resolve_plasma_current_settings(
+            SimpleNamespace(
+                boozer_I=None,
+                plasma_current_A=0.0,
+            )
+        )
+
+        self.assertEqual(settings["input_source"], "physical_A")
+        self.assertEqual(settings["mode"], "boozer_surrogate")
+        self.assertEqual(settings["effective_mode"], "vacuum")
+        self.assertEqual(settings["plasma_current_A"], 0.0)
+        self.assertEqual(settings["boozer_I"], 0.0)
 
     def test_resolve_plasma_current_settings_accepts_negative_physical_amps(self):
         module = self.load_module()
@@ -416,6 +433,7 @@ class SingleStageExampleTests(unittest.TestCase):
 
         self.assertEqual(settings["plasma_current_A"], -35200.0)
         self.assertAlmostEqual(settings["boozer_I"], -0.00704)
+        self.assertEqual(settings["effective_mode"], "boozer_surrogate")
 
     def test_resolve_plasma_current_settings_rejects_mixed_raw_and_physical_inputs(self):
         module = self.load_module()
@@ -440,6 +458,7 @@ class SingleStageExampleTests(unittest.TestCase):
 
         self.assertEqual(settings["input_source"], "default_zero")
         self.assertEqual(settings["mode"], "disabled")
+        self.assertEqual(settings["effective_mode"], "vacuum")
         self.assertEqual(settings["plasma_current_A"], 0.0)
         self.assertEqual(settings["boozer_I"], 0.0)
 
@@ -1777,6 +1796,14 @@ class HardwareConstraintTests(unittest.TestCase):
 
         scaled_callback(np.array([1.0, -2.0]))
         np.testing.assert_allclose(seen["callback"][0], [10.1, 19.8])
+
+    def test_resolve_initial_step_phase_maxiter(self):
+        module = self.load_module()
+
+        self.assertEqual(module.resolve_initial_step_phase_maxiter(40, 1.0, 10), 0)
+        self.assertEqual(module.resolve_initial_step_phase_maxiter(40, 0.5, 0), 0)
+        self.assertEqual(module.resolve_initial_step_phase_maxiter(40, 0.5, 10), 10)
+        self.assertEqual(module.resolve_initial_step_phase_maxiter(5, 0.5, 10), 5)
 
     def test_evaluate_total_objective_uses_surface_weights_for_qs_and_boozer_terms(self):
         module = self.load_module()

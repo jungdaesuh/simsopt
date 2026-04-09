@@ -3,6 +3,8 @@ from __future__ import annotations
 import math
 from pathlib import Path
 
+from .current_contracts import resolve_effective_current_mode
+
 
 def upgrade_legacy_stage2_artifact_results(
     stage2_artifact_results: dict,
@@ -60,10 +62,12 @@ def validate_smoke_results(
     expected_stage2_tf_current_A: float,
     expected_stage2_tf_current_sum_abs_A: float,
 ) -> dict:
+    expected_effective_mode = resolve_effective_current_mode(expected_boozer_I)
     required_keys = (
         "PLASMA_CURRENT_A",
         "PLASMA_CURRENT_INPUT_SOURCE",
         "BOOZER_I",
+        "EFFECTIVE_CURRENT_MODE",
         "STAGE2_TF_CURRENT_A",
         "STAGE2_TF_CURRENT_SUM_ABS_A",
         "FINITE_CURRENT_MODE",
@@ -97,6 +101,8 @@ def validate_smoke_results(
         ),
         "input_source_matches": results.get("PLASMA_CURRENT_INPUT_SOURCE") == "physical_A",
         "mode_matches": results.get("FINITE_CURRENT_MODE") == "boozer_surrogate",
+        "effective_mode_matches": results.get("EFFECTIVE_CURRENT_MODE")
+        == expected_effective_mode,
     }
     checks["passed"] = not missing_keys and all(
         value for key, value in checks.items() if key not in {"missing_keys", "passed"}

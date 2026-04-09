@@ -402,7 +402,20 @@ def resolve_plasma_current_settings(args):
         "plasma_current_A": settings.plasma_current_A,
         "input_source": settings.input_source,
         "mode": settings.mode,
+        "effective_mode": settings.effective_mode,
     }
+
+
+def resolve_initial_step_phase_maxiter(
+    total_maxiter,
+    initial_step_scale,
+    initial_step_maxiter,
+):
+    if initial_step_maxiter <= 0:
+        return 0
+    if not (0.0 < initial_step_scale < 1.0):
+        return 0
+    return min(total_maxiter, initial_step_maxiter)
 
 
 def build_equilibrium_path(args):
@@ -551,7 +564,7 @@ def parse_args():
         type=float,
         default=float(os.environ.get("MULTISURFACE_INITIAL_STEP_SCALE", "1.0")),
         help=(
-            "Physical step scale for an optional first outer-optimization phase in two-surface mode. "
+            "Physical step scale for an optional first outer-optimization phase. "
             "Values below 1.0 shrink early L-BFGS-B moves in a mathematically consistent scaled coordinate system."
         ),
     )
@@ -560,7 +573,7 @@ def parse_args():
         type=int,
         default=int(os.environ.get("MULTISURFACE_INITIAL_STEP_MAXITER", "0")),
         help=(
-            "Maximum outer iterations to run in the scaled first phase of two-surface mode. "
+            "Maximum outer iterations to run in the scaled first phase. "
             "Set to 0 to disable the early-step continuation phase."
         ),
     )
@@ -2554,6 +2567,7 @@ if __name__ == "__main__":
     plasma_current_A = plasma_current_settings["plasma_current_A"]
     plasma_current_input_source = plasma_current_settings["input_source"]
     finite_current_mode = plasma_current_settings["mode"]
+    effective_current_mode = plasma_current_settings["effective_mode"]
     MAXITER = args.maxiter
     CHECKPOINT_EVERY = args.checkpoint_every
     TOPOLOGY_SCORER_EVERY = args.topology_scorer_every
@@ -2988,15 +3002,14 @@ if __name__ == "__main__":
             optimizer_success = True
         print(f"Basin-hopping complete. Best fun={res.fun:.6e}, hops={args.basin_hops}, seed={rng_seed}")
     else:
-        phase1_maxiter = 0
-        if (
-            args.num_surfaces > 1
-            and args.multisurface_initial_step_maxiter > 0
-            and args.multisurface_initial_step_scale < 1.0
-        ):
-            phase1_maxiter = min(MAXITER, args.multisurface_initial_step_maxiter)
+        phase1_maxiter = resolve_initial_step_phase_maxiter(
+            MAXITER,
+            args.multisurface_initial_step_scale,
+            args.multisurface_initial_step_maxiter,
+        )
+        if phase1_maxiter > 0:
             print(
-                "Running scaled multisurface continuation phase with "
+                "Running scaled initial continuation phase with "
                 f"step_scale={args.multisurface_initial_step_scale} and maxiter={phase1_maxiter}"
             )
             scaled_fun, scaled_callback = build_scaled_outer_problem(
@@ -3373,6 +3386,7 @@ if __name__ == "__main__":
         "PLASMA_CURRENT_INPUT_SOURCE": plasma_current_input_source,
         "PLASMA_CURRENT_SURROGATE_SCOPE": "shared_all_surfaces" if args.num_surfaces > 1 else "single_surface",
         "FINITE_CURRENT_MODE": finite_current_mode,
+        "EFFECTIVE_CURRENT_MODE": effective_current_mode,
         "BOOZER_I": float(boozer_I),
         "FINAL_VOLUME": float(final_volume),
         "FINAL_IOTA": float(final_iota),

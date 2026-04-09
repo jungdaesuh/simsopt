@@ -519,6 +519,7 @@ class FiniteCurrentSmokeScriptTests(unittest.TestCase):
             "PLASMA_CURRENT_A": 0.0,
             "PLASMA_CURRENT_INPUT_SOURCE": "physical_A",
             "BOOZER_I": 0.0,
+            "EFFECTIVE_CURRENT_MODE": "vacuum",
             "STAGE2_TF_CURRENT_A": 8.0e4,
             "STAGE2_TF_CURRENT_SUM_ABS_A": 1.6e6,
             "FINITE_CURRENT_MODE": "boozer_surrogate",
@@ -557,6 +558,7 @@ class FiniteCurrentSmokeScriptTests(unittest.TestCase):
         results = self._make_smoke_results(
             PLASMA_CURRENT_A=-35200.0,
             BOOZER_I=-0.00704,
+            EFFECTIVE_CURRENT_MODE="boozer_surrogate",
         )
 
         validation = module.validate_smoke_results(
@@ -567,6 +569,7 @@ class FiniteCurrentSmokeScriptTests(unittest.TestCase):
         )
 
         self.assertTrue(validation["passed"])
+        self.assertTrue(validation["effective_mode_matches"])
 
     def test_validate_smoke_results_uses_actual_artifact_tf_current(self):
         module = load_finite_current_smoke_module()
