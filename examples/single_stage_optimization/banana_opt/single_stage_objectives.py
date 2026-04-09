@@ -59,6 +59,12 @@ def _surface_objective_pair(surface_weights, nonQSs, brs):
     return J_QS_obj, J_Boozer_obj
 
 
+def _objective_gradient(objective, objective_optimizable=None):
+    if objective_optimizable is None:
+        return np.asarray(objective.dJ(), dtype=float)
+    return np.asarray(objective.dJ(partials=True)(objective_optimizable), dtype=float)
+
+
 def evaluate_total_objective(
     surface_weights,
     nonQSs,
@@ -132,6 +138,8 @@ def evaluate_base_objective(
     IOTAS_WEIGHT,
     JCurveLength,
     LENGTH_WEIGHT,
+    *,
+    objective_optimizable=None,
 ):
     J_QS_obj, J_Boozer_obj = _surface_objective_pair(surface_weights, nonQSs, brs)
     base_objective = (
@@ -142,7 +150,7 @@ def evaluate_base_objective(
     )
     return {
         "total": float(base_objective.J()),
-        "grad": np.asarray(base_objective.dJ(), dtype=float),
+        "grad": _objective_gradient(base_objective, objective_optimizable),
         "J_QS": float(J_QS_obj.J()),
         "dJ_QS": np.asarray(J_QS_obj.dJ(), dtype=float),
         "J_Boozer": float(J_Boozer_obj.J()),
@@ -199,6 +207,7 @@ def evaluate_alm_objective(
         IOTAS_WEIGHT,
         JCurveLength,
         LENGTH_WEIGHT,
+        objective_optimizable=objective_optimizable,
     )
 
     curve_curve_signed_value, curve_curve_grad, curve_curve_violation = curve_curve_constraint_fn(

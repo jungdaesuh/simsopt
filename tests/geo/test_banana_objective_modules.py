@@ -69,14 +69,18 @@ class _FakeBaseObjective:
 
 
 class _FakeAlgebraicObjective:
-    def __init__(self, value, gradient):
+    def __init__(self, value, gradient, projected_gradient=None):
         self._value = float(value)
         self._gradient = np.asarray(gradient, dtype=float)
+        projected = gradient if projected_gradient is None else projected_gradient
+        self._projected_gradient = np.asarray(projected, dtype=float)
 
     def J(self):
         return self._value
 
-    def dJ(self):
+    def dJ(self, partials=False):
+        if partials:
+            return lambda _objective: self._projected_gradient.copy()
         return self._gradient.copy()
 
     def __add__(self, other):
@@ -85,12 +89,17 @@ class _FakeAlgebraicObjective:
         return _FakeAlgebraicObjective(
             self._value + other._value,
             self._gradient + other._gradient,
+            self._projected_gradient + other._projected_gradient,
         )
 
     __radd__ = __add__
 
     def __mul__(self, scalar):
-        return _FakeAlgebraicObjective(self._value * scalar, self._gradient * scalar)
+        return _FakeAlgebraicObjective(
+            self._value * scalar,
+            self._gradient * scalar,
+            self._projected_gradient * scalar,
+        )
 
     __rmul__ = __mul__
 
@@ -478,6 +487,16 @@ class SingleStageObjectiveModuleTests(_ModuleTestCase):
     MODULE_PATH = SINGLE_STAGE_OBJECTIVES_PATH
     MODULE_PREFIX = "banana_single_stage_objectives"
 
+    @staticmethod
+    def _make_projected_base_terms():
+        return (
+            SimpleNamespace(name="full"),
+            [_FakeAlgebraicObjective(2.0, [2.0, 0.0], [2.0, 0.0, 0.0, 0.0])],
+            [_FakeAlgebraicObjective(3.0, [0.5, 0.5], [0.5, 0.5, 0.0, 0.0])],
+            _FakeAlgebraicObjective(4.0, [0.2, 0.1], [0.2, 0.1, 0.0, 0.0]),
+            _FakeAlgebraicObjective(5.0, [1.0, 1.5], [1.0, 1.5, 0.0, 0.0]),
+        )
+
     def test_average_surface_objectives_uses_weighted_mean(self):
         single = _FakeAlgebraicObjective(2.0, [2.0, -1.0])
         single_avg = self.module.average_surface_objectives([single])
@@ -619,6 +638,82 @@ class SingleStageObjectiveModuleTests(_ModuleTestCase):
         self.assertAlmostEqual(result["J_surf"], 0.9)
         self.assertAlmostEqual(result["J_curvature"], 0.8)
         np.testing.assert_allclose(result["grad"], [8.0, -3.0])
+
+    def test_evaluate_base_objective_projects_total_gradient_when_requested(self):
+        objective, nonqs, brs, jiota, jlength = self._make_projected_base_terms()
+
+        result = self.module.evaluate_base_objective(
+            np.array([1.0]),
+            nonqs,
+            brs,
+            RES_WEIGHT=2.0,
+            Jiota=jiota,
+            IOTAS_WEIGHT=3.0,
+            JCurveLength=jlength,
+            LENGTH_WEIGHT=1.0,
+            objective_optimizable=objective,
+        )
+
+        np.testing.assert_allclose(result["grad"], [4.6, 2.8, 0.0, 0.0])
+
+    def test_evaluate_alm_objective_projects_base_gradient_into_constraint_space(self):
+        objective, nonqs, brs, jiota, jlength = self._make_projected_base_terms()
+
+        def fake_augmented(base_value, base_grad, constraint_values, constraint_grads, multipliers, penalty):
+            self.assertAlmostEqual(base_value, 25.0)
+            np.testing.assert_allclose(base_grad, [4.6, 2.8, 0.0, 0.0])
+            np.testing.assert_allclose(constraint_values, [-0.1, 0.2, 0.3])
+            np.testing.assert_allclose(constraint_grads[0], [1.0, 0.0, 0.0, 0.0])
+            np.testing.assert_allclose(constraint_grads[1], [0.0, 1.0, 0.0, 0.0])
+            np.testing.assert_allclose(constraint_grads[2], [1.0, -1.0, 0.0, 0.0])
+            np.testing.assert_allclose(multipliers, [0.1, 0.2, 0.3])
+            self.assertAlmostEqual(penalty, 9.0)
+            return {
+                "total": 26.0,
+                "grad": np.array([9.0, -2.0, 0.0, 0.0]),
+                "stationarity_norm": 0.25,
+            }
+
+        result = self.module.evaluate_alm_objective(
+            np.array([1.0]),
+            nonqs,
+            brs,
+            RES_WEIGHT=2.0,
+            Jiota=jiota,
+            IOTAS_WEIGHT=3.0,
+            JCurveLength=jlength,
+            LENGTH_WEIGHT=1.0,
+            JCurveCurve=_FakeAlgebraicObjective(0.6, [0.3, 0.4]),
+            JCurveSurface=_FakeAlgebraicObjective(0.7, [0.5, 0.6]),
+            JCurvature=_FakeAlgebraicObjective(0.8, [0.7, 0.8]),
+            multipliers=np.array([0.1, 0.2, 0.3]),
+            penalty=9.0,
+            objective_optimizable=objective,
+            curves=["curve_a"],
+            curve_curve_min_distance=0.05,
+            outer_surface="outer",
+            curve_surface_min_distance=0.02,
+            banana_curve="banana",
+            curvature_threshold=40.0,
+            distance_smoothing=0.01,
+            curvature_smoothing=0.05,
+            constraint_names=(
+                "coil_coil_spacing",
+                "coil_surface_spacing",
+                "max_curvature",
+                "surface_vessel_spacing",
+            ),
+            curve_curve_constraint_fn=lambda *_args: (-0.1, np.array([1.0, 0.0, 0.0, 0.0]), 0.0),
+            curve_surface_constraint_fn=lambda *_args: (0.2, np.array([0.0, 1.0, 0.0, 0.0]), 0.2),
+            curvature_constraint_fn=lambda *_args: (0.3, np.array([1.0, -1.0, 0.0, 0.0]), 0.3),
+            augmented_inequality_objective_fn=fake_augmented,
+            activity_tolerances_fn=lambda ds, cs, include_surface_surface: np.array(
+                [ds * 4.0, ds * 4.0, cs * 4.0],
+                dtype=float,
+            ),
+        )
+
+        np.testing.assert_allclose(result["grad"], [9.0, -2.0, 0.0, 0.0])
 
 
 class SingleStageGeometryModuleTests(_ModuleTestCase):
