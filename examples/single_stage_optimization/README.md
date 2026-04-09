@@ -1,192 +1,210 @@
 # Stellarator Banana Coil Optimization Workflow
 
-This repository contains a two-stage optimization workflow for designing banana coils in a stellarator configuration. The workflow optimizes coil geometries to minimize magnetic field errors while satisfying various engineering constraints.
+This directory contains the current banana-coil workflow stack for this repository:
 
-## Overview
+- Stage 2 coil optimization in [STAGE_2/banana_coil_solver.py](STAGE_2/banana_coil_solver.py)
+- single-stage Boozer / quasi-symmetry optimization in [SINGLE_STAGE/single_stage_banana_example.py](SINGLE_STAGE/single_stage_banana_example.py)
+- wrapper workflows in [run_80ka_baseline_tradeoff_sweep.py](run_80ka_baseline_tradeoff_sweep.py) and [run_finite_current_smoke.py](run_finite_current_smoke.py)
+- optional field-line / Poincare diagnostics in [POINCARE_PLOTTING/poincare_surfaces.py](POINCARE_PLOTTING/poincare_surfaces.py)
 
-The optimization process consists of two sequential stages:
+The codebase has evolved beyond the older "edit script constants and rerun" model. Use CLI flags or environment variables, not source edits, for normal operation.
 
-1. **Stage 2 (Coil Design)**: `banana_coil_solver.py` - Optimizes the banana coil geometry to minimize normal magnetic field errors on the plasma surface
-2. **Single Stage (Quasi-Symmetry)**: `single_stage_banana_example.py` - Further optimizes the system for quasi-symmetry and Boozer coordinates using outputs from Stage 2
+## Current Workflow Model
 
-There are also two workflow entrypoints that sit on top of those scripts:
+The optimization flow is still two-stage:
 
-- **Locked 80 kA baseline sweep**: `run_80ka_baseline_tradeoff_sweep.py`
-- **Finite-current smoke validation**: `run_finite_current_smoke.py`
+1. Stage 2 builds a banana-coil artifact rooted at `biot_savart_opt.json` plus a sibling `results.json`.
+2. Single-stage consumes that Stage 2 artifact and optimizes Boozer / QS objectives on one or two surfaces.
+3. Optional Poincare analysis reads a single-stage output directory and emits validation and diagnostic topology artifacts.
 
-These two workflows are intentionally separate:
+There are two supported wrapper entrypoints for most day-to-day work:
 
-- The `80 kA` baseline lane is `coil-only, zero-plasma-current`.
-- The finite-current lane reuses a frozen Stage 2 artifact and varies only plasma current.
-- User-facing plasma current is specified in SI `A` via `--plasma-current-A`.
-- Raw `--boozer-I` remains an expert/internal input, not the recommended public interface.
+1. `run_80ka_baseline_tradeoff_sweep.py`
+   This is the locked coil-only baseline lane.
+   It enforces `TF_CURRENT_A = 80000`, `PLASMA_CURRENT_A = 0`, validates any reused Stage 2 artifact against that baseline identity, and sweeps single-stage weights.
 
-## Directory Structure
+2. `run_finite_current_smoke.py`
+   This is a finite-current surrogate smoke harness.
+   It reuses one frozen coil-only Stage 2 artifact and varies only `--plasma-current-A` through the single-stage surrogate path.
 
-```
-.
-├── equilibria/                          # Input VMEC equilibrium files
-│   └── wout_nfp22ginsburg_000_014417_iota15.nc
-├── STAGE_2/                             # Stage 2 script and outputs
+## Branch Scope
+
+This README describes the current behavior of this repository, not necessarily older upstream SIMSOPT examples.
+
+Important branch-local behavior:
+
+- finite current is exposed to users via `--plasma-current-A`
+- raw `--boozer-I` still exists, but it is an expert/internal surrogate input
+- Stage 2 artifact metadata is validated more strictly than in older versions
+- single-stage now supports explicit search-time hardware policies
+- single-stage includes optional two-surface mode, topology gating, confinement surrogate scoring, staged Boozer refinement, and basin-hopping controls
+- Stage 2 and single-stage both support `--constraint-method {penalty, alm}`
+
+## Directory Layout
+
+```text
+examples/single_stage_optimization/
+├── README.md
+├── equilibria/
+├── STAGE_2/
 │   ├── banana_coil_solver.py
-│   ├── banana-scan.sh
-│   └── outputs-[plasma_file]/           # Created by Stage 2
-│       └── R0=X-s=Y-..../
-│           ├── biot_savart_opt.json     # Required for Single Stage
-│           ├── curves_opt.vtu
-│           ├── surf_opt.vtu
-│           └── results.json
-├── SINGLE_STAGE/                        # Single stage script and outputs
+│   └── outputs-[plasma_filename]/
+├── SINGLE_STAGE/
 │   ├── single_stage_banana_example.py
-│   ├── single-scan.sh
-│   └── outputs/                         # Created by Single Stage
-│       └── mpol=X-ntor=Y/
-│           ├── biot_savart_init.json    # Required for Poincaré
-│           ├── biot_savart_opt.json
-│           ├── surf_init.json           # Required for Poincaré
-│           ├── surf_opt.json
-│           ├── curves_opt.vtu
-│           ├── NormPlot*.png
-│           ├── CrossSection*.png
-│           ├── log.txt
-│           └── PoincarePlot.png         # Created by poincare_surfaces.py
-└── POINCARE_PLOTTING/                   # Poincaré plot generation (optional)
-    ├── poincare_surfaces.py
-    └── poincare-plot.sh
+│   └── outputs/
+├── POINCARE_PLOTTING/
+│   ├── poincare_surfaces.py
+│   └── poincare-plot.sh
+├── banana_opt/
+│   └── shared helper modules for Stage 2 / single-stage contracts and objectives
+├── workflow_helpers.py
+├── workflow_runner_common.py
+├── run_80ka_baseline_tradeoff_sweep.py
+└── run_finite_current_smoke.py
 ```
 
 ## Prerequisites
 
-- Python 3.x
-- SIMSOPT library
-- NumPy
-- SciPy
-- Matplotlib
-- Shapely
-- Numba
-- Bentley_Ottmann (Version 8.0.0)
+You need a working SIMSOPT environment plus the extra Python dependencies used by these examples.
 
-Install dependencies:
-```bash
-pip install numpy scipy matplotlib shapely numba bentley_ottmann==8.0.0
-```
+Typical extras:
 
-## Workflow Instructions
+- `numpy`
+- `scipy`
+- `matplotlib`
+- `shapely`
+- `numba`
+- `bentley_ottmann==8.0.0`
 
-### Step 1: Prepare Input Files
+If you are working inside the repo's normal development environment, prefer that environment over ad hoc installs.
 
-Ensure you have a VMEC equilibrium file (`.nc` format) in the `equilibria/` directory. The default filename is:
-```
-wout_nfp22ginsburg_000_014417_iota15.nc
-```
+## Recommended Entrypoints
 
-### Step 2: Run Stage 2 - Banana Coil Design
+### Locked 80 kA Baseline Sweep
 
-**Purpose**: Optimize banana coil geometry to minimize magnetic field normal component on the plasma surface.
+Use this for the current coil-only baseline lane:
 
-**Location**: `STAGE_2/banana_coil_solver.py`
-
-**Key Parameters** (CLI flags or environment variables):
-- `--major-radius` / `MAJOR_RADIUS`: Major radius target
-- `--toroidal-flux` / `TOROIDAL_FLUX`: Normalized toroidal flux surface
-- `--banana-surf-radius` / `BANANA_SURF_RADIUS`: Coil surface radius
-- `--tf-current-A` / `TF_CURRENT_A`: TF current per coil in physical amps
-- `--cc-threshold` / `CC_THRESHOLD`: Coil-coil spacing threshold
-- `--curvature-threshold` / `CURVATURE_THRESHOLD`: Curvature threshold
-- `--maxiter` / `MAXITER`: Maximum optimization iterations
-- `--ftol` / `FTOL`: L-BFGS-B function change tolerance (default: `1e-15`, effectively lets `maxiter` control termination)
-- `--gtol` / `GTOL`: L-BFGS-B projected gradient tolerance (default: `1e-15`)
-
-**Run**:
-```bash
-cd STAGE_2
-python banana_coil_solver.py \
-  --plasma-surf-filename wout_nfp22ginsburg_000_014417_iota15.nc \
-  --major-radius 0.915 \
-  --toroidal-flux 0.24 \
-  --banana-surf-radius 0.22
-```
-
-**Outputs** (in `STAGE_2/outputs-[plasma_filename]/R0=X-s=Y-.../`):
-- `biot_savart_opt.json` - **Required input for Single Stage**
-- `curves_opt.vtu` - Optimized coil geometries (VTK format)
-- `surf_opt.vtu` - Optimized plasma surface (VTK format)
-- `CrossSectionPlot.png` - Diagnostic plot
-- `results.json` - Optimization summary
-
-**Note the output directory path** - you'll need it for the next step.
-
-### Step 3: Select the Stage 2 Seed
-
-You no longer need to hand-edit `single_stage_banana_example.py`.
-
-The script can resolve the seed either from the local Stage 2 outputs or from the archive database:
-
-- `--stage2-source database` uses `DATABASE/COIL_OPTIMIZATION/outputs/...`
-- `--stage2-source local` uses `STAGE_2/outputs-[plasma]/...`
-- `--stage2-bs-path /full/path/to/biot_savart_opt.json` overrides both
-
-### Recommended Workflow Entry Points
-
-For current Columbia finite-current work, prefer these wrappers over hand-running the lower-level scripts:
-
-#### A. Locked `80 kA` Coil-Only Baseline Sweep
-
-This workflow is for the baseline lane only:
-
-- TF current per coil is locked to `80000 A`
-- plasma current is locked to `0 A`
-- the workflow runs a weighted tradeoff sweep and summarizes the non-dominated set afterward
-- the script rejects non-baseline Stage 2 artifacts instead of silently drifting
+- `TF_CURRENT_A = 80000`
+- `PLASMA_CURRENT_A = 0`
+- frozen baseline Stage 2 contract
+- weight sweep over single-stage objectives
 
 ```bash
 cd /path/to/simsopt-surrogate
 python examples/single_stage_optimization/run_80ka_baseline_tradeoff_sweep.py
 ```
 
-Use `--stage2-bs-path` only when you want to reuse a frozen Stage 2 artifact. The script validates the loaded artifact metadata against the locked baseline identity before launching the sweep.
+Useful notes:
 
-#### B. Finite-Current Smoke Validation
+- output root defaults to `examples/single_stage_optimization/outputs_80ka_baseline_sweep`
+- `--stage2-bs-path` can reuse an existing Stage 2 artifact
+- the script validates reused artifacts against the locked baseline contract instead of silently drifting
 
-This workflow is for quick contract validation of the finite-current surrogate:
+### Finite-Current Smoke Validation
 
-- it consumes one frozen Stage 2 artifact
-- it varies only plasma current in physical amps
-- it validates the actual loaded Stage 2 artifact provenance, not just requested CLI defaults
+Use this for quick finite-current surrogate contract checks:
+
+- one frozen Stage 2 artifact
+- vary only `--plasma-current-A`
+- validate the realized Stage 2 artifact metadata and the single-stage result contract
 
 ```bash
 cd /path/to/simsopt-surrogate
 python examples/single_stage_optimization/run_finite_current_smoke.py --currents-A 0,8000,-35200
 ```
 
-This is a workflow/surrogate validation tool, not a self-consistent finite-current equilibrium run.
+Useful notes:
 
-### Step 4: Run Single Stage - Quasi-Symmetry Optimization
+- output root defaults to `examples/single_stage_optimization/outputs_finite_current_smoke`
+- this is a surrogate smoke harness, not a self-consistent finite-current equilibrium workflow
 
-**Purpose**: Optimize for quasi-symmetry and proper Boozer coordinates using the coils from Stage 2.
+## Manual Stage 2
 
-**Location**: `SINGLE_STAGE/single_stage_banana_example.py`
+Use [banana_coil_solver.py](STAGE_2/banana_coil_solver.py) when you want to generate or inspect a Stage 2 artifact directly.
 
-**Key Parameters** (CLI flags or environment variables):
-- `--mpol` / `MPOL`
-- `--ntor` / `NTOR`
-- `--vol-target` / `VOL_TARGET`
-- `--iota-target` / `IOTA_TARGET`
-- `--plasma-current-A` / `PLASMA_CURRENT_A`: User-facing enclosed toroidal plasma current in physical amps
-- `--boozer-I` / `BOOZER_I`: Expert/internal surrogate current knob; prefer `--plasma-current-A`
-- `--cc-dist` / `CC_DIST`
-- `--curvature-threshold` / `CURVATURE_THRESHOLD`
-- `--stage2-seed-major-radius` / `STAGE2_SEED_MAJOR_RADIUS`
-- `--stage2-seed-toroidal-flux` / `STAGE2_SEED_TOROIDAL_FLUX`
-- `--stage2-seed-banana-surf-radius` / `STAGE2_SEED_BANANA_SURF_RADIUS`
-- `--stage2-bs-path` / `STAGE2_BS_PATH`
-- `--hardware-search-mode` / `HARDWARE_SEARCH_MODE`: Search-time realized-hardware gate policy (`hard`, `warn`, `adaptive`)
-- `--hardware-search-soft-iterations` / `HARDWARE_SEARCH_SOFT_ITERATIONS`: Adaptive soft-window budget for early continuation
-- `--maxiter` / `MAXITER`
+Basic penalty-mode example:
 
-**Run**:
 ```bash
-cd SINGLE_STAGE
+cd /path/to/simsopt-surrogate/examples/single_stage_optimization/STAGE_2
+python banana_coil_solver.py \
+  --plasma-surf-filename wout_nfp22ginsburg_000_014417_iota15.nc \
+  --major-radius 0.915 \
+  --toroidal-flux 0.24 \
+  --banana-surf-radius 0.22 \
+  --constraint-method penalty
+```
+
+Key Stage 2 controls:
+
+- seed / geometry:
+  `--plasma-surf-filename`, `--equilibria-dir`, `--major-radius`, `--toroidal-flux`, `--banana-surf-radius`, `--tf-current-A`, `--order`
+- optimization weights:
+  `--length-weight`, `--cc-weight`, `--cc-threshold`, `--curvature-weight`, `--curvature-threshold`
+- optimizer controls:
+  `--maxiter`, `--ftol`, `--gtol`
+- ALM path:
+  `--constraint-method alm`, `--alm-max-outer-iters`, `--alm-penalty-init`, `--alm-penalty-scale`, `--alm-feas-tol`, `--alm-stationarity-tol`, `--alm-trust-radius-*`, `--alm-max-inner-attempts`, `--alm-max-subproblem-continuations`, `--alm-distance-smoothing`, `--alm-curvature-smoothing`, `--alm-taylor-test`
+- basin-hopping path:
+  `--basin-hops`, `--basin-stepsize`, `--basin-temperature`, `--basin-niter-success`, `--basin-seed`
+
+Operational note:
+
+- `--basin-hops` is only supported in penalty mode
+- `--constraint-method=alm` and Stage 2 basin-hopping are mutually exclusive in current code
+
+Stage 2 output root layout:
+
+- `STAGE_2/outputs-[plasma_filename]/...`
+- the artifact consumed by single-stage is the generated `biot_savart_opt.json`
+- the sibling `results.json` is part of the contract and is now used for stricter validation and provenance
+
+## Stage 2 Seed Resolution For Single-Stage
+
+Single-stage can locate the Stage 2 seed in three ways:
+
+1. Explicit artifact path:
+   `--stage2-bs-path /full/path/to/biot_savart_opt.json`
+
+2. Database lookup:
+   `--stage2-source database`
+
+3. Local Stage 2 outputs:
+   `--stage2-source local`
+
+Additional path controls:
+
+- `--local-stage2-root`
+- `--database-stage2-root`
+
+If you do not pass `--stage2-bs-path`, single-stage resolves a Stage 2 seed using the requested seed metadata:
+
+- `--stage2-seed-major-radius`
+- `--stage2-seed-toroidal-flux`
+- `--stage2-seed-length-weight`
+- `--stage2-seed-cc-weight`
+- `--stage2-seed-curvature-weight`
+- `--stage2-seed-cc-threshold`
+- `--stage2-seed-curvature-threshold`
+- `--stage2-seed-banana-surf-radius`
+- `--stage2-seed-tf-current-A`
+- `--stage2-seed-order`
+
+For the common nfp22 example equilibria, defaults are filled automatically when those seed parameters are omitted.
+
+Important caveat:
+
+- those built-in single-stage seed defaults are legacy direct-script defaults, not the locked wrapper baseline
+- in particular, the built-in nfp22 seed defaults still include `stage2_seed_tf_current_A = 1.0e5`
+- if you need the current locked baseline lane, use [run_80ka_baseline_tradeoff_sweep.py](run_80ka_baseline_tradeoff_sweep.py) or pass the Stage 2 seed / artifact explicitly instead of relying on implicit defaults
+
+## Manual Single-Stage
+
+Use [single_stage_banana_example.py](SINGLE_STAGE/single_stage_banana_example.py) when you want direct control of the single-stage run.
+
+Basic example:
+
+```bash
+cd /path/to/simsopt-surrogate/examples/single_stage_optimization/SINGLE_STAGE
 python single_stage_banana_example.py \
   --stage2-source database \
   --plasma-surf-filename wout_nfp22ginsburg_000_014417_iota15.nc \
@@ -198,190 +216,195 @@ python single_stage_banana_example.py \
   --cc-dist 0.07 \
   --mpol 15 \
   --ntor 6 \
-  --output-root ./outputs/CC_convergence-CC7-iota17-vol10
+  --constraint-method penalty
 ```
 
-For finite-current surrogate runs, prefer `--plasma-current-A` over raw `--boozer-I`. Do not pass both together.
+Current high-level flag groups:
 
-Branch-local implementation notes for this surrogate tree:
+- core problem setup:
+  `--plasma-surf-filename`, `--equilibria-dir`, `--equilibrium-path`, `--output-root`, `--mpol`, `--ntor`, `--nphi`, `--ntheta`, `--vol-target`, `--iota-target`, `--banana-surf-radius`
+- current inputs:
+  `--plasma-current-A`, `--boozer-I`, `--num-tf-coils`
+- weights / thresholds:
+  `--res-weight`, `--iotas-weight`, `--cc-weight`, `--cc-dist`, `--curvature-weight`, `--curvature-threshold`, `--length-weight`, `--cs-weight`, `--cs-dist`, `--surf-dist-weight`, `--ss-dist`
+- optimizer controls:
+  `--maxiter`, `--maxcor`, `--ftol`, `--gtol`
+- Stage 2 seed resolution:
+  `--stage2-source`, `--stage2-bs-path`, `--local-stage2-root`, `--database-stage2-root`, plus the `--stage2-seed-*` family
+- ALM path:
+  `--constraint-method alm`, `--alm-max-outer-iters`, `--alm-penalty-init`, `--alm-penalty-scale`, `--alm-feas-tol`, `--alm-stationarity-tol`, `--alm-trust-radius-*`, `--alm-max-inner-attempts`, `--alm-max-subproblem-continuations`, `--alm-distance-smoothing`, `--alm-curvature-smoothing`
+- staged Boozer refinement:
+  `--boozer-stage`, `--boozer-stage-refinement`, `--refinement-boozer-stage`, `--refinement-maxiter`, `--refinement-chunk-maxiter`, `--refinement-max-stalled-chunks`
+- two-surface mode:
+  `--num-surfaces`, `--inner-surface-ratio`, `--surface-gap-threshold`, `--multisurface-ramp-iterations`, `--inner-surface-initial-weight`, `--multisurface-initial-step-scale`, `--multisurface-initial-step-maxiter`
+- topology and confinement scoring:
+  `--topology-gate-fieldlines`, `--topology-gate-tmax`, `--topology-gate-tol`, `--topology-gate-survival-threshold`, `--topology-gate-penalty-scale`, `--topology-scorer-every`, `--topology-scorer-nfieldlines`, `--topology-scorer-tmax`, `--confinement-objective-weight`, `--confinement-surrogate-*`
+- search-time hardware policy:
+  `--hardware-search-mode {hard,warn,adaptive}`, `--hardware-search-soft-iterations`
+- basin-hopping path:
+  `--basin-hops`, `--basin-stepsize`, `--basin-temperature`, `--basin-niter-success`, `--basin-seed`
 
-- Single-stage reload treats the Stage 2 artifact as the source of truth for TF-coil partitioning. If the loaded `results.json` records `NUM_TF_COILS`, it must agree with `--num-tf-coils`; otherwise the run aborts instead of silently re-slicing `bs.coils`.
-- This branch's Boozer residual contract is the `I`-augmented form `(G + \iota I) B - |B|^2 (x_\varphi + \iota x_\theta)`. Public upstream SIMSOPT docs/source may still show the older vacuum-style `G`-only residual, so treat this repository's local source as the authority when reviewing finite-current surrogate behavior.
+Important current behavior:
 
-Search-time realized hardware handling is now explicit:
+- prefer `--plasma-current-A` over raw `--boozer-I`
+- do not pass both current interfaces together unless you are intentionally working at the internal surrogate layer
+- `--constraint-method=alm` currently requires `--num-surfaces=1`
+- staged Boozer refinement currently requires penalty mode, single-surface mode, and no basin-hopping
+- single-stage basin-hopping is only supported in penalty mode
 
-- `--hardware-search-mode hard` is the default and rejects hardware-invalid trial candidates during search.
-- `--hardware-search-mode warn` keeps the run moving but records the realized hardware violation as warning-only.
-- `--hardware-search-mode adaptive` uses the same warning-only handling only during the early soft phase, then reverts to hard rejection.
-- Final certification remains hard in all modes. A run that ends hardware-invalid still reports failure even if search-time handling was softened.
+## Hardware Search Policy
 
-For the hard-iota seed A/B test, change only the Stage 2 seed and plasma file:
+Search-time realized hardware handling is explicit in current single-stage code:
 
-```bash
-python single_stage_banana_example.py \
-  --stage2-source database \
-  --plasma-surf-filename wout_nfp22ginsburg_000_002084_iota20.nc \
-  --stage2-seed-major-radius 0.975 \
-  --stage2-seed-toroidal-flux 0.24 \
-  --stage2-seed-banana-surf-radius 0.22 \
-  --iota-target 0.20 \
-  --vol-target 0.10
-```
+- `--hardware-search-mode hard`
+  Reject hardware-invalid trial candidates during search.
 
-**Outputs** (in `outputs/mpol=X-ntor=Y-<hash>/`, where `<hash>` is a deterministic fingerprint of the run config):
-- `biot_savart_opt.json` - Final optimized magnetic field
-- `surf_opt.json` - Final optimized surface
-- `curves_opt.vtu` - Final coil configurations
-- `surf_init.vtu`, `surf_opt.vtu` - Initial and optimized surfaces
-- `NormPlotInitial.png`, `NormPlotOptimized.png` - Field error diagnostics
-- `CrossSectionInitial.png`, `CrossSectionOptimized.png` - Cross-section plots
-- `log.txt` - Detailed optimization log
+- `--hardware-search-mode warn`
+  Keep the search moving, but record realized hardware violations as warnings during search.
 
-Relevant result metadata now also records:
+- `--hardware-search-mode adaptive`
+  Allow warning-only handling only during the early relaxed search window, then revert to hard rejection.
+
+Final certification is still hard in all modes. A terminal hardware-invalid result is still a failure even if search-time handling was softened.
+
+## Output Artifacts
+
+### Stage 2
+
+Typical Stage 2 outputs include:
+
+- `biot_savart_opt.json`
+- `results.json`
+- `curves_opt.vtu`
+- `surf_opt.vtu`
+- cross-section and normal-field diagnostics
+
+Recent code changes also make `results.json` more important than it used to be. It now carries contract fields such as:
+
+- `CONSTRAINT_METHOD`
+- Stage 2 geometry / weight metadata
+- basin-hopping settings and telemetry when enabled
+- ALM metadata when enabled
+
+### Single-Stage
+
+Single-stage writes under `SINGLE_STAGE/outputs/mpol=...-ntor=...-<fingerprint>/`.
+
+Common artifacts:
+
+- `biot_savart_init.json`
+- `biot_savart_opt.json`
+- `surf_init.json`
+- `surf_opt.json`
+- `surf_init.vtu`
+- `surf_opt.vtu`
+- `curves_opt.vtu`
+- cross-section and normal-field PNGs
+- `log.txt`
+- `results.json`
+
+`results.json` now records more workflow contract data than older versions, including items such as:
 
 - `PLASMA_CURRENT_A`
-- `STAGE2_TF_CURRENT_A`
-- `STAGE2_TF_CURRENT_SUM_ABS_A`
+- Stage 2 TF-current provenance fields
 - `HARDWARE_SEARCH_MODE`
 - `HARDWARE_SEARCH_SOFT_ITERATIONS`
+- current-mode provenance
+- topology / confinement diagnostics when enabled
+- staged Boozer refinement status when enabled
 
-### Step 5 (Optional): Generate Poincaré Plots
+### Poincare
 
-**Purpose**: Visualize field line topology and magnetic surface quality by generating Poincaré plots.
+The Poincare script no longer emits only a single `PoincarePlot.png`.
 
-**Location**: `POINCARE_PLOTTING/poincare_surfaces.py`
+Current outputs include:
 
-**Key Parameters** (editable in script):
-- `nfieldlines`: Number of field lines to trace (default: 50)
-- `tmax_fl`: Maximum toroidal angle for integration (default: 7000)
-- `tol`: Tolerance for field line integration (default: 1e-7)
-- `interpolate`: Use interpolated field for faster calculation (default: True)
-- `nr`, `nphi`, `nz`: Grid resolution for interpolation (default: 20, 10, 10)
-- `degree`: Interpolation degree (default: 3)
+- `PoincarePlot_init.png` or `PoincarePlot_opt.png`
+- `PoincarePlot_init_diagnostic.png` or `PoincarePlot_opt_diagnostic.png`
+- `PoincareMetrics_init.json` or `PoincareMetrics_opt.json`
+- `curves_init_poincare*` or `curves_opt_poincare*`
+- `surf_init_poincare*` or `surf_opt_poincare*`
 
-**Output directory**: By default, the script auto-selects the most recent
-`SINGLE_STAGE/outputs/mpol=*` run directory. Override with `POINCARE_OUT_DIR`:
+By default, the script auto-selects the newest single-stage output under `SINGLE_STAGE/outputs`. Override that with:
+
 ```bash
-export POINCARE_OUT_DIR=/path/to/single_stage/outputs/mpol=8-ntor=6-abcd1234
+export POINCARE_OUT_DIR=/path/to/SINGLE_STAGE/outputs/mpol=8-ntor=6-...
 ```
 
-**Run** (the shell script defaults `SIMSOPT_ROOT` to `$HOME/simsopt`; override for non-default checkouts):
+## Poincare Usage
+
 ```bash
-export SIMSOPT_ROOT=/path/to/simsopt   # only if repo is not at ~/simsopt
+cd /path/to/simsopt-surrogate/examples/single_stage_optimization
+export SIMSOPT_ROOT=/path/to/simsopt
 sbatch POINCARE_PLOTTING/poincare-plot.sh
 ```
 
-**Outputs** (in the specified `OUT_DIR`):
-- `PoincarePlot.png` - Poincaré sections at multiple toroidal angles showing field line intersections
+Interpretation:
 
-**Interpretation**:
-- Well-nested, closed contours indicate good magnetic surfaces
-- Scattered or chaotic patterns suggest field line stochasticity
-- The black outline shows the plasma surface boundary
-- Field lines are traced from the plasma edge outward to check confinement
-
-## Key Optimization Objectives
-
-### Stage 2 (Banana Coil Solver)
-- **Squared Flux**: Minimize `B dot n` (normal field on plasma surface)
-- **Curve Length**: Penalize coils longer than target (1.75 m)
-- **Coil-Coil Distance**: Maintain minimum separation (5 cm)
-- **Curvature**: Limit maximum curvature (threshold: 40 m^-1)
-
-### Single Stage
-- **Quasi-Symmetry**: Minimize non-quasi-symmetric ratio
-- **Boozer Residual**: Minimize Boozer coordinate residual
-- **Iota Control**: Maintain target rotational transform
-- **Curve Length**: Control coil length
-- **Distance Penalties**: Coil-coil, coil-surface, surface-vessel separations
-- **Curvature**: Limit coil curvature
-
-## Visualization
-
-Output VTK files can be visualized using:
-- **ParaView**: Open `.vtu` files to view 3D geometries
-- **VisIt**: Alternative visualization tool
-
-PNG diagnostic plots are generated automatically:
-- Cross-section plots show coil and surface geometries
-- Normal field plots show magnetic field errors
-- Poincaré plots show field line topology and magnetic surface quality
+- validation plots stop field lines on Boozer-surface exit
+- diagnostic plots use only the box-bounded stopping set
+- well-nested closed contours indicate better magnetic surfaces
+- scattered or chaotic hits indicate poor confinement / field-line loss
 
 ## Troubleshooting
 
-### Stage 2 Issues
-- **Self-intersecting coils**: Reduce `CURVATURE_WEIGHT` or adjust coil initialization
-- **Optimization not converging**: Increase `MAXITER` or adjust weight parameters
-- **High field errors**: Reduce `LENGTH_WEIGHT` or adjust coil surface radius
-- **Slow convergence**: Default `--ftol`/`--gtol` of `1e-15` lets `maxiter` control termination; loosen to `--ftol 1e-9 --gtol 1e-5` for faster runs
+### Stage 2
 
-### Single Stage Issues
-- **File not found error**: Verify the path to `biot_savart_opt.json` from Stage 2
-- **Boozer surface rejected**: Surface is self-intersecting or solver failed; try different initial conditions
-- **Convergence issues**: Adjust `ftol` and `gtol` tolerances for your `mpol` value
+- self-intersections or poor geometry:
+  adjust the geometry weights and thresholds instead of patching source
+- slow convergence:
+  tune `--maxiter`, `--ftol`, and `--gtol`
+- ALM experiments:
+  inspect trust-radius and smoothing settings before changing low-level code
+- basin-hopping:
+  remember that it is penalty-only in current code
 
-### Poincaré Plotting Issues
-- **File not found error**: Verify paths to `biot_savart_init.json` and `surf_init.json` from Single Stage
-- **Field line integration errors**: Reduce `tol` for higher accuracy or decrease `tmax_fl` if lines escape
-- **Memory issues with interpolation**: Set `interpolate=False` or reduce `nr`, `nphi`, `nz` grid resolution
-- **Chaotic field lines**: May indicate issues with magnetic configuration; check quasi-symmetry metrics
+### Single-Stage
 
-## Customization
+- ambiguous Stage 2 seed:
+  pass `--stage2-bs-path` explicitly
+- Stage 2 artifact contract mismatch:
+  inspect the Stage 2 sibling `results.json`; single-stage now validates TF partition / provenance more strictly
+- near-zero iota collapse in vacuum lanes:
+  do not assume this is automatically a zero-current semantic issue; it is often just a bad basin
+- tolerance tuning:
+  there is no current automatic `mpol`-based tolerance schedule in the script; set `--ftol` and `--gtol` explicitly
 
-### Changing Plasma Equilibrium
-1. Place new VMEC `.nc` file in `equilibria/`
-2. Update `plasma_surf_filename` in both scripts
-3. Re-run both stages
+### Poincare
 
-### Adjusting Optimization Weights
-Edit weight parameters in the scripts:
-- Stage 2: `LENGTH_WEIGHT`, `CC_WEIGHT`, `CURVATURE_WEIGHT`
-- Single Stage: `RES_WEIGHT`, `IOTAS_WEIGHT`, `CC_WEIGHT`, `CS_WEIGHT`, etc.
+- no auto-selected output:
+  set `POINCARE_OUT_DIR`
+- missing optimized field or surface:
+  the script falls back to matching init artifacts when needed
+- expensive interpolation:
+  reduce interpolation resolution or disable interpolation inside the script if you are intentionally debugging that path
 
-### Convergence Tolerances
+## Customization Guidance
 
-**Stage 2** defaults to `ftol=1e-15` and `gtol=1e-15` (`factr ≈ 4.5`), which effectively
-lets `--maxiter` control termination. Override for faster convergence:
-```bash
-python banana_coil_solver.py --ftol 1e-9 --gtol 1e-5   # scipy "moderate accuracy"
-```
+Use CLI flags or environment variables for normal changes.
 
-**Single stage** includes automatic tolerance adjustment by `mpol`:
-```python
-ftol_by_mpol = {8: 1e-5, 9: 5e-6, 10: 1e-6, ...}
-gtol_by_mpol = {8: 1e-2, 9: 5e-3, 10: 1e-3, ...}
-```
+Do this:
 
-### Customizing Poincaré Plots
-Adjust field line tracing parameters in `poincare_surfaces.py`:
-- Increase `nfieldlines` for denser coverage (impacts computation time)
-- Adjust `tmax_fl` to trace field lines for longer/shorter distances
-- Set `interpolate=False` for exact field evaluation (slower but more accurate)
-- Modify `rrange`, `phirange`, `zrange` to change interpolation grid resolution
+- change equilibrium via `--plasma-surf-filename`, `--equilibria-dir`, or `--equilibrium-path`
+- change Stage 2 seed resolution via `--stage2-source`, `--stage2-bs-path`, and `--stage2-seed-*`
+- change optimization behavior via the documented flags
 
-## Output Interpretation
+Do not rely on this older workflow:
 
-### log.txt (Single Stage)
-Monitor optimization progress with:
-- `Objective J`: Total objective function value
-- `||grad J||`: Gradient norm (should decrease)
-- `nonQS ratio`: Quasi-symmetry metric
-- `Boozer Residual`: Boozer coordinate accuracy
-- `Iotas (actual)`: Current rotational transform
-- `Volume`: Plasma volume
-- `<|B dot n|>`: Average normal field (should be small)
+- editing `plasma_surf_filename` directly in source
+- editing hard-coded weights in scripts as the normal way to run
+- assuming older README-era artifact names are still the full contract
 
-### results.json (Stage 2)
-Contains:
-- Final parameters and weights used
-- Field error metric
-- Self-intersection status
-- Iteration count
+## Related Files
 
-### PoincarePlot.png (Poincaré Analysis)
-Visualizes magnetic field line topology:
-- **Well-nested closed contours**: Indicate good magnetic surfaces and confinement
-- **Scattered/chaotic patterns**: Suggest field line stochasticity and poor confinement
-- **Black outline**: Shows the plasma surface boundary
-- **Multiple panels**: Different toroidal angle cross-sections (typically 4 per field period)
-- Field lines are traced from the plasma edge outward to assess confinement quality 
+- [workflow_runner_common.py](workflow_runner_common.py)
+  Shared wrapper helpers and Stage 2 artifact config / command construction.
+
+- [workflow_helpers.py](workflow_helpers.py)
+  Naming and path helpers for Stage 2 and workflow artifact layout.
+
+- [alm_utils.py](alm_utils.py)
+  Shared augmented-Lagrangian utilities used by Stage 2 and single-stage.
+
+- [topology_scorer.py](topology_scorer.py)
+  Shared topology scoring logic used by single-stage callbacks and Poincare validation.
