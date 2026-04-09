@@ -45,22 +45,15 @@ from benchmarks.validation_ladder_common import (
     write_json,
 )
 
-
-REQUESTED_PLATFORM = preparse_platform(sys.argv[1:])
-apply_requested_platform(REQUESTED_PLATFORM)
-apply_compilation_cache_policy()
-
-import jax
-import jaxlib
-
-maybe_initialize_distributed_runtime()
-jax.config.update("jax_enable_x64", True)
-require_x64_runtime(jax, context="Tier 5 performance characterization")
-
 TIER1_PARITY_RUNG = "tier1b_real_stage2"
 TIER2_PERFORMANCE_RUNG = "tier2_stage2_e2e"
 TIER3_INIT_RUNG = "tier3_single_stage_init"
+TIER4_ADJOINT_RUNG = "tier4_adjoint_fd"
 _TIER5_PERFORMANCE_BUDGET_PROFILE = "stable_hardware_weekly"
+_TIER5_PHASE_CHOICES = ("full", "gpu", "cpu", "aggregate")
+
+_RUNTIME_JAX = None
+_RUNTIME_JAXLIB = None
 
 
 def parse_args() -> argparse.Namespace:
@@ -178,7 +171,44 @@ def parse_args() -> argparse.Namespace:
             "skips heavy target-lane artifacts."
         ),
     )
+    parser.add_argument(
+        "--phase",
+        choices=_TIER5_PHASE_CHOICES,
+        default="full",
+        help=(
+            "Execution mode: full runs all rungs, gpu runs the CUDA-relevant rungs "
+            "plus the Tier 4 lane probe, cpu runs only the Tier 4 CPU baseline, and "
+            "aggregate merges prior gpu/cpu phase artifacts."
+        ),
+    )
+    parser.add_argument(
+        "--gpu-input-json",
+        default=None,
+        help="GPU-phase Tier 5 artifact to merge when --phase=aggregate.",
+    )
+    parser.add_argument(
+        "--cpu-input-json",
+        default=None,
+        help="CPU-phase Tier 5 artifact to merge when --phase=aggregate.",
+    )
     return parser.parse_args()
+
+
+def _runtime_modules() -> tuple[Any, Any]:
+    global _RUNTIME_JAX, _RUNTIME_JAXLIB
+    if _RUNTIME_JAX is None or _RUNTIME_JAXLIB is None:
+        requested_platform = preparse_platform(sys.argv[1:])
+        apply_requested_platform(requested_platform)
+        apply_compilation_cache_policy()
+        import jax as runtime_jax
+        import jaxlib as runtime_jaxlib
+
+        maybe_initialize_distributed_runtime()
+        runtime_jax.config.update("jax_enable_x64", True)
+        require_x64_runtime(runtime_jax, context="Tier 5 performance characterization")
+        _RUNTIME_JAX = runtime_jax
+        _RUNTIME_JAXLIB = runtime_jaxlib
+    return _RUNTIME_JAX, _RUNTIME_JAXLIB
 
 
 def _stage2_value_gradient_script() -> Path:
@@ -424,8 +454,12 @@ def summarize_single_lane_probe(
     }
 
 
+def _build_summary_by_name(summary: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    return {item["name"]: item for item in summary}
+
+
 def build_tier5_performance_contract(summary: list[dict[str, Any]]) -> dict[str, Any]:
-    by_name = {item["name"]: item for item in summary}
+    by_name = _build_summary_by_name(summary)
     tier1 = by_name[TIER1_PARITY_RUNG]
     tier2 = by_name[TIER2_PERFORMANCE_RUNG]
     tier3 = by_name[TIER3_INIT_RUNG]
@@ -475,8 +509,9 @@ def build_tier5_performance_contract(summary: list[dict[str, Any]]) -> dict[str,
         },
         "do_not_use_for_performance_headline": [
             rung["name"]
-            for rung in (tier1, tier3)
+            for rung in (tier1, tier3, by_name.get(TIER4_ADJOINT_RUNG, {}))
             if not bool(rung.get("supports_performance_headline", False))
+            and "name" in rung
         ],
     }
 
@@ -525,8 +560,8 @@ def _render_tier5_summary_line(item: dict[str, Any]) -> str:
     )
 
 
-def _run_tier4_pair(args: argparse.Namespace) -> dict[str, Any]:
-    base_args = [
+def _tier4_probe_args(args: argparse.Namespace) -> list[str]:
+    return [
         *_common_equilibrium_args(args),
         *_trusted_single_stage_args(args),
         "--samples",
@@ -534,6 +569,10 @@ def _run_tier4_pair(args: argparse.Namespace) -> dict[str, Any]:
         "--eps",
         str(args.eps),
     ]
+
+
+def _run_tier4_pair(args: argparse.Namespace) -> dict[str, Any]:
+    base_args = _tier4_probe_args(args)
     cpu_payload, cpu_outer_elapsed_s = _timed_probe(
         _adjoint_fd_script(),
         ["--platform", "cpu", *base_args],
@@ -556,48 +595,168 @@ def _run_tier4_pair(args: argparse.Namespace) -> dict[str, Any]:
         "cpu_payload": cpu_payload,
         "lane_payload": lane_payload,
         "summary": summarize_pair_probe(
-            name="tier4_adjoint_fd",
+            name=TIER4_ADJOINT_RUNG,
             payload=lane_payload,
             outer_elapsed_s=cpu_outer_elapsed_s + lane_outer_elapsed_s,
             cpu_elapsed_s=cpu_outer_elapsed_s,
             lane_elapsed_s=lane_elapsed_s,
             lane_label="jax-cpu" if args.platform == "cpu" else f"jax-{args.platform}",
         ),
+        "probe_timings": {
+            "tier4_adjoint_fd_cpu": float(cpu_outer_elapsed_s),
+            "tier4_adjoint_fd_lane": float(lane_outer_elapsed_s),
+        },
     }
 
 
-def main() -> None:
-    args = parse_args()
-    benchmark_mode = bool(args.benchmark_mode)
-    provenance = build_provenance(
-        jax,
-        jaxlib,
-        title="Tier 5 trusted-fixture performance characterization",
-        extra={
-            "lane": resolve_probe_lane(optimizer_backend=args.optimizer_backend),
-            "fixture": "trusted-public-lane",
-            "platform_request": args.platform,
-            "plasma_surf_filename": args.plasma_surf_filename,
-            "stage2_seed_path": args.stage2_bs_path,
-            "stage2_nphi": int(args.stage2_nphi),
-            "stage2_ntheta": int(args.stage2_ntheta),
-            "single_stage_nphi": int(args.single_stage_nphi),
-            "single_stage_ntheta": int(args.single_stage_ntheta),
-            "mpol": int(args.mpol),
-            "ntor": int(args.ntor),
-            "stage2_maxiter": int(args.maxiter),
-            "optimizer_backend": args.optimizer_backend,
-            "benchmark_mode": benchmark_mode,
-            "fd_samples": int(args.samples),
-            "fd_eps": float(args.eps),
-            "compile_behavior": describe_compile_behavior(uses_subprocesses=True),
+def _run_tier4_cpu_probe(args: argparse.Namespace) -> tuple[dict[str, Any], float]:
+    return _timed_probe(
+        _adjoint_fd_script(),
+        ["--platform", "cpu", *_tier4_probe_args(args)],
+        platform="cpu",
+    )
+
+
+def _run_tier4_lane_probe(args: argparse.Namespace) -> tuple[dict[str, Any], float]:
+    return _timed_probe(
+        _adjoint_fd_script(),
+        ["--platform", args.platform, *_tier4_probe_args(args)],
+        platform=args.platform,
+    )
+
+
+def _summarize_tier4_pair(
+    *,
+    cpu_payload: dict[str, Any],
+    cpu_outer_elapsed_s: float,
+    lane_payload: dict[str, Any],
+    lane_outer_elapsed_s: float,
+    lane_label: str,
+) -> dict[str, Any]:
+    return summarize_pair_probe(
+        name=TIER4_ADJOINT_RUNG,
+        payload=lane_payload,
+        outer_elapsed_s=float(cpu_outer_elapsed_s + lane_outer_elapsed_s),
+        cpu_elapsed_s=float(cpu_outer_elapsed_s),
+        lane_elapsed_s=float(lane_outer_elapsed_s),
+        lane_label=lane_label,
+    )
+
+
+def _combine_phase_payload(
+    *,
+    provenance: dict[str, Any],
+    lane_label: str,
+    phase: str,
+    rungs: dict[str, Any],
+    summary: list[dict[str, Any]],
+    probe_timings: dict[str, float],
+    phase_inputs: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    summary_by_name = _build_summary_by_name(summary)
+    expected_rungs = {
+        TIER1_PARITY_RUNG,
+        TIER2_PERFORMANCE_RUNG,
+        TIER3_INIT_RUNG,
+        TIER4_ADJOINT_RUNG,
+    }
+    missing_rungs = sorted(expected_rungs - set(summary_by_name))
+    total_outer_elapsed_s = float(sum(item["outer_elapsed_s"] for item in summary))
+    if TIER4_ADJOINT_RUNG not in summary_by_name:
+        total_outer_elapsed_s += float(probe_timings.get("tier4_adjoint_fd_cpu", 0.0))
+        total_outer_elapsed_s += float(probe_timings.get("tier4_adjoint_fd_lane", 0.0))
+    performance_budget = tier5_performance_budget(
+        profile=_TIER5_PERFORMANCE_BUDGET_PROFILE
+    )
+    performance_contract = (
+        build_tier5_performance_contract(summary)
+        if {
+            TIER1_PARITY_RUNG,
+            TIER2_PERFORMANCE_RUNG,
+            TIER3_INIT_RUNG,
+        }.issubset(summary_by_name)
+        else None
+    )
+    performance_failures = (
+        evaluate_tier5_performance_budget(summary_by_name, performance_budget)
+        if TIER2_PERFORMANCE_RUNG in summary_by_name
+        else []
+    )
+    sharding_failures = (
+        evaluate_tier5_sharding_contract(dict(rungs[TIER2_PERFORMANCE_RUNG].get("provenance", provenance)))
+        if TIER2_PERFORMANCE_RUNG in rungs
+        else []
+    )
+    phase_passed = all(bool(item["passed"]) for item in summary) and not (
+        performance_failures or sharding_failures
+    )
+    aggregate_complete = not missing_rungs
+    payload: dict[str, Any] = {
+        "phase": phase,
+        "provenance": provenance,
+        "rungs": rungs,
+        "summary": summary,
+        "summary_by_name": summary_by_name,
+        "probe_timings": probe_timings,
+        "aggregate": {
+            "lane_label": lane_label,
+            "total_outer_elapsed_s": total_outer_elapsed_s,
+            "complete": aggregate_complete,
+            "phase_passed": phase_passed,
+            "passed": phase_passed if aggregate_complete else False,
+            "pending_rungs": missing_rungs,
+            "performance_contract": performance_contract,
+            "performance_budget_profile": _TIER5_PERFORMANCE_BUDGET_PROFILE,
+            "performance_budget": performance_budget,
+            "performance_failures": performance_failures,
+            "sharding_failures": sharding_failures,
+        },
+    }
+    if phase_inputs is not None:
+        payload["phase_inputs"] = phase_inputs
+    return payload
+
+
+def _validate_phase_artifact(
+    payload: dict[str, Any],
+    *,
+    expected_phase: str,
+    required_rungs: set[str],
+) -> None:
+    observed_phase = str(payload.get("phase"))
+    if observed_phase != expected_phase:
+        raise ValueError(
+            f"Expected {expected_phase!r} phase artifact, got {observed_phase!r}."
+        )
+    observed_rungs = set(payload.get("rungs", {}))
+    missing_rungs = sorted(required_rungs - observed_rungs)
+    if missing_rungs:
+        raise ValueError(
+            f"{expected_phase!r} phase artifact missing required rungs: {missing_rungs}."
+        )
+
+
+def _build_aggregate_payload(
+    *,
+    gpu_payload: dict[str, Any],
+    cpu_payload: dict[str, Any],
+) -> dict[str, Any]:
+    _validate_phase_artifact(
+        gpu_payload,
+        expected_phase="gpu",
+        required_rungs={
+            TIER1_PARITY_RUNG,
+            TIER2_PERFORMANCE_RUNG,
+            TIER3_INIT_RUNG,
+            "tier4_adjoint_fd_lane",
         },
     )
-    print_provenance(provenance)
 
-    lane_label = "jax-cpu" if args.platform == "cpu" else f"jax-{args.platform}"
 
-    tier1b_payload, tier1b_outer = _timed_probe(
+def _run_stage123_probes(
+    args: argparse.Namespace,
+) -> tuple[dict[str, Any], float, dict[str, Any], float, dict[str, Any], float]:
+    tier1_payload, tier1_outer = _timed_probe(
         _stage2_value_gradient_script(),
         [
             "--platform",
@@ -622,96 +781,257 @@ def main() -> None:
         _single_stage_init_probe_args(args),
         platform=args.platform,
     )
-    tier4_pair = _run_tier4_pair(args)
-
-    tier1b_summary = summarize_informational_pair_probe(
-        name=TIER1_PARITY_RUNG,
-        payload=tier1b_payload,
-        outer_elapsed_s=tier1b_outer,
-        cpu_elapsed_s=float(tier1b_payload["results"]["cpu"]["elapsed_s"]),
-        lane_elapsed_s=float(tier1b_payload["results"]["jax"]["elapsed_s"]),
-        lane_label=lane_label,
-        timing_semantics="correctness_probe_only",
-        recommended_question="parity",
-    )
-    tier2_summary = summarize_stage2_e2e_performance_probe(
-        payload=tier2_payload,
-        outer_elapsed_s=tier2_outer,
-        lane_label=lane_label,
-    )
-    tier3_summary = summarize_informational_pair_probe(
-        name=TIER3_INIT_RUNG,
-        payload=tier3_payload,
-        outer_elapsed_s=tier3_outer,
-        cpu_elapsed_s=float(tier3_payload["timings"]["cpu_elapsed_s"]),
-        lane_elapsed_s=float(tier3_payload["timings"]["jax_elapsed_s"]),
-        lane_label=lane_label,
-        timing_semantics="initialization_probe_only",
-        recommended_question="initialization_diagnostics",
+    return (
+        tier1_payload,
+        tier1_outer,
+        tier2_payload,
+        tier2_outer,
+        tier3_payload,
+        tier3_outer,
     )
 
-    summary = [tier1b_summary, tier2_summary, tier3_summary, tier4_pair["summary"]]
-    summary_by_name = {item["name"]: item for item in summary}
-    total_outer_elapsed_s = float(sum(item["outer_elapsed_s"] for item in summary))
-    performance_contract = build_tier5_performance_contract(summary)
-    performance_budget = tier5_performance_budget(
-        profile=_TIER5_PERFORMANCE_BUDGET_PROFILE
-    )
-    performance_failures = evaluate_tier5_performance_budget(
-        summary_by_name,
-        performance_budget,
-    )
-    sharding_failures = evaluate_tier5_sharding_contract(
-        dict(tier2_payload.get("provenance", provenance))
-    )
-    aggregate_failures = [*performance_failures, *sharding_failures]
-    aggregate_passed = all(bool(item["passed"]) for item in summary) and not aggregate_failures
 
-    payload = {
-        "provenance": provenance,
-        "rungs": {
-            "tier1b_real_stage2": tier1b_payload,
-            "tier2_stage2_e2e": tier2_payload,
-            "tier3_single_stage_init": tier3_payload,
-            "tier4_adjoint_fd_cpu": tier4_pair["cpu_payload"],
-            "tier4_adjoint_fd_lane": tier4_pair["lane_payload"],
+def _summarize_stage123_probes(
+    *,
+    tier1_payload: dict[str, Any],
+    tier1_outer: float,
+    tier2_payload: dict[str, Any],
+    tier2_outer: float,
+    tier3_payload: dict[str, Any],
+    tier3_outer: float,
+    lane_label: str,
+) -> list[dict[str, Any]]:
+    return [
+        summarize_informational_pair_probe(
+            name=TIER1_PARITY_RUNG,
+            payload=tier1_payload,
+            outer_elapsed_s=tier1_outer,
+            cpu_elapsed_s=float(tier1_payload["results"]["cpu"]["elapsed_s"]),
+            lane_elapsed_s=float(tier1_payload["results"]["jax"]["elapsed_s"]),
+            lane_label=lane_label,
+            timing_semantics="correctness_probe_only",
+            recommended_question="parity",
+        ),
+        summarize_stage2_e2e_performance_probe(
+            payload=tier2_payload,
+            outer_elapsed_s=tier2_outer,
+            lane_label=lane_label,
+        ),
+        summarize_informational_pair_probe(
+            name=TIER3_INIT_RUNG,
+            payload=tier3_payload,
+            outer_elapsed_s=tier3_outer,
+            cpu_elapsed_s=float(tier3_payload["timings"]["cpu_elapsed_s"]),
+            lane_elapsed_s=float(tier3_payload["timings"]["jax_elapsed_s"]),
+            lane_label=lane_label,
+            timing_semantics="initialization_probe_only",
+            recommended_question="initialization_diagnostics",
+        ),
+    ]
+
+
+def _build_aggregate_payload(
+    *,
+    gpu_payload: dict[str, Any],
+    cpu_payload: dict[str, Any],
+) -> dict[str, Any]:
+    _validate_phase_artifact(
+        gpu_payload,
+        expected_phase="gpu",
+        required_rungs={
+            TIER1_PARITY_RUNG,
+            TIER2_PERFORMANCE_RUNG,
+            TIER3_INIT_RUNG,
+            "tier4_adjoint_fd_lane",
         },
-        "summary": summary,
-        "summary_by_name": summary_by_name,
-        "aggregate": {
-            "lane_label": lane_label,
-            "total_outer_elapsed_s": total_outer_elapsed_s,
-            "passed": aggregate_passed,
-            "performance_contract": performance_contract,
-            "performance_budget_profile": _TIER5_PERFORMANCE_BUDGET_PROFILE,
-            "performance_budget": performance_budget,
-            "performance_failures": performance_failures,
-            "sharding_failures": sharding_failures,
+    )
+    _validate_phase_artifact(
+        cpu_payload,
+        expected_phase="cpu",
+        required_rungs={"tier4_adjoint_fd_cpu"},
+    )
+    lane_label = str(gpu_payload["aggregate"]["lane_label"])
+    cpu_outer_elapsed_s = float(cpu_payload["probe_timings"]["tier4_adjoint_fd_cpu"])
+    lane_outer_elapsed_s = float(gpu_payload["probe_timings"]["tier4_adjoint_fd_lane"])
+    tier4_summary = _summarize_tier4_pair(
+        cpu_payload=cpu_payload["rungs"]["tier4_adjoint_fd_cpu"],
+        cpu_outer_elapsed_s=cpu_outer_elapsed_s,
+        lane_payload=gpu_payload["rungs"]["tier4_adjoint_fd_lane"],
+        lane_outer_elapsed_s=lane_outer_elapsed_s,
+        lane_label=lane_label,
+    )
+    summary = [
+        *gpu_payload["summary"],
+        tier4_summary,
+    ]
+    return _combine_phase_payload(
+        provenance=dict(gpu_payload["provenance"]),
+        lane_label=lane_label,
+        phase="aggregate",
+        rungs={
+            TIER1_PARITY_RUNG: gpu_payload["rungs"][TIER1_PARITY_RUNG],
+            TIER2_PERFORMANCE_RUNG: gpu_payload["rungs"][TIER2_PERFORMANCE_RUNG],
+            TIER3_INIT_RUNG: gpu_payload["rungs"][TIER3_INIT_RUNG],
+            "tier4_adjoint_fd_cpu": cpu_payload["rungs"]["tier4_adjoint_fd_cpu"],
+            "tier4_adjoint_fd_lane": gpu_payload["rungs"]["tier4_adjoint_fd_lane"],
         },
-    }
-    write_json(args.output_json, payload)
+        summary=summary,
+        probe_timings={
+            **{
+                str(key): float(value)
+                for key, value in gpu_payload.get("probe_timings", {}).items()
+            },
+            **{
+                str(key): float(value)
+                for key, value in cpu_payload.get("probe_timings", {}).items()
+            },
+        },
+        phase_inputs={
+            "gpu": gpu_payload.get("provenance"),
+            "cpu": cpu_payload.get("provenance"),
+        },
+    )
 
+
+def _print_tier5_payload(payload: dict[str, Any]) -> None:
     print("\nTier 5 summary")
     print("--------------")
-    for item in summary:
+    for item in payload["summary"]:
         print(_render_tier5_summary_line(item))
-    print(f"total outer elapsed: {total_outer_elapsed_s:.2f}s")
-    print(
-        "performance contract: "
-        f"use {TIER1_PARITY_RUNG} for parity, "
-        f"{TIER2_PERFORMANCE_RUNG}.outer_speedup_vs_cpu for the main cold first-run wall-clock headline"
-    )
-    warm_source = performance_contract.get("warm_steady_state_source")
+    print(f"total outer elapsed: {payload['aggregate']['total_outer_elapsed_s']:.2f}s")
+    performance_contract = payload["aggregate"].get("performance_contract")
+    warm_source = None
+    if performance_contract is not None:
+        print(
+            "performance contract: "
+            f"use {TIER1_PARITY_RUNG} for parity, "
+            f"{TIER2_PERFORMANCE_RUNG}.outer_speedup_vs_cpu for the main cold first-run wall-clock headline"
+        )
+        warm_source = performance_contract.get("warm_steady_state_source")
     if warm_source is not None:
         print(
             "secondary steady-state metric: "
             f"{TIER2_PERFORMANCE_RUNG}.{warm_source['metric_path'].split('.')[-1]}"
         )
+    aggregate_failures = [
+        *payload["aggregate"]["performance_failures"],
+        *payload["aggregate"]["sharding_failures"],
+    ]
     if aggregate_failures:
         print("Tier 5 performance gate failed")
         for failure in aggregate_failures:
             print(f"  - {failure}")
         raise SystemExit(1)
+
+
+def main() -> None:
+    args = parse_args()
+    if args.phase == "aggregate":
+        if args.gpu_input_json is None or args.cpu_input_json is None:
+            raise SystemExit(
+                "--gpu-input-json and --cpu-input-json are required when --phase=aggregate."
+            )
+        aggregate_payload = _build_aggregate_payload(
+            gpu_payload=load_json(args.gpu_input_json),
+            cpu_payload=load_json(args.cpu_input_json),
+        )
+        write_json(args.output_json, aggregate_payload)
+        _print_tier5_payload(aggregate_payload)
+        return
+
+    runtime_jax, runtime_jaxlib = _runtime_modules()
+    benchmark_mode = bool(args.benchmark_mode)
+    provenance = build_provenance(
+        runtime_jax,
+        runtime_jaxlib,
+        title="Tier 5 trusted-fixture performance characterization",
+        extra={
+            "lane": resolve_probe_lane(optimizer_backend=args.optimizer_backend),
+            "fixture": "trusted-public-lane",
+            "platform_request": args.platform,
+            "plasma_surf_filename": args.plasma_surf_filename,
+            "stage2_seed_path": args.stage2_bs_path,
+            "stage2_nphi": int(args.stage2_nphi),
+            "stage2_ntheta": int(args.stage2_ntheta),
+            "single_stage_nphi": int(args.single_stage_nphi),
+            "single_stage_ntheta": int(args.single_stage_ntheta),
+            "mpol": int(args.mpol),
+            "ntor": int(args.ntor),
+            "stage2_maxiter": int(args.maxiter),
+            "optimizer_backend": args.optimizer_backend,
+            "benchmark_mode": benchmark_mode,
+            "fd_samples": int(args.samples),
+            "fd_eps": float(args.eps),
+            "phase": args.phase,
+            "compile_behavior": describe_compile_behavior(uses_subprocesses=True),
+        },
+    )
+    print_provenance(provenance)
+
+    lane_label = "jax-cpu" if args.platform == "cpu" else f"jax-{args.platform}"
+
+    if args.phase == "cpu":
+        tier4_cpu_payload, tier4_cpu_outer = _run_tier4_cpu_probe(args)
+        payload = _combine_phase_payload(
+            provenance=provenance,
+            lane_label=lane_label,
+            phase="cpu",
+            rungs={"tier4_adjoint_fd_cpu": tier4_cpu_payload},
+            summary=[],
+            probe_timings={"tier4_adjoint_fd_cpu": tier4_cpu_outer},
+        )
+    else:
+        (
+            tier1b_payload,
+            tier1b_outer,
+            tier2_payload,
+            tier2_outer,
+            tier3_payload,
+            tier3_outer,
+        ) = _run_stage123_probes(args)
+        tier123_summary = _summarize_stage123_probes(
+            tier1_payload=tier1b_payload,
+            tier1_outer=tier1b_outer,
+            tier2_payload=tier2_payload,
+            tier2_outer=tier2_outer,
+            tier3_payload=tier3_payload,
+            tier3_outer=tier3_outer,
+            lane_label=lane_label,
+        )
+        phase_rungs = {
+            TIER1_PARITY_RUNG: tier1b_payload,
+            TIER2_PERFORMANCE_RUNG: tier2_payload,
+            TIER3_INIT_RUNG: tier3_payload,
+        }
+        phase_probe_timings = {
+            TIER1_PARITY_RUNG: tier1b_outer,
+            TIER2_PERFORMANCE_RUNG: tier2_outer,
+            TIER3_INIT_RUNG: tier3_outer,
+        }
+        if args.phase == "gpu":
+            tier4_lane_payload, tier4_lane_outer = _run_tier4_lane_probe(args)
+            phase_rungs["tier4_adjoint_fd_lane"] = tier4_lane_payload
+            phase_probe_timings["tier4_adjoint_fd_lane"] = tier4_lane_outer
+        else:
+            tier4_pair = _run_tier4_pair(args)
+            phase_rungs["tier4_adjoint_fd_cpu"] = tier4_pair["cpu_payload"]
+            phase_rungs["tier4_adjoint_fd_lane"] = tier4_pair["lane_payload"]
+            phase_probe_timings.update(tier4_pair["probe_timings"])
+        payload = _combine_phase_payload(
+            provenance=provenance,
+            lane_label=lane_label,
+            phase=args.phase,
+            rungs=phase_rungs,
+            summary=(
+                tier123_summary
+                if args.phase == "gpu"
+                else [*tier123_summary, tier4_pair["summary"]]
+            ),
+            probe_timings=phase_probe_timings,
+        )
+
+    write_json(args.output_json, payload)
+    _print_tier5_payload(payload)
 
 
 if __name__ == "__main__":

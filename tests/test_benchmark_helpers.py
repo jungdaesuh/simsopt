@@ -3440,7 +3440,227 @@ def test_build_tier5_performance_contract_routes_parity_and_headline_sources():
     assert contract["do_not_use_for_performance_headline"] == [
         "tier1b_real_stage2",
         "tier3_single_stage_init",
+        "tier4_adjoint_fd",
     ]
+
+
+def _tier5_gpu_phase_payload(**overrides):
+    payload = {
+        "phase": "gpu",
+        "provenance": {"phase": "gpu", "platform_request": "cuda"},
+        "rungs": {
+            "tier1b_real_stage2": {"passed": True, "provenance": {"platform": "cuda"}},
+            "tier2_stage2_e2e": {
+                "passed": True,
+                "provenance": {
+                    "sharding_active": False,
+                    "sharding_strategy": "none",
+                    "sharding_device_count": 1,
+                },
+            },
+            "tier3_single_stage_init": {"passed": True},
+            "tier4_adjoint_fd_lane": {"passed": True},
+        },
+        "summary": [
+            {
+                "name": "tier1b_real_stage2",
+                "passed": True,
+                "outer_elapsed_s": 3.0,
+                "cpu_elapsed_s": 1.0,
+                "lane_elapsed_s": 0.5,
+                "lane_label": "jax-cuda",
+                "timing_semantics": "correctness_probe_only",
+                "supports_performance_headline": False,
+            },
+            {
+                "name": "tier2_stage2_e2e",
+                "passed": True,
+                "outer_elapsed_s": 9.0,
+                "cpu_elapsed_s": 20.0,
+                "lane_elapsed_s": 10.0,
+                "lane_outer_elapsed_s": 10.0,
+                "lane_warm_elapsed_s": 5.0,
+                "warm_speedup_vs_cpu": 4.0,
+                "outer_speedup_vs_cpu": 2.0,
+                "lane_compile_overhead_s": 5.0,
+                "headline_metric": "outer_speedup_vs_cpu",
+                "headline_speedup_vs_cpu": 2.0,
+                "lane_label": "jax-cuda",
+                "timing_semantics": "separate_cold_end_to_end_and_warm_steady_state",
+                "supports_performance_headline": True,
+            },
+            {
+                "name": "tier3_single_stage_init",
+                "passed": True,
+                "outer_elapsed_s": 7.0,
+                "cpu_elapsed_s": 3.0,
+                "lane_elapsed_s": 2.0,
+                "lane_label": "jax-cuda",
+                "timing_semantics": "initialization_probe_only",
+                "supports_performance_headline": False,
+            },
+        ],
+        "probe_timings": {
+            "tier1b_real_stage2": 3.0,
+            "tier2_stage2_e2e": 9.0,
+            "tier3_single_stage_init": 7.0,
+            "tier4_adjoint_fd_lane": 11.0,
+        },
+        "aggregate": {
+            "lane_label": "jax-cuda",
+            "pending_rungs": ["tier4_adjoint_fd"],
+        },
+    }
+    payload.update(overrides)
+    return payload
+
+
+def _tier5_cpu_phase_payload(**overrides):
+    payload = {
+        "phase": "cpu",
+        "provenance": {"phase": "cpu", "platform_request": "cpu"},
+        "rungs": {
+            "tier4_adjoint_fd_cpu": {"passed": True},
+        },
+        "summary": [],
+        "probe_timings": {
+            "tier4_adjoint_fd_cpu": 13.0,
+        },
+        "aggregate": {
+            "lane_label": "jax-cuda",
+            "pending_rungs": [
+                "tier1b_real_stage2",
+                "tier2_stage2_e2e",
+                "tier3_single_stage_init",
+                "tier4_adjoint_fd",
+            ],
+        },
+    }
+    payload.update(overrides)
+    return payload
+
+
+def test_build_aggregate_payload_merges_gpu_and_cpu_phase_artifacts():
+    payload = tier5_performance_characterization._build_aggregate_payload(
+        gpu_payload=_tier5_gpu_phase_payload(),
+        cpu_payload=_tier5_cpu_phase_payload(),
+    )
+
+    assert payload["phase"] == "aggregate"
+    assert payload["aggregate"]["complete"] is True
+    assert payload["aggregate"]["pending_rungs"] == []
+    assert payload["aggregate"]["phase_passed"] is True
+    assert payload["aggregate"]["passed"] is True
+    assert payload["summary_by_name"]["tier4_adjoint_fd"]["cpu_elapsed_s"] == pytest.approx(
+        13.0
+    )
+    assert payload["summary_by_name"]["tier4_adjoint_fd"]["lane_elapsed_s"] == pytest.approx(
+        11.0
+    )
+    assert payload["summary_by_name"]["tier4_adjoint_fd"]["outer_elapsed_s"] == pytest.approx(
+        24.0
+    )
+    assert payload["aggregate"]["performance_contract"]["headline_performance_source"][
+        "metric_path"
+    ] == "summary_by_name.tier2_stage2_e2e.outer_speedup_vs_cpu"
+    assert payload["phase_inputs"]["gpu"]["phase"] == "gpu"
+    assert payload["phase_inputs"]["cpu"]["phase"] == "cpu"
+
+
+def test_build_aggregate_payload_rejects_wrong_phase_inputs():
+    with pytest.raises(ValueError, match="Expected 'gpu' phase artifact"):
+        tier5_performance_characterization._build_aggregate_payload(
+            gpu_payload=_tier5_cpu_phase_payload(),
+            cpu_payload=_tier5_cpu_phase_payload(),
+        )
+
+
+def test_partial_phase_payload_tracks_probe_only_wall_time():
+    gpu_payload = tier5_performance_characterization._combine_phase_payload(
+        provenance={"phase": "gpu"},
+        lane_label="jax-cuda",
+        phase="gpu",
+        rungs=_tier5_gpu_phase_payload()["rungs"],
+        summary=_tier5_gpu_phase_payload()["summary"],
+        probe_timings=_tier5_gpu_phase_payload()["probe_timings"],
+    )
+    cpu_payload = tier5_performance_characterization._combine_phase_payload(
+        provenance={"phase": "cpu"},
+        lane_label="jax-cuda",
+        phase="cpu",
+        rungs=_tier5_cpu_phase_payload()["rungs"],
+        summary=[],
+        probe_timings=_tier5_cpu_phase_payload()["probe_timings"],
+    )
+
+    assert gpu_payload["aggregate"]["total_outer_elapsed_s"] == pytest.approx(30.0)
+    assert cpu_payload["aggregate"]["total_outer_elapsed_s"] == pytest.approx(13.0)
+
+
+def test_tier5_aggregate_main_skips_runtime_initialization(monkeypatch, tmp_path):
+    output_json = tmp_path / "tier5.json"
+    aggregate_payload = {
+        "summary": [],
+        "aggregate": {
+            "total_outer_elapsed_s": 0.0,
+            "performance_failures": [],
+            "sharding_failures": [],
+        },
+    }
+    observed_writes: list[tuple[str, dict[str, object]]] = []
+
+    monkeypatch.setattr(
+        tier5_performance_characterization,
+        "parse_args",
+        lambda: argparse.Namespace(
+            phase="aggregate",
+            gpu_input_json=str(tmp_path / "gpu.json"),
+            cpu_input_json=str(tmp_path / "cpu.json"),
+            output_json=str(output_json),
+            platform="cuda",
+            optimizer_backend="ondevice",
+            benchmark_mode=False,
+            plasma_surf_filename="fixture.nc",
+            equilibria_dir=str(tmp_path),
+            equilibrium_path=None,
+            stage2_bs_path=str(tmp_path / "seed.json"),
+            stage2_nphi=255,
+            stage2_ntheta=64,
+            single_stage_nphi=255,
+            single_stage_ntheta=64,
+            mpol=8,
+            ntor=6,
+            maxiter=20,
+            vol_target=1.0,
+            iota_target=0.5,
+            samples=3,
+            eps=1e-4,
+        ),
+    )
+    monkeypatch.setattr(
+        tier5_performance_characterization,
+        "_runtime_modules",
+        lambda: (_ for _ in ()).throw(AssertionError("runtime should not initialize")),
+    )
+    monkeypatch.setattr(
+        tier5_performance_characterization,
+        "load_json",
+        lambda path: {"phase": "gpu"} if str(path).endswith("gpu.json") else {"phase": "cpu"},
+    )
+    monkeypatch.setattr(
+        tier5_performance_characterization,
+        "_build_aggregate_payload",
+        lambda **_: aggregate_payload,
+    )
+    monkeypatch.setattr(
+        tier5_performance_characterization,
+        "write_json",
+        lambda path, payload: observed_writes.append((str(path), payload)),
+    )
+
+    tier5_performance_characterization.main()
+
+    assert observed_writes == [(str(output_json), aggregate_payload)]
 
 
 def test_evaluate_tier5_sharding_contract_rejects_inactive_multi_device_lane():
