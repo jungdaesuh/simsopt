@@ -381,14 +381,7 @@ def summarize_stage2_e2e_performance_probe(
     warm_speedup_vs_cpu = (
         safe_speedup(cpu_elapsed_s, warm_elapsed_s) if warm_elapsed_s is not None else None
     )
-    headline_metric = (
-        "warm_speedup_vs_cpu" if warm_speedup_vs_cpu is not None else "speedup_vs_cpu"
-    )
-    headline_speedup_vs_cpu = (
-        warm_speedup_vs_cpu
-        if warm_speedup_vs_cpu is not None
-        else safe_speedup(cpu_elapsed_s, cold_elapsed_s)
-    )
+    outer_speedup_vs_cpu = safe_speedup(cpu_elapsed_s, outer_lane_elapsed_s)
     return _with_performance_contract(
         summarize_pair_probe(
             name=TIER2_PERFORMANCE_RUNG,
@@ -401,12 +394,12 @@ def summarize_stage2_e2e_performance_probe(
         timing_semantics="separate_cold_end_to_end_and_warm_steady_state",
         recommended_question="cold_and_warm_performance",
         supports_performance_headline=True,
-        headline_metric=headline_metric,
-        headline_speedup_vs_cpu=headline_speedup_vs_cpu,
+        headline_metric="outer_speedup_vs_cpu",
+        headline_speedup_vs_cpu=outer_speedup_vs_cpu,
         extra_fields={
             "cpu_outer_elapsed_s": float(timings.get("cpu_outer_elapsed_s", cpu_elapsed_s)),
             "lane_outer_elapsed_s": outer_lane_elapsed_s,
-            "outer_speedup_vs_cpu": safe_speedup(cpu_elapsed_s, outer_lane_elapsed_s),
+            "outer_speedup_vs_cpu": outer_speedup_vs_cpu,
             "lane_warm_elapsed_s": warm_elapsed_s,
             "warm_speedup_vs_cpu": warm_speedup_vs_cpu,
             "lane_compile_overhead_s": _float_or_none(
@@ -706,10 +699,14 @@ def main() -> None:
     print(
         "performance contract: "
         f"use {TIER1_PARITY_RUNG} for parity, "
-        f"{TIER2_PERFORMANCE_RUNG}.outer_speedup_vs_cpu for cold first-run wall clock, "
-        f"and {TIER2_PERFORMANCE_RUNG}.{performance_contract['headline_performance_source']['metric_path'].split('.')[-1]} "
-        "for the main Stage 2 speed headline"
+        f"{TIER2_PERFORMANCE_RUNG}.outer_speedup_vs_cpu for the main cold first-run wall-clock headline"
     )
+    warm_source = performance_contract.get("warm_steady_state_source")
+    if warm_source is not None:
+        print(
+            "secondary steady-state metric: "
+            f"{TIER2_PERFORMANCE_RUNG}.{warm_source['metric_path'].split('.')[-1]}"
+        )
     if aggregate_failures:
         print("Tier 5 performance gate failed")
         for failure in aggregate_failures:

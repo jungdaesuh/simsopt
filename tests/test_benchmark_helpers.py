@@ -3368,8 +3368,8 @@ def test_summarize_stage2_e2e_performance_probe_separates_cold_outer_and_warm():
     assert summary["speedup_vs_cpu"] == pytest.approx(2.0)
     assert summary["outer_speedup_vs_cpu"] == pytest.approx(0.8)
     assert summary["warm_speedup_vs_cpu"] == pytest.approx(4.0)
-    assert summary["headline_metric"] == "warm_speedup_vs_cpu"
-    assert summary["headline_speedup_vs_cpu"] == pytest.approx(4.0)
+    assert summary["headline_metric"] == "outer_speedup_vs_cpu"
+    assert summary["headline_speedup_vs_cpu"] == pytest.approx(0.8)
     assert summary["supports_performance_headline"] is True
     assert summary["timing_semantics"] == "separate_cold_end_to_end_and_warm_steady_state"
 
@@ -3385,8 +3385,8 @@ def test_summarize_stage2_e2e_performance_probe_falls_back_to_cold_without_warm_
 
     assert summary["warm_speedup_vs_cpu"] is None
     assert summary["lane_warm_elapsed_s"] is None
-    assert summary["headline_metric"] == "speedup_vs_cpu"
-    assert summary["headline_speedup_vs_cpu"] == pytest.approx(2.0)
+    assert summary["headline_metric"] == "outer_speedup_vs_cpu"
+    assert summary["headline_speedup_vs_cpu"] == pytest.approx(0.8)
 
 
 def test_build_tier5_performance_contract_routes_parity_and_headline_sources():
@@ -3398,8 +3398,8 @@ def test_build_tier5_performance_contract_routes_parity_and_headline_sources():
         },
         {
             "name": "tier2_stage2_e2e",
-            "headline_metric": "warm_speedup_vs_cpu",
-            "headline_speedup_vs_cpu": 4.0,
+            "headline_metric": "outer_speedup_vs_cpu",
+            "headline_speedup_vs_cpu": 0.8,
             "warm_speedup_vs_cpu": 4.0,
             "outer_speedup_vs_cpu": 0.8,
             "supports_performance_headline": True,
@@ -3428,8 +3428,9 @@ def test_build_tier5_performance_contract_routes_parity_and_headline_sources():
     )
     assert contract["warm_steady_state_source"]["speedup_vs_cpu"] == pytest.approx(4.0)
     assert contract["headline_performance_source"]["metric_path"] == (
-        "summary_by_name.tier2_stage2_e2e.warm_speedup_vs_cpu"
+        "summary_by_name.tier2_stage2_e2e.outer_speedup_vs_cpu"
     )
+    assert contract["headline_performance_source"]["speedup_vs_cpu"] == pytest.approx(0.8)
     assert contract["sharding_source"]["active_path"] == (
         "rungs.tier2_stage2_e2e.provenance.sharding_active"
     )
