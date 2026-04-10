@@ -78,11 +78,15 @@ def _runtime_scalar_mul(factor, value):
 
 
 def _runtime_add(left, right):
-    if _is_runtime_jax_value(left):
+    left_is_jax = _is_runtime_jax_value(left)
+    right_is_jax = _is_runtime_jax_value(right)
+    if left_is_jax and right_is_jax:
+        return left + right
+    if left_is_jax:
         from simsopt.jax_core._math_utils import scalar_like
 
         return left + scalar_like(left, right)
-    if _is_runtime_jax_value(right):
+    if right_is_jax:
         from simsopt.jax_core._math_utils import scalar_like
 
         return scalar_like(right, left) + right
