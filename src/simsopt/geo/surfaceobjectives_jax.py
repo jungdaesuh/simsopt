@@ -38,6 +38,7 @@ from .._core.jax_host_boundary import (
 )
 from .._core.optimizable import Optimizable
 from ..jax_core._math_utils import (
+    as_jax_float64 as _as_jax_float64,
     as_runtime_float64 as _as_runtime_float64,
     zeros as _zeros,
 )
@@ -1428,13 +1429,13 @@ def _build_traceable_objective_state(booz_jax, bs_jax, iota_target):
                 "make_traceable_objective() requires optimizer_backend='ondevice'."
             )
 
-    warmstart_sdofs = jnp.asarray(booz_jax.surface.get_dofs(), dtype=jnp.float64)
-    warmstart_iota = jnp.asarray(booz_jax.res["iota"], dtype=jnp.float64)
+    warmstart_sdofs = _as_jax_float64(booz_jax.surface.get_dofs())
+    warmstart_iota = _as_jax_float64(booz_jax.res["iota"])
     warmstart_G = booz_jax.res["G"]
     if warmstart_G is not None:
-        warmstart_G = jnp.asarray(warmstart_G, dtype=jnp.float64)
+        warmstart_G = _as_jax_float64(warmstart_G)
 
-    baseline_coil_dofs = jnp.asarray(bs_jax.x.copy(), dtype=jnp.float64)
+    baseline_coil_dofs = _as_jax_float64(bs_jax.x.copy())
     coil_dof_extraction_spec = bs_jax.coil_dof_extraction_spec()
     coil_set_spec_from_dofs = lambda coil_dofs: coil_set_spec_from_dof_extraction_spec(
         coil_dof_extraction_spec,
