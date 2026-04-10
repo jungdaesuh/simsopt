@@ -12,6 +12,7 @@ Validates:
 """
 
 import inspect
+import logging
 import sys
 import types
 from contextlib import contextmanager
@@ -2601,6 +2602,26 @@ def _dense_jacobian_scaling_limit_result(
     }
 
 
+def _successful_exact_newton_result(
+    x0,
+    *,
+    step=0.0,
+    nit=0,
+    max_dense_jacobian_bytes=None,
+):
+    n = x0.shape[0]
+    return {
+        "x": x0 + step,
+        "residual": jnp.zeros(n, dtype=x0.dtype),
+        "jacobian": jnp.eye(n, dtype=x0.dtype),
+        "nit": nit,
+        "success": True,
+        "message": None,
+        "jacobian_materialized": True,
+        "max_dense_jacobian_bytes": max_dense_jacobian_bytes,
+    }
+
+
 @contextmanager
 def _patched_exact_newton_result(*, success, step=0.1, nit=3):
     original_newton_exact = _bsj.newton_exact
@@ -2609,15 +2630,9 @@ def _patched_exact_newton_result(*, success, step=0.1, nit=3):
         _residual_fn, x0, *, maxiter, tol, max_dense_jacobian_bytes=None
     ):
         del maxiter, tol, max_dense_jacobian_bytes
-        n = x0.shape[0]
-        return {
-            "x": x0 + step,
-            "jacobian": jnp.eye(n, dtype=x0.dtype),
-            "nit": nit,
-            "success": success,
-            "message": None,
-            "jacobian_materialized": True,
-        }
+        result = _successful_exact_newton_result(x0, step=step, nit=nit)
+        result["success"] = success
+        return result
 
     _bsj.newton_exact = fake_newton_exact
     try:
@@ -2701,6 +2716,37 @@ class TestBoozerSurfaceJAXExactPath:
         x_final = booz._pack_decision_vector(res["iota"], res["G"])
         expected_fun = float(0.5 * jnp.mean(jnp.square(res_fn(x_final))))
         assert res["fun"] == pytest.approx(expected_fun)
+
+    def test_ls_surface_exact_newton_has_default_dense_jacobian_ceiling(
+        self, monkeypatch
+    ):
+        """LS-constructed surfaces must still provide the exact-solve memory cap."""
+        booz = _make_mock_boozer_surface()
+        captured = {}
+        original_newton_exact = _bsj.newton_exact
+
+        def fake_newton_exact(
+            _residual_fn, x0, *, maxiter, tol, max_dense_jacobian_bytes=None
+        ):
+            del maxiter, tol
+            captured["max_dense_jacobian_bytes"] = max_dense_jacobian_bytes
+            return _successful_exact_newton_result(
+                x0,
+                max_dense_jacobian_bytes=max_dense_jacobian_bytes,
+            )
+
+        monkeypatch.setattr(_bsj, "newton_exact", fake_newton_exact)
+        try:
+            with _patched_exact_surface_module():
+                res = booz.solve_residual_equation_exactly_newton(iota=0.3, G=0.05)
+        finally:
+            monkeypatch.setattr(_bsj, "newton_exact", original_newton_exact)
+
+        assert (
+            captured["max_dense_jacobian_bytes"]
+            == _bsj._DEFAULT_MAX_DENSE_JACOBIAN_BYTES
+        )
+        assert res["max_dense_jacobian_bytes"] == _bsj._DEFAULT_MAX_DENSE_JACOBIAN_BYTES
 
     def test_run_code_exact_marks_dense_jacobian_ceiling_as_failure(self, monkeypatch):
         booz = _make_mock_boozer_surface_exact(options={"max_dense_jacobian_bytes": 77})
@@ -3737,6 +3783,37 @@ class TestVJPHooks:
 
         assert len(grouped_entries) == len(booz.coil_groups)
 
+    def test_run_code_rejects_bad_group_vjp_signature(self, monkeypatch):
+        """run_code() must fail fast when grouped VJP hooks have the wrong arity."""
+        booz = _make_mock_boozer_surface()
+
+        def bad_vjp_groups(lm):
+            del lm
+            return ()
+
+        monkeypatch.setattr(
+            _bsj,
+            "_build_ls_group_vjp_callback",
+            lambda *args, **kwargs: bad_vjp_groups,
+        )
+
+        with pytest.raises(TypeError, match="vjp_groups"):
+            booz.run_code(iota=0.3, G=0.05)
+
+    def test_ls_group_vjp_detects_stale_reuse_after_resolve(self):
+        """Grouped VJP hooks must reject stale reuse after a new solve."""
+        booz = _make_mock_boozer_surface()
+        first = booz.run_code(iota=0.3, G=0.05)
+        old_vjp_groups = first["vjp_groups"]
+        lm = jnp.asarray(np.eye(first["jacobian"].shape[0])[0], dtype=jnp.float64)
+
+        booz.need_to_run_code = True
+        second = booz.run_code(iota=0.3, G=0.05)
+        assert second["solve_generation"] == first["solve_generation"] + 1
+
+        with pytest.raises(RuntimeError, match="stale"):
+            list(old_vjp_groups(lm, booz, first["iota"], first["G"]))
+
 
 # ---------------------------------------------------------------------------
 # P2 #6: Negative tests
@@ -3906,6 +3983,56 @@ class TestEnsureSolvedGuard:
 
         with pytest.raises(RuntimeError, match="failed"):
             _ensure_solved_jax(booz)
+
+    def test_ensure_solved_logs_success_and_norms(self, caplog):
+        """_ensure_solved must log cached solve quality alongside success."""
+        booz = _make_mock_boozer_surface()
+        booz.need_to_run_code = False
+        booz.res = {
+            "iota": 0.3,
+            "G": 0.05,
+            "success": True,
+            "type": "ls",
+            "gradient": np.asarray([3.0, -4.0]),
+            "residual": np.asarray([1.5, -2.5]),
+            "PLU": (np.eye(1), np.eye(1), np.eye(1)),
+            "vjp": lambda *_args, **_kwargs: None,
+        }
+
+        with caplog.at_level(
+            logging.DEBUG,
+            logger="simsopt.geo.surfaceobjectives_jax",
+        ):
+            _ensure_solved_jax(booz)
+
+        assert "success=True" in caplog.text
+        assert "grad_inf=4.0" in caplog.text
+        assert "residual_inf=2.5" in caplog.text
+
+    def test_ensure_solved_exact_logs_residual_without_jacobian_as_grad(self, caplog):
+        """Exact cached solves should not label Jacobian size as a gradient norm."""
+        booz = _make_mock_boozer_surface()
+        booz.need_to_run_code = False
+        booz.res = {
+            "iota": 0.3,
+            "G": 0.05,
+            "success": True,
+            "type": "exact",
+            "jacobian": np.asarray([[3.0, -4.0], [1.0, 2.0]]),
+            "residual": np.asarray([0.1, -0.2]),
+            "PLU": (np.eye(1), np.eye(1), np.eye(1)),
+            "vjp": lambda *_args, **_kwargs: None,
+        }
+
+        with caplog.at_level(
+            logging.DEBUG,
+            logger="simsopt.geo.surfaceobjectives_jax",
+        ):
+            _ensure_solved_jax(booz)
+
+        assert "success=True" in caplog.text
+        assert "grad_inf=None" in caplog.text
+        assert "residual_inf=0.2" in caplog.text
 
 
 class TestMixedQuadratureBoozer:

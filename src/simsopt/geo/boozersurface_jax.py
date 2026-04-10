@@ -30,6 +30,7 @@ Builds on M3's composed derivative path:
 """
 
 import hashlib
+import inspect
 from dataclasses import dataclass
 from functools import partial
 
@@ -141,6 +142,80 @@ jax.tree_util.register_dataclass(
     data_fields=["surface_dofs", "iota", "G"],
     meta_fields=[],
 )
+
+
+def _require_boozer_vjp_callback_signature(callback, *, callback_name: str):
+    """Fail fast when a result-dict VJP hook cannot accept the public contract."""
+    if callback is None:
+        return None
+    try:
+        inspect.signature(callback).bind(object(), object(), object(), object())
+    except TypeError as exc:
+        raise TypeError(
+            f"BoozerSurfaceJAX result callback {callback_name!r} must accept "
+            "(lm, booz_surf, iota, G)."
+        ) from exc
+    return callback
+
+
+def _guard_solver_callback_freshness(
+    callback,
+    *,
+    booz_surf,
+    solve_generation: int,
+    callback_name: str,
+):
+    """Reject stale result callbacks after the Boozer solve state changes."""
+    if callback is None:
+        return None
+
+    def guarded(*args, **kwargs):
+        current_generation = getattr(booz_surf, "_solver_generation", None)
+        if booz_surf.need_to_run_code or current_generation != solve_generation:
+            raise RuntimeError(
+                f"BoozerSurfaceJAX result callback {callback_name!r} is stale "
+                f"(expected generation {solve_generation}, got {current_generation}). "
+                "Re-run boozer_surface.run_code(...) before requesting adjoints."
+            )
+        return callback(*args, **kwargs)
+
+    return guarded
+
+
+def _advance_solver_generation(booz_surf) -> int:
+    solve_generation = booz_surf._solver_generation + 1
+    booz_surf._solver_generation = solve_generation
+    return solve_generation
+
+
+def _prepare_result_callback(
+    callback,
+    *,
+    booz_surf,
+    solve_generation: int,
+    callback_name: str,
+    G_provided: bool,
+    freshness_guard: bool,
+):
+    callback = _guard_none_G_coil_gradient_callback(
+        callback,
+        biotsavart=booz_surf.biotsavart,
+        component="BoozerSurfaceJAX",
+        coil_attrs=("_coils",),
+        G_provided=G_provided,
+    )
+    callback = _require_boozer_vjp_callback_signature(
+        callback,
+        callback_name=callback_name,
+    )
+    if freshness_guard:
+        callback = _guard_solver_callback_freshness(
+            callback,
+            booz_surf=booz_surf,
+            solve_generation=solve_generation,
+            callback_name=callback_name,
+        )
+    return callback
 
 
 def _as_boozer_penalty_optimizer_state(x, *, optimize_G):
@@ -926,6 +1001,7 @@ def _boozer_ls_coil_vjp_groups(lm, booz_surf, iota, G, weight_inv_modB=True):
         booz_surf,
         iota,
         G,
+        solve_generation=getattr(booz_surf, "_solver_generation", 0),
         weight_inv_modB=weight_inv_modB,
     )(
         lm,
@@ -935,7 +1011,14 @@ def _boozer_ls_coil_vjp_groups(lm, booz_surf, iota, G, weight_inv_modB=True):
     )
 
 
-def _build_ls_group_vjp_callback(booz_surf, iota, G, weight_inv_modB=True):
+def _build_ls_group_vjp_callback(
+    booz_surf,
+    iota,
+    G,
+    *,
+    solve_generation: int,
+    weight_inv_modB=True,
+):
     """Build stable LS group runners for repeated streaming VJPs."""
     x, optimize_G = _ls_decision_vector(booz_surf, iota, G)
 
@@ -956,6 +1039,12 @@ def _build_ls_group_vjp_callback(booz_surf, iota, G, weight_inv_modB=True):
     )
 
     def vjp_groups(lm, _booz_surf, _iota, _G):
+        current_generation = getattr(booz_surf, "_solver_generation", None)
+        if booz_surf.need_to_run_code or current_generation != solve_generation:
+            raise RuntimeError(
+                "BoozerSurfaceJAX LS grouped VJP callback is stale; "
+                "re-run boozer_surface.run_code(...) before requesting adjoints."
+            )
         for group_runner, group_array, group_index_list in zip(
             group_runners,
             coil_arrays,
@@ -1163,6 +1252,9 @@ def _exact_newton_reporting_fields(result):
     }
 
 
+_DEFAULT_MAX_DENSE_JACOBIAN_BYTES = 512 * 1024 * 1024
+
+
 _DEFAULT_OPTIONS_LS = {
     "verbose": True,
     "bfgs_tol": 1e-10,
@@ -1173,6 +1265,7 @@ _DEFAULT_OPTIONS_LS = {
     "newton_maxiter": 40,
     "newton_stab": 0.0,
     "weight_inv_modB": True,
+    "max_dense_jacobian_bytes": _DEFAULT_MAX_DENSE_JACOBIAN_BYTES,
 }
 
 _DEFAULT_OPTIONS_EXACT = {
@@ -1180,7 +1273,7 @@ _DEFAULT_OPTIONS_EXACT = {
     "newton_tol": 1e-13,
     "newton_maxiter": 40,
     "weight_inv_modB": False,
-    "max_dense_jacobian_bytes": 512 * 1024 * 1024,
+    "max_dense_jacobian_bytes": _DEFAULT_MAX_DENSE_JACOBIAN_BYTES,
 }
 
 # Options only meaningful for private optimizer backends (hybrid, ondevice).
@@ -1338,6 +1431,7 @@ class BoozerSurfaceJAX(Optimizable):
         self.constraint_weight = constraint_weight
         self.need_to_run_code = True
         self.res = None
+        self._solver_generation = 0
 
         # Determine solver type
         self.boozer_type = "ls" if constraint_weight is not None else "exact"
@@ -2350,6 +2444,7 @@ class BoozerSurfaceJAX(Optimizable):
             or not _host_all_finite(result["grad"])
             or not _host_all_finite(result["hessian"])
         ):
+            solve_generation = _advance_solver_generation(self)
             res = {
                 "residual": None,
                 "jacobian": None,
@@ -2363,6 +2458,7 @@ class BoozerSurfaceJAX(Optimizable):
                 "vjp": None,
                 "vjp_groups": None,
                 "type": "ls",
+                "solve_generation": solve_generation,
                 "weight_inv_modB": weight_inv_modB,
                 "fun": float(_host_scalar(result["fun"])),
             }
@@ -2385,6 +2481,29 @@ class BoozerSurfaceJAX(Optimizable):
             G_for_res,
             weight_inv_modB=weight_inv_modB,
         )
+        solve_generation = _advance_solver_generation(self)
+        vjp_callback = _prepare_result_callback(
+            partial(_boozer_ls_coil_vjp, weight_inv_modB=weight_inv_modB),
+            booz_surf=self,
+            solve_generation=solve_generation,
+            callback_name="vjp",
+            G_provided=G_provided,
+            freshness_guard=True,
+        )
+        vjp_groups_callback = _prepare_result_callback(
+            _build_ls_group_vjp_callback(
+                self,
+                iota_out,
+                G_out,
+                solve_generation=solve_generation,
+                weight_inv_modB=weight_inv_modB,
+            ),
+            booz_surf=self,
+            solve_generation=solve_generation,
+            callback_name="vjp_groups",
+            G_provided=G_provided,
+            freshness_guard=True,
+        )
 
         res = {
             "residual": residual_vec,
@@ -2396,26 +2515,10 @@ class BoozerSurfaceJAX(Optimizable):
             "s": s,
             "iota": iota_out,
             "PLU": (P, L, U),
-            "vjp": _guard_none_G_coil_gradient_callback(
-                partial(_boozer_ls_coil_vjp, weight_inv_modB=weight_inv_modB),
-                biotsavart=self.biotsavart,
-                component="BoozerSurfaceJAX",
-                coil_attrs=("_coils",),
-                G_provided=G_provided,
-            ),
-            "vjp_groups": _guard_none_G_coil_gradient_callback(
-                _build_ls_group_vjp_callback(
-                    self,
-                    iota_out,
-                    G_out,
-                    weight_inv_modB=weight_inv_modB,
-                ),
-                biotsavart=self.biotsavart,
-                component="BoozerSurfaceJAX",
-                coil_attrs=("_coils",),
-                G_provided=G_provided,
-            ),
+            "vjp": vjp_callback,
+            "vjp_groups": vjp_groups_callback,
             "type": "ls",
+            "solve_generation": solve_generation,
             "weight_inv_modB": weight_inv_modB,
             "fun": float(_host_scalar(result["fun"])),
         }
@@ -2581,6 +2684,7 @@ class BoozerSurfaceJAX(Optimizable):
             or not jacobian_available
             or not _host_all_finite(jacobian)
         ):
+            solve_generation = _advance_solver_generation(self)
             res = {
                 "residual": None,
                 "fun": float(0.5 * np.mean(np.square(_host_numpy(exact_residual)))),
@@ -2595,6 +2699,7 @@ class BoozerSurfaceJAX(Optimizable):
                 "type": "exact",
                 "vjp": None,
                 "vjp_groups": None,
+                "solve_generation": solve_generation,
                 "weight_inv_modB": self.options["weight_inv_modB"],
                 **exact_reporting,
             }
@@ -2638,6 +2743,27 @@ class BoozerSurfaceJAX(Optimizable):
 
         bool_mask = np.zeros(3 * nphi * ntheta, dtype=bool)
         bool_mask[np.asarray(mask_indices)] = True
+        solve_generation = _advance_solver_generation(self)
+        vjp_callback = _prepare_result_callback(
+            _boozer_exact_coil_vjp,
+            booz_surf=self,
+            solve_generation=solve_generation,
+            callback_name="vjp",
+            G_provided=G_provided,
+            freshness_guard=False,
+        )
+        vjp_groups_callback = _prepare_result_callback(
+            _build_exact_group_vjp_callback(
+                self,
+                iota_final,
+                G_final,
+            ),
+            booz_surf=self,
+            solve_generation=solve_generation,
+            callback_name="vjp_groups",
+            G_provided=G_provided,
+            freshness_guard=False,
+        )
 
         res = {
             "residual": r_raw,
@@ -2651,24 +2777,9 @@ class BoozerSurfaceJAX(Optimizable):
             "PLU": (P, L, U),
             "mask": bool_mask,
             "type": "exact",
-            "vjp": _guard_none_G_coil_gradient_callback(
-                _boozer_exact_coil_vjp,
-                biotsavart=self.biotsavart,
-                component="BoozerSurfaceJAX",
-                coil_attrs=("_coils",),
-                G_provided=G_provided,
-            ),
-            "vjp_groups": _guard_none_G_coil_gradient_callback(
-                _build_exact_group_vjp_callback(
-                    self,
-                    iota_final,
-                    G_final,
-                ),
-                biotsavart=self.biotsavart,
-                component="BoozerSurfaceJAX",
-                coil_attrs=("_coils",),
-                G_provided=G_provided,
-            ),
+            "vjp": vjp_callback,
+            "vjp_groups": vjp_groups_callback,
+            "solve_generation": solve_generation,
             "weight_inv_modB": self.options["weight_inv_modB"],
             **exact_reporting,
         }

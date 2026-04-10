@@ -36,6 +36,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from functools import lru_cache
+import logging
 import re
 from threading import Lock
 from typing import Callable
@@ -114,6 +115,7 @@ _STRICT_HYBRID_OPTIMIZER_DETAIL = "the transitional SciPy-prefix hybrid optimize
 _SCALAR_VALUE_AND_GRAD_CACHE_LOCK = Lock()
 _CACHEABLE_VALUE_AND_GRAD_ATTR = "_simsopt_cache_jit_value_and_grad"
 _CACHED_VALUE_AND_GRAD_ATTR = "_simsopt_cached_jit_value_and_grad"
+logger = logging.getLogger(__name__)
 
 
 def _version_key(raw_version: str) -> tuple[int, ...]:
@@ -301,6 +303,31 @@ def _prepare_optimizer_callable_inputs(fun, x0, *, value_and_grad, callback):
         adapter.wrap_callback(callback),
         adapter,
     )
+
+
+def _hybrid_prefix_grad_inf(prefix_result) -> float:
+    jacobian = getattr(prefix_result, "jac", None)
+    if jacobian is None:
+        return float("nan")
+    return float(np.linalg.norm(np.asarray(jacobian, dtype=np.float64), ord=np.inf))
+
+
+def _emit_hybrid_prefix_nonfinite_observability(prefix_result, progress_callback) -> None:
+    fun_value = float(
+        np.asarray(getattr(prefix_result, "fun", np.nan), dtype=np.float64)
+    )
+    grad_inf = _hybrid_prefix_grad_inf(prefix_result)
+    nit = int(getattr(prefix_result, "nit", 0))
+    logger.warning(
+        "bfgs-hybrid SciPy prefix produced a non-finite continuation state; "
+        "success=%s nit=%d fun=%s grad_inf=%s",
+        bool(getattr(prefix_result, "success", False)),
+        nit,
+        fun_value,
+        grad_inf,
+    )
+    if progress_callback is not None:
+        progress_callback(nit, fun_value, grad_inf)
 
 
 def _finalize_optimizer_result(result, adapter):
@@ -2274,6 +2301,10 @@ def jax_minimize(
     if prefix_result.success:
         return finalize(prefix_result)
     if not _scipy_result_is_continuable(prefix_result):
+        _emit_hybrid_prefix_nonfinite_observability(
+            prefix_result,
+            options.get("progress_callback"),
+        )
         prefix_result.success = False
         prefix_result.message = (
             "SciPy prefix produced a non-finite state; on-device continuation skipped."

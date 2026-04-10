@@ -13,6 +13,11 @@ Solver-level parity stays contract-based: convergence success, residual norm,
 final objective, and final physics quantities must match within the documented
 acceptance envelope, but iterate-by-iterate identity is not required.
 
+## Parity Test Matrix
+
+This matrix is the SSOT for the mirrored parity surface requested by
+`jax_parity_reduction_todos_2026-04-10.md`.
+
 | Upstream test | JAX test | Status | Notes |
 | --- | --- | --- | --- |
 | `tests/field/test_biotsavart.py` | `tests/field/test_biotsavart_jax_parity.py` | exact | Pure-kernel mirror for `A/B`, spatial derivatives, Hessians, and VJP identities. |

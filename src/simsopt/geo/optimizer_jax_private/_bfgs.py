@@ -27,6 +27,22 @@ from ._result_converters import _coerce_dense_hess_inv
 from ._types import _BFGSResults
 
 
+def _bfgs_curvature_terms(s_k, y_k, *, x_dtype):
+    """Return ``(sTy, rho, valid_curvature)`` for the dense BFGS update."""
+    rho_k_inv = _dot(y_k, s_k)
+    rho_k = jnp.reciprocal(rho_k_inv)
+    step_eps = jnp.sqrt(_as_jax_dtype(jnp.finfo(x_dtype).eps, x_dtype))
+    curvature_scale = _norm(s_k) * _norm(y_k)
+    curvature_tol = step_eps * _as_jax_dtype(curvature_scale, rho_k_inv.dtype)
+    valid_curvature = (
+        jnp.isfinite(rho_k_inv)
+        & jnp.isfinite(rho_k)
+        & jnp.isfinite(curvature_scale)
+        & (rho_k_inv > curvature_tol)
+    )
+    return rho_k_inv, rho_k, valid_curvature, step_eps
+
+
 def _minimize_bfgs_private(
     fun,
     x0,
@@ -120,7 +136,11 @@ def _minimize_bfgs_private(
         f_kp1 = line_search_results.f_k
         g_kp1 = line_search_results.g_k
         y_k = g_kp1 - state.g_k
-        rho_k = jnp.reciprocal(_dot(y_k, s_k))
+        rho_k_inv, rho_k, valid_curvature, step_eps = _bfgs_curvature_terms(
+            s_k,
+            y_k,
+            x_dtype=state.x_k.dtype,
+        )
 
         sy_k = s_k[:, np.newaxis] * y_k[np.newaxis, :]
         identity = _as_jax_dtype(base_identity_host, rho_k.dtype)
@@ -129,7 +149,7 @@ def _minimize_bfgs_private(
             _einsum("ij,jk,lk", w, state.H_k, w)
             + rho_k * s_k[:, np.newaxis] * s_k[np.newaxis, :]
         )
-        H_kp1 = jnp.where(jnp.isfinite(rho_k), H_kp1, state.H_k)
+        H_kp1 = jnp.where(valid_curvature, H_kp1, state.H_k)
         converged = _norm(g_kp1, ord=norm) < gtol_jax
         next_k = state.k + _int_scalar(1)
         dphi_0 = jnp.real(_dot(state.g_k, p_k))
@@ -139,9 +159,6 @@ def _minimize_bfgs_private(
             & jnp.all(jnp.isfinite(g_kp1))
             & (f_kp1 <= state.f_k + wolfe_c1 * line_search_results.a_k * dphi_0)
             & (jnp.abs(dphi_kp1) <= -wolfe_c2 * dphi_0)
-        )
-        step_eps = jnp.sqrt(
-            _as_jax_dtype(jnp.finfo(state.x_k.dtype).eps, state.x_k.dtype)
         )
         step_tol = step_eps * jnp.maximum(
             _as_jax_dtype(1.0, state.x_k.dtype),

@@ -262,12 +262,15 @@ Solver drift is dominated by:
 
 ## Test TODOs
 
-- [ ] Add a parity test matrix document for:
+- [x] Add a parity test matrix document for:
   - Biot-Savart
   - FluxObjective
   - SurfaceObjectives family
   - BoozerSurface
   - SurfaceRZFourier
+  Covered by `docs/jax_parity_manifest.md`, which maps the mirrored upstream
+  parity surface and records exact vs partial status plus the intended
+  tolerance-based contracts.
 - [x] Add one stress test per hot reduction kernel where accumulation order is likely to matter
   - Covered by the Biot-Savart many-coil / many-quadrature accumulation-order
     lane, the `integral_BdotN` normalized-denominator stress lane, and the
@@ -282,11 +285,16 @@ Solver drift is dominated by:
 
 ## Exit Criteria
 
-- [ ] Biot-Savart parity remains green after pairwise reduction changes
-- [ ] `integral_BdotN` parity remains green after reduction changes
-- [ ] Stage 2 parity remains green with no hidden fallback seams
-- [ ] Single-stage parity remains green under the documented solver-contract acceptance model
-- [ ] No new reduction-stability work is attempted in `optimizer_jax.py` unless a concrete failure points there
+- [x] Biot-Savart parity remains green after pairwise reduction changes
+  - Re-verified with `tests/field/test_biotsavart_jax.py -q -k 'accumulation_stress or reduction_order'`.
+- [x] `integral_BdotN` parity remains green after reduction changes
+  - Re-verified with `tests/objectives/test_integral_bdotn_jax.py -q`.
+- [x] Stage 2 parity remains green with no hidden fallback seams
+  - Re-verified with the focused `tests/integration/test_stage2_jax.py` objective-parity slice.
+- [x] Single-stage parity remains green under the documented solver-contract acceptance model
+  - Re-verified with the CPU/JAX exact / solved-state parity slice in `tests/integration/test_single_stage_jax_cpu_reference.py`.
+- [x] No new reduction-stability work is attempted in `optimizer_jax.py` unless a concrete failure points there
+  - Current decision remains unchanged: keep solver parity on solved-state metrics and diagnostics rather than optimizer arithmetic changes.
 
 ## Notes
 

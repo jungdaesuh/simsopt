@@ -1,11 +1,13 @@
 """Private optimizer runtime tests for BoozerSurfaceJAX."""
 
+import logging
 import types
 
 import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
+import simsopt.geo.optimizer_jax_private._bfgs as _private_bfgs
 import simsopt.geo.optimizer_jax_private._common as _opt_common
 from jax.flatten_util import ravel_pytree
 
@@ -111,6 +113,26 @@ def test_reduction_helpers_pass_host_init_values_to_lax_reduce(monkeypatch):
         assert isinstance(init_value, np.ndarray)
 
 
+def test_bfgs_curvature_terms_reject_bad_curvature_updates():
+    s_k = jnp.asarray([1.0, 0.0], dtype=jnp.float64)
+    y_negative = jnp.asarray([-1.0e-3, 0.0], dtype=jnp.float64)
+    y_near_orthogonal = jnp.asarray([1.0e-20, 1.0], dtype=jnp.float64)
+
+    _, _, negative_valid, _ = _private_bfgs._bfgs_curvature_terms(
+        s_k,
+        y_negative,
+        x_dtype=s_k.dtype,
+    )
+    _, _, near_orthogonal_valid, _ = _private_bfgs._bfgs_curvature_terms(
+        s_k,
+        y_near_orthogonal,
+        x_dtype=s_k.dtype,
+    )
+
+    assert bool(negative_valid) is False
+    assert bool(near_orthogonal_valid) is False
+
+
 # ---------------------------------------------------------------------------
 # Marker constants
 # ---------------------------------------------------------------------------
@@ -153,6 +175,59 @@ def _emit_sparse_progress(progress_callback):
     progress_callback(1, 3.0, 2.0)
     progress_callback(7, 2.0, 1.0)
     progress_callback(25, 1.0, 0.5)
+
+
+def _private_lbfgs_quadratic_state(
+    monkeypatch,
+    *,
+    x0,
+    line_search_kwargs,
+    maxiter=5,
+    gtol=1e-8,
+    maxcor=4,
+):
+    from simsopt.geo.optimizer_jax_private import _LineSearchResults
+    from simsopt.geo.optimizer_jax_private import _lbfgs as _lbfgs_module
+
+    def quad(x):
+        return 0.5 * jnp.dot(x, x)
+
+    def fake_line_search(*_args, **_kwargs):
+        return _LineSearchResults(
+            failed=jnp.array(False),
+            nit=jnp.array(1),
+            nfev=jnp.array(1),
+            ngev=jnp.array(1),
+            k=jnp.array(1),
+            **line_search_kwargs,
+        )
+
+    monkeypatch.setattr(
+        _lbfgs_module,
+        "_line_search_value_and_grad",
+        fake_line_search,
+    )
+    state = _lbfgs_module._minimize_lbfgs_private(
+        quad,
+        x0,
+        maxiter=maxiter,
+        gtol=gtol,
+        maxcor=maxcor,
+    )
+    return state, quad
+
+
+def _assert_lbfgs_state_preserved(state, x0, quad, *, maxcor=4, ls_status=None):
+    assert bool(state.converged) is False
+    assert bool(state.failed) is True
+    assert int(state.status) == 5
+    if ls_status is not None:
+        assert int(state.ls_status) == ls_status
+    np.testing.assert_allclose(np.asarray(state.x_k), np.asarray(x0))
+    np.testing.assert_allclose(np.asarray(state.f_k), np.asarray(quad(x0)))
+    np.testing.assert_allclose(np.asarray(state.g_k), np.asarray(x0))
+    np.testing.assert_array_equal(np.asarray(state.rho_history), np.zeros(maxcor))
+    assert float(state.gamma) == pytest.approx(1.0)
 
 
 # ---------------------------------------------------------------------------
@@ -347,6 +422,90 @@ class TestOptimizerAdapterPrivate:
         np.testing.assert_allclose(np.asarray(state.g_k), np.zeros(2), atol=1e-12)
 
     @PRIVATE_OPTIMIZER_RUNTIME
+    def test_minimize_lbfgs_private_preserves_last_finite_iterate_on_nonfinite_step(
+        self,
+        monkeypatch,
+    ):
+        """A non-finite accepted proposal must not poison the private L-BFGS state."""
+        x0 = jnp.array([1.0, -2.0], dtype=jnp.float64)
+        state, quad = _private_lbfgs_quadratic_state(
+            monkeypatch,
+            x0=x0,
+            line_search_kwargs=dict(
+                a_k=jnp.array(1.0, dtype=jnp.float64),
+                f_k=jnp.array(np.nan, dtype=jnp.float64),
+                g_k=jnp.array([np.nan, np.nan], dtype=jnp.float64),
+                status=jnp.array(0),
+            ),
+        )
+        _assert_lbfgs_state_preserved(state, x0, quad, ls_status=0)
+
+    @PRIVATE_OPTIMIZER_RUNTIME
+    def test_minimize_lbfgs_private_rejects_degenerate_curvature_update(
+        self,
+        monkeypatch,
+    ):
+        """A non-converged step with unusable y^T s must fail before history updates."""
+        x0 = jnp.array([1.0, -2.0], dtype=jnp.float64)
+        state, quad = _private_lbfgs_quadratic_state(
+            monkeypatch,
+            x0=x0,
+            line_search_kwargs=dict(
+                a_k=jnp.array(1.0, dtype=jnp.float64),
+                f_k=jnp.array(1.0, dtype=jnp.float64),
+                g_k=jnp.array([3.0, -1.0], dtype=jnp.float64),
+                status=jnp.array(0),
+            ),
+        )
+        _assert_lbfgs_state_preserved(state, x0, quad)
+
+    @PRIVATE_OPTIMIZER_RUNTIME
+    def test_minimize_lbfgs_private_rejects_stalled_nonconverged_step(
+        self,
+        monkeypatch,
+    ):
+        """A zero-progress accepted step must fail unless the iterate actually converged."""
+        x0 = jnp.array([1.0, -2.0], dtype=jnp.float64)
+        state, quad = _private_lbfgs_quadratic_state(
+            monkeypatch,
+            x0=x0,
+            line_search_kwargs=dict(
+                a_k=jnp.array(0.0, dtype=jnp.float64),
+                f_k=jnp.array(2.5, dtype=jnp.float64),
+                g_k=jnp.array([1.0, -2.0], dtype=jnp.float64),
+                status=jnp.array(0),
+            ),
+        )
+        _assert_lbfgs_state_preserved(state, x0, quad)
+
+    @PRIVATE_OPTIMIZER_RUNTIME
+    def test_minimize_lbfgs_private_clamps_gamma_on_large_curvature_ratio(
+        self,
+        monkeypatch,
+    ):
+        """Accepted curvature updates must bound gamma to a finite, dtype-scaled range."""
+        x0 = jnp.array([1.0, -2.0], dtype=jnp.float64)
+        gamma_max = np.reciprocal(np.sqrt(np.finfo(np.float64).eps))
+        state, _ = _private_lbfgs_quadratic_state(
+            monkeypatch,
+            x0=x0,
+            line_search_kwargs=dict(
+                a_k=jnp.array(1000.0, dtype=jnp.float64),
+                f_k=jnp.array(1.0, dtype=jnp.float64),
+                g_k=jnp.array([0.9999999, -1.9999998], dtype=jnp.float64),
+                status=jnp.array(0),
+            ),
+            maxiter=1,
+            gtol=1e-12,
+        )
+
+        assert bool(state.failed) is True
+        assert int(state.status) == 1
+        assert np.isfinite(float(state.gamma))
+        assert float(state.gamma) == pytest.approx(gamma_max)
+        np.testing.assert_allclose(np.asarray(state.rho_history[-1]), 2000.0, rtol=1e-6)
+
+    @PRIVATE_OPTIMIZER_RUNTIME
     def test_hybrid_skips_continuation_after_scipy_success(self, monkeypatch):
         """Hybrid mode must return the SciPy prefix directly on convergence."""
         prefix = types.SimpleNamespace(
@@ -418,6 +577,56 @@ class TestOptimizerAdapterPrivate:
         assert result is prefix
         assert result.success is False
         assert "non-finite state" in result.message
+
+    @PRIVATE_OPTIMIZER_RUNTIME
+    def test_hybrid_nonfinite_prefix_emits_warning_and_progress(
+        self,
+        monkeypatch,
+        caplog,
+    ):
+        """Hybrid non-finite prefixes must surface observability before aborting."""
+        prefix = types.SimpleNamespace(
+            x=jnp.array([1.0, -1.0]),
+            fun=np.nan,
+            jac=jnp.array([np.nan, 0.0]),
+            nit=2,
+            nfev=3,
+            njev=3,
+            nhev=0,
+            success=False,
+            status=1,
+            hess_inv=np.eye(2),
+            message="prefix failed",
+        )
+        progress_events = []
+
+        monkeypatch.setattr(_opt, "_scipy_minimize", lambda *args, **kwargs: prefix)
+        monkeypatch.setattr(
+            _opt,
+            "_minimize_bfgs_private",
+            lambda *args, **kwargs: (_ for _ in ()).throw(
+                AssertionError("continuation must not run after non-finite prefix")
+            ),
+        )
+
+        with caplog.at_level(logging.WARNING, logger="simsopt.geo.optimizer_jax"):
+            result = jax_minimize(
+                lambda x: jnp.sum(x**2),
+                jnp.array([1.0, -1.0]),
+                method="bfgs-hybrid",
+                maxiter=8,
+                progress_callback=lambda nit, fun_value, grad_inf: progress_events.append(
+                    (nit, fun_value, grad_inf)
+                ),
+            )
+
+        assert result is prefix
+        assert "non-finite continuation state" in caplog.text
+        assert len(progress_events) == 1
+        nit, fun_value, grad_inf = progress_events[0]
+        assert nit == 2
+        assert np.isnan(fun_value)
+        assert np.isnan(grad_inf)
 
     @PRIVATE_OPTIMIZER_RUNTIME
     def test_hybrid_prefix_cap_and_total_iteration_count(self, monkeypatch):

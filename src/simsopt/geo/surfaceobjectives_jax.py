@@ -23,6 +23,7 @@ Architecture (implicit differentiation):
 """
 
 import hashlib
+import logging
 import numpy as np
 import jax
 import jax.numpy as jnp
@@ -31,6 +32,7 @@ from .._core.derivative import Derivative, derivative_dec
 from .._core.jax_host_boundary import (
     explicit_cotangent_basis as _explicit_cotangent_basis,
     host_array as _host_array,
+    host_inf_norm as _host_inf_norm,
     host_scalar as _host_scalar,
     scalar_pullback_seed as _explicit_scalar_pullback_seed,
 )
@@ -88,6 +90,7 @@ _TRACEABLE_RUNTIME_OPTION_KEYS = (
     "newton_tol",
     "newton_stab",
 )
+logger = logging.getLogger(__name__)
 
 
 def _strict_scalar_grad(fun, arg):
@@ -441,6 +444,34 @@ def _qs_ratio_from_coil_dofs(sdofs, coil_dofs, biotsavart, **qs_kwargs):
     )
 
 
+def _boozer_solve_observability_payload(result):
+    gradient = result.get("gradient")
+    grad_inf = None if gradient is None else float(_host_inf_norm(gradient))
+    residual = result.get("residual")
+    residual_inf = None if residual is None else float(_host_inf_norm(residual))
+    return {
+        "solve_type": result.get("type", "unknown"),
+        "success": bool(result.get("success", False)),
+        "grad_inf": grad_inf,
+        "residual_inf": residual_inf,
+    }
+
+
+def _log_boozer_solve_state(booz_surf):
+    if booz_surf.res is None:
+        logger.warning("BoozerSurfaceJAX solve state unavailable: res=None")
+        return
+    payload = _boozer_solve_observability_payload(booz_surf.res)
+    log_fn = logger.debug if payload["success"] else logger.warning
+    log_fn(
+        "BoozerSurfaceJAX cached solve: type=%s success=%s grad_inf=%s residual_inf=%s",
+        payload["solve_type"],
+        payload["success"],
+        payload["grad_inf"],
+        payload["residual_inf"],
+    )
+
+
 def _ensure_solved(booz_surf):
     """Re-run the Boozer inner solve if the surface is dirty."""
     if booz_surf.need_to_run_code:
@@ -451,6 +482,7 @@ def _ensure_solved(booz_surf):
                 "accessing objective values."
             )
         booz_surf.run_code(booz_surf.res["iota"], G=booz_surf.res["G"])
+    _log_boozer_solve_state(booz_surf)
     if (
         booz_surf.res is None
         or not booz_surf.res.get("success")
