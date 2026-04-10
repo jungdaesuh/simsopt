@@ -153,6 +153,7 @@ DEFAULT_STAGE2_SEEDS_BY_PLASMA = {
         "banana_surf_radius": 0.22,
         "tf_current_A": 1.0e5,
         "order": 2,
+        "banana_init_current_A": 1.0e4,
     },
     "wout_nfp22ginsburg_000_002084_iota20.nc": {
         "major_radius": 0.975,
@@ -165,6 +166,7 @@ DEFAULT_STAGE2_SEEDS_BY_PLASMA = {
         "banana_surf_radius": 0.22,
         "tf_current_A": 1.0e5,
         "order": 2,
+        "banana_init_current_A": 1.0e4,
     },
 }
 def add_confinement_surrogate_args(parser):

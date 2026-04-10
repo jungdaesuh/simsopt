@@ -230,12 +230,15 @@ def evaluate_stage2_hardware_constraints(
 def stage2_constraint_activity_tolerances(
     distance_smoothing: float,
     curvature_smoothing: float,
+    *,
+    length_tolerance: float = 1e-3,
+    banana_current_tolerance: float = 1e-3,
 ):
     return [
-        1e-3,
+        float(length_tolerance),
         max(4.0 * float(distance_smoothing), _SMOOTHING_EPS),
         max(4.0 * float(curvature_smoothing), _SMOOTHING_EPS),
-        1e-3,
+        float(banana_current_tolerance),
     ]
 
 

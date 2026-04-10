@@ -5,6 +5,29 @@ from pathlib import Path
 
 from .current_contracts import resolve_effective_current_mode
 
+DEFAULT_LEGACY_BANANA_INIT_CURRENT_A = 1.0e4
+DEFAULT_BANANA_CURRENT_HARD_LIMIT_A = 1.6e4
+
+
+def _upgrade_legacy_banana_current_metadata(upgraded_results: dict) -> None:
+    banana_current_A = upgraded_results.get("BANANA_CURRENT_A")
+    stage2_seed_path = upgraded_results.get("STAGE2_BS_PATH")
+    if upgraded_results.get("BANANA_INIT_CURRENT_A") is None:
+        if stage2_seed_path in {None, ""}:
+            upgraded_results["BANANA_INIT_CURRENT_A"] = (
+                DEFAULT_LEGACY_BANANA_INIT_CURRENT_A
+            )
+        elif upgraded_results.get("init_only") and banana_current_A is not None:
+            upgraded_results["BANANA_INIT_CURRENT_A"] = float(banana_current_A)
+    if upgraded_results.get("BANANA_CURRENT_MAX_A") is None:
+        realized_current_abs_A = (
+            0.0 if banana_current_A is None else abs(float(banana_current_A))
+        )
+        upgraded_results["BANANA_CURRENT_MAX_A"] = max(
+            DEFAULT_BANANA_CURRENT_HARD_LIMIT_A,
+            realized_current_abs_A,
+        )
+
 
 def upgrade_legacy_stage2_artifact_results(
     stage2_artifact_results: dict,
@@ -21,6 +44,7 @@ def upgrade_legacy_stage2_artifact_results(
             upgraded_results["TF_CURRENT_SUM_ABS_A"] = abs(float(tf_current_A)) * float(
                 num_tf_coils
             )
+    _upgrade_legacy_banana_current_metadata(upgraded_results)
     return upgraded_results
 
 
@@ -120,6 +144,8 @@ def expected_locked_baseline_stage2_artifact_metadata(
         "TF_CURRENT_A": config.tf_current_A,
         "TF_CURRENT_SUM_ABS_A": num_tf_coils * config.tf_current_A,
         "NUM_TF_COILS": num_tf_coils,
+        "BANANA_INIT_CURRENT_A": config.banana_init_current_A,
+        "BANANA_CURRENT_MAX_A": config.banana_current_max_A,
         "MAJOR_RADIUS": config.major_radius,
         "TOROIDAL_FLUX": config.toroidal_flux,
         "LENGTH_WEIGHT": config.length_weight,

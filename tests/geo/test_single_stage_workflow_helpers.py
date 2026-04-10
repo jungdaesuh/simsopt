@@ -509,6 +509,8 @@ class BaselineSweepScriptTests(unittest.TestCase):
         self.assertEqual(loaded_results_path, stage2_results_path)
         self.assertEqual(loaded_results["NUM_TF_COILS"], 20)
         self.assertEqual(loaded_results["TF_CURRENT_SUM_ABS_A"], 1.6e6)
+        self.assertEqual(loaded_results["BANANA_INIT_CURRENT_A"], 1.0e4)
+        self.assertEqual(loaded_results["BANANA_CURRENT_MAX_A"], 1.6e4)
 
     def test_build_summary_reports_non_dominated_cases_and_artifact_provenance(self):
         module = load_baseline_sweep_module()
@@ -687,3 +689,29 @@ class FiniteCurrentSmokeScriptTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "missing TF_CURRENT_SUM_ABS_A"):
             module.resolve_expected_stage2_tf_current_sum_abs_A(upgraded_results)
+
+    def test_legacy_smoke_artifact_upgrades_banana_current_metadata_for_fresh_runs(self):
+        module = load_finite_current_smoke_module()
+        legacy_results = {
+            "BANANA_CURRENT_A": 9500.0,
+            "STAGE2_BS_PATH": None,
+            "init_only": False,
+        }
+
+        upgraded_results = module.upgrade_legacy_stage2_artifact_results(legacy_results)
+
+        self.assertEqual(upgraded_results["BANANA_INIT_CURRENT_A"], 1.0e4)
+        self.assertEqual(upgraded_results["BANANA_CURRENT_MAX_A"], 1.6e4)
+
+    def test_legacy_smoke_artifact_upgrades_banana_current_max_conservatively(self):
+        module = load_finite_current_smoke_module()
+        legacy_results = {
+            "BANANA_CURRENT_A": -2.1e4,
+            "STAGE2_BS_PATH": "/tmp/seed.json",
+            "init_only": False,
+        }
+
+        upgraded_results = module.upgrade_legacy_stage2_artifact_results(legacy_results)
+
+        self.assertEqual(upgraded_results["BANANA_CURRENT_MAX_A"], 2.1e4)
+        self.assertNotIn("BANANA_INIT_CURRENT_A", upgraded_results)

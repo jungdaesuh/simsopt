@@ -75,29 +75,20 @@ def _print_taylor_test_summary(name: str, result: dict) -> None:
         print(f"[{name}] eps={epsilon:.3e}, err={error:.3e}")
 
 
-def _raise_or_parser_error(parser, message: str) -> None:
-    if parser is not None:
-        parser.error(message)
-    raise ValueError(message)
-
-
-def validate_banana_current_cli_args(args, parser=None) -> None:
+def validate_banana_current_cli_args(args) -> None:
     banana_init_current_A = float(args.banana_init_current_A)
     banana_current_max_A = float(args.banana_current_max_A)
     if not (0.0 < banana_init_current_A <= BANANA_CURRENT_HARD_LIMIT_A):
-        _raise_or_parser_error(
-            parser,
-            "--banana-init-current-A must be in the interval (0, 16000].",
+        raise ValueError(
+            "--banana-init-current-A must be in the interval (0, 16000]."
         )
     if not (0.0 < banana_current_max_A <= BANANA_CURRENT_HARD_LIMIT_A):
-        _raise_or_parser_error(
-            parser,
-            "--banana-current-max-A must be in the interval (0, 16000].",
+        raise ValueError(
+            "--banana-current-max-A must be in the interval (0, 16000]."
         )
     if banana_init_current_A > banana_current_max_A:
-        _raise_or_parser_error(
-            parser,
-            "--banana-init-current-A cannot exceed --banana-current-max-A.",
+        raise ValueError(
+            "--banana-init-current-A cannot exceed --banana-current-max-A."
         )
 
 
@@ -446,7 +437,10 @@ def parse_args():
         help="RNG seed for basin-hopping (-1 = random, default). Set for reproducibility.",
     )
     args = parser.parse_args()
-    validate_banana_current_cli_args(args, parser=parser)
+    try:
+        validate_banana_current_cli_args(args)
+    except ValueError as exc:
+        parser.error(str(exc))
     return args
 
 
@@ -508,7 +502,8 @@ def main(parsed_args=None):
     # ---------------------------------------------------------------------------------------
     args = parse_args() if parsed_args is None else parsed_args
     validate_alm_cli_args(args)
-    validate_banana_current_cli_args(args)
+    if parsed_args is not None:
+        validate_banana_current_cli_args(args)
 
     # File for the desired boundary magnetic surface:
     plasma_surf_filename = args.plasma_surf_filename

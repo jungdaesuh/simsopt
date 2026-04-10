@@ -362,6 +362,15 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
         tolerances = self.module.stage2_constraint_activity_tolerances(0.005, 0.05)
         self.assertEqual(tolerances, [1e-3, 0.02, 0.2, 1e-3])
 
+    def test_stage2_constraint_activity_tolerances_accept_explicit_endcaps(self):
+        tolerances = self.module.stage2_constraint_activity_tolerances(
+            0.005,
+            0.05,
+            length_tolerance=2e-3,
+            banana_current_tolerance=3e-3,
+        )
+        self.assertEqual(tolerances, [2e-3, 0.02, 0.2, 3e-3])
+
     def test_evaluate_stage2_alm_problem_caps_banana_current_by_magnitude(self):
         base_objective = _FakeAlgebraicObjective(3.5, [1.2, -0.5], projected_gradient=[0.25, -0.4])
         new_bs = _FakeBiotSavart((1, 1, 3))
