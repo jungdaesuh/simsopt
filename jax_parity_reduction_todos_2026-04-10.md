@@ -11,7 +11,8 @@ This repo already uses the right high-level parity architecture:
 - `native_cpu` is the reference lane
 - `jax_cpu_parity` is the algorithmic parity lane
 - `jax_gpu_parity` is the device parity lane
-- `strict=True` should reject fallback seams instead of silently mixing JAX and CPU/C++
+- `strict=True` should reject legacy backend fallback seams instead of silently mixing JAX and CPU/C++
+- The documented SquaredFlux objective fallback stays explicit and parity tests reject it via `parity_mode="native_only"`
 
 Relevant repo docs:
 
@@ -290,7 +291,7 @@ Solver drift is dominated by:
 - [x] `integral_BdotN` parity remains green after reduction changes
   - Re-verified with `tests/objectives/test_integral_bdotn_jax.py -q`.
 - [x] Stage 2 parity remains green with no hidden fallback seams
-  - Re-verified with the focused `tests/integration/test_stage2_jax.py` objective-parity slice.
+  - Re-verified with the focused `tests/integration/test_stage2_jax.py` objective-parity slice, the Stage 2 fallback-visibility slice, and the native-only wrapper seam test in `tests/objectives/test_fluxobjective_jax_parity.py`.
 - [x] Single-stage parity remains green under the documented solver-contract acceptance model
   - Re-verified with the CPU/JAX exact / solved-state parity slice in `tests/integration/test_single_stage_jax_cpu_reference.py`.
 - [x] No new reduction-stability work is attempted in `optimizer_jax.py` unless a concrete failure points there
