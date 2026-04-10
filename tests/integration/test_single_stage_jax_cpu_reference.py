@@ -712,6 +712,40 @@ def _assert_boozer_surfaces_end_state_parity(
     )
 
 
+def _build_real_fixture_gpu_solver_pair():
+    cpu_fixture = build_real_single_stage_init_fixture(
+        backend="cpu",
+        optimizer_backend="scipy",
+    )
+    booz_cpu = cpu_fixture["boozer_surface"]
+    cpu_result = booz_cpu.res
+    assert cpu_result is not None and cpu_result.get("success", False)
+
+    gpu_fixture = build_real_single_stage_init_fixture(
+        backend="jax",
+        optimizer_backend="ondevice",
+        boozer_surface_dofs_override=np.asarray(
+            booz_cpu.surface.get_dofs(),
+            dtype=float,
+        ),
+        boozer_iota_override=float(cpu_result["iota"]),
+        boozer_G_override=float(cpu_result["G"]),
+    )
+    return booz_cpu, gpu_fixture, gpu_fixture["boozer_surface"].res
+
+
+def _assert_gpu_boozer_solver_result_on_device(gpu, gpu_fixture, gpu_result):
+    assert gpu_fixture["boozer_optimizer_backend"] == "ondevice"
+    assert gpu_result is not None and gpu_result.get("success", False)
+    assert gpu_result["type"] == "ls"
+    assert_arrays_on_device(
+        gpu,
+        gpu_result["jacobian"],
+        gpu_result["hessian"],
+        *gpu_result["PLU"],
+    )
+
+
 def _assert_streaming_group_vjp_matches_full(
     full_d_coil_arrays, full_coil_indices, streamed
 ):
@@ -4431,6 +4465,28 @@ class TestRealFixtureGpuM5Parity:
     """Reduced real single-stage fixture covers the public GPU-backed M5 lane."""
 
     @pytest.mark.slow
+    def test_real_fixture_gpu_solver_stays_ondevice_under_disallow(
+        self,
+        monkeypatch,
+        request,
+    ):
+        gpu = parity_device("gpu")
+        monkeypatch.setenv("SIMSOPT_JAX_TRANSFER_GUARD", "disallow")
+        _enable_strict_jax_backend(monkeypatch, request)
+        booz_cpu, gpu_fixture, gpu_result = _build_real_fixture_gpu_solver_pair()
+        booz_gpu = gpu_fixture["boozer_surface"]
+
+        assert str(gpu_result["optimizer_method"]).endswith("-ondevice")
+        _assert_gpu_boozer_solver_result_on_device(gpu, gpu_fixture, gpu_result)
+        _assert_boozer_surfaces_end_state_parity(
+            "CPU",
+            booz_cpu,
+            "JAX GPU disallow",
+            booz_gpu,
+            tolerances=_REAL_FIXTURE_SOLVER_CPU_GPU_TOLS,
+        )
+
+    @pytest.mark.slow
     def test_real_fixture_gpu_solver_end_state_contracts_match_cpu_reference(
         self,
         monkeypatch,
@@ -4438,33 +4494,8 @@ class TestRealFixtureGpuM5Parity:
     ):
         gpu = parity_device("gpu")
         _enable_strict_jax_backend(monkeypatch, request)
-
-        cpu_fixture = build_real_single_stage_init_fixture(
-            backend="cpu",
-            optimizer_backend="scipy",
-        )
-        booz_cpu = cpu_fixture["boozer_surface"]
-        cpu_result = booz_cpu.res
-        assert cpu_result is not None and cpu_result.get("success", False)
-
-        gpu_fixture = build_real_single_stage_init_fixture(
-            backend="jax",
-            optimizer_backend="ondevice",
-            boozer_surface_dofs_override=np.asarray(
-                booz_cpu.surface.get_dofs(),
-                dtype=float,
-            ),
-            boozer_iota_override=float(cpu_result["iota"]),
-            boozer_G_override=float(cpu_result["G"]),
-        )
-        gpu_result = gpu_fixture["boozer_surface"].res
-        assert gpu_result is not None and gpu_result.get("success", False)
-        assert_arrays_on_device(
-            gpu,
-            gpu_result["jacobian"],
-            gpu_result["hessian"],
-            *gpu_result["PLU"],
-        )
+        booz_cpu, gpu_fixture, gpu_result = _build_real_fixture_gpu_solver_pair()
+        _assert_gpu_boozer_solver_result_on_device(gpu, gpu_fixture, gpu_result)
 
         _assert_boozer_surfaces_end_state_parity(
             "CPU",

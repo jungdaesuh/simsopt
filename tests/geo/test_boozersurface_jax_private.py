@@ -1,6 +1,5 @@
 """Private optimizer runtime tests for BoozerSurfaceJAX."""
 
-import logging
 import types
 
 import jax
@@ -178,6 +177,22 @@ _ALL_JAX_BACKEND_MODES = (
     "jax_gpu_fast",
     "jax_metal_smoke",
 )
+
+
+def _structured_optimizer_x0():
+    return {
+        "surface": jnp.array([1.0, -2.0], dtype=jnp.float64),
+        "current": jnp.array([0.5], dtype=jnp.float64),
+    }
+
+
+def _assert_structured_zero_optimizer_result(result):
+    assert isinstance(result.x, dict)
+    assert isinstance(result.jac, dict)
+    np.testing.assert_allclose(result.x["surface"], np.zeros(2), atol=1e-12)
+    np.testing.assert_allclose(result.x["current"], np.zeros(1), atol=1e-12)
+    np.testing.assert_allclose(result.jac["surface"], np.zeros(2), atol=1e-12)
+    np.testing.assert_allclose(result.jac["current"], np.zeros(1), atol=1e-12)
 
 
 def _emit_sparse_progress(progress_callback):
@@ -577,10 +592,7 @@ class TestOptimizerAdapterPrivate:
                 + jnp.dot(state["current"], state["current"])
             )
 
-        x0 = {
-            "surface": jnp.array([1.0, -2.0], dtype=jnp.float64),
-            "current": jnp.array([0.5], dtype=jnp.float64),
-        }
+        x0 = _structured_optimizer_x0()
         callback_calls = []
 
         result = jax_minimize(
@@ -591,12 +603,47 @@ class TestOptimizerAdapterPrivate:
             callback=lambda state: callback_calls.append(state),
         )
 
-        assert isinstance(result.x, dict)
-        assert isinstance(result.jac, dict)
-        np.testing.assert_allclose(result.x["surface"], np.zeros(2), atol=1e-12)
-        np.testing.assert_allclose(result.x["current"], np.zeros(1), atol=1e-12)
-        np.testing.assert_allclose(result.jac["surface"], np.zeros(2), atol=1e-12)
-        np.testing.assert_allclose(result.jac["current"], np.zeros(1), atol=1e-12)
+        _assert_structured_zero_optimizer_result(result)
+        assert callback_calls
+        assert isinstance(callback_calls[0], dict)
+
+    @PRIVATE_OPTIMIZER_RUNTIME
+    @REQUIRES_PRIVATE_OPTIMIZER_RUNTIME
+    def test_target_minimize_pytree_path_skips_public_flattening_adapter(
+        self, monkeypatch
+    ):
+        """target_minimize() should leave pytree flattening to the private solver."""
+
+        def quad(state):
+            return 0.5 * (
+                jnp.dot(state["surface"], state["surface"])
+                + jnp.dot(state["current"], state["current"])
+            )
+
+        x0 = _structured_optimizer_x0()
+        callback_calls = []
+
+        def forbid_public_flattening(*_args, **_kwargs):
+            raise AssertionError(
+                "target_minimize() should not pre-flatten pytrees in the "
+                "public target entrypoint."
+            )
+
+        monkeypatch.setattr(
+            _opt,
+            "_prepare_optimizer_callable_inputs",
+            forbid_public_flattening,
+        )
+
+        result = _opt.target_minimize(
+            quad,
+            x0,
+            method="lbfgs-ondevice",
+            maxiter=10,
+            callback=lambda state: callback_calls.append(state),
+        )
+
+        _assert_structured_zero_optimizer_result(result)
         assert callback_calls
         assert isinstance(callback_calls[0], dict)
 
@@ -611,10 +658,7 @@ class TestOptimizerAdapterPrivate:
                 + jnp.dot(state["current"], state["current"])
             )
 
-        x0 = {
-            "surface": jnp.array([1.0, -2.0], dtype=jnp.float64),
-            "current": jnp.array([0.5], dtype=jnp.float64),
-        }
+        x0 = _structured_optimizer_x0()
         flat_x0, _ = ravel_pytree(x0)
 
         state = _opt._minimize_lbfgs_private(

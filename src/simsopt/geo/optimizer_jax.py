@@ -148,7 +148,7 @@ class TargetOptimizerContract:
 
 @dataclass(frozen=True)
 class _OptimizerPytreeAdapter:
-    flat_x0: jax.Array
+    flat_dtype: np.dtype
     unravel: Callable[[jax.Array], object]
     tree_def: object
 
@@ -196,9 +196,9 @@ class _OptimizerPytreeAdapter:
 
     def finalize_result(self, result):
         if hasattr(result, "x"):
-            result.x = self._hostify_flat(result.x, dtype=self.flat_x0.dtype)
+            result.x = self._hostify_flat(result.x, dtype=self.flat_dtype)
         if hasattr(result, "jac"):
-            result.jac = self._hostify_flat(result.jac, dtype=self.flat_x0.dtype)
+            result.jac = self._hostify_flat(result.jac, dtype=self.flat_dtype)
         return result
 
 
@@ -310,9 +310,9 @@ def _prepare_optimizer_pytree_adapter(x0):
         return None
     flat_x0, unravel = ravel_pytree(x0)
     _, tree_def = jax.tree_util.tree_flatten(x0)
-    flat_dtype = _optimizer_dtype(flat_x0)
+    flat_dtype = np.dtype(_optimizer_dtype(flat_x0))
     return _OptimizerPytreeAdapter(
-        flat_x0=_optimizer_flat_vector(flat_x0, dtype=flat_dtype),
+        flat_dtype=flat_dtype,
         unravel=unravel,
         tree_def=tree_def,
     )
@@ -348,9 +348,10 @@ def _prepare_optimizer_callable_inputs(fun, x0, *, value_and_grad, callback):
     adapter = _prepare_optimizer_pytree_adapter(x0)
     if adapter is None:
         return fun, x0, callback, None
+    flat_x0, _ = ravel_pytree(x0)
     return (
         adapter.wrap_fun(fun, value_and_grad=value_and_grad),
-        adapter.flat_x0,
+        _optimizer_flat_vector(flat_x0, dtype=adapter.flat_dtype),
         adapter.wrap_callback(callback),
         adapter,
     )
@@ -2253,12 +2254,7 @@ def target_minimize(
             f"{sorted(_TARGET_METHODS)}. Got {method!r}."
         )
 
-    fun, x0, callback, pytree_adapter = _prepare_optimizer_callable_inputs(
-        fun,
-        x0,
-        value_and_grad=value_and_grad,
-        callback=callback,
-    )
+    pytree_adapter = _prepare_optimizer_pytree_adapter(x0)
 
     def finalize(result):
         return _finalize_optimizer_result(result, pytree_adapter)

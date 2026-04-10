@@ -882,6 +882,55 @@ def test_transfer_guard_disallow_allows_lbfgs_ondevice_quadratic_smokes():
     )
 
 
+def test_transfer_guard_disallow_allows_target_minimize_structured_pytree_entry():
+    """Direct target_minimize() should stay transfer-clean for structured pytrees."""
+    _assert_import_check_passes(
+        """
+        import jax
+        import jax.numpy as jnp
+        import numpy as np
+        import simsopt.config as simsopt_config
+        from simsopt.geo.optimizer_jax import (
+            private_optimizer_runtime_is_supported,
+            target_minimize,
+        )
+
+        simsopt_config.set_backend(
+            "jax_cpu_parity",
+            strict=True,
+            transfer_guard="disallow",
+        )
+        if not private_optimizer_runtime_is_supported(jax.__version__):
+            raise SystemExit(0)
+        half = jax.device_put(np.asarray(0.5, dtype=np.float64))
+
+        def quad(state):
+            return half * (
+                jnp.dot(state["surface"], state["surface"])
+                + jnp.dot(state["current"], state["current"])
+            )
+
+        x0 = {
+            "surface": jnp.asarray(np.array([1.0, -2.0], dtype=np.float64)),
+            "current": jnp.asarray(np.array([0.5], dtype=np.float64)),
+        }
+        result = target_minimize(
+            quad,
+            x0,
+            method="lbfgs-ondevice",
+            maxiter=10,
+        )
+
+        assert result.success is True
+        assert isinstance(result.x, dict)
+        assert isinstance(result.jac, dict)
+        np.testing.assert_allclose(result.x["surface"], np.zeros(2), atol=1e-12)
+        np.testing.assert_allclose(result.x["current"], np.zeros(1), atol=1e-12)
+    """,
+        failure_message="target_minimize structured pytree disallow smoke failed",
+    )
+
+
 def _assert_ondevice_optimizer_reuses_compiled_solver(method: str) -> None:
     _assert_python_script_passes(
         _JAX_SUBPROCESS_CASES_PATH,
@@ -994,6 +1043,54 @@ def test_transfer_guard_disallow_allows_lm_ondevice_quadratic_smokes():
         assert np.allclose(np.asarray(result.x), np.asarray([0.25, -0.75]))
     """,
         failure_message="lm-ondevice transfer-guard smoke failed",
+    )
+
+
+def test_transfer_guard_disallow_allows_target_least_squares_structured_entry():
+    """Direct target_least_squares() should stay transfer-clean for structured pytrees."""
+    _assert_import_check_passes(
+        """
+        import jax
+        import jax.numpy as jnp
+        import numpy as np
+        import simsopt.config as simsopt_config
+        from simsopt.geo.optimizer_jax import target_least_squares
+
+        simsopt_config.set_backend(
+            "jax_cpu_parity",
+            strict=True,
+            transfer_guard="disallow",
+        )
+
+        def residual_fn(state):
+            return jnp.asarray(
+                [
+                    state["surface"][0] - 2.0,
+                    state["surface"][1] + 1.0,
+                    state["iota"] - 0.25,
+                ],
+                dtype=jnp.float64,
+            )
+
+        x0 = {
+            "surface": jnp.asarray(np.array([5.0, 3.0], dtype=np.float64)),
+            "iota": jnp.asarray(np.array(0.0, dtype=np.float64)),
+        }
+        result = target_least_squares(
+            residual_fn,
+            x0,
+            method="lm-ondevice",
+            maxiter=25,
+            tol=1e-12,
+        )
+
+        assert result.success is True
+        assert isinstance(result.x, dict)
+        assert isinstance(result.jac, dict)
+        np.testing.assert_allclose(result.x["surface"], np.array([2.0, -1.0]))
+        np.testing.assert_allclose(result.x["iota"], 0.25)
+    """,
+        failure_message="target_least_squares structured pytree disallow smoke failed",
     )
 
 
