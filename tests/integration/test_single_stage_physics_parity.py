@@ -34,6 +34,10 @@ from benchmarks.validation_ladder_common import (  # noqa: E402
     repo_pythonpath_env,
     run_python_script,
 )
+from benchmarks.validation_ladder_contract import (  # noqa: E402
+    TIER3_SINGLE_STAGE_OUTER_LOOP_RUNG,
+    single_stage_proof_contract,
+)
 
 bootstrap_local_simsopt()
 
@@ -81,7 +85,17 @@ def _single_stage_script_path() -> Path:
     )
 
 
-def _single_stage_subprocess_env(*, backend: str, platform: str) -> dict[str, str]:
+def _single_stage_outer_loop_probe_path() -> Path:
+    return REPO_ROOT / "benchmarks" / "single_stage_outer_loop_probe.py"
+
+
+def _single_stage_subprocess_env(
+    *,
+    backend: str,
+    platform: str,
+    strict_backend_mode: str | None = None,
+    transfer_guard: str | None = None,
+) -> dict[str, str]:
     # Keep a stable cache across reruns because the real JAX outer-loop probe
     # can otherwise spend minutes in cold XLA compilation with no stage output.
     env = repo_pythonpath_env(
@@ -100,6 +114,11 @@ def _single_stage_subprocess_env(*, backend: str, platform: str) -> dict[str, st
         env["JAX_COMPILATION_CACHE_DIR"] = str(cache_dir)
         env["SIMSOPT_JAX_COMPILATION_CACHE_POLICY"] = "explicit"
         env.pop("SIMSOPT_DISABLE_JAX_COMPILATION_CACHE", None)
+    if strict_backend_mode is not None:
+        env["SIMSOPT_BACKEND_MODE"] = str(strict_backend_mode)
+        env["SIMSOPT_BACKEND_STRICT"] = "1"
+    if transfer_guard is not None:
+        env["SIMSOPT_JAX_TRANSFER_GUARD"] = str(transfer_guard)
     return env
 
 
@@ -160,6 +179,49 @@ def _run_single_stage_script(
                 self_intersecting=bool(results["SELF_INTERSECTING"]),
             ),
         )
+
+
+def _require_cuda_runtime_or_skip() -> None:
+    jax = pytest.importorskip("jax")
+    if not any(device.platform in {"cuda", "gpu"} for device in jax.devices()):
+        pytest.skip("CUDA GPU not available")
+
+
+def _run_single_stage_outer_loop_probe(
+    *,
+    platform: str,
+    optimizer_backend: str,
+    maxiter: int,
+    strict_backend_mode: str | None = None,
+    transfer_guard: str | None = None,
+) -> dict[str, Any]:
+    with tempfile.TemporaryDirectory(
+        prefix="single-stage-outer-loop-probe-"
+    ) as tmp_dir:
+        output_json = Path(tmp_dir) / "probe.json"
+        run_python_script(
+            _single_stage_outer_loop_probe_path(),
+            [
+                "--platform",
+                platform,
+                "--optimizer-backend",
+                optimizer_backend,
+                "--maxiter",
+                str(maxiter),
+                "--output-json",
+                str(output_json),
+            ],
+            env=_single_stage_subprocess_env(
+                backend="jax",
+                platform=platform,
+                strict_backend_mode=strict_backend_mode,
+                transfer_guard=transfer_guard,
+            ),
+            cwd=REPO_ROOT,
+            bootstrap_repo=True,
+            stream_output=True,
+        )
+        return dict(load_json(output_json))
 
 
 def _load_single_stage_outputs(output_root: Path) -> tuple[dict[str, Any], Any, Any]:
@@ -449,3 +511,37 @@ class TestSingleStagePhysicsSmokeParity:
             rtol=5e-3,
             atol=1e-3,
         )
+
+
+class TestSingleStageOuterLoopGpuProof:
+    @pytest.mark.slow
+    def test_cuda_outer_loop_probe_accepts_step_under_strict_transfer_guard(self):
+        _require_cuda_runtime_or_skip()
+        contract = single_stage_proof_contract(TIER3_SINGLE_STAGE_OUTER_LOOP_RUNG)
+        payload = _run_single_stage_outer_loop_probe(
+            platform="cuda",
+            optimizer_backend="ondevice",
+            maxiter=int(contract["default_maxiter"]),
+            strict_backend_mode="jax_gpu_parity",
+            transfer_guard="disallow",
+        )
+
+        assert payload["rung"] == TIER3_SINGLE_STAGE_OUTER_LOOP_RUNG
+        assert payload["passed"] is True
+        assert payload["failures"] == []
+
+        provenance = payload["provenance"]
+        assert provenance["backend_mode"] == "jax_gpu_parity"
+        assert provenance["backend_strict"] is True
+        assert provenance["transfer_guard"] == "disallow"
+
+        probe = payload["probe"]
+        assert probe["iterations"] >= int(contract["min_iterations"])
+        assert (
+            probe["outer_optimizer_method"]
+            == contract["required_outer_optimizer_method"]
+        )
+        assert probe["boozer_optimizer_backend"] == "ondevice"
+        assert probe["boozer_optimizer_method"] == "lm-ondevice"
+        assert probe["self_intersecting"] is False
+        assert all(probe["finite_result_keys"].values())

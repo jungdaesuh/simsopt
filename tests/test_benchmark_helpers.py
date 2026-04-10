@@ -2458,6 +2458,8 @@ def test_smoke_workflow_adds_cuda_e2e_target_lane_gate():
 def test_smoke_workflow_adds_cuda_strict_transfer_guard_pytest_lane():
     workflow_text = _smoke_workflow_path().read_text(encoding="utf-8")
     _assert_named_benchmark_env_bootstrap(workflow_text)
+    assert "tests/integration/test_single_stage_jax_cpu_reference.py" in workflow_text
+    assert "tests/integration/test_single_stage_physics_parity.py" in workflow_text
     assert "jax-gpu-strict-purity:" in workflow_text
     assert "name: JAX GPU strict purity (CUDA, transfer_guard=disallow)" in workflow_text
     assert "runs-on: [self-hosted, gpu]" in workflow_text
