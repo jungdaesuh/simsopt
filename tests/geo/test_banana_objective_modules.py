@@ -676,6 +676,23 @@ class SingleStageObjectiveModuleTests(_ModuleTestCase):
         self.assertAlmostEqual(result["physics_total"], 25.0)
         np.testing.assert_allclose(result["grad"], [0.0, 0.0, 0.0, 0.0])
 
+    def test_evaluate_base_objective_rejects_unknown_alm_formulation(self):
+        objective, nonqs, brs, jiota, jlength = self._make_projected_base_terms()
+
+        with self.assertRaisesRegex(ValueError, "Unsupported ALM formulation"):
+            self.module.evaluate_base_objective(
+                np.array([1.0]),
+                nonqs,
+                brs,
+                RES_WEIGHT=2.0,
+                Jiota=jiota,
+                IOTAS_WEIGHT=3.0,
+                JCurveLength=jlength,
+                LENGTH_WEIGHT=1.0,
+                objective_optimizable=objective,
+                alm_formulation="typo",
+            )
+
     def test_evaluate_alm_objective_projects_base_gradient_into_constraint_space(self):
         objective, nonqs, brs, jiota, jlength = self._make_projected_base_terms()
 
@@ -820,6 +837,52 @@ class SingleStageObjectiveModuleTests(_ModuleTestCase):
         self.assertAlmostEqual(result["base_total"], 25.0)
         np.testing.assert_allclose(result["constraint_activity_tolerances"], [0.04, 0.04, 0.2, 0.0, 0.0, 0.0, 0.0])
         np.testing.assert_allclose(result["grad"], [7.0, -4.0, 0.0, 0.0])
+
+    def test_evaluate_alm_objective_gil_formulation_requires_explicit_thresholds(self):
+        objective, nonqs, brs, jiota, jlength = self._make_projected_base_terms()
+
+        with self.assertRaisesRegex(ValueError, "requires explicit objective thresholds"):
+            self.module.evaluate_alm_objective(
+                np.array([1.0]),
+                nonqs,
+                brs,
+                RES_WEIGHT=2.0,
+                Jiota=jiota,
+                IOTAS_WEIGHT=3.0,
+                JCurveLength=jlength,
+                LENGTH_WEIGHT=1.0,
+                JCurveCurve=_FakeAlgebraicObjective(0.6, [0.3, 0.4]),
+                JCurveSurface=_FakeAlgebraicObjective(0.7, [0.5, 0.6]),
+                JCurvature=_FakeAlgebraicObjective(0.8, [0.7, 0.8]),
+                multipliers=np.arange(7, dtype=float),
+                penalty=4.0,
+                objective_optimizable=objective,
+                curves=["curve_a"],
+                curve_curve_min_distance=0.05,
+                outer_surface="outer",
+                curve_surface_min_distance=0.02,
+                banana_curve="banana",
+                curvature_threshold=40.0,
+                distance_smoothing=0.01,
+                curvature_smoothing=0.05,
+                constraint_names=(
+                    "coil_coil_spacing",
+                    "coil_surface_spacing",
+                    "max_curvature",
+                    "qs_error",
+                    "boozer_residual",
+                    "iota_penalty",
+                    "length_penalty",
+                ),
+                curve_curve_constraint_fn=lambda *_args: (-0.1, np.array([1.0, 0.0, 0.0, 0.0]), 0.0),
+                curve_surface_constraint_fn=lambda *_args: (0.2, np.array([0.0, 1.0, 0.0, 0.0]), 0.2),
+                curvature_constraint_fn=lambda *_args: (0.3, np.array([1.0, -1.0, 0.0, 0.0]), 0.3),
+                alm_formulation="gil",
+                qs_threshold=1.0,
+                boozer_threshold=1.0,
+                iota_penalty_threshold=None,
+                length_penalty_threshold=0.0,
+            )
 
 
 class SingleStageGeometryModuleTests(_ModuleTestCase):

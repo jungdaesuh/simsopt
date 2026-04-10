@@ -180,6 +180,47 @@ class MinimizeAlmTests(unittest.TestCase):
                 snapshot_accepted_state_fn=lambda: {"x": 0.0},
             )
 
+    def test_minimize_alm_keeps_positional_snapshot_hook_compatibility(self):
+        module = load_alm_utils_module()
+        settings = module.ALMSettings(max_outer_iterations=1)
+
+        def evaluate_problem(x, multipliers, penalty):
+            del multipliers, penalty
+            x = np.asarray(x, dtype=float)
+            return {
+                "total": 0.0,
+                "grad": np.zeros_like(x),
+                "constraint_values": np.zeros(1),
+                "stationarity_norm": 0.0,
+            }
+
+        snapshot_calls = []
+        restore_calls = []
+
+        def snapshot_state():
+            snapshot_calls.append("snapshot")
+            return {"x": 0.0}
+
+        def restore_state(state):
+            restore_calls.append(state)
+
+        result = module.minimize_alm(
+            np.array([0.0]),
+            ["dummy"],
+            evaluate_problem,
+            settings,
+            {"maxiter": 1},
+            None,
+            None,
+            None,
+            snapshot_state,
+            restore_state,
+        )
+
+        self.assertTrue(result.success)
+        self.assertEqual(snapshot_calls, [])
+        self.assertEqual(restore_calls, [])
+
     def test_build_inner_options_caps_boxed_inner_work_in_feasible_continuations(self):
         module = load_alm_utils_module()
         profile = module._select_inner_solve_profile(
@@ -511,6 +552,72 @@ class MinimizeAlmTests(unittest.TestCase):
         self.assertEqual(result.history[0]["action"], "penalty_increase")
         self.assertEqual(result.history[1]["action"], "penalty_increase")
         self.assertEqual(result.history[1]["outer_termination"], "max_outer")
+
+    def test_minimize_alm_short_circuits_zero_step_infeasible_stall(self):
+        module = load_alm_utils_module()
+        settings = module.ALMSettings(
+            max_outer_iterations=1,
+            max_subproblem_continuations=3,
+            trust_radius_init=0.1,
+            trust_radius_min=0.01,
+            trust_radius_shrink=0.5,
+            trust_radius_grow=1.5,
+            max_inner_attempts=3,
+            penalty_init=10.0,
+            penalty_scale=10.0,
+            feasibility_tol=1e-8,
+            stationarity_tol=1e-8,
+        )
+        minimize_calls = []
+        history_snapshots = []
+
+        def evaluate_problem(x, multipliers, penalty):
+            del multipliers, penalty
+            x = np.asarray(x, dtype=float)
+            return {
+                "total": 1.0,
+                "grad": np.zeros_like(x),
+                "constraint_values": np.array([2.0]),
+                "stationarity_norm": 0.0,
+            }
+
+        def fake_minimize(fun, x, jac, method, bounds, callback, options):
+            del fun, jac, method, callback, options
+            minimize_calls.append(bounds)
+            return SimpleNamespace(
+                x=np.asarray(x, dtype=float),
+                nit=5,
+                success=False,
+                message="ABNORMAL: line search failed",
+            )
+
+        def history_callback(history, latest_entry, multipliers, penalty):
+            history_snapshots.append(
+                {
+                    "history": history,
+                    "latest_entry": latest_entry,
+                    "multipliers": multipliers.tolist(),
+                    "penalty": float(penalty),
+                }
+            )
+
+        with patch.object(module, "minimize", side_effect=fake_minimize):
+            result = module.minimize_alm(
+                np.array([0.2]),
+                ["demo_constraint"],
+                evaluate_problem,
+                settings,
+                {"maxiter": 300, "ftol": 1e-15, "gtol": 1e-15},
+                history_callback=history_callback,
+            )
+
+        self.assertFalse(result.success)
+        self.assertEqual(len(minimize_calls), 1)
+        self.assertEqual(result.history[0]["action"], "infeasible_stall_penalty_increase")
+        self.assertTrue(result.history[0]["infeasible_stall"])
+        self.assertEqual(result.history[0]["inner_attempts"], 1)
+        self.assertEqual(history_snapshots[-1]["latest_entry"]["action"], "infeasible_stall_penalty_increase")
+        self.assertEqual(history_snapshots[-1]["latest_entry"]["outer_termination"], "max_outer")
 
     def test_minimize_alm_updates_duals_without_growing_penalty_after_meaningful_progress(self):
         module = load_alm_utils_module()

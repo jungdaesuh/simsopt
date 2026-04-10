@@ -5,6 +5,7 @@ This directory contains the current banana-coil workflow stack for this reposito
 - Stage 2 coil optimization in [STAGE_2/banana_coil_solver.py](STAGE_2/banana_coil_solver.py)
 - single-stage Boozer / quasi-symmetry optimization in [SINGLE_STAGE/single_stage_banana_example.py](SINGLE_STAGE/single_stage_banana_example.py)
 - wrapper workflows in [run_80ka_baseline_tradeoff_sweep.py](run_80ka_baseline_tradeoff_sweep.py) and [run_finite_current_smoke.py](run_finite_current_smoke.py)
+- targeted ALM rerun wrapper in [run_nfp10_gil_alm_rerun.py](run_nfp10_gil_alm_rerun.py)
 - optional field-line / Poincare diagnostics in [POINCARE_PLOTTING/poincare_surfaces.py](POINCARE_PLOTTING/poincare_surfaces.py)
 
 The codebase has evolved beyond the older "edit script constants and rerun" model. Use CLI flags or environment variables, not source edits, for normal operation.
@@ -26,6 +27,12 @@ There are two supported wrapper entrypoints for most day-to-day work:
 2. `run_finite_current_smoke.py`
    This is a finite-current surrogate smoke harness.
    It reuses one frozen coil-only Stage 2 artifact and varies only `--plasma-current-A` through the single-stage surrogate path.
+
+There is also one targeted rerun wrapper for the current NFP10 ALM investigation:
+
+3. `run_nfp10_gil_alm_rerun.py`
+   This is a current-branch single-stage ALM lane for the `desc_s024match` NFP10 iota-20 family.
+   It pins `--constraint-method alm`, `--alm-formulation gil`, explicit physics thresholds, and warning-mode hardware handling so ALM can see hardware violations instead of hard-rejecting them.
 
 ## Branch Scope
 
@@ -60,7 +67,8 @@ examples/single_stage_optimization/
 ├── workflow_helpers.py
 ├── workflow_runner_common.py
 ├── run_80ka_baseline_tradeoff_sweep.py
-└── run_finite_current_smoke.py
+├── run_finite_current_smoke.py
+└── run_nfp10_gil_alm_rerun.py
 ```
 
 ## Prerequisites
@@ -117,6 +125,27 @@ Useful notes:
 
 - output root defaults to `examples/single_stage_optimization/outputs_finite_current_smoke`
 - this is a surrogate smoke harness, not a self-consistent finite-current equilibrium workflow
+
+### Targeted NFP10 GIL ALM Rerun
+
+Use this when you want the concrete NFP10 single-stage ALM lane discussed in the current audit:
+
+- requires an explicit Stage 2 artifact path
+- forces `--alm-formulation gil`
+- forces warning-mode hardware handling for ALM because single-surface ALM keeps `gate_scale=1.0`, so adaptive mode would fall back to hard rejection
+- writes a compact rerun summary JSON in addition to the normal single-stage artifacts
+
+```bash
+cd /path/to/simsopt-surrogate
+python examples/single_stage_optimization/run_nfp10_gil_alm_rerun.py \
+  --stage2-bs-path /full/path/to/biot_savart_opt.json
+```
+
+Useful notes:
+
+- output root defaults to `examples/single_stage_optimization/outputs_nfp10_gil_alm_rerun`
+- all `gil` thresholds and ALM trust-region settings remain CLI-overridable
+- `--dry-run` prints and records the exact single-stage command without launching it
 
 ## Manual Stage 2
 
@@ -218,6 +247,11 @@ python single_stage_banana_example.py \
   --ntor 6 \
   --constraint-method penalty
 ```
+
+ALM operational note:
+
+- single-stage ALM now writes `alm_state.partial.json` inside the run directory at outer-loop transitions and after each recorded ALM history event, so stalled or interrupted runs still leave penalty / multiplier / feasibility diagnostics
+- when you are using `--constraint-method alm` in the current single-surface workflow, use `--hardware-search-mode warn` or the dedicated `run_nfp10_gil_alm_rerun.py` wrapper so trial states can expose constraint violations to ALM instead of being hard-rejected immediately
 
 Current high-level flag groups:
 
