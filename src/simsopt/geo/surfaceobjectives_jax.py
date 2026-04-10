@@ -39,6 +39,7 @@ from .._core.jax_host_boundary import (
 from .._core.optimizable import Optimizable
 from ..jax_core._math_utils import (
     as_jax_float64 as _as_jax_float64,
+    as_jax_int32 as _as_jax_int32,
     as_runtime_float64 as _as_runtime_float64,
     zeros as _zeros,
 )
@@ -206,7 +207,7 @@ def _compute_stellsym_mask_indices_for_grid(
     )
     if stellsym:
         mask[0, 0, 0] = False
-    return jnp.asarray(np.flatnonzero(mask), dtype=jnp.int32)
+    return _as_jax_int32(np.flatnonzero(mask))
 
 
 def _canonicalize_traceable_exact_quadrature(booz_jax):
