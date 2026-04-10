@@ -24,8 +24,8 @@
 - [x] **6.** **[MED]** ~~`_lbfgs.py` body_fun — port BFGS stalled-step check.~~ **DONE** — multi-condition stalled-step check at lines 237-242 (`s_k_norm <= step_tol`, `function_change <= objective_tol`, `gradient_change <= gradient_tol`).
 - [ ] **7.** **[LOW]** `_bfgs.py:122-130` — add Powell damping or skip-if-negative-curvature to BFGS Hessian update. Strong Wolfe should prevent this in normal operation, but defensive hardening matters for edge cases. **(PARTIAL — non-finite guard exists at line 132 via `jnp.where(jnp.isfinite(rho_k), H_kp1, state.H_k)`, but no Powell damping or explicit negative-curvature skip like L-BFGS has)**
 - [ ] **8.** **[LOW]** `optimizer_jax.py:2161-2166` — hybrid scipy→on-device continuation has no fallback when scipy produces non-finite state. Currently returns `success=False` silently; should log or retry with tighter scipy tolerance. **(PARTIAL — `_scipy_result_is_continuable()` check + message at lines 2276-2281, but no logger.warning() or callback invocation)**
-- [ ] **9.** **[LOW]** `surfaceobjectives_jax.py:271-275` — add runtime signature-check for VJP callback at `run_code` result construction. Wrong signatures currently only surface deep in the gradient pass.
-- [ ] **10.** **[LOW]** `boozersurface_jax.py:733-756` — `_build_ls_group_vjp_callback` closes over `booz_surf` state. Add a solver-generation counter and assert freshness when VJP is invoked so stale reuse is detected.
+- [x] **9.** **[LOW]** ~~`surfaceobjectives_jax.py:271-275` — add runtime signature-check for VJP callback at `run_code` result construction. Wrong signatures currently only surface deep in the gradient pass.~~ **DONE** — `BoozerSurfaceJAX` now validates result-dict VJP hook arity via `_require_boozer_vjp_callback_signature()` / `_prepare_result_callback()` at result construction time; covered by `test_run_code_rejects_bad_group_vjp_signature`.
+- [x] **10.** **[LOW]** ~~`boozersurface_jax.py:733-756` — `_build_ls_group_vjp_callback` closes over `booz_surf` state. Add a solver-generation counter and assert freshness when VJP is invoked so stale reuse is detected.~~ **DONE** — solver-generation freshness guard lives in `_guard_solver_callback_freshness()` and grouped-LS stale reuse is covered by `test_ls_group_vjp_detects_stale_reuse_after_resolve`.
 - [ ] **11.** **[LOW]** `surfaceobjectives_jax.py:678-694` (`_compute_dJ_ds`) — `_ensure_solved` at line 418 checks `res["success"]` but not the actual residual norm. Log final `‖grad‖` / residual norm alongside the success flag.
 
 ---
@@ -127,12 +127,12 @@
 
 **Last audit:** 2026-04-10
 
-**Total:** 60 items — **16 done, 14 partial, 30 open**
+**Total:** 60 items — **18 done, 14 partial, 28 open**
 
 | Tier | Items | Done | Partial | Open |
 |------|-------|------|---------|------|
 | 0 — Ship blockers | 3 | **3** | 0 | 0 |
-| 1 — Correctness/defensive | 8 | **3** (4,5,6) | **2** (7,8) | **3** (9,10,11) |
+| 1 — Correctness/defensive | 8 | **5** (4,5,6,9,10) | **2** (7,8) | **1** (11) |
 | 2 — Transfer-guard | 11 | **5** (12,13,14,21,22) | **4** (15,18,19,20) | **2** (16,17) |
 | 3 — Performance | 15 | **1** (36) | **3** (26,34,37) | **11** (23-25,27-33,35) |
 | 4 — Test coverage | 12 | **2** (43,47) | **4** (40,42,45,48) | **6** (38,39,41,44,46,49) |
@@ -140,7 +140,7 @@
 
 **Estimated remaining effort:**
 - Tier 0: **CLEARED**
-- Tier 1: ~0.5 day (3 open are LOW-priority defensive guards)
+- Tier 1: ~0.25 day (only item 11 remains open; 7-8 are partial hardening)
 - Tier 2: ~2-3 days (force.py bulk done; remaining are boundary/cosmetic)
 - Tier 3: ~2-3 weeks (quick wins in ~2 days, rest incremental)
 - Tier 4: ~1 week (GPU test infrastructure)
