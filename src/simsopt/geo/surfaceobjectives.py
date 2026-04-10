@@ -11,6 +11,7 @@ from ..objectives.utilities import forward_backward
 try:
     import jax.numpy as jnp
     from jax import grad
+    from ..jax_core._math_utils import as_jax_float64 as _runtime_as_jax_float64
     from .jit import jit
 
     _HAS_JAX = True
@@ -1098,6 +1099,9 @@ class Iotas(Optimizable):
 
 if _HAS_JAX:
 
+    def _as_jax_float64(value):
+        return _runtime_as_jax_float64(value)
+
     def surface_to_surface_distance_pure(gamma1, gamma2, mdist):
         dists = surface_to_surface_pairwise_distances(gamma1, gamma2)
         return jnp.sum(jnp.maximum(mdist - dists, 0) ** 2) / (
@@ -1128,21 +1132,21 @@ if _HAS_JAX:
             super().__init__(depends_on=[surf1, surf2])
 
         def J(self):
-            gamma1 = self.surf1.gamma()
-            gamma2 = self.surf2.gamma()
+            gamma1 = _as_jax_float64(self.surf1.gamma())
+            gamma2 = _as_jax_float64(self.surf2.gamma())
 
             return self.J_jax(gamma1, gamma2)
 
         def shortest_distance(self):
-            gamma1 = self.surf1.gamma()
-            gamma2 = self.surf2.gamma()
+            gamma1 = _as_jax_float64(self.surf1.gamma())
+            gamma2 = _as_jax_float64(self.surf2.gamma())
 
             return self.shortest_distance_jax(gamma1, gamma2)
 
         @derivative_dec
         def dJ(self):
-            gamma1 = self.surf1.gamma()
-            gamma2 = self.surf2.gamma()
+            gamma1 = _as_jax_float64(self.surf1.gamma())
+            gamma2 = _as_jax_float64(self.surf2.gamma())
 
             grad0 = self.thisgrad0(gamma1, gamma2)
             grad1 = self.thisgrad1(gamma1, gamma2)

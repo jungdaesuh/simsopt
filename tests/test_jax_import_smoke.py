@@ -931,6 +931,48 @@ def test_transfer_guard_disallow_allows_target_minimize_structured_pytree_entry(
     )
 
 
+def test_transfer_guard_disallow_allows_surface_surface_distance_smoke():
+    """SurfaceSurfaceDistance must place host gamma arrays explicitly under disallow."""
+    _assert_import_check_passes(
+        """
+        import numpy as np
+        import simsopt.config as simsopt_config
+        from simsopt.geo.surfaceobjectives import SurfaceSurfaceDistance
+        from simsopt.geo.surfacerzfourier import SurfaceRZFourier
+
+        simsopt_config.set_backend(
+            "jax_cpu_parity",
+            strict=True,
+            transfer_guard="disallow",
+        )
+
+        def make_surface(major_radius):
+            surface = SurfaceRZFourier(
+                nfp=1,
+                stellsym=False,
+                mpol=1,
+                ntor=1,
+                quadpoints_phi=np.linspace(0.0, 1.0, 15, endpoint=False),
+                quadpoints_theta=np.linspace(0.0, 1.0, 16, endpoint=False),
+            )
+            surface.set_rc(0, 0, major_radius)
+            surface.set_rc(1, 0, 0.12)
+            surface.set_zs(1, 0, 0.12)
+            return surface
+
+        distance = SurfaceSurfaceDistance(
+            make_surface(1.0),
+            make_surface(1.35),
+            minimum_distance=0.05,
+        )
+
+        assert float(distance.J()) >= 0.0
+        assert float(distance.shortest_distance()) > 0.0
+    """,
+        failure_message="SurfaceSurfaceDistance transfer-guard smoke failed",
+    )
+
+
 def _assert_ondevice_optimizer_reuses_compiled_solver(method: str) -> None:
     _assert_python_script_passes(
         _JAX_SUBPROCESS_CASES_PATH,
