@@ -632,6 +632,7 @@ def save_surface_artifacts(surface_data, biotsavart, out_dir, stem, also_write_o
     for entry in surface_data:
         name = entry["name"]
         path = os.path.join(out_dir, f"{stem}_{name}")
+        boozer_path = os.path.join(out_dir, f"{stem}_{name}_boozer_surface.json")
         biotsavart.set_points(entry["boozer_surface"].surface.gamma().reshape((-1, 3)))
         unitn = entry["boozer_surface"].surface.unitnormal()
         point_data = {
@@ -640,9 +641,11 @@ def save_surface_artifacts(surface_data, biotsavart, out_dir, stem, also_write_o
         }
         entry["boozer_surface"].surface.to_vtk(path, extra_data=point_data)
         entry["boozer_surface"].surface.save(path + ".json")
+        entry["boozer_surface"].save(boozer_path)
 
     if also_write_outer_legacy:
         legacy_path = os.path.join(out_dir, stem)
+        legacy_boozer_path = os.path.join(out_dir, f"{stem}_boozer_surface.json")
         biotsavart.set_points(
             outer_entry["boozer_surface"].surface.gamma().reshape((-1, 3))
         )
@@ -653,6 +656,7 @@ def save_surface_artifacts(surface_data, biotsavart, out_dir, stem, also_write_o
         }
         outer_entry["boozer_surface"].surface.to_vtk(legacy_path, extra_data=point_data)
         outer_entry["boozer_surface"].surface.save(legacy_path + ".json")
+        outer_entry["boozer_surface"].save(legacy_boozer_path)
 
 
 def collect_surface_run_metadata(

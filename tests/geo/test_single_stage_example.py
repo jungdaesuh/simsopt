@@ -317,6 +317,81 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertIs(module.boozer_surface_residual_dB, boozer_surface_residual_dB)
         self.assertIs(module.forward_backward, forward_backward)
 
+    def test_save_surface_artifacts_writes_boozer_surface_jsons(self):
+        module = self.load_module()
+
+        class _Surface:
+            def __init__(self):
+                self.saved_paths = []
+                self.vtk_paths = []
+
+            def gamma(self):
+                return np.zeros((1, 1, 3))
+
+            def unitnormal(self):
+                return np.ones((1, 1, 3))
+
+            def to_vtk(self, path, extra_data=None):
+                self.vtk_paths.append(path)
+
+            def save(self, path):
+                self.saved_paths.append(path)
+                Path(path).write_text("surface", encoding="utf-8")
+
+        class _BoozerSurface:
+            def __init__(self, surface):
+                self.surface = surface
+                self.saved_paths = []
+
+            def save(self, path):
+                self.saved_paths.append(path)
+                Path(path).write_text("boozer", encoding="utf-8")
+
+        class _BiotSavart:
+            def set_points(self, points):
+                self.points = np.asarray(points)
+
+            def B(self):
+                return np.ones((1, 3))
+
+        inner = _BoozerSurface(_Surface())
+        outer = _BoozerSurface(_Surface())
+        surface_data = [
+            {"name": "inner", "boozer_surface": inner},
+            {"name": "outer", "boozer_surface": outer},
+        ]
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            module.save_surface_artifacts(
+                surface_data,
+                _BiotSavart(),
+                tmpdir,
+                "surf_opt",
+                also_write_outer_legacy=True,
+            )
+
+            tmp_path = Path(tmpdir)
+            for filename in (
+                "surf_opt_inner.json",
+                "surf_opt_outer.json",
+                "surf_opt.json",
+                "surf_opt_inner_boozer_surface.json",
+                "surf_opt_outer_boozer_surface.json",
+                "surf_opt_boozer_surface.json",
+            ):
+                self.assertTrue((tmp_path / filename).exists())
+            self.assertEqual(
+                inner.saved_paths,
+                [str(tmp_path / "surf_opt_inner_boozer_surface.json")],
+            )
+            self.assertEqual(
+                outer.saved_paths,
+                [
+                    str(tmp_path / "surf_opt_outer_boozer_surface.json"),
+                    str(tmp_path / "surf_opt_boozer_surface.json"),
+                ],
+            )
+
     def test_initialize_boozer_surface_exact_uses_ntor_phi_quadrature(self):
         module = self.load_module()
         surf_prev = FakeSurfPrev()
