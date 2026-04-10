@@ -10,7 +10,10 @@ The CPU path remains the default and the correctness oracle.
 As of the JAX ``0.9.2`` runtime, the trusted least-squares backend remains
 ``optimizer_backend="scipy"``.  The private ``hybrid`` and ``ondevice``
 backends now target the same runtime, but they remain a separate validation
-track because they still depend on private optimizer internals.
+track because they still depend on private optimizer internals. In non-parity
+JAX target modes such as ``jax_gpu_fast`` and ``jax_metal_smoke``, direct
+calls into the host reference optimizer methods are rejected so that those
+lanes do not silently route back through host loops.
 
 Stage 2 (Field + Flux Objective)
 --------------------------------

@@ -317,6 +317,7 @@ _enable_fast_non_strict_jax_backend = partial(
     enable_non_strict_jax_backend,
     mode="jax_gpu_fast",
 )
+_NON_PARITY_TARGET_JAX_BACKEND_MODES = ("jax_gpu_fast", "jax_metal_smoke")
 _NON_ONDEVICE_LS_BACKENDS = ("scipy", "hybrid")
 _NON_TARGET_MINIMIZE_METHODS = ("adam", "bfgs", "lbfgs", "bfgs-hybrid")
 
@@ -325,6 +326,14 @@ _EXPLICIT_COIL_SPEC_REQUIRED_PATTERN = (
     r"BoozerSurfaceJAX requires a biotsavart object that provides "
     r"coil_set_spec\(\) for explicit immutable grouped-coil state"
 )
+
+
+def _target_lane_rejection_pattern(
+    component: str, method: str, backend_mode: str
+) -> str:
+    return rf"{component}.*method='{method}'.*{backend_mode}.*fast/ondevice lane"
+
+
 _LEGACY_CURVE_X = np.array([1.0, 0.2, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
 
 
@@ -1878,67 +1887,52 @@ class TestBoozerSurfaceJAXClass:
                 method="bfgs-hybrid",
             )
 
-    @pytest.mark.parametrize(
-        ("method", "maxiter", "options", "atol"),
-        [
-            ("adam", 800, {"step_size": 0.1}, 1e-4),
-            ("bfgs", 100, None, 1e-8),
-            ("lbfgs", 100, None, 1e-8),
-        ],
-    )
-    def test_jax_minimize_reference_methods_still_work_in_fast_backend_mode(
+    @pytest.mark.parametrize("backend_mode", _NON_PARITY_TARGET_JAX_BACKEND_MODES)
+    @pytest.mark.parametrize("method", ("adam", "bfgs", "lbfgs"))
+    def test_jax_minimize_rejects_reference_methods_in_target_backend_mode(
         self,
         monkeypatch,
         request,
+        backend_mode,
         method,
-        maxiter,
-        options,
-        atol,
     ):
-        _enable_fast_non_strict_jax_backend(monkeypatch, request)
-        target = np.asarray([2.0, -1.0], dtype=float)
-
-        def objective(x):
-            diff = jnp.asarray(x, dtype=jnp.float64) - jnp.asarray(
-                target, dtype=jnp.float64
+        enable_non_strict_jax_backend(monkeypatch, request, mode=backend_mode)
+        with pytest.raises(
+            RuntimeError,
+            match=_target_lane_rejection_pattern(
+                r"optimizer_jax\.jax_minimize", method, backend_mode
+            ),
+        ):
+            jax_minimize(
+                lambda x: 0.5 * jnp.dot(x, x),
+                jnp.asarray([5.0, 3.0], dtype=jnp.float64),
+                method=method,
+                maxiter=5,
+                tol=1e-8,
+                options={"step_size": 0.1} if method == "adam" else None,
             )
-            return 0.5 * jnp.dot(diff, diff)
 
-        result = jax_minimize(
-            objective,
-            jnp.asarray([5.0, 3.0], dtype=jnp.float64),
-            method=method,
-            maxiter=maxiter,
-            tol=1e-8,
-            options=options,
-        )
-
-        assert result.success is True
-        np.testing.assert_allclose(result.x, target, atol=atol)
-
-    def test_jax_least_squares_reference_lm_still_works_in_fast_backend_mode(
+    @pytest.mark.parametrize("backend_mode", _NON_PARITY_TARGET_JAX_BACKEND_MODES)
+    def test_jax_least_squares_reference_lm_rejects_in_target_backend_mode(
         self,
         monkeypatch,
         request,
+        backend_mode,
     ):
-        _enable_fast_non_strict_jax_backend(monkeypatch, request)
-        target = np.asarray([2.0, -1.0], dtype=float)
-
-        def residual_fn(x):
-            return jnp.asarray(x, dtype=jnp.float64) - jnp.asarray(
-                target, dtype=jnp.float64
+        enable_non_strict_jax_backend(monkeypatch, request, mode=backend_mode)
+        with pytest.raises(
+            RuntimeError,
+            match=_target_lane_rejection_pattern(
+                r"optimizer_jax\.jax_least_squares", "lm", backend_mode
+            ),
+        ):
+            jax_least_squares(
+                lambda x: x - jnp.asarray([2.0, -1.0], dtype=jnp.float64),
+                jnp.asarray([5.0, 3.0], dtype=jnp.float64),
+                method="lm",
+                maxiter=25,
+                tol=1e-12,
             )
-
-        result = jax_least_squares(
-            residual_fn,
-            jnp.asarray([5.0, 3.0], dtype=jnp.float64),
-            method="lm",
-            maxiter=25,
-            tol=1e-12,
-        )
-
-        assert result.success is True
-        np.testing.assert_allclose(result.x, target, atol=1e-8)
 
     def test_jax_least_squares_solves_simple_structured_problem(self):
         def residual_fn(state):

@@ -46,7 +46,10 @@ GPU install (CUDA 12)::
 Both the public and private optimizer lanes are Python ``3.11+`` with JAX /
 jaxlib ``0.9.2``. The trusted reference backend remains
 ``optimizer_backend="scipy"``; ``ondevice`` / ``hybrid`` still require the
-separate private-optimizer validation track.
+separate private-optimizer validation track. In non-parity JAX target modes
+such as ``jax_gpu_fast`` and ``jax_metal_smoke``, the direct reference
+optimizer methods are rejected so those lanes cannot silently fall back to host
+loops.
 
 Verify the install::
 

@@ -341,7 +341,9 @@ def _hybrid_prefix_grad_inf(prefix_result) -> float:
     return float(np.linalg.norm(np.asarray(jacobian, dtype=np.float64), ord=np.inf))
 
 
-def _emit_hybrid_prefix_nonfinite_observability(prefix_result, progress_callback) -> None:
+def _emit_hybrid_prefix_nonfinite_observability(
+    prefix_result, progress_callback
+) -> None:
     fun_value = float(
         np.asarray(getattr(prefix_result, "fun", np.nan), dtype=np.float64)
     )
@@ -2083,6 +2085,9 @@ def jax_least_squares(
     - ``lm-ondevice``:
       trace-safe Levenberg-Marquardt target lane.
 
+    In backend modes that target the fast/ondevice lane, the reference ``lm``
+    method is rejected rather than silently routing through the host LM loop.
+
     ``x0`` may be either the historical flat 1-D vector or a structured pytree.
     The LM loop itself is pytree-native: it keeps ``x`` and the least-squares
     gradient in the original structure and uses ``jvp``/``vjp`` products inside
@@ -2105,6 +2110,11 @@ def jax_least_squares(
         options["progress_callback"] = progress_callback
 
     if method == "lm":
+        _raise_if_target_lane_required(
+            component="optimizer_jax.jax_least_squares",
+            method=method,
+            detail=_STRICT_REFERENCE_LEAST_SQUARES_DETAIL,
+        )
         _raise_if_strict_optimizer_fallback(
             component="optimizer_jax.jax_least_squares",
             method=method,
@@ -2198,6 +2208,10 @@ def jax_minimize(
     ``OptimizeResult.x``. The adapter only guarantees explicit JAX-array
     re-entry and result normalization instead of ad hoc ``jnp.asarray(...)``
     calls.
+
+    In backend modes that target the fast/ondevice lane, the host reference
+    methods (``adam``, ``bfgs``, ``lbfgs``) are rejected instead of silently
+    falling back to those host loops.
     """
     if method not in _SUPPORTED_METHODS:
         raise ValueError(
@@ -2205,6 +2219,11 @@ def jax_minimize(
         )
 
     if method in _REFERENCE_JAX_METHODS:
+        _raise_if_target_lane_required(
+            component="optimizer_jax.jax_minimize",
+            method=method,
+            detail=_STRICT_REFERENCE_JAX_OPTIMIZER_DETAIL,
+        )
         _raise_if_strict_optimizer_fallback(
             component="optimizer_jax.jax_minimize",
             method=method,
@@ -2252,6 +2271,11 @@ def jax_minimize(
     if progress_callback is not None:
         options["progress_callback"] = progress_callback
     if method in _REFERENCE_METHODS:
+        _raise_if_target_lane_required(
+            component="optimizer_jax.jax_minimize",
+            method=method,
+            detail=_STRICT_REFERENCE_OPTIMIZER_DETAIL,
+        )
         _raise_if_strict_optimizer_fallback(
             component="optimizer_jax.jax_minimize",
             method=method,
