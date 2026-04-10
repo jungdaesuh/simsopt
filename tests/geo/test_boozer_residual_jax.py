@@ -53,6 +53,8 @@ def _make_synthetic_data(nphi=10, ntheta=12, seed=42):
     return device_float64(B), device_float64(xphi), device_float64(xtheta)
 
 
+# Keep this NumPy fixed-tree reference local so the Boozer scalar/vector oracle
+# does not depend on the separate reduction-unit-test helpers.
 def _numpy_pairwise_sum_flat(array):
     reduced = np.ravel(np.asarray(array, dtype=np.float64))
     if reduced.size == 0:

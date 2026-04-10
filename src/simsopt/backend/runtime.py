@@ -8,6 +8,7 @@ an explicit mode-based public API for the new runtime surface:
 - ``jax_cpu_parity``
 - ``jax_gpu_parity``
 - ``jax_gpu_fast``
+- ``jax_metal_smoke``
 
 The mode API is the SSOT. The older ``SIMSOPT_BACKEND`` /
 ``SIMSOPT_JAX_PLATFORM`` pair is still read and written for compatibility.
@@ -23,7 +24,7 @@ from typing import Callable
 import warnings
 
 _VALID_BACKENDS = ("cpu", "jax")
-_VALID_PLATFORMS = ("cpu", "cuda")
+_VALID_PLATFORMS = ("cpu", "cuda", "metal")
 _TRUTHY_ENV_VALUES = frozenset({"1", "true", "yes", "on"})
 
 _BACKEND_ENV = "SIMSOPT_BACKEND"
@@ -82,6 +83,7 @@ VALID_BACKEND_MODES = (
     "jax_cpu_parity",
     "jax_gpu_parity",
     "jax_gpu_fast",
+    "jax_metal_smoke",
 )
 
 _MODE_TO_RUNTIME = {
@@ -89,6 +91,7 @@ _MODE_TO_RUNTIME = {
     "jax_cpu_parity": ("jax", "cpu"),
     "jax_gpu_parity": ("jax", "cuda"),
     "jax_gpu_fast": ("jax", "cuda"),
+    "jax_metal_smoke": ("jax", "metal"),
 }
 
 _NO_CI_REPRODUCIBILITY_DEFAULTS = {
@@ -140,6 +143,15 @@ _MODE_POLICY_DEFAULTS = {
         "provenance_label": "jax_gpu_fast",
         **_NO_CI_REPRODUCIBILITY_DEFAULTS,
     },
+    "jax_metal_smoke": {
+        "parity_mode": False,
+        "requires_x64": False,
+        "chunk_policy": "stable_default",
+        "tolerance_tier": "smoke",
+        "compilation_cache_policy": "optional_persistent",
+        "provenance_label": "jax_metal_smoke",
+        **_NO_CI_REPRODUCIBILITY_DEFAULTS,
+    },
 }
 
 _FIELD_KERNEL_DEFAULTS = {
@@ -147,6 +159,7 @@ _FIELD_KERNEL_DEFAULTS = {
     "jax_cpu_parity": {"coil_chunk_size": 16, "quadrature_block_size": 0},
     "jax_gpu_parity": {"coil_chunk_size": 16, "quadrature_block_size": 0},
     "jax_gpu_fast": {"coil_chunk_size": 64, "quadrature_block_size": 64},
+    "jax_metal_smoke": {"coil_chunk_size": 16, "quadrature_block_size": 0},
 }
 _POINT_CHUNK_SIZE_BY_POLICY = {
     "host_reference": 0,
@@ -159,6 +172,7 @@ _MODE_SHARDING_DEFAULTS = {
     "jax_cpu_parity": "none",
     "jax_gpu_parity": "none",
     "jax_gpu_fast": "hybrid",
+    "jax_metal_smoke": "none",
 }
 _DEFAULT_SHARDING_AXIS_NAME = "d"
 _MIN_POINTS_TO_SHARD_BY_POLICY = {
@@ -259,6 +273,7 @@ _DEFAULT_TRANSFER_GUARD_BY_MODE = {
     "jax_cpu_parity": "log",
     "jax_gpu_parity": "log",
     "jax_gpu_fast": "log",
+    "jax_metal_smoke": "log",
 }
 _BackendCacheClearCallbackKey = tuple[str, str]
 _backend_cache_clear_callbacks: dict[
@@ -279,6 +294,14 @@ class BackendConfig:
 
 @dataclass(frozen=True)
 class BackendPolicy:
+    """Numerical-policy contract for one resolved backend mode.
+
+    The GPU reproducibility fields are reporting/acceptance metadata for parity
+    lanes. They document the expected tolerance budget and sampling defaults
+    used by CI and diagnostics; they do not, by themselves, force deterministic
+    CUDA/XLA kernel execution or reduction ordering.
+    """
+
     mode: str
     backend: str
     jax_platform: str
@@ -374,6 +397,7 @@ def _validate_backend(value: str, *, source: str) -> str:
 
 
 def _validate_platform(value: str, *, source: str) -> str:
+    value = value.lower()
     if value not in _VALID_PLATFORMS:
         raise ValueError(
             f"{source}={value!r} is not valid. Accepted: {_VALID_PLATFORMS}"
@@ -469,6 +493,18 @@ def _resolve_sharding_axis_name() -> str:
     return raw_value
 
 
+def _runtime_jax_platform_value(platform: str) -> str:
+    if platform == "metal":
+        return "METAL"
+    return platform
+
+
+def _runtime_jax_backend_name(platform: str) -> str:
+    if platform == "cuda":
+        return "gpu"
+    return _runtime_jax_platform_value(platform)
+
+
 def _resolve_min_points_to_shard(policy: BackendPolicy) -> int:
     env_value = _optional_positive_int_env(_MIN_POINTS_TO_SHARD_ENV)
     if env_value is not None:
@@ -489,7 +525,7 @@ def _detect_local_jax_device_count(policy: BackendPolicy) -> int:
     except ImportError:
         return 0
     try:
-        backend_name = "gpu" if policy.jax_platform == "cuda" else policy.jax_platform
+        backend_name = _runtime_jax_backend_name(policy.jax_platform)
         return len(jax.local_devices(backend=backend_name))
     except Exception:
         return 0
@@ -501,7 +537,7 @@ def _detect_global_jax_device_count(policy: BackendPolicy) -> int:
     except ImportError:
         return 0
     try:
-        backend_name = "gpu" if policy.jax_platform == "cuda" else policy.jax_platform
+        backend_name = _runtime_jax_backend_name(policy.jax_platform)
         return len(jax.devices(backend=backend_name))
     except Exception:
         return 0
@@ -853,6 +889,8 @@ def _runtime_env_value(attribute_name: str, value: object) -> str:
         return "1" if bool(value) else "0"
     if value is None:
         return ""
+    if attribute_name == "jax_platform":
+        return _runtime_jax_platform_value(str(value))
     return str(value)
 
 
@@ -894,11 +932,25 @@ def _resolve_legacy_value(
     return validator(raw_value, source=source)
 
 
+def _resolve_legacy_platform(backend: str) -> str:
+    raw_value = os.environ.get(_PLATFORM_ENV)
+    source = _PLATFORM_ENV
+    if raw_value is None:
+        raw_value = os.environ.get(_PLATFORM_LEGACY_ENV)
+        source = _PLATFORM_LEGACY_ENV
+    if raw_value is None:
+        raw_value = "cuda" if backend == "jax" else "cpu"
+        source = "(default)"
+    return _validate_platform(raw_value, source=source)
+
+
 def _mode_from_legacy_env(backend: str, platform: str) -> str:
     if backend == "cpu":
         return "native_cpu"
     if platform == "cpu":
         return "jax_cpu_parity"
+    if platform == "metal":
+        return "jax_metal_smoke"
     return "jax_gpu_parity"
 
 
@@ -926,12 +978,7 @@ def get_backend_config() -> BackendConfig:
             "cpu",
             validator=_validate_backend,
         )
-        platform = _resolve_legacy_value(
-            _PLATFORM_ENV,
-            _PLATFORM_LEGACY_ENV,
-            "cpu",
-            validator=_validate_platform,
-        )
+        platform = _resolve_legacy_platform(backend)
         config = _config_from_mode(
             _mode_from_legacy_env(backend, platform),
             strict=strict,
@@ -1355,6 +1402,8 @@ def should_eagerly_configure_jax() -> bool:
 def _expected_runtime_backend_names(jax_platform: str) -> frozenset[str]:
     if jax_platform == "cuda":
         return frozenset({"cuda", "gpu"})
+    if jax_platform == "metal":
+        return frozenset({"metal", "METAL"})
     return frozenset({jax_platform})
 
 
@@ -1388,7 +1437,7 @@ def apply_jax_runtime_config() -> None:
 
     import jax
 
-    jax.config.update("jax_platforms", config.jax_platform)
+    jax.config.update("jax_platforms", _runtime_jax_platform_value(config.jax_platform))
     jax.config.update("jax_enable_x64", requires_x64(config.mode))
     jax.config.update("jax_debug_nans", config.debug_nans)
     if config.transfer_guard is not None:

@@ -1,4 +1,4 @@
-"""On-device BFGS solver (lax.while_loop) and hybrid continuation state."""
+"""On-device BFGS solver implemented as a ``lax.while_loop``."""
 
 from __future__ import annotations
 

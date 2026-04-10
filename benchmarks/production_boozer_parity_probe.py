@@ -48,6 +48,7 @@ SOLVER_OPTIONS = {
     "newton_maxiter": 20,
     "newton_tol": 1e-9,
 }
+TARGET_OPTIMIZER_BACKEND = "ondevice"
 
 
 def parse_args() -> argparse.Namespace:
@@ -72,9 +73,9 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--optimizer-backend",
-        choices=("scipy", "hybrid", "ondevice"),
-        default="scipy",
-        help="BoozerSurfaceJAX LS optimizer backend to exercise on the JAX lane.",
+        choices=(TARGET_OPTIMIZER_BACKEND,),
+        default=TARGET_OPTIMIZER_BACKEND,
+        help="BoozerSurfaceJAX LS optimizer backend to exercise on the JAX target lane.",
     )
     return parser.parse_args()
 

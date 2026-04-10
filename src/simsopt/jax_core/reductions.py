@@ -18,8 +18,15 @@ __all__ = [
 ]
 
 
-def _zero_scalar(dtype):
-    return jnp.array(0, dtype=dtype)
+def _zero_like_array(array):
+    total = jnp.sum(array, dtype=array.dtype)
+    return total - total
+
+
+def _zero_rows_like(array, row_count: int):
+    zero_row = jnp.sum(array, axis=0, keepdims=True, dtype=array.dtype)
+    zero_row = zero_row - zero_row
+    return jnp.broadcast_to(zero_row, (row_count,) + array.shape[1:])
 
 
 def _next_power_of_two(size: int) -> int:
@@ -32,8 +39,7 @@ def _pad_axis0(array, padded_size: int):
     pad_rows = padded_size - array.shape[0]
     if pad_rows <= 0:
         return array
-    padding_config = [(0, pad_rows, 0)] + [(0, 0, 0)] * (array.ndim - 1)
-    return lax.pad(array, _zero_scalar(array.dtype), padding_config)
+    return jnp.concatenate((array, _zero_rows_like(array, pad_rows)), axis=0)
 
 
 def validate_reduction_mode(reduction_mode: str) -> str:
@@ -50,7 +56,7 @@ def _pairwise_reduce_axis0(array):
     while reduced.shape[0] > 1:
         pair_shape = (reduced.shape[0] // 2, 2) + tuple(reduced.shape[1:])
         paired = jnp.reshape(reduced, pair_shape)
-        reduced = paired[:, 0, ...] + paired[:, 1, ...]
+        reduced = jnp.sum(paired, axis=1)
     return reduced
 
 
@@ -84,8 +90,9 @@ def compensated_sum_flat(array):
     if size == 0:
         return jnp.sum(reduced)
 
-    total = _zero_scalar(reduced.dtype)
-    compensation = _zero_scalar(reduced.dtype)
+    zero = _zero_like_array(reduced)
+    total = zero
+    compensation = zero
 
     def body(index, state):
         running_total, running_compensation = state

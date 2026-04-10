@@ -23,6 +23,14 @@ def host_scalar(value, *, dtype=None):
     return host_array(value, dtype=dtype).item()
 
 
+def host_float(value, *, dtype=np.float64) -> float:
+    return float(host_scalar(value, dtype=dtype))
+
+
+def host_int(value, *, dtype=np.int64) -> int:
+    return int(host_scalar(value, dtype=dtype))
+
+
 def host_bool(value) -> bool:
     return bool(host_scalar(value, dtype=np.bool_))
 

@@ -2,12 +2,8 @@
 Lane-aware JAX Boozer surface solver.
 
 The public/reference lane still permits host-side SciPy minimization via
-``optimizer_backend="scipy"``. The private optimizer lane adds two more
-roles:
-
-- ``optimizer_backend="hybrid"``: transitional migration path
-- ``optimizer_backend="ondevice"``: target on-device backend for the eventual
-  full-GPU workflow
+``optimizer_backend="scipy"``. The target lane uses
+``optimizer_backend="ondevice"`` for JAX-resident execution.
 
 This module owns the LS/exact solver routing contract. Only the
 ``ondevice`` backend is intended to represent the eventual target optimizer
@@ -19,7 +15,8 @@ Architecture (per M0 contract §5-§6):
   - The outer ``Optimizable`` dependency graph and ``need_to_run_code``
     dirty-flag semantics are preserved.
   - The reference lane may still cross the host/device boundary inside the LS
-    optimizer loop; removing that is part of the on-device migration.
+    optimizer loop; that boundary is isolated to the reference-only optimizer
+    module.
 
 Builds on M3's composed derivative path:
   - ``_surface_geometry_from_dofs()`` for surface DOFs → geometry (SSOT)
@@ -41,7 +38,6 @@ import jax.scipy.linalg
 
 from ..backend import (
     get_backend_config,
-    is_parity_mode,
     raise_if_strict_jax_fallback,
     warn_if_jax_fallback,
 )
@@ -105,15 +101,18 @@ from . import optimizer_jax as _optimizer_jax
 from .optimizer_jax import (
     VALID_LEAST_SQUARES_ALGORITHMS,
     VALID_OPTIMIZER_BACKENDS,
-    jax_least_squares,
     levenberg_marquardt_traceable,
-    jax_minimize,
     newton_exact,
     newton_exact_traceable,
     newton_polish,
     newton_polish_traceable,
+    reference_least_squares,
+    reference_minimize,
     require_target_backend_x64,
-    resolve_least_squares_optimizer_method,
+    resolve_reference_least_squares_optimizer_method,
+    resolve_target_least_squares_optimizer_method,
+    target_least_squares,
+    target_minimize,
 )
 
 __all__ = ["BoozerSurfaceJAX"]
@@ -1276,11 +1275,10 @@ _DEFAULT_OPTIONS_EXACT = {
     "max_dense_jacobian_bytes": _DEFAULT_MAX_DENSE_JACOBIAN_BYTES,
 }
 
-# Options only meaningful for private optimizer backends (hybrid, ondevice).
+# Options only meaningful for the target/private optimizer backend.
 _PRIVATE_OPTIMIZER_OPTIONS = frozenset(
     {
         "force_ondevice_limited_memory",
-        "hybrid_scipy_maxiter",
         "line_search_maxiter",
         "maxgrad",
     }
@@ -1315,12 +1313,18 @@ def default_least_squares_algorithm_for_backend(optimizer_backend):
     return "quasi-newton"
 
 
+def _default_ls_optimizer_backend() -> str:
+    if get_backend_config().backend == "jax":
+        return "ondevice"
+    return "scipy"
+
+
 def _normalize_solver_options(raw_options, boozer_type):
     """Validate and normalize constructor options for a Boozer solve mode."""
     if "bfgs_method" in raw_options:
         raise ValueError(
             "BoozerSurfaceJAX option 'bfgs_method' was removed. "
-            "Use 'optimizer_backend' with one of: scipy, hybrid, ondevice."
+            "Use 'optimizer_backend' with one of: scipy, ondevice."
         )
 
     allowed_option_keys = (
@@ -1336,7 +1340,7 @@ def _normalize_solver_options(raw_options, boozer_type):
         optimizer_backend is not None
         and optimizer_backend not in VALID_OPTIMIZER_BACKENDS
     ):
-        raise ValueError("optimizer_backend must be one of: scipy, hybrid, ondevice.")
+        raise ValueError("optimizer_backend must be one of: scipy, ondevice.")
     least_squares_algorithm = raw_options.get("least_squares_algorithm")
     if (
         least_squares_algorithm is not None
@@ -1346,30 +1350,27 @@ def _normalize_solver_options(raw_options, boozer_type):
         raise ValueError(f"least_squares_algorithm must be one of: {allowed}.")
 
     if boozer_type == "ls":
-        effective_backend = raw_options.get("optimizer_backend", "scipy")
+        effective_backend = raw_options.get(
+            "optimizer_backend", _default_ls_optimizer_backend()
+        )
         private_keys = sorted(set(raw_options) & _PRIVATE_OPTIMIZER_OPTIONS)
         if private_keys and effective_backend == "scipy":
             keys_str = ", ".join(repr(k) for k in private_keys)
             raise ValueError(
                 f"Private optimizer option(s) {keys_str} require "
-                "optimizer_backend='hybrid' or 'ondevice'."
-            )
-
-        lbfgs_keys = sorted(set(raw_options) & _LBFGS_TUNING_OPTIONS)
-        if lbfgs_keys and effective_backend == "hybrid":
-            keys_str = ", ".join(repr(k) for k in lbfgs_keys)
-            raise ValueError(
-                f"L-BFGS tuning option(s) {keys_str} are unsupported for "
-                "optimizer_backend='hybrid'."
+                "optimizer_backend='ondevice'."
             )
 
     normalized_options = dict(raw_options)
-    if boozer_type == "ls" and "least_squares_algorithm" not in normalized_options:
-        normalized_options["least_squares_algorithm"] = (
-            default_least_squares_algorithm_for_backend(
-                normalized_options.get("optimizer_backend", "scipy")
+    if boozer_type == "ls":
+        if "optimizer_backend" not in normalized_options:
+            normalized_options["optimizer_backend"] = _default_ls_optimizer_backend()
+        if "least_squares_algorithm" not in normalized_options:
+            normalized_options["least_squares_algorithm"] = (
+                default_least_squares_algorithm_for_backend(
+                    normalized_options["optimizer_backend"]
+                )
             )
-        )
     if boozer_type == "exact":
         normalized_options.pop("optimizer_backend", None)
     return normalized_options
@@ -1403,10 +1404,12 @@ class BoozerSurfaceJAX(Optimizable):
         constraint_weight: penalty weight.  If ``None``, BoozerExact
             path is used; otherwise BoozerLS.
         options: dict of solver options (see ``_DEFAULT_OPTIONS_*``).
-            For LS solves, ``optimizer_backend="scipy"`` is the trusted
-            reference lane, ``"hybrid"`` is the transitional migration lane,
-            and ``"ondevice"`` is the target on-device lane for the eventual
-            full-GPU workflow. ``least_squares_algorithm="quasi-newton"``
+            For LS solves, the omitted ``optimizer_backend`` default follows the
+            active simsopt backend contract: ``"scipy"`` on CPU/reference and
+            ``"ondevice"`` on JAX backend modes. ``optimizer_backend="scipy"``
+            remains the trusted CPU/reference lane and
+            ``"ondevice"`` is the target on-device lane.
+            ``least_squares_algorithm="quasi-newton"``
             preserves the historical BFGS/L-BFGS route; ``"lm"`` enables the
             residual-vector Levenberg-Marquardt route on supported backends.
     """
@@ -1462,7 +1465,7 @@ class BoozerSurfaceJAX(Optimizable):
         if self.boozer_type == "ls":
             if self.options["optimizer_backend"] not in VALID_OPTIMIZER_BACKENDS:
                 raise ValueError(
-                    "optimizer_backend must be one of: scipy, hybrid, ondevice."
+                    "optimizer_backend must be one of: scipy, ondevice."
                 )
 
         # --- Extract static data from CPU objects (one-time) ---
@@ -2189,34 +2192,32 @@ class BoozerSurfaceJAX(Optimizable):
     def _resolve_optimizer_method(self, limited_memory=None, *, optimize_G=True):
         """Resolve optimizer method string from options."""
         optimizer_backend = self.options["optimizer_backend"]
+        if optimizer_backend not in VALID_OPTIMIZER_BACKENDS:
+            raise ValueError("optimizer_backend must be one of: scipy, ondevice.")
         require_target_backend_x64(optimizer_backend)
         if optimizer_backend != "ondevice":
+            backend_config = get_backend_config()
+            if backend_config.backend == "jax":
+                raise RuntimeError(
+                    "BoozerSurfaceJAX cannot use "
+                    f"optimizer_backend={optimizer_backend!r} on the LS "
+                    "reference solver lane while simsopt backend mode "
+                    f"{backend_config.mode!r} requires optimizer_backend='ondevice'. "
+                    "Select optimizer_backend='ondevice' or switch to the "
+                    "native_cpu reference backend."
+                )
             raise_if_strict_jax_fallback(
                 component="BoozerSurfaceJAX",
                 detail=(
                     f"optimizer_backend={optimizer_backend!r} on the LS "
-                    "reference/transitional solver lane"
+                    "reference solver lane"
                 ),
             )
-            backend_config = get_backend_config()
-            if (
-                backend_config.backend == "jax"
-                and not backend_config.strict
-                and not is_parity_mode(backend_config.mode)
-            ):
-                raise RuntimeError(
-                    "BoozerSurfaceJAX cannot use "
-                    f"optimizer_backend={optimizer_backend!r} on the LS "
-                    "reference/transitional solver lane while simsopt backend mode "
-                    f"{backend_config.mode!r} targets the fast/ondevice lane. "
-                    "Select optimizer_backend='ondevice' or switch to a "
-                    "CPU/reference or parity backend mode."
-                )
             warn_if_jax_fallback(
                 component="BoozerSurfaceJAX",
                 detail=(
                     f"optimizer_backend={optimizer_backend!r} on the LS "
-                    "reference/transitional solver lane"
+                    "reference solver lane"
                 ),
             )
         if limited_memory is None:
@@ -2236,8 +2237,12 @@ class BoozerSurfaceJAX(Optimizable):
             # The reduced fixed-G compatibility path remains more reliable on
             # the historical quasi-Newton formulation.
             least_squares_algorithm = "quasi-newton"
-        return resolve_least_squares_optimizer_method(
-            optimizer_backend,
+        if optimizer_backend == "ondevice":
+            return resolve_target_least_squares_optimizer_method(
+                limited_memory=effective_limited_memory,
+                least_squares_algorithm=least_squares_algorithm,
+            )
+        return resolve_reference_least_squares_optimizer_method(
             limited_memory=effective_limited_memory,
             least_squares_algorithm=least_squares_algorithm,
         )
@@ -2247,7 +2252,6 @@ class BoozerSurfaceJAX(Optimizable):
         return {
             k: self.options[k]
             for k in (
-                "hybrid_scipy_maxiter",
                 "line_search_maxiter",
                 "maxcor",
                 "ftol",
@@ -2331,7 +2335,10 @@ class BoozerSurfaceJAX(Optimizable):
                 weight_inv_modB,
                 constraint_weight,
             )
-            result = jax_least_squares(
+            least_squares_runner = (
+                target_least_squares if method == "lm-ondevice" else reference_least_squares
+            )
+            result = least_squares_runner(
                 residual_fn,
                 x0,
                 method=method,
@@ -2345,7 +2352,10 @@ class BoozerSurfaceJAX(Optimizable):
                 weight_inv_modB,
                 constraint_weight,
             )
-            result = jax_minimize(
+            minimize_runner = (
+                target_minimize if method.endswith("-ondevice") else reference_minimize
+            )
+            result = minimize_runner(
                 obj_fn,
                 x0,
                 method=method,

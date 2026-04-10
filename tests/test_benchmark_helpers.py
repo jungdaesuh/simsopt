@@ -51,6 +51,8 @@ from benchmarks.benchmark_problem import (
     clone_tensor_surface,
 )
 import benchmarks.run_code_benchmark_common as run_code_benchmark_common
+import benchmarks.production_boozer_parity_probe as production_boozer_parity_probe_module
+import benchmarks.run_code_parity_probe as run_code_parity_probe_module
 import benchmarks.stage2_value_gradient_parity as stage2_value_gradient_parity_module
 import benchmarks.tier5_performance_characterization as tier5_performance_characterization
 from benchmarks.run_code_benchmark_common import summarize_result_fun
@@ -683,8 +685,9 @@ def test_describe_compile_behavior_tracks_cache_state(monkeypatch):
 def test_resolve_probe_lane_tracks_private_optimizer_backends():
     assert resolve_probe_lane() == "trusted-public-reference"
     assert resolve_probe_lane(optimizer_backend="scipy") == "trusted-public-reference"
-    assert resolve_probe_lane(optimizer_backend="hybrid") == "private-optimizer"
     assert resolve_probe_lane(optimizer_backend="ondevice") == "private-optimizer"
+    with pytest.raises(ValueError, match="optimizer_backend must be one of"):
+        resolve_probe_lane(optimizer_backend="hybrid")
 
 
 def test_run_code_benchmark_runtime_lane_matches_ladder_vocabulary(monkeypatch):
@@ -697,10 +700,8 @@ def test_run_code_benchmark_runtime_lane_matches_ladder_vocabulary(monkeypatch):
         run_code_benchmark_common._resolve_runtime_lane(("scipy",))
         == "trusted-public-reference"
     )
-    assert (
+    with pytest.raises(ValueError, match="optimizer_backend must be one of"):
         run_code_benchmark_common._resolve_runtime_lane(("hybrid",))
-        == "private-optimizer"
-    )
 
 
 def test_require_x64_runtime_rejects_float32_runtime():
@@ -2217,6 +2218,7 @@ def test_stage2_benchmark_scripts_default_to_repo_fixture_equilibria_dir(tmp_pat
     stage2_e2e_args = stage2_e2e_comparison_module.parse_args()
     assert stage2_e2e_args.plasma_surf_filename == DEFAULT_PLASMA_SURF_FILENAME
     assert stage2_e2e_args.equilibria_dir == str(DEFAULT_EQUILIBRIA_DIR)
+    assert stage2_e2e_args.optimizer_backend == "ondevice"
 
     monkeypatch.setattr(
         sys,
@@ -2248,6 +2250,30 @@ def test_stage2_benchmark_scripts_default_to_repo_fixture_equilibria_dir(tmp_pat
     assert adjoint_fd_args.plasma_surf_filename == DEFAULT_PLASMA_SURF_FILENAME
     assert adjoint_fd_args.equilibria_dir == str(DEFAULT_EQUILIBRIA_DIR)
     assert adjoint_fd_args.optimizer_backend == "ondevice"
+
+
+def test_production_boozer_probe_defaults_jax_lane_to_ondevice(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "production_boozer_parity_probe.py",
+            "--output-json",
+            str(tmp_path / "production-boozer.json"),
+        ],
+    )
+
+    args = production_boozer_parity_probe_module.parse_args()
+
+    assert args.optimizer_backend == "ondevice"
+
+
+def test_run_code_parity_probe_defaults_jax_lane_to_ondevice(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["run_code_parity_probe.py"])
+
+    args = run_code_parity_probe_module.parse_args()
+
+    assert args.optimizer_backend == "ondevice"
 
 
 def test_stage2_value_gradient_real_fixture_preserves_sharding_summaries(

@@ -743,7 +743,7 @@ def parse_args():
     )
     parser.add_argument(
         "--optimizer-backend",
-        choices=["scipy", "hybrid", "ondevice"],
+        choices=["scipy", "ondevice"],
         default=os.environ.get("OPTIMIZER_BACKEND"),
         help=(
             "JAX outer single-stage optimizer backend. Recorded in the run "
@@ -754,7 +754,7 @@ def parse_args():
     )
     parser.add_argument(
         "--boozer-optimizer-backend",
-        choices=["scipy", "hybrid", "ondevice"],
+        choices=["scipy", "ondevice"],
         default=None,
         help=(
             "Optional override for the inner JAX Boozer LS solve backend. "
@@ -985,7 +985,7 @@ def initialize_boozer_surface(
     iota,
     G0,
     backend="cpu",
-    optimizer_backend="scipy",
+    optimizer_backend=None,
     boozer_least_squares_algorithm=None,
     boozer_limited_memory=False,
     surface_dofs_override=None,
@@ -1005,7 +1005,7 @@ def initialize_boozer_surface(
     iota: initial guess for iota value on the surface
     G0: Value of net current going through the torus hole
     backend: "cpu" or "jax"
-    optimizer_backend: JAX inner optimizer selector recorded in metadata
+    optimizer_backend: optional JAX inner optimizer selector recorded in metadata
     boozer_least_squares_algorithm: optional JAX Boozer LS algorithm override
     boozer_limited_memory: force the JAX Boozer LS solve through ondevice
         limited-memory routing without changing the default contract elsewhere
@@ -1076,10 +1076,15 @@ def initialize_boozer_surface(
         vol = Volume(surf)
         options = {"verbose": True}
         if backend == "jax":
-            options["optimizer_backend"] = optimizer_backend
+            resolved_optimizer_backend = resolve_boozer_optimizer_backend(
+                backend,
+                "ondevice",
+                optimizer_backend,
+            )
+            options["optimizer_backend"] = resolved_optimizer_backend
             if boozer_least_squares_algorithm is not None:
                 options["least_squares_algorithm"] = boozer_least_squares_algorithm
-            if optimizer_backend == "ondevice" and boozer_limited_memory:
+            if resolved_optimizer_backend == "ondevice" and boozer_limited_memory:
                 options["force_ondevice_limited_memory"] = True
             options.update(build_jax_stage_options())
         boozer_surface = BoozerCls(
@@ -1550,12 +1555,21 @@ def resolve_boozer_optimizer_backend(
     optimizer_backend,
     boozer_optimizer_backend=None,
 ):
-    """Resolve the inner Boozer LS backend without changing CPU behavior."""
+    """Resolve the inner Boozer LS backend for the active runtime contract."""
     if field_backend != "jax":
         return None
-    if boozer_optimizer_backend is None:
-        return optimizer_backend
-    return boozer_optimizer_backend
+    effective_backend = (
+        optimizer_backend
+        if boozer_optimizer_backend is None
+        else boozer_optimizer_backend
+    )
+    if effective_backend != "ondevice":
+        raise ValueError(
+            "Single-stage JAX backend requires boozer_optimizer_backend="
+            "'ondevice'. The SciPy/reference Boozer lane is "
+            "CPU/reference-only."
+        )
+    return effective_backend
 
 
 def resolve_single_stage_default_boozer_least_squares_algorithm(
@@ -1596,9 +1610,18 @@ _SINGLE_STAGE_COMPONENT_LABEL = "the single-stage outer loop"
 
 def resolve_single_stage_optimizer_contract(field_backend, optimizer_backend):
     """Resolve the optimizer contract for the single-stage outer loop."""
-    from simsopt.geo.optimizer_jax import resolve_outer_loop_optimizer_contract
+    from simsopt.geo.optimizer_jax import (
+        resolve_reference_outer_loop_optimizer_contract,
+        resolve_target_outer_loop_optimizer_contract,
+    )
 
-    return resolve_outer_loop_optimizer_contract(
+    if field_backend == "jax":
+        return resolve_target_outer_loop_optimizer_contract(
+            field_backend,
+            optimizer_backend,
+            component_label=_SINGLE_STAGE_COMPONENT_LABEL,
+        )
+    return resolve_reference_outer_loop_optimizer_contract(
         field_backend,
         optimizer_backend,
         component_label=_SINGLE_STAGE_COMPONENT_LABEL,
@@ -1771,14 +1794,20 @@ def run_single_stage_optimizer(
     callback,
     scalar_fun=None,
 ):
-    """Run the single-stage outer optimization through the shared adapter."""
-    from simsopt.geo.optimizer_jax import jax_minimize
+    """Run the single-stage outer optimization through the lane-specific adapters."""
+    from simsopt.geo.optimizer_jax import (
+        ReferenceOptimizerContract,
+        TargetOptimizerContract,
+        reference_minimize,
+        target_minimize,
+    )
 
     optimizer_dofs = dofs
+    is_target_lane = isinstance(contract, TargetOptimizerContract)
     if fun is not None:
         optimizer_fun = fun
         value_and_grad = True
-    elif contract.use_scalar_objective:
+    elif is_target_lane:
         if scalar_fun is None:
             raise RuntimeError(
                 "Single-stage target-lane optimization requires either the fused "
@@ -1791,7 +1820,7 @@ def run_single_stage_optimizer(
             "Single-stage optimization requires an explicit value-and-gradient "
             "objective for the selected lane."
         )
-    if contract.use_scalar_objective:
+    if is_target_lane:
         optimizer_dofs = _single_stage_outer_optimizer_state(dofs)
         if value_and_grad:
             optimizer_fun = _wrap_single_stage_outer_value_and_grad_objective(
@@ -1799,7 +1828,24 @@ def run_single_stage_optimizer(
             )
         else:
             optimizer_fun = _wrap_single_stage_outer_scalar_objective(optimizer_fun)
-    return jax_minimize(
+        return target_minimize(
+            optimizer_fun,
+            optimizer_dofs,
+            method=contract.method,
+            tol=gtol,
+            maxiter=maxiter,
+            options={
+                "maxcor": int(maxcor),
+                "ftol": float(ftol),
+            },
+            value_and_grad=value_and_grad,
+            callback=callback,
+        )
+    if not isinstance(contract, ReferenceOptimizerContract):
+        raise RuntimeError(
+            f"Unsupported single-stage optimizer contract {type(contract)!r}."
+        )
+    return reference_minimize(
         optimizer_fun,
         optimizer_dofs,
         method=contract.method,
@@ -1809,7 +1855,7 @@ def run_single_stage_optimizer(
             "maxcor": int(maxcor),
             "ftol": float(ftol),
         },
-        value_and_grad=value_and_grad,
+        value_and_grad=True,
         callback=callback,
     )
 
@@ -2668,7 +2714,9 @@ if __name__ == "__main__":
         args.backend,
         args.optimizer_backend,
     )
-    use_target_lane = outer_contract.use_scalar_objective
+    from simsopt.geo.optimizer_jax import TargetOptimizerContract
+
+    use_target_lane = isinstance(outer_contract, TargetOptimizerContract)
     dof_setter = resolve_single_stage_outer_dof_setter(
         JF,
         bs,
@@ -2725,6 +2773,11 @@ if __name__ == "__main__":
         print("Skipping single-stage optimizer because --init-only was provided.")
     else:
         outer_optimizer_start_s = _perf_counter_s()
+        if use_target_lane:
+            print(
+                "Preparing target-lane outer objective/runtime bundle "
+                f"(method={outer_contract.method}, maxiter={MAXITER})..."
+            )
         (
             target_scalar_objective,
             target_value_and_grad_objective,
@@ -2745,11 +2798,18 @@ if __name__ == "__main__":
             ss_dist=SS_DIST,
             curvature_threshold=CURVATURE_THRESHOLD,
         )
+        if use_target_lane:
+            print("Target-lane outer objective/runtime bundle ready.")
         accepted_step_callback = resolve_target_lane_accepted_step_callback(
             adapter,
             use_target_lane=use_target_lane,
             sync_policy=effective_target_lane_sync_policy,
         )
+        if use_target_lane:
+            print(
+                "Starting target-lane outer optimizer "
+                f"(sync={effective_target_lane_sync_policy})..."
+            )
         res = run_single_stage_optimizer(
             target_value_and_grad_objective if use_target_lane else adapter,
             dofs,

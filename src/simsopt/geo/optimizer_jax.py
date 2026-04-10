@@ -12,9 +12,6 @@ Least-squares methods:
   - ``method="lm-ondevice"``: trace-safe Levenberg-Marquardt for
     residual-vector objectives on the target lane.
 
-Transitional private method (minimum supported JAX floor 0.9.2):
-  - ``method="bfgs-hybrid"``: SciPy BFGS prefix, then JAX on-device BFGS.
-
 Target private methods (minimum supported JAX floor 0.9.2):
   - ``method="bfgs-ondevice"``: JAX on-device BFGS.
   - ``method="lbfgs-ondevice"``: JAX on-device L-BFGS.
@@ -25,7 +22,9 @@ Target public stochastic method:
 
 The private methods live in ``optimizer_jax_private/`` and intentionally mirror
 the JAX 0.9.2 optimizer semantics so the line-search and iteration behavior
-stay stable across this project. The reference source is the upstream
+stay stable across this project. High-level JAX backend flows route through the
+target lane only; the host SciPy adapter lives in the separate
+``optimizer_jax_reference`` module. The reference source is the upstream
 ``jax-v0.9.2`` tag (``a659757d768587a81d095a9fab5f0c36f8beb218``).
 
 This module contains zero ``jax._src`` imports. The private package now does as
@@ -36,7 +35,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from functools import lru_cache
-import logging
 import re
 from threading import Lock
 from typing import Callable
@@ -49,11 +47,9 @@ from jax.flatten_util import ravel_pytree
 from jax import lax
 from jax.scipy.sparse.linalg import gmres
 from scipy.optimize import OptimizeResult
-from scipy.optimize import minimize as scipy_minimize
 
 from ..backend import (
     get_backend_config,
-    is_parity_mode,
     raise_if_strict_jax_fallback,
 )
 from .._core.jax_host_boundary import host_bool as _host_bool
@@ -61,8 +57,9 @@ from .._core.jax_host_boundary import host_scalar as _host_scalar
 from ..jax_core._math_utils import _explicit_device_array
 
 __all__ = [
-    "ContinuousOptimizerContract",
     "PRIVATE_OPTIMIZER_JAX_VERSION",
+    "ReferenceOptimizerContract",
+    "TargetOptimizerContract",
     "adam_optimize",
     "adam_optimize_traceable",
     "private_optimizer_runtime_is_supported",
@@ -77,46 +74,54 @@ __all__ = [
     "newton_polish_traceable",
     "newton_exact",
     "newton_exact_traceable",
+    "reference_least_squares",
+    "reference_minimize",
     "require_target_backend_x64",
     "resolve_least_squares_optimizer_method",
-    "resolve_continuous_optimizer_contract",
+    "resolve_reference_least_squares_optimizer_method",
+    "resolve_reference_optimizer_contract",
+    "resolve_reference_optimizer_method",
+    "resolve_target_least_squares_optimizer_method",
+    "resolve_target_optimizer_contract",
+    "resolve_target_optimizer_method",
     "resolve_optimizer_backend_method",
-    "resolve_outer_loop_optimizer_contract",
+    "resolve_reference_outer_loop_optimizer_contract",
+    "resolve_target_outer_loop_optimizer_contract",
+    "target_least_squares",
+    "target_minimize",
 ]
 
 
 PRIVATE_OPTIMIZER_JAX_VERSION = "0.9.2"
-VALID_OPTIMIZER_BACKENDS = frozenset({"scipy", "hybrid", "ondevice"})
+VALID_OPTIMIZER_BACKENDS = frozenset({"scipy", "ondevice"})
 OPTIMIZER_BACKEND_ROLE = {
     "scipy": "reference",
-    "hybrid": "transitional",
     "ondevice": "target",
 }
-TARGET_X64_REQUIRED_OPTIMIZER_BACKENDS = frozenset({"hybrid", "ondevice"})
+TARGET_X64_REQUIRED_OPTIMIZER_BACKENDS = frozenset({"ondevice"})
 VALID_LEAST_SQUARES_ALGORITHMS = frozenset({"quasi-newton", "lm"})
 _SUPPORTED_METHODS = {
     "adam",
     "adam-ondevice",
     "bfgs",
     "lbfgs",
-    "bfgs-hybrid",
     "bfgs-ondevice",
     "lbfgs-ondevice",
 }
 _SUPPORTED_LEAST_SQUARES_METHODS = frozenset({"lm", "lm-ondevice"})
 _REFERENCE_METHODS = frozenset({"bfgs", "lbfgs"})
 _REFERENCE_JAX_METHODS = frozenset({"adam"})
+_TARGET_PRIVATE_METHODS = frozenset({"bfgs-ondevice", "lbfgs-ondevice"})
 _TARGET_PUBLIC_METHODS = frozenset({"adam-ondevice"})
+_TARGET_METHODS = _TARGET_PRIVATE_METHODS | _TARGET_PUBLIC_METHODS
 _STRICT_REFERENCE_OPTIMIZER_DETAIL = "the host-side SciPy reference optimizer lane"
 _STRICT_REFERENCE_JAX_OPTIMIZER_DETAIL = "the host-side JAX reference optimizer lane"
 _STRICT_REFERENCE_LEAST_SQUARES_DETAIL = (
     "the host-side reference least-squares optimizer lane"
 )
-_STRICT_HYBRID_OPTIMIZER_DETAIL = "the transitional SciPy-prefix hybrid optimizer lane"
 _SCALAR_VALUE_AND_GRAD_CACHE_LOCK = Lock()
 _CACHEABLE_VALUE_AND_GRAD_ATTR = "_simsopt_cache_jit_value_and_grad"
 _CACHED_VALUE_AND_GRAD_ATTR = "_simsopt_cached_jit_value_and_grad"
-logger = logging.getLogger(__name__)
 
 
 def _version_key(raw_version: str) -> tuple[int, ...]:
@@ -131,9 +136,13 @@ def private_optimizer_runtime_is_supported(version: str) -> bool:
 
 
 @dataclass(frozen=True)
-class ContinuousOptimizerContract:
+class ReferenceOptimizerContract:
     method: str
-    use_scalar_objective: bool
+
+
+@dataclass(frozen=True)
+class TargetOptimizerContract:
+    method: str
     use_least_squares_objective: bool = False
 
 
@@ -212,17 +221,30 @@ def _raise_if_target_lane_required(
     detail: str,
 ) -> None:
     backend_config = get_backend_config()
-    if (
-        backend_config.backend == "jax"
-        and not backend_config.strict
-        and not is_parity_mode(backend_config.mode)
-    ):
-        raise RuntimeError(
-            f"{component} cannot use {detail} for method={method!r} while simsopt "
-            f"backend mode {backend_config.mode!r} targets the fast/ondevice lane. "
-            "Select an ondevice target-lane optimizer method or switch to a "
-            "CPU/reference or parity backend mode."
-        )
+    if backend_config.backend != "jax":
+        return
+    raise RuntimeError(
+        f"{component} cannot use {detail} for method={method!r} while simsopt "
+        f"backend mode {backend_config.mode!r} requires an ondevice optimizer "
+        "method. Select an ondevice optimizer method or switch to the "
+        "native_cpu reference backend."
+    )
+
+
+def _require_native_cpu_reference_backend_for_scipy_adapter(
+    *,
+    component: str,
+    method: str,
+) -> None:
+    backend_config = get_backend_config()
+    if backend_config.backend != "jax":
+        return
+    raise RuntimeError(
+        f"{component} cannot use the host SciPy adapter for method={method!r} "
+        f"while simsopt backend mode {backend_config.mode!r} requires an "
+        "ondevice optimizer method. Select an ondevice optimizer method or "
+        "switch to the native_cpu reference backend."
+    )
 
 
 def _x64_enabled():
@@ -334,33 +356,6 @@ def _prepare_optimizer_callable_inputs(fun, x0, *, value_and_grad, callback):
     )
 
 
-def _hybrid_prefix_grad_inf(prefix_result) -> float:
-    jacobian = getattr(prefix_result, "jac", None)
-    if jacobian is None:
-        return float("nan")
-    return float(np.linalg.norm(np.asarray(jacobian, dtype=np.float64), ord=np.inf))
-
-
-def _emit_hybrid_prefix_nonfinite_observability(
-    prefix_result, progress_callback
-) -> None:
-    fun_value = float(
-        np.asarray(getattr(prefix_result, "fun", np.nan), dtype=np.float64)
-    )
-    grad_inf = _hybrid_prefix_grad_inf(prefix_result)
-    nit = int(getattr(prefix_result, "nit", 0))
-    logger.warning(
-        "bfgs-hybrid SciPy prefix produced a non-finite continuation state; "
-        "success=%s nit=%d fun=%s grad_inf=%s",
-        bool(getattr(prefix_result, "success", False)),
-        nit,
-        fun_value,
-        grad_inf,
-    )
-    if progress_callback is not None:
-        progress_callback(nit, fun_value, grad_inf)
-
-
 def _finalize_optimizer_result(result, adapter):
     if adapter is None:
         return result
@@ -379,13 +374,11 @@ _PRIVATE_LAZY_NAMES = frozenset(
         "_BFGSResults",
         "_line_search",
         "_line_search_value_and_grad",
-        "_make_bfgs_continuation_state",
         "_minimize_bfgs_private",
         "_minimize_lbfgs_private",
         "_minimize_lbfgs_private_value_and_grad",
         "_private_bfgs_result_to_optimize_result",
         "_private_lbfgs_result_to_optimize_result",
-        "_scipy_result_is_continuable",
     }
 )
 
@@ -419,16 +412,19 @@ def __getattr__(name):
 def resolve_optimizer_backend_method(optimizer_backend, *, limited_memory):
     """Map the public backend contract to the concrete optimizer method."""
     if optimizer_backend not in VALID_OPTIMIZER_BACKENDS:
-        raise ValueError("optimizer_backend must be one of: scipy, hybrid, ondevice.")
+        raise ValueError("optimizer_backend must be one of: scipy, ondevice.")
     if optimizer_backend == "scipy":
-        return "lbfgs" if limited_memory else "bfgs"
-    if optimizer_backend == "hybrid":
-        if limited_memory:
-            raise ValueError(
-                "optimizer_backend='hybrid' is transitional and does not support "
-                "limited_memory=True."
-            )
-        return "bfgs-hybrid"
+        return resolve_reference_optimizer_method(limited_memory=limited_memory)
+    return resolve_target_optimizer_method(limited_memory=limited_memory)
+
+
+def resolve_reference_optimizer_method(*, limited_memory):
+    """Resolve the CPU/reference scalar optimizer method."""
+    return "lbfgs" if limited_memory else "bfgs"
+
+
+def resolve_target_optimizer_method(*, limited_memory):
+    """Resolve the JAX target scalar optimizer method."""
     return "lbfgs-ondevice" if limited_memory else "bfgs-ondevice"
 
 
@@ -447,18 +443,53 @@ def resolve_least_squares_optimizer_method(
             optimizer_backend,
             limited_memory=limited_memory,
         )
+    if optimizer_backend not in VALID_OPTIMIZER_BACKENDS:
+        raise ValueError("optimizer_backend must be one of: scipy, ondevice.")
+    if optimizer_backend == "scipy":
+        return resolve_reference_least_squares_optimizer_method(
+            limited_memory=limited_memory,
+            least_squares_algorithm=least_squares_algorithm,
+        )
+    return resolve_target_least_squares_optimizer_method(
+        limited_memory=limited_memory,
+        least_squares_algorithm=least_squares_algorithm,
+    )
+
+
+def resolve_reference_least_squares_optimizer_method(
+    *,
+    limited_memory,
+    least_squares_algorithm,
+):
+    """Resolve the CPU/reference least-squares optimizer method."""
+    if least_squares_algorithm not in VALID_LEAST_SQUARES_ALGORITHMS:
+        allowed = ", ".join(sorted(VALID_LEAST_SQUARES_ALGORITHMS))
+        raise ValueError(f"least_squares_algorithm must be one of: {allowed}.")
+    if least_squares_algorithm == "quasi-newton":
+        return resolve_reference_optimizer_method(limited_memory=limited_memory)
     if limited_memory:
         raise ValueError(
             "least_squares_algorithm='lm' is incompatible with limited_memory=True."
         )
-    if optimizer_backend not in VALID_OPTIMIZER_BACKENDS:
-        raise ValueError("optimizer_backend must be one of: scipy, hybrid, ondevice.")
-    if optimizer_backend == "hybrid":
+    return "lm"
+
+
+def resolve_target_least_squares_optimizer_method(
+    *,
+    limited_memory,
+    least_squares_algorithm,
+):
+    """Resolve the JAX target least-squares optimizer method."""
+    if least_squares_algorithm not in VALID_LEAST_SQUARES_ALGORITHMS:
+        allowed = ", ".join(sorted(VALID_LEAST_SQUARES_ALGORITHMS))
+        raise ValueError(f"least_squares_algorithm must be one of: {allowed}.")
+    if least_squares_algorithm == "quasi-newton":
+        return resolve_target_optimizer_method(limited_memory=limited_memory)
+    if limited_memory:
         raise ValueError(
-            "least_squares_algorithm='lm' is unsupported for "
-            "optimizer_backend='hybrid'."
+            "least_squares_algorithm='lm' is incompatible with limited_memory=True."
         )
-    return "lm" if optimizer_backend == "scipy" else "lm-ondevice"
+    return "lm-ondevice"
 
 
 def require_target_backend_x64(optimizer_backend):
@@ -474,156 +505,105 @@ def require_target_backend_x64(optimizer_backend):
     )
 
 
-def resolve_continuous_optimizer_contract(
+def resolve_reference_optimizer_contract(
     field_backend,
     optimizer_backend,
     *,
     limited_memory,
-    allow_hybrid,
     component_label,
 ):
-    """Resolve the shared continuous-optimizer route for outer solve lanes."""
+    """Resolve the explicit CPU/reference optimizer contract."""
     if optimizer_backend not in VALID_OPTIMIZER_BACKENDS:
-        raise ValueError("optimizer_backend must be one of: scipy, hybrid, ondevice.")
+        raise ValueError("optimizer_backend must be one of: scipy, ondevice.")
+    if field_backend == "jax":
+        raise ValueError(
+            f"{component_label} with backend='jax' requires "
+            "optimizer_backend='ondevice'. The SciPy/reference optimizer lane "
+            "is CPU/reference-only."
+        )
     if field_backend != "jax" and optimizer_backend != "scipy":
         raise ValueError(
             f"{component_label} CPU/reference lane only supports "
             "optimizer_backend='scipy'."
         )
-    if optimizer_backend == "hybrid":
-        if not allow_hybrid:
-            raise ValueError(
-                "optimizer_backend='hybrid' is transitional and not supported for "
-                f"{component_label}."
-            )
-        limited_memory = False
-    if (
-        field_backend == "jax"
-        and optimizer_backend in TARGET_X64_REQUIRED_OPTIMIZER_BACKENDS
-    ):
-        require_target_backend_x64(optimizer_backend)
-    return ContinuousOptimizerContract(
-        method=resolve_optimizer_backend_method(
-            optimizer_backend,
+    return ReferenceOptimizerContract(
+        method=resolve_reference_optimizer_method(
             limited_memory=limited_memory,
         ),
-        use_scalar_objective=field_backend == "jax" and optimizer_backend == "ondevice",
     )
 
 
-def resolve_outer_loop_optimizer_contract(
+def resolve_target_optimizer_contract(
+    field_backend,
+    optimizer_backend,
+    *,
+    limited_memory,
+    component_label,
+    least_squares_algorithm="quasi-newton",
+):
+    """Resolve the explicit JAX target optimizer contract."""
+    if optimizer_backend not in VALID_OPTIMIZER_BACKENDS:
+        raise ValueError("optimizer_backend must be one of: scipy, ondevice.")
+    if field_backend != "jax" or optimizer_backend != "ondevice":
+        raise ValueError(
+            f"{component_label} with backend='jax' requires "
+            "optimizer_backend='ondevice'. The SciPy/reference optimizer lane "
+            "is CPU/reference-only."
+        )
+    require_target_backend_x64(optimizer_backend)
+    method = resolve_target_least_squares_optimizer_method(
+        limited_memory=limited_memory,
+        least_squares_algorithm=least_squares_algorithm,
+    )
+    return TargetOptimizerContract(
+        method=method,
+        use_least_squares_objective=(method == "lm-ondevice"),
+    )
+
+
+def resolve_reference_outer_loop_optimizer_contract(
     field_backend,
     optimizer_backend,
     *,
     component_label,
 ):
-    """Resolve the optimizer contract for an outer optimization loop.
-
-    Shared by both Stage 2 and single-stage outer loops, which use
-    ``limited_memory=True`` and ``allow_hybrid=False``.
-    """
-    return resolve_continuous_optimizer_contract(
+    """Resolve the CPU/reference outer-loop contract."""
+    return resolve_reference_optimizer_contract(
         field_backend,
         optimizer_backend,
         limited_memory=True,
-        allow_hybrid=False,
         component_label=component_label,
     )
 
 
+def resolve_target_outer_loop_optimizer_contract(
+    field_backend,
+    optimizer_backend,
+    *,
+    component_label,
+    least_squares_algorithm="quasi-newton",
+):
+    """Resolve the JAX target outer-loop contract."""
+    limited_memory = least_squares_algorithm != "lm"
+    return resolve_target_optimizer_contract(
+        field_backend,
+        optimizer_backend,
+        limited_memory=limited_memory,
+        component_label=component_label,
+        least_squares_algorithm=least_squares_algorithm,
+    )
+
+
 # ---------------------------------------------------------------------------
-# SciPy adapter helpers
+# Reference-lane module loader
 # ---------------------------------------------------------------------------
 
 
-def _strip_internal_options(options, method):
-    if not options:
-        return {}
-    internal = {
-        "hybrid_scipy_maxiter",
-        "line_search_maxiter",
-        "callback",
-        "progress_callback",
-    }
-    if method == "bfgs":
-        internal |= {"maxcor", "ftol", "maxfun", "maxgrad", "maxls"}
-    elif method == "lbfgs":
-        internal |= {"maxgrad"}
-    return {key: value for key, value in options.items() if key not in internal}
+@lru_cache(maxsize=1)
+def _load_reference_optimizer_module():
+    from . import optimizer_jax_reference
 
-
-def _normalize_scipy_result(result, *, x_dtype):
-    result.x = _optimizer_flat_vector(result.x, dtype=x_dtype)
-    result.jac = _optimizer_flat_vector(result.jac, dtype=x_dtype)
-    result.nit = int(getattr(result, "nit", 0))
-    result.nfev = int(getattr(result, "nfev", 0))
-    if hasattr(result, "njev"):
-        result.njev = int(result.njev)
-    result.success = bool(result.success)
-    if hasattr(result, "status"):
-        result.status = int(result.status)
-    return result
-
-
-def _scipy_dispatch(scipy_fun, x0, *, method, tol, maxiter, options):
-    stripped_options = _strip_internal_options(options, method)
-    x_dtype = _optimizer_dtype(x0)
-    if method == "bfgs":
-        scipy_method = "BFGS"
-        scipy_opts = {"maxiter": maxiter, "gtol": tol, **stripped_options}
-    else:
-        scipy_method = "L-BFGS-B"
-        scipy_opts = {
-            "maxiter": maxiter,
-            "gtol": tol,
-            "maxcor": 200,
-            **stripped_options,
-        }
-    callback = options.get("callback")
-    scipy_callback = None
-    if callback is not None:
-
-        def scipy_callback(x_np):
-            callback(_optimizer_flat_vector(x_np, dtype=x_dtype))
-
-    return _normalize_scipy_result(
-        scipy_minimize(
-            scipy_fun,
-            np.asarray(x0, dtype=np.dtype(x_dtype)),
-            jac=True,
-            method=scipy_method,
-            options=scipy_opts,
-            callback=scipy_callback,
-        ),
-        x_dtype=x_dtype,
-    )
-
-
-def _scipy_minimize(fun, x0, *, method, tol, maxiter, options):
-    val_and_grad_fn = _cached_jit_value_and_grad(fun)
-    x_dtype = _optimizer_dtype(x0)
-
-    def scipy_fun(x_np):
-        x_jax = _optimizer_flat_vector(x_np, dtype=x_dtype)
-        val, grad = val_and_grad_fn(x_jax)
-        return float(val), np.asarray(grad, dtype=np.dtype(x_dtype))
-
-    return _scipy_dispatch(
-        scipy_fun, x0, method=method, tol=tol, maxiter=maxiter, options=options
-    )
-
-
-def _scipy_minimize_value_and_grad(fun, x0, *, method, tol, maxiter, options):
-    x_dtype = _optimizer_dtype(x0)
-
-    def scipy_fun(x_np):
-        x_jax = _optimizer_flat_vector(x_np, dtype=x_dtype)
-        val, grad = fun(x_jax)
-        return float(val), np.asarray(grad, dtype=np.dtype(x_dtype))
-
-    return _scipy_dispatch(
-        scipy_fun, x0, method=method, tol=tol, maxiter=maxiter, options=options
-    )
+    return optimizer_jax_reference
 
 
 def _least_squares_cost(residual):
@@ -2065,7 +2045,7 @@ def _require_private_package(method):
             globals()[name] = getattr(pkg, name)
 
 
-def jax_least_squares(
+def reference_least_squares(
     residual_fn,
     x0,
     *,
@@ -2076,31 +2056,35 @@ def jax_least_squares(
     callback=None,
     progress_callback=None,
 ):
-    """Least-squares optimizer adapter for residual-vector objectives.
+    """Explicit CPU/reference least-squares entrypoint."""
+    return _load_reference_optimizer_module().reference_least_squares(
+        residual_fn,
+        x0,
+        method=method,
+        tol=tol,
+        maxiter=maxiter,
+        options=options,
+        callback=callback,
+        progress_callback=progress_callback,
+    )
 
-    Contract by method family:
 
-    - ``lm``:
-      host-driven Levenberg-Marquardt reference lane.
-    - ``lm-ondevice``:
-      trace-safe Levenberg-Marquardt target lane.
-
-    In backend modes that target the fast/ondevice lane, the reference ``lm``
-    method is rejected rather than silently routing through the host LM loop.
-
-    ``x0`` may be either the historical flat 1-D vector or a structured pytree.
-    The LM loop itself is pytree-native: it keeps ``x`` and the least-squares
-    gradient in the original structure and uses ``jvp``/``vjp`` products inside
-    GMRES. Dense Jacobian/Hessian materialization is deferred until the final
-    result boundary for compatibility. ``result.jac`` is the final least-squares
-    gradient tree/vector, while the dense residual Jacobian is exposed
-    separately as ``result.residual_jacobian`` with respect to the flattened
-    decision vector.
-    """
-    if method not in _SUPPORTED_LEAST_SQUARES_METHODS:
+def target_least_squares(
+    residual_fn,
+    x0,
+    *,
+    method="lm-ondevice",
+    tol=1e-10,
+    maxiter=1500,
+    options=None,
+    callback=None,
+    progress_callback=None,
+):
+    """Explicit JAX target least-squares entrypoint."""
+    if method != "lm-ondevice":
         raise ValueError(
-            "Unknown least-squares method "
-            f"{method!r}. Supported: {sorted(_SUPPORTED_LEAST_SQUARES_METHODS)}."
+            "target_least_squares() only supports method='lm-ondevice'. "
+            f"Got {method!r}."
         )
 
     options = dict(options or {})
@@ -2109,40 +2093,20 @@ def jax_least_squares(
     if progress_callback is not None:
         options["progress_callback"] = progress_callback
 
-    if method == "lm":
-        _raise_if_target_lane_required(
-            component="optimizer_jax.jax_least_squares",
-            method=method,
-            detail=_STRICT_REFERENCE_LEAST_SQUARES_DETAIL,
-        )
-        _raise_if_strict_optimizer_fallback(
-            component="optimizer_jax.jax_least_squares",
-            method=method,
-            detail=_STRICT_REFERENCE_LEAST_SQUARES_DETAIL,
-        )
-        result = levenberg_marquardt(
-            residual_fn,
-            x0,
-            maxiter=maxiter,
-            tol=tol,
-            callback=options.get("callback"),
-            progress_callback=options.get("progress_callback"),
-        )
-    else:
-        require_target_backend_x64("ondevice")
-        result = levenberg_marquardt_traceable(
-            residual_fn,
-            x0,
-            maxiter=maxiter,
-            tol=tol,
-            callback=options.get("callback"),
-            progress_callback=options.get("progress_callback"),
-        )
+    require_target_backend_x64("ondevice")
+    result = levenberg_marquardt_traceable(
+        residual_fn,
+        x0,
+        maxiter=maxiter,
+        tol=tol,
+        callback=options.get("callback"),
+        progress_callback=options.get("progress_callback"),
+    )
 
     nit = int(_host_scalar(result["nit"], dtype=np.int64))
     status = int(_host_scalar(result["status"], dtype=np.int64))
     success = _host_bool(result["success"])
-    optimize_result = OptimizeResult(
+    return OptimizeResult(
         x=result["x"],
         fun=result["fun"],
         jac=result["grad"],
@@ -2160,10 +2124,55 @@ def jax_least_squares(
             success,
         ),
     )
-    return optimize_result
 
 
-def jax_minimize(
+def jax_least_squares(
+    residual_fn,
+    x0,
+    *,
+    method="lm",
+    tol=1e-10,
+    maxiter=1500,
+    options=None,
+    callback=None,
+    progress_callback=None,
+):
+    """Compatibility least-squares entrypoint that dispatches by lane."""
+    if method not in _SUPPORTED_LEAST_SQUARES_METHODS:
+        raise ValueError(
+            "Unknown least-squares method "
+            f"{method!r}. Supported: {sorted(_SUPPORTED_LEAST_SQUARES_METHODS)}."
+        )
+    if method == "lm":
+        _raise_if_target_lane_required(
+            component="optimizer_jax.jax_least_squares",
+            method=method,
+            detail=_STRICT_REFERENCE_LEAST_SQUARES_DETAIL,
+        )
+    if method == "lm":
+        return reference_least_squares(
+            residual_fn,
+            x0,
+            method=method,
+            tol=tol,
+            maxiter=maxiter,
+            options=options,
+            callback=callback,
+            progress_callback=progress_callback,
+        )
+    return target_least_squares(
+        residual_fn,
+        x0,
+        method=method,
+        tol=tol,
+        maxiter=maxiter,
+        options=options,
+        callback=callback,
+        progress_callback=progress_callback,
+    )
+
+
+def reference_minimize(
     fun,
     x0,
     *,
@@ -2175,57 +2184,15 @@ def jax_minimize(
     callback=None,
     progress_callback=None,
 ):
-    """Optimizer adapter for Boozer LS minimization.
-
-    Contract by method family:
-
-    - ``bfgs`` / ``lbfgs``:
-      trusted reference/oracle path using host-side SciPy loops.
-    - ``adam``:
-      host-driven JAX Adam lane for noisy/stochastic scalar objectives.
-    - ``bfgs-hybrid``:
-      transitional private path for staged migration away from SciPy.
-    - ``bfgs-ondevice`` / ``lbfgs-ondevice``:
-      private target path for the eventual full-GPU optimizer lane.
-    - ``adam-ondevice``:
-      public trace-safe Adam lane for noisy/stochastic scalar objectives on the
-      target backend.
-
-    If ``value_and_grad=True``, ``fun`` must return ``(value, grad)`` directly.
-    That explicit value/gradient contract is supported on the trusted reference
-    methods, on ``adam`` / ``adam-ondevice``, and on the ``lbfgs-ondevice``
-    target method used by the single-stage outer loop. The on-device explicit
-    paths expect a JAX-traceable callable.
-
-    ``x0`` may be either the historical flat 1-D vector or a structured pytree.
-    Structured states are flattened once inside this adapter, then callbacks and
-    ``OptimizeResult.x`` / ``OptimizeResult.jac`` are restored to the original
-    pytree structure on return.
-
-    On the trusted SciPy/reference methods, the flattened state still crosses a
-    host NumPy boundary because ``scipy.optimize.minimize`` is defined around
-    ``ndarray`` ``x0``, ``fun(x)``, ``jac(x)``, ``callback(xk)``, and
-    ``OptimizeResult.x``. The adapter only guarantees explicit JAX-array
-    re-entry and result normalization instead of ad hoc ``jnp.asarray(...)``
-    calls.
-
-    In backend modes that target the fast/ondevice lane, the host reference
-    methods (``adam``, ``bfgs``, ``lbfgs``) are rejected instead of silently
-    falling back to those host loops.
-    """
-    if method not in _SUPPORTED_METHODS:
-        raise ValueError(
-            f"Unknown method {method!r}. Supported: {sorted(_SUPPORTED_METHODS)}."
-        )
-
+    """Explicit CPU/reference scalar optimizer entrypoint."""
     if method in _REFERENCE_JAX_METHODS:
         _raise_if_target_lane_required(
-            component="optimizer_jax.jax_minimize",
+            component="optimizer_jax.reference_minimize",
             method=method,
             detail=_STRICT_REFERENCE_JAX_OPTIMIZER_DETAIL,
         )
         _raise_if_strict_optimizer_fallback(
-            component="optimizer_jax.jax_minimize",
+            component="optimizer_jax.reference_minimize",
             method=method,
             detail=_STRICT_REFERENCE_JAX_OPTIMIZER_DETAIL,
         )
@@ -2240,7 +2207,32 @@ def jax_minimize(
             progress_callback=progress_callback,
         )
         return _adam_result_to_optimize_result(result)
+    return _load_reference_optimizer_module().reference_minimize(
+        fun,
+        x0,
+        method=method,
+        tol=tol,
+        maxiter=maxiter,
+        options=options,
+        value_and_grad=value_and_grad,
+        callback=callback,
+        progress_callback=progress_callback,
+    )
 
+
+def target_minimize(
+    fun,
+    x0,
+    *,
+    method="bfgs-ondevice",
+    tol=1e-10,
+    maxiter=1500,
+    options=None,
+    value_and_grad=False,
+    callback=None,
+    progress_callback=None,
+):
+    """Explicit JAX target scalar optimizer entrypoint."""
     if method in _TARGET_PUBLIC_METHODS:
         require_target_backend_x64("ondevice")
         result = adam_optimize_traceable(
@@ -2254,6 +2246,12 @@ def jax_minimize(
             progress_callback=progress_callback,
         )
         return _adam_result_to_optimize_result(result)
+
+    if method not in _TARGET_PRIVATE_METHODS:
+        raise ValueError(
+            "target_minimize() only supports target-lane methods "
+            f"{sorted(_TARGET_METHODS)}. Got {method!r}."
+        )
 
     fun, x0, callback, pytree_adapter = _prepare_optimizer_callable_inputs(
         fun,
@@ -2270,42 +2268,8 @@ def jax_minimize(
         options["callback"] = callback
     if progress_callback is not None:
         options["progress_callback"] = progress_callback
-    if method in _REFERENCE_METHODS:
-        _raise_if_target_lane_required(
-            component="optimizer_jax.jax_minimize",
-            method=method,
-            detail=_STRICT_REFERENCE_OPTIMIZER_DETAIL,
-        )
-        _raise_if_strict_optimizer_fallback(
-            component="optimizer_jax.jax_minimize",
-            method=method,
-            detail=_STRICT_REFERENCE_OPTIMIZER_DETAIL,
-        )
-        scipy_adapter = (
-            _scipy_minimize_value_and_grad if value_and_grad else _scipy_minimize
-        )
-        return finalize(
-            scipy_adapter(
-                fun,
-                x0,
-                method=method,
-                tol=tol,
-                maxiter=maxiter,
-                options=options,
-            )
-        )
 
-    if method == "bfgs-hybrid":
-        _raise_if_strict_optimizer_fallback(
-            component="optimizer_jax.jax_minimize",
-            method=method,
-            detail=_STRICT_HYBRID_OPTIMIZER_DETAIL,
-        )
-        _raise_if_target_lane_required(
-            component="optimizer_jax.jax_minimize",
-            method=method,
-            detail=_STRICT_HYBRID_OPTIMIZER_DETAIL,
-        )
+    require_target_backend_x64("ondevice")
 
     # All remaining methods require the private optimizer package.
     _require_private_package(method)
@@ -2358,55 +2322,57 @@ def jax_minimize(
             progress_callback=options.get("progress_callback"),
         )
         return finalize(_private_lbfgs_result_to_optimize_result(state))
+    raise ValueError(f"Unknown target optimizer method {method!r}.")
 
-    # --- bfgs-hybrid: SciPy prefix → on-device continuation ---
-    total_maxiter = int(maxiter)
-    prefix_cap = int(options.get("hybrid_scipy_maxiter", min(total_maxiter // 2, 100)))
-    prefix_cap = max(0, min(prefix_cap, total_maxiter - 1))
-    prefix_result = _scipy_minimize(
+
+def jax_minimize(
+    fun,
+    x0,
+    *,
+    method="bfgs",
+    tol=1e-10,
+    maxiter=1500,
+    options=None,
+    value_and_grad=False,
+    callback=None,
+    progress_callback=None,
+):
+    """Compatibility scalar optimizer entrypoint that dispatches by lane."""
+    if method not in _SUPPORTED_METHODS:
+        raise ValueError(
+            f"Unknown method {method!r}. Supported: {sorted(_SUPPORTED_METHODS)}."
+        )
+
+    if method in _REFERENCE_METHODS | _REFERENCE_JAX_METHODS:
+        detail = (
+            _STRICT_REFERENCE_JAX_OPTIMIZER_DETAIL
+            if method in _REFERENCE_JAX_METHODS
+            else _STRICT_REFERENCE_OPTIMIZER_DETAIL
+        )
+        _raise_if_target_lane_required(
+            component="optimizer_jax.jax_minimize",
+            method=method,
+            detail=detail,
+        )
+        return reference_minimize(
+            fun,
+            x0,
+            method=method,
+            tol=tol,
+            maxiter=maxiter,
+            options=options,
+            value_and_grad=value_and_grad,
+            callback=callback,
+            progress_callback=progress_callback,
+        )
+    return target_minimize(
         fun,
         x0,
-        method="bfgs",
+        method=method,
         tol=tol,
-        maxiter=prefix_cap,
+        maxiter=maxiter,
         options=options,
+        value_and_grad=value_and_grad,
+        callback=callback,
+        progress_callback=progress_callback,
     )
-    if prefix_result.success:
-        return finalize(prefix_result)
-    if not _scipy_result_is_continuable(prefix_result):
-        _emit_hybrid_prefix_nonfinite_observability(
-            prefix_result,
-            options.get("progress_callback"),
-        )
-        prefix_result.success = False
-        prefix_result.message = (
-            "SciPy prefix produced a non-finite state; on-device continuation skipped."
-        )
-        return finalize(prefix_result)
-
-    remaining_maxiter = max(0, total_maxiter - int(prefix_result.nit))
-    if remaining_maxiter == 0:
-        prefix_result.success = False
-        return finalize(prefix_result)
-
-    continuation_state = _make_bfgs_continuation_state(
-        prefix_result,
-        gtol=tol,
-        norm=np.inf,
-    )
-    final_state = _minimize_bfgs_private(
-        fun,
-        prefix_result.x,
-        maxiter=remaining_maxiter,
-        gtol=tol,
-        line_search_maxiter=int(options.get("line_search_maxiter", 10)),
-        initial_state=continuation_state,
-        callback=options.get("callback"),
-        progress_callback=options.get("progress_callback"),
-    )
-    result = _private_bfgs_result_to_optimize_result(
-        final_state,
-        total_nit=int(prefix_result.nit) + int(final_state.k),
-    )
-    result.hess_inv = jnp.asarray(final_state.H_k)
-    return finalize(result)

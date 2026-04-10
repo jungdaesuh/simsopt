@@ -11,7 +11,9 @@ from scipy.optimize import OptimizeResult
 
 from ..._core.jax_host_boundary import (
     host_array as _as_host_numpy,
-    host_scalar as _as_host_scalar,
+    host_bool as _host_bool,
+    host_float as _host_float,
+    host_int as _host_int,
 )
 
 
@@ -36,9 +38,11 @@ _LBFGS_STATUS_MESSAGES = {
     1: "Maximum number of iterations reached.",
     2: "Maximum number of function evaluations reached.",
     3: "Maximum number of gradient evaluations reached.",
-    4: "Insufficient progress (ftol).",
+    4: "Optimization terminated successfully (ftol).",
     5: "Line search failed.",
 }
+
+_LBFGS_SUCCESS_STATUSES = frozenset({0, 4})
 
 _INVALID_STATE_MESSAGE = "Optimization failed with non-finite objective or gradient."
 
@@ -58,19 +62,19 @@ def _status_message_lbfgs(status, invalid_state):
 
 
 def _private_bfgs_result_to_optimize_result(state, *, total_nit=None):
-    line_search_status = int(_as_host_scalar(state.line_search_status))
+    line_search_status = _host_int(state.line_search_status)
     invalid_state = _is_invalid_state(state.f_k, state.g_k) or line_search_status < 0
-    status = int(_as_host_scalar(state.status))
-    nit = int(_as_host_scalar(state.k if total_nit is None else total_nit))
+    status = _host_int(state.status)
+    nit = _host_int(state.k if total_nit is None else total_nit)
     return OptimizeResult(
         x=_as_host_numpy(state.x_k),
-        fun=float(_as_host_scalar(state.f_k)),
+        fun=_host_float(state.f_k),
         jac=_as_host_numpy(state.g_k),
         nit=nit,
-        nfev=int(_as_host_scalar(state.nfev)),
-        njev=int(_as_host_scalar(state.ngev)),
-        nhev=int(_as_host_scalar(state.nhev)),
-        success=bool(_as_host_scalar(state.converged)) and not invalid_state,
+        nfev=_host_int(state.nfev),
+        njev=_host_int(state.ngev),
+        nhev=_host_int(state.nhev),
+        success=_host_bool(state.converged) and not invalid_state,
         status=status,
         message=_status_message_bfgs(status, invalid_state),
         hess_inv=_as_host_numpy(state.H_k),
@@ -80,18 +84,18 @@ def _private_bfgs_result_to_optimize_result(state, *, total_nit=None):
 
 def _private_lbfgs_result_to_optimize_result(state):
     invalid_state = _is_invalid_state(state.f_k, state.g_k)
-    status = int(_as_host_scalar(state.status))
+    status = _host_int(state.status)
     return OptimizeResult(
         x=_as_host_numpy(state.x_k),
-        fun=float(_as_host_scalar(state.f_k)),
+        fun=_host_float(state.f_k),
         jac=_as_host_numpy(state.g_k),
-        nit=int(_as_host_scalar(state.k)),
-        nfev=int(_as_host_scalar(state.nfev)),
-        njev=int(_as_host_scalar(state.ngev)),
-        success=bool(_as_host_scalar(state.converged)) and not invalid_state,
+        nit=_host_int(state.k),
+        nfev=_host_int(state.nfev),
+        njev=_host_int(state.ngev),
+        success=(status in _LBFGS_SUCCESS_STATUSES) and not invalid_state,
         status=status,
         message=_status_message_lbfgs(status, invalid_state),
-        ls_status=int(_as_host_scalar(state.ls_status)),
+        ls_status=_host_int(state.ls_status),
     )
 
 

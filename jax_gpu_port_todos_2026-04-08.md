@@ -12,7 +12,7 @@
 ## Tier 0 — Ship blockers (must fix before any "production GPU mode" claim)
 
 - [x] **1.** ~~Fix `test_pure_objective_matches_optimizable_value` at `tests/integration/test_single_stage_jax_cpu_reference.py:5358-5375`. M5 `f(coil_dofs)` diverges from `JF_jax.J()` beyond `rtol=1e-10`.~~ **DONE** — test passes at rtol=1e-10 (now at line 5818).
-- [x] **2.** ~~Fix `test_boozersurface_jax.py:753` — "DID NOT RAISE RuntimeError" strict-mode enforcement gap.~~ **DONE** — `test_jax_minimize_rejects_fallback_methods_in_strict_mode` passes (4 parameterizations: adam/bfgs/lbfgs/bfgs-hybrid).
+- [x] **2.** ~~Fix `test_boozersurface_jax.py:753` — "DID NOT RAISE RuntimeError" strict-mode enforcement gap.~~ **DONE** — strict JAX-backend rejection covers the remaining reference methods (`adam` / `bfgs` / `lbfgs`), and removed `bfgs-hybrid` now has its own absent-from-surface regression.
 - [x] **3.** ~~Fix `test_lbfgs_reduces_objective` at `tests/geo/test_boozersurface_jax.py:745-752`.~~ **DONE** — sign fix `q = -jnp.conj(state.g_k)` at `_lbfgs.py:60`; test passes (now at line 938).
 
 ---
@@ -37,7 +37,7 @@
 - [x] **12.** **[HIGH]** ~~`field/force.py` — `jnp.asarray(gammas_targets/gammadashs_targets/currents_*)` per-call conversions.~~ **DONE** — refactored to `_as_jax_float64()` throughout; `_prepare_target_source_inputs_pure()` and `_CoilStateGroupCache` handle all conversions.
 - [x] **13.** **[HIGH]** ~~`field/force.py` — `jnp.asarray(opt.full_x)` / `jnp.asarray(coil.full_x)` per-call conversions.~~ **DONE** — now uses `_as_jax_float64()` at lines 329, 618.
 - [x] **14.** **[MED]** ~~`field/force.py:520,525` — `jnp.asarray(symmetry.rotmat/scale)` per-coil conversions.~~ **DONE** — `_apply_coil_state_symmetry()` uses `_as_jax_float64()` at construction time (lines 528, 533).
-- [ ] **15.** **[MED]** Re-scope the `geo/optimizer_jax.py` SciPy-boundary cleanup. `_optimizer_flat_vector(...)` replaced the bare `jnp.asarray(flat_x)` / `jnp.asarray(flat_grad)` re-entry seam, but “keep `x` as a JAX array through the SciPy call” is **not achievable** on the trusted reference backend because `scipy.optimize.minimize` is defined around NumPy/`ndarray` `x0`, `fun(x)`, `jac(x)`, `callback(xk)`, and `OptimizeResult.x`. **(PARTIAL — explicit JAX re-entry/result normalization exists, and the non-parity JAX target lanes now reject the host reference optimizer methods so they cannot silently route through SciPy, but the trusted SciPy/reference lane itself remains a host NumPy boundary by contract.)**
+- [x] **15.** **[MED]** ~~Re-scope the `geo/optimizer_jax.py` SciPy-boundary cleanup.~~ **DONE** — split the optimizer contract into explicit reference-vs-target lanes, removed public `hybrid` / `bfgs-hybrid` routing, moved SciPy host adapters into `geo/optimizer_jax_reference.py`, updated Boozer / Stage 2 / single-stage call sites to use lane-specific wrappers, and added regression coverage that `backend="jax"` flows cannot enter the SciPy adapter path.
 - [x] **16.** **[MED]** ~~`jax_core/objectives_flux.py:86` — remove fallback `jnp.asarray(surface.gamma()), jnp.asarray(surface.normal())` when no `surface_spec()` is available. Enforce spec with a clear error.~~ **DONE** — `SquaredFluxJAX` now requires `surface_spec()` and raises a clear contract error instead of falling back to `surface.gamma()/normal()`.
 - [x] **17.** **[LOW-MED]** ~~`geo/curveperturbed.py:195-196` — `jnp.asarray(self.sample[0/1])` in `__init__`. Replace with `_explicit_device_array()` for `disallow` compliance.~~ **DONE** — `CurvePerturbed` now materializes sampled perturbations with `_explicit_device_array(..., dtype=np.float64)`.
 - [x] **18.** **[LOW-MED]** ~~`jax_core/curve_geometry.py:48-53` — `_as_explicit_float64` numpy fallback path. Tighten input contract to specs only.~~ **DONE** — `_as_explicit_float64()` no longer accepts raw host NumPy inputs without a runtime/spec reference; intended host entry points use the explicit referenced conversion path.
@@ -99,7 +99,7 @@
 - [ ] **45.** Tolerance ratchet regression test — verify CI contract `gpu_reduction_order_max_ulp` and `gpu_reduction_order_rel_tol` cannot loosen without explicit override. **(PARTIAL — contract tests exist in `test_benchmark_helpers.py` for ratchet tightening, ULP tracking, and payload state; but framed as unit tests, not CI regression gates)**
 - [ ] **46.** Transfer guard fuzz test — systematically inject host scalars into kernel entry points and assert rejection under `disallow`.
 - [x] **47.** ~~Unit tests for private-optimizer edge cases: `y_k·s_k ≈ 0`, `‖y_k‖² ≈ 0`, stalled step, curvature-sign flip.~~ **DONE** — `test_minimize_lbfgs_private_rejects_degenerate_curvature_update`, `test_minimize_lbfgs_private_rejects_stalled_nonconverged_step`, `test_minimize_lbfgs_private_clamps_gamma_on_large_curvature_ratio` in `test_boozersurface_jax_private.py`; CI-validated.
-- [ ] **48.** scipy optimizer lane on GPU parity workflow. Currently `jax_gpu_parity.yml` only tests the JAX optimizer path. **(PARTIAL — `TestRealFixtureGpuM5Parity` uses `optimizer_backend="scipy"` on GPU, but no dedicated scipy lane in `jax_gpu_parity.yml`)**
+- [x] **48.** ~~scipy optimizer lane on GPU parity workflow.~~ **DONE** — re-scoped by contract: `backend="jax"` no longer supports the SciPy optimizer lane at high-level entrypoints, so GPU parity and target workflows exercise the on-device optimizer path only, while the SciPy lane remains native CPU/reference-only.
 - [ ] **49.** **[LOW]** Relax FD tolerances (or add skip+reason) for the two known FD-sensitive failures:
       - `tests/geo/test_boozer_derivatives_jax.py::TestComposedWeightInvModB::test_gradient_weighted_fd` (1/|B| near poles)
       - `tests/geo/test_boozer_derivatives_jax.py::TestBoozerResidualCoilVJP::test_coil_vjp_geometry_fd[gammas]`
@@ -127,7 +127,7 @@
 
 **Last audit:** 2026-04-10
 
-**Total:** 60 items — **28 done, 11 partial, 21 open**
+**Total:** 60 items — **29 done, 10 partial, 21 open**
 
 | Tier | Items | Done | Partial | Open |
 |------|-------|------|---------|------|
@@ -135,13 +135,13 @@
 | 1 — Correctness/defensive | 8 | **8** (4-11) | 0 | 0 |
 | 2 — Transfer-guard | 11 | **10** (12-14,16-22) | **1** (15) | 0 |
 | 3 — Performance | 15 | **3** (23,30,36) | **5** (24,26,27,34,37) | **7** (25,28,29,31-33,35) |
-| 4 — Test coverage | 12 | **2** (43,47) | **4** (40,42,45,48) | **6** (38,39,41,44,46,49) |
+| 4 — Test coverage | 12 | **3** (43,47,48) | **3** (40,42,45) | **6** (38,39,41,44,46,49) |
 | 5 — Docs/cleanup | 11 | **2** (50,51) | **1** (59) | **8** (52-58,60) |
 
 **Estimated remaining effort:**
 - Tier 0: **CLEARED**
 - Tier 1: **CLEARED**
-- Tier 2: mostly cleared; item 15 is now a SciPy/reference contract clarification with non-parity JAX target lanes rejecting host reference optimizers, not a remaining hot-path transfer fix
+- Tier 2: **NEARLY CLEARED** (item 15 remains partial; SciPy oracle lane still crosses a host NumPy boundary)
 - Tier 3: ~2-3 weeks (quick wins in ~2 days, rest incremental)
 - Tier 4: ~1 week (GPU test infrastructure)
 - Tier 5: ~2-3 days

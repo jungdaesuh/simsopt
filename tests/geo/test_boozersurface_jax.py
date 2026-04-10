@@ -22,6 +22,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
+import simsopt.geo.optimizer_jax_reference as _opt_ref
 from jax.flatten_util import ravel_pytree
 from conftest import (
     assert_array_on_device,
@@ -300,7 +301,7 @@ def _patch_counting_scipy_minimize(monkeypatch):
         )
 
     monkeypatch.setattr(_opt.jax, "jit", counting_jit)
-    monkeypatch.setattr(_opt, "scipy_minimize", fake_scipy_minimize)
+    monkeypatch.setattr(_opt_ref, "scipy_minimize", fake_scipy_minimize)
     return state
 
 
@@ -317,9 +318,14 @@ _enable_fast_non_strict_jax_backend = partial(
     enable_non_strict_jax_backend,
     mode="jax_gpu_fast",
 )
-_NON_PARITY_TARGET_JAX_BACKEND_MODES = ("jax_gpu_fast", "jax_metal_smoke")
-_NON_ONDEVICE_LS_BACKENDS = ("scipy", "hybrid")
-_NON_TARGET_MINIMIZE_METHODS = ("adam", "bfgs", "lbfgs", "bfgs-hybrid")
+_ALL_JAX_BACKEND_MODES = (
+    "jax_cpu_parity",
+    "jax_gpu_parity",
+    "jax_gpu_fast",
+    "jax_metal_smoke",
+)
+_NON_ONDEVICE_LS_BACKENDS = ("scipy",)
+_NON_TARGET_MINIMIZE_METHODS = ("adam", "bfgs", "lbfgs")
 
 
 _EXPLICIT_COIL_SPEC_REQUIRED_PATTERN = (
@@ -331,29 +337,13 @@ _EXPLICIT_COIL_SPEC_REQUIRED_PATTERN = (
 def _target_lane_rejection_pattern(
     component: str, method: str, backend_mode: str
 ) -> str:
-    return rf"{component}.*method='{method}'.*{backend_mode}.*fast/ondevice lane"
+    return (
+        rf"{component}.*method='{method}'.*{backend_mode}.*requires an "
+        r"ondevice optimizer method"
+    )
 
 
 _LEGACY_CURVE_X = np.array([1.0, 0.2, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
-
-
-def _assert_strict_jax_minimize_rejection(
-    monkeypatch,
-    request,
-    *,
-    method,
-    match,
-    fun,
-    value_and_grad=False,
-):
-    _enable_strict_jax_backend(monkeypatch, request)
-    with pytest.raises(RuntimeError, match=match):
-        jax_minimize(
-            fun,
-            jnp.array([1.0]),
-            method=method,
-            value_and_grad=value_and_grad,
-        )
 
 
 def _make_legacy_coils_list_biotsavart(coils):
@@ -643,7 +633,7 @@ class TestOptimizerAdapter:
                 status=0,
             )
 
-        monkeypatch.setattr(_opt, "scipy_minimize", fake_scipy_minimize)
+        monkeypatch.setattr(_opt_ref, "scipy_minimize", fake_scipy_minimize)
         jax_minimize(
             lambda x: jnp.sum(x**2),
             jnp.array([1.0, -2.0]),
@@ -660,6 +650,69 @@ class TestOptimizerAdapter:
         assert captured["options"]["maxls"] == 66
         assert captured["callback"] is None  # no callback in this call
 
+    @pytest.mark.parametrize(
+        ("adapter_name", "objective_fn"),
+        [
+            ("_scipy_minimize", lambda x: jnp.sum((x - 1.0) ** 2)),
+            (
+                "_scipy_minimize_value_and_grad",
+                lambda x: (jnp.sum((x - 1.0) ** 2), 2.0 * (x - 1.0)),
+            ),
+        ],
+    )
+    def test_reference_scipy_adapters_materialize_host_contract(
+        self, monkeypatch, adapter_name, objective_fn
+    ):
+        """The reference SciPy adapter is the intentional NumPy host boundary."""
+        captured = {}
+
+        def fake_scipy_minimize(fun, x0, jac, method, options, callback=None):
+            captured["x0_type"] = type(x0)
+            captured["x0_dtype"] = x0.dtype
+            captured["jac"] = jac
+            captured["method"] = method
+            captured["options"] = dict(options)
+            captured["callback"] = callback
+            value, grad = fun(x0)
+            captured["value_type"] = type(value)
+            captured["grad_type"] = type(grad)
+            captured["grad_dtype"] = grad.dtype
+            return types.SimpleNamespace(
+                x=np.asarray(x0),
+                jac=np.asarray(grad),
+                fun=float(value),
+                nit=0,
+                nfev=1,
+                njev=1,
+                success=True,
+                status=0,
+            )
+
+        monkeypatch.setattr(_opt_ref, "scipy_minimize", fake_scipy_minimize)
+        x0 = jnp.array([0.0, 2.0], dtype=jnp.float64)
+        adapter = getattr(_opt_ref, adapter_name)
+
+        result = adapter(
+            objective_fn,
+            x0,
+            method="lbfgs",
+            tol=1e-8,
+            maxiter=3,
+            options={"maxcor": 7},
+        )
+
+        assert captured["x0_type"] is np.ndarray
+        assert captured["x0_dtype"] == np.dtype(jnp.float64)
+        assert captured["jac"] is True
+        assert captured["method"] == "L-BFGS-B"
+        assert captured["options"] == {"maxiter": 3, "gtol": 1e-8, "maxcor": 7}
+        assert captured["callback"] is None
+        assert captured["value_type"] is float
+        assert captured["grad_type"] is np.ndarray
+        assert captured["grad_dtype"] == np.dtype(jnp.float64)
+        np.testing.assert_allclose(result.x, np.asarray(x0))
+        np.testing.assert_allclose(result.jac, np.asarray([-2.0, 2.0]))
+
     def test_scipy_minimize_does_not_cache_unmarked_objective(self, monkeypatch):
         """Generic optimizer callables should keep the historical fresh-jit semantics."""
         state = _patch_counting_scipy_minimize(monkeypatch)
@@ -668,7 +721,7 @@ class TestOptimizerAdapter:
             return jnp.sum((x - 1.0) ** 2)
 
         x0 = jnp.array([0.0, 2.0], dtype=jnp.float64)
-        _opt._scipy_minimize(
+        _opt_ref._scipy_minimize(
             quad,
             x0,
             method="lbfgs",
@@ -676,7 +729,7 @@ class TestOptimizerAdapter:
             maxiter=1,
             options={},
         )
-        _opt._scipy_minimize(
+        _opt_ref._scipy_minimize(
             quad,
             x0,
             method="lbfgs",
@@ -1147,6 +1200,60 @@ class TestBoozerSurfaceJAXClass:
 
         assert booz.options["least_squares_algorithm"] == expected_algorithm
 
+    @pytest.mark.parametrize(
+        ("backend_mode", "expected_optimizer_backend", "expected_algorithm"),
+        [
+            (None, "scipy", "quasi-newton"),
+            ("jax_cpu_parity", "ondevice", "lm"),
+        ],
+    )
+    def test_instantiation_defaults_optimizer_backend_from_runtime_contract(
+        self,
+        monkeypatch,
+        request,
+        backend_mode,
+        expected_optimizer_backend,
+        expected_algorithm,
+    ):
+        if backend_mode is not None:
+            enable_non_strict_jax_backend(monkeypatch, request, mode=backend_mode)
+
+        bs = _MockBiotSavart(_make_mock_coils())
+        surf, label = _make_basic_mock_surface_and_label()
+
+        booz = BoozerSurfaceJAX(
+            bs,
+            surf,
+            label,
+            1.0,
+            constraint_weight=1.0,
+        )
+
+        assert booz.options["optimizer_backend"] == expected_optimizer_backend
+        assert booz.options["least_squares_algorithm"] == expected_algorithm
+
+    def test_instantiation_applies_jax_default_before_private_ls_option_validation(
+        self,
+        monkeypatch,
+        request,
+    ):
+        enable_non_strict_jax_backend(monkeypatch, request, mode="jax_cpu_parity")
+
+        bs = _MockBiotSavart(_make_mock_coils())
+        surf, label = _make_basic_mock_surface_and_label()
+
+        booz = BoozerSurfaceJAX(
+            bs,
+            surf,
+            label,
+            1.0,
+            constraint_weight=1.0,
+            options={"force_ondevice_limited_memory": True},
+        )
+
+        assert booz.options["optimizer_backend"] == "ondevice"
+        assert booz.options["force_ondevice_limited_memory"] is True
+
     def test_instantiation_rejects_grouped_extractor_only_adapter(self):
         """BoozerSurfaceJAX now requires explicit ``coil_set_spec()`` state."""
         coils = _make_mixed_quad_mock_coils()
@@ -1371,8 +1478,8 @@ class TestBoozerSurfaceJAXClass:
         assert booz.options["maxfun"] == 99
         assert booz.options["maxls"] == 13
 
-    def test_hybrid_rejects_lbfgs_tuning_options(self):
-        """Hybrid stays BFGS-only, so L-BFGS tuning knobs must be rejected."""
+    def test_removed_hybrid_backend_is_rejected(self):
+        """The removed hybrid backend must no longer be accepted at construction."""
         bs = _MockBiotSavart(_make_mock_coils())
         surf = _MockSurface(
             np.zeros(27),
@@ -1384,7 +1491,7 @@ class TestBoozerSurfaceJAXClass:
             np.linspace(0.0, 1.0, 3, endpoint=False),
         )
         label = _MockVolumeLabel()
-        with pytest.raises(ValueError, match="unsupported for .*'hybrid'"):
+        with pytest.raises(ValueError, match="optimizer_backend must be one of"):
             BoozerSurfaceJAX(
                 bs,
                 surf,
@@ -1393,7 +1500,6 @@ class TestBoozerSurfaceJAXClass:
                 constraint_weight=1.0,
                 options={
                     "optimizer_backend": "hybrid",
-                    "maxcor": 12,
                 },
             )
 
@@ -1418,7 +1524,6 @@ class TestBoozerSurfaceJAXClass:
             constraint_weight=1.0,
             options={
                 "optimizer_backend": "ondevice",
-                "hybrid_scipy_maxiter": 7,
                 "line_search_maxiter": 11,
                 "maxcor": 12,
                 "ftol": 1e-12,
@@ -1428,7 +1533,6 @@ class TestBoozerSurfaceJAXClass:
             },
         )
 
-        assert booz.options["hybrid_scipy_maxiter"] == 7
         assert booz.options["line_search_maxiter"] == 11
         assert booz.options["maxcor"] == 12
         assert booz.options["ftol"] == pytest.approx(1e-12)
@@ -1441,7 +1545,6 @@ class TestBoozerSurfaceJAXClass:
         [
             ("scipy", False, "bfgs"),
             ("scipy", True, "lbfgs"),
-            ("hybrid", False, "bfgs-hybrid"),
             ("ondevice", False, "bfgs-ondevice"),
             ("ondevice", True, "lbfgs-ondevice"),
         ],
@@ -1457,13 +1560,6 @@ class TestBoozerSurfaceJAXClass:
             )
             == expected_method
         )
-
-    def test_resolve_ls_optimizer_method_rejects_hybrid_limited_memory(self):
-        """Hybrid is transitional and must stay BFGS-only."""
-        with pytest.raises(
-            ValueError, match="optimizer_backend='hybrid'.*limited_memory=True"
-        ):
-            resolve_optimizer_backend_method("hybrid", limited_memory=True)
 
     def test_resolve_ls_optimizer_method_rejects_invalid_backend(self):
         """Invalid backend names must fail instead of silently falling through."""
@@ -1501,13 +1597,13 @@ class TestBoozerSurfaceJAXClass:
             == expected_method
         )
 
-    def test_resolve_least_squares_optimizer_method_rejects_hybrid_lm(self):
+    def test_resolve_least_squares_optimizer_method_rejects_invalid_backend(self):
         with pytest.raises(
             ValueError,
-            match="least_squares_algorithm='lm'.*optimizer_backend='hybrid'",
+            match="optimizer_backend must be one of",
         ):
             resolve_least_squares_optimizer_method(
-                "hybrid",
+                "bogus",
                 limited_memory=False,
                 least_squares_algorithm="lm",
             )
@@ -1523,7 +1619,7 @@ class TestBoozerSurfaceJAXClass:
                 least_squares_algorithm="lm",
             )
 
-    @pytest.mark.parametrize("optimizer_backend", ["hybrid", "ondevice"])
+    @pytest.mark.parametrize("optimizer_backend", ["ondevice"])
     def test_require_target_backend_x64_rejects_disabled_float64(
         self, monkeypatch, optimizer_backend
     ):
@@ -1584,7 +1680,6 @@ class TestBoozerSurfaceJAXClass:
         [
             ("scipy", False, "bfgs"),
             ("scipy", True, "lbfgs"),
-            ("hybrid", False, "bfgs-hybrid"),
             ("ondevice", False, "bfgs-ondevice"),
             ("ondevice", True, "lbfgs-ondevice"),
         ],
@@ -1599,7 +1694,7 @@ class TestBoozerSurfaceJAXClass:
 
         captured = {}
 
-        def fake_jax_minimize(
+        def fake_minimize_runner(
             fun,
             x0,
             *,
@@ -1636,7 +1731,8 @@ class TestBoozerSurfaceJAXClass:
             del maxiter, tol, stab, progress_callback, objective_args
             return _successful_newton_polish_result(x0)
 
-        monkeypatch.setattr(_bsj, "jax_minimize", fake_jax_minimize)
+        monkeypatch.setattr(_bsj, "reference_minimize", fake_minimize_runner)
+        monkeypatch.setattr(_bsj, "target_minimize", fake_minimize_runner)
         _patch_newton_polish_runner(monkeypatch, fake_newton_polish)
 
         res = booz.run_code(iota=0.3, G=0.05)
@@ -1650,15 +1746,12 @@ class TestBoozerSurfaceJAXClass:
         assert "iota" in res
         assert booz.need_to_run_code is False
 
-    def test_run_code_rejects_hybrid_limited_memory_at_public_seam(self):
-        """run_code() must reject the unsupported hybrid + limited-memory pair."""
+    def test_run_code_rejects_removed_hybrid_backend_after_options_mutation(self):
+        """Mutated option dicts must not revive the removed hybrid backend."""
         booz = _make_mock_boozer_surface()
         booz.options["optimizer_backend"] = "hybrid"
-        booz.options["limited_memory"] = True
 
-        with pytest.raises(
-            ValueError, match="optimizer_backend='hybrid'.*limited_memory=True"
-        ):
+        with pytest.raises(ValueError, match="optimizer_backend must be one of"):
             booz.run_code(iota=0.3, G=0.05)
 
     def test_run_code_rejects_invalid_backend_after_options_mutation(self):
@@ -1676,7 +1769,7 @@ class TestBoozerSurfaceJAXClass:
 
         captured = {}
 
-        def fake_jax_least_squares(
+        def fake_target_least_squares(
             residual_fn,
             x0,
             *,
@@ -1718,7 +1811,7 @@ class TestBoozerSurfaceJAXClass:
             del maxiter, tol, stab, progress_callback, objective_args
             return _successful_newton_polish_result(x0)
 
-        monkeypatch.setattr(_bsj, "jax_least_squares", fake_jax_least_squares)
+        monkeypatch.setattr(_bsj, "target_least_squares", fake_target_least_squares)
         _patch_newton_polish_runner(monkeypatch, fake_newton_polish)
 
         res = booz.run_code(iota=0.3, G=0.05)
@@ -1754,10 +1847,10 @@ class TestBoozerSurfaceJAXClass:
 
         captured = {}
 
-        def forbidden_jax_least_squares(*args, **kwargs):
+        def forbidden_target_least_squares(*args, **kwargs):
             raise AssertionError("fixed-G ondevice path should not enter lm-ondevice")
 
-        def fake_jax_minimize(
+        def fake_target_minimize(
             fun,
             x0,
             *,
@@ -1784,8 +1877,10 @@ class TestBoozerSurfaceJAXClass:
             del maxiter, tol, stab, progress_callback, objective_args
             return _successful_newton_polish_result(x0)
 
-        monkeypatch.setattr(_bsj, "jax_least_squares", forbidden_jax_least_squares)
-        monkeypatch.setattr(_bsj, "jax_minimize", fake_jax_minimize)
+        monkeypatch.setattr(
+            _bsj, "target_least_squares", forbidden_target_least_squares
+        )
+        monkeypatch.setattr(_bsj, "target_minimize", fake_target_minimize)
         _patch_newton_polish_runner(monkeypatch, fake_newton_polish)
 
         res = booz.run_code(iota=0.3, G=None)
@@ -1794,102 +1889,95 @@ class TestBoozerSurfaceJAXClass:
         assert res["optimizer_method"] == "bfgs-ondevice"
         assert res["success"] is True
 
-    @pytest.mark.parametrize("optimizer_backend", ["scipy", "hybrid"])
-    def test_run_code_rejects_non_ondevice_ls_lane_in_strict_mode(
+    @pytest.mark.parametrize("backend_mode", _ALL_JAX_BACKEND_MODES)
+    @pytest.mark.parametrize("optimizer_backend", ["scipy"])
+    def test_run_code_rejects_non_ondevice_ls_lane_in_any_jax_backend_mode(
         self,
         monkeypatch,
         request,
+        backend_mode,
         optimizer_backend,
     ):
-        """Strict JAX mode must reject the first non-native LS seam it reaches."""
+        """Any JAX backend mode must keep Boozer LS on the ondevice lane."""
         booz = _make_mock_boozer_surface()
-        _enable_strict_jax_backend(monkeypatch, request)
+        enable_non_strict_jax_backend(monkeypatch, request, mode=backend_mode)
         booz.options["optimizer_backend"] = optimizer_backend
 
         with pytest.raises(
             RuntimeError,
-            match="strict=True",
+            match=rf"optimizer_backend='{optimizer_backend}'.*{backend_mode}.*requires optimizer_backend='ondevice'",
         ):
             booz.run_code(iota=0.3, G=0.05)
 
+    @pytest.mark.parametrize("backend_mode", _ALL_JAX_BACKEND_MODES)
     @pytest.mark.parametrize("optimizer_backend", _NON_ONDEVICE_LS_BACKENDS)
-    def test_resolve_optimizer_method_warns_on_non_ondevice_ls_lane_in_non_strict_mode(
+    def test_resolve_optimizer_method_rejects_non_ondevice_ls_lane_in_any_jax_backend_mode(
         self,
         monkeypatch,
         request,
+        backend_mode,
         optimizer_backend,
     ):
         booz = _make_mock_boozer_surface()
-        _enable_non_strict_jax_backend(monkeypatch, request)
-        booz.options["optimizer_backend"] = optimizer_backend
-
-        with pytest.warns(
-            RuntimeWarning,
-            match=rf"optimizer_backend='{optimizer_backend}'.*legacy adapter seam",
-        ):
-            booz._resolve_optimizer_method()
-
-    @pytest.mark.parametrize("optimizer_backend", _NON_ONDEVICE_LS_BACKENDS)
-    def test_resolve_optimizer_method_rejects_non_target_ls_lane_in_fast_backend_mode(
-        self,
-        monkeypatch,
-        request,
-        optimizer_backend,
-    ):
-        booz = _make_mock_boozer_surface()
-        _enable_fast_non_strict_jax_backend(monkeypatch, request)
+        enable_non_strict_jax_backend(monkeypatch, request, mode=backend_mode)
         booz.options["optimizer_backend"] = optimizer_backend
 
         with pytest.raises(
             RuntimeError,
-            match=rf"optimizer_backend='{optimizer_backend}'.*jax_gpu_fast.*fast/ondevice lane",
+            match=rf"optimizer_backend='{optimizer_backend}'.*{backend_mode}.*requires optimizer_backend='ondevice'",
         ):
             booz._resolve_optimizer_method()
 
+    @pytest.mark.parametrize("backend_mode", _ALL_JAX_BACKEND_MODES)
     @pytest.mark.parametrize("method", _NON_TARGET_MINIMIZE_METHODS)
-    def test_jax_minimize_rejects_fallback_methods_in_strict_mode(
+    def test_jax_minimize_rejects_fallback_methods_in_any_jax_backend_mode(
         self,
         monkeypatch,
         request,
+        backend_mode,
         method,
     ):
-        """Strict JAX mode must reject direct optimizer fallback lanes too."""
-        _assert_strict_jax_minimize_rejection(
-            monkeypatch,
-            request,
-            method=method,
-            match=rf"optimizer_jax\.jax_minimize.*method='{method}'.*strict=True",
-            fun=lambda x: jnp.sum(x**2),
-        )
+        """Any JAX backend mode must keep direct minimization on the ondevice lane."""
+        enable_non_strict_jax_backend(monkeypatch, request, mode=backend_mode)
+        with pytest.raises(
+            RuntimeError,
+            match=_target_lane_rejection_pattern(
+                r"optimizer_jax\.jax_minimize", method, backend_mode
+            ),
+        ):
+            jax_minimize(
+                lambda x: jnp.sum(x**2),
+                jnp.array([1.0]),
+                method=method,
+                value_and_grad=False,
+                options={"step_size": 0.1} if method == "adam" else None,
+            )
 
-    def test_jax_minimize_rejects_hybrid_before_private_package_load_in_fast_backend_mode(
+    def test_jax_minimize_rejects_removed_hybrid_before_private_package_load(
         self,
         monkeypatch,
         request,
     ):
-        _enable_fast_non_strict_jax_backend(monkeypatch, request)
+        _enable_non_strict_jax_backend(monkeypatch, request)
 
         def _fail_private_package_load():
             raise AssertionError(
-                "fast/ondevice lane contract rejection must happen before "
+                "JAX-backend contract rejection must happen before "
                 "private optimizer package loading."
             )
 
         monkeypatch.setattr(_opt, "_load_private_pkg", _fail_private_package_load)
 
-        with pytest.raises(
-            RuntimeError,
-            match="optimizer_jax\\.jax_minimize.*method='bfgs-hybrid'.*jax_gpu_fast.*fast/ondevice lane",
-        ):
+        with pytest.raises(ValueError, match="Unknown method 'bfgs-hybrid'"):
             jax_minimize(
                 lambda x: jnp.sum(x**2),
                 jnp.array([1.0], dtype=jnp.float64),
                 method="bfgs-hybrid",
             )
 
-    @pytest.mark.parametrize("backend_mode", _NON_PARITY_TARGET_JAX_BACKEND_MODES)
+    @pytest.mark.parametrize("backend_mode", _ALL_JAX_BACKEND_MODES)
     @pytest.mark.parametrize("method", ("adam", "bfgs", "lbfgs"))
-    def test_jax_minimize_rejects_reference_methods_in_target_backend_mode(
+    def test_jax_minimize_rejects_reference_methods_in_jax_backend_mode(
         self,
         monkeypatch,
         request,
@@ -1912,8 +2000,8 @@ class TestBoozerSurfaceJAXClass:
                 options={"step_size": 0.1} if method == "adam" else None,
             )
 
-    @pytest.mark.parametrize("backend_mode", _NON_PARITY_TARGET_JAX_BACKEND_MODES)
-    def test_jax_least_squares_reference_lm_rejects_in_target_backend_mode(
+    @pytest.mark.parametrize("backend_mode", _ALL_JAX_BACKEND_MODES)
+    def test_jax_least_squares_reference_lm_rejects_in_jax_backend_mode(
         self,
         monkeypatch,
         request,
@@ -2015,12 +2103,7 @@ class TestBoozerSurfaceJAXClass:
         np.testing.assert_allclose(result.x["surface"], target_surface, atol=1e-4)
         np.testing.assert_allclose(result.x["iota"], target_iota, atol=1e-4)
 
-    def test_jax_minimize_reference_bfgs_supports_structured_explicit_value_and_grad(
-        self,
-        monkeypatch,
-        request,
-    ):
-        _enable_fast_non_strict_jax_backend(monkeypatch, request)
+    def test_reference_minimize_supports_structured_explicit_value_and_grad(self):
         target_surface = jnp.asarray([2.0, -1.0], dtype=jnp.float64)
         target_iota = jnp.asarray(0.25, dtype=jnp.float64)
         x0 = {
@@ -2042,7 +2125,7 @@ class TestBoozerSurfaceJAXClass:
         def callback(state):
             observed.append(state)
 
-        result = jax_minimize(
+        result = _opt.reference_minimize(
             objective_value_and_grad,
             x0,
             method="bfgs",
@@ -2166,7 +2249,7 @@ class TestBoozerSurfaceJAXClass:
         assert result.nit > 0
         np.testing.assert_allclose(result.x, np.asarray(target), atol=1e-10)
 
-    @pytest.mark.parametrize("optimizer_backend", ["hybrid", "ondevice"])
+    @pytest.mark.parametrize("optimizer_backend", ["ondevice"])
     def test_run_code_rejects_target_backend_without_x64(
         self, monkeypatch, optimizer_backend
     ):
@@ -2382,7 +2465,7 @@ class TestBoozerSurfaceJAXClass:
 
         booz.options["stage_callback"] = record_stage
 
-        def fake_jax_minimize(
+        def fake_reference_minimize(
             fun,
             x0,
             *,
@@ -2410,7 +2493,7 @@ class TestBoozerSurfaceJAXClass:
             _emit_newton_progress(progress_callback)
             return _successful_newton_polish_result(x0, nit=2)
 
-        monkeypatch.setattr(_bsj, "jax_minimize", fake_jax_minimize)
+        monkeypatch.setattr(_bsj, "reference_minimize", fake_reference_minimize)
         _patch_newton_polish_runner(monkeypatch, fake_newton_polish)
 
         res = booz.run_code(iota=0.3, G=0.05)
@@ -2448,7 +2531,7 @@ class TestBoozerSurfaceJAXClass:
 
         booz.options["stage_callback"] = record_stage
 
-        def fake_jax_minimize(
+        def fake_target_minimize(
             fun,
             x0,
             *,
@@ -2477,7 +2560,7 @@ class TestBoozerSurfaceJAXClass:
             captured["progress_callback"] = progress_callback
             return _successful_newton_polish_result(x0, nit=2)
 
-        monkeypatch.setattr(_bsj, "jax_minimize", fake_jax_minimize)
+        monkeypatch.setattr(_bsj, "target_minimize", fake_target_minimize)
         monkeypatch.setattr(
             _bsj,
             "newton_polish_traceable",
@@ -2513,7 +2596,7 @@ class TestBoozerSurfaceJAXClass:
 
         captured = {}
 
-        def fake_jax_minimize(
+        def fake_reference_minimize(
             fun,
             x0,
             *,
@@ -2558,7 +2641,7 @@ class TestBoozerSurfaceJAXClass:
                 "success": True,
             }
 
-        monkeypatch.setattr(_bsj, "jax_minimize", fake_jax_minimize)
+        monkeypatch.setattr(_bsj, "reference_minimize", fake_reference_minimize)
         _patch_newton_polish_runner(monkeypatch, fake_newton_polish)
 
         res = booz.run_code(iota=0.3, G=0.05)
@@ -3510,14 +3593,19 @@ class TestBoozerSurfaceJAXExactPath:
                 "weight_inv_modB": booz.options["weight_inv_modB"],
             }
 
+        def forbid_optimizer_entrypoint(*_args, **_kwargs):
+            raise AssertionError(
+                "run_code_functional() should not rerun an optimizer entrypoint"
+            )
+
         monkeypatch.setattr(booz, "run_code_traceable", fake_run_code_traceable)
-        monkeypatch.setattr(
-            _bsj,
-            "jax_minimize",
-            lambda *_args, **_kwargs: (_ for _ in ()).throw(
-                AssertionError("run_code_functional() should not rerun jax_minimize")
-            ),
-        )
+        for runner_name in (
+            "reference_least_squares",
+            "reference_minimize",
+            "target_least_squares",
+            "target_minimize",
+        ):
+            monkeypatch.setattr(_bsj, runner_name, forbid_optimizer_entrypoint)
 
         result = booz.run_code_functional(coil_arrays, sdofs, iota, G)
 

@@ -16,8 +16,10 @@ import jax.numpy as jnp
 import numpy as np
 from jax import lax
 
+from ..._core.jax_host_boundary import host_array as _host_callback_array
 from ..optimizer_jax import (
     PRIVATE_OPTIMIZER_JAX_VERSION,
+    _CACHEABLE_VALUE_AND_GRAD_ATTR,
     _x64_enabled,
     private_optimizer_runtime_is_supported,
 )
@@ -107,7 +109,9 @@ def _scalar_value_and_grad(fun):
 
 
 def _cached_private_solver(cache_owner, *, cache_key, builder):
-    if cache_owner is None:
+    if cache_owner is None or not getattr(
+        cache_owner, _CACHEABLE_VALUE_AND_GRAD_ATTR, False
+    ):
         return builder()
     cached = getattr(cache_owner, _PRIVATE_SOLVER_CACHE_ATTR, None)
     if cached is not None:
@@ -193,13 +197,12 @@ def _emit_iteration_callbacks(callback, progress_callback, x_kp1, next_k, f_kp1,
     """Dispatch callback/progress_callback via jax.debug.callback.
 
     Shared by the BFGS and L-BFGS on-device body functions.
+    Host materialization lives in ``jax_host_boundary`` so the solver core
+    only exposes an observability/compatibility seam here.
     """
-    import jax
-    import numpy as np
-
     if callback is not None:
         jax.debug.callback(
-            lambda x: callback(np.asarray(x, dtype=float)),
+            lambda x: callback(_host_callback_array(x, dtype=float)),
             x_kp1,
             ordered=True,
         )

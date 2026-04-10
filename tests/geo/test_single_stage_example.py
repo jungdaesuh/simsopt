@@ -42,13 +42,14 @@ TEST_NTOR = 6
 TEST_VOL_TARGET = 0.1
 TEST_IOTA = 0.15
 TEST_G0 = 1.0
-_SINGLE_STAGE_HYBRID_UNSUPPORTED = (
-    "optimizer_backend='hybrid' is transitional and not supported for "
-    "the single-stage outer loop"
+_SINGLE_STAGE_JAX_ONLY_ONDEVICE = (
+    "the single-stage outer loop with backend='jax' requires "
+    "optimizer_backend='ondevice'"
 )
 _SINGLE_STAGE_CPU_ONLY_SCIPY = (
     "single-stage outer loop CPU/reference lane only supports optimizer_backend='scipy'"
 )
+_OPTIMIZER_BACKEND_INVALID = "optimizer_backend must be one of: scipy, ondevice."
 
 
 def load_single_stage_example_module():
@@ -266,61 +267,58 @@ class SingleStageExampleTests(unittest.TestCase):
         *,
         require_target_backend_x64,
         jax_minimize,
-        resolve_continuous_optimizer_contract=None,
         scipy_minimize_side_effect=None,
     ):
-        if resolve_continuous_optimizer_contract is None:
+        class ReferenceOptimizerContract:
+            def __init__(self, method):
+                self.method = method
 
-            def resolve_continuous_optimizer_contract(
-                field_backend,
-                optimizer_backend,
-                *,
-                limited_memory,
-                allow_hybrid,
-                component_label,
-            ):
-                del component_label
-                if field_backend != "jax" and optimizer_backend != "scipy":
-                    raise ValueError(f"the {_SINGLE_STAGE_CPU_ONLY_SCIPY}.")
-                if optimizer_backend == "hybrid":
-                    if not allow_hybrid:
-                        raise ValueError(_SINGLE_STAGE_HYBRID_UNSUPPORTED)
-                    require_target_backend_x64(optimizer_backend)
-                    return types.SimpleNamespace(
-                        method="bfgs-hybrid",
-                        use_scalar_objective=False,
-                    )
-                if optimizer_backend == "ondevice":
-                    require_target_backend_x64(optimizer_backend)
-                    return types.SimpleNamespace(
-                        method="lbfgs-ondevice",
-                        use_scalar_objective=(field_backend == "jax"),
-                    )
-                if optimizer_backend == "scipy":
-                    return types.SimpleNamespace(
-                        method="lbfgs" if limited_memory else "bfgs",
-                        use_scalar_objective=False,
-                    )
-                raise ValueError(
-                    "optimizer_backend must be one of: scipy, hybrid, ondevice."
-                )
+        class TargetOptimizerContract:
+            def __init__(self, method, *, use_least_squares_objective=False):
+                self.method = method
+                self.use_least_squares_objective = use_least_squares_objective
 
-        from functools import partial
+        def resolve_reference_outer_loop_optimizer_contract(
+            field_backend,
+            optimizer_backend,
+            *,
+            component_label,
+        ):
+            del component_label
+            if optimizer_backend not in {"scipy", "ondevice"}:
+                raise ValueError(_OPTIMIZER_BACKEND_INVALID)
+            if field_backend == "jax":
+                raise ValueError(f"the {_SINGLE_STAGE_JAX_ONLY_ONDEVICE}.")
+            if optimizer_backend != "scipy":
+                raise ValueError(f"the {_SINGLE_STAGE_CPU_ONLY_SCIPY}.")
+            return ReferenceOptimizerContract("lbfgs")
 
-        resolve_outer_loop_optimizer_contract = partial(
-            resolve_continuous_optimizer_contract,
-            limited_memory=True,
-            allow_hybrid=False,
-        )
+        def resolve_target_outer_loop_optimizer_contract(
+            field_backend,
+            optimizer_backend,
+            *,
+            component_label,
+            least_squares_algorithm="quasi-newton",
+        ):
+            del component_label, least_squares_algorithm
+            if optimizer_backend not in {"scipy", "ondevice"}:
+                raise ValueError(_OPTIMIZER_BACKEND_INVALID)
+            if field_backend != "jax" or optimizer_backend != "ondevice":
+                raise ValueError(f"the {_SINGLE_STAGE_JAX_ONLY_ONDEVICE}.")
+            require_target_backend_x64(optimizer_backend)
+            return TargetOptimizerContract("lbfgs-ondevice")
 
         fake_optimizer_module = types.ModuleType("simsopt.geo.optimizer_jax")
-        fake_optimizer_module.jax_minimize = jax_minimize
+        fake_optimizer_module.ReferenceOptimizerContract = ReferenceOptimizerContract
+        fake_optimizer_module.TargetOptimizerContract = TargetOptimizerContract
         fake_optimizer_module.require_target_backend_x64 = require_target_backend_x64
-        fake_optimizer_module.resolve_continuous_optimizer_contract = (
-            resolve_continuous_optimizer_contract
+        fake_optimizer_module.reference_minimize = jax_minimize
+        fake_optimizer_module.target_minimize = jax_minimize
+        fake_optimizer_module.resolve_reference_outer_loop_optimizer_contract = (
+            resolve_reference_outer_loop_optimizer_contract
         )
-        fake_optimizer_module.resolve_outer_loop_optimizer_contract = (
-            resolve_outer_loop_optimizer_contract
+        fake_optimizer_module.resolve_target_outer_loop_optimizer_contract = (
+            resolve_target_outer_loop_optimizer_contract
         )
         scipy_patch = patch(
             "scipy.optimize.minimize", side_effect=scipy_minimize_side_effect
@@ -404,7 +402,7 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertIsNone(call_sdofs)
         self.assertEqual(boozer_surface.constraint_weight, 1.0)
         self.assertEqual(boozer_surface.options["verbose"], True)
-        self.assertEqual(boozer_surface.options["optimizer_backend"], "scipy")
+        self.assertEqual(boozer_surface.options["optimizer_backend"], "ondevice")
         self.assertIs(boozer_surface.surface, FakeSurfaceXYZTensorFourier.instances[0])
 
     def test_initialize_boozer_surface_cpu_warm_start_does_not_pass_sdofs(self):
@@ -507,10 +505,14 @@ class SingleStageExampleTests(unittest.TestCase):
             module.resolve_boozer_optimizer_backend("jax", "ondevice", None),
             "ondevice",
         )
-        self.assertEqual(
-            module.resolve_boozer_optimizer_backend("jax", "ondevice", "scipy"),
-            "scipy",
-        )
+        with self.assertRaisesRegex(
+            ValueError, "requires boozer_optimizer_backend='ondevice'"
+        ):
+            module.resolve_boozer_optimizer_backend("jax", "ondevice", "scipy")
+        with self.assertRaisesRegex(
+            ValueError, "requires boozer_optimizer_backend='ondevice'"
+        ):
+            module.resolve_boozer_optimizer_backend("jax", "scipy", None)
 
     def test_resolve_boozer_least_squares_algorithm_defaults_follow_effective_backend(
         self,
@@ -530,14 +532,21 @@ class SingleStageExampleTests(unittest.TestCase):
             ),
             "lm",
         )
-        self.assertEqual(
+        with self.assertRaisesRegex(
+            ValueError, "requires boozer_optimizer_backend='ondevice'"
+        ):
             module.resolve_single_stage_default_boozer_least_squares_algorithm(
                 "jax",
                 "ondevice",
                 "scipy",
-            ),
-            "quasi-newton",
-        )
+            )
+        with self.assertRaisesRegex(
+            ValueError, "requires boozer_optimizer_backend='ondevice'"
+        ):
+            module.resolve_single_stage_default_boozer_least_squares_algorithm(
+                "jax",
+                "scipy",
+            )
         self.assertEqual(
             module.resolve_single_stage_default_boozer_least_squares_algorithm(
                 "jax",
@@ -602,14 +611,14 @@ class SingleStageExampleTests(unittest.TestCase):
                 "--backend",
                 "jax",
                 "--boozer-optimizer-backend",
-                "scipy",
+                "ondevice",
             ],
         ):
             args = module.parse_args()
 
         self.assertEqual(args.optimizer_backend, "ondevice")
-        self.assertEqual(args.boozer_optimizer_backend, "scipy")
-        self.assertEqual(args.boozer_least_squares_algorithm, "quasi-newton")
+        self.assertEqual(args.boozer_optimizer_backend, "ondevice")
+        self.assertEqual(args.boozer_least_squares_algorithm, "lm")
 
     def test_parse_args_defaults_target_lane_sync_to_final_only(self):
         module = self.load_module()
@@ -999,9 +1008,6 @@ class SingleStageExampleTests(unittest.TestCase):
 
     def test_run_single_stage_optimizer_target_lane_requires_objective_contract(self):
         module = self.load_module()
-        target_contract = types.SimpleNamespace(
-            method="lbfgs-ondevice", use_scalar_objective=True
-        )
 
         with self.patch_optimizer_jax_module(
             require_target_backend_x64=lambda _optimizer_backend: None,
@@ -1009,6 +1015,9 @@ class SingleStageExampleTests(unittest.TestCase):
                 AssertionError("jax_minimize should not run without an objective")
             ),
         ):
+            target_contract = module.resolve_single_stage_optimizer_contract(
+                "jax", "ondevice"
+            )
             with self.assertRaisesRegex(
                 RuntimeError,
                 "Single-stage target-lane optimization requires either the fused "
@@ -1108,19 +1117,19 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertIsInstance(grad, module.SingleStageOuterOptimizerState)
         self.assertEqual(result.message, "ok")
 
-    def test_run_single_stage_optimizer_rejects_hybrid_outer_lane(self):
+    def test_run_single_stage_optimizer_rejects_unknown_outer_lane(self):
         module = self.load_module()
 
         def fake_require_target_backend_x64(optimizer_backend):
             raise AssertionError(
-                f"x64 check should not run for unsupported hybrid lane: {optimizer_backend}"
+                f"x64 check should not run for unsupported lane: {optimizer_backend}"
             )
 
         def fake_jax_minimize(
             fun, x0, *, method, tol, maxiter, options, value_and_grad, callback
         ):
             raise AssertionError(
-                "Unsupported single-stage hybrid lane must fail before jax_minimize."
+                "Unsupported single-stage lane must fail before jax_minimize."
             )
 
         with self.patch_optimizer_jax_module(
@@ -1129,10 +1138,9 @@ class SingleStageExampleTests(unittest.TestCase):
         ):
             with self.assertRaisesRegex(
                 ValueError,
-                "optimizer_backend='hybrid' is transitional and not supported "
-                "for the single-stage outer loop",
+                _OPTIMIZER_BACKEND_INVALID,
             ):
-                module.resolve_single_stage_optimizer_contract("jax", "hybrid")
+                module.resolve_single_stage_optimizer_contract("jax", "bogus")
 
     def test_resolve_single_stage_outer_optimizer_method_rejects_cpu_ondevice(self):
         module = self.load_module()
@@ -1143,14 +1151,14 @@ class SingleStageExampleTests(unittest.TestCase):
         ):
             module.resolve_single_stage_outer_optimizer_method("cpu", "ondevice")
 
-    def test_resolve_single_stage_outer_optimizer_method_rejects_hybrid(self):
+    def test_resolve_single_stage_outer_optimizer_method_rejects_unknown_backend(self):
         module = self.load_module()
 
         with self.assertRaisesRegex(
             ValueError,
-            _SINGLE_STAGE_HYBRID_UNSUPPORTED,
+            _OPTIMIZER_BACKEND_INVALID,
         ):
-            module.resolve_single_stage_outer_optimizer_method("jax", "hybrid")
+            module.resolve_single_stage_outer_optimizer_method("jax", "bogus")
 
     def test_single_stage_adapter_callback_reevaluates_before_accept_in_target_lane(
         self,

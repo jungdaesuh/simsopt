@@ -7,9 +7,17 @@ def resolve_boozer_optimizer_backend(
     optimizer_backend: str,
     boozer_optimizer_backend: str | None,
 ) -> str:
-    if boozer_optimizer_backend is None:
-        return optimizer_backend
-    return boozer_optimizer_backend
+    effective_backend = (
+        optimizer_backend
+        if boozer_optimizer_backend is None
+        else boozer_optimizer_backend
+    )
+    if effective_backend != "ondevice":
+        raise ValueError(
+            "Single-stage JAX benchmark probes require "
+            "boozer_optimizer_backend='ondevice'."
+        )
+    return effective_backend
 
 
 def resolve_boozer_limited_memory(
@@ -29,6 +37,11 @@ def resolve_boozer_optimizer_method(
     limited_memory: bool = False,
     least_squares_algorithm: str | None = None,
 ) -> str:
+    if boozer_optimizer_backend != "ondevice":
+        raise ValueError(
+            "Single-stage JAX benchmark probes require "
+            "boozer_optimizer_backend='ondevice'."
+        )
     if least_squares_algorithm is None:
         least_squares_algorithm = resolve_boozer_least_squares_algorithm(
             boozer_optimizer_backend
@@ -39,15 +52,7 @@ def resolve_boozer_optimizer_method(
                 "least_squares_algorithm='lm' is incompatible with "
                 "limited_memory=True."
             )
-        return "lm" if boozer_optimizer_backend == "scipy" else "lm-ondevice"
-    if boozer_optimizer_backend == "scipy":
-        return "lbfgs" if limited_memory else "bfgs"
-    if boozer_optimizer_backend == "hybrid":
-        if limited_memory:
-            raise ValueError(
-                "optimizer_backend='hybrid' does not support limited_memory=True."
-            )
-        return "bfgs-hybrid"
+        return "lm-ondevice"
     return "lbfgs-ondevice" if limited_memory else "bfgs-ondevice"
 
 
@@ -55,8 +60,11 @@ def resolve_boozer_least_squares_algorithm(
     boozer_optimizer_backend: str,
     least_squares_algorithm: str | None = None,
 ) -> str:
+    if boozer_optimizer_backend != "ondevice":
+        raise ValueError(
+            "Single-stage JAX benchmark probes require "
+            "boozer_optimizer_backend='ondevice'."
+        )
     if least_squares_algorithm is not None:
         return least_squares_algorithm
-    if boozer_optimizer_backend == "ondevice":
-        return "lm"
-    return "quasi-newton"
+    return "lm"

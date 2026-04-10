@@ -8,12 +8,12 @@ The JAX modules do **not** replace the CPU modules.  Both coexist.
 The CPU path remains the default and the correctness oracle.
 
 As of the JAX ``0.9.2`` runtime, the trusted least-squares backend remains
-``optimizer_backend="scipy"``.  The private ``hybrid`` and ``ondevice``
-backends now target the same runtime, but they remain a separate validation
-track because they still depend on private optimizer internals. In non-parity
-JAX target modes such as ``jax_gpu_fast`` and ``jax_metal_smoke``, direct
-calls into the host reference optimizer methods are rejected so that those
-lanes do not silently route back through host loops.
+the native CPU/reference lane with ``optimizer_backend="scipy"``.
+High-level JAX backend flows now require ``optimizer_backend="ondevice"``,
+so Stage 2, single-stage, and Boozer LS execution no longer route through
+SciPy when ``backend="jax"`` is active. The remaining SciPy adapter is kept
+only as a CPU/reference oracle path, and it still crosses a host NumPy
+boundary by construction.
 
 Stage 2 (Field + Flux Objective)
 --------------------------------

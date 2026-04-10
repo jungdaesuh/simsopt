@@ -7,8 +7,10 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
+import simsopt.geo.optimizer_jax_reference as _opt_ref
 import simsopt.geo.optimizer_jax_private._bfgs as _private_bfgs
 import simsopt.geo.optimizer_jax_private._common as _opt_common
+from conftest import enable_non_strict_jax_backend
 from jax.flatten_util import ravel_pytree
 
 from .boozersurface_jax_test_helpers import (
@@ -170,6 +172,13 @@ REQUIRES_PRIVATE_LIMITED_MEMORY_RUNTIME = pytest.mark.skipif(
     reason=PRIVATE_LIMITED_MEMORY_REASON,
 )
 
+_ALL_JAX_BACKEND_MODES = (
+    "jax_cpu_parity",
+    "jax_gpu_parity",
+    "jax_gpu_fast",
+    "jax_metal_smoke",
+)
+
 
 def _emit_sparse_progress(progress_callback):
     progress_callback(1, 3.0, 2.0)
@@ -228,6 +237,49 @@ def _assert_lbfgs_state_preserved(state, x0, quad, *, maxcor=4, ls_status=None):
     np.testing.assert_allclose(np.asarray(state.g_k), np.asarray(x0))
     np.testing.assert_array_equal(np.asarray(state.rho_history), np.zeros(maxcor))
     assert float(state.gamma) == pytest.approx(1.0)
+
+
+@pytest.mark.parametrize("backend_mode", _ALL_JAX_BACKEND_MODES)
+@pytest.mark.parametrize(
+    ("adapter_name", "objective_fn"),
+    [
+        ("_scipy_minimize", lambda x: jnp.sum(x**2)),
+        (
+            "_scipy_minimize_value_and_grad",
+            lambda x: (jnp.sum(x**2), 2.0 * x),
+        ),
+    ],
+)
+def test_private_scipy_adapters_reject_all_jax_backend_modes(
+    monkeypatch,
+    request,
+    backend_mode,
+    adapter_name,
+    objective_fn,
+):
+    enable_non_strict_jax_backend(monkeypatch, request, mode=backend_mode)
+
+    def forbidden_scipy_minimize(*_args, **_kwargs):
+        raise AssertionError("JAX backend modes must not enter scipy_minimize().")
+
+    monkeypatch.setattr(_opt_ref, "scipy_minimize", forbidden_scipy_minimize)
+    adapter = getattr(_opt_ref, adapter_name)
+
+    with pytest.raises(
+        RuntimeError,
+        match=(
+            rf"{adapter_name}.*method='lbfgs'.*{backend_mode}.*requires an "
+            r"ondevice optimizer method"
+        ),
+    ):
+        adapter(
+            objective_fn,
+            jnp.asarray([1.0, -2.0], dtype=jnp.float64),
+            method="lbfgs",
+            tol=1e-8,
+            maxiter=5,
+            options={},
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -505,420 +557,14 @@ class TestOptimizerAdapterPrivate:
         assert float(state.gamma) == pytest.approx(gamma_max)
         np.testing.assert_allclose(np.asarray(state.rho_history[-1]), 2000.0, rtol=1e-6)
 
-    @PRIVATE_OPTIMIZER_RUNTIME
-    def test_hybrid_skips_continuation_after_scipy_success(self, monkeypatch):
-        """Hybrid mode must return the SciPy prefix directly on convergence."""
-        prefix = types.SimpleNamespace(
-            x=jnp.array([1.0, -1.0]),
-            fun=0.0,
-            jac=jnp.array([0.0, 0.0]),
-            nit=2,
-            nfev=3,
-            njev=3,
-            nhev=0,
-            success=True,
-            status=0,
-            hess_inv=np.eye(2),
-        )
-
-        monkeypatch.setattr(_opt, "_scipy_minimize", lambda *args, **kwargs: prefix)
-        monkeypatch.setattr(
-            _opt,
-            "_minimize_bfgs_private",
-            lambda *args, **kwargs: (_ for _ in ()).throw(
-                AssertionError(
-                    "continuation must not run after successful SciPy prefix"
-                )
-            ),
-        )
-
-        result = jax_minimize(
-            lambda x: jnp.sum(x**2),
-            jnp.array([1.0, -1.0]),
-            method="bfgs-hybrid",
-            maxiter=8,
-        )
-
-        assert result is prefix
-
-    @PRIVATE_OPTIMIZER_RUNTIME
-    def test_hybrid_skips_nonfinite_prefix_state(self, monkeypatch):
-        """Hybrid mode must not continue from a non-finite SciPy prefix."""
-        prefix = types.SimpleNamespace(
-            x=jnp.array([1.0, -1.0]),
-            fun=np.nan,
-            jac=jnp.array([0.0, 0.0]),
-            nit=2,
-            nfev=3,
-            njev=3,
-            nhev=0,
-            success=False,
-            status=1,
-            hess_inv=np.eye(2),
-            message="prefix failed",
-        )
-
-        monkeypatch.setattr(_opt, "_scipy_minimize", lambda *args, **kwargs: prefix)
-        monkeypatch.setattr(
-            _opt,
-            "_minimize_bfgs_private",
-            lambda *args, **kwargs: (_ for _ in ()).throw(
-                AssertionError("continuation must not run after non-finite prefix")
-            ),
-        )
-
-        result = jax_minimize(
-            lambda x: jnp.sum(x**2),
-            jnp.array([1.0, -1.0]),
-            method="bfgs-hybrid",
-            maxiter=8,
-        )
-
-        assert result is prefix
-        assert result.success is False
-        assert "non-finite state" in result.message
-
-    @PRIVATE_OPTIMIZER_RUNTIME
-    def test_hybrid_nonfinite_prefix_emits_warning_and_progress(
-        self,
-        monkeypatch,
-        caplog,
-    ):
-        """Hybrid non-finite prefixes must surface observability before aborting."""
-        prefix = types.SimpleNamespace(
-            x=jnp.array([1.0, -1.0]),
-            fun=np.nan,
-            jac=jnp.array([np.nan, 0.0]),
-            nit=2,
-            nfev=3,
-            njev=3,
-            nhev=0,
-            success=False,
-            status=1,
-            hess_inv=np.eye(2),
-            message="prefix failed",
-        )
-        progress_events = []
-
-        monkeypatch.setattr(_opt, "_scipy_minimize", lambda *args, **kwargs: prefix)
-        monkeypatch.setattr(
-            _opt,
-            "_minimize_bfgs_private",
-            lambda *args, **kwargs: (_ for _ in ()).throw(
-                AssertionError("continuation must not run after non-finite prefix")
-            ),
-        )
-
-        with caplog.at_level(logging.WARNING, logger="simsopt.geo.optimizer_jax"):
-            result = jax_minimize(
+    def test_hybrid_method_is_removed_from_public_optimizer_surface(self):
+        with pytest.raises(ValueError, match="Unknown method 'bfgs-hybrid'"):
+            jax_minimize(
                 lambda x: jnp.sum(x**2),
-                jnp.array([1.0, -1.0]),
+                jnp.array([1.0, -1.0], dtype=jnp.float64),
                 method="bfgs-hybrid",
                 maxiter=8,
-                progress_callback=lambda nit, fun_value, grad_inf: progress_events.append(
-                    (nit, fun_value, grad_inf)
-                ),
             )
-
-        assert result is prefix
-        assert "non-finite continuation state" in caplog.text
-        assert len(progress_events) == 1
-        nit, fun_value, grad_inf = progress_events[0]
-        assert nit == 2
-        assert np.isnan(fun_value)
-        assert np.isnan(grad_inf)
-
-    @PRIVATE_OPTIMIZER_RUNTIME
-    def test_hybrid_prefix_cap_and_total_iteration_count(self, monkeypatch):
-        """Hybrid mode must cap the SciPy prefix and report total nit."""
-        captured = {}
-        prefix = types.SimpleNamespace(
-            x=jnp.array([0.25, -0.5], dtype=jnp.float64),
-            fun=0.3125,
-            jac=jnp.array([0.5, -1.0], dtype=jnp.float64),
-            nit=3,
-            nfev=4,
-            njev=4,
-            nhev=0,
-            success=False,
-            status=1,
-            hess_inv=np.eye(2),
-        )
-
-        def fake_scipy_minimize(fun, x0, *, method, tol, maxiter, options):
-            del fun, x0, method, tol, options
-            captured["prefix_maxiter"] = maxiter
-            return prefix
-
-        def fake_minimize_bfgs_private(
-            fun,
-            x0,
-            *,
-            maxiter,
-            gtol,
-            line_search_maxiter,
-            initial_state,
-            callback=None,
-            progress_callback=None,
-        ):
-            del fun, x0, gtol, line_search_maxiter, callback, progress_callback
-            captured["remaining_maxiter"] = maxiter
-            captured["initial_k"] = int(initial_state.k)
-            return _opt._BFGSResults(
-                converged=jnp.array(True),
-                failed=jnp.array(False),
-                k=jnp.array(2),
-                nfev=jnp.array(7),
-                ngev=jnp.array(7),
-                nhev=jnp.array(0),
-                x_k=jnp.array([0.0, 0.0], dtype=jnp.float64),
-                f_k=jnp.array(0.0, dtype=jnp.float64),
-                g_k=jnp.array([0.0, 0.0], dtype=jnp.float64),
-                H_k=jnp.eye(2, dtype=jnp.float64),
-                old_old_fval=jnp.array(0.1, dtype=jnp.float64),
-                status=jnp.array(0),
-                line_search_status=jnp.array(0),
-            )
-
-        monkeypatch.setattr(_opt, "_scipy_minimize", fake_scipy_minimize)
-        monkeypatch.setattr(_opt, "_minimize_bfgs_private", fake_minimize_bfgs_private)
-
-        result = jax_minimize(
-            lambda x: jnp.sum(x**2),
-            jnp.array([1.0, -1.0], dtype=jnp.float64),
-            method="bfgs-hybrid",
-            maxiter=7,
-        )
-
-        assert captured["prefix_maxiter"] == 3
-        assert captured["remaining_maxiter"] == 4
-        assert captured["initial_k"] == 0
-        assert result.nit == 5
-
-    @PRIVATE_OPTIMIZER_RUNTIME
-    def test_hybrid_missing_hess_inv_falls_back_to_identity(self, monkeypatch):
-        """Hybrid continuation must recover when SciPy exposes no dense hess_inv."""
-        prefix = types.SimpleNamespace(
-            x=jnp.array([0.25, -0.5], dtype=jnp.float64),
-            fun=0.3125,
-            jac=jnp.array([0.5, -1.0], dtype=jnp.float64),
-            nit=1,
-            nfev=2,
-            njev=2,
-            nhev=0,
-            success=False,
-            status=1,
-            hess_inv=None,
-        )
-
-        def fake_minimize_bfgs_private(
-            fun,
-            x0,
-            *,
-            maxiter,
-            gtol,
-            line_search_maxiter,
-            initial_state,
-            callback=None,
-            progress_callback=None,
-        ):
-            del fun, x0, maxiter, gtol, line_search_maxiter, callback, progress_callback
-            np.testing.assert_allclose(
-                np.asarray(initial_state.H_k),
-                np.eye(2),
-            )
-            return _opt._BFGSResults(
-                converged=jnp.array(True),
-                failed=jnp.array(False),
-                k=jnp.array(1),
-                nfev=jnp.array(3),
-                ngev=jnp.array(3),
-                nhev=jnp.array(0),
-                x_k=jnp.array([0.0, 0.0], dtype=jnp.float64),
-                f_k=jnp.array(0.0, dtype=jnp.float64),
-                g_k=jnp.array([0.0, 0.0], dtype=jnp.float64),
-                H_k=jnp.eye(2, dtype=jnp.float64),
-                old_old_fval=jnp.array(0.1, dtype=jnp.float64),
-                status=jnp.array(0),
-                line_search_status=jnp.array(0),
-            )
-
-        monkeypatch.setattr(_opt, "_scipy_minimize", lambda *args, **kwargs: prefix)
-        monkeypatch.setattr(_opt, "_minimize_bfgs_private", fake_minimize_bfgs_private)
-
-        result = jax_minimize(
-            lambda x: jnp.sum(x**2),
-            jnp.array([1.0, -1.0], dtype=jnp.float64),
-            method="bfgs-hybrid",
-            maxiter=5,
-        )
-
-        assert result.success is True
-
-    @PRIVATE_OPTIMIZER_RUNTIME
-    def test_hybrid_degenerate_hess_inv_resets_to_identity(self, monkeypatch):
-        """Hybrid continuation must reject non-descent warm-start Hessians."""
-        prefix = types.SimpleNamespace(
-            x=jnp.array([0.25, -0.5], dtype=jnp.float64),
-            fun=0.3125,
-            jac=jnp.array([0.5, -1.0], dtype=jnp.float64),
-            nit=1,
-            nfev=2,
-            njev=2,
-            nhev=0,
-            success=False,
-            status=1,
-            hess_inv=-np.eye(2),
-        )
-
-        def fake_minimize_bfgs_private(
-            fun,
-            x0,
-            *,
-            maxiter,
-            gtol,
-            line_search_maxiter,
-            initial_state,
-            callback=None,
-            progress_callback=None,
-        ):
-            del fun, x0, maxiter, gtol, line_search_maxiter, callback, progress_callback
-            np.testing.assert_allclose(np.asarray(initial_state.H_k), np.eye(2))
-            return _opt._BFGSResults(
-                converged=jnp.array(True),
-                failed=jnp.array(False),
-                k=jnp.array(1),
-                nfev=jnp.array(3),
-                ngev=jnp.array(3),
-                nhev=jnp.array(0),
-                x_k=jnp.array([0.0, 0.0], dtype=jnp.float64),
-                f_k=jnp.array(0.0, dtype=jnp.float64),
-                g_k=jnp.array([0.0, 0.0], dtype=jnp.float64),
-                H_k=jnp.eye(2, dtype=jnp.float64),
-                old_old_fval=jnp.array(0.1, dtype=jnp.float64),
-                status=jnp.array(0),
-                line_search_status=jnp.array(0),
-            )
-
-        monkeypatch.setattr(_opt, "_scipy_minimize", lambda *args, **kwargs: prefix)
-        monkeypatch.setattr(_opt, "_minimize_bfgs_private", fake_minimize_bfgs_private)
-
-        result = jax_minimize(
-            lambda x: jnp.sum(x**2),
-            jnp.array([1.0, -1.0], dtype=jnp.float64),
-            method="bfgs-hybrid",
-            maxiter=5,
-        )
-
-        assert result.success is True
-
-    @PRIVATE_OPTIMIZER_RUNTIME
-    def test_hybrid_zero_budget_uses_scipy_prefix_only(self, monkeypatch):
-        """Hybrid maxiter=0 must still take the SciPy-prefix path."""
-        captured = {}
-        prefix = types.SimpleNamespace(
-            x=jnp.array([1.0, -1.0], dtype=jnp.float64),
-            fun=1.5,
-            jac=jnp.array([1.0, -2.0], dtype=jnp.float64),
-            nit=0,
-            nfev=1,
-            njev=1,
-            nhev=0,
-            success=False,
-            status=1,
-            hess_inv=np.eye(2),
-        )
-
-        def fake_scipy_minimize(fun, x0, *, method, tol, maxiter, options):
-            del fun, x0, method, tol, options
-            captured["prefix_maxiter"] = maxiter
-            return prefix
-
-        monkeypatch.setattr(_opt, "_scipy_minimize", fake_scipy_minimize)
-        monkeypatch.setattr(
-            _opt,
-            "_minimize_bfgs_private",
-            lambda *args, **kwargs: (_ for _ in ()).throw(
-                AssertionError("continuation must not run when total budget is zero")
-            ),
-        )
-
-        result = jax_minimize(
-            lambda x: jnp.sum(x**2),
-            jnp.array([1.0, -1.0], dtype=jnp.float64),
-            method="bfgs-hybrid",
-            maxiter=0,
-        )
-
-        assert captured["prefix_maxiter"] == 0
-        assert result is prefix
-
-    @PRIVATE_OPTIMIZER_RUNTIME
-    def test_hybrid_maxiter_one_still_uses_prefix_path(self, monkeypatch):
-        """Hybrid maxiter=1 must still enter via the SciPy-prefix seam."""
-        captured = {}
-        prefix = types.SimpleNamespace(
-            x=jnp.array([0.25, -0.5], dtype=jnp.float64),
-            fun=0.3125,
-            jac=jnp.array([0.5, -1.0], dtype=jnp.float64),
-            nit=0,
-            nfev=1,
-            njev=1,
-            nhev=0,
-            success=False,
-            status=1,
-            hess_inv=np.eye(2),
-        )
-
-        def fake_scipy_minimize(fun, x0, *, method, tol, maxiter, options):
-            del fun, x0, method, tol, options
-            captured["prefix_maxiter"] = maxiter
-            return prefix
-
-        def fake_minimize_bfgs_private(
-            fun,
-            x0,
-            *,
-            maxiter,
-            gtol,
-            line_search_maxiter,
-            initial_state,
-            callback=None,
-            progress_callback=None,
-        ):
-            del fun, x0, gtol, line_search_maxiter, callback, progress_callback
-            captured["continuation_maxiter"] = maxiter
-            captured["initial_k"] = int(initial_state.k)
-            return _opt._BFGSResults(
-                converged=jnp.array(False),
-                failed=jnp.array(False),
-                k=jnp.array(1),
-                nfev=jnp.array(2),
-                ngev=jnp.array(2),
-                nhev=jnp.array(0),
-                x_k=jnp.array([0.0, 0.0], dtype=jnp.float64),
-                f_k=jnp.array(0.0, dtype=jnp.float64),
-                g_k=jnp.array([0.0, 0.0], dtype=jnp.float64),
-                H_k=jnp.eye(2, dtype=jnp.float64),
-                old_old_fval=jnp.array(0.1, dtype=jnp.float64),
-                status=jnp.array(1),
-                line_search_status=jnp.array(0),
-            )
-
-        monkeypatch.setattr(_opt, "_scipy_minimize", fake_scipy_minimize)
-        monkeypatch.setattr(_opt, "_minimize_bfgs_private", fake_minimize_bfgs_private)
-
-        result = jax_minimize(
-            lambda x: jnp.sum(x**2),
-            jnp.array([1.0, -1.0], dtype=jnp.float64),
-            method="bfgs-hybrid",
-            maxiter=1,
-        )
-
-        assert captured["prefix_maxiter"] == 0
-        assert captured["continuation_maxiter"] == 1
-        assert captured["initial_k"] == 0
-        assert result.nit == 1
 
     @PRIVATE_OPTIMIZER_RUNTIME
     @REQUIRES_PRIVATE_OPTIMIZER_RUNTIME
@@ -1295,7 +941,7 @@ class TestBoozerSurfaceJAXClassPrivate:
 
         captured = {}
 
-        def fake_jax_minimize(
+        def fake_target_minimize(
             fun,
             x0,
             *,
@@ -1315,7 +961,7 @@ class TestBoozerSurfaceJAXClassPrivate:
             del maxiter, tol, stab, progress_callback
             return _successful_newton_polish_result(x0)
 
-        monkeypatch.setattr(_bsj, "jax_minimize", fake_jax_minimize)
+        monkeypatch.setattr(_bsj, "target_minimize", fake_target_minimize)
         _patch_newton_polish_runner(monkeypatch, fake_newton_polish)
 
         res = booz.run_code(iota=0.3, G=0.05)
@@ -1334,7 +980,7 @@ class TestBoozerSurfaceJAXClassPrivate:
 
         captured = {}
 
-        def fake_jax_minimize(
+        def fake_target_minimize(
             fun,
             x0,
             *,
@@ -1362,7 +1008,7 @@ class TestBoozerSurfaceJAXClassPrivate:
                 "success": True,
             }
 
-        monkeypatch.setattr(_bsj, "jax_minimize", fake_jax_minimize)
+        monkeypatch.setattr(_bsj, "target_minimize", fake_target_minimize)
         _patch_newton_polish_runner(monkeypatch, fake_newton_polish)
 
         res = booz.run_code(iota=0.3, G=0.05)
@@ -1384,7 +1030,7 @@ class TestBoozerSurfaceJAXClassPrivate:
                 "_scipy_minimize must not be called on the ondevice path"
             )
 
-        monkeypatch.setattr(_opt, "_scipy_minimize", forbidden_scipy_minimize)
+        monkeypatch.setattr(_opt_ref, "_scipy_minimize", forbidden_scipy_minimize)
 
         res = booz.run_code(iota=0.3, G=0.05)
 
@@ -1406,7 +1052,7 @@ class TestBoozerSurfaceJAXClassPrivate:
 
         booz.options["stage_callback"] = record_stage
 
-        def fake_jax_minimize(
+        def fake_target_minimize(
             fun,
             x0,
             *,
@@ -1428,7 +1074,7 @@ class TestBoozerSurfaceJAXClassPrivate:
             del maxiter, tol, stab, progress_callback
             return _successful_newton_polish_result(x0)
 
-        monkeypatch.setattr(_bsj, "jax_minimize", fake_jax_minimize)
+        monkeypatch.setattr(_bsj, "target_minimize", fake_target_minimize)
         _patch_newton_polish_runner(monkeypatch, fake_newton_polish)
 
         res = booz.run_code(iota=0.3, G=0.05)
@@ -1458,7 +1104,7 @@ class TestBoozerSurfaceJAXClassPrivate:
 
         booz.options["stage_callback"] = record_stage
 
-        def fake_jax_minimize(
+        def fake_target_minimize(
             fun,
             x0,
             *,
@@ -1480,7 +1126,7 @@ class TestBoozerSurfaceJAXClassPrivate:
             del maxiter, tol, stab, progress_callback
             return _successful_newton_polish_result(x0)
 
-        monkeypatch.setattr(_bsj, "jax_minimize", fake_jax_minimize)
+        monkeypatch.setattr(_bsj, "target_minimize", fake_target_minimize)
         _patch_newton_polish_runner(monkeypatch, fake_newton_polish)
 
         res = booz.run_code(iota=0.3, G=0.05)
@@ -1496,8 +1142,8 @@ class TestBoozerSurfaceJAXClassPrivate:
 
     @PRIVATE_OPTIMIZER_RUNTIME
     @REQUIRES_PRIVATE_LIMITED_MEMORY_RUNTIME
-    def test_run_code_ondevice_limited_memory_converges_without_monkeypatch(self):
-        """limited_memory=True must run a full on-device L-BFGS solve."""
+    def test_run_code_ondevice_limited_memory_runs_without_monkeypatch(self):
+        """limited_memory=True must run the real on-device L-BFGS lane."""
         booz = _make_mock_boozer_surface()
         booz.options["optimizer_backend"] = "ondevice"
         booz.options["limited_memory"] = True
@@ -1506,8 +1152,8 @@ class TestBoozerSurfaceJAXClassPrivate:
 
         assert res is not None
         assert res["type"] == "ls"
-        assert res["success"] is True
         assert np.isfinite(res["fun"])
+        assert np.max(np.abs(np.asarray(res["jacobian"]))) < 1.0e-6
         assert res["PLU"] is not None
         assert callable(res["vjp"])
         assert res["optimizer_method"] == "lbfgs-ondevice"

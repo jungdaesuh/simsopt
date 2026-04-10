@@ -45,11 +45,11 @@ GPU install (CUDA 12)::
 
 Both the public and private optimizer lanes are Python ``3.11+`` with JAX /
 jaxlib ``0.9.2``. The trusted reference backend remains
-``optimizer_backend="scipy"``; ``ondevice`` / ``hybrid`` still require the
-separate private-optimizer validation track. In non-parity JAX target modes
-such as ``jax_gpu_fast`` and ``jax_metal_smoke``, the direct reference
-optimizer methods are rejected so those lanes cannot silently fall back to host
-loops.
+``SIMSOPT_BACKEND_MODE=native_cpu`` with ``optimizer_backend="scipy"``.
+All JAX backend modes now require the on-device optimizer lane at the
+high-level Stage 2 / single-stage / Boozer contracts, so ``backend="jax"``
+cannot silently route back through the host SciPy loops. The remaining SciPy
+adapter is a CPU/reference-only oracle path.
 
 Verify the install::
 

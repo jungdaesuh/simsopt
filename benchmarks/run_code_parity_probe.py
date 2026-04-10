@@ -142,6 +142,7 @@ def run_probe(*, optimizer_backend: str):
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
+    target_optimizer_backend = "ondevice"
     parser.add_argument(
         "--platform",
         choices=("auto", "cpu", "cuda"),
@@ -150,9 +151,9 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--optimizer-backend",
-        choices=("scipy", "hybrid", "ondevice"),
-        default="scipy",
-        help="BoozerSurfaceJAX LS optimizer backend to exercise on the JAX lane.",
+        choices=(target_optimizer_backend,),
+        default=target_optimizer_backend,
+        help="BoozerSurfaceJAX LS optimizer backend to exercise on the JAX target lane.",
     )
     return parser.parse_args()
 

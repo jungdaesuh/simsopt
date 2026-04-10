@@ -73,6 +73,7 @@ STAGE2_CURVATURE_TERM_NAME = "curvature_penalty"
 
 _CPU_ONDEVICE_ENDPOINT_LANE = ("jax", "cpu", "cpu-ondevice")
 _CPU_REFERENCE_ENDPOINT_LANE = ("cpu", "auto", "cpu-reference")
+TARGET_OPTIMIZER_BACKEND = "ondevice"
 
 
 def _resolve_stage2_endpoint_cpu_lane(
@@ -275,9 +276,9 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--optimizer-backend",
-        choices=("scipy", "hybrid", "ondevice"),
-        default="scipy",
-        help="Stage 2 optimizer backend for the JAX lane.",
+        choices=(TARGET_OPTIMIZER_BACKEND,),
+        default=TARGET_OPTIMIZER_BACKEND,
+        help="Stage 2 optimizer backend for the JAX target lane.",
     )
     parser.add_argument(
         "--output-json",

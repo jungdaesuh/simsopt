@@ -7,13 +7,13 @@ Validates:
 3. NonQuasiSymmetricRatioJAX.J() is finite and non-negative.
 4. Adjoint-solve consistency (H^T adj = dJ_ds).
 5. VJP produces finite, non-zero derivative.
-6. Reduced real-fixture scipy wrappers match CPU values and gradients.
+6. Reduced real-fixture on-device wrappers match CPU reference values and gradients.
 7. Fixed-surface and re-solve FD validate the composed JAX gradient path.
 8. Composite objective value and gradient are finite and non-zero.
 9. Backend selection constructs correct object types.
 
 Gradient validation uses two complementary lanes:
-- direct CPU-vs-JAX parity on the shared reduced real-fixture scipy path
+- direct CPU-vs-JAX parity on the shared reduced real-fixture CPU-reference vs JAX-ondevice path
 - finite-difference checks on the JAX fixed-surface and re-solve paths
 
 The FD checks remain necessary for the full re-solve lane, where CPU and JAX
@@ -530,14 +530,14 @@ def _jax_single_stage_wrapper_gradients(booz_jax, bs_jax):
     return [np.array(gradient) for gradient in batched_gradients]
 
 
-def _build_real_fixture_scipy_m5_pair():
+def _build_real_fixture_ondevice_m5_pair():
     cpu_fixture = build_real_single_stage_init_fixture(
         backend="cpu",
         optimizer_backend="scipy",
     )
     jax_fixture = build_real_single_stage_init_fixture(
         backend="jax",
-        optimizer_backend="scipy",
+        optimizer_backend="ondevice",
     )
     return cpu_fixture, jax_fixture
 
@@ -1455,7 +1455,7 @@ def _make_real_resolve_fd_setup():
     """Build the stable reduced real single-stage fixture used by Tier 4."""
     fixture = build_real_single_stage_init_fixture(
         backend="jax",
-        optimizer_backend="scipy",
+        optimizer_backend="ondevice",
     )
     bs_jax = fixture["bs"]
     booz_jax = fixture["boozer_surface"]
@@ -4346,12 +4346,12 @@ class TestRunCodeLSParity:
         assert iota_diff < 1e-6, f"Iota disagreement: {iota_diff:.6e}"
 
 
-class TestRealFixtureScipyM5Parity:
-    """Reduced real single-stage fixture covers the public scipy-backed M5 lane."""
+class TestRealFixtureOndeviceM5Parity:
+    """Reduced real single-stage fixture covers the public on-device M5 lane."""
 
-    def test_real_fixture_scipy_solver_end_state_contracts_match(self):
-        """CPU and JAX scipy lanes should match on solved-state quality, not iterates."""
-        cpu_fixture, jax_fixture = _build_real_fixture_scipy_m5_pair()
+    def test_real_fixture_ondevice_solver_end_state_contracts_match(self):
+        """CPU reference and JAX on-device lanes should match on solved-state quality, not iterates."""
+        cpu_fixture, jax_fixture = _build_real_fixture_ondevice_m5_pair()
 
         _assert_boozer_surfaces_end_state_parity(
             "CPU",
@@ -4361,9 +4361,9 @@ class TestRealFixtureScipyM5Parity:
             tolerances=_REAL_FIXTURE_SOLVER_CPU_JAX_TOLS,
         )
 
-    def test_real_fixture_scipy_parity_and_wrapper_gradients(self):
-        """CPU and JAX reduced-real scipy fixtures agree, and JAX wrappers stay healthy."""
-        cpu_fixture, jax_fixture = _build_real_fixture_scipy_m5_pair()
+    def test_real_fixture_ondevice_parity_and_wrapper_gradients(self):
+        """CPU reference and JAX reduced-real on-device fixtures agree, and wrappers stay healthy."""
+        cpu_fixture, jax_fixture = _build_real_fixture_ondevice_m5_pair()
 
         booz_cpu = cpu_fixture["boozer_surface"]
         bs_cpu = cpu_fixture["bs"]
@@ -4371,7 +4371,7 @@ class TestRealFixtureScipyM5Parity:
         bs_jax = jax_fixture["bs"]
 
         assert cpu_fixture["boozer_optimizer_backend"] is None
-        assert jax_fixture["boozer_optimizer_backend"] == "scipy"
+        assert jax_fixture["boozer_optimizer_backend"] == "ondevice"
         assert booz_cpu.res is not None and booz_cpu.res.get("success", False)
         assert booz_jax.res is not None and booz_jax.res.get("success", False)
         assert booz_jax.res["type"] == "ls"
@@ -4406,11 +4406,11 @@ class TestRealFixtureScipyM5Parity:
         jax_gradients = _jax_single_stage_wrapper_gradients(booz_jax, bs_jax)
         _assert_gradients_finite_nonzero(
             cpu_gradients,
-            "Real-fixture scipy CPU wrapper path",
+            "Real-fixture CPU-reference wrapper path",
         )
         _assert_gradients_finite_nonzero(
             jax_gradients,
-            "Real-fixture scipy JAX wrapper path",
+            "Real-fixture JAX ondevice wrapper path",
         )
 
         for label, cpu_gradient, jax_gradient in zip(
@@ -4423,7 +4423,7 @@ class TestRealFixtureScipyM5Parity:
                 cpu_gradient,
                 rtol=1e-10,
                 atol=1e-12,
-                err_msg=f"{label} gradient mismatch on reduced real scipy fixture",
+                err_msg=f"{label} gradient mismatch on reduced real ondevice fixture",
             )
 
 
@@ -4449,7 +4449,7 @@ class TestRealFixtureGpuM5Parity:
 
         gpu_fixture = build_real_single_stage_init_fixture(
             backend="jax",
-            optimizer_backend="scipy",
+            optimizer_backend="ondevice",
             boozer_surface_dofs_override=np.asarray(
                 booz_cpu.surface.get_dofs(),
                 dtype=float,
@@ -4496,7 +4496,7 @@ class TestRealFixtureGpuM5Parity:
 
         gpu_fixture = build_real_single_stage_init_fixture(
             backend="jax",
-            optimizer_backend="scipy",
+            optimizer_backend="ondevice",
             boozer_surface_dofs_override=np.asarray(
                 booz_cpu.surface.get_dofs(),
                 dtype=float,
@@ -4508,7 +4508,7 @@ class TestRealFixtureGpuM5Parity:
         bs_gpu = gpu_fixture["bs"]
         gpu_result = booz_gpu.res
 
-        assert gpu_fixture["boozer_optimizer_backend"] == "scipy"
+        assert gpu_fixture["boozer_optimizer_backend"] == "ondevice"
         assert gpu_result is not None and gpu_result.get("success", False)
         assert gpu_result["type"] == "ls"
         assert_arrays_on_device(
@@ -4740,7 +4740,7 @@ class TestOnDeviceBackendIntegration:
         not private_optimizer_runtime_is_supported(jax.__version__),
         reason=f"On-device backend integration requires JAX >= {PRIVATE_OPTIMIZER_JAX_VERSION}.",
     )
-    @pytest.mark.parametrize("optimizer_backend", ["ondevice", "hybrid"])
+    @pytest.mark.parametrize("optimizer_backend", ["ondevice"])
     @pytest.mark.parametrize("pass_explicit_G", [True, False])
     def test_ondevice_backend_run_code_converges(
         self, optimizer_backend, pass_explicit_G
@@ -5243,8 +5243,8 @@ class TestExactSolveCPUJAXParity:
         norm by ~3x.  This makes direct gradient parity impossible on the
         exact path.
 
-        Direct gradient parity IS validated on the LS scipy path at
-        rtol=1e-10 in test_real_fixture_scipy_parity_and_wrapper_gradients.
+        Direct gradient parity IS validated on the LS on-device path at
+        rtol=1e-10 in test_real_fixture_ondevice_parity_and_wrapper_gradients.
         FD correctness is validated on the LS re-solve path (not exact) in
         TestIotasJAXResolveFD and TestNonQSRatioJAXResolveFD.  This test
         covers only gradient health (finite, non-zero) on the exact state.

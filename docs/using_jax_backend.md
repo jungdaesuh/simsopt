@@ -170,8 +170,9 @@ Single-stage traceable target-lane contract:
   bundle to retarget itself.
 
 The current CPU reference lane remains the oracle for broad workflow trust.
-Public acceptance still centers on the `scipy`-backed reference/parity lanes.
-The `hybrid` / `ondevice` optimizer lanes remain separate validation tracks.
+Public acceptance still centers on the `native_cpu` / `scipy` oracle lane.
+When `backend="jax"` is active, the supported optimizer lane is `ondevice`;
+the retained `scipy` adapter stays available only on the CPU/reference path.
 
 Exact Boozer note:
 
@@ -229,13 +230,14 @@ Use this first when you want:
 SIMSOPT_BACKEND_MODE=jax_cpu_parity \
 python examples/single_stage_optimization/STAGE_2/banana_coil_solver.py \
   --backend jax \
-  --optimizer-backend scipy \
+  --optimizer-backend ondevice \
   --plasma-surf-filename wout_nfp22ginsburg_000_014417_iota15.nc \
   --probe-only \
   --skip-postprocess
 ```
 
-Use this to validate Stage 2 algorithmic parity before moving to GPU.
+Use this to validate the JAX Stage 2 path on CPU before moving to GPU.
+It does not exercise the retained SciPy oracle lane.
 
 ### Single-stage on the default CPU reference lane
 
@@ -257,16 +259,15 @@ This is the safest single-stage initialization proof lane.
 SIMSOPT_BACKEND_MODE=jax_cpu_parity \
 python examples/single_stage_optimization/SINGLE_STAGE/single_stage_banana_example.py \
   --backend jax \
-  --optimizer-backend scipy \
-  --boozer-optimizer-backend scipy \
+  --optimizer-backend ondevice \
+  --boozer-optimizer-backend ondevice \
   --stage2-source local \
   --stage2-bs-path examples/single_stage_optimization/STAGE_2/outputs-wout_nfp22ginsburg_000_014417_iota15.nc/biot_savart_opt.json \
   --init-only
 ```
 
-After that is green, the target-lane outer optimizer path is a separate
-validation track. Do not treat it as a replacement for the public `scipy`
-acceptance lane:
+This is the required single-stage JAX execution lane. Do not treat it as a
+replacement for the public CPU/reference `scipy` oracle lane:
 
 ```bash
 SIMSOPT_BACKEND_MODE=jax_gpu_parity \

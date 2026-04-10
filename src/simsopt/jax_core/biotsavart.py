@@ -99,8 +99,16 @@ def _index_range(size: int):
     return jnp.arange(size, dtype=jnp.int32)
 
 
-def _zero_scalar(dtype):
-    return jnp.zeros((), dtype=dtype)
+def _zero_padding_like(array, *, axis: int, pad_width: int):
+    if axis == 0:
+        zero_slice = jnp.sum(array, axis=0, keepdims=True, dtype=array.dtype)
+        zero_slice = zero_slice - zero_slice
+        target_shape = (pad_width,) + array.shape[1:]
+    else:
+        zero_slice = jnp.sum(array, axis=1, keepdims=True, dtype=array.dtype)
+        zero_slice = zero_slice - zero_slice
+        target_shape = array.shape[:1] + (pad_width,) + array.shape[2:]
+    return jnp.broadcast_to(zero_slice, target_shape)
 
 
 def _safe_radius_squared(diff):
@@ -133,16 +141,20 @@ def _pad_axis0(array, padded_size: int):
     pad_rows = padded_size - array.shape[0]
     if pad_rows <= 0:
         return array
-    padding_config = [(0, pad_rows, 0)] + [(0, 0, 0)] * (array.ndim - 1)
-    return lax.pad(array, _zero_scalar(array.dtype), padding_config)
+    return jnp.concatenate(
+        (array, _zero_padding_like(array, axis=0, pad_width=pad_rows)),
+        axis=0,
+    )
 
 
 def _pad_axis1(array, padded_size: int):
     pad_cols = padded_size - array.shape[1]
     if pad_cols <= 0:
         return array
-    padding_config = [(0, 0, 0), (0, pad_cols, 0)] + [(0, 0, 0)] * (array.ndim - 2)
-    return lax.pad(array, _zero_scalar(array.dtype), padding_config)
+    return jnp.concatenate(
+        (array, _zero_padding_like(array, axis=1, pad_width=pad_cols)),
+        axis=1,
+    )
 
 
 def _next_power_of_two(size: int) -> int:
@@ -163,7 +175,7 @@ def _pairwise_sum_axis(array, *, axis: int):
     while reduced.shape[0] > 1:
         pair_shape = (reduced.shape[0] // 2, 2) + tuple(reduced.shape[1:])
         paired = jnp.reshape(reduced, pair_shape)
-        reduced = paired[:, 0, ...] + paired[:, 1, ...]
+        reduced = jnp.sum(paired, axis=1)
     return jnp.squeeze(reduced, axis=0)
 
 
@@ -413,7 +425,7 @@ def _one_point_dense(
         integrand=integrand,
     )
     return _float64_scalar(currents, _MU0_OVER_4PI) * jnp.einsum(
-        "c,cj->j", currents, integral
+        "c,cj->j", currents, integral, precision=lax.Precision.HIGHEST
     )
 
 
@@ -628,8 +640,7 @@ def _axis0_entries(array: object) -> tuple[jax.Array, ...]:
     if length == 0:
         return ()
     return tuple(
-        jnp.squeeze(chunk, axis=0)
-        for chunk in jnp.split(array_jax, length, axis=0)
+        jnp.squeeze(chunk, axis=0) for chunk in jnp.split(array_jax, length, axis=0)
     )
 
 
@@ -663,7 +674,10 @@ def group_coil_data(gammas_list, gammadashs_list, currents_list):
                     ]
                 ),
                 jnp.stack(
-                    [jnp.asarray(current_entries[i], dtype=jnp.float64) for i in indices]
+                    [
+                        jnp.asarray(current_entries[i], dtype=jnp.float64)
+                        for i in indices
+                    ]
                 ),
                 indices,
             )

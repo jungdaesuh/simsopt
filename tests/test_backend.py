@@ -128,13 +128,14 @@ def _set_distributed_init_env(
 def _assert_synced_runtime_env(
     backend, *, mode: str, backend_name: str, platform: str, strict: bool
 ) -> None:
+    runtime_platform = "METAL" if platform == "metal" else platform
     assert os.environ["SIMSOPT_BACKEND_MODE"] == mode
     assert os.environ["SIMSOPT_BACKEND_STRICT"] == ("1" if strict else "0")
     assert os.environ["SIMSOPT_BACKEND"] == backend_name
     assert os.environ["STAGE2_BACKEND"] == backend_name
-    assert os.environ["SIMSOPT_JAX_PLATFORM"] == platform
-    assert os.environ["SIMSOPT_JAX_BACKEND"] == platform
-    assert os.environ["JAX_PLATFORMS"] == platform
+    assert os.environ["SIMSOPT_JAX_PLATFORM"] == runtime_platform
+    assert os.environ["SIMSOPT_JAX_BACKEND"] == runtime_platform
+    assert os.environ["JAX_PLATFORMS"] == runtime_platform
 
 
 def _assert_backend_policy(
@@ -209,7 +210,6 @@ def test_backend_defaults_to_native_cpu(monkeypatch):
 def test_backend_resolves_legacy_env_pair(monkeypatch):
     _clear_backend_env(monkeypatch)
     monkeypatch.setenv("SIMSOPT_BACKEND", "jax")
-    monkeypatch.setenv("SIMSOPT_JAX_PLATFORM", "cuda")
     backend = _fresh_backend()
 
     config = backend.get_backend_config()
@@ -230,6 +230,34 @@ def test_backend_resolves_stage2_backend_env_alias(monkeypatch):
     assert config.mode == "jax_gpu_parity"
     assert config.backend == "jax"
     assert config.jax_platform == "cuda"
+
+
+def test_backend_resolves_explicit_metal_legacy_env_pair(monkeypatch):
+    _clear_backend_env(monkeypatch)
+    monkeypatch.setenv("SIMSOPT_BACKEND", "jax")
+    monkeypatch.setenv("SIMSOPT_JAX_PLATFORM", "metal")
+    backend = _fresh_backend()
+
+    config = backend.get_backend_config()
+    policy = backend.get_backend_policy()
+
+    assert config.mode == "jax_metal_smoke"
+    assert config.backend == "jax"
+    assert config.jax_platform == "metal"
+    _assert_backend_policy(
+        policy,
+        mode="jax_metal_smoke",
+        backend_name="jax",
+        platform="metal",
+        strict=False,
+        parity_mode=False,
+        requires_x64=False,
+        chunk_policy="stable_default",
+        tolerance_tier="smoke",
+        compilation_cache_policy="optional_persistent",
+        provenance_label="jax_metal_smoke",
+    )
+    assert backend.requires_x64() is False
 
 
 def test_set_backend_updates_mode_and_legacy_envs(monkeypatch):
@@ -257,6 +285,26 @@ def test_set_backend_updates_mode_and_legacy_envs(monkeypatch):
         backend_name="jax",
         platform="cuda",
         strict=True,
+    )
+
+
+def test_set_backend_updates_envs_for_jax_metal_smoke(monkeypatch):
+    _clear_backend_env(monkeypatch)
+    backend = _fresh_backend()
+
+    config = backend.set_backend("jax_metal_smoke", configure_runtime=False)
+
+    assert config.mode == "jax_metal_smoke"
+    assert config.backend == "jax"
+    assert config.jax_platform == "metal"
+    assert backend.get_jax_platform() == "metal"
+    assert backend.requires_x64() is False
+    _assert_synced_runtime_env(
+        backend,
+        mode="jax_metal_smoke",
+        backend_name="jax",
+        platform="metal",
+        strict=False,
     )
 
 
@@ -314,6 +362,35 @@ def test_fast_mode_policy_helpers(monkeypatch):
     _assert_transfer_guard_resolution(
         backend,
         mode="jax_gpu_fast",
+        expected="log",
+    )
+
+
+def test_metal_smoke_mode_policy_helpers(monkeypatch):
+    _clear_backend_env(monkeypatch)
+    monkeypatch.setenv("SIMSOPT_BACKEND_MODE", "jax_metal_smoke")
+    backend = _fresh_backend()
+
+    policy = backend.get_backend_policy()
+
+    _assert_backend_policy(
+        policy,
+        mode="jax_metal_smoke",
+        backend_name="jax",
+        platform="metal",
+        strict=False,
+        parity_mode=False,
+        requires_x64=False,
+        chunk_policy="stable_default",
+        tolerance_tier="smoke",
+        compilation_cache_policy="optional_persistent",
+        provenance_label="jax_metal_smoke",
+    )
+    assert backend.is_parity_mode() is False
+    assert backend.requires_x64() is False
+    _assert_transfer_guard_resolution(
+        backend,
+        mode="jax_metal_smoke",
         expected="log",
     )
 
@@ -1233,6 +1310,26 @@ def test_apply_jax_runtime_config_applies_fast_mode_transfer_guard(monkeypatch):
 
     assert ("jax_platforms", "cuda") in calls
     assert ("jax_enable_x64", True) in calls
+    assert ("jax_debug_nans", False) in calls
+    assert ("jax_transfer_guard", "log") in calls
+
+
+def test_apply_jax_runtime_config_applies_metal_smoke_mode(monkeypatch):
+    _clear_backend_env(monkeypatch)
+    backend = _fresh_backend()
+    calls: list[tuple[str, object]] = []
+    fake_jax = types.SimpleNamespace(
+        config=types.SimpleNamespace(
+            update=lambda name, value: calls.append((name, value))
+        )
+    )
+    monkeypatch.setitem(sys.modules, "jax", fake_jax)
+
+    backend.set_backend("jax_metal_smoke", configure_runtime=False)
+    backend.apply_jax_runtime_config()
+
+    assert ("jax_platforms", "METAL") in calls
+    assert ("jax_enable_x64", False) in calls
     assert ("jax_debug_nans", False) in calls
     assert ("jax_transfer_guard", "log") in calls
 

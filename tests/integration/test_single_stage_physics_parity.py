@@ -39,7 +39,10 @@ bootstrap_local_simsopt()
 
 pytest.importorskip(
     "simsoptpp",
-    reason="Single-stage integration tests require simsoptpp (use candidate-fixed env)",
+    reason=(
+        "Single-stage integration tests require a simsoptpp-backed JAX runtime "
+        "(for example columbia-jax-0.9.2)."
+    ),
 )
 
 from simsopt._core.optimizable import load  # noqa: E402
@@ -76,6 +79,28 @@ def _single_stage_script_path() -> Path:
         / "SINGLE_STAGE"
         / "single_stage_banana_example.py"
     )
+
+
+def _single_stage_subprocess_env(*, backend: str, platform: str) -> dict[str, str]:
+    # Keep a stable cache across reruns because the real JAX outer-loop probe
+    # can otherwise spend minutes in cold XLA compilation with no stage output.
+    env = repo_pythonpath_env(
+        platform=platform,
+        disable_compilation_cache=(backend != "jax"),
+        clear_backend_guardrails=(backend != "jax"),
+    )
+    if backend == "jax":
+        cache_dir = (
+            REPO_ROOT
+            / ".artifacts"
+            / "jax_compilation_cache"
+            / "test_single_stage_physics_parity"
+        )
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        env["JAX_COMPILATION_CACHE_DIR"] = str(cache_dir)
+        env["SIMSOPT_JAX_COMPILATION_CACHE_POLICY"] = "explicit"
+        env.pop("SIMSOPT_DISABLE_JAX_COMPILATION_CACHE", None)
+    return env
 
 
 def _run_single_stage_script(
@@ -119,11 +144,7 @@ def _run_single_stage_script(
         run_python_script(
             _single_stage_script_path(),
             command,
-            env=repo_pythonpath_env(
-                platform=platform,
-                disable_compilation_cache=True,
-                clear_backend_guardrails=(backend != "jax"),
-            ),
+            env=_single_stage_subprocess_env(backend=backend, platform=platform),
             cwd=REPO_ROOT,
             bootstrap_repo=True,
             stream_output=True,

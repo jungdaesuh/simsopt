@@ -23,9 +23,18 @@ DEFAULT_SMOKE_MPOL = 2
 DEFAULT_SMOKE_NTOR = 2
 DEFAULT_VOL_TARGET = 0.10
 DEFAULT_IOTA_TARGET = 0.15
-DEFAULT_OPTIMIZER_BACKEND = "scipy"
+DEFAULT_OPTIMIZER_BACKEND = "ondevice"
+DEFAULT_REFERENCE_OPTIMIZER_BACKEND = "scipy"
 DEFAULT_CONSTRAINT_WEIGHT = 1.0
 DEFAULT_NUM_TF_COILS = 20
+
+
+def default_optimizer_backend_for_backend(backend: str) -> str:
+    return (
+        DEFAULT_OPTIMIZER_BACKEND
+        if backend == "jax"
+        else DEFAULT_REFERENCE_OPTIMIZER_BACKEND
+    )
 
 
 def _emit_stage(
@@ -64,7 +73,7 @@ def build_real_single_stage_init_fixture(
     ntor: int = DEFAULT_SMOKE_NTOR,
     vol_target: float = DEFAULT_VOL_TARGET,
     iota_target: float = DEFAULT_IOTA_TARGET,
-    optimizer_backend: str = DEFAULT_OPTIMIZER_BACKEND,
+    optimizer_backend: str | None = None,
     boozer_optimizer_backend: str | None = None,
     boozer_least_squares_algorithm: str | None = None,
     boozer_limited_memory: bool = False,
@@ -88,10 +97,15 @@ def build_real_single_stage_init_fixture(
         single_stage_banana_example as single_stage_example,
     )
 
+    resolved_optimizer_backend = (
+        default_optimizer_backend_for_backend(backend)
+        if optimizer_backend is None
+        else optimizer_backend
+    )
     resolved_boozer_optimizer_backend = (
         single_stage_example.resolve_boozer_optimizer_backend(
             backend,
-            optimizer_backend,
+            resolved_optimizer_backend,
             boozer_optimizer_backend,
         )
     )

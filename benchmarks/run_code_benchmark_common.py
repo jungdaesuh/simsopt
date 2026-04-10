@@ -21,15 +21,30 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 EXPECTED_BENCHMARK_JAX_VERSION = os.environ.get(
     "SIMSOPT_BENCHMARK_JAX_VERSION", "0.9.2"
 )
-BENCHMARK_BACKEND_CHOICES = ("scipy", "ondevice", "hybrid")
+BENCHMARK_BACKEND_CHOICES = ("scipy", "ondevice")
 DEFAULT_PUBLIC_BACKENDS = ("ondevice",)
-PRIVATE_ONLY_BACKENDS = frozenset({"ondevice", "hybrid"})
+PRIVATE_ONLY_BACKENDS = frozenset({"ondevice"})
 SOLVER_VERBOSE = os.environ.get("SIMSOPT_BENCHMARK_SOLVER_VERBOSE", "").lower() in {
     "1",
     "true",
     "yes",
     "on",
 }
+
+
+def _validate_requested_backends(backends: tuple[str, ...]) -> None:
+    unknown = tuple(
+        backend
+        for backend in backends
+        if backend not in BENCHMARK_BACKEND_CHOICES
+    )
+    if not unknown:
+        return
+    valid = ", ".join(BENCHMARK_BACKEND_CHOICES)
+    raise ValueError(
+        f"optimizer_backend must be one of: {valid}. "
+        f"Got unknown benchmark backend(s): {', '.join(unknown)}."
+    )
 
 
 @lru_cache(maxsize=1)
@@ -65,6 +80,7 @@ def _x64_enabled() -> bool:
 
 
 def _requested_private_backends(backends: tuple[str, ...]) -> tuple[str, ...]:
+    _validate_requested_backends(backends)
     return tuple(sorted(PRIVATE_ONLY_BACKENDS.intersection(backends)))
 
 
@@ -98,6 +114,7 @@ def resolve_benchmark_backends(requested_backends=None) -> tuple[str, ...]:
         backends = tuple(requested_backends)
     else:
         backends = DEFAULT_PUBLIC_BACKENDS
+    _validate_requested_backends(backends)
     _validate_benchmark_runtime(backends)
     return backends
 
@@ -348,10 +365,6 @@ def run_benchmarks(
         if "scipy" in backend_summary and "ondevice" in backend_summary:
             speedup = backend_summary["scipy"] / backend_summary["ondevice"]
             _progress(f"  repeat fresh-solve speedup (ondevice/scipy): {speedup:.2f}x")
-        if "scipy" in backend_summary and "hybrid" in backend_summary:
-            speedup = backend_summary["scipy"] / backend_summary["hybrid"]
-            _progress(f"  repeat fresh-solve speedup (hybrid/scipy):   {speedup:.2f}x")
-
     if "scipy" in backends and "ondevice" in backends:
         break_even = next(
             (

@@ -6,8 +6,9 @@ alongside the existing CPU (simsoptpp) implementation.
 
 The current migration target is the JAX ``0.9.2`` runtime. The trusted public
 acceptance gates remain centered on the ``scipy`` backend. Private
-``hybrid`` / ``ondevice`` optimizer behavior remains a separate validation
-track on the same runtime and is not part of these public acceptance gates.
+``ondevice`` optimizer behavior remains a separate JAX target-lane validation
+track on the same runtime. The removed ``hybrid`` backend is no longer part of
+the public contract.
 
 Parity Gates
 ------------
@@ -96,7 +97,7 @@ When To Use Which Backend
 +---------------------+-----+-----+-----------------------------------------+
 | Stage 2 (GPU)       |     | Yes | Value + gradient parity validated        |
 +---------------------+-----+-----+-----------------------------------------+
-| Single-stage (GPU)  |     |     | Separate ``hybrid`` / ``ondevice`` validation track only |
+| Single-stage (GPU)  |     | Yes | JAX target lane requires ``optimizer_backend="ondevice"`` and still rides the single-stage validation/proof gates |
 +---------------------+-----+-----+-----------------------------------------+
 | Development/testing  | Yes | Yes | Both paths exercised in CI              |
 +---------------------+-----+-----+-----------------------------------------+

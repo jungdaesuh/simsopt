@@ -2958,18 +2958,19 @@ def test_optimizer_jax_import_is_lazy():
 
 
 def test_optimizer_jax_public_reference_methods_work_without_private_package():
-    """Public SciPy methods must work even when the private package cannot import."""
+    """Public reference methods remain available on the native CPU/reference backend."""
     rc, err = _run_import_check(
         _block_private_optimizer_imports()
         + """
+        import simsopt.config
         import sys
-
         from simsopt.geo import optimizer_jax
         import jax.numpy as jnp
 
         def quad(x):
             return 0.5 * jnp.dot(x, x)
 
+        simsopt.config.set_backend("native_cpu", configure_runtime=False)
         x0 = jnp.asarray([1.0, -2.0])
         assert "simsopt.geo.optimizer_jax_private" not in sys.modules
 
@@ -2983,8 +2984,8 @@ def test_optimizer_jax_public_reference_methods_work_without_private_package():
     assert rc == 0, f"public optimizer_jax reference methods failed:\n{err}"
 
 
-def test_optimizer_jax_reference_methods_reject_target_backend_modes():
-    """Non-parity JAX target modes must not silently route through host reference loops."""
+def test_optimizer_jax_reference_methods_reject_all_jax_backend_modes():
+    """Any JAX backend mode must reject host reference optimizer methods."""
     rc, err = _run_import_check(
         _block_private_optimizer_imports()
         + """
@@ -2992,7 +2993,12 @@ def test_optimizer_jax_reference_methods_reject_target_backend_modes():
         import jax.numpy as jnp
         from simsopt.geo import optimizer_jax
 
-        TARGET_BACKEND_MODES = ("jax_gpu_fast", "jax_metal_smoke")
+        TARGET_BACKEND_MODES = (
+            "jax_cpu_parity",
+            "jax_gpu_parity",
+            "jax_gpu_fast",
+            "jax_metal_smoke",
+        )
         REFERENCE_MINIMIZE_METHODS = ("adam", "bfgs", "lbfgs")
         target = jnp.asarray([1.0, -2.0])
         x0 = jnp.asarray([5.0, 3.0])
@@ -3007,7 +3013,7 @@ def test_optimizer_jax_reference_methods_reject_target_backend_modes():
                 message = str(exc)
                 assert method in message
                 assert backend_mode in message
-                assert "fast/ondevice lane" in message
+                assert "requires an ondevice optimizer method" in message
             else:
                 raise AssertionError(
                     f"expected target-mode rejection for {method} in {backend_mode}"
@@ -3040,7 +3046,7 @@ def test_optimizer_jax_reference_methods_reject_target_backend_modes():
             )
     """
     )
-    assert rc == 0, f"target-mode reference optimizer guard failed:\n{err}"
+    assert rc == 0, f"JAX-backend reference optimizer guard failed:\n{err}"
 
 
 def test_optimizer_jax_private_methods_require_private_package_when_blocked():

@@ -2811,7 +2811,6 @@ class TestStage2OptimizerContract:
         ),
         [
             ("cpu", "scipy", "quasi-newton", "lbfgs"),
-            ("jax", "scipy", "quasi-newton", "lbfgs"),
             ("jax", "ondevice", "quasi-newton", "lbfgs-ondevice"),
             ("jax", "ondevice", "lm", "lm-ondevice"),
         ],
@@ -2833,20 +2832,32 @@ class TestStage2OptimizerContract:
             == expected_method
         )
 
-    def test_resolve_stage2_optimizer_method_rejects_hybrid(self):
+    @pytest.mark.parametrize("optimizer_backend", ["scipy"])
+    def test_resolve_stage2_optimizer_method_rejects_non_ondevice_jax_backend(
+        self, optimizer_backend
+    ):
         stage2_script = _load_stage2_script_module()
         with pytest.raises(
             ValueError,
-            match="optimizer_backend='hybrid'.*not supported for the Stage 2 outer loop",
+            match="the Stage 2 outer loop with backend='jax' requires "
+            "optimizer_backend='ondevice'",
         ):
-            stage2_script.resolve_stage2_optimizer_method("jax", "hybrid")
+            stage2_script.resolve_stage2_optimizer_method("jax", optimizer_backend)
+
+    def test_resolve_stage2_optimizer_method_rejects_unknown_backend(self):
+        stage2_script = _load_stage2_script_module()
+        with pytest.raises(
+            ValueError,
+            match="optimizer_backend must be one of: scipy, ondevice.",
+        ):
+            stage2_script.resolve_stage2_optimizer_method("jax", "bogus")
 
     def test_resolve_stage2_optimizer_method_rejects_reference_lm(self):
         stage2_script = _load_stage2_script_module()
         with pytest.raises(
             ValueError,
-            match="Stage 2 least_squares_algorithm='lm' currently requires "
-            "backend='jax' and optimizer_backend='ondevice'",
+            match="the Stage 2 outer loop with backend='jax' requires "
+            "optimizer_backend='ondevice'",
         ):
             stage2_script.resolve_stage2_optimizer_method(
                 "jax",
@@ -2858,7 +2869,6 @@ class TestStage2OptimizerContract:
         ("field_backend", "optimizer_backend", "least_squares_algorithm", "expected"),
         [
             ("cpu", "scipy", "quasi-newton", False),
-            ("jax", "scipy", "quasi-newton", False),
             ("jax", "ondevice", "quasi-newton", True),
             ("jax", "ondevice", "lm", True),
         ],
@@ -2880,6 +2890,34 @@ class TestStage2OptimizerContract:
             is expected
         )
 
+    @pytest.mark.parametrize("optimizer_backend", ["scipy"])
+    def test_target_objective_bundle_rejects_non_ondevice_jax_backend(
+        self, optimizer_backend
+    ):
+        stage2_script = _load_stage2_script_module()
+        with pytest.raises(
+            ValueError,
+            match="the Stage 2 outer loop with backend='jax' requires "
+            "optimizer_backend='ondevice'",
+        ):
+            stage2_script.should_build_stage2_target_objective(
+                "jax",
+                optimizer_backend,
+                least_squares_algorithm="quasi-newton",
+            )
+
+    def test_target_objective_bundle_rejects_unknown_backend(self):
+        stage2_script = _load_stage2_script_module()
+        with pytest.raises(
+            ValueError,
+            match="optimizer_backend must be one of: scipy, ondevice.",
+        ):
+            stage2_script.should_build_stage2_target_objective(
+                "jax",
+                "bogus",
+                least_squares_algorithm="quasi-newton",
+            )
+
     @pytest.mark.parametrize(
         (
             "field_backend",
@@ -2899,17 +2937,6 @@ class TestStage2OptimizerContract:
                 "quasi-newton",
                 False,
                 None,
-                True,
-                False,
-                False,
-                False,
-            ),
-            (
-                "jax",
-                "scipy",
-                "quasi-newton",
-                False,
-                "probe.json",
                 True,
                 False,
                 False,
@@ -2993,7 +3020,28 @@ class TestStage2OptimizerContract:
         assert needs_target_probe_payload is expects_target_probe_payload
         assert probe_only_target_payload is expects_probe_only_target_payload
 
-    def test_run_stage2_optimizer_uses_shared_adapter(
+    @pytest.mark.parametrize("optimizer_backend", ["scipy", "bogus"])
+    def test_resolve_stage2_target_lane_requirements_rejects_non_target_jax_backend(
+        self,
+        optimizer_backend,
+    ):
+        stage2_script = _load_stage2_script_module()
+        expected = (
+            "optimizer_backend must be one of: scipy, ondevice."
+            if optimizer_backend == "bogus"
+            else "the Stage 2 outer loop with backend='jax' requires "
+            "optimizer_backend='ondevice'"
+        )
+        with pytest.raises(ValueError, match=expected):
+            stage2_script.resolve_stage2_target_lane_requirements(
+                "jax",
+                optimizer_backend,
+                least_squares_algorithm="quasi-newton",
+                probe_only=False,
+                export_objective_json="probe.json",
+            )
+
+    def test_run_stage2_optimizer_uses_lane_specific_adapters(
         self,
         monkeypatch,
     ):
@@ -3003,7 +3051,7 @@ class TestStage2OptimizerContract:
 
         cpu_scipy_captured = {}
 
-        def fake_scipy_value_and_grad_adapter(
+        def fake_reference_minimize(
             fun,
             x0,
             *,
@@ -3011,11 +3059,17 @@ class TestStage2OptimizerContract:
             tol,
             maxiter,
             options,
+            value_and_grad,
+            callback=None,
+            progress_callback=None,
         ):
             cpu_scipy_captured["method"] = method
             cpu_scipy_captured["tol"] = tol
             cpu_scipy_captured["maxiter"] = maxiter
             cpu_scipy_captured["options"] = dict(options)
+            cpu_scipy_captured["value_and_grad"] = value_and_grad
+            cpu_scipy_captured["callback"] = callback
+            cpu_scipy_captured["progress_callback"] = progress_callback
             value, grad = fun(np.asarray(x0, dtype=float))
             return types.SimpleNamespace(
                 x=np.asarray(x0, dtype=float),
@@ -3027,8 +3081,8 @@ class TestStage2OptimizerContract:
 
         monkeypatch.setattr(
             optimizer_jax,
-            "_scipy_minimize_value_and_grad",
-            fake_scipy_value_and_grad_adapter,
+            "reference_minimize",
+            fake_reference_minimize,
         )
         cpu_contract = stage2_script.resolve_stage2_optimizer_contract("cpu", "scipy")
         cpu_result = stage2_script.run_stage2_optimizer(
@@ -3044,52 +3098,47 @@ class TestStage2OptimizerContract:
         assert cpu_scipy_captured["tol"] == pytest.approx(1e-12)
         assert cpu_scipy_captured["maxiter"] == 25
         assert cpu_scipy_captured["options"] == {"maxcor": 300, "ftol": 1e-15}
+        assert cpu_scipy_captured["value_and_grad"] is True
+        assert cpu_scipy_captured["callback"] is None
+        assert cpu_scipy_captured["progress_callback"] is None
         assert cpu_result.message == "ok"
 
         ondevice_captured = {}
 
-        def fake_lbfgs_private_value_and_grad(
+        def fake_target_minimize(
             fun,
             x0,
             *,
+            method,
+            tol,
             maxiter,
-            gtol,
-            maxcor,
-            ftol,
-            maxfun=None,
-            maxgrad=None,
-            maxls,
+            options,
+            value_and_grad,
             callback=None,
             progress_callback=None,
         ):
+            ondevice_captured["method"] = method
             ondevice_captured["x0"] = np.asarray(x0, dtype=float)
+            ondevice_captured["tol"] = tol
             ondevice_captured["maxiter"] = maxiter
-            ondevice_captured["gtol"] = gtol
-            ondevice_captured["maxcor"] = maxcor
-            ondevice_captured["ftol"] = ftol
-            ondevice_captured["maxfun"] = maxfun
-            ondevice_captured["maxgrad"] = maxgrad
-            ondevice_captured["maxls"] = maxls
+            ondevice_captured["options"] = dict(options)
+            ondevice_captured["value_and_grad"] = value_and_grad
             ondevice_captured["callback"] = callback
             ondevice_captured["progress_callback"] = progress_callback
             value, grad = fun(np.asarray(x0, dtype=np.float64))
-            return _build_fake_lbfgs_result(x0, value, grad)
-
-        def _reject_scalar_private(*_args, **_kwargs):
-            raise AssertionError(
-                "Stage 2 ondevice lane should not route through scalar lbfgs_private "
-                "once the fused value_and_grad contract is available."
+            return types.SimpleNamespace(
+                x=x0,
+                fun=float(value),
+                jac=np.asarray(grad, dtype=float),
+                nit=0,
+                success=True,
+                message="Optimization terminated successfully.",
             )
 
         monkeypatch.setattr(
             optimizer_jax,
-            "_minimize_lbfgs_private_value_and_grad",
-            fake_lbfgs_private_value_and_grad,
-        )
-        monkeypatch.setattr(
-            optimizer_jax,
-            "_minimize_lbfgs_private",
-            _reject_scalar_private,
+            "target_minimize",
+            fake_target_minimize,
         )
 
         target_contract = stage2_script.resolve_stage2_optimizer_contract(
@@ -3112,13 +3161,11 @@ class TestStage2OptimizerContract:
             ondevice_captured["x0"],
             np.asarray([1.0, -2.0], dtype=float),
         )
+        assert ondevice_captured["method"] == "lbfgs-ondevice"
+        assert ondevice_captured["tol"] == pytest.approx(1e-11)
         assert ondevice_captured["maxiter"] == 12
-        assert ondevice_captured["gtol"] == pytest.approx(1e-11)
-        assert ondevice_captured["maxcor"] == 300
-        assert ondevice_captured["ftol"] == pytest.approx(1e-15)
-        assert ondevice_captured["maxfun"] is None
-        assert ondevice_captured["maxgrad"] is None
-        assert ondevice_captured["maxls"] == 20
+        assert ondevice_captured["options"] == {"maxcor": 300, "ftol": 1e-15}
+        assert ondevice_captured["value_and_grad"] is True
         assert ondevice_captured["callback"] is None
         assert ondevice_captured["progress_callback"] is None
         assert target_result.message == "Optimization terminated successfully."
@@ -4542,16 +4589,9 @@ class TestStage2OptimizerContract:
         monkeypatch,
     ):
         stage2_script = _load_stage2_script_module()
-        contract = stage2_script.resolve_stage2_optimizer_contract("jax", "ondevice")
-        dofs = np.asarray([0.25, -0.5], dtype=np.float64)
-        optimizer_state = stage2_script.build_stage2_target_optimizer_state(
-            types.SimpleNamespace(expected_dof_count=2),
-            dofs,
-        )
-
         calls = {}
 
-        def fake_jax_minimize(
+        def fake_target_minimize(
             fun,
             x0,
             *,
@@ -4576,7 +4616,17 @@ class TestStage2OptimizerContract:
             )
 
         optimizer_jax_module = _fresh_import("simsopt.geo.optimizer_jax")
-        monkeypatch.setattr(optimizer_jax_module, "jax_minimize", fake_jax_minimize)
+        monkeypatch.setattr(
+            optimizer_jax_module,
+            "target_minimize",
+            fake_target_minimize,
+        )
+        contract = stage2_script.resolve_stage2_optimizer_contract("jax", "ondevice")
+        dofs = np.asarray([0.25, -0.5], dtype=np.float64)
+        optimizer_state = stage2_script.build_stage2_target_optimizer_state(
+            types.SimpleNamespace(expected_dof_count=2),
+            dofs,
+        )
 
         def target_value_and_grad(x):
             x = jax.numpy.asarray(
@@ -4615,25 +4665,14 @@ class TestStage2OptimizerContract:
         assert calls["maxiter"] == 20
         assert calls["options"]["maxcor"] == 7
 
-    def test_stage2_run_optimizer_routes_lm_target_lane_through_jax_least_squares(
+    def test_stage2_run_optimizer_routes_lm_target_lane_through_target_least_squares(
         self,
         monkeypatch,
     ):
         stage2_script = _load_stage2_script_module()
-        contract = stage2_script.resolve_stage2_optimizer_contract(
-            "jax",
-            "ondevice",
-            least_squares_algorithm="lm",
-        )
-        dofs = np.asarray([0.25, -0.5], dtype=np.float64)
-        optimizer_state = stage2_script.build_stage2_target_optimizer_state(
-            types.SimpleNamespace(expected_dof_count=2),
-            dofs,
-        )
-
         calls = {}
 
-        def fake_jax_least_squares(
+        def fake_target_least_squares(
             residual_fn,
             x0,
             *,
@@ -4671,8 +4710,18 @@ class TestStage2OptimizerContract:
         optimizer_jax_module = _fresh_import("simsopt.geo.optimizer_jax")
         monkeypatch.setattr(
             optimizer_jax_module,
-            "jax_least_squares",
-            fake_jax_least_squares,
+            "target_least_squares",
+            fake_target_least_squares,
+        )
+        contract = stage2_script.resolve_stage2_optimizer_contract(
+            "jax",
+            "ondevice",
+            least_squares_algorithm="lm",
+        )
+        dofs = np.asarray([0.25, -0.5], dtype=np.float64)
+        optimizer_state = stage2_script.build_stage2_target_optimizer_state(
+            types.SimpleNamespace(expected_dof_count=2),
+            dofs,
         )
 
         def target_residual(x):

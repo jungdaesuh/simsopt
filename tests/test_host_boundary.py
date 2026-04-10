@@ -5,6 +5,8 @@ import numpy as np
 from simsopt._core.jax_host_boundary import (
     explicit_cotangent_basis,
     host_array,
+    host_float,
+    host_int,
     host_scalar,
     host_tree,
     strict_scalar_grad,
@@ -60,3 +62,13 @@ def test_explicit_cotangent_basis_returns_runtime_unit_vector():
 
     assert isinstance(basis, jax.Array)
     np.testing.assert_allclose(host_array(basis), np.array([0.0, 0.0, 1.0, 0.0]))
+
+
+def test_host_python_scalar_helpers_materialize_native_python_scalars():
+    float_value = host_float(jnp.asarray(3.5, dtype=jnp.float32))
+    int_value = host_int(jnp.asarray(7, dtype=jnp.int32))
+
+    assert isinstance(float_value, float)
+    assert float_value == 3.5
+    assert isinstance(int_value, int)
+    assert int_value == 7

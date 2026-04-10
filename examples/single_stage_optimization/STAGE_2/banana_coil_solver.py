@@ -324,15 +324,13 @@ def parse_args():
     )
     parser.add_argument(
         "--optimizer-backend",
-        choices=["scipy", "hybrid", "ondevice"],
+        choices=["scipy", "ondevice"],
         default=os.environ.get("STAGE2_OPTIMIZER_BACKEND")
         or os.environ.get("OPTIMIZER_BACKEND"),
         help=(
             "Stage 2 optimizer backend. "
             "'scipy' is the trusted reference lane; "
-            "'ondevice' is the private JAX target optimizer lane. "
-            "'hybrid' is accepted for contract consistency but not currently "
-            "supported for the Stage 2 outer loop. Defaults to 'ondevice' on "
+            "'ondevice' is the JAX target optimizer lane. Defaults to 'ondevice' on "
             "the JAX backend and 'scipy' on the CPU/reference backend when no "
             "explicit override is provided."
         ),
@@ -1030,28 +1028,26 @@ def resolve_stage2_optimizer_contract(
 ):
     """Resolve the optimizer contract for the Stage 2 outer loop."""
     from simsopt.geo.optimizer_jax import (
-        ContinuousOptimizerContract,
-        resolve_least_squares_optimizer_method,
-        resolve_outer_loop_optimizer_contract,
+        resolve_reference_outer_loop_optimizer_contract,
+        resolve_target_outer_loop_optimizer_contract,
     )
 
     if least_squares_algorithm == "lm":
-        if field_backend != "jax" or optimizer_backend != "ondevice":
-            raise ValueError(
-                "Stage 2 least_squares_algorithm='lm' currently requires "
-                "backend='jax' and optimizer_backend='ondevice'."
-            )
-        return ContinuousOptimizerContract(
-            method=resolve_least_squares_optimizer_method(
-                optimizer_backend,
-                limited_memory=False,
-                least_squares_algorithm=least_squares_algorithm,
-            ),
-            use_scalar_objective=False,
-            use_least_squares_objective=True,
+        return resolve_target_outer_loop_optimizer_contract(
+            field_backend,
+            optimizer_backend,
+            component_label=_STAGE2_COMPONENT_LABEL,
+            least_squares_algorithm=least_squares_algorithm,
         )
 
-    return resolve_outer_loop_optimizer_contract(
+    if field_backend == "jax":
+        return resolve_target_outer_loop_optimizer_contract(
+            field_backend,
+            optimizer_backend,
+            component_label=_STAGE2_COMPONENT_LABEL,
+            least_squares_algorithm=least_squares_algorithm,
+        )
+    return resolve_reference_outer_loop_optimizer_contract(
         field_backend,
         optimizer_backend,
         component_label=_STAGE2_COMPONENT_LABEL,
@@ -1079,12 +1075,14 @@ def should_build_stage2_target_objective(
     least_squares_algorithm="quasi-newton",
 ):
     """Return whether the JAX Stage 2 target objective should drive optimization."""
+    from simsopt.geo.optimizer_jax import TargetOptimizerContract
+
     contract = resolve_stage2_optimizer_contract(
         field_backend,
         optimizer_backend,
         least_squares_algorithm=least_squares_algorithm,
     )
-    return contract.use_scalar_objective or contract.use_least_squares_objective
+    return isinstance(contract, TargetOptimizerContract)
 
 
 def resolve_stage2_target_lane_requirements(
@@ -1173,8 +1171,6 @@ def resolve_stage2_field_diagnostic_stride(args):
     requested_stride = int(args.field_diagnostic_stride)
     if requested_stride > 0:
         return requested_stride
-    if args.backend == "jax" and args.optimizer_backend == "scipy":
-        return 10
     return 1
 
 
@@ -1190,38 +1186,59 @@ def run_stage2_optimizer(
     scalar_fun=None,
     residual_fun=None,
 ):
-    """Run the Stage 2 outer optimization through the shared optimizer substrate."""
-    from simsopt.geo.optimizer_jax import jax_least_squares, jax_minimize
+    """Run the Stage 2 outer optimization through the lane-specific substrate."""
+    from simsopt.geo.optimizer_jax import (
+        ReferenceOptimizerContract,
+        TargetOptimizerContract,
+        reference_minimize,
+        target_least_squares,
+        target_minimize,
+    )
 
     use_explicit_value_and_grad = value_and_grad_fun is not None
-    if contract.use_least_squares_objective:
+    if isinstance(contract, TargetOptimizerContract) and contract.use_least_squares_objective:
         if residual_fun is None:
             raise RuntimeError(
                 "Stage 2 LM optimization requires an explicit residual-vector objective."
             )
-        return jax_least_squares(
+        return target_least_squares(
             residual_fun,
             dofs,
             method=contract.method,
             tol=gtol,
             maxiter=maxiter,
         )
-    if (
-        contract.use_scalar_objective
-        and scalar_fun is None
-        and not use_explicit_value_and_grad
-    ):
-        raise RuntimeError(
-            "Stage 2 target-lane optimization requires a JAX target objective."
+    if isinstance(contract, TargetOptimizerContract):
+        if scalar_fun is None and not use_explicit_value_and_grad:
+            raise RuntimeError(
+                "Stage 2 target-lane optimization requires a JAX target objective."
+            )
+        objective_fun = (
+            value_and_grad_fun if use_explicit_value_and_grad else scalar_fun
         )
-    if (not contract.use_scalar_objective) and not use_explicit_value_and_grad:
+        return target_minimize(
+            objective_fun,
+            dofs,
+            method=contract.method,
+            tol=gtol,
+            maxiter=maxiter,
+            options={
+                "maxcor": int(maxcor),
+                "ftol": float(ftol),
+            },
+            value_and_grad=use_explicit_value_and_grad,
+        )
+    if not isinstance(contract, ReferenceOptimizerContract):
+        raise RuntimeError(
+            f"Unsupported Stage 2 optimizer contract {type(contract)!r}."
+        )
+    if not use_explicit_value_and_grad:
         raise RuntimeError(
             "Stage 2 reference-lane optimization requires an explicit "
             "value-and-gradient objective."
         )
-    objective_fun = value_and_grad_fun if use_explicit_value_and_grad else scalar_fun
-    return jax_minimize(
-        objective_fun,
+    return reference_minimize(
+        value_and_grad_fun,
         dofs,
         method=contract.method,
         tol=gtol,
@@ -1230,7 +1247,7 @@ def run_stage2_optimizer(
             "maxcor": int(maxcor),
             "ftol": float(ftol),
         },
-        value_and_grad=use_explicit_value_and_grad,
+        value_and_grad=True,
     )
 
 
@@ -1957,7 +1974,12 @@ if __name__ == "__main__":
                 target_residual = resolve_stage2_target_least_squares_residual(
                     target_objective_bundle
                 )
-                if outer_contract.use_least_squares_objective:
+                from simsopt.geo.optimizer_jax import TargetOptimizerContract
+
+                if (
+                    isinstance(outer_contract, TargetOptimizerContract)
+                    and outer_contract.use_least_squares_objective
+                ):
                     assert target_residual is not None
                 else:
                     assert target_value_and_grad is not None
