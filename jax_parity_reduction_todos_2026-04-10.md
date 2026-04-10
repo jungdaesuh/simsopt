@@ -4,6 +4,16 @@
 **Scope:** CPU -> JAX CPU -> JAX GPU parity for reduction-heavy kernels and solver-adjacent objective paths
 **Status:** Planning document
 
+## Audit Update
+
+**Audit date:** 2026-04-10
+
+This file was rechecked against the current codebase by inspection.
+
+- Checked boxes reflect items that are clearly implemented in code or docs.
+- Unchecked boxes include open items and items that still look partial.
+- This audit did **not** rerun the parity suites, so exit-criteria items stay open.
+
 ## Context
 
 This repo already uses the right high-level parity architecture:
@@ -86,7 +96,7 @@ External primary-source context:
   - Current decision: keep the outer coil-chunk accumulation serial until parity data points there; the new many-coil / many-quadrature stress lane compares dense, quadrature-only chunking, and fully chunked accumulation and did not justify widening the hot-path reduction change further.
 - [x] Keep the final `jnp.einsum("c,cj->j", ...)` unchanged unless parity data shows it is a real error source
 - [x] Add a parity regression test that stresses many-coil / many-quadrature accumulation order
-- [x] Document the expected performance cost of pairwise reductions before merging
+- [ ] Document the expected performance cost of pairwise reductions before merging
 
 ### 2. Integral BdotN
 
@@ -181,7 +191,9 @@ External primary-source context:
 
 - [x] Complete missing `BiotSavartJAX` object-level methods needed for literal upstream test mirroring
 - [x] Finish composed derivative plumbing before adding reproducible-arithmetic experiments here
-- [x] Mirror upstream ToroidalFlux and related objective tests more literally once the API is complete
+- [ ] Mirror upstream ToroidalFlux and related objective tests more literally once the API is complete
+  - ToroidalFlux parity is substantially improved, but broader `surfaceobjectives`
+    family mirroring still looks incomplete by code inspection.
 - [x] Keep this family on tolerance-based parity for now
 
 ### 6. BoozerSurface and Optimizer
@@ -252,14 +264,11 @@ Solver drift is dominated by:
     and `boozer_residual_scalar(..., reduction_mode="strict_oracle")` now
     promote only the final scalar contraction to compensated summation for
     oracle investigations and stress tests.
-- [x] Tier 4: evaluate whether ExBLAS/ReproBLAS/OzBLAS-style exact reproducibility is worth the complexity
-  - Current decision: keep Tier 4 as a documented research fallback only. The
-    Tier 1–3 ladder now covers the demonstrated parity hot spots without paying
-    the throughput and implementation cost of exact reproducibility machinery.
-- [x] Gate Tier 4 behind demonstrated need, because throughput and implementation complexity will rise sharply
-  - Current decision: do not wire ExBLAS/ReproBLAS/OzBLAS-style arithmetic into
-    production kernels or `optimizer_jax.py` unless new parity evidence shows
-    the Tier 1–3 ladder is insufficient.
+- [ ] Tier 4: evaluate whether ExBLAS/ReproBLAS/OzBLAS-style exact reproducibility is worth the complexity
+  - Still deferred. No dedicated repo artifact or implementation path for this
+    evaluation was found in this audit.
+- [ ] Gate Tier 4 behind demonstrated need, because throughput and implementation complexity will rise sharply
+  - Still a planning decision, not an implemented enforcement mechanism.
 
 ## Test TODOs
 
@@ -286,16 +295,17 @@ Solver drift is dominated by:
 
 ## Exit Criteria
 
-- [x] Biot-Savart parity remains green after pairwise reduction changes
-  - Re-verified with `tests/field/test_biotsavart_jax.py -q -k 'accumulation_stress or reduction_order'`.
-- [x] `integral_BdotN` parity remains green after reduction changes
-  - Re-verified with `tests/objectives/test_integral_bdotn_jax.py -q`.
-- [x] Stage 2 parity remains green with no hidden fallback seams
-  - Re-verified with the focused `tests/integration/test_stage2_jax.py` objective-parity slice, the Stage 2 fallback-visibility slice, and the native-only wrapper seam test in `tests/objectives/test_fluxobjective_jax_parity.py`.
-- [x] Single-stage parity remains green under the documented solver-contract acceptance model
-  - Re-verified with the CPU/JAX exact / solved-state parity slice in `tests/integration/test_single_stage_jax_cpu_reference.py`.
-- [x] No new reduction-stability work is attempted in `optimizer_jax.py` unless a concrete failure points there
-  - Current decision remains unchanged: keep solver parity on solved-state metrics and diagnostics rather than optimizer arithmetic changes.
+- [ ] Biot-Savart parity remains green after pairwise reduction changes
+  - Not rerun in this audit.
+- [ ] `integral_BdotN` parity remains green after reduction changes
+  - Not rerun in this audit.
+- [ ] Stage 2 parity remains green with no hidden fallback seams
+  - Not rerun in this audit.
+- [ ] Single-stage parity remains green under the documented solver-contract acceptance model
+  - Not rerun in this audit.
+- [ ] No new reduction-stability work is attempted in `optimizer_jax.py` unless a concrete failure points there
+  - Current code inspection did not find such work, but this remains an ongoing
+    review gate rather than a one-time completed task.
 
 ## Notes
 
