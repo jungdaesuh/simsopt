@@ -137,6 +137,7 @@ from simsopt.geo.surfaceobjectives_jax import (  # noqa: E402
     NonQuasiSymmetricRatioJAX,
     _boozer_residual_J_of_x_inner,
     _qs_ratio_pure,
+    compute_standard_surface_objective_gradients,
 )
 from simsopt.geo.curve import Curve, RotatedCurve  # noqa: E402
 
@@ -250,7 +251,6 @@ _enable_fast_non_strict_jax_backend = partial(
     enable_non_strict_jax_backend,
     mode="jax_gpu_fast",
 )
-
 
 
 def _assert_hidden_spec_fallback_rejected(
@@ -509,12 +509,25 @@ def _jax_single_stage_wrapper_values(booz_jax, bs_jax):
     ]
 
 
+def _make_jax_standard_wrapper_triplet(booz_jax, bs_jax):
+    return (
+        BoozerResidualJAX(booz_jax, bs_jax),
+        IotasJAX(booz_jax),
+        NonQuasiSymmetricRatioJAX(booz_jax, bs_jax, sDIM=6),
+    )
+
+
 def _jax_single_stage_wrapper_gradients(booz_jax, bs_jax):
-    return [
-        np.array(BoozerResidualJAX(booz_jax, bs_jax).dJ()),
-        np.array(IotasJAX(booz_jax).dJ()),
-        np.array(NonQuasiSymmetricRatioJAX(booz_jax, bs_jax, sDIM=6).dJ()),
-    ]
+    boozer_residual, iotas, non_qs_ratio = _make_jax_standard_wrapper_triplet(
+        booz_jax,
+        bs_jax,
+    )
+    batched_gradients = compute_standard_surface_objective_gradients(
+        boozer_residual,
+        iotas,
+        non_qs_ratio,
+    )
+    return [np.array(gradient) for gradient in batched_gradients]
 
 
 def _build_real_fixture_scipy_m5_pair():
@@ -2292,6 +2305,29 @@ class TestAdjointSolveConsistency:
         logger.info(f"Adjoint residual: ||H^T adj - dJ_ds|| / ||dJ_ds|| = {rel:.2e}")
         assert rel < 1e-10, f"Adjoint solve residual too large: {rel:.2e}"
 
+    def test_device_native_batched_adjoint_solve_matches_host(self, boozer_setup):
+        """JAX transposed PLU solve should match host for matrix right-hand sides."""
+        (coils, surf_cpu, surf_jax, bs_cpu, bs_jax, booz_cpu, booz_jax, vol_cpu) = (
+            boozer_setup
+        )
+        from simsopt.objectives.utilities import forward_backward, forward_backward_jax
+
+        P, L, U = booz_jax.res["PLU"]
+        iota_rhs = _iota_unit_rhs((P, L, U))
+        rhs_matrix = np.stack(
+            (
+                iota_rhs,
+                2.0 * iota_rhs,
+                -0.5 * iota_rhs,
+            ),
+            axis=1,
+        )
+
+        adj_host = forward_backward(P, L, U, rhs_matrix)
+        adj_jax = np.asarray(forward_backward_jax(P, L, U, rhs_matrix))
+
+        np.testing.assert_allclose(adj_jax, adj_host, rtol=1e-12, atol=1e-12)
+
     def test_vjp_produces_finite_derivative(self, boozer_setup):
         """VJP hook produces a finite, non-zero Derivative from a non-trivial adjoint."""
         (coils, surf_cpu, surf_jax, bs_cpu, bs_jax, booz_cpu, booz_jax, vol_cpu) = (
@@ -3905,6 +3941,67 @@ class TestCompositeObjective:
 
         assert np.all(np.isfinite(gradient))
         assert calls["count"] > 0
+
+    def test_batched_standard_wrapper_gradients_match_separate_wrapper_computes(
+        self,
+        boozer_setup,
+        monkeypatch,
+    ):
+        """The standard wrapper helper should share one adjoint solve."""
+        import simsopt.geo.surfaceobjectives_jax as soj
+
+        (_, _, _, _, bs_jax, _, booz_jax, _) = boozer_setup
+
+        reference_gradients = [
+            np.asarray(BoozerResidualJAX(booz_jax, bs_jax).dJ(), dtype=float),
+            np.asarray(IotasJAX(booz_jax).dJ(), dtype=float),
+            np.asarray(
+                NonQuasiSymmetricRatioJAX(booz_jax, bs_jax, sDIM=6).dJ(),
+                dtype=float,
+            ),
+        ]
+
+        boozer_residual, iotas, non_qs_ratio = _make_jax_standard_wrapper_triplet(
+            booz_jax,
+            bs_jax,
+        )
+
+        original_solve = soj._solve_boozer_adjoint
+        recorded = {"calls": 0}
+
+        def counting_solve(booz_surf, rhs):
+            recorded["calls"] += 1
+            recorded["rhs_shape"] = tuple(np.shape(rhs))
+            return original_solve(booz_surf, rhs)
+
+        monkeypatch.setattr(soj, "_solve_boozer_adjoint", counting_solve)
+
+        returned_gradients = compute_standard_surface_objective_gradients(
+            boozer_residual,
+            iotas,
+            non_qs_ratio,
+        )
+        batched_gradients = [
+            np.asarray(gradient, dtype=float) for gradient in returned_gradients
+        ]
+
+        assert recorded["calls"] == 1
+        assert recorded["rhs_shape"] == (booz_jax.res["PLU"][1].shape[0],)
+        for batched_gradient, reference_gradient in zip(
+            batched_gradients,
+            reference_gradients,
+        ):
+            np.testing.assert_allclose(
+                batched_gradient,
+                reference_gradient,
+                rtol=5e-4,
+                atol=1e-6,
+            )
+        np.testing.assert_allclose(
+            np.asarray(boozer_residual.dJ()), batched_gradients[0]
+        )
+        np.testing.assert_allclose(np.asarray(iotas.dJ()), batched_gradients[1])
+        np.testing.assert_allclose(np.asarray(non_qs_ratio.dJ()), batched_gradients[2])
 
 
 # -----------------------------------------------------------------------
@@ -5612,9 +5709,7 @@ class TestTraceableObjective:
             unconstrained_bundle["objective"](perturbed_coil_dofs)
         )
         gated_value = float(gated_bundle["objective"](perturbed_coil_dofs))
-        gated_value_vg, gated_grad = gated_bundle["value_and_grad"](
-            perturbed_coil_dofs
-        )
+        gated_value_vg, gated_grad = gated_bundle["value_and_grad"](perturbed_coil_dofs)
 
         np.testing.assert_allclose(
             gated_baseline_value,

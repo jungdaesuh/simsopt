@@ -7,13 +7,13 @@ from .._core.optimizable import Optimizable
 from .._core.derivative import Derivative, derivative_dec
 
 __all__ = [
-    'MPIOptimizable',
-    'MPIObjective',
-    'QuadraticPenalty',
-    'Weight',
-    'forward_backward',
-    'forward_backward_jax',
-    'plu_solve_jax',
+    "MPIOptimizable",
+    "MPIObjective",
+    "QuadraticPenalty",
+    "Weight",
+    "forward_backward",
+    "forward_backward_jax",
+    "plu_solve_jax",
 ]
 
 
@@ -36,12 +36,12 @@ def forward_backward(P, L, U, rhs, iterative_refinement=False):
     """
     y = scipy.linalg.solve_triangular(U.T, rhs, lower=True)
     z = scipy.linalg.solve_triangular(L.T, y, lower=False)
-    adj = P@z
+    adj = P @ z
 
     if iterative_refinement:
-        yp = scipy.linalg.solve_triangular(U.T, rhs-(P@L@U).T@adj, lower=True)
+        yp = scipy.linalg.solve_triangular(U.T, rhs - (P @ L @ U).T @ adj, lower=True)
         zp = scipy.linalg.solve_triangular(L.T, yp, lower=False)
-        adj += P@zp
+        adj += P @ zp
 
     return adj
 
@@ -52,6 +52,7 @@ def forward_backward_jax(P, L, U, rhs, iterative_refinement=False):
 
     This preserves the existing PLU contract while keeping the adjoint
     linear solve on the active JAX device for JAX-native implicit paths.
+    ``rhs`` may be either a vector or a matrix of right-hand sides.
     """
     import jax
     import jax.numpy as jnp
@@ -61,14 +62,31 @@ def forward_backward_jax(P, L, U, rhs, iterative_refinement=False):
     U_jax = jnp.asarray(U)
     rhs_jax = jnp.asarray(rhs)
 
-    y = jax.scipy.linalg.solve_triangular(U_jax.T, rhs_jax, lower=True)
-    z = jax.scipy.linalg.solve_triangular(L_jax.T, y, lower=False)
+    y = jax.scipy.linalg.solve_triangular(U_jax, rhs_jax, trans="T", lower=False)
+    z = jax.scipy.linalg.solve_triangular(
+        L_jax,
+        y,
+        trans="T",
+        lower=True,
+        unit_diagonal=True,
+    )
     adj = P_jax @ z
 
     if iterative_refinement:
         residual = rhs_jax - (P_jax @ L_jax @ U_jax).T @ adj
-        yp = jax.scipy.linalg.solve_triangular(U_jax.T, residual, lower=True)
-        zp = jax.scipy.linalg.solve_triangular(L_jax.T, yp, lower=False)
+        yp = jax.scipy.linalg.solve_triangular(
+            U_jax,
+            residual,
+            trans="T",
+            lower=False,
+        )
+        zp = jax.scipy.linalg.solve_triangular(
+            L_jax,
+            yp,
+            trans="T",
+            lower=True,
+            unit_diagonal=True,
+        )
         adj = adj + P_jax @ zp
 
     return adj
@@ -129,7 +147,6 @@ def sum_across_comm(derivative, comm):
 
 
 class MPIOptimizable(Optimizable):
-
     def __init__(self, optimizables, attributes, comm):
         r"""
         Ensures that a list of Optimizables on separate ranks have a consistent set of attributes on all ranks.
@@ -148,6 +165,7 @@ class MPIOptimizable(Optimizable):
         """
 
         from simsopt._core.util import parallel_loop_bounds
+
         startidx, endidx = parallel_loop_bounds(comm, len(optimizables))
         self.local_optimizables = optimizables[startidx:endidx]
         self.global_optimizables = optimizables
@@ -159,7 +177,9 @@ class MPIOptimizable(Optimizable):
         for opt in optimizables:
             for attr in self.attributes:
                 if not hasattr(opt, attr):
-                    raise Exception(f'All Optimizables in the optimizable list must contain the attribute {attr}')
+                    raise Exception(
+                        f"All Optimizables in the optimizable list must contain the attribute {attr}"
+                    )
 
     def __getitem__(self, key):
         if self.need_to_communicate:
@@ -170,7 +190,11 @@ class MPIOptimizable(Optimizable):
         if self.need_to_communicate:
             for attr in self.attributes:
                 local_vals = [getattr(J, attr) for J in self.local_optimizables]
-                global_vals = local_vals if self.comm is None else [i for o in self.comm.allgather(local_vals) for i in o]
+                global_vals = (
+                    local_vals
+                    if self.comm is None
+                    else [i for o in self.comm.allgather(local_vals) for i in o]
+                )
                 for val, J in zip(global_vals, self.global_optimizables):
                     if J in self.local_optimizables:
                         continue
@@ -182,7 +206,6 @@ class MPIOptimizable(Optimizable):
 
 
 class MPIObjective(Optimizable):
-
     def __init__(self, objectives, comm, needs_splitting=False):
         r"""
         Compute the mean of a list of objectives in parallel using MPI.
@@ -199,32 +222,46 @@ class MPIObjective(Optimizable):
 
         if needs_splitting:
             from simsopt._core.util import parallel_loop_bounds
+
             startidx, endidx = parallel_loop_bounds(comm, len(objectives))
             objectives = objectives[startidx:endidx]
         Optimizable.__init__(self, x0=np.asarray([]), depends_on=objectives)
         self.objectives = objectives
         self.comm = comm
-        self.n = len(self.objectives) if comm is None else np.sum(self.comm.allgather(len(self.objectives)))
+        self.n = (
+            len(self.objectives)
+            if comm is None
+            else np.sum(self.comm.allgather(len(self.objectives)))
+        )
 
     def J(self):
         local_vals = [J.J() for J in self.objectives]
-        global_vals = local_vals if self.comm is None else [i for o in self.comm.allgather(local_vals) for i in o]
+        global_vals = (
+            local_vals
+            if self.comm is None
+            else [i for o in self.comm.allgather(local_vals) for i in o]
+        )
         res = np.sum(global_vals)
-        return res/self.n
+        return res / self.n
 
     @derivative_dec
     def dJ(self):
         if len(self.objectives) == 0:
-            raise NotImplementedError("`MPIObjective.dJ` currently requires that there is at least one objective per process.")
+            raise NotImplementedError(
+                "`MPIObjective.dJ` currently requires that there is at least one objective per process."
+            )
         local_derivs = sum([J.dJ(partials=True) for J in self.objectives])
-        all_derivs = local_derivs if self.comm is None else sum_across_comm(local_derivs, self.comm)
-        all_derivs *= 1./self.n
+        all_derivs = (
+            local_derivs
+            if self.comm is None
+            else sum_across_comm(local_derivs, self.comm)
+        )
+        all_derivs *= 1.0 / self.n
         return all_derivs
 
 
 class QuadraticPenalty(Optimizable):
-
-    def __init__(self, obj, cons=0., f="identity"):
+    def __init__(self, obj, cons=0.0, f="identity"):
         r"""
         A quadratic penalty function of the form :math:`0.5f(\text{obj}.J() - \text{cons})^2` for an underlying objective ``obj``
         and wrapping function ``f``. This can be used to implement a barrier penalty function for (in)equality
@@ -245,14 +282,14 @@ class QuadraticPenalty(Optimizable):
         val = self.obj.J()
         diff = _host_float_scalar(val) - _host_float_scalar(self.cons)
 
-        if self.f == 'max':
-            return 0.5*max(diff, 0.0)**2
-        elif self.f == 'min':
-            return 0.5*min(diff, 0.0)**2
-        elif self.f == 'identity':
-            return 0.5*diff**2
+        if self.f == "max":
+            return 0.5 * max(diff, 0.0) ** 2
+        elif self.f == "min":
+            return 0.5 * min(diff, 0.0) ** 2
+        elif self.f == "identity":
+            return 0.5 * diff**2
         else:
-            raise Exception('incorrect wrapping function f provided')
+            raise Exception("incorrect wrapping function f provided")
 
     @derivative_dec
     def dJ(self):
@@ -260,16 +297,16 @@ class QuadraticPenalty(Optimizable):
         dval = self.obj.dJ(partials=True)
         diff = _host_float_scalar(val) - _host_float_scalar(self.cons)
 
-        if self.f == 'max':
-            return np.maximum(diff, 0)*dval
-        elif self.f == 'min':
-            return np.minimum(diff, 0)*dval
-        elif self.f == 'identity':
-            return diff*dval
+        if self.f == "max":
+            return np.maximum(diff, 0) * dval
+        elif self.f == "min":
+            return np.minimum(diff, 0) * dval
+        elif self.f == "identity":
+            return diff * dval
         else:
-            raise Exception('incorrect wrapping function f provided')
+            raise Exception("incorrect wrapping function f provided")
 
-    return_fn_map = {'J': J, 'dJ': dJ}
+    return_fn_map = {"J": J, "dJ": dJ}
 
 
 class Weight(object):
@@ -286,6 +323,6 @@ class Weight(object):
     def __imul__(self, alpha):
         self.value *= alpha
         return self
-    
+
     def __str__(self):
         return f"{self.value}"

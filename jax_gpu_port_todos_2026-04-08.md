@@ -55,17 +55,17 @@
 
 ### Quick wins
 
-- [ ] **23.** **[PERF 2-3%]** `jax_core/biotsavart.py:387` — add `precision=lax.Precision.HIGHEST` to `jnp.einsum("c,cj->j", ...)`. Matches private optimizer convention at `_common.py:23-24`.
-- [ ] **24.** **[PERF 5-10% VRAM]** Add `donate_argnums` to accumulator-pytree arguments in `_coil_chunk_reduce`, `_quadrature_block_integral`, `_point_chunk_reduce` fori_loops (`biotsavart.py:240, 297, 329`). Recovers intermediate chunk buffers across iterations.
-- [ ] **25.** **[PERF variable]** `jax_core/_math_utils.py:107-121` — replace `explicit_rsqrt` custom JVP with `jax.lax.rsqrt` + default JVP. GPU has native `RSQRT.APPROX.FTZ.F64` exposed directly. **Verify CPU-JAX bitwise parity first** — if the custom JVP exists only for explicitness, swapping is safe. Biot-Savart is rsqrt-dominated.
-- [ ] **26.** **[PERF 10-20%]** `surfaceobjectives_jax.py:268` — `_solve_boozer_adjoint` unconditionally runs iterative refinement. Gate on estimated condition number for well-conditioned LS Hessians. **(PARTIAL — `iterative_refinement=True` always passed; no condition-number gating)**
+- [x] **23.** **[PERF 2-3%]** ~~`jax_core/biotsavart.py:387` — add `precision=lax.Precision.HIGHEST` to `jnp.einsum("c,cj->j", ...)`. Matches private optimizer convention at `_common.py:23-24`.~~ **DONE** — the final Biot-Savart current contraction now uses `jnp.einsum(..., precision=lax.Precision.HIGHEST)` in the hot path.
+- [ ] **24.** **[PERF 5-10% VRAM?]** Re-scope Biot-Savart buffer donation to a real `jax.jit` boundary instead of the internal `fori_loop` carries (`biotsavart.py`). JAX `donate_argnums` applies at `jit` / `pjit` / `pmap` call boundaries, not directly to `_coil_chunk_reduce`, `_quadrature_block_integral`, or `_point_chunk_reduce`. Find an outer compiled entry point with same-shape input/output pytrees, add donation there, and keep the item only if peak-memory profiling shows a real win. **(PARTIAL — added `benchmarks/biotsavart_donation_probe.py` plus `tests/test_biotsavart_donation_probe.py` to measure an outer-`jax.jit(donate_argnums=(0,))` wrapper on disposable `points` buffers while keeping the public API contract unchanged; local CPU probe matched baseline numerically, but CUDA VRAM benefit is still unverified.)**
+- [ ] **25.** **[EXPERIMENT / PERF variable]** `jax_core/_math_utils.py:107-121` — evaluate replacing `explicit_rsqrt` custom JVP with `jax.lax.rsqrt` + default JVP. `lax.rsqrt` is the direct primitive, but this should remain blocked on the explicit parity gate: require CPU/GPU objective and gradient parity across the Biot-Savart operating range before any swap. If parity fails, delete the item instead of weakening the contract.
+- [ ] **26.** **[EXPERIMENT / PERF 10-20%?]** `surfaceobjectives_jax.py:268` — investigate whether LS-only Boozer adjoint / warm-start solves can skip iterative refinement behind a measured heuristic. Do **not** gate blindly on dense `cond(...)` unless profiling shows the estimator is cheaper than the refinement it suppresses. Keep iterative refinement as the default fallback for exact mode and for any inconclusive LS case. **Current state:** project docs/tests still justify `iterative_refinement=True` as the stable default for dense Boozer PLU solves.
 
 ### Medium effort
 
-- [ ] **27.** **[PERF 40-60%]** `boozersurface_jax.py:753-755` — `_build_ls_group_vjp_callback` re-evaluates Biot-Savart for each coil group. Precompute `B_shared = grouped_biot_savart_B_from_spec(...)` once and reuse across group runners.
+- [ ] **27.** **[EXPERIMENT / PERF 40-60%?]** Re-scope LS grouped-VJP optimization in `boozersurface_jax.py`. The naive proposal to precompute `B_shared = grouped_biot_savart_B_from_spec(...)` once and reuse it across group runners is **not valid**: the grouped callback is differentiated through the surface-point geometry, so freezing `B(points)` would drop `dB/dX` terms, and routing through the full grouped-VJP helper also breaks the streaming-memory contract used by the grouped-adjoint probes. Any future optimization must preserve per-group streaming behavior and point-derivative correctness. **(PARTIAL — review confirmed the original item was wrong as written; added a regression guard in `tests/geo/test_boozersurface_jax.py` that `vjp_groups` must not route through `_boozer_ls_coil_vjp`.)**
 - [ ] **28.** **[PERF 15-25%]** `boozersurface_jax.py:413-423` — `_surface_geometry_from_dofs` computes gamma/xphi/xtheta separately. Fuse into a single JAX primitive for memory locality. Called thousands of times per outer solve.
 - [ ] **29.** **[PERF 40%]** `optimizer_jax.py:1360-1363, 1375-1377` — `_materialize_dense_hessian` does full-column HVPs. For LS Hessians (J^T J, SPD), compute only the upper triangle and mirror.
-- [ ] **30.** **[PERF 25-40%]** `surfaceobjectives_jax.py:663-675` — BoozerResidualJAX/IotasJAX/NonQuasiSymmetricRatioJAX all solve `(PLU)ᵀ adj_i = rhs_i` with the same PLU. Batch via `jax.vmap(solve_triangular)`. Check JAX 0.9.3+ for native batched triangular solve.
+- [x] **30.** **[PERF 25-40%]** ~~`surfaceobjectives_jax.py:663-675` — BoozerResidualJAX/IotasJAX/NonQuasiSymmetricRatioJAX all solve `(PLU)ᵀ adj_i = rhs_i` with the same PLU. Batch via `jax.vmap(solve_triangular)`. Check JAX 0.9.3+ for native batched triangular solve.~~ **DONE** — added `compute_standard_surface_objective_gradients(...)` in `surfaceobjectives_jax.py`, which batches the standard LS wrapper trio through one shared `jax.vmap(_solve_boozer_adjoint)` pass while preserving the public `dJ()` contract; covered by matrix-RHS solve parity and reduced-real wrapper-gradient integration tests.
 - [ ] **31.** **[PERF]** `_lbfgs.py:28-34` — replace `_shift_history` slice+concatenate (~200k element copies/step at `maxcor=200, d=1000`) with a ring-buffer + head-pointer. Requires rewriting two-loop recursion indexing.
 - [ ] **32.** **[PERF small]** `_line_search.py:283` — dead re-evaluation path: BFGS/L-BFGS always pass `state.f_k`, but line search re-evaluates `restricted_func_and_grad(zero)` when `old_fval=None`. Remove.
 - [ ] **33.** **[PERF]** Line-search bracketing and zoom don't share intermediate evals. Cache bracketing-phase `(α, φ, φ')` samples for zoom reuse. Saves 10-30 evals/iteration in worst cases.
@@ -127,14 +127,14 @@
 
 **Last audit:** 2026-04-10
 
-**Total:** 60 items — **27 done, 8 partial, 25 open**
+**Total:** 60 items — **29 done, 10 partial, 21 open**
 
 | Tier | Items | Done | Partial | Open |
 |------|-------|------|---------|------|
 | 0 — Ship blockers | 3 | **3** | 0 | 0 |
 | 1 — Correctness/defensive | 8 | **8** (4-11) | 0 | 0 |
 | 2 — Transfer-guard | 11 | **11** (12-22) | 0 | 0 |
-| 3 — Performance | 15 | **1** (36) | **3** (26,34,37) | **11** (23-25,27-33,35) |
+| 3 — Performance | 15 | **3** (23,30,36) | **5** (24,26,27,34,37) | **7** (25,28,29,31-33,35) |
 | 4 — Test coverage | 12 | **2** (43,47) | **4** (40,42,45,48) | **6** (38,39,41,44,46,49) |
 | 5 — Docs/cleanup | 11 | **2** (50,51) | **1** (59) | **8** (52-58,60) |
 
