@@ -111,6 +111,15 @@ def _emit_newton_progress(progress_callback):
     progress_callback(2, 0.05, 1.0e-4)
 
 
+def _stage_payload(observed, label):
+    return next(payload for current_label, payload in observed if current_label == label)
+
+
+def _assert_solver_completion_payload(payload):
+    assert payload["objective"] == pytest.approx(0.0)
+    assert payload["grad_inf"] == pytest.approx(0.0)
+
+
 def _patch_matrix_free_exact_linear_solver(monkeypatch, *, A, expected_device=None):
     dense_calls = []
 
@@ -2364,15 +2373,19 @@ class TestBoozerSurfaceJAXClass:
         progress_events = [
             payload for label, payload in observed if label == "boozer_newton_progress"
         ]
-        before_newton_payload = next(
-            payload for label, payload in observed if label == "before_boozer_newton"
-        )
+        after_lbfgs_payload = _stage_payload(observed, "after_boozer_lbfgs")
+        before_newton_payload = _stage_payload(observed, "before_boozer_newton")
+        after_newton_payload = _stage_payload(observed, "after_boozer_newton")
         assert res is not None
         assert res["success"] is True
+        assert "after_boozer_lbfgs" in labels
         assert "before_boozer_newton" in labels
         assert "after_boozer_newton" in labels
+        _assert_solver_completion_payload(after_lbfgs_payload)
         assert before_newton_payload["method"] == "newton-polish"
         assert before_newton_payload["ls_method"] == "bfgs"
+        _assert_solver_completion_payload(after_newton_payload)
+        assert np.isfinite(after_newton_payload["residual_inf"])
         assert [int(payload["iteration"]) for payload in progress_events] == [1, 2]
         assert all("grad_norm" in payload for payload in progress_events)
 
@@ -2431,16 +2444,20 @@ class TestBoozerSurfaceJAXClass:
         progress_events = [
             payload for label, payload in observed if label == "boozer_newton_progress"
         ]
-        before_newton_payload = next(
-            payload for label, payload in observed if label == "before_boozer_newton"
-        )
+        after_lbfgs_payload = _stage_payload(observed, "after_boozer_lbfgs")
+        before_newton_payload = _stage_payload(observed, "before_boozer_newton")
+        after_newton_payload = _stage_payload(observed, "after_boozer_newton")
         assert res is not None
         assert res["success"] is True
         assert captured["progress_callback"] is None
+        assert "after_boozer_lbfgs" in labels
         assert "before_boozer_newton" in labels
         assert "after_boozer_newton" in labels
+        _assert_solver_completion_payload(after_lbfgs_payload)
         assert before_newton_payload["method"] == "newton-polish"
         assert before_newton_payload["ls_method"] == "bfgs-ondevice"
+        _assert_solver_completion_payload(after_newton_payload)
+        assert np.isfinite(after_newton_payload["residual_inf"])
         assert progress_events == []
 
     def test_run_code_passes_newton_stab(self, monkeypatch):

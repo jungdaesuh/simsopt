@@ -209,10 +209,12 @@ Solver drift is dominated by:
 
 **TODOs**
 
-- [ ] Keep solver parity defined by end-state quality, not identical iterates
-- [ ] Add explicit mirrored tests for residual norm, convergence success, final objective, and final physics quantities
-- [ ] Do not attempt ExBLAS/ReproBLAS-style reproducibility inside `optimizer_jax.py` as a first-line fix
-- [ ] Add solver logs or diagnostics to explain accepted drift envelopes when parity tests fail
+- [x] Keep solver parity defined by end-state quality, not identical iterates
+- [x] Add explicit mirrored tests for residual norm, convergence success, final objective, and final physics quantities
+- [x] Do not attempt ExBLAS/ReproBLAS-style reproducibility inside `optimizer_jax.py` as a first-line fix
+  - Current decision: keep `optimizer_jax.py` on the existing solver-contract model. The new mirrored parity checks compare solved-state metrics and accepted drift envelopes rather than attempting iterate reproducibility or ExBLAS/ReproBLAS-style arithmetic changes in the optimizer hot path.
+- [x] Add solver logs or diagnostics to explain accepted drift envelopes when parity tests fail
+  - Current implementation: `BoozerSurfaceJAX` stage-callback payloads now include solver objective / gradient / residual diagnostics, and the mirrored CPU/JAX and CPU/GPU parity tests emit the measured end-state metrics together with the accepted per-metric drift envelopes on failure.
 
 ### 7. SurfaceRZFourier
 

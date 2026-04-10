@@ -165,6 +165,34 @@ _PUBLIC_COIL_VJP_STRICT_PATTERN = (
 # Solved-state objective parity can land in the ~1e-24 range, where tiny
 # evaluation-order differences need a small absolute floor to stay meaningful.
 _TRACEABLE_OBJECTIVE_ABS_TOL = 1e-28
+_REAL_FIXTURE_SOLVER_CPU_JAX_TOLS = {
+    "objective": (1e-12, 1e-18),
+    "residual_inf": (1e-12, 1e-12),
+    "iota": (0.0, 1e-12),
+    "G": (0.0, 1e-12),
+    "label_value": (1e-12, 1e-12),
+    "label_error": (1e-12, 1e-12),
+    "axis_z_abs": (0.0, 1e-12),
+}
+_REAL_FIXTURE_SOLVER_CPU_GPU_TOLS = {
+    "objective": (1e-8, 1e-16),
+    "residual_inf": (1e-8, 1e-10),
+    "iota": (0.0, 1e-10),
+    "G": (0.0, 1e-10),
+    "label_value": (1e-10, 1e-10),
+    "label_error": (1e-10, 1e-10),
+    "axis_z_abs": (0.0, 1e-10),
+}
+_EXACT_SOLVER_END_STATE_TOLS = {
+    "objective": (1e-10, 1e-24),
+    "residual_inf": (1e-10, 1e-12),
+    "iota": (0.0, 1e-12),
+    "G": (0.0, 1e-12),
+    "label_value": (1e-12, 1e-12),
+    "label_error": (1e-12, 1e-12),
+    "axis_z_abs": (0.0, 1e-12),
+}
+_EXACT_SOLVER_RESIDUAL_INF_MAX = 1e-12
 
 
 # -----------------------------------------------------------------------
@@ -499,6 +527,176 @@ def _build_real_fixture_scipy_m5_pair():
         optimizer_backend="scipy",
     )
     return cpu_fixture, jax_fixture
+
+
+def _host_metric_array(value):
+    if value is None:
+        return None
+    if isinstance(value, jax.Array):
+        value = jax.device_get(jax.block_until_ready(value))
+    return np.asarray(value, dtype=float)
+
+
+def _host_metric_scalar(value):
+    return float(np.asarray(_host_metric_array(value), dtype=float))
+
+
+def _derived_solver_objective(result, residual):
+    solve_type = str(result["type"])
+    if residual is None:
+        return _host_metric_scalar(result["fun"])
+    if solve_type == "ls":
+        return float(0.5 * np.sum(np.square(residual)))
+    if solve_type == "exact":
+        return float(0.5 * np.mean(np.square(residual)))
+    return _host_metric_scalar(result["fun"])
+
+
+def _collect_boozer_solver_end_state_metrics(booz):
+    result = booz.res
+    assert result is not None, "Boozer solver result missing"
+    residual = _host_metric_array(result.get("residual"))
+    residual_inf = (
+        np.inf if residual is None else float(np.linalg.norm(residual, ord=np.inf))
+    )
+    label_value = float(booz.label.J())
+    surface_gamma = np.asarray(booz.surface.gamma(), dtype=float)
+    G_value = result.get("G")
+    return {
+        "success": bool(result.get("success", False)),
+        "objective": _derived_solver_objective(result, residual),
+        "residual_inf": residual_inf,
+        "iota": float(result["iota"]),
+        "G": None if G_value is None else _host_metric_scalar(G_value),
+        "label_value": label_value,
+        "label_error": abs(label_value - float(booz.targetlabel)),
+        "axis_z_abs": abs(float(surface_gamma[0, 0, 2])),
+        "iterations": int(result["iter"]),
+        "solve_type": str(result["type"]),
+    }
+
+
+def _format_boozer_solver_end_state_diagnostics(
+    reference_label,
+    reference_metrics,
+    candidate_label,
+    candidate_metrics,
+    tolerances,
+):
+    metric_lines = []
+    for metric_name in tolerances:
+        reference_value = reference_metrics[metric_name]
+        candidate_value = candidate_metrics[metric_name]
+        if reference_value is None or candidate_value is None:
+            diff_text = "n/a"
+        else:
+            diff_text = f"|Δ|={abs(candidate_value - reference_value):.3e}"
+        metric_lines.append(
+            f"{metric_name}: {reference_label}={reference_value!r} "
+            f"{candidate_label}={candidate_value!r} {diff_text}"
+        )
+    envelope_lines = [
+        f"{metric}: rtol={rtol:.1e}, atol={atol:.1e}"
+        for metric, (rtol, atol) in tolerances.items()
+    ]
+    return (
+        f"{reference_label}: success={reference_metrics['success']} "
+        f"iter={reference_metrics['iterations']} type={reference_metrics['solve_type']}\n"
+        f"{candidate_label}: success={candidate_metrics['success']} "
+        f"iter={candidate_metrics['iterations']} type={candidate_metrics['solve_type']}\n"
+        + "\n".join(metric_lines)
+        + "\nAccepted drift envelopes: "
+        + "; ".join(envelope_lines)
+    )
+
+
+def _assert_boozer_solver_end_state_parity(
+    reference_label,
+    reference_metrics,
+    candidate_label,
+    candidate_metrics,
+    *,
+    tolerances,
+    max_reference_residual_inf=None,
+    max_candidate_residual_inf=None,
+):
+    diagnostics = _format_boozer_solver_end_state_diagnostics(
+        reference_label,
+        reference_metrics,
+        candidate_label,
+        candidate_metrics,
+        tolerances,
+    )
+    logger.info("Boozer solver end-state diagnostics:\n%s", diagnostics)
+
+    mismatch_reasons = []
+    if not reference_metrics["success"]:
+        mismatch_reasons.append(f"{reference_label} solve did not converge")
+    if not candidate_metrics["success"]:
+        mismatch_reasons.append(f"{candidate_label} solve did not converge")
+
+    for metric_name, (rtol, atol) in tolerances.items():
+        reference_value = reference_metrics[metric_name]
+        candidate_value = candidate_metrics[metric_name]
+        if reference_value is None or candidate_value is None:
+            if reference_value != candidate_value:
+                mismatch_reasons.append(
+                    f"{metric_name}: {reference_label}={reference_value!r} "
+                    f"{candidate_label}={candidate_value!r}"
+                )
+            continue
+        if not np.isclose(candidate_value, reference_value, rtol=rtol, atol=atol):
+            mismatch_reasons.append(
+                f"{metric_name}: {reference_label}={reference_value:.15e} "
+                f"{candidate_label}={candidate_value:.15e} "
+                f"(rtol={rtol:.1e}, atol={atol:.1e})"
+            )
+
+    if (
+        max_reference_residual_inf is not None
+        and reference_metrics["residual_inf"] > max_reference_residual_inf
+    ):
+        mismatch_reasons.append(
+            f"{reference_label} residual_inf={reference_metrics['residual_inf']:.3e} "
+            f"exceeds {max_reference_residual_inf:.1e}"
+        )
+    if (
+        max_candidate_residual_inf is not None
+        and candidate_metrics["residual_inf"] > max_candidate_residual_inf
+    ):
+        mismatch_reasons.append(
+            f"{candidate_label} residual_inf={candidate_metrics['residual_inf']:.3e} "
+            f"exceeds {max_candidate_residual_inf:.1e}"
+        )
+
+    if mismatch_reasons:
+        pytest.fail(
+            "Boozer solver end-state parity failed: "
+            + "; ".join(mismatch_reasons)
+            + "\n"
+            + diagnostics
+        )
+
+
+def _assert_boozer_surfaces_end_state_parity(
+    reference_label,
+    reference_boozer,
+    candidate_label,
+    candidate_boozer,
+    *,
+    tolerances,
+    max_reference_residual_inf=None,
+    max_candidate_residual_inf=None,
+):
+    _assert_boozer_solver_end_state_parity(
+        reference_label,
+        _collect_boozer_solver_end_state_metrics(reference_boozer),
+        candidate_label,
+        _collect_boozer_solver_end_state_metrics(candidate_boozer),
+        tolerances=tolerances,
+        max_reference_residual_inf=max_reference_residual_inf,
+        max_candidate_residual_inf=max_candidate_residual_inf,
+    )
 
 
 def _assert_streaming_group_vjp_matches_full(
@@ -4054,6 +4252,18 @@ class TestRunCodeLSParity:
 class TestRealFixtureScipyM5Parity:
     """Reduced real single-stage fixture covers the public scipy-backed M5 lane."""
 
+    def test_real_fixture_scipy_solver_end_state_contracts_match(self):
+        """CPU and JAX scipy lanes should match on solved-state quality, not iterates."""
+        cpu_fixture, jax_fixture = _build_real_fixture_scipy_m5_pair()
+
+        _assert_boozer_surfaces_end_state_parity(
+            "CPU",
+            cpu_fixture["boozer_surface"],
+            "JAX CPU",
+            jax_fixture["boozer_surface"],
+            tolerances=_REAL_FIXTURE_SOLVER_CPU_JAX_TOLS,
+        )
+
     def test_real_fixture_scipy_parity_and_wrapper_gradients(self):
         """CPU and JAX reduced-real scipy fixtures agree, and JAX wrappers stay healthy."""
         cpu_fixture, jax_fixture = _build_real_fixture_scipy_m5_pair()
@@ -4122,6 +4332,50 @@ class TestRealFixtureScipyM5Parity:
 
 class TestRealFixtureGpuM5Parity:
     """Reduced real single-stage fixture covers the public GPU-backed M5 lane."""
+
+    @pytest.mark.slow
+    def test_real_fixture_gpu_solver_end_state_contracts_match_cpu_reference(
+        self,
+        monkeypatch,
+        request,
+    ):
+        gpu = parity_device("gpu")
+        _enable_strict_jax_backend(monkeypatch, request)
+
+        cpu_fixture = build_real_single_stage_init_fixture(
+            backend="cpu",
+            optimizer_backend="scipy",
+        )
+        booz_cpu = cpu_fixture["boozer_surface"]
+        cpu_result = booz_cpu.res
+        assert cpu_result is not None and cpu_result.get("success", False)
+
+        gpu_fixture = build_real_single_stage_init_fixture(
+            backend="jax",
+            optimizer_backend="scipy",
+            boozer_surface_dofs_override=np.asarray(
+                booz_cpu.surface.get_dofs(),
+                dtype=float,
+            ),
+            boozer_iota_override=float(cpu_result["iota"]),
+            boozer_G_override=float(cpu_result["G"]),
+        )
+        gpu_result = gpu_fixture["boozer_surface"].res
+        assert gpu_result is not None and gpu_result.get("success", False)
+        assert_arrays_on_device(
+            gpu,
+            gpu_result["jacobian"],
+            gpu_result["hessian"],
+            *gpu_result["PLU"],
+        )
+
+        _assert_boozer_surfaces_end_state_parity(
+            "CPU",
+            booz_cpu,
+            "JAX GPU",
+            gpu_fixture["boozer_surface"],
+            tolerances=_REAL_FIXTURE_SOLVER_CPU_GPU_TOLS,
+        )
 
     @pytest.mark.slow
     def test_real_fixture_gpu_wrapper_values_and_gradients_match_cpu_reference(
@@ -4846,33 +5100,15 @@ class TestExactSolveCPUJAXParity:
 
     def test_exact_solve_parity(self):
         exact_pair = _solve_exact_cpu_jax_parity_pair()
-        res_cpu = exact_pair.res_cpu
-        res_jax = exact_pair.res_jax
-        exact_residual_tol = 1e-12
-        exact_solution_abs_tol = 1e-12
-
-        iota_diff = abs(res_cpu["iota"] - res_jax["iota"])
-        G_diff = abs(res_cpu["G"] - res_jax["G"])
-        resid_cpu = np.linalg.norm(res_cpu["residual"], ord=np.inf)
-        resid_jax = np.linalg.norm(res_jax["residual"], ord=np.inf)
-
-        logger.info(
-            f"Exact parity:\n"
-            f"  CPU: iota={res_cpu['iota']:.10e} G={res_cpu['G']:.10e} "
-            f"||r||_inf={resid_cpu:.3e}\n"
-            f"  JAX: iota={res_jax['iota']:.10e} G={res_jax['G']:.10e} "
-            f"||r||_inf={resid_jax:.3e}\n"
-            f"  |Δiota|={iota_diff:.3e} |ΔG|={G_diff:.3e}"
+        _assert_boozer_surfaces_end_state_parity(
+            "CPU",
+            exact_pair.booz_cpu_exact,
+            "JAX CPU",
+            exact_pair.booz_jax_exact,
+            tolerances=_EXACT_SOLVER_END_STATE_TOLS,
+            max_reference_residual_inf=_EXACT_SOLVER_RESIDUAL_INF_MAX,
+            max_candidate_residual_inf=_EXACT_SOLVER_RESIDUAL_INF_MAX,
         )
-
-        assert resid_cpu < exact_residual_tol, (
-            f"CPU residual too large: {resid_cpu:.3e}"
-        )
-        assert resid_jax < exact_residual_tol, (
-            f"JAX residual too large: {resid_jax:.3e}"
-        )
-        assert iota_diff < exact_solution_abs_tol, f"Iota disagreement: {iota_diff:.3e}"
-        assert G_diff < exact_solution_abs_tol, f"G disagreement: {G_diff:.3e}"
 
     def test_value_wrappers_match_on_shared_exact_state(self):
         exact_pair = _solve_exact_cpu_jax_parity_pair()

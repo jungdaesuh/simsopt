@@ -1458,6 +1458,25 @@ class BoozerSurfaceJAX(Optimizable):
         if callback is not None:
             callback(label, **extra)
 
+    def _solver_diagnostics_payload(
+        self,
+        result,
+        *,
+        gradient_key: str,
+        residual_key: str | None = None,
+    ) -> dict[str, float]:
+        payload = {
+            "objective": float(_host_scalar(result["fun"])),
+        }
+        gradient = result.get(gradient_key)
+        if gradient is not None:
+            payload["grad_inf"] = float(_host_inf_norm(gradient))
+        if residual_key is not None:
+            residual = result.get(residual_key)
+            if residual is not None:
+                payload["residual_inf"] = float(_host_inf_norm(residual))
+        return payload
+
     def _make_solver_progress_callback(self, method: str):
         stage_callback = self.options.get("stage_callback")
         if stage_callback is None:
@@ -2727,6 +2746,10 @@ class BoozerSurfaceJAX(Optimizable):
             solve_success=("true" if bool(ls_res["success"]) else "false"),
             iterations=float(ls_res["iter"]),
             method=str(ls_res["optimizer_method"]),
+            **self._solver_diagnostics_payload(
+                ls_res,
+                gradient_key="gradient",
+            ),
         )
         iota_out, G_out = ls_res["iota"], ls_res["G"]
 
@@ -2752,6 +2775,11 @@ class BoozerSurfaceJAX(Optimizable):
             "after_boozer_newton",
             solve_success=("true" if bool(res["success"]) else "false"),
             iterations=float(res["iter"]),
+            **self._solver_diagnostics_payload(
+                res,
+                gradient_key="jacobian",
+                residual_key="residual",
+            ),
         )
         return res
 
