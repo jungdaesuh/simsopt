@@ -17,8 +17,12 @@ from workflow_runner_common import (  # noqa: E402
     ensure_stage2_artifact,
     load_stage2_artifact_results,
     resolve_stage2_artifact_path,
+    resolved_path,
+    resolved_optional_path,
+    timeout_or_none,
 )
 from banana_opt.artifact_contracts import (  # noqa: E402
+    basin_metadata_from_config,
     upgrade_legacy_stage2_artifact_results,
     validate_stage2_artifact_metadata,
 )
@@ -27,53 +31,31 @@ DEFAULT_OUTPUT_ROOT = SCRIPT_DIR / "outputs_stage2_alm"
 STAGE2_CC_THRESHOLD_FLOOR = 0.05
 STAGE2_CURVATURE_THRESHOLD_FLOOR = 40.0
 DEFAULT_SUMMARY_JSON = "stage2_alm_summary.json"
+_BASE_STAGE2_PROFILE = {
+    "major_radius": 0.915,
+    "toroidal_flux": 0.24,
+    "length_weight": 0.0005,
+    "cc_weight": 100.0,
+    "cc_threshold": 0.05,
+    "curvature_weight": 0.0001,
+    "curvature_threshold": 40.0,
+    "banana_surf_radius": 0.22,
+    "order": 2,
+    "banana_init_current_A": 1.0e4,
+    "banana_current_max_A": 1.6e4,
+    "alm_max_outer_iters": 10,
+    "alm_penalty_init": 1.0,
+    "alm_penalty_scale": 10.0,
+    "basin_hops": 0,
+    "basin_stepsize": 0.01,
+    "basin_temperature": 1.0,
+    "basin_niter_success": 0,
+    "basin_seed": None,
+    "init_only": False,
+}
 DEFAULT_STAGE2_PROFILES = {
-    "standard_80ka": {
-        "major_radius": 0.915,
-        "toroidal_flux": 0.24,
-        "length_weight": 0.0005,
-        "cc_weight": 100.0,
-        "cc_threshold": 0.05,
-        "curvature_weight": 0.0001,
-        "curvature_threshold": 40.0,
-        "banana_surf_radius": 0.22,
-        "tf_current_A": 8.0e4,
-        "order": 2,
-        "banana_init_current_A": 1.0e4,
-        "banana_current_max_A": 1.6e4,
-        "alm_max_outer_iters": 10,
-        "alm_penalty_init": 1.0,
-        "alm_penalty_scale": 10.0,
-        "basin_hops": 0,
-        "basin_stepsize": 0.01,
-        "basin_temperature": 1.0,
-        "basin_niter_success": 0,
-        "basin_seed": None,
-        "init_only": False,
-    },
-    "standard_100ka": {
-        "major_radius": 0.915,
-        "toroidal_flux": 0.24,
-        "length_weight": 0.0005,
-        "cc_weight": 100.0,
-        "cc_threshold": 0.05,
-        "curvature_weight": 0.0001,
-        "curvature_threshold": 40.0,
-        "banana_surf_radius": 0.22,
-        "tf_current_A": 1.0e5,
-        "order": 2,
-        "banana_init_current_A": 1.0e4,
-        "banana_current_max_A": 1.6e4,
-        "alm_max_outer_iters": 10,
-        "alm_penalty_init": 1.0,
-        "alm_penalty_scale": 10.0,
-        "basin_hops": 0,
-        "basin_stepsize": 0.01,
-        "basin_temperature": 1.0,
-        "basin_niter_success": 0,
-        "basin_seed": None,
-        "init_only": False,
-    },
+    "standard_80ka": {**_BASE_STAGE2_PROFILE, "tf_current_A": 8.0e4},
+    "standard_100ka": {**_BASE_STAGE2_PROFILE, "tf_current_A": 1.0e5},
 }
 STAGE2_SPEC_KEYS = (
     "major_radius",
@@ -98,16 +80,6 @@ STAGE2_SPEC_KEYS = (
     "basin_seed",
     "init_only",
 )
-
-
-def _resolved_path(raw_path: str | Path) -> Path:
-    return Path(raw_path).expanduser().resolve()
-
-
-def _resolved_optional_path(raw_path: str | Path | None) -> Path | None:
-    if raw_path is None:
-        return None
-    return _resolved_path(raw_path)
 
 
 def _jsonable_stage2_config(config: Stage2ArtifactConfig) -> dict:
@@ -179,10 +151,6 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def _timeout_or_none(timeout_seconds: float) -> float | None:
-    return None if timeout_seconds <= 0.0 else float(timeout_seconds)
-
-
 def _normalize_basin_seed(*, basin_hops: int, basin_seed: int | None) -> int | None:
     if basin_hops <= 0:
         return None
@@ -192,24 +160,24 @@ def _normalize_basin_seed(*, basin_hops: int, basin_seed: int | None) -> int | N
 
 
 def _load_stage2_spec_json(spec_json_path: str | Path) -> tuple[Path, dict]:
-    resolved_path = _resolved_path(spec_json_path)
-    with resolved_path.open("r", encoding="utf-8") as infile:
+    spec_path = resolved_path(spec_json_path)
+    with spec_path.open("r", encoding="utf-8") as infile:
         loaded = json.load(infile)
     if not isinstance(loaded, dict):
         raise ValueError(
-            f"Stage 2 spec JSON must contain an object at the top level: {resolved_path}"
+            f"Stage 2 spec JSON must contain an object at the top level: {spec_path}"
         )
     unknown_keys = sorted(set(loaded) - set(STAGE2_SPEC_KEYS))
     if unknown_keys:
         raise ValueError(
-            f"Unknown Stage 2 spec keys in {resolved_path}: {', '.join(unknown_keys)}"
+            f"Unknown Stage 2 spec keys in {spec_path}: {', '.join(unknown_keys)}"
         )
     missing_keys = [key for key in STAGE2_SPEC_KEYS if key not in loaded]
     if missing_keys:
         raise ValueError(
             f"Stage 2 spec JSON must define all required keys: {', '.join(missing_keys)}"
         )
-    return resolved_path, {key: loaded[key] for key in STAGE2_SPEC_KEYS}
+    return spec_path, {key: loaded[key] for key in STAGE2_SPEC_KEYS}
 
 
 def resolve_stage2_spec_payload(args: argparse.Namespace) -> tuple[dict, str]:
@@ -237,8 +205,8 @@ def build_stage2_alm_config(
     *,
     resolved_spec: dict,
 ) -> Stage2ArtifactConfig:
-    output_root = _resolved_path(args.output_root)
-    equilibria_dir = _resolved_optional_path(args.equilibria_dir)
+    output_root = resolved_path(args.output_root)
+    equilibria_dir = resolved_optional_path(args.equilibria_dir)
     basin_hops = int(resolved_spec["basin_hops"])
     basin_seed = _normalize_basin_seed(
         basin_hops=basin_hops,
@@ -246,19 +214,18 @@ def build_stage2_alm_config(
             None if resolved_spec["basin_seed"] is None else int(resolved_spec["basin_seed"])
         ),
     )
-    cc_threshold = max(float(resolved_spec["cc_threshold"]), STAGE2_CC_THRESHOLD_FLOOR)
-    if float(resolved_spec["cc_threshold"]) < STAGE2_CC_THRESHOLD_FLOOR:
+    raw_cc = float(resolved_spec["cc_threshold"])
+    cc_threshold = max(raw_cc, STAGE2_CC_THRESHOLD_FLOOR)
+    if raw_cc < STAGE2_CC_THRESHOLD_FLOOR:
         print(
-            f"WARNING: cc_threshold {resolved_spec['cc_threshold']} below Stage 2 "
+            f"WARNING: cc_threshold {raw_cc} below Stage 2 "
             f"solver floor, clamped to {STAGE2_CC_THRESHOLD_FLOOR}"
         )
-    curvature_threshold = max(
-        float(resolved_spec["curvature_threshold"]),
-        STAGE2_CURVATURE_THRESHOLD_FLOOR,
-    )
-    if float(resolved_spec["curvature_threshold"]) < STAGE2_CURVATURE_THRESHOLD_FLOOR:
+    raw_curvature = float(resolved_spec["curvature_threshold"])
+    curvature_threshold = max(raw_curvature, STAGE2_CURVATURE_THRESHOLD_FLOOR)
+    if raw_curvature < STAGE2_CURVATURE_THRESHOLD_FLOOR:
         print(
-            f"WARNING: curvature_threshold {resolved_spec['curvature_threshold']} "
+            f"WARNING: curvature_threshold {raw_curvature} "
             f"below Stage 2 solver floor, clamped to "
             f"{STAGE2_CURVATURE_THRESHOLD_FLOOR}"
         )
@@ -307,15 +274,7 @@ def _expected_stage2_artifact_metadata(config: Stage2ArtifactConfig) -> dict:
         "banana_surf_radius": config.banana_surf_radius,
         "order": config.order,
         "CONSTRAINT_METHOD": config.constraint_method,
-        "basin_hops": config.basin_hops,
-        "basin_stepsize": None if config.basin_hops == 0 else config.basin_stepsize,
-        "basin_temperature": None if config.basin_hops == 0 else config.basin_temperature,
-        "basin_niter_success": (
-            None
-            if config.basin_hops == 0 or config.basin_niter_success <= 0
-            else config.basin_niter_success
-        ),
-        "basin_seed": None if config.basin_hops == 0 else config.basin_seed,
+        **basin_metadata_from_config(config),
         "init_only": config.init_only,
     }
 
@@ -385,7 +344,7 @@ def main() -> int:
     output_root.mkdir(parents=True, exist_ok=True)
 
     command = build_stage2_command(config, python_executable=args.python_executable)
-    summary_path = _resolved_optional_path(args.summary_json)
+    summary_path = resolved_optional_path(args.summary_json)
     if summary_path is None:
         summary_path = output_root / DEFAULT_SUMMARY_JSON
     summary_path.parent.mkdir(parents=True, exist_ok=True)
@@ -403,7 +362,7 @@ def main() -> int:
         artifact_path = ensure_stage2_artifact(
             config,
             python_executable=args.python_executable,
-            timeout_seconds=_timeout_or_none(args.stage2_timeout_seconds),
+            timeout_seconds=timeout_or_none(args.stage2_timeout_seconds),
             dry_run=False,
         )
         stage2_results_path, stage2_results = load_validated_stage2_artifact(config)

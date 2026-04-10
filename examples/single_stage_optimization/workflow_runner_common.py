@@ -258,3 +258,17 @@ def discover_single_results_path(
 def load_json(path: str | Path) -> dict:
     with Path(path).open("r", encoding="utf-8") as infile:
         return json.load(infile)
+
+
+def resolved_path(raw_path: str | Path) -> Path:
+    return Path(raw_path).expanduser().resolve()
+
+
+def resolved_optional_path(raw_path: str | Path | None) -> Path | None:
+    if raw_path is None:
+        return None
+    return resolved_path(raw_path)
+
+
+def timeout_or_none(timeout_seconds: float) -> float | None:
+    return None if timeout_seconds <= 0.0 else float(timeout_seconds)

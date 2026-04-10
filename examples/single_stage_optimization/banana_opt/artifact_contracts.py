@@ -133,12 +133,8 @@ def validate_smoke_results(
     return checks
 
 
-def expected_locked_baseline_stage2_artifact_metadata(
-    config,
-    *,
-    num_tf_coils: int,
-) -> dict:
-    basin_metadata = {
+def basin_metadata_from_config(config) -> dict:
+    return {
         "basin_hops": config.basin_hops,
         "basin_stepsize": None if config.basin_hops == 0 else config.basin_stepsize,
         "basin_temperature": (
@@ -151,6 +147,13 @@ def expected_locked_baseline_stage2_artifact_metadata(
         ),
         "basin_seed": None if config.basin_hops == 0 else config.basin_seed,
     }
+
+
+def expected_locked_baseline_stage2_artifact_metadata(
+    config,
+    *,
+    num_tf_coils: int,
+) -> dict:
     return {
         "PLASMA_SURF_FILENAME": config.plasma_surf_filename,
         "TF_CURRENT_A": config.tf_current_A,
@@ -168,7 +171,7 @@ def expected_locked_baseline_stage2_artifact_metadata(
         "banana_surf_radius": config.banana_surf_radius,
         "order": config.order,
         "CONSTRAINT_METHOD": config.constraint_method,
-        **basin_metadata,
+        **basin_metadata_from_config(config),
         "init_only": config.init_only,
     }
 

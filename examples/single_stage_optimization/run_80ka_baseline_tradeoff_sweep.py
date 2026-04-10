@@ -26,6 +26,7 @@ from workflow_runner_common import (  # noqa: E402
     parse_csv,
     run_command,
     snapshot_single_results_paths,
+    timeout_or_none,
 )
 from banana_opt.artifact_contracts import (  # noqa: E402
     expected_locked_baseline_stage2_artifact_metadata as _expected_locked_baseline_stage2_artifact_metadata_impl,
@@ -132,10 +133,6 @@ def parse_args() -> argparse.Namespace:
         help="Comma-separated multipliers applied one-at-a-time to the selected weights.",
     )
     return parser.parse_args()
-
-
-def _timeout_or_none(timeout_seconds: float) -> float | None:
-    return None if timeout_seconds <= 0.0 else float(timeout_seconds)
 
 
 def _raise_locked_baseline_arg_error(flag: str, expected, actual) -> None:
@@ -385,7 +382,7 @@ def run_case(
         }
     run_command(
         command,
-        timeout_seconds=_timeout_or_none(args.single_stage_timeout_seconds),
+        timeout_seconds=timeout_or_none(args.single_stage_timeout_seconds),
     )
     results_path = discover_single_results_path(
         case_output_root,
@@ -420,7 +417,7 @@ def main() -> int:
         else ensure_stage2_artifact(
             stage2_config,
             python_executable=args.python_executable,
-            timeout_seconds=_timeout_or_none(args.stage2_timeout_seconds),
+            timeout_seconds=timeout_or_none(args.stage2_timeout_seconds),
             dry_run=args.dry_run,
         )
     )

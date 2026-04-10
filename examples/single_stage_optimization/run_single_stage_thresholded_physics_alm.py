@@ -14,6 +14,9 @@ from workflow_runner_common import (  # noqa: E402
     discover_single_results_path,
     load_json,
     load_stage2_artifact_results,
+    resolved_path,
+    resolved_optional_path,
+    timeout_or_none,
     run_command,
     snapshot_single_results_paths,
 )
@@ -26,16 +29,6 @@ DEFAULT_ALM_QS_THRESHOLD = 3.0e-3
 DEFAULT_ALM_BOOZER_THRESHOLD = 1.0e-2
 DEFAULT_ALM_IOTA_PENALTY_THRESHOLD = 1.0e-4
 DEFAULT_ALM_LENGTH_PENALTY_THRESHOLD = 0.0
-
-
-def _resolved_path(raw_path: str | Path) -> Path:
-    return Path(raw_path).expanduser().resolve()
-
-
-def _resolved_optional_path(raw_path: str | Path | None) -> Path | None:
-    if raw_path is None:
-        return None
-    return _resolved_path(raw_path)
 
 
 def parse_args() -> argparse.Namespace:
@@ -120,12 +113,13 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def _timeout_or_none(timeout_seconds: float) -> float | None:
-    return None if timeout_seconds <= 0.0 else float(timeout_seconds)
-
-
-def load_validated_stage2_seed_metadata(args: argparse.Namespace) -> tuple[Path, dict]:
-    stage2_bs_path = _resolved_path(args.stage2_bs_path)
+def load_validated_stage2_seed_metadata(
+    args: argparse.Namespace,
+    *,
+    stage2_bs_path: Path | None = None,
+) -> tuple[Path, Path, dict]:
+    if stage2_bs_path is None:
+        stage2_bs_path = resolved_path(args.stage2_bs_path)
     stage2_results_path, stage2_results = load_stage2_artifact_results(stage2_bs_path)
     stage2_results = upgrade_legacy_stage2_artifact_results(stage2_results)
     actual_surface = stage2_results.get("PLASMA_SURF_FILENAME")
@@ -140,15 +134,29 @@ def load_validated_stage2_seed_metadata(args: argparse.Namespace) -> tuple[Path,
             f"--plasma-surf-filename requests {expected_surface!r}, but "
             f"{stage2_results_path} reports {actual_surface!r}."
         )
-    return stage2_results_path, stage2_results
+    return stage2_bs_path, stage2_results_path, stage2_results
+
+
+def maybe_load_validated_stage2_seed_metadata(
+    args: argparse.Namespace,
+) -> tuple[Path, Path | None, dict | None]:
+    stage2_bs_path = resolved_path(args.stage2_bs_path)
+    stage2_results_path = stage2_bs_path.with_name("results.json")
+    if not stage2_bs_path.exists() or not stage2_results_path.exists():
+        return stage2_bs_path, None, None
+    _, loaded_results_path, stage2_results = load_validated_stage2_seed_metadata(
+        args,
+        stage2_bs_path=stage2_bs_path,
+    )
+    return stage2_bs_path, loaded_results_path, stage2_results
 
 
 def build_single_stage_thresholded_physics_command(
     args: argparse.Namespace,
 ) -> list[str]:
-    stage2_bs_path = _resolved_path(args.stage2_bs_path)
-    output_root = _resolved_path(args.output_root)
-    equilibria_dir = _resolved_optional_path(args.equilibria_dir)
+    stage2_bs_path = resolved_path(args.stage2_bs_path)
+    output_root = resolved_path(args.output_root)
+    equilibria_dir = resolved_optional_path(args.equilibria_dir)
     plasma_surf_filename = Path(args.plasma_surf_filename).name
     command = [
         args.python_executable,
@@ -229,22 +237,28 @@ def build_summary(
     args: argparse.Namespace,
     command: list[str],
     *,
-    stage2_results_path: Path,
-    stage2_results: dict,
+    stage2_bs_path: Path | None = None,
+    stage2_results_path: Path | None = None,
+    stage2_results: dict | None = None,
     results_path: Path | None = None,
     results: dict | None = None,
 ) -> dict:
-    stage2_bs_path = _resolved_path(args.stage2_bs_path)
-    output_root = _resolved_path(args.output_root)
+    if stage2_bs_path is None:
+        stage2_bs_path = resolved_path(args.stage2_bs_path)
+    output_root = resolved_path(args.output_root)
     summary = {
         "plasma_surf_filename": Path(args.plasma_surf_filename).name,
         "stage2_bs_path": str(stage2_bs_path),
-        "stage2_results_path": str(stage2_results_path),
-        "stage2_artifact_plasma_surf_filename": stage2_results.get("PLASMA_SURF_FILENAME"),
         "output_root": str(output_root),
         "command": command,
         "dry_run": bool(args.dry_run),
     }
+    if stage2_results_path is not None:
+        summary["stage2_results_path"] = str(stage2_results_path)
+    if stage2_results is not None:
+        summary["stage2_artifact_plasma_surf_filename"] = stage2_results.get(
+            "PLASMA_SURF_FILENAME"
+        )
     if results_path is None or results is None:
         return summary
     summary.update(
@@ -269,27 +283,33 @@ def build_summary(
 
 def main() -> int:
     args = parse_args()
-    stage2_results_path, stage2_results = load_validated_stage2_seed_metadata(args)
-    output_root = _resolved_path(args.output_root)
+    output_root = resolved_path(args.output_root)
     output_root.mkdir(parents=True, exist_ok=True)
     command = build_single_stage_thresholded_physics_command(args)
-    summary_path = _resolved_optional_path(args.summary_json)
+    summary_path = resolved_optional_path(args.summary_json)
     if summary_path is None:
         summary_path = output_root / DEFAULT_SUMMARY_JSON
     summary_path.parent.mkdir(parents=True, exist_ok=True)
 
     if args.dry_run:
+        stage2_bs_path, stage2_results_path, stage2_results = (
+            maybe_load_validated_stage2_seed_metadata(args)
+        )
         summary = build_summary(
             args,
             command,
+            stage2_bs_path=stage2_bs_path,
             stage2_results_path=stage2_results_path,
             stage2_results=stage2_results,
         )
     else:
+        stage2_bs_path, stage2_results_path, stage2_results = (
+            load_validated_stage2_seed_metadata(args)
+        )
         previous_snapshot = snapshot_single_results_paths(output_root)
         run_command(
             command,
-            timeout_seconds=_timeout_or_none(args.single_stage_timeout_seconds),
+            timeout_seconds=timeout_or_none(args.single_stage_timeout_seconds),
         )
         results_path = discover_single_results_path(
             output_root,
@@ -299,6 +319,7 @@ def main() -> int:
         summary = build_summary(
             args,
             command,
+            stage2_bs_path=stage2_bs_path,
             stage2_results_path=stage2_results_path,
             stage2_results=stage2_results,
             results_path=results_path,

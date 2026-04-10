@@ -20,6 +20,7 @@ from workflow_runner_common import (  # noqa: E402
     parse_csv,
     run_command,
     snapshot_single_results_paths,
+    timeout_or_none,
 )
 from banana_opt.artifact_contracts import (  # noqa: E402
     resolve_expected_stage2_tf_current_A,
@@ -81,10 +82,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--mpol", type=int, default=4)
     parser.add_argument("--ntor", type=int, default=4)
     return parser.parse_args()
-
-
-def _timeout_or_none(timeout_seconds: float) -> float | None:
-    return None if timeout_seconds <= 0.0 else float(timeout_seconds)
 
 
 def make_stage2_config(args: argparse.Namespace) -> Stage2ArtifactConfig:
@@ -175,7 +172,7 @@ def run_smoke_case(
         }
     run_command(
         command,
-        timeout_seconds=_timeout_or_none(args.single_stage_timeout_seconds),
+        timeout_seconds=timeout_or_none(args.single_stage_timeout_seconds),
     )
     results_path = discover_single_results_path(
         case_output_root,
@@ -222,7 +219,7 @@ def main() -> int:
         else ensure_stage2_artifact(
             stage2_config,
             python_executable=args.python_executable,
-            timeout_seconds=_timeout_or_none(args.stage2_timeout_seconds),
+            timeout_seconds=timeout_or_none(args.stage2_timeout_seconds),
             dry_run=args.dry_run,
         )
     )

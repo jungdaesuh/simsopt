@@ -776,6 +776,39 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "Stage 2 artifact surface mismatch"):
                 module.load_validated_stage2_seed_metadata(args)
 
+    def test_single_stage_thresholded_physics_rerun_wrapper_dry_run_does_not_require_existing_stage2_artifact(self):
+        module = load_single_stage_thresholded_physics_rerun_module()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            output_root = tmpdir_path / "outputs"
+            summary_path = tmpdir_path / "summary.json"
+            missing_stage2_bs_path = tmpdir_path / "missing" / "biot_savart_opt.json"
+
+            with patch.object(
+                sys,
+                "argv",
+                [
+                    "run_single_stage_thresholded_physics_alm.py",
+                    "--dry-run",
+                    "--plasma-surf-filename",
+                    DEFAULT_ALM_WRAPPER_SURFACE,
+                    "--stage2-bs-path",
+                    str(missing_stage2_bs_path),
+                    "--output-root",
+                    str(output_root),
+                    "--summary-json",
+                    str(summary_path),
+                ],
+            ):
+                self.assertEqual(module.main(), 0)
+
+            summary = json.loads(summary_path.read_text(encoding="utf-8"))
+            self.assertEqual(summary["stage2_bs_path"], str(missing_stage2_bs_path.resolve()))
+            self.assertTrue(summary["dry_run"])
+            self.assertNotIn("stage2_results_path", summary)
+            self.assertNotIn("stage2_artifact_plasma_surf_filename", summary)
+
     def test_single_stage_basin_hopping_uses_shared_helper_and_records_telemetry(self):
         source = SINGLE_STAGE_MODULE_PATH.read_text()
         results_dict = find_assigned_dict(SINGLE_STAGE_MODULE_PATH, "results")
