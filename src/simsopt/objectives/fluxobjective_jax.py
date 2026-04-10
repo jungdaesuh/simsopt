@@ -257,6 +257,8 @@ class SquaredFluxJAX(Optimizable):
         del field, definition
 
         def _integral_from_B(B, flux_spec):
+            # Reduction-order stabilization belongs in integral_bdotn_jax via
+            # the immutable-spec helper, not in this wrapper layer.
             return fixed_surface_flux_integral_from_B(B, flux_spec)
 
         jit_integral = jax.jit(_integral_from_B)

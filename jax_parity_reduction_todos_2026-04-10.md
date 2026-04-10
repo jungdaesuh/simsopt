@@ -160,7 +160,7 @@ External primary-source context:
 
 - [x] Add a native-only parity mode so wrapper tests fail on fallback seams
 - [x] Create mirrored object-level tests for definitions, derivatives, and edge-case contracts
-- [ ] Keep arithmetic stabilization work in `integral_bdotn_jax.py`, not here
+- [x] Keep arithmetic stabilization work in `integral_bdotn_jax.py`, not here
 
 ### 5. Surface Objectives Family
 

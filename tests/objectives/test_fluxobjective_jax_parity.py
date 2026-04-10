@@ -22,6 +22,12 @@ _SQUARED_FLUX_DEFINITIONS = (
     "normalized",
     "local",
 )
+_VALUE_RTOL = 1e-12
+_VALUE_ATOL = 1e-15
+_GRADIENT_RTOL = 1e-11
+_GRADIENT_ATOL = 1e-14
+_FALLBACK_GRADIENT_RTOL = 1e-12
+_FALLBACK_GRADIENT_ATOL = 1e-15
 
 
 class _FluxObjectiveFakeSurface:
@@ -65,14 +71,25 @@ class _FluxObjectiveFakeField(Optimizable):
 def _make_fake_flux_objective(*, definition, normal, B, target, supports_fallback):
     surface = _FluxObjectiveFakeSurface(normal)
     field = _FluxObjectiveFakeField(B, supports_fallback=supports_fallback)
-    objective = SquaredFlux(surface, field, target=np.asarray(target), definition=definition)
+    target_array = np.asarray(target)
+    objective = SquaredFlux(surface, field, target=target_array, definition=definition)
     objective_jax = SquaredFluxJAX(
         surface,
         field,
-        target=np.asarray(target),
+        target=target_array,
         definition=definition,
     )
     return objective, objective_jax, field
+
+
+def _finite_fallback_flux_case(definition):
+    return _make_fake_flux_objective(
+        definition=definition,
+        normal=[[[3.0, 0.0, 4.0], [0.0, 2.0, 0.0]]],
+        B=[[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]],
+        target=[[0.25, -0.5]],
+        supports_fallback=True,
+    )
 
 
 def _make_native_flux_parity_case():
@@ -106,10 +123,50 @@ def _make_native_flux_parity_case():
     return coils, surface
 
 
+def _make_native_flux_objectives(definition, *, target=None):
+    coils, surface = _make_native_flux_parity_case()
+
+    bs_cpu = BiotSavart(coils)
+    bs_cpu.set_points(surface.gamma().reshape((-1, 3)))
+    objective_cpu = SquaredFlux(surface, bs_cpu, target=target, definition=definition)
+
+    bs_jax = BiotSavartJAX(coils)
+    objective_jax = SquaredFluxJAX(
+        surface,
+        bs_jax,
+        target=target,
+        definition=definition,
+        parity_mode="native_only",
+    )
+    return objective_cpu, objective_jax
+
+
 def _degenerate_point_quadrature_scale(definition):
     if definition in {"quadratic flux", "local"}:
         return 0.5
     return 1.0
+
+
+def _assert_flux_value_parity(actual, reference):
+    np.testing.assert_allclose(actual, reference, rtol=_VALUE_RTOL, atol=_VALUE_ATOL)
+
+
+def _assert_flux_gradient_parity(actual, reference):
+    np.testing.assert_allclose(
+        actual,
+        reference,
+        rtol=_GRADIENT_RTOL,
+        atol=_GRADIENT_ATOL,
+    )
+
+
+def _assert_fallback_flux_gradient_parity(actual, reference):
+    np.testing.assert_allclose(
+        actual,
+        reference,
+        rtol=_FALLBACK_GRADIENT_RTOL,
+        atol=_FALLBACK_GRADIENT_ATOL,
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -121,67 +178,39 @@ def _strict_parity_lane(monkeypatch, request, parity_lane):
 
 @pytest.mark.parametrize("definition", _SQUARED_FLUX_DEFINITIONS)
 def test_fluxobjective_value_parity(definition):
-    coils, surface = _make_native_flux_parity_case()
-
-    bs_cpu = BiotSavart(coils)
-    bs_cpu.set_points(surface.gamma().reshape((-1, 3)))
-    objective_cpu = SquaredFlux(surface, bs_cpu, definition=definition)
-
-    bs_jax = BiotSavartJAX(coils)
-    objective_jax = SquaredFluxJAX(
-        surface,
-        bs_jax,
-        definition=definition,
-        parity_mode="native_only",
-    )
+    objective_cpu, objective_jax = _make_native_flux_objectives(definition)
 
     assert objective_jax._use_jax_native
-    np.testing.assert_allclose(objective_jax.J(), objective_cpu.J(), rtol=1e-12, atol=1e-15)
+    _assert_flux_value_parity(objective_jax.J(), objective_cpu.J())
 
 
 @pytest.mark.parametrize("definition", _SQUARED_FLUX_DEFINITIONS)
 def test_fluxobjective_gradient_parity(definition):
-    coils, surface = _make_native_flux_parity_case()
+    objective_cpu, objective_jax = _make_native_flux_objectives(definition)
+    _assert_flux_gradient_parity(objective_jax.dJ(), objective_cpu.dJ())
 
-    bs_cpu = BiotSavart(coils)
-    bs_cpu.set_points(surface.gamma().reshape((-1, 3)))
-    objective_cpu = SquaredFlux(surface, bs_cpu, definition=definition)
 
-    bs_jax = BiotSavartJAX(coils)
-    objective_jax = SquaredFluxJAX(
-        surface,
-        bs_jax,
-        definition=definition,
-        parity_mode="native_only",
-    )
+@pytest.mark.parametrize("definition", _SQUARED_FLUX_DEFINITIONS)
+def test_fallback_fluxobjective_value_and_gradient_parity(definition):
+    objective_cpu, objective_jax, _unused_field = _finite_fallback_flux_case(definition)
 
-    np.testing.assert_allclose(
-        objective_jax.dJ(),
-        objective_cpu.dJ(),
-        rtol=1e-11,
-        atol=1e-14,
-    )
+    assert not objective_jax._use_jax_native
+    assert objective_jax._uses_jax_objective_fallback
+    _assert_flux_value_parity(objective_jax.J(), objective_cpu.J())
+    _assert_fallback_flux_gradient_parity(objective_jax.dJ(), objective_cpu.dJ())
 
 
 def test_fluxobjective_target_parity():
-    coils, surface = _make_native_flux_parity_case()
+    _, surface = _make_native_flux_parity_case()
     rng = parity_rng(11)
     target = rng.standard_normal(surface.normal().shape[:2]) * 1e-2
 
-    bs_cpu = BiotSavart(coils)
-    bs_cpu.set_points(surface.gamma().reshape((-1, 3)))
-    objective_cpu = SquaredFlux(surface, bs_cpu, target=target)
-
-    bs_jax = BiotSavartJAX(coils)
-    objective_jax = SquaredFluxJAX(
-        surface,
-        bs_jax,
+    objective_cpu, objective_jax = _make_native_flux_objectives(
+        "quadratic flux",
         target=target,
-        parity_mode="native_only",
     )
-
-    np.testing.assert_allclose(objective_jax.J(), objective_cpu.J(), rtol=1e-12, atol=1e-15)
-    np.testing.assert_allclose(objective_jax.dJ(), objective_cpu.dJ(), rtol=1e-11, atol=1e-14)
+    _assert_flux_value_parity(objective_jax.J(), objective_cpu.J())
+    _assert_flux_gradient_parity(objective_jax.dJ(), objective_cpu.dJ())
 
 
 def test_quadratic_flux_zero_normals_contract():
