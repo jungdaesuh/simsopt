@@ -113,7 +113,9 @@ def _emit_newton_progress(progress_callback):
 
 
 def _stage_payload(observed, label):
-    return next(payload for current_label, payload in observed if current_label == label)
+    return next(
+        payload for current_label, payload in observed if current_label == label
+    )
 
 
 def _assert_solver_completion_payload(payload):
@@ -239,7 +241,9 @@ def _build_gpu_traceable_linear_problem(booz, gpu, *, step_scale):
     G = jax.device_put(np.asarray(0.05, dtype=np.float64), device=gpu)
     x0 = booz._pack_decision_vector(iota, G, sdofs=sdofs)
     x_target = x0 + jax.device_put(
-        np.linspace(step_scale, step_scale * x0.shape[0], x0.shape[0], dtype=np.float64),
+        np.linspace(
+            step_scale, step_scale * x0.shape[0], x0.shape[0], dtype=np.float64
+        ),
         device=gpu,
     )
     A = jax.device_put(jnp.eye(x0.shape[0], dtype=jnp.float64), device=gpu)
@@ -1721,7 +1725,9 @@ class TestBoozerSurfaceJAXClass:
             booz.options["weight_inv_modB"],
             1.0,
         )
-        closure_nonlocals = inspect.getclosurevars(inspect.unwrap(residual_fn)).nonlocals
+        closure_nonlocals = inspect.getclosurevars(
+            inspect.unwrap(residual_fn)
+        ).nonlocals
 
         assert "self" not in closure_nonlocals
         assert not any(
@@ -2032,9 +2038,7 @@ class TestBoozerSurfaceJAXClass:
         def objective_value_and_grad(state):
             surface_diff = state["surface"] - target_surface
             iota_diff = state["iota"] - target_iota
-            value = 0.5 * (
-                jnp.dot(surface_diff, surface_diff) + jnp.square(iota_diff)
-            )
+            value = 0.5 * (jnp.dot(surface_diff, surface_diff) + jnp.square(iota_diff))
             grad = {
                 "surface": surface_diff,
                 "iota": iota_diff,
@@ -3044,10 +3048,12 @@ class TestBoozerSurfaceJAXExactPath:
         gpu = parity_device("gpu")
         _enable_fast_strict_jax_backend(monkeypatch, request)
         booz = _make_mock_boozer_surface_exact()
-        coil_set_spec, sdofs, iota, G, x_target, A = _build_gpu_traceable_linear_problem(
-            booz,
-            gpu,
-            step_scale=0.05,
+        coil_set_spec, sdofs, iota, G, x_target, A = (
+            _build_gpu_traceable_linear_problem(
+                booz,
+                gpu,
+                step_scale=0.05,
+            )
         )
         dense_calls = _patch_matrix_free_exact_linear_solver(
             monkeypatch,
@@ -3209,10 +3215,12 @@ class TestBoozerSurfaceJAXExactPath:
         booz = _make_mock_boozer_surface()
         booz.options["optimizer_backend"] = "ondevice"
         booz.options["least_squares_algorithm"] = "lm"
-        coil_set_spec, sdofs, iota, G, x_target, A = _build_gpu_traceable_linear_problem(
-            booz,
-            gpu,
-            step_scale=0.02,
+        coil_set_spec, sdofs, iota, G, x_target, A = (
+            _build_gpu_traceable_linear_problem(
+                booz,
+                gpu,
+                step_scale=0.02,
+            )
         )
         dense_calls, gmres_calls = _patch_matrix_free_lm_solver(
             monkeypatch,
@@ -3773,6 +3781,13 @@ class TestBoozerSurfaceJAXExactPath:
 # ---------------------------------------------------------------------------
 
 
+def _mock_ls_group_vjp_case():
+    booz = _make_mock_boozer_surface()
+    res = booz.run_code(iota=0.3, G=0.05)
+    lm = jnp.asarray(np.eye(res["jacobian"].shape[0])[0], dtype=jnp.float64)
+    return booz, res, res["vjp_groups"], lm
+
+
 class TestVJPHooks:
     """Test the VJP hooks stored in result dicts."""
 
@@ -3798,12 +3813,7 @@ class TestVJPHooks:
 
     def test_ls_group_vjp_uses_grouped_spec_path(self, monkeypatch):
         """Streaming LS VJP should avoid rebuilding full grouped input arrays."""
-        booz = _make_mock_boozer_surface()
-        res = booz.run_code(iota=0.3, G=0.05)
-        vjp_groups_fn = res["vjp_groups"]
-        iota_sol = res["iota"]
-        G_sol = res["G"]
-        lm = jnp.asarray(np.eye(res["jacobian"].shape[0])[0], dtype=jnp.float64)
+        booz, res, vjp_groups_fn, lm = _mock_ls_group_vjp_case()
 
         def _forbid_legacy_group_array_path(*_args, **_kwargs):
             raise AssertionError(
@@ -3826,7 +3836,22 @@ class TestVJPHooks:
             _forbid_legacy_group_array_path,
         )
 
-        grouped_entries = list(vjp_groups_fn(lm, booz, iota_sol, G_sol))
+        grouped_entries = list(vjp_groups_fn(lm, booz, res["iota"], res["G"]))
+
+        assert len(grouped_entries) == len(booz.coil_groups)
+
+    def test_ls_group_vjp_does_not_route_through_full_grouped_vjp(self, monkeypatch):
+        """Streaming LS VJP should not materialize the full grouped cotangent pytree."""
+        booz, res, vjp_groups_fn, lm = _mock_ls_group_vjp_case()
+
+        def _forbid_full_grouped_vjp(*_args, **_kwargs):
+            raise AssertionError(
+                "LS grouped VJP should stay on the per-group streaming path"
+            )
+
+        monkeypatch.setattr(_bsj, "_boozer_ls_coil_vjp", _forbid_full_grouped_vjp)
+
+        grouped_entries = list(vjp_groups_fn(lm, booz, res["iota"], res["G"]))
 
         assert len(grouped_entries) == len(booz.coil_groups)
 
@@ -3849,10 +3874,7 @@ class TestVJPHooks:
 
     def test_ls_group_vjp_detects_stale_reuse_after_resolve(self):
         """Grouped VJP hooks must reject stale reuse after a new solve."""
-        booz = _make_mock_boozer_surface()
-        first = booz.run_code(iota=0.3, G=0.05)
-        old_vjp_groups = first["vjp_groups"]
-        lm = jnp.asarray(np.eye(first["jacobian"].shape[0])[0], dtype=jnp.float64)
+        booz, first, old_vjp_groups, lm = _mock_ls_group_vjp_case()
 
         booz.need_to_run_code = True
         second = booz.run_code(iota=0.3, G=0.05)
