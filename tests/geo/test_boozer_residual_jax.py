@@ -8,6 +8,8 @@ Validates:
 4. C++ parity (when simsoptpp is available).
 """
 
+import math
+
 import pytest
 import numpy as np
 
@@ -104,6 +106,16 @@ def _make_near_floor_data(nphi=48, ntheta=48, seed=77, residual_scale=1e-12):
     perturbation /= np.linalg.norm(perturbation.reshape(-1)) / np.sqrt(perturbation.size)
     B = base_field + residual_scale * perturbation
     return G, iota, device_float64(B), device_float64(xphi), device_float64(xtheta)
+
+
+def _make_scalar_dynamic_range_data():
+    amplitudes = np.ones(10001, dtype=np.float64)
+    amplitudes[0] = 1.0e8
+    B = np.zeros((1, amplitudes.size, 3), dtype=np.float64)
+    B[0, :, 0] = amplitudes
+    xphi = np.zeros_like(B)
+    xtheta = np.zeros_like(B)
+    return 1.0, 0.0, device_float64(B), device_float64(xphi), device_float64(xtheta)
 
 
 def _assert_lane_allclose(actual, reference, parity_lane, *, cpu_tol, gpu_tol):
@@ -220,6 +232,56 @@ class TestBoozerResidualScalar:
         assert jnp.all(jnp.isfinite(residual_vector))
         np.testing.assert_allclose(float(scalar_value), 0.0, atol=0.0)
         np.testing.assert_allclose(host_array(residual_vector), 0.0, atol=0.0)
+
+    def test_strict_oracle_scalar_mode_matches_high_precision_reference(self):
+        G, iota, B, xphi, xtheta = _make_scalar_dynamic_range_data()
+
+        default_value = host_scalar(
+            boozer_residual_scalar(
+                G,
+                iota,
+                B,
+                xphi,
+                xtheta,
+                weight_inv_modB=False,
+                reduction_mode="default",
+            )
+        )
+        strict_oracle_value = host_scalar(
+            boozer_residual_scalar(
+                G,
+                iota,
+                B,
+                xphi,
+                xtheta,
+                weight_inv_modB=False,
+                reduction_mode="strict_oracle",
+            )
+        )
+        amplitudes = host_array(B)[0, :, 0]
+        reference = 0.5 * math.fsum(float(value * value) for value in amplitudes) / (
+            3.0 * amplitudes.size
+        )
+
+        np.testing.assert_allclose(
+            strict_oracle_value,
+            reference,
+            rtol=0.0,
+            atol=0.0,
+        )
+        assert abs(strict_oracle_value - reference) <= abs(default_value - reference)
+
+    def test_invalid_reduction_mode_raises(self):
+        B, xphi, xtheta = _make_synthetic_data(8, 10)
+        with pytest.raises(ValueError, match="Unknown reduction_mode"):
+            boozer_residual_scalar(
+                1.5,
+                0.3,
+                B,
+                xphi,
+                xtheta,
+                reduction_mode="bad-mode",
+            )
 
 
 class TestBoozerResidualGradient:

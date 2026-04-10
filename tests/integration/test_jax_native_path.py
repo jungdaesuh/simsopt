@@ -24,6 +24,8 @@ import jax
 jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp
 
+from simsopt.objectives.integral_bdotn_jax import integral_BdotN
+
 _SRC = Path(__file__).resolve().parents[2] / "src" / "simsopt"
 
 
@@ -36,9 +38,6 @@ def _load(name, relpath):
 
 _bs = _load("biotsavart_jax", "field/biotsavart_jax.py")
 biot_savart_B = _bs.biot_savart_B
-
-_ib = _load("integral_bdotn_jax", "objectives/integral_bdotn_jax.py")
-integral_BdotN = _ib.integral_BdotN
 
 
 def _build_fourier_basis(quadpoints_jax, order):

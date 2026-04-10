@@ -23,41 +23,15 @@ All functions accept and return JAX arrays.
 
 import jax
 import jax.numpy as jnp
-from jax import lax
 from functools import partial
 
+from ..jax_core.reductions import (
+    pairwise_sum_flat,
+    scalar_square_sum,
+    validate_reduction_mode,
+)
+
 __all__ = ["integral_BdotN", "residual_BdotN"]
-
-
-def _zero_scalar(dtype):
-    return jnp.array(0, dtype=dtype)
-
-
-def _next_power_of_two(size: int) -> int:
-    if size <= 1:
-        return 1
-    return 1 << (size - 1).bit_length()
-
-
-def _pad_1d(array, padded_size: int):
-    pad_elems = padded_size - array.shape[0]
-    if pad_elems <= 0:
-        return array
-    return lax.pad(array, _zero_scalar(array.dtype), [(0, pad_elems, 0)])
-
-
-def _pairwise_sum_flat(array):
-    """Reduce all entries of ``array`` using a fixed binary addition tree."""
-    reduced = jnp.ravel(array)
-    size = reduced.shape[0]
-    if size == 0:
-        return jnp.sum(reduced)
-
-    reduced = _pad_1d(reduced, _next_power_of_two(size))
-    while reduced.shape[0] > 1:
-        paired = jnp.reshape(reduced, (reduced.shape[0] // 2, 2))
-        reduced = paired[:, 0] + paired[:, 1]
-    return reduced[0]
 
 
 @partial(jax.jit, static_argnames=("definition",))
@@ -80,7 +54,7 @@ def residual_BdotN(Bcoil, target, normal, definition="quadratic flux"):
         residual = jnp.where(has_normal, BdotN * jnp.sqrt(weight), 0.0)
     elif definition == "normalized":
         B2 = jnp.sum(Bcoil * Bcoil, axis=-1)
-        denominator = _pairwise_sum_flat(B2 * norm_n)
+        denominator = pairwise_sum_flat(B2 * norm_n)
         safe_denominator = jnp.where(denominator > 0.0, denominator, 1.0)
         point_weight = jnp.where(has_normal, norm_n / safe_denominator, 0.0)
         residual = jnp.where(
@@ -108,8 +82,14 @@ def residual_BdotN(Bcoil, target, normal, definition="quadratic flux"):
     return jnp.ravel(residual)
 
 
-@partial(jax.jit, static_argnames=("definition",))
-def integral_BdotN(Bcoil, target, normal, definition="quadratic flux"):
+@partial(jax.jit, static_argnames=("definition", "reduction_mode"))
+def integral_BdotN(
+    Bcoil,
+    target,
+    normal,
+    definition="quadratic flux",
+    reduction_mode="default",
+):
     """Compute the integral B·n objective.
 
     Args:
@@ -119,6 +99,10 @@ def integral_BdotN(Bcoil, target, normal, definition="quadratic flux"):
         definition: one of ``"quadratic flux"``, ``"normalized"``,
                     ``"local"``.  Treated as a compile-time constant
                     (static argument) for JIT tracing.
+        reduction_mode: ``"default"`` keeps the kernel's validated hot-path
+                    baseline, while ``"strict_oracle"`` enables the dedicated
+                    compensated scalar objective contraction used for oracle
+                    investigations.
 
     Returns:
         J: scalar objective value.
@@ -129,8 +113,9 @@ def integral_BdotN(Bcoil, target, normal, definition="quadratic flux"):
         normal,
         definition=definition,
     )
-    # Keep the final scalar norm on ``vdot`` for now. Current parity probes
-    # implicated the normalized denominator reduction, not this final residual
-    # contraction, so a stricter compensated path remains deferred until data
-    # shows it is a real parity bottleneck.
-    return 0.5 * jnp.vdot(residual, residual).real
+    validate_reduction_mode(reduction_mode)
+    return 0.5 * scalar_square_sum(
+        residual,
+        reduction_mode=reduction_mode,
+        default="vdot",
+    )

@@ -7,8 +7,7 @@ Validates:
 3. C++ parity (when simsoptpp is available).
 """
 
-import importlib.util
-from pathlib import Path
+import math
 
 import pytest
 import numpy as np
@@ -23,18 +22,7 @@ from conftest import (
     parity_rng,
 )
 
-_SRC = Path(__file__).resolve().parents[2] / "src" / "simsopt"
-
-
-def _load(name, relpath):
-    spec = importlib.util.spec_from_file_location(name, str(_SRC / relpath))
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
-
-
-_ib = _load("integral_bdotn_jax", "objectives/integral_bdotn_jax.py")
-integral_BdotN = _ib.integral_BdotN
+from simsopt.objectives.integral_bdotn_jax import integral_BdotN
 
 
 @pytest.fixture(autouse=True)
@@ -77,6 +65,18 @@ def _normalized_reduction_stress_data():
     B = np.zeros((1, magnitudes.size, 3), dtype=np.float64)
     B[0, :, 0] = magnitudes
     target = np.zeros((1, magnitudes.size), dtype=np.float64)
+    normal = np.zeros_like(B)
+    normal[0, :, 0] = 1.0
+    return device_float64(B), device_float64(target), device_float64(normal)
+
+
+def _quadratic_flux_scalar_stress_data():
+    """Return a dynamic-range case that exposes scalar contraction drift."""
+    amplitudes = np.ones(10001, dtype=np.float64)
+    amplitudes[0] = 1.0e8
+    B = np.zeros((1, amplitudes.size, 3), dtype=np.float64)
+    B[0, :, 0] = amplitudes
+    target = np.zeros((1, amplitudes.size), dtype=np.float64)
     normal = np.zeros_like(B)
     normal[0, :, 0] = 1.0
     return device_float64(B), device_float64(target), device_float64(normal)
@@ -204,6 +204,53 @@ class TestIntegralBdotN:
         J_jax = host_scalar(integral_BdotN(B, target, normal, "normalized"))
 
         np.testing.assert_allclose(J_jax, 0.5, rtol=1e-12, atol=1e-14)
+
+    def test_strict_oracle_scalar_reduction_matches_high_precision_reference(self):
+        B, target, normal = _quadratic_flux_scalar_stress_data()
+
+        default_value = host_scalar(
+            integral_BdotN(
+                B,
+                target,
+                normal,
+                "quadratic flux",
+                reduction_mode="default",
+            )
+        )
+        strict_oracle_value = host_scalar(
+            integral_BdotN(
+                B,
+                target,
+                normal,
+                "quadratic flux",
+                reduction_mode="strict_oracle",
+            )
+        )
+        amplitudes = host_array(B)[0, :, 0]
+        reference = (
+            0.5
+            * math.fsum(float(value * value) for value in amplitudes)
+            / amplitudes.size
+        )
+
+        np.testing.assert_allclose(
+            strict_oracle_value,
+            reference,
+            rtol=1e-15,
+            atol=1e-4,
+        )
+        assert abs(strict_oracle_value - reference) < abs(default_value - reference)
+
+    def test_invalid_reduction_mode_raises(self):
+        B, target, normal = _make_test_data()
+        with pytest.raises(ValueError, match="Unknown reduction_mode"):
+            integral_BdotN(
+                B,
+                target,
+                normal,
+                "quadratic flux",
+                reduction_mode="bad-mode",
+            )
 
 
 class TestIntegralBdotNCppParity:

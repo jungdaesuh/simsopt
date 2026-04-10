@@ -395,6 +395,16 @@ Keep the timing claims narrow and honest:
     sums instead of relying on a raw `jnp.sum(..., axis=1)` reduction order
   - the stabilized `integral_BdotN` kernel now uses the same fixed-tree idea
     for the global `"normalized"` denominator sum
+  - shared reduction helpers now codify the escalation ladder used by the
+    parity-sensitive kernels:
+    - Tier 1: fixed pairwise/tree reductions for hot vector and scalar sites
+      that already showed reduction-order sensitivity
+    - Tier 2: compensated scalar summation is available for especially unstable
+      scalar objectives, but is not promoted by default
+    - Tier 3: selected kernels expose `reduction_mode="strict_oracle"` to opt
+      into the compensated scalar path during parity investigations
+    - Tier 4: ExBLAS/ReproBLAS/OzBLAS-style exact reproducibility remains a
+      deferred research path, not a default runtime mode
   - expect a smaller but still real throughput cost from the extra
     pad/reshape/add stages in that objective kernel; keep the stronger
     arithmetic in the parity-sensitive path unless benchmark data justifies
@@ -404,8 +414,15 @@ Keep the timing claims narrow and honest:
     parity lanes and benchmark before promoting the same arithmetic to
     `jax_gpu_fast`
   - the final scalar residual contraction in `integral_BdotN` intentionally
-    stays on `jnp.vdot(...)` for now; current parity evidence did not justify a
-    stricter compensated-summation branch there
+    stays on the validated baseline by default, but
+    `reduction_mode="strict_oracle"` now promotes it to compensated summation
+    when parity investigations need a stricter scalar oracle
+  - the Boozer residual scalar stays on pairwise accumulation by default; the
+    same `strict_oracle` mode upgrades only its final scalar contraction rather
+    than changing the rest of the optimizer arithmetic
+  - gate any Tier 4 exact-reproducibility work behind demonstrated need: both
+    throughput cost and implementation complexity rise sharply relative to the
+    Tier 1–3 ladder
 - fast mode:
   - `jax_gpu_fast` is the throughput-oriented lane after parity is green
   - it is not the default oracle and should not replace `native_cpu`

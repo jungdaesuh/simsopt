@@ -58,6 +58,14 @@ from .objectives_flux import (
     fixed_surface_flux_integral,
     fixed_surface_flux_integral_from_B,
 )
+from .reductions import (
+    VALID_REDUCTION_MODES,
+    compensated_sum_flat,
+    pairwise_sum_axis,
+    pairwise_sum_flat,
+    scalar_square_sum,
+    validate_reduction_mode,
+)
 from .surface_rzfourier import (
     surface_rz_fourier_area_from_spec,
     surface_rz_fourier_area_from_dofs,
@@ -181,6 +189,12 @@ __all__ = [
     "fixed_surface_flux_specs_from_surface",
     "fixed_surface_flux_integral",
     "fixed_surface_flux_integral_from_B",
+    "VALID_REDUCTION_MODES",
+    "compensated_sum_flat",
+    "pairwise_sum_axis",
+    "pairwise_sum_flat",
+    "scalar_square_sum",
+    "validate_reduction_mode",
     "grouped_coil_set_spec_from_coil_specs",
     "grouped_biot_savart_A_from_inputs",
     "grouped_biot_savart_A_from_spec",

@@ -38,7 +38,6 @@ from functools import lru_cache
 import numpy as np
 import jax
 import jax.numpy as jnp
-from jax import lax
 
 from ..jax_core._math_utils import (
     as_jax_float64 as _as_jax_float64,
@@ -52,6 +51,11 @@ from ..jax_core.surface_rzfourier import (
     surface_rz_fourier_gammadash1_from_spec,
     surface_rz_fourier_gammadash2_from_spec,
     surface_rz_fourier_spec_from_dofs,
+)
+from ..jax_core.reductions import (
+    pairwise_sum_axis,
+    scalar_square_sum,
+    validate_reduction_mode,
 )
 
 __all__ = [
@@ -102,59 +106,9 @@ def _safe_inverse_modB(B2):
     return B2 * _explicit_rsqrt(safe_B2) * _explicit_inv(safe_B2)
 
 
-def _zero_scalar(dtype):
-    return jnp.array(0, dtype=dtype)
-
-
-def _next_power_of_two(size: int) -> int:
-    if size <= 1:
-        return 1
-    return 1 << (size - 1).bit_length()
-
-
-def _pad_axis0(array, padded_size: int):
-    pad_rows = padded_size - array.shape[0]
-    if pad_rows <= 0:
-        return array
-    padding_config = [(0, pad_rows, 0)] + [(0, 0, 0)] * (array.ndim - 1)
-    return lax.pad(array, _zero_scalar(array.dtype), padding_config)
-
-
-def _pairwise_reduce_axis0(array):
-    """Reduce an axis-0 stack with a fixed binary addition tree."""
-    reduced = array
-    while reduced.shape[0] > 1:
-        pair_shape = (reduced.shape[0] // 2, 2) + tuple(reduced.shape[1:])
-        paired = jnp.reshape(reduced, pair_shape)
-        reduced = paired[:, 0, ...] + paired[:, 1, ...]
-    return reduced
-
-
-def _pairwise_sum_flat(array):
-    """Reduce all entries of ``array`` using a fixed binary addition tree."""
-    reduced = jnp.ravel(array)
-    size = reduced.shape[0]
-    if size == 0:
-        return jnp.sum(reduced)
-
-    padded = _pad_axis0(reduced[:, None], _next_power_of_two(size))
-    return _pairwise_reduce_axis0(padded)[0, 0]
-
-
-def _pairwise_sum_last_axis(array):
-    """Reduce ``array`` along its trailing axis using a fixed binary tree."""
-    axis_size = array.shape[-1]
-    if axis_size == 0:
-        return jnp.sum(array, axis=-1)
-
-    reduced = jnp.moveaxis(array, -1, 0)
-    padded = _pad_axis0(reduced, _next_power_of_two(axis_size))
-    return jnp.squeeze(_pairwise_reduce_axis0(padded), axis=0)
-
-
 def _boozer_weighted_residual(G, iota, B, xphi, xtheta, weight_inv_modB):
     tang = xphi + iota * xtheta
-    B2 = _pairwise_sum_last_axis(B * B)
+    B2 = pairwise_sum_axis(B * B, axis=-1)
     residual = G * B - B2[..., None] * tang
 
     if weight_inv_modB:
@@ -162,7 +116,15 @@ def _boozer_weighted_residual(G, iota, B, xphi, xtheta, weight_inv_modB):
     return residual
 
 
-def boozer_residual_scalar(G, iota, B, xphi, xtheta, weight_inv_modB=True):
+def boozer_residual_scalar(
+    G,
+    iota,
+    B,
+    xphi,
+    xtheta,
+    weight_inv_modB=True,
+    reduction_mode="default",
+):
     """Boozer residual scalar objective (forward pass).
 
     Args:
@@ -172,16 +134,28 @@ def boozer_residual_scalar(G, iota, B, xphi, xtheta, weight_inv_modB=True):
         xphi:  (nphi, ntheta, 3)  surface tangent dγ/dφ.
         xtheta:(nphi, ntheta, 3)  surface tangent dγ/dθ.
         weight_inv_modB: if True, weight residual by 1/|B|.
+        reduction_mode: ``"default"`` keeps the validated pairwise scalar
+            accumulation, while ``"strict_oracle"`` promotes the final scalar
+            contraction to compensated summation for oracle investigations.
 
     Returns:
         J: scalar objective value.
     """
     G = _as_jax_float64(G)
     iota = _as_jax_float64(iota)
+    validate_reduction_mode(reduction_mode)
     nphi, ntheta, _ = B.shape
     num_res = _as_jax_float64(3 * nphi * ntheta)
     rtil = _boozer_weighted_residual(G, iota, B, xphi, xtheta, weight_inv_modB)
-    return _as_jax_float64(0.5) * _pairwise_sum_flat(rtil * rtil) / num_res
+    return (
+        _as_jax_float64(0.5)
+        * scalar_square_sum(
+            rtil,
+            reduction_mode=reduction_mode,
+            default="pairwise",
+        )
+        / num_res
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -202,13 +176,38 @@ def _unpack(x, nsurfdofs):
     return _split_decision_vector(x, optimize_G=True)
 
 
-def _boozer_objective_from_packed(x, nsurfdofs, B, xphi, xtheta, weight_inv_modB):
+def _boozer_objective_from_packed(
+    x,
+    nsurfdofs,
+    B,
+    xphi,
+    xtheta,
+    weight_inv_modB,
+    reduction_mode,
+):
     """Scalar objective as a function of the packed decision vector."""
     _, iota, G = _unpack(x, nsurfdofs)
-    return boozer_residual_scalar(G, iota, B, xphi, xtheta, weight_inv_modB)
+    return boozer_residual_scalar(
+        G,
+        iota,
+        B,
+        xphi,
+        xtheta,
+        weight_inv_modB,
+        reduction_mode=reduction_mode,
+    )
 
 
-def boozer_residual_grad(G, iota, B, xphi, xtheta, nsurfdofs, weight_inv_modB=True):
+def boozer_residual_grad(
+    G,
+    iota,
+    B,
+    xphi,
+    xtheta,
+    nsurfdofs,
+    weight_inv_modB=True,
+    reduction_mode="default",
+):
     """Gradient of the Boozer residual w.r.t. [surface_dofs, iota, G].
 
     Surface DOF gradient entries are zero because B, xphi, xtheta are
@@ -224,13 +223,28 @@ def boozer_residual_grad(G, iota, B, xphi, xtheta, nsurfdofs, weight_inv_modB=Tr
     x0 = _pack(_as_jax_float64(np.zeros(nsurfdofs, dtype=np.float64)), iota, G)
     grad_fn = jax.grad(
         lambda x: _boozer_objective_from_packed(
-            x, nsurfdofs, B, xphi, xtheta, weight_inv_modB
+            x,
+            nsurfdofs,
+            B,
+            xphi,
+            xtheta,
+            weight_inv_modB,
+            reduction_mode,
         )
     )
     return grad_fn(x0)
 
 
-def boozer_residual_hessian(G, iota, B, xphi, xtheta, nsurfdofs, weight_inv_modB=True):
+def boozer_residual_hessian(
+    G,
+    iota,
+    B,
+    xphi,
+    xtheta,
+    nsurfdofs,
+    weight_inv_modB=True,
+    reduction_mode="default",
+):
     """Hessian of the Boozer residual w.r.t. [surface_dofs, iota, G].
 
     Surface DOF Hessian blocks are zero because B, xphi, xtheta are
@@ -243,7 +257,13 @@ def boozer_residual_hessian(G, iota, B, xphi, xtheta, nsurfdofs, weight_inv_modB
     x0 = _pack(_as_jax_float64(np.zeros(nsurfdofs, dtype=np.float64)), iota, G)
     hess_fn = jax.hessian(
         lambda x: _boozer_objective_from_packed(
-            x, nsurfdofs, B, xphi, xtheta, weight_inv_modB
+            x,
+            nsurfdofs,
+            B,
+            xphi,
+            xtheta,
+            weight_inv_modB,
+            reduction_mode,
         )
     )
     return hess_fn(x0)
@@ -445,6 +465,7 @@ def boozer_penalty_composed(
     scatter_indices,
     optimize_G,
     weight_inv_modB=True,
+    reduction_mode="default",
 ):
     """Composed scalar penalty objective: DOFs → geometry → field → residual → scalar.
 
@@ -460,6 +481,9 @@ def boozer_penalty_composed(
         scatter_indices: stellsym DOF scatter indices (or None).
         optimize_G: whether G is in the decision vector.
         weight_inv_modB: weight residual by 1/|B|.
+        reduction_mode: ``"default"`` keeps the validated pairwise scalar
+            accumulation, while ``"strict_oracle"`` enables the dedicated
+            compensated scalar contraction for oracle investigations.
 
     Returns:
         Scalar objective value.
@@ -476,7 +500,15 @@ def boozer_penalty_composed(
         scatter_indices=scatter_indices,
         optimize_G=optimize_G,
     )
-    return boozer_residual_scalar(G, iota, B, xphi, xtheta, weight_inv_modB)
+    return boozer_residual_scalar(
+        G,
+        iota,
+        B,
+        xphi,
+        xtheta,
+        weight_inv_modB,
+        reduction_mode=reduction_mode,
+    )
 
 
 def boozer_penalty_grad_composed(x, **kwargs):

@@ -236,11 +236,29 @@ Solver drift is dominated by:
 
 ## Reproducible Arithmetic Escalation Ladder
 
-- [ ] Tier 1: pairwise/tree reductions in hot scalar and vector reductions
-- [ ] Tier 2: compensated summation for especially unstable scalar objectives
-- [ ] Tier 3: dedicated strict-oracle reduction mode for selected kernels
-- [ ] Tier 4: evaluate whether ExBLAS/ReproBLAS/OzBLAS-style exact reproducibility is worth the complexity
-- [ ] Gate Tier 4 behind demonstrated need, because throughput and implementation complexity will rise sharply
+- [x] Tier 1: pairwise/tree reductions in hot scalar and vector reductions
+  - Current implementation: the shared `simsopt.jax_core.reductions` helper now
+    centralizes the fixed-tree reduction building blocks already used by the
+    parity-sensitive kernel family, while the existing Biot-Savart hot-path
+    tree reduction remains in place until that file's broader in-flight work is
+    ready for consolidation.
+- [x] Tier 2: compensated summation for especially unstable scalar objectives
+  - Current implementation: the shared reduction helper now provides a
+    compensated scalar contraction that selected kernels can opt into without
+    changing their default hot-path arithmetic.
+- [x] Tier 3: dedicated strict-oracle reduction mode for selected kernels
+  - Current implementation: `integral_BdotN(..., reduction_mode="strict_oracle")`
+    and `boozer_residual_scalar(..., reduction_mode="strict_oracle")` now
+    promote only the final scalar contraction to compensated summation for
+    oracle investigations and stress tests.
+- [x] Tier 4: evaluate whether ExBLAS/ReproBLAS/OzBLAS-style exact reproducibility is worth the complexity
+  - Current decision: keep Tier 4 as a documented research fallback only. The
+    Tier 1–3 ladder now covers the demonstrated parity hot spots without paying
+    the throughput and implementation cost of exact reproducibility machinery.
+- [x] Gate Tier 4 behind demonstrated need, because throughput and implementation complexity will rise sharply
+  - Current decision: do not wire ExBLAS/ReproBLAS/OzBLAS-style arithmetic into
+    production kernels or `optimizer_jax.py` unless new parity evidence shows
+    the Tier 1–3 ladder is insufficient.
 
 ## Test TODOs
 
