@@ -229,9 +229,10 @@ Solver drift is dominated by:
 
 **TODOs**
 
-- [ ] Keep this path on strict tolerance-based parity
-- [ ] Do not add reproducible summation complexity here unless a concrete failure appears
-- [ ] Focus only on missing object/API parity if full-class parity is required
+- [x] Keep this path on strict tolerance-based parity
+- [x] Do not add reproducible summation complexity here unless a concrete failure appears
+  - Current decision: keep `SurfaceRZFourier` on strict tolerance-based CPU/JAX parity. The new mirrored loader / copy object-API coverage did not expose any concrete reduction-order failure, so no pairwise / compensated / reproducible-summation path was added here.
+- [x] Focus only on missing object/API parity if full-class parity is required
 
 ## Reproducible Arithmetic Escalation Ladder
 

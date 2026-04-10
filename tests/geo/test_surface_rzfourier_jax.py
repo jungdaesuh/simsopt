@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import numpy as np
 import jax
 import jax.numpy as jnp
@@ -5,6 +7,7 @@ import pytest
 from conftest import host_array, host_scalar, parity_default_device, parity_rng
 
 from simsopt.geo.surfacerzfourier import SurfaceRZFourier
+from simsopt.geo.surface import Surface
 from simsopt.geo.boozer_residual_jax import _surface_geometry_from_dofs
 from simsopt.jax_core import (
     SurfaceRZFourierSpec,
@@ -28,6 +31,9 @@ from simsopt.jax_core import (
     surface_rz_fourier_volume_from_dofs,
     surface_rz_fourier_volume_from_spec,
 )
+
+TEST_DIR = Path(__file__).parent / ".." / "test_files"
+SURFACE_RZFOURIER_VOLUME_ATOL = 1e-8
 
 def _make_surface(*, stellsym: bool) -> SurfaceRZFourier:
     rng = parity_rng(7 if stellsym else 11)
@@ -181,6 +187,34 @@ def _assert_surface_parity(surface: SurfaceRZFourier) -> None:
         surface.volume(),
         rtol=1e-12,
         atol=1e-12,
+    )
+
+
+def _assert_loaded_surface_object_api_parity(
+    surface: SurfaceRZFourier, *, expected_volume: float
+) -> None:
+    np.testing.assert_allclose(surface.x, surface.get_dofs(), rtol=0.0, atol=1e-12)
+    np.testing.assert_allclose(
+        surface.volume(),
+        expected_volume,
+        rtol=0.0,
+        atol=SURFACE_RZFOURIER_VOLUME_ATOL,
+    )
+    _assert_surface_parity(surface)
+
+
+def _surface_copy_variants(surface: SurfaceRZFourier) -> tuple[SurfaceRZFourier, ...]:
+    return (
+        surface.copy(
+            quadpoints_phi=Surface.get_phi_quadpoints(nphi=100, range="field period")
+        ),
+        surface.copy(quadpoints_theta=Surface.get_theta_quadpoints(ntheta=50)),
+        surface.copy(ntheta=42),
+        surface.copy(nphi=17),
+        surface.copy(range="field period"),
+        surface.copy(nfp=10),
+        surface.copy(mpol=5, ntor=6),
+        surface.copy(stellsym=False),
     )
 
 
@@ -380,3 +414,57 @@ def test_surface_rzfourier_dofs_round_trip_stellsym():
 
 def test_surface_rzfourier_dofs_round_trip_non_stellsym():
     _assert_dofs_round_trip(_make_surface(stellsym=False))
+
+
+@pytest.mark.parametrize(
+    ("filename", "s_value", "expected_volume"),
+    [
+        ("wout_li383_low_res_reference.nc", 1.0, 2.98138727016329),
+        ("wout_LandremanSenguptaPlunk_section5p3_reference.nc", 1.0, 0.199228326859097),
+    ],
+)
+def test_surface_rzfourier_from_wout_object_api_parity(
+    filename: str, s_value: float, expected_volume: float
+) -> None:
+    surface = SurfaceRZFourier.from_wout(TEST_DIR / filename, s=s_value)
+    _assert_loaded_surface_object_api_parity(
+        surface, expected_volume=expected_volume
+    )
+
+
+@pytest.mark.parametrize(
+    ("filename", "expected_volume"),
+    [
+        ("input.li383_low_res", 2.97871721453671),
+        ("input.LandremanSenguptaPlunk_section5p3", 0.199228326303124),
+    ],
+)
+def test_surface_rzfourier_from_vmec_input_object_api_parity(
+    filename: str, expected_volume: float
+) -> None:
+    surface = SurfaceRZFourier.from_vmec_input(TEST_DIR / filename)
+    _assert_loaded_surface_object_api_parity(
+        surface, expected_volume=expected_volume
+    )
+
+
+def test_surface_rzfourier_from_nescoil_input_object_api_parity() -> None:
+    plasma_surface = SurfaceRZFourier.from_nescoil_input(
+        TEST_DIR / "nescin.LandremanPaul2021_QA", "plasma"
+    )
+    reference_surface = SurfaceRZFourier.from_vmec_input(
+        TEST_DIR / "input.LandremanPaul2021_QA"
+    )
+    _assert_surface_parity(plasma_surface)
+    np.testing.assert_allclose(
+        plasma_surface.volume(),
+        reference_surface.volume(),
+        rtol=0.0,
+        atol=2e-1,
+    )
+
+
+def test_surface_rzfourier_copy_object_api_parity() -> None:
+    surface = SurfaceRZFourier(mpol=4, ntor=5, nfp=3)
+    for copied_surface in _surface_copy_variants(surface):
+        _assert_surface_parity(copied_surface)
