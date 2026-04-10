@@ -261,11 +261,7 @@ def _canonicalize_traceable_exact_quadrature(booz_jax):
         )
         mask_indices = _mask_indices_for(quadpoints_phi, quadpoints_theta)
 
-    return (
-        jnp.asarray(quadpoints_phi, dtype=jnp.float64),
-        jnp.asarray(quadpoints_theta, dtype=jnp.float64),
-        mask_indices,
-    )
+    return (_as_jax_float64(quadpoints_phi), _as_jax_float64(quadpoints_theta), mask_indices)
 
 
 def _solve_boozer_adjoint(booz_surf, rhs):
@@ -415,7 +411,7 @@ def _evaluate_direct_coil_objective_value(
 
 def _current_coil_dofs_and_spec(biotsavart):
     """Return the current free coil DOFs and their immutable grouped spec."""
-    current_coil_dofs = jnp.asarray(biotsavart.x.copy(), dtype=jnp.float64)
+    current_coil_dofs = _as_jax_float64(biotsavart.x.copy())
     return current_coil_dofs, biotsavart.coil_set_spec_from_dofs(current_coil_dofs)
 
 
@@ -882,8 +878,8 @@ class NonQuasiSymmetricRatioJAX(Optimizable):
         aux_phi = np.linspace(0, 1 / s.nfp, 2 * sDIM, endpoint=False)
         aux_theta = np.linspace(0, 1.0, 2 * sDIM, endpoint=False)
         self.surface = self.in_surface
-        self._aux_phi_jax = jnp.asarray(aux_phi)
-        self._aux_theta_jax = jnp.asarray(aux_theta)
+        self._aux_phi_jax = _as_jax_float64(aux_phi)
+        self._aux_theta_jax = _as_jax_float64(aux_theta)
 
         self.recompute_bell()
 
@@ -1462,7 +1458,7 @@ def _build_traceable_objective_state(booz_jax, bs_jax, iota_target):
         "targetlabel": booz_jax.targetlabel,
         "label_type": booz_jax.label_type,
         "phi_idx": booz_jax.phi_idx,
-        "iota_target": jnp.asarray(iota_target, dtype=jnp.float64),
+        "iota_target": _as_jax_float64(iota_target),
         "mask_indices": mask_indices,
         "stellsym_surface": booz_jax.stellsym,
     }
@@ -1479,11 +1475,11 @@ def _build_traceable_objective_state(booz_jax, bs_jax, iota_target):
         bs_jax.coil_set_spec_from_dofs(baseline_coil_dofs),
         objective_kwargs,
     )
-    failure_value = jnp.asarray(
-        baseline_value + jnp.maximum(jnp.abs(baseline_value), 1.0),
-        dtype=jnp.float64,
+    failure_value = _as_jax_float64(
+        baseline_value
+        + jnp.maximum(jnp.abs(baseline_value), _as_jax_float64(1.0))
     )
-    failure_scale = jnp.asarray(1.0, dtype=jnp.float64)
+    failure_scale = _as_jax_float64(1.0)
     return {
         "objective_kwargs": objective_kwargs,
         "baseline_x": baseline_x,
@@ -1523,7 +1519,7 @@ def _build_traceable_objective_compiled_bundle_from_state(
             coil_set_spec_from_dofs,
             coil_dofs=coil_dofs,
             baseline_x=baseline_x,
-            baseline_value=jnp.asarray(baseline_value, dtype=jnp.float64),
+            baseline_value=_as_jax_float64(baseline_value),
             baseline_plu=baseline_plu,
             optimize_G=optimize_G,
             baseline_coil_dofs=baseline_coil_dofs,
@@ -1656,11 +1652,11 @@ def _make_traceable_objective_from_compiled_bundle(compiled_bundle):
 
     @jax.custom_vjp
     def f(coil_dofs):
-        coil_dofs = jnp.asarray(coil_dofs, dtype=jnp.float64)
+        coil_dofs = _as_jax_float64(coil_dofs)
         return compiled_forward_result_for(coil_dofs)["value"]
 
     def f_fwd(coil_dofs):
-        coil_dofs = jnp.asarray(coil_dofs, dtype=jnp.float64)
+        coil_dofs = _as_jax_float64(coil_dofs)
         result = compiled_forward_result_for(coil_dofs)
         return result["value"], (
             coil_dofs,
@@ -1679,7 +1675,7 @@ def _make_traceable_objective_from_compiled_bundle(compiled_bundle):
             return failure_gradient_for(coil_dofs)
 
         grad = jax.lax.cond(success, _success, _failure, operand=None)
-        return (jnp.asarray(cotangent, dtype=grad.dtype) * grad,)
+        return (_as_runtime_float64(cotangent, reference=grad) * grad,)
 
     f.defvjp(f_fwd, f_bwd)
 

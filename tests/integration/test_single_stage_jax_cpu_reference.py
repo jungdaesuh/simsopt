@@ -5620,8 +5620,10 @@ class TestTraceableObjective:
     @staticmethod
     def _traceable_target_inputs(bs_jax, booz_jax, *, iota_target_shift=0.0):
         """Return the shared target-lane inputs used by traceable objective helpers."""
-        iota_target = booz_jax.res["iota"] + iota_target_shift
-        coil_dofs = jnp.array(bs_jax.x.copy())
+        from simsopt.jax_core._math_utils import as_jax_float64
+
+        iota_target = as_jax_float64(booz_jax.res["iota"] + iota_target_shift)
+        coil_dofs = as_jax_float64(bs_jax.x.copy())
         return iota_target, coil_dofs
 
     @staticmethod
@@ -5761,6 +5763,51 @@ class TestTraceableObjective:
             err_msg="Fused value_and_grad path must use the same gated failure value.",
         )
         assert np.all(np.isfinite(np.asarray(gated_grad)))
+
+    def test_runtime_bundle_allows_strict_transfer_guard(
+        self, monkeypatch, request
+    ):
+        """Traceable runtime bundle bootstrap must be strict-safe on CPU parity."""
+        import simsopt.config as simsopt_config
+        from simsopt.backend import invalidate_backend_cache
+
+        monkeypatch.setenv("SIMSOPT_JAX_TRANSFER_GUARD", "disallow")
+        enable_strict_jax_backend(monkeypatch, request, mode="jax_cpu_parity")
+        invalidate_backend_cache()
+        request.addfinalizer(invalidate_backend_cache)
+        simsopt_config.set_backend(
+            "jax_cpu_parity",
+            strict=True,
+            transfer_guard="disallow",
+        )
+
+        (
+            _coils,
+            _surf_cpu,
+            _surf_jax,
+            _bs_cpu,
+            bs_jax,
+            _booz_cpu,
+            booz_jax,
+            _vol_cpu,
+            iota0,
+            G0,
+        ) = _make_boozer_setup(constraint_weight=1.0, optimizer_backend="ondevice")
+
+        solve_result = booz_jax.run_code(iota0, G0)
+        assert solve_result is not None and solve_result.get("success", False)
+
+        runtime_bundle, coil_dofs = self._make_traceable_runtime_bundle(
+            bs_jax,
+            booz_jax,
+            include_profile_suite=True,
+        )
+        value = runtime_bundle["objective"](coil_dofs)
+        value_vg, grad = runtime_bundle["value_and_grad"](coil_dofs)
+
+        assert np.isfinite(float(value))
+        assert np.isfinite(float(value_vg))
+        assert np.all(np.isfinite(np.asarray(grad)))
 
     def test_runtime_bundle_reuses_cached_compiled_callables(self, boozer_setup):
         """Repeated bundle construction should reuse the same compiled target-lane callables."""
