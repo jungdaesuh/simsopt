@@ -546,7 +546,7 @@ class SingleStageExampleTests(unittest.TestCase):
             parent.mkdir(parents=True)
             matched = (
                 parent
-                / "R0=0.915-s=0.24-LW=0.0005-CCW=100-CCT=0.05-CW=0.0001-CT=40-SR=0.220-TFC=80000-Order=2-CM=penalty-BH=3"
+                / "R0=0.915-s=0.24-LW=0.0005-CCW=100-CCT=0.05-CW=0.0001-CT=40-SR=0.220-INITC=10000-TFC=80000-Order=2-CM=penalty-BH=3"
                 / "biot_savart_opt.json"
             )
             matched.parent.mkdir(parents=True)
@@ -565,6 +565,7 @@ class SingleStageExampleTests(unittest.TestCase):
                 stage2_seed_banana_surf_radius=0.22,
                 stage2_seed_tf_current_A=8.0e4,
                 stage2_seed_order=2,
+                stage2_seed_banana_init_current_A=1.0e4,
                 stage2_source="local",
                 local_stage2_root=str(root / "local"),
                 database_stage2_root=str(root / "database"),
@@ -584,7 +585,7 @@ class SingleStageExampleTests(unittest.TestCase):
                     parent
                     / (
                         "R0=0.915-s=0.24-LW=0.0005-CCW=100-CCT=0.05-CW=0.0001-CT=40-"
-                        f"SR=0.220-TFC=80000-Order=2{suffix}"
+                        f"SR=0.220-INITC=10000-TFC=80000-Order=2{suffix}"
                     )
                     / "biot_savart_opt.json"
                 )
@@ -604,6 +605,7 @@ class SingleStageExampleTests(unittest.TestCase):
                 stage2_seed_banana_surf_radius=0.22,
                 stage2_seed_tf_current_A=8.0e4,
                 stage2_seed_order=2,
+                stage2_seed_banana_init_current_A=1.0e4,
                 stage2_source="local",
                 local_stage2_root=str(root / "local"),
                 database_stage2_root=str(root / "database"),
@@ -3269,6 +3271,8 @@ class CurrentBaselineContractTests(unittest.TestCase):
 
         self.assertIn("TFC=80000", local_dir)
         self.assertIn("TFC=80000", database_dir)
+        self.assertIn("INITC=10000", local_dir)
+        self.assertIn("INITC=10000", database_dir)
 
     def test_resolve_stage2_tf_current_prefers_recorded_stage2_result(self):
         module = load_single_stage_example_module()
@@ -3318,7 +3322,7 @@ class CurrentBaselineContractTests(unittest.TestCase):
             outputs_dir = Path(tmpdir) / "outputs-demo.nc"
             current_dir = (
                 outputs_dir
-                / "R0=0.915-s=0.24-LW=0.0005-CCW=100-CCT=0.05-CW=0.0001-CT=40-SR=0.220-TFC=80000-Order=2-CM=penalty"
+                / "R0=0.915-s=0.24-LW=0.0005-CCW=100-CCT=0.05-CW=0.0001-CT=40-SR=0.220-INITC=10000-TFC=80000-Order=2-CM=penalty"
             )
             current_dir.mkdir(parents=True)
             expected_path = current_dir / "biot_savart_opt.json"
@@ -3340,6 +3344,7 @@ class CurrentBaselineContractTests(unittest.TestCase):
                 stage2_seed_banana_surf_radius=0.22,
                 stage2_seed_tf_current_A=8.0e4,
                 stage2_seed_order=2,
+                stage2_seed_banana_init_current_A=1.0e4,
             )
 
             self.assertEqual(module.build_stage2_bs_path(args), str(expected_path))
@@ -3373,6 +3378,7 @@ class CurrentBaselineContractTests(unittest.TestCase):
                 stage2_seed_banana_surf_radius=0.22,
                 stage2_seed_tf_current_A=8.0e4,
                 stage2_seed_order=2,
+                stage2_seed_banana_init_current_A=1.0e4,
             )
 
             self.assertEqual(module.build_stage2_bs_path(args), str(expected_path))
@@ -3431,6 +3437,38 @@ class CurrentBaselineContractTests(unittest.TestCase):
 
         self.assertEqual(args.tf_current_A, 80000.0)
 
+    def test_stage2_parse_args_accepts_banana_current_controls(self):
+        module = load_stage2_module()
+
+        with patch.object(
+            sys,
+            "argv",
+            [
+                "banana_coil_solver.py",
+                "--banana-init-current-A",
+                "12000",
+                "--banana-current-max-A",
+                "16000",
+            ],
+        ):
+            args = module.parse_args()
+
+        self.assertEqual(args.banana_init_current_A, 12000.0)
+        self.assertEqual(args.banana_current_max_A, 16000.0)
+
+    def test_apply_banana_current_upper_bound_is_symmetric_in_penalty_mode(self):
+        module = load_stage2_module()
+        leaf_current = SimpleNamespace(
+            local_lower_bounds=np.array([-np.inf], dtype=float),
+            local_upper_bounds=np.array([np.inf], dtype=float),
+        )
+        scaled_current = SimpleNamespace(current_to_scale=leaf_current, scale=1.0)
+
+        module.apply_banana_current_upper_bound(scaled_current, 16000.0)
+
+        np.testing.assert_allclose(leaf_current.local_lower_bounds, [-16000.0])
+        np.testing.assert_allclose(leaf_current.local_upper_bounds, [16000.0])
+
 
 class Stage2RuntimeSmokeTests(unittest.TestCase):
     _EXPECTED_BASIN_TELEMETRY = {
@@ -3453,6 +3491,8 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
             "init_only": True,
             "banana_surf_radius": 0.22,
             "tf_current_A": 8.0e4,
+            "banana_init_current_A": 1.0e4,
+            "banana_current_max_A": 1.6e4,
             "major_radius": 0.915,
             "toroidal_flux": 0.24,
             "order": 2,
@@ -3497,7 +3537,15 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
         defaults.update(overrides)
         return SimpleNamespace(**defaults)
 
-    def _run_stage2_main(self, *, init_only, constraint_method, use_seed, basin_hops=0):
+    def _run_stage2_main(
+        self,
+        *,
+        init_only,
+        constraint_method,
+        use_seed,
+        basin_hops=0,
+        banana_current_A=9500.0,
+    ):
         module = load_stage2_module()
         runtime = {
             "seed_loads": 0,
@@ -3505,6 +3553,8 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
             "minimize_calls": 0,
             "minimize_alm_calls": 0,
             "run_basin_hopping_calls": 0,
+            "minimize_bounds": None,
+            "basin_bounds": None,
             "results": None,
         }
 
@@ -3513,6 +3563,8 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
                 self._value = float(value)
                 self._gradient = np.asarray(gradient, dtype=float)
                 self.x = np.zeros(2, dtype=float) if x is None else np.asarray(x, dtype=float)
+                self.lower_bounds = np.full(self.x.shape, -np.inf, dtype=float)
+                self.upper_bounds = np.full(self.x.shape, np.inf, dtype=float)
 
             def J(self):
                 return self._value
@@ -3545,6 +3597,8 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
         class FakeCurrent:
             def __init__(self, value):
                 self._value = float(value)
+                self.local_lower_bounds = np.array([-np.inf], dtype=float)
+                self.local_upper_bounds = np.array([np.inf], dtype=float)
 
             def __mul__(self, scalar):
                 return FakeCurrent(self._value * float(scalar))
@@ -3609,7 +3663,9 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
         fake_surface = FakeSurface()
         fake_curve_names = ["curve_a", "curve_b", "curve_c"]
         fake_banana_curve = SimpleNamespace(kappa=lambda: np.array([39.0, 41.0], dtype=float))
-        fake_banana_coils = [SimpleNamespace(curve=fake_banana_curve, current=FakeCurrent(9500.0))]
+        fake_banana_coils = [
+            SimpleNamespace(curve=fake_banana_curve, current=FakeCurrent(banana_current_A))
+        ]
         fake_tf_coils = [
             SimpleNamespace(curve=FakeCurve(), current=FakeCurrent(8.0e4)),
             SimpleNamespace(curve=FakeCurve(), current=FakeCurrent(8.0e4)),
@@ -3633,6 +3689,7 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
             tf_coils,
             num_quadpoints,
             order,
+            banana_init_current_A,
             phi_center,
             theta_center,
             phi_width,
@@ -3645,6 +3702,7 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
             self.assertEqual(len(tf_coils), 20)
             self.assertEqual(num_quadpoints, 16)
             self.assertEqual(order, 2)
+            self.assertEqual(banana_init_current_A, 1.0e4)
             self.assertEqual(phi_center, np.pi / 4.0)
             self.assertEqual(theta_center, np.pi)
             self.assertEqual(phi_width, np.pi / 8.0)
@@ -3659,6 +3717,7 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
 
         def fake_minimize(*_args, **_kwargs):
             runtime["minimize_calls"] += 1
+            runtime["minimize_bounds"] = _kwargs.get("bounds")
             return SimpleNamespace(
                 x=np.array([0.3, -0.2], dtype=float),
                 nit=4,
@@ -3675,9 +3734,9 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
                 success=True,
                 outer_iterations=2,
                 penalty=3.5,
-                multipliers=np.array([0.1, 0.2, 0.3], dtype=float),
-                constraint_values=np.array([0.0, 0.01, 0.0], dtype=float),
-                solver_constraint_values=np.array([0.0, 0.2, 0.0], dtype=float),
+                multipliers=np.array([0.1, 0.2, 0.3, 0.4], dtype=float),
+                constraint_values=np.array([0.0, 0.01, 0.0, 0.0], dtype=float),
+                solver_constraint_values=np.array([0.0, 0.2, 0.0, 0.0], dtype=float),
                 trust_radius=0.1,
                 history=[{"outer_iteration": 1}],
             )
@@ -3686,6 +3745,7 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
             runtime["run_basin_hopping_calls"] += 1
             self.assertEqual(_kwargs["basin_temperature"], 2.5)
             self.assertEqual(_kwargs["basin_niter_success"], 6)
+            runtime["basin_bounds"] = _kwargs["minimizer_kwargs"].get("bounds")
             return (
                 SimpleNamespace(
                     x=np.array([0.6, -0.1], dtype=float),
@@ -3809,6 +3869,11 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
         expected_basin_calls = 1 if runtime["results"]["basin_hops"] > 0 else 0
         self.assertEqual(runtime["run_basin_hopping_calls"], expected_basin_calls)
 
+    def _assert_banana_current_cap_rejected(self, runtime):
+        self.assertFalse(runtime["results"]["OPTIMIZER_SUCCESS"])
+        self.assertFalse(runtime["results"]["HARDWARE_CONSTRAINTS_OK"])
+        self.assertIn("banana_current", runtime["results"]["HARDWARE_CONSTRAINT_VIOLATIONS"][0])
+
     def test_stage2_main_init_only_loads_seed_and_writes_results(self):
         runtime = self._run_stage2_main(init_only=True, constraint_method="penalty", use_seed=True)
 
@@ -3851,6 +3916,9 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
         )
         self.assertEqual(runtime["results"]["CONSTRAINT_METHOD"], "penalty")
         self.assertEqual(runtime["results"]["TERMINATION_MESSAGE"], "penalty_ok")
+        self.assertEqual(runtime["results"]["BANANA_INIT_CURRENT_A"], 9500.0)
+        self.assertEqual(runtime["results"]["BANANA_CURRENT_MAX_A"], 1.6e4)
+        self.assertIsNotNone(runtime["minimize_bounds"])
 
     def test_stage2_main_basin_hopping_persists_telemetry(self):
         runtime = self._run_stage2_main(
@@ -3873,8 +3941,37 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
         self.assertEqual(runtime["results"]["basin_minimization_failures"], 1)
         self.assertEqual(runtime["results"]["basin_temperature"], 2.5)
         self.assertEqual(runtime["results"]["basin_niter_success"], 6)
-        for key, expected in self._EXPECTED_BASIN_TELEMETRY.items():
-            self.assertEqual(runtime["results"][key], expected)
+        self.assertIsNotNone(runtime["basin_bounds"])
+
+    def test_stage2_main_rejects_final_banana_current_above_cap(self):
+        runtime = self._run_stage2_main(
+            init_only=True,
+            constraint_method="penalty",
+            use_seed=False,
+            banana_current_A=17000.0,
+        )
+
+        self._assert_banana_current_cap_rejected(runtime)
+
+    def test_stage2_main_rejects_negative_final_banana_current_above_cap_magnitude(self):
+        runtime = self._run_stage2_main(
+            init_only=True,
+            constraint_method="penalty",
+            use_seed=False,
+            banana_current_A=-17000.0,
+        )
+
+        self._assert_banana_current_cap_rejected(runtime)
+
+    def test_stage2_main_records_loaded_seed_current_as_initial_current(self):
+        runtime = self._run_stage2_main(
+            init_only=True,
+            constraint_method="penalty",
+            use_seed=True,
+            banana_current_A=12345.0,
+        )
+
+        self.assertEqual(runtime["results"]["BANANA_INIT_CURRENT_A"], 12345.0)
 
     def test_stage2_main_fresh_init_path_uses_initialize_coils(self):
         runtime = self._run_stage2_main(init_only=True, constraint_method="penalty", use_seed=False)

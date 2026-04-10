@@ -46,6 +46,7 @@ def build_stage2_results(
     tf_current_A,
     tf_current_sum_abs_A,
     num_tf_coils,
+    initial_banana_current_A,
     banana_current_A,
     banana_to_tf_current_ratio,
     cc_threshold,
@@ -94,6 +95,8 @@ def build_stage2_results(
         "TF_CURRENT_A": float(tf_current_A),
         "TF_CURRENT_SUM_ABS_A": float(tf_current_sum_abs_A),
         "NUM_TF_COILS": int(num_tf_coils),
+        "BANANA_INIT_CURRENT_A": float(initial_banana_current_A),
+        "BANANA_CURRENT_MAX_A": float(args.banana_current_max_A),
         "BANANA_CURRENT_A": float(banana_current_A),
         "BANANA_TO_TF_CURRENT_RATIO": float(banana_to_tf_current_ratio),
         "CC_THRESHOLD": cc_threshold,
@@ -232,6 +235,7 @@ def stage2_constraint_activity_tolerances(
         1e-3,
         max(4.0 * float(distance_smoothing), _SMOOTHING_EPS),
         max(4.0 * float(curvature_smoothing), _SMOOTHING_EPS),
+        1e-3,
     ]
 
 
@@ -327,6 +331,8 @@ def evaluate_stage2_alm_problem(
     length_target,
     Jccdist,
     Jc,
+    banana_current,
+    banana_current_max_A,
     distance_smoothing,
     curvature_smoothing,
     multipliers,
@@ -365,6 +371,17 @@ def evaluate_stage2_alm_problem(
         base_objective_optimizable,
     )
 
+    (
+        banana_current_abs_A,
+        banana_current_violation,
+        banana_current_signed_value,
+        banana_current_grad,
+    ) = evaluate_banana_current_upper_bound(
+        banana_current,
+        banana_current_max_A,
+        base_objective_optimizable,
+    )
+
     evaluation = augmented_inequality_objective(
         base_value,
         base_grad,
@@ -372,8 +389,9 @@ def evaluate_stage2_alm_problem(
             coil_length - length_target,
             curve_curve_signed_value,
             curvature_signed_value,
+            banana_current_signed_value,
         ],
-        [length_grad, curve_curve_grad, curvature_grad],
+        [length_grad, curve_curve_grad, curvature_grad, banana_current_grad],
         multipliers,
         penalty,
     )
@@ -384,13 +402,20 @@ def evaluate_stage2_alm_problem(
                 "coil_length_upper_bound",
                 "coil_coil_spacing",
                 "max_curvature",
+                "banana_current_upper_bound",
             ],
             "dual_update_values": [
                 coil_length - length_target,
                 curve_curve_signed_value,
                 curvature_signed_value,
+                banana_current_signed_value,
             ],
-            "constraint_grads": [length_grad, curve_curve_grad, curvature_grad],
+            "constraint_grads": [
+                length_grad,
+                curve_curve_grad,
+                curvature_grad,
+                banana_current_grad,
+            ],
             "constraint_activity_tolerances": stage2_constraint_activity_tolerances(
                 distance_smoothing,
                 curvature_smoothing,
@@ -399,11 +424,13 @@ def evaluate_stage2_alm_problem(
                 length_violation,
                 curve_curve_violation,
                 curvature_violation,
+                banana_current_violation,
             ],
             "max_feasibility_violation": max(
                 length_violation,
                 curve_curve_violation,
                 curvature_violation,
+                banana_current_violation,
             ),
         }
     )
@@ -426,6 +453,35 @@ def evaluate_stage2_alm_problem(
         f", Curvature={max_curvature:.2f}, Curv+={curvature_violation:.2e}, "
         f"Curvg={curvature_signed_value:.2e}"
     )
+    outstr += (
+        f", |BananaI|={banana_current_abs_A:.2f}A, BananaI+={banana_current_violation:.2e}, "
+        f"BananaIg={banana_current_signed_value:.2e}"
+    )
     outstr += f", ║∇L_A║={evaluation['stationarity_norm']:.1e}, μ={penalty:.1e}"
     print(outstr)
     return evaluation
+
+
+def evaluate_banana_current_upper_bound(
+    banana_current,
+    banana_current_max_A,
+    base_objective_optimizable,
+):
+    banana_current_A = float(banana_current.get_value())
+    banana_current_abs_A = abs(banana_current_A)
+    banana_current_violation = upper_bound_residual(
+        banana_current_abs_A,
+        banana_current_max_A,
+    )
+    banana_current_signed_value = banana_current_abs_A - float(banana_current_max_A)
+    banana_current_sign = 1.0 if banana_current_A >= 0.0 else -1.0
+    banana_current_grad = np.asarray(
+        banana_current.vjp(banana_current_sign)(base_objective_optimizable),
+        dtype=float,
+    )
+    return (
+        banana_current_abs_A,
+        banana_current_violation,
+        banana_current_signed_value,
+        banana_current_grad,
+    )

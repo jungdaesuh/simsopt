@@ -44,6 +44,8 @@ class Stage2ArtifactConfig:
     basin_niter_success: int = 0
     basin_seed: int | None = None
     init_only: bool = False
+    banana_init_current_A: float = 1.0e4
+    banana_current_max_A: float = 1.6e4
 
 
 def parse_csv(raw: str, cast: Callable[[str], T]) -> list[T]:
@@ -66,6 +68,7 @@ def build_stage2_seed_spec(config: Stage2ArtifactConfig) -> Stage2SeedSpec:
         banana_surf_radius=config.banana_surf_radius,
         tf_current_A=config.tf_current_A,
         order=config.order,
+        banana_init_current_A=config.banana_init_current_A,
     )
 
 
@@ -115,6 +118,10 @@ def build_stage2_command(
         str(config.curvature_threshold),
         "--banana-surf-radius",
         str(config.banana_surf_radius),
+        "--banana-init-current-A",
+        str(config.banana_init_current_A),
+        "--banana-current-max-A",
+        str(config.banana_current_max_A),
         "--order",
         str(config.order),
         "--constraint-method",

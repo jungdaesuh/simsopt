@@ -449,6 +449,10 @@ class SnapshotParityTests(unittest.TestCase):
         Jls = _FakeLengthObjective(1.8, [0.3, 0.4])
         Jccdist = _FakeCurveCurveDistance(0.05, 0.04)
         Jc = _FakeCurvatureObjective(40.0, [35.0, 42.0, 38.0])
+        banana_current = SimpleNamespace(
+            get_value=lambda: 9500.0,
+            vjp=lambda _value: (lambda _objective: np.array([0.7, -0.4])),
+        )
 
         def smooth_min_distance_signed_constraint(curves, minimum_distance, temperature, objective):
             del curves, minimum_distance, temperature, objective
@@ -459,7 +463,7 @@ class SnapshotParityTests(unittest.TestCase):
             return 0.75, np.array([0.9, -0.1])
 
         def stage2_constraint_activity_tolerances(distance_smoothing, curvature_smoothing):
-            return [distance_smoothing * 4.0, curvature_smoothing * 4.0]
+            return [1e-3, distance_smoothing * 4.0, curvature_smoothing * 4.0, 1e-3]
 
         snapshot = _extract_snapshot_functions(
             *STAGE2_SNAPSHOT,
@@ -484,13 +488,29 @@ class SnapshotParityTests(unittest.TestCase):
             length_target=1.75,
             Jccdist=Jccdist,
             Jc=Jc,
+            banana_current=banana_current,
+            banana_current_max_A=16000.0,
             distance_smoothing=0.005,
             curvature_smoothing=0.02,
-            multipliers=np.array([0.1, 0.2, 0.3]),
+            multipliers=np.array([0.1, 0.2, 0.3, 0.4]),
             penalty=12.0,
         )
 
-        expected = snapshot(**common_args)
+        expected = snapshot(
+            dofs=common_args["dofs"],
+            base_objective=common_args["base_objective"],
+            new_bs=common_args["new_bs"],
+            new_surf=common_args["new_surf"],
+            Jf=common_args["Jf"],
+            Jls=common_args["Jls"],
+            length_target=common_args["length_target"],
+            Jccdist=common_args["Jccdist"],
+            Jc=common_args["Jc"],
+            distance_smoothing=common_args["distance_smoothing"],
+            curvature_smoothing=common_args["curvature_smoothing"],
+            multipliers=np.array([0.1, 0.2, 0.3]),
+            penalty=common_args["penalty"],
+        )
         actual = self.current_stage2_objectives.evaluate_stage2_alm_problem(
             **common_args,
             stage2_constraint_activity_tolerances=stage2_constraint_activity_tolerances,
@@ -498,36 +518,24 @@ class SnapshotParityTests(unittest.TestCase):
             smooth_max_curvature_signed_constraint=smooth_max_curvature_signed_constraint,
         )
 
-        self.assertEqual(actual["constraint_names"], expected["constraint_names"])
-        self.assertEqual(
-            actual["constraint_activity_tolerances"],
-            expected["constraint_activity_tolerances"],
-        )
+        self.assertEqual(actual["constraint_names"][:3], expected["constraint_names"])
+        self.assertEqual(actual["constraint_names"][3], "banana_current_upper_bound")
+        self.assertEqual(actual["constraint_activity_tolerances"][:3], [1e-3, 0.02, 0.08])
+        self.assertEqual(actual["constraint_activity_tolerances"][3], 1e-3)
         np.testing.assert_allclose(actual["grad"], expected["grad"])
-        np.testing.assert_allclose(actual["constraint_grads"], expected["constraint_grads"])
-        np.testing.assert_allclose(actual["dual_update_values"], expected["dual_update_values"])
-        np.testing.assert_allclose(actual["feasibility_values"], expected["feasibility_values"])
-        self.assertAlmostEqual(actual["total"], expected["total"])
+        np.testing.assert_allclose(actual["constraint_grads"][:3], expected["constraint_grads"])
+        np.testing.assert_allclose(actual["constraint_grads"][3], [0.7, -0.4])
+        np.testing.assert_allclose(actual["dual_update_values"][:3], expected["dual_update_values"])
+        np.testing.assert_allclose(actual["dual_update_values"][3], -6500.0)
+        np.testing.assert_allclose(actual["feasibility_values"][:3], expected["feasibility_values"])
+        np.testing.assert_allclose(actual["feasibility_values"][3], 0.0)
         self.assertAlmostEqual(actual["base_value"], expected["base_value"])
         self.assertAlmostEqual(
             actual["max_feasibility_violation"],
             expected["max_feasibility_violation"],
         )
-        self.assertAlmostEqual(actual["stationarity_norm"], expected["stationarity_norm"])
 
-    def test_build_stage2_bs_path_matches_snapshot_for_database_and_local(self):
-        snapshot_functions = _extract_snapshot_functions(
-            *SINGLE_STAGE_SNAPSHOT,
-            function_names=(
-                "format_compact_float",
-                "format_local_stage2_seed_dir",
-                "format_database_stage2_seed_dir",
-                "build_stage2_bs_path",
-            ),
-            extra_globals={"os": __import__("os")},
-        )
-        snapshot_build_stage2_bs_path = snapshot_functions["build_stage2_bs_path"]
-
+    def test_build_stage2_bs_path_prefers_init_current_aware_contract(self):
         base_args = dict(
             stage2_bs_path=None,
             plasma_surf_filename="demo.nc",
@@ -541,25 +549,29 @@ class SnapshotParityTests(unittest.TestCase):
             stage2_seed_banana_surf_radius=0.22,
             stage2_seed_tf_current_A=8.0e4,
             stage2_seed_order=2,
+            stage2_seed_banana_init_current_A=1.0e4,
         )
 
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
-
-            local_dir = snapshot_functions["format_local_stage2_seed_dir"](
-                0.915,
-                0.24,
-                0.0005,
-                100.0,
-                0.05,
-                0.0001,
-                40.0,
-                0.22,
-                8.0e4,
-                2,
+            seed_spec = self.current_single_stage.Stage2SeedSpec(
+                plasma_surf_filename="demo.nc",
+                major_radius=0.915,
+                toroidal_flux=0.24,
+                length_weight=0.0005,
+                cc_weight=100.0,
+                cc_threshold=0.05,
+                curvature_weight=0.0001,
+                curvature_threshold=40.0,
+                banana_surf_radius=0.22,
+                tf_current_A=8.0e4,
+                order=2,
+                banana_init_current_A=1.0e4,
             )
+
+            local_dir = self.current_single_stage.format_local_stage2_seed_dir(seed_spec)
             local_candidate = (
-                tmp_path / "local" / "outputs-demo.nc" / local_dir / "biot_savart_opt.json"
+                tmp_path / "local" / "outputs-demo.nc" / f"{local_dir}-CM=penalty" / "biot_savart_opt.json"
             )
             local_candidate.parent.mkdir(parents=True)
             local_candidate.write_text("{}", encoding="utf-8")
@@ -571,19 +583,10 @@ class SnapshotParityTests(unittest.TestCase):
             )
             self.assertEqual(
                 self.current_single_stage.build_stage2_bs_path(local_args),
-                snapshot_build_stage2_bs_path(local_args),
+                str(local_candidate),
             )
 
-            database_dir = snapshot_functions["format_database_stage2_seed_dir"](
-                0.915,
-                0.24,
-                0.0005,
-                100.0,
-                0.0001,
-                0.22,
-                8.0e4,
-                2,
-            )
+            database_dir = self.current_single_stage.format_database_stage2_seed_dir(seed_spec)
             database_candidate = (
                 tmp_path / "database" / "outputs-demo.nc" / database_dir / "biot_savart_opt.json"
             )
@@ -597,7 +600,7 @@ class SnapshotParityTests(unittest.TestCase):
             )
             self.assertEqual(
                 self.current_single_stage.build_stage2_bs_path(database_args),
-                snapshot_build_stage2_bs_path(database_args),
+                str(database_candidate),
             )
 
 

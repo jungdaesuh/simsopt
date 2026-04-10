@@ -58,7 +58,9 @@ STAGE2_ALM_CONSTRAINT_NAMES = (
     "coil_length_upper_bound",
     "coil_coil_spacing",
     "max_curvature",
+    "banana_current_upper_bound",
 )
+BANANA_CURRENT_HARD_LIMIT_A = 16000.0
 
 
 def _print_taylor_test_summary(name: str, result: dict) -> None:
@@ -71,6 +73,75 @@ def _print_taylor_test_summary(name: str, result: dict) -> None:
     )
     for epsilon, error in zip(result["epsilons"], result["errors"]):
         print(f"[{name}] eps={epsilon:.3e}, err={error:.3e}")
+
+
+def _raise_or_parser_error(parser, message: str) -> None:
+    if parser is not None:
+        parser.error(message)
+    raise ValueError(message)
+
+
+def validate_banana_current_cli_args(args, parser=None) -> None:
+    banana_init_current_A = float(args.banana_init_current_A)
+    banana_current_max_A = float(args.banana_current_max_A)
+    if not (0.0 < banana_init_current_A <= BANANA_CURRENT_HARD_LIMIT_A):
+        _raise_or_parser_error(
+            parser,
+            "--banana-init-current-A must be in the interval (0, 16000].",
+        )
+    if not (0.0 < banana_current_max_A <= BANANA_CURRENT_HARD_LIMIT_A):
+        _raise_or_parser_error(
+            parser,
+            "--banana-current-max-A must be in the interval (0, 16000].",
+        )
+    if banana_init_current_A > banana_current_max_A:
+        _raise_or_parser_error(
+            parser,
+            "--banana-init-current-A cannot exceed --banana-current-max-A.",
+        )
+
+
+def unwrap_current_optimizable(current):
+    scale = 1.0
+    current_optimizable = current
+    while hasattr(current_optimizable, "current_to_scale") and hasattr(
+        current_optimizable,
+        "scale",
+    ):
+        scale *= float(current_optimizable.scale)
+        current_optimizable = current_optimizable.current_to_scale
+    if not hasattr(current_optimizable, "local_lower_bounds") or not hasattr(
+        current_optimizable,
+        "local_upper_bounds",
+    ):
+        raise TypeError("Banana current does not expose local bounds.")
+    return current_optimizable, scale
+
+
+def apply_banana_current_upper_bound(current, banana_current_max_A):
+    current_optimizable, scale = unwrap_current_optimizable(current)
+    if scale == 0.0:
+        raise ValueError("Banana current scale must be non-zero to apply a bound.")
+    lower_bounds = np.asarray(current_optimizable.local_lower_bounds, dtype=float).copy()
+    upper_bounds = np.asarray(current_optimizable.local_upper_bounds, dtype=float).copy()
+    scaled_magnitude_bound = float(banana_current_max_A) / abs(scale)
+    lower_bounds[0] = max(lower_bounds[0], -scaled_magnitude_bound)
+    upper_bounds[0] = min(upper_bounds[0], scaled_magnitude_bound)
+    current_optimizable.local_lower_bounds = lower_bounds
+    current_optimizable.local_upper_bounds = upper_bounds
+
+
+def build_lbfgsb_bounds(optimizable):
+    return list(
+        zip(
+            np.asarray(optimizable.lower_bounds, dtype=float),
+            np.asarray(optimizable.upper_bounds, dtype=float),
+        )
+    )
+
+
+def banana_current_exceeds_limit(current_A: float, banana_current_max_A: float) -> bool:
+    return abs(float(current_A)) > float(banana_current_max_A)
 
 
 def parse_args():
@@ -122,6 +193,18 @@ def parse_args():
         help="Per-TF-coil current in physical SI amperes (default 1e5).",
     )
     parser.add_argument(
+        "--banana-init-current-A",
+        type=float,
+        default=float(os.environ.get("BANANA_INIT_CURRENT_A", "1e4")),
+        help="Fresh-initialization banana-coil current in SI amperes.",
+    )
+    parser.add_argument(
+        "--banana-current-max-A",
+        type=float,
+        default=float(os.environ.get("BANANA_CURRENT_MAX_A", "16000")),
+        help="Hard upper bound on the realized banana-coil current in SI amperes.",
+    )
+    parser.add_argument(
         "--major-radius",
         type=float,
         default=float(os.environ.get("MAJOR_RADIUS", "0.915")),
@@ -161,7 +244,7 @@ def parse_args():
         "--constraint-method",
         choices=["penalty", "alm"],
         default=os.environ.get("CONSTRAINT_METHOD", "penalty"),
-        help="Use the legacy weighted-penalty objective or the augmented Lagrangian outer loop.",
+        help="Use the weighted-penalty objective or the augmented Lagrangian outer loop.",
     )
     parser.add_argument(
         "--alm-max-outer-iters",
@@ -362,7 +445,9 @@ def parse_args():
         default=int(os.environ.get("BASIN_SEED", "-1")),
         help="RNG seed for basin-hopping (-1 = random, default). Set for reproducibility.",
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+    validate_banana_current_cli_args(args, parser=parser)
+    return args
 
 
 def build_equilibrium_path(args):
@@ -423,6 +508,7 @@ def main(parsed_args=None):
     # ---------------------------------------------------------------------------------------
     args = parse_args() if parsed_args is None else parsed_args
     validate_alm_cli_args(args)
+    validate_banana_current_cli_args(args)
 
     # File for the desired boundary magnetic surface:
     plasma_surf_filename = args.plasma_surf_filename
@@ -487,6 +573,7 @@ def main(parsed_args=None):
             tf_coils,
             num_quadpoints,
             order,
+            args.banana_init_current_A,
             phi_center,
             theta_center,
             phi_width,
@@ -499,6 +586,7 @@ def main(parsed_args=None):
     new_banana_curve = init_coil_array[2]
     new_banana_coils = init_coil_array[3]
     new_surf_coils = surf_coils
+    initial_banana_current_A = float(new_banana_coils[0].current.get_value())
 
     # MAIN OPTIMIZATION
     # ---------------------------------------------------------------------------------------
@@ -571,6 +659,7 @@ def main(parsed_args=None):
         banana_surf_radius=banana_surf_radius,
         tf_current_A=tf_current_A,
         order=order,
+        banana_init_current_A=initial_banana_current_A,
     )
     OUT_DIR_ITER = (
         OUT_DIR
@@ -592,6 +681,21 @@ def main(parsed_args=None):
 
     # minimize gets called, optimizes based on degrees of freedom from objective function
     dofs = BASE_OBJECTIVE.x if CONSTRAINT_METHOD == "alm" else JF.x
+    lbfgsb_bounds = None
+    if CONSTRAINT_METHOD != "alm":
+        if args.stage2_bs_path and banana_current_exceeds_limit(
+            initial_banana_current_A,
+            args.banana_current_max_A,
+        ):
+            raise ValueError(
+                "Loaded Stage 2 seed starts above --banana-current-max-A; "
+                "penalty mode cannot accept an infeasible banana-current seed."
+            )
+        apply_banana_current_upper_bound(
+            new_banana_coils[0].current,
+            args.banana_current_max_A,
+        )
+        lbfgsb_bounds = build_lbfgsb_bounds(JF)
     fun = make_stage2_fun(JF, new_bs, new_surf, Jf, Jls, Jccdist, Jc)
     alm_result = None
     if CONSTRAINT_METHOD == "alm":
@@ -608,6 +712,8 @@ def main(parsed_args=None):
                 LENGTH_TARGET,
                 Jccdist,
                 Jc,
+                new_banana_coils[0].current,
+                args.banana_current_max_A,
                 args.alm_distance_smoothing,
                 args.alm_curvature_smoothing,
                 multipliers,
@@ -664,6 +770,7 @@ def main(parsed_args=None):
         minimizer_kwargs = {
             'method': 'L-BFGS-B',
             'jac': True,
+            'bounds': lbfgsb_bounds,
             'options': {'maxiter': MAXITER, 'maxcor': 300, 'ftol': args.ftol, 'gtol': args.gtol},
         }
         basin_niter_success = args.basin_niter_success if args.basin_niter_success > 0 else None
@@ -705,8 +812,14 @@ def main(parsed_args=None):
             optimizer_success = True
         print(f"Basin-hopping complete. Best fun={res.fun:.6e}, hops={args.basin_hops}, seed={rng_seed}")
     else:
-        res = minimize(fun, dofs, jac=True, method='L-BFGS-B',
-                       options={'maxiter': MAXITER, 'maxcor': 300, 'ftol': args.ftol, 'gtol': args.gtol})
+        res = minimize(
+            fun,
+            dofs,
+            jac=True,
+            method='L-BFGS-B',
+            bounds=lbfgsb_bounds,
+            options={'maxiter': MAXITER, 'maxcor': 300, 'ftol': args.ftol, 'gtol': args.gtol},
+        )
         res_nit = res.nit
         termination_message = str(res.message)
         optimizer_success = bool(res.success)
@@ -727,6 +840,7 @@ def main(parsed_args=None):
     final_coil_length = float(Jls.J())
     final_curve_curve_min_dist = float(Jccdist.shortest_distance())
     final_max_curvature = float(np.max(new_banana_curve.kappa()))
+    final_banana_current_A = float(new_banana_coils[0].current.get_value())
     hardware_status = _evaluate_stage2_hardware_constraints(
         final_coil_length,
         LENGTH_TARGET,
@@ -735,6 +849,14 @@ def main(parsed_args=None):
         final_max_curvature,
         CURVATURE_THRESHOLD,
     )
+    if banana_current_exceeds_limit(final_banana_current_A, args.banana_current_max_A):
+        hardware_status["success"] = False
+        hardware_status["violations"] = list(hardware_status["violations"]) + [
+            (
+                f"|banana_current| {abs(final_banana_current_A):.6f} exceeds maximum "
+                f"{float(args.banana_current_max_A):.6f}"
+            )
+        ]
     if not hardware_status["success"]:
         optimizer_success = False
         constraint_summary = "; ".join(hardware_status["violations"])
@@ -772,9 +894,10 @@ def main(parsed_args=None):
         tf_current_A=tf_current_A,
         tf_current_sum_abs_A=sum(abs(coil.current.get_value()) for coil in new_tf_coils),
         num_tf_coils=len(new_tf_coils),
-        banana_current_A=new_banana_coils[0].current.get_value(),
+        initial_banana_current_A=initial_banana_current_A,
+        banana_current_A=final_banana_current_A,
         banana_to_tf_current_ratio=(
-            new_banana_coils[0].current.get_value() / new_tf_coils[0].current.get_value()
+            final_banana_current_A / new_tf_coils[0].current.get_value()
         ),
         cc_threshold=CC_THRESHOLD,
         cc_weight=CC_WEIGHT,

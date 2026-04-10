@@ -63,9 +63,11 @@ from topology_scorer import (
 from workflow_helpers import (
     Stage2SeedSpec,
     format_database_stage2_seed_dir,
+    format_database_stage2_seed_dir_without_init_current,
     format_legacy_database_stage2_seed_dir,
     format_legacy_local_stage2_seed_dir,
     format_local_stage2_seed_dir,
+    format_local_stage2_seed_dir_without_init_current,
     format_local_stage2_seed_dir_without_tf,
 )
 from workflow_runner_common import load_stage2_artifact_results
@@ -240,6 +242,7 @@ def build_stage2_bs_path(args):
         banana_surf_radius=args.stage2_seed_banana_surf_radius,
         tf_current_A=args.stage2_seed_tf_current_A,
         order=args.stage2_seed_order,
+        banana_init_current_A=args.stage2_seed_banana_init_current_A,
     )
 
     if args.stage2_source == "database":
@@ -252,6 +255,20 @@ def build_stage2_bs_path(args):
         )
         if os.path.exists(candidate):
             return candidate
+
+        legacy_init_dir = format_database_stage2_seed_dir_without_init_current(seed_spec)
+        legacy_init = os.path.join(
+            args.database_stage2_root,
+            f"outputs-{args.plasma_surf_filename}",
+            legacy_init_dir,
+            "biot_savart_opt.json",
+        )
+        if os.path.exists(legacy_init):
+            print(
+                f"Note: found legacy Stage 2 database output at {legacy_init_dir}/ "
+                "(missing INITC segment)"
+            )
+            return legacy_init
 
         legacy_dir = format_legacy_database_stage2_seed_dir(seed_spec)
         legacy = os.path.join(
@@ -266,6 +283,7 @@ def build_stage2_bs_path(args):
         return candidate
 
     seed_dir = format_local_stage2_seed_dir(seed_spec)
+    legacy_init_dir = format_local_stage2_seed_dir_without_init_current(seed_spec)
     current_penalty_candidate = os.path.join(
         args.local_stage2_root,
         f"outputs-{args.plasma_surf_filename}",
@@ -274,6 +292,19 @@ def build_stage2_bs_path(args):
     )
     if os.path.exists(current_penalty_candidate):
         return current_penalty_candidate
+
+    legacy_init_penalty_candidate = os.path.join(
+        args.local_stage2_root,
+        f"outputs-{args.plasma_surf_filename}",
+        legacy_init_dir + "-CM=penalty",
+        "biot_savart_opt.json",
+    )
+    if os.path.exists(legacy_init_penalty_candidate):
+        print(
+            f"Note: found legacy Stage 2 output at {legacy_init_dir}/ "
+            "(missing INITC segment)"
+        )
+        return legacy_init_penalty_candidate
 
     candidate = os.path.join(
         args.local_stage2_root,
@@ -284,6 +315,19 @@ def build_stage2_bs_path(args):
     if os.path.exists(candidate):
         print(f"Note: found legacy Stage 2 output at {seed_dir}/ (missing constraint-method segment)")
         return candidate
+
+    legacy_init_candidate = os.path.join(
+        args.local_stage2_root,
+        f"outputs-{args.plasma_surf_filename}",
+        legacy_init_dir,
+        "biot_savart_opt.json",
+    )
+    if os.path.exists(legacy_init_candidate):
+        print(
+            f"Note: found legacy Stage 2 output at {legacy_init_dir}/ "
+            "(missing INITC and constraint-method segments)"
+        )
+        return legacy_init_candidate
 
     no_tfc_dir = format_local_stage2_seed_dir_without_tf(seed_spec)
     no_tfc_candidate = os.path.join(
@@ -317,6 +361,9 @@ def build_stage2_bs_path(args):
             os.path.join(parent, seed_dir + "-CM=penalty-BH=*", "biot_savart_opt.json"),
             os.path.join(parent, seed_dir + "-CM=alm-*", "biot_savart_opt.json"),
             os.path.join(parent, seed_dir + "-CM=alm-*-BH=*", "biot_savart_opt.json"),
+            os.path.join(parent, legacy_init_dir + "-CM=penalty-BH=*", "biot_savart_opt.json"),
+            os.path.join(parent, legacy_init_dir + "-CM=alm-*", "biot_savart_opt.json"),
+            os.path.join(parent, legacy_init_dir + "-CM=alm-*-BH=*", "biot_savart_opt.json"),
         ],
         "current Stage 2 output",
     )
@@ -460,6 +507,11 @@ def apply_default_stage2_seed_args(args):
         args.stage2_seed_tf_current_A = default_seed.get("tf_current_A", 1.0e5)
     if args.stage2_seed_order is None:
         args.stage2_seed_order = default_seed.get("order", 2)
+    if args.stage2_seed_banana_init_current_A is None:
+        args.stage2_seed_banana_init_current_A = default_seed.get(
+            "banana_init_current_A",
+            1.0e4,
+        )
     return args
 
 
@@ -920,6 +972,15 @@ def parse_args():
         default=int(os.environ["STAGE2_SEED_ORDER"]) if "STAGE2_SEED_ORDER" in os.environ else None,
     )
     parser.add_argument(
+    parser.add_argument(
+        "--stage2-seed-banana-init-current-A",
+        type=float,
+        default=(
+            float(os.environ["STAGE2_SEED_BANANA_INIT_CURRENT_A"])
+            if "STAGE2_SEED_BANANA_INIT_CURRENT_A" in os.environ
+            else None
+        ),
+    )
         "--checkpoint-every",
         type=int,
         default=int(os.environ.get("CHECKPOINT_EVERY", "0")),

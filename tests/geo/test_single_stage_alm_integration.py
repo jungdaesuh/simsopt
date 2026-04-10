@@ -482,7 +482,7 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
 
         tolerances = stage2_constraint_activity_tolerances(0.005, 0.05)
 
-        self.assertEqual(tolerances, [1e-3, 0.02, 0.2])
+        self.assertEqual(tolerances, [1e-3, 0.02, 0.2, 1e-3])
 
     def test_stage2_builds_bounded_alm_settings(self):
         alm_utils = load_alm_utils_module()

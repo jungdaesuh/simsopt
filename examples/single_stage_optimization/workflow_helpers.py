@@ -22,6 +22,7 @@ class Stage2SeedSpec:
     banana_surf_radius: float
     tf_current_A: float
     order: int
+    banana_init_current_A: float = 1.0e4
 
 
 @dataclass(frozen=True)
@@ -46,12 +47,27 @@ def format_local_stage2_seed_dir(spec: Stage2SeedSpec) -> str:
         f"-CW={format_compact_float(spec.curvature_weight)}"
         f"-CT={format_compact_float(spec.curvature_threshold)}"
         f"-SR={spec.banana_surf_radius:0.3f}"
+        f"-INITC={format_compact_float(spec.banana_init_current_A)}"
         f"-TFC={format_compact_float(spec.tf_current_A)}"
         f"-Order={spec.order}"
     )
 
 
 def format_database_stage2_seed_dir(spec: Stage2SeedSpec) -> str:
+    return (
+        f"MR={format_compact_float(spec.major_radius)}"
+        f"-TF={format_compact_float(spec.toroidal_flux)}"
+        f"-LW={format_compact_float(spec.length_weight)}"
+        f"-CCW={format_compact_float(spec.cc_weight)}"
+        f"-CW={format_compact_float(spec.curvature_weight)}"
+        f"-SR={format_compact_float(spec.banana_surf_radius)}"
+        f"-INITC={format_compact_float(spec.banana_init_current_A)}"
+        f"-TFC={format_compact_float(spec.tf_current_A)}"
+        f"-Order={spec.order}"
+    )
+
+
+def format_database_stage2_seed_dir_without_init_current(spec: Stage2SeedSpec) -> str:
     return (
         f"MR={format_compact_float(spec.major_radius)}"
         f"-TF={format_compact_float(spec.toroidal_flux)}"
@@ -86,6 +102,21 @@ def format_local_stage2_seed_dir_without_tf(spec: Stage2SeedSpec) -> str:
         f"-CW={format_compact_float(spec.curvature_weight)}"
         f"-CT={format_compact_float(spec.curvature_threshold)}"
         f"-SR={spec.banana_surf_radius:0.3f}"
+        f"-Order={spec.order}"
+    )
+
+
+def format_local_stage2_seed_dir_without_init_current(spec: Stage2SeedSpec) -> str:
+    return (
+        f"R0={format_compact_float(spec.major_radius)}"
+        f"-s={format_compact_float(spec.toroidal_flux)}"
+        f"-LW={format_compact_float(spec.length_weight)}"
+        f"-CCW={format_compact_float(spec.cc_weight)}"
+        f"-CCT={format_compact_float(spec.cc_threshold)}"
+        f"-CW={format_compact_float(spec.curvature_weight)}"
+        f"-CT={format_compact_float(spec.curvature_threshold)}"
+        f"-SR={spec.banana_surf_radius:0.3f}"
+        f"-TFC={format_compact_float(spec.tf_current_A)}"
         f"-Order={spec.order}"
     )
 

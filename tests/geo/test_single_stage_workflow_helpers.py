@@ -75,6 +75,7 @@ class WorkflowHelpersTests(unittest.TestCase):
         )
 
         self.assertIn("TFC=80000", run_dir)
+        self.assertIn("INITC=10000", run_dir)
         self.assertIn("-CM=penalty", run_dir)
         self.assertIn("-BH=3-BS=0.01-BSeed=7-BT=2.5-BNS=8", run_dir)
 
@@ -109,7 +110,7 @@ class WorkflowHelpersTests(unittest.TestCase):
         self.assertEqual(
             str(artifact_path),
             "/tmp/stage2-root/outputs-demo.nc/"
-            "R0=0.915-s=0.24-LW=0.0005-CCW=100-CCT=0.05-CW=0.0001-CT=40-SR=0.220-TFC=80000-Order=2-CM=penalty/"
+            "R0=0.915-s=0.24-LW=0.0005-CCW=100-CCT=0.05-CW=0.0001-CT=40-SR=0.220-INITC=10000-TFC=80000-Order=2-CM=penalty/"
             "biot_savart_opt.json",
         )
 
@@ -156,6 +157,8 @@ class WorkflowRunnerCommonTests(unittest.TestCase):
 
         self.assertEqual(command[0], "python")
         self.assertIn("--tf-current-A", command)
+        self.assertIn("--banana-init-current-A", command)
+        self.assertIn("--banana-current-max-A", command)
         self.assertIn("--output-root", command)
         self.assertIn("--init-only", command)
 
@@ -309,6 +312,8 @@ class BaselineSweepScriptTests(unittest.TestCase):
             "basin_stepsize": 0.01,
             "basin_seed": None,
             "init_only": False,
+            "banana_init_current_A": 1.0e4,
+            "banana_current_max_A": 1.6e4,
         }
         config.update(overrides)
         return common.Stage2ArtifactConfig(**config)

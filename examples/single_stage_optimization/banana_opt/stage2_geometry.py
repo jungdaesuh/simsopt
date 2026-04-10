@@ -36,6 +36,7 @@ def initialize_coils(
     tf_coils,
     num_quadpoints,
     order,
+    banana_init_current_A,
     phi_center,
     theta_center,
     phi_width,
@@ -54,7 +55,7 @@ def initialize_coils(
 
     banana_coils = coils_via_symmetries(
         [banana_curve],
-        [ScaledCurrent(Current(1), 1e4)],
+        [ScaledCurrent(Current(1), banana_init_current_A)],
         surf_coils.nfp,
         surf_coils.stellsym,
     )
