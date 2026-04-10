@@ -43,13 +43,22 @@ from ..jax_core._math_utils import (
     as_runtime_float64 as _as_runtime_float64,
     zeros as _zeros,
 )
+from ..jax_core.curve_geometry import curve_geometry_from_spec
 from ..jax_core.field import (
     grouped_biot_savart_B_from_spec,
     coil_set_spec_from_dof_extraction_spec,
+    coil_specs_from_dof_extraction_spec,
     grouped_coil_currents_from_spec,
 )
 from ..jax_core.sharding import inspect_array_sharding_summary
 from ..objectives.utilities import forward_backward_jax, plu_solve_jax
+from .curve import incremental_arclength_pure, kappa_pure
+from .curveobjectives import (
+    Lp_curvature_pure,
+    cc_distance_pure,
+    cs_distance_pure,
+    curve_length_pure,
+)
 from .boozer_residual_jax import (
     boozer_residual_scalar,
     _surface_geometry_from_dofs,
@@ -60,6 +69,7 @@ from .boozersurface_jax import (
     _make_boozer_penalty_objective_closure,
 )
 from .label_constraints_jax import compute_G_from_currents
+from .surfaceobjectives import surface_to_surface_distance_pure
 
 __all__ = [
     "BoozerResidualJAX",
@@ -128,6 +138,13 @@ def _take_runtime_scalar(array, index):
     )
 
 
+def _take_runtime_row(array, index):
+    return jnp.reshape(
+        _take_runtime_entries(array, np.array([int(index)], dtype=np.int32)),
+        array.shape[1:],
+    )
+
+
 def _split_x_inner_runtime(x_inner, optimize_G):
     length = int(x_inner.shape[0])
     sdof_count = length - (2 if optimize_G else 1)
@@ -140,6 +157,233 @@ def _split_x_inner_runtime(x_inner, optimize_G):
 
 def _runtime_float64_scalar(value, *, reference):
     return _as_runtime_float64(value, reference=reference)
+
+
+def _runtime_float64_array(value, *, reference):
+    return _as_runtime_float64(value, reference=reference)
+
+
+def _curve_curve_penalty_from_grouped_spec(coil_set_spec, minimum_distance):
+    total = _runtime_float64_scalar(0.0, reference=minimum_distance)
+    curve_terms = []
+    for group in coil_set_spec.groups:
+        gammas = _as_jax_float64(group.gammas)
+        gammadashs = _as_jax_float64(group.gammadashs)
+        for coil_index in range(int(gammas.shape[0])):
+            curve_terms.append(
+                (
+                    _take_runtime_row(gammas, coil_index),
+                    _take_runtime_row(gammadashs, coil_index),
+                )
+            )
+    for curve_index, (gamma_i, gammadash_i) in enumerate(curve_terms):
+        for gamma_j, gammadash_j in curve_terms[:curve_index]:
+            total = total + cc_distance_pure(
+                gamma_i,
+                gammadash_i,
+                gamma_j,
+                gammadash_j,
+                minimum_distance,
+            )
+    return total
+
+
+def _curve_surface_penalty_from_grouped_spec(
+    coil_set_spec,
+    surface_gamma,
+    surface_normal,
+    minimum_distance,
+):
+    total = _runtime_float64_scalar(0.0, reference=minimum_distance)
+    surface_gamma = surface_gamma.reshape((-1, 3))
+    surface_normal = surface_normal.reshape((-1, 3))
+    for group in coil_set_spec.groups:
+        gammas = _as_jax_float64(group.gammas)
+        gammadashs = _as_jax_float64(group.gammadashs)
+        for coil_index in range(int(gammas.shape[0])):
+            total = total + cs_distance_pure(
+                _take_runtime_row(gammas, coil_index),
+                _take_runtime_row(gammadashs, coil_index),
+                surface_gamma,
+                surface_normal,
+                minimum_distance,
+            )
+    return total
+
+
+def _banana_curve_penalties_from_coil_dofs(
+    coil_dofs,
+    coil_dof_extraction_spec,
+    *,
+    banana_curve_index,
+    length_target,
+    curvature_threshold,
+    curvature_p_norm,
+):
+    coil_specs = coil_specs_from_dof_extraction_spec(coil_dof_extraction_spec, coil_dofs)
+    banana_curve_spec = coil_specs[int(banana_curve_index)].curve
+    _gamma, banana_gammadash, banana_gammadashdash = curve_geometry_from_spec(
+        banana_curve_spec
+    )
+    banana_curve_length = curve_length_pure(incremental_arclength_pure(banana_gammadash))
+    zero = _runtime_float64_scalar(0.0, reference=banana_curve_length)
+    half = _runtime_float64_scalar(0.5, reference=banana_curve_length)
+    length_target_jax = _runtime_float64_scalar(length_target, reference=banana_curve_length)
+    curvature_threshold_jax = _runtime_float64_scalar(
+        curvature_threshold,
+        reference=banana_curve_length,
+    )
+    curvature_p_norm_jax = _runtime_float64_scalar(
+        curvature_p_norm,
+        reference=banana_curve_length,
+    )
+    length_delta = jnp.maximum(banana_curve_length - length_target_jax, zero)
+    length_penalty = half * (length_delta * length_delta)
+    curvature_penalty = Lp_curvature_pure(
+        kappa_pure(banana_gammadash, banana_gammadashdash),
+        banana_gammadash,
+        curvature_p_norm_jax,
+        curvature_threshold_jax,
+    )
+    return length_penalty, curvature_penalty
+
+
+def _traceable_full_single_stage_outer_objective(
+    x_inner,
+    coil_dofs,
+    coil_set_spec,
+    *,
+    quadpoints_phi,
+    quadpoints_theta,
+    mpol,
+    ntor,
+    nfp,
+    stellsym,
+    scatter_indices,
+    surface_kind,
+    optimize_G,
+    weight_inv_modB,
+    constraint_weight,
+    targetlabel,
+    label_type,
+    phi_idx,
+    iota_target,
+    surface_quadpoints_phi,
+    surface_quadpoints_theta,
+    coil_dof_extraction_spec,
+    outer_objective_config,
+):
+    J_boozer = _boozer_residual_J_of_x_inner(
+        x_inner,
+        coil_set_spec=coil_set_spec,
+        quadpoints_phi=quadpoints_phi,
+        quadpoints_theta=quadpoints_theta,
+        mpol=mpol,
+        ntor=ntor,
+        nfp=nfp,
+        stellsym=stellsym,
+        scatter_indices=scatter_indices,
+        surface_kind=surface_kind,
+        optimize_G=optimize_G,
+        weight_inv_modB=weight_inv_modB,
+        constraint_weight=constraint_weight,
+        targetlabel=targetlabel,
+        label_type=label_type,
+        phi_idx=phi_idx,
+    )
+    iota_penalty = _traceable_iota_target_penalty(
+        x_inner,
+        optimize_G=optimize_G,
+        iota_target=iota_target,
+    )
+    sdofs, _iota, _G = _split_x_inner_runtime(x_inner, optimize_G)
+    surface_gamma, xphi, xtheta = _surface_geometry_from_dofs(
+        sdofs,
+        surface_quadpoints_phi,
+        surface_quadpoints_theta,
+        mpol,
+        ntor,
+        nfp,
+        stellsym,
+        scatter_indices,
+        surface_kind=surface_kind,
+    )
+    surface_normal = jnp.cross(xphi, xtheta)
+    total = _runtime_float64_scalar(0.0, reference=J_boozer)
+
+    def _weighted_term(weight_key, value):
+        weight = outer_objective_config.get(weight_key, 0.0)
+        if not weight:
+            return _runtime_float64_scalar(0.0, reference=value)
+        return _runtime_float64_scalar(weight, reference=value) * value
+
+    total = total + _weighted_term("non_qs_weight", _qs_ratio_pure(
+        sdofs,
+        coil_set_spec,
+        quadpoints_phi=_runtime_float64_array(
+            outer_objective_config["non_qs_quadpoints_phi"],
+            reference=sdofs,
+        ),
+        quadpoints_theta=_runtime_float64_array(
+            outer_objective_config["non_qs_quadpoints_theta"],
+            reference=sdofs,
+        ),
+        mpol=mpol,
+        ntor=ntor,
+        nfp=nfp,
+        stellsym=stellsym,
+        scatter_indices=scatter_indices,
+        surface_kind=surface_kind,
+        axis=int(outer_objective_config["non_qs_axis"]),
+    ))
+    total = total + _weighted_term("residual_weight", J_boozer)
+    total = total + _weighted_term("iota_weight", iota_penalty)
+
+    length_penalty, curvature_penalty = _banana_curve_penalties_from_coil_dofs(
+        coil_dofs,
+        coil_dof_extraction_spec,
+        banana_curve_index=int(outer_objective_config["banana_curve_index"]),
+        length_target=outer_objective_config["length_target"],
+        curvature_threshold=outer_objective_config["curvature_threshold"],
+        curvature_p_norm=outer_objective_config["curvature_p_norm"],
+    )
+    total = total + _weighted_term("length_weight", length_penalty)
+    total = total + _weighted_term("curvature_weight", curvature_penalty)
+
+    curve_curve_penalty = _curve_curve_penalty_from_grouped_spec(
+        coil_set_spec,
+        _runtime_float64_scalar(
+            outer_objective_config["curve_curve_threshold"],
+            reference=surface_gamma,
+        ),
+    )
+    total = total + _weighted_term("curve_curve_weight", curve_curve_penalty)
+
+    curve_surface_penalty = _curve_surface_penalty_from_grouped_spec(
+        coil_set_spec,
+        surface_gamma,
+        surface_normal,
+        _runtime_float64_scalar(
+            outer_objective_config["curve_surface_threshold"],
+            reference=surface_gamma,
+        ),
+    )
+    total = total + _weighted_term("curve_surface_weight", curve_surface_penalty)
+
+    vessel_gamma = _runtime_float64_array(
+        outer_objective_config["vessel_gamma"],
+        reference=surface_gamma,
+    ).reshape((-1, 3))
+    surface_vessel_penalty = surface_to_surface_distance_pure(
+        surface_gamma,
+        vessel_gamma,
+        _runtime_float64_scalar(
+            outer_objective_config["surface_vessel_threshold"],
+            reference=surface_gamma,
+        ),
+    )
+    total = total + _weighted_term("surface_vessel_weight", surface_vessel_penalty)
+    return total
 
 
 def _surface_stellsym_mask_for_grid(
@@ -1124,11 +1368,15 @@ _TRACEABLE_TOTAL_OBJECTIVE_KEYS = (
     "label_type",
     "phi_idx",
     "iota_target",
+    "surface_quadpoints_phi",
+    "surface_quadpoints_theta",
+    "coil_dof_extraction_spec",
+    "outer_objective_config",
 )
 
 _TRACEABLE_EXACT_RESIDUAL_KEYS = (
-    "quadpoints_phi",
-    "quadpoints_theta",
+    "exact_quadpoints_phi",
+    "exact_quadpoints_theta",
     "mpol",
     "ntor",
     "nfp",
@@ -1156,11 +1404,15 @@ def _traceable_total_objective_kwargs(objective_kwargs):
 
 def _traceable_exact_residual_kwargs(objective_kwargs):
     """Select the exact-residual kwargs from the full traceable contract."""
-    return {key: objective_kwargs[key] for key in _TRACEABLE_EXACT_RESIDUAL_KEYS}
+    exact_kwargs = {key: objective_kwargs[key] for key in _TRACEABLE_EXACT_RESIDUAL_KEYS}
+    exact_kwargs["quadpoints_phi"] = exact_kwargs.pop("exact_quadpoints_phi")
+    exact_kwargs["quadpoints_theta"] = exact_kwargs.pop("exact_quadpoints_theta")
+    return exact_kwargs
 
 
 def _traceable_total_objective(
     x_inner,
+    coil_dofs,
     coil_set_spec,
     *,
     quadpoints_phi,
@@ -1178,8 +1430,37 @@ def _traceable_total_objective(
     label_type,
     phi_idx,
     iota_target,
+    surface_quadpoints_phi,
+    surface_quadpoints_theta,
+    coil_dof_extraction_spec,
+    outer_objective_config,
 ):
     """Pure single-stage objective evaluated at an explicit inner state."""
+    if outer_objective_config is not None:
+        return _traceable_full_single_stage_outer_objective(
+            x_inner,
+            coil_dofs,
+            coil_set_spec,
+            quadpoints_phi=quadpoints_phi,
+            quadpoints_theta=quadpoints_theta,
+            mpol=mpol,
+            ntor=ntor,
+            nfp=nfp,
+            stellsym=stellsym,
+            scatter_indices=scatter_indices,
+            surface_kind=surface_kind,
+            optimize_G=optimize_G,
+            weight_inv_modB=weight_inv_modB,
+            constraint_weight=constraint_weight,
+            targetlabel=targetlabel,
+            label_type=label_type,
+            phi_idx=phi_idx,
+            iota_target=iota_target,
+            surface_quadpoints_phi=surface_quadpoints_phi,
+            surface_quadpoints_theta=surface_quadpoints_theta,
+            coil_dof_extraction_spec=coil_dof_extraction_spec,
+            outer_objective_config=outer_objective_config,
+        )
     J_boozer = _boozer_residual_J_of_x_inner(
         x_inner,
         coil_set_spec=coil_set_spec,
@@ -1205,10 +1486,16 @@ def _traceable_total_objective(
     )
 
 
-def _evaluate_traceable_total_objective(x_inner, coil_set_spec, objective_kwargs):
+def _evaluate_traceable_total_objective(
+    x_inner,
+    coil_dofs,
+    coil_set_spec,
+    objective_kwargs,
+):
     """Evaluate the full traceable scalar objective from packed kwargs."""
     return _traceable_total_objective(
         x_inner,
+        coil_dofs,
         coil_set_spec,
         **_traceable_total_objective_kwargs(objective_kwargs),
     )
@@ -1304,6 +1591,7 @@ def _traceable_forward_result(
                 success,
                 _evaluate_traceable_total_objective(
                     solve_result["x"],
+                    coil_dofs,
                     coil_set_spec,
                     objective_kwargs,
                 ),
@@ -1332,6 +1620,7 @@ def _traceable_total_gradient(
     def total_of_coils(cd):
         return _evaluate_traceable_total_objective(
             solved_x,
+            cd,
             coil_set_spec_from_dofs(cd),
             objective_kwargs,
         )
@@ -1340,6 +1629,7 @@ def _traceable_total_gradient(
     dJ_dx = jax.grad(
         lambda x: _evaluate_traceable_total_objective(
             x,
+            coil_dofs,
             coil_set_spec,
             objective_kwargs,
         )
@@ -1408,7 +1698,13 @@ def _traceable_predict_warmstart_x(
     return baseline_x + dx
 
 
-def _build_traceable_objective_state(booz_jax, bs_jax, iota_target):
+def _build_traceable_objective_state(
+    booz_jax,
+    bs_jax,
+    iota_target,
+    *,
+    outer_objective_config=None,
+):
     """Return the shared state used by the traceable objective builders.
 
     This setup reads the solved mutable object state once, then keeps the
@@ -1440,12 +1736,16 @@ def _build_traceable_objective_state(booz_jax, bs_jax, iota_target):
     )
     optimize_G = warmstart_G is not None
     predictor_kind = booz_jax.boozer_type
-    quadpoints_phi, quadpoints_theta, mask_indices = (
+    solve_quadpoints_phi = _as_jax_float64(np.asarray(booz_jax.quadpoints_phi, dtype=float))
+    solve_quadpoints_theta = _as_jax_float64(
+        np.asarray(booz_jax.quadpoints_theta, dtype=float)
+    )
+    exact_quadpoints_phi, exact_quadpoints_theta, mask_indices = (
         _canonicalize_traceable_exact_quadrature(booz_jax)
     )
     objective_kwargs = {
-        "quadpoints_phi": quadpoints_phi,
-        "quadpoints_theta": quadpoints_theta,
+        "quadpoints_phi": solve_quadpoints_phi,
+        "quadpoints_theta": solve_quadpoints_theta,
         "mpol": booz_jax.mpol,
         "ntor": booz_jax.ntor,
         "nfp": booz_jax.nfp,
@@ -1453,12 +1753,25 @@ def _build_traceable_objective_state(booz_jax, bs_jax, iota_target):
         "scatter_indices": booz_jax.scatter_indices,
         "surface_kind": booz_jax._surface_geometry_kind,
         "optimize_G": optimize_G,
-        "weight_inv_modB": booz_jax.options["weight_inv_modB"],
+        "weight_inv_modB": booz_jax.res.get(
+            "weight_inv_modB",
+            booz_jax.options["weight_inv_modB"],
+        ),
         "constraint_weight": booz_jax.constraint_weight,
         "targetlabel": booz_jax.targetlabel,
         "label_type": booz_jax.label_type,
         "phi_idx": booz_jax.phi_idx,
         "iota_target": _as_jax_float64(iota_target),
+        "exact_quadpoints_phi": exact_quadpoints_phi,
+        "exact_quadpoints_theta": exact_quadpoints_theta,
+        "surface_quadpoints_phi": _as_jax_float64(
+            np.asarray(booz_jax.surface.quadpoints_phi, dtype=float)
+        ),
+        "surface_quadpoints_theta": _as_jax_float64(
+            np.asarray(booz_jax.surface.quadpoints_theta, dtype=float)
+        ),
+        "coil_dof_extraction_spec": coil_dof_extraction_spec,
+        "outer_objective_config": outer_objective_config,
         "mask_indices": mask_indices,
         "stellsym_surface": booz_jax.stellsym,
     }
@@ -1472,6 +1785,7 @@ def _build_traceable_objective_state(booz_jax, bs_jax, iota_target):
 
     baseline_value = _evaluate_traceable_total_objective(
         baseline_x,
+        baseline_coil_dofs,
         bs_jax.coil_set_spec_from_dofs(baseline_coil_dofs),
         objective_kwargs,
     )
@@ -1610,10 +1924,16 @@ def _get_cached_traceable_runtime_entry(
     bs_jax,
     iota_target,
     *,
+    outer_objective_config=None,
     success_filter=None,
 ):
     """Reuse compiled traceable runtime callables while the solved state is unchanged."""
-    state = _build_traceable_objective_state(booz_jax, bs_jax, iota_target)
+    state = _build_traceable_objective_state(
+        booz_jax,
+        bs_jax,
+        iota_target,
+        outer_objective_config=outer_objective_config,
+    )
     cache_key = _traceable_runtime_cache_key(
         booz_jax,
         bs_jax,
@@ -1709,6 +2029,7 @@ def make_traceable_objective(
     bs_jax,
     iota_target,
     *,
+    outer_objective_config=None,
     success_filter=None,
 ):
     """Build a pure function ``f(coil_dofs) -> scalar`` for single-stage optimization.
@@ -1732,6 +2053,9 @@ def make_traceable_objective(
         booz_jax: solved :class:`BoozerSurfaceJAX`.
         bs_jax:   :class:`BiotSavartJAX` providing coil geometry.
         iota_target: scalar target iota for the quadratic penalty.
+        outer_objective_config: optional structured config enabling the full
+            single-stage outer objective. When omitted, the historical traced
+            objective remains ``BoozerResidualJAX + 0.5 * (iota-iota_target)^2``.
 
     Returns:
         ``f(coil_dofs) -> jax.Array`` — traceable scalar objective.
@@ -1746,6 +2070,7 @@ def make_traceable_objective(
         booz_jax,
         bs_jax,
         iota_target,
+        outer_objective_config=outer_objective_config,
         success_filter=success_filter,
     )["objective"]
 
@@ -1755,6 +2080,7 @@ def make_traceable_objective_value_and_grad(
     bs_jax,
     iota_target,
     *,
+    outer_objective_config=None,
     success_filter=None,
 ):
     """Build a pure-JAX function ``f(coil_dofs) -> (value, grad)`` for ondevice L-BFGS.
@@ -1772,6 +2098,7 @@ def make_traceable_objective_value_and_grad(
         booz_jax,
         bs_jax,
         iota_target,
+        outer_objective_config=outer_objective_config,
         success_filter=success_filter,
     )["value_and_grad"]
 
@@ -1880,6 +2207,7 @@ def _make_traceable_objective_profile_suite_from_compiled_bundle(
     def _solved_total_objective_for(coil_dofs, solved_x):
         return _evaluate_traceable_total_objective(
             solved_x,
+            coil_dofs,
             coil_set_spec_from_dofs(coil_dofs),
             objective_kwargs,
         )
@@ -1927,6 +2255,7 @@ def make_traceable_objective_runtime_bundle(
     iota_target,
     *,
     include_profile_suite=False,
+    outer_objective_config=None,
     success_filter=None,
 ):
     """Build the shared runtime bundle for the target single-stage objective path.
@@ -1953,6 +2282,7 @@ def make_traceable_objective_runtime_bundle(
         booz_jax,
         bs_jax,
         iota_target,
+        outer_objective_config=outer_objective_config,
         success_filter=success_filter,
     )
     compiled_bundle = runtime_entry["compiled_bundle"]
@@ -1982,11 +2312,18 @@ def make_traceable_objective_runtime_bundle(
     }
 
 
-def make_traceable_objective_profile_suite(booz_jax, bs_jax, iota_target):
+def make_traceable_objective_profile_suite(
+    booz_jax,
+    bs_jax,
+    iota_target,
+    *,
+    outer_objective_config=None,
+):
     """Build profiled pure-JAX closures for the target single-stage objective path."""
     return make_traceable_objective_runtime_bundle(
         booz_jax,
         bs_jax,
         iota_target,
         include_profile_suite=True,
+        outer_objective_config=outer_objective_config,
     )["profile_suite"]

@@ -1109,10 +1109,13 @@ if _HAS_JAX:
         return np.asarray(jax.device_get(value), dtype=np.float64)
 
     def surface_to_surface_distance_pure(gamma1, gamma2, mdist):
+        gamma1 = _as_jax_float64(gamma1)
+        gamma2 = _as_jax_float64(gamma2)
+        mdist = _as_jax_float64(mdist)
+        zero = _as_jax_float64(0.0)
         dists = surface_to_surface_pairwise_distances(gamma1, gamma2)
-        return jnp.sum(jnp.maximum(mdist - dists, 0) ** 2) / (
-            dists.shape[0] * dists.shape[1]
-        )
+        normalization = _as_jax_float64(dists.shape[0] * dists.shape[1])
+        return jnp.sum(jnp.square(jnp.maximum(mdist - dists, zero))) / normalization
 
     def surface_to_surface_pairwise_distances(gamma1, gamma2):
         gamma1 = gamma1.reshape((-1, 3))

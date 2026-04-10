@@ -54,7 +54,10 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))
 
 from benchmarks.run_code_benchmark_common import summarize_result_fun
-from benchmarks.single_stage_smoke_fixture import build_real_single_stage_init_fixture
+from benchmarks.single_stage_smoke_fixture import (
+    DEFAULT_NUM_TF_COILS,
+    build_real_single_stage_init_fixture,
+)
 
 sopp = pytest.importorskip(
     "simsoptpp",
@@ -6016,6 +6019,110 @@ class TestTraceableObjective:
             rtol=1e-10,
             atol=_TRACEABLE_OBJECTIVE_ABS_TOL,
             err_msg="Traceable objective dropped the offset iota penalty",
+        )
+
+    def test_full_single_stage_outer_objective_matches_real_jf_value(self):
+        """The full target-lane outer objective must match the real single-stage JF."""
+        fixture = build_real_single_stage_init_fixture(
+            backend="jax",
+            optimizer_backend="ondevice",
+        )
+        bs_jax = fixture["bs"]
+        booz_jax = fixture["boozer_surface"]
+        assert booz_jax.res is not None and booz_jax.res.get("success", False)
+
+        banana_curve = bs_jax.coils[DEFAULT_NUM_TF_COILS].curve
+        curves = [coil.curve for coil in bs_jax.coils]
+        length_target = single_stage_example.host_float(
+            single_stage_example.CurveLength(banana_curve).J()
+        )
+        vessel_surface = single_stage_example.SurfaceRZFourier(nfp=5, stellsym=True)
+        vessel_surface.set_rc(0, 0, 0.976)
+        vessel_surface.set_rc(1, 0, 0.222)
+        vessel_surface.set_zs(1, 0, 0.222)
+
+        config = single_stage_example.build_traceable_single_stage_outer_objective_config(
+            booz_jax,
+            bs_jax,
+            banana_curve,
+            vessel_surface,
+            non_qs_weight=1.0,
+            residual_weight=1000.0,
+            iota_weight=100.0,
+            length_weight=5.0e-4,
+            length_target=length_target,
+            curve_curve_weight=100.0,
+            curve_curve_threshold=0.05,
+            curve_surface_weight=1.0,
+            curve_surface_threshold=0.02,
+            surface_vessel_weight=1000.0,
+            surface_vessel_threshold=0.04,
+            curvature_weight=0.1,
+            curvature_threshold=40.0,
+        )
+
+        from simsopt.geo.surfaceobjectives_jax import make_traceable_objective
+
+        iota_target = jnp.asarray(fixture["iota_target"], dtype=jnp.float64)
+        coil_dofs = jnp.asarray(bs_jax.x.copy(), dtype=jnp.float64)
+        f = make_traceable_objective(
+            booz_jax,
+            bs_jax,
+            iota_target,
+            outer_objective_config=config,
+        )
+
+        _, IotasJAX, NonQuasiSymmetricRatioJAX = (
+            single_stage_example.get_jax_surface_objective_classes()
+        )
+        iota = single_stage_example.build_iota_objective(booz_jax, IotasJAX)
+        j_non_qs = NonQuasiSymmetricRatioJAX(booz_jax, bs_jax)
+        j_boozer = single_stage_example.build_boozer_residual_objective(
+            booz_jax,
+            bs_jax,
+            single_stage_example.select_boozer_residual_class(
+                use_jax=True,
+                boozer_kind="ls",
+            ),
+        )
+        j_curve_length = QuadraticPenalty(
+            single_stage_example.CurveLength(banana_curve),
+            length_target,
+            "max",
+        )
+        j_curve_curve = single_stage_example.CurveCurveDistance(curves, 0.05)
+        j_curve_surface = single_stage_example.CurveSurfaceDistance(
+            curves,
+            booz_jax.surface,
+            0.02,
+        )
+        j_surface_surface = single_stage_example.SurfaceSurfaceDistance(
+            booz_jax.surface,
+            vessel_surface,
+            0.04,
+        )
+        j_curvature = single_stage_example.LpCurveCurvature(
+            banana_curve,
+            2,
+            40.0,
+        )
+        jf = (
+            j_non_qs
+            + 1000.0 * j_boozer
+            + 100.0 * QuadraticPenalty(iota, fixture["iota_target"])
+            + 5.0e-4 * j_curve_length
+            + 100.0 * j_curve_curve
+            + 1.0 * j_curve_surface
+            + 1000.0 * j_surface_surface
+            + 0.1 * j_curvature
+        )
+
+        np.testing.assert_allclose(
+            float(f(coil_dofs)),
+            jf.J(),
+            rtol=1e-10,
+            atol=1e-8,
+            err_msg="Full target-lane outer objective no longer matches single-stage JF",
         )
 
     def test_pure_objective_is_jax_grad_differentiable(self, boozer_setup):

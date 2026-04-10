@@ -695,8 +695,15 @@ class SingleStageExampleTests(unittest.TestCase):
                 "default target-lane build should not recreate the scalar closure"
             )
 
-        def _runtime_builder(*args, include_profile_suite=False, success_filter=None):
-            runtime_calls.append((include_profile_suite, success_filter))
+        def _runtime_builder(
+            *args,
+            include_profile_suite=False,
+            outer_objective_config=None,
+            success_filter=None,
+        ):
+            runtime_calls.append(
+                (include_profile_suite, outer_objective_config, success_filter)
+            )
             return {
                 "objective": object(),
                 "value_and_grad": value_and_grad_marker,
@@ -718,24 +725,33 @@ class SingleStageExampleTests(unittest.TestCase):
                     object(),
                     use_value_and_grad=True,
                     profile_target_lane=False,
+                    outer_objective_config=None,
                 )
             )
 
         self.assertIsNone(scalar_fun)
         self.assertIs(value_and_grad_fun, value_and_grad_marker)
         self.assertIsNone(target_lane_profile)
-        self.assertEqual(runtime_calls, [(False, None)])
+        self.assertEqual(runtime_calls, [(False, None, None)])
 
-    def test_build_target_lane_outer_objectives_threads_success_filter_to_runtime_bundle(
+    def test_build_target_lane_outer_objectives_threads_runtime_bundle_options(
         self,
     ):
         module = self.load_module()
         objective_marker = object()
+        outer_objective_config_marker = object()
         success_filter_marker = object()
         runtime_calls = []
 
-        def _runtime_builder(*args, include_profile_suite=False, success_filter=None):
-            runtime_calls.append((include_profile_suite, success_filter))
+        def _runtime_builder(
+            *args,
+            include_profile_suite=False,
+            outer_objective_config=None,
+            success_filter=None,
+        ):
+            runtime_calls.append(
+                (include_profile_suite, outer_objective_config, success_filter)
+            )
             return {
                 "objective": objective_marker,
                 "value_and_grad": object(),
@@ -753,6 +769,7 @@ class SingleStageExampleTests(unittest.TestCase):
                     object(),
                     use_value_and_grad=False,
                     profile_target_lane=False,
+                    outer_objective_config=outer_objective_config_marker,
                     success_filter=success_filter_marker,
                 )
             )
@@ -760,7 +777,10 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertIs(scalar_fun, objective_marker)
         self.assertIsNone(value_and_grad_fun)
         self.assertIsNone(target_lane_profile)
-        self.assertEqual(runtime_calls, [(False, success_filter_marker)])
+        self.assertEqual(
+            runtime_calls,
+            [(False, outer_objective_config_marker, success_filter_marker)],
+        )
 
     def test_prepare_target_lane_outer_objectives_still_builds_objective_when_filter_disabled(
         self,
@@ -776,6 +796,10 @@ class SingleStageExampleTests(unittest.TestCase):
                 "success filter should not be built when explicitly disabled"
             ),
         ), patch.object(
+            module,
+            "build_traceable_single_stage_outer_objective_config",
+            return_value="config-marker",
+        ) as build_objective_config, patch.object(
             module,
             "build_target_lane_outer_objectives",
             return_value=(objective_marker, None, profile_marker),
@@ -795,22 +819,33 @@ class SingleStageExampleTests(unittest.TestCase):
                 use_value_and_grad=False,
                 profile_target_lane=True,
                 disable_success_filter=True,
+                non_qs_weight=1.0,
+                residual_weight=10.0,
+                iota_weight=20.0,
+                length_weight=30.0,
+                length_target=4.0,
                 cc_dist=0.05,
+                cc_weight=40.0,
                 cs_dist=0.01,
+                cs_weight=50.0,
                 ss_dist=0.02,
+                surf_dist_weight=60.0,
                 curvature_threshold=40.0,
+                curvature_weight=70.0,
             )
 
         self.assertIs(scalar_fun, objective_marker)
         self.assertIsNone(value_and_grad_fun)
         self.assertIs(target_lane_profile, profile_marker)
         self.assertIsNone(success_filter)
+        build_objective_config.assert_called_once()
         build_objectives.assert_called_once_with(
             unittest.mock.ANY,
             unittest.mock.ANY,
             unittest.mock.ANY,
             use_value_and_grad=False,
             profile_target_lane=True,
+            outer_objective_config="config-marker",
             success_filter=None,
         )
 
@@ -826,6 +861,10 @@ class SingleStageExampleTests(unittest.TestCase):
             "build_single_stage_target_lane_hardware_success_filter",
             return_value=success_filter_marker,
         ) as build_success_filter, patch.object(
+            module,
+            "build_traceable_single_stage_outer_objective_config",
+            return_value="config-marker",
+        ) as build_objective_config, patch.object(
             module,
             "build_target_lane_outer_objectives",
             return_value=(None, value_and_grad_marker, None),
@@ -845,10 +884,19 @@ class SingleStageExampleTests(unittest.TestCase):
                 use_value_and_grad=True,
                 profile_target_lane=False,
                 disable_success_filter=False,
+                non_qs_weight=1.0,
+                residual_weight=10.0,
+                iota_weight=20.0,
+                length_weight=30.0,
+                length_target=4.0,
                 cc_dist=0.05,
+                cc_weight=40.0,
                 cs_dist=0.01,
+                cs_weight=50.0,
                 ss_dist=0.02,
+                surf_dist_weight=60.0,
                 curvature_threshold=40.0,
+                curvature_weight=70.0,
             )
 
         self.assertIsNone(scalar_fun)
@@ -856,12 +904,14 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertIsNone(target_lane_profile)
         self.assertIs(success_filter, success_filter_marker)
         build_success_filter.assert_called_once()
+        build_objective_config.assert_called_once()
         build_objectives.assert_called_once_with(
             unittest.mock.ANY,
             unittest.mock.ANY,
             unittest.mock.ANY,
             use_value_and_grad=True,
             profile_target_lane=False,
+            outer_objective_config="config-marker",
             success_filter=success_filter_marker,
         )
 
@@ -2422,6 +2472,79 @@ class SingleStageExampleTests(unittest.TestCase):
         np.testing.assert_allclose(
             module._single_stage_optimizer_dofs_array(target_lane_dofs),
             np.array([9.0, 8.0]),
+        )
+
+    def test_single_stage_optimizer_dofs_array_hostifies_target_lane_state_explicitly(
+        self,
+    ):
+        module = self.load_module()
+        host_calls = []
+        original_host_array = module.host_array
+
+        def counted_host_array(value, *, dtype=np.float64):
+            host_calls.append((value, dtype))
+            return original_host_array(value, dtype=dtype)
+
+        target_lane_dofs = module.SingleStageOuterOptimizerState(
+            coil_dofs=jax.device_put(np.array([1.0, -2.0], dtype=np.float64))
+        )
+
+        with patch.object(module, "host_array", counted_host_array):
+            resolved = module._single_stage_optimizer_dofs_array(target_lane_dofs)
+
+        self.assertEqual(len(host_calls), 1)
+        self.assertIsInstance(host_calls[0][0], jax.Array)
+        self.assertEqual(np.dtype(host_calls[0][1]), np.dtype(np.float64))
+        np.testing.assert_allclose(resolved, np.array([1.0, -2.0]))
+
+    def test_build_traceable_single_stage_outer_objective_config_hostifies_vessel_gamma(
+        self,
+    ):
+        module = self.load_module()
+        host_calls = []
+        original_host_array = module.host_array
+        banana_curve = object()
+        vessel_gamma = jax.device_put(np.arange(12.0, dtype=np.float64).reshape(2, 2, 3))
+
+        def counted_host_array(value, *, dtype=np.float64):
+            host_calls.append((value, dtype))
+            return original_host_array(value, dtype=dtype)
+
+        boozer_surface = types.SimpleNamespace(surface=types.SimpleNamespace(nfp=2))
+        bs = types.SimpleNamespace(coils=[types.SimpleNamespace(curve=banana_curve)])
+        vessel_surface = types.SimpleNamespace(surface_spec=lambda: object())
+
+        with patch.object(module, "host_array", counted_host_array), patch(
+            "simsopt.jax_core.surface_rzfourier.surface_rz_fourier_gamma_from_spec",
+            return_value=vessel_gamma,
+        ):
+            config = module.build_traceable_single_stage_outer_objective_config(
+                boozer_surface,
+                bs,
+                banana_curve,
+                vessel_surface,
+                non_qs_weight=1.0,
+                residual_weight=2.0,
+                iota_weight=3.0,
+                length_weight=4.0,
+                length_target=5.0,
+                curve_curve_weight=6.0,
+                curve_curve_threshold=0.05,
+                curve_surface_weight=7.0,
+                curve_surface_threshold=0.02,
+                surface_vessel_weight=8.0,
+                surface_vessel_threshold=0.04,
+                curvature_weight=9.0,
+                curvature_threshold=40.0,
+            )
+
+        self.assertEqual(config["banana_curve_index"], 0)
+        self.assertEqual(len(host_calls), 1)
+        self.assertIsInstance(host_calls[0][0], jax.Array)
+        self.assertEqual(np.dtype(host_calls[0][1]), np.dtype(np.float64))
+        np.testing.assert_allclose(
+            config["vessel_gamma"],
+            np.arange(12.0, dtype=np.float64).reshape(4, 3),
         )
 
     def test_restore_from_pytree_uses_custom_coil_dof_setter_when_provided(self):

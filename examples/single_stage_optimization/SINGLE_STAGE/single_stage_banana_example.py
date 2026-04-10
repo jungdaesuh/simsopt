@@ -1260,6 +1260,89 @@ def get_traceable_single_stage_runtime_bundle_builder():
     return make_traceable_objective_runtime_bundle
 
 
+def _resolve_single_stage_banana_curve_index(bs, banana_curve):
+    try:
+        return next(
+            coil_index
+            for coil_index, coil in enumerate(bs.coils)
+            if coil.curve is banana_curve
+        )
+    except StopIteration as exc:
+        raise RuntimeError(
+            "single-stage target-lane setup could not locate the banana curve "
+            "in bs.coils."
+        ) from exc
+
+
+def build_traceable_single_stage_outer_objective_config(
+    boozer_surface,
+    bs,
+    banana_curve,
+    vessel_surface,
+    *,
+    non_qs_weight,
+    residual_weight,
+    iota_weight,
+    length_weight,
+    length_target,
+    curve_curve_weight,
+    curve_curve_threshold,
+    curve_surface_weight,
+    curve_surface_threshold,
+    surface_vessel_weight,
+    surface_vessel_threshold,
+    curvature_weight,
+    curvature_threshold,
+    curvature_p_norm=2.0,
+):
+    """Build the immutable target-lane config for the full single-stage objective."""
+    from simsopt.jax_core.surface_rzfourier import (
+        surface_rz_fourier_gamma_from_spec,
+    )
+
+    surface = boozer_surface.surface
+    non_qs_sdim = 20
+    banana_curve_index = _resolve_single_stage_banana_curve_index(bs, banana_curve)
+    return {
+        "non_qs_weight": float(non_qs_weight),
+        "non_qs_quadpoints_phi": np.linspace(
+            0.0,
+            1.0 / surface.nfp,
+            2 * non_qs_sdim,
+            endpoint=False,
+            dtype=np.float64,
+        ),
+        "non_qs_quadpoints_theta": np.linspace(
+            0.0,
+            1.0,
+            2 * non_qs_sdim,
+            endpoint=False,
+            dtype=np.float64,
+        ),
+        "non_qs_axis": 0,
+        "residual_weight": float(residual_weight),
+        "iota_weight": float(iota_weight),
+        "length_weight": float(length_weight),
+        "length_target": float(length_target),
+        "curve_curve_weight": float(curve_curve_weight),
+        "curve_curve_threshold": float(curve_curve_threshold),
+        "curve_surface_weight": float(curve_surface_weight),
+        "curve_surface_threshold": float(curve_surface_threshold),
+        "surface_vessel_weight": float(surface_vessel_weight),
+        "surface_vessel_threshold": float(surface_vessel_threshold),
+        "curvature_weight": float(curvature_weight),
+        "curvature_threshold": float(curvature_threshold),
+        "curvature_p_norm": float(curvature_p_norm),
+        "banana_curve_index": int(banana_curve_index),
+        "vessel_gamma": host_array(
+            surface_rz_fourier_gamma_from_spec(vessel_surface.surface_spec()).reshape(
+                (-1, 3)
+            ),
+            dtype=np.float64,
+        ),
+    }
+
+
 def build_single_stage_target_lane_hardware_success_filter(
     boozer_surface,
     bs,
@@ -1289,17 +1372,7 @@ def build_single_stage_target_lane_hardware_success_filter(
         surface_rz_fourier_gamma_from_spec,
     )
 
-    try:
-        banana_curve_index = next(
-            coil_index
-            for coil_index, coil in enumerate(bs.coils)
-            if coil.curve is banana_curve
-        )
-    except StopIteration as exc:
-        raise RuntimeError(
-            "single-stage target-lane hardware filter could not locate the banana "
-            "curve in bs.coils."
-        ) from exc
+    banana_curve_index = _resolve_single_stage_banana_curve_index(bs, banana_curve)
 
     optimize_G = boozer_surface.res.get("G") is not None
     coil_dof_extraction_spec = bs.coil_dof_extraction_spec()
@@ -1436,6 +1509,7 @@ def build_target_lane_outer_objectives(
     *,
     use_value_and_grad: bool,
     profile_target_lane: bool,
+    outer_objective_config=None,
     success_filter=None,
 ):
     """Build the target-lane objective(s) needed by the selected outer-loop mode."""
@@ -1451,6 +1525,7 @@ def build_target_lane_outer_objectives(
             bs,
             iota_target,
             include_profile_suite=profile_target_lane,
+            outer_objective_config=outer_objective_config,
             success_filter=success_filter,
         )
 
@@ -1483,16 +1558,26 @@ def prepare_target_lane_outer_objectives(
     use_value_and_grad: bool,
     profile_target_lane: bool,
     disable_success_filter: bool,
+    non_qs_weight,
+    residual_weight,
+    iota_weight,
+    length_weight,
+    length_target,
     cc_dist,
+    cc_weight,
     cs_dist,
+    cs_weight,
     ss_dist,
+    surf_dist_weight,
     curvature_threshold,
+    curvature_weight,
 ):
     """Build target-lane outer objectives with an optional hard success filter."""
     target_scalar_objective = None
     target_value_and_grad_objective = None
     target_lane_profile = None
     target_lane_success_filter = None
+    target_lane_outer_objective_config = None
 
     if not use_target_lane:
         return (
@@ -1516,6 +1601,26 @@ def prepare_target_lane_outer_objectives(
             )
         )
 
+    target_lane_outer_objective_config = build_traceable_single_stage_outer_objective_config(
+        boozer_surface,
+        bs,
+        banana_curve,
+        VV,
+        non_qs_weight=non_qs_weight,
+        residual_weight=residual_weight,
+        iota_weight=iota_weight,
+        length_weight=length_weight,
+        length_target=length_target,
+        curve_curve_weight=cc_weight,
+        curve_curve_threshold=cc_dist,
+        curve_surface_weight=cs_weight,
+        curve_surface_threshold=cs_dist,
+        surface_vessel_weight=surf_dist_weight,
+        surface_vessel_threshold=ss_dist,
+        curvature_weight=curvature_weight,
+        curvature_threshold=curvature_threshold,
+    )
+
     (
         target_scalar_objective,
         target_value_and_grad_objective,
@@ -1526,6 +1631,7 @@ def prepare_target_lane_outer_objectives(
         iota_target,
         use_value_and_grad=use_value_and_grad,
         profile_target_lane=profile_target_lane,
+        outer_objective_config=target_lane_outer_objective_config,
         success_filter=target_lane_success_filter,
     )
     return (
@@ -1640,7 +1746,7 @@ def _single_stage_optimizer_dofs_array(x):
     """Normalize outer-loop DOFs to the float array contract used in this file."""
     if isinstance(x, SingleStageOuterOptimizerState):
         x = x.coil_dofs
-    return np.asarray(x, dtype=float)
+    return host_array(x, dtype=np.float64)
 
 
 def _single_stage_outer_optimizer_state(x):
@@ -2796,10 +2902,19 @@ if __name__ == "__main__":
             use_value_and_grad=use_target_lane_vg,
             profile_target_lane=args.profile_target_lane,
             disable_success_filter=args.disable_target_lane_success_filter,
+            non_qs_weight=1.0,
+            residual_weight=RES_WEIGHT,
+            iota_weight=IOTAS_WEIGHT,
+            length_weight=LENGTH_WEIGHT,
+            length_target=length_target,
             cc_dist=CC_DIST,
+            cc_weight=CC_WEIGHT,
             cs_dist=CS_DIST,
+            cs_weight=CS_WEIGHT,
             ss_dist=SS_DIST,
+            surf_dist_weight=SURF_DIST_WEIGHT,
             curvature_threshold=CURVATURE_THRESHOLD,
+            curvature_weight=CURVATURE_WEIGHT,
         )
         if use_target_lane:
             print("Target-lane outer objective/runtime bundle ready.")
@@ -2925,14 +3040,18 @@ if __name__ == "__main__":
     final_self_intersection_check_available = run_dict[
         "self_intersection_check_available"
     ]
+    final_curve_curve_min_dist = host_float(JCurveCurve.shortest_distance())
+    final_curve_surface_min_dist = host_float(JCurveSurface.shortest_distance())
+    final_surface_vessel_min_dist = host_float(JSurfSurf.shortest_distance())
+    final_coil_length = host_float(curvelength.J())
 
     # Save the results of optimization to a separate file
     final_hardware_status = evaluate_single_stage_hardware_constraints(
-        float(JCurveCurve.shortest_distance()),
+        final_curve_curve_min_dist,
         CC_DIST,
-        float(JCurveSurface.shortest_distance()),
+        final_curve_surface_min_dist,
         CS_DIST,
-        float(JSurfSurf.shortest_distance()),
+        final_surface_vessel_min_dist,
         SS_DIST,
         float(final_max_curvature),
         CURVATURE_THRESHOLD,
@@ -3002,10 +3121,10 @@ if __name__ == "__main__":
         "SELF_INTERSECTING": final_self_intersecting,
         "SELF_INTERSECTION_CHECK_AVAILABLE": final_self_intersection_check_available,
         "MAX_CURVATURE": float(final_max_curvature),
-        "COIL_LENGTH": float(curvelength.J()),
-        "CURVE_CURVE_MIN_DIST": float(JCurveCurve.shortest_distance()),
-        "CURVE_SURFACE_MIN_DIST": float(JCurveSurface.shortest_distance()),
-        "SURFACE_VESSEL_MIN_DIST": float(JSurfSurf.shortest_distance()),
+        "COIL_LENGTH": final_coil_length,
+        "CURVE_CURVE_MIN_DIST": final_curve_curve_min_dist,
+        "CURVE_SURFACE_MIN_DIST": final_curve_surface_min_dist,
+        "SURFACE_VESSEL_MIN_DIST": final_surface_vessel_min_dist,
         "HARDWARE_CONSTRAINTS_OK": final_hardware_status["success"],
         "HARDWARE_CONSTRAINT_VIOLATIONS": final_hardware_status["violations"],
         "INITIAL_VOLUME": float(initial_volume),
