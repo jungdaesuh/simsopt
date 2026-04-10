@@ -54,6 +54,40 @@ def _optimizable_ancestor_sort_key(opt: "Optimizable") -> tuple[str, int]:
     return (opt.__class__.__name__, opt._id.id)
 
 
+def _runtime_jax_module():
+    try:
+        import jax
+    except ImportError:
+        return None
+    return jax
+
+
+def _is_runtime_jax_value(value) -> bool:
+    jax = _runtime_jax_module()
+    if jax is None:
+        return False
+    return isinstance(value, jax.Array) or hasattr(value, "aval")
+
+
+def _runtime_scalar_mul(factor, value):
+    if _is_runtime_jax_value(value):
+        from simsopt.jax_core._math_utils import scalar_like
+
+        return scalar_like(value, factor) * value
+    return float(factor) * value
+
+
+def _runtime_sum(values):
+    iterator = iter(values)
+    try:
+        total = next(iterator)
+    except StopIteration:
+        return 0.0
+    for value in iterator:
+        total = total + value
+    return total
+
+
 class DOFs(GSONable, Hashable):
     """
     Defines the (D)egrees (O)f (F)reedom(s) associated with optimization
@@ -1805,7 +1839,7 @@ class ScaledOptimizable(Optimizable):
         super().__init__(depends_on=[opt])
 
     def J(self):
-        return float(self.factor) * self.opt.J()
+        return _runtime_scalar_mul(self.factor, self.opt.J())
 
     @derivative_dec
     def dJ(self):
@@ -1831,7 +1865,7 @@ class OptimizableSum(Optimizable):
         super().__init__(depends_on=opts)
 
     def J(self):
-        return sum([opt.J() for opt in self.opts])
+        return _runtime_sum(opt.J() for opt in self.opts)
 
     @derivative_dec
     def dJ(self):
