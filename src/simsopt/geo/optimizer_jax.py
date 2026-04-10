@@ -2191,6 +2191,13 @@ def jax_minimize(
     Structured states are flattened once inside this adapter, then callbacks and
     ``OptimizeResult.x`` / ``OptimizeResult.jac`` are restored to the original
     pytree structure on return.
+
+    On the trusted SciPy/reference methods, the flattened state still crosses a
+    host NumPy boundary because ``scipy.optimize.minimize`` is defined around
+    ``ndarray`` ``x0``, ``fun(x)``, ``jac(x)``, ``callback(xk)``, and
+    ``OptimizeResult.x``. The adapter only guarantees explicit JAX-array
+    re-entry and result normalization instead of ad hoc ``jnp.asarray(...)``
+    calls.
     """
     if method not in _SUPPORTED_METHODS:
         raise ValueError(
