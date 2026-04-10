@@ -376,18 +376,8 @@ def _is_infeasible_inner_stall(
     if float(moved_norm) > _INFEASIBLE_STALL_MOVE_TOL:
         return False
 
-    (
-        _current_solver_values,
-        _current_feasibility_values,
-        _current_dual_update_values,
-        current_max_feasibility_violation,
-    ) = _extract_constraint_state(current_eval)
-    (
-        _candidate_solver_values,
-        _candidate_feasibility_values,
-        _candidate_dual_update_values,
-        candidate_max_feasibility_violation,
-    ) = _extract_constraint_state(candidate_eval)
+    current_max_feasibility_violation = _extract_constraint_state(current_eval)[3]
+    candidate_max_feasibility_violation = _extract_constraint_state(candidate_eval)[3]
     if candidate_max_feasibility_violation <= update_feasibility_tol:
         return False
     if (
@@ -823,20 +813,20 @@ def minimize_alm(
                     inner_result=last_result,
                 )
 
-            _cached_eval = [None, None]  # [x_array, evaluation]
+            _cached_eval = SimpleNamespace(x=None, evaluation=None)
 
             def inner_fun(inner_x):
                 evaluation = evaluate_problem(inner_x, multipliers, penalty)
-                _cached_eval[0] = np.asarray(inner_x, dtype=float).copy()
-                _cached_eval[1] = evaluation
+                _cached_eval.x = np.asarray(inner_x, dtype=float).copy()
+                _cached_eval.evaluation = evaluation
                 return float(evaluation["total"]), np.asarray(evaluation["grad"], dtype=float)
 
             def alm_inner_callback(inner_x):
                 if inner_callback is not None:
                     inner_callback(inner_x)
                 inner_x_arr = np.asarray(inner_x, dtype=float)
-                if _cached_eval[0] is not None and np.array_equal(inner_x_arr, _cached_eval[0]):
-                    evaluation = _cached_eval[1]
+                if _cached_eval.x is not None and np.array_equal(inner_x_arr, _cached_eval.x):
+                    evaluation = _cached_eval.evaluation
                 else:
                     evaluation = evaluate_problem(inner_x_arr, multipliers, penalty)
                 (
@@ -897,8 +887,8 @@ def minimize_alm(
                         options=inner_attempt_options,
                     )
                     candidate_x = np.asarray(result.x, dtype=float).copy()
-                    if _cached_eval[0] is not None and np.array_equal(candidate_x, _cached_eval[0]):
-                        candidate_eval = _cached_eval[1]
+                    if _cached_eval.x is not None and np.array_equal(candidate_x, _cached_eval.x):
+                        candidate_eval = _cached_eval.evaluation
                     else:
                         candidate_eval = evaluate_problem(candidate_x, multipliers, penalty)
                 except _EarlyStopInnerSolve as early_stop:

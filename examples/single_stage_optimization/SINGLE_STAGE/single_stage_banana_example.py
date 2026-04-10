@@ -2107,7 +2107,6 @@ def _jsonable_alm_state(value):
     return value
 
 
-
 def build_single_stage_alm_partial_state(
     run_dict,
     constraint_names,
