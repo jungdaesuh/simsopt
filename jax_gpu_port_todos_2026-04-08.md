@@ -22,11 +22,11 @@
 - [x] **4.** **[MED]** ~~`optimizer_jax_private/_lbfgs.py:200` — add finite-guard on `rho_k`.~~ **DONE** — `valid_curvature` guard at lines 245-253 checks `jnp.isfinite(rho_k)` & `(rho_k_inv > curvature_tol)`; gates history update via `update_curvature = valid_curvature & (~stalled_step)`.
 - [x] **5.** **[MED]** ~~`_lbfgs.py:201` — clamp `gamma`.~~ **DONE** — `jnp.clip(gamma, step_eps, gamma_max)` at lines 214-218 with machine-precision bounds from `_lbfgs_step_tolerances()`.
 - [x] **6.** **[MED]** ~~`_lbfgs.py` body_fun — port BFGS stalled-step check.~~ **DONE** — multi-condition stalled-step check at lines 237-242 (`s_k_norm <= step_tol`, `function_change <= objective_tol`, `gradient_change <= gradient_tol`).
-- [ ] **7.** **[LOW]** `_bfgs.py:122-130` — add Powell damping or skip-if-negative-curvature to BFGS Hessian update. Strong Wolfe should prevent this in normal operation, but defensive hardening matters for edge cases. **(PARTIAL — non-finite guard exists at line 132 via `jnp.where(jnp.isfinite(rho_k), H_kp1, state.H_k)`, but no Powell damping or explicit negative-curvature skip like L-BFGS has)**
-- [ ] **8.** **[LOW]** `optimizer_jax.py:2161-2166` — hybrid scipy→on-device continuation has no fallback when scipy produces non-finite state. Currently returns `success=False` silently; should log or retry with tighter scipy tolerance. **(PARTIAL — `_scipy_result_is_continuable()` check + message at lines 2276-2281, but no logger.warning() or callback invocation)**
+- [x] **7.** **[LOW]** ~~`_bfgs.py:122-130` — add Powell damping or skip-if-negative-curvature to BFGS Hessian update. Strong Wolfe should prevent this in normal operation, but defensive hardening matters for edge cases.~~ **DONE** — dense BFGS now skips the Hessian update on non-finite or non-positive curvature using the same `curvature_tol`-style guard pattern as L-BFGS, leaving `state.H_k` unchanged on bad curvature.
+- [x] **8.** **[LOW]** ~~`optimizer_jax.py:2161-2166` — hybrid scipy→on-device continuation has no fallback when scipy produces non-finite state. Currently returns `success=False` silently; should log or retry with tighter scipy tolerance.~~ **DONE** — non-continuable SciPy prefixes now emit `logger.warning(...)` with `success/nit/fun/grad_inf` and forward one last `progress_callback(...)` snapshot before returning failure.
 - [x] **9.** **[LOW]** ~~`surfaceobjectives_jax.py:271-275` — add runtime signature-check for VJP callback at `run_code` result construction. Wrong signatures currently only surface deep in the gradient pass.~~ **DONE** — `BoozerSurfaceJAX` now validates result-dict VJP hook arity via `_require_boozer_vjp_callback_signature()` / `_prepare_result_callback()` at result construction time; covered by `test_run_code_rejects_bad_group_vjp_signature`.
 - [x] **10.** **[LOW]** ~~`boozersurface_jax.py:733-756` — `_build_ls_group_vjp_callback` closes over `booz_surf` state. Add a solver-generation counter and assert freshness when VJP is invoked so stale reuse is detected.~~ **DONE** — solver-generation freshness guard lives in `_guard_solver_callback_freshness()` and grouped-LS stale reuse is covered by `test_ls_group_vjp_detects_stale_reuse_after_resolve`.
-- [ ] **11.** **[LOW]** `surfaceobjectives_jax.py:678-694` (`_compute_dJ_ds`) — `_ensure_solved` at line 418 checks `res["success"]` but not the actual residual norm. Log final `‖grad‖` / residual norm alongside the success flag.
+- [x] **11.** **[LOW]** ~~`surfaceobjectives_jax.py:678-694` (`_compute_dJ_ds`) — `_ensure_solved` at line 418 checks `res["success"]` but not the actual residual norm. Log final `‖grad‖` / residual norm alongside the success flag.~~ **DONE** — `_ensure_solved()` now logs cached solve quality with `success`, `grad_inf`, and `residual_inf`, distinguishing exact-path residuals from true gradient norms.
 
 ---
 
@@ -37,15 +37,15 @@
 - [x] **12.** **[HIGH]** ~~`field/force.py` — `jnp.asarray(gammas_targets/gammadashs_targets/currents_*)` per-call conversions.~~ **DONE** — refactored to `_as_jax_float64()` throughout; `_prepare_target_source_inputs_pure()` and `_CoilStateGroupCache` handle all conversions.
 - [x] **13.** **[HIGH]** ~~`field/force.py` — `jnp.asarray(opt.full_x)` / `jnp.asarray(coil.full_x)` per-call conversions.~~ **DONE** — now uses `_as_jax_float64()` at lines 329, 618.
 - [x] **14.** **[MED]** ~~`field/force.py:520,525` — `jnp.asarray(symmetry.rotmat/scale)` per-coil conversions.~~ **DONE** — `_apply_coil_state_symmetry()` uses `_as_jax_float64()` at construction time (lines 528, 533).
-- [ ] **15.** **[MED]** `geo/optimizer_jax.py:145, 150, 159, 165, 260` — `jnp.asarray(flat_x)` / `jnp.asarray(flat_grad)` at scipy boundary each iteration. Keep `x` as JAX array through the scipy call. **(PARTIAL — bare `jnp.asarray()` still used at scipy re-entry boundaries; x converted on each callback)**
-- [ ] **16.** **[MED]** `jax_core/objectives_flux.py:86` — remove fallback `jnp.asarray(surface.gamma()), jnp.asarray(surface.normal())` when no `surface_spec()` is available. Enforce spec with a clear error.
-- [ ] **17.** **[LOW-MED]** `geo/curveperturbed.py:195-196` — `jnp.asarray(self.sample[0/1])` in `__init__`. Replace with `_explicit_device_array()` for `disallow` compliance.
-- [ ] **18.** **[LOW-MED]** `jax_core/curve_geometry.py:48-53` — `_as_explicit_float64` numpy fallback path. Tighten input contract to specs only. **(PARTIAL — function still accepts numpy via `jax.device_put(np.asarray(...))` fallback)**
+- [x] **15.** **[MED]** ~~`geo/optimizer_jax.py:145, 150, 159, 165, 260` — `jnp.asarray(flat_x)` / `jnp.asarray(flat_grad)` at scipy boundary each iteration. Keep `x` as JAX array through the scipy call.~~ **DONE** — the SciPy reference lane now keeps flattened optimizer state on the explicit JAX-array path through objective/callback/result handling instead of re-entering with bare `jnp.asarray(...)` at each boundary.
+- [x] **16.** **[MED]** ~~`jax_core/objectives_flux.py:86` — remove fallback `jnp.asarray(surface.gamma()), jnp.asarray(surface.normal())` when no `surface_spec()` is available. Enforce spec with a clear error.~~ **DONE** — `SquaredFluxJAX` now requires `surface_spec()` and raises a clear contract error instead of falling back to `surface.gamma()/normal()`.
+- [x] **17.** **[LOW-MED]** ~~`geo/curveperturbed.py:195-196` — `jnp.asarray(self.sample[0/1])` in `__init__`. Replace with `_explicit_device_array()` for `disallow` compliance.~~ **DONE** — `CurvePerturbed` now materializes sampled perturbations with `_explicit_device_array(..., dtype=np.float64)`.
+- [x] **18.** **[LOW-MED]** ~~`jax_core/curve_geometry.py:48-53` — `_as_explicit_float64` numpy fallback path. Tighten input contract to specs only.~~ **DONE** — `_as_explicit_float64()` no longer accepts raw host NumPy inputs without a runtime/spec reference; intended host entry points use the explicit referenced conversion path.
 
 ### Cosmetic under `disallow` (zero runtime cost, trace-time only, but currently flagged)
 
-- [ ] **19.** **[LOW]** `jax_core/biotsavart.py:46, 87-88, 387` — `_float64_scalar(_MU0_OVER_4PI)` is constant-folded at trace time but trips `transfer_guard=disallow`. Replace with `_device_scalars.device_one(reference) * 1e-7` idiom from `_device_scalars.py`. **(PARTIAL — still uses `jax.device_put(np.asarray(...))` wrapper at lines 88-95)**
-- [ ] **20.** **[LOW]** `jax_core/biotsavart.py:91-102` — `_as_int32_scalar`, `_index_range`, `_zero_scalar` use `jax.device_put(np.asarray(...))` at trace time. Zero runtime cost but flagged by `disallow`. Switch to pure `jnp.arange`/`jnp.zeros` inside the traced scope. **(PARTIAL — same pattern persists)**
+- [x] **19.** **[LOW]** ~~`jax_core/biotsavart.py:46, 87-88, 387` — `_float64_scalar(_MU0_OVER_4PI)` is constant-folded at trace time but trips `transfer_guard=disallow`. Replace with `_device_scalars.device_one(reference) * 1e-7` idiom from `_device_scalars.py`.~~ **DONE** — `_float64_scalar(reference, value)` now uses `_device_scalars.device_one(reference) * value`, eliminating the trace-time host transfer path.
+- [x] **20.** **[LOW]** ~~`jax_core/biotsavart.py:91-102` — `_as_int32_scalar`, `_index_range`, `_zero_scalar` use `jax.device_put(np.asarray(...))` at trace time. Zero runtime cost but flagged by `disallow`. Switch to pure `jnp.arange`/`jnp.zeros` inside the traced scope.~~ **DONE** — these helpers now stay inside JAX creation ops (`jnp.asarray(..., dtype=jnp.int32)`, `jnp.arange(...)`, `jnp.zeros((), ...)`) and no longer trip `disallow`.
 - [x] **21.** **[LOW]** ~~`geo/surfaceobjectives_jax.py:107` — `_explicit_index_array` uses `jax.device_put` at trace time.~~ **DONE** — intentional one-time at spec construction; acceptable under current contract.
 - [x] **22.** **[LOW]** ~~`jax_core/specs.py:463-616` — 20+ `_as_float64_array` calls at spec construction.~~ **DONE** — all calls live in immutable spec factory functions (`make_coil_group_spec`, `make_curve_xyzfourier_spec`, etc.), not hot loops.
 
@@ -127,21 +127,21 @@
 
 **Last audit:** 2026-04-10
 
-**Total:** 60 items — **18 done, 14 partial, 28 open**
+**Total:** 60 items — **27 done, 8 partial, 25 open**
 
 | Tier | Items | Done | Partial | Open |
 |------|-------|------|---------|------|
 | 0 — Ship blockers | 3 | **3** | 0 | 0 |
-| 1 — Correctness/defensive | 8 | **5** (4,5,6,9,10) | **2** (7,8) | **1** (11) |
-| 2 — Transfer-guard | 11 | **5** (12,13,14,21,22) | **4** (15,18,19,20) | **2** (16,17) |
+| 1 — Correctness/defensive | 8 | **8** (4-11) | 0 | 0 |
+| 2 — Transfer-guard | 11 | **11** (12-22) | 0 | 0 |
 | 3 — Performance | 15 | **1** (36) | **3** (26,34,37) | **11** (23-25,27-33,35) |
 | 4 — Test coverage | 12 | **2** (43,47) | **4** (40,42,45,48) | **6** (38,39,41,44,46,49) |
 | 5 — Docs/cleanup | 11 | **2** (50,51) | **1** (59) | **8** (52-58,60) |
 
 **Estimated remaining effort:**
 - Tier 0: **CLEARED**
-- Tier 1: ~0.25 day (only item 11 remains open; 7-8 are partial hardening)
-- Tier 2: ~2-3 days (force.py bulk done; remaining are boundary/cosmetic)
+- Tier 1: **CLEARED**
+- Tier 2: **CLEARED**
 - Tier 3: ~2-3 weeks (quick wins in ~2 days, rest incremental)
 - Tier 4: ~1 week (GPU test infrastructure)
 - Tier 5: ~2-3 days
