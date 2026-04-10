@@ -406,13 +406,9 @@ Keep the timing claims narrow and honest:
     - Tier 4: ExBLAS/ReproBLAS/OzBLAS-style exact reproducibility remains a
       deferred research path, not a default runtime mode
   - expect a smaller but still real throughput cost from the extra
-    pad/reshape/add stages in that objective kernel; keep the stronger
-    arithmetic in the parity-sensitive path unless benchmark data justifies
-    promoting it
-  - expect some throughput cost from the extra pad/reshape/add stages and the
-    additional temporary arrays versus a flat reduction; keep that cost in the
-    parity lanes and benchmark before promoting the same arithmetic to
-    `jax_gpu_fast`
+    pad/reshape/add stages and temporary arrays versus a flat reduction; keep
+    that stronger arithmetic in the parity-sensitive lanes unless benchmark
+    data justifies promoting it to `jax_gpu_fast`
   - the final scalar residual contraction in `integral_BdotN` intentionally
     stays on the validated baseline by default, but
     `reduction_mode="strict_oracle"` now promotes it to compensated summation
