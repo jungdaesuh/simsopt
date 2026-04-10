@@ -25,6 +25,7 @@ import textwrap
 from pathlib import Path
 from typing import Mapping, Sequence
 
+import numpy as np
 import pytest
 
 # Resolve the src/ directory relative to the repo root so subprocesses
@@ -1512,6 +1513,34 @@ def test_transfer_guard_disallow_allows_curvecwsfouriercpp_curve_length_gradient
     )
 
 
+def test_transfer_guard_disallow_allows_curveperturbed_init():
+    """CurvePerturbed should explicitly place sampled host arrays under disallow."""
+    _assert_import_check_passes(
+        """
+        import jax
+        import numpy as np
+        import simsopt.config as simsopt_config
+        from simsopt.geo.curveperturbed import (
+            CurvePerturbed,
+            GaussianSampler,
+            PerturbationSample,
+        )
+        from simsopt.geo.curvexyzfourier import JaxCurveXYZFourier
+
+        quadpoints = np.linspace(0.0, 1.0, 33, endpoint=False)
+        sampler = GaussianSampler(quadpoints, sigma=0.1, length_scale=0.2, n_derivs=1)
+        sample = PerturbationSample(sampler)
+        curve = JaxCurveXYZFourier(33, 1)
+        curve.x = np.array([1.0, 0.1, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.1])
+        simsopt_config.set_backend("jax_cpu_parity", transfer_guard="disallow")
+        perturbed = CurvePerturbed(curve, sample)
+        gamma = perturbed.gamma_jax(jax.device_put(np.asarray(perturbed.full_x)))
+        assert gamma.shape == (33, 3)
+    """,
+        failure_message="CurvePerturbed transfer-guard init smoke failed",
+    )
+
+
 def test_transfer_guard_disallow_allows_curvecwsfouriercpp_curve_distance_gradient():
     """CurveCWSFourierCPP distance gradients should materialize JAX geometry before slicing."""
     _assert_import_check_passes(
@@ -1862,6 +1891,14 @@ def test_transfer_guard_disallow_allows_closed_curve_self_intersection_summary()
         """,
         failure_message="closed-curve self-intersection strict transfer-guard smoke failed",
     )
+
+
+def test_segment_segment_distance_pure_rejects_host_numpy_inputs_without_spec():
+    from simsopt.jax_core.curve_geometry import segment_segment_distance_pure
+
+    point = np.zeros(3, dtype=np.float64)
+    with pytest.raises(TypeError, match="JAX/spec-backed arrays"):
+        segment_segment_distance_pure(point, point, point, point)
 
 
 def test_transfer_guard_disallow_allows_surface_xyztensorfourier_gamma_from_dofs():
@@ -2256,11 +2293,10 @@ def test_transfer_guard_disallow_allows_squaredfluxjax_construction():
     )
 
 
-def test_transfer_guard_disallow_allows_squaredfluxjax_host_surface_fallback():
-    """SquaredFluxJAX fallback surface geometry must use explicit JAX placement."""
+def test_transfer_guard_disallow_rejects_squaredfluxjax_surface_without_spec():
+    """SquaredFluxJAX must require immutable surface specs in strict parity lanes."""
     _assert_import_check_passes(
         """
-        import jax
         import numpy as np
         import simsopt.config as simsopt_config
         from simsopt.geo import CurveXYZFourier
@@ -2298,14 +2334,16 @@ def test_transfer_guard_disallow_allows_squaredfluxjax_host_surface_fallback():
         curve = CurveXYZFourier(16, 1)
         curve.x = np.array([1.0, 0.1, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.1])
         bs_jax = BiotSavartJAX([Coil(curve, Current(1.0))])
-        objective = SquaredFluxJAX(HostSurface(), bs_jax)
-
-        assert isinstance(objective._flux_spec.normal, jax.Array)
-        assert isinstance(objective._flux_spec.target, jax.Array)
-        assert objective._flux_spec.normal.shape == (8, 8, 3)
-        assert objective._flux_spec.target.shape == (8, 8)
+        try:
+            SquaredFluxJAX(HostSurface(), bs_jax)
+        except NotImplementedError as exc:
+            assert "surface_spec" in str(exc)
+        else:
+            raise AssertionError(
+                "expected SquaredFluxJAX to reject surfaces without surface_spec()"
+            )
     """,
-        failure_message="SquaredFluxJAX host-surface fallback transfer-guard smoke failed",
+        failure_message="SquaredFluxJAX missing-surface-spec rejection smoke failed",
     )
 
 

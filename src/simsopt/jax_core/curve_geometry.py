@@ -25,7 +25,9 @@ from ..geo.curvexyzfourier import (
     jaxfouriercurve_geometry_pure,
     jaxfouriercurve_pure,
 )
-from ._math_utils import as_runtime_float64 as _as_runtime_float64
+from ._math_utils import (
+    as_runtime_float64 as _as_runtime_float64,
+)
 from .specs import (
     CurveCWSFourierRZSpec,
     CurveFilamentSpec,
@@ -48,9 +50,16 @@ _SURF_TYPE_RZ_FOURIER = "RZ_Fourier"
 def _as_explicit_float64(value, *, reference=None) -> jax.Array:
     if reference is not None:
         return _as_runtime_float64(value, reference=reference)
-    if isinstance(value, (np.ndarray, np.generic, list, tuple)) or np.isscalar(value):
-        return jax.device_put(np.asarray(value, dtype=np.float64))
-    return jnp.asarray(value, dtype=jnp.float64)
+    if isinstance(value, jax.Array) or hasattr(value, "aval"):
+        return jnp.asarray(value, dtype=jnp.float64)
+    if isinstance(value, (list, tuple)):
+        leaves = jax.tree_util.tree_leaves(value)
+        if any(isinstance(leaf, jax.Array) or hasattr(leaf, "aval") for leaf in leaves):
+            return jnp.asarray(value, dtype=jnp.float64)
+    raise TypeError(
+        "curve_geometry pure helpers require JAX/spec-backed arrays; "
+        "materialize an immutable spec or explicit device array first."
+    )
 
 
 def _explicit_scalar(value: float, *, reference=None) -> jax.Array:
@@ -121,7 +130,9 @@ def curve_spec_from_curve(curve):
 
 
 def _curve_gamma_kernel(spec: CurveSpec, dofs=None):
-    curve_dofs = spec.dofs if dofs is None else _as_explicit_float64(dofs)
+    curve_dofs = (
+        spec.dofs if dofs is None else _as_explicit_float64(dofs, reference=spec.dofs)
+    )
     spec_kind = curve_spec_kind(spec)
     if spec_kind == "xyz_fourier":
         spec = cast(CurveXYZFourierSpec, spec)
@@ -326,7 +337,7 @@ def _curve_perturbed_geometry_from_dofs(spec: CurvePerturbedSpec, dofs):
 
 
 def _curve_spec_with_quadpoints(spec: CurveSpec, quadpoints):
-    quadpoints_jax = _as_explicit_float64(quadpoints)
+    quadpoints_jax = _as_explicit_float64(quadpoints, reference=spec.dofs)
     spec_kind = curve_spec_kind(spec)
     if spec_kind == "perturbed":
         spec = cast(CurvePerturbedSpec, spec)
@@ -433,7 +444,7 @@ def _curve_filament_gamma_and_dash_from_dofs(spec: CurveFilamentSpec, dofs):
 
 
 def curve_spec_with_dofs(spec: CurveSpec, dofs):
-    return replace(spec, dofs=_as_explicit_float64(dofs))
+    return replace(spec, dofs=_as_runtime_float64(dofs, reference=spec.dofs))
 
 
 def curve_spec_with_quadpoints(spec: CurveSpec, quadpoints):
@@ -777,9 +788,9 @@ def curve_pullback_from_spec(spec: CurveSpec, dg, dgd):
 
 def curve_pullback_from_dofs(spec: CurveSpec, dofs, dg, dgd):
     """Return coefficient and optional surface cotangents for one curve spec."""
-    curve_dofs = _as_explicit_float64(dofs)
-    dg_jax = _as_explicit_float64(dg)
-    dgd_jax = _as_explicit_float64(dgd)
+    curve_dofs = _as_runtime_float64(dofs, reference=spec.dofs)
+    dg_jax = _as_runtime_float64(dg, reference=curve_dofs)
+    dgd_jax = _as_runtime_float64(dgd, reference=curve_dofs)
 
     if curve_spec_kind(spec) == "cws_fourier_rz":
         spec = cast(CurveCWSFourierRZSpec, spec)

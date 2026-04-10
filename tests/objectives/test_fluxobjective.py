@@ -8,10 +8,14 @@ from simsopt._core.optimizable import Optimizable
 from simsopt._core.util import ObjectiveFailure
 from simsopt.geo.surfacerzfourier import SurfaceRZFourier
 from simsopt.field.coil import coils_via_symmetries, Current
+from simsopt.field import BiotSavartJAX
 from simsopt.geo.curve import create_equally_spaced_curves
 from simsopt.geo.curveobjectives import CurveLength
 from simsopt.field.biotsavart import BiotSavart
 from simsopt.objectives.fluxobjective import SquaredFlux
+from simsopt.objectives.fluxobjective_jax import SquaredFluxJAX
+from simsopt.field.coil import Coil
+from simsopt.geo.curvexyzfourier import CurveXYZFourier
 from simsopt._core.json import GSONDecoder, GSONEncoder, SIMSON
 
 
@@ -199,3 +203,12 @@ class FluxObjectiveTests(unittest.TestCase):
         self.assertTrue(np.isinf(objective.J()))
         with self.assertRaisesRegex(ObjectiveFailure, "gradient is singular"):
             objective.dJ()
+
+    def test_squaredfluxjax_requires_surface_spec(self):
+        curve = CurveXYZFourier(16, 1)
+        curve.x = np.array([1.0, 0.1, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.1])
+        field = BiotSavartJAX([Coil(curve, Current(1.0))])
+        surface = _FluxObjectiveFakeSurface(np.zeros((1, 1, 3)))
+
+        with self.assertRaisesRegex(NotImplementedError, "surface_spec"):
+            SquaredFluxJAX(surface, field)

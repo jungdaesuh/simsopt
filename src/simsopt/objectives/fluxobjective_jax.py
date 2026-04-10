@@ -13,10 +13,10 @@ round-trips for coil geometry evaluation and ``Coil.vjp()`` calls.
 Otherwise, falls back to computing geometry via C++ ``gamma()``
 and mapping gradients through ``Coil.vjp()``.
 
-The surface geometry (``gamma``, ``normal``) is evaluated once at
-construction time and kept on JAX arrays for the lifetime of the
-objective.  This is correct for Stage 2 where the plasma surface
-is fixed.
+The fixed surface is captured from its immutable ``surface_spec()``
+once at construction time and kept on JAX arrays for the lifetime of
+the objective. This is correct for Stage 2 where the plasma surface is
+fixed.
 """
 
 import numpy as np
@@ -110,7 +110,7 @@ class SquaredFluxJAX(Optimizable):
     evaluate to ``inf``.
 
     Args:
-        surface: a :class:`Surface` providing ``gamma()`` and ``normal()``.
+        surface: a fixed :class:`Surface` exposing ``surface_spec()``.
         field: a :class:`BiotSavartJAX` instance.
         target: optional ``(nphi, ntheta)`` target normal field (default 0).
         definition: ``"quadratic flux"`` | ``"normalized"`` | ``"local"``.

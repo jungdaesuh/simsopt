@@ -86,7 +86,10 @@ def fixed_surface_geometry_from_surface(surface):
         gamma = surface_rz_fourier_gamma_from_spec(surface_spec)
         normal = surface_rz_fourier_normal_from_spec(surface_spec)
         return gamma, normal
-    return _as_jax_float64(surface.gamma()), _as_jax_float64(surface.normal())
+    raise NotImplementedError(
+        "SquaredFluxJAX fixed-surface setup requires a surface exposing "
+        "surface_spec()."
+    )
 
 
 def fixed_surface_flux_specs_from_surface(

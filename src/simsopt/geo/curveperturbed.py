@@ -5,6 +5,7 @@ from sympy import Symbol, lambdify, exp
 
 from .._core.json import GSONable
 from .._core.util import RealArray
+from ..jax_core._math_utils import _explicit_device_array
 from ._simsoptpp import sopp_namespace
 from .curve import (
     Curve,
@@ -192,8 +193,11 @@ class CurvePerturbed(sopp.Curve, Curve):
         self.sample = sample
 
         if hasattr(curve, "gamma_jax") and hasattr(curve, "gammadash_jax"):
-            sample_gamma = jnp.asarray(self.sample[0], dtype=jnp.float64)
-            sample_gammadash = jnp.asarray(self.sample[1], dtype=jnp.float64)
+            sample_gamma = _explicit_device_array(self.sample[0], dtype=np.float64)
+            sample_gammadash = _explicit_device_array(
+                self.sample[1],
+                dtype=np.float64,
+            )
 
             self._jax_curve_dof_mode = "full"
             self.gamma_jax = jit(

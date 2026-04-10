@@ -2015,6 +2015,53 @@ class TestBoozerSurfaceJAXClass:
         np.testing.assert_allclose(result.x["surface"], target_surface, atol=1e-4)
         np.testing.assert_allclose(result.x["iota"], target_iota, atol=1e-4)
 
+    def test_jax_minimize_reference_bfgs_supports_structured_explicit_value_and_grad(
+        self,
+        monkeypatch,
+        request,
+    ):
+        _enable_fast_non_strict_jax_backend(monkeypatch, request)
+        target_surface = jnp.asarray([2.0, -1.0], dtype=jnp.float64)
+        target_iota = jnp.asarray(0.25, dtype=jnp.float64)
+        x0 = {
+            "surface": jnp.asarray([5.0, 3.0], dtype=jnp.float64),
+            "iota": jnp.asarray(0.0, dtype=jnp.float64),
+        }
+        observed = []
+
+        def objective_value_and_grad(state):
+            surface_diff = state["surface"] - target_surface
+            iota_diff = state["iota"] - target_iota
+            value = 0.5 * (
+                jnp.dot(surface_diff, surface_diff) + jnp.square(iota_diff)
+            )
+            grad = {
+                "surface": surface_diff,
+                "iota": iota_diff,
+            }
+            return value, grad
+
+        def callback(state):
+            observed.append(state)
+
+        result = jax_minimize(
+            objective_value_and_grad,
+            x0,
+            method="bfgs",
+            maxiter=100,
+            tol=1e-10,
+            value_and_grad=True,
+            callback=callback,
+        )
+
+        assert result.success is True
+        assert observed
+        assert set(result.x) == {"surface", "iota"}
+        np.testing.assert_allclose(result.x["surface"], np.asarray(target_surface))
+        np.testing.assert_allclose(result.x["iota"], float(target_iota))
+        np.testing.assert_allclose(result.jac["surface"], np.zeros(2), atol=1e-8)
+        np.testing.assert_allclose(result.jac["iota"], 0.0, atol=1e-8)
+
     def test_jax_least_squares_pytree_hot_path_skips_flattening_adapter(
         self,
         monkeypatch,

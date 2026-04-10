@@ -58,6 +58,7 @@ from ..backend import (
 )
 from .._core.jax_host_boundary import host_bool as _host_bool
 from .._core.jax_host_boundary import host_scalar as _host_scalar
+from ..jax_core._math_utils import _explicit_device_array
 
 __all__ = [
     "ContinuousOptimizerContract",
@@ -142,16 +143,21 @@ class _OptimizerPytreeAdapter:
     unravel: Callable[[jax.Array], object]
     tree_def: object
 
+    def _hostify_flat(self, flat_x, *, dtype=None):
+        return _hostify_optimizer_tree(
+            self.unravel(_optimizer_flat_vector(flat_x, dtype=dtype))
+        )
+
     def wrap_fun(self, fun, *, value_and_grad: bool):
         if not value_and_grad:
 
             def wrapped(flat_x):
-                return fun(self.unravel(jnp.asarray(flat_x)))
+                return fun(self.unravel(_optimizer_flat_vector(flat_x)))
 
             return wrapped
 
         def wrapped(flat_x):
-            flat_x = jnp.asarray(flat_x)
+            flat_x = _optimizer_flat_vector(flat_x)
             value, grad_tree = fun(self.unravel(flat_x))
             _, grad_tree_def = jax.tree_util.tree_flatten(grad_tree)
             if grad_tree_def != self.tree_def:
@@ -160,13 +166,13 @@ class _OptimizerPytreeAdapter:
                     "with the same pytree structure as x0."
                 )
             flat_grad, _ = ravel_pytree(grad_tree)
-            flat_grad = jnp.asarray(flat_grad, dtype=flat_x.dtype)
+            flat_grad = _optimizer_flat_vector(flat_grad, dtype=flat_x.dtype)
             if flat_grad.shape != flat_x.shape:
                 raise ValueError(
                     "Explicit value-and-gradient objectives must return a gradient "
                     f"matching the flattened x0 shape {flat_x.shape}, got {flat_grad.shape}."
                 )
-            return jnp.asarray(value, dtype=flat_x.dtype), flat_grad
+            return _optimizer_scalar(value, dtype=flat_x.dtype), flat_grad
 
         return wrapped
 
@@ -175,15 +181,15 @@ class _OptimizerPytreeAdapter:
             return None
 
         def wrapped(flat_x):
-            callback(_hostify_optimizer_tree(self.unravel(jnp.asarray(flat_x))))
+            callback(self._hostify_flat(flat_x))
 
         return wrapped
 
     def finalize_result(self, result):
         if hasattr(result, "x"):
-            result.x = _hostify_optimizer_tree(self.unravel(jnp.asarray(result.x)))
+            result.x = self._hostify_flat(result.x, dtype=self.flat_x0.dtype)
         if hasattr(result, "jac"):
-            result.jac = _hostify_optimizer_tree(self.unravel(jnp.asarray(result.jac)))
+            result.jac = self._hostify_flat(result.jac, dtype=self.flat_x0.dtype)
         return result
 
 
@@ -227,6 +233,28 @@ def _device_scalar(value, *, dtype=jnp.float64):
     return jax.device_put(np.asarray(value, dtype=np.dtype(dtype)))
 
 
+def _optimizer_flat_vector(value, *, dtype=None) -> jax.Array:
+    if isinstance(value, jax.Array):
+        if dtype is None or value.dtype == dtype:
+            return value
+        return jnp.asarray(value, dtype=dtype)
+    if hasattr(value, "aval"):
+        return jnp.asarray(value, dtype=dtype)
+    if dtype is None:
+        dtype = np.asarray(value).dtype
+    return _explicit_device_array(value, dtype=dtype)
+
+
+def _optimizer_scalar(value, *, dtype) -> jax.Array:
+    if isinstance(value, jax.Array) or hasattr(value, "aval"):
+        return jnp.asarray(value, dtype=dtype)
+    return _explicit_device_array(value, dtype=dtype)
+
+
+def _optimizer_dtype(value):
+    return getattr(value, "dtype", np.asarray(value).dtype)
+
+
 def _hostify_optimizer_leaf(leaf):
     if isinstance(leaf, jax.Array):
         array = np.asarray(jax.device_get(leaf))
@@ -260,8 +288,9 @@ def _prepare_optimizer_pytree_adapter(x0):
         return None
     flat_x0, unravel = ravel_pytree(x0)
     _, tree_def = jax.tree_util.tree_flatten(x0)
+    flat_dtype = _optimizer_dtype(flat_x0)
     return _OptimizerPytreeAdapter(
-        flat_x0=jnp.asarray(flat_x0),
+        flat_x0=_optimizer_flat_vector(flat_x0, dtype=flat_dtype),
         unravel=unravel,
         tree_def=tree_def,
     )
@@ -521,9 +550,9 @@ def _strip_internal_options(options, method):
     return {key: value for key, value in options.items() if key not in internal}
 
 
-def _normalize_scipy_result(result):
-    result.x = jnp.asarray(result.x)
-    result.jac = jnp.asarray(result.jac)
+def _normalize_scipy_result(result, *, x_dtype):
+    result.x = _optimizer_flat_vector(result.x, dtype=x_dtype)
+    result.jac = _optimizer_flat_vector(result.jac, dtype=x_dtype)
     result.nit = int(getattr(result, "nit", 0))
     result.nfev = int(getattr(result, "nfev", 0))
     if hasattr(result, "njev"):
@@ -536,6 +565,7 @@ def _normalize_scipy_result(result):
 
 def _scipy_dispatch(scipy_fun, x0, *, method, tol, maxiter, options):
     stripped_options = _strip_internal_options(options, method)
+    x_dtype = _optimizer_dtype(x0)
     if method == "bfgs":
         scipy_method = "BFGS"
         scipy_opts = {"maxiter": maxiter, "gtol": tol, **stripped_options}
@@ -547,25 +577,34 @@ def _scipy_dispatch(scipy_fun, x0, *, method, tol, maxiter, options):
             "maxcor": 200,
             **stripped_options,
         }
+    callback = options.get("callback")
+    scipy_callback = None
+    if callback is not None:
+
+        def scipy_callback(x_np):
+            callback(_optimizer_flat_vector(x_np, dtype=x_dtype))
+
     return _normalize_scipy_result(
         scipy_minimize(
             scipy_fun,
-            np.asarray(x0),
+            np.asarray(x0, dtype=np.dtype(x_dtype)),
             jac=True,
             method=scipy_method,
             options=scipy_opts,
-            callback=options.get("callback"),
-        )
+            callback=scipy_callback,
+        ),
+        x_dtype=x_dtype,
     )
 
 
 def _scipy_minimize(fun, x0, *, method, tol, maxiter, options):
     val_and_grad_fn = _cached_jit_value_and_grad(fun)
+    x_dtype = _optimizer_dtype(x0)
 
     def scipy_fun(x_np):
-        x_jax = jnp.asarray(x_np)
+        x_jax = _optimizer_flat_vector(x_np, dtype=x_dtype)
         val, grad = val_and_grad_fn(x_jax)
-        return float(val), np.asarray(grad)
+        return float(val), np.asarray(grad, dtype=np.dtype(x_dtype))
 
     return _scipy_dispatch(
         scipy_fun, x0, method=method, tol=tol, maxiter=maxiter, options=options
@@ -573,9 +612,12 @@ def _scipy_minimize(fun, x0, *, method, tol, maxiter, options):
 
 
 def _scipy_minimize_value_and_grad(fun, x0, *, method, tol, maxiter, options):
+    x_dtype = _optimizer_dtype(x0)
+
     def scipy_fun(x_np):
-        val, grad = fun(np.asarray(x_np))
-        return float(val), np.asarray(grad, dtype=float)
+        x_jax = _optimizer_flat_vector(x_np, dtype=x_dtype)
+        val, grad = fun(x_jax)
+        return float(val), np.asarray(grad, dtype=np.dtype(x_dtype))
 
     return _scipy_dispatch(
         scipy_fun, x0, method=method, tol=tol, maxiter=maxiter, options=options
