@@ -1160,13 +1160,13 @@ def test_transfer_guard_disallow_allows_boozer_residual_host_scalars():
 
 
 def test_transfer_guard_disallow_allows_biot_savart_point_chunking():
-    """Point-chunked Biot-Savart kernels must stay traceable under JAX loops."""
+    """Point-chunked Biot-Savart B/A kernels must stay traceable under JAX loops."""
     _assert_import_check_passes(
         """
         import jax
         import numpy as np
         import simsopt.config as simsopt_config
-        from simsopt.jax_core.biotsavart import biot_savart_B
+        from simsopt.jax_core.biotsavart import biot_savart_A, biot_savart_B
 
         simsopt_config.set_backend(
             "jax_cpu_parity",
@@ -1180,9 +1180,12 @@ def test_transfer_guard_disallow_allows_biot_savart_point_chunking():
         currents = jax.device_put(np.array([1.0, -0.5], dtype=np.float64))
 
         B = biot_savart_B(points, gammas, gammadashs, currents)
+        A = biot_savart_A(points, gammas, gammadashs, currents)
 
         assert B.shape == (257, 3)
+        assert A.shape == (257, 3)
         assert np.all(np.isfinite(np.asarray(B)))
+        assert np.all(np.isfinite(np.asarray(A)))
     """,
         failure_message="Biot-Savart point-chunking smoke failed",
     )

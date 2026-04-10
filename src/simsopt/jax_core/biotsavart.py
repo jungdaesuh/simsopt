@@ -21,6 +21,7 @@ from ..backend import (
     get_point_chunk_size,
 )
 from ..backend.runtime import register_backend_cache_clear
+from ._device_scalars import device_one as _device_one
 from ._math_utils import (
     explicit_inv as _explicit_inv,
     explicit_rsqrt as _explicit_rsqrt,
@@ -66,41 +67,45 @@ def _read_tuning_config() -> tuple:
 # ── Array slicing primitives ──────────────────────────────────────────
 
 
+def _slice_indices(start: int, size: int):
+    return _as_int32_scalar(start) + _index_range(size)
+
+
 def _slice_coil_chunk(array, start: int, chunk_size: int):
-    indices = _as_int32_scalar(start) + _index_range(chunk_size)
-    return jnp.take(array, indices, axis=0)
+    return jnp.take(array, _slice_indices(start, chunk_size), axis=0)
 
 
 def _slice_quadrature_block(array, start: int, block_size: int):
-    indices = _as_int32_scalar(start) + _index_range(block_size)
-    return jnp.take(array, indices, axis=1)
+    return jnp.take(array, _slice_indices(start, block_size), axis=1)
 
 
 def _slice_point_chunk(points: object, start: int, chunk_size: int):
-    indices = _as_int32_scalar(start) + _index_range(chunk_size)
-    return jnp.take(points, indices, axis=0)
+    return jnp.take(points, _slice_indices(start, chunk_size), axis=0)
 
 
 def _slice_prefix(array, size: int):
     return jnp.take(array, _index_range(size), axis=0)
 
 
-def _float64_scalar(value):
-    return jax.device_put(np.asarray(value, dtype=np.float64))
+def _float64_scalar(reference, value):
+    return _device_one(reference) * np.float64(value)
 
 
 def _as_int32_scalar(value):
-    if isinstance(value, jax.Array):
-        return jnp.asarray(value, dtype=jnp.int32)
-    return jax.device_put(np.asarray(value, dtype=np.int32))
+    return jnp.asarray(value, dtype=jnp.int32)
 
 
 def _index_range(size: int):
-    return jax.device_put(np.arange(size, dtype=np.int32))
+    return jnp.arange(size, dtype=jnp.int32)
 
 
 def _zero_scalar(dtype):
-    return jax.device_put(np.array(0, dtype=np.dtype(dtype)))
+    return jnp.zeros((), dtype=dtype)
+
+
+def _safe_radius_squared(diff):
+    r2 = jnp.sum(diff * diff, axis=-1)
+    return r2, r2 + _float64_scalar(r2, np.finfo(np.float64).tiny)
 
 
 def _vector_component(array, component_index: int):
@@ -360,10 +365,9 @@ def _point_chunk_reduce(points, chunk_kernel, chunk_size):
 
 def _biot_savart_B_integrand(x, gammas, gammadashs):
     diff = gammas - x
-    r2 = jnp.sum(diff * diff, axis=-1)
     # Exact point-on-coil evaluation is outside the physical domain; use a tiny
     # branchless floor so traced audit lanes do not rely on select/where.
-    safe_r2 = r2 + _float64_scalar(np.finfo(np.float64).tiny)
+    r2, safe_r2 = _safe_radius_squared(diff)
     r_inv = _explicit_rsqrt(safe_r2)
     r_inv3 = r_inv * _explicit_inv(safe_r2)
     cross = _cross_product(diff, gammadashs)
@@ -372,8 +376,7 @@ def _biot_savart_B_integrand(x, gammas, gammadashs):
 
 def _biot_savart_A_integrand(x, gammas, gammadashs):
     diff = gammas - x
-    r2 = jnp.sum(diff * diff, axis=-1)
-    safe_r2 = r2 + _float64_scalar(np.finfo(np.float64).tiny)
+    _, safe_r2 = _safe_radius_squared(diff)
     r_inv = _explicit_rsqrt(safe_r2)
     return gammadashs * r_inv[..., None]
 
@@ -409,7 +412,9 @@ def _one_point_dense(
         block_size=quadrature_block_size,
         integrand=integrand,
     )
-    return _float64_scalar(_MU0_OVER_4PI) * jnp.einsum("c,cj->j", currents, integral)
+    return _float64_scalar(currents, _MU0_OVER_4PI) * jnp.einsum(
+        "c,cj->j", currents, integral
+    )
 
 
 # ── Kernel factory ────────────────────────────────────────────────────
