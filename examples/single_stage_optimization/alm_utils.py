@@ -84,6 +84,10 @@ _BOXED_INNER_PROFILES = {
 _ACCEPTANCE_TOTAL_ATOL = 1e-10
 _ACCEPTANCE_TOTAL_RTOL = 1e-3
 _ACCEPTANCE_MOVE_TOL = 1e-12
+_INFEASIBLE_STALL_MOVE_TOL = 1e-8
+_INFEASIBLE_STALL_FEASIBILITY_ATOL = 1e-12
+_INFEASIBLE_STALL_OBJECTIVE_ATOL = 1e-10
+_INFEASIBLE_STALL_OBJECTIVE_RTOL = 1e-6
 _PLATEAU_STALL_LIMIT = 2
 
 
@@ -358,6 +362,49 @@ def _candidate_is_acceptable(
 
     candidate_total = float(candidate_eval["total"])
     return candidate_total <= _acceptable_total_upper_bound(float(current_eval["total"]))
+
+
+def _is_infeasible_inner_stall(
+    current_eval: dict,
+    candidate_eval: dict,
+    result,
+    moved_norm: float,
+    update_feasibility_tol: float,
+) -> bool:
+    if bool(getattr(result, "success", False)):
+        return False
+    if float(moved_norm) > _INFEASIBLE_STALL_MOVE_TOL:
+        return False
+
+    (
+        _current_solver_values,
+        _current_feasibility_values,
+        _current_dual_update_values,
+        current_max_feasibility_violation,
+    ) = _extract_constraint_state(current_eval)
+    (
+        _candidate_solver_values,
+        _candidate_feasibility_values,
+        _candidate_dual_update_values,
+        candidate_max_feasibility_violation,
+    ) = _extract_constraint_state(candidate_eval)
+    if candidate_max_feasibility_violation <= update_feasibility_tol:
+        return False
+    if (
+        candidate_max_feasibility_violation
+        < current_max_feasibility_violation - _INFEASIBLE_STALL_FEASIBILITY_ATOL
+    ):
+        return False
+
+    current_total = float(current_eval["total"])
+    candidate_total = float(candidate_eval["total"])
+    objective_improvement = current_total - candidate_total
+    improvement_floor = max(
+        _INFEASIBLE_STALL_OBJECTIVE_ATOL,
+        _INFEASIBLE_STALL_OBJECTIVE_RTOL
+        * max(abs(current_total), abs(candidate_total), 1.0),
+    )
+    return objective_improvement <= improvement_floor
 
 
 def _normalize_trust_radius(trust_radius: float | None) -> float | None:
@@ -637,6 +684,7 @@ def minimize_alm(
     outer_state_callback: Callable[[int, np.ndarray, float], None] | None = None,
     snapshot_accepted_state_fn: Callable[[], object] | None = None,
     restore_incumbent_state_fn: Callable[[object], None] | None = None,
+    history_callback: Callable[[list[dict], dict, np.ndarray, float], None] | None = None,
 ):
     if (snapshot_accepted_state_fn is None) != (restore_incumbent_state_fn is None):
         raise ValueError(
@@ -656,6 +704,16 @@ def minimize_alm(
     update_feasibility_tol = max(settings.feasibility_tol, 1.0 / penalty)
     update_stationarity_tol = max(settings.stationarity_tol, 1.0 / penalty)
     best_feasible: ALMFeasibleIncumbent | None = None
+
+    def _emit_history_snapshot(latest_entry: dict) -> None:
+        if history_callback is None:
+            return
+        history_callback(
+            [dict(entry) for entry in history],
+            dict(latest_entry),
+            multipliers.copy(),
+            float(penalty),
+        )
 
     def _build_result(
         *,
@@ -742,9 +800,11 @@ def minimize_alm(
                         "trust_radius": trust_radius,
                         "inner_attempts": 0,
                         "accepted_move_norm": 0.0,
+                        "infeasible_stall": False,
                         "action": "converged",
                     }
                 )
+                _emit_history_snapshot(history[-1])
                 final_eval = current_eval
                 final_multipliers = multipliers.copy()
                 final_penalty = penalty
@@ -763,14 +823,22 @@ def minimize_alm(
                     inner_result=last_result,
                 )
 
+            _cached_eval = [None, None]  # [x_array, evaluation]
+
             def inner_fun(inner_x):
                 evaluation = evaluate_problem(inner_x, multipliers, penalty)
+                _cached_eval[0] = np.asarray(inner_x, dtype=float).copy()
+                _cached_eval[1] = evaluation
                 return float(evaluation["total"]), np.asarray(evaluation["grad"], dtype=float)
 
             def alm_inner_callback(inner_x):
                 if inner_callback is not None:
                     inner_callback(inner_x)
-                evaluation = evaluate_problem(np.asarray(inner_x, dtype=float), multipliers, penalty)
+                inner_x_arr = np.asarray(inner_x, dtype=float)
+                if _cached_eval[0] is not None and np.array_equal(inner_x_arr, _cached_eval[0]):
+                    evaluation = _cached_eval[1]
+                else:
+                    evaluation = evaluate_problem(inner_x_arr, multipliers, penalty)
                 (
                     _solver_constraint_values,
                     callback_feasibility_values,
@@ -802,6 +870,7 @@ def minimize_alm(
             current_feasible_enough = current_max_feasibility_violation <= update_feasibility_tol
             last_inner_options = None
             last_inner_profile = None
+            forced_infeasible_penalty_cycle = False
 
             for attempt_index in range(1, settings.max_inner_attempts + 1):
                 attempts = attempt_index
@@ -828,7 +897,10 @@ def minimize_alm(
                         options=inner_attempt_options,
                     )
                     candidate_x = np.asarray(result.x, dtype=float).copy()
-                    candidate_eval = evaluate_problem(candidate_x, multipliers, penalty)
+                    if _cached_eval[0] is not None and np.array_equal(candidate_x, _cached_eval[0]):
+                        candidate_eval = _cached_eval[1]
+                    else:
+                        candidate_eval = evaluate_problem(candidate_x, multipliers, penalty)
                 except _EarlyStopInnerSolve as early_stop:
                     result = SimpleNamespace(
                         x=early_stop.x,
@@ -848,7 +920,14 @@ def minimize_alm(
                     moved_norm,
                     update_feasibility_tol,
                 )
-                if acceptable:
+                infeasible_inner_stall = _is_infeasible_inner_stall(
+                    current_eval,
+                    candidate_eval,
+                    result,
+                    moved_norm,
+                    update_feasibility_tol,
+                )
+                if acceptable and not infeasible_inner_stall:
                     accepted_result = result
                     accepted_eval = candidate_eval
                     if attempt_radius is not None:
@@ -856,6 +935,13 @@ def minimize_alm(
                             trust_radius = float(attempt_radius) * float(settings.trust_radius_grow)
                         else:
                             trust_radius = float(attempt_radius)
+                    break
+                if infeasible_inner_stall:
+                    accepted_result = result
+                    accepted_eval = current_eval
+                    forced_infeasible_penalty_cycle = True
+                    if attempt_radius is not None:
+                        trust_radius = float(attempt_radius)
                     break
                 if attempt_radius is None:
                     accepted_result = result
@@ -977,6 +1063,7 @@ def minimize_alm(
                 "stationarity_delta": float(current_stationarity_norm) - float(stationarity_norm),
                 "meaningful_progress": bool(made_inner_progress),
                 "feasible_stall_count": int(feasible_stall_count),
+                "infeasible_stall": bool(forced_infeasible_penalty_cycle),
             }
             history.append(history_entry)
 
@@ -985,6 +1072,7 @@ def minimize_alm(
                 and stationarity_norm <= settings.stationarity_tol
             ):
                 history_entry["action"] = "converged"
+                _emit_history_snapshot(history_entry)
                 message = (
                     "ALM converged: "
                     f"max_violation={max_feasibility_violation:.3e}, "
@@ -999,6 +1087,16 @@ def minimize_alm(
                     penalty_state=penalty,
                     inner_result=result,
                 )
+
+            if forced_infeasible_penalty_cycle:
+                penalty *= float(settings.penalty_scale)
+                feasible_stall_count = 0
+                update_feasibility_tol = max(settings.feasibility_tol, 1.0 / penalty)
+                update_stationarity_tol = max(settings.stationarity_tol, 1.0 / penalty)
+                history_entry["action"] = "infeasible_stall_penalty_increase"
+                history_entry["trust_radius"] = trust_radius
+                _emit_history_snapshot(history_entry)
+                break
 
             if (
                 max_feasibility_violation <= update_feasibility_tol
@@ -1016,6 +1114,7 @@ def minimize_alm(
                 )
                 history_entry["action"] = "dual_update"
                 history_entry["trust_radius"] = trust_radius
+                _emit_history_snapshot(history_entry)
                 break
 
             if max_feasibility_violation <= update_feasibility_tol:
@@ -1028,6 +1127,7 @@ def minimize_alm(
                     history_entry["trust_radius"] = trust_radius
                     history_entry["feasible_stall_count"] = int(feasible_stall_count)
                     history_entry["action"] = "subproblem_limit"
+                    _emit_history_snapshot(history_entry)
                     break
                 if trust_radius is not None:
                     trust_radius = max(
@@ -1045,6 +1145,7 @@ def minimize_alm(
                 history_entry["action"] = "subproblem_continue"
                 history_entry["trust_radius"] = trust_radius
                 history_entry["feasible_stall_count"] = int(feasible_stall_count)
+                _emit_history_snapshot(history_entry)
                 continue
 
             penalty *= float(settings.penalty_scale)
@@ -1053,10 +1154,12 @@ def minimize_alm(
             update_stationarity_tol = max(settings.stationarity_tol, 1.0 / penalty)
             history_entry["action"] = "penalty_increase"
             history_entry["trust_radius"] = trust_radius
+            _emit_history_snapshot(history_entry)
             break
 
         if outer_iteration == settings.max_outer_iterations:
             history[-1]["outer_termination"] = "max_outer"
+            _emit_history_snapshot(history[-1])
             break
 
     if final_eval is None or last_result is None:

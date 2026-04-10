@@ -1,9 +1,11 @@
 import ast
 import importlib.util
+import sys
 import unittest
 import uuid
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import numpy as np
 
@@ -45,6 +47,13 @@ STAGE2_OBJECTIVES_MODULE_PATH = (
     / "banana_opt"
     / "stage2_objectives.py"
 )
+NFP10_GIL_RERUN_MODULE_PATH = (
+    Path(__file__).resolve().parents[2]
+    / "examples"
+    / "single_stage_optimization"
+    / "run_nfp10_gil_alm_rerun.py"
+)
+DEFAULT_GIL_WRAPPER_SURFACE = "wout_nfp10ginsburg_desc_s024match_iota20.nc"
 
 
 def load_alm_utils_module():
@@ -57,6 +66,17 @@ def load_alm_utils_module():
     spec = importlib.util.spec_from_file_location(
         f"alm_utils_{uuid.uuid4().hex}",
         alm_utils_path,
+    )
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
+
+
+def load_nfp10_gil_rerun_module():
+    spec = importlib.util.spec_from_file_location(
+        f"run_nfp10_gil_alm_rerun_{uuid.uuid4().hex}",
+        NFP10_GIL_RERUN_MODULE_PATH,
     )
     module = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
@@ -124,7 +144,7 @@ def find_function_return_dict(module_path: Path, function_name: str) -> ast.Dict
     return visitor.dict_node
 
 
-def make_single_stage_alm_args(**overrides):
+def _make_alm_args(**overrides):
     defaults = {
         "alm_max_outer_iters": 7,
         "alm_max_subproblem_continuations": 9,
@@ -142,19 +162,41 @@ def make_single_stage_alm_args(**overrides):
     return SimpleNamespace(**defaults)
 
 
-def make_stage2_alm_args(**overrides):
+def make_nfp10_gil_rerun_args(**overrides):
     defaults = {
-        "alm_max_outer_iters": 7,
-        "alm_max_subproblem_continuations": 9,
-        "alm_penalty_init": 2.0,
-        "alm_penalty_scale": 3.0,
+        "python_executable": "python",
+        "plasma_surf_filename": DEFAULT_GIL_WRAPPER_SURFACE,
+        "stage2_bs_path": "relative/seed.json",
+        "output_root": "outputs",
+        "equilibria_dir": None,
+        "nphi": 91,
+        "ntheta": 32,
+        "mpol": 8,
+        "ntor": 6,
+        "maxiter": 300,
+        "iota_target": 0.2,
+        "vol_target": 0.1,
+        "cc_dist": 0.05,
+        "cs_dist": 0.02,
+        "curvature_threshold": 40.0,
+        "hardware_search_mode": "warn",
+        "alm_max_outer_iters": 20,
+        "alm_max_subproblem_continuations": 4,
+        "alm_penalty_init": 1.0,
+        "alm_penalty_scale": 10.0,
         "alm_feas_tol": 1e-4,
-        "alm_stationarity_tol": 2e-4,
-        "alm_trust_radius_init": 0.15,
-        "alm_trust_radius_min": 1e-3,
-        "alm_trust_radius_shrink": 0.4,
-        "alm_trust_radius_grow": 1.8,
-        "alm_max_inner_attempts": 5,
+        "alm_stationarity_tol": 1e-4,
+        "alm_trust_radius_init": 0.05,
+        "alm_trust_radius_min": 1e-4,
+        "alm_trust_radius_shrink": 0.5,
+        "alm_trust_radius_grow": 1.5,
+        "alm_max_inner_attempts": 4,
+        "alm_distance_smoothing": 0.005,
+        "alm_curvature_smoothing": 0.05,
+        "alm_qs_threshold": 3e-3,
+        "alm_boozer_threshold": 1e-2,
+        "alm_iota_penalty_threshold": 1e-4,
+        "alm_length_penalty_threshold": 0.0,
     }
     defaults.update(overrides)
     return SimpleNamespace(**defaults)
@@ -260,7 +302,7 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
             {"ALMSettings": alm_utils.ALMSettings},
         )
         build_single_stage_alm_settings = functions["build_single_stage_alm_settings"]
-        settings = build_single_stage_alm_settings(make_single_stage_alm_args())
+        settings = build_single_stage_alm_settings(_make_alm_args())
 
         self.assertEqual(settings.max_outer_iterations, 7)
         self.assertEqual(settings.max_subproblem_continuations, 9)
@@ -283,7 +325,7 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
         )
         build_single_stage_alm_settings = functions["build_single_stage_alm_settings"]
         settings = build_single_stage_alm_settings(
-            make_single_stage_alm_args(alm_trust_radius_init=0.0)
+            _make_alm_args(alm_trust_radius_init=0.0)
         )
 
         self.assertIsNone(settings.trust_radius_init)
@@ -300,8 +342,111 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
         self.assertNotIn("augmented_objective(", objectives_source)
         self.assertIn("accepted_callback=callback", source)
         self.assertNotIn("inner_callback=callback", source)
+        self.assertIn("history_callback=history_callback", source)
         self.assertIn("single_stage_alm_constraint_names(", source)
         self.assertIn("alm_formulation=args.alm_formulation", source)
+
+    def test_single_stage_partial_alm_state_payload_serializes_numpy_fields(self):
+        functions = extract_functions(
+            SINGLE_STAGE_MODULE_PATH,
+            ["_jsonable_alm_state", "build_single_stage_alm_partial_state"],
+            {"np": np},
+        )
+        build_single_stage_alm_partial_state = functions[
+            "build_single_stage_alm_partial_state"
+        ]
+
+        payload = build_single_stage_alm_partial_state(
+            {
+                "accepted_iterations": 3,
+                "it": 4,
+                "J": 0.25,
+                "accepted_boozer_stage": "initial",
+                "accepted_hardware_status": {"success": False, "violations": ["cc"]},
+                "trial_hardware_status": {"success": False, "violations": ["cs"]},
+                "topology_gate_status": {"success": True, "survived_lines": 6},
+            },
+            ["curve_curve", "curve_surface"],
+            [{"outer_iteration": 1, "action": "penalty_increase"}],
+            {
+                "outer_iteration": 1,
+                "constraint_values": np.array([0.1, 0.2]),
+                "solver_constraint_values": np.array([0.3, 0.4]),
+                "action": "penalty_increase",
+            },
+            np.array([0.5, 0.25]),
+            10.0,
+            outer_iteration=2,
+            termination_message="still running",
+            optimizer_success=None,
+        )
+
+        self.assertEqual(payload["outer_iteration"], 2)
+        self.assertEqual(payload["constraint_names"], ["curve_curve", "curve_surface"])
+        self.assertEqual(payload["multipliers"], [0.5, 0.25])
+        self.assertEqual(payload["history_length"], 1)
+        self.assertEqual(payload["latest_history_entry"]["constraint_values"], [0.1, 0.2])
+        self.assertEqual(
+            payload["latest_history_entry"]["solver_constraint_values"],
+            [0.3, 0.4],
+        )
+        self.assertEqual(payload["accepted_hardware_status"]["violations"], ["cc"])
+        self.assertEqual(payload["trial_hardware_status"]["violations"], ["cs"])
+        self.assertEqual(payload["termination_message"], "still running")
+
+    def test_nfp10_gil_rerun_wrapper_pins_gil_thresholds_and_warn_mode(self):
+        source = NFP10_GIL_RERUN_MODULE_PATH.read_text()
+
+        self.assertIn(DEFAULT_GIL_WRAPPER_SURFACE, source)
+        self.assertIn('"--constraint-method"', source)
+        self.assertIn('"alm"', source)
+        self.assertIn('"--alm-formulation"', source)
+        self.assertIn('"gil"', source)
+        self.assertIn('"--hardware-search-mode"', source)
+        self.assertIn('"warn"', source)
+        self.assertNotIn('"adaptive"', source)
+        self.assertIn('"--alm-qs-threshold"', source)
+        self.assertIn('"--alm-boozer-threshold"', source)
+        self.assertIn('"--alm-iota-penalty-threshold"', source)
+        self.assertIn('"--alm-length-penalty-threshold"', source)
+
+    def test_nfp10_gil_rerun_wrapper_resolves_cli_paths(self):
+        module = load_nfp10_gil_rerun_module()
+        args = make_nfp10_gil_rerun_args(equilibria_dir="eqdir")
+
+        command = module.build_nfp10_gil_command(args)
+
+        self.assertEqual(
+            command[command.index("--stage2-bs-path") + 1],
+            str(Path("relative/seed.json").resolve()),
+        )
+        self.assertEqual(
+            command[command.index("--output-root") + 1],
+            str(Path("outputs").resolve()),
+        )
+        self.assertEqual(
+            command[command.index("--equilibria-dir") + 1],
+            str(Path("eqdir").resolve()),
+        )
+
+    def test_nfp10_gil_rerun_wrapper_parse_args_rejects_adaptive_mode(self):
+        module = load_nfp10_gil_rerun_module()
+
+        with patch.object(
+            sys,
+            "argv",
+            [
+                "run_nfp10_gil_alm_rerun.py",
+                "--stage2-bs-path",
+                "seed.json",
+                "--hardware-search-mode",
+                "adaptive",
+            ],
+        ):
+            with self.assertRaises(SystemExit) as excinfo:
+                module.parse_args()
+
+        self.assertEqual(excinfo.exception.code, 2)
 
     def test_single_stage_basin_hopping_uses_shared_helper_and_records_telemetry(self):
         source = SINGLE_STAGE_MODULE_PATH.read_text()
@@ -347,7 +492,7 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
             {"ALMSettings": alm_utils.ALMSettings},
         )
         build_stage2_alm_settings = functions["build_stage2_alm_settings"]
-        settings = build_stage2_alm_settings(make_stage2_alm_args())
+        settings = build_stage2_alm_settings(_make_alm_args())
 
         self.assertEqual(settings.max_outer_iterations, 7)
         self.assertEqual(settings.max_subproblem_continuations, 9)
@@ -365,7 +510,7 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
         )
         build_stage2_alm_settings = functions["build_stage2_alm_settings"]
         settings = build_stage2_alm_settings(
-            make_stage2_alm_args(alm_trust_radius_init=0.0)
+            _make_alm_args(alm_trust_radius_init=0.0)
         )
 
         self.assertIsNone(settings.trust_radius_init)

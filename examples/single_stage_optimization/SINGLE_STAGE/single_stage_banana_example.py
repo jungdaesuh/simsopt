@@ -1376,11 +1376,11 @@ def make_run_identity_config(
         refinement_max_stalled_chunks=args.refinement_max_stalled_chunks,
         constraint_weight=constraint_weight,
         constraint_method=constraint_method,
-        alm_formulation=args.alm_formulation,
-        alm_qs_threshold=args.alm_qs_threshold,
-        alm_boozer_threshold=args.alm_boozer_threshold,
-        alm_iota_penalty_threshold=args.alm_iota_penalty_threshold,
-        alm_length_penalty_threshold=args.alm_length_penalty_threshold,
+        alm_formulation=getattr(args, "alm_formulation", "legacy"),
+        alm_qs_threshold=getattr(args, "alm_qs_threshold", None),
+        alm_boozer_threshold=getattr(args, "alm_boozer_threshold", None),
+        alm_iota_penalty_threshold=getattr(args, "alm_iota_penalty_threshold", None),
+        alm_length_penalty_threshold=getattr(args, "alm_length_penalty_threshold", None),
         vol_target=vol_target,
         iota_target=iota_target,
         boozer_I=boozer_I,
@@ -2093,6 +2093,62 @@ def build_single_stage_alm_settings(args):
         trust_radius_grow=args.alm_trust_radius_grow,
         max_inner_attempts=args.alm_max_inner_attempts,
     )
+
+
+def _jsonable_alm_state(value):
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, dict):
+        return {str(key): _jsonable_alm_state(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_jsonable_alm_state(item) for item in value]
+    return value
+
+
+
+def build_single_stage_alm_partial_state(
+    run_dict,
+    constraint_names,
+    history,
+    latest_history_entry,
+    multipliers,
+    penalty,
+    *,
+    outer_iteration=None,
+    termination_message=None,
+    optimizer_success=None,
+):
+    current_objective = None if "J" not in run_dict else float(run_dict["J"])
+    return {
+        "outer_iteration": None if outer_iteration is None else int(outer_iteration),
+        "constraint_names": list(constraint_names),
+        "penalty": float(penalty),
+        "multipliers": np.asarray(multipliers, dtype=float).tolist(),
+        "history_length": int(len(history)),
+        "latest_history_entry": _jsonable_alm_state(latest_history_entry),
+        "history": _jsonable_alm_state(history),
+        "accepted_iterations": int(run_dict.get("accepted_iterations", 0)),
+        "current_iteration": int(run_dict.get("it", 0)),
+        "current_objective": current_objective,
+        "accepted_boozer_stage": run_dict.get("accepted_boozer_stage"),
+        "accepted_hardware_status": _jsonable_alm_state(
+            run_dict.get("accepted_hardware_status")
+        ),
+        "trial_hardware_status": _jsonable_alm_state(run_dict.get("trial_hardware_status")),
+        "topology_gate_status": _jsonable_alm_state(run_dict.get("topology_gate_status")),
+        "termination_message": termination_message,
+        "optimizer_success": optimizer_success,
+    }
+
+
+def write_single_stage_alm_partial_state(out_dir, payload):
+    partial_path = os.path.join(out_dir, "alm_state.partial.json")
+    temp_path = f"{partial_path}.tmp"
+    with open(temp_path, "w", encoding="utf-8") as outfile:
+        json.dump(payload, outfile, indent=2)
+    os.replace(temp_path, partial_path)
 
 
 def build_total_objective(JnonQSRatio, RES_WEIGHT, JBoozerResidual, IOTAS_WEIGHT, Jiota, LENGTH_WEIGHT, JCurveLength, CC_WEIGHT, JCurveCurve, CS_WEIGHT, JCurveSurface, CURVATURE_WEIGHT, JCurvature, SURF_DIST_WEIGHT=0.0, JSurfSurf=None):
@@ -3048,6 +3104,34 @@ if __name__ == "__main__":
         if args.basin_hops > 0:
             raise ValueError("--basin-hops is not supported with --constraint-method=alm")
         alm_settings = build_single_stage_alm_settings(args)
+        alm_constraint_names = single_stage_alm_constraint_names(
+            alm_formulation=ALM_FORMULATION,
+            include_surface_surface=JSurfSurf is not None,
+        )
+        alm_partial_state = {"history": []}
+        initial_alm_multipliers = np.zeros(len(alm_constraint_names), dtype=float)
+
+        def emit_alm_partial_state(
+            multipliers,
+            penalty,
+            *,
+            outer_iteration=None,
+            latest_history_entry=None,
+            termination_message=None,
+            optimizer_success=None,
+        ):
+            payload = build_single_stage_alm_partial_state(
+                run_dict,
+                alm_constraint_names,
+                alm_partial_state["history"],
+                latest_history_entry,
+                multipliers,
+                penalty,
+                outer_iteration=outer_iteration,
+                termination_message=termination_message,
+                optimizer_success=optimizer_success,
+            )
+            write_single_stage_alm_partial_state(OUT_DIR_ITER, payload)
 
         def evaluate_problem(inner_x, multipliers, penalty):
             set_alm_runtime_state(multipliers, penalty)
@@ -3061,6 +3145,24 @@ if __name__ == "__main__":
                 f"multipliers={np.asarray(multipliers, dtype=float).tolist()}, "
                 f"penalty={float(penalty):.3e}"
             )
+            emit_alm_partial_state(
+                multipliers,
+                penalty,
+                outer_iteration=outer_iteration,
+            )
+
+        def history_callback(history, latest_history_entry, multipliers, penalty):
+            alm_partial_state["history"] = history  # already shallow-copied by _emit_history_snapshot
+            emit_alm_partial_state(
+                multipliers,
+                penalty,
+                outer_iteration=(
+                    None
+                    if latest_history_entry is None
+                    else latest_history_entry.get("outer_iteration")
+                ),
+                latest_history_entry=latest_history_entry,
+            )
 
         def snapshot_accepted_state():
             return snapshot_single_stage_incumbent_state(run_dict)
@@ -3071,23 +3173,17 @@ if __name__ == "__main__":
             restore_surface_states(surface_data, run_dict["surface_state"])
 
         set_alm_runtime_state(
-            np.zeros(
-                len(
-                    single_stage_alm_constraint_names(
-                        alm_formulation=ALM_FORMULATION,
-                        include_surface_surface=JSurfSurf is not None,
-                    )
-                ),
-                dtype=float,
-            ),
+            initial_alm_multipliers,
             args.alm_penalty_init,
+        )
+        emit_alm_partial_state(
+            initial_alm_multipliers,
+            args.alm_penalty_init,
+            outer_iteration=0,
         )
         res = minimize_alm(
             dofs,
-            single_stage_alm_constraint_names(
-                alm_formulation=ALM_FORMULATION,
-                include_surface_surface=JSurfSurf is not None,
-            ),
+            alm_constraint_names,
             evaluate_problem,
             alm_settings,
             {
@@ -3098,13 +3194,27 @@ if __name__ == "__main__":
             },
             accepted_callback=callback,
             outer_state_callback=outer_state_callback,
+            history_callback=history_callback,
             snapshot_accepted_state_fn=snapshot_accepted_state,
             restore_incumbent_state_fn=restore_incumbent_state,
         )
         alm_result = res
+        alm_partial_state["history"] = [
+            dict(entry) for entry in getattr(res, "history", [])
+        ]
         res_nit = res.nit
         termination_message = str(res.message)
         optimizer_success = bool(res.success)
+        emit_alm_partial_state(
+            res.multipliers,
+            res.penalty,
+            outer_iteration=getattr(res, "outer_iterations", None),
+            latest_history_entry=(
+                None if not alm_partial_state["history"] else alm_partial_state["history"][-1]
+            ),
+            termination_message=termination_message,
+            optimizer_success=optimizer_success,
+        )
         print(res.message)
     elif args.basin_hops > 0:
         # Basin-hopping: perturb DOFs and re-run L-BFGS-B multiple times, keep best
@@ -3503,6 +3613,7 @@ if __name__ == "__main__":
         "ALM_LENGTH_PENALTY_THRESHOLD": (
             args.alm_length_penalty_threshold if CONSTRAINT_METHOD == "alm" else None
         ),
+        "ALM_PARTIAL_STATE_FILENAME": "alm_state.partial.json" if CONSTRAINT_METHOD == "alm" else None,
         "ALM_FINAL_PENALTY": getattr(alm_result, "penalty", None),
         "ALM_FINAL_MULTIPLIERS": getattr(alm_result, "multipliers", None),
         "ALM_FINAL_CONSTRAINT_VALUES": getattr(alm_result, "constraint_values", None),
