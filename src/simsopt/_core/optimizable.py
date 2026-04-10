@@ -77,6 +77,18 @@ def _runtime_scalar_mul(factor, value):
     return float(factor) * value
 
 
+def _runtime_add(left, right):
+    if _is_runtime_jax_value(left):
+        from simsopt.jax_core._math_utils import scalar_like
+
+        return left + scalar_like(left, right)
+    if _is_runtime_jax_value(right):
+        from simsopt.jax_core._math_utils import scalar_like
+
+        return scalar_like(right, left) + right
+    return left + right
+
+
 def _runtime_sum(values):
     iterator = iter(values)
     try:
@@ -84,7 +96,7 @@ def _runtime_sum(values):
     except StopIteration:
         return 0.0
     for value in iterator:
-        total = total + value
+        total = _runtime_add(total, value)
     return total
 
 
