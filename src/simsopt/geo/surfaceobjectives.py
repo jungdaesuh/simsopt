@@ -9,6 +9,7 @@ from .surfacexyztensorfourier import SurfaceXYZTensorFourier
 from ..objectives.utilities import forward_backward
 
 try:
+    import jax
     import jax.numpy as jnp
     from jax import grad
     from ..jax_core._math_utils import as_jax_float64 as _runtime_as_jax_float64
@@ -1102,6 +1103,11 @@ if _HAS_JAX:
     def _as_jax_float64(value):
         return _runtime_as_jax_float64(value)
 
+    def _as_numpy_float64(value):
+        if isinstance(value, np.ndarray):
+            return np.asarray(value, dtype=np.float64)
+        return np.asarray(jax.device_get(value), dtype=np.float64)
+
     def surface_to_surface_distance_pure(gamma1, gamma2, mdist):
         dists = surface_to_surface_pairwise_distances(gamma1, gamma2)
         return jnp.sum(jnp.maximum(mdist - dists, 0) ** 2) / (
@@ -1153,8 +1159,12 @@ if _HAS_JAX:
 
             return Derivative(
                 {
-                    self.surf1: self.surf1.dgamma_by_dcoeff_vjp(grad0),
-                    self.surf2: self.surf2.dgamma_by_dcoeff_vjp(grad1),
+                    self.surf1: self.surf1.dgamma_by_dcoeff_vjp(
+                        _as_numpy_float64(grad0)
+                    ),
+                    self.surf2: self.surf2.dgamma_by_dcoeff_vjp(
+                        _as_numpy_float64(grad1)
+                    ),
                 }
             )
 

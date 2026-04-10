@@ -968,6 +968,7 @@ def test_transfer_guard_disallow_allows_surface_surface_distance_smoke():
 
         assert float(distance.J()) >= 0.0
         assert float(distance.shortest_distance()) > 0.0
+        assert np.all(np.isfinite(np.asarray(distance.dJ())))
     """,
         failure_message="SurfaceSurfaceDistance transfer-guard smoke failed",
     )
