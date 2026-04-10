@@ -9,16 +9,22 @@ Validates:
 """
 
 import math
+from pathlib import Path
+import sys
 
 import pytest
 import numpy as np
 
 import jax
 import jax.numpy as jnp
+_TESTS_ROOT = Path(__file__).resolve().parents[1]
+if str(_TESTS_ROOT) not in sys.path:
+    sys.path.insert(0, str(_TESTS_ROOT))
 from conftest import (
     device_float64,
     host_array,
     host_scalar,
+    parity_acceptance_tolerance,
     parity_default_device,
     parity_lane,
     parity_rng,
@@ -118,8 +124,8 @@ def _make_scalar_dynamic_range_data():
     return 1.0, 0.0, device_float64(B), device_float64(xphi), device_float64(xtheta)
 
 
-def _assert_lane_allclose(actual, reference, parity_lane, *, cpu_tol, gpu_tol):
-    tolerance = cpu_tol if parity_lane == "cpu" else gpu_tol
+def _assert_lane_allclose(actual, reference, parity_lane, *, tier):
+    tolerance = parity_acceptance_tolerance(tier, parity_lane)
     np.testing.assert_allclose(
         actual,
         reference,
@@ -351,8 +357,7 @@ class TestBoozerResidualParityStress:
             vector_actual,
             vector_reference,
             parity_lane,
-            cpu_tol=(1e-12, 1e-24),
-            gpu_tol=(1e-10, 1e-22),
+            tier="boozer_residual_floor_vector",
         )
 
     def test_scalar_residual_norm_near_tolerance_floor(self, parity_lane):
@@ -383,8 +388,7 @@ class TestBoozerResidualParityStress:
             residual_norm_actual,
             residual_norm_reference,
             parity_lane,
-            cpu_tol=(1e-12, 1e-15),
-            gpu_tol=(1e-10, 1e-14),
+            tier="boozer_residual_floor_scalar",
         )
 
 

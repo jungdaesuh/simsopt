@@ -39,6 +39,25 @@ must hold:
   re-solving) validates the direct term correctly. Full adjoint-term
   validation requires a well-conditioned representative case.
 
+**Reduction-order stress tiers**
+
+Mirrored reduction-stress tests must use named acceptance tiers instead of
+one-off tolerances. The current tiers are:
+
+- ``biotsavart_chunked_dense``: CPU ``rtol=1e-12``, ``atol=1e-14``; GPU
+  ``rtol=1e-12``, ``atol=1e-13``.
+- ``biotsavart_accumulation_order``: CPU ``rtol=1e-12``, ``atol=1e-14``;
+  GPU ``rtol=1e-12``, ``atol=2e-13``.
+- ``integral_bdotn_normalized_stress``: CPU/GPU ``rtol=1e-12``,
+  ``atol=1e-14``.
+- ``boozer_residual_floor_vector``: CPU ``rtol=1e-12``, ``atol=1e-24``;
+  GPU ``rtol=1e-10``, ``atol=1e-22``.
+- ``boozer_residual_floor_scalar``: CPU ``rtol=1e-12``, ``atol=1e-15``;
+  GPU ``rtol=1e-10``, ``atol=1e-14``.
+
+Use those tiers for reduction-heavy parity probes until new parity data shows
+that a kernel needs either a tighter contract or stronger arithmetic.
+
 **Solver convergence**
 
 - ``BoozerSurfaceJAX.run_code()`` (both LS and exact paths) converges

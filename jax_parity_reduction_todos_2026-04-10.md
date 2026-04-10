@@ -268,9 +268,17 @@ Solver drift is dominated by:
   - SurfaceObjectives family
   - BoozerSurface
   - SurfaceRZFourier
-- [ ] Add one stress test per hot reduction kernel where accumulation order is likely to matter
-- [ ] Add one CPU-parity lane and one GPU-parity lane for every new mirrored test
-- [ ] Keep tolerances tied to documented acceptance tiers, not ad hoc values
+- [x] Add one stress test per hot reduction kernel where accumulation order is likely to matter
+  - Covered by the Biot-Savart many-coil / many-quadrature accumulation-order
+    lane, the `integral_BdotN` normalized-denominator stress lane, and the
+    Boozer residual near-floor vector/scalar stress lanes.
+- [x] Add one CPU-parity lane and one GPU-parity lane for every new mirrored test
+  - Covered either by explicit `jax_cpu_parity` / `jax_gpu_parity`
+    parametrization or the shared `parity_lane` fixture in the mirrored test
+    files.
+- [x] Keep tolerances tied to documented acceptance tiers, not ad hoc values
+  - Shared reduction-stress tiers now live in `tests/conftest.py` and are
+    documented in `docs/source/jax_acceptance.rst`.
 
 ## Exit Criteria
 

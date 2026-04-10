@@ -23,10 +23,15 @@ jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp
 from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
 
+_TESTS_ROOT = Path(__file__).resolve().parents[1]
+if str(_TESTS_ROOT) not in sys.path:
+    sys.path.insert(0, str(_TESTS_ROOT))
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from repo_bootstrap import bootstrap_local_simsopt
 
 bootstrap_local_simsopt(Path(__file__).resolve().parents[2] / "src")
+
+from conftest import parity_acceptance_modes
 
 from simsopt.backend import invalidate_backend_cache
 from simsopt.jax_core.field import (
@@ -95,6 +100,16 @@ _KERNEL_TUNING_ENV_VARS = (
     "SIMSOPT_BACKEND_MODE",
     "SIMSOPT_JAX_COIL_CHUNK_SIZE",
     "SIMSOPT_JAX_QUADRATURE_BLOCK_SIZE",
+)
+_BIOTSAVART_CHUNKED_DENSE_PARITY_MODES = parity_acceptance_modes(
+    "biotsavart_chunked_dense",
+    "jax_cpu_parity",
+    "jax_gpu_parity",
+)
+_BIOTSAVART_ACCUMULATION_ORDER_PARITY_MODES = parity_acceptance_modes(
+    "biotsavart_accumulation_order",
+    "jax_cpu_parity",
+    "jax_gpu_parity",
 )
 
 
@@ -705,10 +720,7 @@ class TestBiotSavartJaxChunkedParity:
 
     @pytest.mark.parametrize(
         ("mode", "rtol", "atol"),
-        [
-            ("jax_cpu_parity", 1e-12, 1e-14),
-            ("jax_gpu_parity", 1e-12, 1e-13),
-        ],
+        _BIOTSAVART_CHUNKED_DENSE_PARITY_MODES,
     )
     def test_chunked_B_matches_dense_reference_under_accumulation_stress(
         self, mode, rtol, atol
@@ -748,10 +760,7 @@ class TestBiotSavartJaxChunkedParity:
 
     @pytest.mark.parametrize(
         ("mode", "rtol", "atol"),
-        [
-            ("jax_cpu_parity", 1e-12, 1e-14),
-            ("jax_gpu_parity", 1e-12, 2e-13),
-        ],
+        _BIOTSAVART_ACCUMULATION_ORDER_PARITY_MODES,
     )
     def test_many_coil_many_quadrature_reduction_order_matches_dense_reference(
         self, mode, rtol, atol

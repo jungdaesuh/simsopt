@@ -56,6 +56,33 @@ _PARITY_LANE_TO_MODE = {
     "cpu": "jax_cpu_parity",
     "gpu": "jax_gpu_parity",
 }
+_PARITY_MODE_TO_LANE = {
+    "jax_cpu_parity": "cpu",
+    "jax_gpu_parity": "gpu",
+    "jax_gpu_fast": "gpu",
+}
+_REDUCTION_ACCEPTANCE_TIERS = {
+    "biotsavart_chunked_dense": {
+        "cpu": (1e-12, 1e-14),
+        "gpu": (1e-12, 1e-13),
+    },
+    "biotsavart_accumulation_order": {
+        "cpu": (1e-12, 1e-14),
+        "gpu": (1e-12, 2e-13),
+    },
+    "integral_bdotn_normalized_stress": {
+        "cpu": (1e-12, 1e-14),
+        "gpu": (1e-12, 1e-14),
+    },
+    "boozer_residual_floor_vector": {
+        "cpu": (1e-12, 1e-24),
+        "gpu": (1e-10, 1e-22),
+    },
+    "boozer_residual_floor_scalar": {
+        "cpu": (1e-12, 1e-15),
+        "gpu": (1e-10, 1e-14),
+    },
+}
 
 
 def _require_jax():
@@ -294,6 +321,36 @@ def assert_arrays_on_device(device, *arrays):
 def relative_error(actual, reference):
     """Return ``|actual - reference| / (|reference| + 1e-30)``."""
     return abs(actual - reference) / (abs(reference) + 1e-30)
+
+
+def _parity_lane_key(lane_or_mode: str) -> str:
+    if lane_or_mode in _PARITY_LANE_TO_MODE:
+        return lane_or_mode
+    try:
+        return _PARITY_MODE_TO_LANE[lane_or_mode]
+    except KeyError as exc:
+        raise ValueError(f"Unknown parity lane or mode {lane_or_mode!r}") from exc
+
+
+def parity_acceptance_tolerance(
+    tier: str, lane_or_mode: str
+) -> tuple[float, float]:
+    try:
+        tolerances = _REDUCTION_ACCEPTANCE_TIERS[tier]
+    except KeyError as exc:
+        raise ValueError(f"Unknown parity acceptance tier {tier!r}") from exc
+
+    lane = _parity_lane_key(lane_or_mode)
+
+    return tolerances[lane]
+
+
+def parity_acceptance_modes(
+    tier: str, *modes: str
+) -> tuple[tuple[str, float, float], ...]:
+    return tuple(
+        (mode, *parity_acceptance_tolerance(tier, mode)) for mode in modes
+    )
 
 
 def pytest_collection_modifyitems(config, items):

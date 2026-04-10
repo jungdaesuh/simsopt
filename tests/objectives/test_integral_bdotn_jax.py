@@ -8,15 +8,21 @@ Validates:
 """
 
 import math
+from pathlib import Path
+import sys
 
 import pytest
 import numpy as np
 
 import jax.numpy as jnp
+_TESTS_ROOT = Path(__file__).resolve().parents[1]
+if str(_TESTS_ROOT) not in sys.path:
+    sys.path.insert(0, str(_TESTS_ROOT))
 from conftest import (
     device_float64,
     host_array,
     host_scalar,
+    parity_acceptance_tolerance,
     parity_default_device,
     parity_lane,
     parity_rng,
@@ -198,12 +204,16 @@ class TestIntegralBdotN:
 
         np.testing.assert_allclose(J, 0.0, atol=0.0)
 
-    def test_normalized_reduction_stress_stays_on_contract(self):
+    def test_normalized_reduction_stress_stays_on_contract(self, parity_lane):
         B, target, normal = _normalized_reduction_stress_data()
+        rtol, atol = parity_acceptance_tolerance(
+            "integral_bdotn_normalized_stress",
+            parity_lane,
+        )
 
         J_jax = host_scalar(integral_BdotN(B, target, normal, "normalized"))
 
-        np.testing.assert_allclose(J_jax, 0.5, rtol=1e-12, atol=1e-14)
+        np.testing.assert_allclose(J_jax, 0.5, rtol=rtol, atol=atol)
 
     def test_strict_oracle_scalar_reduction_matches_high_precision_reference(self):
         B, target, normal = _quadratic_flux_scalar_stress_data()
