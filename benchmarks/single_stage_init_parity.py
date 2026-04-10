@@ -43,6 +43,7 @@ from benchmarks.validation_ladder_common import (
 from benchmarks.single_stage_smoke_fixture import (
     DEFAULT_EQUILIBRIA_DIR,
     DEFAULT_IOTA_TARGET,
+    DEFAULT_OPTIMIZER_BACKEND,
     DEFAULT_PLASMA_SURF_FILENAME,
     DEFAULT_SMOKE_MPOL,
     DEFAULT_SMOKE_NPHI,
@@ -76,7 +77,7 @@ IOTA_ABS_TOL = _TIER3_TOLERANCES["final_iota_abs_tol"]
 VOLUME_REL_TOL = _TIER3_TOLERANCES["final_volume_rel_tol"]
 FIELD_ERROR_REL_TOL = _TIER3_TOLERANCES["field_error_rel_tol"]
 SURFACE_GEOMETRY_REL_TOL = _TIER3_TOLERANCES["surface_geometry_rel_tol"]
-TARGET_OPTIMIZER_BACKEND = "ondevice"
+TARGET_OPTIMIZER_BACKEND = DEFAULT_OPTIMIZER_BACKEND
 DEFAULT_OUTER_MAXITER = 0
 _TARGET_LANE_FINAL_ONLY_SYNC = "final-only"
 _TARGET_LANE_PER_ACCEPT_SYNC = "per-accept"
@@ -164,21 +165,20 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--optimizer-backend",
-        choices=("scipy", "hybrid", "ondevice"),
+        choices=(TARGET_OPTIMIZER_BACKEND,),
         default=TARGET_OPTIMIZER_BACKEND,
         help=(
             "JAX Boozer optimizer backend for the init probe. "
-            "Defaults to the target ondevice lane; pass scipy to compare "
-            "against the public reference lane explicitly."
+            "Single-stage JAX init parity now uses the ondevice lane only."
         ),
     )
     parser.add_argument(
         "--boozer-optimizer-backend",
-        choices=("scipy", "hybrid", "ondevice"),
+        choices=(TARGET_OPTIMIZER_BACKEND,),
         default=None,
         help=(
             "Optional override for the inner JAX Boozer LS backend. "
-            "Defaults to --optimizer-backend to preserve the historical probe."
+            "When provided it must stay ondevice."
         ),
     )
     parser.add_argument(

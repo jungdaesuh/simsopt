@@ -277,7 +277,6 @@ def _build_init_fixture(
         ntor=DEFAULT_SMOKE_NTOR,
         vol_target=DEFAULT_VOL_TARGET,
         iota_target=DEFAULT_IOTA_TARGET,
-        optimizer_backend="scipy",
         bs_dofs_override=bs_dofs_override,
     )
     boozer_surface = fixture["boozer_surface"]
@@ -348,7 +347,7 @@ def outer_baseline_runs() -> tuple[SingleStageOuterRun, SingleStageOuterRun]:
     )
     jax_run = _run_single_stage_script(
         backend="jax",
-        optimizer_backend="scipy",
+        optimizer_backend="ondevice",
         maxiter=1,
         platform="cpu",
         stage2_bs_path=DEFAULT_STAGE2_BS_PATH,

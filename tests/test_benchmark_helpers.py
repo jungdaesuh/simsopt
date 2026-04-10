@@ -480,8 +480,6 @@ def test_single_stage_init_parity_passes_on_real_cuda_runtime(tmp_path):
         [
             "--platform",
             "cuda",
-            "--optimizer-backend",
-            "scipy",
             "--output-json",
             str(output_json),
         ],
@@ -1086,7 +1084,7 @@ def test_single_stage_init_case_threads_optimizer_backend_to_jax_lane(
         vol_target=0.1,
         iota_target=0.15,
         optimizer_backend="ondevice",
-        boozer_optimizer_backend="scipy",
+        boozer_optimizer_backend="ondevice",
         maxiter=1,
         equilibrium_path=None,
         equilibria_dir=str(tmp_path / "equilibria"),
@@ -1150,7 +1148,7 @@ def test_single_stage_init_case_threads_optimizer_backend_to_jax_lane(
     optimizer_flag_index = command.index("--optimizer-backend")
     assert command[optimizer_flag_index + 1] == "ondevice"
     boozer_optimizer_flag_index = command.index("--boozer-optimizer-backend")
-    assert command[boozer_optimizer_flag_index + 1] == "scipy"
+    assert command[boozer_optimizer_flag_index + 1] == "ondevice"
     target_lane_sync_flag_index = command.index("--target-lane-accepted-step-sync")
     assert command[target_lane_sync_flag_index + 1] == "final-only"
     assert _JAX_COMPILATION_CACHE_ENV_VAR not in env
@@ -3559,6 +3557,37 @@ def test_timed_probe_accepts_written_json_from_failed_informational_probe(
     assert payload["failures"] == ["probe failed"]
     assert outer_elapsed_s >= 0.0
     assert observed_envs
+
+
+def test_tier5_provenance_extra_uses_real_single_stage_fixture():
+    args = argparse.Namespace(
+        platform="cuda",
+        optimizer_backend="ondevice",
+        plasma_surf_filename="fixture.nc",
+        stage2_bs_path="/tmp/seed.json",
+        stage2_nphi=255,
+        stage2_ntheta=64,
+        single_stage_nphi=255,
+        single_stage_ntheta=64,
+        mpol=8,
+        ntor=6,
+        maxiter=20,
+        single_stage_outer_loop_maxiter=1,
+        samples=3,
+        eps=1e-4,
+        phase="gpu",
+    )
+
+    provenance_extra = tier5_performance_characterization._tier5_provenance_extra(
+        args,
+        benchmark_mode=False,
+    )
+
+    assert provenance_extra["fixture"] == "real-single-stage-init"
+    assert provenance_extra["lane"] == resolve_probe_lane(
+        optimizer_backend="ondevice"
+    )
+    assert provenance_extra["phase"] == "gpu"
 
 
 def _set_summary_rung_passed(

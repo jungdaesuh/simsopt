@@ -9,7 +9,6 @@ import subprocess
 import sys
 import textwrap
 
-import numpy as np
 import pytest
 
 
@@ -105,31 +104,16 @@ def _run_real_fixture_probe(
     return json.loads(lines[-1])
 
 
-def _assert_public_scipy_lane_result(payload: dict) -> None:
-    assert "exc_type" not in payload, payload
-    assert payload["success"] is True
-    assert payload["optimizer_method"] == "bfgs"
-    assert payload["private_pkg_is_none"] is True
-    assert payload["private_in_sys_modules"] is False
-
-
-def _assert_real_fixture_match(actual: dict, expected: dict) -> None:
-    np.testing.assert_allclose(actual["iota"], expected["iota"], rtol=1e-10, atol=1e-12)
-    np.testing.assert_allclose(actual["G"], expected["G"], rtol=1e-10, atol=1e-12)
-    np.testing.assert_allclose(actual["fun"], expected["fun"], rtol=1e-10, atol=1e-12)
-    assert actual["iter"] == expected["iter"]
-    np.testing.assert_allclose(
-        np.asarray(actual["surface_dofs"], dtype=float),
-        np.asarray(expected["surface_dofs"], dtype=float),
-        rtol=1e-10,
-        atol=1e-12,
-    )
+def _assert_public_scipy_lane_rejected(payload: dict) -> None:
+    assert payload["exc_type"] == "ValueError"
+    assert "boozer_optimizer_backend='ondevice'" in payload["exc_message"]
+    assert "CPU/reference-only" in payload["exc_message"]
 
 
 class TestSection6PublicLaneRealFixture:
     """Real Boozer parity regression for the Section 6 public/private split."""
 
-    def test_public_scipy_lane_matches_with_private_package_blocked(self):
+    def test_public_scipy_lane_is_rejected_before_private_package_matters(self):
         baseline = _run_real_fixture_probe(
             optimizer_backend="scipy",
             block_private=False,
@@ -139,9 +123,9 @@ class TestSection6PublicLaneRealFixture:
             block_private=True,
         )
 
-        _assert_public_scipy_lane_result(baseline)
-        _assert_public_scipy_lane_result(blocked)
-        _assert_real_fixture_match(blocked, baseline)
+        for payload in (baseline, blocked):
+            _assert_public_scipy_lane_rejected(payload)
+        assert blocked == baseline
 
     @pytest.mark.private_optimizer_runtime
     def test_ondevice_lane_fails_on_real_fixture_when_private_package_is_blocked(self):

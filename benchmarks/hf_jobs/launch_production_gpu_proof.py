@@ -30,6 +30,7 @@ DEFAULT_STAGE2_SEED_REL = (
 DEFAULT_EQUILIBRIA_REL = "examples/single_stage_optimization/equilibria"
 DEFAULT_PLASMA = "wout_nfp22ginsburg_000_014417_iota15.nc"
 DEFAULT_IMAGE = os.environ.get("SIMSOPT_HF_GPU_IMAGE", "python:3.11-bookworm")
+DEFAULT_TARGET_OPTIMIZER_BACKEND = "ondevice"
 
 
 def _resolve_hf_cli() -> str:
@@ -406,8 +407,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--timeout", default="8h", help="HF Jobs timeout.")
     parser.add_argument(
         "--stage2-optimizer-backend",
-        choices=("scipy", "hybrid", "ondevice"),
-        default="ondevice",
+        choices=(DEFAULT_TARGET_OPTIMIZER_BACKEND,),
+        default=DEFAULT_TARGET_OPTIMIZER_BACKEND,
     )
     parser.add_argument("--stage2-nphi", type=int, default=255)
     parser.add_argument("--stage2-ntheta", type=int, default=64)
@@ -415,12 +416,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--geometry-rel-tol", type=float, default=None)
     parser.add_argument(
         "--single-stage-optimizer-backend",
-        choices=("scipy", "hybrid", "ondevice"),
-        default="ondevice",
+        choices=(DEFAULT_TARGET_OPTIMIZER_BACKEND,),
+        default=DEFAULT_TARGET_OPTIMIZER_BACKEND,
     )
     parser.add_argument(
         "--single-stage-boozer-optimizer-backend",
-        choices=("scipy", "hybrid", "ondevice"),
+        choices=(DEFAULT_TARGET_OPTIMIZER_BACKEND,),
         default=None,
         help=(
             "Optional override for the single-stage inner Boozer LS backend. "

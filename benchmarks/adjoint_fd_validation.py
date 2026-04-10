@@ -1,4 +1,4 @@
-"""Tier 4 adjoint pipeline validation on a stable public-lane fixture."""
+"""Tier 4 adjoint pipeline validation on the real single-stage fixture."""
 
 from __future__ import annotations
 
@@ -161,9 +161,9 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--optimizer-backend",
-        choices=("scipy", "hybrid", "ondevice"),
+        choices=(DEFAULT_OPTIMIZER_BACKEND,),
         default=DEFAULT_OPTIMIZER_BACKEND,
-        help="JAX Boozer optimizer backend for the adjoint probe.",
+        help="JAX target-lane optimizer backend for the adjoint probe.",
     )
     parser.add_argument(
         "--samples",

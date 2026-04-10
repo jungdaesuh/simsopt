@@ -27,6 +27,7 @@ from benchmarks.single_stage_backend_routing import (
 from benchmarks.single_stage_smoke_fixture import (
     DEFAULT_EQUILIBRIA_DIR,
     DEFAULT_IOTA_TARGET,
+    DEFAULT_OPTIMIZER_BACKEND,
     DEFAULT_PLASMA_SURF_FILENAME,
     DEFAULT_SMOKE_MPOL,
     DEFAULT_SMOKE_NPHI,
@@ -149,17 +150,17 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--optimizer-backend",
-        choices=("scipy", "hybrid", "ondevice"),
-        default="ondevice",
-        help="JAX Boozer optimizer backend to prove on the target outer path.",
+        choices=(DEFAULT_OPTIMIZER_BACKEND,),
+        default=DEFAULT_OPTIMIZER_BACKEND,
+        help="JAX target-lane optimizer backend for the outer-loop proof.",
     )
     parser.add_argument(
         "--boozer-optimizer-backend",
-        choices=("scipy", "hybrid", "ondevice"),
+        choices=(DEFAULT_OPTIMIZER_BACKEND,),
         default=None,
         help=(
             "Optional override for the inner JAX Boozer LS backend. "
-            "Defaults to --optimizer-backend when omitted."
+            "When provided it must stay ondevice."
         ),
     )
     parser.add_argument(

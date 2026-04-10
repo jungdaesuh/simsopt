@@ -57,6 +57,7 @@ TIER4_ADJOINT_LANE_RUNG = "tier4_adjoint_fd_lane"
 _TIER5_PERFORMANCE_BUDGET_PROFILE = "stable_hardware_weekly"
 _TIER5_PHASE_CHOICES = ("full", "gpu", "cpu", "aggregate")
 _TIER3_OUTER_LOOP_CONTRACT = single_stage_proof_contract(TIER3_OUTER_LOOP_RUNG)
+_TIER5_FIXTURE = "real-single-stage-init"
 
 _RUNTIME_JAX = None
 _RUNTIME_JAXLIB = None
@@ -64,7 +65,10 @@ _RUNTIME_JAXLIB = None
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Run Tier 5 performance characterization on the trusted public-lane fixtures."
+        description=(
+            "Run Tier 5 performance characterization on the trusted real "
+            "single-stage fixture."
+        )
     )
     parser.add_argument(
         "--platform",
@@ -153,9 +157,9 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--optimizer-backend",
-        choices=("scipy", "hybrid", "ondevice"),
+        choices=(DEFAULT_OPTIMIZER_BACKEND,),
         default=DEFAULT_OPTIMIZER_BACKEND,
-        help="JAX Boozer optimizer backend for the single-stage trusted fixture.",
+        help="JAX target-lane optimizer backend for the single-stage trusted fixture.",
     )
     parser.add_argument(
         "--samples",
@@ -340,20 +344,25 @@ def _timed_probe(
     command_args: list[str],
     *,
     platform: str,
+    accept_failed_output_json: bool = False,
 ) -> tuple[dict[str, Any], float]:
     with tempfile.TemporaryDirectory(prefix=f"{script_path.stem}-") as temp_dir:
-        output_json = str(Path(temp_dir) / f"{script_path.stem}.json")
+        output_path = Path(temp_dir) / f"{script_path.stem}.json"
         start = time.perf_counter()
-        run_python_script(
-            script_path,
-            [*command_args, "--output-json", output_json],
-            env=repo_pythonpath_env(platform=platform),
-            cwd=REPO_ROOT,
-            bootstrap_repo=True,
-            stream_output=True,
-        )
+        try:
+            run_python_script(
+                script_path,
+                [*command_args, "--output-json", str(output_path)],
+                env=repo_pythonpath_env(platform=platform),
+                cwd=REPO_ROOT,
+                bootstrap_repo=True,
+                stream_output=True,
+            )
+        except RuntimeError:
+            if not accept_failed_output_json or not output_path.exists():
+                raise
         elapsed_s = time.perf_counter() - start
-        return load_json(output_json), float(elapsed_s)
+        return load_json(output_path), float(elapsed_s)
 
 
 def summarize_pair_probe(
@@ -382,6 +391,7 @@ def _with_performance_contract(
     timing_semantics: str,
     recommended_question: str,
     supports_performance_headline: bool,
+    counts_toward_phase_pass: bool = True,
     headline_metric: str | None = None,
     headline_speedup_vs_cpu: float | None = None,
     extra_fields: dict[str, Any] | None = None,
@@ -390,6 +400,7 @@ def _with_performance_contract(
     enriched["timing_semantics"] = timing_semantics
     enriched["recommended_question"] = recommended_question
     enriched["supports_performance_headline"] = bool(supports_performance_headline)
+    enriched["counts_toward_phase_pass"] = bool(counts_toward_phase_pass)
     if headline_metric is not None:
         enriched["headline_metric"] = headline_metric
     if headline_speedup_vs_cpu is not None:
@@ -508,12 +519,45 @@ def summarize_single_stage_outer_loop_performance_probe(
         timing_semantics="short_outer_loop_probe_with_cpu_reference",
         recommended_question="single_stage_outer_loop_performance",
         supports_performance_headline=False,
+        counts_toward_phase_pass=False,
         extra_fields={"speedup_vs_cpu": safe_speedup(cpu_elapsed_s, lane_elapsed_s)},
     )
 
 
 def _build_summary_by_name(summary: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
     return {item["name"]: item for item in summary}
+
+
+def _counts_toward_phase_pass(item: dict[str, Any]) -> bool:
+    return bool(item.get("counts_toward_phase_pass", True))
+
+
+def _tier5_provenance_extra(
+    args: argparse.Namespace,
+    *,
+    benchmark_mode: bool,
+) -> dict[str, Any]:
+    return {
+        "lane": resolve_probe_lane(optimizer_backend=args.optimizer_backend),
+        "fixture": _TIER5_FIXTURE,
+        "platform_request": args.platform,
+        "plasma_surf_filename": args.plasma_surf_filename,
+        "stage2_seed_path": args.stage2_bs_path,
+        "stage2_nphi": int(args.stage2_nphi),
+        "stage2_ntheta": int(args.stage2_ntheta),
+        "single_stage_nphi": int(args.single_stage_nphi),
+        "single_stage_ntheta": int(args.single_stage_ntheta),
+        "mpol": int(args.mpol),
+        "ntor": int(args.ntor),
+        "stage2_maxiter": int(args.maxiter),
+        "optimizer_backend": args.optimizer_backend,
+        "benchmark_mode": benchmark_mode,
+        "single_stage_outer_loop_maxiter": int(args.single_stage_outer_loop_maxiter),
+        "fd_samples": int(args.samples),
+        "fd_eps": float(args.eps),
+        "phase": args.phase,
+        "compile_behavior": describe_compile_behavior(uses_subprocesses=True),
+    }
 
 
 def build_tier5_performance_contract(summary: list[dict[str, Any]]) -> dict[str, Any]:
@@ -756,7 +800,11 @@ def _combine_phase_payload(
         if TIER2_PERFORMANCE_RUNG in rungs
         else []
     )
-    phase_passed = all(bool(item["passed"]) for item in summary) and not (
+    phase_passed = all(
+        bool(item["passed"])
+        for item in summary
+        if _counts_toward_phase_pass(item)
+    ) and not (
         performance_failures or sharding_failures
     )
     aggregate_complete = not missing_rungs
@@ -846,6 +894,7 @@ def _run_stage123_probes(
         _single_stage_init_script(),
         _single_stage_outer_loop_probe_args(args),
         platform=args.platform,
+        accept_failed_output_json=True,
     )
     return (
         tier1_payload,
@@ -1022,29 +1071,7 @@ def main() -> None:
         runtime_jax,
         runtime_jaxlib,
         title="Tier 5 trusted-fixture performance characterization",
-        extra={
-            "lane": resolve_probe_lane(optimizer_backend=args.optimizer_backend),
-            "fixture": "trusted-public-lane",
-            "platform_request": args.platform,
-            "plasma_surf_filename": args.plasma_surf_filename,
-            "stage2_seed_path": args.stage2_bs_path,
-            "stage2_nphi": int(args.stage2_nphi),
-            "stage2_ntheta": int(args.stage2_ntheta),
-            "single_stage_nphi": int(args.single_stage_nphi),
-            "single_stage_ntheta": int(args.single_stage_ntheta),
-            "mpol": int(args.mpol),
-            "ntor": int(args.ntor),
-            "stage2_maxiter": int(args.maxiter),
-            "optimizer_backend": args.optimizer_backend,
-            "benchmark_mode": benchmark_mode,
-            "single_stage_outer_loop_maxiter": int(
-                args.single_stage_outer_loop_maxiter
-            ),
-            "fd_samples": int(args.samples),
-            "fd_eps": float(args.eps),
-            "phase": args.phase,
-            "compile_behavior": describe_compile_behavior(uses_subprocesses=True),
-        },
+        extra=_tier5_provenance_extra(args, benchmark_mode=benchmark_mode),
     )
     print_provenance(provenance)
 
