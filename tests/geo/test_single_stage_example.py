@@ -987,6 +987,7 @@ class SingleStageExampleTests(unittest.TestCase):
 
         self.assertEqual(captured["x64_backend"], "ondevice")
         self.assertIsInstance(captured["x0"], module.SingleStageOuterOptimizerState)
+        self.assertIsInstance(captured["x0"].coil_dofs, jax.Array)
         self.assertEqual(captured["method"], "lbfgs-ondevice")
         np.testing.assert_allclose(
             module._single_stage_optimizer_dofs_array(captured["x0"]),
@@ -1052,6 +1053,7 @@ class SingleStageExampleTests(unittest.TestCase):
                 np.zeros(2),
             )
             self.assertIsInstance(x0, module.SingleStageOuterOptimizerState)
+            self.assertIsInstance(x0.coil_dofs, jax.Array)
             del x0, tol, maxiter, options, callback
             self.assertEqual(method, "lbfgs-ondevice")
             self.assertTrue(value_and_grad)
@@ -1111,6 +1113,7 @@ class SingleStageExampleTests(unittest.TestCase):
             )
 
         self.assertIsInstance(captured["x0"], module.SingleStageOuterOptimizerState)
+        self.assertIsInstance(captured["x0"].coil_dofs, jax.Array)
         self.assertTrue(captured["value_and_grad"])
         value, grad = captured["fun"](captured["x0"])
         self.assertEqual(value, 0.0)

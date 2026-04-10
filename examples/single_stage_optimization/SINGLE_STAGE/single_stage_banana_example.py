@@ -35,6 +35,7 @@ from simsopt._core.derivative import derivative_dec
 from simsopt._core.optimizable import Optimizable, load
 from simsopt.config import maybe_initialize_distributed_jax
 from simsopt.field import BiotSavart
+from simsopt.jax_core._math_utils import as_jax_float64 as _as_jax_float64
 from simsopt.geo import (
     BoozerSurface,
     CurveLength,
@@ -1644,8 +1645,10 @@ def _single_stage_optimizer_dofs_array(x):
 
 def _single_stage_outer_optimizer_state(x):
     if isinstance(x, SingleStageOuterOptimizerState):
-        return x
-    return SingleStageOuterOptimizerState(coil_dofs=x)
+        coil_dofs = x.coil_dofs
+    else:
+        coil_dofs = x
+    return SingleStageOuterOptimizerState(coil_dofs=_as_jax_float64(coil_dofs))
 
 
 def _wrap_single_stage_outer_scalar_objective(fun):
