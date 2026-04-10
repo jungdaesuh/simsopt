@@ -38,6 +38,7 @@ from functools import lru_cache
 import numpy as np
 import jax
 import jax.numpy as jnp
+from jax import lax
 
 from ..jax_core._math_utils import (
     as_jax_float64 as _as_jax_float64,
@@ -101,6 +102,66 @@ def _safe_inverse_modB(B2):
     return B2 * _explicit_rsqrt(safe_B2) * _explicit_inv(safe_B2)
 
 
+def _zero_scalar(dtype):
+    return jnp.array(0, dtype=dtype)
+
+
+def _next_power_of_two(size: int) -> int:
+    if size <= 1:
+        return 1
+    return 1 << (size - 1).bit_length()
+
+
+def _pad_axis0(array, padded_size: int):
+    pad_rows = padded_size - array.shape[0]
+    if pad_rows <= 0:
+        return array
+    padding_config = [(0, pad_rows, 0)] + [(0, 0, 0)] * (array.ndim - 1)
+    return lax.pad(array, _zero_scalar(array.dtype), padding_config)
+
+
+def _pairwise_reduce_axis0(array):
+    """Reduce an axis-0 stack with a fixed binary addition tree."""
+    reduced = array
+    while reduced.shape[0] > 1:
+        pair_shape = (reduced.shape[0] // 2, 2) + tuple(reduced.shape[1:])
+        paired = jnp.reshape(reduced, pair_shape)
+        reduced = paired[:, 0, ...] + paired[:, 1, ...]
+    return reduced
+
+
+def _pairwise_sum_flat(array):
+    """Reduce all entries of ``array`` using a fixed binary addition tree."""
+    reduced = jnp.ravel(array)
+    size = reduced.shape[0]
+    if size == 0:
+        return jnp.sum(reduced)
+
+    padded = _pad_axis0(reduced[:, None], _next_power_of_two(size))
+    return _pairwise_reduce_axis0(padded)[0, 0]
+
+
+def _pairwise_sum_last_axis(array):
+    """Reduce ``array`` along its trailing axis using a fixed binary tree."""
+    axis_size = array.shape[-1]
+    if axis_size == 0:
+        return jnp.sum(array, axis=-1)
+
+    reduced = jnp.moveaxis(array, -1, 0)
+    padded = _pad_axis0(reduced, _next_power_of_two(axis_size))
+    return jnp.squeeze(_pairwise_reduce_axis0(padded), axis=0)
+
+
+def _boozer_weighted_residual(G, iota, B, xphi, xtheta, weight_inv_modB):
+    tang = xphi + iota * xtheta
+    B2 = _pairwise_sum_last_axis(B * B)
+    residual = G * B - B2[..., None] * tang
+
+    if weight_inv_modB:
+        residual = _safe_inverse_modB(B2)[..., None] * residual
+    return residual
+
+
 def boozer_residual_scalar(G, iota, B, xphi, xtheta, weight_inv_modB=True):
     """Boozer residual scalar objective (forward pass).
 
@@ -119,18 +180,8 @@ def boozer_residual_scalar(G, iota, B, xphi, xtheta, weight_inv_modB=True):
     iota = _as_jax_float64(iota)
     nphi, ntheta, _ = B.shape
     num_res = _as_jax_float64(3 * nphi * ntheta)
-
-    tang = xphi + iota * xtheta  # (nphi, ntheta, 3)
-    B2 = jnp.sum(B * B, axis=-1)  # (nphi, ntheta)
-    residual = G * B - B2[..., None] * tang  # (nphi, ntheta, 3)
-
-    if weight_inv_modB:
-        w = _safe_inverse_modB(B2)  # (nphi, ntheta)
-        rtil = w[..., None] * residual  # (nphi, ntheta, 3)
-    else:
-        rtil = residual
-
-    return _as_jax_float64(0.5) * jnp.sum(rtil * rtil) / num_res
+    rtil = _boozer_weighted_residual(G, iota, B, xphi, xtheta, weight_inv_modB)
+    return _as_jax_float64(0.5) * _pairwise_sum_flat(rtil * rtil) / num_res
 
 
 # ---------------------------------------------------------------------------
@@ -220,15 +271,14 @@ def boozer_residual_vector(G, iota, B, xphi, xtheta, weight_inv_modB=True):
     """
     G = _as_jax_float64(G)
     iota = _as_jax_float64(iota)
-    tang = xphi + iota * xtheta
-    B2 = jnp.sum(B * B, axis=-1)
-    residual = G * B - B2[..., None] * tang
-
-    if weight_inv_modB:
-        w = _safe_inverse_modB(B2)
-        residual = w[..., None] * residual
-
-    return residual.ravel()
+    return _boozer_weighted_residual(
+        G,
+        iota,
+        B,
+        xphi,
+        xtheta,
+        weight_inv_modB,
+    ).ravel()
 
 
 def _get_surface_fns():

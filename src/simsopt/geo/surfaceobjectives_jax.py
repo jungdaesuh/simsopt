@@ -47,6 +47,7 @@ from ..jax_core.field import (
 from ..jax_core.sharding import inspect_array_sharding_summary
 from ..objectives.utilities import forward_backward_jax, plu_solve_jax
 from .boozer_residual_jax import (
+    boozer_residual_scalar,
     boozer_residual_vector,
     _surface_geometry_from_dofs,
 )
@@ -263,9 +264,25 @@ def _canonicalize_traceable_exact_quadrature(booz_jax):
 
 
 def _solve_boozer_adjoint(booz_surf, rhs):
-    """Solve the transposed PLU adjoint system for a BoozerSurfaceJAX result."""
+    """Solve the transposed PLU adjoint system for a BoozerSurfaceJAX result.
+
+    The stored PLU factors come from dense LS/exact linearizations of the inner
+    Boozer solve. Those systems are typically well posed but can still be
+    moderately ill-conditioned on finer grids, so adjoint sensitivity solves
+    always request iterative refinement explicitly.
+    """
     P, L, U = booz_surf.res["PLU"]
+    return _solve_plu_transpose_with_refinement(P, L, U, rhs)
+
+
+def _solve_plu_transpose_with_refinement(P, L, U, rhs):
+    """Solve ``(PLU)^T x = rhs`` with explicit iterative refinement."""
     return forward_backward_jax(P, L, U, rhs, iterative_refinement=True)
+
+
+def _solve_plu_with_refinement(P, L, U, rhs):
+    """Solve ``PLU x = rhs`` with explicit iterative refinement."""
+    return plu_solve_jax(P, L, U, rhs, iterative_refinement=True)
 
 
 def _iter_adjoint_coil_cotangents(vjp_groups_fn, booz_surf, iota, G, adjoint):
@@ -537,7 +554,6 @@ def _boozer_residual_J_of_x_inner(
         surface_kind=surface_kind,
     )
     nphi, ntheta = gamma.shape[:2]
-    num_points = 3 * nphi * ntheta
 
     points = gamma.reshape(-1, 3)
     B = grouped_biot_savart_B_from_spec(points, coil_set_spec).reshape(
@@ -546,10 +562,14 @@ def _boozer_residual_J_of_x_inner(
         3,
     )
 
-    r_flat = boozer_residual_vector(G, iota, B, xphi, xtheta, weight_inv_modB)
-    half = _runtime_float64_scalar(0.5, reference=r_flat)
-    num_points_jax = _runtime_float64_scalar(float(num_points), reference=r_flat)
-    J_boozer = half * jnp.sum(r_flat * r_flat) / num_points_jax
+    J_boozer = boozer_residual_scalar(
+        G,
+        iota,
+        B,
+        xphi,
+        xtheta,
+        weight_inv_modB,
+    )
 
     label_val = _compute_label(
         label_type,
@@ -565,6 +585,7 @@ def _boozer_residual_J_of_x_inner(
         constraint_weight,
         reference=label_val,
     )
+    half = _runtime_float64_scalar(0.5, reference=label_val)
     label_delta = label_val - targetlabel_jax
     J_label = half * constraint_weight_jax * (label_delta * label_delta)
     return J_boozer + J_label
@@ -1181,7 +1202,7 @@ def _traceable_total_gradient(
             objective_kwargs,
         )
     )(solved_x)
-    adjoint = forward_backward_jax(*solved_plu, dJ_dx, iterative_refinement=True)
+    adjoint = _solve_plu_transpose_with_refinement(*solved_plu, dJ_dx)
 
     def directional_of_coils(cd):
         return _traceable_directional_inner_objective(
@@ -1241,7 +1262,7 @@ def _traceable_predict_warmstart_x(
             (delta,),
         )[1]
 
-    dx = plu_solve_jax(*baseline_plu, -forcing, iterative_refinement=True)
+    dx = _solve_plu_with_refinement(*baseline_plu, -forcing)
     return baseline_x + dx
 
 
@@ -1767,6 +1788,11 @@ def make_traceable_objective_runtime_bundle(
     success_filter=None,
 ):
     """Build the shared runtime bundle for the target single-stage objective path.
+
+    The returned entrypoints are cached against deterministic signatures of the
+    solved baseline state, objective kwargs, and coil extraction/runtime specs.
+    Rebuild the bundle after changing those inputs; do not mutate captured
+    objects and expect an existing runtime bundle to retarget itself.
 
     Returned keys:
 

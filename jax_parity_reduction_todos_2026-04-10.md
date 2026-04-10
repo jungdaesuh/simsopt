@@ -137,11 +137,12 @@ External primary-source context:
 
 **TODOs**
 
-- [ ] Finish the composed derivative path first; do not optimize arithmetic around the M1 limitation
-- [ ] Add a reusable pairwise/tree reduction helper for `B2` and scalar penalty accumulation
-- [ ] Evaluate compensated summation for the final scalar objective if this objective is the observed parity bottleneck
-- [ ] Add a stress parity test where the residual norm is near the current tolerance floor
-- [ ] Keep vector-level parity and scalar-level parity as separate checks
+- [x] Finish the composed derivative path first; do not optimize arithmetic around the M1 limitation
+- [x] Add a reusable pairwise/tree reduction helper for `B2` and scalar penalty accumulation
+- [x] Evaluate compensated summation for the final scalar objective if this objective is the observed parity bottleneck
+  - Current decision: keep the final Boozer scalar on the pairwise tree only. The composed derivative path and near-floor parity stress lane now point at ordinary reduction order, not a demonstrated need for Kahan / compensated accumulation in the hot path.
+- [x] Add a stress parity test where the residual norm is near the current tolerance floor
+- [x] Keep vector-level parity and scalar-level parity as separate checks
 
 ### 4. FluxObjective Wrapper
 

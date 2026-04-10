@@ -45,6 +45,77 @@ def _make_synthetic_data(nphi=10, ntheta=12, seed=42):
     return device_float64(B), device_float64(xphi), device_float64(xtheta)
 
 
+def _numpy_pairwise_sum_flat(array):
+    reduced = np.ravel(np.asarray(array, dtype=np.float64))
+    if reduced.size == 0:
+        return float(np.sum(reduced, dtype=np.float64))
+
+    padded = np.zeros(1 << (reduced.size - 1).bit_length(), dtype=np.float64)
+    padded[: reduced.size] = reduced
+    return float(_numpy_pairwise_reduce_last_axis(padded)[0])
+
+
+def _numpy_pairwise_reduce_last_axis(array):
+    reduced = np.asarray(array, dtype=np.float64)
+    while reduced.shape[-1] > 1:
+        pair_shape = reduced.shape[:-1] + (reduced.shape[-1] // 2, 2)
+        reduced = reduced.reshape(pair_shape).sum(axis=-1, dtype=np.float64)
+    return reduced
+
+
+def _numpy_pairwise_sum_last_axis(array):
+    reduced = np.asarray(array, dtype=np.float64)
+    axis_size = reduced.shape[-1]
+    if axis_size == 0:
+        return np.sum(reduced, axis=-1, dtype=np.float64)
+
+    pad_width = [(0, 0)] * reduced.ndim
+    pad_width[-1] = (0, (1 << (axis_size - 1).bit_length()) - axis_size)
+    padded = np.pad(reduced, pad_width, mode="constant")
+    return np.squeeze(_numpy_pairwise_reduce_last_axis(padded), axis=-1)
+
+
+def _numpy_boozer_residual_reference(G, iota, B, xphi, xtheta, *, weight_inv_modB):
+    tang = xphi + iota * xtheta
+    B2 = _numpy_pairwise_sum_last_axis(B * B)
+    residual = G * B - B2[..., None] * tang
+    if weight_inv_modB:
+        modB = np.sqrt(B2)
+        residual = np.divide(
+            residual,
+            modB[..., None],
+            out=np.zeros_like(residual),
+            where=modB[..., None] > 0.0,
+        )
+    scalar = 0.5 * _numpy_pairwise_sum_flat(residual * residual) / residual.size
+    return residual.reshape(-1), scalar
+
+
+def _make_near_floor_data(nphi=48, ntheta=48, seed=77, residual_scale=1e-12):
+    rng = parity_rng(seed)
+    xphi = rng.randn(nphi, ntheta, 3) * 0.15 + np.array([1.0, 0.0, 0.0])
+    xtheta = rng.randn(nphi, ntheta, 3) * 0.15 + np.array([0.0, 1.0, 0.0])
+    iota = 0.37
+    G = 1.25
+    tang = xphi + iota * xtheta
+    tang_sq = np.sum(tang * tang, axis=-1, keepdims=True)
+    base_field = (G / tang_sq) * tang
+    perturbation = rng.randn(nphi, ntheta, 3)
+    perturbation /= np.linalg.norm(perturbation.reshape(-1)) / np.sqrt(perturbation.size)
+    B = base_field + residual_scale * perturbation
+    return G, iota, device_float64(B), device_float64(xphi), device_float64(xtheta)
+
+
+def _assert_lane_allclose(actual, reference, parity_lane, *, cpu_tol, gpu_tol):
+    tolerance = cpu_tol if parity_lane == "cpu" else gpu_tol
+    np.testing.assert_allclose(
+        actual,
+        reference,
+        rtol=tolerance[0],
+        atol=tolerance[1],
+    )
+
+
 class TestBoozerResidualScalar:
     """Test the forward scalar value."""
 
@@ -186,6 +257,73 @@ class TestBoozerResidualGradient:
         dJ_dG_fd = (Jp - Jm) / (2 * eps)
 
         np.testing.assert_allclose(dJ_dG_jax, dJ_dG_fd, rtol=1e-5)
+
+
+class TestBoozerResidualParityStress:
+    """Stress reduction-order parity near the current residual-floor regime."""
+
+    def test_vector_parity_near_tolerance_floor(self, parity_lane):
+        G, iota, B, xphi, xtheta = _make_near_floor_data()
+        vector_actual = host_array(
+            boozer_residual_vector(
+                G,
+                iota,
+                B,
+                xphi,
+                xtheta,
+                weight_inv_modB=True,
+            )
+        )
+        vector_reference, scalar_reference = _numpy_boozer_residual_reference(
+            G,
+            iota,
+            host_array(B),
+            host_array(xphi),
+            host_array(xtheta),
+            weight_inv_modB=True,
+        )
+
+        residual_rms_reference = np.sqrt(2.0 * scalar_reference)
+        assert residual_rms_reference < 5e-12
+        _assert_lane_allclose(
+            vector_actual,
+            vector_reference,
+            parity_lane,
+            cpu_tol=(1e-12, 1e-24),
+            gpu_tol=(1e-10, 1e-22),
+        )
+
+    def test_scalar_residual_norm_near_tolerance_floor(self, parity_lane):
+        G, iota, B, xphi, xtheta = _make_near_floor_data(seed=78)
+        scalar_actual = host_scalar(
+            boozer_residual_scalar(
+                G,
+                iota,
+                B,
+                xphi,
+                xtheta,
+                weight_inv_modB=True,
+            )
+        )
+        _, scalar_reference = _numpy_boozer_residual_reference(
+            G,
+            iota,
+            host_array(B),
+            host_array(xphi),
+            host_array(xtheta),
+            weight_inv_modB=True,
+        )
+        residual_norm_actual = np.sqrt(2.0 * scalar_actual)
+        residual_norm_reference = np.sqrt(2.0 * scalar_reference)
+
+        assert residual_norm_reference < 5e-12
+        _assert_lane_allclose(
+            residual_norm_actual,
+            residual_norm_reference,
+            parity_lane,
+            cpu_tol=(1e-12, 1e-15),
+            gpu_tol=(1e-10, 1e-14),
+        )
 
 
 class TestBoozerResidualHessian:
