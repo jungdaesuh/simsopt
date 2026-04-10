@@ -25,10 +25,12 @@ from benchmarks.adjoint_fd_validation import (
     compute_direct_and_total_gradients,
     evaluate_adjoint_validation,
 )
+import benchmarks.adjoint_fd_validation as adjoint_fd_validation_module
 import benchmarks.adjoint_probe_common as adjoint_probe_common
 from benchmarks.adjoint_probe_common import compute_derivative_l2_metrics
 from benchmarks.single_stage_backend_routing import (
     resolve_boozer_least_squares_algorithm,
+    resolve_boozer_optimizer_backend,
     resolve_boozer_limited_memory,
     resolve_boozer_optimizer_method,
 )
@@ -55,6 +57,7 @@ from benchmarks.run_code_benchmark_common import summarize_result_fun
 from benchmarks.single_stage_smoke_fixture import (
     DEFAULT_EQUILIBRIA_DIR,
     DEFAULT_PLASMA_SURF_FILENAME,
+    default_optimizer_backend_for_backend,
 )
 from benchmarks.single_stage_init_parity import (
     DEFAULT_OUTER_MAXITER,
@@ -458,6 +461,11 @@ def test_single_stage_init_defaults_to_reduced_grid_smoke_fixture(monkeypatch):
     )
     assert args.boozer_optimizer_backend is None
     assert args.maxiter == DEFAULT_OUTER_MAXITER
+
+
+def test_single_stage_fixture_optimizer_backend_defaults_by_backend():
+    assert default_optimizer_backend_for_backend("jax") == "ondevice"
+    assert default_optimizer_backend_for_backend("cpu") == "scipy"
 
 
 @pytest.mark.skipif(
@@ -1578,9 +1586,9 @@ def _single_stage_probe_results(**overrides):
         "SELF_INTERSECTING": False,
         "SELF_INTERSECTION_CHECK_AVAILABLE": True,
         "iterations": 1,
-        "boozer_optimizer_backend": "scipy",
-        "boozer_optimizer_method": "bfgs",
-        "outer_optimizer_method": "lbfgs",
+        "boozer_optimizer_backend": "ondevice",
+        "boozer_optimizer_method": "lm-ondevice",
+        "outer_optimizer_method": TARGET_OUTER_OPTIMIZER_METHOD,
     }
     results.update(overrides)
     return results
@@ -1633,15 +1641,14 @@ def test_single_stage_outer_loop_probe_accepts_finite_target_lane_result():
             FIELD_ERROR=0.004,
             MAX_CURVATURE=32.0,
             SELF_INTERSECTION_CHECK_AVAILABLE=False,
-            outer_optimizer_method=TARGET_OUTER_OPTIMIZER_METHOD,
         ),
-        expected_boozer_optimizer_backend="scipy",
-        expected_boozer_optimizer_method="bfgs",
+        expected_boozer_optimizer_backend="ondevice",
+        expected_boozer_optimizer_method="lm-ondevice",
     )
 
     assert failures == []
     assert summary["iterations"] == 1
-    assert summary["boozer_optimizer_backend"] == "scipy"
+    assert summary["boozer_optimizer_backend"] == "ondevice"
     assert summary["outer_optimizer_method"] == TARGET_OUTER_OPTIMIZER_METHOD
     assert summary["self_intersection_check_available"] is False
 
@@ -1652,21 +1659,20 @@ def test_single_stage_outer_loop_probe_rejects_missing_step_or_wrong_method():
             iterations=0,
             boozer_optimizer_backend="ondevice",
             boozer_optimizer_method="bfgs-ondevice",
+            outer_optimizer_method="bfgs",
             SELF_INTERSECTING=True,
             FINAL_IOTA=np.nan,
             FIELD_ERROR=0.004,
             MAX_CURVATURE=32.0,
         ),
-        expected_boozer_optimizer_backend="scipy",
-        expected_boozer_optimizer_method="bfgs",
+        expected_boozer_optimizer_backend="ondevice",
+        expected_boozer_optimizer_method="lm-ondevice",
     )
 
     assert any("did not accept an optimizer step" in failure for failure in failures)
-    assert any("requested inner Boozer backend" in failure for failure in failures)
     assert any(
         "requested inner Boozer optimizer method" in failure for failure in failures
     )
-    assert any(TARGET_OUTER_OPTIMIZER_METHOD in failure for failure in failures)
     assert any("self-intersecting surface" in failure for failure in failures)
     assert any("non-finite FINAL_IOTA" in failure for failure in failures)
 
@@ -2229,6 +2235,21 @@ def test_stage2_benchmark_scripts_default_to_repo_fixture_equilibria_dir(tmp_pat
         == DEFAULT_PLASMA_SURF_FILENAME
     )
     assert single_stage_outer_loop_args.equilibria_dir == str(DEFAULT_EQUILIBRIA_DIR)
+    assert single_stage_outer_loop_args.optimizer_backend == "ondevice"
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "adjoint_fd_validation.py",
+            "--output-json",
+            str(tmp_path / "adjoint-tier4.json"),
+        ],
+    )
+    adjoint_fd_args = adjoint_fd_validation_module.parse_args()
+    assert adjoint_fd_args.plasma_surf_filename == DEFAULT_PLASMA_SURF_FILENAME
+    assert adjoint_fd_args.equilibria_dir == str(DEFAULT_EQUILIBRIA_DIR)
+    assert adjoint_fd_args.optimizer_backend == "ondevice"
 
 
 def test_stage2_value_gradient_real_fixture_preserves_sharding_summaries(
@@ -2410,6 +2431,27 @@ def test_smoke_workflow_adds_cuda_e2e_target_lane_gate():
         assert required_path in workflow_text
 
 
+def test_smoke_workflow_adds_cuda_strict_transfer_guard_pytest_lane():
+    workflow_text = _smoke_workflow_path().read_text(encoding="utf-8")
+    _assert_named_benchmark_env_bootstrap(workflow_text)
+    assert "jax-gpu-strict-purity:" in workflow_text
+    assert "name: JAX GPU strict purity (CUDA, transfer_guard=disallow)" in workflow_text
+    assert "runs-on: [self-hosted, gpu]" in workflow_text
+    assert 'SIMSOPT_BACKEND_STRICT: "1"' in workflow_text
+    assert "SIMSOPT_JAX_TRANSFER_GUARD: disallow" in workflow_text
+    assert 'JAX_ENABLE_X64: "1"' in workflow_text
+    assert "tests/test_jax_import_smoke.py" in workflow_text
+    assert "gpu_ondevice_loops_with_host_constants" in workflow_text
+    assert "grouped_biot_savart_gpu_spec_eval" in workflow_text
+    assert "grouped_biot_savart_gpu_current_arrays" in workflow_text
+    assert "stage2_target_objective_ondevice_entry" in workflow_text
+    assert "tests/geo/test_boozersurface_jax.py" in workflow_text
+    assert "run_code_traceable_exact_executes_inner_solve_on_gpu" in workflow_text
+    assert "run_code_traceable_lm_ondevice_executes_inner_solve_on_gpu" in workflow_text
+    assert "tests/integration/test_single_stage_jax_cpu_reference.py" in workflow_text
+    assert "TestRealFixtureGpuM5Parity" in workflow_text
+
+
 def test_legacy_gpu_benchmark_wrapper_delegates_to_local_validation_ladder():
     wrapper_text = (
         Path(__file__).resolve().parents[1] / "benchmarks" / "gpu_benchmark.py"
@@ -2489,13 +2531,18 @@ def test_legacy_gpu_benchmark_wrapper_applies_grouped_probe_env_override(
 
 
 def test_single_stage_outer_loop_probe_resolves_expected_boozer_method():
-    assert resolve_boozer_least_squares_algorithm("scipy") == "quasi-newton"
-    assert resolve_boozer_least_squares_algorithm("hybrid") == "quasi-newton"
+    with pytest.raises(ValueError, match="require boozer_optimizer_backend='ondevice'"):
+        resolve_boozer_least_squares_algorithm("scipy")
+    with pytest.raises(ValueError, match="require boozer_optimizer_backend='ondevice'"):
+        resolve_boozer_least_squares_algorithm("hybrid")
     assert resolve_boozer_least_squares_algorithm("ondevice") == "lm"
-    assert resolve_boozer_optimizer_method("scipy") == "bfgs"
-    assert resolve_boozer_optimizer_method("scipy", limited_memory=True) == "lbfgs"
-    assert resolve_boozer_optimizer_method("hybrid") == "bfgs-hybrid"
-    with pytest.raises(ValueError, match="does not support limited_memory=True"):
+    with pytest.raises(ValueError, match="require boozer_optimizer_backend='ondevice'"):
+        resolve_boozer_optimizer_method("scipy")
+    with pytest.raises(ValueError, match="require boozer_optimizer_backend='ondevice'"):
+        resolve_boozer_optimizer_method("scipy", limited_memory=True)
+    with pytest.raises(ValueError, match="require boozer_optimizer_backend='ondevice'"):
+        resolve_boozer_optimizer_method("hybrid")
+    with pytest.raises(ValueError, match="require boozer_optimizer_backend='ondevice'"):
         resolve_boozer_optimizer_method("hybrid", limited_memory=True)
     assert resolve_boozer_optimizer_method("ondevice") == "lm-ondevice"
     assert (
@@ -2515,6 +2562,14 @@ def test_single_stage_outer_loop_probe_resolves_expected_boozer_method():
     )
     with pytest.raises(ValueError, match="least_squares_algorithm='lm'"):
         resolve_boozer_optimizer_method("ondevice", limited_memory=True)
+
+
+def test_single_stage_outer_loop_probe_rejects_non_ondevice_boozer_backend():
+    with pytest.raises(ValueError, match="require boozer_optimizer_backend='ondevice'"):
+        resolve_boozer_optimizer_backend("scipy", None)
+    with pytest.raises(ValueError, match="require boozer_optimizer_backend='ondevice'"):
+        resolve_boozer_optimizer_backend("ondevice", "scipy")
+    assert resolve_boozer_optimizer_backend("ondevice", None) == "ondevice"
 
 
 def test_single_stage_outer_loop_contract_matches_probe_defaults():
@@ -3462,6 +3517,61 @@ def test_summarize_single_stage_outer_loop_performance_probe_records_speedup():
     assert summary["speedup_vs_cpu"] == pytest.approx(4.0)
     assert summary["timing_semantics"] == "short_outer_loop_probe_with_cpu_reference"
     assert summary["supports_performance_headline"] is False
+    assert summary["counts_toward_phase_pass"] is False
+
+
+def _failed_outer_loop_probe_payload() -> dict[str, object]:
+    return {
+        "passed": False,
+        "timings": {"cpu_elapsed_s": 20.0, "jax_elapsed_s": 5.0},
+        "failures": ["probe failed"],
+    }
+
+
+def test_timed_probe_accepts_written_json_from_failed_informational_probe(
+    monkeypatch, tmp_path
+):
+    observed_envs: list[dict[str, str]] = []
+
+    def fake_run_python_script(script_path, args, **kwargs):
+        output_json = Path(args[args.index("--output-json") + 1])
+        output_json.write_text(
+            json.dumps(_failed_outer_loop_probe_payload()),
+            encoding="utf-8",
+        )
+        observed_envs.append(dict(kwargs["env"]))
+        raise RuntimeError("informational probe failed")
+
+    monkeypatch.setattr(
+        tier5_performance_characterization,
+        "run_python_script",
+        fake_run_python_script,
+    )
+
+    payload, outer_elapsed_s = tier5_performance_characterization._timed_probe(
+        tmp_path / "probe.py",
+        ["--platform", "cuda"],
+        platform="cuda",
+        accept_failed_output_json=True,
+    )
+
+    assert payload["passed"] is False
+    assert payload["failures"] == ["probe failed"]
+    assert outer_elapsed_s >= 0.0
+    assert observed_envs
+
+
+def _set_summary_rung_passed(
+    summary: list[dict[str, object]],
+    rung_name: str,
+    *,
+    passed: bool,
+) -> None:
+    for item in summary:
+        if item["name"] == rung_name:
+            item["passed"] = passed
+            return
+    raise AssertionError(f"Missing rung in summary: {rung_name}")
 
 
 def test_build_tier5_performance_contract_routes_parity_and_headline_sources():
@@ -3591,6 +3701,7 @@ def _tier5_gpu_phase_payload(**overrides):
                 "lane_label": "jax-cuda",
                 "timing_semantics": "short_outer_loop_probe_with_cpu_reference",
                 "supports_performance_headline": False,
+                "counts_toward_phase_pass": False,
             },
         ],
         "probe_timings": {
@@ -3663,6 +3774,25 @@ def test_build_aggregate_payload_merges_gpu_and_cpu_phase_artifacts():
     ] == "summary_by_name.tier2_stage2_e2e.outer_speedup_vs_cpu"
     assert payload["phase_inputs"]["gpu"]["phase"] == "gpu"
     assert payload["phase_inputs"]["cpu"]["phase"] == "cpu"
+
+
+def test_build_aggregate_payload_ignores_failed_informational_outer_loop_rung():
+    gpu_payload = _tier5_gpu_phase_payload()
+    gpu_payload["rungs"][TIER3_SINGLE_STAGE_OUTER_LOOP_RUNG] = {"passed": False}
+    _set_summary_rung_passed(
+        gpu_payload["summary"],
+        TIER3_SINGLE_STAGE_OUTER_LOOP_RUNG,
+        passed=False,
+    )
+
+    payload = tier5_performance_characterization._build_aggregate_payload(
+        gpu_payload=gpu_payload,
+        cpu_payload=_tier5_cpu_phase_payload(),
+    )
+
+    assert payload["summary_by_name"][TIER3_SINGLE_STAGE_OUTER_LOOP_RUNG]["passed"] is False
+    assert payload["aggregate"]["phase_passed"] is True
+    assert payload["aggregate"]["passed"] is True
 
 
 def test_build_aggregate_payload_rejects_wrong_phase_inputs():
