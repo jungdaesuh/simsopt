@@ -280,6 +280,17 @@ def enable_strict_parity_backend(monkeypatch, request, lane: str) -> None:
     enable_strict_jax_backend(monkeypatch, request, mode=parity_mode(lane))
 
 
+def assert_array_on_device(array, device):
+    jax_module = _require_jax()
+    assert isinstance(array, jax_module.Array)
+    assert array.devices() == {device}
+
+
+def assert_arrays_on_device(device, *arrays):
+    for array in arrays:
+        assert_array_on_device(array, device)
+
+
 def relative_error(actual, reference):
     """Return ``|actual - reference| / (|reference| + 1e-30)``."""
     return abs(actual - reference) / (abs(reference) + 1e-30)

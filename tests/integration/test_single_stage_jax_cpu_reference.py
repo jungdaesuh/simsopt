@@ -35,8 +35,10 @@ logger = logging.getLogger(__name__)
 
 import pytest
 from conftest import (
+    assert_arrays_on_device,
     enable_non_strict_jax_backend,
     enable_strict_jax_backend,
+    parity_device,
     relative_error,
 )
 import numpy as np
@@ -220,6 +222,7 @@ _enable_fast_non_strict_jax_backend = partial(
     enable_non_strict_jax_backend,
     mode="jax_gpu_fast",
 )
+
 
 
 def _assert_hidden_spec_fallback_rejected(
@@ -459,6 +462,22 @@ def _cpu_single_stage_wrapper_gradients(booz_cpu, bs_cpu):
         np.array(BoozerResidual(booz_cpu, bs_cpu).dJ()),
         np.array(Iotas(booz_cpu).dJ()),
         np.array(NonQuasiSymmetricRatio(booz_cpu, bs_cpu, sDIM=6).dJ()),
+    ]
+
+
+def _cpu_single_stage_wrapper_values(booz_cpu, bs_cpu):
+    return [
+        BoozerResidual(booz_cpu, bs_cpu).J(),
+        Iotas(booz_cpu).J(),
+        NonQuasiSymmetricRatio(booz_cpu, bs_cpu, sDIM=6).J(),
+    ]
+
+
+def _jax_single_stage_wrapper_values(booz_jax, bs_jax):
+    return [
+        BoozerResidualJAX(booz_jax, bs_jax).J(),
+        IotasJAX(booz_jax).J(),
+        NonQuasiSymmetricRatioJAX(booz_jax, bs_jax, sDIM=6).J(),
     ]
 
 
@@ -4050,12 +4069,10 @@ class TestRealFixtureScipyM5Parity:
         assert booz_jax.res is not None and booz_jax.res.get("success", False)
         assert booz_jax.res["type"] == "ls"
 
-        iota_cpu = Iotas(booz_cpu).J()
-        iota_jax = IotasJAX(booz_jax).J()
-        residual_cpu = BoozerResidual(booz_cpu, bs_cpu).J()
-        residual_jax = BoozerResidualJAX(booz_jax, bs_jax).J()
-        nqs_cpu = NonQuasiSymmetricRatio(booz_cpu, bs_cpu, sDIM=6).J()
-        nqs_jax = NonQuasiSymmetricRatioJAX(booz_jax, bs_jax, sDIM=6).J()
+        cpu_values = _cpu_single_stage_wrapper_values(booz_cpu, bs_cpu)
+        jax_values = _jax_single_stage_wrapper_values(booz_jax, bs_jax)
+        residual_cpu, iota_cpu, nqs_cpu = cpu_values
+        residual_jax, iota_jax, nqs_jax = jax_values
 
         np.testing.assert_allclose(
             booz_jax.res["iota"],
@@ -4100,6 +4117,104 @@ class TestRealFixtureScipyM5Parity:
                 rtol=1e-10,
                 atol=1e-12,
                 err_msg=f"{label} gradient mismatch on reduced real scipy fixture",
+            )
+
+
+class TestRealFixtureGpuM5Parity:
+    """Reduced real single-stage fixture covers the public GPU-backed M5 lane."""
+
+    @pytest.mark.slow
+    def test_real_fixture_gpu_wrapper_values_and_gradients_match_cpu_reference(
+        self,
+        monkeypatch,
+        request,
+    ):
+        """GPU wrapper values/gradients should match the reduced real CPU reference."""
+        gpu = parity_device("gpu")
+        _enable_strict_jax_backend(monkeypatch, request)
+
+        cpu_fixture = build_real_single_stage_init_fixture(
+            backend="cpu",
+            optimizer_backend="scipy",
+        )
+        booz_cpu = cpu_fixture["boozer_surface"]
+        bs_cpu = cpu_fixture["bs"]
+        cpu_result = booz_cpu.res
+
+        assert cpu_result is not None and cpu_result.get("success", False)
+
+        gpu_fixture = build_real_single_stage_init_fixture(
+            backend="jax",
+            optimizer_backend="scipy",
+            boozer_surface_dofs_override=np.asarray(
+                booz_cpu.surface.get_dofs(),
+                dtype=float,
+            ),
+            boozer_iota_override=float(cpu_result["iota"]),
+            boozer_G_override=float(cpu_result["G"]),
+        )
+        booz_gpu = gpu_fixture["boozer_surface"]
+        bs_gpu = gpu_fixture["bs"]
+        gpu_result = booz_gpu.res
+
+        assert gpu_fixture["boozer_optimizer_backend"] == "scipy"
+        assert gpu_result is not None and gpu_result.get("success", False)
+        assert gpu_result["type"] == "ls"
+        assert_arrays_on_device(
+            gpu,
+            gpu_result["jacobian"],
+            gpu_result["hessian"],
+            *gpu_result["PLU"],
+        )
+
+        cpu_values = _cpu_single_stage_wrapper_values(booz_cpu, bs_cpu)
+        gpu_values = _jax_single_stage_wrapper_values(booz_gpu, bs_gpu)
+        residual_cpu, iota_cpu, nqs_cpu = cpu_values
+        residual_gpu, iota_gpu, nqs_gpu = gpu_values
+
+        np.testing.assert_allclose(
+            gpu_result["iota"],
+            cpu_result["iota"],
+            rtol=0.0,
+            atol=1e-12,
+        )
+        np.testing.assert_allclose(
+            gpu_result["G"],
+            cpu_result["G"],
+            rtol=0.0,
+            atol=1e-12,
+        )
+        np.testing.assert_allclose(iota_gpu, iota_cpu, rtol=1e-10, atol=1e-12)
+        np.testing.assert_allclose(
+            residual_gpu,
+            residual_cpu,
+            rtol=1e-10,
+            atol=1e-12,
+        )
+        np.testing.assert_allclose(nqs_gpu, nqs_cpu, rtol=1e-10, atol=1e-12)
+
+        cpu_gradients = _cpu_single_stage_wrapper_gradients(booz_cpu, bs_cpu)
+        gpu_gradients = _jax_single_stage_wrapper_gradients(booz_gpu, bs_gpu)
+        _assert_gradients_finite_nonzero(
+            cpu_gradients,
+            "Real-fixture CPU wrapper path",
+        )
+        _assert_gradients_finite_nonzero(
+            gpu_gradients,
+            "Real-fixture GPU JAX wrapper path",
+        )
+
+        for label, cpu_gradient, gpu_gradient in zip(
+            ("BoozerResidual", "Iotas", "NonQuasiSymmetricRatio"),
+            cpu_gradients,
+            gpu_gradients,
+        ):
+            np.testing.assert_allclose(
+                gpu_gradient,
+                cpu_gradient,
+                rtol=1e-8,
+                atol=1e-10,
+                err_msg=f"{label} GPU gradient mismatch on reduced real fixture",
             )
 
 

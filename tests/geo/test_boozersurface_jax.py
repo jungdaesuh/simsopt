@@ -22,7 +22,13 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 from jax.flatten_util import ravel_pytree
-from conftest import enable_non_strict_jax_backend, enable_strict_jax_backend
+from conftest import (
+    assert_array_on_device,
+    assert_arrays_on_device,
+    enable_non_strict_jax_backend,
+    enable_strict_jax_backend,
+    parity_device,
+)
 from simsopt.field.coil import Coil, Current
 from simsopt.geo._boozersurface_current_guard import (
     guard_none_G_coil_gradient_callback,
@@ -105,19 +111,25 @@ def _emit_newton_progress(progress_callback):
     progress_callback(2, 0.05, 1.0e-4)
 
 
-def _patch_matrix_free_exact_linear_solver(monkeypatch, *, A):
+def _patch_matrix_free_exact_linear_solver(monkeypatch, *, A, expected_device=None):
     dense_calls = []
 
     def fake_jvp_fn(_residual_fn):
-        return lambda _x, v: A @ v
+        def apply(_x, v):
+            _maybe_assert_arrays_on_device(expected_device, v)
+            return A @ v
+
+        return apply
 
     def fake_gmres(_jvp_fn, _x, rhs, *, tol):
-        del _jvp_fn, _x, tol
+        del _jvp_fn, tol
+        _maybe_assert_arrays_on_device(expected_device, _x, rhs)
         dx = jnp.linalg.solve(A, rhs)
         return dx, rhs - A @ dx, None
 
     def fake_materialize(_jvp_fn, _x):
-        del _jvp_fn, _x
+        del _jvp_fn
+        _maybe_assert_arrays_on_device(expected_device, _x, A)
         dense_calls.append(True)
         return A
 
@@ -127,24 +139,33 @@ def _patch_matrix_free_exact_linear_solver(monkeypatch, *, A):
     return dense_calls
 
 
-def _patch_matrix_free_lm_solver(monkeypatch, *, A):
+def _patch_matrix_free_lm_solver(monkeypatch, *, A, expected_device=None):
     dense_calls = []
     gmres_calls = []
 
     def fake_gmres(_flat_residual_fn, _x, grad, _pullback, *, damping, tol):
-        del _flat_residual_fn, _x, _pullback, tol
+        del _flat_residual_fn, _pullback, tol
         gmres_calls.append(True)
+        _maybe_assert_arrays_on_device(expected_device, _x, grad)
         hessian = A.T @ A + damping * jnp.eye(A.shape[1], dtype=A.dtype)
         step = jnp.linalg.solve(hessian, grad)
         return step, grad - hessian @ step, None
 
     def fake_materialize(flat_residual_fn, x):
         dense_calls.append(True)
+        _maybe_assert_arrays_on_device(expected_device, x)
         residual = flat_residual_fn(x)
         jacobian = A
         grad, hessian = _opt._least_squares_linearization_from_jacobian(
             residual,
             jacobian,
+        )
+        _maybe_assert_arrays_on_device(
+            expected_device,
+            residual,
+            jacobian,
+            grad,
+            hessian,
         )
         return residual, jacobian, grad, hessian
 
@@ -192,6 +213,56 @@ def _assert_lu_is_not_called(message):
     raise AssertionError(message)
 
 
+def _maybe_assert_arrays_on_device(device, *arrays):
+    if device is None:
+        return
+    assert_arrays_on_device(device, *arrays)
+
+
+def _build_gpu_traceable_linear_problem(booz, gpu, *, step_scale):
+    coil_set_spec = booz.coil_set_spec
+    sdofs = jax.device_put(
+        np.asarray(booz.surface.get_dofs(), dtype=np.float64),
+        device=gpu,
+    )
+    iota = jax.device_put(np.asarray(0.3, dtype=np.float64), device=gpu)
+    G = jax.device_put(np.asarray(0.05, dtype=np.float64), device=gpu)
+    x0 = booz._pack_decision_vector(iota, G, sdofs=sdofs)
+    x_target = x0 + jax.device_put(
+        np.linspace(step_scale, step_scale * x0.shape[0], x0.shape[0], dtype=np.float64),
+        device=gpu,
+    )
+    A = jax.device_put(jnp.eye(x0.shape[0], dtype=jnp.float64), device=gpu)
+    return coil_set_spec, sdofs, iota, G, x_target, A
+
+
+def _assert_traceable_gpu_result(
+    result,
+    expected_x,
+    gpu,
+    *,
+    jacobian_shape=None,
+    hessian_shape=None,
+):
+    np.testing.assert_allclose(
+        np.asarray(jax.device_get(result["x"])),
+        np.asarray(jax.device_get(expected_x)),
+        atol=1e-12,
+    )
+    assert_array_on_device(result["x"], gpu)
+
+    if jacobian_shape is not None:
+        np.testing.assert_allclose(
+            np.asarray(jax.device_get(result["jacobian"])),
+            np.eye(jacobian_shape[0]),
+            atol=1e-12,
+        )
+        assert_array_on_device(result["jacobian"], gpu)
+
+    if hessian_shape is not None:
+        assert_array_on_device(result["hessian"], gpu)
+
+
 def _patch_counting_scipy_minimize(monkeypatch):
     state = {"jit_call_count": 0}
     original_jit = _opt.jax.jit
@@ -223,6 +294,10 @@ _enable_strict_jax_backend = partial(enable_strict_jax_backend, mode="jax_gpu_pa
 _enable_non_strict_jax_backend = partial(
     enable_non_strict_jax_backend,
     mode="jax_gpu_parity",
+)
+_enable_fast_strict_jax_backend = partial(
+    enable_strict_jax_backend,
+    mode="jax_gpu_fast",
 )
 _enable_fast_non_strict_jax_backend = partial(
     enable_non_strict_jax_backend,
@@ -672,7 +747,10 @@ class TestOptimizerAdapter:
         """Exact Newton keeps the loop matrix-free and rebuilds ``J`` once at the end."""
         A = jnp.array([[3.0, 1.0], [1.0, 4.0]])
         b = jnp.array([5.0, 7.0])
-        dense_calls = _patch_matrix_free_exact_linear_solver(monkeypatch, A=A)
+        dense_calls = _patch_matrix_free_exact_linear_solver(
+            monkeypatch,
+            A=A,
+        )
         x_exact = np.linalg.solve(np.asarray(A), np.asarray(b))
 
         def residual(x):
@@ -737,6 +815,11 @@ class TestOptimizerAdapter:
         assert not materialize_calls
         assert result["jacobian"] is None
         assert result["jacobian_materialized"] is False
+        assert result["failure_category"] == "scaling_limit"
+        assert result["failure_stage"] == "dense_jacobian_finalization"
+        assert result["dense_jacobian_shape"] == (2, 2)
+        assert result["dense_jacobian_bytes"] == 32
+        assert result["max_dense_jacobian_bytes"] == 8
         assert "max_dense_jacobian_bytes=8" in result["message"]
         assert result["success"]
 
@@ -768,6 +851,11 @@ class TestOptimizerAdapter:
         assert not materialize_calls
         assert result["jacobian"] is None
         assert result["jacobian_materialized"] is False
+        assert result["failure_category"] == "scaling_limit"
+        assert result["failure_stage"] == "dense_jacobian_finalization"
+        assert result["dense_jacobian_shape"] == (2, 2)
+        assert result["dense_jacobian_bytes"] == 32
+        assert result["max_dense_jacobian_bytes"] == 8
         assert "max_dense_jacobian_bytes=8" in result["message"]
         assert bool(result["success"])
 
@@ -1959,7 +2047,10 @@ class TestBoozerSurfaceJAXClass:
     ):
         A = jnp.array([[3.0, 1.0], [1.0, 4.0]], dtype=jnp.float64)
         b = jnp.array([5.0, 7.0], dtype=jnp.float64)
-        dense_calls, gmres_calls = _patch_matrix_free_lm_solver(monkeypatch, A=A)
+        dense_calls, gmres_calls = _patch_matrix_free_lm_solver(
+            monkeypatch,
+            A=A,
+        )
 
         def residual(x):
             return A @ x - b
@@ -2463,6 +2554,36 @@ def _run_mock_exact_boozer(booz, iota=0.3, G=0.05):
         return booz.run_code(iota=iota, G=G)
 
 
+def _dense_jacobian_scaling_limit_result(
+    x0,
+    *,
+    max_dense_jacobian_bytes,
+    message="dense Jacobian skipped",
+    residual=None,
+):
+    n = x0.shape[0]
+    if residual is None:
+        residual = jnp.zeros(n, dtype=x0.dtype)
+    report = _opt._exact_newton_dense_jacobian_report(
+        n,
+        n,
+        x0.dtype,
+        max_dense_jacobian_bytes,
+    )
+    return {
+        "x": x0,
+        "residual": residual,
+        "jacobian": None,
+        "nit": 0,
+        "success": True,
+        "message": message,
+        "failure_category": "scaling_limit",
+        "failure_stage": "dense_jacobian_finalization",
+        "jacobian_materialized": False,
+        **report,
+    }
+
+
 @contextmanager
 def _patched_exact_newton_result(*, success, step=0.1, nit=3):
     original_newton_exact = _bsj.newton_exact
@@ -2478,6 +2599,7 @@ def _patched_exact_newton_result(*, success, step=0.1, nit=3):
             "nit": nit,
             "success": success,
             "message": None,
+            "jacobian_materialized": True,
         }
 
     _bsj.newton_exact = fake_newton_exact
@@ -2534,8 +2656,10 @@ class TestBoozerSurfaceJAXExactPath:
             "mask",
             "type",
             "vjp",
+            "jacobian_materialized",
         }
         assert expected_keys <= set(res.keys())
+        assert res["jacobian_materialized"] is True
         assert isinstance(res["PLU"], tuple)
         assert len(res["PLU"]) == 3
         assert all(piece is not None for piece in res["PLU"])
@@ -2571,15 +2695,10 @@ class TestBoozerSurfaceJAXExactPath:
         ):
             del maxiter, tol
             captured["max_dense_jacobian_bytes"] = max_dense_jacobian_bytes
-            n = x0.shape[0]
-            return {
-                "x": x0,
-                "residual": jnp.zeros(n, dtype=x0.dtype),
-                "jacobian": None,
-                "nit": 0,
-                "success": True,
-                "message": "dense Jacobian skipped",
-            }
+            return _dense_jacobian_scaling_limit_result(
+                x0,
+                max_dense_jacobian_bytes=max_dense_jacobian_bytes,
+            )
 
         monkeypatch.setattr(_bsj, "newton_exact", fake_newton_exact)
         try:
@@ -2591,7 +2710,40 @@ class TestBoozerSurfaceJAXExactPath:
         assert res["jacobian"] is None
         assert res["PLU"] is None
         assert res["success"] is False
+        assert res["failure_category"] == "scaling_limit"
+        assert res["failure_stage"] == "dense_jacobian_finalization"
+        assert res["jacobian_materialized"] is False
+        assert res["max_dense_jacobian_bytes"] == 77
         assert res["message"] == "dense Jacobian skipped"
+
+    def test_run_code_exact_reports_dense_jacobian_ceiling_when_verbose(
+        self, monkeypatch, capsys
+    ):
+        booz = _make_mock_boozer_surface_exact(options={"max_dense_jacobian_bytes": 77})
+        original_newton_exact = _bsj.newton_exact
+
+        def fake_newton_exact(
+            _residual_fn, x0, *, maxiter, tol, max_dense_jacobian_bytes=None
+        ):
+            del maxiter, tol
+            return _dense_jacobian_scaling_limit_result(
+                x0,
+                max_dense_jacobian_bytes=max_dense_jacobian_bytes,
+                message=(
+                    "Exact Newton skipped dense Jacobian materialization because "
+                    "the final Jacobian would exceed max_dense_jacobian_bytes=77."
+                ),
+            )
+
+        monkeypatch.setattr(_bsj, "newton_exact", fake_newton_exact)
+        try:
+            _run_mock_exact_boozer(booz)
+        finally:
+            monkeypatch.setattr(_bsj, "newton_exact", original_newton_exact)
+
+        captured = capsys.readouterr()
+        assert "Exact Newton skipped dense Jacobian materialization" in captured.out
+        assert "max_dense_jacobian_bytes=77" in captured.out
 
     def test_exact_residual_jits_with_integer_mask_indices(self):
         """The exact residual closure must trace with integer mask indices."""
@@ -2667,14 +2819,11 @@ class TestBoozerSurfaceJAXExactPath:
             del maxiter, tol
             captured["max_dense_jacobian_bytes"] = max_dense_jacobian_bytes
             residual = residual_fn(x0, *args)
-            return {
-                "x": x0,
-                "residual": residual,
-                "jacobian": None,
-                "nit": 0,
-                "success": True,
-                "message": "dense Jacobian skipped",
-            }
+            return _dense_jacobian_scaling_limit_result(
+                x0,
+                max_dense_jacobian_bytes=max_dense_jacobian_bytes,
+                residual=residual,
+            )
 
         monkeypatch.setattr(_bsj, "newton_exact_traceable", fake_newton_exact_traceable)
 
@@ -2684,6 +2833,10 @@ class TestBoozerSurfaceJAXExactPath:
         assert result["jacobian"] is None
         assert result["plu"] is None
         assert bool(result["success"]) is False
+        assert result["failure_category"] == "scaling_limit"
+        assert result["failure_stage"] == "dense_jacobian_finalization"
+        assert result["jacobian_materialized"] is False
+        assert result["max_dense_jacobian_bytes"] == 12345
         assert result["message"] == "dense Jacobian skipped"
 
     def test_run_code_traceable_exact_reuses_stable_residual_callable(
@@ -2772,6 +2925,49 @@ class TestBoozerSurfaceJAXExactPath:
         assert bool(second["success"])
         assert residual_ids[0] != residual_ids[1]
         assert not np.allclose(residuals[0], residuals[1])
+
+    def test_run_code_traceable_exact_executes_inner_solve_on_gpu(
+        self,
+        monkeypatch,
+        request,
+    ):
+        gpu = parity_device("gpu")
+        _enable_fast_strict_jax_backend(monkeypatch, request)
+        booz = _make_mock_boozer_surface_exact()
+        coil_set_spec, sdofs, iota, G, x_target, A = _build_gpu_traceable_linear_problem(
+            booz,
+            gpu,
+            step_scale=0.05,
+        )
+        dense_calls = _patch_matrix_free_exact_linear_solver(
+            monkeypatch,
+            A=A,
+            expected_device=gpu,
+        )
+
+        def fake_get_traceable_exact_residual(_weight_inv_modB):
+            def residual(x, _coil_set_spec):
+                return A @ x - x_target
+
+            return residual
+
+        monkeypatch.setattr(
+            booz,
+            "_get_traceable_exact_residual",
+            fake_get_traceable_exact_residual,
+        )
+
+        result = booz.run_code_traceable(coil_set_spec, sdofs, iota, G)
+
+        assert len(dense_calls) == 1
+        assert result["type"] == "exact"
+        assert bool(result["success"])
+        _assert_traceable_gpu_result(
+            result,
+            x_target,
+            gpu,
+            jacobian_shape=A.shape,
+        )
 
     def test_run_code_traceable_ls_reuses_newton_fun_and_grad(self, monkeypatch):
         """LS traceable path must reuse Newton outputs instead of re-differentiating."""
@@ -2892,6 +3088,84 @@ class TestBoozerSurfaceJAXExactPath:
         assert result["optimizer_method"] == "lm-ondevice"
         assert bool(result["success"])
         assert jnp.all(jnp.isfinite(captured["residual"]))
+
+    def test_run_code_traceable_lm_ondevice_executes_inner_solve_on_gpu(
+        self,
+        monkeypatch,
+        request,
+    ):
+        gpu = parity_device("gpu")
+        _enable_fast_strict_jax_backend(monkeypatch, request)
+        booz = _make_mock_boozer_surface()
+        booz.options["optimizer_backend"] = "ondevice"
+        booz.options["least_squares_algorithm"] = "lm"
+        coil_set_spec, sdofs, iota, G, x_target, A = _build_gpu_traceable_linear_problem(
+            booz,
+            gpu,
+            step_scale=0.02,
+        )
+        dense_calls, gmres_calls = _patch_matrix_free_lm_solver(
+            monkeypatch,
+            A=A,
+            expected_device=gpu,
+        )
+
+        def fake_get_traceable_penalty_residual(_optimize_G, _weight_inv_modB):
+            def residual(x, _coil_set_spec):
+                return A @ x - x_target
+
+            return residual
+
+        def fake_newton_polish(
+            method,
+            obj_fn,
+            x_ls,
+            *,
+            maxiter,
+            tol,
+            stab,
+            progress_callback=None,
+            objective_args=(),
+        ):
+            del method, obj_fn, maxiter, tol, stab, progress_callback, objective_args
+            np.testing.assert_allclose(
+                np.asarray(jax.device_get(x_ls)),
+                np.asarray(jax.device_get(x_target)),
+                atol=1e-12,
+            )
+            return {
+                "x": x_ls,
+                "fun": jnp.asarray(0.0, dtype=x_ls.dtype),
+                "grad": jnp.zeros_like(x_ls),
+                "hessian": jnp.eye(x_ls.shape[0], dtype=x_ls.dtype),
+                "nit": jnp.asarray(0, dtype=jnp.int32),
+                "success": jnp.asarray(True),
+            }
+
+        monkeypatch.setattr(
+            booz,
+            "_get_traceable_penalty_residual",
+            fake_get_traceable_penalty_residual,
+        )
+        monkeypatch.setattr(
+            booz,
+            "_run_newton_polish_for_method",
+            fake_newton_polish,
+        )
+
+        result = booz.run_code_traceable(coil_set_spec, sdofs, iota, G)
+
+        assert gmres_calls
+        assert len(dense_calls) == 1
+        assert result["type"] == "ls"
+        assert result["optimizer_method"] == "lm-ondevice"
+        assert bool(result["success"])
+        _assert_traceable_gpu_result(
+            result,
+            x_target,
+            gpu,
+            hessian_shape=A.shape,
+        )
 
     def test_run_code_traceable_lm_reuses_stable_residual_and_objective_callables(
         self, monkeypatch
@@ -3411,6 +3685,40 @@ class TestVJPHooks:
             assert d_g.shape == g.shape
             assert d_gd.shape == gd.shape
             assert d_c.shape == c.shape
+
+    def test_ls_group_vjp_uses_grouped_spec_path(self, monkeypatch):
+        """Streaming LS VJP should avoid rebuilding full grouped input arrays."""
+        booz = _make_mock_boozer_surface()
+        res = booz.run_code(iota=0.3, G=0.05)
+        vjp_groups_fn = res["vjp_groups"]
+        iota_sol = res["iota"]
+        G_sol = res["G"]
+        lm = jnp.asarray(np.eye(res["jacobian"].shape[0])[0], dtype=jnp.float64)
+
+        def _forbid_legacy_group_array_path(*_args, **_kwargs):
+            raise AssertionError(
+                "LS grouped VJP should not rebuild full grouped input arrays"
+            )
+
+        monkeypatch.setattr(
+            _bsj,
+            "_replace_group_coil_array",
+            _forbid_legacy_group_array_path,
+        )
+        monkeypatch.setattr(
+            _bsj,
+            "grouped_biot_savart_B_from_inputs",
+            _forbid_legacy_group_array_path,
+        )
+        monkeypatch.setattr(
+            _bsj,
+            "grouped_biot_savart_A_from_inputs",
+            _forbid_legacy_group_array_path,
+        )
+
+        grouped_entries = list(vjp_groups_fn(lm, booz, iota_sol, G_sol))
+
+        assert len(grouped_entries) == len(booz.coil_groups)
 
 
 # ---------------------------------------------------------------------------
