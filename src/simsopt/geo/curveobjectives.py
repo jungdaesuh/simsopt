@@ -698,7 +698,7 @@ class CurveCurveDistanceBarrier(Optimizable):
         """
         This returns the value of the quantity.
         """
-        res = 0
+        res = _as_jax_float64(0.0)
         for i, j in self._iter_curve_pair_indices():
             gamma1, l1, gamma2, l2 = _curve_pair_jax_data(self.curves, i, j)
             res += cc_distance_barrier_pure(
@@ -815,7 +815,7 @@ class CurveCurveDistance(Optimizable):
         This returns the value of the quantity.
         """
         self.compute_candidates()
-        res = 0.0
+        res = _as_jax_float64(0.0)
         for i, j in self.candidates:
             gamma1, l1, gamma2, l2 = _curve_pair_jax_data(self.curves, i, j)
             res += cc_distance_pure(gamma1, l1, gamma2, l2, self.minimum_distance)
@@ -1020,7 +1020,7 @@ class CurveSurfaceDistance(Optimizable):
         This returns the value of the quantity.
         """
         curve_positions, curve_tangents, gammas, normals = self._evaluation_geometry()
-        res = 0.0
+        res = _as_jax_float64(0.0)
         minimum_distance = _as_jax_float64(self.minimum_distance)
         for i, _ in self.candidates:
             gammac = _as_jax_float64(curve_positions[i])

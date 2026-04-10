@@ -2476,6 +2476,8 @@ def test_smoke_workflow_adds_cuda_strict_transfer_guard_pytest_lane():
     assert "run_code_traceable_lm_ondevice_executes_inner_solve_on_gpu" in workflow_text
     assert "tests/integration/test_single_stage_jax_cpu_reference.py" in workflow_text
     assert "TestRealFixtureGpuM5Parity" in workflow_text
+    assert "tests/integration/test_single_stage_physics_parity.py" in workflow_text
+    assert "TestSingleStageOuterLoopGpuProof" in workflow_text
 
 
 def test_legacy_gpu_benchmark_wrapper_delegates_to_local_validation_ladder():
