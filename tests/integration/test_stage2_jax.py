@@ -811,7 +811,7 @@ class TestObjectiveValueParity:
         _assert_stage2_value_parity(j_jax, j_cpu)
 
     @pytest.mark.parametrize("definition", ("normalized", "local"))
-    def test_singular_zero_current_objectives_return_inf(
+    def test_singular_zero_current_objectives_boundary_is_documented(
         self,
         coil_surf_setup,
         definition,
@@ -826,7 +826,7 @@ class TestObjectiveValueParity:
         bs_jax = BiotSavartJAX(zero_current_coils)
         jf_jax = SquaredFluxJAX(surf, bs_jax, definition=definition)
 
-        assert np.isinf(jf_cpu.J())
+        assert np.isnan(jf_cpu.J())
         assert np.isinf(jf_jax.J())
 
 

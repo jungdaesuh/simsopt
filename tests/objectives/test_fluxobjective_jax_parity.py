@@ -106,6 +106,12 @@ def _make_native_flux_parity_case():
     return coils, surface
 
 
+def _degenerate_point_quadrature_scale(definition):
+    if definition in {"quadratic flux", "local"}:
+        return 0.5
+    return 1.0
+
+
 @pytest.fixture(autouse=True)
 def _strict_parity_lane(monkeypatch, request, parity_lane):
     enable_strict_parity_backend(monkeypatch, request, parity_lane)
@@ -114,8 +120,7 @@ def _strict_parity_lane(monkeypatch, request, parity_lane):
 
 
 @pytest.mark.parametrize("definition", _SQUARED_FLUX_DEFINITIONS)
-def test_fluxobjective_value_parity(parity_lane, definition):
-    del parity_lane
+def test_fluxobjective_value_parity(definition):
     coils, surface = _make_native_flux_parity_case()
 
     bs_cpu = BiotSavart(coils)
@@ -135,8 +140,7 @@ def test_fluxobjective_value_parity(parity_lane, definition):
 
 
 @pytest.mark.parametrize("definition", _SQUARED_FLUX_DEFINITIONS)
-def test_fluxobjective_gradient_parity(parity_lane, definition):
-    del parity_lane
+def test_fluxobjective_gradient_parity(definition):
     coils, surface = _make_native_flux_parity_case()
 
     bs_cpu = BiotSavart(coils)
@@ -159,8 +163,7 @@ def test_fluxobjective_gradient_parity(parity_lane, definition):
     )
 
 
-def test_fluxobjective_target_parity(parity_lane):
-    del parity_lane
+def test_fluxobjective_target_parity():
     coils, surface = _make_native_flux_parity_case()
     rng = parity_rng(11)
     target = rng.standard_normal(surface.normal().shape[:2]) * 1e-2
@@ -181,8 +184,7 @@ def test_fluxobjective_target_parity(parity_lane):
     np.testing.assert_allclose(objective_jax.dJ(), objective_cpu.dJ(), rtol=1e-11, atol=1e-14)
 
 
-def test_quadratic_flux_zero_normals_contract(parity_lane):
-    del parity_lane
+def test_quadratic_flux_zero_normals_contract():
     objective_cpu, objective_jax, field = _make_fake_flux_objective(
         definition="quadratic flux",
         normal=np.zeros((1, 1, 3)),
@@ -191,13 +193,48 @@ def test_quadratic_flux_zero_normals_contract(parity_lane):
         supports_fallback=True,
     )
 
+    assert np.isnan(objective_cpu.J())
+    np.testing.assert_allclose(objective_jax.J(), 0.0, atol=0.0)
     np.testing.assert_allclose(objective_cpu.dJ(), np.zeros(field.local_dof_size))
     np.testing.assert_allclose(objective_jax.dJ(), np.zeros(field.local_dof_size))
 
 
+@pytest.mark.parametrize("definition", _SQUARED_FLUX_DEFINITIONS)
+def test_degenerate_normals_do_not_perturb_valid_flux_contracts(definition):
+    full_objective_cpu, full_objective_jax, _field = _make_fake_flux_objective(
+        definition=definition,
+        normal=[[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]]],
+        B=[[[7.0, -3.0, 2.0], [2.0, 0.0, 0.0]]],
+        target=[[11.0, 0.5]],
+        supports_fallback=True,
+    )
+    reduced_objective_cpu, _reduced_objective_jax, _reduced_field = _make_fake_flux_objective(
+        definition=definition,
+        normal=[[[1.0, 0.0, 0.0]]],
+        B=[[[2.0, 0.0, 0.0]]],
+        target=[[0.5]],
+        supports_fallback=True,
+    )
+
+    quadrature_scale = _degenerate_point_quadrature_scale(definition)
+    expected_value = quadrature_scale * reduced_objective_cpu.J()
+    expected_gradient = np.concatenate(
+        (np.zeros(3), quadrature_scale * reduced_objective_cpu.dJ())
+    )
+
+    np.testing.assert_allclose(
+        full_objective_jax.J(), expected_value, rtol=1e-12, atol=1e-15
+    )
+    np.testing.assert_allclose(
+        full_objective_cpu.dJ(), expected_gradient, rtol=1e-12, atol=1e-15
+    )
+    np.testing.assert_allclose(
+        full_objective_jax.dJ(), expected_gradient, rtol=1e-12, atol=1e-15
+    )
+
+
 @pytest.mark.parametrize("definition", ("normalized", "local"))
-def test_singular_zero_field_contract(parity_lane, definition):
-    del parity_lane
+def test_singular_zero_field_contract(definition):
     objective_cpu, objective_jax, _field = _make_fake_flux_objective(
         definition=definition,
         normal=[[[1.0, 0.0, 0.0]]],
@@ -214,8 +251,7 @@ def test_singular_zero_field_contract(parity_lane, definition):
         objective_jax.dJ()
 
 
-def test_native_only_mode_rejects_fallback_seams(parity_lane):
-    del parity_lane
+def test_native_only_mode_rejects_fallback_seams():
     surface = _FluxObjectiveFakeSurface([[[1.0, 0.0, 0.0]]])
     field = _FluxObjectiveFakeField([[[0.0, 0.0, 0.0]]], supports_fallback=True)
 

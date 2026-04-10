@@ -393,10 +393,19 @@ Keep the timing claims narrow and honest:
     reporting over maximum throughput
   - Biot-Savart parity lanes now use a fixed pairwise tree for quadrature-axis
     sums instead of relying on a raw `jnp.sum(..., axis=1)` reduction order
+  - the stabilized `integral_BdotN` kernel now uses the same fixed-tree idea
+    for the global `"normalized"` denominator sum
+  - expect a smaller but still real throughput cost from the extra
+    pad/reshape/add stages in that objective kernel; keep the stronger
+    arithmetic in the parity-sensitive path unless benchmark data justifies
+    promoting it
   - expect some throughput cost from the extra pad/reshape/add stages and the
     additional temporary arrays versus a flat reduction; keep that cost in the
     parity lanes and benchmark before promoting the same arithmetic to
     `jax_gpu_fast`
+  - the final scalar residual contraction in `integral_BdotN` intentionally
+    stays on `jnp.vdot(...)` for now; current parity evidence did not justify a
+    stricter compensated-summation branch there
 - fast mode:
   - `jax_gpu_fast` is the throughput-oriented lane after parity is green
   - it is not the default oracle and should not replace `native_cpu`

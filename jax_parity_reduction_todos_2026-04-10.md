@@ -109,10 +109,11 @@ External primary-source context:
 
 **TODOs**
 
-- [ ] Add a reusable pairwise/tree reduction helper for global quadrature sums in `src/simsopt/objectives/integral_bdotn_jax.py`
-- [ ] Replace denominator accumulation in `"normalized"` mode with the pairwise helper
-- [ ] Evaluate whether final scalar objective accumulation should use compensated summation in strict-oracle mode
-- [ ] Keep `fluxobjective_jax.py` as a wrapper around the stabilized kernel instead of adding arithmetic complexity there
+- [x] Add a reusable pairwise/tree reduction helper for global quadrature sums in `src/simsopt/objectives/integral_bdotn_jax.py`
+- [x] Replace denominator accumulation in `"normalized"` mode with the pairwise helper
+- [x] Evaluate whether final scalar objective accumulation should use compensated summation in strict-oracle mode
+  - Current decision: keep the final `jnp.vdot(residual, residual)` contraction unchanged for now. The reduction probe and mirrored parity tests pointed at the normalized denominator as the active drift site; a stricter compensated scalar path remains deferred until parity data shows the final residual norm is the real bottleneck.
+- [x] Keep `fluxobjective_jax.py` as a wrapper around the stabilized kernel instead of adding arithmetic complexity there
 - [x] Add a dedicated mirrored `test_fluxobjective_jax_parity.py` instead of relying only on split integration coverage
 - [x] Add parity cases for `quadratic flux`, `normalized`, and `local` with degenerate normals and singular-field behavior
 

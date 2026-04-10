@@ -13,7 +13,6 @@ from pathlib import Path
 import pytest
 import numpy as np
 
-import jax
 import jax.numpy as jnp
 from conftest import (
     device_float64,
@@ -72,6 +71,17 @@ def _numpy_integral_BdotN(B, target, normal, definition):
         return 0.5 * np.sum(BdotN**2 / B2 * norm_n) / (nphi * ntheta)
 
 
+def _normalized_reduction_stress_data():
+    """Return an odd-length, wide-dynamic-range case for denominator parity."""
+    magnitudes = np.geomspace(1e-120, 1e120, num=257, dtype=np.float64)
+    B = np.zeros((1, magnitudes.size, 3), dtype=np.float64)
+    B[0, :, 0] = magnitudes
+    target = np.zeros((1, magnitudes.size), dtype=np.float64)
+    normal = np.zeros_like(B)
+    normal[0, :, 0] = 1.0
+    return device_float64(B), device_float64(target), device_float64(normal)
+
+
 class TestIntegralBdotN:
     """Test all three definitions against NumPy reference."""
 
@@ -83,7 +93,7 @@ class TestIntegralBdotN:
             "local",
         ],
     )
-    def test_parity_with_target(self, definition, parity_lane):
+    def test_parity_with_target(self, definition):
         B, target, normal = _make_test_data()
         J_jax = host_scalar(integral_BdotN(B, target, normal, definition))
         J_ref = _numpy_integral_BdotN(
@@ -99,7 +109,7 @@ class TestIntegralBdotN:
             "local",
         ],
     )
-    def test_parity_zero_target(self, definition, parity_lane):
+    def test_parity_zero_target(self, definition):
         B, _, normal = _make_test_data()
         target = jnp.zeros(B.shape[:2])
         J_jax = host_scalar(integral_BdotN(B, target, normal, definition))
@@ -188,6 +198,13 @@ class TestIntegralBdotN:
 
         np.testing.assert_allclose(J, 0.0, atol=0.0)
 
+    def test_normalized_reduction_stress_stays_on_contract(self):
+        B, target, normal = _normalized_reduction_stress_data()
+
+        J_jax = host_scalar(integral_BdotN(B, target, normal, "normalized"))
+
+        np.testing.assert_allclose(J_jax, 0.5, rtol=1e-12, atol=1e-14)
+
 
 class TestIntegralBdotNCppParity:
     """Compare against simsoptpp.integral_BdotN (skipped if unavailable)."""
@@ -204,7 +221,7 @@ class TestIntegralBdotNCppParity:
             "local",
         ],
     )
-    def test_cpp_parity(self, definition, parity_lane):
+    def test_cpp_parity(self, definition):
         import simsoptpp as sopp
 
         B, target, normal = _make_test_data(nphi=15, ntheta=15)
