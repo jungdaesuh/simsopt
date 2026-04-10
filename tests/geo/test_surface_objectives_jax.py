@@ -1,10 +1,10 @@
-"""JAX-specific ToroidalFlux Taylor coverage.
+"""JAX-specific ToroidalFlux Taylor and tolerance-parity coverage.
 
 These tests exercise the pure JAX label/objective ingredients directly:
 
 1. Surface-DOF Hessian Taylor convergence for toroidal flux.
 2. Coil-family DOF gradient Taylor convergence for toroidal flux.
-3. Object-level CPU/JAX parity for ToroidalFlux value and derivatives.
+3. Upstream-shaped ToroidalFlux CPU/JAX parity under tolerance-based checks.
 """
 
 from pathlib import Path
@@ -16,6 +16,8 @@ import numpy as np
 import pytest
 from conftest import (
     enable_strict_parity_backend,
+    host_array,
+    host_scalar,
     parity_default_device,
     parity_lane,
     parity_rng,
@@ -31,6 +33,7 @@ from simsopt.field.biotsavart_jax import biot_savart_A
 from simsopt.field.biotsavart import BiotSavart
 from simsopt.field.biotsavart_jax_backend import BiotSavartJAX
 from simsopt.field.coil import Current, coils_via_symmetries
+from simsopt.configs.zoo import get_data
 from simsopt.geo.curve import create_equally_spaced_curves
 from simsopt.geo.surfaceobjectives import ToroidalFlux
 from simsopt.geo.surfacerzfourier import SurfaceRZFourier
@@ -40,6 +43,7 @@ from simsopt.geo.surface_fourier_jax import (
     surface_gammadash2_from_dofs,
     stellsym_scatter_indices,
 )
+from .surface_test_helpers import get_exact_surface, get_surface
 
 _MPOL = 1
 _NTOR = 1
@@ -67,6 +71,20 @@ _TF_COIL_DOFS = jnp.array(
     ],
     dtype=jnp.float64,
 )
+_SURFACE_TYPES = (
+    "SurfaceXYZFourier",
+    "SurfaceRZFourier",
+    "SurfaceXYZTensorFourier",
+)
+_STELLSYM_OPTIONS = (True, False)
+_TOROIDAL_FLUX_VALUE_RTOL = 1e-10
+_TOROIDAL_FLUX_VALUE_ATOL = 1e-12
+_TOROIDAL_FLUX_SURFACE_GRAD_RTOL = 1e-9
+_TOROIDAL_FLUX_SURFACE_GRAD_ATOL = 1e-11
+_TOROIDAL_FLUX_SURFACE_HESS_RTOL = 1e-8
+_TOROIDAL_FLUX_SURFACE_HESS_ATOL = 1e-10
+_TOROIDAL_FLUX_COIL_GRAD_RTOL = 1e-9
+_TOROIDAL_FLUX_COIL_GRAD_ATOL = 1e-7
 
 
 def _make_torus_dofs(R=1.0, r=0.1, mpol=1, ntor=1, nfp=1, stellsym=False):
@@ -197,6 +215,76 @@ def _make_object_level_toroidal_flux_case():
     return coils, surface
 
 
+def _make_reference_object_toroidal_flux_pair():
+    coils, surface = _make_object_level_toroidal_flux_case()
+    return ToroidalFlux(surface, BiotSavart(coils)), ToroidalFlux(
+        surface, BiotSavartJAX(coils)
+    )
+
+
+def _make_ncsx_biotsavart_pair():
+    _, _, _, _, bs = get_data("ncsx")
+    return BiotSavart(bs.coils), BiotSavartJAX(bs.coils)
+
+
+def _make_toroidal_flux_pair(surfacetype, stellsym, *, idx=0):
+    surface = get_surface(surfacetype, stellsym)
+    bs_cpu, bs_jax = _make_ncsx_biotsavart_pair()
+    return (
+        ToroidalFlux(surface, bs_cpu, idx=idx),
+        ToroidalFlux(surface, bs_jax, idx=idx),
+        bs_cpu,
+        bs_jax,
+    )
+
+
+def _surface_gradient_value(tf, _):
+    return tf.dJ_by_dsurfacecoefficients()
+
+
+def _surface_hessian_value(tf, _):
+    return tf.d2J_by_dsurfacecoefficientsdsurfacecoefficients()
+
+
+def _coil_gradient_value(tf, bs):
+    return tf.dJ_by_dcoils()(bs)
+
+
+def _assert_toroidal_flux_value_parity(actual, reference):
+    np.testing.assert_allclose(
+        host_scalar(actual),
+        reference,
+        rtol=_TOROIDAL_FLUX_VALUE_RTOL,
+        atol=_TOROIDAL_FLUX_VALUE_ATOL,
+    )
+
+
+def _assert_toroidal_flux_array_parity(actual, reference, *, rtol, atol):
+    np.testing.assert_allclose(
+        host_array(actual, dtype=np.float64),
+        np.asarray(reference, dtype=np.float64),
+        rtol=rtol,
+        atol=atol,
+    )
+
+
+def _assert_toroidal_flux_pair_parity(
+    surfacetype,
+    stellsym,
+    *,
+    value_getter,
+    rtol,
+    atol,
+):
+    tf_cpu, tf_jax, bs_cpu, bs_jax = _make_toroidal_flux_pair(surfacetype, stellsym)
+    _assert_toroidal_flux_array_parity(
+        value_getter(tf_jax, bs_jax),
+        value_getter(tf_cpu, bs_cpu),
+        rtol=rtol,
+        atol=atol,
+    )
+
+
 def _taylor_test_first_order(
     f, grad_fn, x, *, epsilons=None, direction=None, atol=1e-9
 ):
@@ -296,59 +384,67 @@ class TestToroidalFluxObjectParity:
         with parity_default_device(parity_lane):
             yield
 
-    def test_value_parity(self, parity_lane):
-        del parity_lane
-        coils, surface = _make_object_level_toroidal_flux_case()
+    def test_reference_object_case_value_parity(self):
+        tf_cpu, tf_jax = _make_reference_object_toroidal_flux_pair()
+        _assert_toroidal_flux_value_parity(tf_jax.J(), tf_cpu.J())
 
-        tf_cpu = ToroidalFlux(surface, BiotSavart(coils))
-        tf_jax = ToroidalFlux(surface, BiotSavartJAX(coils))
+    def test_toroidal_flux_is_constant(self):
+        surface = get_exact_surface()
+        bs_cpu, bs_jax = _make_ncsx_biotsavart_pair()
+        num_phi = surface.gamma().shape[0]
+        tf_cpu_values = np.empty(num_phi, dtype=np.float64)
+        tf_jax_values = np.empty(num_phi, dtype=np.float64)
 
-        np.testing.assert_allclose(tf_jax.J(), tf_cpu.J(), rtol=1e-10, atol=1e-12)
-
-    def test_surface_gradient_parity(self, parity_lane):
-        del parity_lane
-        coils, surface = _make_object_level_toroidal_flux_case()
-
-        tf_cpu = ToroidalFlux(surface, BiotSavart(coils))
-        tf_jax = ToroidalFlux(surface, BiotSavartJAX(coils))
-
-        np.testing.assert_allclose(
-            tf_jax.dJ_by_dsurfacecoefficients(),
-            tf_cpu.dJ_by_dsurfacecoefficients(),
-            rtol=1e-9,
-            atol=1e-11,
-        )
-
-    def test_surface_hessian_parity(self, parity_lane):
-        del parity_lane
-        coils, surface = _make_object_level_toroidal_flux_case()
-
-        tf_cpu = ToroidalFlux(surface, BiotSavart(coils))
-        tf_jax = ToroidalFlux(surface, BiotSavartJAX(coils))
+        for idx in range(num_phi):
+            tf_cpu = ToroidalFlux(surface, bs_cpu, idx=idx)
+            tf_jax = ToroidalFlux(surface, bs_jax, idx=idx)
+            tf_cpu_values[idx] = tf_cpu.J()
+            tf_jax_values[idx] = host_scalar(tf_jax.J())
 
         np.testing.assert_allclose(
-            tf_jax.d2J_by_dsurfacecoefficientsdsurfacecoefficients(),
-            tf_cpu.d2J_by_dsurfacecoefficientsdsurfacecoefficients(),
-            rtol=1e-8,
-            atol=1e-10,
+            tf_jax_values,
+            tf_cpu_values,
+            rtol=_TOROIDAL_FLUX_VALUE_RTOL,
+            atol=_TOROIDAL_FLUX_VALUE_ATOL,
+        )
+        mean_tf = np.mean(tf_jax_values)
+        max_err = np.max(np.abs(mean_tf - tf_jax_values)) / abs(mean_tf)
+        assert max_err < 1e-2
+
+    @pytest.mark.parametrize("surfacetype", _SURFACE_TYPES)
+    @pytest.mark.parametrize("stellsym", _STELLSYM_OPTIONS)
+    def test_toroidal_flux_first_derivative(self, surfacetype, stellsym):
+        _assert_toroidal_flux_pair_parity(
+            surfacetype,
+            stellsym,
+            value_getter=_surface_gradient_value,
+            rtol=_TOROIDAL_FLUX_SURFACE_GRAD_RTOL,
+            atol=_TOROIDAL_FLUX_SURFACE_GRAD_ATOL,
         )
 
-    def test_coil_gradient_parity(self, parity_lane):
-        del parity_lane
-        coils, surface = _make_object_level_toroidal_flux_case()
+    @pytest.mark.parametrize("surfacetype", _SURFACE_TYPES)
+    @pytest.mark.parametrize("stellsym", _STELLSYM_OPTIONS)
+    def test_toroidal_flux_second_derivative(self, surfacetype, stellsym):
+        _assert_toroidal_flux_pair_parity(
+            surfacetype,
+            stellsym,
+            value_getter=_surface_hessian_value,
+            rtol=_TOROIDAL_FLUX_SURFACE_HESS_RTOL,
+            atol=_TOROIDAL_FLUX_SURFACE_HESS_ATOL,
+        )
 
-        tf_cpu = ToroidalFlux(surface, BiotSavart(coils))
-        tf_jax = ToroidalFlux(surface, BiotSavartJAX(coils))
-
-        deriv_jax = tf_jax.dJ_by_dcoils()
-        deriv_cpu = tf_cpu.dJ_by_dcoils()
-        for coil in coils:
-            np.testing.assert_allclose(
-                deriv_jax(coil),
-                deriv_cpu(coil),
-                rtol=1e-9,
-                atol=1e-8,
-            )
+    @pytest.mark.parametrize("surfacetype", _SURFACE_TYPES)
+    @pytest.mark.parametrize("stellsym", _STELLSYM_OPTIONS)
+    def test_toroidal_flux_partial_derivatives_wrt_coils(
+        self, surfacetype, stellsym
+    ):
+        _assert_toroidal_flux_pair_parity(
+            surfacetype,
+            stellsym,
+            value_getter=_coil_gradient_value,
+            rtol=_TOROIDAL_FLUX_COIL_GRAD_RTOL,
+            atol=_TOROIDAL_FLUX_COIL_GRAD_ATOL,
+        )
 
 
 if __name__ == "__main__":

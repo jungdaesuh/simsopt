@@ -181,7 +181,7 @@ External primary-source context:
 - [x] Complete missing `BiotSavartJAX` object-level methods needed for literal upstream test mirroring
 - [x] Finish composed derivative plumbing before adding reproducible-arithmetic experiments here
 - [x] Mirror upstream ToroidalFlux and related objective tests more literally once the API is complete
-- [ ] Keep this family on tolerance-based parity for now
+- [x] Keep this family on tolerance-based parity for now
 
 ### 6. BoozerSurface and Optimizer
 
