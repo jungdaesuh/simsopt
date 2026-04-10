@@ -3,10 +3,9 @@ from __future__ import annotations
 import math
 from pathlib import Path
 
-from .current_contracts import resolve_effective_current_mode
+from .current_contracts import BANANA_CURRENT_HARD_LIMIT_A, resolve_effective_current_mode
 
 DEFAULT_LEGACY_BANANA_INIT_CURRENT_A = 1.0e4
-DEFAULT_BANANA_CURRENT_HARD_LIMIT_A = 1.6e4
 
 
 def _upgrade_legacy_banana_current_metadata(upgraded_results: dict) -> None:
@@ -24,7 +23,7 @@ def _upgrade_legacy_banana_current_metadata(upgraded_results: dict) -> None:
             0.0 if banana_current_A is None else abs(float(banana_current_A))
         )
         upgraded_results["BANANA_CURRENT_MAX_A"] = max(
-            DEFAULT_BANANA_CURRENT_HARD_LIMIT_A,
+            BANANA_CURRENT_HARD_LIMIT_A,
             realized_current_abs_A,
         )
 
@@ -139,6 +138,19 @@ def expected_locked_baseline_stage2_artifact_metadata(
     *,
     num_tf_coils: int,
 ) -> dict:
+    basin_metadata = {
+        "basin_hops": config.basin_hops,
+        "basin_stepsize": None if config.basin_hops == 0 else config.basin_stepsize,
+        "basin_temperature": (
+            None if config.basin_hops == 0 else config.basin_temperature
+        ),
+        "basin_niter_success": (
+            None
+            if config.basin_hops == 0 or config.basin_niter_success <= 0
+            else config.basin_niter_success
+        ),
+        "basin_seed": None if config.basin_hops == 0 else config.basin_seed,
+    }
     return {
         "PLASMA_SURF_FILENAME": config.plasma_surf_filename,
         "TF_CURRENT_A": config.tf_current_A,
@@ -156,9 +168,7 @@ def expected_locked_baseline_stage2_artifact_metadata(
         "banana_surf_radius": config.banana_surf_radius,
         "order": config.order,
         "CONSTRAINT_METHOD": config.constraint_method,
-        "basin_hops": config.basin_hops,
-        "basin_stepsize": None if config.basin_hops == 0 else config.basin_stepsize,
-        "basin_seed": config.basin_seed,
+        **basin_metadata,
         "init_only": config.init_only,
     }
 

@@ -1,6 +1,8 @@
 import ast
 import importlib.util
+import json
 import sys
+import tempfile
 import unittest
 import uuid
 from pathlib import Path
@@ -47,13 +49,19 @@ STAGE2_OBJECTIVES_MODULE_PATH = (
     / "banana_opt"
     / "stage2_objectives.py"
 )
-NFP10_GIL_RERUN_MODULE_PATH = (
+STAGE2_ALM_WRAPPER_MODULE_PATH = (
     Path(__file__).resolve().parents[2]
     / "examples"
     / "single_stage_optimization"
-    / "run_nfp10_gil_alm_rerun.py"
+    / "run_stage2_alm.py"
 )
-DEFAULT_GIL_WRAPPER_SURFACE = "wout_nfp10ginsburg_desc_s024match_iota20.nc"
+SINGLE_STAGE_THRESHOLDED_PHYSICS_RERUN_MODULE_PATH = (
+    Path(__file__).resolve().parents[2]
+    / "examples"
+    / "single_stage_optimization"
+    / "run_single_stage_thresholded_physics_alm.py"
+)
+DEFAULT_ALM_WRAPPER_SURFACE = "wout_nfp10ginsburg_desc_s024match_iota20.nc"
 
 
 def load_alm_utils_module():
@@ -73,10 +81,21 @@ def load_alm_utils_module():
     return module
 
 
-def load_nfp10_gil_rerun_module():
+def load_stage2_alm_wrapper_module():
     spec = importlib.util.spec_from_file_location(
-        f"run_nfp10_gil_alm_rerun_{uuid.uuid4().hex}",
-        NFP10_GIL_RERUN_MODULE_PATH,
+        f"run_stage2_alm_{uuid.uuid4().hex}",
+        STAGE2_ALM_WRAPPER_MODULE_PATH,
+    )
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
+
+
+def load_single_stage_thresholded_physics_rerun_module():
+    spec = importlib.util.spec_from_file_location(
+        f"run_single_stage_thresholded_physics_alm_{uuid.uuid4().hex}",
+        SINGLE_STAGE_THRESHOLDED_PHYSICS_RERUN_MODULE_PATH,
     )
     module = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
@@ -162,13 +181,36 @@ def _make_alm_args(**overrides):
     return SimpleNamespace(**defaults)
 
 
-def make_nfp10_gil_rerun_args(**overrides):
+def make_stage2_alm_wrapper_args(**overrides):
     defaults = {
         "python_executable": "python",
-        "plasma_surf_filename": DEFAULT_GIL_WRAPPER_SURFACE,
+        "dry_run": False,
+        "plasma_surf_filename": DEFAULT_ALM_WRAPPER_SURFACE,
+        "profile": "standard_80ka",
+        "stage2_spec_json": None,
+        "equilibria_dir": None,
+        "output_root": "outputs",
+        "summary_json": None,
+        "stage2_timeout_seconds": 0.0,
+        "cc_threshold": None,
+        "curvature_threshold": None,
+        "order": None,
+        "tf_current_A": None,
+    }
+    defaults.update(overrides)
+    return SimpleNamespace(**defaults)
+
+
+def make_single_stage_thresholded_physics_rerun_args(**overrides):
+    defaults = {
+        "python_executable": "python",
+        "dry_run": False,
+        "plasma_surf_filename": DEFAULT_ALM_WRAPPER_SURFACE,
         "stage2_bs_path": "relative/seed.json",
         "output_root": "outputs",
         "equilibria_dir": None,
+        "summary_json": None,
+        "single_stage_timeout_seconds": 0.0,
         "nphi": 91,
         "ntheta": 32,
         "mpol": 8,
@@ -223,11 +265,11 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
         self.assertIn('"--alm-curvature-smoothing"', source)
         self.assertIn('"ALM_CURVATURE_SMOOTHING", "0.05"', source)
 
-    def test_single_stage_parse_args_exposes_gil_formulation_controls(self):
+    def test_single_stage_parse_args_exposes_thresholded_physics_formulation_controls(self):
         source = SINGLE_STAGE_MODULE_PATH.read_text()
 
         self.assertIn('"--alm-formulation"', source)
-        self.assertIn('"ALM_FORMULATION", "legacy"', source)
+        self.assertIn('"ALM_FORMULATION", "weighted_sum"', source)
         self.assertIn('"--alm-qs-threshold"', source)
         self.assertIn('"ALM_QS_THRESHOLD"', source)
         self.assertIn('"--alm-boozer-threshold"', source)
@@ -237,7 +279,7 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
         self.assertIn('"--alm-length-penalty-threshold"', source)
         self.assertIn('"ALM_LENGTH_PENALTY_THRESHOLD"', source)
 
-    def test_single_stage_validate_gil_formulation_requires_explicit_thresholds(self):
+    def test_single_stage_validate_thresholded_physics_formulation_requires_explicit_thresholds(self):
         functions = extract_functions(
             SINGLE_STAGE_MODULE_PATH,
             ["validate_single_stage_alm_formulation_args"],
@@ -245,7 +287,7 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
         )
         validate_args = functions["validate_single_stage_alm_formulation_args"]
         args = SimpleNamespace(
-            alm_formulation="gil",
+            alm_formulation="thresholded_physics",
             constraint_method="alm",
             alm_qs_threshold=None,
             alm_boozer_threshold=1e-6,
@@ -256,7 +298,7 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "--alm-qs-threshold"):
             validate_args(args)
 
-    def test_single_stage_validate_gil_formulation_requires_length_threshold(self):
+    def test_single_stage_validate_thresholded_physics_formulation_requires_length_threshold(self):
         functions = extract_functions(
             SINGLE_STAGE_MODULE_PATH,
             ["validate_single_stage_alm_formulation_args"],
@@ -264,7 +306,7 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
         )
         validate_args = functions["validate_single_stage_alm_formulation_args"]
         args = SimpleNamespace(
-            alm_formulation="gil",
+            alm_formulation="thresholded_physics",
             constraint_method="alm",
             alm_qs_threshold=1e-6,
             alm_boozer_threshold=1e-6,
@@ -275,7 +317,7 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "--alm-length-penalty-threshold"):
             validate_args(args)
 
-    def test_single_stage_validate_gil_formulation_rejects_penalty_mode(self):
+    def test_single_stage_validate_thresholded_physics_formulation_rejects_penalty_mode(self):
         functions = extract_functions(
             SINGLE_STAGE_MODULE_PATH,
             ["validate_single_stage_alm_formulation_args"],
@@ -283,7 +325,7 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
         )
         validate_args = functions["validate_single_stage_alm_formulation_args"]
         args = SimpleNamespace(
-            alm_formulation="gil",
+            alm_formulation="thresholded_physics",
             constraint_method="penalty",
             alm_qs_threshold=1e-6,
             alm_boozer_threshold=1e-6,
@@ -394,14 +436,279 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
         self.assertEqual(payload["trial_hardware_status"]["violations"], ["cs"])
         self.assertEqual(payload["termination_message"], "still running")
 
-    def test_nfp10_gil_rerun_wrapper_pins_gil_thresholds_and_warn_mode(self):
-        source = NFP10_GIL_RERUN_MODULE_PATH.read_text()
+    def test_stage2_alm_wrapper_requires_profile_or_spec_json(self):
+        module = load_stage2_alm_wrapper_module()
 
-        self.assertIn(DEFAULT_GIL_WRAPPER_SURFACE, source)
+        with patch.object(
+            sys,
+            "argv",
+            [
+                "run_stage2_alm.py",
+                "--plasma-surf-filename",
+                DEFAULT_ALM_WRAPPER_SURFACE,
+            ],
+        ):
+            with self.assertRaises(SystemExit) as excinfo:
+                module.parse_args()
+
+        self.assertEqual(excinfo.exception.code, 2)
+
+    def test_stage2_alm_wrapper_pins_alm_and_resolves_cli_paths(self):
+        module = load_stage2_alm_wrapper_module()
+        args = make_stage2_alm_wrapper_args(
+            equilibria_dir="eqdir",
+            tf_current_A=9.0e4,
+            cc_threshold=0.07,
+        )
+        resolved_spec, resolved_spec_source = module.resolve_stage2_spec_payload(args)
+        config = module.build_stage2_alm_config(args, resolved_spec=resolved_spec)
+        command = module.build_stage2_command(config, python_executable=args.python_executable)
+
+        self.assertEqual(resolved_spec_source, "profile:standard_80ka")
+        self.assertEqual(config.constraint_method, "alm")
+        self.assertEqual(config.tf_current_A, 9.0e4)
+        self.assertEqual(config.cc_threshold, 0.07)
+        self.assertEqual(config.output_root, Path("outputs").resolve())
+        self.assertEqual(config.equilibria_dir, str(Path("eqdir").resolve()))
+        self.assertIn("--constraint-method", command)
+        self.assertEqual(command[command.index("--constraint-method") + 1], "alm")
+        self.assertEqual(
+            command[command.index("--output-root") + 1],
+            str(Path("outputs").resolve()),
+        )
+        self.assertEqual(
+            command[command.index("--equilibria-dir") + 1],
+            str(Path("eqdir").resolve()),
+        )
+        self.assertIn("--alm-max-outer-iters", command)
+        self.assertEqual(command[command.index("--alm-max-outer-iters") + 1], "10")
+        self.assertIn("--alm-penalty-init", command)
+        self.assertEqual(command[command.index("--alm-penalty-init") + 1], "1.0")
+        self.assertIn("--alm-penalty-scale", command)
+        self.assertEqual(command[command.index("--alm-penalty-scale") + 1], "10.0")
+        self.assertIn("--banana-current-max-A", command)
+        self.assertEqual(command[command.index("--banana-current-max-A") + 1], "16000.0")
+
+    def test_stage2_alm_wrapper_spec_json_must_be_complete(self):
+        module = load_stage2_alm_wrapper_module()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            spec_path = Path(tmpdir) / "stage2_spec.json"
+            spec_path.write_text(json.dumps({"major_radius": 0.915}), encoding="utf-8")
+            args = make_stage2_alm_wrapper_args(
+                profile=None,
+                stage2_spec_json=str(spec_path),
+            )
+
+            with self.assertRaisesRegex(ValueError, "must define all required keys"):
+                module.resolve_stage2_spec_payload(args)
+
+    def test_stage2_alm_wrapper_spec_json_valid_complete_spec_resolves(self):
+        module = load_stage2_alm_wrapper_module()
+        complete_spec = {
+            "major_radius": 1.0,
+            "toroidal_flux": 0.30,
+            "length_weight": 0.001,
+            "cc_weight": 50.0,
+            "cc_threshold": 0.06,
+            "curvature_weight": 0.0002,
+            "curvature_threshold": 45.0,
+            "banana_surf_radius": 0.25,
+            "tf_current_A": 9.0e4,
+            "order": 3,
+            "banana_init_current_A": 1.2e4,
+            "banana_current_max_A": 1.5e4,
+            "alm_max_outer_iters": 15,
+            "alm_penalty_init": 2.0,
+            "alm_penalty_scale": 5.0,
+            "basin_hops": 0,
+            "basin_stepsize": 0.01,
+            "basin_temperature": 1.0,
+            "basin_niter_success": 0,
+            "basin_seed": None,
+            "init_only": False,
+        }
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            spec_path = Path(tmpdir) / "stage2_spec.json"
+            spec_path.write_text(json.dumps(complete_spec), encoding="utf-8")
+            args = make_stage2_alm_wrapper_args(
+                profile=None,
+                stage2_spec_json=str(spec_path),
+            )
+
+            resolved_spec, source_label = module.resolve_stage2_spec_payload(args)
+
+        self.assertTrue(source_label.startswith("json:"))
+        self.assertEqual(resolved_spec["major_radius"], 1.0)
+        self.assertEqual(resolved_spec["tf_current_A"], 9.0e4)
+        self.assertEqual(resolved_spec["order"], 3)
+        self.assertEqual(resolved_spec["banana_current_max_A"], 1.5e4)
+
+    def test_stage2_alm_wrapper_summary_includes_resolved_config(self):
+        module = load_stage2_alm_wrapper_module()
+        args = make_stage2_alm_wrapper_args()
+        resolved_spec, resolved_spec_source = module.resolve_stage2_spec_payload(args)
+        config = module.build_stage2_alm_config(args, resolved_spec=resolved_spec)
+        command = module.build_stage2_command(config, python_executable=args.python_executable)
+
+        summary = module.build_summary(
+            args,
+            config=config,
+            resolved_spec_source=resolved_spec_source,
+            command=command,
+            artifact_path=Path("/tmp/stage2/biot_savart_opt.json"),
+            artifact_reused=False,
+        )
+
+        self.assertEqual(summary["resolved_spec_source"], "profile:standard_80ka")
+        self.assertIn("resolved_stage2_config", summary)
+        self.assertEqual(summary["resolved_stage2_config"]["constraint_method"], "alm")
+        self.assertEqual(summary["resolved_stage2_config"]["output_root"], str(Path("outputs").resolve()))
+
+    def test_stage2_alm_wrapper_expected_metadata_includes_basin_identity(self):
+        module = load_stage2_alm_wrapper_module()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            spec_path = Path(tmpdir) / "stage2_spec.json"
+            spec_path.write_text(
+                json.dumps(
+                    {
+                        "major_radius": 0.915,
+                        "toroidal_flux": 0.24,
+                        "length_weight": 5.0e-4,
+                        "cc_weight": 100.0,
+                        "cc_threshold": 0.05,
+                        "curvature_weight": 1.0e-4,
+                        "curvature_threshold": 40.0,
+                        "banana_surf_radius": 0.22,
+                        "tf_current_A": 8.0e4,
+                        "order": 2,
+                        "banana_init_current_A": 1.0e4,
+                        "banana_current_max_A": 1.6e4,
+                        "alm_max_outer_iters": 10,
+                        "alm_penalty_init": 1.0,
+                        "alm_penalty_scale": 10.0,
+                        "basin_hops": 3,
+                        "basin_stepsize": 0.01,
+                        "basin_temperature": 2.5,
+                        "basin_niter_success": 8,
+                        "basin_seed": 11,
+                        "init_only": False,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            args = make_stage2_alm_wrapper_args(
+                profile=None,
+                stage2_spec_json=str(spec_path),
+            )
+            resolved_spec, _ = module.resolve_stage2_spec_payload(args)
+            config = module.build_stage2_alm_config(args, resolved_spec=resolved_spec)
+
+        metadata = module._expected_stage2_artifact_metadata(config)
+
+        self.assertEqual(metadata["basin_hops"], 3)
+        self.assertEqual(metadata["basin_stepsize"], 0.01)
+        self.assertEqual(metadata["basin_temperature"], 2.5)
+        self.assertEqual(metadata["basin_niter_success"], 8)
+        self.assertEqual(metadata["basin_seed"], 11)
+
+    def test_stage2_alm_wrapper_normalizes_basin_seed_against_basin_hops(self):
+        module = load_stage2_alm_wrapper_module()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            disabled_spec_path = Path(tmpdir) / "stage2_spec_disabled.json"
+            disabled_spec_path.write_text(
+                json.dumps(
+                    {
+                        "major_radius": 0.915,
+                        "toroidal_flux": 0.24,
+                        "length_weight": 5.0e-4,
+                        "cc_weight": 100.0,
+                        "cc_threshold": 0.05,
+                        "curvature_weight": 1.0e-4,
+                        "curvature_threshold": 40.0,
+                        "banana_surf_radius": 0.22,
+                        "tf_current_A": 8.0e4,
+                        "order": 2,
+                        "banana_init_current_A": 1.0e4,
+                        "banana_current_max_A": 1.6e4,
+                        "alm_max_outer_iters": 10,
+                        "alm_penalty_init": 1.0,
+                        "alm_penalty_scale": 10.0,
+                        "basin_hops": 0,
+                        "basin_stepsize": 0.01,
+                        "basin_temperature": 2.5,
+                        "basin_niter_success": 8,
+                        "basin_seed": 11,
+                        "init_only": False,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            disabled_args = make_stage2_alm_wrapper_args(
+                profile=None,
+                stage2_spec_json=str(disabled_spec_path),
+            )
+            disabled_spec, _ = module.resolve_stage2_spec_payload(disabled_args)
+            disabled_config = module.build_stage2_alm_config(
+                disabled_args,
+                resolved_spec=disabled_spec,
+            )
+
+            enabled_spec_path = Path(tmpdir) / "stage2_spec_enabled.json"
+            enabled_spec_path.write_text(
+                json.dumps(
+                    {
+                        "major_radius": 0.915,
+                        "toroidal_flux": 0.24,
+                        "length_weight": 5.0e-4,
+                        "cc_weight": 100.0,
+                        "cc_threshold": 0.05,
+                        "curvature_weight": 1.0e-4,
+                        "curvature_threshold": 40.0,
+                        "banana_surf_radius": 0.22,
+                        "tf_current_A": 8.0e4,
+                        "order": 2,
+                        "banana_init_current_A": 1.0e4,
+                        "banana_current_max_A": 1.6e4,
+                        "alm_max_outer_iters": 10,
+                        "alm_penalty_init": 1.0,
+                        "alm_penalty_scale": 10.0,
+                        "basin_hops": 3,
+                        "basin_stepsize": 0.01,
+                        "basin_temperature": 2.5,
+                        "basin_niter_success": 8,
+                        "basin_seed": -1,
+                        "init_only": False,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            enabled_args = make_stage2_alm_wrapper_args(
+                profile=None,
+                stage2_spec_json=str(enabled_spec_path),
+            )
+            enabled_spec, _ = module.resolve_stage2_spec_payload(enabled_args)
+            with patch.object(module.os, "urandom", return_value=b"\x00\x00\x00*"):
+                enabled_config = module.build_stage2_alm_config(
+                    enabled_args,
+                    resolved_spec=enabled_spec,
+                )
+
+        self.assertIsNone(disabled_config.basin_seed)
+        self.assertIsNone(module._expected_stage2_artifact_metadata(disabled_config)["basin_seed"])
+        self.assertEqual(enabled_config.basin_seed, 42)
+        self.assertEqual(module._expected_stage2_artifact_metadata(enabled_config)["basin_seed"], 42)
+
+    def test_single_stage_thresholded_physics_rerun_wrapper_pins_thresholded_physics_thresholds_and_warn_mode(self):
+        source = SINGLE_STAGE_THRESHOLDED_PHYSICS_RERUN_MODULE_PATH.read_text()
+
         self.assertIn('"--constraint-method"', source)
         self.assertIn('"alm"', source)
         self.assertIn('"--alm-formulation"', source)
-        self.assertIn('"gil"', source)
+        self.assertIn('"thresholded_physics"', source)
         self.assertIn('"--hardware-search-mode"', source)
         self.assertIn('"warn"', source)
         self.assertNotIn('"adaptive"', source)
@@ -410,11 +717,11 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
         self.assertIn('"--alm-iota-penalty-threshold"', source)
         self.assertIn('"--alm-length-penalty-threshold"', source)
 
-    def test_nfp10_gil_rerun_wrapper_resolves_cli_paths(self):
-        module = load_nfp10_gil_rerun_module()
-        args = make_nfp10_gil_rerun_args(equilibria_dir="eqdir")
+    def test_single_stage_thresholded_physics_rerun_wrapper_resolves_cli_paths(self):
+        module = load_single_stage_thresholded_physics_rerun_module()
+        args = make_single_stage_thresholded_physics_rerun_args(equilibria_dir="eqdir")
 
-        command = module.build_nfp10_gil_command(args)
+        command = module.build_single_stage_thresholded_physics_command(args)
 
         self.assertEqual(
             command[command.index("--stage2-bs-path") + 1],
@@ -429,14 +736,16 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
             str(Path("eqdir").resolve()),
         )
 
-    def test_nfp10_gil_rerun_wrapper_parse_args_rejects_adaptive_mode(self):
-        module = load_nfp10_gil_rerun_module()
+    def test_single_stage_thresholded_physics_rerun_wrapper_parse_args_rejects_adaptive_mode(self):
+        module = load_single_stage_thresholded_physics_rerun_module()
 
         with patch.object(
             sys,
             "argv",
             [
-                "run_nfp10_gil_alm_rerun.py",
+                "run_single_stage_thresholded_physics_alm.py",
+                "--plasma-surf-filename",
+                DEFAULT_ALM_WRAPPER_SURFACE,
                 "--stage2-bs-path",
                 "seed.json",
                 "--hardware-search-mode",
@@ -447,6 +756,25 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
                 module.parse_args()
 
         self.assertEqual(excinfo.exception.code, 2)
+
+    def test_single_stage_thresholded_physics_rerun_wrapper_rejects_stage2_surface_mismatch(self):
+        module = load_single_stage_thresholded_physics_rerun_module()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            stage2_bs_path = tmpdir_path / "biot_savart_opt.json"
+            stage2_bs_path.write_text("{}", encoding="utf-8")
+            (tmpdir_path / "results.json").write_text(
+                json.dumps({"PLASMA_SURF_FILENAME": "other_surface.nc"}),
+                encoding="utf-8",
+            )
+            args = make_single_stage_thresholded_physics_rerun_args(
+                plasma_surf_filename=DEFAULT_ALM_WRAPPER_SURFACE,
+                stage2_bs_path=str(stage2_bs_path),
+            )
+
+            with self.assertRaisesRegex(ValueError, "Stage 2 artifact surface mismatch"):
+                module.load_validated_stage2_seed_metadata(args)
 
     def test_single_stage_basin_hopping_uses_shared_helper_and_records_telemetry(self):
         source = SINGLE_STAGE_MODULE_PATH.read_text()

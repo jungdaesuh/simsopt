@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -17,6 +18,12 @@ WORKFLOW_HELPERS_PATH = EXAMPLE_ROOT / "workflow_helpers.py"
 WORKFLOW_COMMON_PATH = EXAMPLE_ROOT / "workflow_runner_common.py"
 BASELINE_SWEEP_PATH = EXAMPLE_ROOT / "run_80ka_baseline_tradeoff_sweep.py"
 FINITE_CURRENT_SMOKE_PATH = EXAMPLE_ROOT / "run_finite_current_smoke.py"
+SINGLE_STAGE_ENTRYPOINT_PATH = EXAMPLE_ROOT / "SINGLE_STAGE" / "single_stage_banana_example.py"
+STAGE2_ENTRYPOINT_PATH = EXAMPLE_ROOT / "STAGE_2" / "banana_coil_solver.py"
+IMPORT_PROVENANCE_PATH = EXAMPLE_ROOT / "import_provenance.py"
+EXPECTED_LOCAL_SIMSOPT_INIT = (
+    Path(__file__).resolve().parents[2] / "src" / "simsopt" / "__init__.py"
+)
 
 
 def load_module(path: Path, stem: str):
@@ -42,6 +49,36 @@ def load_baseline_sweep_module():
 
 def load_finite_current_smoke_module():
     return load_module(FINITE_CURRENT_SMOKE_PATH, "run_finite_current_smoke")
+
+
+def _run_python_snippet(source: str, *args: str) -> str:
+    command = [
+        sys.executable,
+        "-c",
+        source,
+        *args,
+    ]
+    result = subprocess.run(
+        command,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return result.stdout.strip()
+
+
+def imported_simsopt_init_for_entrypoint(script_path: Path) -> Path:
+    return Path(
+        _run_python_snippet(
+            (
+                "import pathlib, runpy, sys; "
+                "runpy.run_path(sys.argv[1], run_name='__probe__'); "
+                "import simsopt; "
+                "print(pathlib.Path(simsopt.__file__).resolve())"
+            ),
+            str(script_path),
+        )
+    )
 
 
 class WorkflowHelpersTests(unittest.TestCase):
@@ -110,7 +147,7 @@ class WorkflowHelpersTests(unittest.TestCase):
         self.assertEqual(
             str(artifact_path),
             "/tmp/stage2-root/outputs-demo.nc/"
-            "R0=0.915-s=0.24-LW=0.0005-CCW=100-CCT=0.05-CW=0.0001-CT=40-SR=0.220-INITC=10000-TFC=80000-Order=2-CM=penalty/"
+            "R0=0.915-s=0.24-LW=0.0005-CCW=100-CCT=0.05-CW=0.0001-CT=40-SR=0.220-INITC=10000-MAXC=16000-TFC=80000-Order=2-CM=penalty/"
             "biot_savart_opt.json",
         )
 
@@ -127,6 +164,43 @@ class WorkflowHelpersTests(unittest.TestCase):
 
 
 class WorkflowRunnerCommonTests(unittest.TestCase):
+    def test_single_stage_entrypoint_imports_local_simsopt(self):
+        imported_path = imported_simsopt_init_for_entrypoint(SINGLE_STAGE_ENTRYPOINT_PATH)
+
+        self.assertEqual(imported_path, EXPECTED_LOCAL_SIMSOPT_INIT)
+
+    def test_stage2_entrypoint_imports_local_simsopt(self):
+        imported_path = imported_simsopt_init_for_entrypoint(STAGE2_ENTRYPOINT_PATH)
+
+        self.assertEqual(imported_path, EXPECTED_LOCAL_SIMSOPT_INIT)
+
+    def test_import_provenance_moves_local_paths_to_front_when_already_present(self):
+        imported_path = Path(
+            _run_python_snippet(
+                (
+                "import pathlib, sys, tempfile; "
+                "from importlib.util import module_from_spec, spec_from_file_location; "
+                "fake_root = pathlib.Path(tempfile.mkdtemp()); "
+                "(fake_root / 'simsopt').mkdir(); "
+                "(fake_root / 'simsopt' / '__init__.py').write_text('ORIGIN = \"fake\"\\n', encoding='utf-8'); "
+                "sys.path[:] = [str(fake_root), str(pathlib.Path(sys.argv[2]).resolve()), str(pathlib.Path(sys.argv[3]).resolve()), *sys.path]; "
+                "spec = spec_from_file_location('import_provenance_test', sys.argv[1]); "
+                "module = module_from_spec(spec); "
+                "sys.modules[spec.name] = module; "
+                "spec.loader.exec_module(module); "
+                "module.configure_local_simsopt_imports(sys.argv[4]); "
+                "import simsopt; "
+                "print(pathlib.Path(simsopt.__file__).resolve())"
+                ),
+                str(IMPORT_PROVENANCE_PATH),
+                str(EXAMPLE_ROOT.parent.parent / "src"),
+                str(EXAMPLE_ROOT),
+                str(SINGLE_STAGE_ENTRYPOINT_PATH),
+            )
+        )
+
+        self.assertEqual(imported_path, EXPECTED_LOCAL_SIMSOPT_INIT)
+
     def test_build_stage2_command_contains_seed_contract(self):
         module = load_workflow_common_module()
         config = module.Stage2ArtifactConfig(
@@ -197,6 +271,79 @@ class WorkflowRunnerCommonTests(unittest.TestCase):
         self.assertIn("--basin-temperature", command)
         self.assertIn("--basin-niter-success", command)
         self.assertIn("--basin-seed", command)
+
+    def test_locked_baseline_stage2_metadata_includes_basin_identity(self):
+        common = load_workflow_common_module()
+        module = load_baseline_sweep_module()
+        config = common.Stage2ArtifactConfig(
+            plasma_surf_filename="demo.nc",
+            output_root=Path("/tmp/stage2"),
+            equilibria_dir=None,
+            tf_current_A=8.0e4,
+            major_radius=0.915,
+            toroidal_flux=0.24,
+            length_weight=0.0005,
+            cc_weight=100.0,
+            cc_threshold=0.05,
+            curvature_weight=0.0001,
+            curvature_threshold=40.0,
+            banana_surf_radius=0.22,
+            order=2,
+            constraint_method="alm",
+            alm_max_outer_iters=10,
+            alm_penalty_init=1.0,
+            alm_penalty_scale=10.0,
+            basin_hops=3,
+            basin_stepsize=0.01,
+            basin_temperature=2.5,
+            basin_niter_success=8,
+            basin_seed=11,
+            init_only=False,
+        )
+
+        metadata = module.expected_locked_baseline_stage2_artifact_metadata(config)
+
+        self.assertEqual(metadata["basin_hops"], 3)
+        self.assertEqual(metadata["basin_stepsize"], 0.01)
+        self.assertEqual(metadata["basin_temperature"], 2.5)
+        self.assertEqual(metadata["basin_niter_success"], 8)
+        self.assertEqual(metadata["basin_seed"], 11)
+
+    def test_locked_baseline_stage2_metadata_drops_basin_seed_without_basin_hops(self):
+        common = load_workflow_common_module()
+        module = load_baseline_sweep_module()
+        config = common.Stage2ArtifactConfig(
+            plasma_surf_filename="demo.nc",
+            output_root=Path("/tmp/stage2"),
+            equilibria_dir=None,
+            tf_current_A=8.0e4,
+            major_radius=0.915,
+            toroidal_flux=0.24,
+            length_weight=0.0005,
+            cc_weight=100.0,
+            cc_threshold=0.05,
+            curvature_weight=0.0001,
+            curvature_threshold=40.0,
+            banana_surf_radius=0.22,
+            order=2,
+            constraint_method="alm",
+            alm_max_outer_iters=10,
+            alm_penalty_init=1.0,
+            alm_penalty_scale=10.0,
+            basin_hops=0,
+            basin_stepsize=0.01,
+            basin_temperature=2.5,
+            basin_niter_success=8,
+            basin_seed=11,
+            init_only=False,
+        )
+
+        metadata = module.expected_locked_baseline_stage2_artifact_metadata(config)
+
+        self.assertIsNone(metadata["basin_stepsize"])
+        self.assertIsNone(metadata["basin_temperature"])
+        self.assertIsNone(metadata["basin_niter_success"])
+        self.assertIsNone(metadata["basin_seed"])
 
     def test_discover_single_results_path_requires_unique_match(self):
         module = load_workflow_common_module()

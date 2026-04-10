@@ -738,7 +738,7 @@ class SingleStageObjectiveModuleTests(_ModuleTestCase):
 
         np.testing.assert_allclose(result["grad"], [4.6, 2.8, 0.0, 0.0])
 
-    def test_evaluate_base_objective_gil_formulation_zeros_base_value_and_grad(self):
+    def test_evaluate_base_objective_thresholded_physics_formulation_zeros_base_value_and_grad(self):
         objective, nonqs, brs, jiota, jlength = self._make_projected_base_terms()
 
         result = self.module.evaluate_base_objective(
@@ -751,7 +751,7 @@ class SingleStageObjectiveModuleTests(_ModuleTestCase):
             JCurveLength=jlength,
             LENGTH_WEIGHT=1.0,
             objective_optimizable=objective,
-            alm_formulation="gil",
+            alm_formulation="thresholded_physics",
         )
 
         self.assertAlmostEqual(result["total"], 0.0)
@@ -834,7 +834,7 @@ class SingleStageObjectiveModuleTests(_ModuleTestCase):
 
         np.testing.assert_allclose(result["grad"], [9.0, -2.0, 0.0, 0.0])
 
-    def test_evaluate_alm_objective_gil_formulation_promotes_physics_terms_to_constraints(self):
+    def test_evaluate_alm_objective_thresholded_physics_formulation_promotes_physics_terms_to_constraints(self):
         objective, nonqs, brs, jiota, jlength = self._make_projected_base_terms()
 
         def fake_augmented(base_value, base_grad, constraint_values, constraint_grads, multipliers, penalty):
@@ -896,7 +896,7 @@ class SingleStageObjectiveModuleTests(_ModuleTestCase):
                 [ds * 4.0, ds * 4.0, cs * 4.0],
                 dtype=float,
             ),
-            alm_formulation="gil",
+            alm_formulation="thresholded_physics",
             qs_threshold=1.0,
             boozer_threshold=1.0,
             iota_penalty_threshold=0.5,
@@ -920,10 +920,13 @@ class SingleStageObjectiveModuleTests(_ModuleTestCase):
         np.testing.assert_allclose(result["constraint_activity_tolerances"], [0.04, 0.04, 0.2, 0.0, 0.0, 0.0, 0.0])
         np.testing.assert_allclose(result["grad"], [7.0, -4.0, 0.0, 0.0])
 
-    def test_evaluate_alm_objective_gil_formulation_requires_explicit_thresholds(self):
+    def test_evaluate_alm_objective_thresholded_physics_formulation_requires_explicit_thresholds(self):
         objective, nonqs, brs, jiota, jlength = self._make_projected_base_terms()
 
-        with self.assertRaisesRegex(ValueError, "requires explicit objective thresholds"):
+        with self.assertRaisesRegex(
+            ValueError,
+            "thresholded_physics ALM formulation requires explicit objective thresholds",
+        ):
             self.module.evaluate_alm_objective(
                 np.array([1.0]),
                 nonqs,
@@ -959,7 +962,7 @@ class SingleStageObjectiveModuleTests(_ModuleTestCase):
                 curve_curve_constraint_fn=lambda *_args: (-0.1, np.array([1.0, 0.0, 0.0, 0.0]), 0.0),
                 curve_surface_constraint_fn=lambda *_args: (0.2, np.array([0.0, 1.0, 0.0, 0.0]), 0.2),
                 curvature_constraint_fn=lambda *_args: (0.3, np.array([1.0, -1.0, 0.0, 0.0]), 0.3),
-                alm_formulation="gil",
+                alm_formulation="thresholded_physics",
                 qs_threshold=1.0,
                 boozer_threshold=1.0,
                 iota_penalty_threshold=None,

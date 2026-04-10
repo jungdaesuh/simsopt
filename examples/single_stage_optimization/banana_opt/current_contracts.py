@@ -10,6 +10,7 @@ CurrentInputSource = Literal["physical_A", "raw_boozer_I", "default_zero"]
 FiniteCurrentMode = Literal["boozer_surrogate", "disabled"]
 EffectiveCurrentMode = Literal["vacuum", "boozer_surrogate"]
 CURRENT_MODE_ZERO_TOL = 1e-12
+BANANA_CURRENT_HARD_LIMIT_A = 16000.0
 
 
 @dataclass(frozen=True)

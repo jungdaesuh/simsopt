@@ -9,6 +9,108 @@ from functools import partial
 
 __all__ = ['BoozerSurface']
 
+_BOOZER_RESIDUAL_CALL_MODE = None
+_BOOZER_RESIDUAL_DS_CALL_MODE = None
+_BOOZER_RESIDUAL_DS2_CALL_MODE = None
+
+
+def _explicit_current_transform(I, size):
+    transform = np.eye(size)
+    transform[-1, -2] = I
+    return transform
+
+
+def _alpha_only_to_explicit_current_gradient(I, gradient):
+    return _explicit_current_transform(I, gradient.shape[0]).T @ gradient
+
+
+def _alpha_only_to_explicit_current_hessian(I, hessian):
+    transform = _explicit_current_transform(I, hessian.shape[0])
+    return transform.T @ hessian @ transform
+
+
+def _call_boozer_residual(alpha, G, I, iota, xphi, xtheta, B, weight_inv_modB):
+    global _BOOZER_RESIDUAL_CALL_MODE
+    if _BOOZER_RESIDUAL_CALL_MODE == "with_I":
+        return sopp.boozer_residual(G, I, iota, xphi, xtheta, B, weight_inv_modB)
+    if _BOOZER_RESIDUAL_CALL_MODE == "alpha_only":
+        return sopp.boozer_residual(alpha, iota, xphi, xtheta, B, weight_inv_modB)
+    try:
+        value = sopp.boozer_residual(G, I, iota, xphi, xtheta, B, weight_inv_modB)
+    except TypeError as exc:
+        if "incompatible function arguments" not in str(exc):
+            raise
+        _BOOZER_RESIDUAL_CALL_MODE = "alpha_only"
+        return sopp.boozer_residual(alpha, iota, xphi, xtheta, B, weight_inv_modB)
+    _BOOZER_RESIDUAL_CALL_MODE = "with_I"
+    return value
+
+
+def _call_boozer_residual_ds(
+    alpha, G, I, iota, B, dB_dx, xphi, xtheta, dx_ds, dxphi_ds, dxtheta_ds, weight_inv_modB
+):
+    global _BOOZER_RESIDUAL_DS_CALL_MODE
+    if _BOOZER_RESIDUAL_DS_CALL_MODE == "with_I":
+        return sopp.boozer_residual_ds(
+            G, I, iota, B, dB_dx, xphi, xtheta, dx_ds, dxphi_ds, dxtheta_ds, weight_inv_modB
+        )
+    if _BOOZER_RESIDUAL_DS_CALL_MODE == "alpha_only":
+        value, gradient = sopp.boozer_residual_ds(
+            alpha, iota, B, dB_dx, xphi, xtheta, dx_ds, dxphi_ds, dxtheta_ds, weight_inv_modB
+        )
+        return value, _alpha_only_to_explicit_current_gradient(I, gradient)
+    try:
+        value = sopp.boozer_residual_ds(
+            G, I, iota, B, dB_dx, xphi, xtheta, dx_ds, dxphi_ds, dxtheta_ds, weight_inv_modB
+        )
+    except TypeError as exc:
+        if "incompatible function arguments" not in str(exc):
+            raise
+        _BOOZER_RESIDUAL_DS_CALL_MODE = "alpha_only"
+        value, gradient = sopp.boozer_residual_ds(
+            alpha, iota, B, dB_dx, xphi, xtheta, dx_ds, dxphi_ds, dxtheta_ds, weight_inv_modB
+        )
+        return value, _alpha_only_to_explicit_current_gradient(I, gradient)
+    _BOOZER_RESIDUAL_DS_CALL_MODE = "with_I"
+    return value
+
+
+def _call_boozer_residual_ds2(
+    alpha, G, I, iota, B, dB_dx, d2B_dx2, xphi, xtheta, dx_ds, dxphi_ds, dxtheta_ds, weight_inv_modB
+):
+    global _BOOZER_RESIDUAL_DS2_CALL_MODE
+    if _BOOZER_RESIDUAL_DS2_CALL_MODE == "with_I":
+        return sopp.boozer_residual_ds2(
+            G, I, iota, B, dB_dx, d2B_dx2, xphi, xtheta, dx_ds, dxphi_ds, dxtheta_ds, weight_inv_modB
+        )
+    if _BOOZER_RESIDUAL_DS2_CALL_MODE == "alpha_only":
+        value, gradient, hessian = sopp.boozer_residual_ds2(
+            alpha, iota, B, dB_dx, d2B_dx2, xphi, xtheta, dx_ds, dxphi_ds, dxtheta_ds, weight_inv_modB
+        )
+        return (
+            value,
+            _alpha_only_to_explicit_current_gradient(I, gradient),
+            _alpha_only_to_explicit_current_hessian(I, hessian),
+        )
+    try:
+        value = sopp.boozer_residual_ds2(
+            G, I, iota, B, dB_dx, d2B_dx2, xphi, xtheta, dx_ds, dxphi_ds, dxtheta_ds, weight_inv_modB
+        )
+    except TypeError as exc:
+        if "incompatible function arguments" not in str(exc):
+            raise
+        _BOOZER_RESIDUAL_DS2_CALL_MODE = "alpha_only"
+        value, gradient, hessian = sopp.boozer_residual_ds2(
+            alpha, iota, B, dB_dx, d2B_dx2, xphi, xtheta, dx_ds, dxphi_ds, dxtheta_ds, weight_inv_modB
+        )
+        return (
+            value,
+            _alpha_only_to_explicit_current_gradient(I, gradient),
+            _alpha_only_to_explicit_current_hessian(I, hessian),
+        )
+    _BOOZER_RESIDUAL_DS2_CALL_MODE = "with_I"
+    return value
+
 
 class BoozerSurface(Optimizable):
     r"""
@@ -376,14 +478,19 @@ class BoozerSurface(Optimizable):
             d2B_by_dXdX = biotsavart.d2B_by_dXdX().reshape((nphi, ntheta, 3, 3, 3))
 
         num_res = 3 * s.quadpoints_phi.size * s.quadpoints_theta.size
+        alpha = G + iota * self.I
         if derivatives == 0:
-            val = sopp.boozer_residual(G, self.I, iota, xphi, xtheta, B, weight_inv_modB)
+            val = _call_boozer_residual(alpha, G, self.I, iota, xphi, xtheta, B, weight_inv_modB)
             boozer = val,
         elif derivatives == 1:
-            val, dval = sopp.boozer_residual_ds(G, self.I, iota, B, dB_dx, xphi, xtheta, dx_dc, dxphi_dc, dxtheta_dc, weight_inv_modB)
+            val, dval = _call_boozer_residual_ds(
+                alpha, G, self.I, iota, B, dB_dx, xphi, xtheta, dx_dc, dxphi_dc, dxtheta_dc, weight_inv_modB
+            )
             boozer = val, dval
         elif derivatives == 2:
-            val, dval, d2val = sopp.boozer_residual_ds2(G, self.I, iota, B, dB_dx, d2B_by_dXdX, xphi, xtheta, dx_dc, dxphi_dc, dxtheta_dc, weight_inv_modB)
+            val, dval, d2val = _call_boozer_residual_ds2(
+                alpha, G, self.I, iota, B, dB_dx, d2B_by_dXdX, xphi, xtheta, dx_dc, dxphi_dc, dxtheta_dc, weight_inv_modB
+            )
             boozer = val, dval, d2val
 
         # normalizing the residuals here

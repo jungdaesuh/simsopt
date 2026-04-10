@@ -5,7 +5,8 @@ This directory contains the current banana-coil workflow stack for this reposito
 - Stage 2 coil optimization in [STAGE_2/banana_coil_solver.py](STAGE_2/banana_coil_solver.py)
 - single-stage Boozer / quasi-symmetry optimization in [SINGLE_STAGE/single_stage_banana_example.py](SINGLE_STAGE/single_stage_banana_example.py)
 - wrapper workflows in [run_80ka_baseline_tradeoff_sweep.py](run_80ka_baseline_tradeoff_sweep.py) and [run_finite_current_smoke.py](run_finite_current_smoke.py)
-- targeted ALM rerun wrapper in [run_nfp10_gil_alm_rerun.py](run_nfp10_gil_alm_rerun.py)
+- generic Stage 2 ALM wrapper in [run_stage2_alm.py](run_stage2_alm.py)
+- generic single-stage ALM rerun wrapper in [run_single_stage_thresholded_physics_alm.py](run_single_stage_thresholded_physics_alm.py)
 - optional field-line / Poincare diagnostics in [POINCARE_PLOTTING/poincare_surfaces.py](POINCARE_PLOTTING/poincare_surfaces.py)
 
 The codebase has evolved beyond the older "edit script constants and rerun" model. Use CLI flags or environment variables, not source edits, for normal operation.
@@ -28,11 +29,15 @@ There are two supported wrapper entrypoints for most day-to-day work:
    This is a finite-current surrogate smoke harness.
    It reuses one frozen coil-only Stage 2 artifact and varies only `--plasma-current-A` through the single-stage surrogate path.
 
-There is also one targeted rerun wrapper for the current NFP10 ALM investigation:
+There are two wrapper entrypoints for the general ALM workflow:
 
-3. `run_nfp10_gil_alm_rerun.py`
-   This is a current-branch single-stage ALM lane for the `desc_s024match` NFP10 iota-20 family.
-   It pins `--constraint-method alm`, `--alm-formulation gil`, explicit physics thresholds, and warning-mode hardware handling so ALM can see hardware violations instead of hard-rejecting them.
+3. `run_stage2_alm.py`
+   This ensures a Stage 2 ALM artifact from either a named built-in profile or a full explicit Stage 2 spec JSON.
+   It resolves the full Stage 2 config before launching, pins `--constraint-method alm`, and records the resolved config in the summary output.
+
+4. `run_single_stage_thresholded_physics_alm.py`
+   This is the generic single-stage ALM rerun lane.
+   It requires an explicit Stage 2 artifact plus an explicit plasma surface, pins `--constraint-method alm`, `--alm-formulation thresholded_physics`, and warning-mode hardware handling, and validates that the Stage 2 artifact matches the requested plasma surface before launch.
 
 ## Branch Scope
 
@@ -68,7 +73,8 @@ examples/single_stage_optimization/
 ├── workflow_runner_common.py
 ├── run_80ka_baseline_tradeoff_sweep.py
 ├── run_finite_current_smoke.py
-└── run_nfp10_gil_alm_rerun.py
+├── run_stage2_alm.py
+└── run_single_stage_thresholded_physics_alm.py
 ```
 
 ## Prerequisites
@@ -126,26 +132,50 @@ Useful notes:
 - output root defaults to `examples/single_stage_optimization/outputs_finite_current_smoke`
 - this is a surrogate smoke harness, not a self-consistent finite-current equilibrium workflow
 
-### Targeted NFP10 GIL ALM Rerun
+### Stage 2 ALM Wrapper
 
-Use this when you want the concrete NFP10 single-stage ALM lane discussed in the current audit:
+Use this when you want a general Stage 2 ALM artifact with a small wrapper surface:
 
-- requires an explicit Stage 2 artifact path
-- forces `--alm-formulation gil`
-- forces warning-mode hardware handling for ALM because single-surface ALM keeps `gate_scale=1.0`, so adaptive mode would fall back to hard rejection
-- writes a compact rerun summary JSON in addition to the normal single-stage artifacts
+- requires `--plasma-surf-filename`
+- requires exactly one of `--profile` or `--stage2-spec-json`
+- allows a small set of direct CLI overrides for `--cc-threshold`, `--curvature-threshold`, `--order`, and `--tf-current-A`
+- writes a compact summary JSON that includes the fully resolved Stage 2 config
 
 ```bash
 cd /path/to/simsopt-surrogate
-python examples/single_stage_optimization/run_nfp10_gil_alm_rerun.py \
+python examples/single_stage_optimization/run_stage2_alm.py \
+  --plasma-surf-filename wout_nfp10ginsburg_desc_s024match_iota20.nc \
+  --profile standard_80ka
+```
+
+Useful notes:
+
+- output root defaults to `examples/single_stage_optimization/outputs_stage2_alm`
+- `--stage2-spec-json` is the fully explicit path for non-profile Stage 2 contracts
+- `--dry-run` prints and records the resolved config and exact Stage 2 command without launching it
+
+### Single-Stage Thresholded-Physics ALM Rerun
+
+Use this when you want a general single-stage ALM rerun from an explicit Stage 2 artifact:
+
+- requires `--plasma-surf-filename`
+- requires `--stage2-bs-path`
+- forces `--alm-formulation thresholded_physics`
+- forces warning-mode hardware handling for ALM because single-surface ALM keeps `gate_scale=1.0`, so adaptive mode would fall back to hard rejection
+- validates that the Stage 2 artifact matches the requested plasma surface before launch
+
+```bash
+cd /path/to/simsopt-surrogate
+python examples/single_stage_optimization/run_single_stage_thresholded_physics_alm.py \
+  --plasma-surf-filename wout_nfp10ginsburg_desc_s024match_iota20.nc \
   --stage2-bs-path /full/path/to/biot_savart_opt.json
 ```
 
 Useful notes:
 
-- output root defaults to `examples/single_stage_optimization/outputs_nfp10_gil_alm_rerun`
-- all `gil` thresholds and ALM trust-region settings remain CLI-overridable
-- `--dry-run` prints and records the exact single-stage command without launching it
+- output root defaults to `examples/single_stage_optimization/outputs_single_stage_thresholded_physics_alm`
+- all `thresholded_physics` thresholds and ALM trust-region settings remain CLI-overridable
+- `--dry-run` still validates the Stage 2 artifact metadata and prints the exact single-stage command
 
 ## Manual Stage 2
 
@@ -251,7 +281,7 @@ python single_stage_banana_example.py \
 ALM operational note:
 
 - single-stage ALM now writes `alm_state.partial.json` inside the run directory at outer-loop transitions and after each recorded ALM history event, so stalled or interrupted runs still leave penalty / multiplier / feasibility diagnostics
-- when you are using `--constraint-method alm` in the current single-surface workflow, use `--hardware-search-mode warn` or the dedicated `run_nfp10_gil_alm_rerun.py` wrapper so trial states can expose constraint violations to ALM instead of being hard-rejected immediately
+- when you are using `--constraint-method alm` in the current single-surface workflow, use `--hardware-search-mode warn` or the dedicated `run_single_stage_thresholded_physics_alm.py` wrapper so trial states can expose constraint violations to ALM instead of being hard-rejected immediately
 
 Current high-level flag groups:
 

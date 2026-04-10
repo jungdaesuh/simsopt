@@ -69,6 +69,7 @@ def build_stage2_seed_spec(config: Stage2ArtifactConfig) -> Stage2SeedSpec:
         tf_current_A=config.tf_current_A,
         order=config.order,
         banana_init_current_A=config.banana_init_current_A,
+        banana_current_max_A=config.banana_current_max_A,
     )
 
 

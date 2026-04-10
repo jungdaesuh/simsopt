@@ -13,13 +13,14 @@ from workflow_runner_common import (  # noqa: E402
     SINGLE_STAGE_SCRIPT_PATH,
     discover_single_results_path,
     load_json,
+    load_stage2_artifact_results,
     run_command,
     snapshot_single_results_paths,
 )
+from banana_opt.artifact_contracts import upgrade_legacy_stage2_artifact_results  # noqa: E402
 
-DEFAULT_PLASMA_SURF_FILENAME = "wout_nfp10ginsburg_desc_s024match_iota20.nc"
-DEFAULT_OUTPUT_ROOT = SCRIPT_DIR / "outputs_nfp10_gil_alm_rerun"
-DEFAULT_SUMMARY_JSON = "nfp10_gil_alm_summary.json"
+DEFAULT_OUTPUT_ROOT = SCRIPT_DIR / "outputs_single_stage_thresholded_physics_alm"
+DEFAULT_SUMMARY_JSON = "single_stage_thresholded_physics_alm_summary.json"
 DEFAULT_HARDWARE_SEARCH_MODE = "warn"
 DEFAULT_ALM_QS_THRESHOLD = 3.0e-3
 DEFAULT_ALM_BOOZER_THRESHOLD = 1.0e-2
@@ -40,20 +41,21 @@ def _resolved_optional_path(raw_path: str | Path | None) -> Path | None:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Run the recommended current-branch NFP10 single-stage ALM rerun "
-            "using the gil formulation and explicit physics thresholds."
+            "Run a single-stage ALM rerun using the thresholded_physics formulation "
+            "on top of an explicit Stage 2 artifact."
         )
     )
     parser.add_argument("--python-executable", default=sys.executable)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument(
-        "--stage2-bs-path",
+        "--plasma-surf-filename",
         required=True,
-        help="Path to the Stage 2 biot_savart_opt.json or equivalent seed artifact.",
+        help="VMEC wout filename used as the single-stage target surface.",
     )
     parser.add_argument(
-        "--plasma-surf-filename",
-        default=DEFAULT_PLASMA_SURF_FILENAME,
+        "--stage2-bs-path",
+        required=True,
+        help="Path to the Stage 2 biot_savart_opt.json seed artifact.",
     )
     parser.add_argument("--equilibria-dir", default=None)
     parser.add_argument(
@@ -122,15 +124,37 @@ def _timeout_or_none(timeout_seconds: float) -> float | None:
     return None if timeout_seconds <= 0.0 else float(timeout_seconds)
 
 
-def build_nfp10_gil_command(args: argparse.Namespace) -> list[str]:
+def load_validated_stage2_seed_metadata(args: argparse.Namespace) -> tuple[Path, dict]:
+    stage2_bs_path = _resolved_path(args.stage2_bs_path)
+    stage2_results_path, stage2_results = load_stage2_artifact_results(stage2_bs_path)
+    stage2_results = upgrade_legacy_stage2_artifact_results(stage2_results)
+    actual_surface = stage2_results.get("PLASMA_SURF_FILENAME")
+    expected_surface = Path(args.plasma_surf_filename).name
+    if actual_surface is None:
+        raise ValueError(
+            f"Stage 2 artifact results.json is missing PLASMA_SURF_FILENAME: {stage2_results_path}"
+        )
+    if Path(str(actual_surface)).name != expected_surface:
+        raise ValueError(
+            "Stage 2 artifact surface mismatch: "
+            f"--plasma-surf-filename requests {expected_surface!r}, but "
+            f"{stage2_results_path} reports {actual_surface!r}."
+        )
+    return stage2_results_path, stage2_results
+
+
+def build_single_stage_thresholded_physics_command(
+    args: argparse.Namespace,
+) -> list[str]:
     stage2_bs_path = _resolved_path(args.stage2_bs_path)
     output_root = _resolved_path(args.output_root)
     equilibria_dir = _resolved_optional_path(args.equilibria_dir)
+    plasma_surf_filename = Path(args.plasma_surf_filename).name
     command = [
         args.python_executable,
         str(SINGLE_STAGE_SCRIPT_PATH),
         "--plasma-surf-filename",
-        args.plasma_surf_filename,
+        plasma_surf_filename,
         "--stage2-bs-path",
         str(stage2_bs_path),
         "--output-root",
@@ -160,7 +184,7 @@ def build_nfp10_gil_command(args: argparse.Namespace) -> list[str]:
         "--constraint-method",
         "alm",
         "--alm-formulation",
-        "gil",
+        "thresholded_physics",
         "--alm-max-outer-iters",
         str(args.alm_max_outer_iters),
         "--alm-max-subproblem-continuations",
@@ -205,14 +229,18 @@ def build_summary(
     args: argparse.Namespace,
     command: list[str],
     *,
+    stage2_results_path: Path,
+    stage2_results: dict,
     results_path: Path | None = None,
     results: dict | None = None,
 ) -> dict:
     stage2_bs_path = _resolved_path(args.stage2_bs_path)
     output_root = _resolved_path(args.output_root)
     summary = {
-        "plasma_surf_filename": args.plasma_surf_filename,
+        "plasma_surf_filename": Path(args.plasma_surf_filename).name,
         "stage2_bs_path": str(stage2_bs_path),
+        "stage2_results_path": str(stage2_results_path),
+        "stage2_artifact_plasma_surf_filename": stage2_results.get("PLASMA_SURF_FILENAME"),
         "output_root": str(output_root),
         "command": command,
         "dry_run": bool(args.dry_run),
@@ -241,16 +269,22 @@ def build_summary(
 
 def main() -> int:
     args = parse_args()
+    stage2_results_path, stage2_results = load_validated_stage2_seed_metadata(args)
     output_root = _resolved_path(args.output_root)
     output_root.mkdir(parents=True, exist_ok=True)
-    command = build_nfp10_gil_command(args)
+    command = build_single_stage_thresholded_physics_command(args)
     summary_path = _resolved_optional_path(args.summary_json)
     if summary_path is None:
         summary_path = output_root / DEFAULT_SUMMARY_JSON
     summary_path.parent.mkdir(parents=True, exist_ok=True)
 
     if args.dry_run:
-        summary = build_summary(args, command)
+        summary = build_summary(
+            args,
+            command,
+            stage2_results_path=stage2_results_path,
+            stage2_results=stage2_results,
+        )
     else:
         previous_snapshot = snapshot_single_results_paths(output_root)
         run_command(
@@ -265,6 +299,8 @@ def main() -> int:
         summary = build_summary(
             args,
             command,
+            stage2_results_path=stage2_results_path,
+            stage2_results=stage2_results,
             results_path=results_path,
             results=results,
         )

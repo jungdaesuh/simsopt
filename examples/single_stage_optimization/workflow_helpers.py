@@ -23,6 +23,7 @@ class Stage2SeedSpec:
     tf_current_A: float
     order: int
     banana_init_current_A: float = 1.0e4
+    banana_current_max_A: float = 1.6e4
 
 
 @dataclass(frozen=True)
@@ -48,6 +49,7 @@ def format_local_stage2_seed_dir(spec: Stage2SeedSpec) -> str:
         f"-CT={format_compact_float(spec.curvature_threshold)}"
         f"-SR={spec.banana_surf_radius:0.3f}"
         f"-INITC={format_compact_float(spec.banana_init_current_A)}"
+        f"-MAXC={format_compact_float(spec.banana_current_max_A)}"
         f"-TFC={format_compact_float(spec.tf_current_A)}"
         f"-Order={spec.order}"
     )

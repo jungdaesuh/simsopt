@@ -3,10 +3,20 @@ import hashlib
 import os
 import io
 import json
+import sys
 from dataclasses import astuple, dataclass
 from types import SimpleNamespace
 import numpy as np
 from scipy.optimize import minimize
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+EXAMPLE_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, ".."))
+if EXAMPLE_ROOT not in sys.path:
+    sys.path.insert(0, EXAMPLE_ROOT)
+
+from import_provenance import configure_local_simsopt_imports
+
+EXAMPLE_ROOT, SIMSOPT_ROOT, SRC_ROOT = configure_local_simsopt_imports(__file__)
 
 # SIMSOPT imports
 from simsopt._core.optimizable import Optimizable
@@ -43,11 +53,6 @@ from simsopt.objectives.utilities import forward_backward
 from simsopt._core.optimizable import load
 from simsopt._core.derivative import derivative_dec
 
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-EXAMPLE_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, ".."))
-
-import sys
-sys.path.insert(0, EXAMPLE_ROOT)
 from alm_utils import (
     ALMSettings,
     minimize_alm,
@@ -120,7 +125,6 @@ from banana_opt.single_stage_objectives import (
     evaluate_total_objective as _evaluate_total_objective_impl,
     evaluate_alm_objective as _evaluate_alm_objective_impl,
 )
-SIMSOPT_ROOT = os.path.abspath(os.path.join(EXAMPLE_ROOT, "..", ".."))
 REPO_ROOT = os.path.abspath(os.path.join(SIMSOPT_ROOT, ".."))
 DATABASE_EQUILIBRIA_DIR = os.path.join(REPO_ROOT, "DATABASE", "EQUILIBRIA")
 DEFAULT_EQUILIBRIA_DIR = DATABASE_EQUILIBRIA_DIR if os.path.isdir(DATABASE_EQUILIBRIA_DIR) else os.path.join(EXAMPLE_ROOT, "equilibria")
@@ -135,7 +139,7 @@ SINGLE_STAGE_ALM_GEOMETRY_CONSTRAINT_NAMES = (
     "max_curvature",
     "surface_vessel_spacing",
 )
-SINGLE_STAGE_GIL_PHYSICS_CONSTRAINT_NAMES = (
+SINGLE_STAGE_THRESHOLDED_PHYSICS_CONSTRAINT_NAMES = (
     "qs_error",
     "boozer_residual",
     "iota_penalty",
@@ -718,7 +722,7 @@ def parse_args():
         "--constraint-method",
         choices=["penalty", "alm"],
         default=os.environ.get("CONSTRAINT_METHOD", "penalty"),
-        help="Use the legacy weighted-penalty objective or the augmented Lagrangian outer loop.",
+        help="Use the weighted-penalty objective or the augmented Lagrangian outer loop.",
     )
     parser.add_argument(
         "--alm-max-outer-iters",
@@ -800,24 +804,25 @@ def parse_args():
     )
     parser.add_argument(
         "--alm-formulation",
-        choices=["legacy", "gil"],
-        default=os.environ.get("ALM_FORMULATION", "legacy"),
+        choices=["weighted_sum", "thresholded_physics"],
+        default=os.environ.get("ALM_FORMULATION", "weighted_sum"),
         help=(
-            "ALM objective assembly. 'legacy' keeps physics terms in the base objective; "
-            "'gil' uses a dummy zero objective and promotes physics terms to inequality constraints."
+            "ALM objective assembly. 'weighted_sum' keeps physics terms in the base objective; "
+            "'thresholded_physics' uses a dummy zero objective and promotes physics terms "
+            "to inequality constraints."
         ),
     )
     parser.add_argument(
         "--alm-qs-threshold",
         type=float,
         default=float(os.environ["ALM_QS_THRESHOLD"]) if "ALM_QS_THRESHOLD" in os.environ else None,
-        help="Gil-mode upper bound for the quasi-symmetry objective J_QS.",
+        help="thresholded_physics-mode upper bound for the quasi-symmetry objective J_QS.",
     )
     parser.add_argument(
         "--alm-boozer-threshold",
         type=float,
         default=float(os.environ["ALM_BOOZER_THRESHOLD"]) if "ALM_BOOZER_THRESHOLD" in os.environ else None,
-        help="Gil-mode upper bound for the Boozer residual objective.",
+        help="thresholded_physics-mode upper bound for the Boozer residual objective.",
     )
     parser.add_argument(
         "--alm-iota-penalty-threshold",
@@ -827,7 +832,7 @@ def parse_args():
             if "ALM_IOTA_PENALTY_THRESHOLD" in os.environ
             else None
         ),
-        help="Gil-mode upper bound for the Jiota penalty objective.",
+        help="thresholded_physics-mode upper bound for the Jiota penalty objective.",
     )
     parser.add_argument(
         "--alm-length-penalty-threshold",
@@ -837,7 +842,7 @@ def parse_args():
             if "ALM_LENGTH_PENALTY_THRESHOLD" in os.environ
             else None
         ),
-        help="Gil-mode upper bound for the single-stage length penalty objective.",
+        help="thresholded_physics-mode upper bound for the single-stage length penalty objective.",
     )
     parser.add_argument("--iota-target", type=float, default=float(os.environ.get("IOTA_TARGET", "0.15")))
     parser.add_argument("--num-tf-coils", type=int, default=int(os.environ.get("NUM_TF_COILS", "20")))
@@ -974,7 +979,6 @@ def parse_args():
         default=int(os.environ["STAGE2_SEED_ORDER"]) if "STAGE2_SEED_ORDER" in os.environ else None,
     )
     parser.add_argument(
-    parser.add_argument(
         "--stage2-seed-banana-init-current-A",
         type=float,
         default=(
@@ -983,6 +987,7 @@ def parse_args():
             else None
         ),
     )
+    parser.add_argument(
         "--checkpoint-every",
         type=int,
         default=int(os.environ.get("CHECKPOINT_EVERY", "0")),
@@ -1439,7 +1444,7 @@ def make_run_identity_config(
         refinement_max_stalled_chunks=args.refinement_max_stalled_chunks,
         constraint_weight=constraint_weight,
         constraint_method=constraint_method,
-        alm_formulation=getattr(args, "alm_formulation", "legacy"),
+        alm_formulation=getattr(args, "alm_formulation", "weighted_sum"),
         alm_qs_threshold=getattr(args, "alm_qs_threshold", None),
         alm_boozer_threshold=getattr(args, "alm_boozer_threshold", None),
         alm_iota_penalty_threshold=getattr(args, "alm_iota_penalty_threshold", None),
@@ -1535,10 +1540,12 @@ def validate_boozer_stage_refinement_args(args, constraint_weight):
 
 
 def validate_single_stage_alm_formulation_args(args):
-    if args.alm_formulation == "legacy":
+    if args.alm_formulation == "weighted_sum":
         return
     if args.constraint_method != "alm":
-        raise ValueError("--alm-formulation=gil requires --constraint-method=alm")
+        raise ValueError(
+            "--alm-formulation=thresholded_physics requires --constraint-method=alm"
+        )
 
     required_thresholds = {
         "--alm-qs-threshold": args.alm_qs_threshold,
@@ -1551,7 +1558,7 @@ def validate_single_stage_alm_formulation_args(args):
     ]
     if missing_thresholds:
         raise ValueError(
-            "Gil ALM formulation requires explicit thresholds for "
+            "thresholded_physics ALM formulation requires explicit thresholds for "
             + ", ".join(missing_thresholds)
         )
 
@@ -1560,7 +1567,7 @@ def validate_single_stage_alm_formulation_args(args):
     ]
     if negative_thresholds:
         raise ValueError(
-            "Gil ALM thresholds must be non-negative: "
+            "thresholded_physics ALM thresholds must be non-negative: "
             + ", ".join(negative_thresholds)
         )
 
@@ -1569,8 +1576,8 @@ def single_stage_alm_constraint_names(*, alm_formulation, include_surface_surfac
     names = list(SINGLE_STAGE_ALM_GEOMETRY_CONSTRAINT_NAMES[:3])
     if include_surface_surface:
         names.append(SINGLE_STAGE_ALM_GEOMETRY_CONSTRAINT_NAMES[3])
-    if alm_formulation == "gil":
-        names.extend(SINGLE_STAGE_GIL_PHYSICS_CONSTRAINT_NAMES)
+    if alm_formulation == "thresholded_physics":
+        names.extend(SINGLE_STAGE_THRESHOLDED_PHYSICS_CONSTRAINT_NAMES)
     return names
 
 
@@ -2034,7 +2041,9 @@ def evaluate_base_objective(
         IOTAS_WEIGHT,
         JCurveLength,
         LENGTH_WEIGHT,
-        alm_formulation=ALM_FORMULATION if CONSTRAINT_METHOD == "alm" else "legacy",
+        alm_formulation=(
+            ALM_FORMULATION if CONSTRAINT_METHOD == "alm" else "weighted_sum"
+        ),
     )
 
 
@@ -2761,7 +2770,7 @@ TOPOLOGY_GATE_TMAX = 2.0
 TOPOLOGY_GATE_TOL = 1e-7
 TOPOLOGY_GATE_SURVIVAL_THRESHOLD = 0.0
 CONSTRAINT_METHOD = "penalty"
-ALM_FORMULATION = "legacy"
+ALM_FORMULATION = "weighted_sum"
 ALM_MULTIPLIERS = np.zeros(0, dtype=float)
 ALM_PENALTY = 1.0
 CHECKPOINT_EVERY = 0

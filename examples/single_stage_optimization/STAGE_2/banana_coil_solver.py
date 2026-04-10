@@ -1,6 +1,16 @@
 import argparse
 import os
+import sys
 import numpy as np
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+EXAMPLE_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, ".."))
+if EXAMPLE_ROOT not in sys.path:
+    sys.path.insert(0, EXAMPLE_ROOT)
+
+from import_provenance import configure_local_simsopt_imports
+
+EXAMPLE_ROOT, SIMSOPT_ROOT, SRC_ROOT = configure_local_simsopt_imports(__file__)
 
 # SIMSOPT imports
 from scipy.optimize import minimize
@@ -16,11 +26,6 @@ from simsopt._core.optimizable import load
 from simsopt.objectives import SquaredFlux, QuadraticPenalty
 import json
 
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-EXAMPLE_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, ".."))
-
-import sys
-sys.path.insert(0, EXAMPLE_ROOT)
 from alm_utils import (
     minimize_alm,
     run_directional_taylor_test,
@@ -39,6 +44,7 @@ from banana_opt.stage2_geometry import (
     is_self_intersecting,
     magnetic_field_plots as _magnetic_field_plots,
 )
+from banana_opt.current_contracts import BANANA_CURRENT_HARD_LIMIT_A
 from banana_opt.stage2_objectives import (
     build_stage2_alm_settings,
     build_stage2_results as _build_stage2_results_impl,
@@ -50,7 +56,6 @@ from banana_opt.stage2_objectives import (
     stage2_constraint_activity_tolerances,
 )
 
-SIMSOPT_ROOT = os.path.abspath(os.path.join(EXAMPLE_ROOT, "..", ".."))
 REPO_ROOT = os.path.abspath(os.path.join(SIMSOPT_ROOT, ".."))
 DATABASE_EQUILIBRIA_DIR = os.path.join(REPO_ROOT, "DATABASE", "EQUILIBRIA")
 DEFAULT_EQUILIBRIA_DIR = DATABASE_EQUILIBRIA_DIR if os.path.isdir(DATABASE_EQUILIBRIA_DIR) else os.path.join(EXAMPLE_ROOT, "equilibria")
@@ -60,7 +65,6 @@ STAGE2_ALM_CONSTRAINT_NAMES = (
     "max_curvature",
     "banana_current_upper_bound",
 )
-BANANA_CURRENT_HARD_LIMIT_A = 16000.0
 
 
 def _print_taylor_test_summary(name: str, result: dict) -> None:
@@ -80,11 +84,11 @@ def validate_banana_current_cli_args(args) -> None:
     banana_current_max_A = float(args.banana_current_max_A)
     if not (0.0 < banana_init_current_A <= BANANA_CURRENT_HARD_LIMIT_A):
         raise ValueError(
-            "--banana-init-current-A must be in the interval (0, 16000]."
+            f"--banana-init-current-A must be in the interval (0, {BANANA_CURRENT_HARD_LIMIT_A:.0f}]."
         )
     if not (0.0 < banana_current_max_A <= BANANA_CURRENT_HARD_LIMIT_A):
         raise ValueError(
-            "--banana-current-max-A must be in the interval (0, 16000]."
+            f"--banana-current-max-A must be in the interval (0, {BANANA_CURRENT_HARD_LIMIT_A:.0f}]."
         )
     if banana_init_current_A > banana_current_max_A:
         raise ValueError(
@@ -655,6 +659,7 @@ def main(parsed_args=None):
         tf_current_A=tf_current_A,
         order=order,
         banana_init_current_A=initial_banana_current_A,
+        banana_current_max_A=float(args.banana_current_max_A),
     )
     OUT_DIR_ITER = (
         OUT_DIR

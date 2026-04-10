@@ -629,34 +629,26 @@ def topology_gate_rejection_increment(last_objective, status, penalty_scale):
 
 def save_surface_artifacts(surface_data, biotsavart, out_dir, stem, also_write_outer_legacy):
     outer_entry = surface_data[-1]
-    for entry in surface_data:
-        name = entry["name"]
-        path = os.path.join(out_dir, f"{stem}_{name}")
-        boozer_path = os.path.join(out_dir, f"{stem}_{name}_boozer_surface.json")
-        biotsavart.set_points(entry["boozer_surface"].surface.gamma().reshape((-1, 3)))
-        unitn = entry["boozer_surface"].surface.unitnormal()
+
+    def write_surface_artifact(entry, path_stem):
+        boozer_surface = entry["boozer_surface"]
+        surface = boozer_surface.surface
+        biotsavart.set_points(surface.gamma().reshape((-1, 3)))
+        unitn = surface.unitnormal()
+        field = biotsavart.B().reshape(unitn.shape)
         point_data = {
-            "B_N/B": np.sum(biotsavart.B().reshape(unitn.shape) * unitn, axis=2)[:, :, None]
-            / np.sqrt(np.sum(biotsavart.B().reshape(unitn.shape) ** 2, axis=2))[:, :, None]
+            "B_N/B": np.sum(field * unitn, axis=2)[:, :, None]
+            / np.sqrt(np.sum(field ** 2, axis=2))[:, :, None]
         }
-        entry["boozer_surface"].surface.to_vtk(path, extra_data=point_data)
-        entry["boozer_surface"].surface.save(path + ".json")
-        entry["boozer_surface"].save(boozer_path)
+        surface.to_vtk(path_stem, extra_data=point_data)
+        surface.save(path_stem + ".json")
+        boozer_surface.save(path_stem + "_boozer_surface.json")
+
+    for entry in surface_data:
+        write_surface_artifact(entry, os.path.join(out_dir, f"{stem}_{entry['name']}"))
 
     if also_write_outer_legacy:
-        legacy_path = os.path.join(out_dir, stem)
-        legacy_boozer_path = os.path.join(out_dir, f"{stem}_boozer_surface.json")
-        biotsavart.set_points(
-            outer_entry["boozer_surface"].surface.gamma().reshape((-1, 3))
-        )
-        unitn = outer_entry["boozer_surface"].surface.unitnormal()
-        point_data = {
-            "B_N/B": np.sum(biotsavart.B().reshape(unitn.shape) * unitn, axis=2)[:, :, None]
-            / np.sqrt(np.sum(biotsavart.B().reshape(unitn.shape) ** 2, axis=2))[:, :, None]
-        }
-        outer_entry["boozer_surface"].surface.to_vtk(legacy_path, extra_data=point_data)
-        outer_entry["boozer_surface"].surface.save(legacy_path + ".json")
-        outer_entry["boozer_surface"].save(legacy_boozer_path)
+        write_surface_artifact(outer_entry, os.path.join(out_dir, stem))
 
 
 def collect_surface_run_metadata(

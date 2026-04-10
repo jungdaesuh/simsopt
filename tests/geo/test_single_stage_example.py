@@ -546,7 +546,7 @@ class SingleStageExampleTests(unittest.TestCase):
             parent.mkdir(parents=True)
             matched = (
                 parent
-                / "R0=0.915-s=0.24-LW=0.0005-CCW=100-CCT=0.05-CW=0.0001-CT=40-SR=0.220-INITC=10000-TFC=80000-Order=2-CM=penalty-BH=3"
+                / "R0=0.915-s=0.24-LW=0.0005-CCW=100-CCT=0.05-CW=0.0001-CT=40-SR=0.220-INITC=10000-MAXC=16000-TFC=80000-Order=2-CM=penalty-BH=3"
                 / "biot_savart_opt.json"
             )
             matched.parent.mkdir(parents=True)
@@ -585,7 +585,7 @@ class SingleStageExampleTests(unittest.TestCase):
                     parent
                     / (
                         "R0=0.915-s=0.24-LW=0.0005-CCW=100-CCT=0.05-CW=0.0001-CT=40-"
-                        f"SR=0.220-INITC=10000-TFC=80000-Order=2{suffix}"
+                        f"SR=0.220-INITC=10000-MAXC=16000-TFC=80000-Order=2{suffix}"
                     )
                     / "biot_savart_opt.json"
                 )
@@ -3322,7 +3322,7 @@ class CurrentBaselineContractTests(unittest.TestCase):
             outputs_dir = Path(tmpdir) / "outputs-demo.nc"
             current_dir = (
                 outputs_dir
-                / "R0=0.915-s=0.24-LW=0.0005-CCW=100-CCT=0.05-CW=0.0001-CT=40-SR=0.220-INITC=10000-TFC=80000-Order=2-CM=penalty"
+                / "R0=0.915-s=0.24-LW=0.0005-CCW=100-CCT=0.05-CW=0.0001-CT=40-SR=0.220-INITC=10000-MAXC=16000-TFC=80000-Order=2-CM=penalty"
             )
             current_dir.mkdir(parents=True)
             expected_path = current_dir / "biot_savart_opt.json"

@@ -235,10 +235,10 @@ def stage2_constraint_activity_tolerances(
     banana_current_tolerance: float = 1e-3,
 ):
     return [
-        float(length_tolerance),
+        length_tolerance,
         max(4.0 * float(distance_smoothing), _SMOOTHING_EPS),
         max(4.0 * float(curvature_smoothing), _SMOOTHING_EPS),
-        float(banana_current_tolerance),
+        banana_current_tolerance,
     ]
 
 

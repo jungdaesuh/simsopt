@@ -67,7 +67,9 @@ def _objective_gradient(objective, objective_optimizable=None):
 
 def _objective_upper_bound_constraint(objective, threshold, objective_optimizable):
     if threshold is None:
-        raise ValueError("Gil ALM formulation requires explicit objective thresholds")
+        raise ValueError(
+            "thresholded_physics ALM formulation requires explicit objective thresholds"
+        )
     signed_value = float(objective.J()) - float(threshold)
     grad = _objective_gradient(objective, objective_optimizable)
     return signed_value, grad, max(0.0, signed_value)
@@ -148,7 +150,7 @@ def evaluate_base_objective(
     LENGTH_WEIGHT,
     *,
     objective_optimizable=None,
-    alm_formulation="legacy",
+    alm_formulation="weighted_sum",
     _surface_pair=None,
 ):
     if _surface_pair is not None:
@@ -163,10 +165,10 @@ def evaluate_base_objective(
     )
     physics_total = float(base_objective.J())
     base_grad = _objective_gradient(base_objective, objective_optimizable)
-    if alm_formulation == "gil":
+    if alm_formulation == "thresholded_physics":
         total = 0.0
         grad = np.zeros_like(base_grad)
-    elif alm_formulation == "legacy":
+    elif alm_formulation == "weighted_sum":
         total = physics_total
         grad = base_grad
     else:
@@ -221,7 +223,7 @@ def evaluate_alm_objective(
     surface_surface_constraint_fn=None,
     augmented_inequality_objective_fn=augmented_inequality_objective,
     activity_tolerances_fn=single_stage_constraint_activity_tolerances,
-    alm_formulation="legacy",
+    alm_formulation="weighted_sum",
     qs_threshold=None,
     boozer_threshold=None,
     iota_penalty_threshold=None,
@@ -297,7 +299,7 @@ def evaluate_alm_objective(
         feasibility_values.append(surface_surface_violation)
 
     n_physics_constraints = 0
-    if alm_formulation == "gil":
+    if alm_formulation == "thresholded_physics":
         physics_constraints = [
             _objective_upper_bound_constraint(
                 J_QS_obj,
@@ -323,7 +325,7 @@ def evaluate_alm_objective(
         n_physics_constraints = len(physics_constraints)
         if len(constraint_names) < len(active_constraint_names) + n_physics_constraints:
             raise ValueError(
-                f"Gil ALM formulation requires {n_physics_constraints} additional "
+                f"thresholded_physics ALM formulation requires {n_physics_constraints} additional "
                 "physics constraint names"
             )
         for constraint_name, (signed_value, grad, violation) in zip(

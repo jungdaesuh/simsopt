@@ -18,6 +18,29 @@ __all__ = ['Area', 'Volume', 'ToroidalFlux', 'PrincipalCurvature',
            'MajorRadius', 'NonQuasiSymmetricRatio', 'SurfaceSurfaceDistance',
            'BoozerResidual', 'AspectRatio']
 
+_BOOZER_DRESIDUAL_DC_CALL_MODE = None
+
+
+def _call_boozer_dresidual_dc(alpha, G, I, dB_dc, B, tang, B2, dxphi_dc, iota, dxtheta_dc):
+    global _BOOZER_DRESIDUAL_DC_CALL_MODE
+    if _BOOZER_DRESIDUAL_DC_CALL_MODE == "with_I":
+        return sopp.boozer_dresidual_dc(G, I, dB_dc, B, tang, B2, dxphi_dc, iota, dxtheta_dc)
+    if _BOOZER_DRESIDUAL_DC_CALL_MODE == "alpha_only":
+        return sopp.boozer_dresidual_dc(alpha, dB_dc, B, tang, B2, dxphi_dc, iota, dxtheta_dc)
+    try:
+        dresidual_dc = sopp.boozer_dresidual_dc(
+            G, I, dB_dc, B, tang, B2, dxphi_dc, iota, dxtheta_dc
+        )
+    except TypeError as exc:
+        if "incompatible function arguments" not in str(exc):
+            raise
+        _BOOZER_DRESIDUAL_DC_CALL_MODE = "alpha_only"
+        return sopp.boozer_dresidual_dc(
+            alpha, dB_dc, B, tang, B2, dxphi_dc, iota, dxtheta_dc
+        )
+    _BOOZER_DRESIDUAL_DC_CALL_MODE = "with_I"
+    return dresidual_dc
+
 class AspectRatio(Optimizable):
     """
     Wrapper class for surface aspect ratio.
@@ -424,7 +447,18 @@ def boozer_surface_residual(surface, iota, G, biotsavart, derivatives=0, weight_
     dB_dc = np.einsum('ijkl,ijkm->ijlm', dB_by_dX, dx_dc)
 
     # dresidual_dc = G*dB_dc - 2*np.sum(B[..., None]*dB_dc, axis=2)[:, :, None, :] * tang[..., None] - B2[..., None, None] * (dxphi_dc + iota * dxtheta_dc)
-    dresidual_dc = sopp.boozer_dresidual_dc(G, I, dB_dc, B, tang, B2, dxphi_dc, iota, dxtheta_dc)
+    dresidual_dc = _call_boozer_dresidual_dc(
+        alpha,
+        G,
+        I,
+        dB_dc,
+        B,
+        tang,
+        B2,
+        dxphi_dc,
+        iota,
+        dxtheta_dc,
+    )
     dresidual_diota = I * B - B2[..., None] * xtheta
 
     if weight_inv_modB:
@@ -1149,7 +1183,7 @@ def boozer_surface_dexactresidual_dcoils_dcurrents_vjp(lm, booz_surf, iota, G):
 
 
 def boozer_surface_dlsqgrad_dcoils_vjp(lm, booz_surf, iota, G, weight_inv_modB=True):
-    """
+    r"""
     For a given surface with points x on it, this function computes the
     vector-Jacobian product of \lm^T * dlsqgrad_dcoils, \lm^T * dlsqgrad_dcurrents:
     lm^T dresidual_dcoils    = lm^T [dr_dsurface]^T[dr_dcoils]    + sum r_i lm^T d2ri_dsdc
