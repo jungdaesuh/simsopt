@@ -1,5 +1,6 @@
 import importlib.util
 from contextlib import ExitStack
+import json
 import os
 import sys
 import tempfile
@@ -1308,6 +1309,119 @@ class HardwareConstraintTests(unittest.TestCase):
         run_dict["accepted_hardware_status"] = {"success": True, "violations": []}
         self.assertTrue(module.refinement_eligible_incumbent(run_dict))
 
+    def test_refinement_eligible_incumbent_returns_python_bool(self):
+        module = load_single_stage_example_module()
+        run_dict = {
+            "search_eval": {"total": 4.0},
+            "surface_status": {"success": True},
+            "accepted_hardware_status": {"success": True, "violations": []},
+            "intersecting": False,
+        }
+
+        result = module.refinement_eligible_incumbent(run_dict)
+
+        self.assertIs(type(result), bool)
+        self.assertTrue(result)
+
+    def test_write_json_artifact_normalizes_numpy_scalars(self):
+        module = load_single_stage_example_module()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            artifact_path = Path(tmpdir) / "results.json"
+            module.write_json_artifact(
+                str(artifact_path),
+                {
+                    "FINAL_FEASIBILITY_OK": np.bool_(True),
+                    "SEARCH_OBJECTIVE_J": np.float64(1.25),
+                    "INVALID_STATE_REJECTS_TOTAL": np.int64(3),
+                    "FINAL_SEARCH_SURFACE_WEIGHTS": np.array([1.0, 0.5]),
+                    "nested": {
+                        "success": np.bool_(False),
+                        "violations": [np.str_("cc")],
+                    },
+                },
+            )
+
+            payload = json.loads(artifact_path.read_text(encoding="utf-8"))
+
+        self.assertIs(payload["FINAL_FEASIBILITY_OK"], True)
+        self.assertEqual(payload["SEARCH_OBJECTIVE_J"], 1.25)
+        self.assertEqual(payload["INVALID_STATE_REJECTS_TOTAL"], 3)
+        self.assertEqual(payload["FINAL_SEARCH_SURFACE_WEIGHTS"], [1.0, 0.5])
+        self.assertIs(payload["nested"]["success"], False)
+        self.assertEqual(payload["nested"]["violations"], ["cc"])
+
+    def test_append_jsonl_artifact_rewrites_archive_without_partial_lines(self):
+        module = load_single_stage_example_module()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            archive_path = Path(tmpdir) / "topology_archive.jsonl"
+            archive_path.write_text('{"accepted_iteration": 0}\n', encoding="utf-8")
+
+            module.append_jsonl_artifact(
+                str(archive_path),
+                {"accepted_iteration": np.int64(1), "weights": np.array([1.0, 0.5])},
+            )
+
+            payloads = [
+                json.loads(line)
+                for line in archive_path.read_text(encoding="utf-8").splitlines()
+            ]
+
+        self.assertEqual(
+            payloads,
+            [
+                {"accepted_iteration": 0},
+                {"accepted_iteration": 1, "weights": [1.0, 0.5]},
+            ],
+        )
+
+    def test_normalize_optimizer_termination_message_enriches_blank_abnormal(self):
+        module = load_single_stage_example_module()
+
+        message = module.normalize_optimizer_termination_message(
+            "ABNORMAL: ",
+            success=False,
+            status=np.int64(8),
+            invalid_state_rejects_total=np.int64(29),
+            surface_solve_rejects=np.int64(29),
+            hardware_rejects=np.int64(0),
+            topology_gate_rejects=np.int64(0),
+        )
+
+        self.assertEqual(
+            message,
+            "ABNORMAL: empty SciPy L-BFGS-B task; status=8; "
+            "invalid_state_rejects=29; surface_solve_rejects=29; "
+            "hardware_rejects=0; topology_gate_rejects=0",
+        )
+
+    def test_normalize_optimizer_termination_message_decodes_bytes_abnormal(self):
+        module = load_single_stage_example_module()
+
+        message = module.normalize_optimizer_termination_message(
+            b"ABNORMAL: ",
+            success=False,
+            status=8,
+            invalid_state_rejects_total=11,
+        )
+
+        self.assertEqual(
+            message,
+            "ABNORMAL: empty SciPy L-BFGS-B task; status=8; invalid_state_rejects=11",
+        )
+
+    def test_normalize_optimizer_termination_message_preserves_non_abnormal_text(self):
+        module = load_single_stage_example_module()
+
+        message = module.normalize_optimizer_termination_message(
+            "STOP: TOTAL NO. OF ITERATIONS REACHED LIMIT",
+            success=False,
+            status=5,
+        )
+
+        self.assertEqual(message, "STOP: TOTAL NO. OF ITERATIONS REACHED LIMIT")
+
     def test_maybe_update_best_feasible_incumbent_uses_search_total_metric(self):
         module = load_single_stage_example_module()
         run_dict = {
@@ -1342,6 +1456,224 @@ class HardwareConstraintTests(unittest.TestCase):
         self.assertTrue(module.maybe_update_best_feasible_incumbent(run_dict, "final"))
         self.assertEqual(run_dict["best_feasible_metric"], 3.0)
         self.assertEqual(run_dict["best_feasible_stage"], "final")
+
+    def test_maybe_update_best_accepted_incumbent_tracks_valid_nonself_intersecting_states(self):
+        module = load_single_stage_example_module()
+        run_dict = {
+            "accepted_x": np.array([1.0, 2.0]),
+            "surface_state": {"sdofs": [np.array([1.0])], "iota": [0.15], "G": [1.0]},
+            "J": 4.0,
+            "dJ": np.array([1.0, -1.0]),
+            "search_eval": {"total": 4.0, "surface_weights": np.array([1.0])},
+            "surface_status": {"success": True},
+            "search_surface_status": {"success": True},
+            "accepted_hardware_status": {"success": False, "violations": ["max_curvature"]},
+            "topology_gate_status": {"enabled": False, "success": True},
+            "intersecting": False,
+            "best_accepted_incumbent": None,
+            "best_accepted_metric": None,
+            "best_accepted_stage": None,
+        }
+
+        self.assertTrue(module.maybe_update_best_accepted_incumbent(run_dict, "initial"))
+        self.assertEqual(run_dict["best_accepted_metric"], 4.0)
+        self.assertEqual(run_dict["best_accepted_stage"], "initial")
+        np.testing.assert_allclose(run_dict["best_accepted_incumbent"].x, [1.0, 2.0])
+
+        run_dict["search_eval"] = {"total": 5.0, "surface_weights": np.array([1.0])}
+        run_dict["J"] = 5.0
+        self.assertFalse(module.maybe_update_best_accepted_incumbent(run_dict, "middle"))
+        self.assertEqual(run_dict["best_accepted_metric"], 4.0)
+
+        run_dict["intersecting"] = True
+        run_dict["search_eval"] = {"total": 3.0, "surface_weights": np.array([1.0])}
+        run_dict["J"] = 3.0
+        self.assertFalse(module.maybe_update_best_accepted_incumbent(run_dict, "final"))
+        self.assertEqual(run_dict["best_accepted_metric"], 4.0)
+
+    def test_write_preserved_timeout_artifacts_uses_kind_specific_filenames(self):
+        module = load_single_stage_example_module()
+
+        class FakeBiotSavart:
+            def __init__(self):
+                self.saved = []
+
+            def save(self, path):
+                self.saved.append(path)
+
+        class FakeSurface:
+            def __init__(self):
+                self.saved = []
+
+            def save(self, path):
+                self.saved.append(path)
+
+        class FakeBoozerSurface:
+            def __init__(self):
+                self.surface = FakeSurface()
+                self.saved = []
+
+            def save(self, path):
+                self.saved.append(path)
+
+        fake_bs = FakeBiotSavart()
+        fake_outer = FakeBoozerSurface()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out_dir = Path(tmpdir)
+            payload = {"FIELD_ERROR": 0.01}
+            module.write_preserved_timeout_artifacts(
+                out_dir,
+                preservation_kind="best_feasible",
+                results_payload=payload,
+                biotsavart=fake_bs,
+                surface_data=[{"name": "outer", "boozer_surface": fake_outer}],
+            )
+
+            partial_results = out_dir / "results_best_feasible.partial.json"
+            self.assertTrue(partial_results.exists())
+            self.assertEqual(json.loads(partial_results.read_text(encoding="utf-8")), payload)
+            self.assertEqual(fake_bs.saved, [str(out_dir / "biot_savart_best_feasible.json")])
+            self.assertEqual(
+                fake_outer.surface.saved,
+                [str(out_dir / "surf_best_feasible_outer.json")],
+            )
+            self.assertEqual(
+                fake_outer.saved,
+                [str(out_dir / "surf_best_feasible_outer_boozer_surface.json")],
+            )
+
+    def test_build_preserved_timeout_results_payload_includes_replay_metadata(self):
+        module = load_single_stage_example_module()
+        replay_config = module.PreservedTimeoutReplayConfig(
+            plasma_surf_filename="wout_test.nc",
+            plasma_surf_path="/equilibria/wout_test.nc",
+            stage2_bs_path="/seeds/biot_savart_opt.json",
+            stage2_results_path="/seeds/results.json",
+            mpol=8,
+            ntor=6,
+            nphi=127,
+            ntheta=32,
+            constraint_weight=1.0,
+            constraint_method="penalty",
+            alm_formulation="weighted_sum",
+            max_iterations=30,
+            target_volume=0.10,
+            target_iota=0.15,
+        )
+        run_dict = {
+            "search_eval": {
+                "total": 7.5e-4,
+                "base_total": 7.4e-4,
+            },
+            "J": 7.5e-4,
+            "intersecting": False,
+            "surface_status": {"success": True},
+            "accepted_hardware_status": {"success": False},
+            "topology_gate_status": {"success": True},
+        }
+        payload = module.build_preserved_timeout_results_payload(
+            replay_config=replay_config,
+            preservation_kind="best_accepted",
+            incumbent_stage="initial",
+            run_dict=run_dict,
+            objective_eval={"J_QS": 2.7e-4, "J_Boozer": 4.8e-7},
+            field_error=3.5e-4,
+            final_iota=0.14997,
+            final_volume=0.09998,
+            hardware_snapshot={
+                "status": {"success": False, "violations": ["coil_coil_min_dist"]},
+                "max_curvature": 19.8,
+                "curve_curve_min_dist": 0.0496,
+                "curve_surface_min_dist": 0.067,
+                "surface_vessel_min_dist": 0.082,
+            },
+            coil_length=2.91,
+            accepted_iteration=1,
+        )
+
+        self.assertEqual(payload["PLASMA_SURF_PATH"], "/equilibria/wout_test.nc")
+        self.assertEqual(payload["STAGE2_BS_PATH"], "/seeds/biot_savart_opt.json")
+        self.assertEqual(payload["STAGE2_RESULTS_PATH"], "/seeds/results.json")
+        self.assertEqual(payload["mpol"], 8)
+        self.assertEqual(payload["ntor"], 6)
+        self.assertEqual(payload["nphi"], 127)
+        self.assertEqual(payload["ntheta"], 32)
+        self.assertEqual(payload["CONSTRAINT_WEIGHT"], 1.0)
+        self.assertEqual(payload["max_iterations"], 30)
+        self.assertEqual(payload["TARGET_VOLUME"], 0.10)
+        self.assertEqual(payload["TARGET_IOTA"], 0.15)
+        self.assertEqual(payload["FINAL_SOURCE_STAGE"], payload["PRESERVED_TIMEOUT_SALVAGE_STAGE"])
+
+    def test_build_preserved_timeout_results_payload_includes_alm_runtime_state(self):
+        module = load_single_stage_example_module()
+        replay_config = module.PreservedTimeoutReplayConfig(
+            plasma_surf_filename="wout_test.nc",
+            plasma_surf_path="/equilibria/wout_test.nc",
+            stage2_bs_path="/seeds/biot_savart_opt.json",
+            stage2_results_path="/seeds/results.json",
+            mpol=8,
+            ntor=6,
+            nphi=127,
+            ntheta=32,
+            constraint_weight=1.0,
+            constraint_method="alm",
+            alm_formulation="weighted_sum",
+            max_iterations=30,
+            target_volume=0.10,
+            target_iota=0.15,
+        )
+        run_dict = {
+            "search_eval": {
+                "total": 9.5e-4,
+                "base_total": 8.1e-4,
+                "max_feasibility_violation": 4.0e-3,
+                "metric_stationarity_norm": 7.5e-5,
+                "constraint_values": np.array([1.0e-3, -2.0e-4]),
+            },
+            "J": 9.5e-4,
+            "intersecting": False,
+            "surface_status": {"success": True},
+            "accepted_hardware_status": {"success": True, "violations": []},
+            "topology_gate_status": {"success": True},
+            "alm_outer_iteration": 3,
+            "alm_feasibility_tolerance": 1.0e-4,
+            "alm_stationarity_tolerance": 2.0e-4,
+        }
+        payload = module.build_preserved_timeout_results_payload(
+            replay_config=replay_config,
+            preservation_kind="best_feasible",
+            incumbent_stage="final",
+            run_dict=run_dict,
+            objective_eval={"J_QS": 1.7e-4, "J_Boozer": 8.0e-7},
+            field_error=2.5e-4,
+            final_iota=0.151,
+            final_volume=0.101,
+            hardware_snapshot={
+                "status": {"success": True, "violations": []},
+                "max_curvature": 18.2,
+                "curve_curve_min_dist": 0.051,
+                "curve_surface_min_dist": 0.068,
+                "surface_vessel_min_dist": 0.084,
+            },
+            coil_length=2.85,
+            accepted_iteration=4,
+            alm_runtime_state=module.build_preserved_timeout_alm_state(
+                constraint_method="alm",
+                penalty=12.5,
+                multipliers=np.array([0.25, -0.75]),
+            ),
+        )
+
+        self.assertEqual(payload["ALM_FORMULATION"], "weighted_sum")
+        self.assertEqual(payload["ALM_OUTER_ITERATIONS"], 3)
+        self.assertEqual(payload["ALM_FINAL_PENALTY"], 12.5)
+        self.assertEqual(payload["ALM_FINAL_MULTIPLIERS"], [0.25, -0.75])
+        self.assertEqual(payload["ALM_FINAL_CONSTRAINT_VALUES"], [1.0e-3, -2.0e-4])
+        self.assertEqual(payload["ALM_FINAL_FEASIBILITY_TOL"], 1.0e-4)
+        self.assertEqual(payload["ALM_FINAL_STATIONARITY_TOL"], 2.0e-4)
+        self.assertEqual(payload["ALM_FINAL_MAX_FEASIBILITY_VIOLATION"], 4.0e-3)
+        self.assertEqual(payload["ALM_FINAL_STATIONARITY_NORM"], 7.5e-5)
 
     def test_validate_boozer_stage_refinement_args_rejects_unsupported_scope(self):
         module = load_single_stage_example_module()
@@ -1651,6 +1983,9 @@ class HardwareConstraintTests(unittest.TestCase):
             def unitnormal(self):
                 return np.array([[[1.0, 0.0, 0.0]]])
 
+            def save(self, path):
+                self._saved_path = path
+
         class _ScalarObjective:
             def __init__(self, value):
                 self._value = value
@@ -1687,6 +2022,9 @@ class HardwareConstraintTests(unittest.TestCase):
             def B(self):
                 return np.array([[1.0, 0.0, 0.0]])
 
+            def save(self, path):
+                self._saved_path = path
+
         surface = _Surface()
         surface_entry = {
             "name": "outer",
@@ -1695,6 +2033,7 @@ class HardwareConstraintTests(unittest.TestCase):
             "boozer_surface": SimpleNamespace(
                 surface=surface,
                 res={"success": True, "iota": TEST_IOTA, "G": TEST_G0},
+                save=lambda path: None,
             ),
         }
         objective_eval = {
@@ -1897,6 +2236,31 @@ class HardwareConstraintTests(unittest.TestCase):
 
         self.assertEqual(bounds, [(-10.0, 5.0), (-np.inf, 50.0)])
 
+    def test_build_local_relative_bounds_clips_to_anchor_box_and_global_bounds(self):
+        module = self.load_module()
+
+        bounds = module.build_local_relative_bounds(
+            np.array([10.0, -2.0]),
+            0.1,
+            np.array([9.5, -10.0]),
+            np.array([12.0, -1.5]),
+        )
+
+        self.assertEqual(bounds, [(9.5, 11.0), (-2.2, -1.8)])
+
+    def test_build_scaled_local_outer_bounds_transforms_local_box(self):
+        module = self.load_module()
+
+        bounds = module.build_scaled_local_outer_bounds(
+            np.array([10.0, 20.0]),
+            0.5,
+            np.array([8.0, 18.0]),
+            np.array([15.0, 30.0]),
+            0.1,
+        )
+
+        self.assertEqual(bounds, [(-2.0, 2.0), (-4.0, 4.0)])
+
     def test_resolve_initial_step_phase_maxiter(self):
         module = self.load_module()
 
@@ -1904,6 +2268,157 @@ class HardwareConstraintTests(unittest.TestCase):
         self.assertEqual(module.resolve_initial_step_phase_maxiter(40, 0.5, 0), 0)
         self.assertEqual(module.resolve_initial_step_phase_maxiter(40, 0.5, 10), 10)
         self.assertEqual(module.resolve_initial_step_phase_maxiter(5, 0.5, 10), 5)
+
+    def test_penalty_feasible_start_local_preservation_enabled(self):
+        module = self.load_module()
+        run_dict = {
+            "accepted_iterations": 0,
+            "accepted_hardware_status": {"success": True},
+            "surface_status": {"success": True},
+            "intersecting": False,
+            "search_eval": {"total": 1.0},
+        }
+
+        self.assertTrue(
+            module.penalty_feasible_start_local_preservation_enabled(
+                run_dict,
+                constraint_method="penalty",
+                num_surfaces=1,
+                basin_hops=0,
+                init_only=False,
+            )
+        )
+        self.assertFalse(
+            module.penalty_feasible_start_local_preservation_enabled(
+                run_dict,
+                constraint_method="penalty",
+                num_surfaces=2,
+                basin_hops=0,
+                init_only=False,
+            )
+        )
+
+    def test_resolve_penalty_phase1_settings_auto_enables_local_preservation(self):
+        module = self.load_module()
+
+        settings = module.resolve_penalty_phase1_settings(
+            40,
+            1.0,
+            0,
+            enable_local_preservation=True,
+        )
+
+        self.assertTrue(settings["use_phase1"])
+        self.assertTrue(settings["auto_enabled"])
+        self.assertTrue(settings["use_local_bounds"])
+        self.assertEqual(
+            settings["phase1_maxiter"],
+            min(40, module._PENALTY_FEASIBLE_START_LOCAL_MAXITER),
+        )
+        self.assertEqual(settings["phase1_scale"], 1.0)
+
+    def test_run_penalty_phase1_preserves_feasible_start_when_no_safe_step_exists(self):
+        module = self.load_module()
+        run_dict = {
+            "accepted_iterations": 0,
+            "accepted_x": np.array([1.0, -1.0]),
+            "invalid_state_rejects_total": 0,
+            "surface_solve_rejects": 0,
+            "hardware_rejects": 0,
+            "topology_gate_rejects": 0,
+        }
+        restore_calls = []
+
+        def fake_restore():
+            restore_calls.append(True)
+
+        def fake_minimize(*args, **kwargs):
+            return SimpleNamespace(nit=2, success=False, message="ABNORMAL_TERMINATION", status=2)
+
+        result = module.run_penalty_phase1(
+            np.array([1.0, -1.0]),
+            total_maxiter=4,
+            maxcor=5,
+            ftol=1e-15,
+            gtol=1e-15,
+            initial_step_scale=1.0,
+            initial_step_maxiter=0,
+            enable_local_preservation=True,
+            lower_bounds=np.array([-5.0, -5.0]),
+            upper_bounds=np.array([5.0, 5.0]),
+            run_dict=run_dict,
+            objective_fn=lambda x: (0.0, np.zeros_like(x)),
+            callback_fn=lambda x: None,
+            normalize_message_fn=lambda *args, **kwargs: "phase1_reject",
+            restore_accepted_state_fn=fake_restore,
+            minimize_fn=fake_minimize,
+        )
+
+        self.assertTrue(result["used_phase1"])
+        self.assertFalse(result["continue_search"])
+        self.assertTrue(result["local_preservation_used"])
+        self.assertTrue(result["local_preservation_preserved_start"])
+        self.assertGreaterEqual(result["local_preservation_attempts"], 1)
+        self.assertEqual(result["next_dofs"].tolist(), [1.0, -1.0])
+        self.assertGreaterEqual(len(restore_calls), 1)
+
+    def test_run_penalty_phase1_continues_after_local_acceptance(self):
+        module = self.load_module()
+        run_dict = {
+            "accepted_iterations": 0,
+            "accepted_x": np.array([1.0, -1.0]),
+            "invalid_state_rejects_total": 0,
+            "surface_solve_rejects": 0,
+            "hardware_rejects": 0,
+            "topology_gate_rejects": 0,
+        }
+
+        def fake_callback(x):
+            run_dict["accepted_iterations"] += 1
+            run_dict["accepted_x"] = np.asarray(x, dtype=float).copy()
+
+        def fake_minimize(fun, x0, **kwargs):
+            kwargs["callback"](np.array([1.05, -0.95]))
+            return SimpleNamespace(nit=1, success=True, message="CONVERGENCE", status=0)
+
+        result = module.run_penalty_phase1(
+            np.array([1.0, -1.0]),
+            total_maxiter=4,
+            maxcor=5,
+            ftol=1e-15,
+            gtol=1e-15,
+            initial_step_scale=1.0,
+            initial_step_maxiter=0,
+            enable_local_preservation=True,
+            lower_bounds=np.array([-5.0, -5.0]),
+            upper_bounds=np.array([5.0, 5.0]),
+            run_dict=run_dict,
+            objective_fn=lambda x: (0.0, np.zeros_like(x)),
+            callback_fn=fake_callback,
+            normalize_message_fn=lambda *args, **kwargs: "phase1_ok",
+            restore_accepted_state_fn=lambda: None,
+            minimize_fn=fake_minimize,
+        )
+
+        self.assertTrue(result["continue_search"])
+        self.assertFalse(result["local_preservation_preserved_start"])
+        np.testing.assert_allclose(result["next_dofs"], [1.05, -0.95])
+
+    def test_build_penalty_phase2_bounds_keeps_local_preservation_radius(self):
+        module = self.load_module()
+
+        bounds = module.build_penalty_phase2_bounds(
+            np.array([2.0, -4.0]),
+            lower_bounds=np.array([-10.0, -10.0]),
+            upper_bounds=np.array([10.0, 10.0]),
+            phase1_result={
+                "local_preservation_used": True,
+                "local_preservation_preserved_start": False,
+                "local_preservation_radius": 0.05,
+            },
+        )
+
+        self.assertEqual(bounds, [(1.9, 2.1), (-4.2, -3.8)])
 
     def test_evaluate_total_objective_uses_surface_weights_for_qs_and_boozer_terms(self):
         module = self.load_module()
@@ -2261,6 +2776,9 @@ class HardwareConstraintTests(unittest.TestCase):
             def cross_section(self, phi, thetas=None, tol=1e-13):
                 return self._cross_section
 
+            def save(self, path):
+                self._saved_path = path
+
         class _ScalarObjective:
             def __init__(self, value):
                 self._value = value
@@ -2309,10 +2827,21 @@ class HardwareConstraintTests(unittest.TestCase):
             def B(self):
                 return np.array([[1.0, 0.0, 0.0]])
 
+            def save(self, path):
+                self._saved_path = path
+
         inner_cs = [[0.85, 0.0, -0.1], [1.05, 0.0, -0.1], [1.05, 0.0, 0.1], [0.85, 0.0, 0.1]]
         outer_cs = [[0.7, 0.0, -0.3], [1.3, 0.0, -0.3], [1.3, 0.0, 0.3], [0.7, 0.0, 0.3]]
-        inner = SimpleNamespace(surface=_Surface(0.08, [0.0, 0.0, 0.0], inner_cs), res={"success": True, "iota": 0.12, "G": 1.0})
-        outer = SimpleNamespace(surface=_Surface(0.10, [0.4, 0.0, 0.0], outer_cs), res={"success": True, "iota": 0.15, "G": 1.1})
+        inner = SimpleNamespace(
+            surface=_Surface(0.08, [0.0, 0.0, 0.0], inner_cs),
+            res={"success": True, "iota": 0.12, "G": 1.0},
+            save=lambda path: None,
+        )
+        outer = SimpleNamespace(
+            surface=_Surface(0.10, [0.4, 0.0, 0.0], outer_cs),
+            res={"success": True, "iota": 0.15, "G": 1.1},
+            save=lambda path: None,
+        )
 
         with tempfile.TemporaryDirectory() as tmpdir:
             module.surface_data = [

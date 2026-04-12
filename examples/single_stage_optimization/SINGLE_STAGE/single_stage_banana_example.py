@@ -3,7 +3,9 @@ import hashlib
 import os
 import io
 import json
+import shutil
 import sys
+import tempfile
 from dataclasses import astuple, dataclass
 from types import SimpleNamespace
 import numpy as np
@@ -90,7 +92,9 @@ from banana_opt.incumbents import (
 )
 from banana_opt.reference_surfaces import build_banana_reference_surfaces
 from banana_opt.single_stage_geometry import (
+    build_local_relative_bounds,
     build_scaled_outer_bounds,
+    build_scaled_local_outer_bounds,
     build_scaled_outer_problem,
     build_scipy_bounds,
     build_surface_configs as _build_surface_configs_impl,
@@ -136,6 +140,18 @@ DEFAULT_DATABASE_STAGE2_ROOT = os.path.join(REPO_ROOT, "DATABASE", "COIL_OPTIMIZ
 DEFAULT_SINGLE_STAGE_OUTPUT_ROOT = os.path.join(SCRIPT_DIR, "outputs")
 DEFAULT_HARDWARE_SEARCH_MODE = "hard"
 DEFAULT_HARDWARE_SEARCH_SOFT_ITERATIONS = 0
+_PENALTY_FEASIBLE_START_LOCAL_MAXITER = int(
+    os.environ.get("PENALTY_FEASIBLE_START_LOCAL_MAXITER", "5")
+)
+_PENALTY_FEASIBLE_START_LOCAL_RELATIVE_RADIUS = float(
+    os.environ.get("PENALTY_FEASIBLE_START_LOCAL_RELATIVE_RADIUS", "0.05")
+)
+_PENALTY_FEASIBLE_START_LOCAL_MAX_ATTEMPTS = int(
+    os.environ.get("PENALTY_FEASIBLE_START_LOCAL_MAX_ATTEMPTS", "3")
+)
+_PENALTY_FEASIBLE_START_LOCAL_RADIUS_SHRINK = float(
+    os.environ.get("PENALTY_FEASIBLE_START_LOCAL_RADIUS_SHRINK", "0.5")
+)
 SINGLE_STAGE_ALM_GEOMETRY_CONSTRAINT_NAMES = (
     "coil_coil_spacing",
     "coil_surface_spacing",
@@ -1447,6 +1463,48 @@ class RunIdentityConfig:
     alm_curvature_smoothing: float
 
 
+@dataclass(frozen=True)
+class PreservedTimeoutReplayConfig:
+    plasma_surf_filename: str | None
+    plasma_surf_path: str | None
+    stage2_bs_path: str | None
+    stage2_results_path: str | None
+    mpol: int | None
+    ntor: int | None
+    nphi: int | None
+    ntheta: int | None
+    constraint_weight: float | None
+    constraint_method: str | None
+    alm_formulation: str | None
+    max_iterations: int | None
+    target_volume: float | None
+    target_iota: float | None
+
+
+@dataclass(frozen=True)
+class PreservedTimeoutALMState:
+    penalty: float
+    multipliers: np.ndarray
+
+
+PRESERVED_TIMEOUT_REPLAY_CONFIG = PreservedTimeoutReplayConfig(
+    plasma_surf_filename="",
+    plasma_surf_path="",
+    stage2_bs_path="",
+    stage2_results_path="",
+    mpol=0,
+    ntor=0,
+    nphi=0,
+    ntheta=0,
+    constraint_weight=None,
+    constraint_method="penalty",
+    alm_formulation=None,
+    max_iterations=0,
+    target_volume=0.0,
+    target_iota=0.0,
+)
+
+
 def make_run_identity_config(
     args,
     stage2_bs_path,
@@ -1657,23 +1715,40 @@ def final_topology_gate_for_results(init_only, num_surfaces, outer_surface, bfie
     return status
 
 
-def refinement_eligible_incumbent(run_dict):
-    hardware_status = run_dict.get("accepted_hardware_status")
+def preserved_incumbent_eligible(run_dict):
     surface_status = run_dict.get("surface_status")
     search_eval = run_dict.get("search_eval")
-    if hardware_status is None or not hardware_status.get("success", False):
-        return False
     if surface_status is None or not surface_status.get("success", False):
         return False
     if bool(run_dict.get("intersecting", False)):
         return False
     if search_eval is None or "total" not in search_eval:
         return False
-    return np.isfinite(float(search_eval["total"]))
+    return bool(np.isfinite(float(search_eval["total"])))
+
+
+def refinement_eligible_incumbent(run_dict):
+    hardware_status = run_dict.get("accepted_hardware_status")
+    if hardware_status is None or not hardware_status.get("success", False):
+        return False
+    return preserved_incumbent_eligible(run_dict)
 
 
 def accepted_search_metric(run_dict):
     return float(run_dict["search_eval"]["total"])
+
+
+def maybe_update_best_accepted_incumbent(run_dict, incumbent_stage):
+    if not preserved_incumbent_eligible(run_dict):
+        return False
+    metric = accepted_search_metric(run_dict)
+    best_metric = run_dict.get("best_accepted_metric")
+    if best_metric is not None and metric >= best_metric:
+        return False
+    run_dict["best_accepted_incumbent"] = snapshot_single_stage_incumbent_state(run_dict)
+    run_dict["best_accepted_metric"] = metric
+    run_dict["best_accepted_stage"] = str(incumbent_stage)
+    return True
 
 
 def maybe_update_best_feasible_incumbent(run_dict, incumbent_stage):
@@ -1701,6 +1776,41 @@ def frontier_goal_mode_warning_message(iotas_weight):
         "The frontier reward also has no built-in saturation cap, so early "
         "frontier weighted-sum ALM runs should be treated as exploratory."
     )
+
+
+def normalize_optimizer_termination_message(
+    message,
+    *,
+    success,
+    status=None,
+    invalid_state_rejects_total=None,
+    surface_solve_rejects=None,
+    hardware_rejects=None,
+    topology_gate_rejects=None,
+):
+    if message is None:
+        text = ""
+    elif isinstance(message, (bytes, bytearray)):
+        text = bytes(message).decode("utf-8", errors="replace")
+    else:
+        text = str(message)
+    if success:
+        return text
+    if text.strip() not in {"ABNORMAL:", "ABNORMAL"}:
+        return text
+
+    details = ["empty SciPy L-BFGS-B task"]
+    if status is not None:
+        details.append(f"status={int(status)}")
+    if invalid_state_rejects_total is not None:
+        details.append(f"invalid_state_rejects={int(invalid_state_rejects_total)}")
+    if surface_solve_rejects is not None:
+        details.append(f"surface_solve_rejects={int(surface_solve_rejects)}")
+    if hardware_rejects is not None:
+        details.append(f"hardware_rejects={int(hardware_rejects)}")
+    if topology_gate_rejects is not None:
+        details.append(f"topology_gate_rejects={int(topology_gate_rejects)}")
+    return f"ABNORMAL: {'; '.join(details)}"
 
 
 def build_single_stage_iota_objective(surface_iota_term, iota_target, *, goal_mode):
@@ -2158,6 +2268,311 @@ def current_optimizer_bounds():
     return build_scipy_bounds(JF.lower_bounds, JF.upper_bounds)
 
 
+def penalty_feasible_start_local_preservation_enabled(
+    run_dict,
+    *,
+    constraint_method,
+    num_surfaces,
+    basin_hops,
+    init_only,
+):
+    if constraint_method != "penalty":
+        return False
+    if init_only or basin_hops > 0 or num_surfaces != 1:
+        return False
+    if int(run_dict.get("accepted_iterations", 0)) != 0:
+        return False
+    return refinement_eligible_incumbent(run_dict)
+
+
+def resolve_penalty_phase1_settings(
+    total_maxiter,
+    initial_step_scale,
+    initial_step_maxiter,
+    *,
+    enable_local_preservation,
+):
+    explicit_phase1_maxiter = max(int(initial_step_maxiter), 0)
+    phase1_maxiter = resolve_initial_step_phase_maxiter(
+        total_maxiter,
+        initial_step_scale,
+        explicit_phase1_maxiter,
+    )
+    auto_enabled = False
+    phase1_scale = float(initial_step_scale)
+    if enable_local_preservation and phase1_maxiter == 0 and total_maxiter > 0:
+        fallback_maxiter = (
+            explicit_phase1_maxiter
+            if explicit_phase1_maxiter > 0
+            else _PENALTY_FEASIBLE_START_LOCAL_MAXITER
+        )
+        phase1_maxiter = min(total_maxiter, fallback_maxiter)
+        phase1_scale = 1.0
+        auto_enabled = True
+    use_phase1 = phase1_maxiter > 0
+    use_local_bounds = bool(enable_local_preservation and use_phase1)
+    return {
+        "use_phase1": use_phase1,
+        "phase1_maxiter": int(phase1_maxiter),
+        "phase1_scale": float(phase1_scale),
+        "auto_enabled": auto_enabled,
+        "use_local_bounds": use_local_bounds,
+        "local_relative_radius": (
+            float(_PENALTY_FEASIBLE_START_LOCAL_RELATIVE_RADIUS)
+            if use_local_bounds
+            else None
+        ),
+        "local_max_attempts": (
+            max(int(_PENALTY_FEASIBLE_START_LOCAL_MAX_ATTEMPTS), 1)
+            if use_local_bounds
+            else 1
+        ),
+    }
+
+
+def _build_penalty_phase1_result(
+    *,
+    used_phase1,
+    phase1_iterations,
+    phase1_termination_message,
+    phase1_success,
+    continue_search,
+    next_dofs,
+    local_preservation_used,
+    local_preservation_preserved_start,
+    local_preservation_attempts,
+    local_preservation_radius,
+):
+    return {
+        "used_phase1": bool(used_phase1),
+        "phase1_iterations": phase1_iterations,
+        "phase1_termination_message": phase1_termination_message,
+        "phase1_success": phase1_success,
+        "continue_search": bool(continue_search),
+        "next_dofs": np.asarray(next_dofs, dtype=float).copy(),
+        "local_preservation_used": bool(local_preservation_used),
+        "local_preservation_preserved_start": bool(
+            local_preservation_preserved_start
+        ),
+        "local_preservation_attempts": int(local_preservation_attempts),
+        "local_preservation_radius": local_preservation_radius,
+    }
+
+
+def _build_penalty_phase1_problem(
+    anchor_x,
+    *,
+    phase1_scale,
+    use_local_bounds,
+    local_radius,
+    lower_bounds,
+    upper_bounds,
+    objective_fn,
+    callback_fn,
+):
+    if phase1_scale < 1.0:
+        phase1_fun, phase1_callback = build_scaled_outer_problem(
+            objective_fn,
+            callback_fn,
+            anchor_x,
+            phase1_scale,
+        )
+        x0 = np.zeros_like(anchor_x)
+        bounds = (
+            build_scaled_local_outer_bounds(
+                anchor_x,
+                phase1_scale,
+                lower_bounds,
+                upper_bounds,
+                local_radius,
+            )
+            if use_local_bounds
+            else build_scaled_outer_bounds(
+                anchor_x,
+                phase1_scale,
+                lower_bounds,
+                upper_bounds,
+            )
+        )
+        return phase1_fun, phase1_callback, x0, bounds
+
+    bounds = (
+        build_local_relative_bounds(
+            anchor_x,
+            local_radius,
+            lower_bounds,
+            upper_bounds,
+        )
+        if use_local_bounds
+        else build_scipy_bounds(lower_bounds, upper_bounds)
+    )
+    return objective_fn, callback_fn, anchor_x.copy(), bounds
+
+
+def build_penalty_phase2_bounds(
+    anchor_x,
+    *,
+    lower_bounds,
+    upper_bounds,
+    phase1_result,
+):
+    if (
+        not phase1_result.get("local_preservation_used", False)
+        or phase1_result.get("local_preservation_preserved_start", False)
+    ):
+        return build_scipy_bounds(lower_bounds, upper_bounds)
+    return build_local_relative_bounds(
+        anchor_x,
+        phase1_result.get("local_preservation_radius"),
+        lower_bounds,
+        upper_bounds,
+    )
+
+
+def run_penalty_phase1(
+    dofs,
+    *,
+    total_maxiter,
+    maxcor,
+    ftol,
+    gtol,
+    initial_step_scale,
+    initial_step_maxiter,
+    enable_local_preservation,
+    lower_bounds,
+    upper_bounds,
+    run_dict,
+    objective_fn,
+    callback_fn,
+    normalize_message_fn,
+    restore_accepted_state_fn,
+    minimize_fn=minimize,
+):
+    settings = resolve_penalty_phase1_settings(
+        total_maxiter,
+        initial_step_scale,
+        initial_step_maxiter,
+        enable_local_preservation=enable_local_preservation,
+    )
+    if not settings["use_phase1"]:
+        return _build_penalty_phase1_result(
+            used_phase1=False,
+            phase1_iterations=None,
+            phase1_termination_message=None,
+            phase1_success=None,
+            continue_search=True,
+            next_dofs=dofs,
+            local_preservation_used=False,
+            local_preservation_preserved_start=False,
+            local_preservation_attempts=0,
+            local_preservation_radius=None,
+        )
+
+    phase1_iterations = 0
+    phase1_messages = []
+    remaining_maxiter = settings["phase1_maxiter"]
+    local_attempts_used = 0
+    local_radius = settings["local_relative_radius"]
+    accepted_before_phase1 = int(run_dict.get("accepted_iterations", 0))
+    phase1_success = False
+    last_result = None
+
+    while remaining_maxiter > 0:
+        local_attempts_used += 1
+        restore_accepted_state_fn()
+        anchor_x = np.asarray(run_dict["accepted_x"], dtype=float).copy()
+        phase1_scale = settings["phase1_scale"]
+        phase1_fun, phase1_callback, x0, bounds = _build_penalty_phase1_problem(
+            anchor_x,
+            phase1_scale=phase1_scale,
+            use_local_bounds=settings["use_local_bounds"],
+            local_radius=local_radius,
+            lower_bounds=lower_bounds,
+            upper_bounds=upper_bounds,
+            objective_fn=objective_fn,
+            callback_fn=callback_fn,
+        )
+
+        last_result = minimize_fn(
+            phase1_fun,
+            x0,
+            jac=True,
+            method="L-BFGS-B",
+            bounds=bounds,
+            callback=phase1_callback,
+            options={
+                "maxiter": remaining_maxiter,
+                "maxcor": maxcor,
+                "ftol": ftol,
+                "gtol": gtol,
+            },
+        )
+        phase1_iterations += int(last_result.nit)
+        remaining_maxiter = max(settings["phase1_maxiter"] - phase1_iterations, 0)
+        phase1_success = bool(last_result.success)
+        attempt_message = normalize_message_fn(
+            last_result.message,
+            success=phase1_success,
+            status=getattr(last_result, "status", None),
+            invalid_state_rejects_total=run_dict["invalid_state_rejects_total"],
+            surface_solve_rejects=run_dict["surface_solve_rejects"],
+            hardware_rejects=run_dict["hardware_rejects"],
+            topology_gate_rejects=run_dict["topology_gate_rejects"],
+        )
+        phase1_messages.append(
+            f"attempt{local_attempts_used}={attempt_message}"
+            if settings["use_local_bounds"]
+            else attempt_message
+        )
+        if int(run_dict.get("accepted_iterations", 0)) > accepted_before_phase1:
+            return _build_penalty_phase1_result(
+                used_phase1=True,
+                phase1_iterations=phase1_iterations,
+                phase1_termination_message="; ".join(phase1_messages),
+                phase1_success=phase1_success,
+                continue_search=True,
+                next_dofs=run_dict["accepted_x"],
+                local_preservation_used=settings["use_local_bounds"],
+                local_preservation_preserved_start=False,
+                local_preservation_attempts=local_attempts_used,
+                local_preservation_radius=local_radius,
+            )
+        if not settings["use_local_bounds"]:
+            break
+        if local_attempts_used >= settings["local_max_attempts"]:
+            break
+        local_radius *= _PENALTY_FEASIBLE_START_LOCAL_RADIUS_SHRINK
+
+    restore_accepted_state_fn()
+    if settings["use_local_bounds"]:
+        phase1_messages.append("preserved_feasible_start_no_safe_local_step")
+        return _build_penalty_phase1_result(
+            used_phase1=True,
+            phase1_iterations=phase1_iterations,
+            phase1_termination_message="; ".join(phase1_messages),
+            phase1_success=False,
+            continue_search=False,
+            next_dofs=run_dict["accepted_x"],
+            local_preservation_used=True,
+            local_preservation_preserved_start=True,
+            local_preservation_attempts=local_attempts_used,
+            local_preservation_radius=local_radius,
+        )
+
+    return _build_penalty_phase1_result(
+        used_phase1=True,
+        phase1_iterations=phase1_iterations,
+        phase1_termination_message="; ".join(phase1_messages),
+        phase1_success=phase1_success,
+        continue_search=True,
+        next_dofs=run_dict["accepted_x"],
+        local_preservation_used=False,
+        local_preservation_preserved_start=False,
+        local_preservation_attempts=0,
+        local_preservation_radius=None,
+    )
+
+
 def evaluate_total_objective(
     surface_weights,
     nonQSs,
@@ -2280,7 +2695,7 @@ def evaluate_alm_objective(
 
 
 def evaluate_search_objective(surface_weights):
-    if CONSTRAINT_METHOD == "alm":
+    if globals().get("CONSTRAINT_METHOD") == "alm":
         return evaluate_alm_objective(
             surface_weights,
             nonQSs,
@@ -2341,16 +2756,269 @@ def build_single_stage_alm_settings(args):
     )
 
 
-def _jsonable_alm_state(value):
+def _jsonable_value(value):
     if isinstance(value, np.ndarray):
-        return value.tolist()
+        return _jsonable_value(value.tolist())
     if isinstance(value, np.generic):
         return value.item()
     if isinstance(value, dict):
-        return {str(key): _jsonable_alm_state(item) for key, item in value.items()}
+        return {str(key): _jsonable_value(item) for key, item in value.items()}
     if isinstance(value, (list, tuple)):
-        return [_jsonable_alm_state(item) for item in value]
+        return [_jsonable_value(item) for item in value]
     return value
+
+
+def _jsonable_alm_state(value):
+    return _jsonable_value(value)
+
+
+def write_json_artifact(path, payload):
+    temp_path = f"{path}.tmp"
+    with open(temp_path, "w", encoding="utf-8") as outfile:
+        json.dump(_jsonable_value(payload), outfile, indent=2)
+    os.replace(temp_path, path)
+
+
+def append_jsonl_artifact(path, payload):
+    archive_path = os.path.abspath(path)
+    serialized = json.dumps(_jsonable_value(payload)) + "\n"
+    with tempfile.NamedTemporaryFile(
+        "w",
+        encoding="utf-8",
+        dir=os.path.dirname(archive_path),
+        prefix=f".{os.path.basename(archive_path)}.",
+        suffix=".tmp",
+        delete=False,
+    ) as outfile:
+        temp_path = outfile.name
+        if os.path.exists(archive_path):
+            with open(archive_path, encoding="utf-8") as infile:
+                shutil.copyfileobj(infile, outfile)
+        outfile.write(serialized)
+        outfile.flush()
+        os.fsync(outfile.fileno())
+    os.replace(temp_path, archive_path)
+
+
+def build_preserved_timeout_alm_state(
+    *,
+    constraint_method,
+    penalty,
+    multipliers,
+) -> PreservedTimeoutALMState | None:
+    if constraint_method != "alm":
+        return None
+    return PreservedTimeoutALMState(
+        penalty=float(penalty),
+        multipliers=np.asarray(multipliers, dtype=float).copy(),
+    )
+
+
+def current_preserved_timeout_alm_state() -> PreservedTimeoutALMState | None:
+    return build_preserved_timeout_alm_state(
+        constraint_method=PRESERVED_TIMEOUT_REPLAY_CONFIG.constraint_method,
+        penalty=ALM_PENALTY,
+        multipliers=ALM_MULTIPLIERS,
+    )
+
+
+def current_preserved_timeout_replay_config() -> PreservedTimeoutReplayConfig:
+    replay_config = globals().get("PRESERVED_TIMEOUT_REPLAY_CONFIG", PRESERVED_TIMEOUT_REPLAY_CONFIG)
+    stage2_bs_path = globals().get("stage2_bs_path")
+    stage2_results_path = globals().get("stage2_results_path")
+    return PreservedTimeoutReplayConfig(
+        plasma_surf_filename=globals().get("plasma_surf_filename", replay_config.plasma_surf_filename),
+        plasma_surf_path=globals().get("file_loc", replay_config.plasma_surf_path),
+        stage2_bs_path=(
+            replay_config.stage2_bs_path if stage2_bs_path is None else str(stage2_bs_path)
+        ),
+        stage2_results_path=(
+            replay_config.stage2_results_path if stage2_results_path is None else str(stage2_results_path)
+        ),
+        mpol=globals().get("mpol", replay_config.mpol),
+        ntor=globals().get("ntor", replay_config.ntor),
+        nphi=globals().get("nphi", replay_config.nphi),
+        ntheta=globals().get("ntheta", replay_config.ntheta),
+        constraint_weight=globals().get("CONSTRAINT_WEIGHT", replay_config.constraint_weight),
+        constraint_method=globals().get("CONSTRAINT_METHOD", replay_config.constraint_method),
+        alm_formulation=globals().get("ALM_FORMULATION", replay_config.alm_formulation),
+        max_iterations=globals().get("MAXITER", replay_config.max_iterations),
+        target_volume=globals().get("vol_target", replay_config.target_volume),
+        target_iota=globals().get("iota_target", replay_config.target_iota),
+    )
+
+
+_PRESERVED_TIMEOUT_RESULTS_FILENAMES = {
+    "best_feasible": "results_best_feasible.partial.json",
+    "best_accepted": "results_best_accepted.partial.json",
+}
+_PRESERVED_TIMEOUT_BS_FILENAMES = {
+    "best_feasible": "biot_savart_best_feasible.json",
+    "best_accepted": "biot_savart_best_accepted.json",
+}
+_PRESERVED_TIMEOUT_SURFACE_STEMS = {
+    "best_feasible": "surf_best_feasible",
+    "best_accepted": "surf_best_accepted",
+}
+
+
+def _preserved_timeout_artifact_name(names_by_kind, preservation_kind):
+    if preservation_kind not in names_by_kind:
+        raise ValueError(f"Unsupported preservation kind {preservation_kind!r}")
+    return names_by_kind[preservation_kind]
+
+
+def compute_surface_field_metrics(surf, bs):
+    if hasattr(surf, "normal"):
+        n = surf.normal()
+        absn = np.linalg.norm(n, axis=2)
+        unitn = n * (1.0 / absn)[:, :, None]
+    else:
+        unitn = surf.unitnormal()
+        absn = np.linalg.norm(unitn, axis=2)
+        unitn = unitn * (1.0 / absn)[:, :, None]
+    surf_area = absn.reshape((-1, 1)) / float(absn.size)
+    bs.set_points(surf.gamma().reshape((-1, 3)))
+    field = bs.B().reshape(unitn.shape)
+    bdotn = np.sum(field * unitn, axis=2)
+    modb = np.sqrt(np.sum(field**2, axis=2))
+    field_error = float(
+        np.sum(np.abs((bdotn / modb).reshape((-1, 1))) * surf_area) / np.sum(surf_area)
+    )
+    mean_abs_bdotn = float(np.mean(np.abs(bdotn)))
+    return field_error, mean_abs_bdotn
+
+
+def build_preserved_timeout_results_payload(
+    *,
+    replay_config: PreservedTimeoutReplayConfig | None = None,
+    preservation_kind,
+    incumbent_stage,
+    run_dict,
+    objective_eval,
+    field_error,
+    final_iota,
+    final_volume,
+    hardware_snapshot,
+    coil_length,
+    accepted_iteration,
+    alm_runtime_state: PreservedTimeoutALMState | None = None,
+):
+    """Build preserved-timeout results.
+
+    FINAL_SOURCE_STAGE and PRESERVED_TIMEOUT_SALVAGE_STAGE intentionally match
+    because preserved timeout artifacts snapshot the same incumbent stage rather
+    than a separate post-timeout refinement stage.
+    """
+    replay_config = current_preserved_timeout_replay_config() if replay_config is None else replay_config
+    search_eval = run_dict["search_eval"]
+    hardware_status = hardware_snapshot["status"]
+    source_stage = str(incumbent_stage)
+    payload = {
+        "PLASMA_SURF_FILENAME": replay_config.plasma_surf_filename,
+        "PLASMA_SURF_PATH": replay_config.plasma_surf_path,
+        "STAGE2_BS_PATH": replay_config.stage2_bs_path,
+        "STAGE2_RESULTS_PATH": replay_config.stage2_results_path,
+        "mpol": replay_config.mpol,
+        "ntor": replay_config.ntor,
+        "nphi": replay_config.nphi,
+        "ntheta": replay_config.ntheta,
+        "CONSTRAINT_WEIGHT": (
+            None if replay_config.constraint_weight is None else float(replay_config.constraint_weight)
+        ),
+        "CONSTRAINT_METHOD": replay_config.constraint_method,
+        "ALM_FORMULATION": (
+            replay_config.alm_formulation if replay_config.constraint_method == "alm" else None
+        ),
+        "init_only": False,
+        "max_iterations": replay_config.max_iterations,
+        "iterations": int(accepted_iteration),
+        "TARGET_VOLUME": (
+            None if replay_config.target_volume is None else float(replay_config.target_volume)
+        ),
+        "TARGET_IOTA": None if replay_config.target_iota is None else float(replay_config.target_iota),
+        "TERMINATION_MESSAGE": f"preserved_{preservation_kind}_partial",
+        "OPTIMIZER_SUCCESS": False,
+        "FINAL_SOURCE_STAGE": source_stage,
+        "FIELD_ERROR": float(field_error),
+        "OBJECTIVE_J": float(run_dict["J"]),
+        "BASE_OBJECTIVE_J": float(search_eval.get("base_total", search_eval["total"])),
+        "SEARCH_OBJECTIVE_J": float(search_eval["total"]),
+        "FINAL_IOTA": float(final_iota),
+        "FINAL_VOLUME": float(final_volume),
+        "FINAL_FEASIBILITY_OK": bool(refinement_eligible_incumbent(run_dict)),
+        "SELF_INTERSECTING": bool(run_dict["intersecting"]),
+        "MAX_CURVATURE": float(hardware_snapshot["max_curvature"]),
+        "COIL_LENGTH": float(coil_length),
+        "CURVE_CURVE_MIN_DIST": float(hardware_snapshot["curve_curve_min_dist"]),
+        "CURVE_SURFACE_MIN_DIST": float(hardware_snapshot["curve_surface_min_dist"]),
+        "SURFACE_VESSEL_MIN_DIST": hardware_snapshot["surface_vessel_min_dist"],
+        "HARDWARE_CONSTRAINTS_OK": bool(hardware_status["success"]),
+        "HARDWARE_CONSTRAINT_VIOLATIONS": hardware_status["violations"],
+        "FINAL_TOPOLOGY_GATE_SUCCESS": bool(run_dict["topology_gate_status"]["success"]),
+        "NONQS_RATIO": float(objective_eval["J_QS"]),
+        "BOOZER_RESIDUAL": float(objective_eval["J_Boozer"]),
+        "PRESERVED_TIMEOUT_SALVAGE_AVAILABLE": True,
+        "PRESERVED_TIMEOUT_SALVAGE_KIND": preservation_kind,
+        "PRESERVED_TIMEOUT_SALVAGE_STAGE": source_stage,
+    }
+    if replay_config.constraint_method == "alm":
+        if alm_runtime_state is None:
+            raise ValueError("alm_runtime_state is required when constraint_method='alm'")
+        payload.update(
+            {
+                "ALM_OUTER_ITERATIONS": run_dict.get("alm_outer_iteration"),
+                "ALM_FINAL_MAX_FEASIBILITY_VIOLATION": search_eval.get(
+                    "max_feasibility_violation",
+                    search_eval.get("max_violation"),
+                ),
+                "ALM_FINAL_STATIONARITY_NORM": search_eval.get(
+                    "metric_stationarity_norm",
+                    search_eval.get("stationarity_norm"),
+                ),
+                "ALM_FINAL_FEASIBILITY_TOL": run_dict.get("alm_feasibility_tolerance"),
+                "ALM_FINAL_STATIONARITY_TOL": run_dict.get("alm_stationarity_tolerance"),
+                "ALM_FINAL_PENALTY": float(alm_runtime_state.penalty),
+                "ALM_FINAL_MULTIPLIERS": np.asarray(
+                    alm_runtime_state.multipliers,
+                    dtype=float,
+                ).tolist(),
+                "ALM_FINAL_CONSTRAINT_VALUES": _jsonable_value(
+                    search_eval.get("constraint_values")
+                ),
+            }
+        )
+    return payload
+
+
+def write_preserved_timeout_artifacts(
+    out_dir,
+    *,
+    preservation_kind,
+    results_payload,
+    biotsavart,
+    surface_data,
+):
+    results_filename = _preserved_timeout_artifact_name(
+        _PRESERVED_TIMEOUT_RESULTS_FILENAMES,
+        preservation_kind,
+    )
+    bs_filename = _preserved_timeout_artifact_name(
+        _PRESERVED_TIMEOUT_BS_FILENAMES,
+        preservation_kind,
+    )
+    surface_stem = _preserved_timeout_artifact_name(
+        _PRESERVED_TIMEOUT_SURFACE_STEMS,
+        preservation_kind,
+    )
+    write_json_artifact(os.path.join(out_dir, results_filename), results_payload)
+    biotsavart.save(os.path.join(out_dir, bs_filename))
+    for entry in surface_data:
+        boozer_surface = entry["boozer_surface"]
+        surface = boozer_surface.surface
+        path_stem = os.path.join(out_dir, f"{surface_stem}_{entry['name']}")
+        surface.save(path_stem + ".json")
+        boozer_surface.save(path_stem + "_boozer_surface.json")
 
 
 def build_single_stage_alm_partial_state(
@@ -2406,10 +3074,7 @@ def build_single_stage_alm_partial_state(
 
 def write_single_stage_alm_partial_state(out_dir, payload):
     partial_path = os.path.join(out_dir, "alm_state.partial.json")
-    temp_path = f"{partial_path}.tmp"
-    with open(temp_path, "w", encoding="utf-8") as outfile:
-        json.dump(payload, outfile, indent=2)
-    os.replace(temp_path, partial_path)
+    write_json_artifact(partial_path, payload)
 
 
 def build_total_objective(JnonQSRatio, RES_WEIGHT, JBoozerResidual, IOTAS_WEIGHT, Jiota, LENGTH_WEIGHT, JCurveLength, CC_WEIGHT, JCurveCurve, CS_WEIGHT, JCurveSurface, CURVATURE_WEIGHT, JCurvature, SURF_DIST_WEIGHT=0.0, JSurfSurf=None):
@@ -2817,12 +3482,57 @@ def callback(x):
     run_dict['accepted_hardware_status'] = hardware_status
     incumbent_stage = run_dict.get("accepted_boozer_stage", globals().get("stage", "initial"))
     run_dict["accepted_boozer_stage"] = incumbent_stage
-    maybe_update_best_feasible_incumbent(run_dict, incumbent_stage)
-
-    bs.set_points(outer_entry['boozer_surface'].surface.gamma().reshape((-1, 3)))
-    unitn = outer_entry['boozer_surface'].surface.unitnormal()
-    BdotN = np.mean(np.abs(np.sum(bs.B().reshape(unitn.shape) * unitn, axis=2)))
     run_dict['intersecting'] = any(full_stack_status['self_intersections'])
+    best_accepted_updated = maybe_update_best_accepted_incumbent(run_dict, incumbent_stage)
+    best_feasible_updated = maybe_update_best_feasible_incumbent(run_dict, incumbent_stage)
+
+    field_error, BdotN = compute_surface_field_metrics(
+        outer_entry['boozer_surface'].surface,
+        bs,
+    )
+    accepted_iteration = int(run_dict['accepted_iterations'] + 1)
+    if best_accepted_updated:
+        write_preserved_timeout_artifacts(
+            OUT_DIR_ITER,
+            preservation_kind="best_accepted",
+            results_payload=build_preserved_timeout_results_payload(
+                replay_config=PRESERVED_TIMEOUT_REPLAY_CONFIG,
+                preservation_kind="best_accepted",
+                incumbent_stage=incumbent_stage,
+                run_dict=run_dict,
+                objective_eval=objective_eval,
+                field_error=field_error,
+                final_iota=iota_values[-1],
+                final_volume=volume_values[-1],
+                hardware_snapshot=hardware_snapshot,
+                coil_length=length,
+                accepted_iteration=accepted_iteration,
+                alm_runtime_state=current_preserved_timeout_alm_state(),
+            ),
+            biotsavart=bs,
+            surface_data=surface_data,
+        )
+    if best_feasible_updated:
+        write_preserved_timeout_artifacts(
+            OUT_DIR_ITER,
+            preservation_kind="best_feasible",
+            results_payload=build_preserved_timeout_results_payload(
+                replay_config=PRESERVED_TIMEOUT_REPLAY_CONFIG,
+                preservation_kind="best_feasible",
+                incumbent_stage=incumbent_stage,
+                run_dict=run_dict,
+                objective_eval=objective_eval,
+                field_error=field_error,
+                final_iota=iota_values[-1],
+                final_volume=volume_values[-1],
+                hardware_snapshot=hardware_snapshot,
+                coil_length=length,
+                accepted_iteration=accepted_iteration,
+                alm_runtime_state=current_preserved_timeout_alm_state(),
+            ),
+            biotsavart=bs,
+            surface_data=surface_data,
+        )
 
     width = 35
     buffer = io.StringIO()
@@ -2936,8 +3646,7 @@ def callback(x):
         }
         # Append to archive JSONL
         archive_path = os.path.join(OUT_DIR_ITER, "topology_archive.jsonl")
-        with open(archive_path, "a") as af:
-            af.write(json.dumps(topo_entry) + "\n")
+        append_jsonl_artifact(archive_path, topo_entry)
 
         # Track best states
         if 'best_topology' not in run_dict or topo_entry['confinement_score'] > run_dict['best_topology']['confinement_score']:
@@ -3084,6 +3793,22 @@ if __name__ == "__main__":
     plasma_surf_filename = args.plasma_surf_filename
     file_loc = build_equilibrium_path(args)
     bs = load(stage2_bs_path)
+    PRESERVED_TIMEOUT_REPLAY_CONFIG = PreservedTimeoutReplayConfig(
+        plasma_surf_filename=plasma_surf_filename,
+        plasma_surf_path=file_loc,
+        stage2_bs_path=str(stage2_bs_path),
+        stage2_results_path=str(stage2_results_path),
+        mpol=mpol,
+        ntor=ntor,
+        nphi=nphi,
+        ntheta=ntheta,
+        constraint_weight=CONSTRAINT_WEIGHT,
+        constraint_method=CONSTRAINT_METHOD,
+        alm_formulation=ALM_FORMULATION,
+        max_iterations=MAXITER,
+        target_volume=vol_target,
+        target_iota=iota_target,
+    )
 
     # Initialize the boundary magnetic surface and scale it to the target major radius
     surface_configs = build_surface_configs(
@@ -3337,6 +4062,11 @@ if __name__ == "__main__":
         'search_surface_status': initial_search_surface_status,
         'topology_gate_status': initial_topology_status,
         'accepted_boozer_stage': stage,
+        'alm_feasibility_tolerance': args.alm_feas_tol if CONSTRAINT_METHOD == "alm" else None,
+        'alm_stationarity_tolerance': args.alm_stationarity_tol if CONSTRAINT_METHOD == "alm" else None,
+        'best_accepted_incumbent': None,
+        'best_accepted_metric': None,
+        'best_accepted_stage': None,
         'best_feasible_incumbent': None,
         'best_feasible_metric': None,
         'best_feasible_stage': None,
@@ -3345,7 +4075,51 @@ if __name__ == "__main__":
         'hardware_rejects': 0,
         'surface_solve_rejects': 0,
     }
-    maybe_update_best_feasible_incumbent(run_dict, stage)
+    initial_best_accepted_updated = maybe_update_best_accepted_incumbent(run_dict, stage)
+    initial_best_feasible_updated = maybe_update_best_feasible_incumbent(run_dict, stage)
+    initial_coil_length = curvelength.J()
+    if initial_best_accepted_updated:
+        write_preserved_timeout_artifacts(
+            OUT_DIR_ITER,
+            preservation_kind="best_accepted",
+            results_payload=build_preserved_timeout_results_payload(
+                replay_config=PRESERVED_TIMEOUT_REPLAY_CONFIG,
+                preservation_kind="best_accepted",
+                incumbent_stage=stage,
+                run_dict=run_dict,
+                objective_eval=initial_search_eval,
+                field_error=initial_field_error,
+                final_iota=initial_iota,
+                final_volume=initial_volume,
+                hardware_snapshot=initial_hardware_snapshot,
+                coil_length=initial_coil_length,
+                accepted_iteration=0,
+                alm_runtime_state=current_preserved_timeout_alm_state(),
+            ),
+            biotsavart=bs,
+            surface_data=surface_data,
+        )
+    if initial_best_feasible_updated:
+        write_preserved_timeout_artifacts(
+            OUT_DIR_ITER,
+            preservation_kind="best_feasible",
+            results_payload=build_preserved_timeout_results_payload(
+                replay_config=PRESERVED_TIMEOUT_REPLAY_CONFIG,
+                preservation_kind="best_feasible",
+                incumbent_stage=stage,
+                run_dict=run_dict,
+                objective_eval=initial_search_eval,
+                field_error=initial_field_error,
+                final_iota=initial_iota,
+                final_volume=initial_volume,
+                hardware_snapshot=initial_hardware_snapshot,
+                coil_length=initial_coil_length,
+                accepted_iteration=0,
+                alm_runtime_state=current_preserved_timeout_alm_state(),
+            ),
+            biotsavart=bs,
+            surface_data=surface_data,
+        )
 
     # ==============================================================================
     # RUN OPTIMIZATION
@@ -3371,6 +4145,7 @@ if __name__ == "__main__":
     basin_objective_improvement = None
     termination_message = None
     optimizer_success = None
+    optimizer_status = None
     phase1_iterations = None
     phase1_termination_message = None
     phase1_success = None
@@ -3380,6 +4155,10 @@ if __name__ == "__main__":
     refinement_chunks = None
     refinement_abort_reason = None
     refinement_termination_message = None
+    startup_local_preservation_used = False
+    startup_local_preservation_preserved_start = False
+    startup_local_preservation_attempts = 0
+    startup_local_preservation_radius = None
     final_source_stage = stage
     alm_result = None
     if CONSTRAINT_METHOD == "alm" and args.num_surfaces != 1:
@@ -3496,7 +4275,16 @@ if __name__ == "__main__":
             dict(entry) for entry in getattr(res, "history", [])
         ]
         res_nit = res.nit
-        termination_message = str(res.message)
+        optimizer_status = getattr(res, "status", None)
+        termination_message = normalize_optimizer_termination_message(
+            res.message,
+            success=bool(res.success),
+            status=optimizer_status,
+            invalid_state_rejects_total=run_dict["invalid_state_rejects_total"],
+            surface_solve_rejects=run_dict["surface_solve_rejects"],
+            hardware_rejects=run_dict["hardware_rejects"],
+            topology_gate_rejects=run_dict["topology_gate_rejects"],
+        )
         optimizer_success = bool(res.success)
         emit_alm_partial_state(
             res.multipliers,
@@ -3524,7 +4312,7 @@ if __name__ == "__main__":
             ),
             final_stationarity_norm=getattr(res, "final_stationarity_norm", None),
         )
-        print(res.message)
+        print(termination_message)
     elif args.basin_hops > 0:
         # Basin-hopping: perturb DOFs and re-run L-BFGS-B multiple times, keep best
         minimizer_kwargs = {
@@ -3577,77 +4365,137 @@ if __name__ == "__main__":
         else:
             res_nit = basin_hop_count if basin_hop_count is not None else 0
         if hasattr(res, 'lowest_optimization_result'):
-            termination_message = str(getattr(res.lowest_optimization_result, 'message', 'basinhopping_complete'))
-            optimizer_success = bool(getattr(res.lowest_optimization_result, 'success', True))
+            lowest_result = res.lowest_optimization_result
+            optimizer_status = getattr(lowest_result, "status", None)
+            termination_message = normalize_optimizer_termination_message(
+                getattr(lowest_result, "message", "basinhopping_complete"),
+                success=bool(getattr(lowest_result, "success", True)),
+                status=optimizer_status,
+                invalid_state_rejects_total=run_dict["invalid_state_rejects_total"],
+                surface_solve_rejects=run_dict["surface_solve_rejects"],
+                hardware_rejects=run_dict["hardware_rejects"],
+                topology_gate_rejects=run_dict["topology_gate_rejects"],
+            )
+            optimizer_success = bool(getattr(lowest_result, 'success', True))
         else:
             termination_message = str(getattr(res, 'message', 'basinhopping_complete'))
             optimizer_success = True
+            optimizer_status = getattr(res, "status", None)
         print(f"Basin-hopping complete. Best fun={res.fun:.6e}, hops={args.basin_hops}, seed={rng_seed}")
     else:
-        phase1_maxiter = resolve_initial_step_phase_maxiter(
-            MAXITER,
-            args.multisurface_initial_step_scale,
-            args.multisurface_initial_step_maxiter,
+        enable_local_preservation = penalty_feasible_start_local_preservation_enabled(
+            run_dict,
+            constraint_method=CONSTRAINT_METHOD,
+            num_surfaces=args.num_surfaces,
+            basin_hops=args.basin_hops,
+            init_only=args.init_only,
         )
-        if phase1_maxiter > 0:
-            print(
-                "Running scaled initial continuation phase with "
-                f"step_scale={args.multisurface_initial_step_scale} and maxiter={phase1_maxiter}"
-            )
-            scaled_fun, scaled_callback = build_scaled_outer_problem(
-                fun,
-                callback,
-                dofs.copy(),
-                args.multisurface_initial_step_scale,
-            )
-            phase1_result = minimize(
-                scaled_fun,
-                np.zeros_like(dofs),
-                jac=True,
-                method='L-BFGS-B',
-                bounds=build_scaled_outer_bounds(
-                    dofs,
-                    args.multisurface_initial_step_scale,
-                    JF.lower_bounds,
-                    JF.upper_bounds,
-                ),
-                callback=scaled_callback,
-                options={'maxiter': phase1_maxiter, 'maxcor': args.maxcor, 'ftol': ftol, 'gtol': gtol},
-            )
-            phase1_iterations = phase1_result.nit
-            phase1_termination_message = str(phase1_result.message)
-            phase1_success = bool(phase1_result.success)
+
+        def restore_accepted_state():
+            JF.x = run_dict["accepted_x"].copy()
+            restore_surface_states(surface_data, run_dict["surface_state"])
+            run_dict["x_prev"] = run_dict["accepted_x"].copy()
+
+        phase1_result = run_penalty_phase1(
+            dofs,
+            total_maxiter=MAXITER,
+            maxcor=args.maxcor,
+            ftol=ftol,
+            gtol=gtol,
+            initial_step_scale=args.multisurface_initial_step_scale,
+            initial_step_maxiter=args.multisurface_initial_step_maxiter,
+            enable_local_preservation=enable_local_preservation,
+            lower_bounds=JF.lower_bounds,
+            upper_bounds=JF.upper_bounds,
+            run_dict=run_dict,
+            objective_fn=fun,
+            callback_fn=callback,
+            normalize_message_fn=normalize_optimizer_termination_message,
+            restore_accepted_state_fn=restore_accepted_state,
+        )
+        if phase1_result["used_phase1"]:
+            phase1_iterations = phase1_result["phase1_iterations"]
+            phase1_termination_message = phase1_result["phase1_termination_message"]
+            phase1_success = phase1_result["phase1_success"]
+            startup_local_preservation_used = phase1_result["local_preservation_used"]
+            startup_local_preservation_preserved_start = phase1_result[
+                "local_preservation_preserved_start"
+            ]
+            startup_local_preservation_attempts = phase1_result[
+                "local_preservation_attempts"
+            ]
+            startup_local_preservation_radius = phase1_result[
+                "local_preservation_radius"
+            ]
+            if startup_local_preservation_used:
+                print(
+                    "Running feasible-start local preservation phase with "
+                    f"radius={startup_local_preservation_radius:.3e} and "
+                    f"attempts={startup_local_preservation_attempts}"
+                )
+            elif args.multisurface_initial_step_scale < 1.0:
+                print(
+                    "Running scaled initial continuation phase with "
+                    f"step_scale={args.multisurface_initial_step_scale} and "
+                    f"maxiter={phase1_iterations}"
+                )
             print(phase1_termination_message)
-            dofs = run_dict['accepted_x'].copy()
-            run_dict['x_prev'] = dofs.copy()
+            dofs = phase1_result["next_dofs"]
+            run_dict["x_prev"] = dofs.copy()
 
         remaining_maxiter = max(MAXITER - (phase1_iterations or 0), 0)
-        if remaining_maxiter > 0:
+        if remaining_maxiter > 0 and phase1_result["continue_search"]:
+            phase2_bounds = build_penalty_phase2_bounds(
+                dofs,
+                lower_bounds=JF.lower_bounds,
+                upper_bounds=JF.upper_bounds,
+                phase1_result=phase1_result,
+            )
+            if startup_local_preservation_used:
+                print(
+                    "Continuing penalty search with donor-local bounds at "
+                    f"radius={startup_local_preservation_radius:.3e}"
+                )
             res = minimize(
                 fun,
                 dofs,
                 jac=True,
                 method='L-BFGS-B',
-                bounds=current_optimizer_bounds(),
+                bounds=phase2_bounds,
                 callback=callback,
                 options={'maxiter': remaining_maxiter, 'maxcor': args.maxcor, 'ftol': ftol, 'gtol': gtol},
             )
             res_nit = (phase1_iterations or 0) + res.nit
-            termination_message = str(res.message)
+            optimizer_status = getattr(res, "status", None)
+            termination_message = normalize_optimizer_termination_message(
+                res.message,
+                success=bool(res.success),
+                status=optimizer_status,
+                invalid_state_rejects_total=run_dict["invalid_state_rejects_total"],
+                surface_solve_rejects=run_dict["surface_solve_rejects"],
+                hardware_rejects=run_dict["hardware_rejects"],
+                topology_gate_rejects=run_dict["topology_gate_rejects"],
+            )
             optimizer_success = bool(res.success)
             if phase1_termination_message is not None:
                 termination_message = f"phase1={phase1_termination_message}; phase2={termination_message}"
-            print(res.message)
+            print(termination_message)
         else:
             res = SimpleNamespace(
                 x=dofs.copy(),
                 nit=phase1_iterations or 0,
-                message=phase1_termination_message or "phase1_only",
-                success=bool(phase1_success),
+                message=phase1_termination_message
+                or (
+                    "feasible_start_preserved"
+                    if startup_local_preservation_preserved_start
+                    else "phase1_only"
+                ),
+                success=bool(phase1_success) and not startup_local_preservation_preserved_start,
             )
             res_nit = res.nit
             termination_message = str(res.message)
             optimizer_success = bool(res.success)
+            optimizer_status = getattr(res, "status", None)
             print(termination_message)
 
     if (
@@ -4004,6 +4852,7 @@ if __name__ == "__main__":
         "ALM_HISTORY": getattr(alm_result, "history", None),
         "TERMINATION_MESSAGE": termination_message,
         "OPTIMIZER_SUCCESS": optimizer_success,
+        "OPTIMIZER_STATUS": optimizer_status,
         "CHECKPOINT_EVERY": CHECKPOINT_EVERY,
         "TOPOLOGY_SCORER_EVERY": TOPOLOGY_SCORER_EVERY,
         "TOPOLOGY_SCORER_NFIELDLINES": TOPOLOGY_SCORER_NFIELDLINES,
@@ -4041,6 +4890,10 @@ if __name__ == "__main__":
         "PHASE1_ITERATIONS": phase1_iterations,
         "PHASE1_TERMINATION_MESSAGE": phase1_termination_message,
         "PHASE1_SUCCESS": phase1_success,
+        "STARTUP_LOCAL_PRESERVATION_USED": startup_local_preservation_used,
+        "STARTUP_LOCAL_PRESERVED_START": startup_local_preservation_preserved_start,
+        "STARTUP_LOCAL_PRESERVATION_ATTEMPTS": startup_local_preservation_attempts,
+        "STARTUP_LOCAL_PRESERVATION_RADIUS": startup_local_preservation_radius,
         "NFP": int(banana_surf_nfp),
         "FINAL_TOPOLOGY_GATE_EVALUATED": final_topology_status["evaluated"],
         "FINAL_TOPOLOGY_GATE_SUCCESS": final_topology_status["success"],
@@ -4109,5 +4962,4 @@ if __name__ == "__main__":
             final_surface_iotas,
         )
     )
-    with open(os.path.join(OUT_DIR_ITER, "results.json"), "w") as outfile:
-        json.dump(results, outfile, indent=2)
+    write_json_artifact(os.path.join(OUT_DIR_ITER, "results.json"), results)
