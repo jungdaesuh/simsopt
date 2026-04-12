@@ -134,6 +134,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--refinement-max-stalled-chunks", type=int, default=int(os.environ.get("REFINEMENT_MAX_STALLED_CHUNKS", "2")))
     parser.add_argument("--res-weight", type=float, default=1000.0)
     parser.add_argument("--iotas-weight", type=float, default=100.0)
+    parser.add_argument(
+        "--frontier-volume-weight",
+        type=float,
+        default=float(os.environ["FRONTIER_VOLUME_WEIGHT"]) if "FRONTIER_VOLUME_WEIGHT" in os.environ else None,
+        help=(
+            "Independent volume-reward weight for frontier mode. When omitted, forwarded "
+            "as-is (None) so the single-stage script falls back to --iotas-weight."
+        ),
+    )
     parser.add_argument("--cc-weight", type=float, default=100.0)
     parser.add_argument("--curvature-weight", type=float, default=0.1)
     parser.add_argument("--length-weight", type=float, default=1.0)
@@ -348,6 +357,7 @@ def build_single_stage_goal_mode_command(
     _append_optional_flag(command, "--plasma-current-A", args.plasma_current_A)
     _append_optional_flag(command, "--banana-surf-radius", args.banana_surf_radius)
     _append_optional_flag(command, "--length-target", args.length_target)
+    _append_optional_flag(command, "--frontier-volume-weight", args.frontier_volume_weight)
     _append_optional_flag(command, "--alm-qs-threshold", args.alm_qs_threshold)
     _append_optional_flag(command, "--alm-boozer-threshold", args.alm_boozer_threshold)
     _append_optional_flag(command, "--alm-iota-penalty-threshold", args.alm_iota_penalty_threshold)

@@ -605,6 +605,16 @@ def parse_args():
         ),
     )
     parser.add_argument(
+        "--frontier-volume-weight",
+        type=float,
+        default=float(os.environ["FRONTIER_VOLUME_WEIGHT"]) if "FRONTIER_VOLUME_WEIGHT" in os.environ else None,
+        help=(
+            "Independent volume-reward weight for frontier mode. Normalised against the "
+            "legacy baseline (100) to set effective_volume_weight. When omitted, the volume "
+            "weight falls back to --iotas-weight. Ignored in target mode."
+        ),
+    )
+    parser.add_argument(
         "--vol-target",
         type=float,
         default=float(os.environ.get("VOL_TARGET", "0.10")),
@@ -1184,53 +1194,34 @@ class BoozerResidualExact(Optimizable):
         self.surface.set_dofs(self.in_surface.get_dofs())
         self.biotsavart.set_points(self.surface.gamma().reshape((-1, 3)))
 
-        nphi = self.surface.quadpoints_phi.size
-        ntheta = self.surface.quadpoints_theta.size
-        num_points = 3 * nphi * ntheta
-
-        # compute J
         surface = self.surface
+        nphi = surface.quadpoints_phi.size
+        ntheta = surface.quadpoints_theta.size
+        num_points = 3 * nphi * ntheta
+        sqrt_n = np.sqrt(num_points)
+
         iota = self.boozer_surface.res['iota']
         G = self.boozer_surface.res['G']
         I = self._boozer_current_I()
-        r, J = boozer_surface_residual(surface, iota, G, self.biotsavart, derivatives=1, weight_inv_modB=True, I=I)
-        rtil = r / np.sqrt(num_points)
-        self._J = 0.5*np.sum(rtil**2)
-        
-        booz_surf = self.boozer_surface
-        P, L, U = booz_surf.res['PLU']
-        dconstraint_dcoils_vjp = booz_surf.res['vjp']
 
-        dJ_by_dB = self.dJ_by_dB()
+        r, J = boozer_surface_residual(surface, iota, G, self.biotsavart, derivatives=1, weight_inv_modB=True, I=I)
+        rtil = r / sqrt_n
+        self._J = 0.5 * np.sum(rtil ** 2)
+
+        _, r_dB = boozer_surface_residual_dB(surface, iota, G, self.biotsavart, derivatives=0, weight_inv_modB=True, I=I)
+        r_dB /= sqrt_n
+        dJ_by_dB = rtil[:, None] * r_dB
+        dJ_by_dB = np.sum(dJ_by_dB.reshape((-1, 3, 3)), axis=1)
         dJ_by_dcoils = self.biotsavart.B_vjp(dJ_by_dB)
 
-        # dJ_diota, dJ_dG  to the end of dJ_ds are on the end
-        Jtil = J / np.sqrt(num_points)
-        dJ_ds = Jtil.T@rtil
-        
+        # Adjoint correction through the implicit Boozer constraint.
+        booz_surf = self.boozer_surface
+        P, L, U = booz_surf.res['PLU']
+        Jtil = J / sqrt_n
+        dJ_ds = Jtil.T @ rtil
         adj = forward_backward(P, L, U, dJ_ds)
-        
-        adj_times_dg_dcoil = dconstraint_dcoils_vjp(adj, booz_surf, iota, G)
+        adj_times_dg_dcoil = booz_surf.res['vjp'](adj, booz_surf, iota, G)
         self._dJ = dJ_by_dcoils - adj_times_dg_dcoil
-        
-    def dJ_by_dB(self):
-        """
-        Return the partial derivative of the objective with respect to the magnetic field
-        """
-        
-        surface = self.surface
-        nphi = self.surface.quadpoints_phi.size
-        ntheta = self.surface.quadpoints_theta.size
-        num_points = 3 * nphi * ntheta
-        I = self._boozer_current_I()
-        r, r_dB = boozer_surface_residual_dB(surface, self.boozer_surface.res['iota'], self.boozer_surface.res['G'], self.biotsavart, derivatives=0, weight_inv_modB=True, I=I)
-
-        r /= np.sqrt(num_points)
-        r_dB /= np.sqrt(num_points)
-        
-        dJ_by_dB = r[:, None]*r_dB
-        dJ_by_dB = np.sum(dJ_by_dB.reshape((-1, 3, 3)), axis=1)
-        return dJ_by_dB
 
 def initialize_boozer_surface(surf_prev, mpol, ntor, bs, vol_target, constraint_weight, iota, G0, boozer_I=0.0, nfp=5):
     """
@@ -1548,6 +1539,7 @@ class FrontierGoalConfig:
 FRONTIER_GOAL_MODE_IMPL = "frontier_tradeoff_score_v1"
 _FRONTIER_LEGACY_RES_WEIGHT_BASELINE = 1000.0
 _FRONTIER_LEGACY_IOTA_WEIGHT_BASELINE = 100.0
+_FRONTIER_LEGACY_VOLUME_WEIGHT_BASELINE = 100.0
 
 
 class BoundedImprovementReward(Optimizable):
@@ -1594,7 +1586,10 @@ def build_frontier_goal_config(
     initial_boozer_objective,
     res_weight,
     iotas_weight,
+    volume_weight=None,
 ):
+    if volume_weight is None:
+        volume_weight = iotas_weight
     qs_reference = max(abs(float(initial_qs_objective)), 1e-6)
     boozer_reference = max(abs(float(initial_boozer_objective)), 1e-6)
     return FrontierGoalConfig(
@@ -1615,8 +1610,8 @@ def build_frontier_goal_config(
             _FRONTIER_LEGACY_IOTA_WEIGHT_BASELINE,
         ),
         effective_volume_weight=_normalized_frontier_weight(
-            iotas_weight,
-            _FRONTIER_LEGACY_IOTA_WEIGHT_BASELINE,
+            volume_weight,
+            _FRONTIER_LEGACY_VOLUME_WEIGHT_BASELINE,
         ),
     )
 
@@ -2016,6 +2011,11 @@ def resolve_single_stage_goal_objective_terms(
 
 
 def resolve_current_surface_objective_terms(RES_WEIGHT, IOTAS_WEIGHT):
+    """The *RES_WEIGHT* / *IOTAS_WEIGHT* fallbacks are only reached in test
+    harnesses that call the evaluation wrappers without initialising the full
+    objective bundle; in production the effective weights always come from the
+    globals set by ``apply_single_stage_objective_bundle``.
+    """
     objective_nonqs = JnonQSRatioObjective
     objective_boozer = JBoozerResidualObjective
     return {
@@ -4631,6 +4631,7 @@ if __name__ == "__main__":
             initial_boozer_objective=initial_boozer_objective,
             res_weight=RES_WEIGHT,
             iotas_weight=IOTAS_WEIGHT,
+            volume_weight=args.frontier_volume_weight,
         )
         print(frontier_goal_mode_warning_message(frontier_goal_config))
 
@@ -5684,6 +5685,9 @@ if __name__ == "__main__":
         ),
         "FRONTIER_EFFECTIVE_VOLUME_WEIGHT": (
             None if FRONTIER_GOAL_CONFIG is None else FRONTIER_GOAL_CONFIG.effective_volume_weight
+        ),
+        "FRONTIER_VOLUME_WEIGHT_INPUT": (
+            args.frontier_volume_weight if args.single_stage_goal_mode == "frontier" else None
         ),
         "FRONTIER_BOOZER_TRUST_THRESHOLD": final_frontier_trust_status["threshold"],
         "PLASMA_CURRENT_A": float(plasma_current_A),

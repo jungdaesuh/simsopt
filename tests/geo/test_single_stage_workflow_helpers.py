@@ -978,6 +978,7 @@ class GoalModeComparisonScriptTests(unittest.TestCase):
             refinement_max_stalled_chunks=2,
             res_weight=1000.0,
             iotas_weight=100.0,
+            frontier_volume_weight=None,
             cc_weight=100.0,
             curvature_weight=0.1,
             length_weight=1.0,
@@ -1074,6 +1075,37 @@ class GoalModeComparisonScriptTests(unittest.TestCase):
             target_command[target_command.index("--basin-seed") + 1],
             "7",
         )
+
+    def test_build_single_stage_goal_mode_command_forwards_frontier_volume_weight(self):
+        module = load_goal_mode_comparison_module()
+        args = self._make_args()
+        args.frontier_volume_weight = 200.0
+
+        command = module.build_single_stage_goal_mode_command(
+            args,
+            goal_mode="frontier",
+            stage2_bs_path=Path("relative/seed.json").resolve(),
+            case_output_root=Path("outputs/frontier").resolve(),
+        )
+
+        self.assertIn("--frontier-volume-weight", command)
+        self.assertEqual(
+            command[command.index("--frontier-volume-weight") + 1],
+            "200.0",
+        )
+
+    def test_build_single_stage_goal_mode_command_omits_zero_frontier_volume_weight(self):
+        module = load_goal_mode_comparison_module()
+        args = self._make_args()
+
+        command = module.build_single_stage_goal_mode_command(
+            args,
+            goal_mode="frontier",
+            stage2_bs_path=Path("relative/seed.json").resolve(),
+            case_output_root=Path("outputs/frontier").resolve(),
+        )
+
+        self.assertNotIn("--frontier-volume-weight", command)
 
     def test_goal_mode_comparison_wrapper_rejects_stage2_surface_mismatch(self):
         module = load_goal_mode_comparison_module()

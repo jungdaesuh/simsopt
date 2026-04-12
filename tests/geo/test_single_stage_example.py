@@ -2924,6 +2924,37 @@ class HardwareConstraintTests(unittest.TestCase):
         self.assertAlmostEqual(config.effective_iota_weight, 1.0)
         self.assertAlmostEqual(config.effective_volume_weight, 1.0)
 
+    def test_build_frontier_goal_config_volume_weight_independent_of_iota(self):
+        module = self.load_module()
+
+        config = module.build_frontier_goal_config(
+            initial_iota=0.15,
+            initial_volume=0.10,
+            initial_qs_objective=2.0e-4,
+            initial_boozer_objective=6.0e-7,
+            res_weight=1000.0,
+            iotas_weight=500.0,
+            volume_weight=200.0,
+        )
+
+        self.assertAlmostEqual(config.effective_iota_weight, 5.0)
+        self.assertAlmostEqual(config.effective_volume_weight, 2.0)
+
+    def test_build_frontier_goal_config_volume_weight_defaults_to_iotas_weight(self):
+        module = self.load_module()
+
+        config = module.build_frontier_goal_config(
+            initial_iota=0.15,
+            initial_volume=0.10,
+            initial_qs_objective=2.0e-4,
+            initial_boozer_objective=6.0e-7,
+            res_weight=1000.0,
+            iotas_weight=300.0,
+        )
+
+        self.assertAlmostEqual(config.effective_iota_weight, 3.0)
+        self.assertAlmostEqual(config.effective_volume_weight, 3.0)
+
     def test_build_single_stage_iota_objective_rejects_invalid_goal_mode(self):
         module = self.load_module()
         surface_iota = FakeAlgebraicObjective(0.15, [1.0, -2.0])
@@ -4420,6 +4451,22 @@ class CurrentBaselineContractTests(unittest.TestCase):
             args = module.parse_args()
 
         self.assertEqual(args.single_stage_goal_mode, "frontier")
+
+    def test_single_stage_parse_args_accepts_frontier_volume_weight_flag(self):
+        module = load_single_stage_example_module()
+
+        with patch.object(
+            sys,
+            "argv",
+            [
+                "single_stage_banana_example.py",
+                "--frontier-volume-weight",
+                "200",
+            ],
+        ):
+            args = module.parse_args()
+
+        self.assertAlmostEqual(args.frontier_volume_weight, 200.0)
 
     def test_single_stage_parse_args_reads_goal_mode_from_environment(self):
         module = load_single_stage_example_module()
