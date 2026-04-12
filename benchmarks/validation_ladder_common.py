@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import resource
+import re
 import shlex
 import subprocess
 import sys
@@ -17,7 +18,10 @@ import numpy as np
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
-from repo_bootstrap import bootstrap_local_simsopt as _bootstrap_local_simsopt
+from repo_bootstrap import (
+    apply_cuda_toolchain_env as _apply_cuda_toolchain_env,
+    bootstrap_local_simsopt as _bootstrap_local_simsopt,
+)
 from benchmarks import validation_ladder_contract as ladder_contract
 
 SRC_ROOT = REPO_ROOT / "src"
@@ -28,6 +32,15 @@ _JAX_PLATFORM_ENV_VARS = (
 )
 _JAX_CUDA_MEMORY_ENV_VARS = ("XLA_PYTHON_CLIENT_PREALLOCATE",)
 _JAX_COMPILATION_CACHE_ENV_VAR = "JAX_COMPILATION_CACHE_DIR"
+_JAX_PERSISTENT_CACHE_MIN_COMPILE_TIME_ENV_VAR = (
+    "JAX_PERSISTENT_CACHE_MIN_COMPILE_TIME_SECS"
+)
+_JAX_PERSISTENT_CACHE_MIN_ENTRY_SIZE_ENV_VAR = (
+    "JAX_PERSISTENT_CACHE_MIN_ENTRY_SIZE_BYTES"
+)
+_JAX_PERSISTENT_CACHE_ENABLE_XLA_CACHES_ENV_VAR = (
+    "JAX_PERSISTENT_CACHE_ENABLE_XLA_CACHES"
+)
 _SIMSOPT_DISABLE_COMPILATION_CACHE_ENV_VAR = "SIMSOPT_DISABLE_JAX_COMPILATION_CACHE"
 _SIMSOPT_COMPILATION_CACHE_POLICY_ENV_VAR = "SIMSOPT_JAX_COMPILATION_CACHE_POLICY"
 _SIMSOPT_BACKEND_MODE_ENV_VAR = "SIMSOPT_BACKEND_MODE"
@@ -35,6 +48,11 @@ _SIMSOPT_BACKEND_STRICT_ENV_VAR = "SIMSOPT_BACKEND_STRICT"
 _SIMSOPT_TRANSFER_GUARD_ENV_VAR = "SIMSOPT_JAX_TRANSFER_GUARD"
 _TARGET_LANE_ACCEPTED_STEP_SYNC_ENV_VAR = "TARGET_LANE_ACCEPTED_STEP_SYNC"
 _TRUTHY_ENV_VALUES = frozenset({"1", "true", "yes", "on"})
+_BENCHMARK_COMPILATION_CACHE_ENV_DEFAULTS = {
+    _JAX_PERSISTENT_CACHE_MIN_COMPILE_TIME_ENV_VAR: "0",
+    _JAX_PERSISTENT_CACHE_MIN_ENTRY_SIZE_ENV_VAR: "-1",
+    _JAX_PERSISTENT_CACHE_ENABLE_XLA_CACHES_ENV_VAR: "all",
+}
 _REQUESTED_PLATFORM_RUNTIME_BACKENDS = {
     "cpu": frozenset({"cpu"}),
     "cuda": frozenset({"cuda", "gpu"}),
@@ -77,21 +95,46 @@ def apply_compilation_cache_policy(
     disable_raw = os.environ.get(_SIMSOPT_DISABLE_COMPILATION_CACHE_ENV_VAR, "")
     if disable_raw.strip().lower() in _TRUTHY_ENV_VALUES:
         os.environ.pop(_JAX_COMPILATION_CACHE_ENV_VAR, None)
+        for env_name in _BENCHMARK_COMPILATION_CACHE_ENV_DEFAULTS:
+            os.environ.pop(env_name, None)
         os.environ[_SIMSOPT_COMPILATION_CACHE_POLICY_ENV_VAR] = "disabled"
         return current_compilation_cache_metadata()
 
     resolved_dir = cache_dir or os.environ.get(_JAX_COMPILATION_CACHE_ENV_VAR)
     if resolved_dir is None:
         os.environ.pop(_JAX_COMPILATION_CACHE_ENV_VAR, None)
+        for env_name in _BENCHMARK_COMPILATION_CACHE_ENV_DEFAULTS:
+            os.environ.pop(env_name, None)
         os.environ[_SIMSOPT_COMPILATION_CACHE_POLICY_ENV_VAR] = "disabled"
         return current_compilation_cache_metadata()
     resolved_path = Path(resolved_dir).expanduser()
     policy = "explicit"
     resolved_path.mkdir(parents=True, exist_ok=True)
     os.environ[_JAX_COMPILATION_CACHE_ENV_VAR] = str(resolved_path)
+    for env_name, env_value in _BENCHMARK_COMPILATION_CACHE_ENV_DEFAULTS.items():
+        os.environ.setdefault(env_name, env_value)
     os.environ[_SIMSOPT_COMPILATION_CACHE_POLICY_ENV_VAR] = policy
     metadata = current_compilation_cache_metadata()
     return metadata
+
+
+def benchmark_compilation_cache_dir(label: str) -> Path:
+    """Return the default persistent-cache directory for one benchmark label."""
+    normalized = re.sub(r"[^A-Za-z0-9._-]+", "-", label).strip("-")
+    if not normalized:
+        raise ValueError("benchmark compilation cache label must not be empty.")
+    return REPO_ROOT / ".artifacts" / "jax_compilation_cache" / normalized
+
+
+def apply_benchmark_compilation_cache_policy(
+    label: str,
+    *,
+    requested_platform: str,
+) -> dict[str, Any]:
+    """Enable a stable cache dir for benchmark probes unless the run is CPU-only."""
+    if requested_platform == "cpu":
+        return apply_compilation_cache_policy()
+    return apply_compilation_cache_policy(benchmark_compilation_cache_dir(label))
 
 
 def repo_pythonpath_env(
@@ -112,6 +155,8 @@ def repo_pythonpath_env(
         env.pop(_SIMSOPT_TRANSFER_GUARD_ENV_VAR, None)
     if disable_compilation_cache:
         env.pop(_JAX_COMPILATION_CACHE_ENV_VAR, None)
+        for env_name in _BENCHMARK_COMPILATION_CACHE_ENV_DEFAULTS:
+            env.pop(env_name, None)
         env[_SIMSOPT_DISABLE_COMPILATION_CACHE_ENV_VAR] = "1"
         env[_SIMSOPT_COMPILATION_CACHE_POLICY_ENV_VAR] = "disabled"
     pythonpath_entries = [str(REPO_ROOT), str(SRC_ROOT)]
@@ -135,6 +180,7 @@ def _apply_platform_env(env: dict[str, str], platform: str) -> None:
     env["SIMSOPT_JAX_BACKEND"] = platform
     if platform == "cuda":
         env["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
+        _apply_cuda_toolchain_env(env)
 
 
 def _x64_enabled(jax_module) -> bool:

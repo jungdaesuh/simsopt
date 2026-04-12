@@ -17,6 +17,52 @@ _ENTRYPOINT_PLATFORM_ENV_VARS = (
 )
 _JAX_ENABLE_X64_ENV = "JAX_ENABLE_X64"
 _XLA_PREALLOCATE_ENV = "XLA_PYTHON_CLIENT_PREALLOCATE"
+_XLA_FLAGS_ENV = "XLA_FLAGS"
+_XLA_GPU_CUDA_DATA_DIR_FLAG = "--xla_gpu_cuda_data_dir="
+_CUDA_TOOLCHAIN_ROOT_ENV = "SIMSOPT_CUDA_TOOLCHAIN_ROOT"
+_DEFAULT_CUDA_TOOLCHAIN_ROOT = Path("/usr/local/cuda")
+
+
+def _prepend_env_path(env: dict[str, str], name: str, entry: Path) -> None:
+    """Prepend one path entry without duplicating it."""
+    entry_str = str(entry)
+    current = env.get(name)
+    if current is None or current == "":
+        env[name] = entry_str
+        return
+    parts = current.split(os.pathsep)
+    if parts and parts[0] == entry_str:
+        return
+    env[name] = os.pathsep.join([entry_str, *parts])
+
+
+def _resolve_cuda_toolchain_root(env: dict[str, str]) -> Path | None:
+    """Return a usable CUDA toolkit root for external compiler tools."""
+    explicit_root = env.get(_CUDA_TOOLCHAIN_ROOT_ENV)
+    candidates: list[Path] = []
+    if explicit_root:
+        candidates.append(Path(explicit_root).expanduser())
+    candidates.append(_DEFAULT_CUDA_TOOLCHAIN_ROOT)
+    for candidate in candidates:
+        if (candidate / "bin").is_dir():
+            return candidate
+    return None
+
+
+def apply_cuda_toolchain_env(env: dict[str, str]) -> None:
+    """Point JAX/XLA at a concrete external CUDA toolkit when one exists."""
+    cuda_root = _resolve_cuda_toolchain_root(env)
+    if cuda_root is None:
+        return
+    _prepend_env_path(env, "PATH", cuda_root / "bin")
+    existing_xla_flags = env.get(_XLA_FLAGS_ENV)
+    if existing_xla_flags and _XLA_GPU_CUDA_DATA_DIR_FLAG in existing_xla_flags:
+        return
+    data_dir_flag = f"{_XLA_GPU_CUDA_DATA_DIR_FLAG}{cuda_root}"
+    if existing_xla_flags:
+        env[_XLA_FLAGS_ENV] = f"{data_dir_flag} {existing_xla_flags}"
+        return
+    env[_XLA_FLAGS_ENV] = data_dir_flag
 
 
 def _normalize_entrypoint_platform(platform: str | None) -> str | None:
@@ -73,6 +119,7 @@ def apply_entrypoint_jax_runtime_env(platform: str | None) -> str | None:
         os.environ[name] = normalized
     if normalized == "cuda":
         os.environ.setdefault(_XLA_PREALLOCATE_ENV, "false")
+        apply_cuda_toolchain_env(os.environ)
     return normalized
 
 

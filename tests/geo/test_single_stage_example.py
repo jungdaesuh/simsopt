@@ -20,6 +20,13 @@ from simsopt.geo.surfaceobjectives import (
     boozer_surface_residual,
     boozer_surface_residual_dB,
 )
+from simsopt.jax_core.specs import (
+    CoilDofExtractionSpec,
+    CoilSetDofExtractionSpec,
+    CoilSymmetrySpec,
+    CurveXYZFourierSpec,
+    OptimizableDofMapSpec,
+)
 from simsopt.objectives.utilities import forward_backward
 
 
@@ -436,6 +443,36 @@ class SingleStageExampleTests(unittest.TestCase):
         np.testing.assert_array_equal(
             boozer_surface.surface.get_dofs(), surface_override
         )
+        self.assertFalse(hasattr(boozer_surface.surface, "fitted_gamma"))
+
+    def test_initialize_boozer_surface_skips_fit_when_surface_override_present(self):
+        module = self.load_module()
+        surf_prev = FakeSurfPrev()
+        surface_override = np.array([4.0, 5.0, 6.0])
+
+        with patch.object(
+            module, "SurfaceXYZTensorFourier", FakeSurfaceXYZTensorFourier
+        ), patch.object(module, "Volume", FakeVolume), patch.object(
+            module, "BoozerSurface", RecordingCPUBoozerSurface
+        ):
+            boozer_surface = module.initialize_boozer_surface(
+                surf_prev,
+                mpol=TEST_MPOL,
+                ntor=TEST_NTOR,
+                bs=object(),
+                vol_target=TEST_VOL_TARGET,
+                constraint_weight=1.0,
+                iota=TEST_IOTA,
+                G0=TEST_G0,
+                backend="cpu",
+                surface_dofs_override=surface_override,
+            )
+
+        self.assertFalse(hasattr(boozer_surface.surface, "fitted_gamma"))
+        np.testing.assert_array_equal(
+            boozer_surface.surface.get_dofs(),
+            surface_override,
+        )
 
     def test_initialize_boozer_surface_threads_nondefault_optimizer_backend(self):
         module = self.load_module()
@@ -490,6 +527,353 @@ class SingleStageExampleTests(unittest.TestCase):
             fake_boozer_surface_jax.instances[0].options["least_squares_algorithm"],
             "lm",
         )
+
+    def test_initialize_boozer_surface_threads_solver_budget_overrides(self):
+        module = self.load_module()
+        surf_prev = FakeSurfPrev()
+        fake_boozer_surface_jax = self.build_fake_boozer_surface_jax_class(
+            record_run_calls=False
+        )
+
+        with self.patch_initialize_boozer_surface_jax(module, fake_boozer_surface_jax):
+            module.initialize_boozer_surface(
+                surf_prev,
+                mpol=TEST_MPOL,
+                ntor=TEST_NTOR,
+                bs=object(),
+                vol_target=TEST_VOL_TARGET,
+                constraint_weight=1.0,
+                iota=TEST_IOTA,
+                G0=TEST_G0,
+                backend="jax",
+                bfgs_tol_override=3.0e-6,
+                bfgs_maxiter_override=32,
+                newton_tol_override=1.0e-7,
+                newton_maxiter_override=9,
+            )
+
+        options = fake_boozer_surface_jax.instances[0].options
+        self.assertEqual(options["bfgs_tol"], 3.0e-6)
+        self.assertEqual(options["bfgs_maxiter"], 32)
+        self.assertEqual(options["newton_tol"], 1.0e-7)
+        self.assertEqual(options["newton_maxiter"], 9)
+
+    def test_resolve_warm_start_boozer_init_overrides_is_empty_without_warm_start(self):
+        module = self.load_module()
+
+        overrides = module.resolve_warm_start_boozer_init_overrides(
+            warm_start_state=None,
+            explicit_surface_warm_start=False,
+            field_backend="jax",
+            optimizer_backend="ondevice",
+            boozer_optimizer_backend="ondevice",
+            boozer_least_squares_algorithm="lm",
+            boozer_least_squares_algorithm_explicit=False,
+            target_lane_boozer_bfgs_tol=3.0e-6,
+            target_lane_boozer_bfgs_maxiter=32,
+        )
+
+        self.assertEqual(
+            overrides,
+            {
+                "least_squares_algorithm_override": None,
+                "bfgs_tol_override": None,
+                "bfgs_maxiter_override": None,
+                "newton_tol_override": None,
+                "newton_maxiter_override": None,
+            },
+        )
+
+    def test_resolve_warm_start_boozer_init_overrides_keeps_explicit_surface_algorithm(self):
+        module = self.load_module()
+
+        overrides = module.resolve_warm_start_boozer_init_overrides(
+            warm_start_state={"surface": object()},
+            explicit_surface_warm_start=True,
+            field_backend="jax",
+            optimizer_backend="ondevice",
+            boozer_optimizer_backend="ondevice",
+            boozer_least_squares_algorithm="lm",
+            boozer_least_squares_algorithm_explicit=False,
+            target_lane_boozer_bfgs_tol=3.0e-6,
+            target_lane_boozer_bfgs_maxiter=32,
+        )
+
+        self.assertEqual(
+            overrides,
+            {
+                "least_squares_algorithm_override": None,
+                "bfgs_tol_override": 1.0e-8,
+                "bfgs_maxiter_override": 128,
+                "newton_tol_override": None,
+                "newton_maxiter_override": None,
+            },
+        )
+
+    def test_resolve_warm_start_boozer_init_overrides_uses_quasi_newton_for_legacy_path(self):
+        module = self.load_module()
+
+        overrides = module.resolve_warm_start_boozer_init_overrides(
+            warm_start_state={"surface": object()},
+            explicit_surface_warm_start=False,
+            field_backend="jax",
+            optimizer_backend="ondevice",
+            boozer_optimizer_backend="ondevice",
+            boozer_least_squares_algorithm="lm",
+            boozer_least_squares_algorithm_explicit=False,
+            target_lane_boozer_bfgs_tol=3.0e-6,
+            target_lane_boozer_bfgs_maxiter=32,
+        )
+
+        self.assertEqual(overrides["least_squares_algorithm_override"], "quasi-newton")
+        self.assertEqual(overrides["bfgs_tol_override"], 1.0e-8)
+        self.assertEqual(overrides["bfgs_maxiter_override"], 128)
+
+    def test_resolve_warm_start_boozer_init_overrides_preserves_explicit_algorithm(self):
+        module = self.load_module()
+
+        overrides = module.resolve_warm_start_boozer_init_overrides(
+            warm_start_state={"surface": object()},
+            explicit_surface_warm_start=False,
+            field_backend="jax",
+            optimizer_backend="ondevice",
+            boozer_optimizer_backend="ondevice",
+            boozer_least_squares_algorithm="lm",
+            boozer_least_squares_algorithm_explicit=True,
+            target_lane_boozer_bfgs_tol=3.0e-6,
+            target_lane_boozer_bfgs_maxiter=32,
+        )
+
+        self.assertIsNone(overrides["least_squares_algorithm_override"])
+        self.assertEqual(overrides["bfgs_tol_override"], 1.0e-8)
+        self.assertEqual(overrides["bfgs_maxiter_override"], 128)
+
+    def test_initialize_boozer_surface_emits_stage_callbacks(self):
+        module = self.load_module()
+        surf_prev = FakeSurfPrev()
+        stage_events = []
+
+        class FakeBoozerSurfaceJAX:
+            def __init__(
+                self,
+                bs,
+                surface,
+                label,
+                targetlabel,
+                constraint_weight,
+                options=None,
+            ):
+                del bs, label, targetlabel, constraint_weight
+                self.surface = surface
+                self.options = options or {}
+                self.res = {
+                    "success": True,
+                    "iter": 3,
+                    "iota": TEST_IOTA,
+                    "G": TEST_G0,
+                }
+
+            def run_code(self, iota, G, *, sdofs=None):
+                del iota, G, sdofs
+                stage_callback = self.options["stage_callback"]
+                stage_callback("before_boozer_lbfgs", method="lbfgs-ondevice")
+                stage_callback(
+                    "after_boozer_lbfgs",
+                    solve_success="true",
+                    iterations=2.0,
+                    method="lbfgs-ondevice",
+                )
+                stage_callback(
+                    "before_boozer_newton",
+                    method="newton-polish",
+                    ls_method="lbfgs-ondevice",
+                )
+                stage_callback(
+                    "after_boozer_newton",
+                    solve_success="true",
+                    iterations=1.0,
+                )
+                return self.res
+
+        with self.patch_initialize_boozer_surface_jax(module, FakeBoozerSurfaceJAX):
+            module.initialize_boozer_surface(
+                surf_prev,
+                mpol=TEST_MPOL,
+                ntor=TEST_NTOR,
+                bs=object(),
+                vol_target=TEST_VOL_TARGET,
+                constraint_weight=1.0,
+                iota=TEST_IOTA,
+                G0=TEST_G0,
+                backend="jax",
+                on_stage=lambda label, **extra: stage_events.append((label, extra)),
+            )
+
+        self.assertEqual(
+            [label for label, _ in stage_events],
+            [
+                "after_boozer_surface_fit",
+                "after_boozer_setup",
+                "before_boozer_solve",
+                "before_boozer_lbfgs",
+                "after_boozer_lbfgs",
+                "before_boozer_newton",
+                "after_boozer_newton",
+                "after_boozer_solve",
+                "after_boozer_postprocess",
+            ],
+        )
+
+    def test_initialize_boozer_surface_skips_jax_solver_stage_callback_without_cpu(
+        self,
+    ):
+        module = self.load_module()
+        surf_prev = FakeSurfPrev()
+        stage_events = []
+
+        class FakeBoozerSurfaceJAX:
+            instances = []
+
+            def __init__(
+                self,
+                bs,
+                surface,
+                label,
+                targetlabel,
+                constraint_weight,
+                options=None,
+            ):
+                del bs, label, targetlabel, constraint_weight
+                self.surface = surface
+                self.options = options or {}
+                self.res = {
+                    "success": True,
+                    "iter": 1,
+                    "iota": TEST_IOTA,
+                    "G": TEST_G0,
+                }
+                FakeBoozerSurfaceJAX.instances.append(self)
+
+            def run_code(self, iota, G, *, sdofs=None):
+                del iota, G, sdofs
+                self.options.get("stage_callback")
+                return self.res
+
+        with patch.object(module, "jax_solver_stage_callback_supported", return_value=False):
+            with self.patch_initialize_boozer_surface_jax(module, FakeBoozerSurfaceJAX):
+                module.initialize_boozer_surface(
+                    surf_prev,
+                    mpol=TEST_MPOL,
+                    ntor=TEST_NTOR,
+                    bs=object(),
+                    vol_target=TEST_VOL_TARGET,
+                    constraint_weight=1.0,
+                    iota=TEST_IOTA,
+                    G0=TEST_G0,
+                    backend="jax",
+                    on_stage=lambda label, **extra: stage_events.append((label, extra)),
+                )
+
+        self.assertNotIn(
+            "stage_callback",
+            FakeBoozerSurfaceJAX.instances[0].options,
+        )
+        self.assertEqual(
+            [label for label, _ in stage_events],
+            [
+                "after_boozer_surface_fit",
+                "after_boozer_setup",
+                "before_boozer_solve",
+                "after_boozer_solve",
+                "after_boozer_postprocess",
+            ],
+        )
+
+    def test_initialize_boozer_surface_force_enables_jax_solver_stage_callback_without_cpu(
+        self,
+    ):
+        module = self.load_module()
+        surf_prev = FakeSurfPrev()
+        stage_events = []
+
+        class FakeBoozerSurfaceJAX:
+            instances = []
+
+            def __init__(
+                self,
+                bs,
+                surface,
+                label,
+                targetlabel,
+                constraint_weight,
+                options=None,
+            ):
+                del bs, label, targetlabel, constraint_weight
+                self.surface = surface
+                self.options = options or {}
+                self.res = {
+                    "success": True,
+                    "iter": 1,
+                    "iota": TEST_IOTA,
+                    "G": TEST_G0,
+                }
+                FakeBoozerSurfaceJAX.instances.append(self)
+
+            def run_code(self, iota, G, *, sdofs=None):
+                del iota, G, sdofs
+                stage_callback = self.options.get("stage_callback")
+                assert stage_callback is not None
+                stage_callback("before_boozer_lbfgs", method="lm-ondevice")
+                return self.res
+
+        with patch.dict(
+            os.environ,
+            {"SIMSOPT_FORCE_JAX_SOLVER_STAGE_CALLBACK": "1"},
+            clear=False,
+        ):
+            with patch.object(module, "jax_solver_stage_callback_supported", wraps=module.jax_solver_stage_callback_supported):
+                with self.patch_initialize_boozer_surface_jax(module, FakeBoozerSurfaceJAX):
+                    module.initialize_boozer_surface(
+                        surf_prev,
+                        mpol=TEST_MPOL,
+                        ntor=TEST_NTOR,
+                        bs=object(),
+                        vol_target=TEST_VOL_TARGET,
+                        constraint_weight=1.0,
+                        iota=TEST_IOTA,
+                        G0=TEST_G0,
+                        backend="jax",
+                        on_stage=lambda label, **extra: stage_events.append((label, extra)),
+                    )
+
+        self.assertIn(
+            "stage_callback",
+            FakeBoozerSurfaceJAX.instances[0].options,
+        )
+        self.assertIn(
+            "before_boozer_lbfgs",
+            [label for label, _ in stage_events],
+        )
+
+    def test_build_stage_progress_recorder_writes_stage_history(self):
+        module = self.load_module()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            progress_path = os.path.join(tmpdir, "boozer_init_progress.json")
+            record_stage = module.build_stage_progress_recorder(progress_path)
+            record_stage("starting", backend="jax")
+            record_stage("after_boozer_setup", boozer_type="ls")
+
+            with open(progress_path, encoding="utf-8") as infile:
+                payload = json.load(infile)
+
+        self.assertEqual(payload["current_stage"], "after_boozer_setup")
+        self.assertEqual(
+            payload["completed_stages"],
+            ["starting", "after_boozer_setup"],
+        )
+        self.assertEqual(payload["stages"]["starting"]["backend"], "jax")
+        self.assertEqual(payload["stages"]["after_boozer_setup"]["boozer_type"], "ls")
 
     def test_resolve_boozer_optimizer_backend_defaults_and_overrides(self):
         module = self.load_module()
@@ -584,6 +968,7 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertEqual(args.optimizer_backend, "ondevice")
         self.assertIsNone(args.boozer_optimizer_backend)
         self.assertEqual(args.boozer_least_squares_algorithm, "lm")
+        self.assertFalse(args.boozer_least_squares_algorithm_explicit)
 
     def test_parse_args_preserves_cpu_default_reference_lane(self):
         module = self.load_module()
@@ -619,6 +1004,7 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertEqual(args.optimizer_backend, "ondevice")
         self.assertEqual(args.boozer_optimizer_backend, "ondevice")
         self.assertEqual(args.boozer_least_squares_algorithm, "lm")
+        self.assertFalse(args.boozer_least_squares_algorithm_explicit)
 
     def test_parse_args_defaults_target_lane_sync_to_final_only(self):
         module = self.load_module()
@@ -635,6 +1021,1036 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertFalse(args.experimental_target_lane_value_and_grad)
         self.assertFalse(args.disable_target_lane_success_filter)
 
+    def test_parse_args_defaults_target_lane_outer_maxls_to_tighter_budget(self):
+        module = self.load_module()
+
+        with patch.dict(os.environ, {}, clear=True), patch.object(
+            sys,
+            "argv",
+            ["single_stage_banana_example.py", "--backend", "jax"],
+        ):
+            args = module.parse_args()
+
+        self.assertEqual(args.outer_maxls, 8)
+        self.assertEqual(args.maxcor, 20)
+        self.assertEqual(args.initial_step_scale, 1.0)
+        self.assertEqual(args.initial_step_maxiter, 0)
+        self.assertEqual(args.target_lane_boozer_bfgs_tol, 1e-8)
+        self.assertIsNone(args.target_lane_boozer_bfgs_maxiter)
+        self.assertIsNone(args.target_lane_boozer_newton_tol)
+        self.assertIsNone(args.target_lane_boozer_newton_maxiter)
+
+    def test_parse_args_benchmark_mode_uses_target_lane_trial_defaults(self):
+        module = self.load_module()
+
+        with patch.dict(os.environ, {}, clear=True), patch.object(
+            sys,
+            "argv",
+            [
+                "single_stage_banana_example.py",
+                "--backend",
+                "jax",
+                "--benchmark-mode",
+            ],
+        ):
+            args = module.parse_args()
+
+        self.assertEqual(args.outer_maxls, 4)
+        self.assertEqual(args.target_lane_boozer_bfgs_tol, 1e-6)
+        self.assertEqual(args.target_lane_boozer_bfgs_maxiter, 64)
+        self.assertIsNone(args.target_lane_boozer_newton_tol)
+        self.assertIsNone(args.target_lane_boozer_newton_maxiter)
+
+    def test_parse_args_preserves_reference_outer_maxls_default(self):
+        module = self.load_module()
+
+        with patch.dict(os.environ, {}, clear=True), patch.object(
+            sys,
+            "argv",
+            ["single_stage_banana_example.py"],
+        ):
+            args = module.parse_args()
+
+        self.assertEqual(args.outer_maxls, 20)
+        self.assertEqual(args.maxcor, 300)
+        self.assertEqual(args.initial_step_scale, 1.0)
+        self.assertEqual(args.initial_step_maxiter, 0)
+        self.assertIsNone(args.target_lane_boozer_bfgs_tol)
+        self.assertIsNone(args.target_lane_boozer_bfgs_maxiter)
+        self.assertIsNone(args.target_lane_boozer_newton_tol)
+        self.assertIsNone(args.target_lane_boozer_newton_maxiter)
+
+    def test_build_scaled_outer_problem_scales_coordinates_gradients_and_callback(self):
+        module = self.load_module()
+        seen = {"fun": [], "callback": []}
+
+        def base_fun(x):
+            seen["fun"].append(np.asarray(x, dtype=float).copy())
+            return 7.5, np.array([3.0, -4.0])
+
+        def base_callback(x):
+            seen["callback"].append(np.asarray(x, dtype=float).copy())
+
+        scaled_fun, scaled_callback = module.build_scaled_outer_problem(
+            base_fun,
+            base_callback,
+            np.array([10.0, 20.0]),
+            0.1,
+        )
+
+        value, grad = scaled_fun(np.array([1.0, -2.0]))
+        self.assertAlmostEqual(value, 7.5)
+        np.testing.assert_allclose(grad, [0.3, -0.4])
+        np.testing.assert_allclose(seen["fun"][0], [10.1, 19.8])
+
+        scaled_callback(np.array([1.0, -2.0]))
+        np.testing.assert_allclose(seen["callback"][0], [10.1, 19.8])
+
+    def test_build_scaled_outer_problem_omits_callback_when_base_none(self):
+        module = self.load_module()
+
+        def base_fun(x):
+            return 7.5, np.array([3.0, -4.0])
+
+        scaled_fun, scaled_callback = module.build_scaled_outer_problem(
+            base_fun,
+            None,
+            np.array([10.0, 20.0]),
+            0.1,
+        )
+
+        value, grad = scaled_fun(np.array([1.0, -2.0]))
+
+        self.assertIsNone(scaled_callback)
+        self.assertAlmostEqual(value, 7.5)
+        np.testing.assert_allclose(grad, [0.3, -0.4])
+
+    def test_build_scaled_outer_scalar_problem_scales_coordinates_and_callback(self):
+        module = self.load_module()
+        seen = {"fun": [], "callback": []}
+
+        def base_fun(x):
+            seen["fun"].append(np.asarray(x, dtype=float).copy())
+            return float(np.dot(x, x))
+
+        def base_callback(x):
+            seen["callback"].append(np.asarray(x, dtype=float).copy())
+
+        scaled_fun, scaled_callback = module.build_scaled_outer_scalar_problem(
+            base_fun,
+            base_callback,
+            np.array([10.0, 20.0]),
+            0.25,
+        )
+
+        value = scaled_fun(np.array([2.0, -4.0]))
+        self.assertAlmostEqual(value, 10.5**2 + 19.0**2)
+        np.testing.assert_allclose(seen["fun"][0], [10.5, 19.0])
+
+        scaled_callback(np.array([2.0, -4.0]))
+        np.testing.assert_allclose(seen["callback"][0], [10.5, 19.0])
+
+    def test_build_scaled_outer_scalar_problem_omits_callback_when_base_none(self):
+        module = self.load_module()
+
+        def base_fun(x):
+            return float(np.dot(x, x))
+
+        scaled_fun, scaled_callback = module.build_scaled_outer_scalar_problem(
+            base_fun,
+            None,
+            np.array([10.0, 20.0]),
+            0.25,
+        )
+
+        self.assertIsNone(scaled_callback)
+        self.assertAlmostEqual(scaled_fun(np.array([2.0, -4.0])), 10.5**2 + 19.0**2)
+
+    def test_build_scaled_outer_phase_initial_dofs_target_lane_is_transfer_safe(self):
+        module = self.load_module()
+        dofs = jax.device_put(np.array([1.0, -2.0, 3.0], dtype=np.float64))
+
+        with jax.transfer_guard("disallow"):
+            zeros = module.build_scaled_outer_phase_initial_dofs(
+                dofs,
+                use_target_lane=True,
+            )
+
+        np.testing.assert_allclose(
+            np.asarray(jax.device_get(zeros)),
+            np.zeros(3, dtype=np.float64),
+        )
+
+    def test_resolve_scaled_outer_phase_final_dofs_target_lane_is_transfer_safe(self):
+        module = self.load_module()
+        anchor_dofs = jax.device_put(np.array([10.0, 20.0], dtype=np.float64))
+        step_dofs = np.array([2.0, -4.0], dtype=np.float64)
+
+        with jax.transfer_guard("disallow"):
+            final_dofs = module.resolve_scaled_outer_phase_final_dofs(
+                anchor_dofs,
+                step_dofs,
+                0.25,
+                use_target_lane=True,
+            )
+
+        np.testing.assert_allclose(
+            np.asarray(jax.device_get(final_dofs), dtype=np.float64),
+            [10.5, 19.0],
+        )
+
+    def test_resolve_scaled_outer_phase_final_dofs_target_lane_host_anchor_device_step_is_transfer_safe(
+        self,
+    ):
+        module = self.load_module()
+        anchor_dofs = np.array([10.0, 20.0], dtype=np.float64)
+        step_dofs = jax.device_put(np.array([2.0, -4.0], dtype=np.float64))
+
+        with jax.transfer_guard("disallow"):
+            final_dofs = module.resolve_scaled_outer_phase_final_dofs(
+                anchor_dofs,
+                step_dofs,
+                0.25,
+                use_target_lane=True,
+            )
+
+        np.testing.assert_allclose(
+            np.asarray(jax.device_get(final_dofs), dtype=np.float64),
+            [10.5, 19.0],
+        )
+
+    def test_resolve_scaled_outer_phase_final_dofs_target_lane_host_anchor_host_step_is_transfer_safe(
+        self,
+    ):
+        module = self.load_module()
+        anchor_dofs = np.array([10.0, 20.0], dtype=np.float64)
+        step_dofs = np.array([2.0, -4.0], dtype=np.float64)
+
+        with jax.transfer_guard("disallow"):
+            final_dofs = module.resolve_scaled_outer_phase_final_dofs(
+                anchor_dofs,
+                step_dofs,
+                0.25,
+                use_target_lane=True,
+            )
+
+        self.assertIsInstance(final_dofs, jax.Array)
+        np.testing.assert_allclose(
+            np.asarray(jax.device_get(final_dofs), dtype=np.float64),
+            [10.5, 19.0],
+        )
+
+    def test_resolve_scaled_outer_phase_final_dofs_target_lane_scaled_state_host_anchor_is_transfer_safe(
+        self,
+    ):
+        module = self.load_module()
+        scaled_state = module.ScaledOuterPhaseOptimizerState(
+            step_dofs=jax.device_put(np.array([2.0, -4.0], dtype=np.float64)),
+            anchor_dofs=np.array([10.0, 20.0], dtype=np.float64),
+        )
+
+        with jax.transfer_guard("disallow"):
+            final_dofs = module.resolve_scaled_outer_phase_final_dofs(
+                np.array([0.0, 0.0], dtype=np.float64),
+                scaled_state,
+                0.25,
+                use_target_lane=True,
+            )
+
+        np.testing.assert_allclose(
+            np.asarray(jax.device_get(final_dofs), dtype=np.float64),
+            [10.5, 19.0],
+        )
+
+    def test_resolve_scaled_outer_phase_final_dofs_target_lane_scaled_state_host_anchor_host_step_is_transfer_safe(
+        self,
+    ):
+        module = self.load_module()
+        scaled_state = module.ScaledOuterPhaseOptimizerState(
+            step_dofs=np.array([2.0, -4.0], dtype=np.float64),
+            anchor_dofs=np.array([10.0, 20.0], dtype=np.float64),
+        )
+
+        with jax.transfer_guard("disallow"):
+            final_dofs = module.resolve_scaled_outer_phase_final_dofs(
+                np.array([0.0, 0.0], dtype=np.float64),
+                scaled_state,
+                0.25,
+                use_target_lane=True,
+            )
+
+        self.assertIsInstance(final_dofs, jax.Array)
+        np.testing.assert_allclose(
+            np.asarray(jax.device_get(final_dofs), dtype=np.float64),
+            [10.5, 19.0],
+        )
+
+    def test_build_scaled_outer_problem_target_lane_is_transfer_safe(self):
+        module = self.load_module()
+        seen = {"fun": [], "callback": []}
+
+        def base_fun(x):
+            seen["fun"].append(np.asarray(jax.device_get(x), dtype=np.float64))
+            return jnp.sum(x * x), x + x
+
+        def base_callback(x):
+            seen["callback"].append(np.asarray(jax.device_get(x), dtype=np.float64))
+
+        anchor_x = jax.device_put(np.array([10.0, 20.0], dtype=np.float64))
+        z = jax.device_put(np.array([2.0, -4.0], dtype=np.float64))
+
+        scaled_fun, scaled_callback = module.build_scaled_outer_problem(
+            base_fun,
+            base_callback,
+            anchor_x,
+            0.25,
+        )
+
+        with jax.transfer_guard("disallow"):
+            value, grad = scaled_fun(z)
+            scaled_callback(z)
+
+        self.assertAlmostEqual(float(jax.device_get(value)), 10.5**2 + 19.0**2)
+        np.testing.assert_allclose(
+            np.asarray(jax.device_get(grad), dtype=np.float64),
+            [5.25, 9.5],
+        )
+        np.testing.assert_allclose(seen["fun"][0], [10.5, 19.0])
+        np.testing.assert_allclose(seen["callback"][0], [10.5, 19.0])
+
+    def test_build_scaled_outer_problem_target_lane_jit_is_transfer_safe(self):
+        module = self.load_module()
+
+        def base_fun(x):
+            return jnp.sum(x * x), x + x
+
+        anchor_x = jax.device_put(np.array([10.0, 20.0], dtype=np.float64))
+        z = jax.device_put(np.array([2.0, -4.0], dtype=np.float64))
+        scaled_fun, _ = module.build_scaled_outer_problem(
+            base_fun,
+            None,
+            anchor_x,
+            0.25,
+        )
+
+        with jax.transfer_guard("disallow"):
+            value, grad = jax.jit(scaled_fun)(z)
+
+        self.assertAlmostEqual(float(jax.device_get(value)), 10.5**2 + 19.0**2)
+        np.testing.assert_allclose(
+            np.asarray(jax.device_get(grad), dtype=np.float64),
+            [5.25, 9.5],
+        )
+
+    def test_build_scaled_outer_problem_scaled_state_target_lane_is_transfer_safe(
+        self,
+    ):
+        module = self.load_module()
+        seen = {"callback": []}
+
+        def base_fun(x):
+            return jnp.sum(x * x), x + x
+
+        def base_callback(x):
+            seen["callback"].append(np.asarray(jax.device_get(x), dtype=np.float64))
+
+        anchor_x = jax.device_put(np.array([10.0, 20.0], dtype=np.float64))
+        step_dofs = jax.device_put(np.array([2.0, -4.0], dtype=np.float64))
+        scaled_state = module.build_target_lane_scaled_outer_phase_state(
+            anchor_x,
+            step_dofs,
+        )
+        scaled_fun, scaled_callback = module.build_scaled_outer_problem(
+            base_fun,
+            base_callback,
+            anchor_x,
+            0.25,
+        )
+
+        with jax.transfer_guard("disallow"):
+            value, grad = scaled_fun(scaled_state)
+            scaled_callback(scaled_state)
+
+        self.assertAlmostEqual(float(jax.device_get(value)), 10.5**2 + 19.0**2)
+        self.assertIsInstance(grad, module.ScaledOuterPhaseOptimizerState)
+        np.testing.assert_allclose(
+            np.asarray(jax.device_get(grad.step_dofs), dtype=np.float64),
+            [5.25, 9.5],
+        )
+        np.testing.assert_allclose(
+            np.asarray(jax.device_get(grad.anchor_dofs), dtype=np.float64),
+            [0.0, 0.0],
+        )
+        np.testing.assert_allclose(seen["callback"][0], [10.5, 19.0])
+
+    def test_build_scaled_outer_problem_scaled_state_target_lane_jit_is_transfer_safe(
+        self,
+    ):
+        module = self.load_module()
+
+        def base_fun(x):
+            return jnp.sum(x * x), x + x
+
+        anchor_x = jax.device_put(np.array([10.0, 20.0], dtype=np.float64))
+        step_dofs = jax.device_put(np.array([2.0, -4.0], dtype=np.float64))
+        scaled_state = module.build_target_lane_scaled_outer_phase_state(
+            anchor_x,
+            step_dofs,
+        )
+        scaled_fun, _ = module.build_scaled_outer_problem(
+            base_fun,
+            None,
+            anchor_x,
+            0.25,
+            anchor_in_state=True,
+        )
+
+        with jax.transfer_guard("disallow"):
+            value, grad = jax.jit(scaled_fun)(scaled_state)
+
+        self.assertAlmostEqual(float(jax.device_get(value)), 10.5**2 + 19.0**2)
+        self.assertIsInstance(grad, module.ScaledOuterPhaseOptimizerState)
+        np.testing.assert_allclose(
+            np.asarray(jax.device_get(grad.step_dofs), dtype=np.float64),
+            [5.25, 9.5],
+        )
+        np.testing.assert_allclose(
+            np.asarray(jax.device_get(grad.anchor_dofs), dtype=np.float64),
+            [0.0, 0.0],
+        )
+
+    def test_build_scaled_outer_scalar_problem_scaled_state_target_lane_jit_is_transfer_safe(
+        self,
+    ):
+        module = self.load_module()
+
+        def base_fun(x):
+            return jnp.sum(x * x)
+
+        anchor_x = jax.device_put(np.array([10.0, 20.0], dtype=np.float64))
+        step_dofs = jax.device_put(np.array([2.0, -4.0], dtype=np.float64))
+        scaled_state = module.build_target_lane_scaled_outer_phase_state(
+            anchor_x,
+            step_dofs,
+        )
+        scaled_fun, scaled_callback = module.build_scaled_outer_scalar_problem(
+            base_fun,
+            lambda _x: None,
+            anchor_x,
+            0.25,
+            anchor_in_state=True,
+        )
+
+        with jax.transfer_guard("disallow"):
+            value = jax.jit(scaled_fun)(scaled_state)
+            scaled_callback(scaled_state)
+
+        self.assertAlmostEqual(float(jax.device_get(value)), 10.5**2 + 19.0**2)
+
+    def test_resolve_single_stage_warm_start_paths_requires_artifacts(self):
+        module = self.load_module()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with self.assertRaisesRegex(
+                FileNotFoundError,
+                "single-stage warm start run directory is missing required artifacts",
+            ):
+                module.resolve_single_stage_warm_start_paths(tmpdir)
+
+    def test_load_single_stage_warm_start_state_reads_surface_and_metrics(self):
+        module = self.load_module()
+        surface_marker = object()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            run_dir = Path(tmpdir)
+            (run_dir / "surf_opt.json").write_text("{}", encoding="utf-8")
+            (run_dir / "results.json").write_text(
+                json.dumps({"FINAL_IOTA": 0.123, "FINAL_G": 4.5}),
+                encoding="utf-8",
+            )
+
+            with patch.object(module, "load", return_value=surface_marker):
+                warm_start = module.load_single_stage_warm_start_state(str(run_dir))
+
+        self.assertIs(warm_start["surface"], surface_marker)
+        self.assertEqual(warm_start["iota"], 0.123)
+        self.assertEqual(warm_start["G"], 4.5)
+        self.assertTrue(warm_start["surface_path"].endswith("surf_opt.json"))
+        self.assertTrue(warm_start["results_path"].endswith("results.json"))
+
+    def test_project_single_stage_warm_start_surface_dofs_reprojects_to_target_resolution(
+        self,
+    ):
+        module = self.load_module()
+
+        class FakeSurface:
+            nfp = 5
+            stellsym = True
+
+            def gamma(self):
+                raise AssertionError("projection should resample on the target grid")
+
+            def cross_section(self, phi, thetas=None):
+                theta_values = np.asarray(thetas, dtype=float)
+                return np.column_stack(
+                    (
+                        np.full(theta_values.shape, float(phi)),
+                        theta_values,
+                        theta_values + float(phi),
+                    )
+                )
+
+        quadpoints_phi = np.linspace(0.0, 0.2, 5, endpoint=False)
+        quadpoints_theta = np.linspace(0.0, 1.0, 7, endpoint=False)
+
+        with patch.object(
+            module, "SurfaceXYZTensorFourier", FakeSurfaceXYZTensorFourier
+        ):
+            projected_dofs = module.project_single_stage_warm_start_surface_dofs(
+                FakeSurface(),
+                mpol=8,
+                ntor=6,
+                quadpoints_phi=quadpoints_phi,
+                quadpoints_theta=quadpoints_theta,
+            )
+
+        np.testing.assert_allclose(projected_dofs, np.array([1.0]))
+        projected_surface = FakeSurfaceXYZTensorFourier.instances[-1]
+        self.assertEqual(projected_surface.mpol, 8)
+        self.assertEqual(projected_surface.ntor, 6)
+        expected_gamma = np.stack(
+            [
+                np.column_stack(
+                    (
+                        np.full(quadpoints_theta.shape, float(phi)),
+                        quadpoints_theta,
+                        quadpoints_theta + float(phi),
+                    )
+                )
+                for phi in quadpoints_phi
+            ],
+            axis=0,
+        )
+        np.testing.assert_allclose(projected_surface.fitted_gamma, expected_gamma)
+
+    def test_project_single_stage_warm_start_surface_dofs_uses_gamma_fast_path_for_xyz_surface(
+        self,
+    ):
+        module = self.load_module()
+
+        class FastSurfaceXYZTensorFourier(FakeSurfaceXYZTensorFourier):
+            instances = []
+
+            def __init__(self, **kwargs):
+                super().__init__(**kwargs)
+                FastSurfaceXYZTensorFourier.instances.append(self)
+
+            def gamma(self):
+                phi_grid = np.broadcast_to(
+                    self.quadpoints_phi[:, None],
+                    (self.quadpoints_phi.size, self.quadpoints_theta.size),
+                )
+                theta_grid = np.broadcast_to(
+                    self.quadpoints_theta[None, :],
+                    (self.quadpoints_phi.size, self.quadpoints_theta.size),
+                )
+                dof_offset = float(np.sum(self.dofs))
+                return np.stack(
+                    (
+                        phi_grid,
+                        theta_grid,
+                        phi_grid + theta_grid + dof_offset,
+                    ),
+                    axis=2,
+                )
+
+        source_surface = FastSurfaceXYZTensorFourier(
+            mpol=2,
+            ntor=2,
+            nfp=5,
+            stellsym=True,
+            quadpoints_theta=np.linspace(0.0, 1.0, 3, endpoint=False),
+            quadpoints_phi=np.linspace(0.0, 0.2, 2, endpoint=False),
+            dofs=np.array([3.0, -1.0]),
+        )
+        quadpoints_phi = np.linspace(0.0, 0.2, 5, endpoint=False)
+        quadpoints_theta = np.linspace(0.0, 1.0, 7, endpoint=False)
+
+        with patch.object(
+            module,
+            "SurfaceXYZTensorFourier",
+            FastSurfaceXYZTensorFourier,
+        ):
+            projected_dofs = module.project_single_stage_warm_start_surface_dofs(
+                source_surface,
+                mpol=8,
+                ntor=6,
+                quadpoints_phi=quadpoints_phi,
+                quadpoints_theta=quadpoints_theta,
+            )
+
+        self.assertEqual(len(FastSurfaceXYZTensorFourier.instances), 3)
+        projected_surface = FastSurfaceXYZTensorFourier.instances[1]
+        evaluation_surface = FastSurfaceXYZTensorFourier.instances[2]
+        np.testing.assert_allclose(
+            evaluation_surface.dofs,
+            np.array([3.0, -1.0]),
+        )
+        np.testing.assert_allclose(
+            projected_surface.fitted_gamma,
+            evaluation_surface.gamma(),
+        )
+        np.testing.assert_allclose(projected_dofs, np.array([1.0]))
+
+    def test_target_lane_hardware_success_filter_keeps_closure_constants_on_host(self):
+        module = self.load_module()
+        banana_curve = object()
+
+        class FakeBS:
+            def __init__(self):
+                self.coils = [types.SimpleNamespace(curve=banana_curve)]
+
+            def coil_dof_extraction_spec(self):
+                return {
+                    "offsets": jax.device_put(np.asarray([1.0, 2.0], dtype=np.float64))
+                }
+
+        class FakeBoozerSurface:
+            def __init__(self):
+                self.res = {"G": None}
+                self.surface = types.SimpleNamespace(
+                    mpol=2,
+                    ntor=2,
+                    nfp=5,
+                    stellsym=True,
+                    quadpoints_phi=np.linspace(0.0, 0.1, 3, endpoint=False),
+                    quadpoints_theta=np.linspace(0.0, 1.0, 4, endpoint=False),
+                )
+                self.quadpoints_phi = jax.device_put(
+                    np.linspace(0.0, 0.1, 3, endpoint=False, dtype=np.float64)
+                )
+                self.quadpoints_theta = jax.device_put(
+                    np.linspace(0.0, 1.0, 4, endpoint=False, dtype=np.float64)
+                )
+                self.mpol = 2
+                self.ntor = 2
+                self.nfp = 5
+                self.stellsym = True
+                self.scatter_indices = jax.device_put(np.asarray([0], dtype=np.int32))
+                self._surface_geometry_kind = "rzfourier"
+
+            def _unpack_decision_vector_jax(self, solved_x, optimize_G, coil_set_spec=None):
+                del solved_x, optimize_G, coil_set_spec
+                return (
+                    jax.device_put(np.zeros(2, dtype=np.float64)),
+                    jax.device_put(np.asarray(0.0, dtype=np.float64)),
+                    None,
+                )
+
+        vessel_surface = types.SimpleNamespace(surface_spec=lambda: {"rc": 1.0})
+        with patch(
+            "simsopt.jax_core.surface_rzfourier.surface_rz_fourier_gamma_from_spec",
+            return_value=jax.device_put(np.zeros((2, 3, 3), dtype=np.float64)),
+        ):
+            success_filter = module.build_single_stage_target_lane_hardware_success_filter(
+                FakeBoozerSurface(),
+                FakeBS(),
+                banana_curve,
+                vessel_surface,
+                cc_dist=0.05,
+                cs_dist=0.05,
+                ss_dist=0.05,
+                curvature_threshold=40.0,
+            )
+
+        def contains_jax_array(value):
+            return any(
+                isinstance(leaf, jax.Array)
+                for leaf in jax.tree_util.tree_leaves(value)
+            )
+
+        captured_values = [
+            cell.cell_contents for cell in (success_filter.__closure__ or ())
+        ]
+        self.assertFalse(any(contains_jax_array(value) for value in captured_values))
+        self.assertIsInstance(
+            getattr(success_filter, "_traceable_runtime_cache_signature", None),
+            tuple,
+        )
+
+    def test_target_lane_hardware_success_filter_signature_is_stable_for_equivalent_filters(
+        self,
+    ):
+        module = self.load_module()
+        banana_curve = object()
+
+        class FakeBS:
+            def __init__(self):
+                self.coils = [types.SimpleNamespace(curve=banana_curve)]
+
+            def coil_dof_extraction_spec(self):
+                return {"offsets": np.asarray([1.0, 2.0], dtype=np.float64)}
+
+        class FakeBoozerSurface:
+            def __init__(self):
+                self.res = {"G": None}
+                self.surface = types.SimpleNamespace(
+                    mpol=2,
+                    ntor=2,
+                    nfp=5,
+                    stellsym=True,
+                    quadpoints_phi=np.linspace(0.0, 0.1, 3, endpoint=False),
+                    quadpoints_theta=np.linspace(0.0, 1.0, 4, endpoint=False),
+                )
+                self.quadpoints_phi = np.linspace(0.0, 0.1, 3, endpoint=False)
+                self.quadpoints_theta = np.linspace(0.0, 1.0, 4, endpoint=False)
+                self.mpol = 2
+                self.ntor = 2
+                self.nfp = 5
+                self.stellsym = True
+                self.scatter_indices = np.asarray([0], dtype=np.int32)
+                self._surface_geometry_kind = "rzfourier"
+
+            def _unpack_decision_vector_jax(self, solved_x, optimize_G, coil_set_spec=None):
+                del solved_x, optimize_G, coil_set_spec
+                return (
+                    jax.device_put(np.zeros(2, dtype=np.float64)),
+                    jax.device_put(np.asarray(0.0, dtype=np.float64)),
+                    None,
+                )
+
+        vessel_surface = types.SimpleNamespace(surface_spec=lambda: {"rc": 1.0})
+        with patch(
+            "simsopt.jax_core.surface_rzfourier.surface_rz_fourier_gamma_from_spec",
+            return_value=np.zeros((2, 3, 3), dtype=np.float64),
+        ):
+            success_filter_a = module.build_single_stage_target_lane_hardware_success_filter(
+                FakeBoozerSurface(),
+                FakeBS(),
+                banana_curve,
+                vessel_surface,
+                cc_dist=0.05,
+                cs_dist=0.05,
+                ss_dist=0.05,
+                curvature_threshold=40.0,
+            )
+            success_filter_b = module.build_single_stage_target_lane_hardware_success_filter(
+                FakeBoozerSurface(),
+                FakeBS(),
+                banana_curve,
+                vessel_surface,
+                cc_dist=0.05,
+                cs_dist=0.05,
+                ss_dist=0.05,
+                curvature_threshold=40.0,
+            )
+
+        self.assertEqual(
+            success_filter_a._traceable_runtime_cache_signature,
+            success_filter_b._traceable_runtime_cache_signature,
+        )
+
+    def test_profile_target_lane_only_forces_profile_collection(self):
+        module = self.load_module()
+
+        with patch.dict(os.environ, {}, clear=True), patch.object(
+            sys,
+            "argv",
+            [
+                "single_stage_banana_example.py",
+                "--backend",
+                "jax",
+                "--profile-target-lane-only",
+            ],
+        ):
+            args = module.parse_args()
+
+        self.assertTrue(args.profile_target_lane_only)
+        self.assertTrue(args.profile_target_lane)
+
+    def test_parse_args_accepts_diagnose_target_lane_gradient(self):
+        module = self.load_module()
+
+        with patch.dict(os.environ, {}, clear=True), patch.object(
+            sys,
+            "argv",
+            [
+                "single_stage_banana_example.py",
+                "--backend",
+                "jax",
+                "--diagnose-target-lane-gradient",
+            ],
+        ):
+            args = module.parse_args()
+
+        self.assertTrue(args.diagnose_target_lane_gradient)
+        self.assertFalse(args.profile_target_lane_only)
+
+    def test_parse_args_accepts_diagnose_target_lane_scaled_phase1(self):
+        module = self.load_module()
+
+        with patch.dict(os.environ, {}, clear=True), patch.object(
+            sys,
+            "argv",
+            [
+                "single_stage_banana_example.py",
+                "--backend",
+                "jax",
+                "--diagnose-target-lane-scaled-phase1",
+            ],
+        ):
+            args = module.parse_args()
+
+        self.assertTrue(args.diagnose_target_lane_scaled_phase1)
+        self.assertFalse(args.profile_target_lane_only)
+
+    def test_parse_args_accepts_record_target_lane_invalid_state_events(self):
+        module = self.load_module()
+
+        with patch.dict(os.environ, {}, clear=True), patch.object(
+            sys,
+            "argv",
+            [
+                "single_stage_banana_example.py",
+                "--backend",
+                "jax",
+                "--record-target-lane-invalid-state-events",
+            ],
+        ):
+            args = module.parse_args()
+
+        self.assertTrue(args.record_target_lane_invalid_state_events)
+
+    def test_parse_args_accepts_minimal_artifacts(self):
+        module = self.load_module()
+
+        with patch.dict(os.environ, {}, clear=True), patch.object(
+            sys,
+            "argv",
+            ["single_stage_banana_example.py", "--minimal-artifacts"],
+        ):
+            args = module.parse_args()
+
+        self.assertTrue(args.minimal_artifacts)
+
+    def test_extract_optimizer_diagnostics_flags_nonfinite_state(self):
+        module = self.load_module()
+        result = types.SimpleNamespace(
+            fun=np.inf,
+            jac=np.asarray([1.0, np.nan], dtype=np.float64),
+            x=np.asarray([0.0, 1.0], dtype=np.float64),
+        )
+
+        diagnostics = module.extract_optimizer_diagnostics(result, ran_optimizer=True)
+
+        self.assertIsNone(diagnostics["fun"])
+        self.assertFalse(diagnostics["fun_finite"])
+        self.assertFalse(diagnostics["jac_finite"])
+        self.assertIsNone(diagnostics["jac_inf_norm"])
+        self.assertTrue(diagnostics["x_finite"])
+        self.assertTrue(diagnostics["invalid_state"])
+
+    def test_extract_optimizer_diagnostics_uses_nonfinite_message_fallback(self):
+        module = self.load_module()
+
+        diagnostics = module.extract_optimizer_diagnostics(
+            None,
+            ran_optimizer=True,
+            termination_message="Optimization failed with non-finite objective or gradient.",
+        )
+
+        self.assertIsNone(diagnostics["fun"])
+        self.assertFalse(diagnostics["fun_finite"])
+        self.assertFalse(diagnostics["jac_finite"])
+        self.assertIsNone(diagnostics["jac_inf_norm"])
+        self.assertIsNone(diagnostics["x_finite"])
+        self.assertTrue(diagnostics["invalid_state"])
+
+    def test_build_target_lane_invalid_state_failure_callback_records_payload(self):
+        module = self.load_module()
+        events = []
+
+        callback = module.build_target_lane_invalid_state_failure_callback(
+            events,
+            phase="phase2",
+        )
+        callback(
+            3,
+            np.array([0.0, 1.0], dtype=np.float64),
+            np.nan,
+            np.array([1.0, np.nan], dtype=np.float64),
+            np.array([-1.0, 2.0], dtype=np.float64),
+            np.array([-0.5, 1.0], dtype=np.float64),
+            0.5,
+            False,
+            True,
+            False,
+            True,
+            False,
+            0,
+        )
+
+        self.assertEqual(len(events), 1)
+        event = events[0]
+        self.assertEqual(event["phase"], "phase2")
+        self.assertEqual(event["iteration"], 3)
+        self.assertEqual(event["step_scale"]["value"], 0.5)
+        self.assertEqual(event["trial_value"]["classification"], "nan")
+        self.assertFalse(event["trial_grad"]["all_finite"])
+        self.assertEqual(event["trial_grad"]["first_nonfinite_index"], 1)
+        self.assertEqual(event["search_direction"]["values"], [-1.0, 2.0])
+        self.assertEqual(event["step_vector"]["values"], [-0.5, 1.0])
+
+    def test_record_target_lane_invalid_state_events_enabled_defaults_false(self):
+        module = self.load_module()
+
+        self.assertFalse(
+            module.record_target_lane_invalid_state_events_enabled(
+                types.SimpleNamespace()
+            )
+        )
+
+    def test_resolve_target_lane_invalid_state_failure_callback_requires_opt_in(self):
+        module = self.load_module()
+        events = []
+
+        callback = module.resolve_target_lane_invalid_state_failure_callback(
+            events,
+            phase="phase2",
+            use_target_lane=True,
+            args=types.SimpleNamespace(record_target_lane_invalid_state_events=False),
+        )
+
+        self.assertIsNone(callback)
+
+    def test_resolve_target_lane_invalid_state_failure_callback_builds_callback_when_enabled(
+        self,
+    ):
+        module = self.load_module()
+        events = []
+
+        callback = module.resolve_target_lane_invalid_state_failure_callback(
+            events,
+            phase="phase2",
+            use_target_lane=True,
+            args=types.SimpleNamespace(record_target_lane_invalid_state_events=True),
+        )
+
+        self.assertIsNotNone(callback)
+        callback(
+            1,
+            np.array([0.0], dtype=np.float64),
+            1.0,
+            np.array([0.5], dtype=np.float64),
+            np.array([-0.25], dtype=np.float64),
+            np.array([-0.25], dtype=np.float64),
+            0.5,
+            False,
+            False,
+            False,
+            True,
+            False,
+            0,
+        )
+        self.assertEqual(len(events), 1)
+
+    def test_resolve_single_stage_outer_maxls_rejects_nonpositive_budget(self):
+        module = self.load_module()
+
+        with self.assertRaisesRegex(ValueError, "outer_maxls must be at least 1"):
+            module.resolve_single_stage_outer_maxls("jax", "ondevice", 0)
+
+    def test_resolve_single_stage_outer_maxls_uses_benchmark_budget_for_target_lane(self):
+        module = self.load_module()
+
+        self.assertEqual(
+            module.resolve_single_stage_outer_maxls(
+                "jax",
+                "ondevice",
+                benchmark_mode=True,
+            ),
+            4,
+        )
+
+    def test_resolve_single_stage_outer_maxcor_rejects_nonpositive_budget(self):
+        module = self.load_module()
+
+        with self.assertRaisesRegex(ValueError, "maxcor must be at least 1"):
+            module.resolve_single_stage_outer_maxcor("jax", "ondevice", 0)
+
+    def test_resolve_target_lane_boozer_bfgs_tol_rejects_nonpositive_override(self):
+        module = self.load_module()
+
+        with self.assertRaisesRegex(
+            ValueError, "target_lane_boozer_bfgs_tol must be positive"
+        ):
+            module.resolve_target_lane_boozer_bfgs_tol("jax", "ondevice", 0.0)
+
+    def test_resolve_target_lane_boozer_bfgs_maxiter_rejects_nonpositive_override(
+        self,
+    ):
+        module = self.load_module()
+
+        with self.assertRaisesRegex(
+            ValueError, "target_lane_boozer_bfgs_maxiter must be at least 1"
+        ):
+            module.resolve_target_lane_boozer_bfgs_maxiter("jax", "ondevice", 0)
+
+    def test_resolve_target_lane_boozer_newton_tol_rejects_nonpositive_override(self):
+        module = self.load_module()
+
+        with self.assertRaisesRegex(
+            ValueError, "target_lane_boozer_newton_tol must be positive"
+        ):
+            module.resolve_target_lane_boozer_newton_tol("jax", "ondevice", 0.0)
+
+    def test_resolve_target_lane_boozer_newton_maxiter_rejects_nonpositive_override(
+        self,
+    ):
+        module = self.load_module()
+
+        with self.assertRaisesRegex(
+            ValueError, "target_lane_boozer_newton_maxiter must be at least 1"
+        ):
+            module.resolve_target_lane_boozer_newton_maxiter("jax", "ondevice", 0)
+
+    def test_should_write_single_stage_full_artifacts_respects_minimal_mode(self):
+        module = self.load_module()
+
+        self.assertTrue(
+            module.should_write_single_stage_full_artifacts(False, False)
+        )
+        self.assertFalse(
+            module.should_write_single_stage_full_artifacts(False, True)
+        )
+        self.assertFalse(
+            module.should_write_single_stage_full_artifacts(True, False)
+        )
+        self.assertFalse(
+            module.should_write_single_stage_full_artifacts(True, True)
+        )
+
+    def test_should_write_single_stage_restart_artifacts_only_skips_benchmark(self):
+        module = self.load_module()
+
+        self.assertTrue(module.should_write_single_stage_restart_artifacts(False))
+        self.assertFalse(module.should_write_single_stage_restart_artifacts(True))
+
+    def test_temporary_boozer_surface_option_overrides_restores_original_values(self):
+        module = self.load_module()
+        boozer_surface = types.SimpleNamespace(options={"bfgs_tol": 1e-10, "verbose": True})
+
+        with module.temporary_boozer_surface_option_overrides(
+            boozer_surface,
+            bfgs_tol=1e-8,
+            verbose=None,
+        ):
+            self.assertEqual(boozer_surface.options["bfgs_tol"], 1e-8)
+            self.assertEqual(boozer_surface.options["verbose"], True)
+
+        self.assertEqual(boozer_surface.options["bfgs_tol"], 1e-10)
+        self.assertEqual(boozer_surface.options["verbose"], True)
+
     def test_parse_args_accepts_boozer_least_squares_algorithm_override(self):
         module = self.load_module()
 
@@ -650,6 +2066,7 @@ class SingleStageExampleTests(unittest.TestCase):
             args = module.parse_args()
 
         self.assertEqual(args.boozer_least_squares_algorithm, "lm")
+        self.assertTrue(args.boozer_least_squares_algorithm_explicit)
 
     def test_use_experimental_target_lane_value_and_grad_only_on_jax_ondevice(self):
         module = self.load_module()
@@ -698,11 +2115,17 @@ class SingleStageExampleTests(unittest.TestCase):
         def _runtime_builder(
             *args,
             include_profile_suite=False,
+            include_host_wrappers=False,
             outer_objective_config=None,
             success_filter=None,
         ):
             runtime_calls.append(
-                (include_profile_suite, outer_objective_config, success_filter)
+                (
+                    include_profile_suite,
+                    include_host_wrappers,
+                    outer_objective_config,
+                    success_filter,
+                )
             )
             return {
                 "objective": object(),
@@ -732,7 +2155,7 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertIsNone(scalar_fun)
         self.assertIs(value_and_grad_fun, value_and_grad_marker)
         self.assertIsNone(target_lane_profile)
-        self.assertEqual(runtime_calls, [(False, None, None)])
+        self.assertEqual(runtime_calls, [(False, False, None, None)])
 
     def test_build_target_lane_outer_objectives_threads_runtime_bundle_options(
         self,
@@ -746,11 +2169,17 @@ class SingleStageExampleTests(unittest.TestCase):
         def _runtime_builder(
             *args,
             include_profile_suite=False,
+            include_host_wrappers=False,
             outer_objective_config=None,
             success_filter=None,
         ):
             runtime_calls.append(
-                (include_profile_suite, outer_objective_config, success_filter)
+                (
+                    include_profile_suite,
+                    include_host_wrappers,
+                    outer_objective_config,
+                    success_filter,
+                )
             )
             return {
                 "objective": objective_marker,
@@ -779,8 +2208,162 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertIsNone(target_lane_profile)
         self.assertEqual(
             runtime_calls,
-            [(False, outer_objective_config_marker, success_filter_marker)],
+            [
+                (
+                    False,
+                    False,
+                    outer_objective_config_marker,
+                    success_filter_marker,
+                )
+            ],
         )
+
+    def test_build_target_lane_outer_objectives_profiles_with_jax_coil_dofs(self):
+        module = self.load_module()
+        bs = types.SimpleNamespace(x=np.array([1.0, -2.0], dtype=np.float64))
+        profiled_calls = []
+
+        def _runtime_builder(
+            *args,
+            include_profile_suite=False,
+            include_host_wrappers=False,
+            outer_objective_config=None,
+            success_filter=None,
+        ):
+            self.assertFalse(include_host_wrappers)
+            return {
+                "objective": object(),
+                "value_and_grad": object(),
+                "profile_suite": "profile-suite-marker",
+            }
+
+        def _profile(profile_suite, coil_dofs):
+            profiled_calls.append((profile_suite, coil_dofs))
+            return {"ok": True}
+
+        with patch.object(
+            module,
+            "get_traceable_single_stage_runtime_bundle_builder",
+            return_value=_runtime_builder,
+        ), patch.object(
+            module,
+            "profile_traceable_target_lane_objective",
+            side_effect=_profile,
+        ):
+            _, _, target_lane_profile = module.build_target_lane_outer_objectives(
+                object(),
+                bs,
+                object(),
+                use_value_and_grad=True,
+                profile_target_lane=True,
+                profile_batch_size=1,
+                outer_objective_config=None,
+            )
+
+        self.assertEqual(target_lane_profile["ok"], True)
+        self.assertEqual(len(profiled_calls), 1)
+        self.assertEqual(profiled_calls[0][0], "profile-suite-marker")
+        self.assertIsInstance(profiled_calls[0][1], jax.Array)
+        self.assertNotEqual(
+            tuple(np.asarray(profiled_calls[0][1], dtype=np.float64)),
+            tuple(bs.x),
+        )
+        self.assertEqual(target_lane_profile["profile_point_kind"], "baseline_perturbed")
+
+    def test_build_target_lane_profile_coil_dofs_avoids_exact_baseline_fast_path(self):
+        module = self.load_module()
+
+        profiled = module.build_target_lane_profile_coil_dofs(
+            np.array([0.0, -2.0], dtype=np.float64)
+        )
+
+        self.assertIsInstance(profiled, jax.Array)
+        np.testing.assert_allclose(
+            np.asarray(profiled, dtype=np.float64)[1:],
+            np.array([-2.0], dtype=np.float64),
+        )
+        self.assertNotEqual(float(np.asarray(profiled, dtype=np.float64)[0]), 0.0)
+
+    def test_build_target_lane_profile_batch_coil_dofs_returns_perturbed_batch(self):
+        module = self.load_module()
+
+        profiled_batch = module.build_target_lane_profile_batch_coil_dofs(
+            np.array([0.0, -2.0], dtype=np.float64),
+            batch_size=3,
+        )
+
+        self.assertIsInstance(profiled_batch, jax.Array)
+        host_batch = np.asarray(profiled_batch, dtype=np.float64)
+        self.assertEqual(host_batch.shape, (3, 2))
+        self.assertTrue(np.all(np.isfinite(host_batch)))
+        self.assertTrue(np.all(host_batch[:, 1] != 0.0))
+        self.assertTrue(
+            any(
+                not np.array_equal(row, np.array([0.0, -2.0]))
+                for row in host_batch
+            )
+        )
+
+    def test_build_target_lane_outer_objectives_profiles_seed_batch_when_requested(
+        self,
+    ):
+        module = self.load_module()
+        bs = types.SimpleNamespace(x=np.array([1.0, -2.0], dtype=np.float64))
+        batched_calls = []
+
+        def _runtime_builder(
+            *args,
+            include_profile_suite=False,
+            include_host_wrappers=False,
+            outer_objective_config=None,
+            success_filter=None,
+        ):
+            self.assertFalse(include_host_wrappers)
+            return {
+                "objective": object(),
+                "value_and_grad": object(),
+                "profile_suite": "profile-suite-marker",
+            }
+
+        def _profile(_profile_suite, _coil_dofs):
+            return {"ok": True}
+
+        def _profile_batch(profile_suite, coil_dofs_batch):
+            batched_calls.append((profile_suite, coil_dofs_batch))
+            return {"batch_ok": True}
+
+        with patch.object(
+            module,
+            "get_traceable_single_stage_runtime_bundle_builder",
+            return_value=_runtime_builder,
+        ), patch.object(
+            module,
+            "profile_traceable_target_lane_objective",
+            side_effect=_profile,
+        ), patch.object(
+            module,
+            "profile_traceable_target_lane_seed_batch",
+            side_effect=_profile_batch,
+        ):
+            _, _, target_lane_profile = module.build_target_lane_outer_objectives(
+                object(),
+                bs,
+                object(),
+                use_value_and_grad=True,
+                profile_target_lane=True,
+                profile_batch_size=3,
+                outer_objective_config=None,
+            )
+
+        self.assertEqual(target_lane_profile["batched_seed_profile"]["batch_ok"], True)
+        self.assertEqual(
+            target_lane_profile["batched_seed_profile"]["profile_point_kind"],
+            "baseline_perturbed_batch",
+        )
+        self.assertEqual(len(batched_calls), 1)
+        self.assertEqual(batched_calls[0][0], "profile-suite-marker")
+        self.assertIsInstance(batched_calls[0][1], jax.Array)
+        self.assertEqual(np.asarray(batched_calls[0][1]).shape, (3, 2))
 
     def test_prepare_target_lane_outer_objectives_still_builds_objective_when_filter_disabled(
         self,
@@ -797,7 +2380,7 @@ class SingleStageExampleTests(unittest.TestCase):
             ),
         ), patch.object(
             module,
-            "build_traceable_single_stage_outer_objective_config",
+            "build_target_lane_outer_objective_config",
             return_value="config-marker",
         ) as build_objective_config, patch.object(
             module,
@@ -818,6 +2401,7 @@ class SingleStageExampleTests(unittest.TestCase):
                 use_target_lane=True,
                 use_value_and_grad=False,
                 profile_target_lane=True,
+                profile_batch_size=3,
                 disable_success_filter=True,
                 non_qs_weight=1.0,
                 residual_weight=10.0,
@@ -845,6 +2429,7 @@ class SingleStageExampleTests(unittest.TestCase):
             unittest.mock.ANY,
             use_value_and_grad=False,
             profile_target_lane=True,
+            profile_batch_size=3,
             outer_objective_config="config-marker",
             success_filter=None,
         )
@@ -862,7 +2447,7 @@ class SingleStageExampleTests(unittest.TestCase):
             return_value=success_filter_marker,
         ) as build_success_filter, patch.object(
             module,
-            "build_traceable_single_stage_outer_objective_config",
+            "build_target_lane_outer_objective_config",
             return_value="config-marker",
         ) as build_objective_config, patch.object(
             module,
@@ -883,6 +2468,7 @@ class SingleStageExampleTests(unittest.TestCase):
                 use_target_lane=True,
                 use_value_and_grad=True,
                 profile_target_lane=False,
+                profile_batch_size=1,
                 disable_success_filter=False,
                 non_qs_weight=1.0,
                 residual_weight=10.0,
@@ -911,8 +2497,480 @@ class SingleStageExampleTests(unittest.TestCase):
             unittest.mock.ANY,
             use_value_and_grad=True,
             profile_target_lane=False,
+            profile_batch_size=1,
             outer_objective_config="config-marker",
             success_filter=success_filter_marker,
+        )
+
+    def test_build_target_lane_gradient_diagnosis_threads_config_and_filter(self):
+        module = self.load_module()
+        success_filter_marker = object()
+        diagnostic_builder_calls = []
+
+        def _diagnostic_builder(
+            *args,
+            outer_objective_config=None,
+            success_filter=None,
+        ):
+            diagnostic_builder_calls.append(
+                (outer_objective_config, success_filter)
+            )
+            return {
+                "all_finite": False,
+                "first_nonfinite_term": "curve_surface",
+            }
+
+        with patch.object(
+            module,
+            "build_target_lane_outer_objective_config",
+            return_value="config-marker",
+        ) as build_config, patch.object(
+            module,
+            "get_traceable_single_stage_runtime_diagnostic_builder",
+            return_value=_diagnostic_builder,
+        ):
+            diagnosis = module.build_target_lane_gradient_diagnosis(
+                object(),
+                object(),
+                object(),
+                object(),
+                object(),
+                success_filter=success_filter_marker,
+                non_qs_weight=1.0,
+                residual_weight=10.0,
+                iota_weight=20.0,
+                length_weight=30.0,
+                length_target=4.0,
+                cc_dist=0.05,
+                cc_weight=40.0,
+                cs_dist=0.01,
+                cs_weight=50.0,
+                ss_dist=0.02,
+                surf_dist_weight=60.0,
+                curvature_threshold=40.0,
+                curvature_weight=70.0,
+            )
+
+        self.assertEqual(
+            diagnosis,
+            {"all_finite": False, "first_nonfinite_term": "curve_surface"},
+        )
+        build_config.assert_called_once()
+        self.assertEqual(
+            diagnostic_builder_calls,
+            [("config-marker", success_filter_marker)],
+        )
+
+    def test_build_target_lane_scaled_phase1_diagnosis_threads_runtime_and_optimizer(
+        self,
+    ):
+        module = self.load_module()
+        success_filter_marker = object()
+        runtime_builder_calls = []
+        optimizer_calls = []
+
+        def _runtime_builder(
+            *args,
+            include_host_wrappers=False,
+            outer_objective_config=None,
+            success_filter=None,
+        ):
+            runtime_builder_calls.append(
+                (include_host_wrappers, outer_objective_config, success_filter)
+            )
+            self.assertTrue(include_host_wrappers)
+
+            def _host_value_and_grad(x):
+                x = np.asarray(x, dtype=np.float64)
+                return float(np.dot(x, x)), 2.0 * x
+
+            return {
+                "host_value_and_grad": _host_value_and_grad,
+                "value_and_grad": object(),
+            }
+
+        def _run_single_stage_optimizer(
+            fun,
+            dofs,
+            *,
+            contract,
+            maxiter,
+            ftol,
+            gtol,
+            maxcor,
+            outer_maxls,
+            callback,
+            scalar_fun,
+        ):
+            optimizer_calls.append(
+                {
+                    "fun": fun,
+                    "dofs": np.asarray(dofs, dtype=np.float64),
+                    "contract_method": contract.method,
+                    "maxiter": maxiter,
+                    "ftol": ftol,
+                    "gtol": gtol,
+                    "maxcor": maxcor,
+                    "outer_maxls": outer_maxls,
+                    "callback": callback,
+                    "scalar_fun": scalar_fun,
+                }
+            )
+            return types.SimpleNamespace(
+                x=np.array([0.2, -0.4], dtype=np.float64),
+                nit=1,
+                success=False,
+                message="phase1 failed",
+                status=5,
+                nfev=3,
+                njev=3,
+                ls_status=2,
+            )
+
+        with patch.object(
+            module,
+            "build_target_lane_outer_objective_config",
+            return_value="config-marker",
+        ), patch.object(
+            module,
+            "get_traceable_single_stage_runtime_bundle_builder",
+            return_value=_runtime_builder,
+        ), patch.object(
+            module,
+            "build_scaled_outer_problem",
+            return_value=("scaled-fun", "scaled-callback"),
+        ) as build_scaled_problem, patch.object(
+            module,
+            "run_single_stage_optimizer",
+            side_effect=_run_single_stage_optimizer,
+        ):
+            diagnosis = module.build_target_lane_scaled_phase1_diagnosis(
+                object(),
+                object(),
+                object(),
+                object(),
+                object(),
+                anchor_dofs=np.array([1.0, -2.0], dtype=np.float64),
+                contract=types.SimpleNamespace(method="lbfgs-ondevice"),
+                phase1_maxiter=4,
+                step_scale=0.25,
+                ftol=1e-8,
+                gtol=1e-6,
+                maxcor=9,
+                outer_maxls=7,
+                callback="callback-marker",
+                success_filter=success_filter_marker,
+                non_qs_weight=1.0,
+                residual_weight=10.0,
+                iota_weight=20.0,
+                length_weight=30.0,
+                length_target=4.0,
+                cc_dist=0.05,
+                cc_weight=40.0,
+                cs_dist=0.01,
+                cs_weight=50.0,
+                ss_dist=0.02,
+                surf_dist_weight=60.0,
+                curvature_threshold=40.0,
+                curvature_weight=70.0,
+            )
+
+        build_scaled_problem.assert_called_once()
+        self.assertEqual(
+            runtime_builder_calls,
+            [(True, "config-marker", success_filter_marker)],
+        )
+        self.assertEqual(len(optimizer_calls), 1)
+        self.assertEqual(optimizer_calls[0]["contract_method"], "lbfgs-ondevice")
+        self.assertEqual(optimizer_calls[0]["maxiter"], 4)
+        self.assertEqual(optimizer_calls[0]["callback"], "scaled-callback")
+        self.assertIsNone(optimizer_calls[0]["scalar_fun"])
+        self.assertEqual(diagnosis["contract_method"], "lbfgs-ondevice")
+        self.assertTrue(diagnosis["all_finite"])
+        self.assertIsNone(diagnosis["first_nonfinite_stage"])
+        self.assertEqual(diagnosis["optimizer"]["message"], "phase1 failed")
+        self.assertEqual(diagnosis["optimizer"]["status"], 5)
+        np.testing.assert_allclose(
+            diagnosis["anchor"]["mapped_coil_dofs"],
+            np.array([1.0, -2.0], dtype=np.float64),
+        )
+        np.testing.assert_allclose(
+            diagnosis["scaled_origin"]["scaled_dofs"],
+            np.zeros(2, dtype=np.float64),
+        )
+        np.testing.assert_allclose(
+            diagnosis["steepest_descent_trial"]["scaled_dofs"],
+            np.array([-0.5, 1.0], dtype=np.float64),
+        )
+        np.testing.assert_allclose(
+            diagnosis["optimizer_mapped_state"]["mapped_coil_dofs"],
+            np.array([1.05, -2.1], dtype=np.float64),
+        )
+
+    def test_build_target_lane_scaled_phase1_diagnosis_is_transfer_safe(self):
+        module = self.load_module()
+        host_value_and_grad_calls = []
+
+        def _runtime_builder(
+            *args,
+            include_host_wrappers=False,
+            outer_objective_config=None,
+            success_filter=None,
+        ):
+            del args, outer_objective_config, success_filter
+            self.assertTrue(include_host_wrappers)
+
+            def _host_value_and_grad(x):
+                host_value_and_grad_calls.append(x)
+                self.assertIsInstance(x, jax.Array)
+                x_host = np.asarray(jax.device_get(x), dtype=np.float64)
+                return float(np.dot(x_host, x_host)), 2.0 * x_host
+
+            return {
+                "host_value_and_grad": _host_value_and_grad,
+                "value_and_grad": object(),
+            }
+
+        def _run_single_stage_optimizer(
+            fun,
+            dofs,
+            *,
+            contract,
+            maxiter,
+            ftol,
+            gtol,
+            maxcor,
+            outer_maxls,
+            callback,
+            scalar_fun,
+        ):
+            del (
+                fun,
+                dofs,
+                contract,
+                maxiter,
+                ftol,
+                gtol,
+                maxcor,
+                outer_maxls,
+                callback,
+                scalar_fun,
+            )
+            return types.SimpleNamespace(
+                x=jax.device_put(np.array([0.2, -0.4], dtype=np.float64)),
+                nit=1,
+                success=True,
+                message="ok",
+                status=0,
+                nfev=1,
+                njev=1,
+                ls_status=0,
+            )
+
+        with patch.object(
+            module,
+            "build_target_lane_outer_objective_config",
+            return_value="config-marker",
+        ), patch.object(
+            module,
+            "get_traceable_single_stage_runtime_bundle_builder",
+            return_value=_runtime_builder,
+        ), patch.object(
+            module,
+            "build_scaled_outer_problem",
+            return_value=("scaled-fun", None),
+        ), patch.object(
+            module,
+            "run_single_stage_optimizer",
+            side_effect=_run_single_stage_optimizer,
+        ):
+            with jax.transfer_guard("disallow"):
+                diagnosis = module.build_target_lane_scaled_phase1_diagnosis(
+                    object(),
+                    object(),
+                    object(),
+                    object(),
+                    object(),
+                    anchor_dofs=jax.device_put(np.array([1.0, -2.0], dtype=np.float64)),
+                    contract=types.SimpleNamespace(method="lbfgs-ondevice"),
+                    phase1_maxiter=4,
+                    step_scale=0.25,
+                    ftol=1e-8,
+                    gtol=1e-6,
+                    maxcor=9,
+                    outer_maxls=7,
+                    callback=None,
+                    success_filter=None,
+                    non_qs_weight=1.0,
+                    residual_weight=10.0,
+                    iota_weight=20.0,
+                    length_weight=30.0,
+                    length_target=4.0,
+                    cc_dist=0.05,
+                    cc_weight=40.0,
+                    cs_dist=0.01,
+                    cs_weight=50.0,
+                    ss_dist=0.02,
+                    surf_dist_weight=60.0,
+                    curvature_threshold=40.0,
+                    curvature_weight=70.0,
+                )
+
+        self.assertTrue(diagnosis["all_finite"])
+        self.assertGreaterEqual(len(host_value_and_grad_calls), 4)
+
+    def test_build_target_lane_scaled_phase1_diagnosis_writes_incremental_checkpoints(
+        self,
+    ):
+        module = self.load_module()
+        checkpoint_payloads = []
+
+        def _runtime_builder(
+            *args,
+            include_host_wrappers=False,
+            outer_objective_config=None,
+            success_filter=None,
+        ):
+            del args, outer_objective_config, success_filter
+            self.assertTrue(include_host_wrappers)
+
+            def _host_value_and_grad(x):
+                x = np.asarray(x, dtype=np.float64)
+                return float(np.dot(x, x)), 2.0 * x
+
+            return {
+                "host_value_and_grad": _host_value_and_grad,
+                "value_and_grad": object(),
+            }
+
+        def _run_single_stage_optimizer(
+            fun,
+            dofs,
+            *,
+            contract,
+            maxiter,
+            ftol,
+            gtol,
+            maxcor,
+            outer_maxls,
+            callback,
+            scalar_fun,
+        ):
+            del (
+                fun,
+                dofs,
+                contract,
+                maxiter,
+                ftol,
+                gtol,
+                maxcor,
+                outer_maxls,
+                callback,
+                scalar_fun,
+            )
+            return types.SimpleNamespace(
+                x=np.array([0.2, -0.4], dtype=np.float64),
+                nit=1,
+                success=False,
+                message="phase1 failed",
+                status=5,
+                nfev=3,
+                njev=3,
+                ls_status=2,
+            )
+
+        def _write_json_file(path, payload):
+            checkpoint_payloads.append(
+                (
+                    path,
+                    json.loads(json.dumps(module.sanitize_json_payload(payload))),
+                )
+            )
+
+        with patch.object(
+            module,
+            "build_target_lane_outer_objective_config",
+            return_value="config-marker",
+        ), patch.object(
+            module,
+            "get_traceable_single_stage_runtime_bundle_builder",
+            return_value=_runtime_builder,
+        ), patch.object(
+            module,
+            "build_scaled_outer_problem",
+            return_value=("scaled-fun", "scaled-callback"),
+        ), patch.object(
+            module,
+            "run_single_stage_optimizer",
+            side_effect=_run_single_stage_optimizer,
+        ), patch.object(
+            module,
+            "write_json_file",
+            side_effect=_write_json_file,
+        ):
+            diagnosis = module.build_target_lane_scaled_phase1_diagnosis(
+                object(),
+                object(),
+                object(),
+                object(),
+                object(),
+                anchor_dofs=np.array([1.0, -2.0], dtype=np.float64),
+                contract=types.SimpleNamespace(method="lbfgs-ondevice"),
+                phase1_maxiter=4,
+                step_scale=0.25,
+                ftol=1e-8,
+                gtol=1e-6,
+                maxcor=9,
+                outer_maxls=7,
+                callback="callback-marker",
+                success_filter=None,
+                non_qs_weight=1.0,
+                residual_weight=10.0,
+                iota_weight=20.0,
+                length_weight=30.0,
+                length_target=4.0,
+                cc_dist=0.05,
+                cc_weight=40.0,
+                cs_dist=0.01,
+                cs_weight=50.0,
+                ss_dist=0.02,
+                surf_dist_weight=60.0,
+                curvature_threshold=40.0,
+                curvature_weight=70.0,
+                checkpoint_path="/tmp/target_lane_scaled_phase1_diagnosis.json",
+            )
+
+        self.assertEqual(
+            [payload["checkpoint_stage"] for _, payload in checkpoint_payloads],
+            [
+                "starting",
+                "runtime_bundle_ready",
+                "anchor",
+                "scaled_origin",
+                "steepest_descent_trial",
+                "scaled_origin_after_trial",
+                "optimizer_finished",
+                "optimizer_scaled_state",
+                "optimizer_mapped_state",
+                "scaled_origin_after_optimizer",
+                "completed",
+            ],
+        )
+        final_payload = checkpoint_payloads[-1][1]
+        self.assertTrue(final_payload["diagnosis_complete"])
+        self.assertTrue(final_payload["all_finite"])
+        self.assertEqual(
+            final_payload["completed_stages"][-1],
+            "scaled_origin_after_optimizer",
+        )
+        self.assertEqual(
+            final_payload["optimizer"]["message"],
+            "phase1 failed",
+        )
+        self.assertEqual(final_payload["optimizer"]["status"], 5)
+        np.testing.assert_allclose(
+            final_payload["optimizer_mapped_state"]["mapped_coil_dofs"],
+            diagnosis["optimizer_mapped_state"]["mapped_coil_dofs"],
         )
 
     def test_resolve_effective_target_lane_sync_forces_final_only_in_benchmark_mode(
@@ -995,10 +3053,57 @@ class SingleStageExampleTests(unittest.TestCase):
 
         self.assertIsNone(callback)
 
+    def test_should_force_strict_target_lane_final_sync(self):
+        module = self.load_module()
+
+        self.assertFalse(
+            module.should_force_strict_target_lane_final_sync(
+                use_target_lane=False,
+                res_nit=3,
+                accepted_step_callback=None,
+                trial_boozer_override_active=True,
+            )
+        )
+        self.assertFalse(
+            module.should_force_strict_target_lane_final_sync(
+                use_target_lane=True,
+                res_nit=0,
+                accepted_step_callback=None,
+                trial_boozer_override_active=True,
+            )
+        )
+        self.assertFalse(
+            module.should_force_strict_target_lane_final_sync(
+                use_target_lane=True,
+                res_nit=2,
+                accepted_step_callback=object(),
+                trial_boozer_override_active=False,
+            )
+        )
+        self.assertTrue(
+            module.should_force_strict_target_lane_final_sync(
+                use_target_lane=True,
+                res_nit=2,
+                accepted_step_callback=None,
+                trial_boozer_override_active=False,
+            )
+        )
+        self.assertTrue(
+            module.should_force_strict_target_lane_final_sync(
+                use_target_lane=True,
+                res_nit=2,
+                accepted_step_callback=object(),
+                trial_boozer_override_active=True,
+            )
+        )
+
     def test_run_single_stage_optimizer_prefers_fused_target_lane_contract(self):
         module = self.load_module()
         captured = {}
-        explicit_fun = lambda x: (float(np.dot(x, x)), np.asarray(2.0 * x, dtype=float))
+        explicit_fun = lambda x: (
+            jnp.asarray(jnp.dot(x, x), dtype=jnp.float64),
+            jnp.asarray(2.0 * x, dtype=jnp.float64),
+        )
         scalar_fun = lambda x: float(np.dot(x, x))
 
         def fake_require_target_backend_x64(optimizer_backend):
@@ -1031,13 +3136,13 @@ class SingleStageExampleTests(unittest.TestCase):
                 ftol=1e-8,
                 gtol=1e-6,
                 maxcor=9,
+                outer_maxls=7,
                 callback=callback,
                 scalar_fun=scalar_fun,
             )
 
         self.assertEqual(captured["x64_backend"], "ondevice")
-        self.assertIsInstance(captured["x0"], module.SingleStageOuterOptimizerState)
-        self.assertIsInstance(captured["x0"].coil_dofs, jax.Array)
+        self.assertIsInstance(captured["x0"], jax.Array)
         self.assertEqual(captured["method"], "lbfgs-ondevice")
         np.testing.assert_allclose(
             module._single_stage_optimizer_dofs_array(captured["x0"]),
@@ -1045,16 +3150,66 @@ class SingleStageExampleTests(unittest.TestCase):
         )
         self.assertEqual(captured["tol"], 1e-6)
         self.assertEqual(captured["maxiter"], 7)
-        self.assertEqual(captured["options"], {"maxcor": 9, "ftol": 1e-8})
+        self.assertEqual(captured["options"], {"maxcor": 9, "ftol": 1e-8, "maxls": 7})
         self.assertTrue(captured["value_and_grad"])
         self.assertIs(captured["callback"], callback)
         value, grad = captured["fun"](captured["x0"])
         self.assertEqual(value, 5.0)
-        self.assertIsInstance(grad, module.SingleStageOuterOptimizerState)
+        self.assertIsInstance(grad, jax.Array)
         np.testing.assert_allclose(
             module._single_stage_optimizer_dofs_array(grad),
             np.array([2.0, -4.0]),
         )
+        self.assertEqual(result.message, "ok")
+
+    def test_run_single_stage_optimizer_threads_target_lane_failure_callback(self):
+        module = self.load_module()
+        captured = {}
+        explicit_fun = lambda x: (
+            jnp.asarray(jnp.dot(x, x), dtype=jnp.float64),
+            jnp.asarray(2.0 * x, dtype=jnp.float64),
+        )
+
+        def fake_require_target_backend_x64(_optimizer_backend):
+            return None
+
+        def fake_jax_minimize(
+            fun,
+            x0,
+            *,
+            method,
+            tol,
+            maxiter,
+            options,
+            value_and_grad,
+            callback,
+            failure_callback=None,
+        ):
+            del fun, x0, method, tol, maxiter, options, value_and_grad, callback
+            captured["failure_callback"] = failure_callback
+            return types.SimpleNamespace(x=np.zeros(2), nit=0, message="ok")
+
+        with self.patch_optimizer_jax_module(
+            require_target_backend_x64=fake_require_target_backend_x64,
+            jax_minimize=fake_jax_minimize,
+        ):
+            failure_callback = object()
+            contract = module.resolve_single_stage_optimizer_contract("jax", "ondevice")
+            result = module.run_single_stage_optimizer(
+                explicit_fun,
+                np.array([0.0, 0.0]),
+                contract=contract,
+                maxiter=1,
+                ftol=0.0,
+                gtol=1e-6,
+                maxcor=5,
+                outer_maxls=6,
+                callback=None,
+                scalar_fun=None,
+                failure_callback=failure_callback,
+            )
+
+        self.assertIs(captured["failure_callback"], failure_callback)
         self.assertEqual(result.message, "ok")
 
     def test_run_single_stage_optimizer_target_lane_requires_objective_contract(self):
@@ -1082,12 +3237,16 @@ class SingleStageExampleTests(unittest.TestCase):
                     ftol=1e-8,
                     gtol=1e-6,
                     maxcor=9,
+                    outer_maxls=7,
                     callback=None,
                 )
 
     def test_run_single_stage_optimizer_ondevice_does_not_enter_scipy_minimize(self):
         module = self.load_module()
-        explicit_fun = lambda x: (float(np.dot(x, x)), np.asarray(2.0 * x, dtype=float))
+        explicit_fun = lambda x: (
+            jnp.asarray(jnp.dot(x, x), dtype=jnp.float64),
+            jnp.asarray(2.0 * x, dtype=jnp.float64),
+        )
 
         def fake_require_target_backend_x64(_optimizer_backend):
             return None
@@ -1097,13 +3256,12 @@ class SingleStageExampleTests(unittest.TestCase):
         ):
             value, grad = fun(x0)
             self.assertEqual(value, 0.0)
-            self.assertIsInstance(grad, module.SingleStageOuterOptimizerState)
+            self.assertIsInstance(grad, jax.Array)
             np.testing.assert_allclose(
                 module._single_stage_optimizer_dofs_array(grad),
                 np.zeros(2),
             )
-            self.assertIsInstance(x0, module.SingleStageOuterOptimizerState)
-            self.assertIsInstance(x0.coil_dofs, jax.Array)
+            self.assertIsInstance(x0, jax.Array)
             del x0, tol, maxiter, options, callback
             self.assertEqual(method, "lbfgs-ondevice")
             self.assertTrue(value_and_grad)
@@ -1123,6 +3281,7 @@ class SingleStageExampleTests(unittest.TestCase):
                 ftol=0.0,
                 gtol=1e-6,
                 maxcor=5,
+                outer_maxls=4,
                 callback=lambda _x: None,
                 scalar_fun=None,
             )
@@ -1132,7 +3291,10 @@ class SingleStageExampleTests(unittest.TestCase):
     def test_run_single_stage_optimizer_allows_explicit_experimental_target_lane(self):
         module = self.load_module()
         captured = {}
-        explicit_fun = lambda x: (float(np.dot(x, x)), np.asarray(2.0 * x, dtype=float))
+        explicit_fun = lambda x: (
+            jnp.asarray(jnp.dot(x, x), dtype=jnp.float64),
+            jnp.asarray(2.0 * x, dtype=jnp.float64),
+        )
 
         def fake_require_target_backend_x64(_optimizer_backend):
             return None
@@ -1158,16 +3320,16 @@ class SingleStageExampleTests(unittest.TestCase):
                 ftol=0.0,
                 gtol=1e-6,
                 maxcor=5,
+                outer_maxls=6,
                 callback=None,
                 scalar_fun=None,
             )
 
-        self.assertIsInstance(captured["x0"], module.SingleStageOuterOptimizerState)
-        self.assertIsInstance(captured["x0"].coil_dofs, jax.Array)
+        self.assertIsInstance(captured["x0"], jax.Array)
         self.assertTrue(captured["value_and_grad"])
         value, grad = captured["fun"](captured["x0"])
         self.assertEqual(value, 0.0)
-        self.assertIsInstance(grad, module.SingleStageOuterOptimizerState)
+        self.assertIsInstance(grad, jax.Array)
         self.assertEqual(result.message, "ok")
 
     def test_run_single_stage_optimizer_rejects_unknown_outer_lane(self):
@@ -1458,11 +3620,22 @@ class SingleStageExampleTests(unittest.TestCase):
         run_dict = {"x_prev": np.zeros(2), "lscount": 4}
         captured = {}
 
-        def fake_snapshot(state, booz, objective):
+        def fake_snapshot(
+            state,
+            booz,
+            objective,
+            *,
+            objective_value=None,
+            objective_grad=None,
+            store_objective_grad=True,
+        ):
             captured["snapshot"] = {
                 "state": state,
                 "booz": booz,
                 "objective": objective,
+                "objective_value": objective_value,
+                "objective_grad": objective_grad,
+                "store_objective_grad": store_objective_grad,
             }
             return 1.0, np.zeros(2)
 
@@ -1493,7 +3666,217 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertIsNone(jf.x)
         np.testing.assert_allclose(run_dict["x_prev"], np.zeros(2))
         self.assertIs(captured["snapshot"]["state"], run_dict)
+        self.assertIsNone(captured["snapshot"]["objective_value"])
+        self.assertIsNone(captured["snapshot"]["objective_grad"])
+        self.assertFalse(captured["snapshot"]["store_objective_grad"])
         self.assertEqual(run_dict["lscount"], 4)
+
+    def test_single_stage_adapter_benchmark_sync_reuses_reevaluated_objective(self):
+        module = self.load_module()
+
+        class _JF:
+            def __init__(self):
+                self._x = None
+
+            @property
+            def x(self):
+                return self._x
+
+            @x.setter
+            def x(self, value):
+                self._x = np.asarray(value)
+
+        jf = _JF()
+        run_dict = {"x_prev": np.zeros(2), "lscount": 2}
+        captured = {}
+        objective_value = 3.5
+        objective_grad = np.array([1.0, -1.0])
+
+        def fake_eval(
+            x,
+            state,
+            booz,
+            objective,
+            objectives=None,
+            diagnostics=None,
+        ):
+            captured["eval"] = {
+                "x": np.asarray(x),
+                "state": state,
+                "objectives": objectives,
+                "diagnostics": diagnostics,
+            }
+            return objective_value, objective_grad
+
+        def fake_snapshot(
+            state,
+            booz,
+            objective,
+            *,
+            objective_value=None,
+            objective_grad=None,
+            store_objective_grad=True,
+        ):
+            captured["snapshot"] = {
+                "state": state,
+                "booz": booz,
+                "objective": objective,
+                "objective_value": objective_value,
+                "objective_grad": objective_grad,
+                "store_objective_grad": store_objective_grad,
+            }
+            return objective_value, objective_grad
+
+        adapter = module.SingleStageAdapter(
+            run_dict=run_dict,
+            boozer_surface="booz",
+            JF=jf,
+            bs="bs",
+            objectives={"qs": "obj"},
+            diagnostics={"iota": "diag"},
+            log_path="/tmp/log.txt",
+            benchmark_mode=True,
+            reevaluate_before_accept=True,
+        )
+
+        adapter._refresh_accepted_step_runtime_state = lambda _x: False
+
+        with patch.object(
+            module,
+            "_evaluate_candidate_impl",
+            side_effect=fake_eval,
+        ), patch.object(
+            module,
+            "snapshot_accepted_step_state",
+            side_effect=fake_snapshot,
+        ), patch.object(
+            module,
+            "accept_step",
+            side_effect=AssertionError(
+                "benchmark sync path should not call accept_step"
+            ),
+        ):
+            adapter.sync_accepted_step(np.array([4.0, -5.0]))
+
+        np.testing.assert_allclose(jf.x, np.array([4.0, -5.0]))
+        np.testing.assert_allclose(run_dict["x_prev"], np.array([4.0, -5.0]))
+        self.assertEqual(run_dict["lscount"], 2)
+        self.assertIs(captured["snapshot"]["state"], run_dict)
+        self.assertEqual(captured["snapshot"]["objective_value"], objective_value)
+        np.testing.assert_allclose(
+            captured["snapshot"]["objective_grad"],
+            objective_grad,
+        )
+        self.assertTrue(captured["snapshot"]["store_objective_grad"])
+
+    def test_single_stage_adapter_benchmark_sync_can_skip_objective_refresh(self):
+        module = self.load_module()
+
+        class _JF:
+            def J(self):
+                raise AssertionError("benchmark runtime-only sync should skip J()")
+
+            def dJ(self):
+                raise AssertionError("benchmark runtime-only sync should skip dJ()")
+
+        jf = _JF()
+        run_dict = {
+            "x_prev": np.zeros(2),
+            "lscount": 3,
+            "J": 7.0,
+            "dJ": np.array([1.0, 2.0]),
+        }
+        captured = {}
+
+        def fake_snapshot(
+            state,
+            booz,
+            objective,
+            *,
+            objective_value=None,
+            objective_grad=None,
+            store_objective_grad=True,
+        ):
+            captured["snapshot"] = {
+                "state": state,
+                "booz": booz,
+                "objective": objective,
+                "objective_value": objective_value,
+                "objective_grad": objective_grad,
+                "store_objective_grad": store_objective_grad,
+            }
+            return state["J"], state["dJ"]
+
+        adapter = module.SingleStageAdapter(
+            run_dict=run_dict,
+            boozer_surface="booz",
+            JF=jf,
+            bs="bs",
+            objectives={"qs": "obj"},
+            diagnostics={"iota": "diag"},
+            log_path="/tmp/log.txt",
+            benchmark_mode=True,
+            reevaluate_before_accept=True,
+        )
+        adapter._refresh_accepted_step_runtime_state = lambda _x: True
+
+        def raise_if_called(_x):
+            raise AssertionError(
+                "runtime-only benchmark sync should not reevaluate objective"
+            )
+
+        adapter._reevaluate_accepted_step = raise_if_called
+
+        with patch.object(
+            module,
+            "snapshot_accepted_step_state",
+            side_effect=fake_snapshot,
+        ), patch.object(
+            module,
+            "accept_step",
+            side_effect=AssertionError(
+                "benchmark sync path should not call accept_step"
+            ),
+        ):
+            adapter.sync_accepted_step(np.array([4.0, -5.0]))
+
+        np.testing.assert_allclose(run_dict["x_prev"], np.array([0.0, 0.0]))
+        self.assertFalse(captured["snapshot"]["store_objective_grad"])
+        self.assertIsNone(captured["snapshot"]["objective_value"])
+        self.assertIsNone(captured["snapshot"]["objective_grad"])
+
+    def test_snapshot_accepted_step_state_can_skip_objective_refresh(self):
+        module = self.load_module()
+        run_dict = {
+            "lscount": 5,
+            "J": 2.5,
+            "dJ": np.array([3.0, -4.0]),
+        }
+        boozer_surface = types.SimpleNamespace(
+            surface=types.SimpleNamespace(x=np.array([1.0, 2.0])),
+            res={"iota": np.float64(0.125), "G": np.float64(1.75)},
+        )
+
+        class _JF:
+            def J(self):
+                raise AssertionError("store_objective_grad=False should skip J()")
+
+            def dJ(self):
+                raise AssertionError("store_objective_grad=False should skip dJ()")
+
+        objective_value, objective_grad = module.snapshot_accepted_step_state(
+            run_dict,
+            boozer_surface,
+            _JF(),
+            store_objective_grad=False,
+        )
+
+        self.assertEqual(run_dict["lscount"], 0)
+        np.testing.assert_allclose(run_dict["sdofs"], np.array([1.0, 2.0]))
+        self.assertEqual(run_dict["iota"], 0.125)
+        self.assertEqual(run_dict["G"], 1.75)
+        self.assertEqual(objective_value, 2.5)
+        np.testing.assert_allclose(objective_grad, np.array([3.0, -4.0]))
 
     def test_evaluate_surface_self_intersection_skips_when_backend_unavailable(self):
         module = self.load_module()
@@ -1550,6 +3933,27 @@ class SingleStageExampleTests(unittest.TestCase):
 
         self.assertIsInstance(wrapper, FakeIotaWrapper)
         self.assertEqual(calls, [marker])
+
+    def test_resolve_single_stage_iota_metric_uses_cached_boozer_iota_in_benchmark_mode(
+        self,
+    ):
+        module = self.load_module()
+        boozer_surface = types.SimpleNamespace(res={"iota": np.float64(0.1234)})
+
+        with patch.object(
+            module,
+            "build_iota_objective",
+            side_effect=AssertionError(
+                "benchmark-mode iota metric should not rebuild the wrapper"
+            ),
+        ):
+            resolved = module.resolve_single_stage_iota_metric(
+                boozer_surface,
+                object(),
+                benchmark_mode=True,
+            )
+
+        self.assertEqual(resolved, 0.1234)
 
     def test_select_boozer_residual_class_routes_exact_stage_to_exact_wrapper(self):
         module = self.load_module()
@@ -2468,7 +4872,7 @@ class SingleStageExampleTests(unittest.TestCase):
             _BS(),
             use_target_lane=True,
         )
-        self.assertIsInstance(target_lane_dofs, module.SingleStageOuterOptimizerState)
+        self.assertIsInstance(target_lane_dofs, jax.Array)
         np.testing.assert_allclose(
             module._single_stage_optimizer_dofs_array(target_lane_dofs),
             np.array([9.0, 8.0]),
@@ -3397,6 +5801,69 @@ class HardwareConstraintTests(unittest.TestCase):
         self.assertEqual(sanitized["nested"][0], 2.0)
         self.assertIsNone(sanitized["nested"][1])
 
+    def test_target_lane_success_filter_cache_signature_accepts_spec_dataclasses(
+        self,
+    ):
+        module = load_single_stage_example_module()
+
+        def build_extraction_spec(*, current_input_end):
+            curve = CurveXYZFourierSpec(
+                dofs=np.asarray([1.0, 2.0], dtype=np.float64),
+                quadpoints=np.asarray([0.0, 0.5], dtype=np.float64),
+                order=1,
+            )
+            curve_map = OptimizableDofMapSpec(
+                template_full_dofs=np.asarray([1.0, 2.0, 3.0], dtype=np.float64),
+                owner_segments=((0, 2, 0, 2),),
+                input_mode="replace",
+                input_start=0,
+                input_end=2,
+            )
+            current_map = OptimizableDofMapSpec(
+                template_full_dofs=np.asarray([4.0], dtype=np.float64),
+                owner_segments=((0, 1, 0, 1),),
+                input_mode="replace",
+                input_start=0,
+                input_end=current_input_end,
+            )
+            symmetry = CoilSymmetrySpec(
+                rotmat=np.eye(3, dtype=np.float64),
+                scale=1.0,
+                has_rotation=False,
+            )
+            return CoilSetDofExtractionSpec(
+                coils=(
+                    CoilDofExtractionSpec(
+                        curve=curve,
+                        curve_map=curve_map,
+                        current_map=current_map,
+                        symmetry=symmetry,
+                    ),
+                )
+            )
+
+        payload = {
+            "coil_dof_extraction_spec": build_extraction_spec(current_input_end=1),
+        }
+        matching_payload = {
+            "coil_dof_extraction_spec": build_extraction_spec(current_input_end=1),
+        }
+        changed_payload = {
+            "coil_dof_extraction_spec": build_extraction_spec(current_input_end=0),
+        }
+
+        signature = module._target_lane_success_filter_cache_signature(payload)
+        matching_signature = module._target_lane_success_filter_cache_signature(
+            matching_payload
+        )
+        changed_signature = module._target_lane_success_filter_cache_signature(
+            changed_payload
+        )
+
+        self.assertEqual(len(signature), 64)
+        self.assertEqual(signature, matching_signature)
+        self.assertNotEqual(signature, changed_signature)
+
     def test_stage2_write_json_file_sanitizes_non_finite_payloads(self):
         module = load_stage2_module()
 
@@ -3461,6 +5928,306 @@ class FtolGtolDefaultTests(unittest.TestCase):
         source = EXAMPLE_MODULE_PATH.read_text()
         self.assertNotIn("ftol_by_mpol.get(mpol)", source)
         self.assertNotIn("gtol_by_mpol.get(mpol)", source)
+
+
+class ResultsEnvelopeTests(unittest.TestCase):
+    def test_stage2_results_envelope_captures_contract_and_artifacts(self):
+        module = load_stage2_module()
+        module.build_runtime_provenance = lambda **_: {"repo_sha": "deadbeef"}
+        args = types.SimpleNamespace(
+            backend="jax",
+            optimizer_backend="ondevice",
+            least_squares_algorithm="lm",
+            init_only=False,
+            skip_postprocess=True,
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            envelope = module.build_stage2_results_envelope(
+                output_root=tmpdir,
+                plasma_surf_filename="wout_fixture.nc",
+                file_loc="/tmp/wout_fixture.nc",
+                nphi=31,
+                ntheta=16,
+                num_quadpoints=64,
+                order=2,
+                field_diagnostic_stride=7,
+                R0=0.915,
+                s=0.24,
+                banana_surf_radius=0.22,
+                theta_center=0.1,
+                phi_center=0.2,
+                theta_width=0.3,
+                phi_width=0.4,
+                LENGTH_WEIGHT=5e-4,
+                CC_WEIGHT=100.0,
+                CURVATURE_WEIGHT=1e-4,
+                SQUARED_FLUX_WEIGHT=1.0,
+                LENGTH_TARGET=2.5,
+                CC_THRESHOLD=0.05,
+                CURVATURE_THRESHOLD=40.0,
+                args=args,
+                MAXITER=25,
+            )
+
+        self.assertEqual(envelope["schema_version"], 1)
+        self.assertFalse(
+            envelope["problem_contract"]["runtime_contract"][
+                "record_target_lane_invalid_state_events"
+            ]
+        )
+        self.assertEqual(envelope["provenance"]["repo_sha"], "deadbeef")
+        self.assertEqual(
+            envelope["problem_contract"]["equilibrium"]["filename"], "wout_fixture.nc"
+        )
+        self.assertEqual(
+            envelope["problem_contract"]["runtime_contract"]["optimizer_backend"],
+            "ondevice",
+        )
+        self.assertTrue(
+            envelope["artifacts"]["required"]["results.json"]["exists"]
+        )
+        self.assertFalse(
+            envelope["artifacts"]["required"]["biot_savart_opt.json"]["exists"]
+        )
+
+    def test_single_stage_results_envelope_captures_seed_and_artifact_policy(self):
+        module = load_single_stage_example_module()
+        module.build_runtime_provenance = lambda **_: {"repo_sha": "deadbeef"}
+        args = types.SimpleNamespace(
+            backend="jax",
+            benchmark_mode=False,
+            minimal_artifacts=True,
+            init_only=False,
+            profile_target_lane_only=False,
+            diagnose_target_lane_gradient=False,
+            diagnose_target_lane_scaled_phase1=False,
+            disable_target_lane_success_filter=False,
+            maxcor=16,
+            outer_maxls=8,
+            initial_step_scale=1.0,
+            initial_step_maxiter=0,
+        )
+        stage2_results = {"banana_surf_radius": 0.22}
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            envelope = module.build_single_stage_results_envelope(
+                output_root=tmpdir,
+                plasma_surf_filename="wout_fixture.nc",
+                file_loc="/tmp/wout_fixture.nc",
+                mpol=6,
+                ntor=6,
+                nphi=127,
+                ntheta=48,
+                vol_target=0.15,
+                iota_target=0.21,
+                stage2_bs_path="/tmp/stage2/biot_savart_opt.json",
+                stage2_results_path="/tmp/stage2/results.json",
+                stage2_source="derived",
+                stage2_results=stage2_results,
+                warm_start_run_dir="/tmp/warm-start",
+                warm_start_state={
+                    "surface_path": "/tmp/warm-start/surf_opt.json",
+                    "results_path": "/tmp/warm-start/results.json",
+                },
+                R0=0.915,
+                s=0.24,
+                order=2,
+                CONSTRAINT_WEIGHT=1.0,
+                CC_DIST=0.1,
+                CC_WEIGHT=1.0,
+                CS_DIST=0.2,
+                CS_WEIGHT=2.0,
+                SS_DIST=0.3,
+                SURF_DIST_WEIGHT=3.0,
+                CURVATURE_WEIGHT=4.0,
+                CURVATURE_THRESHOLD=20.0,
+                LENGTH_WEIGHT=5.0,
+                RES_WEIGHT=6.0,
+                IOTAS_WEIGHT=7.0,
+                optimizer_backend_record="ondevice",
+                boozer_optimizer_backend_record="ondevice",
+                boozer_least_squares_algorithm_record="lm",
+                outer_optimizer_method="lbfgs-ondevice",
+                target_lane_sync_record="final-only",
+                requested_experimental_target_lane_vg=False,
+                use_target_lane_vg=True,
+                target_lane_boozer_bfgs_tol_record=1e-6,
+                target_lane_boozer_bfgs_maxiter_record=48,
+                target_lane_boozer_newton_tol_record=1e-10,
+                target_lane_boozer_newton_maxiter_record=8,
+                args=args,
+                MAXITER=300,
+                write_restart_artifacts=True,
+                write_full_artifacts=False,
+            )
+
+        self.assertEqual(envelope["schema_version"], 1)
+
+    def test_single_stage_results_envelope_records_scaled_phase1_diagnostic_artifact(
+        self,
+    ):
+        module = load_single_stage_example_module()
+        module.build_runtime_provenance = lambda **_: {"repo_sha": "deadbeef"}
+        args = types.SimpleNamespace(
+            backend="jax",
+            benchmark_mode=False,
+            minimal_artifacts=True,
+            init_only=False,
+            profile_target_lane_only=False,
+            diagnose_target_lane_gradient=False,
+            diagnose_target_lane_scaled_phase1=True,
+            disable_target_lane_success_filter=False,
+            maxcor=16,
+            outer_maxls=8,
+            initial_step_scale=0.25,
+            initial_step_maxiter=4,
+        )
+        stage2_results = {"banana_surf_radius": 0.22}
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            envelope = module.build_single_stage_results_envelope(
+                output_root=tmpdir,
+                plasma_surf_filename="wout_fixture.nc",
+                file_loc="/tmp/wout_fixture.nc",
+                mpol=6,
+                ntor=6,
+                nphi=127,
+                ntheta=48,
+                vol_target=0.15,
+                iota_target=0.21,
+                stage2_bs_path="/tmp/stage2/biot_savart_opt.json",
+                stage2_results_path="/tmp/stage2/results.json",
+                stage2_source="derived",
+                stage2_results=stage2_results,
+                warm_start_run_dir=None,
+                warm_start_state=None,
+                R0=0.915,
+                s=0.24,
+                order=2,
+                CONSTRAINT_WEIGHT=1.0,
+                CC_DIST=0.1,
+                CC_WEIGHT=1.0,
+                CS_DIST=0.2,
+                CS_WEIGHT=2.0,
+                SS_DIST=0.3,
+                SURF_DIST_WEIGHT=3.0,
+                CURVATURE_WEIGHT=4.0,
+                CURVATURE_THRESHOLD=20.0,
+                LENGTH_WEIGHT=5.0,
+                RES_WEIGHT=6.0,
+                IOTAS_WEIGHT=7.0,
+                optimizer_backend_record="ondevice",
+                boozer_optimizer_backend_record="ondevice",
+                boozer_least_squares_algorithm_record="lm",
+                outer_optimizer_method="lbfgs-ondevice",
+                target_lane_sync_record="final-only",
+                requested_experimental_target_lane_vg=False,
+                use_target_lane_vg=True,
+                target_lane_boozer_bfgs_tol_record=1e-6,
+                target_lane_boozer_bfgs_maxiter_record=48,
+                target_lane_boozer_newton_tol_record=1e-10,
+                target_lane_boozer_newton_maxiter_record=8,
+                args=args,
+                MAXITER=300,
+                write_restart_artifacts=False,
+                write_full_artifacts=False,
+            )
+
+        self.assertIn(
+            "target_lane_scaled_phase1_diagnosis.json",
+            envelope["artifacts"]["required"],
+        )
+        self.assertTrue(
+            envelope["problem_contract"]["runtime_contract"][
+                "diagnose_target_lane_scaled_phase1"
+            ]
+        )
+        self.assertEqual(envelope["provenance"]["repo_sha"], "deadbeef")
+        self.assertEqual(envelope["problem_contract"]["stage2_seed"]["order"], 2)
+        self.assertEqual(
+            envelope["problem_contract"]["runtime_contract"]["outer_optimizer_method"],
+            "lbfgs-ondevice",
+        )
+        self.assertFalse(
+            envelope["artifacts"]["policy"]["write_restart_artifacts"]
+        )
+        self.assertFalse(envelope["artifacts"]["policy"]["write_full_artifacts"])
+
+    def test_single_stage_results_envelope_records_invalid_state_event_policy(self):
+        module = load_single_stage_example_module()
+        module.build_runtime_provenance = lambda **_: {"repo_sha": "deadbeef"}
+        args = types.SimpleNamespace(
+            backend="jax",
+            benchmark_mode=False,
+            minimal_artifacts=True,
+            init_only=False,
+            profile_target_lane_only=False,
+            diagnose_target_lane_gradient=False,
+            diagnose_target_lane_scaled_phase1=False,
+            record_target_lane_invalid_state_events=True,
+            disable_target_lane_success_filter=False,
+            maxcor=16,
+            outer_maxls=8,
+            initial_step_scale=1.0,
+            initial_step_maxiter=0,
+        )
+        stage2_results = {"banana_surf_radius": 0.22}
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            envelope = module.build_single_stage_results_envelope(
+                output_root=tmpdir,
+                plasma_surf_filename="wout_fixture.nc",
+                file_loc="/tmp/wout_fixture.nc",
+                mpol=6,
+                ntor=6,
+                nphi=127,
+                ntheta=48,
+                vol_target=0.15,
+                iota_target=0.21,
+                stage2_bs_path="/tmp/stage2/biot_savart_opt.json",
+                stage2_results_path="/tmp/stage2/results.json",
+                stage2_source="derived",
+                stage2_results=stage2_results,
+                warm_start_run_dir=None,
+                warm_start_state=None,
+                R0=0.915,
+                s=0.24,
+                order=2,
+                CONSTRAINT_WEIGHT=1.0,
+                CC_DIST=0.1,
+                CC_WEIGHT=1.0,
+                CS_DIST=0.2,
+                CS_WEIGHT=2.0,
+                SS_DIST=0.3,
+                SURF_DIST_WEIGHT=3.0,
+                CURVATURE_WEIGHT=4.0,
+                CURVATURE_THRESHOLD=20.0,
+                LENGTH_WEIGHT=5.0,
+                RES_WEIGHT=6.0,
+                IOTAS_WEIGHT=7.0,
+                optimizer_backend_record="ondevice",
+                boozer_optimizer_backend_record="ondevice",
+                boozer_least_squares_algorithm_record="lm",
+                outer_optimizer_method="lbfgs-ondevice",
+                target_lane_sync_record="final-only",
+                requested_experimental_target_lane_vg=False,
+                use_target_lane_vg=True,
+                target_lane_boozer_bfgs_tol_record=1e-6,
+                target_lane_boozer_bfgs_maxiter_record=48,
+                target_lane_boozer_newton_tol_record=1e-10,
+                target_lane_boozer_newton_maxiter_record=8,
+                args=args,
+                MAXITER=300,
+                write_restart_artifacts=False,
+                write_full_artifacts=False,
+            )
+
+        self.assertTrue(
+            envelope["problem_contract"]["runtime_contract"][
+                "record_target_lane_invalid_state_events"
+            ]
+        )
 
 
 if __name__ == "__main__":

@@ -8,8 +8,11 @@ import jax
 from .jit import jit
 from .._core.optimizable import Optimizable
 from .._core.derivative import derivative_dec, Derivative
+from .._core.jax_host_boundary import host_array as _host_array
 from ..backend import get_pairwise_penalty_chunk_size
 from ..jax_core._math_utils import as_jax_float64 as _runtime_as_jax_float64
+from ..jax_core._math_utils import as_jax_int32 as _runtime_as_jax_int32
+from ..jax_core._math_utils import as_runtime_float64 as _runtime_as_runtime_float64
 from ..jax_core.sharding import maybe_shard_pairwise_row_inputs
 from ._simsoptpp import sopp_namespace
 from .framedcurve import FramedCurveCentroid
@@ -55,10 +58,18 @@ def _as_jax_float64(value):
     return _runtime_as_jax_float64(value)
 
 
+def _as_jax_int32(value):
+    return _runtime_as_jax_int32(value)
+
+
+def _scalar_like(reference, value):
+    return _runtime_as_runtime_float64(value, reference=reference)
+
+
 def _as_numpy_float64(value):
     if isinstance(value, np.ndarray):
         return np.asarray(value, dtype=np.float64)
-    return np.asarray(jax.device_get(value), dtype=np.float64)
+    return _host_array(value, dtype=np.float64)
 
 
 def _curve_jax_position_and_tangent(curve):
@@ -125,11 +136,16 @@ def _chunk_rows(array, chunk_size: int):
     chunk_count = 0 if row_count == 0 else (row_count + chunk_size - 1) // chunk_size
     padded_row_count = chunk_count * chunk_size
     pad_rows = padded_row_count - row_count
-    pad_config = [(0, pad_rows)] + [(0, 0)] * (array.ndim - 1)
-    padded = jnp.pad(array, pad_config)
+    if pad_rows > 0:
+        zero_rows = jnp.sum(array, axis=0, keepdims=True, dtype=array.dtype)
+        zero_rows = zero_rows - zero_rows
+        zero_rows = jnp.broadcast_to(zero_rows, (pad_rows, *array.shape[1:]))
+        padded = jnp.concatenate((array, zero_rows), axis=0)
+    else:
+        padded = array
     chunk_shape = (chunk_count, chunk_size, *array.shape[1:])
     chunks = padded.reshape(chunk_shape)
-    valid = (jnp.arange(padded_row_count) < row_count).reshape(
+    valid = (jnp.arange(padded_row_count, dtype=jnp.int32) < _as_jax_int32(row_count)).reshape(
         (chunk_count, chunk_size)
     )
     return chunks, valid
@@ -141,7 +157,7 @@ def _pairwise_rowwise_min_distance(points_a, points_b, *, chunk_size=None):
     points_a, points_b = maybe_shard_pairwise_row_inputs(points_a, points_b)
     row_count = int(points_a.shape[0])
     col_count = int(points_b.shape[0])
-    inf = _as_jax_float64(np.inf)
+    inf = _scalar_like(points_a, np.inf)
     if row_count == 0:
         return jnp.zeros((0,), dtype=jnp.float64)
     if col_count == 0:
@@ -184,9 +200,9 @@ def _pairwise_rowwise_pnorm_distance(points_a, points_b, p, *, chunk_size=None):
     points_a = _as_jax_float64(points_a)
     points_b = _as_jax_float64(points_b)
     points_a, points_b = maybe_shard_pairwise_row_inputs(points_a, points_b)
-    p_jax = _as_jax_float64(p)
-    one = _as_jax_float64(1.0)
-    zero = _as_jax_float64(0.0)
+    p_jax = _scalar_like(points_a, p)
+    one = _scalar_like(points_a, 1.0)
+    zero = _scalar_like(points_a, 0.0)
     row_count = int(points_a.shape[0])
     col_count = int(points_b.shape[0])
     if row_count == 0:
@@ -283,10 +299,10 @@ def Lp_curvature_pure(kappa, gammadash, p, desired_kappa):
     """
     This function is used in a Python+Jax implementation of the curvature penalty term.
     """
-    p_jax = _as_jax_float64(p)
-    desired_kappa_jax = _as_jax_float64(desired_kappa)
-    zero = _as_jax_float64(0.0)
-    one = _as_jax_float64(1.0)
+    p_jax = _scalar_like(kappa, p)
+    desired_kappa_jax = _scalar_like(kappa, desired_kappa)
+    zero = _scalar_like(kappa, 0.0)
+    one = _scalar_like(kappa, 1.0)
     arc_length = jnp.linalg.norm(gammadash, axis=1)
     excess = jnp.maximum(kappa - desired_kappa_jax, zero)
     return (one / p_jax) * jnp.mean((excess**p_jax) * arc_length)
@@ -512,13 +528,13 @@ def cc_distance_pure(gamma1, l1, gamma2, l2, minimum_distance):
     l1 = _as_jax_float64(l1)
     gamma2 = _as_jax_float64(gamma2)
     l2 = _as_jax_float64(l2)
-    minimum_distance_jax = _as_jax_float64(minimum_distance)
-    zero = _as_jax_float64(0.0)
+    minimum_distance_jax = _scalar_like(gamma1, minimum_distance)
+    zero = _scalar_like(gamma1, 0.0)
     row_count = int(gamma1.shape[0])
     col_count = int(gamma2.shape[0])
     if row_count == 0 or col_count == 0:
         return zero
-    normalization = _as_jax_float64(row_count * col_count)
+    normalization = _scalar_like(gamma1, row_count * col_count)
 
     arc_length_1 = jnp.linalg.norm(l1, axis=1)
     arc_length_2 = jnp.linalg.norm(l2, axis=1)
@@ -542,7 +558,8 @@ def cc_distance_pure(gamma1, l1, gamma2, l2, minimum_distance):
             dists = _pairwise_distances(gamma1_chunk, gamma2_chunk)
             valid = gamma1_mask[:, None] & gamma2_mask[None, :]
             alen = arc_length_1_chunk[:, None] * arc_length_2_chunk[None, :]
-            excess = jnp.maximum(minimum_distance_jax - dists, zero)
+            safe_dists = jnp.where(valid, dists, minimum_distance_jax + 1.0)
+            excess = jnp.maximum(minimum_distance_jax - safe_dists, zero)
             block_total = jnp.sum(jnp.where(valid, alen * jnp.square(excess), zero))
             return row_total + block_total, None
 
@@ -608,9 +625,10 @@ def cc_distance_barrier_pure(gamma1, l1, gamma2, l2, minimum_distance):
             dists = _pairwise_distances(gamma1_chunk, gamma2_chunk)
             valid = gamma1_mask[:, None] & gamma2_mask[None, :]
             feasible = jnp.logical_or(~valid, dists > minimum_distance_jax)
+            safe_dists = jnp.where(valid, dists, minimum_distance_jax + 1.0)
             safe_ratio = jnp.where(
                 valid,
-                jnp.where(feasible, minimum_distance_jax / dists, half),
+                jnp.where(feasible, minimum_distance_jax / safe_dists, half),
                 zero,
             )
             barrier = -jnp.log1p(-safe_ratio)
@@ -865,13 +883,13 @@ def cs_distance_pure(gammac, lc, gammas, ns, minimum_distance):
     lc = _as_jax_float64(lc)
     gammas = _as_jax_float64(gammas)
     ns = _as_jax_float64(ns)
-    minimum_distance_jax = _as_jax_float64(minimum_distance)
-    zero = _as_jax_float64(0.0)
+    minimum_distance_jax = _scalar_like(gammac, minimum_distance)
+    zero = _scalar_like(gammac, 0.0)
     row_count = int(gammac.shape[0])
     col_count = int(gammas.shape[0])
     if row_count == 0 or col_count == 0:
         return zero
-    normalization = _as_jax_float64(row_count * col_count)
+    normalization = _scalar_like(gammac, row_count * col_count)
 
     curve_weights = jnp.linalg.norm(lc, axis=1)
     surface_weights = jnp.linalg.norm(ns, axis=1)
@@ -895,7 +913,8 @@ def cs_distance_pure(gammac, lc, gammas, ns, minimum_distance):
             dists = _pairwise_distances(gammac_chunk, gammas_chunk)
             valid = gammac_mask[:, None] & gammas_mask[None, :]
             integralweight = curve_weight_chunk[:, None] * surface_weight_chunk[None, :]
-            excess = jnp.maximum(minimum_distance_jax - dists, zero)
+            safe_dists = jnp.where(valid, dists, minimum_distance_jax + 1.0)
+            excess = jnp.maximum(minimum_distance_jax - safe_dists, zero)
             block_total = jnp.sum(
                 jnp.where(valid, integralweight * jnp.square(excess), zero)
             )

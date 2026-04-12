@@ -90,11 +90,16 @@ from benchmarks.tier5_performance_characterization import (
 )
 from benchmarks.validation_ladder_common import (
     _JAX_COMPILATION_CACHE_ENV_VAR,
+    _JAX_PERSISTENT_CACHE_ENABLE_XLA_CACHES_ENV_VAR,
+    _JAX_PERSISTENT_CACHE_MIN_COMPILE_TIME_ENV_VAR,
+    _JAX_PERSISTENT_CACHE_MIN_ENTRY_SIZE_ENV_VAR,
     _SIMSOPT_COMPILATION_CACHE_POLICY_ENV_VAR,
     _SIMSOPT_DISABLE_COMPILATION_CACHE_ENV_VAR,
     _TARGET_LANE_ACCEPTED_STEP_SYNC_ENV_VAR,
     TIER3_SINGLE_STAGE_OUTER_LOOP_RUNG,
+    apply_benchmark_compilation_cache_policy,
     apply_compilation_cache_policy,
+    benchmark_compilation_cache_dir,
     build_provenance,
     describe_compile_behavior,
     evaluate_tier5_performance_budget,
@@ -563,10 +568,16 @@ def test_repo_pythonpath_env_clears_inherited_target_lane_sync(monkeypatch):
 
 def test_repo_pythonpath_env_can_disable_compilation_cache(monkeypatch):
     monkeypatch.setenv(_JAX_COMPILATION_CACHE_ENV_VAR, "/tmp/jax-cache")
+    monkeypatch.setenv(_JAX_PERSISTENT_CACHE_MIN_COMPILE_TIME_ENV_VAR, "0")
+    monkeypatch.setenv(_JAX_PERSISTENT_CACHE_MIN_ENTRY_SIZE_ENV_VAR, "-1")
+    monkeypatch.setenv(_JAX_PERSISTENT_CACHE_ENABLE_XLA_CACHES_ENV_VAR, "all")
 
     env = repo_pythonpath_env(platform="cpu", disable_compilation_cache=True)
 
     assert _JAX_COMPILATION_CACHE_ENV_VAR not in env
+    assert _JAX_PERSISTENT_CACHE_MIN_COMPILE_TIME_ENV_VAR not in env
+    assert _JAX_PERSISTENT_CACHE_MIN_ENTRY_SIZE_ENV_VAR not in env
+    assert _JAX_PERSISTENT_CACHE_ENABLE_XLA_CACHES_ENV_VAR not in env
     assert env[_SIMSOPT_DISABLE_COMPILATION_CACHE_ENV_VAR] == "1"
     assert env[_SIMSOPT_COMPILATION_CACHE_POLICY_ENV_VAR] == "disabled"
 
@@ -609,9 +620,49 @@ def test_repo_pythonpath_env_preserves_backend_guardrails_by_default(monkeypatch
     assert env["SIMSOPT_JAX_TRANSFER_GUARD"] == "disallow"
 
 
+def test_repo_pythonpath_env_adds_detected_cuda_toolchain_root(monkeypatch, tmp_path):
+    cuda_root = tmp_path / "cuda"
+    bin_dir = cuda_root / "bin"
+    bin_dir.mkdir(parents=True)
+    monkeypatch.setattr(
+        "repo_bootstrap._DEFAULT_CUDA_TOOLCHAIN_ROOT",
+        cuda_root,
+    )
+    monkeypatch.setenv("PATH", "/usr/bin")
+    monkeypatch.delenv("XLA_FLAGS", raising=False)
+
+    env = repo_pythonpath_env(platform="cuda")
+
+    assert env["PATH"].split(os.pathsep)[0] == str(bin_dir)
+    assert (
+        env["XLA_FLAGS"].split()[0]
+        == f"--xla_gpu_cuda_data_dir={cuda_root}"
+    )
+
+
+def test_repo_pythonpath_env_respects_explicit_cuda_data_dir_flag(monkeypatch, tmp_path):
+    cuda_root = tmp_path / "cuda"
+    (cuda_root / "bin").mkdir(parents=True)
+    explicit_flag = "--xla_gpu_cuda_data_dir=/already/set"
+    monkeypatch.setattr(
+        "repo_bootstrap._DEFAULT_CUDA_TOOLCHAIN_ROOT",
+        cuda_root,
+    )
+    monkeypatch.setenv("PATH", "/usr/bin")
+    monkeypatch.setenv("XLA_FLAGS", f"{explicit_flag} --other-flag=1")
+
+    env = repo_pythonpath_env(platform="cuda")
+
+    assert env["PATH"].split(os.pathsep)[0] == str(cuda_root / "bin")
+    assert env["XLA_FLAGS"] == f"{explicit_flag} --other-flag=1"
+
+
 def test_apply_compilation_cache_policy_defaults_to_disabled(monkeypatch):
     monkeypatch.delenv(_JAX_COMPILATION_CACHE_ENV_VAR, raising=False)
     monkeypatch.delenv(_SIMSOPT_DISABLE_COMPILATION_CACHE_ENV_VAR, raising=False)
+    monkeypatch.delenv(_JAX_PERSISTENT_CACHE_MIN_COMPILE_TIME_ENV_VAR, raising=False)
+    monkeypatch.delenv(_JAX_PERSISTENT_CACHE_MIN_ENTRY_SIZE_ENV_VAR, raising=False)
+    monkeypatch.delenv(_JAX_PERSISTENT_CACHE_ENABLE_XLA_CACHES_ENV_VAR, raising=False)
 
     metadata = apply_compilation_cache_policy()
 
@@ -621,6 +672,9 @@ def test_apply_compilation_cache_policy_defaults_to_disabled(monkeypatch):
         "compilation_cache_policy": "disabled",
     }
     assert _JAX_COMPILATION_CACHE_ENV_VAR not in os.environ
+    assert _JAX_PERSISTENT_CACHE_MIN_COMPILE_TIME_ENV_VAR not in os.environ
+    assert _JAX_PERSISTENT_CACHE_MIN_ENTRY_SIZE_ENV_VAR not in os.environ
+    assert _JAX_PERSISTENT_CACHE_ENABLE_XLA_CACHES_ENV_VAR not in os.environ
 
 
 def test_apply_compilation_cache_policy_honors_explicit_cache_dir(
@@ -634,11 +688,17 @@ def test_apply_compilation_cache_policy_honors_explicit_cache_dir(
     assert metadata["compilation_cache_policy"] == "explicit"
     assert metadata["compilation_cache_dir"] == str(tmp_path / "jax-cache")
     assert Path(metadata["compilation_cache_dir"]).is_dir()
+    assert os.environ[_JAX_PERSISTENT_CACHE_MIN_COMPILE_TIME_ENV_VAR] == "0"
+    assert os.environ[_JAX_PERSISTENT_CACHE_MIN_ENTRY_SIZE_ENV_VAR] == "-1"
+    assert os.environ[_JAX_PERSISTENT_CACHE_ENABLE_XLA_CACHES_ENV_VAR] == "all"
 
 
 def test_apply_compilation_cache_policy_honors_disable_flag(monkeypatch):
     monkeypatch.setenv(_JAX_COMPILATION_CACHE_ENV_VAR, "/tmp/jax-cache")
     monkeypatch.setenv(_SIMSOPT_DISABLE_COMPILATION_CACHE_ENV_VAR, "1")
+    monkeypatch.setenv(_JAX_PERSISTENT_CACHE_MIN_COMPILE_TIME_ENV_VAR, "0")
+    monkeypatch.setenv(_JAX_PERSISTENT_CACHE_MIN_ENTRY_SIZE_ENV_VAR, "-1")
+    monkeypatch.setenv(_JAX_PERSISTENT_CACHE_ENABLE_XLA_CACHES_ENV_VAR, "all")
 
     metadata = apply_compilation_cache_policy()
 
@@ -648,6 +708,80 @@ def test_apply_compilation_cache_policy_honors_disable_flag(monkeypatch):
         "compilation_cache_policy": "disabled",
     }
     assert _JAX_COMPILATION_CACHE_ENV_VAR not in os.environ
+    assert _JAX_PERSISTENT_CACHE_MIN_COMPILE_TIME_ENV_VAR not in os.environ
+    assert _JAX_PERSISTENT_CACHE_MIN_ENTRY_SIZE_ENV_VAR not in os.environ
+    assert _JAX_PERSISTENT_CACHE_ENABLE_XLA_CACHES_ENV_VAR not in os.environ
+
+
+def test_benchmark_compilation_cache_dir_uses_repo_artifacts_root(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        "benchmarks.validation_ladder_common.REPO_ROOT",
+        tmp_path,
+    )
+
+    cache_dir = benchmark_compilation_cache_dir("single_stage_outer_loop_probe")
+
+    assert cache_dir == (
+        tmp_path
+        / ".artifacts"
+        / "jax_compilation_cache"
+        / "single_stage_outer_loop_probe"
+    )
+
+
+def test_apply_benchmark_compilation_cache_policy_uses_explicit_cache_dir(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setattr(
+        "benchmarks.validation_ladder_common.REPO_ROOT",
+        tmp_path,
+    )
+    monkeypatch.delenv(_SIMSOPT_DISABLE_COMPILATION_CACHE_ENV_VAR, raising=False)
+
+    metadata = apply_benchmark_compilation_cache_policy(
+        "single_stage_outer_loop_probe",
+        requested_platform="cuda",
+    )
+
+    assert metadata["compilation_cache_enabled"] is True
+    assert metadata["compilation_cache_policy"] == "explicit"
+    assert metadata["compilation_cache_dir"] == str(
+        tmp_path
+        / ".artifacts"
+        / "jax_compilation_cache"
+        / "single_stage_outer_loop_probe"
+    )
+    assert os.environ[_JAX_PERSISTENT_CACHE_MIN_COMPILE_TIME_ENV_VAR] == "0"
+    assert os.environ[_JAX_PERSISTENT_CACHE_MIN_ENTRY_SIZE_ENV_VAR] == "-1"
+    assert os.environ[_JAX_PERSISTENT_CACHE_ENABLE_XLA_CACHES_ENV_VAR] == "all"
+
+
+def test_apply_benchmark_compilation_cache_policy_keeps_cpu_only_runs_disabled(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setattr(
+        "benchmarks.validation_ladder_common.REPO_ROOT",
+        tmp_path,
+    )
+    monkeypatch.delenv(_JAX_COMPILATION_CACHE_ENV_VAR, raising=False)
+    monkeypatch.delenv(_SIMSOPT_DISABLE_COMPILATION_CACHE_ENV_VAR, raising=False)
+    monkeypatch.delenv(_JAX_PERSISTENT_CACHE_MIN_COMPILE_TIME_ENV_VAR, raising=False)
+    monkeypatch.delenv(_JAX_PERSISTENT_CACHE_MIN_ENTRY_SIZE_ENV_VAR, raising=False)
+    monkeypatch.delenv(_JAX_PERSISTENT_CACHE_ENABLE_XLA_CACHES_ENV_VAR, raising=False)
+
+    metadata = apply_benchmark_compilation_cache_policy(
+        "single_stage_outer_loop_probe",
+        requested_platform="cpu",
+    )
+
+    assert metadata == {
+        "compilation_cache_enabled": False,
+        "compilation_cache_dir": None,
+        "compilation_cache_policy": "disabled",
+    }
+    assert _JAX_PERSISTENT_CACHE_MIN_COMPILE_TIME_ENV_VAR not in os.environ
+    assert _JAX_PERSISTENT_CACHE_MIN_ENTRY_SIZE_ENV_VAR not in os.environ
+    assert _JAX_PERSISTENT_CACHE_ENABLE_XLA_CACHES_ENV_VAR not in os.environ
 
 
 def test_optimizer_drift_tolerances_tier2_geometry_gate_tracks_iteration_budget():
@@ -1157,6 +1291,80 @@ def test_single_stage_init_case_threads_optimizer_backend_to_jax_lane(
     assert env[_SIMSOPT_COMPILATION_CACHE_POLICY_ENV_VAR] == "disabled"
 
 
+def test_single_stage_init_case_threads_profile_target_lane_only_flag(
+    monkeypatch, tmp_path
+):
+    args = argparse.Namespace(
+        plasma_surf_filename="wout_nfp22ginsburg_000_014417_iota15.nc",
+        stage2_bs_path=str(DEFAULT_STAGE2_BS_PATH),
+        nphi=63,
+        ntheta=32,
+        mpol=4,
+        ntor=4,
+        vol_target=0.1,
+        iota_target=0.15,
+        optimizer_backend="ondevice",
+        boozer_optimizer_backend=None,
+        maxiter=1,
+        equilibrium_path=None,
+        equilibria_dir=str(tmp_path / "equilibria"),
+        jax_profile_dir=str(tmp_path / "xprof"),
+        profile_target_lane_batch_size=4,
+    )
+
+    observed_command: list[str] = []
+    monkeypatch.setattr(
+        single_stage_init_parity_module,
+        "_single_stage_script_path",
+        lambda: tmp_path / "driver.py",
+    )
+    monkeypatch.setattr(
+        single_stage_init_parity_module,
+        "run_python_script",
+        lambda _script_path, command, **kwargs: observed_command.extend(command)
+        or argparse.Namespace(stdout="", stderr=""),
+    )
+
+    def fake_find_single_file(root: str | Path, pattern: str) -> Path:
+        path = Path(root) / pattern
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{}", encoding="utf-8")
+        return path
+
+    monkeypatch.setattr(
+        single_stage_init_parity_module, "find_single_file", fake_find_single_file
+    )
+    monkeypatch.setattr(
+        single_stage_init_parity_module,
+        "load_json",
+        lambda _path: {
+            "FINAL_IOTA": 0.15,
+            "FINAL_VOLUME": 0.1,
+            "FIELD_ERROR": 0.003,
+            "MAX_CURVATURE": 10.0,
+            "SELF_INTERSECTING": False,
+            "TIMINGS": {"boozer_total_s": 2.0},
+        },
+    )
+
+    single_stage_init_parity_module._run_single_stage_case(
+        args,
+        "jax",
+        platform="cuda",
+        benchmark_mode=True,
+        load_surface_gamma=False,
+        profile_target_lane=True,
+        profile_target_lane_only=True,
+    )
+
+    assert "--profile-target-lane" in observed_command
+    assert "--profile-target-lane-only" in observed_command
+    batch_flag_index = observed_command.index("--profile-target-lane-batch-size")
+    assert observed_command[batch_flag_index + 1] == "4"
+    profile_flag_index = observed_command.index("--jax-profile-dir")
+    assert observed_command[profile_flag_index + 1] == str(tmp_path / "xprof")
+
+
 def test_prefix_phase_timings_adds_lane_prefix():
     assert single_stage_init_parity_module._prefix_phase_timings(
         "jax",
@@ -1439,6 +1647,79 @@ def test_single_stage_init_case_threads_disable_target_lane_success_filter_flag(
     assert "--disable-target-lane-success-filter" in observed_command
 
 
+def test_single_stage_init_case_threads_target_lane_boozer_trial_overrides(
+    monkeypatch, tmp_path
+):
+    args = argparse.Namespace(
+        plasma_surf_filename="wout_nfp22ginsburg_000_014417_iota15.nc",
+        stage2_bs_path=str(DEFAULT_STAGE2_BS_PATH),
+        nphi=63,
+        ntheta=32,
+        mpol=4,
+        ntor=4,
+        vol_target=0.1,
+        iota_target=0.15,
+        optimizer_backend="ondevice",
+        boozer_optimizer_backend=None,
+        maxiter=1,
+        equilibrium_path=None,
+        equilibria_dir=str(tmp_path / "equilibria"),
+        target_lane_boozer_bfgs_tol=1e-6,
+        target_lane_boozer_bfgs_maxiter=64,
+        target_lane_boozer_newton_tol=1e-9,
+        target_lane_boozer_newton_maxiter=3,
+    )
+
+    observed_command: list[str] = []
+    monkeypatch.setattr(
+        single_stage_init_parity_module,
+        "_single_stage_script_path",
+        lambda: tmp_path / "driver.py",
+    )
+
+    def fake_run_python_script(_script_path, command, **kwargs):
+        observed_command[:] = list(command)
+        return argparse.Namespace(stdout="", stderr="")
+
+    monkeypatch.setattr(
+        single_stage_init_parity_module,
+        "run_python_script",
+        fake_run_python_script,
+    )
+    monkeypatch.setattr(
+        single_stage_init_parity_module,
+        "find_single_file",
+        lambda root, pattern: Path(root) / pattern,
+    )
+    monkeypatch.setattr(
+        single_stage_init_parity_module,
+        "load_json",
+        lambda _path: {
+            "FINAL_IOTA": 0.15,
+            "FINAL_VOLUME": 0.1,
+            "FIELD_ERROR": 0.003,
+            "MAX_CURVATURE": 10.0,
+            "SELF_INTERSECTING": False,
+        },
+    )
+    monkeypatch.setattr(
+        single_stage_init_parity_module,
+        "_load_surface_gamma_artifact",
+        lambda _path: np.zeros((2, 2, 3)),
+    )
+
+    single_stage_init_parity_module._run_single_stage_case(
+        args,
+        "jax",
+        platform="cpu",
+    )
+
+    assert "--target-lane-boozer-bfgs-tol" in observed_command
+    assert "--target-lane-boozer-bfgs-maxiter" in observed_command
+    assert "--target-lane-boozer-newton-tol" in observed_command
+    assert "--target-lane-boozer-newton-maxiter" in observed_command
+
+
 def test_single_stage_init_case_preserves_target_lane_value_and_grad_result(
     monkeypatch, tmp_path
 ):
@@ -1674,6 +1955,23 @@ def test_single_stage_outer_loop_probe_rejects_missing_step_or_wrong_method():
     )
     assert any("self-intersecting surface" in failure for failure in failures)
     assert any("non-finite FINAL_IOTA" in failure for failure in failures)
+
+
+def test_single_stage_outer_loop_probe_profile_only_allows_zero_iterations():
+    summary, failures = evaluate_single_stage_outer_loop_probe(
+        _single_stage_probe_results(
+            iterations=0,
+            boozer_optimizer_backend="ondevice",
+            boozer_optimizer_method="lm-ondevice",
+            outer_optimizer_method=TARGET_OUTER_OPTIMIZER_METHOD,
+        ),
+        expected_boozer_optimizer_backend="ondevice",
+        expected_boozer_optimizer_method="lm-ondevice",
+        require_accepted_step=False,
+    )
+
+    assert failures == []
+    assert summary["iterations"] == 0
 
 
 def _grouped_adjoint_memory_metrics(*, snapshots, **overrides):
@@ -2158,6 +2456,7 @@ def test_tier5_single_stage_outer_loop_probe_args_thread_benchmark_mode():
         optimizer_backend="ondevice",
         benchmark_mode=True,
         single_stage_outer_loop_maxiter=3,
+        profile_target_lane_batch_size=8,
     )
 
     command = tier5_performance_characterization._single_stage_outer_loop_probe_args(
@@ -2171,6 +2470,8 @@ def test_tier5_single_stage_outer_loop_probe_args_thread_benchmark_mode():
     optimizer_backend_idx = command.index("--optimizer-backend")
     assert command[optimizer_backend_idx + 1] == "ondevice"
     assert "--benchmark-mode" in command
+    batch_size_idx = command.index("--profile-target-lane-batch-size")
+    assert command[batch_size_idx + 1] == "8"
 
 
 def test_tier5_stage2_e2e_probe_args_thread_optimizer_backend():
@@ -3587,6 +3888,42 @@ def test_timed_probe_accepts_written_json_from_failed_informational_probe(
     assert payload["failures"] == ["probe failed"]
     assert outer_elapsed_s >= 0.0
     assert observed_envs
+
+
+def test_timed_probe_disables_compilation_cache_for_cpu_children(monkeypatch, tmp_path):
+    observed_envs: list[dict[str, str]] = []
+
+    def fake_run_python_script(script_path, args, **kwargs):
+        output_json = Path(args[args.index("--output-json") + 1])
+        output_json.write_text(json.dumps({"passed": True}), encoding="utf-8")
+        observed_envs.append(dict(kwargs["env"]))
+
+    monkeypatch.setattr(
+        tier5_performance_characterization,
+        "run_python_script",
+        fake_run_python_script,
+    )
+    monkeypatch.setenv(_JAX_COMPILATION_CACHE_ENV_VAR, "/tmp/parent-cache")
+    monkeypatch.setenv(_JAX_PERSISTENT_CACHE_MIN_COMPILE_TIME_ENV_VAR, "0")
+    monkeypatch.setenv(_JAX_PERSISTENT_CACHE_MIN_ENTRY_SIZE_ENV_VAR, "-1")
+    monkeypatch.setenv(_JAX_PERSISTENT_CACHE_ENABLE_XLA_CACHES_ENV_VAR, "all")
+
+    payload, outer_elapsed_s = tier5_performance_characterization._timed_probe(
+        tmp_path / "probe.py",
+        ["--platform", "cpu"],
+        platform="cpu",
+    )
+
+    assert payload["passed"] is True
+    assert outer_elapsed_s >= 0.0
+    assert len(observed_envs) == 1
+    env = observed_envs[0]
+    assert _JAX_COMPILATION_CACHE_ENV_VAR not in env
+    assert _JAX_PERSISTENT_CACHE_MIN_COMPILE_TIME_ENV_VAR not in env
+    assert _JAX_PERSISTENT_CACHE_MIN_ENTRY_SIZE_ENV_VAR not in env
+    assert _JAX_PERSISTENT_CACHE_ENABLE_XLA_CACHES_ENV_VAR not in env
+    assert env[_SIMSOPT_DISABLE_COMPILATION_CACHE_ENV_VAR] == "1"
+    assert env[_SIMSOPT_COMPILATION_CACHE_POLICY_ENV_VAR] == "disabled"
 
 
 def test_tier5_provenance_extra_uses_real_single_stage_fixture():

@@ -2852,6 +2852,11 @@ class BoozerSurfaceJAX(Optimizable):
 
         # BoozerLS: BFGS + Newton polish
         assert self.constraint_weight is not None
+        first_stage_method = self._resolve_optimizer_method(optimize_G=G is not None)
+        self._emit_stage_callback(
+            "before_boozer_lbfgs",
+            method=str(first_stage_method),
+        )
         ls_res = self.minimize_boozer_penalty_constraints_LBFGS(
             constraint_weight=self.constraint_weight,
             iota=iota,

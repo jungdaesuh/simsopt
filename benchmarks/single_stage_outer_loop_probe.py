@@ -37,7 +37,7 @@ from benchmarks.single_stage_smoke_fixture import (
     DEFAULT_VOL_TARGET,
 )
 from benchmarks.validation_ladder_common import (
-    apply_compilation_cache_policy,
+    apply_benchmark_compilation_cache_policy,
     apply_requested_platform,
     bootstrap_local_simsopt,
     build_provenance,
@@ -55,7 +55,10 @@ from benchmarks.validation_ladder_common import (
 
 REQUESTED_PLATFORM = preparse_platform(sys.argv[1:])
 apply_requested_platform(REQUESTED_PLATFORM)
-apply_compilation_cache_policy()
+apply_benchmark_compilation_cache_policy(
+    "single_stage_outer_loop_probe",
+    requested_platform=REQUESTED_PLATFORM,
+)
 
 import jax
 import jaxlib
@@ -170,9 +173,46 @@ def parse_args() -> argparse.Namespace:
         help="Single-stage outer-loop iteration budget for the proof rung.",
     )
     parser.add_argument(
+        "--target-lane-boozer-bfgs-tol",
+        type=float,
+        default=None,
+        help="Optional temporary Boozer LS tolerance override for target-lane trials.",
+    )
+    parser.add_argument(
+        "--target-lane-boozer-bfgs-maxiter",
+        type=int,
+        default=None,
+        help="Optional temporary Boozer LS iteration cap for target-lane trials.",
+    )
+    parser.add_argument(
         "--profile-target-lane",
         action="store_true",
         help="Record target-lane objective profiling breakdowns in the probe payload.",
+    )
+    parser.add_argument(
+        "--profile-target-lane-only",
+        action="store_true",
+        help=(
+            "Build and profile the target-lane runtime bundle without running the "
+            "outer optimizer."
+        ),
+    )
+    parser.add_argument(
+        "--profile-target-lane-batch-size",
+        type=int,
+        default=1,
+        help=(
+            "When profiling the target lane, also record the batched seed-evaluation "
+            "path over this many nearby deterministic seed points."
+        ),
+    )
+    parser.add_argument(
+        "--jax-profile-dir",
+        default=None,
+        help=(
+            "Optional JAX/XProf trace output directory threaded through to the "
+            "single-stage example subprocess."
+        ),
     )
     parser.add_argument(
         "--experimental-target-lane-value-and-grad",
@@ -197,6 +237,7 @@ def evaluate_single_stage_outer_loop_probe(
     *,
     expected_boozer_optimizer_backend: str | None = None,
     expected_boozer_optimizer_method: str | None = None,
+    require_accepted_step: bool = True,
 ) -> tuple[dict[str, Any], list[str]]:
     summary = {
         "rung": LADDER_RUNG,
@@ -212,7 +253,7 @@ def evaluate_single_stage_outer_loop_probe(
     }
 
     failures: list[str] = []
-    if summary["iterations"] < _MIN_ACCEPTED_ITERATIONS:
+    if require_accepted_step and summary["iterations"] < _MIN_ACCEPTED_ITERATIONS:
         failures.append(
             "Single-stage outer-loop probe did not accept an optimizer step."
         )
@@ -272,6 +313,7 @@ def main() -> None:
             "boozer_optimizer_backend": resolved_boozer_optimizer_backend,
             "boozer_optimizer_backend_requested": args.boozer_optimizer_backend,
             "outer_maxiter": int(args.maxiter),
+            "profile_target_lane_batch_size": int(args.profile_target_lane_batch_size),
             "nphi": int(args.nphi),
             "ntheta": int(args.ntheta),
             "mpol": int(args.mpol),
@@ -288,6 +330,7 @@ def main() -> None:
         benchmark_mode=True,
         load_surface_gamma=False,
         profile_target_lane=args.profile_target_lane,
+        profile_target_lane_only=args.profile_target_lane_only,
         experimental_target_lane_value_and_grad=(
             args.experimental_target_lane_value_and_grad
         ),
@@ -301,6 +344,7 @@ def main() -> None:
                 resolved_boozer_optimizer_backend
             ),
         ),
+        require_accepted_step=not args.profile_target_lane_only,
     )
     payload = {
         "rung": LADDER_RUNG,

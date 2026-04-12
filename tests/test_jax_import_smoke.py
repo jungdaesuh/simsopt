@@ -640,6 +640,39 @@ def test_entrypoint_runtime_helper_auto_clears_stale_platform_env():
     )
 
 
+def test_entrypoint_runtime_helper_adds_detected_cuda_toolchain_root():
+    _assert_import_check_passes(
+        """
+        import os
+        import tempfile
+        from pathlib import Path
+
+        import repo_bootstrap
+        from repo_bootstrap import configure_entrypoint_jax_runtime
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cuda_root = Path(tmp) / "cuda"
+            (cuda_root / "bin").mkdir(parents=True)
+            repo_bootstrap._DEFAULT_CUDA_TOOLCHAIN_ROOT = cuda_root
+            os.environ["PATH"] = "/usr/bin"
+            os.environ.pop("XLA_FLAGS", None)
+
+            requested = configure_entrypoint_jax_runtime(
+                ["--platform", "cuda"],
+                respect_existing_env=False,
+            )
+
+            assert requested == "cuda"
+            assert os.environ["PATH"].split(os.pathsep)[0] == str(cuda_root / "bin")
+            assert (
+                os.environ["XLA_FLAGS"].split()[0]
+                == f"--xla_gpu_cuda_data_dir={cuda_root}"
+            )
+    """,
+        failure_message="entrypoint runtime helper should auto-detect a CUDA toolchain root",
+    )
+
+
 def test_run_code_benchmark_common_import_is_jax_cold():
     _assert_import_check_passes(
         f"""
@@ -991,6 +1024,18 @@ def test_lbfgs_ondevice_reuses_compiled_solver_across_identical_calls():
 def test_bfgs_ondevice_reuses_compiled_solver_across_identical_calls():
     """Repeated identical bfgs-ondevice calls must not recompile run_solver."""
     _assert_ondevice_optimizer_reuses_compiled_solver("bfgs-ondevice")
+
+
+def test_target_lbfgs_ondevice_reuses_compiled_solver_across_identical_value_and_grad_calls():
+    """Target-lane lbfgs-ondevice value/grad calls must reuse the compiled solver."""
+    _assert_python_script_passes(
+        _JAX_SUBPROCESS_CASES_PATH,
+        args=("target-compile-count",),
+        failure_message=(
+            "target lbfgs-ondevice value-and-grad compile-count smoke failed"
+        ),
+        extra_env={"JAX_ENABLE_COMPILATION_CACHE": "0"},
+    )
 
 
 def test_ondevice_solver_cache_respects_mutable_objective_state():
@@ -2187,10 +2232,14 @@ _TRANSFER_GUARD_CURVE_GRADIENT_IMPORTS = """
 from simsopt.geo import (
     FrameRotation,
     FramedCurveCentroid,
+    SurfaceRZFourier,
     create_equally_spaced_curves,
 )
 from simsopt.geo.curveobjectives import (
+    CurveCurveDistance,
+    CurveSurfaceDistance,
     FramedCurveTwist,
+    LpCurveCurvature,
     LpCurveCurvatureBarrier,
     LpCurveTorsion,
 )
@@ -2209,6 +2258,17 @@ curves = create_equally_spaced_curves(
 )
 rotation = FrameRotation(curves[0].quadpoints, order=1)
 rotation.x = np.array([0.1, -0.2, 0.05])
+surface = SurfaceRZFourier(
+    nfp=1,
+    stellsym=False,
+    mpol=1,
+    ntor=0,
+    quadpoints_phi=np.arange(16) / 16,
+    quadpoints_theta=np.arange(16) / 16,
+)
+surface.set_rc(0, 0, 1.2)
+surface.set_rc(1, 0, 0.15)
+surface.set_zs(1, 0, 0.15)
 """
 
 
@@ -2295,6 +2355,36 @@ def test_transfer_guard_disallow_allows_legacy_curve_objective_values(label, cod
             """,
         ),
         (
+            "LpCurveCurvature",
+            """
+            grad = np.asarray(
+                LpCurveCurvature(curves[0], p=4, threshold=10.0).dJ(),
+                dtype=float,
+            )
+            assert grad.size > 0
+            assert np.all(np.isfinite(grad))
+            """,
+        ),
+        (
+            "CurveCurveDistance",
+            """
+            grad = np.asarray(CurveCurveDistance(curves, 0.05).dJ(), dtype=float)
+            assert grad.size > 0
+            assert np.all(np.isfinite(grad))
+            """,
+        ),
+        (
+            "CurveSurfaceDistance",
+            """
+            grad = np.asarray(
+                CurveSurfaceDistance(curves, surface, 0.02).dJ(),
+                dtype=float,
+            )
+            assert grad.size > 0
+            assert np.all(np.isfinite(grad))
+            """,
+        ),
+        (
             "LpCurveTorsion",
             """
             grad = np.asarray(
@@ -2329,6 +2419,65 @@ def test_transfer_guard_disallow_allows_legacy_curve_objective_gradients(label, 
         setup_code=_TRANSFER_GUARD_CURVE_GRADIENT_SETUP,
         objective_code=code,
         failure_message=f"{label} transfer-guard gradient smoke failed",
+    )
+
+
+def test_transfer_guard_disallow_allows_pairwise_curve_penalty_pure_functions():
+    """Pure pairwise penalty helpers must not materialize host scalars implicitly."""
+    _assert_import_check_passes(
+        """
+        import numpy as np
+        import jax
+        import simsopt.config as simsopt_config
+        from simsopt.geo.curveobjectives import cc_distance_pure, cs_distance_pure
+
+        simsopt_config.set_backend("jax_cpu_parity", transfer_guard="disallow")
+        gamma_curve = jax.device_put(
+            np.array(
+                [[0.0, 0.0, 0.0], [0.1, 0.0, 0.0]],
+                dtype=np.float64,
+            )
+        )
+        gammadash_curve = jax.device_put(
+            np.array(
+                [[0.1, 0.0, 0.0], [0.1, 0.0, 0.0]],
+                dtype=np.float64,
+            )
+        )
+        gamma_other = jax.device_put(
+            np.array(
+                [[1.0, 0.0, 0.0], [1.1, 0.0, 0.0]],
+                dtype=np.float64,
+            )
+        )
+        surface_normals = jax.device_put(
+            np.array(
+                [[0.0, 1.0, 0.0], [0.0, 1.0, 0.0]],
+                dtype=np.float64,
+            )
+        )
+
+        cc_value = cc_distance_pure(
+            gamma_curve,
+            gammadash_curve,
+            gamma_other,
+            gammadash_curve,
+            0.05,
+        )
+        cs_value = cs_distance_pure(
+            gamma_curve,
+            gammadash_curve,
+            gamma_other,
+            surface_normals,
+            0.05,
+        )
+
+        assert float(cc_value) == 0.0
+        assert float(cs_value) == 0.0
+        """,
+        failure_message=(
+            "pairwise curve penalty pure functions should stay transfer-clean"
+        ),
     )
 
 

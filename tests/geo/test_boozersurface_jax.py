@@ -1820,6 +1820,67 @@ class TestBoozerSurfaceJAXClass:
         assert res["optimizer_method"] == "lm-ondevice"
         assert res["success"] is True
 
+    def test_run_code_emits_actual_first_stage_method_for_lm(self, monkeypatch):
+        booz = _make_mock_boozer_surface()
+        booz.options["optimizer_backend"] = "ondevice"
+        booz.options["least_squares_algorithm"] = "lm"
+
+        observed = []
+
+        def record_stage(label, **payload):
+            observed.append((label, payload))
+
+        booz.options["stage_callback"] = record_stage
+
+        def fake_target_least_squares(
+            residual_fn,
+            x0,
+            *,
+            method,
+            tol,
+            maxiter,
+            options=None,
+            callback=None,
+            progress_callback=None,
+        ):
+            del residual_fn, tol, maxiter, options, callback, progress_callback
+            flat_x0, _ = ravel_pytree(x0)
+            return types.SimpleNamespace(
+                x=x0,
+                fun=0.0,
+                jac=jnp.zeros_like(flat_x0),
+                residual=jnp.zeros_like(flat_x0),
+                residual_jacobian=jnp.eye(flat_x0.size, dtype=flat_x0.dtype),
+                hessian=jnp.eye(flat_x0.size, dtype=flat_x0.dtype),
+                damping=jnp.asarray(1.0e-3, dtype=flat_x0.dtype),
+                nit=0,
+                nfev=1,
+                njev=1,
+                status=0,
+                success=True,
+            )
+
+        def fake_newton_polish(
+            _objective_fn,
+            x0,
+            *,
+            maxiter,
+            tol,
+            stab,
+            progress_callback=None,
+            objective_args=(),
+        ):
+            del maxiter, tol, stab, progress_callback, objective_args
+            return _successful_newton_polish_result(x0)
+
+        monkeypatch.setattr(_bsj, "target_least_squares", fake_target_least_squares)
+        _patch_newton_polish_runner(monkeypatch, fake_newton_polish)
+
+        booz.run_code(iota=0.3, G=0.05)
+
+        before_payload = _stage_payload(observed, "before_boozer_lbfgs")
+        assert before_payload["method"] == "lm-ondevice"
+
     def test_penalty_residual_closure_hostifies_surface_metadata(self):
         booz = _make_mock_boozer_surface(stellsym=True, mpol=2, ntor=2)
         residual_fn = booz._make_penalty_residual_with(

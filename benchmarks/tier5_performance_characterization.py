@@ -29,7 +29,7 @@ from benchmarks.single_stage_smoke_fixture import (
 )
 from benchmarks.validation_ladder_common import (
     TIER3_SINGLE_STAGE_OUTER_LOOP_RUNG,
-    apply_compilation_cache_policy,
+    apply_benchmark_compilation_cache_policy,
     apply_requested_platform,
     build_provenance,
     describe_compile_behavior,
@@ -218,7 +218,10 @@ def _runtime_modules() -> tuple[Any, Any]:
     if _RUNTIME_JAX is None or _RUNTIME_JAXLIB is None:
         requested_platform = preparse_platform(sys.argv[1:])
         apply_requested_platform(requested_platform)
-        apply_compilation_cache_policy()
+        apply_benchmark_compilation_cache_policy(
+            "tier5_performance_characterization",
+            requested_platform=requested_platform,
+        )
         import jax as runtime_jax
         import jaxlib as runtime_jaxlib
 
@@ -299,6 +302,14 @@ def _single_stage_outer_loop_probe_args(args: argparse.Namespace) -> list[str]:
         *_common_equilibrium_args(args),
         *_trusted_single_stage_args(args),
     ]
+    profile_target_lane_batch_size = getattr(args, "profile_target_lane_batch_size", 1)
+    if int(profile_target_lane_batch_size) > 1:
+        command.extend(
+            [
+                "--profile-target-lane-batch-size",
+                str(int(profile_target_lane_batch_size)),
+            ]
+        )
     if bool(args.benchmark_mode):
         command.append("--benchmark-mode")
     return command
@@ -353,7 +364,10 @@ def _timed_probe(
             run_python_script(
                 script_path,
                 [*command_args, "--output-json", str(output_path)],
-                env=repo_pythonpath_env(platform=platform),
+                env=repo_pythonpath_env(
+                    platform=platform,
+                    disable_compilation_cache=(platform == "cpu"),
+                ),
                 cwd=REPO_ROOT,
                 bootstrap_repo=True,
                 stream_output=True,

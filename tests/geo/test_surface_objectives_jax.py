@@ -9,6 +9,7 @@ These tests exercise the pure JAX label/objective ingredients directly:
 
 from pathlib import Path
 import sys
+import types
 
 import jax
 import jax.numpy as jnp
@@ -19,7 +20,6 @@ from conftest import (
     host_array,
     host_scalar,
     parity_default_device,
-    parity_lane,
     parity_rng,
 )
 
@@ -35,6 +35,8 @@ from simsopt.field.biotsavart_jax_backend import BiotSavartJAX
 from simsopt.field.coil import Current, coils_via_symmetries
 from simsopt.configs.zoo import get_data
 from simsopt.geo.curve import create_equally_spaced_curves
+from simsopt.geo import optimizer_jax as optimizer_jax_module
+from simsopt.geo import surfaceobjectives_jax as surfaceobjectives_jax_module
 from simsopt.geo.surfaceobjectives import ToroidalFlux
 from simsopt.geo.surfacerzfourier import SurfaceRZFourier
 from simsopt.geo.label_constraints_jax import toroidal_flux_jax
@@ -85,6 +87,862 @@ _TOROIDAL_FLUX_SURFACE_HESS_RTOL = 1e-8
 _TOROIDAL_FLUX_SURFACE_HESS_ATOL = 1e-10
 _TOROIDAL_FLUX_COIL_GRAD_RTOL = 1e-9
 _TOROIDAL_FLUX_COIL_GRAD_ATOL = 1e-7
+
+
+def test_traceable_objective_bundle_marks_value_and_grad_cacheable(monkeypatch):
+    marked: dict[str, object] = {}
+    original_mark = optimizer_jax_module._mark_cacheable_jit_value_and_grad
+
+    def counting_mark(fun):
+        marked["calls"] = int(marked.get("calls", 0)) + 1
+        marked["fun"] = fun
+        return original_mark(fun)
+
+    monkeypatch.setattr(
+        optimizer_jax_module,
+        "_mark_cacheable_jit_value_and_grad",
+        counting_mark,
+    )
+
+    state = {
+        "objective_kwargs": {},
+        "baseline_x": jnp.asarray([0.0], dtype=jnp.float64),
+        "baseline_value": jnp.asarray(0.0, dtype=jnp.float64),
+        "baseline_plu": None,
+        "baseline_coil_dofs": jnp.asarray([0.0], dtype=jnp.float64),
+        "coil_set_spec_from_dofs": lambda coil_dofs: coil_dofs,
+        "optimize_G": False,
+        "predictor_kind": "none",
+        "failure_value": jnp.asarray(1.0, dtype=jnp.float64),
+        "failure_scale": jnp.asarray(1.0, dtype=jnp.float64),
+    }
+
+    bundle = (
+        surfaceobjectives_jax_module._build_traceable_objective_compiled_bundle_from_state(
+            object(),
+            state,
+        )
+    )
+
+    assert marked["calls"] == 1
+    assert bundle["compiled_value_and_grad_for"] is marked["fun"]
+    assert (
+        getattr(
+            bundle["compiled_value_and_grad_for"],
+            optimizer_jax_module._CACHEABLE_VALUE_AND_GRAD_ATTR,
+            False,
+        )
+        is True
+    )
+
+
+def test_traceable_runtime_cache_key_avoids_value_hashing_runtime_state(monkeypatch):
+    seen_trees = []
+    original_tree_signature = surfaceobjectives_jax_module._traceable_cache_tree_signature
+
+    def recording_tree_signature(tree):
+        seen_trees.append(tree)
+        return original_tree_signature(tree)
+
+    monkeypatch.setattr(
+        surfaceobjectives_jax_module,
+        "_traceable_cache_tree_signature",
+        recording_tree_signature,
+    )
+
+    booz = types.SimpleNamespace(
+        _solver_generation=7,
+        options={},
+        _collect_optimizer_options=lambda: {},
+    )
+    state = {
+        "objective_kwargs": {
+            "iota_target": 0.23,
+            "outer_objective_config": {
+                "curve_curve_weight": 1.0,
+                "vessel_gamma": jnp.ones((8, 3), dtype=jnp.float64),
+            },
+        },
+        "optimize_G": False,
+        "predictor_kind": "ls",
+        "coil_dof_extraction_spec": {"unused": True},
+        "baseline_x": jnp.arange(5, dtype=jnp.float64),
+        "baseline_value": jnp.asarray(1.0, dtype=jnp.float64),
+        "baseline_plu": (
+            jnp.eye(3, dtype=jnp.float64),
+            jnp.eye(3, dtype=jnp.float64),
+            jnp.arange(3, dtype=jnp.int32),
+        ),
+        "baseline_coil_dofs": jnp.arange(4, dtype=jnp.float64),
+        "failure_value": jnp.asarray(2.0, dtype=jnp.float64),
+        "failure_scale": jnp.asarray(1.0, dtype=jnp.float64),
+    }
+
+    surfaceobjectives_jax_module._traceable_runtime_cache_key(
+        booz,
+        object(),
+        state,
+        success_filter=None,
+    )
+
+    assert not any(tree is state["objective_kwargs"] for tree in seen_trees)
+    assert not any(tree is state["baseline_x"] for tree in seen_trees)
+    assert not any(tree is state["baseline_value"] for tree in seen_trees)
+    assert not any(tree is state["baseline_plu"] for tree in seen_trees)
+    assert not any(tree is state["baseline_coil_dofs"] for tree in seen_trees)
+    assert not any(tree is state["failure_value"] for tree in seen_trees)
+    assert not any(tree is state["failure_scale"] for tree in seen_trees)
+
+
+def test_traceable_runtime_cache_key_uses_structural_success_filter_signature():
+    booz = types.SimpleNamespace(
+        _solver_generation=7,
+        options={},
+        _collect_optimizer_options=lambda: {},
+    )
+    state = {
+        "objective_kwargs": {
+            "iota_target": 0.23,
+            "outer_objective_config": None,
+        },
+        "optimize_G": False,
+        "predictor_kind": "ls",
+    }
+
+    def success_filter_a(_coil_dofs, _solved_x):
+        return jnp.asarray(True, dtype=bool)
+
+    def success_filter_b(_coil_dofs, _solved_x):
+        return jnp.asarray(True, dtype=bool)
+
+    signature = ("single-stage-target-lane-hardware-success-filter", "sig-123")
+    success_filter_a._traceable_runtime_cache_signature = signature
+    success_filter_b._traceable_runtime_cache_signature = signature
+
+    key_a = surfaceobjectives_jax_module._traceable_runtime_cache_key(
+        booz,
+        object(),
+        state,
+        success_filter=success_filter_a,
+    )
+    key_b = surfaceobjectives_jax_module._traceable_runtime_cache_key(
+        booz,
+        object(),
+        state,
+        success_filter=success_filter_b,
+    )
+
+    assert key_a == key_b
+
+
+def test_traceable_runtime_cache_key_does_not_hostify_jax_array_contract_leaves(
+    monkeypatch,
+):
+    original_asarray = surfaceobjectives_jax_module.np.asarray
+
+    def guarded_asarray(value, *args, **kwargs):
+        if isinstance(value, jax.Array):
+            raise AssertionError("jax.Array contract leaves must stay on device")
+        return original_asarray(value, *args, **kwargs)
+
+    monkeypatch.setattr(surfaceobjectives_jax_module.np, "asarray", guarded_asarray)
+
+    booz = types.SimpleNamespace(
+        _solver_generation=7,
+        options={},
+        _collect_optimizer_options=lambda: {},
+    )
+    state = {
+        "objective_kwargs": {
+            "iota_target": 0.23,
+            "outer_objective_config": {
+                "coil_surface_weight": 1.0,
+                "vessel_normal": jnp.asarray([0.0, 0.0, 1.0], dtype=jnp.float64),
+            },
+        },
+        "optimize_G": False,
+        "predictor_kind": "ls",
+    }
+
+    key = surfaceobjectives_jax_module._traceable_runtime_cache_key(
+        booz,
+        object(),
+        state,
+        success_filter=None,
+    )
+
+    assert key[5][0] == "tree"
+
+
+def test_traceable_runtime_hostify_tree_explicitly_materializes_jax_array_leaves():
+    hostified = surfaceobjectives_jax_module._traceable_runtime_hostify_tree(
+        {
+            "vector": jax.device_put(np.array([1.0, -2.0], dtype=np.float64)),
+            "nested": (
+                jnp.asarray([3, 4], dtype=jnp.int32),
+                {"plain": 5.0},
+            ),
+        }
+    )
+
+    leaves = jax.tree_util.tree_leaves(hostified)
+
+    assert not any(isinstance(leaf, jax.Array) for leaf in leaves)
+    assert isinstance(hostified["vector"], np.ndarray)
+    assert isinstance(hostified["nested"][0], np.ndarray)
+
+
+def test_build_traceable_objective_state_hostifies_runtime_constants(monkeypatch):
+    monkeypatch.setattr(
+        surfaceobjectives_jax_module,
+        "_ensure_solved",
+        lambda _booz: None,
+    )
+    monkeypatch.setattr(
+        surfaceobjectives_jax_module,
+        "_canonicalize_traceable_exact_quadrature",
+        lambda _booz: (
+            jnp.asarray([0.0, 0.25], dtype=jnp.float64),
+            jnp.asarray([0.0, 0.5], dtype=jnp.float64),
+            jnp.asarray([0, 1], dtype=jnp.int32),
+        ),
+    )
+    monkeypatch.setattr(
+        surfaceobjectives_jax_module,
+        "_evaluate_traceable_total_objective",
+        lambda *_args, **_kwargs: jnp.asarray(3.5, dtype=jnp.float64),
+    )
+
+    class _FakeSurface:
+        quadpoints_phi = np.asarray([0.0, 0.5], dtype=np.float64)
+        quadpoints_theta = np.asarray([0.0, 0.5], dtype=np.float64)
+
+        def get_dofs(self):
+            return np.asarray([1.0, 0.1], dtype=np.float64)
+
+    class _FakeBooz:
+        boozer_type = "ls"
+        surface = _FakeSurface()
+        res = {
+            "iota": jnp.asarray(0.23, dtype=jnp.float64),
+            "G": jnp.asarray(1.7, dtype=jnp.float64),
+            "PLU": (
+                jnp.eye(2, dtype=jnp.float64),
+                jnp.eye(2, dtype=jnp.float64),
+                jnp.asarray([0, 1], dtype=jnp.int32),
+            ),
+        }
+        quadpoints_phi = np.asarray([0.0, 0.5], dtype=np.float64)
+        quadpoints_theta = np.asarray([0.0, 0.5], dtype=np.float64)
+        mpol = 1
+        ntor = 1
+        nfp = 1
+        stellsym = True
+        scatter_indices = np.asarray([0, 1], dtype=np.int32)
+        _surface_geometry_kind = "surface-geometry-marker"
+        options = {"weight_inv_modB": False}
+        constraint_weight = 1.0
+        targetlabel = 0.0
+        label_type = "iota"
+        phi_idx = 0
+
+        def _resolve_optimizer_method(self):
+            return "lbfgs-ondevice"
+
+        def _pack_decision_vector(self, iota, G, *, sdofs):
+            return jnp.concatenate(
+                [
+                    jnp.asarray(sdofs, dtype=jnp.float64),
+                    jnp.asarray([iota], dtype=jnp.float64),
+                    jnp.asarray([G], dtype=jnp.float64),
+                ]
+            )
+
+    class _FakeBS:
+        x = np.asarray([0.2, -0.1], dtype=np.float64)
+
+        def coil_dof_extraction_spec(self):
+            return {
+                "gamma": jnp.asarray([[1.0, 2.0, 3.0]], dtype=jnp.float64),
+            }
+
+        def coil_set_spec_from_dofs(self, coil_dofs):
+            return coil_dofs
+
+    state = surfaceobjectives_jax_module._build_traceable_objective_state(
+        _FakeBooz(),
+        _FakeBS(),
+        jnp.asarray(0.28, dtype=jnp.float64),
+        outer_objective_config={
+            "vessel_gamma": jnp.ones((2, 3), dtype=jnp.float64),
+        },
+    )
+
+    runtime_constants = {
+        "objective_kwargs": state["objective_kwargs"],
+        "baseline_x": state["baseline_x"],
+        "baseline_value": state["baseline_value"],
+        "baseline_plu": state["baseline_plu"],
+        "baseline_coil_dofs": state["baseline_coil_dofs"],
+        "failure_value": state["failure_value"],
+        "failure_scale": state["failure_scale"],
+        "coil_dof_extraction_spec": state["coil_dof_extraction_spec"],
+    }
+
+    assert not any(
+        isinstance(leaf, jax.Array) for leaf in jax.tree_util.tree_leaves(runtime_constants)
+    )
+    assert isinstance(state["objective_kwargs"]["iota_target"], np.ndarray)
+    assert isinstance(
+        state["objective_kwargs"]["outer_objective_config"]["vessel_gamma"],
+        np.ndarray,
+    )
+    assert isinstance(state["baseline_x"], np.ndarray)
+    assert isinstance(state["baseline_plu"][0], np.ndarray)
+    assert isinstance(state["baseline_coil_dofs"], np.ndarray)
+
+
+def test_get_cached_traceable_runtime_entry_reuses_bundle_for_same_solver_generation(
+    monkeypatch,
+):
+    build_state_calls = []
+    build_bundle_calls = []
+
+    booz = types.SimpleNamespace(
+        _solver_generation=11,
+        _traceable_runtime_entry_cache=None,
+        options={},
+        _collect_optimizer_options=lambda: {},
+    )
+    bs = object()
+
+    def build_state(_booz, _bs, iota_target, *, outer_objective_config=None):
+        build_state_calls.append((iota_target, outer_objective_config))
+        return {
+            "objective_kwargs": {
+                "iota_target": float(iota_target),
+                "outer_objective_config": {
+                    "curve_curve_weight": 1.0,
+                    "vessel_gamma": np.ones((4, 3), dtype=np.float64),
+                }
+                if outer_objective_config is not None
+                else None,
+            },
+            "optimize_G": False,
+            "predictor_kind": "ls",
+            "coil_dof_extraction_spec": {"spec": "marker"},
+            "baseline_x": jnp.arange(4, dtype=jnp.float64),
+            "baseline_value": jnp.asarray(1.0, dtype=jnp.float64),
+            "baseline_plu": (
+                jnp.eye(2, dtype=jnp.float64),
+                jnp.eye(2, dtype=jnp.float64),
+                jnp.arange(2, dtype=jnp.int32),
+            ),
+            "baseline_coil_dofs": jnp.arange(3, dtype=jnp.float64),
+            "failure_value": jnp.asarray(2.0, dtype=jnp.float64),
+            "failure_scale": jnp.asarray(1.0, dtype=jnp.float64),
+        }
+
+    def build_bundle(_booz, state, *, success_filter=None):
+        build_bundle_calls.append((state["objective_kwargs"]["iota_target"], success_filter))
+        return {
+            "state": state,
+            "compiled_forward_result_for": object(),
+            "compiled_total_gradient_for": object(),
+            "compiled_value_and_grad_for": object(),
+            "failure_gradient_for": object(),
+        }
+
+    monkeypatch.setattr(
+        surfaceobjectives_jax_module,
+        "_build_traceable_objective_state",
+        build_state,
+    )
+    monkeypatch.setattr(
+        surfaceobjectives_jax_module,
+        "_build_traceable_objective_compiled_bundle_from_state",
+        build_bundle,
+    )
+    monkeypatch.setattr(
+        surfaceobjectives_jax_module,
+        "_make_traceable_objective_from_compiled_bundle",
+        lambda compiled_bundle: ("objective", id(compiled_bundle)),
+    )
+    monkeypatch.setattr(
+        surfaceobjectives_jax_module,
+        "_make_traceable_host_objective",
+        lambda objective: ("host_objective", objective),
+    )
+    monkeypatch.setattr(
+        surfaceobjectives_jax_module,
+        "_make_traceable_host_value_and_grad",
+        lambda compiled_value_and_grad_for: (
+            "host_value_and_grad",
+            id(compiled_value_and_grad_for),
+        ),
+    )
+    monkeypatch.setattr(
+        surfaceobjectives_jax_module,
+        "_make_traceable_batched_value_and_grad_pipeline",
+        lambda compiled_value_and_grad_for: (
+            "batched_value_and_grad",
+            id(compiled_value_and_grad_for),
+        ),
+    )
+
+    entry1 = surfaceobjectives_jax_module._get_cached_traceable_runtime_entry(
+        booz,
+        bs,
+        0.23,
+        outer_objective_config={"enabled": True},
+        success_filter=None,
+    )
+    entry2 = surfaceobjectives_jax_module._get_cached_traceable_runtime_entry(
+        booz,
+        bs,
+        0.23,
+        outer_objective_config={"enabled": True},
+        success_filter=None,
+    )
+
+    assert entry1 is entry2
+    assert len(build_state_calls) == 2
+    assert len(build_bundle_calls) == 1
+
+
+def test_get_cached_traceable_runtime_entry_reuses_bundle_for_equivalent_success_filter_signatures(
+    monkeypatch,
+):
+    build_bundle_calls = []
+
+    booz = types.SimpleNamespace(
+        _solver_generation=11,
+        _traceable_runtime_entry_cache=None,
+        options={},
+        _collect_optimizer_options=lambda: {},
+    )
+    bs = object()
+
+    def build_state(_booz, _bs, iota_target, *, outer_objective_config=None):
+        del outer_objective_config
+        return {
+            "objective_kwargs": {
+                "iota_target": float(iota_target),
+                "outer_objective_config": None,
+            },
+            "optimize_G": False,
+            "predictor_kind": "ls",
+            "coil_dof_extraction_spec": {"spec": "marker"},
+            "baseline_x": jnp.arange(4, dtype=jnp.float64),
+            "baseline_value": jnp.asarray(1.0, dtype=jnp.float64),
+            "baseline_plu": (
+                jnp.eye(2, dtype=jnp.float64),
+                jnp.eye(2, dtype=jnp.float64),
+                jnp.arange(2, dtype=jnp.int32),
+            ),
+            "baseline_coil_dofs": jnp.arange(3, dtype=jnp.float64),
+            "failure_value": jnp.asarray(2.0, dtype=jnp.float64),
+            "failure_scale": jnp.asarray(1.0, dtype=jnp.float64),
+        }
+
+    def build_bundle(_booz, state, *, success_filter=None):
+        build_bundle_calls.append((state["objective_kwargs"]["iota_target"], success_filter))
+        return {
+            "state": state,
+            "compiled_forward_result_for": object(),
+            "compiled_total_gradient_for": object(),
+            "compiled_value_and_grad_for": object(),
+            "failure_gradient_for": object(),
+        }
+
+    monkeypatch.setattr(
+        surfaceobjectives_jax_module,
+        "_build_traceable_objective_state",
+        build_state,
+    )
+    monkeypatch.setattr(
+        surfaceobjectives_jax_module,
+        "_build_traceable_objective_compiled_bundle_from_state",
+        build_bundle,
+    )
+    monkeypatch.setattr(
+        surfaceobjectives_jax_module,
+        "_make_traceable_objective_from_compiled_bundle",
+        lambda compiled_bundle: ("objective", id(compiled_bundle)),
+    )
+    monkeypatch.setattr(
+        surfaceobjectives_jax_module,
+        "_make_traceable_host_objective",
+        lambda objective: ("host_objective", objective),
+    )
+    monkeypatch.setattr(
+        surfaceobjectives_jax_module,
+        "_make_traceable_host_value_and_grad",
+        lambda compiled_value_and_grad_for: (
+            "host_value_and_grad",
+            id(compiled_value_and_grad_for),
+        ),
+    )
+    monkeypatch.setattr(
+        surfaceobjectives_jax_module,
+        "_make_traceable_batched_value_and_grad_pipeline",
+        lambda compiled_value_and_grad_for: (
+            "batched_value_and_grad",
+            id(compiled_value_and_grad_for),
+        ),
+    )
+
+    def success_filter_a(_coil_dofs, _solved_x):
+        return jnp.asarray(True, dtype=bool)
+
+    def success_filter_b(_coil_dofs, _solved_x):
+        return jnp.asarray(True, dtype=bool)
+
+    signature = ("single-stage-target-lane-hardware-success-filter", "sig-123")
+    success_filter_a._traceable_runtime_cache_signature = signature
+    success_filter_b._traceable_runtime_cache_signature = signature
+
+    entry1 = surfaceobjectives_jax_module._get_cached_traceable_runtime_entry(
+        booz,
+        bs,
+        0.23,
+        outer_objective_config=None,
+        success_filter=success_filter_a,
+    )
+    entry2 = surfaceobjectives_jax_module._get_cached_traceable_runtime_entry(
+        booz,
+        bs,
+        0.23,
+        outer_objective_config=None,
+        success_filter=success_filter_b,
+    )
+
+    assert entry1 is entry2
+    assert len(build_bundle_calls) == 1
+
+
+def test_get_cached_traceable_runtime_entry_invalidates_on_solver_generation_change(
+    monkeypatch,
+):
+    build_bundle_calls = []
+
+    booz = types.SimpleNamespace(
+        _solver_generation=3,
+        _traceable_runtime_entry_cache=None,
+        options={},
+        _collect_optimizer_options=lambda: {},
+    )
+    bs = object()
+
+    def build_state(_booz, _bs, iota_target, *, outer_objective_config=None):
+        del outer_objective_config
+        return {
+            "objective_kwargs": {"iota_target": float(iota_target), "outer_objective_config": None},
+            "optimize_G": False,
+            "predictor_kind": "ls",
+            "coil_dof_extraction_spec": {"spec": "marker"},
+            "baseline_x": jnp.arange(2, dtype=jnp.float64),
+            "baseline_value": jnp.asarray(1.0, dtype=jnp.float64),
+            "baseline_plu": (
+                jnp.eye(2, dtype=jnp.float64),
+                jnp.eye(2, dtype=jnp.float64),
+                jnp.arange(2, dtype=jnp.int32),
+            ),
+            "baseline_coil_dofs": jnp.arange(2, dtype=jnp.float64),
+            "failure_value": jnp.asarray(2.0, dtype=jnp.float64),
+            "failure_scale": jnp.asarray(1.0, dtype=jnp.float64),
+        }
+
+    def build_bundle(_booz, state, *, success_filter=None):
+        del success_filter
+        build_bundle_calls.append(state["objective_kwargs"]["iota_target"])
+        return {
+            "state": state,
+            "compiled_forward_result_for": object(),
+            "compiled_total_gradient_for": object(),
+            "compiled_value_and_grad_for": object(),
+            "failure_gradient_for": object(),
+        }
+
+    monkeypatch.setattr(
+        surfaceobjectives_jax_module,
+        "_build_traceable_objective_state",
+        build_state,
+    )
+    monkeypatch.setattr(
+        surfaceobjectives_jax_module,
+        "_build_traceable_objective_compiled_bundle_from_state",
+        build_bundle,
+    )
+    monkeypatch.setattr(
+        surfaceobjectives_jax_module,
+        "_make_traceable_objective_from_compiled_bundle",
+        lambda compiled_bundle: ("objective", id(compiled_bundle)),
+    )
+    monkeypatch.setattr(
+        surfaceobjectives_jax_module,
+        "_make_traceable_host_objective",
+        lambda objective: ("host_objective", objective),
+    )
+    monkeypatch.setattr(
+        surfaceobjectives_jax_module,
+        "_make_traceable_host_value_and_grad",
+        lambda compiled_value_and_grad_for: (
+            "host_value_and_grad",
+            id(compiled_value_and_grad_for),
+        ),
+    )
+    monkeypatch.setattr(
+        surfaceobjectives_jax_module,
+        "_make_traceable_batched_value_and_grad_pipeline",
+        lambda compiled_value_and_grad_for: (
+            "batched_value_and_grad",
+            id(compiled_value_and_grad_for),
+        ),
+    )
+
+    surfaceobjectives_jax_module._get_cached_traceable_runtime_entry(
+        booz,
+        bs,
+        0.23,
+    )
+    booz._solver_generation += 1
+    surfaceobjectives_jax_module._get_cached_traceable_runtime_entry(
+        booz,
+        bs,
+        0.23,
+    )
+
+    assert len(build_bundle_calls) == 2
+
+
+def test_get_cached_traceable_runtime_entry_invalidates_on_target_change(
+    monkeypatch,
+):
+    build_bundle_calls = []
+
+    booz = types.SimpleNamespace(
+        _solver_generation=5,
+        _traceable_runtime_entry_cache=None,
+        options={},
+        _collect_optimizer_options=lambda: {},
+    )
+    bs = object()
+
+    def build_state(_booz, _bs, iota_target, *, outer_objective_config=None):
+        del outer_objective_config
+        return {
+            "objective_kwargs": {
+                "iota_target": jnp.asarray(iota_target, dtype=jnp.float64),
+                "outer_objective_config": None,
+            },
+            "optimize_G": False,
+            "predictor_kind": "ls",
+            "coil_dof_extraction_spec": {"spec": "marker"},
+            "baseline_x": jnp.arange(2, dtype=jnp.float64),
+            "baseline_value": jnp.asarray(1.0, dtype=jnp.float64),
+            "baseline_plu": (
+                jnp.eye(2, dtype=jnp.float64),
+                jnp.eye(2, dtype=jnp.float64),
+                jnp.arange(2, dtype=jnp.int32),
+            ),
+            "baseline_coil_dofs": jnp.arange(2, dtype=jnp.float64),
+            "failure_value": jnp.asarray(2.0, dtype=jnp.float64),
+            "failure_scale": jnp.asarray(1.0, dtype=jnp.float64),
+        }
+
+    def build_bundle(_booz, state, *, success_filter=None):
+        del success_filter
+        build_bundle_calls.append(float(state["objective_kwargs"]["iota_target"]))
+        return {
+            "state": state,
+            "compiled_forward_result_for": object(),
+            "compiled_total_gradient_for": object(),
+            "compiled_value_and_grad_for": object(),
+            "failure_gradient_for": object(),
+        }
+
+    monkeypatch.setattr(
+        surfaceobjectives_jax_module,
+        "_build_traceable_objective_state",
+        build_state,
+    )
+    monkeypatch.setattr(
+        surfaceobjectives_jax_module,
+        "_build_traceable_objective_compiled_bundle_from_state",
+        build_bundle,
+    )
+    monkeypatch.setattr(
+        surfaceobjectives_jax_module,
+        "_make_traceable_objective_from_compiled_bundle",
+        lambda compiled_bundle: ("objective", id(compiled_bundle)),
+    )
+    monkeypatch.setattr(
+        surfaceobjectives_jax_module,
+        "_make_traceable_host_objective",
+        lambda objective: ("host_objective", objective),
+    )
+    monkeypatch.setattr(
+        surfaceobjectives_jax_module,
+        "_make_traceable_host_value_and_grad",
+        lambda compiled_value_and_grad_for: (
+            "host_value_and_grad",
+            id(compiled_value_and_grad_for),
+        ),
+    )
+    monkeypatch.setattr(
+        surfaceobjectives_jax_module,
+        "_make_traceable_batched_value_and_grad_pipeline",
+        lambda compiled_value_and_grad_for: (
+            "batched_value_and_grad",
+            id(compiled_value_and_grad_for),
+        ),
+    )
+
+    surfaceobjectives_jax_module._get_cached_traceable_runtime_entry(
+        booz,
+        bs,
+        0.23,
+    )
+    surfaceobjectives_jax_module._get_cached_traceable_runtime_entry(
+        booz,
+        bs,
+        0.28,
+    )
+
+    assert len(build_bundle_calls) == 2
+
+
+def test_make_traceable_objective_runtime_bundle_omits_host_wrappers_by_default(
+    monkeypatch,
+):
+    compiled_value_and_grad_for = object()
+    batched_value_and_grad_for = object()
+    runtime_entry = {
+        "compiled_bundle": {
+            "compiled_value_and_grad_for": compiled_value_and_grad_for,
+        },
+        "objective": object(),
+        "batched_value_and_grad": batched_value_and_grad_for,
+        "host_objective": None,
+        "host_value_and_grad": None,
+        "profile_suite": None,
+    }
+    ensure_calls = []
+
+    monkeypatch.setattr(
+        surfaceobjectives_jax_module,
+        "_get_cached_traceable_runtime_entry",
+        lambda *_args, **_kwargs: runtime_entry,
+    )
+    monkeypatch.setattr(
+        surfaceobjectives_jax_module,
+        "_ensure_traceable_runtime_host_wrappers",
+        lambda entry: ensure_calls.append(entry),
+    )
+
+    bundle = surfaceobjectives_jax_module.make_traceable_objective_runtime_bundle(
+        object(),
+        object(),
+        0.23,
+        include_profile_suite=False,
+    )
+
+    assert bundle == {
+        "objective": runtime_entry["objective"],
+        "value_and_grad": compiled_value_and_grad_for,
+        "batched_value_and_grad": batched_value_and_grad_for,
+    }
+    assert ensure_calls == []
+
+
+def test_make_traceable_objective_runtime_bundle_materializes_host_wrappers_on_demand(
+    monkeypatch,
+):
+    compiled_value_and_grad_for = object()
+    batched_value_and_grad_for = object()
+    runtime_entry = {
+        "compiled_bundle": {
+            "compiled_value_and_grad_for": compiled_value_and_grad_for,
+        },
+        "objective": object(),
+        "batched_value_and_grad": batched_value_and_grad_for,
+        "host_objective": None,
+        "host_value_and_grad": None,
+        "profile_suite": None,
+    }
+    ensure_calls = []
+
+    def ensure_wrappers(entry):
+        ensure_calls.append(entry)
+        entry["host_objective"] = ("host_objective", entry["objective"])
+        entry["host_value_and_grad"] = (
+            "host_value_and_grad",
+            entry["compiled_bundle"]["compiled_value_and_grad_for"],
+        )
+
+    monkeypatch.setattr(
+        surfaceobjectives_jax_module,
+        "_get_cached_traceable_runtime_entry",
+        lambda *_args, **_kwargs: runtime_entry,
+    )
+    monkeypatch.setattr(
+        surfaceobjectives_jax_module,
+        "_ensure_traceable_runtime_host_wrappers",
+        ensure_wrappers,
+    )
+
+    bundle = surfaceobjectives_jax_module.make_traceable_objective_runtime_bundle(
+        object(),
+        object(),
+        0.23,
+        include_profile_suite=False,
+        include_host_wrappers=True,
+    )
+
+    assert bundle == {
+        "objective": runtime_entry["objective"],
+        "value_and_grad": compiled_value_and_grad_for,
+        "batched_value_and_grad": batched_value_and_grad_for,
+        "host_objective": ("host_objective", runtime_entry["objective"]),
+        "host_value_and_grad": (
+            "host_value_and_grad",
+            compiled_value_and_grad_for,
+        ),
+    }
+    assert ensure_calls == [runtime_entry]
+
+
+def test_traceable_batched_value_and_grad_pipeline_matches_scalar_calls():
+    compiled_value_and_grad_for = jax.jit(
+        lambda coil_dofs: (
+            jnp.sum(coil_dofs**2),
+            2.0 * coil_dofs,
+        )
+    )
+    batched_value_and_grad = (
+        surfaceobjectives_jax_module._make_traceable_batched_value_and_grad_pipeline(
+            compiled_value_and_grad_for
+        )
+    )
+    coil_dofs_batch = jnp.asarray(
+        [[1.0, -2.0], [0.5, 3.0], [-1.5, 0.25]],
+        dtype=jnp.float64,
+    )
+
+    batched_values, batched_grads = batched_value_and_grad(coil_dofs_batch)
+    reference_values, reference_grads = jax.vmap(compiled_value_and_grad_for)(
+        coil_dofs_batch
+    )
+
+    np.testing.assert_allclose(
+        np.asarray(batched_values),
+        np.asarray(reference_values),
+    )
+    np.testing.assert_allclose(
+        np.asarray(batched_grads),
+        np.asarray(reference_grads),
+    )
 
 
 def _make_torus_dofs(R=1.0, r=0.1, mpol=1, ntor=1, nfp=1, stellsym=False):

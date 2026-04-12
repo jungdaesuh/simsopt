@@ -7,6 +7,7 @@ import numpy as np
 import pytest
 
 from _jit_test_state import make_module_jit_hooks
+from conftest import enable_strict_parity_backend
 import simsopt.geo.curveobjectives as curveobjectives_module
 from simsopt.geo import FrameRotation, FramedCurveCentroid
 from simsopt.geo import parameters
@@ -249,6 +250,77 @@ def test_pairwise_penalty_chunking_preserves_infeasible_barrier_inf(monkeypatch)
     assert np.isposinf(float(value))
 
 
+def test_pairwise_penalty_chunking_preserves_finite_zero_penalty_gradients(monkeypatch):
+    gamma_curve = np.array(
+        [
+            [1.0, 0.0, 0.0],
+            [1.1, 0.0, 0.0],
+            [1.2, 0.0, 0.0],
+            [1.3, 0.0, 0.0],
+        ],
+        dtype=np.float64,
+    )
+    gammadash_curve = np.array(
+        [
+            [0.1, 0.0, 0.0],
+            [0.1, 0.0, 0.0],
+            [0.1, 0.0, 0.0],
+            [0.1, 0.0, 0.0],
+        ],
+        dtype=np.float64,
+    )
+    gamma_surface = np.array(
+        [
+            [1.0, 0.5, 0.0],
+            [1.1, 0.5, 0.0],
+            [1.2, 0.5, 0.0],
+            [1.3, 0.5, 0.0],
+            [1.4, 0.5, 0.0],
+        ],
+        dtype=np.float64,
+    )
+    surface_normals = np.array(
+        [
+            [0.0, 1.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 1.0, 0.0],
+        ],
+        dtype=np.float64,
+    )
+    minimum_distance = 0.05
+
+    monkeypatch.setenv("SIMSOPT_JAX_PENALTY_POINT_CHUNK_SIZE", "2")
+    invalidate_backend_cache()
+    try:
+        cs_grad = jax.grad(
+            lambda g: cs_distance_pure(
+                g,
+                gammadash_curve,
+                gamma_surface,
+                surface_normals,
+                minimum_distance,
+            )
+        )(jax.numpy.asarray(gamma_curve))
+        cc_grad = jax.grad(
+            lambda g: cc_distance_pure(
+                g,
+                gammadash_curve,
+                gamma_surface[:4],
+                gammadash_curve,
+                minimum_distance,
+            )
+        )(jax.numpy.asarray(gamma_curve))
+    finally:
+        monkeypatch.delenv("SIMSOPT_JAX_PENALTY_POINT_CHUNK_SIZE", raising=False)
+        invalidate_backend_cache()
+
+    assert np.all(np.isfinite(np.asarray(cs_grad)))
+    assert np.all(np.isfinite(np.asarray(cc_grad)))
+    assert np.allclose(np.asarray(cs_grad), 0.0, atol=1e-12)
+
+
 def test_pairwise_penalty_accepts_explicit_row_sharding():
     mesh = Mesh(np.asarray(jax.devices(), dtype=object), ("d",))
     gamma1 = jax.device_put(
@@ -292,6 +364,31 @@ def test_pairwise_penalty_accepts_explicit_row_sharding():
     )
     assert sharded_min == pytest.approx(dense_min, rel=1e-12, abs=1e-12)
 
+
+def test_pairwise_penalty_chunking_is_strict_transfer_safe(monkeypatch, request):
+    enable_strict_parity_backend(monkeypatch, request, "cpu")
+    gamma1 = np.array(
+        [
+            [0.00, 0.00, 0.00],
+            [0.12, 0.01, 0.00],
+            [0.24, 0.02, 0.01],
+            [0.36, 0.03, 0.02],
+        ],
+        dtype=np.float64,
+    )
+    gamma2 = np.array(
+        [
+            [0.03, 0.01, 0.00],
+            [0.15, 0.04, 0.01],
+            [0.27, 0.05, 0.02],
+        ],
+        dtype=np.float64,
+    )
+
+    chunked_min = float(pairwise_min_distance_pure(gamma1, gamma2, chunk_size=2))
+    dense_min = float(pairwise_min_distance_pure(gamma1, gamma2, chunk_size=0))
+
+    assert chunked_min == pytest.approx(dense_min, rel=1e-12, abs=1e-12)
 
 class Testing(unittest.TestCase):
     curvetypes = [

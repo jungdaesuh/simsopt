@@ -274,7 +274,10 @@ def _optimizer_scalar(value, *, dtype) -> jax.Array:
 
 
 def _optimizer_dtype(value):
-    return getattr(value, "dtype", np.asarray(value).dtype)
+    dtype = getattr(value, "dtype", None)
+    if dtype is not None:
+        return dtype
+    return np.asarray(value).dtype
 
 
 def _hostify_optimizer_leaf(leaf):
@@ -2232,6 +2235,7 @@ def target_minimize(
     value_and_grad=False,
     callback=None,
     progress_callback=None,
+    failure_callback=None,
 ):
     """Explicit JAX target scalar optimizer entrypoint."""
     if method in _TARGET_PUBLIC_METHODS:
@@ -2264,6 +2268,8 @@ def target_minimize(
         options["callback"] = callback
     if progress_callback is not None:
         options["progress_callback"] = progress_callback
+    if failure_callback is not None:
+        options["failure_callback"] = failure_callback
 
     require_target_backend_x64("ondevice")
 
@@ -2288,6 +2294,7 @@ def target_minimize(
             maxls=int(options.get("maxls", 20)),
             callback=options.get("callback"),
             progress_callback=options.get("progress_callback"),
+            failure_callback=options.get("failure_callback"),
         )
         return finalize(_private_lbfgs_result_to_optimize_result(state))
 
@@ -2316,6 +2323,7 @@ def target_minimize(
             maxls=int(options.get("maxls", 20)),
             callback=options.get("callback"),
             progress_callback=options.get("progress_callback"),
+            failure_callback=options.get("failure_callback"),
         )
         return finalize(_private_lbfgs_result_to_optimize_result(state))
     raise ValueError(f"Unknown target optimizer method {method!r}.")

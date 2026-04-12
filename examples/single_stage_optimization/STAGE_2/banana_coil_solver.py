@@ -23,6 +23,7 @@ from repo_bootstrap import bootstrap_local_simsopt, configure_entrypoint_jax_run
 configure_entrypoint_jax_runtime(sys.argv[1:])
 
 import jax
+import jaxlib
 import numpy as np
 
 from jax_host_boundary import host_array, host_bool, host_float
@@ -35,6 +36,7 @@ from hardware_constraints import (
     apply_hardware_constraint_verdict,
     sanitize_json_payload,
 )
+from run_metadata import build_artifact_manifest, build_runtime_provenance
 
 
 bootstrap_local_simsopt(SRC_ROOT)
@@ -53,6 +55,12 @@ STAGE2_TARGET_OBJECTIVE_DOF_LAYOUT_ERROR = (
 )
 CURVATURE_THRESHOLD_FLOOR = 20.0
 CURVATURE_THRESHOLD_CEILING = 40.0
+_STAGE2_RESULTS_SCHEMA_VERSION = 1
+_STAGE2_REQUIRED_ARTIFACT_FILENAMES = (
+    "results.json",
+    "biot_savart_opt.json",
+    "surf_opt.json",
+)
 
 
 @lru_cache(maxsize=32)
@@ -1417,6 +1425,151 @@ def write_json_file(path, payload):
         json.dump(sanitize_json_payload(payload), outfile, indent=2, allow_nan=False)
 
 
+def build_stage2_problem_contract(
+    *,
+    plasma_surf_filename,
+    file_loc,
+    nphi,
+    ntheta,
+    num_quadpoints,
+    order,
+    field_diagnostic_stride,
+    R0,
+    s,
+    banana_surf_radius,
+    theta_center,
+    phi_center,
+    theta_width,
+    phi_width,
+    LENGTH_WEIGHT,
+    CC_WEIGHT,
+    CURVATURE_WEIGHT,
+    SQUARED_FLUX_WEIGHT,
+    LENGTH_TARGET,
+    CC_THRESHOLD,
+    CURVATURE_THRESHOLD,
+    args,
+    MAXITER,
+):
+    return {
+        "workflow": "stage2-banana-coil-optimization",
+        "equilibrium": {
+            "filename": plasma_surf_filename,
+            "path": file_loc,
+        },
+        "resolution": {
+            "nphi": int(nphi),
+            "ntheta": int(ntheta),
+            "num_quadpoints": int(num_quadpoints),
+            "order": int(order),
+            "field_diagnostic_stride": int(field_diagnostic_stride),
+        },
+        "seed_parameters": {
+            "major_radius": float(R0),
+            "toroidal_flux": float(s),
+            "banana_surface_radius": float(banana_surf_radius),
+            "theta_center": float(theta_center),
+            "phi_center": float(phi_center),
+            "theta_width": float(theta_width),
+            "phi_width": float(phi_width),
+        },
+        "objective_weights": {
+            "squared_flux": float(SQUARED_FLUX_WEIGHT),
+            "length": float(LENGTH_WEIGHT),
+            "coil_coil_distance": float(CC_WEIGHT),
+            "curvature": float(CURVATURE_WEIGHT),
+        },
+        "hardware_thresholds": {
+            "length_target": float(LENGTH_TARGET),
+            "coil_coil_distance": float(CC_THRESHOLD),
+            "curvature": float(CURVATURE_THRESHOLD),
+        },
+        "runtime_contract": {
+            "field_backend": args.backend,
+            "optimizer_backend": args.optimizer_backend,
+            "least_squares_algorithm": args.least_squares_algorithm,
+            "max_iterations": int(MAXITER),
+            "init_only": bool(args.init_only),
+            "skip_postprocess": bool(args.skip_postprocess),
+        },
+    }
+
+
+def build_stage2_results_envelope(
+    *,
+    output_root,
+    plasma_surf_filename,
+    file_loc,
+    nphi,
+    ntheta,
+    num_quadpoints,
+    order,
+    field_diagnostic_stride,
+    R0,
+    s,
+    banana_surf_radius,
+    theta_center,
+    phi_center,
+    theta_width,
+    phi_width,
+    LENGTH_WEIGHT,
+    CC_WEIGHT,
+    CURVATURE_WEIGHT,
+    SQUARED_FLUX_WEIGHT,
+    LENGTH_TARGET,
+    CC_THRESHOLD,
+    CURVATURE_THRESHOLD,
+    args,
+    MAXITER,
+):
+    artifacts = build_artifact_manifest(
+        output_root,
+        required_files=_STAGE2_REQUIRED_ARTIFACT_FILENAMES,
+        planned_files=("results.json",),
+    )
+    artifacts["policy"] = {
+        "skip_postprocess": bool(args.skip_postprocess),
+    }
+    return {
+        "schema_version": _STAGE2_RESULTS_SCHEMA_VERSION,
+        "provenance": build_runtime_provenance(
+            title="Stage 2 banana coil optimization",
+            repo_root=REPO_ROOT,
+            script_path=__file__,
+            output_root=output_root,
+            argv=sys.argv,
+            jax_module=jax,
+            jaxlib_version=jaxlib.__version__,
+        ),
+        "artifacts": artifacts,
+        "problem_contract": build_stage2_problem_contract(
+            plasma_surf_filename=plasma_surf_filename,
+            file_loc=file_loc,
+            nphi=nphi,
+            ntheta=ntheta,
+            num_quadpoints=num_quadpoints,
+            order=order,
+            field_diagnostic_stride=field_diagnostic_stride,
+            R0=R0,
+            s=s,
+            banana_surf_radius=banana_surf_radius,
+            theta_center=theta_center,
+            phi_center=phi_center,
+            theta_width=theta_width,
+            phi_width=phi_width,
+            LENGTH_WEIGHT=LENGTH_WEIGHT,
+            CC_WEIGHT=CC_WEIGHT,
+            CURVATURE_WEIGHT=CURVATURE_WEIGHT,
+            SQUARED_FLUX_WEIGHT=SQUARED_FLUX_WEIGHT,
+            LENGTH_TARGET=LENGTH_TARGET,
+            CC_THRESHOLD=CC_THRESHOLD,
+            CURVATURE_THRESHOLD=CURVATURE_THRESHOLD,
+            args=args,
+            MAXITER=MAXITER,
+        ),
+    }
+
+
 def load_stage2_override_dofs(path, expected_shape):
     """Load a Stage 2 DOF override vector from JSON and validate its shape."""
     with open(path, "r", encoding="utf-8") as infile:
@@ -2051,6 +2204,10 @@ if __name__ == "__main__":
         final_snapshot, _, _ = evaluate_stage2_objective(
             final_context,
         )
+    stage2_bs_output_path = os.path.join(OUT_DIR_ITER, "biot_savart_opt.json")
+    stage2_surface_output_path = os.path.join(OUT_DIR_ITER, "surf_opt.json")
+    new_bs.save(stage2_bs_output_path)
+    new_surf.save(stage2_surface_output_path)
     fieldError = compute_mean_abs_relbn(new_surf, new_bs)
     if args.skip_postprocess:
         print(
@@ -2072,10 +2229,6 @@ if __name__ == "__main__":
         )
         # Create field error plot
         fieldError = magneticFieldPlots(new_surf, new_bs, OUT_DIR_ITER)
-
-        # Save the optimized coil shapes and currents so they can be loaded into other scripts for analysis:
-        new_bs.save(OUT_DIR_ITER + "biot_savart_opt.json")
-    # new_surf.save(OUT_DIR_ITER + "surf_opt.json");
     print(
         f"Banana Coil Current / TF Current = {new_banana_coils[0].current.get_value() / new_tf_coils[0].current.get_value():.3f}\n"
     )
@@ -2117,6 +2270,32 @@ if __name__ == "__main__":
         init_only=args.init_only,
     )
     results = {
+        **build_stage2_results_envelope(
+            output_root=OUT_DIR_ITER,
+            plasma_surf_filename=plasma_surf_filename,
+            file_loc=file_loc,
+            nphi=nphi,
+            ntheta=ntheta,
+            num_quadpoints=num_quadpoints,
+            order=order,
+            field_diagnostic_stride=field_diagnostic_stride,
+            R0=R0,
+            s=s,
+            banana_surf_radius=banana_surf_radius,
+            theta_center=theta_center,
+            phi_center=phi_center,
+            theta_width=theta_width,
+            phi_width=phi_width,
+            LENGTH_WEIGHT=LENGTH_WEIGHT,
+            CC_WEIGHT=CC_WEIGHT,
+            CURVATURE_WEIGHT=CURVATURE_WEIGHT,
+            SQUARED_FLUX_WEIGHT=SQUARED_FLUX_WEIGHT,
+            LENGTH_TARGET=LENGTH_TARGET,
+            CC_THRESHOLD=CC_THRESHOLD,
+            CURVATURE_THRESHOLD=CURVATURE_THRESHOLD,
+            args=args,
+            MAXITER=MAXITER,
+        ),
         "PLASMA_SURF_FILENAME": plasma_surf_filename,
         "PLASMA_SURF_PATH": file_loc,
         "CC_THRESHOLD": CC_THRESHOLD,

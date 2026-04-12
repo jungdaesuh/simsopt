@@ -5684,6 +5684,7 @@ class TestTraceableObjective:
         *,
         iota_target_shift=0.0,
         include_profile_suite=True,
+        include_host_wrappers=False,
         success_filter=None,
     ):
         """Build the shared traceable runtime bundle and coil DOFs."""
@@ -5702,6 +5703,7 @@ class TestTraceableObjective:
             bs_jax,
             iota_target,
             include_profile_suite=include_profile_suite,
+            include_host_wrappers=include_host_wrappers,
             success_filter=success_filter,
         )
         return runtime_bundle, coil_dofs
@@ -5710,12 +5712,20 @@ class TestTraceableObjective:
     def _assert_runtime_bundle_core_reused(runtime_bundle_a, runtime_bundle_b):
         assert runtime_bundle_a["objective"] is runtime_bundle_b["objective"]
         assert runtime_bundle_a["value_and_grad"] is runtime_bundle_b["value_and_grad"]
+        assert (
+            runtime_bundle_a["batched_value_and_grad"]
+            is runtime_bundle_b["batched_value_and_grad"]
+        )
 
     @staticmethod
     def _assert_runtime_bundle_core_rebuilt(runtime_bundle_a, runtime_bundle_b):
         assert runtime_bundle_a["objective"] is not runtime_bundle_b["objective"]
         assert (
             runtime_bundle_a["value_and_grad"] is not runtime_bundle_b["value_and_grad"]
+        )
+        assert (
+            runtime_bundle_a["batched_value_and_grad"]
+            is not runtime_bundle_b["batched_value_and_grad"]
         )
 
     def test_runtime_bundle_success_filter_blocks_infeasible_nonbaseline_states(
@@ -5811,6 +5821,46 @@ class TestTraceableObjective:
         assert np.isfinite(float(value))
         assert np.isfinite(float(value_vg))
         assert np.all(np.isfinite(np.asarray(grad)))
+
+    def test_runtime_bundle_batched_value_and_grad_matches_serial(self, boozer_setup):
+        """The batched seed path must agree with repeated scalar target-lane calls."""
+        (_, _, _, _, bs_jax, _, booz_jax, _) = boozer_setup
+        runtime_bundle, coil_dofs = self._make_traceable_runtime_bundle(
+            bs_jax,
+            booz_jax,
+            include_profile_suite=False,
+        )
+        coil_dofs_batch = jnp.stack(
+            [
+                coil_dofs,
+                coil_dofs.at[0].add(jnp.asarray(1.0e-5, dtype=coil_dofs.dtype)),
+                coil_dofs.at[1].add(jnp.asarray(-2.0e-5, dtype=coil_dofs.dtype)),
+            ],
+            axis=0,
+        )
+
+        batched_values, batched_grads = runtime_bundle["batched_value_and_grad"](
+            coil_dofs_batch
+        )
+        reference_values = []
+        reference_grads = []
+        for batch_index in range(int(coil_dofs_batch.shape[0])):
+            value, grad = runtime_bundle["value_and_grad"](coil_dofs_batch[batch_index])
+            reference_values.append(value)
+            reference_grads.append(grad)
+
+        np.testing.assert_allclose(
+            np.asarray(batched_values),
+            np.asarray(reference_values),
+            rtol=1.0e-12,
+            atol=1.0e-12,
+        )
+        np.testing.assert_allclose(
+            np.asarray(batched_grads),
+            np.asarray(reference_grads),
+            rtol=1.0e-4,
+            atol=5.0e-11,
+        )
 
     def test_runtime_bundle_reuses_cached_compiled_callables(self, boozer_setup):
         """Repeated bundle construction should reuse the same compiled target-lane callables."""
@@ -6209,6 +6259,7 @@ class TestTraceableObjective:
             bs_jax,
             booz_jax,
             include_profile_suite=False,
+            include_host_wrappers=True,
         )
 
         pure_value = runtime_bundle["objective"](coil_dofs)

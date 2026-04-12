@@ -59,7 +59,7 @@ def _interleave_harmonics(first, second):
 
 
 def _fourier_basis_terms(quadpoints, order):
-    quadpoints = _as_jax_float64(quadpoints)
+    quadpoints = _as_runtime_float64(quadpoints, reference=quadpoints)
     two_pi = _as_runtime_float64(_TWO_PI, reference=quadpoints)
     points = two_pi * quadpoints
     mode_numbers = _mode_numbers(order, reference=points)

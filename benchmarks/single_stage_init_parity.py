@@ -19,7 +19,7 @@ sys.path.insert(0, str(SRC_ROOT))
 
 from benchmarks.validation_ladder_common import (
     TIER3_SINGLE_STAGE_OUTER_LOOP_RUNG,
-    apply_compilation_cache_policy,
+    apply_benchmark_compilation_cache_policy,
     apply_requested_platform,
     bootstrap_local_simsopt,
     build_provenance,
@@ -56,7 +56,10 @@ from benchmarks.single_stage_smoke_fixture import (
 
 REQUESTED_PLATFORM = preparse_platform(sys.argv[1:])
 apply_requested_platform(REQUESTED_PLATFORM)
-apply_compilation_cache_policy()
+apply_benchmark_compilation_cache_policy(
+    "single_stage_init_parity",
+    requested_platform=REQUESTED_PLATFORM,
+)
 
 import jax
 import jaxlib
@@ -199,6 +202,14 @@ def parse_args() -> argparse.Namespace:
             "surface-geometry drift check in this parity wrapper."
         ),
     )
+    parser.add_argument(
+        "--jax-profile-dir",
+        default=None,
+        help=(
+            "Optional JAX/XProf trace output directory threaded through to the "
+            "single-stage example subprocess."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -245,17 +256,66 @@ def _append_optional_single_stage_flags(
     *,
     benchmark_mode: bool,
     profile_target_lane: bool,
+    profile_target_lane_only: bool,
+    profile_target_lane_batch_size: int | None,
+    jax_profile_dir: str | None,
     experimental_target_lane_value_and_grad: bool,
     disable_target_lane_success_filter: bool,
+    target_lane_boozer_bfgs_tol: float | None = None,
+    target_lane_boozer_bfgs_maxiter: int | None = None,
+    target_lane_boozer_newton_tol: float | None = None,
+    target_lane_boozer_newton_maxiter: int | None = None,
 ) -> None:
     if benchmark_mode:
         command.append("--benchmark-mode")
     if profile_target_lane:
         command.append("--profile-target-lane")
+    if profile_target_lane_only:
+        command.append("--profile-target-lane-only")
+    if (
+        profile_target_lane_batch_size is not None
+        and int(profile_target_lane_batch_size) > 1
+    ):
+        command.extend(
+            [
+                "--profile-target-lane-batch-size",
+                str(int(profile_target_lane_batch_size)),
+            ]
+        )
+    if jax_profile_dir:
+        command.extend(["--jax-profile-dir", jax_profile_dir])
     if experimental_target_lane_value_and_grad:
         command.append("--experimental-target-lane-value-and-grad")
     if disable_target_lane_success_filter:
         command.append("--disable-target-lane-success-filter")
+    if target_lane_boozer_bfgs_tol is not None:
+        command.extend(
+            [
+                "--target-lane-boozer-bfgs-tol",
+                str(float(target_lane_boozer_bfgs_tol)),
+            ]
+        )
+    if target_lane_boozer_bfgs_maxiter is not None:
+        command.extend(
+            [
+                "--target-lane-boozer-bfgs-maxiter",
+                str(int(target_lane_boozer_bfgs_maxiter)),
+            ]
+        )
+    if target_lane_boozer_newton_tol is not None:
+        command.extend(
+            [
+                "--target-lane-boozer-newton-tol",
+                str(float(target_lane_boozer_newton_tol)),
+            ]
+        )
+    if target_lane_boozer_newton_maxiter is not None:
+        command.extend(
+            [
+                "--target-lane-boozer-newton-maxiter",
+                str(int(target_lane_boozer_newton_maxiter)),
+            ]
+        )
 
 
 def _run_single_stage_case(
@@ -266,6 +326,7 @@ def _run_single_stage_case(
     benchmark_mode: bool = False,
     load_surface_gamma: bool = True,
     profile_target_lane: bool = False,
+    profile_target_lane_only: bool = False,
     experimental_target_lane_value_and_grad: bool = False,
 ) -> dict[str, Any]:
     script_path = _single_stage_script_path()
@@ -313,11 +374,28 @@ def _run_single_stage_case(
             command,
             benchmark_mode=benchmark_mode,
             profile_target_lane=profile_target_lane,
+            profile_target_lane_only=profile_target_lane_only,
+            profile_target_lane_batch_size=getattr(
+                args, "profile_target_lane_batch_size", None
+            ),
+            jax_profile_dir=getattr(args, "jax_profile_dir", None),
             experimental_target_lane_value_and_grad=(
                 experimental_target_lane_value_and_grad
             ),
             disable_target_lane_success_filter=bool(
                 getattr(args, "disable_target_lane_success_filter", False)
+            ),
+            target_lane_boozer_bfgs_tol=getattr(
+                args, "target_lane_boozer_bfgs_tol", None
+            ),
+            target_lane_boozer_bfgs_maxiter=getattr(
+                args, "target_lane_boozer_bfgs_maxiter", None
+            ),
+            target_lane_boozer_newton_tol=getattr(
+                args, "target_lane_boozer_newton_tol", None
+            ),
+            target_lane_boozer_newton_maxiter=getattr(
+                args, "target_lane_boozer_newton_maxiter", None
             ),
         )
         command.extend(

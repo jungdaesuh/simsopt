@@ -13,6 +13,9 @@ try:
     import jax.numpy as jnp
     from jax import grad
     from ..jax_core._math_utils import as_jax_float64 as _runtime_as_jax_float64
+    from ..jax_core._math_utils import (
+        as_runtime_float64 as _runtime_as_runtime_float64,
+    )
     from .jit import jit
 
     _HAS_JAX = True
@@ -1103,6 +1106,9 @@ if _HAS_JAX:
     def _as_jax_float64(value):
         return _runtime_as_jax_float64(value)
 
+    def _scalar_like(reference, value):
+        return _runtime_as_runtime_float64(value, reference=reference)
+
     def _as_numpy_float64(value):
         if isinstance(value, np.ndarray):
             return np.asarray(value, dtype=np.float64)
@@ -1111,10 +1117,10 @@ if _HAS_JAX:
     def surface_to_surface_distance_pure(gamma1, gamma2, mdist):
         gamma1 = _as_jax_float64(gamma1)
         gamma2 = _as_jax_float64(gamma2)
-        mdist = _as_jax_float64(mdist)
-        zero = _as_jax_float64(0.0)
+        mdist = _scalar_like(gamma1, mdist)
+        zero = _scalar_like(gamma1, 0.0)
         dists = surface_to_surface_pairwise_distances(gamma1, gamma2)
-        normalization = _as_jax_float64(dists.shape[0] * dists.shape[1])
+        normalization = _scalar_like(dists, dists.shape[0] * dists.shape[1])
         return jnp.sum(jnp.square(jnp.maximum(mdist - dists, zero))) / normalization
 
     def surface_to_surface_pairwise_distances(gamma1, gamma2):

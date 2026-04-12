@@ -78,6 +78,22 @@ def test_traceable_plu_or_dummy_accepts_python_and_traced_predicates():
     _assert_plu_tuple_is_zero(traced_false)
 
 
+def test_optimizer_dtype_uses_dtype_attr_without_eager_hostification(monkeypatch):
+    class HasDtypeOnly:
+        dtype = np.dtype(np.float64)
+
+    original_asarray = _opt.np.asarray
+
+    def guarded_asarray(value, *args, **kwargs):
+        if isinstance(value, HasDtypeOnly):
+            raise AssertionError("np.asarray should not run when dtype attr exists")
+        return original_asarray(value, *args, **kwargs)
+
+    monkeypatch.setattr(_opt.np, "asarray", guarded_asarray)
+
+    assert _opt._optimizer_dtype(HasDtypeOnly()) == np.dtype(np.float64)
+
+
 def test_resolve_lbfgs_limits_normalizes_to_int32_counter_domain():
     maxiter, maxfun, maxgrad = _opt_common._resolve_lbfgs_limits(
         4,
@@ -241,7 +257,7 @@ def _private_lbfgs_quadratic_state(
     return state, quad
 
 
-def _assert_lbfgs_state_preserved(state, x0, quad, *, maxcor=4, ls_status=None):
+def _assert_lbfgs_state_preserved(state, x0, quad, *, ls_status=None):
     assert bool(state.converged) is False
     assert bool(state.failed) is True
     assert int(state.status) == 5
@@ -250,7 +266,10 @@ def _assert_lbfgs_state_preserved(state, x0, quad, *, maxcor=4, ls_status=None):
     np.testing.assert_allclose(np.asarray(state.x_k), np.asarray(x0))
     np.testing.assert_allclose(np.asarray(state.f_k), np.asarray(quad(x0)))
     np.testing.assert_allclose(np.asarray(state.g_k), np.asarray(x0))
-    np.testing.assert_array_equal(np.asarray(state.rho_history), np.zeros(maxcor))
+    np.testing.assert_array_equal(
+        np.asarray(state.rho_history),
+        np.zeros_like(np.asarray(state.rho_history)),
+    )
     assert float(state.gamma) == pytest.approx(1.0)
 
 
@@ -325,6 +344,28 @@ class TestOptimizerAdapterPrivate:
         assert bool(result.failed) is False
         assert int(result.status) == 0
         assert float(result.f_k) < 1e-20
+
+    @PRIVATE_OPTIMIZER_RUNTIME
+    @REQUIRES_PRIVATE_OPTIMIZER_RUNTIME
+    def test_line_search_zoom_respects_total_eval_budget(self):
+        """Zoom fallback must stay within the caller's total maxiter budget."""
+
+        def quad(x):
+            return 0.5 * jnp.dot(x, x)
+
+        result = _opt._line_search(
+            quad,
+            jnp.array([1.0], dtype=jnp.float64),
+            jnp.array([-1.95], dtype=jnp.float64),
+            old_fval=jnp.array(0.5, dtype=jnp.float64),
+            gfk=jnp.array([1.0], dtype=jnp.float64),
+            maxiter=1,
+        )
+
+        assert bool(result.failed) is False
+        assert int(result.nfev) == 1
+        assert int(result.ngev) == 1
+        assert float(result.f_k) < 0.5
 
     @PRIVATE_OPTIMIZER_RUNTIME
     @REQUIRES_PRIVATE_OPTIMIZER_RUNTIME
@@ -508,6 +549,79 @@ class TestOptimizerAdapterPrivate:
         _assert_lbfgs_state_preserved(state, x0, quad, ls_status=0)
 
     @PRIVATE_OPTIMIZER_RUNTIME
+    def test_minimize_lbfgs_private_emits_failure_callback_on_nonfinite_step(
+        self,
+        monkeypatch,
+    ):
+        """Rejected non-finite L-BFGS proposals must emit a host failure payload."""
+        from simsopt.geo.optimizer_jax_private import _LineSearchResults
+        from simsopt.geo.optimizer_jax_private import _lbfgs as _lbfgs_module
+
+        x0 = jnp.array([1.0, -2.0], dtype=jnp.float64)
+        observed = []
+
+        def quad(x):
+            return 0.5 * jnp.dot(x, x)
+
+        def fake_line_search(*_args, **_kwargs):
+            return _LineSearchResults(
+                failed=jnp.array(False),
+                nit=jnp.array(1),
+                nfev=jnp.array(1),
+                ngev=jnp.array(1),
+                k=jnp.array(1),
+                a_k=jnp.array(1.0, dtype=jnp.float64),
+                f_k=jnp.array(np.nan, dtype=jnp.float64),
+                g_k=jnp.array([np.nan, np.nan], dtype=jnp.float64),
+                status=jnp.array(0),
+            )
+
+        monkeypatch.setattr(
+            _lbfgs_module,
+            "_line_search_value_and_grad",
+            fake_line_search,
+        )
+
+        state = _lbfgs_module._minimize_lbfgs_private(
+            quad,
+            x0,
+            maxiter=5,
+            gtol=1e-8,
+            failure_callback=lambda *payload: observed.append(payload),
+        )
+
+        _assert_lbfgs_state_preserved(state, x0, quad, ls_status=0)
+        assert len(observed) == 1
+        (
+            iteration,
+            trial_x,
+            trial_f,
+            trial_g,
+            search_direction,
+            step_vector,
+            step_scale,
+            line_search_failed,
+            nonfinite_step,
+            stalled_step,
+            valid_curvature,
+            trial_converged,
+            ls_status,
+        ) = observed[0]
+        assert iteration == 1
+        np.testing.assert_allclose(trial_x, np.zeros(2), atol=1e-12)
+        assert np.isnan(trial_f)
+        assert np.isnan(trial_g).all()
+        np.testing.assert_allclose(search_direction, np.array([-1.0, 2.0]))
+        np.testing.assert_allclose(step_vector, np.array([-1.0, 2.0]))
+        assert step_scale == pytest.approx(1.0)
+        assert line_search_failed is False
+        assert nonfinite_step is True
+        assert stalled_step is False
+        assert valid_curvature is False
+        assert trial_converged is False
+        assert ls_status == 0
+
+    @PRIVATE_OPTIMIZER_RUNTIME
     def test_minimize_lbfgs_private_rejects_degenerate_curvature_update(
         self,
         monkeypatch,
@@ -571,6 +685,54 @@ class TestOptimizerAdapterPrivate:
         assert np.isfinite(float(state.gamma))
         assert float(state.gamma) == pytest.approx(gamma_max)
         np.testing.assert_allclose(np.asarray(state.rho_history[-1]), 2000.0, rtol=1e-6)
+
+    @PRIVATE_OPTIMIZER_RUNTIME
+    def test_minimize_lbfgs_private_caps_history_to_iteration_budget(
+        self,
+        monkeypatch,
+    ):
+        """The private L-BFGS state should not allocate unreachable history slots."""
+        x0 = jnp.array([1.0, -2.0], dtype=jnp.float64)
+        state, _ = _private_lbfgs_quadratic_state(
+            monkeypatch,
+            x0=x0,
+            line_search_kwargs=dict(
+                a_k=jnp.array(1.0, dtype=jnp.float64),
+                f_k=jnp.array(1.0, dtype=jnp.float64),
+                g_k=jnp.array([3.0, -1.0], dtype=jnp.float64),
+                status=jnp.array(0),
+            ),
+            maxiter=1,
+            maxcor=7,
+        )
+
+        assert np.asarray(state.s_history).shape == (1, x0.size)
+        assert np.asarray(state.y_history).shape == (1, x0.size)
+        assert np.asarray(state.rho_history).shape == (1,)
+
+    @PRIVATE_OPTIMIZER_RUNTIME
+    def test_minimize_lbfgs_private_caps_history_to_problem_dimension(
+        self,
+        monkeypatch,
+    ):
+        """L-BFGS should not allocate more correction pairs than the problem rank."""
+        x0 = jnp.array([1.0, -2.0], dtype=jnp.float64)
+        state, _ = _private_lbfgs_quadratic_state(
+            monkeypatch,
+            x0=x0,
+            line_search_kwargs=dict(
+                a_k=jnp.array(1.0, dtype=jnp.float64),
+                f_k=jnp.array(1.0, dtype=jnp.float64),
+                g_k=jnp.array([3.0, -1.0], dtype=jnp.float64),
+                status=jnp.array(0),
+            ),
+            maxiter=10,
+            maxcor=7,
+        )
+
+        assert np.asarray(state.s_history).shape == (x0.size, x0.size)
+        assert np.asarray(state.y_history).shape == (x0.size, x0.size)
+        assert np.asarray(state.rho_history).shape == (x0.size,)
 
     def test_hybrid_method_is_removed_from_public_optimizer_surface(self):
         with pytest.raises(ValueError, match="Unknown method 'bfgs-hybrid'"):

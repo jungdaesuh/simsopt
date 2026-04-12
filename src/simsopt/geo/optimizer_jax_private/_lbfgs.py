@@ -105,6 +105,17 @@ def _lbfgs_step_tolerances(x):
     return step_eps, gamma_max
 
 
+def _resolve_lbfgs_history_size(maxcor, *, d, maxiter_limit_value):
+    """Cap history to the reachable correction budget for this solve.
+
+    More than ``d`` correction pairs are redundant in an ``d``-dimensional
+    problem, and more than ``maxiter`` pairs are unreachable during this solve.
+    Clipping here shrinks the traced solver state without changing the set of
+    curvature updates that the run can actually observe.
+    """
+    return max(1, min(int(maxcor), int(d), int(maxiter_limit_value)))
+
+
 def _minimize_lbfgs_private_impl(
     value_and_grad_fun,
     x0,
@@ -120,6 +131,7 @@ def _minimize_lbfgs_private_impl(
     maxls=20,
     callback=None,
     progress_callback=None,
+    failure_callback=None,
 ):
     value_and_grad_fun, x0, callback, adapter = _prepare_optimizer_callable_inputs(
         value_and_grad_fun,
@@ -132,6 +144,11 @@ def _minimize_lbfgs_private_impl(
     dtype = x0.dtype
     maxiter_limit_value, maxfun_limit_value, maxgrad_limit_value = (
         _resolve_lbfgs_limits(d, maxiter, maxfun, maxgrad)
+    )
+    history_size = _resolve_lbfgs_history_size(
+        maxcor,
+        d=d,
+        maxiter_limit_value=maxiter_limit_value,
     )
     ftol_value = np.asarray(ftol, dtype=np.dtype(dtype)).item()
     gtol_value = np.asarray(gtol, dtype=np.dtype(dtype)).item()
@@ -146,9 +163,9 @@ def _minimize_lbfgs_private_impl(
         x_k=x0,
         f_k=f_0,
         g_k=g_0,
-        s_history=_zeros((maxcor, d), dtype),
-        y_history=_zeros((maxcor, d), dtype),
-        rho_history=_zeros((maxcor,), dtype),
+        s_history=_zeros((history_size, d), dtype),
+        y_history=_zeros((history_size, d), dtype),
+        rho_history=_zeros((history_size,), dtype),
         gamma=_as_jax_dtype(1.0, dtype),
         status=_int_scalar(0),
         ls_status=_int_scalar(0),
@@ -264,6 +281,38 @@ def _minimize_lbfgs_private_impl(
         )
 
         def failed_step(_):
+            if failure_callback is not None:
+                jax.debug.callback(
+                    lambda iteration, trial_x, trial_f, trial_g, search_direction, step_vector, step_scale, line_search_failed, nonfinite_step_detected, stalled_step_detected, valid_curvature_detected, trial_converged, line_search_status: failure_callback(
+                        int(iteration),
+                        np.asarray(trial_x, dtype=np.float64),
+                        float(trial_f),
+                        np.asarray(trial_g, dtype=np.float64),
+                        np.asarray(search_direction, dtype=np.float64),
+                        np.asarray(step_vector, dtype=np.float64),
+                        float(step_scale),
+                        bool(line_search_failed),
+                        bool(nonfinite_step_detected),
+                        bool(stalled_step_detected),
+                        bool(valid_curvature_detected),
+                        bool(trial_converged),
+                        int(line_search_status),
+                    ),
+                    next_k,
+                    x_kp1,
+                    f_kp1,
+                    g_kp1,
+                    p_k,
+                    s_k,
+                    ls_results.a_k,
+                    ls_results.failed,
+                    nonfinite_step,
+                    stalled_step,
+                    valid_curvature,
+                    converged,
+                    ls_status,
+                    ordered=True,
+                )
             return state._replace(
                 converged=_bool_scalar(False),
                 failed=_bool_scalar(True),
@@ -361,12 +410,14 @@ def _minimize_lbfgs_private_impl(
         and adapter is None
         and callback is None
         and progress_callback is None
+        and failure_callback is None
     )
     solver = _cached_private_solver(
         cache_owner if can_cache_solver else None,
         cache_key=(
             "lbfgs",
             norm,
+            int(history_size),
             int(maxls),
             float(ftol_value),
             float(gtol_value),
@@ -393,6 +444,7 @@ def _minimize_lbfgs_private(
     maxls=20,
     callback=None,
     progress_callback=None,
+    failure_callback=None,
 ):
     return _minimize_lbfgs_private_impl(
         _scalar_value_and_grad(fun),
@@ -408,6 +460,7 @@ def _minimize_lbfgs_private(
         maxls=maxls,
         callback=callback,
         progress_callback=progress_callback,
+        failure_callback=failure_callback,
     )
 
 
@@ -425,6 +478,7 @@ def _minimize_lbfgs_private_value_and_grad(
     maxls=20,
     callback=None,
     progress_callback=None,
+    failure_callback=None,
 ):
     return _minimize_lbfgs_private_impl(
         fun,
@@ -440,4 +494,5 @@ def _minimize_lbfgs_private_value_and_grad(
         maxls=maxls,
         callback=callback,
         progress_callback=progress_callback,
+        failure_callback=failure_callback,
     )

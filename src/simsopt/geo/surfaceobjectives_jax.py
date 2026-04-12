@@ -104,6 +104,21 @@ _TRACEABLE_RUNTIME_OPTION_KEYS = (
 )
 logger = logging.getLogger(__name__)
 
+_TRACEABLE_SINGLE_STAGE_OUTER_TERM_SPECS = (
+    ("non_qs", "non_qs_weight"),
+    ("residual", "residual_weight"),
+    ("iota", "iota_weight"),
+    ("length", "length_weight"),
+    ("curvature", "curvature_weight"),
+    ("curve_curve", "curve_curve_weight"),
+    ("curve_surface", "curve_surface_weight"),
+    ("surface_vessel", "surface_vessel_weight"),
+)
+_TRACEABLE_SINGLE_STAGE_OUTER_TERM_WEIGHT_KEYS = {
+    term_name: weight_key
+    for term_name, weight_key in _TRACEABLE_SINGLE_STAGE_OUTER_TERM_SPECS
+}
+
 
 def _strict_scalar_grad(fun, arg):
     value, pullback = jax.vjp(fun, arg)
@@ -248,7 +263,7 @@ def _banana_curve_penalties_from_coil_dofs(
     return length_penalty, curvature_penalty
 
 
-def _traceable_full_single_stage_outer_objective(
+def _traceable_single_stage_outer_term_values(
     x_inner,
     coil_dofs,
     coil_set_spec,
@@ -273,6 +288,7 @@ def _traceable_full_single_stage_outer_objective(
     coil_dof_extraction_spec,
     outer_objective_config,
 ):
+    """Return the raw single-stage outer-objective term values at one state."""
     J_boozer = _boozer_residual_J_of_x_inner(
         x_inner,
         coil_set_spec=coil_set_spec,
@@ -309,15 +325,7 @@ def _traceable_full_single_stage_outer_objective(
         surface_kind=surface_kind,
     )
     surface_normal = jnp.cross(xphi, xtheta)
-    total = _runtime_float64_scalar(0.0, reference=J_boozer)
-
-    def _weighted_term(weight_key, value):
-        weight = outer_objective_config.get(weight_key, 0.0)
-        if not weight:
-            return _runtime_float64_scalar(0.0, reference=value)
-        return _runtime_float64_scalar(weight, reference=value) * value
-
-    total = total + _weighted_term("non_qs_weight", _qs_ratio_pure(
+    non_qs_penalty = _qs_ratio_pure(
         sdofs,
         coil_set_spec,
         quadpoints_phi=_runtime_float64_array(
@@ -335,9 +343,7 @@ def _traceable_full_single_stage_outer_objective(
         scatter_indices=scatter_indices,
         surface_kind=surface_kind,
         axis=int(outer_objective_config["non_qs_axis"]),
-    ))
-    total = total + _weighted_term("residual_weight", J_boozer)
-    total = total + _weighted_term("iota_weight", iota_penalty)
+    )
 
     length_penalty, curvature_penalty = _banana_curve_penalties_from_coil_dofs(
         coil_dofs,
@@ -347,8 +353,6 @@ def _traceable_full_single_stage_outer_objective(
         curvature_threshold=outer_objective_config["curvature_threshold"],
         curvature_p_norm=outer_objective_config["curvature_p_norm"],
     )
-    total = total + _weighted_term("length_weight", length_penalty)
-    total = total + _weighted_term("curvature_weight", curvature_penalty)
 
     curve_curve_penalty = _curve_curve_penalty_from_grouped_spec(
         coil_set_spec,
@@ -357,7 +361,6 @@ def _traceable_full_single_stage_outer_objective(
             reference=surface_gamma,
         ),
     )
-    total = total + _weighted_term("curve_curve_weight", curve_curve_penalty)
 
     curve_surface_penalty = _curve_surface_penalty_from_grouped_spec(
         coil_set_spec,
@@ -368,7 +371,6 @@ def _traceable_full_single_stage_outer_objective(
             reference=surface_gamma,
         ),
     )
-    total = total + _weighted_term("curve_surface_weight", curve_surface_penalty)
 
     vessel_gamma = _runtime_float64_array(
         outer_objective_config["vessel_gamma"],
@@ -382,7 +384,118 @@ def _traceable_full_single_stage_outer_objective(
             reference=surface_gamma,
         ),
     )
-    total = total + _weighted_term("surface_vessel_weight", surface_vessel_penalty)
+    return {
+        "non_qs": non_qs_penalty,
+        "residual": J_boozer,
+        "iota": iota_penalty,
+        "length": length_penalty,
+        "curvature": curvature_penalty,
+        "curve_curve": curve_curve_penalty,
+        "curve_surface": curve_surface_penalty,
+        "surface_vessel": surface_vessel_penalty,
+    }
+
+
+def _traceable_weighted_single_stage_outer_term_values(
+    term_values,
+    *,
+    outer_objective_config,
+):
+    """Apply configured weights to raw single-stage outer-objective terms."""
+    weighted_terms = {}
+    for term_name, weight_key in _TRACEABLE_SINGLE_STAGE_OUTER_TERM_SPECS:
+        term_value = term_values[term_name]
+        weight = outer_objective_config.get(weight_key, 0.0)
+        if weight:
+            weighted_terms[term_name] = (
+                _runtime_float64_scalar(weight, reference=term_value) * term_value
+            )
+        else:
+            weighted_terms[term_name] = _runtime_float64_scalar(0.0, reference=term_value)
+    return weighted_terms
+
+
+def _evaluate_traceable_weighted_single_stage_outer_term(
+    term_name,
+    x_inner,
+    coil_dofs,
+    coil_set_spec,
+    objective_kwargs,
+):
+    """Evaluate one weighted single-stage outer-objective term."""
+    outer_objective_config = objective_kwargs["outer_objective_config"]
+    if outer_objective_config is None:
+        raise RuntimeError(
+            "Weighted single-stage term diagnostics require outer_objective_config."
+        )
+    term_values = _traceable_single_stage_outer_term_values(
+        x_inner,
+        coil_dofs,
+        coil_set_spec,
+        **_traceable_total_objective_kwargs(objective_kwargs),
+    )
+    return _traceable_weighted_single_stage_outer_term_values(
+        term_values,
+        outer_objective_config=outer_objective_config,
+    )[term_name]
+
+
+def _traceable_full_single_stage_outer_objective(
+    x_inner,
+    coil_dofs,
+    coil_set_spec,
+    *,
+    quadpoints_phi,
+    quadpoints_theta,
+    mpol,
+    ntor,
+    nfp,
+    stellsym,
+    scatter_indices,
+    surface_kind,
+    optimize_G,
+    weight_inv_modB,
+    constraint_weight,
+    targetlabel,
+    label_type,
+    phi_idx,
+    iota_target,
+    surface_quadpoints_phi,
+    surface_quadpoints_theta,
+    coil_dof_extraction_spec,
+    outer_objective_config,
+):
+    raw_terms = _traceable_single_stage_outer_term_values(
+        x_inner,
+        coil_dofs,
+        coil_set_spec,
+        quadpoints_phi=quadpoints_phi,
+        quadpoints_theta=quadpoints_theta,
+        mpol=mpol,
+        ntor=ntor,
+        nfp=nfp,
+        stellsym=stellsym,
+        scatter_indices=scatter_indices,
+        surface_kind=surface_kind,
+        optimize_G=optimize_G,
+        weight_inv_modB=weight_inv_modB,
+        constraint_weight=constraint_weight,
+        targetlabel=targetlabel,
+        label_type=label_type,
+        phi_idx=phi_idx,
+        iota_target=iota_target,
+        surface_quadpoints_phi=surface_quadpoints_phi,
+        surface_quadpoints_theta=surface_quadpoints_theta,
+        coil_dof_extraction_spec=coil_dof_extraction_spec,
+        outer_objective_config=outer_objective_config,
+    )
+    weighted_terms = _traceable_weighted_single_stage_outer_term_values(
+        raw_terms,
+        outer_objective_config=outer_objective_config,
+    )
+    total = _runtime_float64_scalar(0.0, reference=next(iter(weighted_terms.values())))
+    for term_name, _weight_key in _TRACEABLE_SINGLE_STAGE_OUTER_TERM_SPECS:
+        total = total + weighted_terms[term_name]
     return total
 
 
@@ -565,7 +678,7 @@ def _adjoint_coil_derivative(vjp_groups_fn, booz_surf, iota, G, adjoint, biotsav
 
 def _coil_dofs_gradient_to_derivative(biotsavart, coil_dofs_gradient):
     """Convert a flat free-DOF gradient into the public ``Derivative`` contract."""
-    coil_dofs_gradient = np.asarray(jax.device_get(coil_dofs_gradient), dtype=float)
+    coil_dofs_gradient = _host_array(coil_dofs_gradient, dtype=np.float64)
     deriv_data = {}
     start = 0
     for lineage_opt in biotsavart.unique_dof_lineage:
@@ -602,7 +715,7 @@ def _make_cached_strict_scalar_value_and_grad(fun):
 def _traceable_cache_leaf_signature(leaf):
     """Build a deterministic cache signature for one traceable-runtime leaf."""
     if isinstance(leaf, (jax.Array, np.ndarray)):
-        array = np.asarray(jax.device_get(leaf))
+        array = _host_array(leaf)
         return (
             "array",
             str(array.dtype),
@@ -627,6 +740,71 @@ def _traceable_cache_tree_signature(tree):
         repr(treedef),
         tuple(_traceable_cache_leaf_signature(leaf) for leaf in leaves),
     )
+
+
+def _traceable_contract_leaf_signature(leaf):
+    """Build a cheap immutable-contract signature for one runtime leaf.
+
+    The traceable runtime-entry cache lives only within one Python process and
+    the runtime-bundle contract already requires callers not to mutate captured
+    geometry/runtime arrays in place. For cache reuse, scalar values still need
+    exact matching, but large array leaves only need structural matching once
+    the active Boozer solve generation and object identities are part of the
+    cache key.
+    """
+    if isinstance(leaf, jax.Array):
+        return (
+            "device_array_meta",
+            str(leaf.dtype),
+            tuple(int(dim) for dim in leaf.shape),
+        )
+    if isinstance(leaf, np.ndarray):
+        array = np.asarray(leaf)
+        if array.ndim == 0 or array.size == 1:
+            return ("array_scalar", str(array.dtype), array.reshape(()).item())
+        return ("array_meta", str(array.dtype), tuple(int(dim) for dim in array.shape))
+    if isinstance(leaf, np.generic):
+        return ("numpy_scalar", str(leaf.dtype), leaf.item())
+    if isinstance(leaf, (str, int, float, bool, type(None))):
+        return ("scalar", leaf)
+    return ("repr", type(leaf).__qualname__, repr(leaf))
+
+
+def _traceable_contract_tree_signature(tree):
+    """Build a cheap cache signature for immutable runtime contracts."""
+    try:
+        leaves, treedef = jax.tree_util.tree_flatten(tree)
+    except TypeError:
+        return _traceable_contract_leaf_signature(tree)
+    return (
+        "tree",
+        repr(treedef),
+        tuple(_traceable_contract_leaf_signature(leaf) for leaf in leaves),
+    )
+
+
+def _traceable_runtime_hostify_leaf(leaf):
+    """Explicitly materialize JAX runtime constants on the host once.
+
+    JAX transfer guard permits explicit host/device boundaries but rejects
+    implicit transfers. The traceable runtime bundle captures solved baseline
+    arrays in closures, so those leaves must be converted to host-backed
+    NumPy values before compilation rather than being captured as device
+    constants.
+    """
+    if isinstance(leaf, jax.Array):
+        return _host_array(leaf)
+    if isinstance(leaf, np.ndarray):
+        return np.asarray(leaf)
+    return leaf
+
+
+def _traceable_runtime_hostify_tree(tree):
+    """Recursively hostify runtime constants used by traceable closures."""
+    try:
+        return jax.tree_util.tree_map(_traceable_runtime_hostify_leaf, tree)
+    except TypeError:
+        return _traceable_runtime_hostify_leaf(tree)
 
 
 def _evaluate_scalar_or_value_and_grad(
@@ -1615,25 +1793,54 @@ def _traceable_total_gradient(
     objective_kwargs,
 ):
     """Implicit total derivative of the pure traceable objective."""
+    return _traceable_objective_gradient_parts(
+        booz_jax,
+        coil_set_spec_from_dofs,
+        coil_dofs=coil_dofs,
+        solved_x=solved_x,
+        solved_plu=solved_plu,
+        objective_kwargs=objective_kwargs,
+    )[2]
+
+
+def _traceable_objective_gradient_parts(
+    booz_jax,
+    coil_set_spec_from_dofs,
+    *,
+    coil_dofs,
+    solved_x,
+    solved_plu,
+    objective_kwargs,
+    term_name=None,
+):
+    """Return direct, implicit, and total gradients for one traceable objective."""
     inner_objective_kwargs = _traceable_inner_objective_kwargs(objective_kwargs)
 
-    def total_of_coils(cd):
-        return _evaluate_traceable_total_objective(
-            solved_x,
-            cd,
-            coil_set_spec_from_dofs(cd),
-            objective_kwargs,
-        )
-
-    coil_set_spec = coil_set_spec_from_dofs(coil_dofs)
-    dJ_dx = jax.grad(
-        lambda x: _evaluate_traceable_total_objective(
-            x,
-            coil_dofs,
+    def _evaluate_objective(x_inner, current_coil_dofs, coil_set_spec):
+        if term_name is None:
+            return _evaluate_traceable_total_objective(
+                x_inner,
+                current_coil_dofs,
+                coil_set_spec,
+                objective_kwargs,
+            )
+        return _evaluate_traceable_weighted_single_stage_outer_term(
+            term_name,
+            x_inner,
+            current_coil_dofs,
             coil_set_spec,
             objective_kwargs,
         )
-    )(solved_x)
+
+    def objective_of_coils(current_coil_dofs):
+        return _evaluate_objective(
+            solved_x,
+            current_coil_dofs,
+            coil_set_spec_from_dofs(current_coil_dofs),
+        )
+
+    coil_set_spec = coil_set_spec_from_dofs(coil_dofs)
+    dJ_dx = jax.grad(lambda x: _evaluate_objective(x, coil_dofs, coil_set_spec))(solved_x)
     adjoint = _solve_plu_transpose_with_refinement(*solved_plu, dJ_dx)
 
     def directional_of_coils(cd):
@@ -1644,9 +1851,9 @@ def _traceable_total_gradient(
             **inner_objective_kwargs,
         )
 
-    direct_grad = jax.grad(total_of_coils)(coil_dofs)
+    direct_grad = jax.grad(objective_of_coils)(coil_dofs)
     implicit_grad = jax.grad(directional_of_coils)(coil_dofs)
-    return direct_grad - implicit_grad
+    return direct_grad, implicit_grad, direct_grad - implicit_grad
 
 
 def _traceable_predict_warmstart_x(
@@ -1707,11 +1914,11 @@ def _build_traceable_objective_state(
 ):
     """Return the shared state used by the traceable objective builders.
 
-    This setup reads the solved mutable object state once, then keeps the
-    warm-start and baseline objective data in explicit JAX arrays before
-    building the compiled target-lane closures. The resulting closures are the
-    trace-safe hot path; this helper itself is bootstrap code, not the compiled
-    optimization loop.
+    This setup reads the solved mutable object state once, computes the solved
+    baseline objective in JAX, then explicitly hostifies the captured runtime
+    constants before building the compiled target-lane closures. The resulting
+    closures stay pure in the hot path without capturing device-backed arrays
+    that would trip strict transfer-guard lowering.
     """
     _ensure_solved(booz_jax)
 
@@ -1729,7 +1936,9 @@ def _build_traceable_objective_state(
         warmstart_G = _as_jax_float64(warmstart_G)
 
     baseline_coil_dofs = _as_jax_float64(bs_jax.x.copy())
-    coil_dof_extraction_spec = bs_jax.coil_dof_extraction_spec()
+    coil_dof_extraction_spec = _traceable_runtime_hostify_tree(
+        bs_jax.coil_dof_extraction_spec()
+    )
     coil_set_spec_from_dofs = lambda coil_dofs: coil_set_spec_from_dof_extraction_spec(
         coil_dof_extraction_spec,
         coil_dofs,
@@ -1795,17 +2004,17 @@ def _build_traceable_objective_state(
     )
     failure_scale = _as_jax_float64(1.0)
     return {
-        "objective_kwargs": objective_kwargs,
-        "baseline_x": baseline_x,
-        "baseline_value": baseline_value,
-        "baseline_plu": baseline_plu,
-        "baseline_coil_dofs": baseline_coil_dofs,
+        "objective_kwargs": _traceable_runtime_hostify_tree(objective_kwargs),
+        "baseline_x": _traceable_runtime_hostify_tree(baseline_x),
+        "baseline_value": _traceable_runtime_hostify_tree(baseline_value),
+        "baseline_plu": _traceable_runtime_hostify_tree(baseline_plu),
+        "baseline_coil_dofs": _traceable_runtime_hostify_tree(baseline_coil_dofs),
         "coil_dof_extraction_spec": coil_dof_extraction_spec,
         "coil_set_spec_from_dofs": coil_set_spec_from_dofs,
         "optimize_G": optimize_G,
         "predictor_kind": predictor_kind,
-        "failure_value": failure_value,
-        "failure_scale": failure_scale,
+        "failure_value": _traceable_runtime_hostify_tree(failure_value),
+        "failure_scale": _traceable_runtime_hostify_tree(failure_scale),
     }
 
 
@@ -1816,6 +2025,8 @@ def _build_traceable_objective_compiled_bundle_from_state(
     success_filter=None,
 ):
     """Build shared compiled closures for one traceable single-stage state."""
+    from .optimizer_jax import _mark_cacheable_jit_value_and_grad
+
     objective_kwargs = state["objective_kwargs"]
     baseline_x = state["baseline_x"]
     baseline_value = state["baseline_value"]
@@ -1879,7 +2090,9 @@ def _build_traceable_objective_compiled_bundle_from_state(
         )
         return result["value"], grad
 
-    compiled_value_and_grad_for = jax.jit(_value_and_grad_for)
+    compiled_value_and_grad_for = _mark_cacheable_jit_value_and_grad(
+        jax.jit(_value_and_grad_for)
+    )
 
     return {
         "state": state,
@@ -1899,23 +2112,36 @@ def _traceable_runtime_option_signature(booz_jax):
     return _traceable_cache_tree_signature(option_state)
 
 
+def _traceable_success_filter_signature(success_filter):
+    """Return the runtime-cache signature for one optional success filter."""
+
+    if success_filter is None:
+        return None
+    signature = getattr(success_filter, "_traceable_runtime_cache_signature", None)
+    if signature is not None:
+        return ("structural", signature)
+    return ("callable", id(success_filter))
+
+
 def _traceable_runtime_cache_key(booz_jax, bs_jax, state, *, success_filter=None):
-    """Return a stable cache key for one compiled traceable runtime state."""
+    """Return a stable cache key for one compiled traceable runtime state.
+
+    The expensive solved baseline arrays are represented by the active Boozer
+    solve generation instead of value-hashing their full contents on every
+    lookup. This keeps repeated warm-start runtime-bundle construction from
+    spending minutes in CPU-side array hashing before the target lane even
+    starts compiling or running.
+    """
+    objective_kwargs = state["objective_kwargs"]
     return (
         id(booz_jax),
         id(bs_jax),
+        getattr(booz_jax, "_solver_generation", None),
         state["optimize_G"],
         state["predictor_kind"],
-        _traceable_cache_tree_signature(state["coil_dof_extraction_spec"]),
-        _traceable_cache_tree_signature(state["objective_kwargs"]),
-        _traceable_cache_tree_signature(state["baseline_x"]),
-        _traceable_cache_tree_signature(state["baseline_value"]),
-        _traceable_cache_tree_signature(state["baseline_plu"]),
-        _traceable_cache_tree_signature(state["baseline_coil_dofs"]),
-        _traceable_cache_tree_signature(state["failure_value"]),
-        _traceable_cache_tree_signature(state["failure_scale"]),
+        _traceable_contract_tree_signature(objective_kwargs),
         _traceable_runtime_option_signature(booz_jax),
-        None if success_filter is None else ("callable", id(success_filter)),
+        _traceable_success_filter_signature(success_filter),
     )
 
 
@@ -1954,14 +2180,28 @@ def _get_cached_traceable_runtime_entry(
         "cache_key": cache_key,
         "compiled_bundle": compiled_bundle,
         "objective": objective,
-        "host_objective": _make_traceable_host_objective(objective),
-        "host_value_and_grad": _make_traceable_host_value_and_grad(
+        "batched_value_and_grad": _make_traceable_batched_value_and_grad_pipeline(
             compiled_bundle["compiled_value_and_grad_for"]
         ),
+        "host_objective": None,
+        "host_value_and_grad": None,
         "profile_suite": None,
     }
     booz_jax._traceable_runtime_entry_cache = cached_entry
     return cached_entry
+
+
+def _ensure_traceable_runtime_host_wrappers(runtime_entry):
+    """Materialize host-boundary wrappers for one cached runtime entry on demand."""
+    if runtime_entry["host_objective"] is None:
+        runtime_entry["host_objective"] = _make_traceable_host_objective(
+            runtime_entry["objective"]
+        )
+    if runtime_entry["host_value_and_grad"] is None:
+        runtime_entry["host_value_and_grad"] = _make_traceable_host_value_and_grad(
+            runtime_entry["compiled_bundle"]["compiled_value_and_grad_for"]
+        )
+    return runtime_entry
 
 
 def _make_traceable_objective_from_compiled_bundle(compiled_bundle):
@@ -2024,6 +2264,151 @@ def _make_traceable_host_value_and_grad(compiled_value_and_grad_for):
     return host_value_and_grad
 
 
+def _make_traceable_batched_value_and_grad_pipeline(compiled_value_and_grad_for):
+    """Build a fused batched ``(value, grad)`` pipeline for nearby seed scoring."""
+    from .optimizer_jax import _mark_cacheable_jit_value_and_grad
+
+    def _batched_value_and_grad_for(coil_dofs_batch):
+        coil_dofs_batch = _as_jax_float64(coil_dofs_batch)
+        return jax.vmap(compiled_value_and_grad_for)(coil_dofs_batch)
+
+    return _mark_cacheable_jit_value_and_grad(jax.jit(_batched_value_and_grad_for))
+
+
+def _classify_nonfinite_scalar(host_value):
+    """Classify one non-finite scalar for compact diagnostics."""
+    if np.isnan(host_value):
+        return "nan"
+    if np.isposinf(host_value):
+        return "+inf"
+    if np.isneginf(host_value):
+        return "-inf"
+    return None
+
+
+def _summarize_traceable_scalar(value):
+    """Return a compact host summary for one scalar JAX value."""
+    host_value = float(_host_scalar(value, dtype=np.float64))
+    finite = bool(np.isfinite(host_value))
+    return {
+        "value": host_value if finite else None,
+        "finite": finite,
+        "classification": None if finite else _classify_nonfinite_scalar(host_value),
+    }
+
+
+def _summarize_traceable_gradient(gradient):
+    """Return a compact host summary for one gradient vector."""
+    host_gradient = np.asarray(jax.device_get(gradient), dtype=np.float64).reshape(-1)
+    finite_mask = np.isfinite(host_gradient)
+    all_finite = bool(np.all(finite_mask))
+    first_nonfinite_index = None
+    if not all_finite:
+        first_nonfinite_index = int(np.flatnonzero(~finite_mask)[0])
+    return {
+        "all_finite": all_finite,
+        "inf_norm": float(_host_inf_norm(gradient)) if all_finite else None,
+        "size": int(host_gradient.size),
+        "nonfinite_count": int(host_gradient.size - int(np.count_nonzero(finite_mask))),
+        "first_nonfinite_index": first_nonfinite_index,
+    }
+
+
+def diagnose_traceable_objective_runtime(
+    booz_jax,
+    bs_jax,
+    iota_target,
+    *,
+    outer_objective_config=None,
+    success_filter=None,
+):
+    """Return a compact baseline diagnostic report for the target-lane runtime."""
+    runtime_entry = _get_cached_traceable_runtime_entry(
+        booz_jax,
+        bs_jax,
+        iota_target,
+        outer_objective_config=outer_objective_config,
+        success_filter=success_filter,
+    )
+    compiled_bundle = runtime_entry["compiled_bundle"]
+    state = compiled_bundle["state"]
+    objective_kwargs = state["objective_kwargs"]
+    if objective_kwargs["outer_objective_config"] is None:
+        raise RuntimeError(
+            "Traceable runtime diagnosis requires the full single-stage outer objective."
+        )
+
+    baseline_coil_dofs = state["baseline_coil_dofs"]
+    baseline_x = state["baseline_x"]
+    baseline_plu = state["baseline_plu"]
+    coil_set_spec_from_dofs = state["coil_set_spec_from_dofs"]
+    baseline_coil_set_spec = coil_set_spec_from_dofs(baseline_coil_dofs)
+    forward_result = compiled_bundle["compiled_forward_result_for"](baseline_coil_dofs)
+    total_value, total_gradient = compiled_bundle["compiled_value_and_grad_for"](
+        baseline_coil_dofs
+    )
+    raw_terms = _traceable_single_stage_outer_term_values(
+        baseline_x,
+        baseline_coil_dofs,
+        baseline_coil_set_spec,
+        **_traceable_total_objective_kwargs(objective_kwargs),
+    )
+    weighted_terms = _traceable_weighted_single_stage_outer_term_values(
+        raw_terms,
+        outer_objective_config=objective_kwargs["outer_objective_config"],
+    )
+    report = {
+        "baseline_success": bool(np.asarray(jax.device_get(forward_result["success"]))),
+        "total": {
+            "value": _summarize_traceable_scalar(total_value),
+            "grad": _summarize_traceable_gradient(total_gradient),
+        },
+        "terms": {},
+    }
+    nonfinite_terms = []
+    for term_name, weight_key in _TRACEABLE_SINGLE_STAGE_OUTER_TERM_SPECS:
+        direct_grad, implicit_grad, term_total_grad = _traceable_objective_gradient_parts(
+            booz_jax,
+            coil_set_spec_from_dofs,
+            coil_dofs=baseline_coil_dofs,
+            solved_x=baseline_x,
+            solved_plu=baseline_plu,
+            objective_kwargs=objective_kwargs,
+            term_name=term_name,
+        )
+        term_report = {
+            "weight": float(objective_kwargs["outer_objective_config"].get(weight_key, 0.0)),
+            "raw_value": _summarize_traceable_scalar(raw_terms[term_name]),
+            "weighted_value": _summarize_traceable_scalar(weighted_terms[term_name]),
+            "direct_grad": _summarize_traceable_gradient(direct_grad),
+            "implicit_grad": _summarize_traceable_gradient(implicit_grad),
+            "total_grad": _summarize_traceable_gradient(term_total_grad),
+        }
+        issues = []
+        if not term_report["raw_value"]["finite"]:
+            issues.append("raw_value")
+        if not term_report["weighted_value"]["finite"]:
+            issues.append("weighted_value")
+        if not term_report["direct_grad"]["all_finite"]:
+            issues.append("direct_grad")
+        if not term_report["implicit_grad"]["all_finite"]:
+            issues.append("implicit_grad")
+        if not term_report["total_grad"]["all_finite"]:
+            issues.append("total_grad")
+        term_report["issues"] = issues
+        report["terms"][term_name] = term_report
+        if issues:
+            nonfinite_terms.append(term_name)
+    report["nonfinite_terms"] = nonfinite_terms
+    report["first_nonfinite_term"] = nonfinite_terms[0] if nonfinite_terms else None
+    report["all_finite"] = bool(
+        report["total"]["value"]["finite"]
+        and report["total"]["grad"]["all_finite"]
+        and not nonfinite_terms
+    )
+    return report
+
+
 def make_traceable_objective(
     booz_jax,
     bs_jax,
@@ -2062,9 +2447,10 @@ def make_traceable_objective(
 
         This is the pure-JAX optimizer contract used by the single-stage
         ondevice lane. Callers that need Python/NumPy materialization should
-        use :func:`make_traceable_objective_runtime_bundle` and the returned
-        ``host_objective`` / ``host_value_and_grad`` wrappers instead of
-        coercing this traced scalar directly.
+        use :func:`make_traceable_objective_runtime_bundle` with
+        ``include_host_wrappers=True`` and the returned ``host_objective`` /
+        ``host_value_and_grad`` wrappers instead of coercing this traced scalar
+        directly.
     """
     return _get_cached_traceable_runtime_entry(
         booz_jax,
@@ -2091,7 +2477,8 @@ def make_traceable_objective_value_and_grad(
     outputs from one compiled entrypoint so the outer optimizer can avoid
     rebuilding autodiff transforms around a scalar objective.
 
-    For host-normalized outputs, use ``make_traceable_objective_runtime_bundle()``
+    For host-normalized outputs, use
+    ``make_traceable_objective_runtime_bundle(include_host_wrappers=True)``
     and call ``runtime_bundle["host_value_and_grad"]``.
     """
     return make_traceable_objective_runtime_bundle(
@@ -2125,6 +2512,7 @@ def _make_traceable_objective_profile_suite_from_compiled_bundle(
     bs_jax,
     *,
     value_and_grad_pipeline=None,
+    batched_value_and_grad_pipeline=None,
 ):
     """Build profiling closures from the shared traceable runtime bundle."""
     state = compiled_bundle["state"]
@@ -2140,6 +2528,13 @@ def _make_traceable_objective_profile_suite_from_compiled_bundle(
         compiled_bundle["compiled_value_and_grad_for"]
         if value_and_grad_pipeline is None
         else value_and_grad_pipeline
+    )
+    resolved_batched_value_and_grad_pipeline = (
+        _make_traceable_batched_value_and_grad_pipeline(
+            compiled_bundle["compiled_value_and_grad_for"]
+        )
+        if batched_value_and_grad_pipeline is None
+        else batched_value_and_grad_pipeline
     )
 
     def _warmstart_for(coil_dofs):
@@ -2246,6 +2641,7 @@ def _make_traceable_objective_profile_suite_from_compiled_bundle(
         "solved_total_objective": compiled_solved_total_objective_for,
         "solved_total_gradient": compiled_solved_total_gradient_for,
         "value_and_grad_pipeline": resolved_value_and_grad_pipeline,
+        "batched_value_and_grad_pipeline": resolved_batched_value_and_grad_pipeline,
     }
 
 
@@ -2255,6 +2651,7 @@ def make_traceable_objective_runtime_bundle(
     iota_target,
     *,
     include_profile_suite=False,
+    include_host_wrappers=False,
     outer_objective_config=None,
     success_filter=None,
 ):
@@ -2271,10 +2668,15 @@ def make_traceable_objective_runtime_bundle(
         Pure JAX scalar callable returning a 0-d ``jax.Array``.
     ``value_and_grad``
         Pure JAX callable returning ``(0-d jax.Array, grad jax.Array)``.
+    ``batched_value_and_grad``
+        Pure JAX callable returning batched ``(value, grad)`` outputs for a
+        ``(batch, dof)`` seed array.
     ``host_objective``
-        Host-normalized callable returning a Python ``float``.
+        Optional host-normalized callable returning a Python ``float`` when
+        ``include_host_wrappers=True``.
     ``host_value_and_grad``
-        Host-normalized callable returning ``(float, np.ndarray)``.
+        Optional host-normalized callable returning ``(float, np.ndarray)``
+        when ``include_host_wrappers=True``.
     ``profile_suite``
         Optional profiled pure-JAX closures when ``include_profile_suite=True``.
     """
@@ -2287,13 +2689,21 @@ def make_traceable_objective_runtime_bundle(
     )
     compiled_bundle = runtime_entry["compiled_bundle"]
     compiled_value_and_grad_for = compiled_bundle["compiled_value_and_grad_for"]
+    runtime_bundle = {
+        "objective": runtime_entry["objective"],
+        "value_and_grad": compiled_value_and_grad_for,
+        "batched_value_and_grad": runtime_entry["batched_value_and_grad"],
+    }
+    if include_host_wrappers:
+        _ensure_traceable_runtime_host_wrappers(runtime_entry)
+        runtime_bundle.update(
+            {
+                "host_objective": runtime_entry["host_objective"],
+                "host_value_and_grad": runtime_entry["host_value_and_grad"],
+            }
+        )
     if not include_profile_suite:
-        return {
-            "objective": runtime_entry["objective"],
-            "value_and_grad": compiled_value_and_grad_for,
-            "host_objective": runtime_entry["host_objective"],
-            "host_value_and_grad": runtime_entry["host_value_and_grad"],
-        }
+        return runtime_bundle
     if runtime_entry["profile_suite"] is None:
         runtime_entry["profile_suite"] = (
             _make_traceable_objective_profile_suite_from_compiled_bundle(
@@ -2301,15 +2711,11 @@ def make_traceable_objective_runtime_bundle(
                 booz_jax,
                 bs_jax,
                 value_and_grad_pipeline=compiled_value_and_grad_for,
+                batched_value_and_grad_pipeline=runtime_entry["batched_value_and_grad"],
             )
         )
-    return {
-        "objective": runtime_entry["objective"],
-        "value_and_grad": compiled_value_and_grad_for,
-        "host_objective": runtime_entry["host_objective"],
-        "host_value_and_grad": runtime_entry["host_value_and_grad"],
-        "profile_suite": runtime_entry["profile_suite"],
-    }
+    runtime_bundle["profile_suite"] = runtime_entry["profile_suite"]
+    return runtime_bundle
 
 
 def make_traceable_objective_profile_suite(

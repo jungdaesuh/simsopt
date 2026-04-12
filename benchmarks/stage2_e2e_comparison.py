@@ -18,7 +18,7 @@ sys.path.insert(0, str(REPO_ROOT))
 sys.path.insert(0, str(SRC_ROOT))
 
 from benchmarks.validation_ladder_common import (
-    apply_compilation_cache_policy,
+    apply_benchmark_compilation_cache_policy,
     apply_requested_platform,
     build_provenance,
     describe_compile_behavior,
@@ -44,7 +44,10 @@ from benchmarks.single_stage_smoke_fixture import (
 
 REQUESTED_PLATFORM = preparse_platform(sys.argv[1:])
 apply_requested_platform(REQUESTED_PLATFORM)
-apply_compilation_cache_policy()
+apply_benchmark_compilation_cache_policy(
+    "stage2_e2e_comparison",
+    requested_platform=REQUESTED_PLATFORM,
+)
 
 import jax
 import jaxlib

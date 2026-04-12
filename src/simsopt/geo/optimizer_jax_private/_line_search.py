@@ -75,6 +75,7 @@ def _zoom(
     phi_hi,
     dphi_hi,
     g_hi,
+    maxiter,
     pass_through,
 ):
     dtype = a_lo.dtype
@@ -83,11 +84,11 @@ def _zoom(
     half = _as_jax_dtype(0.5, dtype)
     delta1 = _as_jax_dtype(0.2, dtype)
     delta2 = _as_jax_dtype(0.1, dtype)
-    max_zoom_iter = _int_scalar(30)
+    max_zoom_iter = maxiter
     lo_is_better = phi_lo <= phi_hi
     state = _ZoomState(
         done=_bool_scalar(False),
-        failed=_bool_scalar(False),
+        failed=pass_through,
         j=_int_scalar(0),
         a_lo=a_lo,
         phi_lo=phi_lo,
@@ -259,6 +260,35 @@ def _zoom(
     )
 
 
+def _apply_zoom_branch_result(
+    state,
+    zoom,
+    *,
+    wolfe_one,
+):
+    state = state._replace(
+        nfev=state.nfev + zoom.nfev,
+        ngev=state.ngev + zoom.ngev,
+    )
+    improves_best = (
+        jnp.isfinite(zoom.best_phi)
+        & (~wolfe_one(zoom.best_a, zoom.best_phi))
+        & (zoom.best_phi < state.best_phi)
+    )
+    return state._replace(
+        best_a=jnp.where(improves_best, zoom.best_a, state.best_a),
+        best_phi=jnp.where(improves_best, zoom.best_phi, state.best_phi),
+        best_dphi=jnp.where(improves_best, zoom.best_dphi, state.best_dphi),
+        best_g=jnp.where(improves_best, zoom.best_g, state.best_g),
+        done=_bool_scalar(True),
+        failed=zoom.failed | state.failed,
+        a_star=zoom.a_star,
+        phi_star=zoom.phi_star,
+        dphi_star=zoom.dphi_star,
+        g_star=zoom.g_star,
+    )
+
+
 def _line_search_from_restricted_func_and_grad(
     restricted_func_and_grad,
     *,
@@ -343,94 +373,70 @@ def _line_search_from_restricted_func_and_grad(
         )
         star_to_i = wolfe_two(dphi_i) & (~star_to_zoom1)
         star_to_zoom2 = (dphi_i >= zero) & (~star_to_zoom1) & (~star_to_i)
-
-        zoom1 = _zoom(
-            restricted_func_and_grad,
-            wolfe_one,
-            wolfe_two,
-            phi_0,
-            state.a_i1,
-            state.phi_i1,
-            state.dphi_i1,
-            state.g_i1,
-            a_i,
-            phi_i,
-            dphi_i,
-            g_i,
-            ~star_to_zoom1,
+        remaining_zoom_budget = jnp.maximum(
+            _int_scalar(0),
+            maxiter_jax - state.nfev,
         )
-        state = state._replace(
-            nfev=state.nfev + zoom1.nfev, ngev=state.ngev + zoom1.ngev
-        )
-        improves_best_zoom1 = (
-            jnp.isfinite(zoom1.best_phi)
-            & (~wolfe_one(zoom1.best_a, zoom1.best_phi))
-            & (zoom1.best_phi < state.best_phi)
-        )
-        state = state._replace(
-            best_a=jnp.where(improves_best_zoom1, zoom1.best_a, state.best_a),
-            best_phi=jnp.where(improves_best_zoom1, zoom1.best_phi, state.best_phi),
-            best_dphi=jnp.where(improves_best_zoom1, zoom1.best_dphi, state.best_dphi),
-            best_g=jnp.where(improves_best_zoom1, zoom1.best_g, state.best_g),
-        )
-
-        zoom2 = _zoom(
-            restricted_func_and_grad,
-            wolfe_one,
-            wolfe_two,
-            phi_0,
-            a_i,
-            phi_i,
-            dphi_i,
-            g_i,
-            state.a_i1,
-            state.phi_i1,
-            state.dphi_i1,
-            state.g_i1,
-            ~star_to_zoom2,
-        )
-        state = state._replace(
-            nfev=state.nfev + zoom2.nfev, ngev=state.ngev + zoom2.ngev
-        )
-        improves_best_zoom2 = (
-            jnp.isfinite(zoom2.best_phi)
-            & (~wolfe_one(zoom2.best_a, zoom2.best_phi))
-            & (zoom2.best_phi < state.best_phi)
-        )
-        state = state._replace(
-            best_a=jnp.where(improves_best_zoom2, zoom2.best_a, state.best_a),
-            best_phi=jnp.where(improves_best_zoom2, zoom2.best_phi, state.best_phi),
-            best_dphi=jnp.where(improves_best_zoom2, zoom2.best_dphi, state.best_dphi),
-            best_g=jnp.where(improves_best_zoom2, zoom2.best_g, state.best_g),
-        )
-
-        state = state._replace(
-            done=star_to_zoom1 | state.done,
-            failed=(star_to_zoom1 & zoom1.failed) | state.failed,
-            **_binary_replace(
-                star_to_zoom1,
-                state._asdict(),
-                zoom1._asdict(),
-                keys=["a_star", "phi_star", "dphi_star", "g_star"],
+        zoom_budget_exhausted = remaining_zoom_budget <= _int_scalar(0)
+        state = lax.cond(
+            star_to_zoom1,
+            lambda current: _apply_zoom_branch_result(
+                current,
+                _zoom(
+                    restricted_func_and_grad,
+                    wolfe_one,
+                    wolfe_two,
+                    phi_0,
+                    current.a_i1,
+                    current.phi_i1,
+                    current.dphi_i1,
+                    current.g_i1,
+                    a_i,
+                    phi_i,
+                    dphi_i,
+                    g_i,
+                    remaining_zoom_budget,
+                    zoom_budget_exhausted,
+                ),
+                wolfe_one=wolfe_one,
             ),
-        )
-        state = state._replace(
-            done=star_to_i | state.done,
-            **_binary_replace(
+            lambda current: lax.cond(
                 star_to_i,
-                state._asdict(),
-                dict(a_star=a_i, phi_star=phi_i, dphi_star=dphi_i, g_star=g_i),
+                lambda accepted: accepted._replace(
+                    done=_bool_scalar(True),
+                    a_star=a_i,
+                    phi_star=phi_i,
+                    dphi_star=dphi_i,
+                    g_star=g_i,
+                ),
+                lambda continued: lax.cond(
+                    star_to_zoom2,
+                    lambda zoom_state: _apply_zoom_branch_result(
+                        zoom_state,
+                        _zoom(
+                            restricted_func_and_grad,
+                            wolfe_one,
+                            wolfe_two,
+                            phi_0,
+                            a_i,
+                            phi_i,
+                            dphi_i,
+                            g_i,
+                            zoom_state.a_i1,
+                            zoom_state.phi_i1,
+                            zoom_state.dphi_i1,
+                            zoom_state.g_i1,
+                            remaining_zoom_budget,
+                            zoom_budget_exhausted,
+                        ),
+                        wolfe_one=wolfe_one,
+                    ),
+                    lambda unchanged: unchanged,
+                    operand=continued,
+                ),
+                operand=current,
             ),
-        )
-        state = state._replace(
-            done=star_to_zoom2 | state.done,
-            failed=(star_to_zoom2 & zoom2.failed) | state.failed,
-            **_binary_replace(
-                star_to_zoom2,
-                state._asdict(),
-                zoom2._asdict(),
-                keys=["a_star", "phi_star", "dphi_star", "g_star"],
-            ),
+            operand=state,
         )
         return state._replace(
             i=state.i + _int_scalar(1),

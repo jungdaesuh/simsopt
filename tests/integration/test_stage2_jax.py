@@ -3833,6 +3833,29 @@ class TestStage2OptimizerContract:
 
         assert skip_payload["FIELD_ERROR"] == pytest.approx(full_payload["FIELD_ERROR"])
 
+    def test_stage2_script_skip_postprocess_still_writes_restart_artifacts(self):
+        with tempfile.TemporaryDirectory(prefix="stage2-ondevice-restart-") as temp_dir:
+            output_root = Path(temp_dir) / "outputs"
+            result = _run_stage2_script(
+                *REDUCED_STAGE2_ARGS,
+                "--optimizer-backend",
+                "ondevice",
+                "--skip-postprocess",
+                "--maxiter",
+                "0",
+                "--output-root",
+                str(output_root),
+            )
+
+            if _assert_target_backend_success(result) is None:
+                return
+
+            seed_paths = sorted(output_root.glob("**/biot_savart_opt.json"))
+            surface_paths = sorted(output_root.glob("**/surf_opt.json"))
+
+        assert len(seed_paths) == 1
+        assert len(surface_paths) == 1
+
     def test_stage2_script_rejects_warm_timing_on_reference_lane(self):
         with tempfile.TemporaryDirectory(
             prefix="stage2-warm-timing-invalid-"
