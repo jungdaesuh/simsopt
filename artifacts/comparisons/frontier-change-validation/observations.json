@@ -1,0 +1,83 @@
+{
+  "slug": "frontier-change-validation",
+  "date": "2026-04-13",
+  "comparison_target": "all recent frontier/comparison/preserved-timeout changes",
+  "observations": [
+    {
+      "subject_id": "frontier_regression_slice",
+      "expected": {
+        "unexpected_failures": 0
+      },
+      "observed": {
+        "passed": 308,
+        "failed": 0,
+        "skipped": 0,
+        "duration_seconds": 7.55
+      },
+      "status": "pass"
+    },
+    {
+      "subject_id": "full_geo_regression",
+      "expected": {
+        "unexpected_failures": 0
+      },
+      "observed": {
+        "passed": 535,
+        "failed": 0,
+        "skipped": 4,
+        "warnings": 11,
+        "duration_seconds": 1363.45
+      },
+      "status": "pass"
+    },
+    {
+      "subject_id": "comparison_wrapper_init_only_guard",
+      "expected": {
+        "exit_code": 1,
+        "message_contains": "--allow-init-only-stage2-seed"
+      },
+      "observed": {
+        "exit_code": 1,
+        "message_contains": "--allow-init-only-stage2-seed"
+      },
+      "status": "pass"
+    },
+    {
+      "subject_id": "comparison_wrapper_init_only_override",
+      "expected": {
+        "exit_code": 0,
+        "stage2_artifact_init_only": true,
+        "goal_modes": [
+          "target",
+          "frontier"
+        ]
+      },
+      "observed": {
+        "exit_code": 0,
+        "stage2_artifact_init_only": true,
+        "goal_modes": [
+          "target",
+          "frontier"
+        ],
+        "search_objective_values_comparable": false
+      },
+      "status": "pass"
+    },
+    {
+      "subject_id": "frontier_metadata_contract",
+      "expected": {
+        "tests_passed": 4
+      },
+      "observed": {
+        "focused_pytest_passed": 4,
+        "checks": [
+          "build_preserved_timeout_results_payload_frontier_uses_reference_metadata",
+          "goal_mode_comparison_wrapper_rejects_init_only_stage2_seed",
+          "goal_mode_comparison_wrapper_allows_init_only_stage2_seed_with_override",
+          "build_summary_reports_mode_results_and_deltas"
+        ]
+      },
+      "status": "pass"
+    }
+  ]
+}
