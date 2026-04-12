@@ -1114,23 +1114,18 @@ class BoozerSurface(Optimizable):
                 norm = np.linalg.norm(val)
                 i = i + 1
         else:
-            def exact_residual(x):
-                return self.boozer_exact_constraints(
-                    x, derivatives=0, optimize_G=optimize_G
-                )
-
-            def exact_jacobian(x):
+            def exact_residual_and_jacobian(x):
                 return self.boozer_exact_constraints(
                     x, derivatives=1, optimize_G=optimize_G
-                )[1]
+                )
 
             fallback = root(
-                exact_residual,
+                exact_residual_and_jacobian,
                 xl,
-                jac=exact_jacobian,
+                jac=True,
                 method="hybr",
                 options={
-                    "xtol": min(1e-10, max(1e-12, tol * 1e-2)),
+                    "xtol": max(1e-12, tol * 1e-2),
                     "maxfev": max(400, 4 * maxiter),
                 },
             )
@@ -1144,6 +1139,7 @@ class BoozerSurface(Optimizable):
                 val = fallback_val
                 dval = fallback_dval
                 norm = fallback_norm
+            # nfev: root() does not report iteration count for hybr
             i = getattr(fallback, "nfev", 0)
 
         if s.stellsym:
