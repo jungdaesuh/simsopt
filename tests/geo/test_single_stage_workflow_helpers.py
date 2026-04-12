@@ -7,6 +7,7 @@ import unittest
 import uuid
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 
 EXAMPLE_ROOT = (
@@ -18,6 +19,7 @@ WORKFLOW_HELPERS_PATH = EXAMPLE_ROOT / "workflow_helpers.py"
 WORKFLOW_COMMON_PATH = EXAMPLE_ROOT / "workflow_runner_common.py"
 BASELINE_SWEEP_PATH = EXAMPLE_ROOT / "run_80ka_baseline_tradeoff_sweep.py"
 FINITE_CURRENT_SMOKE_PATH = EXAMPLE_ROOT / "run_finite_current_smoke.py"
+GOAL_MODE_COMPARISON_PATH = EXAMPLE_ROOT / "run_single_stage_goal_mode_comparison.py"
 SINGLE_STAGE_ENTRYPOINT_PATH = EXAMPLE_ROOT / "SINGLE_STAGE" / "single_stage_banana_example.py"
 STAGE2_ENTRYPOINT_PATH = EXAMPLE_ROOT / "STAGE_2" / "banana_coil_solver.py"
 IMPORT_PROVENANCE_PATH = EXAMPLE_ROOT / "import_provenance.py"
@@ -51,6 +53,13 @@ def load_finite_current_smoke_module():
     return load_module(FINITE_CURRENT_SMOKE_PATH, "run_finite_current_smoke")
 
 
+def load_goal_mode_comparison_module():
+    return load_module(
+        GOAL_MODE_COMPARISON_PATH,
+        "run_single_stage_goal_mode_comparison",
+    )
+
+
 def _run_python_snippet(source: str, *args: str) -> str:
     command = [
         sys.executable,
@@ -82,6 +91,24 @@ def imported_simsopt_init_for_entrypoint(script_path: Path) -> Path:
 
 
 class WorkflowHelpersTests(unittest.TestCase):
+    def test_stage2_seed_spec_rejects_out_of_range_toroidal_flux(self):
+        module = load_workflow_helpers_module()
+
+        with self.assertRaisesRegex(ValueError, "between 0 and 1 inclusive"):
+            module.Stage2SeedSpec(
+                plasma_surf_filename="demo.nc",
+                major_radius=0.915,
+                toroidal_flux=1.2,
+                length_weight=0.0005,
+                cc_weight=100.0,
+                cc_threshold=0.05,
+                curvature_weight=0.0001,
+                curvature_threshold=40.0,
+                banana_surf_radius=0.22,
+                tf_current_A=8.0e4,
+                order=2,
+            )
+
     def test_format_local_stage2_run_dir_includes_constraint_and_basin_suffix(self):
         module = load_workflow_helpers_module()
         spec = module.Stage2SeedSpec(
@@ -164,6 +191,34 @@ class WorkflowHelpersTests(unittest.TestCase):
 
 
 class WorkflowRunnerCommonTests(unittest.TestCase):
+    def test_stage2_artifact_config_rejects_out_of_range_toroidal_flux(self):
+        module = load_workflow_common_module()
+
+        with self.assertRaisesRegex(ValueError, "between 0 and 1 inclusive"):
+            module.Stage2ArtifactConfig(
+                plasma_surf_filename="demo.nc",
+                output_root=Path("/tmp/stage2"),
+                equilibria_dir=None,
+                tf_current_A=8.0e4,
+                major_radius=0.915,
+                toroidal_flux=-0.01,
+                length_weight=0.0005,
+                cc_weight=100.0,
+                cc_threshold=0.05,
+                curvature_weight=0.0001,
+                curvature_threshold=40.0,
+                banana_surf_radius=0.22,
+                order=2,
+                constraint_method="penalty",
+                alm_max_outer_iters=10,
+                alm_penalty_init=1.0,
+                alm_penalty_scale=10.0,
+                basin_hops=0,
+                basin_stepsize=0.01,
+                basin_seed=None,
+                init_only=True,
+            )
+
     def test_single_stage_entrypoint_imports_local_simsopt(self):
         imported_path = imported_simsopt_init_for_entrypoint(SINGLE_STAGE_ENTRYPOINT_PATH)
 
@@ -862,3 +917,404 @@ class FiniteCurrentSmokeScriptTests(unittest.TestCase):
 
         self.assertEqual(upgraded_results["BANANA_CURRENT_MAX_A"], 2.1e4)
         self.assertNotIn("BANANA_INIT_CURRENT_A", upgraded_results)
+
+
+class GoalModeComparisonScriptTests(unittest.TestCase):
+    def _make_args(self):
+        return SimpleNamespace(
+            python_executable="python",
+            dry_run=False,
+            plasma_surf_filename="demo.nc",
+            stage2_bs_path="relative/seed.json",
+            equilibria_dir=None,
+            output_root="outputs",
+            summary_json=None,
+            single_stage_timeout_seconds=0.0,
+            nphi=91,
+            ntheta=32,
+            mpol=8,
+            ntor=6,
+            maxiter=300,
+            maxcor=300,
+            ftol=1e-15,
+            gtol=1e-15,
+            constraint_method="penalty",
+            alm_max_outer_iters=10,
+            alm_penalty_init=1.0,
+            alm_penalty_scale=10.0,
+            alm_feas_tol=1e-6,
+            alm_stationarity_tol=1e-6,
+            alm_trust_radius_init=0.05,
+            alm_trust_radius_min=1e-4,
+            alm_trust_radius_shrink=0.5,
+            alm_trust_radius_grow=1.5,
+            alm_max_inner_attempts=4,
+            alm_max_subproblem_continuations=20,
+            alm_distance_smoothing=0.005,
+            alm_curvature_smoothing=0.05,
+            alm_formulation="weighted_sum",
+            alm_qs_threshold=0.01,
+            alm_boozer_threshold=0.02,
+            alm_iota_penalty_threshold=0.03,
+            alm_length_penalty_threshold=0.04,
+            iota_target=0.15,
+            vol_target=0.10,
+            boozer_I=0.123,
+            plasma_current_A=8000.0,
+            banana_surf_radius=0.22,
+            num_surfaces=2,
+            inner_surface_ratio=0.8,
+            surface_gap_threshold=0.01,
+            multisurface_ramp_iterations=5,
+            inner_surface_initial_weight=0.2,
+            multisurface_initial_step_scale=0.5,
+            multisurface_initial_step_maxiter=7,
+            boozer_stage="initial",
+            boozer_stage_refinement=True,
+            refinement_boozer_stage="final",
+            refinement_maxiter=100,
+            refinement_chunk_maxiter=20,
+            refinement_max_stalled_chunks=2,
+            res_weight=1000.0,
+            iotas_weight=100.0,
+            cc_weight=100.0,
+            curvature_weight=0.1,
+            length_weight=1.0,
+            length_target=1.75,
+            cs_weight=1.0,
+            surf_dist_weight=1000.0,
+            cc_dist=0.05,
+            cs_dist=0.02,
+            ss_dist=0.04,
+            curvature_threshold=40.0,
+            checkpoint_every=5,
+            topology_gate_fieldlines=6,
+            topology_gate_tmax=3.0,
+            topology_gate_tol=1e-6,
+            topology_gate_survival_threshold=0.5,
+            topology_gate_penalty_scale=5.0,
+            topology_scorer_every=4,
+            topology_scorer_nfieldlines=10,
+            topology_scorer_tmax=40.0,
+            confinement_objective_weight=0.3,
+            confinement_surrogate_worst_k=5,
+            confinement_surrogate_early_threshold=0.25,
+            confinement_surrogate_mean_weight=0.2,
+            confinement_surrogate_worst_weight=0.6,
+            confinement_surrogate_early_weight=0.2,
+            hardware_search_mode="adaptive",
+            hardware_search_soft_iterations=3,
+            basin_hops=2,
+            basin_stepsize=0.01,
+            basin_temperature=2.5,
+            basin_niter_success=6,
+            basin_seed=7,
+            init_only=False,
+        )
+
+    def test_build_single_stage_goal_mode_command_resolves_paths_and_threads_mode(self):
+        module = load_goal_mode_comparison_module()
+        args = self._make_args()
+        args.equilibria_dir = "eqdir"
+
+        target_command = module.build_single_stage_goal_mode_command(
+            args,
+            goal_mode="target",
+            stage2_bs_path=Path("relative/seed.json").resolve(),
+            case_output_root=Path("outputs/target").resolve(),
+        )
+        frontier_command = module.build_single_stage_goal_mode_command(
+            args,
+            goal_mode="frontier",
+            stage2_bs_path=Path("relative/seed.json").resolve(),
+            case_output_root=Path("outputs/frontier").resolve(),
+        )
+
+        self.assertEqual(
+            target_command[target_command.index("--single-stage-goal-mode") + 1],
+            "target",
+        )
+        self.assertEqual(
+            frontier_command[frontier_command.index("--single-stage-goal-mode") + 1],
+            "frontier",
+        )
+        self.assertEqual(
+            target_command[target_command.index("--stage2-bs-path") + 1],
+            str(Path("relative/seed.json").resolve()),
+        )
+        self.assertEqual(
+            target_command[target_command.index("--equilibria-dir") + 1],
+            str(Path("eqdir").resolve()),
+        )
+        self.assertEqual(
+            target_command[
+                target_command.index("--hardware-search-soft-iterations") + 1
+            ],
+            "3",
+        )
+        self.assertEqual(
+            target_command[target_command.index("--alm-formulation") + 1],
+            "weighted_sum",
+        )
+        self.assertEqual(
+            target_command[target_command.index("--num-surfaces") + 1],
+            "2",
+        )
+        self.assertEqual(
+            target_command[target_command.index("--plasma-current-A") + 1],
+            "8000.0",
+        )
+        self.assertEqual(
+            target_command[target_command.index("--banana-surf-radius") + 1],
+            "0.22",
+        )
+        self.assertIn("--boozer-stage-refinement", target_command)
+        self.assertEqual(
+            target_command[target_command.index("--basin-seed") + 1],
+            "7",
+        )
+
+    def test_goal_mode_comparison_wrapper_rejects_stage2_surface_mismatch(self):
+        module = load_goal_mode_comparison_module()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            stage2_bs_path = tmpdir_path / "biot_savart_opt.json"
+            stage2_bs_path.write_text("{}", encoding="utf-8")
+            (tmpdir_path / "results.json").write_text(
+                json.dumps({"PLASMA_SURF_FILENAME": "other_surface.nc"}),
+                encoding="utf-8",
+            )
+            args = self._make_args()
+            args.plasma_surf_filename = "demo.nc"
+            args.stage2_bs_path = str(stage2_bs_path)
+
+            with self.assertRaisesRegex(ValueError, "Stage 2 artifact surface mismatch"):
+                module.load_validated_stage2_seed_metadata(args)
+
+    def test_build_summary_reports_mode_results_and_deltas(self):
+        module = load_goal_mode_comparison_module()
+        args = self._make_args()
+        args.output_root = "/tmp/comparison"
+        commands_by_mode = {
+            "target": ["python", "single_stage.py", "--single-stage-goal-mode", "target"],
+            "frontier": ["python", "single_stage.py", "--single-stage-goal-mode", "frontier"],
+        }
+        mode_payloads = {
+            "target": {
+                "results_path": Path("/tmp/comparison/target/results.json"),
+                "results": {
+                    "SINGLE_STAGE_GOAL_MODE": "target",
+                    "SINGLE_STAGE_GOAL_MODE_IMPL": "target",
+                    "TERMINATION_MESSAGE": "target_ok",
+                    "OPTIMIZER_SUCCESS": True,
+                    "FINAL_FEASIBILITY_OK": True,
+                    "HARDWARE_CONSTRAINTS_OK": True,
+                    "FINAL_TOPOLOGY_GATE_SUCCESS": True,
+                    "FINAL_IOTA": 0.15,
+                    "FINAL_VOLUME": 0.10,
+                    "NONQS_RATIO": 0.012,
+                    "BOOZER_RESIDUAL": 0.008,
+                    "COIL_LENGTH": 1.7,
+                    "MAX_CURVATURE": 39.0,
+                    "CURVE_CURVE_MIN_DIST": 0.08,
+                    "CURVE_SURFACE_MIN_DIST": 0.03,
+                    "SURFACE_VESSEL_MIN_DIST": 0.05,
+                    "INVALID_STATE_REJECTS_TOTAL": 2,
+                    "TOPOLOGY_GATE_REJECTS": 1,
+                    "HARDWARE_REJECTS": 1,
+                    "SURFACE_SOLVE_REJECTS": 0,
+                    "BEST_FEASIBLE_AVAILABLE": True,
+                    "BEST_FEASIBLE_STAGE": "initial",
+                    "BEST_FEASIBLE_FINAL_IOTA": 0.151,
+                    "BEST_FEASIBLE_FINAL_VOLUME": 0.101,
+                    "BEST_FEASIBLE_QA_OBJECTIVE": 0.011,
+                    "BEST_FEASIBLE_BOOZER_OBJECTIVE": 0.007,
+                    "BEST_FEASIBLE_SEARCH_OBJECTIVE_J": 0.95,
+                    "BEST_FEASIBLE_BASE_OBJECTIVE_J": 0.9,
+                    "BEST_FEASIBLE_CURVE_CURVE_MIN_DIST": 0.081,
+                    "BEST_FEASIBLE_CURVE_SURFACE_MIN_DIST": 0.031,
+                    "BEST_FEASIBLE_SURFACE_VESSEL_MIN_DIST": 0.051,
+                    "BEST_FEASIBLE_MAX_CURVATURE": 38.5,
+                    "BEST_FEASIBLE_HARDWARE_CONSTRAINTS_OK": True,
+                    "BEST_FEASIBLE_FINAL_TOPOLOGY_GATE_SUCCESS": True,
+                    "SEARCH_OBJECTIVE_J": 1.0,
+                    "OBJECTIVE_J": 1.0,
+                    "BASE_OBJECTIVE_J": 1.0,
+                },
+            },
+            "frontier": {
+                "results_path": Path("/tmp/comparison/frontier/results.json"),
+                "results": {
+                    "SINGLE_STAGE_GOAL_MODE": "frontier",
+                    "SINGLE_STAGE_GOAL_MODE_IMPL": "frontier_iota_reward_only",
+                    "TERMINATION_MESSAGE": "frontier_ok",
+                    "OPTIMIZER_SUCCESS": True,
+                    "FINAL_FEASIBILITY_OK": True,
+                    "HARDWARE_CONSTRAINTS_OK": True,
+                    "FINAL_TOPOLOGY_GATE_SUCCESS": True,
+                    "FINAL_IOTA": 0.18,
+                    "FINAL_VOLUME": 0.11,
+                    "NONQS_RATIO": 0.014,
+                    "BOOZER_RESIDUAL": 0.010,
+                    "COIL_LENGTH": 1.72,
+                    "MAX_CURVATURE": 39.5,
+                    "CURVE_CURVE_MIN_DIST": 0.079,
+                    "CURVE_SURFACE_MIN_DIST": 0.029,
+                    "SURFACE_VESSEL_MIN_DIST": 0.051,
+                    "INVALID_STATE_REJECTS_TOTAL": 1,
+                    "TOPOLOGY_GATE_REJECTS": 1,
+                    "HARDWARE_REJECTS": 0,
+                    "SURFACE_SOLVE_REJECTS": 0,
+                    "BEST_FEASIBLE_AVAILABLE": True,
+                    "BEST_FEASIBLE_STAGE": "final",
+                    "BEST_FEASIBLE_FINAL_IOTA": 0.181,
+                    "BEST_FEASIBLE_FINAL_VOLUME": 0.111,
+                    "BEST_FEASIBLE_QA_OBJECTIVE": 0.013,
+                    "BEST_FEASIBLE_BOOZER_OBJECTIVE": 0.009,
+                    "BEST_FEASIBLE_SEARCH_OBJECTIVE_J": -10.5,
+                    "BEST_FEASIBLE_BASE_OBJECTIVE_J": -10.2,
+                    "BEST_FEASIBLE_CURVE_CURVE_MIN_DIST": 0.08,
+                    "BEST_FEASIBLE_CURVE_SURFACE_MIN_DIST": 0.03,
+                    "BEST_FEASIBLE_SURFACE_VESSEL_MIN_DIST": 0.052,
+                    "BEST_FEASIBLE_MAX_CURVATURE": 39.0,
+                    "BEST_FEASIBLE_HARDWARE_CONSTRAINTS_OK": True,
+                    "BEST_FEASIBLE_FINAL_TOPOLOGY_GATE_SUCCESS": True,
+                    "SEARCH_OBJECTIVE_J": -10.0,
+                    "OBJECTIVE_J": -10.0,
+                    "BASE_OBJECTIVE_J": -10.0,
+                },
+            },
+        }
+
+        summary = module.build_summary(
+            args,
+            commands_by_mode,
+            stage2_bs_path=Path("/tmp/stage2/biot_savart_opt.json"),
+            stage2_results_path=Path("/tmp/stage2/results.json"),
+            stage2_results={
+                "PLASMA_SURF_FILENAME": "demo.nc",
+                "BANANA_CURRENT_A": 12000.0,
+                "BANANA_CURRENT_MAX_A": 16000.0,
+            },
+            mode_payloads=mode_payloads,
+        )
+
+        self.assertFalse(summary["search_objective_values_comparable"])
+        self.assertEqual(summary["stage2_banana_current_a"], 12000.0)
+        self.assertEqual(summary["mode_runs"]["target"]["results"]["goal_mode"], "target")
+        self.assertEqual(
+            summary["mode_runs"]["frontier"]["results"]["goal_mode_impl"],
+            "frontier_iota_reward_only",
+        )
+        self.assertTrue(summary["mode_runs"]["target"]["results"]["best_feasible_available"])
+        self.assertEqual(summary["mode_runs"]["target"]["results"]["invalid_state_rejects_total"], 2)
+        self.assertAlmostEqual(summary["comparison"]["frontier_minus_target_final_iota"], 0.03)
+        self.assertAlmostEqual(summary["comparison"]["frontier_minus_target_final_volume"], 0.01)
+        self.assertAlmostEqual(summary["comparison"]["frontier_minus_target_nonqs_ratio"], 0.002)
+        self.assertAlmostEqual(summary["comparison"]["frontier_minus_target_boozer_residual"], 0.002)
+        self.assertTrue(summary["comparison"]["both_final_feasibility_ok"])
+        self.assertTrue(summary["comparison"]["both_hardware_feasible"])
+        self.assertTrue(summary["comparison"]["both_optimizer_success"])
+
+    def test_delta_returns_none_when_either_side_missing(self):
+        module = load_goal_mode_comparison_module()
+
+        self.assertIsNone(module._delta(None, 1.0))
+        self.assertIsNone(module._delta(1.0, None))
+
+    def test_maybe_load_validated_stage2_seed_metadata_returns_loaded_results_when_present(self):
+        module = load_goal_mode_comparison_module()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            stage2_bs_path = tmpdir_path / "biot_savart_opt.json"
+            stage2_results_path = tmpdir_path / "results.json"
+            stage2_bs_path.write_text("{}", encoding="utf-8")
+            stage2_results_path.write_text(
+                json.dumps({"PLASMA_SURF_FILENAME": "demo.nc"}),
+                encoding="utf-8",
+            )
+            args = self._make_args()
+            args.stage2_bs_path = str(stage2_bs_path)
+            args.plasma_surf_filename = "demo.nc"
+
+            loaded_bs_path, loaded_results_path, loaded_results = (
+                module.maybe_load_validated_stage2_seed_metadata(args)
+            )
+
+        self.assertEqual(loaded_bs_path, stage2_bs_path.resolve())
+        self.assertEqual(loaded_results_path, stage2_results_path.resolve())
+        self.assertEqual(loaded_results["PLASMA_SURF_FILENAME"], "demo.nc")
+
+    def test_run_goal_mode_case_executes_and_loads_results(self):
+        module = load_goal_mode_comparison_module()
+        args = self._make_args()
+        output_root = Path(tempfile.mkdtemp())
+
+        with patch.object(module, "run_command") as run_command, patch.object(
+            module,
+            "discover_single_results_path",
+            return_value=output_root / "target" / "results.json",
+        ) as discover_results, patch.object(
+            module,
+            "load_json",
+            return_value={"SINGLE_STAGE_GOAL_MODE": "target"},
+        ) as load_json:
+            payload = module.run_goal_mode_case(
+                args,
+                goal_mode="target",
+                stage2_bs_path=Path("seed.json").resolve(),
+                output_root=output_root,
+            )
+
+        run_command.assert_called_once()
+        discover_results.assert_called_once()
+        load_json.assert_called_once()
+        self.assertEqual(payload["results"]["SINGLE_STAGE_GOAL_MODE"], "target")
+
+    def test_goal_mode_comparison_dry_run_does_not_require_existing_stage2_artifact(self):
+        module = load_goal_mode_comparison_module()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            output_root = tmpdir_path / "outputs"
+            summary_path = tmpdir_path / "summary.json"
+            missing_stage2_bs_path = tmpdir_path / "missing" / "biot_savart_opt.json"
+
+            with patch.object(
+                sys,
+                "argv",
+                [
+                    "run_single_stage_goal_mode_comparison.py",
+                    "--dry-run",
+                    "--plasma-surf-filename",
+                    "demo.nc",
+                    "--stage2-bs-path",
+                    str(missing_stage2_bs_path),
+                    "--output-root",
+                    str(output_root),
+                    "--summary-json",
+                    str(summary_path),
+                ],
+            ):
+                self.assertEqual(module.main(), 0)
+
+            summary = json.loads(summary_path.read_text(encoding="utf-8"))
+            self.assertEqual(summary["stage2_bs_path"], str(missing_stage2_bs_path.resolve()))
+            self.assertTrue(summary["dry_run"])
+            self.assertIn("target", summary["mode_runs"])
+            self.assertIn("frontier", summary["mode_runs"])
+            self.assertEqual(
+                summary["mode_runs"]["target"]["command"][
+                    summary["mode_runs"]["target"]["command"].index("--single-stage-goal-mode") + 1
+                ],
+                "target",
+            )
+            self.assertEqual(
+                summary["mode_runs"]["frontier"]["command"][
+                    summary["mode_runs"]["frontier"]["command"].index("--single-stage-goal-mode") + 1
+                ],
+                "frontier",
+            )
+            self.assertNotIn("stage2_results_path", summary)

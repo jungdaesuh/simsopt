@@ -20,6 +20,7 @@ from topology_scorer import (
     stop_reason_label as _topology_stop_reason,
     toroidal_angle as _topology_toroidal_angle,
 )
+from workflow_helpers import validate_normalized_toroidal_flux
 
 
 def scale_surface_to_major_radius(surface, major_radius):
@@ -39,6 +40,10 @@ def build_surface_configs(
     inner_surface_ratio,
     surface_factory=SurfaceRZFourier,
 ):
+    seed_label = validate_normalized_toroidal_flux(
+        seed_label,
+        field_name="single-stage surface seed_label",
+    )
     outer_reference = surface_factory.from_wout(
         file_loc,
         range="half period",
@@ -64,6 +69,10 @@ def build_surface_configs(
         )
 
     inner_label = seed_label * inner_surface_ratio
+    inner_label = validate_normalized_toroidal_flux(
+        inner_label,
+        field_name="single-stage inner surface seed_label",
+    )
     inner_reference = surface_factory.from_wout(
         file_loc,
         range="half period",
@@ -491,6 +500,33 @@ def build_scaled_outer_problem(base_fun, base_callback, anchor_x, step_scale):
         base_callback(anchor_x + step_scale * z)
 
     return scaled_fun, scaled_callback
+
+
+def build_scipy_bounds(lower_bounds, upper_bounds):
+    lower = np.asarray(lower_bounds, dtype=float)
+    upper = np.asarray(upper_bounds, dtype=float)
+    if lower.ndim != 1 or upper.ndim != 1:
+        raise ValueError("Bounds must be one-dimensional")
+    if lower.shape != upper.shape:
+        raise ValueError("Lower and upper bounds must have the same shape")
+    if not (np.isfinite(lower).any() or np.isfinite(upper).any()):
+        return None
+    return list(zip(lower.tolist(), upper.tolist()))
+
+
+def build_scaled_outer_bounds(anchor_x, step_scale, lower_bounds, upper_bounds):
+    if not (0.0 < step_scale <= 1.0):
+        raise ValueError("step_scale must be in (0, 1]")
+    anchor = np.asarray(anchor_x, dtype=float)
+    lower = np.asarray(lower_bounds, dtype=float)
+    upper = np.asarray(upper_bounds, dtype=float)
+    if anchor.ndim != 1:
+        raise ValueError("anchor_x must be one-dimensional")
+    if anchor.shape != lower.shape or anchor.shape != upper.shape:
+        raise ValueError("Scaled bounds inputs must have matching shapes")
+    scaled_lower = np.where(np.isfinite(lower), (lower - anchor) / step_scale, -np.inf)
+    scaled_upper = np.where(np.isfinite(upper), (upper - anchor) / step_scale, np.inf)
+    return build_scipy_bounds(scaled_lower, scaled_upper)
 
 
 def evaluate_topology_gate(

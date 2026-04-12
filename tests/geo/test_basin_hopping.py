@@ -19,11 +19,23 @@ BASIN_HOPPING_MODULE_PATH = (
 EXPECTED_BASIN_TELEMETRY = {
     "basin_accepted_hops": 1,
     "basin_rejected_hops": 1,
+    "basin_completed_hops": 2,
     "basin_best_objective": 2.0,
+    "basin_initial_objective": 3.0,
+    "basin_best_hop_objective": 2.0,
+    "basin_best_hop_index": 1,
+    "basin_best_result_source": "hop",
+    "basin_objective_improvement": 1.0,
     "basin_accept_test_rejections": 1,
     "basin_accept_test_triggered": True,
 }
-EXPECTED_BASIN_TELEMETRY_FIELDS = tuple(EXPECTED_BASIN_TELEMETRY)
+EXPECTED_BASIN_TELEMETRY_FIELDS = (
+    "basin_accepted_hops",
+    "basin_rejected_hops",
+    "basin_best_objective",
+    "basin_accept_test_rejections",
+    "basin_accept_test_triggered",
+)
 
 
 def load_basin_hopping_module():
@@ -93,6 +105,11 @@ class BasinHoppingHelperTests(unittest.TestCase):
 
         self.assertEqual(monitor.accepted_hops, 1)
         self.assertEqual(monitor.rejected_hops, 1)
+        self.assertEqual(monitor.completed_hops, 2)
+        self.assertEqual(monitor.initial_objective, 5.0)
+        self.assertEqual(monitor.best_hop_objective, 4.0)
+        self.assertEqual(monitor.best_hop_index, 1)
+        self.assertEqual(monitor.best_result_source, "hop")
         self.assertEqual(monitor.best_objective, 4.0)
 
     def test_run_basin_hopping_passes_rng_accept_test_and_callback(self):
@@ -144,11 +161,42 @@ class BasinHoppingHelperTests(unittest.TestCase):
         for key, expected in EXPECTED_BASIN_TELEMETRY.items():
             self.assertEqual(telemetry[key], expected)
 
+    def test_run_basin_hopping_integrates_with_real_scipy_basinhopping(self):
+        module = load_basin_hopping_module()
+
+        def fun(x):
+            x = np.asarray(x, dtype=float)
+            value = float((x[0] ** 2 - 1.0) ** 2 + 0.1 * x[0])
+            grad = np.array([4.0 * x[0] * (x[0] ** 2 - 1.0) + 0.1])
+            return value, grad
+
+        result, telemetry = module.run_basin_hopping(
+            fun,
+            np.array([1.5]),
+            basin_hops=4,
+            basin_stepsize=2.0,
+            basin_temperature=0.5,
+            basin_niter_success=4,
+            rng_seed=0,
+            minimizer_kwargs={"method": "L-BFGS-B", "jac": True},
+            disp=False,
+        )
+
+        self.assertLess(float(result.fun), 0.0)
+        self.assertEqual(telemetry["basin_completed_hops"], 4)
+        self.assertEqual(
+            telemetry["basin_accepted_hops"] + telemetry["basin_rejected_hops"],
+            4,
+        )
+        self.assertEqual(telemetry["basin_best_result_source"], "hop")
+        self.assertLess(float(telemetry["basin_best_objective"]), 0.0)
+        self.assertGreater(float(telemetry["basin_objective_improvement"]), 0.0)
+
     def test_telemetry_values_uses_declared_field_order(self):
         module = load_basin_hopping_module()
 
         self.assertEqual(module.BASIN_TELEMETRY_FIELDS, EXPECTED_BASIN_TELEMETRY_FIELDS)
         self.assertEqual(
             module.telemetry_values(EXPECTED_BASIN_TELEMETRY),
-            tuple(EXPECTED_BASIN_TELEMETRY.values()),
+            (1, 1, 2.0, 1, True),
         )

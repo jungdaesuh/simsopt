@@ -192,6 +192,7 @@ def make_stage2_alm_wrapper_args(**overrides):
         "output_root": "outputs",
         "summary_json": None,
         "stage2_timeout_seconds": 0.0,
+        "toroidal_flux": None,
         "cc_threshold": None,
         "curvature_threshold": None,
         "order": None,
@@ -288,6 +289,7 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
         validate_args = functions["validate_single_stage_alm_formulation_args"]
         args = SimpleNamespace(
             alm_formulation="thresholded_physics",
+            single_stage_goal_mode="target",
             constraint_method="alm",
             alm_qs_threshold=None,
             alm_boozer_threshold=1e-6,
@@ -307,6 +309,7 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
         validate_args = functions["validate_single_stage_alm_formulation_args"]
         args = SimpleNamespace(
             alm_formulation="thresholded_physics",
+            single_stage_goal_mode="target",
             constraint_method="alm",
             alm_qs_threshold=1e-6,
             alm_boozer_threshold=1e-6,
@@ -326,6 +329,7 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
         validate_args = functions["validate_single_stage_alm_formulation_args"]
         args = SimpleNamespace(
             alm_formulation="thresholded_physics",
+            single_stage_goal_mode="target",
             constraint_method="penalty",
             alm_qs_threshold=1e-6,
             alm_boozer_threshold=1e-6,
@@ -421,6 +425,14 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
             outer_iteration=2,
             termination_message="still running",
             optimizer_success=None,
+            termination_reason="subproblem_continue",
+            inner_optimizer_success=False,
+            inner_optimizer_message="iteration limit",
+            converged_to_tolerances=False,
+            restored_best_feasible=True,
+            restored_best_feasible_reason="final_iterate_infeasible",
+            final_max_feasibility_violation=0.2,
+            final_stationarity_norm=0.15,
         )
 
         self.assertEqual(payload["outer_iteration"], 2)
@@ -435,6 +447,17 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
         self.assertEqual(payload["accepted_hardware_status"]["violations"], ["cc"])
         self.assertEqual(payload["trial_hardware_status"]["violations"], ["cs"])
         self.assertEqual(payload["termination_message"], "still running")
+        self.assertEqual(payload["termination_reason"], "subproblem_continue")
+        self.assertFalse(payload["inner_optimizer_success"])
+        self.assertEqual(payload["inner_optimizer_message"], "iteration limit")
+        self.assertFalse(payload["converged_to_tolerances"])
+        self.assertTrue(payload["restored_best_feasible"])
+        self.assertEqual(
+            payload["restored_best_feasible_reason"],
+            "final_iterate_infeasible",
+        )
+        self.assertEqual(payload["final_max_feasibility_violation"], 0.2)
+        self.assertEqual(payload["final_stationarity_norm"], 0.15)
 
     def test_stage2_alm_wrapper_requires_profile_or_spec_json(self):
         module = load_stage2_alm_wrapper_module()
@@ -458,6 +481,7 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
         args = make_stage2_alm_wrapper_args(
             equilibria_dir="eqdir",
             tf_current_A=9.0e4,
+            toroidal_flux=0.37,
             cc_threshold=0.07,
         )
         resolved_spec, resolved_spec_source = module.resolve_stage2_spec_payload(args)
@@ -467,6 +491,7 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
         self.assertEqual(resolved_spec_source, "profile:standard_80ka")
         self.assertEqual(config.constraint_method, "alm")
         self.assertEqual(config.tf_current_A, 9.0e4)
+        self.assertEqual(config.toroidal_flux, 0.37)
         self.assertEqual(config.cc_threshold, 0.07)
         self.assertEqual(config.output_root, Path("outputs").resolve())
         self.assertEqual(config.equilibria_dir, str(Path("eqdir").resolve()))
@@ -488,6 +513,7 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
         self.assertEqual(command[command.index("--alm-penalty-scale") + 1], "10.0")
         self.assertIn("--banana-current-max-A", command)
         self.assertEqual(command[command.index("--banana-current-max-A") + 1], "16000.0")
+        self.assertEqual(command[command.index("--toroidal-flux") + 1], "0.37")
 
     def test_stage2_alm_wrapper_spec_json_must_be_complete(self):
         module = load_stage2_alm_wrapper_module()
@@ -565,6 +591,43 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
         self.assertIn("resolved_stage2_config", summary)
         self.assertEqual(summary["resolved_stage2_config"]["constraint_method"], "alm")
         self.assertEqual(summary["resolved_stage2_config"]["output_root"], str(Path("outputs").resolve()))
+        self.assertEqual(summary["output_contract"], "materialized_stage2_artifact")
+        self.assertFalse(summary["contains_solver_outputs"])
+
+    def test_stage2_alm_wrapper_dry_run_writes_explicit_marker(self):
+        module = load_stage2_alm_wrapper_module()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            output_root = tmpdir_path / "outputs"
+            summary_path = tmpdir_path / "summary.json"
+
+            with patch.object(
+                sys,
+                "argv",
+                [
+                    "run_stage2_alm.py",
+                    "--dry-run",
+                    "--plasma-surf-filename",
+                    DEFAULT_ALM_WRAPPER_SURFACE,
+                    "--profile",
+                    "standard_80ka",
+                    "--output-root",
+                    str(output_root),
+                    "--summary-json",
+                    str(summary_path),
+                ],
+            ):
+                self.assertEqual(module.main(), 0)
+
+            summary = json.loads(summary_path.read_text(encoding="utf-8"))
+            marker_path = (output_root / "DRY_RUN_ONLY.txt").resolve()
+            self.assertTrue(summary["dry_run"])
+            self.assertEqual(summary["output_contract"], "dry_run_summary_only")
+            self.assertFalse(summary["contains_solver_outputs"])
+            self.assertEqual(summary["dry_run_marker_path"], str(marker_path))
+            self.assertTrue(marker_path.exists())
+            self.assertIn("dry run only", marker_path.read_text(encoding="utf-8").lower())
 
     def test_stage2_alm_wrapper_expected_metadata_includes_basin_identity(self):
         module = load_stage2_alm_wrapper_module()
@@ -804,10 +867,16 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
                 self.assertEqual(module.main(), 0)
 
             summary = json.loads(summary_path.read_text(encoding="utf-8"))
+            marker_path = (output_root / "DRY_RUN_ONLY.txt").resolve()
             self.assertEqual(summary["stage2_bs_path"], str(missing_stage2_bs_path.resolve()))
             self.assertTrue(summary["dry_run"])
+            self.assertEqual(summary["output_contract"], "dry_run_summary_only")
+            self.assertFalse(summary["contains_solver_outputs"])
+            self.assertEqual(summary["dry_run_marker_path"], str(marker_path))
             self.assertNotIn("stage2_results_path", summary)
             self.assertNotIn("stage2_artifact_plasma_surf_filename", summary)
+            self.assertTrue(marker_path.exists())
+            self.assertIn("dry run only", marker_path.read_text(encoding="utf-8").lower())
 
     def test_single_stage_basin_hopping_uses_shared_helper_and_records_telemetry(self):
         source = SINGLE_STAGE_MODULE_PATH.read_text()

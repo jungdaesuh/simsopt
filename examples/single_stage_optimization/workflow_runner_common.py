@@ -11,10 +11,15 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
-from workflow_helpers import Stage2SeedSpec, local_stage2_bs_path
+from workflow_helpers import (
+    Stage2SeedSpec,
+    local_stage2_bs_path,
+    validate_normalized_toroidal_flux,
+)
 
 STAGE2_SCRIPT_PATH = SCRIPT_DIR / "STAGE_2" / "banana_coil_solver.py"
 SINGLE_STAGE_SCRIPT_PATH = SCRIPT_DIR / "SINGLE_STAGE" / "single_stage_banana_example.py"
+DRY_RUN_MARKER_FILENAME = "DRY_RUN_ONLY.txt"
 
 T = TypeVar("T")
 
@@ -46,6 +51,12 @@ class Stage2ArtifactConfig:
     init_only: bool = False
     banana_init_current_A: float = 1.0e4
     banana_current_max_A: float = 1.6e4
+
+    def __post_init__(self) -> None:
+        validate_normalized_toroidal_flux(
+            self.toroidal_flux,
+            field_name="Stage2ArtifactConfig.toroidal_flux",
+        )
 
 
 def parse_csv(raw: str, cast: Callable[[str], T]) -> list[T]:
@@ -253,6 +264,35 @@ def discover_single_results_path(
             f"Expected exactly one single-stage results.json under {output_root}, found {len(matches)}"
         )
     return matches[0]
+
+
+def dry_run_marker_path(output_root: str | Path) -> Path:
+    return Path(output_root) / DRY_RUN_MARKER_FILENAME
+
+
+def write_dry_run_marker(
+    output_root: str | Path,
+    *,
+    summary_path: str | Path,
+    runner_label: str,
+) -> Path:
+    marker_path = dry_run_marker_path(output_root)
+    marker_path.parent.mkdir(parents=True, exist_ok=True)
+    marker_path.write_text(
+        (
+            f"{runner_label} dry run only.\n"
+            "No solver outputs were materialized in this directory.\n"
+            f"See the summary JSON for the planned command and resolved inputs: {Path(summary_path)}\n"
+        ),
+        encoding="utf-8",
+    )
+    return marker_path
+
+
+def clear_dry_run_marker(output_root: str | Path) -> None:
+    marker_path = dry_run_marker_path(output_root)
+    if marker_path.exists():
+        marker_path.unlink()
 
 
 def load_json(path: str | Path) -> dict:

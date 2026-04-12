@@ -7,6 +7,7 @@ This directory contains the current banana-coil workflow stack for this reposito
 - wrapper workflows in [run_80ka_baseline_tradeoff_sweep.py](run_80ka_baseline_tradeoff_sweep.py) and [run_finite_current_smoke.py](run_finite_current_smoke.py)
 - generic Stage 2 ALM wrapper in [run_stage2_alm.py](run_stage2_alm.py)
 - generic single-stage ALM rerun wrapper in [run_single_stage_thresholded_physics_alm.py](run_single_stage_thresholded_physics_alm.py)
+- explicit target-vs-frontier comparison wrapper in [run_single_stage_goal_mode_comparison.py](run_single_stage_goal_mode_comparison.py)
 - optional field-line / Poincare diagnostics in [POINCARE_PLOTTING/poincare_surfaces.py](POINCARE_PLOTTING/poincare_surfaces.py)
 
 The codebase has evolved beyond the older "edit script constants and rerun" model. Use CLI flags or environment variables, not source edits, for normal operation.
@@ -38,6 +39,10 @@ There are two wrapper entrypoints for the general ALM workflow:
 4. `run_single_stage_thresholded_physics_alm.py`
    This is the generic single-stage ALM rerun lane.
    It requires an explicit Stage 2 artifact plus an explicit plasma surface, pins `--constraint-method alm`, `--alm-formulation thresholded_physics`, and warning-mode hardware handling, and validates that the Stage 2 artifact matches the requested plasma surface before launch.
+
+5. `run_single_stage_goal_mode_comparison.py`
+   This is the matched target-vs-frontier comparison lane.
+   It requires one explicit Stage 2 artifact plus one explicit plasma surface, runs single-stage twice with identical settings except for `--single-stage-goal-mode {target, frontier}`, validates Stage 2 surface identity, and writes one summary JSON with per-mode metrics plus frontier-minus-target deltas.
 
 ## Branch Scope
 
@@ -74,6 +79,7 @@ examples/single_stage_optimization/
 ├── run_80ka_baseline_tradeoff_sweep.py
 ├── run_finite_current_smoke.py
 ├── run_stage2_alm.py
+├── run_single_stage_goal_mode_comparison.py
 └── run_single_stage_thresholded_physics_alm.py
 ```
 
@@ -153,6 +159,7 @@ Useful notes:
 - output root defaults to `examples/single_stage_optimization/outputs_stage2_alm`
 - `--stage2-spec-json` is the fully explicit path for non-profile Stage 2 contracts
 - `--dry-run` prints and records the resolved config and exact Stage 2 command without launching it
+- dry runs write `DRY_RUN_ONLY.txt` next to the summary so a summary-only directory is not mistaken for a real solver artifact root
 
 ### Single-Stage Thresholded-Physics ALM Rerun
 
@@ -176,6 +183,33 @@ Useful notes:
 - output root defaults to `examples/single_stage_optimization/outputs_single_stage_thresholded_physics_alm`
 - all `thresholded_physics` thresholds and ALM trust-region settings remain CLI-overridable
 - `--dry-run` still validates the Stage 2 artifact metadata and prints the exact single-stage command
+- dry runs write `DRY_RUN_ONLY.txt` next to the summary so a summary-only directory is not mistaken for a real single-stage result root
+
+### Single-Stage Goal-Mode Comparison
+
+Use this when you want an A/B comparison between the legacy target-iota objective and the new frontier-iota reward mode from the same Stage 2 seed:
+
+- requires `--plasma-surf-filename`
+- requires `--stage2-bs-path`
+- launches one `target` run and one `frontier` run under separate output subdirectories
+- keeps all other forwarded single-stage settings matched across the two runs, including ALM formulation and thresholds, staged Boozer refinement, multi-surface settings, topology/confinement knobs, plasma current, and banana-surface radius
+- always passes `--single-stage-goal-mode` explicitly for both runs, so a parent-shell `SINGLE_STAGE_GOAL_MODE` environment variable cannot silently flip the target/frontier A/B semantics
+- writes one comparison summary JSON with per-mode metrics, invalid-state reject counts, best-feasible fallback metrics when available, and frontier-minus-target deltas
+
+```bash
+cd /path/to/simsopt-surrogate
+python examples/single_stage_optimization/run_single_stage_goal_mode_comparison.py \
+  --plasma-surf-filename wout_nfp10ginsburg_desc_s024match_iota20.nc \
+  --stage2-bs-path /full/path/to/biot_savart_opt.json
+```
+
+Useful notes:
+
+- output root defaults to `examples/single_stage_optimization/outputs_single_stage_goal_mode_comparison`
+- `--dry-run` does not require the Stage 2 artifact to exist, but if the artifact and sibling `results.json` are present it still validates the surface match
+- the summary marks `search_objective_values_comparable=false` because `target` and `frontier` intentionally use different base iota terms
+- the current `frontier` implementation is `frontier_iota_reward_only`, so matched runs are useful for metric comparison, not for directly comparing raw optimizer objective values
+- when the shared Stage 2 `results.json` includes banana-current metadata, the comparison summary also records the shared seed `BANANA_CURRENT_A` and `BANANA_CURRENT_MAX_A`
 
 ## Manual Stage 2
 
@@ -270,6 +304,7 @@ python single_stage_banana_example.py \
   --stage2-seed-major-radius 0.915 \
   --stage2-seed-toroidal-flux 0.24 \
   --stage2-seed-banana-surf-radius 0.22 \
+  --single-stage-goal-mode target \
   --iota-target 0.17 \
   --vol-target 0.10 \
   --cc-dist 0.07 \
@@ -286,7 +321,7 @@ ALM operational note:
 Current high-level flag groups:
 
 - core problem setup:
-  `--plasma-surf-filename`, `--equilibria-dir`, `--equilibrium-path`, `--output-root`, `--mpol`, `--ntor`, `--nphi`, `--ntheta`, `--vol-target`, `--iota-target`, `--banana-surf-radius`
+  `--plasma-surf-filename`, `--equilibria-dir`, `--equilibrium-path`, `--output-root`, `--mpol`, `--ntor`, `--nphi`, `--ntheta`, `--single-stage-goal-mode`, `--vol-target`, `--iota-target`, `--banana-surf-radius`
 - current inputs:
   `--plasma-current-A`, `--boozer-I`, `--num-tf-coils`
 - weights / thresholds:
@@ -315,6 +350,13 @@ Important current behavior:
 - `--constraint-method=alm` currently requires `--num-surfaces=1`
 - staged Boozer refinement currently requires penalty mode, single-surface mode, and no basin-hopping
 - single-stage basin-hopping is only supported in penalty mode
+- `--single-stage-goal-mode=frontier` is still comparison-first, not a full replacement for the target path
+- direct single-stage runs default to `SINGLE_STAGE_GOAL_MODE` from the environment when it is set; the comparison wrapper overrides that by passing the goal mode explicitly
+- frontier mode currently changes only the single-stage iota term: it uses a monotone iota reward `-iota` instead of the legacy target-tracking iota penalty `0.5*(iota - iota_target)^2`
+- for backward-compatible run identities, explicit `--single-stage-goal-mode target` and omitting the flag intentionally hash to the same run fingerprint
+- the frontier iota term has a different scale than the target penalty and can be roughly `10x` to `1000x` larger in absolute value depending on distance to target; near convergence it can be several hundred-fold larger, so `--iotas-weight`, which was tuned for the quadratic target penalty, generally needs to be retuned in frontier mode
+- in `frontier` mode the resulting `IOTAS_WEIGHT * (-iota)` term in the base objective is unbounded below in the iota direction and has no built-in saturation cap, so `--single-stage-goal-mode=frontier` paired with `--alm-formulation=weighted_sum --constraint-method=alm` only converges in practice when the other physics and engineering terms (QA, Boozer residual, length, ALM hardware constraints) bound `iota`; treat early frontier ALM runs as exploratory rather than guaranteed-convergent
+- `--single-stage-goal-mode=frontier` is intentionally incompatible with `--alm-formulation=thresholded_physics` because that ALM formulation still assumes an upper-bounded Jiota penalty objective
 
 ## Hardware Search Policy
 

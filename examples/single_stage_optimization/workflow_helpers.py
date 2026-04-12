@@ -9,6 +9,19 @@ def format_compact_float(value: float) -> str:
     return f"{value:g}"
 
 
+def validate_normalized_toroidal_flux(
+    value: float,
+    *,
+    field_name: str = "toroidal_flux",
+) -> float:
+    flux = float(value)
+    if not 0.0 <= flux <= 1.0:
+        raise ValueError(
+            f"{field_name} must be between 0 and 1 inclusive, got {value!r}."
+        )
+    return flux
+
+
 @dataclass(frozen=True)
 class Stage2SeedSpec:
     plasma_surf_filename: str
@@ -24,6 +37,16 @@ class Stage2SeedSpec:
     order: int
     banana_init_current_A: float = 1.0e4
     banana_current_max_A: float = 1.6e4
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "toroidal_flux",
+            validate_normalized_toroidal_flux(
+                self.toroidal_flux,
+                field_name="Stage2SeedSpec.toroidal_flux",
+            ),
+        )
 
 
 @dataclass(frozen=True)

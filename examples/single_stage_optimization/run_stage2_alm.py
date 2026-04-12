@@ -14,12 +14,15 @@ if str(SCRIPT_DIR) not in sys.path:
 from workflow_runner_common import (  # noqa: E402
     Stage2ArtifactConfig,
     build_stage2_command,
+    clear_dry_run_marker,
+    dry_run_marker_path,
     ensure_stage2_artifact,
     load_stage2_artifact_results,
     resolve_stage2_artifact_path,
     resolved_path,
     resolved_optional_path,
     timeout_or_none,
+    write_dry_run_marker,
 )
 from banana_opt.artifact_contracts import (  # noqa: E402
     basin_metadata_from_config,
@@ -148,6 +151,12 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Optional override for the per-TF-coil current in SI amperes.",
     )
+    parser.add_argument(
+        "--toroidal-flux",
+        type=float,
+        default=None,
+        help="Optional override for the VMEC flux-surface label s in [0, 1].",
+    )
     return parser.parse_args()
 
 
@@ -189,6 +198,7 @@ def resolve_stage2_spec_payload(args: argparse.Namespace) -> tuple[dict, str]:
         source_label = f"json:{spec_json_path}"
 
     overrides = {
+        "toroidal_flux": args.toroidal_flux,
         "cc_threshold": args.cc_threshold,
         "curvature_threshold": args.curvature_threshold,
         "order": args.order,
@@ -313,6 +323,11 @@ def build_summary(
         "artifact_reused": artifact_reused,
         "command": command,
         "dry_run": bool(args.dry_run),
+        "output_contract": (
+            "dry_run_summary_only" if args.dry_run else "materialized_stage2_artifact"
+        ),
+        "contains_solver_outputs": bool(stage2_results_path is not None and stage2_results is not None),
+        "dry_run_marker_path": str(dry_run_marker_path(config.output_root)),
         "resolved_stage2_config": _jsonable_stage2_config(config),
     }
     if stage2_results_path is None or stage2_results is None:
@@ -358,7 +373,13 @@ def main() -> int:
             artifact_path=artifact_path,
             artifact_reused=artifact_reused,
         )
+        write_dry_run_marker(
+            output_root,
+            summary_path=summary_path,
+            runner_label="run_stage2_alm.py",
+        )
     else:
+        clear_dry_run_marker(output_root)
         artifact_path = ensure_stage2_artifact(
             config,
             python_executable=args.python_executable,

@@ -35,6 +35,7 @@ from plotting_utils import cross_section_plot
 from workflow_helpers import (
     Stage2SeedSpec,
     format_local_stage2_run_dir,
+    validate_normalized_toroidal_flux,
 )
 from banana_opt.reference_surfaces import build_banana_reference_surfaces
 from banana_opt.basin_hopping import run_basin_hopping, telemetry_values as basin_telemetry_values
@@ -209,7 +210,7 @@ def parse_args():
         "--toroidal-flux",
         type=float,
         default=float(os.environ.get("TOROIDAL_FLUX", "0.24")),
-        help="Flux-surface label s used when loading the VMEC surface.",
+        help="Flux-surface label s in [0, 1] used when loading the VMEC surface.",
     )
     parser.add_argument(
         "--order",
@@ -547,7 +548,10 @@ def main(parsed_args=None):
     order = args.order # number of Fourier modes for coils
 
     R0 = args.major_radius # major radius
-    s = args.toroidal_flux # VMEC flux-surface label
+    s = validate_normalized_toroidal_flux(
+        args.toroidal_flux,
+        field_name="--toroidal-flux",
+    ) # VMEC flux-surface label
 
     new_surf = _init_surface(R0, s, file_loc, nphi, ntheta)
     banana_surf_nfp = new_surf.nfp
@@ -642,6 +646,14 @@ def main(parsed_args=None):
     basin_best_objective = None
     basin_accept_test_rejections = None
     basin_accept_test_triggered = None
+    basin_nonfinite_rejections = None
+    basin_normalized_step_rejections = None
+    basin_completed_hops = None
+    basin_initial_objective = None
+    basin_best_hop_objective = None
+    basin_best_hop_index = None
+    basin_best_result_source = None
+    basin_objective_improvement = None
     alm_settings = None
     alm_taylor_result = None
     if args.basin_hops > 0:
@@ -800,6 +812,16 @@ def main(parsed_args=None):
             basin_accept_test_rejections,
             basin_accept_test_triggered,
         ) = basin_telemetry_values(basin_telemetry)
+        basin_nonfinite_rejections = basin_telemetry.get("basin_nonfinite_rejections")
+        basin_normalized_step_rejections = basin_telemetry.get(
+            "basin_normalized_step_rejections"
+        )
+        basin_completed_hops = basin_telemetry.get("basin_completed_hops")
+        basin_initial_objective = basin_telemetry.get("basin_initial_objective")
+        basin_best_hop_objective = basin_telemetry.get("basin_best_hop_objective")
+        basin_best_hop_index = basin_telemetry.get("basin_best_hop_index")
+        basin_best_result_source = basin_telemetry.get("basin_best_result_source")
+        basin_objective_improvement = basin_telemetry.get("basin_objective_improvement")
         if hasattr(res, 'lowest_optimization_result') and hasattr(res.lowest_optimization_result, 'nit'):
             res_nit = res.lowest_optimization_result.nit
         else:
@@ -927,6 +949,14 @@ def main(parsed_args=None):
         basin_best_objective=basin_best_objective,
         basin_accept_test_rejections=basin_accept_test_rejections,
         basin_accept_test_triggered=basin_accept_test_triggered,
+        basin_nonfinite_rejections=basin_nonfinite_rejections,
+        basin_normalized_step_rejections=basin_normalized_step_rejections,
+        basin_completed_hops=basin_completed_hops,
+        basin_initial_objective=basin_initial_objective,
+        basin_best_hop_objective=basin_best_hop_objective,
+        basin_best_hop_index=basin_best_hop_index,
+        basin_best_result_source=basin_best_result_source,
+        basin_objective_improvement=basin_objective_improvement,
         alm_result=alm_result,
         alm_taylor_result=alm_taylor_result,
         final_volume=new_surf.volume(),

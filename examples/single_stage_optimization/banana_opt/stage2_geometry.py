@@ -17,9 +17,11 @@ from simsopt.field.coil import ScaledCurrent
 from simsopt.geo import CurveCWSFourierCPP, SurfaceRZFourier, curves_to_vtk
 
 from plotting_utils import magnitude_field_plot, norm_field_plot
+from workflow_helpers import validate_normalized_toroidal_flux
 
 
 def init_surface(R0, s, file_loc, nphi, ntheta):
+    s = validate_normalized_toroidal_flux(s, field_name="Stage 2 VMEC surface label s")
     surf = SurfaceRZFourier.from_wout(
         file_loc, range="full torus", nphi=nphi, ntheta=ntheta, s=s
     )

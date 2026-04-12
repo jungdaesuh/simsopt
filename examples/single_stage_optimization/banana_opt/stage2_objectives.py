@@ -77,6 +77,14 @@ def build_stage2_results(
     basin_best_objective,
     basin_accept_test_rejections,
     basin_accept_test_triggered,
+    basin_nonfinite_rejections,
+    basin_normalized_step_rejections,
+    basin_completed_hops,
+    basin_initial_objective,
+    basin_best_hop_objective,
+    basin_best_hop_index,
+    basin_best_result_source,
+    basin_objective_improvement,
     alm_result,
     alm_taylor_result,
     final_volume,
@@ -136,6 +144,14 @@ def build_stage2_results(
         "basin_best_objective": basin_best_objective,
         "basin_accept_test_rejections": basin_accept_test_rejections,
         "basin_accept_test_triggered": basin_accept_test_triggered,
+        "basin_nonfinite_rejections": basin_nonfinite_rejections,
+        "basin_normalized_step_rejections": basin_normalized_step_rejections,
+        "basin_completed_hops": basin_completed_hops,
+        "basin_initial_objective": basin_initial_objective,
+        "basin_best_hop_objective": basin_best_hop_objective,
+        "basin_best_hop_index": basin_best_hop_index,
+        "basin_best_result_source": basin_best_result_source,
+        "basin_objective_improvement": basin_objective_improvement,
         "ALM_MAX_OUTER_ITERS": args.alm_max_outer_iters if alm_enabled else None,
         "ALM_MAX_SUBPROBLEM_CONTINUATIONS": (
             args.alm_max_subproblem_continuations if alm_enabled else None
@@ -155,6 +171,42 @@ def build_stage2_results(
         "ALM_TAYLOR_TEST_ENABLED": args.alm_taylor_test if alm_enabled else None,
         "ALM_TAYLOR_TEST_SEED": args.alm_taylor_test_seed if alm_enabled else None,
         "ALM_TAYLOR_RESULT": alm_taylor_result,
+        "ALM_TERMINATION_REASON": getattr(alm_result, "termination_reason", None),
+        "ALM_CONVERGED": getattr(alm_result, "converged_to_tolerances", None),
+        "ALM_RESTORED_BEST_FEASIBLE": getattr(alm_result, "restored_best_feasible", None),
+        "ALM_RESTORED_BEST_FEASIBLE_REASON": getattr(
+            alm_result,
+            "restored_best_feasible_reason",
+            None,
+        ),
+        "ALM_INNER_OPTIMIZER_SUCCESS": getattr(alm_result, "optimizer_success", None),
+        "ALM_INNER_OPTIMIZER_MESSAGE": getattr(alm_result, "optimizer_message", None),
+        "ALM_FINAL_MAX_FEASIBILITY_VIOLATION": getattr(
+            alm_result,
+            "final_max_feasibility_violation",
+            None,
+        ),
+        "ALM_FINAL_STATIONARITY_NORM": getattr(alm_result, "final_stationarity_norm", None),
+        "ALM_FINAL_RAW_STATIONARITY_NORM": getattr(
+            alm_result,
+            "final_raw_stationarity_norm",
+            None,
+        ),
+        "ALM_FINAL_KKT_STATIONARITY_NORM": getattr(
+            alm_result,
+            "final_kkt_stationarity_norm",
+            None,
+        ),
+        "ALM_FINAL_FEASIBILITY_TOL": getattr(
+            alm_result,
+            "final_feasibility_tolerance",
+            None,
+        ),
+        "ALM_FINAL_STATIONARITY_TOL": getattr(
+            alm_result,
+            "final_stationarity_tolerance",
+            None,
+        ),
         "ALM_FINAL_PENALTY": getattr(alm_result, "penalty", None),
         "ALM_FINAL_MULTIPLIERS": getattr(alm_result, "multipliers", None),
         "ALM_FINAL_CONSTRAINT_VALUES": getattr(alm_result, "constraint_values", None),
@@ -478,8 +530,9 @@ def evaluate_banana_current_upper_bound(
     )
     banana_current_signed_value = banana_current_abs_A - float(banana_current_max_A)
     banana_current_sign = 1.0 if banana_current_A >= 0.0 else -1.0
+    banana_current_cotangent = np.array([banana_current_sign], dtype=float)
     banana_current_grad = np.asarray(
-        banana_current.vjp(banana_current_sign)(base_objective_optimizable),
+        banana_current.vjp(banana_current_cotangent)(base_objective_optimizable),
         dtype=float,
     )
     return (

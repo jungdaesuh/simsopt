@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 import numpy as np
+from simsopt.field.coil import Current, ScaledCurrent
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -193,7 +194,8 @@ class _FakeCurrentObjective:
         return self._value
 
     def vjp(self, value):
-        return _FakeDerivative(float(value) * self._grad)
+        cotangent = float(np.asarray(value, dtype=float).reshape(-1)[0])
+        return _FakeDerivative(cotangent * self._grad)
 
 
 class _FakeBiotSavart:
@@ -407,6 +409,26 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
         self.assertAlmostEqual(result["feasibility_values"][3], 1000.0)
         np.testing.assert_allclose(result["constraint_grads"][3], [-0.7, 0.4])
 
+    def test_evaluate_banana_current_upper_bound_accepts_scaled_current_vjp(self):
+        leaf_current = Current(17000.0)
+        banana_current = ScaledCurrent(leaf_current, -1.0)
+
+        (
+            banana_current_abs_A,
+            banana_current_violation,
+            banana_current_signed_value,
+            banana_current_grad,
+        ) = self.module.evaluate_banana_current_upper_bound(
+            banana_current=banana_current,
+            banana_current_max_A=16000.0,
+            base_objective_optimizable=banana_current,
+        )
+
+        self.assertAlmostEqual(banana_current_abs_A, 17000.0)
+        self.assertAlmostEqual(banana_current_violation, 1000.0)
+        self.assertAlmostEqual(banana_current_signed_value, 1000.0)
+        np.testing.assert_allclose(banana_current_grad, [1.0])
+
     def test_build_stage2_alm_settings_converts_zero_trust_radius_to_none(self):
         settings = self.module.build_stage2_alm_settings(
             SimpleNamespace(
@@ -506,6 +528,14 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
             basin_best_objective=0.42,
             basin_accept_test_rejections=1,
             basin_accept_test_triggered=True,
+            basin_nonfinite_rejections=0,
+            basin_normalized_step_rejections=1,
+            basin_completed_hops=3,
+            basin_initial_objective=0.51,
+            basin_best_hop_objective=0.42,
+            basin_best_hop_index=2,
+            basin_best_result_source="hop",
+            basin_objective_improvement=0.09,
             alm_result=alm_result,
             alm_taylor_result={"passed": True},
             final_volume=0.12,
@@ -530,6 +560,14 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
         self.assertEqual(result["basin_best_objective"], 0.42)
         self.assertEqual(result["basin_accept_test_rejections"], 1)
         self.assertTrue(result["basin_accept_test_triggered"])
+        self.assertEqual(result["basin_nonfinite_rejections"], 0)
+        self.assertEqual(result["basin_normalized_step_rejections"], 1)
+        self.assertEqual(result["basin_completed_hops"], 3)
+        self.assertEqual(result["basin_initial_objective"], 0.51)
+        self.assertEqual(result["basin_best_hop_objective"], 0.42)
+        self.assertEqual(result["basin_best_hop_index"], 2)
+        self.assertEqual(result["basin_best_result_source"], "hop")
+        self.assertEqual(result["basin_objective_improvement"], 0.09)
         self.assertEqual(result["BANANA_INIT_CURRENT_A"], 1.2e4)
         self.assertEqual(result["BANANA_CURRENT_MAX_A"], 1.6e4)
         self.assertAlmostEqual(result["BANANA_TO_TF_CURRENT_RATIO"], 0.11875)

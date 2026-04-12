@@ -35,7 +35,12 @@ class BasinHoppingMonitor:
     normalized_step_rms_limit: float = DEFAULT_NORMALIZED_STEP_RMS_LIMIT
     accepted_hops: int = 0
     rejected_hops: int = 0
+    completed_hops: int = 0
     best_objective: float | None = None
+    initial_objective: float | None = None
+    best_hop_objective: float | None = None
+    best_hop_index: int | None = None
+    best_result_source: str | None = None
     accept_test_rejections: int = 0
     accept_test_triggered: bool = False
     nonfinite_rejections: int = 0
@@ -61,11 +66,21 @@ class BasinHoppingMonitor:
 
     def callback(self, x, f, accept) -> bool:
         objective = float(f)
-        if self.best_objective is None or objective < self.best_objective:
-            self.best_objective = objective
         if not self._seen_initial_callback:
             self._seen_initial_callback = True
+            self.initial_objective = objective
+            self.best_objective = objective
+            self.best_result_source = "initial_local"
             return False
+        self.completed_hops += 1
+        if self.best_hop_objective is None or objective < self.best_hop_objective:
+            self.best_hop_objective = objective
+            self.best_hop_index = self.completed_hops
+        if self.best_objective is None or objective < self.best_objective:
+            self.best_objective = objective
+            self.best_result_source = "hop"
+            self.best_hop_objective = objective
+            self.best_hop_index = self.completed_hops
         if accept:
             self.accepted_hops += 1
         else:
@@ -73,10 +88,19 @@ class BasinHoppingMonitor:
         return False
 
     def as_dict(self) -> dict[str, float | int | bool | None]:
+        objective_improvement = None
+        if self.initial_objective is not None and self.best_objective is not None:
+            objective_improvement = self.initial_objective - self.best_objective
         return {
             "basin_accepted_hops": self.accepted_hops,
             "basin_rejected_hops": self.rejected_hops,
+            "basin_completed_hops": self.completed_hops,
             "basin_best_objective": self.best_objective,
+            "basin_initial_objective": self.initial_objective,
+            "basin_best_hop_objective": self.best_hop_objective,
+            "basin_best_hop_index": self.best_hop_index,
+            "basin_best_result_source": self.best_result_source,
+            "basin_objective_improvement": objective_improvement,
             "basin_accept_test_rejections": self.accept_test_rejections,
             "basin_accept_test_triggered": self.accept_test_triggered,
             "basin_nonfinite_rejections": self.nonfinite_rejections,

@@ -11,7 +11,9 @@ if str(SCRIPT_DIR) not in sys.path:
 
 from workflow_runner_common import (  # noqa: E402
     SINGLE_STAGE_SCRIPT_PATH,
+    clear_dry_run_marker,
     discover_single_results_path,
+    dry_run_marker_path,
     load_json,
     load_stage2_artifact_results,
     resolved_path,
@@ -19,6 +21,7 @@ from workflow_runner_common import (  # noqa: E402
     timeout_or_none,
     run_command,
     snapshot_single_results_paths,
+    write_dry_run_marker,
 )
 from banana_opt.artifact_contracts import upgrade_legacy_stage2_artifact_results  # noqa: E402
 
@@ -252,6 +255,11 @@ def build_summary(
         "output_root": str(output_root),
         "command": command,
         "dry_run": bool(args.dry_run),
+        "output_contract": (
+            "dry_run_summary_only" if args.dry_run else "materialized_single_stage_results"
+        ),
+        "contains_solver_outputs": bool(results_path is not None and results is not None),
+        "dry_run_marker_path": str(dry_run_marker_path(output_root)),
     }
     if stage2_results_path is not None:
         summary["stage2_results_path"] = str(stage2_results_path)
@@ -302,7 +310,13 @@ def main() -> int:
             stage2_results_path=stage2_results_path,
             stage2_results=stage2_results,
         )
+        write_dry_run_marker(
+            output_root,
+            summary_path=summary_path,
+            runner_label="run_single_stage_thresholded_physics_alm.py",
+        )
     else:
+        clear_dry_run_marker(output_root)
         stage2_bs_path, stage2_results_path, stage2_results = (
             load_validated_stage2_seed_metadata(args)
         )

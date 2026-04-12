@@ -1,5 +1,6 @@
 import importlib.util
 from contextlib import ExitStack
+import os
 import sys
 import tempfile
 import unittest
@@ -1874,6 +1875,28 @@ class HardwareConstraintTests(unittest.TestCase):
         scaled_callback(np.array([1.0, -2.0]))
         np.testing.assert_allclose(seen["callback"][0], [10.1, 19.8])
 
+    def test_build_scipy_bounds_returns_none_when_unbounded(self):
+        module = self.load_module()
+
+        bounds = module.build_scipy_bounds(
+            np.array([-np.inf, -np.inf]),
+            np.array([np.inf, np.inf]),
+        )
+
+        self.assertIsNone(bounds)
+
+    def test_build_scaled_outer_bounds_transforms_to_scaled_coordinates(self):
+        module = self.load_module()
+
+        bounds = module.build_scaled_outer_bounds(
+            np.array([10.0, 20.0]),
+            0.1,
+            np.array([9.0, -np.inf]),
+            np.array([10.5, 25.0]),
+        )
+
+        self.assertEqual(bounds, [(-10.0, 5.0), (-np.inf, 50.0)])
+
     def test_resolve_initial_step_phase_maxiter(self):
         module = self.load_module()
 
@@ -1964,6 +1987,45 @@ class HardwareConstraintTests(unittest.TestCase):
 
         self.assertAlmostEqual(total.J(), 1 + 2*3 + 4*5 + 6*7 + 8*9 + 10*11 + 12*13)
         np.testing.assert_allclose(total.dJ(), [33.0, 28.0])
+
+    def test_build_single_stage_iota_objective_target_mode_uses_quadratic_penalty(self):
+        module = self.load_module()
+        surface_iota = FakeAlgebraicObjective(0.15, [1.0, -2.0])
+        target_objective = object()
+
+        with patch.object(module, "QuadraticPenalty", return_value=target_objective) as quadratic_penalty:
+            result = module.build_single_stage_iota_objective(
+                surface_iota,
+                0.17,
+                goal_mode="target",
+            )
+
+        self.assertIs(result, target_objective)
+        quadratic_penalty.assert_called_once_with(surface_iota, 0.17)
+
+    def test_build_single_stage_iota_objective_frontier_mode_negates_surface_iota(self):
+        module = self.load_module()
+        surface_iota = FakeAlgebraicObjective(0.15, [1.0, -2.0])
+
+        result = module.build_single_stage_iota_objective(
+            surface_iota,
+            0.17,
+            goal_mode="frontier",
+        )
+
+        self.assertAlmostEqual(result.J(), -0.15)
+        np.testing.assert_allclose(result.dJ(), [-1.0, 2.0])
+
+    def test_build_single_stage_iota_objective_rejects_invalid_goal_mode(self):
+        module = self.load_module()
+        surface_iota = FakeAlgebraicObjective(0.15, [1.0, -2.0])
+
+        with self.assertRaisesRegex(ValueError, "Unsupported single-stage goal mode"):
+            module.build_single_stage_iota_objective(
+                surface_iota,
+                0.17,
+                goal_mode="not-a-mode",
+            )
 
     def test_evaluate_surface_stack_rejects_unordered_or_too_close_surfaces(self):
         module = self.load_module()
@@ -3057,6 +3119,7 @@ class RunIdentityTests(unittest.TestCase):
             refinement_maxiter=100,
             refinement_chunk_maxiter=20,
             refinement_max_stalled_chunks=2,
+            single_stage_goal_mode="target",
             cc_dist=0.05,
             cc_weight=100.0,
             curvature_weight=0.0001,
@@ -3140,6 +3203,13 @@ class RunIdentityTests(unittest.TestCase):
         with self.assertRaisesRegex(Exception, "cannot assign to field"):
             config.stage = "other"
 
+    def test_run_identity_omits_default_target_goal_mode(self):
+        module = load_single_stage_example_module()
+        args = self._make_identity_args()
+        config = self._make_identity_config(module, args)
+
+        self.assertIsNone(config.single_stage_goal_mode)
+
     def test_run_identity_changes_when_only_confinement_settings_change(self):
         module = load_single_stage_example_module()
         base_args = self._make_identity_args()
@@ -3150,6 +3220,17 @@ class RunIdentityTests(unittest.TestCase):
         weighted_config = self._build_identity(module, weighted_args)
 
         self.assertNotEqual(base_config, weighted_config)
+
+    def test_run_identity_changes_when_goal_mode_changes(self):
+        module = load_single_stage_example_module()
+        target_args = self._make_identity_args()
+        frontier_args = self._make_identity_args()
+        frontier_args.single_stage_goal_mode = "frontier"
+
+        target_config = self._build_identity(module, target_args)
+        frontier_config = self._build_identity(module, frontier_args)
+
+        self.assertNotEqual(target_config, frontier_config)
 
     def test_run_identity_changes_when_constraint_method_changes(self):
         module = load_single_stage_example_module()
@@ -3402,6 +3483,61 @@ class CurrentBaselineContractTests(unittest.TestCase):
         self.assertEqual(args.hardware_search_mode, "adaptive")
         self.assertEqual(args.hardware_search_soft_iterations, 3)
 
+    def test_single_stage_parse_args_accepts_goal_mode_flag(self):
+        module = load_single_stage_example_module()
+
+        with patch.object(
+            sys,
+            "argv",
+            [
+                "single_stage_banana_example.py",
+                "--single-stage-goal-mode",
+                "frontier",
+            ],
+        ):
+            args = module.parse_args()
+
+        self.assertEqual(args.single_stage_goal_mode, "frontier")
+
+    def test_single_stage_parse_args_reads_goal_mode_from_environment(self):
+        module = load_single_stage_example_module()
+
+        with patch.dict(os.environ, {"SINGLE_STAGE_GOAL_MODE": "frontier"}, clear=False), patch.object(
+            sys,
+            "argv",
+            ["single_stage_banana_example.py"],
+        ):
+            args = module.parse_args()
+
+        self.assertEqual(args.single_stage_goal_mode, "frontier")
+
+    def test_frontier_goal_mode_warning_message_reports_scale_and_unsaturated_reward(self):
+        module = load_single_stage_example_module()
+
+        warning = module.frontier_goal_mode_warning_message(100.0)
+
+        self.assertIn("10-1000x", warning)
+        self.assertIn("750x", warning)
+        self.assertIn("no built-in saturation cap", warning)
+
+    def test_validate_single_stage_alm_formulation_args_rejects_frontier_thresholded_physics(self):
+        module = load_single_stage_example_module()
+        args = SimpleNamespace(
+            alm_formulation="thresholded_physics",
+            single_stage_goal_mode="frontier",
+            constraint_method="alm",
+            alm_qs_threshold=0.1,
+            alm_boozer_threshold=0.2,
+            alm_iota_penalty_threshold=0.3,
+            alm_length_penalty_threshold=0.4,
+        )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "frontier is not compatible with --alm-formulation=thresholded_physics",
+        ):
+            module.validate_single_stage_alm_formulation_args(args)
+
     def test_single_stage_parse_args_accepts_boozer_stage_refinement_flags(self):
         module = load_single_stage_example_module()
 
@@ -3474,9 +3610,17 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
     _EXPECTED_BASIN_TELEMETRY = {
         "basin_accepted_hops": 1,
         "basin_rejected_hops": 1,
+        "basin_completed_hops": 2,
         "basin_best_objective": 0.42,
+        "basin_initial_objective": 0.55,
+        "basin_best_hop_objective": 0.42,
+        "basin_best_hop_index": 1,
+        "basin_best_result_source": "hop",
+        "basin_objective_improvement": 0.13,
         "basin_accept_test_rejections": 1,
         "basin_accept_test_triggered": True,
+        "basin_nonfinite_rejections": 0,
+        "basin_normalized_step_rejections": 1,
     }
 
     def _make_stage2_args(self, output_root, **overrides):
@@ -3738,6 +3882,18 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
                 constraint_values=np.array([0.0, 0.01, 0.0, 0.0], dtype=float),
                 solver_constraint_values=np.array([0.0, 0.2, 0.0, 0.0], dtype=float),
                 trust_radius=0.1,
+                termination_reason="max_outer_after_subproblem_limit",
+                converged_to_tolerances=False,
+                restored_best_feasible=True,
+                restored_best_feasible_reason="final_iterate_worse_than_best_feasible",
+                optimizer_success=False,
+                optimizer_message="STOP: TOTAL NO. OF ITERATIONS REACHED LIMIT",
+                final_max_feasibility_violation=0.01,
+                final_stationarity_norm=0.02,
+                final_raw_stationarity_norm=0.03,
+                final_kkt_stationarity_norm=0.025,
+                final_feasibility_tolerance=1.0e-3,
+                final_stationarity_tolerance=5.0e-3,
                 history=[{"outer_iteration": 1}],
             )
 
@@ -3902,6 +4058,30 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
         )
         self.assertEqual(runtime["results"]["CONSTRAINT_METHOD"], "alm")
         self.assertEqual(runtime["results"]["ALM_OUTER_ITERATIONS"], 2)
+        self.assertEqual(
+            runtime["results"]["ALM_TERMINATION_REASON"],
+            "max_outer_after_subproblem_limit",
+        )
+        self.assertFalse(runtime["results"]["ALM_CONVERGED"])
+        self.assertTrue(runtime["results"]["ALM_RESTORED_BEST_FEASIBLE"])
+        self.assertEqual(
+            runtime["results"]["ALM_RESTORED_BEST_FEASIBLE_REASON"],
+            "final_iterate_worse_than_best_feasible",
+        )
+        self.assertFalse(runtime["results"]["ALM_INNER_OPTIMIZER_SUCCESS"])
+        self.assertEqual(
+            runtime["results"]["ALM_INNER_OPTIMIZER_MESSAGE"],
+            "STOP: TOTAL NO. OF ITERATIONS REACHED LIMIT",
+        )
+        self.assertEqual(
+            runtime["results"]["ALM_FINAL_MAX_FEASIBILITY_VIOLATION"],
+            0.01,
+        )
+        self.assertEqual(runtime["results"]["ALM_FINAL_STATIONARITY_NORM"], 0.02)
+        self.assertEqual(runtime["results"]["ALM_FINAL_RAW_STATIONARITY_NORM"], 0.03)
+        self.assertEqual(runtime["results"]["ALM_FINAL_KKT_STATIONARITY_NORM"], 0.025)
+        self.assertEqual(runtime["results"]["ALM_FINAL_FEASIBILITY_TOL"], 1.0e-3)
+        self.assertEqual(runtime["results"]["ALM_FINAL_STATIONARITY_TOL"], 5.0e-3)
         self.assertEqual(runtime["results"]["TERMINATION_MESSAGE"], "alm_ok")
 
     def test_stage2_main_penalty_path_uses_lbfgsb(self):
@@ -3941,6 +4121,14 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
         self.assertEqual(runtime["results"]["basin_minimization_failures"], 1)
         self.assertEqual(runtime["results"]["basin_temperature"], 2.5)
         self.assertEqual(runtime["results"]["basin_niter_success"], 6)
+        self.assertEqual(runtime["results"]["basin_completed_hops"], 2)
+        self.assertEqual(runtime["results"]["basin_initial_objective"], 0.55)
+        self.assertEqual(runtime["results"]["basin_best_hop_objective"], 0.42)
+        self.assertEqual(runtime["results"]["basin_best_hop_index"], 1)
+        self.assertEqual(runtime["results"]["basin_best_result_source"], "hop")
+        self.assertEqual(runtime["results"]["basin_objective_improvement"], 0.13)
+        self.assertEqual(runtime["results"]["basin_nonfinite_rejections"], 0)
+        self.assertEqual(runtime["results"]["basin_normalized_step_rejections"], 1)
         self.assertIsNotNone(runtime["basin_bounds"])
 
     def test_stage2_main_rejects_final_banana_current_above_cap(self):
