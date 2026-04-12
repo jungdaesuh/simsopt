@@ -158,8 +158,8 @@ class VirtualCasingTests(unittest.TestCase):
             vc1 = VirtualCasing.from_vmec(filename, src_nphi=11, src_ntheta=12, trgt_nphi=13, trgt_ntheta=11, filename='vcasing.nc')
             vc2 = VirtualCasing.load('vcasing.nc')
             for variable in variables:
-                variable1 = eval('vc1.' + variable)
-                variable2 = eval('vc2.' + variable)
+                variable1 = getattr(vc1, variable)
+                variable2 = getattr(vc2, variable)
                 logger.info(f'Variable {variable} in vc1 is {variable1} and in vc2 is {variable2}')
                 np.testing.assert_allclose(variable1, variable2)
 

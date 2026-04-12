@@ -7,7 +7,6 @@ import os
 from pathlib import Path
 import subprocess
 import sys
-import textwrap
 
 import pytest
 
@@ -34,57 +33,19 @@ def _run_real_fixture_probe(
 ) -> dict:
     env = os.environ.copy()
     env["PYTHONPATH"] = _PYTHONPATH
-    code = f"""
-        import importlib.abc
-        import json
-        import sys
-
-        if {block_private!r}:
-            class _BlockPrivateOptimizer(importlib.abc.MetaPathFinder):
-                def find_spec(self, fullname, path=None, target=None):
-                    del path, target
-                    if fullname == "simsopt.geo.optimizer_jax_private" or fullname.startswith(
-                        "simsopt.geo.optimizer_jax_private."
-                    ):
-                        raise ImportError("blocked private optimizer package for section 6 test")
-                    return None
-
-            sys.meta_path.insert(0, _BlockPrivateOptimizer())
-
-        from benchmarks.single_stage_smoke_fixture import build_real_single_stage_init_fixture
-        from simsopt.geo import optimizer_jax
-
-        payload = {{}}
-        try:
-            fixture = build_real_single_stage_init_fixture(
-                backend="jax",
-                optimizer_backend={optimizer_backend!r},
-                boozer_least_squares_algorithm={boozer_least_squares_algorithm!r},
-            )
-        except Exception as exc:
-            payload["exc_type"] = type(exc).__name__
-            payload["exc_message"] = str(exc)
-        else:
-            booz = fixture["boozer_surface"]
-            result = booz.res
-            payload.update(
-                {{
-                    "success": bool(result["success"]),
-                    "optimizer_method": result.get("optimizer_method"),
-                    "iota": float(result["iota"]),
-                    "G": float(result["G"]),
-                    "fun": float(result["fun"]),
-                    "iter": int(result["iter"]),
-                    "surface_dofs": [float(x) for x in booz.surface.get_dofs()],
-                    "private_pkg_is_none": optimizer_jax._private_pkg is None,
-                    "private_in_sys_modules": "simsopt.geo.optimizer_jax_private" in sys.modules,
-                }}
-            )
-
-        print(json.dumps(payload))
-    """
+    script_path = REPO_ROOT / "tests" / "subprocess" / "section6_fixture_probe.py"
+    cmd: list[str] = [
+        sys.executable,
+        str(script_path),
+        "--optimizer-backend",
+        optimizer_backend,
+    ]
+    if block_private:
+        cmd.append("--block-private")
+    if boozer_least_squares_algorithm is not None:
+        cmd.extend(["--boozer-least-squares-algorithm", boozer_least_squares_algorithm])
     completed = subprocess.run(
-        [sys.executable, "-c", textwrap.dedent(code)],
+        cmd,
         capture_output=True,
         text=True,
         cwd=REPO_ROOT,
