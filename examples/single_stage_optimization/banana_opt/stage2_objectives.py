@@ -2,6 +2,7 @@ import numpy as np
 
 from alm_utils import (
     ALMSettings,
+    alm_result_diagnostics_fields,
     augmented_inequality_objective,
     lower_bound_residual,
     upper_bound_residual,
@@ -216,6 +217,7 @@ def build_stage2_results(
             None,
         ),
         "ALM_FINAL_TRUST_RADIUS": getattr(alm_result, "trust_radius", None),
+        **alm_result_diagnostics_fields(alm_result),
         "ALM_HISTORY": getattr(alm_result, "history", None),
         "FINAL_VOLUME": float(final_volume),
         "FIELD_ERROR": float(field_error),
@@ -292,6 +294,70 @@ def stage2_constraint_activity_tolerances(
         max(4.0 * float(curvature_smoothing), _SMOOTHING_EPS),
         banana_current_tolerance,
     ]
+
+
+def _sanitize_stage2_alm_inputs(
+    base_value,
+    base_grad,
+    constraint_values,
+    constraint_grads,
+):
+    invalid_fields: list[str] = []
+
+    sanitized_base_grad = np.asarray(base_grad, dtype=float)
+    if not np.all(np.isfinite(sanitized_base_grad)):
+        invalid_fields.append("base_grad")
+        sanitized_base_grad = zero_gradient_like(sanitized_base_grad)
+
+    sanitized_base_value = float(base_value)
+    if not np.isfinite(sanitized_base_value):
+        invalid_fields.append("base_value")
+        sanitized_base_value = max(float(np.linalg.norm(sanitized_base_grad)), 1.0)
+
+    sanitized_constraint_values = []
+    for index, constraint_value in enumerate(constraint_values):
+        scalar_value = float(constraint_value)
+        if not np.isfinite(scalar_value):
+            invalid_fields.append(f"constraint_values[{index}]")
+            scalar_value = 1.0
+        sanitized_constraint_values.append(float(scalar_value))
+
+    sanitized_constraint_grads = []
+    for index, constraint_grad in enumerate(constraint_grads):
+        grad_array = np.asarray(constraint_grad, dtype=float)
+        if (
+            grad_array.shape != sanitized_base_grad.shape
+            or not np.all(np.isfinite(grad_array))
+        ):
+            invalid_fields.append(f"constraint_grads[{index}]")
+            grad_array = zero_gradient_like(sanitized_base_grad)
+        sanitized_constraint_grads.append(grad_array)
+
+    return (
+        float(sanitized_base_value),
+        sanitized_base_grad,
+        sanitized_constraint_values,
+        sanitized_constraint_grads,
+        invalid_fields,
+    )
+
+
+def _sanitize_stage2_feasibility_values(
+    feasibility_values,
+    *,
+    constraint_values,
+) -> tuple[list[float], list[str]]:
+    sanitized = []
+    invalid_fields: list[str] = []
+    for index, (feasibility_value, constraint_value) in enumerate(
+        zip(feasibility_values, constraint_values)
+    ):
+        scalar_value = float(feasibility_value)
+        if not np.isfinite(scalar_value):
+            invalid_fields.append(f"feasibility_values[{index}]")
+            scalar_value = max(1.0, max(float(constraint_value), 0.0))
+        sanitized.append(float(scalar_value))
+    return sanitized, invalid_fields
 
 
 def smooth_max_curvature_signed_constraint(
@@ -437,63 +503,82 @@ def evaluate_stage2_alm_problem(
         base_objective_optimizable,
     )
 
-    evaluation = augmented_inequality_objective(
+    signed_constraint_values = [
+        coil_length - length_target,
+        curve_curve_signed_value,
+        curvature_signed_value,
+        banana_current_signed_value,
+    ]
+    constraint_grads = [
+        length_grad,
+        curve_curve_grad,
+        curvature_grad,
+        banana_current_grad,
+    ]
+    (
+        sanitized_base_value,
+        sanitized_base_grad,
+        sanitized_constraint_values,
+        sanitized_constraint_grads,
+        sanitized_invalid_fields,
+    ) = _sanitize_stage2_alm_inputs(
         base_value,
         base_grad,
-        [
-            coil_length - length_target,
-            curve_curve_signed_value,
-            curvature_signed_value,
-            banana_current_signed_value,
-        ],
-        [length_grad, curve_curve_grad, curvature_grad, banana_current_grad],
+        signed_constraint_values,
+        constraint_grads,
+    )
+
+    evaluation = augmented_inequality_objective(
+        sanitized_base_value,
+        sanitized_base_grad,
+        sanitized_constraint_values,
+        sanitized_constraint_grads,
         multipliers,
         penalty,
     )
+    feasibility_values, invalid_feasibility_fields = _sanitize_stage2_feasibility_values(
+        [
+            length_violation,
+            curve_curve_violation,
+            curvature_violation,
+            banana_current_violation,
+        ],
+        constraint_values=sanitized_constraint_values,
+    )
+    invalid_fields = sanitized_invalid_fields + invalid_feasibility_fields
     evaluation.update(
         {
-            "base_value": base_value,
+            "base_value": sanitized_base_value,
             "constraint_names": [
                 "coil_length_upper_bound",
                 "coil_coil_spacing",
                 "max_curvature",
                 "banana_current_upper_bound",
             ],
-            "dual_update_values": [
-                coil_length - length_target,
-                curve_curve_signed_value,
-                curvature_signed_value,
-                banana_current_signed_value,
-            ],
-            "constraint_grads": [
-                length_grad,
-                curve_curve_grad,
-                curvature_grad,
-                banana_current_grad,
-            ],
+            "dual_update_values": sanitized_constraint_values,
+            "constraint_grads": sanitized_constraint_grads,
             "constraint_activity_tolerances": stage2_constraint_activity_tolerances(
                 distance_smoothing,
                 curvature_smoothing,
             ),
-            "feasibility_values": [
-                length_violation,
-                curve_curve_violation,
-                curvature_violation,
-                banana_current_violation,
-            ],
-            "max_feasibility_violation": max(
-                length_violation,
-                curve_curve_violation,
-                curvature_violation,
-                banana_current_violation,
-            ),
+            "feasibility_values": feasibility_values,
+            "max_feasibility_violation": max(feasibility_values),
+            "nonfinite_inputs_sanitized": bool(invalid_fields),
+            "nonfinite_input_fields": invalid_fields,
         }
     )
+    if invalid_fields:
+        # Keep the diagnostic payload finite enough to inspect, but mark the
+        # evaluation itself invalid so generic ALM rejection/salvage logic
+        # handles it instead of accepting a fabricated finite sample.
+        evaluation["total"] = float("nan")
+        evaluation["nonfinite_evaluation"] = True
+        evaluation["nonfinite_fields"] = list(invalid_fields)
 
     unitn = new_surf.unitnormal()
     BdotN = np.mean(np.abs(np.sum(new_bs.B().reshape(unitn.shape) * unitn, axis=2)))
     outstr = (
-        f"ALM J={evaluation['total']:.1e}, Jflux={base_value:.1e}, "
+        f"ALM J={evaluation['total']:.1e}, Jflux={sanitized_base_value:.1e}, "
         f"Jf={Jf.J():.1e}, ⟨B·n⟩={BdotN:.1e}"
     )
     outstr += (

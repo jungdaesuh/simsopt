@@ -55,6 +55,7 @@ from simsopt._core.derivative import derivative_dec
 
 from alm_utils import (
     ALMSettings,
+    alm_result_diagnostics_fields,
     minimize_alm,
     validate_alm_cli_args,
 )
@@ -3999,6 +4000,7 @@ if __name__ == "__main__":
             None,
         ),
         "ALM_FINAL_TRUST_RADIUS": getattr(alm_result, "trust_radius", None),
+        **alm_result_diagnostics_fields(alm_result),
         "ALM_HISTORY": getattr(alm_result, "history", None),
         "TERMINATION_MESSAGE": termination_message,
         "OPTIMIZER_SUCCESS": optimizer_success,

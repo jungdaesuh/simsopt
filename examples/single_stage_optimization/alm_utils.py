@@ -1,3 +1,4 @@
+from copy import deepcopy
 from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Callable, Sequence
@@ -214,6 +215,7 @@ def augmented_objective(
 
     return _build_augmented_evaluation(
         base_value=float(base_value),
+        base_grad=np.asarray(base_grad, dtype=float),
         total_value=total_value,
         total_grad=total_grad,
         constraint_values=constraint_values,
@@ -251,6 +253,7 @@ def augmented_inequality_objective(
     feasibility_values = np.maximum(constraint_values, 0.0)
     return _build_augmented_evaluation(
         base_value=float(base_value),
+        base_grad=np.asarray(base_grad, dtype=float),
         total_value=total_value,
         total_grad=total_grad,
         constraint_values=constraint_values,
@@ -267,6 +270,7 @@ def zero_gradient_like(reference_grad):
 def _build_augmented_evaluation(
     *,
     base_value: float,
+    base_grad,
     total_value: float,
     total_grad,
     constraint_values: np.ndarray,
@@ -281,6 +285,7 @@ def _build_augmented_evaluation(
     return {
         "total": float(total_value),
         "base_value": float(base_value),
+        "base_grad": np.asarray(base_grad, dtype=float),
         "grad": np.asarray(total_grad, dtype=float),
         "constraint_values": np.asarray(constraint_values, dtype=float),
         "constraint_grads": [np.asarray(constraint_grad, dtype=float) for constraint_grad in constraint_grads],
@@ -298,6 +303,171 @@ def _as_float_array(values) -> np.ndarray:
 
 def _max_value(values: np.ndarray) -> float:
     return float(np.max(values)) if values.size > 0 else 0.0
+
+
+def alm_result_diagnostics_fields(alm_result) -> dict:
+    return {
+        "ALM_MULTIPLIER_CAP_BINDING": getattr(alm_result, "multiplier_cap_binding", None),
+        "ALM_MULTIPLIER_CAP_BINDING_INDICES": getattr(
+            alm_result,
+            "multiplier_cap_binding_indices",
+            None,
+        ),
+        "ALM_FINAL_BASE_OBJECTIVE": getattr(alm_result, "final_base_objective", None),
+        "ALM_FINAL_PENALTY_OBJECTIVE": getattr(alm_result, "final_penalty_objective", None),
+        "ALM_FINAL_PENALTY_OBJECTIVE_RATIO": getattr(
+            alm_result,
+            "final_penalty_objective_ratio",
+            None,
+        ),
+        "ALM_FINAL_TOTAL_GRAD_NORM": getattr(alm_result, "final_total_grad_norm", None),
+        "ALM_FINAL_BASE_GRAD_NORM": getattr(alm_result, "final_base_grad_norm", None),
+        "ALM_FINAL_PENALTY_GRAD_NORM": getattr(
+            alm_result,
+            "final_penalty_grad_norm",
+            None,
+        ),
+        "ALM_FINAL_PENALTY_GRAD_RATIO": getattr(
+            alm_result,
+            "final_penalty_grad_ratio",
+            None,
+        ),
+    }
+
+
+def _nonfinite_evaluation_fields(evaluation: dict) -> tuple[str, ...]:
+    invalid_fields: list[str] = []
+
+    if not np.isfinite(float(evaluation["total"])):
+        invalid_fields.append("total")
+
+    grad = np.asarray(evaluation["grad"], dtype=float)
+    if not np.all(np.isfinite(grad)):
+        invalid_fields.append("grad")
+
+    optional_scalar_fields = (
+        "stationarity_norm",
+        "metric_stationarity_norm",
+        "max_violation",
+        "max_feasibility_violation",
+        "base_value",
+        "base_total",
+    )
+    for field_name in optional_scalar_fields:
+        if field_name not in evaluation:
+            continue
+        if not np.isfinite(float(evaluation[field_name])):
+            invalid_fields.append(field_name)
+
+    optional_array_fields = (
+        "constraint_values",
+        "feasibility_values",
+        "dual_update_values",
+        "metric_grad",
+        "base_grad",
+        "constraint_activity_tolerances",
+    )
+    for field_name in optional_array_fields:
+        if field_name not in evaluation:
+            continue
+        field_values = np.asarray(evaluation[field_name], dtype=float)
+        if not np.all(np.isfinite(field_values)):
+            invalid_fields.append(field_name)
+
+    if "constraint_grads" in evaluation and evaluation["constraint_grads"] is not None:
+        for grad_index, constraint_grad in enumerate(evaluation["constraint_grads"]):
+            constraint_grad_array = np.asarray(constraint_grad, dtype=float)
+            if not np.all(np.isfinite(constraint_grad_array)):
+                invalid_fields.append(f"constraint_grads[{grad_index}]")
+
+    return tuple(invalid_fields)
+
+
+def _require_finite_evaluation(evaluation: dict, *, context: str) -> None:
+    invalid_fields = _nonfinite_evaluation_fields(evaluation)
+    if invalid_fields:
+        invalid_summary = ", ".join(invalid_fields)
+        raise ValueError(f"{context} produced non-finite ALM data: {invalid_summary}")
+
+
+def _elevated_rejection_total(reference_total: float) -> float:
+    return float(reference_total) + max(abs(float(reference_total)), 1.0) + _ACCEPTANCE_TOTAL_ATOL
+
+
+def _sanitize_nonfinite_inner_evaluation(
+    evaluation: dict,
+    *,
+    fallback_evaluation: dict,
+) -> dict:
+    invalid_fields = _nonfinite_evaluation_fields(evaluation)
+    if not invalid_fields:
+        return evaluation
+
+    sanitized = deepcopy(fallback_evaluation)
+    sanitized["total"] = _elevated_rejection_total(float(fallback_evaluation["total"]))
+    sanitized["grad"] = np.asarray(fallback_evaluation["grad"], dtype=float).copy()
+    if "metric_grad" in fallback_evaluation:
+        sanitized["metric_grad"] = np.asarray(
+            fallback_evaluation["metric_grad"],
+            dtype=float,
+        ).copy()
+    if "base_grad" in fallback_evaluation:
+        sanitized["base_grad"] = np.asarray(
+            fallback_evaluation["base_grad"],
+            dtype=float,
+        ).copy()
+    sanitized["nonfinite_evaluation"] = True
+    sanitized["nonfinite_fields"] = list(invalid_fields)
+    return sanitized
+
+
+def _move_tolerance(reference_x) -> float:
+    reference_norm = float(np.linalg.norm(np.asarray(reference_x, dtype=float)))
+    return _INFEASIBLE_STALL_MOVE_TOL * max(1.0, reference_norm)
+
+
+def _conditioning_metrics(evaluation: dict) -> dict[str, float | None]:
+    total_value = float(evaluation["total"])
+    base_objective = float(
+        evaluation.get(
+            "base_total",
+            evaluation.get("base_value", total_value),
+        )
+    )
+    if not np.isfinite(base_objective):
+        base_objective = total_value
+    penalty_objective = total_value - base_objective
+    penalty_objective_ratio = abs(penalty_objective) / max(abs(base_objective), 1.0)
+
+    total_grad = np.asarray(evaluation["grad"], dtype=float).reshape(-1)
+    total_grad_norm = float(np.linalg.norm(total_grad))
+
+    base_grad_raw = evaluation.get("base_grad")
+    if base_grad_raw is None:
+        base_grad_norm = None
+        penalty_grad_norm = None
+        penalty_grad_ratio = None
+    else:
+        base_grad = np.asarray(base_grad_raw, dtype=float).reshape(-1)
+        base_grad_norm = float(np.linalg.norm(base_grad))
+        penalty_grad_norm = float(np.linalg.norm(total_grad - base_grad))
+        penalty_grad_ratio = penalty_grad_norm / max(base_grad_norm, 1.0)
+
+    return {
+        "conditioning_base_objective": float(base_objective),
+        "conditioning_penalty_objective": float(penalty_objective),
+        "conditioning_penalty_objective_ratio": float(penalty_objective_ratio),
+        "conditioning_total_grad_norm": float(total_grad_norm),
+        "conditioning_base_grad_norm": (
+            None if base_grad_norm is None else float(base_grad_norm)
+        ),
+        "conditioning_penalty_grad_norm": (
+            None if penalty_grad_norm is None else float(penalty_grad_norm)
+        ),
+        "conditioning_penalty_grad_ratio": (
+            None if penalty_grad_ratio is None else float(penalty_grad_ratio)
+        ),
+    }
 
 
 def _made_meaningful_inner_progress(
@@ -401,9 +571,10 @@ def _classify_infeasible_inner_stall(
     candidate_eval: dict,
     result,
     moved_norm: float,
+    move_tolerance: float,
     feasibility_gate: float,
 ) -> tuple[bool, bool, str | None]:
-    if float(moved_norm) > _INFEASIBLE_STALL_MOVE_TOL:
+    if float(moved_norm) > float(move_tolerance):
         return False, False, None
 
     current_max_feasibility_violation = _extract_constraint_state(current_eval)[3]
@@ -504,13 +675,46 @@ def _project_nonnegative_multipliers(
     penalty: float,
     multiplier_max: float | None,
 ) -> np.ndarray:
-    updated = np.maximum(
+    projected, _cap_binding, _cap_binding_indices = _project_nonnegative_multipliers_with_diagnostics(
+        multipliers,
+        dual_update_values,
+        penalty,
+        multiplier_max,
+    )
+    return projected
+
+
+def _updated_nonnegative_multipliers(
+    multipliers: np.ndarray,
+    dual_update_values: np.ndarray,
+    penalty: float,
+) -> np.ndarray:
+    return np.maximum(
         0.0,
         np.asarray(multipliers, dtype=float) + float(penalty) * np.asarray(dual_update_values, dtype=float),
     )
+
+
+def _project_nonnegative_multipliers_with_diagnostics(
+    multipliers: np.ndarray,
+    dual_update_values: np.ndarray,
+    penalty: float,
+    multiplier_max: float | None,
+) -> tuple[np.ndarray, bool, list[int]]:
+    updated = _updated_nonnegative_multipliers(
+        multipliers,
+        dual_update_values,
+        penalty,
+    )
     if multiplier_max is None:
-        return updated
-    return np.minimum(updated, float(multiplier_max))
+        return updated, False, []
+    cap = float(multiplier_max)
+    cap_binding_mask = updated > cap
+    return (
+        np.minimum(updated, cap),
+        bool(np.any(cap_binding_mask)),
+        np.flatnonzero(cap_binding_mask).astype(int).tolist(),
+    )
 
 
 def _build_inner_options(
@@ -794,6 +998,8 @@ def minimize_alm(
     final_multipliers = multipliers.copy()
     final_penalty = penalty
     last_outer_iteration = 0
+    cap_binding_detected = False
+    cap_binding_indices: set[int] = set()
     trust_radius = _normalize_trust_radius(settings.trust_radius_init)
     update_feasibility_tol = max(settings.feasibility_tol, 1.0 / penalty)
     update_stationarity_tol = max(settings.stationarity_tol, 1.0 / penalty)
@@ -839,6 +1045,7 @@ def minimize_alm(
         if inner_result is not None:
             inner_optimizer_success = bool(getattr(inner_result, "success", False))
             inner_optimizer_message = str(getattr(inner_result, "message", ""))
+        conditioning = _conditioning_metrics(evaluation)
         return SimpleNamespace(
             x=x.copy(),
             success=bool(success),
@@ -870,6 +1077,15 @@ def minimize_alm(
             final_feasibility_tolerance=float(final_feasibility_tolerance),
             final_stationarity_tolerance=float(final_stationarity_tolerance),
             final_objective=float(evaluation["total"]),
+            final_base_objective=conditioning["conditioning_base_objective"],
+            final_penalty_objective=conditioning["conditioning_penalty_objective"],
+            final_penalty_objective_ratio=conditioning["conditioning_penalty_objective_ratio"],
+            final_total_grad_norm=conditioning["conditioning_total_grad_norm"],
+            final_base_grad_norm=conditioning["conditioning_base_grad_norm"],
+            final_penalty_grad_norm=conditioning["conditioning_penalty_grad_norm"],
+            final_penalty_grad_ratio=conditioning["conditioning_penalty_grad_ratio"],
+            multiplier_cap_binding=bool(cap_binding_detected),
+            multiplier_cap_binding_indices=sorted(cap_binding_indices),
         )
 
     for outer_iteration in range(1, settings.max_outer_iterations + 1):
@@ -881,6 +1097,10 @@ def minimize_alm(
         for continuation_iteration in range(settings.max_subproblem_continuations + 1):
             start_x = x.copy()
             current_eval = evaluate_problem(x, multipliers, penalty)
+            _require_finite_evaluation(
+                current_eval,
+                context="ALM outer iterate evaluation",
+            )
             effective_feasibility_tol = _effective_feasibility_gate(
                 settings,
                 update_feasibility_tol,
@@ -901,6 +1121,7 @@ def minimize_alm(
                 current_feasibility_values,
                 effective_feasibility_tol,
             )
+            current_conditioning = _conditioning_metrics(current_eval)
 
             if (
                 current_max_feasibility_violation <= settings.feasibility_tol
@@ -929,10 +1150,25 @@ def minimize_alm(
                         "trust_radius": trust_radius,
                         "inner_attempts": 0,
                         "accepted_move_norm": 0.0,
+                        "accepted_move_norm_scaled": 0.0,
+                        "infeasible_stall_move_tolerance": float(_move_tolerance(start_x)),
+                        "objective_delta": 0.0,
+                        "feasibility_delta": 0.0,
+                        "feasibility_delta_tolerance": 0.0,
+                        "stationarity_delta": 0.0,
+                        "meaningful_progress": False,
+                        "feasible_stall_count": 0,
                         "infeasible_stall": False,
+                        "inner_false_success": False,
+                        "inner_stall_reason": None,
+                        "active_violation_index": None,
+                        "active_constraint_name": None,
+                        "nonfinite_candidate_evaluation": False,
+                        "nonfinite_candidate_fields": None,
                         "action": "converged",
                     }
                 )
+                history[-1].update(current_conditioning)
                 _emit_history_snapshot(history[-1])
                 final_eval = current_eval
                 final_multipliers = multipliers.copy()
@@ -964,7 +1200,10 @@ def minimize_alm(
             _cached_eval = SimpleNamespace(x=None, evaluation=None)
 
             def inner_fun(inner_x):
-                evaluation = evaluate_problem(inner_x, multipliers, penalty)
+                evaluation = _sanitize_nonfinite_inner_evaluation(
+                    evaluate_problem(inner_x, multipliers, penalty),
+                    fallback_evaluation=current_eval,
+                )
                 _cached_eval.x = np.asarray(inner_x, dtype=float).copy()
                 _cached_eval.evaluation = evaluation
                 return float(evaluation["total"]), np.asarray(evaluation["grad"], dtype=float)
@@ -976,7 +1215,10 @@ def minimize_alm(
                 if _cached_eval.x is not None and np.array_equal(inner_x_arr, _cached_eval.x):
                     evaluation = _cached_eval.evaluation
                 else:
-                    evaluation = evaluate_problem(inner_x_arr, multipliers, penalty)
+                    evaluation = _sanitize_nonfinite_inner_evaluation(
+                        evaluate_problem(inner_x_arr, multipliers, penalty),
+                        fallback_evaluation=current_eval,
+                    )
                 (
                     _solver_constraint_values,
                     callback_feasibility_values,
@@ -1013,6 +1255,8 @@ def minimize_alm(
             forced_infeasible_penalty_cycle = False
             forced_infeasible_penalty_reason = None
             forced_inner_false_success = False
+            nonfinite_candidate_evaluation = False
+            nonfinite_candidate_fields: list[str] | None = None
 
             for attempt_index in range(1, settings.max_inner_attempts + 1):
                 attempts = attempt_index
@@ -1042,7 +1286,10 @@ def minimize_alm(
                     if _cached_eval.x is not None and np.array_equal(candidate_x, _cached_eval.x):
                         candidate_eval = _cached_eval.evaluation
                     else:
-                        candidate_eval = evaluate_problem(candidate_x, multipliers, penalty)
+                        candidate_eval = _sanitize_nonfinite_inner_evaluation(
+                            evaluate_problem(candidate_x, multipliers, penalty),
+                            fallback_evaluation=current_eval,
+                        )
                 except _EarlyStopInnerSolve as early_stop:
                     result = SimpleNamespace(
                         x=early_stop.x,
@@ -1055,6 +1302,10 @@ def minimize_alm(
                 last_attempt_result = result
                 attempt_iterations += int(getattr(result, "nit", 0))
                 moved_norm = float(np.linalg.norm(candidate_x - x))
+                move_tolerance = _move_tolerance(x)
+                if candidate_eval.get("nonfinite_evaluation"):
+                    nonfinite_candidate_evaluation = True
+                    nonfinite_candidate_fields = list(candidate_eval.get("nonfinite_fields", []))
                 acceptable = _candidate_is_acceptable(
                     current_eval,
                     candidate_eval,
@@ -1071,6 +1322,7 @@ def minimize_alm(
                     candidate_eval,
                     result,
                     moved_norm,
+                    move_tolerance,
                     effective_feasibility_tol,
                 )
                 if acceptable and not infeasible_inner_stall:
@@ -1208,6 +1460,7 @@ def minimize_alm(
                 ],
                 "solver_constraint_values": [float(value) for value in solver_constraint_values],
                 "multipliers": [float(value) for value in multipliers],
+                "post_update_multipliers": [float(value) for value in multipliers],
                 "feasibility_tolerance": float(update_feasibility_tol),
                 "effective_feasibility_tolerance": float(effective_feasibility_tol),
                 "stationarity_tolerance": float(update_stationarity_tol),
@@ -1224,6 +1477,11 @@ def minimize_alm(
                 "inner_profile": last_inner_profile,
                 "inner_attempts": int(attempts),
                 "accepted_move_norm": accepted_move_norm,
+                "accepted_move_norm_scaled": accepted_move_norm / max(
+                    1.0,
+                    float(np.linalg.norm(start_x)),
+                ),
+                "infeasible_stall_move_tolerance": float(_move_tolerance(start_x)),
                 "objective_delta": float(current_eval["total"]) - float(final_eval["total"]),
                 "feasibility_delta": float(feasibility_delta),
                 "feasibility_delta_tolerance": float(feasibility_delta_tol),
@@ -1235,7 +1493,12 @@ def minimize_alm(
                 "inner_stall_reason": forced_infeasible_penalty_reason,
                 "active_violation_index": active_violation_index,
                 "active_constraint_name": active_constraint_name,
+                "nonfinite_candidate_evaluation": bool(nonfinite_candidate_evaluation),
+                "nonfinite_candidate_fields": nonfinite_candidate_fields,
+                "multiplier_cap_binding": False,
+                "multiplier_cap_binding_indices": [],
             }
+            history_entry.update(_conditioning_metrics(final_eval))
             history.append(history_entry)
 
             if (
@@ -1283,12 +1546,22 @@ def minimize_alm(
                 and stationarity_norm <= update_stationarity_tol
             ):
                 feasible_stall_count = 0
-                multipliers = _project_nonnegative_multipliers(
+                (
+                    multipliers,
+                    multiplier_cap_binding,
+                    multiplier_cap_binding_indices,
+                ) = _project_nonnegative_multipliers_with_diagnostics(
                     multipliers,
                     dual_update_values,
                     penalty,
                     settings.multiplier_max,
                 )
+                history_entry["post_update_multipliers"] = [float(value) for value in multipliers]
+                history_entry["multiplier_cap_binding"] = bool(multiplier_cap_binding)
+                history_entry["multiplier_cap_binding_indices"] = list(multiplier_cap_binding_indices)
+                if multiplier_cap_binding:
+                    cap_binding_detected = True
+                    cap_binding_indices.update(multiplier_cap_binding_indices)
                 update_feasibility_tol = max(
                     update_feasibility_tol / float(settings.penalty_scale),
                     settings.feasibility_tol,

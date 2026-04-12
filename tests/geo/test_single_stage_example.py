@@ -3882,6 +3882,8 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
                 constraint_values=np.array([0.0, 0.01, 0.0, 0.0], dtype=float),
                 solver_constraint_values=np.array([0.0, 0.2, 0.0, 0.0], dtype=float),
                 trust_radius=0.1,
+                multiplier_cap_binding=True,
+                multiplier_cap_binding_indices=[1],
                 termination_reason="max_outer_after_subproblem_limit",
                 converged_to_tolerances=False,
                 restored_best_feasible=True,
@@ -4082,6 +4084,8 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
         self.assertEqual(runtime["results"]["ALM_FINAL_KKT_STATIONARITY_NORM"], 0.025)
         self.assertEqual(runtime["results"]["ALM_FINAL_FEASIBILITY_TOL"], 1.0e-3)
         self.assertEqual(runtime["results"]["ALM_FINAL_STATIONARITY_TOL"], 5.0e-3)
+        self.assertTrue(runtime["results"]["ALM_MULTIPLIER_CAP_BINDING"])
+        self.assertEqual(runtime["results"]["ALM_MULTIPLIER_CAP_BINDING_INDICES"], [1])
         self.assertEqual(runtime["results"]["TERMINATION_MESSAGE"], "alm_ok")
 
     def test_stage2_main_penalty_path_uses_lbfgsb(self):

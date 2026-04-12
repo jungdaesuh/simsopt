@@ -271,6 +271,120 @@ class MinimizeAlmTests(unittest.TestCase):
         self.assertNotIn("maxfun", options)
         self.assertGreaterEqual(options["gtol"], 1e-4)
 
+    def test_classify_infeasible_inner_stall_scales_move_tolerance_with_iterate_norm(self):
+        module = load_alm_utils_module()
+
+        current_eval = {
+            "total": 10.0,
+            "grad": np.array([1.0]),
+            "constraint_values": np.array([0.5]),
+            "feasibility_values": np.array([0.5]),
+            "dual_update_values": np.array([0.5]),
+            "stationarity_norm": 1.0,
+        }
+        candidate_eval = {
+            "total": 10.0,
+            "grad": np.array([1.0]),
+            "constraint_values": np.array([0.5]),
+            "feasibility_values": np.array([0.5]),
+            "dual_update_values": np.array([0.5]),
+            "stationarity_norm": 1.0,
+        }
+
+        stalled, false_success, reason = module._classify_infeasible_inner_stall(
+            current_eval,
+            candidate_eval,
+            SimpleNamespace(success=False, message="STOP: plateau"),
+            moved_norm=5.0e-8,
+            move_tolerance=module._move_tolerance(np.array([1.0e4])),
+            feasibility_gate=1.0e-6,
+        )
+
+        self.assertTrue(stalled)
+        self.assertFalse(false_success)
+        self.assertEqual(reason, "failed_inner_solve_without_feasibility_gain")
+
+    def test_conditioning_metrics_capture_penalty_dominance(self):
+        module = load_alm_utils_module()
+
+        metrics = module._conditioning_metrics(
+            {
+                "total": 100.0,
+                "base_total": 1.0,
+                "grad": np.array([10.0, 0.0]),
+                "base_grad": np.array([1.0, 0.0]),
+            }
+        )
+
+        self.assertAlmostEqual(metrics["conditioning_base_objective"], 1.0)
+        self.assertAlmostEqual(metrics["conditioning_penalty_objective"], 99.0)
+        self.assertAlmostEqual(metrics["conditioning_penalty_objective_ratio"], 99.0)
+        self.assertAlmostEqual(metrics["conditioning_total_grad_norm"], 10.0)
+        self.assertAlmostEqual(metrics["conditioning_base_grad_norm"], 1.0)
+        self.assertAlmostEqual(metrics["conditioning_penalty_grad_norm"], 9.0)
+        self.assertAlmostEqual(metrics["conditioning_penalty_grad_ratio"], 9.0)
+
+    def test_minimize_alm_sanitizes_nonfinite_candidate_evaluations(self):
+        module = load_alm_utils_module()
+        settings = module.ALMSettings(
+            max_outer_iterations=1,
+            penalty_init=1.0,
+            penalty_scale=10.0,
+            feasibility_tol=1e-8,
+            stationarity_tol=1e-8,
+            trust_radius_init=0.1,
+            trust_radius_min=0.01,
+            trust_radius_shrink=0.5,
+            trust_radius_grow=1.5,
+        )
+        candidate_x = np.array([0.2])
+
+        def evaluate_problem(x, multipliers, penalty):
+            del multipliers, penalty
+            x = np.asarray(x, dtype=float)
+            if np.array_equal(x, candidate_x):
+                return {
+                    "total": np.nan,
+                    "grad": np.array([np.nan]),
+                    "constraint_values": np.array([0.5]),
+                    "feasibility_values": np.array([0.5]),
+                    "dual_update_values": np.array([0.5]),
+                    "stationarity_norm": 1.0,
+                }
+            return {
+                "total": float(np.dot(x, x)),
+                "base_value": float(np.dot(x, x)),
+                "base_grad": 2.0 * x,
+                "grad": 2.0 * x,
+                "constraint_values": np.array([0.5]),
+                "feasibility_values": np.array([0.5]),
+                "dual_update_values": np.array([0.5]),
+                "stationarity_norm": float(np.linalg.norm(2.0 * x)),
+            }
+
+        def fake_minimize(fun, x, jac, method, bounds, callback, options):
+            del jac, method, bounds, callback, options
+            fun(candidate_x)
+            return SimpleNamespace(
+                x=candidate_x.copy(),
+                nit=1,
+                success=False,
+                message="ABNORMAL",
+            )
+
+        with patch.object(module, "minimize", side_effect=fake_minimize):
+            result = module.minimize_alm(
+                np.array([0.0]),
+                ["demo_constraint"],
+                evaluate_problem,
+                settings,
+                {"maxiter": 5, "ftol": 1e-12, "gtol": 1e-12},
+            )
+
+        self.assertEqual(result.history[0]["action"], "penalty_increase")
+        self.assertTrue(result.history[0]["nonfinite_candidate_evaluation"])
+        self.assertEqual(result.history[0]["nonfinite_candidate_fields"], ["total", "grad"])
+
     def test_candidate_is_acceptable_allows_near_equal_feasible_trial(self):
         module = load_alm_utils_module()
 
@@ -774,7 +888,13 @@ class MinimizeAlmTests(unittest.TestCase):
 
         self.assertFalse(result.success)
         self.assertEqual(result.history[0]["action"], "dual_update")
+        self.assertEqual(result.history[0]["multipliers"], [0.0])
+        self.assertEqual(result.history[0]["post_update_multipliers"], [0.2])
+        self.assertTrue(result.history[0]["multiplier_cap_binding"])
+        self.assertEqual(result.history[0]["multiplier_cap_binding_indices"], [0])
         self.assertEqual(result.history[1]["multipliers"], [0.2])
+        self.assertTrue(result.multiplier_cap_binding)
+        self.assertEqual(result.multiplier_cap_binding_indices, [0])
 
     def test_minimize_alm_history_entry_has_stable_schema(self):
         module = load_alm_utils_module()
@@ -830,6 +950,7 @@ class MinimizeAlmTests(unittest.TestCase):
                 "constraint_values",
                 "solver_constraint_values",
                 "multipliers",
+                "post_update_multipliers",
                 "feasibility_tolerance",
                 "effective_feasibility_tolerance",
                 "stationarity_tolerance",
@@ -840,6 +961,8 @@ class MinimizeAlmTests(unittest.TestCase):
                 "inner_profile",
                 "inner_attempts",
                 "accepted_move_norm",
+                "accepted_move_norm_scaled",
+                "infeasible_stall_move_tolerance",
                 "objective_delta",
                 "feasibility_delta",
                 "feasibility_delta_tolerance",
@@ -851,6 +974,17 @@ class MinimizeAlmTests(unittest.TestCase):
                 "inner_stall_reason",
                 "active_violation_index",
                 "active_constraint_name",
+                "nonfinite_candidate_evaluation",
+                "nonfinite_candidate_fields",
+                "multiplier_cap_binding",
+                "multiplier_cap_binding_indices",
+                "conditioning_base_objective",
+                "conditioning_penalty_objective",
+                "conditioning_penalty_objective_ratio",
+                "conditioning_total_grad_norm",
+                "conditioning_base_grad_norm",
+                "conditioning_penalty_grad_norm",
+                "conditioning_penalty_grad_ratio",
                 "action",
                 "outer_termination",
             },

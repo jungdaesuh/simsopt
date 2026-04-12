@@ -360,6 +360,78 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
         self.assertAlmostEqual(result["total"], 9.0)
         np.testing.assert_allclose(result["grad"], [7.0, -3.0])
 
+    def test_evaluate_stage2_alm_problem_sanitizes_nonfinite_inputs(self):
+        base_objective = _FakeBaseObjective(np.nan, [np.inf, np.nan])
+        new_surf = _FakeSurfaceNormals((2, 2, 3))
+        new_bs = _FakeBiotSavart((4, 3))
+        Jf = _FakeScalarObjective(0.25)
+        Jls = _FakeLengthObjective(2.2, [0.3, 0.4])
+        Jccdist = _FakeCurveDistance(0.05, 0.04)
+        Jc = _FakeCurvatureObjective(40.0, [35.0, 41.0, 38.0], 7.5)
+        banana_current = _FakeCurrentObjective(9500.0, [0.7, -0.4])
+
+        def fake_augmented(base_value, base_grad, signed_values, grads, multipliers, penalty):
+            self.assertAlmostEqual(base_value, 1.0)
+            np.testing.assert_allclose(base_grad, [0.0, 0.0])
+            np.testing.assert_allclose(signed_values, [0.2, 1.0, 0.75, -6500.0])
+            np.testing.assert_allclose(grads[0], [0.3, 0.4])
+            np.testing.assert_allclose(grads[1], [0.0, 0.0])
+            np.testing.assert_allclose(grads[2], [0.9, -0.1])
+            np.testing.assert_allclose(grads[3], [0.7, -0.4])
+            np.testing.assert_allclose(multipliers, [0.1, 0.2, 0.3, 0.4])
+            self.assertAlmostEqual(penalty, 12.0)
+            return {
+                "total": 9.0,
+                "grad": np.array([7.0, -3.0]),
+                "base_grad": np.array([0.0, 0.0]),
+                "stationarity_norm": 0.5,
+            }
+
+        with mock.patch.object(
+            self.module,
+            "augmented_inequality_objective",
+            side_effect=fake_augmented,
+        ), mock.patch("builtins.print"):
+            result = self.module.evaluate_stage2_alm_problem(
+                dofs=np.array([0.25, -0.4]),
+                base_objective=base_objective,
+                new_bs=new_bs,
+                new_surf=new_surf,
+                Jf=Jf,
+                Jls=Jls,
+                length_target=2.0,
+                Jccdist=Jccdist,
+                Jc=Jc,
+                banana_current=banana_current,
+                banana_current_max_A=16000.0,
+                distance_smoothing=0.005,
+                curvature_smoothing=0.02,
+                multipliers=np.array([0.1, 0.2, 0.3, 0.4]),
+                penalty=12.0,
+                stage2_constraint_activity_tolerances=lambda ds, cs: [
+                    1e-3,
+                    ds * 4.0,
+                    cs * 4.0,
+                    1e-3,
+                ],
+                smooth_min_distance_signed_constraint=lambda *_args: (np.nan, np.array([np.nan, np.nan])),
+                smooth_max_curvature_signed_constraint=lambda *_args: (0.75, np.array([0.9, -0.1])),
+            )
+
+        self.assertTrue(result["nonfinite_inputs_sanitized"])
+        self.assertEqual(
+            result["nonfinite_input_fields"],
+            ["base_grad", "base_value", "constraint_values[1]", "constraint_grads[1]"],
+        )
+        self.assertTrue(result["nonfinite_evaluation"])
+        self.assertEqual(
+            result["nonfinite_fields"],
+            ["base_grad", "base_value", "constraint_values[1]", "constraint_grads[1]"],
+        )
+        self.assertTrue(np.isnan(result["total"]))
+        np.testing.assert_allclose(result["dual_update_values"], [0.2, 1.0, 0.75, -6500.0])
+        np.testing.assert_allclose(result["constraint_grads"][1], [0.0, 0.0])
+
     def test_stage2_constraint_activity_tolerances_track_smoothing_windows(self):
         tolerances = self.module.stage2_constraint_activity_tolerances(0.005, 0.05)
         self.assertEqual(tolerances, [1e-3, 0.02, 0.2, 1e-3])
@@ -485,6 +557,8 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
             constraint_values=np.array([0.0, 0.01, 0.0]),
             solver_constraint_values=np.array([0.0, 0.2, 0.0]),
             trust_radius=0.125,
+            multiplier_cap_binding=True,
+            multiplier_cap_binding_indices=[1],
             history=[{"outer_iteration": 1}],
         )
         hardware_status = {"success": False, "violations": ["too_curved"]}
@@ -552,6 +626,8 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
         self.assertEqual(result["ALM_MAX_OUTER_ITERS"], 7)
         self.assertEqual(result["ALM_OUTER_ITERATIONS"], 4)
         self.assertEqual(result["ALM_FINAL_TRUST_RADIUS"], 0.125)
+        self.assertTrue(result["ALM_MULTIPLIER_CAP_BINDING"])
+        self.assertEqual(result["ALM_MULTIPLIER_CAP_BINDING_INDICES"], [1])
         self.assertEqual(result["basin_seed"], 7)
         self.assertEqual(result["basin_temperature"], 2.5)
         self.assertEqual(result["basin_niter_success"], 6)
