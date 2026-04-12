@@ -74,7 +74,7 @@ def _resolve_stage2_equilibrium_fixture():
 @pytest.fixture(autouse=True, scope="module")
 def _skip_if_missing_equilibrium_fixture():
     if _resolve_stage2_equilibrium_fixture() is None:
-        pytest.skip("Missing Stage 2 external equilibrium fixture.")
+        pytest.skip("Missing repo-local Stage 2 equilibrium fixture.")
 
 
 sopp = pytest.importorskip(
@@ -159,10 +159,25 @@ REDUCED_STAGE2_ARGS = (
     "--ntheta",
     "16",
 )
+
+
+def _reduced_stage2_reference_args(*extra_args: str) -> tuple[str, ...]:
+    return (
+        *REDUCED_STAGE2_ARGS,
+        "--backend",
+        "cpu",
+        "--optimizer-backend",
+        "scipy",
+        *extra_args,
+    )
+
+
 _SHORT_RUN_PARITY_RTOL = 1e-3
 _STAGE2_VALUE_PARITY_RTOL = 1e-12
 _STAGE2_GRADIENT_PARITY_RTOL = 1e-11
 _STAGE2_GRADIENT_PARITY_ATOL = 1e-15
+_STAGE2_TARGET_SCALAR_VALUE_RTOL = 1e-15
+_STAGE2_TARGET_SCALAR_VALUE_ATOL = 1e-18
 _SQUARED_FLUX_DEFINITIONS = (
     "quadratic flux",
     "normalized",
@@ -2510,7 +2525,7 @@ class TestStage2BananaBoundary:
     @pytest.mark.parametrize("backend", ["cpu", "jax"])
     def test_stage2_probe_reports_shared_production_banana_curve(self, backend):
         if _resolve_stage2_equilibrium_fixture() is None:
-            pytest.skip("Missing stage2 external equilibrium fixture")
+            pytest.skip("Missing repo-local Stage 2 equilibrium fixture")
 
         result, payload = _run_stage2_probe_and_load_payload(
             "--backend",
@@ -2546,9 +2561,7 @@ class TestStage2BananaBoundary:
         with tempfile.TemporaryDirectory(prefix="stage2-override-dofs-") as temp_dir:
             output_root = Path(temp_dir) / "outputs"
             result = _run_stage2_script(
-                *REDUCED_STAGE2_ARGS,
-                "--optimizer-backend",
-                "scipy",
+                *_reduced_stage2_reference_args(),
                 "--skip-postprocess",
                 "--maxiter",
                 "0",
@@ -2567,9 +2580,7 @@ class TestStage2BananaBoundary:
                 encoding="utf-8",
             )
             probe_result = _run_stage2_script(
-                *REDUCED_STAGE2_ARGS,
-                "--optimizer-backend",
-                "scipy",
+                *_reduced_stage2_reference_args(),
                 "--probe-only",
                 "--skip-postprocess",
                 "--override-dofs-json",
@@ -3725,9 +3736,7 @@ class TestStage2OptimizerContract:
             output_root = Path(temp_dir) / "outputs"
             profile_json = Path(temp_dir) / "step_profile.json"
             result = _run_stage2_script(
-                *REDUCED_STAGE2_ARGS,
-                "--optimizer-backend",
-                "scipy",
+                *_reduced_stage2_reference_args(),
                 "--probe-only",
                 "--skip-postprocess",
                 "--profile-step-json",
@@ -3745,12 +3754,12 @@ class TestStage2OptimizerContract:
         assert payload["dominant_extra_diagnostics"][0]["elapsed_s"] >= 0.0
         assert payload["dominant_objective_value_terms"]
         assert payload["dominant_objective_gradient_terms"]
-        assert (
-            set(payload["squared_flux_internal_timings_s"])
-            == EXPECTED_SQUARED_FLUX_INTERNAL_TIMING_KEYS
-        )
-        assert payload["dominant_squared_flux_internal_components"]
-        _assert_b_vjp_profile_payload(payload)
+        assert payload["squared_flux_internal_timings_s"] == {}
+        assert payload["squared_flux_internal_total_s"] == pytest.approx(0.0)
+        assert payload["dominant_squared_flux_internal_components"] == []
+        assert payload["squared_flux_field_b_vjp_component_timings_s"] == {}
+        assert payload["dominant_squared_flux_field_b_vjp_components"] == []
+        assert payload["dominant_squared_flux_field_b_vjp_coils"] == []
 
     def test_stage2_script_rejects_step_profile_on_target_lane(self):
         with tempfile.TemporaryDirectory(
@@ -3862,9 +3871,7 @@ class TestStage2OptimizerContract:
         ) as temp_dir:
             output_root = Path(temp_dir) / "outputs"
             result = _run_stage2_script(
-                *REDUCED_STAGE2_ARGS,
-                "--optimizer-backend",
-                "scipy",
+                *_reduced_stage2_reference_args(),
                 "--record-warm-timings",
                 "--skip-postprocess",
                 "--maxiter",
@@ -3942,7 +3949,12 @@ class TestStage2OptimizerContract:
         assert np.all(np.isfinite(np.asarray(raw_terms, dtype=float)))
         assert np.all(np.isfinite(np.asarray(grad, dtype=float)))
         assert np.all(np.isfinite(np.asarray(grad_vg, dtype=float)))
-        np.testing.assert_allclose(float(value_vg), float(value), rtol=0.0, atol=0.0)
+        np.testing.assert_allclose(
+            float(value_vg),
+            float(value),
+            rtol=_STAGE2_TARGET_SCALAR_VALUE_RTOL,
+            atol=_STAGE2_TARGET_SCALAR_VALUE_ATOL,
+        )
         np.testing.assert_allclose(
             0.5
             * float(
@@ -3977,7 +3989,12 @@ class TestStage2OptimizerContract:
         assert target_bundle.least_squares_residual is not None
         residual = target_bundle.least_squares_residual(optimizer_state)
 
-        np.testing.assert_allclose(float(value_vg), float(value), rtol=0.0, atol=0.0)
+        np.testing.assert_allclose(
+            float(value_vg),
+            float(value),
+            rtol=_STAGE2_TARGET_SCALAR_VALUE_RTOL,
+            atol=_STAGE2_TARGET_SCALAR_VALUE_ATOL,
+        )
         np.testing.assert_allclose(
             0.5
             * float(

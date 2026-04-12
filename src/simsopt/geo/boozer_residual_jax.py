@@ -102,7 +102,10 @@ def _split_decision_vector(x, *, optimize_G):
 
 def _safe_inverse_modB(B2):
     """Return ``1 / |B|`` with a zero-field guard suitable for traced code."""
-    safe_B2 = B2 + _as_jax_float64(np.finfo(np.float64).tiny)
+    safe_B2 = B2 + _as_runtime_float64(
+        np.finfo(np.float64).tiny,
+        reference=B2,
+    )
     return B2 * _explicit_rsqrt(safe_B2) * _explicit_inv(safe_B2)
 
 
@@ -141,14 +144,14 @@ def boozer_residual_scalar(
     Returns:
         J: scalar objective value.
     """
-    G = _as_jax_float64(G)
-    iota = _as_jax_float64(iota)
+    G = _as_runtime_float64(G, reference=B)
+    iota = _as_runtime_float64(iota, reference=B)
     validate_reduction_mode(reduction_mode)
     nphi, ntheta, _ = B.shape
-    num_res = _as_jax_float64(3 * nphi * ntheta)
+    num_res = _as_runtime_float64(3 * nphi * ntheta, reference=B)
     rtil = _boozer_weighted_residual(G, iota, B, xphi, xtheta, weight_inv_modB)
     return (
-        _as_jax_float64(0.5)
+        _as_runtime_float64(0.5, reference=rtil)
         * scalar_square_sum(
             rtil,
             reduction_mode=reduction_mode,
@@ -220,7 +223,15 @@ def boozer_residual_grad(
     Returns:
         grad: (nsurfdofs + 2,) gradient vector.
     """
-    x0 = _pack(_as_jax_float64(np.zeros(nsurfdofs, dtype=np.float64)), iota, G)
+    zero_surface_dofs = _as_runtime_float64(
+        np.zeros(nsurfdofs, dtype=np.float64),
+        reference=B,
+    )
+    x0 = _pack(
+        zero_surface_dofs,
+        _as_runtime_float64(iota, reference=B),
+        _as_runtime_float64(G, reference=B),
+    )
     grad_fn = jax.grad(
         lambda x: _boozer_objective_from_packed(
             x,
@@ -254,7 +265,15 @@ def boozer_residual_hessian(
     Returns:
         H: (nsurfdofs + 2, nsurfdofs + 2) Hessian matrix.
     """
-    x0 = _pack(_as_jax_float64(np.zeros(nsurfdofs, dtype=np.float64)), iota, G)
+    zero_surface_dofs = _as_runtime_float64(
+        np.zeros(nsurfdofs, dtype=np.float64),
+        reference=B,
+    )
+    x0 = _pack(
+        zero_surface_dofs,
+        _as_runtime_float64(iota, reference=B),
+        _as_runtime_float64(G, reference=B),
+    )
     hess_fn = jax.hessian(
         lambda x: _boozer_objective_from_packed(
             x,
@@ -289,8 +308,8 @@ def boozer_residual_vector(G, iota, B, xphi, xtheta, weight_inv_modB=True):
     Returns:
         (nphi*ntheta*3,) flattened residual vector.
     """
-    G = _as_jax_float64(G)
-    iota = _as_jax_float64(iota)
+    G = _as_runtime_float64(G, reference=B)
+    iota = _as_runtime_float64(iota, reference=B)
     return _boozer_weighted_residual(
         G,
         iota,
@@ -407,8 +426,8 @@ def _unpack_decision_vector(x, coil_arrays, optimize_G):
     sdofs, iota, G = _split_decision_vector(x, optimize_G=optimize_G)
     if optimize_G:
         return sdofs, iota, G
-    mu0 = _as_jax_float64(4.0e-7 * np.pi)
     all_currents = jnp.concatenate([c for _, _, c in coil_arrays])
+    mu0 = _as_runtime_float64(4.0e-7 * np.pi, reference=all_currents)
     return sdofs, iota, mu0 * jnp.sum(jnp.abs(all_currents))
 
 

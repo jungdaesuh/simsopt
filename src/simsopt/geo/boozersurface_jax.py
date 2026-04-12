@@ -2007,17 +2007,25 @@ class BoozerSurfaceJAX(Optimizable):
                 plu = (P, L, U)
             else:
                 plu = None
+            sdofs_exact, iota_exact, G_exact = self._unpack_decision_vector_jax(
+                result["x"],
+                True,
+            )
+            half = _as_runtime_float64(0.5, reference=result["residual"])
+            jacobian_available_jax = jax.device_put(
+                np.asarray(jacobian_available, dtype=np.bool_)
+            )
             return {
                 "x": result["x"],
-                "sdofs": result["x"][:-2],
-                "iota": result["x"][-2],
-                "G": result["x"][-1],
-                "fun": 0.5 * jnp.mean(jnp.square(result["residual"])),
+                "sdofs": sdofs_exact,
+                "iota": iota_exact,
+                "G": G_exact,
+                "fun": half * jnp.mean(jnp.square(result["residual"])),
                 "residual": result["residual"],
                 "jacobian": jacobian,
                 "plu": plu,
                 "nit": result["nit"],
-                "success": result["success"] & finite & jacobian_available,
+                "success": result["success"] & finite & jacobian_available_jax,
                 "type": "exact",
                 "weight_inv_modB": weight_inv_modB,
                 **_exact_newton_reporting_fields(result),
@@ -2679,9 +2687,12 @@ class BoozerSurfaceJAX(Optimizable):
 
         x_final = result["x"]
         exact_residual = res_fn(x_final)
-        sdofs_final = x_final[:-2]
-        iota_final = float(_host_scalar(x_final[-2]))
-        G_final = float(_host_scalar(x_final[-1]))
+        sdofs_final, iota_final_jax, G_final_jax = _split_decision_vector_jax(
+            x_final,
+            optimize_G=True,
+        )
+        iota_final = float(_host_scalar(iota_final_jax))
+        G_final = float(_host_scalar(G_final_jax))
         jacobian = result["jacobian"]
         jacobian_available = jacobian is not None
         exact_reporting = _exact_newton_reporting_fields(result)

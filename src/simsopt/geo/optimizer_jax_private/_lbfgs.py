@@ -129,6 +129,7 @@ def _minimize_lbfgs_private_impl(
     maxfun=None,
     maxgrad=None,
     maxls=20,
+    initial_step_size=None,
     callback=None,
     progress_callback=None,
     failure_callback=None,
@@ -150,6 +151,13 @@ def _minimize_lbfgs_private_impl(
         d=d,
         maxiter_limit_value=maxiter_limit_value,
     )
+    initial_step_size_value = (
+        None
+        if initial_step_size is None
+        else np.asarray(initial_step_size, dtype=np.dtype(dtype)).item()
+    )
+    if initial_step_size_value is not None and initial_step_size_value <= 0.0:
+        raise ValueError("initial_step_size must be positive when provided.")
     ftol_value = np.asarray(ftol, dtype=np.dtype(dtype)).item()
     gtol_value = np.asarray(gtol, dtype=np.dtype(dtype)).item()
 
@@ -206,6 +214,17 @@ def _minimize_lbfgs_private_impl(
         maxiter_limit = _as_jax_dtype(maxiter_limit_value, state.k.dtype)
         maxfun_limit = _as_jax_dtype(maxfun_limit_value, state.nfev.dtype)
         maxgrad_limit = _as_jax_dtype(maxgrad_limit_value, state.ngev.dtype)
+        # 0.0 → line search sees use_initial_step_override=False (0.0 > 0.0 is
+        # False), falling back to the default Wolfe start value on later iters.
+        line_search_initial_step_size = (
+            None
+            if initial_step_size_value is None
+            else jnp.where(
+                state.k == _int_scalar(0),
+                _as_jax_dtype(initial_step_size_value, state.x_k.dtype),
+                _as_jax_dtype(0.0, state.x_k.dtype),
+            )
+        )
         p_k = _two_loop_recursion(state)
         ls_results = _line_search_value_and_grad(
             fun=value_and_grad_fun,
@@ -213,6 +232,7 @@ def _minimize_lbfgs_private_impl(
             pk=p_k,
             old_fval=state.f_k,
             gfk=state.g_k,
+            initial_step_size=line_search_initial_step_size,
             maxiter=maxls,
         )
         ls_status = _as_jax_dtype(ls_results.status, state.ls_status.dtype)
@@ -419,6 +439,7 @@ def _minimize_lbfgs_private_impl(
             norm,
             int(history_size),
             int(maxls),
+            None if initial_step_size_value is None else float(initial_step_size_value),
             float(ftol_value),
             float(gtol_value),
             int(maxiter_limit_value),
@@ -442,6 +463,7 @@ def _minimize_lbfgs_private(
     maxfun=None,
     maxgrad=None,
     maxls=20,
+    initial_step_size=None,
     callback=None,
     progress_callback=None,
     failure_callback=None,
@@ -458,6 +480,7 @@ def _minimize_lbfgs_private(
         maxfun=maxfun,
         maxgrad=maxgrad,
         maxls=maxls,
+        initial_step_size=initial_step_size,
         callback=callback,
         progress_callback=progress_callback,
         failure_callback=failure_callback,
@@ -476,6 +499,7 @@ def _minimize_lbfgs_private_value_and_grad(
     maxfun=None,
     maxgrad=None,
     maxls=20,
+    initial_step_size=None,
     callback=None,
     progress_callback=None,
     failure_callback=None,
@@ -492,6 +516,7 @@ def _minimize_lbfgs_private_value_and_grad(
         maxfun=maxfun,
         maxgrad=maxgrad,
         maxls=maxls,
+        initial_step_size=initial_step_size,
         callback=callback,
         progress_callback=progress_callback,
         failure_callback=failure_callback,

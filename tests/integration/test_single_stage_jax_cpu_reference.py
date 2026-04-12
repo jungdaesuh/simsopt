@@ -53,6 +53,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 
 sys.path.insert(0, str(REPO_ROOT))
 
+from benchmarks.benchmark_problem import build_ls_parity_problem, clone_tensor_surface
 from benchmarks.run_code_benchmark_common import summarize_result_fun
 from benchmarks.single_stage_smoke_fixture import (
     DEFAULT_NUM_TF_COILS,
@@ -4040,6 +4041,30 @@ class TestCompositeObjective:
         np.testing.assert_allclose(np.asarray(iotas.dJ()), batched_gradients[1])
         np.testing.assert_allclose(np.asarray(non_qs_ratio.dJ()), batched_gradients[2])
 
+    def test_batched_standard_wrapper_gradients_allow_strict_transfer_guard_on_gpu(
+        self,
+        monkeypatch,
+        request,
+    ):
+        """The batched wrapper helper must not index device adjoints with host scalars."""
+        parity_device("gpu")
+        enable_strict_jax_backend(monkeypatch, request, mode="jax_gpu_parity")
+
+        (_, _, _, _, bs_jax, _, booz_jax, _) = request.getfixturevalue("boozer_setup")
+        boozer_residual, iotas, non_qs_ratio = _make_jax_standard_wrapper_triplet(
+            booz_jax,
+            bs_jax,
+        )
+
+        gradients = compute_standard_surface_objective_gradients(
+            boozer_residual,
+            iotas,
+            non_qs_ratio,
+        )
+        for gradient in gradients:
+            array = np.asarray(gradient, dtype=float)
+            assert np.all(np.isfinite(array))
+
 
 # -----------------------------------------------------------------------
 # Test 6: JAX gradient finite-difference validation
@@ -4265,6 +4290,71 @@ class TestScriptBackendSelection:
 # -----------------------------------------------------------------------
 
 
+_RUN_CODE_LS_PARITY_OPTIONS = {
+    "verbose": False,
+    "bfgs_maxiter": 300,
+    "bfgs_tol": 1e-8,
+    "newton_maxiter": 20,
+    "newton_tol": 1e-9,
+}
+_RUN_CODE_LS_PARITY_PRODUCTION_OPTIONS = {
+    **_RUN_CODE_LS_PARITY_OPTIONS,
+    "bfgs_maxiter": 1500,
+    "newton_maxiter": 40,
+}
+
+
+def _assert_run_code_ls_parity(problem, *, options=None) -> None:
+    solver_options = dict(
+        _RUN_CODE_LS_PARITY_OPTIONS if options is None else options
+    )
+    surf_cpu = clone_tensor_surface(problem.surface)
+    surf_jax = clone_tensor_surface(problem.surface)
+    bs_cpu = BiotSavart(problem.coils)
+    bs_jax = BiotSavartJAX(problem.coils)
+    vol_cpu = Volume(surf_cpu)
+    vol_jax = Volume(surf_jax)
+
+    booz_cpu = BoozerSurface(
+        bs_cpu,
+        surf_cpu,
+        vol_cpu,
+        problem.vol_target,
+        constraint_weight=1.0,
+        options=dict(solver_options),
+    )
+    booz_jax = BoozerSurfaceJAX(
+        bs_jax,
+        surf_jax,
+        vol_jax,
+        problem.vol_target,
+        constraint_weight=1.0,
+        options=dict(solver_options),
+    )
+
+    res_cpu = booz_cpu.run_code(problem.iota0, problem.G0)
+    res_jax = booz_jax.run_code(problem.iota0, problem.G0)
+
+    assert res_cpu.get("success", False), "CPU solver did not converge"
+    assert res_jax.get("success", False), "JAX solver did not converge"
+
+    label_err_cpu = abs(vol_cpu.J() - problem.vol_target)
+    label_err_jax = abs(vol_jax.J() - problem.vol_target)
+    iota_diff = abs(res_cpu["iota"] - res_jax["iota"])
+
+    logger.info(
+        f"CPU: iota={res_cpu['iota']:.6e} |label|={label_err_cpu:.6e}\n"
+        f"JAX: iota={res_jax['iota']:.6e} |label|={label_err_jax:.6e}\n"
+        f"|iota diff|={iota_diff:.6e}"
+    )
+
+    assert abs(res_cpu["iota"]) < 1e-3, f"CPU iota too large: {res_cpu['iota']}"
+    assert abs(res_jax["iota"]) < 1e-3, f"JAX iota too large: {res_jax['iota']}"
+    assert label_err_cpu < 1e-3, f"CPU label error too large: {label_err_cpu}"
+    assert label_err_jax < 1e-3, f"JAX label error too large: {label_err_jax}"
+    assert iota_diff < 1e-6, f"Iota disagreement: {iota_diff:.6e}"
+
+
 class TestRunCodeLSParity:
     """Isolated parity: CPU and JAX run_code() from the same initial guess.
 
@@ -4275,112 +4365,15 @@ class TestRunCodeLSParity:
 
     def test_ls_solve_parity(self):
         """Both solvers converge; iota, label error, and residual match."""
-        ncoils, nfp = 2, 2
-        base_curves = create_equally_spaced_curves(
-            ncoils,
-            nfp,
-            stellsym=True,
-            R0=1.0,
-            R1=0.5,
-            order=3,
+        _assert_run_code_ls_parity(build_ls_parity_problem())
+
+    @pytest.mark.slow
+    def test_ls_solve_parity_production_scale(self):
+        """The LS parity gate should still hold on the larger 16x8 / 4-coil fixture."""
+        _assert_run_code_ls_parity(
+            build_ls_parity_problem(ncoils=4, nphi=16, ntheta=8),
+            options=_RUN_CODE_LS_PARITY_PRODUCTION_OPTIONS,
         )
-        base_currents = [Current(1e5) for _ in range(ncoils)]
-        for c in base_currents:
-            c.fix_all()
-        coils = coils_via_symmetries(base_curves, base_currents, nfp, stellsym=True)
-
-        mpol, ntor = 2, 2
-        nphi, ntheta = 2 * ntor + 1, 2 * mpol + 1
-        surf_cpu = SurfaceXYZTensorFourier(
-            mpol=mpol,
-            ntor=ntor,
-            stellsym=True,
-            nfp=nfp,
-            quadpoints_phi=np.linspace(0, 1.0 / nfp, nphi, endpoint=False),
-            quadpoints_theta=np.linspace(0, 1.0, ntheta, endpoint=False),
-        )
-        surf_cpu.set_dofs(np.zeros_like(surf_cpu.get_dofs()))
-        from simsopt.geo import SurfaceRZFourier
-
-        s_rz = SurfaceRZFourier(
-            nfp=nfp,
-            stellsym=True,
-            mpol=1,
-            ntor=0,
-            quadpoints_phi=surf_cpu.quadpoints_phi,
-            quadpoints_theta=surf_cpu.quadpoints_theta,
-        )
-        s_rz.set_rc(0, 0, 1.0)
-        s_rz.set_rc(1, 0, 0.15)
-        s_rz.set_zs(1, 0, 0.15)
-        surf_cpu.least_squares_fit(s_rz.gamma())
-
-        surf_jax = SurfaceXYZTensorFourier(
-            mpol=mpol,
-            ntor=ntor,
-            stellsym=True,
-            nfp=nfp,
-            quadpoints_phi=surf_cpu.quadpoints_phi,
-            quadpoints_theta=surf_cpu.quadpoints_theta,
-        )
-        surf_jax.set_dofs(surf_cpu.get_dofs().copy())
-
-        bs_cpu = BiotSavart(coils)
-        bs_jax = BiotSavartJAX(coils)
-        vol_cpu = Volume(surf_cpu)
-        vol_jax = Volume(surf_jax)
-        vol_target = vol_cpu.J()
-
-        mu0 = 4 * np.pi * 1e-7
-        G0 = mu0 * sum(abs(c.current.get_value()) for c in coils)
-        iota0 = 0.3
-
-        opts = {
-            "verbose": False,
-            "bfgs_maxiter": 300,
-            "bfgs_tol": 1e-8,
-            "newton_maxiter": 20,
-            "newton_tol": 1e-9,
-        }
-        booz_cpu = BoozerSurface(
-            bs_cpu,
-            surf_cpu,
-            vol_cpu,
-            vol_target,
-            constraint_weight=1.0,
-            options=opts,
-        )
-        booz_jax = BoozerSurfaceJAX(
-            bs_jax,
-            surf_jax,
-            vol_jax,
-            vol_target,
-            constraint_weight=1.0,
-            options=opts,
-        )
-
-        res_cpu = booz_cpu.run_code(iota0, G0)
-        res_jax = booz_jax.run_code(iota0, G0)
-
-        assert res_cpu.get("success", False), "CPU solver did not converge"
-        assert res_jax.get("success", False), "JAX solver did not converge"
-
-        label_err_cpu = abs(vol_cpu.J() - vol_target)
-        label_err_jax = abs(vol_jax.J() - vol_target)
-        iota_diff = abs(res_cpu["iota"] - res_jax["iota"])
-
-        logger.info(
-            f"CPU: iota={res_cpu['iota']:.6e} |label|={label_err_cpu:.6e}\n"
-            f"JAX: iota={res_jax['iota']:.6e} |label|={label_err_jax:.6e}\n"
-            f"|iota diff|={iota_diff:.6e}"
-        )
-
-        # Both should converge to near-zero iota and label error
-        assert abs(res_cpu["iota"]) < 1e-3, f"CPU iota too large: {res_cpu['iota']}"
-        assert abs(res_jax["iota"]) < 1e-3, f"JAX iota too large: {res_jax['iota']}"
-        assert label_err_cpu < 1e-3, f"CPU label error too large: {label_err_cpu}"
-        assert label_err_jax < 1e-3, f"JAX label error too large: {label_err_jax}"
-        assert iota_diff < 1e-6, f"Iota disagreement: {iota_diff:.6e}"
 
 
 class TestRealFixtureOndeviceM5Parity:
@@ -4516,6 +4509,7 @@ class TestRealFixtureGpuM5Parity:
     ):
         """GPU wrapper values/gradients should match the reduced real CPU reference."""
         gpu = parity_device("gpu")
+        monkeypatch.setenv("SIMSOPT_JAX_TRANSFER_GUARD", "disallow")
         _enable_strict_jax_backend(monkeypatch, request)
 
         cpu_fixture = build_real_single_stage_init_fixture(

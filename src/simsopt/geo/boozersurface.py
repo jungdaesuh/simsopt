@@ -1,6 +1,6 @@
 import numpy as np
 from scipy.linalg import lu
-from scipy.optimize import minimize, least_squares
+from scipy.optimize import minimize, least_squares, root
 import simsoptpp as sopp
 
 from .surfaceobjectives import (
@@ -1088,17 +1088,18 @@ class BoozerSurface(Optimizable):
             return self.res
 
         s = self.surface
-        if G is not None:
+        optimize_G = G is not None
+        if optimize_G:
             xl = np.concatenate((s.get_dofs(), [iota, G], lm))
         else:
             xl = np.concatenate((s.get_dofs(), [iota], lm))
         val, dval = self.boozer_exact_constraints(
-            xl, derivatives=1, optimize_G=G is not None
+            xl, derivatives=1, optimize_G=optimize_G
         )
         norm = np.linalg.norm(val)
-        i = 0
-        while i < maxiter and norm > tol:
-            if s.stellsym:
+        if s.stellsym:
+            i = 0
+            while i < maxiter and norm > tol:
                 A = dval[:-1, :-1]
                 b = val[:-1]
                 dx = np.linalg.solve(A, b)
@@ -1107,18 +1108,43 @@ class BoozerSurface(Optimizable):
                 ):  # iterative refinement for higher accuracy. TODO: cache LU factorisation
                     dx += np.linalg.solve(A, b - A @ dx)
                 xl[:-1] = xl[:-1] - dx
-            else:
-                dx = np.linalg.solve(dval, val)
-                if (
-                    norm < 1e-9
-                ):  # iterative refinement for higher accuracy. TODO: cache LU factorisation
-                    dx += np.linalg.solve(dval, val - dval @ dx)
-                xl = xl - dx
-            val, dval = self.boozer_exact_constraints(
-                xl, derivatives=1, optimize_G=G is not None
+                val, dval = self.boozer_exact_constraints(
+                    xl, derivatives=1, optimize_G=optimize_G
+                )
+                norm = np.linalg.norm(val)
+                i = i + 1
+        else:
+            def exact_residual(x):
+                return self.boozer_exact_constraints(
+                    x, derivatives=0, optimize_G=optimize_G
+                )
+
+            def exact_jacobian(x):
+                return self.boozer_exact_constraints(
+                    x, derivatives=1, optimize_G=optimize_G
+                )[1]
+
+            fallback = root(
+                exact_residual,
+                xl,
+                jac=exact_jacobian,
+                method="hybr",
+                options={
+                    "xtol": min(1e-10, max(1e-12, tol * 1e-2)),
+                    "maxfev": max(400, 4 * maxiter),
+                },
             )
-            norm = np.linalg.norm(val)
-            i = i + 1
+            fallback_xl = np.asarray(fallback.x)
+            fallback_val, fallback_dval = self.boozer_exact_constraints(
+                fallback_xl, derivatives=1, optimize_G=optimize_G
+            )
+            fallback_norm = np.linalg.norm(fallback_val)
+            if np.isfinite(fallback_norm) and fallback_norm <= norm:
+                xl = fallback_xl
+                val = fallback_val
+                dval = fallback_dval
+                norm = fallback_norm
+            i = getattr(fallback, "nfev", 0)
 
         if s.stellsym:
             lm = xl[-2]
@@ -1133,7 +1159,7 @@ class BoozerSurface(Optimizable):
             "lm": lm,
             "G": None,
         }
-        if G is not None:
+        if optimize_G:
             s.set_dofs(xl[:-4])
             iota = xl[-4]
             G = xl[-3]

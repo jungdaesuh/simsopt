@@ -254,6 +254,14 @@ def test_build_ls_parity_problem_matches_known_good_fixture_shape():
     assert problem.G0 > 0.0
 
 
+def test_build_ls_parity_problem_honors_requested_scale():
+    problem = build_ls_parity_problem(ncoils=4, nphi=16, ntheta=8)
+
+    assert len(problem.coils) == 4 * problem.surface.nfp * 2
+    assert len(problem.surface.quadpoints_phi) == 16
+    assert len(problem.surface.quadpoints_theta) == 8
+
+
 def test_clone_tensor_surface_is_independent():
     problem = build_ls_parity_problem()
     surface_copy = clone_tensor_surface(problem.surface)

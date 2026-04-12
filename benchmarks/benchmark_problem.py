@@ -100,7 +100,15 @@ def build_synthetic_boozer_problem(config) -> RunCodeProblem:
     )
 
 
-def build_ls_parity_problem() -> RunCodeProblem:
+def build_ls_parity_problem(
+    *,
+    ncoils: int = 2,
+    nfp: int = 2,
+    mpol: int = 2,
+    ntor: int = 2,
+    nphi: int | None = None,
+    ntheta: int | None = None,
+) -> RunCodeProblem:
     """Build the known-good LS parity fixture used by integration tests."""
     from simsopt.field import Current, coils_via_symmetries
     from simsopt.geo import (
@@ -110,7 +118,8 @@ def build_ls_parity_problem() -> RunCodeProblem:
         create_equally_spaced_curves,
     )
 
-    ncoils, nfp = 2, 2
+    resolved_nphi = 2 * ntor + 1 if nphi is None else int(nphi)
+    resolved_ntheta = 2 * mpol + 1 if ntheta is None else int(ntheta)
     base_curves = create_equally_spaced_curves(
         ncoils,
         nfp,
@@ -124,10 +133,8 @@ def build_ls_parity_problem() -> RunCodeProblem:
         current.fix_all()
     coils = coils_via_symmetries(base_curves, base_currents, nfp, stellsym=True)
 
-    mpol, ntor = 2, 2
-    nphi, ntheta = 2 * ntor + 1, 2 * mpol + 1
-    quadpoints_phi = np.linspace(0, 1.0 / nfp, nphi, endpoint=False)
-    quadpoints_theta = np.linspace(0, 1.0, ntheta, endpoint=False)
+    quadpoints_phi = np.linspace(0, 1.0 / nfp, resolved_nphi, endpoint=False)
+    quadpoints_theta = np.linspace(0, 1.0, resolved_ntheta, endpoint=False)
 
     surface = SurfaceXYZTensorFourier(
         mpol=mpol,

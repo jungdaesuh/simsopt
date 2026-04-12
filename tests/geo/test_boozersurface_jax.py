@@ -130,21 +130,23 @@ def _patch_matrix_free_exact_linear_solver(monkeypatch, *, A, expected_device=No
     def fake_jvp_fn(_residual_fn):
         def apply(_x, v):
             _maybe_assert_arrays_on_device(expected_device, v)
-            return A @ v
+            return _matrix_constant(A, v) @ v
 
         return apply
 
     def fake_gmres(_jvp_fn, _x, rhs, *, tol):
         del _jvp_fn, tol
         _maybe_assert_arrays_on_device(expected_device, _x, rhs)
-        dx = jnp.linalg.solve(A, rhs)
-        return dx, rhs - A @ dx, None
+        A_runtime = _matrix_constant(A, rhs)
+        dx = jnp.linalg.solve(A_runtime, rhs)
+        return dx, rhs - A_runtime @ dx, None
 
     def fake_materialize(_jvp_fn, _x):
         del _jvp_fn
-        _maybe_assert_arrays_on_device(expected_device, _x, A)
+        A_runtime = _matrix_constant(A, _x)
         dense_calls.append(True)
-        return A
+        _maybe_assert_arrays_on_device(expected_device, _x, A_runtime)
+        return A_runtime
 
     monkeypatch.setattr(_opt, "_jacobian_vector_product_fn", fake_jvp_fn)
     monkeypatch.setattr(_opt, "_gmres_solve_exact_newton_system", fake_gmres)
@@ -160,7 +162,12 @@ def _patch_matrix_free_lm_solver(monkeypatch, *, A, expected_device=None):
         del _flat_residual_fn, _pullback, tol
         gmres_calls.append(True)
         _maybe_assert_arrays_on_device(expected_device, _x, grad)
-        hessian = A.T @ A + damping * jnp.eye(A.shape[1], dtype=A.dtype)
+        A_runtime = _matrix_constant(A, grad)
+        hessian = A_runtime.T @ A_runtime + damping * _explicit_eye(
+            A_runtime.shape[1],
+            dtype=A.dtype,
+            device=expected_device,
+        )
         step = jnp.linalg.solve(hessian, grad)
         return step, grad - hessian @ step, None
 
@@ -168,7 +175,7 @@ def _patch_matrix_free_lm_solver(monkeypatch, *, A, expected_device=None):
         dense_calls.append(True)
         _maybe_assert_arrays_on_device(expected_device, x)
         residual = flat_residual_fn(x)
-        jacobian = A
+        jacobian = _matrix_constant(A, x)
         grad, hessian = _opt._least_squares_linearization_from_jacobian(
             residual,
             jacobian,
@@ -229,25 +236,46 @@ def _assert_lu_is_not_called(message):
 def _maybe_assert_arrays_on_device(device, *arrays):
     if device is None:
         return
-    assert_arrays_on_device(device, *arrays)
+    concrete_arrays = tuple(
+        array
+        for array in arrays
+        if isinstance(array, jax.Array) and not isinstance(array, jax.core.Tracer)
+    )
+    if concrete_arrays:
+        assert_arrays_on_device(device, *concrete_arrays)
+
+
+def _explicit_eye(size, *, dtype, device=None):
+    return jax.device_put(np.eye(int(size), dtype=np.dtype(dtype)), device=device)
+
+
+def _explicit_scalar(value, *, dtype, device=None):
+    return jax.device_put(np.asarray(value, dtype=np.dtype(dtype)), device=device)
+
+
+def _matrix_constant(matrix, reference):
+    return jnp.asarray(np.asarray(matrix, dtype=np.dtype(reference.dtype)), dtype=reference.dtype)
 
 
 def _build_gpu_traceable_linear_problem(booz, gpu, *, step_scale):
     coil_set_spec = booz.coil_set_spec
+    surface_dofs = np.asarray(booz.surface.get_dofs(), dtype=np.float64)
     sdofs = jax.device_put(
-        np.asarray(booz.surface.get_dofs(), dtype=np.float64),
+        surface_dofs,
         device=gpu,
     )
     iota = jax.device_put(np.asarray(0.3, dtype=np.float64), device=gpu)
     G = jax.device_put(np.asarray(0.05, dtype=np.float64), device=gpu)
     x0 = booz._pack_decision_vector(iota, G, sdofs=sdofs)
-    x_target = x0 + jax.device_put(
-        np.linspace(
-            step_scale, step_scale * x0.shape[0], x0.shape[0], dtype=np.float64
-        ),
-        device=gpu,
+    x_target = np.concatenate(
+        (surface_dofs, np.asarray([0.3, 0.05], dtype=np.float64))
+    ) + np.linspace(
+        step_scale,
+        step_scale * x0.shape[0],
+        x0.shape[0],
+        dtype=np.float64,
     )
-    A = jax.device_put(jnp.eye(x0.shape[0], dtype=jnp.float64), device=gpu)
+    A = np.eye(int(x0.shape[0]), dtype=np.float64)
     return coil_set_spec, sdofs, iota, G, x_target, A
 
 
@@ -3201,7 +3229,7 @@ class TestBoozerSurfaceJAXExactPath:
 
         def fake_get_traceable_exact_residual(_weight_inv_modB):
             def residual(x, _coil_set_spec):
-                return A @ x - x_target
+                return _matrix_constant(A, x) @ x - _matrix_constant(x_target, x)
 
             return residual
 
@@ -3215,7 +3243,7 @@ class TestBoozerSurfaceJAXExactPath:
 
         assert len(dense_calls) == 1
         assert result["type"] == "exact"
-        assert bool(result["success"])
+        assert bool(np.asarray(jax.device_get(result["success"])))
         _assert_traceable_gpu_result(
             result,
             x_target,
@@ -3368,7 +3396,7 @@ class TestBoozerSurfaceJAXExactPath:
 
         def fake_get_traceable_penalty_residual(_optimize_G, _weight_inv_modB):
             def residual(x, _coil_set_spec):
-                return A @ x - x_target
+                return _matrix_constant(A, x) @ x - _matrix_constant(x_target, x)
 
             return residual
 
@@ -3386,16 +3414,20 @@ class TestBoozerSurfaceJAXExactPath:
             del method, obj_fn, maxiter, tol, stab, progress_callback, objective_args
             np.testing.assert_allclose(
                 np.asarray(jax.device_get(x_ls)),
-                np.asarray(jax.device_get(x_target)),
+                np.asarray(x_target),
                 atol=1e-12,
             )
             return {
                 "x": x_ls,
-                "fun": jnp.asarray(0.0, dtype=x_ls.dtype),
-                "grad": jnp.zeros_like(x_ls),
-                "hessian": jnp.eye(x_ls.shape[0], dtype=x_ls.dtype),
-                "nit": jnp.asarray(0, dtype=jnp.int32),
-                "success": jnp.asarray(True),
+                "fun": _explicit_scalar(0.0, dtype=x_ls.dtype, device=gpu),
+                "grad": x_ls - x_ls,
+                "hessian": _explicit_eye(
+                    x_ls.shape[0],
+                    dtype=x_ls.dtype,
+                    device=gpu,
+                ),
+                "nit": _explicit_scalar(0, dtype=jnp.int32, device=gpu),
+                "success": _explicit_scalar(True, dtype=np.bool_, device=gpu),
             }
 
         monkeypatch.setattr(
@@ -3415,7 +3447,7 @@ class TestBoozerSurfaceJAXExactPath:
         assert len(dense_calls) == 1
         assert result["type"] == "ls"
         assert result["optimizer_method"] == "lm-ondevice"
-        assert bool(result["success"])
+        assert bool(np.asarray(jax.device_get(result["success"])))
         _assert_traceable_gpu_result(
             result,
             x_target,

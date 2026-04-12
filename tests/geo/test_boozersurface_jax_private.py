@@ -130,6 +130,25 @@ def test_reduction_helpers_pass_host_init_values_to_lax_reduce(monkeypatch):
         assert isinstance(init_value, np.ndarray)
 
 
+def test_line_search_value_and_grad_uses_explicit_initial_step_size():
+    def quad(x):
+        return 0.5 * jnp.dot(x, x), x
+
+    xk = jnp.asarray([1.0], dtype=jnp.float64)
+    pk = jnp.asarray([-1.0], dtype=jnp.float64)
+    result = _opt._line_search_value_and_grad(
+        quad,
+        xk,
+        pk,
+        old_fval=jnp.asarray(0.5, dtype=jnp.float64),
+        gfk=jnp.asarray([1.0], dtype=jnp.float64),
+        initial_step_size=0.125,
+        maxiter=1,
+    )
+
+    assert float(result.a_k) == pytest.approx(0.125)
+
+
 def test_bfgs_curvature_terms_reject_bad_curvature_updates():
     s_k = jnp.asarray([1.0, 0.0], dtype=jnp.float64)
     y_negative = jnp.asarray([-1.0e-3, 0.0], dtype=jnp.float64)
@@ -271,6 +290,49 @@ def _assert_lbfgs_state_preserved(state, x0, quad, *, ls_status=None):
         np.zeros_like(np.asarray(state.rho_history)),
     )
     assert float(state.gamma) == pytest.approx(1.0)
+
+
+def test_minimize_lbfgs_private_threads_initial_step_size_to_first_line_search(
+    monkeypatch,
+):
+    from simsopt.geo.optimizer_jax_private import _LineSearchResults
+    from simsopt.geo.optimizer_jax_private import _lbfgs as _lbfgs_module
+
+    captured = []
+
+    def quad(x):
+        return 0.5 * jnp.dot(x, x)
+
+    def fake_line_search(*_args, **kwargs):
+        captured.append(kwargs.get("initial_step_size"))
+        return _LineSearchResults(
+            failed=jnp.asarray(True),
+            nit=jnp.asarray(1),
+            nfev=jnp.asarray(1),
+            ngev=jnp.asarray(1),
+            k=jnp.asarray(1),
+            a_k=jnp.asarray(0.0, dtype=jnp.float64),
+            f_k=jnp.asarray(0.5, dtype=jnp.float64),
+            g_k=jnp.asarray([1.0], dtype=jnp.float64),
+            status=jnp.asarray(3, dtype=jnp.int32),
+        )
+
+    monkeypatch.setattr(
+        _lbfgs_module,
+        "_line_search_value_and_grad",
+        fake_line_search,
+    )
+
+    _lbfgs_module._minimize_lbfgs_private(
+        quad,
+        jnp.asarray([1.0], dtype=jnp.float64),
+        maxiter=1,
+        initial_step_size=1.0e-4,
+    )
+
+    assert len(captured) == 1
+    assert captured[0] is not None
+    assert getattr(captured[0], "dtype", None) == jnp.dtype(jnp.float64)
 
 
 @pytest.mark.parametrize("backend_mode", _ALL_JAX_BACKEND_MODES)

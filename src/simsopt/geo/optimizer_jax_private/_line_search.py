@@ -296,6 +296,7 @@ def _line_search_from_restricted_func_and_grad(
     old_fval=None,
     old_old_fval=None,
     gfk=None,
+    initial_step_size=None,
     c1=1e-4,
     c2=0.9,
     maxiter=20,
@@ -308,6 +309,14 @@ def _line_search_from_restricted_func_and_grad(
     c1 = _as_jax_dtype(c1, dtype)
     c2 = _as_jax_dtype(c2, dtype)
     maxiter_jax = _int_scalar(maxiter)
+    if initial_step_size is None:
+        initial_step_value = zero
+        use_initial_step_override = _bool_scalar(False)
+    else:
+        initial_step_value = _as_jax_dtype(initial_step_size, dtype)
+        use_initial_step_override = jnp.isfinite(initial_step_value) & (
+            initial_step_value > zero
+        )
 
     if old_fval is None or gfk is None:
         phi_0, dphi_0, gfk = restricted_func_and_grad(zero)
@@ -323,6 +332,11 @@ def _line_search_from_restricted_func_and_grad(
         start_value = jnp.where(candidate_start_value > one, one, candidate_start_value)
     else:
         start_value = one
+    start_value = jnp.where(
+        use_initial_step_override,
+        initial_step_value,
+        start_value,
+    )
 
     def wolfe_one(a_i, phi_i):
         return phi_i > phi_0 + c1 * a_i * dphi_0
@@ -511,7 +525,16 @@ def _line_search_from_restricted_func_and_grad(
 
 
 def _line_search(
-    f, xk, pk, old_fval=None, old_old_fval=None, gfk=None, c1=1e-4, c2=0.9, maxiter=20
+    f,
+    xk,
+    pk,
+    old_fval=None,
+    old_old_fval=None,
+    gfk=None,
+    initial_step_size=None,
+    c1=1e-4,
+    c2=0.9,
+    maxiter=20,
 ):
     xk, pk = _promote_dtypes_inexact(xk, pk)
     scalar_value_and_grad = _scalar_value_and_grad(f)
@@ -528,6 +551,7 @@ def _line_search(
         old_fval=old_fval,
         old_old_fval=old_old_fval,
         gfk=gfk,
+        initial_step_size=initial_step_size,
         c1=c1,
         c2=c2,
         maxiter=maxiter,
@@ -541,6 +565,7 @@ def _line_search_value_and_grad(
     old_fval=None,
     old_old_fval=None,
     gfk=None,
+    initial_step_size=None,
     c1=1e-4,
     c2=0.9,
     maxiter=20,
@@ -561,6 +586,7 @@ def _line_search_value_and_grad(
         old_fval=old_fval,
         old_old_fval=old_old_fval,
         gfk=gfk,
+        initial_step_size=initial_step_size,
         c1=c1,
         c2=c2,
         maxiter=maxiter,

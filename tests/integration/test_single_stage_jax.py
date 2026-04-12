@@ -183,10 +183,9 @@ def test_boozer_residual_inner_objective_uses_runtime_scalar_constants(
     )
     monkeypatch.setattr(
         soj,
-        "boozer_residual_vector",
-        lambda g_value, iota, B, xphi, xtheta, weight_inv_modB: jnp.array(
-            [1.0, 2.0],
-            dtype=jnp.float64,
+        "boozer_residual_scalar",
+        lambda g_value, iota, B, xphi, xtheta, weight_inv_modB: (
+            soj._runtime_float64_scalar(5.0 / 6.0, reference=B)
         ),
     )
     monkeypatch.setattr(

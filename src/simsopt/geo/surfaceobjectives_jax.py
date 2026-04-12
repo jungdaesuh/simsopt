@@ -1484,9 +1484,16 @@ def compute_standard_surface_objective_gradients(
         out_axes=0,
     )(rhs_batch)
 
-    residual_adjoint = _project_adjoint(adjoint_batch[0], boozer_residual.biotsavart)
-    iota_adjoint = _project_adjoint(adjoint_batch[1], iotas.biotsavart)
-    non_qs_adjoint = _project_adjoint(adjoint_batch[2], non_qs_ratio.biotsavart)
+    # Keep adjoint extraction on the JAX side so strict transfer_guard mode
+    # does not materialize Python scalar indices against device-resident state.
+    residual_batch, iota_batch, non_qs_batch = tuple(
+        jnp.squeeze(chunk, axis=0)
+        for chunk in jnp.split(adjoint_batch, rhs_batch.shape[0], axis=0)
+    )
+
+    residual_adjoint = _project_adjoint(residual_batch, boozer_residual.biotsavart)
+    iota_adjoint = _project_adjoint(iota_batch, iotas.biotsavart)
+    non_qs_adjoint = _project_adjoint(non_qs_batch, non_qs_ratio.biotsavart)
 
     boozer_residual._J = residual_value
     boozer_residual._dJ = residual_direct - residual_adjoint

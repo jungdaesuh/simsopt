@@ -21,10 +21,12 @@ _TESTS_ROOT = Path(__file__).resolve().parents[1]
 if str(_TESTS_ROOT) not in sys.path:
     sys.path.insert(0, str(_TESTS_ROOT))
 from conftest import (
+    assert_arrays_on_device,
     device_float64,
     host_array,
     host_scalar,
     parity_acceptance_tolerance,
+    parity_device,
     parity_default_device,
     parity_lane,
     parity_rng,
@@ -424,6 +426,24 @@ class TestBoozerResidualHessian:
 
         np.testing.assert_allclose(host_scalar(H[0, 0]), d2J_diota2_fd, rtol=1e-4)
         np.testing.assert_allclose(host_scalar(H[0, 1]), d2J_diotadG_fd, rtol=1e-4)
+
+
+class TestBoozerResidualDevicePlacement:
+    """Ensure scalar helpers stay on the active parity lane device."""
+
+    def test_outputs_follow_lane_device(self, parity_lane):
+        B, xphi, xtheta = _make_synthetic_data(6, 8)
+        expected_device = parity_device(parity_lane)
+
+        scalar_value = boozer_residual_scalar(1.5, 0.3, B, xphi, xtheta)
+        gradient = boozer_residual_grad(1.5, 0.3, B, xphi, xtheta, nsurfdofs=0)
+        hessian = boozer_residual_hessian(1.5, 0.3, B, xphi, xtheta, nsurfdofs=0)
+        residual_vector = boozer_residual_vector(1.5, 0.3, B, xphi, xtheta)
+
+        assert_arrays_on_device(expected_device, scalar_value)
+        assert_arrays_on_device(expected_device, gradient)
+        assert_arrays_on_device(expected_device, hessian)
+        assert_arrays_on_device(expected_device, residual_vector)
 
 
 class TestBoozerResidualM1Limitations:

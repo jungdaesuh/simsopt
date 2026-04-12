@@ -23,6 +23,7 @@ from ..backend import (
 from ..backend.runtime import register_backend_cache_clear
 from ._device_scalars import device_one as _device_one
 from ._math_utils import (
+    as_jax_float64 as _as_jax_float64,
     explicit_inv as _explicit_inv,
     explicit_rsqrt as _explicit_rsqrt,
     eye as _eye,
@@ -633,7 +634,7 @@ def biot_savart_B_vjp(points, v, gammas, gammadashs, currents):
 
 
 def _axis0_entries(array: object) -> tuple[jax.Array, ...]:
-    array_jax = jnp.asarray(array)
+    array_jax = _as_jax_float64(array)
     if array_jax.ndim == 0:
         return (array_jax,)
     length = int(array_jax.shape[0])
@@ -664,21 +665,14 @@ def group_coil_data(gammas_list, gammadashs_list, currents_list):
     for indices in by_nquad.values():
         groups.append(
             (
-                jnp.stack(
-                    [jnp.asarray(gamma_entries[i], dtype=jnp.float64) for i in indices]
-                ),
+                jnp.stack([_as_jax_float64(gamma_entries[i]) for i in indices]),
                 jnp.stack(
                     [
-                        jnp.asarray(gammadash_entries[i], dtype=jnp.float64)
+                        _as_jax_float64(gammadash_entries[i])
                         for i in indices
                     ]
                 ),
-                jnp.stack(
-                    [
-                        jnp.asarray(current_entries[i], dtype=jnp.float64)
-                        for i in indices
-                    ]
-                ),
+                jnp.stack([_as_jax_float64(current_entries[i]) for i in indices]),
                 indices,
             )
         )
