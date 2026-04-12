@@ -83,6 +83,24 @@ def load_alm_utils_module():
     return module
 
 
+def make_frontier_goal_config(module, **overrides):
+    config = {
+        "iota_reference": 0.10,
+        "iota_scale": 0.05,
+        "volume_reference": 0.10,
+        "volume_scale": 0.01,
+        "qs_reference": 1.0e-4,
+        "boozer_reference": 1.0e-6,
+        "boozer_trust_threshold": 1.0e-5,
+        "effective_qs_weight": 1.0,
+        "effective_boozer_weight": 1.0,
+        "effective_iota_weight": 1.0,
+        "effective_volume_weight": 1.0,
+    }
+    config.update(overrides)
+    return module.FrontierGoalConfig(**config)
+
+
 class FakeSurfPrev:
     def __init__(self):
         self.nfp = 5
@@ -1491,6 +1509,39 @@ class HardwareConstraintTests(unittest.TestCase):
         self.assertFalse(module.maybe_update_best_accepted_incumbent(run_dict, "final"))
         self.assertEqual(run_dict["best_accepted_metric"], 4.0)
 
+    def test_frontier_preserved_incumbents_require_trust_and_frontier_rank_metric(self):
+        module = load_single_stage_example_module()
+        module.SINGLE_STAGE_GOAL_MODE = "frontier"
+        run_dict = {
+            "accepted_x": np.array([1.0, 2.0]),
+            "surface_state": {"sdofs": [np.array([1.0])], "iota": [0.15], "G": [1.0]},
+            "J": 4.0,
+            "dJ": np.array([1.0, -1.0]),
+            "search_eval": {
+                "total": 100.0,
+                "frontier_rank_total": 4.0,
+                "frontier_trust_ok": True,
+                "surface_weights": np.array([1.0]),
+            },
+            "surface_status": {"success": True},
+            "search_surface_status": {"success": True},
+            "accepted_hardware_status": {"success": True, "violations": []},
+            "topology_gate_status": {"enabled": False, "success": True},
+            "intersecting": False,
+            "best_feasible_incumbent": None,
+            "best_feasible_metric": None,
+            "best_feasible_stage": None,
+        }
+
+        self.assertTrue(module.maybe_update_best_feasible_incumbent(run_dict, "initial"))
+        self.assertEqual(run_dict["best_feasible_metric"], 4.0)
+
+        run_dict["search_eval"]["frontier_trust_ok"] = False
+        run_dict["search_eval"]["frontier_rank_total"] = 3.0
+        run_dict["J"] = 3.0
+        self.assertFalse(module.maybe_update_best_feasible_incumbent(run_dict, "final"))
+        self.assertEqual(run_dict["best_feasible_metric"], 4.0)
+
     def test_write_preserved_timeout_artifacts_uses_kind_specific_filenames(self):
         module = load_single_stage_example_module()
 
@@ -1674,6 +1725,82 @@ class HardwareConstraintTests(unittest.TestCase):
         self.assertEqual(payload["ALM_FINAL_STATIONARITY_TOL"], 2.0e-4)
         self.assertEqual(payload["ALM_FINAL_MAX_FEASIBILITY_VIOLATION"], 4.0e-3)
         self.assertEqual(payload["ALM_FINAL_STATIONARITY_NORM"], 7.5e-5)
+
+    def test_build_preserved_timeout_results_payload_frontier_uses_reference_metadata(self):
+        module = load_single_stage_example_module()
+        replay_config = module.PreservedTimeoutReplayConfig(
+            plasma_surf_filename="wout_test.nc",
+            plasma_surf_path="/equilibria/wout_test.nc",
+            stage2_bs_path="/seeds/biot_savart_opt.json",
+            stage2_results_path="/seeds/results.json",
+            mpol=8,
+            ntor=6,
+            nphi=127,
+            ntheta=32,
+            constraint_weight=1.0,
+            constraint_method="penalty",
+            alm_formulation="weighted_sum",
+            max_iterations=30,
+            target_volume=0.10,
+            target_iota=0.15,
+            single_stage_goal_mode="frontier",
+            single_stage_goal_mode_impl="frontier_tradeoff_score_v1",
+            boozer_surface_target_volumes=(0.10,),
+            frontier_iota_reference=0.15,
+            frontier_iota_scale=0.05,
+            frontier_volume_reference=0.10,
+            frontier_volume_scale=0.01,
+            frontier_qs_reference=2.0e-4,
+            frontier_boozer_reference=1.0e-6,
+            frontier_boozer_trust_threshold=1.0e-5,
+            frontier_effective_qs_weight=1.0,
+            frontier_effective_boozer_weight=1.0,
+            frontier_effective_iota_weight=1.0,
+            frontier_effective_volume_weight=1.0,
+        )
+        run_dict = {
+            "search_eval": {
+                "total": 7.5e-4,
+                "base_total": 7.4e-4,
+                "frontier_rank_total": 7.5e-4,
+                "frontier_trust_ok": True,
+                "frontier_boozer_trust_threshold": 1.0e-5,
+                "frontier_boozer_trust_excess": 0.0,
+                "J_volume": -0.2,
+            },
+            "J": 7.5e-4,
+            "intersecting": False,
+            "surface_status": {"success": True},
+            "accepted_hardware_status": {"success": True, "violations": []},
+            "topology_gate_status": {"success": True},
+        }
+        payload = module.build_preserved_timeout_results_payload(
+            replay_config=replay_config,
+            preservation_kind="best_feasible",
+            incumbent_stage="initial",
+            run_dict=run_dict,
+            objective_eval={"J_QS": 2.7e-4, "J_Boozer": 4.8e-7},
+            field_error=3.5e-4,
+            final_iota=0.14997,
+            final_volume=0.09998,
+            hardware_snapshot={
+                "status": {"success": True, "violations": []},
+                "max_curvature": 19.8,
+                "curve_curve_min_dist": 0.0496,
+                "curve_surface_min_dist": 0.067,
+                "surface_vessel_min_dist": 0.082,
+            },
+            coil_length=2.91,
+            accepted_iteration=1,
+        )
+
+        self.assertIsNone(payload["TARGET_VOLUME"])
+        self.assertIsNone(payload["TARGET_IOTA"])
+        self.assertEqual(payload["SINGLE_STAGE_GOAL_MODE_IMPL"], "frontier_tradeoff_score_v1")
+        self.assertEqual(payload["BOOZER_SURFACE_TARGET_VOLUMES"], [0.10])
+        self.assertEqual(payload["FRONTIER_REFERENCE_IOTA"], 0.15)
+        self.assertEqual(payload["FRONTIER_REFERENCE_VOLUME"], 0.10)
+        self.assertTrue(payload["FRONTIER_TRUST_OK"])
 
     def test_validate_boozer_stage_refinement_args_rejects_unsupported_scope(self):
         module = load_single_stage_example_module()
@@ -2326,6 +2453,23 @@ class HardwareConstraintTests(unittest.TestCase):
             "surface_solve_rejects": 0,
             "hardware_rejects": 0,
             "topology_gate_rejects": 0,
+            "surface_status": {"success": True},
+            "intersecting": False,
+            "search_eval": {"total": 1.0},
+            "accepted_hardware_status": {"success": True},
+            "surface_state": {"seed": "anchor"},
+            "J": 1.0,
+            "dJ": np.zeros(2),
+            "search_surface_status": {"success": True},
+            "topology_gate_status": {"enabled": False},
+            "x_prev": np.array([1.0, -1.0]),
+            "best_accepted_incumbent": None,
+            "best_accepted_metric": None,
+            "best_accepted_stage": None,
+            "best_feasible_incumbent": None,
+            "best_feasible_metric": None,
+            "best_feasible_stage": None,
+            "it": 0,
         }
         restore_calls = []
 
@@ -2371,14 +2515,32 @@ class HardwareConstraintTests(unittest.TestCase):
             "surface_solve_rejects": 0,
             "hardware_rejects": 0,
             "topology_gate_rejects": 0,
+            "surface_status": {"success": True},
+            "intersecting": False,
+            "search_eval": {"total": 1.0},
+            "accepted_hardware_status": {"success": True},
+            "surface_state": {"seed": "anchor"},
+            "J": 1.0,
+            "dJ": np.zeros(2),
+            "search_surface_status": {"success": True},
+            "topology_gate_status": {"enabled": False},
+            "x_prev": np.array([1.0, -1.0]),
+            "best_accepted_incumbent": None,
+            "best_accepted_metric": None,
+            "best_accepted_stage": None,
+            "best_feasible_incumbent": None,
+            "best_feasible_metric": None,
+            "best_feasible_stage": None,
+            "it": 0,
         }
 
         def fake_callback(x):
             run_dict["accepted_iterations"] += 1
             run_dict["accepted_x"] = np.asarray(x, dtype=float).copy()
+            run_dict["accepted_hardware_status"] = {"success": True}
 
         def fake_minimize(fun, x0, **kwargs):
-            kwargs["callback"](np.array([1.05, -0.95]))
+            kwargs["callback"](np.array([1.01, -0.99]))
             return SimpleNamespace(nit=1, success=True, message="CONVERGENCE", status=0)
 
         result = module.run_penalty_phase1(
@@ -2402,7 +2564,165 @@ class HardwareConstraintTests(unittest.TestCase):
 
         self.assertTrue(result["continue_search"])
         self.assertFalse(result["local_preservation_preserved_start"])
-        np.testing.assert_allclose(result["next_dofs"], [1.05, -0.95])
+        np.testing.assert_allclose(result["next_dofs"], [1.01, -0.99])
+        self.assertLessEqual(
+            result["local_preservation_radius"],
+            module._PENALTY_FEASIBLE_START_SAFE_STEP_RMS_LIMIT
+            * module._PENALTY_FEASIBLE_START_PHASE2_RADIUS_SCALE,
+        )
+
+    def test_run_penalty_phase1_zero_move_accept_does_not_graduate(self):
+        module = self.load_module()
+        run_dict = {
+            "accepted_iterations": 0,
+            "accepted_x": np.array([1.0, -1.0]),
+            "invalid_state_rejects_total": 0,
+            "surface_solve_rejects": 0,
+            "hardware_rejects": 0,
+            "topology_gate_rejects": 0,
+            "surface_status": {"success": True},
+            "intersecting": False,
+            "search_eval": {"total": 1.0},
+            "accepted_hardware_status": {"success": True},
+            "surface_state": {"seed": "anchor"},
+            "J": 1.0,
+            "dJ": np.zeros(2),
+            "search_surface_status": {"success": True},
+            "topology_gate_status": {"enabled": False},
+            "x_prev": np.array([1.0, -1.0]),
+            "best_accepted_incumbent": None,
+            "best_accepted_metric": None,
+            "best_accepted_stage": None,
+            "best_feasible_incumbent": None,
+            "best_feasible_metric": None,
+            "best_feasible_stage": None,
+            "it": 0,
+        }
+
+        def fake_callback(x):
+            run_dict["accepted_iterations"] += 1
+            run_dict["accepted_x"] = np.asarray(x, dtype=float).copy()
+
+        def fake_minimize(fun, x0, **kwargs):
+            kwargs["callback"](np.array([1.0, -1.0]))
+            return SimpleNamespace(nit=1, success=True, message="CONVERGENCE", status=0)
+
+        with patch.object(module, "_PENALTY_FEASIBLE_START_LOCAL_MAX_ATTEMPTS", 1):
+            result = module.run_penalty_phase1(
+                np.array([1.0, -1.0]),
+                total_maxiter=4,
+                maxcor=5,
+                ftol=1e-15,
+                gtol=1e-15,
+                initial_step_scale=1.0,
+                initial_step_maxiter=0,
+                enable_local_preservation=True,
+                lower_bounds=np.array([-5.0, -5.0]),
+                upper_bounds=np.array([5.0, 5.0]),
+                run_dict=run_dict,
+                objective_fn=lambda x: (0.0, np.zeros_like(x)),
+                callback_fn=fake_callback,
+                normalize_message_fn=lambda *args, **kwargs: "phase1_ok",
+                restore_accepted_state_fn=lambda: None,
+                minimize_fn=fake_minimize,
+            )
+
+        self.assertFalse(result["continue_search"])
+        self.assertTrue(result["local_preservation_preserved_start"])
+        self.assertIn("unsafe_local_accept", result["phase1_termination_message"])
+
+    def test_run_penalty_phase1_rolls_back_unsafe_accept_and_uses_reject_shrink(self):
+        module = self.load_module()
+        run_dict = {
+            "accepted_iterations": 0,
+            "accepted_x": np.array([1.0, -1.0]),
+            "invalid_state_rejects_total": 0,
+            "surface_solve_rejects": 0,
+            "hardware_rejects": 0,
+            "topology_gate_rejects": 0,
+            "surface_status": {"success": True},
+            "intersecting": False,
+            "search_eval": {"total": 1.0},
+            "accepted_hardware_status": {"success": True},
+            "surface_state": {"seed": "anchor"},
+            "J": 1.0,
+            "dJ": np.zeros(2),
+            "search_surface_status": {"success": True},
+            "topology_gate_status": {"enabled": False},
+            "x_prev": np.array([1.0, -1.0]),
+            "best_accepted_incumbent": None,
+            "best_accepted_metric": None,
+            "best_accepted_stage": None,
+            "best_feasible_incumbent": None,
+            "best_feasible_metric": None,
+            "best_feasible_stage": None,
+            "it": 0,
+        }
+        seen_bounds = []
+        attempts = {"count": 0}
+        refresh_calls = []
+
+        def fake_callback(x):
+            run_dict["accepted_iterations"] += 1
+            run_dict["accepted_x"] = np.asarray(x, dtype=float).copy()
+            if attempts["count"] == 1:
+                run_dict["accepted_hardware_status"] = {"success": False}
+                run_dict["invalid_state_rejects_total"] += 1
+            else:
+                run_dict["accepted_hardware_status"] = {"success": True}
+
+        def fake_minimize(fun, x0, **kwargs):
+            attempts["count"] += 1
+            seen_bounds.append(kwargs["bounds"])
+            if attempts["count"] == 1:
+                kwargs["callback"](np.array([1.04, -0.96]))
+            else:
+                kwargs["callback"](np.array([1.01, -0.99]))
+            return SimpleNamespace(nit=1, success=True, message="CONVERGENCE", status=0)
+
+        result = module.run_penalty_phase1(
+            np.array([1.0, -1.0]),
+            total_maxiter=4,
+            maxcor=5,
+            ftol=1e-15,
+            gtol=1e-15,
+            initial_step_scale=1.0,
+            initial_step_maxiter=0,
+            enable_local_preservation=True,
+            lower_bounds=np.array([-5.0, -5.0]),
+            upper_bounds=np.array([5.0, 5.0]),
+            run_dict=run_dict,
+            objective_fn=lambda x: (0.0, np.zeros_like(x)),
+            callback_fn=fake_callback,
+            normalize_message_fn=lambda *args, **kwargs: "phase1_ok",
+            restore_accepted_state_fn=lambda: None,
+            refresh_preserved_timeout_artifacts_fn=lambda: refresh_calls.append("refresh"),
+            minimize_fn=fake_minimize,
+        )
+
+        self.assertEqual(attempts["count"], 2)
+        self.assertEqual(refresh_calls, ["refresh"])
+        self.assertTrue(result["continue_search"])
+        self.assertFalse(result["local_preservation_preserved_start"])
+        np.testing.assert_allclose(result["next_dofs"], [1.01, -0.99])
+        self.assertEqual(seen_bounds[0], [(0.95, 1.05), (-1.05, -0.95)])
+        self.assertEqual(
+            seen_bounds[1],
+            [
+                (
+                    1.0 - module._PENALTY_FEASIBLE_START_REJECT_RADIUS_SHRINK
+                    * module._PENALTY_FEASIBLE_START_LOCAL_RELATIVE_RADIUS,
+                    1.0 + module._PENALTY_FEASIBLE_START_REJECT_RADIUS_SHRINK
+                    * module._PENALTY_FEASIBLE_START_LOCAL_RELATIVE_RADIUS,
+                ),
+                (
+                    -1.0 - module._PENALTY_FEASIBLE_START_REJECT_RADIUS_SHRINK
+                    * module._PENALTY_FEASIBLE_START_LOCAL_RELATIVE_RADIUS,
+                    -1.0 + module._PENALTY_FEASIBLE_START_REJECT_RADIUS_SHRINK
+                    * module._PENALTY_FEASIBLE_START_LOCAL_RELATIVE_RADIUS,
+                ),
+            ],
+        )
 
     def test_build_penalty_phase2_bounds_keeps_local_preservation_radius(self):
         module = self.load_module()
@@ -2479,7 +2799,36 @@ class HardwareConstraintTests(unittest.TestCase):
         self.assertAlmostEqual(ramped["total"], 38.0)
         np.testing.assert_allclose(ramped["grad"], [8.0, 14.0 / 3.0])
 
-    def test_build_total_objective_skips_missing_surface_vessel_term_without_injecting_int(self):
+    def test_build_total_objective_skips_missing_volume_and_surface_vessel_terms(self):
+        module = self.load_module()
+
+        total = module.build_total_objective(
+            FakeAlgebraicObjective(1.0, [1.0, 0.0]),
+            2.0,
+            FakeAlgebraicObjective(3.0, [0.0, 2.0]),
+            4.0,
+            FakeAlgebraicObjective(5.0, [1.0, 1.0]),
+            6.0,
+            None,
+            8.0,
+            FakeAlgebraicObjective(9.0, [0.0, 3.0]),
+            10.0,
+            FakeAlgebraicObjective(11.0, [1.0, -1.0]),
+            12.0,
+            FakeAlgebraicObjective(13.0, [0.5, 0.5]),
+            14.0,
+            FakeAlgebraicObjective(15.0, [2.0, -2.0]),
+            SURF_DIST_WEIGHT=1000.0,
+            JSurfSurf=None,
+        )
+
+        self.assertAlmostEqual(
+            total.J(),
+            1 + 2 * 3 + 4 * 5 + 8 * 9 + 10 * 11 + 12 * 13 + 14 * 15,
+        )
+        np.testing.assert_allclose(total.dJ(), [49.0, 0.0])
+
+    def test_build_total_objective_includes_volume_term_when_present(self):
         module = self.load_module()
 
         total = module.build_total_objective(
@@ -2496,12 +2845,17 @@ class HardwareConstraintTests(unittest.TestCase):
             FakeAlgebraicObjective(11.0, [1.0, -1.0]),
             12.0,
             FakeAlgebraicObjective(13.0, [0.5, 0.5]),
-            SURF_DIST_WEIGHT=1000.0,
+            14.0,
+            FakeAlgebraicObjective(15.0, [2.0, -2.0]),
+            SURF_DIST_WEIGHT=0.0,
             JSurfSurf=None,
         )
 
-        self.assertAlmostEqual(total.J(), 1 + 2*3 + 4*5 + 6*7 + 8*9 + 10*11 + 12*13)
-        np.testing.assert_allclose(total.dJ(), [33.0, 28.0])
+        self.assertAlmostEqual(
+            total.J(),
+            1 + 2 * 3 + 4 * 5 + 6 * 7 + 8 * 9 + 10 * 11 + 12 * 13 + 14 * 15,
+        )
+        np.testing.assert_allclose(total.dJ(), [61.0, 0.0])
 
     def test_build_single_stage_iota_objective_target_mode_uses_quadratic_penalty(self):
         module = self.load_module()
@@ -2518,18 +2872,57 @@ class HardwareConstraintTests(unittest.TestCase):
         self.assertIs(result, target_objective)
         quadratic_penalty.assert_called_once_with(surface_iota, 0.17)
 
-    def test_build_single_stage_iota_objective_frontier_mode_negates_surface_iota(self):
+    def test_build_single_stage_iota_objective_frontier_mode_uses_bounded_reward(self):
         module = self.load_module()
         surface_iota = FakeAlgebraicObjective(0.15, [1.0, -2.0])
+        frontier_goal_config = make_frontier_goal_config(module)
 
         result = module.build_single_stage_iota_objective(
             surface_iota,
             0.17,
             goal_mode="frontier",
+            frontier_goal_config=frontier_goal_config,
         )
 
-        self.assertAlmostEqual(result.J(), -0.15)
-        np.testing.assert_allclose(result.dJ(), [-1.0, 2.0])
+        self.assertAlmostEqual(result.J(), -np.tanh(1.0))
+        np.testing.assert_allclose(result.dJ(), [-8.39948683, 16.79897366])
+
+    def test_build_single_stage_volume_objective_frontier_mode_rewards_larger_volume(self):
+        module = self.load_module()
+        surface_volume = FakeAlgebraicObjective(0.12, [2.0, -1.0])
+        frontier_goal_config = make_frontier_goal_config(module)
+
+        result = module.build_single_stage_volume_objective(
+            surface_volume,
+            goal_mode="frontier",
+            frontier_goal_config=frontier_goal_config,
+        )
+
+        self.assertAlmostEqual(result.J(), -np.tanh(2.0))
+        np.testing.assert_allclose(result.dJ(), [-14.13016434, 7.06508217])
+
+    def test_build_frontier_goal_config_derives_normalized_weights_and_trust_threshold(self):
+        module = self.load_module()
+
+        config = module.build_frontier_goal_config(
+            initial_iota=0.15,
+            initial_volume=0.10,
+            initial_qs_objective=2.0e-4,
+            initial_boozer_objective=6.0e-7,
+            res_weight=1000.0,
+            iotas_weight=100.0,
+        )
+
+        self.assertAlmostEqual(config.iota_reference, 0.15)
+        self.assertAlmostEqual(config.iota_scale, 0.05)
+        self.assertAlmostEqual(config.volume_reference, 0.10)
+        self.assertAlmostEqual(config.volume_scale, 0.01)
+        self.assertAlmostEqual(config.qs_reference, 2.0e-4)
+        self.assertAlmostEqual(config.boozer_reference, 1.0e-6)
+        self.assertAlmostEqual(config.boozer_trust_threshold, 1.0e-5)
+        self.assertAlmostEqual(config.effective_boozer_weight, 1.0)
+        self.assertAlmostEqual(config.effective_iota_weight, 1.0)
+        self.assertAlmostEqual(config.effective_volume_weight, 1.0)
 
     def test_build_single_stage_iota_objective_rejects_invalid_goal_mode(self):
         module = self.load_module()
@@ -4042,12 +4435,17 @@ class CurrentBaselineContractTests(unittest.TestCase):
 
     def test_frontier_goal_mode_warning_message_reports_scale_and_unsaturated_reward(self):
         module = load_single_stage_example_module()
+        frontier_goal_config = make_frontier_goal_config(
+            module,
+            iota_reference=0.15,
+            qs_reference=2.0e-4,
+        )
 
-        warning = module.frontier_goal_mode_warning_message(100.0)
+        warning = module.frontier_goal_mode_warning_message(frontier_goal_config)
 
-        self.assertIn("10-1000x", warning)
-        self.assertIn("750x", warning)
-        self.assertIn("no built-in saturation cap", warning)
+        self.assertIn("normalized tradeoff score", warning)
+        self.assertIn("iota_ref=0.150000", warning)
+        self.assertIn("1.000000e-05", warning)
 
     def test_validate_single_stage_alm_formulation_args_rejects_frontier_thresholded_physics(self):
         module = load_single_stage_example_module()

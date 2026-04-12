@@ -20,6 +20,7 @@ from workflow_runner_common import (  # noqa: E402
     run_command,
     snapshot_single_results_paths,
     timeout_or_none,
+    validate_stage2_seed_not_init_only,
 )
 from banana_opt.artifact_contracts import upgrade_legacy_stage2_artifact_results  # noqa: E402
 
@@ -56,6 +57,15 @@ def parse_args() -> argparse.Namespace:
         "--stage2-bs-path",
         required=True,
         help="Path to the Stage 2 biot_savart_opt.json seed artifact shared by both goal modes.",
+    )
+    parser.add_argument(
+        "--allow-init-only-stage2-seed",
+        action="store_true",
+        help=(
+            "Allow reusing a Stage 2 artifact whose sibling results.json reports "
+            "init_only=true. Disabled by default because init-only smoke seeds can "
+            "land single-stage in the wrong transform basin."
+        ),
     )
     parser.add_argument("--equilibria-dir", default=None)
     parser.add_argument("--output-root", default=str(DEFAULT_OUTPUT_ROOT))
@@ -185,6 +195,12 @@ def load_validated_stage2_seed_metadata(
             f"--plasma-surf-filename requests {expected_surface!r}, but "
             f"{stage2_results_path} reports {actual_surface!r}."
         )
+    validate_stage2_seed_not_init_only(
+        stage2_results_path,
+        stage2_results,
+        owner_label="run_single_stage_goal_mode_comparison.py",
+        allow_init_only=getattr(args, "allow_init_only_stage2_seed", False),
+    )
     return stage2_bs_path, stage2_results_path, stage2_results
 
 
@@ -392,6 +408,9 @@ def _result_metric_subset(results: dict) -> dict:
     return {
         "goal_mode": results.get("SINGLE_STAGE_GOAL_MODE"),
         "goal_mode_impl": results.get("SINGLE_STAGE_GOAL_MODE_IMPL"),
+        "target_iota": results.get("TARGET_IOTA"),
+        "target_volume": results.get("TARGET_VOLUME"),
+        "boozer_surface_target_volumes": results.get("BOOZER_SURFACE_TARGET_VOLUMES"),
         "termination_message": results.get("TERMINATION_MESSAGE"),
         "optimizer_success": results.get("OPTIMIZER_SUCCESS"),
         "final_feasibility_ok": results.get("FINAL_FEASIBILITY_OK"),
@@ -412,6 +431,8 @@ def _result_metric_subset(results: dict) -> dict:
         "surface_solve_rejects": results.get("SURFACE_SOLVE_REJECTS"),
         "best_feasible_available": results.get("BEST_FEASIBLE_AVAILABLE"),
         "best_feasible_stage": results.get("BEST_FEASIBLE_STAGE"),
+        "best_feasible_frontier_rank_objective_j": results.get("BEST_FEASIBLE_FRONTIER_RANK_OBJECTIVE_J"),
+        "best_feasible_frontier_trust_ok": results.get("BEST_FEASIBLE_FRONTIER_TRUST_OK"),
         "best_feasible_final_iota": results.get("BEST_FEASIBLE_FINAL_IOTA"),
         "best_feasible_final_volume": results.get("BEST_FEASIBLE_FINAL_VOLUME"),
         "best_feasible_qa_objective": results.get("BEST_FEASIBLE_QA_OBJECTIVE"),
@@ -427,6 +448,19 @@ def _result_metric_subset(results: dict) -> dict:
         "search_objective_j": results.get("SEARCH_OBJECTIVE_J"),
         "objective_j": results.get("OBJECTIVE_J"),
         "base_objective_j": results.get("BASE_OBJECTIVE_J"),
+        "frontier_rank_objective_j": results.get("FRONTIER_RANK_OBJECTIVE_J"),
+        "frontier_trust_ok": results.get("FRONTIER_TRUST_OK"),
+        "frontier_boozer_trust_threshold": results.get("FRONTIER_BOOZER_TRUST_THRESHOLD"),
+        "frontier_boozer_trust_excess": results.get("FRONTIER_BOOZER_TRUST_EXCESS"),
+        "frontier_trust_rejects": results.get("FRONTIER_TRUST_REJECTS"),
+        "frontier_reference_iota": results.get("FRONTIER_REFERENCE_IOTA"),
+        "frontier_reference_volume": results.get("FRONTIER_REFERENCE_VOLUME"),
+        "frontier_reference_qa": results.get("FRONTIER_REFERENCE_QA"),
+        "frontier_reference_boozer": results.get("FRONTIER_REFERENCE_BOOZER"),
+        "frontier_effective_iota_weight": results.get("FRONTIER_EFFECTIVE_IOTA_WEIGHT"),
+        "frontier_effective_volume_weight": results.get("FRONTIER_EFFECTIVE_VOLUME_WEIGHT"),
+        "frontier_effective_boozer_weight": results.get("FRONTIER_EFFECTIVE_BOOZER_WEIGHT"),
+        "frontier_volume_objective": results.get("FRONTIER_VOLUME_OBJECTIVE"),
     }
 
 
@@ -467,6 +501,7 @@ def build_summary(
         summary["stage2_artifact_plasma_surf_filename"] = stage2_results.get(
             "PLASMA_SURF_FILENAME"
         )
+        summary["stage2_artifact_init_only"] = stage2_results.get("init_only")
         summary["stage2_banana_current_a"] = stage2_results.get("BANANA_CURRENT_A")
         summary["stage2_banana_current_max_a"] = stage2_results.get("BANANA_CURRENT_MAX_A")
     if mode_payloads is None:

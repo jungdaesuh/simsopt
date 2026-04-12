@@ -1,4 +1,5 @@
 import argparse
+import copy
 import hashlib
 import os
 import io
@@ -81,6 +82,7 @@ from workflow_helpers import (
 from workflow_runner_common import load_stage2_artifact_results
 from banana_opt.artifact_contracts import upgrade_legacy_stage2_artifact_results
 from banana_opt.basin_hopping import run_basin_hopping, telemetry_values as basin_telemetry_values
+from banana_opt.basin_hopping import _normalized_step_rms as basin_normalized_step_rms
 from banana_opt.current_contracts import (
     boozer_I_to_physical_current_A,
     physical_current_to_boozer_I,
@@ -152,6 +154,16 @@ _PENALTY_FEASIBLE_START_LOCAL_MAX_ATTEMPTS = int(
 _PENALTY_FEASIBLE_START_LOCAL_RADIUS_SHRINK = float(
     os.environ.get("PENALTY_FEASIBLE_START_LOCAL_RADIUS_SHRINK", "0.5")
 )
+_PENALTY_FEASIBLE_START_REJECT_RADIUS_SHRINK = float(
+    os.environ.get("PENALTY_FEASIBLE_START_REJECT_RADIUS_SHRINK", "0.25")
+)
+_PENALTY_FEASIBLE_START_SAFE_STEP_RMS_LIMIT = float(
+    os.environ.get("PENALTY_FEASIBLE_START_SAFE_STEP_RMS_LIMIT", "0.02")
+)
+_PENALTY_FEASIBLE_START_PHASE2_RADIUS_SCALE = float(
+    os.environ.get("PENALTY_FEASIBLE_START_PHASE2_RADIUS_SCALE", "0.5")
+)
+_PENALTY_FEASIBLE_START_MIN_ACCEPTED_STEP_RMS = 1.0e-6
 SINGLE_STAGE_ALM_GEOMETRY_CONSTRAINT_NAMES = (
     "coil_coil_spacing",
     "coil_surface_spacing",
@@ -585,13 +597,22 @@ def parse_args():
         default=os.environ.get("SINGLE_STAGE_GOAL_MODE", "target"),
         help=(
             "Single-stage physics-goal contract. 'target' preserves the existing target-based "
-            "formulation. 'frontier' enables the first comparison slice of the planned "
-            "frontier path by replacing the target-tracking iota penalty with a monotone "
-            "iota reward while leaving the rest of the workflow unchanged. Defaults to the "
-            "SINGLE_STAGE_GOAL_MODE environment variable when set, otherwise 'target'."
+            "formulation. 'frontier' uses a normalized tradeoff score that rewards higher "
+            "iota and larger volume, penalizes QA error and Boozer residual relative to the "
+            "seed, and rejects candidates whose Boozer residual exceeds the frontier trust "
+            "threshold. Defaults to the SINGLE_STAGE_GOAL_MODE environment variable when set, "
+            "otherwise 'target'."
         ),
     )
-    parser.add_argument("--vol-target", type=float, default=float(os.environ.get("VOL_TARGET", "0.10")))
+    parser.add_argument(
+        "--vol-target",
+        type=float,
+        default=float(os.environ.get("VOL_TARGET", "0.10")),
+        help=(
+            "Outer Boozer-surface target volume used to construct the numerical surface solve. "
+            "In frontier mode this remains a solver reference, not an outer optimization target."
+        ),
+    )
     parser.add_argument(
         "--constraint-weight",
         type=float,
@@ -875,7 +896,15 @@ def parse_args():
         ),
         help="thresholded_physics-mode upper bound for the single-stage length penalty objective.",
     )
-    parser.add_argument("--iota-target", type=float, default=float(os.environ.get("IOTA_TARGET", "0.15")))
+    parser.add_argument(
+        "--iota-target",
+        type=float,
+        default=float(os.environ.get("IOTA_TARGET", "0.15")),
+        help=(
+            "Target-mode iota penalty center and Boozer initialization guess. In frontier mode "
+            "the outer objective no longer targets this value."
+        ),
+    )
     parser.add_argument("--num-tf-coils", type=int, default=int(os.environ.get("NUM_TF_COILS", "20")))
     parser.add_argument(
         "--boozer-stage",
@@ -1479,12 +1508,117 @@ class PreservedTimeoutReplayConfig:
     max_iterations: int | None
     target_volume: float | None
     target_iota: float | None
+    single_stage_goal_mode: str | None = None
+    single_stage_goal_mode_impl: str | None = None
+    boozer_surface_target_volumes: tuple[float, ...] | None = None
+    frontier_iota_reference: float | None = None
+    frontier_iota_scale: float | None = None
+    frontier_volume_reference: float | None = None
+    frontier_volume_scale: float | None = None
+    frontier_qs_reference: float | None = None
+    frontier_boozer_reference: float | None = None
+    frontier_boozer_trust_threshold: float | None = None
+    frontier_effective_qs_weight: float | None = None
+    frontier_effective_boozer_weight: float | None = None
+    frontier_effective_iota_weight: float | None = None
+    frontier_effective_volume_weight: float | None = None
 
 
 @dataclass(frozen=True)
 class PreservedTimeoutALMState:
     penalty: float
     multipliers: np.ndarray
+
+
+@dataclass(frozen=True)
+class FrontierGoalConfig:
+    iota_reference: float
+    iota_scale: float
+    volume_reference: float
+    volume_scale: float
+    qs_reference: float
+    boozer_reference: float
+    boozer_trust_threshold: float
+    effective_qs_weight: float
+    effective_boozer_weight: float
+    effective_iota_weight: float
+    effective_volume_weight: float
+
+
+FRONTIER_GOAL_MODE_IMPL = "frontier_tradeoff_score_v1"
+_FRONTIER_LEGACY_RES_WEIGHT_BASELINE = 1000.0
+_FRONTIER_LEGACY_IOTA_WEIGHT_BASELINE = 100.0
+
+
+class BoundedImprovementReward(Optimizable):
+    """Smooth bounded reward that increases as a metric improves past a reference."""
+
+    def __init__(self, metric_objective, reference, scale):
+        self.metric_objective = metric_objective
+        self.reference = float(reference)
+        self.scale = float(scale)
+        if not np.isfinite(self.reference):
+            raise ValueError("BoundedImprovementReward requires a finite reference")
+        if not np.isfinite(self.scale) or self.scale <= 0.0:
+            raise ValueError("BoundedImprovementReward requires a positive finite scale")
+        depends_on = [metric_objective] if isinstance(metric_objective, Optimizable) else []
+        super().__init__(depends_on=depends_on)
+
+    def _scaled_delta(self):
+        return (float(self.metric_objective.J()) - self.reference) / self.scale
+
+    def J(self):
+        return -np.tanh(self._scaled_delta())
+
+    def dJ(self, partials=False):
+        delta = self._scaled_delta()
+        prefactor = -(1.0 - np.tanh(delta) ** 2) / self.scale
+        if partials:
+            partial_gradient = self.metric_objective.dJ(partials=True)
+            return lambda objective_optimizable: prefactor * np.asarray(
+                partial_gradient(objective_optimizable),
+                dtype=float,
+            )
+        return prefactor * np.asarray(self.metric_objective.dJ(), dtype=float)
+
+
+def _normalized_frontier_weight(raw_weight, legacy_baseline):
+    return float(raw_weight) / float(legacy_baseline)
+
+
+def build_frontier_goal_config(
+    *,
+    initial_iota,
+    initial_volume,
+    initial_qs_objective,
+    initial_boozer_objective,
+    res_weight,
+    iotas_weight,
+):
+    qs_reference = max(abs(float(initial_qs_objective)), 1e-6)
+    boozer_reference = max(abs(float(initial_boozer_objective)), 1e-6)
+    return FrontierGoalConfig(
+        iota_reference=float(initial_iota),
+        iota_scale=max(abs(float(initial_iota)) * 0.25, 0.05),
+        volume_reference=float(initial_volume),
+        volume_scale=max(abs(float(initial_volume)) * 0.10, 0.01),
+        qs_reference=qs_reference,
+        boozer_reference=boozer_reference,
+        boozer_trust_threshold=max(10.0 * boozer_reference, 1e-5),
+        effective_qs_weight=1.0,
+        effective_boozer_weight=_normalized_frontier_weight(
+            res_weight,
+            _FRONTIER_LEGACY_RES_WEIGHT_BASELINE,
+        ),
+        effective_iota_weight=_normalized_frontier_weight(
+            iotas_weight,
+            _FRONTIER_LEGACY_IOTA_WEIGHT_BASELINE,
+        ),
+        effective_volume_weight=_normalized_frontier_weight(
+            iotas_weight,
+            _FRONTIER_LEGACY_IOTA_WEIGHT_BASELINE,
+        ),
+    )
 
 
 PRESERVED_TIMEOUT_REPLAY_CONFIG = PreservedTimeoutReplayConfig(
@@ -1715,6 +1849,76 @@ def final_topology_gate_for_results(init_only, num_surfaces, outer_surface, bfie
     return status
 
 
+def frontier_mode_enabled():
+    return globals().get("SINGLE_STAGE_GOAL_MODE", "target") == "frontier"
+
+
+def current_frontier_goal_mode_impl():
+    return FRONTIER_GOAL_MODE_IMPL if frontier_mode_enabled() else "target"
+
+
+def current_frontier_goal_config():
+    return globals().get("FRONTIER_GOAL_CONFIG")
+
+
+def require_frontier_goal_config(frontier_goal_config):
+    if frontier_goal_config is None:
+        raise ValueError("frontier goal mode requires frontier_goal_config")
+    return frontier_goal_config
+
+
+def measure_frontier_reference_metrics(stage, surface_data, coils):
+    reference_nonqs = [
+        NonQuasiSymmetricRatio(entry["boozer_surface"], BiotSavart(coils))
+        for entry in surface_data
+    ]
+    boozer_residual_cls = BoozerResidualExact if stage == "final" else BoozerResidual
+    reference_boozer = [
+        boozer_residual_cls(entry["boozer_surface"], BiotSavart(coils))
+        for entry in surface_data
+    ]
+    return (
+        float(average_surface_objectives(reference_nonqs).J()),
+        float(average_surface_objectives(reference_boozer).J()),
+    )
+
+
+def evaluate_frontier_trust_status(search_eval):
+    if not frontier_mode_enabled():
+        return {
+            "enabled": False,
+            "ok": None,
+            "residual": None,
+            "threshold": None,
+            "excess": None,
+        }
+    frontier_goal_config = current_frontier_goal_config()
+    if frontier_goal_config is None:
+        raise ValueError("frontier mode requires FRONTIER_GOAL_CONFIG")
+    residual = float(search_eval["J_Boozer"])
+    threshold = float(frontier_goal_config.boozer_trust_threshold)
+    excess = max(residual - threshold, 0.0)
+    return {
+        "enabled": True,
+        "ok": bool(np.isfinite(residual) and residual <= threshold),
+        "residual": residual,
+        "threshold": threshold,
+        "excess": excess,
+    }
+
+
+def annotate_frontier_search_eval(search_eval):
+    if not frontier_mode_enabled():
+        return search_eval
+    frontier_status = evaluate_frontier_trust_status(search_eval)
+    annotated = dict(search_eval)
+    annotated["frontier_rank_total"] = float(search_eval["total"])
+    annotated["frontier_trust_ok"] = frontier_status["ok"]
+    annotated["frontier_boozer_trust_threshold"] = frontier_status["threshold"]
+    annotated["frontier_boozer_trust_excess"] = frontier_status["excess"]
+    return annotated
+
+
 def preserved_incumbent_eligible(run_dict):
     surface_status = run_dict.get("surface_status")
     search_eval = run_dict.get("search_eval")
@@ -1723,6 +1927,8 @@ def preserved_incumbent_eligible(run_dict):
     if bool(run_dict.get("intersecting", False)):
         return False
     if search_eval is None or "total" not in search_eval:
+        return False
+    if frontier_mode_enabled() and not bool(search_eval.get("frontier_trust_ok", False)):
         return False
     return bool(np.isfinite(float(search_eval["total"])))
 
@@ -1735,7 +1941,10 @@ def refinement_eligible_incumbent(run_dict):
 
 
 def accepted_search_metric(run_dict):
-    return float(run_dict["search_eval"]["total"])
+    search_eval = run_dict["search_eval"]
+    if frontier_mode_enabled():
+        return float(search_eval.get("frontier_rank_total", search_eval["total"]))
+    return float(search_eval["total"])
 
 
 def maybe_update_best_accepted_incumbent(run_dict, incumbent_stage):
@@ -1764,18 +1973,61 @@ def maybe_update_best_feasible_incumbent(run_dict, incumbent_stage):
     return True
 
 
-def frontier_goal_mode_warning_message(iotas_weight):
+def frontier_goal_mode_warning_message(frontier_goal_config):
     return (
-        "WARNING: --single-stage-goal-mode=frontier is a partial implementation: "
-        "only the iota term is rewritten as a monotone reward (-iota); volume reward, "
-        "QA/Boozer scalarization, and search-time hardware policy are unchanged. "
-        f"IOTAS_WEIGHT={iotas_weight} was tuned for the quadratic target penalty and "
-        "may need to be retuned for the linear iota reward "
-        "(its scale can be ~10-1000x larger depending on distance to target, "
-        "for example about 750x at iota=0.15 and target=0.17). "
-        "The frontier reward also has no built-in saturation cap, so early "
-        "frontier weighted-sum ALM runs should be treated as exploratory."
+        "INFO: --single-stage-goal-mode=frontier uses a normalized tradeoff score: "
+        "QA and Boozer residual are normalized to the seed, iota and volume use bounded "
+        f"improvement rewards referenced to the seed (iota_ref={frontier_goal_config.iota_reference:.6f}, "
+        f"volume_ref={frontier_goal_config.volume_reference:.6f}), and Boozer residuals above "
+        f"{frontier_goal_config.boozer_trust_threshold:.6e} are treated as untrustworthy and rejected. "
+        "The legacy --res-weight and --iotas-weight inputs are rescaled relative to their historical "
+        "defaults so matched target/frontier runs stay in the same rough objective range."
     )
+
+
+def resolve_single_stage_goal_objective_terms(
+    *,
+    goal_mode,
+    frontier_goal_config,
+    JnonQSRatio,
+    JBoozerResidual,
+    RES_WEIGHT,
+    IOTAS_WEIGHT,
+):
+    if goal_mode == "target":
+        return {
+            "JnonQSRatioObjective": JnonQSRatio,
+            "JBoozerResidualObjective": JBoozerResidual,
+            "effective_res_weight": RES_WEIGHT,
+            "effective_iotas_weight": IOTAS_WEIGHT,
+            "effective_volume_weight": 0.0,
+        }
+    if goal_mode == "frontier":
+        frontier_goal_config = require_frontier_goal_config(frontier_goal_config)
+        return {
+            "JnonQSRatioObjective": (1.0 / frontier_goal_config.qs_reference) * JnonQSRatio,
+            "JBoozerResidualObjective": (1.0 / frontier_goal_config.boozer_reference)
+            * JBoozerResidual,
+            "effective_res_weight": frontier_goal_config.effective_boozer_weight,
+            "effective_iotas_weight": frontier_goal_config.effective_iota_weight,
+            "effective_volume_weight": frontier_goal_config.effective_volume_weight,
+        }
+    raise ValueError(f"Unsupported single-stage goal mode {goal_mode!r}")
+
+
+def resolve_current_surface_objective_terms(RES_WEIGHT, IOTAS_WEIGHT):
+    objective_nonqs = JnonQSRatioObjective
+    objective_boozer = JBoozerResidualObjective
+    return {
+        "JNonQSObjective": objective_nonqs,
+        "JBoozerObjective": objective_boozer,
+        "effective_res_weight": RES_WEIGHT if objective_boozer is None else EFFECTIVE_RES_WEIGHT,
+        "effective_iotas_weight": (
+            IOTAS_WEIGHT if objective_nonqs is None else EFFECTIVE_IOTAS_WEIGHT
+        ),
+        "JVolume": JVolume,
+        "effective_volume_weight": 0.0 if JVolume is None else EFFECTIVE_VOLUME_WEIGHT,
+    }
 
 
 def normalize_optimizer_termination_message(
@@ -1813,31 +2065,45 @@ def normalize_optimizer_termination_message(
     return f"ABNORMAL: {'; '.join(details)}"
 
 
-def build_single_stage_iota_objective(surface_iota_term, iota_target, *, goal_mode):
+def build_single_stage_iota_objective(
+    surface_iota_term,
+    iota_target,
+    *,
+    goal_mode,
+    frontier_goal_config=None,
+):
     """Construct the iota term used in the single-stage scalar objective.
 
     In ``target`` mode this returns ``QuadraticPenalty(iota, iota_target)``,
     whose ``J`` is ``0.5 * (iota - iota_target)**2`` (typically O(1e-3) near the
-    target). In ``frontier`` mode this returns ``(-1.0) * Iotas(...)``, whose
-    ``J`` is ``-iota`` (typically O(1e-1)); minimizing this term inside the
-    scalar objective therefore maximizes ``iota`` as a monotone reward rather
-    than tracking a target.
-
-    The two modes have different magnitudes by ~10-1000x depending on how close
-    the current design is to the target. Near convergence the ratio can be
-    several hundred-fold; for example ``iota=0.15`` and ``iota_target=0.17``
-    gives ``|(-iota)| / (0.5 * (iota - target)^2) = 750``. ``IOTAS_WEIGHT``
-    tuned for the target-mode quadratic penalty will therefore skew the balance
-    against the other physics and engineering terms in frontier mode. The
-    frontier reward also has no built-in saturation cap, so callers are
-    expected to retune ``IOTAS_WEIGHT`` and treat early frontier ALM runs as
-    exploratory. ``iota_target`` is unused in frontier mode but is accepted for
-    caller-API symmetry.
+    target). In ``frontier`` mode this returns a smooth bounded reward that
+    measures improvement relative to the fixed seed/reference iota. Minimizing
+    this term therefore rewards higher iota without introducing an explicit
+    outer target or an unbounded linear ``-iota`` direction. ``iota_target`` is
+    unused in frontier mode and is accepted only for caller-API symmetry.
     """
     if goal_mode == "target":
         return QuadraticPenalty(surface_iota_term, iota_target)
     if goal_mode == "frontier":
-        return (-1.0) * surface_iota_term
+        frontier_goal_config = require_frontier_goal_config(frontier_goal_config)
+        return BoundedImprovementReward(
+            surface_iota_term,
+            frontier_goal_config.iota_reference,
+            frontier_goal_config.iota_scale,
+        )
+    raise ValueError(f"Unsupported single-stage goal mode {goal_mode!r}")
+
+
+def build_single_stage_volume_objective(surface_volume_term, *, goal_mode, frontier_goal_config=None):
+    if goal_mode == "target":
+        return None
+    if goal_mode == "frontier":
+        frontier_goal_config = require_frontier_goal_config(frontier_goal_config)
+        return BoundedImprovementReward(
+            surface_volume_term,
+            frontier_goal_config.volume_reference,
+            frontier_goal_config.volume_scale,
+        )
     raise ValueError(f"Unsupported single-stage goal mode {goal_mode!r}")
 
 
@@ -1868,6 +2134,8 @@ def build_best_feasible_results_summary(
             "BEST_FEASIBLE_BASE_OBJECTIVE_J": None,
             "BEST_FEASIBLE_QA_OBJECTIVE": None,
             "BEST_FEASIBLE_BOOZER_OBJECTIVE": None,
+            "BEST_FEASIBLE_FRONTIER_RANK_OBJECTIVE_J": None,
+            "BEST_FEASIBLE_FRONTIER_TRUST_OK": None,
             "BEST_FEASIBLE_FINAL_IOTA": None,
             "BEST_FEASIBLE_FINAL_VOLUME": None,
             "BEST_FEASIBLE_CURVE_CURVE_MIN_DIST": None,
@@ -1909,6 +2177,12 @@ def build_best_feasible_results_summary(
             "BEST_FEASIBLE_BOOZER_OBJECTIVE": (
                 float(search_eval.get("J_Boozer")) if search_eval.get("J_Boozer") is not None else None
             ),
+            "BEST_FEASIBLE_FRONTIER_RANK_OBJECTIVE_J": (
+                float(search_eval.get("frontier_rank_total"))
+                if search_eval.get("frontier_rank_total") is not None
+                else None
+            ),
+            "BEST_FEASIBLE_FRONTIER_TRUST_OK": search_eval.get("frontier_trust_ok"),
             "BEST_FEASIBLE_FINAL_IOTA": float(surface_status["iotas"][-1]),
             "BEST_FEASIBLE_FINAL_VOLUME": float(surface_status["volumes"][-1]),
             "BEST_FEASIBLE_CURVE_CURVE_MIN_DIST": float(hardware_snapshot["curve_curve_min_dist"]),
@@ -1946,6 +2220,7 @@ def build_single_stage_objective_bundle(
     vessel_surface=None,
     vessel_gap_threshold=0.0,
     goal_mode="target",
+    frontier_goal_config=None,
 ):
     surface_iota_terms = [Iotas(entry["boozer_surface"]) for entry in surface_data]
     nonQSs = [NonQuasiSymmetricRatio(entry["boozer_surface"], BiotSavart(coils)) for entry in surface_data]
@@ -1957,15 +2232,30 @@ def build_single_stage_objective_bundle(
     curvelength = CurveLength(banana_curves[0])
     if length_target is None:
         length_target = curvelength.J()
+    outer_surface = surface_data[-1]["boozer_surface"].surface
+    surface_volume_term = Volume(outer_surface)
     Jiota = build_single_stage_iota_objective(
         surface_iota_terms[-1],
         iota_target,
         goal_mode=goal_mode,
+        frontier_goal_config=frontier_goal_config,
+    )
+    JVolume = build_single_stage_volume_objective(
+        surface_volume_term,
+        goal_mode=goal_mode,
+        frontier_goal_config=frontier_goal_config,
     )
     JnonQSRatio = average_surface_objectives(nonQSs)
     JBoozerResidual = average_surface_objectives(brs)
+    goal_objective_terms = resolve_single_stage_goal_objective_terms(
+        goal_mode=goal_mode,
+        frontier_goal_config=frontier_goal_config,
+        JnonQSRatio=JnonQSRatio,
+        JBoozerResidual=JBoozerResidual,
+        RES_WEIGHT=RES_WEIGHT,
+        IOTAS_WEIGHT=IOTAS_WEIGHT,
+    )
     JCurveLength = QuadraticPenalty(curvelength, length_target, "max")
-    outer_surface = surface_data[-1]["boozer_surface"].surface
     JCurveCurve = CurveCurveDistance(curves, CC_DIST)
     JCurveSurface = CurveSurfaceDistance(curves, outer_surface, CS_DIST)
     JSurfSurf = (
@@ -1975,11 +2265,13 @@ def build_single_stage_objective_bundle(
     )
     JCurvature = LpCurveCurvature(banana_curves[0], 2, CURVATURE_THRESHOLD)
     JF = build_total_objective(
-        JnonQSRatio,
-        RES_WEIGHT,
-        JBoozerResidual,
-        IOTAS_WEIGHT,
+        goal_objective_terms["JnonQSRatioObjective"],
+        goal_objective_terms["effective_res_weight"],
+        goal_objective_terms["JBoozerResidualObjective"],
+        goal_objective_terms["effective_iotas_weight"],
         Jiota,
+        goal_objective_terms["effective_volume_weight"],
+        JVolume,
         LENGTH_WEIGHT,
         JCurveLength,
         CC_WEIGHT,
@@ -1998,8 +2290,16 @@ def build_single_stage_objective_bundle(
         "curvelength": curvelength,
         "length_target": length_target,
         "Jiota": Jiota,
+        "surface_volume_term": surface_volume_term,
+        "JVolume": JVolume,
         "JnonQSRatio": JnonQSRatio,
+        "JnonQSRatioObjective": goal_objective_terms["JnonQSRatioObjective"],
         "JBoozerResidual": JBoozerResidual,
+        "JBoozerResidualObjective": goal_objective_terms["JBoozerResidualObjective"],
+        "effective_res_weight": goal_objective_terms["effective_res_weight"],
+        "effective_iotas_weight": goal_objective_terms["effective_iotas_weight"],
+        "effective_volume_weight": goal_objective_terms["effective_volume_weight"],
+        "frontier_goal_config": frontier_goal_config,
         "JCurveLength": JCurveLength,
         "JCurveCurve": JCurveCurve,
         "JCurveSurface": JCurveSurface,
@@ -2014,9 +2314,17 @@ def apply_single_stage_objective_bundle(objective_bundle):
     global nonQSs
     global brs
     global curvelength
+    global surface_volume_term
     global Jiota
+    global JVolume
     global JnonQSRatio
+    global JnonQSRatioObjective
     global JBoozerResidual
+    global JBoozerResidualObjective
+    global EFFECTIVE_RES_WEIGHT
+    global EFFECTIVE_IOTAS_WEIGHT
+    global EFFECTIVE_VOLUME_WEIGHT
+    global FRONTIER_GOAL_CONFIG
     global JCurveLength
     global JCurveCurve
     global JCurveSurface
@@ -2028,9 +2336,17 @@ def apply_single_stage_objective_bundle(objective_bundle):
     nonQSs = objective_bundle["nonQSs"]
     brs = objective_bundle["brs"]
     curvelength = objective_bundle["curvelength"]
+    surface_volume_term = objective_bundle["surface_volume_term"]
     Jiota = objective_bundle["Jiota"]
+    JVolume = objective_bundle["JVolume"]
     JnonQSRatio = objective_bundle["JnonQSRatio"]
+    JnonQSRatioObjective = objective_bundle["JnonQSRatioObjective"]
     JBoozerResidual = objective_bundle["JBoozerResidual"]
+    JBoozerResidualObjective = objective_bundle["JBoozerResidualObjective"]
+    EFFECTIVE_RES_WEIGHT = objective_bundle["effective_res_weight"]
+    EFFECTIVE_IOTAS_WEIGHT = objective_bundle["effective_iotas_weight"]
+    EFFECTIVE_VOLUME_WEIGHT = objective_bundle["effective_volume_weight"]
+    FRONTIER_GOAL_CONFIG = objective_bundle["frontier_goal_config"]
     JCurveLength = objective_bundle["JCurveLength"]
     JCurveCurve = objective_bundle["JCurveCurve"]
     JCurveSurface = objective_bundle["JCurveSurface"]
@@ -2052,6 +2368,7 @@ def refresh_accepted_search_state(run_dict, accepted_stage):
     run_dict["J"] = current_search_eval["total"]
     run_dict["dJ"] = current_search_eval["grad"].copy()
     run_dict["search_eval"] = current_search_eval
+    run_dict["frontier_trust_status"] = evaluate_frontier_trust_status(current_search_eval)
     run_dict["accepted_boozer_stage"] = accepted_stage
     run_dict["x_prev"] = run_dict["accepted_x"].copy()
     run_dict["trial_hardware_status"] = None
@@ -2342,6 +2659,7 @@ def _build_penalty_phase1_result(
     local_preservation_preserved_start,
     local_preservation_attempts,
     local_preservation_radius,
+    local_preservation_step_rms,
 ):
     return {
         "used_phase1": bool(used_phase1),
@@ -2356,6 +2674,82 @@ def _build_penalty_phase1_result(
         ),
         "local_preservation_attempts": int(local_preservation_attempts),
         "local_preservation_radius": local_preservation_radius,
+        "phase2_local_preservation_radius": local_preservation_radius,
+        "local_preservation_step_rms": local_preservation_step_rms,
+    }
+
+
+def snapshot_penalty_phase1_anchor(run_dict):
+    return {
+        "incumbent": snapshot_single_stage_incumbent_state(run_dict),
+        "accepted_iterations": int(run_dict.get("accepted_iterations", 0)),
+        "x_prev": np.asarray(
+            run_dict.get("x_prev", run_dict["accepted_x"]),
+            dtype=float,
+        ).copy(),
+        "intersecting": bool(run_dict.get("intersecting", False)),
+        "accepted_boozer_stage": run_dict.get("accepted_boozer_stage"),
+        "frontier_trust_status": copy.deepcopy(run_dict.get("frontier_trust_status")),
+        "best_accepted_incumbent": copy.deepcopy(run_dict.get("best_accepted_incumbent")),
+        "best_accepted_metric": run_dict.get("best_accepted_metric"),
+        "best_accepted_stage": copy.deepcopy(run_dict.get("best_accepted_stage")),
+        "best_feasible_incumbent": copy.deepcopy(run_dict.get("best_feasible_incumbent")),
+        "best_feasible_metric": run_dict.get("best_feasible_metric"),
+        "best_feasible_stage": copy.deepcopy(run_dict.get("best_feasible_stage")),
+        "it": int(run_dict.get("it", 0)),
+    }
+
+
+def restore_penalty_phase1_anchor(run_dict, anchor_state):
+    restore_single_stage_incumbent_state(run_dict, anchor_state["incumbent"])
+    run_dict["accepted_iterations"] = int(anchor_state["accepted_iterations"])
+    run_dict["x_prev"] = np.asarray(anchor_state["x_prev"], dtype=float).copy()
+    run_dict["intersecting"] = bool(anchor_state["intersecting"])
+    run_dict["accepted_boozer_stage"] = anchor_state["accepted_boozer_stage"]
+    run_dict["frontier_trust_status"] = copy.deepcopy(
+        anchor_state["frontier_trust_status"]
+    )
+    run_dict["best_accepted_incumbent"] = copy.deepcopy(
+        anchor_state["best_accepted_incumbent"]
+    )
+    run_dict["best_accepted_metric"] = anchor_state["best_accepted_metric"]
+    run_dict["best_accepted_stage"] = copy.deepcopy(anchor_state["best_accepted_stage"])
+    run_dict["best_feasible_incumbent"] = copy.deepcopy(
+        anchor_state["best_feasible_incumbent"]
+    )
+    run_dict["best_feasible_metric"] = anchor_state["best_feasible_metric"]
+    run_dict["best_feasible_stage"] = copy.deepcopy(anchor_state["best_feasible_stage"])
+    run_dict["it"] = int(anchor_state["it"])
+    run_dict["trial_hardware_status"] = None
+
+
+def evaluate_penalty_phase1_local_accept(anchor_x, run_dict):
+    accepted_x = np.asarray(run_dict["accepted_x"], dtype=float)
+    step_rms = basin_normalized_step_rms(anchor_x, accepted_x)
+    meaningful_step = bool(
+        np.isfinite(step_rms)
+        and step_rms > _PENALTY_FEASIBLE_START_MIN_ACCEPTED_STEP_RMS
+    )
+    refinement_ready = refinement_eligible_incumbent(run_dict)
+    safe_local_step = bool(
+        meaningful_step and step_rms <= _PENALTY_FEASIBLE_START_SAFE_STEP_RMS_LIMIT
+    )
+    phase2_radius = None
+    if safe_local_step:
+        phase2_radius = max(
+            _PENALTY_FEASIBLE_START_MIN_ACCEPTED_STEP_RMS,
+            min(
+                step_rms,
+                _PENALTY_FEASIBLE_START_SAFE_STEP_RMS_LIMIT
+                * _PENALTY_FEASIBLE_START_PHASE2_RADIUS_SCALE,
+            ),
+        )
+    return {
+        "step_rms": float(step_rms),
+        "meaningful_step": meaningful_step,
+        "refinement_ready": refinement_ready,
+        "safe_local_accept": bool(refinement_ready and safe_local_step),
+        "phase2_radius": phase2_radius,
     }
 
 
@@ -2421,9 +2815,13 @@ def build_penalty_phase2_bounds(
         or phase1_result.get("local_preservation_preserved_start", False)
     ):
         return build_scipy_bounds(lower_bounds, upper_bounds)
+    local_radius = phase1_result.get(
+        "phase2_local_preservation_radius",
+        phase1_result.get("local_preservation_radius"),
+    )
     return build_local_relative_bounds(
         anchor_x,
-        phase1_result.get("local_preservation_radius"),
+        local_radius,
         lower_bounds,
         upper_bounds,
     )
@@ -2446,6 +2844,7 @@ def run_penalty_phase1(
     callback_fn,
     normalize_message_fn,
     restore_accepted_state_fn,
+    refresh_preserved_timeout_artifacts_fn=None,
     minimize_fn=minimize,
 ):
     settings = resolve_penalty_phase1_settings(
@@ -2466,6 +2865,7 @@ def run_penalty_phase1(
             local_preservation_preserved_start=False,
             local_preservation_attempts=0,
             local_preservation_radius=None,
+            local_preservation_step_rms=None,
         )
 
     phase1_iterations = 0
@@ -2473,14 +2873,17 @@ def run_penalty_phase1(
     remaining_maxiter = settings["phase1_maxiter"]
     local_attempts_used = 0
     local_radius = settings["local_relative_radius"]
-    accepted_before_phase1 = int(run_dict.get("accepted_iterations", 0))
     phase1_success = False
-    last_result = None
 
     while remaining_maxiter > 0:
         local_attempts_used += 1
         restore_accepted_state_fn()
+        anchor_state = snapshot_penalty_phase1_anchor(run_dict)
         anchor_x = np.asarray(run_dict["accepted_x"], dtype=float).copy()
+        accepted_before_attempt = int(run_dict.get("accepted_iterations", 0))
+        invalid_rejects_before_attempt = int(
+            run_dict.get("invalid_state_rejects_total", 0)
+        )
         phase1_scale = settings["phase1_scale"]
         phase1_fun, phase1_callback, x0, bounds = _build_penalty_phase1_problem(
             anchor_x,
@@ -2524,24 +2927,45 @@ def run_penalty_phase1(
             if settings["use_local_bounds"]
             else attempt_message
         )
-        if int(run_dict.get("accepted_iterations", 0)) > accepted_before_phase1:
-            return _build_penalty_phase1_result(
-                used_phase1=True,
-                phase1_iterations=phase1_iterations,
-                phase1_termination_message="; ".join(phase1_messages),
-                phase1_success=phase1_success,
-                continue_search=True,
-                next_dofs=run_dict["accepted_x"],
-                local_preservation_used=settings["use_local_bounds"],
-                local_preservation_preserved_start=False,
-                local_preservation_attempts=local_attempts_used,
-                local_preservation_radius=local_radius,
+        if int(run_dict.get("accepted_iterations", 0)) > accepted_before_attempt:
+            accept_summary = evaluate_penalty_phase1_local_accept(anchor_x, run_dict)
+            if accept_summary["safe_local_accept"]:
+                return _build_penalty_phase1_result(
+                    used_phase1=True,
+                    phase1_iterations=phase1_iterations,
+                    phase1_termination_message="; ".join(phase1_messages),
+                    phase1_success=phase1_success,
+                    continue_search=True,
+                    next_dofs=run_dict["accepted_x"],
+                    local_preservation_used=settings["use_local_bounds"],
+                    local_preservation_preserved_start=False,
+                    local_preservation_attempts=local_attempts_used,
+                    local_preservation_radius=accept_summary["phase2_radius"],
+                    local_preservation_step_rms=accept_summary["step_rms"],
+                )
+            phase1_messages.append(
+                "unsafe_local_accept("
+                f"step_rms={accept_summary['step_rms']:.3e}, "
+                f"meaningful={accept_summary['meaningful_step']}, "
+                f"refinement_ready={accept_summary['refinement_ready']})"
             )
+            restore_penalty_phase1_anchor(run_dict, anchor_state)
+            restore_accepted_state_fn()
+            if refresh_preserved_timeout_artifacts_fn is not None:
+                refresh_preserved_timeout_artifacts_fn()
         if not settings["use_local_bounds"]:
             break
         if local_attempts_used >= settings["local_max_attempts"]:
             break
-        local_radius *= _PENALTY_FEASIBLE_START_LOCAL_RADIUS_SHRINK
+        invalid_rejects_delta = int(run_dict.get("invalid_state_rejects_total", 0)) - (
+            invalid_rejects_before_attempt
+        )
+        shrink_factor = (
+            _PENALTY_FEASIBLE_START_REJECT_RADIUS_SHRINK
+            if invalid_rejects_delta > 0
+            else _PENALTY_FEASIBLE_START_LOCAL_RADIUS_SHRINK
+        )
+        local_radius *= shrink_factor
 
     restore_accepted_state_fn()
     if settings["use_local_bounds"]:
@@ -2557,6 +2981,7 @@ def run_penalty_phase1(
             local_preservation_preserved_start=True,
             local_preservation_attempts=local_attempts_used,
             local_preservation_radius=local_radius,
+            local_preservation_step_rms=None,
         )
 
     return _build_penalty_phase1_result(
@@ -2570,6 +2995,7 @@ def run_penalty_phase1(
         local_preservation_preserved_start=False,
         local_preservation_attempts=0,
         local_preservation_radius=None,
+        local_preservation_step_rms=None,
     )
 
 
@@ -2591,13 +3017,14 @@ def evaluate_total_objective(
     JSurfSurf=None,
     SURF_DIST_WEIGHT=0.0,
 ):
+    objective_terms = resolve_current_surface_objective_terms(RES_WEIGHT, IOTAS_WEIGHT)
     return _evaluate_total_objective_impl(
         surface_weights,
         nonQSs,
         brs,
-        RES_WEIGHT,
+        objective_terms["effective_res_weight"],
         Jiota,
-        IOTAS_WEIGHT,
+        objective_terms["effective_iotas_weight"],
         JCurveLength,
         LENGTH_WEIGHT,
         JCurveCurve,
@@ -2608,6 +3035,10 @@ def evaluate_total_objective(
         CURVATURE_WEIGHT,
         JSurfSurf=JSurfSurf,
         SURF_DIST_WEIGHT=SURF_DIST_WEIGHT,
+        JNonQSObjective=objective_terms["JNonQSObjective"],
+        JBoozerObjective=objective_terms["JBoozerObjective"],
+        JVolume=objective_terms["JVolume"],
+        VOLUME_WEIGHT=objective_terms["effective_volume_weight"],
     )
 
 
@@ -2621,18 +3052,23 @@ def evaluate_base_objective(
     JCurveLength,
     LENGTH_WEIGHT,
 ):
+    objective_terms = resolve_current_surface_objective_terms(RES_WEIGHT, IOTAS_WEIGHT)
     return _evaluate_base_objective_impl(
         surface_weights,
         nonQSs,
         brs,
-        RES_WEIGHT,
+        objective_terms["effective_res_weight"],
         Jiota,
-        IOTAS_WEIGHT,
+        objective_terms["effective_iotas_weight"],
+        objective_terms["JVolume"],
+        objective_terms["effective_volume_weight"],
         JCurveLength,
         LENGTH_WEIGHT,
         alm_formulation=(
             ALM_FORMULATION if CONSTRAINT_METHOD == "alm" else "weighted_sum"
         ),
+        JNonQSObjective=objective_terms["JNonQSObjective"],
+        JBoozerObjective=objective_terms["JBoozerObjective"],
     )
 
 
@@ -2652,13 +3088,16 @@ def evaluate_alm_objective(
     penalty,
     JSurfSurf=None,
 ):
+    objective_terms = resolve_current_surface_objective_terms(RES_WEIGHT, IOTAS_WEIGHT)
     return _evaluate_alm_objective_impl(
         surface_weights,
         nonQSs,
         brs,
-        RES_WEIGHT,
+        objective_terms["effective_res_weight"],
         Jiota,
-        IOTAS_WEIGHT,
+        objective_terms["effective_iotas_weight"],
+        objective_terms["JVolume"],
+        objective_terms["effective_volume_weight"],
         JCurveLength,
         LENGTH_WEIGHT,
         JCurveCurve,
@@ -2691,12 +3130,33 @@ def evaluate_alm_objective(
         boozer_threshold=args.alm_boozer_threshold,
         iota_penalty_threshold=args.alm_iota_penalty_threshold,
         length_penalty_threshold=args.alm_length_penalty_threshold,
+        JNonQSObjective=objective_terms["JNonQSObjective"],
+        JBoozerObjective=objective_terms["JBoozerObjective"],
     )
 
 
 def evaluate_search_objective(surface_weights):
     if globals().get("CONSTRAINT_METHOD") == "alm":
-        return evaluate_alm_objective(
+        return annotate_frontier_search_eval(
+            evaluate_alm_objective(
+                surface_weights,
+                nonQSs,
+                brs,
+                RES_WEIGHT,
+                Jiota,
+                IOTAS_WEIGHT,
+                JCurveLength,
+                LENGTH_WEIGHT,
+                JCurveCurve,
+                JCurveSurface,
+                JCurvature,
+                ALM_MULTIPLIERS,
+                ALM_PENALTY,
+                JSurfSurf=JSurfSurf,
+            )
+        )
+    return annotate_frontier_search_eval(
+        evaluate_total_objective(
             surface_weights,
             nonQSs,
             brs,
@@ -2706,29 +3166,14 @@ def evaluate_search_objective(surface_weights):
             JCurveLength,
             LENGTH_WEIGHT,
             JCurveCurve,
+            CC_WEIGHT,
             JCurveSurface,
+            CS_WEIGHT,
             JCurvature,
-            ALM_MULTIPLIERS,
-            ALM_PENALTY,
+            CURVATURE_WEIGHT,
             JSurfSurf=JSurfSurf,
+            SURF_DIST_WEIGHT=SURF_DIST_WEIGHT,
         )
-    return evaluate_total_objective(
-        surface_weights,
-        nonQSs,
-        brs,
-        RES_WEIGHT,
-        Jiota,
-        IOTAS_WEIGHT,
-        JCurveLength,
-        LENGTH_WEIGHT,
-        JCurveCurve,
-        CC_WEIGHT,
-        JCurveSurface,
-        CS_WEIGHT,
-        JCurvature,
-        CURVATURE_WEIGHT,
-        JSurfSurf=JSurfSurf,
-        SURF_DIST_WEIGHT=SURF_DIST_WEIGHT,
     )
 
 
@@ -2826,6 +3271,14 @@ def current_preserved_timeout_replay_config() -> PreservedTimeoutReplayConfig:
     replay_config = globals().get("PRESERVED_TIMEOUT_REPLAY_CONFIG", PRESERVED_TIMEOUT_REPLAY_CONFIG)
     stage2_bs_path = globals().get("stage2_bs_path")
     stage2_results_path = globals().get("stage2_results_path")
+    frontier_goal_config = globals().get("FRONTIER_GOAL_CONFIG", replay_config)
+    surface_data_value = globals().get("surface_data")
+
+    def frontier_replay_value(replay_attr, config_attr):
+        if isinstance(frontier_goal_config, FrontierGoalConfig):
+            return getattr(frontier_goal_config, config_attr)
+        return getattr(replay_config, replay_attr)
+
     return PreservedTimeoutReplayConfig(
         plasma_surf_filename=globals().get("plasma_surf_filename", replay_config.plasma_surf_filename),
         plasma_surf_path=globals().get("file_loc", replay_config.plasma_surf_path),
@@ -2845,6 +3298,45 @@ def current_preserved_timeout_replay_config() -> PreservedTimeoutReplayConfig:
         max_iterations=globals().get("MAXITER", replay_config.max_iterations),
         target_volume=globals().get("vol_target", replay_config.target_volume),
         target_iota=globals().get("iota_target", replay_config.target_iota),
+        single_stage_goal_mode=globals().get("SINGLE_STAGE_GOAL_MODE", replay_config.single_stage_goal_mode),
+        single_stage_goal_mode_impl=current_frontier_goal_mode_impl(),
+        boozer_surface_target_volumes=(
+            replay_config.boozer_surface_target_volumes
+            if surface_data_value is None
+            else tuple(float(entry["target_volume"]) for entry in surface_data_value)
+        ),
+        frontier_iota_reference=frontier_replay_value("frontier_iota_reference", "iota_reference"),
+        frontier_iota_scale=frontier_replay_value("frontier_iota_scale", "iota_scale"),
+        frontier_volume_reference=frontier_replay_value(
+            "frontier_volume_reference",
+            "volume_reference",
+        ),
+        frontier_volume_scale=frontier_replay_value("frontier_volume_scale", "volume_scale"),
+        frontier_qs_reference=frontier_replay_value("frontier_qs_reference", "qs_reference"),
+        frontier_boozer_reference=frontier_replay_value(
+            "frontier_boozer_reference",
+            "boozer_reference",
+        ),
+        frontier_boozer_trust_threshold=frontier_replay_value(
+            "frontier_boozer_trust_threshold",
+            "boozer_trust_threshold",
+        ),
+        frontier_effective_qs_weight=frontier_replay_value(
+            "frontier_effective_qs_weight",
+            "effective_qs_weight",
+        ),
+        frontier_effective_boozer_weight=frontier_replay_value(
+            "frontier_effective_boozer_weight",
+            "effective_boozer_weight",
+        ),
+        frontier_effective_iota_weight=frontier_replay_value(
+            "frontier_effective_iota_weight",
+            "effective_iota_weight",
+        ),
+        frontier_effective_volume_weight=frontier_replay_value(
+            "frontier_effective_volume_weight",
+            "effective_volume_weight",
+        ),
     )
 
 
@@ -2891,7 +3383,7 @@ def compute_surface_field_metrics(surf, bs):
 
 def build_preserved_timeout_results_payload(
     *,
-    replay_config: PreservedTimeoutReplayConfig | None = None,
+    replay_config: PreservedTimeoutReplayConfig,
     preservation_kind,
     incumbent_stage,
     run_dict,
@@ -2910,10 +3402,10 @@ def build_preserved_timeout_results_payload(
     because preserved timeout artifacts snapshot the same incumbent stage rather
     than a separate post-timeout refinement stage.
     """
-    replay_config = current_preserved_timeout_replay_config() if replay_config is None else replay_config
     search_eval = run_dict["search_eval"]
     hardware_status = hardware_snapshot["status"]
     source_stage = str(incumbent_stage)
+    is_frontier_mode = replay_config.single_stage_goal_mode == "frontier"
     payload = {
         "PLASMA_SURF_FILENAME": replay_config.plasma_surf_filename,
         "PLASMA_SURF_PATH": replay_config.plasma_surf_path,
@@ -2934,9 +3426,22 @@ def build_preserved_timeout_results_payload(
         "max_iterations": replay_config.max_iterations,
         "iterations": int(accepted_iteration),
         "TARGET_VOLUME": (
-            None if replay_config.target_volume is None else float(replay_config.target_volume)
+            None
+            if is_frontier_mode or replay_config.target_volume is None
+            else float(replay_config.target_volume)
         ),
-        "TARGET_IOTA": None if replay_config.target_iota is None else float(replay_config.target_iota),
+        "TARGET_IOTA": (
+            None
+            if is_frontier_mode or replay_config.target_iota is None
+            else float(replay_config.target_iota)
+        ),
+        "BOOZER_SURFACE_TARGET_VOLUMES": (
+            None
+            if replay_config.boozer_surface_target_volumes is None
+            else list(replay_config.boozer_surface_target_volumes)
+        ),
+        "SINGLE_STAGE_GOAL_MODE": replay_config.single_stage_goal_mode,
+        "SINGLE_STAGE_GOAL_MODE_IMPL": replay_config.single_stage_goal_mode_impl,
         "TERMINATION_MESSAGE": f"preserved_{preservation_kind}_partial",
         "OPTIMIZER_SUCCESS": False,
         "FINAL_SOURCE_STAGE": source_stage,
@@ -2944,6 +3449,11 @@ def build_preserved_timeout_results_payload(
         "OBJECTIVE_J": float(run_dict["J"]),
         "BASE_OBJECTIVE_J": float(search_eval.get("base_total", search_eval["total"])),
         "SEARCH_OBJECTIVE_J": float(search_eval["total"]),
+        "FRONTIER_RANK_OBJECTIVE_J": (
+            None
+            if not is_frontier_mode
+            else float(search_eval.get("frontier_rank_total", search_eval["total"]))
+        ),
         "FINAL_IOTA": float(final_iota),
         "FINAL_VOLUME": float(final_volume),
         "FINAL_FEASIBILITY_OK": bool(refinement_eligible_incumbent(run_dict)),
@@ -2958,6 +3468,20 @@ def build_preserved_timeout_results_payload(
         "FINAL_TOPOLOGY_GATE_SUCCESS": bool(run_dict["topology_gate_status"]["success"]),
         "NONQS_RATIO": float(objective_eval["J_QS"]),
         "BOOZER_RESIDUAL": float(objective_eval["J_Boozer"]),
+        "FRONTIER_TRUST_OK": search_eval.get("frontier_trust_ok"),
+        "FRONTIER_BOOZER_TRUST_THRESHOLD": search_eval.get("frontier_boozer_trust_threshold"),
+        "FRONTIER_BOOZER_TRUST_EXCESS": search_eval.get("frontier_boozer_trust_excess"),
+        "FRONTIER_REFERENCE_IOTA": replay_config.frontier_iota_reference,
+        "FRONTIER_REFERENCE_IOTA_SCALE": replay_config.frontier_iota_scale,
+        "FRONTIER_REFERENCE_VOLUME": replay_config.frontier_volume_reference,
+        "FRONTIER_REFERENCE_VOLUME_SCALE": replay_config.frontier_volume_scale,
+        "FRONTIER_REFERENCE_QA": replay_config.frontier_qs_reference,
+        "FRONTIER_REFERENCE_BOOZER": replay_config.frontier_boozer_reference,
+        "FRONTIER_EFFECTIVE_QA_WEIGHT": replay_config.frontier_effective_qs_weight,
+        "FRONTIER_EFFECTIVE_BOOZER_WEIGHT": replay_config.frontier_effective_boozer_weight,
+        "FRONTIER_EFFECTIVE_IOTA_WEIGHT": replay_config.frontier_effective_iota_weight,
+        "FRONTIER_EFFECTIVE_VOLUME_WEIGHT": replay_config.frontier_effective_volume_weight,
+        "FRONTIER_VOLUME_OBJECTIVE": search_eval.get("J_volume"),
         "PRESERVED_TIMEOUT_SALVAGE_AVAILABLE": True,
         "PRESERVED_TIMEOUT_SALVAGE_KIND": preservation_kind,
         "PRESERVED_TIMEOUT_SALVAGE_STAGE": source_stage,
@@ -3021,6 +3545,78 @@ def write_preserved_timeout_artifacts(
         boozer_surface.save(path_stem + "_boozer_surface.json")
 
 
+def preserved_timeout_artifact_paths(out_dir, preservation_kind, surface_data):
+    results_filename = _preserved_timeout_artifact_name(
+        _PRESERVED_TIMEOUT_RESULTS_FILENAMES,
+        preservation_kind,
+    )
+    bs_filename = _preserved_timeout_artifact_name(
+        _PRESERVED_TIMEOUT_BS_FILENAMES,
+        preservation_kind,
+    )
+    surface_stem = _preserved_timeout_artifact_name(
+        _PRESERVED_TIMEOUT_SURFACE_STEMS,
+        preservation_kind,
+    )
+    artifact_paths = [
+        os.path.join(out_dir, results_filename),
+        os.path.join(out_dir, bs_filename),
+    ]
+    for entry in surface_data:
+        path_stem = os.path.join(out_dir, f"{surface_stem}_{entry['name']}")
+        artifact_paths.extend(
+            [
+                path_stem + ".json",
+                path_stem + "_boozer_surface.json",
+            ]
+        )
+    return artifact_paths
+
+
+def remove_preserved_timeout_artifacts(out_dir, *, preservation_kind, surface_data):
+    for artifact_path in preserved_timeout_artifact_paths(
+        out_dir,
+        preservation_kind,
+        surface_data,
+    ):
+        if os.path.exists(artifact_path):
+            os.remove(artifact_path)
+
+
+def write_preserved_timeout_artifacts_for_current_state(
+    out_dir,
+    *,
+    preservation_kind,
+    incumbent_stage,
+    run_dict,
+    bs,
+    surface_data,
+    hardware_snapshot,
+    field_error,
+    coil_length,
+):
+    write_preserved_timeout_artifacts(
+        out_dir,
+        preservation_kind=preservation_kind,
+        results_payload=build_preserved_timeout_results_payload(
+            replay_config=PRESERVED_TIMEOUT_REPLAY_CONFIG,
+            preservation_kind=preservation_kind,
+            incumbent_stage=incumbent_stage,
+            run_dict=run_dict,
+            objective_eval=run_dict["search_eval"],
+            field_error=field_error,
+            final_iota=run_dict["surface_status"]["iotas"][-1],
+            final_volume=run_dict["surface_status"]["volumes"][-1],
+            hardware_snapshot=hardware_snapshot,
+            coil_length=coil_length,
+            accepted_iteration=int(run_dict.get("accepted_iterations", 0)),
+            alm_runtime_state=current_preserved_timeout_alm_state(),
+        ),
+        biotsavart=bs,
+        surface_data=surface_data,
+    )
+
+
 def build_single_stage_alm_partial_state(
     run_dict,
     constraint_names,
@@ -3077,13 +3673,33 @@ def write_single_stage_alm_partial_state(out_dir, payload):
     write_json_artifact(partial_path, payload)
 
 
-def build_total_objective(JnonQSRatio, RES_WEIGHT, JBoozerResidual, IOTAS_WEIGHT, Jiota, LENGTH_WEIGHT, JCurveLength, CC_WEIGHT, JCurveCurve, CS_WEIGHT, JCurveSurface, CURVATURE_WEIGHT, JCurvature, SURF_DIST_WEIGHT=0.0, JSurfSurf=None):
+def build_total_objective(
+    JnonQSRatio,
+    RES_WEIGHT,
+    JBoozerResidual,
+    IOTAS_WEIGHT,
+    Jiota,
+    VOLUME_WEIGHT,
+    JVolume,
+    LENGTH_WEIGHT,
+    JCurveLength,
+    CC_WEIGHT,
+    JCurveCurve,
+    CS_WEIGHT,
+    JCurveSurface,
+    CURVATURE_WEIGHT,
+    JCurvature,
+    SURF_DIST_WEIGHT=0.0,
+    JSurfSurf=None,
+):
     return _build_total_objective_impl(
         JnonQSRatio,
         RES_WEIGHT,
         JBoozerResidual,
         IOTAS_WEIGHT,
         Jiota,
+        VOLUME_WEIGHT,
+        JVolume,
         LENGTH_WEIGHT,
         JCurveLength,
         CC_WEIGHT,
@@ -3160,6 +3776,7 @@ def evaluate_search_step(x):
     run_dict.setdefault("topology_gate_rejects", 0)
     run_dict.setdefault("hardware_rejects", 0)
     run_dict.setdefault("surface_solve_rejects", 0)
+    run_dict.setdefault("frontier_trust_rejects", 0)
     search_gate = build_surface_search_gate(
         len(surface_data),
         run_dict['accepted_iterations'],
@@ -3195,37 +3812,62 @@ def evaluate_search_step(x):
         objective_eval = evaluate_search_objective(search_surface_weights)
         J = objective_eval['total']
         dJ = objective_eval['grad']
-        topology_status = evaluate_search_topology_gate(
-            len(surface_data),
-            outer_entry['boozer_surface'].surface,
-            bs,
-        )
-        run_dict['topology_gate_status'] = topology_status
-        if topology_status['enabled'] and not topology_status['success']:
+        frontier_trust_status = evaluate_frontier_trust_status(objective_eval)
+        run_dict["frontier_trust_status"] = frontier_trust_status
+        if frontier_trust_status["enabled"] and not frontier_trust_status["ok"]:
             success = False
-            rejection_reason = "topology"
-            run_dict["topology_gate_rejects"] += 1
+            rejection_reason = "frontier_trust"
+            run_dict["frontier_trust_rejects"] += 1
             run_dict["invalid_state_rejects_total"] += 1
-            rejection_increment = topology_gate_rejection_increment(
-                run_dict['J'],
-                topology_status,
-                TOPOLOGY_GATE_PENALTY_SCALE,
+            rejection_increment = max(
+                abs(run_dict["J"]),
+                1.0,
+                abs(run_dict["J"]) + frontier_trust_status["excess"] / frontier_trust_status["threshold"],
             )
-            print("/!\\ /!\\ Topology gate rejected candidate /!\\ /!\\")
+            run_dict['topology_gate_status'] = disabled_topology_gate_status(
+                TOPOLOGY_GATE_TMAX,
+                TOPOLOGY_GATE_TOL,
+                TOPOLOGY_GATE_SURVIVAL_THRESHOLD,
+            )
+            print("/!\\ /!\\ Frontier Boozer trust gate rejected candidate /!\\ /!\\")
             print(
-                "Cheap field-line survival "
-                f"{topology_status['survived_lines']}/{topology_status['nfieldlines']} "
-                f"(fraction={topology_status['survival_fraction']:.3f}, "
-                f"threshold={topology_status['survival_threshold']:.3f})"
+                "Boozer residual "
+                f"{frontier_trust_status['residual']:.6e} exceeds trust threshold "
+                f"{frontier_trust_status['threshold']:.6e}"
             )
-            print(f"Topology rejection increment = {rejection_increment:.6e}")
-            if topology_status['first_exit_time'] is not None:
-                print(
-                    "First topology exit at "
-                    f"t={topology_status['first_exit_time']:.6e}, "
-                    f"phi={topology_status['first_exit_angle']:.6e}, "
-                    f"reason={topology_status['first_exit_reason']}"
+
+        if success:
+            topology_status = evaluate_search_topology_gate(
+                len(surface_data),
+                outer_entry['boozer_surface'].surface,
+                bs,
+            )
+            run_dict['topology_gate_status'] = topology_status
+            if topology_status['enabled'] and not topology_status['success']:
+                success = False
+                rejection_reason = "topology"
+                run_dict["topology_gate_rejects"] += 1
+                run_dict["invalid_state_rejects_total"] += 1
+                rejection_increment = topology_gate_rejection_increment(
+                    run_dict['J'],
+                    topology_status,
+                    TOPOLOGY_GATE_PENALTY_SCALE,
                 )
+                print("/!\\ /!\\ Topology gate rejected candidate /!\\ /!\\")
+                print(
+                    "Cheap field-line survival "
+                    f"{topology_status['survived_lines']}/{topology_status['nfieldlines']} "
+                    f"(fraction={topology_status['survival_fraction']:.3f}, "
+                    f"threshold={topology_status['survival_threshold']:.3f})"
+                )
+                print(f"Topology rejection increment = {rejection_increment:.6e}")
+                if topology_status['first_exit_time'] is not None:
+                    print(
+                        "First topology exit at "
+                        f"t={topology_status['first_exit_time']:.6e}, "
+                        f"phi={topology_status['first_exit_angle']:.6e}, "
+                        f"reason={topology_status['first_exit_reason']}"
+                    )
 
         if success:
             hardware_snapshot = evaluate_single_stage_hardware_snapshot(
@@ -3441,6 +4083,8 @@ def callback(x):
     dJ_Boozer = np.linalg.norm(objective_eval['dJ_Boozer'])
     J_iota = objective_eval['J_iota']
     dJ_iota = np.linalg.norm(objective_eval['dJ_iota'])
+    J_volume = objective_eval.get('J_volume', 0.0)
+    dJ_volume = np.linalg.norm(objective_eval.get('dJ_volume', np.zeros_like(grad)))
     J_len = JCurveLength.J()
     dJ_len = np.linalg.norm(JCurveLength.dJ())
     J_cc = JCurveCurve.J()
@@ -3549,6 +4193,23 @@ def callback(x):
     print(f"{'Boozer Residual':{width}} = {J_Boozer:.6e} (dJ = {dJ_Boozer:.6e})", file=buffer)
     iota_term_label = "ι Reward" if SINGLE_STAGE_GOAL_MODE == "frontier" else "ι Penalty"
     print(f"{iota_term_label:{width}} = {J_iota:.6e} (dJ = {dJ_iota:.6e})", file=buffer)
+    if SINGLE_STAGE_GOAL_MODE == "frontier":
+        print(f"{'Volume Reward':{width}} = {J_volume:.6e} (dJ = {dJ_volume:.6e})", file=buffer)
+        print(
+            f"{'Frontier Rank J':{width}} = "
+            f"{objective_eval.get('frontier_rank_total', J):.6e}",
+            file=buffer,
+        )
+        print(
+            f"{'Frontier Trust OK':{width}} = "
+            f"{objective_eval.get('frontier_trust_ok')}",
+            file=buffer,
+        )
+        print(
+            f"{'Frontier Boozer Threshold':{width}} = "
+            f"{objective_eval.get('frontier_boozer_trust_threshold')}",
+            file=buffer,
+        )
     print(f"{'Iotas (actual)':{width}} = {iota_str}", file=buffer)
     print(f"{'Volume':{width}} = {volume_str}", file=buffer)
     print(f"{'Curve Length Penalty':{width}} = {J_len:.6e} (dJ = {dJ_len:.6e})", file=buffer)
@@ -3688,6 +4349,13 @@ SINGLE_STAGE_GOAL_MODE = "target"
 ALM_FORMULATION = "weighted_sum"
 ALM_MULTIPLIERS = np.zeros(0, dtype=float)
 ALM_PENALTY = 1.0
+JVolume = None
+JnonQSRatioObjective = None
+JBoozerResidualObjective = None
+EFFECTIVE_RES_WEIGHT = 0.0
+EFFECTIVE_IOTAS_WEIGHT = 0.0
+EFFECTIVE_VOLUME_WEIGHT = 0.0
+FRONTIER_GOAL_CONFIG = None
 CHECKPOINT_EVERY = 0
 TOPOLOGY_SCORER_EVERY = 0
 TOPOLOGY_SCORER_NFIELDLINES = 12
@@ -3808,6 +4476,8 @@ if __name__ == "__main__":
         max_iterations=MAXITER,
         target_volume=vol_target,
         target_iota=iota_target,
+        single_stage_goal_mode=args.single_stage_goal_mode,
+        single_stage_goal_mode_impl=current_frontier_goal_mode_impl(),
     )
 
     # Initialize the boundary magnetic surface and scale it to the target major radius
@@ -3917,6 +4587,11 @@ if __name__ == "__main__":
     initial_max_curvature = np.max(banana_curve.kappa())
     initial_surface_volumes = [entry["boozer_surface"].surface.volume() for entry in surface_data]
     initial_surface_iotas = [Iotas(entry["boozer_surface"]).J() for entry in surface_data]
+    initial_qs_objective, initial_boozer_objective = measure_frontier_reference_metrics(
+        stage,
+        surface_data,
+        coils,
+    )
 
     # ==============================================================================
     # DEFINE OBJECTIVE FUNCTION COMPONENTS
@@ -3926,8 +4601,6 @@ if __name__ == "__main__":
     LENGTH_WEIGHT = args.length_weight
     RES_WEIGHT = args.res_weight
     IOTAS_WEIGHT = args.iotas_weight
-    if args.single_stage_goal_mode == "frontier":
-        print(frontier_goal_mode_warning_message(IOTAS_WEIGHT))
     CC_WEIGHT = args.cc_weight
     CC_DIST = max(args.cc_dist, 0.05)            # Baseline default floor
     if args.cc_dist < 0.05:
@@ -3949,6 +4622,17 @@ if __name__ == "__main__":
         print("WARNING: SURF_DIST_WEIGHT is diagnostic-only in multi-surface mode; outer-vessel spacing is enforced as a rejection gate.")
 
     length_target = args.length_target
+    frontier_goal_config = None
+    if args.single_stage_goal_mode == "frontier":
+        frontier_goal_config = build_frontier_goal_config(
+            initial_iota=initial_iota,
+            initial_volume=initial_volume,
+            initial_qs_objective=initial_qs_objective,
+            initial_boozer_objective=initial_boozer_objective,
+            res_weight=RES_WEIGHT,
+            iotas_weight=IOTAS_WEIGHT,
+        )
+        print(frontier_goal_mode_warning_message(frontier_goal_config))
 
     def rebuild_stage_objective_bundle(stage_name):
         objective_bundle = build_single_stage_objective_bundle(
@@ -3972,12 +4656,14 @@ if __name__ == "__main__":
             vessel_surface=VV,
             vessel_gap_threshold=SS_DIST,
             goal_mode=args.single_stage_goal_mode,
+            frontier_goal_config=frontier_goal_config,
         )
         apply_single_stage_objective_bundle(objective_bundle)
         return objective_bundle
 
     objective_bundle = rebuild_stage_objective_bundle(stage)
     length_target = objective_bundle["length_target"]
+    PRESERVED_TIMEOUT_REPLAY_CONFIG = current_preserved_timeout_replay_config()
 
     # Extract degrees of freedom
     dofs = JF.x
@@ -4061,6 +4747,7 @@ if __name__ == "__main__":
         'surface_status': initial_surface_status,
         'search_surface_status': initial_search_surface_status,
         'topology_gate_status': initial_topology_status,
+        'frontier_trust_status': evaluate_frontier_trust_status(initial_search_eval),
         'accepted_boozer_stage': stage,
         'alm_feasibility_tolerance': args.alm_feas_tol if CONSTRAINT_METHOD == "alm" else None,
         'alm_stationarity_tolerance': args.alm_stationarity_tol if CONSTRAINT_METHOD == "alm" else None,
@@ -4074,52 +4761,107 @@ if __name__ == "__main__":
         'topology_gate_rejects': 0,
         'hardware_rejects': 0,
         'surface_solve_rejects': 0,
+        'frontier_trust_rejects': 0,
     }
     initial_best_accepted_updated = maybe_update_best_accepted_incumbent(run_dict, stage)
     initial_best_feasible_updated = maybe_update_best_feasible_incumbent(run_dict, stage)
     initial_coil_length = curvelength.J()
     if initial_best_accepted_updated:
-        write_preserved_timeout_artifacts(
+        write_preserved_timeout_artifacts_for_current_state(
             OUT_DIR_ITER,
             preservation_kind="best_accepted",
-            results_payload=build_preserved_timeout_results_payload(
-                replay_config=PRESERVED_TIMEOUT_REPLAY_CONFIG,
-                preservation_kind="best_accepted",
-                incumbent_stage=stage,
-                run_dict=run_dict,
-                objective_eval=initial_search_eval,
-                field_error=initial_field_error,
-                final_iota=initial_iota,
-                final_volume=initial_volume,
-                hardware_snapshot=initial_hardware_snapshot,
-                coil_length=initial_coil_length,
-                accepted_iteration=0,
-                alm_runtime_state=current_preserved_timeout_alm_state(),
-            ),
-            biotsavart=bs,
+            incumbent_stage=stage,
+            run_dict=run_dict,
+            bs=bs,
             surface_data=surface_data,
+            hardware_snapshot=initial_hardware_snapshot,
+            field_error=initial_field_error,
+            coil_length=initial_coil_length,
         )
     if initial_best_feasible_updated:
-        write_preserved_timeout_artifacts(
+        write_preserved_timeout_artifacts_for_current_state(
             OUT_DIR_ITER,
             preservation_kind="best_feasible",
-            results_payload=build_preserved_timeout_results_payload(
-                replay_config=PRESERVED_TIMEOUT_REPLAY_CONFIG,
-                preservation_kind="best_feasible",
-                incumbent_stage=stage,
-                run_dict=run_dict,
-                objective_eval=initial_search_eval,
-                field_error=initial_field_error,
-                final_iota=initial_iota,
-                final_volume=initial_volume,
-                hardware_snapshot=initial_hardware_snapshot,
-                coil_length=initial_coil_length,
-                accepted_iteration=0,
-                alm_runtime_state=current_preserved_timeout_alm_state(),
-            ),
-            biotsavart=bs,
+            incumbent_stage=stage,
+            run_dict=run_dict,
+            bs=bs,
             surface_data=surface_data,
+            hardware_snapshot=initial_hardware_snapshot,
+            field_error=initial_field_error,
+            coil_length=initial_coil_length,
         )
+
+    def refresh_preserved_timeout_artifacts_from_best_states():
+        current_state = snapshot_single_stage_incumbent_state(run_dict)
+        current_stage = run_dict.get("accepted_boozer_stage", stage)
+        current_x_prev = np.asarray(run_dict.get("x_prev", run_dict["accepted_x"]), dtype=float).copy()
+        current_intersecting = bool(run_dict.get("intersecting", False))
+        current_frontier_trust_status = copy.deepcopy(
+            run_dict.get("frontier_trust_status")
+        )
+        current_trial_hardware_status = copy.deepcopy(
+            run_dict.get("trial_hardware_status")
+        )
+        try:
+            for preservation_kind, incumbent_key, stage_key in (
+                ("best_accepted", "best_accepted_incumbent", "best_accepted_stage"),
+                ("best_feasible", "best_feasible_incumbent", "best_feasible_stage"),
+            ):
+                incumbent = run_dict.get(incumbent_key)
+                if incumbent is None:
+                    remove_preserved_timeout_artifacts(
+                        OUT_DIR_ITER,
+                        preservation_kind=preservation_kind,
+                        surface_data=surface_data,
+                    )
+                    continue
+                incumbent_stage = run_dict.get(stage_key, stage)
+                restore_single_stage_incumbent_state(run_dict, incumbent)
+                run_dict["accepted_boozer_stage"] = incumbent_stage
+                run_dict["frontier_trust_status"] = evaluate_frontier_trust_status(
+                    run_dict["search_eval"]
+                )
+                run_dict["intersecting"] = any(
+                    run_dict["surface_status"]["self_intersections"]
+                )
+                JF.x = run_dict["accepted_x"].copy()
+                restore_surface_states(surface_data, run_dict["surface_state"])
+                outer_surface = surface_data[-1]["boozer_surface"].surface
+                hardware_snapshot = evaluate_single_stage_hardware_snapshot(
+                    JCurveCurve,
+                    CC_DIST,
+                    JCurveSurface,
+                    CS_DIST,
+                    JSurfSurf,
+                    run_dict["surface_status"],
+                    SS_DIST,
+                    banana_curve,
+                    CURVATURE_THRESHOLD,
+                    outer_surface,
+                    VV,
+                )
+                run_dict["accepted_hardware_status"] = hardware_snapshot["status"]
+                field_error, _ = compute_surface_field_metrics(outer_surface, bs)
+                write_preserved_timeout_artifacts_for_current_state(
+                    OUT_DIR_ITER,
+                    preservation_kind=preservation_kind,
+                    incumbent_stage=incumbent_stage,
+                    run_dict=run_dict,
+                    bs=bs,
+                    surface_data=surface_data,
+                    hardware_snapshot=hardware_snapshot,
+                    field_error=field_error,
+                    coil_length=curvelength.J(),
+                )
+        finally:
+            restore_single_stage_incumbent_state(run_dict, current_state)
+            run_dict["accepted_boozer_stage"] = current_stage
+            run_dict["x_prev"] = current_x_prev
+            run_dict["intersecting"] = current_intersecting
+            run_dict["frontier_trust_status"] = current_frontier_trust_status
+            run_dict["trial_hardware_status"] = current_trial_hardware_status
+            JF.x = run_dict["accepted_x"].copy()
+            restore_surface_states(surface_data, run_dict["surface_state"])
 
     # ==============================================================================
     # RUN OPTIMIZATION
@@ -4412,6 +5154,9 @@ if __name__ == "__main__":
             callback_fn=callback,
             normalize_message_fn=normalize_optimizer_termination_message,
             restore_accepted_state_fn=restore_accepted_state,
+            refresh_preserved_timeout_artifacts_fn=(
+                refresh_preserved_timeout_artifacts_from_best_states
+            ),
         )
         if phase1_result["used_phase1"]:
             phase1_iterations = phase1_result["phase1_iterations"]
@@ -4668,6 +5413,8 @@ if __name__ == "__main__":
     objective_j = float(run_dict['J']) if run_dict['J'] is not None else None
     base_objective_j = None if run_dict['base_eval'] is None else float(run_dict['base_eval']['total'])
     search_objective_j = float(run_dict['search_eval']['total'])
+    final_frontier_trust_status = evaluate_frontier_trust_status(run_dict["search_eval"])
+    frontier_rank_objective_j = run_dict["search_eval"].get("frontier_rank_total")
     final_search_surface_weights = run_dict['search_eval']['surface_weights'].tolist()
     if final_hardware_snapshot is None:
         final_hardware_snapshot = evaluate_single_stage_hardware_snapshot(
@@ -4903,14 +5650,42 @@ if __name__ == "__main__":
         "FINAL_TOPOLOGY_FIRST_EXIT_ANGLE": final_topology_status["first_exit_angle"],
         "FINAL_TOPOLOGY_FIRST_EXIT_REASON": final_topology_status["first_exit_reason"],
         "FINAL_TOPOLOGY_STOP_REASON_COUNTS": final_topology_status["stop_reason_counts"],
-        "TARGET_VOLUME": float(vol_target),
-        "TARGET_IOTA": float(iota_target),
+        "TARGET_VOLUME": None if args.single_stage_goal_mode == "frontier" else float(vol_target),
+        "TARGET_IOTA": None if args.single_stage_goal_mode == "frontier" else float(iota_target),
+        "BOOZER_SURFACE_TARGET_VOLUMES": [float(entry["target_volume"]) for entry in surface_data],
         "SINGLE_STAGE_GOAL_MODE": args.single_stage_goal_mode,
-        "SINGLE_STAGE_GOAL_MODE_IMPL": (
-            "frontier_iota_reward_only"
-            if args.single_stage_goal_mode == "frontier"
-            else "target"
+        "SINGLE_STAGE_GOAL_MODE_IMPL": current_frontier_goal_mode_impl(),
+        "FRONTIER_REFERENCE_IOTA": (
+            None if FRONTIER_GOAL_CONFIG is None else FRONTIER_GOAL_CONFIG.iota_reference
         ),
+        "FRONTIER_REFERENCE_IOTA_SCALE": (
+            None if FRONTIER_GOAL_CONFIG is None else FRONTIER_GOAL_CONFIG.iota_scale
+        ),
+        "FRONTIER_REFERENCE_VOLUME": (
+            None if FRONTIER_GOAL_CONFIG is None else FRONTIER_GOAL_CONFIG.volume_reference
+        ),
+        "FRONTIER_REFERENCE_VOLUME_SCALE": (
+            None if FRONTIER_GOAL_CONFIG is None else FRONTIER_GOAL_CONFIG.volume_scale
+        ),
+        "FRONTIER_REFERENCE_QA": (
+            None if FRONTIER_GOAL_CONFIG is None else FRONTIER_GOAL_CONFIG.qs_reference
+        ),
+        "FRONTIER_REFERENCE_BOOZER": (
+            None if FRONTIER_GOAL_CONFIG is None else FRONTIER_GOAL_CONFIG.boozer_reference
+        ),
+        "FRONTIER_EFFECTIVE_QA_WEIGHT": (
+            None if FRONTIER_GOAL_CONFIG is None else FRONTIER_GOAL_CONFIG.effective_qs_weight
+        ),
+        "FRONTIER_EFFECTIVE_BOOZER_WEIGHT": (
+            None if FRONTIER_GOAL_CONFIG is None else FRONTIER_GOAL_CONFIG.effective_boozer_weight
+        ),
+        "FRONTIER_EFFECTIVE_IOTA_WEIGHT": (
+            None if FRONTIER_GOAL_CONFIG is None else FRONTIER_GOAL_CONFIG.effective_iota_weight
+        ),
+        "FRONTIER_EFFECTIVE_VOLUME_WEIGHT": (
+            None if FRONTIER_GOAL_CONFIG is None else FRONTIER_GOAL_CONFIG.effective_volume_weight
+        ),
+        "FRONTIER_BOOZER_TRUST_THRESHOLD": final_frontier_trust_status["threshold"],
         "PLASMA_CURRENT_A": float(plasma_current_A),
         "PLASMA_CURRENT_INPUT_SOURCE": plasma_current_input_source,
         "PLASMA_CURRENT_SURROGATE_SCOPE": "shared_all_surfaces" if args.num_surfaces > 1 else "single_surface",
@@ -4923,6 +5698,9 @@ if __name__ == "__main__":
         "OBJECTIVE_J": objective_j,
         "BASE_OBJECTIVE_J": base_objective_j,
         "SEARCH_OBJECTIVE_J": search_objective_j,
+        "FRONTIER_RANK_OBJECTIVE_J": (
+            None if frontier_rank_objective_j is None else float(frontier_rank_objective_j)
+        ),
         "FINAL_SEARCH_SURFACE_WEIGHTS": final_search_surface_weights,
         "FINAL_FEASIBILITY_OK": final_feasibility_ok,
         "SELF_INTERSECTING": run_dict['intersecting'],
@@ -4937,8 +5715,14 @@ if __name__ == "__main__":
         "TOPOLOGY_GATE_REJECTS": run_dict["topology_gate_rejects"],
         "HARDWARE_REJECTS": run_dict["hardware_rejects"],
         "SURFACE_SOLVE_REJECTS": run_dict["surface_solve_rejects"],
+        "FRONTIER_TRUST_REJECTS": run_dict["frontier_trust_rejects"],
         "NONQS_RATIO": nonqs_ratio,
         "BOOZER_RESIDUAL": boozer_residual,
+        "FRONTIER_TRUST_OK": final_frontier_trust_status["ok"],
+        "FRONTIER_BOOZER_TRUST_EXCESS": final_frontier_trust_status["excess"],
+        "FRONTIER_VOLUME_OBJECTIVE": (
+            None if args.init_only else float(run_dict["search_eval"].get("J_volume", 0.0))
+        ),
         "INITIAL_VOLUME": float(initial_volume),
         "INITIAL_IOTA": float(initial_iota),
         "INITIAL_FIELD_ERROR": float(initial_field_error),

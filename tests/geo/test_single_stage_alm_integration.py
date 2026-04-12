@@ -211,6 +211,7 @@ def make_single_stage_thresholded_physics_rerun_args(**overrides):
         "output_root": "outputs",
         "equilibria_dir": None,
         "summary_json": None,
+        "allow_init_only_stage2_seed": False,
         "single_stage_timeout_seconds": 0.0,
         "nphi": 91,
         "ntheta": 32,
@@ -395,7 +396,11 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
     def test_single_stage_partial_alm_state_payload_serializes_numpy_fields(self):
         functions = extract_functions(
             SINGLE_STAGE_MODULE_PATH,
-            ["_jsonable_alm_state", "build_single_stage_alm_partial_state"],
+            [
+                "_jsonable_value",
+                "_jsonable_alm_state",
+                "build_single_stage_alm_partial_state",
+            ],
             {"np": np},
         )
         build_single_stage_alm_partial_state = functions[
@@ -408,9 +413,18 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
                 "it": 4,
                 "J": 0.25,
                 "accepted_boozer_stage": "initial",
-                "accepted_hardware_status": {"success": False, "violations": ["cc"]},
-                "trial_hardware_status": {"success": False, "violations": ["cs"]},
-                "topology_gate_status": {"success": True, "survived_lines": 6},
+                "accepted_hardware_status": {
+                    "success": np.bool_(False),
+                    "violations": ["cc"],
+                },
+                "trial_hardware_status": {
+                    "success": np.bool_(False),
+                    "violations": ["cs"],
+                },
+                "topology_gate_status": {
+                    "success": np.bool_(True),
+                    "survived_lines": np.int64(6),
+                },
             },
             ["curve_curve", "curve_surface"],
             [{"outer_iteration": 1, "action": "penalty_increase"}],
@@ -445,7 +459,11 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
             [0.3, 0.4],
         )
         self.assertEqual(payload["accepted_hardware_status"]["violations"], ["cc"])
+        self.assertIs(payload["accepted_hardware_status"]["success"], False)
         self.assertEqual(payload["trial_hardware_status"]["violations"], ["cs"])
+        self.assertIs(payload["trial_hardware_status"]["success"], False)
+        self.assertIs(payload["topology_gate_status"]["success"], True)
+        self.assertEqual(payload["topology_gate_status"]["survived_lines"], 6)
         self.assertEqual(payload["termination_message"], "still running")
         self.assertEqual(payload["termination_reason"], "subproblem_continue")
         self.assertFalse(payload["inner_optimizer_success"])
@@ -838,6 +856,60 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
 
             with self.assertRaisesRegex(ValueError, "Stage 2 artifact surface mismatch"):
                 module.load_validated_stage2_seed_metadata(args)
+
+    def test_single_stage_thresholded_physics_rerun_wrapper_rejects_init_only_stage2_seed(self):
+        module = load_single_stage_thresholded_physics_rerun_module()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            stage2_bs_path = tmpdir_path / "biot_savart_opt.json"
+            stage2_bs_path.write_text("{}", encoding="utf-8")
+            (tmpdir_path / "results.json").write_text(
+                json.dumps(
+                    {
+                        "PLASMA_SURF_FILENAME": DEFAULT_ALM_WRAPPER_SURFACE,
+                        "init_only": True,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            args = make_single_stage_thresholded_physics_rerun_args(
+                plasma_surf_filename=DEFAULT_ALM_WRAPPER_SURFACE,
+                stage2_bs_path=str(stage2_bs_path),
+            )
+
+            with self.assertRaisesRegex(ValueError, "non-init-only Stage 2 artifact"):
+                module.load_validated_stage2_seed_metadata(args)
+
+    def test_single_stage_thresholded_physics_rerun_wrapper_allows_init_only_stage2_seed_with_override(self):
+        module = load_single_stage_thresholded_physics_rerun_module()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            stage2_bs_path = tmpdir_path / "biot_savart_opt.json"
+            results_path = tmpdir_path / "results.json"
+            stage2_bs_path.write_text("{}", encoding="utf-8")
+            results_path.write_text(
+                json.dumps(
+                    {
+                        "PLASMA_SURF_FILENAME": DEFAULT_ALM_WRAPPER_SURFACE,
+                        "init_only": True,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            args = make_single_stage_thresholded_physics_rerun_args(
+                plasma_surf_filename=DEFAULT_ALM_WRAPPER_SURFACE,
+                stage2_bs_path=str(stage2_bs_path),
+                allow_init_only_stage2_seed=True,
+            )
+
+            _, loaded_results_path, loaded_results = (
+                module.load_validated_stage2_seed_metadata(args)
+            )
+
+        self.assertEqual(loaded_results_path, results_path.resolve())
+        self.assertTrue(loaded_results["init_only"])
 
     def test_single_stage_thresholded_physics_rerun_wrapper_dry_run_does_not_require_existing_stage2_artifact(self):
         module = load_single_stage_thresholded_physics_rerun_module()

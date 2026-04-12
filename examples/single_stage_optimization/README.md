@@ -170,6 +170,7 @@ Use this when you want a general single-stage ALM rerun from an explicit Stage 2
 - forces `--alm-formulation thresholded_physics`
 - forces warning-mode hardware handling for ALM because single-surface ALM keeps `gate_scale=1.0`, so adaptive mode would fall back to hard rejection
 - validates that the Stage 2 artifact matches the requested plasma surface before launch
+- rejects Stage 2 artifacts whose sibling `results.json` reports `init_only=true` unless you explicitly pass `--allow-init-only-stage2-seed`
 
 ```bash
 cd /path/to/simsopt-surrogate
@@ -183,6 +184,7 @@ Useful notes:
 - output root defaults to `examples/single_stage_optimization/outputs_single_stage_thresholded_physics_alm`
 - all `thresholded_physics` thresholds and ALM trust-region settings remain CLI-overridable
 - `--dry-run` still validates the Stage 2 artifact metadata and prints the exact single-stage command
+- the summary records `stage2_artifact_init_only` from the reused seed metadata when available
 - dry runs write `DRY_RUN_ONLY.txt` next to the summary so a summary-only directory is not mistaken for a real single-stage result root
 
 ### Single-Stage Goal-Mode Comparison
@@ -194,6 +196,7 @@ Use this when you want an A/B comparison between the legacy target-iota objectiv
 - launches one `target` run and one `frontier` run under separate output subdirectories
 - keeps all other forwarded single-stage settings matched across the two runs, including ALM formulation and thresholds, staged Boozer refinement, multi-surface settings, topology/confinement knobs, plasma current, and banana-surface radius
 - always passes `--single-stage-goal-mode` explicitly for both runs, so a parent-shell `SINGLE_STAGE_GOAL_MODE` environment variable cannot silently flip the target/frontier A/B semantics
+- rejects Stage 2 artifacts whose sibling `results.json` reports `init_only=true` unless you explicitly pass `--allow-init-only-stage2-seed`
 - writes one comparison summary JSON with per-mode metrics, invalid-state reject counts, best-feasible fallback metrics when available, and frontier-minus-target deltas
 
 ```bash
@@ -207,8 +210,10 @@ Useful notes:
 
 - output root defaults to `examples/single_stage_optimization/outputs_single_stage_goal_mode_comparison`
 - `--dry-run` does not require the Stage 2 artifact to exist, but if the artifact and sibling `results.json` are present it still validates the surface match
+- the comparison summary records `stage2_artifact_init_only` from the shared seed metadata
 - the summary marks `search_objective_values_comparable=false` because `target` and `frontier` intentionally use different base iota terms
-- the current `frontier` implementation is `frontier_iota_reward_only`, so matched runs are useful for metric comparison, not for directly comparing raw optimizer objective values
+- the current `frontier` implementation is `frontier_tradeoff_score_v1`: it uses a seed-normalized tradeoff score with bounded iota/volume rewards, normalized QA/Boozer terms, and a Boozer trust gate
+- frontier result payloads record the fixed seed references, effective normalized weights, Boozer trust threshold, and the separate `BOOZER_SURFACE_TARGET_VOLUMES` used by the internal Boozer solve
 - when the shared Stage 2 `results.json` includes banana-current metadata, the comparison summary also records the shared seed `BANANA_CURRENT_A` and `BANANA_CURRENT_MAX_A`
 
 ## Manual Stage 2
@@ -350,12 +355,14 @@ Important current behavior:
 - `--constraint-method=alm` currently requires `--num-surfaces=1`
 - staged Boozer refinement currently requires penalty mode, single-surface mode, and no basin-hopping
 - single-stage basin-hopping is only supported in penalty mode
-- `--single-stage-goal-mode=frontier` is still comparison-first, not a full replacement for the target path
+- `--single-stage-goal-mode=frontier` remains a comparison-first lane, but it now uses a real tradeoff score instead of the earlier iota-only slice
 - direct single-stage runs default to `SINGLE_STAGE_GOAL_MODE` from the environment when it is set; the comparison wrapper overrides that by passing the goal mode explicitly
-- frontier mode currently changes only the single-stage iota term: it uses a monotone iota reward `-iota` instead of the legacy target-tracking iota penalty `0.5*(iota - iota_target)^2`
+- frontier mode maximizes iota and nested volume with bounded seed-relative rewards, minimizes QA and Boozer residual on normalized scales, and still keeps complexity / buildability penalties in the scalar objective
+- Boozer residual plays two roles in frontier mode: it remains a scored metric below the trust threshold, and it becomes an invalid-state reject once the residual exceeds the recorded `FRONTIER_BOOZER_TRUST_THRESHOLD`
+- `--vol-target` still feeds the internal Boozer surface construction, but in frontier mode it is no longer reported as the outer optimization target; results instead expose `BOOZER_SURFACE_TARGET_VOLUMES`
+- `--iota-target` still seeds the Boozer initialization guess, but frontier mode no longer treats it as the outer optimization target
 - for backward-compatible run identities, explicit `--single-stage-goal-mode target` and omitting the flag intentionally hash to the same run fingerprint
-- the frontier iota term has a different scale than the target penalty and can be roughly `10x` to `1000x` larger in absolute value depending on distance to target; near convergence it can be several hundred-fold larger, so `--iotas-weight`, which was tuned for the quadratic target penalty, generally needs to be retuned in frontier mode
-- in `frontier` mode the resulting `IOTAS_WEIGHT * (-iota)` term in the base objective is unbounded below in the iota direction and has no built-in saturation cap, so `--single-stage-goal-mode=frontier` paired with `--alm-formulation=weighted_sum --constraint-method=alm` only converges in practice when the other physics and engineering terms (QA, Boozer residual, length, ALM hardware constraints) bound `iota`; treat early frontier ALM runs as exploratory rather than guaranteed-convergent
+- frontier mode rescales legacy `--res-weight` / `--iotas-weight` values relative to their historical defaults before applying the normalized frontier score, so matched target/frontier runs stay in a similar rough magnitude range without reusing the old unbounded `-iota` scalarization
 - `--single-stage-goal-mode=frontier` is intentionally incompatible with `--alm-formulation=thresholded_physics` because that ALM formulation still assumes an upper-bounded Jiota penalty objective
 
 ## Hardware Search Policy

@@ -28,6 +28,8 @@ def build_total_objective(
     JBoozerResidual,
     IOTAS_WEIGHT,
     Jiota,
+    VOLUME_WEIGHT,
+    JVolume,
     LENGTH_WEIGHT,
     JCurveLength,
     CC_WEIGHT,
@@ -48,6 +50,8 @@ def build_total_objective(
         + CS_WEIGHT * JCurveSurface
         + CURVATURE_WEIGHT * JCurvature
     )
+    if JVolume is not None:
+        objective = objective + VOLUME_WEIGHT * JVolume
     if JSurfSurf is not None:
         objective = objective + SURF_DIST_WEIGHT * JSurfSurf
     return objective
@@ -57,6 +61,20 @@ def _surface_objective_pair(surface_weights, nonQSs, brs):
     J_QS_obj = average_surface_objectives(nonQSs, weights=surface_weights)
     J_Boozer_obj = average_surface_objectives(brs, weights=surface_weights)
     return J_QS_obj, J_Boozer_obj
+
+
+def _resolve_surface_objective_terms(
+    surface_weights,
+    nonQSs,
+    brs,
+    *,
+    JNonQSObjective=None,
+    JBoozerObjective=None,
+):
+    raw_J_QS_obj, raw_J_Boozer_obj = _surface_objective_pair(surface_weights, nonQSs, brs)
+    objective_J_QS_obj = raw_J_QS_obj if JNonQSObjective is None else JNonQSObjective
+    objective_J_Boozer_obj = raw_J_Boozer_obj if JBoozerObjective is None else JBoozerObjective
+    return raw_J_QS_obj, raw_J_Boozer_obj, objective_J_QS_obj, objective_J_Boozer_obj
 
 
 def _objective_gradient(objective, objective_optimizable=None):
@@ -92,14 +110,31 @@ def evaluate_total_objective(
     CURVATURE_WEIGHT,
     JSurfSurf=None,
     SURF_DIST_WEIGHT=0.0,
+    JNonQSObjective=None,
+    JBoozerObjective=None,
+    JVolume=None,
+    VOLUME_WEIGHT=0.0,
 ):
-    J_QS_obj, J_Boozer_obj = _surface_objective_pair(surface_weights, nonQSs, brs)
+    (
+        raw_J_QS_obj,
+        raw_J_Boozer_obj,
+        objective_J_QS_obj,
+        objective_J_Boozer_obj,
+    ) = _resolve_surface_objective_terms(
+        surface_weights,
+        nonQSs,
+        brs,
+        JNonQSObjective=JNonQSObjective,
+        JBoozerObjective=JBoozerObjective,
+    )
     total_objective = build_total_objective(
-        J_QS_obj,
+        objective_J_QS_obj,
         RES_WEIGHT,
-        J_Boozer_obj,
+        objective_J_Boozer_obj,
         IOTAS_WEIGHT,
         Jiota,
+        VOLUME_WEIGHT,
+        JVolume,
         LENGTH_WEIGHT,
         JCurveLength,
         CC_WEIGHT,
@@ -112,15 +147,26 @@ def evaluate_total_objective(
         JSurfSurf=JSurfSurf,
     )
     total_grad = np.asarray(total_objective.dJ(), dtype=float)
+    volume_grad = (
+        np.zeros_like(total_grad)
+        if JVolume is None
+        else np.asarray(JVolume.dJ(), dtype=float)
+    )
     return {
         "total": float(total_objective.J()),
         "grad": total_grad,
-        "J_QS": float(J_QS_obj.J()),
-        "dJ_QS": np.asarray(J_QS_obj.dJ(), dtype=float),
-        "J_Boozer": float(J_Boozer_obj.J()),
-        "dJ_Boozer": np.asarray(J_Boozer_obj.dJ(), dtype=float),
+        "J_QS": float(raw_J_QS_obj.J()),
+        "dJ_QS": np.asarray(raw_J_QS_obj.dJ(), dtype=float),
+        "J_QS_objective": float(objective_J_QS_obj.J()),
+        "dJ_QS_objective": np.asarray(objective_J_QS_obj.dJ(), dtype=float),
+        "J_Boozer": float(raw_J_Boozer_obj.J()),
+        "dJ_Boozer": np.asarray(raw_J_Boozer_obj.dJ(), dtype=float),
+        "J_Boozer_objective": float(objective_J_Boozer_obj.J()),
+        "dJ_Boozer_objective": np.asarray(objective_J_Boozer_obj.dJ(), dtype=float),
         "J_iota": float(Jiota.J()),
         "dJ_iota": np.asarray(Jiota.dJ(), dtype=float),
+        "J_volume": 0.0 if JVolume is None else float(JVolume.J()),
+        "dJ_volume": volume_grad,
         "J_len": float(JCurveLength.J()),
         "dJ_len": np.asarray(JCurveLength.dJ(), dtype=float),
         "J_cc": float(JCurveCurve.J()),
@@ -146,25 +192,37 @@ def evaluate_base_objective(
     RES_WEIGHT,
     Jiota,
     IOTAS_WEIGHT,
+    JVolume,
+    VOLUME_WEIGHT,
     JCurveLength,
     LENGTH_WEIGHT,
     *,
     objective_optimizable=None,
     alm_formulation="weighted_sum",
     _surface_pair=None,
+    JNonQSObjective=None,
+    JBoozerObjective=None,
 ):
     if _surface_pair is not None:
-        J_QS_obj, J_Boozer_obj = _surface_pair
+        raw_J_QS_obj, raw_J_Boozer_obj = _surface_pair
     else:
-        J_QS_obj, J_Boozer_obj = _surface_objective_pair(surface_weights, nonQSs, brs)
+        raw_J_QS_obj, raw_J_Boozer_obj = _surface_objective_pair(surface_weights, nonQSs, brs)
+    objective_J_QS_obj = raw_J_QS_obj if JNonQSObjective is None else JNonQSObjective
+    objective_J_Boozer_obj = raw_J_Boozer_obj if JBoozerObjective is None else JBoozerObjective
     base_objective = (
-        J_QS_obj
-        + RES_WEIGHT * J_Boozer_obj
+        objective_J_QS_obj
+        + RES_WEIGHT * objective_J_Boozer_obj
         + IOTAS_WEIGHT * Jiota
+        + VOLUME_WEIGHT * (0 if JVolume is None else JVolume)
         + LENGTH_WEIGHT * JCurveLength
     )
     physics_total = float(base_objective.J())
     base_grad = _objective_gradient(base_objective, objective_optimizable)
+    volume_grad = (
+        np.zeros_like(base_grad)
+        if JVolume is None
+        else _objective_gradient(JVolume, objective_optimizable)
+    )
     if alm_formulation == "thresholded_physics":
         total = 0.0
         grad = np.zeros_like(base_grad)
@@ -177,14 +235,20 @@ def evaluate_base_objective(
         "total": total,
         "grad": grad,
         "physics_total": physics_total,
-        "J_QS": float(J_QS_obj.J()),
-        "dJ_QS": np.asarray(J_QS_obj.dJ(), dtype=float),
-        "J_Boozer": float(J_Boozer_obj.J()),
-        "dJ_Boozer": np.asarray(J_Boozer_obj.dJ(), dtype=float),
+        "J_QS": float(raw_J_QS_obj.J()),
+        "dJ_QS": np.asarray(raw_J_QS_obj.dJ(), dtype=float),
+        "J_QS_objective": float(objective_J_QS_obj.J()),
+        "dJ_QS_objective": _objective_gradient(objective_J_QS_obj, objective_optimizable),
+        "J_Boozer": float(raw_J_Boozer_obj.J()),
+        "dJ_Boozer": np.asarray(raw_J_Boozer_obj.dJ(), dtype=float),
+        "J_Boozer_objective": float(objective_J_Boozer_obj.J()),
+        "dJ_Boozer_objective": _objective_gradient(objective_J_Boozer_obj, objective_optimizable),
         "J_iota": float(Jiota.J()),
-        "dJ_iota": np.asarray(Jiota.dJ(), dtype=float),
+        "dJ_iota": _objective_gradient(Jiota, objective_optimizable),
+        "J_volume": 0.0 if JVolume is None else float(JVolume.J()),
+        "dJ_volume": volume_grad,
         "J_len": float(JCurveLength.J()),
-        "dJ_len": np.asarray(JCurveLength.dJ(), dtype=float),
+        "dJ_len": _objective_gradient(JCurveLength, objective_optimizable),
         "surface_weights": np.asarray(surface_weights, dtype=float).copy(),
     }
 
@@ -196,6 +260,8 @@ def evaluate_alm_objective(
     RES_WEIGHT,
     Jiota,
     IOTAS_WEIGHT,
+    JVolume,
+    VOLUME_WEIGHT,
     JCurveLength,
     LENGTH_WEIGHT,
     JCurveCurve,
@@ -228,9 +294,11 @@ def evaluate_alm_objective(
     boozer_threshold=None,
     iota_penalty_threshold=None,
     length_penalty_threshold=0.0,
+    JNonQSObjective=None,
+    JBoozerObjective=None,
 ):
-    surface_pair = _surface_objective_pair(surface_weights, nonQSs, brs)
-    J_QS_obj, J_Boozer_obj = surface_pair
+    raw_surface_pair = _surface_objective_pair(surface_weights, nonQSs, brs)
+    raw_J_QS_obj, raw_J_Boozer_obj = raw_surface_pair
     base_eval = evaluate_base_objective(
         surface_weights,
         nonQSs,
@@ -238,11 +306,15 @@ def evaluate_alm_objective(
         RES_WEIGHT,
         Jiota,
         IOTAS_WEIGHT,
+        JVolume,
+        VOLUME_WEIGHT,
         JCurveLength,
         LENGTH_WEIGHT,
         objective_optimizable=objective_optimizable,
         alm_formulation=alm_formulation,
-        _surface_pair=surface_pair,
+        _surface_pair=raw_surface_pair,
+        JNonQSObjective=JNonQSObjective,
+        JBoozerObjective=JBoozerObjective,
     )
 
     curve_curve_signed_value, curve_curve_grad, curve_curve_violation = curve_curve_constraint_fn(
@@ -302,12 +374,12 @@ def evaluate_alm_objective(
     if alm_formulation == "thresholded_physics":
         physics_constraints = [
             _objective_upper_bound_constraint(
-                J_QS_obj,
+                raw_J_QS_obj,
                 qs_threshold,
                 objective_optimizable,
             ),
             _objective_upper_bound_constraint(
-                J_Boozer_obj,
+                raw_J_Boozer_obj,
                 boozer_threshold,
                 objective_optimizable,
             ),

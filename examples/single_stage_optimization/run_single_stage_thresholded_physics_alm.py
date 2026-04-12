@@ -21,6 +21,7 @@ from workflow_runner_common import (  # noqa: E402
     timeout_or_none,
     run_command,
     snapshot_single_results_paths,
+    validate_stage2_seed_not_init_only,
     write_dry_run_marker,
 )
 from banana_opt.artifact_contracts import upgrade_legacy_stage2_artifact_results  # noqa: E402
@@ -52,6 +53,15 @@ def parse_args() -> argparse.Namespace:
         "--stage2-bs-path",
         required=True,
         help="Path to the Stage 2 biot_savart_opt.json seed artifact.",
+    )
+    parser.add_argument(
+        "--allow-init-only-stage2-seed",
+        action="store_true",
+        help=(
+            "Allow reusing a Stage 2 artifact whose sibling results.json reports "
+            "init_only=true. Disabled by default because init-only smoke seeds can "
+            "land single-stage in the wrong transform basin."
+        ),
     )
     parser.add_argument("--equilibria-dir", default=None)
     parser.add_argument(
@@ -137,6 +147,12 @@ def load_validated_stage2_seed_metadata(
             f"--plasma-surf-filename requests {expected_surface!r}, but "
             f"{stage2_results_path} reports {actual_surface!r}."
         )
+    validate_stage2_seed_not_init_only(
+        stage2_results_path,
+        stage2_results,
+        owner_label="run_single_stage_thresholded_physics_alm.py",
+        allow_init_only=getattr(args, "allow_init_only_stage2_seed", False),
+    )
     return stage2_bs_path, stage2_results_path, stage2_results
 
 
@@ -267,6 +283,7 @@ def build_summary(
         summary["stage2_artifact_plasma_surf_filename"] = stage2_results.get(
             "PLASMA_SURF_FILENAME"
         )
+        summary["stage2_artifact_init_only"] = stage2_results.get("init_only")
     if results_path is None or results is None:
         return summary
     summary.update(

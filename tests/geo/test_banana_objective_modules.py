@@ -737,14 +737,56 @@ class SingleStageObjectiveModuleTests(_ModuleTestCase):
             CURVATURE_WEIGHT=7.0,
             JSurfSurf=surface_term,
             SURF_DIST_WEIGHT=8.0,
+            JVolume=None,
+            VOLUME_WEIGHT=0.0,
         )
 
         self.assertAlmostEqual(result["J_QS"], (0.5 * 2.0 + 6.0) / 1.5)
         self.assertAlmostEqual(result["J_Boozer"], (0.5 * 10.0 + 20.0) / 1.5)
         self.assertAlmostEqual(result["J_surf"], 1.5)
+        self.assertAlmostEqual(result["J_volume"], 0.0)
         np.testing.assert_allclose(result["dJ_surf"], [0.1, 0.2])
         self.assertAlmostEqual(result["total"], 50.0)
         np.testing.assert_allclose(result["grad"], [8.8, 6.266666666666667])
+
+    def test_evaluate_total_objective_supports_frontier_specific_objective_terms(self):
+        nonqs = [_FakeAlgebraicObjective(2.0, [2.0, 0.0])]
+        brs = [_FakeAlgebraicObjective(3.0, [0.5, 0.5])]
+        jiota = _FakeAlgebraicObjective(-0.4, [-0.2, -0.1])
+        jvolume = _FakeAlgebraicObjective(-0.3, [-0.3, -0.2])
+        jlength = _FakeAlgebraicObjective(5.0, [1.0, 1.5])
+        zero = _FakeAlgebraicObjective(0.0, [0.0, 0.0])
+        normalized_nonqs = _FakeAlgebraicObjective(10.0, [10.0, 0.0])
+        normalized_boozer = _FakeAlgebraicObjective(20.0, [1.0, 1.0])
+
+        result = self.module.evaluate_total_objective(
+            np.array([1.0]),
+            nonqs,
+            brs,
+            RES_WEIGHT=0.5,
+            Jiota=jiota,
+            IOTAS_WEIGHT=2.0,
+            JCurveLength=jlength,
+            LENGTH_WEIGHT=1.0,
+            JCurveCurve=zero,
+            CC_WEIGHT=1.0,
+            JCurveSurface=zero,
+            CS_WEIGHT=1.0,
+            JCurvature=zero,
+            CURVATURE_WEIGHT=1.0,
+            JNonQSObjective=normalized_nonqs,
+            JBoozerObjective=normalized_boozer,
+            JVolume=jvolume,
+            VOLUME_WEIGHT=4.0,
+        )
+
+        self.assertAlmostEqual(result["J_QS"], 2.0)
+        self.assertAlmostEqual(result["J_QS_objective"], 10.0)
+        self.assertAlmostEqual(result["J_Boozer"], 3.0)
+        self.assertAlmostEqual(result["J_Boozer_objective"], 20.0)
+        self.assertAlmostEqual(result["J_volume"], -0.3)
+        self.assertAlmostEqual(result["total"], 23.0)
+        np.testing.assert_allclose(result["grad"], [9.9, 1.0])
 
     def test_evaluate_alm_objective_builds_constraint_payload(self):
         nonqs = [_FakeAlgebraicObjective(2.0, [2.0, 0.0])]
@@ -779,6 +821,8 @@ class SingleStageObjectiveModuleTests(_ModuleTestCase):
             RES_WEIGHT=2.0,
             Jiota=jiota,
             IOTAS_WEIGHT=3.0,
+            JVolume=None,
+            VOLUME_WEIGHT=0.0,
             JCurveLength=jlength,
             LENGTH_WEIGHT=1.0,
             JCurveCurve=jcc,
@@ -845,6 +889,8 @@ class SingleStageObjectiveModuleTests(_ModuleTestCase):
             RES_WEIGHT=2.0,
             Jiota=jiota,
             IOTAS_WEIGHT=3.0,
+            JVolume=None,
+            VOLUME_WEIGHT=0.0,
             JCurveLength=jlength,
             LENGTH_WEIGHT=1.0,
             objective_optimizable=objective,
@@ -862,6 +908,8 @@ class SingleStageObjectiveModuleTests(_ModuleTestCase):
             RES_WEIGHT=2.0,
             Jiota=jiota,
             IOTAS_WEIGHT=3.0,
+            JVolume=None,
+            VOLUME_WEIGHT=0.0,
             JCurveLength=jlength,
             LENGTH_WEIGHT=1.0,
             objective_optimizable=objective,
@@ -883,6 +931,8 @@ class SingleStageObjectiveModuleTests(_ModuleTestCase):
                 RES_WEIGHT=2.0,
                 Jiota=jiota,
                 IOTAS_WEIGHT=3.0,
+                JVolume=None,
+                VOLUME_WEIGHT=0.0,
                 JCurveLength=jlength,
                 LENGTH_WEIGHT=1.0,
                 objective_optimizable=objective,
@@ -914,6 +964,8 @@ class SingleStageObjectiveModuleTests(_ModuleTestCase):
             RES_WEIGHT=2.0,
             Jiota=jiota,
             IOTAS_WEIGHT=3.0,
+            JVolume=None,
+            VOLUME_WEIGHT=0.0,
             JCurveLength=jlength,
             LENGTH_WEIGHT=1.0,
             JCurveCurve=_FakeAlgebraicObjective(0.6, [0.3, 0.4]),
@@ -977,6 +1029,8 @@ class SingleStageObjectiveModuleTests(_ModuleTestCase):
             RES_WEIGHT=2.0,
             Jiota=jiota,
             IOTAS_WEIGHT=3.0,
+            JVolume=None,
+            VOLUME_WEIGHT=0.0,
             JCurveLength=jlength,
             LENGTH_WEIGHT=1.0,
             JCurveCurve=_FakeAlgebraicObjective(0.6, [0.3, 0.4]),
@@ -1048,6 +1102,8 @@ class SingleStageObjectiveModuleTests(_ModuleTestCase):
                 RES_WEIGHT=2.0,
                 Jiota=jiota,
                 IOTAS_WEIGHT=3.0,
+                JVolume=None,
+                VOLUME_WEIGHT=0.0,
                 JCurveLength=jlength,
                 LENGTH_WEIGHT=1.0,
                 JCurveCurve=_FakeAlgebraicObjective(0.6, [0.3, 0.4]),

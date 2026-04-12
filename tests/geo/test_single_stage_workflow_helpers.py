@@ -540,6 +540,7 @@ class BaselineSweepScriptTests(unittest.TestCase):
             stage2_basin_stepsize=0.01,
             stage2_basin_seed=-1,
             stage2_init_only=False,
+            allow_init_only_stage2_seed=False,
             single_stage_constraint_method="penalty",
             single_stage_maxiter=25,
             single_stage_init_only=True,
@@ -1092,6 +1093,58 @@ class GoalModeComparisonScriptTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "Stage 2 artifact surface mismatch"):
                 module.load_validated_stage2_seed_metadata(args)
 
+    def test_goal_mode_comparison_wrapper_rejects_init_only_stage2_seed(self):
+        module = load_goal_mode_comparison_module()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            stage2_bs_path = tmpdir_path / "biot_savart_opt.json"
+            stage2_bs_path.write_text("{}", encoding="utf-8")
+            (tmpdir_path / "results.json").write_text(
+                json.dumps(
+                    {
+                        "PLASMA_SURF_FILENAME": "demo.nc",
+                        "init_only": True,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            args = self._make_args()
+            args.plasma_surf_filename = "demo.nc"
+            args.stage2_bs_path = str(stage2_bs_path)
+
+            with self.assertRaisesRegex(ValueError, "non-init-only Stage 2 artifact"):
+                module.load_validated_stage2_seed_metadata(args)
+
+    def test_goal_mode_comparison_wrapper_allows_init_only_stage2_seed_with_override(self):
+        module = load_goal_mode_comparison_module()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            stage2_bs_path = tmpdir_path / "biot_savart_opt.json"
+            results_path = tmpdir_path / "results.json"
+            stage2_bs_path.write_text("{}", encoding="utf-8")
+            results_path.write_text(
+                json.dumps(
+                    {
+                        "PLASMA_SURF_FILENAME": "demo.nc",
+                        "init_only": True,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            args = self._make_args()
+            args.plasma_surf_filename = "demo.nc"
+            args.stage2_bs_path = str(stage2_bs_path)
+            args.allow_init_only_stage2_seed = True
+
+            _, loaded_results_path, loaded_results = (
+                module.load_validated_stage2_seed_metadata(args)
+            )
+
+        self.assertEqual(loaded_results_path, results_path.resolve())
+        self.assertTrue(loaded_results["init_only"])
+
     def test_build_summary_reports_mode_results_and_deltas(self):
         module = load_goal_mode_comparison_module()
         args = self._make_args()
@@ -1147,7 +1200,10 @@ class GoalModeComparisonScriptTests(unittest.TestCase):
                 "results_path": Path("/tmp/comparison/frontier/results.json"),
                 "results": {
                     "SINGLE_STAGE_GOAL_MODE": "frontier",
-                    "SINGLE_STAGE_GOAL_MODE_IMPL": "frontier_iota_reward_only",
+                    "SINGLE_STAGE_GOAL_MODE_IMPL": "frontier_tradeoff_score_v1",
+                    "TARGET_IOTA": None,
+                    "TARGET_VOLUME": None,
+                    "BOOZER_SURFACE_TARGET_VOLUMES": [0.10],
                     "TERMINATION_MESSAGE": "frontier_ok",
                     "OPTIMIZER_SUCCESS": True,
                     "FINAL_FEASIBILITY_OK": True,
@@ -1166,8 +1222,22 @@ class GoalModeComparisonScriptTests(unittest.TestCase):
                     "TOPOLOGY_GATE_REJECTS": 1,
                     "HARDWARE_REJECTS": 0,
                     "SURFACE_SOLVE_REJECTS": 0,
+                    "FRONTIER_TRUST_REJECTS": 1,
+                    "FRONTIER_TRUST_OK": True,
+                    "FRONTIER_BOOZER_TRUST_THRESHOLD": 1.0e-5,
+                    "FRONTIER_BOOZER_TRUST_EXCESS": 0.0,
+                    "FRONTIER_REFERENCE_IOTA": 0.15,
+                    "FRONTIER_REFERENCE_VOLUME": 0.10,
+                    "FRONTIER_REFERENCE_QA": 0.012,
+                    "FRONTIER_REFERENCE_BOOZER": 0.008,
+                    "FRONTIER_EFFECTIVE_IOTA_WEIGHT": 1.0,
+                    "FRONTIER_EFFECTIVE_VOLUME_WEIGHT": 1.0,
+                    "FRONTIER_EFFECTIVE_BOOZER_WEIGHT": 1.0,
+                    "FRONTIER_VOLUME_OBJECTIVE": -0.4,
                     "BEST_FEASIBLE_AVAILABLE": True,
                     "BEST_FEASIBLE_STAGE": "final",
+                    "BEST_FEASIBLE_FRONTIER_RANK_OBJECTIVE_J": -10.5,
+                    "BEST_FEASIBLE_FRONTIER_TRUST_OK": True,
                     "BEST_FEASIBLE_FINAL_IOTA": 0.181,
                     "BEST_FEASIBLE_FINAL_VOLUME": 0.111,
                     "BEST_FEASIBLE_QA_OBJECTIVE": 0.013,
@@ -1181,6 +1251,7 @@ class GoalModeComparisonScriptTests(unittest.TestCase):
                     "BEST_FEASIBLE_HARDWARE_CONSTRAINTS_OK": True,
                     "BEST_FEASIBLE_FINAL_TOPOLOGY_GATE_SUCCESS": True,
                     "SEARCH_OBJECTIVE_J": -10.0,
+                    "FRONTIER_RANK_OBJECTIVE_J": -10.0,
                     "OBJECTIVE_J": -10.0,
                     "BASE_OBJECTIVE_J": -10.0,
                 },
@@ -1194,6 +1265,7 @@ class GoalModeComparisonScriptTests(unittest.TestCase):
             stage2_results_path=Path("/tmp/stage2/results.json"),
             stage2_results={
                 "PLASMA_SURF_FILENAME": "demo.nc",
+                "init_only": False,
                 "BANANA_CURRENT_A": 12000.0,
                 "BANANA_CURRENT_MAX_A": 16000.0,
             },
@@ -1201,12 +1273,19 @@ class GoalModeComparisonScriptTests(unittest.TestCase):
         )
 
         self.assertFalse(summary["search_objective_values_comparable"])
+        self.assertFalse(summary["stage2_artifact_init_only"])
         self.assertEqual(summary["stage2_banana_current_a"], 12000.0)
         self.assertEqual(summary["mode_runs"]["target"]["results"]["goal_mode"], "target")
         self.assertEqual(
             summary["mode_runs"]["frontier"]["results"]["goal_mode_impl"],
-            "frontier_iota_reward_only",
+            "frontier_tradeoff_score_v1",
         )
+        self.assertIsNone(summary["mode_runs"]["frontier"]["results"]["target_iota"])
+        self.assertEqual(
+            summary["mode_runs"]["frontier"]["results"]["boozer_surface_target_volumes"],
+            [0.10],
+        )
+        self.assertTrue(summary["mode_runs"]["frontier"]["results"]["frontier_trust_ok"])
         self.assertTrue(summary["mode_runs"]["target"]["results"]["best_feasible_available"])
         self.assertEqual(summary["mode_runs"]["target"]["results"]["invalid_state_rejects_total"], 2)
         self.assertAlmostEqual(summary["comparison"]["frontier_minus_target_final_iota"], 0.03)

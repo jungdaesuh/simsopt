@@ -514,6 +514,24 @@ def build_scipy_bounds(lower_bounds, upper_bounds):
     return list(zip(lower.tolist(), upper.tolist()))
 
 
+def build_local_relative_bounds(anchor_x, relative_radius, lower_bounds, upper_bounds):
+    if relative_radius is None:
+        return build_scipy_bounds(lower_bounds, upper_bounds)
+    if relative_radius <= 0.0:
+        raise ValueError("relative_radius must be positive when provided")
+    anchor = np.asarray(anchor_x, dtype=float)
+    lower = np.asarray(lower_bounds, dtype=float)
+    upper = np.asarray(upper_bounds, dtype=float)
+    if anchor.ndim != 1:
+        raise ValueError("anchor_x must be one-dimensional")
+    if anchor.shape != lower.shape or anchor.shape != upper.shape:
+        raise ValueError("Local bounds inputs must have matching shapes")
+    widths = float(relative_radius) * np.maximum(1.0, np.abs(anchor))
+    local_lower = np.where(np.isfinite(lower), np.maximum(lower, anchor - widths), anchor - widths)
+    local_upper = np.where(np.isfinite(upper), np.minimum(upper, anchor + widths), anchor + widths)
+    return build_scipy_bounds(local_lower, local_upper)
+
+
 def build_scaled_outer_bounds(anchor_x, step_scale, lower_bounds, upper_bounds):
     if not (0.0 < step_scale <= 1.0):
         raise ValueError("step_scale must be in (0, 1]")
@@ -526,6 +544,32 @@ def build_scaled_outer_bounds(anchor_x, step_scale, lower_bounds, upper_bounds):
         raise ValueError("Scaled bounds inputs must have matching shapes")
     scaled_lower = np.where(np.isfinite(lower), (lower - anchor) / step_scale, -np.inf)
     scaled_upper = np.where(np.isfinite(upper), (upper - anchor) / step_scale, np.inf)
+    return build_scipy_bounds(scaled_lower, scaled_upper)
+
+
+def build_scaled_local_outer_bounds(
+    anchor_x,
+    step_scale,
+    lower_bounds,
+    upper_bounds,
+    relative_radius,
+):
+    if relative_radius is None:
+        return build_scaled_outer_bounds(anchor_x, step_scale, lower_bounds, upper_bounds)
+    if not (0.0 < step_scale <= 1.0):
+        raise ValueError("step_scale must be in (0, 1]")
+    anchor = np.asarray(anchor_x, dtype=float)
+    lower = np.asarray(lower_bounds, dtype=float)
+    upper = np.asarray(upper_bounds, dtype=float)
+    if anchor.ndim != 1:
+        raise ValueError("anchor_x must be one-dimensional")
+    if anchor.shape != lower.shape or anchor.shape != upper.shape:
+        raise ValueError("Scaled local bounds inputs must have matching shapes")
+    widths = float(relative_radius) * np.maximum(1.0, np.abs(anchor))
+    local_lower = np.where(np.isfinite(lower), np.maximum(lower, anchor - widths), anchor - widths)
+    local_upper = np.where(np.isfinite(upper), np.minimum(upper, anchor + widths), anchor + widths)
+    scaled_lower = np.where(np.isfinite(local_lower), (local_lower - anchor) / step_scale, -np.inf)
+    scaled_upper = np.where(np.isfinite(local_upper), (local_upper - anchor) / step_scale, np.inf)
     return build_scipy_bounds(scaled_lower, scaled_upper)
 
 

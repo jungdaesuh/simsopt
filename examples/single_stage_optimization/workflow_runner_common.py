@@ -217,6 +217,22 @@ def load_stage2_artifact_results(stage2_bs_path: str | Path) -> tuple[Path, dict
     return stage2_results_path, load_json(stage2_results_path)
 
 
+def validate_stage2_seed_not_init_only(
+    stage2_results_path: Path,
+    stage2_results: Mapping[str, object],
+    *,
+    owner_label: str,
+    allow_init_only: bool = False,
+) -> None:
+    if allow_init_only or stage2_results.get("init_only") is not True:
+        return
+    raise ValueError(
+        f"{owner_label} requires a non-init-only Stage 2 artifact, but "
+        f"{stage2_results_path} reports init_only=true. Pass "
+        "--allow-init-only-stage2-seed to override this guard."
+    )
+
+
 def _single_results_matches(output_root: str | Path) -> list[Path]:
     return sorted(Path(output_root).glob("mpol=*-ntor=*/results.json"))
 
