@@ -48,6 +48,8 @@ profiling and continuation-policy work is done.
 10. If reevaluation or host stalls dominate, reduce outer-loop reevaluation.
     Tighten continuation-stage budgets, reduce line-search reevaluations, and
     cut unnecessary Boozer-backed objective calls.
+    Current state: the validated-fast coarse scaled initial phase is already skipped.
+    The next throughput cut is the non-final main outer-loop line-search budget.
 
 11. If steady-state device kernels dominate, evaluate true batched multi-donor execution.
     The current campaign path is orchestration, not real batched GPU execution.

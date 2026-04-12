@@ -90,6 +90,30 @@ def _finite_metric(results: dict[str, object], key: str) -> float | None:
     return _finite_float(results.get(key))
 
 
+def _rejected_stage2_seed_candidate(
+    run_dir: Path,
+    *,
+    artifacts: dict[str, object],
+    failures: list[str],
+    warnings: list[str] | None = None,
+) -> dict[str, object]:
+    return {
+        "run_dir": str(run_dir),
+        "status": "rejected",
+        "downstream_eligible": False,
+        "research_grade": False,
+        "artifacts": artifacts,
+        "metrics": {},
+        "margins": {},
+        "ranking": {
+            "status_rank": _STATUS_RANK["rejected"],
+            "sort_key": [_STATUS_RANK["rejected"], math.inf, math.inf, math.inf],
+        },
+        "failures": failures,
+        "warnings": [] if warnings is None else warnings,
+    }
+
+
 def evaluate_stage2_seed_candidate(
     run_dir: Path,
     *,
@@ -98,23 +122,20 @@ def evaluate_stage2_seed_candidate(
     artifacts = detect_stage2_seed_artifacts(run_dir)
     results_path = run_dir / "results.json"
     if not results_path.exists():
-        return {
-            "run_dir": str(run_dir),
-            "status": "rejected",
-            "downstream_eligible": False,
-            "research_grade": False,
-            "artifacts": artifacts,
-            "metrics": {},
-            "margins": {},
-            "ranking": {
-                "status_rank": _STATUS_RANK["rejected"],
-                "sort_key": [_STATUS_RANK["rejected"], math.inf, math.inf, math.inf],
-            },
-            "failures": ["results.json is missing"],
-            "warnings": [],
-        }
+        return _rejected_stage2_seed_candidate(
+            run_dir,
+            artifacts=artifacts,
+            failures=["results.json is missing"],
+        )
 
-    results = load_json(results_path)
+    try:
+        results = load_json(results_path)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        return _rejected_stage2_seed_candidate(
+            run_dir,
+            artifacts=artifacts,
+            failures=[f"results.json is unreadable: {type(exc).__name__}: {exc}"],
+        )
     failures: list[str] = []
     warnings: list[str] = []
 

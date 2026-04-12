@@ -60,11 +60,11 @@ class SingleStageContinuationTests(unittest.TestCase):
                 ("final", 8, 6, 255, 64, 3),
             ],
         )
-        self.assertEqual(stages[0].outer_maxls, 4)
-        self.assertEqual(stages[1].outer_maxls, 6)
-        self.assertEqual(stages[2].outer_maxls, 8)
+        self.assertEqual(stages[0].outer_maxls, 2)
+        self.assertEqual(stages[1].outer_maxls, 4)
+        self.assertEqual(stages[2].outer_maxls, 6)
         self.assertEqual(stages[0].initial_step_scale, 0.1)
-        self.assertEqual(stages[0].initial_step_maxiter, 1)
+        self.assertEqual(stages[0].initial_step_maxiter, 0)
         self.assertEqual(stages[1].initial_step_scale, 0.25)
         self.assertEqual(stages[1].initial_step_maxiter, 1)
         self.assertEqual(stages[2].initial_step_scale, 0.5)
@@ -420,6 +420,10 @@ class SingleStageContinuationTests(unittest.TestCase):
         self.assertEqual(summary["profiling"]["total_accepted_step_count"], 9)
         self.assertEqual(summary["profiling"]["total_objective_eval_count"], 39)
         self.assertEqual(summary["profiling"]["total_gradient_eval_count"], 39)
+        self.assertIsNone(summary["profiling"]["total_outer_optimizer_s"])
+        self.assertIsNone(summary["profiling"]["total_outer_optimizer_initial_phase_s"])
+        self.assertIsNone(summary["profiling"]["total_outer_optimizer_main_s"])
+        self.assertIsNone(summary["profiling"]["total_target_lane_bundle_setup_s"])
         self.assertAlmostEqual(
             summary["profiling"]["objective_evals_per_accepted_step"],
             39 / 9,
@@ -427,6 +431,194 @@ class SingleStageContinuationTests(unittest.TestCase):
         self.assertAlmostEqual(
             summary["profiling"]["total_value_and_grad_compile_overhead_s"],
             5.9,
+        )
+        self.assertEqual(
+            summary["branch_decision"]["category"],
+            "campaign_ready_for_convergence",
+        )
+
+    def test_build_continuation_campaign_summary_marks_zero_progress_profile_as_reevaluation_dominated(
+        self,
+    ):
+        module = self.load_module()
+
+        zero_progress_a = module.build_campaign_candidate_record(
+            donor_index=1,
+            donor_label="01-seed-a",
+            donor_run_dir=Path("/tmp/donor-a"),
+            outcome=module.ContinuationRunOutcome(
+                run_root=Path("/tmp/campaign/donor-a"),
+                summary_path=Path("/tmp/campaign/donor-a/continuation_summary.json"),
+                summary={},
+                report_path=Path(
+                    "/tmp/campaign/donor-a/continuation_validation.json"
+                ),
+                report={
+                    "passed": False,
+                    "research_verdicts": {"research_grade_ready": False},
+                    "profiling": {
+                        "total_stage_script_time_s": 417.2,
+                        "total_outer_optimizer_s": 327.6,
+                        "total_outer_optimizer_initial_phase_s": 101.7,
+                        "total_outer_optimizer_main_s": 225.9,
+                        "total_target_lane_bundle_setup_s": 10.0,
+                        "total_accepted_step_count": 0,
+                        "total_objective_eval_count": 6,
+                        "total_gradient_eval_count": 6,
+                        "objective_evals_per_accepted_step": None,
+                    },
+                    "final_stage": {
+                        "abs_iota_error": 0.05,
+                        "metrics": {
+                            "FIELD_ERROR": 0.0039,
+                            "FINAL_IOTA": 0.095,
+                            "FINAL_NON_QS": 0.00011,
+                            "FINAL_BOOZER_RESIDUAL": 6e-5,
+                        },
+                    },
+                    "failures": ["coarse stage failed contract"],
+                    "warnings": [],
+                },
+                exit_code=1,
+            ),
+        )
+        zero_progress_b = module.build_campaign_candidate_record(
+            donor_index=2,
+            donor_label="02-seed-b",
+            donor_run_dir=Path("/tmp/donor-b"),
+            outcome=module.ContinuationRunOutcome(
+                run_root=Path("/tmp/campaign/donor-b"),
+                summary_path=Path("/tmp/campaign/donor-b/continuation_summary.json"),
+                summary={},
+                report_path=Path(
+                    "/tmp/campaign/donor-b/continuation_validation.json"
+                ),
+                report={
+                    "passed": False,
+                    "research_verdicts": {"research_grade_ready": False},
+                    "profiling": {
+                        "total_stage_script_time_s": 642.1,
+                        "total_outer_optimizer_s": 552.8,
+                        "total_outer_optimizer_initial_phase_s": 306.2,
+                        "total_outer_optimizer_main_s": 246.6,
+                        "total_target_lane_bundle_setup_s": 9.7,
+                        "total_accepted_step_count": 0,
+                        "total_objective_eval_count": 6,
+                        "total_gradient_eval_count": 6,
+                        "objective_evals_per_accepted_step": None,
+                    },
+                    "final_stage": {
+                        "abs_iota_error": 0.05,
+                        "metrics": {
+                            "FIELD_ERROR": 0.0046,
+                            "FINAL_IOTA": 0.0995,
+                            "FINAL_NON_QS": 0.00012,
+                            "FINAL_BOOZER_RESIDUAL": 8e-5,
+                        },
+                    },
+                    "failures": ["coarse stage failed contract"],
+                    "warnings": [],
+                },
+                exit_code=1,
+            ),
+        )
+
+        summary = module.build_continuation_campaign_summary(
+            campaign_root=Path("/tmp/campaign"),
+            run_id="run-reeval-001",
+            donor_records=[zero_progress_b, zero_progress_a],
+            passthrough_args=["--backend", "jax"],
+            trial_policy="validated-fast",
+            validation_thresholds={
+                "max_final_field_error": 5e-4,
+                "max_final_abs_iota_error": None,
+                "max_final_non_qs": 0.05,
+            },
+        )
+
+        self.assertAlmostEqual(summary["profiling"]["total_outer_optimizer_s"], 880.4)
+        self.assertAlmostEqual(
+            summary["profiling"]["total_target_lane_bundle_setup_s"], 19.7
+        )
+        self.assertEqual(
+            summary["branch_decision"]["category"],
+            "reevaluation_or_host_stall_dominated",
+        )
+        self.assertIn(
+            "Skip the validated-fast coarse scaled initial outer phase and re-profile the same donor set.",
+            summary["branch_decision"]["recommended_actions"],
+        )
+
+    def test_build_continuation_campaign_summary_marks_zero_progress_after_phase_skip_as_line_search_budget_dominated(
+        self,
+    ):
+        module = self.load_module()
+
+        zero_progress = module.build_campaign_candidate_record(
+            donor_index=1,
+            donor_label="01-seed-a",
+            donor_run_dir=Path("/tmp/donor-a"),
+            outcome=module.ContinuationRunOutcome(
+                run_root=Path("/tmp/campaign/donor-a"),
+                summary_path=Path("/tmp/campaign/donor-a/continuation_summary.json"),
+                summary={},
+                report_path=Path(
+                    "/tmp/campaign/donor-a/continuation_validation.json"
+                ),
+                report={
+                    "passed": False,
+                    "research_verdicts": {"research_grade_ready": False},
+                    "profiling": {
+                        "total_stage_script_time_s": 178.7,
+                        "total_outer_optimizer_s": 99.2,
+                        "total_outer_optimizer_initial_phase_s": None,
+                        "total_outer_optimizer_main_s": 99.2,
+                        "total_target_lane_bundle_setup_s": 9.9,
+                        "total_accepted_step_count": 0,
+                        "total_objective_eval_count": 6,
+                        "total_gradient_eval_count": 6,
+                        "objective_evals_per_accepted_step": None,
+                    },
+                    "final_stage": {
+                        "abs_iota_error": 0.05,
+                        "metrics": {
+                            "FIELD_ERROR": 0.0040,
+                            "FINAL_IOTA": 0.0953,
+                            "FINAL_NON_QS": 0.00012,
+                            "FINAL_BOOZER_RESIDUAL": 6e-5,
+                        },
+                    },
+                    "failures": ["coarse stage failed contract"],
+                    "warnings": [],
+                },
+                exit_code=1,
+            ),
+        )
+
+        summary = module.build_continuation_campaign_summary(
+            campaign_root=Path("/tmp/campaign"),
+            run_id="run-reeval-002",
+            donor_records=[zero_progress],
+            passthrough_args=["--backend", "jax"],
+            trial_policy="validated-fast",
+            validation_thresholds={
+                "max_final_field_error": 5e-4,
+                "max_final_abs_iota_error": None,
+                "max_final_non_qs": 0.05,
+            },
+        )
+
+        self.assertEqual(
+            summary["branch_decision"]["category"],
+            "reevaluation_or_host_stall_dominated",
+        )
+        self.assertIn(
+            "Tighten the validated-fast non-final outer line-search budget and re-profile the same donor set.",
+            summary["branch_decision"]["recommended_actions"],
+        )
+        self.assertIn(
+            "The validated-fast coarse scaled phase is already absent, so the remaining waste is in the main outer loop.",
+            summary["branch_decision"]["rationale"],
         )
 
     def test_continuation_uses_target_lane_fast_trials_only_for_nonbenchmark_jax_ondevice(
@@ -831,11 +1023,24 @@ class SingleStageContinuationTests(unittest.TestCase):
             "profiling": {
                 "profiled_candidate_count": 2,
                 "total_stage_script_time_s": 56.5,
+                "total_outer_optimizer_s": 48.0,
+                "total_outer_optimizer_initial_phase_s": 8.0,
+                "total_outer_optimizer_main_s": 40.0,
+                "total_target_lane_bundle_setup_s": 3.2,
                 "total_accepted_step_count": 7,
                 "total_objective_eval_count": 29,
                 "objective_evals_per_accepted_step": 29 / 7,
                 "total_gradient_eval_count": 29,
                 "total_value_and_grad_compile_overhead_s": 3.5,
+            },
+            "branch_decision": {
+                "category": "campaign_ready_for_convergence",
+                "rationale": [
+                    "The campaign already produced continuation-valid donors."
+                ],
+                "recommended_actions": [
+                    "Run longer multi-donor convergence campaigns."
+                ],
             },
             "reports": [
                 {
@@ -845,6 +1050,9 @@ class SingleStageContinuationTests(unittest.TestCase):
                     "run_root": "/tmp/campaign-run-001/donor-01",
                     "profiling": {
                         "total_stage_script_time_s": 24.0,
+                        "total_outer_optimizer_s": 19.0,
+                        "total_outer_optimizer_initial_phase_s": 3.0,
+                        "total_outer_optimizer_main_s": 16.0,
                         "total_accepted_step_count": 4,
                         "total_objective_eval_count": 14,
                         "objective_evals_per_accepted_step": 3.5,
@@ -859,6 +1067,9 @@ class SingleStageContinuationTests(unittest.TestCase):
                     "run_root": "/tmp/campaign-run-001/donor-02",
                     "profiling": {
                         "total_stage_script_time_s": 32.5,
+                        "total_outer_optimizer_s": 29.0,
+                        "total_outer_optimizer_initial_phase_s": 5.0,
+                        "total_outer_optimizer_main_s": 24.0,
                         "total_accepted_step_count": 3,
                         "total_objective_eval_count": 15,
                         "objective_evals_per_accepted_step": 5.0,
@@ -873,8 +1084,14 @@ class SingleStageContinuationTests(unittest.TestCase):
 
         self.assertIn("# Campaign Profiling Report", markdown)
         self.assertIn("- Profiled candidates: 2", markdown)
+        self.assertIn("- Total outer optimizer time (s): 48", markdown)
+        self.assertIn("- Total initial outer phase time (s): 8", markdown)
+        self.assertIn("- Total main outer phase time (s): 40", markdown)
         self.assertIn("- Total objective evaluations: 29", markdown)
+        self.assertIn("## Branch Decision", markdown)
+        self.assertIn("- Category: campaign_ready_for_convergence", markdown)
         self.assertIn("## Donor `01-good-donor`", markdown)
+        self.assertIn("- Total outer optimizer time (s): 19", markdown)
         self.assertIn("- Objective evaluations per accepted step: 3.5", markdown)
 
     def test_build_continuation_validation_report_rejects_missing_surface_artifact(self):

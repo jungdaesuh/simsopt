@@ -138,6 +138,30 @@ class Stage2SeedReportTests(unittest.TestCase):
         self.assertEqual(catalog["best_candidate"]["run_dir"], str(best_run))
         self.assertTrue(catalog["passed"])
 
+    def test_evaluate_candidate_rejects_unreadable_results_without_crashing(self):
+        module = load_stage2_seed_report_module()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            run_dir = Path(tmpdir) / "run-corrupt"
+            run_dir.mkdir(parents=True)
+            (run_dir / "results.json").write_text(
+                '{"FIELD_ERROR": 0.01, "FINAL_OBJECTIVE": }',
+                encoding="utf-8",
+            )
+            (run_dir / "biot_savart_opt.json").write_text("{}", encoding="utf-8")
+            (run_dir / "surf_opt.json").write_text("{}", encoding="utf-8")
+
+            report = module.evaluate_stage2_seed_candidate(run_dir)
+
+        self.assertEqual(report["status"], "rejected")
+        self.assertFalse(report["downstream_eligible"])
+        self.assertTrue(
+            any(
+                "results.json is unreadable: JSONDecodeError"
+                in failure
+                for failure in report["failures"]
+            )
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

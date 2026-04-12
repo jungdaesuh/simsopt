@@ -93,6 +93,7 @@ TARGET_LANE_ACCEPTED_STEP_SYNC_DEFAULT = "final-only"
 _REFERENCE_OUTER_MAXLS_DEFAULT = 20
 _TARGET_OUTER_MAXLS_BENCHMARK_DEFAULT = 4
 _TARGET_OUTER_MAXLS_DEFAULT = 8
+_TARGET_OUTER_INITIAL_STEP_SIZE_BENCHMARK_DEFAULT = 1.0e-4
 _REFERENCE_OUTER_MAXCOR_DEFAULT = 300
 _TARGET_OUTER_MAXCOR_DEFAULT = 20
 _TARGET_LANE_BOOZER_BFGS_TOL_DEFAULT = 1e-8
@@ -601,6 +602,7 @@ def build_single_stage_problem_contract(
             "max_iterations": int(MAXITER),
             "maxcor": int(args.maxcor),
             "outer_maxls": int(args.outer_maxls),
+            "target_lane_outer_initial_step_size": args.target_lane_outer_initial_step_size,
             "initial_step_scale": float(args.initial_step_scale),
             "initial_step_maxiter": int(args.initial_step_maxiter),
             "target_lane_boozer_bfgs_tol": target_lane_boozer_bfgs_tol_record,
@@ -1418,6 +1420,19 @@ def parse_args():
         ),
     )
     parser.add_argument(
+        "--target-lane-outer-initial-step-size",
+        type=float,
+        default=float(os.environ["TARGET_LANE_OUTER_INITIAL_STEP_SIZE"])
+        if "TARGET_LANE_OUTER_INITIAL_STEP_SIZE" in os.environ
+        else None,
+        help=(
+            "Optional initial strong-Wolfe trial step for the JAX/ondevice "
+            "outer L-BFGS line search. This is mainly useful for proof and "
+            "benchmark runs whose first accepted step requires a much smaller "
+            "trial scale than the optimizer's default start."
+        ),
+    )
+    parser.add_argument(
         "--initial-step-scale",
         type=float,
         default=float(os.environ.get("OUTER_INITIAL_STEP_SCALE", "1.0")),
@@ -1719,6 +1734,14 @@ def parse_args():
         args.optimizer_backend,
         args.outer_maxls,
         benchmark_mode=args.benchmark_mode,
+    )
+    args.target_lane_outer_initial_step_size = (
+        resolve_target_lane_outer_initial_step_size(
+            args.backend,
+            args.optimizer_backend,
+            args.target_lane_outer_initial_step_size,
+            benchmark_mode=args.benchmark_mode,
+        )
     )
     args.maxcor = resolve_single_stage_outer_maxcor(
         args.backend,
@@ -3164,6 +3187,25 @@ def resolve_single_stage_outer_maxls(
     return resolved
 
 
+def resolve_target_lane_outer_initial_step_size(
+    field_backend,
+    optimizer_backend,
+    initial_step_size=None,
+    *,
+    benchmark_mode=False,
+):
+    """Resolve the optional first-trial outer L-BFGS step size for target-lane runs."""
+    if initial_step_size is not None:
+        resolved = float(initial_step_size)
+    elif benchmark_mode and field_backend == "jax" and optimizer_backend == "ondevice":
+        resolved = _TARGET_OUTER_INITIAL_STEP_SIZE_BENCHMARK_DEFAULT
+    else:
+        return None
+    if resolved <= 0.0:
+        raise ValueError("target_lane_outer_initial_step_size must be positive.")
+    return resolved
+
+
 def resolve_single_stage_outer_maxcor(
     field_backend,
     optimizer_backend,
@@ -3704,6 +3746,7 @@ def run_single_stage_optimizer(
     outer_maxls,
     callback,
     scalar_fun=None,
+    target_lane_initial_step_size=None,
     failure_callback=None,
 ):
     """Run the single-stage outer optimization through the lane-specific adapters."""
@@ -3746,6 +3789,10 @@ def run_single_stage_optimizer(
             "value_and_grad": value_and_grad,
             "callback": callback,
         }
+        if target_lane_initial_step_size is not None:
+            target_minimize_kwargs["options"]["initial_step_size"] = float(
+                target_lane_initial_step_size
+            )
         if failure_callback is not None:
             target_minimize_kwargs["failure_callback"] = failure_callback
         return target_minimize(
@@ -4717,6 +4764,7 @@ if __name__ == "__main__":
         str(args.ss_dist),
         str(args.maxcor),
         str(args.outer_maxls),
+        str(args.target_lane_outer_initial_step_size),
         str(args.initial_step_scale),
         str(args.initial_step_maxiter),
         str(target_lane_boozer_bfgs_tol_record),
@@ -5420,6 +5468,7 @@ if __name__ == "__main__":
                         "Starting target-lane outer optimizer "
                         f"(sync={effective_target_lane_sync_policy}, "
                         f"outer_maxls={args.outer_maxls}, "
+                        f"initial_step_size={args.target_lane_outer_initial_step_size}, "
                         f"boozer_bfgs_tol={target_lane_boozer_bfgs_tol_record}, "
                         f"boozer_bfgs_maxiter={target_lane_boozer_bfgs_maxiter_record}, "
                         f"boozer_newton_tol={target_lane_boozer_newton_tol_record}, "
@@ -5451,6 +5500,11 @@ if __name__ == "__main__":
                             maxcor=args.maxcor,
                             outer_maxls=args.outer_maxls,
                             scalar_fun=target_scalar_objective,
+                            target_lane_initial_step_size=(
+                                args.target_lane_outer_initial_step_size
+                                if use_target_lane
+                                else None
+                            ),
                             failure_callback=main_failure_callback,
                         )
                     _record_timing(
@@ -5762,6 +5816,7 @@ if __name__ == "__main__":
         "max_iterations": MAXITER,
         "maxcor": args.maxcor,
         "outer_maxls": args.outer_maxls,
+        "target_lane_outer_initial_step_size": args.target_lane_outer_initial_step_size,
         "initial_step_scale": args.initial_step_scale,
         "initial_step_maxiter": args.initial_step_maxiter,
         "target_lane_boozer_bfgs_tol": target_lane_boozer_bfgs_tol_record,

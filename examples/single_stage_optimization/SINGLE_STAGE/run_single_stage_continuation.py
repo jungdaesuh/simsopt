@@ -55,16 +55,16 @@ CONTINUATION_TRIAL_POLICY_CHOICES = (
 _VALIDATED_FAST_TRIAL_STAGE_OVERRIDES = {
     "coarse": {
         "minimal_artifacts": True,
-        "outer_maxls": 4,
+        "outer_maxls": 2,
         "maxcor": 10,
         "initial_step_scale": 0.1,
-        "initial_step_maxiter": 1,
+        "initial_step_maxiter": 0,
         "target_lane_boozer_bfgs_tol": 1e-5,
         "target_lane_boozer_bfgs_maxiter": 24,
     },
     "medium": {
         "minimal_artifacts": True,
-        "outer_maxls": 6,
+        "outer_maxls": 4,
         "maxcor": 12,
         "initial_step_scale": 0.25,
         "initial_step_maxiter": 1,
@@ -73,7 +73,7 @@ _VALIDATED_FAST_TRIAL_STAGE_OVERRIDES = {
     },
     "prefinal": {
         "minimal_artifacts": True,
-        "outer_maxls": 8,
+        "outer_maxls": 6,
         "maxcor": 16,
         "initial_step_scale": 0.5,
         "initial_step_maxiter": 1,
@@ -343,6 +343,30 @@ def _timing_metric_s(results: dict[str, object], key: str) -> float | None:
     return _finite_float(_timings_dict(results).get(key))
 
 
+def _accumulate_float(
+    totals: dict[str, float],
+    key: str,
+    profiling: dict[str, object],
+    source_key: str | None = None,
+) -> None:
+    """Accumulate a finite float from *profiling* into *totals[key]*."""
+    value = _finite_float(profiling.get(source_key or key))
+    if value is not None:
+        totals[key] = totals.get(key, 0.0) + value
+
+
+def _accumulate_int(
+    totals: dict[str, int],
+    key: str,
+    profiling: dict[str, object],
+    source_key: str | None = None,
+) -> None:
+    """Accumulate a safe int from *profiling* into *totals[key]*."""
+    value = _safe_int(profiling.get(source_key or key))
+    if value is not None:
+        totals[key] = totals.get(key, 0) + value
+
+
 def _ratio_or_none(
     numerator: int | float | None,
     denominator: int | float | None,
@@ -490,22 +514,8 @@ def build_stage_profiling_summary(
 def _aggregate_stage_profiling(stage_reports: list[dict[str, object]]) -> dict[str, object]:
     profile_count = 0
     target_lane_profile_count = 0
-    total_stage_script_time_s = 0.0
-    total_stage_script_time_available = False
-    total_outer_optimizer_s = 0.0
-    total_outer_optimizer_available = False
-    total_target_lane_bundle_setup_s = 0.0
-    total_target_lane_bundle_setup_available = False
-    total_value_and_grad_compile_overhead_s = 0.0
-    total_value_and_grad_compile_overhead_available = False
-    total_inner_solve_compile_overhead_s = 0.0
-    total_inner_solve_compile_overhead_available = False
-    total_accepted_step_count = 0
-    total_accepted_step_count_available = False
-    total_objective_eval_count = 0
-    total_objective_eval_count_available = False
-    total_gradient_eval_count = 0
-    total_gradient_eval_count_available = False
+    floats: dict[str, float] = {}
+    ints: dict[str, int] = {}
     stage_summaries: dict[str, object] = {}
 
     for stage_report in stage_reports:
@@ -517,100 +527,39 @@ def _aggregate_stage_profiling(stage_reports: list[dict[str, object]]) -> dict[s
         if isinstance(stage_name, str):
             stage_summaries[stage_name] = profiling
 
-        script_total_s = _finite_float(profiling.get("script_total_s"))
-        if script_total_s is not None:
-            total_stage_script_time_s += script_total_s
-            total_stage_script_time_available = True
-
-        outer_optimizer_s = _finite_float(profiling.get("outer_optimizer_s"))
-        if outer_optimizer_s is not None:
-            total_outer_optimizer_s += outer_optimizer_s
-            total_outer_optimizer_available = True
-
-        target_lane_bundle_setup_s = _finite_float(
-            profiling.get("target_lane_bundle_setup_s")
-        )
-        if target_lane_bundle_setup_s is not None:
-            total_target_lane_bundle_setup_s += target_lane_bundle_setup_s
-            total_target_lane_bundle_setup_available = True
-
-        accepted_step_count = _safe_int(profiling.get("accepted_step_count"))
-        if accepted_step_count is not None:
-            total_accepted_step_count += accepted_step_count
-            total_accepted_step_count_available = True
-
-        objective_eval_count = _safe_int(profiling.get("objective_eval_count"))
-        if objective_eval_count is not None:
-            total_objective_eval_count += objective_eval_count
-            total_objective_eval_count_available = True
-
-        gradient_eval_count = _safe_int(profiling.get("gradient_eval_count"))
-        if gradient_eval_count is not None:
-            total_gradient_eval_count += gradient_eval_count
-            total_gradient_eval_count_available = True
+        _accumulate_float(floats, "total_stage_script_time_s", profiling, source_key="script_total_s")
+        _accumulate_float(floats, "total_outer_optimizer_s", profiling, source_key="outer_optimizer_s")
+        _accumulate_float(floats, "total_outer_optimizer_initial_phase_s", profiling, source_key="outer_optimizer_initial_phase_s")
+        _accumulate_float(floats, "total_outer_optimizer_main_s", profiling, source_key="outer_optimizer_main_s")
+        _accumulate_float(floats, "total_target_lane_bundle_setup_s", profiling, source_key="target_lane_bundle_setup_s")
+        _accumulate_int(ints, "total_accepted_step_count", profiling, source_key="accepted_step_count")
+        _accumulate_int(ints, "total_objective_eval_count", profiling, source_key="objective_eval_count")
+        _accumulate_int(ints, "total_gradient_eval_count", profiling, source_key="gradient_eval_count")
 
         target_lane_profile = profiling.get("target_lane_profile")
         if not isinstance(target_lane_profile, dict):
             continue
         target_lane_profile_count += 1
-
-        value_and_grad_compile_overhead_s = _finite_float(
-            target_lane_profile.get("value_and_grad_compile_overhead_s")
-        )
-        if value_and_grad_compile_overhead_s is not None:
-            total_value_and_grad_compile_overhead_s += (
-                value_and_grad_compile_overhead_s
-            )
-            total_value_and_grad_compile_overhead_available = True
-
-        inner_solve_compile_overhead_s = _finite_float(
-            target_lane_profile.get("inner_solve_compile_overhead_s")
-        )
-        if inner_solve_compile_overhead_s is not None:
-            total_inner_solve_compile_overhead_s += inner_solve_compile_overhead_s
-            total_inner_solve_compile_overhead_available = True
-
-    total_accepted_steps = (
-        total_accepted_step_count if total_accepted_step_count_available else None
-    )
-    total_objective_evals = (
-        total_objective_eval_count if total_objective_eval_count_available else None
-    )
-    total_gradient_evals = (
-        total_gradient_eval_count if total_gradient_eval_count_available else None
-    )
+        _accumulate_float(floats, "total_value_and_grad_compile_overhead_s", target_lane_profile, source_key="value_and_grad_compile_overhead_s")
+        _accumulate_float(floats, "total_inner_solve_compile_overhead_s", target_lane_profile, source_key="inner_solve_compile_overhead_s")
 
     return {
         "profiled_stage_count": profile_count,
         "target_lane_profiled_stage_count": target_lane_profile_count,
-        "total_stage_script_time_s": (
-            total_stage_script_time_s if total_stage_script_time_available else None
-        ),
-        "total_outer_optimizer_s": (
-            total_outer_optimizer_s if total_outer_optimizer_available else None
-        ),
-        "total_target_lane_bundle_setup_s": (
-            total_target_lane_bundle_setup_s
-            if total_target_lane_bundle_setup_available
-            else None
-        ),
-        "total_accepted_step_count": total_accepted_steps,
-        "total_objective_eval_count": total_objective_evals,
-        "total_gradient_eval_count": total_gradient_evals,
+        "total_stage_script_time_s": floats.get("total_stage_script_time_s"),
+        "total_outer_optimizer_s": floats.get("total_outer_optimizer_s"),
+        "total_outer_optimizer_initial_phase_s": floats.get("total_outer_optimizer_initial_phase_s"),
+        "total_outer_optimizer_main_s": floats.get("total_outer_optimizer_main_s"),
+        "total_target_lane_bundle_setup_s": floats.get("total_target_lane_bundle_setup_s"),
+        "total_accepted_step_count": ints.get("total_accepted_step_count"),
+        "total_objective_eval_count": ints.get("total_objective_eval_count"),
+        "total_gradient_eval_count": ints.get("total_gradient_eval_count"),
         "objective_evals_per_accepted_step": _ratio_or_none(
-            total_objective_evals,
-            total_accepted_steps,
+            ints.get("total_objective_eval_count"),
+            ints.get("total_accepted_step_count"),
         ),
-        "total_value_and_grad_compile_overhead_s": (
-            total_value_and_grad_compile_overhead_s
-            if total_value_and_grad_compile_overhead_available
-            else None
-        ),
-        "total_inner_solve_compile_overhead_s": (
-            total_inner_solve_compile_overhead_s
-            if total_inner_solve_compile_overhead_available
-            else None
-        ),
+        "total_value_and_grad_compile_overhead_s": floats.get("total_value_and_grad_compile_overhead_s"),
+        "total_inner_solve_compile_overhead_s": floats.get("total_inner_solve_compile_overhead_s"),
         "stages": stage_summaries,
     }
 
@@ -619,16 +568,8 @@ def _aggregate_campaign_profiling(
     donor_records: list[dict[str, object]],
 ) -> dict[str, object]:
     profiled_candidate_count = 0
-    total_stage_script_time_s = 0.0
-    total_stage_script_time_available = False
-    total_accepted_step_count = 0
-    total_accepted_step_count_available = False
-    total_objective_eval_count = 0
-    total_objective_eval_count_available = False
-    total_gradient_eval_count = 0
-    total_gradient_eval_count_available = False
-    total_value_and_grad_compile_overhead_s = 0.0
-    total_value_and_grad_compile_overhead_available = False
+    floats: dict[str, float] = {}
+    ints: dict[str, int] = {}
 
     for record in donor_records:
         profiling = record.get("profiling")
@@ -636,65 +577,156 @@ def _aggregate_campaign_profiling(
             continue
         profiled_candidate_count += 1
 
-        total_stage_script_time = _finite_float(profiling.get("total_stage_script_time_s"))
-        if total_stage_script_time is not None:
-            total_stage_script_time_s += total_stage_script_time
-            total_stage_script_time_available = True
+        _accumulate_float(floats, "total_stage_script_time_s", profiling)
+        _accumulate_float(floats, "total_outer_optimizer_s", profiling)
+        _accumulate_float(floats, "total_outer_optimizer_initial_phase_s", profiling)
+        _accumulate_float(floats, "total_outer_optimizer_main_s", profiling)
+        _accumulate_float(floats, "total_target_lane_bundle_setup_s", profiling)
+        _accumulate_int(ints, "total_accepted_step_count", profiling)
+        _accumulate_int(ints, "total_objective_eval_count", profiling)
+        _accumulate_int(ints, "total_gradient_eval_count", profiling)
+        _accumulate_float(floats, "total_value_and_grad_compile_overhead_s", profiling)
 
-        total_accepted_steps = _safe_int(profiling.get("total_accepted_step_count"))
-        if total_accepted_steps is not None:
-            total_accepted_step_count += total_accepted_steps
-            total_accepted_step_count_available = True
-
-        total_objective_evals = _safe_int(
-            profiling.get("total_objective_eval_count")
-        )
-        if total_objective_evals is not None:
-            total_objective_eval_count += total_objective_evals
-            total_objective_eval_count_available = True
-
-        total_gradient_evals = _safe_int(
-            profiling.get("total_gradient_eval_count")
-        )
-        if total_gradient_evals is not None:
-            total_gradient_eval_count += total_gradient_evals
-            total_gradient_eval_count_available = True
-
-        value_and_grad_compile_overhead_s = _finite_float(
-            profiling.get("total_value_and_grad_compile_overhead_s")
-        )
-        if value_and_grad_compile_overhead_s is not None:
-            total_value_and_grad_compile_overhead_s += (
-                value_and_grad_compile_overhead_s
-            )
-            total_value_and_grad_compile_overhead_available = True
-
-    total_accepted_steps = (
-        total_accepted_step_count if total_accepted_step_count_available else None
-    )
-    total_objective_evals = (
-        total_objective_eval_count if total_objective_eval_count_available else None
-    )
-    total_gradient_evals = (
-        total_gradient_eval_count if total_gradient_eval_count_available else None
-    )
     return {
         "profiled_candidate_count": profiled_candidate_count,
-        "total_stage_script_time_s": (
-            total_stage_script_time_s if total_stage_script_time_available else None
-        ),
-        "total_accepted_step_count": total_accepted_steps,
-        "total_objective_eval_count": total_objective_evals,
-        "total_gradient_eval_count": total_gradient_evals,
+        "total_stage_script_time_s": floats.get("total_stage_script_time_s"),
+        "total_outer_optimizer_s": floats.get("total_outer_optimizer_s"),
+        "total_outer_optimizer_initial_phase_s": floats.get("total_outer_optimizer_initial_phase_s"),
+        "total_outer_optimizer_main_s": floats.get("total_outer_optimizer_main_s"),
+        "total_target_lane_bundle_setup_s": floats.get("total_target_lane_bundle_setup_s"),
+        "total_accepted_step_count": ints.get("total_accepted_step_count"),
+        "total_objective_eval_count": ints.get("total_objective_eval_count"),
+        "total_gradient_eval_count": ints.get("total_gradient_eval_count"),
         "objective_evals_per_accepted_step": _ratio_or_none(
-            total_objective_evals,
-            total_accepted_steps,
+            ints.get("total_objective_eval_count"),
+            ints.get("total_accepted_step_count"),
         ),
-        "total_value_and_grad_compile_overhead_s": (
-            total_value_and_grad_compile_overhead_s
-            if total_value_and_grad_compile_overhead_available
-            else None
-        ),
+        "total_value_and_grad_compile_overhead_s": floats.get("total_value_and_grad_compile_overhead_s"),
+    }
+
+
+def _build_campaign_branch_decision(
+    *,
+    profiling: dict[str, object],
+    passed_candidate_count: int,
+    research_grade_candidate_count: int,
+    trial_policy: str,
+) -> dict[str, object]:
+    profiled_candidate_count = _safe_int(profiling.get("profiled_candidate_count"))
+    total_stage_script_time_s = _finite_float(profiling.get("total_stage_script_time_s"))
+    total_outer_optimizer_s = _finite_float(profiling.get("total_outer_optimizer_s"))
+    total_outer_optimizer_initial_phase_s = _finite_float(
+        profiling.get("total_outer_optimizer_initial_phase_s")
+    )
+    total_outer_optimizer_main_s = _finite_float(
+        profiling.get("total_outer_optimizer_main_s")
+    )
+    total_target_lane_bundle_setup_s = _finite_float(
+        profiling.get("total_target_lane_bundle_setup_s")
+    )
+    total_accepted_step_count = _safe_int(profiling.get("total_accepted_step_count"))
+    total_objective_eval_count = _safe_int(profiling.get("total_objective_eval_count"))
+    objective_evals_per_accepted_step = _finite_float(
+        profiling.get("objective_evals_per_accepted_step")
+    )
+    signals = {
+        "profiled_candidate_count": profiled_candidate_count,
+        "passed_candidate_count": passed_candidate_count,
+        "research_grade_candidate_count": research_grade_candidate_count,
+        "total_stage_script_time_s": total_stage_script_time_s,
+        "total_outer_optimizer_s": total_outer_optimizer_s,
+        "total_outer_optimizer_initial_phase_s": total_outer_optimizer_initial_phase_s,
+        "total_outer_optimizer_main_s": total_outer_optimizer_main_s,
+        "total_target_lane_bundle_setup_s": total_target_lane_bundle_setup_s,
+        "total_accepted_step_count": total_accepted_step_count,
+        "total_objective_eval_count": total_objective_eval_count,
+        "objective_evals_per_accepted_step": objective_evals_per_accepted_step,
+    }
+    if not profiled_candidate_count:
+        return {
+            "category": "insufficient_signal",
+            "rationale": ["No profiled donor records were available."],
+            "recommended_actions": [
+                "Re-run the continuation campaign with --jax-profile-dir enabled."
+            ],
+            "signals": signals,
+        }
+
+    if (
+        total_objective_eval_count is not None
+        and total_objective_eval_count > 0
+        and total_accepted_step_count == 0
+    ):
+        rationale = [
+            "Profiled donors consumed objective evaluations without any accepted outer-loop progress.",
+        ]
+        if (
+            total_outer_optimizer_s is not None
+            and total_target_lane_bundle_setup_s is not None
+        ):
+            rationale.append(
+                "Outer-optimizer time dominated target-lane bundle setup time."
+            )
+        recommended_actions = [
+            "Reduce non-final outer-loop reevaluation before tuning hardware or XLA flags.",
+        ]
+        if trial_policy == CONTINUATION_TRIAL_POLICY_VALIDATED_FAST:
+            if (
+                total_outer_optimizer_initial_phase_s is not None
+                and total_outer_optimizer_initial_phase_s > 0.0
+            ):
+                recommended_actions.insert(
+                    0,
+                    "Skip the validated-fast coarse scaled initial outer phase and re-profile the same donor set.",
+                )
+            else:
+                rationale.append(
+                    "The validated-fast coarse scaled phase is already absent, so the remaining waste is in the main outer loop."
+                )
+                recommended_actions.insert(
+                    0,
+                    "Tighten the validated-fast non-final outer line-search budget and re-profile the same donor set.",
+                )
+        return {
+            "category": "reevaluation_or_host_stall_dominated",
+            "rationale": rationale,
+            "recommended_actions": recommended_actions,
+            "signals": signals,
+        }
+
+    if passed_candidate_count == 0 and total_accepted_step_count not in (None, 0):
+        return {
+            "category": "donor_quality_dominated",
+            "rationale": [
+                "The campaign recorded accepted continuation progress but no donor passed the final continuation contract."
+            ],
+            "recommended_actions": [
+                "Implement donor ranking and seed-selection policy before expanding schedules."
+            ],
+            "signals": signals,
+        }
+
+    if passed_candidate_count > 0:
+        return {
+            "category": "campaign_ready_for_convergence",
+            "rationale": [
+                "The campaign already produced continuation-valid donors, so the next bottleneck is no longer basic throughput triage."
+            ],
+            "recommended_actions": [
+                "Run longer multi-donor convergence campaigns and rank final candidates on physics and hardware gates."
+            ],
+            "signals": signals,
+        }
+
+    return {
+        "category": "insufficient_signal",
+        "rationale": [
+            "The available profiling metrics do not yet separate reevaluation, device-throughput, and donor-quality limits cleanly."
+        ],
+        "recommended_actions": [
+            "Inspect the per-donor continuation profiling reports and rerun with a tighter donor set if needed."
+        ],
+        "signals": signals,
     }
 
 
@@ -1382,10 +1414,17 @@ def build_continuation_campaign_summary(
         donor_records,
         key=lambda record: tuple(record["ranking"]["sort_key"]),
     )
+    passed_candidate_count = sum(
+        record["passed"] is True for record in sorted_records
+    )
+    research_grade_candidate_count = sum(
+        record["research_grade"] is True for record in sorted_records
+    )
     status_counts = {
         status: sum(record["status"] == status for record in sorted_records)
         for status in _CAMPAIGN_STATUS_RANK
     }
+    profiling = _aggregate_campaign_profiling(sorted_records)
     return {
         "schema_version": _CONTINUATION_CAMPAIGN_SCHEMA_VERSION,
         "created_at_utc": _utc_now_iso(),
@@ -1395,18 +1434,20 @@ def build_continuation_campaign_summary(
         "candidate_count": len(sorted_records),
         "best_candidate": None if not sorted_records else sorted_records[0],
         "status_counts": status_counts,
-        "passed_candidate_count": sum(
-            record["passed"] is True for record in sorted_records
-        ),
-        "research_grade_candidate_count": sum(
-            record["research_grade"] is True for record in sorted_records
-        ),
+        "passed_candidate_count": passed_candidate_count,
+        "research_grade_candidate_count": research_grade_candidate_count,
         "passthrough_args": passthrough_args,
         "trial_policy": trial_policy,
         "backend": resolve_passthrough_backend(passthrough_args),
         "optimizer_backend": resolve_passthrough_optimizer_backend(passthrough_args),
         "validation_thresholds": validation_thresholds,
-        "profiling": _aggregate_campaign_profiling(sorted_records),
+        "profiling": profiling,
+        "branch_decision": _build_campaign_branch_decision(
+            profiling=profiling,
+            passed_candidate_count=passed_candidate_count,
+            research_grade_candidate_count=research_grade_candidate_count,
+            trial_policy=trial_policy,
+        ),
         "reports": sorted_records,
     }
 
@@ -1817,6 +1858,16 @@ def build_continuation_profiling_report_markdown(report: dict[str, object]) -> s
     _append_report_metric(lines, "Total outer optimizer time (s)", profiling.get("total_outer_optimizer_s"))
     _append_report_metric(
         lines,
+        "Total initial outer phase time (s)",
+        profiling.get("total_outer_optimizer_initial_phase_s"),
+    )
+    _append_report_metric(
+        lines,
+        "Total main outer phase time (s)",
+        profiling.get("total_outer_optimizer_main_s"),
+    )
+    _append_report_metric(
+        lines,
         "Total target-lane bundle setup time (s)",
         profiling.get("total_target_lane_bundle_setup_s"),
     )
@@ -1939,6 +1990,9 @@ def build_campaign_profiling_report_markdown(summary: dict[str, object]) -> str:
     profiling = summary.get("profiling")
     if not isinstance(profiling, dict):
         profiling = {}
+    branch_decision = summary.get("branch_decision")
+    if not isinstance(branch_decision, dict):
+        branch_decision = {}
     reports = summary.get("reports")
     if not isinstance(reports, list):
         reports = []
@@ -1959,6 +2013,26 @@ def build_campaign_profiling_report_markdown(summary: dict[str, object]) -> str:
         formatter=_format_report_int,
     )
     _append_report_metric(lines, "Total stage wall time (s)", profiling.get("total_stage_script_time_s"))
+    _append_report_metric(
+        lines,
+        "Total outer optimizer time (s)",
+        profiling.get("total_outer_optimizer_s"),
+    )
+    _append_report_metric(
+        lines,
+        "Total initial outer phase time (s)",
+        profiling.get("total_outer_optimizer_initial_phase_s"),
+    )
+    _append_report_metric(
+        lines,
+        "Total main outer phase time (s)",
+        profiling.get("total_outer_optimizer_main_s"),
+    )
+    _append_report_metric(
+        lines,
+        "Total target-lane bundle setup time (s)",
+        profiling.get("total_target_lane_bundle_setup_s"),
+    )
     _append_report_metric(
         lines,
         "Total accepted steps",
@@ -1988,6 +2062,19 @@ def build_campaign_profiling_report_markdown(summary: dict[str, object]) -> str:
         profiling.get("total_value_and_grad_compile_overhead_s"),
     )
 
+    if branch_decision:
+        lines.extend(
+            [
+                "",
+                "## Branch Decision",
+                f"- Category: {branch_decision.get('category', 'n/a')}",
+            ]
+        )
+        for rationale in branch_decision.get("rationale", []):
+            lines.append(f"- Rationale: {rationale}")
+        for action in branch_decision.get("recommended_actions", []):
+            lines.append(f"- Next action: {action}")
+
     for candidate in reports:
         if not isinstance(candidate, dict):
             continue
@@ -2007,6 +2094,21 @@ def build_campaign_profiling_report_markdown(summary: dict[str, object]) -> str:
             lines,
             "Total stage wall time (s)",
             candidate_profiling.get("total_stage_script_time_s"),
+        )
+        _append_report_metric(
+            lines,
+            "Total outer optimizer time (s)",
+            candidate_profiling.get("total_outer_optimizer_s"),
+        )
+        _append_report_metric(
+            lines,
+            "Total initial outer phase time (s)",
+            candidate_profiling.get("total_outer_optimizer_initial_phase_s"),
+        )
+        _append_report_metric(
+            lines,
+            "Total main outer phase time (s)",
+            candidate_profiling.get("total_outer_optimizer_main_s"),
         )
         _append_report_metric(
             lines,

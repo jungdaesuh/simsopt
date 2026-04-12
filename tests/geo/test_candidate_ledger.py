@@ -325,6 +325,62 @@ class CandidateLedgerTests(unittest.TestCase):
         self.assertEqual(best_candidate["continuation"]["backend"], "jax")
         self.assertEqual(len(best_candidate["continuation"]["stages"]), 2)
 
+    def test_build_candidate_ledger_tolerates_unreadable_stage2_results(self):
+        module = load_candidate_ledger_module()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            stage2_root = root / "stage2"
+            single_stage_root = root / "single-stage"
+            best_stage2 = _write_stage2_run(
+                stage2_root,
+                "good-seed",
+                field_error=0.01,
+                objective=1e-3,
+            )
+            corrupt_run = stage2_root / "corrupt-seed"
+            corrupt_run.mkdir(parents=True)
+            (corrupt_run / "results.json").write_text(
+                '{"FIELD_ERROR": 0.02, "FINAL_OBJECTIVE": }',
+                encoding="utf-8",
+            )
+            (corrupt_run / "biot_savart_opt.json").write_text("{}", encoding="utf-8")
+            (corrupt_run / "surf_opt.json").write_text("{}", encoding="utf-8")
+            _write_continuation_validation(
+                single_stage_root,
+                "run-a",
+                passed=True,
+                field_error=0.001,
+                abs_iota_error=0.002,
+                final_non_qs=0.01,
+                research_grade_ready=True,
+            )
+
+            ledger = module.build_candidate_ledger(
+                stage2_root=stage2_root,
+                single_stage_root=single_stage_root,
+                stage2_max_field_error=None,
+                single_stage_max_final_field_error=None,
+                single_stage_max_final_abs_iota_error=None,
+                single_stage_max_final_non_qs=None,
+            )
+
+        self.assertEqual(
+            ledger["stage2"]["best_candidate"]["run_dir"],
+            str(best_stage2),
+        )
+        corrupt_report = next(
+            report
+            for report in ledger["stage2"]["reports"]
+            if report["run_dir"] == str(corrupt_run)
+        )
+        self.assertEqual(corrupt_report["status"], "rejected")
+        self.assertTrue(
+            any(
+                "results.json is unreadable: JSONDecodeError" in failure
+                for failure in corrupt_report["failures"]
+            )
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

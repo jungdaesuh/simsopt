@@ -1056,6 +1056,7 @@ class SingleStageExampleTests(unittest.TestCase):
             args = module.parse_args()
 
         self.assertEqual(args.outer_maxls, 4)
+        self.assertEqual(args.target_lane_outer_initial_step_size, 1.0e-4)
         self.assertEqual(args.target_lane_boozer_bfgs_tol, 1e-6)
         self.assertEqual(args.target_lane_boozer_bfgs_maxiter, 64)
         self.assertIsNone(args.target_lane_boozer_newton_tol)
@@ -1073,6 +1074,7 @@ class SingleStageExampleTests(unittest.TestCase):
 
         self.assertEqual(args.outer_maxls, 20)
         self.assertEqual(args.maxcor, 300)
+        self.assertIsNone(args.target_lane_outer_initial_step_size)
         self.assertEqual(args.initial_step_scale, 1.0)
         self.assertEqual(args.initial_step_maxiter, 0)
         self.assertIsNone(args.target_lane_boozer_bfgs_tol)
@@ -1971,6 +1973,40 @@ class SingleStageExampleTests(unittest.TestCase):
             ),
             4,
         )
+
+    def test_resolve_target_lane_outer_initial_step_size_uses_benchmark_default(self):
+        module = self.load_module()
+
+        self.assertEqual(
+            module.resolve_target_lane_outer_initial_step_size(
+                "jax",
+                "ondevice",
+                benchmark_mode=True,
+            ),
+            1.0e-4,
+        )
+        self.assertIsNone(
+            module.resolve_target_lane_outer_initial_step_size(
+                "cpu",
+                "scipy",
+                benchmark_mode=False,
+            )
+        )
+
+    def test_resolve_target_lane_outer_initial_step_size_rejects_nonpositive_override(
+        self,
+    ):
+        module = self.load_module()
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "target_lane_outer_initial_step_size must be positive",
+        ):
+            module.resolve_target_lane_outer_initial_step_size(
+                "jax",
+                "ondevice",
+                0.0,
+            )
 
     def test_resolve_single_stage_outer_maxcor_rejects_nonpositive_budget(self):
         module = self.load_module()
@@ -3210,6 +3246,57 @@ class SingleStageExampleTests(unittest.TestCase):
             )
 
         self.assertIs(captured["failure_callback"], failure_callback)
+        self.assertEqual(result.message, "ok")
+
+    def test_run_single_stage_optimizer_threads_target_lane_initial_step_size(self):
+        module = self.load_module()
+        captured = {}
+        explicit_fun = lambda x: (
+            jnp.asarray(jnp.dot(x, x), dtype=jnp.float64),
+            jnp.asarray(2.0 * x, dtype=jnp.float64),
+        )
+
+        def fake_require_target_backend_x64(_optimizer_backend):
+            return None
+
+        def fake_jax_minimize(
+            fun,
+            x0,
+            *,
+            method,
+            tol,
+            maxiter,
+            options,
+            value_and_grad,
+            callback,
+            failure_callback=None,
+        ):
+            del fun, x0, method, tol, maxiter, value_and_grad, callback, failure_callback
+            captured["options"] = dict(options)
+            return types.SimpleNamespace(x=np.zeros(2), nit=0, message="ok")
+
+        with self.patch_optimizer_jax_module(
+            require_target_backend_x64=fake_require_target_backend_x64,
+            jax_minimize=fake_jax_minimize,
+        ):
+            contract = module.resolve_single_stage_optimizer_contract(
+                "jax", "ondevice"
+            )
+            result = module.run_single_stage_optimizer(
+                explicit_fun,
+                np.array([0.0, 0.0]),
+                contract=contract,
+                maxiter=1,
+                ftol=0.0,
+                gtol=1e-6,
+                maxcor=5,
+                outer_maxls=6,
+                callback=None,
+                scalar_fun=None,
+                target_lane_initial_step_size=1.0e-4,
+            )
+
+        self.assertEqual(captured["options"]["initial_step_size"], 1.0e-4)
         self.assertEqual(result.message, "ok")
 
     def test_run_single_stage_optimizer_target_lane_requires_objective_contract(self):
