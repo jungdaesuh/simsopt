@@ -1853,19 +1853,7 @@ class MinimizeAlmTests(unittest.TestCase):
         candidate_x = np.array([0.2])
 
         def evaluate_problem(x, multipliers, penalty):
-            del multipliers, penalty
-            x = np.asarray(x, dtype=float)
-            if np.array_equal(x, candidate_x):
-                return {
-                    "total": 1.0,
-                    "base_value": 0.1,
-                    "base_grad": np.array([0.0]),
-                    "grad": np.array([0.0]),
-                    "constraint_values": np.array([0.5]),
-                    "feasibility_values": np.array([0.5]),
-                    "dual_update_values": np.array([0.5]),
-                    "stationarity_norm": 0.0,
-                }
+            del x, multipliers, penalty
             return {
                 "total": 1.0,
                 "base_value": 0.1,
