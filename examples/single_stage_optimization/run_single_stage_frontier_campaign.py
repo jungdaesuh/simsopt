@@ -4,7 +4,6 @@ import argparse
 import json
 import sys
 import uuid
-from datetime import datetime, timezone
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -13,28 +12,43 @@ if str(SCRIPT_DIR) not in sys.path:
 
 import run_single_stage_goal_mode_comparison as goal_mode_comparison  # noqa: E402
 from banana_opt.frontier_archive import (  # noqa: E402
-    DEFAULT_DUPLICATE_DISTANCE_THRESHOLD,
-    archive_best_by_metric,
     build_archive_member_from_results,
     serialize_frontier_archive,
     update_frontier_archive,
 )
-from banana_opt.frontier_dominance import (  # noqa: E402
-    DEFAULT_DOMINANCE_TOLERANCE,
-    PARETO_OBJECTIVE_SPECS,
+from banana_opt.frontier_campaign_reporting import (  # noqa: E402
+    DEFAULT_SUMMARY_JSON,
+    build_frontier_campaign_manifest,
+    build_frontier_campaign_summary,
+    build_recommended_summary,
+    resolve_frontier_campaign_paths,
+    write_json,
+)
+from banana_opt.frontier_engine_base import (  # noqa: E402
+    FrontierCampaignProgress,
+    FrontierLaneContract,
+    FrontierLaneRecord,
+    build_frontier_lane_contract,
+    build_frontier_lane_record,
+    load_frontier_campaign_progress,
+    serialize_goal_mode_payload,
+    write_frontier_campaign_progress,
 )
 from banana_opt.frontier_engine_multilane_local import (  # noqa: E402
     FrontierLaneSpec,
-    generate_multilane_local_specs,
+    generate_multilane_local_specs,  # re-exported for test compatibility
+)
+from banana_opt.frontier_scalarization import (  # noqa: E402
+    FRONTIER_REFERENCE_MODE_EPSILON,
+    FRONTIER_REFERENCE_MODE_REFERENCE_POINTS,
+    FRONTIER_REFERENCE_MODE_SHARED,
+    SUPPORTED_FRONTIER_REFERENCE_MODES,
+    generate_frontier_lane_specs,
 )
 from banana_opt.frontier_recommendation import recommend_frontier_member  # noqa: E402
 from workflow_runner_common import resolved_optional_path, resolved_path  # noqa: E402
 
 DEFAULT_OUTPUT_ROOT = SCRIPT_DIR / "outputs_single_stage_frontier_campaign"
-DEFAULT_SUMMARY_JSON = "single_stage_frontier_campaign_summary.json"
-DEFAULT_MANIFEST_JSON = "campaign_manifest.json"
-DEFAULT_ARCHIVE_JSON = "frontier_archive.json"
-DEFAULT_RECOMMENDED_JSON = "frontier_recommended.json"
 
 
 def build_parser(*, add_help: bool = True) -> argparse.ArgumentParser:
@@ -56,6 +70,23 @@ def build_parser(*, add_help: bool = True) -> argparse.ArgumentParser:
         "--frontier-engine",
         choices=["multilane_local"],
         default="multilane_local",
+    )
+    parser.add_argument(
+        "--frontier-reference-mode",
+        choices=SUPPORTED_FRONTIER_REFERENCE_MODES,
+        default=FRONTIER_REFERENCE_MODE_SHARED,
+    )
+    parser.add_argument(
+        "--frontier-hypervolume-reference",
+        default=None,
+    )
+    parser.add_argument(
+        "--frontier-reference-points-file",
+        default=None,
+    )
+    parser.add_argument(
+        "--frontier-epsilon-spec-file",
+        default=None,
     )
     parser.add_argument("--frontier-num-lanes", type=int, default=3)
     parser.add_argument(
@@ -81,58 +112,16 @@ def build_parser(*, add_help: bool = True) -> argparse.ArgumentParser:
         action="store_true",
         help="Skip the target baseline lane and run frontier lanes only.",
     )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Resume a previously started frontier campaign from campaign_progress.json.",
+    )
     return parser
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return build_parser().parse_args(argv)
-
-
-def build_campaign_manifest(
-    args: argparse.Namespace,
-    *,
-    campaign_id: str,
-    stage2_bs_path: Path,
-    stage2_results_path: Path | None,
-    stage2_results: dict | None,
-    lane_specs: list[FrontierLaneSpec],
-) -> dict[str, object]:
-    lane_budget = args.frontier_lane_budget if args.frontier_lane_budget is not None else args.maxiter
-    total_budget = (
-        args.frontier_total_budget
-        if args.frontier_total_budget is not None
-        else int(args.frontier_num_lanes) * int(lane_budget)
-    )
-    return {
-        "FRONTIER_VERSION": args.frontier_version,
-        "FRONTIER_ENGINE": args.frontier_engine,
-        "FRONTIER_CAMPAIGN_ID": campaign_id,
-        "SEED_ARTIFACT_PATH": str(stage2_bs_path),
-        "SEED_RESULTS_PATH": None if stage2_results_path is None else str(stage2_results_path),
-        "SEED_SURFACE_IDENTITY": Path(args.plasma_surf_filename).name,
-        "FRONTIER_REFERENCE_MODE": "shared_seed_relative_frontier_v2",
-        "FRONTIER_REFERENCE_POINTS": [
-            lane.scalarization_params for lane in lane_specs
-        ],
-        "FRONTIER_SCALARIZATION_FAMILY": "weight_schedule_v1",
-        "FRONTIER_CONSTRAINT_MODE": "frontier_v2_single_lane_contract",
-        "PARETO_OBJECTIVE_VECTOR": [
-            {"metric": metric_name, "direction": direction}
-            for metric_name, direction, _ in PARETO_OBJECTIVE_SPECS
-        ],
-        "PARETO_OBJECTIVE_NORMALIZATION": {
-            "kind": "frontier_v2_seed_relative",
-        },
-        "DOMINANCE_TOLERANCE": dict(DEFAULT_DOMINANCE_TOLERANCE),
-        "DUPLICATE_DISTANCE_THRESHOLD": DEFAULT_DUPLICATE_DISTANCE_THRESHOLD,
-        "FRONTIER_RECOMMENDATION_POLICY": args.frontier_recommendation_policy,
-        "LANE_BUDGET": lane_budget,
-        "TOTAL_BUDGET": total_budget,
-        "RNG_SEED": args.frontier_rng_seed,
-        "CREATED_AT": datetime.now(timezone.utc).isoformat(),
-        "STAGE2_ARTIFACT_INIT_ONLY": None if stage2_results is None else stage2_results.get("init_only"),
-        "LANE_SPECS": [lane.to_json_dict() for lane in lane_specs],
-    }
 
 
 def run_goal_mode_case_safe(
@@ -167,10 +156,14 @@ def run_goal_mode_case_safe(
             "status": "dry_run",
             "command": payload["command"],
         }
-    return {
+    completed_payload = {
         "status": "completed",
         **payload,
     }
+    completed_payload["results_summary"] = goal_mode_comparison.result_metric_subset(
+        payload["results"]
+    )
+    return completed_payload
 
 
 def build_frontier_lane_args(
@@ -183,7 +176,26 @@ def build_frontier_lane_args(
     lane_args.res_weight = lane_spec.res_weight
     if lane_spec.lane_budget is not None:
         lane_args.maxiter = int(lane_spec.lane_budget)
+    for attribute_name in (
+        "frontier_reference_iota",
+        "frontier_reference_iota_scale",
+        "frontier_reference_volume",
+        "frontier_reference_volume_scale",
+        "frontier_reference_qa",
+        "frontier_reference_boozer",
+        "frontier_boozer_trust_threshold",
+        "frontier_boozer_trust_penalty_scale",
+    ):
+        setattr(
+            lane_args,
+            attribute_name,
+            lane_spec.scalarization_params.get(attribute_name),
+        )
     return lane_args
+
+
+def lane_rng_seed(base_seed: int, *, lane_index: int) -> int:
+    return int(base_seed) + lane_index
 
 
 def build_lane_rerun_contract(
@@ -199,7 +211,9 @@ def build_lane_rerun_contract(
         "iotas_weight": lane_spec.iotas_weight,
         "frontier_volume_weight": lane_spec.frontier_volume_weight,
         "res_weight": lane_spec.res_weight,
-        "maxiter": args.maxiter if lane_spec.lane_budget is None else lane_spec.lane_budget,
+        "maxiter": args.maxiter
+        if lane_spec.lane_budget is None
+        else lane_spec.lane_budget,
         "constraint_method": args.constraint_method,
         "hardware_search_mode": args.hardware_search_mode,
         "scalarization_type": lane_spec.scalarization_type,
@@ -207,139 +221,136 @@ def build_lane_rerun_contract(
     }
 
 
-def build_target_comparison(
-    target_payload: dict[str, object] | None,
-    recommended_payload: dict[str, object] | None,
-) -> dict[str, object] | None:
-    if target_payload is None or target_payload.get("status") != "completed":
-        return None
-    if recommended_payload is None:
-        return None
-    target_results = target_payload["results"]
-    recommended_member = recommended_payload["recommended_member"]
-    _delta = goal_mode_comparison.delta
-    return {
-        "recommended_minus_target_final_iota": _delta(
-            recommended_member.objective_metrics.get("iota"),
-            target_results.get("FINAL_IOTA"),
-        ),
-        "recommended_minus_target_final_volume": _delta(
-            recommended_member.objective_metrics.get("volume"),
-            target_results.get("FINAL_VOLUME"),
-        ),
-        "recommended_minus_target_nonqs_ratio": _delta(
-            recommended_member.objective_metrics.get("qa_error"),
-            target_results.get("NONQS_RATIO"),
-        ),
-        "recommended_minus_target_boozer_residual": _delta(
-            recommended_member.objective_metrics.get("boozer_residual"),
-            target_results.get("BOOZER_RESIDUAL"),
-        ),
+def _lane_reference_point(lane_spec: FrontierLaneSpec) -> dict[str, float] | None:
+    metric_key_map = {
+        "frontier_reference_iota": "iota",
+        "frontier_reference_volume": "volume",
+        "frontier_reference_qa": "qa_error",
+        "frontier_reference_boozer": "boozer_residual",
     }
-
-
-def _build_completed_case_summary(payload: dict[str, object]) -> dict[str, object]:
-    return {
-        "results_path": str(payload["results_path"]),
-        "result_source": payload["result_source"],
-        "results": goal_mode_comparison.result_metric_subset(payload["results"]),
+    reference_point = {
+        metric_name: float(lane_spec.scalarization_params[scalarization_key])
+        for scalarization_key, metric_name in metric_key_map.items()
+        if scalarization_key in lane_spec.scalarization_params
     }
+    return reference_point or None
 
 
-def _build_recommended_summary(
-    recommendation_payload: dict[str, object] | None,
-    *,
-    archive_size: int,
-    policy_name: str,
-) -> dict[str, object]:
-    if recommendation_payload is None:
-        return {
-            "recommended_member_id": None,
-            "policy_name": policy_name,
-            "policy_inputs": None,
-            "policy_rationale": None,
-            "policy_score": None,
-            "recommended_metrics": None,
-            "frontier_archive_size": archive_size,
-        }
-
-    recommended_member = recommendation_payload["recommended_member"]
-    return {
-        "recommended_member_id": recommended_member.member_id,
-        "policy_name": recommendation_payload["policy_name"],
-        "policy_inputs": recommendation_payload["policy_inputs"],
-        "policy_rationale": recommendation_payload["policy_rationale"],
-        "policy_score": recommendation_payload["policy_score"],
-        "recommended_metrics": dict(recommended_member.objective_metrics),
-        "frontier_archive_size": archive_size,
-    }
-
-
-def build_frontier_campaign_summary(
+def build_frontier_lane_contract_for_spec(
     args: argparse.Namespace,
+    lane_spec: FrontierLaneSpec,
     *,
     campaign_id: str,
     stage2_bs_path: Path,
-    stage2_results_path: Path | None,
-    stage2_results: dict | None,
-    manifest_path: Path,
-    archive_path: Path,
-    recommended_path: Path,
-    lane_specs: list[FrontierLaneSpec],
-    target_payload: dict[str, object] | None,
-    lane_records: list[dict[str, object]],
-    archive_members,
-    recommendation_payload: dict[str, object] | None,
-) -> dict[str, object]:
-    summary: dict[str, object] = {
-        "frontier_version": args.frontier_version,
-        "frontier_engine": args.frontier_engine,
-        "frontier_campaign_id": campaign_id,
-        "dry_run": bool(args.dry_run),
-        "output_root": str(resolved_path(args.output_root)),
-        "manifest_path": str(manifest_path),
-        "archive_path": str(archive_path),
-        "recommended_path": str(recommended_path),
-        "stage2_bs_path": str(stage2_bs_path),
-        "stage2_results_path": None if stage2_results_path is None else str(stage2_results_path),
-        "stage2_artifact_init_only": None if stage2_results is None else stage2_results.get("init_only"),
-        "frontier_num_lanes": len(lane_specs),
-        "frontier_lane_specs": [lane.to_json_dict() for lane in lane_specs],
-        "frontier_lanes": lane_records,
-        "frontier_archive": serialize_frontier_archive(archive_members),
-        "frontier_archive_size": len(archive_members),
-        "frontier_archive_best_by_metric": archive_best_by_metric(archive_members),
-        "target_run": None,
-        "recommended_member": _build_recommended_summary(
-            recommendation_payload,
-            archive_size=len(archive_members),
-            policy_name=args.frontier_recommendation_policy,
+    lane_budget: int,
+    lane_index: int,
+) -> FrontierLaneContract:
+    return build_frontier_lane_contract(
+        campaign_id=campaign_id,
+        lane_id=lane_spec.lane_id,
+        engine=args.frontier_engine,
+        reference_point=_lane_reference_point(lane_spec),
+        scalarization_type=lane_spec.scalarization_type,
+        scalarization_params=lane_spec.scalarization_params,
+        constraint_mode="frontier_v2_single_lane_contract",
+        warm_start_source=str(stage2_bs_path),
+        optimizer_budget=lane_budget,
+        rng_seed=lane_rng_seed(args.frontier_rng_seed, lane_index=lane_index),
+        rerun_contract=build_lane_rerun_contract(
+            args,
+            lane_spec,
+            stage2_bs_path=stage2_bs_path,
         ),
-        "target_comparison": None,
-    }
-    if target_payload is not None:
-        target_summary = {
-            "status": target_payload["status"],
-            "command": target_payload["command"],
-        }
-        if target_payload["status"] == "completed":
-            target_summary.update(_build_completed_case_summary(target_payload))
-        elif target_payload["status"] == "failed":
-            target_summary["error_type"] = target_payload.get("error_type")
-            target_summary["error_message"] = target_payload.get("error_message")
-        summary["target_run"] = target_summary
-    if recommendation_payload is not None:
-        summary["target_comparison"] = build_target_comparison(
-            target_payload,
-            recommendation_payload,
-        )
-    return summary
+    )
 
 
-def _write_json(path: Path, payload: dict[str, object]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as outfile:
-        json.dump(payload, outfile, indent=2)
+def load_resume_lane_specs(
+    manifest_path: Path,
+) -> list[FrontierLaneSpec] | None:
+    if not manifest_path.exists():
+        return None
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    lane_specs_payload = manifest.get("LANE_SPECS")
+    if not isinstance(lane_specs_payload, list):
+        return None
+    return [
+        FrontierLaneSpec.from_json_dict(item)
+        for item in lane_specs_payload
+    ]
+
+
+def load_resume_manifest(manifest_path: Path) -> dict[str, object] | None:
+    if not manifest_path.exists():
+        return None
+    return json.loads(manifest_path.read_text(encoding="utf-8"))
+
+
+def persist_campaign_progress(
+    path: Path,
+    *,
+    campaign_id: str,
+    frontier_version: str,
+    frontier_engine: str,
+    target_payload: dict[str, object] | None,
+    lane_records: list[FrontierLaneRecord],
+    archive_members: list,
+) -> None:
+    write_frontier_campaign_progress(
+        path,
+        FrontierCampaignProgress(
+            schema_version="frontier_campaign_progress_v1",
+            campaign_id=campaign_id,
+            frontier_version=frontier_version,
+            frontier_engine=frontier_engine,
+            target_payload=serialize_goal_mode_payload(target_payload),
+            lane_records=lane_records,
+            archive_members=archive_members,
+        ),
+    )
+
+
+def build_lane_record_from_payload(
+    lane_contract: FrontierLaneContract,
+    lane_spec: FrontierLaneSpec,
+    lane_budget: int,
+    lane_payload: dict[str, object],
+    *,
+    archive_member=None,
+    archive_update: dict[str, object] | None = None,
+) -> FrontierLaneRecord:
+    return build_frontier_lane_record(
+        lane_contract,
+        command=lane_payload["command"],
+        weights={
+            "iotas_weight": lane_spec.iotas_weight,
+            "frontier_volume_weight": lane_spec.frontier_volume_weight,
+            "res_weight": lane_spec.res_weight,
+        },
+        lane_budget=lane_budget,
+        status=lane_payload["status"],
+        result_source=lane_payload.get("result_source"),
+        termination_reason=(
+            None
+            if lane_payload["status"] != "completed"
+            or lane_payload["results"].get("TERMINATION_MESSAGE") is None
+            else str(lane_payload["results"]["TERMINATION_MESSAGE"])
+        ),
+        success=(
+            None
+            if lane_payload["status"] != "completed"
+            or lane_payload["results"].get("OPTIMIZER_SUCCESS") is None
+            else bool(lane_payload["results"]["OPTIMIZER_SUCCESS"])
+        ),
+        archive_state=None if archive_member is None else archive_member.archive_state,
+        archive_member=archive_member,
+        archive_update=archive_update,
+        results_path=None
+        if lane_payload.get("results_path") is None
+        else str(lane_payload["results_path"]),
+        results=lane_payload.get("results"),
+        error_type=lane_payload.get("error_type"),
+        error_message=lane_payload.get("error_message"),
+    )
 
 
 def main() -> int:
@@ -349,10 +360,24 @@ def main() -> int:
     summary_path = resolved_optional_path(args.summary_json)
     if summary_path is None:
         summary_path = output_root / DEFAULT_SUMMARY_JSON
-    manifest_path = output_root / DEFAULT_MANIFEST_JSON
-    archive_path = output_root / DEFAULT_ARCHIVE_JSON
-    recommended_path = output_root / DEFAULT_RECOMMENDED_JSON
-    summary_path.parent.mkdir(parents=True, exist_ok=True)
+    paths = resolve_frontier_campaign_paths(
+        output_root,
+        summary_path=summary_path,
+    )
+    paths.summary_path.parent.mkdir(parents=True, exist_ok=True)
+
+    resumed_progress = None
+    resume_manifest = None
+    if args.resume:
+        resumed_progress = load_frontier_campaign_progress(paths.progress_path)
+        resume_manifest = load_resume_manifest(paths.manifest_path)
+        args = argparse.Namespace(**vars(args))
+        args.frontier_version = resumed_progress.frontier_version
+        args.frontier_engine = resumed_progress.frontier_engine
+        if resume_manifest is not None:
+            seed_artifact_path = resume_manifest.get("SEED_ARTIFACT_PATH")
+            if seed_artifact_path is not None:
+                args.stage2_bs_path = str(resolved_path(str(seed_artifact_path)))
 
     if args.dry_run:
         stage2_bs_path, stage2_results_path, stage2_results = (
@@ -362,16 +387,32 @@ def main() -> int:
         stage2_bs_path, stage2_results_path, stage2_results = (
             goal_mode_comparison.load_validated_stage2_seed_metadata(args)
         )
-
-    lane_specs = generate_multilane_local_specs(
-        num_lanes=args.frontier_num_lanes,
-        iotas_weight=args.iotas_weight,
-        frontier_volume_weight=args.frontier_volume_weight,
-        res_weight=args.res_weight,
-        lane_budget=args.frontier_lane_budget,
+    resumed_lane_specs = (
+        load_resume_lane_specs(paths.manifest_path)
+        if args.resume
+        else None
     )
-    campaign_id = uuid.uuid4().hex[:12]
-    manifest = build_campaign_manifest(
+    lane_specs = (
+        resumed_lane_specs
+        if resumed_lane_specs is not None
+        else generate_frontier_lane_specs(
+            reference_mode=args.frontier_reference_mode,
+            num_lanes=args.frontier_num_lanes,
+            iotas_weight=args.iotas_weight,
+            frontier_volume_weight=args.frontier_volume_weight,
+            res_weight=args.res_weight,
+            lane_budget=args.frontier_lane_budget,
+            stage2_results=stage2_results,
+            reference_points_file=args.frontier_reference_points_file,
+            epsilon_spec_file=args.frontier_epsilon_spec_file,
+        )
+    )
+    campaign_id = (
+        resumed_progress.campaign_id
+        if resumed_progress is not None
+        else uuid.uuid4().hex[:12]
+    )
+    manifest = build_frontier_campaign_manifest(
         args,
         campaign_id=campaign_id,
         stage2_bs_path=stage2_bs_path,
@@ -379,65 +420,112 @@ def main() -> int:
         stage2_results=stage2_results,
         lane_specs=lane_specs,
     )
-    _write_json(manifest_path, manifest)
+    if not args.resume or not paths.manifest_path.exists():
+        write_json(paths.manifest_path, manifest)
 
-    target_payload = None
-    if not args.skip_target:
-        target_output_root = output_root / "target_baseline"
+    target_payload = (
+        None
+        if resumed_progress is None
+        else resumed_progress.target_payload
+    )
+    lane_records_by_id = (
+        {}
+        if resumed_progress is None
+        else {
+            record.lane_contract.lane_id: record
+            for record in resumed_progress.lane_records
+        }
+    )
+    archive_members = [] if resumed_progress is None else list(
+        resumed_progress.archive_members
+    )
+
+    persist_campaign_progress(
+        paths.progress_path,
+        campaign_id=campaign_id,
+        frontier_version=args.frontier_version,
+        frontier_engine=args.frontier_engine,
+        target_payload=target_payload,
+        lane_records=list(lane_records_by_id.values()),
+        archive_members=archive_members,
+    )
+
+    if target_payload is None and not args.skip_target:
         target_payload = run_goal_mode_case_safe(
             args,
             goal_mode="target",
             stage2_bs_path=stage2_bs_path,
-            output_root=target_output_root,
+            output_root=output_root / "target_baseline",
+        )
+        persist_campaign_progress(
+            paths.progress_path,
+            campaign_id=campaign_id,
+            frontier_version=args.frontier_version,
+            frontier_engine=args.frontier_engine,
+            target_payload=target_payload,
+            lane_records=list(lane_records_by_id.values()),
+            archive_members=archive_members,
         )
 
-    archive_members = []
-    lane_records: list[dict[str, object]] = []
-    for lane_spec in lane_specs:
+    for lane_index, lane_spec in enumerate(lane_specs):
+        if lane_spec.lane_id in lane_records_by_id:
+            continue
         lane_args = build_frontier_lane_args(args, lane_spec)
-        lane_output_root = output_root / "lanes" / lane_spec.lane_id
+        lane_budget = int(lane_args.maxiter)
+        lane_contract = build_frontier_lane_contract_for_spec(
+            lane_args,
+            lane_spec,
+            campaign_id=campaign_id,
+            stage2_bs_path=stage2_bs_path,
+            lane_budget=lane_budget,
+            lane_index=lane_index,
+        )
         lane_payload = run_goal_mode_case_safe(
             lane_args,
             goal_mode="frontier",
             stage2_bs_path=stage2_bs_path,
-            output_root=lane_output_root,
+            output_root=output_root / "lanes" / lane_spec.lane_id,
         )
-        lane_record: dict[str, object] = {
-            "lane_id": lane_spec.lane_id,
-            "status": lane_payload["status"],
-            "command": lane_payload["command"],
-            "scalarization_type": lane_spec.scalarization_type,
-            "scalarization_params": dict(lane_spec.scalarization_params),
-            "weights": {
-                "iotas_weight": lane_spec.iotas_weight,
-                "frontier_volume_weight": lane_spec.frontier_volume_weight,
-                "res_weight": lane_spec.res_weight,
-            },
-            "lane_budget": int(lane_args.maxiter),
-        }
+        archive_member = None
+        archive_update = None
         if lane_payload["status"] == "completed":
-            lane_record.update(_build_completed_case_summary(lane_payload))
-            member = build_archive_member_from_results(
+            archive_member = build_archive_member_from_results(
                 campaign_id=campaign_id,
                 lane_id=lane_spec.lane_id,
                 payload=lane_payload,
-                rerun_contract=build_lane_rerun_contract(
-                    lane_args,
-                    lane_spec,
-                    stage2_bs_path=stage2_bs_path,
-                ),
+                rerun_contract=lane_contract.rerun_contract,
             )
-            lane_record["archive_state"] = member.archive_state
-            lane_record["archive_member_id"] = member.member_id
             archive_members, archive_update = update_frontier_archive(
                 archive_members,
-                member,
+                archive_member,
             )
-            lane_record["archive_update"] = archive_update
-        elif lane_payload["status"] == "failed":
-            lane_record["error_type"] = lane_payload["error_type"]
-            lane_record["error_message"] = lane_payload["error_message"]
-        lane_records.append(lane_record)
+        lane_records_by_id[lane_spec.lane_id] = build_lane_record_from_payload(
+            lane_contract,
+            lane_spec,
+            lane_budget,
+            lane_payload,
+            archive_member=archive_member,
+            archive_update=archive_update,
+        )
+        persist_campaign_progress(
+            paths.progress_path,
+            campaign_id=campaign_id,
+            frontier_version=args.frontier_version,
+            frontier_engine=args.frontier_engine,
+            target_payload=target_payload,
+            lane_records=list(lane_records_by_id.values()),
+            archive_members=archive_members,
+        )
+
+    ordered_lane_records = [
+        lane_records_by_id[lane_spec.lane_id]
+        for lane_spec in lane_specs
+        if lane_spec.lane_id in lane_records_by_id
+    ]
+    lane_record_payloads = [
+        lane_record.to_json_dict()
+        for lane_record in ordered_lane_records
+    ]
 
     recommendation_payload = None
     if not args.dry_run:
@@ -446,15 +534,18 @@ def main() -> int:
             policy_name=args.frontier_recommendation_policy,
         )
 
-    archive_payload = serialize_frontier_archive(archive_members)
-    _write_json(archive_path, archive_payload)
-
-    recommended_payload = _build_recommended_summary(
-        recommendation_payload,
-        archive_size=len(archive_members),
-        policy_name=args.frontier_recommendation_policy,
+    write_json(
+        paths.archive_path,
+        serialize_frontier_archive(archive_members),
     )
-    _write_json(recommended_path, recommended_payload)
+    write_json(
+        paths.recommended_path,
+        build_recommended_summary(
+            recommendation_payload,
+            archive_size=len(archive_members),
+            policy_name=args.frontier_recommendation_policy,
+        ),
+    )
 
     summary = build_frontier_campaign_summary(
         args,
@@ -462,16 +553,15 @@ def main() -> int:
         stage2_bs_path=stage2_bs_path,
         stage2_results_path=stage2_results_path,
         stage2_results=stage2_results,
-        manifest_path=manifest_path,
-        archive_path=archive_path,
-        recommended_path=recommended_path,
+        paths=paths,
         lane_specs=lane_specs,
         target_payload=target_payload,
-        lane_records=lane_records,
+        lane_records=lane_record_payloads,
         archive_members=archive_members,
         recommendation_payload=recommendation_payload,
+        delta_fn=goal_mode_comparison.delta,
     )
-    _write_json(summary_path, summary)
+    write_json(paths.summary_path, summary)
     print(json.dumps(summary, indent=2))
     return 0
 

@@ -1887,6 +1887,9 @@ class FrontierCampaignScriptTests(unittest.TestCase):
             manifest = json.loads(
                 (output_root / "campaign_manifest.json").read_text(encoding="utf-8")
             )
+            progress = json.loads(
+                (output_root / "campaign_progress.json").read_text(encoding="utf-8")
+            )
             self.assertTrue(summary["dry_run"])
             self.assertEqual(summary["frontier_num_lanes"], 3)
             self.assertEqual(len(summary["frontier_lanes"]), 3)
@@ -1898,6 +1901,7 @@ class FrontierCampaignScriptTests(unittest.TestCase):
             self.assertEqual(
                 summary["recommended_member"],
                 {
+                    "schema_version": "frontier_campaign_recommended_v1",
                     "recommended_member_id": None,
                     "policy_name": "balanced",
                     "policy_inputs": None,
@@ -1908,6 +1912,14 @@ class FrontierCampaignScriptTests(unittest.TestCase):
                 },
             )
             self.assertEqual(summary["target_run"]["status"], "dry_run")
+            self.assertEqual(
+                summary["progress_path"],
+                str((output_root / "campaign_progress.json").resolve()),
+            )
+            self.assertEqual(
+                progress["schema_version"],
+                "frontier_campaign_progress_v1",
+            )
             self.assertEqual(manifest["FRONTIER_ENGINE"], "multilane_local")
 
     def test_frontier_campaign_main_writes_archive_recommendation_and_survives_failed_lane(self):
@@ -2005,4 +2017,440 @@ class FrontierCampaignScriptTests(unittest.TestCase):
             self.assertAlmostEqual(
                 summary["target_comparison"]["recommended_minus_target_final_iota"],
                 0.015,
+            )
+
+    def test_frontier_campaign_parse_args_accepts_v4_resume_contract_flags(self):
+        module = load_frontier_campaign_module()
+
+        args = module.parse_args(
+            [
+                "--plasma-surf-filename",
+                "demo.nc",
+                "--stage2-bs-path",
+                "/tmp/demo/biot_savart_opt.json",
+                "--frontier-reference-mode",
+                "reference_point_sweep_v1",
+                "--frontier-hypervolume-reference",
+                "0.15,0.10,0.012,0.008",
+                "--frontier-reference-points-file",
+                "/tmp/reference_points.json",
+                "--frontier-epsilon-spec-file",
+                "/tmp/epsilon.json",
+                "--resume",
+            ]
+        )
+
+        self.assertEqual(args.frontier_reference_mode, "reference_point_sweep_v1")
+        self.assertEqual(
+            args.frontier_hypervolume_reference,
+            "0.15,0.10,0.012,0.008",
+        )
+        self.assertEqual(
+            args.frontier_reference_points_file,
+            "/tmp/reference_points.json",
+        )
+        self.assertEqual(
+            args.frontier_epsilon_spec_file,
+            "/tmp/epsilon.json",
+        )
+        self.assertTrue(args.resume)
+
+    def test_frontier_campaign_manifest_uses_effective_lane_budget_from_lane_specs(self):
+        module = load_frontier_campaign_module()
+
+        args = module.parse_args(
+            [
+                "--plasma-surf-filename",
+                "demo.nc",
+                "--stage2-bs-path",
+                "/tmp/demo/biot_savart_opt.json",
+                "--frontier-num-lanes",
+                "1",
+            ]
+        )
+        lane_specs = [
+            module.FrontierLaneSpec(
+                lane_id="lane_iota",
+                scalarization_type="reference_point_sweep_v1",
+                scalarization_params={},
+                iotas_weight=100.0,
+                frontier_volume_weight=200.0,
+                res_weight=1000.0,
+                lane_budget=25,
+            )
+        ]
+
+        manifest = module.build_frontier_campaign_manifest(
+            args,
+            campaign_id="campaign",
+            stage2_bs_path=Path("/tmp/demo/biot_savart_opt.json"),
+            stage2_results_path=None,
+            stage2_results=None,
+            lane_specs=lane_specs,
+        )
+
+        self.assertEqual(manifest["LANE_BUDGET"], 25)
+        self.assertEqual(manifest["TOTAL_BUDGET"], 25)
+        self.assertEqual(manifest["LANE_SPECS"][0]["lane_budget"], 25)
+
+    def test_frontier_campaign_manifest_uses_null_lane_budget_for_mixed_lane_budgets(self):
+        module = load_frontier_campaign_module()
+
+        args = module.parse_args(
+            [
+                "--plasma-surf-filename",
+                "demo.nc",
+                "--stage2-bs-path",
+                "/tmp/demo/biot_savart_opt.json",
+                "--frontier-num-lanes",
+                "2",
+            ]
+        )
+        lane_specs = [
+            module.FrontierLaneSpec(
+                lane_id="lane_iota",
+                scalarization_type="reference_point_sweep_v1",
+                scalarization_params={},
+                iotas_weight=100.0,
+                frontier_volume_weight=200.0,
+                res_weight=1000.0,
+                lane_budget=25,
+            ),
+            module.FrontierLaneSpec(
+                lane_id="lane_volume",
+                scalarization_type="reference_point_sweep_v1",
+                scalarization_params={},
+                iotas_weight=120.0,
+                frontier_volume_weight=180.0,
+                res_weight=1000.0,
+                lane_budget=40,
+            ),
+        ]
+
+        manifest = module.build_frontier_campaign_manifest(
+            args,
+            campaign_id="campaign",
+            stage2_bs_path=Path("/tmp/demo/biot_savart_opt.json"),
+            stage2_results_path=None,
+            stage2_results=None,
+            lane_specs=lane_specs,
+        )
+
+        self.assertIsNone(manifest["LANE_BUDGET"])
+        self.assertEqual(manifest["TOTAL_BUDGET"], 65)
+
+    def test_frontier_campaign_resume_reuses_progress_and_only_runs_missing_lanes(self):
+        module = load_frontier_campaign_module()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            output_root = tmpdir_path / "outputs"
+            summary_path = tmpdir_path / "summary.json"
+            stage2_bs_path = tmpdir_path / "stage2" / "biot_savart_opt.json"
+            stage2_results_path = tmpdir_path / "stage2" / "results.json"
+            stage2_bs_path.parent.mkdir(parents=True, exist_ok=True)
+            stage2_bs_path.write_text("{}", encoding="utf-8")
+            stage2_results_path.write_text("{}", encoding="utf-8")
+
+            base_args = module.parse_args(
+                [
+                    "--plasma-surf-filename",
+                    "demo.nc",
+                    "--stage2-bs-path",
+                    str(stage2_bs_path),
+                    "--output-root",
+                    str(output_root),
+                    "--summary-json",
+                    str(summary_path),
+                    "--frontier-num-lanes",
+                    "3",
+                ]
+            )
+            lane_specs = module.generate_multilane_local_specs(
+                num_lanes=3,
+                iotas_weight=base_args.iotas_weight,
+                frontier_volume_weight=base_args.frontier_volume_weight,
+                res_weight=base_args.res_weight,
+                lane_budget=base_args.frontier_lane_budget,
+            )
+            campaign_id = "resume123abc"
+            module.write_json(
+                output_root / "campaign_manifest.json",
+                module.build_frontier_campaign_manifest(
+                    base_args,
+                    campaign_id=campaign_id,
+                    stage2_bs_path=stage2_bs_path.resolve(),
+                    stage2_results_path=stage2_results_path.resolve(),
+                    stage2_results={
+                        "PLASMA_SURF_FILENAME": "demo.nc",
+                        "init_only": False,
+                    },
+                    lane_specs=lane_specs,
+                ),
+            )
+
+            target_payload = {
+                "status": "completed",
+                **self._minimal_target_payload(output_root),
+            }
+            target_payload["results_summary"] = module.goal_mode_comparison.result_metric_subset(
+                target_payload["results"]
+            )
+            lane_01_payload = {
+                "status": "completed",
+                **self._minimal_frontier_payload(
+                    output_root,
+                    lane_id="lane_01",
+                    final_iota=0.165,
+                    final_volume=0.108,
+                    nonqs_ratio=0.011,
+                    boozer_residual=0.0075,
+                ),
+            }
+            lane_01_payload["results_summary"] = module.goal_mode_comparison.result_metric_subset(
+                lane_01_payload["results"]
+            )
+            lane_01_args = module.build_frontier_lane_args(base_args, lane_specs[0])
+            lane_01_contract = module.build_frontier_lane_contract_for_spec(
+                lane_01_args,
+                lane_specs[0],
+                campaign_id=campaign_id,
+                stage2_bs_path=stage2_bs_path.resolve(),
+                lane_budget=int(lane_01_args.maxiter),
+                lane_index=0,
+            )
+            lane_01_member = module.build_archive_member_from_results(
+                campaign_id=campaign_id,
+                lane_id="lane_01",
+                payload=lane_01_payload,
+                rerun_contract=lane_01_contract.rerun_contract,
+            )
+            lane_01_record = module.build_lane_record_from_payload(
+                lane_01_contract,
+                lane_specs[0],
+                int(lane_01_args.maxiter),
+                lane_01_payload,
+                archive_member=lane_01_member,
+                archive_update={
+                    "action": "inserted",
+                    "member_id": lane_01_member.member_id,
+                    "dominated_members": [],
+                },
+            )
+            module.persist_campaign_progress(
+                output_root / "campaign_progress.json",
+                campaign_id=campaign_id,
+                frontier_version=base_args.frontier_version,
+                frontier_engine=base_args.frontier_engine,
+                target_payload=target_payload,
+                lane_records=[lane_01_record],
+                archive_members=[lane_01_member],
+            )
+            progress_payload = json.loads(
+                (output_root / "campaign_progress.json").read_text(encoding="utf-8")
+            )
+            progress_payload["archive_members"] = []
+            (output_root / "campaign_progress.json").write_text(
+                json.dumps(progress_payload, indent=2),
+                encoding="utf-8",
+            )
+
+            lane_02_payload = self._minimal_frontier_payload(
+                output_root,
+                lane_id="lane_02",
+                final_iota=0.172,
+                final_volume=0.107,
+                nonqs_ratio=0.0105,
+                boozer_residual=0.0070,
+            )
+            lane_03_payload = self._minimal_frontier_payload(
+                output_root,
+                lane_id="lane_03",
+                final_iota=0.181,
+                final_volume=0.101,
+                nonqs_ratio=0.0115,
+                boozer_residual=0.0085,
+            )
+
+            with patch.object(
+                sys,
+                "argv",
+                [
+                    "run_single_stage_frontier_campaign.py",
+                    "--plasma-surf-filename",
+                    "demo.nc",
+                    "--stage2-bs-path",
+                    str(stage2_bs_path),
+                    "--output-root",
+                    str(output_root),
+                    "--summary-json",
+                    str(summary_path),
+                    "--frontier-num-lanes",
+                    "3",
+                    "--resume",
+                ],
+            ), patch.object(
+                module.goal_mode_comparison,
+                "load_validated_stage2_seed_metadata",
+                return_value=(
+                    stage2_bs_path.resolve(),
+                    stage2_results_path.resolve(),
+                    {
+                        "PLASMA_SURF_FILENAME": "demo.nc",
+                        "init_only": False,
+                    },
+                ),
+            ), patch.object(
+                module.goal_mode_comparison,
+                "run_goal_mode_case",
+                side_effect=[lane_02_payload, lane_03_payload],
+            ) as run_case:
+                self.assertEqual(module.main(), 0)
+
+            summary = json.loads(summary_path.read_text(encoding="utf-8"))
+            progress = module.load_frontier_campaign_progress(
+                output_root / "campaign_progress.json"
+            )
+
+            self.assertEqual(run_case.call_count, 2)
+            self.assertEqual(summary["frontier_campaign_id"], campaign_id)
+            self.assertEqual(summary["target_run"]["status"], "completed")
+            self.assertEqual(len(summary["frontier_lanes"]), 3)
+            self.assertEqual(
+                [lane["lane_id"] for lane in summary["frontier_lanes"]],
+                ["lane_01", "lane_02", "lane_03"],
+            )
+            self.assertEqual(summary["frontier_archive_size"], 3)
+            self.assertEqual(len(progress.lane_records), 3)
+            self.assertEqual(len(progress.archive_members), 3)
+
+    def test_frontier_campaign_resume_preserves_existing_contract_metadata(self):
+        module = load_frontier_campaign_module()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            output_root = tmpdir_path / "outputs"
+            summary_path = tmpdir_path / "summary.json"
+            original_stage2_bs_path = tmpdir_path / "stage2-original" / "biot_savart_opt.json"
+            original_stage2_results_path = (
+                tmpdir_path / "stage2-original" / "results.json"
+            )
+            new_stage2_bs_path = tmpdir_path / "stage2-new" / "biot_savart_opt.json"
+            new_stage2_results_path = tmpdir_path / "stage2-new" / "results.json"
+            original_stage2_bs_path.parent.mkdir(parents=True, exist_ok=True)
+            new_stage2_bs_path.parent.mkdir(parents=True, exist_ok=True)
+            original_stage2_bs_path.write_text("{}", encoding="utf-8")
+            new_stage2_bs_path.write_text("{}", encoding="utf-8")
+            original_stage2_results_path.write_text(
+                json.dumps({"PLASMA_SURF_FILENAME": "demo.nc", "init_only": False}),
+                encoding="utf-8",
+            )
+            new_stage2_results_path.write_text(
+                json.dumps({"PLASMA_SURF_FILENAME": "demo.nc", "init_only": False}),
+                encoding="utf-8",
+            )
+
+            base_args = module.parse_args(
+                [
+                    "--plasma-surf-filename",
+                    "demo.nc",
+                    "--stage2-bs-path",
+                    str(original_stage2_bs_path),
+                    "--output-root",
+                    str(output_root),
+                    "--summary-json",
+                    str(summary_path),
+                    "--frontier-num-lanes",
+                    "1",
+                ]
+            )
+            lane_specs = module.generate_multilane_local_specs(
+                num_lanes=1,
+                iotas_weight=base_args.iotas_weight,
+                frontier_volume_weight=base_args.frontier_volume_weight,
+                res_weight=base_args.res_weight,
+                lane_budget=base_args.frontier_lane_budget,
+            )
+            campaign_id = "resume-contract"
+            module.write_json(
+                output_root / "campaign_manifest.json",
+                module.build_frontier_campaign_manifest(
+                    base_args,
+                    campaign_id=campaign_id,
+                    stage2_bs_path=original_stage2_bs_path.resolve(),
+                    stage2_results_path=original_stage2_results_path.resolve(),
+                    stage2_results={
+                        "PLASMA_SURF_FILENAME": "demo.nc",
+                        "init_only": False,
+                    },
+                    lane_specs=lane_specs,
+                ),
+            )
+            module.persist_campaign_progress(
+                output_root / "campaign_progress.json",
+                campaign_id=campaign_id,
+                frontier_version="original_frontier_version",
+                frontier_engine="original_frontier_engine",
+                target_payload=None,
+                lane_records=[],
+                archive_members=[],
+            )
+
+            lane_payload = self._minimal_frontier_payload(
+                output_root,
+                lane_id="lane_01",
+                final_iota=0.165,
+                final_volume=0.108,
+                nonqs_ratio=0.011,
+                boozer_residual=0.0075,
+            )
+
+            with patch.object(
+                sys,
+                "argv",
+                [
+                    "run_single_stage_frontier_campaign.py",
+                    "--plasma-surf-filename",
+                    "demo.nc",
+                    "--stage2-bs-path",
+                    str(new_stage2_bs_path),
+                    "--output-root",
+                    str(output_root),
+                    "--summary-json",
+                    str(summary_path),
+                    "--frontier-version",
+                    "mutated_frontier_version",
+                    "--resume",
+                ],
+            ), patch.object(
+                module.goal_mode_comparison,
+                "run_goal_mode_case",
+                side_effect=[lane_payload],
+            ):
+                self.assertEqual(module.main(), 0)
+
+            progress_payload = json.loads(
+                (output_root / "campaign_progress.json").read_text(encoding="utf-8")
+            )
+            summary = json.loads(summary_path.read_text(encoding="utf-8"))
+
+            self.assertEqual(
+                progress_payload["frontier_version"],
+                "original_frontier_version",
+            )
+            self.assertEqual(
+                progress_payload["frontier_engine"],
+                "original_frontier_engine",
+            )
+            self.assertEqual(
+                summary["frontier_version"],
+                "original_frontier_version",
+            )
+            self.assertEqual(
+                summary["stage2_bs_path"],
+                str(original_stage2_bs_path.resolve()),
+            )
+            self.assertEqual(
+                summary["frontier_lanes"][0]["warm_start_source"],
+                str(original_stage2_bs_path.resolve()),
             )
