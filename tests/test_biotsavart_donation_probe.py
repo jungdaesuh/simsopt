@@ -38,6 +38,20 @@ def _build_test_payload(title: str):
     )
 
 
+def _build_real_stage2_test_payload(title: str):
+    return biotsavart_donation_probe.build_biotsavart_donation_probe_payload(
+        title=title,
+        mode="jax_cpu_parity",
+        shape=TEST_PROBE_SHAPE,
+        warmup=0,
+        repeat=1,
+        seed=0,
+        fixture="real-stage2",
+        stage2_nphi=5,
+        stage2_ntheta=4,
+    )
+
+
 def _restore_backend_config(config) -> None:
     invalidate_backend_cache()
     set_backend(
@@ -66,6 +80,18 @@ def test_biotsavart_donation_probe_matches_baseline():
     assert payload["cases"]["baseline"]["public_api_safe"] is True
     assert payload["cases"]["donate_points"]["public_api_safe"] is False
     assert payload["comparison"]["output_shape"] == [16, 3]
+    assert payload["comparison"]["max_abs_diff"] == 0.0
+    assert payload["comparison"]["max_rel_diff"] == 0.0
+
+
+def test_biotsavart_donation_probe_supports_real_stage2_fixture():
+    payload = _build_real_stage2_test_payload("Real Stage 2 probe")
+
+    assert payload["fixture"]["kind"] == "real-stage2"
+    assert payload["fixture"]["point_count"] == 20
+    assert payload["cases"]["baseline"]["donate_argnums"] == []
+    assert payload["cases"]["donate_points"]["donate_argnums"] == [0]
+    assert payload["comparison"]["output_shape"] == [20, 3]
     assert payload["comparison"]["max_abs_diff"] == 0.0
     assert payload["comparison"]["max_rel_diff"] == 0.0
 
