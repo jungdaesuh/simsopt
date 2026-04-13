@@ -45,6 +45,7 @@ class Stage2ArtifactConfig:
     alm_penalty_scale: float
     basin_hops: int
     basin_stepsize: float
+    alm_penalty_max: float = 1.0e8
     basin_temperature: float = 1.0
     basin_niter_success: int = 0
     basin_seed: int | None = None
@@ -92,6 +93,7 @@ def resolve_stage2_artifact_path(config: Stage2ArtifactConfig) -> Path:
         alm_max_outer_iters=config.alm_max_outer_iters,
         alm_penalty_init=config.alm_penalty_init,
         alm_penalty_scale=config.alm_penalty_scale,
+        alm_penalty_max=config.alm_penalty_max,
         basin_hops=config.basin_hops,
         basin_stepsize=config.basin_stepsize,
         basin_temperature=config.basin_temperature,
@@ -150,6 +152,8 @@ def build_stage2_command(
                 str(config.alm_penalty_init),
                 "--alm-penalty-scale",
                 str(config.alm_penalty_scale),
+                "--alm-penalty-max",
+                str(config.alm_penalty_max),
             ]
         )
     if config.basin_hops > 0:

@@ -26,6 +26,7 @@ def build_stage2_alm_settings(args):
         max_subproblem_continuations=args.alm_max_subproblem_continuations,
         penalty_init=args.alm_penalty_init,
         penalty_scale=args.alm_penalty_scale,
+        penalty_max=args.alm_penalty_max,
         feasibility_tol=args.alm_feas_tol,
         stationarity_tol=args.alm_stationarity_tol,
         trust_radius_init=(
@@ -160,6 +161,7 @@ def build_stage2_results(
         "ALM_OUTER_ITERATIONS": getattr(alm_result, "outer_iterations", None),
         "ALM_PENALTY_INIT": args.alm_penalty_init if alm_enabled else None,
         "ALM_PENALTY_SCALE": args.alm_penalty_scale if alm_enabled else None,
+        "ALM_PENALTY_MAX": args.alm_penalty_max if alm_enabled else None,
         "ALM_FEAS_TOL": args.alm_feas_tol if alm_enabled else None,
         "ALM_STATIONARITY_TOL": args.alm_stationarity_tol if alm_enabled else None,
         "ALM_TRUST_RADIUS_INIT": args.alm_trust_radius_init if alm_enabled else None,

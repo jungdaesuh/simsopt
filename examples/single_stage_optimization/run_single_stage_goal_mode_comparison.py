@@ -87,6 +87,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--alm-max-outer-iters", type=int, default=10)
     parser.add_argument("--alm-penalty-init", type=float, default=1.0)
     parser.add_argument("--alm-penalty-scale", type=float, default=10.0)
+    parser.add_argument("--alm-penalty-max", type=float, default=1.0e8)
     parser.add_argument("--alm-feas-tol", type=float, default=1e-6)
     parser.add_argument("--alm-stationarity-tol", type=float, default=1e-6)
     parser.add_argument("--alm-trust-radius-init", type=float, default=0.05)
@@ -372,6 +373,8 @@ def build_single_stage_goal_mode_command(
                 str(args.alm_penalty_init),
                 "--alm-penalty-scale",
                 str(args.alm_penalty_scale),
+                "--alm-penalty-max",
+                str(args.alm_penalty_max),
                 "--alm-feas-tol",
                 str(args.alm_feas_tol),
                 "--alm-stationarity-tol",

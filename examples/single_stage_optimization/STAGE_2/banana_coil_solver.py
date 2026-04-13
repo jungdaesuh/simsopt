@@ -261,6 +261,12 @@ def parse_args():
         help="Multiplicative ALM penalty growth factor (default 10.0).",
     )
     parser.add_argument(
+        "--alm-penalty-max",
+        type=float,
+        default=float(os.environ.get("ALM_PENALTY_MAX", "1e8")),
+        help="Maximum ALM penalty parameter before capped termination (default 1e8).",
+    )
+    parser.add_argument(
         "--alm-feas-tol",
         type=float,
         default=float(os.environ.get("ALM_FEAS_TOL", "1e-6")),
@@ -681,6 +687,7 @@ def main(parsed_args=None):
             alm_max_outer_iters=args.alm_max_outer_iters,
             alm_penalty_init=args.alm_penalty_init,
             alm_penalty_scale=args.alm_penalty_scale,
+            alm_penalty_max=args.alm_penalty_max,
             basin_hops=args.basin_hops,
             basin_stepsize=args.basin_stepsize,
             basin_temperature=args.basin_temperature,

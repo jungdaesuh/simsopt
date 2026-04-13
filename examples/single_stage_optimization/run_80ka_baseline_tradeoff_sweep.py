@@ -257,6 +257,7 @@ def make_stage2_config(args: argparse.Namespace) -> Stage2ArtifactConfig:
         alm_max_outer_iters=10,
         alm_penalty_init=1.0,
         alm_penalty_scale=10.0,
+        alm_penalty_max=1.0e8,
         basin_hops=args.stage2_basin_hops,
         basin_stepsize=args.stage2_basin_stepsize,
         basin_seed=basin_seed,

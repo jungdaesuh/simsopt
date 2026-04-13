@@ -13,6 +13,10 @@ class ALMSettings:
     max_subproblem_continuations: int = 20
     penalty_init: float = 1.0
     penalty_scale: float = 10.0
+    # Production ALM implementations commonly expose a maximum penalty
+    # safeguard; keeping this bounded avoids runaway objective scaling in the
+    # L-BFGS-B inner solve.
+    penalty_max: float | None = 1.0e8
     feasibility_tol: float = 1e-6
     stationarity_tol: float = 1e-6
     trust_radius_init: float | None = None
@@ -114,6 +118,13 @@ def validate_alm_cli_args(args) -> None:
         raise ValueError("--alm-penalty-init must be positive")
     if args.alm_penalty_scale <= 1.0:
         raise ValueError("--alm-penalty-scale must be greater than 1")
+    penalty_max = getattr(args, "alm_penalty_max", None)
+    if penalty_max is not None and penalty_max <= 0.0:
+        raise ValueError("--alm-penalty-max must be positive")
+    if penalty_max is not None and penalty_max < args.alm_penalty_init:
+        raise ValueError(
+            f"--alm-penalty-max ({penalty_max}) must be >= --alm-penalty-init ({args.alm_penalty_init})"
+        )
     if args.alm_feas_tol <= 0.0:
         raise ValueError("--alm-feas-tol must be positive")
     if args.alm_stationarity_tol <= 0.0:
@@ -330,6 +341,13 @@ def alm_result_diagnostics_fields(alm_result) -> dict:
         "ALM_FINAL_PENALTY_GRAD_RATIO": getattr(
             alm_result,
             "final_penalty_grad_ratio",
+            None,
+        ),
+        "ALM_PENALTY_CAP_REACHED": getattr(alm_result, "penalty_cap_reached", None),
+        "ALM_PENALTY_MAX": getattr(alm_result, "penalty_max", None),
+        "ALM_PENALTY_CAP_REQUESTED": getattr(
+            alm_result,
+            "penalty_cap_requested",
             None,
         ),
     }
@@ -717,6 +735,25 @@ def _project_nonnegative_multipliers_with_diagnostics(
     )
 
 
+def _next_penalty(
+    penalty: float,
+    *,
+    penalty_scale: float,
+    penalty_max: float | None,
+) -> tuple[float, bool, float]:
+    requested_penalty = penalty * penalty_scale
+    if penalty_max is None:
+        if not np.isfinite(requested_penalty):
+            return penalty, True, requested_penalty
+        return requested_penalty, False, requested_penalty
+
+    if penalty_max <= 0.0:
+        raise ValueError("ALM penalty_max must be positive when provided")
+    if not np.isfinite(requested_penalty) or requested_penalty > penalty_max:
+        return penalty_max, True, requested_penalty
+    return requested_penalty, False, requested_penalty
+
+
 def _build_inner_options(
     inner_options: dict,
     update_stationarity_tol: float,
@@ -988,6 +1025,13 @@ def minimize_alm(
         raise ValueError(
             "snapshot_accepted_state_fn and restore_incumbent_state_fn must be provided together"
         )
+    if settings.penalty_max is not None and settings.penalty_max <= 0.0:
+        raise ValueError("settings.penalty_max must be positive when provided")
+    if settings.penalty_max is not None and settings.penalty_max < settings.penalty_init:
+        raise ValueError(
+            f"settings.penalty_max ({settings.penalty_max}) must be >= "
+            f"settings.penalty_init ({settings.penalty_init})"
+        )
     x = np.asarray(x0, dtype=float).copy()
     multipliers = np.zeros(len(constraint_names), dtype=float)
     penalty = float(settings.penalty_init)
@@ -1000,6 +1044,8 @@ def minimize_alm(
     last_outer_iteration = 0
     cap_binding_detected = False
     cap_binding_indices: set[int] = set()
+    penalty_cap_reached = False
+    penalty_cap_requested = None
     trust_radius = _normalize_trust_radius(settings.trust_radius_init)
     update_feasibility_tol = max(settings.feasibility_tol, 1.0 / penalty)
     update_stationarity_tol = max(settings.stationarity_tol, 1.0 / penalty)
@@ -1086,7 +1132,57 @@ def minimize_alm(
             final_penalty_grad_ratio=conditioning["conditioning_penalty_grad_ratio"],
             multiplier_cap_binding=bool(cap_binding_detected),
             multiplier_cap_binding_indices=sorted(cap_binding_indices),
+            penalty_cap_reached=bool(penalty_cap_reached),
+            penalty_max=(
+                None if settings.penalty_max is None else float(settings.penalty_max)
+            ),
+            penalty_cap_requested=(
+                None if penalty_cap_requested is None else float(penalty_cap_requested)
+            ),
         )
+
+    def _try_penalty_increase() -> SimpleNamespace | None:
+        """Apply penalty scaling and return a cap-reached result if the cap fires."""
+        nonlocal penalty, penalty_cap_reached, penalty_cap_requested
+        nonlocal feasible_stall_count, update_feasibility_tol, update_stationarity_tol
+        next_p, cap_hit, requested_p = _next_penalty(
+            penalty,
+            penalty_scale=settings.penalty_scale,
+            penalty_max=settings.penalty_max,
+        )
+        if cap_hit:
+            penalty_cap_reached = True
+            penalty_cap_requested = requested_p
+            history_entry["action"] = "penalty_cap_reached"
+            history_entry["trust_radius"] = trust_radius
+            _emit_history_snapshot(history_entry)
+            return _build_result(
+                success=False,
+                message=(
+                    "ALM stopped after the requested penalty update "
+                    f"{requested_p:.3e} exceeded the configured "
+                    f"penalty cap {next_p:.3e}."
+                ),
+                termination_reason="penalty_cap_reached",
+                outer_iterations=outer_iteration,
+                evaluation=accepted_eval,
+                multipliers_state=multipliers,
+                penalty_state=penalty,
+                inner_result=result,
+                restored_best_feasible=False,
+                restored_best_feasible_reason=None,
+                final_max_feasibility_violation=max_feasibility_violation,
+                final_stationarity_norm=stationarity_norm,
+                final_raw_stationarity_norm=raw_stationarity_norm,
+                final_kkt_stationarity_norm=kkt_stationarity_norm,
+                final_feasibility_tolerance=settings.feasibility_tol,
+                final_stationarity_tolerance=settings.stationarity_tol,
+            )
+        penalty = next_p
+        feasible_stall_count = 0
+        update_feasibility_tol = max(settings.feasibility_tol, 1.0 / penalty)
+        update_stationarity_tol = max(settings.stationarity_tol, 1.0 / penalty)
+        return None
 
     for outer_iteration in range(1, settings.max_outer_iterations + 1):
         last_outer_iteration = outer_iteration
@@ -1532,10 +1628,9 @@ def minimize_alm(
                 )
 
             if forced_infeasible_penalty_cycle:
-                penalty *= float(settings.penalty_scale)
-                feasible_stall_count = 0
-                update_feasibility_tol = max(settings.feasibility_tol, 1.0 / penalty)
-                update_stationarity_tol = max(settings.stationarity_tol, 1.0 / penalty)
+                cap_result = _try_penalty_increase()
+                if cap_result is not None:
+                    return cap_result
                 history_entry["action"] = "infeasible_stall_penalty_increase"
                 history_entry["trust_radius"] = trust_radius
                 _emit_history_snapshot(history_entry)
@@ -1612,10 +1707,9 @@ def minimize_alm(
                 _emit_history_snapshot(history_entry)
                 continue
 
-            penalty *= float(settings.penalty_scale)
-            feasible_stall_count = 0
-            update_feasibility_tol = max(settings.feasibility_tol, 1.0 / penalty)
-            update_stationarity_tol = max(settings.stationarity_tol, 1.0 / penalty)
+            cap_result = _try_penalty_increase()
+            if cap_result is not None:
+                return cap_result
             history_entry["action"] = "penalty_increase"
             history_entry["trust_radius"] = trust_radius
             _emit_history_snapshot(history_entry)

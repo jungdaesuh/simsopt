@@ -805,6 +805,12 @@ def parse_args():
         help="Multiplicative ALM penalty growth factor (default 10.0).",
     )
     parser.add_argument(
+        "--alm-penalty-max",
+        type=float,
+        default=float(os.environ.get("ALM_PENALTY_MAX", "1e8")),
+        help="Maximum ALM penalty parameter before capped termination (default 1e8).",
+    )
+    parser.add_argument(
         "--alm-feas-tol",
         type=float,
         default=float(os.environ.get("ALM_FEAS_TOL", "1e-6")),
@@ -1448,6 +1454,7 @@ class RunIdentityConfig:
     alm_max_outer_iters: int
     alm_penalty_init: float
     alm_penalty_scale: float
+    alm_penalty_max: float
     alm_feas_tol: float
     alm_stationarity_tol: float
     num_surfaces: int
@@ -1701,6 +1708,7 @@ def make_run_identity_config(
         alm_max_outer_iters=args.alm_max_outer_iters,
         alm_penalty_init=args.alm_penalty_init,
         alm_penalty_scale=args.alm_penalty_scale,
+        alm_penalty_max=args.alm_penalty_max,
         alm_feas_tol=args.alm_feas_tol,
         alm_stationarity_tol=args.alm_stationarity_tol,
         num_surfaces=args.num_surfaces,
@@ -3200,6 +3208,7 @@ def build_single_stage_alm_settings(args):
         max_subproblem_continuations=args.alm_max_subproblem_continuations,
         penalty_init=args.alm_penalty_init,
         penalty_scale=args.alm_penalty_scale,
+        penalty_max=args.alm_penalty_max,
         feasibility_tol=args.alm_feas_tol,
         stationarity_tol=args.alm_stationarity_tol,
         trust_radius_init=(
@@ -5543,6 +5552,7 @@ if __name__ == "__main__":
         "ALM_OUTER_ITERATIONS": getattr(alm_result, "outer_iterations", None),
         "ALM_PENALTY_INIT": args.alm_penalty_init if CONSTRAINT_METHOD == "alm" else None,
         "ALM_PENALTY_SCALE": args.alm_penalty_scale if CONSTRAINT_METHOD == "alm" else None,
+        "ALM_PENALTY_MAX": args.alm_penalty_max if CONSTRAINT_METHOD == "alm" else None,
         "ALM_FEAS_TOL": args.alm_feas_tol if CONSTRAINT_METHOD == "alm" else None,
         "ALM_STATIONARITY_TOL": args.alm_stationarity_tol if CONSTRAINT_METHOD == "alm" else None,
         "ALM_TRUST_RADIUS_INIT": args.alm_trust_radius_init if CONSTRAINT_METHOD == "alm" else None,

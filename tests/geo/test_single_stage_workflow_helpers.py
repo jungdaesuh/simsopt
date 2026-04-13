@@ -178,6 +178,35 @@ class WorkflowHelpersTests(unittest.TestCase):
             "biot_savart_opt.json",
         )
 
+    def test_format_local_stage2_run_dir_includes_alm_penalty_cap_when_enabled(self):
+        module = load_workflow_helpers_module()
+        spec = module.Stage2SeedSpec(
+            plasma_surf_filename="demo.nc",
+            major_radius=0.915,
+            toroidal_flux=0.24,
+            length_weight=0.0005,
+            cc_weight=100.0,
+            cc_threshold=0.05,
+            curvature_weight=0.0001,
+            curvature_threshold=40.0,
+            banana_surf_radius=0.22,
+            tf_current_A=8.0e4,
+            order=2,
+        )
+
+        run_dir = module.format_local_stage2_run_dir(
+            spec,
+            constraint_method="alm",
+            alm_max_outer_iters=10,
+            alm_penalty_init=1.0,
+            alm_penalty_scale=10.0,
+            alm_penalty_max=1.0e8,
+            basin_hops=0,
+            basin_stepsize=0.01,
+        )
+
+        self.assertIn("-CM=alm-ALMOuter=10-ALMMu=1-ALMScale=10-ALMMax=1e+08", run_dir)
+
     def test_select_non_dominated_records_uses_augmented_iota_error(self):
         module = load_workflow_helpers_module()
         records = [

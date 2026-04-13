@@ -169,6 +169,7 @@ def _make_alm_args(**overrides):
         "alm_max_subproblem_continuations": 9,
         "alm_penalty_init": 2.0,
         "alm_penalty_scale": 3.0,
+        "alm_penalty_max": 25.0,
         "alm_feas_tol": 1e-4,
         "alm_stationarity_tol": 2e-4,
         "alm_trust_radius_init": 0.15,
@@ -228,6 +229,7 @@ def make_single_stage_thresholded_physics_rerun_args(**overrides):
         "alm_max_subproblem_continuations": 4,
         "alm_penalty_init": 1.0,
         "alm_penalty_scale": 10.0,
+        "alm_penalty_max": 1.0e8,
         "alm_feas_tol": 1e-4,
         "alm_stationarity_tol": 1e-4,
         "alm_trust_radius_init": 0.05,
@@ -250,6 +252,8 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
     def test_single_stage_parse_args_exposes_alm_trust_region_controls(self):
         source = SINGLE_STAGE_MODULE_PATH.read_text()
 
+        self.assertIn('"--alm-penalty-max"', source)
+        self.assertIn('"ALM_PENALTY_MAX", "1e8"', source)
         self.assertIn('"--alm-trust-radius-init"', source)
         self.assertIn('"ALM_TRUST_RADIUS_INIT", "0.05"', source)
         self.assertIn('"--alm-trust-radius-min"', source)
@@ -355,6 +359,7 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
         self.assertEqual(settings.max_subproblem_continuations, 9)
         self.assertEqual(settings.penalty_init, 2.0)
         self.assertEqual(settings.penalty_scale, 3.0)
+        self.assertEqual(settings.penalty_max, 25.0)
         self.assertEqual(settings.feasibility_tol, 1e-4)
         self.assertEqual(settings.stationarity_tol, 2e-4)
         self.assertEqual(settings.trust_radius_init, 0.15)
@@ -529,6 +534,8 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
         self.assertEqual(command[command.index("--alm-penalty-init") + 1], "1.0")
         self.assertIn("--alm-penalty-scale", command)
         self.assertEqual(command[command.index("--alm-penalty-scale") + 1], "10.0")
+        self.assertIn("--alm-penalty-max", command)
+        self.assertEqual(command[command.index("--alm-penalty-max") + 1], "100000000.0")
         self.assertIn("--banana-current-max-A", command)
         self.assertEqual(command[command.index("--banana-current-max-A") + 1], "16000.0")
         self.assertEqual(command[command.index("--toroidal-flux") + 1], "0.37")
@@ -565,6 +572,7 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
             "alm_max_outer_iters": 15,
             "alm_penalty_init": 2.0,
             "alm_penalty_scale": 5.0,
+            "alm_penalty_max": 5.0e5,
             "basin_hops": 0,
             "basin_stepsize": 0.01,
             "basin_temperature": 1.0,
@@ -608,6 +616,7 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
         self.assertEqual(summary["resolved_spec_source"], "profile:standard_80ka")
         self.assertIn("resolved_stage2_config", summary)
         self.assertEqual(summary["resolved_stage2_config"]["constraint_method"], "alm")
+        self.assertEqual(summary["resolved_stage2_config"]["alm_penalty_max"], 1.0e8)
         self.assertEqual(summary["resolved_stage2_config"]["output_root"], str(Path("outputs").resolve()))
         self.assertEqual(summary["output_contract"], "materialized_stage2_artifact")
         self.assertFalse(summary["contains_solver_outputs"])
@@ -670,6 +679,7 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
                         "alm_max_outer_iters": 10,
                         "alm_penalty_init": 1.0,
                         "alm_penalty_scale": 10.0,
+                        "alm_penalty_max": 1.0e8,
                         "basin_hops": 3,
                         "basin_stepsize": 0.01,
                         "basin_temperature": 2.5,
@@ -718,6 +728,7 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
                         "alm_max_outer_iters": 10,
                         "alm_penalty_init": 1.0,
                         "alm_penalty_scale": 10.0,
+                        "alm_penalty_max": 1.0e8,
                         "basin_hops": 0,
                         "basin_stepsize": 0.01,
                         "basin_temperature": 2.5,
@@ -757,6 +768,7 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
                         "alm_max_outer_iters": 10,
                         "alm_penalty_init": 1.0,
                         "alm_penalty_scale": 10.0,
+                        "alm_penalty_max": 1.0e8,
                         "basin_hops": 3,
                         "basin_stepsize": 0.01,
                         "basin_temperature": 2.5,

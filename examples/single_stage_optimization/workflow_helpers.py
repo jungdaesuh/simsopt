@@ -163,13 +163,17 @@ def format_stage2_constraint_suffix(
     alm_max_outer_iters: int,
     alm_penalty_init: float,
     alm_penalty_scale: float,
+    alm_penalty_max: float | None = None,
 ) -> str:
     if constraint_method == "alm":
-        return (
+        suffix = (
             f"-CM=alm-ALMOuter={alm_max_outer_iters}"
             f"-ALMMu={format_compact_float(alm_penalty_init)}"
             f"-ALMScale={format_compact_float(alm_penalty_scale)}"
         )
+        if alm_penalty_max is not None:
+            suffix += f"-ALMMax={format_compact_float(alm_penalty_max)}"
+        return suffix
     return "-CM=penalty"
 
 
@@ -202,6 +206,7 @@ def format_local_stage2_run_dir(
     alm_max_outer_iters: int,
     alm_penalty_init: float,
     alm_penalty_scale: float,
+    alm_penalty_max: float | None = None,
     basin_hops: int,
     basin_stepsize: float,
     basin_temperature: float = 1.0,
@@ -215,6 +220,7 @@ def format_local_stage2_run_dir(
             alm_max_outer_iters,
             alm_penalty_init,
             alm_penalty_scale,
+            alm_penalty_max,
         )
         + format_stage2_basin_suffix(
             basin_hops,
@@ -234,6 +240,7 @@ def local_stage2_bs_path(
     alm_max_outer_iters: int,
     alm_penalty_init: float,
     alm_penalty_scale: float,
+    alm_penalty_max: float | None = None,
     basin_hops: int,
     basin_stepsize: float,
     basin_temperature: float = 1.0,
@@ -249,6 +256,7 @@ def local_stage2_bs_path(
             alm_max_outer_iters=alm_max_outer_iters,
             alm_penalty_init=alm_penalty_init,
             alm_penalty_scale=alm_penalty_scale,
+            alm_penalty_max=alm_penalty_max,
             basin_hops=basin_hops,
             basin_stepsize=basin_stepsize,
             basin_temperature=basin_temperature,

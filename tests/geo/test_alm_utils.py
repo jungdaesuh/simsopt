@@ -1810,6 +1810,100 @@ class MinimizeAlmTests(unittest.TestCase):
         self.assertAlmostEqual(result.history[0]["raw_stationarity_norm"], 0.0)
         self.assertAlmostEqual(result.history[0]["stationarity_norm"], 0.0)
 
+    def test_next_penalty_caps_requested_growth(self):
+        module = load_alm_utils_module()
+
+        next_penalty, cap_hit, requested_penalty = module._next_penalty(
+            1.0e8,
+            penalty_scale=10.0,
+            penalty_max=1.0e8,
+        )
+
+        self.assertEqual(next_penalty, 1.0e8)
+        self.assertTrue(cap_hit)
+        self.assertEqual(requested_penalty, 1.0e9)
+
+    def test_next_penalty_caps_on_overflow_when_no_max(self):
+        module = load_alm_utils_module()
+
+        next_penalty, cap_hit, requested_penalty = module._next_penalty(
+            1.0e308,
+            penalty_scale=100.0,
+            penalty_max=None,
+        )
+
+        self.assertEqual(next_penalty, 1.0e308)
+        self.assertTrue(cap_hit)
+        self.assertTrue(np.isinf(requested_penalty))
+
+    def test_minimize_alm_stops_when_penalty_cap_blocks_further_growth(self):
+        module = load_alm_utils_module()
+        settings = module.ALMSettings(
+            max_outer_iterations=2,
+            penalty_init=1.0e8,
+            penalty_scale=10.0,
+            penalty_max=1.0e8,
+            feasibility_tol=1.0e-8,
+            stationarity_tol=1.0e-8,
+            trust_radius_init=0.1,
+            trust_radius_min=0.01,
+            trust_radius_shrink=0.5,
+            trust_radius_grow=1.5,
+        )
+        candidate_x = np.array([0.2])
+
+        def evaluate_problem(x, multipliers, penalty):
+            del multipliers, penalty
+            x = np.asarray(x, dtype=float)
+            if np.array_equal(x, candidate_x):
+                return {
+                    "total": 1.0,
+                    "base_value": 0.1,
+                    "base_grad": np.array([0.0]),
+                    "grad": np.array([0.0]),
+                    "constraint_values": np.array([0.5]),
+                    "feasibility_values": np.array([0.5]),
+                    "dual_update_values": np.array([0.5]),
+                    "stationarity_norm": 0.0,
+                }
+            return {
+                "total": 1.0,
+                "base_value": 0.1,
+                "base_grad": np.array([0.0]),
+                "grad": np.array([0.0]),
+                "constraint_values": np.array([0.5]),
+                "feasibility_values": np.array([0.5]),
+                "dual_update_values": np.array([0.5]),
+                "stationarity_norm": 0.0,
+            }
+
+        def fake_minimize(fun, x, jac, method, bounds, callback, options):
+            del jac, method, bounds, callback, options
+            fun(candidate_x)
+            return SimpleNamespace(
+                x=candidate_x.copy(),
+                nit=1,
+                success=False,
+                message="ABNORMAL",
+            )
+
+        with patch.object(module, "minimize", side_effect=fake_minimize):
+            result = module.minimize_alm(
+                np.array([0.0]),
+                ["demo_constraint"],
+                evaluate_problem,
+                settings,
+                {"maxiter": 5, "ftol": 1.0e-12, "gtol": 1.0e-12},
+            )
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.termination_reason, "penalty_cap_reached")
+        self.assertTrue(result.penalty_cap_reached)
+        self.assertEqual(result.penalty_max, 1.0e8)
+        self.assertEqual(result.penalty_cap_requested, 1.0e9)
+        self.assertEqual(result.history[0]["action"], "penalty_cap_reached")
+        self.assertIn("configured penalty cap", result.message)
+
 
 if __name__ == "__main__":
     unittest.main()
