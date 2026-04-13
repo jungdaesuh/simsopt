@@ -5,7 +5,31 @@ import importlib.util
 import logging
 from collections.abc import Sequence
 from pathlib import Path
+import sys
 from typing import Literal, cast
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_SRC_DIR = _REPO_ROOT / "src"
+_LOCAL_SIMSOPT_IMPORT_PATHS = (_REPO_ROOT, _SRC_DIR)
+
+
+def _prepend_sys_path(path: Path) -> None:
+    """Move one path to the front of ``sys.path`` without duplicates."""
+    path_str = str(path)
+    sys.path[:] = [entry for entry in sys.path if entry != path_str]
+    sys.path.insert(0, path_str)
+
+
+def _prefer_local_simsopt_source_tree() -> None:
+    """Bootstrap the local checkout before importing ``simsopt`` modules."""
+    for path in _LOCAL_SIMSOPT_IMPORT_PATHS:
+        _prepend_sys_path(path)
+    from repo_bootstrap import bootstrap_local_simsopt
+
+    bootstrap_local_simsopt(_SRC_DIR)
+
+
+_prefer_local_simsopt_source_tree()
 
 import jax
 import jax.numpy as jnp
@@ -92,7 +116,6 @@ LegacyCurveObjectiveGradientCase = Literal[
     "lp-curve-torsion",
     "framed-curve-twist",
 ]
-_REPO_ROOT = Path(__file__).resolve().parents[2]
 _STAGE2_SCRIPT_PATH = (
     _REPO_ROOT
     / "examples"

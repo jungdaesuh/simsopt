@@ -21,6 +21,7 @@ from pathlib import Path
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _SRC_DIR = _REPO_ROOT / "src"
 _CPU_RUN_CODE_BENCHMARK_PATH = _REPO_ROOT / "benchmarks" / "cpu_run_code_benchmark.py"
+_LOCAL_SIMSOPT_IMPORT_PATHS = (_REPO_ROOT, _SRC_DIR)
 
 # ---------------------------------------------------------------------------
 # Meta-path blocker helpers
@@ -53,7 +54,7 @@ def block_private_optimizer_submodule_import(submodule: str) -> None:
         def find_spec(self, fullname, path=None, target=None):
             del path, target
             if fullname == submodule or fullname.startswith(f"{submodule}."):
-                raise ImportError(
+                raise ModuleNotFoundError(
                     f"blocked private optimizer dependency {submodule} for smoke test"
                 )
             return None
@@ -68,7 +69,7 @@ def block_simsoptpp_imports() -> None:
         def find_spec(self, fullname, path=None, target=None):
             del path, target
             if fullname == "simsoptpp" or fullname.startswith("simsoptpp."):
-                raise ImportError("blocked simsoptpp for smoke test")
+                raise ModuleNotFoundError("blocked simsoptpp for smoke test")
             return None
 
     sys.meta_path.insert(0, _BlockSimsoptpp())
@@ -77,7 +78,7 @@ def block_simsoptpp_imports() -> None:
 def block_jax_imports(
     *,
     message: str = "blocked jax import for smoke test",
-    error_cls: type[Exception] = ImportError,
+    error_cls: type[Exception] = ModuleNotFoundError,
 ) -> None:
     """Install a meta-path finder that blocks ``jax``."""
 
@@ -102,6 +103,20 @@ def strip_simsopt_editable_finders() -> None:
             or "simsopt" not in type(finder).__module__.lower()
         )
     ]
+
+
+def _prepend_sys_path(path: Path) -> None:
+    """Move one path to the front of ``sys.path`` without duplicates."""
+    path_str = str(path)
+    sys.path[:] = [entry for entry in sys.path if entry != path_str]
+    sys.path.insert(0, path_str)
+
+
+def prefer_local_simsopt_source_tree() -> None:
+    """Prefer this checkout over editable installs in sibling repositories."""
+    strip_simsopt_editable_finders()
+    for path in _LOCAL_SIMSOPT_IMPORT_PATHS:
+        _prepend_sys_path(path)
 
 
 # ---------------------------------------------------------------------------
@@ -2037,6 +2052,7 @@ def case_import_cpu_geo_core_entrypoints_without_jax() -> None:
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
+    prefer_local_simsopt_source_tree()
     case_name = sys.argv[1]
     fn = globals().get(case_name)
     if fn is None or not callable(fn):
