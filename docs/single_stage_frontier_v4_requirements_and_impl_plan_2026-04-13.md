@@ -12,7 +12,7 @@ Define the end-state `frontier_v4` system for single-stage optimization.
 
 - explores several tradeoff directions from the same seed family
 - maintains a non-dominated feasible archive during search
-- uses smooth constraint handling during optimization
+- uses multiple smooth constrained local search lanes during optimization
 - returns a frontier set plus one recommended incumbent
 - preserves the current `target` mode as the single-point production baseline
 
@@ -48,7 +48,7 @@ That is useful as a comparison seam, but it is not yet a frontier engine because
    - per-member tradeoff metadata
    - campaign-level frontier diagnostics
 
-The preferred first `v4` engine is reference-guided evolutionary frontier search with smooth constraint ranking. A later optional engine may add Bayesian frontier search.
+The preferred first `v4` engine is a multi-lane local frontier campaign over the existing smooth constrained optimizer stack. Later optional engines may add evolutionary or Bayesian frontier search, but they are not the first implementation target.
 
 ## Why V4 Exists
 
@@ -94,6 +94,52 @@ Scalar scores are lane-local decision aids only. The frontier archive and its me
 
 Every frontier member must carry enough metadata to rerun that exact search lane.
 
+## Pareto Objective Contract
+
+The first `v4` implementation must freeze the Pareto truth surface instead of leaving it implicit.
+
+Pareto objective vector for archive dominance:
+
+- [ ] maximize final `iota`
+- [ ] maximize final nested volume
+- [ ] minimize final QA error
+- [ ] minimize final Boozer residual
+
+Constraint and certification metrics, not Pareto objectives:
+
+- [ ] curve length
+- [ ] coil-coil spacing
+- [ ] coil-surface spacing
+- [ ] surface-vessel spacing when applicable
+- [ ] curvature
+- [ ] topology / confinement validity
+- [ ] solver-validity and finite-state checks
+
+Dominance reproducibility rules:
+
+- [ ] objective directions are frozen by schema version
+- [ ] objective normalization references are frozen per campaign manifest
+- [ ] equality tolerance for dominance is explicit and versioned
+- [ ] near-duplicate suppression threshold is explicit and versioned
+
+## Archive State Contract
+
+The first `v4` implementation must distinguish working-state archive bookkeeping from final frontier truth.
+
+Archive member states:
+
+- [ ] `provisional`: candidate has a complete objective vector from a lane, but final hard certification is not yet complete
+- [ ] `certified`: candidate passes final hard certification and is eligible for frontier truth, recommendation, and final reporting
+- [ ] `rejected`: candidate failed certification or replay and is retained only for diagnostics
+
+Archive state rules:
+
+- [ ] progress artifacts may report provisional and certified members separately
+- [ ] final frontier archive contains certified members only
+- [ ] final recommendation policy can select certified members only
+- [ ] final hypervolume / dominance summaries use certified members only
+- [ ] provisional members must never silently enter final comparison outputs
+
 ## Requirements
 
 ## Functional Requirements
@@ -116,19 +162,20 @@ At least one of these mechanisms must be supported:
 - [ ] reference-point sweep
 - [ ] achievement / Chebyshev scalarization sweep
 - [ ] epsilon-constraint sweep
-- [ ] preference-guided evolutionary search
+- [ ] multi-lane local preference schedule over the existing single-stage optimizer
 
 Plain fixed weighted-sum-only search is insufficient for the final `v4` contract.
 
-### FR3. Non-dominated feasible archive
+### FR3. Non-dominated archive with certified truth
 
-The campaign must maintain an archive of feasible, non-dominated candidates throughout execution.
+The campaign must maintain archive state throughout execution, but frontier truth is defined only on certified members.
 
 Archive membership rules:
 
-- [ ] candidate passes final hard feasibility and solver-validity checks
-- [ ] candidate is not dominated by an existing archive member
-- [ ] dominated archive members are removed
+- [ ] provisional members may be tracked for progress reporting only
+- [ ] certified members pass final hard feasibility and solver-validity checks
+- [ ] certified member dominance uses the frozen Pareto objective vector only
+- [ ] certified members that are dominated by new certified members are removed
 - [ ] archive keeps enough diversity to avoid near-duplicate collapse
 
 ### FR4. Smooth search-time constraint handling
@@ -215,10 +262,11 @@ Required behavior:
 
 Required first engine:
 
-- [ ] reference-guided evolutionary frontier search
+- [ ] multi-lane local frontier campaign engine
 
-Optional later engine:
+Optional later engines:
 
+- [ ] reference-guided evolutionary frontier engine
 - [ ] Bayesian multi-objective campaign engine
 
 ### FR12. Stable result schema
@@ -233,7 +281,7 @@ Campaign-level and member-level JSON schemas must be versioned and backward-read
 
 - [ ] total lane budget
 - [ ] per-lane budget
-- [ ] population size or probe count
+- [ ] concurrent lane count or probe count
 - [ ] early-stop criteria
 
 ### NFR2. Resume support
@@ -278,19 +326,20 @@ The final docs must clearly distinguish:
 
 Preferred first `v4` engine:
 
-- reference-guided evolutionary frontier search
+- multi-lane local frontier campaign
 
 Why:
 
-- works naturally with set-valued search
-- handles non-convex tradeoffs better than fixed weighted sums
-- aligns with preference/reference-point methods in the frontier literature
-- avoids requiring a new GP-surrogate stack immediately
-- fits the repo's direct-evaluation workflow better than qNEHVI-style machinery
+- matches the existing lane contract and current single-stage optimizer architecture
+- reuses the smooth constrained local search machinery already being hardened in `frontier_v2` and `frontier_v3`
+- addresses the observed frontier failure mode first: search dynamics and rejection behavior, not missing population heuristics
+- is cheaper to validate, resume, and salvage than a new population engine
+- still yields a real frontier archive because the campaign explores multiple preference directions, not just one scalar lane
 
-Deferred engine:
+Deferred engines:
 
-- Bayesian frontier engine using qNParEGO / qNEHVI-style campaign logic
+- reference-guided evolutionary frontier engine for broader non-convex exploration after the archive and reporting contracts are stable
+- Bayesian frontier engine using qNParEGO / qNEHVI-style campaign logic after the repo is ready to absorb a surrogate stack
 
 ## Campaign structure
 
@@ -308,7 +357,7 @@ Responsibilities:
 
 - validate the seed artifact
 - select frontier engine
-- instantiate preference directions
+- instantiate lane-local preference directions
 - assign lane budgets
 - create campaign manifest
 
@@ -319,14 +368,14 @@ Responsibilities:
 - run one search lane
 - expose smooth constrained objective
 - emit incremental lane checkpoints
-- publish candidate states to archive manager
+- publish provisional and certified candidate states to archive manager
 
 ### Archive manager
 
 Responsibilities:
 
 - check feasibility and certification eligibility
-- evaluate dominance
+- evaluate certified-member dominance on the frozen Pareto vector
 - maintain diversity guardrails
 - compute hypervolume or dominance summaries
 
@@ -353,7 +402,7 @@ New modules to add under `examples/single_stage_optimization/banana_opt/`:
 - `frontier_scalarization.py`
 - `frontier_constraints.py`
 - `frontier_engine_base.py`
-- `frontier_engine_reference_guided.py`
+- `frontier_engine_multilane_local.py`
 - `frontier_recommendation.py`
 - `frontier_campaign_reporting.py`
 
@@ -384,6 +433,10 @@ Required `campaign_manifest.json` fields:
 - [ ] `FRONTIER_REFERENCE_POINTS`
 - [ ] `FRONTIER_SCALARIZATION_FAMILY`
 - [ ] `FRONTIER_CONSTRAINT_MODE`
+- [ ] `PARETO_OBJECTIVE_VECTOR`
+- [ ] `PARETO_OBJECTIVE_NORMALIZATION`
+- [ ] `DOMINANCE_TOLERANCE`
+- [ ] `DUPLICATE_DISTANCE_THRESHOLD`
 - [ ] `FRONTIER_RECOMMENDATION_POLICY`
 - [ ] `LANE_BUDGET`
 - [ ] `TOTAL_BUDGET`
@@ -407,6 +460,8 @@ Each lane must record:
 - [ ] `result_source`
 - [ ] `termination_reason`
 - [ ] `success`
+- [ ] `provisional_member_ids`
+- [ ] `certified_member_ids`
 - [ ] `final_certified`
 
 ## Archive member contract
@@ -416,6 +471,7 @@ Each archive member must record:
 - [ ] `member_id`
 - [ ] `lane_id`
 - [ ] `campaign_id`
+- [ ] `archive_state`
 - [ ] `dominance_signature`
 - [ ] `objective_metrics`
 - [ ] `constraint_metrics`
@@ -432,7 +488,9 @@ Required objective metrics:
 - [ ] final nested volume
 - [ ] final QA error
 - [ ] final Boozer residual
-- [ ] final engineering metrics:
+
+Required constraint metrics:
+
 - [ ] curve length
 - [ ] coil-coil spacing
 - [ ] coil-surface spacing
@@ -458,7 +516,7 @@ New campaign CLI:
 python examples/single_stage_optimization/run_single_stage_frontier_campaign.py \
   --stage2-path ... \
   --frontier-version v4 \
-  --frontier-engine reference_guided \
+  --frontier-engine multilane_local \
   --frontier-reference-mode reference_points \
   --frontier-num-lanes 8 \
   --frontier-recommendation-policy balanced
@@ -479,10 +537,14 @@ Required flags:
 
 Optional engine-specific flags:
 
+- [ ] `--frontier-reference-points-file`
+- [ ] `--frontier-epsilon-spec-file`
+
+Deferred engine-specific flags:
+
 - [ ] `--frontier-population-size`
 - [ ] `--frontier-mutation-scale`
 - [ ] `--frontier-crossover-rate`
-- [ ] `--frontier-reference-points-file`
 
 ## Implementation Plan
 
@@ -493,6 +555,8 @@ Deliverables:
 - [ ] freeze `v4` JSON schemas
 - [ ] freeze campaign CLI names
 - [ ] freeze archive membership rules
+- [ ] freeze Pareto objective vector and normalization policy
+- [ ] freeze archive state semantics
 - [ ] freeze recommendation policy inputs
 
 Files:
@@ -554,7 +618,7 @@ Responsibilities:
 - [ ] consume one lane contract
 - [ ] run one smooth constrained search
 - [ ] checkpoint lane state incrementally
-- [ ] publish certified candidates to the archive manager
+- [ ] publish provisional and certified candidates to the archive manager
 
 Files:
 
@@ -566,18 +630,18 @@ Acceptance gate:
 - [ ] one-lane frontier run can publish a certified member to a mock archive
 - [ ] interrupted run writes salvageable lane summary
 
-## Phase 4. Reference-guided engine
+## Phase 4. Multilane local frontier campaign
 
 Implement the first real `v4` engine:
 
-- [ ] reference-guided multi-lane campaign executor
-- [ ] preference direction sampling
+- [ ] multi-lane local campaign executor
+- [ ] reference-point / scalarization / epsilon schedule generation
 - [ ] lane scheduling and budget allocation
 - [ ] archive update loop
 
 Files:
 
-- [ ] `banana_opt/frontier_engine_reference_guided.py`
+- [ ] `banana_opt/frontier_engine_multilane_local.py`
 - [ ] `run_single_stage_frontier_campaign.py`
 
 Acceptance gate:
@@ -585,6 +649,14 @@ Acceptance gate:
 - [ ] campaign runs multiple lanes from one seed
 - [ ] final archive contains more than one member on synthetic or reduced fixtures
 - [ ] campaign survives one failed lane without losing summary output
+
+## Phase 4b. Deferred evolutionary engine
+
+Implement only after the archive contracts, lane contracts, and reporting seams are stable:
+
+- [ ] reference-guided evolutionary frontier engine
+- [ ] population-to-archive adapter
+- [ ] evolutionary-specific progress reporting
 
 ## Phase 5. Recommendation and reporting
 
@@ -720,6 +792,7 @@ Mitigation:
 For the first `v4` landing:
 
 - full Bayesian frontier engine
+- reference-guided evolutionary frontier engine
 - replacing `target` as the production default
 - automatic Stage 2 frontier search
 - global Pareto search across Stage 2 and single-stage jointly
@@ -745,7 +818,7 @@ The first implementable `v4` slice should be:
 
 1. [ ] archive core
 2. [ ] smooth frontier scalarization helpers
-3. [ ] reference-guided multi-lane campaign runner
+3. [ ] multi-lane local frontier campaign runner
 4. [ ] recommendation policy
 5. [ ] partial-artifact salvage and resume
 
