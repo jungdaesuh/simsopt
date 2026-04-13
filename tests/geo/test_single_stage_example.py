@@ -2422,7 +2422,7 @@ class HardwareConstraintTests(unittest.TestCase):
         self.assertAlmostEqual(evaluation["total"], 2.09)
         np.testing.assert_allclose(evaluation["grad"], [1.024, -2.012])
         self.assertEqual(module.run_dict["invalid_state_rejects_total"], 0)
-        self.assertEqual(module.run_dict["frontier_trust_rejects"], 0)
+        self.assertEqual(module.run_dict["frontier_trust_rejects"], 1)
         self.assertTrue(module.run_dict["topology_gate_status"]["success"])
 
     def test_build_scaled_outer_problem_scales_coordinates_gradients_and_callback(self):

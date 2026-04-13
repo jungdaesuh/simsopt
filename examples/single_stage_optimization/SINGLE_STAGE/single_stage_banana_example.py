@@ -3980,6 +3980,9 @@ def evaluate_search_step(x):
         frontier_trust_status = evaluate_frontier_trust_status(objective_eval)
         run_dict["frontier_trust_status"] = frontier_trust_status
         if frontier_trust_status["enabled"] and not frontier_trust_status["ok"]:
+            trust_penalty = objective_eval.get("frontier_trust_penalty", 0.0)
+            excess_ratio = objective_eval.get("frontier_boozer_trust_excess_ratio", 0.0)
+            run_dict["frontier_trust_rejects"] += 1
             print("/!\\ /!\\ Frontier Boozer trust penalty active /!\\ /!\\")
             print(
                 "Boozer residual "
@@ -3988,8 +3991,8 @@ def evaluate_search_step(x):
             )
             print(
                 "Frontier trust penalty = "
-                f"{objective_eval.get('frontier_trust_penalty', 0.0):.6e} "
-                f"(excess_ratio={objective_eval.get('frontier_boozer_trust_excess_ratio'):.6e})"
+                f"{trust_penalty:.6e} "
+                f"(excess_ratio={excess_ratio:.6e})"
             )
 
         if success:
