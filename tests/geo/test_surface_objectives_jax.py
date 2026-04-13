@@ -295,7 +295,7 @@ def test_traceable_runtime_hostify_tree_explicitly_materializes_jax_array_leaves
 def test_build_traceable_objective_state_hostifies_runtime_constants(monkeypatch):
     monkeypatch.setattr(
         surfaceobjectives_jax_module,
-        "_ensure_solved",
+        "_ensure_solved_value_state",
         lambda _booz: None,
     )
     monkeypatch.setattr(
@@ -318,12 +318,13 @@ def test_build_traceable_objective_state_hostifies_runtime_constants(monkeypatch
         quadpoints_theta = np.asarray([0.0, 0.5], dtype=np.float64)
 
         def get_dofs(self):
-            return np.asarray([1.0, 0.1], dtype=np.float64)
+            raise AssertionError("traceable runtime build must use solved runtime state")
 
     class _FakeBooz:
         boozer_type = "ls"
         surface = _FakeSurface()
         res = {
+            "success": True,
             "iota": jnp.asarray(0.23, dtype=jnp.float64),
             "G": jnp.asarray(1.7, dtype=jnp.float64),
             "PLU": (
@@ -331,6 +332,7 @@ def test_build_traceable_objective_state_hostifies_runtime_constants(monkeypatch
                 jnp.eye(2, dtype=jnp.float64),
                 jnp.asarray([0, 1], dtype=jnp.int32),
             ),
+            "vjp": object(),
         }
         quadpoints_phi = np.asarray([0.0, 0.5], dtype=np.float64)
         quadpoints_theta = np.asarray([0.0, 0.5], dtype=np.float64)
@@ -345,6 +347,7 @@ def test_build_traceable_objective_state_hostifies_runtime_constants(monkeypatch
         targetlabel = 0.0
         label_type = "iota"
         phi_idx = 0
+        need_to_run_code = False
 
         def _resolve_optimizer_method(self):
             return "lbfgs-ondevice"
@@ -356,6 +359,14 @@ def test_build_traceable_objective_state_hostifies_runtime_constants(monkeypatch
                     jnp.asarray([iota], dtype=jnp.float64),
                     jnp.asarray([G], dtype=jnp.float64),
                 ]
+            )
+
+        def get_solved_runtime_state(self):
+            return types.SimpleNamespace(
+                sdofs=jnp.asarray([1.0, 0.1], dtype=jnp.float64),
+                iota=jnp.asarray(0.23, dtype=jnp.float64),
+                G=jnp.asarray(1.7, dtype=jnp.float64),
+                weight_inv_modB=False,
             )
 
     class _FakeBS:
@@ -400,6 +411,84 @@ def test_build_traceable_objective_state_hostifies_runtime_constants(monkeypatch
     assert isinstance(state["baseline_x"], np.ndarray)
     assert isinstance(state["baseline_plu"][0], np.ndarray)
     assert isinstance(state["baseline_coil_dofs"], np.ndarray)
+
+
+def test_iotas_jax_value_path_reads_solved_runtime_state(monkeypatch):
+    fake_booz = types.SimpleNamespace(
+        res={
+            "success": True,
+        },
+        need_to_run_code=False,
+        get_solved_runtime_state=lambda: types.SimpleNamespace(
+            sdofs=jnp.asarray([0.0, 1.0], dtype=jnp.float64),
+            iota=jnp.asarray(0.37, dtype=jnp.float64),
+            G=jnp.asarray(1.2, dtype=jnp.float64),
+            weight_inv_modB=True,
+        ),
+    )
+
+    obj = object.__new__(surfaceobjectives_jax_module.IotasJAX)
+    obj.boozer_surface = fake_booz
+    obj.biotsavart = None
+    obj._J = None
+    obj._dJ = None
+    obj.compute(compute_gradient=False)
+
+    np.testing.assert_allclose(np.asarray(obj._J), 0.37)
+
+
+def test_iotas_jax_gradient_path_reads_adjoint_runtime_state(monkeypatch):
+    monkeypatch.setattr(
+        surfaceobjectives_jax_module,
+        "_solve_boozer_adjoint",
+        lambda adjoint_state, rhs: (
+            np.testing.assert_allclose(np.asarray(rhs), np.asarray([0.0, 1.0])),
+            np.testing.assert_allclose(
+                np.asarray(adjoint_state.plu[1]),
+                np.eye(2, dtype=np.float64),
+            ),
+            jnp.asarray([2.0, -3.0], dtype=jnp.float64),
+        )[-1],
+    )
+    monkeypatch.setattr(
+        surfaceobjectives_jax_module,
+        "_adjoint_coil_derivative",
+        lambda stream_group_vjps, adjoint, biotsavart: (
+            np.testing.assert_allclose(np.asarray(adjoint), np.asarray([2.0, -3.0])),
+            list(stream_group_vjps(adjoint)),
+            surfaceobjectives_jax_module.Derivative({}),
+        )[-1],
+    )
+
+    fake_booz = types.SimpleNamespace(
+        res={"success": True},
+        need_to_run_code=False,
+        get_solved_runtime_state=lambda: types.SimpleNamespace(
+            sdofs=jnp.asarray([0.0, 1.0], dtype=jnp.float64),
+            iota=jnp.asarray(0.37, dtype=jnp.float64),
+            G=None,
+            weight_inv_modB=True,
+        ),
+        get_adjoint_runtime_state=lambda: types.SimpleNamespace(
+            solved_state=None,
+            plu=(
+                jnp.eye(2, dtype=jnp.float64),
+                jnp.eye(2, dtype=jnp.float64),
+                jnp.asarray([0, 1], dtype=jnp.int32),
+            ),
+            stream_group_vjps=lambda _adj: iter([("group-cotangent", (0,))]),
+        ),
+        biotsavart=None,
+    )
+
+    obj = object.__new__(surfaceobjectives_jax_module.IotasJAX)
+    obj.boozer_surface = fake_booz
+    obj.biotsavart = None
+    obj._J = None
+    obj._dJ = None
+    obj.compute(compute_gradient=True)
+
+    np.testing.assert_allclose(np.asarray(obj._J), 0.37)
 
 
 def test_get_cached_traceable_runtime_entry_reuses_bundle_for_same_solver_generation(

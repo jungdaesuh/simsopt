@@ -18,8 +18,10 @@ Architecture (implicit differentiation):
   where adj solves ``(PLU)^T adj = ∂J/∂x_inner`` and g is the
   stationarity condition of the inner solve.
 
-  The PLU factorization and VJP hooks come from ``BoozerSurfaceJAX``'s
-  ``run_code()`` result dict (Milestone 4).
+  Wrapper consumers now obtain solved/adjoint state through explicit
+  runtime-summary accessors on ``BoozerSurfaceJAX``. The mutable
+  ``run_code()`` result dict remains the compatibility lane owned by
+  ``BoozerSurfaceJAX`` itself.
 """
 
 import hashlib
@@ -91,8 +93,8 @@ __all__ = [
 ]
 
 _MISSING_STREAMING_GROUP_VJP_ERROR = (
-    "BoozerSurfaceJAX objective wrappers require res['vjp_groups']; "
-    "the legacy full-pytree adjoint fallback is no longer supported."
+    "BoozerSurfaceJAX objective wrappers require a streaming grouped-adjoint "
+    "callback; the legacy full-pytree adjoint fallback is no longer supported."
 )
 _LEGACY_PROJECTION_HELPER_ERROR = (
     "surfaceobjectives_jax._coil_cotangents_to_derivative() is no longer "
@@ -561,8 +563,8 @@ def _canonicalize_traceable_exact_quadrature(booz_jax):
     return (_as_jax_float64(quadpoints_phi), _as_jax_float64(quadpoints_theta), mask_indices)
 
 
-def _solve_boozer_adjoint(booz_surf, rhs):
-    """Solve the transposed PLU adjoint system for a BoozerSurfaceJAX result.
+def _solve_boozer_adjoint(adjoint_state, rhs):
+    """Solve the transposed PLU adjoint system for one adjoint runtime state.
 
     The stored PLU factors come from dense LS/exact linearizations of the inner
     Boozer solve. Those systems are typically well posed but can still be
@@ -570,7 +572,7 @@ def _solve_boozer_adjoint(booz_surf, rhs):
     always request iterative refinement explicitly. ``rhs`` may be a vector or
     a matrix of right-hand sides.
     """
-    P, L, U = booz_surf.res["PLU"]
+    P, L, U = adjoint_state.plu
     return _solve_plu_transpose_with_refinement(P, L, U, rhs)
 
 
@@ -584,11 +586,11 @@ def _solve_plu_with_refinement(P, L, U, rhs):
     return plu_solve_jax(P, L, U, rhs, iterative_refinement=True)
 
 
-def _iter_adjoint_coil_cotangents(vjp_groups_fn, booz_surf, iota, G, adjoint):
+def _iter_adjoint_coil_cotangents(stream_group_vjps, adjoint):
     """Yield grouped coil cotangents from the streaming adjoint callback."""
-    if vjp_groups_fn is None:
+    if stream_group_vjps is None:
         raise RuntimeError(_MISSING_STREAMING_GROUP_VJP_ERROR)
-    yield from vjp_groups_fn(adjoint, booz_surf, iota, G)
+    yield from stream_group_vjps(adjoint)
 
 
 def _coil_cotangents_to_derivative(coils, d_coil_arrays, coil_indices):
@@ -597,7 +599,7 @@ def _coil_cotangents_to_derivative(coils, d_coil_arrays, coil_indices):
     raise RuntimeError(_LEGACY_PROJECTION_HELPER_ERROR)
 
 
-def _adjoint_coil_derivative(vjp_groups_fn, booz_surf, iota, G, adjoint, biotsavart):
+def _adjoint_coil_derivative(stream_group_vjps, adjoint, biotsavart):
     """Project grouped adjoint cotangents to a coil ``Derivative``.
 
     Uses ``BiotSavartJAX.coil_cotangents_to_derivative()`` for
@@ -607,7 +609,7 @@ def _adjoint_coil_derivative(vjp_groups_fn, booz_surf, iota, G, adjoint, biotsav
     """
     total_derivative = Derivative({})
     for d_coil_array, coil_group_indices in _iter_adjoint_coil_cotangents(
-        vjp_groups_fn, booz_surf, iota, G, adjoint
+        stream_group_vjps, adjoint
     ):
         total_derivative += biotsavart.coil_cotangents_to_derivative(
             [d_coil_array],
@@ -693,6 +695,12 @@ def _traceable_contract_leaf_signature(leaf):
     cache key.
     """
     if isinstance(leaf, jax.Array):
+        if leaf.ndim == 0 or leaf.size == 1:
+            return (
+                "device_array_scalar",
+                str(leaf.dtype),
+                np.asarray(jax.device_get(leaf)).reshape(()).item(),
+            )
         return (
             "device_array_meta",
             str(leaf.dtype),
@@ -851,7 +859,13 @@ def _log_boozer_solve_state(booz_surf):
 
 
 def _ensure_solved(booz_surf):
-    """Re-run the Boozer inner solve if the surface is dirty."""
+    """Ensure an adjoint-capable solved state exists for legacy callers."""
+    _resolved_boozer_adjoint_runtime_state(booz_surf)
+    return None
+
+
+def _ensure_solved_value_state(booz_surf):
+    """Ensure a successful solved state exists without requiring adjoint artifacts."""
     if booz_surf.need_to_run_code:
         if booz_surf.res is None:
             raise RuntimeError(
@@ -861,18 +875,83 @@ def _ensure_solved(booz_surf):
             )
         booz_surf.run_code(booz_surf.res["iota"], G=booz_surf.res["G"])
     _log_boozer_solve_state(booz_surf)
+    if booz_surf.res is None or not booz_surf.res.get("success"):
+        raise RuntimeError(
+            "BoozerSurfaceJAX has not been solved yet or the last solve failed "
+            "to produce a valid solved state."
+        )
+
+
+def _resolved_boozer_solved_runtime_state(booz_surf):
+    """Return the solved-state runtime summary for value-path consumers."""
+    _ensure_solved_value_state(booz_surf)
+    if hasattr(booz_surf, "get_solved_runtime_state"):
+        return booz_surf.get_solved_runtime_state()
+
+    get_cached_surface_dofs = getattr(booz_surf, "_get_cached_surface_dofs", None)
+    if callable(get_cached_surface_dofs):
+        sdofs = get_cached_surface_dofs()
+    else:
+        sdofs = booz_surf._get_surface_dofs()
+
+    class _FallbackSolvedRuntimeState:
+        def __init__(self, sdofs, iota, G, weight_inv_modB):
+            self.sdofs = sdofs
+            self.iota = iota
+            self.G = G
+            self.weight_inv_modB = weight_inv_modB
+
+    G = booz_surf.res["G"]
+    solved_G = None if G is None else _as_jax_float64(G)
+    return _FallbackSolvedRuntimeState(
+        sdofs=_as_jax_float64(sdofs),
+        iota=_as_jax_float64(booz_surf.res["iota"]),
+        G=solved_G,
+        weight_inv_modB=bool(
+            booz_surf.res.get("weight_inv_modB", booz_surf.options["weight_inv_modB"])
+        ),
+    )
+
+
+def _resolved_boozer_adjoint_runtime_state(booz_surf):
+    """Return the adjoint-state runtime summary for gradient-path consumers."""
+    _ensure_solved_value_state(booz_surf)
+    if hasattr(booz_surf, "get_adjoint_runtime_state"):
+        return booz_surf.get_adjoint_runtime_state()
+
+    solved_state = _resolved_boozer_solved_runtime_state(booz_surf)
     if (
-        booz_surf.res is None
-        or not booz_surf.res.get("success")
-        or "PLU" not in booz_surf.res
+        "PLU" not in booz_surf.res
         or booz_surf.res["PLU"] is None
-        or "vjp" not in booz_surf.res
-        or booz_surf.res["vjp"] is None
+        or "vjp_groups" not in booz_surf.res
+        or booz_surf.res["vjp_groups"] is None
     ):
         raise RuntimeError(
             "BoozerSurfaceJAX has not been solved yet or the last solve failed "
             "to produce valid adjoint state."
         )
+
+    vjp_groups_fn = booz_surf.res["vjp_groups"]
+
+    class _FallbackAdjointRuntimeState:
+        def __init__(self, solved_state, plu, stream_group_vjps):
+            self.solved_state = solved_state
+            self.plu = plu
+            self.stream_group_vjps = stream_group_vjps
+
+    def stream_group_vjps(adjoint):
+        yield from vjp_groups_fn(
+            adjoint,
+            booz_surf,
+            solved_state.iota,
+            solved_state.G,
+        )
+
+    return _FallbackAdjointRuntimeState(
+        solved_state=solved_state,
+        plu=booz_surf.res["PLU"],
+        stream_group_vjps=stream_group_vjps,
+    )
 
 
 def _qs_ratio_pure(
@@ -1081,12 +1160,11 @@ class BoozerResidualJAX(Optimizable):
 
     def compute(self, *, compute_gradient=True):
         booz_surf = self.boozer_surface
-        _ensure_solved(booz_surf)
-
-        sdofs = booz_surf._get_surface_dofs()
-        iota = booz_surf.res["iota"]
-        G = booz_surf.res["G"]
-        weight_inv_modB = booz_surf.res.get("weight_inv_modB", True)
+        solved_state = _resolved_boozer_solved_runtime_state(booz_surf)
+        sdofs = solved_state.sdofs
+        iota = solved_state.iota
+        G = solved_state.G
+        weight_inv_modB = solved_state.weight_inv_modB
         x_inner, optimize_G = self._inner_objective_state(iota, G, sdofs=sdofs)
         current_coil_dofs, coil_set_spec = _current_coil_dofs_and_spec(self.biotsavart)
         direct_objective_args = (x_inner, optimize_G, weight_inv_modB)
@@ -1099,22 +1177,18 @@ class BoozerResidualJAX(Optimizable):
             )
             return
 
+        adjoint_state = _resolved_boozer_adjoint_runtime_state(booz_surf)
         self._J, dJ_by_dcoils = _value_and_direct_coil_derivative(
             self.biotsavart,
             self._direct_objective_value_and_grad,
             current_coil_dofs,
             *direct_objective_args,
         )
-        vjp_groups_fn = booz_surf.res.get("vjp_groups")
-
         dJ_ds = self._compute_dJ_ds(coil_set_spec, iota, G, weight_inv_modB)
-        adj = _solve_boozer_adjoint(booz_surf, dJ_ds)
+        adj = _solve_boozer_adjoint(adjoint_state, dJ_ds)
 
         adj_derivative = _adjoint_coil_derivative(
-            vjp_groups_fn,
-            booz_surf,
-            iota,
-            G,
+            adjoint_state.stream_group_vjps,
             adj,
             self.biotsavart,
         )
@@ -1194,30 +1268,26 @@ class IotasJAX(Optimizable):
 
     def compute(self, *, compute_gradient=True):
         booz_surf = self.boozer_surface
-        _ensure_solved(booz_surf)
-
-        iota = booz_surf.res["iota"]
-        G = booz_surf.res["G"]
+        solved_state = _resolved_boozer_solved_runtime_state(booz_surf)
+        iota = solved_state.iota
+        G = solved_state.G
         self._J = iota
         if not compute_gradient:
             return
-        vjp_groups_fn = booz_surf.res.get("vjp_groups")
+        adjoint_state = _resolved_boozer_adjoint_runtime_state(booz_surf)
 
         # dJ/dx_inner for iota: unit vector at the iota position
-        L = booz_surf.res["PLU"][1]
+        L = adjoint_state.plu[1]
         n = L.shape[0]
         if G is not None:
             dJ_ds = _explicit_cotangent_basis(n, n - 2, dtype=L.dtype)
         else:
             dJ_ds = _explicit_cotangent_basis(n, n - 1, dtype=L.dtype)
 
-        adj = _solve_boozer_adjoint(booz_surf, dJ_ds)
+        adj = _solve_boozer_adjoint(adjoint_state, dJ_ds)
 
         adj_derivative = _adjoint_coil_derivative(
-            vjp_groups_fn,
-            booz_surf,
-            iota,
-            G,
+            adjoint_state.stream_group_vjps,
             adj,
             self.biotsavart,
         )
@@ -1314,44 +1384,45 @@ class NonQuasiSymmetricRatioJAX(Optimizable):
             _strict_scalar_grad(J_of_coils, current_coil_dofs),
         )
 
-    def _compute_dJ_ds(self, coil_set_spec, sdofs):
+    def _compute_dJ_ds(self, coil_set_spec, sdofs, decision_size):
         qs_kwargs = self._qs_objective_kwargs()
 
         def J_of_sdofs(surface_dofs):
             return _qs_ratio_pure(surface_dofs, coil_set_spec, **qs_kwargs)
 
         dJ_ds_surface = _strict_scalar_grad(J_of_sdofs, sdofs)
-        n = self.boozer_surface.res["PLU"][1].shape[0]
         return jnp.concatenate(
             (
                 dJ_ds_surface,
-                _zeros(n - dJ_ds_surface.size, dtype=dJ_ds_surface.dtype),
+                _zeros(
+                    decision_size - dJ_ds_surface.size,
+                    dtype=dJ_ds_surface.dtype,
+                ),
             )
         )
 
     def compute(self, *, compute_gradient=True):
         booz_surf = self.boozer_surface
-        _ensure_solved(booz_surf)
-
-        iota = booz_surf.res["iota"]
-        G = booz_surf.res["G"]
-        vjp_groups_fn = booz_surf.res.get("vjp_groups")
-
-        sdofs = booz_surf._get_surface_dofs()
+        solved_state = _resolved_boozer_solved_runtime_state(booz_surf)
+        iota = solved_state.iota
+        G = solved_state.G
+        sdofs = solved_state.sdofs
         current_coil_dofs, coil_set_spec = _current_coil_dofs_and_spec(self.biotsavart)
         self._J = self._compute_value(sdofs, coil_set_spec)
         if not compute_gradient:
             return
+        adjoint_state = _resolved_boozer_adjoint_runtime_state(booz_surf)
         dJ_by_dcoils = self._direct_coil_derivative(current_coil_dofs, sdofs)
-        dJ_ds = self._compute_dJ_ds(coil_set_spec, sdofs)
+        dJ_ds = self._compute_dJ_ds(
+            coil_set_spec,
+            sdofs,
+            adjoint_state.plu[1].shape[0],
+        )
 
-        adj = _solve_boozer_adjoint(booz_surf, dJ_ds)
+        adj = _solve_boozer_adjoint(adjoint_state, dJ_ds)
 
         adj_derivative = _adjoint_coil_derivative(
-            vjp_groups_fn,
-            booz_surf,
-            iota,
-            G,
+            adjoint_state.stream_group_vjps,
             adj,
             self.biotsavart,
         )
@@ -1385,13 +1456,12 @@ def compute_standard_surface_objective_gradients(
             "NonQuasiSymmetricRatioJAX to share one BiotSavartJAX."
         )
 
-    _ensure_solved(booz_surf)
-
-    sdofs = booz_surf._get_surface_dofs()
-    iota_value = booz_surf.res["iota"]
-    G = booz_surf.res["G"]
-    weight_inv_modB = booz_surf.res.get("weight_inv_modB", True)
-    vjp_groups_fn = booz_surf.res.get("vjp_groups")
+    solved_state = _resolved_boozer_solved_runtime_state(booz_surf)
+    sdofs = solved_state.sdofs
+    iota_value = solved_state.iota
+    G = solved_state.G
+    weight_inv_modB = solved_state.weight_inv_modB
+    adjoint_state = _resolved_boozer_adjoint_runtime_state(booz_surf)
     current_coil_dofs, coil_set_spec = _current_coil_dofs_and_spec(
         boozer_residual.biotsavart
     )
@@ -1415,28 +1485,29 @@ def compute_standard_surface_objective_gradients(
         weight_inv_modB,
     )
 
-    lhs_dtype = booz_surf.res["PLU"][1].dtype
-    n = booz_surf.res["PLU"][1].shape[0]
+    lhs_dtype = adjoint_state.plu[1].dtype
+    n = adjoint_state.plu[1].shape[0]
     iota_rhs_index = n - 2 if G is not None else n - 1
     iota_rhs = _explicit_cotangent_basis(n, iota_rhs_index, dtype=lhs_dtype)
 
     non_qs_value = non_qs_ratio._compute_value(sdofs, coil_set_spec)
     non_qs_direct = non_qs_ratio._direct_coil_derivative(current_coil_dofs, sdofs)
-    non_qs_rhs = non_qs_ratio._compute_dJ_ds(coil_set_spec, sdofs)
+    non_qs_rhs = non_qs_ratio._compute_dJ_ds(
+        coil_set_spec,
+        sdofs,
+        n,
+    )
 
     def _project_adjoint(adjoint, biotsavart):
         return _adjoint_coil_derivative(
-            vjp_groups_fn,
-            booz_surf,
-            iota_value,
-            G,
+            adjoint_state.stream_group_vjps,
             adjoint,
             biotsavart,
         )
 
     rhs_batch = jnp.stack((residual_rhs, iota_rhs, non_qs_rhs), axis=0)
     adjoint_batch = jax.vmap(
-        lambda rhs: _solve_boozer_adjoint(booz_surf, rhs),
+        lambda rhs: _solve_boozer_adjoint(adjoint_state, rhs),
         in_axes=0,
         out_axes=0,
     )(rhs_batch)
@@ -1887,8 +1958,6 @@ def _build_traceable_objective_state(
     closures stay pure in the hot path without capturing device-backed arrays
     that would trip strict transfer-guard lowering.
     """
-    _ensure_solved(booz_jax)
-
     if booz_jax.boozer_type == "ls":
         objective_method = booz_jax._resolve_optimizer_method()
         if objective_method not in {"bfgs-ondevice", "lbfgs-ondevice", "lm-ondevice"}:
@@ -1896,11 +1965,10 @@ def _build_traceable_objective_state(
                 "make_traceable_objective() requires optimizer_backend='ondevice'."
             )
 
-    warmstart_sdofs = _as_jax_float64(booz_jax.surface.get_dofs())
-    warmstart_iota = _as_jax_float64(booz_jax.res["iota"])
-    warmstart_G = booz_jax.res["G"]
-    if warmstart_G is not None:
-        warmstart_G = _as_jax_float64(warmstart_G)
+    solved_state = _resolved_boozer_solved_runtime_state(booz_jax)
+    warmstart_sdofs = solved_state.sdofs
+    warmstart_iota = solved_state.iota
+    warmstart_G = solved_state.G
 
     baseline_coil_dofs = _as_jax_float64(bs_jax.x.copy())
     coil_dof_extraction_spec = _traceable_runtime_hostify_tree(
@@ -1929,10 +1997,7 @@ def _build_traceable_objective_state(
         "scatter_indices": booz_jax.scatter_indices,
         "surface_kind": booz_jax._surface_geometry_kind,
         "optimize_G": optimize_G,
-        "weight_inv_modB": booz_jax.res.get(
-            "weight_inv_modB",
-            booz_jax.options["weight_inv_modB"],
-        ),
+        "weight_inv_modB": solved_state.weight_inv_modB,
         "constraint_weight": booz_jax.constraint_weight,
         "targetlabel": booz_jax.targetlabel,
         "label_type": booz_jax.label_type,

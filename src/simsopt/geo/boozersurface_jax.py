@@ -159,6 +159,31 @@ class _BoozerSurfaceRuntimeState:
     surface_kind: str = field(metadata={"static": True})
 
 
+@jax.tree_util.register_dataclass
+@dataclass(frozen=True)
+class _BoozerSolvedRuntimeState:
+    """Immutable solved-state summary for pure/runtime Boozer consumers.
+
+    This deliberately carries only the solved state that pure outer-objective
+    code needs as its source of truth. Legacy mutable solve artifacts such as
+    ``PLU`` or callback hooks remain in ``self.res`` on the compatibility lane.
+    """
+
+    sdofs: jax.Array
+    iota: jax.Array
+    G: jax.Array | None
+    weight_inv_modB: bool = field(metadata={"static": True})
+
+
+@dataclass(frozen=True)
+class _BoozerAdjointRuntimeState:
+    """Immutable adjoint-state summary for wrapper gradient consumers."""
+
+    solved_state: _BoozerSolvedRuntimeState
+    plu: tuple[jax.Array, jax.Array, jax.Array]
+    stream_group_vjps: callable
+
+
 def _surface_geometry_kind(surface) -> str:
     surface_type_name = type(surface).__name__
     if surface_type_name == "SurfaceRZFourier":
@@ -1556,8 +1581,6 @@ class BoozerSurfaceJAX(Optimizable):
         self._traceable_exact_residual_cache = {}
         self._reference_penalty_objective_cache = {}
         self._reference_penalty_residual_cache = {}
-        self._solver_progress_callback_cache = {}
-        self._newton_progress_callback_cache = {}
 
         # Coil data (extracted once, updated via _refresh_coil_data)
         self._refresh_coil_data()
@@ -1571,6 +1594,55 @@ class BoozerSurfaceJAX(Optimizable):
     def surface_runtime_state(self):
         """Immutable surface metadata snapshot used by the JAX solver lanes."""
         return self._surface_runtime_state
+
+    def get_solved_runtime_state(self):
+        """Return the last successful solved-state summary without host rereads."""
+        if self.need_to_run_code:
+            raise RuntimeError(
+                "BoozerSurfaceJAX solve state is stale. Re-run "
+                "boozer_surface.run_code(...) before requesting a runtime summary."
+            )
+        if self.res is None or not self.res.get("success"):
+            raise RuntimeError(
+                "BoozerSurfaceJAX has no successful solve state. "
+                "Call boozer_surface.run_code(...) before requesting a solved "
+                "runtime summary."
+            )
+        G = self.res["G"]
+        solved_G = None if G is None else _as_jax_float64(G)
+        return _BoozerSolvedRuntimeState(
+            sdofs=self._get_cached_surface_dofs(),
+            iota=_as_jax_float64(self.res["iota"]),
+            G=solved_G,
+            weight_inv_modB=bool(
+                self.res.get("weight_inv_modB", self.options["weight_inv_modB"])
+            ),
+        )
+
+    def get_adjoint_runtime_state(self):
+        """Return the last successful adjoint-state summary for wrapper gradients."""
+        solved_state = self.get_solved_runtime_state()
+        if (
+            "PLU" not in self.res
+            or self.res["PLU"] is None
+            or "vjp_groups" not in self.res
+            or self.res["vjp_groups"] is None
+        ):
+            raise RuntimeError(
+                "BoozerSurfaceJAX has no valid adjoint state. "
+                "Call boozer_surface.run_code(...) before requesting adjoints."
+            )
+
+        vjp_groups = self.res["vjp_groups"]
+
+        def stream_group_vjps(adjoint):
+            yield from vjp_groups(adjoint, self, solved_state.iota, solved_state.G)
+
+        return _BoozerAdjointRuntimeState(
+            solved_state=solved_state,
+            plu=self.res["PLU"],
+            stream_group_vjps=stream_group_vjps,
+        )
 
     @property
     def _coil_index_lists(self):
@@ -1635,10 +1707,6 @@ class BoozerSurfaceJAX(Optimizable):
         stage_callback = self.options.get("stage_callback")
         if stage_callback is None:
             return None
-        cache_key = (str(method), id(stage_callback))
-        cached_callback = self._solver_progress_callback_cache.get(cache_key)
-        if cached_callback is not None:
-            return cached_callback
 
         def emit_progress(iteration: int, fun_value: float, grad_inf: float) -> None:
             if iteration <= 5 or iteration % 25 == 0:
@@ -1650,17 +1718,12 @@ class BoozerSurfaceJAX(Optimizable):
                     method=method,
                 )
 
-        self._solver_progress_callback_cache[cache_key] = emit_progress
         return emit_progress
 
     def _make_newton_progress_callback(self):
         stage_callback = self.options.get("stage_callback")
         if stage_callback is None:
             return None
-        cache_key = id(stage_callback)
-        cached_callback = self._newton_progress_callback_cache.get(cache_key)
-        if cached_callback is not None:
-            return cached_callback
 
         def emit_progress(iteration: int, fun_value: float, grad_norm: float) -> None:
             stage_callback(
@@ -1670,7 +1733,6 @@ class BoozerSurfaceJAX(Optimizable):
                 grad_norm=float(grad_norm),
             )
 
-        self._newton_progress_callback_cache[cache_key] = emit_progress
         return emit_progress
 
     def _resolve_newton_progress_callback(self, method: str):

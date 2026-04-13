@@ -5500,14 +5500,10 @@ class TestBoozerResidualAdjointFD:
             weight_inv_modB,
         )
         dJ_ds = jr._compute_dJ_ds(coil_set_spec, iota, G, weight_inv_modB)
-        adj = _solve_boozer_adjoint(booz_surf, dJ_ds)
-
-        vjp_groups_fn = booz_surf.res.get("vjp_groups")
+        adjoint_state = booz_surf.get_adjoint_runtime_state()
+        adj = _solve_boozer_adjoint(adjoint_state, dJ_ds)
         adj_deriv = _adjoint_coil_derivative(
-            vjp_groups_fn,
-            booz_surf,
-            iota,
-            G,
+            adjoint_state.stream_group_vjps,
             adj,
             jr.biotsavart,
         )

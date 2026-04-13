@@ -4958,3 +4958,90 @@ class TestBuildBoozerSurfaceRuntimeState:
         np.testing.assert_allclose(
             np.asarray(booz.quadpoints_theta), np.asarray(rs.quadpoints_theta)
         )
+
+    def test_get_solved_runtime_state_uses_cached_dofs(self):
+        """Solved runtime summary must report cached solved DOFs, not reread the surface."""
+        s = self._make_real_surface(mpol=3, ntor=3, nfp=2)
+        coils = _make_mock_coils()
+        bs = _MockBiotSavart(coils)
+        label = _MockVolumeLabel()
+
+        booz = BoozerSurfaceJAX(
+            bs,
+            s,
+            label,
+            targetlabel=0.1,
+            constraint_weight=1.0,
+        )
+        booz.res = {
+            "success": True,
+            "iota": jnp.asarray(0.23, dtype=jnp.float64),
+            "G": jnp.asarray(1.7, dtype=jnp.float64),
+            "weight_inv_modB": False,
+        }
+        booz.need_to_run_code = False
+        booz._surface_dofs = jnp.asarray([9.0, -2.0, 3.5], dtype=jnp.float64)
+        booz.surface.get_dofs = lambda: (_ for _ in ()).throw(
+            AssertionError("live surface DOFs must not be reread")
+        )
+
+        solved_state = booz.get_solved_runtime_state()
+
+        np.testing.assert_allclose(
+            np.asarray(solved_state.sdofs),
+            np.asarray(booz._surface_dofs),
+        )
+        np.testing.assert_allclose(np.asarray(solved_state.iota), 0.23)
+        np.testing.assert_allclose(np.asarray(solved_state.G), 1.7)
+        assert solved_state.weight_inv_modB is False
+
+    def test_get_adjoint_runtime_state_wraps_plu_and_group_vjp_stream(self):
+        """Adjoint runtime summary must expose PLU plus a bound streaming callback."""
+        s = self._make_real_surface(mpol=3, ntor=3, nfp=2)
+        coils = _make_mock_coils()
+        bs = _MockBiotSavart(coils)
+        label = _MockVolumeLabel()
+
+        booz = BoozerSurfaceJAX(
+            bs,
+            s,
+            label,
+            targetlabel=0.1,
+            constraint_weight=1.0,
+        )
+        expected_plu = (
+            jnp.eye(2, dtype=jnp.float64),
+            jnp.eye(2, dtype=jnp.float64),
+            jnp.asarray([0, 1], dtype=jnp.int32),
+        )
+        recorded = {}
+
+        def fake_vjp_groups(adjoint, passed_booz, iota, G):
+            recorded["adjoint"] = np.asarray(adjoint)
+            recorded["booz"] = passed_booz
+            recorded["iota"] = np.asarray(iota)
+            recorded["G"] = np.asarray(G)
+            yield ("cotangent", (0, 1))
+
+        booz.res = {
+            "success": True,
+            "iota": jnp.asarray(0.23, dtype=jnp.float64),
+            "G": jnp.asarray(1.7, dtype=jnp.float64),
+            "weight_inv_modB": True,
+            "PLU": expected_plu,
+            "vjp_groups": fake_vjp_groups,
+        }
+        booz.need_to_run_code = False
+        booz._surface_dofs = jnp.asarray([1.0, 2.0], dtype=jnp.float64)
+
+        adjoint_state = booz.get_adjoint_runtime_state()
+        streamed = list(
+            adjoint_state.stream_group_vjps(jnp.asarray([5.0, -1.0], dtype=jnp.float64))
+        )
+
+        assert adjoint_state.plu == expected_plu
+        assert streamed == [("cotangent", (0, 1))]
+        assert recorded["booz"] is booz
+        np.testing.assert_allclose(recorded["adjoint"], np.asarray([5.0, -1.0]))
+        np.testing.assert_allclose(recorded["iota"], 0.23)
+        np.testing.assert_allclose(recorded["G"], 1.7)
