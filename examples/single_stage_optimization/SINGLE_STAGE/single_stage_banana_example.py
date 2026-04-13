@@ -54,7 +54,7 @@ from simsopt.field import (
 from simsopt.objectives import QuadraticPenalty
 from simsopt.objectives.utilities import forward_backward
 from simsopt._core.optimizable import load
-from simsopt._core.derivative import derivative_dec
+from simsopt._core.derivative import Derivative, derivative_dec
 
 from alm_utils import (
     ALMSettings,
@@ -1567,6 +1567,17 @@ class BoundedImprovementReward(Optimizable):
         prefactor = -(1.0 - np.tanh(delta) ** 2) / self.scale
         if partials:
             partial_gradient = self.metric_objective.dJ(partials=True)
+            if not callable(partial_gradient):
+                return prefactor * partial_gradient
+            if isinstance(self.metric_objective, Optimizable):
+                return prefactor * Derivative(
+                    {
+                        self.metric_objective: np.asarray(
+                            partial_gradient(self.metric_objective),
+                            dtype=float,
+                        )
+                    }
+                )
             return lambda objective_optimizable: prefactor * np.asarray(
                 partial_gradient(objective_optimizable),
                 dtype=float,

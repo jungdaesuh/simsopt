@@ -12,6 +12,8 @@ from unittest.mock import patch
 
 import numpy as np
 
+from simsopt._core.derivative import Derivative
+from simsopt._core.optimizable import Optimizable
 from simsopt.geo.surfaceobjectives import boozer_surface_residual, boozer_surface_residual_dB
 from simsopt.objectives.utilities import forward_backward
 
@@ -2900,6 +2902,29 @@ class HardwareConstraintTests(unittest.TestCase):
 
         self.assertAlmostEqual(result.J(), -np.tanh(2.0))
         np.testing.assert_allclose(result.dJ(), [-14.13016434, 7.06508217])
+
+    def test_bounded_improvement_reward_partials_wrap_callable_optimizable_gradients(self):
+        module = self.load_module()
+
+        class DummyMetricObjective(Optimizable):
+            def __init__(self):
+                super().__init__(x0=np.array([0.0, 0.0]))
+
+            def J(self):
+                return 0.12
+
+            def dJ(self, partials=False):
+                if partials:
+                    return lambda _objective: np.array([2.0, -1.0])
+                return np.array([2.0, -1.0])
+
+        metric_objective = DummyMetricObjective()
+        reward = module.BoundedImprovementReward(metric_objective, reference=0.10, scale=0.01)
+
+        partial_gradient = reward.dJ(partials=True)
+
+        self.assertIsInstance(partial_gradient, Derivative)
+        np.testing.assert_allclose(partial_gradient(metric_objective), [-14.13016497, 7.06508249])
 
     def test_build_frontier_goal_config_derives_normalized_weights_and_trust_threshold(self):
         module = self.load_module()

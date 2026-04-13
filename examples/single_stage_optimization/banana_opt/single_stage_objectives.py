@@ -213,9 +213,10 @@ def evaluate_base_objective(
         objective_J_QS_obj
         + RES_WEIGHT * objective_J_Boozer_obj
         + IOTAS_WEIGHT * Jiota
-        + VOLUME_WEIGHT * (0 if JVolume is None else JVolume)
         + LENGTH_WEIGHT * JCurveLength
     )
+    if JVolume is not None:
+        base_objective = base_objective + VOLUME_WEIGHT * JVolume
     physics_total = float(base_objective.J())
     base_grad = _objective_gradient(base_objective, objective_optimizable)
     volume_grad = (
