@@ -1545,6 +1545,13 @@ class HardwareConstraintTests(unittest.TestCase):
         self.assertFalse(module.maybe_update_best_feasible_incumbent(run_dict, "final"))
         self.assertEqual(run_dict["best_feasible_metric"], 4.0)
 
+        run_dict["search_eval"]["frontier_trust_ok"] = True
+        run_dict["search_eval"]["finite_eval_ok"] = False
+        run_dict["search_eval"]["frontier_rank_total"] = 2.0
+        run_dict["J"] = 2.0
+        self.assertFalse(module.maybe_update_best_feasible_incumbent(run_dict, "final"))
+        self.assertEqual(run_dict["best_feasible_metric"], 4.0)
+
     def test_write_preserved_timeout_artifacts_uses_kind_specific_filenames(self):
         module = load_single_stage_example_module()
 
@@ -2535,6 +2542,72 @@ class HardwareConstraintTests(unittest.TestCase):
             )
         )
 
+    def test_resolve_single_stage_seed_regime_auto_routes_by_incumbent_state(self):
+        module = self.load_module()
+        good_run_dict = {
+            "accepted_hardware_status": {"success": True},
+            "surface_status": {"success": True},
+            "intersecting": False,
+            "search_eval": {"total": 1.0},
+        }
+        bridge_run_dict = {
+            "accepted_hardware_status": {"success": False},
+            "surface_status": {"success": True},
+            "intersecting": False,
+            "search_eval": {"total": 1.0},
+        }
+        bad_run_dict = {
+            "accepted_hardware_status": {"success": False},
+            "surface_status": {"success": False},
+            "intersecting": True,
+            "search_eval": {"total": 1.0},
+        }
+
+        self.assertEqual(
+            module.resolve_single_stage_seed_regime(
+                "auto",
+                good_run_dict,
+                constraint_method="penalty",
+                num_surfaces=1,
+                basin_hops=0,
+                init_only=False,
+            ),
+            "preserve_first",
+        )
+        self.assertEqual(
+            module.resolve_single_stage_seed_regime(
+                "auto",
+                bridge_run_dict,
+                constraint_method="penalty",
+                num_surfaces=1,
+                basin_hops=0,
+                init_only=False,
+            ),
+            "bridge_only",
+        )
+        self.assertEqual(
+            module.resolve_single_stage_seed_regime(
+                "auto",
+                bad_run_dict,
+                constraint_method="penalty",
+                num_surfaces=1,
+                basin_hops=0,
+                init_only=False,
+            ),
+            "repair_first",
+        )
+        self.assertEqual(
+            module.resolve_single_stage_seed_regime(
+                "bridge_only",
+                good_run_dict,
+                constraint_method="alm",
+                num_surfaces=1,
+                basin_hops=0,
+                init_only=False,
+            ),
+            "global_search",
+        )
+
     def test_resolve_penalty_phase1_settings_auto_enables_local_preservation(self):
         module = self.load_module()
 
@@ -3017,6 +3090,193 @@ class HardwareConstraintTests(unittest.TestCase):
         self.assertAlmostEqual(result["phase1_max_accepted_step_rms"], 0.015)
         np.testing.assert_allclose(result["next_dofs"], [1.01, -0.99])
 
+    def test_run_penalty_phase1_repair_first_accepts_local_feasible_recovery(self):
+        module = self.load_module()
+        run_dict = {
+            "accepted_iterations": 0,
+            "accepted_x": np.array([1.0, -1.0]),
+            "invalid_state_rejects_total": 0,
+            "surface_solve_rejects": 0,
+            "hardware_rejects": 0,
+            "topology_gate_rejects": 0,
+            "surface_status": {"success": False},
+            "intersecting": False,
+            "search_eval": {"total": 1.0},
+            "accepted_hardware_status": {"success": False},
+            "surface_state": {"seed": "anchor"},
+            "J": 1.0,
+            "dJ": np.zeros(2),
+            "search_surface_status": {"success": True},
+            "topology_gate_status": {"enabled": False},
+            "x_prev": np.array([1.0, -1.0]),
+            "best_accepted_incumbent": None,
+            "best_accepted_metric": None,
+            "best_accepted_stage": None,
+            "best_feasible_incumbent": None,
+            "best_feasible_metric": None,
+            "best_feasible_stage": None,
+            "it": 0,
+        }
+
+        def fake_callback(x):
+            run_dict["accepted_iterations"] += 1
+            run_dict["accepted_x"] = np.asarray(x, dtype=float).copy()
+            run_dict["accepted_hardware_status"] = {"success": True}
+            run_dict["surface_status"] = {"success": True}
+
+        def fake_minimize(fun, x0, **kwargs):
+            kwargs["callback"](np.array([1.03, -0.97]))
+            return SimpleNamespace(nit=1, success=True, message="CONVERGENCE", status=0)
+
+        result = module.run_penalty_phase1(
+            np.array([1.0, -1.0]),
+            total_maxiter=4,
+            maxcor=5,
+            ftol=1e-15,
+            gtol=1e-15,
+            initial_step_scale=1.0,
+            initial_step_maxiter=0,
+            enable_local_preservation=False,
+            seed_regime="repair_first",
+            lower_bounds=np.array([-5.0, -5.0]),
+            upper_bounds=np.array([5.0, 5.0]),
+            run_dict=run_dict,
+            objective_fn=lambda x: (0.0, np.zeros_like(x)),
+            callback_fn=fake_callback,
+            normalize_message_fn=lambda *args, **kwargs: "phase1_ok",
+            restore_accepted_state_fn=lambda: None,
+            minimize_fn=fake_minimize,
+        )
+
+        self.assertTrue(result["continue_search"])
+        self.assertEqual(result["phase1_outcome"], "repair_local_recovery")
+        self.assertEqual(result["startup_local_phase_regime"], "repair_first")
+        self.assertTrue(result["startup_local_recovery_achieved"])
+        self.assertFalse(result["bridge_local_donor_ready"])
+        self.assertFalse(result["local_preservation_preserved_start"])
+        self.assertAlmostEqual(result["local_preservation_radius"], 0.015)
+
+    def test_run_penalty_phase1_bridge_only_requires_safe_step_for_donor_ready(self):
+        module = self.load_module()
+        run_dict = {
+            "accepted_iterations": 0,
+            "accepted_x": np.array([1.0, -1.0]),
+            "invalid_state_rejects_total": 0,
+            "surface_solve_rejects": 0,
+            "hardware_rejects": 0,
+            "topology_gate_rejects": 0,
+            "surface_status": {"success": False},
+            "intersecting": False,
+            "search_eval": {"total": 1.0},
+            "accepted_hardware_status": {"success": False},
+            "surface_state": {"seed": "anchor"},
+            "J": 1.0,
+            "dJ": np.zeros(2),
+            "search_surface_status": {"success": True},
+            "topology_gate_status": {"enabled": False},
+            "x_prev": np.array([1.0, -1.0]),
+            "best_accepted_incumbent": None,
+            "best_accepted_metric": None,
+            "best_accepted_stage": None,
+            "best_feasible_incumbent": None,
+            "best_feasible_metric": None,
+            "best_feasible_stage": None,
+            "it": 0,
+        }
+
+        def fake_callback(x):
+            run_dict["accepted_iterations"] += 1
+            run_dict["accepted_x"] = np.asarray(x, dtype=float).copy()
+            run_dict["accepted_hardware_status"] = {"success": True}
+            run_dict["surface_status"] = {"success": True}
+
+        def fake_minimize(fun, x0, **kwargs):
+            kwargs["callback"](np.array([1.01, -0.99]))
+            return SimpleNamespace(nit=1, success=True, message="CONVERGENCE", status=0)
+
+        result = module.run_penalty_phase1(
+            np.array([1.0, -1.0]),
+            total_maxiter=4,
+            maxcor=5,
+            ftol=1e-15,
+            gtol=1e-15,
+            initial_step_scale=1.0,
+            initial_step_maxiter=0,
+            enable_local_preservation=False,
+            seed_regime="bridge_only",
+            lower_bounds=np.array([-5.0, -5.0]),
+            upper_bounds=np.array([5.0, 5.0]),
+            run_dict=run_dict,
+            objective_fn=lambda x: (0.0, np.zeros_like(x)),
+            callback_fn=fake_callback,
+            normalize_message_fn=lambda *args, **kwargs: "phase1_ok",
+            restore_accepted_state_fn=lambda: None,
+            minimize_fn=fake_minimize,
+        )
+
+        self.assertTrue(result["continue_search"])
+        self.assertEqual(result["phase1_outcome"], "bridge_local_donor_ready")
+        self.assertEqual(result["startup_local_phase_regime"], "bridge_only")
+        self.assertTrue(result["startup_local_recovery_achieved"])
+        self.assertTrue(result["bridge_local_donor_ready"])
+
+    def test_run_penalty_phase1_bridge_only_stops_without_preserved_closeout(self):
+        module = self.load_module()
+        run_dict = {
+            "accepted_iterations": 0,
+            "accepted_x": np.array([1.0, -1.0]),
+            "invalid_state_rejects_total": 0,
+            "surface_solve_rejects": 0,
+            "hardware_rejects": 0,
+            "topology_gate_rejects": 0,
+            "surface_status": {"success": False},
+            "intersecting": False,
+            "search_eval": {"total": 1.0},
+            "accepted_hardware_status": {"success": False},
+            "surface_state": {"seed": "anchor"},
+            "J": 1.0,
+            "dJ": np.zeros(2),
+            "search_surface_status": {"success": True},
+            "topology_gate_status": {"enabled": False},
+            "x_prev": np.array([1.0, -1.0]),
+            "best_accepted_incumbent": None,
+            "best_accepted_metric": None,
+            "best_accepted_stage": None,
+            "best_feasible_incumbent": None,
+            "best_feasible_metric": None,
+            "best_feasible_stage": None,
+            "it": 0,
+        }
+
+        def fake_minimize(*args, **kwargs):
+            return SimpleNamespace(nit=1, success=False, message="ABNORMAL_TERMINATION", status=2)
+
+        result = module.run_penalty_phase1(
+            np.array([1.0, -1.0]),
+            total_maxiter=4,
+            maxcor=5,
+            ftol=1e-15,
+            gtol=1e-15,
+            initial_step_scale=1.0,
+            initial_step_maxiter=0,
+            enable_local_preservation=False,
+            seed_regime="bridge_only",
+            lower_bounds=np.array([-5.0, -5.0]),
+            upper_bounds=np.array([5.0, 5.0]),
+            run_dict=run_dict,
+            objective_fn=lambda x: (0.0, np.zeros_like(x)),
+            callback_fn=lambda x: None,
+            normalize_message_fn=lambda *args, **kwargs: "phase1_reject",
+            restore_accepted_state_fn=lambda: None,
+            minimize_fn=fake_minimize,
+        )
+
+        self.assertFalse(result["continue_search"])
+        self.assertEqual(result["phase1_outcome"], "bridge_only_no_local_donor")
+        self.assertFalse(result["local_preservation_preserved_start"])
+        self.assertEqual(result["startup_local_phase_regime"], "bridge_only")
+        self.assertFalse(result["bridge_local_donor_ready"])
+
     def test_build_penalty_phase2_bounds_keeps_local_preservation_radius(self):
         module = self.load_module()
 
@@ -3272,6 +3532,38 @@ class HardwareConstraintTests(unittest.TestCase):
         self.assertAlmostEqual(config.effective_iota_weight, 3.0)
         self.assertAlmostEqual(config.effective_volume_weight, 3.0)
 
+    def test_build_frontier_goal_config_applies_reference_and_trust_overrides(self):
+        module = self.load_module()
+
+        config = module.build_frontier_goal_config(
+            initial_iota=0.15,
+            initial_volume=0.10,
+            initial_qs_objective=2.0e-4,
+            initial_boozer_objective=6.0e-7,
+            res_weight=1000.0,
+            iotas_weight=100.0,
+            volume_weight=150.0,
+            iota_reference_override=0.17,
+            iota_scale_override=0.02,
+            volume_reference_override=0.105,
+            volume_scale_override=0.015,
+            qs_reference_override=0.011,
+            boozer_reference_override=0.007,
+            boozer_trust_threshold_override=0.009,
+            boozer_trust_penalty_scale_override=0.045,
+        )
+
+        self.assertAlmostEqual(config.iota_reference, 0.17)
+        self.assertAlmostEqual(config.iota_scale, 0.02)
+        self.assertAlmostEqual(config.volume_reference, 0.105)
+        self.assertAlmostEqual(config.volume_scale, 0.015)
+        self.assertAlmostEqual(config.qs_reference, 0.011)
+        self.assertAlmostEqual(config.boozer_reference, 0.007)
+        self.assertAlmostEqual(config.boozer_trust_threshold, 0.009)
+        self.assertAlmostEqual(config.boozer_trust_penalty_scale, 0.045)
+        self.assertAlmostEqual(config.effective_iota_weight, 1.0)
+        self.assertAlmostEqual(config.effective_volume_weight, 1.5)
+
     def test_annotate_frontier_search_eval_adds_threshold_relative_trust_penalty(self):
         module = self.load_module()
         module.SINGLE_STAGE_GOAL_MODE = "frontier"
@@ -3301,6 +3593,7 @@ class HardwareConstraintTests(unittest.TestCase):
         self.assertAlmostEqual(annotated["frontier_trust_penalty"], 0.09)
         self.assertAlmostEqual(annotated["frontier_rank_total"], 2.09)
         self.assertAlmostEqual(annotated["total"], 2.09)
+        self.assertTrue(annotated["finite_eval_ok"])
         np.testing.assert_allclose(
             annotated["grad"],
             np.array([1.024, -2.012]),
@@ -4515,6 +4808,23 @@ class RunIdentityTests(unittest.TestCase):
 
         self.assertIsNone(config.single_stage_goal_mode)
 
+    def test_run_identity_distinguishes_explicit_preserve_first_from_auto(self):
+        module = load_single_stage_example_module()
+        auto_args = self._make_identity_args()
+        auto_args.seed_regime = "auto"
+        preserve_args = self._make_identity_args()
+        preserve_args.seed_regime = "preserve_first"
+
+        auto_config = self._make_identity_config(module, auto_args)
+        preserve_config = self._make_identity_config(module, preserve_args)
+
+        self.assertIsNone(auto_config.seed_regime)
+        self.assertEqual(preserve_config.seed_regime, "preserve_first")
+        self.assertNotEqual(
+            module.build_run_identity_config(auto_config),
+            module.build_run_identity_config(preserve_config),
+        )
+
     def test_run_identity_changes_when_only_confinement_settings_change(self):
         module = load_single_stage_example_module()
         base_args = self._make_identity_args()
@@ -4803,6 +5113,22 @@ class CurrentBaselineContractTests(unittest.TestCase):
             args = module.parse_args()
 
         self.assertEqual(args.single_stage_goal_mode, "frontier")
+
+    def test_single_stage_parse_args_accepts_seed_regime_flag(self):
+        module = load_single_stage_example_module()
+
+        with patch.object(
+            sys,
+            "argv",
+            [
+                "single_stage_banana_example.py",
+                "--seed-regime",
+                "bridge_only",
+            ],
+        ):
+            args = module.parse_args()
+
+        self.assertEqual(args.seed_regime, "bridge_only")
 
     def test_single_stage_parse_args_accepts_frontier_volume_weight_flag(self):
         module = load_single_stage_example_module()

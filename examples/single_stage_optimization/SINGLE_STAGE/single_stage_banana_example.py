@@ -164,6 +164,12 @@ _PENALTY_FEASIBLE_START_PHASE2_RADIUS_SCALE = float(
     os.environ.get("PENALTY_FEASIBLE_START_PHASE2_RADIUS_SCALE", "0.5")
 )
 _PENALTY_FEASIBLE_START_MIN_ACCEPTED_STEP_RMS = 1.0e-6
+_DEFAULT_SINGLE_STAGE_SEED_REGIME = "auto"
+_SINGLE_STAGE_SEED_REGIME_AUTO = "auto"
+_SINGLE_STAGE_SEED_REGIME_PRESERVE_FIRST = "preserve_first"
+_SINGLE_STAGE_SEED_REGIME_REPAIR_FIRST = "repair_first"
+_SINGLE_STAGE_SEED_REGIME_BRIDGE_ONLY = "bridge_only"
+_SINGLE_STAGE_SEED_REGIME_GLOBAL_SEARCH = "global_search"
 _FRONTIER_FEASIBLE_START_PHASE1_SCALE = 0.05
 _FRONTIER_FEASIBLE_START_LOCAL_RELATIVE_RADIUS = 0.01
 SINGLE_STAGE_ALM_GEOMETRY_CONSTRAINT_NAMES = (
@@ -1009,6 +1015,23 @@ def parse_args():
         help="Explicit path to the Stage 2 biot_savart_opt.json seed. Overrides all derived seed settings.",
     )
     parser.add_argument(
+        "--seed-regime",
+        choices=[
+            _SINGLE_STAGE_SEED_REGIME_AUTO,
+            _SINGLE_STAGE_SEED_REGIME_PRESERVE_FIRST,
+            _SINGLE_STAGE_SEED_REGIME_REPAIR_FIRST,
+            _SINGLE_STAGE_SEED_REGIME_BRIDGE_ONLY,
+            _SINGLE_STAGE_SEED_REGIME_GLOBAL_SEARCH,
+        ],
+        default=os.environ.get("SEED_REGIME", _DEFAULT_SINGLE_STAGE_SEED_REGIME),
+        help=(
+            "Single-stage startup regime. 'preserve_first' protects a good donor, "
+            "'repair_first' attempts a bounded local feasibility recovery, "
+            "'bridge_only' runs a short local bridge solve from a clean initializer, "
+            "and 'global_search' skips the bounded startup lane."
+        ),
+    )
+    parser.add_argument(
         "--local-stage2-root",
         default=os.environ.get("LOCAL_STAGE2_ROOT", DEFAULT_LOCAL_STAGE2_ROOT),
         help="Directory that contains local STAGE_2 outputs-[plasma]/... runs.",
@@ -1490,6 +1513,7 @@ class RunIdentityConfig:
     alm_max_subproblem_continuations: int
     alm_distance_smoothing: float
     alm_curvature_smoothing: float
+    seed_regime: str | None = None
 
 
 @dataclass(frozen=True)
@@ -1508,6 +1532,8 @@ class PreservedTimeoutReplayConfig:
     max_iterations: int | None
     target_volume: float | None
     target_iota: float | None
+    requested_seed_regime: str | None = None
+    effective_seed_regime: str | None = None
     single_stage_goal_mode: str | None = None
     single_stage_goal_mode_impl: str | None = None
     boozer_surface_target_volumes: tuple[float, ...] | None = None
@@ -1655,6 +1681,8 @@ PRESERVED_TIMEOUT_REPLAY_CONFIG = PreservedTimeoutReplayConfig(
     max_iterations=0,
     target_volume=0.0,
     target_iota=0.0,
+    requested_seed_regime=None,
+    effective_seed_regime=None,
 )
 
 
@@ -1748,6 +1776,12 @@ def make_run_identity_config(
         alm_max_subproblem_continuations=args.alm_max_subproblem_continuations,
         alm_distance_smoothing=args.alm_distance_smoothing,
         alm_curvature_smoothing=args.alm_curvature_smoothing,
+        seed_regime=(
+            None
+            if getattr(args, "seed_regime", _DEFAULT_SINGLE_STAGE_SEED_REGIME)
+            == _SINGLE_STAGE_SEED_REGIME_AUTO
+            else args.seed_regime
+        ),
     )
 
 
@@ -2647,6 +2681,44 @@ def current_optimizer_bounds():
     return build_scipy_bounds(JF.lower_bounds, JF.upper_bounds)
 
 
+def resolve_single_stage_seed_regime(
+    requested_seed_regime,
+    run_dict,
+    *,
+    constraint_method,
+    num_surfaces,
+    basin_hops,
+    init_only,
+):
+    """Resolve the solver-side seed regime.
+
+    Keep this logic aligned with `_resolve_single_stage_seed_regime()` in
+    `autoresearch/scripts/run_one.py`; the two repos intentionally share this
+    routing contract.
+    """
+    requested_regime = str(
+        requested_seed_regime or _DEFAULT_SINGLE_STAGE_SEED_REGIME
+    )
+    if constraint_method != "penalty":
+        return _SINGLE_STAGE_SEED_REGIME_GLOBAL_SEARCH
+    if init_only or basin_hops > 0 or num_surfaces != 1:
+        return _SINGLE_STAGE_SEED_REGIME_GLOBAL_SEARCH
+    if requested_regime != _SINGLE_STAGE_SEED_REGIME_AUTO:
+        return requested_regime
+    if refinement_eligible_incumbent(run_dict):
+        return _SINGLE_STAGE_SEED_REGIME_PRESERVE_FIRST
+    if preserved_incumbent_eligible(run_dict):
+        return _SINGLE_STAGE_SEED_REGIME_BRIDGE_ONLY
+    return _SINGLE_STAGE_SEED_REGIME_REPAIR_FIRST
+
+
+def penalty_seed_regime_uses_local_startup(seed_regime):
+    return seed_regime in (
+        _SINGLE_STAGE_SEED_REGIME_REPAIR_FIRST,
+        _SINGLE_STAGE_SEED_REGIME_BRIDGE_ONLY,
+    )
+
+
 def penalty_feasible_start_local_preservation_enabled(
     run_dict,
     *,
@@ -2740,6 +2812,9 @@ def _build_penalty_phase1_result(
     phase1_anchor_restore_used,
     phase1_unsafe_accept_rollbacks,
     phase1_invalid_reject_attempts,
+    startup_local_phase_regime,
+    startup_local_recovery_achieved,
+    bridge_local_donor_ready,
 ):
     return {
         "used_phase1": bool(used_phase1),
@@ -2765,6 +2840,9 @@ def _build_penalty_phase1_result(
         "phase1_recovery_used": bool(
             phase1_anchor_restore_used or phase1_invalid_reject_attempts > 0
         ),
+        "startup_local_phase_regime": startup_local_phase_regime,
+        "startup_local_recovery_achieved": bool(startup_local_recovery_achieved),
+        "bridge_local_donor_ready": bool(bridge_local_donor_ready),
     }
 
 
@@ -2812,7 +2890,38 @@ def restore_penalty_phase1_anchor(run_dict, anchor_state):
     run_dict["trial_hardware_status"] = None
 
 
-def evaluate_penalty_phase1_local_accept(anchor_x, run_dict):
+def resolve_penalty_phase2_local_radius(
+    step_rms,
+    *,
+    local_radius,
+    seed_regime,
+):
+    if not np.isfinite(step_rms):
+        return None
+    radius_ceiling = (
+        _PENALTY_FEASIBLE_START_SAFE_STEP_RMS_LIMIT
+        if seed_regime == _SINGLE_STAGE_SEED_REGIME_PRESERVE_FIRST
+        else local_radius
+    )
+    if radius_ceiling is None or not np.isfinite(radius_ceiling):
+        radius_ceiling = _PENALTY_FEASIBLE_START_SAFE_STEP_RMS_LIMIT
+    base_radius = min(
+        max(float(step_rms), _PENALTY_FEASIBLE_START_MIN_ACCEPTED_STEP_RMS),
+        float(radius_ceiling),
+    )
+    return max(
+        _PENALTY_FEASIBLE_START_MIN_ACCEPTED_STEP_RMS,
+        float(base_radius) * _PENALTY_FEASIBLE_START_PHASE2_RADIUS_SCALE,
+    )
+
+
+def evaluate_penalty_phase1_local_accept(
+    anchor_x,
+    run_dict,
+    *,
+    local_radius,
+    seed_regime,
+):
     accepted_x = np.asarray(run_dict["accepted_x"], dtype=float)
     step_rms = basin_normalized_step_rms(anchor_x, accepted_x)
     meaningful_step = bool(
@@ -2820,25 +2929,54 @@ def evaluate_penalty_phase1_local_accept(anchor_x, run_dict):
         and step_rms > _PENALTY_FEASIBLE_START_MIN_ACCEPTED_STEP_RMS
     )
     refinement_ready = refinement_eligible_incumbent(run_dict)
-    safe_local_step = bool(
-        meaningful_step and step_rms <= _PENALTY_FEASIBLE_START_SAFE_STEP_RMS_LIMIT
-    )
-    phase2_radius = None
-    if safe_local_step:
-        phase2_radius = max(
-            _PENALTY_FEASIBLE_START_MIN_ACCEPTED_STEP_RMS,
-            min(
-                step_rms,
-                _PENALTY_FEASIBLE_START_SAFE_STEP_RMS_LIMIT
-                * _PENALTY_FEASIBLE_START_PHASE2_RADIUS_SCALE,
-            ),
+    within_local_radius = bool(
+        local_radius is None
+        or (
+            np.isfinite(step_rms)
+            and step_rms <= float(local_radius) + 1.0e-12
         )
+    )
+    recovered_local_accept = bool(
+        refinement_ready and meaningful_step and within_local_radius
+    )
+    donor_ready_local_accept = bool(
+        recovered_local_accept
+        and step_rms <= _PENALTY_FEASIBLE_START_SAFE_STEP_RMS_LIMIT
+    )
+    if seed_regime == _SINGLE_STAGE_SEED_REGIME_PRESERVE_FIRST:
+        phase1_graduated = donor_ready_local_accept
+        phase1_outcome = "safe_local_accept"
+    elif seed_regime == _SINGLE_STAGE_SEED_REGIME_REPAIR_FIRST:
+        phase1_graduated = recovered_local_accept
+        phase1_outcome = "repair_local_recovery"
+    elif seed_regime == _SINGLE_STAGE_SEED_REGIME_BRIDGE_ONLY:
+        phase1_graduated = recovered_local_accept
+        phase1_outcome = (
+            "bridge_local_donor_ready"
+            if donor_ready_local_accept
+            else "bridge_local_recovery_only"
+        )
+    else:
+        phase1_graduated = False
+        phase1_outcome = "nonlocal_phase1_continue"
     return {
         "step_rms": float(step_rms),
         "meaningful_step": meaningful_step,
         "refinement_ready": refinement_ready,
-        "safe_local_accept": bool(refinement_ready and safe_local_step),
-        "phase2_radius": phase2_radius,
+        "within_local_radius": within_local_radius,
+        "recovered_local_accept": recovered_local_accept,
+        "donor_ready_local_accept": donor_ready_local_accept,
+        "phase1_graduated": phase1_graduated,
+        "phase1_outcome": phase1_outcome,
+        "phase2_radius": (
+            resolve_penalty_phase2_local_radius(
+                step_rms,
+                local_radius=local_radius,
+                seed_regime=seed_regime,
+            )
+            if phase1_graduated
+            else None
+        ),
     }
 
 
@@ -2926,6 +3064,7 @@ def run_penalty_phase1(
     initial_step_scale,
     initial_step_maxiter,
     enable_local_preservation,
+    seed_regime=_SINGLE_STAGE_SEED_REGIME_PRESERVE_FIRST,
     is_frontier_mode=False,
     lower_bounds,
     upper_bounds,
@@ -2937,11 +3076,14 @@ def run_penalty_phase1(
     refresh_preserved_timeout_artifacts_fn=None,
     minimize_fn=minimize,
 ):
+    use_local_startup = bool(enable_local_preservation) or penalty_seed_regime_uses_local_startup(
+        seed_regime
+    )
     settings = resolve_penalty_phase1_settings(
         total_maxiter,
         initial_step_scale,
         initial_step_maxiter,
-        enable_local_preservation=enable_local_preservation,
+        enable_local_preservation=use_local_startup,
         is_frontier_mode=is_frontier_mode,
     )
     if not settings["use_phase1"]:
@@ -2963,6 +3105,9 @@ def run_penalty_phase1(
             phase1_anchor_restore_used=False,
             phase1_unsafe_accept_rollbacks=0,
             phase1_invalid_reject_attempts=0,
+            startup_local_phase_regime=None,
+            startup_local_recovery_achieved=False,
+            bridge_local_donor_ready=False,
         )
 
     phase1_iterations = 0
@@ -2976,6 +3121,8 @@ def run_penalty_phase1(
     phase1_anchor_restore_used = False
     phase1_unsafe_accept_rollbacks = 0
     phase1_invalid_reject_attempts = 0
+    startup_local_recovery_achieved = False
+    bridge_local_donor_ready = False
 
     while remaining_maxiter > 0:
         local_attempts_used += 1
@@ -3055,17 +3202,28 @@ def run_penalty_phase1(
             else attempt_message
         )
         if int(run_dict.get("accepted_iterations", 0)) > accepted_before_attempt:
-            accept_summary = evaluate_penalty_phase1_local_accept(anchor_x, run_dict)
-            if accept_summary["safe_local_accept"]:
+            accept_summary = evaluate_penalty_phase1_local_accept(
+                anchor_x,
+                run_dict,
+                local_radius=local_radius,
+                seed_regime=seed_regime,
+            )
+            startup_local_recovery_achieved = bool(
+                accept_summary["recovered_local_accept"]
+            )
+            bridge_local_donor_ready = bool(
+                accept_summary["donor_ready_local_accept"]
+            )
+            if accept_summary["phase1_graduated"]:
                 return _build_penalty_phase1_result(
                     used_phase1=True,
                     phase1_iterations=phase1_iterations,
                     phase1_termination_message="; ".join(phase1_messages),
                     phase1_success=phase1_success,
                     phase1_outcome=(
-                        "safe_local_accept_after_recovery"
+                        f"{accept_summary['phase1_outcome']}_after_recovery"
                         if phase1_anchor_restore_used
-                        else "safe_local_accept"
+                        else accept_summary["phase1_outcome"]
                     ),
                     continue_search=True,
                     next_dofs=run_dict["accepted_x"],
@@ -3079,12 +3237,19 @@ def run_penalty_phase1(
                     phase1_anchor_restore_used=phase1_anchor_restore_used,
                     phase1_unsafe_accept_rollbacks=phase1_unsafe_accept_rollbacks,
                     phase1_invalid_reject_attempts=phase1_invalid_reject_attempts,
+                    startup_local_phase_regime=(
+                        seed_regime if settings["use_local_bounds"] else None
+                    ),
+                    startup_local_recovery_achieved=startup_local_recovery_achieved,
+                    bridge_local_donor_ready=bridge_local_donor_ready,
                 )
             phase1_messages.append(
                 "unsafe_local_accept("
                 f"step_rms={accept_summary['step_rms']:.3e}, "
                 f"meaningful={accept_summary['meaningful_step']}, "
-                f"refinement_ready={accept_summary['refinement_ready']})"
+                f"refinement_ready={accept_summary['refinement_ready']}, "
+                f"within_local_radius={accept_summary['within_local_radius']}, "
+                f"donor_ready={accept_summary['donor_ready_local_accept']})"
             )
             phase1_unsafe_accept_rollbacks += 1
             phase1_anchor_restore_used = True
@@ -3110,17 +3275,32 @@ def run_penalty_phase1(
 
     restore_accepted_state_fn()
     if settings["use_local_bounds"]:
-        phase1_messages.append("preserved_feasible_start_no_safe_local_step")
+        if seed_regime == _SINGLE_STAGE_SEED_REGIME_PRESERVE_FIRST:
+            phase1_messages.append("preserved_feasible_start_no_safe_local_step")
+            phase1_outcome = "preserved_start_no_safe_step"
+            preserved_start = True
+        elif seed_regime == _SINGLE_STAGE_SEED_REGIME_BRIDGE_ONLY:
+            phase1_messages.append("bridge_only_no_local_donor")
+            phase1_outcome = "bridge_only_no_local_donor"
+            preserved_start = False
+        elif seed_regime == _SINGLE_STAGE_SEED_REGIME_REPAIR_FIRST:
+            phase1_messages.append("repair_first_no_local_recovery")
+            phase1_outcome = "repair_first_no_local_recovery"
+            preserved_start = False
+        else:
+            phase1_messages.append("local_phase1_no_progress")
+            phase1_outcome = "local_phase1_no_progress"
+            preserved_start = False
         return _build_penalty_phase1_result(
             used_phase1=True,
             phase1_iterations=phase1_iterations,
             phase1_termination_message="; ".join(phase1_messages),
             phase1_success=False,
-            phase1_outcome="preserved_start_no_safe_step",
+            phase1_outcome=phase1_outcome,
             continue_search=False,
             next_dofs=run_dict["accepted_x"],
             local_preservation_used=True,
-            local_preservation_preserved_start=True,
+            local_preservation_preserved_start=preserved_start,
             local_preservation_attempts=local_attempts_used,
             local_preservation_radius=local_radius,
             local_preservation_step_rms=None,
@@ -3129,6 +3309,9 @@ def run_penalty_phase1(
             phase1_anchor_restore_used=phase1_anchor_restore_used,
             phase1_unsafe_accept_rollbacks=phase1_unsafe_accept_rollbacks,
             phase1_invalid_reject_attempts=phase1_invalid_reject_attempts,
+            startup_local_phase_regime=seed_regime,
+            startup_local_recovery_achieved=startup_local_recovery_achieved,
+            bridge_local_donor_ready=bridge_local_donor_ready,
         )
 
     return _build_penalty_phase1_result(
@@ -3149,6 +3332,9 @@ def run_penalty_phase1(
         phase1_anchor_restore_used=phase1_anchor_restore_used,
         phase1_unsafe_accept_rollbacks=phase1_unsafe_accept_rollbacks,
         phase1_invalid_reject_attempts=phase1_invalid_reject_attempts,
+        startup_local_phase_regime=None,
+        startup_local_recovery_achieved=False,
+        bridge_local_donor_ready=False,
     )
 
 
@@ -4833,6 +5019,10 @@ if __name__ == "__main__":
 
     objective_bundle = rebuild_stage_objective_bundle(stage)
     length_target = objective_bundle["length_target"]
+    REQUESTED_SEED_REGIME = str(
+        getattr(args, "seed_regime", _DEFAULT_SINGLE_STAGE_SEED_REGIME)
+    )
+    EFFECTIVE_SEED_REGIME = REQUESTED_SEED_REGIME
     PRESERVED_TIMEOUT_REPLAY_CONFIG = current_preserved_timeout_replay_config()
 
     # Extract degrees of freedom
@@ -4935,6 +5125,15 @@ if __name__ == "__main__":
     }
     initial_best_accepted_updated = maybe_update_best_accepted_incumbent(run_dict, stage)
     initial_best_feasible_updated = maybe_update_best_feasible_incumbent(run_dict, stage)
+    EFFECTIVE_SEED_REGIME = resolve_single_stage_seed_regime(
+        REQUESTED_SEED_REGIME,
+        run_dict,
+        constraint_method=CONSTRAINT_METHOD,
+        num_surfaces=args.num_surfaces,
+        basin_hops=args.basin_hops,
+        init_only=args.init_only,
+    )
+    PRESERVED_TIMEOUT_REPLAY_CONFIG = current_preserved_timeout_replay_config()
     initial_coil_length = curvelength.J()
     if initial_best_accepted_updated:
         write_preserved_timeout_artifacts_for_current_state(
@@ -5078,6 +5277,10 @@ if __name__ == "__main__":
     startup_local_preservation_preserved_start = False
     startup_local_preservation_attempts = 0
     startup_local_preservation_radius = None
+    startup_local_phase_used = False
+    startup_local_phase_regime = None
+    startup_local_recovery_achieved = False
+    bridge_local_donor_ready = False
     final_source_stage = stage
     alm_result = None
     if CONSTRAINT_METHOD == "alm" and args.num_surfaces != 1:
@@ -5324,6 +5527,7 @@ if __name__ == "__main__":
             initial_step_scale=args.multisurface_initial_step_scale,
             initial_step_maxiter=args.multisurface_initial_step_maxiter,
             enable_local_preservation=enable_local_preservation,
+            seed_regime=EFFECTIVE_SEED_REGIME,
             is_frontier_mode=args.single_stage_goal_mode == "frontier",
             lower_bounds=JF.lower_bounds,
             upper_bounds=JF.upper_bounds,
@@ -5365,9 +5569,16 @@ if __name__ == "__main__":
             startup_local_preservation_radius = phase1_result[
                 "local_preservation_radius"
             ]
+            startup_local_phase_used = phase1_result["local_preservation_used"]
+            startup_local_phase_regime = phase1_result["startup_local_phase_regime"]
+            startup_local_recovery_achieved = phase1_result[
+                "startup_local_recovery_achieved"
+            ]
+            bridge_local_donor_ready = phase1_result["bridge_local_donor_ready"]
             if startup_local_preservation_used:
                 print(
-                    "Running feasible-start local preservation phase with "
+                    "Running startup local phase with "
+                    f"regime={startup_local_phase_regime} "
                     f"radius={startup_local_preservation_radius:.3e} and "
                     f"attempts={startup_local_preservation_attempts}"
                 )
@@ -5700,6 +5911,8 @@ if __name__ == "__main__":
         "CONSTRAINT_WEIGHT": CONSTRAINT_WEIGHT,
         "CONSTRAINT_METHOD": CONSTRAINT_METHOD,
         "ALM_FORMULATION": ALM_FORMULATION if CONSTRAINT_METHOD == "alm" else None,
+        "REQUESTED_SEED_REGIME": REQUESTED_SEED_REGIME,
+        "EFFECTIVE_SEED_REGIME": EFFECTIVE_SEED_REGIME,
         "CC_DIST": CC_DIST,
         "CC_WEIGHT": CC_WEIGHT,
         "CS_DIST": CS_DIST,
@@ -5838,6 +6051,11 @@ if __name__ == "__main__":
         "PHASE1_UNSAFE_ACCEPT_ROLLBACKS": phase1_unsafe_accept_rollbacks,
         "PHASE1_INVALID_REJECT_ATTEMPTS": phase1_invalid_reject_attempts,
         "PHASE1_RECOVERY_USED": phase1_recovery_used,
+        "SEED_REGIME_OUTCOME": phase1_outcome,
+        "STARTUP_LOCAL_PHASE_USED": startup_local_phase_used,
+        "STARTUP_LOCAL_PHASE_REGIME": startup_local_phase_regime,
+        "STARTUP_LOCAL_RECOVERY_ACHIEVED": startup_local_recovery_achieved,
+        "BRIDGE_LOCAL_DONOR_READY": bridge_local_donor_ready,
         "STARTUP_LOCAL_PRESERVATION_USED": startup_local_preservation_used,
         "STARTUP_LOCAL_PRESERVED_START": startup_local_preservation_preserved_start,
         "STARTUP_LOCAL_PRESERVATION_ATTEMPTS": startup_local_preservation_attempts,
