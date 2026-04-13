@@ -180,3 +180,46 @@ jobs:
             benchmark_artifacts/single_stage_outer_loop_cuda.json
             benchmark_artifacts/jax_ci_contract.json
             benchmark_artifacts/jax_ci_contract.md
+
+  gpu-full-suite-disallow:
+    name: GPU full suite (CUDA, transfer_guard=disallow)
+    runs-on: [self-hosted, gpu]
+    timeout-minutes: 240
+
+    env:
+      BENCHMARK_ENV_NAME: jax-0.9.2
+      BENCHMARK_ENV_FILE: envs/jax-0.9.2.yml
+      SIMSOPT_BACKEND_MODE: jax_gpu_parity
+      SIMSOPT_BACKEND_STRICT: "1"
+      SIMSOPT_JAX_TRANSFER_GUARD: disallow
+      JAX_PLATFORMS: cuda
+      JAX_ENABLE_X64: "1"
+      XLA_PYTHON_CLIENT_PREALLOCATE: "false"
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Provision GPU full-suite environment from recipe
+        run: |
+          if conda env list | awk '{print $1}' | grep -Fxq "$BENCHMARK_ENV_NAME"; then
+            conda env update -n "$BENCHMARK_ENV_NAME" -f "$BENCHMARK_ENV_FILE" --prune
+          else
+            conda env create -n "$BENCHMARK_ENV_NAME" -f "$BENCHMARK_ENV_FILE"
+          fi
+          conda run --no-capture-output -n "$BENCHMARK_ENV_NAME" \
+            python -m pip install -e ".[JAX_GPU,dev]"
+
+      - name: Verify CUDA runtime and x64 contract
+        run: |
+          conda run --no-capture-output -n "$BENCHMARK_ENV_NAME" \
+            python -c "import jax; print(jax.devices()); print(jax.default_backend()); assert any(device.platform in {'cuda', 'gpu'} for device in jax.devices()); assert jax.config.jax_enable_x64"
+
+      - name: Run full pytest suite under CUDA strict transfer guard
+        run: |
+          conda run --no-capture-output -n "$BENCHMARK_ENV_NAME" \
+            python -m pytest tests \
+            -v --tb=short -rA \
+            -o log_cli=true \
+            -o log_cli_level=INFO

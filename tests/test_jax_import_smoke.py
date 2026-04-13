@@ -501,6 +501,17 @@ def test_ondevice_solver_cache_respects_mutable_objective_state():
     )
 
 
+def test_structured_ondevice_solver_cache_respects_mutable_objective_state():
+    """Structured pytree entry must not freeze mutable cacheable objective state."""
+    _assert_python_script_passes(
+        _JAX_SUBPROCESS_CASES_PATH,
+        args=("structured-mutable-objective-state",),
+        failure_message=(
+            "structured ondevice solver cache must not freeze mutable objective state"
+        ),
+    )
+
+
 def test_transfer_guard_disallow_allows_adam_ondevice_quadratic_smokes():
     """Public ondevice Adam lane must stay transfer-clean under disallow."""
     _assert_python_script_passes(

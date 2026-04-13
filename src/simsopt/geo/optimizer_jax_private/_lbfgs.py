@@ -21,6 +21,7 @@ from ._common import (
     _require_private_optimizer_runtime,
     _resolve_lbfgs_limits,
     _scalar_value_and_grad,
+    _STRUCTURED_SOLVER_CACHE_TOKEN_ATTR,
     _zeros,
 )
 from ._line_search import _line_search_value_and_grad
@@ -531,17 +532,26 @@ def _minimize_lbfgs_private_impl(
         return state._replace(status=status)
 
     run_solver.__name__ = "lbfgs_private_run_solver"
+    structured_solver_cache_token = None
+    if adapter is not None and cache_owner is not None:
+        structured_solver_cache_token = getattr(
+            cache_owner,
+            _STRUCTURED_SOLVER_CACHE_TOKEN_ATTR,
+            None,
+        )
     adapter_cache_key = None if adapter is None else adapter.solver_cache_key()
     can_cache_solver = (
         cache_owner is not None
         and callback is None
         and progress_callback is None
         and failure_callback is None
+        and (adapter is None or structured_solver_cache_token is not None)
     )
     solver = _cached_private_solver(
         cache_owner if can_cache_solver else None,
         cache_key=(
             "lbfgs",
+            structured_solver_cache_token,
             adapter_cache_key,
             norm,
             int(history_size),

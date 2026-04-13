@@ -283,6 +283,21 @@ class _ShiftedQuadratic:
         return self.half * jnp.dot(diff, diff)
 
 
+class _StructuredShiftedQuadraticValueAndGrad:
+    def __init__(self, target: Sequence[float]) -> None:
+        self.target = np.asarray(tuple(target), dtype=np.float64)
+        self.half = jax.device_put(np.asarray(0.5, dtype=np.float64))
+
+    def __call__(
+        self, state: dict[str, jax.Array]
+    ) -> tuple[jax.Array, dict[str, jax.Array]]:
+        vector = jnp.asarray(state["x"], dtype=jnp.float64)
+        target = jnp.asarray(self.target, dtype=jnp.float64)
+        diff = vector - target
+        value = self.half * jnp.dot(diff, diff)
+        return value, {"x": diff}
+
+
 def _find_gpu_device() -> jax.Device | None:
     for device in jax.devices():
         if device.platform == "gpu":
@@ -1022,6 +1037,46 @@ def _run_mutable_objective_state_case() -> None:
     )
 
 
+def _run_structured_mutable_objective_state_case() -> None:
+    if not _configure_strict_cpu_parity_backend():
+        return
+
+    objective = _StructuredShiftedQuadraticValueAndGrad([0.0, 0.0])
+    _mark_cacheable_jit_value_and_grad(objective)
+    x0 = {
+        "x": jnp.asarray(np.array([2.0, -1.0], dtype=np.float64)),
+    }
+
+    first = target_minimize(
+        objective,
+        x0,
+        method="lbfgs-ondevice",
+        value_and_grad=True,
+        maxiter=20,
+    )
+    objective.target = np.asarray([1.5, -0.5], dtype=np.float64)
+    second = target_minimize(
+        objective,
+        x0,
+        method="lbfgs-ondevice",
+        value_and_grad=True,
+        maxiter=20,
+    )
+
+    assert first.success is True
+    assert second.success is True
+    np.testing.assert_allclose(
+        np.asarray(first.x["x"]),
+        np.asarray([0.0, 0.0]),
+        atol=1e-6,
+    )
+    np.testing.assert_allclose(
+        np.asarray(second.x["x"]),
+        np.asarray([1.5, -0.5]),
+        atol=1e-6,
+    )
+
+
 def _parse_optimizer_method(method: str) -> OptimizerMethod:
     if method == "lbfgs-ondevice":
         return cast(OptimizerMethod, method)
@@ -1083,6 +1138,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     subparsers.add_parser("target-compile-count")
     subparsers.add_parser("stage2-target-compile-count")
     subparsers.add_parser("mutable-objective-state")
+    subparsers.add_parser("structured-mutable-objective-state")
     subparsers.add_parser("grouped-gpu-spec-eval")
     subparsers.add_parser("grouped-explicit-point-sharding")
     subparsers.add_parser("pairwise-penalty-explicit-row-sharding")
@@ -1150,6 +1206,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
     if args.case == "mutable-objective-state":
         _run_mutable_objective_state_case()
+        return 0
+    if args.case == "structured-mutable-objective-state":
+        _run_structured_mutable_objective_state_case()
         return 0
     if args.case == "grouped-gpu-spec-eval":
         _run_grouped_biot_savart_gpu_spec_eval_case()

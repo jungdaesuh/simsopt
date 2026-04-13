@@ -20,6 +20,7 @@ from ..._core.jax_host_boundary import host_array as _host_callback_array
 from ..optimizer_jax import (
     PRIVATE_OPTIMIZER_JAX_VERSION,
     _CACHEABLE_VALUE_AND_GRAD_ATTR,
+    _STRUCTURED_SOLVER_CACHE_TOKEN_ATTR,
     _x64_enabled,
     private_optimizer_runtime_is_supported,
 )

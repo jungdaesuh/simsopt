@@ -42,7 +42,10 @@ from ..geo.curveobjectives import (
     cc_distance_pure,
     curve_length_pure,
 )
-from ..geo.optimizer_jax import _mark_cacheable_jit_value_and_grad
+from ..geo.optimizer_jax import (
+    _mark_cacheable_jit_value_and_grad,
+    _mark_structured_private_solver_cacheable,
+)
 
 __all__ = [
     "Stage2PenaltyConfig",
@@ -661,6 +664,10 @@ def build_stage2_target_objective(
     objective = jax.jit(objective_impl)
     value_and_grad = _mark_cacheable_jit_value_and_grad(
         jax.jit(jax.value_and_grad(objective_impl))
+    )
+    value_and_grad = _mark_structured_private_solver_cacheable(
+        value_and_grad,
+        cache_token=("stage2-target-objective",),
     )
 
     def field_sharding_summary(dofs):

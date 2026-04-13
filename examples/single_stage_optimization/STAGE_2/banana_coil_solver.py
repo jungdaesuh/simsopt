@@ -1209,14 +1209,16 @@ def smooth_min_distance_signed_constraint(
         if np.any(point_gradient):
             derivative += curve.dgamma_by_dcoeff_vjp(point_gradient)
     grad = np.asarray(derivative(base_objective_optimizable), dtype=float)
-    return float(minimum_distance) - smooth_min, grad
+    # Negate: constraint value is (minimum_distance - smooth_min), so its
+    # gradient w.r.t. DOFs is -∂smooth_min/∂DOFs.
+    return float(minimum_distance) - smooth_min, -grad
 
 
 # ALM WIP parking lot:
 # The helper functions below are kept as a local recovery point, but the
 # parser/runtime no longer wires them into the live Stage 2 entry path.
 def build_stage2_alm_settings(args):
-    return ALMSettings(
+    return ALMSettings(  # noqa: F821 — parked ALM import
         max_outer_iterations=args.alm_max_outer_iters,
         max_subproblem_continuations=args.alm_max_subproblem_continuations,
         penalty_init=args.alm_penalty_init,
@@ -1255,14 +1257,14 @@ def evaluate_stage2_alm_problem(
     base_grad = np.asarray(base_objective.dJ(), dtype=float)
 
     coil_length = float(Jls.J())
-    length_violation = upper_bound_residual(coil_length, length_target)
+    length_violation = upper_bound_residual(coil_length, length_target)  # noqa: F821
     length_grad = np.asarray(
         Jls.dJ(partials=True)(base_objective),
         dtype=float,
     )
 
     curve_curve_min_dist = float(Jccdist.shortest_distance())
-    curve_curve_violation = lower_bound_residual(
+    curve_curve_violation = lower_bound_residual(  # noqa: F821
         curve_curve_min_dist,
         Jccdist.minimum_distance,
     )
@@ -1274,7 +1276,7 @@ def evaluate_stage2_alm_problem(
     )
 
     max_curvature = float(np.max(Jc.curve.kappa()))
-    curvature_violation = upper_bound_residual(max_curvature, Jc.threshold)
+    curvature_violation = upper_bound_residual(max_curvature, Jc.threshold)  # noqa: F821
     curvature_signed_value, curvature_grad = smooth_max_curvature_signed_constraint(
         Jc.curve,
         Jc.threshold,
@@ -1282,7 +1284,7 @@ def evaluate_stage2_alm_problem(
         base_objective,
     )
 
-    evaluation = augmented_inequality_objective(
+    evaluation = augmented_inequality_objective(  # noqa: F821
         base_value,
         base_grad,
         [
@@ -1626,7 +1628,7 @@ def run_stage2_alm_optimizer_timed(
     outer_state_callback=None,
 ):
     start = time.perf_counter()
-    result = minimize_alm(
+    result = minimize_alm(  # noqa: F821 — parked ALM import
         dofs,
         STAGE2_ALM_CONSTRAINT_NAMES,
         evaluate_problem,

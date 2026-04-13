@@ -3071,6 +3071,23 @@ def test_gpu_parity_workflow_enforces_strict_transfer_guard_contract():
     assert "benchmark_artifacts/single_stage_outer_loop_cuda.json" in workflow_text
 
 
+def test_gpu_parity_workflow_adds_full_suite_disallow_lane():
+    workflow_text = _gpu_parity_workflow_path().read_text(encoding="utf-8")
+
+    _assert_named_benchmark_env_bootstrap(workflow_text)
+    assert "gpu-full-suite-disallow:" in workflow_text
+    assert "name: GPU full suite (CUDA, transfer_guard=disallow)" in workflow_text
+    assert "runs-on: [self-hosted, gpu]" in workflow_text
+    assert 'SIMSOPT_BACKEND_STRICT: "1"' in workflow_text
+    assert "SIMSOPT_JAX_TRANSFER_GUARD: disallow" in workflow_text
+    assert 'JAX_ENABLE_X64: "1"' in workflow_text
+    assert 'XLA_PYTHON_CLIENT_PREALLOCATE: "false"' in workflow_text
+    assert "Run full pytest suite under CUDA strict transfer guard" in workflow_text
+    assert "python -m pytest tests \\" in workflow_text
+    assert "-o log_cli=true" in workflow_text
+    assert "-o log_cli_level=INFO" in workflow_text
+
+
 def test_smoke_workflow_adds_cuda_e2e_target_lane_gate():
     workflow_text = _smoke_workflow_path().read_text(encoding="utf-8")
     required_paths = (

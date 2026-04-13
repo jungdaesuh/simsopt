@@ -122,6 +122,7 @@ _STRICT_REFERENCE_LEAST_SQUARES_DETAIL = (
 _SCALAR_VALUE_AND_GRAD_CACHE_LOCK = Lock()
 _CACHEABLE_VALUE_AND_GRAD_ATTR = "_simsopt_cache_jit_value_and_grad"
 _CACHED_VALUE_AND_GRAD_ATTR = "_simsopt_cached_jit_value_and_grad"
+_STRUCTURED_SOLVER_CACHE_TOKEN_ATTR = "_simsopt_structured_solver_cache_token"
 
 
 def _version_key(raw_version: str) -> tuple[int, ...]:
@@ -340,6 +341,14 @@ def _prepare_optimizer_pytree_adapter(x0):
 def _mark_cacheable_jit_value_and_grad(fun):
     try:
         setattr(fun, _CACHEABLE_VALUE_AND_GRAD_ATTR, True)
+    except (AttributeError, TypeError):
+        pass
+    return fun
+
+
+def _mark_structured_private_solver_cacheable(fun, *, cache_token):
+    try:
+        setattr(fun, _STRUCTURED_SOLVER_CACHE_TOKEN_ATTR, cache_token)
     except (AttributeError, TypeError):
         pass
     return fun
