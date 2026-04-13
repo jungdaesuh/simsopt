@@ -28,7 +28,7 @@ Builds on M3's composed derivative path:
 
 import hashlib
 import inspect
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import partial
 
 import numpy as np
@@ -67,6 +67,9 @@ except (ImportError, ModuleNotFoundError):
 
 from .surface_fourier_jax import (
     stellsym_scatter_indices,
+)
+from ._surface_stellsym import (
+    compute_stellsym_mask_indices_for_grid,
 )
 from ._boozersurface_current_guard import (
     guard_none_G_coil_gradient_callback as _guard_none_G_coil_gradient_callback,
@@ -115,7 +118,7 @@ from .optimizer_jax import (
     target_minimize,
 )
 
-__all__ = ["BoozerSurfaceJAX"]
+__all__ = ["BoozerSurfaceJAX", "build_boozer_surface_runtime_state"]
 
 
 @dataclass(frozen=True)
@@ -141,6 +144,54 @@ jax.tree_util.register_dataclass(
     data_fields=["surface_dofs", "iota", "G"],
     meta_fields=[],
 )
+
+
+@jax.tree_util.register_dataclass
+@dataclass(frozen=True)
+class _BoozerSurfaceRuntimeState:
+    quadpoints_phi: jax.Array
+    quadpoints_theta: jax.Array
+    scatter_indices: jax.Array | None
+    mpol: int = field(metadata={"static": True})
+    ntor: int = field(metadata={"static": True})
+    nfp: int = field(metadata={"static": True})
+    stellsym: bool = field(metadata={"static": True})
+    surface_kind: str = field(metadata={"static": True})
+
+
+def _surface_geometry_kind(surface) -> str:
+    surface_type_name = type(surface).__name__
+    if surface_type_name == "SurfaceRZFourier":
+        return "rzfourier"
+    if surface_type_name == "SurfaceXYZFourier":
+        return "xyzfourier"
+    return "generic"
+
+
+def build_boozer_surface_runtime_state(surface) -> _BoozerSurfaceRuntimeState:
+    """Snapshot the immutable surface metadata required by JAX Boozer solves."""
+    scatter_indices = None
+    if surface.stellsym:
+        geometry_kind = _surface_geometry_kind(surface)
+        if geometry_kind == "generic":
+            scatter_indices = _generic_surface_scatter_operator(
+                surface.mpol,
+                surface.ntor,
+            )
+        else:
+            scatter_indices = _as_jax_int32(
+                stellsym_scatter_indices(surface.mpol, surface.ntor)
+            )
+    return _BoozerSurfaceRuntimeState(
+        quadpoints_phi=_as_jax_float64(surface.quadpoints_phi),
+        quadpoints_theta=_as_jax_float64(surface.quadpoints_theta),
+        scatter_indices=scatter_indices,
+        mpol=int(surface.mpol),
+        ntor=int(surface.ntor),
+        nfp=int(surface.nfp),
+        stellsym=bool(surface.stellsym),
+        surface_kind=_surface_geometry_kind(surface),
+    )
 
 
 def _require_boozer_vjp_callback_signature(callback, *, callback_name: str):
@@ -856,7 +907,7 @@ def _boozer_exact_coil_vjp(lm, booz_surf, iota, G):
         ``d_coil_arrays`` is a list of ``(d_g, d_gd, d_c)`` tuples matching
         the coil_arrays pytree structure.
     """
-    sdofs = booz_surf._get_surface_dofs()
+    sdofs = booz_surf._get_cached_surface_dofs()
     x = _concat_jax_float64(sdofs, [iota, G])
     mask_indices = booz_surf._compute_stellsym_mask_indices()
 
@@ -901,7 +952,7 @@ def _boozer_exact_coil_vjp_groups(lm, booz_surf, iota, G):
 
 def _build_exact_group_vjp_callback(booz_surf, iota, G):
     """Build stable exact-solve group runners for repeated streaming VJPs."""
-    sdofs = booz_surf._get_surface_dofs()
+    sdofs = booz_surf._get_cached_surface_dofs()
     x = _concat_jax_float64(sdofs, [iota, G])
     mask_indices = booz_surf._compute_stellsym_mask_indices()
 
@@ -1093,7 +1144,7 @@ def _make_ls_group_runner(
 
 def _ls_decision_vector(booz_surf, iota, G):
     optimize_G = G is not None
-    sdofs = booz_surf._get_surface_dofs()
+    sdofs = booz_surf._get_cached_surface_dofs()
     if optimize_G:
         x = _concat_jax_float64(sdofs, [iota, G])
     else:
@@ -1215,14 +1266,19 @@ def _directional_derivative(objective, x, tangent):
 
 
 def _traceable_plu_or_dummy(matrix, *, finite):
-    """Build PLU factors only for finite matrices on traceable paths."""
+    """Build PLU factors only for finite matrices on traceable paths.
+
+    The dummy path returns NaN-filled factors so that any accidental solve
+    against a failed-solve PLU propagates NaN visibly rather than silently
+    returning zeros (which could be mistaken for a valid zero gradient).
+    """
 
     def compute_plu(mat):
         return jax.scipy.linalg.lu(mat)
 
     def dummy_plu(mat):
-        zeros = jnp.zeros_like(mat)
-        return zeros, zeros, zeros
+        nan_fill = jnp.full_like(mat, jnp.nan)
+        return nan_fill, nan_fill, nan_fill
 
     if isinstance(finite, (bool, np.bool_)):
         return compute_plu(matrix) if bool(finite) else dummy_plu(matrix)
@@ -1412,6 +1468,10 @@ class BoozerSurfaceJAX(Optimizable):
             ``least_squares_algorithm="quasi-newton"``
             preserves the historical BFGS/L-BFGS route; ``"lm"`` enables the
             residual-vector Levenberg-Marquardt route on supported backends.
+        surface_runtime_state: optional immutable surface-metadata snapshot.
+            When provided, traceable and exact JAX solver paths use this cached
+            state instead of querying the live surface object for quadrature,
+            symmetry-mask construction, or scatter metadata.
     """
 
     supports_explicit_surface_warm_start = True
@@ -1424,6 +1484,7 @@ class BoozerSurfaceJAX(Optimizable):
         targetlabel,
         constraint_weight=None,
         options=None,
+        surface_runtime_state=None,
     ):
         super().__init__(depends_on=[biotsavart])
 
@@ -1468,35 +1529,24 @@ class BoozerSurfaceJAX(Optimizable):
                     "optimizer_backend must be one of: scipy, ondevice."
                 )
 
-        # --- Extract static data from CPU objects (one-time) ---
-        s = surface
-        self.mpol = s.mpol
-        self.ntor = s.ntor
-        self.nfp = s.nfp
-        self.stellsym = s.stellsym
-        self.quadpoints_phi = _as_jax_float64(s.quadpoints_phi)
-        self.quadpoints_theta = _as_jax_float64(s.quadpoints_theta)
-        surface_type_name = type(s).__name__
-        if surface_type_name == "SurfaceRZFourier":
-            self._surface_geometry_kind = "rzfourier"
-        elif surface_type_name == "SurfaceXYZFourier":
-            self._surface_geometry_kind = "xyzfourier"
-        else:
-            self._surface_geometry_kind = "generic"
+        runtime_state = (
+            surface_runtime_state
+            if surface_runtime_state is not None
+            else build_boozer_surface_runtime_state(surface)
+        )
 
-        # Stellsym DOF scatter indices
-        if self.stellsym:
-            if self._surface_geometry_kind == "generic":
-                self.scatter_indices = _generic_surface_scatter_operator(
-                    self.mpol,
-                    self.ntor,
-                )
-            else:
-                self.scatter_indices = _as_jax_int32(
-                    stellsym_scatter_indices(self.mpol, self.ntor)
-                )
-        else:
-            self.scatter_indices = None
+        # --- Extract immutable surface metadata once; keep DOFs cached locally ---
+        self._surface_runtime_state = runtime_state
+        self._surface_dofs = _as_jax_float64(surface.get_dofs())
+        self._exact_mask_indices = None
+        self.mpol = runtime_state.mpol
+        self.ntor = runtime_state.ntor
+        self.nfp = runtime_state.nfp
+        self.stellsym = runtime_state.stellsym
+        self.quadpoints_phi = runtime_state.quadpoints_phi
+        self.quadpoints_theta = runtime_state.quadpoints_theta
+        self._surface_geometry_kind = runtime_state.surface_kind
+        self.scatter_indices = runtime_state.scatter_indices
 
         # Toroidal flux phi index (first phi point by default)
         self.phi_idx = 0
@@ -1516,6 +1566,11 @@ class BoozerSurfaceJAX(Optimizable):
     def _coil_arrays(self):
         """Coil geometry tuples ``(gammas, gammadashs, currents)`` without index lists."""
         return list(grouped_field_inputs_from_spec(self.coil_set_spec))
+
+    @property
+    def surface_runtime_state(self):
+        """Immutable surface metadata snapshot used by the JAX solver lanes."""
+        return self._surface_runtime_state
 
     @property
     def _coil_index_lists(self):
@@ -1624,12 +1679,18 @@ class BoozerSurfaceJAX(Optimizable):
         return self._make_newton_progress_callback()
 
     def _get_surface_dofs(self):
-        """Get current surface DOFs as JAX array."""
-        return _as_jax_float64(self.surface.get_dofs())
+        """Get current surface DOFs as a JAX array and refresh the cache."""
+        self._surface_dofs = _as_jax_float64(self.surface.get_dofs())
+        return self._surface_dofs
+
+    def _get_cached_surface_dofs(self):
+        """Get the last synchronized surface DOFs without touching the host surface."""
+        return self._surface_dofs
 
     def _set_surface_dofs(self, dofs_jax):
-        """Write JAX DOFs back to CPU surface."""
-        self.surface.set_dofs(_host_numpy(dofs_jax))
+        """Update cached DOFs and mirror them back to the live surface."""
+        self._surface_dofs = _as_jax_float64(dofs_jax)
+        self.surface.set_dofs(_host_numpy(self._surface_dofs))
 
     def _pack_decision_vector(self, iota, G, sdofs=None):
         """Pack [surface_dofs, iota] or [surface_dofs, iota, G]."""
@@ -2618,17 +2679,17 @@ class BoozerSurfaceJAX(Optimizable):
         return self._make_exact_residual_with(mask_indices)
 
     def _compute_stellsym_mask_indices(self):
-        """Compute the integer mask indices for the exact residual.
-
-        Extracts the boolean stellsym mask from the CPU surface object
-        and converts to integer indices for JAX fancy indexing.
-        """
-        s = self.surface
-        m = s.get_stellsym_mask()
-        mask = np.repeat(m[..., None], 3, axis=2)
-        if s.stellsym:
-            mask[0, 0, 0] = False
-        return _as_jax_int32(np.flatnonzero(mask))
+        """Compute and cache the integer exact-residual mask indices."""
+        if self._exact_mask_indices is None:
+            self._exact_mask_indices = compute_stellsym_mask_indices_for_grid(
+                mpol=self.mpol,
+                ntor=self.ntor,
+                nfp=self.nfp,
+                stellsym=self.stellsym,
+                quadpoints_phi=self.quadpoints_phi,
+                quadpoints_theta=self.quadpoints_theta,
+            )
+        return self._exact_mask_indices
 
     def solve_residual_equation_exactly_newton(
         self,

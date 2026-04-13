@@ -1248,10 +1248,7 @@ def _lm_iteration(flat_residual_fn, state, *, tol):
             _device_scalar(1.0e-14, dtype=state["cost"].dtype),
         ),
     )
-    _, _, _, _, current_pullback = _least_squares_gradient_state(
-        flat_residual_fn,
-        state["x"],
-    )
+    _, current_pullback = jax.vjp(flat_residual_fn, state["x"])
     step, linear_residual, _ = _gmres_solve_least_squares_system(
         flat_residual_fn,
         state["x"],

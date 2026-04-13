@@ -1202,6 +1202,23 @@ class TestBoozerSurfaceJAXClass:
             np.asarray([coil.current.get_value() for coil in coils]),
         )
 
+    def test_instantiation_caches_surface_runtime_state_and_dofs(self):
+        """The JAX solver keeps an explicit cached copy of the surface DOFs."""
+        booz = _make_mock_boozer_surface()
+        expected_dofs = np.asarray(booz.surface.get_dofs(), dtype=np.float64)
+
+        def _unexpected_get_dofs():
+            raise AssertionError("live surface get_dofs() should not be queried")
+
+        booz.surface.get_dofs = _unexpected_get_dofs
+
+        np.testing.assert_allclose(
+            np.asarray(booz._get_cached_surface_dofs(), dtype=np.float64),
+            expected_dofs,
+        )
+        assert booz.surface_runtime_state.mpol == booz.surface.mpol
+        assert booz.surface_runtime_state.ntor == booz.surface.ntor
+
     @pytest.mark.parametrize(
         ("optimizer_backend", "expected_algorithm"),
         [
@@ -2880,6 +2897,24 @@ class TestBoozerSurfaceJAXExactPath:
         assert booz.boozer_type == "exact"
         assert booz.constraint_weight is None
 
+    def test_exact_mask_indices_use_cached_runtime_state(self):
+        """Exact-path mask construction should not call the live surface getter."""
+        booz = _make_mock_boozer_surface_exact(stellsym=True)
+        expected = np.asarray(booz._compute_stellsym_mask_indices(), dtype=np.int32)
+        booz._exact_mask_indices = None
+
+        def _unexpected_get_mask():
+            raise AssertionError(
+                "live surface get_stellsym_mask() should not be queried"
+            )
+
+        booz.surface.get_stellsym_mask = _unexpected_get_mask
+
+        np.testing.assert_array_equal(
+            np.asarray(booz._compute_stellsym_mask_indices(), dtype=np.int32),
+            expected,
+        )
+
     def test_run_code_exact_converges(self):
         """run_code() exact path runs and returns a result dict."""
         booz = _make_mock_boozer_surface_exact()
@@ -3648,10 +3683,9 @@ class TestBoozerSurfaceJAXExactPath:
         assert bool(result["success"]) is False
         assert result["plu"] is not None
         for factor in result["plu"]:
-            np.testing.assert_allclose(
-                np.asarray(factor),
-                np.zeros((sdofs.size + 2, sdofs.size + 2)),
-                atol=0.0,
+            assert np.all(np.isnan(np.asarray(factor))), (
+                "Dummy PLU for failed solves must be NaN-filled to prevent "
+                "silent zero-gradient propagation"
             )
 
     def test_run_code_functional_reuses_traceable_inner_solve(self, monkeypatch):
@@ -3754,10 +3788,9 @@ class TestBoozerSurfaceJAXExactPath:
         assert bool(result["success"]) is False
         assert result["plu"] is not None
         for factor in result["plu"]:
-            np.testing.assert_allclose(
-                np.asarray(factor),
-                np.zeros((sdofs.size + 2, sdofs.size + 2)),
-                atol=0.0,
+            assert np.all(np.isnan(np.asarray(factor))), (
+                "Dummy PLU for failed solves must be NaN-filled to prevent "
+                "silent zero-gradient propagation"
             )
 
     def test_exact_accepts_and_ignores_optimizer_backend_option(self):
@@ -4715,3 +4748,213 @@ class TestUpstreamFactoryBoozerMatrix:
         assert residual.ndim == 1
         assert residual.size > 0
         assert np.all(np.isfinite(np.asarray(residual)))
+
+
+# ---------------------------------------------------------------------------
+# CPU-vs-JAX parity regression tests (require simsoptpp)
+# ---------------------------------------------------------------------------
+try:
+    from simsopt.geo.surfacexyztensorfourier import SurfaceXYZTensorFourier
+
+    _HAS_SURFACE_XYZ_TENSOR = True
+except (ImportError, ModuleNotFoundError):
+    _HAS_SURFACE_XYZ_TENSOR = False
+
+_skip_no_simsoptpp = pytest.mark.skipif(
+    not _HAS_SURFACE_XYZ_TENSOR,
+    reason="SurfaceXYZTensorFourier requires simsoptpp",
+)
+
+
+@_skip_no_simsoptpp
+class TestStellsymMaskCPUJAXParity:
+    """Verify that the extracted JAX stellsym mask matches the CPU surface mask."""
+
+    _GRID_CONFIGS = [
+        # (description, phi_builder, theta_builder)
+        (
+            "full_phi_x_full_theta",
+            lambda ntor, nfp: np.linspace(0, 1.0 / nfp, 2 * ntor + 1, endpoint=False),
+            lambda mpol: np.linspace(0, 1.0, 2 * mpol + 1, endpoint=False),
+        ),
+        (
+            "full_phi_x_half_theta",
+            lambda ntor, nfp: np.linspace(0, 1.0 / nfp, 2 * ntor + 1, endpoint=False),
+            lambda mpol: np.linspace(0, 0.5, mpol + 1, endpoint=False),
+        ),
+        (
+            "half_phi_x_full_theta",
+            lambda ntor, nfp: np.linspace(0, 1.0 / (2.0 * nfp), ntor + 1, endpoint=False),
+            lambda mpol: np.linspace(0, 1.0, 2 * mpol + 1, endpoint=False),
+        ),
+    ]
+
+    @pytest.mark.parametrize(
+        "mpol,ntor,nfp",
+        [(2, 2, 2), (4, 3, 3), (6, 6, 3)],
+        ids=["2x2_nfp2", "4x3_nfp3", "6x6_nfp3"],
+    )
+    @pytest.mark.parametrize(
+        "grid_label,phi_fn,theta_fn",
+        _GRID_CONFIGS,
+        ids=[cfg[0] for cfg in _GRID_CONFIGS],
+    )
+    def test_mask_matches_cpu_surface(
+        self, mpol, ntor, nfp, grid_label, phi_fn, theta_fn
+    ):
+        """surface_stellsym_mask_for_grid() matches SurfaceXYZTensorFourier.get_stellsym_mask()."""
+        from simsopt.geo._surface_stellsym import surface_stellsym_mask_for_grid
+
+        phis = phi_fn(ntor, nfp)
+        thetas = theta_fn(mpol)
+
+        s = SurfaceXYZTensorFourier(
+            mpol=mpol,
+            ntor=ntor,
+            stellsym=True,
+            nfp=nfp,
+            quadpoints_phi=phis,
+            quadpoints_theta=thetas,
+        )
+
+        cpu_mask = s.get_stellsym_mask()
+        jax_mask = surface_stellsym_mask_for_grid(
+            mpol=mpol,
+            ntor=ntor,
+            nfp=nfp,
+            stellsym=True,
+            quadpoints_phi=phis,
+            quadpoints_theta=thetas,
+        )
+
+        np.testing.assert_array_equal(
+            jax_mask,
+            cpu_mask,
+            err_msg=f"Mask mismatch for {grid_label} mpol={mpol} ntor={ntor} nfp={nfp}",
+        )
+
+    @pytest.mark.parametrize(
+        "mpol,ntor,nfp",
+        [(2, 2, 2), (6, 6, 3)],
+        ids=["2x2_nfp2", "6x6_nfp3"],
+    )
+    def test_mask_indices_match_cpu_surface(self, mpol, ntor, nfp):
+        """compute_stellsym_mask_indices_for_grid() matches the old _compute_stellsym_mask_indices logic."""
+        from simsopt.geo._surface_stellsym import (
+            compute_stellsym_mask_indices_for_grid,
+        )
+
+        phis = np.linspace(0, 1.0 / nfp, 2 * ntor + 1, endpoint=False)
+        thetas = np.linspace(0, 1.0, 2 * mpol + 1, endpoint=False)
+
+        s = SurfaceXYZTensorFourier(
+            mpol=mpol,
+            ntor=ntor,
+            stellsym=True,
+            nfp=nfp,
+            quadpoints_phi=phis,
+            quadpoints_theta=thetas,
+        )
+
+        # Reproduce the old _compute_stellsym_mask_indices logic exactly
+        m = s.get_stellsym_mask()
+        mask_3d = np.repeat(m[..., None], 3, axis=2)
+        mask_3d[0, 0, 0] = False
+        expected_indices = np.flatnonzero(mask_3d)
+
+        jax_indices = np.asarray(
+            compute_stellsym_mask_indices_for_grid(
+                mpol=mpol,
+                ntor=ntor,
+                nfp=nfp,
+                stellsym=True,
+                quadpoints_phi=phis,
+                quadpoints_theta=thetas,
+            ),
+            dtype=np.int32,
+        )
+
+        np.testing.assert_array_equal(
+            jax_indices,
+            expected_indices.astype(np.int32),
+            err_msg=f"Index mismatch for mpol={mpol} ntor={ntor} nfp={nfp}",
+        )
+
+
+@_skip_no_simsoptpp
+class TestBuildBoozerSurfaceRuntimeState:
+    """End-to-end tests for build_boozer_surface_runtime_state → constructor."""
+
+    def _make_real_surface(self, mpol=3, ntor=3, nfp=2, stellsym=True):
+        phis = np.linspace(0, 1.0 / nfp, 2 * ntor + 1, endpoint=False)
+        thetas = np.linspace(0, 1.0, 2 * mpol + 1, endpoint=False)
+        return SurfaceXYZTensorFourier(
+            mpol=mpol,
+            ntor=ntor,
+            stellsym=stellsym,
+            nfp=nfp,
+            quadpoints_phi=phis,
+            quadpoints_theta=thetas,
+        )
+
+    def test_runtime_state_fields_match_surface(self):
+        """build_boozer_surface_runtime_state captures correct surface metadata."""
+        from simsopt.geo.boozersurface_jax import build_boozer_surface_runtime_state
+
+        s = self._make_real_surface()
+        rs = build_boozer_surface_runtime_state(s)
+
+        assert rs.mpol == s.mpol
+        assert rs.ntor == s.ntor
+        assert rs.nfp == s.nfp
+        assert rs.stellsym == s.stellsym
+        np.testing.assert_allclose(
+            np.asarray(rs.quadpoints_phi), s.quadpoints_phi
+        )
+        np.testing.assert_allclose(
+            np.asarray(rs.quadpoints_theta), s.quadpoints_theta
+        )
+        assert rs.scatter_indices is not None  # stellsym=True
+
+    def test_runtime_state_non_stellsym_has_no_scatter(self):
+        """Non-stellsym surface produces scatter_indices=None."""
+        from simsopt.geo.boozersurface_jax import build_boozer_surface_runtime_state
+
+        s = self._make_real_surface(stellsym=False)
+        rs = build_boozer_surface_runtime_state(s)
+
+        assert rs.stellsym is False
+        assert rs.scatter_indices is None
+
+    def test_constructor_uses_prebuilt_runtime_state(self):
+        """BoozerSurfaceJAX uses pre-built runtime state without re-querying surface."""
+        from simsopt.geo.boozersurface_jax import build_boozer_surface_runtime_state
+
+        s = self._make_real_surface(mpol=3, ntor=3, nfp=2)
+        rs = build_boozer_surface_runtime_state(s)
+
+        # Build minimal mock biotsavart and label for the constructor
+        coils = _make_mock_coils()
+        bs = _MockBiotSavart(coils)
+        label = _MockVolumeLabel()
+
+        booz = BoozerSurfaceJAX(
+            bs,
+            s,
+            label,
+            targetlabel=0.1,
+            constraint_weight=1.0,
+            surface_runtime_state=rs,
+        )
+
+        assert booz.mpol == rs.mpol
+        assert booz.ntor == rs.ntor
+        assert booz.nfp == rs.nfp
+        assert booz.stellsym == rs.stellsym
+        assert booz.surface_runtime_state is rs
+        np.testing.assert_allclose(
+            np.asarray(booz.quadpoints_phi), np.asarray(rs.quadpoints_phi)
+        )
+        np.testing.assert_allclose(
+            np.asarray(booz.quadpoints_theta), np.asarray(rs.quadpoints_theta)
+        )

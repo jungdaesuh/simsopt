@@ -133,11 +133,12 @@ def _take_axis0(array, index):
 
 
 def _two_loop_recursion(state):
+    # All stellarator DOFs are real-valued; no conjugation needed.
     dtype = state.rho_history.dtype
     his_size = len(state.rho_history)
     his_size_jax = _int_scalar(his_size)
     curr_size = jnp.where(state.k < his_size_jax, state.k, his_size_jax)
-    q = -jnp.conj(state.g_k)
+    q = -state.g_k
     a_his = jnp.zeros_like(state.rho_history)
 
     def body_fun1(j, carry):
@@ -151,9 +152,9 @@ def _two_loop_recursion(state):
         rho_i = _take_axis0(state.rho_history, i)
         s_i = _take_axis0(state.s_history, i)
         y_i = _take_axis0(state.y_history, i)
-        a_i = rho_i * _dot(jnp.conj(s_i), _q).real.astype(dtype)
+        a_i = rho_i * _dot(s_i, _q).real.astype(dtype)
         _a_his = _a_his.at[i].set(a_i)
-        _q = _q - a_i * jnp.conj(y_i)
+        _q = _q - a_i * y_i
         return _q, _a_his
 
     q, a_his = lax.fori_loop(_int_scalar(0), curr_size, body_fun1, (q, a_his))
@@ -330,7 +331,7 @@ def _minimize_lbfgs_private_impl(
         g_kp1 = ls_results.g_k
         y_k = g_kp1 - state.g_k
         rho_k_inv = jnp.real(_dot(y_k, s_k))
-        y_norm_sq = jnp.real(_dot(jnp.conj(y_k), y_k))
+        y_norm_sq = jnp.real(_dot(y_k, y_k))
         rho_k = jnp.reciprocal(rho_k_inv).astype(y_k.dtype)
         gamma_raw = rho_k_inv / y_norm_sq
         gamma = jnp.clip(
