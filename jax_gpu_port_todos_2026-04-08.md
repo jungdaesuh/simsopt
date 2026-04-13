@@ -88,22 +88,76 @@
 ### Tier 2 (required for production use)
 
 - [x] **39.** ~~Add `TestRunCodeLSParityProductionScale` — `nphi=16, ntheta=8, ncoils=4` fixture (current `TestRunCodeLSParity` uses `nphi=5, ntheta=5, ncoils=2` = 25 points, 1-2 orders below production).~~ **DONE** — `TestRunCodeLSParity::test_ls_solve_parity_production_scale` covers the larger CPU-vs-JAX LS fixture, and `test_ls_solve_parity_production_scale_gpu_under_disallow` adds the strict CUDA `transfer_guard=disallow` lane with on-device solver-state assertions; validated on Runpod RTX 4090 on 2026-04-13.
-- [ ] **40.** Add full single-stage **outer-loop convergence** test on GPU (not just init-parity at `benchmarks/single_stage_init_parity.py`). Verify IFT adjoint decreases the objective over ≥10 outer iterations on CUDA. **(PARTIAL — `single_stage_outer_loop_probe.py` benchmark runs ≥10 iters on CUDA in CI, but no pytest-based test in `tests/`)**
-- [ ] **41.** Add XLA recompilation-count smoke test. Track compilation counter across an optimizer loop; fail if compiles > expected per iteration. Protects against shape-dependent recompile regressions.
-- [ ] **42.** Add CI test that runs `SIMSOPT_JAX_TRANSFER_GUARD=disallow` against the **full** suite on GPU (not just the e2e smoke at `jax_smoke.yml:257-318`). **(PARTIAL — `jax_gpu_parity.yml` and `jax_smoke.yml` set `disallow`, but only run curated slices, not full suite)**
+- [ ] **40.** Add full single-stage **outer-loop convergence** test on GPU (not just init-parity at `benchmarks/single_stage_init_parity.py`). Verify IFT adjoint decreases the objective over ≥10 outer iterations on CUDA. **(PARTIAL — the pytest-based convergence proof now exists and enforces the ≥10-iteration/net-objective-decrease contract, but CUDA validation is currently blocked on the available Runpod pods by runtime/toolchain issues rather than test coverage gaps.)** Local proof path: `benchmarks/validation_ladder_contract.py`, `benchmarks/single_stage_outer_loop_probe.py`, `tests/integration/test_single_stage_physics_parity.py::TestSingleStageOuterLoopGpuProof`, `.github/workflows/jax_smoke.yml`, `.github/workflows/jax_gpu_parity.yml`.
+- [ ] **41.** Add XLA recompilation-count smoke test. Track compilation counter across an optimizer loop; fail if compiles > expected per iteration. Protects against shape-dependent recompile regressions. **Implementation note:** extend the existing target-lane compile-reuse harness rather than inventing a new path, and use the official JAX config diagnostics (`jax_log_compiles`, `jax_explain_cache_misses`) so cache/shape failures stay attributable.
+- [ ] **42.** Add CI test that runs `SIMSOPT_JAX_TRANSFER_GUARD=disallow` against the **full** suite on GPU (not just the e2e smoke at `jax_smoke.yml:257-318`). **(PARTIAL — `jax_gpu_parity.yml` and `jax_smoke.yml` set `disallow`, but only run curated slices, not full suite.)** Keep this behind `#40/#41`, and keep `XLA_PYTHON_CLIENT_PREALLOCATE=false` plus live logging when broadening the suite, per the JAX GPU-memory and profiling guidance.
 - [x] **43.** ~~Add direct GPU unit test for `BoozerSurfaceJAX` inner solver (LS and exact paths).~~ **DONE** — `test_run_code_traceable_exact_executes_inner_solve_on_gpu` (line 2953) + `test_run_code_traceable_lm_ondevice_executes_inner_solve_on_gpu` (line 3116) in `test_boozersurface_jax.py`; run in CI with `transfer_guard=disallow`.
 
 ### Tier 3 (nice-to-have)
 
 - [ ] **44.** Multi-GPU collective operation test (if/when #35 is implemented).
 - [ ] **45.** Tolerance ratchet regression test — verify CI contract `gpu_reduction_order_max_ulp` and `gpu_reduction_order_rel_tol` cannot loosen without explicit override. **(PARTIAL — contract tests exist in `test_benchmark_helpers.py` for ratchet tightening, ULP tracking, and payload state; but framed as unit tests, not CI regression gates)**
-- [ ] **46.** Transfer guard fuzz test — systematically inject host scalars into kernel entry points and assert rejection under `disallow`.
+- [ ] **46.** Transfer guard fuzz test — systematically inject host scalars into kernel entry points and assert rejection under `disallow`. Scope this to the real single-stage target-lane entry points and immutable runtime-bundle boundaries, matching the official JAX transfer-guard semantics for implicit host↔device movement.
 - [x] **47.** ~~Unit tests for private-optimizer edge cases: `y_k·s_k ≈ 0`, `‖y_k‖² ≈ 0`, stalled step, curvature-sign flip.~~ **DONE** — `test_minimize_lbfgs_private_rejects_degenerate_curvature_update`, `test_minimize_lbfgs_private_rejects_stalled_nonconverged_step`, `test_minimize_lbfgs_private_clamps_gamma_on_large_curvature_ratio` in `test_boozersurface_jax_private.py`; CI-validated.
 - [x] **48.** ~~scipy optimizer lane on GPU parity workflow.~~ **DONE** — re-scoped by contract: `backend="jax"` no longer supports the SciPy optimizer lane at high-level entrypoints, so GPU parity and target workflows exercise the on-device optimizer path only, while the SciPy lane remains native CPU/reference-only.
 - [ ] **49.** **[LOW]** Relax FD tolerances (or add skip+reason) for the two known FD-sensitive failures:
       - `tests/geo/test_boozer_derivatives_jax.py::TestComposedWeightInvModB::test_gradient_weighted_fd` (1/|B| near poles)
       - `tests/geo/test_boozer_derivatives_jax.py::TestBoozerResidualCoilVJP::test_coil_vjp_geometry_fd[gammas]`
-      Either loosen `fd_tol` from 1e-4 or mark `@pytest.mark.skip(reason="...")`.
+      Either loosen `fd_tol` from 1e-4 or mark `@pytest.mark.skip(reason="...")`. Leave this last; it is cleanup around known FD sensitivity, not a blocker for the real CUDA correctness/runtime closure.
+
+#### Single-stage closure order (2026-04-13)
+
+1. Close **`#40`** by rerunning the already-checked-in proof path on a clean CUDA environment that satisfies the JAX install/runtime contract. This is now an environment/runtime validation task, not a missing-test task.
+2. Close **`#41`** by wrapping the real target-lane outer-loop probe in a compile-count smoke. The relevant official JAX references are the benchmarking/profiling docs, the configuration options for `jax_log_compiles` / `jax_explain_cache_misses`, and the requirement to benchmark outer compiled calls with explicit `block_until_ready()`.
+3. Close **`#42`** only after `#40/#41` are green. Broadening GPU coverage before compile/runtime stability is understood will produce low-signal failures.
+4. Close **`#46`** against the same real entry points used by `#40`, so transfer-guard hardening is tied to the production lane rather than toy kernels.
+5. Close **`#49`** last.
+
+#### Single-stage algorithm follow-up outside this GPU-port block
+
+The main remaining single-stage work after the GPU-port proof is donor/seed/search policy in `examples/single_stage_optimization/SINGLE_STAGE/single_stage_banana_example.py`, not more proof scaffolding. The working direction is donor-class-aware continuation plus restoration-style shrink/retry for invalid geometry rather than a generic preserve-first rule. Useful references: Nocedal and Wright, *Numerical Optimization*; JAXopt `LBFGS` docs/release notes; and the Wächter-Biegler / IPOPT restoration-phase literature and output docs.
+
+#### Stage 2 closure order (2026-04-13)
+
+- [ ] Treat Stage 2 as **algorithm-first**, not **port-first**. The Stage 2 outer optimizer is already routed through the lane-specific JAX/reference substrate at `examples/single_stage_optimization/STAGE_2/banana_coil_solver.py:1185-1259`, `tests/integration/test_stage2_jax.py:4627-4794` already guards the target-lane routing contract, and the real CUDA parity backlog for reduced-real plus production-scale LS coverage is already closed by **`#38/#39`**.
+- [ ] Fix the **legacy-lane closeout** before adding more Stage 2 proof scaffolding. On **April 13, 2026**, the representative legacy lanes `014417_iota15` and `002084_iota20` stayed hardware-feasible but kept re-solving the same basin instead of closing decisively. The current Stage 2 objective in `banana_coil_solver.py:1917-1924` is still a fixed weighted penalty objective, so the next experiment should move toward proper augmented-Lagrangian semantics rather than more penalty-cap tuning.
+- [ ] Keep the ALM follow-up narrow and evidence-driven:
+  - [ ] Add explicit outer-loop observability for hard-feasibility, surrogate residual, projected stationarity, multiplier norm, `rho`, and inner-solver status.
+  - [ ] Add a "feasible but not closed" detector keyed to persistent hard-feasibility plus stalled stationarity decrease.
+  - [ ] Once that detector fires, switch from generic replay to a **feasible-closeout** mode that tightens first-order stationarity on the current feasible manifold.
+  - [ ] Upgrade the outer loop toward proper ALM semantics with multiplier updates and projection for inequality constraints; increase `rho` only when violation reduction stalls. The Algencan defaults `tau=0.5` and `gamma=10` are reasonable initial settings, not immutable constants.
+  - [ ] Prefer Newton / reduced-KKT closeout and trust-region closeout directions when the feasible-closeout path needs a second stage, closer to **ALGENCAN-NEWTON** / **ALGENCAN-OTR** than to simply increasing `rho`.
+  - [ ] Avoid the unvalidated scalar warm-start heuristic `-grad_f / grad_c`; if dual warm-start is needed, use previous dual state or an active-set least-squares / KKT estimate.
+- [ ] Close **`#41`** by extending the existing compile-count harness to a **real Stage 2 or target-lane outer-loop** smoke instead of inventing a second mechanism. The current reusable pieces are `tests/subprocess/jax_runtime_cases.py:116-160`, `tests/subprocess/jax_runtime_cases.py:184-210`, and `tests/test_jax_import_smoke.py:450-478`. Use the official JAX diagnostics for attribution: `jax_log_compiles`, `jax_explain_cache_misses`, persistent-cache controls, and `block_until_ready()` around any timed/probed outer call. `jax.monitoring.register_event_duration_secs_listener` on `/jax/core/compile/backend_compile_duration` is a valid optional cross-check in JAX 0.9.2, but should complement the existing harness rather than replace it.
+- [ ] Close **`#42`** only after `#41` is stable. There is already strict-guard Stage 2 coverage in `.github/workflows/jax_smoke.yml:324-383` and `.github/workflows/jax_gpu_parity.yml:13-120`, but it is still curated-slice coverage rather than a full-suite GPU `SIMSOPT_JAX_TRANSFER_GUARD=disallow` lane. Promote this by broadening the existing GPU workflow, not by adding a third partially overlapping path. If test-level exemptions are needed, use the public JAX transfer-guard controls, not `jax._src...` internals.
+- [ ] If shared speed work is needed to make Stage 2 experimentation cheaper, prioritize it in this order:
+  - [ ] **`#34`** first: `src/simsopt/backend/runtime.py:434-436` still declines to set a default compilation-cache directory, which directly hurts repeated real-lane Stage 2 iteration. Follow the official JAX persistent-cache setup, including setting the cache dir before first compile and using `jax_persistent_cache_min_compile_time_secs=0` when caching all real-lane compiles is desired.
+  - [ ] **`#31`** second: `_lbfgs.py` still shifts history with slice+concatenate at `src/simsopt/geo/optimizer_jax_private/_lbfgs.py:105-123`, so a ring buffer is the clearest recurring hot-path cleanup.
+  - [ ] **`#32`** third: line-search cleanup is still useful and low risk because the active BFGS/L-BFGS callers already pass `old_fval` and `gfk`; the relevant path is `src/simsopt/geo/optimizer_jax_private/_line_search.py:340-418`.
+  - [ ] **`#24`** after that: keep buffer donation conditional on measured CUDA VRAM benefit. JAX donation only applies at true `jit` boundaries, and the repo already has the right probe scaffold in `benchmarks/biotsavart_donation_probe.py`.
+  - [ ] **`#33`** stays low priority until profiling proves it matters on the real Stage 2 lane.
+- [ ] De-prioritize, but do **not** close, the more speculative perf items until profiling or HLO evidence says otherwise:
+  - [ ] **`#24`** is not a ship blocker and may turn out to be noise, but keep it open until CUDA memory profiling says the public outer-JIT donation probe is worthless.
+  - [ ] **`#28`** should stay open until HLO or profiler evidence shows the three geometry calls are already fully deduplicated.
+  - [ ] **`#33`** should stay open until measured line-search traces show the bracketing/zoom overlap is negligible on real Stage 2 workloads.
+
+#### Stage 2 reference shelf
+
+- Official JAX docs:
+  - Persistent compilation cache: <https://docs.jax.dev/en/latest/persistent_compilation_cache.html>
+  - Config options (`jax_log_compiles`, `jax_explain_cache_misses`): <https://docs.jax.dev/en/latest/config_options.html>
+  - Transfer guard: <https://docs.jax.dev/en/latest/transfer_guard.html>
+  - Buffer donation: <https://docs.jax.dev/en/latest/buffer_donation.html>
+  - Device memory profiling: <https://docs.jax.dev/en/latest/device_memory_profiling.html>
+  - OpenXLA HLO dumps / compile debugging: <https://openxla.org/xla/hlo_dumps>
+- Open-source algorithm references:
+  - NLopt AUGLAG notes and references: <https://nlopt.readthedocs.io/en/latest/NLopt_Algorithms/>
+  - ALGENCAN family codes (`ALGENCAN-NEWTON`, `ALGENCAN-OTR`): <https://www.ime.usp.br/~egbirgin/tango/codes.php>
+  - SciPy strong-Wolfe line search notes: <https://docs.scipy.org/doc/scipy/reference/generated/scipy.optimize.line_search.html>
+- Literature:
+  - Gil et al. (2025), *Augmented Lagrangian methods produce cutting-edge magnetic coils for stellarator fusion reactors*: <https://arxiv.org/abs/2507.12681>
+  - Birgin and Martinez, augmented-Lagrangian survey: <https://www.ime.usp.br/~egbirgin/publications/bmsurveyal.pdf>
+  - Nocedal and Wright, *Numerical Optimization*.
 
 ---
 
