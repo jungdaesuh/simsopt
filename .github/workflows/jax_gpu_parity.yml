@@ -194,6 +194,7 @@ jobs:
       SIMSOPT_JAX_TRANSFER_GUARD: disallow
       JAX_PLATFORMS: cuda
       JAX_ENABLE_X64: "1"
+      PYTHONUNBUFFERED: "1"
       XLA_PYTHON_CLIENT_PREALLOCATE: "false"
 
     steps:
@@ -221,5 +222,6 @@ jobs:
           conda run --no-capture-output -n "$BENCHMARK_ENV_NAME" \
             python -m pytest tests \
             -v --tb=short -rA \
+            --capture=tee-sys \
             -o log_cli=true \
             -o log_cli_level=INFO

@@ -3081,9 +3081,11 @@ def test_gpu_parity_workflow_adds_full_suite_disallow_lane():
     assert 'SIMSOPT_BACKEND_STRICT: "1"' in workflow_text
     assert "SIMSOPT_JAX_TRANSFER_GUARD: disallow" in workflow_text
     assert 'JAX_ENABLE_X64: "1"' in workflow_text
+    assert 'PYTHONUNBUFFERED: "1"' in workflow_text
     assert 'XLA_PYTHON_CLIENT_PREALLOCATE: "false"' in workflow_text
     assert "Run full pytest suite under CUDA strict transfer guard" in workflow_text
     assert "python -m pytest tests \\" in workflow_text
+    assert "--capture=tee-sys" in workflow_text
     assert "-o log_cli=true" in workflow_text
     assert "-o log_cli_level=INFO" in workflow_text
 
