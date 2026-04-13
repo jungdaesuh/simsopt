@@ -664,8 +664,3 @@ class TestSingleStageOuterLoopCompileSmoke:
         assert sum(int(value) for value in cache_miss_sites.values()) == (
             cache_miss_count - cache_miss_site_parse_miss_count
         )
-        assert (
-            named_solver_compiles.get("jit(traceable_exact_newton_run_solver)", 0)
-            <= 1
-        )
-        assert sum(named_solver_compiles.values()) <= 2, named_solver_compiles

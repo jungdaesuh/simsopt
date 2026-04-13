@@ -288,6 +288,23 @@ def _diagnostic_trace_region_for_phase(phase: object) -> str | None:
     return None
 
 
+def _phase1_compile_behavior(
+    *,
+    compile_diagnostics_requested: bool,
+    compile_diagnostics_enabled: bool,
+    compile_diagnostics_disable_reason: str | None,
+) -> dict[str, Any]:
+    diagnostics_enabled = bool(compile_diagnostics_enabled)
+    return {
+        "diagnostics_requested": bool(compile_diagnostics_requested),
+        "diagnostics_enabled": diagnostics_enabled,
+        "jax_log_compiles": diagnostics_enabled,
+        "jax_explain_cache_misses": diagnostics_enabled,
+        "cache_reuse_evidence_valid": diagnostics_enabled,
+        "disabled_reason": compile_diagnostics_disable_reason,
+    }
+
+
 def build_phase1_diagnostic_note(
     results: dict[str, Any],
     *,
@@ -304,14 +321,11 @@ def build_phase1_diagnostic_note(
         "initial_phase_iterations": int(results.get("INITIAL_PHASE_ITERATIONS", 0)),
         "total_iterations": int(results.get("iterations", 0)),
         "target_lane_profile_recorded": "TARGET_LANE_PROFILE" in results,
-        "compile_behavior": {
-            "diagnostics_requested": bool(compile_diagnostics_requested),
-            "diagnostics_enabled": bool(compile_diagnostics_enabled),
-            "jax_log_compiles": bool(compile_diagnostics_enabled),
-            "jax_explain_cache_misses": bool(compile_diagnostics_enabled),
-            "cache_reuse_evidence_valid": bool(compile_diagnostics_enabled),
-            "disabled_reason": compile_diagnostics_disable_reason,
-        },
+        "compile_behavior": _phase1_compile_behavior(
+            compile_diagnostics_requested=compile_diagnostics_requested,
+            compile_diagnostics_enabled=compile_diagnostics_enabled,
+            compile_diagnostics_disable_reason=compile_diagnostics_disable_reason,
+        ),
         "deterministic_gpu_reductions": bool(deterministic_gpu_reductions),
         "first_bad_region": None,
         "first_bad_region_source": None,

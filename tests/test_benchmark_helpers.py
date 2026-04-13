@@ -1502,10 +1502,8 @@ def test_single_stage_init_case_threads_profile_target_lane_only_flag(
     assert observed_command[profile_flag_index + 1] == str(tmp_path / "xprof")
 
 
-def test_single_stage_init_case_threads_phase1_diagnostic_flags_and_env(
-    monkeypatch, tmp_path
-):
-    args = argparse.Namespace(
+def _single_stage_case_args(tmp_path: Path) -> argparse.Namespace:
+    return argparse.Namespace(
         plasma_surf_filename="wout_nfp22ginsburg_000_014417_iota15.nc",
         stage2_bs_path=str(DEFAULT_STAGE2_BS_PATH),
         nphi=63,
@@ -1523,6 +1521,8 @@ def test_single_stage_init_case_threads_phase1_diagnostic_flags_and_env(
         profile_target_lane_batch_size=1,
     )
 
+
+def _observe_single_stage_case_invocations(monkeypatch, tmp_path: Path):
     observed_invocations: list[tuple[list[str], dict[str, str]]] = []
     monkeypatch.setattr(
         single_stage_init_parity_module,
@@ -1537,6 +1537,14 @@ def test_single_stage_init_case_threads_phase1_diagnostic_flags_and_env(
         )
         or argparse.Namespace(stdout="", stderr=""),
     )
+    return observed_invocations
+
+
+def test_single_stage_init_case_threads_phase1_diagnostic_flags_and_env(
+    monkeypatch, tmp_path
+):
+    args = _single_stage_case_args(tmp_path)
+    observed_invocations = _observe_single_stage_case_invocations(monkeypatch, tmp_path)
 
     def fake_find_single_file(root: str | Path, pattern: str) -> Path:
         path = Path(root) / pattern
@@ -1583,38 +1591,8 @@ def test_single_stage_init_case_threads_phase1_diagnostic_flags_and_env(
 def test_single_stage_init_case_threads_compile_diagnostics_without_host_callbacks(
     monkeypatch, tmp_path
 ):
-    args = argparse.Namespace(
-        plasma_surf_filename="wout_nfp22ginsburg_000_014417_iota15.nc",
-        stage2_bs_path=str(DEFAULT_STAGE2_BS_PATH),
-        nphi=63,
-        ntheta=32,
-        mpol=4,
-        ntor=4,
-        vol_target=0.1,
-        iota_target=0.15,
-        optimizer_backend="ondevice",
-        boozer_optimizer_backend=None,
-        maxiter=1,
-        equilibrium_path=None,
-        equilibria_dir=str(tmp_path / "equilibria"),
-        jax_profile_dir=None,
-        profile_target_lane_batch_size=1,
-    )
-
-    observed_invocations: list[tuple[list[str], dict[str, str]]] = []
-    monkeypatch.setattr(
-        single_stage_init_parity_module,
-        "_single_stage_script_path",
-        lambda: tmp_path / "driver.py",
-    )
-    monkeypatch.setattr(
-        single_stage_init_parity_module,
-        "run_python_script",
-        lambda _script_path, command, **kwargs: observed_invocations.append(
-            (list(command), dict(kwargs["env"]))
-        )
-        or argparse.Namespace(stdout="", stderr=""),
-    )
+    args = _single_stage_case_args(tmp_path)
+    observed_invocations = _observe_single_stage_case_invocations(monkeypatch, tmp_path)
     monkeypatch.setattr(
         single_stage_init_parity_module,
         "find_single_file",
@@ -2256,6 +2234,9 @@ def test_single_stage_outer_loop_probe_profile_only_allows_zero_iterations():
 
 
 def test_single_stage_outer_loop_probe_builds_phase1_note_from_scaled_phase1_diagnosis():
+    disable_reason = (
+        single_stage_init_parity_module._TARGET_LANE_COMPILE_DIAGNOSTICS_HOST_CALLBACK_REASON
+    )
     note = single_stage_outer_loop_probe.build_phase1_diagnostic_note(
         {
             "iterations": 0,
@@ -2269,11 +2250,7 @@ def test_single_stage_outer_loop_probe_builds_phase1_note_from_scaled_phase1_dia
         failures=["Single-stage outer-loop probe did not decrease the objective."],
         compile_diagnostics_requested=True,
         compile_diagnostics_enabled=False,
-        compile_diagnostics_disable_reason=(
-            "compile diagnostics are disabled when Phase 1 host-callback "
-            "diagnostics are enabled because that mode does not provide "
-            "normal cache-reuse evidence"
-        ),
+        compile_diagnostics_disable_reason=disable_reason,
         deterministic_gpu_reductions=False,
     )
 
@@ -2291,11 +2268,7 @@ def test_single_stage_outer_loop_probe_builds_phase1_note_from_scaled_phase1_dia
         "jax_log_compiles": False,
         "jax_explain_cache_misses": False,
         "cache_reuse_evidence_valid": False,
-        "disabled_reason": (
-            "compile diagnostics are disabled when Phase 1 host-callback "
-            "diagnostics are enabled because that mode does not provide "
-            "normal cache-reuse evidence"
-        ),
+        "disabled_reason": disable_reason,
     }
 
 
