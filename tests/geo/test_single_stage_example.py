@@ -1552,6 +1552,21 @@ class HardwareConstraintTests(unittest.TestCase):
         self.assertFalse(module.maybe_update_best_feasible_incumbent(run_dict, "final"))
         self.assertEqual(run_dict["best_feasible_metric"], 4.0)
 
+    def test_refinement_eligible_incumbent_requires_topology_success(self):
+        module = load_single_stage_example_module()
+        run_dict = {
+            "accepted_hardware_status": {"success": True},
+            "topology_gate_status": {"enabled": True, "success": False},
+            "surface_status": {"success": True},
+            "search_eval": {"total": 1.0},
+            "intersecting": False,
+        }
+
+        self.assertFalse(module.refinement_eligible_incumbent(run_dict))
+
+        run_dict["topology_gate_status"] = {"enabled": True, "success": True}
+        self.assertTrue(module.refinement_eligible_incumbent(run_dict))
+
     def test_write_preserved_timeout_artifacts_uses_kind_specific_filenames(self):
         module = load_single_stage_example_module()
 
@@ -2431,6 +2446,229 @@ class HardwareConstraintTests(unittest.TestCase):
         self.assertEqual(module.run_dict["invalid_state_rejects_total"], 0)
         self.assertEqual(module.run_dict["frontier_trust_rejects"], 1)
         self.assertTrue(module.run_dict["topology_gate_status"]["success"])
+
+    def test_evaluate_search_step_frontier_topology_reject_becomes_penalty(self):
+        module = self.load_module()
+
+        class _Surface:
+            def volume(self):
+                return 0.10
+
+        module.SINGLE_STAGE_GOAL_MODE = "frontier"
+        module.FRONTIER_GOAL_CONFIG = SimpleNamespace(
+            boozer_trust_threshold=1.0e-5,
+            boozer_trust_penalty_scale=5.0e-5,
+        )
+        module.MULTISURFACE_RAMP_ITERATIONS = 0
+        module.INNER_SURFACE_INITIAL_WEIGHT = 1.0
+        module.SURFACE_GAP_THRESHOLD = 0.0
+        module.SS_DIST = 0.04
+        module.TOPOLOGY_GATE_TMAX = 2.0
+        module.TOPOLOGY_GATE_TOL = 1.0e-3
+        module.TOPOLOGY_GATE_SURVIVAL_THRESHOLD = 0.5
+        module.TOPOLOGY_GATE_PENALTY_SCALE = 4.0
+        module.HARDWARE_SEARCH_MODE = "hard"
+        module.HARDWARE_SEARCH_SOFT_ITERATIONS = 0
+        module.CC_DIST = 0.05
+        module.CS_DIST = 0.015
+        module.CURVATURE_THRESHOLD = 40.0
+        module.bs = object()
+        module.JCurveCurve = object()
+        module.JCurveSurface = object()
+        module.JSurfSurf = None
+        module.banana_curve = object()
+        module.JF = SimpleNamespace(x=np.zeros(2))
+        module.surface_iota_terms = [SimpleNamespace(J=lambda: 0.15)]
+        module.surface_data = [{"boozer_surface": SimpleNamespace(surface=_Surface())}]
+        module.run_dict = {
+            "x_prev": np.zeros(2),
+            "lscount": 0,
+            "accepted_iterations": 0,
+            "surface_state": {"sdofs": [], "iota": [], "G": []},
+            "accepted_x": np.zeros(2),
+            "J": 7.0,
+            "dJ": np.array([3.0, -1.0]),
+            "search_eval": {"total": 7.0},
+            "invalid_state_rejects_total": 0,
+            "topology_gate_rejects": 0,
+            "hardware_rejects": 0,
+            "surface_solve_rejects": 0,
+            "frontier_trust_rejects": 0,
+        }
+        stack_status = {
+            "success": True,
+            "solve_success": [True],
+            "self_intersections": [False],
+            "volumes_ordered": True,
+            "gap_ok": True,
+            "vessel_gap_ok": True,
+            "nesting_ok": True,
+            "adjacent_gaps": [],
+            "outer_vessel_gap": None,
+            "bad_nesting_phis": [],
+        }
+        objective_eval = {
+            "total": 2.0,
+            "grad": np.array([1.0, -2.0]),
+            "J_Boozer": 5.0e-6,
+            "dJ_Boozer": np.array([0.0, 0.0]),
+            "surface_weights": np.array([1.0]),
+        }
+
+        with patch.object(
+            module,
+            "solve_surface_stack_at_dofs",
+            return_value=stack_status,
+        ), patch.object(
+            module,
+            "evaluate_search_objective",
+            return_value=objective_eval,
+        ), patch.object(
+            module,
+            "evaluate_search_topology_gate",
+            return_value={
+                "enabled": True,
+                "success": False,
+                "survived_lines": 1,
+                "nfieldlines": 4,
+                "survival_fraction": 0.5,
+                "survival_threshold": 0.75,
+                "first_exit_time": None,
+                "first_exit_angle": None,
+                "first_exit_reason": None,
+            },
+        ), patch.object(
+            module,
+            "evaluate_single_stage_hardware_snapshot",
+            return_value={
+                "status": {"success": True, "violations": []},
+                "curve_curve_min_dist": 0.06,
+                "curve_surface_min_dist": 0.02,
+                "surface_vessel_min_dist": None,
+                "max_curvature": 15.0,
+            },
+        ):
+            evaluation = module.evaluate_search_step(np.ones(2))
+
+        self.assertAlmostEqual(evaluation["total"], 9.0)
+        np.testing.assert_allclose(evaluation["grad"], [1.0, -2.0])
+        self.assertAlmostEqual(evaluation["frontier_topology_penalty"], 7.0)
+        self.assertAlmostEqual(evaluation["frontier_contract_penalty"], 7.0)
+        self.assertEqual(module.run_dict["invalid_state_rejects_total"], 0)
+        self.assertEqual(module.run_dict["topology_gate_rejects"], 0)
+        self.assertFalse(module.run_dict["topology_gate_status"]["success"])
+
+    def test_evaluate_search_step_frontier_hardware_reject_becomes_penalty(self):
+        module = self.load_module()
+
+        class _Surface:
+            def volume(self):
+                return 0.10
+
+        module.SINGLE_STAGE_GOAL_MODE = "frontier"
+        module.FRONTIER_GOAL_CONFIG = SimpleNamespace(
+            boozer_trust_threshold=1.0e-5,
+            boozer_trust_penalty_scale=5.0e-5,
+        )
+        module.MULTISURFACE_RAMP_ITERATIONS = 0
+        module.INNER_SURFACE_INITIAL_WEIGHT = 1.0
+        module.SURFACE_GAP_THRESHOLD = 0.0
+        module.SS_DIST = 0.04
+        module.TOPOLOGY_GATE_TMAX = 2.0
+        module.TOPOLOGY_GATE_TOL = 1.0e-3
+        module.TOPOLOGY_GATE_SURVIVAL_THRESHOLD = 0.5
+        module.HARDWARE_SEARCH_MODE = "hard"
+        module.HARDWARE_SEARCH_SOFT_ITERATIONS = 0
+        module.HARDWARE_SEARCH_PENALTY_SCALE = 4.0
+        module.CC_DIST = 0.05
+        module.CS_DIST = 0.015
+        module.CURVATURE_THRESHOLD = 40.0
+        module.bs = object()
+        module.JCurveCurve = object()
+        module.JCurveSurface = object()
+        module.JSurfSurf = None
+        module.banana_curve = object()
+        module.JF = SimpleNamespace(x=np.zeros(2))
+        module.surface_iota_terms = [SimpleNamespace(J=lambda: 0.15)]
+        module.surface_data = [{"boozer_surface": SimpleNamespace(surface=_Surface())}]
+        module.run_dict = {
+            "x_prev": np.zeros(2),
+            "lscount": 0,
+            "accepted_iterations": 0,
+            "surface_state": {"sdofs": [], "iota": [], "G": []},
+            "accepted_x": np.zeros(2),
+            "J": 7.0,
+            "dJ": np.array([3.0, -1.0]),
+            "search_eval": {"total": 7.0},
+            "invalid_state_rejects_total": 0,
+            "topology_gate_rejects": 0,
+            "hardware_rejects": 0,
+            "surface_solve_rejects": 0,
+            "frontier_trust_rejects": 0,
+        }
+        stack_status = {
+            "success": True,
+            "solve_success": [True],
+            "self_intersections": [False],
+            "volumes_ordered": True,
+            "gap_ok": True,
+            "vessel_gap_ok": True,
+            "nesting_ok": True,
+            "adjacent_gaps": [],
+            "outer_vessel_gap": None,
+            "bad_nesting_phis": [],
+        }
+        objective_eval = {
+            "total": 2.0,
+            "grad": np.array([1.0, -2.0]),
+            "J_Boozer": 5.0e-6,
+            "dJ_Boozer": np.array([0.0, 0.0]),
+            "surface_weights": np.array([1.0]),
+        }
+
+        with patch.object(
+            module,
+            "solve_surface_stack_at_dofs",
+            return_value=stack_status,
+        ), patch.object(
+            module,
+            "evaluate_search_objective",
+            return_value=objective_eval,
+        ), patch.object(
+            module,
+            "evaluate_search_topology_gate",
+            return_value={"enabled": False, "success": True},
+        ), patch.object(
+            module,
+            "evaluate_single_stage_hardware_snapshot",
+            return_value={
+                "status": {
+                    "success": False,
+                    "violations": ["coil_coil_min_dist low"],
+                    "curve_curve_min_dist": 0.06,
+                    "cc_dist": 0.08,
+                    "curve_surface_min_dist": 0.02,
+                    "cs_dist": 0.015,
+                    "surface_vessel_min_dist": None,
+                    "ss_dist": None,
+                    "max_curvature": 15.0,
+                    "curvature_threshold": 40.0,
+                },
+                "curve_curve_min_dist": 0.06,
+                "curve_surface_min_dist": 0.02,
+                "surface_vessel_min_dist": None,
+                "max_curvature": 15.0,
+            },
+        ):
+            evaluation = module.evaluate_search_step(np.ones(2))
+
+        self.assertAlmostEqual(evaluation["total"], 9.0)
+        np.testing.assert_allclose(evaluation["grad"], [1.0, -2.0])
+        self.assertAlmostEqual(evaluation["frontier_hardware_penalty"], 7.0)
+        self.assertAlmostEqual(evaluation["frontier_contract_penalty"], 7.0)
+        self.assertEqual(module.run_dict["invalid_state_rejects_total"], 0)
+        self.assertEqual(module.run_dict["hardware_rejects"], 0)
+        self.assertFalse(module.run_dict["trial_hardware_status"]["success"])
 
     def test_build_scaled_outer_problem_scales_coordinates_gradients_and_callback(self):
         module = self.load_module()

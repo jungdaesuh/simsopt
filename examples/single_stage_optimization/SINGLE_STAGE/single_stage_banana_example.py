@@ -83,6 +83,17 @@ from workflow_runner_common import load_stage2_artifact_results
 from banana_opt.artifact_contracts import upgrade_legacy_stage2_artifact_results
 from banana_opt.basin_hopping import run_basin_hopping, telemetry_values as basin_telemetry_values
 from banana_opt.basin_hopping import _normalized_step_rms as basin_normalized_step_rms
+from banana_opt.frontier_constraints import (
+    apply_frontier_search_contract_penalties as _apply_frontier_search_contract_penalties_impl,
+    annotate_frontier_search_eval as _annotate_frontier_search_eval_impl,
+    evaluate_frontier_hard_invalidation as _evaluate_frontier_hard_invalidation_impl,
+    evaluate_frontier_hardware_search_contract as _evaluate_frontier_hardware_search_contract_impl,
+    evaluate_frontier_hardware_search_penalty as _evaluate_frontier_hardware_search_penalty_impl,
+    evaluate_frontier_topology_search_contract as _evaluate_frontier_topology_search_contract_impl,
+    evaluate_frontier_topology_search_penalty as _evaluate_frontier_topology_search_penalty_impl,
+    evaluate_frontier_trust_penalty as _evaluate_frontier_trust_penalty_impl,
+    evaluate_frontier_trust_status as _evaluate_frontier_trust_status_impl,
+)
 from banana_opt.current_contracts import (
     boozer_I_to_physical_current_A,
     physical_current_to_boozer_I,
@@ -122,11 +133,7 @@ from banana_opt.single_stage_constraints import (
     smooth_min_curve_surface_signed_constraint as _smooth_min_curve_surface_signed_constraint,
     smooth_min_surface_surface_signed_constraint as _smooth_min_surface_surface_signed_constraint,
 )
-from banana_opt.single_stage_search_policy import (
-    HardwareSearchPolicy,
-    SearchContext,
-    decide_hardware_search_action,
-)
+from banana_opt.single_stage_search_policy import HardwareSearchPolicy, SearchContext
 from banana_opt.single_stage_objectives import (
     average_surface_objectives as _average_surface_objectives_impl,
     build_total_objective as _build_total_objective_impl,
@@ -622,6 +629,14 @@ def parse_args():
             "weight falls back to --iotas-weight. Ignored in target mode."
         ),
     )
+    parser.add_argument("--frontier-reference-iota", type=float, default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--frontier-reference-iota-scale", type=float, default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--frontier-reference-volume", type=float, default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--frontier-reference-volume-scale", type=float, default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--frontier-reference-qa", type=float, default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--frontier-reference-boozer", type=float, default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--frontier-boozer-trust-threshold", type=float, default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--frontier-boozer-trust-penalty-scale", type=float, default=None, help=argparse.SUPPRESS)
     parser.add_argument(
         "--vol-target",
         type=float,
@@ -1626,6 +1641,13 @@ def _normalized_frontier_weight(raw_weight, legacy_baseline):
     return float(raw_weight) / float(legacy_baseline)
 
 
+def _frontier_override_or_default(override_value, default_value, *, minimum=None):
+    value = default_value if override_value is None else float(override_value)
+    if minimum is not None:
+        value = max(float(minimum), value)
+    return float(value)
+
+
 def build_frontier_goal_config(
     *,
     initial_iota,
@@ -1635,21 +1657,61 @@ def build_frontier_goal_config(
     res_weight,
     iotas_weight,
     volume_weight=None,
+    iota_reference_override=None,
+    iota_scale_override=None,
+    volume_reference_override=None,
+    volume_scale_override=None,
+    qs_reference_override=None,
+    boozer_reference_override=None,
+    boozer_trust_threshold_override=None,
+    boozer_trust_penalty_scale_override=None,
 ):
     if volume_weight is None:
         volume_weight = iotas_weight
-    qs_reference = max(abs(float(initial_qs_objective)), 1e-6)
-    boozer_reference = max(abs(float(initial_boozer_objective)), 1e-6)
-    boozer_trust_threshold = max(10.0 * boozer_reference, 1e-5)
+    default_qs_reference = max(abs(float(initial_qs_objective)), 1e-6)
+    default_boozer_reference = max(abs(float(initial_boozer_objective)), 1e-6)
+    qs_reference = _frontier_override_or_default(
+        qs_reference_override,
+        default_qs_reference,
+        minimum=1e-6,
+    )
+    boozer_reference = _frontier_override_or_default(
+        boozer_reference_override,
+        default_boozer_reference,
+        minimum=1e-6,
+    )
+    boozer_trust_threshold = _frontier_override_or_default(
+        boozer_trust_threshold_override,
+        max(10.0 * boozer_reference, 1e-5),
+        minimum=1e-5,
+    )
     return FrontierGoalConfig(
-        iota_reference=float(initial_iota),
-        iota_scale=max(abs(float(initial_iota)) * 0.25, 0.05),
-        volume_reference=float(initial_volume),
-        volume_scale=max(abs(float(initial_volume)) * 0.10, 0.01),
+        iota_reference=_frontier_override_or_default(
+            iota_reference_override,
+            float(initial_iota),
+        ),
+        iota_scale=_frontier_override_or_default(
+            iota_scale_override,
+            max(abs(float(initial_iota)) * 0.25, 0.05),
+            minimum=1e-6,
+        ),
+        volume_reference=_frontier_override_or_default(
+            volume_reference_override,
+            float(initial_volume),
+        ),
+        volume_scale=_frontier_override_or_default(
+            volume_scale_override,
+            max(abs(float(initial_volume)) * 0.10, 0.01),
+            minimum=1e-6,
+        ),
         qs_reference=qs_reference,
         boozer_reference=boozer_reference,
         boozer_trust_threshold=boozer_trust_threshold,
-        boozer_trust_penalty_scale=5.0 * boozer_trust_threshold,
+        boozer_trust_penalty_scale=_frontier_override_or_default(
+            boozer_trust_penalty_scale_override,
+            5.0 * boozer_trust_threshold,
+            minimum=1e-6,
+        ),
         effective_qs_weight=1.0,
         effective_boozer_weight=_normalized_frontier_weight(
             res_weight,
@@ -1938,75 +2000,52 @@ def measure_frontier_reference_metrics(stage, surface_data, coils):
 
 
 def evaluate_frontier_trust_status(search_eval):
-    if not frontier_mode_enabled():
-        return {
-            "enabled": False,
-            "ok": None,
-            "residual": None,
-            "threshold": None,
-            "excess": None,
-        }
     frontier_goal_config = current_frontier_goal_config()
-    if frontier_goal_config is None:
-        raise ValueError("frontier mode requires FRONTIER_GOAL_CONFIG")
-    residual = float(search_eval["J_Boozer"])
-    threshold = float(frontier_goal_config.boozer_trust_threshold)
-    excess = max(residual - threshold, 0.0)
-    return {
-        "enabled": True,
-        "ok": bool(np.isfinite(residual) and residual <= threshold),
-        "residual": residual,
-        "threshold": threshold,
-        "excess": excess,
-    }
+    return _evaluate_frontier_trust_status_impl(
+        search_eval,
+        enabled=frontier_mode_enabled(),
+        threshold=(
+            None
+            if frontier_goal_config is None
+            else frontier_goal_config.boozer_trust_threshold
+        ),
+    )
 
 
 def evaluate_frontier_trust_penalty(search_eval):
-    if not frontier_mode_enabled():
-        return {
-            "enabled": False,
-            "penalty": 0.0,
-            "grad": np.zeros_like(np.asarray(search_eval["grad"], dtype=float)),
-            "scale": None,
-            "excess_ratio": None,
-        }
-    frontier_goal_config = require_frontier_goal_config(current_frontier_goal_config())
-    threshold = float(frontier_goal_config.boozer_trust_threshold)
-    scale = float(frontier_goal_config.boozer_trust_penalty_scale)
-    residual = float(search_eval["J_Boozer"])
-    excess_ratio = max((residual - threshold) / scale, 0.0)
-    if excess_ratio == 0.0:
-        penalty_grad = np.zeros_like(np.asarray(search_eval["grad"], dtype=float))
-    else:
-        penalty_grad = (
-            (2.0 * excess_ratio / scale) * np.asarray(search_eval["dJ_Boozer"], dtype=float)
-        )
-    return {
-        "enabled": True,
-        "penalty": float(excess_ratio ** 2),
-        "grad": penalty_grad,
-        "scale": scale,
-        "excess_ratio": float(excess_ratio),
-    }
+    frontier_goal_config = current_frontier_goal_config()
+    return _evaluate_frontier_trust_penalty_impl(
+        search_eval,
+        enabled=frontier_mode_enabled(),
+        threshold=(
+            None
+            if frontier_goal_config is None
+            else frontier_goal_config.boozer_trust_threshold
+        ),
+        penalty_scale=(
+            None
+            if frontier_goal_config is None
+            else frontier_goal_config.boozer_trust_penalty_scale
+        ),
+    )
 
 
 def annotate_frontier_search_eval(search_eval):
-    if not frontier_mode_enabled():
-        return search_eval
-    frontier_status = evaluate_frontier_trust_status(search_eval)
-    trust_penalty = evaluate_frontier_trust_penalty(search_eval)
-    annotated = dict(search_eval)
-    annotated["frontier_base_total"] = float(search_eval["total"])
-    annotated["frontier_rank_total"] = float(search_eval["total"]) + trust_penalty["penalty"]
-    annotated["total"] = annotated["frontier_rank_total"]
-    annotated["grad"] = np.asarray(search_eval["grad"], dtype=float) + trust_penalty["grad"]
-    annotated["frontier_trust_ok"] = frontier_status["ok"]
-    annotated["frontier_boozer_trust_threshold"] = frontier_status["threshold"]
-    annotated["frontier_boozer_trust_excess"] = frontier_status["excess"]
-    annotated["frontier_boozer_trust_penalty_scale"] = trust_penalty["scale"]
-    annotated["frontier_boozer_trust_excess_ratio"] = trust_penalty["excess_ratio"]
-    annotated["frontier_trust_penalty"] = trust_penalty["penalty"]
-    return annotated
+    frontier_goal_config = current_frontier_goal_config()
+    return _annotate_frontier_search_eval_impl(
+        search_eval,
+        enabled=frontier_mode_enabled(),
+        threshold=(
+            None
+            if frontier_goal_config is None
+            else frontier_goal_config.boozer_trust_threshold
+        ),
+        penalty_scale=(
+            None
+            if frontier_goal_config is None
+            else frontier_goal_config.boozer_trust_penalty_scale
+        ),
+    )
 
 
 def preserved_incumbent_eligible(run_dict):
@@ -2018,6 +2057,8 @@ def preserved_incumbent_eligible(run_dict):
         return False
     if search_eval is None or "total" not in search_eval:
         return False
+    if search_eval.get("finite_eval_ok") is False:
+        return False
     if frontier_mode_enabled() and not bool(search_eval.get("frontier_trust_ok", False)):
         return False
     return bool(np.isfinite(float(search_eval["total"])))
@@ -2026,6 +2067,9 @@ def preserved_incumbent_eligible(run_dict):
 def refinement_eligible_incumbent(run_dict):
     hardware_status = run_dict.get("accepted_hardware_status")
     if hardware_status is None or not hardware_status.get("success", False):
+        return False
+    topology_status = run_dict.get("topology_gate_status")
+    if topology_status is None or not bool(topology_status.get("success", False)):
         return False
     return preserved_incumbent_eligible(run_dict)
 
@@ -3638,6 +3682,14 @@ def current_preserved_timeout_replay_config() -> PreservedTimeoutReplayConfig:
         max_iterations=globals().get("MAXITER", replay_config.max_iterations),
         target_volume=globals().get("vol_target", replay_config.target_volume),
         target_iota=globals().get("iota_target", replay_config.target_iota),
+        requested_seed_regime=globals().get(
+            "REQUESTED_SEED_REGIME",
+            replay_config.requested_seed_regime,
+        ),
+        effective_seed_regime=globals().get(
+            "EFFECTIVE_SEED_REGIME",
+            replay_config.effective_seed_regime,
+        ),
         single_stage_goal_mode=globals().get("SINGLE_STAGE_GOAL_MODE", replay_config.single_stage_goal_mode),
         single_stage_goal_mode_impl=current_frontier_goal_mode_impl(),
         boozer_surface_target_volumes=(
@@ -3766,6 +3818,8 @@ def build_preserved_timeout_results_payload(
         "ALM_FORMULATION": (
             replay_config.alm_formulation if replay_config.constraint_method == "alm" else None
         ),
+        "REQUESTED_SEED_REGIME": replay_config.requested_seed_regime,
+        "EFFECTIVE_SEED_REGIME": replay_config.effective_seed_regime,
         "init_only": False,
         "max_iterations": replay_config.max_iterations,
         "iterations": int(accepted_iteration),
@@ -3827,6 +3881,13 @@ def build_preserved_timeout_results_payload(
         "FRONTIER_EFFECTIVE_VOLUME_WEIGHT": replay_config.frontier_effective_volume_weight,
         "FRONTIER_VOLUME_OBJECTIVE": search_eval.get("J_volume"),
         "FRONTIER_TRUST_PENALTY": search_eval.get("frontier_trust_penalty"),
+        "FRONTIER_CONTRACT_PENALTY": search_eval.get("frontier_contract_penalty"),
+        "FRONTIER_HARDWARE_PENALTY": search_eval.get("frontier_hardware_penalty"),
+        "FRONTIER_HARDWARE_MAX_VIOLATION_RATIO": search_eval.get(
+            "frontier_hardware_max_violation_ratio"
+        ),
+        "FRONTIER_TOPOLOGY_PENALTY": search_eval.get("frontier_topology_penalty"),
+        "FRONTIER_TOPOLOGY_DEFICIT": search_eval.get("frontier_topology_deficit"),
         "FRONTIER_BOOZER_TRUST_PENALTY_SCALE": search_eval.get(
             "frontier_boozer_trust_penalty_scale"
         ),
@@ -4181,6 +4242,22 @@ def evaluate_search_step(x):
                 f"(excess_ratio={excess_ratio:.6e})"
             )
 
+        hard_invalidation = _evaluate_frontier_hard_invalidation_impl(
+            search_eval=objective_eval,
+            surface_success=stack_status["success"],
+        )
+        if hard_invalidation["invalid"]:
+            success = False
+            rejection_reason = hard_invalidation["reason"]
+            run_dict["invalid_state_rejects_total"] += 1
+            print("/!\\ /!\\ Frontier search evaluation invalid /!\\ /!\\")
+            print(f"Hard invalidation reason: {hard_invalidation['reason']}")
+            if hard_invalidation["fields"]:
+                print(
+                    "Invalid frontier fields: "
+                    + ", ".join(hard_invalidation["fields"])
+                )
+
         if success:
             topology_status = evaluate_search_topology_gate(
                 len(surface_data),
@@ -4188,31 +4265,65 @@ def evaluate_search_step(x):
                 bs,
             )
             run_dict['topology_gate_status'] = topology_status
-            if topology_status['enabled'] and not topology_status['success']:
-                success = False
-                rejection_reason = "topology"
-                run_dict["topology_gate_rejects"] += 1
-                run_dict["invalid_state_rejects_total"] += 1
-                rejection_increment = topology_gate_rejection_increment(
-                    run_dict['J'],
-                    topology_status,
-                    TOPOLOGY_GATE_PENALTY_SCALE,
-                )
-                print("/!\\ /!\\ Topology gate rejected candidate /!\\ /!\\")
-                print(
-                    "Cheap field-line survival "
-                    f"{topology_status['survived_lines']}/{topology_status['nfieldlines']} "
-                    f"(fraction={topology_status['survival_fraction']:.3f}, "
-                    f"threshold={topology_status['survival_threshold']:.3f})"
-                )
-                print(f"Topology rejection increment = {rejection_increment:.6e}")
-                if topology_status['first_exit_time'] is not None:
-                    print(
-                        "First topology exit at "
-                        f"t={topology_status['first_exit_time']:.6e}, "
-                        f"phi={topology_status['first_exit_angle']:.6e}, "
-                        f"reason={topology_status['first_exit_reason']}"
+            topology_gate_penalty_scale = float(
+                globals().get("TOPOLOGY_GATE_PENALTY_SCALE", 4.0)
+            )
+            topology_contract = _evaluate_frontier_topology_search_contract_impl(
+                topology_status,
+                previous_objective=run_dict['J'],
+                penalty_scale=topology_gate_penalty_scale,
+            )
+            if topology_contract["reject"]:
+                if frontier_mode_enabled():
+                    topology_penalty = _evaluate_frontier_topology_search_penalty_impl(
+                        topology_status,
+                        previous_objective=run_dict['J'],
+                        penalty_scale=topology_gate_penalty_scale,
                     )
+                    objective_eval = _apply_frontier_search_contract_penalties_impl(
+                        objective_eval,
+                        topology_penalty=topology_penalty,
+                    )
+                    print("/!\\ /!\\ Topology gate penalty active /!\\ /!\\")
+                    print(
+                        "Cheap field-line survival "
+                        f"{topology_status['survived_lines']}/{topology_status['nfieldlines']} "
+                        f"(fraction={topology_status['survival_fraction']:.3f}, "
+                        f"threshold={topology_status['survival_threshold']:.3f})"
+                    )
+                    print(
+                        "Topology frontier penalty = "
+                        f"{topology_penalty['penalty']:.6e} "
+                        f"(deficit={topology_penalty['deficit']:.6e})"
+                    )
+                    if topology_status['first_exit_time'] is not None:
+                        print(
+                            "First topology exit at "
+                            f"t={topology_status['first_exit_time']:.6e}, "
+                            f"phi={topology_status['first_exit_angle']:.6e}, "
+                            f"reason={topology_status['first_exit_reason']}"
+                        )
+                else:
+                    success = False
+                    rejection_reason = "topology"
+                    run_dict["topology_gate_rejects"] += 1
+                    run_dict["invalid_state_rejects_total"] += 1
+                    rejection_increment = topology_contract["rejection_increment"]
+                    print("/!\\ /!\\ Topology gate rejected candidate /!\\ /!\\")
+                    print(
+                        "Cheap field-line survival "
+                        f"{topology_status['survived_lines']}/{topology_status['nfieldlines']} "
+                        f"(fraction={topology_status['survival_fraction']:.3f}, "
+                        f"threshold={topology_status['survival_threshold']:.3f})"
+                    )
+                    print(f"Topology rejection increment = {rejection_increment:.6e}")
+                    if topology_status['first_exit_time'] is not None:
+                        print(
+                            "First topology exit at "
+                            f"t={topology_status['first_exit_time']:.6e}, "
+                            f"phi={topology_status['first_exit_angle']:.6e}, "
+                            f"reason={topology_status['first_exit_reason']}"
+                        )
 
         if success:
             hardware_snapshot = evaluate_single_stage_hardware_snapshot(
@@ -4229,26 +4340,47 @@ def evaluate_search_step(x):
             hardware_status = hardware_snapshot["status"]
             run_dict["trial_hardware_status"] = hardware_status
             if not hardware_status["success"]:
-                decision = decide_hardware_search_action(
-                    HardwareSearchPolicy(
+                hardware_contract = _evaluate_frontier_hardware_search_contract_impl(
+                    hardware_status,
+                    policy=HardwareSearchPolicy(
                         HARDWARE_SEARCH_MODE,
                         HARDWARE_SEARCH_SOFT_ITERATIONS,
                     ),
-                    hardware_status,
-                    SearchContext(
+                    context=SearchContext(
                         accepted_iterations=run_dict["accepted_iterations"],
                         gate_scale=search_gate["gate_scale"],
                         previous_objective=run_dict["J"],
                     ),
                 )
-                if decision.reject:
-                    success = False
-                    rejection_reason = "hardware"
-                    run_dict["hardware_rejects"] += 1
-                    run_dict["invalid_state_rejects_total"] += 1
-                    rejection_increment = decision.rejection_increment
-                    print("/!\\ /!\\ Hardware constraints violated /!\\ /!\\")
-                elif decision.warning_only:
+                if hardware_contract["reject"]:
+                    if frontier_mode_enabled():
+                        hardware_penalty_scale = float(
+                            globals().get("HARDWARE_SEARCH_PENALTY_SCALE", 4.0)
+                        )
+                        hardware_penalty = _evaluate_frontier_hardware_search_penalty_impl(
+                            hardware_status,
+                            previous_objective=run_dict["J"],
+                            penalty_scale=hardware_penalty_scale,
+                        )
+                        objective_eval = _apply_frontier_search_contract_penalties_impl(
+                            objective_eval,
+                            hardware_penalty=hardware_penalty,
+                        )
+                        print("/!\\ /!\\ Hardware search penalty active /!\\ /!\\")
+                        print(
+                            "Hardware frontier penalty = "
+                            f"{hardware_penalty['penalty']:.6e} "
+                            f"(max_violation_ratio="
+                            f"{hardware_penalty['max_violation_ratio']:.6e})"
+                        )
+                    else:
+                        success = False
+                        rejection_reason = "hardware"
+                        run_dict["hardware_rejects"] += 1
+                        run_dict["invalid_state_rejects_total"] += 1
+                        rejection_increment = hardware_contract["rejection_increment"]
+                        print("/!\\ /!\\ Hardware constraints violated /!\\ /!\\")
+                elif hardware_contract["warning_only"]:
                     print("/!\\ /!\\ Hardware constraints violated (warning only) /!\\ /!\\")
                 for violation in hardware_status["violations"]:
                     print(violation)
@@ -4987,6 +5119,14 @@ if __name__ == "__main__":
             res_weight=RES_WEIGHT,
             iotas_weight=IOTAS_WEIGHT,
             volume_weight=args.frontier_volume_weight,
+            iota_reference_override=args.frontier_reference_iota,
+            iota_scale_override=args.frontier_reference_iota_scale,
+            volume_reference_override=args.frontier_reference_volume,
+            volume_scale_override=args.frontier_reference_volume_scale,
+            qs_reference_override=args.frontier_reference_qa,
+            boozer_reference_override=args.frontier_reference_boozer,
+            boozer_trust_threshold_override=args.frontier_boozer_trust_threshold,
+            boozer_trust_penalty_scale_override=args.frontier_boozer_trust_penalty_scale,
         )
         print(frontier_goal_mode_warning_message(frontier_goal_config))
 
@@ -6151,6 +6291,15 @@ if __name__ == "__main__":
             "frontier_boozer_trust_excess_ratio"
         ),
         "FRONTIER_TRUST_PENALTY": run_dict["search_eval"].get("frontier_trust_penalty"),
+        "FRONTIER_CONTRACT_PENALTY": run_dict["search_eval"].get("frontier_contract_penalty"),
+        "FRONTIER_HARDWARE_PENALTY": run_dict["search_eval"].get("frontier_hardware_penalty"),
+        "FRONTIER_HARDWARE_MAX_VIOLATION_RATIO": run_dict["search_eval"].get(
+            "frontier_hardware_max_violation_ratio"
+        ),
+        "FRONTIER_TOPOLOGY_PENALTY": run_dict["search_eval"].get("frontier_topology_penalty"),
+        "FRONTIER_TOPOLOGY_DEFICIT": run_dict["search_eval"].get(
+            "frontier_topology_deficit"
+        ),
         "FRONTIER_VOLUME_OBJECTIVE": (
             None if args.init_only else float(run_dict["search_eval"].get("J_volume", 0.0))
         ),
