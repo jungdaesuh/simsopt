@@ -20,6 +20,7 @@ WORKFLOW_COMMON_PATH = EXAMPLE_ROOT / "workflow_runner_common.py"
 BASELINE_SWEEP_PATH = EXAMPLE_ROOT / "run_80ka_baseline_tradeoff_sweep.py"
 FINITE_CURRENT_SMOKE_PATH = EXAMPLE_ROOT / "run_finite_current_smoke.py"
 GOAL_MODE_COMPARISON_PATH = EXAMPLE_ROOT / "run_single_stage_goal_mode_comparison.py"
+FRONTIER_CAMPAIGN_PATH = EXAMPLE_ROOT / "run_single_stage_frontier_campaign.py"
 SINGLE_STAGE_ENTRYPOINT_PATH = EXAMPLE_ROOT / "SINGLE_STAGE" / "single_stage_banana_example.py"
 STAGE2_ENTRYPOINT_PATH = EXAMPLE_ROOT / "STAGE_2" / "banana_coil_solver.py"
 IMPORT_PROVENANCE_PATH = EXAMPLE_ROOT / "import_provenance.py"
@@ -57,6 +58,13 @@ def load_goal_mode_comparison_module():
     return load_module(
         GOAL_MODE_COMPARISON_PATH,
         "run_single_stage_goal_mode_comparison",
+    )
+
+
+def load_frontier_campaign_module():
+    return load_module(
+        FRONTIER_CAMPAIGN_PATH,
+        "run_single_stage_frontier_campaign",
     )
 
 
@@ -1444,8 +1452,8 @@ class GoalModeComparisonScriptTests(unittest.TestCase):
     def test_delta_returns_none_when_either_side_missing(self):
         module = load_goal_mode_comparison_module()
 
-        self.assertIsNone(module._delta(None, 1.0))
-        self.assertIsNone(module._delta(1.0, None))
+        self.assertIsNone(module.delta(None, 1.0))
+        self.assertIsNone(module.delta(1.0, None))
 
     def test_maybe_load_validated_stage2_seed_metadata_returns_loaded_results_when_present(self):
         module = load_goal_mode_comparison_module()
@@ -1777,3 +1785,224 @@ class GoalModeComparisonScriptTests(unittest.TestCase):
                 "frontier_tradeoff_score_v2",
             )
             self.assertFalse(summary["comparison"]["both_optimizer_success"])
+
+
+class FrontierCampaignScriptTests(unittest.TestCase):
+    def _minimal_target_payload(
+        self,
+        output_root: Path,
+    ) -> dict:
+        return {
+            "command": ["python", "single_stage.py", "--single-stage-goal-mode", "target"],
+            "results_path": output_root / "target_baseline" / "target" / "results.json",
+            "result_source": "final",
+            "results": {
+                "SINGLE_STAGE_GOAL_MODE": "target",
+                "SINGLE_STAGE_GOAL_MODE_IMPL": "target",
+                "FINAL_IOTA": 0.15,
+                "FINAL_VOLUME": 0.10,
+                "NONQS_RATIO": 0.012,
+                "BOOZER_RESIDUAL": 0.008,
+                "FINAL_FEASIBILITY_OK": True,
+                "HARDWARE_CONSTRAINTS_OK": True,
+                "FINAL_TOPOLOGY_GATE_SUCCESS": True,
+                "OPTIMIZER_SUCCESS": True,
+            },
+        }
+
+    def _minimal_frontier_payload(
+        self,
+        output_root: Path,
+        *,
+        lane_id: str,
+        final_iota: float,
+        final_volume: float,
+        nonqs_ratio: float,
+        boozer_residual: float,
+        result_source: str = "final",
+    ) -> dict:
+        results_name = (
+            "results.json"
+            if result_source == "final"
+            else "results_best_feasible.partial.json"
+        )
+        return {
+            "command": ["python", "single_stage.py", "--single-stage-goal-mode", "frontier"],
+            "results_path": (
+                output_root / "lanes" / lane_id / "frontier" / results_name
+            ),
+            "result_source": result_source,
+            "results": {
+                "SINGLE_STAGE_GOAL_MODE": "frontier",
+                "SINGLE_STAGE_GOAL_MODE_IMPL": "frontier_tradeoff_score_v2",
+                "TERMINATION_MESSAGE": "ok",
+                "OPTIMIZER_SUCCESS": True,
+                "FINAL_FEASIBILITY_OK": True,
+                "HARDWARE_CONSTRAINTS_OK": True,
+                "FINAL_TOPOLOGY_GATE_SUCCESS": True,
+                "FINAL_IOTA": final_iota,
+                "FINAL_VOLUME": final_volume,
+                "NONQS_RATIO": nonqs_ratio,
+                "BOOZER_RESIDUAL": boozer_residual,
+                "FRONTIER_TRUST_OK": True,
+                "FRONTIER_REFERENCE_IOTA": 0.15,
+                "FRONTIER_REFERENCE_VOLUME": 0.10,
+                "FRONTIER_REFERENCE_QA": 0.012,
+                "FRONTIER_REFERENCE_BOOZER": 0.008,
+                "FRONTIER_RANK_OBJECTIVE_J": -1.0,
+                "SEARCH_OBJECTIVE_J": -1.0,
+            },
+        }
+
+    def test_frontier_campaign_dry_run_writes_manifest_and_summary(self):
+        module = load_frontier_campaign_module()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            output_root = tmpdir_path / "outputs"
+            summary_path = tmpdir_path / "summary.json"
+            missing_stage2_bs_path = tmpdir_path / "missing" / "biot_savart_opt.json"
+
+            with patch.object(
+                sys,
+                "argv",
+                [
+                    "run_single_stage_frontier_campaign.py",
+                    "--dry-run",
+                    "--plasma-surf-filename",
+                    "demo.nc",
+                    "--stage2-bs-path",
+                    str(missing_stage2_bs_path),
+                    "--output-root",
+                    str(output_root),
+                    "--summary-json",
+                    str(summary_path),
+                    "--frontier-num-lanes",
+                    "3",
+                ],
+            ):
+                self.assertEqual(module.main(), 0)
+
+            summary = json.loads(summary_path.read_text(encoding="utf-8"))
+            manifest = json.loads(
+                (output_root / "campaign_manifest.json").read_text(encoding="utf-8")
+            )
+            self.assertTrue(summary["dry_run"])
+            self.assertEqual(summary["frontier_num_lanes"], 3)
+            self.assertEqual(len(summary["frontier_lanes"]), 3)
+            self.assertEqual(
+                [lane["lane_budget"] for lane in summary["frontier_lanes"]],
+                [300, 300, 300],
+            )
+            self.assertEqual(summary["frontier_archive_size"], 0)
+            self.assertEqual(
+                summary["recommended_member"],
+                {
+                    "recommended_member_id": None,
+                    "policy_name": "balanced",
+                    "policy_inputs": None,
+                    "policy_rationale": None,
+                    "policy_score": None,
+                    "recommended_metrics": None,
+                    "frontier_archive_size": 0,
+                },
+            )
+            self.assertEqual(summary["target_run"]["status"], "dry_run")
+            self.assertEqual(manifest["FRONTIER_ENGINE"], "multilane_local")
+
+    def test_frontier_campaign_main_writes_archive_recommendation_and_survives_failed_lane(self):
+        module = load_frontier_campaign_module()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            output_root = tmpdir_path / "outputs"
+            summary_path = tmpdir_path / "summary.json"
+            stage2_bs_path = tmpdir_path / "stage2" / "biot_savart_opt.json"
+            stage2_results_path = tmpdir_path / "stage2" / "results.json"
+            stage2_bs_path.parent.mkdir(parents=True, exist_ok=True)
+            stage2_bs_path.write_text("{}", encoding="utf-8")
+            stage2_results_path.write_text("{}", encoding="utf-8")
+
+            target_payload = self._minimal_target_payload(output_root)
+            lane_01 = self._minimal_frontier_payload(
+                output_root,
+                lane_id="lane_01",
+                final_iota=0.165,
+                final_volume=0.108,
+                nonqs_ratio=0.011,
+                boozer_residual=0.0075,
+            )
+            lane_03 = self._minimal_frontier_payload(
+                output_root,
+                lane_id="lane_03",
+                final_iota=0.19,
+                final_volume=0.095,
+                nonqs_ratio=0.015,
+                boozer_residual=0.011,
+                result_source="best_feasible_partial",
+            )
+
+            with patch.object(
+                sys,
+                "argv",
+                [
+                    "run_single_stage_frontier_campaign.py",
+                    "--plasma-surf-filename",
+                    "demo.nc",
+                    "--stage2-bs-path",
+                    str(stage2_bs_path),
+                    "--output-root",
+                    str(output_root),
+                    "--summary-json",
+                    str(summary_path),
+                    "--frontier-num-lanes",
+                    "3",
+                ],
+            ), patch.object(
+                module.goal_mode_comparison,
+                "load_validated_stage2_seed_metadata",
+                return_value=(
+                    stage2_bs_path.resolve(),
+                    stage2_results_path.resolve(),
+                    {
+                        "PLASMA_SURF_FILENAME": "demo.nc",
+                        "init_only": False,
+                    },
+                ),
+            ), patch.object(
+                module.goal_mode_comparison,
+                "run_goal_mode_case",
+                side_effect=[
+                    target_payload,
+                    lane_01,
+                    RuntimeError("lane failed"),
+                    lane_03,
+                ],
+            ):
+                self.assertEqual(module.main(), 0)
+
+            summary = json.loads(summary_path.read_text(encoding="utf-8"))
+            archive = json.loads(
+                (output_root / "frontier_archive.json").read_text(encoding="utf-8")
+            )
+            recommended = json.loads(
+                (output_root / "frontier_recommended.json").read_text(encoding="utf-8")
+            )
+
+            self.assertEqual(summary["frontier_archive_size"], 2)
+            self.assertEqual(
+                [lane["lane_budget"] for lane in summary["frontier_lanes"]],
+                [300, 300, 300],
+            )
+            self.assertEqual(summary["frontier_lanes"][1]["status"], "failed")
+            self.assertEqual(summary["frontier_lanes"][1]["error_type"], "RuntimeError")
+            self.assertEqual(archive["best_by_metric"]["iota"]["member_id"].split(":")[-1], "lane_03")
+            self.assertEqual(recommended["recommended_member_id"].split(":")[-1], "lane_01")
+            self.assertEqual(
+                summary["recommended_member"]["recommended_member_id"].split(":")[-1],
+                "lane_01",
+            )
+            self.assertAlmostEqual(
+                summary["target_comparison"]["recommended_minus_target_final_iota"],
+                0.015,
+            )

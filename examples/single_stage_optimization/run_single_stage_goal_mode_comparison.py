@@ -128,12 +128,13 @@ def discover_single_stage_salvage_results_path(
     )
 
 
-def parse_args() -> argparse.Namespace:
+def build_parser(*, add_help: bool = True) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
             "Run matched single-stage target-vs-frontier comparisons from one explicit "
             "Stage 2 seed artifact."
-        )
+        ),
+        add_help=add_help,
     )
     parser.add_argument("--python-executable", default=sys.executable)
     parser.add_argument("--dry-run", action="store_true")
@@ -270,7 +271,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--basin-niter-success", type=int, default=0)
     parser.add_argument("--basin-seed", type=int, default=-1)
     parser.add_argument("--init-only", action="store_true")
-    return parser.parse_args()
+    return parser
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    return build_parser().parse_args(argv)
 
 
 def load_validated_stage2_seed_metadata(
@@ -506,7 +511,7 @@ def build_single_stage_goal_mode_command(
     return command
 
 
-def _result_metric_subset(results: dict) -> dict:
+def result_metric_subset(results: dict) -> dict:
     return {
         "goal_mode": results.get("SINGLE_STAGE_GOAL_MODE"),
         "goal_mode_impl": results.get("SINGLE_STAGE_GOAL_MODE_IMPL"),
@@ -569,7 +574,7 @@ def _result_metric_subset(results: dict) -> dict:
     }
 
 
-def _delta(frontier_value, target_value):
+def delta(frontier_value, target_value):
     if frontier_value is None or target_value is None:
         return None
     return float(frontier_value) - float(target_value)
@@ -616,24 +621,24 @@ def build_summary(
         mode_entry = summary["mode_runs"][goal_mode]
         mode_entry["results_path"] = str(payload["results_path"])
         mode_entry["result_source"] = payload["result_source"]
-        mode_entry["results"] = _result_metric_subset(payload["results"])
+        mode_entry["results"] = result_metric_subset(payload["results"])
 
     target_results = mode_payloads["target"]["results"]
     frontier_results = mode_payloads["frontier"]["results"]
     summary["comparison"] = {
-        "frontier_minus_target_final_iota": _delta(
+        "frontier_minus_target_final_iota": delta(
             frontier_results.get("FINAL_IOTA"),
             target_results.get("FINAL_IOTA"),
         ),
-        "frontier_minus_target_final_volume": _delta(
+        "frontier_minus_target_final_volume": delta(
             frontier_results.get("FINAL_VOLUME"),
             target_results.get("FINAL_VOLUME"),
         ),
-        "frontier_minus_target_nonqs_ratio": _delta(
+        "frontier_minus_target_nonqs_ratio": delta(
             frontier_results.get("NONQS_RATIO"),
             target_results.get("NONQS_RATIO"),
         ),
-        "frontier_minus_target_boozer_residual": _delta(
+        "frontier_minus_target_boozer_residual": delta(
             frontier_results.get("BOOZER_RESIDUAL"),
             target_results.get("BOOZER_RESIDUAL"),
         ),
