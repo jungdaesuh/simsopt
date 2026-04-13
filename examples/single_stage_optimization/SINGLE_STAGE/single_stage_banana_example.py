@@ -186,9 +186,9 @@ DEFAULT_STAGE2_SEEDS_BY_PLASMA = {
         "cc_weight": 100.0,
         "cc_threshold": 0.05,
         "curvature_weight": 0.0001,
-        "curvature_threshold": 40.0,
-        "banana_surf_radius": 0.22,
-        "tf_current_A": 1.0e5,
+        "curvature_threshold": 100.0,
+        "banana_surf_radius": 0.21,
+        "tf_current_A": 8.0e4,
         "order": 2,
         "banana_init_current_A": 1.0e4,
     },
@@ -199,9 +199,9 @@ DEFAULT_STAGE2_SEEDS_BY_PLASMA = {
         "cc_weight": 100.0,
         "cc_threshold": 0.05,
         "curvature_weight": 0.0001,
-        "curvature_threshold": 40.0,
-        "banana_surf_radius": 0.22,
-        "tf_current_A": 1.0e5,
+        "curvature_threshold": 100.0,
+        "banana_surf_radius": 0.21,
+        "tf_current_A": 8.0e4,
         "order": 2,
         "banana_init_current_A": 1.0e4,
     },
@@ -539,11 +539,11 @@ def apply_default_stage2_seed_args(args):
     if args.stage2_seed_cc_threshold is None:
         args.stage2_seed_cc_threshold = default_seed.get("cc_threshold", 0.05)
     if args.stage2_seed_curvature_threshold is None:
-        args.stage2_seed_curvature_threshold = default_seed.get("curvature_threshold", 40.0)
+        args.stage2_seed_curvature_threshold = default_seed.get("curvature_threshold", 100.0)
     if args.stage2_seed_banana_surf_radius is None:
-        args.stage2_seed_banana_surf_radius = default_seed.get("banana_surf_radius", 0.22)
+        args.stage2_seed_banana_surf_radius = default_seed.get("banana_surf_radius", 0.21)
     if args.stage2_seed_tf_current_A is None:
-        args.stage2_seed_tf_current_A = default_seed.get("tf_current_A", 1.0e5)
+        args.stage2_seed_tf_current_A = default_seed.get("tf_current_A", 8.0e4)
     if args.stage2_seed_order is None:
         args.stage2_seed_order = default_seed.get("order", 2)
     if args.stage2_seed_banana_init_current_A is None:
@@ -966,7 +966,7 @@ def parse_args():
         help="Abort refinement after this many consecutive chunks without accepted-state improvement.",
     )
     parser.add_argument("--cc-dist", type=float, default=float(os.environ.get("CC_DIST", "0.05")))
-    parser.add_argument("--curvature-threshold", type=float, default=float(os.environ.get("CURVATURE_THRESHOLD", "40")))
+    parser.add_argument("--curvature-threshold", type=float, default=float(os.environ.get("CURVATURE_THRESHOLD", "100")))
     parser.add_argument("--cc-weight", type=float, default=float(os.environ.get("CC_WEIGHT", "100")))
     parser.add_argument("--curvature-weight", type=float, default=float(os.environ.get("CURVATURE_WEIGHT", "0.1")))
     parser.add_argument("--length-weight", type=float, default=float(os.environ.get("SS_LENGTH_WEIGHT", "1")),
@@ -989,8 +989,8 @@ def parse_args():
                         help="Iota target tracking weight (default 100).")
     parser.add_argument("--cs-weight", type=float, default=float(os.environ.get("CS_WEIGHT", "1")),
                         help="Coil-surface distance penalty weight (default 1).")
-    parser.add_argument("--cs-dist", type=float, default=float(os.environ.get("CS_DIST", "0.02")),
-                        help="Minimum coil-surface distance in meters (default 0.02).")
+    parser.add_argument("--cs-dist", type=float, default=float(os.environ.get("CS_DIST", "0.015")),
+                        help="Minimum coil-surface distance in meters (default 0.015 = 1.5 cm, HBT spec).")
     parser.add_argument("--surf-dist-weight", type=float, default=float(os.environ.get("SURF_DIST_WEIGHT", "1000")),
                         help="Surface-vessel distance penalty weight (default 1000).")
     parser.add_argument("--ss-dist", type=float, default=float(os.environ.get("SS_DIST", "0.04")),
@@ -2686,6 +2686,7 @@ def _build_penalty_phase1_result(
     phase1_iterations,
     phase1_termination_message,
     phase1_success,
+    phase1_outcome,
     continue_search,
     next_dofs,
     local_preservation_used,
@@ -2693,12 +2694,18 @@ def _build_penalty_phase1_result(
     local_preservation_attempts,
     local_preservation_radius,
     local_preservation_step_rms,
+    phase1_first_accepted_step_rms,
+    phase1_max_accepted_step_rms,
+    phase1_anchor_restore_used,
+    phase1_unsafe_accept_rollbacks,
+    phase1_invalid_reject_attempts,
 ):
     return {
         "used_phase1": bool(used_phase1),
         "phase1_iterations": phase1_iterations,
         "phase1_termination_message": phase1_termination_message,
         "phase1_success": phase1_success,
+        "phase1_outcome": phase1_outcome,
         "continue_search": bool(continue_search),
         "next_dofs": np.asarray(next_dofs, dtype=float).copy(),
         "local_preservation_used": bool(local_preservation_used),
@@ -2709,6 +2716,14 @@ def _build_penalty_phase1_result(
         "local_preservation_radius": local_preservation_radius,
         "phase2_local_preservation_radius": local_preservation_radius,
         "local_preservation_step_rms": local_preservation_step_rms,
+        "phase1_first_accepted_step_rms": phase1_first_accepted_step_rms,
+        "phase1_max_accepted_step_rms": phase1_max_accepted_step_rms,
+        "phase1_anchor_restore_used": bool(phase1_anchor_restore_used),
+        "phase1_unsafe_accept_rollbacks": int(phase1_unsafe_accept_rollbacks),
+        "phase1_invalid_reject_attempts": int(phase1_invalid_reject_attempts),
+        "phase1_recovery_used": bool(
+            phase1_anchor_restore_used or phase1_invalid_reject_attempts > 0
+        ),
     }
 
 
@@ -2894,6 +2909,7 @@ def run_penalty_phase1(
             phase1_iterations=None,
             phase1_termination_message=None,
             phase1_success=None,
+            phase1_outcome="bypassed",
             continue_search=True,
             next_dofs=dofs,
             local_preservation_used=False,
@@ -2901,6 +2917,11 @@ def run_penalty_phase1(
             local_preservation_attempts=0,
             local_preservation_radius=None,
             local_preservation_step_rms=None,
+            phase1_first_accepted_step_rms=None,
+            phase1_max_accepted_step_rms=None,
+            phase1_anchor_restore_used=False,
+            phase1_unsafe_accept_rollbacks=0,
+            phase1_invalid_reject_attempts=0,
         )
 
     phase1_iterations = 0
@@ -2909,6 +2930,11 @@ def run_penalty_phase1(
     local_attempts_used = 0
     local_radius = settings["local_relative_radius"]
     phase1_success = False
+    phase1_first_accepted_step_rms = None
+    phase1_max_accepted_step_rms = None
+    phase1_anchor_restore_used = False
+    phase1_unsafe_accept_rollbacks = 0
+    phase1_invalid_reject_attempts = 0
 
     while remaining_maxiter > 0:
         local_attempts_used += 1
@@ -2964,12 +2990,27 @@ def run_penalty_phase1(
         )
         if int(run_dict.get("accepted_iterations", 0)) > accepted_before_attempt:
             accept_summary = evaluate_penalty_phase1_local_accept(anchor_x, run_dict)
+            if phase1_first_accepted_step_rms is None:
+                phase1_first_accepted_step_rms = accept_summary["step_rms"]
+            phase1_max_accepted_step_rms = (
+                accept_summary["step_rms"]
+                if phase1_max_accepted_step_rms is None
+                else max(
+                    phase1_max_accepted_step_rms,
+                    accept_summary["step_rms"],
+                )
+            )
             if accept_summary["safe_local_accept"]:
                 return _build_penalty_phase1_result(
                     used_phase1=True,
                     phase1_iterations=phase1_iterations,
                     phase1_termination_message="; ".join(phase1_messages),
                     phase1_success=phase1_success,
+                    phase1_outcome=(
+                        "safe_local_accept_after_recovery"
+                        if phase1_anchor_restore_used
+                        else "safe_local_accept"
+                    ),
                     continue_search=True,
                     next_dofs=run_dict["accepted_x"],
                     local_preservation_used=settings["use_local_bounds"],
@@ -2977,6 +3018,11 @@ def run_penalty_phase1(
                     local_preservation_attempts=local_attempts_used,
                     local_preservation_radius=accept_summary["phase2_radius"],
                     local_preservation_step_rms=accept_summary["step_rms"],
+                    phase1_first_accepted_step_rms=phase1_first_accepted_step_rms,
+                    phase1_max_accepted_step_rms=phase1_max_accepted_step_rms,
+                    phase1_anchor_restore_used=phase1_anchor_restore_used,
+                    phase1_unsafe_accept_rollbacks=phase1_unsafe_accept_rollbacks,
+                    phase1_invalid_reject_attempts=phase1_invalid_reject_attempts,
                 )
             phase1_messages.append(
                 "unsafe_local_accept("
@@ -2984,6 +3030,8 @@ def run_penalty_phase1(
                 f"meaningful={accept_summary['meaningful_step']}, "
                 f"refinement_ready={accept_summary['refinement_ready']})"
             )
+            phase1_unsafe_accept_rollbacks += 1
+            phase1_anchor_restore_used = True
             restore_penalty_phase1_anchor(run_dict, anchor_state)
             restore_accepted_state_fn()
             if refresh_preserved_timeout_artifacts_fn is not None:
@@ -2995,6 +3043,8 @@ def run_penalty_phase1(
         invalid_rejects_delta = int(run_dict.get("invalid_state_rejects_total", 0)) - (
             invalid_rejects_before_attempt
         )
+        if invalid_rejects_delta > 0:
+            phase1_invalid_reject_attempts += 1
         shrink_factor = (
             _PENALTY_FEASIBLE_START_REJECT_RADIUS_SHRINK
             if invalid_rejects_delta > 0
@@ -3010,6 +3060,7 @@ def run_penalty_phase1(
             phase1_iterations=phase1_iterations,
             phase1_termination_message="; ".join(phase1_messages),
             phase1_success=False,
+            phase1_outcome="preserved_start_no_safe_step",
             continue_search=False,
             next_dofs=run_dict["accepted_x"],
             local_preservation_used=True,
@@ -3017,6 +3068,11 @@ def run_penalty_phase1(
             local_preservation_attempts=local_attempts_used,
             local_preservation_radius=local_radius,
             local_preservation_step_rms=None,
+            phase1_first_accepted_step_rms=phase1_first_accepted_step_rms,
+            phase1_max_accepted_step_rms=phase1_max_accepted_step_rms,
+            phase1_anchor_restore_used=phase1_anchor_restore_used,
+            phase1_unsafe_accept_rollbacks=phase1_unsafe_accept_rollbacks,
+            phase1_invalid_reject_attempts=phase1_invalid_reject_attempts,
         )
 
     return _build_penalty_phase1_result(
@@ -3024,6 +3080,7 @@ def run_penalty_phase1(
         phase1_iterations=phase1_iterations,
         phase1_termination_message="; ".join(phase1_messages),
         phase1_success=phase1_success,
+        phase1_outcome="nonlocal_phase1_continue",
         continue_search=True,
         next_dofs=run_dict["accepted_x"],
         local_preservation_used=False,
@@ -3031,6 +3088,11 @@ def run_penalty_phase1(
         local_preservation_attempts=0,
         local_preservation_radius=None,
         local_preservation_step_rms=None,
+        phase1_first_accepted_step_rms=phase1_first_accepted_step_rms,
+        phase1_max_accepted_step_rms=phase1_max_accepted_step_rms,
+        phase1_anchor_restore_used=phase1_anchor_restore_used,
+        phase1_unsafe_accept_rollbacks=phase1_unsafe_accept_rollbacks,
+        phase1_invalid_reject_attempts=phase1_invalid_reject_attempts,
     )
 
 
@@ -4642,17 +4704,17 @@ if __name__ == "__main__":
     if args.cc_dist < 0.05:
         print(f"WARNING: --cc-dist {args.cc_dist} below baseline default, clamped to 0.05")
     CS_WEIGHT = args.cs_weight
-    CS_DIST = max(args.cs_dist, 0.02)            # Baseline default floor
-    if args.cs_dist < 0.02:
-        print(f"WARNING: --cs-dist {args.cs_dist} below baseline default, clamped to 0.02")
+    CS_DIST = max(args.cs_dist, 0.015)           # HBT spec: coil-plasma >= 1.5 cm
+    if args.cs_dist < 0.015:
+        print(f"WARNING: --cs-dist {args.cs_dist} below HBT spec floor, clamped to 0.015")
     SURF_DIST_WEIGHT = args.surf_dist_weight
     SS_DIST = max(args.ss_dist, 0.04)            # Baseline default floor
     if args.ss_dist < 0.04:
         print(f"WARNING: --ss-dist {args.ss_dist} below baseline default, clamped to 0.04")
     CURVATURE_WEIGHT = args.curvature_weight
-    CURVATURE_THRESHOLD = max(args.curvature_threshold, 40)
-    if args.curvature_threshold < 40:
-        print(f"WARNING: --curvature-threshold {args.curvature_threshold} below hardware floor, clamped to 40")
+    CURVATURE_THRESHOLD = max(args.curvature_threshold, 100)
+    if args.curvature_threshold < 100:
+        print(f"WARNING: --curvature-threshold {args.curvature_threshold} below HBT spec floor, clamped to 100")
     SURFACE_GAP_THRESHOLD = max(args.surface_gap_threshold, 0.0)
     if len(surface_data) > 1 and SURF_DIST_WEIGHT != 0:
         print("WARNING: SURF_DIST_WEIGHT is diagnostic-only in multi-surface mode; outer-vessel spacing is enforced as a rejection gate.")
@@ -4928,6 +4990,13 @@ if __name__ == "__main__":
     phase1_iterations = None
     phase1_termination_message = None
     phase1_success = None
+    phase1_outcome = None
+    phase1_first_accepted_step_rms = None
+    phase1_max_accepted_step_rms = None
+    phase1_anchor_restore_used = False
+    phase1_unsafe_accept_rollbacks = 0
+    phase1_invalid_reject_attempts = 0
+    phase1_recovery_used = False
     refinement_attempted = False
     refinement_success = None
     refinement_iterations = None
@@ -5200,6 +5269,21 @@ if __name__ == "__main__":
             phase1_iterations = phase1_result["phase1_iterations"]
             phase1_termination_message = phase1_result["phase1_termination_message"]
             phase1_success = phase1_result["phase1_success"]
+            phase1_outcome = phase1_result["phase1_outcome"]
+            phase1_first_accepted_step_rms = phase1_result[
+                "phase1_first_accepted_step_rms"
+            ]
+            phase1_max_accepted_step_rms = phase1_result[
+                "phase1_max_accepted_step_rms"
+            ]
+            phase1_anchor_restore_used = phase1_result["phase1_anchor_restore_used"]
+            phase1_unsafe_accept_rollbacks = phase1_result[
+                "phase1_unsafe_accept_rollbacks"
+            ]
+            phase1_invalid_reject_attempts = phase1_result[
+                "phase1_invalid_reject_attempts"
+            ]
+            phase1_recovery_used = phase1_result["phase1_recovery_used"]
             startup_local_preservation_used = phase1_result["local_preservation_used"]
             startup_local_preservation_preserved_start = phase1_result[
                 "local_preservation_preserved_start"
@@ -5676,6 +5760,13 @@ if __name__ == "__main__":
         "PHASE1_ITERATIONS": phase1_iterations,
         "PHASE1_TERMINATION_MESSAGE": phase1_termination_message,
         "PHASE1_SUCCESS": phase1_success,
+        "PHASE1_OUTCOME": phase1_outcome,
+        "PHASE1_FIRST_ACCEPTED_STEP_RMS": phase1_first_accepted_step_rms,
+        "PHASE1_MAX_ACCEPTED_STEP_RMS": phase1_max_accepted_step_rms,
+        "PHASE1_ANCHOR_RESTORE_USED": phase1_anchor_restore_used,
+        "PHASE1_UNSAFE_ACCEPT_ROLLBACKS": phase1_unsafe_accept_rollbacks,
+        "PHASE1_INVALID_REJECT_ATTEMPTS": phase1_invalid_reject_attempts,
+        "PHASE1_RECOVERY_USED": phase1_recovery_used,
         "STARTUP_LOCAL_PRESERVATION_USED": startup_local_preservation_used,
         "STARTUP_LOCAL_PRESERVED_START": startup_local_preservation_preserved_start,
         "STARTUP_LOCAL_PRESERVATION_ATTEMPTS": startup_local_preservation_attempts,

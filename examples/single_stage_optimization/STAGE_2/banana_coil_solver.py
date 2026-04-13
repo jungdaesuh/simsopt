@@ -179,14 +179,14 @@ def parse_args():
     parser.add_argument(
         "--banana-surf-radius",
         type=float,
-        default=float(os.environ.get("BANANA_SURF_RADIUS", "0.22")),
-        help="Coil surface minor radius.",
+        default=float(os.environ.get("BANANA_SURF_RADIUS", "0.21")),
+        help="Coil surface minor radius (default 0.21 m, concentric with HBT vacuum vessel).",
     )
     parser.add_argument(
         "--tf-current-A",
         type=float,
-        default=float(os.environ.get("TF_CURRENT_A", "1e5")),
-        help="Per-TF-coil current in physical SI amperes (default 1e5).",
+        default=float(os.environ.get("TF_CURRENT_A", "8e4")),
+        help="Per-TF-coil current in physical SI amperes (default 8e4 = 80 kA).",
     )
     parser.add_argument(
         "--banana-init-current-A",
@@ -370,8 +370,8 @@ def parse_args():
     parser.add_argument(
         "--curvature-threshold",
         type=float,
-        default=float(os.environ.get("CURVATURE_THRESHOLD", "40")),
-        help="Curvature threshold.",
+        default=float(os.environ.get("CURVATURE_THRESHOLD", "100")),
+        help="Curvature threshold in m^-1 (default 100, HBT hardware limit).",
     )
     parser.add_argument(
         "--theta-center",
@@ -619,9 +619,9 @@ def main(parsed_args=None):
 
     # Threshold and weight for the coil curvature penalty
     CURVATURE_WEIGHT = args.curvature_weight
-    CURVATURE_THRESHOLD = max(args.curvature_threshold, 40)
-    if args.curvature_threshold < 40:
-        print(f"WARNING: --curvature-threshold {args.curvature_threshold} below hardware floor, clamped to 40")
+    CURVATURE_THRESHOLD = max(args.curvature_threshold, 100)
+    if args.curvature_threshold < 100:
+        print(f"WARNING: --curvature-threshold {args.curvature_threshold} below HBT spec floor, clamped to 100")
 
     # Define the individual terms objective function:
     Jf = SquaredFlux(new_surf, new_bs) # penalty on B dot n
