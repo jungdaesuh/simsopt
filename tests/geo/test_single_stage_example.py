@@ -2254,6 +2254,95 @@ class SingleStageExampleTests(unittest.TestCase):
             ],
         )
 
+    def test_resolve_single_stage_final_penalty_metrics_prefers_target_lane_runtime_summary(
+        self,
+    ):
+        module = self.load_module()
+        captured = {}
+        runtime_summary = {
+            "final_G": 1.75,
+            "final_non_qs": 0.11,
+            "final_boozer_residual": 0.22,
+            "final_iota_penalty": 0.33,
+            "final_length_penalty": 0.44,
+            "final_curve_curve_penalty": 0.55,
+            "final_curve_surface_penalty": 0.66,
+            "final_surface_vessel_penalty": 0.77,
+            "final_curvature_penalty": 0.88,
+            "coil_length": 4.25,
+            "max_curvature": 12.5,
+            "curve_curve_min_dist": 0.8,
+            "curve_surface_min_dist": 0.9,
+            "surface_vessel_min_dist": 1.0,
+        }
+
+        class RejectingPenalty:
+            def J(self):
+                raise AssertionError("host-side penalty wrapper should not be used")
+
+        class RejectingDistance(RejectingPenalty):
+            def shortest_distance(self):
+                raise AssertionError("host-side distance wrapper should not be used")
+
+        def _runtime_builder(
+            boozer_surface,
+            bs,
+            iota_target,
+            *,
+            include_profile_suite=False,
+            include_host_wrappers=False,
+            outer_objective_config=None,
+            success_filter=None,
+        ):
+            del boozer_surface, bs, iota_target
+            captured["include_profile_suite"] = include_profile_suite
+            captured["include_host_wrappers"] = include_host_wrappers
+            captured["outer_objective_config"] = outer_objective_config
+            captured["success_filter"] = success_filter
+            return {"host_reporting_metrics": lambda coil_dofs: runtime_summary}
+
+        with patch.object(
+            module,
+            "get_traceable_single_stage_runtime_bundle_builder",
+            return_value=_runtime_builder,
+        ):
+            metrics = module.resolve_single_stage_final_penalty_metrics(
+                use_target_lane=True,
+                benchmark_mode=False,
+                skip_outer_optimizer=False,
+                boozer_surface=object(),
+                bs=object(),
+                iota_target=0.21,
+                coil_dofs=jax.device_put(np.array([1.0, -2.0], dtype=np.float64)),
+                outer_objective_config="config-marker",
+                success_filter="success-filter-marker",
+                curvelength=RejectingPenalty(),
+                j_non_qs=RejectingPenalty(),
+                j_boozer_residual=RejectingPenalty(),
+                j_iota=RejectingPenalty(),
+                j_curve_length=RejectingPenalty(),
+                j_curve_curve=RejectingDistance(),
+                j_curve_surface=RejectingDistance(),
+                j_surface_surface=RejectingDistance(),
+                j_curvature=RejectingPenalty(),
+                cc_dist=0.05,
+                cs_dist=0.02,
+                ss_dist=0.04,
+                curvature_threshold=40.0,
+                init_only=False,
+                termination_message="ok",
+                optimizer_success=True,
+            )
+
+        self.assertEqual(captured["include_profile_suite"], False)
+        self.assertEqual(captured["include_host_wrappers"], True)
+        self.assertEqual(captured["outer_objective_config"], "config-marker")
+        self.assertEqual(captured["success_filter"], "success-filter-marker")
+        for metric_name, expected_value in runtime_summary.items():
+            self.assertEqual(metrics[metric_name], expected_value)
+        self.assertTrue(metrics["hardware_status"]["success"])
+        self.assertEqual(metrics["hardware_status"]["violations"], [])
+
     def test_build_target_lane_outer_objectives_profiles_with_jax_coil_dofs(self):
         module = self.load_module()
         bs = types.SimpleNamespace(x=np.array([1.0, -2.0], dtype=np.float64))

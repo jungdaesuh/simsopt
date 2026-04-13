@@ -59,6 +59,7 @@ from .curveobjectives import (
     cc_distance_pure,
     cs_distance_pure,
     curve_length_pure,
+    pairwise_min_distance_pure,
 )
 from .boozer_residual_jax import (
     boozer_residual_scalar,
@@ -70,7 +71,11 @@ from .boozersurface_jax import (
     _make_boozer_penalty_objective_closure,
 )
 from .label_constraints_jax import compute_G_from_currents
-from .surfaceobjectives import surface_to_surface_distance_pure
+from .surface_fourier_jax import surface_volume
+from .surfaceobjectives import (
+    surface_to_surface_distance_pure,
+    surface_to_surface_shortest_distance_pure,
+)
 
 __all__ = [
     "BoozerResidualJAX",
@@ -2213,6 +2218,7 @@ def _get_cached_traceable_runtime_entry(
         ),
         "host_objective": None,
         "host_value_and_grad": None,
+        "host_reporting_metrics": None,
         "profile_suite": None,
     }
     booz_jax._traceable_runtime_entry_cache = cached_entry
@@ -2228,6 +2234,10 @@ def _ensure_traceable_runtime_host_wrappers(runtime_entry):
     if runtime_entry["host_value_and_grad"] is None:
         runtime_entry["host_value_and_grad"] = _make_traceable_host_value_and_grad(
             runtime_entry["compiled_bundle"]["compiled_value_and_grad_for"]
+        )
+    if runtime_entry["host_reporting_metrics"] is None:
+        runtime_entry["host_reporting_metrics"] = _make_traceable_host_reporting_metrics(
+            runtime_entry["compiled_bundle"]
         )
     return runtime_entry
 
@@ -2290,6 +2300,153 @@ def _make_traceable_host_value_and_grad(compiled_value_and_grad_for):
         )
 
     return host_value_and_grad
+
+
+def _make_traceable_reporting_metrics(compiled_bundle):
+    """Build a pure solved-state reporting summary for one compiled runtime bundle."""
+    compiled_forward_result_for = compiled_bundle["compiled_forward_result_for"]
+    state = compiled_bundle["state"]
+    objective_kwargs = state["objective_kwargs"]
+    outer_objective_config = objective_kwargs["outer_objective_config"]
+    if outer_objective_config is None:
+        raise RuntimeError(
+            "Traceable reporting metrics require the full single-stage outer objective."
+        )
+
+    optimize_G = bool(state["optimize_G"])
+    coil_dof_extraction_spec = objective_kwargs["coil_dof_extraction_spec"]
+    coil_set_spec_from_dofs = state["coil_set_spec_from_dofs"]
+    banana_curve_index = int(outer_objective_config["banana_curve_index"])
+
+    def reporting_metrics(coil_dofs):
+        coil_dofs = _as_jax_float64(coil_dofs)
+        forward_result = compiled_forward_result_for(coil_dofs)
+        solved_x = forward_result["x"]
+        coil_set_spec = coil_set_spec_from_dofs(coil_dofs)
+        raw_terms = _traceable_single_stage_outer_term_values(
+            solved_x,
+            coil_dofs,
+            coil_set_spec,
+            **_traceable_total_objective_kwargs(objective_kwargs),
+        )
+        weighted_terms = _traceable_weighted_single_stage_outer_term_values(
+            raw_terms,
+            outer_objective_config=outer_objective_config,
+        )
+        sdofs, iota, G = _split_x_inner_runtime(solved_x, optimize_G)
+        surface_gamma, xphi, xtheta = _surface_geometry_from_dofs(
+            sdofs,
+            objective_kwargs["surface_quadpoints_phi"],
+            objective_kwargs["surface_quadpoints_theta"],
+            objective_kwargs["mpol"],
+            objective_kwargs["ntor"],
+            objective_kwargs["nfp"],
+            objective_kwargs["stellsym"],
+            objective_kwargs["scatter_indices"],
+            surface_kind=objective_kwargs["surface_kind"],
+        )
+        surface_normal = jnp.cross(xphi, xtheta)
+        vessel_gamma = _runtime_float64_array(
+            outer_objective_config["vessel_gamma"],
+            reference=surface_gamma,
+        ).reshape((-1, 3))
+        coil_specs = coil_specs_from_dof_extraction_spec(
+            coil_dof_extraction_spec,
+            coil_dofs,
+        )
+        banana_curve_spec = coil_specs[banana_curve_index].curve
+        _gamma, banana_gammadash, banana_gammadashdash = curve_geometry_from_spec(
+            banana_curve_spec
+        )
+        coil_length = curve_length_pure(incremental_arclength_pure(banana_gammadash))
+        max_curvature = jnp.max(kappa_pure(banana_gammadash, banana_gammadashdash))
+        surface_gamma_flat = surface_gamma.reshape((-1, 3))
+        inf = _runtime_float64_scalar(np.inf, reference=surface_gamma)
+        curve_curve_min_dist = inf
+        curve_surface_min_dist = inf
+        coil_gammas = []
+        for group in coil_set_spec.groups:
+            gammas = _as_jax_float64(group.gammas)
+            for coil_index in range(int(gammas.shape[0])):
+                coil_gamma = _take_runtime_row(gammas, coil_index)
+                coil_gammas.append(coil_gamma)
+                curve_surface_min_dist = jnp.minimum(
+                    curve_surface_min_dist,
+                    pairwise_min_distance_pure(coil_gamma, surface_gamma_flat),
+                )
+        for curve_index, gamma_i in enumerate(coil_gammas):
+            for gamma_j in coil_gammas[:curve_index]:
+                curve_curve_min_dist = jnp.minimum(
+                    curve_curve_min_dist,
+                    pairwise_min_distance_pure(gamma_i, gamma_j),
+                )
+        surface_vessel_min_dist = surface_to_surface_shortest_distance_pure(
+            surface_gamma,
+            vessel_gamma,
+        )
+        return {
+            "solver_success": forward_result["success"],
+            "has_G": jnp.asarray(optimize_G, dtype=bool),
+            "final_G": G
+            if G is not None
+            else _runtime_float64_scalar(0.0, reference=iota),
+            "final_non_qs": weighted_terms["non_qs"],
+            "final_boozer_residual": weighted_terms["residual"],
+            "final_iota_penalty": weighted_terms["iota"],
+            "final_length_penalty": weighted_terms["length"],
+            "final_curve_curve_penalty": weighted_terms["curve_curve"],
+            "final_curve_surface_penalty": weighted_terms["curve_surface"],
+            "final_surface_vessel_penalty": weighted_terms["surface_vessel"],
+            "final_curvature_penalty": weighted_terms["curvature"],
+            "coil_length": coil_length,
+            "max_curvature": max_curvature,
+            "curve_curve_min_dist": curve_curve_min_dist,
+            "curve_surface_min_dist": curve_surface_min_dist,
+            "surface_vessel_min_dist": surface_vessel_min_dist,
+            "final_volume": surface_volume(surface_gamma, surface_normal),
+            "final_iota": iota,
+        }
+
+    return jax.jit(reporting_metrics)
+
+
+def _make_traceable_host_reporting_metrics(compiled_bundle):
+    """Build a host-normalized solved-state reporting summary wrapper."""
+    reporting_metrics = _make_traceable_reporting_metrics(compiled_bundle)
+    float_metric_names = (
+        "final_non_qs",
+        "final_boozer_residual",
+        "final_iota_penalty",
+        "final_length_penalty",
+        "final_curve_curve_penalty",
+        "final_curve_surface_penalty",
+        "final_surface_vessel_penalty",
+        "final_curvature_penalty",
+        "coil_length",
+        "max_curvature",
+        "curve_curve_min_dist",
+        "curve_surface_min_dist",
+        "surface_vessel_min_dist",
+        "final_volume",
+        "final_iota",
+    )
+
+    def host_reporting_metrics(coil_dofs):
+        metrics = reporting_metrics(coil_dofs)
+        has_G = bool(np.asarray(jax.device_get(metrics["has_G"])))
+        host_metrics = {
+            "solver_success": bool(np.asarray(jax.device_get(metrics["solver_success"]))),
+            "final_G": None
+            if not has_G
+            else float(_host_scalar(metrics["final_G"], dtype=np.float64)),
+        }
+        for metric_name in float_metric_names:
+            host_metrics[metric_name] = float(
+                _host_scalar(metrics[metric_name], dtype=np.float64)
+            )
+        return host_metrics
+
+    return host_reporting_metrics
 
 
 def _make_traceable_batched_value_and_grad_pipeline(compiled_value_and_grad_for):
@@ -2707,6 +2864,10 @@ def make_traceable_objective_runtime_bundle(
     ``host_value_and_grad``
         Optional host-normalized callable returning ``(float, np.ndarray)``
         when ``include_host_wrappers=True``.
+    ``host_reporting_metrics``
+        Optional host-normalized callable returning the final solved-state
+        reporting scalars used by the single-stage example when
+        ``include_host_wrappers=True``.
     ``profile_suite``
         Optional profiled pure-JAX closures when ``include_profile_suite=True``.
     """
@@ -2730,6 +2891,7 @@ def make_traceable_objective_runtime_bundle(
             {
                 "host_objective": runtime_entry["host_objective"],
                 "host_value_and_grad": runtime_entry["host_value_and_grad"],
+                "host_reporting_metrics": runtime_entry["host_reporting_metrics"],
             }
         )
     if not include_profile_suite:

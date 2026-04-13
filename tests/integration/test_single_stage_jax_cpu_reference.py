@@ -6210,6 +6210,123 @@ class TestTraceableObjective:
             err_msg="Full target-lane outer objective no longer matches single-stage JF",
         )
 
+    def test_runtime_bundle_host_reporting_metrics_match_single_stage_wrappers(
+        self,
+        boozer_setup,
+    ):
+        """Host reporting metrics should match the existing single-stage wrapper path."""
+        (_, _, _, _, bs_jax, _, booz_jax, _) = boozer_setup
+        assert booz_jax.res is not None and booz_jax.res.get("success", False)
+
+        banana_curve = bs_jax.coils[0].curve
+        curves = [coil.curve for coil in bs_jax.coils]
+        length_target = single_stage_example.host_float(
+            single_stage_example.CurveLength(banana_curve).J()
+        )
+        vessel_surface = single_stage_example.SurfaceRZFourier(
+            nfp=booz_jax.nfp,
+            stellsym=booz_jax.stellsym,
+            mpol=1,
+            ntor=0,
+            quadpoints_phi=booz_jax.surface.quadpoints_phi,
+            quadpoints_theta=booz_jax.surface.quadpoints_theta,
+        )
+        vessel_surface.set_rc(0, 0, 1.2)
+        vessel_surface.set_rc(1, 0, 0.15)
+        vessel_surface.set_zs(1, 0, 0.15)
+
+        config = single_stage_example.build_traceable_single_stage_outer_objective_config(
+            booz_jax,
+            bs_jax,
+            banana_curve,
+            vessel_surface,
+            non_qs_weight=1.0,
+            residual_weight=1000.0,
+            iota_weight=100.0,
+            length_weight=5.0e-4,
+            length_target=length_target,
+            curve_curve_weight=100.0,
+            curve_curve_threshold=0.05,
+            curve_surface_weight=1.0,
+            curve_surface_threshold=0.02,
+            surface_vessel_weight=1000.0,
+            surface_vessel_threshold=0.04,
+            curvature_weight=0.1,
+            curvature_threshold=40.0,
+        )
+
+        from simsopt.geo.surfaceobjectives_jax import make_traceable_objective_runtime_bundle
+
+        runtime_bundle = make_traceable_objective_runtime_bundle(
+            booz_jax,
+            bs_jax,
+            jnp.asarray(booz_jax.res["iota"], dtype=jnp.float64),
+            include_profile_suite=False,
+            include_host_wrappers=True,
+            outer_objective_config=config,
+        )
+        summary = runtime_bundle["host_reporting_metrics"](
+            jnp.asarray(bs_jax.x.copy(), dtype=jnp.float64)
+        )
+
+        _, IotasJAX, NonQuasiSymmetricRatioJAX = (
+            single_stage_example.get_jax_surface_objective_classes()
+        )
+        iota = single_stage_example.build_iota_objective(booz_jax, IotasJAX)
+        j_non_qs = NonQuasiSymmetricRatioJAX(booz_jax, bs_jax)
+        j_boozer = single_stage_example.build_boozer_residual_objective(
+            booz_jax,
+            bs_jax,
+            single_stage_example.select_boozer_residual_class(
+                use_jax=True,
+                boozer_kind="ls",
+            ),
+        )
+        j_curve_length = QuadraticPenalty(
+            single_stage_example.CurveLength(banana_curve),
+            length_target,
+            "max",
+        )
+        j_curve_curve = single_stage_example.CurveCurveDistance(curves, 0.05)
+        j_curve_surface = single_stage_example.CurveSurfaceDistance(
+            curves,
+            booz_jax.surface,
+            0.02,
+        )
+        j_surface_surface = single_stage_example.SurfaceSurfaceDistance(
+            booz_jax.surface,
+            vessel_surface,
+            0.04,
+        )
+        j_curvature = single_stage_example.LpCurveCurvature(
+            banana_curve,
+            2,
+            40.0,
+        )
+
+        expected_summary = {
+            "final_G": booz_jax.res["G"],
+            "final_non_qs": j_non_qs.J(),
+            "final_boozer_residual": j_boozer.J(),
+            "final_iota_penalty": QuadraticPenalty(iota, booz_jax.res["iota"]).J(),
+            "final_length_penalty": j_curve_length.J(),
+            "final_curve_curve_penalty": j_curve_curve.J(),
+            "final_curve_surface_penalty": j_curve_surface.J(),
+            "final_surface_vessel_penalty": j_surface_surface.J(),
+            "final_curvature_penalty": j_curvature.J(),
+            "coil_length": single_stage_example.CurveLength(banana_curve).J(),
+            "curve_curve_min_dist": j_curve_curve.shortest_distance(),
+            "curve_surface_min_dist": j_curve_surface.shortest_distance(),
+            "surface_vessel_min_dist": j_surface_surface.shortest_distance(),
+        }
+        for metric_name, expected_value in expected_summary.items():
+            np.testing.assert_allclose(
+                summary[metric_name],
+                expected_value,
+                rtol=0.0 if metric_name == "final_G" else 1e-10,
+                atol=1e-12,
+            )
+
     def test_pure_objective_is_jax_grad_differentiable(self, boozer_setup):
         """Test 2: jax.grad(f)(coil_dofs) is finite, nonzero, matches JF.dJ()."""
         (_, _, _, _, bs_jax, _, booz_jax, _) = boozer_setup

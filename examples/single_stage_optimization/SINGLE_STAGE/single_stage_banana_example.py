@@ -2203,6 +2203,109 @@ def resolve_single_stage_iota_metric(
     return host_float(build_iota_objective(boozer_surface, iota_cls).J())
 
 
+def resolve_single_stage_final_penalty_metrics(
+    *,
+    use_target_lane,
+    benchmark_mode,
+    skip_outer_optimizer,
+    boozer_surface,
+    bs,
+    iota_target,
+    coil_dofs,
+    outer_objective_config,
+    success_filter,
+    curvelength,
+    j_non_qs,
+    j_boozer_residual,
+    j_iota,
+    j_curve_length,
+    j_curve_curve,
+    j_curve_surface,
+    j_surface_surface,
+    j_curvature,
+    cc_dist,
+    cs_dist,
+    ss_dist,
+    curvature_threshold,
+    init_only=False,
+    termination_message=None,
+    optimizer_success=None,
+):
+    """Resolve final reported penalties/hardware metrics for one single-stage run."""
+    del init_only, termination_message, optimizer_success
+    benchmark_hardware_status = {
+        "success": None,
+        "violations": ["skipped_in_benchmark_mode"],
+    }
+
+    if use_target_lane and not skip_outer_optimizer:
+        runtime_bundle = get_traceable_single_stage_runtime_bundle_builder()(
+            boozer_surface,
+            bs,
+            iota_target,
+            include_profile_suite=False,
+            include_host_wrappers=True,
+            outer_objective_config=outer_objective_config,
+            success_filter=success_filter,
+        )
+        metrics = dict(runtime_bundle["host_reporting_metrics"](_as_jax_float64(coil_dofs)))
+        if benchmark_mode:
+            metrics["curve_curve_min_dist"] = None
+            metrics["curve_surface_min_dist"] = None
+            metrics["surface_vessel_min_dist"] = None
+            metrics["hardware_status"] = benchmark_hardware_status
+        else:
+            metrics["hardware_status"] = evaluate_single_stage_hardware_constraints(
+                metrics["curve_curve_min_dist"],
+                cc_dist,
+                metrics["curve_surface_min_dist"],
+                cs_dist,
+                metrics["surface_vessel_min_dist"],
+                ss_dist,
+                metrics["max_curvature"],
+                curvature_threshold,
+            )
+        return metrics
+
+    max_curvature = float(np.max(j_curvature.curve.kappa()))
+    final_curve_curve_min_dist = None
+    final_curve_surface_min_dist = None
+    final_surface_vessel_min_dist = None
+    if benchmark_mode:
+        final_hardware_status = benchmark_hardware_status
+    else:
+        final_curve_curve_min_dist = host_float(j_curve_curve.shortest_distance())
+        final_curve_surface_min_dist = host_float(j_curve_surface.shortest_distance())
+        final_surface_vessel_min_dist = host_float(j_surface_surface.shortest_distance())
+        final_hardware_status = evaluate_single_stage_hardware_constraints(
+            final_curve_curve_min_dist,
+            cc_dist,
+            final_curve_surface_min_dist,
+            cs_dist,
+            final_surface_vessel_min_dist,
+            ss_dist,
+            max_curvature,
+            curvature_threshold,
+        )
+    return {
+        "final_G": host_float(boozer_surface.res["G"]),
+        "final_non_qs": host_float(j_non_qs.J()),
+        "final_boozer_residual": host_float(j_boozer_residual.J()),
+        "final_iota_penalty": host_float(j_iota.J()),
+        "final_length_penalty": host_float(j_curve_length.J()),
+        "final_curve_curve_penalty": host_float(j_curve_curve.J()),
+        "final_curve_surface_penalty": host_float(j_curve_surface.J()),
+        "final_surface_vessel_penalty": host_float(j_surface_surface.J()),
+        "final_curvature_penalty": host_float(j_curvature.J()),
+        "coil_length": host_float(curvelength.J()),
+        "max_curvature": max_curvature,
+        "curve_curve_min_dist": final_curve_curve_min_dist,
+        "curve_surface_min_dist": final_curve_surface_min_dist,
+        "surface_vessel_min_dist": final_surface_vessel_min_dist,
+        "hardware_status": final_hardware_status,
+    }
+
+
 def surface_self_intersection_check_available():
     """Return whether the optional surface self-intersection backend is present."""
     has_ground = (
@@ -5784,40 +5887,75 @@ if __name__ == "__main__":
                 _perf_counter_s(),
             )
 
+    final_target_lane_outer_objective_config = None
+    if use_target_lane and not skip_outer_optimizer:
+        final_target_lane_outer_objective_config = build_target_lane_outer_objective_config(
+            boozer_surface,
+            bs,
+            banana_curve,
+            VV,
+            non_qs_weight=1.0,
+            residual_weight=RES_WEIGHT,
+            iota_weight=IOTAS_WEIGHT,
+            length_weight=LENGTH_WEIGHT,
+            length_target=length_target,
+            curve_curve_threshold=CC_DIST,
+            curve_curve_weight=CC_WEIGHT,
+            curve_surface_threshold=CS_DIST,
+            curve_surface_weight=CS_WEIGHT,
+            surface_vessel_threshold=SS_DIST,
+            surface_vessel_weight=SURF_DIST_WEIGHT,
+            curvature_threshold=CURVATURE_THRESHOLD,
+            curvature_weight=CURVATURE_WEIGHT,
+        )
+    final_penalty_metrics = resolve_single_stage_final_penalty_metrics(
+        use_target_lane=use_target_lane,
+        benchmark_mode=bool(args.benchmark_mode),
+        skip_outer_optimizer=skip_outer_optimizer,
+        boozer_surface=boozer_surface,
+        bs=bs,
+        iota_target=iota_target,
+        coil_dofs=bs.x.copy() if res is None else res.x,
+        outer_objective_config=final_target_lane_outer_objective_config,
+        success_filter=target_lane_success_filter,
+        curvelength=curvelength,
+        j_non_qs=JnonQSRatio,
+        j_boozer_residual=JBoozerResidual,
+        j_iota=Jiota,
+        j_curve_length=JCurveLength,
+        j_curve_curve=JCurveCurve,
+        j_curve_surface=JCurveSurface,
+        j_surface_surface=JSurfSurf,
+        j_curvature=JCurvature,
+        cc_dist=CC_DIST,
+        cs_dist=CS_DIST,
+        ss_dist=SS_DIST,
+        curvature_threshold=CURVATURE_THRESHOLD,
+        init_only=args.init_only,
+        termination_message=termination_message,
+        optimizer_success=optimizer_success,
+    )
+    if use_target_lane and not skip_outer_optimizer:
+        final_max_curvature = float(final_penalty_metrics["max_curvature"])
     final_self_intersecting = update_self_intersection_status(
         run_dict, boozer_surface.surface
     )
     final_self_intersection_check_available = run_dict[
         "self_intersection_check_available"
     ]
-    final_coil_length = host_float(curvelength.J())
+    final_coil_length = float(final_penalty_metrics["coil_length"])
     final_hardware_metrics_start_s = _perf_counter_s()
     with maybe_trace_single_stage_phase(
         "single_stage.final_hardware_metrics",
         enabled=jax_profile_enabled,
     ):
-        if args.benchmark_mode:
-            final_curve_curve_min_dist = None
-            final_curve_surface_min_dist = None
-            final_surface_vessel_min_dist = None
-            final_hardware_status = {
-                "success": None,
-                "violations": ["skipped_in_benchmark_mode"],
-            }
-        else:
-            final_curve_curve_min_dist = host_float(JCurveCurve.shortest_distance())
-            final_curve_surface_min_dist = host_float(JCurveSurface.shortest_distance())
-            final_surface_vessel_min_dist = host_float(JSurfSurf.shortest_distance())
-            final_hardware_status = evaluate_single_stage_hardware_constraints(
-                final_curve_curve_min_dist,
-                CC_DIST,
-                final_curve_surface_min_dist,
-                CS_DIST,
-                final_surface_vessel_min_dist,
-                SS_DIST,
-                float(final_max_curvature),
-                CURVATURE_THRESHOLD,
-            )
+        final_curve_curve_min_dist = final_penalty_metrics["curve_curve_min_dist"]
+        final_curve_surface_min_dist = final_penalty_metrics["curve_surface_min_dist"]
+        final_surface_vessel_min_dist = final_penalty_metrics[
+            "surface_vessel_min_dist"
+        ]
+        final_hardware_status = final_penalty_metrics["hardware_status"]
+        if not args.benchmark_mode:
             optimizer_success, termination_message = apply_hardware_constraint_verdict(
                 optimizer_success,
                 termination_message,
@@ -5975,15 +6113,23 @@ if __name__ == "__main__":
         "TARGET_IOTA": float(iota_target),
         "FINAL_VOLUME": float(final_volume),
         "FINAL_IOTA": float(final_iota),
-        "FINAL_G": host_float(boozer_surface.res["G"]),
-        "FINAL_NON_QS": host_float(JnonQSRatio.J()),
-        "FINAL_BOOZER_RESIDUAL": host_float(JBoozerResidual.J()),
-        "FINAL_IOTA_PENALTY": host_float(Jiota.J()),
-        "FINAL_LENGTH_PENALTY": host_float(JCurveLength.J()),
-        "FINAL_CURVE_CURVE_PENALTY": host_float(JCurveCurve.J()),
-        "FINAL_CURVE_SURFACE_PENALTY": host_float(JCurveSurface.J()),
-        "FINAL_SURFACE_VESSEL_PENALTY": host_float(JSurfSurf.J()),
-        "FINAL_CURVATURE_PENALTY": host_float(JCurvature.J()),
+        "FINAL_G": final_penalty_metrics["final_G"],
+        "FINAL_NON_QS": final_penalty_metrics["final_non_qs"],
+        "FINAL_BOOZER_RESIDUAL": final_penalty_metrics["final_boozer_residual"],
+        "FINAL_IOTA_PENALTY": final_penalty_metrics["final_iota_penalty"],
+        "FINAL_LENGTH_PENALTY": final_penalty_metrics["final_length_penalty"],
+        "FINAL_CURVE_CURVE_PENALTY": final_penalty_metrics[
+            "final_curve_curve_penalty"
+        ],
+        "FINAL_CURVE_SURFACE_PENALTY": final_penalty_metrics[
+            "final_curve_surface_penalty"
+        ],
+        "FINAL_SURFACE_VESSEL_PENALTY": final_penalty_metrics[
+            "final_surface_vessel_penalty"
+        ],
+        "FINAL_CURVATURE_PENALTY": final_penalty_metrics[
+            "final_curvature_penalty"
+        ],
         "FIELD_ERROR": float(fieldError),
         "SELF_INTERSECTING": final_self_intersecting,
         "SELF_INTERSECTION_CHECK_AVAILABLE": final_self_intersection_check_available,
