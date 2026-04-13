@@ -619,7 +619,9 @@ def main(parsed_args=None):
 
     # Threshold and weight for the coil curvature penalty
     CURVATURE_WEIGHT = args.curvature_weight
-    CURVATURE_THRESHOLD = args.curvature_threshold  # Penalty threshold is a design choice; HW limit is 100 m⁻¹
+    CURVATURE_THRESHOLD = max(args.curvature_threshold, 40)  # Design target floor 40; HW limit is 100 m⁻¹
+    if args.curvature_threshold < 40:
+        print(f"WARNING: --curvature-threshold {args.curvature_threshold} below design target, clamped to 40")
 
     # Define the individual terms objective function:
     Jf = SquaredFlux(new_surf, new_bs) # penalty on B dot n

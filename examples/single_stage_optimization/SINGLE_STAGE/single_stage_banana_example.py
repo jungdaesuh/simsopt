@@ -186,7 +186,7 @@ DEFAULT_STAGE2_SEEDS_BY_PLASMA = {
         "cc_weight": 100.0,
         "cc_threshold": 0.05,
         "curvature_weight": 0.0001,
-        "curvature_threshold": 100.0,
+        "curvature_threshold": 40.0,
         "banana_surf_radius": 0.21,
         "tf_current_A": 8.0e4,
         "order": 2,
@@ -199,7 +199,7 @@ DEFAULT_STAGE2_SEEDS_BY_PLASMA = {
         "cc_weight": 100.0,
         "cc_threshold": 0.05,
         "curvature_weight": 0.0001,
-        "curvature_threshold": 100.0,
+        "curvature_threshold": 40.0,
         "banana_surf_radius": 0.21,
         "tf_current_A": 8.0e4,
         "order": 2,
@@ -539,7 +539,7 @@ def apply_default_stage2_seed_args(args):
     if args.stage2_seed_cc_threshold is None:
         args.stage2_seed_cc_threshold = default_seed.get("cc_threshold", 0.05)
     if args.stage2_seed_curvature_threshold is None:
-        args.stage2_seed_curvature_threshold = default_seed.get("curvature_threshold", 100.0)
+        args.stage2_seed_curvature_threshold = default_seed.get("curvature_threshold", 40.0)
     if args.stage2_seed_banana_surf_radius is None:
         args.stage2_seed_banana_surf_radius = default_seed.get("banana_surf_radius", 0.21)
     if args.stage2_seed_tf_current_A is None:
@@ -966,7 +966,7 @@ def parse_args():
         help="Abort refinement after this many consecutive chunks without accepted-state improvement.",
     )
     parser.add_argument("--cc-dist", type=float, default=float(os.environ.get("CC_DIST", "0.05")))
-    parser.add_argument("--curvature-threshold", type=float, default=float(os.environ.get("CURVATURE_THRESHOLD", "100")))
+    parser.add_argument("--curvature-threshold", type=float, default=float(os.environ.get("CURVATURE_THRESHOLD", "40")))
     parser.add_argument("--cc-weight", type=float, default=float(os.environ.get("CC_WEIGHT", "100")))
     parser.add_argument("--curvature-weight", type=float, default=float(os.environ.get("CURVATURE_WEIGHT", "0.1")))
     parser.add_argument("--length-weight", type=float, default=float(os.environ.get("SS_LENGTH_WEIGHT", "1")),
@@ -4724,9 +4724,9 @@ if __name__ == "__main__":
     if args.ss_dist < 0.04:
         print(f"WARNING: --ss-dist {args.ss_dist} below baseline default, clamped to 0.04")
     CURVATURE_WEIGHT = args.curvature_weight
-    CURVATURE_THRESHOLD = max(args.curvature_threshold, 100)
-    if args.curvature_threshold < 100:
-        print(f"WARNING: --curvature-threshold {args.curvature_threshold} below HBT spec floor, clamped to 100")
+    CURVATURE_THRESHOLD = max(args.curvature_threshold, 40)  # Design target floor 40; HW limit is 100 m⁻¹
+    if args.curvature_threshold < 40:
+        print(f"WARNING: --curvature-threshold {args.curvature_threshold} below design target, clamped to 40")
     SURFACE_GAP_THRESHOLD = max(args.surface_gap_threshold, 0.0)
     if len(surface_data) > 1 and SURF_DIST_WEIGHT != 0:
         print("WARNING: SURF_DIST_WEIGHT is diagnostic-only in multi-surface mode; outer-vessel spacing is enforced as a rejection gate.")
