@@ -811,9 +811,7 @@ def _traceable_runtime_deviceify_leaf(leaf):
     """Explicitly place cached runtime arrays back onto the active device."""
     if isinstance(leaf, jax.Array):
         return leaf
-    if isinstance(leaf, np.ndarray):
-        return jax.device_put(np.asarray(leaf))
-    if isinstance(leaf, np.generic):
+    if isinstance(leaf, (np.ndarray, np.generic)):
         return jax.device_put(np.asarray(leaf))
     return leaf
 
