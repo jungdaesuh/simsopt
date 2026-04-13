@@ -98,7 +98,8 @@ Tracking checklist:
 Code:
 
 - `single_stage_banana_example.py:4715-4721`
-- `single_stage_banana_example.py:1151-1208`
+- `single_stage_banana_example.py:1151-1166`
+- `single_stage_banana_example.py:1169-1208`
 
 Why it is still host-bound:
 
@@ -174,7 +175,8 @@ What would need porting:
 Code:
 
 - `single_stage_banana_example.py:5793-5826`
-- `single_stage_banana_example.py:5978-6091`
+- final metric wrapper calls in `single_stage_banana_example.py:5978-6003`
+- optimizer diagnostics and final JSON emission in `single_stage_banana_example.py:6004-6091`
 
 Why it is still host-bound:
 
@@ -184,6 +186,7 @@ Why it is still host-bound:
   - `JCurveSurface.shortest_distance()`
   - `JSurfSurf.shortest_distance()`
   - objective `.J()` calls for the final results JSON
+- the surrounding results assembly path also performs optimizer diagnostics extraction and final JSON writes on the host
 
 What would need porting:
 
