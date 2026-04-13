@@ -12,6 +12,7 @@ import pytest
 from simsopt.geo.surface import Surface
 import simsopt.geo.surfaceobjectives_jax as surfaceobjectives_jax_module
 from simsopt.geo.surfaceobjectives_jax import _canonicalize_traceable_exact_quadrature
+from conftest import _parity_device_for_lane
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -574,6 +575,13 @@ def test_repo_pythonpath_env_clears_inherited_target_lane_sync(monkeypatch):
     assert _TARGET_LANE_ACCEPTED_STEP_SYNC_ENV_VAR not in env
 
 
+def test_parity_device_for_lane_rejects_unknown_lane():
+    jax_module = types.SimpleNamespace(devices=lambda: ())
+
+    with pytest.raises(ValueError, match="expected 'cpu' or 'gpu'"):
+        _parity_device_for_lane(jax_module, "tpu")
+
+
 def test_repo_pythonpath_env_can_disable_compilation_cache(monkeypatch):
     monkeypatch.setenv(_JAX_COMPILATION_CACHE_ENV_VAR, "/tmp/jax-cache")
     monkeypatch.setenv(_JAX_PERSISTENT_CACHE_MIN_COMPILE_TIME_ENV_VAR, "0")
@@ -632,6 +640,7 @@ def test_repo_pythonpath_env_adds_detected_cuda_toolchain_root(monkeypatch, tmp_
     cuda_root = tmp_path / "cuda"
     bin_dir = cuda_root / "bin"
     bin_dir.mkdir(parents=True)
+    (bin_dir / "ptxas").touch()
     monkeypatch.setattr(
         "repo_bootstrap._DEFAULT_CUDA_TOOLCHAIN_ROOT",
         cuda_root,
@@ -650,7 +659,9 @@ def test_repo_pythonpath_env_adds_detected_cuda_toolchain_root(monkeypatch, tmp_
 
 def test_repo_pythonpath_env_respects_explicit_cuda_data_dir_flag(monkeypatch, tmp_path):
     cuda_root = tmp_path / "cuda"
-    (cuda_root / "bin").mkdir(parents=True)
+    bin_dir = cuda_root / "bin"
+    bin_dir.mkdir(parents=True)
+    (bin_dir / "ptxas").touch()
     explicit_flag = "--xla_gpu_cuda_data_dir=/already/set"
     monkeypatch.setattr(
         "repo_bootstrap._DEFAULT_CUDA_TOOLCHAIN_ROOT",
@@ -663,6 +674,95 @@ def test_repo_pythonpath_env_respects_explicit_cuda_data_dir_flag(monkeypatch, t
 
     assert env["PATH"].split(os.pathsep)[0] == str(cuda_root / "bin")
     assert env["XLA_FLAGS"] == f"{explicit_flag} --other-flag=1"
+
+
+def test_repo_pythonpath_env_prefers_active_env_cuda_toolchain_root(
+    monkeypatch, tmp_path
+):
+    active_root = tmp_path / "active-env"
+    active_bin_dir = active_root / "bin"
+    active_bin_dir.mkdir(parents=True)
+    (active_bin_dir / "nvlink").touch()
+    (active_bin_dir / "ptxas").touch()
+    active_nvjitlink_dir = (
+        active_root
+        / "lib"
+        / f"python{sys.version_info.major}.{sys.version_info.minor}"
+        / "site-packages"
+        / "nvidia"
+        / "nvjitlink"
+        / "lib"
+    )
+    active_nvjitlink_dir.mkdir(parents=True)
+    (active_nvjitlink_dir / "libnvJitLink.so.12").touch()
+
+    default_root = tmp_path / "default-cuda"
+    default_bin_dir = default_root / "bin"
+    default_bin_dir.mkdir(parents=True)
+    (default_bin_dir / "nvlink").touch()
+    (default_bin_dir / "ptxas").touch()
+
+    monkeypatch.setattr(
+        "repo_bootstrap._DEFAULT_CUDA_TOOLCHAIN_ROOT",
+        default_root,
+    )
+    monkeypatch.setattr("repo_bootstrap.sys.prefix", str(active_root))
+    monkeypatch.delenv("CONDA_PREFIX", raising=False)
+    monkeypatch.delenv("VIRTUAL_ENV", raising=False)
+    monkeypatch.setenv("PATH", "/usr/bin")
+    monkeypatch.delenv("LD_LIBRARY_PATH", raising=False)
+    monkeypatch.delenv("XLA_FLAGS", raising=False)
+
+    env = repo_pythonpath_env(platform="cuda")
+
+    assert env["PATH"].split(os.pathsep)[0] == str(active_bin_dir)
+    assert (
+        env["LD_LIBRARY_PATH"].split(os.pathsep)[0] == str(active_nvjitlink_dir)
+    )
+    assert (
+        env["XLA_FLAGS"].split()[0]
+        == f"--xla_gpu_cuda_data_dir={active_root}"
+    )
+
+
+def test_repo_pythonpath_env_detects_target_arch_nvjitlink_dir(monkeypatch, tmp_path):
+    active_root = tmp_path / "active-env"
+    active_bin_dir = active_root / "bin"
+    active_bin_dir.mkdir(parents=True)
+    (active_bin_dir / "nvlink").touch()
+    (active_bin_dir / "ptxas").touch()
+    active_target_nvjitlink_dir = active_root / "targets" / "sbsa-linux" / "lib"
+    active_target_nvjitlink_dir.mkdir(parents=True)
+    (active_target_nvjitlink_dir / "libnvJitLink.so.12").touch()
+
+    default_root = tmp_path / "default-cuda"
+    default_bin_dir = default_root / "bin"
+    default_bin_dir.mkdir(parents=True)
+    (default_bin_dir / "nvlink").touch()
+    (default_bin_dir / "ptxas").touch()
+
+    monkeypatch.setattr(
+        "repo_bootstrap._DEFAULT_CUDA_TOOLCHAIN_ROOT",
+        default_root,
+    )
+    monkeypatch.setattr("repo_bootstrap.sys.prefix", str(active_root))
+    monkeypatch.delenv("CONDA_PREFIX", raising=False)
+    monkeypatch.delenv("VIRTUAL_ENV", raising=False)
+    monkeypatch.setenv("PATH", "/usr/bin")
+    monkeypatch.delenv("LD_LIBRARY_PATH", raising=False)
+    monkeypatch.delenv("XLA_FLAGS", raising=False)
+
+    env = repo_pythonpath_env(platform="cuda")
+
+    assert env["PATH"].split(os.pathsep)[0] == str(active_bin_dir)
+    assert (
+        env["LD_LIBRARY_PATH"].split(os.pathsep)[0]
+        == str(active_target_nvjitlink_dir)
+    )
+    assert (
+        env["XLA_FLAGS"].split()[0]
+        == f"--xla_gpu_cuda_data_dir={active_root}"
+    )
 
 
 def test_apply_compilation_cache_policy_defaults_to_disabled(monkeypatch):
@@ -2732,6 +2832,8 @@ def test_gpu_parity_workflow_enforces_strict_transfer_guard_contract():
     assert "--fixture real" in workflow_text
     assert "benchmarks/single_stage_outer_loop_probe.py" in workflow_text
     assert "--optimizer-backend ondevice" in workflow_text
+    assert "tests/geo/test_boozer_residual_jax.py \\" in workflow_text
+    assert "-k gpu_parity" in workflow_text
     assert "benchmark_artifacts/stage2_value_gradient_parity_real_cuda.json" in workflow_text
     assert "benchmark_artifacts/single_stage_outer_loop_cuda.json" in workflow_text
 
@@ -2785,6 +2887,7 @@ def test_smoke_workflow_adds_cuda_strict_transfer_guard_pytest_lane():
     assert "run_code_traceable_lm_ondevice_executes_inner_solve_on_gpu" in workflow_text
     assert "tests/integration/test_single_stage_jax_cpu_reference.py" in workflow_text
     assert "TestRealFixtureGpuM5Parity" in workflow_text
+    assert "test_ls_solve_parity_production_scale_gpu_under_disallow" in workflow_text
     assert "tests/integration/test_single_stage_physics_parity.py" in workflow_text
     assert "TestSingleStageOuterLoopGpuProof" in workflow_text
 

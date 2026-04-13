@@ -1119,28 +1119,57 @@ class BoozerSurface(Optimizable):
                     x, derivatives=1, optimize_G=optimize_G
                 )
 
-            fallback = root(
-                exact_residual_and_jacobian,
-                xl,
-                jac=True,
-                method="hybr",
-                options={
-                    "xtol": max(1e-12, tol * 1e-2),
-                    "maxfev": max(400, 4 * maxiter),
-                },
+            def solve_exact_fallback(x0, *, xtol, maxfev):
+                return root(
+                    exact_residual_and_jacobian,
+                    x0,
+                    jac=True,
+                    method="hybr",
+                    options={
+                        "xtol": xtol,
+                        "maxfev": maxfev,
+                    },
+                )
+
+            fallback_xtol = max(1e-12, tol * 1e-2)
+            fallback = solve_exact_fallback(
+                xl, xtol=fallback_xtol, maxfev=max(400, 4 * maxiter)
             )
             fallback_xl = np.asarray(fallback.x)
             fallback_val, fallback_dval = self.boozer_exact_constraints(
                 fallback_xl, derivatives=1, optimize_G=optimize_G
             )
             fallback_norm = np.linalg.norm(fallback_val)
+            fallback_nfev = getattr(fallback, "nfev", 0)
+            polish_xtol = min(1e-10, fallback_xtol)
+            if (
+                np.isfinite(fallback_norm)
+                and fallback_norm > tol
+                and polish_xtol < fallback_xtol
+            ):
+                polished = solve_exact_fallback(
+                    fallback_xl,
+                    xtol=polish_xtol,
+                    maxfev=max(200, 2 * maxiter),
+                )
+                polished_xl = np.asarray(polished.x)
+                polished_val, polished_dval = self.boozer_exact_constraints(
+                    polished_xl, derivatives=1, optimize_G=optimize_G
+                )
+                polished_norm = np.linalg.norm(polished_val)
+                if np.isfinite(polished_norm) and polished_norm <= fallback_norm:
+                    fallback_xl = polished_xl
+                    fallback_val = polished_val
+                    fallback_dval = polished_dval
+                    fallback_norm = polished_norm
+                fallback_nfev += getattr(polished, "nfev", 0)
             if np.isfinite(fallback_norm) and fallback_norm <= norm:
                 xl = fallback_xl
                 val = fallback_val
                 dval = fallback_dval
                 norm = fallback_norm
             # nfev: root() does not report iteration count for hybr
-            i = getattr(fallback, "nfev", 0)
+            i = fallback_nfev
 
         if s.stellsym:
             lm = xl[-2]

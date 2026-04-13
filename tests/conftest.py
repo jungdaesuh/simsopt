@@ -249,12 +249,15 @@ def parity_rng(seed: int = 0) -> np.random.RandomState:
 
 
 def _parity_device_for_lane(jax_module, lane: str):
+    if lane not in {"cpu", "gpu"}:
+        raise ValueError(f"Unknown parity lane {lane!r}; expected 'cpu' or 'gpu'.")
     for device in jax_module.devices():
         if device.platform == lane:
             return device
     if lane == "gpu":
         pytest.skip("CUDA GPU not available")
-    raise RuntimeError(f"No JAX device available for parity lane {lane!r}")
+    if lane == "cpu":
+        pytest.skip("CPU JAX backend not available")
 
 
 def parity_device(lane: str):

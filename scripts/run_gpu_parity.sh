@@ -119,11 +119,20 @@ echo "=== Phase 1: Import Smoke ==="
 # --- Phase 2: Pure JAX unit tests ---
 echo ""
 echo "=== Phase 2: Pure JAX Unit Tests ==="
+PARITY_EXPR="cpu_parity"
+if [ "$PLATFORM" = "cuda" ]; then
+  PARITY_EXPR="gpu_parity"
+fi
+
 "$PYTHON_BIN" -m pytest \
   tests/field/test_biotsavart_jax.py \
   tests/geo/test_surface_fourier_jax.py \
-  tests/geo/test_boozer_residual_jax.py \
   tests/objectives/test_integral_bdotn_jax.py \
+  -v --tb=short 2>&1 || true
+
+"$PYTHON_BIN" -m pytest \
+  tests/geo/test_boozer_residual_jax.py \
+  -k "$PARITY_EXPR" \
   -v --tb=short 2>&1 || true
 
 # --- Phase 3: Biot-Savart parity tests ---

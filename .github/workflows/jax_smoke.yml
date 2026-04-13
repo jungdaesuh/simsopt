@@ -368,11 +368,11 @@ jobs:
             -k "run_code_traceable_exact_executes_inner_solve_on_gpu or run_code_traceable_lm_ondevice_executes_inner_solve_on_gpu" \
             -v --tb=short
 
-      - name: Run reduced real-fixture CUDA M5 parity tests
+      - name: Run reduced real-fixture and production-scale CUDA parity tests
         run: |
           conda run --no-capture-output -n "$BENCHMARK_ENV_NAME" \
             python -m pytest tests/integration/test_single_stage_jax_cpu_reference.py \
-            -k "TestRealFixtureGpuM5Parity" \
+            -k "TestRealFixtureGpuM5Parity or test_ls_solve_parity_production_scale_gpu_under_disallow" \
             -v --tb=short
 
       - name: Run single-stage outer-loop CUDA proof test

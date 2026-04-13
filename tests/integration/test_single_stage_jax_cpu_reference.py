@@ -4302,9 +4302,16 @@ _RUN_CODE_LS_PARITY_PRODUCTION_OPTIONS = {
     "bfgs_maxiter": 1500,
     "newton_maxiter": 40,
 }
+_RUN_CODE_LS_PARITY_DEFAULT_IOTA_TOL = 1e-6
+_RUN_CODE_LS_PARITY_PRODUCTION_GPU_IOTA_TOL = 1e-5
 
 
-def _assert_run_code_ls_parity(problem, *, options=None) -> None:
+def _assert_run_code_ls_parity(
+    problem,
+    *,
+    options=None,
+    max_iota_diff=_RUN_CODE_LS_PARITY_DEFAULT_IOTA_TOL,
+) -> dict[str, object]:
     solver_options = dict(
         _RUN_CODE_LS_PARITY_OPTIONS if options is None else options
     )
@@ -4352,7 +4359,16 @@ def _assert_run_code_ls_parity(problem, *, options=None) -> None:
     assert abs(res_jax["iota"]) < 1e-3, f"JAX iota too large: {res_jax['iota']}"
     assert label_err_cpu < 1e-3, f"CPU label error too large: {label_err_cpu}"
     assert label_err_jax < 1e-3, f"JAX label error too large: {label_err_jax}"
-    assert iota_diff < 1e-6, f"Iota disagreement: {iota_diff:.6e}"
+    assert iota_diff < max_iota_diff, f"Iota disagreement: {iota_diff:.6e}"
+
+    return {
+        "booz_cpu": booz_cpu,
+        "booz_jax": booz_jax,
+        "res_cpu": res_cpu,
+        "res_jax": res_jax,
+        "vol_cpu": vol_cpu,
+        "vol_jax": vol_jax,
+    }
 
 
 class TestRunCodeLSParity:
@@ -4373,6 +4389,31 @@ class TestRunCodeLSParity:
         _assert_run_code_ls_parity(
             build_ls_parity_problem(ncoils=4, nphi=16, ntheta=8),
             options=_RUN_CODE_LS_PARITY_PRODUCTION_OPTIONS,
+        )
+
+    @pytest.mark.slow
+    def test_ls_solve_parity_production_scale_gpu_under_disallow(
+        self,
+        monkeypatch,
+        request,
+    ):
+        """The larger LS fixture should solve on CUDA under strict transfer guard."""
+        gpu = parity_device("gpu")
+        monkeypatch.setenv("SIMSOPT_JAX_TRANSFER_GUARD", "disallow")
+        _enable_strict_jax_backend(monkeypatch, request)
+        results = _assert_run_code_ls_parity(
+            build_ls_parity_problem(ncoils=4, nphi=16, ntheta=8),
+            options=_RUN_CODE_LS_PARITY_PRODUCTION_OPTIONS,
+            max_iota_diff=_RUN_CODE_LS_PARITY_PRODUCTION_GPU_IOTA_TOL,
+        )
+
+        res_jax = results["res_jax"]
+        assert res_jax["type"] == "ls"
+        assert_arrays_on_device(
+            gpu,
+            res_jax["jacobian"],
+            res_jax["hessian"],
+            *res_jax["PLU"],
         )
 
 

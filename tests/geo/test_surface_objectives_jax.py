@@ -913,6 +913,131 @@ def test_make_traceable_objective_runtime_bundle_materializes_host_wrappers_on_d
     assert ensure_calls == [runtime_entry]
 
 
+def test_diagnose_traceable_objective_runtime_redevices_cached_baseline_arrays(
+    monkeypatch,
+):
+    objective_config = {
+        weight_key: 1.0
+        for _, weight_key in surfaceobjectives_jax_module._TRACEABLE_SINGLE_STAGE_OUTER_TERM_SPECS
+    }
+    call_checks: dict[str, bool] = {}
+
+    def _record_array(name, value):
+        call_checks[name] = isinstance(value, jax.Array)
+        return value
+
+    def compiled_forward_result_for(coil_dofs):
+        _record_array("compiled_forward_result_for", coil_dofs)
+        return {"success": jnp.asarray(True, dtype=bool)}
+
+    def compiled_value_and_grad_for(coil_dofs):
+        _record_array("compiled_value_and_grad_for", coil_dofs)
+        return (
+            jnp.asarray(1.25, dtype=jnp.float64),
+            jnp.asarray([0.5, -0.75], dtype=jnp.float64),
+        )
+
+    def fake_term_values(solved_x, coil_dofs, _coil_set_spec, **_objective_kwargs):
+        _record_array("raw_terms_solved_x", solved_x)
+        _record_array("raw_terms_coil_dofs", coil_dofs)
+        return {
+            term_name: jnp.asarray(float(index + 1), dtype=jnp.float64)
+            for index, (term_name, _weight_key) in enumerate(
+                surfaceobjectives_jax_module._TRACEABLE_SINGLE_STAGE_OUTER_TERM_SPECS
+            )
+        }
+
+    def fake_weighted_term_values(raw_terms, *, outer_objective_config):
+        assert outer_objective_config is objective_config
+        return dict(raw_terms)
+
+    def fake_gradient_parts(
+        _booz_jax,
+        _coil_set_spec_from_dofs,
+        *,
+        coil_dofs,
+        solved_x,
+        solved_plu,
+        objective_kwargs,
+        term_name=None,
+    ):
+        _record_array("gradient_parts_coil_dofs", coil_dofs)
+        _record_array("gradient_parts_solved_x", solved_x)
+        plu_leaves = jax.tree_util.tree_leaves(solved_plu)
+        call_checks["gradient_parts_solved_plu"] = all(
+            isinstance(leaf, jax.Array) for leaf in plu_leaves
+        )
+        assert objective_kwargs["outer_objective_config"] is objective_config
+        assert term_name is not None
+        grad = jnp.asarray([0.5, -0.75], dtype=jnp.float64)
+        return grad, grad, grad
+
+    runtime_entry = {
+        "compiled_bundle": {
+            "state": {
+                "objective_kwargs": {"outer_objective_config": objective_config},
+                "baseline_x": np.asarray([1.0, 2.0], dtype=np.float64),
+                "baseline_plu": (
+                    np.eye(2, dtype=np.float64),
+                    np.asarray([0, 1], dtype=np.int32),
+                    np.asarray([0, 1], dtype=np.int32),
+                ),
+                "baseline_coil_dofs": np.asarray([3.0, 4.0], dtype=np.float64),
+                "coil_set_spec_from_dofs": lambda coil_dofs: ("coil-set", coil_dofs),
+            },
+            "compiled_forward_result_for": compiled_forward_result_for,
+            "compiled_value_and_grad_for": compiled_value_and_grad_for,
+        }
+    }
+
+    monkeypatch.setattr(
+        surfaceobjectives_jax_module,
+        "_get_cached_traceable_runtime_entry",
+        lambda *_args, **_kwargs: runtime_entry,
+    )
+    monkeypatch.setattr(
+        surfaceobjectives_jax_module,
+        "_traceable_single_stage_outer_term_values",
+        fake_term_values,
+    )
+    monkeypatch.setattr(
+        surfaceobjectives_jax_module,
+        "_traceable_total_objective_kwargs",
+        lambda objective_kwargs: {
+            "outer_objective_config": objective_kwargs["outer_objective_config"]
+        },
+    )
+    monkeypatch.setattr(
+        surfaceobjectives_jax_module,
+        "_traceable_weighted_single_stage_outer_term_values",
+        fake_weighted_term_values,
+    )
+    monkeypatch.setattr(
+        surfaceobjectives_jax_module,
+        "_traceable_objective_gradient_parts",
+        fake_gradient_parts,
+    )
+
+    report = surfaceobjectives_jax_module.diagnose_traceable_objective_runtime(
+        object(),
+        object(),
+        0.23,
+    )
+
+    assert report["all_finite"] is True
+    assert report["baseline_success"] is True
+    assert report["first_nonfinite_term"] is None
+    assert call_checks == {
+        "compiled_forward_result_for": True,
+        "compiled_value_and_grad_for": True,
+        "raw_terms_solved_x": True,
+        "raw_terms_coil_dofs": True,
+        "gradient_parts_coil_dofs": True,
+        "gradient_parts_solved_x": True,
+        "gradient_parts_solved_plu": True,
+    }
+
+
 def test_traceable_batched_value_and_grad_pipeline_matches_scalar_calls():
     compiled_value_and_grad_for = jax.jit(
         lambda coil_dofs: (

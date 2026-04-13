@@ -807,6 +807,25 @@ def _traceable_runtime_hostify_tree(tree):
         return _traceable_runtime_hostify_leaf(tree)
 
 
+def _traceable_runtime_deviceify_leaf(leaf):
+    """Explicitly place cached runtime arrays back onto the active device."""
+    if isinstance(leaf, jax.Array):
+        return leaf
+    if isinstance(leaf, np.ndarray):
+        return jax.device_put(np.asarray(leaf))
+    if isinstance(leaf, np.generic):
+        return jax.device_put(np.asarray(leaf))
+    return leaf
+
+
+def _traceable_runtime_deviceify_tree(tree):
+    """Recursively device-place cached runtime arrays for strict diagnostics."""
+    try:
+        return jax.tree_util.tree_map(_traceable_runtime_deviceify_leaf, tree)
+    except TypeError:
+        return _traceable_runtime_deviceify_leaf(tree)
+
+
 def _evaluate_scalar_or_value_and_grad(
     objective_or_value_and_grad,
     coil_dofs,
@@ -2345,9 +2364,11 @@ def diagnose_traceable_objective_runtime(
             "Traceable runtime diagnosis requires the full single-stage outer objective."
         )
 
-    baseline_coil_dofs = state["baseline_coil_dofs"]
-    baseline_x = state["baseline_x"]
-    baseline_plu = state["baseline_plu"]
+    baseline_coil_dofs = _traceable_runtime_deviceify_tree(
+        state["baseline_coil_dofs"]
+    )
+    baseline_x = _traceable_runtime_deviceify_tree(state["baseline_x"])
+    baseline_plu = _traceable_runtime_deviceify_tree(state["baseline_plu"])
     coil_set_spec_from_dofs = state["coil_set_spec_from_dofs"]
     baseline_coil_set_spec = coil_set_spec_from_dofs(baseline_coil_dofs)
     forward_result = compiled_bundle["compiled_forward_result_for"](baseline_coil_dofs)

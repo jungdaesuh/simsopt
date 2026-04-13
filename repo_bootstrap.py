@@ -21,6 +21,7 @@ _XLA_FLAGS_ENV = "XLA_FLAGS"
 _XLA_GPU_CUDA_DATA_DIR_FLAG = "--xla_gpu_cuda_data_dir="
 _CUDA_TOOLCHAIN_ROOT_ENV = "SIMSOPT_CUDA_TOOLCHAIN_ROOT"
 _DEFAULT_CUDA_TOOLCHAIN_ROOT = Path("/usr/local/cuda")
+_LD_LIBRARY_PATH_ENV = "LD_LIBRARY_PATH"
 
 
 def _prepend_env_path(env: dict[str, str], name: str, entry: Path) -> None:
@@ -36,15 +37,69 @@ def _prepend_env_path(env: dict[str, str], name: str, entry: Path) -> None:
     env[name] = os.pathsep.join([entry_str, *parts])
 
 
+def _has_cuda_toolchain_binaries(root: Path) -> bool:
+    """Return whether a root exposes CUDA linker/compiler tools."""
+    return any((root / "bin" / tool).exists() for tool in ("nvlink", "ptxas"))
+
+
+def _candidate_env_cuda_toolchain_roots(env: dict[str, str]) -> list[Path]:
+    """Return active Python/virtual environment roots that may carry CUDA tools."""
+    candidates: list[Path] = []
+    for env_name in ("CONDA_PREFIX", "VIRTUAL_ENV"):
+        env_value = env.get(env_name)
+        if env_value:
+            candidates.append(Path(env_value).expanduser())
+    candidates.append(Path(sys.prefix).expanduser())
+    deduped: list[Path] = []
+    seen: set[Path] = set()
+    for candidate in candidates:
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        deduped.append(candidate)
+    return deduped
+
+
 def _resolve_cuda_toolchain_root(env: dict[str, str]) -> Path | None:
     """Return a usable CUDA toolkit root for external compiler tools."""
     explicit_root = env.get(_CUDA_TOOLCHAIN_ROOT_ENV)
     candidates: list[Path] = []
     if explicit_root:
         candidates.append(Path(explicit_root).expanduser())
+    candidates.extend(_candidate_env_cuda_toolchain_roots(env))
     candidates.append(_DEFAULT_CUDA_TOOLCHAIN_ROOT)
     for candidate in candidates:
-        if (candidate / "bin").is_dir():
+        if not (candidate / "bin").is_dir():
+            continue
+        if candidate == _DEFAULT_CUDA_TOOLCHAIN_ROOT or _has_cuda_toolchain_binaries(
+            candidate
+        ):
+            return candidate
+    return None
+
+
+def _resolve_cuda_nvjitlink_lib_root(cuda_root: Path) -> Path | None:
+    """Return an nvJitLink library directory that should shadow older system CUDA."""
+    python_version = f"python{sys.version_info.major}.{sys.version_info.minor}"
+    target_lib_roots = ()
+    targets_root = cuda_root / "targets"
+    if targets_root.is_dir():
+        target_lib_roots = tuple(
+            sorted(path for path in targets_root.glob("*/lib") if path.is_dir())
+        )
+    candidates = (
+        cuda_root / "lib64",
+        *target_lib_roots,
+        cuda_root
+        / "lib"
+        / python_version
+        / "site-packages"
+        / "nvidia"
+        / "nvjitlink"
+        / "lib",
+    )
+    for candidate in candidates:
+        if (candidate / "libnvJitLink.so.12").exists():
             return candidate
     return None
 
@@ -55,6 +110,9 @@ def apply_cuda_toolchain_env(env: dict[str, str]) -> None:
     if cuda_root is None:
         return
     _prepend_env_path(env, "PATH", cuda_root / "bin")
+    nvjitlink_lib_root = _resolve_cuda_nvjitlink_lib_root(cuda_root)
+    if nvjitlink_lib_root is not None:
+        _prepend_env_path(env, _LD_LIBRARY_PATH_ENV, nvjitlink_lib_root)
     existing_xla_flags = env.get(_XLA_FLAGS_ENV)
     if existing_xla_flags and _XLA_GPU_CUDA_DATA_DIR_FLAG in existing_xla_flags:
         return

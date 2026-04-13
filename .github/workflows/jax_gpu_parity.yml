@@ -100,7 +100,8 @@ jobs:
         continue-on-error: true
         run: |
           conda run --no-capture-output -n "$BENCHMARK_ENV_NAME" \
-            python -m pytest tests/geo/test_boozer_residual_jax.py -v --tb=short
+            python -m pytest tests/geo/test_boozer_residual_jax.py \
+            -k gpu_parity -v --tb=short
 
       - name: Surface Fourier JAX
         id: surface

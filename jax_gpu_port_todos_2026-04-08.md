@@ -83,11 +83,11 @@
 
 ### Tier 1 (required for 1.0 release)
 
-- [ ] **38.** Add `test_boozer_residual_jax_gpu` — full LS solve with `BoozerResidualJAX` / `IotasJAX` / `NonQuasiSymmetricRatioJAX` on CUDA with `transfer_guard=disallow`. **Currently zero GPU coverage of M5.**
+- [x] **38.** ~~Add `test_boozer_residual_jax_gpu` — full LS solve with `BoozerResidualJAX` / `IotasJAX` / `NonQuasiSymmetricRatioJAX` on CUDA with `transfer_guard=disallow`.~~ **DONE** — `TestRealFixtureGpuM5Parity::test_real_fixture_gpu_wrapper_values_and_gradients_match_cpu_reference` exercises the reduced real LS solve and M5 wrapper value/gradient parity on CUDA with `SIMSOPT_JAX_TRANSFER_GUARD=disallow`, alongside `test_real_fixture_gpu_solver_stays_ondevice_under_disallow`; validated on Runpod RTX 4090 on 2026-04-13.
 
 ### Tier 2 (required for production use)
 
-- [ ] **39.** Add `TestRunCodeLSParityProductionScale` — `nphi=16, ntheta=8, ncoils=4` fixture (current `TestRunCodeLSParity` uses `nphi=5, ntheta=5, ncoils=2` = 25 points, 1-2 orders below production).
+- [x] **39.** ~~Add `TestRunCodeLSParityProductionScale` — `nphi=16, ntheta=8, ncoils=4` fixture (current `TestRunCodeLSParity` uses `nphi=5, ntheta=5, ncoils=2` = 25 points, 1-2 orders below production).~~ **DONE** — `TestRunCodeLSParity::test_ls_solve_parity_production_scale` covers the larger CPU-vs-JAX LS fixture, and `test_ls_solve_parity_production_scale_gpu_under_disallow` adds the strict CUDA `transfer_guard=disallow` lane with on-device solver-state assertions; validated on Runpod RTX 4090 on 2026-04-13.
 - [ ] **40.** Add full single-stage **outer-loop convergence** test on GPU (not just init-parity at `benchmarks/single_stage_init_parity.py`). Verify IFT adjoint decreases the objective over ≥10 outer iterations on CUDA. **(PARTIAL — `single_stage_outer_loop_probe.py` benchmark runs ≥10 iters on CUDA in CI, but no pytest-based test in `tests/`)**
 - [ ] **41.** Add XLA recompilation-count smoke test. Track compilation counter across an optimizer loop; fail if compiles > expected per iteration. Protects against shape-dependent recompile regressions.
 - [ ] **42.** Add CI test that runs `SIMSOPT_JAX_TRANSFER_GUARD=disallow` against the **full** suite on GPU (not just the e2e smoke at `jax_smoke.yml:257-318`). **(PARTIAL — `jax_gpu_parity.yml` and `jax_smoke.yml` set `disallow`, but only run curated slices, not full suite)**
