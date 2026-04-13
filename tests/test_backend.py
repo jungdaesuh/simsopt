@@ -10,7 +10,11 @@ import warnings
 import numpy as np
 import pytest
 
-from conftest import _BACKEND_RUNTIME_ENV_VARS as _BACKEND_ENV_VARS
+from conftest import (
+    _BACKEND_RUNTIME_ENV_VARS as _BACKEND_ENV_VARS,
+    _require_jax,
+    _restore_loaded_jax_runtime_config,
+)
 _BACKEND_MODULE_NAMES = (
     "simsopt",
     "simsopt.backend",
@@ -1380,6 +1384,34 @@ def test_apply_jax_runtime_config_warns_on_initialized_backend_mismatch(monkeypa
         backend.apply_jax_runtime_config()
 
     assert ("jax_platforms", "cuda") in calls
+
+
+def test_restore_loaded_jax_runtime_config_restores_nullable_fields_to_none():
+    jax_module = _require_jax()
+    snapshot = {
+        "jax_transfer_guard": None,
+        "jax_platforms": None,
+        "jax_compilation_cache_dir": None,
+    }
+    mutated = {
+        "jax_transfer_guard": "disallow",
+        "jax_platforms": "cpu",
+        "jax_compilation_cache_dir": "/tmp/simsopt-jax-restore-cache",
+    }
+    original = {
+        name: getattr(jax_module.config, name)
+        for name in snapshot
+    }
+    try:
+        for name, value in mutated.items():
+            jax_module.config.update(name, value)
+
+        _restore_loaded_jax_runtime_config(snapshot)
+
+        for name in snapshot:
+            assert getattr(jax_module.config, name) is None
+    finally:
+        _restore_loaded_jax_runtime_config(original)
 
 
 def test_apply_jax_runtime_config_raises_on_initialized_backend_mismatch_in_strict_mode(

@@ -141,12 +141,7 @@ def _restore_loaded_jax_runtime_config(snapshot: dict[str, object]) -> None:
     if jax_module is None:
         return
     for name, value in snapshot.items():
-        if value is None and name in ("jax_transfer_guard", "jax_platforms", "jax_compilation_cache_dir"):
-            continue
-        try:
-            jax_module.config.update(name, value)
-        except (TypeError, ValueError):
-            pass
+        jax_module.config.update(name, value)
 
 
 def _restore_backend_runtime_env(snapshot: dict[str, str | None]) -> None:
