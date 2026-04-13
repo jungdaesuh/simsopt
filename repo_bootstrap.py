@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib.machinery
 import importlib.util
 import os
 import sys
@@ -258,6 +259,81 @@ def _is_same_local_package(module: types.ModuleType | None, package_root: Path) 
     return False
 
 
+def _is_same_local_extension(
+    module: types.ModuleType | None, extension_path: Path
+) -> bool:
+    """Return True when ``module`` already resolves to ``extension_path``."""
+    if module is None:
+        return False
+    module_file = getattr(module, "__file__", None)
+    if module_file is None:
+        return False
+    try:
+        return Path(module_file).resolve() == extension_path.resolve()
+    except OSError:
+        return False
+
+
+def _find_local_simsoptpp_extension(repo_root: Path) -> Path | None:
+    """Return the first repo-local ``simsoptpp`` extension matching this Python."""
+    build_root = repo_root / "build"
+    if not build_root.is_dir():
+        return None
+
+    seen: set[Path] = set()
+    for suffix in importlib.machinery.EXTENSION_SUFFIXES:
+        for candidate in sorted(build_root.glob(f"**/simsoptpp{suffix}")):
+            try:
+                resolved = candidate.resolve()
+            except OSError:
+                continue
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            return resolved
+    return None
+
+
+def _load_extension_module(module_name: str, extension_path: Path) -> types.ModuleType:
+    """Load a compiled extension directly from ``extension_path``."""
+    spec = importlib.machinery.PathFinder.find_spec(
+        module_name, [str(extension_path.parent)]
+    )
+    if spec is None or spec.loader is None or spec.origin is None:
+        raise RuntimeError(
+            f"Failed to resolve {module_name} from local extension {extension_path}"
+        )
+    if Path(spec.origin).resolve() != extension_path.resolve():
+        raise RuntimeError(
+            f"Resolved {module_name} from unexpected origin {spec.origin}, "
+            f"expected {extension_path}"
+        )
+
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    try:
+        spec.loader.exec_module(module)
+    except Exception:
+        sys.modules.pop(module_name, None)
+        raise
+    return module
+
+
+def _bootstrap_local_simsoptpp(repo_root: Path) -> bool:
+    """Load the repo-local ``simsoptpp`` extension when one has been built."""
+    extension_path = _find_local_simsoptpp_extension(repo_root)
+    if extension_path is None:
+        return False
+
+    existing = sys.modules.get("simsoptpp")
+    if _is_same_local_extension(existing, extension_path):
+        return False
+
+    sys.modules.pop("simsoptpp", None)
+    _load_extension_module("simsoptpp", extension_path)
+    return True
+
+
 def _module_resolves_within_package(
     module: types.ModuleType | None,
     package_root: Path,
@@ -358,11 +434,14 @@ def _purge_modules(module_names: set[str]) -> None:
 
 def bootstrap_local_simsopt(src_root: str | Path) -> None:
     """Force imports to resolve against this repo's local simsopt source tree."""
-    package_root = Path(src_root) / "simsopt"
+    src_root_path = Path(src_root)
+    package_root = src_root_path / "simsopt"
+    repo_root = src_root_path.parent
     _strip_editable_finders()
+    simsoptpp_reloaded = _bootstrap_local_simsoptpp(repo_root)
     existing = sys.modules.get("simsopt")
 
-    if _is_same_local_package(existing, package_root):
+    if _is_same_local_package(existing, package_root) and not simsoptpp_reloaded:
         _install_bootstrap_version_stub(package_root)
         _purge_modules(_find_detached_simsopt_submodules(package_root))
         return

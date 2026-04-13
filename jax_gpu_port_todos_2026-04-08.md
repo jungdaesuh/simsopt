@@ -69,7 +69,7 @@
 - [ ] **31.** **[PERF]** `_lbfgs.py:28-34` — replace `_shift_history` slice+concatenate (~200k element copies/step at `maxcor=200, d=1000`) with a ring-buffer + head-pointer. Requires rewriting two-loop recursion indexing.
 - [ ] **32.** **[PERF small]** `_line_search.py:283` — dead re-evaluation path: BFGS/L-BFGS always pass `state.f_k`, but line search re-evaluates `restricted_func_and_grad(zero)` when `old_fval=None`. Remove.
 - [ ] **33.** **[PERF]** Line-search bracketing and zoom don't share intermediate evals. Cache bracketing-phase `(α, φ, φ')` samples for zoom reuse. Saves 10-30 evals/iteration in worst cases.
-- [ ] **34.** **[PERF compile 10-15%]** Default `SIMSOPT_JAX_COMPILATION_CACHE_DIR` to `~/.cache/simsopt-jax-xla/` on first run instead of requiring manual setup. Gate already plumbed at `runtime.py:1380-1381`. **(PARTIAL — env var defined and wired, but `_default_compilation_cache_dir` returns None; no auto-default)**
+- [x] **34.** **[PERF compile 10-15%]** ~~Default `SIMSOPT_JAX_COMPILATION_CACHE_DIR` to `~/.cache/simsopt-jax-xla/` on first run instead of requiring manual setup. Gate already plumbed at `runtime.py:1380-1381`.~~ **DONE** — `_default_compilation_cache_dir()` now returns `~/.cache/simsopt-jax-xla` for JAX modes in `src/simsopt/backend/runtime.py`, `_resolve_compilation_cache_dir()` preserves the precedence chain `explicit arg > SIMSOPT_JAX_COMPILATION_CACHE_DIR > mode default`, and `apply_jax_runtime_config()` forwards the resolved path through `jax_compilation_cache_dir`; covered by backend tests for default JAX modes, native_cpu opt-out, env override, and fast/metal runtime-config propagation.
 
 ### Larger structural
 
@@ -128,7 +128,7 @@ The main remaining single-stage work after the GPU-port proof is donor/seed/sear
 - [x] **`#41`** is closed: the existing compile-count harness now covers both the real target-lane value/grad path and the real Stage 2 target outer-loop path, so no second mechanism is needed.
 - [x] **`#42`** is closed: `.github/workflows/jax_gpu_parity.yml` now contains the `gpu-full-suite-disallow` lane that runs the full `tests/` suite on a self-hosted CUDA runner under `SIMSOPT_JAX_TRANSFER_GUARD=disallow`, with `XLA_PYTHON_CLIENT_PREALLOCATE=false` and live-output settings. Keep any future exemptions on the public JAX transfer-guard controls rather than `jax._src...` internals.
 - [ ] If shared speed work is needed to make Stage 2 experimentation cheaper, prioritize it in this order:
-  - [ ] **`#34`** first: `src/simsopt/backend/runtime.py:434-436` still declines to set a default compilation-cache directory, which directly hurts repeated real-lane Stage 2 iteration. Follow the official JAX persistent-cache setup, including setting the cache dir before first compile and using `jax_persistent_cache_min_compile_time_secs=0` when caching all real-lane compiles is desired.
+  - [x] **`#34`** is closed: `src/simsopt/backend/runtime.py:_default_compilation_cache_dir()` now defaults JAX modes to `~/.cache/simsopt-jax-xla`, with precedence `explicit arg > SIMSOPT_JAX_COMPILATION_CACHE_DIR > mode default`, and the normal import/eager-config path applies the resolved cache dir before first compile. Keep `jax_persistent_cache_min_compile_time_secs=0` as an opt-in for runs that explicitly want to cache every compile instead of using JAX's default threshold.
   - [ ] **`#31`** second: `_lbfgs.py` still shifts history with slice+concatenate at `src/simsopt/geo/optimizer_jax_private/_lbfgs.py:105-123`, so a ring buffer is the clearest recurring hot-path cleanup.
   - [ ] **`#32`** third: line-search cleanup is still useful and low risk because the active BFGS/L-BFGS callers already pass `old_fval` and `gfk`; the relevant path is `src/simsopt/geo/optimizer_jax_private/_line_search.py:340-418`.
   - [ ] **`#24`** after that: keep buffer donation conditional on measured CUDA VRAM benefit. JAX donation only applies at true `jit` boundaries, and the repo already has the right probe scaffold in `benchmarks/biotsavart_donation_probe.py`.
@@ -176,17 +176,17 @@ The main remaining single-stage work after the GPU-port proof is donor/seed/sear
 
 ## Progress tracking
 
-**Last audit:** 2026-04-10
+**Last audit:** 2026-04-13
 
-**Total:** 60 items — **29 done, 10 partial, 21 open**
+**Total:** 60 items — **36 done, 5 partial, 19 open**
 
 | Tier | Items | Done | Partial | Open |
 |------|-------|------|---------|------|
 | 0 — Ship blockers | 3 | **3** | 0 | 0 |
 | 1 — Correctness/defensive | 8 | **8** (4-11) | 0 | 0 |
-| 2 — Transfer-guard | 11 | **10** (12-14,16-22) | **1** (15) | 0 |
-| 3 — Performance | 15 | **3** (23,30,36) | **5** (24,26,27,34,37) | **7** (25,28,29,31-33,35) |
-| 4 — Test coverage | 12 | **3** (43,47,48) | **3** (40,42,45) | **6** (38,39,41,44,46,49) |
+| 2 — Transfer-guard | 11 | **11** (12-22) | 0 | 0 |
+| 3 — Performance | 15 | **4** (23,30,34,36) | **3** (24,27,37) | **8** (25,26,28,29,31-33,35) |
+| 4 — Test coverage | 12 | **8** (38-43,47,48) | **1** (45) | **3** (44,46,49) |
 | 5 — Docs/cleanup | 11 | **2** (50,51) | **1** (59) | **8** (52-58,60) |
 
 **Estimated remaining effort:**

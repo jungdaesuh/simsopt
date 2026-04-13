@@ -47,6 +47,30 @@ recommended approach is to use pip:
 
     pip install simsopt
 
+For source development in this fork, the Python package and the compiled
+`simsoptpp` extension should come from the same checkout. In mixed
+workspaces with sibling `simsopt*` repos or older editable installs,
+ambient import resolution can pick up the wrong package or the wrong
+compiled extension from `site-packages`. The repo-local bootstrap helper
+avoids that:
+
+```python
+from repo_bootstrap import bootstrap_local_simsopt
+
+bootstrap_local_simsopt("src")
+```
+
+When a matching local `build/*/simsoptpp*.so` exists for the active
+interpreter, `bootstrap_local_simsopt("src")` now loads that local
+extension explicitly before importing `simsopt`. This keeps scripts,
+examples, and tests pinned to this repo instead of a foreign editable
+install.
+
+If you need to refresh the compiled extension for the current
+interpreter, rebuild from the repo root:
+
+    python -m pip wheel --no-deps . -w .artifacts/wheels
+
 For detailed installation instructions on some specific systems, see
 [the wiki](https://github.com/hiddenSymmetries/simsopt/wiki).
 Also, a Docker container is available with `simsopt` and its components pre-installed, which

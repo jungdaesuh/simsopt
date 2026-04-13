@@ -279,6 +279,17 @@ def test_root_conftest_imports_without_jax_installed():
     )
 
 
+def test_root_conftest_bootstraps_local_simsopt_over_foreign_resolution():
+    """Root fixtures must pin imports to this repo even when another simsopt is earlier."""
+    _assert_python_script_passes(
+        _IMPORT_SMOKE_CASES_PATH,
+        args=("case_root_conftest_bootstraps_local_simsopt_over_foreign_resolution",),
+        failure_message=(
+            "root tests/conftest.py should bootstrap the local simsopt package"
+        ),
+    )
+
+
 def test_repo_bootstrap_purges_detached_local_submodules():
     """A second bootstrap must purge detached ``simsopt.*`` submodules."""
     _assert_python_script_passes(
@@ -303,6 +314,15 @@ def test_repo_bootstrap_preserves_unrelated_editable_meta_path_finders():
         _IMPORT_SMOKE_CASES_PATH,
         args=("case_repo_bootstrap_preserves_unrelated_editable_meta_path_finders",),
         failure_message="repo_bootstrap should preserve unrelated editable finders",
+    )
+
+
+def test_repo_bootstrap_reloads_local_simsoptpp_over_foreign_module():
+    """Bootstrapping local simsopt must replace foreign ``simsoptpp`` modules."""
+    _assert_python_script_passes(
+        _IMPORT_SMOKE_CASES_PATH,
+        args=("case_repo_bootstrap_reloads_local_simsoptpp_over_foreign_module",),
+        failure_message="repo_bootstrap should replace foreign simsoptpp modules",
     )
 
 

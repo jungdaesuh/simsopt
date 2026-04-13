@@ -212,6 +212,68 @@ def case_root_conftest_imports_without_jax_installed() -> None:
     assert parity_rng(3).randint(0, 1000) == parity_rng(3).randint(0, 1000)
 
 
+def case_root_conftest_bootstraps_local_simsopt_over_foreign_resolution() -> None:
+    import importlib
+    import importlib.abc
+    import importlib.util
+    import runpy
+    import tempfile
+
+    conftest_path = _REPO_ROOT / "tests" / "conftest.py"
+    local_init = (_SRC_DIR / "simsopt" / "__init__.py").resolve()
+
+    with tempfile.TemporaryDirectory() as tmp:
+        foreign_src = Path(tmp) / "foreign-src"
+        foreign_package_root = foreign_src / "simsopt"
+        foreign_init = foreign_package_root / "__init__.py"
+        foreign_package_root.mkdir(parents=True)
+        foreign_init.write_text("__version__ = 'foreign-package'\n", encoding="utf-8")
+
+        class _ForeignLoader(importlib.abc.Loader):
+            def create_module(self, spec):
+                del spec
+                return None
+
+            def exec_module(self, module):
+                module.__file__ = str(foreign_init)
+                module.__path__ = [str(foreign_package_root)]
+                module.__package__ = "simsopt"
+                module.__version__ = "foreign-package"
+
+        class _ForeignFinder(importlib.abc.MetaPathFinder):
+            def find_spec(self, fullname, path=None, target=None):
+                del path, target
+                if fullname != "simsopt":
+                    return None
+                spec = importlib.util.spec_from_loader(
+                    fullname,
+                    _ForeignLoader(),
+                    is_package=True,
+                )
+                assert spec is not None
+                spec.origin = str(foreign_init)
+                spec.submodule_search_locations = [str(foreign_package_root)]
+                return spec
+
+        _ForeignFinder.__module__ = "__editable___simsopt_foreign"
+        fake_finder = _ForeignFinder()
+        sys.meta_path.insert(0, fake_finder)
+
+        import simsopt as foreign_simsopt
+
+        assert foreign_simsopt.__version__ == "foreign-package"
+        assert Path(foreign_simsopt.__file__).resolve() == foreign_init.resolve()
+        assert fake_finder in sys.meta_path
+
+        runpy.run_path(str(conftest_path), run_name="simsopt_tests_conftest")
+
+        simsopt = importlib.import_module("simsopt")
+
+        assert Path(simsopt.__file__).resolve() == local_init
+        assert simsopt.__version__ != "foreign-package"
+        assert fake_finder not in sys.meta_path
+
+
 def case_repo_bootstrap_purges_detached_local_submodules() -> None:
     import importlib
     import types
@@ -320,6 +382,49 @@ def case_repo_bootstrap_preserves_unrelated_editable_meta_path_finders() -> None
     bootstrap_local_simsopt(src_root)
 
     assert unrelated_finder in sys.meta_path
+
+
+def case_repo_bootstrap_reloads_local_simsoptpp_over_foreign_module() -> None:
+    import types
+
+    import repo_bootstrap
+    from repo_bootstrap import bootstrap_local_simsopt
+
+    src_root = Path.cwd() / "src"
+    fake_extension = Path.cwd() / "build" / "fake" / "simsoptpp.test.so"
+    foreign_module = types.ModuleType("simsoptpp")
+    foreign_module.__file__ = "/tmp/foreign-simsoptpp.so"
+    foreign_module.using_xsimd = True
+    sys.modules["simsoptpp"] = foreign_module
+
+    original_find_extension = repo_bootstrap._find_local_simsoptpp_extension
+    original_load_extension = repo_bootstrap._load_extension_module
+    try:
+        repo_bootstrap._find_local_simsoptpp_extension = lambda repo_root: (
+            fake_extension
+        )
+
+        def _fake_load_extension(module_name: str, extension_path: Path):
+            module = types.ModuleType(module_name)
+            module.__file__ = str(extension_path)
+            module.using_xsimd = False
+            sys.modules[module_name] = module
+            return module
+
+        repo_bootstrap._load_extension_module = _fake_load_extension
+        bootstrap_local_simsopt(src_root)
+
+        import simsopt
+        import simsoptpp
+
+        assert Path(simsopt.__file__).resolve().is_relative_to(
+            (src_root / "simsopt").resolve()
+        )
+        assert Path(simsoptpp.__file__) == fake_extension
+        assert simsoptpp.using_xsimd is False
+    finally:
+        repo_bootstrap._find_local_simsoptpp_extension = original_find_extension
+        repo_bootstrap._load_extension_module = original_load_extension
 
 
 def case_import_package_root_native_cpu_does_not_require_jax_runtime() -> None:

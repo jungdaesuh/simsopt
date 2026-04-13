@@ -6480,7 +6480,24 @@ class TestTraceableObjective:
                 atol=1e-12,
                 err_msg=f"{metric_name} diverged between target-lane and host reporting",
             )
-        assert target_lane_metrics["hardware_status"] == host_metrics["hardware_status"]
+        target_hardware_status = target_lane_metrics["hardware_status"]
+        host_hardware_status = host_metrics["hardware_status"]
+        assert target_hardware_status.keys() == host_hardware_status.keys()
+        for status_name, target_value in target_hardware_status.items():
+            host_value = host_hardware_status[status_name]
+            if isinstance(target_value, (float, np.floating)):
+                np.testing.assert_allclose(
+                    target_value,
+                    host_value,
+                    rtol=1e-10,
+                    atol=1e-12,
+                    err_msg=(
+                        f"hardware_status[{status_name!r}] diverged between "
+                        "target-lane and host reporting"
+                    ),
+                )
+            else:
+                assert target_value == host_value
 
     def test_pure_objective_is_jax_grad_differentiable(self, boozer_setup):
         """Test 2: jax.grad(f)(coil_dofs) is finite, nonzero, matches JF.dJ()."""

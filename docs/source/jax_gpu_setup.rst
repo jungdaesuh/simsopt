@@ -234,6 +234,47 @@ GPU Node Quick-Start
 
        SIMSOPT_JAX_PLATFORM=cuda python benchmarks/jax_feasibility_spike.py
 
+Repo-local bootstrap
+--------------------
+
+When developing in a workspace that also contains sibling ``simsopt*``
+repositories or older editable installs, plain ``import simsopt`` /
+``import simsoptpp`` can resolve to the wrong checkout or to a stale
+compiled extension in ``site-packages``. This is especially easy to miss
+when the Python package comes from this repo but ``simsoptpp`` still comes
+from some other environment.
+
+Use the repo bootstrap helper in scripts, examples, and ad hoc probes::
+
+    from repo_bootstrap import bootstrap_local_simsopt
+
+    bootstrap_local_simsopt("src")
+
+``bootstrap_local_simsopt("src")`` does two things:
+
+- strips editable import finders that hijack ``simsopt`` imports
+- if a matching local ``build/*/simsoptpp*.so`` exists for the active
+  interpreter, loads that repo-local extension explicitly before importing
+  ``simsopt``
+
+This is the supported way to keep this repo self-contained at runtime
+without relying on whichever ``simsoptpp`` binary happens to be first on
+the ambient Python path.
+
+To refresh the compiled extension for the active interpreter from the repo
+root::
+
+    python -m pip wheel --no-deps . -w .artifacts/wheels
+
+Verify that the active process is really using the local extension::
+
+    python - <<'PY'
+    from repo_bootstrap import bootstrap_local_simsopt
+    bootstrap_local_simsopt("src")
+    import simsoptpp
+    print(simsoptpp.__file__)
+    PY
+
 Hugging Face Jobs
 -----------------
 
@@ -305,6 +346,20 @@ Troubleshooting
   Large Jacobian/Hessian objects can exhaust GPU memory.  Reduce grid
   resolution (``mpol``, ``ntor``) or use ``XLA_PYTHON_CLIENT_PREALLOCATE=false``
   to disable JAX's default 75% memory pre-allocation.
+
+**Wrong repo or wrong ``simsoptpp`` binary loaded**
+  If ``simsopt`` or ``simsoptpp`` resolves to ``site-packages`` or a sibling
+  repo checkout, call ``bootstrap_local_simsopt("src")`` before importing
+  simsopt-heavy modules. Rebuild the local extension with
+  ``python -m pip wheel --no-deps . -w .artifacts/wheels`` if no matching
+  local ``build/*/simsoptpp*.so`` exists for the active interpreter.
+
+**``libomp.dylib`` missing on macOS**
+  A repo-local virtualenv can still fail to import ``simsoptpp`` if the
+  extension was linked against OpenMP but the runtime loader cannot find
+  ``libomp.dylib``. In that case, either provide a working OpenMP runtime
+  for that environment or use an interpreter whose local repo build already
+  loads successfully.
 
 **FP64 precision on consumer GPUs**
   Consumer GPUs (RTX series) have 1/32 or 1/64 FP64 throughput.
