@@ -6216,6 +6216,7 @@ class ResultsEnvelopeTests(unittest.TestCase):
             backend="jax",
             optimizer_backend="ondevice",
             least_squares_algorithm="lm",
+            constraint_method="penalty",
             init_only=False,
             skip_postprocess=True,
         )
@@ -6249,10 +6250,9 @@ class ResultsEnvelopeTests(unittest.TestCase):
             )
 
         self.assertEqual(envelope["schema_version"], 1)
-        self.assertFalse(
-            envelope["problem_contract"]["runtime_contract"][
-                "record_target_lane_invalid_state_events"
-            ]
+        self.assertEqual(
+            envelope["problem_contract"]["runtime_contract"]["constraint_method"],
+            "penalty",
         )
         self.assertEqual(envelope["provenance"]["repo_sha"], "deadbeef")
         self.assertEqual(
@@ -6278,11 +6278,13 @@ class ResultsEnvelopeTests(unittest.TestCase):
             minimal_artifacts=True,
             init_only=False,
             profile_target_lane_only=False,
+            profile_target_lane_batch_size=1,
             diagnose_target_lane_gradient=False,
             diagnose_target_lane_scaled_phase1=False,
             disable_target_lane_success_filter=False,
             maxcor=16,
             outer_maxls=8,
+            target_lane_outer_initial_step_size=None,
             initial_step_scale=1.0,
             initial_step_maxiter=0,
         )
@@ -6353,11 +6355,13 @@ class ResultsEnvelopeTests(unittest.TestCase):
             minimal_artifacts=True,
             init_only=False,
             profile_target_lane_only=False,
+            profile_target_lane_batch_size=1,
             diagnose_target_lane_gradient=False,
             diagnose_target_lane_scaled_phase1=True,
             disable_target_lane_success_filter=False,
             maxcor=16,
             outer_maxls=8,
+            target_lane_outer_initial_step_size=None,
             initial_step_scale=0.25,
             initial_step_maxiter=4,
         )
@@ -6441,12 +6445,14 @@ class ResultsEnvelopeTests(unittest.TestCase):
             minimal_artifacts=True,
             init_only=False,
             profile_target_lane_only=False,
+            profile_target_lane_batch_size=1,
             diagnose_target_lane_gradient=False,
             diagnose_target_lane_scaled_phase1=False,
             record_target_lane_invalid_state_events=True,
             disable_target_lane_success_filter=False,
             maxcor=16,
             outer_maxls=8,
+            target_lane_outer_initial_step_size=None,
             initial_step_scale=1.0,
             initial_step_maxiter=0,
         )

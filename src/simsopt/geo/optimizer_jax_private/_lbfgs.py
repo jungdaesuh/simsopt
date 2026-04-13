@@ -103,25 +103,28 @@ def _emit_lbfgs_runtime_debug(
     )
 
 
-def _shift_history(history, new):
-    length = history.shape[0]
-    if length == 1:
-        return jnp.reshape(new, history.shape)
-    shifted = lax.slice_in_dim(history, 1, length, axis=0)
-    new_row = jnp.expand_dims(new, axis=0)
-    return lax.concatenate((shifted, new_row), dimension=0)
+def _history_write_index(history, step_count):
+    history_size = _int_scalar(history.shape[0])
+    return jnp.mod(_as_jax_dtype(step_count, history_size.dtype), history_size)
 
 
-def _update_history_vectors(history, new):
-    return _shift_history(history, new)
+def _history_logical_index(step_count, curr_size, history_size, logical_offset):
+    return jnp.mod(
+        (_as_jax_dtype(step_count, history_size.dtype) - curr_size) + logical_offset,
+        history_size,
+    )
 
 
-def _update_history_scalars(history, new):
-    length = history.shape[0]
-    if length == 1:
-        return jnp.reshape(new, history.shape)
-    shifted = lax.slice_in_dim(history, 1, length, axis=0)
-    return lax.concatenate((shifted, jnp.reshape(new, (1,))), dimension=0)
+def _update_history_entry(history, new, *, step_count):
+    return history.at[_history_write_index(history, step_count)].set(new)
+
+
+def _update_history_vectors(history, new, *, step_count):
+    return _update_history_entry(history, new, step_count=step_count)
+
+
+def _update_history_scalars(history, new, *, step_count):
+    return _update_history_entry(history, new, step_count=step_count)
 
 
 def _take_axis0(array, index):
@@ -138,7 +141,12 @@ def _two_loop_recursion(state):
     a_his = jnp.zeros_like(state.rho_history)
 
     def body_fun1(j, carry):
-        i = _int_scalar(his_size - 1) - j
+        i = _history_logical_index(
+            state.k,
+            curr_size,
+            his_size_jax,
+            curr_size - _int_scalar(1) - j,
+        )
         _q, _a_his = carry
         rho_i = _take_axis0(state.rho_history, i)
         s_i = _take_axis0(state.s_history, i)
@@ -152,7 +160,7 @@ def _two_loop_recursion(state):
     q = state.gamma * q
 
     def body_fun2(j, _q):
-        i = (his_size_jax - curr_size) + j
+        i = _history_logical_index(state.k, curr_size, his_size_jax, j)
         rho_i = _take_axis0(state.rho_history, i)
         y_i = _take_axis0(state.y_history, i)
         s_i = _take_axis0(state.s_history, i)
@@ -456,17 +464,29 @@ def _minimize_lbfgs_private_impl(
                 g_k=_as_jax_dtype(g_kp1, state.g_k.dtype),
                 s_history=jnp.where(
                     update_curvature,
-                    _update_history_vectors(state.s_history, s_k),
+                    _update_history_vectors(
+                        state.s_history,
+                        s_k,
+                        step_count=state.k,
+                    ),
                     state.s_history,
                 ),
                 y_history=jnp.where(
                     update_curvature,
-                    _update_history_vectors(state.y_history, y_k),
+                    _update_history_vectors(
+                        state.y_history,
+                        y_k,
+                        step_count=state.k,
+                    ),
                     state.y_history,
                 ),
                 rho_history=jnp.where(
                     update_curvature,
-                    _update_history_scalars(state.rho_history, rho_k),
+                    _update_history_scalars(
+                        state.rho_history,
+                        rho_k,
+                        step_count=state.k,
+                    ),
                     state.rho_history,
                 ),
                 gamma=jnp.where(update_curvature, gamma, state.gamma),

@@ -292,6 +292,103 @@ def _assert_lbfgs_state_preserved(state, x0, quad, *, ls_status=None):
     assert float(state.gamma) == pytest.approx(1.0)
 
 
+def test_lbfgs_history_updates_wrap_without_shifting():
+    from simsopt.geo.optimizer_jax_private import _lbfgs as _lbfgs_module
+
+    history = jnp.zeros((3, 2), dtype=jnp.float64)
+    updates = (
+        (0, [1.0, 10.0]),
+        (1, [2.0, 20.0]),
+        (2, [3.0, 30.0]),
+        (3, [4.0, 40.0]),
+    )
+    for step_count, update in updates:
+        history = _lbfgs_module._update_history_vectors(
+            history,
+            jnp.asarray(update, dtype=jnp.float64),
+            step_count=jnp.asarray(step_count, dtype=jnp.int32),
+        )
+
+    np.testing.assert_allclose(
+        np.asarray(history),
+        np.asarray(
+            [
+                [4.0, 40.0],
+                [2.0, 20.0],
+                [3.0, 30.0],
+            ],
+            dtype=np.float64,
+        ),
+    )
+
+
+def test_two_loop_recursion_matches_materialized_history_after_wrap():
+    from simsopt.geo.optimizer_jax_private import _lbfgs as _lbfgs_module
+
+    s_oldest_to_newest = jnp.asarray(
+        [
+            [1.0, 0.0],
+            [0.0, 2.0],
+            [1.5, 0.5],
+            [0.5, 1.5],
+        ],
+        dtype=jnp.float64,
+    )
+    y_oldest_to_newest = jnp.asarray(
+        [
+            [2.0, 0.0],
+            [0.0, 4.0],
+            [3.0, 1.0],
+            [1.0, 3.0],
+        ],
+        dtype=jnp.float64,
+    )
+    rho_oldest_to_newest = jnp.asarray([0.5, 0.25, 0.2, 0.2], dtype=jnp.float64)
+
+    ring_state = types.SimpleNamespace(
+        k=jnp.asarray(6, dtype=jnp.int32),
+        g_k=jnp.asarray([3.0, -1.0], dtype=jnp.float64),
+        gamma=jnp.asarray(0.75, dtype=jnp.float64),
+        s_history=jnp.asarray(
+            [
+                [1.5, 0.5],
+                [0.5, 1.5],
+                [1.0, 0.0],
+                [0.0, 2.0],
+            ],
+            dtype=jnp.float64,
+        ),
+        y_history=jnp.asarray(
+            [
+                [3.0, 1.0],
+                [1.0, 3.0],
+                [2.0, 0.0],
+                [0.0, 4.0],
+            ],
+            dtype=jnp.float64,
+        ),
+        rho_history=jnp.asarray([0.2, 0.2, 0.5, 0.25], dtype=jnp.float64),
+    )
+    materialized_state = types.SimpleNamespace(
+        k=jnp.asarray(4, dtype=jnp.int32),
+        g_k=jnp.asarray([3.0, -1.0], dtype=jnp.float64),
+        gamma=jnp.asarray(0.75, dtype=jnp.float64),
+        s_history=s_oldest_to_newest,
+        y_history=y_oldest_to_newest,
+        rho_history=rho_oldest_to_newest,
+    )
+
+    ring_direction = _lbfgs_module._two_loop_recursion(ring_state)
+    materialized_direction = _lbfgs_module._two_loop_recursion(materialized_state)
+
+    np.testing.assert_allclose(
+        np.asarray(ring_direction),
+        np.asarray(materialized_direction),
+        rtol=1e-12,
+        atol=1e-12,
+    )
+
+
 def test_minimize_lbfgs_private_threads_initial_step_size_to_first_line_search(
     monkeypatch,
 ):
@@ -746,7 +843,11 @@ class TestOptimizerAdapterPrivate:
         assert int(state.status) == 1
         assert np.isfinite(float(state.gamma))
         assert float(state.gamma) == pytest.approx(gamma_max)
-        np.testing.assert_allclose(np.asarray(state.rho_history[-1]), 2000.0, rtol=1e-6)
+        np.testing.assert_allclose(
+            np.asarray(state.rho_history),
+            np.asarray([2000.0], dtype=np.float64),
+            rtol=1e-6,
+        )
 
     @PRIVATE_OPTIMIZER_RUNTIME
     def test_minimize_lbfgs_private_caps_history_to_iteration_budget(

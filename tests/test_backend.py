@@ -1282,21 +1282,62 @@ def test_native_cpu_guardrail_env_does_not_trigger_eager_jax_import(monkeypatch)
     assert backend.should_eagerly_configure_jax() is False
 
 
-def test_jax_modes_do_not_enable_compilation_cache_without_opt_in(monkeypatch):
+def test_jax_modes_default_compilation_cache_dir(monkeypatch):
     _clear_backend_env(monkeypatch)
     backend = _fresh_backend()
+    runtime_module = sys.modules["simsopt.backend.runtime"]
+    fake_home = Path("/tmp/simsopt-jax-cache-home")
+    monkeypatch.setattr(runtime_module.Path, "home", lambda: fake_home)
 
     config = backend.set_backend("jax_cpu_parity", configure_runtime=False)
     policy = backend.get_backend_policy("jax_cpu_parity")
+    expected = str(fake_home / ".cache" / "simsopt-jax-xla")
+
+    assert config.compilation_cache_dir == expected
+    assert backend.get_compilation_cache_dir() == expected
+    assert policy.compilation_cache_dir == expected
+
+
+def test_native_cpu_mode_keeps_compilation_cache_disabled(monkeypatch):
+    _clear_backend_env(monkeypatch)
+    backend = _fresh_backend()
+    runtime_module = sys.modules["simsopt.backend.runtime"]
+    fake_home = Path("/tmp/simsopt-jax-cache-home")
+    monkeypatch.setattr(runtime_module.Path, "home", lambda: fake_home)
+
+    config = backend.set_backend("native_cpu", configure_runtime=False)
+    policy = backend.get_backend_policy("native_cpu")
 
     assert config.compilation_cache_dir is None
     assert backend.get_compilation_cache_dir() is None
     assert policy.compilation_cache_dir is None
 
 
+def test_explicit_compilation_cache_env_overrides_default(monkeypatch):
+    _clear_backend_env(monkeypatch)
+    monkeypatch.setenv(
+        "SIMSOPT_JAX_COMPILATION_CACHE_DIR",
+        "/custom/cache/path",
+    )
+    backend = _fresh_backend()
+    runtime_module = sys.modules["simsopt.backend.runtime"]
+    fake_home = Path("/tmp/simsopt-jax-cache-home")
+    monkeypatch.setattr(runtime_module.Path, "home", lambda: fake_home)
+
+    config = backend.set_backend("jax_gpu_parity", configure_runtime=False)
+    policy = backend.get_backend_policy("jax_gpu_parity")
+
+    assert config.compilation_cache_dir == "/custom/cache/path"
+    assert backend.get_compilation_cache_dir() == "/custom/cache/path"
+    assert policy.compilation_cache_dir == "/custom/cache/path"
+
+
 def test_apply_jax_runtime_config_applies_fast_mode_transfer_guard(monkeypatch):
     _clear_backend_env(monkeypatch)
     backend = _fresh_backend()
+    runtime_module = sys.modules["simsopt.backend.runtime"]
+    fake_home = Path("/tmp/simsopt-jax-cache-home")
+    monkeypatch.setattr(runtime_module.Path, "home", lambda: fake_home)
     calls: list[tuple[str, object]] = []
     fake_jax = types.SimpleNamespace(
         config=types.SimpleNamespace(
@@ -1312,11 +1353,18 @@ def test_apply_jax_runtime_config_applies_fast_mode_transfer_guard(monkeypatch):
     assert ("jax_enable_x64", True) in calls
     assert ("jax_debug_nans", False) in calls
     assert ("jax_transfer_guard", "log") in calls
+    assert (
+        "jax_compilation_cache_dir",
+        str(fake_home / ".cache" / "simsopt-jax-xla"),
+    ) in calls
 
 
 def test_apply_jax_runtime_config_applies_metal_smoke_mode(monkeypatch):
     _clear_backend_env(monkeypatch)
     backend = _fresh_backend()
+    runtime_module = sys.modules["simsopt.backend.runtime"]
+    fake_home = Path("/tmp/simsopt-jax-cache-home")
+    monkeypatch.setattr(runtime_module.Path, "home", lambda: fake_home)
     calls: list[tuple[str, object]] = []
     fake_jax = types.SimpleNamespace(
         config=types.SimpleNamespace(
@@ -1332,11 +1380,18 @@ def test_apply_jax_runtime_config_applies_metal_smoke_mode(monkeypatch):
     assert ("jax_enable_x64", False) in calls
     assert ("jax_debug_nans", False) in calls
     assert ("jax_transfer_guard", "log") in calls
+    assert (
+        "jax_compilation_cache_dir",
+        str(fake_home / ".cache" / "simsopt-jax-xla"),
+    ) in calls
 
 
 def test_apply_jax_runtime_config_warns_on_initialized_backend_mismatch(monkeypatch):
     _clear_backend_env(monkeypatch)
     backend = _fresh_backend()
+    runtime_module = sys.modules["simsopt.backend.runtime"]
+    fake_home = Path("/tmp/simsopt-jax-cache-home")
+    monkeypatch.setattr(runtime_module.Path, "home", lambda: fake_home)
     calls: list[tuple[str, object]] = []
     fake_jax = types.SimpleNamespace(
         config=types.SimpleNamespace(
@@ -1358,6 +1413,9 @@ def test_apply_jax_runtime_config_raises_on_initialized_backend_mismatch_in_stri
 ):
     _clear_backend_env(monkeypatch)
     backend = _fresh_backend()
+    runtime_module = sys.modules["simsopt.backend.runtime"]
+    fake_home = Path("/tmp/simsopt-jax-cache-home")
+    monkeypatch.setattr(runtime_module.Path, "home", lambda: fake_home)
     fake_jax = types.SimpleNamespace(
         config=types.SimpleNamespace(update=lambda name, value: None),
         default_backend=lambda: "cpu",

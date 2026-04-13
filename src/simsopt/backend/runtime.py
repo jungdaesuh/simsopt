@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import os
+from pathlib import Path
 import subprocess
 import sys
 from typing import Callable
@@ -432,8 +433,11 @@ def _validate_sharding_strategy(value: str, *, source: str) -> str:
 
 
 def _default_compilation_cache_dir(mode: str) -> str | None:
-    del mode
-    return None
+    resolved_mode = _validate_mode(mode)
+    backend, _platform = _MODE_TO_RUNTIME[resolved_mode]
+    if backend != "jax":
+        return None
+    return str(Path.home() / ".cache" / "simsopt-jax-xla")
 
 
 def _optional_env_value(name: str) -> str | None:
