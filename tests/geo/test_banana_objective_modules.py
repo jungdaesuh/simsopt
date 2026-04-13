@@ -352,6 +352,22 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
             [0.2, -0.008, 0.75, -6500.0],
         )
         np.testing.assert_allclose(
+            result["hard_signed_constraint_values"],
+            [0.2, 0.01, 1.0, -6500.0],
+        )
+        np.testing.assert_allclose(
+            result["hard_violation_values"],
+            [0.2, 0.01, 1.0, 0.0],
+        )
+        np.testing.assert_allclose(
+            result["surrogate_signed_constraint_values"],
+            [0.2, -0.008, 0.75, -6500.0],
+        )
+        np.testing.assert_allclose(
+            result["hard_dual_update_values"],
+            [0.2, 0.01, 1.0, -6500.0],
+        )
+        np.testing.assert_allclose(
             result["feasibility_values"],
             [0.2, 0.01, 1.0, 0.0],
         )
@@ -430,6 +446,18 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
         )
         self.assertTrue(np.isnan(result["total"]))
         np.testing.assert_allclose(result["dual_update_values"], [0.2, 1.0, 0.75, -6500.0])
+        np.testing.assert_allclose(
+            result["hard_signed_constraint_values"],
+            [0.2, 0.01, 1.0, -6500.0],
+        )
+        np.testing.assert_allclose(
+            result["hard_violation_values"],
+            [0.2, 0.01, 1.0, 0.0],
+        )
+        np.testing.assert_allclose(
+            result["surrogate_signed_constraint_values"],
+            [0.2, 1.0, 0.75, -6500.0],
+        )
         np.testing.assert_allclose(result["constraint_grads"][1], [0.0, 0.0])
 
     def test_stage2_constraint_activity_tolerances_track_smoothing_windows(self):
@@ -558,9 +586,17 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
             multipliers=np.array([0.1, 0.2, 0.3]),
             constraint_values=np.array([0.0, 0.01, 0.0]),
             solver_constraint_values=np.array([0.0, 0.2, 0.0]),
+            hard_signed_constraint_values=np.array([0.0, 0.02, 0.0]),
+            hard_violation_values=np.array([0.0, 0.01, 0.0]),
+            surrogate_signed_constraint_values=np.array([0.0, 0.2, 0.0]),
             trust_radius=0.125,
             multiplier_cap_binding=True,
             multiplier_cap_binding_indices=[1],
+            final_hard_max_violation=0.01,
+            final_surrogate_max_value=0.2,
+            hard_positive_shift_zero=True,
+            signal_mismatch_active=False,
+            final_penalty_gradient_norm=0.25,
             history=[{"outer_iteration": 1}],
         )
         hardware_status = {"success": False, "violations": ["too_curved"]}
@@ -630,6 +666,23 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
         self.assertEqual(result["ALM_FINAL_TRUST_RADIUS"], 0.125)
         self.assertTrue(result["ALM_MULTIPLIER_CAP_BINDING"])
         self.assertEqual(result["ALM_MULTIPLIER_CAP_BINDING_INDICES"], [1])
+        np.testing.assert_allclose(
+            result["ALM_FINAL_HARD_SIGNED_CONSTRAINT_VALUES"],
+            [0.0, 0.02, 0.0],
+        )
+        np.testing.assert_allclose(
+            result["ALM_FINAL_HARD_VIOLATION_VALUES"],
+            [0.0, 0.01, 0.0],
+        )
+        np.testing.assert_allclose(
+            result["ALM_FINAL_SURROGATE_SIGNED_CONSTRAINT_VALUES"],
+            [0.0, 0.2, 0.0],
+        )
+        self.assertEqual(result["ALM_FINAL_HARD_MAX_VIOLATION"], 0.01)
+        self.assertEqual(result["ALM_FINAL_SURROGATE_MAX_VALUE"], 0.2)
+        self.assertTrue(result["ALM_FINAL_HARD_POSITIVE_SHIFT_ZERO"])
+        self.assertFalse(result["ALM_FINAL_SIGNAL_MISMATCH_ACTIVE"])
+        self.assertEqual(result["ALM_FINAL_PENALTY_GRADIENT_NORM"], 0.25)
         self.assertEqual(result["basin_seed"], 7)
         self.assertEqual(result["basin_temperature"], 2.5)
         self.assertEqual(result["basin_niter_success"], 6)

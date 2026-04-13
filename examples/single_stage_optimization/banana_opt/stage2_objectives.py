@@ -218,6 +218,46 @@ def build_stage2_results(
             "solver_constraint_values",
             None,
         ),
+        "ALM_FINAL_HARD_SIGNED_CONSTRAINT_VALUES": getattr(
+            alm_result,
+            "hard_signed_constraint_values",
+            None,
+        ),
+        "ALM_FINAL_HARD_VIOLATION_VALUES": getattr(
+            alm_result,
+            "hard_violation_values",
+            None,
+        ),
+        "ALM_FINAL_SURROGATE_SIGNED_CONSTRAINT_VALUES": getattr(
+            alm_result,
+            "surrogate_signed_constraint_values",
+            None,
+        ),
+        "ALM_FINAL_HARD_MAX_VIOLATION": getattr(
+            alm_result,
+            "final_hard_max_violation",
+            None,
+        ),
+        "ALM_FINAL_SURROGATE_MAX_VALUE": getattr(
+            alm_result,
+            "final_surrogate_max_value",
+            None,
+        ),
+        "ALM_FINAL_HARD_POSITIVE_SHIFT_ZERO": getattr(
+            alm_result,
+            "hard_positive_shift_zero",
+            None,
+        ),
+        "ALM_FINAL_SIGNAL_MISMATCH_ACTIVE": getattr(
+            alm_result,
+            "signal_mismatch_active",
+            None,
+        ),
+        "ALM_FINAL_PENALTY_GRADIENT_NORM": getattr(
+            alm_result,
+            "final_penalty_gradient_norm",
+            None,
+        ),
         "ALM_FINAL_TRUST_RADIUS": getattr(alm_result, "trust_radius", None),
         **alm_result_diagnostics_fields(alm_result),
         "ALM_HISTORY": getattr(alm_result, "history", None),
@@ -348,6 +388,7 @@ def _sanitize_stage2_feasibility_values(
     feasibility_values,
     *,
     constraint_values,
+    field_prefix: str = "feasibility_values",
 ) -> tuple[list[float], list[str]]:
     sanitized = []
     invalid_fields: list[str] = []
@@ -356,8 +397,25 @@ def _sanitize_stage2_feasibility_values(
     ):
         scalar_value = float(feasibility_value)
         if not np.isfinite(scalar_value):
-            invalid_fields.append(f"feasibility_values[{index}]")
+            invalid_fields.append(f"{field_prefix}[{index}]")
             scalar_value = max(1.0, max(float(constraint_value), 0.0))
+        sanitized.append(float(scalar_value))
+    return sanitized, invalid_fields
+
+
+def _sanitize_stage2_signal_values(
+    values,
+    *,
+    fallback_values,
+    field_prefix: str,
+) -> tuple[list[float], list[str]]:
+    sanitized = []
+    invalid_fields: list[str] = []
+    for index, (value, fallback_value) in enumerate(zip(values, fallback_values)):
+        scalar_value = float(value)
+        if not np.isfinite(scalar_value):
+            invalid_fields.append(f"{field_prefix}[{index}]")
+            scalar_value = float(fallback_value)
         sanitized.append(float(scalar_value))
     return sanitized, invalid_fields
 
@@ -505,7 +563,13 @@ def evaluate_stage2_alm_problem(
         base_objective_optimizable,
     )
 
-    signed_constraint_values = [
+    hard_signed_constraint_values = [
+        coil_length - length_target,
+        Jccdist.minimum_distance - curve_curve_min_dist,
+        max_curvature - Jc.threshold,
+        banana_current_signed_value,
+    ]
+    surrogate_signed_constraint_values = [
         coil_length - length_target,
         curve_curve_signed_value,
         curvature_signed_value,
@@ -520,34 +584,48 @@ def evaluate_stage2_alm_problem(
     (
         sanitized_base_value,
         sanitized_base_grad,
-        sanitized_constraint_values,
+        sanitized_surrogate_signed_constraint_values,
         sanitized_constraint_grads,
         sanitized_invalid_fields,
     ) = _sanitize_stage2_alm_inputs(
         base_value,
         base_grad,
-        signed_constraint_values,
+        surrogate_signed_constraint_values,
         constraint_grads,
+    )
+    sanitized_hard_signed_constraint_values, invalid_hard_signed_fields = (
+        _sanitize_stage2_signal_values(
+            hard_signed_constraint_values,
+            fallback_values=sanitized_surrogate_signed_constraint_values,
+            field_prefix="hard_signed_constraint_values",
+        )
+    )
+    sanitized_hard_violation_values, invalid_hard_violation_fields = (
+        _sanitize_stage2_feasibility_values(
+            [
+                length_violation,
+                curve_curve_violation,
+                curvature_violation,
+                banana_current_violation,
+            ],
+            constraint_values=sanitized_hard_signed_constraint_values,
+            field_prefix="hard_violation_values",
+        )
     )
 
     evaluation = augmented_inequality_objective(
         sanitized_base_value,
         sanitized_base_grad,
-        sanitized_constraint_values,
+        sanitized_surrogate_signed_constraint_values,
         sanitized_constraint_grads,
         multipliers,
         penalty,
     )
-    feasibility_values, invalid_feasibility_fields = _sanitize_stage2_feasibility_values(
-        [
-            length_violation,
-            curve_curve_violation,
-            curvature_violation,
-            banana_current_violation,
-        ],
-        constraint_values=sanitized_constraint_values,
+    invalid_fields = (
+        sanitized_invalid_fields
+        + invalid_hard_signed_fields
+        + invalid_hard_violation_fields
     )
-    invalid_fields = sanitized_invalid_fields + invalid_feasibility_fields
     evaluation.update(
         {
             "base_value": sanitized_base_value,
@@ -557,14 +635,18 @@ def evaluate_stage2_alm_problem(
                 "max_curvature",
                 "banana_current_upper_bound",
             ],
-            "dual_update_values": sanitized_constraint_values,
+            "dual_update_values": sanitized_surrogate_signed_constraint_values,
             "constraint_grads": sanitized_constraint_grads,
             "constraint_activity_tolerances": stage2_constraint_activity_tolerances(
                 distance_smoothing,
                 curvature_smoothing,
             ),
-            "feasibility_values": feasibility_values,
-            "max_feasibility_violation": max(feasibility_values),
+            "feasibility_values": sanitized_hard_violation_values,
+            "hard_signed_constraint_values": sanitized_hard_signed_constraint_values,
+            "hard_violation_values": sanitized_hard_violation_values,
+            "surrogate_signed_constraint_values": sanitized_surrogate_signed_constraint_values,
+            "hard_dual_update_values": sanitized_hard_signed_constraint_values,
+            "max_feasibility_violation": max(sanitized_hard_violation_values),
             "nonfinite_inputs_sanitized": bool(invalid_fields),
             "nonfinite_input_fields": invalid_fields,
         }

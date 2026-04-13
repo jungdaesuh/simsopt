@@ -145,6 +145,25 @@ class MinimizeAlmTests(unittest.TestCase):
             "stationarity_norm": float(np.linalg.norm(float(gradient_scale) * x)),
         }
 
+    @staticmethod
+    def _stage2_signal_evaluation(**overrides):
+        evaluation = {
+            "total": 0.0,
+            "grad": np.zeros(1),
+            "constraint_values": np.array([-0.2]),
+            "dual_update_values": np.array([-0.2]),
+            "feasibility_values": np.array([0.0]),
+            "hard_signed_constraint_values": np.array([-0.2]),
+            "hard_violation_values": np.array([0.0]),
+            "surrogate_signed_constraint_values": np.array([-0.2]),
+            "hard_dual_update_values": np.array([-0.2]),
+            "constraint_grads": [np.array([-1.0])],
+            "constraint_activity_tolerances": np.array([1.0e-3]),
+            "stationarity_norm": 0.0,
+        }
+        evaluation.update(overrides)
+        return evaluation
+
     def test_select_inner_solve_profile_uses_explicit_boxed_feasible_continuation_profile(self):
         module = load_alm_utils_module()
 
@@ -323,6 +342,7 @@ class MinimizeAlmTests(unittest.TestCase):
         self.assertAlmostEqual(metrics["conditioning_base_grad_norm"], 1.0)
         self.assertAlmostEqual(metrics["conditioning_penalty_grad_norm"], 9.0)
         self.assertAlmostEqual(metrics["conditioning_penalty_grad_ratio"], 9.0)
+        self.assertAlmostEqual(metrics["penalty_gradient_norm"], 9.0)
 
     def test_minimize_alm_sanitizes_nonfinite_candidate_evaluations(self):
         module = load_alm_utils_module()
@@ -644,8 +664,244 @@ class MinimizeAlmTests(unittest.TestCase):
         self.assertFalse(result.success)
         self.assertEqual(result.constraint_values, [1.0])
         self.assertEqual(result.solver_constraint_values, [3.0])
+        self.assertEqual(result.hard_signed_constraint_values, [3.0])
+        self.assertEqual(result.hard_violation_values, [1.0])
+        self.assertEqual(result.surrogate_signed_constraint_values, [3.0])
         self.assertEqual(result.history[0]["constraint_values"], [1.0])
         self.assertEqual(result.history[0]["solver_constraint_values"], [3.0])
+        self.assertEqual(result.history[0]["hard_signed_constraint_values"], [3.0])
+        self.assertEqual(result.history[0]["hard_violation_values"], [1.0])
+        self.assertEqual(result.history[0]["surrogate_signed_constraint_values"], [3.0])
+
+    def test_stationarity_metrics_uses_raw_norm_when_stage2_signals_disagree(self):
+        module = load_alm_utils_module()
+        evaluation = {
+            "total": 0.0,
+            "grad": np.array([1.0]),
+            "metric_grad": np.array([1.0]),
+            "constraint_values": np.array([0.2]),
+            "dual_update_values": np.array([0.2]),
+            "feasibility_values": np.array([0.0]),
+            "hard_signed_constraint_values": np.array([-1.0e-2]),
+            "hard_violation_values": np.array([0.0]),
+            "surrogate_signed_constraint_values": np.array([0.2]),
+            "hard_dual_update_values": np.array([-1.0e-2]),
+            "constraint_grads": [np.array([-1.0])],
+            "constraint_activity_tolerances": np.array([1.0e-3]),
+            "stationarity_norm": 1.0,
+            "metric_stationarity_norm": 1.0,
+        }
+
+        routing_state = module._constraint_routing_state(
+            evaluation,
+            np.zeros(1),
+            1.0,
+            1.0e-8,
+        )
+        raw_stationarity_norm, kkt_stationarity_norm, effective_stationarity_norm, mismatch = (
+            module._stationarity_metrics(
+                evaluation,
+                routing_state,
+                1.0e-8,
+            )
+        )
+
+        self.assertTrue(mismatch)
+        self.assertIsNone(kkt_stationarity_norm)
+        self.assertAlmostEqual(raw_stationarity_norm, 1.0)
+        self.assertAlmostEqual(effective_stationarity_norm, 1.0)
+
+    def test_constraint_routing_state_flags_boundary_mismatch_when_surrogate_shift_is_live(self):
+        module = load_alm_utils_module()
+        evaluation = self._stage2_signal_evaluation(
+            total=5.0e-7,
+            grad=np.array([1.0e-3]),
+            constraint_values=np.array([1.0e-3]),
+            dual_update_values=np.array([1.0e-3]),
+            hard_signed_constraint_values=np.array([-5.0e-4]),
+            surrogate_signed_constraint_values=np.array([1.0e-3]),
+            hard_dual_update_values=np.array([-5.0e-4]),
+            constraint_grads=[np.array([1.0])],
+            stationarity_norm=1.0e-3,
+        )
+
+        routing_state = module._constraint_routing_state(
+            evaluation,
+            np.zeros(1),
+            1.0,
+            1.0e-8,
+        )
+
+        self.assertEqual(routing_state.hard_activity_mask.tolist(), [True])
+        self.assertEqual(routing_state.surrogate_activity_mask.tolist(), [True])
+        self.assertTrue(routing_state.signal_mismatch_active)
+        self.assertTrue(routing_state.hard_positive_shift_zero)
+        self.assertFalse(routing_state.surrogate_positive_shift_zero)
+
+    def test_minimize_alm_returns_constraints_inactive_converged_for_stage2_zero_shift(self):
+        module = load_alm_utils_module()
+        settings = module.ALMSettings(
+            max_outer_iterations=2,
+            max_subproblem_continuations=1,
+            feasibility_tol=1.0e-8,
+            stationarity_tol=1.0e-8,
+        )
+        minimize_calls = []
+
+        def evaluate_problem(x, multipliers, penalty):
+            del x, multipliers, penalty
+            return self._stage2_signal_evaluation()
+
+        def fake_minimize(fun, x, jac, method, bounds, callback, options):
+            del fun, jac, method, bounds, callback, options
+            minimize_calls.append(np.asarray(x, dtype=float).copy())
+            return SimpleNamespace(
+                x=np.asarray(x, dtype=float).copy(),
+                nit=1,
+                success=True,
+                message="CONVERGENCE",
+            )
+
+        with patch.object(module, "minimize", side_effect=fake_minimize):
+            result = module.minimize_alm(
+                np.array([0.0]),
+                ["demo_constraint"],
+                evaluate_problem,
+                settings,
+                {"maxiter": 5, "ftol": 1e-12, "gtol": 1e-12},
+            )
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.termination_reason, "constraints_inactive_converged")
+        self.assertEqual(len(minimize_calls), 1)
+        self.assertEqual(result.history[0]["action"], "constraints_inactive_converged")
+        self.assertTrue(result.history[0]["hard_positive_shift_zero"])
+        self.assertFalse(result.history[0]["signal_mismatch_active"])
+        self.assertIsNone(result.history[0]["active_constraint_name"])
+        self.assertEqual(result.hard_signed_constraint_values, [-0.2])
+        self.assertEqual(result.hard_violation_values, [0.0])
+        self.assertEqual(result.surrogate_signed_constraint_values, [-0.2])
+
+    def test_minimize_alm_returns_constraints_inactive_stall_after_repeat_without_progress(self):
+        module = load_alm_utils_module()
+        settings = module.ALMSettings(
+            max_outer_iterations=3,
+            max_subproblem_continuations=1,
+            max_inner_attempts=1,
+            feasibility_tol=1.0e-8,
+            stationarity_tol=1.0e-8,
+        )
+        minimize_calls = {"count": 0}
+
+        def evaluate_problem(x, multipliers, penalty):
+            del x, multipliers, penalty
+            return self._stage2_signal_evaluation(
+                grad=np.array([1.0]),
+                stationarity_norm=1.0,
+            )
+
+        def fake_minimize(fun, x, jac, method, bounds, callback, options):
+            del fun, jac, method, bounds, callback, options
+            minimize_calls["count"] += 1
+            return SimpleNamespace(
+                x=np.asarray(x, dtype=float).copy(),
+                nit=0,
+                success=False,
+                message="ABNORMAL: line search failed",
+            )
+
+        with patch.object(module, "minimize", side_effect=fake_minimize):
+            result = module.minimize_alm(
+                np.array([0.0]),
+                ["demo_constraint"],
+                evaluate_problem,
+                settings,
+                {"maxiter": 5, "ftol": 1e-12, "gtol": 1e-12},
+            )
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.termination_reason, "constraints_inactive_stall")
+        self.assertEqual(minimize_calls["count"], 3)
+        self.assertEqual(result.outer_iterations, 2)
+        self.assertEqual(result.history[0]["action"], "dual_update")
+        self.assertEqual(result.history[1]["action"], "subproblem_continue")
+        self.assertEqual(result.history[2]["action"], "constraints_inactive_stall")
+        self.assertTrue(result.history[2]["hard_positive_shift_zero"])
+        self.assertFalse(result.history[2]["signal_mismatch_active"])
+        self.assertIsNone(result.history[2]["active_constraint_name"])
+
+    def test_minimize_alm_escalates_penalty_after_repeated_stage2_signal_mismatch(self):
+        module = load_alm_utils_module()
+        settings = module.ALMSettings(
+            max_outer_iterations=3,
+            max_subproblem_continuations=2,
+            trust_radius_init=0.1,
+            trust_radius_min=0.01,
+            trust_radius_shrink=0.5,
+            trust_radius_grow=1.5,
+            max_inner_attempts=1,
+            feasibility_tol=1.0e-8,
+            stationarity_tol=1.0e-8,
+        )
+        minimize_calls = {"count": 0}
+
+        def evaluate_problem(x, multipliers, penalty):
+            del multipliers, penalty
+            point = float(np.asarray(x, dtype=float)[0])
+            if point < 0.5:
+                total = 2.0
+                grad = np.array([1.0])
+                stationarity_norm = 1.0
+            else:
+                total = 1.0
+                grad = np.array([0.5])
+                stationarity_norm = 0.5
+            return self._stage2_signal_evaluation(
+                total=total,
+                grad=grad,
+                constraint_values=np.array([0.2]),
+                dual_update_values=np.array([0.2]),
+                hard_signed_constraint_values=np.array([-1.0e-2]),
+                surrogate_signed_constraint_values=np.array([0.2]),
+                hard_dual_update_values=np.array([-1.0e-2]),
+                stationarity_norm=stationarity_norm,
+            )
+
+        def fake_minimize(fun, x, jac, method, bounds, callback, options):
+            del fun, jac, method, bounds, callback, options
+            minimize_calls["count"] += 1
+            if minimize_calls["count"] == 1:
+                return SimpleNamespace(
+                    x=np.array([1.0]),
+                    nit=1,
+                    success=True,
+                    message="CONVERGENCE",
+                )
+            return SimpleNamespace(
+                x=np.asarray(x, dtype=float).copy(),
+                nit=0,
+                success=False,
+                message="ABNORMAL: line search failed",
+            )
+
+        with patch.object(module, "minimize", side_effect=fake_minimize):
+            result = module.minimize_alm(
+                np.array([0.0]),
+                ["demo_constraint"],
+                evaluate_problem,
+                settings,
+                {"maxiter": 5, "ftol": 1e-12, "gtol": 1e-12},
+            )
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.termination_reason, "max_outer")
+        self.assertEqual(minimize_calls["count"], 4)
+        self.assertEqual(result.history[0]["action"], "subproblem_continue")
+        self.assertTrue(result.history[0]["signal_mismatch_active"])
+        self.assertEqual(result.history[1]["action"], "signal_mismatch_penalty_increase")
+        self.assertTrue(result.history[1]["signal_mismatch_active"])
+        self.assertTrue(result.history[1]["hard_positive_shift_zero"])
+        self.assertFalse(result.history[1]["surrogate_max_value"] <= 0.0)
 
     def test_minimize_alm_increases_penalty_only_when_feasibility_is_bad(self):
         module = load_alm_utils_module()
@@ -949,6 +1205,13 @@ class MinimizeAlmTests(unittest.TestCase):
                 "kkt_stationarity_norm",
                 "constraint_values",
                 "solver_constraint_values",
+                "hard_signed_constraint_values",
+                "hard_violation_values",
+                "surrogate_signed_constraint_values",
+                "hard_max_violation",
+                "surrogate_max_value",
+                "hard_positive_shift_zero",
+                "signal_mismatch_active",
                 "multipliers",
                 "post_update_multipliers",
                 "feasibility_tolerance",
@@ -985,6 +1248,7 @@ class MinimizeAlmTests(unittest.TestCase):
                 "conditioning_base_grad_norm",
                 "conditioning_penalty_grad_norm",
                 "conditioning_penalty_grad_ratio",
+                "penalty_gradient_norm",
                 "action",
                 "outer_termination",
             },

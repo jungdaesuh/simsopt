@@ -2574,6 +2574,13 @@ class HardwareConstraintTests(unittest.TestCase):
         self.assertTrue(result["local_preservation_used"])
         self.assertTrue(result["local_preservation_preserved_start"])
         self.assertGreaterEqual(result["local_preservation_attempts"], 1)
+        self.assertEqual(result["phase1_outcome"], "preserved_start_no_safe_step")
+        self.assertIsNone(result["phase1_first_accepted_step_rms"])
+        self.assertIsNone(result["phase1_max_accepted_step_rms"])
+        self.assertFalse(result["phase1_anchor_restore_used"])
+        self.assertEqual(result["phase1_unsafe_accept_rollbacks"], 0)
+        self.assertEqual(result["phase1_invalid_reject_attempts"], 0)
+        self.assertFalse(result["phase1_recovery_used"])
         self.assertEqual(result["next_dofs"].tolist(), [1.0, -1.0])
         self.assertGreaterEqual(len(restore_calls), 1)
 
@@ -2635,7 +2642,24 @@ class HardwareConstraintTests(unittest.TestCase):
 
         self.assertTrue(result["continue_search"])
         self.assertFalse(result["local_preservation_preserved_start"])
+        self.assertEqual(result["phase1_outcome"], "safe_local_accept")
+        self.assertFalse(result["phase1_anchor_restore_used"])
+        self.assertEqual(result["phase1_unsafe_accept_rollbacks"], 0)
+        self.assertEqual(result["phase1_invalid_reject_attempts"], 0)
+        self.assertFalse(result["phase1_recovery_used"])
         np.testing.assert_allclose(result["next_dofs"], [1.01, -0.99])
+        expected_step_rms = module.basin_normalized_step_rms(
+            np.array([1.0, -1.0]),
+            np.array([1.01, -0.99]),
+        )
+        self.assertAlmostEqual(
+            result["phase1_first_accepted_step_rms"],
+            expected_step_rms,
+        )
+        self.assertAlmostEqual(
+            result["phase1_max_accepted_step_rms"],
+            expected_step_rms,
+        )
         self.assertLessEqual(
             result["local_preservation_radius"],
             module._PENALTY_FEASIBLE_START_SAFE_STEP_RMS_LIMIT
@@ -2700,6 +2724,13 @@ class HardwareConstraintTests(unittest.TestCase):
 
         self.assertFalse(result["continue_search"])
         self.assertTrue(result["local_preservation_preserved_start"])
+        self.assertEqual(result["phase1_outcome"], "preserved_start_no_safe_step")
+        self.assertTrue(result["phase1_anchor_restore_used"])
+        self.assertEqual(result["phase1_unsafe_accept_rollbacks"], 1)
+        self.assertEqual(result["phase1_invalid_reject_attempts"], 0)
+        self.assertTrue(result["phase1_recovery_used"])
+        self.assertEqual(result["phase1_first_accepted_step_rms"], 0.0)
+        self.assertEqual(result["phase1_max_accepted_step_rms"], 0.0)
         self.assertIn("unsafe_local_accept", result["phase1_termination_message"])
 
     def test_run_penalty_phase1_rolls_back_unsafe_accept_and_uses_reject_shrink(self):
@@ -2775,7 +2806,28 @@ class HardwareConstraintTests(unittest.TestCase):
         self.assertEqual(refresh_calls, ["refresh"])
         self.assertTrue(result["continue_search"])
         self.assertFalse(result["local_preservation_preserved_start"])
+        self.assertEqual(result["phase1_outcome"], "safe_local_accept_after_recovery")
+        self.assertTrue(result["phase1_anchor_restore_used"])
+        self.assertEqual(result["phase1_unsafe_accept_rollbacks"], 1)
+        self.assertEqual(result["phase1_invalid_reject_attempts"], 1)
+        self.assertTrue(result["phase1_recovery_used"])
         np.testing.assert_allclose(result["next_dofs"], [1.01, -0.99])
+        first_step_rms = module.basin_normalized_step_rms(
+            np.array([1.0, -1.0]),
+            np.array([1.04, -0.96]),
+        )
+        second_step_rms = module.basin_normalized_step_rms(
+            np.array([1.0, -1.0]),
+            np.array([1.01, -0.99]),
+        )
+        self.assertAlmostEqual(
+            result["phase1_first_accepted_step_rms"],
+            first_step_rms,
+        )
+        self.assertAlmostEqual(
+            result["phase1_max_accepted_step_rms"],
+            max(first_step_rms, second_step_rms),
+        )
         self.assertEqual(seen_bounds[0], [(0.95, 1.05), (-1.05, -0.95)])
         self.assertEqual(
             seen_bounds[1],
@@ -2794,6 +2846,68 @@ class HardwareConstraintTests(unittest.TestCase):
                 ),
             ],
         )
+
+    def test_run_penalty_phase1_tracks_first_and_max_accepted_step_across_callbacks(self):
+        module = self.load_module()
+        run_dict = {
+            "accepted_iterations": 0,
+            "accepted_x": np.array([1.0, -1.0]),
+            "invalid_state_rejects_total": 0,
+            "surface_solve_rejects": 0,
+            "hardware_rejects": 0,
+            "topology_gate_rejects": 0,
+            "surface_status": {"success": True},
+            "intersecting": False,
+            "search_eval": {"total": 1.0},
+            "accepted_hardware_status": {"success": True},
+            "surface_state": {"seed": "anchor"},
+            "J": 1.0,
+            "dJ": np.zeros(2),
+            "search_surface_status": {"success": True},
+            "topology_gate_status": {"enabled": False},
+            "x_prev": np.array([1.0, -1.0]),
+            "best_accepted_incumbent": None,
+            "best_accepted_metric": None,
+            "best_accepted_stage": None,
+            "best_feasible_incumbent": None,
+            "best_feasible_metric": None,
+            "best_feasible_stage": None,
+            "it": 0,
+        }
+
+        def fake_callback(x):
+            run_dict["accepted_iterations"] += 1
+            run_dict["accepted_x"] = np.asarray(x, dtype=float).copy()
+            run_dict["accepted_hardware_status"] = {"success": True}
+
+        def fake_minimize(fun, x0, **kwargs):
+            kwargs["callback"](np.array([1.015, -0.985]))
+            kwargs["callback"](np.array([1.01, -0.99]))
+            return SimpleNamespace(nit=2, success=True, message="CONVERGENCE", status=0)
+
+        result = module.run_penalty_phase1(
+            np.array([1.0, -1.0]),
+            total_maxiter=4,
+            maxcor=5,
+            ftol=1e-15,
+            gtol=1e-15,
+            initial_step_scale=1.0,
+            initial_step_maxiter=0,
+            enable_local_preservation=True,
+            lower_bounds=np.array([-5.0, -5.0]),
+            upper_bounds=np.array([5.0, 5.0]),
+            run_dict=run_dict,
+            objective_fn=lambda x: (0.0, np.zeros_like(x)),
+            callback_fn=fake_callback,
+            normalize_message_fn=lambda *args, **kwargs: "phase1_ok",
+            restore_accepted_state_fn=lambda: None,
+            minimize_fn=fake_minimize,
+        )
+
+        self.assertEqual(result["phase1_outcome"], "safe_local_accept")
+        self.assertAlmostEqual(result["phase1_first_accepted_step_rms"], 0.015)
+        self.assertAlmostEqual(result["phase1_max_accepted_step_rms"], 0.015)
+        np.testing.assert_allclose(result["next_dofs"], [1.01, -0.99])
 
     def test_build_penalty_phase2_bounds_keeps_local_preservation_radius(self):
         module = self.load_module()
@@ -4641,6 +4755,38 @@ class CurrentBaselineContractTests(unittest.TestCase):
             args = module.parse_args()
 
         self.assertEqual(args.tf_current_A, 80000.0)
+
+    def test_single_stage_parse_args_preserve_wrapper_default_hardware_thresholds(self):
+        module = load_single_stage_example_module()
+
+        with patch.object(sys, "argv", ["single_stage_banana_example.py"]):
+            args = module.parse_args()
+
+        self.assertEqual(args.cs_dist, 0.015)
+        self.assertEqual(args.curvature_threshold, 100.0)
+
+    def test_apply_default_stage2_seed_args_uses_legacy_seed_defaults(self):
+        module = load_single_stage_example_module()
+        args = SimpleNamespace(
+            plasma_surf_filename="wout_nfp22ginsburg_000_014417_iota15.nc",
+            stage2_seed_major_radius=None,
+            stage2_seed_toroidal_flux=None,
+            stage2_seed_length_weight=None,
+            stage2_seed_cc_weight=None,
+            stage2_seed_curvature_weight=None,
+            stage2_seed_cc_threshold=None,
+            stage2_seed_curvature_threshold=None,
+            stage2_seed_banana_surf_radius=None,
+            stage2_seed_tf_current_A=None,
+            stage2_seed_order=None,
+            stage2_seed_banana_init_current_A=None,
+        )
+
+        module.apply_default_stage2_seed_args(args)
+
+        self.assertEqual(args.stage2_seed_curvature_threshold, 100.0)
+        self.assertEqual(args.stage2_seed_banana_surf_radius, 0.21)
+        self.assertEqual(args.stage2_seed_tf_current_A, 8.0e4)
 
     def test_stage2_parse_args_accepts_banana_current_controls(self):
         module = load_stage2_module()

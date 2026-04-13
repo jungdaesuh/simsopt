@@ -850,6 +850,25 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
 
         self.assertEqual(excinfo.exception.code, 2)
 
+    def test_single_stage_thresholded_physics_rerun_wrapper_defaults_match_single_stage_entrypoint(self):
+        module = load_single_stage_thresholded_physics_rerun_module()
+
+        with patch.object(
+            sys,
+            "argv",
+            [
+                "run_single_stage_thresholded_physics_alm.py",
+                "--plasma-surf-filename",
+                DEFAULT_ALM_WRAPPER_SURFACE,
+                "--stage2-bs-path",
+                "seed.json",
+            ],
+        ):
+            args = module.parse_args()
+
+        self.assertEqual(args.cs_dist, 0.015)
+        self.assertEqual(args.curvature_threshold, 100.0)
+
     def test_single_stage_thresholded_physics_rerun_wrapper_rejects_stage2_surface_mismatch(self):
         module = load_single_stage_thresholded_physics_rerun_module()
 

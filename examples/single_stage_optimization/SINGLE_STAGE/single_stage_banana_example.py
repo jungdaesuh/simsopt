@@ -2946,6 +2946,28 @@ def run_penalty_phase1(
             run_dict.get("invalid_state_rejects_total", 0)
         )
         phase1_scale = settings["phase1_scale"]
+        def tracked_phase1_callback(xk):
+            nonlocal phase1_first_accepted_step_rms, phase1_max_accepted_step_rms
+            accepted_before_callback = int(run_dict.get("accepted_iterations", 0))
+            phase1_callback(xk)
+            if int(run_dict.get("accepted_iterations", 0)) > accepted_before_callback:
+                accepted_step_rms = float(
+                    basin_normalized_step_rms(
+                        anchor_x,
+                        np.asarray(run_dict["accepted_x"], dtype=float),
+                    )
+                )
+                if phase1_first_accepted_step_rms is None:
+                    phase1_first_accepted_step_rms = accepted_step_rms
+                phase1_max_accepted_step_rms = (
+                    accepted_step_rms
+                    if phase1_max_accepted_step_rms is None
+                    else max(
+                        phase1_max_accepted_step_rms,
+                        accepted_step_rms,
+                    )
+                )
+
         phase1_fun, phase1_callback, x0, bounds = _build_penalty_phase1_problem(
             anchor_x,
             phase1_scale=phase1_scale,
@@ -2963,7 +2985,7 @@ def run_penalty_phase1(
             jac=True,
             method="L-BFGS-B",
             bounds=bounds,
-            callback=phase1_callback,
+            callback=tracked_phase1_callback,
             options={
                 "maxiter": remaining_maxiter,
                 "maxcor": maxcor,
@@ -2990,16 +3012,6 @@ def run_penalty_phase1(
         )
         if int(run_dict.get("accepted_iterations", 0)) > accepted_before_attempt:
             accept_summary = evaluate_penalty_phase1_local_accept(anchor_x, run_dict)
-            if phase1_first_accepted_step_rms is None:
-                phase1_first_accepted_step_rms = accept_summary["step_rms"]
-            phase1_max_accepted_step_rms = (
-                accept_summary["step_rms"]
-                if phase1_max_accepted_step_rms is None
-                else max(
-                    phase1_max_accepted_step_rms,
-                    accept_summary["step_rms"],
-                )
-            )
             if accept_summary["safe_local_accept"]:
                 return _build_penalty_phase1_result(
                     used_phase1=True,

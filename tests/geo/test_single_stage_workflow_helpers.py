@@ -1155,6 +1155,25 @@ class GoalModeComparisonScriptTests(unittest.TestCase):
             "7",
         )
 
+    def test_goal_mode_comparison_wrapper_defaults_match_single_stage_entrypoint(self):
+        module = load_goal_mode_comparison_module()
+
+        with patch.object(
+            sys,
+            "argv",
+            [
+                "run_single_stage_goal_mode_comparison.py",
+                "--plasma-surf-filename",
+                "demo.nc",
+                "--stage2-bs-path",
+                "seed.json",
+            ],
+        ):
+            args = module.parse_args()
+
+        self.assertEqual(args.cs_dist, 0.015)
+        self.assertEqual(args.curvature_threshold, 100.0)
+
     def test_build_single_stage_goal_mode_command_forwards_frontier_volume_weight(self):
         module = load_goal_mode_comparison_module()
         args = self._make_args()

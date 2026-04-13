@@ -370,8 +370,8 @@ def parse_args():
     parser.add_argument(
         "--curvature-threshold",
         type=float,
-        default=float(os.environ.get("CURVATURE_THRESHOLD", "100")),
-        help="Curvature threshold in m^-1 (default 100, HBT hardware limit).",
+        default=float(os.environ.get("CURVATURE_THRESHOLD", "40")),
+        help="Curvature penalty threshold in m^-1 (default 40, design target; HBT hardware limit is 100).",
     )
     parser.add_argument(
         "--theta-center",
@@ -619,9 +619,7 @@ def main(parsed_args=None):
 
     # Threshold and weight for the coil curvature penalty
     CURVATURE_WEIGHT = args.curvature_weight
-    CURVATURE_THRESHOLD = max(args.curvature_threshold, 100)
-    if args.curvature_threshold < 100:
-        print(f"WARNING: --curvature-threshold {args.curvature_threshold} below HBT spec floor, clamped to 100")
+    CURVATURE_THRESHOLD = args.curvature_threshold  # Penalty threshold is a design choice; HW limit is 100 m⁻¹
 
     # Define the individual terms objective function:
     Jf = SquaredFlux(new_surf, new_bs) # penalty on B dot n

@@ -527,6 +527,26 @@ class SnapshotParityTests(unittest.TestCase):
         np.testing.assert_allclose(actual["constraint_grads"][3], [0.7, -0.4])
         np.testing.assert_allclose(actual["dual_update_values"][:3], expected["dual_update_values"])
         np.testing.assert_allclose(actual["dual_update_values"][3], -6500.0)
+        np.testing.assert_allclose(
+            actual["hard_signed_constraint_values"],
+            [0.05, 0.01, 2.0, -6500.0],
+        )
+        np.testing.assert_allclose(
+            actual["hard_violation_values"],
+            [0.05, 0.01, 2.0, 0.0],
+        )
+        np.testing.assert_allclose(
+            actual["surrogate_signed_constraint_values"][:3],
+            expected["dual_update_values"],
+        )
+        np.testing.assert_allclose(
+            actual["surrogate_signed_constraint_values"][3],
+            -6500.0,
+        )
+        np.testing.assert_allclose(
+            actual["hard_dual_update_values"],
+            [0.05, 0.01, 2.0, -6500.0],
+        )
         np.testing.assert_allclose(actual["feasibility_values"][:3], expected["feasibility_values"])
         np.testing.assert_allclose(actual["feasibility_values"][3], 0.0)
         self.assertAlmostEqual(actual["base_value"], expected["base_value"])

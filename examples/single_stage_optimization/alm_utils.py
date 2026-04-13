@@ -47,6 +47,29 @@ class ALMFeasibleIncumbent:
     incumbent_state: object | None = None
 
 
+@dataclass(frozen=True)
+class ALMConstraintSignalState:
+    explicit_stage2_signals: bool
+    hard_signed_constraint_values: np.ndarray
+    hard_violation_values: np.ndarray
+    surrogate_signed_constraint_values: np.ndarray
+    preferred_dual_update_values: np.ndarray
+
+
+@dataclass(frozen=True)
+class ALMConstraintRoutingState:
+    signal_state: ALMConstraintSignalState
+    hard_activity_mask: np.ndarray
+    surrogate_activity_mask: np.ndarray
+    signal_mismatch_active: bool
+    hard_positive_shift: np.ndarray
+    surrogate_positive_shift: np.ndarray
+    hard_positive_shift_zero: bool
+    surrogate_positive_shift_zero: bool
+    hard_max_violation: float
+    surrogate_max_value: float
+
+
 _UNBOUNDED_INNER_PROFILE = ALMInnerSolveProfile(
     name="unbounded",
     maxiter_cap=None,
@@ -484,6 +507,9 @@ def _conditioning_metrics(evaluation: dict) -> dict[str, float | None]:
         ),
         "conditioning_penalty_grad_ratio": (
             None if penalty_grad_ratio is None else float(penalty_grad_ratio)
+        ),
+        "penalty_gradient_norm": (
+            None if penalty_grad_norm is None else float(penalty_grad_norm)
         ),
     }
 
@@ -926,6 +952,45 @@ def _extract_constraint_state(evaluation: dict):
     )
 
 
+def _extract_stage2_constraint_signal_state(
+    evaluation: dict,
+) -> ALMConstraintSignalState:
+    explicit_stage2_signals = any(
+        key in evaluation
+        for key in (
+            "hard_signed_constraint_values",
+            "hard_violation_values",
+            "surrogate_signed_constraint_values",
+            "hard_dual_update_values",
+        )
+    )
+    (
+        solver_constraint_values,
+        feasibility_values,
+        dual_update_values,
+        _max_feasibility_violation,
+    ) = _extract_constraint_state(evaluation)
+    hard_signed_constraint_values = _as_float_array(
+        evaluation.get("hard_signed_constraint_values", dual_update_values)
+    )
+    hard_violation_values = _as_float_array(
+        evaluation.get("hard_violation_values", feasibility_values)
+    )
+    surrogate_signed_constraint_values = _as_float_array(
+        evaluation.get("surrogate_signed_constraint_values", solver_constraint_values)
+    )
+    preferred_dual_update_values = _as_float_array(
+        evaluation.get("hard_dual_update_values", hard_signed_constraint_values)
+    )
+    return ALMConstraintSignalState(
+        explicit_stage2_signals=bool(explicit_stage2_signals),
+        hard_signed_constraint_values=hard_signed_constraint_values,
+        hard_violation_values=hard_violation_values,
+        surrogate_signed_constraint_values=surrogate_signed_constraint_values,
+        preferred_dual_update_values=preferred_dual_update_values,
+    )
+
+
 def _constraint_activity_tolerances(evaluation: dict, constraint_values: np.ndarray) -> np.ndarray:
     raw_tolerances = evaluation.get("constraint_activity_tolerances")
     if raw_tolerances is None:
@@ -937,6 +1002,75 @@ def _constraint_activity_tolerances(evaluation: dict, constraint_values: np.ndar
     if tolerances.size == 1:
         return np.full_like(constraint_values, float(tolerances.reshape(())))
     raise ValueError("constraint_activity_tolerances shape must match constraint_values")
+
+
+def _constraint_activity_mask(
+    constraint_values: np.ndarray,
+    feasibility_values: np.ndarray,
+    activity_tolerances: np.ndarray,
+    feasibility_gate: float,
+) -> np.ndarray:
+    return np.logical_and(
+        np.asarray(feasibility_values, dtype=float) <= float(feasibility_gate),
+        np.asarray(constraint_values, dtype=float)
+        >= -np.asarray(activity_tolerances, dtype=float),
+    )
+
+
+def _constraint_routing_state(
+    evaluation: dict,
+    multipliers: np.ndarray,
+    penalty: float,
+    feasibility_gate: float,
+) -> ALMConstraintRoutingState:
+    signal_state = _extract_stage2_constraint_signal_state(evaluation)
+    activity_tolerances = _constraint_activity_tolerances(
+        evaluation,
+        signal_state.surrogate_signed_constraint_values,
+    )
+    hard_activity_mask = _constraint_activity_mask(
+        signal_state.hard_signed_constraint_values,
+        signal_state.hard_violation_values,
+        activity_tolerances,
+        feasibility_gate,
+    )
+    surrogate_activity_mask = _constraint_activity_mask(
+        signal_state.surrogate_signed_constraint_values,
+        signal_state.hard_violation_values,
+        activity_tolerances,
+        feasibility_gate,
+    )
+    masks_disagree = not np.array_equal(hard_activity_mask, surrogate_activity_mask)
+    signal_mismatch_active = signal_state.explicit_stage2_signals and masks_disagree
+    hard_positive_shift = np.maximum(
+        0.0,
+        np.asarray(multipliers, dtype=float)
+        + float(penalty) * signal_state.preferred_dual_update_values,
+    )
+    surrogate_positive_shift = np.maximum(
+        0.0,
+        np.asarray(multipliers, dtype=float)
+        + float(penalty) * signal_state.surrogate_signed_constraint_values,
+    )
+    direct_boundary_mismatch = (
+        signal_state.explicit_stage2_signals
+        and _max_value(signal_state.hard_violation_values) <= float(feasibility_gate)
+        and np.any(surrogate_positive_shift > 0.0)
+    )
+    if direct_boundary_mismatch:
+        signal_mismatch_active = True
+    return ALMConstraintRoutingState(
+        signal_state=signal_state,
+        hard_activity_mask=hard_activity_mask,
+        surrogate_activity_mask=surrogate_activity_mask,
+        signal_mismatch_active=bool(signal_mismatch_active),
+        hard_positive_shift=hard_positive_shift,
+        surrogate_positive_shift=surrogate_positive_shift,
+        hard_positive_shift_zero=bool(not np.any(hard_positive_shift > 0.0)),
+        surrogate_positive_shift_zero=bool(not np.any(surrogate_positive_shift > 0.0)),
+        hard_max_violation=_max_value(signal_state.hard_violation_values),
+        surrogate_max_value=_max_value(signal_state.surrogate_signed_constraint_values),
+    )
 
 
 def _kkt_stationarity_norm(
@@ -978,10 +1112,9 @@ def _kkt_stationarity_norm(
 
 def _stationarity_metrics(
     evaluation: dict,
-    dual_update_values: np.ndarray,
-    feasibility_values: np.ndarray,
+    routing_state: ALMConstraintRoutingState,
     feasibility_gate: float,
-) -> tuple[float, float | None, float]:
+) -> tuple[float, float | None, float, bool]:
     metric_grad = np.asarray(
         evaluation.get("metric_grad", evaluation["grad"]),
         dtype=float,
@@ -992,20 +1125,30 @@ def _stationarity_metrics(
             evaluation.get("stationarity_norm", np.linalg.norm(metric_grad)),
         )
     )
-    kkt_stationarity_norm = _kkt_stationarity_norm(
-        metric_grad,
-        evaluation.get("constraint_grads"),
-        dual_update_values,
-        feasibility_values,
-        _constraint_activity_tolerances(evaluation, dual_update_values),
-        feasibility_gate,
+    if routing_state.signal_mismatch_active:
+        kkt_stationarity_norm = None
+        effective_stationarity_norm = raw_stationarity_norm
+    else:
+        preferred_dual_update_values = routing_state.signal_state.preferred_dual_update_values
+        kkt_stationarity_norm = _kkt_stationarity_norm(
+            metric_grad,
+            evaluation.get("constraint_grads"),
+            preferred_dual_update_values,
+            routing_state.signal_state.hard_violation_values,
+            _constraint_activity_tolerances(evaluation, preferred_dual_update_values),
+            feasibility_gate,
+        )
+        effective_stationarity_norm = (
+            raw_stationarity_norm
+            if kkt_stationarity_norm is None
+            else min(raw_stationarity_norm, kkt_stationarity_norm)
+        )
+    return (
+        raw_stationarity_norm,
+        kkt_stationarity_norm,
+        effective_stationarity_norm,
+        bool(routing_state.signal_mismatch_active),
     )
-    effective_stationarity_norm = (
-        raw_stationarity_norm
-        if kkt_stationarity_norm is None
-        else min(raw_stationarity_norm, kkt_stationarity_norm)
-    )
-    return raw_stationarity_norm, kkt_stationarity_norm, effective_stationarity_norm
 
 
 def minimize_alm(
@@ -1086,6 +1229,12 @@ def minimize_alm(
             _dual_update_values,
             _max_feasibility_violation,
         ) = _extract_constraint_state(evaluation)
+        routing_state = _constraint_routing_state(
+            evaluation,
+            multipliers_state,
+            penalty_state,
+            final_feasibility_tolerance,
+        )
         inner_optimizer_success = None
         inner_optimizer_message = None
         if inner_result is not None:
@@ -1102,6 +1251,18 @@ def minimize_alm(
             constraint_names=list(constraint_names),
             constraint_values=[float(value) for value in feasibility_values],
             solver_constraint_values=[float(value) for value in solver_constraint_values],
+            hard_signed_constraint_values=[
+                float(value)
+                for value in routing_state.signal_state.hard_signed_constraint_values
+            ],
+            hard_violation_values=[
+                float(value)
+                for value in routing_state.signal_state.hard_violation_values
+            ],
+            surrogate_signed_constraint_values=[
+                float(value)
+                for value in routing_state.signal_state.surrogate_signed_constraint_values
+            ],
             multipliers=[float(value) for value in multipliers_state],
             penalty=float(penalty_state),
             trust_radius=trust_radius,
@@ -1129,7 +1290,12 @@ def minimize_alm(
             final_total_grad_norm=conditioning["conditioning_total_grad_norm"],
             final_base_grad_norm=conditioning["conditioning_base_grad_norm"],
             final_penalty_grad_norm=conditioning["conditioning_penalty_grad_norm"],
+            final_penalty_gradient_norm=conditioning["penalty_gradient_norm"],
             final_penalty_grad_ratio=conditioning["conditioning_penalty_grad_ratio"],
+            final_hard_max_violation=float(routing_state.hard_max_violation),
+            final_surrogate_max_value=float(routing_state.surrogate_max_value),
+            hard_positive_shift_zero=bool(routing_state.hard_positive_shift_zero),
+            signal_mismatch_active=bool(routing_state.signal_mismatch_active),
             multiplier_cap_binding=bool(cap_binding_detected),
             multiplier_cap_binding_indices=sorted(cap_binding_indices),
             penalty_cap_reached=bool(penalty_cap_reached),
@@ -1184,6 +1350,126 @@ def minimize_alm(
         update_stationarity_tol = max(settings.stationarity_tol, 1.0 / penalty)
         return None
 
+    def _restore_best_feasible_on_failure(
+        *,
+        evaluation: dict,
+        multipliers_state: np.ndarray,
+        penalty_state: float,
+        inner_result,
+        final_max_feasibility_violation: float,
+    ) -> SimpleNamespace:
+        restored_best_feasible = False
+        restored_best_feasible_reason = None
+        restored_evaluation = evaluation
+        restored_x = x.copy()
+        restored_multipliers_state = np.asarray(multipliers_state, dtype=float).copy()
+        restored_penalty_state = float(penalty_state)
+        restored_inner_result = inner_result
+
+        restore_reasons: list[str] = []
+        if best_feasible is not None:
+            if final_max_feasibility_violation > settings.feasibility_tol:
+                restore_reasons.append("final_iterate_infeasible")
+            if (
+                _incumbent_objective_value(restored_evaluation)
+                > _incumbent_objective_value(best_feasible.evaluation)
+            ):
+                restore_reasons.append("final_iterate_worse_than_best_feasible")
+
+        if restore_reasons:
+            restored_best_feasible = True
+            restored_best_feasible_reason = ",".join(restore_reasons)
+            restored_x = best_feasible.x.copy()
+            restored_evaluation = best_feasible.evaluation
+            restored_multipliers_state = best_feasible.multipliers.copy()
+            restored_penalty_state = best_feasible.penalty
+            restored_inner_result = best_feasible.inner_result
+            if (
+                restore_incumbent_state_fn is not None
+                and best_feasible.incumbent_state is not None
+            ):
+                restore_incumbent_state_fn(best_feasible.incumbent_state)
+
+        return SimpleNamespace(
+            x=restored_x,
+            evaluation=restored_evaluation,
+            multipliers_state=restored_multipliers_state,
+            penalty_state=restored_penalty_state,
+            inner_result=restored_inner_result,
+            restored_best_feasible=bool(restored_best_feasible),
+            restored_best_feasible_reason=restored_best_feasible_reason,
+        )
+
+    def _build_failure_result_with_optional_restore(
+        *,
+        termination_reason: str,
+        message_prefix: str,
+        evaluation: dict,
+        multipliers_state: np.ndarray,
+        penalty_state: float,
+        inner_result,
+        restored_message_prefix: str | None = None,
+        restored_termination_reason: str | None = None,
+    ) -> SimpleNamespace:
+        nonlocal x
+        restored_state = _restore_best_feasible_on_failure(
+            evaluation=evaluation,
+            multipliers_state=multipliers_state,
+            penalty_state=penalty_state,
+            inner_result=inner_result,
+            final_max_feasibility_violation=_extract_constraint_state(evaluation)[3],
+        )
+        x = restored_state.x.copy()
+        restored_routing_state = _constraint_routing_state(
+            restored_state.evaluation,
+            restored_state.multipliers_state,
+            restored_state.penalty_state,
+            settings.feasibility_tol,
+        )
+        (
+            restored_raw_stationarity_norm,
+            restored_kkt_stationarity_norm,
+            restored_stationarity_norm,
+            _restored_signal_mismatch_active,
+        ) = _stationarity_metrics(
+            restored_state.evaluation,
+            restored_routing_state,
+            settings.feasibility_tol,
+        )
+        restored_max_feasibility_violation = _extract_constraint_state(
+            restored_state.evaluation
+        )[3]
+        effective_message_prefix = message_prefix
+        effective_termination_reason = termination_reason
+        if restored_state.restored_best_feasible:
+            if restored_message_prefix is not None:
+                effective_message_prefix = restored_message_prefix
+            if restored_termination_reason is not None:
+                effective_termination_reason = restored_termination_reason
+        message = (
+            f"{effective_message_prefix}: "
+            f"max_violation={restored_max_feasibility_violation:.3e}, "
+            f"stationarity={restored_stationarity_norm:.3e}"
+        )
+        return _build_result(
+            success=False,
+            message=message,
+            termination_reason=effective_termination_reason,
+            outer_iterations=last_outer_iteration,
+            evaluation=restored_state.evaluation,
+            multipliers_state=restored_state.multipliers_state,
+            penalty_state=restored_state.penalty_state,
+            inner_result=restored_state.inner_result,
+            restored_best_feasible=restored_state.restored_best_feasible,
+            restored_best_feasible_reason=restored_state.restored_best_feasible_reason,
+            final_max_feasibility_violation=restored_max_feasibility_violation,
+            final_stationarity_norm=restored_stationarity_norm,
+            final_raw_stationarity_norm=restored_raw_stationarity_norm,
+            final_kkt_stationarity_norm=restored_kkt_stationarity_norm,
+            final_feasibility_tolerance=settings.feasibility_tol,
+            final_stationarity_tolerance=settings.stationarity_tol,
+        )
+
     for outer_iteration in range(1, settings.max_outer_iterations + 1):
         last_outer_iteration = outer_iteration
         if outer_state_callback is not None:
@@ -1207,21 +1493,36 @@ def minimize_alm(
                 current_dual_update_values,
                 current_max_feasibility_violation,
             ) = _extract_constraint_state(current_eval)
+            current_routing_state = _constraint_routing_state(
+                current_eval,
+                multipliers,
+                penalty,
+                effective_feasibility_tol,
+            )
             (
                 current_raw_stationarity_norm,
                 current_kkt_stationarity_norm,
                 current_stationarity_norm,
+                current_signal_mismatch_active,
             ) = _stationarity_metrics(
                 current_eval,
-                current_dual_update_values,
-                current_feasibility_values,
+                current_routing_state,
                 effective_feasibility_tol,
             )
             current_conditioning = _conditioning_metrics(current_eval)
+            current_constraints_inactive_candidate = (
+                current_routing_state.signal_state.explicit_stage2_signals
+                and current_routing_state.hard_max_violation <= settings.feasibility_tol
+                and not np.any(current_routing_state.surrogate_activity_mask)
+                and current_routing_state.hard_positive_shift_zero
+                and not current_signal_mismatch_active
+            )
 
             if (
                 current_max_feasibility_violation <= settings.feasibility_tol
                 and current_stationarity_norm <= settings.stationarity_tol
+                and not current_constraints_inactive_candidate
+                and not current_signal_mismatch_active
             ):
                 history.append(
                     {
@@ -1239,6 +1540,24 @@ def minimize_alm(
                         "solver_constraint_values": [
                             float(value) for value in current_solver_constraint_values
                         ],
+                        "hard_signed_constraint_values": [
+                            float(value)
+                            for value in current_routing_state.signal_state.hard_signed_constraint_values
+                        ],
+                        "hard_violation_values": [
+                            float(value)
+                            for value in current_routing_state.signal_state.hard_violation_values
+                        ],
+                        "surrogate_signed_constraint_values": [
+                            float(value)
+                            for value in current_routing_state.signal_state.surrogate_signed_constraint_values
+                        ],
+                        "hard_max_violation": float(current_routing_state.hard_max_violation),
+                        "surrogate_max_value": float(current_routing_state.surrogate_max_value),
+                        "hard_positive_shift_zero": bool(
+                            current_routing_state.hard_positive_shift_zero
+                        ),
+                        "signal_mismatch_active": bool(current_signal_mismatch_active),
                         "multipliers": [float(value) for value in multipliers],
                         "feasibility_tolerance": float(update_feasibility_tol),
                         "effective_feasibility_tolerance": float(effective_feasibility_tol),
@@ -1321,14 +1640,20 @@ def minimize_alm(
                     callback_dual_update_values,
                     callback_max_feasibility_violation,
                 ) = _extract_constraint_state(evaluation)
+                callback_routing_state = _constraint_routing_state(
+                    evaluation,
+                    multipliers,
+                    penalty,
+                    effective_feasibility_tol,
+                )
                 (
                     _callback_raw_stationarity_norm,
                     _callback_kkt_stationarity_norm,
                     callback_stationarity_norm,
+                    _callback_signal_mismatch_active,
                 ) = _stationarity_metrics(
                     evaluation,
-                    callback_dual_update_values,
-                    callback_feasibility_values,
+                    callback_routing_state,
                     effective_feasibility_tol,
                 )
                 if (
@@ -1482,24 +1807,38 @@ def minimize_alm(
                 dual_update_values,
                 max_feasibility_violation,
             ) = _extract_constraint_state(final_eval)
+            routing_state = _constraint_routing_state(
+                final_eval,
+                multipliers,
+                penalty,
+                update_feasibility_tol,
+            )
             (
                 raw_stationarity_norm,
                 kkt_stationarity_norm,
                 stationarity_norm,
+                signal_mismatch_active,
             ) = _stationarity_metrics(
                 final_eval,
-                dual_update_values,
-                feasibility_values,
+                routing_state,
                 update_feasibility_tol,
             )
             feasibility_delta, feasibility_delta_tol = _feasibility_improvement_metrics(
                 current_max_feasibility_violation,
                 max_feasibility_violation,
             )
+            hard_signed_constraint_values = (
+                routing_state.signal_state.hard_signed_constraint_values
+            )
+            hard_violation_values = routing_state.signal_state.hard_violation_values
+            surrogate_signed_constraint_values = (
+                routing_state.signal_state.surrogate_signed_constraint_values
+            )
             active_violation_index = (
                 None
-                if current_feasibility_values.size == 0
-                else int(np.argmax(current_feasibility_values))
+                if hard_violation_values.size == 0
+                or routing_state.hard_max_violation <= 0.0
+                else int(np.argmax(hard_violation_values))
             )
             active_constraint_name = (
                 None
@@ -1555,6 +1894,19 @@ def minimize_alm(
                     float(value) for value in feasibility_values
                 ],
                 "solver_constraint_values": [float(value) for value in solver_constraint_values],
+                "hard_signed_constraint_values": [
+                    float(value) for value in hard_signed_constraint_values
+                ],
+                "hard_violation_values": [
+                    float(value) for value in hard_violation_values
+                ],
+                "surrogate_signed_constraint_values": [
+                    float(value) for value in surrogate_signed_constraint_values
+                ],
+                "hard_max_violation": float(routing_state.hard_max_violation),
+                "surrogate_max_value": float(routing_state.surrogate_max_value),
+                "hard_positive_shift_zero": bool(routing_state.hard_positive_shift_zero),
+                "signal_mismatch_active": bool(signal_mismatch_active),
                 "multipliers": [float(value) for value in multipliers],
                 "post_update_multipliers": [float(value) for value in multipliers],
                 "feasibility_tolerance": float(update_feasibility_tol),
@@ -1596,10 +1948,23 @@ def minimize_alm(
             }
             history_entry.update(_conditioning_metrics(final_eval))
             history.append(history_entry)
+            hard_feasible_strict = routing_state.hard_max_violation <= settings.feasibility_tol
+            hard_feasible_for_update = (
+                routing_state.hard_max_violation <= effective_feasibility_tol
+            )
+            constraints_inactive_candidate = (
+                routing_state.signal_state.explicit_stage2_signals
+                and hard_feasible_strict
+                and not np.any(routing_state.surrogate_activity_mask)
+                and routing_state.hard_positive_shift_zero
+                and not signal_mismatch_active
+            )
 
             if (
                 max_feasibility_violation <= settings.feasibility_tol
                 and stationarity_norm <= settings.stationarity_tol
+                and not constraints_inactive_candidate
+                and not signal_mismatch_active
             ):
                 history_entry["action"] = "converged"
                 _emit_history_snapshot(history_entry)
@@ -1636,10 +2001,91 @@ def minimize_alm(
                 _emit_history_snapshot(history_entry)
                 break
 
-            if (
-                max_feasibility_violation <= effective_feasibility_tol
-                and stationarity_norm <= update_stationarity_tol
-            ):
+            if constraints_inactive_candidate:
+                if stationarity_norm <= settings.stationarity_tol:
+                    history_entry["action"] = "constraints_inactive_converged"
+                    history_entry["trust_radius"] = trust_radius
+                    _emit_history_snapshot(history_entry)
+                    message = (
+                        "ALM converged with inactive hard constraints: "
+                        f"max_violation={routing_state.hard_max_violation:.3e}, "
+                        f"stationarity={stationarity_norm:.3e}"
+                    )
+                    return _build_result(
+                        success=True,
+                        message=message,
+                        termination_reason="constraints_inactive_converged",
+                        outer_iterations=outer_iteration,
+                        evaluation=final_eval,
+                        multipliers_state=multipliers,
+                        penalty_state=penalty,
+                        inner_result=result,
+                        restored_best_feasible=False,
+                        restored_best_feasible_reason=None,
+                        final_max_feasibility_violation=max_feasibility_violation,
+                        final_stationarity_norm=stationarity_norm,
+                        final_raw_stationarity_norm=raw_stationarity_norm,
+                        final_kkt_stationarity_norm=kkt_stationarity_norm,
+                        final_feasibility_tolerance=settings.feasibility_tol,
+                        final_stationarity_tolerance=settings.stationarity_tol,
+                    )
+                if not made_inner_progress and continuation_iteration > 0:
+                    history_entry["action"] = "constraints_inactive_stall"
+                    history_entry["trust_radius"] = trust_radius
+                    _emit_history_snapshot(history_entry)
+                    return _build_failure_result_with_optional_restore(
+                        termination_reason="constraints_inactive_stall",
+                        message_prefix=(
+                            "ALM stopped after hard constraints became inactive without "
+                            "further stationarity progress"
+                        ),
+                        evaluation=final_eval,
+                        multipliers_state=multipliers,
+                        penalty_state=penalty,
+                        inner_result=result,
+                    )
+
+            if signal_mismatch_active and hard_feasible_strict:
+                if not made_inner_progress or continuation_iteration > 0:
+                    if routing_state.surrogate_positive_shift_zero:
+                        history_entry["action"] = "signal_mismatch_stall"
+                        history_entry["trust_radius"] = trust_radius
+                        _emit_history_snapshot(history_entry)
+                        return _build_failure_result_with_optional_restore(
+                            termination_reason="signal_mismatch_stall",
+                            message_prefix=(
+                                "ALM stopped after hard-feasible and surrogate-active "
+                                "signals repeated without corrective progress"
+                            ),
+                            evaluation=final_eval,
+                            multipliers_state=multipliers,
+                            penalty_state=penalty,
+                            inner_result=result,
+                        )
+                    cap_result = _try_penalty_increase()
+                    if cap_result is not None:
+                        return cap_result
+                    history_entry["action"] = "signal_mismatch_penalty_increase"
+                    history_entry["trust_radius"] = trust_radius
+                    _emit_history_snapshot(history_entry)
+                    break
+                feasible_stall_count = 0
+                if trust_radius is not None:
+                    trust_radius = max(
+                        trust_radius,
+                        max(
+                            settings.trust_radius_min,
+                            float(trust_radius) * float(settings.trust_radius_grow),
+                        ),
+                    )
+                history_entry["subproblem_limit_reason"] = None
+                history_entry["action"] = "subproblem_continue"
+                history_entry["trust_radius"] = trust_radius
+                history_entry["feasible_stall_count"] = int(feasible_stall_count)
+                _emit_history_snapshot(history_entry)
+                continue
+
+            if hard_feasible_for_update and stationarity_norm <= update_stationarity_tol:
                 feasible_stall_count = 0
                 (
                     multipliers,
@@ -1647,7 +2093,7 @@ def minimize_alm(
                     multiplier_cap_binding_indices,
                 ) = _project_nonnegative_multipliers_with_diagnostics(
                     multipliers,
-                    dual_update_values,
+                    routing_state.signal_state.preferred_dual_update_values,
                     penalty,
                     settings.multiplier_max,
                 )
@@ -1670,7 +2116,7 @@ def minimize_alm(
                 _emit_history_snapshot(history_entry)
                 break
 
-            if max_feasibility_violation <= effective_feasibility_tol:
+            if hard_feasible_for_update:
                 feasible_stall_count = 0 if made_inner_progress else feasible_stall_count + 1
                 hit_stall_limit = (
                     continuation_iteration == settings.max_subproblem_continuations
@@ -1723,84 +2169,23 @@ def minimize_alm(
     if final_eval is None or last_result is None:
         raise RuntimeError("ALM failed before any inner optimization result was produced.")
 
-    (
-        _final_solver_constraint_values,
-        _final_feasibility_values,
-        _final_dual_update_values,
-        final_max_feasibility_violation,
-    ) = _extract_constraint_state(final_eval)
-    restored_best_feasible = False
-    restored_best_feasible_reason = None
-    restore_reasons: list[str] = []
-    if best_feasible is not None:
-        if final_max_feasibility_violation > settings.feasibility_tol:
-            restore_reasons.append("final_iterate_infeasible")
-        if (
-            _incumbent_objective_value(final_eval)
-            > _incumbent_objective_value(best_feasible.evaluation)
-        ):
-            restore_reasons.append("final_iterate_worse_than_best_feasible")
-    if restore_reasons:
-        x = best_feasible.x.copy()
-        final_eval = best_feasible.evaluation
-        final_multipliers = best_feasible.multipliers.copy()
-        final_penalty = best_feasible.penalty
-        last_result = best_feasible.inner_result
-        restored_best_feasible = True
-        restored_best_feasible_reason = ",".join(restore_reasons)
-        if (
-            restore_incumbent_state_fn is not None
-            and best_feasible.incumbent_state is not None
-        ):
-            restore_incumbent_state_fn(best_feasible.incumbent_state)
-
-    (
-        solver_constraint_values,
-        feasibility_values,
-        dual_update_values,
-        max_feasibility_violation,
-    ) = _extract_constraint_state(final_eval)
-    (
-        raw_stationarity_norm,
-        kkt_stationarity_norm,
-        stationarity_norm,
-    ) = _stationarity_metrics(
-        final_eval,
-        dual_update_values,
-        feasibility_values,
-        settings.feasibility_tol,
-    )
     termination_reason = _termination_reason_from_history(
         history,
         success=False,
-        restored_best_feasible=restored_best_feasible,
+        restored_best_feasible=False,
     )
-
-    message_prefix = (
-        "ALM exhausted outer iterations after restoring best feasible iterate (max outer iterations reached)"
-        if restored_best_feasible
-        else "ALM exhausted outer iterations (max outer iterations reached)"
-    )
-    message = (
-        f"{message_prefix}: "
-        f"max_violation={max_feasibility_violation:.3e}, "
-        f"stationarity={stationarity_norm:.3e}"
-    )
-    return _build_result(
-        success=False,
-        message=message,
+    return _build_failure_result_with_optional_restore(
         termination_reason=termination_reason,
-        outer_iterations=last_outer_iteration,
         evaluation=final_eval,
         multipliers_state=final_multipliers,
         penalty_state=final_penalty,
         inner_result=last_result,
-        restored_best_feasible=restored_best_feasible,
-        restored_best_feasible_reason=restored_best_feasible_reason,
-        final_max_feasibility_violation=max_feasibility_violation,
-        final_stationarity_norm=stationarity_norm,
-        final_raw_stationarity_norm=raw_stationarity_norm,
-        final_kkt_stationarity_norm=kkt_stationarity_norm,
-        final_feasibility_tolerance=settings.feasibility_tol,
-        final_stationarity_tolerance=settings.stationarity_tol,
+        message_prefix=(
+            "ALM exhausted outer iterations (max outer iterations reached)"
+        ),
+        restored_message_prefix=(
+            "ALM exhausted outer iterations after restoring best feasible iterate "
+            "(max outer iterations reached)"
+        ),
+        restored_termination_reason="max_outer_restored_best_feasible",
     )

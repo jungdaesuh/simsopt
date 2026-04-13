@@ -228,7 +228,7 @@ python banana_coil_solver.py \
   --plasma-surf-filename wout_nfp22ginsburg_000_014417_iota15.nc \
   --major-radius 0.915 \
   --toroidal-flux 0.24 \
-  --banana-surf-radius 0.22 \
+  --banana-surf-radius 0.21 \
   --constraint-method penalty
 ```
 
@@ -291,9 +291,9 @@ For the common nfp22 example equilibria, defaults are filled automatically when 
 
 Important caveat:
 
-- those built-in single-stage seed defaults are legacy direct-script defaults, not the locked wrapper baseline
-- in particular, the built-in nfp22 seed defaults still include `stage2_seed_tf_current_A = 1.0e5`
-- if you need the current locked baseline lane, use [run_80ka_baseline_tradeoff_sweep.py](run_80ka_baseline_tradeoff_sweep.py) or pass the Stage 2 seed / artifact explicitly instead of relying on implicit defaults
+- the built-in nfp22 single-stage seed defaults now match the current HBT hardware baseline
+- in particular, the default nfp22 seed set uses `stage2_seed_tf_current_A = 8.0e4`, `stage2_seed_banana_surf_radius = 0.21`, and `stage2_seed_curvature_threshold = 100`
+- if you need a non-baseline seed family, pass the Stage 2 seed / artifact explicitly instead of relying on implicit defaults
 
 ## Manual Single-Stage
 
@@ -308,7 +308,7 @@ python single_stage_banana_example.py \
   --plasma-surf-filename wout_nfp22ginsburg_000_014417_iota15.nc \
   --stage2-seed-major-radius 0.915 \
   --stage2-seed-toroidal-flux 0.24 \
-  --stage2-seed-banana-surf-radius 0.22 \
+  --stage2-seed-banana-surf-radius 0.21 \
   --single-stage-goal-mode target \
   --iota-target 0.17 \
   --vol-target 0.10 \

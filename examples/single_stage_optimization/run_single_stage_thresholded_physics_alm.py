@@ -82,8 +82,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--iota-target", type=float, default=0.20)
     parser.add_argument("--vol-target", type=float, default=0.10)
     parser.add_argument("--cc-dist", type=float, default=0.05)
-    parser.add_argument("--cs-dist", type=float, default=0.02)
-    parser.add_argument("--curvature-threshold", type=float, default=40.0)
+    parser.add_argument("--cs-dist", type=float, default=0.015)
+    parser.add_argument("--curvature-threshold", type=float, default=100.0)
     parser.add_argument(
         "--hardware-search-mode",
         choices=["warn"],
