@@ -23,6 +23,17 @@ This plan assumes the repo will reach the earlier frontier steps first:
 
 `frontier_v4` is the first version that should be allowed to claim it performs frontier search rather than scalar comparison.
 
+## Prerequisite Versions
+
+This document is the `v4` target architecture, not the near-term execution plan for the currently diagnosed frontier failure mode.
+
+The prerequisite versions are:
+
+- `frontier_v2`: one-lane smooth constrained frontier search that removes hard Boozer trust rejection from the search path, rescales frontier normalization so the lane objective is numerically usable by the existing local optimizer, and validates behavior on the canonical feasible seed
+- `frontier_v3`: multi-lane local frontier campaign using Chebyshev or epsilon-style preference variation, certified archive filtering, and target-vs-frontier reporting from one campaign without requiring a new population engine
+
+`frontier_v4` builds on those prerequisites by freezing the long-lived campaign, archive, recommendation, resume, and engine-abstraction contracts.
+
 ## Executive Summary
 
 The current `frontier` mode is implemented as one scalarized objective with a Boozer trust reject layered on top:
@@ -192,6 +203,11 @@ Hard invalidation is allowed only for:
 - [ ] failed surface solve with no meaningful metric state
 - [ ] geometry states the pipeline cannot represent or restore safely
 
+Conditioning requirement:
+
+- [ ] frontier lane normalization must keep active objective and soft-constraint terms in a numerically usable range for the existing local optimizer near the seed and early accepted iterates
+- [ ] normalization policy must be explicit enough to prevent one lane term from dominating search solely due to scale mismatch
+
 ### FR5. Recommendation policy
 
 The campaign must output one recommended incumbent in addition to the archive.
@@ -201,6 +217,9 @@ The recommendation policy must be explicit and reproducible.
 Required initial policies:
 
 - [ ] `balanced`
+
+Deferred policies:
+
 - [ ] `max_iota_under_safe_boozer`
 - [ ] `max_volume_under_safe_hardware`
 - [ ] `closest_to_seed`
@@ -283,6 +302,10 @@ Campaign-level and member-level JSON schemas must be versioned and backward-read
 - [ ] per-lane budget
 - [ ] concurrent lane count or probe count
 - [ ] early-stop criteria
+
+Operational note:
+
+- [ ] campaign defaults should be chosen from an explicit runtime calibration pass on reduced and canonical fixtures rather than arbitrary lane-count or iteration-count guesses
 
 ### NFR2. Resume support
 
@@ -597,6 +620,7 @@ Implement:
 - [ ] epsilon-constraint helper functions
 - [ ] smooth Boozer trust penalty helpers
 - [ ] smooth hardware/topology routing helpers
+- [ ] explicit normalization / conditioning helpers for frontier lane objectives
 
 Files:
 
@@ -608,6 +632,7 @@ Acceptance gate:
 
 - [ ] scalarization invariants tested
 - [ ] soft-constraint helpers produce finite values and gradients on representative states
+- [ ] normalization / conditioning checks show lane objective terms stay within a usable scale range near the seed and first accepted moves
 
 ## Phase 3. Lane executor contract
 
