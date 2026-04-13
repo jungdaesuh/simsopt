@@ -1,7 +1,7 @@
 """Strong Wolfe line search for on-device BFGS / L-BFGS.
 
-Mirrors the JAX 0.9.2 line-search semantics so
-the line-search semantics stay stable across this project.
+Derived from the JAX 0.9.2 strong-Wolfe flow, with repo-specific changes for
+the explicit old_fval/gfk contract and cached zoom-sample reuse.
 """
 
 from __future__ import annotations
@@ -103,6 +103,16 @@ def _binary_replace(replace_bit, original_dict, new_dict, keys=None):
     }
 
 
+def _cache_zoom_sample(state, *, alpha, phi, dphi, grad):
+    return state._replace(
+        has_rec=_bool_scalar(True),
+        a_rec=alpha,
+        phi_rec=phi,
+        dphi_rec=dphi,
+        g_rec=grad,
+    )
+
+
 def _zoom(
     restricted_func_and_grad,
     wolfe_one,
@@ -116,6 +126,11 @@ def _zoom(
     phi_hi,
     dphi_hi,
     g_hi,
+    has_rec,
+    a_rec,
+    phi_rec,
+    dphi_rec,
+    g_rec,
     maxiter,
     pass_through,
 ):
@@ -139,8 +154,11 @@ def _zoom(
         phi_hi=phi_hi,
         dphi_hi=dphi_hi,
         g_hi=g_hi,
-        a_rec=(a_lo + a_hi) * half,
-        phi_rec=(phi_lo + phi_hi) * half,
+        has_rec=has_rec,
+        a_rec=a_rec,
+        phi_rec=phi_rec,
+        dphi_rec=dphi_rec,
+        g_rec=g_rec,
         a_star=one,
         phi_star=phi_lo,
         dphi_star=dphi_lo,
@@ -176,7 +194,7 @@ def _zoom(
             state.phi_rec,
         )
         use_cubic = (
-            (state.j > _int_scalar(0)) & (a_j_cubic > a + cchk) & (a_j_cubic < b - cchk)
+            state.has_rec & (a_j_cubic > a + cchk) & (a_j_cubic < b - cchk)
         )
         a_j_quad = _quadmin(
             state.a_lo,
@@ -192,7 +210,18 @@ def _zoom(
         a_j = jnp.where(use_quad, a_j_quad, a_j)
         a_j = jnp.where((~use_cubic) & (~use_quad), a_j_bisection, a_j)
 
-        phi_j, dphi_j, g_j = restricted_func_and_grad(a_j)
+        reuse_rec_sample = state.has_rec & (a_j == state.a_rec)
+        phi_j, dphi_j, g_j, sample_eval_count = lax.cond(
+            reuse_rec_sample,
+            lambda _: (
+                state.phi_rec,
+                state.dphi_rec,
+                state.g_rec,
+                _int_scalar(0),
+            ),
+            lambda _: (*restricted_func_and_grad(a_j), _int_scalar(1)),
+            operand=None,
+        )
         phi_j = phi_j.astype(state.phi_lo.dtype)
         dphi_j = dphi_j.astype(state.dphi_lo.dtype)
         g_j = g_j.astype(state.g_star.dtype)
@@ -204,8 +233,8 @@ def _zoom(
             dphi=dphi_j,
         )
         state = state._replace(
-            nfev=state.nfev + _int_scalar(1),
-            ngev=state.ngev + _int_scalar(1),
+            nfev=state.nfev + sample_eval_count,
+            ngev=state.ngev + sample_eval_count,
         )
         improves_best = jnp.isfinite(phi_j) & (phi_j < state.best_phi)
         state = state._replace(
@@ -221,6 +250,14 @@ def _zoom(
             (dphi_j * (state.a_hi - state.a_lo) >= zero) & (~hi_to_j) & (~star_to_j)
         )
         lo_to_j = (~hi_to_j) & (~star_to_j)
+        previous_a_lo = state.a_lo
+        previous_phi_lo = state.phi_lo
+        previous_dphi_lo = state.dphi_lo
+        previous_g_lo = state.g_lo
+        previous_a_hi = state.a_hi
+        previous_phi_hi = state.phi_hi
+        previous_dphi_hi = state.dphi_hi
+        previous_g_hi = state.g_hi
 
         state = state._replace(
             **_binary_replace(
@@ -231,10 +268,20 @@ def _zoom(
                     phi_hi=phi_j,
                     dphi_hi=dphi_j,
                     g_hi=g_j,
-                    a_rec=state.a_hi,
-                    phi_rec=state.phi_hi,
                 ),
             )
+        )
+        state = lax.cond(
+            hi_to_j,
+            lambda current: _cache_zoom_sample(
+                current,
+                alpha=previous_a_hi,
+                phi=previous_phi_hi,
+                dphi=previous_dphi_hi,
+                grad=previous_g_hi,
+            ),
+            lambda current: current,
+            operand=state,
         )
         state = state._replace(
             done=star_to_j | state.done,
@@ -253,17 +300,20 @@ def _zoom(
                     phi_hi=state.phi_lo,
                     dphi_hi=state.dphi_lo,
                     g_hi=state.g_lo,
-                    a_rec=state.a_hi,
-                    phi_rec=state.phi_hi,
                 ),
             )
         )
-        state = state._replace(
-            **_binary_replace(
-                lo_to_j & ~hi_to_lo,
-                state._asdict(),
-                dict(a_rec=state.a_lo, phi_rec=state.phi_lo),
-            )
+        state = lax.cond(
+            hi_to_lo,
+            lambda current: _cache_zoom_sample(
+                current,
+                alpha=previous_a_hi,
+                phi=previous_phi_hi,
+                dphi=previous_dphi_hi,
+                grad=previous_g_hi,
+            ),
+            lambda current: current,
+            operand=state,
         )
         state = state._replace(
             **_binary_replace(
@@ -271,6 +321,18 @@ def _zoom(
                 state._asdict(),
                 dict(a_lo=a_j, phi_lo=phi_j, dphi_lo=dphi_j, g_lo=g_j),
             )
+        )
+        state = lax.cond(
+            lo_to_j & ~hi_to_lo,
+            lambda current: _cache_zoom_sample(
+                current,
+                alpha=previous_a_lo,
+                phi=previous_phi_lo,
+                dphi=previous_dphi_lo,
+                grad=previous_g_lo,
+            ),
+            lambda current: current,
+            operand=state,
         )
         state = state._replace(j=state.j + _int_scalar(1))
         state = state._replace(failed=state.failed | (state.j >= max_zoom_iter))
@@ -341,9 +403,9 @@ def _line_search_from_restricted_func_and_grad(
     restricted_func_and_grad,
     *,
     pk,
-    old_fval=None,
+    old_fval,
+    gfk,
     old_old_fval=None,
-    gfk=None,
     initial_step_size=None,
     c1=1e-4,
     c2=0.9,
@@ -366,11 +428,8 @@ def _line_search_from_restricted_func_and_grad(
             initial_step_value > zero
         )
 
-    if old_fval is None or gfk is None:
-        phi_0, dphi_0, gfk = restricted_func_and_grad(zero)
-    else:
-        phi_0 = old_fval
-        dphi_0 = jnp.real(_dot(gfk, pk))
+    phi_0 = old_fval
+    dphi_0 = jnp.real(_dot(gfk, pk))
 
     if old_old_fval is not None:
         candidate_start_value = one_point_01 * two * (phi_0 - old_old_fval) / dphi_0
@@ -396,6 +455,10 @@ def _line_search_from_restricted_func_and_grad(
         done=_bool_scalar(False),
         failed=_bool_scalar(False),
         i=_int_scalar(1),
+        a_i2=zero,
+        phi_i2=phi_0,
+        dphi_i2=dphi_0,
+        g_i2=gfk,
         a_i1=zero,
         phi_i1=phi_0,
         dphi_i1=dphi_0,
@@ -404,8 +467,8 @@ def _line_search_from_restricted_func_and_grad(
         best_phi=phi_0,
         best_dphi=dphi_0,
         best_g=gfk,
-        nfev=_int_scalar(1 if (old_fval is None or gfk is None) else 0),
-        ngev=_int_scalar(1 if (old_fval is None or gfk is None) else 0),
+        nfev=_int_scalar(0),
+        ngev=_int_scalar(0),
         a_star=zero,
         phi_star=phi_0,
         dphi_star=dphi_0,
@@ -464,6 +527,11 @@ def _line_search_from_restricted_func_and_grad(
                     phi_i,
                     dphi_i,
                     g_i,
+                    current.i > _int_scalar(1),
+                    current.a_i2,
+                    current.phi_i2,
+                    current.dphi_i2,
+                    current.g_i2,
                     remaining_zoom_budget,
                     zoom_budget_exhausted,
                 ),
@@ -495,6 +563,11 @@ def _line_search_from_restricted_func_and_grad(
                             zoom_state.phi_i1,
                             zoom_state.dphi_i1,
                             zoom_state.g_i1,
+                            zoom_state.i > _int_scalar(1),
+                            zoom_state.a_i2,
+                            zoom_state.phi_i2,
+                            zoom_state.dphi_i2,
+                            zoom_state.g_i2,
                             remaining_zoom_budget,
                             zoom_budget_exhausted,
                         ),
@@ -509,6 +582,10 @@ def _line_search_from_restricted_func_and_grad(
         )
         return state._replace(
             i=state.i + _int_scalar(1),
+            a_i2=state.a_i1,
+            phi_i2=state.phi_i1,
+            dphi_i2=state.dphi_i1,
+            g_i2=state.g_i1,
             a_i1=a_i,
             phi_i1=phi_i,
             dphi_i1=dphi_i,
@@ -583,15 +660,17 @@ def _line_search(
     f,
     xk,
     pk,
-    old_fval=None,
+    old_fval,
+    gfk,
     old_old_fval=None,
-    gfk=None,
     initial_step_size=None,
     c1=1e-4,
     c2=0.9,
     maxiter=20,
 ):
     xk, pk = _promote_dtypes_inexact(xk, pk)
+    old_fval = _as_jax_dtype(old_fval, pk.dtype)
+    gfk = _as_jax_dtype(gfk, pk.dtype)
     scalar_value_and_grad = _scalar_value_and_grad(f)
 
     def restricted_func_and_grad(t):
@@ -617,15 +696,17 @@ def _line_search_value_and_grad(
     fun,
     xk,
     pk,
-    old_fval=None,
+    old_fval,
+    gfk,
     old_old_fval=None,
-    gfk=None,
     initial_step_size=None,
     c1=1e-4,
     c2=0.9,
     maxiter=20,
 ):
     xk, pk = _promote_dtypes_inexact(xk, pk)
+    old_fval = _as_jax_dtype(old_fval, pk.dtype)
+    gfk = _as_jax_dtype(gfk, pk.dtype)
 
     def restricted_func_and_grad(t):
         t = _as_jax_dtype(t, pk.dtype)
