@@ -1,6 +1,7 @@
 import argparse
 from contextlib import contextmanager
 from dataclasses import dataclass, fields as dataclass_fields, is_dataclass
+from functools import lru_cache
 import hashlib
 import inspect
 import io
@@ -1355,6 +1356,83 @@ class SerializedSurfaceState:
     quadpoints_theta: np.ndarray
 
 
+class DeferredSurfaceXYZTensorFourier:
+    """Lazily materialize a host SurfaceXYZTensorFourier only on host-only paths."""
+
+    deferred_surface_class = "SurfaceXYZTensorFourier"
+
+    def __init__(
+        self,
+        *,
+        mpol,
+        ntor,
+        nfp,
+        stellsym,
+        quadpoints_phi,
+        quadpoints_theta,
+        dofs,
+    ):
+        self.mpol = int(mpol)
+        self.ntor = int(ntor)
+        self.nfp = int(nfp)
+        self.stellsym = bool(stellsym)
+        self.quadpoints_phi = np.asarray(quadpoints_phi, dtype=np.float64)
+        self.quadpoints_theta = np.asarray(quadpoints_theta, dtype=np.float64)
+        self._dofs = _as_jax_float64(dofs)
+        self._materialized_surface = None
+
+    def _host_dofs(self):
+        return np.asarray(host_array(self._dofs), dtype=np.float64)
+
+    def _materialize_surface(self):
+        if self._materialized_surface is None:
+            self._materialized_surface = SurfaceXYZTensorFourier(
+                mpol=self.mpol,
+                ntor=self.ntor,
+                nfp=self.nfp,
+                stellsym=self.stellsym,
+                quadpoints_phi=self.quadpoints_phi,
+                quadpoints_theta=self.quadpoints_theta,
+            )
+        self._materialized_surface.set_dofs(self._host_dofs())
+        return self._materialized_surface
+
+    def get_dofs(self):
+        return self._dofs
+
+    def set_dofs(self, dofs):
+        self._dofs = _as_jax_float64(dofs)
+        if self._materialized_surface is not None:
+            self._materialized_surface.set_dofs(self._host_dofs())
+
+    @property
+    def x(self):
+        return self._dofs
+
+    @x.setter
+    def x(self, dofs):
+        self.set_dofs(dofs)
+
+    def __getattr__(self, name):
+        return getattr(self._materialize_surface(), name)
+
+
+class DeferredVolume:
+    """Volume-label proxy that preserves the Boozer public label contract."""
+
+    def __init__(self, surface):
+        self.surface = surface
+
+    def J(self):
+        return self.surface.volume()
+
+    def dJ_by_dsurfacecoefficients(self):
+        return self.surface.dvolume_by_dcoeff()
+
+    def d2J_by_dsurfacecoefficientsdsurfacecoefficients(self):
+        return self.surface.d2volume_by_dcoeffdcoeff()
+
+
 def _decode_gson_array(value, *, field_name):
     if not isinstance(value, dict):
         raise ValueError(f"{field_name} is not a serialized array payload")
@@ -1536,64 +1614,19 @@ def _surface_xyz_tensor_design_matrix_host(
     quadpoints_phi,
     quadpoints_theta,
 ):
-    theta_basis, _ = build_theta_basis(
-        np.asarray(quadpoints_theta, dtype=np.float64),
-        mpol,
-    )
-    phi_basis, _ = build_phi_basis(
-        np.asarray(quadpoints_phi, dtype=np.float64),
-        ntor,
-        nfp,
-    )
-    theta_basis = np.asarray(host_array(theta_basis), dtype=np.float64)
-    phi_basis = np.asarray(host_array(phi_basis), dtype=np.float64)
-    basis_values = phi_basis[:, None, None, :] * theta_basis[None, :, :, None]
-    basis_values = np.reshape(
-        basis_values,
-        (
-            phi_basis.shape[0],
-            theta_basis.shape[0],
-            (2 * mpol + 1) * (2 * ntor + 1),
+    return np.asarray(
+        jax.device_get(
+            _surface_xyz_tensor_design_matrix(
+                mpol=mpol,
+                ntor=ntor,
+                nfp=nfp,
+                stellsym=stellsym,
+                quadpoints_phi=jnp.asarray(quadpoints_phi, dtype=jnp.float64),
+                quadpoints_theta=jnp.asarray(quadpoints_theta, dtype=jnp.float64),
+            )
         ),
+        dtype=float,
     )
-
-    phi_angles = (2.0 * np.pi) * np.asarray(quadpoints_phi, dtype=np.float64)
-    cos_phi = np.cos(phi_angles)[:, None, None]
-    sin_phi = np.sin(phi_angles)[:, None, None]
-    zeros = np.zeros_like(basis_values)
-
-    x_block = np.stack(
-        (
-            basis_values * cos_phi,
-            basis_values * sin_phi,
-            zeros,
-        ),
-        axis=2,
-    )
-    y_block = np.stack(
-        (
-            -basis_values * sin_phi,
-            basis_values * cos_phi,
-            zeros,
-        ),
-        axis=2,
-    )
-    z_block = np.stack(
-        (
-            zeros,
-            zeros,
-            basis_values,
-        ),
-        axis=2,
-    )
-    design_matrix = np.reshape(
-        np.concatenate((x_block, y_block, z_block), axis=3),
-        (-1, 3 * basis_values.shape[2]),
-    )
-    if not stellsym:
-        return design_matrix
-    scatter_indices = np.asarray(stellsym_scatter_indices(mpol, ntor), dtype=np.int32)
-    return design_matrix[:, scatter_indices]
 
 
 def _fit_surface_xyz_tensor_dofs_to_gamma(
@@ -1606,42 +1639,199 @@ def _fit_surface_xyz_tensor_dofs_to_gamma(
     quadpoints_phi,
     quadpoints_theta,
 ):
-    quadpoints_phi_host = np.asarray(quadpoints_phi, dtype=np.float64)
-    quadpoints_theta_host = np.asarray(quadpoints_theta, dtype=np.float64)
-    target_gamma_host = np.asarray(
-        jax.device_get(target_gamma)
-        if isinstance(target_gamma, jax.Array)
-        else target_gamma,
-        dtype=np.float64,
-    ).reshape(quadpoints_phi_host.size, quadpoints_theta_host.size, 3)
-
-    # Delegate to the host solver directly. The C++ least_squares_fit uses a
-    # QR-based algorithm whose alias resolution is data-dependent, so
-    # reverse-engineering its convention via probing is unreliable. Since this
-    # is a one-time initialization step (not on the inner-loop hot path),
-    # calling the host solver is both simpler and correct.
-    host_surface = SurfaceXYZTensorFourier(
+    quadpoints_phi_jax = jnp.asarray(quadpoints_phi, dtype=jnp.float64)
+    quadpoints_theta_jax = jnp.asarray(quadpoints_theta, dtype=jnp.float64)
+    target_gamma_jax = jnp.asarray(target_gamma, dtype=jnp.float64).reshape(
+        quadpoints_phi_jax.size,
+        quadpoints_theta_jax.size,
+        3,
+    )
+    design_matrix = _surface_xyz_tensor_design_matrix(
         mpol=max(1, int(mpol)),
         ntor=max(1, int(ntor)),
         nfp=int(nfp),
         stellsym=bool(stellsym),
-        quadpoints_phi=quadpoints_phi_host,
-        quadpoints_theta=quadpoints_theta_host,
+        quadpoints_phi=quadpoints_phi_jax,
+        quadpoints_theta=quadpoints_theta_jax,
     )
-    host_surface.least_squares_fit(target_gamma_host)
-    fitted_dofs_host = np.asarray(host_surface.get_dofs(), dtype=float)
-
-    # Check rank via the design matrix to report whether the fit is unique.
-    design_matrix_host = _surface_xyz_tensor_design_matrix_host(
+    rhs = jnp.reshape(target_gamma_jax, (-1,))
+    fitted_dofs, _, rank, _ = jnp.linalg.lstsq(design_matrix, rhs, rcond=None)
+    fitted_dofs_host = _canonicalize_surface_xyz_tensor_fit_dofs(
+        np.asarray(jax.device_get(fitted_dofs), dtype=float),
         mpol=mpol,
         ntor=ntor,
         nfp=nfp,
         stellsym=stellsym,
-        quadpoints_phi=quadpoints_phi_host,
-        quadpoints_theta=quadpoints_theta_host,
+        quadpoints_phi=quadpoints_phi_jax,
+        quadpoints_theta=quadpoints_theta_jax,
     )
-    design_rank = int(np.linalg.matrix_rank(design_matrix_host))
-    return fitted_dofs_host, design_rank == int(design_matrix_host.shape[1])
+    design_rank = int(np.asarray(jax.device_get(rank)))
+    return fitted_dofs_host, design_rank == int(design_matrix.shape[1])
+
+
+def _quadpoints_cache_key(values):
+    return tuple(float(value) for value in np.asarray(values, dtype=float).reshape(-1))
+
+
+def _surface_xyz_tensor_alias_cache_args(
+    *,
+    mpol,
+    ntor,
+    nfp,
+    stellsym,
+    quadpoints_phi,
+    quadpoints_theta,
+):
+    return (
+        int(mpol),
+        int(ntor),
+        int(nfp),
+        bool(stellsym),
+        _quadpoints_cache_key(quadpoints_phi),
+        _quadpoints_cache_key(quadpoints_theta),
+    )
+
+
+@lru_cache(maxsize=None)
+def _surface_xyz_tensor_alias_groups(
+    mpol,
+    ntor,
+    nfp,
+    stellsym,
+    quadpoints_phi_key,
+    quadpoints_theta_key,
+):
+    design_matrix = _surface_xyz_tensor_design_matrix_host(
+        mpol=mpol,
+        ntor=ntor,
+        nfp=nfp,
+        stellsym=stellsym,
+        quadpoints_phi=quadpoints_phi_key,
+        quadpoints_theta=quadpoints_theta_key,
+    )
+    ncols = int(design_matrix.shape[1])
+    used = np.zeros(ncols, dtype=bool)
+    groups = []
+    atol = 1.0e-12
+    for column_index in range(ncols):
+        if used[column_index]:
+            continue
+        reference = design_matrix[:, column_index]
+        members = [(column_index, 1.0)]
+        used[column_index] = True
+        for other_index in range(column_index + 1, ncols):
+            if used[other_index]:
+                continue
+            candidate = design_matrix[:, other_index]
+            if np.allclose(candidate, reference, rtol=0.0, atol=atol):
+                members.append((other_index, 1.0))
+                used[other_index] = True
+            elif np.allclose(candidate, -reference, rtol=0.0, atol=atol):
+                members.append((other_index, -1.0))
+                used[other_index] = True
+        groups.append(
+            (
+                int(column_index),
+                bool(np.max(np.abs(reference)) <= atol),
+                tuple((int(index), float(sign)) for index, sign in members),
+            )
+        )
+    return tuple(groups)
+
+
+@lru_cache(maxsize=None)
+def _surface_xyz_tensor_alias_group_host_convention(
+    mpol,
+    ntor,
+    nfp,
+    stellsym,
+    quadpoints_phi_key,
+    quadpoints_theta_key,
+):
+    """Resolve the legacy host QR representative for each alias group."""
+    quadpoints_phi = np.asarray(quadpoints_phi_key, dtype=float)
+    quadpoints_theta = np.asarray(quadpoints_theta_key, dtype=float)
+    alias_groups = _surface_xyz_tensor_alias_groups(
+        int(mpol),
+        int(ntor),
+        int(nfp),
+        bool(stellsym),
+        quadpoints_phi_key,
+        quadpoints_theta_key,
+    )
+    design_matrix = _surface_xyz_tensor_design_matrix_host(
+        mpol=mpol,
+        ntor=ntor,
+        nfp=nfp,
+        stellsym=stellsym,
+        quadpoints_phi=quadpoints_phi,
+        quadpoints_theta=quadpoints_theta,
+    )
+    host_surface = SurfaceXYZTensorFourier(
+        mpol=mpol,
+        ntor=ntor,
+        nfp=nfp,
+        stellsym=stellsym,
+        quadpoints_phi=quadpoints_phi,
+        quadpoints_theta=quadpoints_theta,
+    )
+
+    conventions = []
+    for representative_index, zero_column, members in alias_groups:
+        if zero_column or len(members) == 1:
+            conventions.append((int(representative_index), 1.0))
+            continue
+        target_gamma = design_matrix[:, representative_index].reshape(
+            quadpoints_phi.size,
+            quadpoints_theta.size,
+            3,
+        )
+        host_surface.least_squares_fit(target_gamma)
+        host_dofs = np.asarray(host_surface.get_dofs(), dtype=float)
+        chosen_index, chosen_sign, chosen_value = max(
+            (
+                (int(index), float(sign), float(host_dofs[index]))
+                for index, sign in members
+            ),
+            key=lambda item: abs(item[2]),
+        )
+        del chosen_value
+        conventions.append((chosen_index, chosen_sign))
+    return tuple(conventions)
+
+
+def _canonicalize_surface_xyz_tensor_fit_dofs(
+    fitted_dofs,
+    *,
+    mpol,
+    ntor,
+    nfp,
+    stellsym,
+    quadpoints_phi,
+    quadpoints_theta,
+):
+    """Collapse alias-equivalent coefficients to the host solver convention."""
+    alias_cache_args = _surface_xyz_tensor_alias_cache_args(
+        mpol=mpol,
+        ntor=ntor,
+        nfp=nfp,
+        stellsym=stellsym,
+        quadpoints_phi=quadpoints_phi,
+        quadpoints_theta=quadpoints_theta,
+    )
+    alias_groups = _surface_xyz_tensor_alias_groups(*alias_cache_args)
+    host_convention = _surface_xyz_tensor_alias_group_host_convention(*alias_cache_args)
+    canonical_dofs = np.zeros_like(np.asarray(fitted_dofs, dtype=float))
+    for (representative_index, zero_column, members), (
+        host_index,
+        host_orientation,
+    ) in zip(alias_groups, host_convention):
+        if zero_column:
+            canonical_dofs[representative_index] = 0.0
+            continue
+        canonical_value = sum(sign * float(fitted_dofs[index]) for index, sign in members)
+        canonical_dofs[int(host_index)] = float(host_orientation) * canonical_value
+    return canonical_dofs
 
 
 
@@ -1715,15 +1905,10 @@ def project_surface_dofs_to_resolution(
         quadpoints_theta=quadpoints_theta,
     )
     if target_gamma is None:
-        target_gamma = np.stack(
-            [
-                np.asarray(
-                    surface.cross_section(float(phi), thetas=quadpoints_theta),
-                    dtype=float,
-                )
-                for phi in np.asarray(quadpoints_phi, dtype=float)
-            ],
-            axis=0,
+        raise TypeError(
+            "project_surface_dofs_to_resolution only supports "
+            "SurfaceXYZTensorFourier, SurfaceRZFourier, and serialized warm-start "
+            f"surfaces on the dehybridized path; got {type(surface).__name__}."
         )
     projected_dofs, _ = _fit_surface_xyz_tensor_dofs_to_gamma(
         target_gamma,
@@ -2586,15 +2771,38 @@ def initialize_boozer_surface(
             )
         )
     )
-    surf = SurfaceXYZTensorFourier(
-        mpol=mpol,
-        ntor=ntor,
-        nfp=5,
-        stellsym=True,
+    initial_surface_dofs_host = np.asarray(host_array(initial_surface_dofs), dtype=np.float64)
+
+    def build_surface(*, quadpoints_phi, quadpoints_theta):
+        if backend == "jax":
+            return DeferredSurfaceXYZTensorFourier(
+                mpol=mpol,
+                ntor=ntor,
+                nfp=5,
+                stellsym=True,
+                quadpoints_theta=quadpoints_theta,
+                quadpoints_phi=quadpoints_phi,
+                dofs=initial_surface_dofs,
+            )
+        return SurfaceXYZTensorFourier(
+            mpol=mpol,
+            ntor=ntor,
+            nfp=5,
+            stellsym=True,
+            quadpoints_theta=quadpoints_theta,
+            quadpoints_phi=quadpoints_phi,
+            dofs=initial_surface_dofs_host,
+        )
+
+    def build_volume_label(surface):
+        if backend == "jax":
+            return DeferredVolume(surface)
+        return Volume(surface)
+
+    surf = build_surface(
         quadpoints_theta=surf_prev.quadpoints_theta,
         quadpoints_phi=surf_prev.quadpoints_phi,
     )
-    surf.set_dofs(np.asarray(host_array(initial_surface_dofs), dtype=np.float64))
     fit_end_s = _perf_counter_s()
     _record_timing(timings, "boozer_surface_fit_s", fit_start_s, fit_end_s)
     emit_stage("after_boozer_surface_fit")
@@ -2613,7 +2821,7 @@ def initialize_boozer_surface(
     setup_start_s = _perf_counter_s()
     if constraint_weight is not None:
         print(f"Generating {solver_name}Boozer least squares surface...")
-        vol = Volume(surf)
+        vol = build_volume_label(surf)
         options = {"verbose": True}
         if backend == "jax":
             resolved_optimizer_backend = resolve_boozer_optimizer_backend(
@@ -2661,16 +2869,15 @@ def initialize_boozer_surface(
         )
     else:
         print(f"Generating {solver_name}Boozer exact surface...")
-        surf_exact = SurfaceXYZTensorFourier(
-            mpol=mpol,
-            ntor=ntor,
-            nfp=5,
-            stellsym=True,
-            quadpoints_theta=np.linspace(0, 1, 2 * mpol + 1, endpoint=False),
-            quadpoints_phi=np.linspace(0, 1.0 / surf.nfp, 2 * ntor + 1, endpoint=False),
-            dofs=np.asarray(host_array(initial_surface_dofs), dtype=np.float64),
+        exact_quadpoints_theta = np.linspace(0, 1, 2 * mpol + 1, endpoint=False)
+        exact_quadpoints_phi = np.linspace(
+            0, 1.0 / surf.nfp, 2 * ntor + 1, endpoint=False
         )
-        vol = Volume(surf_exact)
+        surf_exact = build_surface(
+            quadpoints_theta=exact_quadpoints_theta,
+            quadpoints_phi=exact_quadpoints_phi,
+        )
+        vol = build_volume_label(surf_exact)
         if backend == "jax":
             boozer_surface = BoozerCls(
                 bs,

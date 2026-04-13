@@ -458,7 +458,11 @@ class SingleStageExampleTests(unittest.TestCase):
             record_run_calls=True
         )
 
-        with self.patch_initialize_boozer_surface_jax(module, fake_boozer_surface_jax):
+        with patch.object(
+            module,
+            "evaluate_surface_self_intersection",
+            return_value=(False, True),
+        ), self.patch_initialize_boozer_surface_jax(module, fake_boozer_surface_jax):
             boozer_surface = module.initialize_boozer_surface(
                 surf_prev,
                 mpol=TEST_MPOL,
@@ -480,13 +484,58 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertEqual(boozer_surface.constraint_weight, 1.0)
         self.assertEqual(boozer_surface.options["verbose"], True)
         self.assertEqual(boozer_surface.options["optimizer_backend"], "ondevice")
-        self.assertIs(boozer_surface.surface, FakeSurfaceXYZTensorFourier.instances[0])
+        self.assertEqual(
+            type(boozer_surface.surface).__name__,
+            "DeferredSurfaceXYZTensorFourier",
+        )
+        self.assertEqual(len(FakeSurfaceXYZTensorFourier.instances), 0)
         self.assertEqual(boozer_surface.surface_runtime_state["mpol"], TEST_MPOL)
         self.assertEqual(boozer_surface.surface_runtime_state["ntor"], TEST_NTOR)
         np.testing.assert_allclose(
             boozer_surface.surface_runtime_state["quadpoints_phi"],
-            FakeSurfaceXYZTensorFourier.instances[0].quadpoints_phi,
+            surf_prev.quadpoints_phi,
         )
+
+    def test_initialize_boozer_surface_jax_backend_materializes_surface_only_on_host_use(
+        self,
+    ):
+        module = self.load_module()
+        surf_prev = FakeSurfPrev()
+        fake_boozer_surface_jax = self.build_fake_boozer_surface_jax_class(
+            record_run_calls=False
+        )
+
+        with patch.object(
+            module,
+            "evaluate_surface_self_intersection",
+            return_value=(False, True),
+        ), self.patch_initialize_boozer_surface_jax(module, fake_boozer_surface_jax):
+            boozer_surface = module.initialize_boozer_surface(
+                surf_prev,
+                mpol=TEST_MPOL,
+                ntor=TEST_NTOR,
+                bs=object(),
+                vol_target=TEST_VOL_TARGET,
+                constraint_weight=1.0,
+                iota=TEST_IOTA,
+                G0=TEST_G0,
+                backend="jax",
+            )
+            self.assertEqual(len(FakeSurfaceXYZTensorFourier.instances), 0)
+            boozer_surface.surface.set_dofs(
+                np.zeros(
+                    len(module.stellsym_scatter_indices(TEST_MPOL, TEST_NTOR)),
+                    dtype=np.float64,
+                )
+            )
+            materialized_surface = boozer_surface.surface._materialize_surface()
+            self.assertIs(
+                materialized_surface, FakeSurfaceXYZTensorFourier.instances[0]
+            )
+            np.testing.assert_allclose(
+                materialized_surface.get_dofs(),
+                np.asarray(boozer_surface.surface.get_dofs()),
+            )
 
     def test_initialize_boozer_surface_cpu_warm_start_does_not_pass_sdofs(self):
         module = self.load_module()
@@ -1623,67 +1672,30 @@ class SingleStageExampleTests(unittest.TestCase):
             quadpoints_theta=quadpoints_theta,
         )
 
-    def test_project_surface_dofs_to_resolution_reprojects_to_target_resolution(self):
+    def test_project_surface_dofs_to_resolution_rejects_unsupported_hybrid_surface(self):
         module = self.load_module()
-        captured = {}
 
         class FakeSurface:
             nfp = 5
             stellsym = True
 
             def gamma(self):
-                raise AssertionError("projection should resample on the target grid")
+                raise AssertionError("unsupported surfaces must not use gamma()")
 
             def cross_section(self, phi, thetas=None):
-                theta_values = np.asarray(thetas, dtype=float)
-                return np.column_stack(
-                    (
-                        np.full(theta_values.shape, float(phi)),
-                        theta_values,
-                        theta_values + float(phi),
-                    )
-                )
+                raise AssertionError("unsupported surfaces must not use cross_section()")
 
         quadpoints_phi = np.linspace(0.0, 0.2, 5, endpoint=False)
         quadpoints_theta = np.linspace(0.0, 1.0, 7, endpoint=False)
 
-        def _fit_surface_xyz_tensor_dofs_to_gamma(target_gamma, **kwargs):
-            captured["target_gamma"] = np.asarray(target_gamma)
-            captured["kwargs"] = kwargs
-            return np.array([1.0]), True
-
-        with patch.object(
-            module,
-            "_fit_surface_xyz_tensor_dofs_to_gamma",
-            side_effect=_fit_surface_xyz_tensor_dofs_to_gamma,
-        ):
-            projected_dofs = module.project_surface_dofs_to_resolution(
+        with self.assertRaisesRegex(TypeError, "dehybridized path"):
+            module.project_surface_dofs_to_resolution(
                 FakeSurface(),
                 mpol=8,
                 ntor=6,
                 quadpoints_phi=quadpoints_phi,
                 quadpoints_theta=quadpoints_theta,
             )
-
-        np.testing.assert_allclose(projected_dofs, np.array([1.0]))
-        expected_gamma = np.stack(
-            [
-                np.column_stack(
-                    (
-                        np.full(quadpoints_theta.shape, float(phi)),
-                        quadpoints_theta,
-                        quadpoints_theta + float(phi),
-                    )
-                )
-                for phi in quadpoints_phi
-            ],
-            axis=0,
-        )
-        np.testing.assert_allclose(captured["target_gamma"], expected_gamma)
-        self.assertEqual(captured["kwargs"]["mpol"], 8)
-        self.assertEqual(captured["kwargs"]["ntor"], 6)
-        self.assertEqual(captured["kwargs"]["nfp"], 5)
-        self.assertTrue(captured["kwargs"]["stellsym"])
 
     def test_project_single_stage_warm_start_surface_dofs_uses_gamma_fast_path_for_xyz_surface(
         self,
@@ -1894,7 +1906,7 @@ class SingleStageExampleTests(unittest.TestCase):
             atol=1e-12,
         )
 
-    def test_project_surface_dofs_to_resolution_matches_host_for_rz_nonstellsym_alias_convention(
+    def test_project_surface_dofs_to_resolution_reproduces_target_gamma_for_rz_nonstellsym(
         self,
     ):
         module = self.load_module()
@@ -1924,29 +1936,32 @@ class SingleStageExampleTests(unittest.TestCase):
             quadpoints_theta=quadpoints_theta,
         )
 
-        legacy_surface = module.SurfaceXYZTensorFourier(
-            mpol=3,
-            ntor=2,
-            nfp=source_surface.nfp,
-            stellsym=source_surface.stellsym,
-            quadpoints_phi=quadpoints_phi,
-            quadpoints_theta=quadpoints_theta,
+        projected_gamma = module.surface_gamma_from_dofs(
+            jnp.asarray(projected_dofs, dtype=jnp.float64),
+            jnp.asarray(quadpoints_phi, dtype=jnp.float64),
+            jnp.asarray(quadpoints_theta, dtype=jnp.float64),
+            3,
+            2,
+            source_surface.nfp,
+            source_surface.stellsym,
+            scatter_indices=None,
         )
-        target_gamma = np.stack(
-            [
-                np.asarray(
-                    source_surface.cross_section(float(phi), thetas=quadpoints_theta),
-                    dtype=float,
-                )
-                for phi in np.asarray(quadpoints_phi, dtype=float)
-            ],
-            axis=0,
+        target_gamma = module.surface_rz_fourier_gamma_from_dofs(
+            module.surface_rz_fourier_spec_from_dofs(
+                jnp.asarray(source_surface.get_dofs(), dtype=jnp.float64),
+                quadpoints_phi=jnp.asarray(quadpoints_phi, dtype=jnp.float64),
+                quadpoints_theta=jnp.asarray(quadpoints_theta, dtype=jnp.float64),
+                mpol=source_surface.mpol,
+                ntor=source_surface.ntor,
+                nfp=source_surface.nfp,
+                stellsym=source_surface.stellsym,
+            ),
+            jnp.asarray(source_surface.get_dofs(), dtype=jnp.float64),
         )
-        legacy_surface.least_squares_fit(target_gamma)
 
         np.testing.assert_allclose(
-            projected_dofs,
-            np.asarray(legacy_surface.get_dofs(), dtype=float),
+            np.asarray(projected_gamma),
+            np.asarray(target_gamma),
             rtol=1e-10,
             atol=1e-12,
         )
