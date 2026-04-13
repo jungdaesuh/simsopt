@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -27,6 +28,10 @@ from banana_opt.artifact_contracts import upgrade_legacy_stage2_artifact_results
 DEFAULT_OUTPUT_ROOT = SCRIPT_DIR / "outputs_single_stage_goal_mode_comparison"
 DEFAULT_SUMMARY_JSON = "single_stage_goal_mode_comparison_summary.json"
 GOAL_MODES = ("target", "frontier")
+PRESERVED_RESULT_SOURCES = (
+    ("best_feasible_partial", "results_best_feasible.partial.json"),
+    ("best_accepted_partial", "results_best_accepted.partial.json"),
+)
 
 
 def _append_optional_flag(command: list[str], flag: str, value) -> None:
@@ -37,6 +42,90 @@ def _append_optional_flag(command: list[str], flag: str, value) -> None:
 def _append_bool_flag(command: list[str], flag: str, enabled: bool) -> None:
     if enabled:
         command.append(flag)
+
+
+def _single_stage_preserved_result_matches(
+    output_root: str | Path,
+    filename: str,
+) -> list[Path]:
+    return sorted(Path(output_root).glob(f"mpol=*-ntor=*/{filename}"))
+
+
+def snapshot_single_stage_preserved_results_paths(output_root: str | Path) -> dict[Path, int]:
+    snapshot: dict[Path, int] = {}
+    for _, filename in PRESERVED_RESULT_SOURCES:
+        for path in _single_stage_preserved_result_matches(output_root, filename):
+            snapshot[path] = path.stat().st_mtime_ns
+    return snapshot
+
+
+def _expect_single_preserved_result_match(
+    matches: list[Path],
+    *,
+    source_label: str,
+    filename: str,
+    output_root: str | Path,
+    match_kind: str | None = None,
+) -> Path | None:
+    if len(matches) == 1:
+        return matches[0]
+    if len(matches) == 0:
+        return None
+
+    match_descriptor = "" if match_kind is None else f"{match_kind} "
+    raise FileNotFoundError(
+        f"Expected exactly one {match_descriptor}{filename} for {source_label} under "
+        f"{output_root}, found {len(matches)}"
+    )
+
+
+def discover_single_stage_salvage_results_path(
+    output_root: str | Path,
+    *,
+    previous_snapshot: dict[Path, int] | None = None,
+) -> tuple[str, Path]:
+    for source_label, filename in PRESERVED_RESULT_SOURCES:
+        matches = _single_stage_preserved_result_matches(output_root, filename)
+        if not matches:
+            continue
+        if previous_snapshot is not None:
+            new_match = _expect_single_preserved_result_match(
+                [path for path in matches if path not in previous_snapshot],
+                source_label=source_label,
+                filename=filename,
+                output_root=output_root,
+                match_kind="new",
+            )
+            if new_match is not None:
+                return source_label, new_match
+            updated_matches = [
+                path
+                for path in matches
+                if previous_snapshot.get(path) != path.stat().st_mtime_ns
+            ]
+            updated_match = _expect_single_preserved_result_match(
+                updated_matches,
+                source_label=source_label,
+                filename=filename,
+                output_root=output_root,
+                match_kind="updated",
+            )
+            if updated_match is not None:
+                return source_label, updated_match
+            continue
+        match = _expect_single_preserved_result_match(
+            matches,
+            source_label=source_label,
+            filename=filename,
+            output_root=output_root,
+        )
+        if match is not None:
+            return source_label, match
+    raise FileNotFoundError(
+        "Expected one preserved partial single-stage result after the run, but found "
+        f"neither {PRESERVED_RESULT_SOURCES[0][1]!r} nor {PRESERVED_RESULT_SOURCES[1][1]!r} "
+        f"under {output_root}"
+    )
 
 
 def parse_args() -> argparse.Namespace:
@@ -523,6 +612,7 @@ def build_summary(
     for goal_mode, payload in mode_payloads.items():
         mode_entry = summary["mode_runs"][goal_mode]
         mode_entry["results_path"] = str(payload["results_path"])
+        mode_entry["result_source"] = payload["result_source"]
         mode_entry["results"] = _result_metric_subset(payload["results"])
 
     target_results = mode_payloads["target"]["results"]
@@ -560,6 +650,28 @@ def build_summary(
     return summary
 
 
+def load_single_stage_results_with_salvage(
+    case_output_root: Path,
+    *,
+    previous_results_snapshot: dict[Path, int],
+    previous_preserved_snapshot: dict[Path, int],
+) -> tuple[str, Path, dict]:
+    result_source = "final"
+    try:
+        results_path = discover_single_results_path(
+            case_output_root,
+            previous_snapshot=previous_results_snapshot,
+        )
+        results = load_json(results_path)
+    except (FileNotFoundError, json.JSONDecodeError):
+        result_source, results_path = discover_single_stage_salvage_results_path(
+            case_output_root,
+            previous_snapshot=previous_preserved_snapshot,
+        )
+        results = load_json(results_path)
+    return result_source, results_path, results
+
+
 def run_goal_mode_case(
     args: argparse.Namespace,
     *,
@@ -569,7 +681,15 @@ def run_goal_mode_case(
 ) -> dict:
     case_output_root = output_root / goal_mode
     case_output_root.mkdir(parents=True, exist_ok=True)
-    previous_snapshot = snapshot_single_results_paths(case_output_root)
+    previous_results_snapshot = snapshot_single_results_paths(case_output_root)
+    previous_preserved_snapshot = snapshot_single_stage_preserved_results_paths(
+        case_output_root
+    )
+    salvage_kwargs = {
+        "case_output_root": case_output_root,
+        "previous_results_snapshot": previous_results_snapshot,
+        "previous_preserved_snapshot": previous_preserved_snapshot,
+    }
     command = build_single_stage_goal_mode_command(
         args,
         goal_mode=goal_mode,
@@ -578,18 +698,28 @@ def run_goal_mode_case(
     )
     if args.dry_run:
         return {"command": command}
-    run_command(
-        command,
-        timeout_seconds=timeout_or_none(args.single_stage_timeout_seconds),
-    )
-    results_path = discover_single_results_path(
-        case_output_root,
-        previous_snapshot=previous_snapshot,
-    )
+    timeout_seconds = timeout_or_none(args.single_stage_timeout_seconds)
+    try:
+        run_command(
+            command,
+            timeout_seconds=timeout_seconds,
+        )
+    except (subprocess.TimeoutExpired, subprocess.CalledProcessError) as error:
+        try:
+            result_source, results_path, results = load_single_stage_results_with_salvage(
+                **salvage_kwargs
+            )
+        except (FileNotFoundError, json.JSONDecodeError):
+            raise error
+    else:
+        result_source, results_path, results = load_single_stage_results_with_salvage(
+            **salvage_kwargs
+        )
     return {
         "command": command,
         "results_path": results_path,
-        "results": load_json(results_path),
+        "result_source": result_source,
+        "results": results,
     }
 
 
@@ -629,17 +759,7 @@ def main() -> int:
         stage2_bs_path=stage2_bs_path,
         stage2_results_path=stage2_results_path,
         stage2_results=stage2_results,
-        mode_payloads=(
-            None
-            if args.dry_run
-            else {
-                goal_mode: {
-                    "results_path": mode_runs[goal_mode]["results_path"],
-                    "results": mode_runs[goal_mode]["results"],
-                }
-                for goal_mode in GOAL_MODES
-            }
-        ),
+        mode_payloads=None if args.dry_run else mode_runs,
     )
 
     with summary_path.open("w", encoding="utf-8") as outfile:

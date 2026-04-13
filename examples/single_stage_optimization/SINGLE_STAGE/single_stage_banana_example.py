@@ -164,6 +164,8 @@ _PENALTY_FEASIBLE_START_PHASE2_RADIUS_SCALE = float(
     os.environ.get("PENALTY_FEASIBLE_START_PHASE2_RADIUS_SCALE", "0.5")
 )
 _PENALTY_FEASIBLE_START_MIN_ACCEPTED_STEP_RMS = 1.0e-6
+_FRONTIER_FEASIBLE_START_PHASE1_SCALE = 0.05
+_FRONTIER_FEASIBLE_START_LOCAL_RELATIVE_RADIUS = 0.01
 SINGLE_STAGE_ALM_GEOMETRY_CONSTRAINT_NAMES = (
     "coil_coil_spacing",
     "coil_surface_spacing",
@@ -2627,6 +2629,7 @@ def resolve_penalty_phase1_settings(
     initial_step_maxiter,
     *,
     enable_local_preservation,
+    is_frontier_mode=False,
 ):
     explicit_phase1_maxiter = max(int(initial_step_maxiter), 0)
     phase1_maxiter = resolve_initial_step_phase_maxiter(
@@ -2634,8 +2637,16 @@ def resolve_penalty_phase1_settings(
         initial_step_scale,
         explicit_phase1_maxiter,
     )
+    baseline_local_relative_radius = float(
+        _PENALTY_FEASIBLE_START_LOCAL_RELATIVE_RADIUS
+    )
     auto_enabled = False
     phase1_scale = float(initial_step_scale)
+    local_relative_radius = (
+        baseline_local_relative_radius
+        if enable_local_preservation and phase1_maxiter > 0
+        else None
+    )
     if enable_local_preservation and phase1_maxiter == 0 and total_maxiter > 0:
         fallback_maxiter = (
             explicit_phase1_maxiter
@@ -2643,7 +2654,14 @@ def resolve_penalty_phase1_settings(
             else _PENALTY_FEASIBLE_START_LOCAL_MAXITER
         )
         phase1_maxiter = min(total_maxiter, fallback_maxiter)
-        phase1_scale = 1.0
+        phase1_scale = (
+            _FRONTIER_FEASIBLE_START_PHASE1_SCALE if is_frontier_mode else 1.0
+        )
+        local_relative_radius = (
+            _FRONTIER_FEASIBLE_START_LOCAL_RELATIVE_RADIUS
+            if is_frontier_mode
+            else baseline_local_relative_radius
+        )
         auto_enabled = True
     use_phase1 = phase1_maxiter > 0
     use_local_bounds = bool(enable_local_preservation and use_phase1)
@@ -2653,11 +2671,7 @@ def resolve_penalty_phase1_settings(
         "phase1_scale": float(phase1_scale),
         "auto_enabled": auto_enabled,
         "use_local_bounds": use_local_bounds,
-        "local_relative_radius": (
-            float(_PENALTY_FEASIBLE_START_LOCAL_RELATIVE_RADIUS)
-            if use_local_bounds
-            else None
-        ),
+        "local_relative_radius": local_relative_radius if use_local_bounds else None,
         "local_max_attempts": (
             max(int(_PENALTY_FEASIBLE_START_LOCAL_MAX_ATTEMPTS), 1)
             if use_local_bounds
@@ -2856,6 +2870,7 @@ def run_penalty_phase1(
     initial_step_scale,
     initial_step_maxiter,
     enable_local_preservation,
+    is_frontier_mode=False,
     lower_bounds,
     upper_bounds,
     run_dict,
@@ -2871,6 +2886,7 @@ def run_penalty_phase1(
         initial_step_scale,
         initial_step_maxiter,
         enable_local_preservation=enable_local_preservation,
+        is_frontier_mode=is_frontier_mode,
     )
     if not settings["use_phase1"]:
         return _build_penalty_phase1_result(
@@ -5168,6 +5184,7 @@ if __name__ == "__main__":
             initial_step_scale=args.multisurface_initial_step_scale,
             initial_step_maxiter=args.multisurface_initial_step_maxiter,
             enable_local_preservation=enable_local_preservation,
+            is_frontier_mode=args.single_stage_goal_mode == "frontier",
             lower_bounds=JF.lower_bounds,
             upper_bounds=JF.upper_bounds,
             run_dict=run_dict,

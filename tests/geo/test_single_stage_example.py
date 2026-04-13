@@ -2445,6 +2445,75 @@ class HardwareConstraintTests(unittest.TestCase):
             min(40, module._PENALTY_FEASIBLE_START_LOCAL_MAXITER),
         )
         self.assertEqual(settings["phase1_scale"], 1.0)
+        self.assertEqual(
+            settings["local_relative_radius"],
+            module._PENALTY_FEASIBLE_START_LOCAL_RELATIVE_RADIUS,
+        )
+
+    def test_resolve_penalty_phase1_settings_frontier_auto_contracts_phase1(self):
+        module = self.load_module()
+
+        settings = module.resolve_penalty_phase1_settings(
+            40,
+            1.0,
+            0,
+            enable_local_preservation=True,
+            is_frontier_mode=True,
+        )
+
+        self.assertTrue(settings["use_phase1"])
+        self.assertTrue(settings["auto_enabled"])
+        self.assertTrue(settings["use_local_bounds"])
+        self.assertEqual(
+            settings["phase1_maxiter"],
+            min(40, module._PENALTY_FEASIBLE_START_LOCAL_MAXITER),
+        )
+        self.assertEqual(
+            settings["phase1_scale"],
+            module._FRONTIER_FEASIBLE_START_PHASE1_SCALE,
+        )
+        self.assertEqual(
+            settings["local_relative_radius"],
+            module._FRONTIER_FEASIBLE_START_LOCAL_RELATIVE_RADIUS,
+        )
+
+    def test_resolve_penalty_phase1_settings_frontier_does_not_auto_contract_when_local_preservation_disabled(self):
+        module = self.load_module()
+
+        settings = module.resolve_penalty_phase1_settings(
+            40,
+            1.0,
+            0,
+            enable_local_preservation=False,
+            is_frontier_mode=True,
+        )
+
+        self.assertFalse(settings["use_phase1"])
+        self.assertFalse(settings["auto_enabled"])
+        self.assertFalse(settings["use_local_bounds"])
+        self.assertEqual(settings["phase1_scale"], 1.0)
+        self.assertIsNone(settings["local_relative_radius"])
+
+    def test_resolve_penalty_phase1_settings_frontier_respects_explicit_initial_step_scale(self):
+        module = self.load_module()
+
+        settings = module.resolve_penalty_phase1_settings(
+            40,
+            0.5,
+            5,
+            enable_local_preservation=True,
+            is_frontier_mode=True,
+        )
+
+        self.assertTrue(settings["use_phase1"])
+        self.assertFalse(settings["auto_enabled"])
+        self.assertTrue(settings["use_local_bounds"])
+        self.assertEqual(settings["phase1_maxiter"], 5)
+        self.assertEqual(settings["phase1_scale"], 0.5)
+        self.assertEqual(
+            settings["local_relative_radius"],
+            module._PENALTY_FEASIBLE_START_LOCAL_RELATIVE_RADIUS,
+        )
 
     def test_run_penalty_phase1_preserves_feasible_start_when_no_safe_step_exists(self):
         module = self.load_module()
@@ -4882,6 +4951,9 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
                 multipliers=np.array([0.1, 0.2, 0.3, 0.4], dtype=float),
                 constraint_values=np.array([0.0, 0.01, 0.0, 0.0], dtype=float),
                 solver_constraint_values=np.array([0.0, 0.2, 0.0, 0.0], dtype=float),
+                hard_signed_constraint_values=np.array([0.0, 0.02, 0.0, 0.0], dtype=float),
+                hard_violation_values=np.array([0.0, 0.01, 0.0, 0.0], dtype=float),
+                surrogate_signed_constraint_values=np.array([0.0, 0.2, 0.0, 0.0], dtype=float),
                 trust_radius=0.1,
                 multiplier_cap_binding=True,
                 multiplier_cap_binding_indices=[1],
@@ -4895,6 +4967,11 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
                 final_stationarity_norm=0.02,
                 final_raw_stationarity_norm=0.03,
                 final_kkt_stationarity_norm=0.025,
+                final_hard_max_violation=0.01,
+                final_surrogate_max_value=0.2,
+                hard_positive_shift_zero=True,
+                signal_mismatch_active=False,
+                final_penalty_gradient_norm=0.4,
                 final_feasibility_tolerance=1.0e-3,
                 final_stationarity_tolerance=5.0e-3,
                 history=[{"outer_iteration": 1}],
@@ -5083,6 +5160,23 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
         self.assertEqual(runtime["results"]["ALM_FINAL_STATIONARITY_NORM"], 0.02)
         self.assertEqual(runtime["results"]["ALM_FINAL_RAW_STATIONARITY_NORM"], 0.03)
         self.assertEqual(runtime["results"]["ALM_FINAL_KKT_STATIONARITY_NORM"], 0.025)
+        np.testing.assert_allclose(
+            runtime["results"]["ALM_FINAL_HARD_SIGNED_CONSTRAINT_VALUES"],
+            [0.0, 0.02, 0.0, 0.0],
+        )
+        np.testing.assert_allclose(
+            runtime["results"]["ALM_FINAL_HARD_VIOLATION_VALUES"],
+            [0.0, 0.01, 0.0, 0.0],
+        )
+        np.testing.assert_allclose(
+            runtime["results"]["ALM_FINAL_SURROGATE_SIGNED_CONSTRAINT_VALUES"],
+            [0.0, 0.2, 0.0, 0.0],
+        )
+        self.assertEqual(runtime["results"]["ALM_FINAL_HARD_MAX_VIOLATION"], 0.01)
+        self.assertEqual(runtime["results"]["ALM_FINAL_SURROGATE_MAX_VALUE"], 0.2)
+        self.assertTrue(runtime["results"]["ALM_FINAL_HARD_POSITIVE_SHIFT_ZERO"])
+        self.assertFalse(runtime["results"]["ALM_FINAL_SIGNAL_MISMATCH_ACTIVE"])
+        self.assertEqual(runtime["results"]["ALM_FINAL_PENALTY_GRADIENT_NORM"], 0.4)
         self.assertEqual(runtime["results"]["ALM_FINAL_FEASIBILITY_TOL"], 1.0e-3)
         self.assertEqual(runtime["results"]["ALM_FINAL_STATIONARITY_TOL"], 5.0e-3)
         self.assertTrue(runtime["results"]["ALM_MULTIPLIER_CAP_BINDING"])

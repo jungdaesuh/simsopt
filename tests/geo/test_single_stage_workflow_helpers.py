@@ -1043,6 +1043,56 @@ class GoalModeComparisonScriptTests(unittest.TestCase):
             init_only=False,
         )
 
+    def _minimal_goal_mode_payload(
+        self,
+        output_root: Path,
+        *,
+        goal_mode: str,
+        result_source: str,
+        final_iota: float,
+        final_volume: float,
+        nonqs_ratio: float,
+        boozer_residual: float,
+        optimizer_success: bool,
+    ) -> dict:
+        results_name = (
+            "results.json"
+            if result_source == "final"
+            else "results_best_feasible.partial.json"
+        )
+        return {
+            "command": ["python", "single_stage.py", "--single-stage-goal-mode", goal_mode],
+            "results_path": output_root / goal_mode / results_name,
+            "result_source": result_source,
+            "results": {
+                "SINGLE_STAGE_GOAL_MODE": goal_mode,
+                "SINGLE_STAGE_GOAL_MODE_IMPL": (
+                    "target" if goal_mode == "target" else "frontier_tradeoff_score_v1"
+                ),
+                "FINAL_IOTA": final_iota,
+                "FINAL_VOLUME": final_volume,
+                "NONQS_RATIO": nonqs_ratio,
+                "BOOZER_RESIDUAL": boozer_residual,
+                "FINAL_FEASIBILITY_OK": True,
+                "HARDWARE_CONSTRAINTS_OK": True,
+                "OPTIMIZER_SUCCESS": optimizer_success,
+            },
+        }
+
+    def _run_goal_mode_case(
+        self,
+        module,
+        *,
+        goal_mode: str,
+        output_root: Path,
+    ):
+        return module.run_goal_mode_case(
+            self._make_args(),
+            goal_mode=goal_mode,
+            stage2_bs_path=Path("seed.json").resolve(),
+            output_root=output_root,
+        )
+
     def test_build_single_stage_goal_mode_command_resolves_paths_and_threads_mode(self):
         module = load_goal_mode_comparison_module()
         args = self._make_args()
@@ -1217,6 +1267,7 @@ class GoalModeComparisonScriptTests(unittest.TestCase):
         mode_payloads = {
             "target": {
                 "results_path": Path("/tmp/comparison/target/results.json"),
+                "result_source": "final",
                 "results": {
                     "SINGLE_STAGE_GOAL_MODE": "target",
                     "SINGLE_STAGE_GOAL_MODE_IMPL": "target",
@@ -1259,6 +1310,7 @@ class GoalModeComparisonScriptTests(unittest.TestCase):
             },
             "frontier": {
                 "results_path": Path("/tmp/comparison/frontier/results.json"),
+                "result_source": "best_feasible_partial",
                 "results": {
                     "SINGLE_STAGE_GOAL_MODE": "frontier",
                     "SINGLE_STAGE_GOAL_MODE_IMPL": "frontier_tradeoff_score_v1",
@@ -1336,6 +1388,11 @@ class GoalModeComparisonScriptTests(unittest.TestCase):
         self.assertFalse(summary["search_objective_values_comparable"])
         self.assertFalse(summary["stage2_artifact_init_only"])
         self.assertEqual(summary["stage2_banana_current_a"], 12000.0)
+        self.assertEqual(summary["mode_runs"]["target"]["result_source"], "final")
+        self.assertEqual(
+            summary["mode_runs"]["frontier"]["result_source"],
+            "best_feasible_partial",
+        )
         self.assertEqual(summary["mode_runs"]["target"]["results"]["goal_mode"], "target")
         self.assertEqual(
             summary["mode_runs"]["frontier"]["results"]["goal_mode_impl"],
@@ -1389,7 +1446,6 @@ class GoalModeComparisonScriptTests(unittest.TestCase):
 
     def test_run_goal_mode_case_executes_and_loads_results(self):
         module = load_goal_mode_comparison_module()
-        args = self._make_args()
         output_root = Path(tempfile.mkdtemp())
 
         with patch.object(module, "run_command") as run_command, patch.object(
@@ -1401,17 +1457,173 @@ class GoalModeComparisonScriptTests(unittest.TestCase):
             "load_json",
             return_value={"SINGLE_STAGE_GOAL_MODE": "target"},
         ) as load_json:
-            payload = module.run_goal_mode_case(
-                args,
+            payload = self._run_goal_mode_case(
+                module,
                 goal_mode="target",
-                stage2_bs_path=Path("seed.json").resolve(),
                 output_root=output_root,
             )
 
         run_command.assert_called_once()
         discover_results.assert_called_once()
         load_json.assert_called_once()
+        self.assertEqual(payload["result_source"], "final")
         self.assertEqual(payload["results"]["SINGLE_STAGE_GOAL_MODE"], "target")
+
+    def test_discover_single_stage_salvage_results_path_skips_stale_best_feasible(self):
+        module = load_goal_mode_comparison_module()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_root = Path(tmpdir)
+            stale_feasible_dir = output_root / "mpol=8-ntor=6-old"
+            stale_feasible_dir.mkdir(parents=True)
+            (stale_feasible_dir / "results_best_feasible.partial.json").write_text(
+                "{}",
+                encoding="utf-8",
+            )
+
+            previous_snapshot = module.snapshot_single_stage_preserved_results_paths(
+                output_root
+            )
+
+            updated_accepted_dir = output_root / "mpol=8-ntor=6-new"
+            updated_accepted_dir.mkdir(parents=True)
+            updated_accepted_path = (
+                updated_accepted_dir / "results_best_accepted.partial.json"
+            )
+            updated_accepted_path.write_text("{}", encoding="utf-8")
+
+            result_source, results_path = (
+                module.discover_single_stage_salvage_results_path(
+                    output_root,
+                    previous_snapshot=previous_snapshot,
+                )
+            )
+
+        self.assertEqual(result_source, "best_accepted_partial")
+        self.assertEqual(results_path, updated_accepted_path)
+
+    def test_run_goal_mode_case_salvages_best_feasible_partial_when_final_results_are_truncated(self):
+        module = load_goal_mode_comparison_module()
+        output_root = Path(tempfile.mkdtemp())
+        final_results_path = output_root / "frontier" / "mpol=8-ntor=6" / "results.json"
+        partial_results_path = (
+            output_root
+            / "frontier"
+            / "mpol=8-ntor=6"
+            / "results_best_feasible.partial.json"
+        )
+
+        def load_json_side_effect(path):
+            if path == final_results_path:
+                raise json.JSONDecodeError("bad", "}", 0)
+            if path == partial_results_path:
+                return {"SINGLE_STAGE_GOAL_MODE": "frontier"}
+            raise AssertionError(f"unexpected load_json path: {path}")
+
+        with patch.object(module, "run_command") as run_command, patch.object(
+            module,
+            "discover_single_results_path",
+            return_value=final_results_path,
+        ) as discover_results, patch.object(
+            module,
+            "discover_single_stage_salvage_results_path",
+            return_value=("best_feasible_partial", partial_results_path),
+        ) as discover_salvage, patch.object(
+            module,
+            "load_json",
+            side_effect=load_json_side_effect,
+        ) as load_json:
+            payload = self._run_goal_mode_case(
+                module,
+                goal_mode="frontier",
+                output_root=output_root,
+            )
+
+        run_command.assert_called_once()
+        discover_results.assert_called_once()
+        discover_salvage.assert_called_once()
+        self.assertEqual(load_json.call_count, 2)
+        self.assertEqual(payload["result_source"], "best_feasible_partial")
+        self.assertEqual(payload["results_path"], partial_results_path)
+        self.assertEqual(payload["results"]["SINGLE_STAGE_GOAL_MODE"], "frontier")
+
+    def test_run_goal_mode_case_salvages_partial_when_run_command_times_out(self):
+        module = load_goal_mode_comparison_module()
+        output_root = Path(tempfile.mkdtemp())
+        partial_results_path = (
+            output_root
+            / "frontier"
+            / "mpol=8-ntor=6"
+            / "results_best_feasible.partial.json"
+        )
+
+        with patch.object(
+            module,
+            "run_command",
+            side_effect=subprocess.TimeoutExpired(cmd=["python"], timeout=1.0),
+        ) as run_command, patch.object(
+            module,
+            "discover_single_results_path",
+            side_effect=FileNotFoundError("no final results"),
+        ) as discover_results, patch.object(
+            module,
+            "discover_single_stage_salvage_results_path",
+            return_value=("best_feasible_partial", partial_results_path),
+        ) as discover_salvage, patch.object(
+            module,
+            "load_json",
+            return_value={"SINGLE_STAGE_GOAL_MODE": "frontier"},
+        ) as load_json:
+            payload = self._run_goal_mode_case(
+                module,
+                goal_mode="frontier",
+                output_root=output_root,
+            )
+
+        run_command.assert_called_once()
+        discover_results.assert_called_once()
+        discover_salvage.assert_called_once()
+        load_json.assert_called_once_with(partial_results_path)
+        self.assertEqual(payload["result_source"], "best_feasible_partial")
+        self.assertEqual(payload["results_path"], partial_results_path)
+        self.assertEqual(payload["results"]["SINGLE_STAGE_GOAL_MODE"], "frontier")
+
+    def test_run_goal_mode_case_re_raises_timeout_when_no_results_can_be_salvaged(self):
+        module = load_goal_mode_comparison_module()
+        output_root = Path(tempfile.mkdtemp())
+        timeout_error = subprocess.TimeoutExpired(cmd=["python"], timeout=1.0)
+
+        with patch.object(
+            module,
+            "run_command",
+            side_effect=timeout_error,
+        ) as run_command, patch.object(
+            module,
+            "discover_single_results_path",
+            side_effect=FileNotFoundError("no final results"),
+        ) as discover_results, patch.object(
+            module,
+            "discover_single_stage_salvage_results_path",
+            side_effect=FileNotFoundError("no partial results"),
+        ) as discover_salvage:
+            with self.assertRaises(subprocess.TimeoutExpired):
+                self._run_goal_mode_case(
+                    module,
+                    goal_mode="frontier",
+                    output_root=output_root,
+                )
+
+        run_command.assert_called_once()
+        discover_results.assert_called_once()
+        discover_salvage.assert_called_once()
+
+    def test_discover_single_stage_salvage_results_path_raises_when_no_partials_exist(self):
+        module = load_goal_mode_comparison_module()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_root = Path(tmpdir)
+            with self.assertRaises(FileNotFoundError):
+                module.discover_single_stage_salvage_results_path(output_root)
 
     def test_goal_mode_comparison_dry_run_does_not_require_existing_stage2_artifact(self):
         module = load_goal_mode_comparison_module()
@@ -1458,3 +1670,83 @@ class GoalModeComparisonScriptTests(unittest.TestCase):
                 "frontier",
             )
             self.assertNotIn("stage2_results_path", summary)
+
+    def test_goal_mode_comparison_main_writes_summary_with_mixed_result_sources(self):
+        module = load_goal_mode_comparison_module()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            output_root = tmpdir_path / "outputs"
+            summary_path = tmpdir_path / "summary.json"
+            stage2_bs_path = tmpdir_path / "stage2" / "biot_savart_opt.json"
+            stage2_results_path = tmpdir_path / "stage2" / "results.json"
+            stage2_bs_path.parent.mkdir(parents=True, exist_ok=True)
+            stage2_bs_path.write_text("{}", encoding="utf-8")
+            stage2_results_path.write_text("{}", encoding="utf-8")
+
+            target_payload = self._minimal_goal_mode_payload(
+                output_root,
+                goal_mode="target",
+                result_source="final",
+                final_iota=0.15,
+                final_volume=0.10,
+                nonqs_ratio=0.01,
+                boozer_residual=1.0e-6,
+                optimizer_success=True,
+            )
+            frontier_payload = self._minimal_goal_mode_payload(
+                output_root,
+                goal_mode="frontier",
+                result_source="best_feasible_partial",
+                final_iota=0.16,
+                final_volume=0.11,
+                nonqs_ratio=0.011,
+                boozer_residual=1.1e-6,
+                optimizer_success=False,
+            )
+
+            with patch.object(
+                sys,
+                "argv",
+                [
+                    "run_single_stage_goal_mode_comparison.py",
+                    "--plasma-surf-filename",
+                    "demo.nc",
+                    "--stage2-bs-path",
+                    str(stage2_bs_path),
+                    "--output-root",
+                    str(output_root),
+                    "--summary-json",
+                    str(summary_path),
+                ],
+            ), patch.object(
+                module,
+                "load_validated_stage2_seed_metadata",
+                return_value=(
+                    stage2_bs_path.resolve(),
+                    stage2_results_path.resolve(),
+                    {
+                        "PLASMA_SURF_FILENAME": "demo.nc",
+                        "init_only": False,
+                        "BANANA_CURRENT_A": 12000.0,
+                        "BANANA_CURRENT_MAX_A": 16000.0,
+                    },
+                ),
+            ), patch.object(
+                module,
+                "run_goal_mode_case",
+                side_effect=[target_payload, frontier_payload],
+            ):
+                self.assertEqual(module.main(), 0)
+
+            summary = json.loads(summary_path.read_text(encoding="utf-8"))
+            self.assertEqual(summary["mode_runs"]["target"]["result_source"], "final")
+            self.assertEqual(
+                summary["mode_runs"]["frontier"]["result_source"],
+                "best_feasible_partial",
+            )
+            self.assertEqual(
+                summary["mode_runs"]["frontier"]["results"]["goal_mode_impl"],
+                "frontier_tradeoff_score_v1",
+            )
+            self.assertFalse(summary["comparison"]["both_optimizer_success"])
