@@ -447,7 +447,7 @@ def _optional_env_value(name: str) -> str | None:
     return raw_value
 
 
-def _optional_positive_int_env(name: str) -> int | None:
+def _optional_nonneg_int_env(name: str) -> int | None:
     raw_value = _optional_env_value(name)
     if raw_value is None:
         return None
@@ -510,14 +510,14 @@ def _runtime_jax_backend_name(platform: str) -> str:
 
 
 def _resolve_min_points_to_shard(policy: BackendPolicy) -> int:
-    env_value = _optional_positive_int_env(_MIN_POINTS_TO_SHARD_ENV)
+    env_value = _optional_nonneg_int_env(_MIN_POINTS_TO_SHARD_ENV)
     if env_value is not None:
         return env_value
     return _MIN_POINTS_TO_SHARD_BY_POLICY.get(policy.chunk_policy, 0)
 
 
 def _resolve_min_pairwise_rows_to_shard(policy: BackendPolicy) -> int:
-    env_value = _optional_positive_int_env(_MIN_PAIRWISE_ROWS_TO_SHARD_ENV)
+    env_value = _optional_nonneg_int_env(_MIN_PAIRWISE_ROWS_TO_SHARD_ENV)
     if env_value is not None:
         return env_value
     return _MIN_PAIRWISE_ROWS_TO_SHARD_BY_POLICY.get(policy.chunk_policy, 0)
@@ -673,7 +673,7 @@ def _resolve_gpu_total_memory_mb(
 ) -> tuple[int | None, str | None]:
     if policy.jax_platform != "cuda":
         return None, None
-    env_value = _optional_positive_int_env(_GPU_MEMORY_TOTAL_MB_ENV)
+    env_value = _optional_nonneg_int_env(_GPU_MEMORY_TOTAL_MB_ENV)
     if env_value is not None:
         if env_value == 0:
             raise ValueError(f"{_GPU_MEMORY_TOTAL_MB_ENV} must be > 0 when set")
@@ -714,10 +714,10 @@ def _static_chunk_sizes(mode: str, chunk_policy: str) -> dict[str, int]:
 def _apply_chunk_env_overrides(chunk_sizes: dict[str, int]) -> dict[str, int]:
     resolved = dict(chunk_sizes)
     for key, env_name in _FIELD_KERNEL_ENV_BY_KEY.items():
-        value = _optional_positive_int_env(env_name)
+        value = _optional_nonneg_int_env(env_name)
         if value is not None:
             resolved[key] = value
-    pairwise_value = _optional_positive_int_env(_PAIRWISE_PENALTY_CHUNK_SIZE_ENV)
+    pairwise_value = _optional_nonneg_int_env(_PAIRWISE_PENALTY_CHUNK_SIZE_ENV)
     if pairwise_value is not None:
         resolved["pairwise_penalty_chunk_size"] = pairwise_value
     return resolved
@@ -1259,8 +1259,8 @@ def _parse_local_device_ids(raw_value: str | None) -> tuple[int, ...] | None:
 def _build_distributed_runtime_config() -> DistributedRuntimeConfig:
     enabled = _env_bool(_DISTRIBUTED_INIT_ENV)
     coordinator_address = _optional_nonempty_env(_DISTRIBUTED_COORDINATOR_ADDRESS_ENV)
-    num_processes = _optional_positive_int_env(_DISTRIBUTED_NUM_PROCESSES_ENV)
-    process_id = _optional_positive_int_env(_DISTRIBUTED_PROCESS_ID_ENV)
+    num_processes = _optional_nonneg_int_env(_DISTRIBUTED_NUM_PROCESSES_ENV)
+    process_id = _optional_nonneg_int_env(_DISTRIBUTED_PROCESS_ID_ENV)
     local_device_ids = _parse_local_device_ids(
         _optional_nonempty_env(_DISTRIBUTED_LOCAL_DEVICE_IDS_ENV)
     )

@@ -614,8 +614,8 @@ def build_stage2_target_objective(
         penalty_terms = jnp.asarray(
             (
                 length_excess * jnp.sqrt(length_weight_jax),
-                jnp.sqrt(two_jax * cc_weight_jax * coil_distance_penalty),
-                jnp.sqrt(two_jax * curvature_weight_jax * curvature_penalty),
+                jnp.sqrt(jnp.maximum(two_jax * cc_weight_jax * coil_distance_penalty, zero_jax)),
+                jnp.sqrt(jnp.maximum(two_jax * curvature_weight_jax * curvature_penalty, zero_jax)),
             ),
             dtype=jnp.float64,
         )

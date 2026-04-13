@@ -280,33 +280,29 @@ def _find_local_simsoptpp_extension(repo_root: Path) -> Path | None:
     if not build_root.is_dir():
         return None
 
-    seen: set[Path] = set()
     for suffix in importlib.machinery.EXTENSION_SUFFIXES:
         for candidate in sorted(build_root.glob(f"**/simsoptpp{suffix}")):
             try:
-                resolved = candidate.resolve()
+                return candidate.resolve()
             except OSError:
                 continue
-            if resolved in seen:
-                continue
-            seen.add(resolved)
-            return resolved
     return None
 
 
 def _load_extension_module(module_name: str, extension_path: Path) -> types.ModuleType:
     """Load a compiled extension directly from ``extension_path``."""
+    resolved_extension_path = extension_path.resolve()
     spec = importlib.machinery.PathFinder.find_spec(
         module_name, [str(extension_path.parent)]
     )
     if spec is None or spec.loader is None or spec.origin is None:
         raise RuntimeError(
-            f"Failed to resolve {module_name} from local extension {extension_path}"
+            f"Failed to resolve {module_name} from local extension {resolved_extension_path}"
         )
-    if Path(spec.origin).resolve() != extension_path.resolve():
+    if Path(spec.origin).resolve() != resolved_extension_path:
         raise RuntimeError(
             f"Resolved {module_name} from unexpected origin {spec.origin}, "
-            f"expected {extension_path}"
+            f"expected {resolved_extension_path}"
         )
 
     module = importlib.util.module_from_spec(spec)

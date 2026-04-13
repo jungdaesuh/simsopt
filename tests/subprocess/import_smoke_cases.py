@@ -386,6 +386,7 @@ def case_repo_bootstrap_preserves_unrelated_editable_meta_path_finders() -> None
 
 def case_repo_bootstrap_reloads_local_simsoptpp_over_foreign_module() -> None:
     import types
+    from unittest import mock
 
     import repo_bootstrap
     from repo_bootstrap import bootstrap_local_simsopt
@@ -397,21 +398,26 @@ def case_repo_bootstrap_reloads_local_simsoptpp_over_foreign_module() -> None:
     foreign_module.using_xsimd = True
     sys.modules["simsoptpp"] = foreign_module
 
-    original_find_extension = repo_bootstrap._find_local_simsoptpp_extension
-    original_load_extension = repo_bootstrap._load_extension_module
-    try:
-        repo_bootstrap._find_local_simsoptpp_extension = lambda repo_root: (
-            fake_extension
-        )
+    def _fake_find_extension(repo_root: Path) -> Path:
+        del repo_root
+        return fake_extension
 
-        def _fake_load_extension(module_name: str, extension_path: Path):
-            module = types.ModuleType(module_name)
-            module.__file__ = str(extension_path)
-            module.using_xsimd = False
-            sys.modules[module_name] = module
-            return module
+    def _fake_load_extension(module_name: str, extension_path: Path):
+        module = types.ModuleType(module_name)
+        module.__file__ = str(extension_path)
+        module.using_xsimd = False
+        sys.modules[module_name] = module
+        return module
 
-        repo_bootstrap._load_extension_module = _fake_load_extension
+    with mock.patch.object(
+        repo_bootstrap,
+        "_find_local_simsoptpp_extension",
+        _fake_find_extension,
+    ), mock.patch.object(
+        repo_bootstrap,
+        "_load_extension_module",
+        _fake_load_extension,
+    ):
         bootstrap_local_simsopt(src_root)
 
         import simsopt
@@ -422,9 +428,6 @@ def case_repo_bootstrap_reloads_local_simsoptpp_over_foreign_module() -> None:
         )
         assert Path(simsoptpp.__file__) == fake_extension
         assert simsoptpp.using_xsimd is False
-    finally:
-        repo_bootstrap._find_local_simsoptpp_extension = original_find_extension
-        repo_bootstrap._load_extension_module = original_load_extension
 
 
 def case_import_package_root_native_cpu_does_not_require_jax_runtime() -> None:

@@ -1329,7 +1329,9 @@ def _lm_iteration(flat_residual_fn, state, *, tol):
             jnp.asarray(2, dtype=jnp.int32),
         ),
         "accepted": accepted,
-        "success": finite_candidate & (grad_norm_candidate <= tol),
+        "success": finite_candidate & (
+            lax.select(accepted, grad_norm_candidate, state["grad_norm_inf"]) <= tol
+        ),
     }
 
 
@@ -1880,7 +1882,9 @@ def newton_exact(
             tol=linear_tol,
         )
         linear_residual_norm = float(np.linalg.norm(np.asarray(linear_residual)))
-        if np.all(np.isfinite(np.asarray(dx))) and linear_residual_norm > linear_tol:
+        if not np.all(np.isfinite(np.asarray(dx))):
+            break
+        if linear_residual_norm > linear_tol:
             correction, _, _ = _gmres_solve_exact_newton_system(
                 jvp_fn,
                 x,
@@ -1889,9 +1893,15 @@ def newton_exact(
             )
             if np.all(np.isfinite(np.asarray(correction))):
                 dx = dx + correction
-        x = x - dx
-        r = res_fn(x)
-        norm = jnp.linalg.norm(r)
+        x_candidate = x - dx
+        r_candidate = res_fn(x_candidate)
+        norm_candidate = jnp.linalg.norm(r_candidate)
+        if float(norm_candidate) <= float(norm):
+            x = x_candidate
+            r = r_candidate
+            norm = norm_candidate
+        else:
+            break
         nit += 1
 
     rows = int(np.prod(np.shape(r)))

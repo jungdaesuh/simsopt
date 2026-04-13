@@ -180,8 +180,6 @@ def _activate_backend_mode(monkeypatch, request, *, mode, strict):
         transfer_guard = requested_transfer_guard
     else:
         transfer_guard = "log"
-    backend_env_ctx = monkeypatch.context()
-    backend_env = backend_env_ctx.__enter__()
     set_backend(
         mode,
         strict=strict,
@@ -192,7 +190,6 @@ def _activate_backend_mode(monkeypatch, request, *, mode, strict):
     _apply_test_transfer_guard(mode, transfer_guard)
 
     def _restore_backend_mode():
-        backend_env_ctx.__exit__(None, None, None)
         invalidate_backend_cache()
         set_backend(
             previous.mode,

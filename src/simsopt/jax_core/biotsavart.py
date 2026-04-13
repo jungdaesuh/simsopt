@@ -114,7 +114,10 @@ def _zero_padding_like(array, *, axis: int, pad_width: int):
 
 def _safe_radius_squared(diff):
     r2 = jnp.sum(diff * diff, axis=-1)
-    return r2, r2 + _float64_scalar(r2, np.finfo(np.float64).tiny)
+    # Floor must be large enough that 1/safe_r2^{1.5} stays within float64:
+    # 1/(1e-60)^1.5 = 1e90, well below float64 max (~1.8e308).
+    # Using float64.tiny (~5e-324) overflows: 1/tiny^1.5 ~ 1e486.
+    return r2, jnp.maximum(r2, _float64_scalar(r2, 1e-60))
 
 
 def _vector_component(array, component_index: int):
@@ -380,7 +383,7 @@ def _biot_savart_B_integrand(x, gammas, gammadashs):
     diff = gammas - x
     # Exact point-on-coil evaluation is outside the physical domain; use a tiny
     # branchless floor so traced audit lanes do not rely on select/where.
-    r2, safe_r2 = _safe_radius_squared(diff)
+    _, safe_r2 = _safe_radius_squared(diff)
     r_inv = _explicit_rsqrt(safe_r2)
     r_inv3 = r_inv * _explicit_inv(safe_r2)
     cross = _cross_product(diff, gammadashs)
