@@ -2302,7 +2302,7 @@ def _make_traceable_host_value_and_grad(compiled_value_and_grad_for):
     return host_value_and_grad
 
 
-def _make_traceable_reporting_metrics(compiled_bundle):
+def _make_traceable_reporting_metrics(compiled_bundle, *, include_distance_metrics):
     """Build a pure solved-state reporting summary for one compiled runtime bundle."""
     compiled_forward_result_for = compiled_bundle["compiled_forward_result_for"]
     state = compiled_bundle["state"]
@@ -2346,10 +2346,6 @@ def _make_traceable_reporting_metrics(compiled_bundle):
             surface_kind=objective_kwargs["surface_kind"],
         )
         surface_normal = jnp.cross(xphi, xtheta)
-        vessel_gamma = _runtime_float64_array(
-            outer_objective_config["vessel_gamma"],
-            reference=surface_gamma,
-        ).reshape((-1, 3))
         coil_specs = coil_specs_from_dof_extraction_spec(
             coil_dof_extraction_spec,
             coil_dofs,
@@ -2360,30 +2356,36 @@ def _make_traceable_reporting_metrics(compiled_bundle):
         )
         coil_length = curve_length_pure(incremental_arclength_pure(banana_gammadash))
         max_curvature = jnp.max(kappa_pure(banana_gammadash, banana_gammadashdash))
-        surface_gamma_flat = surface_gamma.reshape((-1, 3))
         inf = _runtime_float64_scalar(np.inf, reference=surface_gamma)
         curve_curve_min_dist = inf
         curve_surface_min_dist = inf
-        coil_gammas = []
-        for group in coil_set_spec.groups:
-            gammas = _as_jax_float64(group.gammas)
-            for coil_index in range(int(gammas.shape[0])):
-                coil_gamma = _take_runtime_row(gammas, coil_index)
-                coil_gammas.append(coil_gamma)
-                curve_surface_min_dist = jnp.minimum(
-                    curve_surface_min_dist,
-                    pairwise_min_distance_pure(coil_gamma, surface_gamma_flat),
-                )
-        for curve_index, gamma_i in enumerate(coil_gammas):
-            for gamma_j in coil_gammas[:curve_index]:
-                curve_curve_min_dist = jnp.minimum(
-                    curve_curve_min_dist,
-                    pairwise_min_distance_pure(gamma_i, gamma_j),
-                )
-        surface_vessel_min_dist = surface_to_surface_shortest_distance_pure(
-            surface_gamma,
-            vessel_gamma,
-        )
+        surface_vessel_min_dist = inf
+        if include_distance_metrics:
+            vessel_gamma = _runtime_float64_array(
+                outer_objective_config["vessel_gamma"],
+                reference=surface_gamma,
+            ).reshape((-1, 3))
+            surface_gamma_flat = surface_gamma.reshape((-1, 3))
+            coil_gammas = []
+            for group in coil_set_spec.groups:
+                gammas = _as_jax_float64(group.gammas)
+                for coil_index in range(int(gammas.shape[0])):
+                    coil_gamma = _take_runtime_row(gammas, coil_index)
+                    coil_gammas.append(coil_gamma)
+                    curve_surface_min_dist = jnp.minimum(
+                        curve_surface_min_dist,
+                        pairwise_min_distance_pure(coil_gamma, surface_gamma_flat),
+                    )
+            for curve_index, gamma_i in enumerate(coil_gammas):
+                for gamma_j in coil_gammas[:curve_index]:
+                    curve_curve_min_dist = jnp.minimum(
+                        curve_curve_min_dist,
+                        pairwise_min_distance_pure(gamma_i, gamma_j),
+                    )
+            surface_vessel_min_dist = surface_to_surface_shortest_distance_pure(
+                surface_gamma,
+                vessel_gamma,
+            )
         return {
             "solver_success": forward_result["success"],
             "has_G": jnp.asarray(optimize_G, dtype=bool),
@@ -2412,7 +2414,14 @@ def _make_traceable_reporting_metrics(compiled_bundle):
 
 def _make_traceable_host_reporting_metrics(compiled_bundle):
     """Build a host-normalized solved-state reporting summary wrapper."""
-    reporting_metrics = _make_traceable_reporting_metrics(compiled_bundle)
+    reporting_metrics = _make_traceable_reporting_metrics(
+        compiled_bundle,
+        include_distance_metrics=True,
+    )
+    reporting_metrics_without_distances = _make_traceable_reporting_metrics(
+        compiled_bundle,
+        include_distance_metrics=False,
+    )
     float_metric_names = (
         "final_non_qs",
         "final_boozer_residual",
@@ -2424,15 +2433,22 @@ def _make_traceable_host_reporting_metrics(compiled_bundle):
         "final_curvature_penalty",
         "coil_length",
         "max_curvature",
-        "curve_curve_min_dist",
-        "curve_surface_min_dist",
-        "surface_vessel_min_dist",
         "final_volume",
         "final_iota",
     )
+    distance_metric_names = (
+        "curve_curve_min_dist",
+        "curve_surface_min_dist",
+        "surface_vessel_min_dist",
+    )
 
-    def host_reporting_metrics(coil_dofs):
-        metrics = reporting_metrics(coil_dofs)
+    def host_reporting_metrics(coil_dofs, *, include_distance_metrics=True):
+        selected_reporting_metrics = (
+            reporting_metrics
+            if include_distance_metrics
+            else reporting_metrics_without_distances
+        )
+        metrics = selected_reporting_metrics(coil_dofs)
         has_G = bool(np.asarray(jax.device_get(metrics["has_G"])))
         host_metrics = {
             "solver_success": bool(np.asarray(jax.device_get(metrics["solver_success"]))),
@@ -2443,6 +2459,12 @@ def _make_traceable_host_reporting_metrics(compiled_bundle):
         for metric_name in float_metric_names:
             host_metrics[metric_name] = float(
                 _host_scalar(metrics[metric_name], dtype=np.float64)
+            )
+        for metric_name in distance_metric_names:
+            host_metrics[metric_name] = (
+                None
+                if not include_distance_metrics
+                else float(_host_scalar(metrics[metric_name], dtype=np.float64))
             )
         return host_metrics
 

@@ -1166,7 +1166,7 @@ def load_single_stage_warm_start_state(run_dir):
     }
 
 
-def project_single_stage_warm_start_surface_dofs(
+def project_surface_dofs_to_resolution(
     surface,
     *,
     mpol,
@@ -1174,6 +1174,7 @@ def project_single_stage_warm_start_surface_dofs(
     quadpoints_phi,
     quadpoints_theta,
 ):
+    """Reproject surface geometry onto the requested target resolution on host."""
     projected_surface = SurfaceXYZTensorFourier(
         mpol=max(1, int(mpol)),
         ntor=max(1, int(ntor)),
@@ -1206,6 +1207,24 @@ def project_single_stage_warm_start_surface_dofs(
         )
     projected_surface.least_squares_fit(target_gamma)
     return np.asarray(projected_surface.get_dofs(), dtype=float)
+
+
+def project_single_stage_warm_start_surface_dofs(
+    surface,
+    *,
+    mpol,
+    ntor,
+    quadpoints_phi,
+    quadpoints_theta,
+):
+    """Backward-compatible warm-start wrapper around the generic projector."""
+    return project_surface_dofs_to_resolution(
+        surface,
+        mpol=mpol,
+        ntor=ntor,
+        quadpoints_phi=quadpoints_phi,
+        quadpoints_theta=quadpoints_theta,
+    )
 
 
 def build_equilibrium_path(args):
@@ -2248,11 +2267,13 @@ def resolve_single_stage_final_penalty_metrics(
             outer_objective_config=outer_objective_config,
             success_filter=success_filter,
         )
-        metrics = dict(runtime_bundle["host_reporting_metrics"](_as_jax_float64(coil_dofs)))
+        metrics = dict(
+            runtime_bundle["host_reporting_metrics"](
+                _as_jax_float64(coil_dofs),
+                include_distance_metrics=not benchmark_mode,
+            )
+        )
         if benchmark_mode:
-            metrics["curve_curve_min_dist"] = None
-            metrics["curve_surface_min_dist"] = None
-            metrics["surface_vessel_min_dist"] = None
             metrics["hardware_status"] = benchmark_hardware_status
         else:
             metrics["hardware_status"] = evaluate_single_stage_hardware_constraints(
@@ -4868,7 +4889,7 @@ if __name__ == "__main__":
     warm_start_surface_dofs = (
         None
         if warm_start_state is None
-        else project_single_stage_warm_start_surface_dofs(
+        else project_surface_dofs_to_resolution(
             warm_start_state["surface"],
             mpol=mpol,
             ntor=ntor,

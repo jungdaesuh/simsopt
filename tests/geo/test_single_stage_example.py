@@ -191,6 +191,52 @@ class SingleStageExampleTests(unittest.TestCase):
     def load_module(self):
         return load_single_stage_example_module()
 
+    @staticmethod
+    def _make_reporting_runtime_summary(*, include_distance_metrics):
+        return {
+            "final_G": 1.75,
+            "final_non_qs": 0.11,
+            "final_boozer_residual": 0.22,
+            "final_iota_penalty": 0.33,
+            "final_length_penalty": 0.44,
+            "final_curve_curve_penalty": 0.55,
+            "final_curve_surface_penalty": 0.66,
+            "final_surface_vessel_penalty": 0.77,
+            "final_curvature_penalty": 0.88,
+            "coil_length": 4.25,
+            "max_curvature": 12.5,
+            "curve_curve_min_dist": 0.8 if include_distance_metrics else None,
+            "curve_surface_min_dist": 0.9 if include_distance_metrics else None,
+            "surface_vessel_min_dist": 1.0 if include_distance_metrics else None,
+        }
+
+    @staticmethod
+    def _make_reporting_runtime_builder(captured, runtime_summary):
+        def _runtime_builder(
+            boozer_surface,
+            bs,
+            iota_target,
+            *,
+            include_profile_suite=False,
+            include_host_wrappers=False,
+            outer_objective_config=None,
+            success_filter=None,
+        ):
+            del boozer_surface, bs, iota_target
+            captured["include_profile_suite"] = include_profile_suite
+            captured["include_host_wrappers"] = include_host_wrappers
+            captured["outer_objective_config"] = outer_objective_config
+            captured["success_filter"] = success_filter
+
+            def _host_reporting_metrics(coil_dofs, **kwargs):
+                del coil_dofs
+                captured["host_reporting_metrics_kwargs"] = kwargs
+                return runtime_summary
+
+            return {"host_reporting_metrics": _host_reporting_metrics}
+
+        return _runtime_builder
+
     def resolve_benchmark_target_lane_sync(
         self,
         module,
@@ -1480,9 +1526,36 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertTrue(warm_start["surface_path"].endswith("surf_opt.json"))
         self.assertTrue(warm_start["results_path"].endswith("results.json"))
 
-    def test_project_single_stage_warm_start_surface_dofs_reprojects_to_target_resolution(
+    def test_project_single_stage_warm_start_surface_dofs_delegates_to_resolution_projector(
         self,
     ):
+        module = self.load_module()
+        surface = object()
+        quadpoints_phi = np.linspace(0.0, 0.2, 5, endpoint=False)
+        quadpoints_theta = np.linspace(0.0, 1.0, 7, endpoint=False)
+        with patch.object(
+            module,
+            "project_surface_dofs_to_resolution",
+            return_value=np.array([1.0]),
+        ) as projector:
+            projected_dofs = module.project_single_stage_warm_start_surface_dofs(
+                surface,
+                mpol=8,
+                ntor=6,
+                quadpoints_phi=quadpoints_phi,
+                quadpoints_theta=quadpoints_theta,
+            )
+
+        np.testing.assert_allclose(projected_dofs, np.array([1.0]))
+        projector.assert_called_once_with(
+            surface,
+            mpol=8,
+            ntor=6,
+            quadpoints_phi=quadpoints_phi,
+            quadpoints_theta=quadpoints_theta,
+        )
+
+    def test_project_surface_dofs_to_resolution_reprojects_to_target_resolution(self):
         module = self.load_module()
 
         class FakeSurface:
@@ -1508,7 +1581,7 @@ class SingleStageExampleTests(unittest.TestCase):
         with patch.object(
             module, "SurfaceXYZTensorFourier", FakeSurfaceXYZTensorFourier
         ):
-            projected_dofs = module.project_single_stage_warm_start_surface_dofs(
+            projected_dofs = module.project_surface_dofs_to_resolution(
                 FakeSurface(),
                 mpol=8,
                 ntor=6,
@@ -2259,22 +2332,9 @@ class SingleStageExampleTests(unittest.TestCase):
     ):
         module = self.load_module()
         captured = {}
-        runtime_summary = {
-            "final_G": 1.75,
-            "final_non_qs": 0.11,
-            "final_boozer_residual": 0.22,
-            "final_iota_penalty": 0.33,
-            "final_length_penalty": 0.44,
-            "final_curve_curve_penalty": 0.55,
-            "final_curve_surface_penalty": 0.66,
-            "final_surface_vessel_penalty": 0.77,
-            "final_curvature_penalty": 0.88,
-            "coil_length": 4.25,
-            "max_curvature": 12.5,
-            "curve_curve_min_dist": 0.8,
-            "curve_surface_min_dist": 0.9,
-            "surface_vessel_min_dist": 1.0,
-        }
+        runtime_summary = self._make_reporting_runtime_summary(
+            include_distance_metrics=True
+        )
 
         class RejectingPenalty:
             def J(self):
@@ -2284,27 +2344,10 @@ class SingleStageExampleTests(unittest.TestCase):
             def shortest_distance(self):
                 raise AssertionError("host-side distance wrapper should not be used")
 
-        def _runtime_builder(
-            boozer_surface,
-            bs,
-            iota_target,
-            *,
-            include_profile_suite=False,
-            include_host_wrappers=False,
-            outer_objective_config=None,
-            success_filter=None,
-        ):
-            del boozer_surface, bs, iota_target
-            captured["include_profile_suite"] = include_profile_suite
-            captured["include_host_wrappers"] = include_host_wrappers
-            captured["outer_objective_config"] = outer_objective_config
-            captured["success_filter"] = success_filter
-            return {"host_reporting_metrics": lambda coil_dofs: runtime_summary}
-
         with patch.object(
             module,
             "get_traceable_single_stage_runtime_bundle_builder",
-            return_value=_runtime_builder,
+            return_value=self._make_reporting_runtime_builder(captured, runtime_summary),
         ):
             metrics = module.resolve_single_stage_final_penalty_metrics(
                 use_target_lane=True,
@@ -2338,10 +2381,66 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertEqual(captured["include_host_wrappers"], True)
         self.assertEqual(captured["outer_objective_config"], "config-marker")
         self.assertEqual(captured["success_filter"], "success-filter-marker")
+        self.assertEqual(
+            captured["host_reporting_metrics_kwargs"],
+            {"include_distance_metrics": True},
+        )
         for metric_name, expected_value in runtime_summary.items():
             self.assertEqual(metrics[metric_name], expected_value)
         self.assertTrue(metrics["hardware_status"]["success"])
         self.assertEqual(metrics["hardware_status"]["violations"], [])
+
+    def test_resolve_single_stage_final_penalty_metrics_skips_target_lane_distances_in_benchmark_mode(
+        self,
+    ):
+        module = self.load_module()
+        captured = {}
+        runtime_summary = self._make_reporting_runtime_summary(
+            include_distance_metrics=False
+        )
+
+        with patch.object(
+            module,
+            "get_traceable_single_stage_runtime_bundle_builder",
+            return_value=self._make_reporting_runtime_builder(captured, runtime_summary),
+        ):
+            metrics = module.resolve_single_stage_final_penalty_metrics(
+                use_target_lane=True,
+                benchmark_mode=True,
+                skip_outer_optimizer=False,
+                boozer_surface=object(),
+                bs=object(),
+                iota_target=0.21,
+                coil_dofs=jax.device_put(np.array([1.0, -2.0], dtype=np.float64)),
+                outer_objective_config="config-marker",
+                success_filter="success-filter-marker",
+                curvelength=object(),
+                j_non_qs=object(),
+                j_boozer_residual=object(),
+                j_iota=object(),
+                j_curve_length=object(),
+                j_curve_curve=object(),
+                j_curve_surface=object(),
+                j_surface_surface=object(),
+                j_curvature=object(),
+                cc_dist=0.05,
+                cs_dist=0.02,
+                ss_dist=0.04,
+                curvature_threshold=40.0,
+            )
+
+        self.assertEqual(
+            captured["host_reporting_metrics_kwargs"],
+            {"include_distance_metrics": False},
+        )
+        self.assertIsNone(metrics["curve_curve_min_dist"])
+        self.assertIsNone(metrics["curve_surface_min_dist"])
+        self.assertIsNone(metrics["surface_vessel_min_dist"])
+        self.assertIsNone(metrics["hardware_status"]["success"])
+        self.assertEqual(
+            metrics["hardware_status"]["violations"],
+            ["skipped_in_benchmark_mode"],
+        )
 
     def test_build_target_lane_outer_objectives_profiles_with_jax_coil_dofs(self):
         module = self.load_module()
