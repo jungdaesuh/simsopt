@@ -48,9 +48,9 @@ def _assert_plu_tuple_matches(actual, expected) -> None:
         np.testing.assert_allclose(actual_part, expected_part, atol=1e-14)
 
 
-def _assert_plu_tuple_is_zero(parts) -> None:
+def _assert_plu_tuple_is_nan(parts) -> None:
     for part in parts:
-        np.testing.assert_array_equal(part, np.zeros_like(part))
+        assert np.isnan(part).all()
 
 
 def test_traceable_plu_or_dummy_accepts_python_and_traced_predicates():
@@ -65,7 +65,7 @@ def test_traceable_plu_or_dummy_accepts_python_and_traced_predicates():
     )
 
     _assert_plu_tuple_matches(eager_true, expected)
-    _assert_plu_tuple_is_zero(eager_false)
+    _assert_plu_tuple_is_nan(eager_false)
 
     @jax.jit
     def traceable(finite):
@@ -75,7 +75,7 @@ def test_traceable_plu_or_dummy_accepts_python_and_traced_predicates():
     traced_false = tuple(np.asarray(part) for part in traceable(jnp.asarray(False)))
 
     _assert_plu_tuple_matches(traced_true, expected)
-    _assert_plu_tuple_is_zero(traced_false)
+    _assert_plu_tuple_is_nan(traced_false)
 
 
 def test_optimizer_dtype_uses_dtype_attr_without_eager_hostification(monkeypatch):
@@ -147,6 +147,79 @@ def test_line_search_value_and_grad_uses_explicit_initial_step_size():
     )
 
     assert float(result.a_k) == pytest.approx(0.125)
+
+
+def test_line_search_value_and_grad_skips_zero_step_reevaluation_with_explicit_state():
+    def quad(x):
+        return 0.5 * jnp.dot(x, x), x
+
+    xk = jnp.asarray([1.0], dtype=jnp.float64)
+    pk = jnp.asarray([-1.0], dtype=jnp.float64)
+    result = _opt._line_search_value_and_grad(
+        quad,
+        xk,
+        pk,
+        old_fval=jnp.asarray(0.5, dtype=jnp.float64),
+        gfk=jnp.asarray([1.0], dtype=jnp.float64),
+        initial_step_size=0.125,
+        maxiter=1,
+    )
+
+    assert int(result.nfev) == 1
+    assert int(result.ngev) == 1
+    assert float(result.f_k) == pytest.approx(0.5 * 0.875**2)
+
+
+def test_zoom_reuses_cached_bracketing_sample_without_extra_eval(monkeypatch):
+    # Access the submodule for monkeypatching, then restore the function
+    # reference that __init__.py exports so _opt._line_search stays callable
+    # for subsequent tests.
+    import importlib
+    import simsopt.geo.optimizer_jax_private as _private_pkg
+
+    _line_search_fn = _private_pkg._line_search  # save function reference
+    line_search_module = importlib.import_module(
+        "simsopt.geo.optimizer_jax_private._line_search"
+    )
+    _private_pkg._line_search = _line_search_fn  # restore clobbered binding
+
+    def _reuse_cached_cubic(_a, _fa, _fpa, _b, _fb, c, _fc):
+        return c
+
+    def _fresh_eval(_alpha):
+        return (
+            jnp.asarray(9.0, dtype=jnp.float64),
+            jnp.asarray(4.0, dtype=jnp.float64),
+            jnp.asarray([4.0], dtype=jnp.float64),
+        )
+
+    monkeypatch.setattr(line_search_module, "_cubicmin", _reuse_cached_cubic)
+    zoom = line_search_module._zoom(
+        _fresh_eval,
+        lambda _alpha, _phi: jnp.asarray(False),
+        lambda _dphi: jnp.asarray(True),
+        jnp.asarray(1.5, dtype=jnp.float64),
+        jnp.asarray(1.0, dtype=jnp.float64),
+        jnp.asarray(1.0, dtype=jnp.float64),
+        jnp.asarray(-1.0, dtype=jnp.float64),
+        jnp.asarray([-1.0], dtype=jnp.float64),
+        jnp.asarray(2.0, dtype=jnp.float64),
+        jnp.asarray(3.0, dtype=jnp.float64),
+        jnp.asarray(1.0, dtype=jnp.float64),
+        jnp.asarray([1.0], dtype=jnp.float64),
+        jnp.asarray(True),
+        jnp.asarray(1.25, dtype=jnp.float64),
+        jnp.asarray(0.8, dtype=jnp.float64),
+        jnp.asarray(-0.1, dtype=jnp.float64),
+        jnp.asarray([-0.1], dtype=jnp.float64),
+        jnp.asarray(1, dtype=jnp.int32),
+        jnp.asarray(False),
+    )
+
+    assert int(zoom.nfev) == 0
+    assert int(zoom.ngev) == 0
+    assert float(zoom.a_star) == pytest.approx(1.25)
+    assert float(zoom.phi_star) == pytest.approx(0.8)
 
 
 def test_bfgs_curvature_terms_reject_bad_curvature_updates():
@@ -536,8 +609,10 @@ class TestOptimizerAdapterPrivate:
 
         result = _opt._line_search(
             quad,
-            jnp.array([1], dtype=jnp.int32),
+            jnp.array([2], dtype=jnp.int32),
             jnp.array([-1], dtype=jnp.int32),
+            old_fval=jnp.array(2, dtype=jnp.int32),
+            gfk=jnp.array([2], dtype=jnp.int32),
             maxiter=5,
         )
 
