@@ -10,7 +10,6 @@ import os
 import sys
 import time
 import types
-from functools import lru_cache
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 EXAMPLE_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, ".."))
@@ -842,6 +841,135 @@ def resolve_curvature_threshold(value: float) -> float:
     )
 
 
+def evaluate_single_stage_hardware_constraints_pure(
+    curve_curve_min_dist,
+    cc_dist,
+    curve_surface_min_dist,
+    cs_dist,
+    surface_vessel_min_dist,
+    ss_dist,
+    max_curvature,
+    curvature_threshold,
+):
+    """Evaluate single-stage hardware constraints without leaving the runtime lane."""
+    curve_curve_min_dist = _as_jax_float64(curve_curve_min_dist)
+    cc_dist = _as_jax_float64(cc_dist)
+    curve_surface_min_dist = _as_jax_float64(curve_surface_min_dist)
+    cs_dist = _as_jax_float64(cs_dist)
+    surface_vessel_min_dist = _as_jax_float64(surface_vessel_min_dist)
+    ss_dist = _as_jax_float64(ss_dist)
+    max_curvature = _as_jax_float64(max_curvature)
+    curvature_threshold = _as_jax_float64(curvature_threshold)
+
+    finite_flags = {
+        "curve_curve_min_dist": jnp.isfinite(curve_curve_min_dist),
+        "cc_dist": jnp.isfinite(cc_dist),
+        "curve_surface_min_dist": jnp.isfinite(curve_surface_min_dist),
+        "cs_dist": jnp.isfinite(cs_dist),
+        "surface_vessel_min_dist": jnp.isfinite(surface_vessel_min_dist),
+        "ss_dist": jnp.isfinite(ss_dist),
+        "max_curvature": jnp.isfinite(max_curvature),
+        "curvature_threshold": jnp.isfinite(curvature_threshold),
+    }
+    threshold_flags = {
+        "curve_curve_min_dist": curve_curve_min_dist >= cc_dist,
+        "curve_surface_min_dist": curve_surface_min_dist >= cs_dist,
+        "surface_vessel_min_dist": surface_vessel_min_dist >= ss_dist,
+        "max_curvature": max_curvature <= curvature_threshold,
+    }
+    success = jnp.all(
+        jnp.asarray(
+            tuple(finite_flags.values()) + tuple(threshold_flags.values()),
+            dtype=bool,
+        )
+    )
+    return {
+        "success": success,
+        "finite_flags": finite_flags,
+        "threshold_flags": threshold_flags,
+        "curve_curve_min_dist": curve_curve_min_dist,
+        "cc_dist": cc_dist,
+        "curve_surface_min_dist": curve_surface_min_dist,
+        "cs_dist": cs_dist,
+        "surface_vessel_min_dist": surface_vessel_min_dist,
+        "ss_dist": ss_dist,
+        "max_curvature": max_curvature,
+        "curvature_threshold": curvature_threshold,
+    }
+
+
+def _hostify_single_stage_hardware_constraints(status):
+    """Normalize pure single-stage hardware status at the reporting boundary."""
+    host_status = {
+        "success": host_bool(status["success"]),
+        "curve_curve_min_dist": host_float(status["curve_curve_min_dist"]),
+        "cc_dist": host_float(status["cc_dist"]),
+        "curve_surface_min_dist": host_float(status["curve_surface_min_dist"]),
+        "cs_dist": host_float(status["cs_dist"]),
+        "surface_vessel_min_dist": host_float(status["surface_vessel_min_dist"]),
+        "ss_dist": host_float(status["ss_dist"]),
+        "max_curvature": host_float(status["max_curvature"]),
+        "curvature_threshold": host_float(status["curvature_threshold"]),
+    }
+    finite_flags = {
+        metric_name: host_bool(metric_ok)
+        for metric_name, metric_ok in status["finite_flags"].items()
+    }
+    threshold_flags = {
+        metric_name: host_bool(metric_ok)
+        for metric_name, metric_ok in status["threshold_flags"].items()
+    }
+    violations = []
+    for metric_name, label in (
+        ("curve_curve_min_dist", "coil_coil_min_dist"),
+        ("cc_dist", "cc_dist"),
+        ("curve_surface_min_dist", "coil_surface_min_dist"),
+        ("cs_dist", "cs_dist"),
+        ("surface_vessel_min_dist", "surface_vessel_min_dist"),
+        ("ss_dist", "ss_dist"),
+        ("max_curvature", "max_curvature"),
+        ("curvature_threshold", "curvature_threshold"),
+    ):
+        if not finite_flags[metric_name]:
+            violations.append(
+                f"{label} {host_status[metric_name]} is not finite"
+            )
+    if finite_flags["curve_curve_min_dist"] and finite_flags["cc_dist"] and (
+        not threshold_flags["curve_curve_min_dist"]
+    ):
+        violations.append(
+            "coil_coil_min_dist "
+            f"{host_status['curve_curve_min_dist']:.6f} below threshold "
+            f"{host_status['cc_dist']:.6f}"
+        )
+    if finite_flags["curve_surface_min_dist"] and finite_flags["cs_dist"] and (
+        not threshold_flags["curve_surface_min_dist"]
+    ):
+        violations.append(
+            "coil_surface_min_dist "
+            f"{host_status['curve_surface_min_dist']:.6f} below threshold "
+            f"{host_status['cs_dist']:.6f}"
+        )
+    if finite_flags["surface_vessel_min_dist"] and finite_flags["ss_dist"] and (
+        not threshold_flags["surface_vessel_min_dist"]
+    ):
+        violations.append(
+            "surface_vessel_min_dist "
+            f"{host_status['surface_vessel_min_dist']:.6f} below threshold "
+            f"{host_status['ss_dist']:.6f}"
+        )
+    if finite_flags["max_curvature"] and finite_flags["curvature_threshold"] and (
+        not threshold_flags["max_curvature"]
+    ):
+        violations.append(
+            "max_curvature "
+            f"{host_status['max_curvature']:.6f} exceeds threshold "
+            f"{host_status['curvature_threshold']:.6f}"
+        )
+    host_status["violations"] = violations
+    return host_status
+
+
 def evaluate_single_stage_hardware_constraints(
     curve_curve_min_dist,
     cc_dist,
@@ -853,55 +981,18 @@ def evaluate_single_stage_hardware_constraints(
     curvature_threshold,
 ):
     """Evaluate hard single-stage hardware constraints against realized geometry."""
-    curve_curve_min_dist = float(curve_curve_min_dist)
-    cc_dist = float(cc_dist)
-    curve_surface_min_dist = float(curve_surface_min_dist)
-    cs_dist = float(cs_dist)
-    surface_vessel_min_dist = float(surface_vessel_min_dist)
-    ss_dist = float(ss_dist)
-    max_curvature = float(max_curvature)
-    curvature_threshold = float(curvature_threshold)
-    violations = []
-    for metric_name, metric_value in (
-        ("coil_coil_min_dist", curve_curve_min_dist),
-        ("cc_dist", cc_dist),
-        ("coil_surface_min_dist", curve_surface_min_dist),
-        ("cs_dist", cs_dist),
-        ("surface_vessel_min_dist", surface_vessel_min_dist),
-        ("ss_dist", ss_dist),
-        ("max_curvature", max_curvature),
-        ("curvature_threshold", curvature_threshold),
-    ):
-        if not np.isfinite(metric_value):
-            violations.append(f"{metric_name} {metric_value} is not finite")
-    if curve_curve_min_dist < cc_dist:
-        violations.append(
-            f"coil_coil_min_dist {curve_curve_min_dist:.6f} below threshold {cc_dist:.6f}"
+    return _hostify_single_stage_hardware_constraints(
+        evaluate_single_stage_hardware_constraints_pure(
+            curve_curve_min_dist,
+            cc_dist,
+            curve_surface_min_dist,
+            cs_dist,
+            surface_vessel_min_dist,
+            ss_dist,
+            max_curvature,
+            curvature_threshold,
         )
-    if curve_surface_min_dist < cs_dist:
-        violations.append(
-            f"coil_surface_min_dist {curve_surface_min_dist:.6f} below threshold {cs_dist:.6f}"
-        )
-    if surface_vessel_min_dist < ss_dist:
-        violations.append(
-            f"surface_vessel_min_dist {surface_vessel_min_dist:.6f} below threshold {ss_dist:.6f}"
-        )
-    if max_curvature > curvature_threshold:
-        violations.append(
-            f"max_curvature {max_curvature:.6f} exceeds threshold {curvature_threshold:.6f}"
-        )
-    return {
-        "success": len(violations) == 0,
-        "violations": violations,
-        "curve_curve_min_dist": curve_curve_min_dist,
-        "cc_dist": cc_dist,
-        "curve_surface_min_dist": curve_surface_min_dist,
-        "cs_dist": cs_dist,
-        "surface_vessel_min_dist": surface_vessel_min_dist,
-        "ss_dist": ss_dist,
-        "max_curvature": max_curvature,
-        "curvature_threshold": curvature_threshold,
-    }
+    )
 
 
 def _can_evaluate_single_stage_hardware_status(objectives, diagnostics):
@@ -1011,6 +1102,16 @@ def _hostify_traceable_value_and_grad(value_and_grad, x):
     return (
         host_float(value),
         np.asarray(host_array(grad), dtype=np.float64).reshape(-1),
+    )
+
+
+def total_single_stage_objective_from_traceable_reporting_metrics(metrics):
+    """Reconstruct the weighted single-stage objective on the runtime lane."""
+    return jnp.sum(
+        jnp.asarray(
+            [metrics[field_name] for field_name in _SINGLE_STAGE_WEIGHTED_REPORTING_FIELDS],
+            dtype=jnp.float64,
+        )
     )
 
 
@@ -1432,9 +1533,34 @@ def _fit_surface_xyz_tensor_dofs_to_gamma(
     quadpoints_phi,
     quadpoints_theta,
 ):
-    quadpoints_phi_jax = jnp.asarray(quadpoints_phi, dtype=jnp.float64)
-    quadpoints_theta_jax = jnp.asarray(quadpoints_theta, dtype=jnp.float64)
-    target_gamma_jax = jnp.asarray(target_gamma, dtype=jnp.float64)
+    quadpoints_phi_host = np.asarray(quadpoints_phi, dtype=np.float64)
+    quadpoints_theta_host = np.asarray(quadpoints_theta, dtype=np.float64)
+    target_gamma_host = np.asarray(
+        jax.device_get(target_gamma)
+        if isinstance(target_gamma, jax.Array)
+        else target_gamma,
+        dtype=np.float64,
+    ).reshape(quadpoints_phi_host.size, quadpoints_theta_host.size, 3)
+
+    # Delegate to the host solver directly. The C++ least_squares_fit uses a
+    # QR-based algorithm whose alias resolution is data-dependent, so
+    # reverse-engineering its convention via probing is unreliable. Since this
+    # is a one-time initialization step (not on the inner-loop hot path),
+    # calling the host solver is both simpler and correct.
+    host_surface = SurfaceXYZTensorFourier(
+        mpol=max(1, int(mpol)),
+        ntor=max(1, int(ntor)),
+        nfp=int(nfp),
+        stellsym=bool(stellsym),
+        quadpoints_phi=quadpoints_phi_host,
+        quadpoints_theta=quadpoints_theta_host,
+    )
+    host_surface.least_squares_fit(target_gamma_host)
+    fitted_dofs_host = np.asarray(host_surface.get_dofs(), dtype=float)
+
+    # Check rank via the design matrix to report whether the fit is unique.
+    quadpoints_phi_jax = jnp.asarray(quadpoints_phi_host, dtype=jnp.float64)
+    quadpoints_theta_jax = jnp.asarray(quadpoints_theta_host, dtype=jnp.float64)
     design_matrix = _surface_xyz_tensor_design_matrix(
         mpol=mpol,
         ntor=ntor,
@@ -1443,211 +1569,14 @@ def _fit_surface_xyz_tensor_dofs_to_gamma(
         quadpoints_phi=quadpoints_phi_jax,
         quadpoints_theta=quadpoints_theta_jax,
     )
-    fitted_dofs, _, rank, _ = jnp.linalg.lstsq(
+    _, _, rank, _ = jnp.linalg.lstsq(
         design_matrix,
-        jnp.reshape(target_gamma_jax, (-1,)),
+        jnp.zeros(design_matrix.shape[0], dtype=jnp.float64),
         rcond=None,
-    )
-    fitted_dofs_host = _canonicalize_surface_xyz_tensor_fit_dofs(
-        np.asarray(jax.device_get(fitted_dofs), dtype=float),
-        mpol=mpol,
-        ntor=ntor,
-        nfp=nfp,
-        stellsym=stellsym,
-        quadpoints_phi=quadpoints_phi_jax,
-        quadpoints_theta=quadpoints_theta_jax,
     )
     design_rank = int(np.asarray(jax.device_get(rank)))
     return fitted_dofs_host, design_rank == int(design_matrix.shape[1])
 
-
-def _quadpoints_cache_key(values):
-    return tuple(float(value) for value in np.asarray(values, dtype=float).reshape(-1))
-
-
-def _surface_xyz_tensor_design_matrix_host(
-    *,
-    mpol,
-    ntor,
-    nfp,
-    stellsym,
-    quadpoints_phi,
-    quadpoints_theta,
-):
-    return np.asarray(
-        jax.device_get(
-            _surface_xyz_tensor_design_matrix(
-                mpol=mpol,
-                ntor=ntor,
-                nfp=nfp,
-                stellsym=stellsym,
-                quadpoints_phi=jnp.asarray(quadpoints_phi, dtype=jnp.float64),
-                quadpoints_theta=jnp.asarray(quadpoints_theta, dtype=jnp.float64),
-            )
-        ),
-        dtype=float,
-    )
-
-
-def _surface_xyz_tensor_alias_cache_args(
-    *,
-    mpol,
-    ntor,
-    nfp,
-    stellsym,
-    quadpoints_phi,
-    quadpoints_theta,
-):
-    return (
-        int(mpol),
-        int(ntor),
-        int(nfp),
-        bool(stellsym),
-        _quadpoints_cache_key(quadpoints_phi),
-        _quadpoints_cache_key(quadpoints_theta),
-    )
-
-
-@lru_cache(maxsize=None)
-def _surface_xyz_tensor_alias_groups(
-    mpol,
-    ntor,
-    nfp,
-    stellsym,
-    quadpoints_phi_key,
-    quadpoints_theta_key,
-):
-    design_matrix = _surface_xyz_tensor_design_matrix_host(
-        mpol=mpol,
-        ntor=ntor,
-        nfp=nfp,
-        stellsym=stellsym,
-        quadpoints_phi=quadpoints_phi_key,
-        quadpoints_theta=quadpoints_theta_key,
-    )
-    ncols = int(design_matrix.shape[1])
-    used = np.zeros(ncols, dtype=bool)
-    groups = []
-    atol = 1.0e-12
-    for column_index in range(ncols):
-        if used[column_index]:
-            continue
-        reference = design_matrix[:, column_index]
-        members = [(column_index, 1.0)]
-        used[column_index] = True
-        for other_index in range(column_index + 1, ncols):
-            if used[other_index]:
-                continue
-            candidate = design_matrix[:, other_index]
-            if np.allclose(candidate, reference, rtol=0.0, atol=atol):
-                members.append((other_index, 1.0))
-                used[other_index] = True
-            elif np.allclose(candidate, -reference, rtol=0.0, atol=atol):
-                members.append((other_index, -1.0))
-                used[other_index] = True
-        groups.append(
-            (
-                int(column_index),
-                bool(np.max(np.abs(reference)) <= atol),
-                tuple((int(index), float(sign)) for index, sign in members),
-            )
-        )
-    return tuple(groups)
-
-
-@lru_cache(maxsize=None)
-def _surface_xyz_tensor_alias_group_host_convention(
-    mpol,
-    ntor,
-    nfp,
-    stellsym,
-    quadpoints_phi_key,
-    quadpoints_theta_key,
-):
-    """Resolve the legacy host QR representative for each alias group."""
-    quadpoints_phi = np.asarray(quadpoints_phi_key, dtype=float)
-    quadpoints_theta = np.asarray(quadpoints_theta_key, dtype=float)
-    alias_groups = _surface_xyz_tensor_alias_groups(
-        int(mpol),
-        int(ntor),
-        int(nfp),
-        bool(stellsym),
-        quadpoints_phi_key,
-        quadpoints_theta_key,
-    )
-    design_matrix = _surface_xyz_tensor_design_matrix_host(
-        mpol=mpol,
-        ntor=ntor,
-        nfp=nfp,
-        stellsym=stellsym,
-        quadpoints_phi=quadpoints_phi,
-        quadpoints_theta=quadpoints_theta,
-    )
-    host_surface = SurfaceXYZTensorFourier(
-        mpol=mpol,
-        ntor=ntor,
-        nfp=nfp,
-        stellsym=stellsym,
-        quadpoints_phi=quadpoints_phi,
-        quadpoints_theta=quadpoints_theta,
-    )
-
-    conventions = []
-    for representative_index, zero_column, members in alias_groups:
-        if zero_column or len(members) == 1:
-            conventions.append((int(representative_index), 1.0))
-            continue
-        target_gamma = design_matrix[:, representative_index].reshape(
-            quadpoints_phi.size,
-            quadpoints_theta.size,
-            3,
-        )
-        host_surface.least_squares_fit(target_gamma)
-        host_dofs = np.asarray(host_surface.get_dofs(), dtype=float)
-        chosen_index, chosen_sign, chosen_value = max(
-            (
-                (int(index), float(sign), float(host_dofs[index]))
-                for index, sign in members
-            ),
-            key=lambda item: abs(item[2]),
-        )
-        del chosen_value
-        conventions.append((chosen_index, chosen_sign))
-    return tuple(conventions)
-
-
-def _canonicalize_surface_xyz_tensor_fit_dofs(
-    fitted_dofs,
-    *,
-    mpol,
-    ntor,
-    nfp,
-    stellsym,
-    quadpoints_phi,
-    quadpoints_theta,
-):
-    """Collapse alias-equivalent coefficients to the host solver convention."""
-    alias_cache_args = _surface_xyz_tensor_alias_cache_args(
-        mpol=mpol,
-        ntor=ntor,
-        nfp=nfp,
-        stellsym=stellsym,
-        quadpoints_phi=quadpoints_phi,
-        quadpoints_theta=quadpoints_theta,
-    )
-    alias_groups = _surface_xyz_tensor_alias_groups(*alias_cache_args)
-    host_convention = _surface_xyz_tensor_alias_group_host_convention(*alias_cache_args)
-    canonical_dofs = np.zeros_like(np.asarray(fitted_dofs, dtype=float))
-    for (representative_index, zero_column, members), (
-        host_index,
-        host_orientation,
-    ) in zip(alias_groups, host_convention):
-        if zero_column:
-            canonical_dofs[representative_index] = 0.0
-            continue
-        canonical_value = sum(sign * float(fitted_dofs[index]) for index, sign in members)
-        canonical_dofs[int(host_index)] = float(host_orientation) * canonical_value
-    return canonical_dofs
 
 
 def _target_gamma_from_supported_surface(
@@ -2839,25 +2768,28 @@ def resolve_single_stage_final_penalty_metrics(
             outer_objective_config=outer_objective_config,
             success_filter=success_filter,
         )
+        traceable_metrics = runtime_bundle["reporting_metrics"](
+            _as_jax_float64(coil_dofs),
+            include_distance_metrics=not benchmark_mode,
+        )
         metrics = _hostify_traceable_reporting_metrics(
-            runtime_bundle["reporting_metrics"](
-                _as_jax_float64(coil_dofs),
-                include_distance_metrics=not benchmark_mode,
-            ),
+            traceable_metrics,
             include_distance_metrics=not benchmark_mode,
         )
         if benchmark_mode:
             metrics["hardware_status"] = benchmark_hardware_status
         else:
-            metrics["hardware_status"] = evaluate_single_stage_hardware_constraints(
-                metrics["curve_curve_min_dist"],
-                cc_dist,
-                metrics["curve_surface_min_dist"],
-                cs_dist,
-                metrics["surface_vessel_min_dist"],
-                ss_dist,
-                metrics["max_curvature"],
-                curvature_threshold,
+            metrics["hardware_status"] = _hostify_single_stage_hardware_constraints(
+                evaluate_single_stage_hardware_constraints_pure(
+                    traceable_metrics["curve_curve_min_dist"],
+                    cc_dist,
+                    traceable_metrics["curve_surface_min_dist"],
+                    cs_dist,
+                    traceable_metrics["surface_vessel_min_dist"],
+                    ss_dist,
+                    traceable_metrics["max_curvature"],
+                    curvature_threshold,
+                )
             )
         return metrics
 
@@ -2893,6 +2825,8 @@ def resolve_single_stage_final_penalty_metrics(
         "final_curvature_penalty": host_float(j_curvature.J()),
         "coil_length": host_float(curvelength.J()),
         "max_curvature": max_curvature,
+        "final_volume": host_float(boozer_surface.surface.volume()),
+        "final_iota": host_float(boozer_surface.res["iota"]),
         "curve_curve_min_dist": final_curve_curve_min_dist,
         "curve_surface_min_dist": final_curve_surface_min_dist,
         "surface_vessel_min_dist": final_surface_vessel_min_dist,
@@ -2998,11 +2932,12 @@ def build_single_stage_target_lane_accepted_step_sync(
                 "single-stage array-native state."
             )
 
+        traceable_reporting_metrics = runtime_bundle["reporting_metrics"](
+            coil_dofs,
+            include_distance_metrics=not benchmark_mode,
+        )
         reporting_metrics = _hostify_traceable_reporting_metrics(
-            runtime_bundle["reporting_metrics"](
-                coil_dofs,
-                include_distance_metrics=not benchmark_mode,
-            ),
+            traceable_reporting_metrics,
             include_distance_metrics=not benchmark_mode,
         )
         if benchmark_mode:
@@ -3011,19 +2946,23 @@ def build_single_stage_target_lane_accepted_step_sync(
                 "violations": ["skipped_in_benchmark_mode"],
             }
         else:
-            hardware_status = evaluate_single_stage_hardware_constraints(
-                reporting_metrics["curve_curve_min_dist"],
-                CC_DIST,
-                reporting_metrics["curve_surface_min_dist"],
-                CS_DIST,
-                reporting_metrics["surface_vessel_min_dist"],
-                SS_DIST,
-                reporting_metrics["max_curvature"],
-                CURVATURE_THRESHOLD,
+            hardware_status = _hostify_single_stage_hardware_constraints(
+                evaluate_single_stage_hardware_constraints_pure(
+                    traceable_reporting_metrics["curve_curve_min_dist"],
+                    CC_DIST,
+                    traceable_reporting_metrics["curve_surface_min_dist"],
+                    CS_DIST,
+                    traceable_reporting_metrics["surface_vessel_min_dist"],
+                    SS_DIST,
+                    traceable_reporting_metrics["max_curvature"],
+                    CURVATURE_THRESHOLD,
+                )
             )
         reporting_metrics["hardware_status"] = hardware_status
-        objective_value = total_single_stage_objective_from_reporting_metrics(
-            reporting_metrics
+        objective_value = host_float(
+            total_single_stage_objective_from_traceable_reporting_metrics(
+                traceable_reporting_metrics
+            )
         )
         snapshot_accepted_step_state_from_values(
             run_dict,

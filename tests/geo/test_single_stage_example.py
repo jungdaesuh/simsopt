@@ -6232,6 +6232,35 @@ class HardwareConstraintTests(unittest.TestCase):
         self.assertIn("surface_vessel_min_dist", status["violations"][2])
         self.assertIn("max_curvature", status["violations"][3])
 
+    def test_single_stage_hardware_constraints_pure_matches_host_status(self):
+        module = load_single_stage_example_module()
+
+        pure_status = module.evaluate_single_stage_hardware_constraints_pure(
+            curve_curve_min_dist=jnp.asarray(0.04, dtype=jnp.float64),
+            cc_dist=jnp.asarray(0.05, dtype=jnp.float64),
+            curve_surface_min_dist=jnp.asarray(0.01, dtype=jnp.float64),
+            cs_dist=jnp.asarray(0.02, dtype=jnp.float64),
+            surface_vessel_min_dist=jnp.asarray(0.03, dtype=jnp.float64),
+            ss_dist=jnp.asarray(0.04, dtype=jnp.float64),
+            max_curvature=jnp.asarray(41.0, dtype=jnp.float64),
+            curvature_threshold=jnp.asarray(40.0, dtype=jnp.float64),
+        )
+        hostified_status = module._hostify_single_stage_hardware_constraints(
+            pure_status
+        )
+        direct_status = module.evaluate_single_stage_hardware_constraints(
+            curve_curve_min_dist=0.04,
+            cc_dist=0.05,
+            curve_surface_min_dist=0.01,
+            cs_dist=0.02,
+            surface_vessel_min_dist=0.03,
+            ss_dist=0.04,
+            max_curvature=41.0,
+            curvature_threshold=40.0,
+        )
+
+        self.assertEqual(hostified_status, direct_status)
+
     def test_single_stage_hardware_constraints_report_isolated_violations(self):
         module = load_single_stage_example_module()
 
