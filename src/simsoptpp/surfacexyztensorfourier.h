@@ -51,11 +51,8 @@ class SurfaceXYZTensorFourier : public Surface<Array> {
         Array cache_enforcer_dphi;
         Array cache_enforcer_dtheta;
         Array cache_enforcer_dthetadtheta;
-        Array cache_enforcer_dthetadphi;
         Array cache_enforcer_dphidphi;
         Array cache_enforcer_dthetadthetadtheta;
-        Array cache_enforcer_dthetadthetadphi;
-        Array cache_enforcer_dthetadphidphi;
         Array cache_enforcer_dphidphidphi;
         int nfp;
         int mpol;
@@ -925,10 +922,7 @@ class SurfaceXYZTensorFourier : public Surface<Array> {
             cache_enforcer_dtheta = xt::zeros<double>({numquadpoints_phi, numquadpoints_theta});
             cache_enforcer_dphidphi = xt::zeros<double>({numquadpoints_phi, numquadpoints_theta});
             cache_enforcer_dthetadtheta = xt::zeros<double>({numquadpoints_phi, numquadpoints_theta});
-            cache_enforcer_dthetadphi = xt::zeros<double>({numquadpoints_phi, numquadpoints_theta});
             cache_enforcer_dthetadthetadtheta = xt::zeros<double>({numquadpoints_phi, numquadpoints_theta});
-            cache_enforcer_dthetadthetadphi = xt::zeros<double>({numquadpoints_phi, numquadpoints_theta});
-            cache_enforcer_dthetadphidphi = xt::zeros<double>({numquadpoints_phi, numquadpoints_theta});
             cache_enforcer_dphidphidphi = xt::zeros<double>({numquadpoints_phi, numquadpoints_theta});
             for (int k1 = 0; k1 < numquadpoints_phi; ++k1) {
                 double phi  = 2*M_PI*quadpoints_phi[k1];
@@ -939,10 +933,7 @@ class SurfaceXYZTensorFourier : public Surface<Array> {
                     cache_enforcer_dtheta(k1, k2) = bc_enforcer_dtheta_core(theta);
                     cache_enforcer_dphidphi(k1, k2) = bc_enforcer_dphidphi_core(phi);
                     cache_enforcer_dthetadtheta(k1, k2) = bc_enforcer_dthetadtheta_core(theta);
-                    cache_enforcer_dthetadphi(k1, k2) = bc_enforcer_dthetadphi_core(phi, theta);
                     cache_enforcer_dthetadthetadtheta(k1, k2) = bc_enforcer_dthetadthetadtheta_core(theta);
-                    cache_enforcer_dthetadthetadphi(k1, k2) = bc_enforcer_dthetadthetadphi_core(phi, theta);
-                    cache_enforcer_dthetadphidphi(k1, k2) = bc_enforcer_dthetadphidphi_core(phi, theta);
                     cache_enforcer_dphidphidphi(k1, k2) = bc_enforcer_dphidphidphi_core(phi);
                 }
             }
@@ -1065,13 +1056,12 @@ class SurfaceXYZTensorFourier : public Surface<Array> {
         inline double basis_fun_dthetadphi(int dim, int n, int phiidx, int m, int thetaidx){
             double fun_dthetadphi = cache_basis_fun_phi_dash(phiidx, n)*cache_basis_fun_theta_dash(thetaidx, m);
             if(apply_bc_enforcer(dim, n, m)){
-                double fun = cache_basis_fun_phi(phiidx, n)*cache_basis_fun_theta(thetaidx, m);
                 double fun_dtheta = cache_basis_fun_phi(phiidx, n)*cache_basis_fun_theta_dash(thetaidx, m);
                 double fun_dphi = cache_basis_fun_phi_dash(phiidx, n)*cache_basis_fun_theta(thetaidx, m);
                 fun_dthetadphi = fun_dthetadphi*cache_enforcer(phiidx, thetaidx) \
                                 + fun_dtheta*cache_enforcer_dphi(phiidx, thetaidx) \
-                                + fun_dphi*cache_enforcer_dtheta(phiidx, thetaidx) \
-                                + fun*cache_enforcer_dthetadphi(phiidx, thetaidx);
+                                + fun_dphi*cache_enforcer_dtheta(phiidx, thetaidx);
+                // d(enforcer)/d(theta)d(phi) = 0 by separability
             }
             return fun_dthetadphi;
         }
@@ -1108,15 +1098,12 @@ class SurfaceXYZTensorFourier : public Surface<Array> {
             if(apply_bc_enforcer(dim, n, m)){
                 double fun_dphidphi = cache_basis_fun_phi_dashdash(phiidx, n)*cache_basis_fun_theta(thetaidx, m);
                 double fun_dphidtheta = cache_basis_fun_phi_dash(phiidx, n)*cache_basis_fun_theta_dash(thetaidx, m);
-                double fun_dphi = cache_basis_fun_phi_dash(phiidx, n)*cache_basis_fun_theta(thetaidx, m);
-                double fun = cache_basis_fun_phi(phiidx, n)*cache_basis_fun_theta(thetaidx, m);
                 double fun_dtheta = cache_basis_fun_phi(phiidx, n)*cache_basis_fun_theta_dash(thetaidx, m);
                 fun_dthetadphidphi = fun_dthetadphidphi*cache_enforcer(phiidx, thetaidx) \
                             +  fun_dphidphi*cache_enforcer_dtheta(phiidx, thetaidx) \
                             +2*fun_dphidtheta*cache_enforcer_dphi(phiidx, thetaidx) \
-                            +2*fun_dphi*cache_enforcer_dthetadphi(phiidx, thetaidx) \
-                            +  fun_dtheta*cache_enforcer_dphidphi(phiidx, thetaidx) \
-                            +  fun*cache_enforcer_dthetadphidphi(phiidx, thetaidx);
+                            +  fun_dtheta*cache_enforcer_dphidphi(phiidx, thetaidx);
+                // d(enforcer)/d(theta)d(phi) = d(enforcer)/d(theta)d(phi)^2 = 0 by separability
             }
             return fun_dthetadphidphi;
         }
@@ -1124,18 +1111,14 @@ class SurfaceXYZTensorFourier : public Surface<Array> {
         inline double basis_fun_dthetadthetadphi(int dim, int n, int phiidx, int m, int thetaidx){
             double fun_dthetadthetadphi = cache_basis_fun_phi_dash(phiidx, n)*cache_basis_fun_theta_dashdash(thetaidx, m);
             if(apply_bc_enforcer(dim, n, m)){
-                double fun = cache_basis_fun_phi(phiidx, n)*cache_basis_fun_theta(thetaidx, m);
-                double fun_dtheta = cache_basis_fun_phi(phiidx, n)*cache_basis_fun_theta_dash(thetaidx, m);
                 double fun_dthetadtheta = cache_basis_fun_phi(phiidx, n)*cache_basis_fun_theta_dashdash(thetaidx, m);
                 double fun_dphi = cache_basis_fun_phi_dash(phiidx, n)*cache_basis_fun_theta(thetaidx, m);
                 double fun_dthetadphi = cache_basis_fun_phi_dash(phiidx, n)*cache_basis_fun_theta_dash(thetaidx, m);
                 fun_dthetadthetadphi = fun_dthetadthetadphi*cache_enforcer(phiidx, thetaidx) \
-                                + fun_dthetadphi*cache_enforcer_dtheta(phiidx, thetaidx) \
+                                + 2*fun_dthetadphi*cache_enforcer_dtheta(phiidx, thetaidx) \
                                 + fun_dthetadtheta*cache_enforcer_dphi(phiidx, thetaidx) \
-                                + fun_dthetadphi*cache_enforcer_dtheta(phiidx, thetaidx) \
-                                + 2*fun_dtheta*cache_enforcer_dthetadphi(phiidx, thetaidx) \
-                                + fun_dphi*cache_enforcer_dthetadtheta(phiidx, thetaidx) \
-                                + fun*cache_enforcer_dthetadthetadphi(phiidx, thetaidx);
+                                + fun_dphi*cache_enforcer_dthetadtheta(phiidx, thetaidx);
+                // d(enforcer)/d(theta)d(phi) = d(enforcer)/d(theta)^2 d(phi) = 0 by separability
             }
             return fun_dthetadthetadphi;
         }
