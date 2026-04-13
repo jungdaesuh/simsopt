@@ -824,16 +824,27 @@ def test_make_traceable_objective_runtime_bundle_omits_host_wrappers_by_default(
         },
         "objective": object(),
         "batched_value_and_grad": batched_value_and_grad_for,
+        "reporting_metrics": None,
         "host_objective": None,
         "host_value_and_grad": None,
         "profile_suite": None,
     }
     ensure_calls = []
+    ensure_reporting_calls = []
+
+    def ensure_reporting(entry):
+        ensure_reporting_calls.append(entry)
+        entry["reporting_metrics"] = ("reporting_metrics", entry["compiled_bundle"])
 
     monkeypatch.setattr(
         surfaceobjectives_jax_module,
         "_get_cached_traceable_runtime_entry",
         lambda *_args, **_kwargs: runtime_entry,
+    )
+    monkeypatch.setattr(
+        surfaceobjectives_jax_module,
+        "_ensure_traceable_runtime_reporting_metrics",
+        ensure_reporting,
     )
     monkeypatch.setattr(
         surfaceobjectives_jax_module,
@@ -852,7 +863,9 @@ def test_make_traceable_objective_runtime_bundle_omits_host_wrappers_by_default(
         "objective": runtime_entry["objective"],
         "value_and_grad": compiled_value_and_grad_for,
         "batched_value_and_grad": batched_value_and_grad_for,
+        "reporting_metrics": ("reporting_metrics", runtime_entry["compiled_bundle"]),
     }
+    assert ensure_reporting_calls == [runtime_entry]
     assert ensure_calls == []
 
 
@@ -867,11 +880,18 @@ def test_make_traceable_objective_runtime_bundle_materializes_host_wrappers_on_d
         },
         "objective": object(),
         "batched_value_and_grad": batched_value_and_grad_for,
+        "reporting_metrics": None,
         "host_objective": None,
         "host_value_and_grad": None,
+        "host_reporting_metrics": None,
         "profile_suite": None,
     }
     ensure_calls = []
+    ensure_reporting_calls = []
+
+    def ensure_reporting(entry):
+        ensure_reporting_calls.append(entry)
+        entry["reporting_metrics"] = ("reporting_metrics", entry["compiled_bundle"])
 
     def ensure_wrappers(entry):
         ensure_calls.append(entry)
@@ -880,11 +900,20 @@ def test_make_traceable_objective_runtime_bundle_materializes_host_wrappers_on_d
             "host_value_and_grad",
             entry["compiled_bundle"]["compiled_value_and_grad_for"],
         )
+        entry["host_reporting_metrics"] = (
+            "host_reporting_metrics",
+            entry["reporting_metrics"],
+        )
 
     monkeypatch.setattr(
         surfaceobjectives_jax_module,
         "_get_cached_traceable_runtime_entry",
         lambda *_args, **_kwargs: runtime_entry,
+    )
+    monkeypatch.setattr(
+        surfaceobjectives_jax_module,
+        "_ensure_traceable_runtime_reporting_metrics",
+        ensure_reporting,
     )
     monkeypatch.setattr(
         surfaceobjectives_jax_module,
@@ -904,12 +933,18 @@ def test_make_traceable_objective_runtime_bundle_materializes_host_wrappers_on_d
         "objective": runtime_entry["objective"],
         "value_and_grad": compiled_value_and_grad_for,
         "batched_value_and_grad": batched_value_and_grad_for,
+        "reporting_metrics": ("reporting_metrics", runtime_entry["compiled_bundle"]),
         "host_objective": ("host_objective", runtime_entry["objective"]),
         "host_value_and_grad": (
             "host_value_and_grad",
             compiled_value_and_grad_for,
         ),
+        "host_reporting_metrics": (
+            "host_reporting_metrics",
+            ("reporting_metrics", runtime_entry["compiled_bundle"]),
+        ),
     }
+    assert ensure_reporting_calls == [runtime_entry]
     assert ensure_calls == [runtime_entry]
 
 

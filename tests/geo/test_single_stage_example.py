@@ -194,6 +194,8 @@ class SingleStageExampleTests(unittest.TestCase):
     @staticmethod
     def _make_reporting_runtime_summary(*, include_distance_metrics):
         return {
+            "solver_success": True,
+            "has_G": True,
             "final_G": 1.75,
             "final_non_qs": 0.11,
             "final_boozer_residual": 0.22,
@@ -205,6 +207,8 @@ class SingleStageExampleTests(unittest.TestCase):
             "final_curvature_penalty": 0.88,
             "coil_length": 4.25,
             "max_curvature": 12.5,
+            "final_volume": 6.5,
+            "final_iota": 0.21,
             "curve_curve_min_dist": 0.8 if include_distance_metrics else None,
             "curve_surface_min_dist": 0.9 if include_distance_metrics else None,
             "surface_vessel_min_dist": 1.0 if include_distance_metrics else None,
@@ -228,12 +232,12 @@ class SingleStageExampleTests(unittest.TestCase):
             captured["outer_objective_config"] = outer_objective_config
             captured["success_filter"] = success_filter
 
-            def _host_reporting_metrics(coil_dofs, **kwargs):
+            def _reporting_metrics(coil_dofs, **kwargs):
                 del coil_dofs
-                captured["host_reporting_metrics_kwargs"] = kwargs
+                captured["reporting_metrics_kwargs"] = kwargs
                 return runtime_summary
 
-            return {"host_reporting_metrics": _host_reporting_metrics}
+            return {"reporting_metrics": _reporting_metrics}
 
         return _runtime_builder
 
@@ -253,6 +257,10 @@ class SingleStageExampleTests(unittest.TestCase):
             module, "SurfaceXYZTensorFourier", FakeSurfaceXYZTensorFourier
         ), patch.object(module, "Volume", FakeVolume), patch.object(
             module, "BoozerSurface", FakeBoozerSurface
+        ), patch.object(
+            module,
+            "project_surface_dofs_to_resolution",
+            return_value=np.array([1.0], dtype=np.float64),
         ):
             return module.initialize_boozer_surface(
                 surf_prev,
@@ -320,6 +328,10 @@ class SingleStageExampleTests(unittest.TestCase):
             module, "SurfaceXYZTensorFourier", FakeSurfaceXYZTensorFourier
         ), patch.object(module, "Volume", FakeVolume), patch.object(
             module, "BoozerSurface", FailingCPUBoozerSurface
+        ), patch.object(
+            module,
+            "project_surface_dofs_to_resolution",
+            return_value=np.array([1.0], dtype=np.float64),
         ), patch.dict(
             sys.modules,
             {"simsopt.geo.boozersurface_jax": fake_jax_module},
@@ -1613,6 +1625,7 @@ class SingleStageExampleTests(unittest.TestCase):
 
     def test_project_surface_dofs_to_resolution_reprojects_to_target_resolution(self):
         module = self.load_module()
+        captured = {}
 
         class FakeSurface:
             nfp = 5
@@ -1634,8 +1647,15 @@ class SingleStageExampleTests(unittest.TestCase):
         quadpoints_phi = np.linspace(0.0, 0.2, 5, endpoint=False)
         quadpoints_theta = np.linspace(0.0, 1.0, 7, endpoint=False)
 
+        def _fit_surface_xyz_tensor_dofs_to_gamma(target_gamma, **kwargs):
+            captured["target_gamma"] = np.asarray(target_gamma)
+            captured["kwargs"] = kwargs
+            return np.array([1.0]), True
+
         with patch.object(
-            module, "SurfaceXYZTensorFourier", FakeSurfaceXYZTensorFourier
+            module,
+            "_fit_surface_xyz_tensor_dofs_to_gamma",
+            side_effect=_fit_surface_xyz_tensor_dofs_to_gamma,
         ):
             projected_dofs = module.project_surface_dofs_to_resolution(
                 FakeSurface(),
@@ -1646,9 +1666,6 @@ class SingleStageExampleTests(unittest.TestCase):
             )
 
         np.testing.assert_allclose(projected_dofs, np.array([1.0]))
-        projected_surface = FakeSurfaceXYZTensorFourier.instances[-1]
-        self.assertEqual(projected_surface.mpol, 8)
-        self.assertEqual(projected_surface.ntor, 6)
         expected_gamma = np.stack(
             [
                 np.column_stack(
@@ -1662,55 +1679,53 @@ class SingleStageExampleTests(unittest.TestCase):
             ],
             axis=0,
         )
-        np.testing.assert_allclose(projected_surface.fitted_gamma, expected_gamma)
+        np.testing.assert_allclose(captured["target_gamma"], expected_gamma)
+        self.assertEqual(captured["kwargs"]["mpol"], 8)
+        self.assertEqual(captured["kwargs"]["ntor"], 6)
+        self.assertEqual(captured["kwargs"]["nfp"], 5)
+        self.assertTrue(captured["kwargs"]["stellsym"])
 
     def test_project_single_stage_warm_start_surface_dofs_uses_gamma_fast_path_for_xyz_surface(
         self,
     ):
         module = self.load_module()
-
-        class FastSurfaceXYZTensorFourier(FakeSurfaceXYZTensorFourier):
-            instances = []
-
-            def __init__(self, **kwargs):
-                super().__init__(**kwargs)
-                FastSurfaceXYZTensorFourier.instances.append(self)
-
-            def gamma(self):
-                phi_grid = np.broadcast_to(
-                    self.quadpoints_phi[:, None],
-                    (self.quadpoints_phi.size, self.quadpoints_theta.size),
-                )
-                theta_grid = np.broadcast_to(
-                    self.quadpoints_theta[None, :],
-                    (self.quadpoints_phi.size, self.quadpoints_theta.size),
-                )
-                dof_offset = float(np.sum(self.dofs))
-                return np.stack(
-                    (
-                        phi_grid,
-                        theta_grid,
-                        phi_grid + theta_grid + dof_offset,
-                    ),
-                    axis=2,
-                )
-
-        source_surface = FastSurfaceXYZTensorFourier(
+        captured = {}
+        source_surface = module.SurfaceXYZTensorFourier(
             mpol=2,
             ntor=2,
             nfp=5,
             stellsym=True,
             quadpoints_theta=np.linspace(0.0, 1.0, 3, endpoint=False),
             quadpoints_phi=np.linspace(0.0, 0.2, 2, endpoint=False),
-            dofs=np.array([3.0, -1.0]),
         )
+        source_dofs = source_surface.get_dofs().copy()
+        source_dofs[:] = np.linspace(0.05, 0.05 * source_dofs.size, source_dofs.size)
+        source_surface.set_dofs(source_dofs)
         quadpoints_phi = np.linspace(0.0, 0.2, 5, endpoint=False)
         quadpoints_theta = np.linspace(0.0, 1.0, 7, endpoint=False)
 
+        expected_gamma = module.surface_gamma_from_dofs(
+            jnp.asarray(source_surface.get_dofs(), dtype=jnp.float64),
+            jnp.asarray(quadpoints_phi, dtype=jnp.float64),
+            jnp.asarray(quadpoints_theta, dtype=jnp.float64),
+            source_surface.mpol,
+            source_surface.ntor,
+            source_surface.nfp,
+            source_surface.stellsym,
+            scatter_indices=module.stellsym_scatter_indices(
+                source_surface.mpol, source_surface.ntor
+            ),
+        )
+
+        def _fit_surface_xyz_tensor_dofs_to_gamma(target_gamma, **kwargs):
+            captured["target_gamma"] = np.asarray(target_gamma)
+            captured["kwargs"] = kwargs
+            return np.array([1.0]), True
+
         with patch.object(
             module,
-            "SurfaceXYZTensorFourier",
-            FastSurfaceXYZTensorFourier,
+            "_fit_surface_xyz_tensor_dofs_to_gamma",
+            side_effect=_fit_surface_xyz_tensor_dofs_to_gamma,
         ):
             projected_dofs = module.project_single_stage_warm_start_surface_dofs(
                 source_surface,
@@ -1720,18 +1735,66 @@ class SingleStageExampleTests(unittest.TestCase):
                 quadpoints_theta=quadpoints_theta,
             )
 
-        self.assertEqual(len(FastSurfaceXYZTensorFourier.instances), 3)
-        projected_surface = FastSurfaceXYZTensorFourier.instances[1]
-        evaluation_surface = FastSurfaceXYZTensorFourier.instances[2]
-        np.testing.assert_allclose(
-            evaluation_surface.dofs,
-            np.array([3.0, -1.0]),
-        )
-        np.testing.assert_allclose(
-            projected_surface.fitted_gamma,
-            evaluation_surface.gamma(),
-        )
         np.testing.assert_allclose(projected_dofs, np.array([1.0]))
+        np.testing.assert_allclose(captured["target_gamma"], np.asarray(expected_gamma))
+        self.assertEqual(captured["kwargs"]["mpol"], 8)
+        self.assertEqual(captured["kwargs"]["ntor"], 6)
+
+    def test_project_surface_dofs_to_resolution_uses_dof_fast_path_for_rz_surface(
+        self,
+    ):
+        module = self.load_module()
+        captured = {}
+        source_surface = module.SurfaceRZFourier(
+            mpol=2,
+            ntor=1,
+            nfp=5,
+            stellsym=True,
+            quadpoints_phi=np.linspace(0.0, 0.2, 4, endpoint=False),
+            quadpoints_theta=np.linspace(0.0, 1.0, 5, endpoint=False),
+        )
+        source_dofs = source_surface.get_dofs().copy()
+        source_dofs[:] = np.linspace(0.03, 0.03 * source_dofs.size, source_dofs.size)
+        source_surface.set_dofs(source_dofs)
+        quadpoints_phi = np.linspace(0.0, 0.2, 6, endpoint=False)
+        quadpoints_theta = np.linspace(0.0, 1.0, 7, endpoint=False)
+
+        source_spec = module.surface_rz_fourier_spec_from_dofs(
+            jnp.asarray(source_surface.get_dofs(), dtype=jnp.float64),
+            quadpoints_phi=jnp.asarray(quadpoints_phi, dtype=jnp.float64),
+            quadpoints_theta=jnp.asarray(quadpoints_theta, dtype=jnp.float64),
+            mpol=source_surface.mpol,
+            ntor=source_surface.ntor,
+            nfp=source_surface.nfp,
+            stellsym=source_surface.stellsym,
+        )
+        expected_gamma = module.surface_rz_fourier_gamma_from_dofs(
+            source_spec,
+            jnp.asarray(source_surface.get_dofs(), dtype=jnp.float64),
+        )
+
+        def _fit_surface_xyz_tensor_dofs_to_gamma(target_gamma, **kwargs):
+            captured["target_gamma"] = np.asarray(target_gamma)
+            captured["kwargs"] = kwargs
+            return np.array([2.0]), True
+
+        with patch.object(
+            module,
+            "_fit_surface_xyz_tensor_dofs_to_gamma",
+            side_effect=_fit_surface_xyz_tensor_dofs_to_gamma,
+        ):
+            projected_dofs = module.project_surface_dofs_to_resolution(
+                source_surface,
+                mpol=8,
+                ntor=6,
+                quadpoints_phi=quadpoints_phi,
+                quadpoints_theta=quadpoints_theta,
+            )
+
+        np.testing.assert_allclose(projected_dofs, np.array([2.0]))
+        np.testing.assert_allclose(captured["target_gamma"], np.asarray(expected_gamma))
+        self.assertEqual(captured["kwargs"]["nfp"], source_surface.nfp)
+        self.assertTrue(captured["kwargs"]["stellsym"])
 
     def test_project_surface_dofs_to_resolution_matches_host_for_serialized_xyz_surface(
         self,
@@ -1827,6 +1890,63 @@ class SingleStageExampleTests(unittest.TestCase):
         np.testing.assert_allclose(
             serialized_projected_dofs,
             host_projected_dofs,
+            rtol=1e-10,
+            atol=1e-12,
+        )
+
+    def test_project_surface_dofs_to_resolution_matches_host_for_rz_nonstellsym_alias_convention(
+        self,
+    ):
+        module = self.load_module()
+        source_surface = module.SurfaceRZFourier(
+            mpol=2,
+            ntor=2,
+            nfp=3,
+            stellsym=False,
+            quadpoints_phi=np.linspace(0.0, 1.0, 8, endpoint=False),
+            quadpoints_theta=np.linspace(0.0, 1.0, 7, endpoint=False),
+        )
+        source_dofs = source_surface.get_dofs().copy()
+        source_dofs[:] = np.linspace(
+            0.015,
+            0.015 * source_dofs.size,
+            source_dofs.size,
+        )
+        source_surface.set_dofs(source_dofs)
+        quadpoints_phi = np.linspace(0.0, 1.0, 9, endpoint=False)
+        quadpoints_theta = np.linspace(0.0, 1.0, 8, endpoint=False)
+
+        projected_dofs = module.project_surface_dofs_to_resolution(
+            source_surface,
+            mpol=3,
+            ntor=2,
+            quadpoints_phi=quadpoints_phi,
+            quadpoints_theta=quadpoints_theta,
+        )
+
+        legacy_surface = module.SurfaceXYZTensorFourier(
+            mpol=3,
+            ntor=2,
+            nfp=source_surface.nfp,
+            stellsym=source_surface.stellsym,
+            quadpoints_phi=quadpoints_phi,
+            quadpoints_theta=quadpoints_theta,
+        )
+        target_gamma = np.stack(
+            [
+                np.asarray(
+                    source_surface.cross_section(float(phi), thetas=quadpoints_theta),
+                    dtype=float,
+                )
+                for phi in np.asarray(quadpoints_phi, dtype=float)
+            ],
+            axis=0,
+        )
+        legacy_surface.least_squares_fit(target_gamma)
+
+        np.testing.assert_allclose(
+            projected_dofs,
+            np.asarray(legacy_surface.get_dofs(), dtype=float),
             rtol=1e-10,
             atol=1e-12,
         )
@@ -2532,11 +2652,11 @@ class SingleStageExampleTests(unittest.TestCase):
             )
 
         self.assertEqual(captured["include_profile_suite"], False)
-        self.assertEqual(captured["include_host_wrappers"], True)
+        self.assertEqual(captured["include_host_wrappers"], False)
         self.assertEqual(captured["outer_objective_config"], "config-marker")
         self.assertEqual(captured["success_filter"], "success-filter-marker")
         self.assertEqual(
-            captured["host_reporting_metrics_kwargs"],
+            captured["reporting_metrics_kwargs"],
             {"include_distance_metrics": True},
         )
         for metric_name, expected_value in runtime_summary.items():
@@ -2584,7 +2704,7 @@ class SingleStageExampleTests(unittest.TestCase):
             )
 
         self.assertEqual(
-            captured["host_reporting_metrics_kwargs"],
+            captured["reporting_metrics_kwargs"],
             {"include_distance_metrics": False},
         )
         self.assertIsNone(metrics["curve_curve_min_dist"])
@@ -2595,6 +2715,68 @@ class SingleStageExampleTests(unittest.TestCase):
             metrics["hardware_status"]["violations"],
             ["skipped_in_benchmark_mode"],
         )
+
+    def test_build_single_stage_target_lane_accepted_step_sync_uses_pure_reporting_metrics(
+        self,
+    ):
+        module = self.load_module()
+        captured = {}
+        runtime_summary = self._make_reporting_runtime_summary(
+            include_distance_metrics=True
+        )
+        fake_boozer_surface = types.SimpleNamespace(
+            run_code_traceable=lambda *_args: {
+                "success": jnp.asarray(True, dtype=bool),
+                "sdofs": jnp.asarray([0.4, -0.2], dtype=jnp.float64),
+                "iota": jnp.asarray(0.21, dtype=jnp.float64),
+                "G": jnp.asarray(1.75, dtype=jnp.float64),
+            }
+        )
+        fake_bs = types.SimpleNamespace(coil_set_spec_from_dofs=lambda coil_dofs: coil_dofs)
+
+        with patch.object(
+            module,
+            "get_traceable_single_stage_runtime_bundle_builder",
+            return_value=self._make_reporting_runtime_builder(captured, runtime_summary),
+        ), patch.object(module, "CC_DIST", 0.05, create=True), patch.object(
+            module, "CS_DIST", 0.02, create=True
+        ), patch.object(module, "SS_DIST", 0.04, create=True), patch.object(
+            module, "CURVATURE_THRESHOLD", 40.0, create=True
+        ):
+            sync = module.build_single_stage_target_lane_accepted_step_sync(
+                fake_boozer_surface,
+                fake_bs,
+                0.21,
+                outer_objective_config="config-marker",
+                success_filter="success-filter-marker",
+            )
+            run_dict = {
+                "sdofs": np.array([0.1, -0.05], dtype=np.float64),
+                "iota": 0.2,
+                "G": 1.0,
+                "J": 1.0,
+                "dJ": np.zeros(2, dtype=np.float64),
+            }
+            summary = sync(
+                run_dict,
+                jax.device_put(np.array([1.0, -2.0], dtype=np.float64)),
+                benchmark_mode=False,
+            )
+
+        self.assertEqual(captured["include_profile_suite"], False)
+        self.assertEqual(captured["include_host_wrappers"], False)
+        self.assertEqual(captured["outer_objective_config"], "config-marker")
+        self.assertEqual(captured["success_filter"], "success-filter-marker")
+        self.assertEqual(
+            captured["reporting_metrics_kwargs"],
+            {"include_distance_metrics": True},
+        )
+        self.assertIn("objective_value", summary)
+        self.assertEqual(
+            summary["reporting_metrics"]["final_non_qs"],
+            runtime_summary["final_non_qs"],
+        )
+        self.assertTrue(run_dict["hardware_constraint_status"]["success"])
 
     def test_build_target_lane_outer_objectives_profiles_with_jax_coil_dofs(self):
         module = self.load_module()
@@ -2956,15 +3138,14 @@ class SingleStageExampleTests(unittest.TestCase):
             runtime_builder_calls.append(
                 (include_host_wrappers, outer_objective_config, success_filter)
             )
-            self.assertTrue(include_host_wrappers)
+            self.assertFalse(include_host_wrappers)
 
-            def _host_value_and_grad(x):
+            def _value_and_grad(x):
                 x = np.asarray(x, dtype=np.float64)
-                return float(np.dot(x, x)), 2.0 * x
+                return np.dot(x, x), 2.0 * x
 
             return {
-                "host_value_and_grad": _host_value_and_grad,
-                "value_and_grad": object(),
+                "value_and_grad": _value_and_grad,
             }
 
         def _run_single_stage_optimizer(
@@ -3057,7 +3238,7 @@ class SingleStageExampleTests(unittest.TestCase):
         build_scaled_problem.assert_called_once()
         self.assertEqual(
             runtime_builder_calls,
-            [(True, "config-marker", success_filter_marker)],
+            [(False, "config-marker", success_filter_marker)],
         )
         self.assertEqual(len(optimizer_calls), 1)
         self.assertEqual(optimizer_calls[0]["contract_method"], "lbfgs-ondevice")
@@ -3088,7 +3269,7 @@ class SingleStageExampleTests(unittest.TestCase):
 
     def test_build_target_lane_scaled_phase1_diagnosis_is_transfer_safe(self):
         module = self.load_module()
-        host_value_and_grad_calls = []
+        value_and_grad_calls = []
 
         def _runtime_builder(
             *args,
@@ -3097,17 +3278,16 @@ class SingleStageExampleTests(unittest.TestCase):
             success_filter=None,
         ):
             del args, outer_objective_config, success_filter
-            self.assertTrue(include_host_wrappers)
+            self.assertFalse(include_host_wrappers)
 
-            def _host_value_and_grad(x):
-                host_value_and_grad_calls.append(x)
+            def _value_and_grad(x):
+                value_and_grad_calls.append(x)
                 self.assertIsInstance(x, jax.Array)
                 x_host = np.asarray(jax.device_get(x), dtype=np.float64)
-                return float(np.dot(x_host, x_host)), 2.0 * x_host
+                return np.dot(x_host, x_host), 2.0 * x_host
 
             return {
-                "host_value_and_grad": _host_value_and_grad,
-                "value_and_grad": object(),
+                "value_and_grad": _value_and_grad,
             }
 
         def _run_single_stage_optimizer(
@@ -3196,7 +3376,7 @@ class SingleStageExampleTests(unittest.TestCase):
                 )
 
         self.assertTrue(diagnosis["all_finite"])
-        self.assertGreaterEqual(len(host_value_and_grad_calls), 4)
+        self.assertGreaterEqual(len(value_and_grad_calls), 4)
 
     def test_build_target_lane_scaled_phase1_diagnosis_writes_incremental_checkpoints(
         self,
@@ -3211,15 +3391,14 @@ class SingleStageExampleTests(unittest.TestCase):
             success_filter=None,
         ):
             del args, outer_objective_config, success_filter
-            self.assertTrue(include_host_wrappers)
+            self.assertFalse(include_host_wrappers)
 
-            def _host_value_and_grad(x):
+            def _value_and_grad(x):
                 x = np.asarray(x, dtype=np.float64)
-                return float(np.dot(x, x)), 2.0 * x
+                return np.dot(x, x), 2.0 * x
 
             return {
-                "host_value_and_grad": _host_value_and_grad,
-                "value_and_grad": object(),
+                "value_and_grad": _value_and_grad,
             }
 
         def _run_single_stage_optimizer(

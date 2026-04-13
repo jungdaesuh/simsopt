@@ -40,7 +40,6 @@ from .._core.jax_host_boundary import (
 from .._core.optimizable import Optimizable
 from ..jax_core._math_utils import (
     as_jax_float64 as _as_jax_float64,
-    as_jax_int32 as _as_jax_int32,
     as_runtime_float64 as _as_runtime_float64,
     zeros as _zeros,
 )
@@ -71,6 +70,9 @@ from .boozersurface_jax import (
     _make_boozer_penalty_objective_closure,
 )
 from .label_constraints_jax import compute_G_from_currents
+from ._surface_stellsym import (
+    compute_stellsym_mask_indices_for_grid as _compute_stellsym_mask_indices_for_grid,
+)
 from .surface_fourier_jax import surface_volume
 from .surfaceobjectives import (
     surface_to_surface_distance_pure,
@@ -503,74 +505,6 @@ def _traceable_full_single_stage_outer_objective(
     for term_name, _weight_key in _TRACEABLE_SINGLE_STAGE_OUTER_TERM_SPECS:
         total = total + weighted_terms[term_name]
     return total
-
-
-def _surface_stellsym_mask_for_grid(
-    *,
-    ntor,
-    mpol,
-    nfp,
-    stellsym,
-    quadpoints_phi,
-    quadpoints_theta,
-):
-    phis = np.asarray(quadpoints_phi, dtype=float)
-    thetas = np.asarray(quadpoints_theta, dtype=float)
-    mask = np.ones((phis.size, thetas.size), dtype=bool)
-    if not stellsym:
-        return mask
-
-    def _same_grid(lhs, rhs):
-        return lhs.shape == rhs.shape and np.allclose(lhs, rhs)
-
-    full_phi = np.linspace(0.0, 1.0 / nfp, 2 * ntor + 1, endpoint=False)
-    full_theta = np.linspace(0.0, 1.0, 2 * mpol + 1, endpoint=False)
-    half_theta = np.linspace(0.0, 0.5, mpol + 1, endpoint=False)
-    half_phi = np.linspace(0.0, 1.0 / (2.0 * nfp), ntor + 1, endpoint=False)
-
-    if _same_grid(phis, full_phi) and _same_grid(thetas, full_theta):
-        mask[:, mpol + 1 :] = False
-        mask[ntor + 1 :, 0] = False
-        return mask
-    if _same_grid(phis, full_phi) and _same_grid(thetas, half_theta):
-        mask[ntor + 1 :, 0] = False
-        return mask
-    if _same_grid(phis, half_phi) and _same_grid(thetas, full_theta):
-        mask[0, mpol + 1 :] = False
-        return mask
-    raise Exception(
-        "Stellarator symmetric BoozerExact surfaces require a specific set of "
-        "quadrature points on the surface. See the "
-        "SurfaceXYZTensorFourier.get_stellsym_mask() docstring for more "
-        "information."
-    )
-
-
-def _compute_stellsym_mask_indices_for_grid(
-    *,
-    mpol,
-    ntor,
-    nfp,
-    stellsym,
-    quadpoints_phi,
-    quadpoints_theta,
-):
-    """Return exact-residual mask indices for a specific surface quadrature."""
-    mask = np.repeat(
-        _surface_stellsym_mask_for_grid(
-            mpol=mpol,
-            ntor=ntor,
-            nfp=nfp,
-            stellsym=stellsym,
-            quadpoints_phi=quadpoints_phi,
-            quadpoints_theta=quadpoints_theta,
-        )[..., None],
-        3,
-        axis=2,
-    )
-    if stellsym:
-        mask[0, 0, 0] = False
-    return _as_jax_int32(np.flatnonzero(mask))
 
 
 def _canonicalize_traceable_exact_quadrature(booz_jax):
@@ -2216,6 +2150,7 @@ def _get_cached_traceable_runtime_entry(
         "batched_value_and_grad": _make_traceable_batched_value_and_grad_pipeline(
             compiled_bundle["compiled_value_and_grad_for"]
         ),
+        "reporting_metrics": None,
         "host_objective": None,
         "host_value_and_grad": None,
         "host_reporting_metrics": None,
@@ -2225,8 +2160,18 @@ def _get_cached_traceable_runtime_entry(
     return cached_entry
 
 
+def _ensure_traceable_runtime_reporting_metrics(runtime_entry):
+    """Materialize the pure reporting-metrics selector on demand."""
+    if runtime_entry["reporting_metrics"] is None:
+        runtime_entry["reporting_metrics"] = _make_traceable_reporting_metrics_bundle(
+            runtime_entry["compiled_bundle"]
+        )
+    return runtime_entry
+
+
 def _ensure_traceable_runtime_host_wrappers(runtime_entry):
     """Materialize host-boundary wrappers for one cached runtime entry on demand."""
+    _ensure_traceable_runtime_reporting_metrics(runtime_entry)
     if runtime_entry["host_objective"] is None:
         runtime_entry["host_objective"] = _make_traceable_host_objective(
             runtime_entry["objective"]
@@ -2237,7 +2182,7 @@ def _ensure_traceable_runtime_host_wrappers(runtime_entry):
         )
     if runtime_entry["host_reporting_metrics"] is None:
         runtime_entry["host_reporting_metrics"] = _make_traceable_host_reporting_metrics(
-            runtime_entry["compiled_bundle"]
+            runtime_entry["reporting_metrics"]
         )
     return runtime_entry
 
@@ -2412,8 +2357,8 @@ def _make_traceable_reporting_metrics(compiled_bundle, *, include_distance_metri
     return jax.jit(reporting_metrics)
 
 
-def _make_traceable_host_reporting_metrics(compiled_bundle):
-    """Build a host-normalized solved-state reporting summary wrapper."""
+def _make_traceable_reporting_metrics_bundle(compiled_bundle):
+    """Build the pure reporting-metrics selector for one compiled bundle."""
     reporting_metrics = _make_traceable_reporting_metrics(
         compiled_bundle,
         include_distance_metrics=True,
@@ -2422,6 +2367,20 @@ def _make_traceable_host_reporting_metrics(compiled_bundle):
         compiled_bundle,
         include_distance_metrics=False,
     )
+
+    def reporting_metrics_for(coil_dofs, *, include_distance_metrics=True):
+        selected_reporting_metrics = (
+            reporting_metrics
+            if include_distance_metrics
+            else reporting_metrics_without_distances
+        )
+        return selected_reporting_metrics(coil_dofs)
+
+    return reporting_metrics_for
+
+
+def _make_traceable_host_reporting_metrics(reporting_metrics):
+    """Build a host-normalized solved-state reporting summary wrapper."""
     float_metric_names = (
         "final_non_qs",
         "final_boozer_residual",
@@ -2443,12 +2402,10 @@ def _make_traceable_host_reporting_metrics(compiled_bundle):
     )
 
     def host_reporting_metrics(coil_dofs, *, include_distance_metrics=True):
-        selected_reporting_metrics = (
-            reporting_metrics
-            if include_distance_metrics
-            else reporting_metrics_without_distances
+        metrics = reporting_metrics(
+            coil_dofs,
+            include_distance_metrics=include_distance_metrics,
         )
-        metrics = selected_reporting_metrics(coil_dofs)
         has_G = bool(np.asarray(jax.device_get(metrics["has_G"])))
         host_metrics = {
             "solver_success": bool(np.asarray(jax.device_get(metrics["solver_success"]))),
@@ -2880,6 +2837,11 @@ def make_traceable_objective_runtime_bundle(
     ``batched_value_and_grad``
         Pure JAX callable returning batched ``(value, grad)`` outputs for a
         ``(batch, dof)`` seed array.
+    ``reporting_metrics``
+        Pure JAX callable returning the solved-state reporting scalars used by
+        the single-stage example. Callers that need Python/NumPy materialization
+        can host-normalize this explicit boundary themselves, or request the
+        companion ``host_reporting_metrics`` wrapper.
     ``host_objective``
         Optional host-normalized callable returning a Python ``float`` when
         ``include_host_wrappers=True``.
@@ -2902,10 +2864,12 @@ def make_traceable_objective_runtime_bundle(
     )
     compiled_bundle = runtime_entry["compiled_bundle"]
     compiled_value_and_grad_for = compiled_bundle["compiled_value_and_grad_for"]
+    _ensure_traceable_runtime_reporting_metrics(runtime_entry)
     runtime_bundle = {
         "objective": runtime_entry["objective"],
         "value_and_grad": compiled_value_and_grad_for,
         "batched_value_and_grad": runtime_entry["batched_value_and_grad"],
+        "reporting_metrics": runtime_entry["reporting_metrics"],
     }
     if include_host_wrappers:
         _ensure_traceable_runtime_host_wrappers(runtime_entry)

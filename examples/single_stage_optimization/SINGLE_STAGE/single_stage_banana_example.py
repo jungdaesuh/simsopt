@@ -10,6 +10,7 @@ import os
 import sys
 import time
 import types
+from functools import lru_cache
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 EXAMPLE_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, ".."))
@@ -941,6 +942,25 @@ _SINGLE_STAGE_WEIGHTED_REPORTING_FIELDS = (
     "final_surface_vessel_penalty",
     "final_curvature_penalty",
 )
+_TRACEABLE_REPORTING_FLOAT_FIELDS = (
+    "final_non_qs",
+    "final_boozer_residual",
+    "final_iota_penalty",
+    "final_length_penalty",
+    "final_curve_curve_penalty",
+    "final_curve_surface_penalty",
+    "final_surface_vessel_penalty",
+    "final_curvature_penalty",
+    "coil_length",
+    "max_curvature",
+    "final_volume",
+    "final_iota",
+)
+_TRACEABLE_REPORTING_DISTANCE_FIELDS = (
+    "curve_curve_min_dist",
+    "curve_surface_min_dist",
+    "surface_vessel_min_dist",
+)
 
 
 def total_single_stage_objective_from_reporting_metrics(metrics):
@@ -950,6 +970,47 @@ def total_single_stage_objective_from_reporting_metrics(metrics):
             float(metrics[field_name])
             for field_name in _SINGLE_STAGE_WEIGHTED_REPORTING_FIELDS
         )
+    )
+
+
+def _hostify_traceable_reporting_metrics(
+    metrics,
+    *,
+    include_distance_metrics,
+):
+    """Normalize pure target-lane reporting metrics at the explicit host boundary."""
+    host_metrics = {}
+    if "solver_success" in metrics:
+        host_metrics["solver_success"] = host_bool(metrics["solver_success"])
+    has_G = metrics.get("has_G")
+    if has_G is not None:
+        host_has_G = host_bool(has_G)
+        host_metrics["has_G"] = host_has_G
+        host_metrics["final_G"] = (
+            None if not host_has_G else host_float(metrics["final_G"])
+        )
+    elif "final_G" in metrics:
+        final_G = metrics["final_G"]
+        host_metrics["final_G"] = None if final_G is None else host_float(final_G)
+    for metric_name in _TRACEABLE_REPORTING_FLOAT_FIELDS:
+        if metric_name in metrics:
+            host_metrics[metric_name] = host_float(metrics[metric_name])
+    for metric_name in _TRACEABLE_REPORTING_DISTANCE_FIELDS:
+        metric_value = metrics.get(metric_name)
+        host_metrics[metric_name] = (
+            None
+            if (not include_distance_metrics or metric_value is None)
+            else host_float(metric_value)
+        )
+    return host_metrics
+
+
+def _hostify_traceable_value_and_grad(value_and_grad, x):
+    """Evaluate the pure target-lane value/grad contract and host-normalize once."""
+    value, grad = value_and_grad(_as_jax_float64(x))
+    return (
+        host_float(value),
+        np.asarray(host_array(grad), dtype=np.float64).reshape(-1),
     )
 
 
@@ -1387,75 +1448,261 @@ def _fit_surface_xyz_tensor_dofs_to_gamma(
         jnp.reshape(target_gamma_jax, (-1,)),
         rcond=None,
     )
-    fitted_dofs_host = np.asarray(jax.device_get(fitted_dofs), dtype=float)
+    fitted_dofs_host = _canonicalize_surface_xyz_tensor_fit_dofs(
+        np.asarray(jax.device_get(fitted_dofs), dtype=float),
+        mpol=mpol,
+        ntor=ntor,
+        nfp=nfp,
+        stellsym=stellsym,
+        quadpoints_phi=quadpoints_phi_jax,
+        quadpoints_theta=quadpoints_theta_jax,
+    )
     design_rank = int(np.asarray(jax.device_get(rank)))
     return fitted_dofs_host, design_rank == int(design_matrix.shape[1])
 
 
-def _project_serialized_surface_dofs_to_resolution(
-    surface,
+def _quadpoints_cache_key(values):
+    return tuple(float(value) for value in np.asarray(values, dtype=float).reshape(-1))
+
+
+def _surface_xyz_tensor_design_matrix_host(
     *,
     mpol,
     ntor,
+    nfp,
+    stellsym,
     quadpoints_phi,
     quadpoints_theta,
 ):
-    target_mpol = max(1, int(mpol))
-    target_ntor = max(1, int(ntor))
+    return np.asarray(
+        jax.device_get(
+            _surface_xyz_tensor_design_matrix(
+                mpol=mpol,
+                ntor=ntor,
+                nfp=nfp,
+                stellsym=stellsym,
+                quadpoints_phi=jnp.asarray(quadpoints_phi, dtype=jnp.float64),
+                quadpoints_theta=jnp.asarray(quadpoints_theta, dtype=jnp.float64),
+            )
+        ),
+        dtype=float,
+    )
+
+
+def _surface_xyz_tensor_alias_cache_args(
+    *,
+    mpol,
+    ntor,
+    nfp,
+    stellsym,
+    quadpoints_phi,
+    quadpoints_theta,
+):
+    return (
+        int(mpol),
+        int(ntor),
+        int(nfp),
+        bool(stellsym),
+        _quadpoints_cache_key(quadpoints_phi),
+        _quadpoints_cache_key(quadpoints_theta),
+    )
+
+
+@lru_cache(maxsize=None)
+def _surface_xyz_tensor_alias_groups(
+    mpol,
+    ntor,
+    nfp,
+    stellsym,
+    quadpoints_phi_key,
+    quadpoints_theta_key,
+):
+    design_matrix = _surface_xyz_tensor_design_matrix_host(
+        mpol=mpol,
+        ntor=ntor,
+        nfp=nfp,
+        stellsym=stellsym,
+        quadpoints_phi=quadpoints_phi_key,
+        quadpoints_theta=quadpoints_theta_key,
+    )
+    ncols = int(design_matrix.shape[1])
+    used = np.zeros(ncols, dtype=bool)
+    groups = []
+    atol = 1.0e-12
+    for column_index in range(ncols):
+        if used[column_index]:
+            continue
+        reference = design_matrix[:, column_index]
+        members = [(column_index, 1.0)]
+        used[column_index] = True
+        for other_index in range(column_index + 1, ncols):
+            if used[other_index]:
+                continue
+            candidate = design_matrix[:, other_index]
+            if np.allclose(candidate, reference, rtol=0.0, atol=atol):
+                members.append((other_index, 1.0))
+                used[other_index] = True
+            elif np.allclose(candidate, -reference, rtol=0.0, atol=atol):
+                members.append((other_index, -1.0))
+                used[other_index] = True
+        groups.append(
+            (
+                int(column_index),
+                bool(np.max(np.abs(reference)) <= atol),
+                tuple((int(index), float(sign)) for index, sign in members),
+            )
+        )
+    return tuple(groups)
+
+
+@lru_cache(maxsize=None)
+def _surface_xyz_tensor_alias_group_host_convention(
+    mpol,
+    ntor,
+    nfp,
+    stellsym,
+    quadpoints_phi_key,
+    quadpoints_theta_key,
+):
+    """Resolve the legacy host QR representative for each alias group."""
+    quadpoints_phi = np.asarray(quadpoints_phi_key, dtype=float)
+    quadpoints_theta = np.asarray(quadpoints_theta_key, dtype=float)
+    alias_groups = _surface_xyz_tensor_alias_groups(
+        int(mpol),
+        int(ntor),
+        int(nfp),
+        bool(stellsym),
+        quadpoints_phi_key,
+        quadpoints_theta_key,
+    )
+    design_matrix = _surface_xyz_tensor_design_matrix_host(
+        mpol=mpol,
+        ntor=ntor,
+        nfp=nfp,
+        stellsym=stellsym,
+        quadpoints_phi=quadpoints_phi,
+        quadpoints_theta=quadpoints_theta,
+    )
+    host_surface = SurfaceXYZTensorFourier(
+        mpol=mpol,
+        ntor=ntor,
+        nfp=nfp,
+        stellsym=stellsym,
+        quadpoints_phi=quadpoints_phi,
+        quadpoints_theta=quadpoints_theta,
+    )
+
+    conventions = []
+    for representative_index, zero_column, members in alias_groups:
+        if zero_column or len(members) == 1:
+            conventions.append((int(representative_index), 1.0))
+            continue
+        target_gamma = design_matrix[:, representative_index].reshape(
+            quadpoints_phi.size,
+            quadpoints_theta.size,
+            3,
+        )
+        host_surface.least_squares_fit(target_gamma)
+        host_dofs = np.asarray(host_surface.get_dofs(), dtype=float)
+        chosen_index, chosen_sign, chosen_value = max(
+            (
+                (int(index), float(sign), float(host_dofs[index]))
+                for index, sign in members
+            ),
+            key=lambda item: abs(item[2]),
+        )
+        del chosen_value
+        conventions.append((chosen_index, chosen_sign))
+    return tuple(conventions)
+
+
+def _canonicalize_surface_xyz_tensor_fit_dofs(
+    fitted_dofs,
+    *,
+    mpol,
+    ntor,
+    nfp,
+    stellsym,
+    quadpoints_phi,
+    quadpoints_theta,
+):
+    """Collapse alias-equivalent coefficients to the host solver convention."""
+    alias_cache_args = _surface_xyz_tensor_alias_cache_args(
+        mpol=mpol,
+        ntor=ntor,
+        nfp=nfp,
+        stellsym=stellsym,
+        quadpoints_phi=quadpoints_phi,
+        quadpoints_theta=quadpoints_theta,
+    )
+    alias_groups = _surface_xyz_tensor_alias_groups(*alias_cache_args)
+    host_convention = _surface_xyz_tensor_alias_group_host_convention(*alias_cache_args)
+    canonical_dofs = np.zeros_like(np.asarray(fitted_dofs, dtype=float))
+    for (representative_index, zero_column, members), (
+        host_index,
+        host_orientation,
+    ) in zip(alias_groups, host_convention):
+        if zero_column:
+            canonical_dofs[representative_index] = 0.0
+            continue
+        canonical_value = sum(sign * float(fitted_dofs[index]) for index, sign in members)
+        canonical_dofs[int(host_index)] = float(host_orientation) * canonical_value
+    return canonical_dofs
+
+
+def _target_gamma_from_supported_surface(
+    surface,
+    *,
+    quadpoints_phi,
+    quadpoints_theta,
+):
     quadpoints_phi_jax = jnp.asarray(quadpoints_phi, dtype=jnp.float64)
     quadpoints_theta_jax = jnp.asarray(quadpoints_theta, dtype=jnp.float64)
-    source_dofs = jnp.asarray(surface.dofs, dtype=jnp.float64)
+    if isinstance(surface, SerializedSurfaceState):
+        surface_class = surface.surface_class
+        source_dofs = jnp.asarray(surface.dofs, dtype=jnp.float64)
+        source_mpol = surface.mpol
+        source_ntor = surface.ntor
+        source_nfp = surface.nfp
+        source_stellsym = surface.stellsym
+    else:
+        surface_class = type(surface).__name__
+        if not hasattr(surface, "get_dofs"):
+            return None
+        source_dofs = jnp.asarray(surface.get_dofs(), dtype=jnp.float64)
+        source_mpol = int(getattr(surface, "mpol", 0))
+        source_ntor = int(getattr(surface, "ntor", 0))
+        source_nfp = int(getattr(surface, "nfp", 5))
+        source_stellsym = bool(getattr(surface, "stellsym", True))
 
-    if surface.surface_class == "SurfaceXYZTensorFourier":
+    if surface_class == "SurfaceXYZTensorFourier" or isinstance(
+        surface, SurfaceXYZTensorFourier
+    ):
         scatter_indices = None
-        if surface.stellsym:
-            scatter_indices = stellsym_scatter_indices(surface.mpol, surface.ntor)
-        target_gamma = surface_gamma_from_dofs(
+        if source_stellsym:
+            scatter_indices = stellsym_scatter_indices(source_mpol, source_ntor)
+        return surface_gamma_from_dofs(
             source_dofs,
             quadpoints_phi_jax,
             quadpoints_theta_jax,
-            surface.mpol,
-            surface.ntor,
-            surface.nfp,
-            surface.stellsym,
+            source_mpol,
+            source_ntor,
+            source_nfp,
+            source_stellsym,
             scatter_indices=scatter_indices,
         )
-    elif surface.surface_class == "SurfaceRZFourier":
+    if surface_class == "SurfaceRZFourier" or isinstance(surface, SurfaceRZFourier):
         source_spec = surface_rz_fourier_spec_from_dofs(
             source_dofs,
             quadpoints_phi=quadpoints_phi_jax,
             quadpoints_theta=quadpoints_theta_jax,
-            mpol=surface.mpol,
-            ntor=surface.ntor,
-            nfp=surface.nfp,
-            stellsym=surface.stellsym,
+            mpol=source_mpol,
+            ntor=source_ntor,
+            nfp=source_nfp,
+            stellsym=source_stellsym,
         )
-        target_gamma = surface_rz_fourier_gamma_from_dofs(source_spec, source_dofs)
-    else:
-        raise ValueError(f"unsupported serialized surface class: {surface.surface_class}")
-
-    projected_dofs, full_rank = _fit_surface_xyz_tensor_dofs_to_gamma(
-        target_gamma,
-        mpol=target_mpol,
-        ntor=target_ntor,
-        nfp=surface.nfp,
-        stellsym=surface.stellsym,
-        quadpoints_phi=quadpoints_phi_jax,
-        quadpoints_theta=quadpoints_theta_jax,
-    )
-    if full_rank:
-        return projected_dofs
-
-    # Rank-deficient fits admit many coefficient vectors for the same sampled
-    # geometry. Reuse the legacy host projector in that case to preserve the
-    # existing warm-start coefficient convention.
-    return project_surface_dofs_to_resolution(
-        _reconstruct_live_surface_from_serialized_state(surface),
-        mpol=target_mpol,
-        ntor=target_ntor,
-        quadpoints_phi=quadpoints_phi,
-        quadpoints_theta=quadpoints_theta,
-    )
+        return surface_rz_fourier_gamma_from_dofs(source_spec, source_dofs)
+    return None
 
 
 def project_surface_dofs_to_resolution(
@@ -1467,35 +1714,12 @@ def project_surface_dofs_to_resolution(
     quadpoints_theta,
 ):
     """Reproject surface geometry onto the requested target resolution."""
-    if isinstance(surface, SerializedSurfaceState):
-        return _project_serialized_surface_dofs_to_resolution(
-            surface,
-            mpol=mpol,
-            ntor=ntor,
-            quadpoints_phi=quadpoints_phi,
-            quadpoints_theta=quadpoints_theta,
-        )
-
-    projected_surface = SurfaceXYZTensorFourier(
-        mpol=max(1, int(mpol)),
-        ntor=max(1, int(ntor)),
-        nfp=int(getattr(surface, "nfp", 5)),
-        stellsym=bool(getattr(surface, "stellsym", True)),
-        quadpoints_theta=quadpoints_theta,
+    target_gamma = _target_gamma_from_supported_surface(
+        surface,
         quadpoints_phi=quadpoints_phi,
+        quadpoints_theta=quadpoints_theta,
     )
-    if isinstance(surface, SurfaceXYZTensorFourier):
-        evaluation_surface = SurfaceXYZTensorFourier(
-            mpol=max(1, int(getattr(surface, "mpol", mpol))),
-            ntor=max(1, int(getattr(surface, "ntor", ntor))),
-            nfp=int(getattr(surface, "nfp", 5)),
-            stellsym=bool(getattr(surface, "stellsym", True)),
-            quadpoints_theta=quadpoints_theta,
-            quadpoints_phi=quadpoints_phi,
-        )
-        evaluation_surface.set_dofs(np.asarray(surface.get_dofs(), dtype=float))
-        target_gamma = np.asarray(evaluation_surface.gamma(), dtype=float)
-    else:
+    if target_gamma is None:
         target_gamma = np.stack(
             [
                 np.asarray(
@@ -1506,8 +1730,16 @@ def project_surface_dofs_to_resolution(
             ],
             axis=0,
         )
-    projected_surface.least_squares_fit(target_gamma)
-    return np.asarray(projected_surface.get_dofs(), dtype=float)
+    projected_dofs, _ = _fit_surface_xyz_tensor_dofs_to_gamma(
+        target_gamma,
+        mpol=max(1, int(mpol)),
+        ntor=max(1, int(ntor)),
+        nfp=int(getattr(surface, "nfp", 5)),
+        stellsym=bool(getattr(surface, "stellsym", True)),
+        quadpoints_phi=quadpoints_phi,
+        quadpoints_theta=quadpoints_theta,
+    )
+    return projected_dofs
 
 
 def project_single_stage_warm_start_surface_dofs(
@@ -2331,7 +2563,11 @@ def initialize_boozer_surface(
         solve_sdofs = (
             None
             if surface_dofs_override is None
-            else np.asarray(surface_dofs_override, dtype=float)
+            else (
+                _as_jax_float64(surface_dofs_override)
+                if backend == "jax"
+                else np.asarray(surface_dofs_override, dtype=float)
+            )
         )
         return solve_iota, solve_G, solve_sdofs
 
@@ -2342,6 +2578,19 @@ def initialize_boozer_surface(
 
     total_start_s = _perf_counter_s()
     fit_start_s = total_start_s
+    initial_surface_dofs = (
+        _as_jax_float64(surface_dofs_override)
+        if surface_dofs_override is not None
+        else _as_jax_float64(
+            project_surface_dofs_to_resolution(
+                surf_prev,
+                mpol=mpol,
+                ntor=ntor,
+                quadpoints_phi=surf_prev.quadpoints_phi,
+                quadpoints_theta=surf_prev.quadpoints_theta,
+            )
+        )
+    )
     surf = SurfaceXYZTensorFourier(
         mpol=mpol,
         ntor=ntor,
@@ -2349,11 +2598,8 @@ def initialize_boozer_surface(
         stellsym=True,
         quadpoints_theta=surf_prev.quadpoints_theta,
         quadpoints_phi=surf_prev.quadpoints_phi,
+        dofs=np.asarray(host_array(initial_surface_dofs), dtype=np.float64),
     )
-    if surface_dofs_override is None:
-        surf.least_squares_fit(surf_prev.gamma())
-    else:
-        surf.set_dofs(np.asarray(surface_dofs_override, dtype=float))
     fit_end_s = _perf_counter_s()
     _record_timing(timings, "boozer_surface_fit_s", fit_start_s, fit_end_s)
     emit_stage("after_boozer_surface_fit")
@@ -2427,7 +2673,7 @@ def initialize_boozer_surface(
             stellsym=True,
             quadpoints_theta=np.linspace(0, 1, 2 * mpol + 1, endpoint=False),
             quadpoints_phi=np.linspace(0, 1.0 / surf.nfp, 2 * ntor + 1, endpoint=False),
-            dofs=surf.dofs,
+            dofs=np.asarray(host_array(initial_surface_dofs), dtype=np.float64),
         )
         vol = Volume(surf_exact)
         if backend == "jax":
@@ -2589,15 +2835,16 @@ def resolve_single_stage_final_penalty_metrics(
             bs,
             iota_target,
             include_profile_suite=False,
-            include_host_wrappers=True,
+            include_host_wrappers=False,
             outer_objective_config=outer_objective_config,
             success_filter=success_filter,
         )
-        metrics = dict(
-            runtime_bundle["host_reporting_metrics"](
+        metrics = _hostify_traceable_reporting_metrics(
+            runtime_bundle["reporting_metrics"](
                 _as_jax_float64(coil_dofs),
                 include_distance_metrics=not benchmark_mode,
-            )
+            ),
+            include_distance_metrics=not benchmark_mode,
         )
         if benchmark_mode:
             metrics["hardware_status"] = benchmark_hardware_status
@@ -2732,7 +2979,7 @@ def build_single_stage_target_lane_accepted_step_sync(
         bs,
         iota_target,
         include_profile_suite=False,
-        include_host_wrappers=True,
+        include_host_wrappers=False,
         outer_objective_config=outer_objective_config,
         success_filter=success_filter,
     )
@@ -2751,11 +2998,12 @@ def build_single_stage_target_lane_accepted_step_sync(
                 "single-stage array-native state."
             )
 
-        reporting_metrics = dict(
-            runtime_bundle["host_reporting_metrics"](
+        reporting_metrics = _hostify_traceable_reporting_metrics(
+            runtime_bundle["reporting_metrics"](
                 coil_dofs,
                 include_distance_metrics=not benchmark_mode,
-            )
+            ),
+            include_distance_metrics=not benchmark_mode,
         )
         if benchmark_mode:
             hardware_status = {
@@ -3501,7 +3749,7 @@ def build_target_lane_scaled_phase1_diagnosis(
         boozer_surface,
         bs,
         iota_target,
-        include_host_wrappers=True,
+        include_host_wrappers=False,
         outer_objective_config=outer_objective_config,
         success_filter=success_filter,
     )
@@ -3516,8 +3764,7 @@ def build_target_lane_scaled_phase1_diagnosis(
     anchor_host_dofs = np.asarray(host_array(anchor_dofs), dtype=np.float64).reshape(-1)
 
     def _base_host_value_and_grad(x):
-        value, grad = runtime_bundle["host_value_and_grad"](_as_jax_float64(x))
-        return float(value), np.asarray(grad, dtype=np.float64).reshape(-1)
+        return _hostify_traceable_value_and_grad(runtime_bundle["value_and_grad"], x)
 
     def _phase1_host_value_and_grad(z):
         if isinstance(z, ScaledOuterPhaseOptimizerState):

@@ -4236,6 +4236,10 @@ class TestScriptBackendSelection:
             "simsopt.geo.boozersurface_jax.BoozerSurfaceJAX", recorder
         ), patch.object(mod, "Volume", fake_vol), patch.object(
             mod, "SurfaceXYZTensorFourier", MagicMock(return_value=fake_surf)
+        ), patch.object(
+            mod,
+            "project_surface_dofs_to_resolution",
+            return_value=np.array([1.0], dtype=np.float64),
         ):
             mod.initialize_boozer_surface(
                 fake_surf,
