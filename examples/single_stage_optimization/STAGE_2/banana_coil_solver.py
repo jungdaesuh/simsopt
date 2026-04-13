@@ -2721,46 +2721,22 @@ if __name__ == "__main__":
         ],
         "SELF_INTERSECTION_TOLERANCE": final_self_intersection_summary["tolerance"],
         "SELF_INTERSECTION_PENALTY": final_self_intersection_summary["penalty"],
-        "ALM_MAX_OUTER_ITERS": (
-            args.alm_max_outer_iters if CONSTRAINT_METHOD == "alm" else None
-        ),
-        "ALM_MAX_SUBPROBLEM_CONTINUATIONS": (
-            args.alm_max_subproblem_continuations
-            if CONSTRAINT_METHOD == "alm"
-            else None
+        "ALM_MAX_OUTER_ITERS": getattr(args, "alm_max_outer_iters", None),
+        "ALM_MAX_SUBPROBLEM_CONTINUATIONS": getattr(
+            args, "alm_max_subproblem_continuations", None
         ),
         "ALM_OUTER_ITERATIONS": getattr(alm_result, "outer_iterations", None),
-        "ALM_PENALTY_INIT": (
-            args.alm_penalty_init if CONSTRAINT_METHOD == "alm" else None
-        ),
-        "ALM_PENALTY_SCALE": (
-            args.alm_penalty_scale if CONSTRAINT_METHOD == "alm" else None
-        ),
-        "ALM_FEAS_TOL": args.alm_feas_tol if CONSTRAINT_METHOD == "alm" else None,
-        "ALM_STATIONARITY_TOL": (
-            args.alm_stationarity_tol if CONSTRAINT_METHOD == "alm" else None
-        ),
-        "ALM_TRUST_RADIUS_INIT": (
-            args.alm_trust_radius_init if CONSTRAINT_METHOD == "alm" else None
-        ),
-        "ALM_TRUST_RADIUS_MIN": (
-            args.alm_trust_radius_min if CONSTRAINT_METHOD == "alm" else None
-        ),
-        "ALM_TRUST_RADIUS_SHRINK": (
-            args.alm_trust_radius_shrink if CONSTRAINT_METHOD == "alm" else None
-        ),
-        "ALM_TRUST_RADIUS_GROW": (
-            args.alm_trust_radius_grow if CONSTRAINT_METHOD == "alm" else None
-        ),
-        "ALM_MAX_INNER_ATTEMPTS": (
-            args.alm_max_inner_attempts if CONSTRAINT_METHOD == "alm" else None
-        ),
-        "ALM_DISTANCE_SMOOTHING": (
-            args.alm_distance_smoothing if CONSTRAINT_METHOD == "alm" else None
-        ),
-        "ALM_CURVATURE_SMOOTHING": (
-            args.alm_curvature_smoothing if CONSTRAINT_METHOD == "alm" else None
-        ),
+        "ALM_PENALTY_INIT": getattr(args, "alm_penalty_init", None),
+        "ALM_PENALTY_SCALE": getattr(args, "alm_penalty_scale", None),
+        "ALM_FEAS_TOL": getattr(args, "alm_feas_tol", None),
+        "ALM_STATIONARITY_TOL": getattr(args, "alm_stationarity_tol", None),
+        "ALM_TRUST_RADIUS_INIT": getattr(args, "alm_trust_radius_init", None),
+        "ALM_TRUST_RADIUS_MIN": getattr(args, "alm_trust_radius_min", None),
+        "ALM_TRUST_RADIUS_SHRINK": getattr(args, "alm_trust_radius_shrink", None),
+        "ALM_TRUST_RADIUS_GROW": getattr(args, "alm_trust_radius_grow", None),
+        "ALM_MAX_INNER_ATTEMPTS": getattr(args, "alm_max_inner_attempts", None),
+        "ALM_DISTANCE_SMOOTHING": getattr(args, "alm_distance_smoothing", None),
+        "ALM_CURVATURE_SMOOTHING": getattr(args, "alm_curvature_smoothing", None),
         "ALM_TERMINATION_REASON": getattr(alm_result, "termination_reason", None),
         "ALM_FINAL_PENALTY": getattr(alm_result, "penalty", None),
         "ALM_FINAL_MULTIPLIERS": getattr(alm_result, "multipliers", None),

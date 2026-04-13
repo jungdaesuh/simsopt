@@ -1482,10 +1482,11 @@ def _surface_xyz_tensor_design_matrix(
         ),
     )
 
-    phi_angles = 2.0 * jnp.pi * quadpoints_phi
+    two_pi = _as_runtime_float64(2.0 * np.pi, reference=quadpoints_phi)
+    phi_angles = two_pi * quadpoints_phi
     cos_phi = jnp.cos(phi_angles)[:, None, None]
     sin_phi = jnp.sin(phi_angles)[:, None, None]
-    zeros = jnp.zeros_like(basis_values)
+    zeros = _as_runtime_float64(0.0, reference=basis_values) * basis_values
 
     x_block = jnp.stack(
         (
@@ -1517,10 +1518,82 @@ def _surface_xyz_tensor_design_matrix(
     )
     if not stellsym:
         return design_matrix
+    scatter_indices = jax.device_put(
+        np.asarray(stellsym_scatter_indices(mpol, ntor), dtype=np.int32)
+    )
     return design_matrix[
         :,
-        jnp.asarray(stellsym_scatter_indices(mpol, ntor), dtype=jnp.int32),
+        scatter_indices,
     ]
+
+
+def _surface_xyz_tensor_design_matrix_host(
+    *,
+    mpol,
+    ntor,
+    nfp,
+    stellsym,
+    quadpoints_phi,
+    quadpoints_theta,
+):
+    theta_basis, _ = build_theta_basis(
+        np.asarray(quadpoints_theta, dtype=np.float64),
+        mpol,
+    )
+    phi_basis, _ = build_phi_basis(
+        np.asarray(quadpoints_phi, dtype=np.float64),
+        ntor,
+        nfp,
+    )
+    theta_basis = np.asarray(host_array(theta_basis), dtype=np.float64)
+    phi_basis = np.asarray(host_array(phi_basis), dtype=np.float64)
+    basis_values = phi_basis[:, None, None, :] * theta_basis[None, :, :, None]
+    basis_values = np.reshape(
+        basis_values,
+        (
+            phi_basis.shape[0],
+            theta_basis.shape[0],
+            (2 * mpol + 1) * (2 * ntor + 1),
+        ),
+    )
+
+    phi_angles = (2.0 * np.pi) * np.asarray(quadpoints_phi, dtype=np.float64)
+    cos_phi = np.cos(phi_angles)[:, None, None]
+    sin_phi = np.sin(phi_angles)[:, None, None]
+    zeros = np.zeros_like(basis_values)
+
+    x_block = np.stack(
+        (
+            basis_values * cos_phi,
+            basis_values * sin_phi,
+            zeros,
+        ),
+        axis=2,
+    )
+    y_block = np.stack(
+        (
+            -basis_values * sin_phi,
+            basis_values * cos_phi,
+            zeros,
+        ),
+        axis=2,
+    )
+    z_block = np.stack(
+        (
+            zeros,
+            zeros,
+            basis_values,
+        ),
+        axis=2,
+    )
+    design_matrix = np.reshape(
+        np.concatenate((x_block, y_block, z_block), axis=3),
+        (-1, 3 * basis_values.shape[2]),
+    )
+    if not stellsym:
+        return design_matrix
+    scatter_indices = np.asarray(stellsym_scatter_indices(mpol, ntor), dtype=np.int32)
+    return design_matrix[:, scatter_indices]
 
 
 def _fit_surface_xyz_tensor_dofs_to_gamma(
@@ -1559,23 +1632,16 @@ def _fit_surface_xyz_tensor_dofs_to_gamma(
     fitted_dofs_host = np.asarray(host_surface.get_dofs(), dtype=float)
 
     # Check rank via the design matrix to report whether the fit is unique.
-    quadpoints_phi_jax = jnp.asarray(quadpoints_phi_host, dtype=jnp.float64)
-    quadpoints_theta_jax = jnp.asarray(quadpoints_theta_host, dtype=jnp.float64)
-    design_matrix = _surface_xyz_tensor_design_matrix(
+    design_matrix_host = _surface_xyz_tensor_design_matrix_host(
         mpol=mpol,
         ntor=ntor,
         nfp=nfp,
         stellsym=stellsym,
-        quadpoints_phi=quadpoints_phi_jax,
-        quadpoints_theta=quadpoints_theta_jax,
+        quadpoints_phi=quadpoints_phi_host,
+        quadpoints_theta=quadpoints_theta_host,
     )
-    _, _, rank, _ = jnp.linalg.lstsq(
-        design_matrix,
-        jnp.zeros(design_matrix.shape[0], dtype=jnp.float64),
-        rcond=None,
-    )
-    design_rank = int(np.asarray(jax.device_get(rank)))
-    return fitted_dofs_host, design_rank == int(design_matrix.shape[1])
+    design_rank = int(np.linalg.matrix_rank(design_matrix_host))
+    return fitted_dofs_host, design_rank == int(design_matrix_host.shape[1])
 
 
 
@@ -2527,8 +2593,8 @@ def initialize_boozer_surface(
         stellsym=True,
         quadpoints_theta=surf_prev.quadpoints_theta,
         quadpoints_phi=surf_prev.quadpoints_phi,
-        dofs=np.asarray(host_array(initial_surface_dofs), dtype=np.float64),
     )
+    surf.set_dofs(np.asarray(host_array(initial_surface_dofs), dtype=np.float64))
     fit_end_s = _perf_counter_s()
     _record_timing(timings, "boozer_surface_fit_s", fit_start_s, fit_end_s)
     emit_stage("after_boozer_surface_fit")
@@ -2723,6 +2789,85 @@ def resolve_single_stage_iota_metric(
     return host_float(build_iota_objective(boozer_surface, iota_cls).J())
 
 
+def _resolved_single_stage_boozer_solved_state(boozer_surface):
+    """Return the solved Boozer state using the explicit runtime contract when present."""
+    get_solved_runtime_state = getattr(boozer_surface, "get_solved_runtime_state", None)
+    if callable(get_solved_runtime_state):
+        return get_solved_runtime_state()
+
+    return types.SimpleNamespace(
+        sdofs=boozer_surface.surface.x,
+        iota=boozer_surface.res["iota"],
+        G=boozer_surface.res["G"],
+    )
+
+
+def _clear_target_lane_reporting_cache(run_dict):
+    """Clear cached target-lane reporting state from the shared run dict."""
+    run_dict.pop("target_lane_reporting_metrics", None)
+    run_dict.pop("target_lane_reporting_coil_dofs", None)
+    run_dict.pop("target_lane_reporting_include_distance_metrics", None)
+
+
+def _cache_target_lane_reporting_summary(
+    run_dict,
+    coil_dofs,
+    accepted_step_summary,
+    *,
+    benchmark_mode,
+):
+    """Persist one accepted-step reporting summary in the array-native run state."""
+    reporting_metrics = dict(accepted_step_summary["reporting_metrics"])
+    hardware_status = reporting_metrics.get("hardware_status")
+    if isinstance(hardware_status, dict):
+        reporting_metrics["hardware_status"] = dict(hardware_status)
+    run_dict["target_lane_reporting_metrics"] = reporting_metrics
+    run_dict["target_lane_reporting_coil_dofs"] = host_array(
+        _single_stage_optimizer_dofs_array(coil_dofs),
+        dtype=np.float64,
+    )
+    run_dict["target_lane_reporting_include_distance_metrics"] = bool(
+        not benchmark_mode
+    )
+
+
+def _resolve_cached_target_lane_reporting_metrics(
+    run_dict,
+    coil_dofs,
+    *,
+    benchmark_mode,
+):
+    """Return cached accepted-step reporting metrics when they match the final state."""
+    if run_dict is None:
+        return None
+
+    cached_metrics = run_dict.get("target_lane_reporting_metrics")
+    cached_coil_dofs = run_dict.get("target_lane_reporting_coil_dofs")
+    include_distance_metrics = run_dict.get(
+        "target_lane_reporting_include_distance_metrics"
+    )
+    if (
+        cached_metrics is None
+        or cached_coil_dofs is None
+        or include_distance_metrics is None
+        or bool(include_distance_metrics) != bool(not benchmark_mode)
+    ):
+        return None
+
+    final_coil_dofs = host_array(_single_stage_optimizer_dofs_array(coil_dofs))
+    if final_coil_dofs.shape != cached_coil_dofs.shape or not np.array_equal(
+        final_coil_dofs,
+        cached_coil_dofs,
+    ):
+        return None
+
+    resolved_metrics = dict(cached_metrics)
+    hardware_status = resolved_metrics.get("hardware_status")
+    if isinstance(hardware_status, dict):
+        resolved_metrics["hardware_status"] = dict(hardware_status)
+    return resolved_metrics
+
+
 def resolve_single_stage_final_penalty_metrics(
     *,
     use_target_lane,
@@ -2747,6 +2892,7 @@ def resolve_single_stage_final_penalty_metrics(
     cs_dist,
     ss_dist,
     curvature_threshold,
+    run_dict=None,
     init_only=False,
     termination_message=None,
     optimizer_success=None,
@@ -2759,6 +2905,13 @@ def resolve_single_stage_final_penalty_metrics(
     }
 
     if use_target_lane and not skip_outer_optimizer:
+        cached_metrics = _resolve_cached_target_lane_reporting_metrics(
+            run_dict,
+            coil_dofs,
+            benchmark_mode=benchmark_mode,
+        )
+        if cached_metrics is not None:
+            return cached_metrics
         runtime_bundle = get_traceable_single_stage_runtime_bundle_builder()(
             boozer_surface,
             bs,
@@ -2973,10 +3126,17 @@ def build_single_stage_target_lane_accepted_step_sync(
             store_objective_grad=False,
         )
         run_dict["hardware_constraint_status"] = hardware_status
-        return {
+        accepted_step_summary = {
             "objective_value": objective_value,
             "reporting_metrics": reporting_metrics,
         }
+        _cache_target_lane_reporting_summary(
+            run_dict,
+            coil_dofs,
+            accepted_step_summary,
+            benchmark_mode=benchmark_mode,
+        )
+        return accepted_step_summary
 
     return sync
 
@@ -5013,6 +5173,7 @@ def snapshot_accepted_step_state_from_values(
 ):
     """Persist accepted-step state from explicit array/scalar values."""
     run_dict["lscount"] = 0
+    _clear_target_lane_reporting_cache(run_dict)
     run_dict["sdofs"] = host_array(sdofs, dtype=np.float64)
     run_dict["iota"] = host_float(iota)
     run_dict["G"] = host_float(G)
@@ -5358,11 +5519,12 @@ def snapshot_to_pytree(JF, boozer_surface, bs, *, num_tf_coils):
 
     initial_objective = host_float(JF.J())
     initial_objective_grad = host_array(JF.dJ())
+    solved_state = _resolved_single_stage_boozer_solved_state(boozer_surface)
 
     run_dict = {
-        "sdofs": boozer_surface.surface.x.copy(),
-        "iota": host_float(boozer_surface.res["iota"]),
-        "G": host_float(boozer_surface.res["G"]),
+        "sdofs": host_array(solved_state.sdofs, dtype=np.float64),
+        "iota": host_float(solved_state.iota),
+        "G": host_float(solved_state.G),
         "J": initial_objective,
         "dJ": initial_objective_grad,
         "initial_objective": initial_objective,
@@ -6697,6 +6859,7 @@ if __name__ == "__main__":
         cs_dist=CS_DIST,
         ss_dist=SS_DIST,
         curvature_threshold=CURVATURE_THRESHOLD,
+        run_dict=run_dict,
         init_only=args.init_only,
         termination_message=termination_message,
         optimizer_success=optimizer_success,

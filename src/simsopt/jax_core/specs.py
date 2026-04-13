@@ -12,7 +12,6 @@ from dataclasses import dataclass
 from typing import Literal, TypeAlias
 
 import jax
-import jax.numpy as jnp
 import numpy as np
 
 from ._math_utils import (
@@ -702,11 +701,6 @@ def make_coil_set_dof_extraction_spec(
     return CoilSetDofExtractionSpec(coils=tuple(coils))
 
 
-def _apply_rotation_matrix_rows(values: jax.Array, rotmat: jax.Array) -> jax.Array:
-    """Rotate row vectors without routing tiny 3x3 products through GEMM."""
-    return jnp.sum(values[..., :, None] * rotmat, axis=-2)
-
-
 def apply_coil_symmetry(
     gamma: jax.Array,
     gammadash: jax.Array,
@@ -716,8 +710,8 @@ def apply_coil_symmetry(
     """Apply rotation/scale transform to curve geometry and current."""
     if symmetry.has_rotation:
         rotmat = _as_runtime_float64(symmetry.rotmat, reference=gamma)
-        gamma = _apply_rotation_matrix_rows(gamma, rotmat)
-        gammadash = _apply_rotation_matrix_rows(gammadash, rotmat)
+        gamma = gamma @ rotmat
+        gammadash = gammadash @ rotmat
     return (
         gamma,
         gammadash,

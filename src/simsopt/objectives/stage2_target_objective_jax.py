@@ -587,7 +587,7 @@ def build_stage2_target_objective(
             curvature_penalty,
             coil_distance_penalty,
             _half_jax,
-            _zero_jax,
+            zero_jax,
         ) = _evaluate_dynamic_stage2_state(dofs)
         two_jax = _runtime_float64_scalar(2.0, reference=flat_dofs)
         squared_flux_weight_jax = _runtime_float64_scalar(

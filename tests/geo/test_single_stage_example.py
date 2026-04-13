@@ -2664,6 +2664,54 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertTrue(metrics["hardware_status"]["success"])
         self.assertEqual(metrics["hardware_status"]["violations"], [])
 
+    def test_resolve_single_stage_final_penalty_metrics_prefers_cached_target_lane_summary(
+        self,
+    ):
+        module = self.load_module()
+        cached_metrics = self._make_reporting_runtime_summary(
+            include_distance_metrics=True
+        )
+        run_dict = {
+            "target_lane_reporting_metrics": dict(cached_metrics),
+            "target_lane_reporting_coil_dofs": np.array([1.0, -2.0], dtype=np.float64),
+            "target_lane_reporting_include_distance_metrics": True,
+        }
+
+        with patch.object(
+            module,
+            "get_traceable_single_stage_runtime_bundle_builder",
+            side_effect=AssertionError(
+                "cached accepted-step reporting should avoid rebuilding the runtime bundle"
+            ),
+        ):
+            metrics = module.resolve_single_stage_final_penalty_metrics(
+                use_target_lane=True,
+                benchmark_mode=False,
+                skip_outer_optimizer=False,
+                boozer_surface=object(),
+                bs=object(),
+                iota_target=0.21,
+                coil_dofs=np.array([1.0, -2.0], dtype=np.float64),
+                outer_objective_config="config-marker",
+                success_filter="success-filter-marker",
+                curvelength=object(),
+                j_non_qs=object(),
+                j_boozer_residual=object(),
+                j_iota=object(),
+                j_curve_length=object(),
+                j_curve_curve=object(),
+                j_curve_surface=object(),
+                j_surface_surface=object(),
+                j_curvature=object(),
+                cc_dist=0.05,
+                cs_dist=0.02,
+                ss_dist=0.04,
+                curvature_threshold=40.0,
+                run_dict=run_dict,
+            )
+
+        self.assertEqual(metrics, cached_metrics)
+
     def test_resolve_single_stage_final_penalty_metrics_skips_target_lane_distances_in_benchmark_mode(
         self,
     ):
@@ -2777,6 +2825,15 @@ class SingleStageExampleTests(unittest.TestCase):
             runtime_summary["final_non_qs"],
         )
         self.assertTrue(run_dict["hardware_constraint_status"]["success"])
+        np.testing.assert_allclose(
+            run_dict["target_lane_reporting_coil_dofs"],
+            np.array([1.0, -2.0], dtype=np.float64),
+        )
+        self.assertEqual(
+            run_dict["target_lane_reporting_metrics"],
+            summary["reporting_metrics"],
+        )
+        self.assertTrue(run_dict["target_lane_reporting_include_distance_metrics"])
 
     def test_build_target_lane_outer_objectives_profiles_with_jax_coil_dofs(self):
         module = self.load_module()
@@ -5830,6 +5887,82 @@ class SingleStageExampleTests(unittest.TestCase):
             )
 
         self.assertFalse(rd["self_intersection_check_available"])
+
+    def test_snapshot_to_pytree_prefers_solved_runtime_contract_over_live_surface(self):
+        module = self.load_module()
+
+        class _Surface:
+            def __init__(self):
+                self._x = np.array([99.0, 98.0, 97.0])
+
+            @property
+            def x(self):
+                return self._x
+
+            @x.setter
+            def x(self, val):
+                self._x = np.asarray(val)
+
+        class _BoozerSurface:
+            def __init__(self):
+                self.surface = _Surface()
+                self.res = {"success": True, "iter": 1, "iota": 9.9, "G": 8.8}
+
+            def get_solved_runtime_state(self):
+                return types.SimpleNamespace(
+                    sdofs=jnp.asarray([10.0, 20.0, 30.0], dtype=jnp.float64),
+                    iota=jnp.asarray(0.15, dtype=jnp.float64),
+                    G=jnp.asarray(1.0, dtype=jnp.float64),
+                )
+
+        class _JF:
+            def __init__(self):
+                self._x = np.array([1.0, 2.0, 3.0])
+
+            @property
+            def x(self):
+                return self._x
+
+            def J(self):
+                return 42.0
+
+            def dJ(self):
+                return np.array([0.1, 0.2, 0.3])
+
+        class _Curve:
+            def gamma(self):
+                return np.ones((4, 3))
+
+            def gammadash(self):
+                return np.ones((4, 3)) * 0.1
+
+        class _Current:
+            def get_value(self):
+                return 1.0
+
+        class _Coil:
+            def __init__(self):
+                self.curve = _Curve()
+                self.current = _Current()
+
+        class _BS:
+            def __init__(self):
+                self.coils = [_Coil()]
+
+        jf = _JF()
+        booz = _BoozerSurface()
+        bs_obj = _BS()
+
+        with patch.object(
+            module, "surface_self_intersection_check_available", return_value=True
+        ):
+            _, run_dict, _ = module.snapshot_to_pytree(
+                jf, booz, bs_obj, num_tf_coils=1
+            )
+
+        np.testing.assert_allclose(run_dict["sdofs"], np.array([10.0, 20.0, 30.0]))
+        self.assertEqual(run_dict["iota"], 0.15)
+        self.assertEqual(run_dict["G"], 1.0)
 
 
 class BoozerFallbackLBFGSBTests(unittest.TestCase):
