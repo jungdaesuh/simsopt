@@ -212,7 +212,7 @@ Useful notes:
 - `--dry-run` does not require the Stage 2 artifact to exist, but if the artifact and sibling `results.json` are present it still validates the surface match
 - the comparison summary records `stage2_artifact_init_only` from the shared seed metadata
 - the summary marks `search_objective_values_comparable=false` because `target` and `frontier` intentionally use different base iota terms
-- the current `frontier` implementation is `frontier_tradeoff_score_v1`: it uses a seed-normalized tradeoff score with bounded iota/volume rewards, normalized QA/Boozer terms, and a Boozer trust gate
+- the current `frontier` implementation is `frontier_tradeoff_score_v2`: it uses a seed-normalized tradeoff score with bounded iota/volume rewards, normalized QA/Boozer terms, and a smooth threshold-relative Boozer trust penalty during search while keeping final frontier certification hard
 - frontier result payloads record the fixed seed references, effective normalized weights, Boozer trust threshold, and the separate `BOOZER_SURFACE_TARGET_VOLUMES` used by the internal Boozer solve
 - when the shared Stage 2 `results.json` includes banana-current metadata, the comparison summary also records the shared seed `BANANA_CURRENT_A` and `BANANA_CURRENT_MAX_A`
 

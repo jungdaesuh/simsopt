@@ -1067,7 +1067,7 @@ class GoalModeComparisonScriptTests(unittest.TestCase):
             "results": {
                 "SINGLE_STAGE_GOAL_MODE": goal_mode,
                 "SINGLE_STAGE_GOAL_MODE_IMPL": (
-                    "target" if goal_mode == "target" else "frontier_tradeoff_score_v1"
+                    "target" if goal_mode == "target" else "frontier_tradeoff_score_v2"
                 ),
                 "FINAL_IOTA": final_iota,
                 "FINAL_VOLUME": final_volume,
@@ -1332,7 +1332,7 @@ class GoalModeComparisonScriptTests(unittest.TestCase):
                 "result_source": "best_feasible_partial",
                 "results": {
                     "SINGLE_STAGE_GOAL_MODE": "frontier",
-                    "SINGLE_STAGE_GOAL_MODE_IMPL": "frontier_tradeoff_score_v1",
+                    "SINGLE_STAGE_GOAL_MODE_IMPL": "frontier_tradeoff_score_v2",
                     "TARGET_IOTA": None,
                     "TARGET_VOLUME": None,
                     "BOOZER_SURFACE_TARGET_VOLUMES": [0.10],
@@ -1358,6 +1358,9 @@ class GoalModeComparisonScriptTests(unittest.TestCase):
                     "FRONTIER_TRUST_OK": True,
                     "FRONTIER_BOOZER_TRUST_THRESHOLD": 1.0e-5,
                     "FRONTIER_BOOZER_TRUST_EXCESS": 0.0,
+                    "FRONTIER_BOOZER_TRUST_EXCESS_RATIO": 0.0,
+                    "FRONTIER_BOOZER_TRUST_PENALTY_SCALE": 5.0e-5,
+                    "FRONTIER_TRUST_PENALTY": 0.0,
                     "FRONTIER_REFERENCE_IOTA": 0.15,
                     "FRONTIER_REFERENCE_VOLUME": 0.10,
                     "FRONTIER_REFERENCE_QA": 0.012,
@@ -1415,7 +1418,7 @@ class GoalModeComparisonScriptTests(unittest.TestCase):
         self.assertEqual(summary["mode_runs"]["target"]["results"]["goal_mode"], "target")
         self.assertEqual(
             summary["mode_runs"]["frontier"]["results"]["goal_mode_impl"],
-            "frontier_tradeoff_score_v1",
+            "frontier_tradeoff_score_v2",
         )
         self.assertIsNone(summary["mode_runs"]["frontier"]["results"]["target_iota"])
         self.assertEqual(
@@ -1423,6 +1426,11 @@ class GoalModeComparisonScriptTests(unittest.TestCase):
             [0.10],
         )
         self.assertTrue(summary["mode_runs"]["frontier"]["results"]["frontier_trust_ok"])
+        self.assertEqual(summary["mode_runs"]["frontier"]["results"]["frontier_trust_penalty"], 0.0)
+        self.assertEqual(
+            summary["mode_runs"]["frontier"]["results"]["frontier_boozer_trust_penalty_scale"],
+            5.0e-5,
+        )
         self.assertTrue(summary["mode_runs"]["target"]["results"]["best_feasible_available"])
         self.assertEqual(summary["mode_runs"]["target"]["results"]["invalid_state_rejects_total"], 2)
         self.assertAlmostEqual(summary["comparison"]["frontier_minus_target_final_iota"], 0.03)
@@ -1766,6 +1774,6 @@ class GoalModeComparisonScriptTests(unittest.TestCase):
             )
             self.assertEqual(
                 summary["mode_runs"]["frontier"]["results"]["goal_mode_impl"],
-                "frontier_tradeoff_score_v1",
+                "frontier_tradeoff_score_v2",
             )
             self.assertFalse(summary["comparison"]["both_optimizer_success"])

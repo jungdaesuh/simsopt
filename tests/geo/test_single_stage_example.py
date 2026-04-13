@@ -94,6 +94,7 @@ def make_frontier_goal_config(module, **overrides):
         "qs_reference": 1.0e-4,
         "boozer_reference": 1.0e-6,
         "boozer_trust_threshold": 1.0e-5,
+        "boozer_trust_penalty_scale": 5.0e-5,
         "effective_qs_weight": 1.0,
         "effective_boozer_weight": 1.0,
         "effective_iota_weight": 1.0,
@@ -1746,7 +1747,7 @@ class HardwareConstraintTests(unittest.TestCase):
             target_volume=0.10,
             target_iota=0.15,
             single_stage_goal_mode="frontier",
-            single_stage_goal_mode_impl="frontier_tradeoff_score_v1",
+            single_stage_goal_mode_impl="frontier_tradeoff_score_v2",
             boozer_surface_target_volumes=(0.10,),
             frontier_iota_reference=0.15,
             frontier_iota_scale=0.05,
@@ -1755,6 +1756,7 @@ class HardwareConstraintTests(unittest.TestCase):
             frontier_qs_reference=2.0e-4,
             frontier_boozer_reference=1.0e-6,
             frontier_boozer_trust_threshold=1.0e-5,
+            frontier_boozer_trust_penalty_scale=5.0e-5,
             frontier_effective_qs_weight=1.0,
             frontier_effective_boozer_weight=1.0,
             frontier_effective_iota_weight=1.0,
@@ -1768,6 +1770,9 @@ class HardwareConstraintTests(unittest.TestCase):
                 "frontier_trust_ok": True,
                 "frontier_boozer_trust_threshold": 1.0e-5,
                 "frontier_boozer_trust_excess": 0.0,
+                "frontier_boozer_trust_excess_ratio": 0.0,
+                "frontier_boozer_trust_penalty_scale": 5.0e-5,
+                "frontier_trust_penalty": 0.0,
                 "J_volume": -0.2,
             },
             "J": 7.5e-4,
@@ -1798,11 +1803,14 @@ class HardwareConstraintTests(unittest.TestCase):
 
         self.assertIsNone(payload["TARGET_VOLUME"])
         self.assertIsNone(payload["TARGET_IOTA"])
-        self.assertEqual(payload["SINGLE_STAGE_GOAL_MODE_IMPL"], "frontier_tradeoff_score_v1")
+        self.assertEqual(payload["SINGLE_STAGE_GOAL_MODE_IMPL"], "frontier_tradeoff_score_v2")
         self.assertEqual(payload["BOOZER_SURFACE_TARGET_VOLUMES"], [0.10])
         self.assertEqual(payload["FRONTIER_REFERENCE_IOTA"], 0.15)
         self.assertEqual(payload["FRONTIER_REFERENCE_VOLUME"], 0.10)
         self.assertTrue(payload["FRONTIER_TRUST_OK"])
+        self.assertEqual(payload["FRONTIER_BOOZER_TRUST_PENALTY_SCALE"], 5.0e-5)
+        self.assertEqual(payload["FRONTIER_BOOZER_TRUST_EXCESS_RATIO"], 0.0)
+        self.assertEqual(payload["FRONTIER_TRUST_PENALTY"], 0.0)
 
     def test_validate_boozer_stage_refinement_args_rejects_unsupported_scope(self):
         module = load_single_stage_example_module()
@@ -2316,6 +2324,106 @@ class HardwareConstraintTests(unittest.TestCase):
         )
         self.assertAlmostEqual(evaluation["base_total"], 5.0)
         restore_mock.assert_called_once()
+
+    def test_evaluate_search_step_frontier_trust_excess_remains_search_penalty(self):
+        module = self.load_module()
+
+        class _Surface:
+            def volume(self):
+                return 0.10
+
+        module.SINGLE_STAGE_GOAL_MODE = "frontier"
+        module.FRONTIER_GOAL_CONFIG = SimpleNamespace(
+            boozer_trust_threshold=1.0e-5,
+            boozer_trust_penalty_scale=5.0e-5,
+        )
+        module.MULTISURFACE_RAMP_ITERATIONS = 0
+        module.INNER_SURFACE_INITIAL_WEIGHT = 1.0
+        module.SURFACE_GAP_THRESHOLD = 0.0
+        module.SS_DIST = 0.04
+        module.TOPOLOGY_GATE_TMAX = 2.0
+        module.TOPOLOGY_GATE_TOL = 1.0e-3
+        module.TOPOLOGY_GATE_SURVIVAL_THRESHOLD = 0.5
+        module.HARDWARE_SEARCH_MODE = "hard"
+        module.HARDWARE_SEARCH_SOFT_ITERATIONS = 0
+        module.CC_DIST = 0.05
+        module.CS_DIST = 0.015
+        module.CURVATURE_THRESHOLD = 40.0
+        module.bs = object()
+        module.JCurveCurve = object()
+        module.JCurveSurface = object()
+        module.JSurfSurf = None
+        module.banana_curve = object()
+        module.JF = SimpleNamespace(x=np.zeros(2))
+        module.surface_iota_terms = [SimpleNamespace(J=lambda: 0.15)]
+        module.surface_data = [{"boozer_surface": SimpleNamespace(surface=_Surface())}]
+        module.run_dict = {
+            "x_prev": np.zeros(2),
+            "lscount": 0,
+            "accepted_iterations": 0,
+            "surface_state": {"sdofs": [], "iota": [], "G": []},
+            "accepted_x": np.zeros(2),
+            "J": 7.0,
+            "dJ": np.array([3.0, -1.0]),
+            "search_eval": {"total": 7.0},
+            "invalid_state_rejects_total": 0,
+            "topology_gate_rejects": 0,
+            "hardware_rejects": 0,
+            "surface_solve_rejects": 0,
+            "frontier_trust_rejects": 0,
+        }
+        stack_status = {
+            "success": True,
+            "solve_success": [True],
+            "self_intersections": [False],
+            "volumes_ordered": True,
+            "gap_ok": True,
+            "vessel_gap_ok": True,
+            "nesting_ok": True,
+            "adjacent_gaps": [],
+            "outer_vessel_gap": None,
+            "bad_nesting_phis": [],
+        }
+        objective_eval = {
+            "total": 2.09,
+            "grad": np.array([1.024, -2.012]),
+            "J_Boozer": 2.5e-5,
+            "dJ_Boozer": np.array([2.0e-6, -1.0e-6]),
+            "frontier_trust_penalty": 0.09,
+            "frontier_boozer_trust_excess_ratio": 0.3,
+            "surface_weights": np.array([1.0]),
+        }
+
+        with patch.object(
+            module,
+            "solve_surface_stack_at_dofs",
+            return_value=stack_status,
+        ), patch.object(
+            module,
+            "evaluate_search_objective",
+            return_value=objective_eval,
+        ), patch.object(
+            module,
+            "evaluate_search_topology_gate",
+            return_value={"enabled": False, "success": True},
+        ), patch.object(
+            module,
+            "evaluate_single_stage_hardware_snapshot",
+            return_value={
+                "status": {"success": True, "violations": []},
+                "curve_curve_min_dist": 0.06,
+                "curve_surface_min_dist": 0.02,
+                "surface_vessel_min_dist": None,
+                "max_curvature": 15.0,
+            },
+        ):
+            evaluation = module.evaluate_search_step(np.ones(2))
+
+        self.assertAlmostEqual(evaluation["total"], 2.09)
+        np.testing.assert_allclose(evaluation["grad"], [1.024, -2.012])
+        self.assertEqual(module.run_dict["invalid_state_rejects_total"], 0)
+        self.assertEqual(module.run_dict["frontier_trust_rejects"], 0)
+        self.assertTrue(module.run_dict["topology_gate_status"]["success"])
 
     def test_build_scaled_outer_problem_scales_coordinates_gradients_and_callback(self):
         module = self.load_module()
@@ -3128,6 +3236,7 @@ class HardwareConstraintTests(unittest.TestCase):
         self.assertAlmostEqual(config.qs_reference, 2.0e-4)
         self.assertAlmostEqual(config.boozer_reference, 1.0e-6)
         self.assertAlmostEqual(config.boozer_trust_threshold, 1.0e-5)
+        self.assertAlmostEqual(config.boozer_trust_penalty_scale, 5.0e-5)
         self.assertAlmostEqual(config.effective_boozer_weight, 1.0)
         self.assertAlmostEqual(config.effective_iota_weight, 1.0)
         self.assertAlmostEqual(config.effective_volume_weight, 1.0)
@@ -3162,6 +3271,40 @@ class HardwareConstraintTests(unittest.TestCase):
 
         self.assertAlmostEqual(config.effective_iota_weight, 3.0)
         self.assertAlmostEqual(config.effective_volume_weight, 3.0)
+
+    def test_annotate_frontier_search_eval_adds_threshold_relative_trust_penalty(self):
+        module = self.load_module()
+        module.SINGLE_STAGE_GOAL_MODE = "frontier"
+        module.FRONTIER_GOAL_CONFIG = module.build_frontier_goal_config(
+            initial_iota=0.15,
+            initial_volume=0.10,
+            initial_qs_objective=2.0e-4,
+            initial_boozer_objective=6.0e-7,
+            res_weight=1000.0,
+            iotas_weight=100.0,
+        )
+        search_eval = {
+            "total": 2.0,
+            "grad": np.array([1.0, -2.0]),
+            "J_Boozer": 2.5e-5,
+            "dJ_Boozer": np.array([2.0e-6, -1.0e-6]),
+        }
+
+        annotated = module.annotate_frontier_search_eval(search_eval)
+
+        self.assertEqual(annotated["frontier_base_total"], 2.0)
+        self.assertFalse(annotated["frontier_trust_ok"])
+        self.assertAlmostEqual(annotated["frontier_boozer_trust_threshold"], 1.0e-5)
+        self.assertAlmostEqual(annotated["frontier_boozer_trust_penalty_scale"], 5.0e-5)
+        self.assertAlmostEqual(annotated["frontier_boozer_trust_excess"], 1.5e-5)
+        self.assertAlmostEqual(annotated["frontier_boozer_trust_excess_ratio"], 0.3)
+        self.assertAlmostEqual(annotated["frontier_trust_penalty"], 0.09)
+        self.assertAlmostEqual(annotated["frontier_rank_total"], 2.09)
+        self.assertAlmostEqual(annotated["total"], 2.09)
+        np.testing.assert_allclose(
+            annotated["grad"],
+            np.array([1.024, -2.012]),
+        )
 
     def test_build_single_stage_iota_objective_rejects_invalid_goal_mode(self):
         module = self.load_module()
@@ -4763,7 +4906,7 @@ class CurrentBaselineContractTests(unittest.TestCase):
             args = module.parse_args()
 
         self.assertEqual(args.cs_dist, 0.015)
-        self.assertEqual(args.curvature_threshold, 100.0)
+        self.assertEqual(args.curvature_threshold, 40.0)
 
     def test_apply_default_stage2_seed_args_uses_legacy_seed_defaults(self):
         module = load_single_stage_example_module()
@@ -4784,7 +4927,7 @@ class CurrentBaselineContractTests(unittest.TestCase):
 
         module.apply_default_stage2_seed_args(args)
 
-        self.assertEqual(args.stage2_seed_curvature_threshold, 100.0)
+        self.assertEqual(args.stage2_seed_curvature_threshold, 40.0)
         self.assertEqual(args.stage2_seed_banana_surf_radius, 0.21)
         self.assertEqual(args.stage2_seed_tf_current_A, 8.0e4)
 

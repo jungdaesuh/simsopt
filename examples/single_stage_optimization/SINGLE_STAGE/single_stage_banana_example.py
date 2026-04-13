@@ -1518,6 +1518,7 @@ class PreservedTimeoutReplayConfig:
     frontier_qs_reference: float | None = None
     frontier_boozer_reference: float | None = None
     frontier_boozer_trust_threshold: float | None = None
+    frontier_boozer_trust_penalty_scale: float | None = None
     frontier_effective_qs_weight: float | None = None
     frontier_effective_boozer_weight: float | None = None
     frontier_effective_iota_weight: float | None = None
@@ -1539,13 +1540,14 @@ class FrontierGoalConfig:
     qs_reference: float
     boozer_reference: float
     boozer_trust_threshold: float
+    boozer_trust_penalty_scale: float
     effective_qs_weight: float
     effective_boozer_weight: float
     effective_iota_weight: float
     effective_volume_weight: float
 
 
-FRONTIER_GOAL_MODE_IMPL = "frontier_tradeoff_score_v1"
+FRONTIER_GOAL_MODE_IMPL = "frontier_tradeoff_score_v2"
 _FRONTIER_LEGACY_RES_WEIGHT_BASELINE = 1000.0
 _FRONTIER_LEGACY_IOTA_WEIGHT_BASELINE = 100.0
 _FRONTIER_LEGACY_VOLUME_WEIGHT_BASELINE = 100.0
@@ -1612,6 +1614,7 @@ def build_frontier_goal_config(
         volume_weight = iotas_weight
     qs_reference = max(abs(float(initial_qs_objective)), 1e-6)
     boozer_reference = max(abs(float(initial_boozer_objective)), 1e-6)
+    boozer_trust_threshold = max(10.0 * boozer_reference, 1e-5)
     return FrontierGoalConfig(
         iota_reference=float(initial_iota),
         iota_scale=max(abs(float(initial_iota)) * 0.25, 0.05),
@@ -1619,7 +1622,8 @@ def build_frontier_goal_config(
         volume_scale=max(abs(float(initial_volume)) * 0.10, 0.01),
         qs_reference=qs_reference,
         boozer_reference=boozer_reference,
-        boozer_trust_threshold=max(10.0 * boozer_reference, 1e-5),
+        boozer_trust_threshold=boozer_trust_threshold,
+        boozer_trust_penalty_scale=5.0 * boozer_trust_threshold,
         effective_qs_weight=1.0,
         effective_boozer_weight=_normalized_frontier_weight(
             res_weight,
@@ -1923,15 +1927,51 @@ def evaluate_frontier_trust_status(search_eval):
     }
 
 
+def evaluate_frontier_trust_penalty(search_eval):
+    if not frontier_mode_enabled():
+        return {
+            "enabled": False,
+            "penalty": 0.0,
+            "grad": np.zeros_like(np.asarray(search_eval["grad"], dtype=float)),
+            "scale": None,
+            "excess_ratio": None,
+        }
+    frontier_goal_config = require_frontier_goal_config(current_frontier_goal_config())
+    threshold = float(frontier_goal_config.boozer_trust_threshold)
+    scale = float(frontier_goal_config.boozer_trust_penalty_scale)
+    residual = float(search_eval["J_Boozer"])
+    excess_ratio = max((residual - threshold) / scale, 0.0)
+    if excess_ratio == 0.0:
+        penalty_grad = np.zeros_like(np.asarray(search_eval["grad"], dtype=float))
+    else:
+        penalty_grad = (
+            (2.0 * excess_ratio / scale) * np.asarray(search_eval["dJ_Boozer"], dtype=float)
+        )
+    return {
+        "enabled": True,
+        "penalty": float(excess_ratio ** 2),
+        "grad": penalty_grad,
+        "scale": scale,
+        "excess_ratio": float(excess_ratio),
+    }
+
+
 def annotate_frontier_search_eval(search_eval):
     if not frontier_mode_enabled():
         return search_eval
     frontier_status = evaluate_frontier_trust_status(search_eval)
+    trust_penalty = evaluate_frontier_trust_penalty(search_eval)
     annotated = dict(search_eval)
-    annotated["frontier_rank_total"] = float(search_eval["total"])
+    annotated["frontier_base_total"] = float(search_eval["total"])
+    annotated["frontier_rank_total"] = float(search_eval["total"]) + trust_penalty["penalty"]
+    annotated["total"] = annotated["frontier_rank_total"]
+    annotated["grad"] = np.asarray(search_eval["grad"], dtype=float) + trust_penalty["grad"]
     annotated["frontier_trust_ok"] = frontier_status["ok"]
     annotated["frontier_boozer_trust_threshold"] = frontier_status["threshold"]
     annotated["frontier_boozer_trust_excess"] = frontier_status["excess"]
+    annotated["frontier_boozer_trust_penalty_scale"] = trust_penalty["scale"]
+    annotated["frontier_boozer_trust_excess_ratio"] = trust_penalty["excess_ratio"]
+    annotated["frontier_trust_penalty"] = trust_penalty["penalty"]
     return annotated
 
 
@@ -1995,7 +2035,8 @@ def frontier_goal_mode_warning_message(frontier_goal_config):
         "QA and Boozer residual are normalized to the seed, iota and volume use bounded "
         f"improvement rewards referenced to the seed (iota_ref={frontier_goal_config.iota_reference:.6f}, "
         f"volume_ref={frontier_goal_config.volume_reference:.6f}), and Boozer residuals above "
-        f"{frontier_goal_config.boozer_trust_threshold:.6e} are treated as untrustworthy and rejected. "
+        f"{frontier_goal_config.boozer_trust_threshold:.6e} incur a smooth threshold-relative trust penalty "
+        "during search and still fail final frontier certification. "
         "The legacy --res-weight and --iotas-weight inputs are rescaled relative to their historical "
         "defaults so matched target/frontier runs stay in the same rough objective range."
     )
@@ -2946,25 +2987,28 @@ def run_penalty_phase1(
             run_dict.get("invalid_state_rejects_total", 0)
         )
         phase1_scale = settings["phase1_scale"]
-        def tracked_phase1_callback(xk):
+
+        def record_phase1_accepted_step_rms(accepted_step_rms):
             nonlocal phase1_first_accepted_step_rms, phase1_max_accepted_step_rms
+            if phase1_first_accepted_step_rms is None:
+                phase1_first_accepted_step_rms = accepted_step_rms
+            phase1_max_accepted_step_rms = (
+                accepted_step_rms
+                if phase1_max_accepted_step_rms is None
+                else max(
+                    phase1_max_accepted_step_rms,
+                    accepted_step_rms,
+                )
+            )
+
+        def tracked_phase1_callback(xk):
             accepted_before_callback = int(run_dict.get("accepted_iterations", 0))
             phase1_callback(xk)
             if int(run_dict.get("accepted_iterations", 0)) > accepted_before_callback:
-                accepted_step_rms = float(
+                record_phase1_accepted_step_rms(
                     basin_normalized_step_rms(
                         anchor_x,
                         np.asarray(run_dict["accepted_x"], dtype=float),
-                    )
-                )
-                if phase1_first_accepted_step_rms is None:
-                    phase1_first_accepted_step_rms = accepted_step_rms
-                phase1_max_accepted_step_rms = (
-                    accepted_step_rms
-                    if phase1_max_accepted_step_rms is None
-                    else max(
-                        phase1_max_accepted_step_rms,
-                        accepted_step_rms,
                     )
                 )
 
@@ -3431,6 +3475,10 @@ def current_preserved_timeout_replay_config() -> PreservedTimeoutReplayConfig:
             "frontier_boozer_trust_threshold",
             "boozer_trust_threshold",
         ),
+        frontier_boozer_trust_penalty_scale=frontier_replay_value(
+            "frontier_boozer_trust_penalty_scale",
+            "boozer_trust_penalty_scale",
+        ),
         frontier_effective_qs_weight=frontier_replay_value(
             "frontier_effective_qs_weight",
             "effective_qs_weight",
@@ -3592,6 +3640,13 @@ def build_preserved_timeout_results_payload(
         "FRONTIER_EFFECTIVE_IOTA_WEIGHT": replay_config.frontier_effective_iota_weight,
         "FRONTIER_EFFECTIVE_VOLUME_WEIGHT": replay_config.frontier_effective_volume_weight,
         "FRONTIER_VOLUME_OBJECTIVE": search_eval.get("J_volume"),
+        "FRONTIER_TRUST_PENALTY": search_eval.get("frontier_trust_penalty"),
+        "FRONTIER_BOOZER_TRUST_PENALTY_SCALE": search_eval.get(
+            "frontier_boozer_trust_penalty_scale"
+        ),
+        "FRONTIER_BOOZER_TRUST_EXCESS_RATIO": search_eval.get(
+            "frontier_boozer_trust_excess_ratio"
+        ),
         "PRESERVED_TIMEOUT_SALVAGE_AVAILABLE": True,
         "PRESERVED_TIMEOUT_SALVAGE_KIND": preservation_kind,
         "PRESERVED_TIMEOUT_SALVAGE_STAGE": source_stage,
@@ -3925,25 +3980,16 @@ def evaluate_search_step(x):
         frontier_trust_status = evaluate_frontier_trust_status(objective_eval)
         run_dict["frontier_trust_status"] = frontier_trust_status
         if frontier_trust_status["enabled"] and not frontier_trust_status["ok"]:
-            success = False
-            rejection_reason = "frontier_trust"
-            run_dict["frontier_trust_rejects"] += 1
-            run_dict["invalid_state_rejects_total"] += 1
-            rejection_increment = max(
-                abs(run_dict["J"]),
-                1.0,
-                abs(run_dict["J"]) + frontier_trust_status["excess"] / frontier_trust_status["threshold"],
-            )
-            run_dict['topology_gate_status'] = disabled_topology_gate_status(
-                TOPOLOGY_GATE_TMAX,
-                TOPOLOGY_GATE_TOL,
-                TOPOLOGY_GATE_SURVIVAL_THRESHOLD,
-            )
-            print("/!\\ /!\\ Frontier Boozer trust gate rejected candidate /!\\ /!\\")
+            print("/!\\ /!\\ Frontier Boozer trust penalty active /!\\ /!\\")
             print(
                 "Boozer residual "
                 f"{frontier_trust_status['residual']:.6e} exceeds trust threshold "
                 f"{frontier_trust_status['threshold']:.6e}"
+            )
+            print(
+                "Frontier trust penalty = "
+                f"{objective_eval.get('frontier_trust_penalty', 0.0):.6e} "
+                f"(excess_ratio={objective_eval.get('frontier_boozer_trust_excess_ratio'):.6e})"
             )
 
         if success:
@@ -4318,6 +4364,16 @@ def callback(x):
         print(
             f"{'Frontier Boozer Threshold':{width}} = "
             f"{objective_eval.get('frontier_boozer_trust_threshold')}",
+            file=buffer,
+        )
+        print(
+            f"{'Frontier Trust Penalty':{width}} = "
+            f"{objective_eval.get('frontier_trust_penalty')}",
+            file=buffer,
+        )
+        print(
+            f"{'Frontier Trust Excess Ratio':{width}} = "
+            f"{objective_eval.get('frontier_boozer_trust_excess_ratio')}",
             file=buffer,
         )
     print(f"{'Iotas (actual)':{width}} = {iota_str}", file=buffer)
@@ -5815,6 +5871,11 @@ if __name__ == "__main__":
         "FRONTIER_REFERENCE_BOOZER": (
             None if FRONTIER_GOAL_CONFIG is None else FRONTIER_GOAL_CONFIG.boozer_reference
         ),
+        "FRONTIER_BOOZER_TRUST_PENALTY_SCALE": (
+            None
+            if FRONTIER_GOAL_CONFIG is None
+            else FRONTIER_GOAL_CONFIG.boozer_trust_penalty_scale
+        ),
         "FRONTIER_EFFECTIVE_QA_WEIGHT": (
             None if FRONTIER_GOAL_CONFIG is None else FRONTIER_GOAL_CONFIG.effective_qs_weight
         ),
@@ -5865,6 +5926,10 @@ if __name__ == "__main__":
         "BOOZER_RESIDUAL": boozer_residual,
         "FRONTIER_TRUST_OK": final_frontier_trust_status["ok"],
         "FRONTIER_BOOZER_TRUST_EXCESS": final_frontier_trust_status["excess"],
+        "FRONTIER_BOOZER_TRUST_EXCESS_RATIO": run_dict["search_eval"].get(
+            "frontier_boozer_trust_excess_ratio"
+        ),
+        "FRONTIER_TRUST_PENALTY": run_dict["search_eval"].get("frontier_trust_penalty"),
         "FRONTIER_VOLUME_OBJECTIVE": (
             None if args.init_only else float(run_dict["search_eval"].get("J_volume", 0.0))
         ),

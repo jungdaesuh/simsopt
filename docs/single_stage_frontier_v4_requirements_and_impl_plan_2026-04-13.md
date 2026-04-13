@@ -1,7 +1,7 @@
 # Single-Stage Frontier V4 Requirements And Implementation Plan
 
 Date: 2026-04-13
-Status: proposal only, not yet implemented
+Status: `v4` proposal target; `frontier_v2` partially implemented, `v3`/`v4` not yet implemented
 Scope: `examples/single_stage_optimization/` frontier architecture, runtime contracts, archive semantics, and validation gates
 
 ## Goal
@@ -161,7 +161,7 @@ The system must support an explicit frontier campaign mode that launches multipl
 
 Required user-facing contract:
 
-- [ ] `--single-stage-goal-mode target` remains unchanged
+- [x] `--single-stage-goal-mode target` remains unchanged
 - [ ] `frontier_v4` is selected through a frontier campaign CLI, not by overloading the single-lane CLI alone
 
 ### FR2. Multiple preference directions
@@ -193,7 +193,7 @@ Archive membership rules:
 
 Search-time treatment for the following must be smooth or ALM-routed:
 
-- [ ] Boozer trust
+- [x] Boozer trust
 - [ ] hardware engineering limits
 - [ ] topology / confinement limits where differentiable or cheaply relaxable
 
@@ -205,7 +205,7 @@ Hard invalidation is allowed only for:
 
 Conditioning requirement:
 
-- [ ] frontier lane normalization must keep active objective and soft-constraint terms in a numerically usable range for the existing local optimizer near the seed and early accepted iterates
+- [x] frontier lane normalization must keep active objective and soft-constraint terms in a numerically usable range for the existing local optimizer near the seed and early accepted iterates
 - [ ] normalization policy must be explicit enough to prevent one lane term from dominating search solely due to scale mismatch
 
 ### FR5. Recommendation policy
@@ -618,9 +618,9 @@ Implement:
 
 - [ ] achievement / Chebyshev scalarizations
 - [ ] epsilon-constraint helper functions
-- [ ] smooth Boozer trust penalty helpers
+- [x] smooth Boozer trust penalty helpers
 - [ ] smooth hardware/topology routing helpers
-- [ ] explicit normalization / conditioning helpers for frontier lane objectives
+- [x] explicit normalization / conditioning helpers for frontier lane objectives
 
 Files:
 
@@ -631,7 +631,7 @@ Files:
 Acceptance gate:
 
 - [ ] scalarization invariants tested
-- [ ] soft-constraint helpers produce finite values and gradients on representative states
+- [x] soft-constraint helpers produce finite values and gradients on representative states
 - [ ] normalization / conditioning checks show lane objective terms stay within a usable scale range near the seed and first accepted moves
 
 ## Phase 3. Lane executor contract
@@ -641,19 +641,19 @@ Implement a reusable frontier lane executor on top of the current single-stage m
 Responsibilities:
 
 - [ ] consume one lane contract
-- [ ] run one smooth constrained search
-- [ ] checkpoint lane state incrementally
+- [x] run one smooth constrained search
+- [x] checkpoint lane state incrementally
 - [ ] publish provisional and certified candidates to the archive manager
 
 Files:
 
 - [ ] `banana_opt/frontier_engine_base.py`
-- [ ] `single_stage_banana_example.py` integration hooks
+- [x] `single_stage_banana_example.py` integration hooks
 
 Acceptance gate:
 
 - [ ] one-lane frontier run can publish a certified member to a mock archive
-- [ ] interrupted run writes salvageable lane summary
+- [x] interrupted run writes salvageable lane summary
 
 ## Phase 4. Multilane local frontier campaign
 
@@ -842,7 +842,7 @@ Do not promote `frontier_v4` to replace `target` unless:
 The first implementable `v4` slice should be:
 
 1. [ ] archive core
-2. [ ] smooth frontier scalarization helpers
+2. [x] smooth frontier scalarization helpers
 3. [ ] multi-lane local frontier campaign runner
 4. [ ] recommendation policy
 5. [ ] partial-artifact salvage and resume
