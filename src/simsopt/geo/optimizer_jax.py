@@ -35,6 +35,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from functools import lru_cache
+import importlib
 import re
 from threading import Lock
 from typing import Callable
@@ -397,6 +398,7 @@ def _finalize_optimizer_result(result, adapter):
 # optimizer_jax for SciPy / Newton paths never touches private optimizer internals.
 # ---------------------------------------------------------------------------
 _private_pkg = None  # None = untried, False = absent, module = loaded
+_PRIVATE_PKG_MODULE_NAME = f"{__package__}.optimizer_jax_private"
 
 _PRIVATE_LAZY_NAMES = frozenset(
     {
@@ -416,11 +418,15 @@ def _load_private_pkg():
     global _private_pkg
     if _private_pkg is None:
         try:
-            from . import optimizer_jax_private
-
-            _private_pkg = optimizer_jax_private
-        except ImportError:
+            optimizer_jax_private = importlib.import_module(
+                ".optimizer_jax_private", __package__
+            )
+        except ImportError as exc:
+            if getattr(exc, "name", None) != _PRIVATE_PKG_MODULE_NAME:
+                raise
             _private_pkg = False
+        else:
+            _private_pkg = optimizer_jax_private
     return _private_pkg
 
 

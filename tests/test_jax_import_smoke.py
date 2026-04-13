@@ -1003,6 +1003,15 @@ def test_optimizer_jax_private_methods_require_private_package_when_blocked():
     assert rc == 0, f"private optimizer import guard failed:\n{err}"
 
 
+def test_optimizer_jax_private_nested_import_errors_propagate():
+    """Nested private-package import failures must not be masked as package absence."""
+    rc, err = _run_python_script(
+        _IMPORT_SMOKE_CASES_PATH,
+        args=("case_optimizer_jax_private_nested_import_errors_propagate",),
+    )
+    assert rc == 0, f"nested private optimizer ImportError was masked:\n{err}"
+
+
 def test_optimizer_jax_public_module_has_no_private_jax_src_usage():
     """Section 6 public optimizer module must remain free of jax._src usage."""
     _assert_no_private_jax_src_usage(

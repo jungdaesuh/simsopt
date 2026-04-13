@@ -36,10 +36,29 @@ def block_private_optimizer_imports() -> None:
             if fullname == "simsopt.geo.optimizer_jax_private" or fullname.startswith(
                 "simsopt.geo.optimizer_jax_private."
             ):
-                raise ImportError("blocked private optimizer package for smoke test")
+                exc = ModuleNotFoundError(
+                    "blocked private optimizer package for smoke test"
+                )
+                exc.name = "simsopt.geo.optimizer_jax_private"
+                raise exc
             return None
 
     sys.meta_path.insert(0, _BlockPrivateOptimizer())
+
+
+def block_private_optimizer_submodule_import(submodule: str) -> None:
+    """Install a meta-path finder that blocks one private optimizer submodule."""
+
+    class _BlockPrivateOptimizerSubmodule(importlib.abc.MetaPathFinder):
+        def find_spec(self, fullname, path=None, target=None):
+            del path, target
+            if fullname == submodule or fullname.startswith(f"{submodule}."):
+                raise ImportError(
+                    f"blocked private optimizer dependency {submodule} for smoke test"
+                )
+            return None
+
+    sys.meta_path.insert(0, _BlockPrivateOptimizerSubmodule())
 
 
 def block_simsoptpp_imports() -> None:
@@ -1647,6 +1666,35 @@ def case_optimizer_jax_private_methods_require_private_package_when_blocked() ->
     else:
         raise AssertionError(
             "expected ImportError for blocked private optimizer package"
+        )
+
+
+def case_optimizer_jax_private_nested_import_errors_propagate() -> None:
+    import jax.numpy as jnp
+
+    block_private_optimizer_submodule_import(
+        "simsopt.geo.optimizer_jax_private._common"
+    )
+
+    from simsopt.geo import optimizer_jax
+
+    def quad(x):
+        return 0.5 * jnp.dot(x, x)
+
+    try:
+        optimizer_jax.jax_minimize(
+            quad,
+            jnp.asarray([1.0, -2.0]),
+            method="bfgs-ondevice",
+            maxiter=1,
+        )
+    except ImportError as exc:
+        message = str(exc)
+        assert "blocked private optimizer dependency" in message
+        assert "requires the private optimizer package" not in message
+    else:
+        raise AssertionError(
+            "expected nested ImportError from blocked private optimizer dependency"
         )
 
 
