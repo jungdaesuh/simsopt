@@ -27,6 +27,7 @@ import logging
 import numpy as np
 import jax
 import jax.numpy as jnp
+from jax import lax
 
 from .._core.derivative import Derivative, derivative_dec
 from .._core.jax_host_boundary import (
@@ -1786,7 +1787,10 @@ def _traceable_forward_result(
         failure_value_jax = _runtime_float64_scalar(failure_value, reference=delta)
         failure_scale_jax = _runtime_float64_scalar(failure_scale, reference=delta)
         failure_penalty = (
-            failure_value_jax + failure_half * failure_scale_jax * jnp.dot(delta, delta)
+            failure_value_jax
+            + failure_half
+            * failure_scale_jax
+            * jnp.dot(delta, delta, precision=lax.Precision.HIGHEST)
         )
         return {
             "value": jnp.where(

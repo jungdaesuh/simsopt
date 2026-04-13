@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import logging
 from collections.abc import Sequence
+from pathlib import Path
 from typing import Literal, cast
 
 import jax
@@ -90,6 +92,14 @@ LegacyCurveObjectiveGradientCase = Literal[
     "lp-curve-torsion",
     "framed-curve-twist",
 ]
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_STAGE2_SCRIPT_PATH = (
+    _REPO_ROOT
+    / "examples"
+    / "single_stage_optimization"
+    / "STAGE_2"
+    / "banana_coil_solver.py"
+)
 
 
 def _configure_strict_cpu_parity_backend() -> bool:
@@ -119,7 +129,8 @@ class _CompileCounter(logging.Handler):
         self.count = 0
 
     def emit(self, record: logging.LogRecord) -> None:
-        if "Compiling jit(run_solver)" in record.getMessage():
+        message = record.getMessage()
+        if "Compiling jit(" in message and "_run_solver)" in message:
             self.count += 1
 
 
@@ -207,6 +218,55 @@ def _run_target_compile_count_case() -> None:
             maxiter=5,
         )
         assert result.success is True
+
+    _assert_run_solver_compiles_once(run_once)
+
+
+def _load_stage2_script_module():
+    spec = importlib.util.spec_from_file_location(
+        "stage2_banana_coil_solver_subprocess",
+        _STAGE2_SCRIPT_PATH,
+    )
+    if spec is None or spec.loader is None:
+        raise RuntimeError(
+            f"Failed to load Stage 2 script module from {_STAGE2_SCRIPT_PATH}"
+        )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _run_stage2_target_compile_count_case() -> None:
+    if not _configure_strict_cpu_parity_backend():
+        return
+
+    stage2_script = _load_stage2_script_module()
+    cpu = jax.devices("cpu")[0]
+    bundle, dofs_device = _build_stage2_target_objective_test_bundle(cpu)
+    contract = stage2_script.resolve_stage2_optimizer_contract("jax", "ondevice")
+    value_and_grad = bundle.value_and_grad
+    if value_and_grad is None:
+        raise RuntimeError("Stage 2 target bundle must expose value_and_grad.")
+    initial_dofs = np.asarray(jax.device_get(dofs_device), dtype=np.float64)
+
+    def run_once() -> None:
+        optimizer_state = stage2_script.build_stage2_target_optimizer_state(
+            bundle,
+            initial_dofs,
+        )
+        result = stage2_script.run_stage2_optimizer(
+            value_and_grad_fun=value_and_grad,
+            dofs=optimizer_state,
+            contract=contract,
+            maxiter=5,
+            ftol=0.0,
+            gtol=1e-12,
+            maxcor=7,
+            scalar_fun=bundle.objective,
+        )
+        final_dofs = stage2_script.flatten_stage2_target_optimizer_state(result.x)
+        assert final_dofs.shape == initial_dofs.shape
+        assert np.all(np.isfinite(np.asarray(final_dofs, dtype=np.float64)))
 
     _assert_run_solver_compiles_once(run_once)
 
@@ -1021,6 +1081,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     subparsers.add_parser("biot-savart-point-chunking")
     subparsers.add_parser("target-compile-count")
+    subparsers.add_parser("stage2-target-compile-count")
     subparsers.add_parser("mutable-objective-state")
     subparsers.add_parser("grouped-gpu-spec-eval")
     subparsers.add_parser("grouped-explicit-point-sharding")
@@ -1083,6 +1144,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
     if args.case == "target-compile-count":
         _run_target_compile_count_case()
+        return 0
+    if args.case == "stage2-target-compile-count":
+        _run_stage2_target_compile_count_case()
         return 0
     if args.case == "mutable-objective-state":
         _run_mutable_objective_state_case()

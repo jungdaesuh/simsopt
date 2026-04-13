@@ -37,6 +37,18 @@ from hardware_constraints import (
     sanitize_json_payload,
 )
 from run_metadata import build_artifact_manifest, build_runtime_provenance
+# ALM WIP is intentionally parked off the active Stage 2 path for now.
+# Keep the recovery point local in this file instead of exposing an
+# unvalidated constraint-method branch in the script's live CLI/runtime path.
+# from alm_utils import (
+#     ALMSettings,
+#     augmented_inequality_objective,
+#     lower_bound_residual,
+#     minimize_alm,
+#     upper_bound_residual,
+#     validate_alm_cli_args,
+#     zero_gradient_like,
+# )
 
 
 bootstrap_local_simsopt(SRC_ROOT)
@@ -61,11 +73,21 @@ _STAGE2_REQUIRED_ARTIFACT_FILENAMES = (
     "biot_savart_opt.json",
     "surf_opt.json",
 )
+STAGE2_ALM_CONSTRAINT_NAMES = (
+    "coil_length_upper_bound",
+    "coil_coil_spacing",
+    "max_curvature",
+)
+_SMOOTHING_EPS = float(np.finfo(float).eps)
 
 
 @lru_cache(maxsize=32)
 def _cached_raw_terms_jacobian(raw_terms):
     return jax.jit(jax.jacrev(raw_terms))
+
+
+def _zero_gradient_like(values):
+    return np.zeros_like(np.asarray(values, dtype=float))
 
 
 def resolve_curvature_threshold(value: float) -> float:
@@ -245,6 +267,30 @@ def parse_args():
         ),
     )
     parser.add_argument(
+        "--constraint-method",
+        choices=["penalty"],
+        default="penalty",
+        help=(
+            "Use the legacy fixed weighted-penalty objective. "
+            "The Stage 2 ALM closeout WIP is intentionally parked and not "
+            "exposed on this live script path."
+        ),
+    )
+    # Parked Stage 2 ALM CLI surface:
+    # - --alm-max-outer-iters
+    # - --alm-max-subproblem-continuations
+    # - --alm-penalty-init
+    # - --alm-penalty-scale
+    # - --alm-feas-tol
+    # - --alm-stationarity-tol
+    # - --alm-trust-radius-init
+    # - --alm-trust-radius-min
+    # - --alm-trust-radius-shrink
+    # - --alm-trust-radius-grow
+    # - --alm-max-inner-attempts
+    # - --alm-distance-smoothing
+    # - --alm-curvature-smoothing
+    parser.add_argument(
         "--length-weight",
         type=float,
         default=float(os.environ.get("LENGTH_WEIGHT", "0.0005")),
@@ -391,6 +437,7 @@ def parse_args():
         args.optimizer_backend,
         args.least_squares_algorithm,
     )
+    validate_stage2_constraint_method_args(args)
     return args
 
 
@@ -414,6 +461,11 @@ def resolve_stage2_default_least_squares_algorithm(
     if field_backend == "jax" and optimizer_backend == "ondevice":
         return "lm"
     return "quasi-newton"
+
+
+def validate_stage2_constraint_method_args(args) -> None:
+    # ALM WIP is intentionally parked; only the legacy penalty lane is exposed.
+    return
 
 
 def build_equilibrium_path(args):
@@ -1025,6 +1077,280 @@ def profile_stage2_explicit_step(
     }
 
 
+def _stable_softmax(values: np.ndarray) -> np.ndarray:
+    shifted = np.asarray(values, dtype=float) - float(np.max(values))
+    weights = np.exp(shifted)
+    return weights / float(np.sum(weights))
+
+
+def _smoothmax_selected(
+    values: np.ndarray,
+    temperature: float,
+) -> tuple[float, np.ndarray]:
+    temperature = max(float(temperature), _SMOOTHING_EPS)
+    max_value = float(np.max(values))
+    shifted = (np.asarray(values, dtype=float) - max_value) / temperature
+    weights = _stable_softmax(shifted)
+    smooth_value = max_value + temperature * float(np.log(np.sum(np.exp(shifted))))
+    return smooth_value, weights
+
+
+def _smoothmin_selected(
+    values: np.ndarray,
+    temperature: float,
+) -> tuple[float, np.ndarray]:
+    temperature = max(float(temperature), _SMOOTHING_EPS)
+    min_value = float(np.min(values))
+    shifted = -(np.asarray(values, dtype=float) - min_value) / temperature
+    weights = _stable_softmax(shifted)
+    smooth_value = min_value - temperature * float(np.log(np.sum(np.exp(shifted))))
+    return smooth_value, weights
+
+
+def stage2_constraint_activity_tolerances(
+    distance_smoothing: float,
+    curvature_smoothing: float,
+) -> list[float]:
+    return [
+        1e-3,
+        1.0 / max(float(distance_smoothing), _SMOOTHING_EPS),
+        1.0 / max(float(curvature_smoothing), _SMOOTHING_EPS),
+    ]
+
+
+def smooth_max_curvature_signed_constraint(
+    curve,
+    threshold: float,
+    temperature: float,
+    base_objective_optimizable,
+):
+    kappa = np.asarray(curve.kappa(), dtype=float)
+    hard_max = float(np.max(kappa))
+    active_mask = kappa >= (hard_max - 4.0 * float(temperature))
+    if not np.any(active_mask):
+        active_mask[np.argmax(kappa)] = True
+    smooth_max, active_weights = _smoothmax_selected(kappa[active_mask], temperature)
+    full_weights = np.zeros_like(kappa)
+    full_weights[active_mask] = active_weights
+    grad = np.asarray(
+        curve.dkappa_by_dcoeff_vjp(full_weights)(base_objective_optimizable),
+        dtype=float,
+    )
+    return smooth_max - float(threshold), grad
+
+
+def smooth_min_distance_signed_constraint(
+    curves,
+    minimum_distance: float,
+    temperature: float,
+    base_objective_optimizable,
+):
+    from simsopt._core.derivative import Derivative
+
+    pair_blocks = []
+    hard_min = np.inf
+    for curve_index, curve_i in enumerate(curves):
+        gamma_i = np.asarray(curve_i.gamma(), dtype=float)
+        for other_index in range(curve_index):
+            curve_j = curves[other_index]
+            gamma_j = np.asarray(curve_j.gamma(), dtype=float)
+            diffs = gamma_i[:, None, :] - gamma_j[None, :, :]
+            dists = np.linalg.norm(diffs, axis=2)
+            hard_min = min(hard_min, float(np.min(dists)))
+            pair_blocks.append((curve_index, other_index, diffs, dists))
+
+    if not pair_blocks:
+        return float(minimum_distance), _zero_gradient_like(
+            base_objective_optimizable.x
+        )
+
+    selection_window = 4.0 * float(temperature)
+    selected_distances = []
+    selected_entries = []
+    for curve_index, other_index, diffs, dists in pair_blocks:
+        mask = dists <= (hard_min + selection_window)
+        if not np.any(mask):
+            mask[np.unravel_index(np.argmin(dists), dists.shape)] = True
+        rows, cols = np.nonzero(mask)
+        selected_distances.append(dists[rows, cols])
+        selected_entries.append(
+            (
+                curve_index,
+                other_index,
+                rows,
+                cols,
+                diffs[rows, cols],
+                dists[rows, cols],
+            )
+        )
+
+    flat_distances = np.concatenate(selected_distances)
+    smooth_min, flat_weights = _smoothmin_selected(flat_distances, temperature)
+
+    point_gradients = [
+        np.zeros_like(np.asarray(curve.gamma(), dtype=float))
+        for curve in curves
+    ]
+    offset = 0
+    for curve_index, other_index, rows, cols, diffs, distances in selected_entries:
+        count = len(distances)
+        local_weights = flat_weights[offset : offset + count]
+        offset += count
+        directions = diffs / np.maximum(distances[:, None], _SMOOTHING_EPS)
+        np.add.at(point_gradients[curve_index], rows, local_weights[:, None] * directions)
+        np.add.at(
+            point_gradients[other_index],
+            cols,
+            -local_weights[:, None] * directions,
+        )
+
+    derivative = Derivative({})
+    for curve, point_gradient in zip(curves, point_gradients):
+        if np.any(point_gradient):
+            derivative += curve.dgamma_by_dcoeff_vjp(point_gradient)
+    grad = np.asarray(derivative(base_objective_optimizable), dtype=float)
+    return float(minimum_distance) - smooth_min, grad
+
+
+# ALM WIP parking lot:
+# The helper functions below are kept as a local recovery point, but the
+# parser/runtime no longer wires them into the live Stage 2 entry path.
+def build_stage2_alm_settings(args):
+    return ALMSettings(
+        max_outer_iterations=args.alm_max_outer_iters,
+        max_subproblem_continuations=args.alm_max_subproblem_continuations,
+        penalty_init=args.alm_penalty_init,
+        penalty_scale=args.alm_penalty_scale,
+        feasibility_tol=args.alm_feas_tol,
+        stationarity_tol=args.alm_stationarity_tol,
+        trust_radius_init=(
+            None
+            if float(args.alm_trust_radius_init) == 0.0
+            else float(args.alm_trust_radius_init)
+        ),
+        trust_radius_min=args.alm_trust_radius_min,
+        trust_radius_shrink=args.alm_trust_radius_shrink,
+        trust_radius_grow=args.alm_trust_radius_grow,
+        max_inner_attempts=args.alm_max_inner_attempts,
+    )
+
+
+def evaluate_stage2_alm_problem(
+    dofs,
+    base_objective,
+    new_bs,
+    new_surf,
+    Jf,
+    Jls,
+    length_target,
+    Jccdist,
+    Jc,
+    distance_smoothing,
+    curvature_smoothing,
+    multipliers,
+    penalty,
+):
+    base_objective.x = dofs
+    base_value = float(base_objective.J())
+    base_grad = np.asarray(base_objective.dJ(), dtype=float)
+
+    coil_length = float(Jls.J())
+    length_violation = upper_bound_residual(coil_length, length_target)
+    length_grad = np.asarray(
+        Jls.dJ(partials=True)(base_objective),
+        dtype=float,
+    )
+
+    curve_curve_min_dist = float(Jccdist.shortest_distance())
+    curve_curve_violation = lower_bound_residual(
+        curve_curve_min_dist,
+        Jccdist.minimum_distance,
+    )
+    curve_curve_signed_value, curve_curve_grad = smooth_min_distance_signed_constraint(
+        Jccdist.curves,
+        Jccdist.minimum_distance,
+        distance_smoothing,
+        base_objective,
+    )
+
+    max_curvature = float(np.max(Jc.curve.kappa()))
+    curvature_violation = upper_bound_residual(max_curvature, Jc.threshold)
+    curvature_signed_value, curvature_grad = smooth_max_curvature_signed_constraint(
+        Jc.curve,
+        Jc.threshold,
+        curvature_smoothing,
+        base_objective,
+    )
+
+    evaluation = augmented_inequality_objective(
+        base_value,
+        base_grad,
+        [
+            coil_length - length_target,
+            curve_curve_signed_value,
+            curvature_signed_value,
+        ],
+        [length_grad, curve_curve_grad, curvature_grad],
+        multipliers,
+        penalty,
+    )
+    evaluation.update(
+        {
+            "base_value": base_value,
+            "constraint_names": list(STAGE2_ALM_CONSTRAINT_NAMES),
+            "dual_update_values": [
+                coil_length - length_target,
+                curve_curve_signed_value,
+                curvature_signed_value,
+            ],
+            "constraint_grads": [length_grad, curve_curve_grad, curvature_grad],
+            "constraint_activity_tolerances": stage2_constraint_activity_tolerances(
+                distance_smoothing,
+                curvature_smoothing,
+            ),
+            "feasibility_values": [
+                length_violation,
+                curve_curve_violation,
+                curvature_violation,
+            ],
+            "max_feasibility_violation": max(
+                length_violation,
+                curve_curve_violation,
+                curvature_violation,
+            ),
+            "metric_grad": base_grad,
+            "metric_stationarity_norm": float(np.linalg.norm(base_grad)),
+        }
+    )
+
+    unitn = new_surf.unitnormal()
+    BdotN = np.mean(
+        np.abs(np.sum(new_bs.B().reshape(unitn.shape) * unitn, axis=2))
+    )
+    outstr = (
+        f"ALM J={evaluation['total']:.1e}, Jflux={base_value:.1e}, "
+        f"Jf={Jf.J():.1e}, ⟨B·n⟩={BdotN:.1e}"
+    )
+    outstr += (
+        f", Len={coil_length:.1f}m, Len+={length_violation:.2e}, "
+        f"Lens={coil_length - length_target:.2e}"
+    )
+    outstr += (
+        f", C-C-Sep={curve_curve_min_dist:.2f}m, CC+={curve_curve_violation:.2e}, "
+        f"CCs={curve_curve_signed_value:.2e}"
+    )
+    outstr += (
+        f", Curvature={max_curvature:.2f}, Curv+={curvature_violation:.2e}, "
+        f"Curvs={curvature_signed_value:.2e}"
+    )
+    outstr += (
+        f", ║∇L_A║={evaluation['stationarity_norm']:.1e}, "
+        f"║∇Jflux║={np.linalg.norm(base_grad):.1e}, mu={penalty:.1e}"
+    )
+    print(outstr)
+    return evaluation
+
+
 _STAGE2_COMPONENT_LABEL = "the Stage 2 outer loop"
 
 
@@ -1287,6 +1613,36 @@ def run_stage2_optimizer_timed(
     return result, float(time.perf_counter() - start)
 
 
+def run_stage2_alm_optimizer_timed(
+    dofs,
+    *,
+    settings,
+    evaluate_problem,
+    maxiter,
+    ftol,
+    gtol,
+    maxcor=300,
+    accepted_callback=None,
+    outer_state_callback=None,
+):
+    start = time.perf_counter()
+    result = minimize_alm(
+        dofs,
+        STAGE2_ALM_CONSTRAINT_NAMES,
+        evaluate_problem,
+        settings,
+        {
+            "maxiter": int(maxiter),
+            "maxcor": int(maxcor),
+            "ftol": float(ftol),
+            "gtol": float(gtol),
+        },
+        accepted_callback=accepted_callback,
+        outer_state_callback=outer_state_callback,
+    )
+    return result, float(time.perf_counter() - start)
+
+
 def _build_stage2_probe_composite_payload(
     context,
     *,
@@ -1488,6 +1844,7 @@ def build_stage2_problem_contract(
             "field_backend": args.backend,
             "optimizer_backend": args.optimizer_backend,
             "least_squares_algorithm": args.least_squares_algorithm,
+            "constraint_method": args.constraint_method,
             "max_iterations": int(MAXITER),
             "init_only": bool(args.init_only),
             "skip_postprocess": bool(args.skip_postprocess),
@@ -1916,23 +2273,33 @@ if __name__ == "__main__":
 
     # TOTAL OBJECTIVE FUNCTION -
     # we'll penalize the coil length, coil-coil distance, and curvature while minimizing the normal field
+    CONSTRAINT_METHOD = args.constraint_method
+    BASE_OBJECTIVE = SQUARED_FLUX_WEIGHT * Jf
     JF = (
-        SQUARED_FLUX_WEIGHT * Jf
+        BASE_OBJECTIVE
         + LENGTH_WEIGHT * Jls_penalty
         + CC_WEIGHT * Jccdist
         + CURVATURE_WEIGHT * Jc
     )
 
-    OUT_DIR_ITER = f"{OUT_DIR}R0={R0:g}-s={s:g}-LW={LENGTH_WEIGHT:g}-CCW={CC_WEIGHT:g}-CCT={CC_THRESHOLD:g}-CW={CURVATURE_WEIGHT:g}-CT={CURVATURE_THRESHOLD:g}-SR={banana_surf_radius:0.3f}-Order={order}-NQ={num_quadpoints}-CP={args.curvature_p_norm}-SFW={SQUARED_FLUX_WEIGHT:g}-backend={args.backend}/"
+    OUT_DIR_ITER = (
+        f"{OUT_DIR}R0={R0:g}-s={s:g}-LW={LENGTH_WEIGHT:g}-CCW={CC_WEIGHT:g}"
+        f"-CCT={CC_THRESHOLD:g}-CW={CURVATURE_WEIGHT:g}-CT={CURVATURE_THRESHOLD:g}"
+        f"-SR={banana_surf_radius:0.3f}-Order={order}-NQ={num_quadpoints}"
+        f"-CP={args.curvature_p_norm}-SFW={SQUARED_FLUX_WEIGHT:g}"
+        f"-backend={args.backend}-cm={CONSTRAINT_METHOD}/"
+    )
     os.makedirs(OUT_DIR_ITER, exist_ok=True)
 
-    # minimize gets called, optimizes based on degrees of freedom from objective function
+    # Keep Stage 2 on the legacy weighted-penalty lane while the ALM closeout
+    # work stays parked and unvalidated.
     dofs = JF.x
     if args.override_dofs_json is not None:
         dofs = load_stage2_override_dofs(
             args.override_dofs_json, np.asarray(dofs).shape
         )
         JF.x = np.asarray(dofs, dtype=float)
+        BASE_OBJECTIVE.x = np.asarray(dofs, dtype=float)
     if target_objective_bundle is not None:
         validate_stage2_target_objective_dof_layout(
             target_objective_bundle,
@@ -1941,6 +2308,7 @@ if __name__ == "__main__":
     trajectory: list[dict[str, object]] | None = [] if args.trajectory_json else None
     final_snapshot = None
     optimizer_timings = None
+    alm_result = None
     if args.record_warm_timings and not use_target_objective_lane:
         raise ValueError(
             "--record-warm-timings is only supported on the JAX Stage 2 ondevice lane."
@@ -2046,6 +2414,8 @@ if __name__ == "__main__":
         print("Skipping Stage 2 optimizer because --init-only was provided.")
     else:
         initial_dofs = host_array(dofs).copy()
+        # ALM WIP is intentionally parked here; keep the live path on the
+        # reference/target weighted-penalty optimizer loop until ALM is ready.
         optimizer_dofs = dofs
         if use_target_objective_lane:
             assert target_objective_bundle is not None
@@ -2318,6 +2688,7 @@ if __name__ == "__main__":
         "backend": args.backend,
         "optimizer_backend": args.optimizer_backend,
         "least_squares_algorithm": args.least_squares_algorithm,
+        "CONSTRAINT_METHOD": CONSTRAINT_METHOD,
         "field_diagnostic_stride": int(field_diagnostic_stride),
         "banana_curve_class": type(new_banana_curve).__name__,
         "init_only": args.init_only,
@@ -2348,6 +2719,77 @@ if __name__ == "__main__":
         ],
         "SELF_INTERSECTION_TOLERANCE": final_self_intersection_summary["tolerance"],
         "SELF_INTERSECTION_PENALTY": final_self_intersection_summary["penalty"],
+        "ALM_MAX_OUTER_ITERS": (
+            args.alm_max_outer_iters if CONSTRAINT_METHOD == "alm" else None
+        ),
+        "ALM_MAX_SUBPROBLEM_CONTINUATIONS": (
+            args.alm_max_subproblem_continuations
+            if CONSTRAINT_METHOD == "alm"
+            else None
+        ),
+        "ALM_OUTER_ITERATIONS": getattr(alm_result, "outer_iterations", None),
+        "ALM_PENALTY_INIT": (
+            args.alm_penalty_init if CONSTRAINT_METHOD == "alm" else None
+        ),
+        "ALM_PENALTY_SCALE": (
+            args.alm_penalty_scale if CONSTRAINT_METHOD == "alm" else None
+        ),
+        "ALM_FEAS_TOL": args.alm_feas_tol if CONSTRAINT_METHOD == "alm" else None,
+        "ALM_STATIONARITY_TOL": (
+            args.alm_stationarity_tol if CONSTRAINT_METHOD == "alm" else None
+        ),
+        "ALM_TRUST_RADIUS_INIT": (
+            args.alm_trust_radius_init if CONSTRAINT_METHOD == "alm" else None
+        ),
+        "ALM_TRUST_RADIUS_MIN": (
+            args.alm_trust_radius_min if CONSTRAINT_METHOD == "alm" else None
+        ),
+        "ALM_TRUST_RADIUS_SHRINK": (
+            args.alm_trust_radius_shrink if CONSTRAINT_METHOD == "alm" else None
+        ),
+        "ALM_TRUST_RADIUS_GROW": (
+            args.alm_trust_radius_grow if CONSTRAINT_METHOD == "alm" else None
+        ),
+        "ALM_MAX_INNER_ATTEMPTS": (
+            args.alm_max_inner_attempts if CONSTRAINT_METHOD == "alm" else None
+        ),
+        "ALM_DISTANCE_SMOOTHING": (
+            args.alm_distance_smoothing if CONSTRAINT_METHOD == "alm" else None
+        ),
+        "ALM_CURVATURE_SMOOTHING": (
+            args.alm_curvature_smoothing if CONSTRAINT_METHOD == "alm" else None
+        ),
+        "ALM_TERMINATION_REASON": getattr(alm_result, "termination_reason", None),
+        "ALM_FINAL_PENALTY": getattr(alm_result, "penalty", None),
+        "ALM_FINAL_MULTIPLIERS": getattr(alm_result, "multipliers", None),
+        "ALM_FINAL_CONSTRAINT_VALUES": getattr(alm_result, "constraint_values", None),
+        "ALM_FINAL_SOLVER_CONSTRAINT_VALUES": getattr(
+            alm_result,
+            "solver_constraint_values",
+            None,
+        ),
+        "ALM_FINAL_TRUST_RADIUS": getattr(alm_result, "trust_radius", None),
+        "ALM_FINAL_MAX_FEASIBILITY_VIOLATION": getattr(
+            alm_result,
+            "final_max_feasibility_violation",
+            None,
+        ),
+        "ALM_FINAL_STATIONARITY_NORM": getattr(
+            alm_result,
+            "final_stationarity_norm",
+            None,
+        ),
+        "ALM_FINAL_RAW_STATIONARITY_NORM": getattr(
+            alm_result,
+            "final_raw_stationarity_norm",
+            None,
+        ),
+        "ALM_FINAL_KKT_STATIONARITY_NORM": getattr(
+            alm_result,
+            "final_kkt_stationarity_norm",
+            None,
+        ),
+        "ALM_HISTORY": getattr(alm_result, "history", None),
     }
     if optimizer_timings is not None:
         results["OPTIMIZER_TIMINGS"] = optimizer_timings

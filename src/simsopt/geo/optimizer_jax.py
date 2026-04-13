@@ -151,6 +151,7 @@ class _OptimizerPytreeAdapter:
     flat_dtype: np.dtype
     unravel: Callable[[jax.Array], object]
     tree_def: object
+    leaf_signature: tuple[tuple[tuple[int, ...], str], ...]
 
     def _hostify_flat(self, flat_x, *, dtype=None):
         return _hostify_optimizer_tree(
@@ -200,6 +201,13 @@ class _OptimizerPytreeAdapter:
         if hasattr(result, "jac"):
             result.jac = self._hostify_flat(result.jac, dtype=self.flat_dtype)
         return result
+
+    def solver_cache_key(self) -> tuple[object, ...]:
+        return (
+            self.flat_dtype.str,
+            repr(self.tree_def),
+            self.leaf_signature,
+        )
 
 
 def _raise_if_strict_optimizer_fallback(
@@ -311,13 +319,21 @@ def _is_flat_optimizer_vector(x0) -> bool:
 def _prepare_optimizer_pytree_adapter(x0):
     if _is_flat_optimizer_vector(x0):
         return None
+    leaves, tree_def = jax.tree_util.tree_flatten(x0)
     flat_x0, unravel = ravel_pytree(x0)
-    _, tree_def = jax.tree_util.tree_flatten(x0)
     flat_dtype = np.dtype(_optimizer_dtype(flat_x0))
+    leaf_signature = tuple(
+        (
+            tuple(int(dim) for dim in np.shape(leaf)),
+            np.dtype(np.asarray(leaf).dtype).str,
+        )
+        for leaf in leaves
+    )
     return _OptimizerPytreeAdapter(
         flat_dtype=flat_dtype,
         unravel=unravel,
         tree_def=tree_def,
+        leaf_signature=leaf_signature,
     )
 
 
@@ -1016,6 +1032,7 @@ def adam_optimize_traceable(
 
         return lax.while_loop(cond_fun, body_fun, state0)
 
+    run_solver.__name__ = "adam_traceable_run_solver"
     return jax.jit(run_solver)(x)
 
 
@@ -1116,6 +1133,7 @@ def _make_traceable_levenberg_marquardt_runner(
             "success": state["success"],
         }
 
+    run_solver.__name__ = "traceable_levenberg_marquardt_run_solver"
     return jax.jit(run_solver)
 
 
@@ -1785,6 +1803,7 @@ def _make_traceable_newton_polish_runner(
             "success": norm_final <= tol_value,
         }
 
+    run_solver.__name__ = "traceable_newton_polish_run_solver"
     return jax.jit(run_solver)
 
 
@@ -1979,6 +1998,7 @@ def _make_traceable_exact_newton_runner(
             result["jacobian"] = _materialize_dense_jacobian(jvp_fn, state["x"])
         return result
 
+    run_solver.__name__ = "traceable_exact_newton_run_solver"
     return jax.jit(run_solver)
 
 

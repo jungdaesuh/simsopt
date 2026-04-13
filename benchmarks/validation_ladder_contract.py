@@ -73,8 +73,9 @@ TIER5_PERFORMANCE_BUDGETS = {
 
 SINGLE_STAGE_PROOF_CONTRACTS = {
     TIER3_SINGLE_STAGE_OUTER_LOOP_RUNG: {
-        "default_maxiter": 1,
-        "min_iterations": 1,
+        "default_maxiter": 10,
+        "min_iterations": 10,
+        "require_objective_decrease": True,
         "required_outer_optimizer_method": "lbfgs-ondevice",
         "required_result_keys": (
             "FINAL_IOTA",

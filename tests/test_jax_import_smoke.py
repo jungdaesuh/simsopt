@@ -478,6 +478,20 @@ def test_target_lbfgs_ondevice_reuses_compiled_solver_across_identical_value_and
     )
 
 
+def test_stage2_target_outer_loop_reuses_compiled_solver_across_identical_calls():
+    """Real Stage 2 target-lane outer-loop calls must reuse the compiled solver."""
+    _assert_python_script_passes(
+        _JAX_SUBPROCESS_CASES_PATH,
+        args=("stage2-target-compile-count",),
+        failure_message="Stage 2 target outer-loop compile-count smoke failed",
+        timeout=120,
+        extra_env={
+            "JAX_ENABLE_COMPILATION_CACHE": "0",
+            "XLA_PYTHON_CLIENT_PREALLOCATE": "false",
+        },
+    )
+
+
 def test_ondevice_solver_cache_respects_mutable_objective_state():
     """Unmarked mutable callables must retrace so updated host state is observed."""
     _assert_python_script_passes(

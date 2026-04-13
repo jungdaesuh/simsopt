@@ -42,6 +42,7 @@ from ..geo.curveobjectives import (
     cc_distance_pure,
     curve_length_pure,
 )
+from ..geo.optimizer_jax import _mark_cacheable_jit_value_and_grad
 
 __all__ = [
     "Stage2PenaltyConfig",
@@ -658,7 +659,9 @@ def build_stage2_target_objective(
         )
 
     objective = jax.jit(objective_impl)
-    value_and_grad = jax.jit(jax.value_and_grad(objective_impl))
+    value_and_grad = _mark_cacheable_jit_value_and_grad(
+        jax.jit(jax.value_and_grad(objective_impl))
+    )
 
     def field_sharding_summary(dofs):
         _, total_field, *_ = _evaluate_dynamic_stage2_state(dofs)

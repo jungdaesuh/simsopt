@@ -2638,10 +2638,11 @@ class SingleStageExampleTests(unittest.TestCase):
             callback,
             scalar_fun,
         ):
+            recorded_dofs = getattr(dofs, "step_dofs", dofs)
             optimizer_calls.append(
                 {
                     "fun": fun,
-                    "dofs": np.asarray(dofs, dtype=np.float64),
+                    "dofs": np.asarray(recorded_dofs, dtype=np.float64),
                     "contract_method": contract.method,
                     "maxiter": maxiter,
                     "ftol": ftol,
@@ -4879,6 +4880,7 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertEqual(rd1["iota"], 0.15)
         self.assertEqual(rd1["G"], 1.0)
         self.assertEqual(rd1["J"], 42.0)
+        self.assertEqual(rd1["initial_objective"], 42.0)
         self.assertEqual(rd1["it"], 1)
         self.assertEqual(rd1["lscount"], 0)
         self.assertTrue(rd1["self_intersection_check_available"])
@@ -4919,6 +4921,7 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertEqual(rd1["iota"], rd2["iota"])
         self.assertEqual(rd1["G"], rd2["G"])
         self.assertEqual(rd1["J"], rd2["J"])
+        self.assertEqual(rd1["initial_objective"], rd2["initial_objective"])
         np.testing.assert_array_equal(rd1["dJ"], rd2["dJ"])
         np.testing.assert_array_equal(rd1["x_prev"], rd2["x_prev"])
         for key in [

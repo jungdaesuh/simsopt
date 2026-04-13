@@ -262,6 +262,7 @@ def _minimize_bfgs_private(
         )
         return state._replace(status=status)
 
+    run_solver.__name__ = "bfgs_private_run_solver"
     can_cache_solver = (
         adapter is None
         and callback is None

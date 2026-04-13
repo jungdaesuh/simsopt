@@ -1,4 +1,4 @@
-"""Reduced accepted-step probe for the target single-stage outer optimizer path."""
+"""Reduced convergence probe for the target single-stage outer optimizer path."""
 
 from __future__ import annotations
 
@@ -18,6 +18,7 @@ sys.path.insert(0, str(SRC_ROOT))
 from benchmarks.single_stage_init_parity import (
     _prefix_phase_timings,
     _run_single_stage_case,
+    resolve_target_lane_compile_diagnostics,
 )
 from benchmarks.single_stage_backend_routing import (
     resolve_boozer_least_squares_algorithm,
@@ -74,14 +75,20 @@ TARGET_OUTER_OPTIMIZER_METHOD = str(
 )
 DEFAULT_OUTER_PROOF_MAXITER = int(_OUTER_LOOP_PROOF_CONTRACT["default_maxiter"])
 _MIN_ACCEPTED_ITERATIONS = int(_OUTER_LOOP_PROOF_CONTRACT["min_iterations"])
+_REQUIRE_OBJECTIVE_DECREASE = bool(
+    _OUTER_LOOP_PROOF_CONTRACT.get("require_objective_decrease", False)
+)
 _REQUIRED_RESULT_KEYS = tuple(_OUTER_LOOP_PROOF_CONTRACT["required_result_keys"])
+_PHASE1_INITIAL_TRACE_REGION = "single_stage.outer_optimizer_initial_phase"
+_PHASE2_TRACE_REGION = "single_stage.outer_optimizer"
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Run the reduced real single-stage target lane long enough to prove "
-            "the outer optimizer accepts a step without entering SciPy."
+            "the outer optimizer takes a real multi-step descent path without "
+            "entering SciPy."
         )
     )
     parser.add_argument(
@@ -215,6 +222,39 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--diagnose-target-lane-scaled-phase1",
+        action="store_true",
+        help=(
+            "Run the scaled phase-1 target-lane diagnosis instead of the full "
+            "outer-loop proof so the first failing/stalling region can be "
+            "localized."
+        ),
+    )
+    parser.add_argument(
+        "--record-target-lane-invalid-state-events",
+        action="store_true",
+        help=(
+            "Record rejected target-lane L-BFGS trial states so proof failures "
+            "carry a structured first-event postmortem."
+        ),
+    )
+    parser.add_argument(
+        "--enable-compile-diagnostics",
+        action="store_true",
+        help=(
+            "Enable scoped JAX compile/cache-miss diagnostics inside the real "
+            "single-stage target-lane section."
+        ),
+    )
+    parser.add_argument(
+        "--deterministic-gpu-reductions",
+        action="store_true",
+        help=(
+            "Append --xla_gpu_deterministic_ops=true for the CUDA subprocess as "
+            "a phase-1 A/B experiment."
+        ),
+    )
+    parser.add_argument(
         "--experimental-target-lane-value-and-grad",
         action="store_true",
         help=(
@@ -230,6 +270,90 @@ def _finite_result_keys(results: dict[str, Any]) -> dict[str, bool]:
         key: bool(np.isfinite(float(results.get(key, np.nan))))
         for key in _REQUIRED_RESULT_KEYS
     }
+
+
+def _finite_optional_scalar(value: object) -> float | None:
+    try:
+        scalar = float(value)
+    except (TypeError, ValueError):
+        return None
+    return scalar if np.isfinite(scalar) else None
+
+
+def _diagnostic_trace_region_for_phase(phase: object) -> str | None:
+    if phase == "phase1":
+        return _PHASE1_INITIAL_TRACE_REGION
+    if phase == "phase2":
+        return _PHASE2_TRACE_REGION
+    return None
+
+
+def build_phase1_diagnostic_note(
+    results: dict[str, Any],
+    *,
+    failures: list[str],
+    compile_diagnostics_requested: bool,
+    compile_diagnostics_enabled: bool,
+    compile_diagnostics_disable_reason: str | None,
+    deterministic_gpu_reductions: bool,
+) -> dict[str, Any]:
+    note: dict[str, Any] = {
+        "reproduced": bool(failures),
+        "trace_dir": results.get("JAX_PROFILE_DIR"),
+        "termination_message": results.get("TERMINATION_MESSAGE"),
+        "initial_phase_iterations": int(results.get("INITIAL_PHASE_ITERATIONS", 0)),
+        "total_iterations": int(results.get("iterations", 0)),
+        "target_lane_profile_recorded": "TARGET_LANE_PROFILE" in results,
+        "compile_behavior": {
+            "diagnostics_requested": bool(compile_diagnostics_requested),
+            "diagnostics_enabled": bool(compile_diagnostics_enabled),
+            "jax_log_compiles": bool(compile_diagnostics_enabled),
+            "jax_explain_cache_misses": bool(compile_diagnostics_enabled),
+            "cache_reuse_evidence_valid": bool(compile_diagnostics_enabled),
+            "disabled_reason": compile_diagnostics_disable_reason,
+        },
+        "deterministic_gpu_reductions": bool(deterministic_gpu_reductions),
+        "first_bad_region": None,
+        "first_bad_region_source": None,
+        "first_bad_region_detail": None,
+    }
+    scaled_phase1 = results.get("TARGET_LANE_SCALED_PHASE1_DIAGNOSIS")
+    if isinstance(scaled_phase1, dict):
+        first_nonfinite_stage = scaled_phase1.get("first_nonfinite_stage")
+        if isinstance(first_nonfinite_stage, str):
+            note["first_bad_region"] = _PHASE1_INITIAL_TRACE_REGION
+            note["first_bad_region_source"] = (
+                "TARGET_LANE_SCALED_PHASE1_DIAGNOSIS.first_nonfinite_stage"
+            )
+            note["first_bad_region_detail"] = first_nonfinite_stage
+            return note
+    invalid_state = results.get("TARGET_LANE_INVALID_STATE_DIAGNOSIS")
+    if isinstance(invalid_state, dict):
+        events = invalid_state.get("events")
+        if isinstance(events, list) and events:
+            first_event = events[0]
+            phase = first_event.get("phase")
+            note["first_bad_region"] = (
+                _diagnostic_trace_region_for_phase(phase) or str(phase)
+            )
+            note["first_bad_region_source"] = (
+                "TARGET_LANE_INVALID_STATE_DIAGNOSIS.events[0]"
+            )
+            note["first_bad_region_detail"] = {
+                "phase": phase,
+                "iteration": first_event.get("iteration"),
+                "line_search_failed": first_event.get("line_search_failed"),
+                "nonfinite_step": first_event.get("nonfinite_step"),
+                "stalled_step": first_event.get("stalled_step"),
+                "valid_curvature": first_event.get("valid_curvature"),
+                "ls_status": first_event.get("ls_status"),
+            }
+            return note
+    if failures:
+        note["first_bad_region"] = _PHASE2_TRACE_REGION
+        note["first_bad_region_source"] = "probe_failures[0]"
+        note["first_bad_region_detail"] = failures[0]
+    return note
 
 
 def evaluate_single_stage_outer_loop_probe(
@@ -250,12 +374,25 @@ def evaluate_single_stage_outer_loop_probe(
             results.get("SELF_INTERSECTION_CHECK_AVAILABLE", True)
         ),
         "finite_result_keys": _finite_result_keys(results),
+        "initial_objective": _finite_optional_scalar(results.get("INITIAL_OBJECTIVE")),
+        "final_objective": _finite_optional_scalar(results.get("FINAL_OBJECTIVE")),
     }
+    summary["objective_decrease"] = (
+        None
+        if summary["initial_objective"] is None or summary["final_objective"] is None
+        else float(summary["initial_objective"] - summary["final_objective"])
+    )
+    summary["objective_decreased"] = (
+        None
+        if summary["objective_decrease"] is None
+        else bool(summary["objective_decrease"] > 0.0)
+    )
 
     failures: list[str] = []
     if require_accepted_step and summary["iterations"] < _MIN_ACCEPTED_ITERATIONS:
         failures.append(
-            "Single-stage outer-loop probe did not accept an optimizer step."
+            "Single-stage outer-loop probe did not complete the required "
+            f"{_MIN_ACCEPTED_ITERATIONS} accepted optimizer iterations."
         )
     if summary["outer_optimizer_method"] != TARGET_OUTER_OPTIMIZER_METHOD:
         failures.append(
@@ -282,6 +419,19 @@ def evaluate_single_stage_outer_loop_probe(
         failures.append(
             "Single-stage outer-loop probe produced a self-intersecting surface."
         )
+    if require_accepted_step and _REQUIRE_OBJECTIVE_DECREASE:
+        if summary["initial_objective"] is None:
+            failures.append(
+                "Single-stage outer-loop probe did not report a finite initial objective."
+            )
+        elif summary["final_objective"] is None:
+            failures.append(
+                "Single-stage outer-loop probe did not report a finite final objective."
+            )
+        elif not summary["objective_decreased"]:
+            failures.append(
+                "Single-stage outer-loop probe did not decrease the objective."
+            )
     for key, is_finite in summary["finite_result_keys"].items():
         if not is_finite:
             failures.append(
@@ -293,6 +443,16 @@ def evaluate_single_stage_outer_loop_probe(
 def main() -> None:
     args = parse_args()
     args.disable_target_lane_success_filter = True
+    (
+        compile_diagnostics_enabled,
+        compile_diagnostics_disable_reason,
+    ) = resolve_target_lane_compile_diagnostics(
+        enable_compile_diagnostics=args.enable_compile_diagnostics,
+        diagnose_target_lane_scaled_phase1=args.diagnose_target_lane_scaled_phase1,
+        record_target_lane_invalid_state_events=(
+            args.record_target_lane_invalid_state_events
+        ),
+    )
     bootstrap_local_simsopt()
     resolved_boozer_optimizer_backend = resolve_boozer_optimizer_backend(
         args.optimizer_backend,
@@ -314,6 +474,18 @@ def main() -> None:
             "boozer_optimizer_backend_requested": args.boozer_optimizer_backend,
             "outer_maxiter": int(args.maxiter),
             "profile_target_lane_batch_size": int(args.profile_target_lane_batch_size),
+            "diagnose_target_lane_scaled_phase1": bool(
+                args.diagnose_target_lane_scaled_phase1
+            ),
+            "record_target_lane_invalid_state_events": bool(
+                args.record_target_lane_invalid_state_events
+            ),
+            "compile_diagnostics_requested": bool(args.enable_compile_diagnostics),
+            "compile_diagnostics_enabled": bool(compile_diagnostics_enabled),
+            "compile_diagnostics_disable_reason": compile_diagnostics_disable_reason,
+            "deterministic_gpu_reductions": bool(
+                args.deterministic_gpu_reductions
+            ),
             "nphi": int(args.nphi),
             "ntheta": int(args.ntheta),
             "mpol": int(args.mpol),
@@ -331,9 +503,15 @@ def main() -> None:
         load_surface_gamma=False,
         profile_target_lane=args.profile_target_lane,
         profile_target_lane_only=args.profile_target_lane_only,
+        diagnose_target_lane_scaled_phase1=args.diagnose_target_lane_scaled_phase1,
+        record_target_lane_invalid_state_events=(
+            args.record_target_lane_invalid_state_events
+        ),
         experimental_target_lane_value_and_grad=(
             args.experimental_target_lane_value_and_grad
         ),
+        enable_compile_diagnostics=compile_diagnostics_enabled,
+        deterministic_gpu_reductions=args.deterministic_gpu_reductions,
     )
     summary, failures = evaluate_single_stage_outer_loop_probe(
         case["results"],
@@ -344,7 +522,9 @@ def main() -> None:
                 resolved_boozer_optimizer_backend
             ),
         ),
-        require_accepted_step=not args.profile_target_lane_only,
+        require_accepted_step=not (
+            args.profile_target_lane_only or args.diagnose_target_lane_scaled_phase1
+        ),
     )
     payload = {
         "rung": LADDER_RUNG,
@@ -361,6 +541,25 @@ def main() -> None:
     }
     if "TARGET_LANE_PROFILE" in case["results"]:
         payload["target_lane_profile"] = case["results"]["TARGET_LANE_PROFILE"]
+    if "JAX_COMPILE_DIAGNOSTICS" in case["results"]:
+        payload["compile_diagnostics"] = case["results"]["JAX_COMPILE_DIAGNOSTICS"]
+    if (
+        args.jax_profile_dir
+        or args.enable_compile_diagnostics
+        or args.deterministic_gpu_reductions
+        or args.record_target_lane_invalid_state_events
+        or args.diagnose_target_lane_scaled_phase1
+        or "TARGET_LANE_INVALID_STATE_DIAGNOSIS" in case["results"]
+        or "TARGET_LANE_SCALED_PHASE1_DIAGNOSIS" in case["results"]
+    ):
+        payload["phase1_diagnostic_note"] = build_phase1_diagnostic_note(
+            case["results"],
+            failures=failures,
+            compile_diagnostics_requested=args.enable_compile_diagnostics,
+            compile_diagnostics_enabled=compile_diagnostics_enabled,
+            compile_diagnostics_disable_reason=compile_diagnostics_disable_reason,
+            deterministic_gpu_reductions=args.deterministic_gpu_reductions,
+        )
     write_json(args.output_json, payload)
     if failures:
         print("SINGLE-STAGE OUTER-LOOP PROBE FAILED")

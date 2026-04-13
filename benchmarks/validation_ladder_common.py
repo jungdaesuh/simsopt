@@ -48,6 +48,7 @@ _SIMSOPT_BACKEND_STRICT_ENV_VAR = "SIMSOPT_BACKEND_STRICT"
 _SIMSOPT_TRANSFER_GUARD_ENV_VAR = "SIMSOPT_JAX_TRANSFER_GUARD"
 _TARGET_LANE_ACCEPTED_STEP_SYNC_ENV_VAR = "TARGET_LANE_ACCEPTED_STEP_SYNC"
 _TRUTHY_ENV_VALUES = frozenset({"1", "true", "yes", "on"})
+_XLA_GPU_DETERMINISTIC_OPS_FLAG = "--xla_gpu_deterministic_ops=true"
 _BENCHMARK_COMPILATION_CACHE_ENV_DEFAULTS = {
     _JAX_PERSISTENT_CACHE_MIN_COMPILE_TIME_ENV_VAR: "0",
     _JAX_PERSISTENT_CACHE_MIN_ENTRY_SIZE_ENV_VAR: "-1",
@@ -118,11 +119,68 @@ def apply_compilation_cache_policy(
     return metadata
 
 
-def benchmark_compilation_cache_dir(label: str) -> Path:
-    """Return the default persistent-cache directory for one benchmark label."""
+def _normalize_cache_component(value: str) -> str:
+    return re.sub(r"[^A-Za-z0-9._-]+", "-", value).strip("-").lower()
+
+
+def _visible_cuda_device_selector() -> str | None:
+    raw_value = os.environ.get("CUDA_VISIBLE_DEVICES")
+    if raw_value is None:
+        return None
+    first = raw_value.split(",", 1)[0].strip()
+    if not first or first in {"-1", "none", "NoDevFiles"}:
+        return None
+    return first
+
+
+def _benchmark_cuda_cache_target_suffix() -> str | None:
+    command = ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"]
+    selector = _visible_cuda_device_selector()
+    if selector is not None:
+        command.extend(["-i", selector])
+    try:
+        result = subprocess.run(
+            command,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        return None
+    device_names = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    if not device_names:
+        return None
+    normalized = _normalize_cache_component(device_names[0])
+    if not normalized:
+        return None
+    return f"cuda-{normalized}"
+
+
+def _benchmark_compilation_cache_target_suffix(
+    requested_platform: str | None,
+) -> str | None:
+    platform = str(requested_platform or "").strip().lower()
+    if platform == "cpu":
+        return None
+    if platform in {"cuda", "gpu"}:
+        return _benchmark_cuda_cache_target_suffix() or "cuda"
+    if platform == "auto":
+        return _benchmark_cuda_cache_target_suffix()
+    return None
+
+
+def benchmark_compilation_cache_dir(
+    label: str,
+    *,
+    requested_platform: str | None = None,
+) -> Path:
+    """Return the default persistent-cache directory for one benchmark target."""
     normalized = re.sub(r"[^A-Za-z0-9._-]+", "-", label).strip("-")
     if not normalized:
         raise ValueError("benchmark compilation cache label must not be empty.")
+    target_suffix = _benchmark_compilation_cache_target_suffix(requested_platform)
+    if target_suffix is not None:
+        normalized = f"{normalized}-{target_suffix}"
     return REPO_ROOT / ".artifacts" / "jax_compilation_cache" / normalized
 
 
@@ -134,7 +192,12 @@ def apply_benchmark_compilation_cache_policy(
     """Enable a stable cache dir for benchmark probes unless the run is CPU-only."""
     if requested_platform == "cpu":
         return apply_compilation_cache_policy()
-    return apply_compilation_cache_policy(benchmark_compilation_cache_dir(label))
+    return apply_compilation_cache_policy(
+        benchmark_compilation_cache_dir(
+            label,
+            requested_platform=requested_platform,
+        )
+    )
 
 
 def repo_pythonpath_env(
@@ -142,6 +205,7 @@ def repo_pythonpath_env(
     platform: str = "auto",
     disable_compilation_cache: bool = False,
     clear_backend_guardrails: bool = False,
+    deterministic_gpu_reductions: bool = False,
 ) -> dict[str, str]:
     """Return an environment that resolves in-repo imports for subprocess probes."""
     env = dict(os.environ)
@@ -164,7 +228,22 @@ def repo_pythonpath_env(
     if existing_pythonpath:
         pythonpath_entries.append(existing_pythonpath)
     env["PYTHONPATH"] = os.pathsep.join(pythonpath_entries)
+    if deterministic_gpu_reductions and platform == "cuda":
+        _append_xla_flag(env, _XLA_GPU_DETERMINISTIC_OPS_FLAG)
     return env
+
+
+def _append_xla_flag(env: dict[str, str], flag: str) -> None:
+    current_flags = env.get("XLA_FLAGS", "")
+    if not current_flags:
+        env["XLA_FLAGS"] = flag
+        return
+    tokens = current_flags.split()
+    flag_prefix = flag.split("=", 1)[0] + "="
+    rewritten = [token for token in tokens if not token.startswith(flag_prefix)]
+    if flag not in rewritten:
+        rewritten.append(flag)
+    env["XLA_FLAGS"] = " ".join(rewritten)
 
 
 def _apply_platform_env(env: dict[str, str], platform: str) -> None:

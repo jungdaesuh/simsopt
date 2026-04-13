@@ -1506,6 +1506,8 @@ class BoozerSurfaceJAX(Optimizable):
         self._traceable_exact_residual_cache = {}
         self._reference_penalty_objective_cache = {}
         self._reference_penalty_residual_cache = {}
+        self._solver_progress_callback_cache = {}
+        self._newton_progress_callback_cache = {}
 
         # Coil data (extracted once, updated via _refresh_coil_data)
         self._refresh_coil_data()
@@ -1578,6 +1580,10 @@ class BoozerSurfaceJAX(Optimizable):
         stage_callback = self.options.get("stage_callback")
         if stage_callback is None:
             return None
+        cache_key = (str(method), id(stage_callback))
+        cached_callback = self._solver_progress_callback_cache.get(cache_key)
+        if cached_callback is not None:
+            return cached_callback
 
         def emit_progress(iteration: int, fun_value: float, grad_inf: float) -> None:
             if iteration <= 5 or iteration % 25 == 0:
@@ -1589,12 +1595,17 @@ class BoozerSurfaceJAX(Optimizable):
                     method=method,
                 )
 
+        self._solver_progress_callback_cache[cache_key] = emit_progress
         return emit_progress
 
     def _make_newton_progress_callback(self):
         stage_callback = self.options.get("stage_callback")
         if stage_callback is None:
             return None
+        cache_key = id(stage_callback)
+        cached_callback = self._newton_progress_callback_cache.get(cache_key)
+        if cached_callback is not None:
+            return cached_callback
 
         def emit_progress(iteration: int, fun_value: float, grad_norm: float) -> None:
             stage_callback(
@@ -1604,6 +1615,7 @@ class BoozerSurfaceJAX(Optimizable):
                 grad_norm=float(grad_norm),
             )
 
+        self._newton_progress_callback_cache[cache_key] = emit_progress
         return emit_progress
 
     def _resolve_newton_progress_callback(self, method: str):

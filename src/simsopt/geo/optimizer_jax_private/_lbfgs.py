@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import numpy as np
 
 import jax
@@ -24,6 +25,81 @@ from ._common import (
 )
 from ._line_search import _line_search_value_and_grad
 from ._types import _LBFGSResults
+
+
+_LBFGS_DEBUG_ENABLED = os.environ.get("SIMSOPT_LBFGS_DEBUG", "").lower() not in {
+    "",
+    "0",
+    "false",
+    "no",
+    "off",
+}
+
+
+def _emit_lbfgs_runtime_debug(
+    stage,
+    *,
+    iteration,
+    fun_value,
+    grad,
+    step_scale=None,
+    ls_failed=None,
+    ls_status=None,
+    nonfinite_step=None,
+    stalled_step=None,
+    valid_curvature=None,
+    converged=None,
+):
+    """Emit ordered runtime diagnostics when SIMSOPT_LBFGS_DEBUG is enabled."""
+    if not _LBFGS_DEBUG_ENABLED:
+        return
+
+    grad_inf = jnp.max(jnp.abs(grad))
+    if step_scale is None:
+        step_scale = _as_jax_dtype(0.0, fun_value.dtype)
+    if ls_failed is None:
+        ls_failed = _bool_scalar(False)
+    if ls_status is None:
+        ls_status = _int_scalar(0)
+    if nonfinite_step is None:
+        nonfinite_step = _bool_scalar(False)
+    if stalled_step is None:
+        stalled_step = _bool_scalar(False)
+    if valid_curvature is None:
+        valid_curvature = _bool_scalar(True)
+    if converged is None:
+        converged = _bool_scalar(False)
+
+    jax.debug.callback(
+        lambda k, f, ginf, alpha, failed, status, nonfinite, stalled, curvature, done: (
+            print(
+                "[lbfgs-debug] "
+                f"stage={stage} "
+                f"iter={int(k)} "
+                f"f={float(f):.16e} "
+                f"grad_inf={float(ginf):.16e} "
+                f"alpha={float(alpha):.16e} "
+                f"ls_failed={bool(failed)} "
+                f"ls_status={int(status)} "
+                f"nonfinite_step={bool(nonfinite)} "
+                f"stalled_step={bool(stalled)} "
+                f"valid_curvature={bool(curvature)} "
+                f"converged={bool(done)}",
+                flush=True,
+            )
+        ),
+        iteration,
+        fun_value,
+        grad_inf,
+        step_scale,
+        ls_failed,
+        ls_status,
+        nonfinite_step,
+        stalled_step,
+        valid_curvature,
+        converged,
+        ordered=True,
+    )
 
 
 def _shift_history(history, new):
@@ -299,6 +375,19 @@ def _minimize_lbfgs_private_impl(
         rejected_step = (
             nonfinite_step | stalled_step | ((~converged) & (~valid_curvature))
         )
+        _emit_lbfgs_runtime_debug(
+            "post_line_search",
+            iteration=next_k,
+            fun_value=f_kp1,
+            grad=g_kp1,
+            step_scale=ls_results.a_k,
+            ls_failed=ls_results.failed,
+            ls_status=ls_status,
+            nonfinite_step=nonfinite_step,
+            stalled_step=stalled_step,
+            valid_curvature=valid_curvature,
+            converged=converged,
+        )
 
         def failed_step(_):
             if failure_callback is not None:
@@ -397,7 +486,23 @@ def _minimize_lbfgs_private_impl(
         maxfun_limit = _as_jax_dtype(maxfun_limit_value, initial_state.nfev.dtype)
         maxgrad_limit = _as_jax_dtype(maxgrad_limit_value, initial_state.ngev.dtype)
         state = lax.while_loop(cond_fun, body_fun, initial_state)
+        _emit_lbfgs_runtime_debug(
+            "pre_final_eval",
+            iteration=state.k,
+            fun_value=state.f_k,
+            grad=state.g_k,
+            ls_status=state.ls_status,
+            converged=state.converged,
+        )
         f_final, g_final = _coerce_value_and_grad_result(value_and_grad_fun, state.x_k)
+        _emit_lbfgs_runtime_debug(
+            "post_final_eval",
+            iteration=state.k,
+            fun_value=f_final,
+            grad=g_final,
+            ls_status=state.ls_status,
+            converged=state.converged,
+        )
         converged_final = _norm(g_final, ord=norm) < gtol_jax
         state = state._replace(
             converged=converged_final,
@@ -425,9 +530,10 @@ def _minimize_lbfgs_private_impl(
         )
         return state._replace(status=status)
 
+    run_solver.__name__ = "lbfgs_private_run_solver"
+    adapter_cache_key = None if adapter is None else adapter.solver_cache_key()
     can_cache_solver = (
         cache_owner is not None
-        and adapter is None
         and callback is None
         and progress_callback is None
         and failure_callback is None
@@ -436,6 +542,7 @@ def _minimize_lbfgs_private_impl(
         cache_owner if can_cache_solver else None,
         cache_key=(
             "lbfgs",
+            adapter_cache_key,
             norm,
             int(history_size),
             int(maxls),

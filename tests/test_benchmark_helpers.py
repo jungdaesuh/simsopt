@@ -837,12 +837,41 @@ def test_benchmark_compilation_cache_dir_uses_repo_artifacts_root(monkeypatch, t
     )
 
 
+def test_benchmark_compilation_cache_dir_scopes_cuda_runs_by_gpu_name(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setattr(
+        "benchmarks.validation_ladder_common.REPO_ROOT",
+        tmp_path,
+    )
+    monkeypatch.setattr(
+        "benchmarks.validation_ladder_common._benchmark_cuda_cache_target_suffix",
+        lambda: "cuda-nvidia-geforce-rtx-5090",
+    )
+
+    cache_dir = benchmark_compilation_cache_dir(
+        "single_stage_outer_loop_probe",
+        requested_platform="cuda",
+    )
+
+    assert cache_dir == (
+        tmp_path
+        / ".artifacts"
+        / "jax_compilation_cache"
+        / "single_stage_outer_loop_probe-cuda-nvidia-geforce-rtx-5090"
+    )
+
+
 def test_apply_benchmark_compilation_cache_policy_uses_explicit_cache_dir(
     monkeypatch, tmp_path
 ):
     monkeypatch.setattr(
         "benchmarks.validation_ladder_common.REPO_ROOT",
         tmp_path,
+    )
+    monkeypatch.setattr(
+        "benchmarks.validation_ladder_common._benchmark_cuda_cache_target_suffix",
+        lambda: "cuda-nvidia-geforce-rtx-5090",
     )
     monkeypatch.delenv(_SIMSOPT_DISABLE_COMPILATION_CACHE_ENV_VAR, raising=False)
 
@@ -857,7 +886,7 @@ def test_apply_benchmark_compilation_cache_policy_uses_explicit_cache_dir(
         tmp_path
         / ".artifacts"
         / "jax_compilation_cache"
-        / "single_stage_outer_loop_probe"
+        / "single_stage_outer_loop_probe-cuda-nvidia-geforce-rtx-5090"
     )
     assert os.environ[_JAX_PERSISTENT_CACHE_MIN_COMPILE_TIME_ENV_VAR] == "0"
     assert os.environ[_JAX_PERSISTENT_CACHE_MIN_ENTRY_SIZE_ENV_VAR] == "-1"
@@ -1473,6 +1502,144 @@ def test_single_stage_init_case_threads_profile_target_lane_only_flag(
     assert observed_command[profile_flag_index + 1] == str(tmp_path / "xprof")
 
 
+def test_single_stage_init_case_threads_phase1_diagnostic_flags_and_env(
+    monkeypatch, tmp_path
+):
+    args = argparse.Namespace(
+        plasma_surf_filename="wout_nfp22ginsburg_000_014417_iota15.nc",
+        stage2_bs_path=str(DEFAULT_STAGE2_BS_PATH),
+        nphi=63,
+        ntheta=32,
+        mpol=4,
+        ntor=4,
+        vol_target=0.1,
+        iota_target=0.15,
+        optimizer_backend="ondevice",
+        boozer_optimizer_backend=None,
+        maxiter=1,
+        equilibrium_path=None,
+        equilibria_dir=str(tmp_path / "equilibria"),
+        jax_profile_dir=None,
+        profile_target_lane_batch_size=1,
+    )
+
+    observed_invocations: list[tuple[list[str], dict[str, str]]] = []
+    monkeypatch.setattr(
+        single_stage_init_parity_module,
+        "_single_stage_script_path",
+        lambda: tmp_path / "driver.py",
+    )
+    monkeypatch.setattr(
+        single_stage_init_parity_module,
+        "run_python_script",
+        lambda _script_path, command, **kwargs: observed_invocations.append(
+            (list(command), dict(kwargs["env"]))
+        )
+        or argparse.Namespace(stdout="", stderr=""),
+    )
+
+    def fake_find_single_file(root: str | Path, pattern: str) -> Path:
+        path = Path(root) / pattern
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{}", encoding="utf-8")
+        return path
+
+    monkeypatch.setattr(
+        single_stage_init_parity_module, "find_single_file", fake_find_single_file
+    )
+    monkeypatch.setattr(
+        single_stage_init_parity_module,
+        "load_json",
+        lambda _path: {
+            "FINAL_IOTA": 0.15,
+            "FINAL_VOLUME": 0.1,
+            "FIELD_ERROR": 0.003,
+            "MAX_CURVATURE": 10.0,
+            "SELF_INTERSECTING": False,
+            "TIMINGS": {"boozer_total_s": 2.0},
+        },
+    )
+
+    single_stage_init_parity_module._run_single_stage_case(
+        args,
+        "jax",
+        platform="cuda",
+        benchmark_mode=True,
+        load_surface_gamma=False,
+        diagnose_target_lane_scaled_phase1=True,
+        record_target_lane_invalid_state_events=True,
+        enable_compile_diagnostics=True,
+        deterministic_gpu_reductions=True,
+    )
+
+    assert len(observed_invocations) == 1
+    command, env = observed_invocations[0]
+    assert "--diagnose-target-lane-scaled-phase1" in command
+    assert "--record-target-lane-invalid-state-events" in command
+    assert "--record-jax-compile-diagnostics" not in command
+    assert "--xla_gpu_deterministic_ops=true" in env["XLA_FLAGS"].split()
+
+
+def test_single_stage_init_case_threads_compile_diagnostics_without_host_callbacks(
+    monkeypatch, tmp_path
+):
+    args = argparse.Namespace(
+        plasma_surf_filename="wout_nfp22ginsburg_000_014417_iota15.nc",
+        stage2_bs_path=str(DEFAULT_STAGE2_BS_PATH),
+        nphi=63,
+        ntheta=32,
+        mpol=4,
+        ntor=4,
+        vol_target=0.1,
+        iota_target=0.15,
+        optimizer_backend="ondevice",
+        boozer_optimizer_backend=None,
+        maxiter=1,
+        equilibrium_path=None,
+        equilibria_dir=str(tmp_path / "equilibria"),
+        jax_profile_dir=None,
+        profile_target_lane_batch_size=1,
+    )
+
+    observed_invocations: list[tuple[list[str], dict[str, str]]] = []
+    monkeypatch.setattr(
+        single_stage_init_parity_module,
+        "_single_stage_script_path",
+        lambda: tmp_path / "driver.py",
+    )
+    monkeypatch.setattr(
+        single_stage_init_parity_module,
+        "run_python_script",
+        lambda _script_path, command, **kwargs: observed_invocations.append(
+            (list(command), dict(kwargs["env"]))
+        )
+        or argparse.Namespace(stdout="", stderr=""),
+    )
+    monkeypatch.setattr(
+        single_stage_init_parity_module,
+        "find_single_file",
+        lambda root, pattern: Path(root) / pattern,
+    )
+    monkeypatch.setattr(
+        single_stage_init_parity_module,
+        "load_json",
+        lambda _path: {},
+    )
+
+    single_stage_init_parity_module._run_single_stage_case(
+        args,
+        "jax",
+        platform="cuda",
+        benchmark_mode=True,
+        load_surface_gamma=False,
+        enable_compile_diagnostics=True,
+    )
+
+    assert len(observed_invocations) == 1
+    command, _env = observed_invocations[0]
+    assert "--record-jax-compile-diagnostics" in command
+
+
 def test_prefix_phase_timings_adds_lane_prefix():
     assert single_stage_init_parity_module._prefix_phase_timings(
         "jax",
@@ -1973,10 +2140,12 @@ def _single_stage_probe_results(**overrides):
         "MAX_CURVATURE": 10.0,
         "SELF_INTERSECTING": False,
         "SELF_INTERSECTION_CHECK_AVAILABLE": True,
-        "iterations": 1,
+        "iterations": 10,
         "boozer_optimizer_backend": "ondevice",
         "boozer_optimizer_method": "lm-ondevice",
         "outer_optimizer_method": TARGET_OUTER_OPTIMIZER_METHOD,
+        "INITIAL_OBJECTIVE": 10.0,
+        "FINAL_OBJECTIVE": 8.0,
     }
     results.update(overrides)
     return results
@@ -2035,10 +2204,12 @@ def test_single_stage_outer_loop_probe_accepts_finite_target_lane_result():
     )
 
     assert failures == []
-    assert summary["iterations"] == 1
+    assert summary["iterations"] == 10
     assert summary["boozer_optimizer_backend"] == "ondevice"
     assert summary["outer_optimizer_method"] == TARGET_OUTER_OPTIMIZER_METHOD
     assert summary["self_intersection_check_available"] is False
+    assert summary["objective_decrease"] == pytest.approx(2.0)
+    assert summary["objective_decreased"] is True
 
 
 def test_single_stage_outer_loop_probe_rejects_missing_step_or_wrong_method():
@@ -2050,6 +2221,7 @@ def test_single_stage_outer_loop_probe_rejects_missing_step_or_wrong_method():
             outer_optimizer_method="bfgs",
             SELF_INTERSECTING=True,
             FINAL_IOTA=np.nan,
+            FINAL_OBJECTIVE=10.5,
             FIELD_ERROR=0.004,
             MAX_CURVATURE=32.0,
         ),
@@ -2057,11 +2229,12 @@ def test_single_stage_outer_loop_probe_rejects_missing_step_or_wrong_method():
         expected_boozer_optimizer_method="lm-ondevice",
     )
 
-    assert any("did not accept an optimizer step" in failure for failure in failures)
+    assert any("required 10 accepted optimizer iterations" in failure for failure in failures)
     assert any(
         "requested inner Boozer optimizer method" in failure for failure in failures
     )
     assert any("self-intersecting surface" in failure for failure in failures)
+    assert any("did not decrease the objective" in failure for failure in failures)
     assert any("non-finite FINAL_IOTA" in failure for failure in failures)
 
 
@@ -2080,6 +2253,93 @@ def test_single_stage_outer_loop_probe_profile_only_allows_zero_iterations():
 
     assert failures == []
     assert summary["iterations"] == 0
+
+
+def test_single_stage_outer_loop_probe_builds_phase1_note_from_scaled_phase1_diagnosis():
+    note = single_stage_outer_loop_probe.build_phase1_diagnostic_note(
+        {
+            "iterations": 0,
+            "INITIAL_PHASE_ITERATIONS": 3,
+            "TERMINATION_MESSAGE": "diagnose_target_lane_scaled_phase1",
+            "JAX_PROFILE_DIR": "/tmp/xprof",
+            "TARGET_LANE_SCALED_PHASE1_DIAGNOSIS": {
+                "first_nonfinite_stage": "steepest_descent_trial"
+            },
+        },
+        failures=["Single-stage outer-loop probe did not decrease the objective."],
+        compile_diagnostics_requested=True,
+        compile_diagnostics_enabled=False,
+        compile_diagnostics_disable_reason=(
+            "compile diagnostics are disabled when Phase 1 host-callback "
+            "diagnostics are enabled because that mode does not provide "
+            "normal cache-reuse evidence"
+        ),
+        deterministic_gpu_reductions=False,
+    )
+
+    assert note["reproduced"] is True
+    assert note["trace_dir"] == "/tmp/xprof"
+    assert note["first_bad_region"] == "single_stage.outer_optimizer_initial_phase"
+    assert (
+        note["first_bad_region_source"]
+        == "TARGET_LANE_SCALED_PHASE1_DIAGNOSIS.first_nonfinite_stage"
+    )
+    assert note["first_bad_region_detail"] == "steepest_descent_trial"
+    assert note["compile_behavior"] == {
+        "diagnostics_requested": True,
+        "diagnostics_enabled": False,
+        "jax_log_compiles": False,
+        "jax_explain_cache_misses": False,
+        "cache_reuse_evidence_valid": False,
+        "disabled_reason": (
+            "compile diagnostics are disabled when Phase 1 host-callback "
+            "diagnostics are enabled because that mode does not provide "
+            "normal cache-reuse evidence"
+        ),
+    }
+
+
+def test_single_stage_outer_loop_probe_builds_phase1_note_from_invalid_state_events():
+    note = single_stage_outer_loop_probe.build_phase1_diagnostic_note(
+        {
+            "iterations": 4,
+            "TARGET_LANE_INVALID_STATE_DIAGNOSIS": {
+                "events": [
+                    {
+                        "phase": "phase2",
+                        "iteration": 2,
+                        "line_search_failed": True,
+                        "nonfinite_step": False,
+                        "stalled_step": True,
+                        "valid_curvature": True,
+                        "ls_status": 3,
+                    }
+                ]
+            },
+        },
+        failures=["Single-stage outer-loop probe produced a non-finite FINAL_IOTA."],
+        compile_diagnostics_requested=False,
+        compile_diagnostics_enabled=False,
+        compile_diagnostics_disable_reason=None,
+        deterministic_gpu_reductions=True,
+    )
+
+    assert note["reproduced"] is True
+    assert note["first_bad_region"] == "single_stage.outer_optimizer"
+    assert (
+        note["first_bad_region_source"]
+        == "TARGET_LANE_INVALID_STATE_DIAGNOSIS.events[0]"
+    )
+    assert note["first_bad_region_detail"] == {
+        "phase": "phase2",
+        "iteration": 2,
+        "line_search_failed": True,
+        "nonfinite_step": False,
+        "stalled_step": True,
+        "valid_curvature": True,
+        "ls_status": 3,
+    }
+    assert note["deterministic_gpu_reductions"] is True
 
 
 def _grouped_adjoint_memory_metrics(*, snapshots, **overrides):
@@ -3015,8 +3275,9 @@ def test_single_stage_outer_loop_probe_rejects_non_ondevice_boozer_backend():
 def test_single_stage_outer_loop_contract_matches_probe_defaults():
     contract = single_stage_proof_contract()
 
-    assert contract["default_maxiter"] == 1
-    assert contract["min_iterations"] == 1
+    assert contract["default_maxiter"] == 10
+    assert contract["min_iterations"] == 10
+    assert contract["require_objective_decrease"] is True
     assert contract["required_outer_optimizer_method"] == TARGET_OUTER_OPTIMIZER_METHOD
     assert contract["required_result_keys"] == (
         "FINAL_IOTA",

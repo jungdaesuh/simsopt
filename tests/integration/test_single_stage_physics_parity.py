@@ -122,6 +122,57 @@ def _single_stage_subprocess_env(
     return env
 
 
+def _build_single_stage_script_command(
+    *,
+    backend: str,
+    optimizer_backend: str,
+    maxiter: int,
+    stage2_bs_path: Path,
+    benchmark_mode: bool = False,
+    record_jax_compile_diagnostics: bool = False,
+    disable_target_lane_success_filter: bool = False,
+    target_lane_accepted_step_sync: str | None = None,
+) -> list[str]:
+    command = [
+        "--backend",
+        backend,
+        "--plasma-surf-filename",
+        DEFAULT_PLASMA_SURF_FILENAME,
+        "--stage2-bs-path",
+        str(stage2_bs_path),
+        "--nphi",
+        str(DEFAULT_SMOKE_NPHI),
+        "--ntheta",
+        str(DEFAULT_SMOKE_NTHETA),
+        "--mpol",
+        str(DEFAULT_SMOKE_MPOL),
+        "--ntor",
+        str(DEFAULT_SMOKE_NTOR),
+        "--vol-target",
+        str(DEFAULT_VOL_TARGET),
+        "--iota-target",
+        str(DEFAULT_IOTA_TARGET),
+        "--maxiter",
+        str(maxiter),
+        "--equilibria-dir",
+        str(DEFAULT_EQUILIBRIA_DIR),
+    ]
+    if backend == "jax":
+        command += ["--optimizer-backend", optimizer_backend]
+    if benchmark_mode:
+        command.append("--benchmark-mode")
+    if record_jax_compile_diagnostics:
+        command.append("--record-jax-compile-diagnostics")
+    if disable_target_lane_success_filter:
+        command.append("--disable-target-lane-success-filter")
+    if target_lane_accepted_step_sync is not None:
+        command += [
+            "--target-lane-accepted-step-sync",
+            str(target_lane_accepted_step_sync),
+        ]
+    return command
+
+
 def _run_single_stage_script(
     *,
     backend: str,
@@ -132,34 +183,16 @@ def _run_single_stage_script(
 ) -> SingleStageOuterRun:
     with tempfile.TemporaryDirectory(prefix=f"single-stage-{backend}-") as tmp_dir:
         output_root = Path(tmp_dir) / "outputs"
-        command = [
-            "--backend",
-            backend,
+        command = _build_single_stage_script_command(
+            backend=backend,
+            optimizer_backend=optimizer_backend,
+            maxiter=maxiter,
+            stage2_bs_path=stage2_bs_path,
+        )
+        command[0:0] = [
             "--output-root",
             str(output_root),
-            "--plasma-surf-filename",
-            DEFAULT_PLASMA_SURF_FILENAME,
-            "--stage2-bs-path",
-            str(stage2_bs_path),
-            "--nphi",
-            str(DEFAULT_SMOKE_NPHI),
-            "--ntheta",
-            str(DEFAULT_SMOKE_NTHETA),
-            "--mpol",
-            str(DEFAULT_SMOKE_MPOL),
-            "--ntor",
-            str(DEFAULT_SMOKE_NTOR),
-            "--vol-target",
-            str(DEFAULT_VOL_TARGET),
-            "--iota-target",
-            str(DEFAULT_IOTA_TARGET),
-            "--maxiter",
-            str(maxiter),
-            "--equilibria-dir",
-            str(DEFAULT_EQUILIBRIA_DIR),
         ]
-        if backend == "jax":
-            command += ["--optimizer-backend", optimizer_backend]
         run_python_script(
             _single_stage_script_path(),
             command,
@@ -181,6 +214,43 @@ def _run_single_stage_script(
         )
 
 
+def _run_single_stage_script_results(
+    *,
+    backend: str,
+    optimizer_backend: str,
+    maxiter: int,
+    platform: str,
+    stage2_bs_path: Path,
+    benchmark_mode: bool = False,
+    record_jax_compile_diagnostics: bool = False,
+    disable_target_lane_success_filter: bool = False,
+    target_lane_accepted_step_sync: str | None = None,
+) -> dict[str, Any]:
+    with tempfile.TemporaryDirectory(prefix=f"single-stage-{backend}-results-") as tmp_dir:
+        output_root = Path(tmp_dir) / "outputs"
+        command = _build_single_stage_script_command(
+            backend=backend,
+            optimizer_backend=optimizer_backend,
+            maxiter=maxiter,
+            stage2_bs_path=stage2_bs_path,
+            benchmark_mode=benchmark_mode,
+            record_jax_compile_diagnostics=record_jax_compile_diagnostics,
+            disable_target_lane_success_filter=disable_target_lane_success_filter,
+            target_lane_accepted_step_sync=target_lane_accepted_step_sync,
+        )
+        command[0:0] = ["--output-root", str(output_root)]
+        run_python_script(
+            _single_stage_script_path(),
+            command,
+            env=_single_stage_subprocess_env(backend=backend, platform=platform),
+            cwd=REPO_ROOT,
+            bootstrap_repo=True,
+            stream_output=True,
+        )
+        results_path = find_single_file(output_root, "results.json")
+        return dict(load_json(results_path))
+
+
 def _require_cuda_runtime_or_skip() -> None:
     jax = pytest.importorskip("jax")
     if not any(device.platform in {"cuda", "gpu"} for device in jax.devices()):
@@ -194,23 +264,27 @@ def _run_single_stage_outer_loop_probe(
     maxiter: int,
     strict_backend_mode: str | None = None,
     transfer_guard: str | None = None,
+    enable_compile_diagnostics: bool = False,
 ) -> dict[str, Any]:
     with tempfile.TemporaryDirectory(
         prefix="single-stage-outer-loop-probe-"
     ) as tmp_dir:
         output_json = Path(tmp_dir) / "probe.json"
+        command = [
+            "--platform",
+            platform,
+            "--optimizer-backend",
+            optimizer_backend,
+            "--maxiter",
+            str(maxiter),
+            "--output-json",
+            str(output_json),
+        ]
+        if enable_compile_diagnostics:
+            command.append("--enable-compile-diagnostics")
         run_python_script(
             _single_stage_outer_loop_probe_path(),
-            [
-                "--platform",
-                platform,
-                "--optimizer-backend",
-                optimizer_backend,
-                "--maxiter",
-                str(maxiter),
-                "--output-json",
-                str(output_json),
-            ],
+            command,
             env=_single_stage_subprocess_env(
                 backend="jax",
                 platform=platform,
@@ -515,7 +589,7 @@ class TestSingleStagePhysicsSmokeParity:
 
 class TestSingleStageOuterLoopGpuProof:
     @pytest.mark.slow
-    def test_cuda_outer_loop_probe_accepts_step_under_strict_transfer_guard(self):
+    def test_cuda_outer_loop_probe_converges_under_strict_transfer_guard(self):
         _require_cuda_runtime_or_skip()
         contract = single_stage_proof_contract(TIER3_SINGLE_STAGE_OUTER_LOOP_RUNG)
         payload = _run_single_stage_outer_loop_probe(
@@ -543,5 +617,55 @@ class TestSingleStageOuterLoopGpuProof:
         )
         assert probe["boozer_optimizer_backend"] == "ondevice"
         assert probe["boozer_optimizer_method"] == "lm-ondevice"
+        assert probe["initial_objective"] is not None
+        assert probe["final_objective"] is not None
+        assert probe["objective_decreased"] is True
+        assert probe["objective_decrease"] is not None
+        assert probe["objective_decrease"] > 0.0
         assert probe["self_intersecting"] is False
         assert all(probe["finite_result_keys"].values())
+
+
+class TestSingleStageOuterLoopCompileSmoke:
+    @pytest.mark.slow
+    def test_cpu_target_lane_case_records_compile_diagnostic_accounting(self):
+        results = _run_single_stage_script_results(
+            backend="jax",
+            optimizer_backend="ondevice",
+            platform="cpu",
+            stage2_bs_path=DEFAULT_STAGE2_BS_PATH,
+            maxiter=2,
+            benchmark_mode=True,
+            record_jax_compile_diagnostics=True,
+            target_lane_accepted_step_sync="final-only",
+        )
+
+        diagnostics = results.get("JAX_COMPILE_DIAGNOSTICS")
+        assert isinstance(diagnostics, dict)
+        compile_targets = diagnostics.get("compile_targets")
+        cache_miss_sites = diagnostics.get("cache_miss_sites")
+        assert isinstance(compile_targets, dict)
+        assert isinstance(cache_miss_sites, dict)
+        compile_event_count = int(diagnostics.get("compile_event_count", -1))
+        cache_miss_count = int(diagnostics.get("cache_miss_count", -1))
+        compile_target_parse_miss_count = int(
+            diagnostics.get("compile_target_parse_miss_count", -1)
+        )
+        cache_miss_site_parse_miss_count = int(
+            diagnostics.get("cache_miss_site_parse_miss_count", -1)
+        )
+        assert compile_event_count >= 0
+        assert cache_miss_count >= 0
+        assert compile_target_parse_miss_count >= 0
+        assert cache_miss_site_parse_miss_count >= 0
+        assert sum(int(value) for value in compile_targets.values()) == (
+            compile_event_count - compile_target_parse_miss_count
+        )
+        assert sum(int(value) for value in cache_miss_sites.values()) == (
+            cache_miss_count - cache_miss_site_parse_miss_count
+        )
+        assert (
+            named_solver_compiles.get("jit(traceable_exact_newton_run_solver)", 0)
+            <= 1
+        )
+        assert sum(named_solver_compiles.values()) <= 2, named_solver_compiles

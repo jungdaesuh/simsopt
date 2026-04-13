@@ -6,6 +6,9 @@ the line-search semantics stay stable across this project.
 
 from __future__ import annotations
 
+import os
+
+import jax
 import jax.numpy as jnp
 from jax import lax
 
@@ -18,6 +21,44 @@ from ._common import (
     _scalar_value_and_grad,
 )
 from ._types import _LineSearchResults, _LineSearchState, _ZoomState
+
+
+_LINE_SEARCH_DEBUG_ENABLED = os.environ.get("SIMSOPT_LBFGS_DEBUG", "").lower() not in {
+    "",
+    "0",
+    "false",
+    "no",
+    "off",
+}
+
+
+def _emit_line_search_runtime_debug(
+    stage,
+    *,
+    iteration,
+    alpha,
+    phi,
+    dphi,
+):
+    """Emit ordered runtime diagnostics when SIMSOPT_LBFGS_DEBUG is enabled."""
+    if not _LINE_SEARCH_DEBUG_ENABLED:
+        return
+    jax.debug.callback(
+        lambda i, a, f, df: print(
+            "[line-search-debug] "
+            f"stage={stage} "
+            f"iter={int(i)} "
+            f"alpha={float(a):.16e} "
+            f"phi={float(f):.16e} "
+            f"dphi={float(df):.16e}",
+            flush=True,
+        ),
+        iteration,
+        alpha,
+        phi,
+        dphi,
+        ordered=True,
+    )
 
 
 def _cubicmin(a, fa, fpa, b, fb, c, fc):
@@ -155,6 +196,13 @@ def _zoom(
         phi_j = phi_j.astype(state.phi_lo.dtype)
         dphi_j = dphi_j.astype(state.dphi_lo.dtype)
         g_j = g_j.astype(state.g_star.dtype)
+        _emit_line_search_runtime_debug(
+            "zoom_trial",
+            iteration=state.j + _int_scalar(1),
+            alpha=a_j,
+            phi=phi_j,
+            dphi=dphi_j,
+        )
         state = state._replace(
             nfev=state.nfev + _int_scalar(1),
             ngev=state.ngev + _int_scalar(1),
@@ -368,6 +416,13 @@ def _line_search_from_restricted_func_and_grad(
         a_i = jnp.where(state.i == _int_scalar(1), start_value, state.a_i1 * two)
 
         phi_i, dphi_i, g_i = restricted_func_and_grad(a_i)
+        _emit_line_search_runtime_debug(
+            "trial",
+            iteration=state.i,
+            alpha=a_i,
+            phi=phi_i,
+            dphi=dphi_i,
+        )
         state = state._replace(
             nfev=state.nfev + _int_scalar(1),
             ngev=state.ngev + _int_scalar(1),

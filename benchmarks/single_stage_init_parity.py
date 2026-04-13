@@ -93,6 +93,10 @@ _OUTER_LOOP_REQUIRED_RESULT_KEYS = tuple(
 _TARGET_OUTER_OPTIMIZER_METHOD = str(
     _OUTER_LOOP_PROOF_CONTRACT["required_outer_optimizer_method"]
 )
+_TARGET_LANE_COMPILE_DIAGNOSTICS_HOST_CALLBACK_REASON = (
+    "compile diagnostics are disabled when Phase 1 host-callback diagnostics "
+    "are enabled because that mode does not provide normal cache-reuse evidence"
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -257,7 +261,10 @@ def _append_optional_single_stage_flags(
     benchmark_mode: bool,
     profile_target_lane: bool,
     profile_target_lane_only: bool,
+    diagnose_target_lane_scaled_phase1: bool,
+    record_target_lane_invalid_state_events: bool,
     profile_target_lane_batch_size: int | None,
+    enable_compile_diagnostics: bool,
     jax_profile_dir: str | None,
     experimental_target_lane_value_and_grad: bool,
     disable_target_lane_success_filter: bool,
@@ -272,6 +279,10 @@ def _append_optional_single_stage_flags(
         command.append("--profile-target-lane")
     if profile_target_lane_only:
         command.append("--profile-target-lane-only")
+    if diagnose_target_lane_scaled_phase1:
+        command.append("--diagnose-target-lane-scaled-phase1")
+    if record_target_lane_invalid_state_events:
+        command.append("--record-target-lane-invalid-state-events")
     if (
         profile_target_lane_batch_size is not None
         and int(profile_target_lane_batch_size) > 1
@@ -282,6 +293,13 @@ def _append_optional_single_stage_flags(
                 str(int(profile_target_lane_batch_size)),
             ]
         )
+    effective_compile_diagnostics, _ = resolve_target_lane_compile_diagnostics(
+        enable_compile_diagnostics=enable_compile_diagnostics,
+        diagnose_target_lane_scaled_phase1=diagnose_target_lane_scaled_phase1,
+        record_target_lane_invalid_state_events=record_target_lane_invalid_state_events,
+    )
+    if effective_compile_diagnostics:
+        command.append("--record-jax-compile-diagnostics")
     if jax_profile_dir:
         command.extend(["--jax-profile-dir", jax_profile_dir])
     if experimental_target_lane_value_and_grad:
@@ -318,6 +336,23 @@ def _append_optional_single_stage_flags(
         )
 
 
+def resolve_target_lane_compile_diagnostics(
+    *,
+    enable_compile_diagnostics: bool,
+    diagnose_target_lane_scaled_phase1: bool,
+    record_target_lane_invalid_state_events: bool,
+) -> tuple[bool, str | None]:
+    """Resolve whether compile/cache diagnostics can run on this target-lane mode."""
+    if not enable_compile_diagnostics:
+        return False, None
+    if (
+        diagnose_target_lane_scaled_phase1
+        or record_target_lane_invalid_state_events
+    ):
+        return False, _TARGET_LANE_COMPILE_DIAGNOSTICS_HOST_CALLBACK_REASON
+    return True, None
+
+
 def _run_single_stage_case(
     args: argparse.Namespace,
     backend: str,
@@ -327,7 +362,11 @@ def _run_single_stage_case(
     load_surface_gamma: bool = True,
     profile_target_lane: bool = False,
     profile_target_lane_only: bool = False,
+    diagnose_target_lane_scaled_phase1: bool = False,
+    record_target_lane_invalid_state_events: bool = False,
     experimental_target_lane_value_and_grad: bool = False,
+    enable_compile_diagnostics: bool = False,
+    deterministic_gpu_reductions: bool = False,
 ) -> dict[str, Any]:
     script_path = _single_stage_script_path()
     effective_platform = platform if backend == "jax" else "cpu"
@@ -375,9 +414,14 @@ def _run_single_stage_case(
             benchmark_mode=benchmark_mode,
             profile_target_lane=profile_target_lane,
             profile_target_lane_only=profile_target_lane_only,
+            diagnose_target_lane_scaled_phase1=diagnose_target_lane_scaled_phase1,
+            record_target_lane_invalid_state_events=(
+                record_target_lane_invalid_state_events
+            ),
             profile_target_lane_batch_size=getattr(
                 args, "profile_target_lane_batch_size", None
             ),
+            enable_compile_diagnostics=enable_compile_diagnostics,
             jax_profile_dir=getattr(args, "jax_profile_dir", None),
             experimental_target_lane_value_and_grad=(
                 experimental_target_lane_value_and_grad
@@ -417,6 +461,7 @@ def _run_single_stage_case(
                 platform=effective_platform,
                 disable_compilation_cache=(effective_platform == "cpu"),
                 clear_backend_guardrails=(backend != "jax"),
+                deterministic_gpu_reductions=deterministic_gpu_reductions,
             ),
             cwd=REPO_ROOT,
             bootstrap_repo=True,

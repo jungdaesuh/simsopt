@@ -100,6 +100,7 @@ _TARGET_LANE_BOOZER_BFGS_TOL_DEFAULT = 1e-8
 _TARGET_LANE_BOOZER_BFGS_TOL_BENCHMARK_DEFAULT = 1e-6
 _TARGET_LANE_BOOZER_BFGS_MAXITER_BENCHMARK_DEFAULT = 64
 _SINGLE_STAGE_RESULTS_SCHEMA_VERSION = 1
+_JAX_COMPILE_DIAGNOSTICS_SAMPLE_LIMIT = 25
 _TIMED_STAGE_LABELS = frozenset(
     {
         "after_boozer_surface_fit",
@@ -1668,6 +1669,15 @@ def parse_args():
             "When profiling the JAX/ondevice target lane, also profile a batched "
             "seed-evaluation path over this many nearby deterministic seed points. "
             "Values greater than 1 are additive and do not change optimizer behavior."
+        ),
+    )
+    parser.add_argument(
+        "--record-jax-compile-diagnostics",
+        action="store_true",
+        help=(
+            "Record named JAX compile/cache-miss diagnostics for the real "
+            "target-lane bundle setup and outer optimizer, then write the summary "
+            "into results.json for compile-reuse smoke tests."
         ),
     )
     parser.add_argument(
@@ -3574,6 +3584,117 @@ def _profile_tree_callable_pair(fn, *args):
     }
 
 
+def _increment_diagnostic_counter(counts, key):
+    counts[key] = counts.get(key, 0) + 1
+
+
+class _JaxCompileDiagnosticsRecorder(logging.Handler):
+    """Collect compact JAX compile and cache-miss diagnostics for probe runs."""
+
+    def __init__(self, *, sample_limit=_JAX_COMPILE_DIAGNOSTICS_SAMPLE_LIMIT):
+        super().__init__(level=logging.WARNING)
+        self.sample_limit = int(sample_limit)
+        self.compile_event_count = 0
+        self.cache_miss_count = 0
+        self.compile_target_parse_miss_count = 0
+        self.cache_miss_site_parse_miss_count = 0
+        self.compile_targets = {}
+        self.cache_miss_sites = {}
+        self.compile_messages = []
+        self.cache_miss_messages = []
+
+    @staticmethod
+    def _parse_compile_target(message):
+        prefix = "Compiling "
+        start = message.find(prefix)
+        if start < 0:
+            return None
+        suffix = message[start + len(prefix) :]
+        return suffix.split(" with ", 1)[0].strip() or None
+
+    @staticmethod
+    def _parse_cache_miss_site(message):
+        prefix = "TRACING CACHE MISS at "
+        start = message.find(prefix)
+        if start < 0:
+            return None
+        suffix = message[start + len(prefix) :]
+        return suffix.split(" (", 1)[0].strip() or None
+
+    def emit(self, record):
+        message = record.getMessage()
+        if "Compiling " in message:
+            self.compile_event_count += 1
+            target = self._parse_compile_target(message)
+            if target is not None:
+                _increment_diagnostic_counter(self.compile_targets, target)
+            else:
+                self.compile_target_parse_miss_count += 1
+            if len(self.compile_messages) < self.sample_limit:
+                self.compile_messages.append(message)
+        if "TRACING CACHE MISS" in message:
+            self.cache_miss_count += 1
+            site = self._parse_cache_miss_site(message)
+            if site is not None:
+                _increment_diagnostic_counter(self.cache_miss_sites, site)
+            else:
+                self.cache_miss_site_parse_miss_count += 1
+            if len(self.cache_miss_messages) < self.sample_limit:
+                self.cache_miss_messages.append(message)
+
+    def summary(self):
+        return {
+            "compile_event_count": int(self.compile_event_count),
+            "cache_miss_count": int(self.cache_miss_count),
+            "compile_target_parse_miss_count": int(
+                self.compile_target_parse_miss_count
+            ),
+            "cache_miss_site_parse_miss_count": int(
+                self.cache_miss_site_parse_miss_count
+            ),
+            "compile_targets": {
+                key: int(self.compile_targets[key]) for key in sorted(self.compile_targets)
+            },
+            "cache_miss_sites": {
+                key: int(self.cache_miss_sites[key]) for key in sorted(self.cache_miss_sites)
+            },
+            "compile_messages": list(self.compile_messages),
+            "cache_miss_messages": list(self.cache_miss_messages),
+        }
+
+
+@contextmanager
+def maybe_record_jax_compile_diagnostics(enabled):
+    """Capture named JAX compile/cache-miss diagnostics for the wrapped section."""
+    if not enabled:
+        yield None
+        return
+
+    logger = logging.getLogger("jax")
+    recorder = _JaxCompileDiagnosticsRecorder()
+    previous_level = logger.level
+    previous_propagate = logger.propagate
+    override_level = previous_level == logging.NOTSET or previous_level > logging.WARNING
+    if override_level:
+        logger.setLevel(logging.WARNING)
+    logger.propagate = False
+    previous_explain_cache_misses = bool(jax.config.jax_explain_cache_misses)
+    logger.addHandler(recorder)
+    try:
+        jax.config.update("jax_explain_cache_misses", True)
+        with jax.log_compiles(True):
+            yield recorder
+    finally:
+        logger.removeHandler(recorder)
+        jax.config.update(
+            "jax_explain_cache_misses",
+            previous_explain_cache_misses,
+        )
+        logger.propagate = previous_propagate
+        if override_level:
+            logger.setLevel(previous_level)
+
+
 def profile_traceable_target_lane_objective(profile_suite, coil_dofs):
     """Profile the traceable target-lane closures at one representative DOF point."""
     profiled = {}
@@ -4397,12 +4518,16 @@ def snapshot_to_pytree(JF, boozer_surface, bs, *, num_tf_coils):
     coils = bs.coils
     tf_coils = coils[:num_tf_coils]
 
+    initial_objective = host_float(JF.J())
+    initial_objective_grad = host_array(JF.dJ())
+
     run_dict = {
         "sdofs": boozer_surface.surface.x.copy(),
         "iota": host_float(boozer_surface.res["iota"]),
         "G": host_float(boozer_surface.res["G"]),
-        "J": host_float(JF.J()),
-        "dJ": host_array(JF.dJ()),
+        "J": initial_objective,
+        "dJ": initial_objective_grad,
+        "initial_objective": initial_objective,
         "it": 1,
         "lscount": 0,
         "x_prev": coil_dofs.copy(),
@@ -5046,6 +5171,7 @@ if __name__ == "__main__":
     target_lane_gradient_diagnosis = None
     target_lane_scaled_phase1_diagnosis = None
     target_lane_invalid_state_events = []
+    jax_compile_diagnostics = None
     record_target_lane_invalid_state_events = (
         record_target_lane_invalid_state_events_enabled(args)
     )
@@ -5084,7 +5210,9 @@ if __name__ == "__main__":
             value is not None for value in target_lane_trial_boozer_overrides.values()
         )
         accepted_step_callback = None
-        with temporary_boozer_surface_option_overrides(
+        with maybe_record_jax_compile_diagnostics(
+            bool(args.record_jax_compile_diagnostics and use_target_lane)
+        ) as jax_compile_diagnostics_recorder, temporary_boozer_surface_option_overrides(
             boozer_surface,
             **target_lane_trial_boozer_overrides,
         ):
@@ -5555,6 +5683,8 @@ if __name__ == "__main__":
                     outer_optimizer_run_start_s,
                     outer_optimizer_end_s,
                 )
+        if jax_compile_diagnostics_recorder is not None:
+            jax_compile_diagnostics = jax_compile_diagnostics_recorder.summary()
 
         # The target lane keeps the mutable graph synchronized through the
         # accepted-step seam, so re-restoring the same accepted state here only
@@ -5876,12 +6006,22 @@ if __name__ == "__main__":
         ran_optimizer=not skip_outer_optimizer,
         termination_message=termination_message,
     )
+    initial_objective = float(run_dict["initial_objective"])
+    final_objective = optimizer_diag["fun"]
+    objective_decrease = (
+        None
+        if final_objective is None
+        else initial_objective - float(final_objective)
+    )
     results["OPTIMIZER_FUN"] = optimizer_diag["fun"]
     results["OPTIMIZER_FUN_FINITE"] = optimizer_diag["fun_finite"]
     results["OPTIMIZER_JAC_FINITE"] = optimizer_diag["jac_finite"]
     results["OPTIMIZER_JAC_INF_NORM"] = optimizer_diag["jac_inf_norm"]
     results["OPTIMIZER_X_FINITE"] = optimizer_diag["x_finite"]
     results["OPTIMIZER_INVALID_STATE"] = optimizer_diag["invalid_state"]
+    results["INITIAL_OBJECTIVE"] = initial_objective
+    results["FINAL_OBJECTIVE"] = final_objective
+    results["OBJECTIVE_DECREASE"] = objective_decrease
     if use_target_lane and (
         target_lane_invalid_state_events or optimizer_diag["invalid_state"]
     ):
@@ -5916,6 +6056,8 @@ if __name__ == "__main__":
     results["TIMINGS"] = timings
     if target_lane_profile is not None:
         results["TARGET_LANE_PROFILE"] = target_lane_profile
+    if jax_compile_diagnostics is not None:
+        results["JAX_COMPILE_DIAGNOSTICS"] = jax_compile_diagnostics
     if target_lane_gradient_diagnosis is not None:
         results["TARGET_LANE_GRADIENT_DIAGNOSIS"] = target_lane_gradient_diagnosis
     if target_lane_scaled_phase1_diagnosis is not None:
@@ -5935,6 +6077,11 @@ if __name__ == "__main__":
         write_json_file(
             os.path.join(OUT_DIR_ITER, "target_lane_scaled_phase1_diagnosis.json"),
             target_lane_scaled_phase1_diagnosis,
+        )
+    if jax_compile_diagnostics is not None:
+        write_json_file(
+            os.path.join(OUT_DIR_ITER, "jax_compile_diagnostics.json"),
+            jax_compile_diagnostics,
         )
     if "TARGET_LANE_INVALID_STATE_DIAGNOSIS" in results:
         write_json_file(
