@@ -30,12 +30,14 @@ class FramedCurve(sopp.Curve, Curve):
         self.rotation = rotation
         Curve.__init__(self, depends_on=deps)
 
-        self.frame_twist_jax = jit(lambda gammadash, t, n, ndash: frame_twist_pure(gammadash,t,n,ndash))
+        self.frame_twist_jax = jit(lambda gammadash, t, n, ndash: frame_twist_pure(gammadash, t, n, ndash))
         self.frame_twistgrad_vjp0 = jit(lambda gammadash, t, n, ndash, v: vjp(
-            lambda g: self.frame_twist_jax(g, t, n, ndash), t)[1](v)[0])
+            lambda g: self.frame_twist_jax(g, t, n, ndash), gammadash)[1](v)[0])
         self.frame_twistgrad_vjp1 = jit(lambda gammadash, t, n, ndash, v: vjp(
-            lambda g: self.frame_twist_jax(gammadash, t, g, ndash), n)[1](v)[0])
+            lambda g: self.frame_twist_jax(gammadash, g, n, ndash), t)[1](v)[0])
         self.frame_twistgrad_vjp2 = jit(lambda gammadash, t, n, ndash, v: vjp(
+            lambda g: self.frame_twist_jax(gammadash, t, g, ndash), n)[1](v)[0])
+        self.frame_twistgrad_vjp3 = jit(lambda gammadash, t, n, ndash, v: vjp(
             lambda g: self.frame_twist_jax(gammadash, t, n, g), ndash)[1](v)[0])
 
     def frame_twist(self):
@@ -57,9 +59,12 @@ class FramedCurve(sopp.Curve, Curve):
         grad0 = self.frame_twistgrad_vjp0(gammadash, t, n, ndash, v)
         grad1 = self.frame_twistgrad_vjp1(gammadash, t, n, ndash, v)
         grad2 = self.frame_twistgrad_vjp2(gammadash, t, n, ndash, v)
- 
-        return self.rotated_frame_dcoeff_vjp(grad0,grad1,np.zeros_like(grad0)) \
-            +  self.rotated_frame_dash_dcoeff_vjp(np.zeros_like(grad0),grad2,np.zeros_like(grad0))
+        grad3 = self.frame_twistgrad_vjp3(gammadash, t, n, ndash, v)
+        zeros = np.zeros_like(grad0)
+
+        return self.curve.dgammadash_by_dcoeff_vjp(grad0) \
+            + self.rotated_frame_dcoeff_vjp(grad1, grad2, zeros) \
+            + self.rotated_frame_dash_dcoeff_vjp(zeros, grad3, zeros)
 
 class FramedCurveFrenet(FramedCurve):
     r"""
@@ -110,24 +115,9 @@ class FramedCurveFrenet(FramedCurve):
         self.torsiongrad_vjp5 = jit(lambda gamma, gammadash, gammadashdash, gammadashdashdash, alpha, alphadash, v: vjp(
             lambda g: self.torsion(gamma, gammadash, gammadashdash, gammadashdashdash, alpha, g), alphadash)[1](v)[0])
 
-        self.twist_pure = jit(lambda gamma, gammadash, gammadashdash, gammadashdashdash, alpha, alphadash: twist_pure_frenet(
-            gamma, gammadash, gammadashdash, gammadashdashdash, alpha, alphadash))
-        self.twistgrad0 = jit(lambda gamma, gammadash, gammadashdash, gammadashdashdash, alpha, alphadash, v: vjp(
-            lambda g: self.twist_pure(g, gammadash, gammadashdash, gammadashdashdash, alpha, alphadash), gamma)[1](v)[0])
-        self.twistgrad1 = jit(lambda gamma, gammadash, gammadashdash, gammadashdashdash, alpha, alphadash, v: vjp(
-            lambda g: self.twist_pure(gamma, g, gammadashdash, gammadashdashdash, alpha, alphadash), gammadash)[1](v)[0])
-        self.twistgrad2 = jit(lambda gamma, gammadash, gammadashdash, gammadashdashdash, alpha, alphadash, v: vjp(
-            lambda g: self.twist_pure(gamma, gammadash, g, gammadashdashdash, alpha, alphadash), gammadashdash)[1](v)[0])
-        self.twistgrad3 = jit(lambda gamma, gammadash, gammadashdash, gammadashdashdash, alpha, alphadash, v: vjp(
-            lambda g: self.twist_pure(gamma, gammadash, gammadashdash, g, alpha, alphadash), gammadashdashdash)[1](v)[0])
-        self.twistgrad4 = jit(lambda gamma, gammadash, gammadashdash, gammadashdashdash, alpha, alphadash, v: vjp(
-            lambda g: self.twist_pure(gamma, gammadash, gammadashdash, gammadashdashdash, g, alphadash), alpha)[1](v)[0])
-        self.twistgrad5 = jit(lambda gamma, gammadash, gammadashdash, gammadashdashdash, alpha, alphadash, v: vjp(
-            lambda g: self.twist_pure(gamma, gammadash, gammadashdash, gammadashdashdash, alpha, g), alphadash)[1](v)[0])
-
     def rotated_frame(self):
         """
-        Returns the frame :math:`(\hat{\textbf{t}}, \hat{\textbf{n}}, \hat{\textbf{b}})`, which is rotated 
+        Returns the frame :math:`(\hat{\textbf{t}}, \hat{\textbf{n}}, \hat{\textbf{b}})`, which is rotated
         with respect to the reference Frenet frame by the rotation. 
         """
         return rotated_frenet_frame(self.curve.gamma(), self.curve.gammadash(), self.curve.gammadashdash(), self.rotation.alpha(self.curve.quadpoints))
@@ -333,23 +323,10 @@ class FramedCurveCentroid(FramedCurve):
         self.binormgrad_vjp5 = jit(lambda gamma, gammadash, gammadashdash, alpha, alphadash, v: vjp(
             lambda g: self.binorm(gamma, gammadash, gammadashdash, alpha, g), alphadash)[1](v)[0])
 
-        self.twist_pure = jit(lambda gamma, gammadash, gammadashdash, alpha, alphadash: twist_pure_frenet(
-            gamma, gammadash, gammadashdash, alpha, alphadash))
-        self.twistgrad0 = jit(lambda gamma, gammadash, gammadashdash, alpha, alphadash, v: vjp(
-            lambda g: self.twist_pure(g, gammadash, gammadashdash, alpha, alphadash), gamma)[1](v)[0])
-        self.twistgrad1 = jit(lambda gamma, gammadash, gammadashdash, alpha, alphadash, v: vjp(
-            lambda g: self.twist_pure(gamma, g, gammadashdash, alpha, alphadash), gammadash)[1](v)[0])
-        self.twistgrad2 = jit(lambda gamma, gammadash, gammadashdash,  alpha, alphadash, v: vjp(
-            lambda g: self.twist_pure(gamma, gammadash, g, alpha, alphadash), gammadashdash)[1](v)[0])
-        self.twistgrad4 = jit(lambda gamma, gammadash, gammadashdash, alpha, alphadash, v: vjp(
-            lambda g: self.twist_pure(gamma, gammadash, gammadashdash, g, alphadash), alpha)[1](v)[0])
-        self.twistgrad5 = jit(lambda gamma, gammadash, gammadashdash, alpha, alphadash, v: vjp(
-            lambda g: self.twist_pure(gamma, gammadash, gammadashdash, alpha, g), alphadash)[1](v)[0])
-
     def frame_torsion(self):
         """
         Returns the frame torsion, :math:`\hat{\textbf{n}}'(l) \cdot \hat{\textbf{b}}`,
-        along the curve.  
+        along the curve.
         """
         gamma = self.curve.gamma()
         d1gamma = self.curve.gammadash()

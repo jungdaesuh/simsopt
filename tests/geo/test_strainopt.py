@@ -9,6 +9,11 @@ from scipy.optimize import minimize
 
 class CoilStrainTesting(unittest.TestCase):
 
+    def test_frame_twist_vjp(self):
+        for centroid in [True, False]:
+            with self.subTest(centroid=centroid):
+                self.subtest_frame_twist_vjp(centroid)
+
     def test_strain_opt(self):
         """ 
         Check that for a circular coil, strains 
@@ -41,6 +46,43 @@ class CoilStrainTesting(unittest.TestCase):
                      options={'maxiter': 100, 'maxcor': 10, 'gtol': 1e-20, 'ftol': 1e-20}, tol=1e-20)
             assert Jt.J() < 1e-12
             assert Jb.J() < 1e-12
+
+    def subtest_frame_twist_vjp(self, centroid):
+        quadpoints = np.linspace(0, 1, 32, endpoint=False)
+        curve = CurveXYZFourier(quadpoints, order=3)
+        curve.set('xc(0)', 1.0)
+        curve.set('xc(1)', 0.2)
+        curve.set('ys(1)', 0.15)
+        curve.set('zs(1)', 0.1)
+        curve.set('xc(2)', -0.03)
+        curve.set('ys(2)', 0.02)
+        curve.set('zs(2)', -0.01)
+        curve.set('xc(3)', 0.01)
+        curve.set('zs(3)', 0.005)
+
+        rotation = FrameRotation(quadpoints, order=2)
+        rotation.x = np.array([0.12, 0.03, -0.02, 0.01, 0.015])
+
+        if centroid:
+            framedcurve = FramedCurveCentroid(curve, rotation)
+        else:
+            framedcurve = FramedCurveFrenet(curve, rotation)
+
+        dofs = framedcurve.x.copy()
+        v = np.linspace(0.5, 1.5, len(quadpoints))
+
+        np.random.seed(1)
+        h = np.random.standard_normal(size=dofs.shape)
+        df = np.sum(framedcurve.dframe_twist_by_dcoeff_vjp(v)(framedcurve) * h)
+
+        eps = 1e-6
+        framedcurve.x = dofs + eps*h
+        f1 = np.sum(framedcurve.frame_twist() * v)
+        framedcurve.x = dofs - eps*h
+        f2 = np.sum(framedcurve.frame_twist() * v)
+        np.testing.assert_allclose((f1-f2)/(2*eps), df, rtol=1e-6, atol=1e-5)
+
+        framedcurve.x = dofs
 
     def test_torsion(self):
         for centroid in [True, False]:

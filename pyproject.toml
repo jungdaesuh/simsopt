@@ -14,7 +14,7 @@ description="Framework for optimizing stellarators"
 readme = "README.md"
 # long_description = file: README.md
 # long_description_content_type = text/markdown
-requires-python = ">=3.8"
+requires-python = ">=3.9"
 authors = [
   {name = "Matt Landreman", email = "mattland@umd.edu"},
   {name = "Bharat Medasani", email = "mbkumar@gmail.com"},
@@ -33,9 +33,11 @@ classifiers = [
     "Operating System :: POSIX :: Linux",
     "Environment :: Console",
     "Programming Language :: Python :: 3 :: Only",
-    "Programming Language :: Python :: 3.8",
     "Programming Language :: Python :: 3.9",
-    "Programming Language :: Python :: 3.10"
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13"
 ]
 keywords = [
     "plasma physics",
@@ -53,8 +55,8 @@ keywords = [
 ]
 dependencies = [
     "numpy>=1.21",
-    "jax>=0.2.5",
-    "jaxlib>=0.1.56",
+    "jax>=0.4.1",
+    "jaxlib>=0.4.1",
     "scipy>=1.5.4",
     "Deprecated>=1.2.10",
     "monty>=2021.6.10",
@@ -67,6 +69,8 @@ dependencies = [
 dynamic = ["version"]
 
 [project.optional-dependencies]
+# Python-side helpers only. Full simsopt.mhd.Spec support also needs the
+# external SPEC python wrapper from PrincetonUniversity/SPEC.
 SPEC = ["py_spec>=3.0.1", "pyoculus>=0.1.1", "h5py>=3.1.0"]
 MPI = ["mpi4py>=3.0.3"]
 VIS = ["vtk >= 8.1.2", "PyQt5", "plotly", "networkx"]
