@@ -28,6 +28,7 @@ from repo_bootstrap import bootstrap_local_simsopt, configure_entrypoint_jax_run
 configure_entrypoint_jax_runtime(sys.argv[1:])
 
 import jax
+import jax.numpy as jnp
 import jaxlib
 import numpy as np
 
@@ -56,6 +57,12 @@ from simsopt.geo.curveobjectives import (
     pairwise_min_distance_pure,
 )
 import simsopt.geo.surface as surface_module
+from simsopt.geo.surface_fourier_jax import (
+    build_phi_basis,
+    build_theta_basis,
+    stellsym_scatter_indices,
+    surface_gamma_from_dofs,
+)
 from simsopt.geo.surfaceobjectives import (
     BoozerResidual,
     Iotas,
@@ -67,6 +74,10 @@ from simsopt.geo.surfaceobjectives import (
 )
 from simsopt.objectives import QuadraticPenalty
 from simsopt.objectives.utilities import forward_backward
+from simsopt.jax_core.surface_rzfourier import (
+    surface_rz_fourier_gamma_from_dofs,
+    surface_rz_fourier_spec_from_dofs,
+)
 from hardware_constraints import (
     apply_hardware_constraint_verdict,
     sanitize_json_payload,
@@ -920,6 +931,28 @@ def _evaluate_single_stage_hardware_status(objectives, diagnostics):
     )
 
 
+_SINGLE_STAGE_WEIGHTED_REPORTING_FIELDS = (
+    "final_non_qs",
+    "final_boozer_residual",
+    "final_iota_penalty",
+    "final_length_penalty",
+    "final_curve_curve_penalty",
+    "final_curve_surface_penalty",
+    "final_surface_vessel_penalty",
+    "final_curvature_penalty",
+)
+
+
+def total_single_stage_objective_from_reporting_metrics(metrics):
+    """Reconstruct the weighted single-stage objective from reporting terms."""
+    return float(
+        sum(
+            float(metrics[field_name])
+            for field_name in _SINGLE_STAGE_WEIGHTED_REPORTING_FIELDS
+        )
+    )
+
+
 def uses_per_accept_target_lane_sync(sync_policy: str) -> bool:
     """Return whether the target lane should sync/log every accepted step."""
     return sync_policy == "per-accept"
@@ -1148,9 +1181,109 @@ def resolve_single_stage_warm_start_paths(run_dir):
     return surface_path, results_path
 
 
+@dataclass(frozen=True)
+class SerializedSurfaceState:
+    surface_class: str
+    dofs: np.ndarray
+    mpol: int
+    ntor: int
+    nfp: int
+    stellsym: bool
+    quadpoints_phi: np.ndarray
+    quadpoints_theta: np.ndarray
+
+
+def _decode_gson_array(value, *, field_name):
+    if not isinstance(value, dict):
+        raise ValueError(f"{field_name} is not a serialized array payload")
+    if value.get("@module") != "numpy" or value.get("@class") != "array":
+        raise ValueError(f"{field_name} is not a serialized numpy array")
+    return np.asarray(value["data"], dtype=np.dtype(value["dtype"]))
+
+
+def _resolve_simson_root_name(serialized_payload):
+    graph = serialized_payload.get("graph")
+    if isinstance(graph, dict) and graph.get("$type") == "ref":
+        return graph["value"]
+    if (
+        isinstance(graph, list)
+        and len(graph) == 1
+        and isinstance(graph[0], dict)
+        and graph[0].get("$type") == "ref"
+    ):
+        return graph[0]["value"]
+    raise ValueError("serialized surface payload is missing a single root reference")
+
+
+def load_serialized_surface_state(surface_path):
+    with open(surface_path, "r", encoding="utf-8") as infile:
+        serialized_payload = json.load(infile)
+    if serialized_payload.get("@class") != "SIMSON":
+        raise ValueError("surface payload is not a SIMSON serialization")
+
+    simsopt_objs = serialized_payload.get("simsopt_objs")
+    if not isinstance(simsopt_objs, dict):
+        raise ValueError("surface payload is missing simsopt_objs")
+
+    surface_name = _resolve_simson_root_name(serialized_payload)
+    surface_payload = simsopt_objs.get(surface_name)
+    if not isinstance(surface_payload, dict):
+        raise ValueError("surface payload root is missing")
+
+    surface_class = surface_payload.get("@class")
+    if surface_class not in {"SurfaceRZFourier", "SurfaceXYZTensorFourier"}:
+        raise ValueError(f"unsupported serialized surface class: {surface_class}")
+
+    dofs_ref = surface_payload.get("dofs")
+    if not isinstance(dofs_ref, dict) or dofs_ref.get("$type") != "ref":
+        raise ValueError("surface payload is missing DOF reference")
+    dofs_payload = simsopt_objs.get(dofs_ref["value"])
+    if not isinstance(dofs_payload, dict):
+        raise ValueError("surface DOF payload is missing")
+
+    return SerializedSurfaceState(
+        surface_class=surface_class,
+        dofs=_decode_gson_array(dofs_payload["x"], field_name="dofs.x"),
+        mpol=int(surface_payload["mpol"]),
+        ntor=int(surface_payload["ntor"]),
+        nfp=int(surface_payload["nfp"]),
+        stellsym=bool(surface_payload["stellsym"]),
+        quadpoints_phi=_decode_gson_array(
+            surface_payload["quadpoints_phi"],
+            field_name="quadpoints_phi",
+        ),
+        quadpoints_theta=_decode_gson_array(
+            surface_payload["quadpoints_theta"],
+            field_name="quadpoints_theta",
+        ),
+    )
+
+
+def _reconstruct_live_surface_from_serialized_state(surface):
+    surface_kwargs = {
+        "mpol": surface.mpol,
+        "ntor": surface.ntor,
+        "nfp": surface.nfp,
+        "stellsym": surface.stellsym,
+        "quadpoints_phi": surface.quadpoints_phi,
+        "quadpoints_theta": surface.quadpoints_theta,
+    }
+    if surface.surface_class == "SurfaceXYZTensorFourier":
+        live_surface = SurfaceXYZTensorFourier(**surface_kwargs)
+    elif surface.surface_class == "SurfaceRZFourier":
+        live_surface = SurfaceRZFourier(**surface_kwargs)
+    else:
+        raise ValueError(f"unsupported serialized surface class: {surface.surface_class}")
+    live_surface.set_dofs(np.asarray(surface.dofs, dtype=float))
+    return live_surface
+
+
 def load_single_stage_warm_start_state(run_dir):
     surface_path, results_path = resolve_single_stage_warm_start_paths(run_dir)
-    surface = load(surface_path)
+    try:
+        surface = load_serialized_surface_state(surface_path)
+    except (KeyError, TypeError, ValueError):
+        surface = load(surface_path)
     with open(results_path, "r", encoding="utf-8") as infile:
         results = json.load(infile)
     warm_start_iota = float(results["FINAL_IOTA"])
@@ -1166,6 +1299,165 @@ def load_single_stage_warm_start_state(run_dir):
     }
 
 
+def _surface_xyz_tensor_design_matrix(
+    *,
+    mpol,
+    ntor,
+    nfp,
+    stellsym,
+    quadpoints_phi,
+    quadpoints_theta,
+):
+    theta_basis, _ = build_theta_basis(quadpoints_theta, mpol)
+    phi_basis, _ = build_phi_basis(quadpoints_phi, ntor, nfp)
+    basis_values = phi_basis[:, None, None, :] * theta_basis[None, :, :, None]
+    basis_values = jnp.reshape(
+        basis_values,
+        (
+            phi_basis.shape[0],
+            theta_basis.shape[0],
+            (2 * mpol + 1) * (2 * ntor + 1),
+        ),
+    )
+
+    phi_angles = 2.0 * jnp.pi * quadpoints_phi
+    cos_phi = jnp.cos(phi_angles)[:, None, None]
+    sin_phi = jnp.sin(phi_angles)[:, None, None]
+    zeros = jnp.zeros_like(basis_values)
+
+    x_block = jnp.stack(
+        (
+            basis_values * cos_phi,
+            basis_values * sin_phi,
+            zeros,
+        ),
+        axis=2,
+    )
+    y_block = jnp.stack(
+        (
+            -basis_values * sin_phi,
+            basis_values * cos_phi,
+            zeros,
+        ),
+        axis=2,
+    )
+    z_block = jnp.stack(
+        (
+            zeros,
+            zeros,
+            basis_values,
+        ),
+        axis=2,
+    )
+    design_matrix = jnp.reshape(
+        jnp.concatenate((x_block, y_block, z_block), axis=3),
+        (-1, 3 * basis_values.shape[2]),
+    )
+    if not stellsym:
+        return design_matrix
+    return design_matrix[
+        :,
+        jnp.asarray(stellsym_scatter_indices(mpol, ntor), dtype=jnp.int32),
+    ]
+
+
+def _fit_surface_xyz_tensor_dofs_to_gamma(
+    target_gamma,
+    *,
+    mpol,
+    ntor,
+    nfp,
+    stellsym,
+    quadpoints_phi,
+    quadpoints_theta,
+):
+    quadpoints_phi_jax = jnp.asarray(quadpoints_phi, dtype=jnp.float64)
+    quadpoints_theta_jax = jnp.asarray(quadpoints_theta, dtype=jnp.float64)
+    target_gamma_jax = jnp.asarray(target_gamma, dtype=jnp.float64)
+    design_matrix = _surface_xyz_tensor_design_matrix(
+        mpol=mpol,
+        ntor=ntor,
+        nfp=nfp,
+        stellsym=stellsym,
+        quadpoints_phi=quadpoints_phi_jax,
+        quadpoints_theta=quadpoints_theta_jax,
+    )
+    fitted_dofs, _, rank, _ = jnp.linalg.lstsq(
+        design_matrix,
+        jnp.reshape(target_gamma_jax, (-1,)),
+        rcond=None,
+    )
+    fitted_dofs_host = np.asarray(jax.device_get(fitted_dofs), dtype=float)
+    design_rank = int(np.asarray(jax.device_get(rank)))
+    return fitted_dofs_host, design_rank == int(design_matrix.shape[1])
+
+
+def _project_serialized_surface_dofs_to_resolution(
+    surface,
+    *,
+    mpol,
+    ntor,
+    quadpoints_phi,
+    quadpoints_theta,
+):
+    target_mpol = max(1, int(mpol))
+    target_ntor = max(1, int(ntor))
+    quadpoints_phi_jax = jnp.asarray(quadpoints_phi, dtype=jnp.float64)
+    quadpoints_theta_jax = jnp.asarray(quadpoints_theta, dtype=jnp.float64)
+    source_dofs = jnp.asarray(surface.dofs, dtype=jnp.float64)
+
+    if surface.surface_class == "SurfaceXYZTensorFourier":
+        scatter_indices = None
+        if surface.stellsym:
+            scatter_indices = stellsym_scatter_indices(surface.mpol, surface.ntor)
+        target_gamma = surface_gamma_from_dofs(
+            source_dofs,
+            quadpoints_phi_jax,
+            quadpoints_theta_jax,
+            surface.mpol,
+            surface.ntor,
+            surface.nfp,
+            surface.stellsym,
+            scatter_indices=scatter_indices,
+        )
+    elif surface.surface_class == "SurfaceRZFourier":
+        source_spec = surface_rz_fourier_spec_from_dofs(
+            source_dofs,
+            quadpoints_phi=quadpoints_phi_jax,
+            quadpoints_theta=quadpoints_theta_jax,
+            mpol=surface.mpol,
+            ntor=surface.ntor,
+            nfp=surface.nfp,
+            stellsym=surface.stellsym,
+        )
+        target_gamma = surface_rz_fourier_gamma_from_dofs(source_spec, source_dofs)
+    else:
+        raise ValueError(f"unsupported serialized surface class: {surface.surface_class}")
+
+    projected_dofs, full_rank = _fit_surface_xyz_tensor_dofs_to_gamma(
+        target_gamma,
+        mpol=target_mpol,
+        ntor=target_ntor,
+        nfp=surface.nfp,
+        stellsym=surface.stellsym,
+        quadpoints_phi=quadpoints_phi_jax,
+        quadpoints_theta=quadpoints_theta_jax,
+    )
+    if full_rank:
+        return projected_dofs
+
+    # Rank-deficient fits admit many coefficient vectors for the same sampled
+    # geometry. Reuse the legacy host projector in that case to preserve the
+    # existing warm-start coefficient convention.
+    return project_surface_dofs_to_resolution(
+        _reconstruct_live_surface_from_serialized_state(surface),
+        mpol=target_mpol,
+        ntor=target_ntor,
+        quadpoints_phi=quadpoints_phi,
+        quadpoints_theta=quadpoints_theta,
+    )
+
+
 def project_surface_dofs_to_resolution(
     surface,
     *,
@@ -1174,7 +1466,16 @@ def project_surface_dofs_to_resolution(
     quadpoints_phi,
     quadpoints_theta,
 ):
-    """Reproject surface geometry onto the requested target resolution on host."""
+    """Reproject surface geometry onto the requested target resolution."""
+    if isinstance(surface, SerializedSurfaceState):
+        return _project_serialized_surface_dofs_to_resolution(
+            surface,
+            mpol=mpol,
+            ntor=ntor,
+            quadpoints_phi=quadpoints_phi,
+            quadpoints_theta=quadpoints_theta,
+        )
+
     projected_surface = SurfaceXYZTensorFourier(
         mpol=max(1, int(mpol)),
         ntor=max(1, int(ntor)),
@@ -2058,7 +2359,10 @@ def initialize_boozer_surface(
     emit_stage("after_boozer_surface_fit")
 
     if backend == "jax":
-        from simsopt.geo.boozersurface_jax import BoozerSurfaceJAX
+        from simsopt.geo.boozersurface_jax import (
+            BoozerSurfaceJAX,
+            build_boozer_surface_runtime_state,
+        )
 
         BoozerCls = BoozerSurfaceJAX
     else:
@@ -2090,14 +2394,25 @@ def initialize_boozer_surface(
             if newton_maxiter_override is not None:
                 options["newton_maxiter"] = int(newton_maxiter_override)
             options.update(build_jax_stage_options())
-        boozer_surface = BoozerCls(
-            bs,
-            surf,
-            vol,
-            vol_target,
-            constraint_weight,
-            options=options,
-        )
+        if backend == "jax":
+            boozer_surface = BoozerCls(
+                bs,
+                surf,
+                vol,
+                vol_target,
+                constraint_weight,
+                options=options,
+                surface_runtime_state=build_boozer_surface_runtime_state(surf),
+            )
+        else:
+            boozer_surface = BoozerCls(
+                bs,
+                surf,
+                vol,
+                vol_target,
+                constraint_weight,
+                options=options,
+            )
         emit_stage(
             "after_boozer_setup",
             boozer_type="ls",
@@ -2115,14 +2430,25 @@ def initialize_boozer_surface(
             dofs=surf.dofs,
         )
         vol = Volume(surf_exact)
-        boozer_surface = BoozerCls(
-            bs,
-            surf_exact,
-            vol,
-            vol_target,
-            None,
-            options=build_jax_stage_options(verbose=True),
-        )
+        if backend == "jax":
+            boozer_surface = BoozerCls(
+                bs,
+                surf_exact,
+                vol,
+                vol_target,
+                None,
+                options=build_jax_stage_options(verbose=True),
+                surface_runtime_state=build_boozer_surface_runtime_state(surf_exact),
+            )
+        else:
+            boozer_surface = BoozerCls(
+                bs,
+                surf_exact,
+                vol,
+                vol_target,
+                None,
+                options=build_jax_stage_options(verbose=True),
+            )
         emit_stage(
             "after_boozer_setup",
             boozer_type="exact",
@@ -2385,6 +2711,160 @@ def get_traceable_single_stage_runtime_diagnostic_builder():
     from simsopt.geo.surfaceobjectives_jax import diagnose_traceable_objective_runtime
 
     return diagnose_traceable_objective_runtime
+
+
+def build_single_stage_target_lane_accepted_step_sync(
+    boozer_surface,
+    bs,
+    iota_target,
+    *,
+    outer_objective_config,
+    success_filter,
+):
+    """Build the array-native accepted-step sync used on the target lane.
+
+    The returned callable refreshes ``run_dict`` from immutable coil/surface
+    state only. It intentionally does not touch ``boozer_surface.surface`` or
+    any other mutable host-only diagnostic graph state.
+    """
+    runtime_bundle = get_traceable_single_stage_runtime_bundle_builder()(
+        boozer_surface,
+        bs,
+        iota_target,
+        include_profile_suite=False,
+        include_host_wrappers=True,
+        outer_objective_config=outer_objective_config,
+        success_filter=success_filter,
+    )
+
+    def sync(run_dict, coil_dofs, *, benchmark_mode):
+        coil_dofs = _as_jax_float64(_single_stage_optimizer_dofs_array(coil_dofs))
+        solve_result = boozer_surface.run_code_traceable(
+            bs.coil_set_spec_from_dofs(coil_dofs),
+            _as_jax_float64(run_dict["sdofs"]),
+            _as_jax_float64(run_dict["iota"]),
+            _as_jax_float64(run_dict["G"]),
+        )
+        if not host_bool(solve_result["success"]):
+            raise RuntimeError(
+                "target-lane accepted-step replay failed while refreshing "
+                "single-stage array-native state."
+            )
+
+        reporting_metrics = dict(
+            runtime_bundle["host_reporting_metrics"](
+                coil_dofs,
+                include_distance_metrics=not benchmark_mode,
+            )
+        )
+        if benchmark_mode:
+            hardware_status = {
+                "success": None,
+                "violations": ["skipped_in_benchmark_mode"],
+            }
+        else:
+            hardware_status = evaluate_single_stage_hardware_constraints(
+                reporting_metrics["curve_curve_min_dist"],
+                CC_DIST,
+                reporting_metrics["curve_surface_min_dist"],
+                CS_DIST,
+                reporting_metrics["surface_vessel_min_dist"],
+                SS_DIST,
+                reporting_metrics["max_curvature"],
+                CURVATURE_THRESHOLD,
+            )
+        reporting_metrics["hardware_status"] = hardware_status
+        objective_value = total_single_stage_objective_from_reporting_metrics(
+            reporting_metrics
+        )
+        snapshot_accepted_step_state_from_values(
+            run_dict,
+            sdofs=solve_result["sdofs"],
+            iota=solve_result["iota"],
+            G=solve_result["G"],
+            objective_value=objective_value,
+            store_objective_grad=False,
+        )
+        run_dict["hardware_constraint_status"] = hardware_status
+        return {
+            "objective_value": objective_value,
+            "reporting_metrics": reporting_metrics,
+        }
+
+    return sync
+
+
+def log_single_stage_target_lane_accepted_step(
+    run_dict,
+    accepted_step_summary,
+    log_path,
+):
+    """Log the pure target-lane accepted-step summary without host diagnostics."""
+    reporting_metrics = accepted_step_summary["reporting_metrics"]
+    hardware_status = reporting_metrics["hardware_status"]
+    width = 35
+    buffer = io.StringIO()
+    print("=" * 70, file=buffer)
+    print(f"ITERATION {run_dict['it']}", file=buffer)
+    print(
+        f"{'Objective J':{width}} = {accepted_step_summary['objective_value']:.6e}",
+        file=buffer,
+    )
+    print(
+        f"{'Iotas (actual)':{width}} = {reporting_metrics['final_iota']:.4f}",
+        file=buffer,
+    )
+    print(
+        f"{'Volume':{width}} = {reporting_metrics['final_volume']:.4f}",
+        file=buffer,
+    )
+    print(
+        f"{'Curve Length':{width}} = {reporting_metrics['coil_length']:.6e}",
+        file=buffer,
+    )
+    print(
+        f"{'Max Curvature':{width}} = {reporting_metrics['max_curvature']:.6e}",
+        file=buffer,
+    )
+    if reporting_metrics["curve_curve_min_dist"] is not None:
+        print(
+            f"{'Curve-Curve Min Dist':{width}} = "
+            f"{reporting_metrics['curve_curve_min_dist']:.6e}",
+            file=buffer,
+        )
+        print(
+            f"{'Curve-Surface Min Dist':{width}} = "
+            f"{reporting_metrics['curve_surface_min_dist']:.6e}",
+            file=buffer,
+        )
+        print(
+            f"{'Surface-Vessel Min Dist':{width}} = "
+            f"{reporting_metrics['surface_vessel_min_dist']:.6e}",
+            file=buffer,
+        )
+    print(
+        f"{'Host-only diagnostics':{width}} = deferred to final postprocess",
+        file=buffer,
+    )
+    print(
+        f"{'Hardware Constraints OK':{width}} = {hardware_status['success']}",
+        file=buffer,
+    )
+    if hardware_status["violations"]:
+        print(
+            f"{'Hardware Violations':{width}} = {hardware_status['violations']}",
+            file=buffer,
+        )
+    print("=" * 70, file=buffer)
+
+    output_str = buffer.getvalue()
+    buffer.close()
+    logger.info("%s", output_str)
+
+    with open(log_path, "a") as f:
+        f.write(output_str + "\n")
+
+    run_dict["it"] += 1
 
 
 def _resolve_single_stage_banana_curve_index(bs, banana_curve):
@@ -4335,6 +4815,36 @@ def evaluate_candidate(
     )
 
 
+def snapshot_accepted_step_state_from_values(
+    run_dict,
+    *,
+    sdofs,
+    iota,
+    G,
+    objective_value=None,
+    objective_grad=None,
+    store_objective_grad=True,
+):
+    """Persist accepted-step state from explicit array/scalar values."""
+    run_dict["lscount"] = 0
+    run_dict["sdofs"] = host_array(sdofs, dtype=np.float64)
+    run_dict["iota"] = host_float(iota)
+    run_dict["G"] = host_float(G)
+    if objective_value is not None:
+        run_dict["J"] = host_float(objective_value)
+    if store_objective_grad:
+        if objective_value is None:
+            raise ValueError(
+                "objective_value is required when store_objective_grad=True"
+            )
+        if objective_grad is None:
+            raise ValueError(
+                "objective_grad is required when store_objective_grad=True"
+            )
+        run_dict["dJ"] = host_array(objective_grad)
+    return run_dict["J"], run_dict["dJ"]
+
+
 def snapshot_accepted_step_state(
     run_dict,
     boozer_surface,
@@ -4345,18 +4855,20 @@ def snapshot_accepted_step_state(
     store_objective_grad=True,
 ):
     """Persist the accepted-step solver/objective state into run_dict."""
-    run_dict["lscount"] = 0
-    run_dict["sdofs"] = boozer_surface.surface.x.copy()
-    run_dict["iota"] = host_float(boozer_surface.res["iota"])
-    run_dict["G"] = host_float(boozer_surface.res["G"])
     if store_objective_grad:
         if objective_value is None:
             objective_value = JF.J()
         if objective_grad is None:
             objective_grad = JF.dJ()
-        run_dict["J"] = host_float(objective_value)
-        run_dict["dJ"] = host_array(objective_grad)
-    return run_dict["J"], run_dict["dJ"]
+    return snapshot_accepted_step_state_from_values(
+        run_dict,
+        sdofs=boozer_surface.surface.x,
+        iota=boozer_surface.res["iota"],
+        G=boozer_surface.res["G"],
+        objective_value=objective_value,
+        objective_grad=objective_grad,
+        store_objective_grad=store_objective_grad,
+    )
 
 
 def accept_step(
@@ -4499,6 +5011,7 @@ class SingleStageAdapter:
         reevaluate_before_accept=False,
         apply_coil_dofs=None,
         benchmark_mode=False,
+        accepted_step_state_sync=None,
     ):
         self.run_dict = run_dict
         self.boozer_surface = boozer_surface
@@ -4509,6 +5022,7 @@ class SingleStageAdapter:
         self.log_path = log_path
         self.reevaluate_before_accept = bool(reevaluate_before_accept)
         self.benchmark_mode = bool(benchmark_mode)
+        self.accepted_step_state_sync = accepted_step_state_sync
         self.apply_coil_dofs = (
             apply_coil_dofs
             if apply_coil_dofs is not None
@@ -4552,6 +5066,20 @@ class SingleStageAdapter:
 
     def sync_accepted_step(self, x):
         """Refresh mutable state if needed, then snapshot one accepted step."""
+        if self.accepted_step_state_sync is not None:
+            accepted_step_summary = self.accepted_step_state_sync(
+                self.run_dict,
+                x,
+                benchmark_mode=self.benchmark_mode,
+            )
+            self.run_dict["x_prev"] = _single_stage_optimizer_dofs_array(x).copy()
+            if not self.benchmark_mode:
+                log_single_stage_target_lane_accepted_step(
+                    self.run_dict,
+                    accepted_step_summary,
+                    self.log_path,
+                )
+            return
         objective_value = None
         objective_grad = None
         if self.benchmark_mode:
@@ -5280,6 +5808,7 @@ if __name__ == "__main__":
         reevaluate_before_accept=use_target_lane,
         apply_coil_dofs=dof_setter,
         benchmark_mode=args.benchmark_mode,
+        accepted_step_state_sync=None,
     )
 
     # ==============================================================================
@@ -5373,6 +5902,36 @@ if __name__ == "__main__":
                     surf_dist_weight=SURF_DIST_WEIGHT,
                     curvature_threshold=CURVATURE_THRESHOLD,
                     curvature_weight=CURVATURE_WEIGHT,
+                )
+            if use_target_lane:
+                adapter.accepted_step_state_sync = (
+                    build_single_stage_target_lane_accepted_step_sync(
+                        boozer_surface,
+                        bs,
+                        iota_target,
+                        outer_objective_config=(
+                            build_target_lane_outer_objective_config(
+                                boozer_surface,
+                                bs,
+                                banana_curve,
+                                VV,
+                                non_qs_weight=1.0,
+                                residual_weight=RES_WEIGHT,
+                                iota_weight=IOTAS_WEIGHT,
+                                length_weight=LENGTH_WEIGHT,
+                                length_target=length_target,
+                                curve_curve_threshold=CC_DIST,
+                                curve_curve_weight=CC_WEIGHT,
+                                curve_surface_threshold=CS_DIST,
+                                curve_surface_weight=CS_WEIGHT,
+                                surface_vessel_threshold=SS_DIST,
+                                surface_vessel_weight=SURF_DIST_WEIGHT,
+                                curvature_threshold=CURVATURE_THRESHOLD,
+                                curvature_weight=CURVATURE_WEIGHT,
+                            )
+                        ),
+                        success_filter=target_lane_success_filter,
+                    )
                 )
             if use_target_lane:
                 _record_timing(
@@ -5810,18 +6369,6 @@ if __name__ == "__main__":
         if jax_compile_diagnostics_recorder is not None:
             jax_compile_diagnostics = jax_compile_diagnostics_recorder.summary()
 
-        # The target lane keeps the mutable graph synchronized through the
-        # accepted-step seam, so re-restoring the same accepted state here only
-        # dirties BoozerSurfaceJAX and forces an extra no-op solve during final
-        # diagnostics. The CPU/reference lane still needs the explicit restore.
-        if not skip_outer_optimizer and not use_target_lane:
-            restore_from_pytree(
-                JF,
-                boozer_surface,
-                run_dict,
-                coil_dofs=res.x,
-                apply_coil_dofs=dof_setter,
-            )
         if (not args.benchmark_mode) and should_force_strict_target_lane_final_sync(
             use_target_lane=use_target_lane,
             res_nit=res_nit,
@@ -5839,6 +6386,18 @@ if __name__ == "__main__":
                 "target_lane_final_sync_s",
                 target_lane_sync_start_s,
                 _perf_counter_s(),
+            )
+        if not skip_outer_optimizer:
+            # Optimization now keeps accepted state in ``run_dict`` on the
+            # target lane. Host-only diagnostics and artifact emission get one
+            # explicit handoff here instead of reading the live surface during
+            # the optimizer callback path.
+            restore_from_pytree(
+                JF,
+                boozer_surface,
+                run_dict,
+                coil_dofs=res.x,
+                apply_coil_dofs=dof_setter,
             )
 
         # ==============================================================================

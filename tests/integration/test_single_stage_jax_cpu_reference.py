@@ -4209,6 +4209,10 @@ class TestScriptBackendSelection:
         fake_bs = MagicMock()
         fake_bs.coils = []
         fake_surf = MagicMock()
+        fake_surf.mpol = 2
+        fake_surf.ntor = 2
+        fake_surf.nfp = 5
+        fake_surf.stellsym = True
         fake_surf.quadpoints_phi = np.linspace(0, 0.5, 5)
         fake_surf.quadpoints_theta = np.linspace(0, 1, 5)
         fake_surf.gamma.return_value = np.zeros((5, 5, 3))
@@ -6494,6 +6498,234 @@ class TestTraceableObjective:
                     err_msg=(
                         f"hardware_status[{status_name!r}] diverged between "
                         "target-lane and host reporting"
+                    ),
+                )
+            else:
+                assert target_value == host_value
+
+    def test_target_lane_accepted_step_sync_matches_legacy_mutable_surface_lane(
+        self,
+        boozer_setup,
+        monkeypatch,
+    ):
+        (_, _, _, _, bs_jax, _, booz_jax, _) = boozer_setup
+        assert booz_jax.res is not None and booz_jax.res.get("success", False)
+
+        cc_dist = 0.05
+        cs_dist = 0.02
+        ss_dist = 0.04
+        curvature_threshold = 40.0
+        monkeypatch.setattr(single_stage_example, "CC_DIST", cc_dist, raising=False)
+        monkeypatch.setattr(single_stage_example, "CS_DIST", cs_dist, raising=False)
+        monkeypatch.setattr(single_stage_example, "SS_DIST", ss_dist, raising=False)
+        monkeypatch.setattr(
+            single_stage_example,
+            "CURVATURE_THRESHOLD",
+            curvature_threshold,
+            raising=False,
+        )
+
+        warmstart_sdofs = np.asarray(booz_jax.surface.x.copy(), dtype=float)
+        warmstart_iota = float(booz_jax.res["iota"])
+        warmstart_G = float(booz_jax.res["G"])
+        iota_target = warmstart_iota
+
+        banana_curve = bs_jax.coils[0].curve
+        curves = [coil.curve for coil in bs_jax.coils]
+        length_target = single_stage_example.host_float(
+            single_stage_example.CurveLength(banana_curve).J()
+        )
+        vessel_surface = single_stage_example.SurfaceRZFourier(
+            nfp=booz_jax.nfp,
+            stellsym=booz_jax.stellsym,
+            mpol=1,
+            ntor=0,
+            quadpoints_phi=booz_jax.surface.quadpoints_phi,
+            quadpoints_theta=booz_jax.surface.quadpoints_theta,
+        )
+        vessel_surface.set_rc(0, 0, 1.2)
+        vessel_surface.set_rc(1, 0, 0.15)
+        vessel_surface.set_zs(1, 0, 0.15)
+
+        config = single_stage_example.build_traceable_single_stage_outer_objective_config(
+            booz_jax,
+            bs_jax,
+            banana_curve,
+            vessel_surface,
+            non_qs_weight=1.0,
+            residual_weight=1000.0,
+            iota_weight=100.0,
+            length_weight=5.0e-4,
+            length_target=length_target,
+            curve_curve_weight=100.0,
+            curve_curve_threshold=cc_dist,
+            curve_surface_weight=1.0,
+            curve_surface_threshold=cs_dist,
+            surface_vessel_weight=1000.0,
+            surface_vessel_threshold=ss_dist,
+            curvature_weight=0.1,
+            curvature_threshold=curvature_threshold,
+        )
+        sync_accepted_step = (
+            single_stage_example.build_single_stage_target_lane_accepted_step_sync(
+                booz_jax,
+                bs_jax,
+                iota_target,
+                outer_objective_config=config,
+                success_filter=None,
+            )
+        )
+
+        coil_dofs = np.asarray(
+            jax.device_get(
+                single_stage_example.build_target_lane_profile_coil_dofs(
+                    bs_jax.x.copy()
+                )
+            ),
+            dtype=float,
+        )
+        run_dict = {
+            "sdofs": warmstart_sdofs.copy(),
+            "iota": warmstart_iota,
+            "G": warmstart_G,
+            "J": 0.0,
+            "dJ": np.zeros_like(coil_dofs),
+            "lscount": 3,
+            "it": 1,
+        }
+        summary = sync_accepted_step(run_dict, coil_dofs, benchmark_mode=False)
+
+        bs_jax.x = coil_dofs
+        booz_jax.run_code(warmstart_iota, warmstart_G, sdofs=warmstart_sdofs)
+        assert booz_jax.res is not None and booz_jax.res.get("success", False)
+
+        _, IotasJAX, NonQuasiSymmetricRatioJAX = (
+            single_stage_example.get_jax_surface_objective_classes()
+        )
+        iota = single_stage_example.build_iota_objective(booz_jax, IotasJAX)
+        j_non_qs = NonQuasiSymmetricRatioJAX(booz_jax, bs_jax)
+        j_boozer = single_stage_example.build_boozer_residual_objective(
+            booz_jax,
+            bs_jax,
+            single_stage_example.select_boozer_residual_class(
+                use_jax=True,
+                boozer_kind="ls",
+            ),
+        )
+        j_curve_length = QuadraticPenalty(
+            single_stage_example.CurveLength(banana_curve),
+            length_target,
+            "max",
+        )
+        j_curve_curve = single_stage_example.CurveCurveDistance(curves, cc_dist)
+        j_curve_surface = single_stage_example.CurveSurfaceDistance(
+            curves,
+            booz_jax.surface,
+            cs_dist,
+        )
+        j_surface_surface = single_stage_example.SurfaceSurfaceDistance(
+            booz_jax.surface,
+            vessel_surface,
+            ss_dist,
+        )
+        j_curvature = single_stage_example.LpCurveCurvature(
+            banana_curve,
+            2,
+            curvature_threshold,
+        )
+        curvelength = single_stage_example.CurveLength(banana_curve)
+        host_metrics = single_stage_example.resolve_single_stage_final_penalty_metrics(
+            use_target_lane=False,
+            benchmark_mode=False,
+            skip_outer_optimizer=False,
+            boozer_surface=booz_jax,
+            bs=bs_jax,
+            iota_target=iota_target,
+            coil_dofs=coil_dofs,
+            outer_objective_config=None,
+            success_filter=None,
+            curvelength=curvelength,
+            j_non_qs=j_non_qs,
+            j_boozer_residual=j_boozer,
+            j_iota=QuadraticPenalty(iota, iota_target),
+            j_curve_length=j_curve_length,
+            j_curve_curve=j_curve_curve,
+            j_curve_surface=j_curve_surface,
+            j_surface_surface=j_surface_surface,
+            j_curvature=j_curvature,
+            cc_dist=cc_dist,
+            cs_dist=cs_dist,
+            ss_dist=ss_dist,
+            curvature_threshold=curvature_threshold,
+        )
+
+        np.testing.assert_allclose(
+            run_dict["sdofs"],
+            np.asarray(booz_jax.surface.x.copy(), dtype=float),
+            rtol=1e-10,
+            atol=1e-12,
+        )
+        np.testing.assert_allclose(
+            run_dict["iota"],
+            float(booz_jax.res["iota"]),
+            rtol=1e-10,
+            atol=1e-12,
+        )
+        np.testing.assert_allclose(
+            run_dict["G"],
+            float(booz_jax.res["G"]),
+            rtol=0.0,
+            atol=1e-12,
+        )
+        np.testing.assert_allclose(
+            summary["reporting_metrics"]["final_volume"],
+            booz_jax.surface.volume(),
+            rtol=1e-10,
+            atol=1e-12,
+        )
+
+        metric_names = (
+            "final_G",
+            "final_non_qs",
+            "final_boozer_residual",
+            "final_iota_penalty",
+            "final_length_penalty",
+            "final_curve_curve_penalty",
+            "final_curve_surface_penalty",
+            "final_surface_vessel_penalty",
+            "final_curvature_penalty",
+            "coil_length",
+            "max_curvature",
+            "curve_curve_min_dist",
+            "curve_surface_min_dist",
+            "surface_vessel_min_dist",
+        )
+        for metric_name in metric_names:
+            np.testing.assert_allclose(
+                summary["reporting_metrics"][metric_name],
+                host_metrics[metric_name],
+                rtol=0.0 if metric_name == "final_G" else 1e-10,
+                atol=1e-12,
+                err_msg=(
+                    f"{metric_name} diverged between array-native accepted-step "
+                    "sync and the legacy mutable-surface lane"
+                ),
+            )
+        target_hardware_status = summary["reporting_metrics"]["hardware_status"]
+        host_hardware_status = host_metrics["hardware_status"]
+        assert target_hardware_status.keys() == host_hardware_status.keys()
+        for status_name, target_value in target_hardware_status.items():
+            host_value = host_hardware_status[status_name]
+            if isinstance(target_value, (float, np.floating)):
+                np.testing.assert_allclose(
+                    target_value,
+                    host_value,
+                    rtol=1e-10,
+                    atol=1e-12,
+                    err_msg=(
+                        f"hardware_status[{status_name!r}] diverged between "
+                        "array-native accepted-step sync and the legacy "
+                        "mutable-surface lane"
                     ),
                 )
             else:

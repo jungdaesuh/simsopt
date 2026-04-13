@@ -277,6 +277,7 @@ class SingleStageExampleTests(unittest.TestCase):
                 targetlabel,
                 constraint_weight,
                 options=None,
+                surface_runtime_state=None,
             ):
                 self.bs = bs
                 self.surface = surface
@@ -284,6 +285,7 @@ class SingleStageExampleTests(unittest.TestCase):
                 self.targetlabel = targetlabel
                 self.constraint_weight = constraint_weight
                 self.options = options or {}
+                self.surface_runtime_state = surface_runtime_state
                 self.res = {
                     "success": True,
                     "iter": 1,
@@ -304,6 +306,16 @@ class SingleStageExampleTests(unittest.TestCase):
     def patch_initialize_boozer_surface_jax(self, module, fake_boozer_surface_jax):
         fake_jax_module = types.ModuleType("simsopt.geo.boozersurface_jax")
         fake_jax_module.BoozerSurfaceJAX = fake_boozer_surface_jax
+        fake_jax_module.build_boozer_surface_runtime_state = (
+            lambda surface: {
+                "mpol": surface.mpol,
+                "ntor": surface.ntor,
+                "nfp": surface.nfp,
+                "stellsym": surface.stellsym,
+                "quadpoints_phi": np.asarray(surface.quadpoints_phi).copy(),
+                "quadpoints_theta": np.asarray(surface.quadpoints_theta).copy(),
+            }
+        )
         with patch.object(
             module, "SurfaceXYZTensorFourier", FakeSurfaceXYZTensorFourier
         ), patch.object(module, "Volume", FakeVolume), patch.object(
@@ -457,6 +469,12 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertEqual(boozer_surface.options["verbose"], True)
         self.assertEqual(boozer_surface.options["optimizer_backend"], "ondevice")
         self.assertIs(boozer_surface.surface, FakeSurfaceXYZTensorFourier.instances[0])
+        self.assertEqual(boozer_surface.surface_runtime_state["mpol"], TEST_MPOL)
+        self.assertEqual(boozer_surface.surface_runtime_state["ntor"], TEST_NTOR)
+        np.testing.assert_allclose(
+            boozer_surface.surface_runtime_state["quadpoints_phi"],
+            FakeSurfaceXYZTensorFourier.instances[0].quadpoints_phi,
+        )
 
     def test_initialize_boozer_surface_cpu_warm_start_does_not_pass_sdofs(self):
         module = self.load_module()
@@ -708,8 +726,9 @@ class SingleStageExampleTests(unittest.TestCase):
                 targetlabel,
                 constraint_weight,
                 options=None,
+                surface_runtime_state=None,
             ):
-                del bs, label, targetlabel, constraint_weight
+                del bs, label, targetlabel, constraint_weight, surface_runtime_state
                 self.surface = surface
                 self.options = options or {}
                 self.res = {
@@ -788,8 +807,9 @@ class SingleStageExampleTests(unittest.TestCase):
                 targetlabel,
                 constraint_weight,
                 options=None,
+                surface_runtime_state=None,
             ):
-                del bs, label, targetlabel, constraint_weight
+                del bs, label, targetlabel, constraint_weight, surface_runtime_state
                 self.surface = surface
                 self.options = options or {}
                 self.res = {
@@ -853,8 +873,9 @@ class SingleStageExampleTests(unittest.TestCase):
                 targetlabel,
                 constraint_weight,
                 options=None,
+                surface_runtime_state=None,
             ):
-                del bs, label, targetlabel, constraint_weight
+                del bs, label, targetlabel, constraint_weight, surface_runtime_state
                 self.surface = surface
                 self.options = options or {}
                 self.res = {
@@ -1526,6 +1547,41 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertTrue(warm_start["surface_path"].endswith("surf_opt.json"))
         self.assertTrue(warm_start["results_path"].endswith("results.json"))
 
+    def test_load_single_stage_warm_start_state_reads_serialized_surface_payload(self):
+        module = self.load_module()
+        surface = module.SurfaceXYZTensorFourier(
+            mpol=2,
+            ntor=1,
+            nfp=5,
+            stellsym=True,
+            quadpoints_phi=np.linspace(0.0, 0.2, 4, endpoint=False),
+            quadpoints_theta=np.linspace(0.0, 1.0, 5, endpoint=False),
+        )
+        surface_dofs = surface.get_dofs().copy()
+        surface_dofs[:] = np.linspace(0.01, 0.01 * surface_dofs.size, surface_dofs.size)
+        surface.set_dofs(surface_dofs)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            run_dir = Path(tmpdir)
+            surface.save(run_dir / "surf_opt.json")
+            (run_dir / "results.json").write_text(
+                json.dumps({"FINAL_IOTA": 0.123, "FINAL_G": 4.5}),
+                encoding="utf-8",
+            )
+
+            with patch.object(
+                module,
+                "load",
+                side_effect=AssertionError("serialized warm start should not call load()"),
+            ):
+                warm_start = module.load_single_stage_warm_start_state(str(run_dir))
+
+        self.assertIsInstance(warm_start["surface"], module.SerializedSurfaceState)
+        self.assertEqual(warm_start["surface"].surface_class, "SurfaceXYZTensorFourier")
+        np.testing.assert_allclose(warm_start["surface"].dofs, surface_dofs)
+        self.assertEqual(warm_start["iota"], 0.123)
+        self.assertEqual(warm_start["G"], 4.5)
+
     def test_project_single_stage_warm_start_surface_dofs_delegates_to_resolution_projector(
         self,
     ):
@@ -1676,6 +1732,104 @@ class SingleStageExampleTests(unittest.TestCase):
             evaluation_surface.gamma(),
         )
         np.testing.assert_allclose(projected_dofs, np.array([1.0]))
+
+    def test_project_surface_dofs_to_resolution_matches_host_for_serialized_xyz_surface(
+        self,
+    ):
+        module = self.load_module()
+        source_surface = module.SurfaceXYZTensorFourier(
+            mpol=2,
+            ntor=2,
+            nfp=5,
+            stellsym=True,
+            quadpoints_phi=np.linspace(0.0, 0.2, 7, endpoint=False),
+            quadpoints_theta=np.linspace(0.0, 1.0, 9, endpoint=False),
+        )
+        source_dofs = source_surface.get_dofs().copy()
+        source_dofs[:] = np.linspace(
+            0.02,
+            0.02 * source_dofs.size,
+            source_dofs.size,
+        )
+        source_surface.set_dofs(source_dofs)
+        quadpoints_phi = np.linspace(0.0, 0.2, 11, endpoint=False)
+        quadpoints_theta = np.linspace(0.0, 1.0, 13, endpoint=False)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            surface_path = Path(tmpdir) / "surf_opt.json"
+            source_surface.save(surface_path)
+            serialized_surface = module.load_serialized_surface_state(surface_path)
+
+        host_projected_dofs = module.project_surface_dofs_to_resolution(
+            source_surface,
+            mpol=4,
+            ntor=3,
+            quadpoints_phi=quadpoints_phi,
+            quadpoints_theta=quadpoints_theta,
+        )
+        serialized_projected_dofs = module.project_surface_dofs_to_resolution(
+            serialized_surface,
+            mpol=4,
+            ntor=3,
+            quadpoints_phi=quadpoints_phi,
+            quadpoints_theta=quadpoints_theta,
+        )
+
+        np.testing.assert_allclose(
+            serialized_projected_dofs,
+            host_projected_dofs,
+            rtol=1e-10,
+            atol=1e-12,
+        )
+
+    def test_project_surface_dofs_to_resolution_matches_host_for_rank_deficient_serialized_xyz_surface(
+        self,
+    ):
+        module = self.load_module()
+        source_surface = module.SurfaceXYZTensorFourier(
+            mpol=2,
+            ntor=2,
+            nfp=5,
+            stellsym=False,
+            quadpoints_phi=np.linspace(0.0, 1.0, 7, endpoint=False),
+            quadpoints_theta=np.linspace(0.0, 1.0, 9, endpoint=False),
+        )
+        source_dofs = source_surface.get_dofs().copy()
+        source_dofs[:] = np.linspace(
+            0.02,
+            0.02 * source_dofs.size,
+            source_dofs.size,
+        )
+        source_surface.set_dofs(source_dofs)
+        quadpoints_phi = np.linspace(0.0, 1.0, 5, endpoint=False)
+        quadpoints_theta = np.linspace(0.0, 1.0, 7, endpoint=False)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            surface_path = Path(tmpdir) / "surf_opt.json"
+            source_surface.save(surface_path)
+            serialized_surface = module.load_serialized_surface_state(surface_path)
+
+        host_projected_dofs = module.project_surface_dofs_to_resolution(
+            source_surface,
+            mpol=1,
+            ntor=1,
+            quadpoints_phi=quadpoints_phi,
+            quadpoints_theta=quadpoints_theta,
+        )
+        serialized_projected_dofs = module.project_surface_dofs_to_resolution(
+            serialized_surface,
+            mpol=1,
+            ntor=1,
+            quadpoints_phi=quadpoints_phi,
+            quadpoints_theta=quadpoints_theta,
+        )
+
+        np.testing.assert_allclose(
+            serialized_projected_dofs,
+            host_projected_dofs,
+            rtol=1e-10,
+            atol=1e-12,
+        )
 
     def test_target_lane_hardware_success_filter_keeps_closure_constants_on_host(self):
         module = self.load_module()
@@ -3875,6 +4029,96 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertEqual(captured["eval_diagnostics"], {"iota": "diag"})
         np.testing.assert_allclose(jf.x, np.array([1.0, 2.0]))
 
+    def test_single_stage_adapter_sync_accepted_step_prefers_array_native_target_lane_sync(
+        self,
+    ):
+        module = self.load_module()
+
+        class _JF:
+            def __init__(self):
+                self._x = np.array([1.0, 2.0])
+
+            @property
+            def x(self):
+                return self._x
+
+            @x.setter
+            def x(self, value):
+                self._x = np.asarray(value)
+
+        jf = _JF()
+        run_dict = {"x_prev": np.zeros(2), "lscount": 4, "it": 3}
+        captured = {"setter": []}
+
+        def fake_setter(value):
+            captured["setter"].append(np.asarray(value))
+
+        def fake_sync(state, x, *, benchmark_mode):
+            captured["sync"] = {
+                "state": state,
+                "x": np.asarray(x),
+                "benchmark_mode": benchmark_mode,
+            }
+            state["sdofs"] = np.array([9.0, -2.0])
+            state["iota"] = 0.21
+            state["G"] = 1.8
+            return {
+                "objective_value": 1.25,
+                "reporting_metrics": {
+                    "final_iota": 0.21,
+                    "final_volume": 0.75,
+                    "coil_length": 2.0,
+                    "max_curvature": 3.0,
+                    "curve_curve_min_dist": 0.11,
+                    "curve_surface_min_dist": 0.12,
+                    "surface_vessel_min_dist": 0.13,
+                    "hardware_status": {
+                        "success": True,
+                        "violations": [],
+                    },
+                },
+            }
+
+        adapter = module.SingleStageAdapter(
+            run_dict=run_dict,
+            boozer_surface="booz",
+            JF=jf,
+            bs="bs",
+            objectives={"qs": "obj"},
+            diagnostics={"iota": "diag"},
+            log_path="/tmp/log.txt",
+            reevaluate_before_accept=True,
+            apply_coil_dofs=fake_setter,
+            accepted_step_state_sync=fake_sync,
+        )
+
+        with patch.object(
+            module,
+            "log_single_stage_target_lane_accepted_step",
+            return_value=None,
+        ) as log_summary, patch.object(
+            module,
+            "_evaluate_candidate_impl",
+            side_effect=AssertionError(
+                "array-native target-lane sync should not reevaluate the mutable graph"
+            ),
+        ), patch.object(
+            module,
+            "accept_step",
+            side_effect=AssertionError(
+                "array-native target-lane sync should not call accept_step"
+            ),
+        ):
+            adapter.sync_accepted_step(np.array([3.0, -4.0]))
+
+        self.assertIs(captured["sync"]["state"], run_dict)
+        np.testing.assert_allclose(captured["sync"]["x"], np.array([3.0, -4.0]))
+        self.assertFalse(captured["sync"]["benchmark_mode"])
+        log_summary.assert_called_once()
+        np.testing.assert_allclose(run_dict["x_prev"], np.array([3.0, -4.0]))
+        self.assertEqual(captured["setter"], [])
+        np.testing.assert_allclose(jf.x, np.array([1.0, 2.0]))
+
     def test_single_stage_adapter_sync_accepted_step_uses_benchmark_snapshot_path(
         self,
     ):
@@ -4152,6 +4396,32 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertEqual(run_dict["iota"], 0.125)
         self.assertEqual(run_dict["G"], 1.75)
         self.assertEqual(objective_value, 2.5)
+        np.testing.assert_allclose(objective_grad, np.array([3.0, -4.0]))
+
+    def test_snapshot_accepted_step_state_from_values_can_refresh_objective_only(self):
+        module = self.load_module()
+        run_dict = {
+            "lscount": 5,
+            "J": 2.5,
+            "dJ": np.array([3.0, -4.0]),
+        }
+
+        objective_value, objective_grad = (
+            module.snapshot_accepted_step_state_from_values(
+                run_dict,
+                sdofs=np.array([1.0, 2.0]),
+                iota=np.float64(0.125),
+                G=np.float64(1.75),
+                objective_value=7.5,
+                store_objective_grad=False,
+            )
+        )
+
+        self.assertEqual(run_dict["lscount"], 0)
+        np.testing.assert_allclose(run_dict["sdofs"], np.array([1.0, 2.0]))
+        self.assertEqual(run_dict["iota"], 0.125)
+        self.assertEqual(run_dict["G"], 1.75)
+        self.assertEqual(objective_value, 7.5)
         np.testing.assert_allclose(objective_grad, np.array([3.0, -4.0]))
 
     def test_evaluate_surface_self_intersection_skips_when_backend_unavailable(self):
