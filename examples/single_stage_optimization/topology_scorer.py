@@ -10,15 +10,6 @@ computation so that metrics cannot drift between callback and validation.
 """
 
 import numpy as np
-from simsopt.field import compute_fieldlines
-from simsopt.field import (
-    LevelsetStoppingCriterion,
-    MaxZStoppingCriterion,
-    MinZStoppingCriterion,
-    MaxRStoppingCriterion,
-    MinRStoppingCriterion,
-)
-from simsopt.geo import SurfaceClassifier
 
 
 # ---------------------------------------------------------------------------
@@ -97,6 +88,7 @@ def _full_torus_surface(surface):
     all phi values.
     """
     from simsopt.geo import SurfaceXYZTensorFourier
+
     if not isinstance(surface, SurfaceXYZTensorFourier):
         return surface  # only XYZTensorFourier needs the fix
     nphi_input = len(surface.quadpoints_phi)
@@ -124,6 +116,15 @@ def build_stopping_criteria(surface, include_surface_exit=True, box_padding=0.05
     Returns (criteria_list, stop_labels) matching the convention used by
     both the topology gate and the strict Poincare validator.
     """
+    from simsopt.field import (
+        LevelsetStoppingCriterion,
+        MaxRStoppingCriterion,
+        MaxZStoppingCriterion,
+        MinRStoppingCriterion,
+        MinZStoppingCriterion,
+    )
+    from simsopt.geo import SurfaceClassifier
+
     gamma = surface.gamma()
     rr = np.sqrt(gamma[:, :, 0]**2 + gamma[:, :, 1]**2)
     zz = gamma[:, :, 2]
@@ -317,6 +318,8 @@ def score_topology(
     Returns a dict with survival_fraction, mean_exit_time, stop_reason_counts,
     and per-line metrics.
     """
+    from simsopt.field import compute_fieldlines
+
     nfp = surface.nfp
     phis = [(i / nphis) * (2 * np.pi / nfp) for i in range(nphis)]
 
