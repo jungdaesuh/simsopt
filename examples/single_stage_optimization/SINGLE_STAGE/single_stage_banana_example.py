@@ -1,4 +1,5 @@
 import argparse
+import copy
 from contextlib import contextmanager
 from dataclasses import dataclass, fields as dataclass_fields, is_dataclass
 from functools import lru_cache
@@ -113,6 +114,9 @@ _TARGET_LANE_BOOZER_BFGS_TOL_BENCHMARK_DEFAULT = 1e-6
 _TARGET_LANE_BOOZER_BFGS_MAXITER_BENCHMARK_DEFAULT = 64
 _SINGLE_STAGE_RESULTS_SCHEMA_VERSION = 1
 _JAX_COMPILE_DIAGNOSTICS_SAMPLE_LIMIT = 25
+_SINGLE_STAGE_SEARCH_POLICY_PRESERVE_FIRST = "preserve_first"
+_SINGLE_STAGE_SEARCH_POLICY_REPAIR_FIRST = "repair_first"
+_SINGLE_STAGE_SEARCH_POLICY_GLOBAL_SEARCH = "global_search"
 _TIMED_STAGE_LABELS = frozenset(
     {
         "after_boozer_surface_fit",
@@ -149,6 +153,17 @@ DEFAULT_STAGE2_SEEDS_BY_PLASMA = {
         "order": 2,
     },
 }
+
+
+@dataclass(frozen=True)
+class SingleStageSearchPolicy:
+    donor_class: str
+    search_policy: str
+    adaptive_failure_penalty_weight: float
+    auto_initial_step_scale: float | None = None
+    auto_initial_step_maxiter: int | None = None
+    invalid_step_retry_budget: int = 0
+    retry_step_shrink_factor: float = 0.5
 
 maybe_initialize_distributed_jax()
 
@@ -543,11 +558,26 @@ def build_single_stage_problem_contract(
     target_lane_boozer_bfgs_maxiter_record,
     target_lane_boozer_newton_tol_record,
     target_lane_boozer_newton_maxiter_record,
-    args,
-    MAXITER,
-    write_restart_artifacts,
-    write_full_artifacts,
+    single_stage_search_policy=None,
+    effective_initial_phase_settings=None,
+    args=None,
+    MAXITER=None,
+    write_restart_artifacts=False,
+    write_full_artifacts=False,
 ):
+    if args is None:
+        raise ValueError(
+            "args is required for build_single_stage_problem_contract — "
+            "the runtime_contract section requires argparse fields"
+        )
+    single_stage_search_policy, effective_initial_phase_settings = (
+        resolve_single_stage_contract_policy_context(
+            warm_start_state=warm_start_state,
+            single_stage_search_policy=single_stage_search_policy,
+            effective_initial_phase_settings=effective_initial_phase_settings,
+            args=args,
+        )
+    )
     return {
         "workflow": "single-stage-banana-optimization",
         "equilibrium": {
@@ -583,6 +613,8 @@ def build_single_stage_problem_contract(
             "results_path": None
             if warm_start_state is None
             else warm_start_state["results_path"],
+            "donor_class": single_stage_search_policy.donor_class,
+            "search_policy": single_stage_search_policy.search_policy,
         },
         "objective_weights": {
             "constraint": float(CONSTRAINT_WEIGHT),
@@ -616,8 +648,24 @@ def build_single_stage_problem_contract(
             "maxcor": int(args.maxcor),
             "outer_maxls": int(args.outer_maxls),
             "target_lane_outer_initial_step_size": args.target_lane_outer_initial_step_size,
-            "initial_step_scale": float(args.initial_step_scale),
-            "initial_step_maxiter": int(args.initial_step_maxiter),
+            "initial_step_scale": float(
+                effective_initial_phase_settings["initial_step_scale"]
+            ),
+            "initial_step_maxiter": int(
+                effective_initial_phase_settings["initial_step_maxiter"]
+            ),
+            "initial_step_auto_enabled": bool(
+                effective_initial_phase_settings["auto_enabled"]
+            ),
+            "adaptive_failure_penalty_weight": float(
+                single_stage_search_policy.adaptive_failure_penalty_weight
+            ),
+            "invalid_step_retry_budget": int(
+                single_stage_search_policy.invalid_step_retry_budget
+            ),
+            "retry_step_shrink_factor": float(
+                single_stage_search_policy.retry_step_shrink_factor
+            ),
             "target_lane_boozer_bfgs_tol": target_lane_boozer_bfgs_tol_record,
             "target_lane_boozer_bfgs_maxiter": target_lane_boozer_bfgs_maxiter_record,
             "target_lane_boozer_newton_tol": target_lane_boozer_newton_tol_record,
@@ -688,10 +736,12 @@ def build_single_stage_results_envelope(
     target_lane_boozer_bfgs_maxiter_record,
     target_lane_boozer_newton_tol_record,
     target_lane_boozer_newton_maxiter_record,
-    args,
-    MAXITER,
-    write_restart_artifacts,
-    write_full_artifacts,
+    single_stage_search_policy=None,
+    effective_initial_phase_settings=None,
+    args=None,
+    MAXITER=None,
+    write_restart_artifacts=False,
+    write_full_artifacts=False,
 ):
     required_files = ["results.json"]
     planned_files = ["results.json"]
@@ -765,6 +815,8 @@ def build_single_stage_results_envelope(
             target_lane_boozer_bfgs_maxiter_record=target_lane_boozer_bfgs_maxiter_record,
             target_lane_boozer_newton_tol_record=target_lane_boozer_newton_tol_record,
             target_lane_boozer_newton_maxiter_record=target_lane_boozer_newton_maxiter_record,
+            single_stage_search_policy=single_stage_search_policy,
+            effective_initial_phase_settings=effective_initial_phase_settings,
             args=args,
             MAXITER=MAXITER,
             write_restart_artifacts=write_restart_artifacts,
@@ -1537,6 +1589,250 @@ def load_single_stage_warm_start_state(run_dir):
         "surface_path": surface_path,
         "results_path": results_path,
     }
+
+
+def classify_single_stage_donor(
+    warm_start_state,
+    *,
+    explicit_surface_warm_start,
+):
+    """Classify the startup donor quality for continuation policy selection."""
+    if warm_start_state is None:
+        return "stage2_seed_only"
+    surface = warm_start_state["surface"]
+    if isinstance(surface, SerializedSurfaceState):
+        return "serialized_surface_state"
+    if explicit_surface_warm_start and isinstance(
+        surface, (SurfaceRZFourier, SurfaceXYZTensorFourier)
+    ):
+        return "live_supported_surface"
+    if explicit_surface_warm_start:
+        return "projected_supported_surface"
+    return "legacy_surface_object"
+
+
+def resolve_single_stage_search_policy(
+    warm_start_state,
+    *,
+    explicit_surface_warm_start,
+):
+    """Resolve donor-aware continuation policy for the outer single-stage loop."""
+    donor_class = classify_single_stage_donor(
+        warm_start_state,
+        explicit_surface_warm_start=explicit_surface_warm_start,
+    )
+    if donor_class == "serialized_surface_state":
+        return SingleStageSearchPolicy(
+            donor_class=donor_class,
+            search_policy=_SINGLE_STAGE_SEARCH_POLICY_PRESERVE_FIRST,
+            adaptive_failure_penalty_weight=1.0,
+            invalid_step_retry_budget=2,
+            retry_step_shrink_factor=0.35,
+        )
+    if donor_class in {"stage2_seed_only", "live_supported_surface"}:
+        return SingleStageSearchPolicy(
+            donor_class=donor_class,
+            search_policy=_SINGLE_STAGE_SEARCH_POLICY_REPAIR_FIRST,
+            adaptive_failure_penalty_weight=1.5,
+            auto_initial_step_scale=0.25,
+            auto_initial_step_maxiter=3,
+            invalid_step_retry_budget=2,
+            retry_step_shrink_factor=0.5,
+        )
+    return SingleStageSearchPolicy(
+        donor_class=donor_class,
+        search_policy=_SINGLE_STAGE_SEARCH_POLICY_GLOBAL_SEARCH,
+        adaptive_failure_penalty_weight=2.0,
+        auto_initial_step_scale=0.1,
+        auto_initial_step_maxiter=5,
+        invalid_step_retry_budget=0,
+        retry_step_shrink_factor=0.5,
+    )
+
+
+def resolve_single_stage_policy_initial_phase_settings(
+    search_policy,
+    *,
+    initial_step_scale,
+    initial_step_maxiter,
+):
+    """Auto-enable a conservative scaled phase only when the caller left defaults."""
+    if initial_step_maxiter > 0 or initial_step_scale < 1.0:
+        return {
+            "initial_step_scale": float(initial_step_scale),
+            "initial_step_maxiter": int(initial_step_maxiter),
+            "auto_enabled": False,
+        }
+    if search_policy.auto_initial_step_scale is None:
+        return {
+            "initial_step_scale": float(initial_step_scale),
+            "initial_step_maxiter": int(initial_step_maxiter),
+            "auto_enabled": False,
+        }
+    return {
+        "initial_step_scale": float(search_policy.auto_initial_step_scale),
+        "initial_step_maxiter": int(search_policy.auto_initial_step_maxiter),
+        "auto_enabled": True,
+    }
+
+
+def snapshot_single_stage_local_incumbent_state(run_dict):
+    """Capture one accepted local single-stage state for retry restoration."""
+    hardware_status = run_dict.get("hardware_constraint_status")
+    coil_dofs = run_dict.get("x_prev")
+    if coil_dofs is None:
+        coil_dofs = np.zeros_like(host_array(run_dict["dJ"], dtype=np.float64))
+    return {
+        "coil_dofs": host_array(coil_dofs, dtype=np.float64),
+        "sdofs": host_array(run_dict["sdofs"], dtype=np.float64),
+        "iota": host_float(run_dict["iota"]),
+        "G": host_float(run_dict["G"]),
+        "J": host_float(run_dict["J"]),
+        "dJ": host_array(run_dict["dJ"], dtype=np.float64),
+        "intersecting": bool(run_dict.get("intersecting", False)),
+        "self_intersection_check_available": bool(
+            run_dict.get("self_intersection_check_available", False)
+        ),
+        "hardware_constraint_status": copy.deepcopy(hardware_status),
+    }
+
+
+def restore_single_stage_local_incumbent_state(run_dict, incumbent_state):
+    """Restore the accepted local state used as a retry anchor."""
+    _clear_target_lane_reporting_cache(run_dict)
+    run_dict["x_prev"] = host_array(incumbent_state["coil_dofs"], dtype=np.float64)
+    run_dict["sdofs"] = host_array(incumbent_state["sdofs"], dtype=np.float64)
+    run_dict["iota"] = host_float(incumbent_state["iota"])
+    run_dict["G"] = host_float(incumbent_state["G"])
+    run_dict["J"] = host_float(incumbent_state["J"])
+    run_dict["dJ"] = host_array(incumbent_state["dJ"], dtype=np.float64)
+    run_dict["intersecting"] = bool(incumbent_state["intersecting"])
+    run_dict["self_intersection_check_available"] = bool(
+        incumbent_state["self_intersection_check_available"]
+    )
+    run_dict["hardware_constraint_status"] = copy.deepcopy(
+        incumbent_state["hardware_constraint_status"]
+    )
+    run_dict["failure_count"] = 0
+    run_dict.pop("last_candidate_failure", None)
+
+
+def single_stage_local_incumbent_eligible(run_dict):
+    """Return whether the current run_dict state is safe to preserve for retries."""
+    if bool(run_dict.get("intersecting", False)):
+        return False
+    hardware_status = run_dict.get("hardware_constraint_status")
+    if hardware_status is None:
+        return True
+    return bool(hardware_status.get("success", False))
+
+
+def record_single_stage_local_incumbent(run_dict, *, stage):
+    """Track latest and best feasible local states for donor-aware retries."""
+    if not single_stage_local_incumbent_eligible(run_dict):
+        return False
+    incumbent_state = snapshot_single_stage_local_incumbent_state(run_dict)
+    incumbent_metric = float(incumbent_state["J"])
+    run_dict["latest_local_incumbent"] = incumbent_state
+    run_dict["latest_local_metric"] = incumbent_metric
+    run_dict["latest_local_stage"] = str(stage)
+    best_metric = run_dict.get("best_local_metric")
+    if best_metric is not None and incumbent_metric >= float(best_metric):
+        return False
+    run_dict["best_local_incumbent"] = copy.deepcopy(incumbent_state)
+    run_dict["best_local_metric"] = incumbent_metric
+    run_dict["best_local_stage"] = str(stage)
+    return True
+
+
+def resolve_single_stage_retry_anchor(run_dict, single_stage_search_policy):
+    """Choose the retry anchor that matches the current donor search policy."""
+    if (
+        single_stage_search_policy.search_policy
+        == _SINGLE_STAGE_SEARCH_POLICY_PRESERVE_FIRST
+    ):
+        best_incumbent = run_dict.get("best_local_incumbent")
+        if best_incumbent is not None:
+            return best_incumbent, run_dict.get("best_local_stage")
+    latest_incumbent = run_dict.get("latest_local_incumbent")
+    if latest_incumbent is not None:
+        return latest_incumbent, run_dict.get("latest_local_stage")
+    best_incumbent = run_dict.get("best_local_incumbent")
+    if best_incumbent is not None:
+        return best_incumbent, run_dict.get("best_local_stage")
+    return None, None
+
+
+def single_stage_retry_triggered_by_invalid_state(events):
+    """Return whether a target-lane failure event is retry-eligible."""
+    if not events:
+        return False
+    last_event = events[-1]
+    return bool(
+        last_event["line_search_failed"]
+        or last_event["nonfinite_step"]
+        or last_event["stalled_step"]
+        or (not last_event["valid_curvature"])
+    )
+
+
+def resolve_single_stage_retry_initial_step_size(
+    previous_initial_step_size,
+    failure_events,
+    *,
+    single_stage_search_policy,
+    retry_index,
+):
+    """Shrink the next target-lane trial step after an invalid-state failure."""
+    del retry_index
+    base_step_size = previous_initial_step_size
+    if base_step_size is None and failure_events:
+        base_step_size = failure_events[-1]["step_scale"]["value"]
+    if base_step_size is None or base_step_size <= 0.0:
+        base_step_size = 1.0
+    return max(
+        float(base_step_size) * float(single_stage_search_policy.retry_step_shrink_factor),
+        1.0e-6,
+    )
+
+
+def resolve_single_stage_contract_policy_context(
+    *,
+    warm_start_state,
+    single_stage_search_policy,
+    effective_initial_phase_settings,
+    args,
+):
+    """Backfill reporting metadata when helper callers omit policy inputs."""
+    if single_stage_search_policy is None:
+        explicit_surface_warm_start = (
+            isinstance(warm_start_state, dict) and "surface" in warm_start_state
+        )
+        if warm_start_state is None or explicit_surface_warm_start:
+            single_stage_search_policy = resolve_single_stage_search_policy(
+                warm_start_state,
+                explicit_surface_warm_start=explicit_surface_warm_start,
+            )
+        else:
+            single_stage_search_policy = SingleStageSearchPolicy(
+                donor_class="direct_call_unknown",
+                search_policy=_SINGLE_STAGE_SEARCH_POLICY_GLOBAL_SEARCH,
+                adaptive_failure_penalty_weight=1.0,
+            )
+    if effective_initial_phase_settings is None:
+        if args is None:
+            raise ValueError(
+                "args is required when effective_initial_phase_settings is not "
+                "provided to resolve_single_stage_contract_policy_context"
+            )
+        effective_initial_phase_settings = (
+            resolve_single_stage_policy_initial_phase_settings(
+                single_stage_search_policy,
+                initial_step_scale=args.initial_step_scale,
+                initial_step_maxiter=args.initial_step_maxiter,
+            )
+        )
+    return single_stage_search_policy, effective_initial_phase_settings
 
 
 def _surface_xyz_tensor_design_matrix(
@@ -3333,6 +3629,10 @@ def build_single_stage_target_lane_accepted_step_sync(
             store_objective_grad=False,
         )
         run_dict["hardware_constraint_status"] = hardware_status
+        record_single_stage_local_incumbent(
+            run_dict,
+            stage=f"iter_{run_dict.get('it', 0)}",
+        )
         accepted_step_summary = {
             "objective_value": objective_value,
             "reporting_metrics": reporting_metrics,
@@ -4997,6 +5297,14 @@ def resolve_scaled_outer_phase_final_dofs(
     )
 
 
+def build_single_stage_scaled_phase_retry_state(anchor_dofs):
+    """Build a zero-step scaled optimizer state anchored at accepted physical DOFs."""
+    return build_target_lane_scaled_outer_phase_state(
+        anchor_dofs,
+        build_scaled_outer_phase_initial_dofs(anchor_dofs, use_target_lane=True),
+    )
+
+
 def resolve_single_stage_outer_dof_setter(
     JF,
     bs,
@@ -5096,6 +5404,132 @@ def run_single_stage_optimizer(
         value_and_grad=True,
         callback=callback,
     )
+
+
+def run_single_stage_target_lane_optimizer_with_retries(
+    fun,
+    dofs,
+    *,
+    callback,
+    retry_callback,
+    contract,
+    maxiter,
+    ftol,
+    gtol,
+    maxcor,
+    outer_maxls,
+    scalar_fun,
+    target_lane_initial_step_size,
+    failure_callback,
+    invalid_state_events,
+    run_dict,
+    single_stage_search_policy,
+    retry_dofs_factory=None,
+    restored_result_x_factory=None,
+):
+    """Retry invalid-state target-lane failures from preserved local anchors."""
+    if retry_dofs_factory is None:
+        retry_dofs_factory = lambda anchor_state: host_array(  # noqa: E731
+            anchor_state["coil_dofs"],
+            dtype=np.float64,
+        )
+    if restored_result_x_factory is None:
+        restored_result_x_factory = retry_dofs_factory
+    initial_step_size = target_lane_initial_step_size
+    event_start = len(invalid_state_events)
+    result = run_single_stage_optimizer(
+        fun,
+        dofs,
+        callback=callback,
+        contract=contract,
+        maxiter=maxiter,
+        ftol=ftol,
+        gtol=gtol,
+        maxcor=maxcor,
+        outer_maxls=outer_maxls,
+        scalar_fun=scalar_fun,
+        target_lane_initial_step_size=initial_step_size,
+        failure_callback=failure_callback,
+    )
+    total_nit = int(getattr(result, "nit", 0))
+    total_nfev = int(getattr(result, "nfev", 0)) if hasattr(result, "nfev") else None
+    total_njev = int(getattr(result, "njev", 0)) if hasattr(result, "njev") else None
+    retry_summary = {
+        "attempt_count": 0,
+        "attempts": [],
+        "restored_preserved_local_state": False,
+        "restored_preserved_local_stage": None,
+    }
+    for retry_index in range(single_stage_search_policy.invalid_step_retry_budget):
+        new_events = invalid_state_events[event_start:]
+        if result.success or (not single_stage_retry_triggered_by_invalid_state(new_events)):
+            break
+        anchor_state, anchor_stage = resolve_single_stage_retry_anchor(
+            run_dict,
+            single_stage_search_policy,
+        )
+        if anchor_state is None:
+            break
+        restore_single_stage_local_incumbent_state(run_dict, anchor_state)
+        initial_step_size = resolve_single_stage_retry_initial_step_size(
+            initial_step_size,
+            new_events,
+            single_stage_search_policy=single_stage_search_policy,
+            retry_index=retry_index,
+        )
+        retry_summary["attempt_count"] += 1
+        retry_summary["attempts"].append(
+            {
+                "retry_index": int(retry_index + 1),
+                "anchor_stage": None if anchor_stage is None else str(anchor_stage),
+                "anchor_metric": float(anchor_state["J"]),
+                "initial_step_size": float(initial_step_size),
+                "triggered_by_invalid_state": True,
+            }
+        )
+        event_start = len(invalid_state_events)
+        remaining_maxiter = max(int(maxiter) - total_nit, 1)
+        result = run_single_stage_optimizer(
+            fun,
+            retry_dofs_factory(anchor_state),
+            callback=retry_callback,
+            contract=contract,
+            maxiter=remaining_maxiter,
+            ftol=ftol,
+            gtol=gtol,
+            maxcor=maxcor,
+            outer_maxls=outer_maxls,
+            scalar_fun=scalar_fun,
+            target_lane_initial_step_size=initial_step_size,
+            failure_callback=failure_callback,
+        )
+        total_nit += int(getattr(result, "nit", 0))
+        if total_nfev is not None:
+            total_nfev += int(getattr(result, "nfev", 0))
+        if total_njev is not None:
+            total_njev += int(getattr(result, "njev", 0))
+    result.nit = total_nit
+    if total_nfev is not None:
+        result.nfev = total_nfev
+    if total_njev is not None:
+        result.njev = total_njev
+    if not result.success:
+        anchor_state, anchor_stage = resolve_single_stage_retry_anchor(
+            run_dict,
+            single_stage_search_policy,
+        )
+        if anchor_state is not None:
+            restore_single_stage_local_incumbent_state(run_dict, anchor_state)
+            result.x = restored_result_x_factory(anchor_state)
+            result.restored_preserved_local_state = True
+            result.restored_preserved_local_stage = (
+                None if anchor_stage is None else str(anchor_stage)
+            )
+            retry_summary["restored_preserved_local_state"] = True
+            retry_summary["restored_preserved_local_stage"] = (
+                None if anchor_stage is None else str(anchor_stage)
+            )
+    return result, retry_summary
 
 
 logger = logging.getLogger(__name__)
@@ -5237,6 +5671,82 @@ def _update_line_search_state(x, run_dict):
     run_dict["lscount"] += 1
 
 
+def _single_stage_failure_residual_inf(boozer_surface):
+    residual = boozer_surface.res.get("residual")
+    if residual is None:
+        residual = boozer_surface.res.get("fun")
+    if residual is None:
+        return 0.0
+    residual_array = np.asarray(host_array(residual, dtype=np.float64), dtype=float)
+    if residual_array.size == 0:
+        return 0.0
+    return float(np.linalg.norm(residual_array.reshape(-1), ord=np.inf))
+
+
+def _single_stage_hardware_violation_score(hardware_status):
+    if hardware_status is None or hardware_status["success"]:
+        return 0.0
+    score = 0.25 * float(len(hardware_status["violations"]))
+    for distance_name, threshold_name in (
+        ("curve_curve_min_dist", "cc_dist"),
+        ("curve_surface_min_dist", "cs_dist"),
+        ("surface_vessel_min_dist", "ss_dist"),
+    ):
+        distance = float(hardware_status.get(distance_name, 0.0))
+        threshold = float(hardware_status.get(threshold_name, 0.0))
+        if threshold > 0.0:
+            score += max(threshold - distance, 0.0) / threshold
+    curvature_threshold = float(hardware_status.get("curvature_threshold", 0.0))
+    max_curvature = float(hardware_status.get("max_curvature", 0.0))
+    if curvature_threshold > 0.0:
+        score += max(max_curvature - curvature_threshold, 0.0) / curvature_threshold
+    return score
+
+
+def compute_single_stage_failure_penalty(
+    x,
+    run_dict,
+    boozer_surface,
+    *,
+    success_solve,
+    is_intersecting,
+    hardware_status,
+):
+    """Scale failure penalties by donor policy, step size, and solve quality."""
+    failure_weight = float(run_dict.get("adaptive_failure_penalty_weight", 1.0))
+    last_objective = float(run_dict["J"])
+    penalty_base = max(abs(last_objective), 1.0)
+    previous_x = np.asarray(run_dict["x_prev"], dtype=float)
+    step_norm = float(np.linalg.norm(np.asarray(x, dtype=float) - previous_x))
+    reference_norm = max(float(np.linalg.norm(previous_x)), 1.0)
+    step_ratio = step_norm / reference_norm
+    residual_inf = 0.0 if success_solve else _single_stage_failure_residual_inf(
+        boozer_surface
+    )
+    hardware_score = _single_stage_hardware_violation_score(hardware_status)
+    failure_count = int(run_dict.get("failure_count", 0))
+    multiplier = failure_weight
+    multiplier += min(step_ratio, 4.0)
+    multiplier += min(residual_inf, 4.0)
+    multiplier += hardware_score
+    multiplier += 0.5 if is_intersecting else 0.0
+    multiplier += 0.25 * float(failure_count)
+    penalty = penalty_base * multiplier
+    return penalty, {
+        "step_norm": step_norm,
+        "step_ratio": step_ratio,
+        "residual_inf": residual_inf,
+        "hardware_score": hardware_score,
+        "failure_count": failure_count,
+        "intersecting": bool(is_intersecting),
+        "solver_success": bool(success_solve),
+        "search_policy": run_dict.get("search_policy"),
+        "donor_class": run_dict.get("donor_class"),
+        "penalty": penalty,
+        "penalty_multiplier": multiplier,
+    }
+
+
 def _evaluate_candidate_impl(
     x,
     run_dict,
@@ -5294,6 +5804,8 @@ def _evaluate_candidate_impl(
         run_dict.pop("hardware_constraint_status", None)
 
     if success:
+        run_dict["failure_count"] = 0
+        run_dict.pop("last_candidate_failure", None)
         J = JF.J()
         dJ = JF.dJ()
         logger.info("Volume: %s", host_float(boozer_surface.surface.volume()))
@@ -5312,8 +5824,30 @@ def _evaluate_candidate_impl(
         # gradient-inconsistent: it produces y_k=0 if the step is ever
         # accepted, safely skipping the L-BFGS Hessian update via the
         # ys > 0 guard.
-        J = run_dict["J"] + max(abs(run_dict["J"]), 1.0)
+        failure_penalty, failure_summary = compute_single_stage_failure_penalty(
+            x,
+            run_dict,
+            boozer_surface,
+            success_solve=success_solve,
+            is_intersecting=is_intersecting,
+            hardware_status=hardware_status,
+        )
+        logger.warning(
+            "Single-stage failure penalty: policy=%s donor_class=%s "
+            "step_norm=%.2e residual_inf=%.2e hardware_score=%.2e "
+            "multiplier=%.2e penalty=%.2e",
+            failure_summary["search_policy"],
+            failure_summary["donor_class"],
+            failure_summary["step_norm"],
+            failure_summary["residual_inf"],
+            failure_summary["hardware_score"],
+            failure_summary["penalty_multiplier"],
+            failure_summary["penalty"],
+        )
+        J = run_dict["J"] + failure_penalty
         dJ = run_dict["dJ"].copy()
+        run_dict["failure_count"] = int(run_dict.get("failure_count", 0)) + 1
+        run_dict["last_candidate_failure"] = failure_summary
 
         if uses_legacy_warm_start:
             _restore_cpu_boozer_state(boozer_surface, run_dict)
@@ -5492,6 +6026,10 @@ def accept_step(
     if _bs_pts_before is not None:
         bs.set_points(_bs_pts_before)
     update_self_intersection_status(run_dict, boozer_surface.surface)
+    record_single_stage_local_incumbent(
+        run_dict,
+        stage=f"iter_{run_dict.get('it', 0)}",
+    )
 
     width = 35
     buffer = io.StringIO()
@@ -5737,11 +6275,18 @@ def snapshot_to_pytree(JF, boozer_surface, bs, *, num_tf_coils):
         "initial_objective": initial_objective,
         "it": 1,
         "lscount": 0,
+        "failure_count": 0,
         "x_prev": coil_dofs.copy(),
         "intersecting": False,
         "self_intersection_check_available": (
             surface_self_intersection_check_available()
         ),
+        "latest_local_incumbent": None,
+        "latest_local_metric": None,
+        "latest_local_stage": None,
+        "best_local_incumbent": None,
+        "best_local_metric": None,
+        "best_local_stage": None,
     }
 
     static_config = {
@@ -5984,6 +6529,19 @@ if __name__ == "__main__":
         "warm_start_surface_projected",
         start_s=warm_start_surface_project_start_s,
     )
+    single_stage_search_policy = resolve_single_stage_search_policy(
+        warm_start_state,
+        explicit_surface_warm_start=warm_start_surface_dofs is not None,
+    )
+    effective_initial_phase_settings = resolve_single_stage_policy_initial_phase_settings(
+        single_stage_search_policy,
+        initial_step_scale=args.initial_step_scale,
+        initial_step_maxiter=args.initial_step_maxiter,
+    )
+    effective_initial_step_scale = effective_initial_phase_settings["initial_step_scale"]
+    effective_initial_step_maxiter = effective_initial_phase_settings[
+        "initial_step_maxiter"
+    ]
 
     # Extract coil information
     coils = bs.coils
@@ -6002,6 +6560,18 @@ if __name__ == "__main__":
     # OPTIMIZATION SETUP
     # ==============================================================================
     print(f"\n===== Starting single stage optimization for mpol = {mpol} =====")
+    print(
+        "Single-stage search policy "
+        f"(donor_class={single_stage_search_policy.donor_class}, "
+        f"policy={single_stage_search_policy.search_policy}, "
+        f"adaptive_failure_penalty_weight="
+        f"{single_stage_search_policy.adaptive_failure_penalty_weight:g}, "
+        f"invalid_step_retry_budget="
+        f"{single_stage_search_policy.invalid_step_retry_budget}, "
+        f"retry_step_shrink_factor="
+        f"{single_stage_search_policy.retry_step_shrink_factor:g}, "
+        f"initial_phase_auto_enabled={effective_initial_phase_settings['auto_enabled']})"
+    )
 
     optimizer_backend_record = args.optimizer_backend if args.backend == "jax" else None
     boozer_optimizer_backend_record = resolve_boozer_optimizer_backend(
@@ -6097,12 +6667,18 @@ if __name__ == "__main__":
         str(args.maxcor),
         str(args.outer_maxls),
         str(args.target_lane_outer_initial_step_size),
-        str(args.initial_step_scale),
-        str(args.initial_step_maxiter),
+        str(effective_initial_phase_settings["initial_step_scale"]),
+        str(effective_initial_phase_settings["initial_step_maxiter"]),
         str(target_lane_boozer_bfgs_tol_record),
         str(target_lane_boozer_bfgs_maxiter_record),
         str(target_lane_boozer_newton_tol_record),
         str(target_lane_boozer_newton_maxiter_record),
+        str(single_stage_search_policy.donor_class),
+        str(single_stage_search_policy.search_policy),
+        str(single_stage_search_policy.adaptive_failure_penalty_weight),
+        str(single_stage_search_policy.invalid_step_retry_budget),
+        str(single_stage_search_policy.retry_step_shrink_factor),
+        str(effective_initial_phase_settings["auto_enabled"]),
         str(banana_surf_radius),
         str(nphi),
         str(ntheta),
@@ -6338,27 +6914,43 @@ if __name__ == "__main__":
         use_target_lane=use_target_lane,
     )
     run_dict["x_prev"] = _single_stage_optimizer_dofs_array(dofs).copy()
+    run_dict["donor_class"] = single_stage_search_policy.donor_class
+    run_dict["search_policy"] = single_stage_search_policy.search_policy
+    run_dict["adaptive_failure_penalty_weight"] = (
+        single_stage_search_policy.adaptive_failure_penalty_weight
+    )
+    run_dict["initial_phase_auto_enabled"] = bool(
+        effective_initial_phase_settings["auto_enabled"]
+    )
+    objectives = {
+        "qs": JnonQSRatio,
+        "boozer": JBoozerResidual,
+        "iota_penalty": Jiota,
+        "length": JCurveLength,
+        "cc": JCurveCurve,
+        "cs": JCurveSurface,
+        "surf": JSurfSurf,
+        "curvature": JCurvature,
+    }
+    diagnostics_refs = {
+        "iota": iota,
+        "banana_curve": banana_curve,
+        "curvelength": curvelength,
+    }
+    run_dict["hardware_constraint_status"] = _evaluate_single_stage_hardware_status(
+        objectives,
+        diagnostics_refs,
+    )
+    update_self_intersection_status(run_dict, boozer_surface.surface)
+    record_single_stage_local_incumbent(run_dict, stage="initial")
     target_lane_profile = None
     adapter = SingleStageAdapter(
         run_dict=run_dict,
         boozer_surface=boozer_surface,
         JF=JF,
         bs=bs,
-        objectives={
-            "qs": JnonQSRatio,
-            "boozer": JBoozerResidual,
-            "iota_penalty": Jiota,
-            "length": JCurveLength,
-            "cc": JCurveCurve,
-            "cs": JCurveSurface,
-            "surf": JSurfSurf,
-            "curvature": JCurvature,
-        },
-        diagnostics={
-            "iota": iota,
-            "banana_curve": banana_curve,
-            "curvelength": curvelength,
-        },
+        objectives=objectives,
+        diagnostics=diagnostics_refs,
         log_path=OUT_DIR_ITER + "/log.txt",
         reevaluate_before_accept=use_target_lane,
         apply_coil_dofs=dof_setter,
@@ -6379,6 +6971,18 @@ if __name__ == "__main__":
     target_lane_gradient_diagnosis = None
     target_lane_scaled_phase1_diagnosis = None
     target_lane_invalid_state_events = []
+    phase1_retry_summary = {
+        "attempt_count": 0,
+        "attempts": [],
+        "restored_preserved_local_state": False,
+        "restored_preserved_local_stage": None,
+    }
+    target_lane_retry_summary = {
+        "attempt_count": 0,
+        "attempts": [],
+        "restored_preserved_local_state": False,
+        "restored_preserved_local_stage": None,
+    }
     jax_compile_diagnostics = None
     record_target_lane_invalid_state_events = (
         record_target_lane_invalid_state_events_enabled(args)
@@ -6503,7 +7107,10 @@ if __name__ == "__main__":
                         "--diagnose-target-lane-scaled-phase1 requires the JAX "
                         "ondevice single-stage target lane."
                     )
-                if args.initial_step_maxiter < 1 or args.initial_step_scale >= 1.0:
+                if (
+                    effective_initial_step_maxiter < 1
+                    or effective_initial_step_scale >= 1.0
+                ):
                     raise RuntimeError(
                         "--diagnose-target-lane-scaled-phase1 requires an active "
                         "scaled initial phase: set --initial-step-maxiter >= 1 "
@@ -6523,8 +7130,8 @@ if __name__ == "__main__":
                         iota_target,
                         anchor_dofs=dofs,
                         contract=outer_contract,
-                        phase1_maxiter=min(MAXITER, args.initial_step_maxiter),
-                        step_scale=args.initial_step_scale,
+                        phase1_maxiter=min(MAXITER, effective_initial_step_maxiter),
+                        step_scale=effective_initial_step_scale,
                         ftol=ftol,
                         gtol=gtol,
                         maxcor=args.maxcor,
@@ -6709,14 +7316,27 @@ if __name__ == "__main__":
                     use_target_lane=use_target_lane,
                     sync_policy=effective_target_lane_sync_policy,
                 )
+                retry_step_callback = (
+                    adapter.callback if use_target_lane else accepted_step_callback
+                )
                 phase1_dofs = dofs
+                phase1_base_fun = (
+                    target_value_and_grad_objective if use_target_lane else adapter
+                )
+                phase1_base_scalar_fun = (
+                    target_scalar_objective if use_target_lane else None
+                )
+                phase1_fun = phase1_base_fun
+                phase1_scalar_fun = phase1_base_scalar_fun
                 phase1_callback = accepted_step_callback
-                phase1_fun = target_value_and_grad_objective if use_target_lane else adapter
-                phase1_scalar_fun = target_scalar_objective if use_target_lane else None
+                phase1_retry_callback = phase1_callback
                 phase1_final_dofs = None
                 remaining_maxiter = MAXITER
-                if args.initial_step_maxiter > 0 and args.initial_step_scale < 1.0:
-                    phase1_maxiter = min(MAXITER, args.initial_step_maxiter)
+                if (
+                    effective_initial_step_maxiter > 0
+                    and effective_initial_step_scale < 1.0
+                ):
+                    phase1_maxiter = min(MAXITER, effective_initial_step_maxiter)
                     if phase1_maxiter > 0:
                         phase1_anchor_dofs = dofs
                         phase1_dofs = build_scaled_outer_phase_initial_dofs(
@@ -6731,10 +7351,10 @@ if __name__ == "__main__":
                         if use_target_lane:
                             if phase1_fun is not None:
                                 phase1_fun, phase1_callback = build_scaled_outer_problem(
-                                    phase1_fun,
+                                    phase1_base_fun,
                                     accepted_step_callback,
                                     phase1_anchor_dofs,
-                                    args.initial_step_scale,
+                                    effective_initial_step_scale,
                                     anchor_in_state=True,
                                 )
                                 phase1_scalar_fun = None
@@ -6743,22 +7363,42 @@ if __name__ == "__main__":
                                     phase1_scalar_fun,
                                     phase1_callback,
                                 ) = build_scaled_outer_scalar_problem(
-                                    phase1_scalar_fun,
+                                    phase1_base_scalar_fun,
                                     accepted_step_callback,
                                     phase1_anchor_dofs,
-                                    args.initial_step_scale,
+                                    effective_initial_step_scale,
                                     anchor_in_state=True,
                                 )
+                            phase1_retry_callback = phase1_callback
+                            if phase1_retry_callback is None:
+                                if phase1_base_fun is not None:
+                                    _, phase1_retry_callback = build_scaled_outer_problem(
+                                        phase1_base_fun,
+                                        retry_step_callback,
+                                        phase1_anchor_dofs,
+                                        effective_initial_step_scale,
+                                        anchor_in_state=True,
+                                    )
+                                else:
+                                    _, phase1_retry_callback = (
+                                        build_scaled_outer_scalar_problem(
+                                            phase1_base_scalar_fun,
+                                            retry_step_callback,
+                                            phase1_anchor_dofs,
+                                            effective_initial_step_scale,
+                                            anchor_in_state=True,
+                                        )
+                                    )
                         else:
                             phase1_fun, phase1_callback = build_scaled_outer_problem(
                                 phase1_fun,
                                 accepted_step_callback,
                                 phase1_anchor_dofs,
-                                args.initial_step_scale,
+                                effective_initial_step_scale,
                             )
                         print(
                             "Starting scaled initial outer phase "
-                            f"(step_scale={args.initial_step_scale}, "
+                            f"(step_scale={effective_initial_step_scale}, "
                             f"maxiter={phase1_maxiter})..."
                         )
                         phase1_failure_callback = (
@@ -6774,19 +7414,65 @@ if __name__ == "__main__":
                             "single_stage.outer_optimizer_initial_phase",
                             enabled=jax_profile_enabled,
                         ):
-                            phase1_res = run_single_stage_optimizer(
-                                phase1_fun,
-                                phase1_dofs,
-                                callback=phase1_callback,
-                                contract=outer_contract,
-                                maxiter=phase1_maxiter,
-                                ftol=ftol,
-                                gtol=gtol,
-                                maxcor=args.maxcor,
-                                outer_maxls=args.outer_maxls,
-                                scalar_fun=phase1_scalar_fun,
-                                failure_callback=phase1_failure_callback,
-                            )
+                            if use_target_lane:
+                                phase1_res, phase1_retry_summary = (
+                                    run_single_stage_target_lane_optimizer_with_retries(
+                                        phase1_fun,
+                                        phase1_dofs,
+                                        callback=phase1_callback,
+                                        retry_callback=phase1_retry_callback,
+                                        contract=outer_contract,
+                                        maxiter=phase1_maxiter,
+                                        ftol=ftol,
+                                        gtol=gtol,
+                                        maxcor=args.maxcor,
+                                        outer_maxls=args.outer_maxls,
+                                        scalar_fun=phase1_scalar_fun,
+                                        target_lane_initial_step_size=None,
+                                        failure_callback=phase1_failure_callback,
+                                        invalid_state_events=(
+                                            target_lane_invalid_state_events
+                                        ),
+                                        run_dict=run_dict,
+                                        single_stage_search_policy=(
+                                            single_stage_search_policy
+                                        ),
+                                        retry_dofs_factory=(
+                                            lambda anchor_state: (
+                                                build_single_stage_scaled_phase_retry_state(
+                                                    host_array(
+                                                        anchor_state["coil_dofs"],
+                                                        dtype=np.float64,
+                                                    )
+                                                )
+                                            )
+                                        ),
+                                        restored_result_x_factory=(
+                                            lambda anchor_state: (
+                                                build_single_stage_scaled_phase_retry_state(
+                                                    host_array(
+                                                        anchor_state["coil_dofs"],
+                                                        dtype=np.float64,
+                                                    )
+                                                )
+                                            )
+                                        ),
+                                    )
+                                )
+                            else:
+                                phase1_res = run_single_stage_optimizer(
+                                    phase1_fun,
+                                    phase1_dofs,
+                                    callback=phase1_callback,
+                                    contract=outer_contract,
+                                    maxiter=phase1_maxiter,
+                                    ftol=ftol,
+                                    gtol=gtol,
+                                    maxcor=args.maxcor,
+                                    outer_maxls=args.outer_maxls,
+                                    scalar_fun=phase1_scalar_fun,
+                                    failure_callback=phase1_failure_callback,
+                                )
                         _record_timing(
                             timings,
                             "outer_optimizer_initial_phase_s",
@@ -6795,12 +7481,17 @@ if __name__ == "__main__":
                         )
                         phase1_iterations = int(phase1_res.nit)
                         phase1_termination_message = str(phase1_res.message)
+                        if phase1_retry_summary["attempt_count"] > 0:
+                            phase1_termination_message = (
+                                f"{phase1_termination_message}; "
+                                f"retry_attempts={phase1_retry_summary['attempt_count']}"
+                            )
                         phase1_success = bool(phase1_res.success)
                         print(phase1_res.message)
                         phase1_final_dofs = resolve_scaled_outer_phase_final_dofs(
                             phase1_anchor_dofs,
                             phase1_res.x,
-                            args.initial_step_scale,
+                            effective_initial_step_scale,
                             use_target_lane=use_target_lane,
                         )
                         if (
@@ -6855,24 +7546,44 @@ if __name__ == "__main__":
                         "single_stage.outer_optimizer",
                         enabled=jax_profile_enabled,
                     ):
-                        res = run_single_stage_optimizer(
-                            target_value_and_grad_objective if use_target_lane else adapter,
-                            dofs,
-                            callback=accepted_step_callback,
-                            contract=outer_contract,
-                            maxiter=remaining_maxiter,
-                            ftol=ftol,
-                            gtol=gtol,
-                            maxcor=args.maxcor,
-                            outer_maxls=args.outer_maxls,
-                            scalar_fun=target_scalar_objective,
-                            target_lane_initial_step_size=(
-                                args.target_lane_outer_initial_step_size
-                                if use_target_lane
-                                else None
-                            ),
-                            failure_callback=main_failure_callback,
-                        )
+                        if use_target_lane:
+                            res, target_lane_retry_summary = (
+                                run_single_stage_target_lane_optimizer_with_retries(
+                                    target_value_and_grad_objective,
+                                    dofs,
+                                    callback=accepted_step_callback,
+                                    retry_callback=retry_step_callback,
+                                    contract=outer_contract,
+                                    maxiter=remaining_maxiter,
+                                    ftol=ftol,
+                                    gtol=gtol,
+                                    maxcor=args.maxcor,
+                                    outer_maxls=args.outer_maxls,
+                                    scalar_fun=target_scalar_objective,
+                                    target_lane_initial_step_size=(
+                                        args.target_lane_outer_initial_step_size
+                                    ),
+                                    failure_callback=main_failure_callback,
+                                    invalid_state_events=target_lane_invalid_state_events,
+                                    run_dict=run_dict,
+                                    single_stage_search_policy=single_stage_search_policy,
+                                )
+                            )
+                        else:
+                            res = run_single_stage_optimizer(
+                                adapter,
+                                dofs,
+                                callback=accepted_step_callback,
+                                contract=outer_contract,
+                                maxiter=remaining_maxiter,
+                                ftol=ftol,
+                                gtol=gtol,
+                                maxcor=args.maxcor,
+                                outer_maxls=args.outer_maxls,
+                                scalar_fun=target_scalar_objective,
+                                target_lane_initial_step_size=None,
+                                failure_callback=main_failure_callback,
+                            )
                     _record_timing(
                         timings,
                         "outer_optimizer_main_s",
@@ -6880,6 +7591,11 @@ if __name__ == "__main__":
                         _perf_counter_s(),
                     )
                     termination_message = str(res.message)
+                    if target_lane_retry_summary["attempt_count"] > 0:
+                        termination_message = (
+                            f"{termination_message}; "
+                            f"retry_attempts={target_lane_retry_summary['attempt_count']}"
+                        )
                     optimizer_success = bool(res.success)
                     main_phase_iterations = int(res.nit)
                     res_nit = (phase1_iterations or 0) + int(res.nit)
@@ -7147,6 +7863,8 @@ if __name__ == "__main__":
             target_lane_boozer_bfgs_maxiter_record=target_lane_boozer_bfgs_maxiter_record,
             target_lane_boozer_newton_tol_record=target_lane_boozer_newton_tol_record,
             target_lane_boozer_newton_maxiter_record=target_lane_boozer_newton_maxiter_record,
+            single_stage_search_policy=single_stage_search_policy,
+            effective_initial_phase_settings=effective_initial_phase_settings,
             args=args,
             MAXITER=MAXITER,
             write_restart_artifacts=write_restart_artifacts,
@@ -7205,6 +7923,16 @@ if __name__ == "__main__":
         "disable_target_lane_success_filter": bool(
             args.disable_target_lane_success_filter
         ),
+        "single_stage_donor_class": single_stage_search_policy.donor_class,
+        "single_stage_search_policy": single_stage_search_policy.search_policy,
+        "adaptive_failure_penalty_weight": (
+            single_stage_search_policy.adaptive_failure_penalty_weight
+        ),
+        "invalid_step_retry_budget": single_stage_search_policy.invalid_step_retry_budget,
+        "retry_step_shrink_factor": single_stage_search_policy.retry_step_shrink_factor,
+        "initial_phase_auto_enabled": bool(
+            effective_initial_phase_settings["auto_enabled"]
+        ),
         "profile_target_lane": bool(args.profile_target_lane),
         "profile_target_lane_only": bool(args.profile_target_lane_only),
         "profile_target_lane_batch_size": int(args.profile_target_lane_batch_size),
@@ -7221,8 +7949,26 @@ if __name__ == "__main__":
         "maxcor": args.maxcor,
         "outer_maxls": args.outer_maxls,
         "target_lane_outer_initial_step_size": args.target_lane_outer_initial_step_size,
-        "initial_step_scale": args.initial_step_scale,
-        "initial_step_maxiter": args.initial_step_maxiter,
+        "initial_phase_retry_attempts": int(phase1_retry_summary["attempt_count"]),
+        "initial_phase_retry_attempt_details": phase1_retry_summary["attempts"],
+        "initial_phase_restored_preserved_local_state": bool(
+            phase1_retry_summary["restored_preserved_local_state"]
+        ),
+        "initial_phase_restored_preserved_local_stage": phase1_retry_summary[
+            "restored_preserved_local_stage"
+        ],
+        "target_lane_retry_attempts": int(target_lane_retry_summary["attempt_count"]),
+        "target_lane_retry_attempt_details": target_lane_retry_summary["attempts"],
+        "target_lane_restored_preserved_local_state": bool(
+            target_lane_retry_summary["restored_preserved_local_state"]
+        ),
+        "target_lane_restored_preserved_local_stage": target_lane_retry_summary[
+            "restored_preserved_local_stage"
+        ],
+        "initial_step_scale": effective_initial_step_scale,
+        "initial_step_maxiter": effective_initial_step_maxiter,
+        "requested_initial_step_scale": args.initial_step_scale,
+        "requested_initial_step_maxiter": args.initial_step_maxiter,
         "target_lane_boozer_bfgs_tol": target_lane_boozer_bfgs_tol_record,
         "target_lane_boozer_bfgs_maxiter": target_lane_boozer_bfgs_maxiter_record,
         "target_lane_boozer_newton_tol": target_lane_boozer_newton_tol_record,

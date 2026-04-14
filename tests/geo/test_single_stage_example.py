@@ -1,3 +1,4 @@
+import copy
 from contextlib import contextmanager
 import importlib.util
 import os
@@ -532,10 +533,52 @@ class SingleStageExampleTests(unittest.TestCase):
             self.assertIs(
                 materialized_surface, FakeSurfaceXYZTensorFourier.instances[0]
             )
-            np.testing.assert_allclose(
-                materialized_surface.get_dofs(),
-                np.asarray(boozer_surface.surface.get_dofs()),
+        np.testing.assert_allclose(
+            materialized_surface.get_dofs(),
+            np.asarray(boozer_surface.surface.get_dofs()),
+        )
+
+    def test_initialize_boozer_surface_jax_exact_backend_uses_deferred_surface(self):
+        module = self.load_module()
+        surf_prev = FakeSurfPrev()
+        fake_boozer_surface_jax = self.build_fake_boozer_surface_jax_class(
+            record_run_calls=True
+        )
+
+        with patch.object(
+            module,
+            "evaluate_surface_self_intersection",
+            return_value=(False, True),
+        ), self.patch_initialize_boozer_surface_jax(module, fake_boozer_surface_jax):
+            boozer_surface = module.initialize_boozer_surface(
+                surf_prev,
+                mpol=TEST_MPOL,
+                ntor=TEST_NTOR,
+                bs=object(),
+                vol_target=TEST_VOL_TARGET,
+                constraint_weight=None,
+                iota=TEST_IOTA,
+                G0=TEST_G0,
+                backend="jax",
             )
+
+        self.assertIsInstance(boozer_surface, fake_boozer_surface_jax)
+        self.assertEqual(len(boozer_surface.run_code_calls), 1)
+        call_iota, call_G, call_sdofs = boozer_surface.run_code_calls[0]
+        self.assertEqual(call_iota, TEST_IOTA)
+        self.assertEqual(call_G, TEST_G0)
+        self.assertIsNone(call_sdofs)
+        self.assertEqual(
+            type(boozer_surface.surface).__name__,
+            "DeferredSurfaceXYZTensorFourier",
+        )
+        self.assertEqual(len(FakeSurfaceXYZTensorFourier.instances), 0)
+        self.assertEqual(boozer_surface.surface_runtime_state["mpol"], TEST_MPOL)
+        self.assertEqual(boozer_surface.surface_runtime_state["ntor"], TEST_NTOR)
+        np.testing.assert_allclose(
+            boozer_surface.surface_runtime_state["quadpoints_theta"],
+            np.linspace(0, 1, 2 * TEST_MPOL + 1, endpoint=False),
+        )
 
     def test_initialize_boozer_surface_cpu_warm_start_does_not_pass_sdofs(self):
         module = self.load_module()
@@ -1642,6 +1685,177 @@ class SingleStageExampleTests(unittest.TestCase):
         np.testing.assert_allclose(warm_start["surface"].dofs, surface_dofs)
         self.assertEqual(warm_start["iota"], 0.123)
         self.assertEqual(warm_start["G"], 4.5)
+
+    def test_resolve_single_stage_search_policy_preserves_serialized_surface_state(self):
+        module = self.load_module()
+        policy = module.resolve_single_stage_search_policy(
+            {
+                "surface": module.SerializedSurfaceState(
+                    surface_class="SurfaceXYZTensorFourier",
+                    dofs=np.ones(3),
+                    mpol=2,
+                    ntor=1,
+                    nfp=5,
+                    stellsym=True,
+                    quadpoints_phi=np.linspace(0.0, 0.2, 4, endpoint=False),
+                    quadpoints_theta=np.linspace(0.0, 1.0, 5, endpoint=False),
+                )
+            },
+            explicit_surface_warm_start=True,
+        )
+
+        self.assertEqual(policy.donor_class, "serialized_surface_state")
+        self.assertEqual(policy.search_policy, "preserve_first")
+        self.assertEqual(policy.adaptive_failure_penalty_weight, 1.0)
+        self.assertIsNone(policy.auto_initial_step_scale)
+        self.assertEqual(policy.invalid_step_retry_budget, 2)
+        self.assertEqual(policy.retry_step_shrink_factor, 0.35)
+
+    def test_resolve_single_stage_search_policy_repairs_stage2_seed_only_start(self):
+        module = self.load_module()
+        policy = module.resolve_single_stage_search_policy(
+            None,
+            explicit_surface_warm_start=False,
+        )
+
+        self.assertEqual(policy.donor_class, "stage2_seed_only")
+        self.assertEqual(policy.search_policy, "repair_first")
+        self.assertEqual(policy.adaptive_failure_penalty_weight, 1.5)
+        self.assertEqual(policy.auto_initial_step_scale, 0.25)
+        self.assertEqual(policy.auto_initial_step_maxiter, 3)
+        self.assertEqual(policy.invalid_step_retry_budget, 2)
+        self.assertEqual(policy.retry_step_shrink_factor, 0.5)
+
+    def test_resolve_single_stage_policy_initial_phase_settings_only_auto_enables_defaults(
+        self,
+    ):
+        module = self.load_module()
+        policy = module.SingleStageSearchPolicy(
+            donor_class="stage2_seed_only",
+            search_policy="repair_first",
+            adaptive_failure_penalty_weight=1.5,
+            auto_initial_step_scale=0.25,
+            auto_initial_step_maxiter=3,
+        )
+
+        auto_settings = module.resolve_single_stage_policy_initial_phase_settings(
+            policy,
+            initial_step_scale=1.0,
+            initial_step_maxiter=0,
+        )
+        explicit_settings = module.resolve_single_stage_policy_initial_phase_settings(
+            policy,
+            initial_step_scale=0.5,
+            initial_step_maxiter=2,
+        )
+
+        self.assertEqual(auto_settings["initial_step_scale"], 0.25)
+        self.assertEqual(auto_settings["initial_step_maxiter"], 3)
+        self.assertTrue(auto_settings["auto_enabled"])
+        self.assertEqual(explicit_settings["initial_step_scale"], 0.5)
+        self.assertEqual(explicit_settings["initial_step_maxiter"], 2)
+        self.assertFalse(explicit_settings["auto_enabled"])
+
+    def test_record_single_stage_local_incumbent_tracks_latest_and_best(self):
+        module = self.load_module()
+        run_dict = self._make_candidate_run_dict([1.0, 2.0])
+        run_dict["hardware_constraint_status"] = {"success": True, "violations": []}
+        run_dict["intersecting"] = False
+
+        updated = module.record_single_stage_local_incumbent(
+            run_dict,
+            stage="initial",
+        )
+
+        self.assertTrue(updated)
+        self.assertEqual(run_dict["latest_local_stage"], "initial")
+        self.assertEqual(run_dict["best_local_stage"], "initial")
+        np.testing.assert_allclose(
+            run_dict["latest_local_incumbent"]["coil_dofs"],
+            np.zeros(5),
+        )
+
+        run_dict["x_prev"] = np.array([9.0, 8.0, 7.0, 6.0, 5.0])
+        run_dict["J"] = 2.0
+        updated = module.record_single_stage_local_incumbent(
+            run_dict,
+            stage="retry",
+        )
+
+        self.assertFalse(updated)
+        self.assertEqual(run_dict["latest_local_stage"], "retry")
+        self.assertEqual(run_dict["best_local_stage"], "initial")
+        np.testing.assert_allclose(
+            run_dict["latest_local_incumbent"]["coil_dofs"],
+            np.array([9.0, 8.0, 7.0, 6.0, 5.0]),
+        )
+
+    def test_resolve_single_stage_retry_anchor_respects_policy(self):
+        module = self.load_module()
+        run_dict = {
+            "latest_local_incumbent": {"coil_dofs": np.array([3.0])},
+            "latest_local_stage": "latest",
+            "best_local_incumbent": {"coil_dofs": np.array([1.0])},
+            "best_local_stage": "best",
+        }
+        preserve_policy = module.SingleStageSearchPolicy(
+            donor_class="serialized_surface_state",
+            search_policy="preserve_first",
+            adaptive_failure_penalty_weight=1.0,
+            invalid_step_retry_budget=2,
+            retry_step_shrink_factor=0.35,
+        )
+        repair_policy = module.SingleStageSearchPolicy(
+            donor_class="stage2_seed_only",
+            search_policy="repair_first",
+            adaptive_failure_penalty_weight=1.5,
+            invalid_step_retry_budget=2,
+            retry_step_shrink_factor=0.5,
+        )
+
+        preserve_anchor, preserve_stage = module.resolve_single_stage_retry_anchor(
+            run_dict,
+            preserve_policy,
+        )
+        repair_anchor, repair_stage = module.resolve_single_stage_retry_anchor(
+            run_dict,
+            repair_policy,
+        )
+
+        np.testing.assert_allclose(preserve_anchor["coil_dofs"], np.array([1.0]))
+        self.assertEqual(preserve_stage, "best")
+        np.testing.assert_allclose(repair_anchor["coil_dofs"], np.array([3.0]))
+        self.assertEqual(repair_stage, "latest")
+
+    def test_resolve_single_stage_retry_initial_step_size_shrinks_failure_step(self):
+        module = self.load_module()
+        policy = module.SingleStageSearchPolicy(
+            donor_class="stage2_seed_only",
+            search_policy="repair_first",
+            adaptive_failure_penalty_weight=1.5,
+            invalid_step_retry_budget=2,
+            retry_step_shrink_factor=0.5,
+        )
+
+        retry_step_size = module.resolve_single_stage_retry_initial_step_size(
+            None,
+            [{"step_scale": {"value": 0.2}}],
+            single_stage_search_policy=policy,
+            retry_index=0,
+        )
+
+        self.assertEqual(retry_step_size, 0.1)
+
+    def test_build_single_stage_scaled_phase_retry_state_anchors_zero_step(self):
+        module = self.load_module()
+
+        retry_state = module.build_single_stage_scaled_phase_retry_state(
+            np.array([3.0, 4.0]),
+        )
+
+        self.assertIsInstance(retry_state, module.ScaledOuterPhaseOptimizerState)
+        np.testing.assert_allclose(retry_state.anchor_dofs, np.array([3.0, 4.0]))
+        np.testing.assert_allclose(retry_state.step_dofs, np.zeros(2))
 
     def test_project_single_stage_warm_start_surface_dofs_delegates_to_resolution_projector(
         self,
@@ -3893,6 +4107,556 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertEqual(captured["options"]["initial_step_size"], 1.0e-4)
         self.assertEqual(result.message, "ok")
 
+    def test_run_single_stage_target_lane_optimizer_with_retries_retries_from_anchor(self):
+        module = self.load_module()
+        contract = module.resolve_single_stage_optimizer_contract("jax", "ondevice")
+        run_dict = self._make_candidate_run_dict([1.0, 2.0])
+        run_dict["latest_local_incumbent"] = {
+            "coil_dofs": np.array([1.0, 2.0]),
+            "sdofs": np.array([3.0, 4.0]),
+            "iota": TEST_IOTA,
+            "G": TEST_G0,
+            "J": 1.0,
+            "dJ": np.array([0.0, 0.0, 0.0, 0.0, 0.0]),
+            "intersecting": False,
+            "self_intersection_check_available": True,
+            "hardware_constraint_status": {"success": True, "violations": []},
+        }
+        run_dict["latest_local_stage"] = "initial"
+        run_dict["best_local_incumbent"] = copy.deepcopy(
+            run_dict["latest_local_incumbent"]
+        )
+        run_dict["best_local_stage"] = "initial"
+        invalid_state_events = []
+        optimizer_calls = []
+
+        def fake_run_single_stage_optimizer(
+            fun,
+            dofs,
+            *,
+            callback,
+            contract,
+            maxiter,
+            ftol,
+            gtol,
+            maxcor,
+            outer_maxls,
+            scalar_fun,
+            target_lane_initial_step_size,
+            failure_callback,
+        ):
+            del fun, contract, maxiter, ftol, gtol, maxcor, outer_maxls, scalar_fun
+            optimizer_calls.append(
+                {
+                    "dofs": np.asarray(dofs, dtype=float).copy(),
+                    "callback": callback,
+                    "initial_step_size": target_lane_initial_step_size,
+                }
+            )
+            if len(optimizer_calls) == 1:
+                invalid_state_events.append(
+                    {
+                        "line_search_failed": True,
+                        "nonfinite_step": False,
+                        "stalled_step": False,
+                        "valid_curvature": True,
+                        "step_scale": {"value": 0.2},
+                    }
+                )
+                return types.SimpleNamespace(
+                    x=np.array([9.0, 9.0]),
+                    nit=0,
+                    success=False,
+                    message="failed",
+                    status=5,
+                )
+            return types.SimpleNamespace(
+                x=np.array([1.0, 2.0]),
+                nit=1,
+                success=True,
+                message="ok",
+                status=0,
+            )
+
+        retry_callback = object()
+        policy = module.SingleStageSearchPolicy(
+            donor_class="stage2_seed_only",
+            search_policy="repair_first",
+            adaptive_failure_penalty_weight=1.5,
+            invalid_step_retry_budget=2,
+            retry_step_shrink_factor=0.5,
+        )
+
+        with patch.object(
+            module,
+            "run_single_stage_optimizer",
+            side_effect=fake_run_single_stage_optimizer,
+        ):
+            result, retry_summary = (
+                module.run_single_stage_target_lane_optimizer_with_retries(
+                    lambda x: x,
+                    np.array([0.0, 0.0]),
+                    callback=None,
+                    retry_callback=retry_callback,
+                    contract=contract,
+                    maxiter=5,
+                    ftol=0.0,
+                    gtol=1.0e-6,
+                    maxcor=5,
+                    outer_maxls=6,
+                    scalar_fun=None,
+                    target_lane_initial_step_size=None,
+                    failure_callback=None,
+                    invalid_state_events=invalid_state_events,
+                    run_dict=run_dict,
+                    single_stage_search_policy=policy,
+                )
+            )
+
+        self.assertTrue(result.success)
+        self.assertEqual(retry_summary["attempt_count"], 1)
+        self.assertEqual(len(optimizer_calls), 2)
+        np.testing.assert_allclose(optimizer_calls[1]["dofs"], np.array([1.0, 2.0]))
+        self.assertIs(optimizer_calls[1]["callback"], retry_callback)
+        self.assertEqual(optimizer_calls[1]["initial_step_size"], 0.1)
+
+    def test_run_single_stage_target_lane_optimizer_with_retries_restores_anchor_on_exhaustion(
+        self,
+    ):
+        module = self.load_module()
+        contract = module.resolve_single_stage_optimizer_contract("jax", "ondevice")
+        anchor_state = {
+            "coil_dofs": np.array([4.0, 5.0]),
+            "sdofs": np.array([6.0, 7.0]),
+            "iota": TEST_IOTA,
+            "G": TEST_G0,
+            "J": 1.0,
+            "dJ": np.zeros(5),
+            "intersecting": False,
+            "self_intersection_check_available": True,
+            "hardware_constraint_status": {"success": True, "violations": []},
+        }
+        run_dict = self._make_candidate_run_dict([1.0, 2.0])
+        run_dict["latest_local_incumbent"] = copy.deepcopy(anchor_state)
+        run_dict["latest_local_stage"] = "latest"
+        run_dict["best_local_incumbent"] = copy.deepcopy(anchor_state)
+        run_dict["best_local_stage"] = "best"
+        invalid_state_events = [
+            {
+                "line_search_failed": True,
+                "nonfinite_step": False,
+                "stalled_step": False,
+                "valid_curvature": True,
+                "step_scale": {"value": 0.2},
+            }
+        ]
+
+        def always_fail(*args, **kwargs):
+            del args, kwargs
+            return types.SimpleNamespace(
+                x=np.array([9.0, 9.0]),
+                nit=0,
+                success=False,
+                message="failed",
+                status=5,
+            )
+
+        policy = module.SingleStageSearchPolicy(
+            donor_class="serialized_surface_state",
+            search_policy="preserve_first",
+            adaptive_failure_penalty_weight=1.0,
+            invalid_step_retry_budget=0,
+            retry_step_shrink_factor=0.35,
+        )
+
+        with patch.object(
+            module,
+            "run_single_stage_optimizer",
+            side_effect=always_fail,
+        ):
+            result, retry_summary = (
+                module.run_single_stage_target_lane_optimizer_with_retries(
+                    lambda x: x,
+                    np.array([0.0, 0.0]),
+                    callback=None,
+                    retry_callback=None,
+                    contract=contract,
+                    maxiter=5,
+                    ftol=0.0,
+                    gtol=1.0e-6,
+                    maxcor=5,
+                    outer_maxls=6,
+                    scalar_fun=None,
+                    target_lane_initial_step_size=None,
+                    failure_callback=None,
+                    invalid_state_events=invalid_state_events,
+                    run_dict=run_dict,
+                    single_stage_search_policy=policy,
+                )
+            )
+
+        self.assertFalse(result.success)
+        self.assertTrue(retry_summary["restored_preserved_local_state"])
+        self.assertEqual(retry_summary["restored_preserved_local_stage"], "best")
+        np.testing.assert_allclose(result.x, np.array([4.0, 5.0]))
+        np.testing.assert_allclose(run_dict["x_prev"], np.array([4.0, 5.0]))
+
+    def test_run_single_stage_target_lane_optimizer_with_retries_tracks_total_iterations(
+        self,
+    ):
+        module = self.load_module()
+        contract = module.resolve_single_stage_optimizer_contract("jax", "ondevice")
+        anchor_state = {
+            "coil_dofs": np.array([1.0, 2.0]),
+            "sdofs": np.array([3.0, 4.0]),
+            "iota": TEST_IOTA,
+            "G": TEST_G0,
+            "J": 1.0,
+            "dJ": np.zeros(5),
+            "intersecting": False,
+            "self_intersection_check_available": True,
+            "hardware_constraint_status": {"success": True, "violations": []},
+        }
+        run_dict = self._make_candidate_run_dict([1.0, 2.0])
+        run_dict["latest_local_incumbent"] = copy.deepcopy(anchor_state)
+        run_dict["latest_local_stage"] = "latest"
+        run_dict["best_local_incumbent"] = copy.deepcopy(anchor_state)
+        run_dict["best_local_stage"] = "best"
+        invalid_state_events = []
+        observed_maxiters = []
+
+        def fake_run_single_stage_optimizer(
+            fun,
+            dofs,
+            *,
+            callback,
+            contract,
+            maxiter,
+            ftol,
+            gtol,
+            maxcor,
+            outer_maxls,
+            scalar_fun,
+            target_lane_initial_step_size,
+            failure_callback,
+        ):
+            del (
+                fun,
+                dofs,
+                callback,
+                contract,
+                ftol,
+                gtol,
+                maxcor,
+                outer_maxls,
+                scalar_fun,
+                target_lane_initial_step_size,
+                failure_callback,
+            )
+            observed_maxiters.append(maxiter)
+            if len(observed_maxiters) == 1:
+                invalid_state_events.append(
+                    {
+                        "line_search_failed": True,
+                        "nonfinite_step": False,
+                        "stalled_step": False,
+                        "valid_curvature": True,
+                        "step_scale": {"value": 0.2},
+                    }
+                )
+                return types.SimpleNamespace(
+                    x=np.array([9.0, 9.0]),
+                    nit=2,
+                    nfev=4,
+                    njev=4,
+                    success=False,
+                    message="failed",
+                    status=5,
+                )
+            return types.SimpleNamespace(
+                x=np.array([1.0, 2.0]),
+                nit=3,
+                nfev=6,
+                njev=6,
+                success=True,
+                message="ok",
+                status=0,
+            )
+
+        policy = module.SingleStageSearchPolicy(
+            donor_class="stage2_seed_only",
+            search_policy="repair_first",
+            adaptive_failure_penalty_weight=1.5,
+            invalid_step_retry_budget=2,
+            retry_step_shrink_factor=0.5,
+        )
+
+        with patch.object(
+            module,
+            "run_single_stage_optimizer",
+            side_effect=fake_run_single_stage_optimizer,
+        ):
+            result, retry_summary = (
+                module.run_single_stage_target_lane_optimizer_with_retries(
+                    lambda x: x,
+                    np.array([0.0, 0.0]),
+                    callback=None,
+                    retry_callback=None,
+                    contract=contract,
+                    maxiter=5,
+                    ftol=0.0,
+                    gtol=1.0e-6,
+                    maxcor=5,
+                    outer_maxls=6,
+                    scalar_fun=None,
+                    target_lane_initial_step_size=None,
+                    failure_callback=None,
+                    invalid_state_events=invalid_state_events,
+                    run_dict=run_dict,
+                    single_stage_search_policy=policy,
+                )
+            )
+
+        self.assertTrue(result.success)
+        self.assertEqual(retry_summary["attempt_count"], 1)
+        self.assertEqual(observed_maxiters, [5, 3])
+        self.assertEqual(result.nit, 5)
+        self.assertEqual(result.nfev, 10)
+        self.assertEqual(result.njev, 10)
+
+    def test_run_single_stage_target_lane_optimizer_with_retries_supports_scaled_phase_retry_state(
+        self,
+    ):
+        module = self.load_module()
+        contract = module.resolve_single_stage_optimizer_contract("jax", "ondevice")
+        run_dict = self._make_candidate_run_dict([1.0, 2.0])
+        run_dict["latest_local_incumbent"] = {
+            "coil_dofs": np.array([1.0, 2.0]),
+            "sdofs": np.array([3.0, 4.0]),
+            "iota": TEST_IOTA,
+            "G": TEST_G0,
+            "J": 1.0,
+            "dJ": np.array([0.0, 0.0, 0.0, 0.0, 0.0]),
+            "intersecting": False,
+            "self_intersection_check_available": True,
+            "hardware_constraint_status": {"success": True, "violations": []},
+        }
+        run_dict["latest_local_stage"] = "initial"
+        run_dict["best_local_incumbent"] = copy.deepcopy(
+            run_dict["latest_local_incumbent"]
+        )
+        run_dict["best_local_stage"] = "initial"
+        invalid_state_events = []
+        optimizer_calls = []
+
+        def fake_run_single_stage_optimizer(
+            fun,
+            dofs,
+            *,
+            callback,
+            contract,
+            maxiter,
+            ftol,
+            gtol,
+            maxcor,
+            outer_maxls,
+            scalar_fun,
+            target_lane_initial_step_size,
+            failure_callback,
+        ):
+            del fun, contract, maxiter, ftol, gtol, maxcor, outer_maxls, scalar_fun
+            optimizer_calls.append(
+                {
+                    "dofs": dofs,
+                    "callback": callback,
+                    "initial_step_size": target_lane_initial_step_size,
+                }
+            )
+            if len(optimizer_calls) == 1:
+                invalid_state_events.append(
+                    {
+                        "line_search_failed": True,
+                        "nonfinite_step": False,
+                        "stalled_step": False,
+                        "valid_curvature": True,
+                        "step_scale": {"value": 0.2},
+                    }
+                )
+                return types.SimpleNamespace(
+                    x=dofs,
+                    nit=0,
+                    success=False,
+                    message="failed",
+                    status=5,
+                )
+            return types.SimpleNamespace(
+                x=dofs,
+                nit=1,
+                success=True,
+                message="ok",
+                status=0,
+            )
+
+        retry_callback = object()
+        policy = module.SingleStageSearchPolicy(
+            donor_class="stage2_seed_only",
+            search_policy="repair_first",
+            adaptive_failure_penalty_weight=1.5,
+            invalid_step_retry_budget=2,
+            retry_step_shrink_factor=0.5,
+        )
+        initial_state = module.build_single_stage_scaled_phase_retry_state(
+            np.array([9.0, 8.0]),
+        )
+
+        with patch.object(
+            module,
+            "run_single_stage_optimizer",
+            side_effect=fake_run_single_stage_optimizer,
+        ):
+            result, retry_summary = (
+                module.run_single_stage_target_lane_optimizer_with_retries(
+                    lambda x: x,
+                    initial_state,
+                    callback=None,
+                    retry_callback=retry_callback,
+                    contract=contract,
+                    maxiter=5,
+                    ftol=0.0,
+                    gtol=1.0e-6,
+                    maxcor=5,
+                    outer_maxls=6,
+                    scalar_fun=None,
+                    target_lane_initial_step_size=None,
+                    failure_callback=None,
+                    invalid_state_events=invalid_state_events,
+                    run_dict=run_dict,
+                    single_stage_search_policy=policy,
+                    retry_dofs_factory=lambda anchor_state: (
+                        module.build_single_stage_scaled_phase_retry_state(
+                            anchor_state["coil_dofs"]
+                        )
+                    ),
+                    restored_result_x_factory=lambda anchor_state: (
+                        module.build_single_stage_scaled_phase_retry_state(
+                            anchor_state["coil_dofs"]
+                        )
+                    ),
+                )
+            )
+
+        self.assertTrue(result.success)
+        self.assertEqual(retry_summary["attempt_count"], 1)
+        self.assertEqual(len(optimizer_calls), 2)
+        self.assertIs(optimizer_calls[1]["callback"], retry_callback)
+        self.assertEqual(optimizer_calls[1]["initial_step_size"], 0.1)
+        self.assertIsInstance(
+            optimizer_calls[1]["dofs"],
+            module.ScaledOuterPhaseOptimizerState,
+        )
+        np.testing.assert_allclose(
+            optimizer_calls[1]["dofs"].anchor_dofs,
+            np.array([1.0, 2.0]),
+        )
+        np.testing.assert_allclose(
+            optimizer_calls[1]["dofs"].step_dofs,
+            np.zeros(2),
+        )
+
+    def test_run_single_stage_target_lane_optimizer_with_retries_restores_scaled_phase_anchor_on_exhaustion(
+        self,
+    ):
+        module = self.load_module()
+        contract = module.resolve_single_stage_optimizer_contract("jax", "ondevice")
+        anchor_state = {
+            "coil_dofs": np.array([4.0, 5.0]),
+            "sdofs": np.array([6.0, 7.0]),
+            "iota": TEST_IOTA,
+            "G": TEST_G0,
+            "J": 1.0,
+            "dJ": np.zeros(5),
+            "intersecting": False,
+            "self_intersection_check_available": True,
+            "hardware_constraint_status": {"success": True, "violations": []},
+        }
+        run_dict = self._make_candidate_run_dict([1.0, 2.0])
+        run_dict["latest_local_incumbent"] = copy.deepcopy(anchor_state)
+        run_dict["latest_local_stage"] = "latest"
+        run_dict["best_local_incumbent"] = copy.deepcopy(anchor_state)
+        run_dict["best_local_stage"] = "best"
+        invalid_state_events = [
+            {
+                "line_search_failed": True,
+                "nonfinite_step": False,
+                "stalled_step": False,
+                "valid_curvature": True,
+                "step_scale": {"value": 0.2},
+            }
+        ]
+
+        def always_fail(*args, **kwargs):
+            del args, kwargs
+            return types.SimpleNamespace(
+                x=np.array([9.0, 9.0]),
+                nit=0,
+                success=False,
+                message="failed",
+                status=5,
+            )
+
+        policy = module.SingleStageSearchPolicy(
+            donor_class="serialized_surface_state",
+            search_policy="preserve_first",
+            adaptive_failure_penalty_weight=1.0,
+            invalid_step_retry_budget=0,
+            retry_step_shrink_factor=0.35,
+        )
+
+        with patch.object(
+            module,
+            "run_single_stage_optimizer",
+            side_effect=always_fail,
+        ):
+            result, retry_summary = (
+                module.run_single_stage_target_lane_optimizer_with_retries(
+                    lambda x: x,
+                    module.build_single_stage_scaled_phase_retry_state(
+                        np.array([8.0, 9.0]),
+                    ),
+                    callback=None,
+                    retry_callback=None,
+                    contract=contract,
+                    maxiter=5,
+                    ftol=0.0,
+                    gtol=1.0e-6,
+                    maxcor=5,
+                    outer_maxls=6,
+                    scalar_fun=None,
+                    target_lane_initial_step_size=None,
+                    failure_callback=None,
+                    invalid_state_events=invalid_state_events,
+                    run_dict=run_dict,
+                    single_stage_search_policy=policy,
+                    retry_dofs_factory=lambda candidate_anchor_state: (
+                        module.build_single_stage_scaled_phase_retry_state(
+                            candidate_anchor_state["coil_dofs"]
+                        )
+                    ),
+                    restored_result_x_factory=lambda candidate_anchor_state: (
+                        module.build_single_stage_scaled_phase_retry_state(
+                            candidate_anchor_state["coil_dofs"]
+                        )
+                    ),
+                )
+            )
+
+        self.assertFalse(result.success)
+        self.assertTrue(retry_summary["restored_preserved_local_state"])
+        self.assertEqual(retry_summary["restored_preserved_local_stage"], "best")
+        self.assertIsInstance(result.x, module.ScaledOuterPhaseOptimizerState)
+        np.testing.assert_allclose(result.x.anchor_dofs, np.array([4.0, 5.0]))
+        np.testing.assert_allclose(result.x.step_dofs, np.zeros(2))
+
     def test_run_single_stage_optimizer_target_lane_requires_objective_contract(self):
         module = self.load_module()
 
@@ -5478,11 +6242,13 @@ class SingleStageExampleTests(unittest.TestCase):
 
         last_J = 12.0
         last_dJ = np.arange(5.0)
-        expected_failure_value = last_J + max(abs(last_J), 1.0)
         sdofs_warm = np.array([1.0, 2.0, 3.0])
         run_dict = self._make_candidate_run_dict(sdofs_warm)
         run_dict["J"] = last_J
         run_dict["dJ"] = last_dJ.copy()
+        run_dict["donor_class"] = "stage2_seed_only"
+        run_dict["search_policy"] = "repair_first"
+        run_dict["adaptive_failure_penalty_weight"] = 1.5
         booz = _CpuMock()
         jf = _JF()
 
@@ -5496,12 +6262,22 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertEqual(call_iota, TEST_IOTA)
         self.assertEqual(call_G, TEST_G0)
         self.assertIsNone(call_sdofs)
-        self.assertEqual(J_out, expected_failure_value)
+        self.assertGreater(J_out, last_J + max(abs(last_J), 1.0))
         np.testing.assert_array_equal(dJ_out, last_dJ)
         np.testing.assert_array_equal(booz.surface.x, sdofs_warm)
         self.assertEqual(booz.res["iota"], TEST_IOTA)
         self.assertEqual(booz.res["G"], TEST_G0)
         self.assertFalse(booz.res["success"])
+        self.assertEqual(run_dict["failure_count"], 1)
+        failure_summary = run_dict["last_candidate_failure"]
+        self.assertEqual(failure_summary["donor_class"], "stage2_seed_only")
+        self.assertEqual(failure_summary["search_policy"], "repair_first")
+        self.assertAlmostEqual(failure_summary["penalty"], J_out - last_J)
+        self.assertEqual(failure_summary["step_norm"], 0.0)
+        self.assertEqual(
+            failure_summary["penalty_multiplier"],
+            run_dict["adaptive_failure_penalty_weight"],
+        )
 
     def test_snapshot_restore_round_trip(self):
         """Wave 1.4: snapshot → restore → snapshot produces identical arrays."""
@@ -6634,9 +7410,14 @@ class HardwareConstraintTests(unittest.TestCase):
                 diagnostics,
             )
 
-        self.assertEqual(J_out, 24.0)
+        self.assertGreater(J_out, last_J + max(abs(last_J), 1.0))
         np.testing.assert_array_equal(dJ_out, last_dJ)
         self.assertFalse(run_dict["hardware_constraint_status"]["success"])
+        self.assertEqual(run_dict["failure_count"], 1)
+        failure_summary = run_dict["last_candidate_failure"]
+        self.assertGreater(failure_summary["hardware_score"], 0.0)
+        self.assertTrue(failure_summary["solver_success"])
+        self.assertAlmostEqual(failure_summary["penalty"], J_out - last_J)
 
     def test_surface_surface_distance_exposes_shortest_distance(self):
         class _Surface(Optimizable):
@@ -6835,6 +7616,70 @@ class FtolGtolDefaultTests(unittest.TestCase):
 
 
 class ResultsEnvelopeTests(unittest.TestCase):
+    def test_stage2_select_better_feasible_partial_prefers_lower_objective(self):
+        module = load_stage2_module()
+        current = module.Stage2FeasiblePartial(
+            dofs=np.asarray([1.0, 2.0], dtype=float),
+            objective=2.0,
+            curve_length=0.95,
+            coil_coil_distance=0.07,
+            max_curvature=9.0,
+            accepted_index=1,
+        )
+        candidate = module.Stage2FeasiblePartial(
+            dofs=np.asarray([3.0, 4.0], dtype=float),
+            objective=1.0,
+            curve_length=0.96,
+            coil_coil_distance=0.08,
+            max_curvature=10.0,
+            accepted_index=2,
+        )
+
+        chosen = module.select_better_stage2_feasible_partial(current, candidate)
+
+        self.assertIs(chosen, candidate)
+
+    def test_stage2_should_restore_feasible_partial_only_for_non_success(self):
+        module = load_stage2_module()
+        best = module.Stage2FeasiblePartial(
+            dofs=np.asarray([1.0], dtype=float),
+            objective=1.0,
+            curve_length=0.9,
+            coil_coil_distance=0.08,
+            max_curvature=8.0,
+            accepted_index=2,
+        )
+        worse_final = module.Stage2FeasiblePartial(
+            dofs=np.asarray([2.0], dtype=float),
+            objective=2.0,
+            curve_length=0.91,
+            coil_coil_distance=0.07,
+            max_curvature=8.5,
+            accepted_index=4,
+        )
+
+        self.assertTrue(
+            module.should_restore_stage2_feasible_partial(
+                best,
+                worse_final,
+                optimizer_success=False,
+            )
+        )
+        self.assertFalse(
+            module.should_restore_stage2_feasible_partial(
+                best,
+                worse_final,
+                optimizer_success=True,
+            )
+        )
+        self.assertTrue(
+            module.should_restore_stage2_feasible_partial(
+                best,
+                None,
+                optimizer_success=False,
+            )
+        )
+
     def test_stage2_results_envelope_captures_contract_and_artifacts(self):
         module = load_stage2_module()
         module.build_runtime_provenance = lambda **_: {"repo_sha": "deadbeef"}
