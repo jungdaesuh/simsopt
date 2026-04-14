@@ -1078,12 +1078,8 @@ def parse_args():
     parser.add_argument(
         "--iota-target",
         type=float,
-        # The right iota-target is equilibrium-dependent: it should match the
-        # native iota at the working surface (s=0.24 by default). For VMEC-anchor
-        # equilibria the accessible range is ~0.12-0.22; setting targets far from
-        # native iota stalls the optimizer or crashes Boozer initialization.
-        # The 0.15 fallback is a historical default; callers should always set
-        # this explicitly based on the equilibrium being optimized.
+        # Set this explicitly from the equilibrium and working surface.
+        # The 0.15 value is only a historical fallback.
         default=float(os.environ.get("IOTA_TARGET", "0.15")),
         help=(
             "Target-mode iota penalty center and Boozer initialization guess. In frontier mode "

@@ -79,6 +79,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--mpol", type=int, default=8)
     parser.add_argument("--ntor", type=int, default=6)
     parser.add_argument("--maxiter", type=int, default=300)
+    # Set this explicitly from the equilibrium and working surface.
+    # The 0.20 value is only a convenience default for historical reruns.
     parser.add_argument("--iota-target", type=float, default=0.20)
     parser.add_argument("--vol-target", type=float, default=0.10)
     parser.add_argument("--cc-dist", type=float, default=0.05)
@@ -209,6 +211,8 @@ def build_single_stage_thresholded_physics_command(
         str(args.curvature_threshold),
         "--hardware-search-mode",
         args.hardware_search_mode,
+        "--single-stage-goal-mode",
+        "target",
         "--constraint-method",
         "alm",
         "--alm-formulation",
@@ -296,6 +300,14 @@ def build_summary(
             "optimizer_success": results.get("OPTIMIZER_SUCCESS"),
             "alm_outer_iterations": results.get("ALM_OUTER_ITERATIONS"),
             "alm_final_penalty": results.get("ALM_FINAL_PENALTY"),
+            "alm_converged": results.get("ALM_CONVERGED"),
+            "alm_termination_reason": results.get("ALM_TERMINATION_REASON"),
+            "alm_final_multipliers": results.get("ALM_FINAL_MULTIPLIERS"),
+            "alm_final_constraint_values": results.get("ALM_FINAL_CONSTRAINT_VALUES"),
+            "alm_final_max_feasibility_violation": results.get(
+                "ALM_FINAL_MAX_FEASIBILITY_VIOLATION"
+            ),
+            "alm_final_stationarity_norm": results.get("ALM_FINAL_STATIONARITY_NORM"),
             "curve_curve_min_dist": results.get("CURVE_CURVE_MIN_DIST"),
             "curve_surface_min_dist": results.get("CURVE_SURFACE_MIN_DIST"),
             "surface_vessel_min_dist": results.get("SURFACE_VESSEL_MIN_DIST"),
