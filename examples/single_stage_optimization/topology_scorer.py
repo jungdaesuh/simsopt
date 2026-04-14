@@ -295,7 +295,10 @@ def trace_metrics(fieldlines_tys, fieldlines_phi_hits, phis, stop_labels, mode="
 
     survival_fraction = survived / nfieldlines if nfieldlines else 0.0
     if mode == "validation":
-        validation_status = "validated" if survived == nfieldlines else "fails_validation"
+        if stop_reasons_indicate_broken(stop_reason_counts):
+            validation_status = "broken"
+        else:
+            validation_status = "validated" if survived == nfieldlines else "fails_validation"
     else:
         validation_status = "diagnostic_only"
 
