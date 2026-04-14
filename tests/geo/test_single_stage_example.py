@@ -113,6 +113,14 @@ def make_frontier_goal_config(module, **overrides):
         "effective_boozer_weight": 1.0,
         "effective_iota_weight": 1.0,
         "effective_volume_weight": 1.0,
+        "scalarization_type": "weight_schedule_v1",
+        "chebyshev_rho": 1.0e-3,
+        "chebyshev_weight_iota": 1.0,
+        "chebyshev_weight_volume": 1.0,
+        "chebyshev_weight_qa": 1.0,
+        "chebyshev_weight_boozer": 1.0,
+        "epsilon_constraint_qa_max": None,
+        "epsilon_constraint_boozer_max": None,
     }
     config.update(overrides)
     return module.FrontierGoalConfig(**config)
@@ -269,6 +277,37 @@ class FakeAlgebraicObjective:
 
     def __mul__(self, scalar):
         return FakeAlgebraicObjective(self._value * scalar, self._gradient * scalar)
+
+    __rmul__ = __mul__
+
+
+class FakeProjectedObjective(FakeAlgebraicObjective):
+    def __init__(self, value, gradient, projected_gradient):
+        super().__init__(value, gradient)
+        self._projected_gradient = np.asarray(projected_gradient, dtype=float)
+
+    def dJ(self, partials=False):
+        if not partials:
+            return super().dJ()
+        return lambda objective_optimizable: self._projected_gradient.copy()
+
+    def __add__(self, other):
+        if other == 0:
+            return self
+        return FakeProjectedObjective(
+            self._value + other._value,
+            self._gradient + other._gradient,
+            self._projected_gradient + other._projected_gradient,
+        )
+
+    __radd__ = __add__
+
+    def __mul__(self, scalar):
+        return FakeProjectedObjective(
+            self._value * scalar,
+            self._gradient * scalar,
+            self._projected_gradient * scalar,
+        )
 
     __rmul__ = __mul__
 
@@ -702,42 +741,199 @@ class SingleStageExampleTests(unittest.TestCase):
 
     def test_evaluate_topology_gate_reports_early_surface_exit(self):
         module = self.load_module()
-
-        class _Surface:
-            def cross_section(self, phi, thetas):
-                theta = np.asarray(thetas)
-                return np.column_stack(
-                    [
-                        1.0 + 0.1 * np.cos(2 * np.pi * theta),
-                        np.zeros_like(theta),
-                        0.1 * np.sin(2 * np.pi * theta),
-                    ]
-                )
-
-        class _Stop:
-            def __init__(self, *args, **kwargs):
-                pass
-
+        fieldlines_tys = [
+            np.array([[0.0, 1.0, 0.0, 0.0]]),
+            np.array([[0.0, 1.1, 0.0, 0.0]]),
+        ]
         fake_hits = [
             np.array([[0.8, -1.0, 1.0, 0.0, 0.0]]),
             np.array([]),
         ]
-
-        with patch.object(module, "SurfaceClassifier", return_value=SimpleNamespace(dist=lambda xyz: 1.0)), patch.object(
-            module, "LevelsetStoppingCriterion", _Stop
-        ), patch.object(module, "MaxZStoppingCriterion", _Stop), patch.object(
-            module, "MinZStoppingCriterion", _Stop
-        ), patch.object(module, "MinRStoppingCriterion", _Stop), patch.object(
-            module, "MaxRStoppingCriterion", _Stop
-        ), patch.object(module, "compute_fieldlines", return_value=([], fake_hits)):
-            status = module.evaluate_topology_gate(_Surface(), object(), 2, 2.0, 1e-7, 0.75)
+        stop_labels = [
+            "surface_exit",
+            "max_z_guardrail",
+            "min_z_guardrail",
+            "min_r_guardrail",
+            "max_r_guardrail",
+            "iteration_limit",
+        ]
+        status = module._evaluate_topology_gate_impl(
+            object(),
+            object(),
+            2,
+            2.0,
+            1e-7,
+            0.75,
+            compute_fieldlines_fn=lambda *_args, **_kwargs: (fieldlines_tys, fake_hits),
+            midplane_seed_radii_fn=lambda *_args, **_kwargs: np.array([1.0, 1.1]),
+            build_stopping_criteria_fn=lambda *_args, **_kwargs: ([object()], stop_labels),
+            topology_iteration_limit_fn=lambda _tmax: 100,
+        )
 
         self.assertTrue(status["enabled"])
         self.assertFalse(status["success"])
+        self.assertEqual(status["state"], "modeled_infeasible")
         self.assertEqual(status["survived_lines"], 1)
         self.assertAlmostEqual(status["survival_fraction"], 0.5)
         self.assertEqual(status["first_exit_reason"], "surface_exit")
         self.assertAlmostEqual(status["first_exit_time"], 0.8)
+
+    def test_evaluate_topology_gate_marks_iteration_limit_as_broken(self):
+        module = self.load_module()
+        fieldlines_tys = [
+            np.array([[0.0, 1.0, 0.0, 0.0]]),
+            np.array([[0.0, 1.1, 0.0, 0.0]]),
+        ]
+        stop_labels = [
+            "surface_exit",
+            "max_z_guardrail",
+            "min_z_guardrail",
+            "min_r_guardrail",
+            "max_r_guardrail",
+            "iteration_limit",
+        ]
+        status = module._evaluate_topology_gate_impl(
+            object(),
+            object(),
+            2,
+            2.0,
+            1e-7,
+            0.5,
+            compute_fieldlines_fn=lambda *_args, **_kwargs: (
+                fieldlines_tys,
+                [
+                    np.array([]),
+                    np.array([[0.4, -6.0, 1.0, 0.0, 0.0]]),
+                ],
+            ),
+            midplane_seed_radii_fn=lambda *_args, **_kwargs: np.array([1.0, 1.1]),
+            build_stopping_criteria_fn=lambda *_args, **_kwargs: ([object()], stop_labels),
+            topology_iteration_limit_fn=lambda _tmax: 100,
+        )
+
+        self.assertFalse(status["success"])
+        self.assertEqual(status["state"], "broken")
+        self.assertTrue(status["broken"])
+        self.assertEqual(status["survived_lines"], 1)
+        self.assertAlmostEqual(status["survival_fraction"], 0.5)
+
+    def test_topology_gate_and_scorer_share_trace_metrics(self):
+        module = self.load_module()
+        topology_module = load_topology_scorer_module()
+
+        class _Surface:
+            nfp = 1
+
+        fieldlines_tys = [
+            np.array([[0.0, 1.0, 0.0, 0.0]]),
+            np.array([[0.0, 1.1, 0.0, 0.0]]),
+            np.array([[0.0, 1.2, 0.0, 0.0]]),
+        ]
+        fieldlines_phi_hits = [
+            np.array([[0.4, 0.0, 1.0, 0.0, 0.0], [0.7, -1.0, 1.0, 0.0, 0.0]]),
+            np.array([[0.5, 0.0, 1.1, 0.0, 0.0]]),
+            np.array([]),
+        ]
+        stop_labels = [
+            "surface_exit",
+            "max_z_guardrail",
+            "min_z_guardrail",
+            "min_r_guardrail",
+            "max_r_guardrail",
+            "iteration_limit",
+        ]
+
+        gate_status = module._evaluate_topology_gate_impl(
+            _Surface(),
+            object(),
+            3,
+            2.0,
+            1e-7,
+            0.60,
+            compute_fieldlines_fn=lambda *_args, **_kwargs: (
+                fieldlines_tys,
+                fieldlines_phi_hits,
+            ),
+            midplane_seed_radii_fn=lambda *_args, **_kwargs: np.array([1.0, 1.1, 1.2]),
+            build_stopping_criteria_fn=lambda *_args, **_kwargs: ([object()], stop_labels),
+            topology_iteration_limit_fn=lambda _tmax: 100,
+        )
+
+        with patch.object(
+            topology_module,
+            "build_stopping_criteria",
+            return_value=([object()], stop_labels),
+        ), patch.object(
+            topology_module,
+            "midplane_seed_radii",
+            return_value=np.array([1.0, 1.1, 1.2]),
+        ), patch(
+            "simsopt.field.compute_fieldlines",
+            return_value=(fieldlines_tys, fieldlines_phi_hits),
+        ):
+            scorer_result = topology_module.score_topology(
+                _Surface(),
+                object(),
+                nfieldlines=3,
+                tmax=2.0,
+                tol=1e-7,
+                nphis=1,
+            )
+
+        self.assertAlmostEqual(
+            gate_status["survival_fraction"],
+            scorer_result["survival_fraction"],
+        )
+        self.assertEqual(
+            gate_status["survived_lines"],
+            scorer_result["survived_lines"],
+        )
+        self.assertEqual(
+            gate_status["stop_reason_counts"],
+            scorer_result["stop_reason_counts"],
+        )
+        self.assertAlmostEqual(
+            gate_status["first_exit_time"],
+            scorer_result["first_exit"]["first_exit_time"],
+        )
+        self.assertAlmostEqual(
+            gate_status["first_exit_angle"],
+            scorer_result["first_exit"]["first_exit_angle"],
+        )
+
+    def test_safe_score_topology_returns_broken_result_on_exception(self):
+        module = self.load_module()
+
+        with patch.object(
+            module,
+            "score_topology",
+            side_effect=RuntimeError("trace exploded"),
+        ):
+            result = module.safe_score_topology(
+                object(),
+                object(),
+                nfieldlines=4,
+                tmax=2.0,
+            )
+
+        self.assertTrue(result["broken"])
+        self.assertEqual(result["evaluation_state"], "broken")
+        self.assertIn("trace exploded", result["evaluation_error"])
+        self.assertEqual(result["evaluation_error_type"], "RuntimeError")
+        self.assertEqual(result["nfieldlines"], 4)
+        self.assertEqual(result["survived_lines"], 0)
+        self.assertTrue(np.isinf(result["confinement_loss"]))
+
+    def test_trace_metrics_rejects_malformed_empty_hit_rows(self):
+        topology_module = load_topology_scorer_module()
+
+        with self.assertRaises(ValueError):
+            topology_module.trace_metrics(
+                [np.array([[0.0, 1.0, 0.0, 0.0]])],
+                [np.empty((0, 0))],
+                [],
+                ["surface_exit"],
+            )
 
     def test_topology_gate_rejection_increment_scales_with_deficit(self):
         module = self.load_module()
@@ -848,6 +1044,8 @@ class SingleStageExampleTests(unittest.TestCase):
             return_value={
                 "enabled": True,
                 "success": False,
+                "state": "modeled_infeasible",
+                "broken": False,
                 "nfieldlines": 4,
                 "survived_lines": 0,
                 "survival_fraction": 0.0,
@@ -858,6 +1056,8 @@ class SingleStageExampleTests(unittest.TestCase):
                 "first_exit_time": 0.4,
                 "first_exit_angle": 0.2,
                 "first_exit_reason": "surface_exit",
+                "evaluation_error": None,
+                "evaluation_error_type": None,
             },
         ):
             J_out, dJ_out = module.fun(np.ones(5))
@@ -865,6 +1065,114 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertEqual(J_out, 126.0)
         np.testing.assert_array_equal(dJ_out, last_dJ)
         restore_mock.assert_called_once()
+        self.assertEqual(module.run_dict["topology_gate_status"]["state"], "modeled_infeasible")
+        self.assertEqual(module.run_dict["topology_gate_rejects"], 1)
+        self.assertEqual(module.run_dict["invalid_state_rejects_total"], 0)
+
+    def test_fun_rejects_candidate_on_broken_topology_evaluation(self):
+        module = self.load_module()
+
+        last_J = 42.0
+        last_dJ = np.array([1.0, -2.0, 3.0, -4.0, 5.0])
+
+        class _Surface:
+            x = np.ones(3)
+
+            def is_self_intersecting(self):
+                return False
+
+            def volume(self):
+                return 1.0
+
+            def gamma(self):
+                return np.zeros((1, 1, 3))
+
+        class _BoozerSurface:
+            surface = _Surface()
+            res = {"success": True, "iota": TEST_IOTA, "G": TEST_G0}
+
+            def run_code(self, iota, G):
+                return self.res
+
+        class _JF:
+            x = np.zeros(5)
+
+        surface_data = [{"boozer_surface": _BoozerSurface()}, {"boozer_surface": _BoozerSurface()}]
+        module.run_dict = {
+            "x_prev": np.zeros(5),
+            "lscount": 0,
+            "surface_state": {"sdofs": [np.ones(3), np.ones(3)], "iota": [TEST_IOTA, TEST_IOTA], "G": [TEST_G0, TEST_G0]},
+            "J": last_J,
+            "dJ": last_dJ.copy(),
+            "accepted_iterations": 0,
+            "accepted_x": np.zeros(5),
+        }
+        module.surface_data = surface_data
+        module.outer_surface_data = surface_data[-1]
+        module.surface_iota_terms = [SimpleNamespace(J=lambda: TEST_IOTA), SimpleNamespace(J=lambda: TEST_IOTA)]
+        module.VV = object()
+        module.SURFACE_GAP_THRESHOLD = 0.0
+        module.SS_DIST = 0.0
+        module.JF = _JF()
+        module.bs = object()
+        module.nonQSs = []
+        module.brs = []
+        module.Jiota = object()
+        module.IOTAS_WEIGHT = 1.0
+        module.JCurveLength = object()
+        module.LENGTH_WEIGHT = 1.0
+        module.JCurveCurve = object()
+        module.CC_WEIGHT = 1.0
+        module.JCurveSurface = object()
+        module.CS_WEIGHT = 1.0
+        module.JCurvature = object()
+        module.CURVATURE_WEIGHT = 1.0
+        module.JSurfSurf = None
+        module.SURF_DIST_WEIGHT = 0.0
+        module.RES_WEIGHT = 1.0
+        module.MULTISURFACE_RAMP_ITERATIONS = 0
+        module.INNER_SURFACE_INITIAL_WEIGHT = 1.0
+        module.TOPOLOGY_GATE_FIELDLINES = 4
+        module.TOPOLOGY_GATE_TMAX = 2.0
+        module.TOPOLOGY_GATE_TOL = 1e-7
+        module.TOPOLOGY_GATE_SURVIVAL_THRESHOLD = 0.25
+        module.TOPOLOGY_GATE_PENALTY_SCALE = 4.0
+
+        with patch.object(
+            module,
+            "solve_surface_stack_at_dofs",
+            return_value={
+                "success": True,
+                "solve_success": [True, True],
+                "self_intersections": [False, False],
+                "volumes_ordered": True,
+                "gap_ok": True,
+                "vessel_gap_ok": True,
+                "nesting_ok": True,
+                "adjacent_gaps": [0.01],
+                "outer_vessel_gap": 0.1,
+                "bad_nesting_phis": [],
+            },
+        ), patch.object(
+            module,
+            "evaluate_total_objective",
+            return_value={"total": 7.0, "grad": np.arange(5, dtype=float), "surface_weights": np.array([1.0, 1.0])},
+        ), patch.object(module, "restore_surface_states") as restore_mock, patch.object(
+            module,
+            "evaluate_topology_gate",
+            side_effect=RuntimeError("trace exploded"),
+        ):
+            J_out, dJ_out = module.fun(np.ones(5))
+
+        self.assertEqual(J_out, last_J * 2.0)
+        np.testing.assert_array_equal(dJ_out, last_dJ)
+        restore_mock.assert_called_once()
+        self.assertEqual(module.run_dict["topology_gate_status"]["state"], "broken")
+        self.assertTrue(module.run_dict["topology_gate_status"]["broken"])
+        self.assertIn("trace exploded", module.run_dict["topology_gate_status"]["evaluation_error"])
+        self.assertEqual(module.run_dict["topology_gate_status"]["evaluation_error_type"], "RuntimeError")
+        self.assertEqual(module.run_dict["topology_gate_rejects"], 0)
+        self.assertEqual(module.run_dict["invalid_state_rejects_total"], 1)
 
     def test_build_surface_configs_two_surface_mode_derives_inner_target_volume(self):
         module = self.load_module()
@@ -2566,8 +2874,8 @@ class HardwareConstraintTests(unittest.TestCase):
 
         self.assertAlmostEqual(evaluation["total"], 9.0)
         np.testing.assert_allclose(evaluation["grad"], [1.0, -2.0])
-        self.assertAlmostEqual(evaluation["frontier_topology_penalty"], 7.0)
-        self.assertAlmostEqual(evaluation["frontier_contract_penalty"], 7.0)
+        self.assertAlmostEqual(module.run_dict["last_successful_eval"]["frontier_topology_penalty"], 7.0)
+        self.assertAlmostEqual(module.run_dict["last_successful_eval"]["frontier_contract_penalty"], 7.0)
         self.assertEqual(module.run_dict["invalid_state_rejects_total"], 0)
         self.assertEqual(module.run_dict["topology_gate_rejects"], 0)
         self.assertFalse(module.run_dict["topology_gate_status"]["success"])
@@ -2678,11 +2986,124 @@ class HardwareConstraintTests(unittest.TestCase):
 
         self.assertAlmostEqual(evaluation["total"], 9.0)
         np.testing.assert_allclose(evaluation["grad"], [1.0, -2.0])
-        self.assertAlmostEqual(evaluation["frontier_hardware_penalty"], 7.0)
-        self.assertAlmostEqual(evaluation["frontier_contract_penalty"], 7.0)
+        self.assertAlmostEqual(module.run_dict["last_successful_eval"]["frontier_hardware_penalty"], 7.0)
+        self.assertAlmostEqual(module.run_dict["last_successful_eval"]["frontier_contract_penalty"], 7.0)
         self.assertEqual(module.run_dict["invalid_state_rejects_total"], 0)
         self.assertEqual(module.run_dict["hardware_rejects"], 0)
         self.assertFalse(module.run_dict["trial_hardware_status"]["success"])
+
+    def test_evaluate_search_step_repair_phase1_keeps_valid_hardware_bad_candidate_live(self):
+        module = self.load_module()
+
+        class _Surface:
+            def volume(self):
+                return 0.10
+
+        module.SINGLE_STAGE_GOAL_MODE = "target"
+        module.MULTISURFACE_RAMP_ITERATIONS = 0
+        module.INNER_SURFACE_INITIAL_WEIGHT = 1.0
+        module.SURFACE_GAP_THRESHOLD = 0.0
+        module.SS_DIST = 0.04
+        module.TOPOLOGY_GATE_TMAX = 2.0
+        module.TOPOLOGY_GATE_TOL = 1.0e-3
+        module.TOPOLOGY_GATE_SURVIVAL_THRESHOLD = 0.5
+        module.HARDWARE_SEARCH_MODE = "hard"
+        module.HARDWARE_SEARCH_SOFT_ITERATIONS = 0
+        module.CC_DIST = 0.05
+        module.CS_DIST = 0.015
+        module.CURVATURE_THRESHOLD = 40.0
+        module.bs = object()
+        module.JCurveCurve = object()
+        module.JCurveSurface = object()
+        module.JSurfSurf = None
+        module.banana_curve = object()
+        module.JF = SimpleNamespace(x=np.zeros(2))
+        module.surface_iota_terms = [SimpleNamespace(J=lambda: 0.15)]
+        module.surface_data = [{"boozer_surface": SimpleNamespace(surface=_Surface())}]
+        module.run_dict = {
+            "x_prev": np.zeros(2),
+            "lscount": 0,
+            "accepted_iterations": 0,
+            "surface_state": {"sdofs": [], "iota": [], "G": []},
+            "accepted_x": np.zeros(2),
+            "J": 7.0,
+            "dJ": np.array([3.0, -1.0]),
+            "search_eval": {"total": 7.0},
+            "invalid_state_rejects_total": 0,
+            "topology_gate_rejects": 0,
+            "hardware_rejects": 0,
+            "surface_solve_rejects": 0,
+            "frontier_trust_rejects": 0,
+            "phase1_repair_mode_active": True,
+        }
+        stack_status = {
+            "success": True,
+            "solve_success": [True],
+            "self_intersections": [False],
+            "volumes_ordered": True,
+            "gap_ok": True,
+            "vessel_gap_ok": True,
+            "nesting_ok": True,
+            "adjacent_gaps": [],
+            "outer_vessel_gap": None,
+            "bad_nesting_phis": [],
+        }
+        objective_eval = {
+            "total": 2.0,
+            "grad": np.array([1.0, -2.0]),
+            "J_cc": 1.5,
+            "dJ_cc": np.array([0.5, -0.5]),
+            "J_cs": 0.5,
+            "dJ_cs": np.array([0.25, -0.25]),
+            "J_curvature": 0.25,
+            "dJ_curvature": np.array([0.1, -0.1]),
+            "J_surf": 0.0,
+            "dJ_surf": np.zeros(2),
+            "surface_weights": np.array([1.0]),
+        }
+
+        with patch.object(
+            module,
+            "solve_surface_stack_at_dofs",
+            return_value=stack_status,
+        ), patch.object(
+            module,
+            "evaluate_search_objective",
+            return_value=objective_eval,
+        ), patch.object(
+            module,
+            "evaluate_search_topology_gate",
+            return_value={"enabled": False, "success": True},
+        ), patch.object(
+            module,
+            "evaluate_single_stage_hardware_snapshot",
+            return_value={
+                "status": {
+                    "success": False,
+                    "violations": ["coil_coil_min_dist low"],
+                    "curve_curve_min_dist": 0.06,
+                    "cc_dist": 0.08,
+                    "curve_surface_min_dist": 0.02,
+                    "cs_dist": 0.015,
+                    "surface_vessel_min_dist": None,
+                    "ss_dist": None,
+                    "max_curvature": 15.0,
+                    "curvature_threshold": 40.0,
+                },
+                "curve_curve_min_dist": 0.06,
+                "curve_surface_min_dist": 0.02,
+                "surface_vessel_min_dist": None,
+                "max_curvature": 15.0,
+            },
+        ):
+            evaluation = module.evaluate_search_step(np.ones(2))
+
+        self.assertAlmostEqual(evaluation["total"], 2.0)
+        np.testing.assert_allclose(evaluation["grad"], [1.0, -2.0])
+        self.assertEqual(module.run_dict["invalid_state_rejects_total"], 0)
+        self.assertEqual(module.run_dict["hardware_rejects"], 0)
+        self.assertFalse(module.run_dict["trial_hardware_status"]["success"])
+        self.assertEqual(module.run_dict["last_successful_eval"], objective_eval)
 
     def test_build_scaled_outer_problem_scales_coordinates_gradients_and_callback(self):
         module = self.load_module()
@@ -5422,6 +5843,49 @@ class CurrentBaselineContractTests(unittest.TestCase):
             8.0e4,
         )
 
+    def test_validate_stage2_seed_contract_rejects_missing_tf_current_metadata(self):
+        module = load_single_stage_example_module()
+
+        with self.assertRaisesRegex(ValueError, "missing TF_CURRENT_A even after legacy-contract upgrade"):
+            module.validate_stage2_seed_contract(
+                {
+                    "banana_surf_radius": module.BANANA_WINDING_MINOR_RADIUS_M,
+                    "CURVATURE_THRESHOLD": module.MAX_CURVATURE_INV_M,
+                }
+            )
+
+    def test_validate_stage2_seed_contract_accepts_upgraded_legacy_tf_current(self):
+        module = load_single_stage_example_module()
+        stage2_results = module.upgrade_legacy_stage2_artifact_results(
+            {
+                "banana_surf_radius": 0.22,
+                "CURVATURE_THRESHOLD": module.MAX_CURVATURE_INV_M,
+            },
+            known_tf_current_A=8.0e4,
+        )
+
+        module.validate_stage2_seed_contract(stage2_results)
+
+    def test_resolve_single_stage_banana_surf_radius_defaults_to_loaded_artifact(self):
+        module = load_single_stage_example_module()
+
+        self.assertEqual(
+            module.resolve_single_stage_banana_surf_radius(
+                {"banana_surf_radius": 0.22},
+                None,
+            ),
+            0.22,
+        )
+
+    def test_resolve_single_stage_banana_surf_radius_rejects_cli_override_mismatch(self):
+        module = load_single_stage_example_module()
+
+        with self.assertRaisesRegex(ValueError, "must match the loaded Stage 2 artifact radius 0.220000 m"):
+            module.resolve_single_stage_banana_surf_radius(
+                {"banana_surf_radius": 0.22},
+                0.21,
+            )
+
     def test_resolve_stage2_num_tf_coils_prefers_recorded_artifact_count(self):
         module = load_single_stage_example_module()
         stage2_results = {"NUM_TF_COILS": 20}
@@ -5518,6 +5982,71 @@ class CurrentBaselineContractTests(unittest.TestCase):
 
             self.assertEqual(module.build_stage2_bs_path(args), str(expected_path))
 
+    def test_build_stage2_bs_path_falls_back_to_legacy_radius_for_local_lookup(self):
+        module = load_single_stage_example_module()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            outputs_dir = Path(tmpdir) / "outputs-demo.nc"
+            legacy_dir = (
+                outputs_dir
+                / "R0=0.915-s=0.24-LW=0.0005-CCW=100-CCT=0.05-CW=0.0001-CT=100-SR=0.220-INITC=10000-MAXC=16000-TFC=80000-Order=2-CM=penalty"
+            )
+            legacy_dir.mkdir(parents=True)
+            expected_path = legacy_dir / "biot_savart_opt.json"
+            expected_path.write_text("{}", encoding="utf-8")
+
+            args = SimpleNamespace(
+                stage2_bs_path=None,
+                stage2_source="local",
+                local_stage2_root=tmpdir,
+                database_stage2_root="/unused",
+                plasma_surf_filename="demo.nc",
+                stage2_seed_major_radius=0.915,
+                stage2_seed_toroidal_flux=0.24,
+                stage2_seed_length_weight=0.0005,
+                stage2_seed_cc_weight=100.0,
+                stage2_seed_cc_threshold=0.05,
+                stage2_seed_curvature_weight=0.0001,
+                stage2_seed_curvature_threshold=100.0,
+                stage2_seed_banana_surf_radius=module.BANANA_WINDING_MINOR_RADIUS_M,
+                stage2_seed_tf_current_A=8.0e4,
+                stage2_seed_order=2,
+                stage2_seed_banana_init_current_A=1.0e4,
+            )
+
+            self.assertEqual(module.build_stage2_bs_path(args), str(expected_path))
+
+    def test_build_stage2_bs_path_falls_back_to_legacy_radius_for_database_lookup(self):
+        module = load_single_stage_example_module()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            outputs_dir = Path(tmpdir) / "outputs-demo.nc"
+            legacy_dir = outputs_dir / "MR=0.915-TF=0.24-LW=0.0005-CCW=100-CW=0.0001-SR=0.22-INITC=10000-TFC=80000-Order=2"
+            legacy_dir.mkdir(parents=True)
+            expected_path = legacy_dir / "biot_savart_opt.json"
+            expected_path.write_text("{}", encoding="utf-8")
+
+            args = SimpleNamespace(
+                stage2_bs_path=None,
+                stage2_source="database",
+                local_stage2_root="/unused",
+                database_stage2_root=tmpdir,
+                plasma_surf_filename="demo.nc",
+                stage2_seed_major_radius=0.915,
+                stage2_seed_toroidal_flux=0.24,
+                stage2_seed_length_weight=0.0005,
+                stage2_seed_cc_weight=100.0,
+                stage2_seed_cc_threshold=0.05,
+                stage2_seed_curvature_weight=0.0001,
+                stage2_seed_curvature_threshold=100.0,
+                stage2_seed_banana_surf_radius=module.BANANA_WINDING_MINOR_RADIUS_M,
+                stage2_seed_tf_current_A=8.0e4,
+                stage2_seed_order=2,
+                stage2_seed_banana_init_current_A=1.0e4,
+            )
+
+            self.assertEqual(module.build_stage2_bs_path(args), str(expected_path))
+
     def test_single_stage_parse_args_accepts_hardware_search_flags(self):
         module = load_single_stage_example_module()
 
@@ -5585,6 +6114,34 @@ class CurrentBaselineContractTests(unittest.TestCase):
 
         self.assertAlmostEqual(args.frontier_volume_weight, 200.0)
 
+    def test_single_stage_parse_args_accepts_frontier_scalarization_flags(self):
+        module = load_single_stage_example_module()
+
+        with patch.object(
+            sys,
+            "argv",
+            [
+                "single_stage_banana_example.py",
+                "--frontier-scalarization-type",
+                "achievement_chebyshev_sweep_v1",
+                "--frontier-chebyshev-rho",
+                "0.02",
+                "--frontier-chebyshev-weight-iota",
+                "2.0",
+                "--epsilon-constraint-qa-max",
+                "0.011",
+            ],
+        ):
+            args = module.parse_args()
+
+        self.assertEqual(
+            args.frontier_scalarization_type,
+            "achievement_chebyshev_sweep_v1",
+        )
+        self.assertAlmostEqual(args.frontier_chebyshev_rho, 0.02)
+        self.assertAlmostEqual(args.frontier_chebyshev_weight_iota, 2.0)
+        self.assertAlmostEqual(args.epsilon_constraint_qa_max, 0.011)
+
     def test_single_stage_parse_args_reads_goal_mode_from_environment(self):
         module = load_single_stage_example_module()
 
@@ -5610,6 +6167,359 @@ class CurrentBaselineContractTests(unittest.TestCase):
         self.assertIn("normalized tradeoff score", warning)
         self.assertIn("iota_ref=0.150000", warning)
         self.assertIn("1.000000e-05", warning)
+
+    def test_apply_frontier_scalarization_override_uses_chebyshev_lane(self):
+        module = load_single_stage_example_module()
+
+        class _ScalarObjective:
+            def __init__(self, value, grad):
+                self._value = value
+                self._grad = np.asarray(grad, dtype=float)
+
+            def J(self):
+                return self._value
+
+            def dJ(self):
+                return self._grad
+
+        module.SINGLE_STAGE_GOAL_MODE = "frontier"
+        module.FRONTIER_GOAL_CONFIG = make_frontier_goal_config(
+            module,
+            scalarization_type="achievement_chebyshev_sweep_v1",
+            chebyshev_rho=0.02,
+            chebyshev_weight_iota=2.0,
+            chebyshev_weight_volume=1.5,
+            chebyshev_weight_qa=1.0,
+            chebyshev_weight_boozer=0.5,
+        )
+        module.surface_iota_terms = [_ScalarObjective(0.13, [1.0, 0.0])]
+        module.surface_volume_term = _ScalarObjective(0.09, [0.0, 1.0])
+        module.EFFECTIVE_RES_WEIGHT = 1.0
+        module.EFFECTIVE_IOTAS_WEIGHT = 1.0
+        module.EFFECTIVE_VOLUME_WEIGHT = 1.0
+        module.LENGTH_WEIGHT = 1.0
+        module.CC_WEIGHT = 0.0
+        module.CS_WEIGHT = 0.0
+        module.CURVATURE_WEIGHT = 0.0
+        module.SURF_DIST_WEIGHT = 0.0
+
+        objective_eval = {
+            "total": 0.0,
+            "grad": np.zeros(2),
+            "J_QS": 1.2e-4,
+            "dJ_QS": np.array([0.5, 0.0]),
+            "J_QS_objective": 1.2,
+            "dJ_QS_objective": np.array([0.5, 0.0]),
+            "J_Boozer": 2.0e-6,
+            "dJ_Boozer": np.array([0.0, 0.4]),
+            "J_Boozer_objective": 2.0,
+            "dJ_Boozer_objective": np.array([0.0, 0.4]),
+            "J_iota": -0.1,
+            "dJ_iota": np.array([-0.3, 0.0]),
+            "J_volume": -0.2,
+            "dJ_volume": np.array([0.0, -0.2]),
+            "J_len": 0.05,
+            "dJ_len": np.array([0.1, 0.1]),
+            "J_cc": 0.0,
+            "dJ_cc": np.zeros(2),
+            "J_cs": 0.0,
+            "dJ_cs": np.zeros(2),
+            "J_curvature": 0.0,
+            "dJ_curvature": np.zeros(2),
+            "J_surf": 0.0,
+            "dJ_surf": np.zeros(2),
+        }
+
+        scalarized = module.apply_frontier_scalarization_override(objective_eval)
+
+        self.assertEqual(
+            scalarized["frontier_scalarization_type"],
+            "achievement_chebyshev_sweep_v1",
+        )
+        self.assertIn("frontier_chebyshev_deltas", scalarized)
+        self.assertNotAlmostEqual(
+            scalarized["frontier_goal_total"],
+            1.2 + 2.0 - 0.1 - 0.2,
+        )
+
+    def test_apply_frontier_scalarization_override_adds_epsilon_search_penalty(self):
+        module = load_single_stage_example_module()
+
+        class _ScalarObjective:
+            def __init__(self, value, grad):
+                self._value = value
+                self._grad = np.asarray(grad, dtype=float)
+
+            def J(self):
+                return self._value
+
+            def dJ(self):
+                return self._grad
+
+        module.SINGLE_STAGE_GOAL_MODE = "frontier"
+        module.FRONTIER_GOAL_CONFIG = make_frontier_goal_config(
+            module,
+            scalarization_type="epsilon_constraint_sweep_v1",
+            epsilon_constraint_qa_max=1.0e-4,
+            epsilon_constraint_boozer_max=1.0e-6,
+        )
+        module.surface_iota_terms = [_ScalarObjective(0.13, [1.0, 0.0])]
+        module.surface_volume_term = _ScalarObjective(0.09, [0.0, 1.0])
+        module.EFFECTIVE_RES_WEIGHT = 1.0
+        module.EFFECTIVE_IOTAS_WEIGHT = 1.0
+        module.EFFECTIVE_VOLUME_WEIGHT = 1.0
+        module.LENGTH_WEIGHT = 1.0
+        module.CC_WEIGHT = 0.0
+        module.CS_WEIGHT = 0.0
+        module.CURVATURE_WEIGHT = 0.0
+        module.SURF_DIST_WEIGHT = 0.0
+
+        objective_eval = {
+            "total": 0.0,
+            "grad": np.zeros(2),
+            "J_QS": 4.0e-4,
+            "dJ_QS": np.array([0.5, 0.0]),
+            "J_QS_objective": 1.2,
+            "dJ_QS_objective": np.array([0.5, 0.0]),
+            "J_Boozer": 5.0e-6,
+            "dJ_Boozer": np.array([0.0, 0.4]),
+            "J_Boozer_objective": 2.0,
+            "dJ_Boozer_objective": np.array([0.0, 0.4]),
+            "J_iota": -0.1,
+            "dJ_iota": np.array([-0.3, 0.0]),
+            "J_volume": -0.2,
+            "dJ_volume": np.array([0.0, -0.2]),
+            "J_len": 0.05,
+            "dJ_len": np.array([0.1, 0.1]),
+            "J_cc": 0.0,
+            "dJ_cc": np.zeros(2),
+            "J_cs": 0.0,
+            "dJ_cs": np.zeros(2),
+            "J_curvature": 0.0,
+            "dJ_curvature": np.zeros(2),
+            "J_surf": 0.0,
+            "dJ_surf": np.zeros(2),
+        }
+
+        scalarized = module.apply_frontier_scalarization_override(objective_eval)
+
+        self.assertEqual(
+            scalarized["frontier_scalarization_type"],
+            "epsilon_constraint_sweep_v1",
+        )
+        self.assertGreater(scalarized["frontier_epsilon_penalty"], 0.0)
+        self.assertIn("qa_error", scalarized["frontier_epsilon_constraints"])
+
+    def test_apply_frontier_scalarization_override_is_noop_outside_frontier_mode(self):
+        module = load_single_stage_example_module()
+        module.SINGLE_STAGE_GOAL_MODE = "target"
+        module.FRONTIER_GOAL_CONFIG = None
+        if hasattr(module, "surface_iota_terms"):
+            delattr(module, "surface_iota_terms")
+        if hasattr(module, "surface_volume_term"):
+            delattr(module, "surface_volume_term")
+
+        objective_eval = {
+            "total": 1.23,
+            "grad": np.array([0.1, -0.2]),
+            "J_QS": 1.2e-4,
+            "dJ_QS": np.array([0.5, 0.0]),
+            "J_Boozer": 2.0e-6,
+            "dJ_Boozer": np.array([0.0, 0.4]),
+            "J_iota": -0.1,
+            "dJ_iota": np.array([-0.3, 0.0]),
+        }
+
+        scalarized = module.apply_frontier_scalarization_override(objective_eval)
+
+        self.assertEqual(set(scalarized.keys()), set(objective_eval.keys()))
+        self.assertIsNot(scalarized, objective_eval)
+        np.testing.assert_allclose(scalarized["grad"], objective_eval["grad"])
+
+    def test_apply_frontier_scalarization_override_projects_metric_gradients(self):
+        module = load_single_stage_example_module()
+        module.SINGLE_STAGE_GOAL_MODE = "frontier"
+        module.FRONTIER_GOAL_CONFIG = make_frontier_goal_config(
+            module,
+            scalarization_type="achievement_chebyshev_sweep_v1",
+            chebyshev_rho=0.02,
+        )
+        module.JF = object()
+        module.surface_iota_terms = [
+            FakeProjectedObjective(0.13, [1.0, 0.0], [0.0, 0.0, 1.0, 0.0])
+        ]
+        module.surface_volume_term = FakeProjectedObjective(
+            0.09,
+            [0.0, 1.0],
+            [0.0, 0.0, 0.0, 1.0],
+        )
+        module.EFFECTIVE_RES_WEIGHT = 1.0
+        module.EFFECTIVE_IOTAS_WEIGHT = 1.0
+        module.EFFECTIVE_VOLUME_WEIGHT = 1.0
+        module.LENGTH_WEIGHT = 1.0
+        module.CC_WEIGHT = 0.0
+        module.CS_WEIGHT = 0.0
+        module.CURVATURE_WEIGHT = 0.0
+        module.SURF_DIST_WEIGHT = 0.0
+
+        objective_eval = {
+            "total": 0.0,
+            "grad": np.zeros(4),
+            "J_QS": 1.2e-4,
+            "dJ_QS": np.array([0.5, 0.0, 0.0, 0.0]),
+            "J_QS_objective": 1.2,
+            "dJ_QS_objective": np.array([0.5, 0.0, 0.0, 0.0]),
+            "J_Boozer": 2.0e-6,
+            "dJ_Boozer": np.array([0.0, 0.4, 0.0, 0.0]),
+            "J_Boozer_objective": 2.0,
+            "dJ_Boozer_objective": np.array([0.0, 0.4, 0.0, 0.0]),
+            "J_iota": -0.1,
+            "dJ_iota": np.array([-0.3, 0.0, 0.0, 0.0]),
+            "J_volume": -0.2,
+            "dJ_volume": np.array([0.0, -0.2, 0.0, 0.0]),
+            "J_len": 0.05,
+            "dJ_len": np.array([0.1, 0.1, 0.0, 0.0]),
+            "J_cc": 0.0,
+            "dJ_cc": np.zeros(4),
+            "J_cs": 0.0,
+            "dJ_cs": np.zeros(4),
+            "J_curvature": 0.0,
+            "dJ_curvature": np.zeros(4),
+            "J_surf": 0.0,
+            "dJ_surf": np.zeros(4),
+        }
+
+        scalarized = module.apply_frontier_scalarization_override(objective_eval)
+
+        self.assertEqual(scalarized["frontier_goal_grad"].shape, (4,))
+        np.testing.assert_allclose(
+            scalarized["dJ_iota_metric"],
+            [0.0, 0.0, 1.0, 0.0],
+        )
+        np.testing.assert_allclose(
+            scalarized["dJ_volume_metric"],
+            [0.0, 0.0, 0.0, 1.0],
+        )
+
+    def test_evaluate_total_objective_matches_raw_impl_outside_frontier_mode(self):
+        module = load_single_stage_example_module()
+        module.SINGLE_STAGE_GOAL_MODE = "target"
+        module.FRONTIER_GOAL_CONFIG = None
+
+        surface_weights = np.array([1.0])
+        non_qs = [FakeAlgebraicObjective(1.2, [0.5, 0.0])]
+        boozer = [FakeAlgebraicObjective(2.0, [0.0, 0.4])]
+        jiota = FakeAlgebraicObjective(-0.1, [-0.3, 0.0])
+        curve_length = FakeAlgebraicObjective(0.05, [0.1, 0.1])
+        curve_curve = FakeAlgebraicObjective(0.25, [0.3, 0.4])
+        curve_surface = FakeAlgebraicObjective(0.15, [0.2, -0.1])
+        curvature = FakeAlgebraicObjective(0.35, [0.2, 0.3])
+        resolved_terms = {
+            "effective_res_weight": 7.0,
+            "effective_iotas_weight": 11.0,
+            "effective_volume_weight": 0.0,
+            "JNonQSObjective": None,
+            "JBoozerObjective": None,
+            "JVolume": None,
+        }
+
+        with patch.object(
+            module,
+            "resolve_current_surface_objective_terms",
+            return_value=resolved_terms,
+        ):
+            wrapped = module.evaluate_total_objective(
+                surface_weights,
+                non_qs,
+                boozer,
+                RES_WEIGHT=999.0,
+                Jiota=jiota,
+                IOTAS_WEIGHT=888.0,
+                JCurveLength=curve_length,
+                LENGTH_WEIGHT=0.5,
+                JCurveCurve=curve_curve,
+                CC_WEIGHT=2.0,
+                JCurveSurface=curve_surface,
+                CS_WEIGHT=3.0,
+                JCurvature=curvature,
+                CURVATURE_WEIGHT=4.0,
+            )
+        raw = module._evaluate_total_objective_impl(
+            surface_weights,
+            non_qs,
+            boozer,
+            resolved_terms["effective_res_weight"],
+            jiota,
+            resolved_terms["effective_iotas_weight"],
+            curve_length,
+            0.5,
+            curve_curve,
+            2.0,
+            curve_surface,
+            3.0,
+            curvature,
+            4.0,
+            JNonQSObjective=resolved_terms["JNonQSObjective"],
+            JBoozerObjective=resolved_terms["JBoozerObjective"],
+            JVolume=resolved_terms["JVolume"],
+            VOLUME_WEIGHT=resolved_terms["effective_volume_weight"],
+        )
+
+        self.assertEqual(set(wrapped.keys()), set(raw.keys()))
+        for key, raw_value in raw.items():
+            wrapped_value = wrapped[key]
+            if isinstance(raw_value, np.ndarray):
+                np.testing.assert_allclose(wrapped_value, raw_value)
+            else:
+                self.assertEqual(wrapped_value, raw_value)
+
+    def test_evaluate_total_objective_projects_component_gradients_to_search_space(self):
+        module = load_single_stage_example_module()
+
+        surface_weights = np.array([1.0])
+        objective_optimizable = object()
+        non_qs = [
+            FakeProjectedObjective(1.2, [0.5, 0.0], [0.5, 0.0, 0.0, 0.0])
+        ]
+        boozer = [
+            FakeProjectedObjective(2.0, [0.0, 0.4], [0.0, 0.4, 0.0, 0.0])
+        ]
+        jiota = FakeProjectedObjective(-0.1, [-0.3, 0.0], [0.0, 0.0, -0.3, 0.0])
+        volume = FakeProjectedObjective(-0.2, [0.0, -0.2], [0.0, 0.0, 0.0, -0.2])
+        curve_length = FakeProjectedObjective(0.05, [0.1, 0.1], [0.1, 0.1, 0.0, 0.0])
+        curve_curve = FakeProjectedObjective(0.0, [0.0, 0.0], np.zeros(4))
+        curve_surface = FakeProjectedObjective(0.0, [0.0, 0.0], np.zeros(4))
+        curvature = FakeProjectedObjective(0.0, [0.0, 0.0], np.zeros(4))
+
+        objective_eval = module._evaluate_total_objective_impl(
+            surface_weights,
+            non_qs,
+            boozer,
+            RES_WEIGHT=1.0,
+            Jiota=jiota,
+            IOTAS_WEIGHT=1.0,
+            JCurveLength=curve_length,
+            LENGTH_WEIGHT=1.0,
+            JCurveCurve=curve_curve,
+            CC_WEIGHT=0.0,
+            JCurveSurface=curve_surface,
+            CS_WEIGHT=0.0,
+            JCurvature=curvature,
+            CURVATURE_WEIGHT=0.0,
+            JVolume=volume,
+            VOLUME_WEIGHT=1.0,
+            objective_optimizable=objective_optimizable,
+        )
+
+        self.assertEqual(objective_eval["grad"].shape, (4,))
+        self.assertEqual(objective_eval["dJ_QS_objective"].shape, (4,))
+        self.assertEqual(objective_eval["dJ_Boozer_objective"].shape, (4,))
+        self.assertEqual(objective_eval["dJ_iota"].shape, (4,))
+        self.assertEqual(objective_eval["dJ_volume"].shape, (4,))
+        np.testing.assert_allclose(objective_eval["dJ_QS"], [0.5, 0.0, 0.0, 0.0])
+        np.testing.assert_allclose(objective_eval["dJ_Boozer"], [0.0, 0.4, 0.0, 0.0])
+        np.testing.assert_allclose(objective_eval["dJ_iota"], [0.0, 0.0, -0.3, 0.0])
+        np.testing.assert_allclose(objective_eval["dJ_volume"], [0.0, 0.0, 0.0, -0.2])
 
     def test_validate_single_stage_alm_formulation_args_rejects_frontier_thresholded_physics(self):
         module = load_single_stage_example_module()
@@ -5671,7 +6581,7 @@ class CurrentBaselineContractTests(unittest.TestCase):
             args = module.parse_args()
 
         self.assertEqual(args.cs_dist, 0.015)
-        self.assertEqual(args.curvature_threshold, 40.0)
+        self.assertEqual(args.curvature_threshold, 100.0)
 
     def test_apply_default_stage2_seed_args_uses_legacy_seed_defaults(self):
         module = load_single_stage_example_module()
@@ -5692,7 +6602,7 @@ class CurrentBaselineContractTests(unittest.TestCase):
 
         module.apply_default_stage2_seed_args(args)
 
-        self.assertEqual(args.stage2_seed_curvature_threshold, 40.0)
+        self.assertEqual(args.stage2_seed_curvature_threshold, 100.0)
         self.assertEqual(args.stage2_seed_banana_surf_radius, 0.21)
         self.assertEqual(args.stage2_seed_tf_current_A, 8.0e4)
 
@@ -5756,7 +6666,7 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
             "nphi": 8,
             "ntheta": 8,
             "init_only": True,
-            "banana_surf_radius": 0.22,
+            "banana_surf_radius": 0.21,
             "tf_current_A": 8.0e4,
             "banana_init_current_A": 1.0e4,
             "banana_current_max_A": 1.6e4,
@@ -5784,11 +6694,11 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
             "alm_taylor_test": False,
             "alm_taylor_test_seed": 123,
             "length_weight": 5e-4,
-            "length_target": 1.75,
+            "length_target": 1.7,
             "cc_threshold": 0.05,
             "cc_weight": 100.0,
             "curvature_weight": 1e-4,
-            "curvature_threshold": 40.0,
+            "curvature_threshold": 100.0,
             "curvature_p_norm": 2,
             "squared_flux_weight": 1.0,
             "basin_hops": 0,
@@ -5927,6 +6837,16 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
                 self.threshold = 40.0
                 self.curve = SimpleNamespace(kappa=lambda: np.array([39.0, 41.0], dtype=float))
 
+        class FakeCurveSurfaceDistance(FakeStage2Objective):
+            def __init__(self):
+                super().__init__(0.15, [0.05, 0.06])
+                self.minimum_distance = 0.015
+                self.curves = ["curve_a", "curve_b"]
+                self.surface = fake_surface
+
+            def shortest_distance(self):
+                return 0.02
+
         fake_bs = FakeBiotSavart()
         fake_surface = FakeSurface()
         fake_curve_names = ["curve_a", "curve_b", "curve_c"]
@@ -6002,12 +6922,12 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
                 success=True,
                 outer_iterations=2,
                 penalty=3.5,
-                multipliers=np.array([0.1, 0.2, 0.3, 0.4], dtype=float),
-                constraint_values=np.array([0.0, 0.01, 0.0, 0.0], dtype=float),
-                solver_constraint_values=np.array([0.0, 0.2, 0.0, 0.0], dtype=float),
-                hard_signed_constraint_values=np.array([0.0, 0.02, 0.0, 0.0], dtype=float),
-                hard_violation_values=np.array([0.0, 0.01, 0.0, 0.0], dtype=float),
-                surrogate_signed_constraint_values=np.array([0.0, 0.2, 0.0, 0.0], dtype=float),
+                multipliers=np.array([0.1, 0.2, 0.3, 0.4, 0.5], dtype=float),
+                constraint_values=np.array([0.0, 0.01, 0.0, 0.0, 0.0], dtype=float),
+                solver_constraint_values=np.array([0.0, 0.2, 0.0, 0.0, 0.0], dtype=float),
+                hard_signed_constraint_values=np.array([0.0, 0.02, 0.0, 0.0, 0.0], dtype=float),
+                hard_violation_values=np.array([0.0, 0.01, 0.0, 0.0, 0.0], dtype=float),
+                surrogate_signed_constraint_values=np.array([0.0, 0.2, 0.0, 0.0, 0.0], dtype=float),
                 trust_radius=0.1,
                 multiplier_cap_binding=True,
                 multiplier_cap_binding_indices=[1],
@@ -6084,7 +7004,10 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
                         lambda *_args, **_kwargs: (
                             "hbt",
                             "surf_coils",
-                            SimpleNamespace(to_vtk=lambda *_a, **_k: None),
+                            SimpleNamespace(
+                                gamma=lambda: np.ones((2, 2, 3), dtype=float) * 0.1,
+                                to_vtk=lambda *_a, **_k: None,
+                            ),
                         ),
                     ),
                     patch.object(
@@ -6101,6 +7024,11 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
                         module,
                         "CurveCurveDistance",
                         lambda *_args, **_kwargs: FakeCurveDistance(),
+                    ),
+                    patch.object(
+                        module,
+                        "CurveSurfaceDistance",
+                        lambda *_args, **_kwargs: FakeCurveSurfaceDistance(),
                     ),
                     patch.object(
                         module,
@@ -6216,15 +7144,15 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
         self.assertEqual(runtime["results"]["ALM_FINAL_KKT_STATIONARITY_NORM"], 0.025)
         np.testing.assert_allclose(
             runtime["results"]["ALM_FINAL_HARD_SIGNED_CONSTRAINT_VALUES"],
-            [0.0, 0.02, 0.0, 0.0],
+            [0.0, 0.02, 0.0, 0.0, 0.0],
         )
         np.testing.assert_allclose(
             runtime["results"]["ALM_FINAL_HARD_VIOLATION_VALUES"],
-            [0.0, 0.01, 0.0, 0.0],
+            [0.0, 0.01, 0.0, 0.0, 0.0],
         )
         np.testing.assert_allclose(
             runtime["results"]["ALM_FINAL_SURROGATE_SIGNED_CONSTRAINT_VALUES"],
-            [0.0, 0.2, 0.0, 0.0],
+            [0.0, 0.2, 0.0, 0.0, 0.0],
         )
         self.assertEqual(runtime["results"]["ALM_FINAL_HARD_MAX_VIOLATION"], 0.01)
         self.assertEqual(runtime["results"]["ALM_FINAL_SURROGATE_MAX_VALUE"], 0.2)

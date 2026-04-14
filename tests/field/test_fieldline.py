@@ -1,10 +1,11 @@
 import unittest
 import logging
 import numpy as np
+import simsoptpp as sopp
 
 from simsopt.field.magneticfieldclasses import ToroidalField, PoloidalField, InterpolatedField, UniformInterpolationRule
 from simsopt.field.tracing import compute_fieldlines, particles_to_vtk, plot_poincare_data, \
-    MinRStoppingCriterion, MinZStoppingCriterion, MaxRStoppingCriterion, MaxZStoppingCriterion
+    LevelsetStoppingCriterion, MinRStoppingCriterion, MinZStoppingCriterion, MaxRStoppingCriterion, MaxZStoppingCriterion
 from simsopt.field.biotsavart import BiotSavart
 from simsopt.configs.zoo import get_ncsx_data
 from simsopt.field.coil import coils_via_symmetries, Coil, Current
@@ -73,6 +74,154 @@ class FieldlineTesting(unittest.TestCase):
         # Check that Poincare plot is a circle in the R,Z plane with R centered at R0
         rtest = [[np.sqrt((np.sqrt(res_tys[i][j][1]**2+res_tys[i][j][2]**2)-R0test)**2+res_tys[i][j][3]**2)-R0[i]+R0test for j in range(len(res_tys[i]))] for i in range(len(res_tys))]
         assert [np.allclose(rtest[i], 0., rtol=1e-5, atol=1e-5) for i in range(nlines)]
+
+    def test_levelset_stopping_detects_within_step_surface_exit(self):
+        field = ToroidalField(1.0, 1.0)
+        rule = sopp.UniformInterpolationRule(1)
+        levelset = sopp.RegularGridInterpolant3D(
+            rule,
+            (0.8, 1.2, 32),
+            (0.0, 2 * np.pi, 256),
+            (-0.1, 0.1, 8),
+            1,
+            True,
+        )
+
+        def signed_wedge(r, phi, z, flatten=True):
+            r = np.asarray(r)
+            phi = np.mod(np.asarray(phi), 2 * np.pi)
+            z = np.asarray(z)
+            values = np.ones((r.size, 1))
+            mask = (
+                (np.abs(r - 1.0) <= 0.05)
+                & (np.abs(z) <= 0.02)
+                & (phi >= 1.0)
+                & (phi <= 1.2)
+            )
+            values[mask, 0] = -1.0
+            if flatten:
+                return np.ascontiguousarray(values).flatten()
+            return values
+
+        levelset.interpolate_batch(signed_wedge)
+
+        res_tys, res_phi_hits = compute_fieldlines(
+            field,
+            [1.0],
+            [0.0],
+            tmax=2.0,
+            tol=1e-2,
+            phis=[],
+            stopping_criteria=[LevelsetStoppingCriterion(levelset)],
+        )
+
+        assert len(res_phi_hits[0]) == 1
+        assert res_phi_hits[0][0, 1] == -1
+        assert 0.9 < res_phi_hits[0][0, 0] < 1.3
+        assert res_phi_hits[0][0, 2] > 0.0
+        assert len(res_tys[0]) > 0
+
+    def test_levelset_stopping_detects_subsample_width_surface_exit(self):
+        field = ToroidalField(1.0, 1.0)
+        rule = sopp.UniformInterpolationRule(1)
+        levelset = sopp.RegularGridInterpolant3D(
+            rule,
+            (0.8, 1.2, 32),
+            (0.0, 2 * np.pi, 512),
+            (-0.1, 0.1, 8),
+            1,
+            True,
+        )
+
+        def signed_wedge(r, phi, z, flatten=True):
+            r = np.asarray(r)
+            phi = np.mod(np.asarray(phi), 2 * np.pi)
+            z = np.asarray(z)
+            values = np.ones((r.size, 1))
+            mask = (
+                (np.abs(r - 1.0) <= 0.05)
+                & (np.abs(z) <= 0.02)
+                & (phi >= 1.135)
+                & (phi <= 1.150)
+            )
+            values[mask, 0] = -1.0
+            if flatten:
+                return np.ascontiguousarray(values).flatten()
+            return values
+
+        levelset.interpolate_batch(signed_wedge)
+
+        _, res_phi_hits = compute_fieldlines(
+            field,
+            [1.0],
+            [0.0],
+            tmax=2.0,
+            tol=1e-2,
+            phis=[],
+            stopping_criteria=[LevelsetStoppingCriterion(levelset)],
+        )
+
+        assert len(res_phi_hits[0]) == 1
+        assert res_phi_hits[0][0, 1] == -1
+        assert 1.05 < res_phi_hits[0][0, 0] < 1.16
+
+    def test_levelset_stopping_refines_to_interpolant_resolution(self):
+        field = ToroidalField(1.0, 1.0)
+        baseline_tys, _ = compute_fieldlines(
+            field,
+            [1.0],
+            [0.0],
+            tmax=2.0,
+            tol=1e-2,
+            phis=[],
+            stopping_criteria=[],
+        )
+        final_step_start = baseline_tys[0][-2, 0]
+        final_step_end = baseline_tys[0][-1, 0]
+        target_fraction = 2561.0 / 8192.0
+        target_phi = final_step_start + target_fraction * (final_step_end - final_step_start)
+
+        rule = sopp.UniformInterpolationRule(1)
+        levelset = sopp.RegularGridInterpolant3D(
+            rule,
+            (0.8, 1.2, 32),
+            (0.0, 2 * np.pi, 8192),
+            (-0.1, 0.1, 8),
+            1,
+            True,
+        )
+
+        def signed_wedge(r, phi, z, flatten=True):
+            r = np.asarray(r)
+            phi = np.mod(np.asarray(phi), 2 * np.pi)
+            z = np.asarray(z)
+            values = np.ones((r.size, 1))
+            mask = (
+                (np.abs(r - 1.0) <= 0.05)
+                & (np.abs(z) <= 0.02)
+                & (phi >= target_phi - 9.0e-4)
+                & (phi <= target_phi + 9.0e-4)
+            )
+            values[mask, 0] = -1.0
+            if flatten:
+                return np.ascontiguousarray(values).flatten()
+            return values
+
+        levelset.interpolate_batch(signed_wedge)
+
+        _, res_phi_hits = compute_fieldlines(
+            field,
+            [1.0],
+            [0.0],
+            tmax=2.0,
+            tol=1e-2,
+            phis=[],
+            stopping_criteria=[LevelsetStoppingCriterion(levelset)],
+        )
+
+        assert len(res_phi_hits[0]) == 1
+        assert res_phi_hits[0][0, 1] == -1
+        assert abs(res_phi_hits[0][0, 0] - target_phi) < 0.02
 
     def test_poincare_plot(self):
         curves, currents, ma = get_ncsx_data()

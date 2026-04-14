@@ -59,6 +59,7 @@ from simsopt._core.derivative import Derivative, derivative_dec
 from alm_utils import (
     ALMSettings,
     alm_result_diagnostics_fields,
+    augmented_inequality_objective,
     minimize_alm,
     validate_alm_cli_args,
 )
@@ -66,6 +67,7 @@ from plotting_utils import norm_field_plot, cross_section_plot
 from topology_scorer import (
     midplane_seed_radii as _midplane_seed_radii,
     score_topology,
+    stop_reasons_indicate_broken as _topology_stop_reasons_indicate_broken,
     stop_reason_label as _topology_stop_reason,
     toroidal_angle as _topology_toroidal_angle,
 )
@@ -82,7 +84,9 @@ from workflow_helpers import (
 from workflow_runner_common import load_stage2_artifact_results
 from banana_opt.artifact_contracts import upgrade_legacy_stage2_artifact_results
 from banana_opt.basin_hopping import run_basin_hopping, telemetry_values as basin_telemetry_values
-from banana_opt.basin_hopping import _normalized_step_rms as basin_normalized_step_rms
+from banana_opt.basin_hopping import (  # noqa: F401 - re-exported for importlib-loaded tests
+    _normalized_step_rms as basin_normalized_step_rms,
+)
 from banana_opt.frontier_constraints import (
     apply_frontier_search_contract_penalties as _apply_frontier_search_contract_penalties_impl,
     annotate_frontier_search_eval as _annotate_frontier_search_eval_impl,
@@ -93,11 +97,34 @@ from banana_opt.frontier_constraints import (
     evaluate_frontier_topology_search_penalty as _evaluate_frontier_topology_search_penalty_impl,
     evaluate_frontier_trust_penalty as _evaluate_frontier_trust_penalty_impl,
     evaluate_frontier_trust_status as _evaluate_frontier_trust_status_impl,
+    hardware_violation_ratios as _hardware_violation_ratios,
+)
+from banana_opt.frontier_conditioning import (
+    FRONTIER_CONDITIONING_SCHEMA_VERSION,
+    build_frontier_conditioning_gate,
+    build_frontier_conditioning_report,
+)
+from banana_opt.frontier_solver_checkpoint import (
+    load_solver_checkpoint,
+    restore_incumbent_from_solver_checkpoint,
+    restore_optional_incumbent,
+    solver_checkpoint_path,
+    write_solver_checkpoint,
+    build_solver_checkpoint_payload,
 )
 from banana_opt.current_contracts import (
-    boozer_I_to_physical_current_A,
-    physical_current_to_boozer_I,
     resolve_plasma_current_settings as _resolve_plasma_current_settings_impl,
+)
+from banana_opt.hardware_contracts import (
+    BANANA_WINDING_MINOR_RADIUS_M,
+    COIL_COIL_MIN_DIST_M,
+    COIL_LENGTH_TARGET_M,
+    COIL_PLASMA_MIN_DIST_M,
+    MAX_CURVATURE_INV_M,
+    PLASMA_VESSEL_MIN_DIST_M,
+    TF_CURRENT_HARD_LIMIT_A,
+    validate_banana_winding_surface_radius,
+    validate_tf_current_limit,
 )
 from banana_opt.incumbents import (
     restore_single_stage_incumbent_state,
@@ -127,14 +154,11 @@ from banana_opt.single_stage_phase1 import (  # noqa: F401 — re-exported for t
     run_penalty_phase1,
 )
 from banana_opt.single_stage_geometry import (
-    build_local_relative_bounds,
-    build_scaled_outer_bounds,
-    build_scaled_local_outer_bounds,
-    build_scaled_outer_problem,
     build_scipy_bounds,
     build_surface_configs as _build_surface_configs_impl,
     build_surface_search_gate,
     build_surface_search_weights,
+    broken_topology_gate_status,
     collect_surface_run_metadata,
     disabled_topology_gate_status,
     evaluate_single_stage_hardware_constraints as _evaluate_single_stage_hardware_constraints,
@@ -147,6 +171,13 @@ from banana_opt.single_stage_geometry import (
     solve_surface_stack_at_dofs,
     compute_single_stage_surface_vessel_min_dist as _compute_single_stage_surface_vessel_min_dist,
     topology_gate_deficit as _topology_gate_deficit,
+    topology_gate_state as _topology_gate_state,
+)
+from banana_opt.single_stage_geometry import (  # noqa: F401 - re-exported for importlib-loaded tests
+    build_local_relative_bounds,
+    build_scaled_local_outer_bounds,
+    build_scaled_outer_bounds,
+    build_scaled_outer_problem,
     topology_gate_rejection_increment,
 )
 from banana_opt.single_stage_constraints import (
@@ -169,38 +200,16 @@ DEFAULT_EQUILIBRIA_DIR = DATABASE_EQUILIBRIA_DIR if os.path.isdir(DATABASE_EQUIL
 DEFAULT_LOCAL_STAGE2_ROOT = os.path.join(EXAMPLE_ROOT, "STAGE_2")
 DEFAULT_DATABASE_STAGE2_ROOT = os.path.join(REPO_ROOT, "DATABASE", "COIL_OPTIMIZATION", "outputs")
 DEFAULT_SINGLE_STAGE_OUTPUT_ROOT = os.path.join(SCRIPT_DIR, "outputs")
+LEGACY_STAGE2_BANANA_WINDING_MINOR_RADIUS_M = 0.22
 DEFAULT_HARDWARE_SEARCH_MODE = "hard"
 DEFAULT_HARDWARE_SEARCH_SOFT_ITERATIONS = 0
-_PENALTY_FEASIBLE_START_LOCAL_MAXITER = int(
-    os.environ.get("PENALTY_FEASIBLE_START_LOCAL_MAXITER", "5")
-)
-_PENALTY_FEASIBLE_START_LOCAL_RELATIVE_RADIUS = float(
-    os.environ.get("PENALTY_FEASIBLE_START_LOCAL_RELATIVE_RADIUS", "0.05")
-)
-_PENALTY_FEASIBLE_START_LOCAL_MAX_ATTEMPTS = int(
-    os.environ.get("PENALTY_FEASIBLE_START_LOCAL_MAX_ATTEMPTS", "3")
-)
-_PENALTY_FEASIBLE_START_LOCAL_RADIUS_SHRINK = float(
-    os.environ.get("PENALTY_FEASIBLE_START_LOCAL_RADIUS_SHRINK", "0.5")
-)
-_PENALTY_FEASIBLE_START_REJECT_RADIUS_SHRINK = float(
-    os.environ.get("PENALTY_FEASIBLE_START_REJECT_RADIUS_SHRINK", "0.25")
-)
-_PENALTY_FEASIBLE_START_SAFE_STEP_RMS_LIMIT = float(
-    os.environ.get("PENALTY_FEASIBLE_START_SAFE_STEP_RMS_LIMIT", "0.02")
-)
-_PENALTY_FEASIBLE_START_PHASE2_RADIUS_SCALE = float(
-    os.environ.get("PENALTY_FEASIBLE_START_PHASE2_RADIUS_SCALE", "0.5")
-)
-_PENALTY_FEASIBLE_START_MIN_ACCEPTED_STEP_RMS = 1.0e-6
 _DEFAULT_SINGLE_STAGE_SEED_REGIME = "auto"
 _SINGLE_STAGE_SEED_REGIME_AUTO = "auto"
-_SINGLE_STAGE_SEED_REGIME_PRESERVE_FIRST = "preserve_first"
-_SINGLE_STAGE_SEED_REGIME_REPAIR_FIRST = "repair_first"
-_SINGLE_STAGE_SEED_REGIME_BRIDGE_ONLY = "bridge_only"
+# Derive from single_stage_phase1 to keep one canonical source of truth for string values.
+_SINGLE_STAGE_SEED_REGIME_PRESERVE_FIRST = _PHASE1_SEED_REGIME_PRESERVE_FIRST
+_SINGLE_STAGE_SEED_REGIME_REPAIR_FIRST = _PHASE1_SEED_REGIME_REPAIR_FIRST
+_SINGLE_STAGE_SEED_REGIME_BRIDGE_ONLY = _PHASE1_SEED_REGIME_BRIDGE_ONLY
 _SINGLE_STAGE_SEED_REGIME_GLOBAL_SEARCH = "global_search"
-_FRONTIER_FEASIBLE_START_PHASE1_SCALE = 0.05
-_FRONTIER_FEASIBLE_START_LOCAL_RELATIVE_RADIUS = 0.01
 SINGLE_STAGE_ALM_GEOMETRY_CONSTRAINT_NAMES = (
     "coil_coil_spacing",
     "coil_surface_spacing",
@@ -219,11 +228,11 @@ DEFAULT_STAGE2_SEEDS_BY_PLASMA = {
         "toroidal_flux": 0.24,
         "length_weight": 0.0005,
         "cc_weight": 100.0,
-        "cc_threshold": 0.05,
+        "cc_threshold": COIL_COIL_MIN_DIST_M,
         "curvature_weight": 0.0001,
-        "curvature_threshold": 40.0,
-        "banana_surf_radius": 0.21,
-        "tf_current_A": 8.0e4,
+        "curvature_threshold": MAX_CURVATURE_INV_M,
+        "banana_surf_radius": BANANA_WINDING_MINOR_RADIUS_M,
+        "tf_current_A": TF_CURRENT_HARD_LIMIT_A,
         "order": 2,
         "banana_init_current_A": 1.0e4,
     },
@@ -232,11 +241,11 @@ DEFAULT_STAGE2_SEEDS_BY_PLASMA = {
         "toroidal_flux": 0.24,
         "length_weight": 0.0005,
         "cc_weight": 100.0,
-        "cc_threshold": 0.05,
+        "cc_threshold": COIL_COIL_MIN_DIST_M,
         "curvature_weight": 0.0001,
-        "curvature_threshold": 40.0,
-        "banana_surf_radius": 0.21,
-        "tf_current_A": 8.0e4,
+        "curvature_threshold": MAX_CURVATURE_INV_M,
+        "banana_surf_radius": BANANA_WINDING_MINOR_RADIUS_M,
+        "tf_current_A": TF_CURRENT_HARD_LIMIT_A,
         "order": 2,
         "banana_init_current_A": 1.0e4,
     },
@@ -300,11 +309,8 @@ def _resolve_unique_stage2_match(patterns, note):
     return None
 
 
-def build_stage2_bs_path(args):
-    if args.stage2_bs_path:
-        return args.stage2_bs_path
-
-    seed_spec = Stage2SeedSpec(
+def _stage2_seed_spec_from_args(args, *, banana_surf_radius: float | None = None):
+    return Stage2SeedSpec(
         plasma_surf_filename=args.plasma_surf_filename,
         major_radius=args.stage2_seed_major_radius,
         toroidal_flux=args.stage2_seed_toroidal_flux,
@@ -313,158 +319,227 @@ def build_stage2_bs_path(args):
         cc_threshold=args.stage2_seed_cc_threshold,
         curvature_weight=args.stage2_seed_curvature_weight,
         curvature_threshold=args.stage2_seed_curvature_threshold,
-        banana_surf_radius=args.stage2_seed_banana_surf_radius,
+        banana_surf_radius=(
+            args.stage2_seed_banana_surf_radius
+            if banana_surf_radius is None
+            else banana_surf_radius
+        ),
         tf_current_A=args.stage2_seed_tf_current_A,
         order=args.stage2_seed_order,
         banana_init_current_A=args.stage2_seed_banana_init_current_A,
     )
 
+
+def _iter_stage2_seed_specs_for_lookup(seed_spec):
+    yield seed_spec, None
+    if abs(seed_spec.banana_surf_radius - BANANA_WINDING_MINOR_RADIUS_M) <= 1.0e-12:
+        yield (
+            Stage2SeedSpec(
+                plasma_surf_filename=seed_spec.plasma_surf_filename,
+                major_radius=seed_spec.major_radius,
+                toroidal_flux=seed_spec.toroidal_flux,
+                length_weight=seed_spec.length_weight,
+                cc_weight=seed_spec.cc_weight,
+                cc_threshold=seed_spec.cc_threshold,
+                curvature_weight=seed_spec.curvature_weight,
+                curvature_threshold=seed_spec.curvature_threshold,
+                banana_surf_radius=LEGACY_STAGE2_BANANA_WINDING_MINOR_RADIUS_M,
+                tf_current_A=seed_spec.tf_current_A,
+                order=seed_spec.order,
+                banana_init_current_A=seed_spec.banana_init_current_A,
+                banana_current_max_A=seed_spec.banana_current_max_A,
+            ),
+            (
+                "legacy banana winding surface radius "
+                f"{LEGACY_STAGE2_BANANA_WINDING_MINOR_RADIUS_M:.3f} m"
+            ),
+        )
+
+
+def build_stage2_bs_path(args):
+    if args.stage2_bs_path:
+        return args.stage2_bs_path
+
+    seed_spec = _stage2_seed_spec_from_args(args)
+    lookup_specs = tuple(_iter_stage2_seed_specs_for_lookup(seed_spec))
+
     if args.stage2_source == "database":
-        seed_dir = format_database_stage2_seed_dir(seed_spec)
+        for lookup_spec, compatibility_note in lookup_specs:
+            note_suffix = "" if compatibility_note is None else f"; {compatibility_note}"
+            seed_dir = format_database_stage2_seed_dir(lookup_spec)
+            candidate = os.path.join(
+                args.database_stage2_root,
+                f"outputs-{args.plasma_surf_filename}",
+                seed_dir,
+                "biot_savart_opt.json",
+            )
+            if os.path.exists(candidate):
+                if compatibility_note is not None:
+                    print(
+                        f"Note: found legacy Stage 2 database output at {seed_dir}/ "
+                        f"({compatibility_note})"
+                    )
+                return candidate
+
+            legacy_init_dir = format_database_stage2_seed_dir_without_init_current(lookup_spec)
+            legacy_init = os.path.join(
+                args.database_stage2_root,
+                f"outputs-{args.plasma_surf_filename}",
+                legacy_init_dir,
+                "biot_savart_opt.json",
+            )
+            if os.path.exists(legacy_init):
+                print(
+                    f"Note: found legacy Stage 2 database output at {legacy_init_dir}/ "
+                    f"(missing INITC segment{note_suffix})"
+                )
+                return legacy_init
+
+            legacy_dir = format_legacy_database_stage2_seed_dir(lookup_spec)
+            legacy = os.path.join(
+                args.database_stage2_root,
+                f"outputs-{args.plasma_surf_filename}",
+                legacy_dir,
+                "biot_savart_opt.json",
+            )
+            if os.path.exists(legacy):
+                print(
+                    f"Note: found legacy Stage 2 database output at {legacy_dir}/ "
+                    f"(missing TFC segment{note_suffix})"
+                )
+                return legacy
+        return candidate
+
+    for lookup_spec, compatibility_note in lookup_specs:
+        note_suffix = "" if compatibility_note is None else f"; {compatibility_note}"
+        seed_dir = format_local_stage2_seed_dir(lookup_spec)
+        legacy_init_dir = format_local_stage2_seed_dir_without_init_current(lookup_spec)
+        current_penalty_candidate = os.path.join(
+            args.local_stage2_root,
+            f"outputs-{args.plasma_surf_filename}",
+            seed_dir + "-CM=penalty",
+            "biot_savart_opt.json",
+        )
+        if os.path.exists(current_penalty_candidate):
+            if compatibility_note is not None:
+                print(
+                    f"Note: found legacy Stage 2 output at {seed_dir}-CM=penalty/ "
+                    f"({compatibility_note})"
+                )
+            return current_penalty_candidate
+
+        legacy_init_penalty_candidate = os.path.join(
+            args.local_stage2_root,
+            f"outputs-{args.plasma_surf_filename}",
+            legacy_init_dir + "-CM=penalty",
+            "biot_savart_opt.json",
+        )
+        if os.path.exists(legacy_init_penalty_candidate):
+            print(
+                f"Note: found legacy Stage 2 output at {legacy_init_dir}/ "
+                f"(missing INITC segment{note_suffix})"
+            )
+            return legacy_init_penalty_candidate
+
         candidate = os.path.join(
-            args.database_stage2_root,
+            args.local_stage2_root,
             f"outputs-{args.plasma_surf_filename}",
             seed_dir,
             "biot_savart_opt.json",
         )
         if os.path.exists(candidate):
+            print(
+                f"Note: found legacy Stage 2 output at {seed_dir}/ "
+                f"(missing constraint-method segment{note_suffix})"
+            )
             return candidate
 
-        legacy_init_dir = format_database_stage2_seed_dir_without_init_current(seed_spec)
-        legacy_init = os.path.join(
-            args.database_stage2_root,
+        legacy_init_candidate = os.path.join(
+            args.local_stage2_root,
             f"outputs-{args.plasma_surf_filename}",
             legacy_init_dir,
             "biot_savart_opt.json",
         )
-        if os.path.exists(legacy_init):
+        if os.path.exists(legacy_init_candidate):
             print(
-                f"Note: found legacy Stage 2 database output at {legacy_init_dir}/ "
-                "(missing INITC segment)"
+                f"Note: found legacy Stage 2 output at {legacy_init_dir}/ "
+                f"(missing INITC and constraint-method segments{note_suffix})"
             )
-            return legacy_init
+            return legacy_init_candidate
 
-        legacy_dir = format_legacy_database_stage2_seed_dir(seed_spec)
+        no_tfc_dir = format_local_stage2_seed_dir_without_tf(lookup_spec)
+        no_tfc_candidate = os.path.join(
+            args.local_stage2_root,
+            f"outputs-{args.plasma_surf_filename}",
+            no_tfc_dir,
+            "biot_savart_opt.json",
+        )
+        if os.path.exists(no_tfc_candidate):
+            print(
+                f"Note: found legacy Stage 2 output at {no_tfc_dir}/ "
+                f"(missing TFC segment{note_suffix})"
+            )
+            return no_tfc_candidate
+
+        legacy_dir = format_legacy_local_stage2_seed_dir(lookup_spec)
         legacy = os.path.join(
-            args.database_stage2_root,
+            args.local_stage2_root,
             f"outputs-{args.plasma_surf_filename}",
             legacy_dir,
             "biot_savart_opt.json",
         )
         if os.path.exists(legacy):
-            print(f"Note: found legacy Stage 2 database output at {legacy_dir}/ (missing TFC segment)")
+            print(
+                f"Note: found legacy Stage 2 output at {legacy_dir}/ "
+                f"(missing CCT/CT segments{note_suffix})"
+            )
             return legacy
-        return candidate
 
-    seed_dir = format_local_stage2_seed_dir(seed_spec)
-    legacy_init_dir = format_local_stage2_seed_dir_without_init_current(seed_spec)
-    current_penalty_candidate = os.path.join(
-        args.local_stage2_root,
-        f"outputs-{args.plasma_surf_filename}",
-        seed_dir + "-CM=penalty",
-        "biot_savart_opt.json",
-    )
-    if os.path.exists(current_penalty_candidate):
-        return current_penalty_candidate
-
-    legacy_init_penalty_candidate = os.path.join(
-        args.local_stage2_root,
-        f"outputs-{args.plasma_surf_filename}",
-        legacy_init_dir + "-CM=penalty",
-        "biot_savart_opt.json",
-    )
-    if os.path.exists(legacy_init_penalty_candidate):
-        print(
-            f"Note: found legacy Stage 2 output at {legacy_init_dir}/ "
-            "(missing INITC segment)"
+        parent = os.path.join(
+            args.local_stage2_root,
+            f"outputs-{args.plasma_surf_filename}",
         )
-        return legacy_init_penalty_candidate
-
-    candidate = os.path.join(
-        args.local_stage2_root,
-        f"outputs-{args.plasma_surf_filename}",
-        seed_dir,
-        "biot_savart_opt.json",
-    )
-    if os.path.exists(candidate):
-        print(f"Note: found legacy Stage 2 output at {seed_dir}/ (missing constraint-method segment)")
-        return candidate
-
-    legacy_init_candidate = os.path.join(
-        args.local_stage2_root,
-        f"outputs-{args.plasma_surf_filename}",
-        legacy_init_dir,
-        "biot_savart_opt.json",
-    )
-    if os.path.exists(legacy_init_candidate):
-        print(
-            f"Note: found legacy Stage 2 output at {legacy_init_dir}/ "
-            "(missing INITC and constraint-method segments)"
+        current_matches = _resolve_unique_stage2_match(
+            [
+                os.path.join(parent, seed_dir + "-CM=penalty-BH=*", "biot_savart_opt.json"),
+                os.path.join(parent, seed_dir + "-CM=alm-*", "biot_savart_opt.json"),
+                os.path.join(parent, seed_dir + "-CM=alm-*-BH=*", "biot_savart_opt.json"),
+                os.path.join(parent, legacy_init_dir + "-CM=penalty-BH=*", "biot_savart_opt.json"),
+                os.path.join(parent, legacy_init_dir + "-CM=alm-*", "biot_savart_opt.json"),
+                os.path.join(parent, legacy_init_dir + "-CM=alm-*-BH=*", "biot_savart_opt.json"),
+            ],
+            "current Stage 2 output"
+            if compatibility_note is None
+            else f"legacy Stage 2 output ({compatibility_note})",
         )
-        return legacy_init_candidate
+        if current_matches is not None:
+            return current_matches
 
-    no_tfc_dir = format_local_stage2_seed_dir_without_tf(seed_spec)
-    no_tfc_candidate = os.path.join(
-        args.local_stage2_root,
-        f"outputs-{args.plasma_surf_filename}",
-        no_tfc_dir,
-        "biot_savart_opt.json",
-    )
-    if os.path.exists(no_tfc_candidate):
-        print(f"Note: found legacy Stage 2 output at {no_tfc_dir}/ (missing TFC segment)")
-        return no_tfc_candidate
+        no_tfc_matches = _resolve_unique_stage2_match(
+            [
+                os.path.join(parent, no_tfc_dir + "-CM=penalty", "biot_savart_opt.json"),
+                os.path.join(parent, no_tfc_dir + "-CM=penalty-BH=*", "biot_savart_opt.json"),
+                os.path.join(parent, no_tfc_dir + "-BH=*", "biot_savart_opt.json"),
+            ],
+            "legacy Stage 2 output (missing TFC segment)"
+            if compatibility_note is None
+            else f"legacy Stage 2 output (missing TFC segment; {compatibility_note})",
+        )
+        if no_tfc_matches is not None:
+            return no_tfc_matches
 
-    # Fallback: legacy directory format without CCT/CT segments
-    legacy_dir = format_legacy_local_stage2_seed_dir(seed_spec)
-    legacy = os.path.join(
-        args.local_stage2_root,
-        f"outputs-{args.plasma_surf_filename}",
-        legacy_dir,
-        "biot_savart_opt.json",
-    )
-    if os.path.exists(legacy):
-        print(f"Note: found legacy Stage 2 output at {legacy_dir}/ (missing CCT/CT segments)")
-        return legacy
-
-    parent = os.path.join(
-        args.local_stage2_root,
-        f"outputs-{args.plasma_surf_filename}",
-    )
-    current_matches = _resolve_unique_stage2_match(
-        [
-            os.path.join(parent, seed_dir + "-CM=penalty-BH=*", "biot_savart_opt.json"),
-            os.path.join(parent, seed_dir + "-CM=alm-*", "biot_savart_opt.json"),
-            os.path.join(parent, seed_dir + "-CM=alm-*-BH=*", "biot_savart_opt.json"),
-            os.path.join(parent, legacy_init_dir + "-CM=penalty-BH=*", "biot_savart_opt.json"),
-            os.path.join(parent, legacy_init_dir + "-CM=alm-*", "biot_savart_opt.json"),
-            os.path.join(parent, legacy_init_dir + "-CM=alm-*-BH=*", "biot_savart_opt.json"),
-        ],
-        "current Stage 2 output",
-    )
-    if current_matches is not None:
-        return current_matches
-
-    no_tfc_matches = _resolve_unique_stage2_match(
-        [
-            os.path.join(parent, no_tfc_dir + "-CM=penalty", "biot_savart_opt.json"),
-            os.path.join(parent, no_tfc_dir + "-CM=penalty-BH=*", "biot_savart_opt.json"),
-            os.path.join(parent, no_tfc_dir + "-BH=*", "biot_savart_opt.json"),
-        ],
-        "legacy Stage 2 output (missing TFC segment)",
-    )
-    if no_tfc_matches is not None:
-        return no_tfc_matches
-
-    legacy_matches = _resolve_unique_stage2_match(
-        [
-            os.path.join(parent, legacy_dir + "-CM=penalty", "biot_savart_opt.json"),
-            os.path.join(parent, legacy_dir + "-CM=penalty-BH=*", "biot_savart_opt.json"),
-            os.path.join(parent, legacy_dir + "-BH=*", "biot_savart_opt.json"),
-        ],
-        "legacy Stage 2 output (missing CCT/CT segments)",
-    )
-    if legacy_matches is not None:
-        return legacy_matches
+        legacy_matches = _resolve_unique_stage2_match(
+            [
+                os.path.join(parent, legacy_dir + "-CM=penalty", "biot_savart_opt.json"),
+                os.path.join(parent, legacy_dir + "-CM=penalty-BH=*", "biot_savart_opt.json"),
+                os.path.join(parent, legacy_dir + "-BH=*", "biot_savart_opt.json"),
+            ],
+            "legacy Stage 2 output (missing CCT/CT segments)"
+            if compatibility_note is None
+            else f"legacy Stage 2 output (missing CCT/CT segments; {compatibility_note})",
+        )
+        if legacy_matches is not None:
+            return legacy_matches
 
     return current_penalty_candidate
 
@@ -503,6 +578,24 @@ def resolve_stage2_num_tf_coils(stage2_results, requested_num_tf_coils):
             "Single-stage reload now refuses to re-slice coils with inconsistent TF-count provenance."
         )
     return resolved_num_tf_coils
+
+
+def resolve_single_stage_banana_surf_radius(stage2_results, requested_banana_surf_radius):
+    artifact_banana_surf_radius = validate_banana_winding_surface_radius(
+        stage2_results["banana_surf_radius"]
+    )
+    if requested_banana_surf_radius is None:
+        return artifact_banana_surf_radius
+    resolved_banana_surf_radius = validate_banana_winding_surface_radius(
+        requested_banana_surf_radius
+    )
+    if abs(resolved_banana_surf_radius - artifact_banana_surf_radius) > 1.0e-12:
+        raise ValueError(
+            "Single-stage banana winding surface must match the loaded Stage 2 artifact "
+            f"radius {artifact_banana_surf_radius:.6f} m; got "
+            f"{resolved_banana_surf_radius:.6f} m."
+        )
+    return resolved_banana_surf_radius
 
 
 def validate_loaded_stage2_coils_partition(coils, num_tf_coils):
@@ -560,13 +653,22 @@ def apply_default_stage2_seed_args(args):
     if args.stage2_seed_curvature_weight is None:
         args.stage2_seed_curvature_weight = default_seed.get("curvature_weight", 0.0001)
     if args.stage2_seed_cc_threshold is None:
-        args.stage2_seed_cc_threshold = default_seed.get("cc_threshold", 0.05)
+        args.stage2_seed_cc_threshold = default_seed.get("cc_threshold", COIL_COIL_MIN_DIST_M)
     if args.stage2_seed_curvature_threshold is None:
-        args.stage2_seed_curvature_threshold = default_seed.get("curvature_threshold", 40.0)
+        args.stage2_seed_curvature_threshold = default_seed.get(
+            "curvature_threshold",
+            MAX_CURVATURE_INV_M,
+        )
     if args.stage2_seed_banana_surf_radius is None:
-        args.stage2_seed_banana_surf_radius = default_seed.get("banana_surf_radius", 0.21)
+        args.stage2_seed_banana_surf_radius = default_seed.get(
+            "banana_surf_radius",
+            BANANA_WINDING_MINOR_RADIUS_M,
+        )
     if args.stage2_seed_tf_current_A is None:
-        args.stage2_seed_tf_current_A = default_seed.get("tf_current_A", 8.0e4)
+        args.stage2_seed_tf_current_A = default_seed.get(
+            "tf_current_A",
+            TF_CURRENT_HARD_LIMIT_A,
+        )
     if args.stage2_seed_order is None:
         args.stage2_seed_order = default_seed.get("order", 2)
     if args.stage2_seed_banana_init_current_A is None:
@@ -600,6 +702,11 @@ def parse_args():
         "--output-root",
         default=os.environ.get("SINGLE_STAGE_OUTPUT_ROOT", DEFAULT_SINGLE_STAGE_OUTPUT_ROOT),
         help="Directory where the single-stage output family will be written.",
+    )
+    parser.add_argument(
+        "--resume-solver-checkpoint",
+        default=None,
+        help=argparse.SUPPRESS,
     )
     parser.add_argument(
         "--banana-surf-radius",
@@ -647,6 +754,24 @@ def parse_args():
     parser.add_argument("--frontier-reference-boozer", type=float, default=None, help=argparse.SUPPRESS)
     parser.add_argument("--frontier-boozer-trust-threshold", type=float, default=None, help=argparse.SUPPRESS)
     parser.add_argument("--frontier-boozer-trust-penalty-scale", type=float, default=None, help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--frontier-scalarization-type",
+        choices=[
+            FRONTIER_SCALARIZATION_TYPE_WEIGHT_SCHEDULE,
+            FRONTIER_SCALARIZATION_TYPE_REFERENCE_POINT,
+            FRONTIER_SCALARIZATION_TYPE_ACHIEVEMENT,
+            FRONTIER_SCALARIZATION_TYPE_EPSILON,
+        ],
+        default=None,
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument("--frontier-chebyshev-rho", type=float, default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--frontier-chebyshev-weight-iota", type=float, default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--frontier-chebyshev-weight-volume", type=float, default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--frontier-chebyshev-weight-qa", type=float, default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--frontier-chebyshev-weight-boozer", type=float, default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--epsilon-constraint-qa-max", type=float, default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--epsilon-constraint-boozer-max", type=float, default=None, help=argparse.SUPPRESS)
     parser.add_argument(
         "--vol-target",
         type=float,
@@ -900,6 +1025,11 @@ def parse_args():
     parser.add_argument(
         "--alm-curvature-smoothing",
         type=float,
+        # Single-stage uses 0.05 (tighter tracking of hard max curvature)
+        # vs Stage 2's 0.25 (broader softmax window). The gap is intentional:
+        # single-stage curvature responds more sensitively during full Boozer
+        # surface optimization, and a tighter smoothing prevents phantom
+        # constraint activation from distant curvature peaks.
         default=float(os.environ.get("ALM_CURVATURE_SMOOTHING", "0.05")),
         help="Curvature smooth-max temperature for single-stage ALM curvature constraints.",
     )
@@ -948,6 +1078,12 @@ def parse_args():
     parser.add_argument(
         "--iota-target",
         type=float,
+        # The right iota-target is equilibrium-dependent: it should match the
+        # native iota at the working surface (s=0.24 by default). For VMEC-anchor
+        # equilibria the accessible range is ~0.12-0.22; setting targets far from
+        # native iota stalls the optimizer or crashes Boozer initialization.
+        # The 0.15 fallback is a historical default; callers should always set
+        # this explicitly based on the equilibrium being optimized.
         default=float(os.environ.get("IOTA_TARGET", "0.15")),
         help=(
             "Target-mode iota penalty center and Boozer initialization guess. In frontier mode "
@@ -996,8 +1132,8 @@ def parse_args():
         default=int(os.environ.get("REFINEMENT_MAX_STALLED_CHUNKS", "2")),
         help="Abort refinement after this many consecutive chunks without accepted-state improvement.",
     )
-    parser.add_argument("--cc-dist", type=float, default=float(os.environ.get("CC_DIST", "0.05")))
-    parser.add_argument("--curvature-threshold", type=float, default=float(os.environ.get("CURVATURE_THRESHOLD", "40")))
+    parser.add_argument("--cc-dist", type=float, default=float(os.environ.get("CC_DIST", str(COIL_COIL_MIN_DIST_M))))
+    parser.add_argument("--curvature-threshold", type=float, default=float(os.environ.get("CURVATURE_THRESHOLD", str(MAX_CURVATURE_INV_M))))
     parser.add_argument("--cc-weight", type=float, default=float(os.environ.get("CC_WEIGHT", "100")))
     parser.add_argument("--curvature-weight", type=float, default=float(os.environ.get("CURVATURE_WEIGHT", "0.1")))
     parser.add_argument("--length-weight", type=float, default=float(os.environ.get("SS_LENGTH_WEIGHT", "1")),
@@ -1005,13 +1141,12 @@ def parse_args():
     parser.add_argument(
         "--length-target",
         type=float,
-        default=(float(os.environ["SS_LENGTH_TARGET"]) if "SS_LENGTH_TARGET" in os.environ else None),
+        default=float(os.environ.get("SS_LENGTH_TARGET", str(COIL_LENGTH_TARGET_M))),
         help=(
             "Curve length quadratic penalty target in meters (applies to banana_curves[0] via "
-            "QuadraticPenalty(..., 'max')). When unset (default), the penalty target is "
-            "self-referentially pinned to the initial seed length, which only prevents the "
-            "coil from growing longer. Setting this flag activates downward pressure toward "
-            "the specified length, e.g. pushing coils toward an HBT-style ~1.75 m spec."
+            "QuadraticPenalty(..., 'max')). Defaults to the hardware contract ceiling of 1.7 m. "
+            "Passing a larger value is clamped back to the contract; passing a smaller value "
+            "makes the run stricter."
         ),
     )
     parser.add_argument("--res-weight", type=float, default=float(os.environ.get("RES_WEIGHT", "1000")),
@@ -1020,11 +1155,11 @@ def parse_args():
                         help="Iota target tracking weight (default 100).")
     parser.add_argument("--cs-weight", type=float, default=float(os.environ.get("CS_WEIGHT", "1")),
                         help="Coil-surface distance penalty weight (default 1).")
-    parser.add_argument("--cs-dist", type=float, default=float(os.environ.get("CS_DIST", "0.015")),
+    parser.add_argument("--cs-dist", type=float, default=float(os.environ.get("CS_DIST", str(COIL_PLASMA_MIN_DIST_M))),
                         help="Minimum coil-surface distance in meters (default 0.015 = 1.5 cm, HBT spec).")
     parser.add_argument("--surf-dist-weight", type=float, default=float(os.environ.get("SURF_DIST_WEIGHT", "1000")),
                         help="Surface-vessel distance penalty weight (default 1000).")
-    parser.add_argument("--ss-dist", type=float, default=float(os.environ.get("SS_DIST", "0.04")),
+    parser.add_argument("--ss-dist", type=float, default=float(os.environ.get("SS_DIST", str(PLASMA_VESSEL_MIN_DIST_M))),
                         help="Minimum surface-vessel distance in meters (default 0.04).")
     parser.add_argument("--maxcor", type=int, default=int(os.environ.get("MAXCOR", "300")),
                         help="L-BFGS-B memory (number of corrections, default 300).")
@@ -1415,16 +1550,8 @@ def evaluate_topology_gate(surface, bfield, nfieldlines, tmax, tol, survival_thr
         tmax,
         tol,
         survival_threshold,
-        surface_classifier_factory=SurfaceClassifier,
-        levelset_stopping_criterion_cls=LevelsetStoppingCriterion,
-        max_z_stopping_criterion_cls=MaxZStoppingCriterion,
-        min_z_stopping_criterion_cls=MinZStoppingCriterion,
-        min_r_stopping_criterion_cls=MinRStoppingCriterion,
-        max_r_stopping_criterion_cls=MaxRStoppingCriterion,
         compute_fieldlines_fn=compute_fieldlines,
         midplane_seed_radii_fn=_midplane_seed_radii,
-        topology_stop_reason_fn=_topology_stop_reason,
-        topology_toroidal_angle_fn=_topology_toroidal_angle,
     )
 
 
@@ -1448,6 +1575,95 @@ def confinement_surrogate_kwargs():
 
 def checkpoint_confinement_objective(proxy_objective, topology_result, confinement_weight):
     return float(proxy_objective) + float(confinement_weight) * float(topology_result["confinement_loss"])
+
+
+def _format_topology_error(error):
+    return str(error) or repr(error)
+
+
+def safe_evaluate_topology_gate(surface, bfield, nfieldlines, tmax, tol, survival_threshold):
+    try:
+        return evaluate_topology_gate(
+            surface,
+            bfield,
+            nfieldlines,
+            tmax,
+            tol,
+            survival_threshold,
+        )
+    except Exception as error:
+        return broken_topology_gate_status(
+            tmax,
+            tol,
+            survival_threshold,
+            nfieldlines=nfieldlines,
+            error_message=_format_topology_error(error),
+            error_type=type(error).__name__,
+        )
+
+
+def _finalize_topology_score_result(result, *, error_message=None, error_type=None):
+    finalized = dict(result)
+    broken = error_message is not None or _topology_stop_reasons_indicate_broken(
+        finalized.get("stop_reason_counts", {})
+    )
+    if broken and error_message is None:
+        error_message = "Topology tracing hit iteration limit"
+        error_type = "IterationLimit"
+    finalized["evaluation_state"] = "broken" if broken else "evaluated"
+    finalized["broken"] = bool(broken)
+    finalized["evaluation_error"] = error_message
+    finalized["evaluation_error_type"] = error_type
+    return finalized
+
+
+def safe_score_topology(
+    surface,
+    bfield,
+    *,
+    nfieldlines,
+    tmax,
+    tol=1e-7,
+    **kwargs,
+):
+    try:
+        return _finalize_topology_score_result(
+            score_topology(
+                surface,
+                bfield,
+                nfieldlines=nfieldlines,
+                tmax=tmax,
+                tol=tol,
+                **kwargs,
+            )
+        )
+    except Exception as error:
+        return _finalize_topology_score_result(
+            {
+                "survival_fraction": 0.0,
+                "survived_lines": 0,
+                "nfieldlines": int(nfieldlines),
+                "tmax": float(tmax),
+                "mean_exit_time": None,
+                "confinement_score": 0.0,
+                "mean_line_loss": 1.0,
+                "worst_k_line_loss": 1.0,
+                "early_exit_fraction": 1.0,
+                "confinement_loss": np.inf,
+                "confinement_surrogate_k": int(max(1, kwargs.get("surrogate_worst_k", 1))),
+                "confinement_early_exit_threshold": float(
+                    kwargs.get("surrogate_early_exit_threshold", 0.0)
+                ),
+                "stop_reason_counts": {},
+                "first_exit": None,
+                "per_phi_hit_counts": [],
+                "line_metrics": [],
+                "line_lifetimes": [],
+                "line_losses": [],
+            },
+            error_message=_format_topology_error(error),
+            error_type=type(error).__name__,
+        )
 
 
 def validate_confinement_surrogate_args(args):
@@ -1574,6 +1790,14 @@ class PreservedTimeoutReplayConfig:
     frontier_effective_boozer_weight: float | None = None
     frontier_effective_iota_weight: float | None = None
     frontier_effective_volume_weight: float | None = None
+    frontier_scalarization_type: str | None = None
+    frontier_chebyshev_rho: float | None = None
+    frontier_chebyshev_weight_iota: float | None = None
+    frontier_chebyshev_weight_volume: float | None = None
+    frontier_chebyshev_weight_qa: float | None = None
+    frontier_chebyshev_weight_boozer: float | None = None
+    epsilon_constraint_qa_max: float | None = None
+    epsilon_constraint_boozer_max: float | None = None
 
 
 @dataclass(frozen=True)
@@ -1596,12 +1820,26 @@ class FrontierGoalConfig:
     effective_boozer_weight: float
     effective_iota_weight: float
     effective_volume_weight: float
+    scalarization_type: str
+    chebyshev_rho: float
+    chebyshev_weight_iota: float
+    chebyshev_weight_volume: float
+    chebyshev_weight_qa: float
+    chebyshev_weight_boozer: float
+    epsilon_constraint_qa_max: float | None
+    epsilon_constraint_boozer_max: float | None
 
 
 FRONTIER_GOAL_MODE_IMPL = "frontier_tradeoff_score_v2"
+FRONTIER_SCALARIZATION_TYPE_WEIGHT_SCHEDULE = "weight_schedule_v1"
+FRONTIER_SCALARIZATION_TYPE_REFERENCE_POINT = "reference_point_sweep_v1"
+FRONTIER_SCALARIZATION_TYPE_ACHIEVEMENT = "achievement_chebyshev_sweep_v1"
+FRONTIER_SCALARIZATION_TYPE_EPSILON = "epsilon_constraint_sweep_v1"
 _FRONTIER_LEGACY_RES_WEIGHT_BASELINE = 1000.0
 _FRONTIER_LEGACY_IOTA_WEIGHT_BASELINE = 100.0
 _FRONTIER_LEGACY_VOLUME_WEIGHT_BASELINE = 100.0
+_FRONTIER_CHEBYSHEV_SHARPNESS = 12.0
+_FRONTIER_EPSILON_PENALTY_WEIGHT = 4.0
 
 
 class BoundedImprovementReward(Optimizable):
@@ -1675,6 +1913,14 @@ def build_frontier_goal_config(
     boozer_reference_override=None,
     boozer_trust_threshold_override=None,
     boozer_trust_penalty_scale_override=None,
+    scalarization_type=None,
+    chebyshev_rho_override=None,
+    chebyshev_weight_iota_override=None,
+    chebyshev_weight_volume_override=None,
+    chebyshev_weight_qa_override=None,
+    chebyshev_weight_boozer_override=None,
+    epsilon_constraint_qa_max_override=None,
+    epsilon_constraint_boozer_max_override=None,
 ):
     if volume_weight is None:
         volume_weight = iotas_weight
@@ -1694,6 +1940,11 @@ def build_frontier_goal_config(
         boozer_trust_threshold_override,
         max(10.0 * boozer_reference, 1e-5),
         minimum=1e-5,
+    )
+    resolved_scalarization_type = (
+        FRONTIER_SCALARIZATION_TYPE_WEIGHT_SCHEDULE
+        if scalarization_type is None
+        else str(scalarization_type)
     )
     return FrontierGoalConfig(
         iota_reference=_frontier_override_or_default(
@@ -1735,6 +1986,42 @@ def build_frontier_goal_config(
             volume_weight,
             _FRONTIER_LEGACY_VOLUME_WEIGHT_BASELINE,
         ),
+        scalarization_type=resolved_scalarization_type,
+        chebyshev_rho=_frontier_override_or_default(
+            chebyshev_rho_override,
+            1.0e-3,
+            minimum=0.0,
+        ),
+        chebyshev_weight_iota=_frontier_override_or_default(
+            chebyshev_weight_iota_override,
+            1.0,
+            minimum=1.0e-12,
+        ),
+        chebyshev_weight_volume=_frontier_override_or_default(
+            chebyshev_weight_volume_override,
+            1.0,
+            minimum=1.0e-12,
+        ),
+        chebyshev_weight_qa=_frontier_override_or_default(
+            chebyshev_weight_qa_override,
+            1.0,
+            minimum=1.0e-12,
+        ),
+        chebyshev_weight_boozer=_frontier_override_or_default(
+            chebyshev_weight_boozer_override,
+            1.0,
+            minimum=1.0e-12,
+        ),
+        epsilon_constraint_qa_max=(
+            None
+            if epsilon_constraint_qa_max_override is None
+            else max(float(epsilon_constraint_qa_max_override), 1.0e-6)
+        ),
+        epsilon_constraint_boozer_max=(
+            None
+            if epsilon_constraint_boozer_max_override is None
+            else max(float(epsilon_constraint_boozer_max_override), 1.0e-6)
+        ),
     )
 
 
@@ -1755,6 +2042,29 @@ PRESERVED_TIMEOUT_REPLAY_CONFIG = PreservedTimeoutReplayConfig(
     target_iota=0.0,
     requested_seed_regime=None,
     effective_seed_regime=None,
+    single_stage_goal_mode=None,
+    single_stage_goal_mode_impl=None,
+    boozer_surface_target_volumes=None,
+    frontier_iota_reference=None,
+    frontier_iota_scale=None,
+    frontier_volume_reference=None,
+    frontier_volume_scale=None,
+    frontier_qs_reference=None,
+    frontier_boozer_reference=None,
+    frontier_boozer_trust_threshold=None,
+    frontier_boozer_trust_penalty_scale=None,
+    frontier_effective_qs_weight=None,
+    frontier_effective_boozer_weight=None,
+    frontier_effective_iota_weight=None,
+    frontier_effective_volume_weight=None,
+    frontier_scalarization_type=None,
+    frontier_chebyshev_rho=None,
+    frontier_chebyshev_weight_iota=None,
+    frontier_chebyshev_weight_volume=None,
+    frontier_chebyshev_weight_qa=None,
+    frontier_chebyshev_weight_boozer=None,
+    epsilon_constraint_qa_max=None,
+    epsilon_constraint_boozer_max=None,
 )
 
 
@@ -1944,7 +2254,7 @@ def evaluate_search_topology_gate(num_surfaces, outer_surface, bfield):
             TOPOLOGY_GATE_TOL,
             TOPOLOGY_GATE_SURVIVAL_THRESHOLD,
         )
-    return evaluate_topology_gate(
+    return safe_evaluate_topology_gate(
         outer_surface,
         bfield,
         TOPOLOGY_GATE_FIELDLINES,
@@ -1980,7 +2290,16 @@ def frontier_mode_enabled():
 
 
 def current_frontier_goal_mode_impl():
-    return FRONTIER_GOAL_MODE_IMPL if frontier_mode_enabled() else "target"
+    if not frontier_mode_enabled():
+        return "target"
+    frontier_goal_config = current_frontier_goal_config()
+    if frontier_goal_config is None:
+        return FRONTIER_GOAL_MODE_IMPL
+    if frontier_goal_config.scalarization_type == FRONTIER_SCALARIZATION_TYPE_ACHIEVEMENT:
+        return "frontier_achievement_chebyshev_v1"
+    if frontier_goal_config.scalarization_type == FRONTIER_SCALARIZATION_TYPE_EPSILON:
+        return "frontier_epsilon_constraint_v1"
+    return FRONTIER_GOAL_MODE_IMPL
 
 
 def current_frontier_goal_config():
@@ -2074,14 +2393,56 @@ def preserved_incumbent_eligible(run_dict):
     return bool(np.isfinite(float(search_eval["total"])))
 
 
+def topology_gate_allows_incumbent(run_dict):
+    topology_status = run_dict.get("topology_gate_status")
+    return not (
+        topology_status is not None
+        and bool(topology_status.get("enabled", False))
+        and not bool(topology_status.get("success", False))
+    )
+
+
 def refinement_eligible_incumbent(run_dict):
     hardware_status = run_dict.get("accepted_hardware_status")
     if hardware_status is None or not hardware_status.get("success", False):
         return False
-    topology_status = run_dict.get("topology_gate_status")
-    if topology_status is None or not bool(topology_status.get("success", False)):
+    if not topology_gate_allows_incumbent(run_dict):
         return False
     return preserved_incumbent_eligible(run_dict)
+
+
+def repair_eligible_incumbent(run_dict):
+    if not topology_gate_allows_incumbent(run_dict):
+        return False
+    return preserved_incumbent_eligible(run_dict)
+
+
+def hardware_violation_score(hardware_status):
+    if hardware_status is None:
+        return float("inf")
+    if bool(hardware_status.get("success", False)):
+        return 0.0
+    violation_score = float(
+        sum(
+            float(value)
+            for value in _hardware_violation_ratios(hardware_status).values()
+        )
+    )
+    if violation_score > 0.0:
+        return violation_score
+    violations = hardware_status.get("violations")
+    if violations is None:
+        return 1.0
+    return float(max(len(violations), 1))
+
+
+def repair_progress_state(run_dict):
+    if not repair_eligible_incumbent(run_dict):
+        return (1, float("inf"))
+    return (
+        0,
+        float(hardware_violation_score(run_dict.get("accepted_hardware_status"))),
+    )
 
 
 def accepted_search_metric(run_dict):
@@ -2118,6 +2479,28 @@ def maybe_update_best_feasible_incumbent(run_dict, incumbent_stage):
 
 
 def frontier_goal_mode_warning_message(frontier_goal_config):
+    if frontier_goal_config.scalarization_type == FRONTIER_SCALARIZATION_TYPE_ACHIEVEMENT:
+        return (
+            "INFO: --single-stage-goal-mode=frontier uses an achievement/Chebyshev "
+            "tradeoff score: iota, volume, QA error, and Boozer residual are compared "
+            f"against the lane reference point (iota_ref={frontier_goal_config.iota_reference:.6f}, "
+            f"volume_ref={frontier_goal_config.volume_reference:.6f}, "
+            f"qa_ref={frontier_goal_config.qs_reference:.6e}, "
+            f"boozer_ref={frontier_goal_config.boozer_reference:.6e}), combined with "
+            f"rho={frontier_goal_config.chebyshev_rho:.6e}, and Boozer residuals above "
+            f"{frontier_goal_config.boozer_trust_threshold:.6e} still incur the frontier "
+            "trust penalty during search."
+        )
+    if frontier_goal_config.scalarization_type == FRONTIER_SCALARIZATION_TYPE_EPSILON:
+        return (
+            "INFO: --single-stage-goal-mode=frontier uses an epsilon-constrained "
+            "tradeoff score: the seed-relative frontier objective stays active, but "
+            "QA and/or Boozer residual threshold violations add smooth search penalties "
+            f"(qa_max={frontier_goal_config.epsilon_constraint_qa_max}, "
+            f"boozer_max={frontier_goal_config.epsilon_constraint_boozer_max}) while "
+            f"Boozer residuals above {frontier_goal_config.boozer_trust_threshold:.6e} "
+            "still incur the frontier trust penalty during search."
+        )
     return (
         "INFO: --single-stage-goal-mode=frontier uses a normalized tradeoff score: "
         "QA and Boozer residual are normalized to the seed, iota and volume use bounded "
@@ -2128,6 +2511,242 @@ def frontier_goal_mode_warning_message(frontier_goal_config):
         "The legacy --res-weight and --iotas-weight inputs are rescaled relative to their historical "
         "defaults so matched target/frontier runs stay in the same rough objective range."
     )
+
+
+def _current_search_gradient(objective):
+    objective_optimizable = globals().get("JF")
+    if objective_optimizable is None:
+        return np.asarray(objective.dJ(), dtype=float)
+    try:
+        partial_gradient = objective.dJ(partials=True)
+    except TypeError:
+        return np.asarray(objective.dJ(), dtype=float)
+    if callable(partial_gradient):
+        return np.asarray(partial_gradient(objective_optimizable), dtype=float)
+    return np.asarray(partial_gradient, dtype=float)
+
+
+def _augment_frontier_metric_state(objective_eval):
+    annotated = dict(objective_eval)
+    raw_iota_term = surface_iota_terms[-1]
+    annotated["J_iota_metric"] = float(raw_iota_term.J())
+    annotated["dJ_iota_metric"] = _current_search_gradient(raw_iota_term)
+    if surface_volume_term is None:
+        annotated["J_volume_metric"] = 0.0
+        annotated["dJ_volume_metric"] = np.zeros_like(annotated["grad"], dtype=float)
+    else:
+        annotated["J_volume_metric"] = float(surface_volume_term.J())
+        annotated["dJ_volume_metric"] = _current_search_gradient(surface_volume_term)
+    return annotated
+
+
+def _frontier_goal_component_total_grad(objective_eval):
+    total = (
+        float(objective_eval["J_QS_objective"])
+        + EFFECTIVE_RES_WEIGHT * float(objective_eval["J_Boozer_objective"])
+        + EFFECTIVE_IOTAS_WEIGHT * float(objective_eval["J_iota"])
+        + EFFECTIVE_VOLUME_WEIGHT * float(objective_eval.get("J_volume", 0.0))
+    )
+    grad = (
+        np.asarray(objective_eval["dJ_QS_objective"], dtype=float)
+        + EFFECTIVE_RES_WEIGHT * np.asarray(objective_eval["dJ_Boozer_objective"], dtype=float)
+        + EFFECTIVE_IOTAS_WEIGHT * np.asarray(objective_eval["dJ_iota"], dtype=float)
+        + EFFECTIVE_VOLUME_WEIGHT * np.asarray(objective_eval.get("dJ_volume", 0.0), dtype=float)
+    )
+    return float(total), grad
+
+
+def _frontier_penalty_geometry_total_grad(objective_eval):
+    total = (
+        LENGTH_WEIGHT * float(objective_eval["J_len"])
+        + CC_WEIGHT * float(objective_eval["J_cc"])
+        + CS_WEIGHT * float(objective_eval["J_cs"])
+        + CURVATURE_WEIGHT * float(objective_eval["J_curvature"])
+        + SURF_DIST_WEIGHT * float(objective_eval.get("J_surf", 0.0))
+    )
+    grad = (
+        LENGTH_WEIGHT * np.asarray(objective_eval["dJ_len"], dtype=float)
+        + CC_WEIGHT * np.asarray(objective_eval["dJ_cc"], dtype=float)
+        + CS_WEIGHT * np.asarray(objective_eval["dJ_cs"], dtype=float)
+        + CURVATURE_WEIGHT * np.asarray(objective_eval["dJ_curvature"], dtype=float)
+        + SURF_DIST_WEIGHT * np.asarray(objective_eval.get("dJ_surf", 0.0), dtype=float)
+    )
+    return float(total), grad
+
+
+def _frontier_alm_base_total_grad(objective_eval):
+    total = LENGTH_WEIGHT * float(objective_eval["J_len"])
+    grad = LENGTH_WEIGHT * np.asarray(objective_eval["dJ_len"], dtype=float)
+    return float(total), grad
+
+
+def _frontier_chebyshev_goal(objective_eval, frontier_goal_config):
+    deltas = np.asarray(
+        [
+            frontier_goal_config.chebyshev_weight_iota
+            * (
+                (frontier_goal_config.iota_reference - float(objective_eval["J_iota_metric"]))
+                / frontier_goal_config.iota_scale
+            ),
+            frontier_goal_config.chebyshev_weight_volume
+            * (
+                (frontier_goal_config.volume_reference - float(objective_eval["J_volume_metric"]))
+                / frontier_goal_config.volume_scale
+            ),
+            frontier_goal_config.chebyshev_weight_qa
+            * (
+                (float(objective_eval["J_QS"]) - frontier_goal_config.qs_reference)
+                / frontier_goal_config.qs_reference
+            ),
+            frontier_goal_config.chebyshev_weight_boozer
+            * (
+                (float(objective_eval["J_Boozer"]) - frontier_goal_config.boozer_reference)
+                / frontier_goal_config.boozer_reference
+            ),
+        ],
+        dtype=float,
+    )
+    sharpness = float(_FRONTIER_CHEBYSHEV_SHARPNESS)
+    shifted = sharpness * (deltas - np.max(deltas))
+    softmax_weights = np.exp(shifted)
+    softmax_weights = softmax_weights / np.sum(softmax_weights)
+    chebyshev_total = (
+        np.max(deltas)
+        + np.log(np.sum(np.exp(shifted))) / sharpness
+        + frontier_goal_config.chebyshev_rho * float(np.sum(deltas))
+    )
+    directional_grads = [
+        -frontier_goal_config.chebyshev_weight_iota
+        * np.asarray(objective_eval["dJ_iota_metric"], dtype=float)
+        / frontier_goal_config.iota_scale,
+        -frontier_goal_config.chebyshev_weight_volume
+        * np.asarray(objective_eval["dJ_volume_metric"], dtype=float)
+        / frontier_goal_config.volume_scale,
+        frontier_goal_config.chebyshev_weight_qa
+        * np.asarray(objective_eval["dJ_QS"], dtype=float)
+        / frontier_goal_config.qs_reference,
+        frontier_goal_config.chebyshev_weight_boozer
+        * np.asarray(objective_eval["dJ_Boozer"], dtype=float)
+        / frontier_goal_config.boozer_reference,
+    ]
+    coeffs = softmax_weights + frontier_goal_config.chebyshev_rho
+    chebyshev_grad = sum(
+        float(coeff) * directional_grad
+        for coeff, directional_grad in zip(coeffs, directional_grads)
+    )
+    return {
+        "frontier_scalarization_total": float(chebyshev_total),
+        "frontier_scalarization_grad": np.asarray(chebyshev_grad, dtype=float),
+        "frontier_chebyshev_deltas": deltas.tolist(),
+        "frontier_chebyshev_softmax_weights": softmax_weights.tolist(),
+    }
+
+
+def _frontier_excess_penalty(value, grad, *, threshold, scale):
+    excess = max(float(value) - float(threshold), 0.0)
+    excess_ratio = excess / float(scale)
+    penalty = float(_FRONTIER_EPSILON_PENALTY_WEIGHT) * float(excess_ratio ** 2)
+    penalty_grad = (
+        np.zeros_like(np.asarray(grad, dtype=float))
+        if excess <= 0.0
+        else (
+            float(_FRONTIER_EPSILON_PENALTY_WEIGHT)
+            * 2.0
+            * excess_ratio
+            / float(scale)
+            * np.asarray(grad, dtype=float)
+        )
+    )
+    return {
+        "enabled": True,
+        "threshold": float(threshold),
+        "scale": float(scale),
+        "excess": float(excess),
+        "excess_ratio": float(excess_ratio),
+        "penalty": float(penalty),
+        "grad": np.asarray(penalty_grad, dtype=float),
+    }
+
+
+def apply_frontier_scalarization_override(objective_eval, *, alm_formulation="weighted_sum"):
+    frontier_goal_config = current_frontier_goal_config()
+    if not frontier_mode_enabled() or frontier_goal_config is None:
+        return dict(objective_eval)
+    annotated = _augment_frontier_metric_state(objective_eval)
+
+    annotated["frontier_scalarization_type"] = frontier_goal_config.scalarization_type
+    frontier_goal_total, frontier_goal_grad = _frontier_goal_component_total_grad(annotated)
+    replacement_total = float(frontier_goal_total)
+    replacement_grad = np.asarray(frontier_goal_grad, dtype=float)
+
+    if frontier_goal_config.scalarization_type == FRONTIER_SCALARIZATION_TYPE_ACHIEVEMENT:
+        chebyshev_eval = _frontier_chebyshev_goal(annotated, frontier_goal_config)
+        replacement_total = float(chebyshev_eval["frontier_scalarization_total"])
+        replacement_grad = np.asarray(
+            chebyshev_eval["frontier_scalarization_grad"],
+            dtype=float,
+        )
+        annotated.update(chebyshev_eval)
+    elif frontier_goal_config.scalarization_type == FRONTIER_SCALARIZATION_TYPE_EPSILON:
+        epsilon_penalties: dict[str, dict[str, object]] = {}
+        if frontier_goal_config.epsilon_constraint_qa_max is not None:
+            epsilon_penalties["qa_error"] = _frontier_excess_penalty(
+                annotated["J_QS"],
+                annotated["dJ_QS"],
+                threshold=frontier_goal_config.epsilon_constraint_qa_max,
+                scale=max(frontier_goal_config.qs_reference, 1.0e-6),
+            )
+        if frontier_goal_config.epsilon_constraint_boozer_max is not None:
+            epsilon_penalties["boozer_residual"] = _frontier_excess_penalty(
+                annotated["J_Boozer"],
+                annotated["dJ_Boozer"],
+                threshold=frontier_goal_config.epsilon_constraint_boozer_max,
+                scale=max(frontier_goal_config.boozer_reference, 1.0e-6),
+            )
+        epsilon_penalty_total = float(
+            sum(entry["penalty"] for entry in epsilon_penalties.values())
+        )
+        epsilon_penalty_grad = sum(
+            (np.asarray(entry["grad"], dtype=float) for entry in epsilon_penalties.values()),
+            np.zeros_like(replacement_grad),
+        )
+        replacement_total += epsilon_penalty_total
+        replacement_grad = replacement_grad + epsilon_penalty_grad
+        annotated["frontier_epsilon_penalty"] = float(epsilon_penalty_total)
+        annotated["frontier_epsilon_constraints"] = {
+            metric_name: {
+                "threshold": entry["threshold"],
+                "excess": entry["excess"],
+                "excess_ratio": entry["excess_ratio"],
+                "penalty": entry["penalty"],
+            }
+            for metric_name, entry in epsilon_penalties.items()
+        }
+
+    annotated["frontier_goal_total"] = float(replacement_total)
+    annotated["frontier_goal_grad"] = np.asarray(replacement_grad, dtype=float)
+
+    if alm_formulation == "weighted_sum":
+        if "constraint_values" in annotated and "constraint_grads" in annotated:
+            base_total, base_grad = _frontier_alm_base_total_grad(annotated)
+            base_total += float(replacement_total)
+            base_grad = base_grad + replacement_grad
+            alm_eval = augmented_inequality_objective(
+                base_total,
+                base_grad,
+                annotated["constraint_values"],
+                annotated["constraint_grads"],
+                ALM_MULTIPLIERS,
+                ALM_PENALTY,
+            )
+            annotated.update(alm_eval)
+            annotated["physics_total"] = float(base_total)
+            annotated["base_total"] = float(base_total)
+        else:
+            penalty_total, penalty_grad = _frontier_penalty_geometry_total_grad(annotated)
+            annotated["total"] = penalty_total + float(replacement_total)
+            annotated["grad"] = penalty_grad + replacement_grad
+    return annotated
 
 
 def resolve_single_stage_goal_objective_terms(
@@ -2344,6 +2963,8 @@ def build_best_feasible_results_summary(
             "BEST_FEASIBLE_SURFACE_STACK_OK": bool(surface_status["success"]),
             "BEST_FEASIBLE_SELF_INTERSECTING": bool(any(surface_status["self_intersections"])),
             "BEST_FEASIBLE_FINAL_TOPOLOGY_GATE_SUCCESS": bool(topology_status["success"]),
+            "BEST_FEASIBLE_FINAL_TOPOLOGY_GATE_STATE": topology_status.get("state"),
+            "BEST_FEASIBLE_FINAL_TOPOLOGY_GATE_ERROR": topology_status.get("evaluation_error"),
         }
     finally:
         restore_single_stage_incumbent_state(run_dict, current_state)
@@ -2381,7 +3002,7 @@ def build_single_stage_objective_bundle(
 
     curvelength = CurveLength(banana_curves[0])
     if length_target is None:
-        length_target = curvelength.J()
+        length_target = COIL_LENGTH_TARGET_M
     outer_surface = surface_data[-1]["boozer_surface"].surface
     surface_volume_term = Volume(outer_surface)
     Jiota = build_single_stage_iota_objective(
@@ -2802,27 +3423,31 @@ def evaluate_total_objective(
     SURF_DIST_WEIGHT=0.0,
 ):
     objective_terms = resolve_current_surface_objective_terms(RES_WEIGHT, IOTAS_WEIGHT)
-    return _evaluate_total_objective_impl(
-        surface_weights,
-        nonQSs,
-        brs,
-        objective_terms["effective_res_weight"],
-        Jiota,
-        objective_terms["effective_iotas_weight"],
-        JCurveLength,
-        LENGTH_WEIGHT,
-        JCurveCurve,
-        CC_WEIGHT,
-        JCurveSurface,
-        CS_WEIGHT,
-        JCurvature,
-        CURVATURE_WEIGHT,
-        JSurfSurf=JSurfSurf,
-        SURF_DIST_WEIGHT=SURF_DIST_WEIGHT,
-        JNonQSObjective=objective_terms["JNonQSObjective"],
-        JBoozerObjective=objective_terms["JBoozerObjective"],
-        JVolume=objective_terms["JVolume"],
-        VOLUME_WEIGHT=objective_terms["effective_volume_weight"],
+    return apply_frontier_scalarization_override(
+        _evaluate_total_objective_impl(
+            surface_weights,
+            nonQSs,
+            brs,
+            objective_terms["effective_res_weight"],
+            Jiota,
+            objective_terms["effective_iotas_weight"],
+            JCurveLength,
+            LENGTH_WEIGHT,
+            JCurveCurve,
+            CC_WEIGHT,
+            JCurveSurface,
+            CS_WEIGHT,
+            JCurvature,
+            CURVATURE_WEIGHT,
+            JSurfSurf=JSurfSurf,
+            SURF_DIST_WEIGHT=SURF_DIST_WEIGHT,
+            JNonQSObjective=objective_terms["JNonQSObjective"],
+            JBoozerObjective=objective_terms["JBoozerObjective"],
+            JVolume=objective_terms["JVolume"],
+            VOLUME_WEIGHT=objective_terms["effective_volume_weight"],
+            objective_optimizable=globals().get("JF"),
+        ),
+        alm_formulation="weighted_sum",
     )
 
 
@@ -2873,49 +3498,52 @@ def evaluate_alm_objective(
     JSurfSurf=None,
 ):
     objective_terms = resolve_current_surface_objective_terms(RES_WEIGHT, IOTAS_WEIGHT)
-    return _evaluate_alm_objective_impl(
-        surface_weights,
-        nonQSs,
-        brs,
-        objective_terms["effective_res_weight"],
-        Jiota,
-        objective_terms["effective_iotas_weight"],
-        objective_terms["JVolume"],
-        objective_terms["effective_volume_weight"],
-        JCurveLength,
-        LENGTH_WEIGHT,
-        JCurveCurve,
-        JCurveSurface,
-        JCurvature,
-        multipliers,
-        penalty,
-        objective_optimizable=JF,
-        curves=curves,
-        curve_curve_min_distance=CC_DIST,
-        outer_surface=outer_surface_data["boozer_surface"].surface,
-        curve_surface_min_distance=CS_DIST,
-        banana_curve=banana_curve,
-        curvature_threshold=CURVATURE_THRESHOLD,
-        distance_smoothing=args.alm_distance_smoothing,
-        curvature_smoothing=args.alm_curvature_smoothing,
-        constraint_names=single_stage_alm_constraint_names(
+    return apply_frontier_scalarization_override(
+        _evaluate_alm_objective_impl(
+            surface_weights,
+            nonQSs,
+            brs,
+            objective_terms["effective_res_weight"],
+            Jiota,
+            objective_terms["effective_iotas_weight"],
+            objective_terms["JVolume"],
+            objective_terms["effective_volume_weight"],
+            JCurveLength,
+            LENGTH_WEIGHT,
+            JCurveCurve,
+            JCurveSurface,
+            JCurvature,
+            multipliers,
+            penalty,
+            objective_optimizable=JF,
+            curves=curves,
+            curve_curve_min_distance=CC_DIST,
+            outer_surface=outer_surface_data["boozer_surface"].surface,
+            curve_surface_min_distance=CS_DIST,
+            banana_curve=banana_curve,
+            curvature_threshold=CURVATURE_THRESHOLD,
+            distance_smoothing=args.alm_distance_smoothing,
+            curvature_smoothing=args.alm_curvature_smoothing,
+            constraint_names=single_stage_alm_constraint_names(
+                alm_formulation=args.alm_formulation,
+                include_surface_surface=JSurfSurf is not None,
+            ),
+            curve_curve_constraint_fn=_smooth_min_curve_curve_signed_constraint,
+            curve_surface_constraint_fn=_smooth_min_curve_surface_signed_constraint,
+            curvature_constraint_fn=_smooth_max_curvature_signed_constraint,
+            JSurfSurf=JSurfSurf,
+            vessel_surface=VV,
+            surface_surface_min_distance=SS_DIST,
+            surface_surface_constraint_fn=_smooth_min_surface_surface_signed_constraint,
             alm_formulation=args.alm_formulation,
-            include_surface_surface=JSurfSurf is not None,
+            qs_threshold=args.alm_qs_threshold,
+            boozer_threshold=args.alm_boozer_threshold,
+            iota_penalty_threshold=args.alm_iota_penalty_threshold,
+            length_penalty_threshold=args.alm_length_penalty_threshold,
+            JNonQSObjective=objective_terms["JNonQSObjective"],
+            JBoozerObjective=objective_terms["JBoozerObjective"],
         ),
-        curve_curve_constraint_fn=_smooth_min_curve_curve_signed_constraint,
-        curve_surface_constraint_fn=_smooth_min_curve_surface_signed_constraint,
-        curvature_constraint_fn=_smooth_max_curvature_signed_constraint,
-        JSurfSurf=JSurfSurf,
-        vessel_surface=VV,
-        surface_surface_min_distance=SS_DIST,
-        surface_surface_constraint_fn=_smooth_min_surface_surface_signed_constraint,
         alm_formulation=args.alm_formulation,
-        qs_threshold=args.alm_qs_threshold,
-        boozer_threshold=args.alm_boozer_threshold,
-        iota_penalty_threshold=args.alm_iota_penalty_threshold,
-        length_penalty_threshold=args.alm_length_penalty_threshold,
-        JNonQSObjective=objective_terms["JNonQSObjective"],
-        JBoozerObjective=objective_terms["JBoozerObjective"],
     )
 
 
@@ -2996,10 +3624,6 @@ def _jsonable_value(value):
     if isinstance(value, (list, tuple)):
         return [_jsonable_value(item) for item in value]
     return value
-
-
-def _jsonable_alm_state(value):
-    return _jsonable_value(value)
 
 
 def write_json_artifact(path, payload):
@@ -3134,6 +3758,38 @@ def current_preserved_timeout_replay_config() -> PreservedTimeoutReplayConfig:
             "frontier_effective_volume_weight",
             "effective_volume_weight",
         ),
+        frontier_scalarization_type=frontier_replay_value(
+            "frontier_scalarization_type",
+            "scalarization_type",
+        ),
+        frontier_chebyshev_rho=frontier_replay_value(
+            "frontier_chebyshev_rho",
+            "chebyshev_rho",
+        ),
+        frontier_chebyshev_weight_iota=frontier_replay_value(
+            "frontier_chebyshev_weight_iota",
+            "chebyshev_weight_iota",
+        ),
+        frontier_chebyshev_weight_volume=frontier_replay_value(
+            "frontier_chebyshev_weight_volume",
+            "chebyshev_weight_volume",
+        ),
+        frontier_chebyshev_weight_qa=frontier_replay_value(
+            "frontier_chebyshev_weight_qa",
+            "chebyshev_weight_qa",
+        ),
+        frontier_chebyshev_weight_boozer=frontier_replay_value(
+            "frontier_chebyshev_weight_boozer",
+            "chebyshev_weight_boozer",
+        ),
+        epsilon_constraint_qa_max=frontier_replay_value(
+            "epsilon_constraint_qa_max",
+            "epsilon_constraint_qa_max",
+        ),
+        epsilon_constraint_boozer_max=frontier_replay_value(
+            "epsilon_constraint_boozer_max",
+            "epsilon_constraint_boozer_max",
+        ),
     )
 
 
@@ -3265,6 +3921,8 @@ def build_preserved_timeout_results_payload(
         "HARDWARE_CONSTRAINTS_OK": bool(hardware_status["success"]),
         "HARDWARE_CONSTRAINT_VIOLATIONS": hardware_status["violations"],
         "FINAL_TOPOLOGY_GATE_SUCCESS": bool(run_dict["topology_gate_status"]["success"]),
+        "FINAL_TOPOLOGY_GATE_STATE": run_dict["topology_gate_status"].get("state"),
+        "FINAL_TOPOLOGY_GATE_ERROR": run_dict["topology_gate_status"].get("evaluation_error"),
         "NONQS_RATIO": float(objective_eval["J_QS"]),
         "BOOZER_RESIDUAL": float(objective_eval["J_Boozer"]),
         "FRONTIER_TRUST_OK": search_eval.get("frontier_trust_ok"),
@@ -3276,6 +3934,14 @@ def build_preserved_timeout_results_payload(
         "FRONTIER_REFERENCE_VOLUME_SCALE": replay_config.frontier_volume_scale,
         "FRONTIER_REFERENCE_QA": replay_config.frontier_qs_reference,
         "FRONTIER_REFERENCE_BOOZER": replay_config.frontier_boozer_reference,
+        "FRONTIER_SCALARIZATION_TYPE": replay_config.frontier_scalarization_type,
+        "FRONTIER_CHEBYSHEV_RHO": replay_config.frontier_chebyshev_rho,
+        "FRONTIER_CHEBYSHEV_WEIGHT_IOTA": replay_config.frontier_chebyshev_weight_iota,
+        "FRONTIER_CHEBYSHEV_WEIGHT_VOLUME": replay_config.frontier_chebyshev_weight_volume,
+        "FRONTIER_CHEBYSHEV_WEIGHT_QA": replay_config.frontier_chebyshev_weight_qa,
+        "FRONTIER_CHEBYSHEV_WEIGHT_BOOZER": replay_config.frontier_chebyshev_weight_boozer,
+        "EPSILON_CONSTRAINT_QA_MAX": replay_config.epsilon_constraint_qa_max,
+        "EPSILON_CONSTRAINT_BOOZER_MAX": replay_config.epsilon_constraint_boozer_max,
         "FRONTIER_EFFECTIVE_QA_WEIGHT": replay_config.frontier_effective_qs_weight,
         "FRONTIER_EFFECTIVE_BOOZER_WEIGHT": replay_config.frontier_effective_boozer_weight,
         "FRONTIER_EFFECTIVE_IOTA_WEIGHT": replay_config.frontier_effective_iota_weight,
@@ -3283,6 +3949,7 @@ def build_preserved_timeout_results_payload(
         "FRONTIER_VOLUME_OBJECTIVE": search_eval.get("J_volume"),
         "FRONTIER_TRUST_PENALTY": search_eval.get("frontier_trust_penalty"),
         "FRONTIER_CONTRACT_PENALTY": search_eval.get("frontier_contract_penalty"),
+        "FRONTIER_EPSILON_PENALTY": search_eval.get("frontier_epsilon_penalty"),
         "FRONTIER_HARDWARE_PENALTY": search_eval.get("frontier_hardware_penalty"),
         "FRONTIER_HARDWARE_MAX_VIOLATION_RATIO": search_eval.get(
             "frontier_hardware_max_violation_ratio"
@@ -3457,17 +4124,17 @@ def build_single_stage_alm_partial_state(
         "penalty": float(penalty),
         "multipliers": np.asarray(multipliers, dtype=float).tolist(),
         "history_length": int(len(history)),
-        "latest_history_entry": _jsonable_alm_state(latest_history_entry),
-        "history": _jsonable_alm_state(history),
+        "latest_history_entry": _jsonable_value(latest_history_entry),
+        "history": _jsonable_value(history),
         "accepted_iterations": int(run_dict.get("accepted_iterations", 0)),
         "current_iteration": int(run_dict.get("it", 0)),
         "current_objective": current_objective,
         "accepted_boozer_stage": run_dict.get("accepted_boozer_stage"),
-        "accepted_hardware_status": _jsonable_alm_state(
+        "accepted_hardware_status": _jsonable_value(
             run_dict.get("accepted_hardware_status")
         ),
-        "trial_hardware_status": _jsonable_alm_state(run_dict.get("trial_hardware_status")),
-        "topology_gate_status": _jsonable_alm_state(run_dict.get("topology_gate_status")),
+        "trial_hardware_status": _jsonable_value(run_dict.get("trial_hardware_status")),
+        "topology_gate_status": _jsonable_value(run_dict.get("topology_gate_status")),
         "termination_message": termination_message,
         "optimizer_success": optimizer_success,
         "termination_reason": termination_reason,
@@ -3484,6 +4151,95 @@ def build_single_stage_alm_partial_state(
 def write_single_stage_alm_partial_state(out_dir, payload):
     partial_path = os.path.join(out_dir, "alm_state.partial.json")
     write_json_artifact(partial_path, payload)
+
+
+def build_single_stage_solver_checkpoint_state(
+    run_dict,
+    *,
+    requested_maxiter,
+    runtime_maxiter,
+    accepted_stage,
+    goal_mode,
+    constraint_method,
+    stage2_bs_path,
+    out_dir_iter,
+    alm_state=None,
+):
+    return build_solver_checkpoint_payload(
+        goal_mode=goal_mode,
+        constraint_method=constraint_method,
+        stage2_bs_path=str(stage2_bs_path),
+        requested_maxiter=int(requested_maxiter),
+        runtime_maxiter=int(runtime_maxiter),
+        accepted_iterations=int(run_dict.get("accepted_iterations", 0)),
+        accepted_boozer_stage=str(accepted_stage),
+        accepted_incumbent=snapshot_single_stage_incumbent_state(run_dict),
+        best_accepted_incumbent=run_dict.get("best_accepted_incumbent"),
+        best_accepted_stage=run_dict.get("best_accepted_stage"),
+        best_accepted_metric=run_dict.get("best_accepted_metric"),
+        best_feasible_incumbent=run_dict.get("best_feasible_incumbent"),
+        best_feasible_stage=run_dict.get("best_feasible_stage"),
+        best_feasible_metric=run_dict.get("best_feasible_metric"),
+        out_dir_iter=str(out_dir_iter),
+        run_counters={
+            "it": run_dict.get("it", 0),
+            "invalid_state_rejects_total": run_dict.get(
+                "invalid_state_rejects_total",
+                0,
+            ),
+            "topology_gate_rejects": run_dict.get("topology_gate_rejects", 0),
+            "hardware_rejects": run_dict.get("hardware_rejects", 0),
+            "surface_solve_rejects": run_dict.get("surface_solve_rejects", 0),
+            "frontier_trust_rejects": run_dict.get("frontier_trust_rejects", 0),
+        },
+        alm_state=alm_state,
+        conditioning_seed_report=run_dict.get(
+            "frontier_conditioning_seed_report"
+        ),
+        conditioning_first_accepted_report=run_dict.get(
+            "frontier_conditioning_first_accepted_report"
+        ),
+    )
+
+
+def write_single_stage_solver_checkpoint_state(
+    out_dir,
+    run_dict,
+    *,
+    requested_maxiter,
+    runtime_maxiter,
+    accepted_stage,
+    goal_mode,
+    constraint_method,
+    stage2_bs_path,
+    out_dir_iter,
+    alm_state=None,
+):
+    checkpoint_payload = build_single_stage_solver_checkpoint_state(
+        run_dict,
+        requested_maxiter=requested_maxiter,
+        runtime_maxiter=runtime_maxiter,
+        accepted_stage=accepted_stage,
+        goal_mode=goal_mode,
+        constraint_method=constraint_method,
+        stage2_bs_path=stage2_bs_path,
+        out_dir_iter=out_dir_iter,
+        alm_state=alm_state,
+    )
+    write_solver_checkpoint(
+        solver_checkpoint_path(out_dir),
+        checkpoint_payload,
+    )
+
+
+def current_solver_checkpoint_alm_state():
+    alm_state = current_preserved_timeout_alm_state()
+    if alm_state is None:
+        return None
+    return {
+        "penalty": float(alm_state.penalty),
+        "multipliers": np.asarray(alm_state.multipliers, dtype=float).copy(),
+    }
 
 
 def build_total_objective(
@@ -3614,6 +4370,7 @@ def evaluate_search_step(x):
     rejection_increment = None
     rejection_reason = None
     objective_eval = None
+    repair_phase1_mode_active = bool(run_dict.get("phase1_repair_mode_active", False))
 
     if success:
         search_surface_weights = build_surface_search_weights(
@@ -3646,6 +4403,7 @@ def evaluate_search_step(x):
         hard_invalidation = _evaluate_frontier_hard_invalidation_impl(
             search_eval=objective_eval,
             surface_success=stack_status["success"],
+            surface_status=stack_status,
         )
         if hard_invalidation["invalid"]:
             success = False
@@ -3666,65 +4424,74 @@ def evaluate_search_step(x):
                 bs,
             )
             run_dict['topology_gate_status'] = topology_status
-            topology_gate_penalty_scale = float(
-                globals().get("TOPOLOGY_GATE_PENALTY_SCALE", 4.0)
-            )
-            topology_contract = _evaluate_frontier_topology_search_contract_impl(
-                topology_status,
-                previous_objective=run_dict['J'],
-                penalty_scale=topology_gate_penalty_scale,
-            )
-            if topology_contract["reject"]:
-                if frontier_mode_enabled():
-                    topology_penalty = _evaluate_frontier_topology_search_penalty_impl(
-                        topology_status,
-                        previous_objective=run_dict['J'],
-                        penalty_scale=topology_gate_penalty_scale,
-                    )
-                    objective_eval = _apply_frontier_search_contract_penalties_impl(
-                        objective_eval,
-                        topology_penalty=topology_penalty,
-                    )
-                    print("/!\\ /!\\ Topology gate penalty active /!\\ /!\\")
-                    print(
-                        "Cheap field-line survival "
-                        f"{topology_status['survived_lines']}/{topology_status['nfieldlines']} "
-                        f"(fraction={topology_status['survival_fraction']:.3f}, "
-                        f"threshold={topology_status['survival_threshold']:.3f})"
-                    )
-                    print(
-                        "Topology frontier penalty = "
-                        f"{topology_penalty['penalty']:.6e} "
-                        f"(deficit={topology_penalty['deficit']:.6e})"
-                    )
-                    if topology_status['first_exit_time'] is not None:
-                        print(
-                            "First topology exit at "
-                            f"t={topology_status['first_exit_time']:.6e}, "
-                            f"phi={topology_status['first_exit_angle']:.6e}, "
-                            f"reason={topology_status['first_exit_reason']}"
+            topology_state = _topology_gate_state(topology_status)
+            if topology_state == "broken":
+                success = False
+                rejection_reason = "topology_broken"
+                run_dict["invalid_state_rejects_total"] += 1
+                print("/!\\ /!\\ Topology evaluation broken /!\\ /!\\")
+                evaluation_error = topology_status.get("evaluation_error")
+                if evaluation_error:
+                    print(f"Topology error: {evaluation_error}")
+            else:
+                topology_gate_penalty_scale = float(
+                    globals().get("TOPOLOGY_GATE_PENALTY_SCALE", 4.0)
+                )
+                topology_contract = _evaluate_frontier_topology_search_contract_impl(
+                    topology_status,
+                    previous_objective=run_dict['J'],
+                    penalty_scale=topology_gate_penalty_scale,
+                )
+                if topology_contract["reject"]:
+                    if frontier_mode_enabled():
+                        topology_penalty = _evaluate_frontier_topology_search_penalty_impl(
+                            topology_status,
+                            previous_objective=run_dict['J'],
+                            penalty_scale=topology_gate_penalty_scale,
                         )
-                else:
-                    success = False
-                    rejection_reason = "topology"
-                    run_dict["topology_gate_rejects"] += 1
-                    run_dict["invalid_state_rejects_total"] += 1
-                    rejection_increment = topology_contract["rejection_increment"]
-                    print("/!\\ /!\\ Topology gate rejected candidate /!\\ /!\\")
-                    print(
-                        "Cheap field-line survival "
-                        f"{topology_status['survived_lines']}/{topology_status['nfieldlines']} "
-                        f"(fraction={topology_status['survival_fraction']:.3f}, "
-                        f"threshold={topology_status['survival_threshold']:.3f})"
-                    )
-                    print(f"Topology rejection increment = {rejection_increment:.6e}")
-                    if topology_status['first_exit_time'] is not None:
-                        print(
-                            "First topology exit at "
-                            f"t={topology_status['first_exit_time']:.6e}, "
-                            f"phi={topology_status['first_exit_angle']:.6e}, "
-                            f"reason={topology_status['first_exit_reason']}"
+                        objective_eval = _apply_frontier_search_contract_penalties_impl(
+                            objective_eval,
+                            topology_penalty=topology_penalty,
                         )
+                        print("/!\\ /!\\ Topology gate penalty active /!\\ /!\\")
+                        print(
+                            "Cheap field-line survival "
+                            f"{topology_status['survived_lines']}/{topology_status['nfieldlines']} "
+                            f"(fraction={topology_status['survival_fraction']:.3f}, "
+                            f"threshold={topology_status['survival_threshold']:.3f})"
+                        )
+                        print(
+                            "Topology frontier penalty = "
+                            f"{topology_penalty['penalty']:.6e} "
+                            f"(deficit={topology_penalty['deficit']:.6e})"
+                        )
+                        if topology_status['first_exit_time'] is not None:
+                            print(
+                                "First topology exit at "
+                                f"t={topology_status['first_exit_time']:.6e}, "
+                                f"phi={topology_status['first_exit_angle']:.6e}, "
+                                f"reason={topology_status['first_exit_reason']}"
+                            )
+                    else:
+                        success = False
+                        rejection_reason = "topology"
+                        run_dict["topology_gate_rejects"] += 1
+                        rejection_increment = topology_contract["rejection_increment"]
+                        print("/!\\ /!\\ Topology gate rejected candidate /!\\ /!\\")
+                        print(
+                            "Cheap field-line survival "
+                            f"{topology_status['survived_lines']}/{topology_status['nfieldlines']} "
+                            f"(fraction={topology_status['survival_fraction']:.3f}, "
+                            f"threshold={topology_status['survival_threshold']:.3f})"
+                        )
+                        print(f"Topology rejection increment = {rejection_increment:.6e}")
+                        if topology_status['first_exit_time'] is not None:
+                            print(
+                                "First topology exit at "
+                                f"t={topology_status['first_exit_time']:.6e}, "
+                                f"phi={topology_status['first_exit_angle']:.6e}, "
+                                f"reason={topology_status['first_exit_reason']}"
+                            )
 
         if success:
             hardware_snapshot = evaluate_single_stage_hardware_snapshot(
@@ -3774,6 +4541,11 @@ def evaluate_search_step(x):
                             f"(max_violation_ratio="
                             f"{hardware_penalty['max_violation_ratio']:.6e})"
                         )
+                    elif repair_phase1_mode_active:
+                        print(
+                            "/!\\ /!\\ Repair-first phase1 keeping valid hardware-bad "
+                            "candidate for feasibility reduction /!\\ /!\\"
+                        )
                     else:
                         success = False
                         rejection_reason = "hardware"
@@ -3787,6 +4559,8 @@ def evaluate_search_step(x):
                     print(violation)
 
         if success:
+            J = objective_eval['total']
+            dJ = objective_eval['grad']
             run_dict['last_successful_eval'] = objective_eval
             run_dict['last_successful_eval_weights'] = np.asarray(search_surface_weights).copy()
             print(f"Volume: {outer_entry['boozer_surface'].surface.volume()}")
@@ -4013,6 +4787,16 @@ def callback(x):
         bs,
     )
     accepted_iteration = int(run_dict['accepted_iterations'] + 1)
+    if (
+        SINGLE_STAGE_GOAL_MODE == "frontier"
+        and run_dict.get("frontier_conditioning_first_accepted_report") is None
+    ):
+        run_dict["frontier_conditioning_first_accepted_report"] = (
+            build_frontier_conditioning_report(
+                objective_eval,
+                sample_label="first_accepted",
+            )
+        )
     if best_accepted_updated:
         write_preserved_timeout_artifacts(
             OUT_DIR_ITER,
@@ -4153,6 +4937,20 @@ def callback(x):
     run_dict['accepted_iterations'] += 1
     run_dict['it'] += 1
 
+    if CHECKPOINT_EVERY > 0:
+        write_single_stage_solver_checkpoint_state(
+            OUT_DIR_ITER,
+            run_dict,
+            requested_maxiter=MAXITER,
+            runtime_maxiter=RUNTIME_MAXITER,
+            accepted_stage=incumbent_stage,
+            goal_mode=SINGLE_STAGE_GOAL_MODE,
+            constraint_method=CONSTRAINT_METHOD,
+            stage2_bs_path=stage2_bs_path,
+            out_dir_iter=OUT_DIR_ITER,
+            alm_state=current_solver_checkpoint_alm_state(),
+        )
+
     # Periodic checkpoint saving
     if CHECKPOINT_EVERY > 0 and run_dict['accepted_iterations'] % CHECKPOINT_EVERY == 0:
         ckpt_dir = os.path.join(OUT_DIR_ITER, f"checkpoint_iter{run_dict['accepted_iterations']:04d}")
@@ -4164,21 +4962,30 @@ def callback(x):
     # Periodic topology scoring (medium-fidelity confinement evaluation)
     if TOPOLOGY_SCORER_EVERY > 0 and run_dict['accepted_iterations'] % TOPOLOGY_SCORER_EVERY == 0:
         outer_surf = outer_surface_data['boozer_surface'].surface
-        topo_result = score_topology(
-            outer_surf, bs,
+        topo_result = safe_score_topology(
+            outer_surf,
+            bs,
             nfieldlines=TOPOLOGY_SCORER_NFIELDLINES,
             tmax=TOPOLOGY_SCORER_TMAX,
             **confinement_surrogate_kwargs(),
         )
-        checkpoint_objective_total = checkpoint_confinement_objective(
-            J,
-            topo_result,
-            CONFINEMENT_OBJECTIVE_WEIGHT,
+        checkpoint_objective_total = (
+            np.inf
+            if topo_result["broken"]
+            else checkpoint_confinement_objective(
+                J,
+                topo_result,
+                CONFINEMENT_OBJECTIVE_WEIGHT,
+            )
         )
         topo_entry = {
             "accepted_iteration": run_dict['accepted_iterations'],
             "J": float(J),
             "checkpoint_objective_total": checkpoint_objective_total,
+            "topology_state": topo_result["evaluation_state"],
+            "topology_broken": bool(topo_result["broken"]),
+            "topology_error": topo_result.get("evaluation_error"),
+            "topology_error_type": topo_result.get("evaluation_error_type"),
             "survival_fraction": topo_result["survival_fraction"],
             "survived_lines": topo_result["survived_lines"],
             "nfieldlines": topo_result["nfieldlines"],
@@ -4198,7 +5005,13 @@ def callback(x):
         append_jsonl_artifact(archive_path, topo_entry)
 
         # Track best states
-        if 'best_topology' not in run_dict or topo_entry['confinement_score'] > run_dict['best_topology']['confinement_score']:
+        if (
+            not topo_result["broken"]
+            and (
+                'best_topology' not in run_dict
+                or topo_entry['confinement_score'] > run_dict['best_topology']['confinement_score']
+            )
+        ):
             run_dict['best_topology'] = topo_entry
             # Save checkpoint for best-topology state
             best_dir = os.path.join(OUT_DIR_ITER, "best_topology")
@@ -4206,9 +5019,13 @@ def callback(x):
             bs.save(os.path.join(best_dir, "biot_savart.json"))
             save_surface_artifacts(surface_data, bs, best_dir, "surf", also_write_outer_legacy=False)
 
-        if CONFINEMENT_OBJECTIVE_WEIGHT > 0.0 and (
-            'best_confinement_objective' not in run_dict
-            or topo_entry['checkpoint_objective_total'] < run_dict['best_confinement_objective']['checkpoint_objective_total']
+        if (
+            not topo_result["broken"]
+            and CONFINEMENT_OBJECTIVE_WEIGHT > 0.0
+            and (
+                'best_confinement_objective' not in run_dict
+                or topo_entry['checkpoint_objective_total'] < run_dict['best_confinement_objective']['checkpoint_objective_total']
+            )
         ):
             run_dict['best_confinement_objective'] = topo_entry
             best_dir = os.path.join(OUT_DIR_ITER, "best_confinement_objective")
@@ -4216,13 +5033,20 @@ def callback(x):
             bs.save(os.path.join(best_dir, "biot_savart.json"))
             save_surface_artifacts(surface_data, bs, best_dir, "surf", also_write_outer_legacy=False)
 
-        print(
-            f"  [topology] iter={run_dict['accepted_iterations']}: "
-            f"survival={topo_result['survived_lines']}/{topo_result['nfieldlines']}, "
-            f"confinement={topo_result['confinement_score']:.4f}, "
-            f"loss={topo_result['confinement_loss']:.4f}, "
-            f"mean_exit={topo_result['mean_exit_time']}"
-        )
+        if topo_result["broken"]:
+            print(
+                f"  [topology] iter={run_dict['accepted_iterations']}: "
+                f"broken ({topo_result.get('evaluation_error_type')}: "
+                f"{topo_result.get('evaluation_error')})"
+            )
+        else:
+            print(
+                f"  [topology] iter={run_dict['accepted_iterations']}: "
+                f"survival={topo_result['survived_lines']}/{topo_result['nfieldlines']}, "
+                f"confinement={topo_result['confinement_score']:.4f}, "
+                f"loss={topo_result['confinement_loss']:.4f}, "
+                f"mean_exit={topo_result['mean_exit_time']}"
+            )
 
 
 # Convergence tolerances for different mpol values (module-level for testability)
@@ -4244,6 +5068,7 @@ EFFECTIVE_RES_WEIGHT = 0.0
 EFFECTIVE_IOTAS_WEIGHT = 0.0
 EFFECTIVE_VOLUME_WEIGHT = 0.0
 FRONTIER_GOAL_CONFIG = None
+JF = None
 CHECKPOINT_EVERY = 0
 TOPOLOGY_SCORER_EVERY = 0
 TOPOLOGY_SCORER_NFIELDLINES = 12
@@ -4256,6 +5081,23 @@ CONFINEMENT_SURROGATE_WORST_WEIGHT = 0.6
 CONFINEMENT_SURROGATE_EARLY_WEIGHT = 0.2
 
 
+def validate_stage2_seed_contract(stage2_results):
+    tf_current_A = stage2_results.get("TF_CURRENT_A")
+    if tf_current_A is None:
+        raise ValueError(
+            "Stage 2 seed artifact is missing TF_CURRENT_A even after legacy-contract "
+            "upgrade. Pass --stage2-seed-tf-current-A explicitly or use a newer "
+            "artifact with TF-current metadata."
+        )
+    validate_tf_current_limit(tf_current_A)
+    validate_banana_winding_surface_radius(stage2_results["banana_surf_radius"])
+    if float(stage2_results.get("CURVATURE_THRESHOLD", MAX_CURVATURE_INV_M)) > MAX_CURVATURE_INV_M:
+        raise ValueError(
+            "Stage 2 seed curvature threshold exceeds the hardware ceiling of "
+            f"{MAX_CURVATURE_INV_M:.1f} m^-1."
+        )
+
+
 if __name__ == "__main__":
     # ==============================================================================
     # CONFIGURATION PARAMETERS
@@ -4266,12 +5108,17 @@ if __name__ == "__main__":
     stage2_results = upgrade_legacy_stage2_artifact_results(
         stage2_results,
         known_num_tf_coils=args.num_tf_coils,
+        known_tf_current_A=args.stage2_seed_tf_current_A,
     )
+    validate_stage2_seed_contract(stage2_results)
     R0 = float(stage2_results["MAJOR_RADIUS"])
     s = float(stage2_results["TOROIDAL_FLUX"])
     order = int(stage2_results.get("order", args.stage2_seed_order))
 
-    banana_surf_radius = args.banana_surf_radius if args.banana_surf_radius is not None else float(stage2_results["banana_surf_radius"])
+    banana_surf_radius = resolve_single_stage_banana_surf_radius(
+        stage2_results,
+        args.banana_surf_radius,
+    )
     nphi = args.nphi
     ntheta = args.ntheta
     mpol = args.mpol
@@ -4292,6 +5139,16 @@ if __name__ == "__main__":
     finite_current_mode = plasma_current_settings["mode"]
     effective_current_mode = plasma_current_settings["effective_mode"]
     MAXITER = args.maxiter
+    resume_solver_checkpoint_payload = (
+        None
+        if args.resume_solver_checkpoint is None
+        else load_solver_checkpoint(args.resume_solver_checkpoint)
+    )
+    RUNTIME_MAXITER = (
+        MAXITER
+        if resume_solver_checkpoint_payload is None
+        else int(resume_solver_checkpoint_payload["remaining_maxiter"])
+    )
     CHECKPOINT_EVERY = args.checkpoint_every
     TOPOLOGY_SCORER_EVERY = args.topology_scorer_every
     TOPOLOGY_SCORER_NFIELDLINES = args.topology_scorer_nfieldlines
@@ -4490,26 +5347,43 @@ if __name__ == "__main__":
     RES_WEIGHT = args.res_weight
     IOTAS_WEIGHT = args.iotas_weight
     CC_WEIGHT = args.cc_weight
-    CC_DIST = max(args.cc_dist, 0.05)            # Baseline default floor
-    if args.cc_dist < 0.05:
-        print(f"WARNING: --cc-dist {args.cc_dist} below baseline default, clamped to 0.05")
+    CC_DIST = max(args.cc_dist, COIL_COIL_MIN_DIST_M)
+    if args.cc_dist < COIL_COIL_MIN_DIST_M:
+        print(
+            f"WARNING: --cc-dist {args.cc_dist} below hardware floor, "
+            f"clamped to {COIL_COIL_MIN_DIST_M}"
+        )
     CS_WEIGHT = args.cs_weight
-    CS_DIST = max(args.cs_dist, 0.015)           # HBT spec: coil-plasma >= 1.5 cm
-    if args.cs_dist < 0.015:
-        print(f"WARNING: --cs-dist {args.cs_dist} below HBT spec floor, clamped to 0.015")
+    CS_DIST = max(args.cs_dist, COIL_PLASMA_MIN_DIST_M)
+    if args.cs_dist < COIL_PLASMA_MIN_DIST_M:
+        print(
+            f"WARNING: --cs-dist {args.cs_dist} below hardware floor, "
+            f"clamped to {COIL_PLASMA_MIN_DIST_M}"
+        )
     SURF_DIST_WEIGHT = args.surf_dist_weight
-    SS_DIST = max(args.ss_dist, 0.04)            # Baseline default floor
-    if args.ss_dist < 0.04:
-        print(f"WARNING: --ss-dist {args.ss_dist} below baseline default, clamped to 0.04")
+    SS_DIST = max(args.ss_dist, PLASMA_VESSEL_MIN_DIST_M)
+    if args.ss_dist < PLASMA_VESSEL_MIN_DIST_M:
+        print(
+            f"WARNING: --ss-dist {args.ss_dist} below hardware floor, "
+            f"clamped to {PLASMA_VESSEL_MIN_DIST_M}"
+        )
     CURVATURE_WEIGHT = args.curvature_weight
-    CURVATURE_THRESHOLD = max(args.curvature_threshold, 40)  # Design target floor 40; HW limit is 100 m⁻¹
-    if args.curvature_threshold < 40:
-        print(f"WARNING: --curvature-threshold {args.curvature_threshold} below design target, clamped to 40")
+    CURVATURE_THRESHOLD = min(args.curvature_threshold, MAX_CURVATURE_INV_M)
+    if args.curvature_threshold > MAX_CURVATURE_INV_M:
+        print(
+            f"WARNING: --curvature-threshold {args.curvature_threshold} above hardware ceiling, "
+            f"clamped to {MAX_CURVATURE_INV_M}"
+        )
     SURFACE_GAP_THRESHOLD = max(args.surface_gap_threshold, 0.0)
     if len(surface_data) > 1 and SURF_DIST_WEIGHT != 0:
         print("WARNING: SURF_DIST_WEIGHT is diagnostic-only in multi-surface mode; outer-vessel spacing is enforced as a rejection gate.")
 
-    length_target = args.length_target
+    length_target = min(args.length_target, COIL_LENGTH_TARGET_M)
+    if args.length_target > COIL_LENGTH_TARGET_M:
+        print(
+            f"WARNING: --length-target {args.length_target} above hardware ceiling, "
+            f"clamped to {COIL_LENGTH_TARGET_M}"
+        )
     frontier_goal_config = None
     if args.single_stage_goal_mode == "frontier":
         frontier_goal_config = build_frontier_goal_config(
@@ -4528,6 +5402,14 @@ if __name__ == "__main__":
             boozer_reference_override=args.frontier_reference_boozer,
             boozer_trust_threshold_override=args.frontier_boozer_trust_threshold,
             boozer_trust_penalty_scale_override=args.frontier_boozer_trust_penalty_scale,
+            scalarization_type=args.frontier_scalarization_type,
+            chebyshev_rho_override=args.frontier_chebyshev_rho,
+            chebyshev_weight_iota_override=args.frontier_chebyshev_weight_iota,
+            chebyshev_weight_volume_override=args.frontier_chebyshev_weight_volume,
+            chebyshev_weight_qa_override=args.frontier_chebyshev_weight_qa,
+            chebyshev_weight_boozer_override=args.frontier_chebyshev_weight_boozer,
+            epsilon_constraint_qa_max_override=args.epsilon_constraint_qa_max,
+            epsilon_constraint_boozer_max_override=args.epsilon_constraint_boozer_max,
         )
         print(frontier_goal_mode_warning_message(frontier_goal_config))
 
@@ -4591,6 +5473,14 @@ if __name__ == "__main__":
         INNER_SURFACE_INITIAL_WEIGHT,
     )
     initial_search_eval = evaluate_search_objective(initial_search_surface_weights)
+    initial_frontier_conditioning_report = (
+        None
+        if args.single_stage_goal_mode != "frontier"
+        else build_frontier_conditioning_report(
+            initial_search_eval,
+            sample_label="seed",
+        )
+    )
     initial_search_gate = build_surface_search_gate(
         len(surface_data),
         0,
@@ -4663,9 +5553,93 @@ if __name__ == "__main__":
         'hardware_rejects': 0,
         'surface_solve_rejects': 0,
         'frontier_trust_rejects': 0,
+        'frontier_conditioning_seed_report': initial_frontier_conditioning_report,
+        'frontier_conditioning_first_accepted_report': None,
     }
-    initial_best_accepted_updated = maybe_update_best_accepted_incumbent(run_dict, stage)
-    initial_best_feasible_updated = maybe_update_best_feasible_incumbent(run_dict, stage)
+    restored_from_solver_checkpoint = False
+    resume_alm_state = None
+    if resume_solver_checkpoint_payload is not None:
+        restored_from_solver_checkpoint = True
+        restored_stage = str(resume_solver_checkpoint_payload["accepted_boozer_stage"])
+        objective_bundle = rebuild_stage_objective_bundle(restored_stage)
+        restore_single_stage_incumbent_state(
+            run_dict,
+            restore_incumbent_from_solver_checkpoint(
+                resume_solver_checkpoint_payload
+            ),
+        )
+        run_counters = dict(
+            resume_solver_checkpoint_payload.get("run_counters", {})
+        )
+        run_dict["it"] = int(run_counters.get("it", run_dict["it"]))
+        run_dict["accepted_iterations"] = int(
+            resume_solver_checkpoint_payload["accepted_iterations"]
+        )
+        run_dict["x_prev"] = np.asarray(run_dict["accepted_x"], dtype=float).copy()
+        run_dict["accepted_boozer_stage"] = restored_stage
+        run_dict["invalid_state_rejects_total"] = int(
+            run_counters.get("invalid_state_rejects_total", 0)
+        )
+        run_dict["topology_gate_rejects"] = int(
+            run_counters.get("topology_gate_rejects", 0)
+        )
+        run_dict["hardware_rejects"] = int(
+            run_counters.get("hardware_rejects", 0)
+        )
+        run_dict["surface_solve_rejects"] = int(
+            run_counters.get("surface_solve_rejects", 0)
+        )
+        run_dict["frontier_trust_rejects"] = int(
+            run_counters.get("frontier_trust_rejects", 0)
+        )
+        run_dict["best_accepted_incumbent"] = restore_optional_incumbent(
+            resume_solver_checkpoint_payload,
+            "best_accepted_incumbent",
+        )
+        run_dict["best_accepted_stage"] = resume_solver_checkpoint_payload.get(
+            "best_accepted_stage"
+        )
+        run_dict["best_accepted_metric"] = resume_solver_checkpoint_payload.get(
+            "best_accepted_metric"
+        )
+        run_dict["best_feasible_incumbent"] = restore_optional_incumbent(
+            resume_solver_checkpoint_payload,
+            "best_feasible_incumbent",
+        )
+        run_dict["best_feasible_stage"] = resume_solver_checkpoint_payload.get(
+            "best_feasible_stage"
+        )
+        run_dict["best_feasible_metric"] = resume_solver_checkpoint_payload.get(
+            "best_feasible_metric"
+        )
+        run_dict["frontier_conditioning_seed_report"] = (
+            resume_solver_checkpoint_payload.get(
+                "conditioning_seed_report",
+                run_dict.get("frontier_conditioning_seed_report"),
+            )
+        )
+        run_dict["frontier_conditioning_first_accepted_report"] = (
+            resume_solver_checkpoint_payload.get(
+                "conditioning_first_accepted_report",
+                run_dict.get("frontier_conditioning_first_accepted_report"),
+            )
+        )
+        refresh_accepted_search_state(run_dict, restored_stage)
+        dofs = np.asarray(run_dict["accepted_x"], dtype=float).copy()
+        resume_alm_state = resume_solver_checkpoint_payload.get("alm_state")
+        if CONSTRAINT_METHOD == "alm" and isinstance(resume_alm_state, dict):
+            ALM_MULTIPLIERS = np.asarray(
+                resume_alm_state.get("multipliers", ALM_MULTIPLIERS),
+                dtype=float,
+            )
+            ALM_PENALTY = float(
+                resume_alm_state.get("penalty", ALM_PENALTY)
+            )
+        initial_best_accepted_updated = False
+        initial_best_feasible_updated = False
+    else:
+        initial_best_accepted_updated = maybe_update_best_accepted_incumbent(run_dict, stage)
+        initial_best_feasible_updated = maybe_update_best_feasible_incumbent(run_dict, stage)
     EFFECTIVE_SEED_REGIME = resolve_single_stage_seed_regime(
         REQUESTED_SEED_REGIME,
         run_dict,
@@ -4674,6 +5648,19 @@ if __name__ == "__main__":
         basin_hops=args.basin_hops,
         init_only=args.init_only,
     )
+    if CHECKPOINT_EVERY > 0 and not args.init_only:
+        write_single_stage_solver_checkpoint_state(
+            OUT_DIR_ITER,
+            run_dict,
+            requested_maxiter=MAXITER,
+            runtime_maxiter=RUNTIME_MAXITER,
+            accepted_stage=run_dict.get("accepted_boozer_stage", stage),
+            goal_mode=args.single_stage_goal_mode,
+            constraint_method=CONSTRAINT_METHOD,
+            stage2_bs_path=stage2_bs_path,
+            out_dir_iter=OUT_DIR_ITER,
+            alm_state=current_solver_checkpoint_alm_state(),
+        )
     PRESERVED_TIMEOUT_REPLAY_CONFIG = current_preserved_timeout_replay_config()
     initial_coil_length = curvelength.J()
     if initial_best_accepted_updated:
@@ -4773,6 +5760,9 @@ if __name__ == "__main__":
             JF.x = run_dict["accepted_x"].copy()
             restore_surface_states(surface_data, run_dict["surface_state"])
 
+    if restored_from_solver_checkpoint:
+        refresh_preserved_timeout_artifacts_from_best_states()
+
     # ==============================================================================
     # RUN OPTIMIZATION
     # ==============================================================================
@@ -4844,7 +5834,22 @@ if __name__ == "__main__":
             include_surface_surface=JSurfSurf is not None,
         )
         alm_partial_state = {"history": []}
-        initial_alm_multipliers = np.zeros(len(alm_constraint_names), dtype=float)
+        resume_alm_state = (
+            None
+            if resume_solver_checkpoint_payload is None
+            else resume_solver_checkpoint_payload.get("alm_state")
+        )
+        if CONSTRAINT_METHOD == "alm" and isinstance(resume_alm_state, dict):
+            initial_alm_multipliers = np.asarray(
+                resume_alm_state.get("multipliers", np.zeros(len(alm_constraint_names))),
+                dtype=float,
+            )
+            initial_alm_penalty = float(
+                resume_alm_state.get("penalty", args.alm_penalty_init)
+            )
+        else:
+            initial_alm_multipliers = np.zeros(len(alm_constraint_names), dtype=float)
+            initial_alm_penalty = args.alm_penalty_init
 
         def emit_alm_partial_state(
             multipliers,
@@ -4854,6 +5859,14 @@ if __name__ == "__main__":
             latest_history_entry=None,
             termination_message=None,
             optimizer_success=None,
+            termination_reason=None,
+            inner_optimizer_success=None,
+            inner_optimizer_message=None,
+            converged_to_tolerances=None,
+            restored_best_feasible=None,
+            restored_best_feasible_reason=None,
+            final_max_feasibility_violation=None,
+            final_stationarity_norm=None,
         ):
             payload = build_single_stage_alm_partial_state(
                 run_dict,
@@ -4865,6 +5878,14 @@ if __name__ == "__main__":
                 outer_iteration=outer_iteration,
                 termination_message=termination_message,
                 optimizer_success=optimizer_success,
+                termination_reason=termination_reason,
+                inner_optimizer_success=inner_optimizer_success,
+                inner_optimizer_message=inner_optimizer_message,
+                converged_to_tolerances=converged_to_tolerances,
+                restored_best_feasible=restored_best_feasible,
+                restored_best_feasible_reason=restored_best_feasible_reason,
+                final_max_feasibility_violation=final_max_feasibility_violation,
+                final_stationarity_norm=final_stationarity_norm,
             )
             write_single_stage_alm_partial_state(OUT_DIR_ITER, payload)
 
@@ -4909,11 +5930,11 @@ if __name__ == "__main__":
 
         set_alm_runtime_state(
             initial_alm_multipliers,
-            args.alm_penalty_init,
+            initial_alm_penalty,
         )
         emit_alm_partial_state(
             initial_alm_multipliers,
-            args.alm_penalty_init,
+            initial_alm_penalty,
             outer_iteration=0,
         )
         res = minimize_alm(
@@ -4922,7 +5943,7 @@ if __name__ == "__main__":
             evaluate_problem,
             alm_settings,
             {
-                "maxiter": MAXITER,
+                "maxiter": RUNTIME_MAXITER,
                 "maxcor": args.maxcor,
                 "ftol": ftol,
                 "gtol": gtol,
@@ -4932,6 +5953,8 @@ if __name__ == "__main__":
             history_callback=history_callback,
             snapshot_accepted_state_fn=snapshot_accepted_state,
             restore_incumbent_state_fn=restore_incumbent_state,
+            initial_multipliers=initial_alm_multipliers,
+            initial_penalty=initial_alm_penalty,
         )
         alm_result = res
         alm_partial_state["history"] = [
@@ -4983,7 +6006,7 @@ if __name__ == "__main__":
             'jac': True,
             'bounds': current_optimizer_bounds(),
             'callback': callback,
-            'options': {'maxiter': MAXITER, 'maxcor': args.maxcor, 'ftol': ftol, 'gtol': gtol},
+            'options': {'maxiter': RUNTIME_MAXITER, 'maxcor': args.maxcor, 'ftol': ftol, 'gtol': gtol},
         }
         basin_niter_success = args.basin_niter_success if args.basin_niter_success > 0 else None
         print(
@@ -5067,7 +6090,7 @@ if __name__ == "__main__":
 
         phase1_result = run_penalty_phase1(
             dofs,
-            total_maxiter=MAXITER,
+            total_maxiter=RUNTIME_MAXITER,
             maxcor=args.maxcor,
             ftol=ftol,
             gtol=gtol,
@@ -5143,7 +6166,7 @@ if __name__ == "__main__":
             dofs = phase1_result["next_dofs"]
             run_dict["x_prev"] = dofs.copy()
 
-        remaining_maxiter = max(MAXITER - (phase1_iterations or 0), 0)
+        remaining_maxiter = max(RUNTIME_MAXITER - (phase1_iterations or 0), 0)
         if remaining_maxiter > 0 and phase1_result["continue_search"]:
             phase2_bounds = build_penalty_phase2_bounds(
                 dofs,
@@ -5414,6 +6437,12 @@ if __name__ == "__main__":
             termination_message = "hardware_constraints_failed"
 
     # Save the results of optimization to a separate file
+    frontier_conditioning_gate = build_frontier_conditioning_gate(
+        seed_report=run_dict.get("frontier_conditioning_seed_report"),
+        first_accepted_report=run_dict.get(
+            "frontier_conditioning_first_accepted_report"
+        ),
+    )
     results = {
         "PLASMA_SURF_FILENAME": plasma_surf_filename,
         "PLASMA_SURF_PATH": file_loc,
@@ -5546,6 +6575,7 @@ if __name__ == "__main__":
         ),
         "ALM_FINAL_PENALTY": getattr(alm_result, "penalty", None),
         "ALM_FINAL_MULTIPLIERS": getattr(alm_result, "multipliers", None),
+        "ALM_CONSTRAINT_NAMES": getattr(alm_result, "constraint_names", None),
         "ALM_FINAL_CONSTRAINT_VALUES": getattr(alm_result, "constraint_values", None),
         "ALM_FINAL_SOLVER_CONSTRAINT_VALUES": getattr(
             alm_result,
@@ -5614,6 +6644,8 @@ if __name__ == "__main__":
         "NFP": int(banana_surf_nfp),
         "FINAL_TOPOLOGY_GATE_EVALUATED": final_topology_status["evaluated"],
         "FINAL_TOPOLOGY_GATE_SUCCESS": final_topology_status["success"],
+        "FINAL_TOPOLOGY_GATE_STATE": final_topology_status.get("state"),
+        "FINAL_TOPOLOGY_GATE_ERROR": final_topology_status.get("evaluation_error"),
         "FINAL_TOPOLOGY_SURVIVED_LINES": final_topology_status["survived_lines"],
         "FINAL_TOPOLOGY_SURVIVAL_FRACTION": final_topology_status["survival_fraction"],
         "FINAL_TOPOLOGY_FIRST_EXIT_TIME": final_topology_status["first_exit_time"],
@@ -5642,6 +6674,30 @@ if __name__ == "__main__":
         ),
         "FRONTIER_REFERENCE_BOOZER": (
             None if FRONTIER_GOAL_CONFIG is None else FRONTIER_GOAL_CONFIG.boozer_reference
+        ),
+        "FRONTIER_SCALARIZATION_TYPE": (
+            None if FRONTIER_GOAL_CONFIG is None else FRONTIER_GOAL_CONFIG.scalarization_type
+        ),
+        "FRONTIER_CHEBYSHEV_RHO": (
+            None if FRONTIER_GOAL_CONFIG is None else FRONTIER_GOAL_CONFIG.chebyshev_rho
+        ),
+        "FRONTIER_CHEBYSHEV_WEIGHT_IOTA": (
+            None if FRONTIER_GOAL_CONFIG is None else FRONTIER_GOAL_CONFIG.chebyshev_weight_iota
+        ),
+        "FRONTIER_CHEBYSHEV_WEIGHT_VOLUME": (
+            None if FRONTIER_GOAL_CONFIG is None else FRONTIER_GOAL_CONFIG.chebyshev_weight_volume
+        ),
+        "FRONTIER_CHEBYSHEV_WEIGHT_QA": (
+            None if FRONTIER_GOAL_CONFIG is None else FRONTIER_GOAL_CONFIG.chebyshev_weight_qa
+        ),
+        "FRONTIER_CHEBYSHEV_WEIGHT_BOOZER": (
+            None if FRONTIER_GOAL_CONFIG is None else FRONTIER_GOAL_CONFIG.chebyshev_weight_boozer
+        ),
+        "EPSILON_CONSTRAINT_QA_MAX": (
+            None if FRONTIER_GOAL_CONFIG is None else FRONTIER_GOAL_CONFIG.epsilon_constraint_qa_max
+        ),
+        "EPSILON_CONSTRAINT_BOOZER_MAX": (
+            None if FRONTIER_GOAL_CONFIG is None else FRONTIER_GOAL_CONFIG.epsilon_constraint_boozer_max
         ),
         "FRONTIER_BOOZER_TRUST_PENALTY_SCALE": (
             None
@@ -5703,6 +6759,7 @@ if __name__ == "__main__":
         ),
         "FRONTIER_TRUST_PENALTY": run_dict["search_eval"].get("frontier_trust_penalty"),
         "FRONTIER_CONTRACT_PENALTY": run_dict["search_eval"].get("frontier_contract_penalty"),
+        "FRONTIER_EPSILON_PENALTY": run_dict["search_eval"].get("frontier_epsilon_penalty"),
         "FRONTIER_HARDWARE_PENALTY": run_dict["search_eval"].get("frontier_hardware_penalty"),
         "FRONTIER_HARDWARE_MAX_VIOLATION_RATIO": run_dict["search_eval"].get(
             "frontier_hardware_max_violation_ratio"
@@ -5710,6 +6767,17 @@ if __name__ == "__main__":
         "FRONTIER_TOPOLOGY_PENALTY": run_dict["search_eval"].get("frontier_topology_penalty"),
         "FRONTIER_TOPOLOGY_DEFICIT": run_dict["search_eval"].get(
             "frontier_topology_deficit"
+        ),
+        "FRONTIER_CONDITIONING_SCHEMA_VERSION": FRONTIER_CONDITIONING_SCHEMA_VERSION,
+        "FRONTIER_CONDITIONING_SEED_REPORT": run_dict.get(
+            "frontier_conditioning_seed_report"
+        ),
+        "FRONTIER_CONDITIONING_FIRST_ACCEPTED_REPORT": run_dict.get(
+            "frontier_conditioning_first_accepted_report"
+        ),
+        "FRONTIER_CONDITIONING_GATE": frontier_conditioning_gate,
+        "FRONTIER_CONDITIONING_GATE_OK": frontier_conditioning_gate.get(
+            "usable_scale_ok"
         ),
         "FRONTIER_VOLUME_OBJECTIVE": (
             None if args.init_only else float(run_dict["search_eval"].get("J_volume", 0.0))

@@ -6,19 +6,16 @@ from scipy.spatial import cKDTree
 from scipy.spatial.distance import cdist
 
 from simsopt.field import (
-    LevelsetStoppingCriterion,
-    MaxRStoppingCriterion,
-    MaxZStoppingCriterion,
-    MinRStoppingCriterion,
-    MinZStoppingCriterion,
     compute_fieldlines,
 )
-from simsopt.geo import SurfaceClassifier, SurfaceRZFourier
+from simsopt.geo import SurfaceRZFourier
 
 from topology_scorer import (
+    build_stopping_criteria as _build_topology_stopping_criteria,
     midplane_seed_radii as _midplane_seed_radii,
-    stop_reason_label as _topology_stop_reason,
-    toroidal_angle as _topology_toroidal_angle,
+    stop_reasons_indicate_broken as _topology_stop_reasons_indicate_broken,
+    topology_iteration_limit as _topology_iteration_limit,
+    trace_metrics as _topology_trace_metrics,
 )
 from workflow_helpers import validate_normalized_toroidal_flux
 
@@ -580,44 +577,23 @@ def evaluate_topology_gate(
     tmax,
     tol,
     survival_threshold,
-    surface_classifier_factory=SurfaceClassifier,
-    levelset_stopping_criterion_cls=LevelsetStoppingCriterion,
-    max_z_stopping_criterion_cls=MaxZStoppingCriterion,
-    min_z_stopping_criterion_cls=MinZStoppingCriterion,
-    min_r_stopping_criterion_cls=MinRStoppingCriterion,
-    max_r_stopping_criterion_cls=MaxRStoppingCriterion,
     compute_fieldlines_fn=compute_fieldlines,
     midplane_seed_radii_fn=_midplane_seed_radii,
-    topology_stop_reason_fn=_topology_stop_reason,
-    topology_toroidal_angle_fn=_topology_toroidal_angle,
+    build_stopping_criteria_fn=_build_topology_stopping_criteria,
+    trace_metrics_fn=_topology_trace_metrics,
+    topology_iteration_limit_fn=_topology_iteration_limit,
 ):
     if nfieldlines <= 0:
         return disabled_topology_gate_status(tmax, tol, survival_threshold)
 
-    cross_section = surface.cross_section(phi=0.0, thetas=512)
-    r = np.sqrt(cross_section[:, 0] ** 2 + cross_section[:, 1] ** 2)
-    z = cross_section[:, 2]
-    rmin = float(np.min(r))
-    rmax = float(np.max(r))
-    zmax = float(np.max(np.abs(z)))
-    classifier = surface_classifier_factory(surface, h=0.03, p=2)
-    stopping_criteria = [
-        levelset_stopping_criterion_cls(classifier.dist),
-        max_z_stopping_criterion_cls(zmax * 1.05),
-        min_z_stopping_criterion_cls(-zmax * 1.05),
-        min_r_stopping_criterion_cls(rmin * 0.95),
-        max_r_stopping_criterion_cls(rmax * 1.05),
-    ]
-    stop_labels = [
-        "surface_exit",
-        "max_z_guardrail",
-        "min_z_guardrail",
-        "min_r_guardrail",
-        "max_r_guardrail",
-    ]
+    stopping_criteria, stop_labels = build_stopping_criteria_fn(
+        surface,
+        include_surface_exit=True,
+        max_iterations=topology_iteration_limit_fn(tmax),
+    )
     R0 = midplane_seed_radii_fn(surface, nfieldlines)
     Z0 = np.zeros((nfieldlines,))
-    _, fieldlines_phi_hits = compute_fieldlines_fn(
+    fieldlines_tys, fieldlines_phi_hits = compute_fieldlines_fn(
         bfield,
         R0,
         Z0,
@@ -626,73 +602,113 @@ def evaluate_topology_gate(
         phis=[0.0],
         stopping_criteria=stopping_criteria,
     )
+    metrics = trace_metrics_fn(
+        fieldlines_tys,
+        fieldlines_phi_hits,
+        [0.0],
+        stop_labels,
+        mode="validation",
+    )
+    earliest_exit = metrics["first_exit"]
+    return _finalize_topology_gate_status(
+        {
+            "enabled": True,
+            "success": bool(metrics["survival_fraction"] >= survival_threshold),
+            "nfieldlines": int(nfieldlines),
+            "survived_lines": int(metrics["survived_lines"]),
+            "survival_fraction": float(metrics["survival_fraction"]),
+            "survival_threshold": float(survival_threshold),
+            "tmax": float(tmax),
+            "tol": float(tol),
+            "stop_reason_counts": metrics["stop_reason_counts"],
+            "first_exit_time": None
+            if earliest_exit is None
+            else earliest_exit["first_exit_time"],
+            "first_exit_angle": None
+            if earliest_exit is None
+            else earliest_exit["first_exit_angle"],
+            "first_exit_reason": None
+            if earliest_exit is None
+            else earliest_exit["stop_reason"],
+            "evaluation_error": None,
+            "evaluation_error_type": None,
+        }
+    )
 
-    survived = 0
-    earliest_exit = None
-    stop_reason_counts = {label: 0 for label in stop_labels}
-    for hits in fieldlines_phi_hits:
-        hits = np.asarray(hits)
-        if hits.size == 0:
-            survived += 1
-            continue
-        if hits.ndim == 1:
-            hits = hits[None, :]
-        negative_hits = hits[hits[:, 1] < 0]
-        if negative_hits.size == 0:
-            survived += 1
-            continue
-        first_stop = negative_hits[0]
-        stop_index = int(-first_stop[1]) - 1
-        stop_reason = topology_stop_reason_fn(stop_index, stop_labels)
-        stop_reason_counts.setdefault(stop_reason, 0)
-        stop_reason_counts[stop_reason] += 1
-        exit_time = float(first_stop[0])
-        exit_angle = topology_toroidal_angle_fn(first_stop[2], first_stop[3])
-        if earliest_exit is None or exit_time < earliest_exit["first_exit_time"]:
-            earliest_exit = {
-                "first_exit_time": exit_time,
-                "first_exit_angle": exit_angle,
-                "stop_reason": stop_reason,
-            }
 
-    survival_fraction = survived / nfieldlines
-    return {
-        "enabled": True,
-        "success": bool(survival_fraction >= survival_threshold),
-        "nfieldlines": int(nfieldlines),
-        "survived_lines": int(survived),
-        "survival_fraction": float(survival_fraction),
-        "survival_threshold": float(survival_threshold),
-        "tmax": float(tmax),
-        "tol": float(tol),
-        "stop_reason_counts": stop_reason_counts,
-        "first_exit_time": None
-        if earliest_exit is None
-        else earliest_exit["first_exit_time"],
-        "first_exit_angle": None
-        if earliest_exit is None
-        else earliest_exit["first_exit_angle"],
-        "first_exit_reason": None
-        if earliest_exit is None
-        else earliest_exit["stop_reason"],
-    }
+def topology_gate_state(status):
+    if bool(status.get("broken", False)):
+        return "broken"
+    stop_reason_counts = status.get("stop_reason_counts") or {}
+    survival_fraction = float(status.get("survival_fraction", 0.0))
+    survival_threshold = float(status.get("survival_threshold", 0.0))
+    finite_metrics = np.isfinite(survival_fraction) and np.isfinite(survival_threshold)
+    if not finite_metrics or _topology_stop_reasons_indicate_broken(stop_reason_counts):
+        return "broken"
+    if bool(status.get("success", False)):
+        return "feasible"
+    return "modeled_infeasible"
+
+
+def _finalize_topology_gate_status(status):
+    state = topology_gate_state(status)
+    finalized = dict(status)
+    if state == "broken":
+        finalized["success"] = False
+    finalized["state"] = state
+    finalized["broken"] = state == "broken"
+    return finalized
+
+
+def broken_topology_gate_status(
+    tmax,
+    tol,
+    survival_threshold,
+    *,
+    nfieldlines,
+    error_message,
+    error_type,
+):
+    return _finalize_topology_gate_status(
+        {
+            "enabled": bool(nfieldlines > 0),
+            "success": False,
+            "nfieldlines": int(max(nfieldlines, 0)),
+            "survived_lines": 0,
+            "survival_fraction": 0.0,
+            "survival_threshold": float(survival_threshold),
+            "tmax": float(tmax),
+            "tol": float(tol),
+            "stop_reason_counts": {},
+            "first_exit_time": None,
+            "first_exit_angle": None,
+            "first_exit_reason": None,
+            "evaluation_error": str(error_message),
+            "evaluation_error_type": str(error_type),
+            "broken": True,
+        }
+    )
 
 
 def disabled_topology_gate_status(tmax, tol, survival_threshold):
-    return {
-        "enabled": False,
-        "success": True,
-        "nfieldlines": 0,
-        "survived_lines": 0,
-        "survival_fraction": 1.0,
-        "survival_threshold": float(survival_threshold),
-        "tmax": float(tmax),
-        "tol": float(tol),
-        "stop_reason_counts": {},
-        "first_exit_time": None,
-        "first_exit_angle": None,
-        "first_exit_reason": None,
-    }
+    return _finalize_topology_gate_status(
+        {
+            "enabled": False,
+            "success": True,
+            "nfieldlines": 0,
+            "survived_lines": 0,
+            "survival_fraction": 1.0,
+            "survival_threshold": float(survival_threshold),
+            "tmax": float(tmax),
+            "tol": float(tol),
+            "stop_reason_counts": {},
+            "first_exit_time": None,
+            "first_exit_angle": None,
+            "first_exit_reason": None,
+            "evaluation_error": None,
+            "evaluation_error_type": None,
+        }
+    )
 
 
 def topology_gate_deficit(status):

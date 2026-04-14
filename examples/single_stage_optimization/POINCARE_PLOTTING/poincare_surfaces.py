@@ -25,6 +25,7 @@ from topology_scorer import (
     trace_metrics as _trace_metrics,
     phi_hit_counts as _phi_hit_counts,
     build_stopping_criteria,
+    topology_iteration_limit,
     STOP_LABELS_VALIDATION,
     STOP_LABELS_DIAGNOSTIC,
 )
@@ -160,8 +161,17 @@ if __name__ == "__main__":
 
     # Build stopping criteria from the shared module (single source of truth)
     nfp = surf.nfp
-    stop_crit_validation, stop_labels_validation = build_stopping_criteria(surf, include_surface_exit=True)
-    stop_crit_box, stop_labels_diagnostic = build_stopping_criteria(surf, include_surface_exit=False)
+    iteration_limit = topology_iteration_limit(tmax_fl)
+    stop_crit_validation, stop_labels_validation = build_stopping_criteria(
+        surf,
+        include_surface_exit=True,
+        max_iterations=iteration_limit,
+    )
+    stop_crit_box, stop_labels_diagnostic = build_stopping_criteria(
+        surf,
+        include_surface_exit=False,
+        max_iterations=iteration_limit,
+    )
 
 
     def trace_fieldlines(bfield):

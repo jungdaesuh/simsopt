@@ -1,5 +1,6 @@
 #include <memory>
 #include <vector>
+#include <algorithm>
 #include <functional>
 #include "magneticfield.h"
 #include "boozermagneticfield.h"
@@ -21,6 +22,16 @@ typedef xt::pyarray<double> Array;
 //#include <boost/numeric/odeint/stepper/bulirsch_stoer_dense_out.hpp>
 using boost::math::tools::toms748_solve;
 using namespace boost::numeric::odeint;
+
+template<class State>
+bool state_is_finite(const State& state) {
+    for (double value : state) {
+        if (!std::isfinite(value)) {
+            return false;
+        }
+    }
+    return true;
+}
 
 template<template<class, std::size_t, xt::layout_type> class T>
 class GuidingCenterVacuumRHS {
@@ -387,16 +398,33 @@ solve(RHS rhs, typename RHS::State y, double tmax, double dt, double dtmax, doub
     State temp;
     do {
         res.push_back(join<1, RHS::Size>({t}, y));
+        State y_last = y;
         tuple<double, double> step = dense.do_step(rhs);
         iter++;
         t = dense.current_time();
         y = dense.current_state();
+        if (!std::isfinite(t) || !state_is_finite(y)) {
+            throw std::runtime_error("Non-finite tracing state encountered");
+        }
         phi_current = get_phi(y[0], y[1], phi_last);
         if (flux) {
           phi_current = y[2];
         }
         double tlast = std::get<0>(step);
         double tcurrent = std::get<1>(step);
+        vector<array<double, RHS::Size+2>> step_phi_hits = {};
+        bool has_stop_event = false;
+        double stop_time = 0.0;
+        int stop_index = -1;
+        State stop_state = y;
+        auto register_stop_event = [&](int candidate_index, double candidate_time, const State& candidate_state) {
+            if (!has_stop_event || candidate_time < stop_time) {
+                has_stop_event = true;
+                stop_time = candidate_time;
+                stop_index = candidate_index;
+                stop_state = candidate_state;
+            }
+        };
         // Now check whether we have hit any of the phi planes
         for (int i = 0; i < phis.size(); ++i) {
             double phi = phis[i];
@@ -413,7 +441,8 @@ solve(RHS rhs, typename RHS::State y, double tmax, double dt, double dtmax, doub
                     }
                     return diff;
                 };
-                auto root = toms748_solve(rootfun, tlast, tcurrent, phi_last - phi_shift, phi_current - phi_shift, roottol, rootmaxit);
+                uintmax_t phi_rootmaxit = rootmaxit;
+                auto root = toms748_solve(rootfun, tlast, tcurrent, phi_last - phi_shift, phi_current - phi_shift, roottol, phi_rootmaxit);
                 double f0 = rootfun(root.first);
                 double f1 = rootfun(root.second);
                 double troot = std::abs(f0) < std::abs(f1) ? root.first : root.second;
@@ -425,15 +454,145 @@ solve(RHS rhs, typename RHS::State y, double tmax, double dt, double dtmax, doub
                 //fmt::print("root=({:.5f}, {:.5f}), tlast={:.5f}, phi_last={:.5f}, tcurrent={:.5f}, phi_current={:.5f}, phi_shift={:.5f}, phi_root={:.5f}\n", std::get<0>(root), std::get<1>(root), tlast, phi_last, tcurrent, phi_current, phi_shift, get_phi(temp[0], temp[1], phi_last));
                 //fmt::print("t={:.5f}, xyz=({:.5f}, {:.5f}, {:.5f}), rphiz=({}, {}, {})\n", troot, temp[0], temp[1], temp[2], rroot, phiroot, temp[2]);
                 //fmt::print("x={}, y={}, phi={}\n", temp[0], temp[1], std::atan2(temp[1], temp[0]));
-                res_phi_hits.push_back(join<2, RHS::Size>({troot, double(i)}, temp));
+                step_phi_hits.push_back(join<2, RHS::Size>({troot, double(i)}, temp));
             }
         }
         // check whether we have satisfied any of the extra stopping criteria (e.g. left a surface)
         for (int i = 0; i < stopping_criteria.size(); ++i) {
-            if(stopping_criteria[i] && (*stopping_criteria[i])(iter, t, y[0], y[1], y[2])){
-                stop = true;
-                res_phi_hits.push_back(join<2, RHS::Size>({t, -1-double(i)}, y));
-                break;
+            if (!stopping_criteria[i]) {
+                continue;
+            }
+            if (stopping_criteria[i]->supports_dense_rootfinding()) {
+                auto evaluate_dense_stop_value = [&](double probe_t) {
+                    dense.calc_state(probe_t, temp);
+                    if (!state_is_finite(temp)) {
+                        throw std::runtime_error("Non-finite tracing state encountered");
+                    }
+                    double probe_value = stopping_criteria[i]->dense_root_value(
+                        probe_t, temp[0], temp[1], temp[2]
+                    );
+                    if (!std::isfinite(probe_value)) {
+                        throw std::runtime_error("Non-finite tracing stop-function value encountered");
+                    }
+                    return probe_value;
+                };
+                double value_last = stopping_criteria[i]->dense_root_value(tlast, y_last[0], y_last[1], y_last[2]);
+                if (!std::isfinite(value_last)) {
+                    throw std::runtime_error("Non-finite tracing stop-function value encountered");
+                }
+                if (value_last < 0.0) {
+                    register_stop_event(i, tlast, y_last);
+                    continue;
+                }
+                struct DenseStopBracket {
+                    bool found;
+                    double left_time;
+                    double left_value;
+                    double right_time;
+                    double right_value;
+                };
+                int dense_stop_max_depth = std::max(
+                    1,
+                    stopping_criteria[i]->dense_root_refinement_depth(
+                        tlast,
+                        y_last[0],
+                        y_last[1],
+                        y_last[2],
+                        tcurrent,
+                        y[0],
+                        y[1],
+                        y[2]
+                    )
+                );
+                std::function<DenseStopBracket(double, double, double, double, int)> find_dense_stop_bracket;
+                find_dense_stop_bracket = [&](double left_time, double left_value, double right_time, double right_value, int depth) {
+                    if (left_value >= 0.0 && right_value < 0.0 && depth <= 0) {
+                        return DenseStopBracket{
+                            true,
+                            left_time,
+                            left_value,
+                            right_time,
+                            right_value,
+                        };
+                    }
+                    if (depth <= 0) {
+                        return DenseStopBracket{false, 0.0, 0.0, 0.0, 0.0};
+                    }
+                    double mid_time = 0.5 * (left_time + right_time);
+                    double mid_value = evaluate_dense_stop_value(mid_time);
+                    auto left_bracket = find_dense_stop_bracket(
+                        left_time,
+                        left_value,
+                        mid_time,
+                        mid_value,
+                        depth - 1
+                    );
+                    if (left_bracket.found) {
+                        return left_bracket;
+                    }
+                    return find_dense_stop_bracket(
+                        mid_time,
+                        mid_value,
+                        right_time,
+                        right_value,
+                        depth - 1
+                    );
+                };
+                double value_current = evaluate_dense_stop_value(tcurrent);
+                auto dense_stop_bracket = find_dense_stop_bracket(
+                    tlast,
+                    value_last,
+                    tcurrent,
+                    value_current,
+                    dense_stop_max_depth
+                );
+                if (dense_stop_bracket.found) {
+                    std::function<double(double)> rootfun = [&](double probe_t) {
+                        return evaluate_dense_stop_value(probe_t);
+                    };
+                    uintmax_t stop_rootmaxit = rootmaxit;
+                    auto root = toms748_solve(
+                        rootfun,
+                        dense_stop_bracket.left_time,
+                        dense_stop_bracket.right_time,
+                        dense_stop_bracket.left_value,
+                        dense_stop_bracket.right_value,
+                        roottol,
+                        stop_rootmaxit
+                    );
+                    double f0 = rootfun(root.first);
+                    double f1 = rootfun(root.second);
+                    double troot = std::abs(f0) < std::abs(f1) ? root.first : root.second;
+                    dense.calc_state(troot, temp);
+                    if (!state_is_finite(temp)) {
+                        throw std::runtime_error("Non-finite tracing state encountered");
+                    }
+                    register_stop_event(i, troot, temp);
+                    continue;
+                }
+            }
+            if((*stopping_criteria[i])(iter, t, y[0], y[1], y[2])){
+                register_stop_event(i, t, y);
+            }
+        }
+        if (has_stop_event) {
+            std::sort(
+                step_phi_hits.begin(),
+                step_phi_hits.end(),
+                [](const auto& lhs, const auto& rhs) {
+                    return lhs[0] < rhs[0];
+                }
+            );
+            for (const auto& phi_hit : step_phi_hits) {
+                if (phi_hit[0] <= stop_time) {
+                    res_phi_hits.push_back(phi_hit);
+                }
+            }
+            stop = true;
+            res_phi_hits.push_back(join<2, RHS::Size>({stop_time, -1-double(stop_index)}, stop_state));
+        } else {
+            for (const auto& phi_hit : step_phi_hits) {
+                res_phi_hits.push_back(phi_hit);
             }
         }
         phi_last = phi_current;

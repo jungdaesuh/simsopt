@@ -1,4 +1,6 @@
 #pragma once
+#include <algorithm>
+#include <cmath>
 #include <memory>
 #include <vector>
 #include "magneticfield.h"
@@ -15,6 +17,32 @@ class StoppingCriterion {
     public:
         // Should return true if the Criterion is satisfied.
         virtual bool operator()(int iter, double t, double x, double y, double z) = 0;
+        virtual bool supports_dense_rootfinding() const {
+            return false;
+        }
+        virtual double dense_root_value(double t, double x, double y, double z) const {
+            return 1.0;
+        }
+        virtual int dense_root_refinement_depth(
+            double t0,
+            double x0,
+            double y0,
+            double z0,
+            double t1,
+            double x1,
+            double y1,
+            double z1
+        ) const {
+            (void)t0;
+            (void)x0;
+            (void)y0;
+            (void)z0;
+            (void)t1;
+            (void)x1;
+            (void)y1;
+            (void)z1;
+            return 12;
+        }
         virtual ~StoppingCriterion() {}
 };
 
@@ -110,7 +138,7 @@ class IterationStoppingCriterion : public StoppingCriterion{
     public:
         IterationStoppingCriterion(int max_iter) : max_iter(max_iter) {};
         bool operator()(int iter, double t, double x, double y, double z) override {
-            return iter>max_iter;
+            return iter>=max_iter;
         };
 };
 
@@ -120,12 +148,52 @@ class LevelsetStoppingCriterion : public StoppingCriterion{
         shared_ptr<RegularGridInterpolant3D<Array>> levelset;
     public:
         LevelsetStoppingCriterion(shared_ptr<RegularGridInterpolant3D<Array>> levelset) : levelset(levelset) { };
-        bool operator()(int iter, double t, double x, double y, double z) override {
+        bool supports_dense_rootfinding() const override {
+            return true;
+        }
+        double dense_root_value(double t, double x, double y, double z) const override {
+            (void)t;
             double r = std::sqrt(x*x + y*y);
             double phi = std::atan2(y, x);
             if(phi < 0)
                 phi += 2*M_PI;
-            double f = levelset->evaluate(r, phi, z)[0];
+            return levelset->evaluate(r, phi, z)[0];
+        };
+        int dense_root_refinement_depth(
+            double t0,
+            double x0,
+            double y0,
+            double z0,
+            double t1,
+            double x1,
+            double y1,
+            double z1
+        ) const override {
+            (void)t0;
+            (void)t1;
+            double r0 = std::sqrt(x0*x0 + y0*y0);
+            double r1 = std::sqrt(x1*x1 + y1*y1);
+            double phi0 = std::atan2(y0, x0);
+            if(phi0 < 0)
+                phi0 += 2*M_PI;
+            double phi1 = get_phi(x1, y1, phi0);
+            constexpr double refinement_safety_factor = 4.0;
+            constexpr int refinement_depth_cap = 20;
+            double required_segments = refinement_safety_factor * std::max({
+                1.0,
+                std::abs(r1-r0) / std::max(levelset->cell_width_x(), 1e-12),
+                std::abs(phi1-phi0) / std::max(levelset->cell_width_y(), 1e-12),
+                std::abs(z1-z0) / std::max(levelset->cell_width_z(), 1e-12),
+            });
+            int depth = int(std::ceil(std::log2(required_segments)));
+            if (depth < 1)
+                depth = 1;
+            if (depth > refinement_depth_cap)
+                depth = refinement_depth_cap;
+            return depth;
+        };
+        bool operator()(int iter, double t, double x, double y, double z) override {
+            double f = dense_root_value(t, x, y, z);
             //fmt::print("Levelset at xyz=({}, {}, {}), rphiz=({}, {}, {}), f={}\n", x, y, z, r, phi, z, f);
             return f<0;
         };

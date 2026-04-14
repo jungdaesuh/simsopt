@@ -144,6 +144,17 @@ class RegularGridInterpolant3D {
         void evaluate_local(double x, double y, double z, int cell_idx, double* res);
 
     public:
+        double cell_width_x() const {
+            return hx;
+        }
+
+        double cell_width_y() const {
+            return hy;
+        }
+
+        double cell_width_z() const {
+            return hz;
+        }
 
         RegularGridInterpolant3D(InterpolationRule rule, RangeTriplet xrange, RangeTriplet yrange, RangeTriplet zrange, int value_size, bool out_of_bounds_ok, std::function<std::vector<bool>(Vec, Vec, Vec)> skip) :
             rule(rule), 
@@ -341,4 +352,3 @@ class ChebyshevInterpolationRule : public InterpolationRule {
             build_scalings();
         }
 };
-

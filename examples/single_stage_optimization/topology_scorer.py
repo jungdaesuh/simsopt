@@ -52,7 +52,12 @@ def toroidal_angle(x, y):
 def phi_hit_counts(fieldlines_phi_hits, phis):
     """Summarize how many Poincare hits were recorded on each phi plane."""
     return [
-        int(sum(np.sum(fieldline[:, 1] == i) for fieldline in fieldlines_phi_hits))
+        int(
+            sum(
+                np.sum(_normalize_trace_hits(fieldline)[:, 1] == i)
+                for fieldline in fieldlines_phi_hits
+            )
+        )
         for i in range(len(phis))
     ]
 
@@ -67,6 +72,7 @@ STOP_LABELS_VALIDATION = [
     "min_z_guardrail",
     "min_r_guardrail",
     "max_r_guardrail",
+    "iteration_limit",
 ]
 
 STOP_LABELS_DIAGNOSTIC = [
@@ -74,7 +80,29 @@ STOP_LABELS_DIAGNOSTIC = [
     "min_z_guardrail",
     "min_r_guardrail",
     "max_r_guardrail",
+    "iteration_limit",
 ]
+
+BROKEN_STOP_REASONS = frozenset({"iteration_limit"})
+
+_TOPOLOGY_TRACE_MIN_ITERATIONS = 10_000
+_TOPOLOGY_TRACE_ITERATIONS_PER_TMAX = 20_000
+_TOPOLOGY_TRACE_MAX_ITERATIONS = 2_000_000
+
+
+def topology_iteration_limit(tmax):
+    """Return a generous but finite tracing iteration cap for a given horizon."""
+    scaled_limit = int(np.ceil(float(max(tmax, 1.0)) * _TOPOLOGY_TRACE_ITERATIONS_PER_TMAX))
+    return int(
+        min(
+            _TOPOLOGY_TRACE_MAX_ITERATIONS,
+            max(_TOPOLOGY_TRACE_MIN_ITERATIONS, scaled_limit),
+        )
+    )
+
+
+def stop_reasons_indicate_broken(stop_reason_counts):
+    return any(int(stop_reason_counts.get(reason, 0)) > 0 for reason in BROKEN_STOP_REASONS)
 
 
 def _full_torus_surface(surface):
@@ -110,13 +138,19 @@ def _full_torus_surface(surface):
     return surf_full
 
 
-def build_stopping_criteria(surface, include_surface_exit=True, box_padding=0.05):
+def build_stopping_criteria(
+    surface,
+    include_surface_exit=True,
+    box_padding=0.05,
+    max_iterations=None,
+):
     """Build stopping criteria from a Boozer surface.
 
     Returns (criteria_list, stop_labels) matching the convention used by
     both the topology gate and the strict Poincare validator.
     """
     from simsopt.field import (
+        IterationStoppingCriterion,
         LevelsetStoppingCriterion,
         MaxRStoppingCriterion,
         MaxZStoppingCriterion,
@@ -138,25 +172,78 @@ def build_stopping_criteria(surface, include_surface_exit=True, box_padding=0.05
         MinRStoppingCriterion(rmin * (1 - box_padding)),
         MaxRStoppingCriterion(rmax * (1 + box_padding)),
     ]
+    iteration_limit = (
+        _TOPOLOGY_TRACE_MAX_ITERATIONS
+        if max_iterations is None
+        else int(max_iterations)
+    )
+    if iteration_limit <= 0:
+        raise ValueError("max_iterations must be positive")
+    iteration_criterion = IterationStoppingCriterion(iteration_limit)
 
     if include_surface_exit:
         surf_for_classifier = _full_torus_surface(surface)
         classifier = SurfaceClassifier(surf_for_classifier, h=0.03, p=2)
-        criteria = [LevelsetStoppingCriterion(classifier.dist)] + box_criteria
+        criteria = [LevelsetStoppingCriterion(classifier.dist)] + box_criteria + [iteration_criterion]
         return criteria, STOP_LABELS_VALIDATION
     else:
-        return box_criteria, STOP_LABELS_DIAGNOSTIC
+        return box_criteria + [iteration_criterion], STOP_LABELS_DIAGNOSTIC
 
 
 # ---------------------------------------------------------------------------
 # Metrics extraction (single source of truth)
 # ---------------------------------------------------------------------------
 
+def _normalize_trace_history(history):
+    history = np.asarray(history, dtype=float)
+    if history.size == 0:
+        if history.ndim >= 2:
+            return history.reshape((0, history.shape[-1]))
+        return np.empty((0, 4), dtype=float)
+    if history.ndim == 1:
+        return history[None, :]
+    return history
+
+
+def _normalize_trace_hits(hits):
+    hits = np.asarray(hits, dtype=float)
+    if hits.size == 0:
+        if hits.ndim >= 2 and hits.shape[-1] != 5:
+            raise ValueError(
+                f"Topology trace hit rows have invalid empty shape {hits.shape}"
+            )
+        return np.empty((0, 5), dtype=float)
+    if hits.ndim == 1:
+        return hits[None, :]
+    return hits
+
+
+def validate_trace_arrays(fieldlines_tys, fieldlines_phi_hits):
+    if len(fieldlines_tys) != len(fieldlines_phi_hits):
+        raise ValueError("Topology tracing returned mismatched history and hit counts")
+    for line_index, (history, hits) in enumerate(zip(fieldlines_tys, fieldlines_phi_hits)):
+        normalized_history = _normalize_trace_history(history)
+        normalized_hits = _normalize_trace_hits(hits)
+        if normalized_history.shape[1] < 4:
+            raise ValueError(
+                f"Topology trace history for line {line_index} has invalid shape {normalized_history.shape}"
+            )
+        if normalized_hits.shape[1] != 5:
+            raise ValueError(
+                f"Topology trace hit rows for line {line_index} have invalid shape {normalized_hits.shape}"
+            )
+        if normalized_history.size and not np.all(np.isfinite(normalized_history)):
+            raise ValueError(f"Topology trace history for line {line_index} contains NaN/Inf")
+        if normalized_hits.size and not np.all(np.isfinite(normalized_hits)):
+            raise ValueError(f"Topology trace hits for line {line_index} contain NaN/Inf")
+
+
 def trace_metrics(fieldlines_tys, fieldlines_phi_hits, phis, stop_labels, mode="validation"):
     """Extract structured metrics from field-line tracing results.
 
     This is the single implementation used by all scoring paths.
     """
+    validate_trace_arrays(fieldlines_tys, fieldlines_phi_hits)
     nfieldlines = len(fieldlines_tys)
     hit_counts = phi_hit_counts(fieldlines_phi_hits, phis)
     line_metrics = []
@@ -165,6 +252,8 @@ def trace_metrics(fieldlines_tys, fieldlines_phi_hits, phis, stop_labels, mode="
     earliest_exit = None
 
     for seed_index, (history, hits) in enumerate(zip(fieldlines_tys, fieldlines_phi_hits)):
+        history = _normalize_trace_history(history)
+        hits = _normalize_trace_hits(hits)
         negative_hits = hits[hits[:, 1] < 0]
         first_stop = negative_hits[0] if negative_hits.size else None
         per_phi_counts = [int(np.sum(hits[:, 1] == i)) for i in range(len(phis))]
@@ -323,7 +412,11 @@ def score_topology(
     nfp = surface.nfp
     phis = [(i / nphis) * (2 * np.pi / nfp) for i in range(nphis)]
 
-    stopping_criteria, stop_labels = build_stopping_criteria(surface, include_surface_exit=True)
+    stopping_criteria, stop_labels = build_stopping_criteria(
+        surface,
+        include_surface_exit=True,
+        max_iterations=topology_iteration_limit(tmax),
+    )
 
     R0 = midplane_seed_radii(surface, nfieldlines)
     Z0 = np.zeros((nfieldlines,))

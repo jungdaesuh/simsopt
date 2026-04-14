@@ -371,7 +371,13 @@ class ParticleTracingTesting(unittest.TestCase):
             ma, bsh, nparticles, tmax=tmax, seed=1, mass=m, charge=q,
             Ekin=Ekin, umin=-0.80, umax=-0.70,
             phis=[], mode='gc_vac', tol=1e-11, stopping_criteria=[IterationStoppingCriterion(10)])
-        assert len(gc_tys[0]) == 11
+        assert len(gc_tys[0]) == 10
+
+        gc_tys_one_step, _ = trace_particles_starting_on_curve(
+            ma, bsh, nparticles, tmax=tmax, seed=1, mass=m, charge=q,
+            Ekin=Ekin, umin=-0.80, umax=-0.70,
+            phis=[], mode='gc_vac', tol=1e-11, stopping_criteria=[IterationStoppingCriterion(1)])
+        assert len(gc_tys_one_step[0]) == 1
 
         # consider a particle with mostly perpendicular velocity so that it get's lost
         ntor = 1
@@ -418,7 +424,7 @@ class ParticleTracingTesting(unittest.TestCase):
             s, bsh, nparticles, tmax=tmax, seed=1, mass=m, charge=q,
             Ekin=Ekin, umin=-0.80, umax=-0.70,
             phis=[], mode='gc_vac', tol=1e-11, stopping_criteria=[IterationStoppingCriterion(10)])
-        assert len(gc_tys[0]) == 11
+        assert len(gc_tys[0]) == 10
 
 
 class BoozerGuidingCenterTracingTesting(unittest.TestCase):
