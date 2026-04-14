@@ -33,6 +33,49 @@ def validate_phi_hits(phi_hits, nphis):
     return True
 
 
+def _build_levelset(phi_points):
+    return sopp.RegularGridInterpolant3D(
+        sopp.UniformInterpolationRule(1),
+        (0.8, 1.2, 32),
+        (0.0, 2 * np.pi, phi_points),
+        (-0.1, 0.1, 8),
+        1,
+        True,
+    )
+
+
+def _signed_wedge(phi_min, phi_max):
+    def evaluator(r, phi, z, flatten=True):
+        r = np.asarray(r)
+        phi = np.mod(np.asarray(phi), 2 * np.pi)
+        z = np.asarray(z)
+        values = np.ones((r.size, 1))
+        mask = (
+            (np.abs(r - 1.0) <= 0.05)
+            & (np.abs(z) <= 0.02)
+            & (phi >= phi_min)
+            & (phi <= phi_max)
+        )
+        values[mask, 0] = -1.0
+        if flatten:
+            return np.ascontiguousarray(values).flatten()
+        return values
+
+    return evaluator
+
+
+def _trace_single_fieldline(field, *, tmax=2.0, tol=1e-2, stopping_criteria=None):
+    return compute_fieldlines(
+        field,
+        [1.0],
+        [0.0],
+        tmax=tmax,
+        tol=tol,
+        phis=[],
+        stopping_criteria=[] if stopping_criteria is None else stopping_criteria,
+    )
+
+
 class FieldlineTesting(unittest.TestCase):
 
     def test_poincare_toroidal(self):
@@ -77,41 +120,10 @@ class FieldlineTesting(unittest.TestCase):
 
     def test_levelset_stopping_detects_within_step_surface_exit(self):
         field = ToroidalField(1.0, 1.0)
-        rule = sopp.UniformInterpolationRule(1)
-        levelset = sopp.RegularGridInterpolant3D(
-            rule,
-            (0.8, 1.2, 32),
-            (0.0, 2 * np.pi, 256),
-            (-0.1, 0.1, 8),
-            1,
-            True,
-        )
-
-        def signed_wedge(r, phi, z, flatten=True):
-            r = np.asarray(r)
-            phi = np.mod(np.asarray(phi), 2 * np.pi)
-            z = np.asarray(z)
-            values = np.ones((r.size, 1))
-            mask = (
-                (np.abs(r - 1.0) <= 0.05)
-                & (np.abs(z) <= 0.02)
-                & (phi >= 1.0)
-                & (phi <= 1.2)
-            )
-            values[mask, 0] = -1.0
-            if flatten:
-                return np.ascontiguousarray(values).flatten()
-            return values
-
-        levelset.interpolate_batch(signed_wedge)
-
-        res_tys, res_phi_hits = compute_fieldlines(
+        levelset = _build_levelset(256)
+        levelset.interpolate_batch(_signed_wedge(1.0, 1.2))
+        res_tys, res_phi_hits = _trace_single_fieldline(
             field,
-            [1.0],
-            [0.0],
-            tmax=2.0,
-            tol=1e-2,
-            phis=[],
             stopping_criteria=[LevelsetStoppingCriterion(levelset)],
         )
 
@@ -123,41 +135,10 @@ class FieldlineTesting(unittest.TestCase):
 
     def test_levelset_stopping_detects_subsample_width_surface_exit(self):
         field = ToroidalField(1.0, 1.0)
-        rule = sopp.UniformInterpolationRule(1)
-        levelset = sopp.RegularGridInterpolant3D(
-            rule,
-            (0.8, 1.2, 32),
-            (0.0, 2 * np.pi, 512),
-            (-0.1, 0.1, 8),
-            1,
-            True,
-        )
-
-        def signed_wedge(r, phi, z, flatten=True):
-            r = np.asarray(r)
-            phi = np.mod(np.asarray(phi), 2 * np.pi)
-            z = np.asarray(z)
-            values = np.ones((r.size, 1))
-            mask = (
-                (np.abs(r - 1.0) <= 0.05)
-                & (np.abs(z) <= 0.02)
-                & (phi >= 1.135)
-                & (phi <= 1.150)
-            )
-            values[mask, 0] = -1.0
-            if flatten:
-                return np.ascontiguousarray(values).flatten()
-            return values
-
-        levelset.interpolate_batch(signed_wedge)
-
-        _, res_phi_hits = compute_fieldlines(
+        levelset = _build_levelset(512)
+        levelset.interpolate_batch(_signed_wedge(1.135, 1.150))
+        _, res_phi_hits = _trace_single_fieldline(
             field,
-            [1.0],
-            [0.0],
-            tmax=2.0,
-            tol=1e-2,
-            phis=[],
             stopping_criteria=[LevelsetStoppingCriterion(levelset)],
         )
 
@@ -165,31 +146,46 @@ class FieldlineTesting(unittest.TestCase):
         assert res_phi_hits[0][0, 1] == -1
         assert 1.05 < res_phi_hits[0][0, 0] < 1.16
 
+    def test_levelset_stopping_detects_leave_and_reenter_within_single_step(self):
+        field = ToroidalField(1.0, 1.0)
+        baseline_tys, _ = _trace_single_fieldline(field)
+        final_step_start = baseline_tys[0][-2, 0]
+        final_step_end = baseline_tys[0][-1, 0]
+        target_center = final_step_start + 0.30 * (final_step_end - final_step_start)
+        half_width = 8.0e-4
+        lower_phi = target_center - half_width
+        upper_phi = target_center + half_width
+
+        levelset = _build_levelset(8192)
+        levelset.interpolate_batch(_signed_wedge(lower_phi, upper_phi))
+        _, res_phi_hits = _trace_single_fieldline(
+            field,
+            stopping_criteria=[LevelsetStoppingCriterion(levelset)],
+        )
+
+        assert final_step_start < lower_phi < upper_phi < final_step_end
+        assert len(res_phi_hits[0]) == 1
+        assert res_phi_hits[0][0, 1] == -1
+        assert final_step_start < res_phi_hits[0][0, 0] < final_step_end
+        hit_x = res_phi_hits[0][0, 2]
+        hit_y = res_phi_hits[0][0, 3]
+        hit_z = res_phi_hits[0][0, 4]
+        hit_r = np.sqrt(hit_x**2 + hit_y**2)
+        hit_phi = np.mod(np.arctan2(hit_y, hit_x), 2 * np.pi)
+        assert (lower_phi - 1.5e-3) <= hit_phi <= (upper_phi + 1.5e-3)
+        assert levelset.evaluate(hit_r, hit_phi, hit_z)[0] < 0.0
+        assert abs(hit_r - 1.0) <= 0.05
+        assert abs(hit_z) <= 0.02
+
     def test_levelset_stopping_refines_to_interpolant_resolution(self):
         field = ToroidalField(1.0, 1.0)
-        baseline_tys, _ = compute_fieldlines(
-            field,
-            [1.0],
-            [0.0],
-            tmax=2.0,
-            tol=1e-2,
-            phis=[],
-            stopping_criteria=[],
-        )
+        baseline_tys, _ = _trace_single_fieldline(field)
         final_step_start = baseline_tys[0][-2, 0]
         final_step_end = baseline_tys[0][-1, 0]
         target_fraction = 2561.0 / 8192.0
         target_phi = final_step_start + target_fraction * (final_step_end - final_step_start)
 
-        rule = sopp.UniformInterpolationRule(1)
-        levelset = sopp.RegularGridInterpolant3D(
-            rule,
-            (0.8, 1.2, 32),
-            (0.0, 2 * np.pi, 8192),
-            (-0.1, 0.1, 8),
-            1,
-            True,
-        )
+        levelset = _build_levelset(8192)
 
         def signed_wedge(r, phi, z, flatten=True):
             r = np.asarray(r)
@@ -209,13 +205,8 @@ class FieldlineTesting(unittest.TestCase):
 
         levelset.interpolate_batch(signed_wedge)
 
-        _, res_phi_hits = compute_fieldlines(
+        _, res_phi_hits = _trace_single_fieldline(
             field,
-            [1.0],
-            [0.0],
-            tmax=2.0,
-            tol=1e-2,
-            phis=[],
             stopping_criteria=[LevelsetStoppingCriterion(levelset)],
         )
 
