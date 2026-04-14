@@ -1,3 +1,4 @@
+import copy
 import importlib.util
 from contextlib import ExitStack
 import json
@@ -83,6 +84,19 @@ def load_alm_utils_module():
     assert spec.loader is not None
     spec.loader.exec_module(module)
     return module
+
+
+def phase1_runtime_kwargs(module, *, phase1_config=None):
+    resolved_phase1_config = (
+        module.build_phase1_config()
+        if phase1_config is None
+        else phase1_config
+    )
+    return {
+        "phase1_config": resolved_phase1_config,
+        "refinement_eligible_fn": module.refinement_eligible_incumbent,
+        "repair_progress_state_fn": module.repair_progress_state,
+    }
 
 
 def make_frontier_goal_config(module, **overrides):
@@ -2934,6 +2948,24 @@ class HardwareConstraintTests(unittest.TestCase):
             module._PENALTY_FEASIBLE_START_LOCAL_RELATIVE_RADIUS,
         )
 
+    def test_resolve_penalty_phase1_settings_repair_first_uses_extra_local_attempt(self):
+        module = self.load_module()
+
+        settings = module.resolve_penalty_phase1_settings(
+            40,
+            1.0,
+            0,
+            enable_local_preservation=True,
+            seed_regime="repair_first",
+        )
+
+        self.assertTrue(settings["use_phase1"])
+        self.assertTrue(settings["use_local_bounds"])
+        self.assertEqual(
+            settings["local_max_attempts"],
+            module._PENALTY_FEASIBLE_START_LOCAL_MAX_ATTEMPTS + 1,
+        )
+
     def test_run_penalty_phase1_preserves_feasible_start_when_no_safe_step_exists(self):
         module = self.load_module()
         run_dict = {
@@ -2986,6 +3018,7 @@ class HardwareConstraintTests(unittest.TestCase):
             normalize_message_fn=lambda *args, **kwargs: "phase1_reject",
             restore_accepted_state_fn=fake_restore,
             minimize_fn=fake_minimize,
+            **phase1_runtime_kwargs(module),
         )
 
         self.assertTrue(result["used_phase1"])
@@ -3057,6 +3090,7 @@ class HardwareConstraintTests(unittest.TestCase):
             normalize_message_fn=lambda *args, **kwargs: "phase1_ok",
             restore_accepted_state_fn=lambda: None,
             minimize_fn=fake_minimize,
+            **phase1_runtime_kwargs(module),
         )
 
         self.assertTrue(result["continue_search"])
@@ -3121,25 +3155,28 @@ class HardwareConstraintTests(unittest.TestCase):
             kwargs["callback"](np.array([1.0, -1.0]))
             return SimpleNamespace(nit=1, success=True, message="CONVERGENCE", status=0)
 
-        with patch.object(module, "_PENALTY_FEASIBLE_START_LOCAL_MAX_ATTEMPTS", 1):
-            result = module.run_penalty_phase1(
-                np.array([1.0, -1.0]),
-                total_maxiter=4,
-                maxcor=5,
-                ftol=1e-15,
-                gtol=1e-15,
-                initial_step_scale=1.0,
-                initial_step_maxiter=0,
-                enable_local_preservation=True,
-                lower_bounds=np.array([-5.0, -5.0]),
-                upper_bounds=np.array([5.0, 5.0]),
-                run_dict=run_dict,
-                objective_fn=lambda x: (0.0, np.zeros_like(x)),
-                callback_fn=fake_callback,
-                normalize_message_fn=lambda *args, **kwargs: "phase1_ok",
-                restore_accepted_state_fn=lambda: None,
-                minimize_fn=fake_minimize,
-            )
+        result = module.run_penalty_phase1(
+            np.array([1.0, -1.0]),
+            total_maxiter=4,
+            maxcor=5,
+            ftol=1e-15,
+            gtol=1e-15,
+            initial_step_scale=1.0,
+            initial_step_maxiter=0,
+            enable_local_preservation=True,
+            lower_bounds=np.array([-5.0, -5.0]),
+            upper_bounds=np.array([5.0, 5.0]),
+            run_dict=run_dict,
+            objective_fn=lambda x: (0.0, np.zeros_like(x)),
+            callback_fn=fake_callback,
+            normalize_message_fn=lambda *args, **kwargs: "phase1_ok",
+            restore_accepted_state_fn=lambda: None,
+            minimize_fn=fake_minimize,
+            **phase1_runtime_kwargs(
+                module,
+                phase1_config=module.build_phase1_config(local_max_attempts=1),
+            ),
+        )
 
         self.assertFalse(result["continue_search"])
         self.assertTrue(result["local_preservation_preserved_start"])
@@ -3219,6 +3256,7 @@ class HardwareConstraintTests(unittest.TestCase):
             restore_accepted_state_fn=lambda: None,
             refresh_preserved_timeout_artifacts_fn=lambda: refresh_calls.append("refresh"),
             minimize_fn=fake_minimize,
+            **phase1_runtime_kwargs(module),
         )
 
         self.assertEqual(attempts["count"], 2)
@@ -3321,6 +3359,7 @@ class HardwareConstraintTests(unittest.TestCase):
             normalize_message_fn=lambda *args, **kwargs: "phase1_ok",
             restore_accepted_state_fn=lambda: None,
             minimize_fn=fake_minimize,
+            **phase1_runtime_kwargs(module),
         )
 
         self.assertEqual(result["phase1_outcome"], "safe_local_accept")
@@ -3328,19 +3367,50 @@ class HardwareConstraintTests(unittest.TestCase):
         self.assertAlmostEqual(result["phase1_max_accepted_step_rms"], 0.015)
         np.testing.assert_allclose(result["next_dofs"], [1.01, -0.99])
 
-    def test_run_penalty_phase1_repair_first_accepts_local_feasible_recovery(self):
+    def test_run_penalty_phase1_repair_first_accepts_local_violation_reduction_not_preserve_gate(self):
         module = self.load_module()
-        run_dict = {
+        anchor_hardware = {
+            "success": False,
+            "violations": [
+                "coil_coil_min_dist 0.030000 below threshold 0.050000",
+                "max_curvature 120.000000 exceeds threshold 100.000000",
+            ],
+            "curve_curve_min_dist": 0.03,
+            "cc_dist": 0.05,
+            "curve_surface_min_dist": 0.02,
+            "cs_dist": 0.015,
+            "surface_vessel_min_dist": 0.05,
+            "ss_dist": 0.04,
+            "max_curvature": 120.0,
+            "curvature_threshold": 100.0,
+        }
+        repaired_hardware = {
+            "success": False,
+            "violations": [
+                "coil_coil_min_dist 0.040000 below threshold 0.050000",
+                "max_curvature 110.000000 exceeds threshold 100.000000",
+            ],
+            "curve_curve_min_dist": 0.04,
+            "cc_dist": 0.05,
+            "curve_surface_min_dist": 0.02,
+            "cs_dist": 0.015,
+            "surface_vessel_min_dist": 0.05,
+            "ss_dist": 0.04,
+            "max_curvature": 110.0,
+            "curvature_threshold": 100.0,
+        }
+
+        repair_run_dict = {
             "accepted_iterations": 0,
             "accepted_x": np.array([1.0, -1.0]),
             "invalid_state_rejects_total": 0,
             "surface_solve_rejects": 0,
             "hardware_rejects": 0,
             "topology_gate_rejects": 0,
-            "surface_status": {"success": False},
+            "surface_status": {"success": True},
             "intersecting": False,
             "search_eval": {"total": 1.0},
-            "accepted_hardware_status": {"success": False},
+            "accepted_hardware_status": dict(anchor_hardware),
             "surface_state": {"seed": "anchor"},
             "J": 1.0,
             "dJ": np.zeros(2),
@@ -3355,18 +3425,22 @@ class HardwareConstraintTests(unittest.TestCase):
             "best_feasible_stage": None,
             "it": 0,
         }
+        preserve_run_dict = copy.deepcopy(repair_run_dict)
 
-        def fake_callback(x):
-            run_dict["accepted_iterations"] += 1
-            run_dict["accepted_x"] = np.asarray(x, dtype=float).copy()
-            run_dict["accepted_hardware_status"] = {"success": True}
-            run_dict["surface_status"] = {"success": True}
+        def make_callback(run_dict):
+            def fake_callback(x):
+                run_dict["accepted_iterations"] += 1
+                run_dict["accepted_x"] = np.asarray(x, dtype=float).copy()
+                run_dict["accepted_hardware_status"] = dict(repaired_hardware)
+                run_dict["surface_status"] = {"success": True}
+
+            return fake_callback
 
         def fake_minimize(fun, x0, **kwargs):
             kwargs["callback"](np.array([1.03, -0.97]))
             return SimpleNamespace(nit=1, success=True, message="CONVERGENCE", status=0)
 
-        result = module.run_penalty_phase1(
+        repair_result = module.run_penalty_phase1(
             np.array([1.0, -1.0]),
             total_maxiter=4,
             maxcor=5,
@@ -3378,21 +3452,146 @@ class HardwareConstraintTests(unittest.TestCase):
             seed_regime="repair_first",
             lower_bounds=np.array([-5.0, -5.0]),
             upper_bounds=np.array([5.0, 5.0]),
-            run_dict=run_dict,
+            run_dict=repair_run_dict,
             objective_fn=lambda x: (0.0, np.zeros_like(x)),
-            callback_fn=fake_callback,
+            callback_fn=make_callback(repair_run_dict),
             normalize_message_fn=lambda *args, **kwargs: "phase1_ok",
             restore_accepted_state_fn=lambda: None,
             minimize_fn=fake_minimize,
+            **phase1_runtime_kwargs(module),
         )
 
-        self.assertTrue(result["continue_search"])
-        self.assertEqual(result["phase1_outcome"], "repair_local_recovery")
-        self.assertEqual(result["startup_local_phase_regime"], "repair_first")
-        self.assertTrue(result["startup_local_recovery_achieved"])
-        self.assertFalse(result["bridge_local_donor_ready"])
-        self.assertFalse(result["local_preservation_preserved_start"])
-        self.assertAlmostEqual(result["local_preservation_radius"], 0.015)
+        preserve_result = module.run_penalty_phase1(
+            np.array([1.0, -1.0]),
+            total_maxiter=4,
+            maxcor=5,
+            ftol=1e-15,
+            gtol=1e-15,
+            initial_step_scale=1.0,
+            initial_step_maxiter=0,
+            enable_local_preservation=True,
+            seed_regime="preserve_first",
+            lower_bounds=np.array([-5.0, -5.0]),
+            upper_bounds=np.array([5.0, 5.0]),
+            run_dict=preserve_run_dict,
+            objective_fn=lambda x: (0.0, np.zeros_like(x)),
+            callback_fn=make_callback(preserve_run_dict),
+            normalize_message_fn=lambda *args, **kwargs: "phase1_ok",
+            restore_accepted_state_fn=lambda: None,
+            minimize_fn=fake_minimize,
+            **phase1_runtime_kwargs(module),
+        )
+
+        self.assertTrue(repair_result["continue_search"])
+        self.assertEqual(repair_result["phase1_outcome"], "repair_local_recovery")
+        self.assertEqual(repair_result["startup_local_phase_regime"], "repair_first")
+        self.assertTrue(repair_result["startup_local_recovery_achieved"])
+        self.assertFalse(repair_result["bridge_local_donor_ready"])
+        self.assertFalse(repair_result["local_preservation_preserved_start"])
+        self.assertAlmostEqual(repair_result["local_preservation_radius"], 0.015)
+        self.assertFalse(preserve_result["continue_search"])
+        self.assertEqual(preserve_result["phase1_outcome"], "preserved_start_no_safe_step")
+        self.assertFalse(preserve_result["startup_local_recovery_achieved"])
+        self.assertFalse(preserve_result["bridge_local_donor_ready"])
+
+    def test_run_penalty_phase1_repair_first_uses_repair_objective_not_generic_total(self):
+        module = self.load_module()
+        module.CC_WEIGHT = 101.0
+        module.CS_WEIGHT = 103.0
+        module.CURVATURE_WEIGHT = 107.0
+        module.SURF_DIST_WEIGHT = 109.0
+        run_dict = {
+            "accepted_iterations": 0,
+            "accepted_x": np.array([1.0, -1.0]),
+            "invalid_state_rejects_total": 0,
+            "surface_solve_rejects": 0,
+            "hardware_rejects": 0,
+            "topology_gate_rejects": 0,
+            "surface_status": {"success": True},
+            "intersecting": False,
+            "search_eval": {"total": 1.0},
+            "accepted_hardware_status": {"success": False, "violations": ["coil_coil"]},
+            "surface_state": {"seed": "anchor"},
+            "J": 1.0,
+            "dJ": np.zeros(2),
+            "search_surface_status": {"success": True},
+            "topology_gate_status": {"enabled": False},
+            "x_prev": np.array([1.0, -1.0]),
+            "best_accepted_incumbent": None,
+            "best_accepted_metric": None,
+            "best_accepted_stage": None,
+            "best_feasible_incumbent": None,
+            "best_feasible_metric": None,
+            "best_feasible_stage": None,
+            "it": 0,
+        }
+        captured = {}
+
+        def fake_objective_eval(x):
+            captured["repair_mode_during_eval"] = run_dict.get("phase1_repair_mode_active")
+            return {
+                "total": 999.0,
+                "grad": np.array([9.0, 9.0]),
+                "J_cc": 2.0,
+                "dJ_cc": np.array([1.0, 0.0]),
+                "J_cs": 3.0,
+                "dJ_cs": np.array([0.0, 1.0]),
+                "J_curvature": 4.0,
+                "dJ_curvature": np.array([-1.0, 2.0]),
+                "J_surf": 5.0,
+                "dJ_surf": np.array([3.0, -2.0]),
+            }
+
+        def fake_minimize(fun, x0, **kwargs):
+            total, grad = fun(x0)
+            captured["total"] = total
+            captured["grad"] = grad
+            return SimpleNamespace(nit=1, success=False, message="ABNORMAL_TERMINATION", status=2)
+
+        result = module.run_penalty_phase1(
+            np.array([1.0, -1.0]),
+            total_maxiter=1,
+            maxcor=5,
+            ftol=1e-15,
+            gtol=1e-15,
+            initial_step_scale=1.0,
+            initial_step_maxiter=1,
+            enable_local_preservation=False,
+            seed_regime="repair_first",
+            lower_bounds=np.array([-5.0, -5.0]),
+            upper_bounds=np.array([5.0, 5.0]),
+            run_dict=run_dict,
+            objective_fn=lambda x: (111.0, np.array([7.0, 7.0])),
+            callback_fn=lambda x: None,
+            objective_eval_fn=fake_objective_eval,
+            normalize_message_fn=lambda *args, **kwargs: "phase1_stop",
+            restore_accepted_state_fn=lambda: None,
+            minimize_fn=fake_minimize,
+            **phase1_runtime_kwargs(
+                module,
+                phase1_config=module.build_phase1_config(
+                    cc_weight=2.0,
+                    cs_weight=3.0,
+                    curvature_weight=5.0,
+                    surf_dist_weight=7.0,
+                ),
+            ),
+        )
+
+        self.assertEqual(
+            captured["total"],
+            2.0 * 2.0 + 3.0 * 3.0 + 5.0 * 4.0 + 7.0 * 5.0,
+        )
+        np.testing.assert_allclose(
+            captured["grad"],
+            2.0 * np.array([1.0, 0.0])
+            + 3.0 * np.array([0.0, 1.0])
+            + 5.0 * np.array([-1.0, 2.0])
+            + 7.0 * np.array([3.0, -2.0]),
+        )
+        self.assertTrue(captured["repair_mode_during_eval"])
+        self.assertFalse(run_dict["phase1_repair_mode_active"])
+        self.assertEqual(result["phase1_outcome"], "repair_first_no_local_recovery")
 
     def test_run_penalty_phase1_bridge_only_requires_safe_step_for_donor_ready(self):
         module = self.load_module()
@@ -3450,6 +3649,7 @@ class HardwareConstraintTests(unittest.TestCase):
             normalize_message_fn=lambda *args, **kwargs: "phase1_ok",
             restore_accepted_state_fn=lambda: None,
             minimize_fn=fake_minimize,
+            **phase1_runtime_kwargs(module),
         )
 
         self.assertTrue(result["continue_search"])
@@ -3507,6 +3707,7 @@ class HardwareConstraintTests(unittest.TestCase):
             normalize_message_fn=lambda *args, **kwargs: "phase1_reject",
             restore_accepted_state_fn=lambda: None,
             minimize_fn=fake_minimize,
+            **phase1_runtime_kwargs(module),
         )
 
         self.assertFalse(result["continue_search"])
