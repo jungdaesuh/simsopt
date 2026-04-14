@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import json
 import logging
 from collections.abc import Sequence
 from pathlib import Path
@@ -11,6 +12,9 @@ from typing import Literal, cast
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _SRC_DIR = _REPO_ROOT / "src"
 _LOCAL_SIMSOPT_IMPORT_PATHS = (_REPO_ROOT, _SRC_DIR)
+_SINGLE_STAGE_TRANSFER_GUARD_SNAPSHOT_PATH = (
+    _REPO_ROOT / "tests" / "test_files" / "single_stage_transfer_guard_snapshot.json"
+)
 
 
 def _prepend_sys_path(path: Path) -> None:
@@ -36,6 +40,7 @@ import jax.numpy as jnp
 import numpy as np
 from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
 
+from benchmarks.single_stage_smoke_fixture import build_real_single_stage_init_fixture
 import simsopt.config as simsopt_config  # type: ignore[import-untyped]
 from simsopt.field import Coil, Current, coils_via_symmetries  # type: ignore[import-untyped]
 from simsopt.field.coil import ScaledCurrent  # type: ignore[import-untyped]
@@ -292,6 +297,280 @@ def _run_stage2_target_compile_count_case() -> None:
         assert np.all(np.isfinite(np.asarray(final_dofs, dtype=np.float64)))
 
     _assert_run_solver_compiles_once(run_once)
+
+
+def _assert_implicit_host_transfer_rejected(
+    fn,
+    *args,
+    case_name: str,
+    **kwargs,
+) -> None:
+    try:
+        fn(*args, **kwargs)
+    except RuntimeError as exc:
+        message = str(exc)
+        normalized_message = message.lower()
+        assert "transfer" in normalized_message and (
+            "guard" in normalized_message or "disallow" in normalized_message
+        ), (
+            f"{case_name} raised the wrong transfer-guard error: "
+            f"{message}"
+        )
+    else:
+        raise AssertionError(
+            f"{case_name} should reject implicit host input under transfer guard"
+        )
+
+
+def _build_single_stage_transfer_guard_runtime_fixture():
+    from simsopt.geo import surfaceobjectives_jax as surfaceobjectives_jax_module
+
+    from examples.single_stage_optimization.SINGLE_STAGE import (
+        single_stage_banana_example as single_stage_example,
+    )
+
+    snapshot = json.loads(_SINGLE_STAGE_TRANSFER_GUARD_SNAPSHOT_PATH.read_text())
+    surface_shape = snapshot["surface_shape"]
+    fixture = build_real_single_stage_init_fixture(
+        backend="jax",
+        nphi=int(surface_shape["nphi"]),
+        ntheta=int(surface_shape["ntheta"]),
+        mpol=int(surface_shape["mpol"]),
+        ntor=int(surface_shape["ntor"]),
+        boozer_surface_dofs_override=np.asarray(
+            snapshot["surface_dofs"],
+            dtype=np.float64,
+        ),
+        boozer_iota_override=float(snapshot["iota"]),
+        boozer_G_override=float(snapshot["G"]),
+    )
+    bs = fixture["bs"]
+    boozer_surface = fixture["boozer_surface"]
+    if not hasattr(bs, "coils"):
+        raise RuntimeError("single-stage transfer-guard fixture requires coil geometry")
+    if (
+        not hasattr(boozer_surface, "res")
+        or boozer_surface.res is None
+        or not boozer_surface.res.get("success", False)
+    ):
+        raise RuntimeError(
+            "single-stage transfer-guard fixture requires a solved Boozer state"
+        )
+
+    banana_curve = bs.coils[0].curve
+    length_target = single_stage_example.host_float(
+        single_stage_example.CurveLength(banana_curve).J()
+    )
+    vessel_surface = single_stage_example.SurfaceRZFourier(
+        nfp=boozer_surface.nfp,
+        stellsym=boozer_surface.stellsym,
+        mpol=1,
+        ntor=0,
+        quadpoints_phi=boozer_surface.surface.quadpoints_phi,
+        quadpoints_theta=boozer_surface.surface.quadpoints_theta,
+    )
+    vessel_surface.set_rc(0, 0, 1.2)
+    vessel_surface.set_rc(1, 0, 0.15)
+    vessel_surface.set_zs(1, 0, 0.15)
+
+    config = single_stage_example.build_traceable_single_stage_outer_objective_config(
+        boozer_surface,
+        bs,
+        banana_curve,
+        vessel_surface,
+        non_qs_weight=1.0,
+        residual_weight=1000.0,
+        iota_weight=100.0,
+        length_weight=5.0e-4,
+        length_target=length_target,
+        curve_curve_weight=100.0,
+        curve_curve_threshold=0.05,
+        curve_surface_weight=1.0,
+        curve_surface_threshold=0.02,
+        surface_vessel_weight=1000.0,
+        surface_vessel_threshold=0.04,
+        curvature_weight=0.1,
+        curvature_threshold=40.0,
+    )
+    success_filter = single_stage_example.build_single_stage_target_lane_hardware_success_filter(
+        boozer_surface,
+        bs,
+        banana_curve,
+        vessel_surface,
+        cc_dist=0.05,
+        cs_dist=0.02,
+        ss_dist=0.04,
+        curvature_threshold=40.0,
+    )
+    runtime_bundle = single_stage_example.get_traceable_single_stage_runtime_bundle_builder()(
+        boozer_surface,
+        bs,
+        fixture["iota_target"],
+        include_profile_suite=False,
+        include_host_wrappers=False,
+        outer_objective_config=config,
+        success_filter=success_filter,
+    )
+    compiled_bundle = surfaceobjectives_jax_module._get_cached_traceable_runtime_entry(
+        boozer_surface,
+        bs,
+        fixture["iota_target"],
+        outer_objective_config=config,
+        success_filter=success_filter,
+    )["compiled_bundle"]
+
+    cpu = jax.devices("cpu")[0]
+    coil_dofs_host = np.asarray(bs.x.copy(), dtype=np.float64)
+    coil_dofs_device = jax.device_put(coil_dofs_host, device=cpu)
+    coil_dofs_batch_host = np.stack((coil_dofs_host, coil_dofs_host), axis=0)
+    coil_dofs_batch_device = jax.device_put(coil_dofs_batch_host, device=cpu)
+    return (
+        runtime_bundle,
+        compiled_bundle,
+        success_filter,
+        coil_dofs_device,
+        coil_dofs_host,
+        coil_dofs_batch_device,
+        coil_dofs_batch_host,
+    )
+
+
+def _host_scalar_float64(value) -> float:
+    return float(jax.device_get(value))
+
+
+def _host_array_float64(value) -> np.ndarray:
+    return np.asarray(jax.device_get(value), dtype=np.float64)
+
+
+def _assert_finite_scalar_matches_host(device_value, host_value) -> None:
+    device_scalar = _host_scalar_float64(device_value)
+    host_scalar = _host_scalar_float64(host_value)
+    assert np.isfinite(device_scalar)
+    np.testing.assert_allclose(host_scalar, device_scalar)
+
+
+def _assert_finite_array_matches_host(
+    device_value,
+    host_value,
+    *,
+    expected_shape=None,
+) -> None:
+    device_array = _host_array_float64(device_value)
+    host_array = _host_array_float64(host_value)
+    if expected_shape is not None:
+        assert device_array.shape == expected_shape
+    assert np.all(np.isfinite(device_array))
+    np.testing.assert_allclose(host_array, device_array)
+
+
+def _assert_reporting_metrics_match_host(
+    metric_names: tuple[str, ...],
+    device_metrics,
+    host_metrics,
+) -> None:
+    for metric_name in metric_names:
+        metric_value = _host_scalar_float64(device_metrics[metric_name])
+        metric_value_from_host = _host_scalar_float64(host_metrics[metric_name])
+        assert np.isfinite(metric_value), metric_name
+        np.testing.assert_allclose(metric_value_from_host, metric_value)
+
+
+def _run_single_stage_target_runtime_bundle_transfer_guard_case() -> None:
+    if not _configure_strict_cpu_parity_backend():
+        return
+
+    (
+        runtime_bundle,
+        compiled_bundle,
+        success_filter,
+        coil_dofs_device,
+        coil_dofs_host,
+        coil_dofs_batch_device,
+        coil_dofs_batch_host,
+    ) = _build_single_stage_transfer_guard_runtime_fixture()
+
+    objective_value = runtime_bundle["objective"](coil_dofs_device)
+    value_and_grad_value, value_and_grad_grad = runtime_bundle["value_and_grad"](
+        coil_dofs_device
+    )
+    batch_values, batch_grads = runtime_bundle["batched_value_and_grad"](
+        coil_dofs_batch_device
+    )
+    reporting_metrics = runtime_bundle["reporting_metrics"](
+        coil_dofs_device,
+        include_distance_metrics=True,
+    )
+    objective_value_from_host = runtime_bundle["objective"](coil_dofs_host)
+    value_and_grad_value_from_host, value_and_grad_grad_from_host = runtime_bundle[
+        "value_and_grad"
+    ](coil_dofs_host)
+    batch_values_from_host, batch_grads_from_host = runtime_bundle[
+        "batched_value_and_grad"
+    ](coil_dofs_batch_host)
+    reporting_metrics_from_host = runtime_bundle["reporting_metrics"](
+        coil_dofs_host,
+        include_distance_metrics=True,
+    )
+
+    _assert_finite_scalar_matches_host(
+        objective_value,
+        objective_value_from_host,
+    )
+    _assert_finite_scalar_matches_host(
+        value_and_grad_value,
+        value_and_grad_value_from_host,
+    )
+    _assert_finite_array_matches_host(
+        value_and_grad_grad,
+        value_and_grad_grad_from_host,
+        expected_shape=coil_dofs_host.shape,
+    )
+    _assert_finite_array_matches_host(
+        batch_values,
+        batch_values_from_host,
+        expected_shape=(2,),
+    )
+    _assert_finite_array_matches_host(
+        batch_grads,
+        batch_grads_from_host,
+        expected_shape=coil_dofs_batch_host.shape,
+    )
+    metric_names = (
+        "final_non_qs",
+        "final_boozer_residual",
+        "final_iota",
+        "final_volume",
+        "max_curvature",
+        "curve_curve_min_dist",
+        "curve_surface_min_dist",
+        "surface_vessel_min_dist",
+    )
+    _assert_reporting_metrics_match_host(
+        metric_names,
+        reporting_metrics,
+        reporting_metrics_from_host,
+    )
+
+    forward_result = compiled_bundle["compiled_forward_result_for"](coil_dofs_device)
+    solved_x_host = _host_array_float64(forward_result["x"])
+
+    _assert_implicit_host_transfer_rejected(
+        compiled_bundle["compiled_forward_result_for"],
+        coil_dofs_host,
+        case_name="single-stage compiled_forward_result_for",
+    )
+    _assert_implicit_host_transfer_rejected(
+        compiled_bundle["compiled_value_and_grad_for"],
+        coil_dofs_host,
+        case_name="single-stage compiled_value_and_grad_for",
+    )
+    _assert_implicit_host_transfer_rejected(
+        jax.jit(success_filter),
+        coil_dofs_host,
+        solved_x_host,
+        case_name="single-stage success_filter",
+    )
 
 
 class _ShiftedQuadratic:
@@ -1209,6 +1488,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     subparsers.add_parser("curveperturbed-init")
     subparsers.add_parser("stage2-target-objective-host-closure-constants")
     subparsers.add_parser("stage2-target-objective-ondevice-entry")
+    subparsers.add_parser("single-stage-target-runtime-transfer-guard")
     subparsers.add_parser("grouped-gpu-current-arrays")
     subparsers.add_parser("grouped-host-scalar-currents")
     subparsers.add_parser("grouped-host-spec-vjp")
@@ -1296,6 +1576,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
     if args.case == "stage2-target-objective-ondevice-entry":
         _run_stage2_target_objective_ondevice_entry_case()
+        return 0
+    if args.case == "single-stage-target-runtime-transfer-guard":
+        _run_single_stage_target_runtime_bundle_transfer_guard_case()
         return 0
     if args.case == "grouped-gpu-current-arrays":
         _run_grouped_biot_savart_gpu_current_arrays_case()

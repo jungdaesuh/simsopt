@@ -467,6 +467,18 @@ def test_transfer_guard_disallow_allows_surface_surface_distance_smoke():
     )
 
 
+def test_transfer_guard_disallow_enforces_single_stage_target_runtime_boundaries():
+    """Single-stage runtime boundaries must allow only the explicit staging seam."""
+    _assert_python_script_passes(
+        _JAX_SUBPROCESS_CASES_PATH,
+        args=("single-stage-target-runtime-transfer-guard",),
+        failure_message=(
+            "single-stage target runtime transfer-guard contract drifted"
+        ),
+        timeout=120,
+    )
+
+
 def _assert_ondevice_optimizer_reuses_compiled_solver(method: str) -> None:
     _assert_python_script_passes(
         _JAX_SUBPROCESS_CASES_PATH,
