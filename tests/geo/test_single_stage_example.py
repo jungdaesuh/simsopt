@@ -39,6 +39,13 @@ TOPOLOGY_SCORER_MODULE_PATH = (
     / "single_stage_optimization"
     / "topology_scorer.py"
 )
+TOPOLOGY_FIDELITY_LADDER_MODULE_PATH = (
+    Path(__file__).resolve().parents[2]
+    / "examples"
+    / "single_stage_optimization"
+    / "banana_opt"
+    / "topology_fidelity_ladder.py"
+)
 ALM_UTILS_MODULE_PATH = (
     Path(__file__).resolve().parents[2]
     / "examples"
@@ -53,37 +60,69 @@ TEST_G0 = 1.0
 TEST_BOOZER_I = 0.37
 
 
-def load_single_stage_example_module():
+def _load_module_from_path(module_path, name_prefix, *, register_in_sys_modules=False):
     spec = importlib.util.spec_from_file_location(
-        f"single_stage_banana_example_{uuid.uuid4().hex}",
-        EXAMPLE_MODULE_PATH,
+        f"{name_prefix}_{uuid.uuid4().hex}",
+        module_path,
     )
     module = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
+    if register_in_sys_modules:
+        sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
+
+
+def load_single_stage_example_module():
+    return _load_module_from_path(
+        EXAMPLE_MODULE_PATH,
+        "single_stage_banana_example",
+    )
 
 
 def load_topology_scorer_module():
-    spec = importlib.util.spec_from_file_location(
-        f"topology_scorer_{uuid.uuid4().hex}",
+    return _load_module_from_path(
         TOPOLOGY_SCORER_MODULE_PATH,
+        "topology_scorer",
     )
-    module = importlib.util.module_from_spec(spec)
-    assert spec.loader is not None
-    spec.loader.exec_module(module)
-    return module
+
+
+def load_topology_fidelity_ladder_module():
+    return _load_module_from_path(
+        TOPOLOGY_FIDELITY_LADDER_MODULE_PATH,
+        "topology_fidelity_ladder",
+        register_in_sys_modules=True,
+    )
 
 
 def load_alm_utils_module():
-    spec = importlib.util.spec_from_file_location(
-        f"alm_utils_{uuid.uuid4().hex}",
+    return _load_module_from_path(
         ALM_UTILS_MODULE_PATH,
+        "alm_utils",
     )
-    module = importlib.util.module_from_spec(spec)
-    assert spec.loader is not None
-    spec.loader.exec_module(module)
-    return module
+
+
+def _mock_topology_score_result(
+    *,
+    stop_reason,
+    first_exit_time,
+    survival_fraction=0.5,
+    survived_lines=1,
+    seed_tier="cheap",
+    field_mode="native",
+):
+    return {
+        "survival_fraction": float(survival_fraction),
+        "survived_lines": int(survived_lines),
+        "stop_reason_counts": {str(stop_reason): 1},
+        "first_exit": {
+            "first_exit_time": float(first_exit_time),
+            "first_exit_angle": 0.0,
+            "stop_reason": str(stop_reason),
+        },
+        "seed_contract": {"tier": str(seed_tier)},
+        "field_model": {"selected_mode": str(field_mode)},
+    }
 
 
 def phase1_runtime_kwargs(module, *, phase1_config=None):
@@ -741,22 +780,6 @@ class SingleStageExampleTests(unittest.TestCase):
 
     def test_evaluate_topology_gate_reports_early_surface_exit(self):
         module = self.load_module()
-        fieldlines_tys = [
-            np.array([[0.0, 1.0, 0.0, 0.0]]),
-            np.array([[0.0, 1.1, 0.0, 0.0]]),
-        ]
-        fake_hits = [
-            np.array([[0.8, -1.0, 1.0, 0.0, 0.0]]),
-            np.array([]),
-        ]
-        stop_labels = [
-            "surface_exit",
-            "max_z_guardrail",
-            "min_z_guardrail",
-            "min_r_guardrail",
-            "max_r_guardrail",
-            "iteration_limit",
-        ]
         status = module._evaluate_topology_gate_impl(
             object(),
             object(),
@@ -764,10 +787,10 @@ class SingleStageExampleTests(unittest.TestCase):
             2.0,
             1e-7,
             0.75,
-            compute_fieldlines_fn=lambda *_args, **_kwargs: (fieldlines_tys, fake_hits),
-            midplane_seed_radii_fn=lambda *_args, **_kwargs: np.array([1.0, 1.1]),
-            build_stopping_criteria_fn=lambda *_args, **_kwargs: ([object()], stop_labels),
-            topology_iteration_limit_fn=lambda _tmax: 100,
+            score_topology_fn=lambda *_args, **_kwargs: _mock_topology_score_result(
+                stop_reason="surface_exit",
+                first_exit_time=0.8,
+            ),
         )
 
         self.assertTrue(status["enabled"])
@@ -780,18 +803,6 @@ class SingleStageExampleTests(unittest.TestCase):
 
     def test_evaluate_topology_gate_marks_iteration_limit_as_broken(self):
         module = self.load_module()
-        fieldlines_tys = [
-            np.array([[0.0, 1.0, 0.0, 0.0]]),
-            np.array([[0.0, 1.1, 0.0, 0.0]]),
-        ]
-        stop_labels = [
-            "surface_exit",
-            "max_z_guardrail",
-            "min_z_guardrail",
-            "min_r_guardrail",
-            "max_r_guardrail",
-            "iteration_limit",
-        ]
         status = module._evaluate_topology_gate_impl(
             object(),
             object(),
@@ -799,16 +810,10 @@ class SingleStageExampleTests(unittest.TestCase):
             2.0,
             1e-7,
             0.5,
-            compute_fieldlines_fn=lambda *_args, **_kwargs: (
-                fieldlines_tys,
-                [
-                    np.array([]),
-                    np.array([[0.4, -6.0, 1.0, 0.0, 0.0]]),
-                ],
+            score_topology_fn=lambda *_args, **_kwargs: _mock_topology_score_result(
+                stop_reason="iteration_limit",
+                first_exit_time=0.4,
             ),
-            midplane_seed_radii_fn=lambda *_args, **_kwargs: np.array([1.0, 1.1]),
-            build_stopping_criteria_fn=lambda *_args, **_kwargs: ([object()], stop_labels),
-            topology_iteration_limit_fn=lambda _tmax: 100,
         )
 
         self.assertFalse(status["success"])
@@ -843,32 +848,31 @@ class SingleStageExampleTests(unittest.TestCase):
             "iteration_limit",
         ]
 
-        gate_status = module._evaluate_topology_gate_impl(
-            _Surface(),
-            object(),
-            3,
-            2.0,
-            1e-7,
-            0.60,
-            compute_fieldlines_fn=lambda *_args, **_kwargs: (
-                fieldlines_tys,
-                fieldlines_phi_hits,
-            ),
-            midplane_seed_radii_fn=lambda *_args, **_kwargs: np.array([1.0, 1.1, 1.2]),
-            build_stopping_criteria_fn=lambda *_args, **_kwargs: ([object()], stop_labels),
-            topology_iteration_limit_fn=lambda _tmax: 100,
-        )
-
         with patch.object(
             topology_module,
             "build_stopping_criteria",
             return_value=([object()], stop_labels),
         ), patch.object(
             topology_module,
-            "midplane_seed_radii",
-            return_value=np.array([1.0, 1.1, 1.2]),
-        ), patch(
-            "simsopt.field.compute_fieldlines",
+            "build_topology_seed_points",
+            return_value={
+                "xyz_inits": np.array(
+                    [
+                        [1.0, 0.0, 0.0],
+                        [1.1, 0.0, 0.0],
+                        [1.2, 0.0, 0.0],
+                    ]
+                ),
+                "contract": {"tier": "cheap"},
+                "seed_points": [],
+            },
+        ), patch.object(
+            topology_module,
+            "prepare_topology_field",
+            return_value=(object(), {"selected_mode": "native"}),
+        ), patch.object(
+            topology_module,
+            "trace_fieldlines_xyz",
             return_value=(fieldlines_tys, fieldlines_phi_hits),
         ):
             scorer_result = topology_module.score_topology(
@@ -878,7 +882,18 @@ class SingleStageExampleTests(unittest.TestCase):
                 tmax=2.0,
                 tol=1e-7,
                 nphis=1,
+                seed_tier="cheap",
+                field_policy="never",
             )
+        gate_status = module._evaluate_topology_gate_impl(
+            _Surface(),
+            object(),
+            3,
+            2.0,
+            1e-7,
+            0.60,
+            score_topology_fn=lambda *_args, **_kwargs: scorer_result,
+        )
 
         self.assertAlmostEqual(
             gate_status["survival_fraction"],
@@ -901,8 +916,8 @@ class SingleStageExampleTests(unittest.TestCase):
             scorer_result["first_exit"]["first_exit_angle"],
         )
 
-    def test_safe_score_topology_returns_broken_result_on_exception(self):
-        module = self.load_module()
+    def test_topology_scorer_safe_wrapper_returns_broken_result_on_exception(self):
+        module = load_topology_scorer_module()
 
         with patch.object(
             module,
@@ -934,6 +949,205 @@ class SingleStageExampleTests(unittest.TestCase):
                 [],
                 ["surface_exit"],
             )
+
+    def test_trace_metrics_marks_iteration_limit_as_broken_validation(self):
+        topology_module = load_topology_scorer_module()
+
+        metrics = topology_module.trace_metrics(
+            [np.array([[0.0, 1.0, 0.0, 0.0]])],
+            [np.array([[0.1, -6.0, 1.0, 0.0, 0.0]])],
+            [0.0],
+            [
+                "surface_exit",
+                "max_z_guardrail",
+                "min_z_guardrail",
+                "min_r_guardrail",
+                "max_r_guardrail",
+                "iteration_limit",
+            ],
+            mode="validation",
+        )
+
+        self.assertEqual(metrics["validation_status"], "broken")
+        self.assertEqual(metrics["stop_reason_counts"]["iteration_limit"], 1)
+
+    def test_build_topology_seed_points_uses_multi_plane_multi_poloidal_contract(self):
+        topology_module = load_topology_scorer_module()
+
+        class _Surface:
+            nfp = 5
+
+            def cross_section(self, phi, thetas):
+                angles = np.linspace(0.0, 2.0 * np.pi, int(thetas), endpoint=False)
+                R = 1.0 + 0.2 * np.cos(angles)
+                Z = 0.15 * np.sin(angles)
+                phi_abs = 2.0 * np.pi * float(phi)
+                return np.column_stack(
+                    [
+                        R * np.cos(phi_abs),
+                        R * np.sin(phi_abs),
+                        Z,
+                    ]
+                )
+
+        seed_bundle = topology_module.build_topology_seed_points(
+            _Surface(),
+            12,
+            seed_tier="medium",
+        )
+
+        self.assertEqual(seed_bundle["xyz_inits"].shape, (12, 3))
+        self.assertEqual(seed_bundle["contract"]["tier"], "medium")
+        self.assertEqual(seed_bundle["contract"]["seed_plane_count"], 4)
+        self.assertEqual(seed_bundle["contract"]["lines_per_plane"], [3, 3, 3, 3])
+        self.assertEqual(len(seed_bundle["contract"]["seed_plane_angles"]), 4)
+        self.assertEqual(len(seed_bundle["seed_points"]), 12)
+        self.assertEqual(
+            len({round(seed["phi"], 12) for seed in seed_bundle["seed_points"]}),
+            4,
+        )
+        self.assertGreater(
+            len(
+                {
+                    round(seed["target_poloidal_angle"], 12)
+                    for seed in seed_bundle["seed_points"]
+                }
+            ),
+            3,
+        )
+
+    def test_prepare_topology_field_auto_policy_switches_at_threshold(self):
+        topology_module = load_topology_scorer_module()
+
+        class _Surface:
+            nfp = 5
+            stellsym = True
+
+            def gamma(self):
+                return np.array(
+                    [
+                        [[1.0, 0.0, 0.1], [1.1, 0.0, -0.1]],
+                        [[0.9, 0.1, 0.05], [1.05, -0.1, -0.05]],
+                    ],
+                    dtype=float,
+                )
+
+        class _BField:
+            def __init__(self):
+                self.points = None
+
+            def set_points(self, points):
+                self.points = np.asarray(points, dtype=float)
+
+            def B(self):
+                assert self.points is not None
+                return np.ones((self.points.shape[0], 3), dtype=float)
+
+        class _InterpolatedField:
+            def __init__(
+                self,
+                source_field,
+                degree,
+                rrange,
+                phirange,
+                zrange,
+                extrapolate,
+                *,
+                nfp,
+                stellsym,
+            ):
+                self.source_field = source_field
+                self.degree = degree
+                self.rrange = rrange
+                self.phirange = phirange
+                self.zrange = zrange
+                self.extrapolate = extrapolate
+                self.nfp = nfp
+                self.stellsym = stellsym
+                self.points = None
+
+            def set_points(self, points):
+                self.points = np.asarray(points, dtype=float)
+
+            def B(self):
+                assert self.points is not None
+                return np.ones((self.points.shape[0], 3), dtype=float)
+
+        surface = _Surface()
+        native_field = _BField()
+        below_threshold_field, below_threshold_model = topology_module.prepare_topology_field(
+            surface,
+            native_field,
+            49.9,
+            field_policy="auto",
+        )
+        self.assertIs(below_threshold_field, native_field)
+        self.assertEqual(below_threshold_model["selected_mode"], "native")
+        self.assertEqual(below_threshold_model["reason"], "below_threshold")
+
+        with patch("simsopt.field.InterpolatedField", _InterpolatedField):
+            threshold_field = _BField()
+            interpolated_field, interpolated_model = topology_module.prepare_topology_field(
+                surface,
+                threshold_field,
+                50.0,
+                field_policy="auto",
+                interpolation_grid={
+                    "degree": 5,
+                    "nr": 10,
+                    "nphi": 11,
+                    "nz": 12,
+                },
+            )
+
+        self.assertIsInstance(interpolated_field, _InterpolatedField)
+        self.assertEqual(interpolated_model["selected_mode"], "interpolated")
+        self.assertEqual(interpolated_model["reason"], "tmax_threshold")
+        self.assertEqual(
+            interpolated_model["grid"],
+            {"degree": 5, "nr": 10, "nphi": 11, "nz": 12},
+        )
+        self.assertEqual(interpolated_model["max_abs_error"], 0.0)
+        self.assertEqual(interpolated_model["mean_abs_error"], 0.0)
+        self.assertEqual(interpolated_model["max_rel_error"], 0.0)
+
+    def test_topology_fidelity_report_summarizes_tier_agreement(self):
+        ladder_module = load_topology_fidelity_ladder_module()
+
+        report = ladder_module.build_topology_fidelity_report(
+            [
+                {
+                    "label": "case_a",
+                    "cheap": {"passed": True, "confinement_score": 0.80},
+                    "medium": {"passed": True, "confinement_score": 0.82},
+                    "strict": {"passed": False, "confinement_score": 0.20},
+                },
+                {
+                    "label": "case_b",
+                    "cheap": {"passed": False, "confinement_score": 0.30},
+                    "medium": {"passed": False, "confinement_score": 0.35},
+                    "strict": {"passed": True, "confinement_score": 0.70},
+                },
+                {
+                    "label": "case_c",
+                    "cheap": {"passed": True, "confinement_score": 0.60},
+                    "medium": {"passed": True, "confinement_score": 0.62},
+                    "strict": {"passed": True, "confinement_score": 0.65},
+                },
+            ]
+        )
+
+        cheap_vs_strict = report["agreements"]["cheap_vs_strict"]
+        medium_vs_strict = report["agreements"]["medium_vs_strict"]
+        self.assertEqual(cheap_vs_strict["false_pass_count"], 1)
+        self.assertEqual(cheap_vs_strict["false_reject_count"], 1)
+        self.assertEqual(cheap_vs_strict["false_pass_labels"], ["case_a"])
+        self.assertEqual(cheap_vs_strict["false_reject_labels"], ["case_b"])
+        self.assertEqual(medium_vs_strict["false_pass_count"], 1)
+        self.assertEqual(medium_vs_strict["false_reject_count"], 1)
+        self.assertIsNotNone(cheap_vs_strict["spearman_rank_correlation"])
+        self.assertEqual(report["tier_specs"]["cheap"]["seed_tier"], "cheap")
+        self.assertEqual(report["tier_specs"]["medium"]["field_policy"], "auto")
 
     def test_topology_gate_rejection_increment_scales_with_deficit(self):
         module = self.load_module()
