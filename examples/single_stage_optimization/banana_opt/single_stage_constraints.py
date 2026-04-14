@@ -107,7 +107,9 @@ def smooth_min_curve_curve_signed_constraint(
             derivative += curve.dgamma_by_dcoeff_vjp(point_gradient)
     grad = np.asarray(derivative(objective_optimizable), dtype=float)
     signed_value = float(minimum_distance) - float(smooth_min)
-    return signed_value, grad, max(0.0, signed_value)
+    # grad = d(smooth_min)/dx, but signed_value = min_dist - smooth_min,
+    # so d(signed_value)/dx = -d(smooth_min)/dx = -grad.
+    return signed_value, -grad, max(0.0, signed_value)
 
 
 def smooth_min_curve_surface_signed_constraint(
@@ -168,7 +170,9 @@ def smooth_min_curve_surface_signed_constraint(
         )
     grad = np.asarray(derivative(objective_optimizable), dtype=float)
     signed_value = float(minimum_distance) - float(smooth_min)
-    return signed_value, grad, max(0.0, signed_value)
+    # grad = d(smooth_min)/dx, but signed_value = min_dist - smooth_min,
+    # so d(signed_value)/dx = -d(smooth_min)/dx = -grad.
+    return signed_value, -grad, max(0.0, signed_value)
 
 
 def smooth_min_surface_surface_signed_constraint(
@@ -214,7 +218,9 @@ def smooth_min_surface_surface_signed_constraint(
     )
     grad = np.asarray(derivative(objective_optimizable), dtype=float)
     signed_value = float(minimum_distance) - float(smooth_min)
-    return signed_value, grad, max(0.0, signed_value)
+    # grad = d(smooth_min)/dx, but signed_value = min_dist - smooth_min,
+    # so d(signed_value)/dx = -d(smooth_min)/dx = -grad.
+    return signed_value, -grad, max(0.0, signed_value)
 
 
 def single_stage_constraint_activity_tolerances(

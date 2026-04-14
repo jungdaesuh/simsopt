@@ -22,6 +22,7 @@ from simsopt.geo import (
     CurveCurveDistance,
     LpCurveCurvature,
 )
+from simsopt.geo.curveobjectives import CurveSurfaceDistance
 from simsopt._core.optimizable import load
 from simsopt.objectives import SquaredFlux, QuadraticPenalty
 import json
@@ -45,13 +46,24 @@ from banana_opt.stage2_geometry import (
     is_self_intersecting,
     magnetic_field_plots as _magnetic_field_plots,
 )
-from banana_opt.current_contracts import BANANA_CURRENT_HARD_LIMIT_A
+from banana_opt.hardware_contracts import (
+    BANANA_CURRENT_HARD_LIMIT_A,
+    BANANA_WINDING_MINOR_RADIUS_M,
+    COIL_COIL_MIN_DIST_M,
+    COIL_LENGTH_TARGET_M,
+    COIL_PLASMA_MIN_DIST_M,
+    MAX_CURVATURE_INV_M,
+    PLASMA_VESSEL_MIN_DIST_M,
+    TF_CURRENT_HARD_LIMIT_A,
+    validate_tf_current_limit,
+)
 from banana_opt.stage2_objectives import (
     build_stage2_alm_settings,
     build_stage2_results as _build_stage2_results_impl,
     evaluate_stage2_alm_problem as _evaluate_stage2_alm_problem,
     evaluate_stage2_hardware_constraints as _evaluate_stage2_hardware_constraints,
     make_stage2_fun,
+    smooth_min_curve_surface_signed_constraint,
     smooth_max_curvature_signed_constraint,
     smooth_min_distance_signed_constraint,
     stage2_constraint_activity_tolerances,
@@ -63,6 +75,7 @@ DEFAULT_EQUILIBRIA_DIR = DATABASE_EQUILIBRIA_DIR if os.path.isdir(DATABASE_EQUIL
 STAGE2_ALM_CONSTRAINT_NAMES = (
     "coil_length_upper_bound",
     "coil_coil_spacing",
+    "coil_surface_spacing",
     "max_curvature",
     "banana_current_upper_bound",
 )
@@ -95,6 +108,7 @@ def validate_banana_current_cli_args(args) -> None:
         raise ValueError(
             "--banana-init-current-A cannot exceed --banana-current-max-A."
         )
+    validate_tf_current_limit(args.tf_current_A)
 
 
 def unwrap_current_optimizable(current):
@@ -179,13 +193,13 @@ def parse_args():
     parser.add_argument(
         "--banana-surf-radius",
         type=float,
-        default=float(os.environ.get("BANANA_SURF_RADIUS", "0.21")),
+        default=float(os.environ.get("BANANA_SURF_RADIUS", str(BANANA_WINDING_MINOR_RADIUS_M))),
         help="Coil surface minor radius (default 0.21 m, concentric with HBT vacuum vessel).",
     )
     parser.add_argument(
         "--tf-current-A",
         type=float,
-        default=float(os.environ.get("TF_CURRENT_A", "8e4")),
+        default=float(os.environ.get("TF_CURRENT_A", str(TF_CURRENT_HARD_LIMIT_A))),
         help="Per-TF-coil current in physical SI amperes (default 8e4 = 80 kA).",
     )
     parser.add_argument(
@@ -323,6 +337,10 @@ def parse_args():
     parser.add_argument(
         "--alm-curvature-smoothing",
         type=float,
+        # Stage 2 uses 0.25 (broader softmax window over the banana coil's
+        # kappa array) vs single-stage's 0.05. The wider window is appropriate
+        # here because Stage 2 operates on a single banana coil with fewer
+        # quadrature points and less sensitivity to curvature perturbations.
         default=float(os.environ.get("ALM_CURVATURE_SMOOTHING", "0.25")),
         help="Curvature soft-max temperature for Stage 2 ALM curvature constraints.",
     )
@@ -346,13 +364,13 @@ def parse_args():
     parser.add_argument(
         "--length-target",
         type=float,
-        default=float(os.environ.get("LENGTH_TARGET", "1.75")),
+        default=float(os.environ.get("LENGTH_TARGET", str(COIL_LENGTH_TARGET_M))),
         help="Curve-length target in meters.",
     )
     parser.add_argument(
         "--cc-threshold",
         type=float,
-        default=float(os.environ.get("CC_THRESHOLD", "0.05")),
+        default=float(os.environ.get("CC_THRESHOLD", str(COIL_COIL_MIN_DIST_M))),
         help="Coil-coil distance threshold in meters.",
     )
     parser.add_argument(
@@ -370,8 +388,8 @@ def parse_args():
     parser.add_argument(
         "--curvature-threshold",
         type=float,
-        default=float(os.environ.get("CURVATURE_THRESHOLD", "40")),
-        help="Curvature penalty threshold in m^-1 (default 40, design target; HBT hardware limit is 100).",
+        default=float(os.environ.get("CURVATURE_THRESHOLD", str(MAX_CURVATURE_INV_M))),
+        help="Curvature penalty threshold in m^-1 (default 100, matching the hardware ceiling).",
     )
     parser.add_argument(
         "--theta-center",
@@ -526,8 +544,6 @@ def main(parsed_args=None):
 
     nphi = args.nphi
     ntheta = args.ntheta
-    surf = None
-
     # Create the TF coils in HBT - these will be fixed but create background toroidal field:
     tf_curves = create_equally_spaced_curves(20, 1, stellsym=False, R0=0.976, R1=0.4, order=1)
     tf_current_A = args.tf_current_A
@@ -563,7 +579,25 @@ def main(parsed_args=None):
     banana_surf_nfp = new_surf.nfp
 
     banana_surf_radius = args.banana_surf_radius
+    if abs(banana_surf_radius - BANANA_WINDING_MINOR_RADIUS_M) > 1.0e-12:
+        raise ValueError(
+            "Stage 2 banana winding surface must remain concentric with the vessel at "
+            f"minor radius {BANANA_WINDING_MINOR_RADIUS_M:.6f} m."
+        )
     hbt, surf_coils, VV = build_hbt_reference_surfaces(banana_surf_nfp, banana_surf_radius)
+    plasma_vessel_min_dist = float(
+        np.min(
+            np.linalg.norm(
+                new_surf.gamma().reshape((-1, 1, 3)) - VV.gamma().reshape((1, -1, 3)),
+                axis=2,
+            )
+        )
+    )
+    if plasma_vessel_min_dist < PLASMA_VESSEL_MIN_DIST_M:
+        raise ValueError(
+            "Fixed Stage 2 plasma surface violates the plasma-vessel clearance contract: "
+            f"{plasma_vessel_min_dist:.6f} m < {PLASMA_VESSEL_MIN_DIST_M:.6f} m."
+        )
 
     if args.stage2_bs_path:
         print(f"Loading Stage 2 seed from {args.stage2_bs_path}")
@@ -575,6 +609,7 @@ def main(parsed_args=None):
         )
         new_tf_coils = init_coil_array[4]
         tf_current_A = float(new_tf_coils[0].current.get_value())
+        validate_tf_current_limit(tf_current_A)
     else:
         init_coil_array = _initialize_coils(
             new_surf,
@@ -605,28 +640,39 @@ def main(parsed_args=None):
     intersecting = False
 
     # Weight on the curve lengths in the objective function
-    # We'll penalize the coil if it becomes longer than an target length of 1.75 m
+    # We'll penalize the coil if it becomes longer than the hardware contract target.
     LENGTH_WEIGHT = args.length_weight
-    LENGTH_TARGET = max(args.length_target, 1.75)  # Baseline default floor
-    if args.length_target < 1.75:
-        print(f"WARNING: --length-target {args.length_target} below baseline default, clamped to 1.75")
+    LENGTH_TARGET = min(args.length_target, COIL_LENGTH_TARGET_M)
+    if args.length_target > COIL_LENGTH_TARGET_M:
+        print(
+            f"WARNING: --length-target {args.length_target} above hardware ceiling, "
+            f"clamped to {COIL_LENGTH_TARGET_M}"
+        )
 
     # Threshold and weight for the coil-to-coil distance penalty
-    CC_THRESHOLD = max(args.cc_threshold, 0.05)  # Baseline default floor
-    if args.cc_threshold < 0.05:
-        print(f"WARNING: --cc-threshold {args.cc_threshold} below baseline default, clamped to 0.05")
+    CC_THRESHOLD = max(args.cc_threshold, COIL_COIL_MIN_DIST_M)
+    if args.cc_threshold < COIL_COIL_MIN_DIST_M:
+        print(
+            f"WARNING: --cc-threshold {args.cc_threshold} below hardware floor, "
+            f"clamped to {COIL_COIL_MIN_DIST_M}"
+        )
     CC_WEIGHT = args.cc_weight
+    CS_THRESHOLD = COIL_PLASMA_MIN_DIST_M
 
     # Threshold and weight for the coil curvature penalty
     CURVATURE_WEIGHT = args.curvature_weight
-    CURVATURE_THRESHOLD = max(args.curvature_threshold, 40)  # Design target floor 40; HW limit is 100 m⁻¹
-    if args.curvature_threshold < 40:
-        print(f"WARNING: --curvature-threshold {args.curvature_threshold} below design target, clamped to 40")
+    CURVATURE_THRESHOLD = min(args.curvature_threshold, MAX_CURVATURE_INV_M)
+    if args.curvature_threshold > MAX_CURVATURE_INV_M:
+        print(
+            f"WARNING: --curvature-threshold {args.curvature_threshold} above hardware ceiling, "
+            f"clamped to {MAX_CURVATURE_INV_M}"
+        )
 
     # Define the individual terms objective function:
     Jf = SquaredFlux(new_surf, new_bs) # penalty on B dot n
     Jls = CurveLength(new_banana_curve) # penalty on curve length
     Jccdist = CurveCurveDistance(new_curves, CC_THRESHOLD) #penalty on coil-to-coil distance
+    Jcsdist = CurveSurfaceDistance(new_curves, new_surf, CS_THRESHOLD)
 
     # Lp-norm curvature penalty (configurable via --curvature-p-norm)
     Jc = LpCurveCurvature(new_banana_curve, args.curvature_p_norm, CURVATURE_THRESHOLD)
@@ -639,6 +685,7 @@ def main(parsed_args=None):
     JF = SQUARED_FLUX_WEIGHT * Jf \
         + LENGTH_WEIGHT * QuadraticPenalty(Jls, LENGTH_TARGET, "max") \
         + CC_WEIGHT * Jccdist \
+        + CC_WEIGHT * Jcsdist \
         + CURVATURE_WEIGHT * Jc
     BASE_OBJECTIVE = SQUARED_FLUX_WEIGHT * Jf
     if args.alm_taylor_test and CONSTRAINT_METHOD != "alm":
@@ -688,6 +735,16 @@ def main(parsed_args=None):
             alm_penalty_init=args.alm_penalty_init,
             alm_penalty_scale=args.alm_penalty_scale,
             alm_penalty_max=args.alm_penalty_max,
+            alm_max_subproblem_continuations=args.alm_max_subproblem_continuations,
+            alm_feas_tol=args.alm_feas_tol,
+            alm_stationarity_tol=args.alm_stationarity_tol,
+            alm_trust_radius_init=args.alm_trust_radius_init,
+            alm_trust_radius_min=args.alm_trust_radius_min,
+            alm_trust_radius_shrink=args.alm_trust_radius_shrink,
+            alm_trust_radius_grow=args.alm_trust_radius_grow,
+            alm_max_inner_attempts=args.alm_max_inner_attempts,
+            alm_distance_smoothing=args.alm_distance_smoothing,
+            alm_curvature_smoothing=args.alm_curvature_smoothing,
             basin_hops=args.basin_hops,
             basin_stepsize=args.basin_stepsize,
             basin_temperature=args.basin_temperature,
@@ -740,6 +797,8 @@ def main(parsed_args=None):
                 stage2_constraint_activity_tolerances,
                 smooth_min_distance_signed_constraint,
                 smooth_max_curvature_signed_constraint,
+                Jcsdist=Jcsdist,
+                smooth_min_curve_surface_signed_constraint=smooth_min_curve_surface_signed_constraint,
             )
 
         def outer_state_callback(outer_iteration, multipliers, penalty):
@@ -868,6 +927,7 @@ def main(parsed_args=None):
 
     final_coil_length = float(Jls.J())
     final_curve_curve_min_dist = float(Jccdist.shortest_distance())
+    final_curve_surface_min_dist = float(Jcsdist.shortest_distance())
     final_max_curvature = float(np.max(new_banana_curve.kappa()))
     final_banana_current_A = float(new_banana_coils[0].current.get_value())
     hardware_status = _evaluate_stage2_hardware_constraints(
@@ -877,6 +937,10 @@ def main(parsed_args=None):
         CC_THRESHOLD,
         final_max_curvature,
         CURVATURE_THRESHOLD,
+        curve_surface_min_dist=final_curve_surface_min_dist,
+        coil_surface_threshold=CS_THRESHOLD,
+        plasma_vessel_min_dist=plasma_vessel_min_dist,
+        plasma_vessel_threshold=PLASMA_VESSEL_MIN_DIST_M,
     )
     if banana_current_exceeds_limit(final_banana_current_A, args.banana_current_max_A):
         hardware_status["success"] = False
@@ -911,7 +975,6 @@ def main(parsed_args=None):
 
     # Save the optimized coil shapes and currents so they can be loaded into other scripts for analysis:
     new_bs.save(OUT_DIR_ITER + "biot_savart_opt.json")
-    #new_surf.save(OUT_DIR_ITER + "surf_opt.json");
     print(f'Banana Coil Current / TF Current = {new_banana_coils[0].current.get_value() / new_tf_coils[0].current.get_value():.3f}\n')
 
     # Save the results of optimization to a separate file
@@ -972,6 +1035,8 @@ def main(parsed_args=None):
         final_max_curvature=final_max_curvature,
         final_coil_length=final_coil_length,
         final_curve_curve_min_dist=final_curve_curve_min_dist,
+        final_curve_surface_min_dist=final_curve_surface_min_dist,
+        plasma_vessel_min_dist=plasma_vessel_min_dist,
         hardware_status=hardware_status,
     )
     with open(os.path.join(OUT_DIR_ITER, "results.json"), "w") as outfile:

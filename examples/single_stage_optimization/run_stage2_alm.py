@@ -29,27 +29,48 @@ from banana_opt.artifact_contracts import (  # noqa: E402
     upgrade_legacy_stage2_artifact_results,
     validate_stage2_artifact_metadata,
 )
+from banana_opt.hardware_contracts import (  # noqa: E402
+    BANANA_CURRENT_HARD_LIMIT_A,
+    COIL_COIL_MIN_DIST_M,
+    COIL_PLASMA_MIN_DIST_M,
+    MAX_CURVATURE_INV_M,
+    PLASMA_VESSEL_MIN_DIST_M,
+    fixed_stage2_artifact_hardware_contract,
+    fixed_stage2_clearance_contract,
+    TF_CURRENT_HARD_LIMIT_A,
+    validate_tf_current_limit,
+)
 
 DEFAULT_OUTPUT_ROOT = SCRIPT_DIR / "outputs_stage2_alm"
-STAGE2_CC_THRESHOLD_FLOOR = 0.05
-STAGE2_CURVATURE_THRESHOLD_FLOOR = 40.0
+STAGE2_CC_THRESHOLD_FLOOR = COIL_COIL_MIN_DIST_M
+STAGE2_CURVATURE_THRESHOLD_CEILING = MAX_CURVATURE_INV_M
 DEFAULT_SUMMARY_JSON = "stage2_alm_summary.json"
 _BASE_STAGE2_PROFILE = {
     "major_radius": 0.915,
     "toroidal_flux": 0.24,
     "length_weight": 0.0005,
     "cc_weight": 100.0,
-    "cc_threshold": 0.05,
+    "cc_threshold": COIL_COIL_MIN_DIST_M,
     "curvature_weight": 0.0001,
-    "curvature_threshold": 40.0,
-    "banana_surf_radius": 0.22,
+    "curvature_threshold": MAX_CURVATURE_INV_M,
+    "banana_surf_radius": 0.21,
     "order": 2,
     "banana_init_current_A": 1.0e4,
-    "banana_current_max_A": 1.6e4,
+    "banana_current_max_A": BANANA_CURRENT_HARD_LIMIT_A,
     "alm_max_outer_iters": 10,
     "alm_penalty_init": 1.0,
     "alm_penalty_scale": 10.0,
     "alm_penalty_max": 1.0e8,
+    "alm_feas_tol": 1.0e-6,
+    "alm_stationarity_tol": 1.0e-6,
+    "alm_trust_radius_init": 0.05,
+    "alm_trust_radius_min": 1.0e-4,
+    "alm_trust_radius_shrink": 0.5,
+    "alm_trust_radius_grow": 1.5,
+    "alm_max_inner_attempts": 4,
+    "alm_max_subproblem_continuations": 20,
+    "alm_distance_smoothing": 0.005,
+    "alm_curvature_smoothing": 0.25,
     "basin_hops": 0,
     "basin_stepsize": 0.01,
     "basin_temperature": 1.0,
@@ -58,8 +79,7 @@ _BASE_STAGE2_PROFILE = {
     "init_only": False,
 }
 DEFAULT_STAGE2_PROFILES = {
-    "standard_80ka": {**_BASE_STAGE2_PROFILE, "tf_current_A": 8.0e4},
-    "standard_100ka": {**_BASE_STAGE2_PROFILE, "tf_current_A": 1.0e5},
+    "standard_80ka": {**_BASE_STAGE2_PROFILE, "tf_current_A": TF_CURRENT_HARD_LIMIT_A},
 }
 STAGE2_SPEC_KEYS = (
     "major_radius",
@@ -78,12 +98,34 @@ STAGE2_SPEC_KEYS = (
     "alm_penalty_init",
     "alm_penalty_scale",
     "alm_penalty_max",
+    "alm_feas_tol",
+    "alm_stationarity_tol",
+    "alm_trust_radius_init",
+    "alm_trust_radius_min",
+    "alm_trust_radius_shrink",
+    "alm_trust_radius_grow",
+    "alm_max_inner_attempts",
+    "alm_max_subproblem_continuations",
+    "alm_distance_smoothing",
+    "alm_curvature_smoothing",
     "basin_hops",
     "basin_stepsize",
     "basin_temperature",
     "basin_niter_success",
     "basin_seed",
     "init_only",
+)
+OPTIONAL_STAGE2_SPEC_KEYS = (
+    "alm_feas_tol",
+    "alm_stationarity_tol",
+    "alm_trust_radius_init",
+    "alm_trust_radius_min",
+    "alm_trust_radius_shrink",
+    "alm_trust_radius_grow",
+    "alm_max_inner_attempts",
+    "alm_max_subproblem_continuations",
+    "alm_distance_smoothing",
+    "alm_curvature_smoothing",
 )
 
 
@@ -183,12 +225,19 @@ def _load_stage2_spec_json(spec_json_path: str | Path) -> tuple[Path, dict]:
         raise ValueError(
             f"Unknown Stage 2 spec keys in {spec_path}: {', '.join(unknown_keys)}"
         )
-    missing_keys = [key for key in STAGE2_SPEC_KEYS if key not in loaded]
+    missing_keys = [
+        key
+        for key in STAGE2_SPEC_KEYS
+        if key not in loaded and key not in OPTIONAL_STAGE2_SPEC_KEYS
+    ]
     if missing_keys:
         raise ValueError(
             f"Stage 2 spec JSON must define all required keys: {', '.join(missing_keys)}"
         )
-    return spec_path, {key: loaded[key] for key in STAGE2_SPEC_KEYS}
+    return spec_path, {
+        key: loaded[key] if key in loaded else _BASE_STAGE2_PROFILE[key]
+        for key in STAGE2_SPEC_KEYS
+    }
 
 
 def resolve_stage2_spec_payload(args: argparse.Namespace) -> tuple[dict, str]:
@@ -234,18 +283,19 @@ def build_stage2_alm_config(
             f"solver floor, clamped to {STAGE2_CC_THRESHOLD_FLOOR}"
         )
     raw_curvature = float(resolved_spec["curvature_threshold"])
-    curvature_threshold = max(raw_curvature, STAGE2_CURVATURE_THRESHOLD_FLOOR)
-    if raw_curvature < STAGE2_CURVATURE_THRESHOLD_FLOOR:
+    curvature_threshold = min(raw_curvature, STAGE2_CURVATURE_THRESHOLD_CEILING)
+    if raw_curvature > STAGE2_CURVATURE_THRESHOLD_CEILING:
         print(
             f"WARNING: curvature_threshold {raw_curvature} "
-            f"below Stage 2 solver floor, clamped to "
-            f"{STAGE2_CURVATURE_THRESHOLD_FLOOR}"
+            f"above Stage 2 hardware ceiling, clamped to "
+            f"{STAGE2_CURVATURE_THRESHOLD_CEILING}"
         )
+    tf_current_A = validate_tf_current_limit(resolved_spec["tf_current_A"])
     return Stage2ArtifactConfig(
         plasma_surf_filename=Path(args.plasma_surf_filename).name,
         output_root=output_root,
         equilibria_dir=None if equilibria_dir is None else str(equilibria_dir),
-        tf_current_A=float(resolved_spec["tf_current_A"]),
+        tf_current_A=tf_current_A,
         major_radius=float(resolved_spec["major_radius"]),
         toroidal_flux=float(resolved_spec["toroidal_flux"]),
         length_weight=float(resolved_spec["length_weight"]),
@@ -260,6 +310,18 @@ def build_stage2_alm_config(
         alm_penalty_init=float(resolved_spec["alm_penalty_init"]),
         alm_penalty_scale=float(resolved_spec["alm_penalty_scale"]),
         alm_penalty_max=float(resolved_spec["alm_penalty_max"]),
+        alm_feas_tol=float(resolved_spec["alm_feas_tol"]),
+        alm_stationarity_tol=float(resolved_spec["alm_stationarity_tol"]),
+        alm_trust_radius_init=float(resolved_spec["alm_trust_radius_init"]),
+        alm_trust_radius_min=float(resolved_spec["alm_trust_radius_min"]),
+        alm_trust_radius_shrink=float(resolved_spec["alm_trust_radius_shrink"]),
+        alm_trust_radius_grow=float(resolved_spec["alm_trust_radius_grow"]),
+        alm_max_inner_attempts=int(resolved_spec["alm_max_inner_attempts"]),
+        alm_max_subproblem_continuations=int(
+            resolved_spec["alm_max_subproblem_continuations"]
+        ),
+        alm_distance_smoothing=float(resolved_spec["alm_distance_smoothing"]),
+        alm_curvature_smoothing=float(resolved_spec["alm_curvature_smoothing"]),
         basin_hops=basin_hops,
         basin_stepsize=float(resolved_spec["basin_stepsize"]),
         basin_temperature=float(resolved_spec["basin_temperature"]),
@@ -269,6 +331,25 @@ def build_stage2_alm_config(
         banana_init_current_A=float(resolved_spec["banana_init_current_A"]),
         banana_current_max_A=float(resolved_spec["banana_current_max_A"]),
     )
+
+
+def _expected_stage2_alm_solver_metadata(config: Stage2ArtifactConfig) -> dict:
+    return {
+        "ALM_PENALTY_INIT": config.alm_penalty_init,
+        "ALM_PENALTY_SCALE": config.alm_penalty_scale,
+        "ALM_PENALTY_MAX": config.alm_penalty_max,
+        "ALM_MAX_OUTER_ITERS": config.alm_max_outer_iters,
+        "ALM_FEAS_TOL": config.alm_feas_tol,
+        "ALM_STATIONARITY_TOL": config.alm_stationarity_tol,
+        "ALM_TRUST_RADIUS_INIT": config.alm_trust_radius_init,
+        "ALM_TRUST_RADIUS_MIN": config.alm_trust_radius_min,
+        "ALM_TRUST_RADIUS_SHRINK": config.alm_trust_radius_shrink,
+        "ALM_TRUST_RADIUS_GROW": config.alm_trust_radius_grow,
+        "ALM_MAX_INNER_ATTEMPTS": config.alm_max_inner_attempts,
+        "ALM_MAX_SUBPROBLEM_CONTINUATIONS": config.alm_max_subproblem_continuations,
+        "ALM_DISTANCE_SMOOTHING": config.alm_distance_smoothing,
+        "ALM_CURVATURE_SMOOTHING": config.alm_curvature_smoothing,
+    }
 
 
 def _expected_stage2_artifact_metadata(config: Stage2ArtifactConfig) -> dict:
@@ -284,13 +365,25 @@ def _expected_stage2_artifact_metadata(config: Stage2ArtifactConfig) -> dict:
         "CC_THRESHOLD": config.cc_threshold,
         "CURVATURE_WEIGHT": config.curvature_weight,
         "CURVATURE_THRESHOLD": config.curvature_threshold,
+        **fixed_stage2_artifact_hardware_contract(),
         "banana_surf_radius": config.banana_surf_radius,
         "order": config.order,
         "CONSTRAINT_METHOD": config.constraint_method,
-        "ALM_PENALTY_MAX": config.alm_penalty_max,
+        **_expected_stage2_alm_solver_metadata(config),
         **basin_metadata_from_config(config),
         "init_only": config.init_only,
     }
+
+
+def _backfill_missing_stage2_alm_solver_metadata(
+    stage2_results: dict,
+    config: Stage2ArtifactConfig,
+) -> dict:
+    upgraded_results = dict(stage2_results)
+    for key, value in _expected_stage2_alm_solver_metadata(config).items():
+        if upgraded_results.get(key) is None:
+            upgraded_results[key] = value
+    return upgraded_results
 
 
 def load_validated_stage2_artifact(
@@ -299,6 +392,7 @@ def load_validated_stage2_artifact(
     artifact_path = resolve_stage2_artifact_path(config)
     stage2_results_path, stage2_results = load_stage2_artifact_results(artifact_path)
     stage2_results = upgrade_legacy_stage2_artifact_results(stage2_results)
+    stage2_results = _backfill_missing_stage2_alm_solver_metadata(stage2_results, config)
     validate_stage2_artifact_metadata(
         stage2_results_path,
         stage2_results,
@@ -333,6 +427,7 @@ def build_summary(
         "contains_solver_outputs": bool(stage2_results_path is not None and stage2_results is not None),
         "dry_run_marker_path": str(dry_run_marker_path(config.output_root)),
         "resolved_stage2_config": _jsonable_stage2_config(config),
+        "fixed_stage2_hardware_contract": fixed_stage2_clearance_contract(),
     }
     if stage2_results_path is None or stage2_results is None:
         return summary
@@ -348,6 +443,16 @@ def build_summary(
             "coil_length": stage2_results.get("COIL_LENGTH"),
             "field_error": stage2_results.get("FIELD_ERROR"),
             "hardware_constraints_ok": stage2_results.get("HARDWARE_CONSTRAINTS_OK"),
+            "coil_plasma_min_dist": stage2_results.get("CURVE_SURFACE_MIN_DIST"),
+            "coil_plasma_threshold": stage2_results.get(
+                "COIL_PLASMA_MIN_DIST_M",
+                COIL_PLASMA_MIN_DIST_M,
+            ),
+            "plasma_vessel_min_dist": stage2_results.get("PLASMA_VESSEL_MIN_DIST"),
+            "plasma_vessel_threshold": stage2_results.get(
+                "PLASMA_VESSEL_MIN_DIST_M",
+                PLASMA_VESSEL_MIN_DIST_M,
+            ),
         }
     )
     return summary
@@ -384,6 +489,12 @@ def main() -> int:
         )
     else:
         clear_dry_run_marker(output_root)
+        # NOTE: artifact_reused was computed before ensure_stage2_artifact.
+        # Under concurrent workflows, a concurrent process could create the
+        # artifact between the pre-check and the ensure call, causing
+        # artifact_reused=False while ensure_stage2_artifact actually reused it.
+        # The proper fix requires ensure_stage2_artifact to return a created/reused
+        # flag; for now the pre-check is authoritative for the common case.
         artifact_path = ensure_stage2_artifact(
             config,
             python_executable=args.python_executable,

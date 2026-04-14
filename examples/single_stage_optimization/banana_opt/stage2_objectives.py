@@ -8,6 +8,7 @@ from alm_utils import (
     upper_bound_residual,
     zero_gradient_like,
 )
+from banana_opt.hardware_contracts import fixed_stage2_clearance_contract
 from banana_opt.smoothing import smoothmax_selected, smoothmin_selected
 
 
@@ -96,6 +97,8 @@ def build_stage2_results(
     final_coil_length,
     final_curve_curve_min_dist,
     hardware_status,
+    final_curve_surface_min_dist=None,
+    plasma_vessel_min_dist=None,
 ):
     alm_enabled = constraint_method == "alm"
     return {
@@ -114,6 +117,7 @@ def build_stage2_results(
         "CURVATURE_WEIGHT": curvature_weight,
         "CURVATURE_THRESHOLD": curvature_threshold,
         "LENGTH_WEIGHT": length_weight,
+        **fixed_stage2_clearance_contract(),
         "CONSTRAINT_METHOD": constraint_method,
         "theta_center": theta_center,
         "phi_center": phi_center,
@@ -267,6 +271,8 @@ def build_stage2_results(
         "MAX_CURVATURE": final_max_curvature,
         "COIL_LENGTH": final_coil_length,
         "CURVE_CURVE_MIN_DIST": final_curve_curve_min_dist,
+        "CURVE_SURFACE_MIN_DIST": final_curve_surface_min_dist,
+        "PLASMA_VESSEL_MIN_DIST": plasma_vessel_min_dist,
         "HARDWARE_CONSTRAINTS_OK": hardware_status["success"],
         "HARDWARE_CONSTRAINT_VIOLATIONS": hardware_status["violations"],
     }
@@ -297,6 +303,10 @@ def evaluate_stage2_hardware_constraints(
     cc_threshold,
     max_curvature,
     curvature_threshold,
+    curve_surface_min_dist=None,
+    coil_surface_threshold=None,
+    plasma_vessel_min_dist=None,
+    plasma_vessel_threshold=None,
 ):
     violations = []
     if coil_length > length_target:
@@ -311,7 +321,7 @@ def evaluate_stage2_hardware_constraints(
         violations.append(
             f"max_curvature {max_curvature:.6f} exceeds threshold {curvature_threshold:.6f}"
         )
-    return {
+    status = {
         "success": len(violations) == 0,
         "violations": violations,
         "coil_length": float(coil_length),
@@ -321,6 +331,24 @@ def evaluate_stage2_hardware_constraints(
         "max_curvature": float(max_curvature),
         "curvature_threshold": float(curvature_threshold),
     }
+    if curve_surface_min_dist is not None and coil_surface_threshold is not None:
+        if curve_surface_min_dist < coil_surface_threshold:
+            violations.append(
+                f"coil_surface_min_dist {curve_surface_min_dist:.6f} below threshold "
+                f"{coil_surface_threshold:.6f}"
+            )
+        status["curve_surface_min_dist"] = float(curve_surface_min_dist)
+        status["coil_surface_threshold"] = float(coil_surface_threshold)
+    if plasma_vessel_min_dist is not None and plasma_vessel_threshold is not None:
+        if plasma_vessel_min_dist < plasma_vessel_threshold:
+            violations.append(
+                f"plasma_vessel_min_dist {plasma_vessel_min_dist:.6f} below threshold "
+                f"{plasma_vessel_threshold:.6f}"
+            )
+        status["plasma_vessel_min_dist"] = float(plasma_vessel_min_dist)
+        status["plasma_vessel_threshold"] = float(plasma_vessel_threshold)
+    status["success"] = len(violations) == 0
+    return status
 
 
 def stage2_constraint_activity_tolerances(
@@ -329,13 +357,23 @@ def stage2_constraint_activity_tolerances(
     *,
     length_tolerance: float = 1e-3,
     banana_current_tolerance: float = 1e-3,
+    include_coil_surface: bool = False,
 ):
-    return [
+    tolerances = [
         length_tolerance,
         max(4.0 * float(distance_smoothing), _SMOOTHING_EPS),
         max(4.0 * float(curvature_smoothing), _SMOOTHING_EPS),
         banana_current_tolerance,
     ]
+    if include_coil_surface:
+        return [
+            tolerances[0],
+            tolerances[1],
+            tolerances[1],
+            tolerances[2],
+            tolerances[3],
+        ]
+    return tolerances
 
 
 def _sanitize_stage2_alm_inputs(
@@ -499,7 +537,66 @@ def smooth_min_distance_signed_constraint(
         if np.any(point_gradient):
             derivative += curve.dgamma_by_dcoeff_vjp(point_gradient)
     grad = np.asarray(derivative(base_objective_optimizable), dtype=float)
-    return float(minimum_distance) - smooth_min, grad
+    # grad = d(smooth_min)/dx, but signed_value = min_dist - smooth_min,
+    # so d(signed_value)/dx = -d(smooth_min)/dx = -grad.
+    return float(minimum_distance) - smooth_min, -grad
+
+
+def smooth_min_curve_surface_signed_constraint(
+    curves,
+    surface,
+    minimum_distance: float,
+    temperature: float,
+    base_objective_optimizable,
+):
+    if not curves:
+        return float(minimum_distance), zero_gradient_like(base_objective_optimizable.x)
+
+    surface_points = np.asarray(surface.gamma(), dtype=float).reshape((-1, 3))
+    curve_blocks = []
+    hard_min = np.inf
+    for curve_index, curve in enumerate(curves):
+        gamma = np.asarray(curve.gamma(), dtype=float)
+        diffs = gamma[:, None, :] - surface_points[None, :, :]
+        dists = np.linalg.norm(diffs, axis=2)
+        hard_min = min(hard_min, float(np.min(dists)))
+        curve_blocks.append((curve_index, diffs, dists))
+
+    selection_window = 4.0 * float(temperature)
+    selected_distances = []
+    selected_entries = []
+    for curve_index, diffs, dists in curve_blocks:
+        mask = dists <= (hard_min + selection_window)
+        if not np.any(mask):
+            mask[np.unravel_index(np.argmin(dists), dists.shape)] = True
+        rows, cols = np.nonzero(mask)
+        selected_distances.append(dists[rows, cols])
+        selected_entries.append((curve_index, rows, diffs[rows, cols], dists[rows, cols]))
+
+    flat_distances = np.concatenate(selected_distances)
+    smooth_min, flat_weights = smoothmin_selected(
+        flat_distances,
+        temperature,
+        _SMOOTHING_EPS,
+    )
+
+    point_gradients = [np.zeros_like(np.asarray(curve.gamma(), dtype=float)) for curve in curves]
+    offset = 0
+    for curve_index, rows, diffs, distances in selected_entries:
+        count = len(distances)
+        local_weights = flat_weights[offset:offset + count]
+        offset += count
+        directions = diffs / np.maximum(distances[:, None], _SMOOTHING_EPS)
+        np.add.at(point_gradients[curve_index], rows, local_weights[:, None] * directions)
+
+    derivative = _new_derivative()
+    for curve, point_gradient in zip(curves, point_gradients):
+        if np.any(point_gradient):
+            derivative += curve.dgamma_by_dcoeff_vjp(point_gradient)
+    grad = np.asarray(derivative(base_objective_optimizable), dtype=float)
+    # grad = d(smooth_min)/dx, but signed_value = min_dist - smooth_min,
+    # so d(signed_value)/dx = -d(smooth_min)/dx = -grad.
+    return float(minimum_distance) - smooth_min, -grad
 
 
 def evaluate_stage2_alm_problem(
@@ -521,6 +618,8 @@ def evaluate_stage2_alm_problem(
     stage2_constraint_activity_tolerances,
     smooth_min_distance_signed_constraint,
     smooth_max_curvature_signed_constraint,
+    Jcsdist=None,
+    smooth_min_curve_surface_signed_constraint=None,
 ):
     base_objective.x = dofs
     base_value = float(base_objective.J())
@@ -542,6 +641,24 @@ def evaluate_stage2_alm_problem(
         distance_smoothing,
         base_objective_optimizable,
     )
+    include_coil_surface = (
+        Jcsdist is not None and smooth_min_curve_surface_signed_constraint is not None
+    )
+    if include_coil_surface:
+        curve_surface_min_dist = float(Jcsdist.shortest_distance())
+        curve_surface_violation = lower_bound_residual(
+            curve_surface_min_dist,
+            Jcsdist.minimum_distance,
+        )
+        curve_surface_signed_value, curve_surface_grad = (
+            smooth_min_curve_surface_signed_constraint(
+                Jcsdist.curves,
+                Jcsdist.surface,
+                Jcsdist.minimum_distance,
+                distance_smoothing,
+                base_objective_optimizable,
+            )
+        )
 
     max_curvature = float(np.max(Jc.curve.kappa()))
     curvature_violation = upper_bound_residual(max_curvature, Jc.threshold)
@@ -563,24 +680,47 @@ def evaluate_stage2_alm_problem(
         base_objective_optimizable,
     )
 
-    hard_signed_constraint_values = [
-        coil_length - length_target,
-        Jccdist.minimum_distance - curve_curve_min_dist,
-        max_curvature - Jc.threshold,
-        banana_current_signed_value,
-    ]
-    surrogate_signed_constraint_values = [
-        coil_length - length_target,
-        curve_curve_signed_value,
-        curvature_signed_value,
-        banana_current_signed_value,
-    ]
-    constraint_grads = [
-        length_grad,
-        curve_curve_grad,
-        curvature_grad,
-        banana_current_grad,
-    ]
+    if include_coil_surface:
+        hard_signed_constraint_values = [
+            coil_length - length_target,
+            Jccdist.minimum_distance - curve_curve_min_dist,
+            Jcsdist.minimum_distance - curve_surface_min_dist,
+            max_curvature - Jc.threshold,
+            banana_current_signed_value,
+        ]
+        surrogate_signed_constraint_values = [
+            coil_length - length_target,
+            curve_curve_signed_value,
+            curve_surface_signed_value,
+            curvature_signed_value,
+            banana_current_signed_value,
+        ]
+        constraint_grads = [
+            length_grad,
+            curve_curve_grad,
+            curve_surface_grad,
+            curvature_grad,
+            banana_current_grad,
+        ]
+    else:
+        hard_signed_constraint_values = [
+            coil_length - length_target,
+            Jccdist.minimum_distance - curve_curve_min_dist,
+            max_curvature - Jc.threshold,
+            banana_current_signed_value,
+        ]
+        surrogate_signed_constraint_values = [
+            coil_length - length_target,
+            curve_curve_signed_value,
+            curvature_signed_value,
+            banana_current_signed_value,
+        ]
+        constraint_grads = [
+            length_grad,
+            curve_curve_grad,
+            curvature_grad,
+            banana_current_grad,
+        ]
     (
         sanitized_base_value,
         sanitized_base_grad,
@@ -602,12 +742,22 @@ def evaluate_stage2_alm_problem(
     )
     sanitized_hard_violation_values, invalid_hard_violation_fields = (
         _sanitize_stage2_feasibility_values(
-            [
-                length_violation,
-                curve_curve_violation,
-                curvature_violation,
-                banana_current_violation,
-            ],
+            (
+                [
+                    length_violation,
+                    curve_curve_violation,
+                    curve_surface_violation,
+                    curvature_violation,
+                    banana_current_violation,
+                ]
+                if include_coil_surface
+                else [
+                    length_violation,
+                    curve_curve_violation,
+                    curvature_violation,
+                    banana_current_violation,
+                ]
+            ),
             constraint_values=sanitized_hard_signed_constraint_values,
             field_prefix="hard_violation_values",
         )
@@ -629,17 +779,35 @@ def evaluate_stage2_alm_problem(
     evaluation.update(
         {
             "base_value": sanitized_base_value,
-            "constraint_names": [
-                "coil_length_upper_bound",
-                "coil_coil_spacing",
-                "max_curvature",
-                "banana_current_upper_bound",
-            ],
+            "constraint_names": (
+                [
+                    "coil_length_upper_bound",
+                    "coil_coil_spacing",
+                    "coil_surface_spacing",
+                    "max_curvature",
+                    "banana_current_upper_bound",
+                ]
+                if include_coil_surface
+                else [
+                    "coil_length_upper_bound",
+                    "coil_coil_spacing",
+                    "max_curvature",
+                    "banana_current_upper_bound",
+                ]
+            ),
             "dual_update_values": sanitized_surrogate_signed_constraint_values,
             "constraint_grads": sanitized_constraint_grads,
-            "constraint_activity_tolerances": stage2_constraint_activity_tolerances(
-                distance_smoothing,
-                curvature_smoothing,
+            "constraint_activity_tolerances": (
+                stage2_constraint_activity_tolerances(
+                    distance_smoothing,
+                    curvature_smoothing,
+                    include_coil_surface=True,
+                )
+                if include_coil_surface
+                else stage2_constraint_activity_tolerances(
+                    distance_smoothing,
+                    curvature_smoothing,
+                )
             ),
             "feasibility_values": sanitized_hard_violation_values,
             "hard_signed_constraint_values": sanitized_hard_signed_constraint_values,
@@ -673,6 +841,11 @@ def evaluate_stage2_alm_problem(
         f", C-C-Sep={curve_curve_min_dist:.2f}m, CC+={curve_curve_violation:.2e}, "
         f"CCg={curve_curve_signed_value:.2e}"
     )
+    if include_coil_surface:
+        outstr += (
+            f", C-S-Sep={curve_surface_min_dist:.2f}m, CS+={curve_surface_violation:.2e}, "
+            f"CSg={curve_surface_signed_value:.2e}"
+        )
     outstr += (
         f", Curvature={max_curvature:.2f}, Curv+={curvature_violation:.2e}, "
         f"Curvg={curvature_signed_value:.2e}"

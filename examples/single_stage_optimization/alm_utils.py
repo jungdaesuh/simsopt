@@ -232,6 +232,8 @@ def augmented_objective(
     multipliers,
     penalty: float,
 ):
+    if penalty <= 0.0:
+        raise ValueError("penalty must be positive")
     constraint_values = np.asarray(constraint_values, dtype=float)
     constraint_grad_list = [
         np.asarray(constraint_grad, dtype=float) for constraint_grad in constraint_grads
@@ -267,6 +269,8 @@ def augmented_inequality_objective(
     multipliers,
     penalty: float,
 ):
+    if penalty <= 0.0:
+        raise ValueError("penalty must be positive")
     constraint_values = np.asarray(constraint_values, dtype=float)
     constraint_grad_list = [
         np.asarray(constraint_grad, dtype=float) for constraint_grad in constraint_grads
@@ -367,7 +371,6 @@ def alm_result_diagnostics_fields(alm_result) -> dict:
             None,
         ),
         "ALM_PENALTY_CAP_REACHED": getattr(alm_result, "penalty_cap_reached", None),
-        "ALM_PENALTY_MAX": getattr(alm_result, "penalty_max", None),
         "ALM_PENALTY_CAP_REQUESTED": getattr(
             alm_result,
             "penalty_cap_requested",
@@ -1017,6 +1020,18 @@ def _constraint_activity_mask(
     )
 
 
+def _positive_shift(
+    multipliers: np.ndarray,
+    penalty: float,
+    constraint_values: np.ndarray,
+) -> np.ndarray:
+    return np.maximum(
+        0.0,
+        np.asarray(multipliers, dtype=float)
+        + float(penalty) * np.asarray(constraint_values, dtype=float),
+    )
+
+
 def _constraint_routing_state(
     evaluation: dict,
     multipliers: np.ndarray,
@@ -1042,19 +1057,22 @@ def _constraint_routing_state(
     )
     masks_disagree = not np.array_equal(hard_activity_mask, surrogate_activity_mask)
     signal_mismatch_active = signal_state.explicit_stage2_signals and masks_disagree
-    hard_positive_shift = np.maximum(
-        0.0,
-        np.asarray(multipliers, dtype=float)
-        + float(penalty) * signal_state.preferred_dual_update_values,
+    hard_positive_shift = _positive_shift(
+        multipliers,
+        penalty,
+        signal_state.preferred_dual_update_values,
     )
-    surrogate_positive_shift = np.maximum(
-        0.0,
-        np.asarray(multipliers, dtype=float)
-        + float(penalty) * signal_state.surrogate_signed_constraint_values,
+    surrogate_positive_shift = _positive_shift(
+        multipliers,
+        penalty,
+        signal_state.surrogate_signed_constraint_values,
+    )
+    hard_feasible_under_gate = (
+        _max_value(signal_state.hard_violation_values) <= float(feasibility_gate)
     )
     direct_boundary_mismatch = (
         signal_state.explicit_stage2_signals
-        and _max_value(signal_state.hard_violation_values) <= float(feasibility_gate)
+        and hard_feasible_under_gate
         and np.any(surrogate_positive_shift > 0.0)
     )
     if direct_boundary_mismatch:
@@ -1163,6 +1181,8 @@ def minimize_alm(
     snapshot_accepted_state_fn: Callable[[], object] | None = None,
     restore_incumbent_state_fn: Callable[[object], None] | None = None,
     history_callback: Callable[[list[dict], dict, np.ndarray, float], None] | None = None,
+    initial_multipliers: np.ndarray | None = None,
+    initial_penalty: float | None = None,
 ):
     if (snapshot_accepted_state_fn is None) != (restore_incumbent_state_fn is None):
         raise ValueError(
@@ -1176,8 +1196,16 @@ def minimize_alm(
             f"settings.penalty_init ({settings.penalty_init})"
         )
     x = np.asarray(x0, dtype=float).copy()
-    multipliers = np.zeros(len(constraint_names), dtype=float)
-    penalty = float(settings.penalty_init)
+    multipliers = (
+        np.asarray(initial_multipliers, dtype=float).copy()
+        if initial_multipliers is not None
+        else np.zeros(len(constraint_names), dtype=float)
+    )
+    penalty = (
+        float(initial_penalty)
+        if initial_penalty is not None
+        else float(settings.penalty_init)
+    )
     total_inner_iterations = 0
     history = []
     final_eval = None
@@ -1476,6 +1504,7 @@ def minimize_alm(
             outer_state_callback(outer_iteration, multipliers.copy(), penalty)
 
         feasible_stall_count = 0
+        is_final_outer = outer_iteration == settings.max_outer_iterations
         for continuation_iteration in range(settings.max_subproblem_continuations + 1):
             start_x = x.copy()
             current_eval = evaluate_problem(x, multipliers, penalty)
@@ -1559,10 +1588,15 @@ def minimize_alm(
                         ),
                         "signal_mismatch_active": bool(current_signal_mismatch_active),
                         "multipliers": [float(value) for value in multipliers],
+                        "post_update_multipliers": [float(value) for value in multipliers],
                         "feasibility_tolerance": float(update_feasibility_tol),
                         "effective_feasibility_tolerance": float(effective_feasibility_tol),
                         "stationarity_tolerance": float(update_stationarity_tol),
                         "trust_radius": trust_radius,
+                        "inner_maxiter": None,
+                        "inner_maxls": None,
+                        "inner_maxfun": None,
+                        "inner_profile": None,
                         "inner_attempts": 0,
                         "accepted_move_norm": 0.0,
                         "accepted_move_norm_scaled": 0.0,
@@ -1580,6 +1614,8 @@ def minimize_alm(
                         "active_constraint_name": None,
                         "nonfinite_candidate_evaluation": False,
                         "nonfinite_candidate_fields": None,
+                        "multiplier_cap_binding": False,
+                        "multiplier_cap_binding_indices": [],
                         "action": "converged",
                     }
                 )
@@ -1998,6 +2034,8 @@ def minimize_alm(
                     return cap_result
                 history_entry["action"] = "infeasible_stall_penalty_increase"
                 history_entry["trust_radius"] = trust_radius
+                if is_final_outer:
+                    history_entry["outer_termination"] = "max_outer"
                 _emit_history_snapshot(history_entry)
                 break
 
@@ -2067,6 +2105,8 @@ def minimize_alm(
                         return cap_result
                     history_entry["action"] = "signal_mismatch_penalty_increase"
                     history_entry["trust_radius"] = trust_radius
+                    if is_final_outer:
+                        history_entry["outer_termination"] = "max_outer"
                     _emit_history_snapshot(history_entry)
                     break
                 feasible_stall_count = 0
@@ -2113,6 +2153,8 @@ def minimize_alm(
                 )
                 history_entry["action"] = "dual_update"
                 history_entry["trust_radius"] = trust_radius
+                if is_final_outer:
+                    history_entry["outer_termination"] = "max_outer"
                 _emit_history_snapshot(history_entry)
                 break
 
@@ -2131,6 +2173,8 @@ def minimize_alm(
                     history_entry["trust_radius"] = trust_radius
                     history_entry["feasible_stall_count"] = int(feasible_stall_count)
                     history_entry["action"] = "subproblem_limit"
+                    if is_final_outer:
+                        history_entry["outer_termination"] = "max_outer"
                     _emit_history_snapshot(history_entry)
                     break
                 if trust_radius is not None:
@@ -2158,12 +2202,12 @@ def minimize_alm(
                 return cap_result
             history_entry["action"] = "penalty_increase"
             history_entry["trust_radius"] = trust_radius
+            if is_final_outer:
+                history_entry["outer_termination"] = "max_outer"
             _emit_history_snapshot(history_entry)
             break
 
-        if outer_iteration == settings.max_outer_iterations:
-            history[-1]["outer_termination"] = "max_outer"
-            _emit_history_snapshot(history[-1])
+        if is_final_outer:
             break
 
     if final_eval is None or last_result is None:
