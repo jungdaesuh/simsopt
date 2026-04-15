@@ -1976,6 +1976,36 @@ def should_recompute_stage2_field_diagnostics(
     )
 
 
+def plan_stage2_field_diagnostic_evaluation(
+    field_diagnostic_state,
+    *,
+    stride,
+):
+    next_eval = field_diagnostic_state["eval_count"] + 1
+    diagnostics = field_diagnostic_state["diagnostics"]
+    return (
+        next_eval,
+        diagnostics,
+        should_recompute_stage2_field_diagnostics(
+            diagnostics,
+            eval_index=next_eval,
+            stride=stride,
+        ),
+    )
+
+
+def store_stage2_field_diagnostics(
+    field_diagnostic_state,
+    *,
+    eval_index,
+    diagnostics,
+):
+    field_diagnostic_state["eval_count"] = int(eval_index)
+    field_diagnostic_state["diagnostics"] = (
+        None if diagnostics is None else dict(diagnostics)
+    )
+
+
 def run_stage2_optimizer(
     value_and_grad_fun=None,
     dofs=None,
@@ -2544,19 +2574,23 @@ def make_fun(
     )
 
     def fun(dofs):
-        next_eval = field_diagnostic_state["eval_count"] + 1
-        recompute_diagnostics = should_recompute_stage2_field_diagnostics(
-            field_diagnostic_state["diagnostics"],
-            eval_index=next_eval,
-            stride=field_diagnostic_stride,
+        next_eval, diagnostics, recompute_diagnostics = (
+            plan_stage2_field_diagnostic_evaluation(
+                field_diagnostic_state,
+                stride=field_diagnostic_stride,
+            )
         )
         JF.x = dofs
-        snapshot, grad, field_diagnostic_state["diagnostics"] = evaluate_stage2_objective(
+        snapshot, grad, diagnostics = evaluate_stage2_objective(
             context,
-            diagnostics=field_diagnostic_state["diagnostics"],
+            diagnostics=diagnostics,
             recompute_diagnostics=recompute_diagnostics,
         )
-        field_diagnostic_state["eval_count"] = next_eval
+        store_stage2_field_diagnostics(
+            field_diagnostic_state,
+            eval_index=next_eval,
+            diagnostics=diagnostics,
+        )
         append_stage2_trajectory_snapshot(
             trajectory_sink,
             snapshot,
@@ -2932,11 +2966,11 @@ if __name__ == "__main__":
         }
 
         def evaluate_problem(inner_dofs, multipliers, penalty):
-            next_eval = alm_field_diagnostic_state["eval_count"] + 1
-            recompute_diagnostics = should_recompute_stage2_field_diagnostics(
-                alm_field_diagnostic_state["diagnostics"],
-                eval_index=next_eval,
-                stride=field_diagnostic_stride,
+            next_eval, diagnostics, recompute_diagnostics = (
+                plan_stage2_field_diagnostic_evaluation(
+                    alm_field_diagnostic_state,
+                    stride=field_diagnostic_stride,
+                )
             )
             evaluation = _evaluate_stage2_alm_problem_impl(
                 inner_dofs,
@@ -2961,15 +2995,16 @@ if __name__ == "__main__":
                 smooth_min_curve_surface_signed_constraint=(
                     _smooth_min_curve_surface_signed_constraint_impl
                 ),
-                diagnostics=alm_field_diagnostic_state["diagnostics"],
+                diagnostics=diagnostics,
                 recompute_diagnostics=recompute_diagnostics,
             )
-            alm_field_diagnostic_state["eval_count"] = next_eval
-            alm_field_diagnostic_state["diagnostics"] = dict(
-                evaluation.get(
+            store_stage2_field_diagnostics(
+                alm_field_diagnostic_state,
+                eval_index=next_eval,
+                diagnostics=evaluation.get(
                     "field_diagnostics",
-                    alm_field_diagnostic_state["diagnostics"] or {},
-                )
+                    diagnostics,
+                ),
             )
             return evaluation
 

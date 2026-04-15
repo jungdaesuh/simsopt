@@ -741,6 +741,12 @@ def compute_stage2_alm_field_diagnostics(new_bs, new_surf):
     }
 
 
+def normalize_stage2_alm_field_diagnostics(diagnostics):
+    return {
+        "mean_abs_relBfinal_norm": float(diagnostics["mean_abs_relBfinal_norm"]),
+    }
+
+
 def evaluate_stage2_alm_problem(
     dofs,
     base_objective,
@@ -940,11 +946,9 @@ def evaluate_stage2_alm_problem(
     if recompute_diagnostics or diagnostics is None:
         diagnostics = compute_stage2_alm_field_diagnostics(new_bs, new_surf)
     else:
-        diagnostics = {
-            "mean_abs_relBfinal_norm": float(diagnostics["mean_abs_relBfinal_norm"])
-        }
+        diagnostics = normalize_stage2_alm_field_diagnostics(diagnostics)
     BdotN = float(diagnostics["mean_abs_relBfinal_norm"])
-    evaluation["field_diagnostics"] = dict(diagnostics)
+    evaluation["field_diagnostics"] = normalize_stage2_alm_field_diagnostics(diagnostics)
     evaluation["mean_abs_relBfinal_norm"] = BdotN
     outstr = (
         f"ALM J={evaluation['total']:.1e}, Jflux={sanitized_base_value:.1e}, "
