@@ -41,6 +41,12 @@ STAGE2_SCRIPT = (
     / "STAGE_2"
     / "banana_coil_solver.py"
 )
+RUN_STAGE2_ALM_SCRIPT = (
+    REPO_ROOT
+    / "examples"
+    / "single_stage_optimization"
+    / "run_stage2_alm.py"
+)
 _EQUILIBRIA_PATHS_MODULE = (
     REPO_ROOT / "examples" / "single_stage_optimization" / "equilibria_paths.py"
 )
@@ -301,6 +307,59 @@ def _load_stage2_script_module():
             if name == "simsopt" or name.startswith("simsopt."):
                 del sys.modules[name]
         sys.modules.update(saved_simsopt_modules)
+
+
+def _load_run_stage2_alm_module():
+    module_name = "stage2_run_stage2_alm"
+    spec = importlib.util.spec_from_file_location(
+        module_name,
+        RUN_STAGE2_ALM_SCRIPT,
+    )
+    if spec is None or spec.loader is None:
+        raise RuntimeError(
+            f"Failed to load Stage 2 ALM wrapper module from {RUN_STAGE2_ALM_SCRIPT}"
+        )
+    module = importlib.util.module_from_spec(spec)
+    saved_module = sys.modules.get(module_name)
+    sys.modules[module_name] = module
+    try:
+        spec.loader.exec_module(module)
+        return module
+    finally:
+        if saved_module is None:
+            sys.modules.pop(module_name, None)
+        else:
+            sys.modules[module_name] = saved_module
+
+
+def _make_run_stage2_alm_args(
+    tmp_path,
+    *,
+    output_root_name="stage2-alm",
+    plasma_surf_filename="wout_test.nc",
+    equilibria_dir=None,
+    profile=None,
+    stage2_spec_json=None,
+    backend=None,
+    toroidal_flux=None,
+    cc_threshold=None,
+    curvature_threshold=None,
+    order=None,
+    tf_current_A=None,
+):
+    return types.SimpleNamespace(
+        plasma_surf_filename=plasma_surf_filename,
+        output_root=str(tmp_path / output_root_name),
+        equilibria_dir=equilibria_dir,
+        profile=profile,
+        stage2_spec_json=stage2_spec_json,
+        backend=backend,
+        toroidal_flux=toroidal_flux,
+        cc_threshold=cc_threshold,
+        curvature_threshold=curvature_threshold,
+        order=order,
+        tf_current_A=tf_current_A,
+    )
 
 
 def _fresh_import(module_name):
@@ -672,12 +731,171 @@ def _assert_first_order_taylor_contract(fun, x, grad, *, seed):
     )
 
 
-def test_stage2_curvature_threshold_policy_caps_at_40():
+def test_stage2_curvature_threshold_policy_clamps_only_to_shared_hardware_ceiling():
     stage2_script = _load_stage2_script_module()
 
-    assert stage2_script.resolve_curvature_threshold(10.0) == pytest.approx(20.0)
+    assert stage2_script.resolve_curvature_threshold(10.0) == pytest.approx(10.0)
     assert stage2_script.resolve_curvature_threshold(30.0) == pytest.approx(30.0)
-    assert stage2_script.resolve_curvature_threshold(80.0) == pytest.approx(40.0)
+    assert stage2_script.resolve_curvature_threshold(80.0) == pytest.approx(80.0)
+    assert stage2_script.resolve_curvature_threshold(120.0) == pytest.approx(100.0)
+
+
+def test_stage2_alm_constraint_names_follow_shared_schema():
+    stage2_script = _load_stage2_script_module()
+
+    assert stage2_script.stage2_alm_constraint_names(
+        include_coil_surface=False
+    ) == (
+        "coil_coil_spacing",
+        "max_curvature",
+        "coil_length_upper_bound",
+        "banana_current_upper_bound",
+    )
+    assert stage2_script.stage2_alm_constraint_names(
+        include_coil_surface=True
+    ) == (
+        "coil_coil_spacing",
+        "coil_surface_spacing",
+        "max_curvature",
+        "coil_length_upper_bound",
+        "banana_current_upper_bound",
+    )
+
+
+def test_run_stage2_alm_standard_profile_uses_shared_contract_defaults(tmp_path):
+    wrapper = _load_run_stage2_alm_module()
+    args = _make_run_stage2_alm_args(tmp_path)
+
+    config = wrapper.build_stage2_alm_config(
+        args,
+        resolved_spec=dict(wrapper.DEFAULT_STAGE2_PROFILES["standard_80ka"]),
+    )
+
+    assert config.tf_current_A == pytest.approx(80000.0)
+    assert config.length_target == pytest.approx(1.7)
+    assert config.cc_threshold == pytest.approx(0.05)
+    assert config.curvature_threshold == pytest.approx(100.0)
+    assert config.banana_surf_radius == pytest.approx(0.21)
+    assert config.banana_current_max_A == pytest.approx(16000.0)
+    assert config.constraint_method == "alm"
+    assert config.backend == "cpu"
+
+
+def test_run_stage2_alm_builds_live_solver_command_with_alm_flags(tmp_path):
+    wrapper = _load_run_stage2_alm_module()
+    args = _make_run_stage2_alm_args(tmp_path)
+    config = wrapper.build_stage2_alm_config(
+        args,
+        resolved_spec=dict(wrapper.DEFAULT_STAGE2_PROFILES["standard_80ka"]),
+    )
+
+    command = wrapper.build_stage2_command(config, python_executable="python")
+
+    assert command[:2] == ["python", str(wrapper.SOLVER_SCRIPT)]
+    assert "--constraint-method" in command
+    assert command[command.index("--constraint-method") + 1] == "alm"
+    assert "--tf-current-A" in command
+    assert command[command.index("--tf-current-A") + 1] == "80000.0"
+    assert "--banana-current-max-A" in command
+    assert command[command.index("--banana-current-max-A") + 1] == "16000.0"
+    assert "--curvature-threshold" in command
+    assert command[command.index("--curvature-threshold") + 1] == "100.0"
+    assert "--banana-surf-radius" in command
+    assert command[command.index("--banana-surf-radius") + 1] == "0.21"
+    assert "--alm-penalty-max" in command
+    assert command[command.index("--alm-penalty-max") + 1] == "100000000.0"
+
+
+def test_run_stage2_alm_spec_json_backfills_optional_solver_and_wrapper_keys(tmp_path):
+    wrapper = _load_run_stage2_alm_module()
+    spec_path = tmp_path / "stage2_spec.json"
+    spec_path.write_text(
+        json.dumps(
+            {
+                "major_radius": 0.915,
+                "toroidal_flux": 0.24,
+                "length_weight": 5.0e-4,
+                "cc_weight": 100.0,
+                "cc_threshold": 0.05,
+                "curvature_weight": 1.0e-4,
+                "curvature_threshold": 40.0,
+                "banana_surf_radius": 0.21,
+                "order": 2,
+                "tf_current_A": 8.0e4,
+                "banana_init_current_A": 1.0e4,
+                "banana_current_max_A": 1.6e4,
+                "alm_max_outer_iters": 10,
+                "alm_penalty_init": 1.0,
+                "alm_penalty_scale": 10.0,
+                "alm_penalty_max": 1.0e8,
+            }
+        ),
+        encoding="utf-8",
+    )
+    args = _make_run_stage2_alm_args(
+        tmp_path,
+        stage2_spec_json=str(spec_path),
+    )
+
+    resolved_spec, _ = wrapper.resolve_stage2_spec_payload(args)
+
+    assert resolved_spec["length_target"] == pytest.approx(1.7)
+    assert resolved_spec["backend"] == "cpu"
+    assert resolved_spec["alm_feas_tol"] == pytest.approx(1.0e-6)
+    assert resolved_spec["alm_stationarity_tol"] == pytest.approx(1.0e-6)
+    assert resolved_spec["alm_max_inner_attempts"] == 4
+    assert resolved_spec["alm_max_subproblem_continuations"] == 20
+    assert resolved_spec["alm_distance_smoothing"] == pytest.approx(0.005)
+    assert resolved_spec["alm_curvature_smoothing"] == pytest.approx(0.25)
+    assert resolved_spec["alm_taylor_test"] is False
+    assert resolved_spec["alm_taylor_test_seed"] == 1
+    assert resolved_spec["init_only"] is False
+
+
+def test_run_stage2_alm_load_validated_artifact_rejects_partial_metadata_match(tmp_path):
+    wrapper = _load_run_stage2_alm_module()
+    args = _make_run_stage2_alm_args(tmp_path, output_root_name=".")
+    resolved_spec = dict(wrapper.DEFAULT_STAGE2_PROFILES["standard_80ka"])
+    resolved_spec["backend"] = "jax"
+    config = wrapper.build_stage2_alm_config(args, resolved_spec=resolved_spec)
+    expected = wrapper._expected_stage2_artifact_metadata(config)
+    search_root = config.output_root / f"outputs-{config.plasma_surf_filename}"
+    right_dir = search_root / "a-right"
+    wrong_dir = search_root / "z-wrong"
+    right_dir.mkdir(parents=True)
+    wrong_dir.mkdir(parents=True)
+
+    right_results = dict(expected)
+    for key in (
+        "LENGTH_TARGET",
+        "ALM_FEAS_TOL",
+        "ALM_STATIONARITY_TOL",
+        "ALM_DISTANCE_SMOOTHING",
+        "ALM_CURVATURE_SMOOTHING",
+    ):
+        right_results.pop(key)
+    (right_dir / "results.json").write_text(
+        json.dumps(right_results),
+        encoding="utf-8",
+    )
+
+    wrong_results = dict(expected)
+    wrong_results["backend"] = "cpu"
+    wrong_results["ALM_PENALTY_INIT"] = 3.0
+    (wrong_dir / "results.json").write_text(
+        json.dumps(wrong_results),
+        encoding="utf-8",
+    )
+
+    loaded_path, loaded_results = wrapper.load_validated_stage2_artifact(config)
+
+    assert loaded_path == right_dir / "results.json"
+    assert loaded_results["backend"] == "jax"
+    assert loaded_results["LENGTH_TARGET"] == pytest.approx(config.length_target)
+    assert loaded_results["ALM_FEAS_TOL"] == pytest.approx(config.alm_feas_tol)
+    assert loaded_results["ALM_DISTANCE_SMOOTHING"] == pytest.approx(
+        config.alm_distance_smoothing
+    )
 
 
 class _FakeStage2SquaredFluxTerm:
@@ -841,8 +1059,10 @@ class TestObjectiveValueParity:
         bs_jax = BiotSavartJAX(zero_current_coils)
         jf_jax = SquaredFluxJAX(surf, bs_jax, definition=definition)
 
-        assert np.isnan(jf_cpu.J())
-        assert np.isinf(jf_jax.J())
+        cpu_j = float(jf_cpu.J())
+        jax_j = float(jf_jax.J())
+        assert not np.isfinite(cpu_j), f"CPU zero-current J should be non-finite, got {cpu_j}"
+        assert not np.isfinite(jax_j), f"JAX zero-current J should be non-finite, got {jax_j}"
 
 
 # -----------------------------------------------------------------------
@@ -3127,6 +3347,7 @@ class TestStage2OptimizerContract:
             value_and_grad,
             callback=None,
             progress_callback=None,
+            failure_callback=None,
         ):
             ondevice_captured["method"] = method
             ondevice_captured["x0"] = np.asarray(x0, dtype=float)
@@ -3136,6 +3357,7 @@ class TestStage2OptimizerContract:
             ondevice_captured["value_and_grad"] = value_and_grad
             ondevice_captured["callback"] = callback
             ondevice_captured["progress_callback"] = progress_callback
+            ondevice_captured["failure_callback"] = failure_callback
             value, grad = fun(np.asarray(x0, dtype=np.float64))
             return types.SimpleNamespace(
                 x=x0,
@@ -3179,6 +3401,7 @@ class TestStage2OptimizerContract:
         assert ondevice_captured["value_and_grad"] is True
         assert ondevice_captured["callback"] is None
         assert ondevice_captured["progress_callback"] is None
+        assert ondevice_captured["failure_callback"] is None
         assert target_result.message == "Optimization terminated successfully."
 
     def test_make_fun_caches_field_diagnostics_between_stride_refreshes(
@@ -4640,6 +4863,9 @@ class TestStage2OptimizerContract:
             maxiter,
             options,
             value_and_grad,
+            callback=None,
+            progress_callback=None,
+            failure_callback=None,
         ):
             calls["fun"] = fun
             calls["x0"] = x0
@@ -4792,6 +5018,266 @@ class TestStage2OptimizerContract:
             stage2_script.flatten_stage2_target_optimizer_state(calls["x0"]),
             dofs,
         )
+
+    def test_stage2_run_optimizer_rejects_failure_callback_on_target_lm_lane(
+        self,
+        monkeypatch,
+    ):
+        stage2_script = _load_stage2_script_module()
+        optimizer_jax_module = _fresh_import("simsopt.geo.optimizer_jax")
+
+        def fake_target_least_squares(*args, **kwargs):
+            raise AssertionError("target_least_squares should not run")
+
+        monkeypatch.setattr(
+            optimizer_jax_module,
+            "target_least_squares",
+            fake_target_least_squares,
+        )
+        contract = stage2_script.resolve_stage2_optimizer_contract(
+            "jax",
+            "ondevice",
+            least_squares_algorithm="lm",
+        )
+
+        with pytest.raises(
+            ValueError,
+            match="target-lane LM optimization does not support failure_callback",
+        ):
+            stage2_script.run_stage2_optimizer(
+                dofs=stage2_script.build_stage2_target_optimizer_state(
+                    types.SimpleNamespace(expected_dof_count=2),
+                    np.asarray([0.25, -0.5], dtype=np.float64),
+                ),
+                contract=contract,
+                maxiter=9,
+                ftol=0.0,
+                gtol=1e-9,
+                residual_fun=lambda x: (
+                    jax.numpy.asarray(
+                        stage2_target_optimizer_state_to_dofs(x),
+                        dtype=jax.numpy.float64,
+                    )
+                    + 1.0
+                ),
+                failure_callback=lambda *args: None,
+            )
+
+    def test_stage2_run_optimizer_threads_callbacks_to_target_lane(self, monkeypatch):
+        stage2_script = _load_stage2_script_module()
+        calls = {}
+
+        def fake_target_minimize(
+            fun,
+            x0,
+            *,
+            method,
+            tol,
+            maxiter,
+            options,
+            value_and_grad,
+            callback,
+            progress_callback,
+            failure_callback,
+        ):
+            calls["callback"] = callback
+            calls["progress_callback"] = progress_callback
+            calls["failure_callback"] = failure_callback
+            if callback is not None:
+                callback(x0)
+            if progress_callback is not None:
+                progress_callback(3, 1.25, 0.5)
+            if failure_callback is not None:
+                flat_x = np.asarray(
+                    stage2_script.flatten_stage2_target_optimizer_state(x0),
+                    dtype=float,
+                )
+                zeros = np.zeros_like(flat_x)
+                failure_callback(
+                    3,
+                    flat_x,
+                    1.25,
+                    zeros,
+                    zeros,
+                    zeros,
+                    0.25,
+                    False,
+                    False,
+                    False,
+                    True,
+                    False,
+                    0,
+                )
+            return types.SimpleNamespace(
+                x=x0,
+                nit=3,
+                success=False,
+                message="maximum iterations reached",
+            )
+
+        optimizer_jax_module = _fresh_import("simsopt.geo.optimizer_jax")
+        monkeypatch.setattr(
+            optimizer_jax_module,
+            "target_minimize",
+            fake_target_minimize,
+        )
+        contract = stage2_script.resolve_stage2_optimizer_contract("jax", "ondevice")
+        dofs = np.asarray([0.25, -0.5], dtype=np.float64)
+        optimizer_state = stage2_script.build_stage2_target_optimizer_state(
+            types.SimpleNamespace(expected_dof_count=2),
+            dofs,
+        )
+
+        callback_events = []
+        progress_events = []
+        failure_events = []
+
+        def callback(current_x):
+            callback_events.append(
+                np.asarray(
+                    stage2_script.flatten_stage2_target_optimizer_state(current_x),
+                    dtype=float,
+                )
+            )
+
+        def progress_callback(iteration, fun_value, grad_norm):
+            progress_events.append((iteration, fun_value, grad_norm))
+
+        def failure_callback(*args):
+            failure_events.append(args)
+
+        stage2_script.run_stage2_optimizer(
+            value_and_grad_fun=lambda x: (
+                jax.numpy.sum(
+                    jax.numpy.square(
+                        jax.numpy.asarray(
+                            stage2_script.flatten_stage2_target_optimizer_state(x),
+                            dtype=jax.numpy.float64,
+                        )
+                    )
+                ),
+                2.0
+                * jax.numpy.asarray(
+                    stage2_script.flatten_stage2_target_optimizer_state(x),
+                    dtype=jax.numpy.float64,
+                ),
+            ),
+            dofs=optimizer_state,
+            contract=contract,
+            maxiter=20,
+            ftol=0.0,
+            gtol=1e-12,
+            callback=callback,
+            progress_callback=progress_callback,
+            failure_callback=failure_callback,
+        )
+
+        assert calls["callback"] is callback
+        assert calls["progress_callback"] is progress_callback
+        assert calls["failure_callback"] is failure_callback
+        np.testing.assert_allclose(callback_events[0], dofs)
+        assert progress_events == [(3, 1.25, 0.5)]
+        assert len(failure_events) == 1
+
+    def test_stage2_run_optimizer_threads_callbacks_to_reference_lane(
+        self,
+        monkeypatch,
+    ):
+        stage2_script = _load_stage2_script_module()
+        calls = {}
+
+        def fake_reference_minimize(
+            fun,
+            x0,
+            *,
+            method,
+            tol,
+            maxiter,
+            options,
+            value_and_grad,
+            callback,
+            progress_callback,
+        ):
+            calls["callback"] = callback
+            calls["progress_callback"] = progress_callback
+            if callback is not None:
+                callback(x0)
+            if progress_callback is not None:
+                progress_callback(2, 0.75, 0.125)
+            return types.SimpleNamespace(
+                x=x0,
+                nit=2,
+                success=True,
+                message="ok",
+            )
+
+        optimizer_jax_module = _fresh_import("simsopt.geo.optimizer_jax")
+        monkeypatch.setattr(
+            optimizer_jax_module,
+            "reference_minimize",
+            fake_reference_minimize,
+        )
+        contract = stage2_script.resolve_stage2_optimizer_contract("cpu", "scipy")
+        dofs = np.asarray([0.25, -0.5], dtype=np.float64)
+        callback_events = []
+        progress_events = []
+
+        def callback(current_x):
+            callback_events.append(np.asarray(current_x, dtype=float))
+
+        def progress_callback(iteration, fun_value, grad_norm):
+            progress_events.append((iteration, fun_value, grad_norm))
+
+        stage2_script.run_stage2_optimizer(
+            value_and_grad_fun=lambda x: (float(np.dot(x, x)), 2.0 * np.asarray(x)),
+            dofs=dofs,
+            contract=contract,
+            maxiter=10,
+            ftol=0.0,
+            gtol=1e-12,
+            callback=callback,
+            progress_callback=progress_callback,
+        )
+
+        assert calls["callback"] is callback
+        assert calls["progress_callback"] is progress_callback
+        np.testing.assert_allclose(callback_events[0], dofs)
+        assert progress_events == [(2, 0.75, 0.125)]
+
+    def test_stage2_run_optimizer_rejects_failure_callback_on_reference_lane(
+        self,
+        monkeypatch,
+    ):
+        stage2_script = _load_stage2_script_module()
+
+        optimizer_jax_module = _fresh_import("simsopt.geo.optimizer_jax")
+
+        def fake_reference_minimize(*args, **kwargs):
+            raise AssertionError("reference_minimize should not run")
+
+        monkeypatch.setattr(
+            optimizer_jax_module,
+            "reference_minimize",
+            fake_reference_minimize,
+        )
+        contract = stage2_script.resolve_stage2_optimizer_contract("cpu", "scipy")
+
+        with pytest.raises(
+            ValueError,
+            match="reference-lane optimization does not support failure_callback",
+        ):
+            stage2_script.run_stage2_optimizer(
+                value_and_grad_fun=lambda x: (
+                    float(np.dot(x, x)),
+                    2.0 * np.asarray(x),
+                ),
+                dofs=np.asarray([0.25, -0.5], dtype=np.float64),
+                contract=contract,
+                maxiter=10,
+                ftol=0.0,
+                gtol=1e-12,
+                failure_callback=lambda *args: None,
+            )
 
     @pytest.mark.parametrize(
         ("optimizer_backend", "expected_source"),

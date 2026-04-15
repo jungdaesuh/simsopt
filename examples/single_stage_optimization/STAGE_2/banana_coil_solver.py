@@ -22,6 +22,11 @@ from repo_bootstrap import bootstrap_local_simsopt, configure_entrypoint_jax_run
 
 configure_entrypoint_jax_runtime(sys.argv[1:])
 
+# bootstrap_local_simsopt must run BEFORE any simsopt.* imports to avoid
+# pybind11 double-registration when both site-packages and build-directory
+# simsoptpp .so files exist.
+bootstrap_local_simsopt(SRC_ROOT)
+
 import jax
 import jaxlib
 import numpy as np
@@ -37,21 +42,40 @@ from hardware_constraints import (
     sanitize_json_payload,
 )
 from run_metadata import build_artifact_manifest, build_runtime_provenance
-# ALM WIP is intentionally parked off the active Stage 2 path for now.
-# Keep the recovery point local in this file instead of exposing an
-# unvalidated constraint-method branch in the script's live CLI/runtime path.
-# from alm_utils import (
-#     ALMSettings,
-#     augmented_inequality_objective,
-#     lower_bound_residual,
-#     minimize_alm,
-#     upper_bound_residual,
-#     validate_alm_cli_args,
-#     zero_gradient_like,
-# )
-
-
-bootstrap_local_simsopt(SRC_ROOT)
+from alm_utils import (
+    minimize_alm,
+    run_directional_taylor_test,
+    validate_alm_cli_args,
+)
+from banana_opt.current_contracts import (
+    apply_penalty_traversal_forbidden_box_bounds,
+)
+from banana_opt.hardware_constraint_schema import (
+    hardware_constraint_alm_names,
+)
+from banana_opt.hardware_contracts import (
+    BANANA_CURRENT_HARD_LIMIT_A,
+    BANANA_WINDING_MINOR_RADIUS_M,
+    COIL_COIL_MIN_DIST_M,
+    COIL_LENGTH_TARGET_M,
+    COIL_PLASMA_MIN_DIST_M,
+    MAX_CURVATURE_INV_M,
+    PLASMA_VESSEL_MIN_DIST_M,
+    TF_CURRENT_HARD_LIMIT_A,
+    VACUUM_VESSEL_MAJOR_RADIUS_M,
+    VACUUM_VESSEL_MINOR_RADIUS_M,
+    validate_banana_winding_surface_radius,
+    validate_tf_current_limit,
+)
+from banana_opt.reference_surfaces import build_banana_reference_surfaces
+from banana_opt.stage2_objectives import (
+    build_stage2_alm_settings as _build_stage2_alm_settings_impl,
+    build_stage2_results as _build_stage2_results_impl,
+    evaluate_stage2_alm_problem as _evaluate_stage2_alm_problem_impl,
+    evaluate_stage2_hardware_constraints as _evaluate_stage2_hardware_constraints_impl,
+    smooth_min_curve_surface_signed_constraint as _smooth_min_curve_surface_signed_constraint_impl,
+    stage2_constraint_activity_tolerances as _stage2_constraint_activity_tolerances_impl,
+)
 from simsopt.config import maybe_initialize_distributed_jax
 from simsopt.jax_core import (
     closed_curve_self_intersection_summary,
@@ -65,18 +89,11 @@ DATABASE_EQUILIBRIA_DIR = str(WORKSPACE_EQUILIBRIA_DIR)
 STAGE2_TARGET_OBJECTIVE_DOF_LAYOUT_ERROR = (
     "Stage 2 target objective DOF layout does not match the composite objective."
 )
-CURVATURE_THRESHOLD_FLOOR = 20.0
-CURVATURE_THRESHOLD_CEILING = 40.0
 _STAGE2_RESULTS_SCHEMA_VERSION = 1
 _STAGE2_REQUIRED_ARTIFACT_FILENAMES = (
     "results.json",
     "biot_savart_opt.json",
     "surf_opt.json",
-)
-STAGE2_ALM_CONSTRAINT_NAMES = (
-    "coil_length_upper_bound",
-    "coil_coil_spacing",
-    "max_curvature",
 )
 _SMOOTHING_EPS = float(np.finfo(float).eps)
 
@@ -91,11 +108,43 @@ def _zero_gradient_like(values):
 
 
 def resolve_curvature_threshold(value: float) -> float:
-    """Clamp Stage 2 curvature thresholds into the shared HBT [20, 40] band."""
-    return min(
-        max(float(value), CURVATURE_THRESHOLD_FLOOR),
-        CURVATURE_THRESHOLD_CEILING,
-    )
+    """Clamp Stage 2 curvature thresholds to the shared hardware ceiling."""
+    return min(float(value), MAX_CURVATURE_INV_M)
+
+
+def stage2_alm_constraint_names(*, include_coil_surface: bool) -> tuple[str, ...]:
+    requested_names = [
+        "coil_coil_spacing",
+        "max_curvature",
+        "coil_length",
+        "banana_current",
+    ]
+    if include_coil_surface:
+        requested_names.insert(1, "coil_surface_spacing")
+    return hardware_constraint_alm_names(names=tuple(requested_names))
+
+
+def validate_banana_current_cli_args(args) -> None:
+    banana_init_current_A = float(args.banana_init_current_A)
+    banana_current_max_A = float(args.banana_current_max_A)
+    if not (0.0 < banana_init_current_A <= BANANA_CURRENT_HARD_LIMIT_A):
+        raise ValueError(
+            f"--banana-init-current-A must be in the interval (0, {BANANA_CURRENT_HARD_LIMIT_A:.0f}]."
+        )
+    if not (0.0 < banana_current_max_A <= BANANA_CURRENT_HARD_LIMIT_A):
+        raise ValueError(
+            f"--banana-current-max-A must be in the interval (0, {BANANA_CURRENT_HARD_LIMIT_A:.0f}]."
+        )
+    if banana_init_current_A > banana_current_max_A:
+        raise ValueError(
+            "--banana-init-current-A cannot exceed --banana-current-max-A."
+        )
+    validate_tf_current_limit(args.tf_current_A)
+
+
+def build_hbt_reference_surfaces(nfp: int, banana_surf_radius: float):
+    surfaces = build_banana_reference_surfaces(nfp, banana_surf_radius)
+    return surfaces.hbt, surfaces.coil_winding_surface, surfaces.vessel
 
 
 def evaluate_stage2_hardware_constraints(
@@ -105,51 +154,159 @@ def evaluate_stage2_hardware_constraints(
     cc_threshold,
     max_curvature,
     curvature_threshold,
+    curve_surface_min_dist=None,
+    coil_surface_threshold=None,
+    plasma_vessel_min_dist=None,
+    plasma_vessel_threshold=None,
+    banana_current_A=None,
+    banana_current_threshold=None,
+    tf_current_A=None,
+    tf_current_threshold=None,
     *,
     self_intersecting=False,
 ):
     """Evaluate hard Stage 2 hardware constraints against realized geometry."""
-    coil_length = float(coil_length)
-    length_target = float(length_target)
-    curve_curve_min_dist = float(curve_curve_min_dist)
-    cc_threshold = float(cc_threshold)
-    max_curvature = float(max_curvature)
-    curvature_threshold = float(curvature_threshold)
-    violations = []
-    for metric_name, metric_value in (
-        ("coil_length", coil_length),
-        ("length_target", length_target),
-        ("coil_coil_min_dist", curve_curve_min_dist),
-        ("cc_threshold", cc_threshold),
-        ("max_curvature", max_curvature),
-        ("curvature_threshold", curvature_threshold),
-    ):
-        if not np.isfinite(metric_value):
-            violations.append(f"{metric_name} {metric_value} is not finite")
-    if coil_length > length_target:
-        violations.append(
-            f"coil_length {coil_length:.6f} exceeds target {length_target:.6f}"
-        )
-    if curve_curve_min_dist < cc_threshold:
-        violations.append(
-            f"coil_coil_min_dist {curve_curve_min_dist:.6f} below threshold {cc_threshold:.6f}"
-        )
-    if max_curvature > curvature_threshold:
-        violations.append(
-            f"max_curvature {max_curvature:.6f} exceeds threshold {curvature_threshold:.6f}"
-        )
+    status = _evaluate_stage2_hardware_constraints_impl(
+        coil_length,
+        length_target,
+        curve_curve_min_dist,
+        cc_threshold,
+        max_curvature,
+        curvature_threshold,
+        curve_surface_min_dist=curve_surface_min_dist,
+        coil_surface_threshold=coil_surface_threshold,
+        plasma_vessel_min_dist=plasma_vessel_min_dist,
+        plasma_vessel_threshold=plasma_vessel_threshold,
+        banana_current_A=banana_current_A,
+        banana_current_threshold=banana_current_threshold,
+        tf_current_A=tf_current_A,
+        tf_current_threshold=tf_current_threshold,
+    )
     if self_intersecting:
-        violations.append("banana_curve is self-intersecting")
+        status = {
+            **status,
+            "success": False,
+            "violations": [*status["violations"], "banana_curve is self-intersecting"],
+        }
+    status["self_intersecting"] = bool(self_intersecting)
+    return status
+
+
+def _evaluate_stage2_artifact_hardware_status(
+    *,
+    banana_curve,
+    coil_length,
+    length_target,
+    curve_curve_min_dist,
+    cc_threshold,
+    max_curvature,
+    curvature_threshold,
+    curve_surface_min_dist,
+    coil_surface_threshold,
+    plasma_vessel_min_dist,
+    plasma_vessel_threshold,
+    banana_current_A,
+    banana_current_threshold,
+    tf_current_A,
+    tf_current_threshold,
+):
+    hardware_status = evaluate_stage2_hardware_constraints(
+        coil_length,
+        length_target,
+        curve_curve_min_dist,
+        cc_threshold,
+        max_curvature,
+        curvature_threshold,
+        curve_surface_min_dist=curve_surface_min_dist,
+        coil_surface_threshold=coil_surface_threshold,
+        plasma_vessel_min_dist=plasma_vessel_min_dist,
+        plasma_vessel_threshold=plasma_vessel_threshold,
+        banana_current_A=banana_current_A,
+        banana_current_threshold=banana_current_threshold,
+        tf_current_A=tf_current_A,
+        tf_current_threshold=tf_current_threshold,
+    )
+    if not hardware_status["success"]:
+        return hardware_status
+    if not build_curve_self_intersection_summary(banana_curve)["intersecting"]:
+        return hardware_status
+    return evaluate_stage2_hardware_constraints(
+        coil_length,
+        length_target,
+        curve_curve_min_dist,
+        cc_threshold,
+        max_curvature,
+        curvature_threshold,
+        curve_surface_min_dist=curve_surface_min_dist,
+        coil_surface_threshold=coil_surface_threshold,
+        plasma_vessel_min_dist=plasma_vessel_min_dist,
+        plasma_vessel_threshold=plasma_vessel_threshold,
+        banana_current_A=banana_current_A,
+        banana_current_threshold=banana_current_threshold,
+        tf_current_A=tf_current_A,
+        tf_current_threshold=tf_current_threshold,
+        self_intersecting=True,
+    )
+
+
+def _capture_stage2_artifact_state(
+    *,
+    dofs,
+    JF,
+    BASE_OBJECTIVE,
+    Jf,
+    Jls,
+    Jccdist,
+    Jcsdist,
+    new_banana_curve,
+    new_banana_coils,
+    new_tf_coils,
+    length_target,
+    cc_threshold,
+    curvature_threshold,
+    coil_surface_threshold,
+    plasma_vessel_min_dist,
+    plasma_vessel_threshold,
+    banana_current_max_A,
+):
+    candidate_x = np.asarray(dofs, dtype=float).copy()
+    JF.x = candidate_x
+    BASE_OBJECTIVE.x = candidate_x
+    coil_length = float(Jls.J())
+    curve_curve_min_dist = float(Jccdist.shortest_distance())
+    curve_surface_min_dist = None
+    if Jcsdist is not None:
+        curve_surface_min_dist = float(Jcsdist.shortest_distance())
+    max_curvature = float(np.max(new_banana_curve.kappa()))
+    banana_current_A = float(new_banana_coils[0].current.get_value())
+    tf_current_A = float(new_tf_coils[0].current.get_value())
+    hardware_status = _evaluate_stage2_artifact_hardware_status(
+        banana_curve=new_banana_curve,
+        coil_length=coil_length,
+        length_target=length_target,
+        curve_curve_min_dist=curve_curve_min_dist,
+        cc_threshold=cc_threshold,
+        max_curvature=max_curvature,
+        curvature_threshold=curvature_threshold,
+        curve_surface_min_dist=curve_surface_min_dist,
+        coil_surface_threshold=coil_surface_threshold,
+        plasma_vessel_min_dist=plasma_vessel_min_dist,
+        plasma_vessel_threshold=plasma_vessel_threshold,
+        banana_current_A=banana_current_A,
+        banana_current_threshold=banana_current_max_A,
+        tf_current_A=tf_current_A,
+        tf_current_threshold=TF_CURRENT_HARD_LIMIT_A,
+    )
     return {
-        "success": len(violations) == 0,
-        "violations": violations,
+        "x": candidate_x,
+        "field_objective": float(Jf.J()),
         "coil_length": coil_length,
-        "length_target": length_target,
         "curve_curve_min_dist": curve_curve_min_dist,
-        "cc_threshold": cc_threshold,
+        "curve_surface_min_dist": curve_surface_min_dist,
         "max_curvature": max_curvature,
-        "curvature_threshold": curvature_threshold,
-        "self_intersecting": bool(self_intersecting),
+        "banana_current_A": banana_current_A,
+        "tf_current_A": tf_current_A,
+        "hardware_status": hardware_status,
     }
 
 
@@ -180,6 +337,11 @@ def parse_args():
         "--output-root",
         default=os.environ.get("STAGE2_OUTPUT_ROOT", SCRIPT_DIR),
         help="Directory where outputs-[plasma] will be written.",
+    )
+    parser.add_argument(
+        "--stage2-bs-path",
+        default=os.environ.get("STAGE2_BS_PATH"),
+        help="Optional path to a saved Stage 2 biot_savart_opt.json seed to restart from.",
     )
     parser.add_argument(
         "--export-objective-json",
@@ -221,8 +383,33 @@ def parse_args():
     parser.add_argument(
         "--banana-surf-radius",
         type=float,
-        default=float(os.environ.get("BANANA_SURF_RADIUS", "0.22")),
-        help="Coil surface minor radius.",
+        default=float(
+            os.environ.get("BANANA_SURF_RADIUS", str(BANANA_WINDING_MINOR_RADIUS_M))
+        ),
+        help="Coil surface minor radius (default 0.21 m, concentric with HBT vacuum vessel).",
+    )
+    parser.add_argument(
+        "--tf-current-A",
+        type=float,
+        default=float(os.environ.get("TF_CURRENT_A", str(TF_CURRENT_HARD_LIMIT_A))),
+        help="Per-TF-coil current in physical SI amperes (default 8e4 = 80 kA).",
+    )
+    parser.add_argument(
+        "--banana-init-current-A",
+        type=float,
+        default=float(os.environ.get("BANANA_INIT_CURRENT_A", "1e4")),
+        help="Fresh-initialization banana-coil current in SI amperes.",
+    )
+    parser.add_argument(
+        "--banana-current-max-A",
+        type=float,
+        default=float(
+            os.environ.get(
+                "BANANA_CURRENT_MAX_A",
+                str(BANANA_CURRENT_HARD_LIMIT_A),
+            )
+        ),
+        help="Hard upper bound on the realized banana-coil current in SI amperes.",
     )
     parser.add_argument(
         "--major-radius",
@@ -268,28 +455,105 @@ def parse_args():
     )
     parser.add_argument(
         "--constraint-method",
-        choices=["penalty"],
-        default="penalty",
-        help=(
-            "Use the legacy fixed weighted-penalty objective. "
-            "The Stage 2 ALM closeout WIP is intentionally parked and not "
-            "exposed on this live script path."
-        ),
+        choices=["penalty", "alm"],
+        default=os.environ.get("CONSTRAINT_METHOD", "penalty"),
+        help="Use the weighted-penalty objective or the augmented Lagrangian outer loop.",
     )
-    # Parked Stage 2 ALM CLI surface:
-    # - --alm-max-outer-iters
-    # - --alm-max-subproblem-continuations
-    # - --alm-penalty-init
-    # - --alm-penalty-scale
-    # - --alm-feas-tol
-    # - --alm-stationarity-tol
-    # - --alm-trust-radius-init
-    # - --alm-trust-radius-min
-    # - --alm-trust-radius-shrink
-    # - --alm-trust-radius-grow
-    # - --alm-max-inner-attempts
-    # - --alm-distance-smoothing
-    # - --alm-curvature-smoothing
+    parser.add_argument(
+        "--alm-max-outer-iters",
+        type=int,
+        default=int(os.environ.get("ALM_MAX_OUTER_ITERS", "10")),
+        help="Maximum number of ALM outer iterations (default 10).",
+    )
+    parser.add_argument(
+        "--alm-penalty-init",
+        type=float,
+        default=float(os.environ.get("ALM_PENALTY_INIT", "1.0")),
+        help="Initial ALM penalty parameter (default 1.0).",
+    )
+    parser.add_argument(
+        "--alm-penalty-scale",
+        type=float,
+        default=float(os.environ.get("ALM_PENALTY_SCALE", "10.0")),
+        help="Multiplicative ALM penalty growth factor (default 10.0).",
+    )
+    parser.add_argument(
+        "--alm-penalty-max",
+        type=float,
+        default=float(os.environ.get("ALM_PENALTY_MAX", "1e8")),
+        help="Maximum ALM penalty parameter before capped termination (default 1e8).",
+    )
+    parser.add_argument(
+        "--alm-feas-tol",
+        type=float,
+        default=float(os.environ.get("ALM_FEAS_TOL", "1e-6")),
+        help="ALM max-violation stopping tolerance (default 1e-6).",
+    )
+    parser.add_argument(
+        "--alm-stationarity-tol",
+        type=float,
+        default=float(os.environ.get("ALM_STATIONARITY_TOL", "1e-6")),
+        help="ALM augmented-gradient stopping tolerance (default 1e-6).",
+    )
+    parser.add_argument(
+        "--alm-trust-radius-init",
+        type=float,
+        default=float(os.environ.get("ALM_TRUST_RADIUS_INIT", "0.05")),
+        help="Initial relative trust radius for bounded ALM inner solves (0 disables bounds).",
+    )
+    parser.add_argument(
+        "--alm-trust-radius-min",
+        type=float,
+        default=float(os.environ.get("ALM_TRUST_RADIUS_MIN", "1e-4")),
+        help="Minimum relative trust radius for bounded ALM inner solves.",
+    )
+    parser.add_argument(
+        "--alm-trust-radius-shrink",
+        type=float,
+        default=float(os.environ.get("ALM_TRUST_RADIUS_SHRINK", "0.5")),
+        help="Multiplicative shrink factor for the ALM inner trust radius.",
+    )
+    parser.add_argument(
+        "--alm-trust-radius-grow",
+        type=float,
+        default=float(os.environ.get("ALM_TRUST_RADIUS_GROW", "1.5")),
+        help="Multiplicative growth factor for the ALM inner trust radius after good steps.",
+    )
+    parser.add_argument(
+        "--alm-max-inner-attempts",
+        type=int,
+        default=int(os.environ.get("ALM_MAX_INNER_ATTEMPTS", "4")),
+        help="Maximum number of trust-radius retries per ALM outer iteration.",
+    )
+    parser.add_argument(
+        "--alm-max-subproblem-continuations",
+        type=int,
+        default=int(os.environ.get("ALM_MAX_SUBPROBLEM_CONTINUATIONS", "20")),
+        help="Maximum accepted-feasible continuation solves before forcing an ALM return.",
+    )
+    parser.add_argument(
+        "--alm-distance-smoothing",
+        type=float,
+        default=float(os.environ.get("ALM_DISTANCE_SMOOTHING", "0.005")),
+        help="Distance soft-min temperature for Stage 2 ALM spacing constraints.",
+    )
+    parser.add_argument(
+        "--alm-curvature-smoothing",
+        type=float,
+        default=float(os.environ.get("ALM_CURVATURE_SMOOTHING", "0.25")),
+        help="Curvature soft-max temperature for Stage 2 ALM curvature constraints.",
+    )
+    parser.add_argument(
+        "--alm-taylor-test",
+        action="store_true",
+        help="Run a directional Taylor test on the initialized Stage 2 ALM subproblem before optimization.",
+    )
+    parser.add_argument(
+        "--alm-taylor-test-seed",
+        type=int,
+        default=int(os.environ.get("ALM_TAYLOR_TEST_SEED", "1")),
+        help="Random seed used to build the Stage 2 ALM Taylor-test direction.",
+    )
     parser.add_argument(
         "--length-weight",
         type=float,
@@ -299,13 +563,13 @@ def parse_args():
     parser.add_argument(
         "--length-target",
         type=float,
-        default=float(os.environ.get("LENGTH_TARGET", "1.75")),
+        default=float(os.environ.get("LENGTH_TARGET", str(COIL_LENGTH_TARGET_M))),
         help="Curve-length target in meters.",
     )
     parser.add_argument(
         "--cc-threshold",
         type=float,
-        default=float(os.environ.get("CC_THRESHOLD", "0.05")),
+        default=float(os.environ.get("CC_THRESHOLD", str(COIL_COIL_MIN_DIST_M))),
         help="Coil-coil distance threshold in meters.",
     )
     parser.add_argument(
@@ -323,8 +587,8 @@ def parse_args():
     parser.add_argument(
         "--curvature-threshold",
         type=float,
-        default=float(os.environ.get("CURVATURE_THRESHOLD", "40")),
-        help="Curvature threshold.",
+        default=float(os.environ.get("CURVATURE_THRESHOLD", str(MAX_CURVATURE_INV_M))),
+        help="Curvature threshold in m^-1 (default 100, matching the hardware ceiling).",
     )
     parser.add_argument(
         "--theta-center",
@@ -464,8 +728,12 @@ def resolve_stage2_default_least_squares_algorithm(
 
 
 def validate_stage2_constraint_method_args(args) -> None:
-    # ALM WIP is intentionally parked; only the legacy penalty lane is exposed.
-    return
+    args.banana_surf_radius = validate_banana_winding_surface_radius(
+        args.banana_surf_radius
+    )
+    validate_banana_current_cli_args(args)
+    if args.constraint_method == "alm":
+        validate_alm_cli_args(args)
 
 
 def build_equilibrium_path(args):
@@ -477,6 +745,25 @@ def build_equilibrium_path(args):
             fallback_dirs=(DEFAULT_EQUILIBRIA_DIR, WORKSPACE_EQUILIBRIA_DIR),
         )
     )
+
+
+def load_stage2_seed_configuration(seed_bs_path, surf, num_tf_coils, out_dir):
+    bs = load(seed_bs_path)
+    bs.set_points(surf.gamma().reshape((-1, 3)))
+
+    coils = bs.coils
+    curves = [coil.curve for coil in coils]
+    curves_to_vtk(curves, out_dir + "curves_init", close=True)
+    unitn = surf.unitnormal()
+    point_data = {
+        "B_N": np.sum(bs.B().reshape(unitn.shape) * unitn, axis=2)[:, :, None]
+    }
+    surf.to_vtk(out_dir + "surf_init", extra_data=point_data)
+
+    banana_coils = coils[num_tf_coils:]
+    banana_curve = banana_coils[0].curve
+    tf_coils = coils[:num_tf_coils]
+    return bs, curves, banana_curve, banana_coils, tf_coils
 
 
 def initSurface(R0, s, file_loc, nphi, ntheta):
@@ -498,6 +785,7 @@ def initializeCoils(
     tf_coils,
     num_quadpoints,
     order,
+    banana_init_current_A,
     phi_center,
     theta_center,
     phi_width,
@@ -520,7 +808,7 @@ def initializeCoils(
     # Apply symmetries - if stellsym = False, only one per half field period (and two if true)
     banana_coils = coils_via_symmetries(
         [banana_curve],
-        [ScaledCurrent(Current(1), 1e4)],
+        [ScaledCurrent(Current(1), float(banana_init_current_A))],
         surf_coils.nfp,
         surf_coils.stellsym,
     )
@@ -976,6 +1264,170 @@ def compute_stage2_distance_constraint_state(
         coil_distance_penalty=coil_distance_penalty,
         cc_threshold=cc_threshold,
         violated=bool(violated),
+    )
+
+
+@dataclass(frozen=True)
+class Stage2FeasiblePartial:
+    dofs: np.ndarray
+    objective: float
+    curve_length: float
+    coil_coil_distance: float
+    max_curvature: float
+    accepted_index: int
+
+
+@dataclass(frozen=True)
+class Stage2ExactHardwarePass:
+    dofs: np.ndarray
+    field_objective: float
+    source: str
+
+
+def _stage2_feasible_partial_sort_key(partial: Stage2FeasiblePartial):
+    return (
+        float(partial.objective),
+        float(partial.curve_length),
+        -float(partial.coil_coil_distance),
+        float(partial.max_curvature),
+        int(partial.accepted_index),
+    )
+
+
+def select_better_stage2_exact_hardware_pass(
+    current: Stage2ExactHardwarePass | None,
+    candidate: Stage2ExactHardwarePass,
+) -> Stage2ExactHardwarePass:
+    if current is None or float(candidate.field_objective) < float(
+        current.field_objective
+    ):
+        return candidate
+    return current
+
+
+def capture_stage2_exact_hardware_pass_candidate(
+    artifact_state: dict[str, object],
+    *,
+    source: str,
+) -> Stage2ExactHardwarePass | None:
+    hardware_status = artifact_state["hardware_status"]
+    assert isinstance(hardware_status, dict)
+    if not hardware_status["success"]:
+        return None
+    return Stage2ExactHardwarePass(
+        dofs=np.asarray(artifact_state["x"], dtype=float),
+        field_objective=float(artifact_state["field_objective"]),
+        source=str(source),
+    )
+
+
+def select_better_stage2_feasible_partial(
+    current: Stage2FeasiblePartial | None,
+    candidate: Stage2FeasiblePartial,
+) -> Stage2FeasiblePartial:
+    if current is None:
+        return candidate
+    if _stage2_feasible_partial_sort_key(candidate) < _stage2_feasible_partial_sort_key(
+        current
+    ):
+        return candidate
+    return current
+
+
+def capture_stage2_feasible_partial_candidate(
+    JF,
+    Jls,
+    Jccdist,
+    banana_curve,
+    length_target,
+    cc_threshold,
+    curvature_threshold,
+    *,
+    Jcsdist=None,
+    coil_surface_threshold=None,
+    plasma_vessel_min_dist=None,
+    plasma_vessel_threshold=None,
+    banana_current_A=None,
+    banana_current_threshold=None,
+    tf_current_A=None,
+    tf_current_threshold=None,
+    accepted_index,
+):
+    objective = float(JF.J())
+    curve_length = float(Jls.J())
+    coil_coil_distance = float(Jccdist.shortest_distance())
+    max_curvature = float(np.max(banana_curve.kappa()))
+    curve_surface_min_dist = (
+        None if Jcsdist is None else float(Jcsdist.shortest_distance())
+    )
+    hardware_status = _evaluate_stage2_artifact_hardware_status(
+        banana_curve=banana_curve,
+        coil_length=curve_length,
+        length_target=length_target,
+        curve_curve_min_dist=coil_coil_distance,
+        cc_threshold=cc_threshold,
+        max_curvature=max_curvature,
+        curvature_threshold=curvature_threshold,
+        curve_surface_min_dist=curve_surface_min_dist,
+        coil_surface_threshold=coil_surface_threshold,
+        plasma_vessel_min_dist=plasma_vessel_min_dist,
+        plasma_vessel_threshold=plasma_vessel_threshold,
+        banana_current_A=banana_current_A,
+        banana_current_threshold=banana_current_threshold,
+        tf_current_A=tf_current_A,
+        tf_current_threshold=tf_current_threshold,
+    )
+    if not hardware_status["success"]:
+        return None, hardware_status
+    return (
+        Stage2FeasiblePartial(
+            dofs=np.asarray(host_array(JF.x), dtype=float),
+            objective=objective,
+            curve_length=curve_length,
+            coil_coil_distance=coil_coil_distance,
+            max_curvature=max_curvature,
+            accepted_index=int(accepted_index),
+        ),
+        hardware_status,
+    )
+
+
+def restore_stage2_exact_hardware_pass_for_artifact_output(
+    best_exact_hardware_pass: Stage2ExactHardwarePass | None,
+    final_artifact_state: dict[str, object],
+    *,
+    optimizer_success: bool,
+    termination_message: str | None,
+) -> tuple[np.ndarray | None, bool, str | None]:
+    hardware_status = final_artifact_state["hardware_status"]
+    assert isinstance(hardware_status, dict)
+    if best_exact_hardware_pass is None or hardware_status["success"]:
+        return None, bool(optimizer_success), termination_message
+    if termination_message:
+        termination_message = (
+            f"{termination_message}; restored_best_exact_hardware_pass"
+        )
+    else:
+        termination_message = "restored_best_exact_hardware_pass"
+    return (
+        np.asarray(best_exact_hardware_pass.dofs, dtype=float),
+        False,
+        termination_message,
+    )
+
+
+def should_restore_stage2_feasible_partial(
+    best_partial: Stage2FeasiblePartial | None,
+    final_partial: Stage2FeasiblePartial | None,
+    *,
+    optimizer_success: bool,
+) -> bool:
+    if optimizer_success or best_partial is None:
+        return False
+    if final_partial is None:
+        return True
+    return _stage2_feasible_partial_sort_key(best_partial) < _stage2_feasible_partial_sort_key(
+        final_partial
     )
 
 
@@ -1521,6 +1973,9 @@ def run_stage2_optimizer(
     maxcor=300,
     scalar_fun=None,
     residual_fun=None,
+    callback=None,
+    progress_callback=None,
+    failure_callback=None,
 ):
     """Run the Stage 2 outer optimization through the lane-specific substrate."""
     from simsopt.geo.optimizer_jax import (
@@ -1537,12 +1992,20 @@ def run_stage2_optimizer(
             raise RuntimeError(
                 "Stage 2 LM optimization requires an explicit residual-vector objective."
             )
+        if failure_callback is not None:
+            raise ValueError(
+                "Stage 2 target-lane LM optimization does not support "
+                "failure_callback; line-search failure diagnostics are only "
+                "available for the lbfgs-ondevice target lane."
+            )
         return target_least_squares(
             residual_fun,
             dofs,
             method=contract.method,
             tol=gtol,
             maxiter=maxiter,
+            callback=callback,
+            progress_callback=progress_callback,
         )
     if isinstance(contract, TargetOptimizerContract):
         if scalar_fun is None and not use_explicit_value_and_grad:
@@ -1563,6 +2026,9 @@ def run_stage2_optimizer(
                 "ftol": float(ftol),
             },
             value_and_grad=use_explicit_value_and_grad,
+            callback=callback,
+            progress_callback=progress_callback,
+            failure_callback=failure_callback,
         )
     if not isinstance(contract, ReferenceOptimizerContract):
         raise RuntimeError(
@@ -1572,6 +2038,12 @@ def run_stage2_optimizer(
         raise RuntimeError(
             "Stage 2 reference-lane optimization requires an explicit "
             "value-and-gradient objective."
+        )
+    if failure_callback is not None:
+        raise ValueError(
+            "Stage 2 reference-lane optimization does not support "
+            "failure_callback; use the target ondevice lane for "
+            "line-search failure diagnostics."
         )
     return reference_minimize(
         value_and_grad_fun,
@@ -1584,6 +2056,8 @@ def run_stage2_optimizer(
             "ftol": float(ftol),
         },
         value_and_grad=True,
+        callback=callback,
+        progress_callback=progress_callback,
     )
 
 
@@ -1598,6 +2072,9 @@ def run_stage2_optimizer_timed(
     maxcor=300,
     scalar_fun=None,
     residual_fun=None,
+    callback=None,
+    progress_callback=None,
+    failure_callback=None,
 ):
     """Run the Stage 2 optimizer and return both result and elapsed time."""
     start = time.perf_counter()
@@ -1611,6 +2088,9 @@ def run_stage2_optimizer_timed(
         maxcor=maxcor,
         scalar_fun=scalar_fun,
         residual_fun=residual_fun,
+        callback=callback,
+        progress_callback=progress_callback,
+        failure_callback=failure_callback,
     )
     return result, float(time.perf_counter() - start)
 
@@ -1618,6 +2098,7 @@ def run_stage2_optimizer_timed(
 def run_stage2_alm_optimizer_timed(
     dofs,
     *,
+    constraint_names,
     settings,
     evaluate_problem,
     maxiter,
@@ -1628,9 +2109,9 @@ def run_stage2_alm_optimizer_timed(
     outer_state_callback=None,
 ):
     start = time.perf_counter()
-    result = minimize_alm(  # noqa: F821 — parked ALM import
+    result = minimize_alm(
         dofs,
-        STAGE2_ALM_CONSTRAINT_NAMES,
+        constraint_names,
         evaluate_problem,
         settings,
         {
@@ -2084,6 +2565,7 @@ if __name__ == "__main__":
     # Deferred imports — simsopt modules require simsoptpp (C++ extension)
     # for coil/surface setup.  Placing them after arg parsing lets --help work
     # even when simsoptpp is not installed.
+    from simsopt._core.optimizable import load
     from simsopt.field import BiotSavart, Current, Coil, coils_via_symmetries
     from simsopt.field.coil import ScaledCurrent
     from simsopt.geo import (
@@ -2092,6 +2574,7 @@ if __name__ == "__main__":
         create_equally_spaced_curves,
         CurveLength,
         CurveCurveDistance,
+        CurveSurfaceDistance,
         LpCurveCurvature,
         CurveCWSFourierCPP,
     )
@@ -2114,37 +2597,20 @@ if __name__ == "__main__":
     OUT_DIR = os.path.join(args.output_root, f"outputs-{plasma_surf_filename}") + "/"
     os.makedirs(OUT_DIR, exist_ok=True)
 
-    # The proposed new HBT LCFS
-    hbt = SurfaceRZFourier(nfp=5, stellsym=True)
-    hbt.set_rc(0, 0, 0.9115)  # R0 of LCFS semi-circle center
-    hbt.set_rc(1, 0, 0.1605)  # Minor radius (thick metal walls)
-    hbt.set_zs(1, 0, 0.152)  # Z extent = ±0.152 m (flat top/bottom)
-
     nphi = args.nphi
     ntheta = args.ntheta
 
-    # The surface the coils can lie on from Jeff - R0 = 0.976 and a~=0.22
-    banana_surf_radius = args.banana_surf_radius
-    banana_surf_nfp = 5
-    surf_coils = SurfaceRZFourier(nfp=banana_surf_nfp, stellsym=True)
-    surf_coils.set_rc(0, 0, 0.976)
-    surf_coils.set_rc(1, 0, banana_surf_radius)
-    surf_coils.set_zs(1, 0, banana_surf_radius)
-
-    # The outer vacuum vessel of HBT, R0 = 0.976, a = 0.222
-    # Solely for visualization purposes
-    VV = SurfaceRZFourier(nfp=5, stellsym=True)
-    VV.set_rc(0, 0, 0.976)
-    VV.set_rc(1, 0, 0.222)
-    VV.set_zs(1, 0, 0.222)
-
     # Create the TF coils in HBT - these will be fixed but create background toroidal field:
     tf_curves = create_equally_spaced_curves(
-        20, 1, stellsym=False, R0=0.976, R1=0.4, order=1
+        20,
+        1,
+        stellsym=False,
+        R0=VACUUM_VESSEL_MAJOR_RADIUS_M,
+        R1=0.4,
+        order=1,
     )
-    tf_currents = [
-        Current(1.0) * 1e5 for i in range(20)
-    ]  # At some point, update with actual HBT TF current
+    tf_current_A = validate_tf_current_limit(args.tf_current_A)
+    tf_currents = [Current(1.0) * tf_current_A for _ in range(20)]
 
     # All the TF degrees of freedom are fixed
     for tf_curve in tf_curves:
@@ -2169,24 +2635,62 @@ if __name__ == "__main__":
     s = args.toroidal_flux  # VMEC flux-surface label
 
     new_surf = initSurface(R0, s, file_loc, nphi, ntheta)
-    init_coil_array = initializeCoils(
-        new_surf,
-        surf_coils,
-        tf_coils,
-        num_quadpoints,
-        order,
-        phi_center,
-        theta_center,
-        phi_width,
-        theta_width,
-        OUT_DIR,
+    banana_surf_radius = args.banana_surf_radius
+    hbt, surf_coils, VV = build_hbt_reference_surfaces(
+        new_surf.nfp,
+        banana_surf_radius,
     )
-    new_bs = init_coil_array[0]
-    new_curves = init_coil_array[1]
-    new_banana_curve = init_coil_array[2]
-    new_banana_coils = init_coil_array[3]
-    new_tf_coils = tf_coils
+    plasma_vessel_min_dist = float(
+        np.min(
+            np.linalg.norm(
+                new_surf.gamma().reshape((-1, 1, 3)) - VV.gamma().reshape((1, -1, 3)),
+                axis=2,
+            )
+        )
+    )
+    if plasma_vessel_min_dist < PLASMA_VESSEL_MIN_DIST_M:
+        raise ValueError(
+            "Fixed Stage 2 plasma surface violates the plasma-vessel clearance contract: "
+            f"{plasma_vessel_min_dist:.6f} m < {PLASMA_VESSEL_MIN_DIST_M:.6f} m."
+        )
+
+    if args.stage2_bs_path:
+        print(f"Loading Stage 2 seed from {args.stage2_bs_path}")
+        init_coil_array = load_stage2_seed_configuration(
+            args.stage2_bs_path,
+            new_surf,
+            len(tf_coils),
+            OUT_DIR,
+        )
+        new_bs = init_coil_array[0]
+        new_curves = init_coil_array[1]
+        new_banana_curve = init_coil_array[2]
+        new_banana_coils = init_coil_array[3]
+        new_tf_coils = init_coil_array[4]
+        tf_current_A = validate_tf_current_limit(
+            float(new_tf_coils[0].current.get_value())
+        )
+    else:
+        init_coil_array = initializeCoils(
+            new_surf,
+            surf_coils,
+            tf_coils,
+            num_quadpoints,
+            order,
+            args.banana_init_current_A,
+            phi_center,
+            theta_center,
+            phi_width,
+            theta_width,
+            OUT_DIR,
+        )
+        new_bs = init_coil_array[0]
+        new_curves = init_coil_array[1]
+        new_banana_curve = init_coil_array[2]
+        new_banana_coils = init_coil_array[3]
+        new_tf_coils = tf_coils
     new_surf_coils = surf_coils
+    initial_banana_current_A = float(new_banana_coils[0].current.get_value())
 
     # MAIN OPTIMIZATION
     # ---------------------------------------------------------------------------------------
@@ -2195,34 +2699,36 @@ if __name__ == "__main__":
     # boolean for determining whether coil self-intersects
     intersecting = False
 
-    # Weight on the curve lengths in the objective function
-    # We'll penalize the coil if it becomes longer than an target length of 1.75 m
     LENGTH_WEIGHT = args.length_weight
-    LENGTH_TARGET = max(args.length_target, 1.75)  # Hardware minimum: 1.75m
+    LENGTH_TARGET = min(args.length_target, COIL_LENGTH_TARGET_M)
 
-    # Threshold and weight for the coil-to-coil distance penalty
-    CC_THRESHOLD = max(
-        args.cc_threshold, 0.05
-    )  # Hardware minimum: 5cm coil-coil spacing
+    CC_THRESHOLD = max(args.cc_threshold, COIL_COIL_MIN_DIST_M)
     CC_WEIGHT = args.cc_weight
+    CS_THRESHOLD = COIL_PLASMA_MIN_DIST_M
 
-    # Threshold and weight for the coil curvature penalty
     CURVATURE_WEIGHT = args.curvature_weight
     CURVATURE_THRESHOLD = args.curvature_threshold
     SQUARED_FLUX_WEIGHT = args.squared_flux_weight
+    CONSTRAINT_METHOD = args.constraint_method
 
-    (
-        outer_contract,
-        use_target_objective_lane,
-        needs_target_probe_payload,
-        probe_only_target_payload,
-    ) = resolve_stage2_target_lane_requirements(
-        args.backend,
-        args.optimizer_backend,
-        least_squares_algorithm=args.least_squares_algorithm,
-        probe_only=args.probe_only,
-        export_objective_json=args.export_objective_json,
-    )
+    if CONSTRAINT_METHOD == "alm":
+        outer_contract = None
+        use_target_objective_lane = False
+        needs_target_probe_payload = False
+        probe_only_target_payload = False
+    else:
+        (
+            outer_contract,
+            use_target_objective_lane,
+            needs_target_probe_payload,
+            probe_only_target_payload,
+        ) = resolve_stage2_target_lane_requirements(
+            args.backend,
+            args.optimizer_backend,
+            least_squares_algorithm=args.least_squares_algorithm,
+            probe_only=args.probe_only,
+            export_objective_json=args.export_objective_json,
+        )
 
     target_objective_bundle = None
     needs_target_objective_bundle = (
@@ -2231,7 +2737,7 @@ if __name__ == "__main__":
     if needs_target_objective_bundle:
         target_objective_bundle = build_stage2_target_objective(
             surface=new_surf,
-            tf_coils=tf_coils,
+            tf_coils=new_tf_coils,
             banana_coils=new_banana_coils,
             banana_curve=new_banana_curve,
             penalty_config=Stage2PenaltyConfig(
@@ -2252,7 +2758,7 @@ if __name__ == "__main__":
         from simsopt.field import BiotSavartJAX
         from simsopt.objectives import SquaredFluxJAX
 
-        all_coils = tf_coils + list(new_banana_coils)
+        all_coils = list(new_tf_coils) + list(new_banana_coils)
         new_bs_jax = BiotSavartJAX(all_coils)
         Jf = SquaredFluxJAX(new_surf, new_bs_jax)  # JAX forward + autodiff gradient
         print("Stage 2 backend: JAX")
@@ -2263,6 +2769,7 @@ if __name__ == "__main__":
     Jccdist = CurveCurveDistance(
         new_curves, CC_THRESHOLD
     )  # penalty on coil-to-coil distance
+    Jcsdist = CurveSurfaceDistance(new_curves, new_surf, CS_THRESHOLD)
 
     # Lp-norm curvature penalty (configurable via --curvature-p-norm)
     Jc = LpCurveCurvature(
@@ -2275,33 +2782,45 @@ if __name__ == "__main__":
 
     # TOTAL OBJECTIVE FUNCTION -
     # we'll penalize the coil length, coil-coil distance, and curvature while minimizing the normal field
-    CONSTRAINT_METHOD = args.constraint_method
     BASE_OBJECTIVE = SQUARED_FLUX_WEIGHT * Jf
     JF = (
         BASE_OBJECTIVE
         + LENGTH_WEIGHT * Jls_penalty
         + CC_WEIGHT * Jccdist
+        + CC_WEIGHT * Jcsdist
         + CURVATURE_WEIGHT * Jc
     )
 
     OUT_DIR_ITER = (
         f"{OUT_DIR}R0={R0:g}-s={s:g}-LW={LENGTH_WEIGHT:g}-CCW={CC_WEIGHT:g}"
         f"-CCT={CC_THRESHOLD:g}-CW={CURVATURE_WEIGHT:g}-CT={CURVATURE_THRESHOLD:g}"
-        f"-SR={banana_surf_radius:0.3f}-Order={order}-NQ={num_quadpoints}"
+        f"-SR={banana_surf_radius:0.3f}-INITC={initial_banana_current_A:g}"
+        f"-MAXC={args.banana_current_max_A:g}-TFC={tf_current_A:g}"
+        f"-Order={order}-NQ={num_quadpoints}"
         f"-CP={args.curvature_p_norm}-SFW={SQUARED_FLUX_WEIGHT:g}"
-        f"-backend={args.backend}-cm={CONSTRAINT_METHOD}/"
+        f"-backend={args.backend}-cm={CONSTRAINT_METHOD}"
+        f"{'' if CONSTRAINT_METHOD != 'alm' else f'-AO={args.alm_max_outer_iters}-API={args.alm_penalty_init:g}-APS={args.alm_penalty_scale:g}'}"
+        "/"
     )
     os.makedirs(OUT_DIR_ITER, exist_ok=True)
 
     # Keep Stage 2 on the legacy weighted-penalty lane while the ALM closeout
     # work stays parked and unvalidated.
-    dofs = JF.x
+    dofs = BASE_OBJECTIVE.x if CONSTRAINT_METHOD == "alm" else JF.x
     if args.override_dofs_json is not None:
         dofs = load_stage2_override_dofs(
             args.override_dofs_json, np.asarray(dofs).shape
         )
         JF.x = np.asarray(dofs, dtype=float)
         BASE_OBJECTIVE.x = np.asarray(dofs, dtype=float)
+    if CONSTRAINT_METHOD != "alm":
+        apply_penalty_traversal_forbidden_box_bounds(
+            bound_targets={"banana_current": new_banana_coils[0].current},
+            requested_thresholds={"banana_current": args.banana_current_max_A},
+            seed_values={"banana_current": initial_banana_current_A},
+            validate_seed=bool(args.stage2_bs_path),
+            seed_context="Loaded Stage 2 seed",
+        )
     if target_objective_bundle is not None:
         validate_stage2_target_objective_dof_layout(
             target_objective_bundle,
@@ -2311,6 +2830,11 @@ if __name__ == "__main__":
     final_snapshot = None
     optimizer_timings = None
     alm_result = None
+    best_feasible_partial = None
+    accepted_iteration_count = 0
+    restored_best_feasible_partial = False
+    selected_result_x = None
+    final_artifact_state = None
     if args.record_warm_timings and not use_target_objective_lane:
         raise ValueError(
             "--record-warm-timings is only supported on the JAX Stage 2 ondevice lane."
@@ -2345,6 +2869,73 @@ if __name__ == "__main__":
             trajectory_sink=trajectory,
             field_diagnostic_stride=field_diagnostic_stride,
         )
+
+    def capture_artifact_state(candidate_x):
+        return _capture_stage2_artifact_state(
+            dofs=candidate_x,
+            JF=JF,
+            BASE_OBJECTIVE=BASE_OBJECTIVE,
+            Jf=Jf,
+            Jls=Jls,
+            Jccdist=Jccdist,
+            Jcsdist=Jcsdist,
+            new_banana_curve=new_banana_curve,
+            new_banana_coils=new_banana_coils,
+            new_tf_coils=new_tf_coils,
+            length_target=LENGTH_TARGET,
+            cc_threshold=CC_THRESHOLD,
+            curvature_threshold=CURVATURE_THRESHOLD,
+            coil_surface_threshold=CS_THRESHOLD,
+            plasma_vessel_min_dist=plasma_vessel_min_dist,
+            plasma_vessel_threshold=PLASMA_VESSEL_MIN_DIST_M,
+            banana_current_max_A=float(args.banana_current_max_A),
+        )
+
+    alm_settings = None
+    alm_constraint_names = None
+    alm_taylor_result = None
+    evaluate_problem = None
+    if CONSTRAINT_METHOD == "alm":
+        alm_settings = _build_stage2_alm_settings_impl(args)
+        alm_constraint_names = stage2_alm_constraint_names(
+            include_coil_surface=Jcsdist is not None,
+        )
+
+        def evaluate_problem(inner_dofs, multipliers, penalty):
+            return _evaluate_stage2_alm_problem_impl(
+                inner_dofs,
+                BASE_OBJECTIVE,
+                new_bs,
+                new_surf,
+                Jf,
+                Jls,
+                LENGTH_TARGET,
+                Jccdist,
+                Jc,
+                new_banana_coils[0].current,
+                args.banana_current_max_A,
+                args.alm_distance_smoothing,
+                args.alm_curvature_smoothing,
+                multipliers,
+                penalty,
+                _stage2_constraint_activity_tolerances_impl,
+                smooth_min_distance_signed_constraint,
+                smooth_max_curvature_signed_constraint,
+                Jcsdist=Jcsdist,
+                smooth_min_curve_surface_signed_constraint=(
+                    _smooth_min_curve_surface_signed_constraint_impl
+                ),
+            )
+
+        if args.alm_taylor_test:
+            alm_taylor_result = run_directional_taylor_test(
+                evaluate_problem,
+                dofs,
+                np.zeros(len(alm_constraint_names), dtype=float),
+                alm_settings.penalty_init,
+                seed=args.alm_taylor_test_seed,
+            )
+            _print_taylor_test_summary("ALM Taylor", alm_taylor_result)
     if args.export_objective_json:
         initial_self_intersection_summary = build_curve_self_intersection_summary(
             new_banana_curve
@@ -2414,11 +3005,190 @@ if __name__ == "__main__":
         optimizer_success = True
         termination_message = "init_only"
         print("Skipping Stage 2 optimizer because --init-only was provided.")
+    elif CONSTRAINT_METHOD == "alm":
+        accepted_state = {
+            "count": 0,
+            "best_feasible_partial": None,
+            "best_exact_hardware_pass": None,
+        }
+        initial_artifact_source = (
+            "override_dofs"
+            if args.override_dofs_json is not None
+            else ("loaded_seed" if args.stage2_bs_path else "initial_state")
+        )
+
+        def maybe_record_exact_hardware_pass(candidate_x, *, source):
+            candidate_state = capture_artifact_state(candidate_x)
+            candidate = capture_stage2_exact_hardware_pass_candidate(
+                candidate_state,
+                source=source,
+            )
+            if candidate is None:
+                return
+            accepted_state["best_exact_hardware_pass"] = (
+                select_better_stage2_exact_hardware_pass(
+                    accepted_state["best_exact_hardware_pass"],
+                    candidate,
+                )
+            )
+            if accepted_state["best_exact_hardware_pass"] is candidate:
+                print(
+                    "[ALM] exact hardware-pass incumbent "
+                    f"source={candidate.source}, "
+                    f"field_objective={candidate.field_objective:.6e}, "
+                    f"coil_length={candidate_state['coil_length']:.6f}"
+                )
+
+        def accepted_callback(current_dofs):
+            flat_dofs = flatten_stage2_target_optimizer_state(current_dofs)
+            accepted_state["count"] += 1
+            JF.x = np.asarray(flat_dofs, dtype=float)
+            BASE_OBJECTIVE.x = np.asarray(flat_dofs, dtype=float)
+            candidate, _ = capture_stage2_feasible_partial_candidate(
+                JF,
+                Jls,
+                Jccdist,
+                new_banana_curve,
+                LENGTH_TARGET,
+                CC_THRESHOLD,
+                CURVATURE_THRESHOLD,
+                Jcsdist=Jcsdist,
+                coil_surface_threshold=CS_THRESHOLD,
+                plasma_vessel_min_dist=plasma_vessel_min_dist,
+                plasma_vessel_threshold=PLASMA_VESSEL_MIN_DIST_M,
+                banana_current_A=float(new_banana_coils[0].current.get_value()),
+                banana_current_threshold=args.banana_current_max_A,
+                tf_current_A=tf_current_A,
+                tf_current_threshold=TF_CURRENT_HARD_LIMIT_A,
+                accepted_index=accepted_state["count"],
+            )
+            if candidate is not None:
+                accepted_state["best_feasible_partial"] = (
+                    select_better_stage2_feasible_partial(
+                        accepted_state["best_feasible_partial"],
+                        candidate,
+                    )
+                )
+            maybe_record_exact_hardware_pass(
+                flat_dofs,
+                source=f"accepted_iterate_{accepted_state['count']}",
+            )
+
+        def outer_state_callback(outer_iteration, multipliers, penalty):
+            print(
+                f"[ALM] outer_iteration={outer_iteration}, "
+                f"multipliers={multipliers.tolist()}, penalty={penalty:.3e}"
+            )
+
+        assert alm_settings is not None
+        assert alm_constraint_names is not None
+        assert evaluate_problem is not None
+        maybe_record_exact_hardware_pass(
+            dofs,
+            source=initial_artifact_source,
+        )
+        res, _ = run_stage2_alm_optimizer_timed(
+            dofs,
+            constraint_names=alm_constraint_names,
+            settings=alm_settings,
+            evaluate_problem=evaluate_problem,
+            maxiter=MAXITER,
+            maxcor=300,
+            ftol=args.ftol,
+            gtol=args.gtol,
+            accepted_callback=accepted_callback,
+            outer_state_callback=outer_state_callback,
+        )
+        alm_result = res
+        selected_result_x = np.asarray(res.x, dtype=float).copy()
+        JF.x = selected_result_x
+        BASE_OBJECTIVE.x = selected_result_x
+        res_nit = res.nit
+        termination_message = str(res.message)
+        optimizer_success = bool(res.success)
+        print(res.message)
+        best_feasible_partial = accepted_state["best_feasible_partial"]
+        accepted_iteration_count = int(accepted_state["count"])
+        restored_best_feasible_partial = bool(
+            getattr(res, "restored_best_feasible", False)
+        )
+        best_exact_hardware_pass = accepted_state["best_exact_hardware_pass"]
+        final_artifact_state = capture_artifact_state(selected_result_x)
+        restored_result_x, optimizer_success, termination_message = (
+            restore_stage2_exact_hardware_pass_for_artifact_output(
+                best_exact_hardware_pass,
+                final_artifact_state,
+                optimizer_success=optimizer_success,
+                termination_message=termination_message,
+            )
+        )
+        if restored_result_x is not None:
+            assert best_exact_hardware_pass is not None
+            selected_result_x = restored_result_x
+            final_artifact_state = capture_artifact_state(selected_result_x)
+            JF.x = selected_result_x
+            BASE_OBJECTIVE.x = selected_result_x
+            final_snapshot = None
+            if trajectory is not None:
+                capture_stage2_trajectory_snapshot(
+                    trajectory,
+                    JF,
+                    new_bs,
+                    new_surf,
+                    Jf,
+                    Jls,
+                    Jccdist,
+                    Jc,
+                    SQUARED_FLUX_WEIGHT,
+                    LENGTH_WEIGHT,
+                    LENGTH_TARGET,
+                    CC_WEIGHT,
+                    CC_THRESHOLD,
+                    CURVATURE_WEIGHT,
+                    bs_jax=new_bs_jax,
+                )
+            print(
+                "[ALM] restoring best exact hardware-pass incumbent "
+                f"from {best_exact_hardware_pass.source}"
+            )
     else:
         initial_dofs = host_array(dofs).copy()
-        # ALM WIP is intentionally parked here; keep the live path on the
-        # reference/target weighted-penalty optimizer loop until ALM is ready.
         optimizer_dofs = dofs
+        accepted_state = {
+            "count": 0,
+            "best_feasible_partial": None,
+        }
+
+        def accepted_callback(current_dofs):
+            flat_dofs = flatten_stage2_target_optimizer_state(current_dofs)
+            accepted_state["count"] += 1
+            JF.x = np.asarray(flat_dofs, dtype=float)
+            candidate, _ = capture_stage2_feasible_partial_candidate(
+                JF,
+                Jls,
+                Jccdist,
+                new_banana_curve,
+                LENGTH_TARGET,
+                CC_THRESHOLD,
+                CURVATURE_THRESHOLD,
+                Jcsdist=Jcsdist,
+                coil_surface_threshold=CS_THRESHOLD,
+                plasma_vessel_min_dist=plasma_vessel_min_dist,
+                plasma_vessel_threshold=PLASMA_VESSEL_MIN_DIST_M,
+                banana_current_A=float(new_banana_coils[0].current.get_value()),
+                banana_current_threshold=args.banana_current_max_A,
+                tf_current_A=tf_current_A,
+                tf_current_threshold=TF_CURRENT_HARD_LIMIT_A,
+                accepted_index=accepted_state["count"],
+            )
+            if candidate is not None:
+                accepted_state["best_feasible_partial"] = (
+                    select_better_stage2_feasible_partial(
+                        accepted_state["best_feasible_partial"],
+                        candidate,
+                    )
+                )
+
         if use_target_objective_lane:
             assert target_objective_bundle is not None
             optimizer_dofs = build_stage2_target_optimizer_state(
@@ -2464,6 +3234,7 @@ if __name__ == "__main__":
                 else target_objective_bundle.objective
             ),
             residual_fun=target_residual,
+            callback=accepted_callback,
         )
         JF.x = flatten_stage2_target_optimizer_state(res.x)
         res_nit = res.nit
@@ -2530,6 +3301,66 @@ if __name__ == "__main__":
                 )
                 JF.x = flatten_stage2_target_optimizer_state(res.x)
         print(res.message)
+        final_feasible_partial, _ = capture_stage2_feasible_partial_candidate(
+            JF,
+            Jls,
+            Jccdist,
+            new_banana_curve,
+            LENGTH_TARGET,
+            CC_THRESHOLD,
+            CURVATURE_THRESHOLD,
+            Jcsdist=Jcsdist,
+            coil_surface_threshold=CS_THRESHOLD,
+            plasma_vessel_min_dist=plasma_vessel_min_dist,
+            plasma_vessel_threshold=PLASMA_VESSEL_MIN_DIST_M,
+            banana_current_A=float(new_banana_coils[0].current.get_value()),
+            banana_current_threshold=args.banana_current_max_A,
+            tf_current_A=tf_current_A,
+            tf_current_threshold=TF_CURRENT_HARD_LIMIT_A,
+            accepted_index=accepted_state["count"],
+        )
+        restored_best_feasible_partial = should_restore_stage2_feasible_partial(
+            accepted_state["best_feasible_partial"],
+            final_feasible_partial,
+            optimizer_success=optimizer_success,
+        )
+        if restored_best_feasible_partial:
+            assert accepted_state["best_feasible_partial"] is not None
+            JF.x = np.asarray(
+                accepted_state["best_feasible_partial"].dofs,
+                dtype=float,
+            )
+            final_snapshot = None
+            if termination_message:
+                termination_message = (
+                    f"{termination_message}; restored_best_feasible_partial"
+                )
+            else:
+                termination_message = "restored_best_feasible_partial"
+            if trajectory is not None:
+                capture_stage2_trajectory_snapshot(
+                    trajectory,
+                    JF,
+                    new_bs,
+                    new_surf,
+                    Jf,
+                    Jls,
+                    Jccdist,
+                    Jc,
+                    SQUARED_FLUX_WEIGHT,
+                    LENGTH_WEIGHT,
+                    LENGTH_TARGET,
+                    CC_WEIGHT,
+                    CC_THRESHOLD,
+                    CURVATURE_WEIGHT,
+                    bs_jax=new_bs_jax,
+                )
+        best_feasible_partial = accepted_state["best_feasible_partial"]
+        accepted_iteration_count = int(accepted_state["count"])
+    if not args.init_only and final_artifact_state is None:
+        if selected_result_x is None:
+            selected_result_x = np.asarray(host_array(JF.x), dtype=float).copy()
+        final_artifact_state = capture_artifact_state(selected_result_x)
     if args.trajectory_json:
         write_json_file(
             args.trajectory_json,
@@ -2626,13 +3457,37 @@ if __name__ == "__main__":
         final_snapshot, _, _ = evaluate_stage2_objective(
             final_context,
         )
+    final_curve_surface_min_dist = (
+        float(final_artifact_state["curve_surface_min_dist"])
+        if final_artifact_state is not None
+        else float(Jcsdist.shortest_distance())
+    )
+    final_max_curvature = (
+        float(final_artifact_state["max_curvature"])
+        if final_artifact_state is not None
+        else float(np.max(new_banana_curve.kappa()))
+    )
+    final_banana_current_A = (
+        float(final_artifact_state["banana_current_A"])
+        if final_artifact_state is not None
+        else float(new_banana_coils[0].current.get_value())
+    )
+    banana_to_tf_current_ratio = float(final_banana_current_A / tf_current_A)
     hardware_status = evaluate_stage2_hardware_constraints(
         final_snapshot["curve_length"],
         LENGTH_TARGET,
         final_snapshot["coil_coil_distance"],
         CC_THRESHOLD,
-        float(np.max(new_banana_curve.kappa())),
+        final_max_curvature,
         CURVATURE_THRESHOLD,
+        curve_surface_min_dist=final_curve_surface_min_dist,
+        coil_surface_threshold=CS_THRESHOLD,
+        plasma_vessel_min_dist=plasma_vessel_min_dist,
+        plasma_vessel_threshold=PLASMA_VESSEL_MIN_DIST_M,
+        banana_current_A=final_banana_current_A,
+        banana_current_threshold=args.banana_current_max_A,
+        tf_current_A=tf_current_A,
+        tf_current_threshold=TF_CURRENT_HARD_LIMIT_A,
         self_intersecting=intersecting,
     )
     optimizer_success, termination_message = apply_hardware_constraint_verdict(
@@ -2668,51 +3523,93 @@ if __name__ == "__main__":
             args=args,
             MAXITER=MAXITER,
         ),
-        "PLASMA_SURF_FILENAME": plasma_surf_filename,
-        "PLASMA_SURF_PATH": file_loc,
-        "CC_THRESHOLD": CC_THRESHOLD,
-        "CC_WEIGHT": CC_WEIGHT,
-        "CURVATURE_WEIGHT": CURVATURE_WEIGHT,
-        "CURVATURE_THRESHOLD": CURVATURE_THRESHOLD,
-        "LENGTH_WEIGHT": LENGTH_WEIGHT,
-        "theta_center": theta_center,
-        "phi_center": phi_center,
-        "theta_width": theta_width,
-        "phi_width": phi_width,
-        "LENGTH_TARGET": LENGTH_TARGET,
-        "MAJOR_RADIUS": R0,
-        "TOROIDAL_FLUX": s,
-        "banana_surf_radius": banana_surf_radius,
-        "order": order,
-        "num_quadpoints": num_quadpoints,
-        "curvature_p_norm": args.curvature_p_norm,
-        "squared_flux_weight": SQUARED_FLUX_WEIGHT,
+        **_build_stage2_results_impl(
+            args=args,
+            plasma_surf_filename=plasma_surf_filename,
+            file_loc=file_loc,
+            stage2_bs_path=args.stage2_bs_path,
+            tf_current_A=tf_current_A,
+            tf_current_sum_abs_A=sum(
+                abs(coil.current.get_value()) for coil in new_tf_coils
+            ),
+            num_tf_coils=len(new_tf_coils),
+            initial_banana_current_A=initial_banana_current_A,
+            banana_current_A=final_banana_current_A,
+            banana_to_tf_current_ratio=banana_to_tf_current_ratio,
+            cc_threshold=CC_THRESHOLD,
+            cc_weight=CC_WEIGHT,
+            curvature_weight=CURVATURE_WEIGHT,
+            curvature_threshold=CURVATURE_THRESHOLD,
+            length_weight=LENGTH_WEIGHT,
+            constraint_method=CONSTRAINT_METHOD,
+            theta_center=theta_center,
+            phi_center=phi_center,
+            theta_width=theta_width,
+            phi_width=phi_width,
+            length_target=LENGTH_TARGET,
+            major_radius=R0,
+            toroidal_flux=s,
+            nfp=new_surf.nfp,
+            banana_surf_radius=banana_surf_radius,
+            order=order,
+            max_iterations=MAXITER,
+            iterations=res_nit,
+            termination_message=termination_message,
+            optimizer_success=optimizer_success,
+            basin_seed=None,
+            basin_iterations=None,
+            basin_minimization_failures=None,
+            basin_accepted_hops=None,
+            basin_rejected_hops=None,
+            basin_best_objective=None,
+            basin_accept_test_rejections=None,
+            basin_accept_test_triggered=None,
+            basin_nonfinite_rejections=None,
+            basin_normalized_step_rejections=None,
+            basin_completed_hops=None,
+            basin_initial_objective=None,
+            basin_best_hop_objective=None,
+            basin_best_hop_index=None,
+            basin_best_result_source=None,
+            basin_objective_improvement=None,
+            alm_result=alm_result,
+            alm_taylor_result=alm_taylor_result,
+            final_volume=float(new_surf.volume()),
+            field_error=float(fieldError),
+            intersecting=intersecting,
+            final_max_curvature=final_max_curvature,
+            final_coil_length=float(final_snapshot["curve_length"]),
+            final_curve_curve_min_dist=float(final_snapshot["coil_coil_distance"]),
+            hardware_status=hardware_status,
+            final_curve_surface_min_dist=final_curve_surface_min_dist,
+            plasma_vessel_min_dist=plasma_vessel_min_dist,
+        ),
         "backend": args.backend,
         "optimizer_backend": args.optimizer_backend,
         "least_squares_algorithm": args.least_squares_algorithm,
-        "CONSTRAINT_METHOD": CONSTRAINT_METHOD,
         "field_diagnostic_stride": int(field_diagnostic_stride),
         "banana_curve_class": type(new_banana_curve).__name__,
-        "init_only": args.init_only,
-        "max_iterations": MAXITER,
-        "iterations": res_nit,
-        "TERMINATION_MESSAGE": termination_message,
-        "OPTIMIZER_SUCCESS": optimizer_success,
+        "OPTIMIZER_ACCEPTED_ITERATIONS": accepted_iteration_count,
+        "BEST_FEASIBLE_PARTIAL_AVAILABLE": best_feasible_partial is not None,
+        "BEST_FEASIBLE_PARTIAL_RESTORED": restored_best_feasible_partial,
+        "BEST_FEASIBLE_PARTIAL_ACCEPTED_INDEX": (
+            None
+            if best_feasible_partial is None
+            else int(best_feasible_partial.accepted_index)
+        ),
+        "BEST_FEASIBLE_PARTIAL_OBJECTIVE": (
+            None
+            if best_feasible_partial is None
+            else float(best_feasible_partial.objective)
+        ),
         "FINAL_DOFS": host_array(JF.x).tolist(),
         "FINAL_OBJECTIVE": final_snapshot["J"],
         "OBJECTIVE_J": final_snapshot["J"],
         "FINAL_SQUARED_FLUX": final_snapshot["Jf"],
         "FINAL_CURVE_LENGTH": final_snapshot["curve_length"],
         "FINAL_CC_DISTANCE": final_snapshot["coil_coil_distance"],
+        "FINAL_COIL_SURFACE_DISTANCE": final_curve_surface_min_dist,
         "FINAL_MEAN_ABS_RELBN": final_snapshot["mean_abs_relBfinal_norm"],
-        "FINAL_VOLUME": float(new_surf.volume()),
-        "FIELD_ERROR": float(fieldError),
-        "SELF_INTERSECTING": intersecting,
-        "MAX_CURVATURE": float(np.max(new_banana_curve.kappa())),
-        "COIL_LENGTH": float(final_snapshot["curve_length"]),
-        "CURVE_CURVE_MIN_DIST": float(final_snapshot["coil_coil_distance"]),
-        "HARDWARE_CONSTRAINTS_OK": hardware_status["success"],
-        "HARDWARE_CONSTRAINT_VIOLATIONS": hardware_status["violations"],
         "FINAL_BANANA_GAMMA": np.asarray(
             new_banana_curve.gamma(), dtype=float
         ).tolist(),
@@ -2721,53 +3618,6 @@ if __name__ == "__main__":
         ],
         "SELF_INTERSECTION_TOLERANCE": final_self_intersection_summary["tolerance"],
         "SELF_INTERSECTION_PENALTY": final_self_intersection_summary["penalty"],
-        "ALM_MAX_OUTER_ITERS": getattr(args, "alm_max_outer_iters", None),
-        "ALM_MAX_SUBPROBLEM_CONTINUATIONS": getattr(
-            args, "alm_max_subproblem_continuations", None
-        ),
-        "ALM_OUTER_ITERATIONS": getattr(alm_result, "outer_iterations", None),
-        "ALM_PENALTY_INIT": getattr(args, "alm_penalty_init", None),
-        "ALM_PENALTY_SCALE": getattr(args, "alm_penalty_scale", None),
-        "ALM_FEAS_TOL": getattr(args, "alm_feas_tol", None),
-        "ALM_STATIONARITY_TOL": getattr(args, "alm_stationarity_tol", None),
-        "ALM_TRUST_RADIUS_INIT": getattr(args, "alm_trust_radius_init", None),
-        "ALM_TRUST_RADIUS_MIN": getattr(args, "alm_trust_radius_min", None),
-        "ALM_TRUST_RADIUS_SHRINK": getattr(args, "alm_trust_radius_shrink", None),
-        "ALM_TRUST_RADIUS_GROW": getattr(args, "alm_trust_radius_grow", None),
-        "ALM_MAX_INNER_ATTEMPTS": getattr(args, "alm_max_inner_attempts", None),
-        "ALM_DISTANCE_SMOOTHING": getattr(args, "alm_distance_smoothing", None),
-        "ALM_CURVATURE_SMOOTHING": getattr(args, "alm_curvature_smoothing", None),
-        "ALM_TERMINATION_REASON": getattr(alm_result, "termination_reason", None),
-        "ALM_FINAL_PENALTY": getattr(alm_result, "penalty", None),
-        "ALM_FINAL_MULTIPLIERS": getattr(alm_result, "multipliers", None),
-        "ALM_FINAL_CONSTRAINT_VALUES": getattr(alm_result, "constraint_values", None),
-        "ALM_FINAL_SOLVER_CONSTRAINT_VALUES": getattr(
-            alm_result,
-            "solver_constraint_values",
-            None,
-        ),
-        "ALM_FINAL_TRUST_RADIUS": getattr(alm_result, "trust_radius", None),
-        "ALM_FINAL_MAX_FEASIBILITY_VIOLATION": getattr(
-            alm_result,
-            "final_max_feasibility_violation",
-            None,
-        ),
-        "ALM_FINAL_STATIONARITY_NORM": getattr(
-            alm_result,
-            "final_stationarity_norm",
-            None,
-        ),
-        "ALM_FINAL_RAW_STATIONARITY_NORM": getattr(
-            alm_result,
-            "final_raw_stationarity_norm",
-            None,
-        ),
-        "ALM_FINAL_KKT_STATIONARITY_NORM": getattr(
-            alm_result,
-            "final_kkt_stationarity_norm",
-            None,
-        ),
-        "ALM_HISTORY": getattr(alm_result, "history", None),
     }
     if optimizer_timings is not None:
         results["OPTIMIZER_TIMINGS"] = optimizer_timings
