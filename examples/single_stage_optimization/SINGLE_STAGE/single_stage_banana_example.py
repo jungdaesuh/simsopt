@@ -24,7 +24,6 @@ EXAMPLE_ROOT, SIMSOPT_ROOT, SRC_ROOT = configure_local_simsopt_imports(__file__)
 # SIMSOPT imports
 from simsopt._core.optimizable import Optimizable
 from simsopt.geo import (
-    SurfaceClassifier,
     SurfaceRZFourier,
     SurfaceXYZTensorFourier,
     BoozerSurface,
@@ -44,11 +43,6 @@ from simsopt.geo.surfaceobjectives import (
 from simsopt.geo.curveobjectives import CurveCurveDistance, CurveSurfaceDistance
 from simsopt.field import (
     BiotSavart,
-    LevelsetStoppingCriterion,
-    MaxRStoppingCriterion,
-    MaxZStoppingCriterion,
-    MinRStoppingCriterion,
-    MinZStoppingCriterion,
 )
 from simsopt.objectives import QuadraticPenalty
 from simsopt.objectives.utilities import forward_backward
@@ -1133,7 +1127,9 @@ def parse_args():
         ),
         help=(
             "Maximum allowed magnitude for the banana current in amps. "
-            "Penalty/L-BFGS-B mode applies this as a hard box bound."
+            "Penalty/L-BFGS-B mode applies this as a hard box bound; "
+            "ALM mode still rechecks it at final feasibility but may "
+            "temporarily traverse over-cap values during search."
         ),
     )
     parser.add_argument(

@@ -320,6 +320,36 @@ def format_hardware_constraint_violation(
     raise ValueError(f"Unsupported hardware constraint kind {spec.kind!r}.")
 
 
+def _empty_constraint_status() -> dict[str, object]:
+    return {
+        "success": True,
+        "violations": [],
+        "constraints": {},
+    }
+
+
+def _constraint_status_entry(
+    spec: HardwareConstraintSpec,
+    *,
+    threshold: float,
+    value: float,
+    signed_value: float,
+    violation: float,
+    success: bool,
+) -> dict[str, object]:
+    return {
+        "name": spec.name,
+        "kind": spec.kind,
+        "threshold": float(threshold),
+        "value": float(value),
+        "signed_value": float(signed_value),
+        "violation": float(violation),
+        "success": bool(success),
+        "applies_to": tuple(sorted(spec.applies_to)),
+        "traversal_policy": spec.traversal_policy,
+    }
+
+
 def build_hardware_constraint_status(
     measured_values: Mapping[str, float | None],
     *,
@@ -329,6 +359,13 @@ def build_hardware_constraint_status(
 ) -> dict[str, object]:
     constraints: dict[str, dict[str, object]] = {}
     violations: list[str] = []
+    # Keep the top-level success/violations view intact while also surfacing
+    # schema-driven traversal semantics for callers that need to distinguish
+    # search-time forbidden violations from allowed soft violations.
+    traversal_statuses: dict[TraversalPolicy, dict[str, object]] = {
+        "allowed": _empty_constraint_status(),
+        "forbidden": _empty_constraint_status(),
+    }
     for spec in hardware_constraint_specs(applies_to=applies_to, names=names):
         value = measured_values.get(spec.name)
         if value is None:
@@ -339,31 +376,38 @@ def build_hardware_constraint_status(
             value,
             threshold_overrides=threshold_overrides,
         )
-        violation = max(0.0, signed_value)
+        violation = hardware_constraint_violation(
+            spec,
+            value,
+            threshold_overrides=threshold_overrides,
+        )
         success = violation == 0.0
-        constraints[spec.name] = {
-            "name": spec.name,
-            "kind": spec.kind,
-            "threshold": float(threshold),
-            "value": float(value),
-            "signed_value": float(signed_value),
-            "violation": float(violation),
-            "success": bool(success),
-            "applies_to": tuple(sorted(spec.applies_to)),
-            "traversal_policy": spec.traversal_policy,
-        }
+        constraint_entry = _constraint_status_entry(
+            spec,
+            threshold=threshold,
+            value=value,
+            signed_value=signed_value,
+            violation=violation,
+            success=success,
+        )
+        constraints[spec.name] = constraint_entry
+        traversal_status = traversal_statuses[spec.traversal_policy]
+        traversal_status["constraints"][spec.name] = constraint_entry
         if not success:
-            violations.append(
-                format_hardware_constraint_violation(
-                    spec,
-                    value,
-                    threshold_overrides=threshold_overrides,
-                )
+            violation_message = format_hardware_constraint_violation(
+                spec,
+                value,
+                threshold_overrides=threshold_overrides,
             )
+            violations.append(violation_message)
+            traversal_status["success"] = False
+            traversal_status["violations"].append(violation_message)
     return {
-        "success": len(violations) == 0,
+        "success": not violations,
         "violations": violations,
         "constraints": constraints,
+        "allowed_traversal_status": traversal_statuses["allowed"],
+        "forbidden_traversal_status": traversal_statuses["forbidden"],
     }
 
 

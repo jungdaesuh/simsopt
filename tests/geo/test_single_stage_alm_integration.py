@@ -522,6 +522,56 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
             1.6e4,
         )
 
+    def test_hardware_constraint_status_splits_allowed_and_forbidden_traversal(self):
+        schema_module = load_hardware_constraint_schema_module()
+
+        status = schema_module.build_hardware_constraint_status(
+            {
+                "coil_coil_spacing": 0.05,
+                "coil_surface_spacing": 0.02,
+                "surface_vessel_spacing": 0.04,
+                "max_curvature": 40.0,
+                "coil_length": 1.8,
+                "banana_current": 1.7e4,
+                "tf_current": 9.0e4,
+            },
+            applies_to="artifact",
+            threshold_overrides={
+                "coil_length": 1.7,
+                "banana_current": 1.6e4,
+                "tf_current": 8.0e4,
+            },
+        )
+        allowed_status = status["allowed_traversal_status"]
+        forbidden_status = status["forbidden_traversal_status"]
+
+        self.assertFalse(status["success"])
+        self.assertEqual(
+            list(allowed_status["constraints"]),
+            [
+                "coil_coil_spacing",
+                "coil_surface_spacing",
+                "surface_vessel_spacing",
+                "max_curvature",
+                "coil_length",
+            ],
+        )
+        self.assertEqual(
+            list(forbidden_status["constraints"]),
+            ["banana_current", "tf_current"],
+        )
+        self.assertEqual(
+            allowed_status["violations"],
+            ["coil_length 1.800000 exceeds threshold 1.700000"],
+        )
+        self.assertEqual(
+            forbidden_status["violations"],
+            [
+                "|banana_current| 17000.000000 exceeds threshold 16000.000000",
+                "|tf_current| 90000.000000 exceeds threshold 80000.000000",
+            ],
+        )
+
     def test_penalty_traversal_policy_execution_is_centralized_in_shared_helper(self):
         single_stage_source = SINGLE_STAGE_MODULE_PATH.read_text()
         stage2_source = STAGE2_MODULE_PATH.read_text()

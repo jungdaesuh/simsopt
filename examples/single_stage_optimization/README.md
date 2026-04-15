@@ -157,6 +157,10 @@ python examples/single_stage_optimization/run_stage2_alm.py \
 Useful notes:
 
 - output root defaults to `examples/single_stage_optimization/outputs_stage2_alm`
+- the built-in `standard_80ka` profile now matches the canonical hardware baseline:
+  `tf_current_A=8.0e4`, `banana_surf_radius=0.21`, `cc_threshold=0.05`, `curvature_threshold=100`
+- the wrapper also exposes the fixed Stage 2 solver-owned clearance contract in its summary/artifact validation:
+  `coil-plasma >= 0.015 m`, `plasma-vessel >= 0.04 m`, `coil_length <= 1.7 m`
 - `--stage2-spec-json` is the fully explicit path for non-profile Stage 2 contracts
 - `--dry-run` prints and records the resolved config and exact Stage 2 command without launching it
 - dry runs write `DRY_RUN_ONLY.txt` next to the summary so a summary-only directory is not mistaken for a real solver artifact root
@@ -364,6 +368,8 @@ Important current behavior:
 - for backward-compatible run identities, explicit `--single-stage-goal-mode target` and omitting the flag intentionally hash to the same run fingerprint
 - frontier mode rescales legacy `--res-weight` / `--iotas-weight` values relative to their historical defaults before applying the normalized frontier score, so matched target/frontier runs stay in a similar rough magnitude range without reusing the old unbounded `-iota` scalarization
 - `--single-stage-goal-mode=frontier` is intentionally incompatible with `--alm-formulation=thresholded_physics` because that ALM formulation still assumes an upper-bounded Jiota penalty objective
+- realized hardware status is intentionally split: `search_hardware_status` describes the search-role contract used for accepted/trial single-stage states, while `artifact_hardware_status` describes final artifact certification and drives `HARDWARE_CONSTRAINTS_OK` / `HARDWARE_CONSTRAINT_VIOLATIONS`
+- both status objects are schema-driven and now expose `allowed_traversal_status` and `forbidden_traversal_status` buckets so wrappers can distinguish soft-search violations from constraints that are supposed to forbid traversal in penalty mode
 
 ## Hardware Search Policy
 
@@ -379,6 +385,13 @@ Search-time realized hardware handling is explicit in current single-stage code:
   Allow warning-only handling only during the early relaxed search window, then revert to hard rejection.
 
 Final certification is still hard in all modes. A terminal hardware-invalid result is still a failure even if search-time handling was softened.
+
+Current constraint semantics are narrower than a generic "all hardware is hard during search" reading:
+
+- in penalty mode, banana current is the only traversal-forbidden search constraint today; it is applied as a hard box bound on the banana-current DOF
+- in ALM mode, banana current and coil length are checked again as final feasibility constraints, but temporary search-time violation is still possible
+- spacing, curvature, and vessel-clearance constraints are still evaluated through the ordinary search/constraint machinery rather than an always-hard box bound
+- `search_hardware_status["forbidden_traversal_status"]` therefore captures the search-role contract, while `artifact_hardware_status` remains the final buildability contract used in result payloads
 
 ## Output Artifacts
 

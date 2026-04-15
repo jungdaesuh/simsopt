@@ -1956,26 +1956,47 @@ class HardwareConstraintTests(unittest.TestCase):
             banana_current_A=1.7e4,
             banana_current_max_A=1.6e4,
         )
+        search_status = status["search_hardware_status"]
+        artifact_status = status["artifact_hardware_status"]
 
-        self.assertFalse(status["search_hardware_status"]["success"])
-        self.assertEqual(status["search_hardware_status"]["violations"], [
+        self.assertFalse(search_status["success"])
+        self.assertEqual(search_status["violations"], [
             "|banana_current| 17000.000000 exceeds threshold 16000.000000"
         ])
-        self.assertFalse(status["artifact_hardware_status"]["success"])
-        self.assertEqual(len(status["artifact_hardware_status"]["violations"]), 3)
-        self.assertIn("coil_length", status["artifact_hardware_status"]["violations"][0])
-        self.assertIn("banana_current", status["artifact_hardware_status"]["violations"][1])
-        self.assertIn("tf_current", status["artifact_hardware_status"]["violations"][2])
         self.assertEqual(
-            status["artifact_hardware_status"]["constraints"]["coil_length"]["threshold"],
+            search_status["allowed_traversal_status"]["violations"],
+            [],
+        )
+        self.assertEqual(
+            search_status["forbidden_traversal_status"]["violations"],
+            ["|banana_current| 17000.000000 exceeds threshold 16000.000000"],
+        )
+        self.assertFalse(artifact_status["success"])
+        self.assertEqual(len(artifact_status["violations"]), 3)
+        self.assertIn("coil_length", artifact_status["violations"][0])
+        self.assertIn("banana_current", artifact_status["violations"][1])
+        self.assertIn("tf_current", artifact_status["violations"][2])
+        self.assertEqual(
+            artifact_status["allowed_traversal_status"]["violations"],
+            ["coil_length 1.800000 exceeds threshold 1.700000"],
+        )
+        self.assertEqual(
+            artifact_status["forbidden_traversal_status"]["violations"],
+            [
+                "|banana_current| 17000.000000 exceeds threshold 16000.000000",
+                "|tf_current| 90000.000000 exceeds threshold 80000.000000",
+            ],
+        )
+        self.assertEqual(
+            artifact_status["constraints"]["coil_length"]["threshold"],
             1.7,
         )
         self.assertEqual(
-            status["artifact_hardware_status"]["constraints"]["tf_current"]["threshold"],
+            artifact_status["constraints"]["tf_current"]["threshold"],
             8.0e4,
         )
         self.assertEqual(
-            status["search_hardware_status"]["constraints"]["banana_current"]["threshold"],
+            search_status["constraints"]["banana_current"]["threshold"],
             1.6e4,
         )
 
