@@ -732,6 +732,15 @@ def smooth_min_curve_surface_signed_constraint(
     return float(minimum_distance) - smooth_min, -grad
 
 
+def compute_stage2_alm_field_diagnostics(new_bs, new_surf):
+    unitn = new_surf.unitnormal()
+    return {
+        "mean_abs_relBfinal_norm": float(
+            np.mean(np.abs(np.sum(new_bs.B().reshape(unitn.shape) * unitn, axis=2)))
+        )
+    }
+
+
 def evaluate_stage2_alm_problem(
     dofs,
     base_objective,
@@ -753,6 +762,8 @@ def evaluate_stage2_alm_problem(
     smooth_max_curvature_signed_constraint,
     Jcsdist=None,
     smooth_min_curve_surface_signed_constraint=None,
+    diagnostics=None,
+    recompute_diagnostics=True,
 ):
     base_objective.x = dofs
     base_value = float(base_objective.J())
@@ -926,8 +937,15 @@ def evaluate_stage2_alm_problem(
         evaluation["nonfinite_evaluation"] = True
         evaluation["nonfinite_fields"] = list(invalid_fields)
 
-    unitn = new_surf.unitnormal()
-    BdotN = np.mean(np.abs(np.sum(new_bs.B().reshape(unitn.shape) * unitn, axis=2)))
+    if recompute_diagnostics or diagnostics is None:
+        diagnostics = compute_stage2_alm_field_diagnostics(new_bs, new_surf)
+    else:
+        diagnostics = {
+            "mean_abs_relBfinal_norm": float(diagnostics["mean_abs_relBfinal_norm"])
+        }
+    BdotN = float(diagnostics["mean_abs_relBfinal_norm"])
+    evaluation["field_diagnostics"] = dict(diagnostics)
+    evaluation["mean_abs_relBfinal_norm"] = BdotN
     outstr = (
         f"ALM J={evaluation['total']:.1e}, Jflux={sanitized_base_value:.1e}, "
         f"Jf={Jf.J():.1e}, ⟨B·n⟩={BdotN:.1e}"

@@ -3404,6 +3404,124 @@ class TestStage2OptimizerContract:
         assert ondevice_captured["failure_callback"] is None
         assert target_result.message == "Optimization terminated successfully."
 
+    def test_stage2_alm_ondevice_inner_solves_route_through_target_minimize(
+        self,
+        monkeypatch,
+    ):
+        stage2_script = _load_stage2_script_module()
+        alm_utils_module = _fresh_import("alm_utils")
+        optimizer_jax = _fresh_import("simsopt.geo.optimizer_jax")
+        calls = {"target": 0, "scipy": 0}
+
+        def forbidden_scipy_minimize(*_args, **_kwargs):
+            calls["scipy"] += 1
+            raise AssertionError("SciPy minimize should not run on the ALM ondevice lane")
+
+        def fake_target_minimize(
+            fun,
+            x0,
+            *,
+            method,
+            tol,
+            maxiter,
+            options,
+            value_and_grad,
+            callback=None,
+            progress_callback=None,
+            failure_callback=None,
+        ):
+            calls["target"] += 1
+            calls["method"] = method
+            calls["tol"] = tol
+            calls["maxiter"] = maxiter
+            calls["options"] = dict(options)
+            calls["value_and_grad"] = value_and_grad
+            calls["callback"] = callback
+            calls["progress_callback"] = progress_callback
+            calls["failure_callback"] = failure_callback
+            calls["x0"] = np.asarray(x0, dtype=float)
+            return types.SimpleNamespace(
+                x=np.asarray(x0, dtype=float),
+                nit=0,
+                success=False,
+                message="maximum iterations reached",
+            )
+
+        monkeypatch.setattr(alm_utils_module, "minimize", forbidden_scipy_minimize)
+        monkeypatch.setattr(optimizer_jax, "target_minimize", fake_target_minimize)
+
+        constraint_names = ["coil_length_upper_bound"]
+        settings = alm_utils_module.ALMSettings(
+            max_outer_iterations=1,
+            max_subproblem_continuations=0,
+            penalty_init=1.0,
+            penalty_scale=10.0,
+            feasibility_tol=1.0e-8,
+            stationarity_tol=1.0e-8,
+            trust_radius_init=None,
+            max_inner_attempts=1,
+        )
+
+        def evaluate_problem(dofs, multipliers, penalty):
+            dofs = np.asarray(dofs, dtype=float)
+            base_value = float(np.dot(dofs, dofs))
+            base_grad = 2.0 * dofs
+            signed_constraint = np.asarray([-0.25], dtype=float)
+            constraint_grad = np.zeros_like(dofs)
+            evaluation = alm_utils_module.augmented_inequality_objective(
+                base_value,
+                base_grad,
+                signed_constraint,
+                [constraint_grad],
+                multipliers,
+                penalty,
+            )
+            evaluation.update(
+                {
+                    "base_value": base_value,
+                    "constraint_names": list(constraint_names),
+                    "dual_update_values": signed_constraint.copy(),
+                    "constraint_grads": [constraint_grad.copy()],
+                    "constraint_activity_tolerances": np.asarray([1.0e-6], dtype=float),
+                    "feasibility_values": np.asarray([0.0], dtype=float),
+                    "hard_signed_constraint_values": signed_constraint.copy(),
+                    "hard_violation_values": np.asarray([0.0], dtype=float),
+                    "surrogate_signed_constraint_values": signed_constraint.copy(),
+                    "hard_dual_update_values": signed_constraint.copy(),
+                    "max_feasibility_violation": 0.0,
+                    "metric_grad": base_grad.copy(),
+                    "metric_stationarity_norm": float(np.linalg.norm(base_grad)),
+                }
+            )
+            return evaluation
+
+        stage2_script.run_stage2_alm_optimizer_timed(
+            np.asarray([1.0, -2.0], dtype=float),
+            constraint_names=constraint_names,
+            settings=settings,
+            evaluate_problem=evaluate_problem,
+            maxiter=7,
+            ftol=1.0e-12,
+            gtol=1.0e-9,
+            maxcor=11,
+            inner_optimizer_contract=stage2_script.resolve_stage2_optimizer_contract(
+                "jax",
+                "ondevice",
+            ),
+        )
+
+        assert calls["target"] == 1
+        assert calls["scipy"] == 0
+        assert calls["method"] == "lbfgs-ondevice"
+        assert calls["tol"] == pytest.approx(1.0e-4)
+        assert calls["maxiter"] == 7
+        assert calls["options"] == {"maxcor": 11, "ftol": 1.0e-12, "maxls": 20}
+        assert calls["value_and_grad"] is True
+        assert calls["callback"] is None
+        assert calls["progress_callback"] is None
+        assert calls["failure_callback"] is None
+        np.testing.assert_allclose(calls["x0"], np.asarray([1.0, -2.0], dtype=float))
+
     def test_make_fun_caches_field_diagnostics_between_stride_refreshes(
         self,
         monkeypatch,

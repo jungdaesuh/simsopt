@@ -111,6 +111,14 @@ _BOXED_INNER_PROFILES = {
     (True, False): _BOXED_FEASIBLE_INITIAL_PROFILE,
     (True, True): _BOXED_FEASIBLE_CONTINUATION_PROFILE,
 }
+_TARGET_INNER_OPTION_KEYS = (
+    "maxcor",
+    "ftol",
+    "maxls",
+    "maxfun",
+    "maxgrad",
+    "initial_step_size",
+)
 _ACCEPTANCE_TOTAL_ATOL = 1e-10
 _ACCEPTANCE_TOTAL_RTOL = 1e-3
 _ACCEPTANCE_MOVE_TOL = 1e-12
@@ -679,18 +687,105 @@ def _effective_feasibility_gate(
 
 
 def _build_box_bounds(center: np.ndarray, trust_radius: float | None):
+    widths = _trust_region_widths(center, trust_radius)
+    if widths is None:
+        return None
+    return [
+        (float(value - width), float(value + width))
+        for value, width in zip(np.asarray(center, dtype=float), widths)
+    ]
+
+
+def _trust_region_widths(center: np.ndarray, trust_radius: float | None):
     normalized_trust_radius = _normalize_trust_radius(trust_radius)
     if normalized_trust_radius is None:
         return None
     # This is a lightweight trust-region proxy implemented with L-BFGS-B bounds:
     # each continuation centers a symmetric box around the current iterate.
-    widths = normalized_trust_radius * np.maximum(
+    return normalized_trust_radius * np.maximum(
         1.0, np.abs(np.asarray(center, dtype=float))
     )
-    return [
-        (float(value - width), float(value + width))
-        for value, width in zip(np.asarray(center, dtype=float), widths)
-    ]
+
+
+def _target_inner_physical_x(opt_x, center: np.ndarray, widths: np.ndarray | None):
+    opt_x_arr = np.asarray(opt_x, dtype=float)
+    if widths is None:
+        return opt_x_arr
+    return np.asarray(center, dtype=float) + np.asarray(widths, dtype=float) * np.tanh(
+        opt_x_arr
+    )
+
+
+def _build_target_inner_value_and_grad(
+    *,
+    evaluate_value_and_grad: Callable[[np.ndarray], tuple[float, np.ndarray]],
+    center: np.ndarray,
+    widths: np.ndarray | None,
+):
+    import jax
+    import jax.numpy as jnp
+
+    center_arr = np.asarray(center, dtype=float).copy()
+    widths_arr = None if widths is None else np.asarray(widths, dtype=float).copy()
+    result_spec = (
+        jax.ShapeDtypeStruct((), np.float64),
+        jax.ShapeDtypeStruct(center_arr.shape, np.float64),
+    )
+
+    if widths_arr is None:
+
+        def _physical_x_jax(opt_x):
+            return jnp.asarray(opt_x, dtype=jnp.float64)
+
+        optimizer_x0 = np.asarray(center_arr, dtype=float)
+    else:
+        center_jax = jax.device_put(np.asarray(center_arr, dtype=np.float64))
+        widths_jax = jax.device_put(np.asarray(widths_arr, dtype=np.float64))
+
+        def _physical_x_jax(opt_x):
+            opt_x = jnp.asarray(opt_x, dtype=jnp.float64)
+            return center_jax + widths_jax * jnp.tanh(opt_x)
+
+        optimizer_x0 = np.zeros_like(center_arr, dtype=float)
+
+    def _host_eval(host_x):
+        value, grad = evaluate_value_and_grad(np.asarray(host_x, dtype=float))
+        return np.asarray(value, dtype=np.float64), np.asarray(grad, dtype=np.float64)
+
+    def _value_and_grad(opt_x):
+        opt_x = jnp.asarray(opt_x, dtype=jnp.float64)
+        physical_x = _physical_x_jax(opt_x)
+        value, grad_x = jax.pure_callback(_host_eval, result_spec, physical_x)
+        grad_x = jnp.asarray(grad_x, dtype=jnp.float64)
+        if widths_arr is None:
+            return jnp.asarray(value, dtype=jnp.float64), grad_x
+        grad_scale = widths_jax * (1.0 - jnp.square(jnp.tanh(opt_x)))
+        return jnp.asarray(value, dtype=jnp.float64), grad_x * grad_scale
+
+    return _value_and_grad, optimizer_x0
+
+
+def _resolve_target_inner_optimizer(inner_optimizer_contract):
+    if inner_optimizer_contract is None:
+        return None, None
+
+    from simsopt.geo.optimizer_jax import TargetOptimizerContract, target_minimize
+
+    if not isinstance(inner_optimizer_contract, TargetOptimizerContract):
+        raise ValueError(
+            "minimize_alm() only supports TargetOptimizerContract for "
+            "inner_optimizer_contract."
+        )
+    if inner_optimizer_contract.use_least_squares_objective:
+        raise ValueError(
+            "minimize_alm() only supports scalar target ALM inner solves."
+        )
+    if inner_optimizer_contract.method != "lbfgs-ondevice":
+        raise ValueError(
+            "minimize_alm() only supports method='lbfgs-ondevice' for "
+            "target ALM inner solves."
+        )
+    return inner_optimizer_contract.method, target_minimize
 
 
 def _select_inner_solve_profile(
@@ -819,6 +914,67 @@ def _build_inner_options(
     else:
         options["maxfun"] = min(max(1, int(requested_maxfun)), maxfun_cap)
     return options
+
+
+def _build_target_inner_callback(
+    inner_callback: Callable[[np.ndarray], None] | None,
+    *,
+    center: np.ndarray,
+    widths: np.ndarray | None,
+):
+    if inner_callback is None:
+        return None
+
+    callback_center = np.asarray(center, dtype=float).copy()
+    callback_widths = None if widths is None else np.asarray(widths, dtype=float).copy()
+
+    def _callback(opt_x, *, _center=callback_center, _widths=callback_widths):
+        inner_callback(_target_inner_physical_x(opt_x, _center, _widths))
+
+    return _callback
+
+
+def _build_target_inner_options(inner_attempt_options: dict) -> dict:
+    return {
+        key: inner_attempt_options[key]
+        for key in _TARGET_INNER_OPTION_KEYS
+        if key in inner_attempt_options
+    }
+
+
+def _run_target_inner_solve(
+    *,
+    evaluate_value_and_grad: Callable[[np.ndarray], tuple[float, np.ndarray]],
+    center: np.ndarray,
+    attempt_radius: float | None,
+    inner_attempt_options: dict,
+    method: str,
+    optimizer: Callable[..., object],
+    inner_callback: Callable[[np.ndarray], None] | None,
+):
+    trust_widths = _trust_region_widths(center, attempt_radius)
+    target_fun, target_x0 = _build_target_inner_value_and_grad(
+        evaluate_value_and_grad=evaluate_value_and_grad,
+        center=center,
+        widths=trust_widths,
+    )
+    result = optimizer(
+        target_fun,
+        target_x0,
+        method=method,
+        tol=float(inner_attempt_options["gtol"]),
+        maxiter=int(inner_attempt_options["maxiter"]),
+        options=_build_target_inner_options(inner_attempt_options),
+        value_and_grad=True,
+        callback=_build_target_inner_callback(
+            inner_callback,
+            center=center,
+            widths=trust_widths,
+        ),
+    )
+    candidate_x = _target_inner_physical_x(result.x, center, trust_widths)
+    result.x = np.asarray(candidate_x, dtype=float).copy()
+    return result, candidate_x
 
 
 def _termination_reason_from_history(
@@ -1175,6 +1331,7 @@ def minimize_alm(
     evaluate_problem: Callable[[np.ndarray, np.ndarray, float], dict],
     settings: ALMSettings,
     inner_options: dict,
+    inner_optimizer_contract=None,
     inner_callback: Callable[[np.ndarray], None] | None = None,
     accepted_callback: Callable[[np.ndarray], None] | None = None,
     outer_state_callback: Callable[[int, np.ndarray, float], None] | None = None,
@@ -1188,6 +1345,9 @@ def minimize_alm(
         raise ValueError(
             "snapshot_accepted_state_fn and restore_incumbent_state_fn must be provided together"
         )
+    target_inner_method, target_inner_optimizer = _resolve_target_inner_optimizer(
+        inner_optimizer_contract
+    )
     if settings.penalty_max is not None and settings.penalty_max <= 0.0:
         raise ValueError("settings.penalty_max must be positive when provided")
     if settings.penalty_max is not None and settings.penalty_max < settings.penalty_init:
@@ -1730,16 +1890,27 @@ def minimize_alm(
                 last_inner_options = dict(inner_attempt_options)
                 last_inner_profile = current_inner_profile.name
                 try:
-                    result = minimize(
-                        inner_fun,
-                        x,
-                        jac=True,
-                        method="L-BFGS-B",
-                        bounds=_build_box_bounds(x, attempt_radius),
-                        callback=alm_inner_callback,
-                        options=inner_attempt_options,
-                    )
-                    candidate_x = np.asarray(result.x, dtype=float).copy()
+                    if target_inner_optimizer is None:
+                        result = minimize(
+                            inner_fun,
+                            x,
+                            jac=True,
+                            method="L-BFGS-B",
+                            bounds=_build_box_bounds(x, attempt_radius),
+                            callback=alm_inner_callback,
+                            options=inner_attempt_options,
+                        )
+                        candidate_x = np.asarray(result.x, dtype=float).copy()
+                    else:
+                        result, candidate_x = _run_target_inner_solve(
+                            evaluate_value_and_grad=inner_fun,
+                            center=x,
+                            attempt_radius=attempt_radius,
+                            inner_attempt_options=inner_attempt_options,
+                            method=target_inner_method,
+                            optimizer=target_inner_optimizer,
+                            inner_callback=inner_callback,
+                        )
                     if _cached_eval.x is not None and np.array_equal(candidate_x, _cached_eval.x):
                         candidate_eval = _cached_eval.evaluation
                     else:

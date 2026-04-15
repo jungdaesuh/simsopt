@@ -1962,6 +1962,20 @@ def resolve_stage2_field_diagnostic_stride(args):
     return 1
 
 
+def should_recompute_stage2_field_diagnostics(
+    diagnostics,
+    *,
+    eval_index,
+    stride,
+):
+    return (
+        diagnostics is None
+        or stride <= 1
+        or eval_index == 1
+        or eval_index % stride == 0
+    )
+
+
 def run_stage2_optimizer(
     value_and_grad_fun=None,
     dofs=None,
@@ -2105,6 +2119,7 @@ def run_stage2_alm_optimizer_timed(
     ftol,
     gtol,
     maxcor=300,
+    inner_optimizer_contract=None,
     accepted_callback=None,
     outer_state_callback=None,
 ):
@@ -2120,6 +2135,7 @@ def run_stage2_alm_optimizer_timed(
             "ftol": float(ftol),
             "gtol": float(gtol),
         },
+        inner_optimizer_contract=inner_optimizer_contract,
         accepted_callback=accepted_callback,
         outer_state_callback=outer_state_callback,
     )
@@ -2506,8 +2522,10 @@ def make_fun(
     from the JAX field (avoids stale CPU cache and redundant CPU field
     evaluation inside the optimizer loop).
     """
-    eval_counter = {"count": 0}
-    diagnostic_cache = {"snapshot": None}
+    field_diagnostic_state = {
+        "eval_count": 0,
+        "diagnostics": None,
+    }
     context = make_stage2_objective_context(
         JF,
         new_bs,
@@ -2526,20 +2544,19 @@ def make_fun(
     )
 
     def fun(dofs):
-        next_eval = eval_counter["count"] + 1
-        recompute_diagnostics = (
-            diagnostic_cache["snapshot"] is None
-            or field_diagnostic_stride <= 1
-            or next_eval == 1
-            or next_eval % field_diagnostic_stride == 0
+        next_eval = field_diagnostic_state["eval_count"] + 1
+        recompute_diagnostics = should_recompute_stage2_field_diagnostics(
+            field_diagnostic_state["diagnostics"],
+            eval_index=next_eval,
+            stride=field_diagnostic_stride,
         )
         JF.x = dofs
-        snapshot, grad, diagnostic_cache["snapshot"] = evaluate_stage2_objective(
+        snapshot, grad, field_diagnostic_state["diagnostics"] = evaluate_stage2_objective(
             context,
-            diagnostics=diagnostic_cache["snapshot"],
+            diagnostics=field_diagnostic_state["diagnostics"],
             recompute_diagnostics=recompute_diagnostics,
         )
-        eval_counter["count"] = next_eval
+        field_diagnostic_state["eval_count"] = next_eval
         append_stage2_trajectory_snapshot(
             trajectory_sink,
             snapshot,
@@ -2716,6 +2733,14 @@ if __name__ == "__main__":
         use_target_objective_lane = False
         needs_target_probe_payload = False
         probe_only_target_payload = False
+        alm_inner_optimizer_contract = (
+            resolve_stage2_optimizer_contract(
+                args.backend,
+                args.optimizer_backend,
+            )
+            if args.backend == "jax" and args.optimizer_backend == "ondevice"
+            else None
+        )
     else:
         (
             outer_contract,
@@ -2729,6 +2754,7 @@ if __name__ == "__main__":
             probe_only=args.probe_only,
             export_objective_json=args.export_objective_json,
         )
+        alm_inner_optimizer_contract = None
 
     target_objective_bundle = None
     needs_target_objective_bundle = (
@@ -2804,8 +2830,8 @@ if __name__ == "__main__":
     )
     os.makedirs(OUT_DIR_ITER, exist_ok=True)
 
-    # Keep Stage 2 on the legacy weighted-penalty lane while the ALM closeout
-    # work stays parked and unvalidated.
+    # Penalty mode optimizes the weighted composite objective directly; ALM keeps
+    # the outer loop host-driven but shares the same root DOF state.
     dofs = BASE_OBJECTIVE.x if CONSTRAINT_METHOD == "alm" else JF.x
     if args.override_dofs_json is not None:
         dofs = load_stage2_override_dofs(
@@ -2900,9 +2926,19 @@ if __name__ == "__main__":
         alm_constraint_names = stage2_alm_constraint_names(
             include_coil_surface=Jcsdist is not None,
         )
+        alm_field_diagnostic_state = {
+            "eval_count": 0,
+            "diagnostics": None,
+        }
 
         def evaluate_problem(inner_dofs, multipliers, penalty):
-            return _evaluate_stage2_alm_problem_impl(
+            next_eval = alm_field_diagnostic_state["eval_count"] + 1
+            recompute_diagnostics = should_recompute_stage2_field_diagnostics(
+                alm_field_diagnostic_state["diagnostics"],
+                eval_index=next_eval,
+                stride=field_diagnostic_stride,
+            )
+            evaluation = _evaluate_stage2_alm_problem_impl(
                 inner_dofs,
                 BASE_OBJECTIVE,
                 new_bs,
@@ -2925,7 +2961,17 @@ if __name__ == "__main__":
                 smooth_min_curve_surface_signed_constraint=(
                     _smooth_min_curve_surface_signed_constraint_impl
                 ),
+                diagnostics=alm_field_diagnostic_state["diagnostics"],
+                recompute_diagnostics=recompute_diagnostics,
             )
+            alm_field_diagnostic_state["eval_count"] = next_eval
+            alm_field_diagnostic_state["diagnostics"] = dict(
+                evaluation.get(
+                    "field_diagnostics",
+                    alm_field_diagnostic_state["diagnostics"] or {},
+                )
+            )
+            return evaluation
 
         if args.alm_taylor_test:
             alm_taylor_result = run_directional_taylor_test(
@@ -3096,6 +3142,7 @@ if __name__ == "__main__":
             maxcor=300,
             ftol=args.ftol,
             gtol=args.gtol,
+            inner_optimizer_contract=alm_inner_optimizer_contract,
             accepted_callback=accepted_callback,
             outer_state_callback=outer_state_callback,
         )
