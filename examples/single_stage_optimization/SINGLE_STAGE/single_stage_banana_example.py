@@ -1192,7 +1192,7 @@ def resolve_target_lane_accepted_step_callback(
     if not use_target_lane:
         return adapter.callback
     if uses_per_accept_target_lane_sync(sync_policy):
-        return adapter.callback
+        return adapter.observe_accepted_step
     return None
 
 
@@ -1381,6 +1381,37 @@ def load_stage2_results(stage2_bs_path):
 
 def resolve_single_stage_warm_start_paths(run_dir):
     resolved_run_dir = os.path.abspath(run_dir)
+def resolve_target_lane_post_run_state_sync(
+    adapter,
+    *,
+    use_target_lane: bool,
+    accepted_step_callback,
+    scaled_phase_step_scale: float | None = None,
+):
+    """Return explicit accepted-state sync for target-lane runs."""
+    if not use_target_lane:
+        return None
+    explicit_state_sync = (
+        adapter.sync_accepted_step
+        if accepted_step_callback is None
+        else adapter.sync_accepted_step_state
+    )
+    if scaled_phase_step_scale is None:
+        return explicit_state_sync
+
+    def sync(result_x):
+        explicit_state_sync(
+            resolve_scaled_outer_phase_final_dofs(
+                None,
+                result_x,
+                scaled_phase_step_scale,
+                use_target_lane=True,
+            )
+        )
+
+    return sync
+
+
     surface_path = os.path.join(resolved_run_dir, "surf_opt.json")
     results_path = os.path.join(resolved_run_dir, "results.json")
     missing_paths = [
@@ -3574,7 +3605,7 @@ def build_single_stage_target_lane_accepted_step_sync(
         success_filter=success_filter,
     )
 
-    def sync(run_dict, coil_dofs, *, benchmark_mode):
+    def sync(run_dict, coil_dofs, *, benchmark_mode, update_run_state=True):
         coil_dofs = _as_jax_float64(_single_stage_optimizer_dofs_array(coil_dofs))
         solve_result = boozer_surface.run_code_traceable(
             bs.coil_set_spec_from_dofs(coil_dofs),
@@ -3620,29 +3651,30 @@ def build_single_stage_target_lane_accepted_step_sync(
                 traceable_reporting_metrics
             )
         )
-        snapshot_accepted_step_state_from_values(
-            run_dict,
-            sdofs=solve_result["sdofs"],
-            iota=solve_result["iota"],
-            G=solve_result["G"],
-            objective_value=objective_value,
-            store_objective_grad=False,
-        )
-        run_dict["hardware_constraint_status"] = hardware_status
-        record_single_stage_local_incumbent(
-            run_dict,
-            stage=f"iter_{run_dict.get('it', 0)}",
-        )
         accepted_step_summary = {
             "objective_value": objective_value,
             "reporting_metrics": reporting_metrics,
         }
-        _cache_target_lane_reporting_summary(
-            run_dict,
-            coil_dofs,
-            accepted_step_summary,
-            benchmark_mode=benchmark_mode,
-        )
+        if update_run_state:
+            snapshot_accepted_step_state_from_values(
+                run_dict,
+                sdofs=solve_result["sdofs"],
+                iota=solve_result["iota"],
+                G=solve_result["G"],
+                objective_value=objective_value,
+                store_objective_grad=False,
+            )
+            run_dict["hardware_constraint_status"] = hardware_status
+            record_single_stage_local_incumbent(
+                run_dict,
+                stage=f"iter_{run_dict.get('it', 0)}",
+            )
+            _cache_target_lane_reporting_summary(
+                run_dict,
+                coil_dofs,
+                accepted_step_summary,
+                benchmark_mode=benchmark_mode,
+            )
         return accepted_step_summary
 
     return sync
@@ -4874,9 +4906,8 @@ def should_force_strict_target_lane_final_sync(
     trial_boozer_override_active,
 ):
     """Return whether the final accepted state must be re-synced strictly."""
-    return bool(use_target_lane) and int(res_nit) > 0 and (
-        accepted_step_callback is None or trial_boozer_override_active
-    )
+    del accepted_step_callback, trial_boozer_override_active
+    return bool(use_target_lane) and int(res_nit) > 0
 
 
 def _wrap_single_stage_outer_scalar_objective(fun):
@@ -5429,10 +5460,8 @@ def run_single_stage_target_lane_optimizer_with_retries(
 ):
     """Retry invalid-state target-lane failures from preserved local anchors."""
     if retry_dofs_factory is None:
-        retry_dofs_factory = lambda anchor_state: host_array(  # noqa: E731
-            anchor_state["coil_dofs"],
-            dtype=np.float64,
-        )
+        retry_dofs_factory = default_retry_dofs_factory
+
     if restored_result_x_factory is None:
         restored_result_x_factory = retry_dofs_factory
     initial_step_size = target_lane_initial_step_size
@@ -5462,7 +5491,9 @@ def run_single_stage_target_lane_optimizer_with_retries(
     }
     for retry_index in range(single_stage_search_policy.invalid_step_retry_budget):
         new_events = invalid_state_events[event_start:]
-        if result.success or (not single_stage_retry_triggered_by_invalid_state(new_events)):
+        if result.success or (
+            not single_stage_retry_triggered_by_invalid_state(new_events)
+        ):
             break
         anchor_state, anchor_stage = resolve_single_stage_retry_anchor(
             run_dict,
@@ -6159,18 +6190,11 @@ class SingleStageAdapter:
     def sync_accepted_step(self, x):
         """Refresh mutable state if needed, then snapshot one accepted step."""
         if self.accepted_step_state_sync is not None:
-            accepted_step_summary = self.accepted_step_state_sync(
-                self.run_dict,
+            accepted_step_summary = self._sync_target_lane_accepted_step_summary(
                 x,
-                benchmark_mode=self.benchmark_mode,
+                update_run_state=True,
             )
-            self.run_dict["x_prev"] = _single_stage_optimizer_dofs_array(x).copy()
-            if not self.benchmark_mode:
-                log_single_stage_target_lane_accepted_step(
-                    self.run_dict,
-                    accepted_step_summary,
-                    self.log_path,
-                )
+            self._log_target_lane_accepted_step(accepted_step_summary)
             return
         objective_value = None
         objective_grad = None
@@ -6396,6 +6420,7 @@ if __name__ == "__main__":
         write_json_file(startup_progress_path, startup_progress)
 
     _mark_startup_progress("output_root_ready")
+    result_state_sync,
     stop_jax_profile_trace = begin_jax_profile_trace(args.jax_profile_dir)
     jax_profile_enabled = stop_jax_profile_trace is not None
     args.curvature_threshold = resolve_curvature_threshold(args.curvature_threshold)
@@ -6412,6 +6437,10 @@ if __name__ == "__main__":
 
     banana_surf_radius = (
         args.banana_surf_radius
+
+    def default_retry_dofs_factory(anchor_state):
+        return host_array(anchor_state["coil_dofs"], dtype=np.float64)
+
         if args.banana_surf_radius is not None
         else float(stage2_results["banana_surf_radius"])
     )
@@ -6419,6 +6448,17 @@ if __name__ == "__main__":
     nphi = args.nphi
     ntheta = args.ntheta
     mpol = args.mpol
+
+    def sync_failed_attempt_state(result, *, event_start_index):
+        if result_state_sync is None:
+            return
+        if int(getattr(result, "nit", 0)) <= 0 or result.success:
+            return
+        if single_stage_retry_triggered_by_invalid_state(
+            invalid_state_events[event_start_index:]
+        ):
+            result_state_sync(result.x)
+
     ntor = args.ntor
 
     # Optimization targets and weights
@@ -6444,6 +6484,7 @@ if __name__ == "__main__":
 
     # The proposed new HBT LCFS
     hbt = SurfaceRZFourier(nfp=5, stellsym=True)
+    sync_failed_attempt_state(result, event_start_index=event_start)
     hbt.set_rc(0, 0, 0.9115)  # R0 of LCFS semi-circle center
     hbt.set_rc(1, 0, 0.1605)  # Minor radius (thick metal walls)
     hbt.set_zs(1, 0, 0.152)  # Z extent = ±0.152 m (flat top/bottom)
@@ -6487,6 +6528,7 @@ if __name__ == "__main__":
     )
 
     # JAX backend: wrap the loaded BiotSavart coils in BiotSavartJAX.
+        sync_failed_attempt_state(result, event_start_index=event_start)
     # Keep a CPU reference for diagnostics and artifact output.
     bs_cpu_diag = bs if use_jax else None
     biotsavart_wrap_start_s = _perf_counter_s()
@@ -7140,6 +7182,46 @@ if __name__ == "__main__":
                         success_filter=target_lane_success_filter,
                         non_qs_weight=1.0,
                         residual_weight=RES_WEIGHT,
+    def _sync_target_lane_accepted_step_summary(self, x, *, update_run_state):
+        """Run the pure target-lane accepted-step sync with optional state commit."""
+        accepted_step_summary = self.accepted_step_state_sync(
+            self.run_dict,
+            x,
+            benchmark_mode=self.benchmark_mode,
+            update_run_state=update_run_state,
+        )
+        if update_run_state:
+            self.run_dict["x_prev"] = _single_stage_optimizer_dofs_array(x).copy()
+        return accepted_step_summary
+
+    def _log_target_lane_accepted_step(self, accepted_step_summary):
+        """Write the accepted-step summary when host-side logging is enabled."""
+        if self.benchmark_mode:
+            return
+        log_single_stage_target_lane_accepted_step(
+            self.run_dict,
+            accepted_step_summary,
+            self.log_path,
+        )
+
+    def sync_accepted_step_state(self, x):
+        """Refresh the accepted step without emitting per-accept logging."""
+        if self.accepted_step_state_sync is None:
+            self.sync_accepted_step(x)
+            return
+        self._sync_target_lane_accepted_step_summary(x, update_run_state=True)
+
+    def observe_accepted_step(self, x):
+        """Emit target-lane accepted-step observability without state mutation."""
+        if self.accepted_step_state_sync is None:
+            self.sync_accepted_step(x)
+            return
+        accepted_step_summary = self._sync_target_lane_accepted_step_summary(
+            x,
+            update_run_state=False,
+        )
+        self._log_target_lane_accepted_step(accepted_step_summary)
+
                         iota_weight=IOTAS_WEIGHT,
                         length_weight=LENGTH_WEIGHT,
                         length_target=length_target,
@@ -7281,66 +7363,23 @@ if __name__ == "__main__":
                         "baseline target-lane value/gradient are finite."
                     )
                 else:
-                    print(
-                        "Skipping single-stage optimizer because "
-                        "--diagnose-target-lane-gradient was provided; "
-                        f"first non-finite term is {first_nonfinite_term}."
+                    accepted_step_callback = resolve_target_lane_accepted_step_callback(
+                        adapter,
+                        use_target_lane=use_target_lane,
+                        sync_policy=effective_target_lane_sync_policy,
                     )
-            elif args.profile_target_lane_only:
-                if not use_target_lane:
-                    raise RuntimeError(
-                        "--profile-target-lane-only requires the JAX ondevice "
-                        "single-stage target lane."
+                    retry_step_callback = accepted_step_callback
+                    target_lane_phase1_state_sync = (
+                        resolve_target_lane_post_run_state_sync(
+                            adapter,
+                            use_target_lane=use_target_lane,
+                            accepted_step_callback=accepted_step_callback,
+                            scaled_phase_step_scale=effective_initial_step_scale,
+                        )
                     )
-                outer_optimizer_end_s = _perf_counter_s()
-                _record_timing(
-                    timings,
-                    "target_lane_profile_only_s",
-                    outer_optimizer_start_s,
-                    outer_optimizer_end_s,
-                )
-                res_nit = 0
-                optimizer_success = True
-                termination_message = "profile_target_lane_only"
-                final_volume = initial_volume
-                final_iota = initial_iota
-                final_max_curvature = initial_max_curvature
-                fieldError = initial_field_error
-                print(
-                    "Skipping single-stage optimizer because "
-                    "--profile-target-lane-only was provided."
-                )
-            else:
-                accepted_step_callback = resolve_target_lane_accepted_step_callback(
-                    adapter,
-                    use_target_lane=use_target_lane,
-                    sync_policy=effective_target_lane_sync_policy,
-                )
-                retry_step_callback = (
-                    adapter.callback if use_target_lane else accepted_step_callback
-                )
-                phase1_dofs = dofs
-                phase1_base_fun = (
-                    target_value_and_grad_objective if use_target_lane else adapter
-                )
-                phase1_base_scalar_fun = (
-                    target_scalar_objective if use_target_lane else None
-                )
-                phase1_fun = phase1_base_fun
-                phase1_scalar_fun = phase1_base_scalar_fun
-                phase1_callback = accepted_step_callback
-                phase1_retry_callback = phase1_callback
-                phase1_final_dofs = None
-                remaining_maxiter = MAXITER
-                if (
-                    effective_initial_step_maxiter > 0
-                    and effective_initial_step_scale < 1.0
-                ):
-                    phase1_maxiter = min(MAXITER, effective_initial_step_maxiter)
-                    if phase1_maxiter > 0:
-                        phase1_anchor_dofs = dofs
-                        phase1_dofs = build_scaled_outer_phase_initial_dofs(
-                            phase1_anchor_dofs,
+                    target_lane_post_run_state_sync = (
+                        resolve_target_lane_post_run_state_sync(
+                            adapter,
                             use_target_lane=use_target_lane,
                         )
                         if use_target_lane:
@@ -7389,10 +7428,153 @@ if __name__ == "__main__":
                                             anchor_in_state=True,
                                         )
                                     )
-                        else:
-                            phase1_fun, phase1_callback = build_scaled_outer_problem(
-                                phase1_fun,
-                                accepted_step_callback,
+                                    phase1_scalar_fun = None
+                                else:
+                                    (
+                                        phase1_scalar_fun,
+                                        phase1_callback,
+                                    ) = build_scaled_outer_scalar_problem(
+                                        phase1_base_scalar_fun,
+                                        accepted_step_callback,
+                                        phase1_anchor_dofs,
+                                        effective_initial_step_scale,
+                                        anchor_in_state=True,
+                                    )
+                                phase1_retry_callback = phase1_callback
+                                phase1_post_run_state_sync = (
+                                    resolve_target_lane_post_run_state_sync(
+                                        adapter,
+                                        use_target_lane=use_target_lane,
+                                        accepted_step_callback=phase1_callback,
+                                        scaled_phase_step_scale=(
+                                            effective_initial_step_scale
+                                        ),
+                                    )
+                                )
+                                if phase1_retry_callback is None:
+                                    if phase1_base_fun is not None:
+                                        _, phase1_retry_callback = (
+                                            build_scaled_outer_problem(
+                                                phase1_base_fun,
+                                                retry_step_callback,
+                                                phase1_anchor_dofs,
+                                                effective_initial_step_scale,
+                                                anchor_in_state=True,
+                                            )
+                                        )
+                                    else:
+                                        _, phase1_retry_callback = (
+                                            build_scaled_outer_scalar_problem(
+                                                phase1_base_scalar_fun,
+                                                retry_step_callback,
+                                                phase1_anchor_dofs,
+                                                effective_initial_step_scale,
+                                                anchor_in_state=True,
+                                            )
+                                        )
+                            else:
+                                phase1_fun, phase1_callback = (
+                                    build_scaled_outer_problem(
+                                        phase1_fun,
+                                        accepted_step_callback,
+                                        phase1_anchor_dofs,
+                                        effective_initial_step_scale,
+                                    )
+                                )
+                            print(
+                                "Starting scaled initial outer phase "
+                                f"(step_scale={effective_initial_step_scale}, "
+                                f"maxiter={phase1_maxiter})..."
+                            )
+                            phase1_failure_callback = (
+                                resolve_target_lane_invalid_state_failure_callback(
+                                    target_lane_invalid_state_events,
+                                    phase="phase1",
+                                    use_target_lane=use_target_lane,
+                                    args=args,
+                                )
+                            )
+                            phase1_start_s = _perf_counter_s()
+                            with maybe_trace_single_stage_phase(
+                                "single_stage.outer_optimizer_initial_phase",
+                                enabled=jax_profile_enabled,
+                            ):
+                                if use_target_lane:
+                                    phase1_res, phase1_retry_summary = (
+                                        run_single_stage_target_lane_optimizer_with_retries(
+                                            phase1_fun,
+                                            phase1_dofs,
+                                            callback=phase1_callback,
+                                            retry_callback=phase1_retry_callback,
+                                            result_state_sync=phase1_post_run_state_sync,
+                                            contract=outer_contract,
+                                            maxiter=phase1_maxiter,
+                                            ftol=ftol,
+                                            gtol=gtol,
+                                            maxcor=args.maxcor,
+                                            outer_maxls=args.outer_maxls,
+                                            scalar_fun=phase1_scalar_fun,
+                                            target_lane_initial_step_size=None,
+                                            failure_callback=phase1_failure_callback,
+                                            invalid_state_events=(
+                                                target_lane_invalid_state_events
+                                            ),
+                                            run_dict=run_dict,
+                                            single_stage_search_policy=(
+                                                single_stage_search_policy
+                                            ),
+                                            retry_dofs_factory=(
+                                                lambda anchor_state: (
+                                                    build_single_stage_scaled_phase_retry_state(
+                                                        host_array(
+                                                            anchor_state["coil_dofs"],
+                                                            dtype=np.float64,
+                                                        )
+                                                    )
+                                                )
+                                            ),
+                                            restored_result_x_factory=(
+                                                lambda anchor_state: (
+                                                    build_single_stage_scaled_phase_retry_state(
+                                                        host_array(
+                                                            anchor_state["coil_dofs"],
+                                                            dtype=np.float64,
+                                                        )
+                                                    )
+                                                )
+                                            ),
+                                        )
+                                    )
+                                else:
+                                    phase1_res = run_single_stage_optimizer(
+                                        phase1_fun,
+                                        phase1_dofs,
+                                        callback=phase1_callback,
+                                        contract=outer_contract,
+                                        maxiter=phase1_maxiter,
+                                        ftol=ftol,
+                                        gtol=gtol,
+                                        maxcor=args.maxcor,
+                                        outer_maxls=args.outer_maxls,
+                                        scalar_fun=phase1_scalar_fun,
+                                        failure_callback=phase1_failure_callback,
+                                    )
+                            _record_timing(
+                                timings,
+                                "outer_optimizer_initial_phase_s",
+                                phase1_start_s,
+                                _perf_counter_s(),
+                            )
+                            phase1_iterations = int(phase1_res.nit)
+                            phase1_termination_message = str(phase1_res.message)
+                            if phase1_retry_summary["attempt_count"] > 0:
+                                phase1_termination_message = (
+                                    f"{phase1_termination_message}; "
+                                    f"retry_attempts={phase1_retry_summary['attempt_count']}"
+                                )
+                            phase1_success = bool(phase1_res.success)
+                            print(phase1_res.message)
+                            phase1_final_dofs = resolve_scaled_outer_phase_final_dofs(
                                 phase1_anchor_dofs,
                                 effective_initial_step_scale,
                             )
@@ -7417,10 +7599,11 @@ if __name__ == "__main__":
                             if use_target_lane:
                                 phase1_res, phase1_retry_summary = (
                                     run_single_stage_target_lane_optimizer_with_retries(
-                                        phase1_fun,
-                                        phase1_dofs,
-                                        callback=phase1_callback,
-                                        retry_callback=phase1_retry_callback,
+                                        target_value_and_grad_objective,
+                                        dofs,
+                                        callback=accepted_step_callback,
+                                        retry_callback=retry_step_callback,
+                                        result_state_sync=target_lane_post_run_state_sync,
                                         contract=outer_contract,
                                         maxiter=phase1_maxiter,
                                         ftol=ftol,
@@ -7496,93 +7679,26 @@ if __name__ == "__main__":
                         )
                         if (
                             use_target_lane
-                            and accepted_step_callback is None
-                            and phase1_iterations > 0
+                            and args.benchmark_mode
+                            and target_lane_post_run_state_sync is not None
+                            and int(res.nit) > 0
                         ):
                             target_lane_phase1_sync_start_s = _perf_counter_s()
                             with maybe_trace_single_stage_phase(
                                 "single_stage.target_lane_initial_phase_sync",
                                 enabled=jax_profile_enabled,
                             ):
-                                adapter.sync_accepted_step(phase1_final_dofs)
+                                target_lane_post_run_state_sync(res.x)
                             _record_timing(
                                 timings,
                                 "target_lane_initial_phase_sync_s",
                                 target_lane_phase1_sync_start_s,
                                 _perf_counter_s(),
                             )
-                        if phase1_iterations > 0:
-                            dofs = phase1_final_dofs
-                            run_dict["x_prev"] = _single_stage_optimizer_dofs_array(
-                                dofs
-                            ).copy()
-                        remaining_maxiter = max(MAXITER - phase1_iterations, 0)
-                run_main_optimizer = (
-                    remaining_maxiter > 0 or phase1_termination_message is None
-                )
-                if use_target_lane and run_main_optimizer:
-                    print(
-                        "Starting target-lane outer optimizer "
-                        f"(sync={effective_target_lane_sync_policy}, "
-                        f"outer_maxls={args.outer_maxls}, "
-                        f"initial_step_size={args.target_lane_outer_initial_step_size}, "
-                        f"boozer_bfgs_tol={target_lane_boozer_bfgs_tol_record}, "
-                        f"boozer_bfgs_maxiter={target_lane_boozer_bfgs_maxiter_record}, "
-                        f"boozer_newton_tol={target_lane_boozer_newton_tol_record}, "
-                        f"boozer_newton_maxiter={target_lane_boozer_newton_maxiter_record}, "
-                        f"remaining_maxiter={remaining_maxiter})..."
-                    )
-                if run_main_optimizer:
-                    main_failure_callback = (
-                        resolve_target_lane_invalid_state_failure_callback(
-                            target_lane_invalid_state_events,
-                            phase="phase2",
-                            use_target_lane=use_target_lane,
-                            args=args,
-                        )
-                    )
-                    main_optimizer_start_s = _perf_counter_s()
-                    with maybe_trace_single_stage_phase(
-                        "single_stage.outer_optimizer",
-                        enabled=jax_profile_enabled,
-                    ):
-                        if use_target_lane:
-                            res, target_lane_retry_summary = (
-                                run_single_stage_target_lane_optimizer_with_retries(
-                                    target_value_and_grad_objective,
-                                    dofs,
-                                    callback=accepted_step_callback,
-                                    retry_callback=retry_step_callback,
-                                    contract=outer_contract,
-                                    maxiter=remaining_maxiter,
-                                    ftol=ftol,
-                                    gtol=gtol,
-                                    maxcor=args.maxcor,
-                                    outer_maxls=args.outer_maxls,
-                                    scalar_fun=target_scalar_objective,
-                                    target_lane_initial_step_size=(
-                                        args.target_lane_outer_initial_step_size
-                                    ),
-                                    failure_callback=main_failure_callback,
-                                    invalid_state_events=target_lane_invalid_state_events,
-                                    run_dict=run_dict,
-                                    single_stage_search_policy=single_stage_search_policy,
-                                )
-                            )
-                        else:
-                            res = run_single_stage_optimizer(
-                                adapter,
-                                dofs,
-                                callback=accepted_step_callback,
-                                contract=outer_contract,
-                                maxiter=remaining_maxiter,
-                                ftol=ftol,
-                                gtol=gtol,
-                                maxcor=args.maxcor,
-                                outer_maxls=args.outer_maxls,
-                                scalar_fun=target_scalar_objective,
-                                target_lane_initial_step_size=None,
-                                failure_callback=main_failure_callback,
+                        if phase1_termination_message is not None:
+                            termination_message = (
+                                f"phase1={phase1_termination_message}; "
+                                f"phase2={termination_message}"
                             )
                     _record_timing(
                         timings,
@@ -7651,7 +7767,7 @@ if __name__ == "__main__":
                 "single_stage.target_lane_final_sync",
                 enabled=jax_profile_enabled,
             ):
-                adapter.sync_accepted_step(res.x)
+                target_lane_post_run_state_sync(res.x)
             _record_timing(
                 timings,
                 "target_lane_final_sync_s",
@@ -8117,3 +8233,29 @@ if __name__ == "__main__":
             results["TARGET_LANE_INVALID_STATE_DIAGNOSIS"],
         )
     write_json_file(os.path.join(OUT_DIR_ITER, "results.json"), results)
+                            if (
+                                target_lane_phase1_state_sync is not None
+                                and phase1_iterations > 0
+                            ):
+                                target_lane_phase1_sync_start_s = _perf_counter_s()
+                                with maybe_trace_single_stage_phase(
+                                    "single_stage.target_lane_initial_phase_sync",
+                                    enabled=jax_profile_enabled,
+                                ):
+                                    target_lane_phase1_state_sync(phase1_res.x)
+                                _record_timing(
+                                    timings,
+                                    "target_lane_initial_phase_sync_s",
+                                    target_lane_phase1_sync_start_s,
+                                    _perf_counter_s(),
+                                )
+                            if phase1_iterations > 0:
+                                dofs = phase1_final_dofs
+                                run_dict["x_prev"] = _single_stage_optimizer_dofs_array(
+                                    dofs
+                                ).copy()
+                            remaining_maxiter = max(MAXITER - phase1_iterations, 0)
+                    run_main_optimizer = (
+                        remaining_maxiter > 0 or phase1_termination_message is None
+                    )
+                    if use_target_lane and run_main_optimizer:

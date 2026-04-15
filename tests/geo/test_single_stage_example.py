@@ -243,6 +243,52 @@ class SingleStageExampleTests(unittest.TestCase):
         return _runtime_builder
 
     def resolve_benchmark_target_lane_sync(
+    @staticmethod
+    def _make_fake_target_lane_accepted_step_summary():
+        return {
+            "objective_value": 1.25,
+            "reporting_metrics": {
+                "final_iota": 0.21,
+                "final_volume": 0.75,
+                "coil_length": 2.0,
+                "max_curvature": 3.0,
+                "curve_curve_min_dist": 0.11,
+                "curve_surface_min_dist": 0.12,
+                "surface_vessel_min_dist": 0.13,
+                "hardware_status": {
+                    "success": True,
+                    "violations": [],
+                },
+            },
+        }
+
+    @staticmethod
+    def _make_fake_target_lane_state_sync(
+        captured,
+        *,
+        sdofs=None,
+        iota=None,
+        G=None,
+    ):
+        def fake_sync(state, x, *, benchmark_mode, update_run_state=True):
+            captured["sync"] = {
+                "state": state,
+                "x": np.asarray(x),
+                "benchmark_mode": benchmark_mode,
+                "update_run_state": update_run_state,
+            }
+            if update_run_state and sdofs is not None:
+                state["sdofs"] = np.asarray(sdofs)
+            if update_run_state and iota is not None:
+                state["iota"] = iota
+            if update_run_state and G is not None:
+                state["G"] = G
+            return (
+                SingleStageExampleTests._make_fake_target_lane_accepted_step_summary()
+            )
+
+        return fake_sync
+
         self,
         module,
         *,
@@ -3137,6 +3183,74 @@ class SingleStageExampleTests(unittest.TestCase):
             np.array([0.0, -2.0], dtype=np.float64),
             batch_size=3,
         )
+    def test_build_single_stage_target_lane_accepted_step_sync_can_skip_state_commit(
+        self,
+    ):
+        module = self.load_module()
+        captured = {}
+        runtime_summary = self._make_reporting_runtime_summary(
+            include_distance_metrics=True
+        )
+        fake_boozer_surface = types.SimpleNamespace(
+            run_code_traceable=lambda *_args: {
+                "success": jnp.asarray(True, dtype=bool),
+                "sdofs": jnp.asarray([0.4, -0.2], dtype=jnp.float64),
+                "iota": jnp.asarray(0.21, dtype=jnp.float64),
+                "G": jnp.asarray(1.75, dtype=jnp.float64),
+            }
+        )
+        fake_bs = types.SimpleNamespace(
+            coil_set_spec_from_dofs=lambda coil_dofs: coil_dofs
+        )
+
+        with patch.object(
+            module,
+            "get_traceable_single_stage_runtime_bundle_builder",
+            return_value=self._make_reporting_runtime_builder(
+                captured, runtime_summary
+            ),
+        ), patch.object(module, "CC_DIST", 0.05, create=True), patch.object(
+            module, "CS_DIST", 0.02, create=True
+        ), patch.object(module, "SS_DIST", 0.04, create=True), patch.object(
+            module, "CURVATURE_THRESHOLD", 40.0, create=True
+        ):
+            sync = module.build_single_stage_target_lane_accepted_step_sync(
+                fake_boozer_surface,
+                fake_bs,
+                0.21,
+                outer_objective_config="config-marker",
+                success_filter="success-filter-marker",
+            )
+            run_dict = {
+                "sdofs": np.array([0.1, -0.05], dtype=np.float64),
+                "iota": 0.2,
+                "G": 1.0,
+                "J": 1.0,
+                "dJ": np.zeros(2, dtype=np.float64),
+                "x_prev": np.array([8.0, -3.0], dtype=np.float64),
+                "it": 4,
+            }
+            run_dict_before = copy.deepcopy(run_dict)
+            summary = sync(
+                run_dict,
+                jax.device_put(np.array([1.0, -2.0], dtype=np.float64)),
+                benchmark_mode=False,
+                update_run_state=False,
+            )
+
+        self.assertIn("objective_value", summary)
+        self.assertNotIn("hardware_constraint_status", run_dict)
+        self.assertNotIn("target_lane_reporting_metrics", run_dict)
+        self.assertNotIn("target_lane_reporting_coil_dofs", run_dict)
+        self.assertNotIn("target_lane_reporting_include_distance_metrics", run_dict)
+        np.testing.assert_allclose(run_dict["sdofs"], run_dict_before["sdofs"])
+        self.assertEqual(run_dict["iota"], run_dict_before["iota"])
+        self.assertEqual(run_dict["G"], run_dict_before["G"])
+        self.assertEqual(run_dict["J"], run_dict_before["J"])
+        np.testing.assert_allclose(run_dict["dJ"], run_dict_before["dJ"])
+        np.testing.assert_allclose(run_dict["x_prev"], run_dict_before["x_prev"])
+        self.assertEqual(run_dict["it"], run_dict_before["it"])
+
 
         self.assertIsInstance(profiled_batch, jax.Array)
         host_batch = np.asarray(profiled_batch, dtype=np.float64)
@@ -3967,6 +4081,67 @@ class SingleStageExampleTests(unittest.TestCase):
             return types.SimpleNamespace(x=x0, nit=0, message="ok")
 
         with self.patch_optimizer_jax_module(
+    def test_resolve_target_lane_accepted_step_callback_uses_observe_only_callback_for_per_accept(
+        self,
+    ):
+        module = self.load_module()
+        callback = object()
+        observe_accepted_step = object()
+        adapter = types.SimpleNamespace(
+            callback=callback,
+            observe_accepted_step=observe_accepted_step,
+        )
+
+        resolved_callback = module.resolve_target_lane_accepted_step_callback(
+            adapter,
+            use_target_lane=True,
+            sync_policy="per-accept",
+        )
+
+        self.assertIs(resolved_callback, observe_accepted_step)
+
+    def test_resolve_target_lane_post_run_state_sync_uses_explicit_state_sync_when_callback_active(
+        self,
+    ):
+        module = self.load_module()
+        adapter = types.SimpleNamespace(
+            sync_accepted_step=object(),
+            sync_accepted_step_state=object(),
+        )
+
+        sync = module.resolve_target_lane_post_run_state_sync(
+            adapter,
+            use_target_lane=True,
+            accepted_step_callback=object(),
+        )
+
+        self.assertIs(sync, adapter.sync_accepted_step_state)
+
+    def test_resolve_target_lane_post_run_state_sync_maps_scaled_phase_state(self):
+        module = self.load_module()
+        synced_states = []
+        adapter = types.SimpleNamespace(
+            sync_accepted_step=lambda x: synced_states.append(
+                np.asarray(x, dtype=float)
+            )
+        )
+
+        sync = module.resolve_target_lane_post_run_state_sync(
+            adapter,
+            use_target_lane=True,
+            accepted_step_callback=None,
+            scaled_phase_step_scale=0.5,
+        )
+        state = module.ScaledOuterPhaseOptimizerState(
+            step_dofs=np.array([2.0, 4.0]),
+            anchor_dofs=np.array([10.0, 20.0]),
+        )
+
+        sync(state)
+
+        self.assertEqual(len(synced_states), 1)
+        np.testing.assert_allclose(synced_states[0], np.array([11.0, 22.0]))
+
             require_target_backend_x64=fake_require_target_backend_x64,
             jax_minimize=fake_jax_minimize,
         ):
@@ -4220,6 +4395,157 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertIs(optimizer_calls[1]["callback"], retry_callback)
         self.assertEqual(optimizer_calls[1]["initial_step_size"], 0.1)
 
+    def test_run_single_stage_target_lane_optimizer_with_retries_uses_explicit_post_run_sync_for_retry_anchor(
+        self,
+    ):
+        module = self.load_module()
+        contract = module.resolve_single_stage_optimizer_contract("jax", "ondevice")
+        anchor_state = {
+            "coil_dofs": np.array([4.0, 5.0]),
+            "sdofs": np.array([6.0, 7.0]),
+            "iota": TEST_IOTA,
+            "G": TEST_G0,
+            "J": 1.0,
+            "dJ": np.zeros(5),
+            "intersecting": False,
+            "self_intersection_check_available": True,
+            "hardware_constraint_status": {"success": True, "violations": []},
+        }
+        run_dict = self._make_candidate_run_dict([1.0, 2.0])
+        run_dict["latest_local_incumbent"] = copy.deepcopy(anchor_state)
+        run_dict["latest_local_stage"] = "latest"
+        run_dict["best_local_incumbent"] = copy.deepcopy(anchor_state)
+        run_dict["best_local_stage"] = "best"
+        invalid_state_events = [
+            {
+                "line_search_failed": True,
+                "nonfinite_step": False,
+                "stalled_step": False,
+                "valid_curvature": True,
+                "step_scale": {"value": 0.2},
+            }
+        ]
+
+        def always_fail(*args, **kwargs):
+            del args, kwargs
+            return types.SimpleNamespace(
+                x=np.array([9.0, 9.0]),
+                nit=0,
+                success=False,
+                message="failed",
+                status=5,
+            )
+
+        def fake_run_single_stage_optimizer(
+            fun,
+            dofs,
+            *,
+            callback,
+            contract,
+            maxiter,
+            ftol,
+            gtol,
+            maxcor,
+            outer_maxls,
+            scalar_fun,
+            target_lane_initial_step_size,
+            failure_callback,
+        ):
+            del (
+                fun,
+                contract,
+                maxiter,
+                ftol,
+                gtol,
+                maxcor,
+                outer_maxls,
+                scalar_fun,
+                target_lane_initial_step_size,
+                failure_callback,
+            )
+            optimizer_calls.append(
+                {
+                    "dofs": np.asarray(dofs, dtype=float).copy(),
+                    "callback": callback,
+                }
+            )
+            if len(optimizer_calls) == 1:
+                invalid_state_events.append(
+                    {
+                        "line_search_failed": True,
+                        "nonfinite_step": False,
+                        "stalled_step": False,
+                        "valid_curvature": True,
+                        "step_scale": {"value": 0.2},
+                    }
+                )
+                return types.SimpleNamespace(
+                    x=np.array([9.0, 9.0]),
+                    nit=1,
+                    success=False,
+                    message="failed",
+                    status=5,
+                )
+            return types.SimpleNamespace(
+                x=np.array([9.0, 9.0]),
+                nit=1,
+                success=True,
+                message="ok",
+                status=0,
+            )
+
+        def result_state_sync(result_x):
+            synced_x = np.asarray(result_x, dtype=float).copy()
+            synced_states.append(synced_x)
+            synced_anchor_state = copy.deepcopy(anchor_state)
+            synced_anchor_state["coil_dofs"] = synced_x
+            synced_anchor_state["J"] = 0.5
+            run_dict["latest_local_incumbent"] = copy.deepcopy(synced_anchor_state)
+            run_dict["latest_local_stage"] = "synced"
+            run_dict["best_local_incumbent"] = copy.deepcopy(synced_anchor_state)
+            run_dict["best_local_stage"] = "synced"
+
+        policy = module.SingleStageSearchPolicy(
+            donor_class="stage2_seed_only",
+            search_policy="repair_first",
+            adaptive_failure_penalty_weight=1.5,
+            invalid_step_retry_budget=2,
+            retry_step_shrink_factor=0.5,
+        )
+
+        with patch.object(
+            module,
+            "run_single_stage_optimizer",
+            side_effect=fake_run_single_stage_optimizer,
+        ):
+            result, retry_summary = (
+                module.run_single_stage_target_lane_optimizer_with_retries(
+                    lambda x: x,
+                    np.array([0.0, 0.0]),
+                    callback=None,
+                    retry_callback=None,
+                    result_state_sync=result_state_sync,
+                    contract=contract,
+                    maxiter=5,
+                    ftol=0.0,
+                    gtol=1.0e-6,
+                    maxcor=5,
+                    outer_maxls=6,
+                    scalar_fun=None,
+                    target_lane_initial_step_size=None,
+                    failure_callback=None,
+                    invalid_state_events=invalid_state_events,
+                    run_dict=run_dict,
+                    single_stage_search_policy=policy,
+                )
+            )
+
+        self.assertTrue(result.success)
+        self.assertEqual(retry_summary["attempt_count"], 1)
+        self.assertEqual(len(synced_states), 1)
+        np.testing.assert_allclose(optimizer_calls[1]["dofs"], np.array([9.0, 9.0]))
+        self.assertIsNone(optimizer_calls[1]["callback"])
+
     def test_run_single_stage_target_lane_optimizer_with_retries_restores_anchor_on_exhaustion(
         self,
     ):
@@ -4311,6 +4637,7 @@ class SingleStageExampleTests(unittest.TestCase):
             "sdofs": np.array([3.0, 4.0]),
             "iota": TEST_IOTA,
             "G": TEST_G0,
+                    result_state_sync=None,
             "J": 1.0,
             "dJ": np.zeros(5),
             "intersecting": False,
@@ -4377,6 +4704,7 @@ class SingleStageExampleTests(unittest.TestCase):
                 x=np.array([1.0, 2.0]),
                 nit=3,
                 nfev=6,
+                    result_state_sync=None,
                 njev=6,
                 success=True,
                 message="ok",
@@ -4499,6 +4827,7 @@ class SingleStageExampleTests(unittest.TestCase):
 
         retry_callback = object()
         policy = module.SingleStageSearchPolicy(
+                    result_state_sync=None,
             donor_class="stage2_seed_only",
             search_policy="repair_first",
             adaptive_failure_penalty_weight=1.5,
@@ -4617,6 +4946,7 @@ class SingleStageExampleTests(unittest.TestCase):
             "run_single_stage_optimizer",
             side_effect=always_fail,
         ):
+                    result_state_sync=None,
             result, retry_summary = (
                 module.run_single_stage_target_lane_optimizer_with_retries(
                     lambda x: x,
@@ -4722,6 +5052,7 @@ class SingleStageExampleTests(unittest.TestCase):
                 explicit_fun,
                 np.array([0.0, 0.0]),
                 contract=contract,
+                    result_state_sync=None,
                 maxiter=1,
                 ftol=0.0,
                 gtol=1e-6,
@@ -5104,7 +5435,12 @@ class SingleStageExampleTests(unittest.TestCase):
             log_path="/tmp/log.txt",
             reevaluate_before_accept=True,
             apply_coil_dofs=fake_setter,
-            accepted_step_state_sync=fake_sync,
+            accepted_step_state_sync=self._make_fake_target_lane_state_sync(
+                captured,
+                sdofs=np.array([9.0, -2.0]),
+                iota=0.21,
+                G=1.8,
+            ),
         )
 
         with patch.object(
@@ -5200,11 +5536,114 @@ class SingleStageExampleTests(unittest.TestCase):
 
         self.assertIsNone(jf.x)
         np.testing.assert_allclose(run_dict["x_prev"], np.zeros(2))
+        self.assertTrue(captured["sync"]["update_run_state"])
         self.assertIs(captured["snapshot"]["state"], run_dict)
         self.assertIsNone(captured["snapshot"]["objective_value"])
         self.assertIsNone(captured["snapshot"]["objective_grad"])
         self.assertFalse(captured["snapshot"]["store_objective_grad"])
         self.assertEqual(run_dict["lscount"], 4)
+    def test_single_stage_adapter_observe_accepted_step_skips_state_commit(self):
+        module = self.load_module()
+
+        class _JF:
+            def __init__(self):
+                self._x = np.array([1.0, 2.0])
+
+            @property
+            def x(self):
+                return self._x
+
+            @x.setter
+            def x(self, value):
+                self._x = np.asarray(value)
+
+        jf = _JF()
+        run_dict = {"x_prev": np.array([8.0, -3.0]), "lscount": 4, "it": 3}
+        captured = {}
+
+        adapter = module.SingleStageAdapter(
+            run_dict=run_dict,
+            boozer_surface="booz",
+            JF=jf,
+            bs="bs",
+            objectives={"qs": "obj"},
+            diagnostics={"iota": "diag"},
+            log_path="/tmp/log.txt",
+            reevaluate_before_accept=True,
+            accepted_step_state_sync=self._make_fake_target_lane_state_sync(
+                captured,
+                sdofs=np.array([9.0, -2.0]),
+            ),
+        )
+
+        with patch.object(
+            module,
+            "log_single_stage_target_lane_accepted_step",
+            return_value=None,
+        ) as log_summary:
+            adapter.observe_accepted_step(np.array([3.0, -4.0]))
+
+        self.assertIs(captured["sync"]["state"], run_dict)
+        np.testing.assert_allclose(captured["sync"]["x"], np.array([3.0, -4.0]))
+        self.assertFalse(captured["sync"]["benchmark_mode"])
+        self.assertFalse(captured["sync"]["update_run_state"])
+        log_summary.assert_called_once()
+        np.testing.assert_allclose(run_dict["x_prev"], np.array([8.0, -3.0]))
+        self.assertNotIn("sdofs", run_dict)
+        np.testing.assert_allclose(jf.x, np.array([1.0, 2.0]))
+
+    def test_single_stage_adapter_sync_accepted_step_state_commits_without_logging(
+        self,
+    ):
+        module = self.load_module()
+
+        class _JF:
+            def __init__(self):
+                self._x = np.array([1.0, 2.0])
+
+            @property
+            def x(self):
+                return self._x
+
+            @x.setter
+            def x(self, value):
+                self._x = np.asarray(value)
+
+        jf = _JF()
+        run_dict = {"x_prev": np.zeros(2), "lscount": 4, "it": 3}
+        captured = {}
+
+        adapter = module.SingleStageAdapter(
+            run_dict=run_dict,
+            boozer_surface="booz",
+            JF=jf,
+            bs="bs",
+            objectives={"qs": "obj"},
+            diagnostics={"iota": "diag"},
+            log_path="/tmp/log.txt",
+            reevaluate_before_accept=True,
+            accepted_step_state_sync=self._make_fake_target_lane_state_sync(
+                captured,
+                sdofs=np.array([9.0, -2.0]),
+            ),
+        )
+
+        with patch.object(
+            module,
+            "log_single_stage_target_lane_accepted_step",
+            return_value=None,
+        ) as log_summary:
+            adapter.sync_accepted_step_state(np.array([3.0, -4.0]))
+
+        self.assertIs(captured["sync"]["state"], run_dict)
+        np.testing.assert_allclose(captured["sync"]["x"], np.array([3.0, -4.0]))
+        self.assertFalse(captured["sync"]["benchmark_mode"])
+        self.assertTrue(captured["sync"]["update_run_state"])
+        log_summary.assert_not_called()
+        np.testing.assert_allclose(run_dict["x_prev"], np.array([3.0, -4.0]))
+        np.testing.assert_allclose(run_dict["sdofs"], np.array([9.0, -2.0]))
+        np.testing.assert_allclose(jf.x, np.array([1.0, 2.0]))
+
 
     def test_single_stage_adapter_benchmark_sync_reuses_reevaluated_objective(self):
         module = self.load_module()
