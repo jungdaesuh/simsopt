@@ -1,3 +1,5 @@
+import inspect
+
 import numpy as np
 
 from alm_utils import (
@@ -8,7 +10,16 @@ from alm_utils import (
     upper_bound_residual,
     zero_gradient_like,
 )
-from banana_opt.hardware_contracts import fixed_stage2_clearance_contract
+from banana_opt.hardware_contracts import (
+    TF_CURRENT_HARD_LIMIT_A,
+    fixed_stage2_clearance_contract,
+)
+from banana_opt.hardware_constraint_schema import (
+    build_hardware_constraint_artifact_payload_fields,
+    build_hardware_constraint_status,
+    build_threshold_overrides,
+    hardware_constraint_alm_names,
+)
 from banana_opt.smoothing import smoothmax_selected, smoothmin_selected
 
 
@@ -38,6 +49,70 @@ def build_stage2_alm_settings(args):
         trust_radius_grow=args.alm_trust_radius_grow,
         max_inner_attempts=args.alm_max_inner_attempts,
     )
+
+
+def _build_stage2_artifact_hardware_snapshot(
+    *,
+    hardware_status,
+    final_coil_length,
+    length_target,
+    final_curve_curve_min_dist,
+    final_max_curvature,
+    final_curve_surface_min_dist,
+    plasma_vessel_min_dist,
+    banana_current_A,
+    banana_current_max_A,
+    tf_current_A,
+):
+    return {
+        "coil_length": final_coil_length,
+        "length_target": length_target,
+        "curve_curve_min_dist": final_curve_curve_min_dist,
+        "max_curvature": final_max_curvature,
+        "curve_surface_min_dist": final_curve_surface_min_dist,
+        "surface_vessel_min_dist": plasma_vessel_min_dist,
+        "banana_current_A": banana_current_A,
+        "banana_current_max_A": banana_current_max_A,
+        "tf_current_A": tf_current_A,
+        "tf_current_limit_A": TF_CURRENT_HARD_LIMIT_A,
+        "artifact_hardware_status": hardware_status,
+    }
+
+
+def _stage2_constraint_names(*, include_coil_surface: bool) -> tuple[str, ...]:
+    requested_names = [
+        "coil_length",
+        "coil_coil_spacing",
+        "max_curvature",
+        "banana_current",
+    ]
+    if include_coil_surface:
+        requested_names.insert(2, "coil_surface_spacing")
+    return hardware_constraint_alm_names(names=tuple(requested_names))
+
+
+def _legacy_stage2_constraint_names(*, include_coil_surface: bool) -> tuple[str, ...]:
+    if include_coil_surface:
+        return (
+            "coil_length_upper_bound",
+            "coil_coil_spacing",
+            "coil_surface_spacing",
+            "max_curvature",
+            "banana_current_upper_bound",
+        )
+    return (
+        "coil_length_upper_bound",
+        "coil_coil_spacing",
+        "max_curvature",
+        "banana_current_upper_bound",
+    )
+
+
+def _ordered_constraint_values(
+    constraint_names: tuple[str, ...],
+    values_by_name: dict[str, object],
+) -> list[object]:
+    return [values_by_name[name] for name in constraint_names]
 
 
 def build_stage2_results(
@@ -101,6 +176,18 @@ def build_stage2_results(
     plasma_vessel_min_dist=None,
 ):
     alm_enabled = constraint_method == "alm"
+    hardware_snapshot = _build_stage2_artifact_hardware_snapshot(
+        hardware_status=hardware_status,
+        final_coil_length=final_coil_length,
+        length_target=length_target,
+        final_curve_curve_min_dist=final_curve_curve_min_dist,
+        final_max_curvature=final_max_curvature,
+        final_curve_surface_min_dist=final_curve_surface_min_dist,
+        plasma_vessel_min_dist=plasma_vessel_min_dist,
+        banana_current_A=banana_current_A,
+        banana_current_max_A=float(args.banana_current_max_A),
+        tf_current_A=tf_current_A,
+    )
     return {
         "PLASMA_SURF_FILENAME": plasma_surf_filename,
         "PLASMA_SURF_PATH": file_loc,
@@ -268,13 +355,7 @@ def build_stage2_results(
         "FINAL_VOLUME": float(final_volume),
         "FIELD_ERROR": float(field_error),
         "SELF_INTERSECTING": intersecting,
-        "MAX_CURVATURE": final_max_curvature,
-        "COIL_LENGTH": final_coil_length,
-        "CURVE_CURVE_MIN_DIST": final_curve_curve_min_dist,
-        "CURVE_SURFACE_MIN_DIST": final_curve_surface_min_dist,
-        "PLASMA_VESSEL_MIN_DIST": plasma_vessel_min_dist,
-        "HARDWARE_CONSTRAINTS_OK": hardware_status["success"],
-        "HARDWARE_CONSTRAINT_VIOLATIONS": hardware_status["violations"],
+        **build_hardware_constraint_artifact_payload_fields(hardware_snapshot),
     }
 
 
@@ -307,47 +388,58 @@ def evaluate_stage2_hardware_constraints(
     coil_surface_threshold=None,
     plasma_vessel_min_dist=None,
     plasma_vessel_threshold=None,
+    banana_current_A=None,
+    banana_current_threshold=None,
+    tf_current_A=None,
+    tf_current_threshold=None,
 ):
-    violations = []
-    if coil_length > length_target:
-        violations.append(
-            f"coil_length {coil_length:.6f} exceeds target {length_target:.6f}"
+    threshold_overrides = build_threshold_overrides(
+        (
+            ("coil_length", length_target),
+            ("coil_coil_spacing", cc_threshold),
+            ("max_curvature", curvature_threshold),
+            ("coil_surface_spacing", coil_surface_threshold),
+            ("surface_vessel_spacing", plasma_vessel_threshold),
+            ("banana_current", banana_current_threshold),
+            ("tf_current", tf_current_threshold),
         )
-    if curve_curve_min_dist < cc_threshold:
-        violations.append(
-            f"coil_coil_min_dist {curve_curve_min_dist:.6f} below threshold {cc_threshold:.6f}"
-        )
-    if max_curvature > curvature_threshold:
-        violations.append(
-            f"max_curvature {max_curvature:.6f} exceeds threshold {curvature_threshold:.6f}"
-        )
-    status = {
-        "success": len(violations) == 0,
-        "violations": violations,
-        "coil_length": float(coil_length),
-        "length_target": float(length_target),
-        "curve_curve_min_dist": float(curve_curve_min_dist),
-        "cc_threshold": float(cc_threshold),
-        "max_curvature": float(max_curvature),
-        "curvature_threshold": float(curvature_threshold),
+    )
+    measured_values = {
+        "coil_length": coil_length,
+        "coil_coil_spacing": curve_curve_min_dist,
+        "max_curvature": max_curvature,
+        "coil_surface_spacing": curve_surface_min_dist,
+        "surface_vessel_spacing": plasma_vessel_min_dist,
+        "banana_current": banana_current_A,
+        "tf_current": tf_current_A,
     }
+    status = build_hardware_constraint_status(
+        measured_values,
+        applies_to="artifact",
+        threshold_overrides=threshold_overrides,
+    )
+    status.update(
+        {
+            "coil_length": float(coil_length),
+            "length_target": float(length_target),
+            "curve_curve_min_dist": float(curve_curve_min_dist),
+            "cc_threshold": float(cc_threshold),
+            "max_curvature": float(max_curvature),
+            "curvature_threshold": float(curvature_threshold),
+        }
+    )
     if curve_surface_min_dist is not None and coil_surface_threshold is not None:
-        if curve_surface_min_dist < coil_surface_threshold:
-            violations.append(
-                f"coil_surface_min_dist {curve_surface_min_dist:.6f} below threshold "
-                f"{coil_surface_threshold:.6f}"
-            )
         status["curve_surface_min_dist"] = float(curve_surface_min_dist)
         status["coil_surface_threshold"] = float(coil_surface_threshold)
     if plasma_vessel_min_dist is not None and plasma_vessel_threshold is not None:
-        if plasma_vessel_min_dist < plasma_vessel_threshold:
-            violations.append(
-                f"plasma_vessel_min_dist {plasma_vessel_min_dist:.6f} below threshold "
-                f"{plasma_vessel_threshold:.6f}"
-            )
         status["plasma_vessel_min_dist"] = float(plasma_vessel_min_dist)
         status["plasma_vessel_threshold"] = float(plasma_vessel_threshold)
-    status["success"] = len(violations) == 0
+    if banana_current_A is not None and banana_current_threshold is not None:
+        status["banana_current_A"] = float(banana_current_A)
+        status["banana_current_threshold"] = float(banana_current_threshold)
+    if tf_current_A is not None and tf_current_threshold is not None:
+        status["tf_current_A"] = float(tf_current_A)
+        status["tf_current_threshold"] = float(tf_current_threshold)
     return status
 
 
@@ -374,6 +466,40 @@ def stage2_constraint_activity_tolerances(
             tolerances[3],
         ]
     return tolerances
+
+
+def resolve_stage2_constraint_activity_tolerances(
+    stage2_constraint_activity_tolerances_fn,
+    distance_smoothing: float,
+    curvature_smoothing: float,
+    *,
+    include_coil_surface: bool,
+):
+    parameters = inspect.signature(stage2_constraint_activity_tolerances_fn).parameters
+    if "include_coil_surface" in parameters:
+        raw_tolerances = stage2_constraint_activity_tolerances_fn(
+            distance_smoothing,
+            curvature_smoothing,
+            include_coil_surface=include_coil_surface,
+        )
+    else:
+        raw_tolerances = stage2_constraint_activity_tolerances_fn(
+            distance_smoothing,
+            curvature_smoothing,
+        )
+    tolerance_values = [float(value) for value in raw_tolerances]
+    constraint_names = _legacy_stage2_constraint_names(
+        include_coil_surface=include_coil_surface,
+    )
+    if len(tolerance_values) != len(constraint_names):
+        raise ValueError(
+            "Stage 2 activity tolerance helper returned "
+            f"{len(tolerance_values)} values for {len(constraint_names)} constraints."
+        )
+    return {
+        name: value
+        for name, value in zip(constraint_names, tolerance_values)
+    }
 
 
 def _sanitize_stage2_alm_inputs(
@@ -680,47 +806,45 @@ def evaluate_stage2_alm_problem(
         base_objective_optimizable,
     )
 
+    active_names = _stage2_constraint_names(include_coil_surface=include_coil_surface)
+    hard_by_name = {
+        "coil_length_upper_bound": coil_length - length_target,
+        "coil_coil_spacing": Jccdist.minimum_distance - curve_curve_min_dist,
+        "max_curvature": max_curvature - Jc.threshold,
+        "banana_current_upper_bound": banana_current_signed_value,
+    }
+    surrogate_by_name = {
+        "coil_length_upper_bound": coil_length - length_target,
+        "coil_coil_spacing": curve_curve_signed_value,
+        "max_curvature": curvature_signed_value,
+        "banana_current_upper_bound": banana_current_signed_value,
+    }
+    grad_by_name = {
+        "coil_length_upper_bound": length_grad,
+        "coil_coil_spacing": curve_curve_grad,
+        "max_curvature": curvature_grad,
+        "banana_current_upper_bound": banana_current_grad,
+    }
+    feasibility_by_name = {
+        "coil_length_upper_bound": length_violation,
+        "coil_coil_spacing": curve_curve_violation,
+        "max_curvature": curvature_violation,
+        "banana_current_upper_bound": banana_current_violation,
+    }
     if include_coil_surface:
-        hard_signed_constraint_values = [
-            coil_length - length_target,
-            Jccdist.minimum_distance - curve_curve_min_dist,
-            Jcsdist.minimum_distance - curve_surface_min_dist,
-            max_curvature - Jc.threshold,
-            banana_current_signed_value,
-        ]
-        surrogate_signed_constraint_values = [
-            coil_length - length_target,
-            curve_curve_signed_value,
-            curve_surface_signed_value,
-            curvature_signed_value,
-            banana_current_signed_value,
-        ]
-        constraint_grads = [
-            length_grad,
-            curve_curve_grad,
-            curve_surface_grad,
-            curvature_grad,
-            banana_current_grad,
-        ]
-    else:
-        hard_signed_constraint_values = [
-            coil_length - length_target,
-            Jccdist.minimum_distance - curve_curve_min_dist,
-            max_curvature - Jc.threshold,
-            banana_current_signed_value,
-        ]
-        surrogate_signed_constraint_values = [
-            coil_length - length_target,
-            curve_curve_signed_value,
-            curvature_signed_value,
-            banana_current_signed_value,
-        ]
-        constraint_grads = [
-            length_grad,
-            curve_curve_grad,
-            curvature_grad,
-            banana_current_grad,
-        ]
+        hard_by_name["coil_surface_spacing"] = (
+            Jcsdist.minimum_distance - curve_surface_min_dist
+        )
+        surrogate_by_name["coil_surface_spacing"] = curve_surface_signed_value
+        grad_by_name["coil_surface_spacing"] = curve_surface_grad
+        feasibility_by_name["coil_surface_spacing"] = curve_surface_violation
+    hard_signed_constraint_values = _ordered_constraint_values(active_names, hard_by_name)
+    surrogate_signed_constraint_values = _ordered_constraint_values(
+        active_names,
+        surrogate_by_name,
+    )
+    constraint_grads = _ordered_constraint_values(active_names, grad_by_name)
+    hard_violation_values = _ordered_constraint_values(active_names, feasibility_by_name)
     (
         sanitized_base_value,
         sanitized_base_grad,
@@ -742,22 +866,7 @@ def evaluate_stage2_alm_problem(
     )
     sanitized_hard_violation_values, invalid_hard_violation_fields = (
         _sanitize_stage2_feasibility_values(
-            (
-                [
-                    length_violation,
-                    curve_curve_violation,
-                    curve_surface_violation,
-                    curvature_violation,
-                    banana_current_violation,
-                ]
-                if include_coil_surface
-                else [
-                    length_violation,
-                    curve_curve_violation,
-                    curvature_violation,
-                    banana_current_violation,
-                ]
-            ),
+            hard_violation_values,
             constraint_values=sanitized_hard_signed_constraint_values,
             field_prefix="hard_violation_values",
         )
@@ -771,6 +880,12 @@ def evaluate_stage2_alm_problem(
         multipliers,
         penalty,
     )
+    tolerance_by_name = resolve_stage2_constraint_activity_tolerances(
+        stage2_constraint_activity_tolerances,
+        distance_smoothing,
+        curvature_smoothing,
+        include_coil_surface=include_coil_surface,
+    )
     invalid_fields = (
         sanitized_invalid_fields
         + invalid_hard_signed_fields
@@ -779,35 +894,12 @@ def evaluate_stage2_alm_problem(
     evaluation.update(
         {
             "base_value": sanitized_base_value,
-            "constraint_names": (
-                [
-                    "coil_length_upper_bound",
-                    "coil_coil_spacing",
-                    "coil_surface_spacing",
-                    "max_curvature",
-                    "banana_current_upper_bound",
-                ]
-                if include_coil_surface
-                else [
-                    "coil_length_upper_bound",
-                    "coil_coil_spacing",
-                    "max_curvature",
-                    "banana_current_upper_bound",
-                ]
-            ),
+            "constraint_names": list(active_names),
             "dual_update_values": sanitized_surrogate_signed_constraint_values,
             "constraint_grads": sanitized_constraint_grads,
-            "constraint_activity_tolerances": (
-                stage2_constraint_activity_tolerances(
-                    distance_smoothing,
-                    curvature_smoothing,
-                    include_coil_surface=True,
-                )
-                if include_coil_surface
-                else stage2_constraint_activity_tolerances(
-                    distance_smoothing,
-                    curvature_smoothing,
-                )
+            "constraint_activity_tolerances": np.asarray(
+                _ordered_constraint_values(active_names, tolerance_by_name),
+                dtype=float,
             ),
             "feasibility_values": sanitized_hard_violation_values,
             "hard_signed_constraint_values": sanitized_hard_signed_constraint_values,

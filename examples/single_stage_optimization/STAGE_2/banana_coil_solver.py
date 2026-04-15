@@ -59,11 +59,9 @@ from banana_opt.hardware_contracts import (
 )
 from banana_opt.hardware_constraint_schema import (
     hardware_constraint_alm_names,
-    resolve_penalty_box_bound_threshold,
 )
 from banana_opt.current_contracts import (
-    apply_banana_current_upper_bound,
-    banana_current_exceeds_limit,
+    apply_penalty_traversal_forbidden_box_bounds,
 )
 from banana_opt.stage2_objectives import (
     build_stage2_alm_settings,
@@ -738,21 +736,12 @@ def main(parsed_args=None):
     dofs = BASE_OBJECTIVE.x if CONSTRAINT_METHOD == "alm" else JF.x
     lbfgsb_bounds = None
     if CONSTRAINT_METHOD != "alm":
-        penalty_banana_current_max_A = resolve_penalty_box_bound_threshold(
-            "banana_current",
-            requested_threshold=args.banana_current_max_A,
-        )
-        if args.stage2_bs_path and banana_current_exceeds_limit(
-            initial_banana_current_A,
-            penalty_banana_current_max_A,
-        ):
-            raise ValueError(
-                "Loaded Stage 2 seed starts above --banana-current-max-A; "
-                "penalty mode cannot accept an infeasible banana-current seed."
-            )
-        apply_banana_current_upper_bound(
-            new_banana_coils[0].current,
-            penalty_banana_current_max_A,
+        apply_penalty_traversal_forbidden_box_bounds(
+            bound_targets={"banana_current": new_banana_coils[0].current},
+            requested_thresholds={"banana_current": args.banana_current_max_A},
+            seed_values={"banana_current": initial_banana_current_A},
+            validate_seed=bool(args.stage2_bs_path),
+            seed_context="Loaded Stage 2 seed",
         )
         lbfgsb_bounds = build_lbfgsb_bounds(JF)
     fun = make_stage2_fun(JF, new_bs, new_surf, Jf, Jls, Jccdist, Jc)

@@ -109,9 +109,9 @@ from banana_opt.frontier_solver_checkpoint import (
     build_solver_checkpoint_payload,
 )
 from banana_opt.current_contracts import (
-    apply_banana_current_upper_bound,
-    banana_current_exceeds_limit,
+    apply_penalty_traversal_forbidden_box_bounds,
     infer_uniform_coil_current_A as _infer_uniform_coil_current_A,
+    resolve_penalty_traversal_forbidden_box_bounds,
     resolve_loaded_tf_current_A as _resolve_loaded_tf_current_A,
     resolve_plasma_current_settings as _resolve_plasma_current_settings_impl,
 )
@@ -130,7 +130,6 @@ from banana_opt.hardware_contracts import (
 from banana_opt.hardware_constraint_schema import (
     build_hardware_constraint_artifact_payload_fields,
     hardware_constraint_alm_names,
-    resolve_penalty_box_bound_threshold,
 )
 from banana_opt.incumbents import (
     restore_single_stage_incumbent_state,
@@ -1573,10 +1572,10 @@ def current_single_stage_hardware_snapshot_kwargs(*, coil_length=None):
         "banana_current_max_A",
         BANANA_CURRENT_HARD_LIMIT_A,
     )
-    penalty_banana_current_max_A = resolve_penalty_box_bound_threshold(
-        "banana_current",
-        requested_threshold=resolved_banana_current_max_A,
+    penalty_box_bounds = resolve_penalty_traversal_forbidden_box_bounds(
+        {"banana_current": resolved_banana_current_max_A},
     )
+    penalty_banana_current_max_A = penalty_box_bounds["banana_current"]
     return {
         "coil_length": resolved_coil_length,
         "length_target": resolved_length_target,
@@ -5504,26 +5503,12 @@ if __name__ == "__main__":
     tf_current_sum_abs_A = float(sum(abs(c.current.get_value()) for c in tf_coils))
     initial_banana_current_A = float(banana_coils[0].current.get_value())
     if CONSTRAINT_METHOD == "penalty":
-        penalty_banana_current_max_A = resolve_penalty_box_bound_threshold(
-            "banana_current",
-            requested_threshold=args.banana_current_max_A,
-        )
-        if (
-            not args.init_only
-            and banana_current_exceeds_limit(
-                initial_banana_current_A,
-                penalty_banana_current_max_A,
-            )
-        ):
-            raise ValueError(
-                "Loaded Stage 2 banana current "
-                f"{initial_banana_current_A:.6f} A exceeds --banana-current-max-A="
-                f"{float(penalty_banana_current_max_A):.6f} A. Penalty/L-BFGS-B mode "
-                "cannot start outside the hard box bound."
-            )
-        apply_banana_current_upper_bound(
-            banana_coils[0].current,
-            penalty_banana_current_max_A,
+        apply_penalty_traversal_forbidden_box_bounds(
+            bound_targets={"banana_current": banana_coils[0].current},
+            requested_thresholds={"banana_current": args.banana_current_max_A},
+            seed_values={"banana_current": initial_banana_current_A},
+            validate_seed=not args.init_only,
+            seed_context="Loaded Stage 2 banana current",
         )
     # ALM now checks banana current as a final feasibility constraint as well,
     # but only penalty/L-BFGS-B mode keeps the hard inner box bound that forbids

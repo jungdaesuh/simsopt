@@ -448,7 +448,10 @@ def build_summary(
                 "COIL_PLASMA_MIN_DIST_M",
                 COIL_PLASMA_MIN_DIST_M,
             ),
-            "plasma_vessel_min_dist": stage2_results.get("PLASMA_VESSEL_MIN_DIST"),
+            "plasma_vessel_min_dist": stage2_results.get(
+                "SURFACE_VESSEL_MIN_DIST",
+                stage2_results.get("PLASMA_VESSEL_MIN_DIST"),
+            ),
             "plasma_vessel_threshold": stage2_results.get(
                 "PLASMA_VESSEL_MIN_DIST_M",
                 PLASMA_VESSEL_MIN_DIST_M,

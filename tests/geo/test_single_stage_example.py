@@ -6139,6 +6139,14 @@ def load_stage2_module():
     return module
 
 
+def _make_unbounded_scaled_current():
+    leaf_current = SimpleNamespace(
+        local_lower_bounds=np.array([-np.inf], dtype=float),
+        local_upper_bounds=np.array([np.inf], dtype=float),
+    )
+    return leaf_current, SimpleNamespace(current_to_scale=leaf_current, scale=1.0)
+
+
 def _load_segment_distance_from_source():
     """Extract the deployed segment-distance kernel from the SSOT stage2 module via AST.
 
@@ -7424,18 +7432,43 @@ class CurrentBaselineContractTests(unittest.TestCase):
         self.assertEqual(args.banana_init_current_A, 12000.0)
         self.assertEqual(args.banana_current_max_A, 16000.0)
 
-    def test_apply_banana_current_upper_bound_is_symmetric_in_penalty_mode(self):
+    def test_penalty_traversal_helper_applies_symmetric_box_bound(self):
         module = load_stage2_module()
-        leaf_current = SimpleNamespace(
-            local_lower_bounds=np.array([-np.inf], dtype=float),
-            local_upper_bounds=np.array([np.inf], dtype=float),
+        leaf_current, scaled_current = _make_unbounded_scaled_current()
+
+        resolved = module.apply_penalty_traversal_forbidden_box_bounds(
+            bound_targets={"banana_current": scaled_current},
+            requested_thresholds={"banana_current": 16000.0},
         )
-        scaled_current = SimpleNamespace(current_to_scale=leaf_current, scale=1.0)
 
-        module.apply_banana_current_upper_bound(scaled_current, 16000.0)
-
+        self.assertEqual(resolved, {"banana_current": 16000.0})
         np.testing.assert_allclose(leaf_current.local_lower_bounds, [-16000.0])
         np.testing.assert_allclose(leaf_current.local_upper_bounds, [16000.0])
+
+    def test_shared_penalty_traversal_helper_uses_schema_bound(self):
+        module = load_stage2_module()
+        leaf_current, scaled_current = _make_unbounded_scaled_current()
+
+        resolved = module.apply_penalty_traversal_forbidden_box_bounds(
+            bound_targets={"banana_current": scaled_current},
+            requested_thresholds={"banana_current": 20000.0},
+        )
+
+        self.assertEqual(resolved, {"banana_current": 16000.0})
+        np.testing.assert_allclose(leaf_current.local_lower_bounds, [-16000.0])
+        np.testing.assert_allclose(leaf_current.local_upper_bounds, [16000.0])
+
+    def test_shared_penalty_traversal_helper_rejects_missing_target(self):
+        module = load_stage2_module()
+
+        with self.assertRaisesRegex(
+            KeyError,
+            "Missing penalty box-bound target for hardware constraint 'banana_current'",
+        ):
+            module.apply_penalty_traversal_forbidden_box_bounds(
+                bound_targets={},
+                requested_thresholds={"banana_current": 16000.0},
+            )
 
 
 class Stage2RuntimeSmokeTests(unittest.TestCase):

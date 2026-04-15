@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal
+from typing import Callable, Literal, Mapping
 
 import numpy as np
 
 from banana_opt.hardware_contracts import (
     BANANA_CURRENT_HARD_LIMIT_A,
     validate_tf_current_limit,
+)
+from banana_opt.hardware_constraint_schema import (
+    hardware_constraint_penalty_box_bound_names,
+    resolve_penalty_box_bound_threshold,
 )
 
 
@@ -25,13 +29,16 @@ __all__ = [
     "EffectiveCurrentMode",
     "FiniteCurrentMode",
     "MU0_OVER_2PI",
+    "PenaltyBoxBoundHandler",
     "PlasmaCurrentSettings",
     "apply_banana_current_upper_bound",
+    "apply_penalty_traversal_forbidden_box_bounds",
     "banana_current_exceeds_limit",
     "boozer_I_to_physical_current_A",
     "infer_uniform_coil_current_A",
     "physical_current_to_boozer_I",
     "resolve_effective_current_mode",
+    "resolve_penalty_traversal_forbidden_box_bounds",
     "resolve_loaded_tf_current_A",
     "resolve_plasma_current_settings",
     "unwrap_current_optimizable",
@@ -45,6 +52,12 @@ class PlasmaCurrentSettings:
     input_source: CurrentInputSource
     mode: FiniteCurrentMode
     effective_mode: EffectiveCurrentMode
+
+
+@dataclass(frozen=True)
+class PenaltyBoxBoundHandler:
+    apply_bound: Callable[[object, float], None]
+    exceeds_limit: Callable[[float, float], bool]
 
 
 def physical_current_to_boozer_I(plasma_current_A: float) -> float:
@@ -93,6 +106,71 @@ def apply_banana_current_upper_bound(current, banana_current_max_A):
 
 def banana_current_exceeds_limit(current_A: float, banana_current_max_A: float) -> bool:
     return abs(float(current_A)) > float(banana_current_max_A)
+
+
+_PENALTY_BOX_BOUND_HANDLERS: Mapping[str, PenaltyBoxBoundHandler] = {
+    "banana_current": PenaltyBoxBoundHandler(
+        apply_bound=apply_banana_current_upper_bound,
+        exceeds_limit=banana_current_exceeds_limit,
+    ),
+}
+
+
+def _penalty_box_bound_handler(name: str) -> PenaltyBoxBoundHandler:
+    try:
+        return _PENALTY_BOX_BOUND_HANDLERS[name]
+    except KeyError as exc:
+        raise KeyError(
+            f"No penalty box-bound handler registered for hardware constraint {name!r}."
+        ) from exc
+
+
+def resolve_penalty_traversal_forbidden_box_bounds(
+    requested_thresholds: Mapping[str, float | None],
+) -> dict[str, float]:
+    return {
+        name: resolve_penalty_box_bound_threshold(
+            name,
+            requested_threshold=requested_thresholds.get(name),
+        )
+        for name in hardware_constraint_penalty_box_bound_names(
+            traversal_policy="forbidden",
+        )
+    }
+
+
+def apply_penalty_traversal_forbidden_box_bounds(
+    *,
+    bound_targets: Mapping[str, object],
+    requested_thresholds: Mapping[str, float | None],
+    seed_values: Mapping[str, float | None] | None = None,
+    validate_seed: bool = False,
+    seed_context: str = "Loaded seed",
+) -> dict[str, float]:
+    resolved_thresholds = resolve_penalty_traversal_forbidden_box_bounds(
+        requested_thresholds,
+    )
+    applied_thresholds: dict[str, float] = {}
+    for name, threshold in resolved_thresholds.items():
+        target = bound_targets.get(name)
+        if target is None:
+            raise KeyError(
+                f"Missing penalty box-bound target for hardware constraint {name!r}."
+            )
+        handler = _penalty_box_bound_handler(name)
+        if validate_seed and seed_values is not None:
+            seed_value = seed_values.get(name)
+            if (
+                seed_value is not None
+                and handler.exceeds_limit(float(seed_value), threshold)
+            ):
+                raise ValueError(
+                    f"{seed_context} {name}={float(seed_value):.6f} exceeds the "
+                    f"traversal-forbidden penalty box bound {threshold:.6f}."
+                )
+        handler.apply_bound(target, threshold)
+        applied_thresholds[name] = threshold
+    return applied_thresholds
 
 
 def infer_uniform_coil_current_A(coils) -> float | None:

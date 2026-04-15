@@ -695,6 +695,8 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
             final_max_curvature=41.0,
             final_coil_length=1.8,
             final_curve_curve_min_dist=0.04,
+            final_curve_surface_min_dist=0.017,
+            plasma_vessel_min_dist=0.041,
             hardware_status=hardware_status,
         )
 
@@ -740,7 +742,13 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
         self.assertEqual(result["basin_objective_improvement"], 0.09)
         self.assertEqual(result["BANANA_INIT_CURRENT_A"], 1.2e4)
         self.assertEqual(result["BANANA_CURRENT_MAX_A"], 1.6e4)
+        self.assertEqual(result["TF_CURRENT_LIMIT_A"], 8.0e4)
         self.assertAlmostEqual(result["BANANA_TO_TF_CURRENT_RATIO"], 0.11875)
+        self.assertEqual(result["COIL_LENGTH"], 1.8)
+        self.assertEqual(result["MAX_CURVATURE"], 41.0)
+        self.assertEqual(result["CURVE_CURVE_MIN_DIST"], 0.04)
+        self.assertEqual(result["CURVE_SURFACE_MIN_DIST"], 0.017)
+        self.assertEqual(result["SURFACE_VESSEL_MIN_DIST"], 0.041)
 
     def test_smooth_max_curvature_signed_constraint_uses_active_window(self):
         curve = _FakeCurve(

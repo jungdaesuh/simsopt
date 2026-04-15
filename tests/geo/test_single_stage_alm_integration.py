@@ -522,6 +522,23 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
             1.6e4,
         )
 
+    def test_penalty_traversal_policy_execution_is_centralized_in_shared_helper(self):
+        single_stage_source = SINGLE_STAGE_MODULE_PATH.read_text()
+        stage2_source = STAGE2_MODULE_PATH.read_text()
+
+        self.assertIn(
+            "apply_penalty_traversal_forbidden_box_bounds(",
+            single_stage_source,
+        )
+        self.assertIn(
+            "apply_penalty_traversal_forbidden_box_bounds(",
+            stage2_source,
+        )
+        self.assertNotIn("apply_banana_current_upper_bound(", single_stage_source)
+        self.assertNotIn("banana_current_exceeds_limit(", single_stage_source)
+        self.assertNotIn("apply_banana_current_upper_bound(", stage2_source)
+        self.assertNotIn("banana_current_exceeds_limit(", stage2_source)
+
     def test_single_stage_alm_constraint_names_follow_shared_schema(self):
         schema_module = load_hardware_constraint_schema_module()
         functions = extract_functions(
@@ -1026,7 +1043,7 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
                 "HARDWARE_CONSTRAINTS_OK": True,
                 "CURVE_SURFACE_MIN_DIST": 0.017,
                 "COIL_PLASMA_MIN_DIST_M": 0.015,
-                "PLASMA_VESSEL_MIN_DIST": 0.041,
+                "SURFACE_VESSEL_MIN_DIST": 0.041,
                 "PLASMA_VESSEL_MIN_DIST_M": 0.04,
             },
         )
@@ -1390,31 +1407,14 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
         self.assertIn("_build_stage2_results_impl(", source)
         objectives_source = STAGE2_OBJECTIVES_MODULE_PATH.read_text()
         self.assertIn("fixed_stage2_clearance_contract()", objectives_source)
-
-        results_dict = find_function_return_dict(
-            STAGE2_OBJECTIVES_MODULE_PATH,
-            "build_stage2_results",
+        self.assertIn(
+            "build_hardware_constraint_artifact_payload_fields(",
+            objectives_source,
         )
-
-        entries = {
-            key.value: value
-            for key, value in zip(results_dict.keys, results_dict.values)
-            if isinstance(key, ast.Constant) and isinstance(key.value, str)
-        }
-
-        self.assertIn("HARDWARE_CONSTRAINTS_OK", entries)
-        self.assertIn("HARDWARE_CONSTRAINT_VIOLATIONS", entries)
-
-        for field_name, expected_status_key in (
-            ("HARDWARE_CONSTRAINTS_OK", "success"),
-            ("HARDWARE_CONSTRAINT_VIOLATIONS", "violations"),
-        ):
-            value_node = entries[field_name]
-            self.assertIsInstance(value_node, ast.Subscript)
-            self.assertIsInstance(value_node.value, ast.Name)
-            self.assertEqual(value_node.value.id, "hardware_status")
-            self.assertIsInstance(value_node.slice, ast.Constant)
-            self.assertEqual(value_node.slice.value, expected_status_key)
+        self.assertIn(
+            "_build_stage2_artifact_hardware_snapshot(",
+            objectives_source,
+        )
 
     def test_stage2_results_contract_records_basin_hopping_telemetry(self):
         results_dict = find_function_return_dict(
