@@ -15,6 +15,9 @@ from banana_opt.hardware_contracts import (
 
 ConstraintKind = Literal["lower_bound", "upper_bound", "box_bound"]
 ConstraintTarget = Literal["penalty", "alm", "artifact"]
+# Traversal policy is search-role metadata, not a universal mode dispatcher.
+# It buckets realized status reporting for every mode, while only the
+# penalty/box_bound/forbidden subset becomes a hard search-time bound.
 TraversalPolicy = Literal["allowed", "forbidden"]
 
 
@@ -231,6 +234,12 @@ def hardware_constraint_penalty_box_bound_names(
     names: Collection[str] | None = None,
     traversal_policy: TraversalPolicy | None = None,
 ) -> tuple[str, ...]:
+    """Return the schema subset that becomes a penalty-search runtime bound.
+
+    This is intentionally narrower than the full hardware contract surface.
+    ALM inclusion comes from ``hardware_constraint_alm_names``; artifact and
+    final certification consume the schema through the status/payload builders.
+    """
     return tuple(
         spec.name
         for spec in hardware_constraint_specs(

@@ -128,6 +128,8 @@ def _penalty_box_bound_handler(name: str) -> PenaltyBoxBoundHandler:
 def resolve_penalty_traversal_forbidden_box_bounds(
     requested_thresholds: Mapping[str, float | None],
 ) -> dict[str, float]:
+    # Only penalty-search box bounds need runtime handlers here. ALM and
+    # artifact enforcement consume the schema through separate paths.
     return {
         name: resolve_penalty_box_bound_threshold(
             name,

@@ -522,6 +522,26 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
             1.6e4,
         )
 
+    def test_traversal_policy_runtime_subset_is_intentionally_penalty_only(self):
+        schema_module = load_hardware_constraint_schema_module()
+
+        self.assertEqual(
+            schema_module.hardware_constraint_alm_names(
+                names=("coil_length", "banana_current"),
+            ),
+            ("coil_length_upper_bound", "banana_current_upper_bound"),
+        )
+        self.assertEqual(
+            schema_module.hardware_constraint_specs(
+                applies_to="artifact",
+                traversal_policy="forbidden",
+            ),
+            (
+                schema_module.get_hardware_constraint_spec("banana_current"),
+                schema_module.get_hardware_constraint_spec("tf_current"),
+            ),
+        )
+
     def test_hardware_constraint_status_splits_allowed_and_forbidden_traversal(self):
         schema_module = load_hardware_constraint_schema_module()
 
