@@ -7576,6 +7576,8 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
         use_seed,
         basin_hops=0,
         banana_current_A=9500.0,
+        alm_accepted_candidate_x=None,
+        artifact_state_by_x=None,
     ):
         module = load_stage2_module()
         runtime = {
@@ -7768,6 +7770,9 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
 
         def fake_minimize_alm(*_args, **_kwargs):
             runtime["minimize_alm_calls"] += 1
+            accepted_callback = _kwargs.get("accepted_callback")
+            if accepted_callback is not None and alm_accepted_candidate_x is not None:
+                accepted_callback(np.asarray(alm_accepted_candidate_x, dtype=float))
             return SimpleNamespace(
                 x=np.array([0.1, 0.2], dtype=float),
                 nit=5,
@@ -7803,6 +7808,26 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
                 final_stationarity_tolerance=5.0e-3,
                 history=[{"outer_iteration": 1}],
             )
+
+        def fake_capture_stage2_artifact_state(**kwargs):
+            dofs = tuple(np.asarray(kwargs["dofs"], dtype=float).tolist())
+            if artifact_state_by_x is None or dofs not in artifact_state_by_x:
+                raise AssertionError(f"unexpected artifact-state request for dofs {dofs}")
+            state = artifact_state_by_x[dofs]
+            return {
+                "x": np.asarray(kwargs["dofs"], dtype=float).copy(),
+                "field_objective": float(state["field_objective"]),
+                "coil_length": float(state["coil_length"]),
+                "curve_curve_min_dist": float(state["curve_curve_min_dist"]),
+                "curve_surface_min_dist": float(state["curve_surface_min_dist"]),
+                "max_curvature": float(state["max_curvature"]),
+                "banana_current_A": float(state["banana_current_A"]),
+                "tf_current_A": float(state["tf_current_A"]),
+                "hardware_status": {
+                    "success": bool(state["hardware_status"]["success"]),
+                    "violations": list(state["hardware_status"]["violations"]),
+                },
+            }
 
         def fake_run_basin_hopping(*_args, **_kwargs):
             runtime["run_basin_hopping_calls"] += 1
@@ -7909,6 +7934,14 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
                 ]
                 for patcher in common_patches:
                     stack.enter_context(patcher)
+                if artifact_state_by_x is not None:
+                    stack.enter_context(
+                        patch.object(
+                            module,
+                            "_capture_stage2_artifact_state",
+                            side_effect=fake_capture_stage2_artifact_state,
+                        )
+                    )
                 if use_seed:
                     stack.enter_context(patch.object(module, "load_stage2_seed_configuration", side_effect=fake_seed_loader))
                     stack.enter_context(patch.object(module, "_initialize_coils", side_effect=AssertionError("unexpected fresh initialization")))
@@ -8017,6 +8050,64 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
         self.assertTrue(runtime["results"]["ALM_MULTIPLIER_CAP_BINDING"])
         self.assertEqual(runtime["results"]["ALM_MULTIPLIER_CAP_BINDING_INDICES"], [1])
         self.assertEqual(runtime["results"]["TERMINATION_MESSAGE"], "alm_ok")
+
+    def test_stage2_main_alm_restores_best_exact_hardware_pass_for_artifact_output(self):
+        def make_artifact_state(
+            field_objective,
+            coil_length,
+            *,
+            success,
+            curve_curve_min_dist=0.06,
+            max_curvature=41.0,
+        ):
+            violations = [] if success else [f"coil_length {coil_length:.6f} > 1.700000"]
+            return {
+                "field_objective": float(field_objective),
+                "coil_length": float(coil_length),
+                "curve_curve_min_dist": float(curve_curve_min_dist),
+                "curve_surface_min_dist": 0.02,
+                "max_curvature": float(max_curvature),
+                "banana_current_A": 9500.0,
+                "tf_current_A": 8.0e4,
+                "hardware_status": {
+                    "success": bool(success),
+                    "violations": violations,
+                },
+            }
+
+        runtime = self._run_stage2_main(
+            init_only=False,
+            constraint_method="alm",
+            use_seed=True,
+            alm_accepted_candidate_x=np.array([0.9, 0.8], dtype=float),
+            artifact_state_by_x={
+                (0.0, 0.0): make_artifact_state(0.9, 1.7004, success=False),
+                (0.9, 0.8): make_artifact_state(
+                    0.4,
+                    1.69,
+                    success=True,
+                    curve_curve_min_dist=0.07,
+                    max_curvature=39.0,
+                ),
+                (0.1, 0.2): make_artifact_state(0.6, 1.7002, success=False),
+            },
+        )
+
+        self._assert_runtime_counts(
+            runtime,
+            seed_loads=1,
+            initialize_calls=0,
+            minimize_calls=0,
+            minimize_alm_calls=1,
+        )
+        self.assertEqual(
+            runtime["results"]["TERMINATION_MESSAGE"],
+            "alm_ok; restored_best_exact_hardware_pass",
+        )
+        self.assertFalse(runtime["results"]["OPTIMIZER_SUCCESS"])
+        self.assertTrue(runtime["results"]["HARDWARE_CONSTRAINTS_OK"])
+        self.assertEqual(runtime["results"]["HARDWARE_CONSTRAINT_VIOLATIONS"], [])
+        self.assertEqual(runtime["results"]["COIL_LENGTH"], 1.69)
 
     def test_stage2_main_penalty_path_uses_lbfgsb(self):
         runtime = self._run_stage2_main(init_only=False, constraint_method="penalty", use_seed=True)

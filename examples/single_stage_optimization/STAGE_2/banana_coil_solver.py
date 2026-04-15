@@ -486,6 +486,64 @@ def evaluate_stage2_hardware_constraints(
     )
 
 
+def _capture_stage2_artifact_state(
+    *,
+    dofs,
+    JF,
+    BASE_OBJECTIVE,
+    Jf,
+    Jls,
+    Jccdist,
+    Jcsdist,
+    new_banana_curve,
+    new_banana_coils,
+    new_tf_coils,
+    length_target,
+    cc_threshold,
+    curvature_threshold,
+    coil_surface_threshold,
+    plasma_vessel_min_dist,
+    plasma_vessel_threshold,
+    banana_current_max_A,
+):
+    candidate_x = np.asarray(dofs, dtype=float).copy()
+    JF.x = candidate_x
+    BASE_OBJECTIVE.x = candidate_x
+    coil_length = float(Jls.J())
+    curve_curve_min_dist = float(Jccdist.shortest_distance())
+    curve_surface_min_dist = float(Jcsdist.shortest_distance())
+    max_curvature = float(np.max(new_banana_curve.kappa()))
+    banana_current_A = float(new_banana_coils[0].current.get_value())
+    tf_current_A = float(new_tf_coils[0].current.get_value())
+    hardware_status = _evaluate_stage2_hardware_constraints(
+        coil_length,
+        length_target,
+        curve_curve_min_dist,
+        cc_threshold,
+        max_curvature,
+        curvature_threshold,
+        curve_surface_min_dist=curve_surface_min_dist,
+        coil_surface_threshold=coil_surface_threshold,
+        plasma_vessel_min_dist=plasma_vessel_min_dist,
+        plasma_vessel_threshold=plasma_vessel_threshold,
+        banana_current_A=banana_current_A,
+        banana_current_threshold=banana_current_max_A,
+        tf_current_A=tf_current_A,
+        tf_current_threshold=TF_CURRENT_HARD_LIMIT_A,
+    )
+    return {
+        "x": candidate_x,
+        "field_objective": float(Jf.J()),
+        "coil_length": coil_length,
+        "curve_curve_min_dist": curve_curve_min_dist,
+        "curve_surface_min_dist": curve_surface_min_dist,
+        "max_curvature": max_curvature,
+        "banana_current_A": banana_current_A,
+        "tf_current_A": tf_current_A,
+        "hardware_status": hardware_status,
+    }
+
+
 def load_stage2_seed_configuration(seed_bs_path, surf, num_tf_coils, out_dir):
     bs = load(seed_bs_path)
     bs.set_points(surf.gamma().reshape((-1, 3)))
@@ -734,6 +792,30 @@ def main(parsed_args=None):
 
     # minimize gets called, optimizes based on degrees of freedom from objective function
     dofs = BASE_OBJECTIVE.x if CONSTRAINT_METHOD == "alm" else JF.x
+
+    def capture_artifact_state(candidate_x):
+        return _capture_stage2_artifact_state(
+            dofs=candidate_x,
+            JF=JF,
+            BASE_OBJECTIVE=BASE_OBJECTIVE,
+            Jf=Jf,
+            Jls=Jls,
+            Jccdist=Jccdist,
+            Jcsdist=Jcsdist,
+            new_banana_curve=new_banana_curve,
+            new_banana_coils=new_banana_coils,
+            new_tf_coils=new_tf_coils,
+            length_target=LENGTH_TARGET,
+            cc_threshold=CC_THRESHOLD,
+            curvature_threshold=CURVATURE_THRESHOLD,
+            coil_surface_threshold=CS_THRESHOLD,
+            plasma_vessel_min_dist=plasma_vessel_min_dist,
+            plasma_vessel_threshold=PLASMA_VESSEL_MIN_DIST_M,
+            banana_current_max_A=float(args.banana_current_max_A),
+        )
+
+    selected_result_x = None
+    best_exact_hardware_pass = None
     lbfgsb_bounds = None
     if CONSTRAINT_METHOD != "alm":
         apply_penalty_traversal_forbidden_box_bounds(
@@ -776,6 +858,27 @@ def main(parsed_args=None):
                 smooth_min_curve_surface_signed_constraint=smooth_min_curve_surface_signed_constraint,
             )
 
+        def maybe_record_exact_hardware_pass(candidate_x, *, source):
+            nonlocal best_exact_hardware_pass
+            candidate_state = capture_artifact_state(candidate_x)
+            if not candidate_state["hardware_status"]["success"]:
+                return
+            if (
+                best_exact_hardware_pass is None
+                or candidate_state["field_objective"]
+                < best_exact_hardware_pass["field_objective"]
+            ):
+                best_exact_hardware_pass = {
+                    "x": candidate_state["x"].copy(),
+                    "field_objective": candidate_state["field_objective"],
+                    "source": source,
+                }
+                print(
+                    "[ALM] exact hardware-pass incumbent "
+                    f"source={source}, field_objective={candidate_state['field_objective']:.6e}, "
+                    f"coil_length={candidate_state['coil_length']:.6f}"
+                )
+
         def outer_state_callback(outer_iteration, multipliers, penalty):
             print(
                 f"[ALM] outer_iteration={outer_iteration}, "
@@ -800,6 +903,10 @@ def main(parsed_args=None):
     elif CONSTRAINT_METHOD == "alm":
         if args.basin_hops > 0:
             raise ValueError("--basin-hops is not supported with --constraint-method=alm")
+        maybe_record_exact_hardware_pass(
+            dofs,
+            source="loaded_seed" if args.stage2_bs_path else "initial_state",
+        )
         res = minimize_alm(
             dofs,
             alm_constraint_names,
@@ -811,12 +918,34 @@ def main(parsed_args=None):
                 "ftol": args.ftol,
                 "gtol": args.gtol,
             },
+            accepted_callback=lambda candidate_x: maybe_record_exact_hardware_pass(
+                candidate_x,
+                source="accepted_iterate",
+            ),
             outer_state_callback=outer_state_callback,
         )
         alm_result = res
         res_nit = res.nit
         termination_message = str(res.message)
         optimizer_success = bool(res.success)
+        selected_result_x = np.asarray(res.x, dtype=float).copy()
+        final_candidate_state = capture_artifact_state(selected_result_x)
+        if (
+            best_exact_hardware_pass is not None
+            and not final_candidate_state["hardware_status"]["success"]
+        ):
+            selected_result_x = best_exact_hardware_pass["x"].copy()
+            optimizer_success = False
+            if termination_message:
+                termination_message = (
+                    f"{termination_message}; restored_best_exact_hardware_pass"
+                )
+            else:
+                termination_message = "restored_best_exact_hardware_pass"
+            print(
+                "[ALM] restoring best exact hardware-pass incumbent "
+                f"from {best_exact_hardware_pass['source']}"
+            )
         print(res.message)
     elif args.basin_hops > 0:
         # Basin-hopping: perturb DOFs and re-run L-BFGS-B multiple times, keep best
@@ -890,9 +1019,11 @@ def main(parsed_args=None):
 
 
     # Ensure SIMSOPT state matches the best result (needed after basin-hopping)
+    final_artifact_state = None
     if not args.init_only:
-        JF.x = res.x
-        BASE_OBJECTIVE.x = res.x
+        if selected_result_x is None:
+            selected_result_x = np.asarray(res.x, dtype=float).copy()
+        final_artifact_state = capture_artifact_state(selected_result_x)
 
     # POST-OPTIMIZATION PROCESSING AND OUTPUTS
     # ---------------------------------------------------------------------------------------
@@ -900,27 +1031,35 @@ def main(parsed_args=None):
         print("BANANA COIL IS SELF-INTERSECTING!")
         intersecting = True
 
-    final_coil_length = float(Jls.J())
-    final_curve_curve_min_dist = float(Jccdist.shortest_distance())
-    final_curve_surface_min_dist = float(Jcsdist.shortest_distance())
-    final_max_curvature = float(np.max(new_banana_curve.kappa()))
-    final_banana_current_A = float(new_banana_coils[0].current.get_value())
-    hardware_status = _evaluate_stage2_hardware_constraints(
-        final_coil_length,
-        LENGTH_TARGET,
-        final_curve_curve_min_dist,
-        CC_THRESHOLD,
-        final_max_curvature,
-        CURVATURE_THRESHOLD,
-        curve_surface_min_dist=final_curve_surface_min_dist,
-        coil_surface_threshold=CS_THRESHOLD,
-        plasma_vessel_min_dist=plasma_vessel_min_dist,
-        plasma_vessel_threshold=PLASMA_VESSEL_MIN_DIST_M,
-        banana_current_A=final_banana_current_A,
-        banana_current_threshold=args.banana_current_max_A,
-        tf_current_A=float(new_tf_coils[0].current.get_value()),
-        tf_current_threshold=TF_CURRENT_HARD_LIMIT_A,
-    )
+    if final_artifact_state is None:
+        final_coil_length = float(Jls.J())
+        final_curve_curve_min_dist = float(Jccdist.shortest_distance())
+        final_curve_surface_min_dist = float(Jcsdist.shortest_distance())
+        final_max_curvature = float(np.max(new_banana_curve.kappa()))
+        final_banana_current_A = float(new_banana_coils[0].current.get_value())
+        hardware_status = _evaluate_stage2_hardware_constraints(
+            final_coil_length,
+            LENGTH_TARGET,
+            final_curve_curve_min_dist,
+            CC_THRESHOLD,
+            final_max_curvature,
+            CURVATURE_THRESHOLD,
+            curve_surface_min_dist=final_curve_surface_min_dist,
+            coil_surface_threshold=CS_THRESHOLD,
+            plasma_vessel_min_dist=plasma_vessel_min_dist,
+            plasma_vessel_threshold=PLASMA_VESSEL_MIN_DIST_M,
+            banana_current_A=final_banana_current_A,
+            banana_current_threshold=args.banana_current_max_A,
+            tf_current_A=float(new_tf_coils[0].current.get_value()),
+            tf_current_threshold=TF_CURRENT_HARD_LIMIT_A,
+        )
+    else:
+        final_coil_length = final_artifact_state["coil_length"]
+        final_curve_curve_min_dist = final_artifact_state["curve_curve_min_dist"]
+        final_curve_surface_min_dist = final_artifact_state["curve_surface_min_dist"]
+        final_max_curvature = final_artifact_state["max_curvature"]
+        final_banana_current_A = final_artifact_state["banana_current_A"]
+        hardware_status = final_artifact_state["hardware_status"]
     if not hardware_status["success"]:
         optimizer_success = False
         constraint_summary = "; ".join(hardware_status["violations"])
