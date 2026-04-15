@@ -801,6 +801,60 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertEqual(status["first_exit_reason"], "surface_exit")
         self.assertAlmostEqual(status["first_exit_time"], 0.8)
 
+    def test_evaluate_topology_gate_threads_transport_diagnostics(self):
+        module = self.load_module()
+        transport_diagnostics = {
+            "schema_version": "single_stage_topology_transport_diagnostics_v1",
+            "status": "partial",
+            "gamma_c": {"status": "unavailable"},
+            "effective_ripple": {"status": "unavailable", "aliases": ["epsilon_eff"]},
+        }
+
+        status = module._evaluate_topology_gate_impl(
+            object(),
+            object(),
+            2,
+            2.0,
+            1e-7,
+            0.75,
+            score_topology_fn=lambda *_args, **_kwargs: {
+                **_mock_topology_score_result(
+                    stop_reason="surface_exit",
+                    first_exit_time=0.8,
+                ),
+                "transport_diagnostics": transport_diagnostics,
+            },
+        )
+
+        self.assertEqual(status["transport_diagnostics"], transport_diagnostics)
+
+    def test_evaluate_topology_gate_wrapper_uses_shared_impl_signature(self):
+        module = self.load_module()
+
+        with patch.object(
+            module,
+            "_evaluate_topology_gate_impl",
+            return_value={"ok": True},
+        ) as gate_impl:
+            result = module.evaluate_topology_gate(
+                "surface",
+                "field",
+                2,
+                2.0,
+                1e-7,
+                0.75,
+            )
+
+        self.assertEqual(result, {"ok": True})
+        gate_impl.assert_called_once_with(
+            "surface",
+            "field",
+            2,
+            2.0,
+            1e-7,
+            0.75,
+        )
+
     def test_evaluate_topology_gate_marks_iteration_limit_as_broken(self):
         module = self.load_module()
         status = module._evaluate_topology_gate_impl(
@@ -1110,6 +1164,66 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertEqual(interpolated_model["max_abs_error"], 0.0)
         self.assertEqual(interpolated_model["mean_abs_error"], 0.0)
         self.assertEqual(interpolated_model["max_rel_error"], 0.0)
+
+    def test_compute_topology_transport_diagnostics_reports_surface_structure(self):
+        topology_module = load_topology_scorer_module()
+
+        class _Surface:
+            def gamma(self):
+                return np.array(
+                    [
+                        [[1.0, 0.0, 0.0], [2.0, 0.0, 0.0]],
+                        [[3.0, 0.0, 0.0], [4.0, 0.0, 0.0]],
+                    ],
+                    dtype=float,
+                )
+
+        class _Field:
+            def set_points(self, points):
+                self._points = np.asarray(points, dtype=float)
+
+            def AbsB(self):
+                return self._points[:, 0] + 1.0
+
+        diagnostics = topology_module.compute_topology_transport_diagnostics(
+            _Surface(),
+            _Field(),
+        )
+
+        self.assertEqual(
+            diagnostics["schema_version"],
+            "single_stage_topology_transport_diagnostics_v1",
+        )
+        self.assertEqual(diagnostics["status"], "partial")
+        self.assertEqual(
+            diagnostics["surface_field_structure"]["status"],
+            "evaluated",
+        )
+        self.assertEqual(
+            diagnostics["surface_field_structure"]["grid_shape"],
+            [2, 2],
+        )
+        self.assertAlmostEqual(
+            diagnostics["surface_field_structure"]["modB_min"],
+            2.0,
+        )
+        self.assertAlmostEqual(
+            diagnostics["surface_field_structure"]["modB_max"],
+            5.0,
+        )
+        self.assertAlmostEqual(
+            diagnostics["surface_field_structure"]["mirror_ratio"],
+            2.5,
+        )
+        self.assertAlmostEqual(
+            diagnostics["surface_field_structure"]["effective_inverse_aspect_ratio_epsilon"],
+            3.0 / 7.0,
+        )
+        self.assertEqual(diagnostics["gamma_c"]["status"], "unavailable")
+        self.assertEqual(
+            diagnostics["effective_ripple"]["aliases"],
+            ["epsilon_eff"],
+        )
 
     def test_topology_fidelity_report_summarizes_tier_agreement(self):
         ladder_module = load_topology_fidelity_ladder_module()
@@ -2155,6 +2269,139 @@ class HardwareConstraintTests(unittest.TestCase):
                 [str(out_dir / "surf_best_feasible_outer_boozer_surface.json")],
             )
 
+    def test_build_topology_gate_diagnostics_distinguishes_pass_reject_and_broken(self):
+        module = load_single_stage_example_module()
+
+        passed = module.build_topology_gate_diagnostics(
+            {
+                "enabled": True,
+                "evaluated": True,
+                "success": True,
+                "state": "feasible",
+                "survived_lines": 4,
+                "nfieldlines": 4,
+                "survival_fraction": 1.0,
+                "survival_threshold": 0.5,
+            },
+            artifact_role="final_topology_gate",
+        )
+        rejected = module.build_topology_gate_diagnostics(
+            {
+                "enabled": True,
+                "evaluated": True,
+                "success": False,
+                "state": "modeled_infeasible",
+                "survived_lines": 1,
+                "nfieldlines": 4,
+                "survival_fraction": 0.25,
+                "survival_threshold": 0.5,
+                "first_exit_reason": "surface_exit",
+                "first_exit_time": 0.2,
+                "first_exit_angle": 0.1,
+            },
+            artifact_role="final_topology_gate",
+        )
+        broken = module.build_topology_gate_diagnostics(
+            {
+                "enabled": True,
+                "evaluated": True,
+                "success": False,
+                "state": "broken",
+                "broken": True,
+                "evaluation_error": "trace exploded",
+                "evaluation_error_type": "RuntimeError",
+            },
+            artifact_role="final_topology_gate",
+        )
+
+        self.assertEqual(passed["outcome"], "pass")
+        self.assertEqual(passed["reason"], "survival_threshold_met")
+        self.assertIn("Topology gate pass", passed["summary"])
+        self.assertEqual(rejected["outcome"], "reject")
+        self.assertEqual(rejected["reason"], "surface_exit")
+        self.assertIn("surface_exit", rejected["summary"])
+        self.assertEqual(broken["outcome"], "broken")
+        self.assertEqual(broken["reason"], "RuntimeError")
+        self.assertIn("trace exploded", broken["summary"])
+
+    def test_build_topology_gate_diagnostics_keeps_skipped_gate_disabled(self):
+        module = load_single_stage_example_module()
+
+        diagnostics = module.build_topology_gate_diagnostics(
+            module.skipped_topology_gate_status(),
+            artifact_role="final_topology_gate",
+        )
+
+        self.assertEqual(diagnostics["outcome"], "not_evaluated")
+        self.assertFalse(diagnostics["enabled"])
+        self.assertFalse(diagnostics["evaluated"])
+        self.assertEqual(diagnostics["reason"], "not_evaluated")
+
+    def test_write_topology_checkpoint_artifacts_writes_diagnostics(self):
+        module = load_single_stage_example_module()
+
+        class FakeBiotSavart:
+            def __init__(self):
+                self.saved = []
+
+            def save(self, path):
+                self.saved.append(path)
+
+        class FakeBoozerSurface:
+            def __init__(self):
+                self.surface = object()
+
+        fake_bs = FakeBiotSavart()
+        fake_outer = FakeBoozerSurface()
+        topology_entry = {
+            "accepted_iteration": 7,
+            "topology_state": "evaluated",
+            "topology_broken": False,
+            "survived_lines": 10,
+            "nfieldlines": 12,
+            "confinement_score": 0.91,
+            "confinement_loss": 0.08,
+            "transport_diagnostics": {
+                "schema_version": "single_stage_topology_transport_diagnostics_v1",
+                "status": "partial",
+                "effective_ripple": {
+                    "status": "unavailable",
+                    "aliases": ["epsilon_eff"],
+                },
+            },
+        }
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out_dir = Path(tmpdir) / "best_topology"
+            with patch.object(module, "save_surface_artifacts") as save_surface_artifacts:
+                module.write_topology_checkpoint_artifacts(
+                    out_dir,
+                    artifact_role="best_topology_checkpoint",
+                    topology_entry=topology_entry,
+                    biotsavart=fake_bs,
+                    surface_data=[{"name": "outer", "boozer_surface": fake_outer}],
+                )
+
+            diagnostics = json.loads(
+                (out_dir / "topology_diagnostics.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(diagnostics["kind"], "score")
+            self.assertEqual(diagnostics["artifact_role"], "best_topology_checkpoint")
+            self.assertEqual(diagnostics["outcome"], "scored")
+            self.assertEqual(diagnostics["entry"]["accepted_iteration"], 7)
+            self.assertEqual(
+                diagnostics["entry"]["transport_diagnostics"]["effective_ripple"]["aliases"],
+                ["epsilon_eff"],
+            )
+            self.assertEqual(fake_bs.saved, [str(out_dir / "biot_savart.json")])
+            save_surface_artifacts.assert_called_once_with(
+                [{"name": "outer", "boozer_surface": fake_outer}],
+                fake_bs,
+                out_dir,
+                "surf",
+                also_write_outer_legacy=False,
+            )
+
     def test_build_preserved_timeout_results_payload_includes_replay_metadata(self):
         module = load_single_stage_example_module()
         replay_config = module.PreservedTimeoutReplayConfig(
@@ -2216,6 +2463,12 @@ class HardwareConstraintTests(unittest.TestCase):
         self.assertEqual(payload["TARGET_VOLUME"], 0.10)
         self.assertEqual(payload["TARGET_IOTA"], 0.15)
         self.assertEqual(payload["FINAL_SOURCE_STAGE"], payload["PRESERVED_TIMEOUT_SALVAGE_STAGE"])
+        self.assertEqual(payload["FINAL_TOPOLOGY_GATE_DIAGNOSTICS"]["kind"], "gate")
+        self.assertEqual(
+            payload["FINAL_TOPOLOGY_GATE_DIAGNOSTICS"]["outcome"],
+            "pass",
+        )
+        self.assertIsNone(payload["FINAL_TOPOLOGY_TRANSPORT_DIAGNOSTICS"])
 
     def test_build_preserved_timeout_results_payload_includes_alm_runtime_state(self):
         module = load_single_stage_example_module()

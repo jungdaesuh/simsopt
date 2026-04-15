@@ -9,7 +9,10 @@ All three paths use the same stopping criteria, seed logic, and metric
 computation so that metrics cannot drift between callback and validation.
 """
 
+from dataclasses import dataclass
+
 import numpy as np
+import simsoptpp as sopp
 
 
 # ---------------------------------------------------------------------------
@@ -60,6 +63,494 @@ def phi_hit_counts(fieldlines_phi_hits, phis):
         )
         for i in range(len(phis))
     ]
+
+
+@dataclass(frozen=True)
+class TopologySeedTier:
+    name: str
+    default_seed_plane_count: int
+    default_field_policy: str
+
+
+TOPOLOGY_SEED_TIERS = {
+    "cheap": TopologySeedTier(
+        name="cheap",
+        default_seed_plane_count=2,
+        default_field_policy="never",
+    ),
+    "medium": TopologySeedTier(
+        name="medium",
+        default_seed_plane_count=4,
+        default_field_policy="auto",
+    ),
+    "strict": TopologySeedTier(
+        name="strict",
+        default_seed_plane_count=8,
+        default_field_policy="auto",
+    ),
+}
+
+TOPOLOGY_INTERPOLATION_TMAX_THRESHOLD = 50.0
+TOPOLOGY_INTERPOLATION_GRID = {
+    "degree": 3,
+    "nr": 40,
+    "nphi": 40,
+    "nz": 20,
+}
+_TOPOLOGY_SEED_THETA_SAMPLES = 512
+TOPOLOGY_TRANSPORT_DIAGNOSTICS_SCHEMA_VERSION = (
+    "single_stage_topology_transport_diagnostics_v1"
+)
+
+_GAMMA_C_UNAVAILABLE_REASON = (
+    "Gamma_c requires bounce-integral drift metrics and flux-coordinate geometry "
+    "that the single-stage vacuum topology scorer does not expose."
+)
+_EFFECTIVE_RIPPLE_UNAVAILABLE_REASON = (
+    "EffectiveRipple (epsilon_eff) requires a Nemov-style bounce-integral "
+    "transport backend and flux-coordinate geometry that the single-stage "
+    "vacuum topology scorer does not expose."
+)
+
+
+def _resolve_topology_seed_tier(seed_tier):
+    try:
+        return TOPOLOGY_SEED_TIERS[str(seed_tier)]
+    except KeyError as error:
+        raise ValueError(
+            f"Unsupported topology seed tier {seed_tier!r}; "
+            f"expected one of {sorted(TOPOLOGY_SEED_TIERS)}"
+        ) from error
+
+
+def _resolve_seed_plane_count(seed_tier, nfieldlines, seed_plane_count):
+    if nfieldlines <= 0:
+        return 0
+    default_plane_count = _resolve_topology_seed_tier(seed_tier).default_seed_plane_count
+    resolved_plane_count = (
+        default_plane_count
+        if seed_plane_count is None
+        else int(seed_plane_count)
+    )
+    if resolved_plane_count <= 0:
+        raise ValueError("seed_plane_count must be positive")
+    return min(int(nfieldlines), resolved_plane_count)
+
+
+def _seed_plane_angles(nfp, plane_count):
+    if plane_count <= 0:
+        return np.empty((0,), dtype=float)
+    field_period = (2.0 * np.pi) / float(max(int(nfp), 1))
+    return np.linspace(0.0, field_period, plane_count, endpoint=False, dtype=float)
+
+
+def _lines_per_plane(nfieldlines, plane_count):
+    if plane_count <= 0:
+        return []
+    base, remainder = divmod(int(nfieldlines), int(plane_count))
+    return [
+        int(base + (1 if plane_index < remainder else 0))
+        for plane_index in range(int(plane_count))
+    ]
+
+
+def _cross_section_rz(surface, phi_abs, theta_samples=_TOPOLOGY_SEED_THETA_SAMPLES):
+    cross_section = np.asarray(
+        surface.cross_section(phi=float(phi_abs) / (2.0 * np.pi), thetas=theta_samples),
+        dtype=float,
+    )
+    rz = np.empty((cross_section.shape[0], 2), dtype=float)
+    rz[:, 0] = np.sqrt(cross_section[:, 0] ** 2 + cross_section[:, 1] ** 2)
+    rz[:, 1] = cross_section[:, 2]
+    return cross_section, rz
+
+
+def _angle_distance(values, target):
+    wrapped = np.mod(values - target + np.pi, 2.0 * np.pi) - np.pi
+    return np.abs(wrapped)
+
+
+def _inset_rz_point(boundary_rz, centroid_rz, inset_fraction, min_inset):
+    direction = np.asarray(boundary_rz, dtype=float) - np.asarray(centroid_rz, dtype=float)
+    radius = float(np.linalg.norm(direction))
+    if radius <= 0.0:
+        return np.asarray(boundary_rz, dtype=float)
+    inset = min(max(float(inset_fraction) * radius, float(min_inset)), 0.45 * radius)
+    scale = max((radius - inset) / radius, 0.0)
+    return np.asarray(centroid_rz, dtype=float) + scale * direction
+
+
+def build_topology_seed_points(
+    surface,
+    nfieldlines,
+    *,
+    seed_tier="medium",
+    seed_plane_count=None,
+    inset_fraction=0.08,
+    min_inset=0.01,
+    theta_samples=_TOPOLOGY_SEED_THETA_SAMPLES,
+):
+    resolved_nfieldlines = int(nfieldlines)
+    if resolved_nfieldlines < 0:
+        raise ValueError("nfieldlines must be non-negative")
+
+    resolved_plane_count = _resolve_seed_plane_count(
+        seed_tier,
+        resolved_nfieldlines,
+        seed_plane_count,
+    )
+    plane_angles = _seed_plane_angles(surface.nfp, resolved_plane_count)
+    points_per_plane = _lines_per_plane(resolved_nfieldlines, resolved_plane_count)
+
+    xyz_inits = []
+    seed_points = []
+    for plane_index, (phi_abs, plane_line_count) in enumerate(
+        zip(plane_angles, points_per_plane)
+    ):
+        if plane_line_count <= 0:
+            continue
+        _, rz = _cross_section_rz(surface, float(phi_abs), theta_samples=theta_samples)
+        centroid_rz = np.mean(rz, axis=0)
+        boundary_angles = np.mod(
+            np.arctan2(rz[:, 1] - centroid_rz[1], rz[:, 0] - centroid_rz[0]),
+            2.0 * np.pi,
+        )
+        poloidal_step = (2.0 * np.pi) / float(plane_line_count)
+        poloidal_offset = (
+            float(plane_index) / float(max(resolved_plane_count, 1))
+        ) * poloidal_step
+        target_angles = np.mod(
+            poloidal_offset
+            + np.arange(plane_line_count, dtype=float) * poloidal_step,
+            2.0 * np.pi,
+        )
+        for target_angle in target_angles:
+            boundary_index = int(np.argmin(_angle_distance(boundary_angles, target_angle)))
+            seeded_rz = _inset_rz_point(
+                rz[boundary_index],
+                centroid_rz,
+                inset_fraction,
+                min_inset,
+            )
+            seeded_r = float(seeded_rz[0])
+            seeded_z = float(seeded_rz[1])
+            seeded_xyz = np.array(
+                [
+                    seeded_r * np.cos(phi_abs),
+                    seeded_r * np.sin(phi_abs),
+                    seeded_z,
+                ],
+                dtype=float,
+            )
+            xyz_inits.append(seeded_xyz)
+            seed_points.append(
+                {
+                    "phi": float(phi_abs),
+                    "R": seeded_r,
+                    "Z": seeded_z,
+                    "target_poloidal_angle": float(target_angle),
+                }
+            )
+
+    return {
+        "xyz_inits": np.asarray(xyz_inits, dtype=float).reshape((-1, 3)),
+        "contract": {
+            "tier": str(seed_tier),
+            "seed_plane_count": int(resolved_plane_count),
+            "seed_plane_angles": [float(angle) for angle in plane_angles],
+            "lines_per_plane": [int(count) for count in points_per_plane],
+            "poloidal_sampling": "evenly_spaced_cross_section",
+            "theta_samples": int(theta_samples),
+            "inset_fraction": float(inset_fraction),
+            "min_inset": float(min_inset),
+        },
+        "seed_points": seed_points,
+    }
+
+
+def trace_fieldlines_xyz(
+    field,
+    xyz_inits,
+    *,
+    tmax,
+    tol,
+    phis,
+    stopping_criteria,
+):
+    points = np.asarray(xyz_inits, dtype=float)
+    if points.ndim != 2 or points.shape[1] != 3:
+        raise ValueError(
+            f"Topology seed points must have shape (n, 3), got {points.shape}"
+        )
+    res_tys = []
+    res_phi_hits = []
+    for point in points:
+        res_ty, res_phi_hit = sopp.fieldline_tracing(
+            field,
+            (float(point[0]), float(point[1]), float(point[2])),
+            float(tmax),
+            float(tol),
+            phis=[float(phi) for phi in phis],
+            stopping_criteria=list(stopping_criteria),
+        )
+        res_tys.append(np.asarray(res_ty))
+        res_phi_hits.append(np.asarray(res_phi_hit))
+    return res_tys, res_phi_hits
+
+
+def prepare_topology_field(
+    surface,
+    bfield,
+    tmax,
+    *,
+    field_policy="auto",
+    interpolation_grid=None,
+):
+    from simsopt.field import InterpolatedField
+
+    resolved_policy = str(field_policy)
+    if resolved_policy not in {"auto", "always", "never"}:
+        raise ValueError(
+            f"Unsupported topology field policy {field_policy!r}; expected "
+            "'auto', 'always', or 'never'"
+        )
+    if isinstance(bfield, InterpolatedField):
+        return bfield, {
+            "policy": resolved_policy,
+            "selected_mode": "pre_interpolated",
+            "reason": "already_interpolated",
+            "tmax_threshold": float(TOPOLOGY_INTERPOLATION_TMAX_THRESHOLD),
+            "grid": None,
+            "max_abs_error": None,
+            "mean_abs_error": None,
+            "max_rel_error": None,
+        }
+    should_interpolate = (
+        resolved_policy == "always"
+        or (
+            resolved_policy == "auto"
+            and float(tmax) >= float(TOPOLOGY_INTERPOLATION_TMAX_THRESHOLD)
+        )
+    )
+    if not should_interpolate:
+        reason = "below_threshold" if resolved_policy == "auto" else "explicit_never"
+        return bfield, {
+            "policy": resolved_policy,
+            "selected_mode": "native",
+            "reason": reason,
+            "tmax_threshold": float(TOPOLOGY_INTERPOLATION_TMAX_THRESHOLD),
+            "grid": None,
+            "max_abs_error": None,
+            "mean_abs_error": None,
+            "max_rel_error": None,
+        }
+
+    grid = dict(TOPOLOGY_INTERPOLATION_GRID)
+    if interpolation_grid is not None:
+        grid.update(interpolation_grid)
+    gamma = surface.gamma()
+    rr = np.sqrt(gamma[:, :, 0] ** 2 + gamma[:, :, 1] ** 2)
+    zz = gamma[:, :, 2]
+    interp_rmin, interp_rmax, interp_zmax = padded_bounds(
+        float(np.min(rr)),
+        float(np.max(rr)),
+        float(np.max(np.abs(zz))),
+    )
+    zrange = (
+        (0.0, float(interp_zmax), int(grid["nz"]))
+        if getattr(surface, "stellsym", False)
+        else (-float(interp_zmax), float(interp_zmax), int(grid["nz"]))
+    )
+    interpolated_field = InterpolatedField(
+        bfield,
+        int(grid["degree"]),
+        (float(interp_rmin), float(interp_rmax), int(grid["nr"])),
+        (0.0, (2.0 * np.pi) / float(max(int(surface.nfp), 1)), int(grid["nphi"])),
+        zrange,
+        True,
+        nfp=int(surface.nfp),
+        stellsym=bool(getattr(surface, "stellsym", False)),
+    )
+    surface_points = gamma.reshape((-1, 3))
+    interpolated_field.set_points(surface_points)
+    bfield.set_points(surface_points)
+    exact_B = np.asarray(bfield.B(), dtype=float)
+    interp_B = np.asarray(interpolated_field.B(), dtype=float)
+    abs_diff = np.abs(exact_B - interp_B)
+    exact_norm = np.linalg.norm(exact_B, axis=1)
+    diff_norm = np.linalg.norm(exact_B - interp_B, axis=1)
+    denom = np.maximum(exact_norm, 1.0e-12)
+    max_rel_error = float(np.max(diff_norm / denom)) if diff_norm.size else 0.0
+    return interpolated_field, {
+        "policy": resolved_policy,
+        "selected_mode": "interpolated",
+        "reason": "explicit_always" if resolved_policy == "always" else "tmax_threshold",
+        "tmax_threshold": float(TOPOLOGY_INTERPOLATION_TMAX_THRESHOLD),
+        "grid": {
+            "degree": int(grid["degree"]),
+            "nr": int(grid["nr"]),
+            "nphi": int(grid["nphi"]),
+            "nz": int(grid["nz"]),
+        },
+        "max_abs_error": float(np.max(abs_diff)) if abs_diff.size else 0.0,
+        "mean_abs_error": float(np.mean(abs_diff)) if abs_diff.size else 0.0,
+        "max_rel_error": max_rel_error,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Transport diagnostics
+# ---------------------------------------------------------------------------
+
+def _transport_metric_status(
+    metric_name,
+    display_name,
+    *,
+    status,
+    reason,
+    value=None,
+    aliases=(),
+):
+    return {
+        "metric_name": str(metric_name),
+        "display_name": str(display_name),
+        "aliases": [str(alias) for alias in aliases],
+        "status": str(status),
+        "value": None if value is None else float(value),
+        "reason": str(reason),
+    }
+
+
+def _surface_field_structure_not_evaluated(reason, *, status):
+    return {
+        "status": str(status),
+        "reason": str(reason),
+        "error_type": None,
+        "grid_shape": None,
+        "modB_min": None,
+        "modB_max": None,
+        "modB_mean": None,
+        "modB_std": None,
+        "modB_coefficient_of_variation": None,
+        "mirror_ratio": None,
+        "effective_inverse_aspect_ratio_epsilon": None,
+    }
+
+
+def topology_transport_diagnostics_not_evaluated(reason):
+    return {
+        "schema_version": TOPOLOGY_TRANSPORT_DIAGNOSTICS_SCHEMA_VERSION,
+        "status": "not_evaluated",
+        "summary": str(reason),
+        "surface_field_structure": _surface_field_structure_not_evaluated(
+            reason,
+            status="not_evaluated",
+        ),
+        "gamma_c": _transport_metric_status(
+            "gamma_c",
+            "Gamma_c",
+            status="not_evaluated",
+            reason=str(reason),
+        ),
+        "effective_ripple": _transport_metric_status(
+            "effective_ripple",
+            "EffectiveRipple",
+            aliases=("epsilon_eff",),
+            status="not_evaluated",
+            reason=str(reason),
+        ),
+    }
+
+
+def _surface_field_structure(surface, field):
+    surface_points = np.asarray(surface.gamma(), dtype=float)
+    if surface_points.ndim != 3 or surface_points.shape[-1] != 3:
+        raise ValueError(
+            "Topology transport diagnostics require a surface gamma grid with "
+            f"shape (nphi, ntheta, 3), got {surface_points.shape}"
+        )
+    flat_points = surface_points.reshape((-1, 3))
+    field.set_points(flat_points)
+    if hasattr(field, "AbsB"):
+        modB = np.asarray(field.AbsB(), dtype=float)
+    else:
+        modB = np.linalg.norm(np.asarray(field.B(), dtype=float), axis=1)
+    modB = modB.reshape((-1,))
+    if modB.size == 0:
+        raise ValueError("Topology transport diagnostics received no |B| samples")
+    if not np.all(np.isfinite(modB)):
+        raise ValueError("Topology transport diagnostics received NaN/Inf |B| samples")
+
+    modB_min = float(np.min(modB))
+    modB_max = float(np.max(modB))
+    if modB_min <= 0.0:
+        raise ValueError("Topology transport diagnostics require strictly positive |B|")
+    modB_mean = float(np.mean(modB))
+    modB_std = float(np.std(modB))
+    mirror_ratio = float(modB_max / modB_min)
+    return {
+        "status": "evaluated",
+        "reason": "surface_modB_grid",
+        "error_type": None,
+        "grid_shape": [
+            int(surface_points.shape[0]),
+            int(surface_points.shape[1]),
+        ],
+        "modB_min": modB_min,
+        "modB_max": modB_max,
+        "modB_mean": modB_mean,
+        "modB_std": modB_std,
+        "modB_coefficient_of_variation": (
+            0.0 if modB_mean == 0.0 else float(modB_std / modB_mean)
+        ),
+        "mirror_ratio": mirror_ratio,
+        "effective_inverse_aspect_ratio_epsilon": float(
+            (mirror_ratio - 1.0) / (mirror_ratio + 1.0)
+        ),
+    }
+
+
+def compute_topology_transport_diagnostics(surface, field):
+    diagnostics = {
+        "schema_version": TOPOLOGY_TRANSPORT_DIAGNOSTICS_SCHEMA_VERSION,
+        "status": "partial",
+        "summary": (
+            "Surface-field structure metrics evaluated from |B| on the Boozer "
+            "surface grid. Exact Gamma_c and EffectiveRipple remain unavailable "
+            "without a bounce-integral equilibrium transport backend."
+        ),
+        "surface_field_structure": None,
+        "gamma_c": _transport_metric_status(
+            "gamma_c",
+            "Gamma_c",
+            status="unavailable",
+            reason=_GAMMA_C_UNAVAILABLE_REASON,
+        ),
+        "effective_ripple": _transport_metric_status(
+            "effective_ripple",
+            "EffectiveRipple",
+            aliases=("epsilon_eff",),
+            status="unavailable",
+            reason=_EFFECTIVE_RIPPLE_UNAVAILABLE_REASON,
+        ),
+    }
+    try:
+        diagnostics["surface_field_structure"] = _surface_field_structure(surface, field)
+    except Exception as error:
+        diagnostics["status"] = "unavailable"
+        diagnostics["summary"] = (
+            "Surface-field structure metrics could not be evaluated from the "
+            "current topology field model. Gamma_c and EffectiveRipple remain "
+            "unavailable without a bounce-integral equilibrium transport backend."
+        )
+        diagnostics["surface_field_structure"] = {
+            **_surface_field_structure_not_evaluated(
+                str(error) or repr(error),
+                status="error",
+            ),
+            "error_type": type(error).__name__,
+        }
+    return diagnostics
 
 
 # ---------------------------------------------------------------------------
@@ -387,6 +878,63 @@ def summarize_confinement_surrogate(
 # Entry point: score_topology
 # ---------------------------------------------------------------------------
 
+
+def empty_topology_score_result(
+    nfieldlines,
+    tmax,
+    *,
+    surrogate_worst_k=1,
+    surrogate_early_exit_threshold=0.0,
+    seed_contract=None,
+    field_model=None,
+    transport_diagnostics=None,
+):
+    effective_k = int(max(1, surrogate_worst_k))
+    return {
+        "survival_fraction": 0.0,
+        "survived_lines": 0,
+        "nfieldlines": int(nfieldlines),
+        "tmax": float(tmax),
+        "mean_exit_time": None,
+        "confinement_score": 0.0,
+        "mean_line_loss": 1.0,
+        "worst_k_line_loss": 1.0,
+        "early_exit_fraction": 1.0,
+        "confinement_loss": np.inf,
+        "confinement_surrogate_k": effective_k,
+        "confinement_early_exit_threshold": float(surrogate_early_exit_threshold),
+        "stop_reason_counts": {},
+        "first_exit": None,
+        "per_phi_hit_counts": [],
+        "line_metrics": [],
+        "line_lifetimes": [],
+        "line_losses": [],
+        "seed_contract": seed_contract,
+        "field_model": field_model,
+        "transport_diagnostics": (
+            topology_transport_diagnostics_not_evaluated(
+                "topology_score_not_evaluated"
+            )
+            if transport_diagnostics is None
+            else transport_diagnostics
+        ),
+    }
+
+
+def finalize_topology_score_result(result, *, error_message=None, error_type=None):
+    finalized = dict(result)
+    broken = error_message is not None or stop_reasons_indicate_broken(
+        finalized.get("stop_reason_counts", {})
+    )
+    if broken and error_message is None:
+        error_message = "Topology tracing hit iteration limit"
+        error_type = "IterationLimit"
+    finalized["evaluation_state"] = "broken" if broken else "evaluated"
+    finalized["broken"] = bool(broken)
+    finalized["evaluation_error"] = error_message
+    finalized["evaluation_error_type"] = error_type
+    return finalized
+
 def score_topology(
     surface,
     bfield,
@@ -399,6 +947,10 @@ def score_topology(
     surrogate_mean_weight=0.2,
     surrogate_worst_weight=0.6,
     surrogate_early_weight=0.2,
+    seed_tier="medium",
+    seed_plane_count=None,
+    field_policy=None,
+    interpolation_grid=None,
 ):
     """Score field-line confinement on a Boozer surface.
 
@@ -410,23 +962,36 @@ def score_topology(
     Returns a dict with survival_fraction, mean_exit_time, stop_reason_counts,
     and per-line metrics.
     """
-    from simsopt.field import compute_fieldlines
-
     nfp = surface.nfp
     phis = [(i / nphis) * (2 * np.pi / nfp) for i in range(nphis)]
+    resolved_field_policy = (
+        _resolve_topology_seed_tier(seed_tier).default_field_policy
+        if field_policy is None
+        else str(field_policy)
+    )
 
     stopping_criteria, stop_labels = build_stopping_criteria(
         surface,
         include_surface_exit=True,
         max_iterations=topology_iteration_limit(tmax),
     )
-
-    R0 = midplane_seed_radii(surface, nfieldlines)
-    Z0 = np.zeros((nfieldlines,))
-
-    fieldlines_tys, fieldlines_phi_hits = compute_fieldlines(
+    seed_bundle = build_topology_seed_points(
+        surface,
+        nfieldlines,
+        seed_tier=seed_tier,
+        seed_plane_count=seed_plane_count,
+    )
+    traced_field, field_model = prepare_topology_field(
+        surface,
         bfield,
-        R0, Z0,
+        tmax,
+        field_policy=resolved_field_policy,
+        interpolation_grid=interpolation_grid,
+    )
+    transport_diagnostics = compute_topology_transport_diagnostics(surface, traced_field)
+    fieldlines_tys, fieldlines_phi_hits = trace_fieldlines_xyz(
+        traced_field,
+        seed_bundle["xyz_inits"],
         tmax=tmax,
         tol=tol,
         phis=phis,
@@ -470,4 +1035,74 @@ def score_topology(
         "line_metrics": metrics["line_metrics"],
         "line_lifetimes": surrogate["line_lifetimes"],
         "line_losses": surrogate["line_losses"],
+        "seed_contract": seed_bundle["contract"],
+        "field_model": field_model,
+        "transport_diagnostics": transport_diagnostics,
     }
+
+
+def safe_score_topology(
+    surface,
+    bfield,
+    *,
+    nfieldlines,
+    tmax,
+    tol=1e-7,
+    **kwargs,
+):
+    resolved_field_policy = kwargs.get("field_policy")
+    if resolved_field_policy is None:
+        resolved_field_policy = _resolve_topology_seed_tier(
+            kwargs.get("seed_tier", "medium")
+        ).default_field_policy
+    seed_contract = {
+        "tier": str(kwargs.get("seed_tier", "medium")),
+        "seed_plane_count": None,
+        "seed_plane_angles": [],
+        "lines_per_plane": [],
+        "poloidal_sampling": "evenly_spaced_cross_section",
+        "theta_samples": int(_TOPOLOGY_SEED_THETA_SAMPLES),
+        "inset_fraction": 0.08,
+        "min_inset": 0.01,
+    }
+    field_model = {
+        "policy": str(resolved_field_policy),
+        "selected_mode": "native",
+        "reason": "uninitialized",
+        "tmax_threshold": float(TOPOLOGY_INTERPOLATION_TMAX_THRESHOLD),
+        "grid": None,
+        "max_abs_error": None,
+        "mean_abs_error": None,
+        "max_rel_error": None,
+    }
+    transport_diagnostics = topology_transport_diagnostics_not_evaluated(
+        "topology_score_failed_before_transport_metrics"
+    )
+    try:
+        return finalize_topology_score_result(
+            score_topology(
+                surface,
+                bfield,
+                nfieldlines=nfieldlines,
+                tmax=tmax,
+                tol=tol,
+                **kwargs,
+            )
+        )
+    except Exception as error:
+        return finalize_topology_score_result(
+            empty_topology_score_result(
+                nfieldlines,
+                tmax,
+                surrogate_worst_k=kwargs.get("surrogate_worst_k", 1),
+                surrogate_early_exit_threshold=kwargs.get(
+                    "surrogate_early_exit_threshold",
+                    0.0,
+                ),
+                seed_contract=seed_contract,
+                field_model=field_model,
+                transport_diagnostics=transport_diagnostics,
+            ),
+            error_message=str(error) or repr(error),
+            error_type=type(error).__name__,
+        )

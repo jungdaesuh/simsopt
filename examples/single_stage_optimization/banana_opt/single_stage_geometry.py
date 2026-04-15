@@ -5,17 +5,12 @@ from matplotlib.path import Path as MplPath
 from scipy.spatial import cKDTree
 from scipy.spatial.distance import cdist
 
-from simsopt.field import (
-    compute_fieldlines,
-)
 from simsopt.geo import SurfaceRZFourier
 
 from topology_scorer import (
-    build_stopping_criteria as _build_topology_stopping_criteria,
-    midplane_seed_radii as _midplane_seed_radii,
+    score_topology as _score_topology,
     stop_reasons_indicate_broken as _topology_stop_reasons_indicate_broken,
-    topology_iteration_limit as _topology_iteration_limit,
-    trace_metrics as _topology_trace_metrics,
+    topology_transport_diagnostics_not_evaluated as _topology_transport_diagnostics_not_evaluated,
 )
 from workflow_helpers import validate_normalized_toroidal_flux
 
@@ -577,50 +572,33 @@ def evaluate_topology_gate(
     tmax,
     tol,
     survival_threshold,
-    compute_fieldlines_fn=compute_fieldlines,
-    midplane_seed_radii_fn=_midplane_seed_radii,
-    build_stopping_criteria_fn=_build_topology_stopping_criteria,
-    trace_metrics_fn=_topology_trace_metrics,
-    topology_iteration_limit_fn=_topology_iteration_limit,
+    score_topology_fn=_score_topology,
 ):
     if nfieldlines <= 0:
         return disabled_topology_gate_status(tmax, tol, survival_threshold)
 
-    stopping_criteria, stop_labels = build_stopping_criteria_fn(
+    topology_result = score_topology_fn(
         surface,
-        include_surface_exit=True,
-        max_iterations=topology_iteration_limit_fn(tmax),
-    )
-    R0 = midplane_seed_radii_fn(surface, nfieldlines)
-    Z0 = np.zeros((nfieldlines,))
-    fieldlines_tys, fieldlines_phi_hits = compute_fieldlines_fn(
         bfield,
-        R0,
-        Z0,
+        nfieldlines=nfieldlines,
         tmax=tmax,
         tol=tol,
-        phis=[0.0],
-        stopping_criteria=stopping_criteria,
+        nphis=1,
+        seed_tier="cheap",
+        field_policy="never",
     )
-    metrics = trace_metrics_fn(
-        fieldlines_tys,
-        fieldlines_phi_hits,
-        [0.0],
-        stop_labels,
-        mode="validation",
-    )
-    earliest_exit = metrics["first_exit"]
+    earliest_exit = topology_result["first_exit"]
     return _finalize_topology_gate_status(
         {
             "enabled": True,
-            "success": bool(metrics["survival_fraction"] >= survival_threshold),
+            "success": bool(topology_result["survival_fraction"] >= survival_threshold),
             "nfieldlines": int(nfieldlines),
-            "survived_lines": int(metrics["survived_lines"]),
-            "survival_fraction": float(metrics["survival_fraction"]),
+            "survived_lines": int(topology_result["survived_lines"]),
+            "survival_fraction": float(topology_result["survival_fraction"]),
             "survival_threshold": float(survival_threshold),
             "tmax": float(tmax),
             "tol": float(tol),
-            "stop_reason_counts": metrics["stop_reason_counts"],
+            "stop_reason_counts": topology_result["stop_reason_counts"],
             "first_exit_time": None
             if earliest_exit is None
             else earliest_exit["first_exit_time"],
@@ -632,6 +610,9 @@ def evaluate_topology_gate(
             else earliest_exit["stop_reason"],
             "evaluation_error": None,
             "evaluation_error_type": None,
+            "seed_contract": topology_result.get("seed_contract"),
+            "field_model": topology_result.get("field_model"),
+            "transport_diagnostics": topology_result.get("transport_diagnostics"),
         }
     )
 
@@ -686,6 +667,9 @@ def broken_topology_gate_status(
             "evaluation_error": str(error_message),
             "evaluation_error_type": str(error_type),
             "broken": True,
+            "transport_diagnostics": _topology_transport_diagnostics_not_evaluated(
+                "topology_gate_broken"
+            ),
         }
     )
 
@@ -707,6 +691,9 @@ def disabled_topology_gate_status(tmax, tol, survival_threshold):
             "first_exit_reason": None,
             "evaluation_error": None,
             "evaluation_error_type": None,
+            "transport_diagnostics": _topology_transport_diagnostics_not_evaluated(
+                "topology_gate_disabled"
+            ),
         }
     )
 

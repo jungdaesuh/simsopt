@@ -49,7 +49,6 @@ from simsopt.field import (
     MaxZStoppingCriterion,
     MinRStoppingCriterion,
     MinZStoppingCriterion,
-    compute_fieldlines,
 )
 from simsopt.objectives import QuadraticPenalty
 from simsopt.objectives.utilities import forward_backward
@@ -65,11 +64,8 @@ from alm_utils import (
 )
 from plotting_utils import norm_field_plot, cross_section_plot
 from topology_scorer import (
-    midplane_seed_radii as _midplane_seed_radii,
-    score_topology,
-    stop_reasons_indicate_broken as _topology_stop_reasons_indicate_broken,
-    stop_reason_label as _topology_stop_reason,
-    toroidal_angle as _topology_toroidal_angle,
+    safe_score_topology as _safe_score_topology_impl,
+    topology_transport_diagnostics_not_evaluated as _topology_transport_diagnostics_not_evaluated,
 )
 from workflow_helpers import (
     Stage2SeedSpec,
@@ -1546,8 +1542,6 @@ def evaluate_topology_gate(surface, bfield, nfieldlines, tmax, tol, survival_thr
         tmax,
         tol,
         survival_threshold,
-        compute_fieldlines_fn=compute_fieldlines,
-        midplane_seed_radii_fn=_midplane_seed_radii,
     )
 
 
@@ -1598,21 +1592,6 @@ def safe_evaluate_topology_gate(surface, bfield, nfieldlines, tmax, tol, surviva
         )
 
 
-def _finalize_topology_score_result(result, *, error_message=None, error_type=None):
-    finalized = dict(result)
-    broken = error_message is not None or _topology_stop_reasons_indicate_broken(
-        finalized.get("stop_reason_counts", {})
-    )
-    if broken and error_message is None:
-        error_message = "Topology tracing hit iteration limit"
-        error_type = "IterationLimit"
-    finalized["evaluation_state"] = "broken" if broken else "evaluated"
-    finalized["broken"] = bool(broken)
-    finalized["evaluation_error"] = error_message
-    finalized["evaluation_error_type"] = error_type
-    return finalized
-
-
 def safe_score_topology(
     surface,
     bfield,
@@ -1622,44 +1601,14 @@ def safe_score_topology(
     tol=1e-7,
     **kwargs,
 ):
-    try:
-        return _finalize_topology_score_result(
-            score_topology(
-                surface,
-                bfield,
-                nfieldlines=nfieldlines,
-                tmax=tmax,
-                tol=tol,
-                **kwargs,
-            )
-        )
-    except Exception as error:
-        return _finalize_topology_score_result(
-            {
-                "survival_fraction": 0.0,
-                "survived_lines": 0,
-                "nfieldlines": int(nfieldlines),
-                "tmax": float(tmax),
-                "mean_exit_time": None,
-                "confinement_score": 0.0,
-                "mean_line_loss": 1.0,
-                "worst_k_line_loss": 1.0,
-                "early_exit_fraction": 1.0,
-                "confinement_loss": np.inf,
-                "confinement_surrogate_k": int(max(1, kwargs.get("surrogate_worst_k", 1))),
-                "confinement_early_exit_threshold": float(
-                    kwargs.get("surrogate_early_exit_threshold", 0.0)
-                ),
-                "stop_reason_counts": {},
-                "first_exit": None,
-                "per_phi_hit_counts": [],
-                "line_metrics": [],
-                "line_lifetimes": [],
-                "line_losses": [],
-            },
-            error_message=_format_topology_error(error),
-            error_type=type(error).__name__,
-        )
+    return _safe_score_topology_impl(
+        surface,
+        bfield,
+        nfieldlines=nfieldlines,
+        tmax=tmax,
+        tol=tol,
+        **kwargs,
+    )
 
 
 def validate_confinement_surrogate_args(args):
@@ -2262,6 +2211,7 @@ def evaluate_search_topology_gate(num_surfaces, outer_surface, bfield):
 
 def skipped_topology_gate_status():
     return {
+        "enabled": False,
         "evaluated": False,
         "success": None,
         "survived_lines": None,
@@ -2270,6 +2220,9 @@ def skipped_topology_gate_status():
         "first_exit_angle": None,
         "first_exit_reason": None,
         "stop_reason_counts": None,
+        "transport_diagnostics": _topology_transport_diagnostics_not_evaluated(
+            "topology_gate_not_evaluated"
+        ),
     }
 
 
@@ -2912,6 +2865,10 @@ def build_best_feasible_results_summary(
             "BEST_FEASIBLE_SURFACE_STACK_OK": None,
             "BEST_FEASIBLE_SELF_INTERSECTING": None,
             "BEST_FEASIBLE_FINAL_TOPOLOGY_GATE_SUCCESS": None,
+            "BEST_FEASIBLE_FINAL_TOPOLOGY_GATE_STATE": None,
+            "BEST_FEASIBLE_FINAL_TOPOLOGY_GATE_ERROR": None,
+            "BEST_FEASIBLE_FINAL_TOPOLOGY_GATE_DIAGNOSTICS": None,
+            "BEST_FEASIBLE_FINAL_TOPOLOGY_TRANSPORT_DIAGNOSTICS": None,
         }
 
     current_state = snapshot_single_stage_incumbent_state(run_dict)
@@ -2961,6 +2918,13 @@ def build_best_feasible_results_summary(
             "BEST_FEASIBLE_FINAL_TOPOLOGY_GATE_SUCCESS": bool(topology_status["success"]),
             "BEST_FEASIBLE_FINAL_TOPOLOGY_GATE_STATE": topology_status.get("state"),
             "BEST_FEASIBLE_FINAL_TOPOLOGY_GATE_ERROR": topology_status.get("evaluation_error"),
+            "BEST_FEASIBLE_FINAL_TOPOLOGY_GATE_DIAGNOSTICS": build_topology_gate_diagnostics(
+                topology_status,
+                artifact_role="best_feasible_final_topology_gate",
+            ),
+            "BEST_FEASIBLE_FINAL_TOPOLOGY_TRANSPORT_DIAGNOSTICS": topology_status.get(
+                "transport_diagnostics"
+            ),
         }
     finally:
         restore_single_stage_incumbent_state(run_dict, current_state)
@@ -3650,6 +3614,174 @@ def append_jsonl_artifact(path, payload):
     os.replace(temp_path, archive_path)
 
 
+SINGLE_STAGE_TOPOLOGY_DIAGNOSTICS_SCHEMA_VERSION = (
+    "single_stage_topology_diagnostics_v1"
+)
+
+
+def _topology_gate_has_payload(status):
+    return any(
+        key in status
+        for key in (
+            "success",
+            "state",
+            "broken",
+            "survived_lines",
+            "survival_fraction",
+        )
+    )
+
+
+def _topology_gate_outcome(status):
+    has_gate_payload = _topology_gate_has_payload(status)
+    enabled = bool(status.get("enabled", has_gate_payload))
+    evaluated = bool(status.get("evaluated", has_gate_payload))
+    state = status.get("state")
+    if not evaluated:
+        return "not_evaluated"
+    if not enabled:
+        return "disabled"
+    if bool(status.get("broken", False)) or state == "broken":
+        return "broken"
+    if bool(status.get("success", False)) or state == "feasible":
+        return "pass"
+    return "reject"
+
+
+def _topology_gate_reason(status, outcome):
+    if outcome == "not_evaluated":
+        return "not_evaluated"
+    if outcome == "disabled":
+        return "gate_disabled"
+    if outcome == "broken":
+        return status.get("evaluation_error_type") or "broken_evaluation"
+    if outcome == "pass":
+        return "survival_threshold_met"
+    return status.get("first_exit_reason") or "survival_threshold_not_met"
+
+
+def _format_topology_gate_summary(status, outcome):
+    if outcome == "not_evaluated":
+        return "Topology gate was not evaluated for this artifact."
+    if outcome == "disabled":
+        return "Topology gate was disabled for this artifact."
+    if outcome == "broken":
+        error_type = status.get("evaluation_error_type")
+        error_message = status.get("evaluation_error")
+        if error_type and error_message:
+            return f"Topology evaluation broke: {error_type}: {error_message}"
+        if error_message:
+            return f"Topology evaluation broke: {error_message}"
+        return "Topology evaluation broke."
+    survived_lines = status.get("survived_lines")
+    nfieldlines = status.get("nfieldlines")
+    survival_fraction = status.get("survival_fraction")
+    survival_threshold = status.get("survival_threshold")
+    summary = (
+        f"Topology gate {outcome}: survived {survived_lines}/{nfieldlines} lines "
+        f"(fraction={survival_fraction}, threshold={survival_threshold})."
+    )
+    if outcome == "reject" and status.get("first_exit_reason") is not None:
+        summary = (
+            f"{summary} First exit reason={status.get('first_exit_reason')} "
+            f"at t={status.get('first_exit_time')} phi={status.get('first_exit_angle')}."
+        )
+    return summary
+
+
+def build_topology_gate_diagnostics(status, *, artifact_role):
+    outcome = _topology_gate_outcome(status)
+    has_gate_payload = _topology_gate_has_payload(status)
+    return {
+        "schema_version": SINGLE_STAGE_TOPOLOGY_DIAGNOSTICS_SCHEMA_VERSION,
+        "kind": "gate",
+        "artifact_role": str(artifact_role),
+        "outcome": outcome,
+        "reason": _topology_gate_reason(status, outcome),
+        "summary": _format_topology_gate_summary(status, outcome),
+        "enabled": bool(status.get("enabled", has_gate_payload)),
+        "evaluated": bool(status.get("evaluated", has_gate_payload)),
+        "state": status.get("state"),
+        "status": _jsonable_value(status),
+    }
+
+
+def _topology_score_outcome(entry):
+    return "broken" if bool(entry.get("topology_broken", False)) else "scored"
+
+
+def _format_topology_score_summary(entry, outcome):
+    if outcome == "broken":
+        error_type = entry.get("topology_error_type")
+        error_message = entry.get("topology_error")
+        if error_type and error_message:
+            return f"Topology scoring broke: {error_type}: {error_message}"
+        if error_message:
+            return f"Topology scoring broke: {error_message}"
+        return "Topology scoring broke."
+    return (
+        "Topology score recorded at accepted iteration "
+        f"{entry.get('accepted_iteration')}: survival="
+        f"{entry.get('survived_lines')}/{entry.get('nfieldlines')}, "
+        f"confinement_score={entry.get('confinement_score')}, "
+        f"confinement_loss={entry.get('confinement_loss')}."
+    )
+
+
+def build_topology_score_diagnostics(entry, *, artifact_role):
+    outcome = _topology_score_outcome(entry)
+    return {
+        "schema_version": SINGLE_STAGE_TOPOLOGY_DIAGNOSTICS_SCHEMA_VERSION,
+        "kind": "score",
+        "artifact_role": str(artifact_role),
+        "outcome": outcome,
+        "reason": (
+            entry.get("topology_error_type")
+            if outcome == "broken"
+            else "score_recorded"
+        ),
+        "summary": _format_topology_score_summary(entry, outcome),
+        "accepted_iteration": entry.get("accepted_iteration"),
+        "state": entry.get("topology_state"),
+        "entry": _jsonable_value(entry),
+    }
+
+
+def optional_topology_score_diagnostics(entry, *, artifact_role):
+    if entry is None:
+        return None
+    return build_topology_score_diagnostics(
+        entry,
+        artifact_role=artifact_role,
+    )
+
+
+def write_topology_checkpoint_artifacts(
+    out_dir,
+    *,
+    artifact_role,
+    topology_entry,
+    biotsavart,
+    surface_data,
+):
+    os.makedirs(out_dir, exist_ok=True)
+    write_json_artifact(
+        os.path.join(out_dir, "topology_diagnostics.json"),
+        build_topology_score_diagnostics(
+            topology_entry,
+            artifact_role=artifact_role,
+        ),
+    )
+    biotsavart.save(os.path.join(out_dir, "biot_savart.json"))
+    save_surface_artifacts(
+        surface_data,
+        biotsavart,
+        out_dir,
+        "surf",
+        also_write_outer_legacy=False,
+    )
+
+
 def build_preserved_timeout_alm_state(
     *,
     constraint_method,
@@ -3919,6 +4051,13 @@ def build_preserved_timeout_results_payload(
         "FINAL_TOPOLOGY_GATE_SUCCESS": bool(run_dict["topology_gate_status"]["success"]),
         "FINAL_TOPOLOGY_GATE_STATE": run_dict["topology_gate_status"].get("state"),
         "FINAL_TOPOLOGY_GATE_ERROR": run_dict["topology_gate_status"].get("evaluation_error"),
+        "FINAL_TOPOLOGY_GATE_DIAGNOSTICS": build_topology_gate_diagnostics(
+            run_dict["topology_gate_status"],
+            artifact_role=f"{preservation_kind}_final_topology_gate",
+        ),
+        "FINAL_TOPOLOGY_TRANSPORT_DIAGNOSTICS": run_dict["topology_gate_status"].get(
+            "transport_diagnostics"
+        ),
         "NONQS_RATIO": float(objective_eval["J_QS"]),
         "BOOZER_RESIDUAL": float(objective_eval["J_Boozer"]),
         "FRONTIER_TRUST_OK": search_eval.get("frontier_trust_ok"),
@@ -4995,6 +5134,14 @@ def callback(x):
             "confinement_surrogate_k": topo_result["confinement_surrogate_k"],
             "confinement_early_exit_threshold": topo_result["confinement_early_exit_threshold"],
             "stop_reason_counts": topo_result["stop_reason_counts"],
+            "first_exit": topo_result.get("first_exit"),
+            "per_phi_hit_counts": topo_result.get("per_phi_hit_counts"),
+            "line_metrics": topo_result.get("line_metrics"),
+            "line_lifetimes": topo_result.get("line_lifetimes"),
+            "line_losses": topo_result.get("line_losses"),
+            "seed_contract": topo_result.get("seed_contract"),
+            "field_model": topo_result.get("field_model"),
+            "transport_diagnostics": topo_result.get("transport_diagnostics"),
         }
         # Append to archive JSONL
         archive_path = os.path.join(OUT_DIR_ITER, "topology_archive.jsonl")
@@ -5009,11 +5156,14 @@ def callback(x):
             )
         ):
             run_dict['best_topology'] = topo_entry
-            # Save checkpoint for best-topology state
             best_dir = os.path.join(OUT_DIR_ITER, "best_topology")
-            os.makedirs(best_dir, exist_ok=True)
-            bs.save(os.path.join(best_dir, "biot_savart.json"))
-            save_surface_artifacts(surface_data, bs, best_dir, "surf", also_write_outer_legacy=False)
+            write_topology_checkpoint_artifacts(
+                best_dir,
+                artifact_role="best_topology_checkpoint",
+                topology_entry=topo_entry,
+                biotsavart=bs,
+                surface_data=surface_data,
+            )
 
         if (
             not topo_result["broken"]
@@ -5025,9 +5175,13 @@ def callback(x):
         ):
             run_dict['best_confinement_objective'] = topo_entry
             best_dir = os.path.join(OUT_DIR_ITER, "best_confinement_objective")
-            os.makedirs(best_dir, exist_ok=True)
-            bs.save(os.path.join(best_dir, "biot_savart.json"))
-            save_surface_artifacts(surface_data, bs, best_dir, "surf", also_write_outer_legacy=False)
+            write_topology_checkpoint_artifacts(
+                best_dir,
+                artifact_role="best_confinement_objective_checkpoint",
+                topology_entry=topo_entry,
+                biotsavart=bs,
+                surface_data=surface_data,
+            )
 
         if topo_result["broken"]:
             print(
@@ -6642,6 +6796,13 @@ if __name__ == "__main__":
         "FINAL_TOPOLOGY_GATE_SUCCESS": final_topology_status["success"],
         "FINAL_TOPOLOGY_GATE_STATE": final_topology_status.get("state"),
         "FINAL_TOPOLOGY_GATE_ERROR": final_topology_status.get("evaluation_error"),
+        "FINAL_TOPOLOGY_GATE_DIAGNOSTICS": build_topology_gate_diagnostics(
+            final_topology_status,
+            artifact_role="final_topology_gate",
+        ),
+        "FINAL_TOPOLOGY_TRANSPORT_DIAGNOSTICS": final_topology_status.get(
+            "transport_diagnostics"
+        ),
         "FINAL_TOPOLOGY_SURVIVED_LINES": final_topology_status["survived_lines"],
         "FINAL_TOPOLOGY_SURVIVAL_FRACTION": final_topology_status["survival_fraction"],
         "FINAL_TOPOLOGY_FIRST_EXIT_TIME": final_topology_status["first_exit_time"],
@@ -6785,10 +6946,26 @@ if __name__ == "__main__":
         "BEST_TOPOLOGY_ACCEPTED_ITERATION": run_dict.get("best_topology", {}).get("accepted_iteration"),
         "BEST_TOPOLOGY_CONFINEMENT_SCORE": run_dict.get("best_topology", {}).get("confinement_score"),
         "BEST_TOPOLOGY_CONFINEMENT_LOSS": run_dict.get("best_topology", {}).get("confinement_loss"),
+        "BEST_TOPOLOGY_TRANSPORT_DIAGNOSTICS": run_dict.get(
+            "best_topology",
+            {},
+        ).get("transport_diagnostics"),
+        "BEST_TOPOLOGY_DIAGNOSTICS": optional_topology_score_diagnostics(
+            run_dict.get("best_topology"),
+            artifact_role="best_topology",
+        ),
         "BEST_CONFINEMENT_OBJECTIVE_ACCEPTED_ITERATION": run_dict.get("best_confinement_objective", {}).get("accepted_iteration"),
         "BEST_CONFINEMENT_OBJECTIVE_TOTAL": run_dict.get("best_confinement_objective", {}).get("checkpoint_objective_total"),
         "BEST_CONFINEMENT_OBJECTIVE_PROXY_J": run_dict.get("best_confinement_objective", {}).get("J"),
         "BEST_CONFINEMENT_OBJECTIVE_LOSS": run_dict.get("best_confinement_objective", {}).get("confinement_loss"),
+        "BEST_CONFINEMENT_OBJECTIVE_TRANSPORT_DIAGNOSTICS": run_dict.get(
+            "best_confinement_objective",
+            {},
+        ).get("transport_diagnostics"),
+        "BEST_CONFINEMENT_OBJECTIVE_DIAGNOSTICS": optional_topology_score_diagnostics(
+            run_dict.get("best_confinement_objective"),
+            artifact_role="best_confinement_objective",
+        ),
     }
     results.update(best_feasible_results)
     results.update(
