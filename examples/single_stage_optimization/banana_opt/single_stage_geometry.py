@@ -599,15 +599,7 @@ def evaluate_topology_gate(
             "tmax": float(tmax),
             "tol": float(tol),
             "stop_reason_counts": topology_result["stop_reason_counts"],
-            "first_exit_time": None
-            if earliest_exit is None
-            else earliest_exit["first_exit_time"],
-            "first_exit_angle": None
-            if earliest_exit is None
-            else earliest_exit["first_exit_angle"],
-            "first_exit_reason": None
-            if earliest_exit is None
-            else earliest_exit["stop_reason"],
+            **_topology_gate_first_exit_fields(earliest_exit),
             "evaluation_error": None,
             "evaluation_error_type": None,
             "seed_contract": topology_result.get("seed_contract"),
@@ -615,6 +607,20 @@ def evaluate_topology_gate(
             "transport_diagnostics": topology_result.get("transport_diagnostics"),
         }
     )
+
+
+def _topology_gate_first_exit_fields(earliest_exit):
+    if earliest_exit is None:
+        return {
+            "first_exit_time": None,
+            "first_exit_angle": None,
+            "first_exit_reason": None,
+        }
+    return {
+        "first_exit_time": earliest_exit["first_exit_time"],
+        "first_exit_angle": earliest_exit["first_exit_angle"],
+        "first_exit_reason": earliest_exit["stop_reason"],
+    }
 
 
 def topology_gate_state(status):

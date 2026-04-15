@@ -421,6 +421,25 @@ def _transport_metric_status(
     }
 
 
+def _gamma_c_status(*, status, reason):
+    return _transport_metric_status(
+        "gamma_c",
+        "Gamma_c",
+        status=status,
+        reason=reason,
+    )
+
+
+def _effective_ripple_status(*, status, reason):
+    return _transport_metric_status(
+        "effective_ripple",
+        "EffectiveRipple",
+        aliases=("epsilon_eff",),
+        status=status,
+        reason=reason,
+    )
+
+
 def _surface_field_structure_not_evaluated(reason, *, status):
     return {
         "status": str(status),
@@ -437,29 +456,50 @@ def _surface_field_structure_not_evaluated(reason, *, status):
     }
 
 
-def topology_transport_diagnostics_not_evaluated(reason):
+def _transport_diagnostics_payload(
+    *,
+    status,
+    summary,
+    surface_field_structure,
+    metric_status,
+    gamma_c_reason,
+    effective_ripple_reason,
+):
     return {
         "schema_version": TOPOLOGY_TRANSPORT_DIAGNOSTICS_SCHEMA_VERSION,
-        "status": "not_evaluated",
-        "summary": str(reason),
-        "surface_field_structure": _surface_field_structure_not_evaluated(
+        "status": str(status),
+        "summary": str(summary),
+        "surface_field_structure": surface_field_structure,
+        "gamma_c": _gamma_c_status(
+            status=metric_status,
+            reason=gamma_c_reason,
+        ),
+        "effective_ripple": _effective_ripple_status(
+            status=metric_status,
+            reason=effective_ripple_reason,
+        ),
+    }
+
+
+def topology_transport_diagnostics_not_evaluated(reason):
+    return _transport_diagnostics_payload(
+        status="not_evaluated",
+        summary=reason,
+        surface_field_structure=_surface_field_structure_not_evaluated(
             reason,
             status="not_evaluated",
         ),
-        "gamma_c": _transport_metric_status(
-            "gamma_c",
-            "Gamma_c",
-            status="not_evaluated",
-            reason=str(reason),
-        ),
-        "effective_ripple": _transport_metric_status(
-            "effective_ripple",
-            "EffectiveRipple",
-            aliases=("epsilon_eff",),
-            status="not_evaluated",
-            reason=str(reason),
-        ),
-    }
+        metric_status="not_evaluated",
+        gamma_c_reason=reason,
+        effective_ripple_reason=reason,
+    )
+
+
+def _surface_modB_samples(field, flat_points):
+    field.set_points(flat_points)
+    if hasattr(field, "AbsB"):
+        return np.asarray(field.AbsB(), dtype=float).reshape((-1,))
+    return np.linalg.norm(np.asarray(field.B(), dtype=float), axis=1).reshape((-1,))
 
 
 def _surface_field_structure(surface, field):
@@ -470,12 +510,7 @@ def _surface_field_structure(surface, field):
             f"shape (nphi, ntheta, 3), got {surface_points.shape}"
         )
     flat_points = surface_points.reshape((-1, 3))
-    field.set_points(flat_points)
-    if hasattr(field, "AbsB"):
-        modB = np.asarray(field.AbsB(), dtype=float)
-    else:
-        modB = np.linalg.norm(np.asarray(field.B(), dtype=float), axis=1)
-    modB = modB.reshape((-1,))
+    modB = _surface_modB_samples(field, flat_points)
     if modB.size == 0:
         raise ValueError("Topology transport diagnostics received no |B| samples")
     if not np.all(np.isfinite(modB)):
@@ -511,29 +546,18 @@ def _surface_field_structure(surface, field):
 
 
 def compute_topology_transport_diagnostics(surface, field):
-    diagnostics = {
-        "schema_version": TOPOLOGY_TRANSPORT_DIAGNOSTICS_SCHEMA_VERSION,
-        "status": "partial",
-        "summary": (
+    diagnostics = _transport_diagnostics_payload(
+        status="partial",
+        summary=(
             "Surface-field structure metrics evaluated from |B| on the Boozer "
             "surface grid. Exact Gamma_c and EffectiveRipple remain unavailable "
             "without a bounce-integral equilibrium transport backend."
         ),
-        "surface_field_structure": None,
-        "gamma_c": _transport_metric_status(
-            "gamma_c",
-            "Gamma_c",
-            status="unavailable",
-            reason=_GAMMA_C_UNAVAILABLE_REASON,
-        ),
-        "effective_ripple": _transport_metric_status(
-            "effective_ripple",
-            "EffectiveRipple",
-            aliases=("epsilon_eff",),
-            status="unavailable",
-            reason=_EFFECTIVE_RIPPLE_UNAVAILABLE_REASON,
-        ),
-    }
+        surface_field_structure=None,
+        metric_status="unavailable",
+        gamma_c_reason=_GAMMA_C_UNAVAILABLE_REASON,
+        effective_ripple_reason=_EFFECTIVE_RIPPLE_UNAVAILABLE_REASON,
+    )
     try:
         diagnostics["surface_field_structure"] = _surface_field_structure(surface, field)
     except Exception as error:
