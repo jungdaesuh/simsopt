@@ -876,6 +876,21 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertEqual(status["survived_lines"], 1)
         self.assertAlmostEqual(status["survival_fraction"], 0.5)
 
+    def test_disabled_topology_gate_status_does_not_claim_feasible_state(self):
+        module = self.load_module()
+
+        status = module.disabled_topology_gate_status(2.0, 1e-7, 0.25)
+
+        self.assertFalse(status["enabled"])
+        self.assertTrue(status["success"])
+        self.assertIsNone(status["state"])
+        self.assertFalse(status["broken"])
+        diagnostics = module.build_topology_gate_diagnostics(
+            status,
+            artifact_role="final_topology_gate",
+        )
+        self.assertEqual(diagnostics["outcome"], "disabled")
+
     def test_topology_gate_and_scorer_share_trace_metrics(self):
         module = self.load_module()
         topology_module = load_topology_scorer_module()
@@ -1897,9 +1912,9 @@ class HardwareConstraintTests(unittest.TestCase):
 
         self.assertFalse(status["success"])
         self.assertEqual(len(status["violations"]), 3)
-        self.assertIn("coil_length", status["violations"][0])
-        self.assertIn("coil_coil_min_dist", status["violations"][1])
-        self.assertIn("max_curvature", status["violations"][2])
+        self.assertIn("coil_coil_spacing", status["violations"][0])
+        self.assertIn("max_curvature", status["violations"][1])
+        self.assertIn("coil_length", status["violations"][2])
 
     def test_single_stage_hardware_constraints_report_each_violation(self):
         module = load_single_stage_example_module()
@@ -1917,10 +1932,52 @@ class HardwareConstraintTests(unittest.TestCase):
 
         self.assertFalse(status["success"])
         self.assertEqual(len(status["violations"]), 4)
-        self.assertIn("coil_coil_min_dist", status["violations"][0])
-        self.assertIn("coil_surface_min_dist", status["violations"][1])
-        self.assertIn("surface_vessel_min_dist", status["violations"][2])
+        self.assertIn("coil_coil_spacing", status["violations"][0])
+        self.assertIn("coil_surface_spacing", status["violations"][1])
+        self.assertIn("surface_vessel_spacing", status["violations"][2])
         self.assertIn("max_curvature", status["violations"][3])
+
+    def test_single_stage_hardware_constraints_report_current_and_length_violations(self):
+        module = load_single_stage_example_module()
+
+        status = module.evaluate_single_stage_hardware_constraints(
+            curve_curve_min_dist=0.05,
+            cc_dist=0.05,
+            curve_surface_min_dist=0.02,
+            cs_dist=0.02,
+            surface_vessel_min_dist=0.04,
+            ss_dist=0.04,
+            max_curvature=40.0,
+            curvature_threshold=40.0,
+            coil_length=1.8,
+            length_target=1.7,
+            tf_current_A=9.0e4,
+            tf_current_limit_A=8.0e4,
+            banana_current_A=1.7e4,
+            banana_current_max_A=1.6e4,
+        )
+
+        self.assertFalse(status["search_hardware_status"]["success"])
+        self.assertEqual(status["search_hardware_status"]["violations"], [
+            "|banana_current| 17000.000000 exceeds threshold 16000.000000"
+        ])
+        self.assertFalse(status["artifact_hardware_status"]["success"])
+        self.assertEqual(len(status["artifact_hardware_status"]["violations"]), 3)
+        self.assertIn("coil_length", status["artifact_hardware_status"]["violations"][0])
+        self.assertIn("banana_current", status["artifact_hardware_status"]["violations"][1])
+        self.assertIn("tf_current", status["artifact_hardware_status"]["violations"][2])
+        self.assertEqual(
+            status["artifact_hardware_status"]["constraints"]["coil_length"]["threshold"],
+            1.7,
+        )
+        self.assertEqual(
+            status["artifact_hardware_status"]["constraints"]["tf_current"]["threshold"],
+            8.0e4,
+        )
+        self.assertEqual(
+            status["search_hardware_status"]["constraints"]["banana_current"]["threshold"],
+            1.6e4,
+        )
 
     def test_surface_vessel_min_dist_uses_single_source_for_results(self):
         module = load_single_stage_example_module()
@@ -2441,8 +2498,20 @@ class HardwareConstraintTests(unittest.TestCase):
             final_iota=0.14997,
             final_volume=0.09998,
             hardware_snapshot={
-                "status": {"success": False, "violations": ["coil_coil_min_dist"]},
+                "search_hardware_status": {
+                    "success": False,
+                    "violations": ["coil_coil_spacing 0.049600 below threshold 0.050000"],
+                },
+                "artifact_hardware_status": {
+                    "success": False,
+                    "violations": ["coil_coil_spacing 0.049600 below threshold 0.050000"],
+                },
                 "max_curvature": 19.8,
+                "length_target": 1.7,
+                "tf_current_A": 8.0e4,
+                "tf_current_limit_A": 8.0e4,
+                "banana_current_A": 1.4e4,
+                "banana_current_max_A": 1.6e4,
                 "curve_curve_min_dist": 0.0496,
                 "curve_surface_min_dist": 0.067,
                 "surface_vessel_min_dist": 0.082,
@@ -2468,6 +2537,13 @@ class HardwareConstraintTests(unittest.TestCase):
             payload["FINAL_TOPOLOGY_GATE_DIAGNOSTICS"]["outcome"],
             "pass",
         )
+        self.assertEqual(payload["MAX_CURVATURE"], 19.8)
+        self.assertEqual(payload["COIL_LENGTH"], 2.91)
+        self.assertEqual(payload["LENGTH_TARGET"], 1.7)
+        self.assertEqual(payload["TF_CURRENT_A"], 8.0e4)
+        self.assertEqual(payload["TF_CURRENT_LIMIT_A"], 8.0e4)
+        self.assertEqual(payload["BANANA_CURRENT_A"], 1.4e4)
+        self.assertEqual(payload["BANANA_CURRENT_MAX_A"], 1.6e4)
         self.assertIsNone(payload["FINAL_TOPOLOGY_TRANSPORT_DIAGNOSTICS"])
 
     def test_build_preserved_timeout_results_payload_includes_alm_runtime_state(self):
@@ -2515,7 +2591,8 @@ class HardwareConstraintTests(unittest.TestCase):
             final_iota=0.151,
             final_volume=0.101,
             hardware_snapshot={
-                "status": {"success": True, "violations": []},
+                "search_hardware_status": {"success": True, "violations": []},
+                "artifact_hardware_status": {"success": True, "violations": []},
                 "max_curvature": 18.2,
                 "curve_curve_min_dist": 0.051,
                 "curve_surface_min_dist": 0.068,
@@ -2539,6 +2616,121 @@ class HardwareConstraintTests(unittest.TestCase):
         self.assertEqual(payload["ALM_FINAL_STATIONARITY_TOL"], 2.0e-4)
         self.assertEqual(payload["ALM_FINAL_MAX_FEASIBILITY_VIOLATION"], 4.0e-3)
         self.assertEqual(payload["ALM_FINAL_STATIONARITY_NORM"], 7.5e-5)
+
+    def test_build_preserved_timeout_results_payload_uses_artifact_hardware_status_for_final_feasibility(self):
+        module = load_single_stage_example_module()
+        replay_config = module.PreservedTimeoutReplayConfig(
+            plasma_surf_filename="wout_test.nc",
+            plasma_surf_path="/equilibria/wout_test.nc",
+            stage2_bs_path="/seeds/biot_savart_opt.json",
+            stage2_results_path="/seeds/results.json",
+            mpol=8,
+            ntor=6,
+            nphi=127,
+            ntheta=32,
+            constraint_weight=1.0,
+            constraint_method="penalty",
+            alm_formulation="weighted_sum",
+            max_iterations=30,
+            target_volume=0.10,
+            target_iota=0.15,
+        )
+        run_dict = {
+            "search_eval": {
+                "total": 7.5e-4,
+                "base_total": 7.4e-4,
+            },
+            "J": 7.5e-4,
+            "intersecting": False,
+            "surface_status": {"success": True},
+            "accepted_hardware_status": {"success": True, "violations": []},
+            "topology_gate_status": {"success": True},
+        }
+
+        payload = module.build_preserved_timeout_results_payload(
+            replay_config=replay_config,
+            preservation_kind="best_accepted",
+            incumbent_stage="initial",
+            run_dict=run_dict,
+            objective_eval={"J_QS": 2.7e-4, "J_Boozer": 4.8e-7},
+            field_error=3.5e-4,
+            final_iota=0.14997,
+            final_volume=0.09998,
+            hardware_snapshot={
+                "search_hardware_status": {"success": True, "violations": []},
+                "artifact_hardware_status": {
+                    "success": False,
+                    "violations": ["coil_length 1.800000 exceeds threshold 1.700000"],
+                },
+                "max_curvature": 19.8,
+                "curve_curve_min_dist": 0.0501,
+                "curve_surface_min_dist": 0.067,
+                "surface_vessel_min_dist": 0.082,
+            },
+            coil_length=1.8,
+            accepted_iteration=1,
+        )
+
+        self.assertIs(payload["FINAL_FEASIBILITY_OK"], False)
+        self.assertIs(payload["HARDWARE_CONSTRAINTS_OK"], False)
+        self.assertEqual(
+            payload["HARDWARE_CONSTRAINT_VIOLATIONS"],
+            ["coil_length 1.800000 exceeds threshold 1.700000"],
+        )
+
+    def test_build_preserved_timeout_results_payload_backfills_missing_coil_length(self):
+        module = load_single_stage_example_module()
+        replay_config = module.PreservedTimeoutReplayConfig(
+            plasma_surf_filename="wout_test.nc",
+            plasma_surf_path="/equilibria/wout_test.nc",
+            stage2_bs_path="/seeds/biot_savart_opt.json",
+            stage2_results_path="/seeds/results.json",
+            mpol=8,
+            ntor=6,
+            nphi=127,
+            ntheta=32,
+            constraint_weight=1.0,
+            constraint_method="penalty",
+            alm_formulation="weighted_sum",
+            max_iterations=30,
+            target_volume=0.10,
+            target_iota=0.15,
+        )
+        run_dict = {
+            "search_eval": {
+                "total": 7.5e-4,
+                "base_total": 7.4e-4,
+            },
+            "J": 7.5e-4,
+            "intersecting": False,
+            "surface_status": {"success": True},
+            "accepted_hardware_status": {"success": True, "violations": []},
+            "topology_gate_status": {"success": True},
+        }
+
+        payload = module.build_preserved_timeout_results_payload(
+            replay_config=replay_config,
+            preservation_kind="best_accepted",
+            incumbent_stage="initial",
+            run_dict=run_dict,
+            objective_eval={"J_QS": 2.7e-4, "J_Boozer": 4.8e-7},
+            field_error=3.5e-4,
+            final_iota=0.14997,
+            final_volume=0.09998,
+            hardware_snapshot={
+                "search_hardware_status": {"success": True, "violations": []},
+                "artifact_hardware_status": {"success": True, "violations": []},
+                "coil_length": None,
+                "max_curvature": 19.8,
+                "curve_curve_min_dist": 0.0501,
+                "curve_surface_min_dist": 0.067,
+                "surface_vessel_min_dist": 0.082,
+            },
+            coil_length=1.83,
+            accepted_iteration=1,
+        )
+
+        self.assertEqual(payload["COIL_LENGTH"], 1.83)
 
     def test_build_preserved_timeout_results_payload_frontier_uses_reference_metadata(self):
         module = load_single_stage_example_module()
@@ -2602,7 +2794,8 @@ class HardwareConstraintTests(unittest.TestCase):
             final_iota=0.14997,
             final_volume=0.09998,
             hardware_snapshot={
-                "status": {"success": True, "violations": []},
+                "search_hardware_status": {"success": True, "violations": []},
+                "artifact_hardware_status": {"success": True, "violations": []},
                 "max_curvature": 19.8,
                 "curve_curve_min_dist": 0.0496,
                 "curve_surface_min_dist": 0.067,
@@ -2622,6 +2815,104 @@ class HardwareConstraintTests(unittest.TestCase):
         self.assertEqual(payload["FRONTIER_BOOZER_TRUST_PENALTY_SCALE"], 5.0e-5)
         self.assertEqual(payload["FRONTIER_BOOZER_TRUST_EXCESS_RATIO"], 0.0)
         self.assertEqual(payload["FRONTIER_TRUST_PENALTY"], 0.0)
+
+    def test_build_best_feasible_results_summary_emits_schema_backed_hardware_fields(self):
+        module = load_single_stage_example_module()
+        run_dict = {
+            "best_feasible_incumbent": {"surface_state": "saved"},
+            "best_feasible_stage": "accepted",
+            "J": 7.5e-4,
+            "dJ": np.array([1.0, -1.0]),
+            "search_eval": {
+                "total": 7.5e-4,
+                "physics_total": 7.4e-4,
+                "J_QS": 2.7e-4,
+                "J_Boozer": 4.8e-7,
+                "frontier_rank_total": None,
+                "frontier_trust_ok": True,
+            },
+            "surface_status": {
+                "iotas": [0.14997],
+                "volumes": [0.09998],
+                "success": True,
+                "self_intersections": [False],
+            },
+            "topology_gate_status": {
+                "success": True,
+                "state": "pass",
+                "evaluation_error": None,
+                "transport_diagnostics": None,
+            },
+        }
+        hardware_snapshot = {
+            "artifact_hardware_status": {
+                "success": False,
+                "violations": ["coil_length 1.800000 exceeds threshold 1.700000"],
+            },
+            "curve_curve_min_dist": 0.0501,
+            "curve_surface_min_dist": 0.067,
+            "surface_vessel_min_dist": 0.082,
+            "max_curvature": 19.8,
+            "coil_length": 1.8,
+            "length_target": 1.7,
+            "tf_current_A": 8.0e4,
+            "tf_current_limit_A": 8.0e4,
+            "banana_current_A": 1.4e4,
+            "banana_current_max_A": 1.6e4,
+        }
+
+        with patch.object(
+            module,
+            "snapshot_single_stage_incumbent_state",
+            return_value={"surface_state": "current"},
+        ), patch.object(
+            module,
+            "restore_single_stage_incumbent_state",
+        ), patch.object(
+            module,
+            "evaluate_single_stage_hardware_snapshot",
+            return_value=hardware_snapshot,
+        ), patch.object(
+            module,
+            "build_topology_gate_diagnostics",
+            return_value={"kind": "gate", "outcome": "pass"},
+        ):
+            summary = module.build_best_feasible_results_summary(
+                run_dict,
+                curve_curve_distance_obj=object(),
+                curve_surface_distance_obj=object(),
+                surface_surface_distance_obj=object(),
+                banana_curve=object(),
+                curvelength_obj=SimpleNamespace(J=lambda: 1.8),
+                cc_dist=0.05,
+                cs_dist=0.015,
+                ss_dist=0.04,
+                curvature_threshold=100.0,
+                length_target=1.7,
+                tf_current_A=8.0e4,
+                banana_coils=[SimpleNamespace(current=SimpleNamespace(get_value=lambda: 1.4e4))],
+                banana_current_max_A=1.6e4,
+                outer_surface=object(),
+                vessel_surface=object(),
+            )
+
+        self.assertTrue(summary["BEST_FEASIBLE_AVAILABLE"])
+        self.assertEqual(summary["BEST_FEASIBLE_STAGE"], "accepted")
+        self.assertEqual(summary["BEST_FEASIBLE_CURVE_CURVE_MIN_DIST"], 0.0501)
+        self.assertEqual(summary["BEST_FEASIBLE_CURVE_SURFACE_MIN_DIST"], 0.067)
+        self.assertEqual(summary["BEST_FEASIBLE_SURFACE_VESSEL_MIN_DIST"], 0.082)
+        self.assertEqual(summary["BEST_FEASIBLE_MAX_CURVATURE"], 19.8)
+        self.assertEqual(summary["BEST_FEASIBLE_COIL_LENGTH"], 1.8)
+        self.assertEqual(summary["BEST_FEASIBLE_LENGTH_TARGET"], 1.7)
+        self.assertEqual(summary["BEST_FEASIBLE_TF_CURRENT_A"], 8.0e4)
+        self.assertEqual(summary["BEST_FEASIBLE_TF_CURRENT_LIMIT_A"], 8.0e4)
+        self.assertEqual(summary["BEST_FEASIBLE_BANANA_CURRENT_A"], 1.4e4)
+        self.assertEqual(summary["BEST_FEASIBLE_BANANA_CURRENT_MAX_A"], 1.6e4)
+        self.assertFalse(summary["BEST_FEASIBLE_HARDWARE_CONSTRAINTS_OK"])
+        self.assertEqual(
+            summary["BEST_FEASIBLE_HARDWARE_CONSTRAINT_VIOLATIONS"],
+            ["coil_length 1.800000 exceeds threshold 1.700000"],
+        )
 
     def test_validate_boozer_stage_refinement_args_rejects_unsupported_scope(self):
         module = load_single_stage_example_module()
@@ -3021,7 +3312,13 @@ class HardwareConstraintTests(unittest.TestCase):
             "curve_surface_min_dist": 0.03,
             "surface_vessel_min_dist": 0.0,
             "max_curvature": 41.0,
-            "status": {
+            "success": False,
+            "violations": ["coil_coil_min_dist=0.040000 < threshold=0.050000"],
+            "search_hardware_status": {
+                "success": False,
+                "violations": ["coil_coil_min_dist=0.040000 < threshold=0.050000"],
+            },
+            "artifact_hardware_status": {
                 "success": False,
                 "violations": ["coil_coil_min_dist=0.040000 < threshold=0.050000"],
             },
@@ -3221,7 +3518,10 @@ class HardwareConstraintTests(unittest.TestCase):
             module,
             "evaluate_single_stage_hardware_snapshot",
             return_value={
-                "status": {"success": True, "violations": []},
+                "success": True,
+                "violations": [],
+                "search_hardware_status": {"success": True, "violations": []},
+                "artifact_hardware_status": {"success": True, "violations": []},
                 "curve_curve_min_dist": 0.06,
                 "curve_surface_min_dist": 0.02,
                 "surface_vessel_min_dist": None,
@@ -3330,7 +3630,10 @@ class HardwareConstraintTests(unittest.TestCase):
             module,
             "evaluate_single_stage_hardware_snapshot",
             return_value={
-                "status": {"success": True, "violations": []},
+                "success": True,
+                "violations": [],
+                "search_hardware_status": {"success": True, "violations": []},
+                "artifact_hardware_status": {"success": True, "violations": []},
                 "curve_curve_min_dist": 0.06,
                 "curve_surface_min_dist": 0.02,
                 "surface_vessel_min_dist": None,
@@ -3431,7 +3734,9 @@ class HardwareConstraintTests(unittest.TestCase):
             module,
             "evaluate_single_stage_hardware_snapshot",
             return_value={
-                "status": {
+                "success": False,
+                "violations": ["coil_coil_min_dist low"],
+                "search_hardware_status": {
                     "success": False,
                     "violations": ["coil_coil_min_dist low"],
                     "curve_curve_min_dist": 0.06,
@@ -3442,6 +3747,10 @@ class HardwareConstraintTests(unittest.TestCase):
                     "ss_dist": None,
                     "max_curvature": 15.0,
                     "curvature_threshold": 40.0,
+                },
+                "artifact_hardware_status": {
+                    "success": False,
+                    "violations": ["coil_coil_min_dist low"],
                 },
                 "curve_curve_min_dist": 0.06,
                 "curve_surface_min_dist": 0.02,
@@ -3545,7 +3854,9 @@ class HardwareConstraintTests(unittest.TestCase):
             module,
             "evaluate_single_stage_hardware_snapshot",
             return_value={
-                "status": {
+                "success": False,
+                "violations": ["coil_coil_min_dist low"],
+                "search_hardware_status": {
                     "success": False,
                     "violations": ["coil_coil_min_dist low"],
                     "curve_curve_min_dist": 0.06,
@@ -3556,6 +3867,10 @@ class HardwareConstraintTests(unittest.TestCase):
                     "ss_dist": None,
                     "max_curvature": 15.0,
                     "curvature_threshold": 40.0,
+                },
+                "artifact_hardware_status": {
+                    "success": False,
+                    "violations": ["coil_coil_min_dist low"],
                 },
                 "curve_curve_min_dist": 0.06,
                 "curve_surface_min_dist": 0.02,
@@ -6297,7 +6612,7 @@ class CurrentBaselineContractTests(unittest.TestCase):
         self.assertIn("INITC=10000", local_dir)
         self.assertIn("INITC=10000", database_dir)
 
-    def test_resolve_stage2_tf_current_prefers_recorded_stage2_result(self):
+    def test_resolve_stage2_tf_current_rejects_metadata_mismatch_against_loaded_seed(self):
         module = load_single_stage_example_module()
 
         tf_coils = [
@@ -6305,10 +6620,26 @@ class CurrentBaselineContractTests(unittest.TestCase):
             SimpleNamespace(current=SimpleNamespace(get_value=lambda: 1.0e5)),
         ]
 
+        with self.assertRaisesRegex(ValueError, "does not match the artifact metadata TF_CURRENT_A"):
+            module.resolve_stage2_tf_current_A({"TF_CURRENT_A": 8.0e4}, tf_coils)
+
+    def test_resolve_stage2_tf_current_accepts_matching_loaded_seed_value(self):
+        module = load_single_stage_example_module()
+
+        tf_coils = [
+            SimpleNamespace(current=SimpleNamespace(get_value=lambda: 8.0e4)),
+            SimpleNamespace(current=SimpleNamespace(get_value=lambda: 8.0e4)),
+        ]
+
         self.assertEqual(
             module.resolve_stage2_tf_current_A({"TF_CURRENT_A": 8.0e4}, tf_coils),
             8.0e4,
         )
+
+    def test_infer_uniform_tf_current_returns_none_when_coils_are_missing(self):
+        module = load_single_stage_example_module()
+
+        self.assertIsNone(module.infer_uniform_tf_current_A([]))
 
     def test_validate_stage2_seed_contract_rejects_missing_tf_current_metadata(self):
         module = load_single_stage_example_module()
@@ -7049,6 +7380,7 @@ class CurrentBaselineContractTests(unittest.TestCase):
 
         self.assertEqual(args.cs_dist, 0.015)
         self.assertEqual(args.curvature_threshold, 100.0)
+        self.assertEqual(args.banana_current_max_A, 16000.0)
 
     def test_apply_default_stage2_seed_args_uses_legacy_seed_defaults(self):
         module = load_single_stage_example_module()
@@ -7296,7 +7628,7 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
                 self.curves = ["curve_a", "curve_b"]
 
             def shortest_distance(self):
-                return 0.04
+                return 0.06
 
         class FakeCurvatureObjective(FakeStage2Objective):
             def __init__(self):
@@ -7485,7 +7817,7 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
                     patch.object(
                         module,
                         "CurveLength",
-                        lambda *_args, **_kwargs: FakeStage2Objective(1.8, [0.1, 0.2]),
+                        lambda *_args, **_kwargs: FakeStage2Objective(1.6, [0.1, 0.2]),
                     ),
                     patch.object(
                         module,
@@ -7512,11 +7844,6 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
                     patch.object(module, "cross_section_plot", lambda *_args, **_kwargs: None),
                     patch.object(module, "_magnetic_field_plots", lambda *_args, **_kwargs: 0.03),
                     patch.object(module, "is_self_intersecting", lambda *_args, **_kwargs: False),
-                    patch.object(
-                        module,
-                        "_evaluate_stage2_hardware_constraints",
-                        lambda *_args, **_kwargs: {"success": True, "violations": []},
-                    ),
                     patch.object(module, "minimize", side_effect=fake_minimize),
                     patch.object(module, "minimize_alm", side_effect=fake_minimize_alm),
                     patch.object(module, "run_basin_hopping", side_effect=fake_run_basin_hopping),
@@ -7557,7 +7884,12 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
     def _assert_banana_current_cap_rejected(self, runtime):
         self.assertFalse(runtime["results"]["OPTIMIZER_SUCCESS"])
         self.assertFalse(runtime["results"]["HARDWARE_CONSTRAINTS_OK"])
-        self.assertIn("banana_current", runtime["results"]["HARDWARE_CONSTRAINT_VIOLATIONS"][0])
+        self.assertTrue(
+            any(
+                "banana_current" in violation
+                for violation in runtime["results"]["HARDWARE_CONSTRAINT_VIOLATIONS"]
+            )
+        )
 
     def test_stage2_main_init_only_loads_seed_and_writes_results(self):
         runtime = self._run_stage2_main(init_only=True, constraint_method="penalty", use_seed=True)

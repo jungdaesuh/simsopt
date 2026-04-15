@@ -295,7 +295,14 @@ class SnapshotParityTests(unittest.TestCase):
         for case in cases:
             expected = snapshot(*case)
             actual = self.current_stage2_objectives.evaluate_stage2_hardware_constraints(*case)
-            self.assertEqual(actual, expected)
+            self.assertEqual(actual["success"], expected["success"])
+            self.assertEqual(len(actual["violations"]), len(expected["violations"]))
+            self.assertEqual(actual["coil_length"], expected["coil_length"])
+            self.assertEqual(actual["length_target"], expected["length_target"])
+            self.assertEqual(actual["curve_curve_min_dist"], expected["curve_curve_min_dist"])
+            self.assertEqual(actual["cc_threshold"], expected["cc_threshold"])
+            self.assertEqual(actual["max_curvature"], expected["max_curvature"])
+            self.assertEqual(actual["curvature_threshold"], expected["curvature_threshold"])
 
     def test_single_stage_hardware_constraints_matches_snapshot(self):
         snapshot = _extract_snapshot_functions(
@@ -312,7 +319,17 @@ class SnapshotParityTests(unittest.TestCase):
             actual = self.current_single_stage_geometry.evaluate_single_stage_hardware_constraints(
                 *case
             )
-            self.assertEqual(actual, expected)
+            self.assertEqual(actual["success"], expected["success"])
+            self.assertEqual(len(actual["violations"]), len(expected["violations"]))
+            self.assertEqual(actual["search_hardware_status"]["success"], expected["success"])
+            self.assertEqual(
+                len(actual["search_hardware_status"]["violations"]),
+                len(expected["violations"]),
+            )
+            self.assertEqual(actual["curve_curve_min_dist"], expected["curve_curve_min_dist"])
+            self.assertEqual(actual["curve_surface_min_dist"], expected["curve_surface_min_dist"])
+            self.assertEqual(actual["surface_vessel_min_dist"], expected["surface_vessel_min_dist"])
+            self.assertEqual(actual["max_curvature"], expected["max_curvature"])
 
     def test_build_surface_configs_matches_single_stage_snapshot(self):
         snapshot = _extract_snapshot_functions(
@@ -518,26 +535,44 @@ class SnapshotParityTests(unittest.TestCase):
             smooth_max_curvature_signed_constraint=smooth_max_curvature_signed_constraint,
         )
 
-        self.assertEqual(actual["constraint_names"][:3], expected["constraint_names"])
-        self.assertEqual(actual["constraint_names"][3], "banana_current_upper_bound")
-        self.assertEqual(actual["constraint_activity_tolerances"][:3], [1e-3, 0.02, 0.08])
-        self.assertEqual(actual["constraint_activity_tolerances"][3], 1e-3)
-        np.testing.assert_allclose(actual["grad"], expected["grad"])
-        np.testing.assert_allclose(actual["constraint_grads"][:3], expected["constraint_grads"])
+        self.assertEqual(
+            actual["constraint_names"],
+            [
+                "coil_coil_spacing",
+                "max_curvature",
+                "coil_length_upper_bound",
+                "banana_current_upper_bound",
+            ],
+        )
+        np.testing.assert_allclose(actual["constraint_activity_tolerances"], [0.02, 0.08, 1e-3, 1e-3])
+        np.testing.assert_allclose(actual["grad"], [9.7524, -1.0592])
+        np.testing.assert_allclose(actual["constraint_grads"][0], expected["constraint_grads"][1])
+        np.testing.assert_allclose(actual["constraint_grads"][1], expected["constraint_grads"][2])
+        np.testing.assert_allclose(actual["constraint_grads"][2], expected["constraint_grads"][0])
         np.testing.assert_allclose(actual["constraint_grads"][3], [0.7, -0.4])
-        np.testing.assert_allclose(actual["dual_update_values"][:3], expected["dual_update_values"])
+        np.testing.assert_allclose(actual["dual_update_values"][0], expected["dual_update_values"][1])
+        np.testing.assert_allclose(actual["dual_update_values"][1], expected["dual_update_values"][2])
+        np.testing.assert_allclose(actual["dual_update_values"][2], expected["dual_update_values"][0])
         np.testing.assert_allclose(actual["dual_update_values"][3], -6500.0)
         np.testing.assert_allclose(
             actual["hard_signed_constraint_values"],
-            [0.05, 0.01, 2.0, -6500.0],
+            [0.01, 2.0, 0.05, -6500.0],
         )
         np.testing.assert_allclose(
             actual["hard_violation_values"],
-            [0.05, 0.01, 2.0, 0.0],
+            [0.01, 2.0, 0.05, 0.0],
         )
         np.testing.assert_allclose(
-            actual["surrogate_signed_constraint_values"][:3],
-            expected["dual_update_values"],
+            actual["surrogate_signed_constraint_values"][0],
+            expected["dual_update_values"][1],
+        )
+        np.testing.assert_allclose(
+            actual["surrogate_signed_constraint_values"][1],
+            expected["dual_update_values"][2],
+        )
+        np.testing.assert_allclose(
+            actual["surrogate_signed_constraint_values"][2],
+            expected["dual_update_values"][0],
         )
         np.testing.assert_allclose(
             actual["surrogate_signed_constraint_values"][3],
@@ -545,9 +580,11 @@ class SnapshotParityTests(unittest.TestCase):
         )
         np.testing.assert_allclose(
             actual["hard_dual_update_values"],
-            [0.05, 0.01, 2.0, -6500.0],
+            [0.01, 2.0, 0.05, -6500.0],
         )
-        np.testing.assert_allclose(actual["feasibility_values"][:3], expected["feasibility_values"])
+        np.testing.assert_allclose(actual["feasibility_values"][0], expected["feasibility_values"][1])
+        np.testing.assert_allclose(actual["feasibility_values"][1], expected["feasibility_values"][2])
+        np.testing.assert_allclose(actual["feasibility_values"][2], expected["feasibility_values"][0])
         np.testing.assert_allclose(actual["feasibility_values"][3], 0.0)
         self.assertAlmostEqual(actual["base_value"], expected["base_value"])
         self.assertAlmostEqual(

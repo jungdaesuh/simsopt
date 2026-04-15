@@ -109,9 +109,14 @@ from banana_opt.frontier_solver_checkpoint import (
     build_solver_checkpoint_payload,
 )
 from banana_opt.current_contracts import (
+    apply_banana_current_upper_bound,
+    banana_current_exceeds_limit,
+    infer_uniform_coil_current_A as _infer_uniform_coil_current_A,
+    resolve_loaded_tf_current_A as _resolve_loaded_tf_current_A,
     resolve_plasma_current_settings as _resolve_plasma_current_settings_impl,
 )
 from banana_opt.hardware_contracts import (
+    BANANA_CURRENT_HARD_LIMIT_A,
     BANANA_WINDING_MINOR_RADIUS_M,
     COIL_COIL_MIN_DIST_M,
     COIL_LENGTH_TARGET_M,
@@ -121,6 +126,11 @@ from banana_opt.hardware_contracts import (
     TF_CURRENT_HARD_LIMIT_A,
     validate_banana_winding_surface_radius,
     validate_tf_current_limit,
+)
+from banana_opt.hardware_constraint_schema import (
+    build_hardware_constraint_artifact_payload_fields,
+    hardware_constraint_alm_names,
+    resolve_penalty_box_bound_threshold,
 )
 from banana_opt.incumbents import (
     restore_single_stage_incumbent_state,
@@ -206,12 +216,6 @@ _SINGLE_STAGE_SEED_REGIME_PRESERVE_FIRST = _PHASE1_SEED_REGIME_PRESERVE_FIRST
 _SINGLE_STAGE_SEED_REGIME_REPAIR_FIRST = _PHASE1_SEED_REGIME_REPAIR_FIRST
 _SINGLE_STAGE_SEED_REGIME_BRIDGE_ONLY = _PHASE1_SEED_REGIME_BRIDGE_ONLY
 _SINGLE_STAGE_SEED_REGIME_GLOBAL_SEARCH = "global_search"
-SINGLE_STAGE_ALM_GEOMETRY_CONSTRAINT_NAMES = (
-    "coil_coil_spacing",
-    "coil_surface_spacing",
-    "max_curvature",
-    "surface_vessel_spacing",
-)
 SINGLE_STAGE_THRESHOLDED_PHYSICS_CONSTRAINT_NAMES = (
     "qs_error",
     "boozer_residual",
@@ -541,19 +545,11 @@ def build_stage2_bs_path(args):
 
 
 def infer_uniform_tf_current_A(tf_coils):
-    if not tf_coils:
-        return None
-    tf_currents = np.asarray([coil.current.get_value() for coil in tf_coils], dtype=float)
-    if np.allclose(tf_currents, tf_currents[0]):
-        return float(tf_currents[0])
-    return None
+    return _infer_uniform_coil_current_A(tf_coils)
 
 
 def resolve_stage2_tf_current_A(stage2_results, tf_coils):
-    recorded_tf_current = stage2_results.get("TF_CURRENT_A")
-    if recorded_tf_current is not None:
-        return float(recorded_tf_current)
-    return infer_uniform_tf_current_A(tf_coils)
+    return _resolve_loaded_tf_current_A(stage2_results.get("TF_CURRENT_A"), tf_coils)
 
 
 def resolve_stage2_num_tf_coils(stage2_results, requested_num_tf_coils):
@@ -1131,6 +1127,17 @@ def parse_args():
     parser.add_argument("--length-weight", type=float, default=float(os.environ.get("SS_LENGTH_WEIGHT", "1")),
                         help="Curve length penalty weight (default 1).")
     parser.add_argument(
+        "--banana-current-max-A",
+        type=float,
+        default=float(
+            os.environ.get("BANANA_CURRENT_MAX_A", str(BANANA_CURRENT_HARD_LIMIT_A))
+        ),
+        help=(
+            "Maximum allowed magnitude for the banana current in amps. "
+            "Penalty/L-BFGS-B mode applies this as a hard box bound."
+        ),
+    )
+    parser.add_argument(
         "--length-target",
         type=float,
         default=float(os.environ.get("SS_LENGTH_TARGET", str(COIL_LENGTH_TARGET_M))),
@@ -1507,6 +1514,13 @@ def evaluate_single_stage_hardware_constraints(
     ss_dist,
     max_curvature,
     curvature_threshold,
+    *,
+    coil_length=None,
+    length_target=None,
+    tf_current_A=None,
+    tf_current_limit_A=None,
+    banana_current_A=None,
+    banana_current_max_A=None,
 ):
     return _evaluate_single_stage_hardware_constraints(
         curve_curve_min_dist,
@@ -1517,6 +1531,12 @@ def evaluate_single_stage_hardware_constraints(
         ss_dist,
         max_curvature,
         curvature_threshold,
+        coil_length=coil_length,
+        length_target=length_target,
+        tf_current_A=tf_current_A,
+        tf_current_limit_A=tf_current_limit_A,
+        banana_current_A=banana_current_A,
+        banana_current_max_A=banana_current_max_A,
     )
 
 
@@ -1532,6 +1552,45 @@ def compute_single_stage_surface_vessel_min_dist(
         outer_surface,
         vessel_surface,
     )
+
+
+def current_single_stage_hardware_snapshot_kwargs(*, coil_length=None):
+    curvelength_obj = globals().get("curvelength")
+    resolved_coil_length = None
+    if curvelength_obj is not None:
+        resolved_coil_length = float(curvelength_obj.J())
+    if coil_length is not None:
+        resolved_coil_length = float(coil_length)
+    resolved_length_target = globals().get("length_target")
+    resolved_tf_current_A = globals().get("stage2_tf_current_A")
+    banana_coils_value = globals().get("banana_coils")
+    resolved_banana_current_A = None
+    if banana_coils_value:
+        resolved_banana_current_A = float(banana_coils_value[0].current.get_value())
+    args_value = globals().get("args")
+    resolved_banana_current_max_A = getattr(
+        args_value,
+        "banana_current_max_A",
+        BANANA_CURRENT_HARD_LIMIT_A,
+    )
+    penalty_banana_current_max_A = resolve_penalty_box_bound_threshold(
+        "banana_current",
+        requested_threshold=resolved_banana_current_max_A,
+    )
+    return {
+        "coil_length": resolved_coil_length,
+        "length_target": resolved_length_target,
+        "tf_current_A": resolved_tf_current_A,
+        "tf_current_limit_A": (
+            None if resolved_tf_current_A is None else TF_CURRENT_HARD_LIMIT_A
+        ),
+        "banana_current_A": resolved_banana_current_A,
+        "banana_current_max_A": (
+            None
+            if resolved_banana_current_A is None
+            else float(penalty_banana_current_max_A)
+        ),
+    }
 
 
 def evaluate_topology_gate(surface, bfield, nfieldlines, tmax, tol, survival_threshold):
@@ -1626,6 +1685,15 @@ def validate_confinement_surrogate_args(args):
         raise ValueError("--confinement-surrogate-* weights must be non-negative")
 
 
+def validate_single_stage_current_args(args):
+    banana_current_max_A = float(args.banana_current_max_A)
+    if not (0.0 < banana_current_max_A <= BANANA_CURRENT_HARD_LIMIT_A):
+        raise ValueError(
+            f"--banana-current-max-A must be in the interval "
+            f"(0, {BANANA_CURRENT_HARD_LIMIT_A:.0f}]."
+        )
+
+
 @dataclass(frozen=True)
 class RunIdentityConfig:
     stage2_bs_path: str
@@ -1652,6 +1720,7 @@ class RunIdentityConfig:
     curvature_weight: float
     curvature_threshold: float
     banana_surf_radius: float
+    banana_current_max_A: float
     nphi: int
     ntheta: int
     init_only: bool
@@ -2056,6 +2125,11 @@ def make_run_identity_config(
         curvature_weight=args.curvature_weight,
         curvature_threshold=args.curvature_threshold,
         banana_surf_radius=banana_surf_radius,
+        banana_current_max_A=getattr(
+            args,
+            "banana_current_max_A",
+            BANANA_CURRENT_HARD_LIMIT_A,
+        ),
         nphi=nphi,
         ntheta=ntheta,
         init_only=args.init_only,
@@ -2184,9 +2258,16 @@ def validate_single_stage_alm_formulation_args(args):
 
 
 def single_stage_alm_constraint_names(*, alm_formulation, include_surface_surface):
-    names = list(SINGLE_STAGE_ALM_GEOMETRY_CONSTRAINT_NAMES[:3])
+    available_names = {
+        "coil_coil_spacing",
+        "coil_surface_spacing",
+        "max_curvature",
+        "coil_length",
+        "banana_current",
+    }
     if include_surface_surface:
-        names.append(SINGLE_STAGE_ALM_GEOMETRY_CONSTRAINT_NAMES[3])
+        available_names.add("surface_vessel_spacing")
+    names = list(hardware_constraint_alm_names(names=available_names))
     if alm_formulation == "thresholded_physics":
         names.extend(SINGLE_STAGE_THRESHOLDED_PHYSICS_CONSTRAINT_NAMES)
     return names
@@ -2353,6 +2434,10 @@ def topology_gate_allows_incumbent(run_dict):
 
 def refinement_eligible_incumbent(run_dict):
     hardware_status = run_dict.get("accepted_hardware_status")
+    return refinement_eligible_for_hardware_status(run_dict, hardware_status)
+
+
+def refinement_eligible_for_hardware_status(run_dict, hardware_status):
     if hardware_status is None or not hardware_status.get("success", False):
         return False
     if not topology_gate_allows_incumbent(run_dict):
@@ -2831,10 +2916,15 @@ def build_best_feasible_results_summary(
     curve_surface_distance_obj,
     surface_surface_distance_obj,
     banana_curve,
+    curvelength_obj,
     cc_dist,
     cs_dist,
     ss_dist,
     curvature_threshold,
+    length_target,
+    tf_current_A,
+    banana_coils,
+    banana_current_max_A,
     outer_surface,
     vessel_surface,
 ):
@@ -2856,12 +2946,10 @@ def build_best_feasible_results_summary(
             "BEST_FEASIBLE_FRONTIER_TRUST_OK": None,
             "BEST_FEASIBLE_FINAL_IOTA": None,
             "BEST_FEASIBLE_FINAL_VOLUME": None,
-            "BEST_FEASIBLE_CURVE_CURVE_MIN_DIST": None,
-            "BEST_FEASIBLE_CURVE_SURFACE_MIN_DIST": None,
-            "BEST_FEASIBLE_SURFACE_VESSEL_MIN_DIST": None,
-            "BEST_FEASIBLE_MAX_CURVATURE": None,
-            "BEST_FEASIBLE_HARDWARE_CONSTRAINTS_OK": None,
-            "BEST_FEASIBLE_HARDWARE_CONSTRAINT_VIOLATIONS": None,
+            **build_hardware_constraint_artifact_payload_fields(
+                None,
+                prefix="BEST_FEASIBLE_",
+            ),
             "BEST_FEASIBLE_SURFACE_STACK_OK": None,
             "BEST_FEASIBLE_SELF_INTERSECTING": None,
             "BEST_FEASIBLE_FINAL_TOPOLOGY_GATE_SUCCESS": None,
@@ -2886,6 +2974,12 @@ def build_best_feasible_results_summary(
             curvature_threshold,
             outer_surface,
             vessel_surface,
+            coil_length=float(curvelength_obj.J()),
+            length_target=length_target,
+            tf_current_A=tf_current_A,
+            tf_current_limit_A=TF_CURRENT_HARD_LIMIT_A,
+            banana_current_A=float(banana_coils[0].current.get_value()),
+            banana_current_max_A=banana_current_max_A,
         )
         surface_status = run_dict["surface_status"]
         search_eval = run_dict["search_eval"]
@@ -2907,12 +3001,10 @@ def build_best_feasible_results_summary(
             "BEST_FEASIBLE_FRONTIER_TRUST_OK": search_eval.get("frontier_trust_ok"),
             "BEST_FEASIBLE_FINAL_IOTA": float(surface_status["iotas"][-1]),
             "BEST_FEASIBLE_FINAL_VOLUME": float(surface_status["volumes"][-1]),
-            "BEST_FEASIBLE_CURVE_CURVE_MIN_DIST": float(hardware_snapshot["curve_curve_min_dist"]),
-            "BEST_FEASIBLE_CURVE_SURFACE_MIN_DIST": float(hardware_snapshot["curve_surface_min_dist"]),
-            "BEST_FEASIBLE_SURFACE_VESSEL_MIN_DIST": hardware_snapshot["surface_vessel_min_dist"],
-            "BEST_FEASIBLE_MAX_CURVATURE": float(hardware_snapshot["max_curvature"]),
-            "BEST_FEASIBLE_HARDWARE_CONSTRAINTS_OK": bool(hardware_snapshot["status"]["success"]),
-            "BEST_FEASIBLE_HARDWARE_CONSTRAINT_VIOLATIONS": hardware_snapshot["status"]["violations"],
+            **build_hardware_constraint_artifact_payload_fields(
+                hardware_snapshot,
+                prefix="BEST_FEASIBLE_",
+            ),
             "BEST_FEASIBLE_SURFACE_STACK_OK": bool(surface_status["success"]),
             "BEST_FEASIBLE_SELF_INTERSECTING": bool(any(surface_status["self_intersections"])),
             "BEST_FEASIBLE_FINAL_TOPOLOGY_GATE_SUCCESS": bool(topology_status["success"]),
@@ -3500,6 +3592,10 @@ def evaluate_alm_objective(
             boozer_threshold=args.alm_boozer_threshold,
             iota_penalty_threshold=args.alm_iota_penalty_threshold,
             length_penalty_threshold=args.alm_length_penalty_threshold,
+            coil_length_objective=curvelength,
+            coil_length_threshold=length_target,
+            banana_current=banana_coils[0].current,
+            banana_current_threshold=args.banana_current_max_A,
             JNonQSObjective=objective_terms["JNonQSObjective"],
             JBoozerObjective=objective_terms["JBoozerObjective"],
         ),
@@ -3984,7 +4080,14 @@ def build_preserved_timeout_results_payload(
     than a separate post-timeout refinement stage.
     """
     search_eval = run_dict["search_eval"]
-    hardware_status = hardware_snapshot["status"]
+    artifact_hardware_snapshot = dict(hardware_snapshot)
+    if artifact_hardware_snapshot.get("coil_length") is None:
+        artifact_hardware_snapshot["coil_length"] = float(coil_length)
+    hardware_status = hardware_snapshot["artifact_hardware_status"]
+    final_feasibility_ok = refinement_eligible_for_hardware_status(
+        run_dict,
+        hardware_status,
+    )
     source_stage = str(incumbent_stage)
     is_frontier_mode = replay_config.single_stage_goal_mode == "frontier"
     payload = {
@@ -4039,15 +4142,9 @@ def build_preserved_timeout_results_payload(
         ),
         "FINAL_IOTA": float(final_iota),
         "FINAL_VOLUME": float(final_volume),
-        "FINAL_FEASIBILITY_OK": bool(refinement_eligible_incumbent(run_dict)),
+        "FINAL_FEASIBILITY_OK": bool(final_feasibility_ok),
         "SELF_INTERSECTING": bool(run_dict["intersecting"]),
-        "MAX_CURVATURE": float(hardware_snapshot["max_curvature"]),
-        "COIL_LENGTH": float(coil_length),
-        "CURVE_CURVE_MIN_DIST": float(hardware_snapshot["curve_curve_min_dist"]),
-        "CURVE_SURFACE_MIN_DIST": float(hardware_snapshot["curve_surface_min_dist"]),
-        "SURFACE_VESSEL_MIN_DIST": hardware_snapshot["surface_vessel_min_dist"],
-        "HARDWARE_CONSTRAINTS_OK": bool(hardware_status["success"]),
-        "HARDWARE_CONSTRAINT_VIOLATIONS": hardware_status["violations"],
+        **build_hardware_constraint_artifact_payload_fields(artifact_hardware_snapshot),
         "FINAL_TOPOLOGY_GATE_SUCCESS": bool(run_dict["topology_gate_status"]["success"]),
         "FINAL_TOPOLOGY_GATE_STATE": run_dict["topology_gate_status"].get("state"),
         "FINAL_TOPOLOGY_GATE_ERROR": run_dict["topology_gate_status"].get("evaluation_error"),
@@ -4639,8 +4736,9 @@ def evaluate_search_step(x):
                 SS_DIST,
                 banana_curve,
                 CURVATURE_THRESHOLD,
+                **current_single_stage_hardware_snapshot_kwargs(),
             )
-            hardware_status = hardware_snapshot["status"]
+            hardware_status = hardware_snapshot["search_hardware_status"]
             run_dict["trial_hardware_status"] = hardware_status
             if not hardware_status["success"]:
                 hardware_contract = _evaluate_frontier_hardware_search_contract_impl(
@@ -4904,12 +5002,13 @@ def callback(x):
         CURVATURE_THRESHOLD,
         outer_entry["boozer_surface"].surface,
         VV,
+        **current_single_stage_hardware_snapshot_kwargs(coil_length=length),
     )
     curvecurve_min = hardware_snapshot["curve_curve_min_dist"]
     curvesurf_min = hardware_snapshot["curve_surface_min_dist"]
     surface_vessel_min = hardware_snapshot["surface_vessel_min_dist"]
     max_curvature = hardware_snapshot["max_curvature"]
-    hardware_status = hardware_snapshot["status"]
+    hardware_status = hardware_snapshot["search_hardware_status"]
     run_dict['accepted_hardware_status'] = hardware_status
     incumbent_stage = run_dict.get("accepted_boozer_stage", globals().get("stage", "initial"))
     run_dict["accepted_boozer_stage"] = incumbent_stage
@@ -5334,6 +5433,7 @@ if __name__ == "__main__":
     validate_alm_cli_args(args)
     validate_single_stage_alm_formulation_args(args)
     validate_confinement_surrogate_args(args)
+    validate_single_stage_current_args(args)
     validate_boozer_stage_refinement_args(args, CONSTRAINT_WEIGHT)
     MULTISURFACE_RAMP_ITERATIONS = args.multisurface_ramp_iterations
     INNER_SURFACE_INITIAL_WEIGHT = args.inner_surface_initial_weight
@@ -5402,6 +5502,32 @@ if __name__ == "__main__":
     banana_curve = banana_curves[0]
     stage2_tf_current_A = resolve_stage2_tf_current_A(stage2_results, tf_coils)
     tf_current_sum_abs_A = float(sum(abs(c.current.get_value()) for c in tf_coils))
+    initial_banana_current_A = float(banana_coils[0].current.get_value())
+    if CONSTRAINT_METHOD == "penalty":
+        penalty_banana_current_max_A = resolve_penalty_box_bound_threshold(
+            "banana_current",
+            requested_threshold=args.banana_current_max_A,
+        )
+        if (
+            not args.init_only
+            and banana_current_exceeds_limit(
+                initial_banana_current_A,
+                penalty_banana_current_max_A,
+            )
+        ):
+            raise ValueError(
+                "Loaded Stage 2 banana current "
+                f"{initial_banana_current_A:.6f} A exceeds --banana-current-max-A="
+                f"{float(penalty_banana_current_max_A):.6f} A. Penalty/L-BFGS-B mode "
+                "cannot start outside the hard box bound."
+            )
+        apply_banana_current_upper_bound(
+            banana_coils[0].current,
+            penalty_banana_current_max_A,
+        )
+    # ALM now checks banana current as a final feasibility constraint as well,
+    # but only penalty/L-BFGS-B mode keeps the hard inner box bound that forbids
+    # infeasible traversal during the search itself.
     current_sum = tf_current_sum_abs_A
 
     # Calculate G0 parameter from TF coil currents
@@ -5671,6 +5797,16 @@ if __name__ == "__main__":
         CURVATURE_THRESHOLD,
         outer_surface_data["boozer_surface"].surface,
         VV,
+        coil_length=float(curvelength.J()),
+        length_target=length_target,
+        tf_current_A=stage2_tf_current_A,
+        tf_current_limit_A=TF_CURRENT_HARD_LIMIT_A,
+        banana_current_A=initial_banana_current_A,
+        banana_current_max_A=getattr(
+            args,
+            "banana_current_max_A",
+            BANANA_CURRENT_HARD_LIMIT_A,
+        ),
     )
     run_dict = {
         'surface_state': snapshot_surface_states(surface_data),
@@ -5684,7 +5820,7 @@ if __name__ == "__main__":
         'accepted_x': dofs.copy(),
         'intersecting': any(entry["boozer_surface"].surface.is_self_intersecting() for entry in surface_data),
         'trial_hardware_status': None,
-        'accepted_hardware_status': initial_hardware_snapshot["status"],
+        'accepted_hardware_status': initial_hardware_snapshot["search_hardware_status"],
         'surface_status': initial_surface_status,
         'search_surface_status': initial_search_surface_status,
         'topology_gate_status': initial_topology_status,
@@ -5886,8 +6022,9 @@ if __name__ == "__main__":
                     CURVATURE_THRESHOLD,
                     outer_surface,
                     VV,
+                    **current_single_stage_hardware_snapshot_kwargs(),
                 )
-                run_dict["accepted_hardware_status"] = hardware_snapshot["status"]
+                run_dict["accepted_hardware_status"] = hardware_snapshot["search_hardware_status"]
                 field_error, _ = compute_surface_field_metrics(outer_surface, bs)
                 write_preserved_timeout_artifacts_for_current_state(
                     OUT_DIR_ITER,
@@ -6510,6 +6647,12 @@ if __name__ == "__main__":
             CURVATURE_THRESHOLD,
             outer_surface_data["boozer_surface"].surface,
             VV,
+            coil_length=float(curvelength.J()),
+            length_target=length_target,
+            tf_current_A=stage2_tf_current_A,
+            tf_current_limit_A=TF_CURRENT_HARD_LIMIT_A,
+            banana_current_A=float(banana_coils[0].current.get_value()),
+            banana_current_max_A=args.banana_current_max_A,
         )
         final_max_curvature = final_hardware_snapshot["max_curvature"]
         final_surface_volumes = [entry["boozer_surface"].surface.volume() for entry in surface_data]
@@ -6557,25 +6700,35 @@ if __name__ == "__main__":
             CURVATURE_THRESHOLD,
             outer_surface_data["boozer_surface"].surface,
             VV,
+            coil_length=float(curvelength.J()),
+            length_target=length_target,
+            tf_current_A=stage2_tf_current_A,
+            tf_current_limit_A=TF_CURRENT_HARD_LIMIT_A,
+            banana_current_A=float(banana_coils[0].current.get_value()),
+            banana_current_max_A=args.banana_current_max_A,
         )
-    coil_length = float(curvelength.J())
-    curve_curve_min_dist = final_hardware_snapshot["curve_curve_min_dist"]
-    curve_surface_min_dist = final_hardware_snapshot["curve_surface_min_dist"]
-    surface_vessel_min_dist = final_hardware_snapshot["surface_vessel_min_dist"]
     nonqs_ratio = None if args.init_only else float(JnonQSRatio.J())
     boozer_residual = None if args.init_only else float(JBoozerResidual.J())
-    final_hardware_status = final_hardware_snapshot["status"]
-    final_feasibility_ok = refinement_eligible_incumbent(run_dict)
+    final_hardware_status = final_hardware_snapshot["artifact_hardware_status"]
+    final_feasibility_ok = refinement_eligible_for_hardware_status(
+        run_dict,
+        final_hardware_status,
+    )
     best_feasible_results = build_best_feasible_results_summary(
         run_dict,
         JCurveCurve,
         JCurveSurface,
         JSurfSurf,
         banana_curve,
+        curvelength,
         CC_DIST,
         CS_DIST,
         SS_DIST,
         CURVATURE_THRESHOLD,
+        length_target,
+        stage2_tf_current_A,
+        banana_coils,
+        args.banana_current_max_A,
         outer_surface_data["boozer_surface"].surface,
         VV,
     )
@@ -6606,6 +6759,7 @@ if __name__ == "__main__":
         "STAGE2_SEED_ORDER": order,
         "STAGE2_TF_CURRENT_A": stage2_tf_current_A,
         "STAGE2_TF_CURRENT_SUM_ABS_A": tf_current_sum_abs_A,
+        "BANANA_INIT_CURRENT_A": initial_banana_current_A,
         "mpol": mpol,
         "ntor": ntor,
         "nphi": nphi,
@@ -6895,13 +7049,7 @@ if __name__ == "__main__":
         "FINAL_SEARCH_SURFACE_WEIGHTS": final_search_surface_weights,
         "FINAL_FEASIBILITY_OK": final_feasibility_ok,
         "SELF_INTERSECTING": run_dict['intersecting'],
-        "MAX_CURVATURE": float(final_max_curvature),
-        "COIL_LENGTH": coil_length,
-        "CURVE_CURVE_MIN_DIST": curve_curve_min_dist,
-        "CURVE_SURFACE_MIN_DIST": curve_surface_min_dist,
-        "SURFACE_VESSEL_MIN_DIST": surface_vessel_min_dist,
-        "HARDWARE_CONSTRAINTS_OK": final_hardware_status["success"],
-        "HARDWARE_CONSTRAINT_VIOLATIONS": final_hardware_status["violations"],
+        **build_hardware_constraint_artifact_payload_fields(final_hardware_snapshot),
         "INVALID_STATE_REJECTS_TOTAL": run_dict["invalid_state_rejects_total"],
         "TOPOLOGY_GATE_REJECTS": run_dict["topology_gate_rejects"],
         "HARDWARE_REJECTS": run_dict["hardware_rejects"],

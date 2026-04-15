@@ -57,6 +57,14 @@ from banana_opt.hardware_contracts import (
     TF_CURRENT_HARD_LIMIT_A,
     validate_tf_current_limit,
 )
+from banana_opt.hardware_constraint_schema import (
+    hardware_constraint_alm_names,
+    resolve_penalty_box_bound_threshold,
+)
+from banana_opt.current_contracts import (
+    apply_banana_current_upper_bound,
+    banana_current_exceeds_limit,
+)
 from banana_opt.stage2_objectives import (
     build_stage2_alm_settings,
     build_stage2_results as _build_stage2_results_impl,
@@ -72,13 +80,18 @@ from banana_opt.stage2_objectives import (
 REPO_ROOT = os.path.abspath(os.path.join(SIMSOPT_ROOT, ".."))
 DATABASE_EQUILIBRIA_DIR = os.path.join(REPO_ROOT, "DATABASE", "EQUILIBRIA")
 DEFAULT_EQUILIBRIA_DIR = DATABASE_EQUILIBRIA_DIR if os.path.isdir(DATABASE_EQUILIBRIA_DIR) else os.path.join(EXAMPLE_ROOT, "equilibria")
-STAGE2_ALM_CONSTRAINT_NAMES = (
-    "coil_length_upper_bound",
-    "coil_coil_spacing",
-    "coil_surface_spacing",
-    "max_curvature",
-    "banana_current_upper_bound",
-)
+
+
+def stage2_alm_constraint_names(*, include_coil_surface: bool) -> tuple[str, ...]:
+    available_names = {
+        "coil_length",
+        "coil_coil_spacing",
+        "max_curvature",
+        "banana_current",
+    }
+    if include_coil_surface:
+        available_names.add("coil_surface_spacing")
+    return hardware_constraint_alm_names(names=available_names)
 
 
 def _print_taylor_test_summary(name: str, result: dict) -> None:
@@ -111,36 +124,6 @@ def validate_banana_current_cli_args(args) -> None:
     validate_tf_current_limit(args.tf_current_A)
 
 
-def unwrap_current_optimizable(current):
-    scale = 1.0
-    current_optimizable = current
-    while hasattr(current_optimizable, "current_to_scale") and hasattr(
-        current_optimizable,
-        "scale",
-    ):
-        scale *= float(current_optimizable.scale)
-        current_optimizable = current_optimizable.current_to_scale
-    if not hasattr(current_optimizable, "local_lower_bounds") or not hasattr(
-        current_optimizable,
-        "local_upper_bounds",
-    ):
-        raise TypeError("Banana current does not expose local bounds.")
-    return current_optimizable, scale
-
-
-def apply_banana_current_upper_bound(current, banana_current_max_A):
-    current_optimizable, scale = unwrap_current_optimizable(current)
-    if scale == 0.0:
-        raise ValueError("Banana current scale must be non-zero to apply a bound.")
-    lower_bounds = np.asarray(current_optimizable.local_lower_bounds, dtype=float).copy()
-    upper_bounds = np.asarray(current_optimizable.local_upper_bounds, dtype=float).copy()
-    scaled_magnitude_bound = float(banana_current_max_A) / abs(scale)
-    lower_bounds[0] = max(lower_bounds[0], -scaled_magnitude_bound)
-    upper_bounds[0] = min(upper_bounds[0], scaled_magnitude_bound)
-    current_optimizable.local_lower_bounds = lower_bounds
-    current_optimizable.local_upper_bounds = upper_bounds
-
-
 def build_lbfgsb_bounds(optimizable):
     return list(
         zip(
@@ -148,10 +131,6 @@ def build_lbfgsb_bounds(optimizable):
             np.asarray(optimizable.upper_bounds, dtype=float),
         )
     )
-
-
-def banana_current_exceeds_limit(current_A: float, banana_current_max_A: float) -> bool:
-    return abs(float(current_A)) > float(banana_current_max_A)
 
 
 def parse_args():
@@ -759,9 +738,13 @@ def main(parsed_args=None):
     dofs = BASE_OBJECTIVE.x if CONSTRAINT_METHOD == "alm" else JF.x
     lbfgsb_bounds = None
     if CONSTRAINT_METHOD != "alm":
+        penalty_banana_current_max_A = resolve_penalty_box_bound_threshold(
+            "banana_current",
+            requested_threshold=args.banana_current_max_A,
+        )
         if args.stage2_bs_path and banana_current_exceeds_limit(
             initial_banana_current_A,
-            args.banana_current_max_A,
+            penalty_banana_current_max_A,
         ):
             raise ValueError(
                 "Loaded Stage 2 seed starts above --banana-current-max-A; "
@@ -769,13 +752,16 @@ def main(parsed_args=None):
             )
         apply_banana_current_upper_bound(
             new_banana_coils[0].current,
-            args.banana_current_max_A,
+            penalty_banana_current_max_A,
         )
         lbfgsb_bounds = build_lbfgsb_bounds(JF)
     fun = make_stage2_fun(JF, new_bs, new_surf, Jf, Jls, Jccdist, Jc)
     alm_result = None
     if CONSTRAINT_METHOD == "alm":
         alm_settings = build_stage2_alm_settings(args)
+        alm_constraint_names = stage2_alm_constraint_names(
+            include_coil_surface=Jcsdist is not None,
+        )
 
         def evaluate_problem(inner_dofs, multipliers, penalty):
             return _evaluate_stage2_alm_problem(
@@ -811,7 +797,7 @@ def main(parsed_args=None):
             alm_taylor_result = run_directional_taylor_test(
                 evaluate_problem,
                 dofs,
-                np.zeros(len(STAGE2_ALM_CONSTRAINT_NAMES), dtype=float),
+                np.zeros(len(alm_constraint_names), dtype=float),
                 alm_settings.penalty_init,
                 seed=args.alm_taylor_test_seed,
             )
@@ -827,7 +813,7 @@ def main(parsed_args=None):
             raise ValueError("--basin-hops is not supported with --constraint-method=alm")
         res = minimize_alm(
             dofs,
-            STAGE2_ALM_CONSTRAINT_NAMES,
+            alm_constraint_names,
             evaluate_problem,
             alm_settings,
             {
@@ -941,15 +927,11 @@ def main(parsed_args=None):
         coil_surface_threshold=CS_THRESHOLD,
         plasma_vessel_min_dist=plasma_vessel_min_dist,
         plasma_vessel_threshold=PLASMA_VESSEL_MIN_DIST_M,
+        banana_current_A=final_banana_current_A,
+        banana_current_threshold=args.banana_current_max_A,
+        tf_current_A=float(new_tf_coils[0].current.get_value()),
+        tf_current_threshold=TF_CURRENT_HARD_LIMIT_A,
     )
-    if banana_current_exceeds_limit(final_banana_current_A, args.banana_current_max_A):
-        hardware_status["success"] = False
-        hardware_status["violations"] = list(hardware_status["violations"]) + [
-            (
-                f"|banana_current| {abs(final_banana_current_A):.6f} exceeds maximum "
-                f"{float(args.banana_current_max_A):.6f}"
-            )
-        ]
     if not hardware_status["success"]:
         optimizer_success = False
         constraint_summary = "; ".join(hardware_status["violations"])

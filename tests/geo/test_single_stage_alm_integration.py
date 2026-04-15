@@ -1,4 +1,5 @@
 import ast
+import importlib
 import importlib.util
 import json
 import sys
@@ -48,6 +49,13 @@ STAGE2_OBJECTIVES_MODULE_PATH = (
     / "single_stage_optimization"
     / "banana_opt"
     / "stage2_objectives.py"
+)
+HARDWARE_CONSTRAINT_SCHEMA_MODULE_PATH = (
+    Path(__file__).resolve().parents[2]
+    / "examples"
+    / "single_stage_optimization"
+    / "banana_opt"
+    / "hardware_constraint_schema.py"
 )
 STAGE2_ALM_WRAPPER_MODULE_PATH = (
     Path(__file__).resolve().parents[2]
@@ -101,6 +109,13 @@ def load_single_stage_thresholded_physics_rerun_module():
     assert spec.loader is not None
     spec.loader.exec_module(module)
     return module
+
+
+def load_hardware_constraint_schema_module():
+    package_root = str(HARDWARE_CONSTRAINT_SCHEMA_MODULE_PATH.parents[1])
+    if package_root not in sys.path:
+        sys.path.insert(0, package_root)
+    return importlib.import_module("banana_opt.hardware_constraint_schema")
 
 
 def extract_functions(module_path: Path, function_names: list[str], global_bindings: dict):
@@ -271,6 +286,71 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
         self.assertIn('"--alm-curvature-smoothing"', source)
         self.assertIn('"ALM_CURVATURE_SMOOTHING", "0.05"', source)
 
+    def test_single_stage_parse_args_behavioral_alm_flag_wiring(self):
+        """Behaviorally verify ALM argparse flags parse to correct dest/type/value.
+
+        Complements the source-text assertIn checks above by actually calling
+        parse_args and inspecting the resulting namespace.
+        """
+        import argparse as _argparse
+        import os as _os
+
+        globals_for_extract = {
+            "argparse": _argparse,
+            "os": _os,
+            "COIL_COIL_MIN_DIST_M": 0.05,
+            "COIL_LENGTH_TARGET_M": 1.7,
+            "COIL_PLASMA_MIN_DIST_M": 0.015,
+            "DEFAULT_EQUILIBRIA_DIR": "/tmp/fake_eq",
+            "DEFAULT_SINGLE_STAGE_OUTPUT_ROOT": "/tmp/fake_out",
+            "DEFAULT_DATABASE_STAGE2_ROOT": "/tmp/fake_db",
+            "DEFAULT_LOCAL_STAGE2_ROOT": "/tmp/fake_local",
+            "DEFAULT_HARDWARE_SEARCH_MODE": "hard",
+            "DEFAULT_HARDWARE_SEARCH_SOFT_ITERATIONS": 0,
+            "DEFAULT_STAGE2_SEEDS_BY_PLASMA": {},
+            "FRONTIER_SCALARIZATION_TYPE_WEIGHT_SCHEDULE": "weight_schedule_v1",
+            "FRONTIER_SCALARIZATION_TYPE_REFERENCE_POINT": "reference_point_v1",
+            "FRONTIER_SCALARIZATION_TYPE_ACHIEVEMENT": "achievement_v1",
+            "FRONTIER_SCALARIZATION_TYPE_EPSILON": "epsilon_constraint_v1",
+            "BANANA_CURRENT_HARD_LIMIT_A": 1.6e4,
+            "MAX_CURVATURE_INV_M": 100.0,
+            "PLASMA_VESSEL_MIN_DIST_M": 0.04,
+            "_DEFAULT_SINGLE_STAGE_SEED_REGIME": "auto",
+            "_SINGLE_STAGE_SEED_REGIME_AUTO": "auto",
+            "_SINGLE_STAGE_SEED_REGIME_PRESERVE_FIRST": "preserve_first",
+            "_SINGLE_STAGE_SEED_REGIME_REPAIR_FIRST": "repair_first",
+            "_SINGLE_STAGE_SEED_REGIME_BRIDGE_ONLY": "bridge_only",
+            "_SINGLE_STAGE_SEED_REGIME_GLOBAL_SEARCH": "global_search",
+        }
+        fns = extract_functions(
+            SINGLE_STAGE_MODULE_PATH,
+            ["add_confinement_surrogate_args", "parse_args"],
+            globals_for_extract,
+        )
+        test_argv = [
+            "prog",
+            "--alm-penalty-max", "42.0",
+            "--alm-trust-radius-init", "0.1",
+            "--alm-trust-radius-min", "1e-5",
+            "--alm-trust-radius-shrink", "0.3",
+            "--alm-trust-radius-grow", "2.0",
+            "--alm-max-inner-attempts", "7",
+            "--alm-max-subproblem-continuations", "15",
+            "--alm-distance-smoothing", "0.01",
+            "--alm-curvature-smoothing", "0.1",
+        ]
+        with patch.object(sys, "argv", test_argv):
+            args = fns["parse_args"]()
+        self.assertAlmostEqual(args.alm_penalty_max, 42.0)
+        self.assertAlmostEqual(args.alm_trust_radius_init, 0.1)
+        self.assertAlmostEqual(args.alm_trust_radius_min, 1e-5)
+        self.assertAlmostEqual(args.alm_trust_radius_shrink, 0.3)
+        self.assertAlmostEqual(args.alm_trust_radius_grow, 2.0)
+        self.assertEqual(args.alm_max_inner_attempts, 7)
+        self.assertEqual(args.alm_max_subproblem_continuations, 15)
+        self.assertAlmostEqual(args.alm_distance_smoothing, 0.01)
+        self.assertAlmostEqual(args.alm_curvature_smoothing, 0.1)
+
     def test_single_stage_parse_args_exposes_thresholded_physics_formulation_controls(self):
         source = SINGLE_STAGE_MODULE_PATH.read_text()
 
@@ -398,12 +478,111 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
         self.assertIn("single_stage_alm_constraint_names(", source)
         self.assertIn("alm_formulation=args.alm_formulation", source)
 
+    def test_hardware_constraint_schema_declares_expected_targets(self):
+        schema_module = load_hardware_constraint_schema_module()
+        specs = {
+            spec.name: spec
+            for spec in schema_module.hardware_constraint_schema()
+        }
+
+        self.assertEqual(
+            set(specs),
+            {
+                "coil_coil_spacing",
+                "coil_surface_spacing",
+                "surface_vessel_spacing",
+                "max_curvature",
+                "coil_length",
+                "banana_current",
+                "tf_current",
+            },
+        )
+        self.assertEqual(specs["coil_length"].applies_to, frozenset({"alm", "artifact"}))
+        self.assertEqual(
+            specs["banana_current"].applies_to,
+            frozenset({"penalty", "alm", "artifact"}),
+        )
+        self.assertEqual(specs["banana_current"].traversal_policy, "forbidden")
+        self.assertEqual(specs["tf_current"].applies_to, frozenset({"artifact"}))
+
+    def test_penalty_box_bound_names_follow_forbidden_traversal_policy(self):
+        schema_module = load_hardware_constraint_schema_module()
+
+        self.assertEqual(
+            schema_module.hardware_constraint_penalty_box_bound_names(
+                traversal_policy="forbidden",
+            ),
+            ("banana_current",),
+        )
+        self.assertEqual(
+            schema_module.resolve_penalty_box_bound_threshold(
+                "banana_current",
+                requested_threshold=2.0e4,
+            ),
+            1.6e4,
+        )
+
+    def test_single_stage_alm_constraint_names_follow_shared_schema(self):
+        schema_module = load_hardware_constraint_schema_module()
+        functions = extract_functions(
+            SINGLE_STAGE_MODULE_PATH,
+            ["single_stage_alm_constraint_names"],
+            {
+                "hardware_constraint_alm_names": schema_module.hardware_constraint_alm_names,
+                "SINGLE_STAGE_THRESHOLDED_PHYSICS_CONSTRAINT_NAMES": (
+                    "qs_error",
+                    "boozer_residual",
+                    "iota_penalty",
+                    "length_penalty",
+                ),
+            },
+        )
+
+        constraint_names = functions["single_stage_alm_constraint_names"](
+            alm_formulation="weighted_sum",
+            include_surface_surface=True,
+        )
+        self.assertEqual(
+            constraint_names,
+            [
+                "coil_coil_spacing",
+                "coil_surface_spacing",
+                "surface_vessel_spacing",
+                "max_curvature",
+                "coil_length_upper_bound",
+                "banana_current_upper_bound",
+            ],
+        )
+
+    def test_stage2_alm_constraint_names_follow_shared_schema(self):
+        schema_module = load_hardware_constraint_schema_module()
+        functions = extract_functions(
+            STAGE2_MODULE_PATH,
+            ["stage2_alm_constraint_names"],
+            {
+                "hardware_constraint_alm_names": schema_module.hardware_constraint_alm_names,
+            },
+        )
+
+        constraint_names = functions["stage2_alm_constraint_names"](
+            include_coil_surface=True,
+        )
+        self.assertEqual(
+            constraint_names,
+            (
+                "coil_coil_spacing",
+                "coil_surface_spacing",
+                "max_curvature",
+                "coil_length_upper_bound",
+                "banana_current_upper_bound",
+            ),
+        )
+
     def test_single_stage_partial_alm_state_payload_serializes_numpy_fields(self):
         functions = extract_functions(
             SINGLE_STAGE_MODULE_PATH,
             [
                 "_jsonable_value",
-                "_jsonable_alm_state",
                 "build_single_stage_alm_partial_state",
             ],
             {"np": np},
@@ -503,7 +682,7 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
         module = load_stage2_alm_wrapper_module()
         args = make_stage2_alm_wrapper_args(
             equilibria_dir="eqdir",
-            tf_current_A=9.0e4,
+            tf_current_A=7.5e4,
             toroidal_flux=0.37,
             cc_threshold=0.07,
         )
@@ -513,7 +692,7 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
 
         self.assertEqual(resolved_spec_source, "profile:standard_80ka")
         self.assertEqual(config.constraint_method, "alm")
-        self.assertEqual(config.tf_current_A, 9.0e4)
+        self.assertEqual(config.tf_current_A, 7.5e4)
         self.assertEqual(config.toroidal_flux, 0.37)
         self.assertEqual(config.cc_threshold, 0.07)
         self.assertEqual(config.output_root, Path("outputs").resolve())
@@ -539,6 +718,27 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
         self.assertIn("--banana-current-max-A", command)
         self.assertEqual(command[command.index("--banana-current-max-A") + 1], "16000.0")
         self.assertEqual(command[command.index("--toroidal-flux") + 1], "0.37")
+
+    def test_stage2_alm_wrapper_standard_profile_matches_hardware_baseline(self):
+        module = load_stage2_alm_wrapper_module()
+
+        resolved_spec, resolved_spec_source = module.resolve_stage2_spec_payload(
+            make_stage2_alm_wrapper_args()
+        )
+
+        self.assertEqual(resolved_spec_source, "profile:standard_80ka")
+        self.assertEqual(resolved_spec["tf_current_A"], 8.0e4)
+        self.assertEqual(resolved_spec["cc_threshold"], 0.05)
+        self.assertEqual(resolved_spec["curvature_threshold"], 100.0)
+        self.assertEqual(resolved_spec["banana_surf_radius"], 0.21)
+
+    def test_stage2_alm_wrapper_rejects_tf_current_above_hard_limit(self):
+        module = load_stage2_alm_wrapper_module()
+        args = make_stage2_alm_wrapper_args(tf_current_A=8.5e4)
+        resolved_spec, _ = module.resolve_stage2_spec_payload(args)
+
+        with self.assertRaisesRegex(ValueError, "TF coil current must be in the interval"):
+            module.build_stage2_alm_config(args, resolved_spec=resolved_spec)
 
     def test_stage2_alm_wrapper_spec_json_must_be_complete(self):
         module = load_stage2_alm_wrapper_module()
@@ -617,7 +817,22 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
         self.assertIn("resolved_stage2_config", summary)
         self.assertEqual(summary["resolved_stage2_config"]["constraint_method"], "alm")
         self.assertEqual(summary["resolved_stage2_config"]["alm_penalty_max"], 1.0e8)
+        self.assertEqual(
+            summary["resolved_stage2_config"]["alm_max_subproblem_continuations"],
+            20,
+        )
+        self.assertEqual(summary["resolved_stage2_config"]["alm_distance_smoothing"], 0.005)
+        self.assertEqual(summary["resolved_stage2_config"]["alm_curvature_smoothing"], 0.25)
+        self.assertEqual(summary["resolved_stage2_config"]["curvature_threshold"], 100.0)
+        self.assertEqual(summary["resolved_stage2_config"]["banana_surf_radius"], 0.21)
         self.assertEqual(summary["resolved_stage2_config"]["output_root"], str(Path("outputs").resolve()))
+        self.assertEqual(
+            summary["fixed_stage2_hardware_contract"],
+            {
+                "COIL_PLASMA_MIN_DIST_M": 0.015,
+                "PLASMA_VESSEL_MIN_DIST_M": 0.04,
+            },
+        )
         self.assertEqual(summary["output_contract"], "materialized_stage2_artifact")
         self.assertFalse(summary["contains_solver_outputs"])
 
@@ -704,6 +919,122 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
         self.assertEqual(metadata["basin_temperature"], 2.5)
         self.assertEqual(metadata["basin_niter_success"], 8)
         self.assertEqual(metadata["basin_seed"], 11)
+        self.assertEqual(metadata["COIL_PLASMA_MIN_DIST_M"], 0.015)
+        self.assertEqual(metadata["PLASMA_VESSEL_MIN_DIST_M"], 0.04)
+        self.assertEqual(metadata["LENGTH_TARGET"], 1.7)
+
+    def test_stage2_alm_wrapper_load_validated_artifact_backfills_clearance_metadata(self):
+        module = load_stage2_alm_wrapper_module()
+        args = make_stage2_alm_wrapper_args()
+        resolved_spec, _ = module.resolve_stage2_spec_payload(args)
+        config = module.build_stage2_alm_config(args, resolved_spec=resolved_spec)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            artifact_path = Path(tmpdir) / "biot_savart_opt.json"
+            results_path = artifact_path.with_name("results.json")
+            artifact_path.write_text("{}", encoding="utf-8")
+
+            legacy_results = module._expected_stage2_artifact_metadata(config)
+            legacy_results.pop("COIL_PLASMA_MIN_DIST_M")
+            legacy_results.pop("PLASMA_VESSEL_MIN_DIST_M")
+            legacy_results.pop("LENGTH_TARGET")
+            legacy_results.pop("ALM_DISTANCE_SMOOTHING")
+            legacy_results.pop("ALM_CURVATURE_SMOOTHING")
+            results_path.write_text(json.dumps(legacy_results), encoding="utf-8")
+
+            with patch.object(module, "resolve_stage2_artifact_path", return_value=artifact_path):
+                loaded_results_path, loaded_results = module.load_validated_stage2_artifact(config)
+
+        self.assertEqual(loaded_results_path, results_path)
+        self.assertEqual(loaded_results["COIL_PLASMA_MIN_DIST_M"], 0.015)
+        self.assertEqual(loaded_results["PLASMA_VESSEL_MIN_DIST_M"], 0.04)
+        self.assertEqual(loaded_results["LENGTH_TARGET"], 1.7)
+        self.assertEqual(loaded_results["ALM_DISTANCE_SMOOTHING"], 0.005)
+        self.assertEqual(loaded_results["ALM_CURVATURE_SMOOTHING"], 0.25)
+
+    def test_stage2_alm_wrapper_spec_json_backfills_optional_alm_solver_keys(self):
+        module = load_stage2_alm_wrapper_module()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            spec_path = Path(tmpdir) / "stage2_spec.json"
+            spec_path.write_text(
+                json.dumps(
+                    {
+                        "major_radius": 0.915,
+                        "toroidal_flux": 0.24,
+                        "length_weight": 5.0e-4,
+                        "cc_weight": 100.0,
+                        "cc_threshold": 0.05,
+                        "curvature_weight": 1.0e-4,
+                        "curvature_threshold": 40.0,
+                        "banana_surf_radius": 0.22,
+                        "tf_current_A": 8.0e4,
+                        "order": 2,
+                        "banana_init_current_A": 1.0e4,
+                        "banana_current_max_A": 1.6e4,
+                        "alm_max_outer_iters": 10,
+                        "alm_penalty_init": 1.0,
+                        "alm_penalty_scale": 10.0,
+                        "alm_penalty_max": 1.0e8,
+                        "basin_hops": 0,
+                        "basin_stepsize": 0.01,
+                        "basin_temperature": 1.0,
+                        "basin_niter_success": 0,
+                        "basin_seed": None,
+                        "init_only": False,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            args = make_stage2_alm_wrapper_args(
+                profile=None,
+                stage2_spec_json=str(spec_path),
+            )
+
+            resolved_spec, _ = module.resolve_stage2_spec_payload(args)
+
+        self.assertEqual(resolved_spec["alm_max_subproblem_continuations"], 20)
+        self.assertEqual(resolved_spec["alm_feas_tol"], 1.0e-6)
+        self.assertEqual(resolved_spec["alm_stationarity_tol"], 1.0e-6)
+        self.assertEqual(resolved_spec["alm_distance_smoothing"], 0.005)
+        self.assertEqual(resolved_spec["alm_curvature_smoothing"], 0.25)
+
+    def test_stage2_alm_wrapper_summary_includes_explicit_clearance_results(self):
+        module = load_stage2_alm_wrapper_module()
+        args = make_stage2_alm_wrapper_args()
+        resolved_spec, resolved_spec_source = module.resolve_stage2_spec_payload(args)
+        config = module.build_stage2_alm_config(args, resolved_spec=resolved_spec)
+        command = module.build_stage2_command(config, python_executable=args.python_executable)
+
+        summary = module.build_summary(
+            args,
+            config=config,
+            resolved_spec_source=resolved_spec_source,
+            command=command,
+            artifact_path=Path("/tmp/stage2/biot_savart_opt.json"),
+            artifact_reused=True,
+            stage2_results_path=Path("/tmp/stage2/results.json"),
+            stage2_results={
+                "TERMINATION_MESSAGE": "done",
+                "OPTIMIZER_SUCCESS": True,
+                "ALM_OUTER_ITERATIONS": 4,
+                "ALM_FINAL_PENALTY": 25.0,
+                "CURVE_CURVE_MIN_DIST": 0.07,
+                "MAX_CURVATURE": 91.0,
+                "COIL_LENGTH": 1.69,
+                "FIELD_ERROR": 2.0e-4,
+                "HARDWARE_CONSTRAINTS_OK": True,
+                "CURVE_SURFACE_MIN_DIST": 0.017,
+                "COIL_PLASMA_MIN_DIST_M": 0.015,
+                "PLASMA_VESSEL_MIN_DIST": 0.041,
+                "PLASMA_VESSEL_MIN_DIST_M": 0.04,
+            },
+        )
+
+        self.assertEqual(summary["coil_plasma_min_dist"], 0.017)
+        self.assertEqual(summary["coil_plasma_threshold"], 0.015)
+        self.assertEqual(summary["plasma_vessel_min_dist"], 0.041)
+        self.assertEqual(summary["plasma_vessel_threshold"], 0.04)
 
     def test_stage2_alm_wrapper_normalizes_basin_seed_against_basin_hops(self):
         module = load_stage2_alm_wrapper_module()
@@ -1057,6 +1388,8 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
     def test_stage2_results_contract_records_hardware_status_fields(self):
         source = STAGE2_MODULE_PATH.read_text()
         self.assertIn("_build_stage2_results_impl(", source)
+        objectives_source = STAGE2_OBJECTIVES_MODULE_PATH.read_text()
+        self.assertIn("fixed_stage2_clearance_contract()", objectives_source)
 
         results_dict = find_function_return_dict(
             STAGE2_OBJECTIVES_MODULE_PATH,

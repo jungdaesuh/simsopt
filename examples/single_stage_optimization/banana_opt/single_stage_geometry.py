@@ -7,6 +7,10 @@ from scipy.spatial.distance import cdist
 
 from simsopt.geo import SurfaceRZFourier
 
+from banana_opt.hardware_constraint_schema import (
+    build_hardware_constraint_status,
+    build_threshold_overrides,
+)
 from topology_scorer import (
     score_topology as _score_topology,
     stop_reasons_indicate_broken as _topology_stop_reasons_indicate_broken,
@@ -269,27 +273,50 @@ def evaluate_single_stage_hardware_constraints(
     ss_dist,
     max_curvature,
     curvature_threshold,
+    *,
+    coil_length=None,
+    length_target=None,
+    tf_current_A=None,
+    tf_current_limit_A=None,
+    banana_current_A=None,
+    banana_current_max_A=None,
 ):
-    violations = []
-    if curve_curve_min_dist < cc_dist:
-        violations.append(
-            f"coil_coil_min_dist {curve_curve_min_dist:.6f} below threshold {cc_dist:.6f}"
+    threshold_overrides = build_threshold_overrides(
+        (
+            ("coil_coil_spacing", cc_dist),
+            ("coil_surface_spacing", cs_dist),
+            ("surface_vessel_spacing", ss_dist),
+            ("max_curvature", curvature_threshold),
+            ("coil_length", length_target),
+            ("tf_current", tf_current_limit_A),
+            ("banana_current", banana_current_max_A),
         )
-    if curve_surface_min_dist < cs_dist:
-        violations.append(
-            f"coil_surface_min_dist {curve_surface_min_dist:.6f} below threshold {cs_dist:.6f}"
-        )
-    if surface_vessel_min_dist < ss_dist:
-        violations.append(
-            f"surface_vessel_min_dist {surface_vessel_min_dist:.6f} below threshold {ss_dist:.6f}"
-        )
-    if max_curvature > curvature_threshold:
-        violations.append(
-            f"max_curvature {max_curvature:.6f} exceeds threshold {curvature_threshold:.6f}"
-        )
+    )
+    measured_values = {
+        "coil_coil_spacing": curve_curve_min_dist,
+        "coil_surface_spacing": curve_surface_min_dist,
+        "surface_vessel_spacing": surface_vessel_min_dist,
+        "max_curvature": max_curvature,
+        "coil_length": coil_length,
+        "tf_current": tf_current_A,
+        "banana_current": banana_current_A,
+    }
+    search_hardware_status = build_hardware_constraint_status(
+        measured_values,
+        applies_to="penalty",
+        threshold_overrides=threshold_overrides,
+    )
+    artifact_hardware_status = build_hardware_constraint_status(
+        measured_values,
+        applies_to="artifact",
+        threshold_overrides=threshold_overrides,
+    )
     return {
-        "success": len(violations) == 0,
-        "violations": violations,
+        "success": search_hardware_status["success"],
+        "violations": list(search_hardware_status["violations"]),
+        "constraints": search_hardware_status["constraints"],
+        "search_hardware_status": search_hardware_status,
+        "artifact_hardware_status": artifact_hardware_status,
         "curve_curve_min_dist": float(curve_curve_min_dist),
         "cc_dist": float(cc_dist),
         "curve_surface_min_dist": float(curve_surface_min_dist),
@@ -298,6 +325,18 @@ def evaluate_single_stage_hardware_constraints(
         "ss_dist": float(ss_dist),
         "max_curvature": float(max_curvature),
         "curvature_threshold": float(curvature_threshold),
+        "coil_length": None if coil_length is None else float(coil_length),
+        "length_target": None if length_target is None else float(length_target),
+        "tf_current_A": None if tf_current_A is None else float(tf_current_A),
+        "tf_current_limit_A": (
+            None if tf_current_limit_A is None else float(tf_current_limit_A)
+        ),
+        "banana_current_A": (
+            None if banana_current_A is None else float(banana_current_A)
+        ),
+        "banana_current_max_A": (
+            None if banana_current_max_A is None else float(banana_current_max_A)
+        ),
     }
 
 
@@ -342,6 +381,12 @@ def evaluate_single_stage_hardware_snapshot(
     curvature_threshold,
     outer_surface=None,
     vessel_surface=None,
+    coil_length=None,
+    length_target=None,
+    tf_current_A=None,
+    tf_current_limit_A=None,
+    banana_current_A=None,
+    banana_current_max_A=None,
 ):
     curve_curve_min_dist = float(curve_curve_distance_obj.shortest_distance())
     curve_surface_min_dist = float(curve_surface_distance_obj.shortest_distance())
@@ -352,7 +397,7 @@ def evaluate_single_stage_hardware_snapshot(
         vessel_surface,
     )
     max_curvature = float(np.max(banana_curve.kappa()))
-    status = evaluate_single_stage_hardware_constraints(
+    return evaluate_single_stage_hardware_constraints(
         curve_curve_min_dist,
         cc_dist,
         curve_surface_min_dist,
@@ -361,14 +406,13 @@ def evaluate_single_stage_hardware_snapshot(
         ss_dist,
         max_curvature,
         curvature_threshold,
+        coil_length=coil_length,
+        length_target=length_target,
+        tf_current_A=tf_current_A,
+        tf_current_limit_A=tf_current_limit_A,
+        banana_current_A=banana_current_A,
+        banana_current_max_A=banana_current_max_A,
     )
-    return {
-        "curve_curve_min_dist": curve_curve_min_dist,
-        "curve_surface_min_dist": curve_surface_min_dist,
-        "surface_vessel_min_dist": surface_vessel_min_dist,
-        "max_curvature": max_curvature,
-        "status": status,
-    }
 
 
 def snapshot_surface_states(surface_data):
@@ -624,6 +668,8 @@ def _topology_gate_first_exit_fields(earliest_exit):
 
 
 def topology_gate_state(status):
+    if not bool(status.get("enabled", True)):
+        return None
     if bool(status.get("broken", False)):
         return "broken"
     stop_reason_counts = status.get("stop_reason_counts") or {}
@@ -640,6 +686,10 @@ def topology_gate_state(status):
 def _finalize_topology_gate_status(status):
     state = topology_gate_state(status)
     finalized = dict(status)
+    if state is None:
+        finalized["state"] = None
+        finalized["broken"] = False
+        return finalized
     if state == "broken":
         finalized["success"] = False
     finalized["state"] = state
