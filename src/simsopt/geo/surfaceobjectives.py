@@ -6,6 +6,10 @@ from .._core.derivative import Derivative, derivative_dec
 from .._core.types import RealArray
 from .surface import Surface
 from .surfacexyztensorfourier import SurfaceXYZTensorFourier
+from ._simsoptpp_boozer_compat import (
+    KEY_BOOZER_DRESIDUAL_DC,
+    _call_with_abi_fallback,
+)
 from ..objectives.utilities import forward_backward
 
 try:
@@ -38,25 +42,6 @@ __all__ = [
 if _HAS_JAX:
     __all__.append("SurfaceSurfaceDistance")
 
-_BOOZER_DRESIDUAL_DC_CALL_MODE = None
-
-
-def _call_boozer_compat_signature(call_mode_name, func, with_I_args, alpha_only_args):
-    call_mode = globals()[call_mode_name]
-    if call_mode == "with_I":
-        return func(*with_I_args)
-    if call_mode == "alpha_only":
-        return func(*alpha_only_args)
-    try:
-        value = func(*with_I_args)
-    except TypeError as exc:
-        if "incompatible function arguments" not in str(exc):
-            raise
-        globals()[call_mode_name] = "alpha_only"
-        return func(*alpha_only_args)
-    globals()[call_mode_name] = "with_I"
-    return value
-
 
 def _call_boozer_dresidual_dc(
     G,
@@ -68,9 +53,12 @@ def _call_boozer_dresidual_dc(
     iota,
     dxtheta_dc,
 ):
-    """Dispatch across the supported simsoptpp Boozer dresidual signatures."""
-    return _call_boozer_compat_signature(
-        "_BOOZER_DRESIDUAL_DC_CALL_MODE",
+    """Dispatch across the supported simsoptpp Boozer dresidual signatures.
+
+    See ``_simsoptpp_boozer_compat`` for the ``I=0.0`` vacuum-field rationale.
+    """
+    return _call_with_abi_fallback(
+        KEY_BOOZER_DRESIDUAL_DC,
         sopp.boozer_dresidual_dc,
         (G, 0.0, dB_dc, B, tang, B2, dxphi_dc, iota, dxtheta_dc),
         (G, dB_dc, B, tang, B2, dxphi_dc, iota, dxtheta_dc),

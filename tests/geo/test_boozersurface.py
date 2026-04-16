@@ -5,6 +5,12 @@ from unittest.mock import patch
 import numpy as np
 from simsopt._core.optimizable import Optimizable
 import simsopt.geo.boozersurface as boozersurface_module
+from simsopt.geo import _simsoptpp_boozer_compat as boozer_compat
+from simsopt.geo._simsoptpp_boozer_compat import (
+    KEY_BOOZER_RESIDUAL,
+    KEY_BOOZER_RESIDUAL_DS,
+    KEY_BOOZER_RESIDUAL_DS2,
+)
 from simsopt.geo._boozersurface_current_guard import (
     guard_none_G_coil_gradient_callback,
 )
@@ -64,9 +70,7 @@ def _make_free_current_biotsavart(attr_name="coils"):
 
 class BoozerSurfaceTests(unittest.TestCase):
     def setUp(self):
-        boozersurface_module._BOOZER_RESIDUAL_CALL_MODE = None
-        boozersurface_module._BOOZER_RESIDUAL_DS_CALL_MODE = None
-        boozersurface_module._BOOZER_RESIDUAL_DS2_CALL_MODE = None
+        boozer_compat._reset_call_modes()
 
     def test_call_boozer_residual_falls_back_to_alpha_only_signature(self):
         calls = []
@@ -100,7 +104,9 @@ class BoozerSurfaceTests(unittest.TestCase):
 
         self.assertEqual(value, 1.25)
         self.assertEqual(cached_value, 1.25)
-        self.assertEqual(boozersurface_module._BOOZER_RESIDUAL_CALL_MODE, "alpha_only")
+        self.assertEqual(
+            boozer_compat._get_call_mode(KEY_BOOZER_RESIDUAL), "alpha_only"
+        )
         self.assertEqual([len(args) for args in calls], [7, 6, 6])
 
     def test_call_boozer_residual_ds_falls_back_to_alpha_only_signature(self):
@@ -149,7 +155,7 @@ class BoozerSurfaceTests(unittest.TestCase):
         self.assertEqual(cached_value, 2.5)
         np.testing.assert_allclose(cached_gradient, expected_gradient)
         self.assertEqual(
-            boozersurface_module._BOOZER_RESIDUAL_DS_CALL_MODE, "alpha_only"
+            boozer_compat._get_call_mode(KEY_BOOZER_RESIDUAL_DS), "alpha_only"
         )
         self.assertEqual([len(args) for args in calls], [11, 10, 10])
 
@@ -206,7 +212,7 @@ class BoozerSurfaceTests(unittest.TestCase):
         np.testing.assert_allclose(cached_gradient, expected_gradient)
         np.testing.assert_allclose(cached_hessian, expected_hessian)
         self.assertEqual(
-            boozersurface_module._BOOZER_RESIDUAL_DS2_CALL_MODE, "alpha_only"
+            boozer_compat._get_call_mode(KEY_BOOZER_RESIDUAL_DS2), "alpha_only"
         )
         self.assertEqual([len(args) for args in calls], [12, 11, 11])
 

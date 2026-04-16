@@ -1,4 +1,5 @@
 import argparse
+import atexit
 import copy
 from contextlib import contextmanager
 from dataclasses import dataclass, fields as dataclass_fields, is_dataclass
@@ -393,9 +394,9 @@ def _summarize_host_scalar(value):
 
 
 def _single_stage_host_vector_array(value):
-    return np.asarray(_single_stage_optimizer_dofs_array(value), dtype=np.float64).reshape(
-        -1
-    )
+    return np.asarray(
+        _single_stage_optimizer_dofs_array(value), dtype=np.float64
+    ).reshape(-1)
 
 
 def _optional_int(value):
@@ -4578,7 +4579,9 @@ def build_single_stage_target_lane_self_intersection_success_filter(
 
     from simsopt.jax_core.field import coil_set_spec_from_dof_extraction_spec
 
-    supported_inputs = _supported_surface_self_intersection_inputs(boozer_surface.surface)
+    supported_inputs = _supported_surface_self_intersection_inputs(
+        boozer_surface.surface
+    )
     if supported_inputs is None:
         return None
 
@@ -5299,7 +5302,7 @@ def build_target_lane_outer_objective_config(
     surface_vessel_weight,
     curvature_threshold,
     curvature_weight,
-    ):
+):
     """Build the structured target-lane outer-objective contract once."""
     return build_traceable_single_stage_outer_objective_config(
         boozer_surface,
@@ -5335,6 +5338,7 @@ def build_traceable_single_stage_alm_runtime_config(
     banana_current_threshold,
 ):
     """Build the immutable pure-JAX ALM runtime config for the inner solve."""
+
     def optional_threshold(value):
         return None if value is None else float(value)
 
@@ -5976,7 +5980,9 @@ def resolve_single_stage_alm_inner_optimizer_contract(
 
     if constraint_method != "alm":
         return None
-    return outer_contract if isinstance(outer_contract, TargetOptimizerContract) else None
+    return (
+        outer_contract if isinstance(outer_contract, TargetOptimizerContract) else None
+    )
 
 
 def resolve_single_stage_outer_optimizer_method(field_backend, optimizer_backend):
@@ -7647,6 +7653,11 @@ if __name__ == "__main__":
         encoding="utf-8",
         buffering=1,
     )
+    # atexit runs LIFO: registering close() first then faulthandler.disable()
+    # guarantees disable fires before close, so a late fault signal cannot
+    # write to an already-closed stream. Exception paths are covered too.
+    atexit.register(fatal_error_log_stream.close)
+    atexit.register(faulthandler.disable)
     faulthandler.enable(file=fatal_error_log_stream, all_threads=True)
     startup_progress_path = os.path.join(OUT_DIR, "startup_progress.json")
     startup_progress = {"completed_stages": [], "timings": {}}
@@ -8470,13 +8481,15 @@ if __name__ == "__main__":
                     length_penalty_threshold=args.alm_length_penalty_threshold,
                     banana_current_threshold=args.banana_current_max_A,
                 )
-                alm_runtime_bundle = get_traceable_single_stage_alm_runtime_bundle_builder()(
-                    boozer_surface,
-                    bs,
-                    iota_target,
-                    outer_objective_config=alm_outer_objective_config,
-                    alm_config=alm_runtime_config,
-                    success_filter=alm_target_success_filter,
+                alm_runtime_bundle = (
+                    get_traceable_single_stage_alm_runtime_bundle_builder()(
+                        boozer_surface,
+                        bs,
+                        iota_target,
+                        outer_objective_config=alm_outer_objective_config,
+                        alm_config=alm_runtime_config,
+                        success_filter=alm_target_success_filter,
+                    )
                 )
                 alm_target_value_and_grad = alm_runtime_bundle["value_and_grad"]
 
@@ -9300,7 +9313,9 @@ if __name__ == "__main__":
                             record_outer_optimizer_event(
                                 "phase1_returned",
                                 phase="phase1",
-                                elapsed_s=timings.get("outer_optimizer_initial_phase_s"),
+                                elapsed_s=timings.get(
+                                    "outer_optimizer_initial_phase_s"
+                                ),
                                 result=summarize_optimizer_result_for_progress(
                                     phase1_res
                                 ),
@@ -9378,8 +9393,8 @@ if __name__ == "__main__":
                             main_failure_callback,
                             phase="phase2",
                         )
-                        main_progress_callback = build_outer_optimizer_progress_callback(
-                            "phase2"
+                        main_progress_callback = (
+                            build_outer_optimizer_progress_callback("phase2")
                         )
                         main_optimizer_start_s = _perf_counter_s()
                         with maybe_trace_single_stage_phase(
@@ -10101,5 +10116,3 @@ if __name__ == "__main__":
             results["TARGET_LANE_INVALID_STATE_DIAGNOSIS"],
         )
     write_json_file(os.path.join(OUT_DIR_ITER, "results.json"), results)
-    faulthandler.disable()
-    fatal_error_log_stream.close()

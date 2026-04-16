@@ -4,6 +4,8 @@ import pytest
 sopp = pytest.importorskip("simsoptpp")
 from simsopt.geo.surfacexyztensorfourier import SurfaceXYZTensorFourier
 import simsopt.geo.surfaceobjectives as surfaceobjectives_module
+from simsopt.geo import _simsoptpp_boozer_compat as boozer_compat
+from simsopt.geo._simsoptpp_boozer_compat import KEY_BOOZER_DRESIDUAL_DC
 
 
 def _make_clamped_tensor_surface(theta):
@@ -55,11 +57,13 @@ def test_surface_xyztensorfourier_theta_third_derivative_matches_finite_differen
         - minus_surface.gammadash2dash2()[0, 0, :]
     ) / (2 * eps)
 
-    np.testing.assert_allclose(analytical[0], finite_difference, rtol=1.0e-6, atol=1.0e-6)
+    np.testing.assert_allclose(
+        analytical[0], finite_difference, rtol=1.0e-6, atol=1.0e-6
+    )
 
 
 def test_call_boozer_dresidual_dc_falls_back_to_alpha_only_signature(monkeypatch):
-    surfaceobjectives_module._BOOZER_DRESIDUAL_DC_CALL_MODE = None
+    boozer_compat._reset_call_modes()
     calls = []
     expected = np.arange(6, dtype=float).reshape(1, 2, 3)
 
@@ -99,5 +103,5 @@ def test_call_boozer_dresidual_dc_falls_back_to_alpha_only_signature(monkeypatch
 
     np.testing.assert_allclose(value, expected)
     np.testing.assert_allclose(cached_value, expected)
-    assert surfaceobjectives_module._BOOZER_DRESIDUAL_DC_CALL_MODE == "alpha_only"
+    assert boozer_compat._get_call_mode(KEY_BOOZER_DRESIDUAL_DC) == "alpha_only"
     assert [len(args) for args in calls] == [9, 8, 8]

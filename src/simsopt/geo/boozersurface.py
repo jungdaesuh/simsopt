@@ -14,14 +14,16 @@ from ._boozersurface_current_guard import (
 )
 from .surfacexyzfourier import SurfaceXYZFourier
 from .surfacexyztensorfourier import SurfaceXYZTensorFourier
+from ._simsoptpp_boozer_compat import (
+    KEY_BOOZER_RESIDUAL,
+    KEY_BOOZER_RESIDUAL_DS,
+    KEY_BOOZER_RESIDUAL_DS2,
+    _call_with_abi_fallback,
+)
 from .._core.optimizable import Optimizable
 from functools import partial
 
 __all__ = ["BoozerSurface"]
-
-_BOOZER_RESIDUAL_CALL_MODE = None
-_BOOZER_RESIDUAL_DS_CALL_MODE = None
-_BOOZER_RESIDUAL_DS2_CALL_MODE = None
 
 _BOOZER_SURFACE_REQUIRED_ATTRIBUTES = (
     "quadpoints_phi",
@@ -81,27 +83,13 @@ def _is_supported_boozer_exact_surface(surface):
     return _matches_supported_surface_spec(surface, _BOOZER_EXACT_SURFACE_SPEC)
 
 
-def _call_boozer_compat_signature(call_mode_name, func, with_I_args, alpha_only_args):
-    call_mode = globals()[call_mode_name]
-    if call_mode == "with_I":
-        return func(*with_I_args)
-    if call_mode == "alpha_only":
-        return func(*alpha_only_args)
-    try:
-        value = func(*with_I_args)
-    except TypeError as exc:
-        if "incompatible function arguments" not in str(exc):
-            raise
-        globals()[call_mode_name] = "alpha_only"
-        return func(*alpha_only_args)
-    globals()[call_mode_name] = "with_I"
-    return value
-
-
 def _call_boozer_residual(G, iota, xphi, xtheta, B, weight_inv_modB):
-    """Dispatch across the supported simsoptpp residual signatures."""
-    return _call_boozer_compat_signature(
-        "_BOOZER_RESIDUAL_CALL_MODE",
+    """Dispatch across the supported simsoptpp residual signatures.
+
+    See ``_simsoptpp_boozer_compat`` for the ``I=0.0`` vacuum-field rationale.
+    """
+    return _call_with_abi_fallback(
+        KEY_BOOZER_RESIDUAL,
         sopp.boozer_residual,
         (G, 0.0, iota, xphi, xtheta, B, weight_inv_modB),
         (G, iota, xphi, xtheta, B, weight_inv_modB),
@@ -120,9 +108,12 @@ def _call_boozer_residual_ds(
     dxtheta_ds,
     weight_inv_modB,
 ):
-    """Dispatch across the supported simsoptpp first-derivative signatures."""
-    return _call_boozer_compat_signature(
-        "_BOOZER_RESIDUAL_DS_CALL_MODE",
+    """Dispatch across the supported simsoptpp first-derivative signatures.
+
+    See ``_simsoptpp_boozer_compat`` for the ``I=0.0`` vacuum-field rationale.
+    """
+    return _call_with_abi_fallback(
+        KEY_BOOZER_RESIDUAL_DS,
         sopp.boozer_residual_ds,
         (
             G,
@@ -165,9 +156,12 @@ def _call_boozer_residual_ds2(
     dxtheta_ds,
     weight_inv_modB,
 ):
-    """Dispatch across the supported simsoptpp second-derivative signatures."""
-    return _call_boozer_compat_signature(
-        "_BOOZER_RESIDUAL_DS2_CALL_MODE",
+    """Dispatch across the supported simsoptpp second-derivative signatures.
+
+    See ``_simsoptpp_boozer_compat`` for the ``I=0.0`` vacuum-field rationale.
+    """
+    return _call_with_abi_fallback(
+        KEY_BOOZER_RESIDUAL_DS2,
         sopp.boozer_residual_ds2,
         (
             G,
@@ -1236,6 +1230,7 @@ class BoozerSurface(Optimizable):
                 norm = np.linalg.norm(val)
                 i = i + 1
         else:
+
             def exact_residual_and_jacobian(x):
                 return self.boozer_exact_constraints(
                     x, derivatives=1, optimize_G=optimize_G
