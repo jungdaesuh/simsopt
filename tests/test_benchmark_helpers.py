@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import sys
 import math
+import subprocess
 import types
 
 import numpy as np
@@ -553,6 +554,44 @@ def test_repo_pythonpath_env_sets_all_platform_selectors(monkeypatch):
     assert env["SIMSOPT_JAX_BACKEND"] == "cpu"
 
 
+def _assert_benchmark_module_import_bootstraps_local_simsopt(module_name: str) -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import sys; "
+                f"sys.path.insert(0, {str(repo_root)!r}); "
+                f"sys.path.insert(0, {str(repo_root / 'src')!r}); "
+                f"import {module_name}; "
+                "import simsopt; "
+                "print(simsopt.__file__)"
+            ),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        cwd=str(repo_root),
+        env=repo_pythonpath_env(platform="cpu"),
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert str(repo_root / "src" / "simsopt" / "__init__.py") in completed.stdout.strip()
+
+
+def test_single_stage_init_parity_import_bootstraps_local_simsopt():
+    _assert_benchmark_module_import_bootstraps_local_simsopt(
+        "benchmarks.single_stage_init_parity"
+    )
+
+
+def test_stage2_e2e_comparison_import_bootstraps_local_simsopt():
+    _assert_benchmark_module_import_bootstraps_local_simsopt(
+        "benchmarks.stage2_e2e_comparison"
+    )
+
+
 def test_repo_pythonpath_env_auto_clears_inherited_platform_selectors(monkeypatch):
     monkeypatch.setenv("JAX_PLATFORMS", "cuda")
     monkeypatch.setenv("SIMSOPT_JAX_PLATFORM", "cuda")
@@ -763,6 +802,27 @@ def test_repo_pythonpath_env_detects_target_arch_nvjitlink_dir(monkeypatch, tmp_
         env["XLA_FLAGS"].split()[0]
         == f"--xla_gpu_cuda_data_dir={active_root}"
     )
+
+
+def test_repo_pythonpath_env_bundled_cuda_clears_local_toolchain_overrides(
+    monkeypatch,
+):
+    monkeypatch.setenv("SIMSOPT_JAX_CUDA_LIBRARY_MODE", "bundled")
+    monkeypatch.setenv("PATH", "/usr/bin")
+    monkeypatch.setenv("LD_LIBRARY_PATH", "/cuda/lib:/driver/lib")
+    monkeypatch.setenv(
+        "XLA_FLAGS",
+        "--xla_gpu_cuda_data_dir=/tmp/fake-cuda --xla_gpu_deterministic_ops=true",
+    )
+
+    env = repo_pythonpath_env(platform="cuda")
+
+    assert env["PATH"] == "/usr/bin"
+    assert "LD_LIBRARY_PATH" not in env
+    assert env["XLA_FLAGS"] == "--xla_gpu_deterministic_ops=true"
+    assert env["JAX_PLATFORMS"] == "cuda"
+    assert env["SIMSOPT_JAX_PLATFORM"] == "cuda"
+    assert env["SIMSOPT_JAX_BACKEND"] == "cuda"
 
 
 def test_apply_compilation_cache_policy_defaults_to_disabled(monkeypatch):

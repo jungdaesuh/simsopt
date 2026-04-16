@@ -60,6 +60,7 @@ apply_benchmark_compilation_cache_policy(
     "single_stage_init_parity",
     requested_platform=REQUESTED_PLATFORM,
 )
+bootstrap_local_simsopt()
 
 import jax
 import jaxlib
@@ -631,7 +632,6 @@ def evaluate_single_stage_init_parity(
 def main() -> None:
     args = parse_args()
     benchmark_mode = bool(args.benchmark_mode)
-    bootstrap_local_simsopt()
     stage2_bs_path = Path(args.stage2_bs_path)
     if not stage2_bs_path.exists():
         raise RuntimeError(f"Stage 2 seed fixture does not exist: {stage2_bs_path}")

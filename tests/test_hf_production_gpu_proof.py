@@ -32,6 +32,12 @@ def _write_executable(path: Path, content: str) -> None:
     path.chmod(path.stat().st_mode | stat.S_IXUSR)
 
 
+def _read_call_records(call_log: Path) -> list[dict[str, object]]:
+    return [
+        json.loads(line) for line in call_log.read_text(encoding="utf-8").splitlines()
+    ]
+
+
 def _build_fake_proof_repo(
     tmp_path: Path,
     *,
@@ -70,6 +76,7 @@ def _build_fake_proof_repo(
                         "argv": argv,
                         "output_json": str(output_json),
                         "ld_library_path": __import__("os").environ.get("LD_LIBRARY_PATH"),
+                        "cuda_library_mode": __import__("os").environ.get("SIMSOPT_JAX_CUDA_LIBRARY_MODE"),
                     }}
                 )
                 + "\\n"
@@ -111,6 +118,7 @@ def _build_fake_proof_repo(
                         "argv": argv,
                         "output_json": str(output_json),
                         "ld_library_path": __import__("os").environ.get("LD_LIBRARY_PATH"),
+                        "cuda_library_mode": __import__("os").environ.get("SIMSOPT_JAX_CUDA_LIBRARY_MODE"),
                     }}
                 )
                 + "\\n"
@@ -157,9 +165,7 @@ def test_run_production_gpu_proof_continues_after_missing_payload(tmp_path):
     assert (results_dir / "single_stage_cold.json").is_file()
     assert (results_dir / "single_stage_warm.json").is_file()
     assert not (results_dir / "stage2_warm.json").exists()
-    call_records = [
-        json.loads(line) for line in call_log.read_text(encoding="utf-8").splitlines()
-    ]
+    call_records = _read_call_records(call_log)
     stage2_calls = [
         record
         for record in call_records
@@ -228,9 +234,7 @@ def test_run_production_gpu_proof_adds_optional_repro_rung(tmp_path):
 
     assert completed.returncode == 0
     assert (results_dir / "stage2_warm_repro.json").is_file()
-    call_records = [
-        json.loads(line) for line in call_log.read_text(encoding="utf-8").splitlines()
-    ]
+    call_records = _read_call_records(call_log)
     repro_calls = [
         record
         for record in call_records
@@ -264,9 +268,7 @@ def test_run_production_gpu_proof_omits_boozer_override_by_default(tmp_path):
     )
 
     assert completed.returncode == 0
-    call_records = [
-        json.loads(line) for line in call_log.read_text(encoding="utf-8").splitlines()
-    ]
+    call_records = _read_call_records(call_log)
     single_stage_calls = [
         record
         for record in call_records
@@ -305,13 +307,12 @@ def test_run_production_gpu_proof_preserves_ld_library_path(tmp_path):
     )
 
     assert completed.returncode == 0
-    call_records = [
-        json.loads(line) for line in call_log.read_text(encoding="utf-8").splitlines()
-    ]
+    call_records = _read_call_records(call_log)
     assert call_records
     assert {
         record["ld_library_path"] for record in call_records
     } == {ld_library_path}
+    assert {record["cuda_library_mode"] for record in call_records} == {"bundled"}
 
 
 def test_build_stage2_hf_plan_keeps_smoke_jobs_geometry_report_only():
@@ -520,6 +521,7 @@ def test_launch_production_gpu_proof_dry_run_omits_smoke_geometry_override(tmp_p
     assert "--single-stage-boozer-optimizer-backend" not in completed.stdout
     assert "unset LD_LIBRARY_PATH" not in completed.stdout
     assert 'SIMSOPT_HF_JOB_JAX_GPU_WHEEL_SPEC="jax[cuda12]==0.9.2"' in completed.stdout
+    assert 'SIMSOPT_JAX_CUDA_LIBRARY_MODE="bundled"' in completed.stdout
     assert "stage2_warm_repro" not in completed.stdout
 
 

@@ -34,6 +34,7 @@ DEFAULT_IMAGE = os.environ.get("SIMSOPT_HF_GPU_IMAGE") or None
 DEFAULT_TARGET_OPTIMIZER_BACKEND = "ondevice"
 DEFAULT_JAX_GPU_WHEEL_SPEC = "jax[cuda12]==0.9.2"
 DEFAULT_EXPECTED_JAX_VERSION = "0.9.2"
+DEFAULT_CUDA_LIBRARY_MODE = "bundled"
 
 
 def _resolve_hf_cli() -> str:
@@ -340,6 +341,7 @@ def _build_job_command(args: argparse.Namespace, *, resolved_repo_sha: str) -> s
         f'export SIMSOPT_HF_JOB_BOOTSTRAP_MODE="{args.bootstrap_mode}"',
         f'export SIMSOPT_HF_JOB_EXPECTED_JAX_VERSION="{DEFAULT_EXPECTED_JAX_VERSION}"',
         f'export SIMSOPT_HF_JOB_JAX_GPU_WHEEL_SPEC="{DEFAULT_JAX_GPU_WHEEL_SPEC}"',
+        f'export SIMSOPT_JAX_CUDA_LIBRARY_MODE="{DEFAULT_CUDA_LIBRARY_MODE}"',
         "rm -rf /tmp/hf-production-proof",
         'mkdir -p /tmp/hf-production-proof "$JAX_COMPILATION_CACHE_DIR"',
         (

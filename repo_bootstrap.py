@@ -21,6 +21,15 @@ _XLA_PREALLOCATE_ENV = "XLA_PYTHON_CLIENT_PREALLOCATE"
 _XLA_FLAGS_ENV = "XLA_FLAGS"
 _XLA_GPU_CUDA_DATA_DIR_FLAG = "--xla_gpu_cuda_data_dir="
 _CUDA_TOOLCHAIN_ROOT_ENV = "SIMSOPT_CUDA_TOOLCHAIN_ROOT"
+_CUDA_LIBRARY_MODE_ENV = "SIMSOPT_JAX_CUDA_LIBRARY_MODE"
+_CUDA_LIBRARY_MODE_AUTO = "auto"
+_CUDA_LIBRARY_MODE_LOCAL = "local"
+_CUDA_LIBRARY_MODE_BUNDLED = "bundled"
+_CUDA_LIBRARY_MODES = (
+    _CUDA_LIBRARY_MODE_AUTO,
+    _CUDA_LIBRARY_MODE_LOCAL,
+    _CUDA_LIBRARY_MODE_BUNDLED,
+)
 _DEFAULT_CUDA_TOOLCHAIN_ROOT = Path("/usr/local/cuda")
 _LD_LIBRARY_PATH_ENV = "LD_LIBRARY_PATH"
 
@@ -36,6 +45,33 @@ def _prepend_env_path(env: dict[str, str], name: str, entry: Path) -> None:
     if parts and parts[0] == entry_str:
         return
     env[name] = os.pathsep.join([entry_str, *parts])
+
+
+def _normalize_cuda_library_mode(value: str | None) -> str:
+    """Normalize the CUDA runtime-library mode selector."""
+    if value is None:
+        return _CUDA_LIBRARY_MODE_AUTO
+    normalized = value.strip().lower()
+    if normalized == "":
+        return _CUDA_LIBRARY_MODE_AUTO
+    if normalized not in _CUDA_LIBRARY_MODES:
+        raise ValueError(
+            f"Unsupported CUDA library mode {value!r}; expected one of "
+            f"{_CUDA_LIBRARY_MODES}."
+        )
+    return normalized
+
+
+def _drop_xla_flags_with_prefix(env: dict[str, str], prefix: str) -> None:
+    """Remove XLA flag tokens with ``prefix`` while preserving unrelated flags."""
+    current = env.get(_XLA_FLAGS_ENV)
+    if current is None or current == "":
+        return
+    tokens = [token for token in current.split() if not token.startswith(prefix)]
+    if tokens:
+        env[_XLA_FLAGS_ENV] = " ".join(tokens)
+        return
+    env.pop(_XLA_FLAGS_ENV, None)
 
 
 def _has_cuda_toolchain_binaries(root: Path) -> bool:
@@ -107,6 +143,14 @@ def _resolve_cuda_nvjitlink_lib_root(cuda_root: Path) -> Path | None:
 
 def apply_cuda_toolchain_env(env: dict[str, str]) -> None:
     """Point JAX/XLA at a concrete external CUDA toolkit when one exists."""
+    cuda_library_mode = _normalize_cuda_library_mode(env.get(_CUDA_LIBRARY_MODE_ENV))
+    if cuda_library_mode == _CUDA_LIBRARY_MODE_BUNDLED:
+        # JAX's pip-installed CUDA wheels carry their own CUDA user-space
+        # libraries; forcing a local toolkit path here can make subprocesses
+        # resolve the wrong runtime libraries.
+        env.pop(_LD_LIBRARY_PATH_ENV, None)
+        _drop_xla_flags_with_prefix(env, _XLA_GPU_CUDA_DATA_DIR_FLAG)
+        return
     cuda_root = _resolve_cuda_toolchain_root(env)
     if cuda_root is None:
         return

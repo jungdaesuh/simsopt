@@ -20,6 +20,7 @@ sys.path.insert(0, str(SRC_ROOT))
 from benchmarks.validation_ladder_common import (
     apply_benchmark_compilation_cache_policy,
     apply_requested_platform,
+    bootstrap_local_simsopt,
     build_provenance,
     describe_compile_behavior,
     find_single_file,
@@ -48,6 +49,7 @@ apply_benchmark_compilation_cache_policy(
     "stage2_e2e_comparison",
     requested_platform=REQUESTED_PLATFORM,
 )
+bootstrap_local_simsopt()
 
 import jax
 import jaxlib
