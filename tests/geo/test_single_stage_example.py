@@ -699,6 +699,19 @@ class SingleStageExampleTests(unittest.TestCase):
             "wataru_proxy_field",
         )
 
+    def test_stage2_resolve_finite_current_mode_explains_legacy_assumed_default(self):
+        module = load_stage2_module()
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "recorded no finite-current mode, so that value was assumed as the legacy default",
+        ):
+            module.resolve_finite_current_mode(
+                "wataru_proxy_field",
+                artifact_mode="boozer_surrogate",
+                artifact_mode_source="legacy_assumed_default",
+            )
+
     def test_build_stage2_bs_path_uses_unique_globbed_current_match(self):
         module = self.load_module()
 

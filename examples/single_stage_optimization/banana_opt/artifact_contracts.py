@@ -6,6 +6,8 @@ from pathlib import Path
 from .current_contracts import (
     BANANA_CURRENT_HARD_LIMIT_A,
     DEFAULT_FINITE_CURRENT_MODE,
+    FINITE_CURRENT_MODE_SOURCE_ARTIFACT_METADATA,
+    FINITE_CURRENT_MODE_SOURCE_LEGACY_ASSUMED_DEFAULT,
     physical_current_to_boozer_I,
     resolve_boozer_current_convention,
     resolve_effective_current_mode,
@@ -132,9 +134,18 @@ def _infer_legacy_boozer_current_convention(
 
 def _upgrade_legacy_finite_current_metadata(upgraded_results: dict) -> None:
     finite_current_mode = upgraded_results.get("FINITE_CURRENT_MODE")
+    finite_current_mode_source = upgraded_results.get("FINITE_CURRENT_MODE_SOURCE")
     if finite_current_mode in {None, ""}:
         finite_current_mode = DEFAULT_FINITE_CURRENT_MODE
         upgraded_results["FINITE_CURRENT_MODE"] = finite_current_mode
+        if finite_current_mode_source in {None, ""}:
+            upgraded_results["FINITE_CURRENT_MODE_SOURCE"] = (
+                FINITE_CURRENT_MODE_SOURCE_LEGACY_ASSUMED_DEFAULT
+            )
+    elif finite_current_mode_source in {None, ""}:
+        upgraded_results["FINITE_CURRENT_MODE_SOURCE"] = (
+            FINITE_CURRENT_MODE_SOURCE_ARTIFACT_METADATA
+        )
     recorded_boozer_current_convention = upgraded_results.get("BOOZER_CURRENT_CONVENTION")
     if recorded_boozer_current_convention in {None, ""}:
         upgraded_results["BOOZER_CURRENT_CONVENTION"] = (

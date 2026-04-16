@@ -133,6 +133,7 @@ def resolve_stage2_finite_current_mode(
     return resolve_finite_current_mode(
         requested_finite_current_mode,
         artifact_mode=stage2_results.get("FINITE_CURRENT_MODE"),
+        artifact_mode_source=stage2_results.get("FINITE_CURRENT_MODE_SOURCE"),
     )
 
 
@@ -391,6 +392,17 @@ def initialize_boozer_surface(
     volume_cls=Volume,
     boozer_surface_cls=BoozerSurface,
 ):
+    """Initialize a Boozer surface via either the "least squares" or "exact" path.
+
+    constraint_weight: set to a finite weight to use Boozer least-squares; pass
+        ``None`` to use the Boozer "exact" algorithm.
+    iota: initial guess for the rotational transform on the surface.
+    G0: net toroidal current linking the torus hole.
+    nfp: number of field periods (default 5 for banana coils).
+
+    Raises ``RuntimeError`` on solver failure; use :func:`attempt_initialize_boozer_surface`
+    for a non-raising variant that returns a :class:`BoozerInitializationResult`.
+    """
     result = attempt_initialize_boozer_surface(
         surf_prev,
         mpol,
@@ -548,7 +560,7 @@ def probe_stage2_seed_bootability(
     vol_target: float,
     iota_target: float,
     iota_tolerance: float,
-    constraint_weight: float,
+    constraint_weight: float | None,
     boozer_I: float = 0.0,
     stage: str = BOOTABILITY_STAGE_PROBE,
     equilibrium_path: str | Path | None = None,

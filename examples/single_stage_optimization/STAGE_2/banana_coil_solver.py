@@ -1105,6 +1105,11 @@ def _resolve_stage2_finite_current_config(
         artifact_mode=(
             None if stage2_results is None else stage2_results.get("FINITE_CURRENT_MODE")
         ),
+        artifact_mode_source=(
+            None
+            if stage2_results is None
+            else stage2_results.get("FINITE_CURRENT_MODE_SOURCE")
+        ),
     )
     if (
         args.stage2_bs_path
@@ -1305,20 +1310,32 @@ def main(parsed_args=None):
 
     if args.stage2_bs_path:
         print(f"Loading Stage 2 seed from {args.stage2_bs_path}")
-        init_coil_array = load_stage2_seed_configuration(
+        (
+            new_bs,
+            new_curves,
+            new_banana_curve,
+            new_banana_coils,
+            new_tf_coils,
+            new_proxy_coils,
+            new_vf_coils,
+        ) = load_stage2_seed_configuration(
             args.stage2_bs_path,
             new_surf,
             len(tf_coils),
             OUT_DIR,
             **_build_stage2_seed_load_kwargs(stage2_results=seed_stage2_results),
         )
-        new_tf_coils = init_coil_array[4]
-        new_proxy_coils = init_coil_array[5] if len(init_coil_array) > 5 else ()
-        new_vf_coils = init_coil_array[6] if len(init_coil_array) > 6 else ()
         tf_current_A = float(new_tf_coils[0].current.get_value())
         validate_tf_current_limit(tf_current_A)
     else:
-        init_coil_array = _initialize_coils(
+        (
+            new_bs,
+            new_curves,
+            new_banana_curve,
+            new_banana_coils,
+            new_proxy_coils,
+            new_vf_coils,
+        ) = _initialize_coils(
             new_surf,
             surf_coils,
             tf_coils,
@@ -1340,12 +1357,6 @@ def main(parsed_args=None):
             ),
         )
         new_tf_coils = tf_coils
-        new_proxy_coils = init_coil_array[4] if len(init_coil_array) > 4 else ()
-        new_vf_coils = init_coil_array[5] if len(init_coil_array) > 5 else ()
-    new_bs = init_coil_array[0]
-    new_curves = init_coil_array[1]
-    new_banana_curve = init_coil_array[2]
-    new_banana_coils = init_coil_array[3]
     new_surf_coils = surf_coils
     objective_curves = (
         new_curves
@@ -1997,6 +2008,8 @@ def main(parsed_args=None):
             secondary_stage2_results_path=secondary_stage2_results_path,
             secondary_source=best_secondary_stage2_artifact["source"],
         )
+        # Re-materialize the selected primary state before writing the main artifact,
+        # since capture_artifact_state mutates the shared optimizer/objective dofs.
         capture_artifact_state(selected_result_x)
 
     # Save the results of optimization to a separate file

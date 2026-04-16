@@ -24,11 +24,18 @@ CurrentInputSource = Literal[
     "default_zero",
     "artifact_default_A",
 ]
+FiniteCurrentModeSource = Literal["artifact_metadata", "legacy_assumed_default"]
 BoozerCurrentConvention = Literal["mu0_over_2pi", "mu0"]
 FiniteCurrentMode = Literal["boozer_surrogate", "wataru_proxy_field"]
 EffectiveCurrentMode = Literal["vacuum", "boozer_surrogate", "wataru_proxy_field"]
 CURRENT_MODE_ZERO_TOL = 1e-12
 DEFAULT_FINITE_CURRENT_MODE: FiniteCurrentMode = "boozer_surrogate"
+FINITE_CURRENT_MODE_SOURCE_ARTIFACT_METADATA: FiniteCurrentModeSource = (
+    "artifact_metadata"
+)
+FINITE_CURRENT_MODE_SOURCE_LEGACY_ASSUMED_DEFAULT: FiniteCurrentModeSource = (
+    "legacy_assumed_default"
+)
 
 __all__ = [
     "BANANA_CURRENT_HARD_LIMIT_A",
@@ -38,6 +45,9 @@ __all__ = [
     "DEFAULT_FINITE_CURRENT_MODE",
     "EffectiveCurrentMode",
     "FiniteCurrentMode",
+    "FiniteCurrentModeSource",
+    "FINITE_CURRENT_MODE_SOURCE_ARTIFACT_METADATA",
+    "FINITE_CURRENT_MODE_SOURCE_LEGACY_ASSUMED_DEFAULT",
     "MU0",
     "MU0_OVER_2PI",
     "PenaltyBoxBoundHandler",
@@ -129,6 +139,7 @@ def resolve_finite_current_mode(
     requested_mode: FiniteCurrentMode | None,
     *,
     artifact_mode: str | None = None,
+    artifact_mode_source: FiniteCurrentModeSource | None = None,
 ) -> FiniteCurrentMode:
     if artifact_mode in {None, ""}:
         if requested_mode is None:
@@ -138,6 +149,14 @@ def resolve_finite_current_mode(
     if requested_mode is None:
         return normalized_artifact_mode
     if requested_mode != normalized_artifact_mode:
+        if artifact_mode_source == FINITE_CURRENT_MODE_SOURCE_LEGACY_ASSUMED_DEFAULT:
+            raise ValueError(
+                "Requested finite-current mode "
+                f"{requested_mode!r} does not match the donor artifact mode "
+                f"{normalized_artifact_mode!r}. The donor artifact recorded no "
+                "finite-current mode, so that value was assumed as the legacy "
+                "default during upgrade."
+            )
         raise ValueError(
             "Requested finite-current mode "
             f"{requested_mode!r} does not match the donor artifact mode "

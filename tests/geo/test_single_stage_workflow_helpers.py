@@ -1037,6 +1037,10 @@ class FiniteCurrentSmokeScriptTests(unittest.TestCase):
 
         self.assertEqual(upgraded_results["FINITE_CURRENT_MODE"], "boozer_surrogate")
         self.assertEqual(
+            upgraded_results["FINITE_CURRENT_MODE_SOURCE"],
+            "legacy_assumed_default",
+        )
+        self.assertEqual(
             upgraded_results["BOOZER_CURRENT_CONVENTION"],
             expected_convention,
         )
