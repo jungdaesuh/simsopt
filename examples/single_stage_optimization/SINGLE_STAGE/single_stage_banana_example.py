@@ -36,6 +36,38 @@ import numpy as np
 
 bootstrap_local_simsopt(SRC_ROOT)
 
+from alm_utils import (
+    ALMSettings,
+    alm_result_diagnostics_fields,
+    minimize_alm,
+    validate_alm_cli_args,
+)
+from banana_opt.current_contracts import (
+    BANANA_CURRENT_HARD_LIMIT_A,
+    apply_penalty_traversal_forbidden_box_bounds,
+    resolve_loaded_tf_current_A,
+)
+from banana_opt.hardware_contracts import (
+    COIL_COIL_MIN_DIST_M,
+    COIL_LENGTH_TARGET_M,
+    COIL_PLASMA_MIN_DIST_M,
+    PLASMA_VESSEL_MIN_DIST_M,
+    TF_CURRENT_HARD_LIMIT_A,
+)
+from banana_opt.hardware_constraint_schema import (
+    build_hardware_constraint_artifact_payload_fields,
+    build_hardware_constraint_status,
+    build_threshold_overrides,
+    hardware_constraint_alm_names,
+)
+from banana_opt.single_stage_constraints import (
+    smooth_max_curvature_signed_constraint,
+    smooth_min_curve_curve_signed_constraint,
+    smooth_min_curve_surface_signed_constraint,
+    smooth_min_surface_surface_signed_constraint,
+)
+from banana_opt.single_stage_objectives import evaluate_alm_objective
+
 # SIMSOPT imports
 from simsopt._core.derivative import derivative_dec
 from simsopt._core.optimizable import Optimizable, load
@@ -43,6 +75,7 @@ from simsopt.config import maybe_initialize_distributed_jax
 from simsopt.field import BiotSavart
 from simsopt.jax_core._math_utils import (
     as_jax_float64 as _as_jax_float64,
+    as_jax_int32 as _as_jax_int32,
     as_runtime_float64 as _as_runtime_float64,
 )
 from simsopt.geo import (
@@ -53,6 +86,7 @@ from simsopt.geo import (
     SurfaceXYZTensorFourier,
     curves_to_vtk,
 )
+from simsopt.geo.curve import surfrz_gamma_lin, surfxyztensor_gamma_lin
 from simsopt.geo.curveobjectives import (
     CurveCurveDistance,
     CurveSurfaceDistance,
@@ -76,6 +110,7 @@ from simsopt.geo.surfaceobjectives import (
 )
 from simsopt.objectives import QuadraticPenalty
 from simsopt.objectives.utilities import forward_backward
+from simsopt.jax_core.curve_geometry import closed_curve_self_intersection_summary
 from simsopt.jax_core.surface_rzfourier import (
     surface_rz_fourier_gamma_from_dofs,
     surface_rz_fourier_spec_from_dofs,
@@ -114,6 +149,14 @@ _TARGET_LANE_BOOZER_BFGS_TOL_BENCHMARK_DEFAULT = 1e-6
 _TARGET_LANE_BOOZER_BFGS_MAXITER_BENCHMARK_DEFAULT = 64
 _SINGLE_STAGE_RESULTS_SCHEMA_VERSION = 1
 _JAX_COMPILE_DIAGNOSTICS_SAMPLE_LIMIT = 25
+_SURFACE_SELF_INTERSECTION_BISECTION_STEPS = 48
+_SURFACE_SELF_INTERSECTION_TOLERANCE_FACTOR = 1.0e-9
+SINGLE_STAGE_THRESHOLDED_PHYSICS_CONSTRAINT_NAMES = (
+    "qs_error",
+    "boozer_residual",
+    "iota_penalty",
+    "length_penalty",
+)
 _SINGLE_STAGE_SEARCH_POLICY_PRESERVE_FIRST = "preserve_first"
 _SINGLE_STAGE_SEARCH_POLICY_REPAIR_FIRST = "repair_first"
 _SINGLE_STAGE_SEARCH_POLICY_GLOBAL_SEARCH = "global_search"
@@ -164,6 +207,7 @@ class SingleStageSearchPolicy:
     auto_initial_step_maxiter: int | None = None
     invalid_step_retry_budget: int = 0
     retry_step_shrink_factor: float = 0.5
+
 
 maybe_initialize_distributed_jax()
 
@@ -287,9 +331,7 @@ def extract_optimizer_diagnostics(result, *, ran_optimizer, termination_message=
     x_finite, _ = _finite_array_diagnostics(getattr(result, "x", None))
 
     invalid_state = (
-        (fun_finite is False)
-        or (jac_finite is False)
-        or (x_finite is False)
+        (fun_finite is False) or (jac_finite is False) or (x_finite is False)
     )
     if _termination_message_indicates_invalid_optimizer_state(termination_message):
         if fun_finite is None:
@@ -516,6 +558,20 @@ def _target_lane_success_filter_cache_signature(payload) -> str:
     return hashlib.sha256(encoded_payload).hexdigest()
 
 
+def _hostify_target_lane_constant_tree(value):
+    """Materialize one constant tree on the host for target-lane cache keys."""
+    return jax.tree_util.tree_map(
+        lambda leaf: (
+            host_array(leaf)
+            if isinstance(leaf, jax.Array)
+            else np.asarray(leaf)
+            if isinstance(leaf, np.ndarray)
+            else leaf
+        ),
+        value,
+    )
+
+
 def build_single_stage_problem_contract(
     *,
     plasma_surf_filename,
@@ -536,6 +592,8 @@ def build_single_stage_problem_contract(
     s,
     order,
     CONSTRAINT_WEIGHT,
+    constraint_method=None,
+    alm_formulation=None,
     CC_DIST,
     CC_WEIGHT,
     CS_DIST,
@@ -547,6 +605,9 @@ def build_single_stage_problem_contract(
     LENGTH_WEIGHT,
     RES_WEIGHT,
     IOTAS_WEIGHT,
+    length_target=None,
+    banana_current_max_A=None,
+    tf_current_limit_A=None,
     optimizer_backend_record,
     boozer_optimizer_backend_record,
     boozer_least_squares_algorithm_record,
@@ -570,6 +631,28 @@ def build_single_stage_problem_contract(
             "args is required for build_single_stage_problem_contract — "
             "the runtime_contract section requires argparse fields"
         )
+    constraint_method = (
+        getattr(args, "constraint_method", "penalty")
+        if constraint_method is None
+        else constraint_method
+    )
+    if constraint_method != "alm":
+        alm_formulation = None
+    elif alm_formulation is None:
+        alm_formulation = getattr(args, "alm_formulation", "weighted_sum")
+    length_target = (
+        COIL_LENGTH_TARGET_M if length_target is None else float(length_target)
+    )
+    banana_current_max_A = (
+        BANANA_CURRENT_HARD_LIMIT_A
+        if banana_current_max_A is None
+        else float(banana_current_max_A)
+    )
+    tf_current_limit_A = (
+        TF_CURRENT_HARD_LIMIT_A
+        if tf_current_limit_A is None
+        else float(tf_current_limit_A)
+    )
     single_stage_search_policy, effective_initial_phase_settings = (
         resolve_single_stage_contract_policy_context(
             warm_start_state=warm_start_state,
@@ -632,6 +715,9 @@ def build_single_stage_problem_contract(
             "curve_surface_distance": float(CS_DIST),
             "surface_vessel_distance": float(SS_DIST),
             "curvature": float(CURVATURE_THRESHOLD),
+            "coil_length": float(length_target),
+            "banana_current": float(banana_current_max_A),
+            "tf_current": float(tf_current_limit_A),
         },
         "runtime_contract": {
             "field_backend": args.backend,
@@ -639,6 +725,10 @@ def build_single_stage_problem_contract(
             "boozer_optimizer_backend": boozer_optimizer_backend_record,
             "boozer_least_squares_algorithm": boozer_least_squares_algorithm_record,
             "outer_optimizer_method": outer_optimizer_method,
+            "constraint_method": constraint_method,
+            "alm_formulation": (
+                None if constraint_method != "alm" else alm_formulation
+            ),
             "target_lane_accepted_step_sync": target_lane_sync_record,
             "experimental_target_lane_value_and_grad": bool(
                 requested_experimental_target_lane_vg
@@ -687,6 +777,74 @@ def build_single_stage_problem_contract(
             "disable_target_lane_success_filter": bool(
                 args.disable_target_lane_success_filter
             ),
+            "alm_max_outer_iters": (
+                None if constraint_method != "alm" else int(args.alm_max_outer_iters)
+            ),
+            "alm_penalty_init": (
+                None if constraint_method != "alm" else float(args.alm_penalty_init)
+            ),
+            "alm_penalty_scale": (
+                None if constraint_method != "alm" else float(args.alm_penalty_scale)
+            ),
+            "alm_penalty_max": (
+                None if constraint_method != "alm" else float(args.alm_penalty_max)
+            ),
+            "alm_feas_tol": (
+                None if constraint_method != "alm" else float(args.alm_feas_tol)
+            ),
+            "alm_stationarity_tol": (
+                None if constraint_method != "alm" else float(args.alm_stationarity_tol)
+            ),
+            "alm_trust_radius_init": (
+                None
+                if constraint_method != "alm"
+                else float(args.alm_trust_radius_init)
+            ),
+            "alm_trust_radius_min": (
+                None if constraint_method != "alm" else float(args.alm_trust_radius_min)
+            ),
+            "alm_trust_radius_shrink": (
+                None
+                if constraint_method != "alm"
+                else float(args.alm_trust_radius_shrink)
+            ),
+            "alm_trust_radius_grow": (
+                None
+                if constraint_method != "alm"
+                else float(args.alm_trust_radius_grow)
+            ),
+            "alm_max_inner_attempts": (
+                None if constraint_method != "alm" else int(args.alm_max_inner_attempts)
+            ),
+            "alm_max_subproblem_continuations": (
+                None
+                if constraint_method != "alm"
+                else int(args.alm_max_subproblem_continuations)
+            ),
+            "alm_distance_smoothing": (
+                None
+                if constraint_method != "alm"
+                else float(args.alm_distance_smoothing)
+            ),
+            "alm_curvature_smoothing": (
+                None
+                if constraint_method != "alm"
+                else float(args.alm_curvature_smoothing)
+            ),
+            "alm_qs_threshold": (
+                None if constraint_method != "alm" else args.alm_qs_threshold
+            ),
+            "alm_boozer_threshold": (
+                None if constraint_method != "alm" else args.alm_boozer_threshold
+            ),
+            "alm_iota_penalty_threshold": (
+                None if constraint_method != "alm" else args.alm_iota_penalty_threshold
+            ),
+            "alm_length_penalty_threshold": (
+                None
+                if constraint_method != "alm"
+                else args.alm_length_penalty_threshold
+            ),
             "write_restart_artifacts": bool(write_restart_artifacts),
             "write_full_artifacts": bool(write_full_artifacts),
         },
@@ -714,6 +872,8 @@ def build_single_stage_results_envelope(
     s,
     order,
     CONSTRAINT_WEIGHT,
+    constraint_method=None,
+    alm_formulation=None,
     CC_DIST,
     CC_WEIGHT,
     CS_DIST,
@@ -725,6 +885,9 @@ def build_single_stage_results_envelope(
     LENGTH_WEIGHT,
     RES_WEIGHT,
     IOTAS_WEIGHT,
+    length_target=None,
+    banana_current_max_A=None,
+    tf_current_limit_A=None,
     optimizer_backend_record,
     boozer_optimizer_backend_record,
     boozer_least_squares_algorithm_record,
@@ -743,6 +906,28 @@ def build_single_stage_results_envelope(
     write_restart_artifacts=False,
     write_full_artifacts=False,
 ):
+    constraint_method = (
+        getattr(args, "constraint_method", "penalty")
+        if constraint_method is None
+        else constraint_method
+    )
+    if constraint_method != "alm":
+        alm_formulation = None
+    elif alm_formulation is None:
+        alm_formulation = getattr(args, "alm_formulation", "weighted_sum")
+    length_target = (
+        COIL_LENGTH_TARGET_M if length_target is None else float(length_target)
+    )
+    banana_current_max_A = (
+        BANANA_CURRENT_HARD_LIMIT_A
+        if banana_current_max_A is None
+        else float(banana_current_max_A)
+    )
+    tf_current_limit_A = (
+        TF_CURRENT_HARD_LIMIT_A
+        if tf_current_limit_A is None
+        else float(tf_current_limit_A)
+    )
     required_files = ["results.json"]
     planned_files = ["results.json"]
     if getattr(args, "diagnose_target_lane_gradient", False):
@@ -751,6 +936,9 @@ def build_single_stage_results_envelope(
     if getattr(args, "diagnose_target_lane_scaled_phase1", False):
         required_files.append("target_lane_scaled_phase1_diagnosis.json")
         planned_files.append("target_lane_scaled_phase1_diagnosis.json")
+    if constraint_method == "alm":
+        required_files.append("alm_state.partial.json")
+        planned_files.append("alm_state.partial.json")
     if write_restart_artifacts:
         required_files.extend(("biot_savart_opt.json", "surf_opt.json"))
     artifacts = build_artifact_manifest(
@@ -793,6 +981,8 @@ def build_single_stage_results_envelope(
             s=s,
             order=order,
             CONSTRAINT_WEIGHT=CONSTRAINT_WEIGHT,
+            constraint_method=constraint_method,
+            alm_formulation=alm_formulation,
             CC_DIST=CC_DIST,
             CC_WEIGHT=CC_WEIGHT,
             CS_DIST=CS_DIST,
@@ -804,6 +994,9 @@ def build_single_stage_results_envelope(
             LENGTH_WEIGHT=LENGTH_WEIGHT,
             RES_WEIGHT=RES_WEIGHT,
             IOTAS_WEIGHT=IOTAS_WEIGHT,
+            length_target=length_target,
+            banana_current_max_A=banana_current_max_A,
+            tf_current_limit_A=tf_current_limit_A,
             optimizer_backend_record=optimizer_backend_record,
             boozer_optimizer_backend_record=boozer_optimizer_backend_record,
             boozer_least_squares_algorithm_record=boozer_least_squares_algorithm_record,
@@ -859,10 +1052,7 @@ def jax_solver_stage_callback_supported():
 
 
 def _record_prefixed_stage_timings(timings, stage_marks, *, prefix, solve_start_s):
-    if (
-        "before_boozer_lbfgs" in stage_marks
-        and "after_boozer_lbfgs" in stage_marks
-    ):
+    if "before_boozer_lbfgs" in stage_marks and "after_boozer_lbfgs" in stage_marks:
         timings[f"{prefix}_lbfgs_s"] = _elapsed_s(
             stage_marks["before_boozer_lbfgs"],
             stage_marks["after_boozer_lbfgs"],
@@ -984,35 +1174,41 @@ def _hostify_single_stage_hardware_constraints(status):
         ("curvature_threshold", "curvature_threshold"),
     ):
         if not finite_flags[metric_name]:
-            violations.append(
-                f"{label} {host_status[metric_name]} is not finite"
-            )
-    if finite_flags["curve_curve_min_dist"] and finite_flags["cc_dist"] and (
-        not threshold_flags["curve_curve_min_dist"]
+            violations.append(f"{label} {host_status[metric_name]} is not finite")
+    if (
+        finite_flags["curve_curve_min_dist"]
+        and finite_flags["cc_dist"]
+        and (not threshold_flags["curve_curve_min_dist"])
     ):
         violations.append(
             "coil_coil_min_dist "
             f"{host_status['curve_curve_min_dist']:.6f} below threshold "
             f"{host_status['cc_dist']:.6f}"
         )
-    if finite_flags["curve_surface_min_dist"] and finite_flags["cs_dist"] and (
-        not threshold_flags["curve_surface_min_dist"]
+    if (
+        finite_flags["curve_surface_min_dist"]
+        and finite_flags["cs_dist"]
+        and (not threshold_flags["curve_surface_min_dist"])
     ):
         violations.append(
             "coil_surface_min_dist "
             f"{host_status['curve_surface_min_dist']:.6f} below threshold "
             f"{host_status['cs_dist']:.6f}"
         )
-    if finite_flags["surface_vessel_min_dist"] and finite_flags["ss_dist"] and (
-        not threshold_flags["surface_vessel_min_dist"]
+    if (
+        finite_flags["surface_vessel_min_dist"]
+        and finite_flags["ss_dist"]
+        and (not threshold_flags["surface_vessel_min_dist"])
     ):
         violations.append(
             "surface_vessel_min_dist "
             f"{host_status['surface_vessel_min_dist']:.6f} below threshold "
             f"{host_status['ss_dist']:.6f}"
         )
-    if finite_flags["max_curvature"] and finite_flags["curvature_threshold"] and (
-        not threshold_flags["max_curvature"]
+    if (
+        finite_flags["max_curvature"]
+        and finite_flags["curvature_threshold"]
+        and (not threshold_flags["max_curvature"])
     ):
         violations.append(
             "max_curvature "
@@ -1162,7 +1358,10 @@ def total_single_stage_objective_from_traceable_reporting_metrics(metrics):
     """Reconstruct the weighted single-stage objective on the runtime lane."""
     return jnp.sum(
         jnp.asarray(
-            [metrics[field_name] for field_name in _SINGLE_STAGE_WEIGHTED_REPORTING_FIELDS],
+            [
+                metrics[field_name]
+                for field_name in _SINGLE_STAGE_WEIGHTED_REPORTING_FIELDS
+            ],
             dtype=jnp.float64,
         )
     )
@@ -1194,6 +1393,37 @@ def resolve_target_lane_accepted_step_callback(
     if uses_per_accept_target_lane_sync(sync_policy):
         return adapter.observe_accepted_step
     return None
+
+
+def resolve_target_lane_post_run_state_sync(
+    adapter,
+    *,
+    use_target_lane: bool,
+    accepted_step_callback,
+    scaled_phase_step_scale: float | None = None,
+):
+    """Return explicit accepted-state sync for target-lane runs."""
+    if not use_target_lane:
+        return None
+    explicit_state_sync = (
+        adapter.sync_accepted_step
+        if accepted_step_callback is None
+        else adapter.sync_accepted_step_state
+    )
+    if scaled_phase_step_scale is None:
+        return explicit_state_sync
+
+    def sync(result_x):
+        explicit_state_sync(
+            resolve_scaled_outer_phase_final_dofs(
+                None,
+                result_x,
+                scaled_phase_step_scale,
+                use_target_lane=True,
+            )
+        )
+
+    return sync
 
 
 def resolve_target_lane_accepted_step_sync_record(
@@ -1381,43 +1611,10 @@ def load_stage2_results(stage2_bs_path):
 
 def resolve_single_stage_warm_start_paths(run_dir):
     resolved_run_dir = os.path.abspath(run_dir)
-def resolve_target_lane_post_run_state_sync(
-    adapter,
-    *,
-    use_target_lane: bool,
-    accepted_step_callback,
-    scaled_phase_step_scale: float | None = None,
-):
-    """Return explicit accepted-state sync for target-lane runs."""
-    if not use_target_lane:
-        return None
-    explicit_state_sync = (
-        adapter.sync_accepted_step
-        if accepted_step_callback is None
-        else adapter.sync_accepted_step_state
-    )
-    if scaled_phase_step_scale is None:
-        return explicit_state_sync
-
-    def sync(result_x):
-        explicit_state_sync(
-            resolve_scaled_outer_phase_final_dofs(
-                None,
-                result_x,
-                scaled_phase_step_scale,
-                use_target_lane=True,
-            )
-        )
-
-    return sync
-
-
     surface_path = os.path.join(resolved_run_dir, "surf_opt.json")
     results_path = os.path.join(resolved_run_dir, "results.json")
     missing_paths = [
-        path
-        for path in (surface_path, results_path)
-        if not os.path.exists(path)
+        path for path in (surface_path, results_path) if not os.path.exists(path)
     ]
     if missing_paths:
         raise FileNotFoundError(
@@ -1596,7 +1793,9 @@ def _reconstruct_live_surface_from_serialized_state(surface):
     elif surface.surface_class == "SurfaceRZFourier":
         live_surface = SurfaceRZFourier(**surface_kwargs)
     else:
-        raise ValueError(f"unsupported serialized surface class: {surface.surface_class}")
+        raise ValueError(
+            f"unsupported serialized surface class: {surface.surface_class}"
+        )
     live_surface.set_dofs(np.asarray(surface.dofs, dtype=float))
     return live_surface
 
@@ -1822,7 +2021,8 @@ def resolve_single_stage_retry_initial_step_size(
     if base_step_size is None or base_step_size <= 0.0:
         base_step_size = 1.0
     return max(
-        float(base_step_size) * float(single_stage_search_policy.retry_step_shrink_factor),
+        float(base_step_size)
+        * float(single_stage_search_policy.retry_step_shrink_factor),
         1.0e-6,
     )
 
@@ -2086,35 +2286,48 @@ def _surface_xyz_tensor_alias_group_host_convention(
         quadpoints_phi_key,
         quadpoints_theta_key,
     )
-    design_matrix = _surface_xyz_tensor_design_matrix_host(
-        mpol=mpol,
-        ntor=ntor,
-        nfp=nfp,
-        stellsym=stellsym,
-        quadpoints_phi=quadpoints_phi,
-        quadpoints_theta=quadpoints_theta,
-    )
-    host_surface = SurfaceXYZTensorFourier(
-        mpol=mpol,
-        ntor=ntor,
-        nfp=nfp,
-        stellsym=stellsym,
-        quadpoints_phi=quadpoints_phi,
-        quadpoints_theta=quadpoints_theta,
-    )
+    design_matrix = None
+    host_surface = None
+
+    def get_design_matrix():
+        nonlocal design_matrix
+        if design_matrix is None:
+            design_matrix = _surface_xyz_tensor_design_matrix_host(
+                mpol=mpol,
+                ntor=ntor,
+                nfp=nfp,
+                stellsym=stellsym,
+                quadpoints_phi=quadpoints_phi,
+                quadpoints_theta=quadpoints_theta,
+            )
+        return design_matrix
+
+    def get_host_surface():
+        nonlocal host_surface
+        if host_surface is None:
+            host_surface = SurfaceXYZTensorFourier(
+                mpol=mpol,
+                ntor=ntor,
+                nfp=nfp,
+                stellsym=stellsym,
+                quadpoints_phi=quadpoints_phi,
+                quadpoints_theta=quadpoints_theta,
+            )
+        return host_surface
 
     conventions = []
     for representative_index, zero_column, members in alias_groups:
         if zero_column or len(members) == 1:
             conventions.append((int(representative_index), 1.0))
             continue
-        target_gamma = design_matrix[:, representative_index].reshape(
+        target_gamma = get_design_matrix()[:, representative_index].reshape(
             quadpoints_phi.size,
             quadpoints_theta.size,
             3,
         )
-        host_surface.least_squares_fit(target_gamma)
-        host_dofs = np.asarray(host_surface.get_dofs(), dtype=float)
+        resolved_host_surface = get_host_surface()
+        resolved_host_surface.least_squares_fit(target_gamma)
+        host_dofs = np.asarray(resolved_host_surface.get_dofs(), dtype=float)
         chosen_index, chosen_sign, chosen_value = max(
             (
                 (int(index), float(sign), float(host_dofs[index]))
@@ -2156,10 +2369,11 @@ def _canonicalize_surface_xyz_tensor_fit_dofs(
         if zero_column:
             canonical_dofs[representative_index] = 0.0
             continue
-        canonical_value = sum(sign * float(fitted_dofs[index]) for index, sign in members)
+        canonical_value = sum(
+            sign * float(fitted_dofs[index]) for index, sign in members
+        )
         canonical_dofs[int(host_index)] = float(host_orientation) * canonical_value
     return canonical_dofs
-
 
 
 def _target_gamma_from_supported_surface(
@@ -2311,6 +2525,156 @@ def apply_default_stage2_seed_args(args):
     return args
 
 
+def validate_single_stage_current_args(args) -> None:
+    banana_current_max_A = float(args.banana_current_max_A)
+    if not (0.0 < banana_current_max_A <= BANANA_CURRENT_HARD_LIMIT_A):
+        raise ValueError(
+            f"--banana-current-max-A must be in the interval "
+            f"(0, {BANANA_CURRENT_HARD_LIMIT_A:.0f}]."
+        )
+    if float(args.length_target) <= 0.0:
+        raise ValueError("--length-target must be positive")
+
+
+def validate_single_stage_alm_formulation_args(args) -> None:
+    if args.alm_formulation == "weighted_sum":
+        return
+    if args.constraint_method != "alm":
+        raise ValueError(
+            "--alm-formulation=thresholded_physics requires --constraint-method=alm"
+        )
+
+    required_thresholds = {
+        "--alm-qs-threshold": args.alm_qs_threshold,
+        "--alm-boozer-threshold": args.alm_boozer_threshold,
+        "--alm-iota-penalty-threshold": args.alm_iota_penalty_threshold,
+        "--alm-length-penalty-threshold": args.alm_length_penalty_threshold,
+    }
+    missing_thresholds = [
+        flag_name for flag_name, value in required_thresholds.items() if value is None
+    ]
+    if missing_thresholds:
+        raise ValueError(
+            "thresholded_physics ALM formulation requires explicit thresholds for "
+            + ", ".join(missing_thresholds)
+        )
+
+    negative_thresholds = [
+        flag_name
+        for flag_name, value in required_thresholds.items()
+        if float(value) < 0.0
+    ]
+    if negative_thresholds:
+        raise ValueError(
+            "thresholded_physics ALM thresholds must be non-negative: "
+            + ", ".join(negative_thresholds)
+        )
+
+
+def single_stage_alm_constraint_names(*, alm_formulation, include_surface_surface):
+    available_names = {
+        "coil_coil_spacing",
+        "coil_surface_spacing",
+        "max_curvature",
+        "coil_length",
+        "banana_current",
+    }
+    if include_surface_surface:
+        available_names.add("surface_vessel_spacing")
+    names = list(hardware_constraint_alm_names(names=available_names))
+    if alm_formulation == "thresholded_physics":
+        names.extend(SINGLE_STAGE_THRESHOLDED_PHYSICS_CONSTRAINT_NAMES)
+    return names
+
+
+def build_single_stage_alm_settings(args):
+    return ALMSettings(
+        max_outer_iterations=args.alm_max_outer_iters,
+        max_subproblem_continuations=args.alm_max_subproblem_continuations,
+        penalty_init=args.alm_penalty_init,
+        penalty_scale=args.alm_penalty_scale,
+        penalty_max=args.alm_penalty_max,
+        feasibility_tol=args.alm_feas_tol,
+        stationarity_tol=args.alm_stationarity_tol,
+        trust_radius_init=(
+            None
+            if float(args.alm_trust_radius_init) == 0.0
+            else float(args.alm_trust_radius_init)
+        ),
+        trust_radius_min=args.alm_trust_radius_min,
+        trust_radius_shrink=args.alm_trust_radius_shrink,
+        trust_radius_grow=args.alm_trust_radius_grow,
+        max_inner_attempts=args.alm_max_inner_attempts,
+    )
+
+
+def _jsonable_value(value):
+    if isinstance(value, np.ndarray):
+        return _jsonable_value(value.tolist())
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, dict):
+        return {str(key): _jsonable_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_jsonable_value(item) for item in value]
+    return value
+
+
+def build_single_stage_alm_partial_state(
+    run_dict,
+    constraint_names,
+    history,
+    latest_history_entry,
+    multipliers,
+    penalty,
+    *,
+    outer_iteration=None,
+    termination_message=None,
+    optimizer_success=None,
+    termination_reason=None,
+    inner_optimizer_success=None,
+    inner_optimizer_message=None,
+    converged_to_tolerances=None,
+    restored_best_feasible=None,
+    restored_best_feasible_reason=None,
+    final_max_feasibility_violation=None,
+    final_stationarity_norm=None,
+):
+    current_objective = None if "J" not in run_dict else float(run_dict["J"])
+    return {
+        "outer_iteration": None if outer_iteration is None else int(outer_iteration),
+        "constraint_names": list(constraint_names),
+        "penalty": float(penalty),
+        "multipliers": np.asarray(multipliers, dtype=float).tolist(),
+        "history_length": int(len(history)),
+        "latest_history_entry": _jsonable_value(latest_history_entry),
+        "history": _jsonable_value(history),
+        "accepted_iterations": int(run_dict.get("accepted_iterations", 0)),
+        "current_iteration": int(run_dict.get("it", 0)),
+        "current_objective": current_objective,
+        "accepted_boozer_stage": run_dict.get("accepted_boozer_stage"),
+        "accepted_hardware_status": _jsonable_value(
+            run_dict.get("accepted_hardware_status")
+        ),
+        "trial_hardware_status": _jsonable_value(run_dict.get("trial_hardware_status")),
+        "topology_gate_status": _jsonable_value(run_dict.get("topology_gate_status")),
+        "termination_message": termination_message,
+        "optimizer_success": optimizer_success,
+        "termination_reason": termination_reason,
+        "inner_optimizer_success": inner_optimizer_success,
+        "inner_optimizer_message": inner_optimizer_message,
+        "converged_to_tolerances": converged_to_tolerances,
+        "restored_best_feasible": restored_best_feasible,
+        "restored_best_feasible_reason": restored_best_feasible_reason,
+        "final_max_feasibility_violation": final_max_feasibility_violation,
+        "final_stationarity_norm": final_stationarity_norm,
+    }
+
+
+def write_single_stage_alm_partial_state(out_dir, payload):
+    write_json_file(os.path.join(out_dir, "alm_state.partial.json"), payload)
+
+
 def parse_args():
     parser = argparse.ArgumentParser(
         description="Run single-stage Boozer/quasi-symmetry optimization from a Stage 2 seed.",
@@ -2387,6 +2751,138 @@ def parse_args():
         "--maxiter", type=int, default=int(os.environ.get("MAXITER", "300"))
     )
     parser.add_argument(
+        "--constraint-method",
+        choices=["penalty", "alm"],
+        default=os.environ.get("CONSTRAINT_METHOD", "penalty"),
+        help="Use the weighted-penalty objective or the augmented Lagrangian outer loop.",
+    )
+    parser.add_argument(
+        "--alm-max-outer-iters",
+        type=int,
+        default=int(os.environ.get("ALM_MAX_OUTER_ITERS", "10")),
+        help="Maximum number of ALM outer iterations (default 10).",
+    )
+    parser.add_argument(
+        "--alm-penalty-init",
+        type=float,
+        default=float(os.environ.get("ALM_PENALTY_INIT", "1.0")),
+        help="Initial ALM penalty parameter (default 1.0).",
+    )
+    parser.add_argument(
+        "--alm-penalty-scale",
+        type=float,
+        default=float(os.environ.get("ALM_PENALTY_SCALE", "10.0")),
+        help="Multiplicative ALM penalty growth factor (default 10.0).",
+    )
+    parser.add_argument(
+        "--alm-penalty-max",
+        type=float,
+        default=float(os.environ.get("ALM_PENALTY_MAX", "1e8")),
+        help="Maximum ALM penalty parameter before capped termination (default 1e8).",
+    )
+    parser.add_argument(
+        "--alm-feas-tol",
+        type=float,
+        default=float(os.environ.get("ALM_FEAS_TOL", "1e-6")),
+        help="ALM max-violation stopping tolerance (default 1e-6).",
+    )
+    parser.add_argument(
+        "--alm-stationarity-tol",
+        type=float,
+        default=float(os.environ.get("ALM_STATIONARITY_TOL", "1e-6")),
+        help="ALM augmented-gradient stopping tolerance (default 1e-6).",
+    )
+    parser.add_argument(
+        "--alm-trust-radius-init",
+        type=float,
+        default=float(os.environ.get("ALM_TRUST_RADIUS_INIT", "0.05")),
+        help="Initial relative trust radius for bounded ALM inner solves (0 disables bounds).",
+    )
+    parser.add_argument(
+        "--alm-trust-radius-min",
+        type=float,
+        default=float(os.environ.get("ALM_TRUST_RADIUS_MIN", "1e-4")),
+        help="Minimum relative trust radius for bounded ALM inner solves.",
+    )
+    parser.add_argument(
+        "--alm-trust-radius-shrink",
+        type=float,
+        default=float(os.environ.get("ALM_TRUST_RADIUS_SHRINK", "0.5")),
+        help="Multiplicative shrink factor for the ALM inner trust radius.",
+    )
+    parser.add_argument(
+        "--alm-trust-radius-grow",
+        type=float,
+        default=float(os.environ.get("ALM_TRUST_RADIUS_GROW", "1.5")),
+        help="Multiplicative growth factor for the ALM inner trust radius after good steps.",
+    )
+    parser.add_argument(
+        "--alm-max-inner-attempts",
+        type=int,
+        default=int(os.environ.get("ALM_MAX_INNER_ATTEMPTS", "4")),
+        help="Maximum number of trust-radius retries per ALM outer iteration.",
+    )
+    parser.add_argument(
+        "--alm-max-subproblem-continuations",
+        type=int,
+        default=int(os.environ.get("ALM_MAX_SUBPROBLEM_CONTINUATIONS", "20")),
+        help="Maximum accepted-feasible continuation solves before forcing an ALM return.",
+    )
+    parser.add_argument(
+        "--alm-distance-smoothing",
+        type=float,
+        default=float(os.environ.get("ALM_DISTANCE_SMOOTHING", "0.005")),
+        help="Distance soft-min temperature for single-stage ALM spacing constraints.",
+    )
+    parser.add_argument(
+        "--alm-curvature-smoothing",
+        type=float,
+        default=float(os.environ.get("ALM_CURVATURE_SMOOTHING", "0.05")),
+        help="Curvature smooth-max temperature for single-stage ALM curvature constraints.",
+    )
+    parser.add_argument(
+        "--alm-formulation",
+        choices=["weighted_sum", "thresholded_physics"],
+        default=os.environ.get("ALM_FORMULATION", "weighted_sum"),
+        help=(
+            "ALM objective assembly. 'weighted_sum' keeps physics terms in the base objective; "
+            "'thresholded_physics' uses a dummy zero objective and promotes physics terms "
+            "to inequality constraints."
+        ),
+    )
+    parser.add_argument(
+        "--alm-qs-threshold",
+        type=float,
+        default=float(os.environ["ALM_QS_THRESHOLD"])
+        if "ALM_QS_THRESHOLD" in os.environ
+        else None,
+        help="thresholded_physics-mode upper bound for the quasi-symmetry objective J_QS.",
+    )
+    parser.add_argument(
+        "--alm-boozer-threshold",
+        type=float,
+        default=float(os.environ["ALM_BOOZER_THRESHOLD"])
+        if "ALM_BOOZER_THRESHOLD" in os.environ
+        else None,
+        help="thresholded_physics-mode upper bound for the Boozer residual objective.",
+    )
+    parser.add_argument(
+        "--alm-iota-penalty-threshold",
+        type=float,
+        default=float(os.environ["ALM_IOTA_PENALTY_THRESHOLD"])
+        if "ALM_IOTA_PENALTY_THRESHOLD" in os.environ
+        else None,
+        help="thresholded_physics-mode upper bound for the Jiota penalty objective.",
+    )
+    parser.add_argument(
+        "--alm-length-penalty-threshold",
+        type=float,
+        default=float(os.environ["ALM_LENGTH_PENALTY_THRESHOLD"])
+        if "ALM_LENGTH_PENALTY_THRESHOLD" in os.environ
+        else None,
+        help="thresholded_physics-mode upper bound for the single-stage length penalty objective.",
+    )
+    parser.add_argument(
         "--iota-target",
         type=float,
         default=float(os.environ.get("IOTA_TARGET", "0.15")),
@@ -2421,6 +2917,27 @@ def parse_args():
         type=float,
         default=float(os.environ.get("SS_LENGTH_WEIGHT", "1")),
         help="Curve length penalty weight (default 1).",
+    )
+    parser.add_argument(
+        "--banana-current-max-A",
+        type=float,
+        default=float(
+            os.environ.get("BANANA_CURRENT_MAX_A", str(BANANA_CURRENT_HARD_LIMIT_A))
+        ),
+        help=(
+            "Maximum allowed magnitude for the banana current in amps. "
+            "Penalty mode applies this as a hard box bound; ALM mode still "
+            "certifies it at final feasibility."
+        ),
+    )
+    parser.add_argument(
+        "--length-target",
+        type=float,
+        default=float(os.environ.get("SS_LENGTH_TARGET", str(COIL_LENGTH_TARGET_M))),
+        help=(
+            "Curve length quadratic penalty target in meters. Values above the "
+            "hardware contract are clamped back to the shared ceiling."
+        ),
     )
     parser.add_argument(
         "--res-weight",
@@ -2470,9 +2987,7 @@ def parse_args():
     parser.add_argument(
         "--outer-maxls",
         type=int,
-        default=int(os.environ["OUTER_MAXLS"])
-        if "OUTER_MAXLS" in os.environ
-        else None,
+        default=int(os.environ["OUTER_MAXLS"]) if "OUTER_MAXLS" in os.environ else None,
         help=(
             "Maximum strong-Wolfe line-search evaluations per outer L-BFGS step. "
             "Defaults to a tighter budget on the JAX ondevice lane and the "
@@ -2823,25 +3338,21 @@ def parse_args():
         args.target_lane_boozer_bfgs_tol,
         benchmark_mode=args.benchmark_mode,
     )
-    args.target_lane_boozer_bfgs_maxiter = (
-        resolve_target_lane_boozer_bfgs_maxiter(
-            args.backend,
-            args.optimizer_backend,
-            args.target_lane_boozer_bfgs_maxiter,
-            benchmark_mode=args.benchmark_mode,
-        )
+    args.target_lane_boozer_bfgs_maxiter = resolve_target_lane_boozer_bfgs_maxiter(
+        args.backend,
+        args.optimizer_backend,
+        args.target_lane_boozer_bfgs_maxiter,
+        benchmark_mode=args.benchmark_mode,
     )
     args.target_lane_boozer_newton_tol = resolve_target_lane_boozer_newton_tol(
         args.backend,
         args.optimizer_backend,
         args.target_lane_boozer_newton_tol,
     )
-    args.target_lane_boozer_newton_maxiter = (
-        resolve_target_lane_boozer_newton_maxiter(
-            args.backend,
-            args.optimizer_backend,
-            args.target_lane_boozer_newton_maxiter,
-        )
+    args.target_lane_boozer_newton_maxiter = resolve_target_lane_boozer_newton_maxiter(
+        args.backend,
+        args.optimizer_backend,
+        args.target_lane_boozer_newton_maxiter,
     )
     if args.profile_target_lane_only:
         args.profile_target_lane = True
@@ -2851,6 +3362,20 @@ def parse_args():
         raise ValueError("--initial-step-scale must be in (0, 1]")
     if args.initial_step_maxiter < 0:
         raise ValueError("--initial-step-maxiter must be non-negative")
+    validate_single_stage_current_args(args)
+    validate_single_stage_alm_formulation_args(args)
+    if args.constraint_method == "alm":
+        validate_alm_cli_args(args)
+    if args.constraint_method == "alm" and (
+        args.profile_target_lane
+        or args.profile_target_lane_only
+        or args.diagnose_target_lane_gradient
+        or args.diagnose_target_lane_scaled_phase1
+    ):
+        raise ValueError(
+            "target-lane profiling and diagnostic flags are only supported with "
+            "--constraint-method=penalty"
+        )
     return args
 
 
@@ -3060,7 +3585,11 @@ def initialize_boozer_surface(
 
     def build_jax_stage_options(**extra):
         options = dict(extra)
-        if backend == "jax" and on_stage is not None and jax_solver_stage_callback_supported():
+        if (
+            backend == "jax"
+            and on_stage is not None
+            and jax_solver_stage_callback_supported()
+        ):
             options["stage_callback"] = on_stage
         return options
 
@@ -3098,7 +3627,9 @@ def initialize_boozer_surface(
             )
         )
     )
-    initial_surface_dofs_host = np.asarray(host_array(initial_surface_dofs), dtype=np.float64)
+    initial_surface_dofs_host = np.asarray(
+        host_array(initial_surface_dofs), dtype=np.float64
+    )
 
     def build_surface(*, quadpoints_phi, quadpoints_theta):
         if backend == "jax":
@@ -3318,7 +3849,11 @@ def resolve_single_stage_iota_metric(
     benchmark_mode,
 ):
     """Resolve the reported iota metric without redundant benchmark-mode replay."""
-    if benchmark_mode and boozer_surface.res is not None and "iota" in boozer_surface.res:
+    if (
+        benchmark_mode
+        and boozer_surface.res is not None
+        and "iota" in boozer_surface.res
+    ):
         return host_float(boozer_surface.res["iota"])
     return host_float(build_iota_objective(boozer_surface, iota_cls).J())
 
@@ -3489,7 +4024,9 @@ def resolve_single_stage_final_penalty_metrics(
     else:
         final_curve_curve_min_dist = host_float(j_curve_curve.shortest_distance())
         final_curve_surface_min_dist = host_float(j_curve_surface.shortest_distance())
-        final_surface_vessel_min_dist = host_float(j_surface_surface.shortest_distance())
+        final_surface_vessel_min_dist = host_float(
+            j_surface_surface.shortest_distance()
+        )
         final_hardware_status = evaluate_single_stage_hardware_constraints(
             final_curve_curve_min_dist,
             cc_dist,
@@ -3521,8 +4058,265 @@ def resolve_single_stage_final_penalty_metrics(
     }
 
 
-def surface_self_intersection_check_available():
+def evaluate_single_stage_artifact_hardware_snapshot(
+    *,
+    curve_curve_min_dist,
+    cc_dist,
+    curve_surface_min_dist,
+    cs_dist,
+    surface_vessel_min_dist,
+    ss_dist,
+    max_curvature,
+    curvature_threshold,
+    coil_length,
+    length_target,
+    banana_current_A,
+    banana_current_max_A,
+    tf_current_A,
+    tf_current_limit_A,
+):
+    threshold_overrides = build_threshold_overrides(
+        (
+            ("coil_coil_spacing", cc_dist),
+            ("coil_surface_spacing", cs_dist),
+            ("surface_vessel_spacing", ss_dist),
+            ("max_curvature", curvature_threshold),
+            ("coil_length", length_target),
+            ("banana_current", banana_current_max_A),
+            ("tf_current", tf_current_limit_A),
+        )
+    )
+    measured_values = {
+        "coil_coil_spacing": curve_curve_min_dist,
+        "coil_surface_spacing": curve_surface_min_dist,
+        "surface_vessel_spacing": surface_vessel_min_dist,
+        "max_curvature": max_curvature,
+        "coil_length": coil_length,
+        "banana_current": banana_current_A,
+        "tf_current": tf_current_A,
+    }
+    artifact_hardware_status = build_hardware_constraint_status(
+        measured_values,
+        applies_to="artifact",
+        threshold_overrides=threshold_overrides,
+    )
+    return {
+        "curve_curve_min_dist": (
+            None if curve_curve_min_dist is None else float(curve_curve_min_dist)
+        ),
+        "cc_dist": None if cc_dist is None else float(cc_dist),
+        "curve_surface_min_dist": (
+            None if curve_surface_min_dist is None else float(curve_surface_min_dist)
+        ),
+        "cs_dist": None if cs_dist is None else float(cs_dist),
+        "surface_vessel_min_dist": (
+            None if surface_vessel_min_dist is None else float(surface_vessel_min_dist)
+        ),
+        "ss_dist": None if ss_dist is None else float(ss_dist),
+        "max_curvature": None if max_curvature is None else float(max_curvature),
+        "curvature_threshold": (
+            None if curvature_threshold is None else float(curvature_threshold)
+        ),
+        "coil_length": None if coil_length is None else float(coil_length),
+        "length_target": None if length_target is None else float(length_target),
+        "banana_current_A": (
+            None if banana_current_A is None else float(banana_current_A)
+        ),
+        "banana_current_max_A": (
+            None if banana_current_max_A is None else float(banana_current_max_A)
+        ),
+        "tf_current_A": None if tf_current_A is None else float(tf_current_A),
+        "tf_current_limit_A": (
+            None if tf_current_limit_A is None else float(tf_current_limit_A)
+        ),
+        "artifact_hardware_status": artifact_hardware_status,
+    }
+
+
+def _failed_single_stage_alm_evaluation(
+    run_dict,
+    constraint_names,
+    *,
+    failure_penalty,
+):
+    objective_value = float(run_dict["J"]) + float(failure_penalty)
+    grad = host_array(run_dict["dJ"], dtype=np.float64).copy()
+    max_violation = max(abs(objective_value), 1.0)
+    feasibility_values = np.full(len(constraint_names), max_violation, dtype=float)
+    zero_grad = np.zeros_like(grad)
+    return {
+        "total": float(objective_value),
+        "grad": grad,
+        "physics_total": float(objective_value),
+        "base_total": float(objective_value),
+        "constraint_names": list(constraint_names),
+        "constraint_values": feasibility_values.copy(),
+        "dual_update_values": feasibility_values.copy(),
+        "feasibility_values": feasibility_values.copy(),
+        "max_feasibility_violation": float(max_violation),
+        "constraint_grads": [zero_grad.copy() for _ in constraint_names],
+        "constraint_activity_tolerances": np.zeros(
+            len(constraint_names),
+            dtype=float,
+        ),
+        "metric_grad": grad,
+        "metric_stationarity_norm": float(np.linalg.norm(grad)),
+        "J_QS": float(run_dict["J"]),
+        "J_Boozer": float(run_dict["J"]),
+        "J_iota": 0.0,
+        "J_len": 0.0,
+    }
+
+
+def evaluate_single_stage_alm_problem(
+    dofs,
+    *,
+    run_dict,
+    boozer_surface,
+    JF,
+    nonQSs,
+    brs,
+    RES_WEIGHT,
+    Jiota,
+    IOTAS_WEIGHT,
+    curvelength,
+    JCurveLength,
+    LENGTH_WEIGHT,
+    JCurveCurve,
+    JCurveSurface,
+    JCurvature,
+    JSurfSurf,
+    curves,
+    banana_curve,
+    vessel_surface,
+    curve_curve_distance,
+    curve_surface_distance,
+    surface_vessel_distance,
+    curvature_threshold,
+    distance_smoothing,
+    curvature_smoothing,
+    constraint_names,
+    alm_formulation,
+    qs_threshold,
+    boozer_threshold,
+    iota_penalty_threshold,
+    length_penalty_threshold,
+    banana_current,
+    banana_current_threshold,
+    tf_current_A,
+    tf_current_limit_A,
+    coil_length_threshold,
+    multipliers,
+    penalty,
+):
+    candidate_x = _single_stage_optimizer_dofs_array(dofs)
+    JF.x = candidate_x
+    uses_legacy_warm_start = not _boozer_surface_supports_explicit_surface_warm_start(
+        boozer_surface
+    )
+    if uses_legacy_warm_start:
+        _restore_cpu_boozer_state(boozer_surface, run_dict)
+        boozer_surface.run_code(run_dict["iota"], run_dict["G"])
+    else:
+        boozer_surface.run_code(
+            run_dict["iota"],
+            run_dict["G"],
+            sdofs=run_dict["sdofs"],
+        )
+
+    success_solve = host_bool(boozer_surface.res["success"])
+    is_intersecting = update_self_intersection_status(run_dict, boozer_surface.surface)
+    if not success_solve or is_intersecting:
+        failure_penalty, failure_summary = compute_single_stage_failure_penalty(
+            candidate_x,
+            run_dict,
+            boozer_surface,
+            success_solve=success_solve,
+            is_intersecting=is_intersecting,
+            hardware_status=None,
+        )
+        run_dict["last_candidate_failure"] = failure_summary
+        run_dict["trial_hardware_status"] = None
+        if uses_legacy_warm_start:
+            _restore_cpu_boozer_state(boozer_surface, run_dict)
+        return _failed_single_stage_alm_evaluation(
+            run_dict,
+            constraint_names,
+            failure_penalty=failure_penalty,
+        )
+
+    evaluation = evaluate_alm_objective(
+        np.ones(len(nonQSs), dtype=float),
+        nonQSs,
+        brs,
+        RES_WEIGHT,
+        Jiota,
+        IOTAS_WEIGHT,
+        JCurveLength,
+        LENGTH_WEIGHT,
+        JCurveCurve,
+        JCurveSurface,
+        JCurvature,
+        np.asarray(multipliers, dtype=float),
+        float(penalty),
+        objective_optimizable=JF,
+        curves=curves,
+        curve_curve_min_distance=curve_curve_distance,
+        outer_surface=boozer_surface.surface,
+        curve_surface_min_distance=curve_surface_distance,
+        banana_curve=banana_curve,
+        curvature_threshold=curvature_threshold,
+        distance_smoothing=distance_smoothing,
+        curvature_smoothing=curvature_smoothing,
+        constraint_names=constraint_names,
+        curve_curve_constraint_fn=smooth_min_curve_curve_signed_constraint,
+        curve_surface_constraint_fn=smooth_min_curve_surface_signed_constraint,
+        curvature_constraint_fn=smooth_max_curvature_signed_constraint,
+        JSurfSurf=JSurfSurf,
+        vessel_surface=vessel_surface,
+        surface_surface_min_distance=surface_vessel_distance,
+        surface_surface_constraint_fn=smooth_min_surface_surface_signed_constraint,
+        alm_formulation=alm_formulation,
+        qs_threshold=qs_threshold,
+        boozer_threshold=boozer_threshold,
+        iota_penalty_threshold=iota_penalty_threshold,
+        length_penalty_threshold=length_penalty_threshold,
+        coil_length_objective=curvelength,
+        coil_length_threshold=coil_length_threshold,
+        banana_current=banana_current,
+        banana_current_threshold=banana_current_threshold,
+    )
+    trial_hardware_snapshot = evaluate_single_stage_artifact_hardware_snapshot(
+        curve_curve_min_dist=float(JCurveCurve.shortest_distance()),
+        cc_dist=curve_curve_distance,
+        curve_surface_min_dist=float(JCurveSurface.shortest_distance()),
+        cs_dist=curve_surface_distance,
+        surface_vessel_min_dist=(
+            None if JSurfSurf is None else float(JSurfSurf.shortest_distance())
+        ),
+        ss_dist=surface_vessel_distance,
+        max_curvature=float(np.max(banana_curve.kappa())),
+        curvature_threshold=curvature_threshold,
+        coil_length=float(curvelength.J()),
+        length_target=coil_length_threshold,
+        banana_current_A=float(banana_current.get_value()),
+        banana_current_max_A=banana_current_threshold,
+        tf_current_A=tf_current_A,
+        tf_current_limit_A=tf_current_limit_A,
+    )
+    run_dict["trial_hardware_status"] = trial_hardware_snapshot[
+        "artifact_hardware_status"
+    ]
+    return evaluation
+
+
+def surface_self_intersection_check_available(surface=None):
     """Return whether the optional surface self-intersection backend is present."""
+    if (
+        surface is not None
+        and _supported_surface_self_intersection_inputs(surface) is not None
+    ):
+        return True
     has_ground = (
         surface_module.get_context is not None
         and surface_module.contour_self_intersects is not None
@@ -3530,8 +4324,289 @@ def surface_self_intersection_check_available():
     return has_ground or getattr(surface_module, "LineString", None) is not None
 
 
+def _surface_rzfourier_dof_count(*, mpol, ntor, stellsym):
+    rc_count = (ntor + 1) + mpol * (2 * ntor + 1)
+    tail_count = ntor + mpol * (2 * ntor + 1)
+    if stellsym:
+        return rc_count + tail_count
+    return 2 * rc_count + 2 * tail_count
+
+
+def _supported_surface_self_intersection_inputs(surface):
+    deferred_surface_class = getattr(surface, "deferred_surface_class", None)
+    surface_type_name = type(surface).__name__
+    if deferred_surface_class == "SurfaceXYZTensorFourier":
+        surface_kind = "xyztensorfourier"
+    elif surface_type_name == "SurfaceXYZTensorFourier":
+        surface_kind = "xyztensorfourier"
+    elif surface_type_name == "SurfaceRZFourier":
+        surface_kind = "rzfourier"
+    else:
+        return None
+
+    surface_dofs_getter = getattr(surface, "get_dofs", None)
+    if surface_dofs_getter is None or not callable(surface_dofs_getter):
+        return None
+
+    surface_dofs = _as_jax_float64(surface_dofs_getter()).reshape(-1)
+    mpol = int(surface.mpol)
+    ntor = int(surface.ntor)
+    stellsym = bool(surface.stellsym)
+    if surface_kind == "xyztensorfourier":
+        expected_dofs = (
+            int(stellsym_scatter_indices(mpol, ntor).size)
+            if stellsym
+            else 3 * (2 * mpol + 1) * (2 * ntor + 1)
+        )
+    else:
+        expected_dofs = _surface_rzfourier_dof_count(
+            mpol=mpol,
+            ntor=ntor,
+            stellsym=stellsym,
+        )
+    if int(surface_dofs.size) != expected_dofs:
+        return None
+
+    return {
+        "surface_kind": surface_kind,
+        "dofs": surface_dofs,
+        "mpol": mpol,
+        "ntor": ntor,
+        "nfp": int(surface.nfp),
+        "stellsym": stellsym,
+        "quadpoints_theta": _as_jax_float64(surface.quadpoints_theta).reshape(-1),
+    }
+
+
+@jax.jit(
+    static_argnames=(
+        "mpol",
+        "ntor",
+        "nfp",
+        "stellsym",
+        "surface_kind",
+    )
+)
+def _surface_phi0_cross_section_from_supported_dofs(
+    surface_dofs,
+    quadpoints_theta,
+    *,
+    mpol,
+    ntor,
+    nfp,
+    stellsym,
+    surface_kind,
+):
+    thetas = _as_runtime_float64(quadpoints_theta, reference=surface_dofs).reshape(-1)
+    zero_varphi = _as_runtime_float64(0.0, reference=thetas) * thetas
+
+    if surface_kind == "rzfourier":
+        return surfrz_gamma_lin(
+            zero_varphi,
+            thetas,
+            mpol,
+            ntor,
+            surface_dofs,
+            nfp,
+            stellsym,
+        )
+
+    gamma_zero = surfxyztensor_gamma_lin(
+        zero_varphi,
+        thetas,
+        mpol,
+        ntor,
+        surface_dofs,
+        nfp,
+        stellsym,
+    )
+    two_pi = _as_runtime_float64(2.0 * np.pi, reference=gamma_zero)
+    phi0 = jnp.arctan2(gamma_zero[:, 1], gamma_zero[:, 0]) / two_pi
+    target_phi = _as_runtime_float64(0.0, reference=phi0)
+    target_phi = target_phi - phi0
+    target_phi = target_phi + jnp.ceil(-target_phi)
+
+    def shifted_cylindrical_angle(varphi_in):
+        gamma = surfxyztensor_gamma_lin(
+            varphi_in,
+            thetas,
+            mpol,
+            ntor,
+            surface_dofs,
+            nfp,
+            stellsym,
+        )
+        angle = jnp.arctan2(gamma[:, 1], gamma[:, 0]) / two_pi - phi0
+        return angle + jnp.ceil(-angle)
+
+    def bisection_step(_iteration, state):
+        lower, upper, lower_phi, upper_phi = state
+        middle = 0.5 * (lower + upper)
+        middle_phi = shifted_cylindrical_angle(middle)
+        root_in_lower_interval = (
+            (middle_phi - target_phi) * (upper_phi - target_phi)
+        ) > _as_runtime_float64(0.0, reference=middle_phi)
+        next_lower = jnp.where(root_in_lower_interval, lower, middle)
+        next_upper = jnp.where(root_in_lower_interval, middle, upper)
+        next_lower_phi = jnp.where(root_in_lower_interval, lower_phi, middle_phi)
+        next_upper_phi = jnp.where(root_in_lower_interval, middle_phi, upper_phi)
+        return next_lower, next_upper, next_lower_phi, next_upper_phi
+
+    initial_lower = _as_runtime_float64(0.0, reference=thetas) * thetas
+    initial_upper = initial_lower + _as_runtime_float64(1.0, reference=thetas)
+    lower, upper, _lower_phi, _upper_phi = jax.lax.fori_loop(
+        0,
+        _SURFACE_SELF_INTERSECTION_BISECTION_STEPS,
+        bisection_step,
+        (initial_lower, initial_upper, initial_lower, initial_upper),
+    )
+    return surfxyztensor_gamma_lin(
+        0.5 * (lower + upper),
+        thetas,
+        mpol,
+        ntor,
+        surface_dofs,
+        nfp,
+        stellsym,
+    )
+
+
+def _evaluate_supported_surface_self_intersection(surface):
+    supported_inputs = _supported_surface_self_intersection_inputs(surface)
+    if supported_inputs is None:
+        return None
+
+    return bool(
+        host_bool(
+            _supported_surface_self_intersection_flag_from_dofs(
+                supported_inputs["dofs"],
+                supported_inputs["quadpoints_theta"],
+                mpol=supported_inputs["mpol"],
+                ntor=supported_inputs["ntor"],
+                nfp=supported_inputs["nfp"],
+                stellsym=supported_inputs["stellsym"],
+                surface_kind=supported_inputs["surface_kind"],
+            )
+        )
+    )
+
+
+def _supported_surface_self_intersection_flag_from_dofs(
+    surface_dofs,
+    quadpoints_theta,
+    *,
+    mpol,
+    ntor,
+    nfp,
+    stellsym,
+    surface_kind,
+):
+    cross_section = _surface_phi0_cross_section_from_supported_dofs(
+        surface_dofs,
+        quadpoints_theta,
+        mpol=mpol,
+        ntor=ntor,
+        nfp=nfp,
+        stellsym=stellsym,
+        surface_kind=surface_kind,
+    )
+    radial_components = jnp.take(
+        cross_section,
+        _as_jax_int32(np.array([0, 1], dtype=np.int32)),
+        axis=1,
+    )
+    vertical_component = jnp.reshape(
+        jnp.take(
+            cross_section,
+            _as_jax_int32(np.array([2], dtype=np.int32)),
+            axis=1,
+        ),
+        (cross_section.shape[0],),
+    )
+    radial_height_curve = jnp.stack(
+        (
+            jnp.linalg.norm(radial_components, axis=1),
+            vertical_component,
+            vertical_component * _as_runtime_float64(0.0, reference=vertical_component),
+        ),
+        axis=1,
+    )
+    return closed_curve_self_intersection_summary(
+        radial_height_curve,
+        neighbor_skip=1,
+        tolerance_factor=_SURFACE_SELF_INTERSECTION_TOLERANCE_FACTOR,
+    )[3]
+
+
+def build_single_stage_target_lane_self_intersection_success_filter(
+    boozer_surface,
+    bs,
+):
+    """Build a pure-JAX self-intersection rejector for the native ALM lane."""
+    import jax.numpy as jnp
+
+    from simsopt.jax_core.field import coil_set_spec_from_dof_extraction_spec
+
+    supported_inputs = _supported_surface_self_intersection_inputs(boozer_surface.surface)
+    if supported_inputs is None:
+        return None
+
+    surface_intersection_kwargs = {
+        "quadpoints_theta": _hostify_target_lane_constant_tree(
+            supported_inputs["quadpoints_theta"]
+        ),
+        "mpol": int(supported_inputs["mpol"]),
+        "ntor": int(supported_inputs["ntor"]),
+        "nfp": int(supported_inputs["nfp"]),
+        "stellsym": bool(supported_inputs["stellsym"]),
+        "surface_kind": supported_inputs["surface_kind"],
+    }
+
+    optimize_G = boozer_surface.res.get("G") is not None
+    coil_dof_extraction_spec = (
+        None
+        if optimize_G
+        else _hostify_target_lane_constant_tree(bs.coil_dof_extraction_spec())
+    )
+    success_filter_signature = _target_lane_success_filter_cache_signature(
+        {
+            **surface_intersection_kwargs,
+            "optimize_G": bool(optimize_G),
+            "coil_dof_extraction_spec": coil_dof_extraction_spec,
+        }
+    )
+
+    def success_filter(coil_dofs, solved_x):
+        coil_set_spec = None
+        if not optimize_G:
+            coil_set_spec = coil_set_spec_from_dof_extraction_spec(
+                coil_dof_extraction_spec,
+                coil_dofs,
+            )
+        sdofs, _iota, _G = boozer_surface._unpack_decision_vector_jax(
+            solved_x,
+            optimize_G,
+            coil_set_spec=coil_set_spec,
+        )
+        return jnp.logical_not(
+            _supported_surface_self_intersection_flag_from_dofs(
+                sdofs,
+                **surface_intersection_kwargs,
+            )
+        )
+
+    success_filter._traceable_runtime_cache_signature = (
+        "single-stage-target-lane-self-intersection-success-filter",
+        success_filter_signature,
+    )
+    return success_filter
+
+
 def evaluate_surface_self_intersection(surface):
     """Return (intersecting, check_available) for a SIMSOPT surface."""
+    supported_intersection = _evaluate_supported_surface_self_intersection(surface)
+    if supported_intersection is not None:
+        return supported_intersection, True
     check_available = surface_self_intersection_check_available()
     if not check_available:
         return False, False
@@ -3572,6 +4647,15 @@ def get_traceable_single_stage_runtime_bundle_builder():
     )
 
     return make_traceable_objective_runtime_bundle
+
+
+def get_traceable_single_stage_alm_runtime_bundle_builder():
+    """Load the pure single-stage ALM runtime bundle on demand."""
+    from simsopt.geo.surfaceobjectives_jax import (
+        make_traceable_single_stage_alm_runtime_bundle,
+    )
+
+    return make_traceable_single_stage_alm_runtime_bundle
 
 
 def get_traceable_single_stage_runtime_diagnostic_builder():
@@ -3848,7 +4932,6 @@ def build_single_stage_target_lane_hardware_success_filter(
     curvature_threshold,
 ):
     """Build the pure-JAX feasibility filter for the ondevice target lane."""
-    import jax
     import jax.numpy as jnp
 
     from simsopt.geo.curve import kappa_pure
@@ -3867,18 +4950,10 @@ def build_single_stage_target_lane_hardware_success_filter(
 
     banana_curve_index = _resolve_single_stage_banana_curve_index(bs, banana_curve)
 
-    def _hostify_constant_tree(value):
-        return jax.tree_util.tree_map(
-            lambda leaf: host_array(leaf)
-            if isinstance(leaf, jax.Array)
-            else np.asarray(leaf)
-            if isinstance(leaf, np.ndarray)
-            else leaf,
-            value,
-        )
-
     optimize_G = boozer_surface.res.get("G") is not None
-    coil_dof_extraction_spec = _hostify_constant_tree(bs.coil_dof_extraction_spec())
+    coil_dof_extraction_spec = _hostify_target_lane_constant_tree(
+        bs.coil_dof_extraction_spec()
+    )
     surface = boozer_surface.surface
     surface_kind = getattr(boozer_surface, "_surface_geometry_kind", None)
     if surface_kind is None:
@@ -4117,9 +5192,9 @@ def build_target_lane_outer_objectives(
                     ),
                 )
             )
-            target_lane_profile["batched_seed_profile"][
-                "profile_point_kind"
-            ] = "baseline_perturbed_batch"
+            target_lane_profile["batched_seed_profile"]["profile_point_kind"] = (
+                "baseline_perturbed_batch"
+            )
 
     return (
         target_scalar_objective,
@@ -4193,7 +5268,7 @@ def build_target_lane_outer_objective_config(
     surface_vessel_weight,
     curvature_threshold,
     curvature_weight,
-):
+    ):
     """Build the structured target-lane outer-objective contract once."""
     return build_traceable_single_stage_outer_objective_config(
         boozer_surface,
@@ -4214,6 +5289,44 @@ def build_target_lane_outer_objective_config(
         curvature_weight=curvature_weight,
         curvature_threshold=curvature_threshold,
     )
+
+
+def build_traceable_single_stage_alm_runtime_config(
+    *,
+    constraint_names,
+    alm_formulation,
+    distance_smoothing,
+    curvature_smoothing,
+    qs_threshold,
+    boozer_threshold,
+    iota_penalty_threshold,
+    length_penalty_threshold,
+    banana_current_threshold,
+):
+    """Build the immutable pure-JAX ALM runtime config for the inner solve."""
+    return {
+        "constraint_names": tuple(str(name) for name in constraint_names),
+        "alm_formulation": str(alm_formulation),
+        "distance_smoothing": float(distance_smoothing),
+        "curvature_smoothing": float(curvature_smoothing),
+        "qs_threshold": (
+            None if qs_threshold is None else float(qs_threshold)
+        ),
+        "boozer_threshold": (
+            None if boozer_threshold is None else float(boozer_threshold)
+        ),
+        "iota_penalty_threshold": (
+            None
+            if iota_penalty_threshold is None
+            else float(iota_penalty_threshold)
+        ),
+        "length_penalty_threshold": (
+            None
+            if length_penalty_threshold is None
+            else float(length_penalty_threshold)
+        ),
+        "banana_current_threshold": float(banana_current_threshold),
+    }
 
 
 def build_target_lane_gradient_diagnosis(
@@ -4344,10 +5457,7 @@ def build_target_lane_scaled_phase1_diagnosis(
             "first_nonfinite_stage": first_nonfinite_stage,
         }
         payload.update(
-            {
-                stage_name: stage_records.get(stage_name)
-                for stage_name in stage_names
-            }
+            {stage_name: stage_records.get(stage_name) for stage_name in stage_names}
         )
         return payload
 
@@ -4429,7 +5539,9 @@ def build_target_lane_scaled_phase1_diagnosis(
             mapped_dofs=mapped_dofs,
         )
 
-    phase1_dofs = build_scaled_outer_phase_initial_dofs(anchor_dofs, use_target_lane=True)
+    phase1_dofs = build_scaled_outer_phase_initial_dofs(
+        anchor_dofs, use_target_lane=True
+    )
     phase1_optimizer_dofs = build_target_lane_scaled_outer_phase_state(
         anchor_dofs,
         phase1_dofs,
@@ -4797,17 +5909,12 @@ def resolve_target_lane_boozer_newton_maxiter(
 @contextmanager
 def temporary_boozer_surface_option_overrides(boozer_surface, **overrides):
     """Temporarily override mutable BoozerSurface options for one scoped phase."""
-    applied = {
-        key: value for key, value in overrides.items() if value is not None
-    }
+    applied = {key: value for key, value in overrides.items() if value is not None}
     if not applied:
         yield
         return
 
-    original = {
-        key: boozer_surface.options.get(key)
-        for key in applied
-    }
+    original = {key: boozer_surface.options.get(key) for key in applied}
     boozer_surface.options.update(applied)
     try:
         yield
@@ -4836,6 +5943,18 @@ def resolve_single_stage_optimizer_contract(field_backend, optimizer_backend):
         optimizer_backend,
         component_label=_SINGLE_STAGE_COMPONENT_LABEL,
     )
+
+
+def resolve_single_stage_alm_inner_optimizer_contract(
+    constraint_method,
+    outer_contract,
+):
+    """Resolve the ALM inner optimizer contract for the single-stage lane."""
+    from simsopt.geo.optimizer_jax import TargetOptimizerContract
+
+    if constraint_method != "alm":
+        return None
+    return outer_contract if isinstance(outer_contract, TargetOptimizerContract) else None
 
 
 def resolve_single_stage_outer_optimizer_method(field_backend, optimizer_backend):
@@ -5141,10 +6260,12 @@ class _JaxCompileDiagnosticsRecorder(logging.Handler):
                 self.cache_miss_site_parse_miss_count
             ),
             "compile_targets": {
-                key: int(self.compile_targets[key]) for key in sorted(self.compile_targets)
+                key: int(self.compile_targets[key])
+                for key in sorted(self.compile_targets)
             },
             "cache_miss_sites": {
-                key: int(self.cache_miss_sites[key]) for key in sorted(self.cache_miss_sites)
+                key: int(self.cache_miss_sites[key])
+                for key in sorted(self.cache_miss_sites)
             },
             "compile_messages": list(self.compile_messages),
             "cache_miss_messages": list(self.cache_miss_messages),
@@ -5162,7 +6283,9 @@ def maybe_record_jax_compile_diagnostics(enabled):
     recorder = _JaxCompileDiagnosticsRecorder()
     previous_level = logger.level
     previous_propagate = logger.propagate
-    override_level = previous_level == logging.NOTSET or previous_level > logging.WARNING
+    override_level = (
+        previous_level == logging.NOTSET or previous_level > logging.WARNING
+    )
     if override_level:
         logger.setLevel(logging.WARNING)
     logger.propagate = False
@@ -5316,7 +6439,9 @@ def resolve_scaled_outer_phase_final_dofs(
             scale = _as_runtime_float64(step_scale, reference=runtime_reference)
             return anchor_runtime + scale * step_runtime
         if runtime_reference is not None:
-            anchor_runtime = _as_runtime_float64(anchor_dofs, reference=runtime_reference)
+            anchor_runtime = _as_runtime_float64(
+                anchor_dofs, reference=runtime_reference
+            )
             step_runtime = _as_runtime_float64(step_dofs, reference=runtime_reference)
             scale = _as_runtime_float64(step_scale, reference=runtime_reference)
             return anchor_runtime + scale * step_runtime
@@ -5421,6 +6546,12 @@ def run_single_stage_optimizer(
         raise RuntimeError(
             f"Unsupported single-stage optimizer contract {type(contract)!r}."
         )
+    if failure_callback is not None:
+        raise ValueError(
+            "Single-stage reference-lane optimization does not support "
+            "failure_callback; use the target ondevice lane for "
+            "line-search failure diagnostics."
+        )
     return reference_minimize(
         optimizer_fun,
         optimizer_dofs,
@@ -5443,6 +6574,7 @@ def run_single_stage_target_lane_optimizer_with_retries(
     *,
     callback,
     retry_callback,
+    result_state_sync,
     contract,
     maxiter,
     ftol,
@@ -5459,11 +6591,26 @@ def run_single_stage_target_lane_optimizer_with_retries(
     restored_result_x_factory=None,
 ):
     """Retry invalid-state target-lane failures from preserved local anchors."""
+
+    def default_retry_dofs_factory(anchor_state):
+        return host_array(anchor_state["coil_dofs"], dtype=np.float64)
+
     if retry_dofs_factory is None:
         retry_dofs_factory = default_retry_dofs_factory
 
     if restored_result_x_factory is None:
         restored_result_x_factory = retry_dofs_factory
+
+    def sync_failed_attempt_state(result, *, event_start_index):
+        if result_state_sync is None:
+            return
+        if int(getattr(result, "nit", 0)) <= 0 or result.success:
+            return
+        if single_stage_retry_triggered_by_invalid_state(
+            invalid_state_events[event_start_index:]
+        ):
+            result_state_sync(result.x)
+
     initial_step_size = target_lane_initial_step_size
     event_start = len(invalid_state_events)
     result = run_single_stage_optimizer(
@@ -5489,6 +6636,7 @@ def run_single_stage_target_lane_optimizer_with_retries(
         "restored_preserved_local_state": False,
         "restored_preserved_local_stage": None,
     }
+    sync_failed_attempt_state(result, event_start_index=event_start)
     for retry_index in range(single_stage_search_policy.invalid_step_retry_budget):
         new_events = invalid_state_events[event_start:]
         if result.success or (
@@ -5534,6 +6682,7 @@ def run_single_stage_target_lane_optimizer_with_retries(
             target_lane_initial_step_size=initial_step_size,
             failure_callback=failure_callback,
         )
+        sync_failed_attempt_state(result, event_start_index=event_start)
         total_nit += int(getattr(result, "nit", 0))
         if total_nfev is not None:
             total_nfev += int(getattr(result, "nfev", 0))
@@ -5751,8 +6900,8 @@ def compute_single_stage_failure_penalty(
     step_norm = float(np.linalg.norm(np.asarray(x, dtype=float) - previous_x))
     reference_norm = max(float(np.linalg.norm(previous_x)), 1.0)
     step_ratio = step_norm / reference_norm
-    residual_inf = 0.0 if success_solve else _single_stage_failure_residual_inf(
-        boozer_surface
+    residual_inf = (
+        0.0 if success_solve else _single_stage_failure_residual_inf(boozer_surface)
     )
     hardware_score = _single_stage_hardware_violation_score(hardware_status)
     failure_count = int(run_dict.get("failure_count", 0))
@@ -5901,9 +7050,9 @@ def _refresh_single_stage_runtime_state(
         boozer_surface.run_code(
             run_dict["iota"], run_dict["G"], sdofs=run_dict["sdofs"]
         )
-    success = host_bool(boozer_surface.res["success"]) and not update_self_intersection_status(
-        run_dict, boozer_surface.surface
-    )
+    success = host_bool(
+        boozer_surface.res["success"]
+    ) and not update_self_intersection_status(run_dict, boozer_surface.surface)
     if not success and uses_legacy_warm_start:
         _restore_cpu_boozer_state(boozer_surface, run_dict)
     return success
@@ -6187,6 +7336,46 @@ class SingleStageAdapter:
         self.run_dict["x_prev"] = x_array.copy()
         return success
 
+    def _sync_target_lane_accepted_step_summary(self, x, *, update_run_state):
+        """Run the pure target-lane accepted-step sync with optional state commit."""
+        accepted_step_summary = self.accepted_step_state_sync(
+            self.run_dict,
+            x,
+            benchmark_mode=self.benchmark_mode,
+            update_run_state=update_run_state,
+        )
+        if update_run_state:
+            self.run_dict["x_prev"] = _single_stage_optimizer_dofs_array(x).copy()
+        return accepted_step_summary
+
+    def _log_target_lane_accepted_step(self, accepted_step_summary):
+        """Write the accepted-step summary when host-side logging is enabled."""
+        if self.benchmark_mode:
+            return
+        log_single_stage_target_lane_accepted_step(
+            self.run_dict,
+            accepted_step_summary,
+            self.log_path,
+        )
+
+    def sync_accepted_step_state(self, x):
+        """Refresh the accepted step without emitting per-accept logging."""
+        if self.accepted_step_state_sync is None:
+            self.sync_accepted_step(x)
+            return
+        self._sync_target_lane_accepted_step_summary(x, update_run_state=True)
+
+    def observe_accepted_step(self, x):
+        """Emit target-lane accepted-step observability without state mutation."""
+        if self.accepted_step_state_sync is None:
+            self.sync_accepted_step(x)
+            return
+        accepted_step_summary = self._sync_target_lane_accepted_step_summary(
+            x,
+            update_run_state=False,
+        )
+        self._log_target_lane_accepted_step(accepted_step_summary)
+
     def sync_accepted_step(self, x):
         """Refresh mutable state if needed, then snapshot one accepted step."""
         if self.accepted_step_state_sync is not None:
@@ -6303,7 +7492,7 @@ def snapshot_to_pytree(JF, boozer_surface, bs, *, num_tf_coils):
         "x_prev": coil_dofs.copy(),
         "intersecting": False,
         "self_intersection_check_available": (
-            surface_self_intersection_check_available()
+            surface_self_intersection_check_available(boozer_surface.surface)
         ),
         "latest_local_incumbent": None,
         "latest_local_metric": None,
@@ -6420,7 +7609,6 @@ if __name__ == "__main__":
         write_json_file(startup_progress_path, startup_progress)
 
     _mark_startup_progress("output_root_ready")
-    result_state_sync,
     stop_jax_profile_trace = begin_jax_profile_trace(args.jax_profile_dir)
     jax_profile_enabled = stop_jax_profile_trace is not None
     args.curvature_threshold = resolve_curvature_threshold(args.curvature_threshold)
@@ -6437,10 +7625,6 @@ if __name__ == "__main__":
 
     banana_surf_radius = (
         args.banana_surf_radius
-
-    def default_retry_dofs_factory(anchor_state):
-        return host_array(anchor_state["coil_dofs"], dtype=np.float64)
-
         if args.banana_surf_radius is not None
         else float(stage2_results["banana_surf_radius"])
     )
@@ -6448,22 +7632,13 @@ if __name__ == "__main__":
     nphi = args.nphi
     ntheta = args.ntheta
     mpol = args.mpol
-
-    def sync_failed_attempt_state(result, *, event_start_index):
-        if result_state_sync is None:
-            return
-        if int(getattr(result, "nit", 0)) <= 0 or result.success:
-            return
-        if single_stage_retry_triggered_by_invalid_state(
-            invalid_state_events[event_start_index:]
-        ):
-            result_state_sync(result.x)
-
     ntor = args.ntor
 
     # Optimization targets and weights
     vol_target = args.vol_target
     CONSTRAINT_WEIGHT = args.constraint_weight
+    CONSTRAINT_METHOD = args.constraint_method
+    ALM_FORMULATION = args.alm_formulation
     MAXITER = args.maxiter
     iota_target = args.iota_target
     num_tf_coils = args.num_tf_coils
@@ -6484,7 +7659,6 @@ if __name__ == "__main__":
 
     # The proposed new HBT LCFS
     hbt = SurfaceRZFourier(nfp=5, stellsym=True)
-    sync_failed_attempt_state(result, event_start_index=event_start)
     hbt.set_rc(0, 0, 0.9115)  # R0 of LCFS semi-circle center
     hbt.set_rc(1, 0, 0.1605)  # Minor radius (thick metal walls)
     hbt.set_zs(1, 0, 0.152)  # Z extent = ±0.152 m (flat top/bottom)
@@ -6528,7 +7702,6 @@ if __name__ == "__main__":
     )
 
     # JAX backend: wrap the loaded BiotSavart coils in BiotSavartJAX.
-        sync_failed_attempt_state(result, event_start_index=event_start)
     # Keep a CPU reference for diagnostics and artifact output.
     bs_cpu_diag = bs if use_jax else None
     biotsavart_wrap_start_s = _perf_counter_s()
@@ -6575,12 +7748,16 @@ if __name__ == "__main__":
         warm_start_state,
         explicit_surface_warm_start=warm_start_surface_dofs is not None,
     )
-    effective_initial_phase_settings = resolve_single_stage_policy_initial_phase_settings(
-        single_stage_search_policy,
-        initial_step_scale=args.initial_step_scale,
-        initial_step_maxiter=args.initial_step_maxiter,
+    effective_initial_phase_settings = (
+        resolve_single_stage_policy_initial_phase_settings(
+            single_stage_search_policy,
+            initial_step_scale=args.initial_step_scale,
+            initial_step_maxiter=args.initial_step_maxiter,
+        )
     )
-    effective_initial_step_scale = effective_initial_phase_settings["initial_step_scale"]
+    effective_initial_step_scale = effective_initial_phase_settings[
+        "initial_step_scale"
+    ]
     effective_initial_step_maxiter = effective_initial_phase_settings[
         "initial_step_maxiter"
     ]
@@ -6593,7 +7770,20 @@ if __name__ == "__main__":
     banana_coils = coils[num_tf_coils:]
     banana_curves = [c.curve for c in banana_coils]
     banana_curve = banana_curves[0]
+    stage2_tf_current_A = resolve_loaded_tf_current_A(
+        stage2_results.get("TF_CURRENT_A"),
+        tf_coils,
+    )
     current_sum = sum(abs(c.current.get_value()) for c in tf_coils)
+
+    if CONSTRAINT_METHOD == "penalty":
+        apply_penalty_traversal_forbidden_box_bounds(
+            bound_targets={"banana_current": banana_coils[0].current},
+            requested_thresholds={"banana_current": args.banana_current_max_A},
+            seed_values={"banana_current": banana_coils[0].current.get_value()},
+            validate_seed=True,
+            seed_context="Loaded Stage 2 seed banana_current",
+        )
 
     # Calculate G0 parameter from TF coil currents
     G0 = 2.0 * np.pi * current_sum * (4 * np.pi * 10 ** (-7) / (2 * np.pi))
@@ -6693,6 +7883,12 @@ if __name__ == "__main__":
         str(stage2_bs_path),
         str(stage),
         str(CONSTRAINT_WEIGHT),
+        str(CONSTRAINT_METHOD),
+        str(ALM_FORMULATION if CONSTRAINT_METHOD == "alm" else None),
+        str(args.alm_qs_threshold if CONSTRAINT_METHOD == "alm" else None),
+        str(args.alm_boozer_threshold if CONSTRAINT_METHOD == "alm" else None),
+        str(args.alm_iota_penalty_threshold if CONSTRAINT_METHOD == "alm" else None),
+        str(args.alm_length_penalty_threshold if CONSTRAINT_METHOD == "alm" else None),
         str(vol_target),
         str(iota_target),
         str(args.cc_dist),
@@ -6700,12 +7896,14 @@ if __name__ == "__main__":
         str(args.curvature_weight),
         str(args.curvature_threshold),
         str(args.length_weight),
+        str(args.length_target),
         str(args.res_weight),
         str(args.iotas_weight),
         str(args.cs_weight),
         str(args.cs_dist),
         str(args.surf_dist_weight),
         str(args.ss_dist),
+        str(args.banana_current_max_A),
         str(args.maxcor),
         str(args.outer_maxls),
         str(args.target_lane_outer_initial_step_size),
@@ -6737,6 +7935,7 @@ if __name__ == "__main__":
         str(use_target_lane_vg),
         str(args.maxiter),
         str(args.num_tf_coils),
+        str(stage2_tf_current_A),
         str(file_loc),
     ]
     if boozer_optimizer_backend_hash_record is not None:
@@ -6797,14 +7996,14 @@ if __name__ == "__main__":
             bfgs_maxiter_override=warm_start_boozer_init_overrides[
                 "bfgs_maxiter_override"
             ],
-            newton_tol_override=warm_start_boozer_init_overrides[
-                "newton_tol_override"
-            ],
+            newton_tol_override=warm_start_boozer_init_overrides["newton_tol_override"],
             newton_maxiter_override=warm_start_boozer_init_overrides[
                 "newton_maxiter_override"
             ],
             surface_dofs_override=warm_start_surface_dofs,
-            iota_override=None if warm_start_state is None else warm_start_state["iota"],
+            iota_override=None
+            if warm_start_state is None
+            else warm_start_state["iota"],
             G_override=None if warm_start_state is None else warm_start_state["G"],
             on_stage=boozer_init_progress,
             timings_out=timings,
@@ -6892,18 +8091,18 @@ if __name__ == "__main__":
     RES_WEIGHT = args.res_weight
     IOTAS_WEIGHT = args.iotas_weight
     CC_WEIGHT = args.cc_weight
-    CC_DIST = max(args.cc_dist, 0.05)  # Hardware minimum: 5cm coil-coil spacing
+    CC_DIST = max(args.cc_dist, COIL_COIL_MIN_DIST_M)
     CS_WEIGHT = args.cs_weight
-    CS_DIST = max(args.cs_dist, 0.02)  # Hardware minimum: 2cm coil-surface clearance
+    CS_DIST = max(args.cs_dist, COIL_PLASMA_MIN_DIST_M)
     SURF_DIST_WEIGHT = args.surf_dist_weight
-    SS_DIST = max(args.ss_dist, 0.04)  # Hardware minimum: 4cm surface-vessel clearance
+    SS_DIST = max(args.ss_dist, PLASMA_VESSEL_MIN_DIST_M)
     CURVATURE_WEIGHT = args.curvature_weight
     CURVATURE_THRESHOLD = args.curvature_threshold
 
     # Individual objective terms
     iota = build_iota_objective(boozer_surface, iota_cls)
     curvelength = CurveLength(banana_curves[0])
-    length_target = host_float(curvelength.J())
+    length_target = min(float(args.length_target), COIL_LENGTH_TARGET_M)
 
     Jiota = QuadraticPenalty(iota, iota_target)
     JnonQSRatio = sum(nonQSs)
@@ -6944,7 +8143,17 @@ if __name__ == "__main__":
     )
     from simsopt.geo.optimizer_jax import TargetOptimizerContract
 
-    use_target_lane = isinstance(outer_contract, TargetOptimizerContract)
+    outer_optimizer_method_record = (
+        "alm" if CONSTRAINT_METHOD == "alm" else outer_contract.method
+    )
+    alm_inner_optimizer_contract = resolve_single_stage_alm_inner_optimizer_contract(
+        CONSTRAINT_METHOD,
+        outer_contract,
+    )
+    use_target_lane = CONSTRAINT_METHOD == "penalty" and isinstance(
+        outer_contract,
+        TargetOptimizerContract,
+    )
     dof_setter = resolve_single_stage_outer_dof_setter(
         JF,
         bs,
@@ -6964,6 +8173,14 @@ if __name__ == "__main__":
     run_dict["initial_phase_auto_enabled"] = bool(
         effective_initial_phase_settings["auto_enabled"]
     )
+    run_dict["constraint_method"] = CONSTRAINT_METHOD
+    run_dict["alm_formulation"] = (
+        ALM_FORMULATION if CONSTRAINT_METHOD == "alm" else None
+    )
+    run_dict["accepted_iterations"] = 0
+    run_dict["accepted_boozer_stage"] = stage
+    run_dict["accepted_hardware_status"] = None
+    run_dict["trial_hardware_status"] = None
     objectives = {
         "qs": JnonQSRatio,
         "boozer": JBoozerResidual,
@@ -7031,11 +8248,21 @@ if __name__ == "__main__":
     )
     skip_outer_optimizer = bool(
         args.init_only
-        or args.profile_target_lane_only
-        or args.diagnose_target_lane_gradient
-        or args.diagnose_target_lane_scaled_phase1
+        or (
+            CONSTRAINT_METHOD == "penalty"
+            and (
+                args.profile_target_lane_only
+                or args.diagnose_target_lane_gradient
+                or args.diagnose_target_lane_scaled_phase1
+            )
+        )
     )
     res = None
+    alm_result = None
+    target_lane_trial_boozer_override_active = False
+    accepted_step_callback = None
+    target_lane_success_filter = None
+    optimized_artifacts_already_materialized = False
 
     if args.init_only:
         res_nit = 0
@@ -7049,179 +8276,396 @@ if __name__ == "__main__":
     else:
         outer_optimizer_start_s = _perf_counter_s()
         outer_optimizer_run_start_s = outer_optimizer_start_s
-        if use_target_lane:
-            print(
-                "Preparing target-lane outer objective/runtime bundle "
-                f"(method={outer_contract.method}, maxiter={MAXITER})..."
+        if CONSTRAINT_METHOD == "alm":
+            alm_settings = build_single_stage_alm_settings(args)
+            alm_constraint_names = single_stage_alm_constraint_names(
+                alm_formulation=ALM_FORMULATION,
+                include_surface_surface=JSurfSurf is not None,
             )
-        target_lane_trial_boozer_overrides = {
-            "bfgs_tol": target_lane_boozer_bfgs_tol_record,
-            "bfgs_maxiter": target_lane_boozer_bfgs_maxiter_record,
-            "newton_tol": target_lane_boozer_newton_tol_record,
-            "newton_maxiter": target_lane_boozer_newton_maxiter_record,
-        }
-        target_lane_trial_boozer_override_active = any(
-            value is not None for value in target_lane_trial_boozer_overrides.values()
-        )
-        accepted_step_callback = None
-        with maybe_record_jax_compile_diagnostics(
-            bool(args.record_jax_compile_diagnostics and use_target_lane)
-        ) as jax_compile_diagnostics_recorder, temporary_boozer_surface_option_overrides(
-            boozer_surface,
-            **target_lane_trial_boozer_overrides,
-        ):
-            with maybe_trace_single_stage_phase(
-                "single_stage.target_lane_bundle_setup",
-                enabled=jax_profile_enabled and use_target_lane,
-            ):
-                (
-                    target_scalar_objective,
-                    target_value_and_grad_objective,
-                    target_lane_profile,
-                    target_lane_success_filter,
-                ) = prepare_target_lane_outer_objectives(
+            alm_partial_state = {"history": []}
+            initial_alm_multipliers = np.zeros(len(alm_constraint_names), dtype=float)
+            initial_alm_penalty = float(args.alm_penalty_init)
+            alm_target_value_and_grad = None
+            alm_target_success_filter = None
+            if alm_inner_optimizer_contract is not None:
+                alm_target_success_filter = (
+                    build_single_stage_target_lane_self_intersection_success_filter(
+                        boozer_surface,
+                        bs,
+                    )
+                )
+                alm_outer_objective_config = build_target_lane_outer_objective_config(
                     boozer_surface,
                     bs,
                     banana_curve,
                     VV,
-                    iota_target,
-                    use_target_lane=use_target_lane,
-                    use_value_and_grad=use_target_lane_vg,
-                    profile_target_lane=args.profile_target_lane,
-                    profile_batch_size=args.profile_target_lane_batch_size,
-                    disable_success_filter=args.disable_target_lane_success_filter,
                     non_qs_weight=1.0,
                     residual_weight=RES_WEIGHT,
                     iota_weight=IOTAS_WEIGHT,
                     length_weight=LENGTH_WEIGHT,
                     length_target=length_target,
-                    cc_dist=CC_DIST,
-                    cc_weight=CC_WEIGHT,
-                    cs_dist=CS_DIST,
-                    cs_weight=CS_WEIGHT,
-                    ss_dist=SS_DIST,
-                    surf_dist_weight=SURF_DIST_WEIGHT,
+                    curve_curve_threshold=CC_DIST,
+                    curve_curve_weight=CC_WEIGHT,
+                    curve_surface_threshold=CS_DIST,
+                    curve_surface_weight=CS_WEIGHT,
+                    surface_vessel_threshold=SS_DIST,
+                    surface_vessel_weight=SURF_DIST_WEIGHT,
                     curvature_threshold=CURVATURE_THRESHOLD,
                     curvature_weight=CURVATURE_WEIGHT,
                 )
-            if use_target_lane:
-                adapter.accepted_step_state_sync = (
-                    build_single_stage_target_lane_accepted_step_sync(
-                        boozer_surface,
-                        bs,
-                        iota_target,
-                        outer_objective_config=(
-                            build_target_lane_outer_objective_config(
-                                boozer_surface,
-                                bs,
-                                banana_curve,
-                                VV,
-                                non_qs_weight=1.0,
-                                residual_weight=RES_WEIGHT,
-                                iota_weight=IOTAS_WEIGHT,
-                                length_weight=LENGTH_WEIGHT,
-                                length_target=length_target,
-                                curve_curve_threshold=CC_DIST,
-                                curve_curve_weight=CC_WEIGHT,
-                                curve_surface_threshold=CS_DIST,
-                                curve_surface_weight=CS_WEIGHT,
-                                surface_vessel_threshold=SS_DIST,
-                                surface_vessel_weight=SURF_DIST_WEIGHT,
-                                curvature_threshold=CURVATURE_THRESHOLD,
-                                curvature_weight=CURVATURE_WEIGHT,
-                            )
-                        ),
-                        success_filter=target_lane_success_filter,
-                    )
+                alm_runtime_config = build_traceable_single_stage_alm_runtime_config(
+                    constraint_names=alm_constraint_names,
+                    alm_formulation=ALM_FORMULATION,
+                    distance_smoothing=args.alm_distance_smoothing,
+                    curvature_smoothing=args.alm_curvature_smoothing,
+                    qs_threshold=args.alm_qs_threshold,
+                    boozer_threshold=args.alm_boozer_threshold,
+                    iota_penalty_threshold=args.alm_iota_penalty_threshold,
+                    length_penalty_threshold=args.alm_length_penalty_threshold,
+                    banana_current_threshold=args.banana_current_max_A,
                 )
-            if use_target_lane:
-                _record_timing(
-                    timings,
-                    "target_lane_bundle_setup_s",
-                    outer_optimizer_start_s,
-                    _perf_counter_s(),
+                alm_runtime_bundle = get_traceable_single_stage_alm_runtime_bundle_builder()(
+                    boozer_surface,
+                    bs,
+                    iota_target,
+                    outer_objective_config=alm_outer_objective_config,
+                    alm_config=alm_runtime_config,
+                    success_filter=alm_target_success_filter,
                 )
-                outer_optimizer_run_start_s = _perf_counter_s()
-                print("Target-lane outer objective/runtime bundle ready.")
-            if args.diagnose_target_lane_scaled_phase1:
-                if not use_target_lane:
-                    raise RuntimeError(
-                        "--diagnose-target-lane-scaled-phase1 requires the JAX "
-                        "ondevice single-stage target lane."
+                alm_target_value_and_grad = alm_runtime_bundle["value_and_grad"]
+
+            def set_alm_runtime_state(multipliers, penalty, *, outer_iteration=None):
+                run_dict["alm_multipliers"] = np.asarray(
+                    multipliers, dtype=float
+                ).copy()
+                run_dict["alm_penalty"] = float(penalty)
+                if outer_iteration is not None:
+                    run_dict["alm_outer_iteration"] = int(outer_iteration)
+
+            def emit_alm_partial_state(
+                multipliers,
+                penalty,
+                *,
+                outer_iteration=None,
+                latest_history_entry=None,
+                termination_message=None,
+                optimizer_success=None,
+                termination_reason=None,
+                inner_optimizer_success=None,
+                inner_optimizer_message=None,
+                converged_to_tolerances=None,
+                restored_best_feasible=None,
+                restored_best_feasible_reason=None,
+                final_max_feasibility_violation=None,
+                final_stationarity_norm=None,
+            ):
+                payload = build_single_stage_alm_partial_state(
+                    run_dict,
+                    alm_constraint_names,
+                    alm_partial_state["history"],
+                    latest_history_entry,
+                    multipliers,
+                    penalty,
+                    outer_iteration=outer_iteration,
+                    termination_message=termination_message,
+                    optimizer_success=optimizer_success,
+                    termination_reason=termination_reason,
+                    inner_optimizer_success=inner_optimizer_success,
+                    inner_optimizer_message=inner_optimizer_message,
+                    converged_to_tolerances=converged_to_tolerances,
+                    restored_best_feasible=restored_best_feasible,
+                    restored_best_feasible_reason=restored_best_feasible_reason,
+                    final_max_feasibility_violation=final_max_feasibility_violation,
+                    final_stationarity_norm=final_stationarity_norm,
+                )
+                write_single_stage_alm_partial_state(OUT_DIR_ITER, payload)
+
+            def accepted_callback(x):
+                adapter.callback(x)
+                run_dict["accepted_iterations"] = (
+                    int(run_dict.get("accepted_iterations", 0)) + 1
+                )
+                run_dict["accepted_boozer_stage"] = stage
+                run_dict["accepted_hardware_status"] = copy.deepcopy(
+                    run_dict.get("hardware_constraint_status")
+                )
+
+            def evaluate_problem(inner_x, multipliers, penalty):
+                set_alm_runtime_state(multipliers, penalty)
+                return evaluate_single_stage_alm_problem(
+                    inner_x,
+                    run_dict=run_dict,
+                    boozer_surface=boozer_surface,
+                    JF=JF,
+                    nonQSs=nonQSs,
+                    brs=brs,
+                    RES_WEIGHT=RES_WEIGHT,
+                    Jiota=Jiota,
+                    IOTAS_WEIGHT=IOTAS_WEIGHT,
+                    curvelength=curvelength,
+                    JCurveLength=JCurveLength,
+                    LENGTH_WEIGHT=LENGTH_WEIGHT,
+                    JCurveCurve=JCurveCurve,
+                    JCurveSurface=JCurveSurface,
+                    JCurvature=JCurvature,
+                    JSurfSurf=JSurfSurf,
+                    curves=curves,
+                    banana_curve=banana_curve,
+                    vessel_surface=VV,
+                    curve_curve_distance=CC_DIST,
+                    curve_surface_distance=CS_DIST,
+                    surface_vessel_distance=SS_DIST,
+                    curvature_threshold=CURVATURE_THRESHOLD,
+                    distance_smoothing=args.alm_distance_smoothing,
+                    curvature_smoothing=args.alm_curvature_smoothing,
+                    constraint_names=alm_constraint_names,
+                    alm_formulation=ALM_FORMULATION,
+                    qs_threshold=args.alm_qs_threshold,
+                    boozer_threshold=args.alm_boozer_threshold,
+                    iota_penalty_threshold=args.alm_iota_penalty_threshold,
+                    length_penalty_threshold=args.alm_length_penalty_threshold,
+                    banana_current=banana_coils[0].current,
+                    banana_current_threshold=args.banana_current_max_A,
+                    tf_current_A=stage2_tf_current_A,
+                    tf_current_limit_A=TF_CURRENT_HARD_LIMIT_A,
+                    coil_length_threshold=length_target,
+                    multipliers=multipliers,
+                    penalty=penalty,
+                )
+
+            def outer_state_callback(outer_iteration, multipliers, penalty):
+                set_alm_runtime_state(
+                    multipliers,
+                    penalty,
+                    outer_iteration=outer_iteration,
+                )
+                print(
+                    f"[ALM] outer_iteration={outer_iteration}, "
+                    f"multipliers={np.asarray(multipliers, dtype=float).tolist()}, "
+                    f"penalty={float(penalty):.3e}"
+                )
+                emit_alm_partial_state(
+                    multipliers,
+                    penalty,
+                    outer_iteration=outer_iteration,
+                )
+
+            def history_callback(history, latest_history_entry, multipliers, penalty):
+                alm_partial_state["history"] = history
+                emit_alm_partial_state(
+                    multipliers,
+                    penalty,
+                    outer_iteration=(
+                        None
+                        if latest_history_entry is None
+                        else latest_history_entry.get("outer_iteration")
+                    ),
+                    latest_history_entry=latest_history_entry,
+                )
+
+            def snapshot_accepted_state():
+                return snapshot_single_stage_local_incumbent_state(run_dict)
+
+            def restore_incumbent_state(incumbent_state):
+                restore_single_stage_local_incumbent_state(run_dict, incumbent_state)
+                dof_setter(run_dict["x_prev"])
+
+            set_alm_runtime_state(
+                initial_alm_multipliers,
+                initial_alm_penalty,
+                outer_iteration=0,
+            )
+            emit_alm_partial_state(
+                initial_alm_multipliers,
+                initial_alm_penalty,
+                outer_iteration=0,
+            )
+            res = minimize_alm(
+                dofs,
+                alm_constraint_names,
+                evaluate_problem,
+                alm_settings,
+                {
+                    "maxiter": int(MAXITER),
+                    "maxcor": int(args.maxcor),
+                    "ftol": float(ftol),
+                    "gtol": float(gtol),
+                    "maxls": int(args.outer_maxls),
+                },
+                inner_optimizer_contract=alm_inner_optimizer_contract,
+                target_inner_value_and_grad=alm_target_value_and_grad,
+                accepted_callback=accepted_callback,
+                outer_state_callback=outer_state_callback,
+                history_callback=history_callback,
+                snapshot_accepted_state_fn=snapshot_accepted_state,
+                restore_incumbent_state_fn=restore_incumbent_state,
+                initial_multipliers=initial_alm_multipliers,
+                initial_penalty=initial_alm_penalty,
+            )
+            alm_result = res
+            alm_partial_state["history"] = [
+                dict(entry) for entry in getattr(res, "history", [])
+            ]
+            set_alm_runtime_state(
+                res.multipliers,
+                res.penalty,
+                outer_iteration=getattr(res, "outer_iterations", None),
+            )
+            emit_alm_partial_state(
+                res.multipliers,
+                res.penalty,
+                outer_iteration=getattr(res, "outer_iterations", None),
+                latest_history_entry=(
+                    None if not getattr(res, "history", None) else res.history[-1]
+                ),
+                termination_message=str(res.message),
+                optimizer_success=bool(res.success),
+                termination_reason=getattr(res, "termination_reason", None),
+                inner_optimizer_success=getattr(res, "optimizer_success", None),
+                inner_optimizer_message=getattr(res, "optimizer_message", None),
+                converged_to_tolerances=getattr(
+                    res,
+                    "converged_to_tolerances",
+                    None,
+                ),
+                restored_best_feasible=getattr(res, "restored_best_feasible", None),
+                restored_best_feasible_reason=getattr(
+                    res,
+                    "restored_best_feasible_reason",
+                    None,
+                ),
+                final_max_feasibility_violation=getattr(
+                    res,
+                    "final_max_feasibility_violation",
+                    None,
+                ),
+                final_stationarity_norm=getattr(
+                    res,
+                    "final_stationarity_norm",
+                    None,
+                ),
+            )
+            res_nit = int(res.nit)
+            main_phase_iterations = int(res.nit)
+            termination_message = str(res.message)
+            optimizer_success = bool(res.success)
+            outer_optimizer_end_s = _perf_counter_s()
+            _record_timing(
+                timings,
+                "outer_optimizer_s",
+                outer_optimizer_run_start_s,
+                outer_optimizer_end_s,
+            )
+            restore_from_pytree(
+                JF,
+                boozer_surface,
+                run_dict,
+                coil_dofs=res.x,
+                apply_coil_dofs=dof_setter,
+            )
+            final_artifacts_start_s = _perf_counter_s()
+            if write_restart_artifacts:
+                bs_diag.save(OUT_DIR_ITER + "/biot_savart_opt.json")
+                boozer_surface.surface.save(OUT_DIR_ITER + "/surf_opt.json")
+                if write_full_artifacts:
+                    curves_to_vtk(curves, OUT_DIR_ITER + "/curves_opt", close=True)
+                    bs_diag.set_points(boozer_surface.surface.gamma().reshape((-1, 3)))
+                    unitn = boozer_surface.surface.unitnormal()
+                    pointData = {
+                        "B_N/B": np.sum(
+                            bs_diag.B().reshape(unitn.shape) * unitn,
+                            axis=2,
+                        )[:, :, None]
+                        / np.sqrt(
+                            np.sum(bs_diag.B().reshape(unitn.shape) ** 2, axis=2)
+                        )[:, :, None]
+                    }
+                    boozer_surface.surface.to_vtk(
+                        OUT_DIR_ITER + "/surf_opt",
+                        extra_data=pointData,
                     )
-                if (
-                    effective_initial_step_maxiter < 1
-                    or effective_initial_step_scale >= 1.0
+
+            final_volume = host_float(boozer_surface.surface.volume())
+            final_iota = resolve_single_stage_iota_metric(
+                boozer_surface,
+                iota_cls,
+                benchmark_mode=args.benchmark_mode,
+            )
+            final_max_curvature = np.max(banana_curve.kappa())
+            print(f"Volume: {final_volume}")
+            print(f"Iota: {final_iota}")
+            print(f"Max Curvature: {final_max_curvature}")
+            if write_full_artifacts:
+                fieldError = normPlot(
+                    boozer_surface.surface,
+                    bs_diag,
+                    OUT_DIR_ITER + "/NormPlotOptimized",
+                )
+                cross_section_plot(
+                    surf_coils,
+                    boozer_surface.surface,
+                    banana_curve,
+                    OUT_DIR_ITER + "/CrossSectionOptimized",
+                    hbt,
+                    VV,
+                )
+            else:
+                fieldError, _, _, _, _, _ = norm_field_summary(
+                    boozer_surface.surface,
+                    bs_diag,
+                )
+            _record_timing(
+                timings,
+                "final_artifacts_s",
+                final_artifacts_start_s,
+                _perf_counter_s(),
+            )
+            optimized_artifacts_already_materialized = True
+        elif use_target_lane:
+            print(
+                "Preparing target-lane outer objective/runtime bundle "
+                f"(method={outer_contract.method}, maxiter={MAXITER})..."
+            )
+        jax_compile_diagnostics_recorder = None
+        if CONSTRAINT_METHOD != "alm":
+            target_lane_trial_boozer_overrides = {
+                "bfgs_tol": target_lane_boozer_bfgs_tol_record,
+                "bfgs_maxiter": target_lane_boozer_bfgs_maxiter_record,
+                "newton_tol": target_lane_boozer_newton_tol_record,
+                "newton_maxiter": target_lane_boozer_newton_maxiter_record,
+            }
+            target_lane_trial_boozer_override_active = any(
+                value is not None
+                for value in target_lane_trial_boozer_overrides.values()
+            )
+            with maybe_record_jax_compile_diagnostics(
+                bool(args.record_jax_compile_diagnostics and use_target_lane)
+            ) as jax_compile_diagnostics_recorder, temporary_boozer_surface_option_overrides(
+                boozer_surface,
+                **target_lane_trial_boozer_overrides,
+            ):
+                with maybe_trace_single_stage_phase(
+                    "single_stage.target_lane_bundle_setup",
+                    enabled=jax_profile_enabled and use_target_lane,
                 ):
-                    raise RuntimeError(
-                        "--diagnose-target-lane-scaled-phase1 requires an active "
-                        "scaled initial phase: set --initial-step-maxiter >= 1 "
-                        "and --initial-step-scale < 1."
-                    )
-                accepted_step_callback = resolve_target_lane_accepted_step_callback(
-                    adapter,
-                    use_target_lane=use_target_lane,
-                    sync_policy=effective_target_lane_sync_policy,
-                )
-                target_lane_scaled_phase1_diagnosis = (
-                    build_target_lane_scaled_phase1_diagnosis(
+                    (
+                        target_scalar_objective,
+                        target_value_and_grad_objective,
+                        target_lane_profile,
+                        target_lane_success_filter,
+                    ) = prepare_target_lane_outer_objectives(
                         boozer_surface,
                         bs,
                         banana_curve,
                         VV,
                         iota_target,
-                        anchor_dofs=dofs,
-                        contract=outer_contract,
-                        phase1_maxiter=min(MAXITER, effective_initial_step_maxiter),
-                        step_scale=effective_initial_step_scale,
-                        ftol=ftol,
-                        gtol=gtol,
-                        maxcor=args.maxcor,
-                        outer_maxls=args.outer_maxls,
-                        callback=accepted_step_callback,
-                        success_filter=target_lane_success_filter,
+                        use_target_lane=use_target_lane,
+                        use_value_and_grad=use_target_lane_vg,
+                        profile_target_lane=args.profile_target_lane,
+                        profile_batch_size=args.profile_target_lane_batch_size,
+                        disable_success_filter=args.disable_target_lane_success_filter,
                         non_qs_weight=1.0,
                         residual_weight=RES_WEIGHT,
-    def _sync_target_lane_accepted_step_summary(self, x, *, update_run_state):
-        """Run the pure target-lane accepted-step sync with optional state commit."""
-        accepted_step_summary = self.accepted_step_state_sync(
-            self.run_dict,
-            x,
-            benchmark_mode=self.benchmark_mode,
-            update_run_state=update_run_state,
-        )
-        if update_run_state:
-            self.run_dict["x_prev"] = _single_stage_optimizer_dofs_array(x).copy()
-        return accepted_step_summary
-
-    def _log_target_lane_accepted_step(self, accepted_step_summary):
-        """Write the accepted-step summary when host-side logging is enabled."""
-        if self.benchmark_mode:
-            return
-        log_single_stage_target_lane_accepted_step(
-            self.run_dict,
-            accepted_step_summary,
-            self.log_path,
-        )
-
-    def sync_accepted_step_state(self, x):
-        """Refresh the accepted step without emitting per-accept logging."""
-        if self.accepted_step_state_sync is None:
-            self.sync_accepted_step(x)
-            return
-        self._sync_target_lane_accepted_step_summary(x, update_run_state=True)
-
-    def observe_accepted_step(self, x):
-        """Emit target-lane accepted-step observability without state mutation."""
-        if self.accepted_step_state_sync is None:
-            self.sync_accepted_step(x)
-            return
-        accepted_step_summary = self._sync_target_lane_accepted_step_summary(
-            x,
-            update_run_state=False,
-        )
-        self._log_target_lane_accepted_step(accepted_step_summary)
-
                         iota_weight=IOTAS_WEIGHT,
                         length_weight=LENGTH_WEIGHT,
                         length_target=length_target,
@@ -7233,134 +8677,259 @@ if __name__ == "__main__":
                         surf_dist_weight=SURF_DIST_WEIGHT,
                         curvature_threshold=CURVATURE_THRESHOLD,
                         curvature_weight=CURVATURE_WEIGHT,
-                        checkpoint_path=os.path.join(
-                            OUT_DIR_ITER,
-                            "target_lane_scaled_phase1_diagnosis.json",
-                        ),
                     )
-                )
-                outer_optimizer_end_s = _perf_counter_s()
-                _record_timing(
-                    timings,
-                    "target_lane_scaled_phase1_diagnosis_s",
-                    outer_optimizer_start_s,
-                    outer_optimizer_end_s,
-                )
-                phase1_iterations = target_lane_scaled_phase1_diagnosis["optimizer"][
-                    "iterations"
-                ]
-                if accepted_step_callback is not None and phase1_iterations > 0:
-                    target_lane_restore_start_s = _perf_counter_s()
-                    with maybe_trace_single_stage_phase(
-                        "single_stage.target_lane_scaled_phase1_restore",
-                        enabled=jax_profile_enabled,
-                    ):
-                        adapter.sync_accepted_step(dofs)
+                if use_target_lane:
+                    adapter.accepted_step_state_sync = (
+                        build_single_stage_target_lane_accepted_step_sync(
+                            boozer_surface,
+                            bs,
+                            iota_target,
+                            outer_objective_config=(
+                                build_target_lane_outer_objective_config(
+                                    boozer_surface,
+                                    bs,
+                                    banana_curve,
+                                    VV,
+                                    non_qs_weight=1.0,
+                                    residual_weight=RES_WEIGHT,
+                                    iota_weight=IOTAS_WEIGHT,
+                                    length_weight=LENGTH_WEIGHT,
+                                    length_target=length_target,
+                                    curve_curve_threshold=CC_DIST,
+                                    curve_curve_weight=CC_WEIGHT,
+                                    curve_surface_threshold=CS_DIST,
+                                    curve_surface_weight=CS_WEIGHT,
+                                    surface_vessel_threshold=SS_DIST,
+                                    surface_vessel_weight=SURF_DIST_WEIGHT,
+                                    curvature_threshold=CURVATURE_THRESHOLD,
+                                    curvature_weight=CURVATURE_WEIGHT,
+                                )
+                            ),
+                            success_filter=target_lane_success_filter,
+                        )
+                    )
+                if use_target_lane:
                     _record_timing(
                         timings,
-                        "target_lane_scaled_phase1_restore_s",
-                        target_lane_restore_start_s,
+                        "target_lane_bundle_setup_s",
+                        outer_optimizer_start_s,
                         _perf_counter_s(),
                     )
-                phase1_termination_message = target_lane_scaled_phase1_diagnosis[
-                    "optimizer"
-                ]["message"]
-                phase1_success = target_lane_scaled_phase1_diagnosis["optimizer"][
-                    "success"
-                ]
-                res_nit = phase1_iterations
-                optimizer_success = bool(
-                    target_lane_scaled_phase1_diagnosis["all_finite"]
-                )
-                termination_message = "diagnose_target_lane_scaled_phase1"
-                final_volume = initial_volume
-                final_iota = initial_iota
-                final_max_curvature = initial_max_curvature
-                fieldError = initial_field_error
-                first_nonfinite_stage = target_lane_scaled_phase1_diagnosis[
-                    "first_nonfinite_stage"
-                ]
-                if first_nonfinite_stage is None:
-                    print(
-                        "Skipping the normal single-stage optimizer because "
-                        "--diagnose-target-lane-scaled-phase1 was provided; "
-                        "all recorded scaled phase-1 states stayed finite."
+                    outer_optimizer_run_start_s = _perf_counter_s()
+                    print("Target-lane outer objective/runtime bundle ready.")
+                if args.diagnose_target_lane_scaled_phase1:
+                    if not use_target_lane:
+                        raise RuntimeError(
+                            "--diagnose-target-lane-scaled-phase1 requires the JAX "
+                            "ondevice single-stage target lane."
+                        )
+                    if (
+                        effective_initial_step_maxiter < 1
+                        or effective_initial_step_scale >= 1.0
+                    ):
+                        raise RuntimeError(
+                            "--diagnose-target-lane-scaled-phase1 requires an active "
+                            "scaled initial phase: set --initial-step-maxiter >= 1 "
+                            "and --initial-step-scale < 1."
+                        )
+                    accepted_step_callback = resolve_target_lane_accepted_step_callback(
+                        adapter,
+                        use_target_lane=use_target_lane,
+                        sync_policy=effective_target_lane_sync_policy,
                     )
-                else:
-                    print(
-                        "Skipping the normal single-stage optimizer because "
-                        "--diagnose-target-lane-scaled-phase1 was provided; "
-                        f"first non-finite stage is {first_nonfinite_stage}."
+                    target_lane_scaled_phase1_diagnosis = (
+                        build_target_lane_scaled_phase1_diagnosis(
+                            boozer_surface,
+                            bs,
+                            banana_curve,
+                            VV,
+                            iota_target,
+                            anchor_dofs=dofs,
+                            contract=outer_contract,
+                            phase1_maxiter=min(MAXITER, effective_initial_step_maxiter),
+                            step_scale=effective_initial_step_scale,
+                            ftol=ftol,
+                            gtol=gtol,
+                            maxcor=args.maxcor,
+                            outer_maxls=args.outer_maxls,
+                            callback=accepted_step_callback,
+                            success_filter=target_lane_success_filter,
+                            non_qs_weight=1.0,
+                            residual_weight=RES_WEIGHT,
+                            iota_weight=IOTAS_WEIGHT,
+                            length_weight=LENGTH_WEIGHT,
+                            length_target=length_target,
+                            cc_dist=CC_DIST,
+                            cc_weight=CC_WEIGHT,
+                            cs_dist=CS_DIST,
+                            cs_weight=CS_WEIGHT,
+                            ss_dist=SS_DIST,
+                            surf_dist_weight=SURF_DIST_WEIGHT,
+                            curvature_threshold=CURVATURE_THRESHOLD,
+                            curvature_weight=CURVATURE_WEIGHT,
+                            checkpoint_path=os.path.join(
+                                OUT_DIR_ITER,
+                                "target_lane_scaled_phase1_diagnosis.json",
+                            ),
+                        )
                     )
-                res = types.SimpleNamespace(
-                    x=np.asarray(
-                        target_lane_scaled_phase1_diagnosis[
-                            "optimizer_mapped_state"
-                        ]["mapped_coil_dofs"],
-                        dtype=np.float64,
-                    ),
-                    nit=phase1_iterations,
-                    success=phase1_success,
-                    message=phase1_termination_message,
-                    status=target_lane_scaled_phase1_diagnosis["optimizer"]["status"],
-                    nfev=target_lane_scaled_phase1_diagnosis["optimizer"]["nfev"],
-                    njev=target_lane_scaled_phase1_diagnosis["optimizer"]["njev"],
-                    ls_status=target_lane_scaled_phase1_diagnosis["optimizer"][
-                        "ls_status"
-                    ],
-                )
-            elif args.diagnose_target_lane_gradient:
-                if not use_target_lane:
-                    raise RuntimeError(
-                        "--diagnose-target-lane-gradient requires the JAX "
-                        "ondevice single-stage target lane."
+                    outer_optimizer_end_s = _perf_counter_s()
+                    _record_timing(
+                        timings,
+                        "target_lane_scaled_phase1_diagnosis_s",
+                        outer_optimizer_start_s,
+                        outer_optimizer_end_s,
                     )
-                target_lane_gradient_diagnosis = build_target_lane_gradient_diagnosis(
-                    boozer_surface,
-                    bs,
-                    banana_curve,
-                    VV,
-                    iota_target,
-                    success_filter=target_lane_success_filter,
-                    non_qs_weight=1.0,
-                    residual_weight=RES_WEIGHT,
-                    iota_weight=IOTAS_WEIGHT,
-                    length_weight=LENGTH_WEIGHT,
-                    length_target=length_target,
-                    cc_dist=CC_DIST,
-                    cc_weight=CC_WEIGHT,
-                    cs_dist=CS_DIST,
-                    cs_weight=CS_WEIGHT,
-                    ss_dist=SS_DIST,
-                    surf_dist_weight=SURF_DIST_WEIGHT,
-                    curvature_threshold=CURVATURE_THRESHOLD,
-                    curvature_weight=CURVATURE_WEIGHT,
-                )
-                outer_optimizer_end_s = _perf_counter_s()
-                _record_timing(
-                    timings,
-                    "target_lane_gradient_diagnosis_s",
-                    outer_optimizer_start_s,
-                    outer_optimizer_end_s,
-                )
-                total_diag = target_lane_gradient_diagnosis["total"]
-                res_nit = 0
-                optimizer_success = bool(
-                    total_diag["value"]["finite"] and total_diag["grad"]["all_finite"]
-                )
-                termination_message = "diagnose_target_lane_gradient"
-                final_volume = initial_volume
-                final_iota = initial_iota
-                final_max_curvature = initial_max_curvature
-                fieldError = initial_field_error
-                first_nonfinite_term = target_lane_gradient_diagnosis[
-                    "first_nonfinite_term"
-                ]
-                if first_nonfinite_term is None:
+                    phase1_iterations = target_lane_scaled_phase1_diagnosis[
+                        "optimizer"
+                    ]["iterations"]
+                    if accepted_step_callback is not None and phase1_iterations > 0:
+                        target_lane_restore_start_s = _perf_counter_s()
+                        with maybe_trace_single_stage_phase(
+                            "single_stage.target_lane_scaled_phase1_restore",
+                            enabled=jax_profile_enabled,
+                        ):
+                            adapter.sync_accepted_step(dofs)
+                        _record_timing(
+                            timings,
+                            "target_lane_scaled_phase1_restore_s",
+                            target_lane_restore_start_s,
+                            _perf_counter_s(),
+                        )
+                    phase1_termination_message = target_lane_scaled_phase1_diagnosis[
+                        "optimizer"
+                    ]["message"]
+                    phase1_success = target_lane_scaled_phase1_diagnosis["optimizer"][
+                        "success"
+                    ]
+                    res_nit = phase1_iterations
+                    optimizer_success = bool(
+                        target_lane_scaled_phase1_diagnosis["all_finite"]
+                    )
+                    termination_message = "diagnose_target_lane_scaled_phase1"
+                    final_volume = initial_volume
+                    final_iota = initial_iota
+                    final_max_curvature = initial_max_curvature
+                    fieldError = initial_field_error
+                    first_nonfinite_stage = target_lane_scaled_phase1_diagnosis[
+                        "first_nonfinite_stage"
+                    ]
+                    if first_nonfinite_stage is None:
+                        print(
+                            "Skipping the normal single-stage optimizer because "
+                            "--diagnose-target-lane-scaled-phase1 was provided; "
+                            "all recorded scaled phase-1 states stayed finite."
+                        )
+                    else:
+                        print(
+                            "Skipping the normal single-stage optimizer because "
+                            "--diagnose-target-lane-scaled-phase1 was provided; "
+                            f"first non-finite stage is {first_nonfinite_stage}."
+                        )
+                    res = types.SimpleNamespace(
+                        x=np.asarray(
+                            target_lane_scaled_phase1_diagnosis[
+                                "optimizer_mapped_state"
+                            ]["mapped_coil_dofs"],
+                            dtype=np.float64,
+                        ),
+                        nit=phase1_iterations,
+                        success=phase1_success,
+                        message=phase1_termination_message,
+                        status=target_lane_scaled_phase1_diagnosis["optimizer"][
+                            "status"
+                        ],
+                        nfev=target_lane_scaled_phase1_diagnosis["optimizer"]["nfev"],
+                        njev=target_lane_scaled_phase1_diagnosis["optimizer"]["njev"],
+                        ls_status=target_lane_scaled_phase1_diagnosis["optimizer"][
+                            "ls_status"
+                        ],
+                    )
+                elif args.diagnose_target_lane_gradient:
+                    if not use_target_lane:
+                        raise RuntimeError(
+                            "--diagnose-target-lane-gradient requires the JAX "
+                            "ondevice single-stage target lane."
+                        )
+                    target_lane_gradient_diagnosis = (
+                        build_target_lane_gradient_diagnosis(
+                            boozer_surface,
+                            bs,
+                            banana_curve,
+                            VV,
+                            iota_target,
+                            success_filter=target_lane_success_filter,
+                            non_qs_weight=1.0,
+                            residual_weight=RES_WEIGHT,
+                            iota_weight=IOTAS_WEIGHT,
+                            length_weight=LENGTH_WEIGHT,
+                            length_target=length_target,
+                            cc_dist=CC_DIST,
+                            cc_weight=CC_WEIGHT,
+                            cs_dist=CS_DIST,
+                            cs_weight=CS_WEIGHT,
+                            ss_dist=SS_DIST,
+                            surf_dist_weight=SURF_DIST_WEIGHT,
+                            curvature_threshold=CURVATURE_THRESHOLD,
+                            curvature_weight=CURVATURE_WEIGHT,
+                        )
+                    )
+                    outer_optimizer_end_s = _perf_counter_s()
+                    _record_timing(
+                        timings,
+                        "target_lane_gradient_diagnosis_s",
+                        outer_optimizer_start_s,
+                        outer_optimizer_end_s,
+                    )
+                    total_diag = target_lane_gradient_diagnosis["total"]
+                    res_nit = 0
+                    optimizer_success = bool(
+                        total_diag["value"]["finite"]
+                        and total_diag["grad"]["all_finite"]
+                    )
+                    termination_message = "diagnose_target_lane_gradient"
+                    final_volume = initial_volume
+                    final_iota = initial_iota
+                    final_max_curvature = initial_max_curvature
+                    fieldError = initial_field_error
+                    first_nonfinite_term = target_lane_gradient_diagnosis[
+                        "first_nonfinite_term"
+                    ]
+                    if first_nonfinite_term is None:
+                        print(
+                            "Skipping single-stage optimizer because "
+                            "--diagnose-target-lane-gradient was provided; "
+                            "baseline target-lane value/gradient are finite."
+                        )
+                    else:
+                        print(
+                            "Skipping single-stage optimizer because "
+                            "--diagnose-target-lane-gradient was provided; "
+                            f"first non-finite term is {first_nonfinite_term}."
+                        )
+                elif args.profile_target_lane_only:
+                    if not use_target_lane:
+                        raise RuntimeError(
+                            "--profile-target-lane-only requires the JAX ondevice "
+                            "single-stage target lane."
+                        )
+                    outer_optimizer_end_s = _perf_counter_s()
+                    _record_timing(
+                        timings,
+                        "target_lane_profile_only_s",
+                        outer_optimizer_start_s,
+                        outer_optimizer_end_s,
+                    )
+                    res_nit = 0
+                    optimizer_success = True
+                    termination_message = "profile_target_lane_only"
+                    final_volume = initial_volume
+                    final_iota = initial_iota
+                    final_max_curvature = initial_max_curvature
+                    fieldError = initial_field_error
                     print(
                         "Skipping single-stage optimizer because "
-                        "--diagnose-target-lane-gradient was provided; "
-                        "baseline target-lane value/gradient are finite."
+                        "--profile-target-lane-only was provided."
                     )
                 else:
                     accepted_step_callback = resolve_target_lane_accepted_step_callback(
@@ -7381,48 +8950,47 @@ if __name__ == "__main__":
                         resolve_target_lane_post_run_state_sync(
                             adapter,
                             use_target_lane=use_target_lane,
+                            accepted_step_callback=accepted_step_callback,
                         )
-                        if use_target_lane:
-                            phase1_dofs = build_target_lane_scaled_outer_phase_state(
+                    )
+                    phase1_dofs = dofs
+                    phase1_base_fun = (
+                        target_value_and_grad_objective if use_target_lane else adapter
+                    )
+                    phase1_base_scalar_fun = (
+                        target_scalar_objective if use_target_lane else None
+                    )
+                    phase1_fun = phase1_base_fun
+                    phase1_scalar_fun = phase1_base_scalar_fun
+                    phase1_callback = accepted_step_callback
+                    phase1_retry_callback = phase1_callback
+                    phase1_post_run_state_sync = None
+                    phase1_final_dofs = None
+                    remaining_maxiter = MAXITER
+                    if (
+                        effective_initial_step_maxiter > 0
+                        and effective_initial_step_scale < 1.0
+                    ):
+                        phase1_maxiter = min(MAXITER, effective_initial_step_maxiter)
+                        if phase1_maxiter > 0:
+                            phase1_anchor_dofs = dofs
+                            phase1_dofs = build_scaled_outer_phase_initial_dofs(
                                 phase1_anchor_dofs,
-                                phase1_dofs,
+                                use_target_lane=use_target_lane,
                             )
-                        if use_target_lane:
-                            if phase1_fun is not None:
-                                phase1_fun, phase1_callback = build_scaled_outer_problem(
-                                    phase1_base_fun,
-                                    accepted_step_callback,
-                                    phase1_anchor_dofs,
-                                    effective_initial_step_scale,
-                                    anchor_in_state=True,
-                                )
-                                phase1_scalar_fun = None
-                            else:
-                                (
-                                    phase1_scalar_fun,
-                                    phase1_callback,
-                                ) = build_scaled_outer_scalar_problem(
-                                    phase1_base_scalar_fun,
-                                    accepted_step_callback,
-                                    phase1_anchor_dofs,
-                                    effective_initial_step_scale,
-                                    anchor_in_state=True,
-                                )
-                            phase1_retry_callback = phase1_callback
-                            if phase1_retry_callback is None:
-                                if phase1_base_fun is not None:
-                                    _, phase1_retry_callback = build_scaled_outer_problem(
-                                        phase1_base_fun,
-                                        retry_step_callback,
+                            if use_target_lane:
+                                phase1_dofs = (
+                                    build_target_lane_scaled_outer_phase_state(
                                         phase1_anchor_dofs,
-                                        effective_initial_step_scale,
-                                        anchor_in_state=True,
+                                        phase1_dofs,
                                     )
-                                else:
-                                    _, phase1_retry_callback = (
-                                        build_scaled_outer_scalar_problem(
-                                            phase1_base_scalar_fun,
-                                            retry_step_callback,
+                                )
+                            if use_target_lane:
+                                if phase1_fun is not None:
+                                    phase1_fun, phase1_callback = (
+                                        build_scaled_outer_problem(
+                                            phase1_base_fun,
+                                            accepted_step_callback,
                                             phase1_anchor_dofs,
                                             effective_initial_step_scale,
                                             anchor_in_state=True,
@@ -7576,28 +9144,63 @@ if __name__ == "__main__":
                             print(phase1_res.message)
                             phase1_final_dofs = resolve_scaled_outer_phase_final_dofs(
                                 phase1_anchor_dofs,
+                                phase1_res.x,
                                 effective_initial_step_scale,
+                                use_target_lane=use_target_lane,
                             )
+                            if (
+                                target_lane_phase1_state_sync is not None
+                                and phase1_iterations > 0
+                            ):
+                                target_lane_phase1_sync_start_s = _perf_counter_s()
+                                with maybe_trace_single_stage_phase(
+                                    "single_stage.target_lane_initial_phase_sync",
+                                    enabled=jax_profile_enabled,
+                                ):
+                                    target_lane_phase1_state_sync(phase1_res.x)
+                                _record_timing(
+                                    timings,
+                                    "target_lane_initial_phase_sync_s",
+                                    target_lane_phase1_sync_start_s,
+                                    _perf_counter_s(),
+                                )
+                            if phase1_iterations > 0:
+                                dofs = phase1_final_dofs
+                                run_dict["x_prev"] = _single_stage_optimizer_dofs_array(
+                                    dofs
+                                ).copy()
+                            remaining_maxiter = max(MAXITER - phase1_iterations, 0)
+                    run_main_optimizer = (
+                        remaining_maxiter > 0 or phase1_termination_message is None
+                    )
+                    if use_target_lane and run_main_optimizer:
                         print(
-                            "Starting scaled initial outer phase "
-                            f"(step_scale={effective_initial_step_scale}, "
-                            f"maxiter={phase1_maxiter})..."
+                            "Starting target-lane outer optimizer "
+                            f"(sync={effective_target_lane_sync_policy}, "
+                            f"outer_maxls={args.outer_maxls}, "
+                            f"initial_step_size={args.target_lane_outer_initial_step_size}, "
+                            f"boozer_bfgs_tol={target_lane_boozer_bfgs_tol_record}, "
+                            f"boozer_bfgs_maxiter={target_lane_boozer_bfgs_maxiter_record}, "
+                            f"boozer_newton_tol={target_lane_boozer_newton_tol_record}, "
+                            f"boozer_newton_maxiter={target_lane_boozer_newton_maxiter_record}, "
+                            f"remaining_maxiter={remaining_maxiter})..."
                         )
-                        phase1_failure_callback = (
+                    if run_main_optimizer:
+                        main_failure_callback = (
                             resolve_target_lane_invalid_state_failure_callback(
                                 target_lane_invalid_state_events,
-                                phase="phase1",
+                                phase="phase2",
                                 use_target_lane=use_target_lane,
                                 args=args,
                             )
                         )
-                        phase1_start_s = _perf_counter_s()
+                        main_optimizer_start_s = _perf_counter_s()
                         with maybe_trace_single_stage_phase(
-                            "single_stage.outer_optimizer_initial_phase",
+                            "single_stage.outer_optimizer",
                             enabled=jax_profile_enabled,
                         ):
                             if use_target_lane:
-                                phase1_res, phase1_retry_summary = (
+                                res, target_lane_retry_summary = (
                                     run_single_stage_target_lane_optimizer_with_retries(
                                         target_value_and_grad_objective,
                                         dofs,
@@ -7605,94 +9208,68 @@ if __name__ == "__main__":
                                         retry_callback=retry_step_callback,
                                         result_state_sync=target_lane_post_run_state_sync,
                                         contract=outer_contract,
-                                        maxiter=phase1_maxiter,
+                                        maxiter=remaining_maxiter,
                                         ftol=ftol,
                                         gtol=gtol,
                                         maxcor=args.maxcor,
                                         outer_maxls=args.outer_maxls,
-                                        scalar_fun=phase1_scalar_fun,
-                                        target_lane_initial_step_size=None,
-                                        failure_callback=phase1_failure_callback,
-                                        invalid_state_events=(
-                                            target_lane_invalid_state_events
+                                        scalar_fun=target_scalar_objective,
+                                        target_lane_initial_step_size=(
+                                            args.target_lane_outer_initial_step_size
                                         ),
+                                        failure_callback=main_failure_callback,
+                                        invalid_state_events=target_lane_invalid_state_events,
                                         run_dict=run_dict,
-                                        single_stage_search_policy=(
-                                            single_stage_search_policy
-                                        ),
-                                        retry_dofs_factory=(
-                                            lambda anchor_state: (
-                                                build_single_stage_scaled_phase_retry_state(
-                                                    host_array(
-                                                        anchor_state["coil_dofs"],
-                                                        dtype=np.float64,
-                                                    )
-                                                )
-                                            )
-                                        ),
-                                        restored_result_x_factory=(
-                                            lambda anchor_state: (
-                                                build_single_stage_scaled_phase_retry_state(
-                                                    host_array(
-                                                        anchor_state["coil_dofs"],
-                                                        dtype=np.float64,
-                                                    )
-                                                )
-                                            )
-                                        ),
+                                        single_stage_search_policy=single_stage_search_policy,
                                     )
                                 )
                             else:
-                                phase1_res = run_single_stage_optimizer(
-                                    phase1_fun,
-                                    phase1_dofs,
-                                    callback=phase1_callback,
+                                res = run_single_stage_optimizer(
+                                    adapter,
+                                    dofs,
+                                    callback=accepted_step_callback,
                                     contract=outer_contract,
-                                    maxiter=phase1_maxiter,
+                                    maxiter=remaining_maxiter,
                                     ftol=ftol,
                                     gtol=gtol,
                                     maxcor=args.maxcor,
                                     outer_maxls=args.outer_maxls,
-                                    scalar_fun=phase1_scalar_fun,
-                                    failure_callback=phase1_failure_callback,
+                                    scalar_fun=target_scalar_objective,
+                                    target_lane_initial_step_size=None,
+                                    failure_callback=main_failure_callback,
                                 )
                         _record_timing(
                             timings,
-                            "outer_optimizer_initial_phase_s",
-                            phase1_start_s,
+                            "outer_optimizer_main_s",
+                            main_optimizer_start_s,
                             _perf_counter_s(),
                         )
-                        phase1_iterations = int(phase1_res.nit)
-                        phase1_termination_message = str(phase1_res.message)
-                        if phase1_retry_summary["attempt_count"] > 0:
-                            phase1_termination_message = (
-                                f"{phase1_termination_message}; "
-                                f"retry_attempts={phase1_retry_summary['attempt_count']}"
+                        termination_message = str(res.message)
+                        if target_lane_retry_summary["attempt_count"] > 0:
+                            termination_message = (
+                                f"{termination_message}; "
+                                f"retry_attempts={target_lane_retry_summary['attempt_count']}"
                             )
-                        phase1_success = bool(phase1_res.success)
-                        print(phase1_res.message)
-                        phase1_final_dofs = resolve_scaled_outer_phase_final_dofs(
-                            phase1_anchor_dofs,
-                            phase1_res.x,
-                            effective_initial_step_scale,
-                            use_target_lane=use_target_lane,
-                        )
+                        optimizer_success = bool(res.success)
+                        main_phase_iterations = int(res.nit)
+                        res_nit = (phase1_iterations or 0) + int(res.nit)
+                        print(res.message)
                         if (
                             use_target_lane
                             and args.benchmark_mode
                             and target_lane_post_run_state_sync is not None
                             and int(res.nit) > 0
                         ):
-                            target_lane_phase1_sync_start_s = _perf_counter_s()
+                            target_lane_sync_start_s = _perf_counter_s()
                             with maybe_trace_single_stage_phase(
-                                "single_stage.target_lane_initial_phase_sync",
+                                "single_stage.target_lane_final_sync",
                                 enabled=jax_profile_enabled,
                             ):
                                 target_lane_post_run_state_sync(res.x)
                             _record_timing(
                                 timings,
-                                "target_lane_initial_phase_sync_s",
-                                target_lane_phase1_sync_start_s,
+                                "target_lane_final_sync_s",
+                                target_lane_sync_start_s,
                                 _perf_counter_s(),
                             )
                         if phase1_termination_message is not None:
@@ -7700,59 +9277,22 @@ if __name__ == "__main__":
                                 f"phase1={phase1_termination_message}; "
                                 f"phase2={termination_message}"
                             )
+                    else:
+                        res = phase1_res
+                        if phase1_final_dofs is not None:
+                            res.x = phase1_final_dofs
+                        res_nit = phase1_iterations or 0
+                        termination_message = (
+                            phase1_termination_message or "phase1_only"
+                        )
+                        optimizer_success = bool(phase1_success)
+                    outer_optimizer_end_s = _perf_counter_s()
                     _record_timing(
                         timings,
-                        "outer_optimizer_main_s",
-                        main_optimizer_start_s,
-                        _perf_counter_s(),
+                        "outer_optimizer_s",
+                        outer_optimizer_run_start_s,
+                        outer_optimizer_end_s,
                     )
-                    termination_message = str(res.message)
-                    if target_lane_retry_summary["attempt_count"] > 0:
-                        termination_message = (
-                            f"{termination_message}; "
-                            f"retry_attempts={target_lane_retry_summary['attempt_count']}"
-                        )
-                    optimizer_success = bool(res.success)
-                    main_phase_iterations = int(res.nit)
-                    res_nit = (phase1_iterations or 0) + int(res.nit)
-                    print(res.message)
-                    if (
-                        use_target_lane
-                        and args.benchmark_mode
-                        and accepted_step_callback is None
-                        and int(res.nit) > 0
-                    ):
-                        target_lane_sync_start_s = _perf_counter_s()
-                        with maybe_trace_single_stage_phase(
-                            "single_stage.target_lane_final_sync",
-                            enabled=jax_profile_enabled,
-                        ):
-                            adapter.sync_accepted_step(res.x)
-                        _record_timing(
-                            timings,
-                            "target_lane_final_sync_s",
-                            target_lane_sync_start_s,
-                            _perf_counter_s(),
-                        )
-                    if phase1_termination_message is not None:
-                        termination_message = (
-                            f"phase1={phase1_termination_message}; "
-                            f"phase2={termination_message}"
-                        )
-                else:
-                    res = phase1_res
-                    if phase1_final_dofs is not None:
-                        res.x = phase1_final_dofs
-                    res_nit = phase1_iterations or 0
-                    termination_message = phase1_termination_message or "phase1_only"
-                    optimizer_success = bool(phase1_success)
-                outer_optimizer_end_s = _perf_counter_s()
-                _record_timing(
-                    timings,
-                    "outer_optimizer_s",
-                    outer_optimizer_run_start_s,
-                    outer_optimizer_end_s,
-                )
         if jax_compile_diagnostics_recorder is not None:
             jax_compile_diagnostics = jax_compile_diagnostics_recorder.summary()
 
@@ -7774,7 +9314,7 @@ if __name__ == "__main__":
                 target_lane_sync_start_s,
                 _perf_counter_s(),
             )
-        if not skip_outer_optimizer:
+        if not skip_outer_optimizer and not optimized_artifacts_already_materialized:
             # Optimization now keeps accepted state in ``run_dict`` on the
             # target lane. Host-only diagnostics and artifact emission get one
             # explicit handoff here instead of reading the live surface during
@@ -7790,7 +9330,7 @@ if __name__ == "__main__":
         # ==============================================================================
         # SAVE OPTIMIZED STATE
         # ==============================================================================
-        if not skip_outer_optimizer:
+        if not skip_outer_optimizer and not optimized_artifacts_already_materialized:
             final_artifacts_start_s = _perf_counter_s()
             if write_restart_artifacts:
                 bs_diag.save(OUT_DIR_ITER + "/biot_savart_opt.json")
@@ -7856,24 +9396,26 @@ if __name__ == "__main__":
 
     final_target_lane_outer_objective_config = None
     if use_target_lane and not skip_outer_optimizer:
-        final_target_lane_outer_objective_config = build_target_lane_outer_objective_config(
-            boozer_surface,
-            bs,
-            banana_curve,
-            VV,
-            non_qs_weight=1.0,
-            residual_weight=RES_WEIGHT,
-            iota_weight=IOTAS_WEIGHT,
-            length_weight=LENGTH_WEIGHT,
-            length_target=length_target,
-            curve_curve_threshold=CC_DIST,
-            curve_curve_weight=CC_WEIGHT,
-            curve_surface_threshold=CS_DIST,
-            curve_surface_weight=CS_WEIGHT,
-            surface_vessel_threshold=SS_DIST,
-            surface_vessel_weight=SURF_DIST_WEIGHT,
-            curvature_threshold=CURVATURE_THRESHOLD,
-            curvature_weight=CURVATURE_WEIGHT,
+        final_target_lane_outer_objective_config = (
+            build_target_lane_outer_objective_config(
+                boozer_surface,
+                bs,
+                banana_curve,
+                VV,
+                non_qs_weight=1.0,
+                residual_weight=RES_WEIGHT,
+                iota_weight=IOTAS_WEIGHT,
+                length_weight=LENGTH_WEIGHT,
+                length_target=length_target,
+                curve_curve_threshold=CC_DIST,
+                curve_curve_weight=CC_WEIGHT,
+                curve_surface_threshold=CS_DIST,
+                curve_surface_weight=CS_WEIGHT,
+                surface_vessel_threshold=SS_DIST,
+                surface_vessel_weight=SURF_DIST_WEIGHT,
+                curvature_threshold=CURVATURE_THRESHOLD,
+                curvature_weight=CURVATURE_WEIGHT,
+            )
         )
     final_penalty_metrics = resolve_single_stage_final_penalty_metrics(
         use_target_lane=use_target_lane,
@@ -7913,16 +9455,55 @@ if __name__ == "__main__":
     ]
     final_coil_length = float(final_penalty_metrics["coil_length"])
     final_hardware_metrics_start_s = _perf_counter_s()
+    final_artifact_hardware_snapshot = None
     with maybe_trace_single_stage_phase(
         "single_stage.final_hardware_metrics",
         enabled=jax_profile_enabled,
     ):
-        final_curve_curve_min_dist = final_penalty_metrics["curve_curve_min_dist"]
-        final_curve_surface_min_dist = final_penalty_metrics["curve_surface_min_dist"]
-        final_surface_vessel_min_dist = final_penalty_metrics[
-            "surface_vessel_min_dist"
-        ]
-        final_hardware_status = final_penalty_metrics["hardware_status"]
+        if args.benchmark_mode:
+            final_curve_curve_min_dist = final_penalty_metrics["curve_curve_min_dist"]
+            final_curve_surface_min_dist = final_penalty_metrics[
+                "curve_surface_min_dist"
+            ]
+            final_surface_vessel_min_dist = final_penalty_metrics[
+                "surface_vessel_min_dist"
+            ]
+            final_hardware_status = final_penalty_metrics["hardware_status"]
+        else:
+            final_artifact_hardware_snapshot = (
+                evaluate_single_stage_artifact_hardware_snapshot(
+                    curve_curve_min_dist=final_penalty_metrics["curve_curve_min_dist"],
+                    cc_dist=CC_DIST,
+                    curve_surface_min_dist=final_penalty_metrics[
+                        "curve_surface_min_dist"
+                    ],
+                    cs_dist=CS_DIST,
+                    surface_vessel_min_dist=final_penalty_metrics[
+                        "surface_vessel_min_dist"
+                    ],
+                    ss_dist=SS_DIST,
+                    max_curvature=final_penalty_metrics["max_curvature"],
+                    curvature_threshold=CURVATURE_THRESHOLD,
+                    coil_length=final_coil_length,
+                    length_target=length_target,
+                    banana_current_A=float(banana_coils[0].current.get_value()),
+                    banana_current_max_A=args.banana_current_max_A,
+                    tf_current_A=stage2_tf_current_A,
+                    tf_current_limit_A=TF_CURRENT_HARD_LIMIT_A,
+                )
+            )
+            final_curve_curve_min_dist = final_artifact_hardware_snapshot[
+                "curve_curve_min_dist"
+            ]
+            final_curve_surface_min_dist = final_artifact_hardware_snapshot[
+                "curve_surface_min_dist"
+            ]
+            final_surface_vessel_min_dist = final_artifact_hardware_snapshot[
+                "surface_vessel_min_dist"
+            ]
+            final_hardware_status = final_artifact_hardware_snapshot[
+                "artifact_hardware_status"
+            ]
         if not args.benchmark_mode:
             optimizer_success, termination_message = apply_hardware_constraint_verdict(
                 optimizer_success,
@@ -7957,6 +9538,8 @@ if __name__ == "__main__":
             s=s,
             order=order,
             CONSTRAINT_WEIGHT=CONSTRAINT_WEIGHT,
+            constraint_method=CONSTRAINT_METHOD,
+            alm_formulation=ALM_FORMULATION,
             CC_DIST=CC_DIST,
             CC_WEIGHT=CC_WEIGHT,
             CS_DIST=CS_DIST,
@@ -7968,10 +9551,13 @@ if __name__ == "__main__":
             LENGTH_WEIGHT=LENGTH_WEIGHT,
             RES_WEIGHT=RES_WEIGHT,
             IOTAS_WEIGHT=IOTAS_WEIGHT,
+            length_target=length_target,
+            banana_current_max_A=args.banana_current_max_A,
+            tf_current_limit_A=TF_CURRENT_HARD_LIMIT_A,
             optimizer_backend_record=optimizer_backend_record,
             boozer_optimizer_backend_record=boozer_optimizer_backend_record,
             boozer_least_squares_algorithm_record=boozer_least_squares_algorithm_record,
-            outer_optimizer_method=outer_contract.method,
+            outer_optimizer_method=outer_optimizer_method_record,
             target_lane_sync_record=target_lane_sync_record,
             requested_experimental_target_lane_vg=requested_experimental_target_lane_vg,
             use_target_lane_vg=use_target_lane_vg,
@@ -8010,6 +9596,8 @@ if __name__ == "__main__":
         "ntheta": ntheta,
         "boozer_stage": stage,
         "CONSTRAINT_WEIGHT": CONSTRAINT_WEIGHT,
+        "CONSTRAINT_METHOD": CONSTRAINT_METHOD,
+        "ALM_FORMULATION": ALM_FORMULATION if CONSTRAINT_METHOD == "alm" else None,
         "CC_DIST": CC_DIST,
         "CC_WEIGHT": CC_WEIGHT,
         "CS_DIST": CS_DIST,
@@ -8026,12 +9614,16 @@ if __name__ == "__main__":
         "TOROIDAL_FLUX": s,
         "banana_surf_radius": banana_surf_radius,
         "order": order,
+        "LENGTH_TARGET": float(length_target),
+        "BANANA_CURRENT_MAX_A": float(args.banana_current_max_A),
+        "STAGE2_TF_CURRENT_A": float(stage2_tf_current_A),
+        "TF_CURRENT_LIMIT_A": float(TF_CURRENT_HARD_LIMIT_A),
         "backend": args.backend,
         "optimizer_backend": optimizer_backend_record,
         "boozer_optimizer_backend": boozer_optimizer_backend_record,
         "boozer_least_squares_algorithm": boozer_least_squares_algorithm_record,
         "boozer_optimizer_method": boozer_surface.res.get("optimizer_method"),
-        "outer_optimizer_method": outer_contract.method,
+        "outer_optimizer_method": outer_optimizer_method_record,
         "target_lane_accepted_step_sync": target_lane_sync_record,
         "experimental_target_lane_value_and_grad": requested_experimental_target_lane_vg,
         "target_lane_value_and_grad": use_target_lane_vg,
@@ -8116,18 +9708,14 @@ if __name__ == "__main__":
         "FINAL_BOOZER_RESIDUAL": final_penalty_metrics["final_boozer_residual"],
         "FINAL_IOTA_PENALTY": final_penalty_metrics["final_iota_penalty"],
         "FINAL_LENGTH_PENALTY": final_penalty_metrics["final_length_penalty"],
-        "FINAL_CURVE_CURVE_PENALTY": final_penalty_metrics[
-            "final_curve_curve_penalty"
-        ],
+        "FINAL_CURVE_CURVE_PENALTY": final_penalty_metrics["final_curve_curve_penalty"],
         "FINAL_CURVE_SURFACE_PENALTY": final_penalty_metrics[
             "final_curve_surface_penalty"
         ],
         "FINAL_SURFACE_VESSEL_PENALTY": final_penalty_metrics[
             "final_surface_vessel_penalty"
         ],
-        "FINAL_CURVATURE_PENALTY": final_penalty_metrics[
-            "final_curvature_penalty"
-        ],
+        "FINAL_CURVATURE_PENALTY": final_penalty_metrics["final_curvature_penalty"],
         "FIELD_ERROR": float(fieldError),
         "SELF_INTERSECTING": final_self_intersecting,
         "SELF_INTERSECTION_CHECK_AVAILABLE": final_self_intersection_check_available,
@@ -8138,6 +9726,9 @@ if __name__ == "__main__":
         "SURFACE_VESSEL_MIN_DIST": final_surface_vessel_min_dist,
         "HARDWARE_CONSTRAINTS_OK": final_hardware_status["success"],
         "HARDWARE_CONSTRAINT_VIOLATIONS": final_hardware_status["violations"],
+        **build_hardware_constraint_artifact_payload_fields(
+            final_artifact_hardware_snapshot
+        ),
         "INITIAL_VOLUME": float(initial_volume),
         "INITIAL_IOTA": float(initial_iota),
         "INITIAL_FIELD_ERROR": float(initial_field_error),
@@ -8145,6 +9736,83 @@ if __name__ == "__main__":
         "num_tf_coils": static_config["num_tf_coils"],
         "tf_currents": static_config["tf_currents"],
     }
+    if alm_result is not None:
+        results.update(
+            {
+                "ALM_PARTIAL_STATE_FILENAME": "alm_state.partial.json",
+                "ALM_OUTER_ITERATIONS": int(alm_result.outer_iterations),
+                "ALM_FINAL_PENALTY": float(alm_result.penalty),
+                "ALM_CONSTRAINT_NAMES": list(alm_result.constraint_names),
+                "ALM_CONSTRAINT_VALUES": list(alm_result.constraint_values),
+                "ALM_SOLVER_CONSTRAINT_VALUES": list(
+                    alm_result.solver_constraint_values
+                ),
+                "ALM_MULTIPLIERS": list(alm_result.multipliers),
+                "ALM_TRUST_RADIUS": alm_result.trust_radius,
+                "ALM_TERMINATION_REASON": getattr(
+                    alm_result,
+                    "termination_reason",
+                    None,
+                ),
+                "ALM_CONVERGED": getattr(
+                    alm_result,
+                    "converged_to_tolerances",
+                    None,
+                ),
+                "ALM_CONVERGED_TO_TOLERANCES": getattr(
+                    alm_result,
+                    "converged_to_tolerances",
+                    None,
+                ),
+                "ALM_RESTORED_BEST_FEASIBLE": getattr(
+                    alm_result,
+                    "restored_best_feasible",
+                    None,
+                ),
+                "ALM_RESTORED_BEST_FEASIBLE_REASON": getattr(
+                    alm_result,
+                    "restored_best_feasible_reason",
+                    None,
+                ),
+                "ALM_INNER_OPTIMIZER_SUCCESS": getattr(
+                    alm_result,
+                    "optimizer_success",
+                    None,
+                ),
+                "ALM_INNER_OPTIMIZER_MESSAGE": getattr(
+                    alm_result,
+                    "optimizer_message",
+                    None,
+                ),
+                "ALM_FINAL_MAX_FEASIBILITY_VIOLATION": getattr(
+                    alm_result,
+                    "final_max_feasibility_violation",
+                    None,
+                ),
+                "ALM_FINAL_STATIONARITY_NORM": getattr(
+                    alm_result,
+                    "final_stationarity_norm",
+                    None,
+                ),
+                "ALM_FINAL_FEASIBILITY_TOL": getattr(
+                    alm_result,
+                    "final_feasibility_tolerance",
+                    None,
+                ),
+                "ALM_FINAL_STATIONARITY_TOL": getattr(
+                    alm_result,
+                    "final_stationarity_tolerance",
+                    None,
+                ),
+                "ALM_FINAL_MULTIPLIERS": list(alm_result.multipliers),
+                "ALM_FINAL_CONSTRAINT_VALUES": list(alm_result.constraint_values),
+                "ALM_FINAL_SOLVER_CONSTRAINT_VALUES": list(
+                    alm_result.solver_constraint_values
+                ),
+                "ALM_FINAL_TRUST_RADIUS": alm_result.trust_radius,
+                **alm_result_diagnostics_fields(alm_result),
+            }
+        )
     optimizer_diag = extract_optimizer_diagnostics(
         None if skip_outer_optimizer else res,
         ran_optimizer=not skip_outer_optimizer,
@@ -8153,9 +9821,7 @@ if __name__ == "__main__":
     initial_objective = float(run_dict["initial_objective"])
     final_objective = optimizer_diag["fun"]
     objective_decrease = (
-        None
-        if final_objective is None
-        else initial_objective - float(final_objective)
+        None if final_objective is None else initial_objective - float(final_objective)
     )
     results["OPTIMIZER_FUN"] = optimizer_diag["fun"]
     results["OPTIMIZER_FUN_FINITE"] = optimizer_diag["fun_finite"]
@@ -8233,29 +9899,3 @@ if __name__ == "__main__":
             results["TARGET_LANE_INVALID_STATE_DIAGNOSIS"],
         )
     write_json_file(os.path.join(OUT_DIR_ITER, "results.json"), results)
-                            if (
-                                target_lane_phase1_state_sync is not None
-                                and phase1_iterations > 0
-                            ):
-                                target_lane_phase1_sync_start_s = _perf_counter_s()
-                                with maybe_trace_single_stage_phase(
-                                    "single_stage.target_lane_initial_phase_sync",
-                                    enabled=jax_profile_enabled,
-                                ):
-                                    target_lane_phase1_state_sync(phase1_res.x)
-                                _record_timing(
-                                    timings,
-                                    "target_lane_initial_phase_sync_s",
-                                    target_lane_phase1_sync_start_s,
-                                    _perf_counter_s(),
-                                )
-                            if phase1_iterations > 0:
-                                dofs = phase1_final_dofs
-                                run_dict["x_prev"] = _single_stage_optimizer_dofs_array(
-                                    dofs
-                                ).copy()
-                            remaining_maxiter = max(MAXITER - phase1_iterations, 0)
-                    run_main_optimizer = (
-                        remaining_maxiter > 0 or phase1_termination_message is None
-                    )
-                    if use_target_lane and run_main_optimizer:

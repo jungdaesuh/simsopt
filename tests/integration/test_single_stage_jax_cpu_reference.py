@@ -5748,6 +5748,77 @@ class TestTraceableObjective:
         return runtime_bundle, coil_dofs
 
     @staticmethod
+    def _make_traceable_alm_runtime_bundle(
+        bs_jax,
+        booz_jax,
+        *,
+        alm_formulation="thresholded_physics",
+        success_filter=None,
+    ):
+        """Build the native single-stage ALM runtime bundle and seed inputs."""
+        iota_target, coil_dofs = TestTraceableObjective._traceable_target_inputs(
+            bs_jax,
+            booz_jax,
+        )
+
+        from simsopt.geo.surfaceobjectives_jax import (
+            make_traceable_single_stage_alm_runtime_bundle,
+        )
+
+        vessel_surface = SurfaceRZFourier(nfp=5, stellsym=True)
+        vessel_surface.set_rc(0, 0, 0.976)
+        vessel_surface.set_rc(1, 0, 0.222)
+        vessel_surface.set_zs(1, 0, 0.222)
+        banana_curve = bs_jax.coils[-1].curve
+        outer_objective_config = single_stage_example.build_target_lane_outer_objective_config(
+            booz_jax,
+            bs_jax,
+            banana_curve,
+            vessel_surface,
+            non_qs_weight=1.0,
+            residual_weight=1000.0,
+            iota_weight=100.0,
+            length_weight=1.0,
+            length_target=1.7,
+            curve_curve_threshold=0.05,
+            curve_curve_weight=100.0,
+            curve_surface_threshold=0.02,
+            curve_surface_weight=1.0,
+            surface_vessel_threshold=0.04,
+            surface_vessel_weight=1000.0,
+            curvature_threshold=40.0,
+            curvature_weight=0.1,
+        )
+        alm_config = single_stage_example.build_traceable_single_stage_alm_runtime_config(
+            constraint_names=single_stage_example.single_stage_alm_constraint_names(
+                alm_formulation=alm_formulation,
+                include_surface_surface=True,
+            ),
+            alm_formulation=alm_formulation,
+            distance_smoothing=0.005,
+            curvature_smoothing=0.05,
+            qs_threshold=3e-3,
+            boozer_threshold=1e-2,
+            iota_penalty_threshold=1e-4,
+            length_penalty_threshold=0.0,
+            banana_current_threshold=1.6e4,
+        )
+        runtime_bundle = make_traceable_single_stage_alm_runtime_bundle(
+            booz_jax,
+            bs_jax,
+            iota_target,
+            outer_objective_config=outer_objective_config,
+            alm_config=alm_config,
+            success_filter=success_filter,
+        )
+        multipliers = jnp.zeros(
+            (len(runtime_bundle["constraint_names"]),),
+            dtype=jnp.float64,
+        )
+        penalty = jnp.asarray(1.0, dtype=jnp.float64)
+        return runtime_bundle, coil_dofs, multipliers, penalty
+
+    @staticmethod
     def _assert_runtime_bundle_core_reused(runtime_bundle_a, runtime_bundle_b):
         assert runtime_bundle_a["objective"] is runtime_bundle_b["objective"]
         assert runtime_bundle_a["value_and_grad"] is runtime_bundle_b["value_and_grad"]
@@ -5860,6 +5931,95 @@ class TestTraceableObjective:
         assert np.isfinite(float(value))
         assert np.isfinite(float(value_vg))
         assert np.all(np.isfinite(np.asarray(grad)))
+
+    def test_runtime_bundle_host_wrappers_allow_host_inputs_under_strict_transfer_guard(
+        self, monkeypatch, request
+    ):
+        """Explicit host wrappers remain the supported host-boundary lane."""
+        import simsopt.config as simsopt_config
+        from simsopt.backend import invalidate_backend_cache
+
+        monkeypatch.setenv("SIMSOPT_JAX_TRANSFER_GUARD", "disallow")
+        enable_strict_jax_backend(monkeypatch, request, mode="jax_cpu_parity")
+        invalidate_backend_cache()
+        request.addfinalizer(invalidate_backend_cache)
+        simsopt_config.set_backend(
+            "jax_cpu_parity",
+            strict=True,
+            transfer_guard="disallow",
+        )
+
+        (
+            _coils,
+            _surf_cpu,
+            _surf_jax,
+            _bs_cpu,
+            bs_jax,
+            _booz_cpu,
+            booz_jax,
+            _vol_cpu,
+            iota0,
+            G0,
+        ) = _make_boozer_setup(constraint_weight=1.0, optimizer_backend="ondevice")
+
+        solve_result = booz_jax.run_code(iota0, G0)
+        assert solve_result is not None and solve_result.get("success", False)
+
+        banana_curve = bs_jax.coils[0].curve
+        length_target = single_stage_example.host_float(
+            single_stage_example.CurveLength(banana_curve).J()
+        )
+        vessel_surface = single_stage_example.SurfaceRZFourier(
+            nfp=booz_jax.nfp,
+            stellsym=booz_jax.stellsym,
+            mpol=1,
+            ntor=0,
+            quadpoints_phi=booz_jax.surface.quadpoints_phi,
+            quadpoints_theta=booz_jax.surface.quadpoints_theta,
+        )
+        vessel_surface.set_rc(0, 0, 1.2)
+        vessel_surface.set_rc(1, 0, 0.15)
+        vessel_surface.set_zs(1, 0, 0.15)
+        config = single_stage_example.build_traceable_single_stage_outer_objective_config(
+            booz_jax,
+            bs_jax,
+            banana_curve,
+            vessel_surface,
+            non_qs_weight=1.0,
+            residual_weight=1000.0,
+            iota_weight=100.0,
+            length_weight=5.0e-4,
+            length_target=length_target,
+            curve_curve_weight=100.0,
+            curve_curve_threshold=0.05,
+            curve_surface_weight=1.0,
+            curve_surface_threshold=0.02,
+            surface_vessel_weight=1000.0,
+            surface_vessel_threshold=0.04,
+            curvature_weight=0.1,
+            curvature_threshold=40.0,
+        )
+        from simsopt.jax_core._math_utils import as_jax_float64
+        from simsopt.geo.surfaceobjectives_jax import make_traceable_objective_runtime_bundle
+
+        runtime_bundle = make_traceable_objective_runtime_bundle(
+            booz_jax,
+            bs_jax,
+            as_jax_float64(booz_jax.res["iota"]),
+            include_profile_suite=False,
+            include_host_wrappers=True,
+            outer_objective_config=config,
+        )
+        host_coil_dofs = np.asarray(bs_jax.x.copy(), dtype=np.float64)
+
+        host_value = runtime_bundle["host_objective"](host_coil_dofs)
+        host_value_vg, host_grad = runtime_bundle["host_value_and_grad"](
+            host_coil_dofs
+        )
+
+        assert np.isfinite(host_value)
+        assert np.isfinite(host_value_vg)
+        assert np.all(np.isfinite(host_grad))
 
     def test_runtime_bundle_batched_value_and_grad_matches_serial(self, boozer_setup):
         """The batched seed path must agree with repeated scalar target-lane calls."""
@@ -6901,6 +7061,71 @@ class TestTraceableObjective:
         assert "pure_callback" not in str(jaxpr), (
             "Traceable objective still routes through jax.pure_callback"
         )
+
+    def test_traceable_single_stage_alm_runtime_bundle_traces_without_pure_callback(
+        self,
+        boozer_setup,
+    ):
+        """The native single-stage ALM runtime bundle must stay callback-free."""
+        (_, _, _, _, bs_jax, _, booz_jax, _) = boozer_setup
+        runtime_bundle, coil_dofs, multipliers, penalty = (
+            self._make_traceable_alm_runtime_bundle(bs_jax, booz_jax)
+        )
+
+        evaluation = runtime_bundle["evaluate"](coil_dofs, multipliers, penalty)
+        value = runtime_bundle["objective"](coil_dofs, multipliers, penalty)
+        value_vg, grad = runtime_bundle["value_and_grad"](
+            coil_dofs,
+            multipliers,
+            penalty,
+        )
+        jaxpr = jax.make_jaxpr(runtime_bundle["objective"])(
+            coil_dofs,
+            multipliers,
+            penalty,
+        )
+
+        assert np.isfinite(float(np.asarray(jax.device_get(value))))
+        assert np.isfinite(float(np.asarray(jax.device_get(value_vg))))
+        assert np.all(np.isfinite(np.asarray(jax.device_get(grad), dtype=float)))
+        assert np.asarray(jax.device_get(evaluation["constraint_values"])).shape == (
+            len(runtime_bundle["constraint_names"]),
+        )
+        assert "pure_callback" not in str(jaxpr), (
+            "Traceable single-stage ALM runtime still routes through jax.pure_callback"
+        )
+
+    def test_traceable_single_stage_alm_runtime_bundle_honors_success_filter(
+        self,
+        boozer_setup,
+    ):
+        """The native ALM runtime must preserve the compiled success-filter seam."""
+        (_, _, _, _, bs_jax, _, booz_jax, _) = boozer_setup
+
+        def reject_all_success_filter(_coil_dofs, _solved_x):
+            return jnp.array(False, dtype=jnp.bool_)
+
+        runtime_bundle, coil_dofs, multipliers, penalty = (
+            self._make_traceable_alm_runtime_bundle(
+                bs_jax,
+                booz_jax,
+                success_filter=reject_all_success_filter,
+            )
+        )
+        perturbed_coil_dofs = coil_dofs.at[0].set(jnp.nextafter(coil_dofs[0], jnp.inf))
+        evaluation = runtime_bundle["evaluate"](
+            perturbed_coil_dofs,
+            multipliers,
+            penalty,
+        )
+        value = runtime_bundle["objective"](
+            perturbed_coil_dofs,
+            multipliers,
+            penalty,
+        )
+
+        assert not bool(np.asarray(jax.device_get(evaluation["success"])))
+        assert np.isfinite(float(np.asarray(jax.device_get(value))))
 
     def test_traceable_runtime_bundle_matches_sharded_field_contract(
         self,

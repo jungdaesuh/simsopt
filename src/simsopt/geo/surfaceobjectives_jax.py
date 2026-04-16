@@ -86,6 +86,7 @@ __all__ = [
     "IotasJAX",
     "NonQuasiSymmetricRatioJAX",
     "compute_standard_surface_objective_gradients",
+    "make_traceable_single_stage_alm_runtime_bundle",
     "make_traceable_objective",
     "make_traceable_objective_runtime_bundle",
     "make_traceable_objective_value_and_grad",
@@ -423,6 +424,385 @@ def _traceable_weighted_single_stage_outer_term_values(
         else:
             weighted_terms[term_name] = _runtime_float64_scalar(0.0, reference=term_value)
     return weighted_terms
+
+
+def _traceable_smoothmin_selected(values, temperature):
+    values = _as_jax_float64(values).reshape((-1,))
+    if int(values.shape[0]) == 0:
+        return _runtime_float64_scalar(np.inf, reference=values)
+    bounded_temperature = jnp.maximum(
+        _runtime_float64_scalar(temperature, reference=values),
+        _runtime_float64_scalar(np.finfo(np.float64).eps, reference=values),
+    )
+    hard_min = jnp.min(values)
+    logits = -(values - hard_min) / bounded_temperature
+    selection_mask = values <= (
+        hard_min
+        + _runtime_float64_scalar(4.0, reference=values) * bounded_temperature
+    )
+    masked_logits = jnp.where(selection_mask, logits, -jnp.inf)
+    return hard_min - bounded_temperature * jax.nn.logsumexp(masked_logits)
+
+
+def _traceable_smoothmax_selected(values, temperature):
+    values = _as_jax_float64(values).reshape((-1,))
+    if int(values.shape[0]) == 0:
+        return _runtime_float64_scalar(-np.inf, reference=values)
+    bounded_temperature = jnp.maximum(
+        _runtime_float64_scalar(temperature, reference=values),
+        _runtime_float64_scalar(np.finfo(np.float64).eps, reference=values),
+    )
+    hard_max = jnp.max(values)
+    logits = (values - hard_max) / bounded_temperature
+    selection_mask = values >= (
+        hard_max
+        - _runtime_float64_scalar(4.0, reference=values) * bounded_temperature
+    )
+    masked_logits = jnp.where(selection_mask, logits, -jnp.inf)
+    return hard_max + bounded_temperature * jax.nn.logsumexp(masked_logits)
+
+
+def _traceable_single_stage_banana_curve_runtime_metrics(
+    coil_dofs,
+    coil_dof_extraction_spec,
+    *,
+    banana_curve_index,
+    curvature_smoothing,
+):
+    coil_specs = coil_specs_from_dof_extraction_spec(coil_dof_extraction_spec, coil_dofs)
+    banana_curve_spec = coil_specs[int(banana_curve_index)].curve
+    _gamma, banana_gammadash, banana_gammadashdash = curve_geometry_from_spec(
+        banana_curve_spec
+    )
+    coil_length = curve_length_pure(incremental_arclength_pure(banana_gammadash))
+    max_curvature = _traceable_smoothmax_selected(
+        kappa_pure(banana_gammadash, banana_gammadashdash),
+        temperature=curvature_smoothing,
+    )
+    banana_current = jnp.abs(
+        _take_runtime_scalar(coil_specs[int(banana_curve_index)].current.value, 0)
+    )
+    return coil_length, max_curvature, banana_current
+
+
+def _traceable_single_stage_coil_gammas(
+    coil_dofs,
+    coil_dof_extraction_spec,
+):
+    coil_specs = coil_specs_from_dof_extraction_spec(coil_dof_extraction_spec, coil_dofs)
+    coil_gammas = []
+    for coil_spec in coil_specs:
+        gamma, _gammadash, _gammadashdash = curve_geometry_from_spec(coil_spec.curve)
+        if coil_spec.symmetry.has_rotation:
+            gamma = gamma @ coil_spec.symmetry.rotmat
+        coil_gammas.append(gamma.reshape((-1, 3)))
+    return tuple(coil_gammas)
+
+
+def _traceable_single_stage_curve_curve_signed_constraint(
+    coil_gammas,
+    *,
+    minimum_distance,
+    distance_smoothing,
+):
+    if len(coil_gammas) < 2:
+        return _runtime_float64_scalar(minimum_distance, reference=minimum_distance)
+    hard_min = _runtime_float64_scalar(np.inf, reference=coil_gammas[0])
+    pairwise_blocks = []
+    for curve_index, gamma_i in enumerate(coil_gammas):
+        for gamma_j in coil_gammas[:curve_index]:
+            dists = jnp.linalg.norm(gamma_i[:, None, :] - gamma_j[None, :, :], axis=2)
+            pairwise_blocks.append(dists.reshape((-1,)))
+            hard_min = jnp.minimum(hard_min, jnp.min(dists))
+    smooth_min = _traceable_smoothmin_selected(
+        jnp.concatenate(pairwise_blocks),
+        temperature=distance_smoothing,
+    )
+    return _runtime_float64_scalar(minimum_distance, reference=smooth_min) - smooth_min
+
+
+def _traceable_single_stage_curve_surface_signed_constraint(
+    coil_gammas,
+    surface_gamma,
+    *,
+    minimum_distance,
+    distance_smoothing,
+):
+    if len(coil_gammas) == 0:
+        return _runtime_float64_scalar(minimum_distance, reference=surface_gamma)
+    flat_surface = surface_gamma.reshape((-1, 3))
+    hard_min = _runtime_float64_scalar(np.inf, reference=surface_gamma)
+    pairwise_blocks = []
+    for gamma in coil_gammas:
+        dists = jnp.linalg.norm(gamma[:, None, :] - flat_surface[None, :, :], axis=2)
+        pairwise_blocks.append(dists.reshape((-1,)))
+        hard_min = jnp.minimum(hard_min, jnp.min(dists))
+    smooth_min = _traceable_smoothmin_selected(
+        jnp.concatenate(pairwise_blocks),
+        temperature=distance_smoothing,
+    )
+    return _runtime_float64_scalar(minimum_distance, reference=smooth_min) - smooth_min
+
+
+def _traceable_single_stage_surface_surface_signed_constraint(
+    surface_gamma,
+    vessel_gamma,
+    *,
+    minimum_distance,
+    distance_smoothing,
+):
+    flat_surface = surface_gamma.reshape((-1, 3))
+    flat_vessel = _runtime_float64_array(vessel_gamma, reference=surface_gamma).reshape(
+        (-1, 3)
+    )
+    dists = jnp.linalg.norm(
+        flat_surface[:, None, :] - flat_vessel[None, :, :],
+        axis=2,
+    )
+    smooth_min = _traceable_smoothmin_selected(
+        dists.reshape((-1,)),
+        temperature=distance_smoothing,
+    )
+    return _runtime_float64_scalar(minimum_distance, reference=smooth_min) - smooth_min
+
+
+def _traceable_single_stage_hardware_constraint_values(
+    x_inner,
+    coil_dofs,
+    *,
+    objective_kwargs,
+    alm_config,
+):
+    outer_objective_config = objective_kwargs["outer_objective_config"]
+    if outer_objective_config is None:
+        raise RuntimeError(
+            "Traceable single-stage ALM runtime requires outer_objective_config."
+        )
+    optimize_G = bool(objective_kwargs["optimize_G"])
+    sdofs, _iota, _G = _split_x_inner_runtime(x_inner, optimize_G)
+    surface_gamma, _xphi, _xtheta = _surface_geometry_from_dofs(
+        sdofs,
+        objective_kwargs["surface_quadpoints_phi"],
+        objective_kwargs["surface_quadpoints_theta"],
+        objective_kwargs["mpol"],
+        objective_kwargs["ntor"],
+        objective_kwargs["nfp"],
+        objective_kwargs["stellsym"],
+        objective_kwargs["scatter_indices"],
+        surface_kind=objective_kwargs["surface_kind"],
+    )
+    coil_gammas = _traceable_single_stage_coil_gammas(
+        coil_dofs,
+        objective_kwargs["coil_dof_extraction_spec"],
+    )
+    coil_length, max_curvature, banana_current = (
+        _traceable_single_stage_banana_curve_runtime_metrics(
+            coil_dofs,
+            objective_kwargs["coil_dof_extraction_spec"],
+            banana_curve_index=int(outer_objective_config["banana_curve_index"]),
+            curvature_smoothing=alm_config["curvature_smoothing"],
+        )
+    )
+    return {
+        "coil_coil_spacing": _traceable_single_stage_curve_curve_signed_constraint(
+            coil_gammas,
+            minimum_distance=outer_objective_config["curve_curve_threshold"],
+            distance_smoothing=alm_config["distance_smoothing"],
+        ),
+        "coil_surface_spacing": _traceable_single_stage_curve_surface_signed_constraint(
+            coil_gammas,
+            surface_gamma.reshape((-1, 3)),
+            minimum_distance=outer_objective_config["curve_surface_threshold"],
+            distance_smoothing=alm_config["distance_smoothing"],
+        ),
+        "surface_vessel_spacing": _traceable_single_stage_surface_surface_signed_constraint(
+            surface_gamma,
+            outer_objective_config["vessel_gamma"],
+            minimum_distance=outer_objective_config["surface_vessel_threshold"],
+            distance_smoothing=alm_config["distance_smoothing"],
+        ),
+        "max_curvature": max_curvature
+        - _runtime_float64_scalar(
+            outer_objective_config["curvature_threshold"],
+            reference=max_curvature,
+        ),
+        "coil_length_upper_bound": coil_length
+        - _runtime_float64_scalar(
+            outer_objective_config["length_target"],
+            reference=coil_length,
+        ),
+        "banana_current_upper_bound": banana_current
+        - _runtime_float64_scalar(
+            alm_config["banana_current_threshold"],
+            reference=banana_current,
+        ),
+    }
+
+
+def _traceable_single_stage_alm_constraint_values(
+    raw_terms,
+    x_inner,
+    coil_dofs,
+    *,
+    objective_kwargs,
+    alm_config,
+):
+    outer_objective_config = objective_kwargs["outer_objective_config"]
+    if outer_objective_config is None:
+        raise RuntimeError(
+            "Traceable single-stage ALM runtime requires outer_objective_config."
+        )
+    hardware_constraints = _traceable_single_stage_hardware_constraint_values(
+        x_inner,
+        coil_dofs,
+        objective_kwargs=objective_kwargs,
+        alm_config=alm_config,
+    )
+    named_constraints = dict(hardware_constraints)
+    if alm_config["alm_formulation"] == "thresholded_physics":
+        named_constraints.update(
+            {
+                "qs_error": raw_terms["non_qs"]
+                - _runtime_float64_scalar(
+                    alm_config["qs_threshold"],
+                    reference=raw_terms["non_qs"],
+                ),
+                "boozer_residual": raw_terms["residual"]
+                - _runtime_float64_scalar(
+                    alm_config["boozer_threshold"],
+                    reference=raw_terms["residual"],
+                ),
+                "iota_penalty": raw_terms["iota"]
+                - _runtime_float64_scalar(
+                    alm_config["iota_penalty_threshold"],
+                    reference=raw_terms["iota"],
+                ),
+                "length_penalty": raw_terms["length"]
+                - _runtime_float64_scalar(
+                    alm_config["length_penalty_threshold"],
+                    reference=raw_terms["length"],
+                ),
+            }
+        )
+    return jnp.stack(
+        [named_constraints[constraint_name] for constraint_name in alm_config["constraint_names"]]
+    )
+
+
+def _traceable_single_stage_alm_physics_total(raw_terms, *, outer_objective_config):
+    return (
+        raw_terms["non_qs"]
+        + _runtime_float64_scalar(
+            outer_objective_config["residual_weight"],
+            reference=raw_terms["residual"],
+        )
+        * raw_terms["residual"]
+        + _runtime_float64_scalar(
+            outer_objective_config["iota_weight"],
+            reference=raw_terms["iota"],
+        )
+        * raw_terms["iota"]
+        + _runtime_float64_scalar(
+            outer_objective_config["length_weight"],
+            reference=raw_terms["length"],
+        )
+        * raw_terms["length"]
+    )
+
+
+def _traceable_single_stage_alm_base_total(
+    raw_terms,
+    *,
+    outer_objective_config,
+    alm_formulation,
+):
+    physics_total = _traceable_single_stage_alm_physics_total(
+        raw_terms,
+        outer_objective_config=outer_objective_config,
+    )
+    if alm_formulation == "weighted_sum":
+        return physics_total, physics_total
+    if alm_formulation == "thresholded_physics":
+        return _runtime_float64_scalar(0.0, reference=physics_total), physics_total
+    raise ValueError(f"Unsupported ALM formulation {alm_formulation!r}.")
+
+
+def _traceable_augmented_inequality_total(
+    base_total,
+    constraint_values,
+    multipliers,
+    penalty,
+):
+    constraint_values = _as_jax_float64(constraint_values).reshape((-1,))
+    multipliers = _runtime_float64_array(multipliers, reference=constraint_values).reshape(
+        constraint_values.shape
+    )
+    penalty_jax = _runtime_float64_scalar(penalty, reference=constraint_values)
+    positive_shift = jnp.maximum(
+        _runtime_float64_scalar(0.0, reference=constraint_values),
+        multipliers + penalty_jax * constraint_values,
+    )
+    return base_total + (
+        _runtime_float64_scalar(0.5, reference=constraint_values) / penalty_jax
+    ) * (
+        jnp.dot(positive_shift, positive_shift, precision=lax.Precision.HIGHEST)
+        - jnp.dot(multipliers, multipliers, precision=lax.Precision.HIGHEST)
+    )
+
+
+def _traceable_single_stage_alm_evaluation(
+    x_inner,
+    coil_dofs,
+    coil_set_spec,
+    *,
+    objective_kwargs,
+    alm_config,
+    multipliers,
+    penalty,
+):
+    del coil_set_spec
+    outer_objective_config = objective_kwargs["outer_objective_config"]
+    if outer_objective_config is None:
+        raise RuntimeError(
+            "Traceable single-stage ALM runtime requires outer_objective_config."
+        )
+    raw_terms = _traceable_single_stage_outer_term_values(
+        x_inner,
+        coil_dofs,
+        coil_set_spec_from_dof_extraction_spec(
+            objective_kwargs["coil_dof_extraction_spec"],
+            coil_dofs,
+        ),
+        **_traceable_total_objective_kwargs(objective_kwargs),
+    )
+    base_total, physics_total = _traceable_single_stage_alm_base_total(
+        raw_terms,
+        outer_objective_config=outer_objective_config,
+        alm_formulation=alm_config["alm_formulation"],
+    )
+    constraint_values = _traceable_single_stage_alm_constraint_values(
+        raw_terms,
+        x_inner,
+        coil_dofs,
+        objective_kwargs=objective_kwargs,
+        alm_config=alm_config,
+    )
+    feasibility_values = jnp.maximum(
+        constraint_values,
+        _runtime_float64_scalar(0.0, reference=constraint_values),
+    )
+    return {
+        "total": _traceable_augmented_inequality_total(
+            base_total,
+            constraint_values,
+            multipliers,
+            penalty,
+        ),
+        "base_total": base_total,
+        "physics_total": physics_total,
+        "constraint_values": constraint_values,
+        "feasibility_values": feasibility_values,
+    }
 
 
 def _evaluate_traceable_weighted_single_stage_outer_term(
@@ -1404,8 +1784,6 @@ class NonQuasiSymmetricRatioJAX(Optimizable):
     def compute(self, *, compute_gradient=True):
         booz_surf = self.boozer_surface
         solved_state = _resolved_boozer_solved_runtime_state(booz_surf)
-        iota = solved_state.iota
-        G = solved_state.G
         sdofs = solved_state.sdofs
         current_coil_dofs, coil_set_spec = _current_coil_dofs_and_spec(self.biotsavart)
         self._J = self._compute_value(sdofs, coil_set_spec)
@@ -1850,11 +2228,24 @@ def _traceable_objective_gradient_parts(
     solved_plu,
     objective_kwargs,
     term_name=None,
+    scalar_objective_fn=None,
 ):
     """Return direct, implicit, and total gradients for one traceable objective."""
+    if scalar_objective_fn is not None and term_name is not None:
+        raise ValueError(
+            "scalar_objective_fn and term_name are mutually exclusive traceable "
+            "gradient selectors."
+        )
     inner_objective_kwargs = _traceable_inner_objective_kwargs(objective_kwargs)
 
     def _evaluate_objective(x_inner, current_coil_dofs, coil_set_spec):
+        if scalar_objective_fn is not None:
+            return scalar_objective_fn(
+                x_inner,
+                current_coil_dofs,
+                coil_set_spec,
+                objective_kwargs=objective_kwargs,
+            )
         if term_name is None:
             return _evaluate_traceable_total_objective(
                 x_inner,
@@ -2216,10 +2607,15 @@ def _get_cached_traceable_runtime_entry(
             compiled_bundle["compiled_value_and_grad_for"]
         ),
         "reporting_metrics": None,
+        "public_objective": None,
+        "public_value_and_grad": None,
+        "public_batched_value_and_grad": None,
+        "public_reporting_metrics": None,
         "host_objective": None,
         "host_value_and_grad": None,
         "host_reporting_metrics": None,
         "profile_suite": None,
+        "alm_runtime_bundles": {},
     }
     booz_jax._traceable_runtime_entry_cache = cached_entry
     return cached_entry
@@ -2234,9 +2630,67 @@ def _ensure_traceable_runtime_reporting_metrics(runtime_entry):
     return runtime_entry
 
 
+def _make_traceable_lazy_reporting_metrics_boundary(runtime_entry):
+    """Build a public reporting-metrics boundary that resolves lazily."""
+
+    def reporting_metrics_for(coil_dofs, *, include_distance_metrics=True):
+        reporting_metrics = _ensure_traceable_runtime_reporting_metrics(runtime_entry)[
+            "reporting_metrics"
+        ]
+        return reporting_metrics(
+            _as_jax_float64(coil_dofs),
+            include_distance_metrics=include_distance_metrics,
+        )
+
+    return reporting_metrics_for
+
+
+def _ensure_traceable_runtime_public_boundaries(runtime_entry):
+    """Materialize stable public runtime-bundle boundaries on demand."""
+    if runtime_entry["public_objective"] is None:
+        runtime_entry["public_objective"] = _make_traceable_objective_boundary(
+            runtime_entry["objective"]
+        )
+    if runtime_entry["public_value_and_grad"] is None:
+        runtime_entry["public_value_and_grad"] = _make_traceable_value_and_grad_boundary(
+            runtime_entry["compiled_bundle"]["compiled_value_and_grad_for"]
+        )
+    if runtime_entry["public_batched_value_and_grad"] is None:
+        runtime_entry["public_batched_value_and_grad"] = (
+            _make_traceable_batched_value_and_grad_boundary(
+                runtime_entry["batched_value_and_grad"]
+            )
+        )
+    if runtime_entry["public_reporting_metrics"] is None:
+        runtime_entry["public_reporting_metrics"] = (
+            _make_traceable_lazy_reporting_metrics_boundary(runtime_entry)
+        )
+    return runtime_entry
+
+
+def _make_traceable_lazy_host_reporting_metrics(runtime_entry):
+    """Build a host-normalized reporting wrapper that resolves lazily."""
+    resolved_host_reporting_metrics = None
+
+    def host_reporting_metrics(coil_dofs, *, include_distance_metrics=True):
+        nonlocal resolved_host_reporting_metrics
+        if resolved_host_reporting_metrics is None:
+            reporting_metrics = _ensure_traceable_runtime_reporting_metrics(
+                runtime_entry
+            )["reporting_metrics"]
+            resolved_host_reporting_metrics = _make_traceable_host_reporting_metrics(
+                reporting_metrics
+            )
+        return resolved_host_reporting_metrics(
+            coil_dofs,
+            include_distance_metrics=include_distance_metrics,
+        )
+
+    return host_reporting_metrics
+
+
 def _ensure_traceable_runtime_host_wrappers(runtime_entry):
     """Materialize host-boundary wrappers for one cached runtime entry on demand."""
-    _ensure_traceable_runtime_reporting_metrics(runtime_entry)
     if runtime_entry["host_objective"] is None:
         runtime_entry["host_objective"] = _make_traceable_host_objective(
             runtime_entry["objective"]
@@ -2246,8 +2700,8 @@ def _ensure_traceable_runtime_host_wrappers(runtime_entry):
             runtime_entry["compiled_bundle"]["compiled_value_and_grad_for"]
         )
     if runtime_entry["host_reporting_metrics"] is None:
-        runtime_entry["host_reporting_metrics"] = _make_traceable_host_reporting_metrics(
-            runtime_entry["reporting_metrics"]
+        runtime_entry["host_reporting_metrics"] = (
+            _make_traceable_lazy_host_reporting_metrics(runtime_entry)
         )
     return runtime_entry
 
@@ -2287,29 +2741,63 @@ def _make_traceable_objective_from_compiled_bundle(compiled_bundle):
 
     f.defvjp(f_fwd, f_bwd)
 
-    return f
+    # Keep the pure runtime entrypoint on a real JIT boundary so transfer_guard
+    # rejects implicit host inputs consistently with the other runtime-bundle
+    # callables. Explicit host materialization belongs on the host wrapper.
+    return jax.jit(f)
 
 
 def _make_traceable_host_objective(pure_objective):
     """Build a host-normalized scalar wrapper around the pure JAX objective."""
 
     def host_objective(coil_dofs):
-        return float(_host_scalar(pure_objective(coil_dofs), dtype=np.float64))
+        return float(
+            _host_scalar(
+                pure_objective(_as_jax_float64(coil_dofs)),
+                dtype=np.float64,
+            )
+        )
 
     return host_objective
+
+
+def _make_traceable_objective_boundary(pure_objective):
+    """Build the public pure-JAX scalar entrypoint for one runtime bundle."""
+
+    def objective(coil_dofs):
+        return pure_objective(_as_jax_float64(coil_dofs))
+
+    return objective
 
 
 def _make_traceable_host_value_and_grad(compiled_value_and_grad_for):
     """Build a host-normalized wrapper around the fused JAX value/grad callable."""
 
     def host_value_and_grad(coil_dofs):
-        value, grad = compiled_value_and_grad_for(coil_dofs)
+        value, grad = compiled_value_and_grad_for(_as_jax_float64(coil_dofs))
         return (
             float(_host_scalar(value, dtype=np.float64)),
             _host_array(grad, dtype=np.float64),
         )
 
     return host_value_and_grad
+
+
+def _make_traceable_value_and_grad_boundary(compiled_value_and_grad_for):
+    """Build the public pure-JAX value/grad entrypoint for one runtime bundle.
+
+    This is the explicit host-to-device staging seam for callers that still
+    hold coil DOFs as NumPy arrays during setup or test harness construction.
+    Under JAX transfer-guard ``disallow``, explicit staging is allowed while
+    implicit transfers are not, so keep this entrypoint aligned with the scalar
+    objective and reporting-metrics boundaries.
+    """
+    from .optimizer_jax import _mark_cacheable_jit_value_and_grad
+
+    def value_and_grad(coil_dofs):
+        return compiled_value_and_grad_for(_as_jax_float64(coil_dofs))
+
+    return _mark_cacheable_jit_value_and_grad(value_and_grad)
 
 
 def _make_traceable_reporting_metrics(compiled_bundle, *, include_distance_metrics):
@@ -2468,7 +2956,7 @@ def _make_traceable_host_reporting_metrics(reporting_metrics):
 
     def host_reporting_metrics(coil_dofs, *, include_distance_metrics=True):
         metrics = reporting_metrics(
-            coil_dofs,
+            _as_jax_float64(coil_dofs),
             include_distance_metrics=include_distance_metrics,
         )
         has_G = bool(np.asarray(jax.device_get(metrics["has_G"])))
@@ -2502,6 +2990,15 @@ def _make_traceable_batched_value_and_grad_pipeline(compiled_value_and_grad_for)
         return jax.vmap(compiled_value_and_grad_for)(coil_dofs_batch)
 
     return _mark_cacheable_jit_value_and_grad(jax.jit(_batched_value_and_grad_for))
+
+
+def _make_traceable_batched_value_and_grad_boundary(batched_value_and_grad):
+    """Build the public pure-JAX batched value/grad entrypoint."""
+
+    def batched_value_and_grad_for(coil_dofs_batch):
+        return batched_value_and_grad(_as_jax_float64(coil_dofs_batch))
+
+    return batched_value_and_grad_for
 
 
 def _classify_nonfinite_scalar(host_value):
@@ -2906,7 +3403,8 @@ def make_traceable_objective_runtime_bundle(
         Pure JAX callable returning the solved-state reporting scalars used by
         the single-stage example. Callers that need Python/NumPy materialization
         can host-normalize this explicit boundary themselves, or request the
-        companion ``host_reporting_metrics`` wrapper.
+        companion ``host_reporting_metrics`` wrapper. This entrypoint resolves
+        lazily and requires ``outer_objective_config`` when invoked.
     ``host_objective``
         Optional host-normalized callable returning a Python ``float`` when
         ``include_host_wrappers=True``.
@@ -2927,14 +3425,12 @@ def make_traceable_objective_runtime_bundle(
         outer_objective_config=outer_objective_config,
         success_filter=success_filter,
     )
-    compiled_bundle = runtime_entry["compiled_bundle"]
-    compiled_value_and_grad_for = compiled_bundle["compiled_value_and_grad_for"]
-    _ensure_traceable_runtime_reporting_metrics(runtime_entry)
+    _ensure_traceable_runtime_public_boundaries(runtime_entry)
     runtime_bundle = {
-        "objective": runtime_entry["objective"],
-        "value_and_grad": compiled_value_and_grad_for,
-        "batched_value_and_grad": runtime_entry["batched_value_and_grad"],
-        "reporting_metrics": runtime_entry["reporting_metrics"],
+        "objective": runtime_entry["public_objective"],
+        "value_and_grad": runtime_entry["public_value_and_grad"],
+        "batched_value_and_grad": runtime_entry["public_batched_value_and_grad"],
+        "reporting_metrics": runtime_entry["public_reporting_metrics"],
     }
     if include_host_wrappers:
         _ensure_traceable_runtime_host_wrappers(runtime_entry)
@@ -2947,18 +3443,245 @@ def make_traceable_objective_runtime_bundle(
         )
     if not include_profile_suite:
         return runtime_bundle
+    compiled_bundle = runtime_entry["compiled_bundle"]
     if runtime_entry["profile_suite"] is None:
         runtime_entry["profile_suite"] = (
             _make_traceable_objective_profile_suite_from_compiled_bundle(
                 compiled_bundle,
                 booz_jax,
                 bs_jax,
-                value_and_grad_pipeline=compiled_value_and_grad_for,
-                batched_value_and_grad_pipeline=runtime_entry["batched_value_and_grad"],
+                value_and_grad_pipeline=runtime_entry["public_value_and_grad"],
+                batched_value_and_grad_pipeline=runtime_entry[
+                    "public_batched_value_and_grad"
+                ],
             )
         )
     runtime_bundle["profile_suite"] = runtime_entry["profile_suite"]
     return runtime_bundle
+
+
+def make_traceable_single_stage_alm_runtime_bundle(
+    booz_jax,
+    bs_jax,
+    iota_target,
+    *,
+    outer_objective_config,
+    alm_config,
+    success_filter=None,
+):
+    """Build the pure-JAX single-stage ALM runtime bundle for the inner solve.
+
+    The returned bundle keeps the hot ALM subproblem entirely in JAX and is
+    intended for ``backend='jax', optimizer_backend='ondevice'`` single-stage
+    ALM inner solves. Host-side accepted-step reporting and artifact shaping
+    remain outside this bundle on explicit Python boundaries. ``success_filter``
+    is optional and can reject solved states, for example when the host ALM
+    reference lane would treat a self-intersecting surface as an immediate
+    failure.
+    """
+    from .optimizer_jax import _mark_cacheable_jit_value_and_grad
+
+    if outer_objective_config is None:
+        raise ValueError(
+            "make_traceable_single_stage_alm_runtime_bundle() requires "
+            "outer_objective_config."
+        )
+    normalized_alm_config = _traceable_runtime_hostify_tree(dict(alm_config))
+    runtime_entry = _get_cached_traceable_runtime_entry(
+        booz_jax,
+        bs_jax,
+        iota_target,
+        outer_objective_config=outer_objective_config,
+        success_filter=success_filter,
+    )
+    alm_cache_key = _traceable_contract_tree_signature(normalized_alm_config)
+    cached_bundle = runtime_entry["alm_runtime_bundles"].get(alm_cache_key)
+    if cached_bundle is not None:
+        return cached_bundle
+
+    compiled_bundle = runtime_entry["compiled_bundle"]
+    state = compiled_bundle["state"]
+    objective_kwargs = dict(
+        state["objective_kwargs"],
+        outer_objective_config=_traceable_runtime_hostify_tree(
+            outer_objective_config
+        ),
+    )
+    coil_set_spec_from_dofs = state["coil_set_spec_from_dofs"]
+    compiled_forward_result_for = compiled_bundle["compiled_forward_result_for"]
+    failure_gradient_for = compiled_bundle["failure_gradient_for"]
+    constraint_names = tuple(
+        str(name) for name in normalized_alm_config["constraint_names"]
+    )
+    normalized_alm_config["constraint_names"] = constraint_names
+
+    def _failure_evaluation(forward_result):
+        failure_total = _runtime_float64_scalar(
+            state["failure_value"],
+            reference=forward_result["value"],
+        )
+        max_violation = jnp.maximum(
+            jnp.abs(failure_total),
+            _runtime_float64_scalar(1.0, reference=failure_total),
+        )
+        constraint_values = jnp.full(
+            (len(constraint_names),),
+            max_violation,
+            dtype=jnp.float64,
+        )
+        return {
+            "total": failure_total,
+            "base_total": failure_total,
+            "physics_total": failure_total,
+            "constraint_values": constraint_values,
+            "feasibility_values": constraint_values,
+            "x": forward_result["x"],
+            "plu": forward_result["plu"],
+            "success": forward_result["success"],
+        }
+
+    def _alm_evaluation_for(coil_dofs, multipliers, penalty):
+        coil_dofs = _as_jax_float64(coil_dofs)
+        multipliers = _as_jax_float64(multipliers)
+        penalty = _as_jax_float64(penalty)
+        forward_result = compiled_forward_result_for(coil_dofs)
+
+        def _success(_):
+            evaluation = _traceable_single_stage_alm_evaluation(
+                forward_result["x"],
+                coil_dofs,
+                coil_set_spec_from_dofs(coil_dofs),
+                objective_kwargs=objective_kwargs,
+                alm_config=normalized_alm_config,
+                multipliers=multipliers,
+                penalty=penalty,
+            )
+            evaluation["x"] = forward_result["x"]
+            evaluation["plu"] = forward_result["plu"]
+            evaluation["success"] = forward_result["success"]
+            return evaluation
+
+        return jax.lax.cond(
+            forward_result["success"],
+            _success,
+            lambda _: _failure_evaluation(forward_result),
+            operand=None,
+        )
+
+    compiled_evaluation_for = jax.jit(_alm_evaluation_for)
+
+    def _alm_total_gradient_for(coil_dofs, solved_x, solved_plu, multipliers, penalty):
+        def _scalar_objective_fn(
+            x_inner,
+            current_coil_dofs,
+            coil_set_spec,
+            *,
+            objective_kwargs,
+        ):
+            return _traceable_single_stage_alm_evaluation(
+                x_inner,
+                current_coil_dofs,
+                coil_set_spec,
+                objective_kwargs=objective_kwargs,
+                alm_config=normalized_alm_config,
+                multipliers=multipliers,
+                penalty=penalty,
+            )["total"]
+
+        return _traceable_objective_gradient_parts(
+            booz_jax,
+            coil_set_spec_from_dofs,
+            coil_dofs=coil_dofs,
+            solved_x=solved_x,
+            solved_plu=solved_plu,
+            objective_kwargs=objective_kwargs,
+            scalar_objective_fn=_scalar_objective_fn,
+        )[2]
+
+    compiled_total_gradient_for = jax.jit(_alm_total_gradient_for)
+
+    @jax.custom_vjp
+    def _objective(coil_dofs, multipliers, penalty):
+        return compiled_evaluation_for(coil_dofs, multipliers, penalty)["total"]
+
+    def _objective_fwd(coil_dofs, multipliers, penalty):
+        evaluation = compiled_evaluation_for(coil_dofs, multipliers, penalty)
+        return evaluation["total"], (
+            coil_dofs,
+            evaluation["x"],
+            evaluation["plu"],
+            evaluation["success"],
+            multipliers,
+            penalty,
+        )
+
+    def _objective_bwd(saved_state, cotangent):
+        coil_dofs, solved_x, solved_plu, success, multipliers, penalty = saved_state
+
+        def _success(_):
+            return compiled_total_gradient_for(
+                coil_dofs,
+                solved_x,
+                solved_plu,
+                multipliers,
+                penalty,
+            )
+
+        grad = jax.lax.cond(
+            success,
+            _success,
+            lambda _: failure_gradient_for(coil_dofs),
+            operand=None,
+        )
+        multipliers_bar = jnp.zeros_like(multipliers)
+        penalty_bar = _runtime_float64_scalar(0.0, reference=grad)
+        return (
+            _as_runtime_float64(cotangent, reference=grad) * grad,
+            multipliers_bar,
+            penalty_bar,
+        )
+
+    _objective.defvjp(_objective_fwd, _objective_bwd)
+    compiled_objective = jax.jit(_objective)
+
+    def objective(coil_dofs, multipliers, penalty):
+        return compiled_objective(
+            _as_jax_float64(coil_dofs),
+            _as_jax_float64(multipliers),
+            _as_jax_float64(penalty),
+        )
+
+    def evaluate(coil_dofs, multipliers, penalty):
+        return compiled_evaluation_for(
+            _as_jax_float64(coil_dofs),
+            _as_jax_float64(multipliers),
+            _as_jax_float64(penalty),
+        )
+
+    @_mark_cacheable_jit_value_and_grad
+    @jax.jit
+    def value_and_grad(coil_dofs, multipliers, penalty):
+        return jax.value_and_grad(_objective, argnums=0)(
+            coil_dofs,
+            multipliers,
+            penalty,
+        )
+
+    def public_value_and_grad(coil_dofs, multipliers, penalty):
+        return value_and_grad(
+            _as_jax_float64(coil_dofs),
+            _as_jax_float64(multipliers),
+            _as_jax_float64(penalty),
+        )
+
+    alm_runtime_bundle = {
+        "objective": objective,
+        "evaluate": evaluate,
+        "value_and_grad": public_value_and_grad,
+        "constraint_names": constraint_names,
+    }
+    runtime_entry["alm_runtime_bundles"][alm_cache_key] = alm_runtime_bundle
+    return alm_runtime_bundle
 
 
 def make_traceable_objective_profile_suite(

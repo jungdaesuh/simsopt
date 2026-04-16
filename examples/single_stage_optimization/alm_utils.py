@@ -719,6 +719,7 @@ def _target_inner_physical_x(opt_x, center: np.ndarray, widths: np.ndarray | Non
 def _build_target_inner_value_and_grad(
     *,
     evaluate_value_and_grad: Callable[[np.ndarray], tuple[float, np.ndarray]],
+    native_value_and_grad: Callable[[object], tuple[object, object]] | None = None,
     center: np.ndarray,
     widths: np.ndarray | None,
 ):
@@ -747,6 +748,21 @@ def _build_target_inner_value_and_grad(
             return center_jax + widths_jax * jnp.tanh(opt_x)
 
         optimizer_x0 = np.zeros_like(center_arr, dtype=float)
+
+    if native_value_and_grad is not None:
+
+        def _value_and_grad(opt_x):
+            opt_x = jnp.asarray(opt_x, dtype=jnp.float64)
+            physical_x = _physical_x_jax(opt_x)
+            value, grad_x = native_value_and_grad(physical_x)
+            value = jnp.asarray(value, dtype=jnp.float64)
+            grad_x = jnp.asarray(grad_x, dtype=jnp.float64)
+            if widths_arr is None:
+                return value, grad_x
+            grad_scale = widths_jax * (1.0 - jnp.square(jnp.tanh(opt_x)))
+            return value, grad_x * grad_scale
+
+        return _value_and_grad, optimizer_x0
 
     def _host_eval(host_x):
         value, grad = evaluate_value_and_grad(np.asarray(host_x, dtype=float))
@@ -945,6 +961,7 @@ def _build_target_inner_options(inner_attempt_options: dict) -> dict:
 def _run_target_inner_solve(
     *,
     evaluate_value_and_grad: Callable[[np.ndarray], tuple[float, np.ndarray]],
+    native_value_and_grad: Callable[[object], tuple[object, object]] | None = None,
     center: np.ndarray,
     attempt_radius: float | None,
     inner_attempt_options: dict,
@@ -955,6 +972,7 @@ def _run_target_inner_solve(
     trust_widths = _trust_region_widths(center, attempt_radius)
     target_fun, target_x0 = _build_target_inner_value_and_grad(
         evaluate_value_and_grad=evaluate_value_and_grad,
+        native_value_and_grad=native_value_and_grad,
         center=center,
         widths=trust_widths,
     )
@@ -1332,6 +1350,8 @@ def minimize_alm(
     settings: ALMSettings,
     inner_options: dict,
     inner_optimizer_contract=None,
+    target_inner_value_and_grad: Callable[[object, np.ndarray, float], tuple[object, object]]
+    | None = None,
     inner_callback: Callable[[np.ndarray], None] | None = None,
     accepted_callback: Callable[[np.ndarray], None] | None = None,
     outer_state_callback: Callable[[int, np.ndarray, float], None] | None = None,
@@ -1904,6 +1924,15 @@ def minimize_alm(
                     else:
                         result, candidate_x = _run_target_inner_solve(
                             evaluate_value_and_grad=inner_fun,
+                            native_value_and_grad=(
+                                None
+                                if target_inner_value_and_grad is None
+                                else lambda inner_x: target_inner_value_and_grad(
+                                    inner_x,
+                                    multipliers,
+                                    penalty,
+                                )
+                            ),
                             center=x,
                             attempt_radius=attempt_radius,
                             inner_attempt_options=inner_attempt_options,
