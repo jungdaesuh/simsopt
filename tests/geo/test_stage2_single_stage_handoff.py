@@ -7,6 +7,7 @@ import time
 import unittest
 import uuid
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import numpy as np
@@ -275,6 +276,10 @@ class HandoffSchemaTests(unittest.TestCase):
 
 
 class HandoffModuleTests(unittest.TestCase):
+    @staticmethod
+    def _fixed_current(current_A: float):
+        return SimpleNamespace(get_value=lambda: float(current_A))
+
     def test_classify_bootability_result_rejects_iota_mismatch(self):
         module = load_handoff_module()
 
@@ -419,6 +424,195 @@ class HandoffModuleTests(unittest.TestCase):
                     self.assertEqual(len(partitions.vf_coils), 0)
 
         self.assertEqual(set(timings), {"legacy", "wataru_proxy_field"})
+
+    def test_probe_stage2_seed_bootability_smoke_legacy_donor_uses_remainder_partition(self):
+        module = load_handoff_module()
+
+        tf_coils = [
+            SimpleNamespace(current=self._fixed_current(8.0e4))
+            for _ in range(20)
+        ]
+        banana_coils = [
+            SimpleNamespace(current=self._fixed_current(1.1e4)),
+            SimpleNamespace(current=self._fixed_current(-1.1e4)),
+        ]
+        fake_bs = SimpleNamespace(coils=[*tf_coils, *banana_coils])
+        fake_surface = SimpleNamespace(nfp=5)
+        recorded = {}
+
+        def fake_attempt_initialize_boozer_surface(
+            surf_prev,
+            mpol,
+            ntor,
+            bs,
+            vol_target,
+            constraint_weight,
+            iota,
+            G0,
+            boozer_I=0.0,
+            *,
+            nfp,
+        ):
+            recorded.update(
+                bs=bs,
+                vol_target=vol_target,
+                constraint_weight=constraint_weight,
+                iota=iota,
+                G0=G0,
+                boozer_I=boozer_I,
+                nfp=nfp,
+            )
+            return module.BoozerInitializationResult(
+                boozer_surface=SimpleNamespace(surface=SimpleNamespace(volume=lambda: 0.1)),
+                solve_success=True,
+                self_intersecting=False,
+                success=True,
+                solved_iota=0.2,
+                solved_G=G0,
+                volume=0.1,
+            )
+
+        with patch.object(
+            module,
+            "build_surface_configs",
+            return_value=[{"initial_surface": fake_surface, "target_volume": 0.1}],
+        ), patch.object(
+            module,
+            "attempt_initialize_boozer_surface",
+            side_effect=fake_attempt_initialize_boozer_surface,
+        ):
+            status = module.probe_stage2_seed_bootability(
+                stage2_bs_path="/tmp/legacy/biot_savart_opt.json",
+                stage2_artifact_results={
+                    "PLASMA_SURF_FILENAME": "demo.nc",
+                    "TF_CURRENT_A": 8.0e4,
+                    "MAJOR_RADIUS": 0.915,
+                    "TOROIDAL_FLUX": 0.24,
+                    "banana_surf_radius": 0.21,
+                    "CURVATURE_THRESHOLD": 100.0,
+                },
+                plasma_surf_filename="demo.nc",
+                equilibria_dir="/tmp/equilibria",
+                num_tf_coils=20,
+                nphi=31,
+                ntheta=16,
+                mpol=8,
+                ntor=6,
+                vol_target=0.1,
+                iota_target=0.2,
+                iota_tolerance=5.0e-3,
+                constraint_weight=1.0,
+                boozer_I=0.0,
+                bs_loader=lambda _path: fake_bs,
+            )
+
+        self.assertTrue(module.bootability_passes(status))
+        self.assertEqual(recorded["bs"], fake_bs)
+        self.assertEqual(recorded["nfp"], 5)
+        self.assertAlmostEqual(recorded["G0"], module.compute_tf_G0(tf_coils))
+        self.assertEqual(recorded["boozer_I"], 0.0)
+
+    def test_probe_stage2_seed_bootability_smoke_wataru_donor_preserves_extra_coil_metadata(self):
+        module = load_handoff_module()
+        current_contracts = importlib.import_module("banana_opt.current_contracts")
+
+        tf_coils = [
+            SimpleNamespace(current=self._fixed_current(8.0e4))
+            for _ in range(20)
+        ]
+        banana_coils = [
+            SimpleNamespace(current=self._fixed_current(1.1e4)),
+            SimpleNamespace(current=self._fixed_current(-1.1e4)),
+        ]
+        proxy_coils = [SimpleNamespace(current=self._fixed_current(9.0e3))]
+        vf_coils = [SimpleNamespace(current=self._fixed_current(-5.0e2))]
+        fake_bs = SimpleNamespace(coils=[*tf_coils, *banana_coils, *proxy_coils, *vf_coils])
+        fake_surface = SimpleNamespace(nfp=5)
+        recorded = {}
+
+        plasma_settings = current_contracts.resolve_plasma_current_settings(
+            raw_boozer_I=None,
+            plasma_current_A=None,
+            finite_current_mode="wataru_proxy_field",
+            default_plasma_current_A=9.0e3,
+        )
+
+        def fake_attempt_initialize_boozer_surface(
+            surf_prev,
+            mpol,
+            ntor,
+            bs,
+            vol_target,
+            constraint_weight,
+            iota,
+            G0,
+            boozer_I=0.0,
+            *,
+            nfp,
+        ):
+            recorded.update(
+                bs=bs,
+                G0=G0,
+                boozer_I=boozer_I,
+                nfp=nfp,
+                total_loaded_coils=len(bs.coils),
+            )
+            return module.BoozerInitializationResult(
+                boozer_surface=SimpleNamespace(surface=SimpleNamespace(volume=lambda: 0.1)),
+                solve_success=True,
+                self_intersecting=False,
+                success=True,
+                solved_iota=0.2,
+                solved_G=G0,
+                volume=0.1,
+            )
+
+        with patch.object(
+            module,
+            "build_surface_configs",
+            return_value=[{"initial_surface": fake_surface, "target_volume": 0.1}],
+        ), patch.object(
+            module,
+            "attempt_initialize_boozer_surface",
+            side_effect=fake_attempt_initialize_boozer_surface,
+        ):
+            status = module.probe_stage2_seed_bootability(
+                stage2_bs_path="/tmp/wataru/biot_savart_opt.json",
+                stage2_artifact_results={
+                    "PLASMA_SURF_FILENAME": "demo.nc",
+                    "TF_CURRENT_A": 8.0e4,
+                    "NUM_TF_COILS": 20,
+                    "NUM_BANANA_COILS": 2,
+                    "NUM_PROXY_COILS": 1,
+                    "NUM_VF_COILS": 1,
+                    "FINITE_CURRENT_MODE": "wataru_proxy_field",
+                    "PROXY_PLASMA_CURRENT_A": 9.0e3,
+                    "VF_CURRENT_A": 5.0e2,
+                    "MAJOR_RADIUS": 0.915,
+                    "TOROIDAL_FLUX": 0.24,
+                    "banana_surf_radius": 0.21,
+                    "CURVATURE_THRESHOLD": 100.0,
+                },
+                plasma_surf_filename="demo.nc",
+                equilibria_dir="/tmp/equilibria",
+                num_tf_coils=20,
+                nphi=31,
+                ntheta=16,
+                mpol=8,
+                ntor=6,
+                vol_target=0.1,
+                iota_target=0.2,
+                iota_tolerance=5.0e-3,
+                constraint_weight=1.0,
+                boozer_I=plasma_settings.boozer_I,
+                bs_loader=lambda _path: fake_bs,
+            )
+
+        self.assertTrue(module.bootability_passes(status))
+        self.assertEqual(recorded["total_loaded_coils"], 24)
+        self.assertEqual(recorded["nfp"], 5)
+        self.assertAlmostEqual(recorded["G0"], module.compute_tf_G0(tf_coils))
+        self.assertAlmostEqual(recorded["boozer_I"], plasma_settings.boozer_I)
 
 
 class UnifiedRunnerTests(unittest.TestCase):

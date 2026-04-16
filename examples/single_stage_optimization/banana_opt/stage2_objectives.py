@@ -111,6 +111,30 @@ def evaluate_stage2_iota_state(stage2_iota_runtime: Stage2IotaRuntime) -> Stage2
     )
 
 
+def validate_stage2_coil_partition_counts(
+    *,
+    total_coils,
+    num_tf_coils,
+    num_banana_coils,
+    num_proxy_coils,
+    num_vf_coils,
+    context: str,
+) -> None:
+    expected_total_coils = (
+        int(num_tf_coils)
+        + int(num_banana_coils)
+        + int(num_proxy_coils)
+        + int(num_vf_coils)
+    )
+    if int(total_coils) != expected_total_coils:
+        raise ValueError(
+            f"{context} does not match the loaded BiotSavart coil count: "
+            f"total={int(total_coils)}, expected={expected_total_coils} "
+            f"(TF={int(num_tf_coils)}, banana={int(num_banana_coils)}, "
+            f"proxy={int(num_proxy_coils)}, vf={int(num_vf_coils)})."
+        )
+
+
 def build_stage2_iota_runtime(
     *,
     equilibrium_file: str,
@@ -402,19 +426,14 @@ def build_stage2_results(
         banana_current_max_A=float(args.banana_current_max_A),
         tf_current_A=tf_current_A,
     )
-    expected_total_coils = (
-        int(num_tf_coils)
-        + int(num_banana_coils)
-        + int(num_proxy_coils)
-        + int(num_vf_coils)
+    validate_stage2_coil_partition_counts(
+        total_coils=total_coils,
+        num_tf_coils=num_tf_coils,
+        num_banana_coils=num_banana_coils,
+        num_proxy_coils=num_proxy_coils,
+        num_vf_coils=num_vf_coils,
+        context="Stage 2 coil partition metadata",
     )
-    if int(total_coils) != expected_total_coils:
-        raise ValueError(
-            "Stage 2 coil partition metadata does not match the loaded BiotSavart "
-            f"coil count: total={int(total_coils)}, expected={expected_total_coils} "
-            f"(TF={int(num_tf_coils)}, banana={int(num_banana_coils)}, "
-            f"proxy={int(num_proxy_coils)}, vf={int(num_vf_coils)})."
-        )
     return {
         "PLASMA_SURF_FILENAME": plasma_surf_filename,
         "PLASMA_SURF_PATH": file_loc,

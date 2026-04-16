@@ -94,6 +94,7 @@ from banana_opt.stage2_objectives import (
     smooth_max_curvature_signed_constraint,
     smooth_min_distance_signed_constraint,
     stage2_constraint_activity_tolerances,
+    validate_stage2_coil_partition_counts,
 )
 
 REPO_ROOT = os.path.abspath(os.path.join(SIMSOPT_ROOT, ".."))
@@ -909,6 +910,14 @@ def materialize_stage2_artifact_results(
 ):
     artifact_output_root = os.path.dirname(stage2_bs_artifact_path)
     os.makedirs(artifact_output_root, exist_ok=True)
+    validate_stage2_coil_partition_counts(
+        total_coils=len(new_bs.coils),
+        num_tf_coils=results_kwargs["num_tf_coils"],
+        num_banana_coils=results_kwargs["num_banana_coils"],
+        num_proxy_coils=results_kwargs["num_proxy_coils"],
+        num_vf_coils=results_kwargs["num_vf_coils"],
+        context="Stage 2 artifact writer partition metadata",
+    )
     new_bs.save(stage2_bs_artifact_path)
     field_error = _magnetic_field_plots(new_surf, new_bs, artifact_output_root + "/")
     results = _build_stage2_results_impl(

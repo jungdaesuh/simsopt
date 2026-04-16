@@ -7623,6 +7623,34 @@ class CurrentBaselineContractTests(unittest.TestCase):
             )
 
 
+class Stage2ArtifactWriterTests(unittest.TestCase):
+    def test_materialize_stage2_artifact_results_rejects_biot_savart_partition_mismatch(self):
+        module = load_stage2_module()
+
+        fake_bs = SimpleNamespace(
+            coils=[object(), object(), object()],
+            save=lambda *_args, **_kwargs: None,
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir, self.assertRaisesRegex(
+            ValueError,
+            "Stage 2 artifact writer partition metadata does not match the loaded BiotSavart coil count",
+        ):
+            module.materialize_stage2_artifact_results(
+                args=SimpleNamespace(),
+                stage2_bs_artifact_path=str(Path(tmpdir) / "biot_savart_opt.json"),
+                results_kwargs={
+                    "num_tf_coils": 1,
+                    "num_banana_coils": 1,
+                    "num_proxy_coils": 0,
+                    "num_vf_coils": 0,
+                },
+                stage2_iota_runtime=None,
+                new_bs=fake_bs,
+                new_surf=SimpleNamespace(),
+            )
+
+
 class Stage2RuntimeSmokeTests(unittest.TestCase):
     _EXPECTED_BASIN_TELEMETRY = {
         "basin_accepted_hops": 1,
@@ -7814,6 +7842,7 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
         class FakeBiotSavart:
             def __init__(self):
                 self.points = np.zeros((4, 3), dtype=float)
+                self.coils = []
 
             def set_points(self, points):
                 self.points = np.asarray(points, dtype=float)
@@ -7858,7 +7887,10 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
         ]
         fake_tf_coils = [
             SimpleNamespace(curve=FakeCurve(), current=FakeCurrent(8.0e4)),
-            SimpleNamespace(curve=FakeCurve(), current=FakeCurrent(8.0e4)),
+            *[
+                SimpleNamespace(curve=FakeCurve(), current=FakeCurrent(8.0e4))
+                for _ in range(19)
+            ],
         ]
 
         def build_coil_bundle(*, wataru_proxy_field):
@@ -7891,6 +7923,7 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
                     == "wataru_proxy_field"
                 ),
             )
+            fake_bs.coils = [*fake_tf_coils, *fake_banana_coils, *proxy_coils, *vf_coils]
             return (
                 fake_bs,
                 curves,
@@ -7933,6 +7966,7 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
                     extra_kwargs.get("finite_current_mode") == "wataru_proxy_field"
                 ),
             )
+            fake_bs.coils = [*fake_tf_coils, *fake_banana_coils, *proxy_coils, *vf_coils]
             return (
                 fake_bs,
                 curves,
