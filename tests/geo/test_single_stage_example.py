@@ -7668,6 +7668,13 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
         "basin_normalized_step_rejections": 1,
     }
 
+    @staticmethod
+    def _make_fake_tf_coils(curve_cls, current_cls, *, count=20, current_A=8.0e4):
+        return [
+            SimpleNamespace(curve=curve_cls(), current=current_cls(current_A))
+            for _ in range(count)
+        ]
+
     def _make_stage2_args(self, output_root, **overrides):
         defaults = {
             "plasma_surf_filename": "demo.nc",
@@ -7885,13 +7892,7 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
         fake_banana_coils = [
             SimpleNamespace(curve=fake_banana_curve, current=FakeCurrent(banana_current_A))
         ]
-        fake_tf_coils = [
-            SimpleNamespace(curve=FakeCurve(), current=FakeCurrent(8.0e4)),
-            *[
-                SimpleNamespace(curve=FakeCurve(), current=FakeCurrent(8.0e4))
-                for _ in range(19)
-            ],
-        ]
+        fake_tf_coils = self._make_fake_tf_coils(FakeCurve, FakeCurrent)
 
         def build_coil_bundle(*, wataru_proxy_field):
             proxy_coils = []

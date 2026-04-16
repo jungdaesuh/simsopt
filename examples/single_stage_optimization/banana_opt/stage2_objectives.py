@@ -111,6 +111,23 @@ def evaluate_stage2_iota_state(stage2_iota_runtime: Stage2IotaRuntime) -> Stage2
     )
 
 
+def _coerce_stage2_partition_counts(
+    *,
+    total_coils,
+    num_tf_coils,
+    num_banana_coils,
+    num_proxy_coils,
+    num_vf_coils,
+) -> tuple[int, int, int, int, int]:
+    return (
+        int(total_coils),
+        int(num_tf_coils),
+        int(num_banana_coils),
+        int(num_proxy_coils),
+        int(num_vf_coils),
+    )
+
+
 def validate_stage2_coil_partition_counts(
     *,
     total_coils,
@@ -120,18 +137,31 @@ def validate_stage2_coil_partition_counts(
     num_vf_coils,
     context: str,
 ) -> None:
-    expected_total_coils = (
-        int(num_tf_coils)
-        + int(num_banana_coils)
-        + int(num_proxy_coils)
-        + int(num_vf_coils)
+    (
+        total_coils_int,
+        num_tf_coils_int,
+        num_banana_coils_int,
+        num_proxy_coils_int,
+        num_vf_coils_int,
+    ) = _coerce_stage2_partition_counts(
+        total_coils=total_coils,
+        num_tf_coils=num_tf_coils,
+        num_banana_coils=num_banana_coils,
+        num_proxy_coils=num_proxy_coils,
+        num_vf_coils=num_vf_coils,
     )
-    if int(total_coils) != expected_total_coils:
+    expected_total_coils = (
+        num_tf_coils_int
+        + num_banana_coils_int
+        + num_proxy_coils_int
+        + num_vf_coils_int
+    )
+    if total_coils_int != expected_total_coils:
         raise ValueError(
             f"{context} does not match the loaded BiotSavart coil count: "
-            f"total={int(total_coils)}, expected={expected_total_coils} "
-            f"(TF={int(num_tf_coils)}, banana={int(num_banana_coils)}, "
-            f"proxy={int(num_proxy_coils)}, vf={int(num_vf_coils)})."
+            f"total={total_coils_int}, expected={expected_total_coils} "
+            f"(TF={num_tf_coils_int}, banana={num_banana_coils_int}, "
+            f"proxy={num_proxy_coils_int}, vf={num_vf_coils_int})."
         )
 
 

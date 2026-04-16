@@ -280,6 +280,40 @@ class HandoffModuleTests(unittest.TestCase):
     def _fixed_current(current_A: float):
         return SimpleNamespace(get_value=lambda: float(current_A))
 
+    def _fixed_current_coil(self, current_A: float):
+        return SimpleNamespace(current=self._fixed_current(current_A))
+
+    def _bootability_smoke_inputs(self, *, include_proxy_vf: bool):
+        tf_coils = [self._fixed_current_coil(8.0e4) for _ in range(20)]
+        banana_coils = [
+            self._fixed_current_coil(1.1e4),
+            self._fixed_current_coil(-1.1e4),
+        ]
+        proxy_coils = [self._fixed_current_coil(9.0e3)] if include_proxy_vf else []
+        vf_coils = [self._fixed_current_coil(-5.0e2)] if include_proxy_vf else []
+        fake_bs = SimpleNamespace(coils=[*tf_coils, *banana_coils, *proxy_coils, *vf_coils])
+        stage2_artifact_results = {
+            "PLASMA_SURF_FILENAME": "demo.nc",
+            "TF_CURRENT_A": 8.0e4,
+            "MAJOR_RADIUS": 0.915,
+            "TOROIDAL_FLUX": 0.24,
+            "banana_surf_radius": 0.21,
+            "CURVATURE_THRESHOLD": 100.0,
+        }
+        if include_proxy_vf:
+            stage2_artifact_results.update(
+                {
+                    "NUM_TF_COILS": 20,
+                    "NUM_BANANA_COILS": 2,
+                    "NUM_PROXY_COILS": 1,
+                    "NUM_VF_COILS": 1,
+                    "FINITE_CURRENT_MODE": "wataru_proxy_field",
+                    "PROXY_PLASMA_CURRENT_A": 9.0e3,
+                    "VF_CURRENT_A": 5.0e2,
+                }
+            )
+        return tf_coils, fake_bs, stage2_artifact_results
+
     def test_classify_bootability_result_rejects_iota_mismatch(self):
         module = load_handoff_module()
 
@@ -427,16 +461,9 @@ class HandoffModuleTests(unittest.TestCase):
 
     def test_probe_stage2_seed_bootability_smoke_legacy_donor_uses_remainder_partition(self):
         module = load_handoff_module()
-
-        tf_coils = [
-            SimpleNamespace(current=self._fixed_current(8.0e4))
-            for _ in range(20)
-        ]
-        banana_coils = [
-            SimpleNamespace(current=self._fixed_current(1.1e4)),
-            SimpleNamespace(current=self._fixed_current(-1.1e4)),
-        ]
-        fake_bs = SimpleNamespace(coils=[*tf_coils, *banana_coils])
+        tf_coils, fake_bs, stage2_artifact_results = self._bootability_smoke_inputs(
+            include_proxy_vf=False
+        )
         fake_surface = SimpleNamespace(nfp=5)
         recorded = {}
 
@@ -483,14 +510,7 @@ class HandoffModuleTests(unittest.TestCase):
         ):
             status = module.probe_stage2_seed_bootability(
                 stage2_bs_path="/tmp/legacy/biot_savart_opt.json",
-                stage2_artifact_results={
-                    "PLASMA_SURF_FILENAME": "demo.nc",
-                    "TF_CURRENT_A": 8.0e4,
-                    "MAJOR_RADIUS": 0.915,
-                    "TOROIDAL_FLUX": 0.24,
-                    "banana_surf_radius": 0.21,
-                    "CURVATURE_THRESHOLD": 100.0,
-                },
+                stage2_artifact_results=stage2_artifact_results,
                 plasma_surf_filename="demo.nc",
                 equilibria_dir="/tmp/equilibria",
                 num_tf_coils=20,
@@ -515,18 +535,9 @@ class HandoffModuleTests(unittest.TestCase):
     def test_probe_stage2_seed_bootability_smoke_wataru_donor_preserves_extra_coil_metadata(self):
         module = load_handoff_module()
         current_contracts = importlib.import_module("banana_opt.current_contracts")
-
-        tf_coils = [
-            SimpleNamespace(current=self._fixed_current(8.0e4))
-            for _ in range(20)
-        ]
-        banana_coils = [
-            SimpleNamespace(current=self._fixed_current(1.1e4)),
-            SimpleNamespace(current=self._fixed_current(-1.1e4)),
-        ]
-        proxy_coils = [SimpleNamespace(current=self._fixed_current(9.0e3))]
-        vf_coils = [SimpleNamespace(current=self._fixed_current(-5.0e2))]
-        fake_bs = SimpleNamespace(coils=[*tf_coils, *banana_coils, *proxy_coils, *vf_coils])
+        tf_coils, fake_bs, stage2_artifact_results = self._bootability_smoke_inputs(
+            include_proxy_vf=True
+        )
         fake_surface = SimpleNamespace(nfp=5)
         recorded = {}
 
@@ -578,21 +589,7 @@ class HandoffModuleTests(unittest.TestCase):
         ):
             status = module.probe_stage2_seed_bootability(
                 stage2_bs_path="/tmp/wataru/biot_savart_opt.json",
-                stage2_artifact_results={
-                    "PLASMA_SURF_FILENAME": "demo.nc",
-                    "TF_CURRENT_A": 8.0e4,
-                    "NUM_TF_COILS": 20,
-                    "NUM_BANANA_COILS": 2,
-                    "NUM_PROXY_COILS": 1,
-                    "NUM_VF_COILS": 1,
-                    "FINITE_CURRENT_MODE": "wataru_proxy_field",
-                    "PROXY_PLASMA_CURRENT_A": 9.0e3,
-                    "VF_CURRENT_A": 5.0e2,
-                    "MAJOR_RADIUS": 0.915,
-                    "TOROIDAL_FLUX": 0.24,
-                    "banana_surf_radius": 0.21,
-                    "CURVATURE_THRESHOLD": 100.0,
-                },
+                stage2_artifact_results=stage2_artifact_results,
                 plasma_surf_filename="demo.nc",
                 equilibria_dir="/tmp/equilibria",
                 num_tf_coils=20,
