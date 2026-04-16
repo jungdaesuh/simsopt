@@ -15,6 +15,7 @@ from .hardware_constraint_schema import build_bootability_recovery_payload_field
 from workflow_helpers import canonical_stage2_iota_constraint_weight
 
 DEFAULT_LEGACY_BANANA_INIT_CURRENT_A = 1.0e4
+_BOOZER_CURRENT_CONVENTION_INFERENCE_ABS_TOL = 1.0e-12
 
 
 def _upgrade_legacy_banana_current_metadata(upgraded_results: dict) -> None:
@@ -95,6 +96,40 @@ def _upgrade_legacy_stage2_iota_report_metadata(upgraded_results: dict) -> None:
     )
 
 
+def _infer_legacy_boozer_current_convention(
+    *,
+    finite_current_mode: str,
+    plasma_current_A,
+    boozer_I,
+) -> str:
+    resolved_boozer_current_convention = resolve_boozer_current_convention(
+        finite_current_mode
+    )
+    if plasma_current_A is None or boozer_I is None:
+        return resolved_boozer_current_convention
+
+    expected_boozer_I_by_convention = {
+        "mu0": physical_current_to_boozer_I(plasma_current_A, convention="mu0"),
+        "mu0_over_2pi": physical_current_to_boozer_I(
+            plasma_current_A,
+            convention="mu0_over_2pi",
+        ),
+    }
+    matching_conventions = {
+        convention
+        for convention, expected_boozer_I in expected_boozer_I_by_convention.items()
+        if math.isclose(
+            float(boozer_I),
+            expected_boozer_I,
+            rel_tol=0.0,
+            abs_tol=_BOOZER_CURRENT_CONVENTION_INFERENCE_ABS_TOL,
+        )
+    }
+    if len(matching_conventions) != 1:
+        return resolved_boozer_current_convention
+    return next(iter(matching_conventions))
+
+
 def _upgrade_legacy_finite_current_metadata(upgraded_results: dict) -> None:
     finite_current_mode = upgraded_results.get("FINITE_CURRENT_MODE")
     if finite_current_mode in {None, ""}:
@@ -102,38 +137,12 @@ def _upgrade_legacy_finite_current_metadata(upgraded_results: dict) -> None:
         upgraded_results["FINITE_CURRENT_MODE"] = finite_current_mode
     recorded_boozer_current_convention = upgraded_results.get("BOOZER_CURRENT_CONVENTION")
     if recorded_boozer_current_convention in {None, ""}:
-        plasma_current_A = upgraded_results.get("PLASMA_CURRENT_A")
-        boozer_I = upgraded_results.get("BOOZER_I")
-        resolved_boozer_current_convention = resolve_boozer_current_convention(
-            finite_current_mode
-        )
-        if plasma_current_A is not None and boozer_I is not None:
-            expected_mu0_boozer_I = physical_current_to_boozer_I(
-                plasma_current_A,
-                convention="mu0",
-            )
-            expected_mu0_over_2pi_boozer_I = physical_current_to_boozer_I(
-                plasma_current_A,
-                convention="mu0_over_2pi",
-            )
-            matches_mu0 = math.isclose(
-                float(boozer_I),
-                expected_mu0_boozer_I,
-                rel_tol=0.0,
-                abs_tol=1.0e-12,
-            )
-            matches_mu0_over_2pi = math.isclose(
-                float(boozer_I),
-                expected_mu0_over_2pi_boozer_I,
-                rel_tol=0.0,
-                abs_tol=1.0e-12,
-            )
-            if matches_mu0 and not matches_mu0_over_2pi:
-                resolved_boozer_current_convention = "mu0"
-            elif matches_mu0_over_2pi and not matches_mu0:
-                resolved_boozer_current_convention = "mu0_over_2pi"
         upgraded_results["BOOZER_CURRENT_CONVENTION"] = (
-            resolved_boozer_current_convention
+            _infer_legacy_boozer_current_convention(
+                finite_current_mode=finite_current_mode,
+                plasma_current_A=upgraded_results.get("PLASMA_CURRENT_A"),
+                boozer_I=upgraded_results.get("BOOZER_I"),
+            )
         )
     else:
         upgraded_results["BOOZER_CURRENT_CONVENTION"] = recorded_boozer_current_convention
