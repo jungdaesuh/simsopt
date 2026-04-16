@@ -15,6 +15,16 @@ in the Boozer solve path, `SquaredFlux`, `Derivative` composition, the Python
 `BiotSavart` VJP layer, and `MagneticFieldSum`. Those addenda are recorded
 below and should be considered live TODOs.
 
+Update `2026-04-16` (second pass): a deeper validation pass against HEAD
+confirmed the above and surfaced additional concrete items in the distance
+accumulator allocations, the `Curve` Python derivative path, the ALM driver's
+defensive-copy discipline, a `boozer_surface_residual` variable-shadowing
+correctness trap, and a partial frontier-lane parallelism opportunity. Those
+are recorded as addenda H through L. Claims that did not survive validation
+(frontier atomic writes, curve kappa/torsion caching, `BiotSavart`
+current-change cache invalidation, Pareto early-exit, and a naive drop-in
+`lu_factor/lu_solve` swap) are explicitly excluded.
+
 ## Priority Legend
 
 | Impact | Meaning |
@@ -426,12 +436,147 @@ belong ahead of items 6 through 12 on a pure gain-to-risk basis.
 - Correctness angle:
   - Preserve threshold behavior for positive and negative currents.
 
+### H. Stop over-allocating VJP accumulators in curve distance objectives
+
+- Impact: Medium to High
+- Effort: Small
+- Quick win: Yes
+- Why this matters: `CurveCurveDistance.dJ()` and `CurveSurfaceDistance.dJ()`
+  each allocate `np.zeros_like(c.gamma())` and `np.zeros_like(c.gammadash())`
+  for *every* curve on every call, but only the curves appearing in the
+  candidate-pair list actually receive writes. On single-stage banana
+  configurations with tens of coils and only a handful of active candidate
+  pairs, most of the allocation is dead weight and it happens hundreds of
+  times per ALM outer iteration.
+- Files:
+  - `src/simsopt/geo/curveobjectives.py:243-258`
+  - `src/simsopt/geo/curveobjectives.py:347-361`
+- Todo:
+  - Key the accumulator on the set of curve indices actually touched by
+    candidates, either via a dict keyed on `i`/`j` or a reusable persistent
+    buffer zeroed only for touched indices.
+  - Hoist the accumulator allocation out of `dJ()` when the set of active
+    curves is stable across a call (reset via `recompute_bell`).
+- Correctness angle:
+  - Keep the existing scatter semantics; the final `dgamma_by_dcoeff_vjp` /
+    `dgammadash_by_dcoeff_vjp` sum must still produce identical gradients.
+
+### I. Vectorize the Python DOF loop in `Curve.dkappadash_by_dcoeff`
+
+- Impact: Medium
+- Effort: Small
+- Quick win: Yes
+- Why this matters: `dkappadash_by_dcoeff` iterates `for i in range(self.num_dofs())`
+  and redoes a full set of cross / inner products per DOF. For a coil with
+  several tens of Fourier DOFs, this is pure Python-level iteration over work
+  that is broadcastable.
+- Files:
+  - `src/simsopt/geo/curve.py:357-411`
+- Todo:
+  - Replace the per-DOF Python loop with a single broadcasted NumPy
+    computation over the last axis of `dgamma_dcoeff_` / `d2gamma_dcoeff_` /
+    `d3gamma_dcoeff_`.
+  - Keep the expression grouped exactly like the current loop body so the
+    change is a pure rewrite.
+- Correctness angle:
+  - Add a numerical regression test against the current output before
+    changing anything, since the expression is non-trivial.
+
+### J. Clean up ALM driver defensive-copy discipline
+
+- Impact: Medium
+- Effort: Small to Medium
+- Quick win: Yes
+- Why this matters: the ALM driver performs `np.asarray(..., dtype=float).copy()`
+  and similar defensive copies at many inner-loop entry points, and uses
+  `deepcopy(fallback_evaluation)` on the sanitization path. Each inner
+  iteration touches several of these. When the caller already provides a
+  contiguous `float64` array, the `asarray` is a no-op but the `.copy()` is
+  not.
+- Files:
+  - `examples/single_stage_optimization/alm_utils.py:130`
+  - `examples/single_stage_optimization/alm_utils.py:450`
+  - `examples/single_stage_optimization/alm_utils.py:868-874`
+  - `examples/single_stage_optimization/alm_utils.py:1198-1232`
+  - `examples/single_stage_optimization/alm_utils.py:1273`
+  - `examples/single_stage_optimization/alm_utils.py:1392-1412`
+  - `examples/single_stage_optimization/alm_utils.py:1450`
+  - `examples/single_stage_optimization/alm_utils.py:1504-1509`
+  - `examples/single_stage_optimization/alm_utils.py:1625`
+  - `examples/single_stage_optimization/alm_utils.py:1658`
+  - `examples/single_stage_optimization/alm_utils.py:1742`
+  - `examples/single_stage_optimization/alm_utils.py:1830`
+- Todo:
+  - Copy only at persistence / checkpoint boundaries (trust-region snapshots,
+    outer-iteration state dumps). At API boundaries inside the hot loop,
+    prefer `np.ascontiguousarray(..., dtype=float)` without `.copy()`.
+  - Replace `deepcopy(fallback_evaluation)` with a shallow dict rebuild that
+    copies only the arrays that are actually mutated downstream.
+  - Cache `_build_box_bounds` output keyed on `(normalized_trust_radius,
+    id(center))` since the trust radius does not change every inner call.
+- Correctness angle:
+  - Document which fields are owned versus borrowed so future readers know
+    which shallow references are safe.
+
+### K. Eliminate `d2B2_dcdc` variable shadowing in `boozer_surface_residual`
+
+- Impact: Low on runtime, Medium on maintainability and correctness risk
+- Effort: Small
+- Quick win: Yes
+- Why this matters: `d2B2_dcdc` is assigned with one semantic in the
+  unweighted branch and then re-assigned with a different semantic inside the
+  `weight_inv_modB` branch. The reader has to trace carefully to confirm
+  nothing downstream uses the pre-shadow value. This is a live correctness
+  trap when the second-order path is next edited.
+- Files:
+  - `src/simsopt/geo/surfaceobjectives.py:493-533`
+- Todo:
+  - Split into clearly named locals such as `d2B2_dcdc_base` and
+    `d2B2_dcdc_weighted`, and thread them explicitly through the downstream
+    expressions.
+  - While the branch is being touched, collapse the unnecessary `.copy()`
+    calls on `rtil`, `drtil_dc`, `drtil_diota`, and `drtil_dG` when the
+    returned arrays are immediately consumed.
+- Correctness angle:
+  - Pair the rename with a regression test that exercises both the weighted
+    and unweighted paths at `derivatives=2`.
+
+### L. Enable partial frontier-lane parallelism within warm-start groups
+
+- Impact: Medium to High on wallclock
+- Effort: Medium
+- Quick win: No
+- Why this matters: the critic correctly flagged that naive cross-lane
+  parallelism is unsafe because `reuse_latest_certified` makes later lanes
+  depend on earlier certified lanes. However, lanes that do not opt into
+  `reuse_latest_certified`, and groups of lanes that share a common
+  pre-certified base warm start, are independent and can be executed in
+  parallel.
+- Files:
+  - `examples/single_stage_optimization/run_single_stage_frontier_campaign.py:329-344`
+  - `examples/single_stage_optimization/run_single_stage_frontier_campaign.py:715-788`
+- Todo:
+  - Partition `lane_specs` into warm-start-independent groups based on the
+    mode and the base path returned by `resolve_frontier_lane_warm_start`.
+  - Within each group, execute with `concurrent.futures.ProcessPoolExecutor`
+    or `joblib.Parallel`, merging per-lane archive files at group boundaries.
+  - Preserve the existing serial semantics when all lanes share a single
+    latest-certified chain.
+- Correctness angle:
+  - Keep archive writes atomic (already using `mkstemp` + `os.replace`), and
+    ensure per-lane result files never collide by including the lane id in
+    the filename.
+
 ## Suggested Patch Order
 
 `2026-04-16` update: treat addenda `A`, `B`, `D`, `E`, and `F` as better
 near-term patch candidates than the old long-horizon items 9 through 12. Treat
 addendum `C` as the highest-priority memory fix if the Boozer LS path is
-showing OOM or severe RSS growth.
+showing OOM or severe RSS growth. Addenda `H`, `I`, and `J` are additional
+small-effort quick wins that pair naturally with the earlier items. Addendum
+`K` should go in with any edit to the Boozer LS second-order path. Addendum
+`L` is the highest-wallclock frontier campaign win once the base path is
+stabilized.
 
 1. Item 1: split optimizer fast path from diagnostics.
 2. Item 2: stop hot-loop `shortest_distance()` usage.
@@ -457,3 +602,31 @@ showing OOM or severe RSS growth.
   - exact Boozer Newton / adjoint factor reuse
   - `Derivative` accumulation semantics after switching away from Python `sum(...)`
   - stage 2 smoothed distance sign / gradient conventions
+  - curve distance VJP accumulator output equivalence (addendum H)
+  - `Curve.dkappadash_by_dcoeff` vectorization equivalence (addendum I)
+  - weighted and unweighted `boozer_surface_residual` second-order paths
+    (addenda C and K)
+  - ALM evaluation-dict ownership after copy-pattern cleanup (addendum J)
+  - frontier-lane partitioning correctness against `reuse_latest_certified`
+    semantics (addendum L)
+
+## Claims Intentionally Excluded
+
+These were flagged during the deep dive but did not survive validation against
+HEAD. They are recorded here so future reviewers do not re-raise them:
+
+- Frontier campaign writes being corrupt-prone. The campaign path already
+  uses `mkstemp` + `os.replace` atomic writes in
+  `banana_opt/frontier_engine_base.py` and `banana_opt/frontier_campaign_reporting.py`.
+- `Curve.kappa()` and `Curve.torsion()` lacking caching. Both are cached via
+  `check_the_cache` in `src/simsoptpp/curve.h`.
+- `BiotSavart` returning stale fields after coil current changes. The Python
+  wrapper's `MagneticField.recompute_bell(...)` path clears the field cache,
+  and the C++ side invalidates the per-coil cache on `set_points_cart`.
+- Frontier Pareto dominance lacking an early exit. The per-candidate check in
+  `banana_opt/frontier_dominance.py` already returns on the first failing
+  metric.
+- Swapping the exact Boozer Newton to `scipy.linalg.lu_factor` /
+  `lu_solve` as a drop-in change. `forward_backward(...)` in
+  `src/simsopt/objectives/utilities.py` explicitly consumes `(P, L, U)`; any
+  refactor must update that contract as well (captured in addendum B).
