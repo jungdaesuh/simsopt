@@ -7411,6 +7411,254 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertEqual(run_dict["iota"], 0.15)
         self.assertEqual(run_dict["G"], 1.0)
 
+    def test_snapshot_to_pytree_accepts_deferred_surface_parent_graph(self):
+        module = self.load_module()
+        from simsopt.geo.surfacerzfourier import SurfaceRZFourier
+
+        quadpoints_phi = np.linspace(0.0, 1.0, 4, endpoint=False)
+        quadpoints_theta = np.linspace(0.0, 1.0, 5, endpoint=False)
+        template_surface = module.SurfaceXYZTensorFourier(
+            mpol=1,
+            ntor=1,
+            nfp=1,
+            stellsym=False,
+            quadpoints_phi=quadpoints_phi,
+            quadpoints_theta=quadpoints_theta,
+        )
+        deferred_surface = module.DeferredSurfaceXYZTensorFourier(
+            mpol=1,
+            ntor=1,
+            nfp=1,
+            stellsym=False,
+            quadpoints_phi=quadpoints_phi,
+            quadpoints_theta=quadpoints_theta,
+            dofs=np.zeros_like(template_surface.x),
+        )
+        vessel_surface = SurfaceRZFourier(
+            nfp=1,
+            stellsym=False,
+            mpol=1,
+            ntor=0,
+            quadpoints_phi=quadpoints_phi,
+            quadpoints_theta=quadpoints_theta,
+        )
+        vessel_surface.set_rc(0, 0, 1.0)
+        vessel_surface.set_rc(1, 0, 0.1)
+        vessel_surface.set_zs(1, 0, 0.1)
+        vessel_surface.fix_all()
+        objective = SurfaceSurfaceDistance(
+            deferred_surface,
+            vessel_surface,
+            minimum_distance=0.05,
+        )
+
+        class _JF:
+            def __init__(self, composite_objective):
+                self._objective = composite_objective
+
+            @property
+            def x(self):
+                return self._objective.x
+
+            def J(self):
+                return jnp.asarray(0.25, dtype=jnp.float64)
+
+            def dJ(self):
+                return jnp.linspace(
+                    0.0,
+                    1.0,
+                    self._objective.x.size,
+                    dtype=jnp.float64,
+                )
+
+        class _BoozerSurface:
+            def __init__(self, surface):
+                self.surface = surface
+                self.res = {"success": True, "iter": 1, "iota": 9.9, "G": 8.8}
+
+            def get_solved_runtime_state(self):
+                return types.SimpleNamespace(
+                    sdofs=jnp.asarray(np.arange(template_surface.x.size), dtype=jnp.float64),
+                    iota=jnp.asarray(0.15, dtype=jnp.float64),
+                    G=jnp.asarray(1.0, dtype=jnp.float64),
+                )
+
+        class _Curve:
+            def gamma(self):
+                return np.ones((4, 3))
+
+            def gammadash(self):
+                return np.ones((4, 3)) * 0.1
+
+        class _Current:
+            def get_value(self):
+                return 1.0
+
+        class _Coil:
+            def __init__(self):
+                self.curve = _Curve()
+                self.current = _Current()
+
+        bs_obj = types.SimpleNamespace(coils=[_Coil()])
+
+        with patch.object(
+            module, "surface_self_intersection_check_available", return_value=True
+        ):
+            dofs, run_dict, _ = module.snapshot_to_pytree(
+                _JF(objective),
+                _BoozerSurface(deferred_surface),
+                bs_obj,
+                num_tf_coils=1,
+            )
+
+        np.testing.assert_allclose(dofs, objective.x)
+        np.testing.assert_allclose(
+            run_dict["sdofs"],
+            np.arange(template_surface.x.size, dtype=np.float64),
+        )
+        self.assertEqual(run_dict["iota"], 0.15)
+        self.assertEqual(run_dict["G"], 1.0)
+
+    def test_snapshot_to_pytree_hostifies_tf_currents_under_strict_transfer_guard(self):
+        module = self.load_module()
+        host_calls = {"float": 0}
+        original_host_float = module.host_float
+        objective_value = jax.device_put(np.asarray(2.5, dtype=np.float64))
+        objective_grad = jax.device_put(np.asarray([0.1, 0.2], dtype=np.float64))
+        solved_sdofs = jax.device_put(np.asarray([3.0, 4.0], dtype=np.float64))
+        solved_iota = jax.device_put(np.asarray(0.15, dtype=np.float64))
+        solved_G = jax.device_put(np.asarray(1.0, dtype=np.float64))
+
+        def counted_host_float(value):
+            host_calls["float"] += 1
+            return original_host_float(value)
+
+        class _JF:
+            x = np.array([1.0, 2.0], dtype=np.float64)
+
+            def J(self):
+                return objective_value
+
+            def dJ(self):
+                return objective_grad
+
+        class _BoozerSurface:
+            def __init__(self):
+                self.surface = types.SimpleNamespace()
+                self.res = {"success": True}
+
+            def get_solved_runtime_state(self):
+                return types.SimpleNamespace(
+                    sdofs=solved_sdofs,
+                    iota=solved_iota,
+                    G=solved_G,
+                )
+
+        class _Curve:
+            def gamma(self):
+                return np.ones((4, 3))
+
+            def gammadash(self):
+                return np.ones((4, 3)) * 0.1
+
+        class _Current:
+            def __init__(self, value):
+                self._value = jax.device_put(np.asarray(value, dtype=np.float64))
+
+            def get_value(self):
+                return self._value
+
+        class _Coil:
+            def __init__(self, current_value):
+                self.curve = _Curve()
+                self.current = _Current(current_value)
+
+        bs_obj = types.SimpleNamespace(coils=[_Coil(100.0), _Coil(200.0)])
+
+        with patch.object(module, "host_float", counted_host_float), patch.object(
+            module, "surface_self_intersection_check_available", return_value=True
+        ):
+            with jax.transfer_guard("disallow"):
+                _, _, static_config = module.snapshot_to_pytree(
+                    _JF(),
+                    _BoozerSurface(),
+                    bs_obj,
+                    num_tf_coils=2,
+                )
+
+        self.assertEqual(static_config["tf_currents"], [100.0, 200.0])
+        self.assertGreaterEqual(host_calls["float"], 5)
+
+    def test_host_curve_max_curvature_allows_strict_transfer_guard(self):
+        module = self.load_module()
+        host_calls = {"array": 0}
+        original_host_array = module.host_array
+
+        def counted_host_array(value, *, dtype=np.float64):
+            host_calls["array"] += 1
+            return original_host_array(value, dtype=dtype)
+
+        class _Curve:
+            def kappa(self):
+                return jax.device_put(np.asarray([4.0, 6.0, 5.0], dtype=np.float64))
+
+        with patch.object(module, "host_array", counted_host_array):
+            with jax.transfer_guard("disallow"):
+                max_curvature = module._host_curve_max_curvature(_Curve())
+
+        self.assertEqual(max_curvature, 6.0)
+        self.assertGreaterEqual(host_calls["array"], 1)
+
+    def test_evaluate_single_stage_artifact_hardware_snapshot_hostifies_scalars(self):
+        module = self.load_module()
+        host_calls = {"float": 0}
+        original_host_float = module.host_float
+
+        def counted_host_float(value):
+            host_calls["float"] += 1
+            return original_host_float(value)
+
+        with patch.object(module, "host_float", counted_host_float):
+            with jax.transfer_guard("disallow"):
+                snapshot = module.evaluate_single_stage_artifact_hardware_snapshot(
+                    curve_curve_min_dist=jax.device_put(
+                        np.asarray(0.20, dtype=np.float64)
+                    ),
+                    cc_dist=jax.device_put(np.asarray(0.05, dtype=np.float64)),
+                    curve_surface_min_dist=jax.device_put(
+                        np.asarray(0.30, dtype=np.float64)
+                    ),
+                    cs_dist=jax.device_put(np.asarray(0.04, dtype=np.float64)),
+                    surface_vessel_min_dist=jax.device_put(
+                        np.asarray(0.35, dtype=np.float64)
+                    ),
+                    ss_dist=jax.device_put(np.asarray(0.04, dtype=np.float64)),
+                    max_curvature=jax.device_put(np.asarray(6.0, dtype=np.float64)),
+                    curvature_threshold=jax.device_put(
+                        np.asarray(10.0, dtype=np.float64)
+                    ),
+                    coil_length=jax.device_put(np.asarray(1.5, dtype=np.float64)),
+                    length_target=jax.device_put(np.asarray(2.0, dtype=np.float64)),
+                    banana_current_A=jax.device_put(
+                        np.asarray(123.0, dtype=np.float64)
+                    ),
+                    banana_current_max_A=jax.device_put(
+                        np.asarray(500.0, dtype=np.float64)
+                    ),
+                    tf_current_A=jax.device_put(
+                        np.asarray(80000.0, dtype=np.float64)
+                    ),
+                    tf_current_limit_A=jax.device_put(
+                        np.asarray(90000.0, dtype=np.float64)
+                    ),
+                )
+
+        self.assertTrue(snapshot["artifact_hardware_status"]["success"])
+        self.assertEqual(snapshot["max_curvature"], 6.0)
+        self.assertEqual(snapshot["banana_current_A"], 123.0)
+        self.assertEqual(snapshot["tf_current_A"], 80000.0)
+        self.assertGreaterEqual(host_calls["float"], 14)
+
 
 class BoozerFallbackLBFGSBTests(unittest.TestCase):
     """Issue #2: elevated-J fallback must not flush L-BFGS-B Hessian memory."""

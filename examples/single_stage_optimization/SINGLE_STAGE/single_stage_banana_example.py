@@ -417,6 +417,14 @@ def _summarize_host_vector(vector):
     }
 
 
+def _optional_host_float(value):
+    return None if value is None else host_float(value)
+
+
+def _host_curve_max_curvature(curve):
+    return float(np.max(host_array(curve.kappa(), dtype=np.float64)))
+
+
 def _build_target_lane_value_and_grad_record(
     *,
     value,
@@ -4077,62 +4085,48 @@ def evaluate_single_stage_artifact_hardware_snapshot(
     tf_current_A,
     tf_current_limit_A,
 ):
+    snapshot = {
+        "curve_curve_min_dist": _optional_host_float(curve_curve_min_dist),
+        "cc_dist": _optional_host_float(cc_dist),
+        "curve_surface_min_dist": _optional_host_float(curve_surface_min_dist),
+        "cs_dist": _optional_host_float(cs_dist),
+        "surface_vessel_min_dist": _optional_host_float(surface_vessel_min_dist),
+        "ss_dist": _optional_host_float(ss_dist),
+        "max_curvature": _optional_host_float(max_curvature),
+        "curvature_threshold": _optional_host_float(curvature_threshold),
+        "coil_length": _optional_host_float(coil_length),
+        "length_target": _optional_host_float(length_target),
+        "banana_current_A": _optional_host_float(banana_current_A),
+        "banana_current_max_A": _optional_host_float(banana_current_max_A),
+        "tf_current_A": _optional_host_float(tf_current_A),
+        "tf_current_limit_A": _optional_host_float(tf_current_limit_A),
+    }
     threshold_overrides = build_threshold_overrides(
         (
-            ("coil_coil_spacing", cc_dist),
-            ("coil_surface_spacing", cs_dist),
-            ("surface_vessel_spacing", ss_dist),
-            ("max_curvature", curvature_threshold),
-            ("coil_length", length_target),
-            ("banana_current", banana_current_max_A),
-            ("tf_current", tf_current_limit_A),
+            ("coil_coil_spacing", snapshot["cc_dist"]),
+            ("coil_surface_spacing", snapshot["cs_dist"]),
+            ("surface_vessel_spacing", snapshot["ss_dist"]),
+            ("max_curvature", snapshot["curvature_threshold"]),
+            ("coil_length", snapshot["length_target"]),
+            ("banana_current", snapshot["banana_current_max_A"]),
+            ("tf_current", snapshot["tf_current_limit_A"]),
         )
     )
     measured_values = {
-        "coil_coil_spacing": curve_curve_min_dist,
-        "coil_surface_spacing": curve_surface_min_dist,
-        "surface_vessel_spacing": surface_vessel_min_dist,
-        "max_curvature": max_curvature,
-        "coil_length": coil_length,
-        "banana_current": banana_current_A,
-        "tf_current": tf_current_A,
+        "coil_coil_spacing": snapshot["curve_curve_min_dist"],
+        "coil_surface_spacing": snapshot["curve_surface_min_dist"],
+        "surface_vessel_spacing": snapshot["surface_vessel_min_dist"],
+        "max_curvature": snapshot["max_curvature"],
+        "coil_length": snapshot["coil_length"],
+        "banana_current": snapshot["banana_current_A"],
+        "tf_current": snapshot["tf_current_A"],
     }
     artifact_hardware_status = build_hardware_constraint_status(
         measured_values,
         applies_to="artifact",
         threshold_overrides=threshold_overrides,
     )
-    return {
-        "curve_curve_min_dist": (
-            None if curve_curve_min_dist is None else float(curve_curve_min_dist)
-        ),
-        "cc_dist": None if cc_dist is None else float(cc_dist),
-        "curve_surface_min_dist": (
-            None if curve_surface_min_dist is None else float(curve_surface_min_dist)
-        ),
-        "cs_dist": None if cs_dist is None else float(cs_dist),
-        "surface_vessel_min_dist": (
-            None if surface_vessel_min_dist is None else float(surface_vessel_min_dist)
-        ),
-        "ss_dist": None if ss_dist is None else float(ss_dist),
-        "max_curvature": None if max_curvature is None else float(max_curvature),
-        "curvature_threshold": (
-            None if curvature_threshold is None else float(curvature_threshold)
-        ),
-        "coil_length": None if coil_length is None else float(coil_length),
-        "length_target": None if length_target is None else float(length_target),
-        "banana_current_A": (
-            None if banana_current_A is None else float(banana_current_A)
-        ),
-        "banana_current_max_A": (
-            None if banana_current_max_A is None else float(banana_current_max_A)
-        ),
-        "tf_current_A": None if tf_current_A is None else float(tf_current_A),
-        "tf_current_limit_A": (
-            None if tf_current_limit_A is None else float(tf_current_limit_A)
-        ),
-        "artifact_hardware_status": artifact_hardware_status,
-    }
+    return {**snapshot, "artifact_hardware_status": artifact_hardware_status}
 
 
 def _failed_single_stage_alm_evaluation(
@@ -4289,19 +4283,19 @@ def evaluate_single_stage_alm_problem(
         banana_current_threshold=banana_current_threshold,
     )
     trial_hardware_snapshot = evaluate_single_stage_artifact_hardware_snapshot(
-        curve_curve_min_dist=float(JCurveCurve.shortest_distance()),
+        curve_curve_min_dist=JCurveCurve.shortest_distance(),
         cc_dist=curve_curve_distance,
-        curve_surface_min_dist=float(JCurveSurface.shortest_distance()),
+        curve_surface_min_dist=JCurveSurface.shortest_distance(),
         cs_dist=curve_surface_distance,
         surface_vessel_min_dist=(
-            None if JSurfSurf is None else float(JSurfSurf.shortest_distance())
+            None if JSurfSurf is None else JSurfSurf.shortest_distance()
         ),
         ss_dist=surface_vessel_distance,
-        max_curvature=float(np.max(banana_curve.kappa())),
+        max_curvature=_host_curve_max_curvature(banana_curve),
         curvature_threshold=curvature_threshold,
-        coil_length=float(curvelength.J()),
+        coil_length=curvelength.J(),
         length_target=coil_length_threshold,
-        banana_current_A=float(banana_current.get_value()),
+        banana_current_A=banana_current.get_value(),
         banana_current_max_A=banana_current_threshold,
         tf_current_A=tf_current_A,
         tf_current_limit_A=tf_current_limit_A,
@@ -7499,7 +7493,7 @@ def snapshot_to_pytree(JF, boozer_surface, bs, *, num_tf_coils):
         "num_tf_coils": num_tf_coils,
         "tf_gamma": [c.curve.gamma().copy() for c in tf_coils],
         "tf_gammadash": [c.curve.gammadash().copy() for c in tf_coils],
-        "tf_currents": [float(c.current.get_value()) for c in tf_coils],
+        "tf_currents": [host_float(c.current.get_value()) for c in tf_coils],
     }
 
     return coil_dofs, run_dict, static_config
@@ -8049,7 +8043,7 @@ if __name__ == "__main__":
         iota_cls,
         benchmark_mode=args.benchmark_mode,
     )
-    initial_max_curvature = np.max(banana_curve.kappa())
+    initial_max_curvature = _host_curve_max_curvature(banana_curve)
     _record_timing(
         timings,
         "initial_artifacts_s",
@@ -8584,7 +8578,7 @@ if __name__ == "__main__":
                 iota_cls,
                 benchmark_mode=args.benchmark_mode,
             )
-            final_max_curvature = np.max(banana_curve.kappa())
+            final_max_curvature = _host_curve_max_curvature(banana_curve)
             print(f"Volume: {final_volume}")
             print(f"Iota: {final_iota}")
             print(f"Max Curvature: {final_max_curvature}")
@@ -9355,7 +9349,7 @@ if __name__ == "__main__":
                 iota_cls,
                 benchmark_mode=args.benchmark_mode,
             )
-            final_max_curvature = np.max(banana_curve.kappa())
+            final_max_curvature = _host_curve_max_curvature(banana_curve)
             print(f"Volume: {final_volume}")
             print(f"Iota: {final_iota}")
             print(f"Max Curvature: {final_max_curvature}")
@@ -9479,7 +9473,7 @@ if __name__ == "__main__":
                     curvature_threshold=CURVATURE_THRESHOLD,
                     coil_length=final_coil_length,
                     length_target=length_target,
-                    banana_current_A=float(banana_coils[0].current.get_value()),
+                    banana_current_A=banana_coils[0].current.get_value(),
                     banana_current_max_A=args.banana_current_max_A,
                     tf_current_A=stage2_tf_current_A,
                     tf_current_limit_A=TF_CURRENT_HARD_LIMIT_A,

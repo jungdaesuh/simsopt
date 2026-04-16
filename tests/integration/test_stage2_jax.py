@@ -5667,6 +5667,221 @@ class TestStage2OptimizerContract:
         assert host_calls["array"] >= 1
         assert host_calls["float"] >= 1
 
+    def test_compute_stage2_max_curvature_value_allows_strict_transfer_guard(
+        self, monkeypatch
+    ):
+        stage2_script = _load_stage2_script_module()
+        host_calls = {"array": 0}
+        original_host_array = stage2_script.host_array
+
+        def counted_host_array(value, *, dtype=np.float64):
+            host_calls["array"] += 1
+            return original_host_array(value, dtype=dtype)
+
+        monkeypatch.setattr(stage2_script, "host_array", counted_host_array)
+
+        class _Curve:
+            def kappa(self):
+                return jax.device_put(np.asarray([4.0, 6.0, 5.0], dtype=np.float64))
+
+        jc = types.SimpleNamespace(curve=_Curve())
+
+        with jax.transfer_guard("disallow"):
+            value = stage2_script.compute_stage2_max_curvature_value(jc)
+
+        assert value == pytest.approx(6.0)
+        assert host_calls["array"] >= 1
+
+    def test_capture_stage2_feasible_partial_candidate_allows_strict_transfer_guard(
+        self, monkeypatch
+    ):
+        stage2_script = _load_stage2_script_module()
+        captured_hardware_args = {}
+        host_calls = {"float": 0, "array": 0}
+        original_host_float = stage2_script.host_float
+        original_host_array = stage2_script.host_array
+
+        def counted_host_float(value):
+            host_calls["float"] += 1
+            return original_host_float(value)
+
+        def counted_host_array(value, *, dtype=np.float64):
+            host_calls["array"] += 1
+            return original_host_array(value, dtype=dtype)
+
+        def fake_hardware_status(**kwargs):
+            captured_hardware_args.update(kwargs)
+            return {"success": True, "violations": [], "self_intersecting": False}
+
+        monkeypatch.setattr(stage2_script, "host_float", counted_host_float)
+        monkeypatch.setattr(stage2_script, "host_array", counted_host_array)
+        monkeypatch.setattr(
+            stage2_script,
+            "_evaluate_stage2_artifact_hardware_status",
+            fake_hardware_status,
+        )
+
+        class _ScalarObjective:
+            def __init__(self, value):
+                self._value = jax.device_put(np.asarray(value, dtype=np.float64))
+                self.x = jax.device_put(np.asarray([1.0, -2.0], dtype=np.float64))
+
+            def J(self):
+                return self._value
+
+        class _Distance(_ScalarObjective):
+            def shortest_distance(self):
+                return self._value
+
+        class _Curve:
+            def kappa(self):
+                return jax.device_put(np.asarray([1.0, 3.0, 2.0], dtype=np.float64))
+
+        with jax.transfer_guard("disallow"):
+            candidate, hardware_status = (
+                stage2_script.capture_stage2_feasible_partial_candidate(
+                    _ScalarObjective(1.25),
+                    _ScalarObjective(1.5),
+                    _Distance(0.2),
+                    _Curve(),
+                    2.0,
+                    0.05,
+                    10.0,
+                    Jcsdist=_Distance(0.3),
+                    coil_surface_threshold=0.04,
+                    plasma_vessel_min_dist=0.08,
+                    plasma_vessel_threshold=0.04,
+                    banana_current_A=jax.device_put(
+                        np.asarray(123.0, dtype=np.float64)
+                    ),
+                    banana_current_threshold=200.0,
+                    tf_current_A=jax.device_put(np.asarray(80000.0, dtype=np.float64)),
+                    tf_current_threshold=90000.0,
+                    accepted_index=4,
+                )
+            )
+
+        assert hardware_status["success"] is True
+        assert candidate is not None
+        np.testing.assert_allclose(candidate.dofs, np.asarray([1.0, -2.0]))
+        assert candidate.objective == pytest.approx(1.25)
+        assert candidate.curve_length == pytest.approx(1.5)
+        assert candidate.coil_coil_distance == pytest.approx(0.2)
+        assert candidate.max_curvature == pytest.approx(3.0)
+        assert candidate.accepted_index == 4
+        assert captured_hardware_args["curve_surface_min_dist"] == pytest.approx(0.3)
+        assert captured_hardware_args["banana_current_A"] == pytest.approx(123.0)
+        assert captured_hardware_args["tf_current_A"] == pytest.approx(80000.0)
+        assert isinstance(captured_hardware_args["banana_current_A"], float)
+        assert isinstance(captured_hardware_args["tf_current_A"], float)
+        assert host_calls["float"] >= 6
+        assert host_calls["array"] >= 2
+
+    def test_capture_stage2_artifact_state_allows_strict_transfer_guard(
+        self, monkeypatch
+    ):
+        stage2_script = _load_stage2_script_module()
+        captured_hardware_args = {}
+        host_calls = {"float": 0, "array": 0}
+        original_host_float = stage2_script.host_float
+        original_host_array = stage2_script.host_array
+
+        def counted_host_float(value):
+            host_calls["float"] += 1
+            return original_host_float(value)
+
+        def counted_host_array(value, *, dtype=np.float64):
+            host_calls["array"] += 1
+            return original_host_array(value, dtype=dtype)
+
+        def fake_hardware_status(**kwargs):
+            captured_hardware_args.update(kwargs)
+            return {"success": True, "violations": [], "self_intersecting": False}
+
+        monkeypatch.setattr(stage2_script, "host_float", counted_host_float)
+        monkeypatch.setattr(stage2_script, "host_array", counted_host_array)
+        monkeypatch.setattr(
+            stage2_script,
+            "_evaluate_stage2_artifact_hardware_status",
+            fake_hardware_status,
+        )
+
+        class _MutableObjective:
+            def __init__(self, value):
+                self._value = jax.device_put(np.asarray(value, dtype=np.float64))
+                self._x = None
+
+            @property
+            def x(self):
+                return self._x
+
+            @x.setter
+            def x(self, value):
+                self._x = np.asarray(value, dtype=float)
+
+            def J(self):
+                return self._value
+
+        class _Distance(_MutableObjective):
+            def shortest_distance(self):
+                return self._value
+
+        class _Curve:
+            def kappa(self):
+                return jax.device_put(np.asarray([4.0, 6.0, 5.0], dtype=np.float64))
+
+        class _Current:
+            def __init__(self, value):
+                self._value = jax.device_put(np.asarray(value, dtype=np.float64))
+
+            def get_value(self):
+                return self._value
+
+        jf = _MutableObjective(1.0)
+        base_objective = _MutableObjective(1.0)
+
+        with jax.transfer_guard("disallow"):
+            state = stage2_script._capture_stage2_artifact_state(
+                dofs=jax.device_put(np.asarray([0.25, -0.5], dtype=np.float64)),
+                JF=jf,
+                BASE_OBJECTIVE=base_objective,
+                Jf=_MutableObjective(0.75),
+                Jls=_MutableObjective(1.5),
+                Jccdist=_Distance(0.2),
+                Jcsdist=_Distance(0.3),
+                new_banana_curve=_Curve(),
+                new_banana_coils=[
+                    types.SimpleNamespace(current=_Current(321.0)),
+                ],
+                new_tf_coils=[
+                    types.SimpleNamespace(current=_Current(80000.0)),
+                ],
+                length_target=2.0,
+                cc_threshold=0.05,
+                curvature_threshold=10.0,
+                coil_surface_threshold=0.04,
+                plasma_vessel_min_dist=0.08,
+                plasma_vessel_threshold=0.04,
+                banana_current_max_A=500.0,
+            )
+
+        np.testing.assert_allclose(state["x"], np.asarray([0.25, -0.5]))
+        np.testing.assert_allclose(jf.x, np.asarray([0.25, -0.5]))
+        np.testing.assert_allclose(base_objective.x, np.asarray([0.25, -0.5]))
+        assert state["field_objective"] == pytest.approx(0.75)
+        assert state["coil_length"] == pytest.approx(1.5)
+        assert state["curve_curve_min_dist"] == pytest.approx(0.2)
+        assert state["curve_surface_min_dist"] == pytest.approx(0.3)
+        assert state["max_curvature"] == pytest.approx(6.0)
+        assert state["banana_current_A"] == pytest.approx(321.0)
+        assert state["tf_current_A"] == pytest.approx(80000.0)
+        assert captured_hardware_args["banana_current_A"] == pytest.approx(321.0)
+        assert captured_hardware_args["tf_current_A"] == pytest.approx(80000.0)
+        assert isinstance(captured_hardware_args["banana_current_A"], float)
+        assert isinstance(captured_hardware_args["tf_current_A"], float)
+        assert host_calls["float"] >= 6
+        assert host_calls["array"] >= 2
+
     @pytest.mark.parametrize(
         ("backend", "optimizer_backend", "expected_error"),
         [

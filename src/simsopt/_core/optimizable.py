@@ -1102,7 +1102,7 @@ class Optimizable(ABC_Callable, Hashable, GSONable, metaclass=OptimizableMeta):
         Numeric values of the free DOFs associated with the current
         Optimizable object and those of its ancestors
         """
-        return np.concatenate([opt._dofs.free_x for
+        return np.concatenate([opt.dofs.free_x for
                                opt in self._unique_dof_opts])
 
     @x.setter
@@ -1118,7 +1118,7 @@ class Optimizable(ABC_Callable, Hashable, GSONable, metaclass=OptimizableMeta):
         Numeric values of all the DOFs (both free and fixed) associated
         with the current Optimizable object and those of its ancestors
         """
-        return np.concatenate([opt._dofs.full_x for
+        return np.concatenate([opt.dofs.full_x for
                                opt in self._unique_dof_opts])
 
     @full_x.setter
@@ -1250,7 +1250,7 @@ class Optimizable(ABC_Callable, Hashable, GSONable, metaclass=OptimizableMeta):
         Lower bounds of the fixed and free DOFs associated with the current
         Optimizable object and those of its ancestors
         """
-        return np.concatenate([opt._dofs.full_lower_bounds for opt in self.unique_dof_lineage])
+        return np.concatenate([opt.dofs.full_lower_bounds for opt in self.unique_dof_lineage])
 
     @full_lower_bounds.setter
     def full_lower_bounds(self, lb) -> None:
@@ -1261,7 +1261,7 @@ class Optimizable(ABC_Callable, Hashable, GSONable, metaclass=OptimizableMeta):
         if list(self.dof_indices.values())[-1][-1] != len(lb):
             raise ValueError
         for opt, indices in self.dof_indices.items():
-            opt._dofs.full_lower_bounds = lb[indices[0]:indices[1]]
+            opt.dofs.full_lower_bounds = lb[indices[0]:indices[1]]
 
     @property
     def lower_bounds(self) -> RealArray:
@@ -1269,7 +1269,7 @@ class Optimizable(ABC_Callable, Hashable, GSONable, metaclass=OptimizableMeta):
         Lower bounds of the free DOFs associated with the current
         Optimizable object and those of its ancestors
         """
-        return np.concatenate([opt._dofs.free_lower_bounds for opt in self.unique_dof_lineage])
+        return np.concatenate([opt.dofs.free_lower_bounds for opt in self.unique_dof_lineage])
 
     @lower_bounds.setter
     def lower_bounds(self, lb) -> None:
@@ -1280,7 +1280,7 @@ class Optimizable(ABC_Callable, Hashable, GSONable, metaclass=OptimizableMeta):
         if list(self.dof_indices.values())[-1][-1] != len(lb):
             raise ValueError
         for opt, indices in self.dof_indices.items():
-            opt._dofs.free_lower_bounds = lb[indices[0]:indices[1]]
+            opt.dofs.free_lower_bounds = lb[indices[0]:indices[1]]
 
     def set_lower_bound(self, key: Key, new_val: Real) -> None:
         """
@@ -1331,7 +1331,7 @@ class Optimizable(ABC_Callable, Hashable, GSONable, metaclass=OptimizableMeta):
         Upper bounds of the fixed and free DOFs associated with the current
         Optimizable object and those of its ancestors
         """
-        return np.concatenate([opt._dofs.full_upper_bounds for opt in self.unique_dof_lineage])
+        return np.concatenate([opt.dofs.full_upper_bounds for opt in self.unique_dof_lineage])
 
     @full_upper_bounds.setter
     def full_upper_bounds(self, ub) -> None:
@@ -1342,7 +1342,7 @@ class Optimizable(ABC_Callable, Hashable, GSONable, metaclass=OptimizableMeta):
         if list(self.dof_indices.values())[-1][-1] != len(ub):
             raise ValueError
         for opt, indices in self.dof_indices.items():
-            opt._dofs.full_upper_bounds = ub[indices[0]:indices[1]]
+            opt.dofs.full_upper_bounds = ub[indices[0]:indices[1]]
 
     @property
     def upper_bounds(self) -> RealArray:
@@ -1350,7 +1350,7 @@ class Optimizable(ABC_Callable, Hashable, GSONable, metaclass=OptimizableMeta):
         Upper bounds of the free DOFs associated with the current
         Optimizable object and those of its ancestors
         """
-        return np.concatenate([opt._dofs.free_upper_bounds for opt in self.unique_dof_lineage])
+        return np.concatenate([opt.dofs.free_upper_bounds for opt in self.unique_dof_lineage])
 
     @upper_bounds.setter
     def upper_bounds(self, ub) -> None:
@@ -1361,7 +1361,7 @@ class Optimizable(ABC_Callable, Hashable, GSONable, metaclass=OptimizableMeta):
         if list(self.dof_indices.values())[-1][-1] != len(ub):
             raise ValueError
         for opt, indices in self.dof_indices.items():
-            opt._dofs.free_upper_bounds = ub[indices[0]:indices[1]]
+            opt.dofs.free_upper_bounds = ub[indices[0]:indices[1]]
 
     def set_upper_bound(self, key: Key, new_val: Real) -> None:
         """
@@ -1414,7 +1414,7 @@ class Optimizable(ABC_Callable, Hashable, GSONable, metaclass=OptimizableMeta):
         """
         names = []
         for opt in self.unique_dof_lineage:
-            names += [opt.name + ":" + dname for dname in opt._dofs.free_names]
+            names += [opt.name + ":" + dname for dname in opt.dofs.free_names]
         return names
 
     @property
@@ -1425,7 +1425,7 @@ class Optimizable(ABC_Callable, Hashable, GSONable, metaclass=OptimizableMeta):
         """
         names = []
         for opt in self.unique_dof_lineage:
-            names += [opt.name + ":" + dname for dname in opt._dofs.full_names]
+            names += [opt.name + ":" + dname for dname in opt.dofs.full_names]
         return names
 
     @property
@@ -1451,7 +1451,7 @@ class Optimizable(ABC_Callable, Hashable, GSONable, metaclass=OptimizableMeta):
         current and ancestors Optimizable objects are free or not
         """
         return np.concatenate(
-            [opt._dofs.free_status for opt in self.unique_dof_lineage])
+            [opt.dofs.free_status for opt in self.unique_dof_lineage])
 
     @property
     def local_dofs_free_status(self) -> BoolArray:
@@ -1512,8 +1512,8 @@ class Optimizable(ABC_Callable, Hashable, GSONable, metaclass=OptimizableMeta):
                 to fixed.
         """
         for opt, indices in self._full_dof_indices.items():
-            opt._dofs._free[:] = np.logical_not(arr[indices[0]:indices[1]])
-            opt._dofs._update_opt_indices()
+            opt.dofs._free[:] = np.logical_not(arr[indices[0]:indices[1]])
+            opt.dofs._update_opt_indices()
 
     def full_unfix(self, arr: Key) -> None:
         """
@@ -1526,8 +1526,8 @@ class Optimizable(ABC_Callable, Hashable, GSONable, metaclass=OptimizableMeta):
                 to free.
         """
         for opt, indices in self._full_dof_indices.items():
-            opt._dofs._free[:] = arr[indices[0]:indices[1]]
-            opt._dofs._update_opt_indices()
+            opt.dofs._free[:] = arr[indices[0]:indices[1]]
+            opt.dofs._update_opt_indices()
 
     def local_fix_all(self) -> None:
         """

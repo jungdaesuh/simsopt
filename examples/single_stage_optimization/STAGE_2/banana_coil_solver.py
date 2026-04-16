@@ -107,6 +107,18 @@ def _zero_gradient_like(values):
     return np.zeros_like(np.asarray(values, dtype=float))
 
 
+def _optional_host_float(value):
+    return None if value is None else host_float(value)
+
+
+def _host_curve_max_curvature(curve):
+    return float(np.max(host_array(curve.kappa(), dtype=np.float64)))
+
+
+def _host_dofs_copy(dofs):
+    return np.asarray(host_array(dofs, dtype=np.float64), dtype=float).copy()
+
+
 def resolve_curvature_threshold(value: float) -> float:
     """Clamp Stage 2 curvature thresholds to the shared hardware ceiling."""
     return min(float(value), MAX_CURVATURE_INV_M)
@@ -269,17 +281,17 @@ def _capture_stage2_artifact_state(
     plasma_vessel_threshold,
     banana_current_max_A,
 ):
-    candidate_x = np.asarray(dofs, dtype=float).copy()
+    candidate_x = _host_dofs_copy(dofs)
     JF.x = candidate_x
     BASE_OBJECTIVE.x = candidate_x
-    coil_length = float(Jls.J())
-    curve_curve_min_dist = float(Jccdist.shortest_distance())
-    curve_surface_min_dist = None
-    if Jcsdist is not None:
-        curve_surface_min_dist = float(Jcsdist.shortest_distance())
-    max_curvature = float(np.max(new_banana_curve.kappa()))
-    banana_current_A = float(new_banana_coils[0].current.get_value())
-    tf_current_A = float(new_tf_coils[0].current.get_value())
+    coil_length = host_float(Jls.J())
+    curve_curve_min_dist = host_float(Jccdist.shortest_distance())
+    curve_surface_min_dist = _optional_host_float(
+        None if Jcsdist is None else Jcsdist.shortest_distance()
+    )
+    max_curvature = _host_curve_max_curvature(new_banana_curve)
+    banana_current_A = host_float(new_banana_coils[0].current.get_value())
+    tf_current_A = host_float(new_tf_coils[0].current.get_value())
     hardware_status = _evaluate_stage2_artifact_hardware_status(
         banana_curve=new_banana_curve,
         coil_length=coil_length,
@@ -299,7 +311,7 @@ def _capture_stage2_artifact_state(
     )
     return {
         "x": candidate_x,
-        "field_objective": float(Jf.J()),
+        "field_objective": host_float(Jf.J()),
         "coil_length": coil_length,
         "curve_curve_min_dist": curve_curve_min_dist,
         "curve_surface_min_dist": curve_surface_min_dist,
@@ -1107,7 +1119,7 @@ def compute_stage2_length_penalty_value(curve_length, length_target):
 def compute_stage2_max_curvature_value(Jc):
     banana_curve = getattr(Jc, "curve", None)
     if banana_curve is not None:
-        return float(np.max(banana_curve.kappa()))
+        return _host_curve_max_curvature(banana_curve)
     return host_float(Jc.J())
 
 
@@ -1353,13 +1365,15 @@ def capture_stage2_feasible_partial_candidate(
     tf_current_threshold=None,
     accepted_index,
 ):
-    objective = float(JF.J())
-    curve_length = float(Jls.J())
-    coil_coil_distance = float(Jccdist.shortest_distance())
-    max_curvature = float(np.max(banana_curve.kappa()))
-    curve_surface_min_dist = (
-        None if Jcsdist is None else float(Jcsdist.shortest_distance())
+    objective = host_float(JF.J())
+    curve_length = host_float(Jls.J())
+    coil_coil_distance = host_float(Jccdist.shortest_distance())
+    max_curvature = _host_curve_max_curvature(banana_curve)
+    curve_surface_min_dist = _optional_host_float(
+        None if Jcsdist is None else Jcsdist.shortest_distance()
     )
+    banana_current_A_host = _optional_host_float(banana_current_A)
+    tf_current_A_host = _optional_host_float(tf_current_A)
     hardware_status = _evaluate_stage2_artifact_hardware_status(
         banana_curve=banana_curve,
         coil_length=curve_length,
@@ -1372,9 +1386,9 @@ def capture_stage2_feasible_partial_candidate(
         coil_surface_threshold=coil_surface_threshold,
         plasma_vessel_min_dist=plasma_vessel_min_dist,
         plasma_vessel_threshold=plasma_vessel_threshold,
-        banana_current_A=banana_current_A,
+        banana_current_A=banana_current_A_host,
         banana_current_threshold=banana_current_threshold,
-        tf_current_A=tf_current_A,
+        tf_current_A=tf_current_A_host,
         tf_current_threshold=tf_current_threshold,
     )
     if not hardware_status["success"]:
@@ -3182,7 +3196,7 @@ if __name__ == "__main__":
             outer_state_callback=outer_state_callback,
         )
         alm_result = res
-        selected_result_x = np.asarray(res.x, dtype=float).copy()
+        selected_result_x = _host_dofs_copy(res.x)
         JF.x = selected_result_x
         BASE_OBJECTIVE.x = selected_result_x
         res_nit = res.nit
@@ -3441,7 +3455,7 @@ if __name__ == "__main__":
         accepted_iteration_count = int(accepted_state["count"])
     if not args.init_only and final_artifact_state is None:
         if selected_result_x is None:
-            selected_result_x = np.asarray(host_array(JF.x), dtype=float).copy()
+            selected_result_x = _host_dofs_copy(JF.x)
         final_artifact_state = capture_artifact_state(selected_result_x)
     if args.trajectory_json:
         write_json_file(
