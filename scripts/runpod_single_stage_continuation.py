@@ -45,6 +45,7 @@ _CANDIDATE_LEDGER_SCRIPT = (
     REPO_ROOT / "examples" / "single_stage_optimization" / "candidate_ledger.py"
 )
 _REMOTE_REPO_BUILD_CACHE_PREFIX = ".runpod-build-cache-"
+_PORTABLE_TAR_SCRIPT = REPO_ROOT / "scripts" / "portable_tar.sh"
 _REQUIRED_DONOR_FILENAMES = (
     "results.json",
     "biot_savart_opt.json",
@@ -346,10 +347,16 @@ def build_repo_tar_command(
     local_columbia_root: Path,
     repo_relative_path: Path,
 ) -> list[str]:
-    command = ["tar"]
+    command = [
+        "bash",
+        str(_PORTABLE_TAR_SCRIPT),
+        "--gzip",
+        "--root",
+        str(local_columbia_root),
+    ]
     for pattern in _TAR_EXCLUDES:
         command.extend(["--exclude", pattern])
-    command.extend(["-C", str(local_columbia_root), "-czf", "-", str(repo_relative_path)])
+    command.append(str(repo_relative_path))
     return command
 
 

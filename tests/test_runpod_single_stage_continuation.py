@@ -11,10 +11,21 @@ MODULE_PATH = (
     / "scripts"
     / "runpod_single_stage_continuation.py"
 )
+PORTABLE_TAR_SCRIPT = (
+    Path(__file__).resolve().parents[1]
+    / "scripts"
+    / "portable_tar.sh"
+)
 
 
 def load_module_globals():
     return runpy.run_path(str(MODULE_PATH))
+
+def run_portable_tar(*args: str, **kwargs):
+    return subprocess.run(
+        ["bash", str(PORTABLE_TAR_SCRIPT), *args],
+        **kwargs,
+    )
 
 
 class RunpodSingleStageContinuationTests(unittest.TestCase):
@@ -74,7 +85,9 @@ class RunpodSingleStageContinuationTests(unittest.TestCase):
             repo_relative_path=Path("simsopt-jax"),
         )
 
-        self.assertEqual(command[:1], ["tar"])
+        self.assertEqual(command[:2], ["bash", str(PORTABLE_TAR_SCRIPT)])
+        self.assertIn("--gzip", command)
+        self.assertIn("--root", command)
         self.assertIn(".git", command)
         self.assertIn(".DS_Store", command)
         self.assertIn("._*", command)
@@ -88,6 +101,43 @@ class RunpodSingleStageContinuationTests(unittest.TestCase):
 
         self.assertEqual(env["COPYFILE_DISABLE"], "1")
         self.assertEqual(env["COPY_EXTENDED_ATTRIBUTES_DISABLE"], "1")
+
+    def test_portable_tar_help_describes_cross_platform_behavior(self):
+        completed = run_portable_tar(
+            "--help",
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+        self.assertIn("cross-platform tar archive", completed.stdout)
+        self.assertIn("--no-xattrs", completed.stdout)
+
+    def test_portable_tar_creates_archive_without_shelling_through_python(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            archive_root = root / "payload"
+            archive_root.mkdir()
+            (archive_root / "hello.txt").write_text("hello\n", encoding="utf-8")
+            archive_path = root / "payload.tar"
+
+            run_portable_tar(
+                "--file",
+                str(archive_path),
+                "--root",
+                str(root),
+                "payload",
+                check=True,
+            )
+
+            completed = subprocess.run(
+                ["tar", "-tf", str(archive_path)],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertIn("payload/hello.txt", completed.stdout)
 
     def test_build_remote_repo_extract_command_wraps_remote_shell_payload(self):
         module = load_module_globals()
