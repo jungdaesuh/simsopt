@@ -168,6 +168,13 @@ Single-stage traceable target-lane contract:
   baseline state, objective kwargs, and coil/runtime specs. Rebuild it after
   changing those inputs; do not mutate captured objects and expect an existing
   bundle to retarget itself.
+- The single-stage accepted-step path now uses that runtime bundle as the
+  primary reporting source, caches one accepted-step summary in array-native run
+  state, and reuses it at final reporting time when the final DOFs still match
+  the accepted state.
+- When available, solved-state snapshots should come from the explicit
+  `BoozerSurfaceJAX.get_solved_runtime_state()` contract rather than by
+  reconstructing solved geometry from mutable host wrappers.
 
 The current CPU reference lane remains the oracle for broad workflow trust.
 Public acceptance still centers on the `native_cpu` / `scipy` oracle lane.
@@ -238,6 +245,15 @@ python examples/single_stage_optimization/STAGE_2/banana_coil_solver.py \
 
 Use this to validate the JAX Stage 2 path on CPU before moving to GPU.
 It does not exercise the retained SciPy oracle lane.
+
+Stage 2 live constraint-method note:
+
+- The active CLI/runtime path is penalty only.
+- The older ALM helper code is intentionally parked off the live path while its
+  closeout semantics are unfinished.
+- Results serialization still preserves the parked ALM fields as optional
+  metadata so historical payload readers do not break when those attributes are
+  absent.
 
 ### Single-stage on the default CPU reference lane
 
