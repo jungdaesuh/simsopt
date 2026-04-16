@@ -22,6 +22,22 @@ def _surface_dgamma_by_dcoeff_derivative(surface, point_gradient):
     return Derivative({surface: np.asarray(surface_vjp, dtype=float)})
 
 
+def _selected_distance_rows_and_cols(dists, *, hard_min, temperature):
+    mask = dists <= (hard_min + 4.0 * float(temperature))
+    if not np.any(mask):
+        mask[np.unravel_index(np.argmin(dists), dists.shape)] = True
+    return np.nonzero(mask)
+
+
+def _distance_directions(diffs, distances):
+    return diffs / np.maximum(distances[:, None], _SMOOTHING_EPS)
+
+
+def _smooth_min_signed_constraint(minimum_distance, smooth_min, grad):
+    signed_value = float(minimum_distance) - float(smooth_min)
+    return signed_value, -grad, max(0.0, signed_value)
+
+
 def smooth_max_curvature_signed_constraint(
     curve,
     threshold,
@@ -69,14 +85,14 @@ def smooth_min_curve_curve_signed_constraint(
     if not pair_blocks:
         return float(minimum_distance), zero_gradient_like(objective_optimizable.x), 0.0
 
-    selection_window = 4.0 * float(temperature)
     selected_distances = []
     selected_entries = []
     for i, j, diffs, dists in pair_blocks:
-        mask = dists <= (hard_min + selection_window)
-        if not np.any(mask):
-            mask[np.unravel_index(np.argmin(dists), dists.shape)] = True
-        rows, cols = np.nonzero(mask)
+        rows, cols = _selected_distance_rows_and_cols(
+            dists,
+            hard_min=hard_min,
+            temperature=temperature,
+        )
         selected_distances.append(dists[rows, cols])
         selected_entries.append((i, j, rows, cols, diffs[rows, cols], dists[rows, cols]))
 
@@ -93,7 +109,7 @@ def smooth_min_curve_curve_signed_constraint(
         count = len(distances)
         local_weights = flat_weights[offset:offset + count]
         offset += count
-        directions = diffs / np.maximum(distances[:, None], _SMOOTHING_EPS)
+        directions = _distance_directions(diffs, distances)
         np.add.at(point_gradients[i], rows, local_weights[:, None] * directions)
         np.add.at(point_gradients[j], cols, -local_weights[:, None] * directions)
 
@@ -102,8 +118,7 @@ def smooth_min_curve_curve_signed_constraint(
         if np.any(point_gradient):
             derivative += curve.dgamma_by_dcoeff_vjp(point_gradient)
     grad = np.asarray(derivative(objective_optimizable), dtype=float)
-    signed_value = float(minimum_distance) - float(smooth_min)
-    return signed_value, -grad, max(0.0, signed_value)
+    return _smooth_min_signed_constraint(minimum_distance, smooth_min, grad)
 
 
 def smooth_min_curve_surface_signed_constraint(
@@ -124,14 +139,14 @@ def smooth_min_curve_surface_signed_constraint(
         hard_min = min(hard_min, float(np.min(dists)))
         curve_blocks.append((curve_index, diffs, dists))
 
-    selection_window = 4.0 * float(temperature)
     selected_distances = []
     selected_entries = []
     for curve_index, diffs, dists in curve_blocks:
-        mask = dists <= (hard_min + selection_window)
-        if not np.any(mask):
-            mask[np.unravel_index(np.argmin(dists), dists.shape)] = True
-        rows, cols = np.nonzero(mask)
+        rows, cols = _selected_distance_rows_and_cols(
+            dists,
+            hard_min=hard_min,
+            temperature=temperature,
+        )
         selected_distances.append(dists[rows, cols])
         selected_entries.append((curve_index, rows, cols, diffs[rows, cols], dists[rows, cols]))
 
@@ -149,7 +164,7 @@ def smooth_min_curve_surface_signed_constraint(
         count = len(distances)
         local_weights = flat_weights[offset:offset + count]
         offset += count
-        directions = diffs / np.maximum(distances[:, None], _SMOOTHING_EPS)
+        directions = _distance_directions(diffs, distances)
         np.add.at(curve_gradients[curve_index], rows, local_weights[:, None] * directions)
         np.add.at(surface_gradient, cols, -local_weights[:, None] * directions)
 
@@ -163,8 +178,7 @@ def smooth_min_curve_surface_signed_constraint(
             surface_gradient.reshape(surface_gamma.shape),
         )
     grad = np.asarray(derivative(objective_optimizable), dtype=float)
-    signed_value = float(minimum_distance) - float(smooth_min)
-    return signed_value, -grad, max(0.0, signed_value)
+    return _smooth_min_signed_constraint(minimum_distance, smooth_min, grad)
 
 
 def smooth_min_surface_surface_signed_constraint(
@@ -181,11 +195,11 @@ def smooth_min_surface_surface_signed_constraint(
     diffs = flat_gamma_1[:, None, :] - flat_gamma_2[None, :, :]
     dists = np.linalg.norm(diffs, axis=2)
     hard_min = float(np.min(dists))
-    selection_window = 4.0 * float(temperature)
-    mask = dists <= (hard_min + selection_window)
-    if not np.any(mask):
-        mask[np.unravel_index(np.argmin(dists), dists.shape)] = True
-    rows, cols = np.nonzero(mask)
+    rows, cols = _selected_distance_rows_and_cols(
+        dists,
+        hard_min=hard_min,
+        temperature=temperature,
+    )
     selected_distances = dists[rows, cols]
     smooth_min, weights = smoothmin_selected(
         selected_distances,
@@ -193,7 +207,7 @@ def smooth_min_surface_surface_signed_constraint(
         _SMOOTHING_EPS,
     )
 
-    directions = diffs[rows, cols] / np.maximum(selected_distances[:, None], _SMOOTHING_EPS)
+    directions = _distance_directions(diffs[rows, cols], selected_distances)
     gradient_1 = np.zeros_like(flat_gamma_1)
     gradient_2 = np.zeros_like(flat_gamma_2)
     np.add.at(gradient_1, rows, weights[:, None] * directions)
@@ -209,8 +223,7 @@ def smooth_min_surface_surface_signed_constraint(
         gradient_2.reshape(gamma_2.shape),
     )
     grad = np.asarray(derivative(objective_optimizable), dtype=float)
-    signed_value = float(minimum_distance) - float(smooth_min)
-    return signed_value, -grad, max(0.0, signed_value)
+    return _smooth_min_signed_constraint(minimum_distance, smooth_min, grad)
 
 
 def single_stage_constraint_activity_tolerances(

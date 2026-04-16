@@ -44,6 +44,14 @@ def timeout_or_none(timeout_seconds: float) -> float | None:
     return None if timeout_seconds <= 0.0 else float(timeout_seconds)
 
 
+def first_present_value(mapping: Mapping[str, object], *keys: str) -> object | None:
+    for key in keys:
+        value = mapping.get(key)
+        if value is not None:
+            return value
+    return None
+
+
 def load_json(path: Path) -> dict[str, object]:
     with path.open("r", encoding="utf-8") as infile:
         loaded = json.load(infile)
@@ -475,15 +483,21 @@ def build_summary(
         "optimizer_backend",
         args.optimizer_backend,
     )
-    alm_converged = results.get("ALM_CONVERGED")
-    if alm_converged is None:
-        alm_converged = results.get("ALM_CONVERGED_TO_TOLERANCES")
-    alm_final_multipliers = results.get("ALM_FINAL_MULTIPLIERS")
-    if alm_final_multipliers is None:
-        alm_final_multipliers = results.get("ALM_MULTIPLIERS")
-    alm_final_constraint_values = results.get("ALM_FINAL_CONSTRAINT_VALUES")
-    if alm_final_constraint_values is None:
-        alm_final_constraint_values = results.get("ALM_CONSTRAINT_VALUES")
+    alm_converged = first_present_value(
+        results,
+        "ALM_CONVERGED",
+        "ALM_CONVERGED_TO_TOLERANCES",
+    )
+    alm_final_multipliers = first_present_value(
+        results,
+        "ALM_FINAL_MULTIPLIERS",
+        "ALM_MULTIPLIERS",
+    )
+    alm_final_constraint_values = first_present_value(
+        results,
+        "ALM_FINAL_CONSTRAINT_VALUES",
+        "ALM_CONSTRAINT_VALUES",
+    )
 
     summary.update(
         {
