@@ -2,6 +2,7 @@ import ast
 import importlib
 import importlib.util
 import json
+import os
 import sys
 import tempfile
 import unittest
@@ -36,6 +37,21 @@ SINGLE_STAGE_THRESHOLDED_PHYSICS_RERUN_MODULE_PATH = (
     / "run_single_stage_thresholded_physics_alm.py"
 )
 DEFAULT_ALM_WRAPPER_SURFACE = "wout_nfp10ginsburg_desc_s024match_iota20.nc"
+LEGACY_STAGE2_RESULTS_PAYLOAD = {
+    "PLASMA_SURF_FILENAME": DEFAULT_ALM_WRAPPER_SURFACE,
+    "BANANA_CURRENT_A": 12000.0,
+    "TF_CURRENT_A": 5000.0,
+    "NUM_TF_COILS": 16,
+    "init_only": False,
+}
+LEGACY_STAGE2_UPGRADED_FIELDS = {
+    "BANANA_INIT_CURRENT_A": 1.0e4,
+    "BANANA_CURRENT_MAX_A": 1.6e4,
+    "TF_CURRENT_SUM_ABS_A": 80000.0,
+    "LENGTH_TARGET": 1.7,
+    "COIL_PLASMA_MIN_DIST_M": 0.015,
+    "PLASMA_VESSEL_MIN_DIST_M": 0.04,
+}
 
 
 def extract_functions(module_path: Path, function_names: list[str], global_bindings: dict):
@@ -51,18 +67,49 @@ def extract_functions(module_path: Path, function_names: list[str], global_bindi
     return {name: namespace[name] for name in function_names}
 
 
-def load_hardware_constraint_schema_module():
+def single_stage_example_package_root() -> str:
     package_root = str(HARDWARE_CONSTRAINT_SCHEMA_MODULE_PATH.parents[1])
     if package_root not in sys.path:
         sys.path.insert(0, package_root)
+    return package_root
+
+
+def load_hardware_constraint_schema_module():
+    single_stage_example_package_root()
     return importlib.import_module("banana_opt.hardware_constraint_schema")
 
 
+def load_stage2_artifact_contracts_module():
+    single_stage_example_package_root()
+    return importlib.import_module("banana_opt.artifact_contracts")
+
+
 def load_alm_utils_module():
-    package_root = str(SINGLE_STAGE_MODULE_PATH.parents[1])
-    if package_root not in sys.path:
-        sys.path.insert(0, package_root)
+    single_stage_example_package_root()
     return importlib.import_module("alm_utils")
+
+
+def write_stage2_artifact_bundle(
+    tmpdir_path: Path,
+    *,
+    results_payload: dict[str, object],
+) -> Path:
+    stage2_bs_path = tmpdir_path / "biot_savart_opt.json"
+    stage2_results_path = tmpdir_path / "results.json"
+    stage2_bs_path.write_text("{}", encoding="utf-8")
+    stage2_results_path.write_text(
+        json.dumps(results_payload),
+        encoding="utf-8",
+    )
+    return stage2_bs_path
+
+
+def assert_legacy_stage2_fields_upgraded(
+    testcase: unittest.TestCase,
+    stage2_results: dict[str, object],
+) -> None:
+    for key, expected in LEGACY_STAGE2_UPGRADED_FIELDS.items():
+        testcase.assertEqual(stage2_results[key], expected)
 
 
 def load_single_stage_thresholded_physics_rerun_module():
@@ -230,6 +277,31 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
         self.assertIsNone(config["boozer_threshold"])
         self.assertIsNone(config["iota_penalty_threshold"])
         self.assertIsNone(config["length_penalty_threshold"])
+
+    def test_single_stage_load_stage2_results_upgrades_legacy_artifact_metadata(self):
+        artifact_contracts_module = load_stage2_artifact_contracts_module()
+        functions = extract_functions(
+            SINGLE_STAGE_MODULE_PATH,
+            ["load_stage2_results"],
+            {
+                "json": json,
+                "os": os,
+                "upgrade_legacy_stage2_artifact_results": (
+                    artifact_contracts_module.upgrade_legacy_stage2_artifact_results
+                ),
+            },
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            stage2_bs_path = write_stage2_artifact_bundle(
+                tmpdir_path,
+                results_payload=LEGACY_STAGE2_RESULTS_PAYLOAD,
+            )
+
+            _, stage2_results = functions["load_stage2_results"](str(stage2_bs_path))
+
+        assert_legacy_stage2_fields_upgraded(self, stage2_results)
 
     def test_single_stage_target_lane_self_intersection_success_filter_rejects_crossing_surface(
         self,
@@ -620,6 +692,24 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
 
             with self.assertRaisesRegex(ValueError, "requires a non-init-only Stage 2 artifact"):
                 module.load_validated_stage2_seed_metadata(args)
+
+    def test_single_stage_thresholded_physics_wrapper_upgrades_legacy_stage2_seed_metadata(self):
+        module = load_single_stage_thresholded_physics_rerun_module()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            stage2_bs_path = write_stage2_artifact_bundle(
+                tmpdir_path,
+                results_payload=LEGACY_STAGE2_RESULTS_PAYLOAD,
+            )
+
+            args = make_single_stage_thresholded_physics_rerun_args(
+                stage2_bs_path=str(stage2_bs_path),
+                plasma_surf_filename=DEFAULT_ALM_WRAPPER_SURFACE,
+            )
+            _, _, stage2_results = module.load_validated_stage2_seed_metadata(args)
+
+        assert_legacy_stage2_fields_upgraded(self, stage2_results)
 
     def test_single_stage_thresholded_physics_wrapper_dry_run_writes_marker_and_summary(self):
         module = load_single_stage_thresholded_physics_rerun_module()

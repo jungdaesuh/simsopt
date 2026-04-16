@@ -47,6 +47,7 @@ from banana_opt.current_contracts import (
     apply_penalty_traversal_forbidden_box_bounds,
     resolve_loaded_tf_current_A,
 )
+from banana_opt.artifact_contracts import upgrade_legacy_stage2_artifact_results
 from banana_opt.hardware_contracts import (
     COIL_COIL_MIN_DIST_M,
     COIL_LENGTH_TARGET_M,
@@ -1606,6 +1607,7 @@ def load_stage2_results(stage2_bs_path):
     stage2_results_path = os.path.join(os.path.dirname(stage2_bs_path), "results.json")
     with open(stage2_results_path, "r", encoding="utf-8") as infile:
         stage2_results = json.load(infile)
+    stage2_results = upgrade_legacy_stage2_artifact_results(stage2_results)
     return stage2_results_path, stage2_results
 
 

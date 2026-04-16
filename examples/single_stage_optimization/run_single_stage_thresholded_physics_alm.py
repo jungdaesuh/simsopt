@@ -19,6 +19,7 @@ from banana_opt.hardware_contracts import (
     MAX_CURVATURE_INV_M,
     PLASMA_VESSEL_MIN_DIST_M,
 )
+from banana_opt.artifact_contracts import upgrade_legacy_stage2_artifact_results
 
 SINGLE_STAGE_SCRIPT_PATH = SCRIPT_DIR / "SINGLE_STAGE" / "single_stage_banana_example.py"
 DRY_RUN_MARKER_FILENAME = "DRY_RUN_ONLY.txt"
@@ -299,6 +300,7 @@ def load_validated_stage2_seed_metadata(
     if not stage2_bs_path.exists():
         raise FileNotFoundError(f"Stage 2 biot_savart_opt.json does not exist: {stage2_bs_path}")
     stage2_results_path, stage2_results = load_stage2_artifact_results(stage2_bs_path)
+    stage2_results = upgrade_legacy_stage2_artifact_results(stage2_results)
     actual_surface = stage2_results.get("PLASMA_SURF_FILENAME")
     expected_surface = Path(args.plasma_surf_filename).name
     if actual_surface is None:
