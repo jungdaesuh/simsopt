@@ -775,7 +775,7 @@ def _traceable_single_stage_alm_evaluation(
         ),
         **_traceable_total_objective_kwargs(objective_kwargs),
     )
-    base_total, physics_total = _traceable_single_stage_alm_base_total(
+    objective_total, physics_total = _traceable_single_stage_alm_base_total(
         raw_terms,
         outer_objective_config=outer_objective_config,
         alm_formulation=alm_config["alm_formulation"],
@@ -793,12 +793,12 @@ def _traceable_single_stage_alm_evaluation(
     )
     return {
         "total": _traceable_augmented_inequality_total(
-            base_total,
+            objective_total,
             constraint_values,
             multipliers,
             penalty,
         ),
-        "base_total": base_total,
+        "base_total": physics_total,
         "physics_total": physics_total,
         "constraint_values": constraint_values,
         "feasibility_values": feasibility_values,

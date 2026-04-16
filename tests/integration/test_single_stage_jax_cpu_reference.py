@@ -7127,6 +7127,24 @@ class TestTraceableObjective:
         assert not bool(np.asarray(jax.device_get(evaluation["success"])))
         assert np.isfinite(float(np.asarray(jax.device_get(value))))
 
+    def test_traceable_single_stage_alm_runtime_bundle_reports_host_base_total(
+        self,
+        boozer_setup,
+    ):
+        """Thresholded-physics ALM reporting should match the host base_total contract."""
+        (_, _, _, _, bs_jax, _, booz_jax, _) = boozer_setup
+        runtime_bundle, coil_dofs, multipliers, penalty = (
+            self._make_traceable_alm_runtime_bundle(bs_jax, booz_jax)
+        )
+
+        evaluation = runtime_bundle["evaluate"](coil_dofs, multipliers, penalty)
+        base_total = float(np.asarray(jax.device_get(evaluation["base_total"])))
+        physics_total = float(np.asarray(jax.device_get(evaluation["physics_total"])))
+
+        assert np.isfinite(base_total)
+        assert np.isfinite(physics_total)
+        assert base_total == physics_total
+
     def test_traceable_runtime_bundle_matches_sharded_field_contract(
         self,
         boozer_setup,

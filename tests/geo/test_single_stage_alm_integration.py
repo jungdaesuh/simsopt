@@ -532,6 +532,13 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
 
         self.assertIsNotNone(result)
         self.assertTrue(hasattr(result, "inner_result"))
+        self.assertLess(float(np.asarray(result.x, dtype=float)[0]), 1.5)
+        self.assertEqual(len(result.multipliers), 1)
+        self.assertEqual(len(result.constraint_values), 1)
+        self.assertTrue(np.all(np.isfinite(np.asarray(result.multipliers, dtype=float))))
+        self.assertTrue(
+            np.all(np.isfinite(np.asarray(result.constraint_values, dtype=float)))
+        )
 
     def test_single_stage_results_surface_keeps_surrogate_alm_aliases(self):
         source = SINGLE_STAGE_MODULE_PATH.read_text()
