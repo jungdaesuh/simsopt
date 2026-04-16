@@ -10,6 +10,11 @@ Low-level conclusion from the deep dive: most `simsoptpp` kernels are already
 reasonable. The biggest remaining opportunities are in the human-written glue
 above them.
 
+Update `2026-04-16`: follow-up validation found several more concrete hotspots
+in the Boozer solve path, `SquaredFlux`, `Derivative` composition, the Python
+`BiotSavart` VJP layer, and `MagneticFieldSum`. Those addenda are recorded
+below and should be considered live TODOs.
+
 ## Priority Legend
 
 | Impact | Meaning |
@@ -251,19 +256,182 @@ above them.
 - Impact: Low unless profiling proves otherwise
 - Effort: Large
 - Quick win: No
-- Why last: `SquaredFlux.J()`, the vectorized Boozer residual path, and the core `BiotSavart` arithmetic already look structurally sound.
+- Why last: most remaining pain is still in Python orchestration and duplicated
+  evaluation work above the core kernels. Do not spend time rewriting
+  `simsoptpp` arithmetic before the higher-level glue issues and validated
+  invalidation bugs are fixed.
 - Files:
-  - `src/simsopt/objectives/fluxobjective.py:65-106`
   - `src/simsopt/geo/boozersurface.py:422-533`
   - `src/simsopt/geo/boozersurface.py:608-668`
 - Primary blame / last-touch:
   - `Florian Wechsung`, `Matt Landreman`, `Rogerio Jorge`
   - `Andrew Giuliani`, `mishapadidar`, `Jung Dae Suh`
 - Todo:
-  - Do not spend time rewriting these kernels before the higher-level duplication is removed.
+  - Do not spend time rewriting these kernels before the higher-level
+    duplication is removed.
   - Re-profile after items 1 through 11; only then decide whether any kernel-level work remains justified.
 
+## 2026-04-16 Addenda
+
+These items were validated after the initial draft. Several of them likely
+belong ahead of items 6 through 12 on a pure gain-to-risk basis.
+
+### A. Fix `SquaredFlux` field-point invalidation and stale surface coupling
+
+- Impact: Very High
+- Effort: Small
+- Quick win: Yes
+- Why this matters: `SquaredFlux` sets field evaluation points once in
+  `__init__` and only depends on `field`, not `surface`, so a moving surface can
+  silently combine stale `B(x_old)` with fresh normals from `surface.normal()`.
+- Files:
+  - `src/simsopt/objectives/fluxobjective.py:51-106`
+- Todo:
+  - Make `surface` part of the dependency / invalidation chain.
+  - Refresh field points when the surface geometry changes instead of only once
+    at construction.
+  - Add a regression test that moves the surface while keeping the field object
+    fixed.
+- Correctness angle:
+  - This is a silent wrong-answer bug, not just a speed issue.
+
+### B. Reuse factorization in exact Boozer Newton and adjoint setup
+
+- Impact: High
+- Effort: Small to Medium
+- Quick win: Yes
+- Why this matters: the exact Newton path currently does two fresh
+  `np.linalg.solve(J, ...)` factorizations per step and then a separate `lu(J)`
+  for the adjoint data.
+- Files:
+  - `src/simsopt/geo/boozersurface.py:1077-1119`
+  - `src/simsopt/objectives/utilities.py:11-29`
+- Todo:
+  - Reuse one factorization across the Newton step, iterative refinement, and
+    stored adjoint solve data.
+  - If switching away from `(P, L, U)`, update `forward_backward(...)`
+    accordingly instead of treating `lu_factor/lu_solve` as a drop-in swap.
+- Correctness angle:
+  - Preserve the current iterative-refinement behavior and adjoint solve
+    semantics while reducing duplicate linear algebra work.
+
+### C. Make the Boozer LS second-order path lower-memory and remove easy copies
+
+- Impact: Very High
+- Effort: Large
+- Quick win: No
+- Why this matters: the `derivatives=2` LS path explicitly builds large
+  second-order tensors and a dense `H`, which is the clearest OOM risk found in
+  the review.
+- Files:
+  - `src/simsopt/geo/boozersurface.py:733-750`
+  - `src/simsopt/geo/surfaceobjectives.py:417-545`
+- Todo:
+  - Replace explicit `d2B_dcdc` / `H` materialization with a matrix-free or
+    reduced second-order formulation.
+  - While touching this path, remove the unnecessary
+    `x.reshape(...).copy()` / branch `.copy()` allocations in
+    `boozer_surface_residual(...)`.
+- Correctness angle:
+  - Add regression coverage for weighted and unweighted paths before changing
+    the second-order implementation.
+
+### D. Tighten Boozer-derived objective reuse and first-use safety
+
+- Impact: High
+- Effort: Small to Medium
+- Quick win: Yes
+- Why this matters: `Iotas`, `NonQuasiSymmetricRatio`, and `BoozerResidual`
+  still redo avoidable field / surface / adjoint work, and `BoozerResidual`
+  duplicates a same-grid surface plus redundant `set_points` / residual passes.
+- Files:
+  - `src/simsopt/geo/surfaceobjectives.py:725-835`
+  - `src/simsopt/geo/surfaceobjectives.py:925-979`
+  - `src/simsopt/geo/surfaceobjectives.py:1048-1143`
+- Todo:
+  - Reuse the solved-surface data directly where the grid is identical instead
+    of cloning an independent same-grid surface.
+  - Remove redundant `set_points(...)`, `boozer_surface_residual(...)`, and
+    `boozer_surface_residual_dB(...)` passes inside `BoozerResidual.compute()`.
+  - Guard `self.boozer_surface.res` for first-use or failed-solve cases in
+    `Iotas`, `NonQuasiSymmetricRatio`, and `BoozerResidual`.
+  - Fold this into item 6's broader shared-cache design if doing a larger
+    refactor.
+- Correctness angle:
+  - This closes a latent initialization / failed-solve bug in addition to
+    cutting repeated work.
+
+### E. Eliminate systemic `Derivative` accumulation copies
+
+- Impact: High
+- Effort: Medium
+- Quick win: Yes
+- Why this matters: the expensive `Derivative.__add__` copy pattern is now
+  confirmed in generic composition code, not just in one `BiotSavart` call
+  site.
+- Files:
+  - `src/simsopt/_core/derivative.py:114-143`
+  - `src/simsopt/_core/optimizable.py:1825-1828`
+  - `src/simsopt/objectives/utilities.py:136-143`
+  - `src/simsopt/field/biotsavart.py:69-119`
+  - `src/simsopt/field/magneticfield.py:268-269`
+  - `src/simsopt/geo/accessibility.py:486-515`
+  - `src/simsopt/geo/accessibility.py:685-706`
+  - `src/simsopt/field/coilset.py:253-355`
+- Todo:
+  - Add a one-allocation `Derivative.sum(...)` or an equivalent explicit
+    in-place accumulator.
+  - Switch `OptimizableSum`, `MPIObjective`, `MagneticFieldSum.B_vjp`,
+    accessibility objectives, and the Python `BiotSavart` VJP returns off
+    Python `sum(...)`.
+  - Reuse `BiotSavart` VJP work buffers when the coil structure and point grid
+    are unchanged.
+- Correctness angle:
+  - Keep derivative-key semantics identical while changing only the aggregation
+    strategy.
+
+### F. Replace `MagneticFieldSum` temporary stacks and MPI ndarray sums with in-place accumulation
+
+- Impact: Medium
+- Effort: Small
+- Quick win: Yes
+- Why this matters: `MagneticFieldSum` currently builds temporary full-array
+  stacks for `B`, `A`, and their derivatives, and `sum_across_comm(...)` reduces
+  gathered ndarrays through repeated Python additions.
+- Files:
+  - `src/simsopt/field/magneticfield.py:250-266`
+  - `src/simsopt/objectives/utilities.py:36-49`
+- Todo:
+  - Replace `np.sum([child_array, ...], axis=0)` with direct accumulation into
+    the destination buffer.
+  - Replace `sum(comm.allgather(data))` with an in-place or collective reduction
+    path that avoids repeated ndarray temporaries.
+- Correctness angle:
+  - Preserve dtype and empty-collection behavior while removing the extra
+    allocations.
+
+### G. Clean up `CurrentPenalty` JAX tracing
+
+- Impact: Low to Medium
+- Effort: Small
+- Quick win: Yes
+- Why this matters: the penalty and its grad are currently built from plain
+  lambdas, so the JAX transform setup is more expensive than it needs to be for
+  a hot wrapper objective.
+- Files:
+  - `src/simsopt/field/coilobjective.py:18-30`
+- Todo:
+  - Prebuild and, if appropriate, `jit` the scalar penalty and gradient once
+    instead of constructing `grad(self.J_jax, ...)` through lambdas.
+- Correctness angle:
+  - Preserve threshold behavior for positive and negative currents.
+
 ## Suggested Patch Order
+
+`2026-04-16` update: treat addenda `A`, `B`, `D`, `E`, and `F` as better
+near-term patch candidates than the old long-horizon items 9 through 12. Treat
+addendum `C` as the highest-priority memory fix if the Boozer LS path is
+showing OOM or severe RSS growth.
 
 1. Item 1: split optimizer fast path from diagnostics.
 2. Item 2: stop hot-loop `shortest_distance()` usage.
@@ -283,6 +451,9 @@ above them.
 - Track cumulative allocation or peak RSS, not just runtime.
 - For correctness-sensitive refactors, add regression tests before optimizing:
   - `CurveSurfaceDistance` cache invalidation
+  - `SquaredFlux` field-point invalidation when the surface moves
   - `CurveCWSFourierCPP` derivative consistency
   - shared Boozer cache invalidation
+  - exact Boozer Newton / adjoint factor reuse
+  - `Derivative` accumulation semantics after switching away from Python `sum(...)`
   - stage 2 smoothed distance sign / gradient conventions
