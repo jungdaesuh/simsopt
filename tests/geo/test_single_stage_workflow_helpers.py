@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import math
 import subprocess
 import sys
 import tempfile
@@ -1033,7 +1034,7 @@ class FiniteCurrentSmokeScriptTests(unittest.TestCase):
             "STAGE2_TF_CURRENT_A": 8.0e4,
             "STAGE2_TF_CURRENT_SUM_ABS_A": 1.6e6,
             "FINITE_CURRENT_MODE": "boozer_surrogate",
-            "BOOZER_CURRENT_CONVENTION": "mu0_over_2pi",
+            "BOOZER_CURRENT_CONVENTION": "mu0",
         }
         results.update(overrides)
         return results
@@ -1068,7 +1069,7 @@ class FiniteCurrentSmokeScriptTests(unittest.TestCase):
         module = load_finite_current_smoke_module()
         results = self._make_smoke_results(
             PLASMA_CURRENT_A=-35200.0,
-            BOOZER_I=-0.00704,
+            BOOZER_I=4.0e-7 * math.pi * -35200.0,
             EFFECTIVE_CURRENT_MODE="boozer_surrogate",
         )
 
@@ -1148,7 +1149,31 @@ class FiniteCurrentSmokeScriptTests(unittest.TestCase):
         self.assertEqual(upgraded_results["TF_CURRENT_A"], 8.0e4)
         self.assertEqual(upgraded_results["TF_CURRENT_SUM_ABS_A"], 1.6e6)
         self.assertEqual(upgraded_results["FINITE_CURRENT_MODE"], "boozer_surrogate")
+        self.assertEqual(upgraded_results["BOOZER_CURRENT_CONVENTION"], "mu0")
+
+    def test_legacy_smoke_artifact_preserves_old_boozer_I_convention_when_inferable(self):
+        module = load_finite_current_smoke_module()
+        legacy_results = {
+            "PLASMA_CURRENT_A": 8000.0,
+            "BOOZER_I": 0.0016,
+        }
+
+        upgraded_results = module.upgrade_legacy_stage2_artifact_results(legacy_results)
+
+        self.assertEqual(upgraded_results["FINITE_CURRENT_MODE"], "boozer_surrogate")
         self.assertEqual(upgraded_results["BOOZER_CURRENT_CONVENTION"], "mu0_over_2pi")
+
+    def test_legacy_smoke_artifact_infers_mu0_convention_from_normalized_api_value(self):
+        module = load_finite_current_smoke_module()
+        legacy_results = {
+            "PLASMA_CURRENT_A": 8000.0,
+            "BOOZER_I": 4.0e-7 * math.pi * 8000.0,
+        }
+
+        upgraded_results = module.upgrade_legacy_stage2_artifact_results(legacy_results)
+
+        self.assertEqual(upgraded_results["FINITE_CURRENT_MODE"], "boozer_surrogate")
+        self.assertEqual(upgraded_results["BOOZER_CURRENT_CONVENTION"], "mu0")
 
     def test_legacy_smoke_artifact_upgrades_total_tf_current_from_negative_tf_current(self):
         module = load_finite_current_smoke_module()

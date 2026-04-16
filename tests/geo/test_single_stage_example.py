@@ -593,8 +593,8 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertEqual(settings["mode"], "boozer_surrogate")
         self.assertEqual(settings["effective_mode"], "boozer_surrogate")
         self.assertEqual(settings["plasma_current_A"], 8000.0)
-        self.assertAlmostEqual(settings["boozer_I"], 0.0016)
-        self.assertEqual(settings["boozer_current_convention"], "mu0_over_2pi")
+        self.assertAlmostEqual(settings["boozer_I"], 4.0e-7 * np.pi * 8000.0)
+        self.assertEqual(settings["boozer_current_convention"], "mu0")
 
     def test_resolve_plasma_current_settings_zero_physical_amps_reports_vacuum_effective_mode(self):
         module = self.load_module()
@@ -623,7 +623,7 @@ class SingleStageExampleTests(unittest.TestCase):
         )
 
         self.assertEqual(settings["plasma_current_A"], -35200.0)
-        self.assertAlmostEqual(settings["boozer_I"], -0.00704)
+        self.assertAlmostEqual(settings["boozer_I"], 4.0e-7 * np.pi * -35200.0)
         self.assertEqual(settings["effective_mode"], "boozer_surrogate")
 
     def test_resolve_plasma_current_settings_rejects_mixed_raw_and_physical_inputs(self):
@@ -652,7 +652,7 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertEqual(settings["effective_mode"], "vacuum")
         self.assertEqual(settings["plasma_current_A"], 0.0)
         self.assertEqual(settings["boozer_I"], 0.0)
-        self.assertEqual(settings["boozer_current_convention"], "mu0_over_2pi")
+        self.assertEqual(settings["boozer_current_convention"], "mu0")
 
     def test_resolve_plasma_current_settings_uses_artifact_default_in_wataru_mode(self):
         module = self.load_module()
@@ -672,6 +672,21 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertEqual(settings["plasma_current_A"], 8000.0)
         self.assertAlmostEqual(settings["boozer_I"], 4.0e-7 * np.pi * 8000.0)
         self.assertEqual(settings["boozer_current_convention"], "mu0")
+
+    def test_wataru_mode_preserves_mu0_no_2pi_convention(self):
+        module = self.load_module()
+
+        settings = module.resolve_plasma_current_settings(
+            SimpleNamespace(
+                boozer_I=None,
+                plasma_current_A=9000.0,
+            ),
+            finite_current_mode="wataru_proxy_field",
+        )
+
+        self.assertEqual(settings["boozer_current_convention"], "mu0")
+        self.assertAlmostEqual(settings["boozer_I"], 4.0e-7 * np.pi * 9000.0)
+        self.assertNotAlmostEqual(settings["boozer_I"], 2.0e-7 * 9000.0)
 
     def test_stage2_resolve_finite_current_mode_accepts_explicit_wataru_without_artifact(self):
         module = load_stage2_module()
@@ -6566,7 +6581,12 @@ class RunIdentityTests(unittest.TestCase):
         base_args = self._make_identity_args()
 
         base_config = self._build_identity(module, base_args, boozer_I=0.0, plasma_current_A=0.0)
-        physical_config = self._build_identity(module, base_args, boozer_I=0.0016, plasma_current_A=8000.0)
+        physical_config = self._build_identity(
+            module,
+            base_args,
+            boozer_I=4.0e-7 * np.pi * 8000.0,
+            plasma_current_A=8000.0,
+        )
 
         self.assertNotEqual(base_config, physical_config)
 
@@ -6574,8 +6594,18 @@ class RunIdentityTests(unittest.TestCase):
         module = load_single_stage_example_module()
         base_args = self._make_identity_args()
 
-        physical_config = self._build_identity(module, base_args, boozer_I=0.0016, plasma_current_A=8000.0)
-        raw_config = self._build_identity(module, base_args, boozer_I=0.0016, plasma_current_A=8000.0)
+        physical_config = self._build_identity(
+            module,
+            base_args,
+            boozer_I=4.0e-7 * np.pi * 8000.0,
+            plasma_current_A=8000.0,
+        )
+        raw_config = self._build_identity(
+            module,
+            base_args,
+            boozer_I=4.0e-7 * np.pi * 8000.0,
+            plasma_current_A=8000.0,
+        )
 
         self.assertEqual(physical_config, raw_config)
 
@@ -7768,6 +7798,8 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
                 fake_banana_curve,
                 fake_banana_coils,
                 fake_tf_coils,
+                [],
+                [],
             )
 
         def fake_initialize_coils(
@@ -7800,6 +7832,8 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
                 fake_curve_names,
                 fake_banana_curve,
                 fake_banana_coils,
+                [],
+                [],
             )
 
         def fake_minimize(*_args, **_kwargs):

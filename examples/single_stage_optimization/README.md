@@ -534,6 +534,9 @@ Important current behavior:
 
 - prefer `--plasma-current-A` over raw `--boozer-I`
 - do not pass both current interfaces together unless you are intentionally working at the internal surrogate layer
+- the current SIMSOPT API-side conversion is `BOOZER_I = mu0 * PLASMA_CURRENT_A`; the
+  literature-side `mu0/(2*pi)` convention is absorbed by SIMSOPT's normalized-angle
+  surface parameterization before the `BoozerSurface(..., I=...)` call
 - `--constraint-method=alm` currently requires `--num-surfaces=1`
 - staged Boozer refinement currently requires penalty mode, single-surface mode, and no basin-hopping
 - single-stage basin-hopping is only supported in penalty mode

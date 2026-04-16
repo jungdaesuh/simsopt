@@ -126,29 +126,35 @@ because external coil currents are still on in that scenario.
 
 ## Unit Convention For Plasma Current
 
-SIMSOPT's convention is:
+The paper-side Boozer convention is still:
 
 - `G(s)` is `mu0/(2*pi)` times the poloidal current outside the surface
 - `I(s)` is `mu0/(2*pi)` times the toroidal current inside the surface
 
-Therefore the correct finite-plasma-current conversion is:
+However, this workflow passes current into the SIMSOPT `BoozerSurface(..., I=...)`
+API through normalized angular coordinates on `[0, 1)`, not paper-side `0..2*pi`
+angles. The `2*pi` therefore moves into the code-facing current coefficient.
+
+So the current `simsopt-surrogate` API-side conversion is:
 
 ```text
-boozer_I = (mu0 / (2*pi)) * plasma_current_A
-         = 2e-7 * plasma_current_A
+boozer_I = mu0 * plasma_current_A
+         = 4e-7 * pi * plasma_current_A
 ```
 
 Examples:
 
 ```text
   0 A    -> 0.0
-8000 A   -> 0.0016
-16000 A  -> 0.0032
-30000 A  -> 0.0060
-35200 A  -> 0.00704
+8000 A   -> 0.010053096491487338
+16000 A  -> 0.020106192982974676
+30000 A  -> 0.03769911184307752
+35200 A  -> 0.04423540669587842
 ```
 
-This remains correct and should still govern the finite-current surrogate interface.
+This is now the correct surrogate-interface conversion for this repo. The older
+`mu0/(2*pi)` numbers were the paper-normalized coefficients, not the direct
+SIMSOPT API values.
 
 ## Why `A`-Only Input Is Better
 
@@ -165,7 +171,7 @@ Recommended user-facing field:
 Recommended internal behavior:
 
 ```text
-boozer_I = (mu0 / (2*pi)) * plasma_current_A
+boozer_I = mu0 * plasma_current_A
 ```
 
 Recommended compatibility rule:
@@ -310,11 +316,11 @@ Before calling implementation correct, require:
 
 1. The configurable TF-current baseline reproduces current behavior when set to the present `1e5 A` value.
 2. The new baseline path runs correctly at the requested `80 kA` setting with plasma current fixed to `0 A`.
-3. Physical plasma-current inputs in `A` map to the correct internal `BOOZER_I`.
+3. Physical plasma-current inputs in `A` map to the correct internal `BOOZER_I = mu0 * plasma_current_A` API value.
 4. Raw `--boozer-I` and physical-current inputs cannot be used together silently.
 5. Result files contain physical current, current-source provenance, and internal current when the physical-current interface is used.
 6. Sign convention is documented explicitly for positive and negative toroidal current.
-7. Historical result handling preserves raw-unit interpretation when provenance is absent.
+7. Historical result handling preserves inferable raw-unit interpretation when legacy results omit explicit convention metadata.
 8. Both Boozer solver branches are checked with `0 A`, positive current, and negative current at fixed geometry and fixed coil seed.
 9. A small surrogate-current sensitivity sweep confirms the finite-current term is actually active and not being lost numerically.
 

@@ -83,8 +83,13 @@ _BOOZER_CURRENT_CONVENTION_BY_MODE: Mapping[
     FiniteCurrentMode,
     BoozerCurrentConvention,
 ] = {
-    "boozer_surrogate": "mu0_over_2pi",
-    # Wataru's scripts pass μ0 * I_A directly into BoozerSurface(..., I=...).
+    # SIMSOPT's BoozerSurface residual is written in normalized angles, so the
+    # code-facing current function carries the 2π from the angle change of
+    # variables. Physical enclosed current in amperes therefore maps to μ0*I_A
+    # at the API boundary, not μ0/(2π)*I_A.
+    "boozer_surrogate": "mu0",
+    # Wataru confirmed his workflow intentionally uses BoozerSurface(..., I=μ0*I_A)
+    # with no extra 2π factor. This matches the normalized-angle SIMSOPT API.
     "wataru_proxy_field": "mu0",
 }
 
@@ -100,13 +105,14 @@ def _validated_finite_current_mode(mode: str) -> FiniteCurrentMode:
 def resolve_boozer_current_convention(
     finite_current_mode: FiniteCurrentMode,
 ) -> BoozerCurrentConvention:
+    """Return the BoozerSurface I normalization owned by the selected workflow."""
     return _BOOZER_CURRENT_CONVENTION_BY_MODE[finite_current_mode]
 
 
 def physical_current_to_boozer_I(
     plasma_current_A: float,
     *,
-    convention: BoozerCurrentConvention = "mu0_over_2pi",
+    convention: BoozerCurrentConvention = "mu0",
 ) -> float:
     return _BOOZER_CURRENT_SCALE_BY_CONVENTION[convention] * float(plasma_current_A)
 
@@ -114,7 +120,7 @@ def physical_current_to_boozer_I(
 def boozer_I_to_physical_current_A(
     boozer_I: float,
     *,
-    convention: BoozerCurrentConvention = "mu0_over_2pi",
+    convention: BoozerCurrentConvention = "mu0",
 ) -> float:
     return float(boozer_I) / _BOOZER_CURRENT_SCALE_BY_CONVENTION[convention]
 

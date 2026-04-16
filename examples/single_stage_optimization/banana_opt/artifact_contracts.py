@@ -6,6 +6,7 @@ from pathlib import Path
 from .current_contracts import (
     BANANA_CURRENT_HARD_LIMIT_A,
     DEFAULT_FINITE_CURRENT_MODE,
+    physical_current_to_boozer_I,
     resolve_boozer_current_convention,
     resolve_effective_current_mode,
 )
@@ -99,10 +100,43 @@ def _upgrade_legacy_finite_current_metadata(upgraded_results: dict) -> None:
     if finite_current_mode in {None, ""}:
         finite_current_mode = DEFAULT_FINITE_CURRENT_MODE
         upgraded_results["FINITE_CURRENT_MODE"] = finite_current_mode
-    upgraded_results["BOOZER_CURRENT_CONVENTION"] = (
-        upgraded_results.get("BOOZER_CURRENT_CONVENTION")
-        or resolve_boozer_current_convention(finite_current_mode)
-    )
+    recorded_boozer_current_convention = upgraded_results.get("BOOZER_CURRENT_CONVENTION")
+    if recorded_boozer_current_convention in {None, ""}:
+        plasma_current_A = upgraded_results.get("PLASMA_CURRENT_A")
+        boozer_I = upgraded_results.get("BOOZER_I")
+        resolved_boozer_current_convention = resolve_boozer_current_convention(
+            finite_current_mode
+        )
+        if plasma_current_A is not None and boozer_I is not None:
+            expected_mu0_boozer_I = physical_current_to_boozer_I(
+                plasma_current_A,
+                convention="mu0",
+            )
+            expected_mu0_over_2pi_boozer_I = physical_current_to_boozer_I(
+                plasma_current_A,
+                convention="mu0_over_2pi",
+            )
+            matches_mu0 = math.isclose(
+                float(boozer_I),
+                expected_mu0_boozer_I,
+                rel_tol=0.0,
+                abs_tol=1.0e-12,
+            )
+            matches_mu0_over_2pi = math.isclose(
+                float(boozer_I),
+                expected_mu0_over_2pi_boozer_I,
+                rel_tol=0.0,
+                abs_tol=1.0e-12,
+            )
+            if matches_mu0 and not matches_mu0_over_2pi:
+                resolved_boozer_current_convention = "mu0"
+            elif matches_mu0_over_2pi and not matches_mu0:
+                resolved_boozer_current_convention = "mu0_over_2pi"
+        upgraded_results["BOOZER_CURRENT_CONVENTION"] = (
+            resolved_boozer_current_convention
+        )
+    else:
+        upgraded_results["BOOZER_CURRENT_CONVENTION"] = recorded_boozer_current_convention
     if upgraded_results.get("NUM_PROXY_COILS") is None:
         upgraded_results["NUM_PROXY_COILS"] = 0
     if upgraded_results.get("NUM_VF_COILS") is None:

@@ -152,7 +152,7 @@ class HandoffSchemaTests(unittest.TestCase):
         self.assertIsNone(upgraded["STAGE2_SECONDARY_BS_PATH"])
         self.assertIsNone(upgraded["STAGE2_SECONDARY_RESULTS_PATH"])
         self.assertEqual(upgraded["FINITE_CURRENT_MODE"], "boozer_surrogate")
-        self.assertEqual(upgraded["BOOZER_CURRENT_CONVENTION"], "mu0_over_2pi")
+        self.assertEqual(upgraded["BOOZER_CURRENT_CONVENTION"], "mu0")
         self.assertEqual(upgraded["NUM_PROXY_COILS"], 0)
         self.assertEqual(upgraded["NUM_VF_COILS"], 0)
         self.assertEqual(upgraded["PROXY_PLASMA_CURRENT_A"], 0.0)
@@ -396,7 +396,10 @@ class UnifiedRunnerTests(unittest.TestCase):
                 stage="probe",
             )
 
-        self.assertAlmostEqual(probe.call_args.kwargs["boozer_I"], 1.8e-3)
+        self.assertAlmostEqual(
+            probe.call_args.kwargs["boozer_I"],
+            4.0e-7 * 3.141592653589793 * 9000.0,
+        )
 
     def test_build_probe_status_uses_stage2_proxy_current_default_in_wataru_mode(self):
         wrapper = load_wrapper_module()
