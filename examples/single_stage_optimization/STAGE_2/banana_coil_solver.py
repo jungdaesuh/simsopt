@@ -116,7 +116,7 @@ def _host_curve_max_curvature(curve):
 
 
 def _host_dofs_copy(dofs):
-    return np.asarray(host_array(dofs, dtype=np.float64), dtype=float).copy()
+    return host_array(dofs, dtype=np.float64).copy()
 
 
 def resolve_curvature_threshold(value: float) -> float:
@@ -1395,7 +1395,7 @@ def capture_stage2_feasible_partial_candidate(
         return None, hardware_status
     return (
         Stage2FeasiblePartial(
-            dofs=np.asarray(host_array(JF.x), dtype=float),
+            dofs=_host_dofs_copy(JF.x),
             objective=objective,
             curve_length=curve_length,
             coil_coil_distance=coil_coil_distance,
