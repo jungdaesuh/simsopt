@@ -125,24 +125,30 @@ if supports_tar_flag "--no-xattrs"; then
   tar_args+=(--no-xattrs)
 fi
 
-for pattern in "${exclude_patterns[@]}"; do
-  tar_args+=(--exclude "$pattern")
-done
+if [ "${#exclude_patterns[@]}" -gt 0 ]; then
+  for pattern in "${exclude_patterns[@]}"; do
+    tar_args+=(--exclude "$pattern")
+  done
+fi
 
 if [ -n "$root_dir" ]; then
   tar_args+=(-C "$root_dir")
 fi
 
-for files_from_path in "${files_from_paths[@]}"; do
-  tar_args+=(-T "$files_from_path")
-done
+if [ "${#files_from_paths[@]}" -gt 0 ]; then
+  for files_from_path in "${files_from_paths[@]}"; do
+    tar_args+=(-T "$files_from_path")
+  done
+fi
 
 if [ "$gzip_mode" -eq 1 ]; then
   tar_create_flag="-czf"
 fi
 
 tar_args+=("$tar_create_flag" "$tar_output")
-tar_args+=("${archive_paths[@]}")
+if [ "${#archive_paths[@]}" -gt 0 ]; then
+  tar_args+=("${archive_paths[@]}")
+fi
 
 exec env \
   COPYFILE_DISABLE=1 \
