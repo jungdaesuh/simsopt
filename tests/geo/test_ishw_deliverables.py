@@ -511,6 +511,24 @@ class Stage2IotaReportingTests(unittest.TestCase):
 
         self.assertIsNone(expected_metadata["STAGE2_IOTA_CONSTRAINT_WEIGHT"])
 
+    def test_run_stage2_alm_rejects_enabled_iota_mode_without_target_before_launch(self):
+        module = load_module(EXAMPLE_ROOT / "run_stage2_alm.py", "run_stage2_alm")
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "--stage2-iota-target is required when --stage2-iota-mode is enabled.",
+        ):
+            module.main(
+                [
+                    "--plasma-surf-filename",
+                    "demo.nc",
+                    "--profile",
+                    "standard_80ka",
+                    "--stage2-iota-mode",
+                    "report",
+                ]
+            )
+
     def test_stage2_iota_report_payload_reuses_bootability_schema_without_recovery_fields(self):
         module = load_stage2_module()
 

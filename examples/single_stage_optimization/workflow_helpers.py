@@ -92,6 +92,48 @@ def canonical_stage2_iota_constraint_weight(
     return None if normalized_constraint_weight <= 0.0 else normalized_constraint_weight
 
 
+def validate_stage2_iota_args(
+    *,
+    stage2_iota_mode: str,
+    stage2_iota_target: float | None,
+    stage2_iota_tolerance: float,
+    stage2_iota_vol_target: float,
+    stage2_iota_num_tf_coils: int,
+    stage2_iota_nphi: int,
+    stage2_iota_ntheta: int,
+    stage2_iota_mpol: int,
+    stage2_iota_ntor: int,
+    stage2_iota_weight: float,
+    constraint_method: str,
+) -> None:
+    if stage2_iota_mode == _DEFAULT_STAGE2_IOTA_MODE:
+        return
+    if stage2_iota_target is None:
+        raise ValueError(
+            "--stage2-iota-target is required when --stage2-iota-mode is enabled."
+        )
+    if stage2_iota_tolerance <= 0.0:
+        raise ValueError("--stage2-iota-tolerance must be positive.")
+    if stage2_iota_vol_target <= 0.0:
+        raise ValueError("--stage2-iota-vol-target must be positive.")
+    if stage2_iota_num_tf_coils <= 0:
+        raise ValueError("--stage2-iota-num-tf-coils must be positive.")
+    if stage2_iota_nphi <= 0 or stage2_iota_ntheta <= 0:
+        raise ValueError(
+            "--stage2-iota-nphi and --stage2-iota-ntheta must both be positive."
+        )
+    if stage2_iota_mpol <= 0 or stage2_iota_ntor <= 0:
+        raise ValueError(
+            "--stage2-iota-mpol and --stage2-iota-ntor must both be positive."
+        )
+    if stage2_iota_mode == "soft" and stage2_iota_weight <= 0.0:
+        raise ValueError("--stage2-iota-weight must be positive in soft mode.")
+    if stage2_iota_mode == "alm" and constraint_method != "alm":
+        raise ValueError(
+            "--stage2-iota-mode=alm requires --constraint-method=alm."
+        )
+
+
 def format_local_stage2_seed_dir(spec: Stage2SeedSpec) -> str:
     return (
         f"R0={format_compact_float(spec.major_radius)}"

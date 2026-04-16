@@ -38,6 +38,7 @@ from workflow_helpers import (
     Stage2SeedSpec,
     canonical_stage2_iota_constraint_weight,
     format_local_stage2_run_dir,
+    validate_stage2_iota_args,
     validate_normalized_toroidal_flux,
 )
 from banana_opt.reference_surfaces import build_banana_reference_surfaces
@@ -148,32 +149,19 @@ def validate_banana_current_cli_args(args) -> None:
 
 
 def validate_stage2_iota_cli_args(args) -> None:
-    if args.stage2_iota_mode == DEFAULT_STAGE2_IOTA_MODE:
-        return
-    if args.stage2_iota_target is None:
-        raise ValueError(
-            "--stage2-iota-target is required when --stage2-iota-mode is enabled."
-        )
-    if args.stage2_iota_tolerance <= 0.0:
-        raise ValueError("--stage2-iota-tolerance must be positive.")
-    if args.stage2_iota_vol_target <= 0.0:
-        raise ValueError("--stage2-iota-vol-target must be positive.")
-    if args.stage2_iota_num_tf_coils <= 0:
-        raise ValueError("--stage2-iota-num-tf-coils must be positive.")
-    if args.stage2_iota_nphi <= 0 or args.stage2_iota_ntheta <= 0:
-        raise ValueError(
-            "--stage2-iota-nphi and --stage2-iota-ntheta must both be positive."
-        )
-    if args.stage2_iota_mpol <= 0 or args.stage2_iota_ntor <= 0:
-        raise ValueError(
-            "--stage2-iota-mpol and --stage2-iota-ntor must both be positive."
-        )
-    if args.stage2_iota_mode == "soft" and args.stage2_iota_weight <= 0.0:
-        raise ValueError("--stage2-iota-weight must be positive in soft mode.")
-    if args.stage2_iota_mode == "alm" and args.constraint_method != "alm":
-        raise ValueError(
-            "--stage2-iota-mode=alm requires --constraint-method=alm."
-        )
+    validate_stage2_iota_args(
+        stage2_iota_mode=args.stage2_iota_mode,
+        stage2_iota_target=args.stage2_iota_target,
+        stage2_iota_tolerance=args.stage2_iota_tolerance,
+        stage2_iota_vol_target=args.stage2_iota_vol_target,
+        stage2_iota_num_tf_coils=args.stage2_iota_num_tf_coils,
+        stage2_iota_nphi=args.stage2_iota_nphi,
+        stage2_iota_ntheta=args.stage2_iota_ntheta,
+        stage2_iota_mpol=args.stage2_iota_mpol,
+        stage2_iota_ntor=args.stage2_iota_ntor,
+        stage2_iota_weight=args.stage2_iota_weight,
+        constraint_method=args.constraint_method,
+    )
 
 
 def resolve_stage2_iota_constraint_weight(constraint_weight: float) -> float | None:

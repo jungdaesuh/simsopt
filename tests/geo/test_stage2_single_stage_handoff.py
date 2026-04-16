@@ -90,6 +90,10 @@ class HandoffSchemaTests(unittest.TestCase):
                 "BOOTABILITY_TARGET_IOTA": 0.2,
                 "BOOTABILITY_SOLVED_IOTA": 0.18,
                 "BOOTABILITY_SELF_INTERSECTING": False,
+                "BOOTABILITY_SOLVE_SUCCESS": True,
+                "BOOTABILITY_ABS_IOTA_ERROR": 0.02,
+                "BOOTABILITY_ERROR_TYPE": None,
+                "BOOTABILITY_ERROR_MESSAGE": None,
             },
             stage2_bs_path="/tmp/stage2/biot_savart_opt.json",
             stage2_results_path="/tmp/stage2/results.json",
@@ -109,6 +113,10 @@ class HandoffSchemaTests(unittest.TestCase):
                 "BOOTABILITY_TARGET_IOTA",
                 "BOOTABILITY_SOLVED_IOTA",
                 "BOOTABILITY_SELF_INTERSECTING",
+                "BOOTABILITY_SOLVE_SUCCESS",
+                "BOOTABILITY_ABS_IOTA_ERROR",
+                "BOOTABILITY_ERROR_TYPE",
+                "BOOTABILITY_ERROR_MESSAGE",
                 "STAGE2_BS_PATH",
                 "STAGE2_RESULTS_PATH",
                 "RECOVERY_ATTEMPTED",
@@ -120,6 +128,7 @@ class HandoffSchemaTests(unittest.TestCase):
         self.assertTrue(payload["BOOZER_BOOTABLE"])
         self.assertFalse(payload["IOTA_FEASIBLE"])
         self.assertEqual(payload["BOOTABILITY_REASON"], "iota_mismatch")
+        self.assertAlmostEqual(payload["BOOTABILITY_ABS_IOTA_ERROR"], 0.02)
         self.assertEqual(payload["RECOVERY_ITERS"], 7)
         self.assertEqual(
             payload["RECOVERY_TERMINATION_REASON"],

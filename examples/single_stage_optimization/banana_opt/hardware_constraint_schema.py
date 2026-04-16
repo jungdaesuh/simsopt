@@ -106,6 +106,15 @@ _BOOTABILITY_STATUS_FIELD_NAMES = (
     "BOOTABILITY_SOLVED_IOTA",
     "BOOTABILITY_SELF_INTERSECTING",
 )
+_BOOTABILITY_DIAGNOSTIC_FIELD_NAMES = (
+    "BOOTABILITY_SOLVE_SUCCESS",
+    "BOOTABILITY_ABS_IOTA_ERROR",
+    "BOOTABILITY_ERROR_TYPE",
+    "BOOTABILITY_ERROR_MESSAGE",
+)
+_BOOTABILITY_PAYLOAD_FIELD_NAMES = (
+    _BOOTABILITY_STATUS_FIELD_NAMES + _BOOTABILITY_DIAGNOSTIC_FIELD_NAMES
+)
 _BOOTABILITY_PROVENANCE_FIELD_NAMES = (
     "STAGE2_BS_PATH",
     "STAGE2_RESULTS_PATH",
@@ -232,9 +241,7 @@ def bootability_recovery_payload_field_names(
     include_provenance: bool = True,
     include_recovery: bool = True,
 ) -> tuple[str, ...]:
-    field_names = [
-        f"{prefix}{field}" for field in _BOOTABILITY_STATUS_FIELD_NAMES
-    ]
+    field_names = [f"{prefix}{field}" for field in _BOOTABILITY_PAYLOAD_FIELD_NAMES]
     if include_provenance:
         field_names.extend(
             f"{prefix}{field}" for field in _BOOTABILITY_PROVENANCE_FIELD_NAMES
@@ -266,7 +273,7 @@ def build_bootability_recovery_payload_fields(
         )
     }
     if bootability_status is not None:
-        for field_name in _BOOTABILITY_STATUS_FIELD_NAMES:
+        for field_name in _BOOTABILITY_PAYLOAD_FIELD_NAMES:
             payload_fields[f"{prefix}{field_name}"] = bootability_status.get(field_name)
     payload_fields[f"{prefix}STAGE2_BS_PATH"] = stage2_bs_path
     payload_fields[f"{prefix}STAGE2_RESULTS_PATH"] = stage2_results_path

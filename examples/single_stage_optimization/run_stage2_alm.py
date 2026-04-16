@@ -24,7 +24,10 @@ from workflow_runner_common import (  # noqa: E402
     timeout_or_none,
     write_dry_run_marker,
 )
-from workflow_helpers import canonical_stage2_iota_constraint_weight  # noqa: E402
+from workflow_helpers import (  # noqa: E402
+    canonical_stage2_iota_constraint_weight,
+    validate_stage2_iota_args,
+)
 from banana_opt.artifact_contracts import (  # noqa: E402
     basin_metadata_from_config,
     upgrade_legacy_stage2_artifact_results,
@@ -137,7 +140,7 @@ def _jsonable_stage2_config(config: Stage2ArtifactConfig) -> dict:
     }
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Ensure a Stage 2 ALM artifact for any plasma surface using either a "
@@ -275,7 +278,7 @@ def parse_args() -> argparse.Namespace:
         default=6,
         help="Boozer-surface ntor used by the Stage 2 Boozer/iota solve.",
     )
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
 def _normalize_basin_seed(*, basin_hops: int, basin_seed: int | None) -> int | None:
@@ -584,8 +587,21 @@ def build_summary(
     return summary
 
 
-def main() -> int:
-    args = parse_args()
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
+    validate_stage2_iota_args(
+        stage2_iota_mode=args.stage2_iota_mode,
+        stage2_iota_target=args.stage2_iota_target,
+        stage2_iota_tolerance=args.stage2_iota_tolerance,
+        stage2_iota_vol_target=args.stage2_iota_vol_target,
+        stage2_iota_num_tf_coils=args.stage2_iota_num_tf_coils,
+        stage2_iota_nphi=args.stage2_iota_nphi,
+        stage2_iota_ntheta=args.stage2_iota_ntheta,
+        stage2_iota_mpol=args.stage2_iota_mpol,
+        stage2_iota_ntor=args.stage2_iota_ntor,
+        stage2_iota_weight=args.stage2_iota_weight,
+        constraint_method="alm",
+    )
     resolved_spec, resolved_spec_source = resolve_stage2_spec_payload(args)
     config = build_stage2_alm_config(args, resolved_spec=resolved_spec)
     artifact_path = resolve_stage2_artifact_path(config)
