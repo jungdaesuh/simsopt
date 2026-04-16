@@ -2133,13 +2133,8 @@ def _surface_xyz_tensor_design_matrix(
     )
     if not stellsym:
         return design_matrix
-    scatter_indices = jax.device_put(
-        np.asarray(stellsym_scatter_indices(mpol, ntor), dtype=np.int32)
-    )
-    return design_matrix[
-        :,
-        scatter_indices,
-    ]
+    scatter_indices = _as_jax_int32(stellsym_scatter_indices(mpol, ntor))
+    return jnp.take(design_matrix, scatter_indices, axis=1)
 
 
 def _surface_xyz_tensor_design_matrix_host(
@@ -2151,19 +2146,22 @@ def _surface_xyz_tensor_design_matrix_host(
     quadpoints_phi,
     quadpoints_theta,
 ):
-    return np.asarray(
-        jax.device_get(
-            _surface_xyz_tensor_design_matrix(
-                mpol=mpol,
-                ntor=ntor,
-                nfp=nfp,
-                stellsym=stellsym,
-                quadpoints_phi=jnp.asarray(quadpoints_phi, dtype=jnp.float64),
-                quadpoints_theta=jnp.asarray(quadpoints_theta, dtype=jnp.float64),
-            )
+    return host_array(
+        _surface_xyz_tensor_design_matrix(
+            mpol=mpol,
+            ntor=ntor,
+            nfp=nfp,
+            stellsym=stellsym,
+            quadpoints_phi=_as_jax_float64(quadpoints_phi),
+            quadpoints_theta=_as_jax_float64(quadpoints_theta),
         ),
-        dtype=float,
+        dtype=np.float64,
     )
+
+
+def _host_and_jax_float64(values):
+    host_values = host_array(values, dtype=np.float64)
+    return host_values, _as_jax_float64(host_values)
 
 
 def _fit_surface_xyz_tensor_dofs_to_gamma(
@@ -2176,9 +2174,11 @@ def _fit_surface_xyz_tensor_dofs_to_gamma(
     quadpoints_phi,
     quadpoints_theta,
 ):
-    quadpoints_phi_jax = jnp.asarray(quadpoints_phi, dtype=jnp.float64)
-    quadpoints_theta_jax = jnp.asarray(quadpoints_theta, dtype=jnp.float64)
-    target_gamma_jax = jnp.asarray(target_gamma, dtype=jnp.float64).reshape(
+    quadpoints_phi_host, quadpoints_phi_jax = _host_and_jax_float64(quadpoints_phi)
+    quadpoints_theta_host, quadpoints_theta_jax = _host_and_jax_float64(
+        quadpoints_theta
+    )
+    target_gamma_jax = _as_jax_float64(target_gamma).reshape(
         quadpoints_phi_jax.size,
         quadpoints_theta_jax.size,
         3,
@@ -2199,15 +2199,17 @@ def _fit_surface_xyz_tensor_dofs_to_gamma(
         ntor=ntor,
         nfp=nfp,
         stellsym=stellsym,
-        quadpoints_phi=quadpoints_phi_jax,
-        quadpoints_theta=quadpoints_theta_jax,
+        quadpoints_phi=quadpoints_phi_host,
+        quadpoints_theta=quadpoints_theta_host,
     )
     design_rank = int(np.asarray(jax.device_get(rank)))
     return fitted_dofs_host, design_rank == int(design_matrix.shape[1])
 
 
 def _quadpoints_cache_key(values):
-    return tuple(float(value) for value in np.asarray(values, dtype=float).reshape(-1))
+    return tuple(
+        float(value) for value in host_array(values, dtype=np.float64).reshape(-1)
+    )
 
 
 def _surface_xyz_tensor_alias_cache_args(
@@ -2392,11 +2394,11 @@ def _target_gamma_from_supported_surface(
     quadpoints_phi,
     quadpoints_theta,
 ):
-    quadpoints_phi_jax = jnp.asarray(quadpoints_phi, dtype=jnp.float64)
-    quadpoints_theta_jax = jnp.asarray(quadpoints_theta, dtype=jnp.float64)
+    quadpoints_phi_jax = _as_jax_float64(quadpoints_phi)
+    quadpoints_theta_jax = _as_jax_float64(quadpoints_theta)
     if isinstance(surface, SerializedSurfaceState):
         surface_class = surface.surface_class
-        source_dofs = jnp.asarray(surface.dofs, dtype=jnp.float64)
+        source_dofs = _as_jax_float64(surface.dofs)
         source_mpol = surface.mpol
         source_ntor = surface.ntor
         source_nfp = surface.nfp
@@ -2405,7 +2407,7 @@ def _target_gamma_from_supported_surface(
         surface_class = type(surface).__name__
         if not hasattr(surface, "get_dofs"):
             return None
-        source_dofs = jnp.asarray(surface.get_dofs(), dtype=jnp.float64)
+        source_dofs = _as_jax_float64(surface.get_dofs())
         source_mpol = int(getattr(surface, "mpol", 0))
         source_ntor = int(getattr(surface, "ntor", 0))
         source_nfp = int(getattr(surface, "nfp", 5))

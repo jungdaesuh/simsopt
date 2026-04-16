@@ -464,6 +464,14 @@ def _assert_finite_array_matches_host(
     np.testing.assert_allclose(host_array, device_array)
 
 
+def _assert_finite_array(value, *, expected_shape=None) -> np.ndarray:
+    array = _host_array_float64(value)
+    if expected_shape is not None:
+        assert array.shape == expected_shape
+    assert np.all(np.isfinite(array))
+    return array
+
+
 def _assert_reporting_metrics_match_host(
     metric_names: tuple[str, ...],
     device_metrics,
@@ -909,10 +917,44 @@ def _run_surface_xyztensorfourier_gamma_from_dofs_case() -> None:
             scatter,
         )
 
-    gamma = jax.jit(gamma_from_dofs)(jax.device_put(dofs, device=gpu))
+    eager_gamma = gamma_from_dofs(jax.device_put(dofs, device=gpu))
+    jitted_gamma = jax.jit(gamma_from_dofs)(jax.device_put(dofs, device=gpu))
 
-    assert gamma.shape == (2, 2, 3)
-    assert bool(jax.device_get(jnp.all(jnp.isfinite(gamma))))
+    _assert_finite_array(eager_gamma, expected_shape=(2, 2, 3))
+    _assert_finite_array(jitted_gamma, expected_shape=(2, 2, 3))
+
+
+def _run_project_surface_dofs_to_resolution_case() -> None:
+    _configure_transfer_guard_cpu_parity_backend()
+
+    from examples.single_stage_optimization.SINGLE_STAGE import (
+        single_stage_banana_example as single_stage_example,
+    )
+
+    surface = SurfaceRZFourier(
+        mpol=2,
+        ntor=1,
+        nfp=5,
+        stellsym=True,
+        quadpoints_phi=np.linspace(0.0, 0.2, 4, endpoint=False),
+        quadpoints_theta=np.linspace(0.0, 1.0, 5, endpoint=False),
+    )
+    source_dofs = np.asarray(surface.get_dofs(), dtype=np.float64)
+    source_dofs[:] = np.linspace(0.03, 0.03 * source_dofs.size, source_dofs.size)
+    surface.set_dofs(source_dofs)
+
+    projected_dofs = single_stage_example.project_surface_dofs_to_resolution(
+        surface,
+        mpol=4,
+        ntor=3,
+        quadpoints_phi=np.linspace(0.0, 0.2, 6, endpoint=False),
+        quadpoints_theta=np.linspace(0.0, 1.0, 7, endpoint=False),
+    )
+
+    _assert_finite_array(
+        projected_dofs,
+        expected_shape=(len(single_stage_example.stellsym_scatter_indices(4, 3)),),
+    )
 
 
 def _run_coil_symmetry_spec_identity_default_case() -> None:
@@ -996,16 +1038,14 @@ def _run_surface_rzfourier_gamma_from_spec_case() -> None:
     surf = _build_surface_rzfourier_transfer_guard_surface()
     gamma = surface_rz_fourier_gamma_from_spec(surf.surface_spec())
 
-    assert gamma.shape == (16, 16, 3)
-    assert bool(jax.device_get(jnp.all(jnp.isfinite(gamma))))
+    _assert_finite_array(gamma, expected_shape=(16, 16, 3))
 
 
 def _run_surface_rzfourier_normal_from_spec_case() -> None:
     surf = _build_surface_rzfourier_transfer_guard_surface()
     normal = surface_rz_fourier_normal_from_spec(surf.surface_spec())
 
-    assert normal.shape == (16, 16, 3)
-    assert bool(jax.device_get(jnp.all(jnp.isfinite(normal))))
+    _assert_finite_array(normal, expected_shape=(16, 16, 3))
 
 
 def _build_legacy_curve_objective_common_fixture() -> (
@@ -1530,6 +1570,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     subparsers.add_parser("closed-curve-self-intersection-summary")
     subparsers.add_parser("single-stage-surface-self-intersection")
     subparsers.add_parser("surface-xyztensorfourier-gamma-from-dofs")
+    subparsers.add_parser("project-surface-dofs-to-resolution")
     subparsers.add_parser("coil-symmetry-spec-identity-default")
     subparsers.add_parser("pairwise-curve-penalty-pure-functions")
     subparsers.add_parser("surfacerzfourier-spec-defaults")
@@ -1618,6 +1659,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
     if args.case == "surface-xyztensorfourier-gamma-from-dofs":
         _run_surface_xyztensorfourier_gamma_from_dofs_case()
+        return 0
+    if args.case == "project-surface-dofs-to-resolution":
+        _run_project_surface_dofs_to_resolution_case()
         return 0
     if args.case == "coil-symmetry-spec-identity-default":
         _run_coil_symmetry_spec_identity_default_case()

@@ -2286,6 +2286,78 @@ class SingleStageExampleTests(unittest.TestCase):
             atol=1e-12,
         )
 
+    def test_project_surface_dofs_to_resolution_allows_strict_transfer_guard_for_stellsym_rz_surface(
+        self,
+    ):
+        module = self.load_module()
+        source_surface = module.SurfaceRZFourier(
+            mpol=2,
+            ntor=1,
+            nfp=5,
+            stellsym=True,
+            quadpoints_phi=np.linspace(0.0, 0.2, 4, endpoint=False),
+            quadpoints_theta=np.linspace(0.0, 1.0, 5, endpoint=False),
+        )
+        source_dofs = source_surface.get_dofs().copy()
+        source_dofs[:] = np.linspace(0.03, 0.03 * source_dofs.size, source_dofs.size)
+        source_surface.set_dofs(source_dofs)
+        quadpoints_phi = np.linspace(0.0, 0.2, 6, endpoint=False)
+        quadpoints_theta = np.linspace(0.0, 1.0, 7, endpoint=False)
+
+        expected_dofs = module.project_surface_dofs_to_resolution(
+            source_surface,
+            mpol=4,
+            ntor=3,
+            quadpoints_phi=quadpoints_phi,
+            quadpoints_theta=quadpoints_theta,
+        )
+
+        with jax.transfer_guard("disallow"):
+            projected_dofs = module.project_surface_dofs_to_resolution(
+                source_surface,
+                mpol=4,
+                ntor=3,
+                quadpoints_phi=quadpoints_phi,
+                quadpoints_theta=quadpoints_theta,
+            )
+
+        np.testing.assert_allclose(
+            projected_dofs,
+            expected_dofs,
+            rtol=1e-10,
+            atol=1e-12,
+        )
+
+    def test_surface_gamma_from_dofs_allows_strict_transfer_guard_for_eager_stellsym_xyz(
+        self,
+    ):
+        module = self.load_module()
+        surface = module.SurfaceXYZTensorFourier(
+            mpol=1,
+            ntor=1,
+            stellsym=True,
+            nfp=1,
+            quadpoints_phi=np.array([0.23, 0.41]),
+            quadpoints_theta=np.array([0.37, 0.59]),
+        )
+        dofs = np.asarray(surface.get_dofs(), dtype=np.float64)
+        scatter_indices = module.stellsym_scatter_indices(surface.mpol, surface.ntor)
+
+        with jax.transfer_guard("disallow"):
+            gamma = module.surface_gamma_from_dofs(
+                jax.device_put(dofs),
+                jax.device_put(np.asarray(surface.quadpoints_phi, dtype=np.float64)),
+                jax.device_put(np.asarray(surface.quadpoints_theta, dtype=np.float64)),
+                surface.mpol,
+                surface.ntor,
+                surface.nfp,
+                surface.stellsym,
+                scatter_indices=scatter_indices,
+            )
+
+        self.assertEqual(gamma.shape, (2, 2, 3))
+        self.assertTrue(np.all(np.isfinite(np.asarray(jax.device_get(gamma)))))
+
     def test_target_lane_hardware_success_filter_keeps_closure_constants_on_host(self):
         module = self.load_module()
         banana_curve = object()

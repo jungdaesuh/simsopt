@@ -779,13 +779,22 @@ def test_segment_segment_distance_pure_rejects_host_numpy_inputs_without_spec():
 
 
 def test_transfer_guard_disallow_allows_surface_xyztensorfourier_gamma_from_dofs():
-    """SurfaceXYZTensorFourier geometry should not close over device constants."""
+    """SurfaceXYZTensorFourier geometry should stay clean in eager and jitted strict-guard lanes."""
     _assert_python_script_passes(
         _JAX_SUBPROCESS_CASES_PATH,
         args=("surface-xyztensorfourier-gamma-from-dofs",),
         failure_message="SurfaceXYZTensorFourier gamma strict transfer-guard smoke failed",
         timeout=120,
         extra_env={"XLA_PYTHON_CLIENT_PREALLOCATE": "false"},
+    )
+
+
+def test_transfer_guard_disallow_allows_project_surface_dofs_to_resolution():
+    """Warm-start surface reprojection should keep host/device transfers explicit."""
+    _assert_python_script_passes(
+        _JAX_SUBPROCESS_CASES_PATH,
+        args=("project-surface-dofs-to-resolution",),
+        failure_message="project_surface_dofs_to_resolution strict transfer-guard smoke failed",
     )
 
 

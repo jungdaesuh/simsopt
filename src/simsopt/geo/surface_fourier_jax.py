@@ -23,6 +23,7 @@ For stellarator symmetry the caller must zero out the forbidden entries
 import numpy as np
 import jax
 import jax.numpy as jnp
+from jax import lax
 
 from simsopt.jax_core._math_utils import as_runtime_float64 as _as_runtime_float64
 
@@ -89,11 +90,13 @@ def _selector_matrix(size, positions):
     return _as_jax_float64(matrix)
 
 
-def _scatter_matrix(target_size, positions):
-    matrix = np.zeros((target_size, len(positions)), dtype=np.float64)
-    if positions:
-        matrix[positions, np.arange(len(positions))] = 1.0
-    return _as_jax_float64(matrix)
+_SCATTER_SET_DIMS_1D = lax.ScatterDimensionNumbers(
+    update_window_dims=(),
+    inserted_window_dims=(0,),
+    scatter_dims_to_operand_dims=(0,),
+    operand_batching_dims=(),
+    scatter_indices_batching_dims=(),
+)
 
 
 # ---------------------------------------------------------------------------
@@ -401,16 +404,22 @@ def dofs_to_xyzc(sdofs, scatter_indices, mpol, ntor):
     """
     sdofs_jax = _as_jax_float64(sdofs)
     scatter_operand = scatter_indices
-    if isinstance(scatter_operand, jax.Array) and scatter_operand.ndim == 2:
-        flat = _as_jax_float64(scatter_operand) @ sdofs_jax
-        return _split_flat_to_xyzc(flat, mpol, ntor)
-    if np.ndim(scatter_operand) == 2:
+    scatter_ndim = getattr(scatter_operand, "ndim", np.ndim(scatter_operand))
+    if scatter_ndim == 2:
         flat = _as_jax_float64(scatter_operand) @ sdofs_jax
         return _split_flat_to_xyzc(flat, mpol, ntor)
 
     n_per_coord = int((2 * mpol + 1) * (2 * ntor + 1))
-    flat = _zeros(3 * n_per_coord, sdofs_jax.dtype)
-    flat = flat.at[_as_jax_int32(scatter_operand)].set(sdofs_jax)
+    scatter_indices_1d = _as_jax_int32(scatter_operand).reshape(-1, 1)
+    flat = lax.scatter(
+        _zeros(3 * n_per_coord, sdofs_jax.dtype),
+        scatter_indices_1d,
+        sdofs_jax,
+        _SCATTER_SET_DIMS_1D,
+        indices_are_sorted=True,
+        unique_indices=True,
+        mode=lax.GatherScatterMode.PROMISE_IN_BOUNDS,
+    )
     return _split_flat_to_xyzc(flat, mpol, ntor)
 
 
