@@ -53,6 +53,24 @@ def _assert_plu_tuple_is_nan(parts) -> None:
         assert np.isnan(part).all()
 
 
+def _device_half() -> jax.Array:
+    return jax.device_put(np.asarray(0.5, dtype=np.float64))
+
+
+def _record_host_arrays(points, *, dtype=None):
+    def callback(x):
+        points.append(np.asarray(x, dtype=dtype))
+
+    return callback
+
+
+def _record_progress(points):
+    def callback(nit, fun, grad_norm):
+        points.append((int(nit), float(fun), float(grad_norm)))
+
+    return callback
+
+
 def test_traceable_plu_or_dummy_accepts_python_and_traced_predicates():
     matrix = jnp.asarray([[3.0, 1.0], [2.0, 4.0]], dtype=jnp.float64)
     expected = tuple(np.asarray(part) for part in jax.scipy.linalg.lu(matrix))
@@ -810,6 +828,37 @@ class TestOptimizerAdapterPrivate:
         np.testing.assert_allclose(np.asarray(state.g_k), np.zeros(2), atol=1e-12)
 
     @PRIVATE_OPTIMIZER_RUNTIME
+    def test_minimize_lbfgs_private_callbacks_stay_transfer_clean_under_disallow(self):
+        """Accepted-step callbacks must not trip strict transfer guard."""
+        half = _device_half()
+
+        def quad(x):
+            return half * jnp.dot(x, x)
+
+        x0 = jnp.array([1.0, -2.0], dtype=jnp.float64)
+        callback_points = []
+        progress_points = []
+
+        with jax.transfer_guard("disallow"):
+            state = _opt._minimize_lbfgs_private(
+                quad,
+                x0,
+                maxiter=10,
+                gtol=1e-8,
+                maxcor=5,
+                callback=_record_host_arrays(callback_points),
+                progress_callback=_record_progress(progress_points),
+            )
+
+        assert bool(state.converged) is True
+        assert bool(state.failed) is False
+        assert int(state.status) == 0
+        assert callback_points
+        assert progress_points
+        np.testing.assert_allclose(callback_points[-1], np.zeros(2), atol=1e-12)
+        assert progress_points[-1][0] >= 1
+
+    @PRIVATE_OPTIMIZER_RUNTIME
     def test_minimize_lbfgs_private_preserves_last_finite_iterate_on_nonfinite_step(
         self,
         monkeypatch,
@@ -839,9 +888,10 @@ class TestOptimizerAdapterPrivate:
 
         x0 = jnp.array([1.0, -2.0], dtype=jnp.float64)
         observed = []
+        half = _device_half()
 
         def quad(x):
-            return 0.5 * jnp.dot(x, x)
+            return half * jnp.dot(x, x)
 
         def fake_line_search(*_args, **_kwargs):
             return _LineSearchResults(
@@ -862,13 +912,14 @@ class TestOptimizerAdapterPrivate:
             fake_line_search,
         )
 
-        state = _lbfgs_module._minimize_lbfgs_private(
-            quad,
-            x0,
-            maxiter=5,
-            gtol=1e-8,
-            failure_callback=lambda *payload: observed.append(payload),
-        )
+        with jax.transfer_guard("disallow"):
+            state = _lbfgs_module._minimize_lbfgs_private(
+                quad,
+                x0,
+                maxiter=5,
+                gtol=1e-8,
+                failure_callback=lambda *payload: observed.append(payload),
+            )
 
         _assert_lbfgs_state_preserved(state, x0, quad, ls_status=0)
         assert len(observed) == 1
@@ -1283,26 +1334,31 @@ class TestLBFGSMethodPrivate:
     @REQUIRES_PRIVATE_LBFGS_RUNTIME
     def test_lbfgs_ondevice_accepts_explicit_value_and_grad(self):
         """lbfgs-ondevice must support explicit value/grad objectives."""
+        half = _device_half()
 
         def quad_value_and_grad(x):
             x = jnp.asarray(x, dtype=jnp.float64)
-            return 0.5 * jnp.dot(x, x), x
+            return half * jnp.dot(x, x), x
 
         callback_calls = []
+        progress_calls = []
         x0 = jnp.array([1.0, -2.0], dtype=jnp.float64)
-        result = jax_minimize(
-            quad_value_and_grad,
-            x0,
-            method="lbfgs-ondevice",
-            maxiter=5,
-            value_and_grad=True,
-            callback=lambda x: callback_calls.append(np.asarray(x, dtype=float)),
-        )
+        with jax.transfer_guard("disallow"):
+            result = jax_minimize(
+                quad_value_and_grad,
+                x0,
+                method="lbfgs-ondevice",
+                maxiter=5,
+                value_and_grad=True,
+                callback=_record_host_arrays(callback_calls, dtype=float),
+                progress_callback=_record_progress(progress_calls),
+            )
 
         assert result.success is True
         assert result.nit > 0
         assert float(result.fun) < quad_value_and_grad(np.asarray(x0))[0]
         assert len(callback_calls) == result.nit
+        assert len(progress_calls) == result.nit
 
     @PRIVATE_OPTIMIZER_RUNTIME
     @REQUIRES_PRIVATE_LBFGS_RUNTIME

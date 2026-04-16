@@ -119,6 +119,25 @@ def prefer_local_simsopt_source_tree() -> None:
         _prepend_sys_path(path)
 
 
+def _record_host_arrays(points, *, dtype):
+    """Build a callback that captures array payloads as NumPy arrays."""
+    import numpy as np
+
+    def callback(x):
+        points.append(np.asarray(x, dtype=dtype))
+
+    return callback
+
+
+def _record_progress(points):
+    """Build a callback that captures progress tuples in host-native types."""
+
+    def callback(nit, fun, grad_norm):
+        points.append((int(nit), float(fun), float(grad_norm)))
+
+    return callback
+
+
 # ---------------------------------------------------------------------------
 # Case functions
 # ---------------------------------------------------------------------------
@@ -684,18 +703,33 @@ def case_transfer_guard_disallow_allows_lbfgs_ondevice_quadratic_smokes() -> Non
         x = jnp.asarray(x, dtype=jnp.float64)
         return half * jnp.dot(x, x), x
 
+    def run_lbfgs(fun, *, value_and_grad=False):
+        callback_points = []
+        progress_points = []
+        result = jax_minimize(
+            fun,
+            x0,
+            method="lbfgs-ondevice",
+            maxiter=5,
+            value_and_grad=value_and_grad,
+            callback=_record_host_arrays(callback_points, dtype=np.float64),
+            progress_callback=_record_progress(progress_points),
+        )
+        return result, callback_points, progress_points
+
     x0 = jnp.asarray(np.array([1.0, -2.0], dtype=np.float64))
-    result = jax_minimize(quad, x0, method="lbfgs-ondevice", maxiter=5)
-    result_vg = jax_minimize(
+    result, callback_points, progress_points = run_lbfgs(quad)
+    result_vg, callback_points_vg, progress_points_vg = run_lbfgs(
         quad_value_and_grad,
-        x0,
-        method="lbfgs-ondevice",
-        maxiter=5,
         value_and_grad=True,
     )
 
     assert result.success is True
     assert result_vg.success is True
+    assert callback_points
+    assert progress_points
+    assert callback_points_vg
+    assert progress_points_vg
     assert float(result.fun) < float(quad(x0))
     assert float(result_vg.fun) < float(quad(x0))
 
@@ -731,14 +765,20 @@ def case_transfer_guard_disallow_allows_target_minimize_structured_pytree_entry(
         "surface": jnp.asarray(np.array([1.0, -2.0], dtype=np.float64)),
         "current": jnp.asarray(np.array([0.5], dtype=np.float64)),
     }
+    callback_states = []
+    progress_points = []
     result = target_minimize(
         quad,
         x0,
         method="lbfgs-ondevice",
         maxiter=10,
+        callback=callback_states.append,
+        progress_callback=_record_progress(progress_points),
     )
 
     assert result.success is True
+    assert callback_states
+    assert progress_points
     assert isinstance(result.x, dict)
     assert isinstance(result.jac, dict)
     np.testing.assert_allclose(result.x["surface"], np.zeros(2), atol=1e-12)
