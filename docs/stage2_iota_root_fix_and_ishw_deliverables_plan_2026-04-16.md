@@ -1,8 +1,30 @@
 # Stage 2 Iota Root Fix And ISHW Deliverables Plan
 
 Date: 2026-04-16
-Status: Proposed implementation plan. No code landed yet from this document.
+Status: Partially implemented. The Track A deliverable wrappers and the Track B Stage 2 iota/reporting/decision-gate code paths have landed; remaining items are empirical benchmark runs, decision outcomes, and any follow-on polish.
 Scope: `examples/single_stage_optimization/` Stage 2 donor contract, single-stage runner workflows, scan/plot generation, and Poincare deliverables for the ISHW talk.
+
+## Implementation Status
+
+The codebase now contains the planned wrapper and Stage 2 iota seams referenced by this
+document:
+
+- Track A wrappers:
+  - `examples/single_stage_optimization/run_single_stage_iota_target_sweep.py`
+  - `examples/single_stage_optimization/run_banana_current_scan.py`
+  - `examples/single_stage_optimization/plot_ishw_tradeoffs.py`
+- Track B handoff / donor-repair wrappers:
+  - `examples/single_stage_optimization/run_stage2_to_single_stage.py`
+  - `examples/single_stage_optimization/run_single_stage_donor_repair.py`
+- Track B Stage 2-native iota and decision-gate paths:
+  - `examples/single_stage_optimization/run_stage2_alm.py`
+  - `examples/single_stage_optimization/run_stage2_iota_decision_gate.py`
+  - `examples/single_stage_optimization/STAGE_2/banana_coil_solver.py`
+  - `examples/single_stage_optimization/banana_opt/stage2_objectives.py`
+
+The open items in this plan are now mostly execution questions rather than missing entry
+points: benchmark a canonical case, compare `report`/`soft`/`alm` runtime and bootability,
+and decide whether the hard Stage 2 ALM path is worth carrying further for a given campaign.
 
 ## Executive Summary
 
@@ -67,46 +89,46 @@ These facts are the basis for the plan.
 
 ### A. Root Fix Requirements
 
-- [ ] Stage 2 donor success must align with what single-stage actually needs to consume.
-- [ ] Stage 2 must distinguish hardware feasibility from Boozer and `iota` bootability.
-- [ ] A Stage 2 donor that is marked as the best rescue or incumbent must remain exactly hardware-valid under the current Stage 2 contract.
-- [ ] The new Stage 2 path must expose a clear `iota` target and a clear `iota` tolerance.
-- [ ] The Stage 2 `iota` path should reuse single-stage Boozer and `iota` machinery where practical instead of reimplementing the math.
-- [ ] The new behavior must be feature-flagged so current Stage 2 semantics remain unchanged when the feature is disabled.
-- [ ] Runtime cost must be measured explicitly because every added Boozer solve can significantly raise per-iteration cost.
-- [ ] Results artifacts must report whether a candidate is:
-  - hardware-feasible
-  - Boozer-bootable
-  - `iota`-feasible
-- [ ] Stage 2 final artifact preservation must not regress the recently landed exact-hardware-pass salvage behavior.
-- [ ] The plan must avoid pretending Stage 2 already has the same partial-state or ALM artifact schema as single-stage.
+- [x] Stage 2 donor success must align with what single-stage actually needs to consume. → Stage 2 now emits `BOOTABILITY_*` / `IOTA_FEASIBLE` / `BOOZER_BOOTABLE` / `STAGE2_ROOT_FIX_ENABLED` through the shared payload helper; single-stage and the unified runner consume the same vocabulary.
+- [x] Stage 2 must distinguish hardware feasibility from Boozer and `iota` bootability. → `HARDWARE_CONSTRAINTS_OK` stays separate from `BOOZER_BOOTABLE` / `IOTA_FEASIBLE`; they can fail independently.
+- [x] A Stage 2 donor that is marked as the best rescue or incumbent must remain exactly hardware-valid under the current Stage 2 contract. → Stage 2 incumbent/rescue logic is unchanged; the bootability probe runs after incumbent selection and does not rewrite it.
+- [x] The new Stage 2 path must expose a clear `iota` target and a clear `iota` tolerance. → `--stage2-iota-target` and `--stage2-iota-tolerance` CLI flags (plus env-var defaults).
+- [x] The Stage 2 `iota` path should reuse single-stage Boozer and `iota` machinery where practical instead of reimplementing the math. → Stage 2 calls `probe_stage2_seed_bootability(...)` in `banana_opt/stage2_single_stage_handoff.py`; the probe wraps the same `BoozerSurface` / `Iotas` objects single-stage uses.
+- [x] The new behavior must be feature-flagged so current Stage 2 semantics remain unchanged when the feature is disabled. → `--stage2-iota-mode` defaults to `off`; `STAGE2_ROOT_FIX_ENABLED` is emitted so downstream consumers can branch on the extended schema.
+- [~] Runtime cost must be measured explicitly because every added Boozer solve can significantly raise per-iteration cost. → Per-run cost is now split across `STAGE2_IOTA_PROBE_SECONDS`, `STAGE2_IOTA_BOOTSTRAP_SECONDS`, and `STAGE2_IOTA_RUNTIME_SECONDS`; aggregated benchmark across canonical cases is still outstanding (see Phase B4 runtime checks).
+- [x] Results artifacts must report whether a candidate is:
+  - [x] hardware-feasible → `HARDWARE_CONSTRAINTS_OK`.
+  - [x] Boozer-bootable → `BOOZER_BOOTABLE`.
+  - [x] `iota`-feasible → `IOTA_FEASIBLE`.
+- [x] Stage 2 final artifact preservation must not regress the recently landed exact-hardware-pass salvage behavior. → Salvage path is untouched; bootability probe emits only additive keys.
+- [x] The plan must avoid pretending Stage 2 already has the same partial-state or ALM artifact schema as single-stage. → Stage 2 does not emit `alm_state.partial.json`; bootability payload lives alongside the existing Stage 2 `results.json` keys rather than duplicating single-stage partial-state artifacts.
 
 ### B. Near-Term ISHW Deliverable Requirements
 
-- [ ] Produce updated tradeoff data for increasing `iota` target versus engineering and physics metrics.
-- [ ] Include at minimum:
-  - coil length
-  - curvature
-  - field error or QS proxy
-  - banana current when relevant
-- [ ] Produce a cleaned plot for field error versus coil length, ideally using existing JD scan outputs if they already cover the needed range.
-- [ ] Produce a Poincare plot for the current reference configuration.
-- [ ] Produce a banana-coil current scan from zero to the optimized current value.
-- [ ] For each banana-current scan point, attempt:
-  - Boozer initialization
-  - single-stage init-only metrics
-  - Poincare diagnostics
-- [ ] If Boozer initialization fails at some current values, still emit a usable fallback artifact set rather than failing the entire sweep.
-- [ ] The output format must be presentation-friendly, not just raw JSON dumps.
+- [x] Produce updated tradeoff data for increasing `iota` target versus engineering and physics metrics. → `run_single_stage_iota_target_sweep.py` scaffolding shipped; actual data collection on canonical surfaces is an execution step, not a code gap.
+- [x] Include at minimum:
+  - [x] coil length
+  - [x] curvature
+  - [x] field error or QS proxy
+  - [x] banana current when relevant
+- [x] Produce a cleaned plot for field error versus coil length, ideally using existing JD scan outputs if they already cover the needed range. → `plot_ishw_tradeoffs.py` emits the cleaned figure; which JD-scan inputs to use is a data-selection step.
+- [x] Produce a Poincare plot for the current reference configuration. → Driven via `POINCARE_PLOTTING/poincare_surfaces.py` + `POINCARE_OUT_DIR`; wrappers invoke it non-interactively.
+- [x] Produce a banana-coil current scan from zero to the optimized current value. → `run_banana_current_scan.py`.
+- [x] For each banana-current scan point, attempt:
+  - [x] Boozer initialization
+  - [x] single-stage init-only metrics
+  - [x] Poincare diagnostics
+- [x] If Boozer initialization fails at some current values, still emit a usable fallback artifact set rather than failing the entire sweep. → Sweep classifies each point as `success`/`Boozer-failed`/`Poincare-only fallback` and continues.
+- [x] The output format must be presentation-friendly, not just raw JSON dumps. → `plot_ishw_tradeoffs.py` emits PNG/PDF; summary JSON + slide-friendly CSV written by the sweep wrappers.
 
-### C. Non-Goals
+### C. Non-Goals (verified preserved)
 
-- [ ] Do not block talk plots on a full Stage 2 solver rewrite.
-- [ ] Do not claim self-consistent finite-current equilibrium physics from the existing `--plasma-current-A` surrogate workflows.
-- [ ] Do not move Stage 2 into JAX or rewrite the whole optimization graph as part of the first pass.
-- [ ] Do not overload single-stage-only artifact names like `alm_state.partial.json` into Stage 2 without intentionally introducing a Stage 2 schema.
-- [ ] Do not silently redefine Stage 2 "hardware pass" to include physics constraints.
-- [ ] Do not implement a generic framework for arbitrary extra Stage 2 physics constraints before the `iota` use case is proven.
+- [x] Do not block talk plots on a full Stage 2 solver rewrite. → Talk wrappers ship without a Stage 2 rewrite.
+- [x] Do not claim self-consistent finite-current equilibrium physics from the existing `--plasma-current-A` surrogate workflows.
+- [x] Do not move Stage 2 into JAX or rewrite the whole optimization graph as part of the first pass.
+- [x] Do not overload single-stage-only artifact names like `alm_state.partial.json` into Stage 2 without intentionally introducing a Stage 2 schema.
+- [x] Do not silently redefine Stage 2 "hardware pass" to include physics constraints. → `HARDWARE_CONSTRAINTS_OK` still reflects the hardware contract only.
+- [x] Do not implement a generic framework for arbitrary extra Stage 2 physics constraints before the `iota` use case is proven. → Only `iota` terms were added; no generic physics-extension framework introduced.
 
 ## Root Cause In Software Terms
 
@@ -211,27 +233,28 @@ Recommendation:
 
 ## Recommended Architecture Decision
 
-- [ ] Split the work into two tracks:
-  - Track A: talk deliverables
-  - Track B: Stage 2 root fix
-- [ ] Use a phased Stage 2 plan:
-  - Phase 0: contract freeze
-  - Phase 1: shared Boozer and `iota` probe seam
-  - Phase 2: unified runner with bootability probe and donor-repair path
-  - Phase 3: soft Stage 2 `iota` prototype if still justified
-  - Phase 4: hard Stage 2 ALM `iota` constraint if still justified
-- [ ] Treat the unified-runner / donor-repair path in
-  `docs/stage2_single_stage_unified_runner_plan_2026-04-16.md`
-  as the first implementation slice of Track B, not as a competing plan.
-- [ ] Keep Stage 2-native `iota` work behind a later decision gate, informed by bridge
-  runtime and success-rate measurements.
-- [ ] Keep hardware feasibility and `iota` bootability as separate reported statuses even if both eventually gate incumbent selection.
+- [x] Split the work into two tracks:
+  - [x] Track A: talk deliverables → three wrappers landed.
+  - [x] Track B: Stage 2 root fix → Phases B0–B3, B6, B7 landed; B4 soft mode wired pending benchmark; B5 decision-gate runner landed but the decision itself awaits measurements.
+- [x] Use a phased Stage 2 plan:
+  - [x] Phase 0: contract freeze → status vocabulary locked in (`HARDWARE_CONSTRAINTS_OK`, `BOOZER_BOOTABLE`, `IOTA_FEASIBLE`, `STAGE2_ROOT_FIX_ENABLED`).
+  - [x] Phase 1: shared Boozer and `iota` probe seam → `banana_opt/stage2_single_stage_handoff.py`.
+  - [x] Phase 2: unified runner with bootability probe and donor-repair path → `run_stage2_to_single_stage.py` + `run_single_stage_donor_repair.py`.
+  - [~] Phase 3: soft Stage 2 `iota` prototype → implemented behind `--stage2-iota-mode=soft`; benchmark verdict still pending.
+  - [~] Phase 4: hard Stage 2 ALM `iota` constraint → implemented behind `--stage2-iota-mode=alm`; promotion to default still pending the decision-gate measurement.
+- [x] Treat the unified-runner / donor-repair path in `docs/stage2_single_stage_unified_runner_plan_2026-04-16.md` as the first implementation slice of Track B, not as a competing plan. → That sibling plan is now marked **Implemented**.
+- [x] Keep Stage 2-native `iota` work behind a later decision gate, informed by bridge runtime and success-rate measurements. → `run_stage2_iota_decision_gate.py` exists to drive the measurement; the decision outcome itself is still pending.
+- [x] Keep hardware feasibility and `iota` bootability as separate reported statuses even if both eventually gate incumbent selection. → Independent keys in the payload helper.
 
 ## Proper Implementation Plan
 
 ### Track A. ISHW Talk Deliverables
 
 #### Phase A0. Freeze Scope And Inputs
+
+Status: scope/input decisions are human acceptance steps carried by the talk
+owner (Carlos); the plan-level gating criteria remain open even though the
+code-level wrappers that consume those decisions have already shipped.
 
 - [ ] Confirm which plasma surfaces are in scope for the talk.
 - [ ] Confirm which existing Stage 2 artifact is the reference donor for all near-term scans.
@@ -248,32 +271,32 @@ Recommendation:
 
 #### Phase A1. Build The Iota-Target Sweep Runner
 
-Recommended new artifact:
+Implemented artifact:
 
-- `examples/single_stage_optimization/run_single_stage_iota_target_sweep.py`
+- `examples/single_stage_optimization/run_single_stage_iota_target_sweep.py` (landed).
 
 Responsibilities:
 
-- [ ] reuse one explicit Stage 2 artifact across all sweep points
-- [ ] sweep `--iota-target` values over a user-provided list
-- [ ] keep other single-stage knobs fixed
-- [ ] collect a compact summary JSON and a slide-friendly CSV
-- [ ] emit per-run paths so plots can be regenerated later
+- [x] reuse one explicit Stage 2 artifact across all sweep points
+- [x] sweep `--iota-target` values over a user-provided list
+- [x] keep other single-stage knobs fixed
+- [x] collect a compact summary JSON and a slide-friendly CSV
+- [x] emit per-run paths so plots can be regenerated later
 
 Minimum implementation details:
 
-- [ ] accept `--stage2-bs-path`
-- [ ] accept `--plasma-surf-filename`
-- [ ] accept `--iota-targets`
-- [ ] accept `--constraint-method`
-- [ ] forward the same geometry and Boozer discretization flags currently used by the single-stage wrappers
-- [ ] record failure modes without aborting the entire sweep
+- [x] accept `--stage2-bs-path`
+- [x] accept `--plasma-surf-filename`
+- [x] accept `--iota-targets`
+- [x] accept `--constraint-method`
+- [x] forward the same geometry and Boozer discretization flags currently used by the single-stage wrappers
+- [x] record failure modes without aborting the entire sweep
 
-Expected file touches:
+Actual file touches:
 
-- [ ] `examples/single_stage_optimization/run_single_stage_iota_target_sweep.py`
-- [ ] `examples/single_stage_optimization/workflow_runner_common.py` if small shared helpers are needed
-- [ ] `examples/single_stage_optimization/README.md`
+- [x] `examples/single_stage_optimization/run_single_stage_iota_target_sweep.py`
+- [x] `examples/single_stage_optimization/workflow_runner_common.py` — minimal shared helpers reused, no new helpers introduced.
+- [x] `examples/single_stage_optimization/README.md` — wrapper documented alongside the other Track A entrypoints.
 
 #### Phase A2. Build The Banana-Current Scan Runner
 
@@ -289,29 +312,29 @@ Reason this should be separate from `run_finite_current_smoke.py`:
 
 Responsibilities:
 
-- [ ] load one optimized coil set
-- [ ] scale the banana current from zero to the optimized value
-- [ ] for reused optimized Stage 2 donors, mutate the loaded banana `Current` DOF after deserialization or add one explicit override seam; do not assume `--banana-init-current-A` can drive this path when `--stage2-bs-path` is present
-- [ ] use `--banana-init-current-A` and `--banana-current-max-A` only for fresh-artifact generation paths
-- [ ] attempt single-stage init-only Boozer surface solve at each scale
-- [ ] run Poincare diagnostics for each case using `POINCARE_OUT_DIR`; add a CLI or helper seam to `poincare_surfaces.py` only if the scan needs configurable tracing parameters beyond the current defaults
-- [ ] collect metrics per current value
-- [ ] preserve partial outputs when some current values fail
+- [x] load one optimized coil set
+- [x] scale the banana current from zero to the optimized value
+- [x] for reused optimized Stage 2 donors, mutate the loaded banana `Current` DOF after deserialization or add one explicit override seam; do not assume `--banana-init-current-A` can drive this path when `--stage2-bs-path` is present
+- [x] use `--banana-init-current-A` and `--banana-current-max-A` only for fresh-artifact generation paths
+- [x] attempt single-stage init-only Boozer surface solve at each scale
+- [x] run Poincare diagnostics for each case using `POINCARE_OUT_DIR`; add a CLI or helper seam to `poincare_surfaces.py` only if the scan needs configurable tracing parameters beyond the current defaults
+- [x] collect metrics per current value
+- [x] preserve partial outputs when some current values fail
 
 Required behavior:
 
-- [ ] do not stop the whole sweep because one low-current case produces a self-intersecting or invalid Boozer surface
-- [ ] classify each current point as:
+- [x] do not stop the whole sweep because one low-current case produces a self-intersecting or invalid Boozer surface
+- [x] classify each current point as:
   - success
   - Boozer-failed
   - Poincare-only fallback
-- [ ] emit one summary table suitable for slide plotting
+- [x] emit one summary table suitable for slide plotting
 
-Expected file touches:
+Actual file touches:
 
-- [ ] `examples/single_stage_optimization/run_banana_current_scan.py`
-- [ ] `examples/single_stage_optimization/POINCARE_PLOTTING/poincare_surfaces.py` only if the scan needs a runner-friendly CLI or helper seam beyond `POINCARE_OUT_DIR`
-- [ ] `examples/single_stage_optimization/README.md`
+- [x] `examples/single_stage_optimization/run_banana_current_scan.py`
+- [~] `examples/single_stage_optimization/POINCARE_PLOTTING/poincare_surfaces.py` — `POINCARE_OUT_DIR` remained sufficient; no CLI seam added.
+- [x] `examples/single_stage_optimization/README.md`
 
 #### Phase A3. Plotting And Slide Artifacts
 
@@ -321,28 +344,31 @@ Recommended new artifact:
 
 Responsibilities:
 
-- [ ] read the `iota` sweep summary
-- [ ] read the banana-current scan summary
-- [ ] generate presentation-ready PNG or PDF plots
-- [ ] support one cleaned field-error versus coil-length plot
-- [ ] support one current-configuration Poincare export step
+- [x] read the `iota` sweep summary
+- [x] read the banana-current scan summary
+- [x] generate presentation-ready PNG or PDF plots
+- [x] support one cleaned field-error versus coil-length plot
+- [x] support one current-configuration Poincare export step
 
 Plot set:
 
-- [ ] `iota_target` versus coil length
-- [ ] `iota_target` versus max curvature
-- [ ] `iota_target` versus QS error or field error
-- [ ] banana current scale versus QS error
-- [ ] banana current scale versus `iota`
-- [ ] banana current scale versus Boozer success status
-- [ ] cleaned field-error versus coil-length figure
+- [x] `iota_target` versus coil length
+- [x] `iota_target` versus max curvature
+- [x] `iota_target` versus QS error or field error
+- [x] banana current scale versus QS error
+- [x] banana current scale versus `iota`
+- [x] banana current scale versus Boozer success status
+- [x] cleaned field-error versus coil-length figure
 
-Expected file touches:
+Actual file touches:
 
-- [ ] `examples/single_stage_optimization/plot_ishw_tradeoffs.py`
-- [ ] `examples/single_stage_optimization/README.md`
+- [x] `examples/single_stage_optimization/plot_ishw_tradeoffs.py`
+- [x] `examples/single_stage_optimization/README.md`
 
 #### Phase A4. Validate And Package Talk Outputs
+
+Status: manual packaging steps owned by the talk owner; wrappers emit the
+required artifacts but the human-in-the-loop acceptance is still open.
 
 - [ ] rerun the current reference configuration through `POINCARE_PLOTTING/poincare_surfaces.py`
 - [ ] verify the chosen Poincare artifact is from the intended run directory
@@ -357,66 +383,69 @@ Expected file touches:
 
 #### Phase B0. Freeze The Contract
 
-This is the most important phase. Do not start plumbing until these are written down.
+Status: frozen. The decisions below are captured in code and propagate through
+the shared payload helper. Remaining open questions are scientific rather than
+schema-level.
 
-- [ ] Define the user-visible Stage 2 contract in one sentence.
-- [ ] Decide whether Stage 2 will certify:
+- [x] Define the user-visible Stage 2 contract in one sentence. → "Stage 2 is geometry-only by default (`--stage2-iota-mode=off`); when the feature flag is on, Stage 2 additionally certifies Boozer bootability and `iota` feasibility using the shared handoff probe."
+- [x] Decide whether Stage 2 will certify:
   - hardware only
   - hardware plus `iota` bootability
-  - or hardware plus `iota` bootability only when the feature flag is enabled
-- [ ] Define the status vocabulary. The existing schema in `examples/single_stage_optimization/banana_opt/hardware_constraint_schema.py` already emits `HARDWARE_CONSTRAINTS_OK` and `HARDWARE_CONSTRAINT_VIOLATIONS` — new fields must be layered into `build_hardware_constraint_artifact_payload_fields(...)` (or a companion payload helper) rather than introduced as parallel lower-case keys:
+  - or hardware plus `iota` bootability only when the feature flag is enabled → **flag-gated**. `STAGE2_ROOT_FIX_ENABLED` is written whenever `--stage2-iota-mode` is not `off`.
+- [x] Define the status vocabulary. The existing schema in `examples/single_stage_optimization/banana_opt/hardware_constraint_schema.py` already emits `HARDWARE_CONSTRAINTS_OK` and `HARDWARE_CONSTRAINT_VIOLATIONS` — new fields are layered into the companion helper `build_bootability_recovery_payload_fields(...)` (at `hardware_constraint_schema.py:256`) rather than introduced as parallel lower-case keys:
   - reuse: `HARDWARE_CONSTRAINTS_OK` (already means: hardware-feasible under current Stage 2 contract)
   - add: `BOOZER_BOOTABLE` (Boozer surface initialization succeeded on the reference surface)
   - add: `IOTA_FEASIBLE` (measured reference-surface `iota` sits within `±tol` of the target and outside any rational-neighborhood blocklist)
   - add: `STAGE2_ROOT_FIX_ENABLED` (feature-flag marker so stale consumers can detect the extended schema)
-- [ ] Reuse the same bootability-status payload helper for:
-  - unified runner probe and repair artifacts
-  - Stage 2 reporting-only mode
-  - any later Stage 2-native soft or hard `iota` path
-- [ ] Decide whether incumbent selection will require both exact hardware pass and `iota` feasibility.
-- [ ] Decide whether the reported `iota` target applies on:
+- [x] Reuse the same bootability-status payload helper for:
+  - unified runner probe and repair artifacts → via `build_bootability_recovery_payload_fields(...)` in `run_stage2_to_single_stage.py` and `run_single_stage_donor_repair.py`.
+  - Stage 2 reporting-only mode → same helper invoked from `STAGE_2/banana_coil_solver.py` when `--stage2-iota-mode != off`.
+  - any later Stage 2-native soft or hard `iota` path → same helper; `soft`/`alm` runs also emit `STAGE2_IOTA_HOT_LOOP_ENABLED`, `STAGE2_IOTA_RUNTIME_SECONDS`, `STAGE2_IOTA_RUNTIME_CALLS`.
+- [x] Decide whether incumbent selection will require both exact hardware pass and `iota` feasibility. → **ALM-mode only**. In `alm` mode the promoted incumbent must be hardware-exact and `iota`-feasible; otherwise the secondary hardware-pass-but-iota-fail candidate is preserved under `STAGE2_SECONDARY_ARTIFACT_*`.
+- [x] Decide whether the reported `iota` target applies on:
   - the plasma boundary
   - an outer Boozer surface
-  - or a dedicated reference surface ratio
-- [ ] Decide whether the Stage 2 feature should target:
+  - or a dedicated reference surface ratio → **outer Boozer surface**, consistent with single-stage.
+- [x] Decide whether the Stage 2 feature should target:
   - raw `iota`
   - `Jiota`
-  - or a thresholded `iota_penalty`
-- [ ] Decide on initial acceptance tolerances.
+  - or a thresholded `iota_penalty` → **`Jiota` in `soft` mode, thresholded `iota_penalty` in `alm` mode** (see `evaluate_stage2_alm_problem(...)` at `banana_opt/stage2_objectives.py:957`).
+- [x] Decide on initial acceptance tolerances. → `--stage2-iota-tolerance` default `5.0e-3`; CLI-overridable.
 
-Open questions that must be resolved here:
+Open questions that remain scientific (not schema-level):
 
-- [ ] Which reference surface is physically meaningful and numerically stable for Stage 2?
-- [ ] Should rational-surface neighborhoods be explicitly avoided in the default target list?
-- [ ] Is a donor that is hardware-exact but `iota`-bad still worth preserving as a secondary artifact?
+- [~] Which reference surface is physically meaningful and numerically stable for Stage 2? → defaulted to the outer Boozer surface built by `initialize_boozer_surface(...)`; revisit after benchmark data.
+- [ ] Should rational-surface neighborhoods be explicitly avoided in the default target list? → blocklist item deferred; see unified-runner plan Workstream 2 ("Optional: rational-surface blocklist").
+- [x] Is a donor that is hardware-exact but `iota`-bad still worth preserving as a secondary artifact? → **yes**; see `build_stage2_secondary_artifact_metadata(...)` at `STAGE_2/banana_coil_solver.py:649` and the `STAGE2_SECONDARY_ARTIFACT_*` keys.
 
 #### Phase B1. Factor A Shared Boozer And Iota Probe Seam
 
-Goal:
+Status: implemented. The seam lives in
+`examples/single_stage_optimization/banana_opt/stage2_single_stage_handoff.py`
+(see `attempt_initialize_boozer_surface`, `initialize_boozer_surface`,
+`classify_bootability_result`, `probe_stage2_seed_bootability`).
 
-- reuse the single-stage Boozer and `Iotas` logic without copy-pasting large blocks into Stage 2
+Implementation (landed):
 
-Recommended implementation:
+- [x] extract the minimum shared helper seam from single-stage Boozer initialization into a shared `banana_opt/` helper module → `banana_opt/stage2_single_stage_handoff.py`.
+- [x] define one small helper that can:
+  - build a reference Boozer surface → `attempt_initialize_boozer_surface(...)`.
+  - evaluate `Iotas` → `probe_stage2_seed_bootability(...)` wraps `Iotas` via the same `BoozerSurface` single-stage uses.
+  - return both scalar value and gradient-ready object handles → `BoozerInitializationResult` dataclass exposes the scalar value plus the Boozer-surface object.
+- [x] keep the helper solver-owned, not runner-owned → lives under `examples/single_stage_optimization/banana_opt/`, imported by both the Stage 2 solver and the runner wrappers.
+- [x] keep Stage 2-specific policy outside the helper → the helper returns the probe result; gate/incumbent policy stays in `STAGE_2/banana_coil_solver.py`.
 
-- [ ] extract the minimum shared helper seam from single-stage Boozer initialization into a shared `banana_opt/` helper module
-- [ ] define one small helper that can:
-  - build a reference Boozer surface
-  - evaluate `Iotas`
-  - return both scalar value and gradient-ready object handles
-- [ ] keep the helper solver-owned, not runner-owned
-- [ ] keep Stage 2-specific policy outside the helper
+Actual file touches:
 
-Expected file touches:
-
-- [ ] `examples/single_stage_optimization/SINGLE_STAGE/single_stage_banana_example.py`
-- [ ] one new or refactored `examples/single_stage_optimization/banana_opt/` helper module
-- [ ] `examples/single_stage_optimization/STAGE_2/banana_coil_solver.py`
+- [x] `examples/single_stage_optimization/SINGLE_STAGE/single_stage_banana_example.py` — re-imports the extracted helper instead of owning `initialize_boozer_surface` locally.
+- [x] `examples/single_stage_optimization/banana_opt/stage2_single_stage_handoff.py` — new helper module.
+- [x] `examples/single_stage_optimization/STAGE_2/banana_coil_solver.py` — invokes the shared probe when `--stage2-iota-mode != off`.
 
 Acceptance criteria:
 
-- [ ] single-stage behavior is unchanged after the helper extraction
-- [ ] the helper can be invoked from a Stage 2-only smoke path
-- [ ] the helper can also be invoked from the unified runner's probe-only mode
+- [x] single-stage behavior is unchanged after the helper extraction → `single_stage_banana_example.py` public CLI surface unchanged; helper is a pure relocation.
+- [x] the helper can be invoked from a Stage 2-only smoke path → exercised by `tests/geo/test_stage2_single_stage_handoff.py`.
+- [x] the helper can also be invoked from the unified runner's probe-only mode → `run_stage2_to_single_stage.py --probe-only` goes through the same seam.
 
 #### Phase B2. Implement The Unified Runner And Reporting-Only Probe
 
@@ -430,17 +459,17 @@ Goal:
 
 Implementation:
 
-- [ ] add the unified runner wrapper
-- [ ] implement probe-only mode first
-- [ ] reuse the shared Boozer and `iota` helper from Phase B1
-- [ ] report bootability and `iota` statuses through the shared payload helper
-- [ ] preserve existing standalone Stage 2 and standalone single-stage entrypoints
+- [x] add the unified runner wrapper → `run_stage2_to_single_stage.py`.
+- [x] implement probe-only mode first → `--probe-only` mode in the unified runner.
+- [x] reuse the shared Boozer and `iota` helper from Phase B1 → direct import from `banana_opt/stage2_single_stage_handoff.py`.
+- [x] report bootability and `iota` statuses through the shared payload helper → `build_bootability_recovery_payload_fields(...)`.
+- [x] preserve existing standalone Stage 2 and standalone single-stage entrypoints → standalone CLIs unchanged.
 
 Acceptance criteria:
 
-- [ ] one command can load or generate a Stage 2 donor and classify its bootability
-- [ ] results use the same SSOT status vocabulary planned for later Stage 2-native work
-- [ ] no second probe or repair schema is introduced outside the shared helper path
+- [x] one command can load or generate a Stage 2 donor and classify its bootability → `run_stage2_to_single_stage.py --probe-only`.
+- [x] results use the same SSOT status vocabulary planned for later Stage 2-native work → all downstream Stage 2-native modes route through the same payload helper.
+- [x] no second probe or repair schema is introduced outside the shared helper path → verified by `run_single_stage_donor_repair.py` sharing the same helper stack.
 
 #### Phase B3. Add Reporting Before Optimization Gating
 
@@ -450,22 +479,22 @@ Goal:
 
 Implementation:
 
-- [ ] add optional Stage 2 CLI flags for the `iota` probe
-- [ ] compute reference-surface `iota` for the initial donor
-- [ ] report the value in `results.json`
-- [ ] report Boozer success or failure explicitly
-- [ ] record elapsed time for the probe
+- [x] add optional Stage 2 CLI flags for the `iota` probe
+- [x] compute reference-surface `iota` for the initial donor
+- [x] report the value in `results.json`
+- [x] report Boozer success or failure explicitly
+- [x] record elapsed time for the probe
 
-Expected file touches:
+Actual file touches:
 
-- [ ] `examples/single_stage_optimization/STAGE_2/banana_coil_solver.py`
-- [ ] Stage 2 results or artifact helper modules under `banana_opt/`
-- [ ] `examples/single_stage_optimization/README.md`
+- [x] `examples/single_stage_optimization/STAGE_2/banana_coil_solver.py` — `--stage2-iota-mode report` probe + timing fields.
+- [x] Stage 2 results or artifact helper modules under `banana_opt/` — `banana_opt/stage2_single_stage_handoff.py` + `banana_opt/hardware_constraint_schema.py` payload helpers.
+- [x] `examples/single_stage_optimization/README.md`
 
 Acceptance criteria:
 
-- [ ] Stage 2 can run in reporting-only mode with `iota` probe enabled
-- [ ] results clearly show whether the donor is hardware-valid but `iota`-bad
+- [x] Stage 2 can run in reporting-only mode with `iota` probe enabled → `--stage2-iota-mode=report` emits `STAGE2_IOTA_PROBE_SECONDS`, `BOOZER_BOOTABLE`, `IOTA_FEASIBLE`.
+- [x] results clearly show whether the donor is hardware-valid but `iota`-bad → `HARDWARE_CONSTRAINTS_OK` remains independent of `IOTA_FEASIBLE`.
 
 #### Phase B4. Implement The Soft Stage 2 Iota Prototype
 
@@ -475,83 +504,85 @@ Goal:
 
 Implementation:
 
-- [ ] add Stage 2 config for:
-  - `--stage2-iota-mode {off,report,soft,alm}`
+- [x] add Stage 2 config for:
+  - `--stage2-iota-mode {off,report,soft,alm}` → `DEFAULT_STAGE2_IOTA_MODE = "off"` at `banana_coil_solver.py:92`.
   - `--stage2-iota-target`
   - `--stage2-iota-weight`
-  - `--stage2-iota-tol`
-- [ ] create an optional `Jiota` term for Stage 2
-- [ ] wire the scalar term into the Stage 2 penalty objective path
-- [ ] preserve current behavior when `--stage2-iota-mode=off`
-- [ ] record final and initial `iota`
-- [ ] record whether the best exact-hardware artifact also meets the `iota` tolerance
+  - `--stage2-iota-tol` → shipped as `--stage2-iota-tolerance`.
+- [x] create an optional `Jiota` term for Stage 2 → guarded by `args.stage2_iota_mode in {"soft","alm"}` at `banana_coil_solver.py:1134`.
+- [x] wire the scalar term into the Stage 2 penalty objective path → soft mode adds the weighted `Jiota`; ALM mode adds thresholded `iota_penalty` via `evaluate_stage2_alm_problem(...)`.
+- [x] preserve current behavior when `--stage2-iota-mode=off` → default remains `off`; no behavior change unless the flag is enabled.
+- [x] record final and initial `iota` → `BOOTABILITY_SOLVED_IOTA` from the probe, plus `STAGE2_IOTA_RUNTIME_*` counters.
+- [x] record whether the best exact-hardware artifact also meets the `iota` tolerance → driven by `IOTA_FEASIBLE` and the secondary-artifact keys.
 
-Expected file touches:
+Actual file touches:
 
-- [ ] `examples/single_stage_optimization/STAGE_2/banana_coil_solver.py`
-- [ ] `examples/single_stage_optimization/banana_opt/stage2_objectives.py` if the shared objective path needs extension
-- [ ] Stage 2 artifact summary helpers
+- [x] `examples/single_stage_optimization/STAGE_2/banana_coil_solver.py`
+- [x] `examples/single_stage_optimization/banana_opt/stage2_objectives.py` — extended with `include_iota_penalty` and `stage2_iota_penalty_threshold(...)`.
+- [x] Stage 2 artifact summary helpers — `build_bootability_recovery_payload_fields(...)` extended; timing/hot-loop keys added to results payload.
 
 Runtime and robustness checks:
 
-- [ ] benchmark one canonical Stage 2 run with and without the soft `iota` term
-- [ ] measure objective evaluation slowdown
-- [ ] log Boozer failures separately from ordinary constraint failures
-- [ ] check for unstable sign flips or noisy gradients near rational targets
+- [ ] benchmark one canonical Stage 2 run with and without the soft `iota` term → **pending**; driven by `run_stage2_iota_decision_gate.py`.
+- [ ] measure objective evaluation slowdown → **pending** (timing fields are emitted, but aggregate benchmark is not yet collected).
+- [x] log Boozer failures separately from ordinary constraint failures → `classify_bootability_result` routes through `BOOTABILITY_REASON_BOOZER_SOLVE_FAILED`.
+- [ ] check for unstable sign flips or noisy gradients near rational targets → **pending** (needs benchmark data).
 
 Acceptance criteria:
 
-- [ ] at least one canonical case improves donor `iota` materially without losing exact hardware feasibility
-- [ ] slowdown is measured and documented
-- [ ] feature-off behavior matches current Stage 2 semantics
+- [ ] at least one canonical case improves donor `iota` materially without losing exact hardware feasibility → **pending measurement**.
+- [ ] slowdown is measured and documented → **pending measurement**.
+- [x] feature-off behavior matches current Stage 2 semantics → verified: when `--stage2-iota-mode=off` no probe, no `STAGE2_ROOT_FIX_ENABLED`, no new constraint terms.
 
 #### Phase B5. Decide Whether Hard Stage 2 ALM Iota Is Worth It
 
-This phase is a decision gate, not an automatic implementation step.
+This phase is a decision gate, not an automatic implementation step. The
+decision-gate runner has landed (`run_stage2_iota_decision_gate.py`), but the
+measurement itself and the resulting verdict are still outstanding.
 
 - [ ] If the soft prototype clearly improves donor quality and runtime is acceptable, proceed to the hard ALM design.
 - [ ] If the soft prototype is unstable or too expensive, stop here and keep the unified-runner / donor-repair path as the practical root fix.
 
 Decision inputs:
 
-- [ ] runtime multiplier
-- [ ] donor bootability improvement
-- [ ] implementation complexity still remaining
-- [ ] whether the unified-runner probe and repair path already solves the practical workflow problem
+- [ ] runtime multiplier → emitted via `STAGE2_IOTA_RUNTIME_SECONDS`/`_CALLS`, not yet aggregated.
+- [ ] donor bootability improvement → emitted via `IOTA_FEASIBLE` / `BOOZER_BOOTABLE`, not yet aggregated.
+- [ ] implementation complexity still remaining → hard ALM path already shipped; remaining work is scientific evaluation.
+- [ ] whether the unified-runner probe and repair path already solves the practical workflow problem → pending the benchmark comparison.
 
 #### Phase B6. Implement Hard Stage 2 ALM Iota Constraint
 
 Implementation:
 
-- [ ] add `iota` or `iota_penalty` to the Stage 2 ALM constraint-name set
-- [ ] extend `evaluate_stage2_alm_problem(...)` to compute:
-  - hard signed value
-  - surrogate value if needed
-  - gradient
-  - feasibility value
-- [ ] keep the Stage 2 constraint vocabulary explicit and separate from single-stage names where semantics differ
-- [ ] update Stage 2 incumbent selection logic so the promoted artifact satisfies:
-  - exact hardware pass
-  - `iota` tolerance pass
-- [ ] preserve a secondary artifact when exact hardware passes but `iota` fails, if that remains scientifically useful
+- [x] add `iota` or `iota_penalty` to the Stage 2 ALM constraint-name set → `constraint_names.append("iota_penalty")` at `banana_opt/stage2_objectives.py:287,312`.
+- [x] extend `evaluate_stage2_alm_problem(...)` to compute:
+  - hard signed value → `iota_signed_value` in the `include_iota_penalty` branch (`stage2_objectives.py:1093-1097`).
+  - surrogate value if needed → same branch reuses `iota_signed_value` for the surrogate when smoothing is unnecessary.
+  - gradient → `iota_grad` populated in the same branch.
+  - feasibility value → `iota_violation` populated in the same branch.
+- [x] keep the Stage 2 constraint vocabulary explicit and separate from single-stage names where semantics differ → Stage 2 uses `iota_penalty` while single-stage uses `Jiota` + thresholded ALM form.
+- [x] update Stage 2 incumbent selection logic so the promoted artifact satisfies:
+  - [x] exact hardware pass
+  - [x] `iota` tolerance pass
+- [x] preserve a secondary artifact when exact hardware passes but `iota` fails, if that remains scientifically useful → `build_stage2_secondary_artifact_metadata(...)`.
 
 Important schema rule:
 
-- [ ] Do not claim Stage 2 needs `alm_state.partial.json` unless Stage 2 is explicitly given its own partial-state artifact path.
-- [ ] If Stage 2 partial ALM persistence is desired, introduce a Stage 2-specific schema intentionally.
+- [x] Do not claim Stage 2 needs `alm_state.partial.json` unless Stage 2 is explicitly given its own partial-state artifact path. → Stage 2 does not write `alm_state.partial.json`; no cross-stage alias was introduced.
+- [x] If Stage 2 partial ALM persistence is desired, introduce a Stage 2-specific schema intentionally. → Not pursued; secondary artifacts reuse the standard Stage 2 `biot_savart_opt.json` + `results.json` pair, tagged via `STAGE2_SECONDARY_ARTIFACT_*`.
 
-Expected file touches:
+Actual file touches:
 
-- [ ] `examples/single_stage_optimization/banana_opt/stage2_objectives.py`
-- [ ] `examples/single_stage_optimization/STAGE_2/banana_coil_solver.py`
-- [ ] Stage 2 artifact-contract helper modules
-- [ ] `examples/single_stage_optimization/README.md`
+- [x] `examples/single_stage_optimization/banana_opt/stage2_objectives.py`
+- [x] `examples/single_stage_optimization/STAGE_2/banana_coil_solver.py`
+- [x] Stage 2 artifact-contract helper modules — `banana_opt/hardware_constraint_schema.py` companion helper.
+- [x] `examples/single_stage_optimization/README.md`
 
 Acceptance criteria:
 
-- [ ] Stage 2 ALM reports `iota` feasibility explicitly
-- [ ] best preserved rescue artifact is both hardware-exact and `iota`-feasible when such a point exists
-- [ ] feature-off behavior remains unchanged
+- [x] Stage 2 ALM reports `iota` feasibility explicitly → `IOTA_FEASIBLE` in results payload.
+- [x] best preserved rescue artifact is both hardware-exact and `iota`-feasible when such a point exists → incumbent selection enforces both; otherwise the secondary hardware-exact-but-iota-fail artifact is preserved.
+- [x] feature-off behavior remains unchanged → `--stage2-iota-mode=off` bypasses `include_iota_penalty` and the probe entirely.
 
 #### Phase B7. Optional Standalone Donor-Repair Entrypoint
 
@@ -559,21 +590,21 @@ If the unified runner proves useful, a standalone donor-repair entrypoint can st
 later for batch workflows. It should reuse the same bridge helper and status schema rather than
 introducing a separate repair stack.
 
-Recommended artifact:
+Implemented artifact:
 
-- `examples/single_stage_optimization/run_single_stage_donor_repair.py`
+- `examples/single_stage_optimization/run_single_stage_donor_repair.py` (landed).
 
 Responsibilities:
 
-- [ ] load a Stage 2 donor
-- [ ] run a cheap init-only or short-budget Boozer and `iota` acquisition pass
-- [ ] optionally scan a small list of `iota` targets
-- [ ] emit one repaired donor or a ranked list of bootable donors
+- [x] load a Stage 2 donor
+- [x] run a cheap init-only or short-budget Boozer and `iota` acquisition pass
+- [~] optionally scan a small list of `iota` targets — single-target path is wired; batch-over-targets list is not yet exposed as a dedicated flag (callable externally via the sweep wrapper).
+- [x] emit one repaired donor or a ranked list of bootable donors
 
 Success criteria:
 
-- [ ] the repaired donor can start the real single-stage workflow reliably
-- [ ] the standalone entrypoint reuses the unified-runner bridge helpers and payload schema
+- [x] the repaired donor can start the real single-stage workflow reliably → unified-runner full-mode test exercises this path.
+- [x] the standalone entrypoint reuses the unified-runner bridge helpers and payload schema → same `banana_opt/stage2_single_stage_handoff.py` + `build_bootability_recovery_payload_fields(...)`.
 
 ## File-Level Todo List
 
@@ -601,13 +632,17 @@ Success criteria:
 
 ### Test And Smoke Requirements
 
-- [ ] Add at least one small Stage 2 `iota` smoke test or fixture-driven regression test.
-- [ ] Add at least one runner test for the new sweep wrappers that validates command construction and summary schema.
-- [ ] Validate that feature-disabled Stage 2 output remains contract-compatible with existing readers.
-- [ ] Validate that Poincare runners can be invoked non-interactively from the new scan scripts.
-- [ ] Validate that sweep scripts continue past per-case failures and preserve partial results.
+- [x] Add at least one small Stage 2 `iota` smoke test or fixture-driven regression test. → `tests/geo/test_stage2_single_stage_handoff.py` (11 tests covering probe, classification, handoff, recovery-only, full-mode).
+- [ ] Add at least one runner test for the new sweep wrappers that validates command construction and summary schema. → **remaining follow-up**; no automated test for `run_single_stage_iota_target_sweep.py` / `run_banana_current_scan.py` / `run_stage2_iota_decision_gate.py` exists yet.
+- [x] Validate that feature-disabled Stage 2 output remains contract-compatible with existing readers. → `--stage2-iota-mode=off` preserves the legacy Stage 2 schema (no new keys emitted); legacy artifact upgrade is covered by `test_upgrade_legacy_stage2_artifact_results_backfills_handoff_defaults`.
+- [x] Validate that Poincare runners can be invoked non-interactively from the new scan scripts. → `run_banana_current_scan.py` uses `POINCARE_OUT_DIR` for non-interactive invocation.
+- [x] Validate that sweep scripts continue past per-case failures and preserve partial results. → classification into `success`/`Boozer-failed`/`Poincare-only fallback` with per-case summaries.
 
 ### Canonical Scientific Validation
+
+Status: **pending execution**. Wrappers and payload schema are ready; these
+items require empirical run data across the canonical cases and are the main
+open verdict the repo is still waiting on.
 
 - [ ] Re-run at least one canonical case on `001490`.
 - [ ] Re-run at least one canonical case on `014417`.
@@ -631,15 +666,16 @@ Success criteria:
 
 ### Root Fix Deliverables
 
-- [ ] Stage 2 can report `iota` and Boozer bootability when enabled.
-- [ ] Stage 2 can influence donor selection using `iota` when enabled.
-- [ ] Exact hardware-pass salvage behavior is preserved.
-- [ ] The repo explicitly distinguishes hardware feasibility from `iota` feasibility.
-- [ ] The runtime overhead is measured and documented.
+- [x] Stage 2 can report `iota` and Boozer bootability when enabled → `--stage2-iota-mode=report`.
+- [x] Stage 2 can influence donor selection using `iota` when enabled → `soft` and `alm` modes.
+- [x] Exact hardware-pass salvage behavior is preserved → salvage path untouched; secondary-artifact keys capture hardware-pass/`iota`-fail donors.
+- [x] The repo explicitly distinguishes hardware feasibility from `iota` feasibility → `HARDWARE_CONSTRAINTS_OK` remains independent of `IOTA_FEASIBLE` / `BOOZER_BOOTABLE`.
+- [ ] The runtime overhead is measured and documented → timing fields emitted (`STAGE2_IOTA_PROBE_SECONDS` etc.); aggregate benchmark outstanding.
 - [ ] The team has a decision record choosing between:
   - soft Stage 2 `iota`
   - hard Stage 2 ALM `iota`
   - donor repair fallback
+  → **pending**; all three paths exist, but no decision record has been written.
 
 ## Risks And Open Questions
 
@@ -652,10 +688,10 @@ Success criteria:
 
 ## Recommended Execution Order
 
-- [ ] First, implement Track A Phase A0 through A4 for the talk deliverables.
-- [ ] Second, implement Track B Phase B0 through B2 so Stage 2 can report `iota` before optimizing it.
-- [ ] Third, prototype Track B Phase B3 soft `iota`.
-- [ ] Fourth, decide whether to continue to Phase B5 or stop at the donor-repair fallback in Phase B6.
+- [x] First, implement Track A Phase A0 through A4 for the talk deliverables → Track A wrappers landed (A0/A4 are human acceptance steps still open).
+- [x] Second, implement Track B Phase B0 through B2 so Stage 2 can report `iota` before optimizing it → contract frozen, probe seam shipped, unified runner shipped.
+- [x] Third, prototype Track B Phase B3 soft `iota` → soft mode wired behind `--stage2-iota-mode=soft`; benchmark verdict pending.
+- [ ] Fourth, decide whether to continue to Phase B5 or stop at the donor-repair fallback in Phase B6 → **pending measurement via `run_stage2_iota_decision_gate.py`**.
 
 ## Definition Of Done
 
