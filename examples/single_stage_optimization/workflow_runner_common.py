@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import json
+import math
 import os
 import subprocess
 import sys
@@ -447,11 +448,29 @@ def clear_dry_run_marker(output_root: str | Path) -> None:
         marker_path.unlink()
 
 
+def _json_portable_value(payload: object) -> object:
+    if isinstance(payload, float):
+        if not math.isfinite(payload):
+            return None
+        return payload
+    if isinstance(payload, Mapping):
+        return {
+            key: _json_portable_value(value)
+            for key, value in payload.items()
+        }
+    if isinstance(payload, Sequence) and not isinstance(
+        payload,
+        (str, bytes, bytearray),
+    ):
+        return [_json_portable_value(value) for value in payload]
+    return payload
+
+
 def write_json(path: str | Path, payload: object) -> None:
     target_path = Path(path)
     target_path.parent.mkdir(parents=True, exist_ok=True)
     with target_path.open("w", encoding="utf-8") as outfile:
-        json.dump(payload, outfile, indent=2)
+        json.dump(_json_portable_value(payload), outfile, indent=2, allow_nan=False)
 
 
 def write_csv_rows(

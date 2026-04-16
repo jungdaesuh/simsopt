@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import math
 import shutil
 import sys
 from pathlib import Path
@@ -31,6 +32,32 @@ STATUS_ORDER = {
     "poincare_only_fallback": 1,
     "success": 2,
 }
+ERROR_METRIC_LABELS = {
+    "nonqs_ratio": "Non-QS Ratio [-]",
+    "field_error": "Field Error [-]",
+}
+
+
+def _finite_float_or_none(value: object) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, str) and not value.strip():
+        return None
+    numeric_value = float(value)
+    if not math.isfinite(numeric_value):
+        return None
+    return numeric_value
+
+
+def _resolved_error_metric_key(rows: list[dict]) -> str:
+    if any(_finite_float_or_none(row.get("nonqs_ratio")) is not None for row in rows):
+        return "nonqs_ratio"
+    return "field_error"
+
+
+def _resolved_error_metric_spec(rows: list[dict]) -> tuple[str, str]:
+    key = _resolved_error_metric_key(rows)
+    return key, ERROR_METRIC_LABELS[key]
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -146,11 +173,13 @@ def _plot_xy(
     formats: list[str],
     annotate_label: bool = False,
 ) -> list[str]:
-    points = [
-        (float(row[x_key]), float(row[y_key]), row.get("label"))
-        for row in rows
-        if row.get(x_key) is not None and row.get(y_key) is not None
-    ]
+    points: list[tuple[float, float, object]] = []
+    for row in rows:
+        x_value = _finite_float_or_none(row.get(x_key))
+        y_value = _finite_float_or_none(row.get(y_key))
+        if x_value is None or y_value is None:
+            continue
+        points.append((x_value, y_value, row.get("label")))
     if not points:
         return []
     figure, axis = plt.subplots(figsize=(6.5, 4.5))
@@ -304,14 +333,7 @@ def main(argv: list[str] | None = None) -> int:
     external_field_error_path = resolved_optional_path(args.field_error_coil_length_path)
     generated_plots: dict[str, list[str]] = {}
 
-    iota_error_key = (
-        "nonqs_ratio"
-        if any(row.get("nonqs_ratio") is not None for row in iota_rows)
-        else "field_error"
-    )
-    iota_error_label = (
-        "Non-QS Ratio [-]" if iota_error_key == "nonqs_ratio" else "Field Error [-]"
-    )
+    iota_error_key, iota_error_label = _resolved_error_metric_spec(iota_rows)
     generated_plots["iota_target_vs_coil_length"] = _plot_xy(
         iota_rows,
         x_key="iota_target",
@@ -346,14 +368,7 @@ def main(argv: list[str] | None = None) -> int:
         formats=plot_formats,
     )
 
-    banana_error_key = (
-        "nonqs_ratio"
-        if any(row.get("nonqs_ratio") is not None for row in banana_rows)
-        else "field_error"
-    )
-    banana_error_label = (
-        "Non-QS Ratio [-]" if banana_error_key == "nonqs_ratio" else "Field Error [-]"
-    )
+    banana_error_key, banana_error_label = _resolved_error_metric_spec(banana_rows)
     generated_plots["banana_current_scale_vs_qs_proxy"] = _plot_xy(
         banana_rows,
         x_key="banana_current_scale",

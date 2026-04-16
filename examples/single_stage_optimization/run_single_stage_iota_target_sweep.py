@@ -47,6 +47,24 @@ CSV_FIELDNAMES = (
     "error_type",
     "error_message",
 )
+NUMERIC_RESULT_SUMMARY_KEYS = (
+    "target_iota",
+    "target_volume",
+    "final_iota",
+    "final_volume",
+    "field_error",
+    "nonqs_ratio",
+    "boozer_residual",
+    "coil_length",
+    "max_curvature",
+    "banana_current_a",
+    "plasma_current_a",
+    "initial_iota",
+)
+
+
+def _optional_float(value: object) -> float | None:
+    return None if value is None else float(value)
 
 
 def build_parser(*, add_help: bool = True) -> argparse.ArgumentParser:
@@ -105,6 +123,8 @@ def _result_summary(results: dict) -> dict:
             "initial_iota": results.get("INITIAL_IOTA"),
         }
     )
+    for key in NUMERIC_RESULT_SUMMARY_KEYS:
+        summary[key] = _optional_float(summary.get(key))
     return summary
 
 

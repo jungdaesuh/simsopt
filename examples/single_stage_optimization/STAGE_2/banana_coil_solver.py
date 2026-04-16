@@ -2,6 +2,8 @@ import argparse
 import os
 import sys
 import time
+from pathlib import Path
+
 import numpy as np
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -97,6 +99,11 @@ DEFAULT_STAGE2_IOTA_NPHI = 91
 DEFAULT_STAGE2_IOTA_NTHETA = 32
 DEFAULT_STAGE2_IOTA_MPOL = 8
 DEFAULT_STAGE2_IOTA_NTOR = 6
+SECONDARY_STAGE2_ARTIFACT_REASON = "exact_hardware_pass_iota_fail"
+SECONDARY_STAGE2_ARTIFACT_DIRNAME = "secondary_exact_hardware_pass_iota_fail"
+SECONDARY_STAGE2_TERMINATION_SUFFIX = (
+    "preserved_secondary_exact_hardware_pass_iota_fail"
+)
 
 
 def stage2_alm_constraint_names(
@@ -629,6 +636,71 @@ def build_stage2_results_sidecar_path(stage2_bs_artifact_path):
     return os.path.join(os.path.dirname(stage2_bs_artifact_path), "results.json")
 
 
+def build_stage2_secondary_artifact_paths(stage2_bs_artifact_path):
+    secondary_root = (
+        Path(stage2_bs_artifact_path).parent / SECONDARY_STAGE2_ARTIFACT_DIRNAME
+    )
+    return (
+        str(secondary_root / "biot_savart_opt.json"),
+        str(secondary_root / "results.json"),
+    )
+
+
+def build_stage2_secondary_artifact_metadata(
+    *,
+    secondary_stage2_bs_path=None,
+    secondary_stage2_results_path=None,
+    secondary_source=None,
+):
+    preserved = (
+        secondary_stage2_bs_path is not None and secondary_stage2_results_path is not None
+    )
+    return {
+        "STAGE2_SECONDARY_ARTIFACT_PRESERVED": preserved,
+        "STAGE2_SECONDARY_ARTIFACT_REASON": (
+            SECONDARY_STAGE2_ARTIFACT_REASON if preserved else None
+        ),
+        "STAGE2_SECONDARY_ARTIFACT_SOURCE": secondary_source if preserved else None,
+        "STAGE2_SECONDARY_BS_PATH": secondary_stage2_bs_path,
+        "STAGE2_SECONDARY_RESULTS_PATH": secondary_stage2_results_path,
+    }
+
+
+def append_termination_suffix(termination_message, suffix):
+    if termination_message:
+        return f"{termination_message}; {suffix}"
+    return suffix
+
+
+def build_secondary_stage2_results_kwargs(
+    *,
+    stage2_results_kwargs,
+    secondary_state,
+    tf_current_A,
+    new_banana_curve,
+    new_surf,
+    termination_message,
+):
+    return stage2_results_kwargs | {
+        "alm_result": None,
+        "banana_current_A": secondary_state["banana_current_A"],
+        "banana_to_tf_current_ratio": secondary_state["banana_current_A"]
+        / tf_current_A,
+        "termination_message": append_termination_suffix(
+            termination_message,
+            SECONDARY_STAGE2_TERMINATION_SUFFIX,
+        ),
+        "optimizer_success": False,
+        "final_volume": new_surf.volume(),
+        "intersecting": is_self_intersecting(new_banana_curve),
+        "final_max_curvature": secondary_state["max_curvature"],
+        "final_coil_length": secondary_state["coil_length"],
+        "final_curve_curve_min_dist": secondary_state["curve_curve_min_dist"],
+        "final_curve_surface_min_dist": secondary_state["curve_surface_min_dist"],
+        "hardware_status": secondary_state["hardware_status"],
+    }
+
+
 def build_stage2_iota_hot_loop_payload(
     *,
     args,
@@ -773,6 +845,34 @@ def build_stage2_iota_report_payload(
     )
     payload["STAGE2_IOTA_PROBE_SECONDS"] = time.perf_counter() - probe_start
     return payload
+
+
+def materialize_stage2_artifact_results(
+    *,
+    args,
+    stage2_bs_artifact_path,
+    results_kwargs,
+    stage2_iota_runtime,
+    new_bs,
+    new_surf,
+):
+    artifact_output_root = os.path.dirname(stage2_bs_artifact_path)
+    os.makedirs(artifact_output_root, exist_ok=True)
+    new_bs.save(stage2_bs_artifact_path)
+    field_error = _magnetic_field_plots(new_surf, new_bs, artifact_output_root + "/")
+    results = _build_stage2_results_impl(
+        **results_kwargs,
+        field_error=field_error,
+    )
+    results.update(
+        build_stage2_iota_report_payload(
+            args=args,
+            stage2_bs_artifact_path=stage2_bs_artifact_path,
+            stage2_results_payload=results,
+            stage2_iota_runtime=stage2_iota_runtime,
+        )
+    )
+    return results
 
 
 def evaluate_stage2_hardware_constraints(
@@ -1180,6 +1280,7 @@ def main(parsed_args=None):
 
     selected_result_x = None
     best_exact_stage2_pass = None
+    best_secondary_stage2_artifact = None
     lbfgsb_bounds = None
     if CONSTRAINT_METHOD != "alm":
         apply_penalty_traversal_forbidden_box_bounds(
@@ -1242,9 +1343,37 @@ def main(parsed_args=None):
                 return bool(candidate_state["stage2_iota_feasible"])
             return True
 
+        def should_preserve_secondary_stage2_artifact(candidate_state):
+            return (
+                args.stage2_iota_mode == "alm"
+                and candidate_state["hardware_status"]["success"]
+                and candidate_state["stage2_iota_feasible"] is False
+            )
+
+        def maybe_record_secondary_stage2_artifact(candidate_state, *, source):
+            nonlocal best_secondary_stage2_artifact
+            if not should_preserve_secondary_stage2_artifact(candidate_state):
+                return
+            if (
+                best_secondary_stage2_artifact is None
+                or candidate_state["field_objective"]
+                < best_secondary_stage2_artifact["field_objective"]
+            ):
+                best_secondary_stage2_artifact = {
+                    "x": candidate_state["x"].copy(),
+                    "field_objective": candidate_state["field_objective"],
+                    "source": source,
+                }
+                print(
+                    "[ALM] preserved secondary hardware-pass/iota-fail candidate "
+                    f"source={source}, field_objective={candidate_state['field_objective']:.6e}, "
+                    f"coil_length={candidate_state['coil_length']:.6f}"
+                )
+
         def maybe_record_exact_stage2_pass(candidate_x, *, source):
             nonlocal best_exact_stage2_pass
             candidate_state = capture_artifact_state(candidate_x)
+            maybe_record_secondary_stage2_artifact(candidate_state, source=source)
             if not stage2_contract_passes(candidate_state):
                 return
             if (
@@ -1486,16 +1615,10 @@ def main(parsed_args=None):
 
     # Create toroidal cross section plot
     cross_section_plot(new_surf_coils, new_surf, new_banana_curve, OUT_DIR_ITER + "CrossSectionPlot", hbt, VV)
-    # Create field error plot
-    fieldError = _magnetic_field_plots(new_surf, new_bs, OUT_DIR_ITER)
-
-    # Save the optimized coil shapes and currents so they can be loaded into other scripts for analysis:
     stage2_bs_artifact_path = OUT_DIR_ITER + "biot_savart_opt.json"
-    new_bs.save(stage2_bs_artifact_path)
     print(f'Banana Coil Current / TF Current = {new_banana_coils[0].current.get_value() / new_tf_coils[0].current.get_value():.3f}\n')
 
-    # Save the results of optimization to a separate file
-    results = _build_stage2_results_impl(
+    stage2_results_kwargs = dict(
         args=args,
         plasma_surf_filename=plasma_surf_filename,
         file_loc=file_loc,
@@ -1547,7 +1670,6 @@ def main(parsed_args=None):
         alm_result=alm_result,
         alm_taylor_result=alm_taylor_result,
         final_volume=new_surf.volume(),
-        field_error=fieldError,
         intersecting=intersecting,
         final_max_curvature=final_max_curvature,
         final_coil_length=final_coil_length,
@@ -1556,14 +1678,50 @@ def main(parsed_args=None):
         plasma_vessel_min_dist=plasma_vessel_min_dist,
         hardware_status=hardware_status,
     )
-    results.update(
-        build_stage2_iota_report_payload(
-            args=args,
-            stage2_bs_artifact_path=stage2_bs_artifact_path,
-            stage2_results_payload=results,
-            stage2_iota_runtime=stage2_iota_runtime,
+    secondary_artifact_metadata = build_stage2_secondary_artifact_metadata()
+    if (
+        best_secondary_stage2_artifact is not None
+        and selected_result_x is not None
+        and not np.array_equal(best_secondary_stage2_artifact["x"], selected_result_x)
+    ):
+        secondary_stage2_bs_path, secondary_stage2_results_path = (
+            build_stage2_secondary_artifact_paths(stage2_bs_artifact_path)
         )
+        secondary_state = capture_artifact_state(best_secondary_stage2_artifact["x"])
+        secondary_results = materialize_stage2_artifact_results(
+            args=args,
+            stage2_bs_artifact_path=secondary_stage2_bs_path,
+            results_kwargs=build_secondary_stage2_results_kwargs(
+                stage2_results_kwargs=stage2_results_kwargs,
+                secondary_state=secondary_state,
+                tf_current_A=new_tf_coils[0].current.get_value(),
+                new_banana_curve=new_banana_curve,
+                new_surf=new_surf,
+                termination_message=termination_message,
+            ),
+            stage2_iota_runtime=stage2_iota_runtime,
+            new_bs=new_bs,
+            new_surf=new_surf,
+        )
+        with open(secondary_stage2_results_path, "w") as outfile:
+            json.dump(secondary_results, outfile, indent=2)
+        secondary_artifact_metadata = build_stage2_secondary_artifact_metadata(
+            secondary_stage2_bs_path=secondary_stage2_bs_path,
+            secondary_stage2_results_path=secondary_stage2_results_path,
+            secondary_source=best_secondary_stage2_artifact["source"],
+        )
+        capture_artifact_state(selected_result_x)
+
+    # Save the results of optimization to a separate file
+    results = materialize_stage2_artifact_results(
+        args=args,
+        stage2_bs_artifact_path=stage2_bs_artifact_path,
+        results_kwargs=stage2_results_kwargs,
+        stage2_iota_runtime=stage2_iota_runtime,
+        new_bs=new_bs,
+        new_surf=new_surf,
     )
+    results.update(secondary_artifact_metadata)
     with open(os.path.join(OUT_DIR_ITER, "results.json"), "w") as outfile:
         json.dump(results, outfile, indent=2)
 

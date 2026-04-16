@@ -116,6 +116,32 @@ class IotaTargetSweepTests(unittest.TestCase):
             self.assertIn("case_id", csv_text)
             self.assertIn("iota_0p15", csv_text)
 
+    def test_result_summary_keeps_missing_numeric_metrics_json_portable(self):
+        module = load_iota_sweep_module()
+
+        summary = module._result_summary(
+            {
+                "SINGLE_STAGE_GOAL_MODE": "target",
+                "TARGET_IOTA": 0.15,
+                "FIELD_ERROR": None,
+                "BANANA_CURRENT_A": None,
+                "PLASMA_CURRENT_A": None,
+                "INITIAL_IOTA": None,
+            }
+        )
+
+        self.assertEqual(summary["goal_mode"], "target")
+        self.assertEqual(summary["target_iota"], 0.15)
+        for key in (
+            "field_error",
+            "banana_current_a",
+            "plasma_current_a",
+            "initial_iota",
+            "final_iota",
+            "coil_length",
+        ):
+            self.assertIsNone(summary[key])
+
 
 class BananaCurrentScanTests(unittest.TestCase):
     def test_dry_run_scales_optimized_current_and_writes_csv(self):
@@ -308,6 +334,28 @@ class BananaCurrentScanTests(unittest.TestCase):
 
 
 class IshwPlotTests(unittest.TestCase):
+    def test_resolved_error_metric_key_ignores_missing_and_nan_nonqs_ratio(self):
+        module = load_plot_module()
+
+        self.assertEqual(
+            module._resolved_error_metric_key(
+                [
+                    {"nonqs_ratio": "", "field_error": 0.01},
+                    {"nonqs_ratio": None, "field_error": 0.02},
+                    {"nonqs_ratio": float("nan"), "field_error": 0.03},
+                ]
+            ),
+            "field_error",
+        )
+        self.assertEqual(
+            module._resolved_error_metric_key(
+                [
+                    {"nonqs_ratio": 0.011, "field_error": 0.02},
+                ]
+            ),
+            "nonqs_ratio",
+        )
+
     def test_plot_manifest_records_generated_files(self):
         module = load_plot_module()
 
@@ -622,6 +670,154 @@ class Stage2IotaReportingTests(unittest.TestCase):
 
         self.assertIsNone(probe_mock.call_args.kwargs["constraint_weight"])
         self.assertIsNone(payload["STAGE2_IOTA_CONSTRAINT_WEIGHT"])
+
+    def test_stage2_iota_report_payload_persists_hot_loop_and_probe_timings(self):
+        module = load_stage2_module()
+
+        args = SimpleNamespace(
+            stage2_iota_mode="alm",
+            stage2_iota_target=0.2,
+            stage2_iota_tolerance=5.0e-3,
+            stage2_iota_weight=1.0,
+            equilibria_dir="/tmp/equilibria",
+            equilibrium_path=None,
+            stage2_iota_num_tf_coils=20,
+            stage2_iota_nphi=91,
+            stage2_iota_ntheta=32,
+            stage2_iota_mpol=8,
+            stage2_iota_ntor=6,
+            stage2_iota_vol_target=0.1,
+            stage2_iota_constraint_weight=1.0,
+            plasma_surf_filename="demo.nc",
+        )
+        runtime = SimpleNamespace(
+            stats=SimpleNamespace(
+                bootstrap_seconds=0.25,
+                runtime_seconds=1.5,
+                runtime_calls=7,
+            ),
+            initial_state=SimpleNamespace(iota=0.18, penalty=0.03),
+            penalty_threshold=5.0e-3,
+        )
+
+        with patch.object(
+            module,
+            "evaluate_stage2_iota_state",
+            return_value=SimpleNamespace(iota=0.201, penalty=0.0),
+        ), patch.object(
+            module,
+            "probe_stage2_seed_bootability",
+            return_value={
+                "BOOZER_BOOTABLE": True,
+                "IOTA_FEASIBLE": True,
+                "BOOTABILITY_REASON": "ok",
+                "BOOTABILITY_STAGE": "probe",
+                "BOOTABILITY_TARGET_IOTA": 0.2,
+                "BOOTABILITY_SOLVED_IOTA": 0.201,
+                "BOOTABILITY_SELF_INTERSECTING": False,
+                "BOOTABILITY_SOLVE_SUCCESS": True,
+                "BOOTABILITY_ABS_IOTA_ERROR": 1.0e-3,
+                "BOOTABILITY_ERROR_TYPE": None,
+                "BOOTABILITY_ERROR_MESSAGE": None,
+            },
+        ):
+            payload = module.build_stage2_iota_report_payload(
+                args=args,
+                stage2_bs_artifact_path="/tmp/stage2/biot_savart_opt.json",
+                stage2_results_payload={},
+                stage2_iota_runtime=runtime,
+            )
+
+        self.assertTrue(payload["STAGE2_IOTA_HOT_LOOP_ENABLED"])
+        self.assertEqual(payload["STAGE2_IOTA_BOOTSTRAP_SECONDS"], 0.25)
+        self.assertEqual(payload["STAGE2_IOTA_RUNTIME_SECONDS"], 1.5)
+        self.assertEqual(payload["STAGE2_IOTA_RUNTIME_CALLS"], 7)
+        self.assertIsNotNone(payload["STAGE2_IOTA_PROBE_SECONDS"])
+
+    def test_stage2_secondary_artifact_helpers_return_standard_bundle_paths(self):
+        module = load_stage2_module()
+
+        bs_path, results_path = module.build_stage2_secondary_artifact_paths(
+            "/tmp/stage2/biot_savart_opt.json"
+        )
+        metadata = module.build_stage2_secondary_artifact_metadata(
+            secondary_stage2_bs_path=bs_path,
+            secondary_stage2_results_path=results_path,
+            secondary_source="accepted_iterate",
+        )
+
+        self.assertTrue(bs_path.endswith("secondary_exact_hardware_pass_iota_fail/biot_savart_opt.json"))
+        self.assertTrue(results_path.endswith("secondary_exact_hardware_pass_iota_fail/results.json"))
+        self.assertTrue(metadata["STAGE2_SECONDARY_ARTIFACT_PRESERVED"])
+        self.assertEqual(
+            metadata["STAGE2_SECONDARY_ARTIFACT_REASON"],
+            "exact_hardware_pass_iota_fail",
+        )
+        self.assertEqual(
+            metadata["STAGE2_SECONDARY_ARTIFACT_SOURCE"],
+            "accepted_iterate",
+        )
+        self.assertEqual(metadata["STAGE2_SECONDARY_BS_PATH"], bs_path)
+        self.assertEqual(metadata["STAGE2_SECONDARY_RESULTS_PATH"], results_path)
+
+    def test_secondary_stage2_results_drop_primary_alm_final_diagnostics(self):
+        module = load_stage2_module()
+
+        with patch.object(module, "is_self_intersecting", return_value=False):
+            secondary_kwargs = module.build_secondary_stage2_results_kwargs(
+                stage2_results_kwargs={
+                    "alm_result": SimpleNamespace(
+                        penalty=123.0,
+                        multipliers=[1.0],
+                        constraint_values=[2.0],
+                    ),
+                    "optimizer_success": True,
+                },
+                secondary_state={
+                    "banana_current_A": 9000.0,
+                    "max_curvature": 22.0,
+                    "coil_length": 1.8,
+                    "curve_curve_min_dist": 0.06,
+                    "curve_surface_min_dist": 0.05,
+                    "hardware_status": {"success": True, "violations": []},
+                },
+                tf_current_A=80000.0,
+                new_banana_curve=SimpleNamespace(),
+                new_surf=SimpleNamespace(volume=lambda: 0.11),
+                termination_message="solver_done",
+            )
+
+        self.assertIsNone(secondary_kwargs["alm_result"])
+        self.assertFalse(secondary_kwargs["optimizer_success"])
+        self.assertIn(
+            "preserved_secondary_exact_hardware_pass_iota_fail",
+            secondary_kwargs["termination_message"],
+        )
+
+
+class WorkflowJsonTests(unittest.TestCase):
+    def test_write_json_normalizes_nonfinite_floats_to_null(self):
+        module = load_workflow_common_module()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "summary.json"
+
+            module.write_json(
+                path,
+                {
+                    "scalar_nan": float("nan"),
+                    "nested": {"value": float("inf")},
+                    "rows": [1.0, float("-inf"), {"inner": float("nan")}],
+                },
+            )
+
+            payload = json.loads(path.read_text(encoding="utf-8"))
+
+        self.assertIsNone(payload["scalar_nan"])
+        self.assertIsNone(payload["nested"]["value"])
+        self.assertEqual(payload["rows"][0], 1.0)
+        self.assertIsNone(payload["rows"][1])
+        self.assertIsNone(payload["rows"][2]["inner"])
 
 
 if __name__ == "__main__":

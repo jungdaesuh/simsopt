@@ -146,6 +146,11 @@ class HandoffSchemaTests(unittest.TestCase):
         self.assertFalse(upgraded["RECOVERY_SUCCEEDED"])
         self.assertIsNone(upgraded["RECOVERY_ITERS"])
         self.assertIsNone(upgraded["RECOVERY_TERMINATION_REASON"])
+        self.assertFalse(upgraded["STAGE2_SECONDARY_ARTIFACT_PRESERVED"])
+        self.assertIsNone(upgraded["STAGE2_SECONDARY_ARTIFACT_REASON"])
+        self.assertIsNone(upgraded["STAGE2_SECONDARY_ARTIFACT_SOURCE"])
+        self.assertIsNone(upgraded["STAGE2_SECONDARY_BS_PATH"])
+        self.assertIsNone(upgraded["STAGE2_SECONDARY_RESULTS_PATH"])
 
 
 class HandoffModuleTests(unittest.TestCase):
