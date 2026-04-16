@@ -37,6 +37,10 @@ class Stage2SeedSpec:
     order: int
     banana_init_current_A: float = 1.0e4
     banana_current_max_A: float = 1.6e4
+    finite_current_mode: str = "boozer_surrogate"
+    proxy_plasma_current_A: float = 0.0
+    vf_current_A: float = 0.0
+    vf_template_path: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -148,6 +152,7 @@ def format_local_stage2_seed_dir(spec: Stage2SeedSpec) -> str:
         f"-MAXC={format_compact_float(spec.banana_current_max_A)}"
         f"-TFC={format_compact_float(spec.tf_current_A)}"
         f"-Order={spec.order}"
+        f"{format_stage2_finite_current_suffix(spec)}"
     )
 
 
@@ -162,6 +167,7 @@ def format_database_stage2_seed_dir(spec: Stage2SeedSpec) -> str:
         f"-INITC={format_compact_float(spec.banana_init_current_A)}"
         f"-TFC={format_compact_float(spec.tf_current_A)}"
         f"-Order={spec.order}"
+        f"{format_stage2_finite_current_suffix(spec)}"
     )
 
 
@@ -175,6 +181,7 @@ def format_database_stage2_seed_dir_without_init_current(spec: Stage2SeedSpec) -
         f"-SR={format_compact_float(spec.banana_surf_radius)}"
         f"-TFC={format_compact_float(spec.tf_current_A)}"
         f"-Order={spec.order}"
+        f"{format_stage2_finite_current_suffix(spec)}"
     )
 
 
@@ -187,6 +194,7 @@ def format_legacy_database_stage2_seed_dir(spec: Stage2SeedSpec) -> str:
         f"-CW={format_compact_float(spec.curvature_weight)}"
         f"-SR={format_compact_float(spec.banana_surf_radius)}"
         f"-Order={spec.order}"
+        f"{format_stage2_finite_current_suffix(spec)}"
     )
 
 
@@ -201,6 +209,7 @@ def format_local_stage2_seed_dir_without_tf(spec: Stage2SeedSpec) -> str:
         f"-CT={format_compact_float(spec.curvature_threshold)}"
         f"-SR={spec.banana_surf_radius:0.3f}"
         f"-Order={spec.order}"
+        f"{format_stage2_finite_current_suffix(spec)}"
     )
 
 
@@ -216,6 +225,7 @@ def format_local_stage2_seed_dir_without_init_current(spec: Stage2SeedSpec) -> s
         f"-SR={spec.banana_surf_radius:0.3f}"
         f"-TFC={format_compact_float(spec.tf_current_A)}"
         f"-Order={spec.order}"
+        f"{format_stage2_finite_current_suffix(spec)}"
     )
 
 
@@ -228,7 +238,24 @@ def format_legacy_local_stage2_seed_dir(spec: Stage2SeedSpec) -> str:
         f"-CW={format_compact_float(spec.curvature_weight)}"
         f"-SR={spec.banana_surf_radius:0.3f}"
         f"-Order={spec.order}"
+        f"{format_stage2_finite_current_suffix(spec)}"
     )
+
+
+def format_stage2_finite_current_suffix(spec: Stage2SeedSpec) -> str:
+    if (
+        spec.finite_current_mode == "boozer_surrogate"
+        and abs(float(spec.proxy_plasma_current_A)) <= 1.0e-12
+        and abs(float(spec.vf_current_A)) <= 1.0e-12
+        and spec.vf_template_path in {None, ""}
+    ):
+        return ""
+    suffix = f"-FCM={spec.finite_current_mode}"
+    suffix += f"-PPC={format_compact_float(spec.proxy_plasma_current_A)}"
+    suffix += f"-VFC={format_compact_float(spec.vf_current_A)}"
+    if spec.vf_template_path not in {None, ""}:
+        suffix += f"-VFT={Path(spec.vf_template_path).stem}"
+    return suffix
 
 
 def format_stage2_constraint_suffix(

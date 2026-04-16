@@ -594,6 +594,7 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertEqual(settings["effective_mode"], "boozer_surrogate")
         self.assertEqual(settings["plasma_current_A"], 8000.0)
         self.assertAlmostEqual(settings["boozer_I"], 0.0016)
+        self.assertEqual(settings["boozer_current_convention"], "mu0_over_2pi")
 
     def test_resolve_plasma_current_settings_zero_physical_amps_reports_vacuum_effective_mode(self):
         module = self.load_module()
@@ -636,7 +637,7 @@ class SingleStageExampleTests(unittest.TestCase):
                 )
             )
 
-    def test_resolve_plasma_current_settings_defaults_to_disabled_zero(self):
+    def test_resolve_plasma_current_settings_defaults_to_surrogate_zero(self):
         module = self.load_module()
 
         settings = module.resolve_plasma_current_settings(
@@ -647,10 +648,41 @@ class SingleStageExampleTests(unittest.TestCase):
         )
 
         self.assertEqual(settings["input_source"], "default_zero")
-        self.assertEqual(settings["mode"], "disabled")
+        self.assertEqual(settings["mode"], "boozer_surrogate")
         self.assertEqual(settings["effective_mode"], "vacuum")
         self.assertEqual(settings["plasma_current_A"], 0.0)
         self.assertEqual(settings["boozer_I"], 0.0)
+        self.assertEqual(settings["boozer_current_convention"], "mu0_over_2pi")
+
+    def test_resolve_plasma_current_settings_uses_artifact_default_in_wataru_mode(self):
+        module = self.load_module()
+
+        settings = module.resolve_plasma_current_settings(
+            SimpleNamespace(
+                boozer_I=None,
+                plasma_current_A=None,
+            ),
+            finite_current_mode="wataru_proxy_field",
+            default_plasma_current_A=8000.0,
+        )
+
+        self.assertEqual(settings["input_source"], "artifact_default_A")
+        self.assertEqual(settings["mode"], "wataru_proxy_field")
+        self.assertEqual(settings["effective_mode"], "wataru_proxy_field")
+        self.assertEqual(settings["plasma_current_A"], 8000.0)
+        self.assertAlmostEqual(settings["boozer_I"], 4.0e-7 * np.pi * 8000.0)
+        self.assertEqual(settings["boozer_current_convention"], "mu0")
+
+    def test_stage2_resolve_finite_current_mode_accepts_explicit_wataru_without_artifact(self):
+        module = load_stage2_module()
+
+        self.assertEqual(
+            module.resolve_finite_current_mode(
+                "wataru_proxy_field",
+                artifact_mode=None,
+            ),
+            "wataru_proxy_field",
+        )
 
     def test_build_stage2_bs_path_uses_unique_globbed_current_match(self):
         module = self.load_module()
@@ -7589,6 +7621,7 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
         banana_current_A=9500.0,
         alm_accepted_candidate_x=None,
         artifact_state_by_x=None,
+        arg_overrides=None,
     ):
         module = load_stage2_module()
         runtime = {
@@ -7869,6 +7902,7 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
                 stage2_bs_path=stage2_bs_path,
                 equilibrium_path=str(Path(tmpdir) / "demo.nc"),
                 basin_hops=basin_hops,
+                **({} if arg_overrides is None else dict(arg_overrides)),
             )
 
             with ExitStack() as stack:
@@ -8004,6 +8038,15 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
         self.assertEqual(runtime["results"]["iterations"], 0)
         self.assertTrue(runtime["results"]["HARDWARE_CONSTRAINTS_OK"])
         self.assertTrue(runtime["results"]["STAGE2_BS_PATH"].endswith("seed.json"))
+
+    def test_stage2_main_rejects_wataru_seed_without_results_sidecar(self):
+        with self.assertRaisesRegex(ValueError, "results.json sidecar"):
+            self._run_stage2_main(
+                init_only=True,
+                constraint_method="penalty",
+                use_seed=True,
+                arg_overrides={"finite_current_mode": "wataru_proxy_field"},
+            )
 
     def test_stage2_main_alm_path_uses_minimize_alm(self):
         runtime = self._run_stage2_main(init_only=False, constraint_method="alm", use_seed=True)

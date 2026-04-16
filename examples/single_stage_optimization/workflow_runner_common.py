@@ -67,6 +67,10 @@ class Stage2ArtifactConfig:
     init_only: bool = False
     banana_init_current_A: float = 1.0e4
     banana_current_max_A: float = 1.6e4
+    finite_current_mode: str = "boozer_surrogate"
+    proxy_plasma_current_A: float = 0.0
+    vf_current_A: float = 0.0
+    vf_template_path: str | None = None
     stage2_iota_mode: str = "off"
     stage2_iota_target: float | None = None
     stage2_iota_tolerance: float = 5.0e-3
@@ -122,6 +126,10 @@ def build_stage2_seed_spec(config: Stage2ArtifactConfig) -> Stage2SeedSpec:
         order=config.order,
         banana_init_current_A=config.banana_init_current_A,
         banana_current_max_A=config.banana_current_max_A,
+        finite_current_mode=config.finite_current_mode,
+        proxy_plasma_current_A=config.proxy_plasma_current_A,
+        vf_current_A=config.vf_current_A,
+        vf_template_path=config.vf_template_path,
     )
 
 
@@ -202,6 +210,19 @@ def build_stage2_command(
         "--constraint-method",
         config.constraint_method,
     ]
+    if config.finite_current_mode != "boozer_surrogate":
+        command.extend(["--finite-current-mode", config.finite_current_mode])
+    if abs(float(config.proxy_plasma_current_A)) > 1.0e-12:
+        command.extend(
+            [
+                "--proxy-plasma-current-A",
+                str(config.proxy_plasma_current_A),
+            ]
+        )
+    if abs(float(config.vf_current_A)) > 1.0e-12:
+        command.extend(["--vf-current-A", str(config.vf_current_A)])
+    if config.vf_template_path not in {None, ""}:
+        command.extend(["--vf-template-path", str(config.vf_template_path)])
     if config.equilibria_dir is not None:
         command.extend(["--equilibria-dir", config.equilibria_dir])
     if config.constraint_method == "alm":

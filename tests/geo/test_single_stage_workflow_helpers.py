@@ -304,6 +304,41 @@ class WorkflowHelpersTests(unittest.TestCase):
         self.assertIn("-ALMDist=0.01", run_dir)
         self.assertIn("-ALMCurv=0.05", run_dir)
 
+    def test_format_local_stage2_run_dir_includes_wataru_field_suffix(self):
+        module = load_workflow_helpers_module()
+        spec = module.Stage2SeedSpec(
+            plasma_surf_filename="demo.nc",
+            major_radius=0.915,
+            toroidal_flux=0.24,
+            length_weight=0.0005,
+            cc_weight=100.0,
+            cc_threshold=0.05,
+            curvature_weight=0.0001,
+            curvature_threshold=40.0,
+            banana_surf_radius=0.22,
+            tf_current_A=8.0e4,
+            order=2,
+            finite_current_mode="wataru_proxy_field",
+            proxy_plasma_current_A=9000.0,
+            vf_current_A=500.0,
+            vf_template_path="/tmp/vf_template.json",
+        )
+
+        run_dir = module.format_local_stage2_run_dir(
+            spec,
+            constraint_method="penalty",
+            alm_max_outer_iters=10,
+            alm_penalty_init=1.0,
+            alm_penalty_scale=10.0,
+            basin_hops=0,
+            basin_stepsize=0.01,
+        )
+
+        self.assertIn("-FCM=wataru_proxy_field", run_dir)
+        self.assertIn("-PPC=9000", run_dir)
+        self.assertIn("-VFC=500", run_dir)
+        self.assertIn("-VFT=vf_template", run_dir)
+
     def test_select_non_dominated_records_uses_augmented_iota_error(self):
         module = load_workflow_helpers_module()
         records = [
@@ -506,6 +541,53 @@ class WorkflowRunnerCommonTests(unittest.TestCase):
         ):
             self.assertIn(flag, command)
             self.assertEqual(command[command.index(flag) + 1], expected)
+
+    def test_build_stage2_command_threads_wataru_field_controls(self):
+        module = load_workflow_common_module()
+        config = module.Stage2ArtifactConfig(
+            plasma_surf_filename="demo.nc",
+            output_root=Path("/tmp/stage2"),
+            equilibria_dir="/tmp/equilibria",
+            tf_current_A=8.0e4,
+            major_radius=0.915,
+            toroidal_flux=0.24,
+            length_weight=0.0005,
+            cc_weight=100.0,
+            cc_threshold=0.05,
+            curvature_weight=0.0001,
+            curvature_threshold=40.0,
+            banana_surf_radius=0.22,
+            order=2,
+            constraint_method="penalty",
+            alm_max_outer_iters=10,
+            alm_penalty_init=1.0,
+            alm_penalty_scale=10.0,
+            basin_hops=0,
+            basin_stepsize=0.01,
+            basin_seed=None,
+            init_only=False,
+            finite_current_mode="wataru_proxy_field",
+            proxy_plasma_current_A=9000.0,
+            vf_current_A=500.0,
+            vf_template_path="/tmp/vf_template.json",
+        )
+
+        command = module.build_stage2_command(config, python_executable="python")
+
+        self.assertIn("--finite-current-mode", command)
+        self.assertEqual(
+            command[command.index("--finite-current-mode") + 1],
+            "wataru_proxy_field",
+        )
+        self.assertIn("--proxy-plasma-current-A", command)
+        self.assertEqual(command[command.index("--proxy-plasma-current-A") + 1], "9000.0")
+        self.assertIn("--vf-current-A", command)
+        self.assertEqual(command[command.index("--vf-current-A") + 1], "500.0")
+        self.assertIn("--vf-template-path", command)
+        self.assertEqual(
+            command[command.index("--vf-template-path") + 1],
+            "/tmp/vf_template.json",
+        )
 
     def test_locked_baseline_stage2_metadata_includes_basin_identity(self):
         common = load_workflow_common_module()
@@ -951,6 +1033,7 @@ class FiniteCurrentSmokeScriptTests(unittest.TestCase):
             "STAGE2_TF_CURRENT_A": 8.0e4,
             "STAGE2_TF_CURRENT_SUM_ABS_A": 1.6e6,
             "FINITE_CURRENT_MODE": "boozer_surrogate",
+            "BOOZER_CURRENT_CONVENTION": "mu0_over_2pi",
         }
         results.update(overrides)
         return results
@@ -1064,6 +1147,8 @@ class FiniteCurrentSmokeScriptTests(unittest.TestCase):
 
         self.assertEqual(upgraded_results["TF_CURRENT_A"], 8.0e4)
         self.assertEqual(upgraded_results["TF_CURRENT_SUM_ABS_A"], 1.6e6)
+        self.assertEqual(upgraded_results["FINITE_CURRENT_MODE"], "boozer_surrogate")
+        self.assertEqual(upgraded_results["BOOZER_CURRENT_CONVENTION"], "mu0_over_2pi")
 
     def test_legacy_smoke_artifact_upgrades_total_tf_current_from_negative_tf_current(self):
         module = load_finite_current_smoke_module()

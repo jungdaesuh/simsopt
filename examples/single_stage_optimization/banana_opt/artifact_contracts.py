@@ -3,7 +3,12 @@ from __future__ import annotations
 import math
 from pathlib import Path
 
-from .current_contracts import BANANA_CURRENT_HARD_LIMIT_A, resolve_effective_current_mode
+from .current_contracts import (
+    BANANA_CURRENT_HARD_LIMIT_A,
+    DEFAULT_FINITE_CURRENT_MODE,
+    resolve_boozer_current_convention,
+    resolve_effective_current_mode,
+)
 from .hardware_contracts import fixed_stage2_artifact_hardware_contract
 from .hardware_constraint_schema import build_bootability_recovery_payload_fields
 from workflow_helpers import canonical_stage2_iota_constraint_weight
@@ -73,6 +78,11 @@ def _upgrade_legacy_stage2_iota_report_metadata(upgraded_results: dict) -> None:
         "STAGE2_IOTA_FINAL": None,
         "STAGE2_IOTA_FINAL_PENALTY": None,
         "STAGE2_IOTA_PENALTY_THRESHOLD": None,
+        "STAGE2_SECONDARY_ARTIFACT_PRESERVED": False,
+        "STAGE2_SECONDARY_ARTIFACT_REASON": None,
+        "STAGE2_SECONDARY_ARTIFACT_SOURCE": None,
+        "STAGE2_SECONDARY_BS_PATH": None,
+        "STAGE2_SECONDARY_RESULTS_PATH": None,
     }
     for key, value in defaults.items():
         if upgraded_results.get(key) is None:
@@ -82,6 +92,31 @@ def _upgrade_legacy_stage2_iota_report_metadata(upgraded_results: dict) -> None:
             upgraded_results.get("STAGE2_IOTA_CONSTRAINT_WEIGHT")
         )
     )
+
+
+def _upgrade_legacy_finite_current_metadata(upgraded_results: dict) -> None:
+    finite_current_mode = upgraded_results.get("FINITE_CURRENT_MODE")
+    if finite_current_mode in {None, ""}:
+        finite_current_mode = DEFAULT_FINITE_CURRENT_MODE
+        upgraded_results["FINITE_CURRENT_MODE"] = finite_current_mode
+    upgraded_results["BOOZER_CURRENT_CONVENTION"] = (
+        upgraded_results.get("BOOZER_CURRENT_CONVENTION")
+        or resolve_boozer_current_convention(finite_current_mode)
+    )
+    if upgraded_results.get("NUM_PROXY_COILS") is None:
+        upgraded_results["NUM_PROXY_COILS"] = 0
+    if upgraded_results.get("NUM_VF_COILS") is None:
+        upgraded_results["NUM_VF_COILS"] = 0
+    if upgraded_results.get("PROXY_PLASMA_CURRENT_A") is None:
+        upgraded_results["PROXY_PLASMA_CURRENT_A"] = 0.0
+    if upgraded_results.get("VF_CURRENT_A") is None:
+        upgraded_results["VF_CURRENT_A"] = 0.0
+    if upgraded_results.get("VF_TEMPLATE_PATH") is None:
+        upgraded_results["VF_TEMPLATE_PATH"] = None
+    if upgraded_results.get("NUM_BANANA_COILS") is None:
+        nfp = upgraded_results.get("NFP")
+        if nfp is not None:
+            upgraded_results["NUM_BANANA_COILS"] = 2 * int(nfp)
 
 
 def upgrade_legacy_stage2_artifact_results(
@@ -106,6 +141,7 @@ def upgrade_legacy_stage2_artifact_results(
     _upgrade_legacy_stage2_hardware_contract_metadata(upgraded_results)
     _upgrade_legacy_bootability_recovery_metadata(upgraded_results)
     _upgrade_legacy_stage2_iota_report_metadata(upgraded_results)
+    _upgrade_legacy_finite_current_metadata(upgraded_results)
     return upgraded_results
 
 
@@ -146,8 +182,18 @@ def validate_smoke_results(
     expected_boozer_I: float,
     expected_stage2_tf_current_A: float,
     expected_stage2_tf_current_sum_abs_A: float,
+    expected_finite_current_mode: str = DEFAULT_FINITE_CURRENT_MODE,
+    expected_boozer_current_convention: str | None = None,
 ) -> dict:
-    expected_effective_mode = resolve_effective_current_mode(expected_boozer_I)
+    resolved_boozer_current_convention = (
+        resolve_boozer_current_convention(expected_finite_current_mode)
+        if expected_boozer_current_convention is None
+        else expected_boozer_current_convention
+    )
+    expected_effective_mode = resolve_effective_current_mode(
+        expected_boozer_I,
+        finite_current_mode=expected_finite_current_mode,
+    )
     required_keys = (
         "PLASMA_CURRENT_A",
         "PLASMA_CURRENT_INPUT_SOURCE",
@@ -156,6 +202,7 @@ def validate_smoke_results(
         "STAGE2_TF_CURRENT_A",
         "STAGE2_TF_CURRENT_SUM_ABS_A",
         "FINITE_CURRENT_MODE",
+        "BOOZER_CURRENT_CONVENTION",
     )
     missing_keys = [key for key in required_keys if key not in results]
     checks = {
@@ -185,7 +232,9 @@ def validate_smoke_results(
             abs_tol=1e-12,
         ),
         "input_source_matches": results.get("PLASMA_CURRENT_INPUT_SOURCE") == "physical_A",
-        "mode_matches": results.get("FINITE_CURRENT_MODE") == "boozer_surrogate",
+        "mode_matches": results.get("FINITE_CURRENT_MODE") == expected_finite_current_mode,
+        "boozer_current_convention_matches": results.get("BOOZER_CURRENT_CONVENTION")
+        == resolved_boozer_current_convention,
         "effective_mode_matches": results.get("EFFECTIVE_CURRENT_MODE")
         == expected_effective_mode,
     }
@@ -223,6 +272,13 @@ def expected_locked_baseline_stage2_artifact_metadata(
         "NUM_TF_COILS": num_tf_coils,
         "BANANA_INIT_CURRENT_A": config.banana_init_current_A,
         "BANANA_CURRENT_MAX_A": config.banana_current_max_A,
+        "FINITE_CURRENT_MODE": config.finite_current_mode,
+        "BOOZER_CURRENT_CONVENTION": resolve_boozer_current_convention(
+            config.finite_current_mode
+        ),
+        "PROXY_PLASMA_CURRENT_A": config.proxy_plasma_current_A,
+        "VF_CURRENT_A": config.vf_current_A,
+        "VF_TEMPLATE_PATH": config.vf_template_path,
         "MAJOR_RADIUS": config.major_radius,
         "TOROIDAL_FLUX": config.toroidal_flux,
         "LENGTH_WEIGHT": config.length_weight,

@@ -2,6 +2,7 @@ import argparse
 import os
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -43,9 +44,11 @@ from workflow_helpers import (
     validate_stage2_iota_args,
     validate_normalized_toroidal_flux,
 )
+from banana_opt.artifact_contracts import upgrade_legacy_stage2_artifact_results
 from banana_opt.reference_surfaces import build_banana_reference_surfaces
 from banana_opt.basin_hopping import run_basin_hopping, telemetry_values as basin_telemetry_values
 from banana_opt.stage2_geometry import (
+    WATARU_PROXY_FIELD_MODE,
     init_surface as _init_surface,
     initialize_coils as _initialize_coils,
     is_self_intersecting,
@@ -67,9 +70,15 @@ from banana_opt.hardware_constraint_schema import (
     hardware_constraint_alm_names,
 )
 from banana_opt.current_contracts import (
+    BoozerCurrentConvention,
     apply_penalty_traversal_forbidden_box_bounds,
+    DEFAULT_FINITE_CURRENT_MODE,
+    FiniteCurrentMode,
+    resolve_boozer_current_convention,
+    resolve_finite_current_mode,
 )
 from banana_opt.stage2_single_stage_handoff import (
+    partition_loaded_stage2_coils,
     probe_stage2_seed_bootability,
 )
 from banana_opt.stage2_objectives import (
@@ -104,6 +113,15 @@ SECONDARY_STAGE2_ARTIFACT_DIRNAME = "secondary_exact_hardware_pass_iota_fail"
 SECONDARY_STAGE2_TERMINATION_SUFFIX = (
     "preserved_secondary_exact_hardware_pass_iota_fail"
 )
+
+
+@dataclass(frozen=True)
+class Stage2FiniteCurrentConfig:
+    finite_current_mode: FiniteCurrentMode
+    proxy_plasma_current_A: float
+    vf_current_A: float
+    vf_template_path: str | None
+    boozer_current_convention: BoozerCurrentConvention
 
 
 def stage2_alm_constraint_names(
@@ -243,6 +261,38 @@ def parse_args():
         type=float,
         default=float(os.environ.get("BANANA_CURRENT_MAX_A", "16000")),
         help="Hard upper bound on the realized banana-coil current in SI amperes.",
+    )
+    parser.add_argument(
+        "--finite-current-mode",
+        choices=["boozer_surrogate", "wataru_proxy_field"],
+        default=os.environ.get("FINITE_CURRENT_MODE"),
+        help=(
+            "Optional Stage 2 finite-current field model. When omitted for a fresh run, "
+            "Stage 2 preserves the existing surrogate default."
+        ),
+    )
+    parser.add_argument(
+        "--proxy-plasma-current-A",
+        type=float,
+        default=(
+            float(os.environ["PROXY_PLASMA_CURRENT_A"])
+            if "PROXY_PLASMA_CURRENT_A" in os.environ
+            else None
+        ),
+        help="Physical SI amperes for the Wataru-style proxy plasma-current coil.",
+    )
+    parser.add_argument(
+        "--vf-current-A",
+        type=float,
+        default=(
+            float(os.environ["VF_CURRENT_A"]) if "VF_CURRENT_A" in os.environ else None
+        ),
+        help="Physical SI amperes for each sign-preserving VF template current.",
+    )
+    parser.add_argument(
+        "--vf-template-path",
+        default=os.environ.get("VF_TEMPLATE_PATH"),
+        help="Optional BiotSavart JSON template that defines the VF coil geometry/signs.",
     )
     parser.add_argument(
         "--major-radius",
@@ -961,7 +1011,14 @@ def _capture_stage2_artifact_state(
     }
 
 
-def load_stage2_seed_configuration(seed_bs_path, surf, num_tf_coils, out_dir):
+def load_stage2_seed_configuration(
+    seed_bs_path,
+    surf,
+    num_tf_coils,
+    out_dir,
+    *,
+    stage2_results=None,
+):
     bs = load(seed_bs_path)
     bs.set_points(surf.gamma().reshape((-1, 3)))
 
@@ -972,10 +1029,187 @@ def load_stage2_seed_configuration(seed_bs_path, surf, num_tf_coils, out_dir):
     pointData = {"B_N": np.sum(bs.B().reshape(unitn.shape) * unitn, axis=2)[:, :, None]}
     surf.to_vtk(out_dir + "surf_init", extra_data=pointData)
 
-    banana_coils = coils[num_tf_coils:]
+    if stage2_results is None:
+        tf_coils = coils[:num_tf_coils]
+        banana_coils = coils[num_tf_coils:]
+        proxy_coils = []
+        vf_coils = []
+    else:
+        coil_partitions = partition_loaded_stage2_coils(
+            coils,
+            stage2_results=stage2_results,
+            requested_num_tf_coils=num_tf_coils,
+        )
+        tf_coils = list(coil_partitions.tf_coils)
+        banana_coils = list(coil_partitions.banana_coils)
+        proxy_coils = list(coil_partitions.proxy_coils)
+        vf_coils = list(coil_partitions.vf_coils)
     banana_curve = banana_coils[0].curve
-    tf_coils = coils[:num_tf_coils]
-    return bs, curves, banana_curve, banana_coils, tf_coils
+    return bs, curves, banana_curve, banana_coils, tf_coils, proxy_coils, vf_coils
+
+
+def load_stage2_seed_results(seed_bs_path, *, known_tf_current_A):
+    stage2_results_path = Path(seed_bs_path).with_name("results.json")
+    if not stage2_results_path.is_file():
+        return None, None
+    with stage2_results_path.open(encoding="utf-8") as infile:
+        loaded_results = json.load(infile)
+    return stage2_results_path, upgrade_legacy_stage2_artifact_results(
+        loaded_results,
+        known_num_tf_coils=20,
+        known_tf_current_A=known_tf_current_A,
+    )
+
+
+def _resolve_seeded_numeric_field(cli_value, artifact_value, *, field_name):
+    if cli_value is None:
+        return 0.0 if artifact_value is None else float(artifact_value)
+    if artifact_value is None:
+        return float(cli_value)
+    if not np.isclose(float(cli_value), float(artifact_value), rtol=0.0, atol=1.0e-12):
+        raise ValueError(
+            f"{field_name}={float(cli_value):.6f} does not match the loaded Stage 2 "
+            f"artifact metadata value {float(artifact_value):.6f}."
+        )
+    return float(cli_value)
+
+
+def _resolve_seeded_path_field(cli_value, artifact_value, *, field_name):
+    if cli_value in {None, ""}:
+        return artifact_value
+    if artifact_value in {None, ""}:
+        return cli_value
+    if str(cli_value) != str(artifact_value):
+        raise ValueError(
+            f"{field_name}={cli_value!r} does not match the loaded Stage 2 artifact "
+            f"metadata value {artifact_value!r}."
+        )
+    return cli_value
+
+
+def _resolve_stage2_finite_current_config(
+    args,
+    *,
+    stage2_results,
+) -> Stage2FiniteCurrentConfig:
+    requested_finite_current_mode = getattr(
+        args,
+        "finite_current_mode",
+        DEFAULT_FINITE_CURRENT_MODE,
+    )
+    requested_proxy_plasma_current_A = getattr(args, "proxy_plasma_current_A", None)
+    requested_vf_current_A = getattr(args, "vf_current_A", None)
+    requested_vf_template_path = getattr(args, "vf_template_path", None)
+    finite_current_mode = resolve_finite_current_mode(
+        requested_finite_current_mode,
+        artifact_mode=(
+            None if stage2_results is None else stage2_results.get("FINITE_CURRENT_MODE")
+        ),
+    )
+    if (
+        args.stage2_bs_path
+        and stage2_results is None
+        and finite_current_mode == WATARU_PROXY_FIELD_MODE
+    ):
+        raise ValueError(
+            "Stage 2 restarts in wataru_proxy_field mode require the sibling "
+            "results.json sidecar so the loaded coils can be partitioned correctly."
+        )
+
+    if stage2_results is None:
+        proxy_plasma_current_A = (
+            0.0
+            if requested_proxy_plasma_current_A is None
+            else float(requested_proxy_plasma_current_A)
+        )
+        vf_current_A = (
+            0.0 if requested_vf_current_A is None else float(requested_vf_current_A)
+        )
+        vf_template_path = requested_vf_template_path
+    else:
+        proxy_plasma_current_A = _resolve_seeded_numeric_field(
+            requested_proxy_plasma_current_A,
+            stage2_results.get("PROXY_PLASMA_CURRENT_A"),
+            field_name="--proxy-plasma-current-A",
+        )
+        vf_current_A = _resolve_seeded_numeric_field(
+            requested_vf_current_A,
+            stage2_results.get("VF_CURRENT_A"),
+            field_name="--vf-current-A",
+        )
+        vf_template_path = _resolve_seeded_path_field(
+            requested_vf_template_path,
+            stage2_results.get("VF_TEMPLATE_PATH"),
+            field_name="--vf-template-path",
+        )
+
+    if finite_current_mode != WATARU_PROXY_FIELD_MODE:
+        if (
+            requested_proxy_plasma_current_A is not None
+            or requested_vf_current_A is not None
+        ):
+            raise ValueError(
+                "--proxy-plasma-current-A and --vf-current-A require "
+                "--finite-current-mode=wataru_proxy_field."
+            )
+        if requested_vf_template_path not in {None, ""}:
+            raise ValueError(
+                "--vf-template-path requires --finite-current-mode=wataru_proxy_field."
+            )
+        return Stage2FiniteCurrentConfig(
+            finite_current_mode=finite_current_mode,
+            proxy_plasma_current_A=0.0,
+            vf_current_A=0.0,
+            vf_template_path=None,
+            boozer_current_convention=resolve_boozer_current_convention(
+                finite_current_mode,
+            ),
+        )
+
+    if vf_current_A != 0.0 and vf_template_path in {None, ""}:
+        raise ValueError(
+            "--vf-template-path is required when --vf-current-A is non-zero in "
+            "wataru_proxy_field mode."
+        )
+    return Stage2FiniteCurrentConfig(
+        finite_current_mode=finite_current_mode,
+        proxy_plasma_current_A=proxy_plasma_current_A,
+        vf_current_A=vf_current_A,
+        vf_template_path=vf_template_path,
+        boozer_current_convention=resolve_boozer_current_convention(
+            finite_current_mode,
+        ),
+    )
+
+
+def _build_stage2_seed_load_kwargs(*, stage2_results):
+    if stage2_results is None:
+        return {}
+    return {"stage2_results": stage2_results}
+
+
+def _build_initialize_coils_kwargs(
+    *,
+    finite_current_config: Stage2FiniteCurrentConfig,
+    equilibrium_file,
+    target_major_radius,
+    toroidal_flux,
+    nphi,
+    ntheta,
+):
+    if finite_current_config.finite_current_mode != WATARU_PROXY_FIELD_MODE:
+        return {}
+    return {
+        "equilibrium_file": equilibrium_file,
+        "target_major_radius": target_major_radius,
+        "toroidal_flux": toroidal_flux,
+        "nphi": nphi,
+        "ntheta": ntheta,
+        "finite_current_mode": finite_current_config.finite_current_mode,
+        "proxy_plasma_current_A": finite_current_config.proxy_plasma_current_A,
+        "vf_current_A": finite_current_config.vf_current_A,
+        "vf_template_path": finite_current_config.vf_template_path,
+    }
 
 
 def main(parsed_args=None):
@@ -994,6 +1228,23 @@ def main(parsed_args=None):
     # Make Directory for output
     OUT_DIR = os.path.join(args.output_root, f"outputs-{plasma_surf_filename}") + "/"
     os.makedirs(OUT_DIR, exist_ok=True)
+
+    seed_stage2_results = None
+    seed_stage2_results_path = None
+    if args.stage2_bs_path:
+        seed_stage2_results_path, seed_stage2_results = load_stage2_seed_results(
+            args.stage2_bs_path,
+            known_tf_current_A=args.tf_current_A,
+        )
+    finite_current_config = _resolve_stage2_finite_current_config(
+        args,
+        stage2_results=seed_stage2_results,
+    )
+    finite_current_mode = finite_current_config.finite_current_mode
+    proxy_plasma_current_A = finite_current_config.proxy_plasma_current_A
+    vf_current_A = finite_current_config.vf_current_A
+    vf_template_path = finite_current_config.vf_template_path
+    boozer_current_convention = finite_current_config.boozer_current_convention
 
     nphi = args.nphi
     ntheta = args.ntheta
@@ -1059,8 +1310,11 @@ def main(parsed_args=None):
             new_surf,
             len(tf_coils),
             OUT_DIR,
+            **_build_stage2_seed_load_kwargs(stage2_results=seed_stage2_results),
         )
         new_tf_coils = init_coil_array[4]
+        new_proxy_coils = init_coil_array[5] if len(init_coil_array) > 5 else ()
+        new_vf_coils = init_coil_array[6] if len(init_coil_array) > 6 else ()
         tf_current_A = float(new_tf_coils[0].current.get_value())
         validate_tf_current_limit(tf_current_A)
     else:
@@ -1076,13 +1330,28 @@ def main(parsed_args=None):
             phi_width,
             theta_width,
             OUT_DIR,
+            **_build_initialize_coils_kwargs(
+                finite_current_config=finite_current_config,
+                equilibrium_file=file_loc,
+                target_major_radius=R0,
+                toroidal_flux=s,
+                nphi=nphi,
+                ntheta=ntheta,
+            ),
         )
         new_tf_coils = tf_coils
+        new_proxy_coils = init_coil_array[4] if len(init_coil_array) > 4 else ()
+        new_vf_coils = init_coil_array[5] if len(init_coil_array) > 5 else ()
     new_bs = init_coil_array[0]
     new_curves = init_coil_array[1]
     new_banana_curve = init_coil_array[2]
     new_banana_coils = init_coil_array[3]
     new_surf_coils = surf_coils
+    objective_curves = (
+        new_curves
+        if finite_current_mode != WATARU_PROXY_FIELD_MODE
+        else [coil.curve for coil in new_banana_coils]
+    )
     initial_banana_current_A = float(new_banana_coils[0].current.get_value())
 
     # MAIN OPTIMIZATION
@@ -1124,8 +1393,8 @@ def main(parsed_args=None):
     # Define the individual terms objective function:
     Jf = SquaredFlux(new_surf, new_bs) # penalty on B dot n
     Jls = CurveLength(new_banana_curve) # penalty on curve length
-    Jccdist = CurveCurveDistance(new_curves, CC_THRESHOLD) #penalty on coil-to-coil distance
-    Jcsdist = CurveSurfaceDistance(new_curves, new_surf, CS_THRESHOLD)
+    Jccdist = CurveCurveDistance(objective_curves, CC_THRESHOLD) #penalty on coil-to-coil distance
+    Jcsdist = CurveSurfaceDistance(objective_curves, new_surf, CS_THRESHOLD)
 
     # Lp-norm curvature penalty (configurable via --curvature-p-norm)
     Jc = LpCurveCurvature(new_banana_curve, args.curvature_p_norm, CURVATURE_THRESHOLD)
@@ -1212,6 +1481,10 @@ def main(parsed_args=None):
         order=order,
         banana_init_current_A=initial_banana_current_A,
         banana_current_max_A=float(args.banana_current_max_A),
+        finite_current_mode=finite_current_mode,
+        proxy_plasma_current_A=proxy_plasma_current_A,
+        vf_current_A=vf_current_A,
+        vf_template_path=vf_template_path,
     )
     OUT_DIR_ITER = (
         OUT_DIR
@@ -1626,10 +1899,24 @@ def main(parsed_args=None):
         tf_current_A=tf_current_A,
         tf_current_sum_abs_A=sum(abs(coil.current.get_value()) for coil in new_tf_coils),
         num_tf_coils=len(new_tf_coils),
+        num_banana_coils=len(new_banana_coils),
+        num_proxy_coils=len(new_proxy_coils),
+        num_vf_coils=len(new_vf_coils),
         initial_banana_current_A=initial_banana_current_A,
         banana_current_A=final_banana_current_A,
         banana_to_tf_current_ratio=(
             final_banana_current_A / new_tf_coils[0].current.get_value()
+        ),
+        finite_current_mode=finite_current_mode,
+        boozer_current_convention=boozer_current_convention,
+        proxy_plasma_current_A=proxy_plasma_current_A,
+        vf_current_A=vf_current_A,
+        vf_template_path=vf_template_path,
+        total_coils=(
+            len(new_tf_coils)
+            + len(new_banana_coils)
+            + len(new_proxy_coils)
+            + len(new_vf_coils)
         ),
         cc_threshold=CC_THRESHOLD,
         cc_weight=CC_WEIGHT,

@@ -151,6 +151,13 @@ class HandoffSchemaTests(unittest.TestCase):
         self.assertIsNone(upgraded["STAGE2_SECONDARY_ARTIFACT_SOURCE"])
         self.assertIsNone(upgraded["STAGE2_SECONDARY_BS_PATH"])
         self.assertIsNone(upgraded["STAGE2_SECONDARY_RESULTS_PATH"])
+        self.assertEqual(upgraded["FINITE_CURRENT_MODE"], "boozer_surrogate")
+        self.assertEqual(upgraded["BOOZER_CURRENT_CONVENTION"], "mu0_over_2pi")
+        self.assertEqual(upgraded["NUM_PROXY_COILS"], 0)
+        self.assertEqual(upgraded["NUM_VF_COILS"], 0)
+        self.assertEqual(upgraded["PROXY_PLASMA_CURRENT_A"], 0.0)
+        self.assertEqual(upgraded["VF_CURRENT_A"], 0.0)
+        self.assertIsNone(upgraded["VF_TEMPLATE_PATH"])
 
 
 class HandoffModuleTests(unittest.TestCase):
@@ -200,6 +207,44 @@ class HandoffModuleTests(unittest.TestCase):
             module.BOOTABILITY_REASON_MISSING_ARTIFACT_METADATA,
         )
         self.assertFalse(module.bootability_passes(status))
+
+    def test_partition_loaded_stage2_coils_uses_recorded_proxy_and_vf_counts(self):
+        module = load_handoff_module()
+        coils = [object() for _ in range(24)]
+
+        partitions = module.partition_loaded_stage2_coils(
+            coils,
+            stage2_results={
+                "NUM_TF_COILS": 20,
+                "NUM_BANANA_COILS": 2,
+                "NUM_PROXY_COILS": 1,
+                "NUM_VF_COILS": 1,
+                "FINITE_CURRENT_MODE": "wataru_proxy_field",
+            },
+            requested_num_tf_coils=20,
+        )
+
+        self.assertEqual(len(partitions.tf_coils), 20)
+        self.assertEqual(len(partitions.banana_coils), 2)
+        self.assertEqual(len(partitions.proxy_coils), 1)
+        self.assertEqual(len(partitions.vf_coils), 1)
+        self.assertEqual(partitions.finite_current_mode, "wataru_proxy_field")
+
+    def test_partition_loaded_stage2_coils_rejects_inconsistent_partition_total(self):
+        module = load_handoff_module()
+        coils = [object() for _ in range(22)]
+
+        with self.assertRaisesRegex(ValueError, "partition metadata expects 24"):
+            module.partition_loaded_stage2_coils(
+                coils,
+                stage2_results={
+                    "NUM_TF_COILS": 20,
+                    "NUM_BANANA_COILS": 2,
+                    "NUM_PROXY_COILS": 1,
+                    "NUM_VF_COILS": 1,
+                },
+                requested_num_tf_coils=20,
+            )
 
 
 class UnifiedRunnerTests(unittest.TestCase):
@@ -343,11 +388,44 @@ class UnifiedRunnerTests(unittest.TestCase):
             wrapper.build_probe_status(
                 args,
                 stage2_bs_path=Path("/tmp/stage2/biot_savart_opt.json"),
-                stage2_results={"PLASMA_SURF_FILENAME": "demo.nc"},
+                stage2_results={
+                    "PLASMA_SURF_FILENAME": "demo.nc",
+                    "FINITE_CURRENT_MODE": "boozer_surrogate",
+                    "PROXY_PLASMA_CURRENT_A": 0.0,
+                },
                 stage="probe",
             )
 
         self.assertAlmostEqual(probe.call_args.kwargs["boozer_I"], 1.8e-3)
+
+    def test_build_probe_status_uses_stage2_proxy_current_default_in_wataru_mode(self):
+        wrapper = load_wrapper_module()
+
+        args = wrapper.parse_args(
+            [
+                "--plasma-surf-filename",
+                "demo.nc",
+                "--stage2-bs-path",
+                "/tmp/stage2/biot_savart_opt.json",
+            ]
+        )
+
+        with patch.object(wrapper, "probe_stage2_seed_bootability", return_value={}) as probe:
+            wrapper.build_probe_status(
+                args,
+                stage2_bs_path=Path("/tmp/stage2/biot_savart_opt.json"),
+                stage2_results={
+                    "PLASMA_SURF_FILENAME": "demo.nc",
+                    "FINITE_CURRENT_MODE": "wataru_proxy_field",
+                    "PROXY_PLASMA_CURRENT_A": 9000.0,
+                },
+                stage="probe",
+            )
+
+        self.assertAlmostEqual(
+            probe.call_args.kwargs["boozer_I"],
+            4.0e-7 * 3.141592653589793 * 9000.0,
+        )
 
     def test_recovery_only_updates_recovery_results_with_handoff_metadata(self):
         wrapper = load_wrapper_module()

@@ -329,9 +329,18 @@ def build_stage2_results(
     tf_current_A,
     tf_current_sum_abs_A,
     num_tf_coils,
+    num_banana_coils,
+    num_proxy_coils,
+    num_vf_coils,
     initial_banana_current_A,
     banana_current_A,
     banana_to_tf_current_ratio,
+    finite_current_mode,
+    boozer_current_convention,
+    proxy_plasma_current_A,
+    vf_current_A,
+    vf_template_path,
+    total_coils,
     cc_threshold,
     cc_weight,
     curvature_weight,
@@ -393,6 +402,19 @@ def build_stage2_results(
         banana_current_max_A=float(args.banana_current_max_A),
         tf_current_A=tf_current_A,
     )
+    expected_total_coils = (
+        int(num_tf_coils)
+        + int(num_banana_coils)
+        + int(num_proxy_coils)
+        + int(num_vf_coils)
+    )
+    if int(total_coils) != expected_total_coils:
+        raise ValueError(
+            "Stage 2 coil partition metadata does not match the loaded BiotSavart "
+            f"coil count: total={int(total_coils)}, expected={expected_total_coils} "
+            f"(TF={int(num_tf_coils)}, banana={int(num_banana_coils)}, "
+            f"proxy={int(num_proxy_coils)}, vf={int(num_vf_coils)})."
+        )
     return {
         "PLASMA_SURF_FILENAME": plasma_surf_filename,
         "PLASMA_SURF_PATH": file_loc,
@@ -400,10 +422,20 @@ def build_stage2_results(
         "TF_CURRENT_A": float(tf_current_A),
         "TF_CURRENT_SUM_ABS_A": float(tf_current_sum_abs_A),
         "NUM_TF_COILS": int(num_tf_coils),
+        "NUM_BANANA_COILS": int(num_banana_coils),
+        "NUM_PROXY_COILS": int(num_proxy_coils),
+        "NUM_VF_COILS": int(num_vf_coils),
         "BANANA_INIT_CURRENT_A": float(initial_banana_current_A),
         "BANANA_CURRENT_MAX_A": float(args.banana_current_max_A),
         "BANANA_CURRENT_A": float(banana_current_A),
         "BANANA_TO_TF_CURRENT_RATIO": float(banana_to_tf_current_ratio),
+        "FINITE_CURRENT_MODE": str(finite_current_mode),
+        "BOOZER_CURRENT_CONVENTION": str(boozer_current_convention),
+        "PROXY_PLASMA_CURRENT_A": float(proxy_plasma_current_A),
+        "VF_CURRENT_A": float(vf_current_A),
+        "VF_TEMPLATE_PATH": (
+            None if vf_template_path in {None, ""} else str(vf_template_path)
+        ),
         "CC_THRESHOLD": cc_threshold,
         "CC_WEIGHT": cc_weight,
         "CURVATURE_WEIGHT": curvature_weight,

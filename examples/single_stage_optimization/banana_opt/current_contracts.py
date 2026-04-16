@@ -15,19 +15,30 @@ from banana_opt.hardware_constraint_schema import (
 )
 
 
+MU0 = 4.0e-7 * np.pi
 MU0_OVER_2PI = 2.0e-7
 
-CurrentInputSource = Literal["physical_A", "raw_boozer_I", "default_zero"]
-FiniteCurrentMode = Literal["boozer_surrogate", "disabled"]
-EffectiveCurrentMode = Literal["vacuum", "boozer_surrogate"]
+CurrentInputSource = Literal[
+    "physical_A",
+    "raw_boozer_I",
+    "default_zero",
+    "artifact_default_A",
+]
+BoozerCurrentConvention = Literal["mu0_over_2pi", "mu0"]
+FiniteCurrentMode = Literal["boozer_surrogate", "wataru_proxy_field"]
+EffectiveCurrentMode = Literal["vacuum", "boozer_surrogate", "wataru_proxy_field"]
 CURRENT_MODE_ZERO_TOL = 1e-12
+DEFAULT_FINITE_CURRENT_MODE: FiniteCurrentMode = "boozer_surrogate"
 
 __all__ = [
     "BANANA_CURRENT_HARD_LIMIT_A",
+    "BoozerCurrentConvention",
     "CURRENT_MODE_ZERO_TOL",
     "CurrentInputSource",
+    "DEFAULT_FINITE_CURRENT_MODE",
     "EffectiveCurrentMode",
     "FiniteCurrentMode",
+    "MU0",
     "MU0_OVER_2PI",
     "PenaltyBoxBoundHandler",
     "PlasmaCurrentSettings",
@@ -37,6 +48,8 @@ __all__ = [
     "boozer_I_to_physical_current_A",
     "infer_uniform_coil_current_A",
     "physical_current_to_boozer_I",
+    "resolve_boozer_current_convention",
+    "resolve_finite_current_mode",
     "resolve_effective_current_mode",
     "resolve_penalty_traversal_forbidden_box_bounds",
     "resolve_loaded_tf_current_A",
@@ -50,6 +63,7 @@ class PlasmaCurrentSettings:
     boozer_I: float
     plasma_current_A: float
     input_source: CurrentInputSource
+    boozer_current_convention: BoozerCurrentConvention
     mode: FiniteCurrentMode
     effective_mode: EffectiveCurrentMode
 
@@ -60,18 +74,101 @@ class PenaltyBoxBoundHandler:
     exceeds_limit: Callable[[float, float], bool]
 
 
-def physical_current_to_boozer_I(plasma_current_A: float) -> float:
-    return MU0_OVER_2PI * float(plasma_current_A)
+_BOOZER_CURRENT_SCALE_BY_CONVENTION: Mapping[BoozerCurrentConvention, float] = {
+    "mu0_over_2pi": MU0_OVER_2PI,
+    "mu0": MU0,
+}
+
+_BOOZER_CURRENT_CONVENTION_BY_MODE: Mapping[
+    FiniteCurrentMode,
+    BoozerCurrentConvention,
+] = {
+    "boozer_surrogate": "mu0_over_2pi",
+    # Wataru's scripts pass μ0 * I_A directly into BoozerSurface(..., I=...).
+    "wataru_proxy_field": "mu0",
+}
 
 
-def boozer_I_to_physical_current_A(boozer_I: float) -> float:
-    return float(boozer_I) / MU0_OVER_2PI
+def _validated_finite_current_mode(mode: str) -> FiniteCurrentMode:
+    if mode == "boozer_surrogate":
+        return "boozer_surrogate"
+    if mode == "wataru_proxy_field":
+        return "wataru_proxy_field"
+    raise ValueError(f"Unsupported finite-current mode {mode!r}.")
 
 
-def resolve_effective_current_mode(boozer_I: float) -> EffectiveCurrentMode:
+def resolve_boozer_current_convention(
+    finite_current_mode: FiniteCurrentMode,
+) -> BoozerCurrentConvention:
+    return _BOOZER_CURRENT_CONVENTION_BY_MODE[finite_current_mode]
+
+
+def physical_current_to_boozer_I(
+    plasma_current_A: float,
+    *,
+    convention: BoozerCurrentConvention = "mu0_over_2pi",
+) -> float:
+    return _BOOZER_CURRENT_SCALE_BY_CONVENTION[convention] * float(plasma_current_A)
+
+
+def boozer_I_to_physical_current_A(
+    boozer_I: float,
+    *,
+    convention: BoozerCurrentConvention = "mu0_over_2pi",
+) -> float:
+    return float(boozer_I) / _BOOZER_CURRENT_SCALE_BY_CONVENTION[convention]
+
+
+def resolve_finite_current_mode(
+    requested_mode: FiniteCurrentMode | None,
+    *,
+    artifact_mode: str | None = None,
+) -> FiniteCurrentMode:
+    if artifact_mode in {None, ""}:
+        if requested_mode is None:
+            return DEFAULT_FINITE_CURRENT_MODE
+        return _validated_finite_current_mode(requested_mode)
+    normalized_artifact_mode = _validated_finite_current_mode(str(artifact_mode))
+    if requested_mode is None:
+        return normalized_artifact_mode
+    if requested_mode != normalized_artifact_mode:
+        raise ValueError(
+            "Requested finite-current mode "
+            f"{requested_mode!r} does not match the donor artifact mode "
+            f"{normalized_artifact_mode!r}."
+        )
+    return requested_mode
+
+
+def resolve_effective_current_mode(
+    boozer_I: float,
+    *,
+    finite_current_mode: FiniteCurrentMode = DEFAULT_FINITE_CURRENT_MODE,
+) -> EffectiveCurrentMode:
     if abs(float(boozer_I)) <= CURRENT_MODE_ZERO_TOL:
         return "vacuum"
-    return "boozer_surrogate"
+    return finite_current_mode
+
+
+def _build_plasma_current_settings(
+    *,
+    boozer_I: float,
+    plasma_current_A: float,
+    input_source: CurrentInputSource,
+    boozer_current_convention: BoozerCurrentConvention,
+    finite_current_mode: FiniteCurrentMode,
+) -> PlasmaCurrentSettings:
+    return PlasmaCurrentSettings(
+        boozer_I=float(boozer_I),
+        plasma_current_A=float(plasma_current_A),
+        input_source=input_source,
+        boozer_current_convention=boozer_current_convention,
+        mode=finite_current_mode,
+        effective_mode=resolve_effective_current_mode(
+            boozer_I,
+            finite_current_mode=finite_current_mode,
+        ),
+    )
 
 
 def unwrap_current_optimizable(current):
@@ -209,32 +306,50 @@ def resolve_plasma_current_settings(
     *,
     raw_boozer_I: float | None,
     plasma_current_A: float | None,
+    finite_current_mode: FiniteCurrentMode = DEFAULT_FINITE_CURRENT_MODE,
+    default_plasma_current_A: float = 0.0,
 ) -> PlasmaCurrentSettings:
+    boozer_current_convention = resolve_boozer_current_convention(finite_current_mode)
     if plasma_current_A is not None:
         if raw_boozer_I is not None:
             raise ValueError("Cannot use --plasma-current-A together with --boozer-I")
-        resolved_boozer_I = physical_current_to_boozer_I(plasma_current_A)
-        return PlasmaCurrentSettings(
+        resolved_boozer_I = physical_current_to_boozer_I(
+            plasma_current_A,
+            convention=boozer_current_convention,
+        )
+        return _build_plasma_current_settings(
             boozer_I=resolved_boozer_I,
-            plasma_current_A=float(plasma_current_A),
+            plasma_current_A=plasma_current_A,
             input_source="physical_A",
-            mode="boozer_surrogate",
-            effective_mode=resolve_effective_current_mode(resolved_boozer_I),
+            boozer_current_convention=boozer_current_convention,
+            finite_current_mode=finite_current_mode,
         )
     if raw_boozer_I is not None:
         resolved_boozer_I = float(raw_boozer_I)
-        return PlasmaCurrentSettings(
+        return _build_plasma_current_settings(
             boozer_I=resolved_boozer_I,
-            plasma_current_A=boozer_I_to_physical_current_A(raw_boozer_I),
+            plasma_current_A=boozer_I_to_physical_current_A(
+                raw_boozer_I,
+                convention=boozer_current_convention,
+            ),
             input_source="raw_boozer_I",
-            mode="boozer_surrogate",
-            effective_mode=resolve_effective_current_mode(resolved_boozer_I),
+            boozer_current_convention=boozer_current_convention,
+            finite_current_mode=finite_current_mode,
         )
 
-    return PlasmaCurrentSettings(
-        boozer_I=0.0,
-        plasma_current_A=0.0,
-        input_source="default_zero",
-        mode="disabled",
-        effective_mode="vacuum",
+    resolved_default_plasma_current_A = float(default_plasma_current_A)
+    resolved_default_boozer_I = physical_current_to_boozer_I(
+        resolved_default_plasma_current_A,
+        convention=boozer_current_convention,
+    )
+    return _build_plasma_current_settings(
+        boozer_I=resolved_default_boozer_I,
+        plasma_current_A=resolved_default_plasma_current_A,
+        input_source=(
+            "default_zero"
+            if abs(resolved_default_plasma_current_A) <= CURRENT_MODE_ZERO_TOL
+            else "artifact_default_A"
+        ),
+        boozer_current_convention=boozer_current_convention,
+        finite_current_mode=finite_current_mode,
     )

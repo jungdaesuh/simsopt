@@ -24,6 +24,7 @@ from banana_opt.stage2_single_stage_handoff import (  # noqa: E402
     BOOTABILITY_STAGE_RECOVERY,
     bootability_passes,
     probe_stage2_seed_bootability,
+    resolve_stage2_finite_current_mode,
 )
 from workflow_runner_common import (  # noqa: E402
     ensure_stage2_artifact,
@@ -410,9 +411,14 @@ def build_probe_status(
         if float(args.constraint_weight) < 0.0
         else float(args.constraint_weight)
     )
+    finite_current_mode = resolve_stage2_finite_current_mode(stage2_results, None)
     current_settings = resolve_plasma_current_settings(
         raw_boozer_I=args.boozer_I,
         plasma_current_A=args.plasma_current_A,
+        finite_current_mode=finite_current_mode,
+        default_plasma_current_A=float(
+            stage2_results.get("PROXY_PLASMA_CURRENT_A", 0.0)
+        ),
     )
     return probe_stage2_seed_bootability(
         stage2_bs_path=stage2_bs_path,

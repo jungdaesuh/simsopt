@@ -11,7 +11,7 @@ from simsopt.field import BiotSavart
 from simsopt.geo import BoozerSurface, SurfaceXYZTensorFourier
 from simsopt.geo.surfaceobjectives import Volume
 
-from .current_contracts import resolve_loaded_tf_current_A
+from .current_contracts import resolve_finite_current_mode, resolve_loaded_tf_current_A
 from .hardware_contracts import (
     BANANA_WINDING_MINOR_RADIUS_M,
     MAX_CURVATURE_INV_M,
@@ -38,12 +38,15 @@ __all__ = [
     "BOOTABILITY_STAGE_PROBE",
     "BOOTABILITY_STAGE_RECOVERY",
     "BoozerInitializationResult",
+    "Stage2CoilPartitions",
     "bootability_passes",
     "build_equilibrium_path",
     "classify_bootability_result",
     "compute_tf_G0",
     "initialize_boozer_surface",
+    "partition_loaded_stage2_coils",
     "probe_stage2_seed_bootability",
+    "resolve_stage2_finite_current_mode",
     "resolve_single_stage_banana_surf_radius",
     "resolve_stage2_num_tf_coils",
     "resolve_stage2_tf_current_A",
@@ -63,6 +66,19 @@ class BoozerInitializationResult:
     volume: float | None
     error_type: str | None = None
     error_message: str | None = None
+
+
+@dataclass(frozen=True)
+class Stage2CoilPartitions:
+    tf_coils: tuple[object, ...]
+    banana_coils: tuple[object, ...]
+    proxy_coils: tuple[object, ...]
+    vf_coils: tuple[object, ...]
+    num_tf_coils: int
+    num_banana_coils: int
+    num_proxy_coils: int
+    num_vf_coils: int
+    finite_current_mode: str
 
 
 def resolve_stage2_tf_current_A(stage2_results, tf_coils):
@@ -110,18 +126,109 @@ def resolve_single_stage_banana_surf_radius(
     return resolved_banana_surf_radius
 
 
-def validate_loaded_stage2_coils_partition(coils, num_tf_coils):
-    total_coils = len(coils)
-    if num_tf_coils > total_coils:
+def resolve_stage2_finite_current_mode(
+    stage2_results: Mapping[str, object],
+    requested_finite_current_mode: str | None,
+) -> str:
+    return resolve_finite_current_mode(
+        requested_finite_current_mode,
+        artifact_mode=stage2_results.get("FINITE_CURRENT_MODE"),
+    )
+
+
+def _resolve_stage2_loaded_partition_counts(
+    stage2_results: Mapping[str, object],
+    *,
+    requested_num_tf_coils: int,
+    total_loaded_coils: int,
+) -> tuple[int, int, int, int]:
+    resolved_num_tf_coils = resolve_stage2_num_tf_coils(
+        stage2_results,
+        requested_num_tf_coils=requested_num_tf_coils,
+    )
+    if resolved_num_tf_coils > total_loaded_coils:
         raise ValueError(
-            f"Loaded Stage 2 BiotSavart artifact has only {total_coils} coils, but "
-            f"NUM_TF_COILS={num_tf_coils}. Cannot partition TF and banana coils."
+            f"Loaded Stage 2 BiotSavart artifact has only {total_loaded_coils} coils, but "
+            f"NUM_TF_COILS={resolved_num_tf_coils}. Cannot partition TF and banana coils."
         )
-    if num_tf_coils == total_coils:
+    num_proxy_coils = int(stage2_results.get("NUM_PROXY_COILS", 0) or 0)
+    num_vf_coils = int(stage2_results.get("NUM_VF_COILS", 0) or 0)
+    recorded_num_banana_coils = stage2_results.get("NUM_BANANA_COILS")
+    if recorded_num_banana_coils is None:
+        num_banana_coils = (
+            total_loaded_coils - resolved_num_tf_coils - num_proxy_coils - num_vf_coils
+        )
+    else:
+        num_banana_coils = int(recorded_num_banana_coils)
+    if num_banana_coils <= 0:
         raise ValueError(
-            f"Loaded Stage 2 BiotSavart artifact has {total_coils} coils and "
-            f"NUM_TF_COILS={num_tf_coils}, leaving no banana coils to optimize."
+            f"Loaded Stage 2 BiotSavart artifact has {total_loaded_coils} coils and "
+            f"NUM_TF_COILS={resolved_num_tf_coils}, leaving no banana coils to optimize."
         )
+    expected_total_coils = (
+        resolved_num_tf_coils + num_banana_coils + num_proxy_coils + num_vf_coils
+    )
+    if expected_total_coils != total_loaded_coils:
+        raise ValueError(
+            "Loaded Stage 2 BiotSavart artifact has "
+            f"{total_loaded_coils} coils, but the artifact partition metadata "
+            f"expects {expected_total_coils} "
+            f"(TF={resolved_num_tf_coils}, banana={num_banana_coils}, "
+            f"proxy={num_proxy_coils}, vf={num_vf_coils})."
+        )
+    return (
+        resolved_num_tf_coils,
+        num_banana_coils,
+        num_proxy_coils,
+        num_vf_coils,
+    )
+
+
+def partition_loaded_stage2_coils(
+    coils,
+    *,
+    stage2_results: Mapping[str, object],
+    requested_num_tf_coils: int,
+) -> Stage2CoilPartitions:
+    (
+        resolved_num_tf_coils,
+        num_banana_coils,
+        num_proxy_coils,
+        num_vf_coils,
+    ) = _resolve_stage2_loaded_partition_counts(
+        stage2_results,
+        requested_num_tf_coils=requested_num_tf_coils,
+        total_loaded_coils=len(coils),
+    )
+    tf_stop = resolved_num_tf_coils
+    banana_stop = tf_stop + num_banana_coils
+    proxy_stop = banana_stop + num_proxy_coils
+    return Stage2CoilPartitions(
+        tf_coils=tuple(coils[:tf_stop]),
+        banana_coils=tuple(coils[tf_stop:banana_stop]),
+        proxy_coils=tuple(coils[banana_stop:proxy_stop]),
+        vf_coils=tuple(coils[proxy_stop:]),
+        num_tf_coils=resolved_num_tf_coils,
+        num_banana_coils=num_banana_coils,
+        num_proxy_coils=num_proxy_coils,
+        num_vf_coils=num_vf_coils,
+        finite_current_mode=resolve_stage2_finite_current_mode(stage2_results, None),
+    )
+
+
+def validate_loaded_stage2_coils_partition(
+    coils,
+    num_tf_coils,
+    *,
+    stage2_results: Mapping[str, object] | None = None,
+):
+    if stage2_results is None:
+        stage2_results = {"NUM_TF_COILS": int(num_tf_coils)}
+    partition_loaded_stage2_coils(
+        coils,
+        stage2_results=stage2_results,
+        requested_num_tf_coils=int(num_tf_coils),
+    )
 
 
 def build_equilibrium_path(
@@ -468,12 +575,12 @@ def probe_stage2_seed_bootability(
             database_equilibria_dir=database_equilibria_dir,
         )
         bs = bs_loader(stage2_bs_path)
-        resolved_num_tf_coils = resolve_stage2_num_tf_coils(
-            stage2_artifact_results,
+        coil_partitions = partition_loaded_stage2_coils(
+            bs.coils,
+            stage2_results=stage2_artifact_results,
             requested_num_tf_coils=num_tf_coils,
         )
-        validate_loaded_stage2_coils_partition(bs.coils, resolved_num_tf_coils)
-        tf_coils = bs.coils[:resolved_num_tf_coils]
+        tf_coils = coil_partitions.tf_coils
         resolve_stage2_tf_current_A(stage2_artifact_results, tf_coils)
         surface_configs = build_surface_configs(
             equilibrium_file,

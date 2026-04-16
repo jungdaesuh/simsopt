@@ -3,6 +3,7 @@ import sys
 import unittest
 import uuid
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 import numpy as np
@@ -72,6 +73,156 @@ class BananaReferenceSurfaceTests(unittest.TestCase):
 class Stage2GeometryHelperTests(unittest.TestCase):
     def setUp(self):
         self.module = _load_module(STAGE2_GEOMETRY_PATH, "banana_stage2_geometry")
+
+    def test_build_proxy_plasma_current_coils_rescales_vmec_axis(self):
+        class FakeNetcdfFile:
+            def __init__(self):
+                self.variables = {
+                    "raxis_cc": np.array([2.0]),
+                    "zaxis_cs": np.array([0.3]),
+                }
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+        class FakeProxySurface:
+            def major_radius(self):
+                return 2.0
+
+        class FakeCurveXYZFourier:
+            def __init__(self, nquadpoints, order):
+                self.nquadpoints = nquadpoints
+                self.order = order
+                self.assignments = {}
+                self.fixed = False
+
+            def set(self, name, value):
+                self.assignments[name] = value
+
+            def fix_all(self):
+                self.fixed = True
+
+        class FakeCurrent:
+            def __init__(self, value):
+                self.value = float(value)
+                self.fixed = False
+
+            def fix_all(self):
+                self.fixed = True
+
+        class FakeCoil:
+            def __init__(self, curve, current):
+                self.curve = curve
+                self.current = current
+
+        with mock.patch.object(
+            self.module,
+            "netcdf_file",
+            return_value=FakeNetcdfFile(),
+        ), mock.patch.object(
+            self.module.SurfaceRZFourier,
+            "from_wout",
+            return_value=FakeProxySurface(),
+        ), mock.patch.object(
+            self.module,
+            "CurveXYZFourier",
+            FakeCurveXYZFourier,
+        ), mock.patch.object(
+            self.module,
+            "Current",
+            FakeCurrent,
+        ), mock.patch.object(
+            self.module,
+            "Coil",
+            FakeCoil,
+        ):
+            coils = self.module.build_proxy_plasma_current_coils(
+                equilibrium_file="/tmp/demo.nc",
+                target_major_radius=1.0,
+                nphi=91,
+                ntheta=32,
+                toroidal_flux=0.24,
+                plasma_current_A=9000.0,
+            )
+
+        self.assertEqual(len(coils), 1)
+        proxy_coil = coils[0]
+        self.assertEqual(proxy_coil.curve.assignments["xc(1)"], 1.0)
+        self.assertEqual(proxy_coil.curve.assignments["ys(1)"], 1.0)
+        self.assertEqual(proxy_coil.curve.assignments["zc(0)"], 0.15)
+        self.assertTrue(proxy_coil.curve.fixed)
+        self.assertEqual(proxy_coil.current.value, 9000.0)
+        self.assertTrue(proxy_coil.current.fixed)
+
+    def test_build_vf_coils_preserves_template_current_signs(self):
+        class FakeCurve:
+            def __init__(self):
+                self.fixed = False
+
+            def fix_all(self):
+                self.fixed = True
+
+        class FakeTemplateCurrent:
+            def __init__(self, value):
+                self.value = float(value)
+
+            def get_value(self):
+                return self.value
+
+        class FakeCurrent:
+            def __init__(self, value):
+                self.value = float(value)
+                self.fixed = False
+
+            def fix_all(self):
+                self.fixed = True
+
+        class FakeCoil:
+            def __init__(self, curve, current):
+                self.curve = curve
+                self.current = current
+
+        template = SimpleNamespace(
+            coils=[
+                FakeCoil(FakeCurve(), FakeTemplateCurrent(3.0)),
+                FakeCoil(FakeCurve(), FakeTemplateCurrent(-7.0)),
+            ]
+        )
+
+        with mock.patch.object(self.module, "Current", FakeCurrent), mock.patch.object(
+            self.module,
+            "Coil",
+            FakeCoil,
+        ):
+            coils = self.module.build_vf_coils(
+                vf_current_A=500.0,
+                vf_template_path="/tmp/vf_template.json",
+                load_fn=lambda _path: template,
+            )
+
+        self.assertEqual([coil.current.value for coil in coils], [500.0, -500.0])
+        self.assertTrue(all(coil.curve.fixed for coil in coils))
+        self.assertTrue(all(coil.current.fixed for coil in coils))
+
+    def test_build_vf_coils_rejects_zero_sign_template_current(self):
+        class FakeTemplateCurrent:
+            def get_value(self):
+                return 0.0
+
+        class FakeCoil:
+            def __init__(self):
+                self.curve = object()
+                self.current = FakeTemplateCurrent()
+
+        with self.assertRaisesRegex(ValueError, "must carry non-zero signed currents"):
+            self.module.build_vf_coils(
+                vf_current_A=500.0,
+                vf_template_path="/tmp/vf_template.json",
+                load_fn=lambda _path: SimpleNamespace(coils=[FakeCoil()]),
+            )
 
     def test_check_all_pairs_skips_adjacent_segments(self):
         segments = np.array(

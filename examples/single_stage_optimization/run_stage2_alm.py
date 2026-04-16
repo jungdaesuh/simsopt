@@ -61,6 +61,10 @@ _BASE_STAGE2_PROFILE = {
     "order": 2,
     "banana_init_current_A": 1.0e4,
     "banana_current_max_A": BANANA_CURRENT_HARD_LIMIT_A,
+    "finite_current_mode": "boozer_surrogate",
+    "proxy_plasma_current_A": 0.0,
+    "vf_current_A": 0.0,
+    "vf_template_path": None,
     "alm_max_outer_iters": 10,
     "alm_penalty_init": 1.0,
     "alm_penalty_scale": 10.0,
@@ -98,6 +102,10 @@ STAGE2_SPEC_KEYS = (
     "order",
     "banana_init_current_A",
     "banana_current_max_A",
+    "finite_current_mode",
+    "proxy_plasma_current_A",
+    "vf_current_A",
+    "vf_template_path",
     "alm_max_outer_iters",
     "alm_penalty_init",
     "alm_penalty_scale",
@@ -120,6 +128,10 @@ STAGE2_SPEC_KEYS = (
     "init_only",
 )
 OPTIONAL_STAGE2_SPEC_KEYS = (
+    "finite_current_mode",
+    "proxy_plasma_current_A",
+    "vf_current_A",
+    "vf_template_path",
     "alm_feas_tol",
     "alm_stationarity_tol",
     "alm_trust_radius_init",
@@ -422,6 +434,14 @@ def build_stage2_alm_config(
         init_only=bool(resolved_spec["init_only"]),
         banana_init_current_A=float(resolved_spec["banana_init_current_A"]),
         banana_current_max_A=float(resolved_spec["banana_current_max_A"]),
+        finite_current_mode=str(
+            resolved_spec.get("finite_current_mode", "boozer_surrogate")
+        ),
+        proxy_plasma_current_A=float(
+            resolved_spec.get("proxy_plasma_current_A", 0.0)
+        ),
+        vf_current_A=float(resolved_spec.get("vf_current_A", 0.0)),
+        vf_template_path=resolved_spec.get("vf_template_path"),
         stage2_iota_mode=stage2_iota_mode,
         stage2_iota_target=stage2_iota_target,
         stage2_iota_tolerance=stage2_iota_tolerance,
@@ -569,6 +589,13 @@ def build_summary(
             "coil_length": stage2_results.get("COIL_LENGTH"),
             "field_error": stage2_results.get("FIELD_ERROR"),
             "hardware_constraints_ok": stage2_results.get("HARDWARE_CONSTRAINTS_OK"),
+            "secondary_artifact_preserved": stage2_results.get(
+                "STAGE2_SECONDARY_ARTIFACT_PRESERVED"
+            ),
+            "secondary_artifact_path": stage2_results.get("STAGE2_SECONDARY_BS_PATH"),
+            "secondary_results_path": stage2_results.get(
+                "STAGE2_SECONDARY_RESULTS_PATH"
+            ),
             "coil_plasma_min_dist": stage2_results.get("CURVE_SURFACE_MIN_DIST"),
             "coil_plasma_threshold": stage2_results.get(
                 "COIL_PLASMA_MIN_DIST_M",

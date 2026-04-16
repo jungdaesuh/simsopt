@@ -104,6 +104,7 @@ from banana_opt.frontier_solver_checkpoint import (
 )
 from banana_opt.current_contracts import (
     apply_penalty_traversal_forbidden_box_bounds,
+    DEFAULT_FINITE_CURRENT_MODE,
     infer_uniform_coil_current_A as _infer_uniform_coil_current_A,
     resolve_penalty_traversal_forbidden_box_bounds,
     resolve_loaded_tf_current_A as _resolve_loaded_tf_current_A,
@@ -155,7 +156,9 @@ from banana_opt.single_stage_phase1 import (  # noqa: F401 — re-exported for t
 from banana_opt.stage2_single_stage_handoff import (
     build_equilibrium_path as _build_equilibrium_path_impl,
     initialize_boozer_surface as _initialize_boozer_surface_impl,
+    partition_loaded_stage2_coils as _partition_loaded_stage2_coils_impl,
     resolve_single_stage_banana_surf_radius as _resolve_single_stage_banana_surf_radius_impl,
+    resolve_stage2_finite_current_mode as _resolve_stage2_finite_current_mode_impl,
     resolve_stage2_num_tf_coils as _resolve_stage2_num_tf_coils_impl,
     resolve_stage2_tf_current_A as _resolve_stage2_tf_current_A_impl,
     validate_loaded_stage2_coils_partition as _validate_loaded_stage2_coils_partition_impl,
@@ -569,15 +572,38 @@ def validate_loaded_stage2_coils_partition(coils, num_tf_coils):
     _validate_loaded_stage2_coils_partition_impl(coils, num_tf_coils)
 
 
-def resolve_plasma_current_settings(args):
+def resolve_stage2_finite_current_mode(stage2_results, requested_finite_current_mode):
+    return _resolve_stage2_finite_current_mode_impl(
+        stage2_results,
+        requested_finite_current_mode,
+    )
+
+
+def partition_loaded_stage2_coils(coils, stage2_results, requested_num_tf_coils):
+    return _partition_loaded_stage2_coils_impl(
+        coils,
+        stage2_results=stage2_results,
+        requested_num_tf_coils=requested_num_tf_coils,
+    )
+
+
+def resolve_plasma_current_settings(
+    args,
+    *,
+    finite_current_mode="boozer_surrogate",
+    default_plasma_current_A=0.0,
+):
     settings = _resolve_plasma_current_settings_impl(
         raw_boozer_I=args.boozer_I,
         plasma_current_A=args.plasma_current_A,
+        finite_current_mode=finite_current_mode,
+        default_plasma_current_A=default_plasma_current_A,
     )
     return {
         "boozer_I": settings.boozer_I,
         "plasma_current_A": settings.plasma_current_A,
         "input_source": settings.input_source,
+        "boozer_current_convention": settings.boozer_current_convention,
         "mode": settings.mode,
         "effective_mode": settings.effective_mode,
     }
@@ -753,6 +779,15 @@ def parse_args():
         type=float,
         default=float(os.environ["PLASMA_CURRENT_A"]) if "PLASMA_CURRENT_A" in os.environ else None,
         help="User-facing enclosed toroidal plasma current in physical SI amperes.",
+    )
+    parser.add_argument(
+        "--finite-current-mode",
+        choices=["boozer_surrogate", "wataru_proxy_field"],
+        default=os.environ.get("FINITE_CURRENT_MODE"),
+        help=(
+            "Finite-current interpretation for the loaded Stage 2 donor. When omitted, "
+            "single-stage reload uses the donor artifact metadata."
+        ),
     )
     parser.add_argument("--maxiter", type=int, default=int(os.environ.get("MAXITER", "300")))
     parser.add_argument(
@@ -5296,10 +5331,24 @@ if __name__ == "__main__":
     ALM_FORMULATION = args.alm_formulation
     ALM_MULTIPLIERS = np.zeros(0, dtype=float)
     ALM_PENALTY = args.alm_penalty_init
-    plasma_current_settings = resolve_plasma_current_settings(args)
+    requested_finite_current_mode = getattr(
+        args,
+        "finite_current_mode",
+        DEFAULT_FINITE_CURRENT_MODE,
+    )
+    finite_current_mode = resolve_stage2_finite_current_mode(
+        stage2_results,
+        requested_finite_current_mode,
+    )
+    plasma_current_settings = resolve_plasma_current_settings(
+        args,
+        finite_current_mode=finite_current_mode,
+        default_plasma_current_A=float(stage2_results.get("PROXY_PLASMA_CURRENT_A", 0.0)),
+    )
     boozer_I = plasma_current_settings["boozer_I"]
     plasma_current_A = plasma_current_settings["plasma_current_A"]
     plasma_current_input_source = plasma_current_settings["input_source"]
+    boozer_current_convention = plasma_current_settings["boozer_current_convention"]
     finite_current_mode = plasma_current_settings["mode"]
     effective_current_mode = plasma_current_settings["effective_mode"]
     MAXITER = args.maxiter
@@ -5408,13 +5457,22 @@ if __name__ == "__main__":
 
     # Extract coil information
     coils = bs.coils
-    validate_loaded_stage2_coils_partition(coils, num_tf_coils)
     curves = [c.curve for c in coils]
-    tf_coils = coils[:num_tf_coils]
+    coil_partitions = partition_loaded_stage2_coils(
+        coils,
+        stage2_results,
+        num_tf_coils,
+    )
+    tf_coils = list(coil_partitions.tf_coils)
     tf_curves = [c.curve for c in tf_coils]
-    banana_coils = coils[num_tf_coils:]
+    banana_coils = list(coil_partitions.banana_coils)
+    proxy_coils = list(coil_partitions.proxy_coils)
+    vf_coils = list(coil_partitions.vf_coils)
     banana_curves = [c.curve for c in banana_coils]
     banana_curve = banana_curves[0]
+    objective_curves = (
+        curves if finite_current_mode == "boozer_surrogate" else banana_curves
+    )
     stage2_tf_current_A = resolve_stage2_tf_current_A(stage2_results, tf_coils)
     tf_current_sum_abs_A = float(sum(abs(c.current.get_value()) for c in tf_coils))
     initial_banana_current_A = float(banana_coils[0].current.get_value())
@@ -5595,7 +5653,7 @@ if __name__ == "__main__":
             stage_name,
             surface_data,
             coils,
-            curves,
+            objective_curves,
             banana_curves,
             iota_target,
             RES_WEIGHT,
@@ -6658,6 +6716,16 @@ if __name__ == "__main__":
         "STAGE2_SEED_BANANA_SURF_RADIUS": float(stage2_results["banana_surf_radius"]),
         "STAGE2_SEED_TF_CURRENT_A": stage2_tf_current_A,
         "STAGE2_SEED_ORDER": order,
+        "STAGE2_FINITE_CURRENT_MODE": stage2_results["FINITE_CURRENT_MODE"],
+        "STAGE2_BOOZER_CURRENT_CONVENTION": stage2_results["BOOZER_CURRENT_CONVENTION"],
+        "STAGE2_NUM_BANANA_COILS": coil_partitions.num_banana_coils,
+        "STAGE2_NUM_PROXY_COILS": coil_partitions.num_proxy_coils,
+        "STAGE2_NUM_VF_COILS": coil_partitions.num_vf_coils,
+        "STAGE2_PROXY_PLASMA_CURRENT_A": float(
+            stage2_results.get("PROXY_PLASMA_CURRENT_A", 0.0)
+        ),
+        "STAGE2_VF_CURRENT_A": float(stage2_results.get("VF_CURRENT_A", 0.0)),
+        "STAGE2_VF_TEMPLATE_PATH": stage2_results.get("VF_TEMPLATE_PATH"),
         "STAGE2_TF_CURRENT_A": stage2_tf_current_A,
         "STAGE2_TF_CURRENT_SUM_ABS_A": tf_current_sum_abs_A,
         "BANANA_INIT_CURRENT_A": initial_banana_current_A,
@@ -6936,6 +7004,7 @@ if __name__ == "__main__":
         "PLASMA_CURRENT_INPUT_SOURCE": plasma_current_input_source,
         "PLASMA_CURRENT_SURROGATE_SCOPE": "shared_all_surfaces" if args.num_surfaces > 1 else "single_surface",
         "FINITE_CURRENT_MODE": finite_current_mode,
+        "BOOZER_CURRENT_CONVENTION": boozer_current_convention,
         "EFFECTIVE_CURRENT_MODE": effective_current_mode,
         "BOOZER_I": float(boozer_I),
         "FINAL_VOLUME": float(final_volume),
